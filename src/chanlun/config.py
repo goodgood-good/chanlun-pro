@@ -146,11 +146,23 @@ FEISHU_KEYS = {
     "enable_img": False,
 }
 
+# 启动时预加载 symbols 的市场列表
+# 不在列表中的市场首次访问时仍可按需加载（异步），列表越短启动越快。
+# 可选值: "a"(沪深A股), "hk"(港股), "us"(美股), "fx"(外汇),
+#        "futures"(国内期货), "ny_futures"(纽约期货),
+#        "currency"(数字货币合约), "currency_spot"(数字货币现货)
+# 不配置该项时默认仅预加载 ["a", "hk", "us"]，避免境外/网络受限的市场拖慢启动
+# (如通达信期货 30s 超时、币安 451 地区限制)。
+PRELOAD_MARKETS = ["a", "hk", "us"]
+
+PRELOAD_STARTUP_DELAY_SECONDS = 60
+
 def get_data_path():
     # 获取项目数据的目录
     data_path = pathlib.Path(DATA_PATH)
     if DATA_PATH.startswith("."):
         data_path = pathlib.Path().home() / DATA_PATH
-    if data_path.is_dir() is False:
-        data_path.mkdir(parents=True)
+    # 加 exist_ok=True：避免多进程并发首启时（如 ProcessPoolExecutor）
+    # 两个进程同时进入 if，第二个 mkdir 抛 FileExistsError。
+    data_path.mkdir(parents=True, exist_ok=True)
     return data_path
