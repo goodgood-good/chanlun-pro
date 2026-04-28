@@ -41,7 +41,7 @@ REDIS_PORT = 6379
 # 数字货币（现货）支持：binance_spot / db
 # 美股市场支持： alpaca / polygon / ib / tdx_us / db
 EXCHANGE_A = "qmt"  # 沪深A股市场
-EXCHANGE_HK = "tdx_hk"  # 港股市场
+EXCHANGE_HK = "cq"  # 港股市场
 EXCHANGE_FUTURES = "tdx_futures"  # 期货市场
 EXCHANGE_NY_FUTURES = "tdx_ny_futures"  # 纽约期货市场
 EXCHANGE_CURRENCY = "binance"  # 数字货币（合约）
