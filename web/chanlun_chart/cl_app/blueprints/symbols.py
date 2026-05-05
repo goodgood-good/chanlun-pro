@@ -283,6 +283,11 @@ _PREWARM_PERSIST_DIRNAME = "prewarm_status"
 # 写盘频率：每完成 N 个标的写一次（额外终态时强制写一次）。
 # 50 是经验值：典型 11k 标的预热 220 次写盘，IO 开销 < 1%；同时崩溃后丢失进度 < 50 个。
 _PREWARM_PERSIST_EVERY_N_DONE = 50
+# Resume 用的"已完成 code 列表"文件后缀：
+# - 每完成一个 code（无论成功/失败）即追加一行，进程崩溃/取消后下次 start() 跳过；
+# - 仅在任务 status==finished（全市场跑完）时删除，cancel/aborted/error 都保留以便续跑；
+# - 文件格式为 plain text，每行一个 code，依赖 'a' mode + GIL 实现单进程多线程的写并发。
+_PREWARM_DONE_SUFFIX = "_done.txt"
 
 # 全局信号量：所有预热请求（不论标的不论周期）都要先 acquire 才能发请求。
 # 这是防止打爆数据源的核心机制。
@@ -305,6 +310,7 @@ class PrewarmTask:
         "cancel_event",
         "error_msg",
         "persist_fail_count",
+        "resumed_skipped",
     )
 
     def __init__(self, market: str, total: int):
@@ -324,6 +330,8 @@ class PrewarmTask:
         self.error_msg: str = ""
         # 连续持久化失败计数（运行时；不持久化跨重启）。≥3 次时升级为 ERROR + 写 error_msg。
         self.persist_fail_count: int = 0
+        # M5 resume：本任务因为续跑而跳过的 code 数（仅展示用，total 已扣除）
+        self.resumed_skipped: int = 0
 
     def to_dict(self) -> dict:
         cur_code, cur_name = self.current
@@ -341,6 +349,7 @@ class PrewarmTask:
             "finished_at": self.finished_at,
             "elapsed": (self.finished_at or time.time()) - self.started_at,
             "error_msg": self.error_msg,
+            "resumed_skipped": self.resumed_skipped,
         }
 
     @classmethod
@@ -357,6 +366,7 @@ class PrewarmTask:
         finished = d.get("finished_at")
         t.finished_at = float(finished) if finished is not None else None
         t.error_msg = d.get("error_msg", "")
+        t.resumed_skipped = int(d.get("resumed_skipped", 0))
         return t
 
 class PrewarmManager:
@@ -436,6 +446,45 @@ class PrewarmManager:
             LogUtil.warning(f"[prewarm] persist dir create failed: {e}")
             return None
 
+    # ---------------- M5 resume：已完成 code 列表 ----------------
+
+    def _done_file_path(self, market: str) -> Optional["pathlib.Path"]:
+        d = self._persist_dir()
+        if d is None:
+            return None
+        return d / f"{market}{_PREWARM_DONE_SUFFIX}"
+
+    def _load_done_codes(self, market: str) -> set:
+        """从 <market>_done.txt 加载已完成 code 集合，损坏文件按空集处理（容错）.
+
+        捕获范围说明：
+        - OSError：文件被锁/权限异常等。
+        - ValueError：覆盖 UnicodeDecodeError（继承自 ValueError），磁盘半截写入
+          / 断电等导致 UTF-8 截断时不会让 start() 整个 500。
+        """
+        path = self._done_file_path(market)
+        if path is None or not path.is_file():
+            return set()
+        try:
+            return {
+                line.strip()
+                for line in path.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            }
+        except (OSError, ValueError) as e:
+            LogUtil.warning(f"[prewarm] load done codes failed market={market}: {e}")
+            return set()
+
+    def _clear_done_codes(self, market: str) -> None:
+        """任务完整跑完时调用，删除 done 文件让下一次预热从头开始。"""
+        path = self._done_file_path(market)
+        if path is None:
+            return
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as e:
+            LogUtil.warning(f"[prewarm] clear done file failed market={market}: {e}")
+
     def _persist_task(self, task: "PrewarmTask") -> None:
         """把单个 task 状态原子写到 <data>/prewarm_status/<market>.json。
         写失败仅 warning，不影响内存进度。
@@ -484,9 +533,30 @@ class PrewarmManager:
 
         参数 ``codes`` 为 ``[{"code": str, "name": str}, ...]`` 列表。
         返回 ``{"ok": bool, "msg": str, "task": dict | None}``。
+
+        M5 resume：会自动加载 ``<market>_done.txt`` 跳过上次已完成的 code，
+        实现进程崩溃 / 取消后续跑；仅在任务 finished 时清空该文件。
         """
         if not codes:
             return {"ok": False, "msg": "标的列表为空，无需预热", "task": None}
+
+        # M5 resume：过滤掉上次已完成的 code（done.txt 里有的）
+        done_set = self._load_done_codes(market)
+        original_total = len(codes)
+        if done_set:
+            codes = [c for c in codes if c.get("code") not in done_set]
+            skipped = original_total - len(codes)
+        else:
+            skipped = 0
+        if not codes:
+            return {
+                "ok": False,
+                "msg": (
+                    f"该市场所有 {original_total} 个标的均已预热完成；"
+                    f"如需重新预热，请删除 {market}{_PREWARM_DONE_SUFFIX}"
+                ),
+                "task": None,
+            }
 
         with self._lock:
             self._gc_old_tasks_locked()
@@ -506,6 +576,7 @@ class PrewarmManager:
                 }
 
             task = PrewarmTask(market=market, total=len(codes))
+            task.resumed_skipped = skipped
             self._tasks[market] = task
             self._global_running = True
 
@@ -520,9 +591,15 @@ class PrewarmManager:
         thread.start()
 
         LogUtil.info(
-            f"[prewarm] task started market={market} total={len(codes)} task_id={task.task_id}"
+            f"[prewarm] task started market={market} total={len(codes)} "
+            f"resumed_skipped={skipped} task_id={task.task_id}"
         )
-        return {"ok": True, "msg": "预热任务已启动", "task": task.to_dict()}
+        msg = (
+            f"预热任务已启动（resume：跳过上次已完成的 {skipped} 个标的，本次处理 {len(codes)} 个）"
+            if skipped
+            else "预热任务已启动"
+        )
+        return {"ok": True, "msg": msg, "task": task.to_dict()}
 
     def get_status(self, market: str) -> Optional[dict]:
         with self._lock:
@@ -591,6 +668,8 @@ class PrewarmManager:
         processed: set = set()
         # 多线程并发更新 task 计数器需要小锁
         counter_lock = threading.Lock()
+        # M5 resume：done 文件路径预先解析一次（None 时降级为不写）
+        done_file_path = self._done_file_path(market)
 
         def _process_one(item: dict) -> None:
             if task.cancel_event.is_set():
@@ -639,6 +718,19 @@ class PrewarmManager:
                     task.failed += 1
                 task.done += 1
                 done_now = task.done
+
+            # M5 resume：把已处理 code（无论成功/失败）追加到 done.txt。
+            # 失败也写：避免下次 resume 死循环重试同一个坏 code；
+            # 用户判断需要重做时手动删 done.txt 即可。
+            # 不上锁：'a' mode + GIL + 单行短写在同进程多线程下足够安全。
+            if code and done_file_path is not None:
+                try:
+                    with open(done_file_path, "a", encoding="utf-8") as fdone:
+                        fdone.write(code + "\n")
+                except OSError as e:
+                    LogUtil.warning(
+                        f"[prewarm] append done failed market={market} code={code}: {e}"
+                    )
 
             if done_now % 100 == 0:
                 LogUtil.info(
@@ -726,6 +818,10 @@ class PrewarmManager:
                     task.status = "finished"
                 task.finished_at = time.time()
                 task.current = ("", "")
+            # M5 resume：仅在 finished（全市场跑完）时清空 done.txt，
+            # 让下一次预热重新从头开始；cancel/aborted/error 都保留以便续跑。
+            if task.status == "finished":
+                self._clear_done_codes(market)
 
             LogUtil.info(
                 f"[prewarm] task done market={market} status={task.status} "
