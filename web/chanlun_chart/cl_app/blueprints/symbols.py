@@ -25,6 +25,7 @@
 """
 
 import json
+import os
 import pathlib
 import re
 import threading
@@ -32,6 +33,21 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Optional
+
+
+# M3: env 优先的常量读取助手；解析失败兜底默认值，不让坏 env 炸服务启动。
+def _env_int(key: str, default: int) -> int:
+    try:
+        return int(os.environ.get(key, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _env_float(key: str, default: float) -> float:
+    try:
+        return float(os.environ.get(key, str(default)))
+    except (TypeError, ValueError):
+        return default
 
 from flask import Blueprint, jsonify, render_template, request
 from flask_login import login_required
@@ -232,7 +248,8 @@ PREWARM_INTERVALS = ["1D", "30", "5", "1"]
 # 长桥 HTTP 连接池被占满，前端 polling 请求（每 3 秒 1 次/面板，4 面板 = 1.3 QPS）被排到
 # 队列后面，导致已切换标的的旧请求耗时 10-18 秒，用户感觉切换很卡。
 # 维持 2，让总在飞请求数 ≤ INFLIGHT_LIMIT，避免 4 周期同时抢一把信号量。
-PREWARM_FREQ_PARALLELISM = 2
+# M3: env PREWARM_FREQ_PARALLELISM 可覆盖
+PREWARM_FREQ_PARALLELISM = _env_int("PREWARM_FREQ_PARALLELISM", 2)
 
 # 多个标的之间并行处理的 worker 数。按市场区分：
 # - a 股 xtquant native 不是线程安全的，必须串行 → 1
@@ -262,15 +279,18 @@ PREWARM_CODE_PARALLELISM_DEFAULT = 1
 # 2026-04 二次调优（M2 落盘后）：2 → 6。
 # 长桥/futu 单连接池 QPS 上限实测 ~10，预热占 6，给用户实时请求和 polling 留 4 个余量。
 # 用户切已预热标的现在走 disk hit 不再走 HTTP，所以可以放心吃满。
-PREWARM_GLOBAL_INFLIGHT_LIMIT = 6
+# M3: env PREWARM_GLOBAL_INFLIGHT_LIMIT 可覆盖
+PREWARM_GLOBAL_INFLIGHT_LIMIT = _env_int("PREWARM_GLOBAL_INFLIGHT_LIMIT", 6)
 
 # 用户活跃度让位：用户最近 N 秒内有 firstDataRequest=true 的请求时，预热请求等一下再发，
 # 避免把用户的实时请求挤到 HTTP 连接队列后面。
-PREWARM_USER_ACTIVE_WINDOW_SECONDS = 3.0
+# M3: env PREWARM_USER_ACTIVE_WINDOW_SECONDS 可覆盖
+PREWARM_USER_ACTIVE_WINDOW_SECONDS = _env_float("PREWARM_USER_ACTIVE_WINDOW_SECONDS", 3.0)
 # 让位等待时间（秒）。用户活跃时，预热请求会 sleep 这么久后再继续。
 # 2026-04 二次调优：1.0 → 0.3。1s 让位过长，用户没切其它标的时也会因为单次 first=true
 # 把后续预热堵 5 秒，全市场预热被腰斩。0.3s 既能让用户突发请求优先，又不会浪费太多。
-PREWARM_YIELD_SLEEP_SECONDS = 0.3
+# M3: env PREWARM_YIELD_SLEEP_SECONDS 可覆盖
+PREWARM_YIELD_SLEEP_SECONDS = _env_float("PREWARM_YIELD_SLEEP_SECONDS", 0.3)
 
 # 任务对象保留时长：完成后超过此时间允许新任务启动，并允许 GC。
 PREWARM_TASK_RETAIN_SECONDS = 3600
@@ -282,7 +302,8 @@ PREWARM_USER_RECENT_TRACK_SECONDS = 600  # 10 分钟内看过的算"用户关注
 _PREWARM_PERSIST_DIRNAME = "prewarm_status"
 # 写盘频率：每完成 N 个标的写一次（额外终态时强制写一次）。
 # 50 是经验值：典型 11k 标的预热 220 次写盘，IO 开销 < 1%；同时崩溃后丢失进度 < 50 个。
-_PREWARM_PERSIST_EVERY_N_DONE = 50
+# M3: env PREWARM_PERSIST_EVERY_N_DONE 可覆盖
+_PREWARM_PERSIST_EVERY_N_DONE = _env_int("PREWARM_PERSIST_EVERY_N_DONE", 50)
 # Resume 用的"已完成 code 列表"文件后缀：
 # - 每完成一个 code（无论成功/失败）即追加一行，进程崩溃/取消后下次 start() 跳过；
 # - 仅在任务 status==finished（全市场跑完）时删除，cancel/aborted/error 都保留以便续跑；
@@ -292,6 +313,14 @@ _PREWARM_DONE_SUFFIX = "_done.txt"
 # 全局信号量：所有预热请求（不论标的不论周期）都要先 acquire 才能发请求。
 # 这是防止打爆数据源的核心机制。
 _PREWARM_INFLIGHT_SEMAPHORE = threading.Semaphore(PREWARM_GLOBAL_INFLIGHT_LIMIT)
+
+# M1: 启动速率限制。同一 market 在 N 秒内只允许成功启动 1 次预热，
+# 防止用户脚本反复 POST /symbols/prewarm 滥用 CPU/磁盘/数据源 QPS。
+# 设为 0 表示禁用速率限制。env PREWARM_RATE_LIMIT_SECONDS 可覆盖。
+PREWARM_RATE_LIMIT_SECONDS = _env_int("PREWARM_RATE_LIMIT_SECONDS", 300)
+# market -> last successful start ts；进程内字典，单 worker 假设下足够。
+_prewarm_last_start_at: Dict[str, float] = {}
+_prewarm_rate_lock = threading.Lock()
 
 class PrewarmTask:
     """单次预热任务的进度对象（线程安全；通过 manager 的锁外部串行化访问）。"""
@@ -540,6 +569,23 @@ class PrewarmManager:
         if not codes:
             return {"ok": False, "msg": "标的列表为空，无需预热", "task": None}
 
+        # M1: 速率限制 — 同一 market 在 PREWARM_RATE_LIMIT_SECONDS 内只允许 1 次启动
+        if PREWARM_RATE_LIMIT_SECONDS > 0:
+            with _prewarm_rate_lock:
+                last = _prewarm_last_start_at.get(market, 0.0)
+                elapsed = time.time() - last
+                if elapsed < PREWARM_RATE_LIMIT_SECONDS:
+                    wait_sec = int(PREWARM_RATE_LIMIT_SECONDS - elapsed) + 1
+                    return {
+                        "ok": False,
+                        "code": "rate_limited",
+                        "msg": (
+                            f"距上次启动 {market!r} 预热不足 "
+                            f"{PREWARM_RATE_LIMIT_SECONDS}s，请等待 {wait_sec}s 后再试"
+                        ),
+                        "task": None,
+                    }
+
         # M5 resume：过滤掉上次已完成的 code（done.txt 里有的）
         done_set = self._load_done_codes(market)
         original_total = len(codes)
@@ -589,6 +635,12 @@ class PrewarmManager:
         )
         self._worker_thread = thread
         thread.start()
+
+        # M1: 仅在确认任务真启动后记录速率限制时间戳；
+        # 早期失败（codes 空 / 全已完成 / 已有任务在跑）不计入。
+        if PREWARM_RATE_LIMIT_SECONDS > 0:
+            with _prewarm_rate_lock:
+                _prewarm_last_start_at[market] = time.time()
 
         LogUtil.info(
             f"[prewarm] task started market={market} total={len(codes)} "
@@ -1069,7 +1121,12 @@ def symbols_prewarm():
     ]
 
     result = _prewarm_manager.start(market, codes)
-    status_code = 200 if result["ok"] else 409
+    if result["ok"]:
+        status_code = 200
+    elif result.get("code") == "rate_limited":
+        status_code = 429  # Too Many Requests
+    else:
+        status_code = 409
     return jsonify(result), status_code
 
 @symbols_bp.route("/symbols/prewarm/status")
