@@ -122,27 +122,15 @@ def _persist_chart_cache_async(cache_key: str, entry: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 批量预热活动注册表（与 symbols.py PrewarmManager 协作）
+# 批量预热活动注册表（service 层，与 symbols.py PrewarmManager 协作）
 # ---------------------------------------------------------------------------
-# 设计动机：用户 tv_history 走的旧版 `prewarm_common_intervals` 与 symbols.py 的
-# 全市场预热会重复争用同一份 chart_calc_locks 与上游 HTTP 配额。批量预热已经覆盖
-# 该 market 时，旧版 prewarm 直接退出即可，避免双倍开销。
-_batch_prewarm_active_markets: set = set()
-_batch_prewarm_lock = threading.Lock()
-
-
-def mark_batch_prewarm_active(market: str, active: bool) -> None:
-    """供 symbols.py 在批量预热任务开始/结束时调用。"""
-    with _batch_prewarm_lock:
-        if active:
-            _batch_prewarm_active_markets.add(market)
-        else:
-            _batch_prewarm_active_markets.discard(market)
-
-
-def is_batch_prewarm_active(market: str) -> bool:
-    with _batch_prewarm_lock:
-        return market in _batch_prewarm_active_markets
+# L1 重构后，状态与函数迁移到 ..services.prewarm_status；这里 re-export 让
+# 本模块内部既有的 ``is_batch_prewarm_active(market)`` 调用（line 660 等）
+# 不需要修改即可继续工作；symbols.py 直接 import 自 service 模块。
+from ..services.prewarm_status import (  # noqa: E402
+    is_batch_prewarm_active,
+    mark_batch_prewarm_active,
+)
 
 # Pre-warm cache for common interval switches to reduce recomputation
 _MAX_PREWARMED_SIZE = 50  # prewarmed 集合上限，防止线程异常导致无限增长
@@ -225,66 +213,15 @@ cache_lock = RLock()
 # 全文已无任何引用，故移除避免误用。
 
 # ---------------------------------------------------------------------------
-# 用户活跃度跟踪（供 symbols.py 的批量预热让位用）
+# 用户活跃度跟踪（service 层，供 symbols.py 的批量预热让位用）
 # ---------------------------------------------------------------------------
-# 为什么需要：批量预热和 tv_history 共享 native 行情接口（xtquant/通达信/长桥），
-# 单连接是串行的，并发会互相阻塞。让位的目的是让用户切标的时能立刻拿到数据，
-# 而不是排队等批量预热完。
-#
-# 设计：
-# - _last_user_request_ts: 最近一次 tv_history 入口的时间戳（秒）。预热每个标的/
-#   每个周期前会读这个值，若距离现在 < N 秒则主动 sleep 让出。
-# - _user_recent_codes: market -> [(code, ts), ...] 用户最近看过的标的，按市场分桶。
-#   预热每轮循环开始时会把这些标的提到队首，让用户实际关注的标的优先预热完。
-_last_user_request_ts = 0.0
-_user_activity_lock = threading.Lock()
-_user_recent_codes: Dict[str, "OrderedDict"] = {}
-_USER_RECENT_TRACK_SECONDS = 600  # 10 分钟内看过的算"用户关注"
-_USER_RECENT_MAX_PER_MARKET = 64  # 每个市场最多保留多少个 hot code
-
-
-def _mark_user_request(market: str = None, code: str = None) -> None:
-    """tv_history 入口处调用：标记用户活跃度。
-
-    线程安全；O(1)/O(N=64) 操作，不影响 tv_history 性能。
-    """
-    global _last_user_request_ts
-    now = time.time()
-    with _user_activity_lock:
-        _last_user_request_ts = now
-        if market and code:
-            bucket = _user_recent_codes.setdefault(market, OrderedDict())
-            # 已存在则移到末尾（LRU），不存在则插入
-            if code in bucket:
-                bucket.move_to_end(code)
-            else:
-                bucket[code] = now
-                # 容量上限保护
-                while len(bucket) > _USER_RECENT_MAX_PER_MARKET:
-                    bucket.popitem(last=False)
-            # 顺便清理过期项（懒清理，避免长时间不切换市场时残留）
-            cutoff = now - _USER_RECENT_TRACK_SECONDS
-            stale = [c for c, ts in bucket.items() if ts < cutoff]
-            for c in stale:
-                bucket.pop(c, None)
-
-
-def _get_last_user_request_time() -> float:
-    """供 symbols.py 调用：返回最近一次 tv_history 时间戳。"""
-    with _user_activity_lock:
-        return _last_user_request_ts
-
-
-def _get_user_recent_codes(market: str) -> List[str]:
-    """供 symbols.py 调用：返回某市场最近活跃过的 code 列表（最近的在最前）。"""
-    with _user_activity_lock:
-        bucket = _user_recent_codes.get(market)
-        if not bucket:
-            return []
-        now = time.time()
-        cutoff = now - _USER_RECENT_TRACK_SECONDS
-        # 按最近优先（OrderedDict 末尾是最新），过滤过期
-        return [c for c, ts in reversed(list(bucket.items())) if ts >= cutoff]
+# L1 重构后，状态与函数迁移到 ..services.user_activity；本模块内部仅在
+# tv_history 入口处调用 ``_mark_user_request`` 写入；symbols.py 直接 import 自 service。
+from ..services.user_activity import (  # noqa: E402
+    _get_last_user_request_time,
+    _get_user_recent_codes,
+    _mark_user_request,
+)
 
 
 def _stable_hash(obj) -> str:

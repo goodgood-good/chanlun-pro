@@ -8,4 +8,6 @@ route implementations.
 
 __all__ = [
     "constants",
+    "prewarm_status",
+    "user_activity",
 ]

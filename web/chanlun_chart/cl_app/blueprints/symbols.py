@@ -56,16 +56,25 @@ from chanlun.cl_utils import query_cl_chart_config
 from chanlun.tools.log_util import LogUtil
 
 from ..services.constants import market_types, resolution_maps
+from ..services.prewarm_status import mark_batch_prewarm_active
+from ..services.user_activity import (
+    _get_last_user_request_time,
+    _get_user_recent_codes,
+)
+
+# 仍由 tv.py 提供（Phase 2 才会迁到 services/chart_cache.py）：
+# _build_cache_key / _get_chart_cache_entry / chart_data_cache / cache_lock 是
+# 共享的 chart 缓存基础设施，迁移涉及 _stable_hash + _normalize_cache_entry +
+# _build_chart_cache_entry + fdb 等多依赖，留作下一轮 L1 Phase 2 处理。
+# compute_and_cache_chart_data / get_cached_processed_stocks 是路由级业务函数，
+# 留在 tv.py 合适。
 from .tv import (
     _build_cache_key,
     _get_chart_cache_entry,
-    _get_last_user_request_time,
-    _get_user_recent_codes,
     cache_lock,
     chart_data_cache,
     compute_and_cache_chart_data,
     get_cached_processed_stocks,
-    mark_batch_prewarm_active,
 )
 
 symbols_bp = Blueprint("symbols", __name__)
@@ -296,7 +305,6 @@ PREWARM_YIELD_SLEEP_SECONDS = _env_float("PREWARM_YIELD_SLEEP_SECONDS", 0.3)
 PREWARM_TASK_RETAIN_SECONDS = 3600
 # 用户最近请求过的标的优先插队：worker 在每轮循环开始时，会把还没预热的"用户最近看过"
 # 的标的提到队首。
-PREWARM_USER_RECENT_TRACK_SECONDS = 600  # 10 分钟内看过的算"用户关注"
 
 # 任务进度持久化目录与写盘频率
 _PREWARM_PERSIST_DIRNAME = "prewarm_status"
