@@ -229,7 +229,7 @@
 
         <hr class="layui-border-red">
         <div class="layui-form-item">
-            <div class="layui-inline" title="线段区间计算依据，影响走势段的特征序列计算">
+            <div class="layui-inline" title="线段区间计算依据，影响线段的特征序列计算">
                 <label class="layui-form-label">线段区间</label>
                 <div class="layui-input-inline">
                     <label for="xd_qj">
@@ -238,21 +238,6 @@
                             <option value="xd_qj_ck" {% if xd_qj=='xd_qj_ck' %} selected {% endif %}>线段内缠论K线高低点
                             </option>
                             <option value="xd_qj_k" {% if xd_qj=='xd_qj_k' %} selected {% endif %}>线段内原始K线高低点
-                            </option>
-                        </select>
-                    </label>
-                </div>
-            </div>
-            <div class="layui-inline" title="走势段区间计算依据，影响走势段中枢计算">
-                <label class="layui-form-label">走势段区间</label>
-                <div class="layui-input-inline">
-                    <label for="zsd_qj">
-                        <select type="select" class="form-control" name="zsd_qj" lay-filter="cl_config">
-                            <option value="zsd_qj_dd" {% if zsd_qj=='zsd_qj_dd' %} selected {% endif %}>线段的起始端点
-                            </option>
-                            <option value="zsd_qj_ck" {% if zsd_qj=='zsd_qj_ck' %} selected {% endif %}>线段内缠论K线高低点
-                            </option>
-                            <option value="zsd_qj_k" {% if zsd_qj=='zsd_qj_k' %} selected {% endif %}>线段内原始K线高低点
                             </option>
                         </select>
                     </label>
@@ -563,17 +548,6 @@
                 </div>
 
                 <div class="layui-col-xs3">
-                    <input type="checkbox" value="1" lay-filter="cl_config" {% if chart_show_zsd=='1' %} checked {%
-                        endif %} name="chart_show_zsd" title="走势段" />
-                </div>
-
-                <div class="layui-col-xs3">
-                    <input type="checkbox" value="1" lay-filter="cl_config" {% if chart_show_qsd=='1' %} checked {%
-                        endif %} name="chart_show_qsd" title="趋势段" />
-                </div>
-
-
-                <div class="layui-col-xs3">
                     <input type="checkbox" value="1" lay-filter="cl_config" {% if chart_show_bi_zs=='1' %} checked {%
                         endif %} name="chart_show_bi_zs" title="笔中枢" />
                 </div>
@@ -582,17 +556,6 @@
                     <input type="checkbox" value="1" lay-filter="cl_config" {% if chart_show_xd_zs=='1' %} checked {%
                         endif %} name="chart_show_xd_zs" title="线段中枢" />
                 </div>
-
-                <div class="layui-col-xs3">
-                    <input type="checkbox" value="1" lay-filter="cl_config" {% if chart_show_zsd_zs=='1' %} checked {%
-                        endif %} name="chart_show_zsd_zs" title="走势段中枢" />
-                </div>
-
-                <div class="layui-col-xs3">
-                    <input type="checkbox" value="1" lay-filter="cl_config" {% if chart_show_qsd_zs=='1' %} checked {%
-                        endif %} name="chart_show_qsd_zs" title="趋势段中枢" />
-                </div>
-
 
                 <div class="layui-col-xs3">
                     <input type="checkbox" value="1" lay-filter="cl_config" {% if chart_show_bi_mmd=='1' %} checked {%
@@ -604,17 +567,6 @@
                 </div>
 
                 <div class="layui-col-xs3">
-                    <input type="checkbox" value="1" lay-filter="cl_config" {% if chart_show_zsd_mmd=='1' %} checked {%
-                        endif %} name="chart_show_zsd_mmd" title="走势段买卖点" />
-                </div>
-
-                <div class="layui-col-xs3">
-                    <input type="checkbox" value="1" lay-filter="cl_config" {% if chart_show_qsd_mmd=='1' %} checked {%
-                        endif %} name="chart_show_qsd_mmd" title="趋势段买卖点" />
-                </div>
-
-
-                <div class="layui-col-xs3">
                     <input type="checkbox" value="1" lay-filter="cl_config" {% if chart_show_bi_bc=='1' %} checked {%
                         endif %} name="chart_show_bi_bc" title="笔背驰" />
                 </div>
@@ -622,15 +574,6 @@
                     <input type="checkbox" value="1" lay-filter="cl_config" {% if chart_show_xd_bc=='1' %} checked {%
                         endif %} name="chart_show_xd_bc" title="线段背驰" />
                 </div>
-                <div class="layui-col-xs3">
-                    <input type="checkbox" value="1" lay-filter="cl_config" {% if chart_show_zsd_bc=='1' %} checked {%
-                        endif %} name="chart_show_zsd_bc" title="走势段背驰" />
-                </div>
-                <div class="layui-col-xs3">
-                    <input type="checkbox" value="1" lay-filter="cl_config" {% if chart_show_qsd_bc=='1' %} checked {%
-                        endif %} name="chart_show_qsd_bc" title="趋势段背驰" />
-                </div>
-
                 <div class="layui-col-xs3">
                     <input type="checkbox" value="1" lay-filter="cl_config" {% if chart_show_fx=='1' %} checked {% endif
                         %} name="chart_show_fx" title="分型" />
@@ -861,7 +804,6 @@
                                 "fx_check_k_nums",
                                 "allow_bi_fx_strict",
                                 "xd_qj",
-                                "zsd_qj",
                                 "xd_zs_max_lines_split",
                                 "xd_allow_bi_pohuai",
                                 "xd_allow_split_no_highlow",
@@ -890,20 +832,12 @@
                                 "chart_show_fx",
                                 "chart_show_bi",
                                 "chart_show_xd",
-                                "chart_show_zsd",
-                                "chart_show_qsd",
                                 "chart_show_bi_zs",
                                 "chart_show_xd_zs",
-                                "chart_show_zsd_zs",
-                                "chart_show_qsd_zs",
                                 "chart_show_bi_mmd",
                                 "chart_show_xd_mmd",
-                                "chart_show_zsd_mmd",
-                                "chart_show_qsd_mmd",
                                 "chart_show_bi_bc",
-                                "chart_show_xd_bc",
-                                "chart_show_zsd_bc",
-                                "chart_show_qsd_bc"
+                                "chart_show_xd_bc"
                             ];
                             var postData = {
                                 'market': '{{ market }}',

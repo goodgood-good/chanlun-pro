@@ -30,9 +30,6 @@ try:
         # 线段默认配置
         "xd_bzh": Config.XD_BZH_NO.value,
         "xd_qj": Config.XD_QJ_DD.value,
-        # 走势段默认配置
-        "zsd_bzh": Config.ZSD_BZH_NO.value,
-        "zsd_qj": Config.ZSD_QJ_DD.value,
         # 中枢默认配置
         "zs_bi_type": Config.ZS_TYPE_DN.value,  # 笔中枢类型
         "zs_xd_type": Config.ZS_TYPE_DN.value,  # 走势中枢类型

@@ -1027,10 +1027,8 @@ def tv_history():
                     "fxs": filter_shapes(cl_chart_data.get("fxs", [])),
                     "bis": filter_shapes(cl_chart_data.get("bis", [])),
                     "xds": filter_shapes(cl_chart_data.get("xds", [])),
-                    "zsds": filter_shapes(cl_chart_data.get("zsds", [])),
                     "bi_zss": filter_shapes(cl_chart_data.get("bi_zss", [])),
                     "xd_zss": filter_shapes(cl_chart_data.get("xd_zss", [])),
-                    "zsd_zss": filter_shapes(cl_chart_data.get("zsd_zss", [])),
                     "bcs": filter_shapes(cl_chart_data.get("bcs", [])),
                     "mmds": filter_shapes(cl_chart_data.get("mmds", [])),
                 }
@@ -1067,7 +1065,6 @@ def tv_history():
             f"fxs={len(cl_chart_data.get('fxs', []))} "
             f"bis={len(cl_chart_data.get('bis', []))} "
             f"xds={len(cl_chart_data.get('xds', []))} "
-            f"zsds={len(cl_chart_data.get('zsds', []))} "
             f"bi_zss={len(cl_chart_data.get('bi_zss', []))} "
             f"bcs={len(cl_chart_data.get('bcs', []))} "
             f"mmds={len(cl_chart_data.get('mmds', []))}"
@@ -1097,10 +1094,8 @@ def tv_history():
             "fxs": cl_chart_data.get("fxs", []),
             "bis": cl_chart_data.get("bis", []),
             "xds": cl_chart_data.get("xds", []),
-            "zsds": cl_chart_data.get("zsds", []),
             "bi_zss": cl_chart_data.get("bi_zss", []),
             "xd_zss": cl_chart_data.get("xd_zss", []),
-            "zsd_zss": cl_chart_data.get("zsd_zss", []),
             "bcs": cl_chart_data.get("bcs", []),
             "mmds": cl_chart_data.get("mmds", []),
             "update": False if firstDataRequest == "true" else True,

@@ -28,8 +28,6 @@ try:
         "bi_bzh": Config.BI_BZH_YES.value,
         "bi_fx_cgd": Config.BI_FX_CHD_NO.value,
         "bi_qj": Config.BI_QJ_DD.value,
-        "zsd_bzh": Config.ZSD_BZH_NO.value,
-        "zsd_qj": Config.ZSD_QJ_DD.value,
         "zs_bi_type": Config.ZS_TYPE_DN.value,
         "zs_seg_type": Config.ZS_TYPE_DN.value,
         "zs_qj": Config.ZS_QJ_CK.value,

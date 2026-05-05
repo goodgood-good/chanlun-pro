@@ -57,7 +57,6 @@ def set_cl_config():
         "allow_bi_fx_strict",
         # 线段配置
         "xd_qj",
-        "zsd_qj",
         "xd_zs_max_lines_split",
         "xd_allow_bi_pohuai",
         "xd_allow_split_no_highlow",
@@ -90,20 +89,12 @@ def set_cl_config():
         "chart_show_fx",
         "chart_show_bi",
         "chart_show_xd",
-        "chart_show_zsd",
-        "chart_show_qsd",
         "chart_show_bi_zs",
         "chart_show_xd_zs",
-        "chart_show_zsd_zs",
-        "chart_show_qsd_zs",
         "chart_show_bi_mmd",
         "chart_show_xd_mmd",
-        "chart_show_zsd_mmd",
-        "chart_show_qsd_mmd",
         "chart_show_bi_bc",
         "chart_show_xd_bc",
-        "chart_show_zsd_bc",
-        "chart_show_qsd_bc",
     ]
     cl_config = {}
     for _k in keys:
