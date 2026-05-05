@@ -386,9 +386,11 @@ class TestResumeIntegration:
 
 class TestPersistRace:
     def test_persist_serialized_under_concurrency(self, tmp_path, monkeypatch):
-        """多线程并发 _persist_task 时，磁盘最终内容应是某次 to_dict() 的快照
-        （不会出现"半截内容"或字段错乱），且 done 字段不会比内存已落定的某个
-        snapshot 更小。"""
+        """多线程并发 _persist_task 时，磁盘最终内容应是某次 to_dict() 的合法快照。
+
+        T2 fix: 用一个 counter_lock + 单调递增 done 模拟真实 worker 递增模式，
+        断言磁盘 done 必须等于"某个真实出现过的中间值"，且不会破坏字段（合法 JSON）。
+        """
         import json as _json
         import threading as _t
 
@@ -400,34 +402,44 @@ class TestPersistRace:
         pm._ensure_loaded()  # 确保 persist_dir 已建
 
         task = PrewarmTask(market="prc_test", total=1000)
-        # 我们在后续线程里递增 task.done 并触发 persist；用一个 barrier 让线程同时跑
+        # 模拟真实 worker 模式：每个线程把 done +1（counter_lock 内）然后 persist
         N = 30
+        counter_lock = _t.Lock()
         barrier = _t.Barrier(N)
         errors = []
+        seen_done_values = set()  # 记录所有出现过的 done 值
 
-        def worker(target_done: int):
+        def worker():
             try:
                 barrier.wait(timeout=5)
-                task.done = target_done  # 模拟 worker 完成 1 个 code
+                with counter_lock:
+                    task.done += 1
+                    snapshot_done = task.done
+                seen_done_values.add(snapshot_done)
                 pm._persist_task(task)
             except Exception as e:  # noqa: BLE001
                 errors.append(e)
 
-        threads = [_t.Thread(target=worker, args=(i,)) for i in range(N)]
+        threads = [_t.Thread(target=worker) for _ in range(N)]
         for t in threads:
             t.start()
         for t in threads:
             t.join()
 
         assert not errors, f"persist 线程异常: {errors}"
+        assert task.done == N, f"counter_lock 应保证 done 单调递增到 N，实际 {task.done}"
 
-        # 读磁盘：内容必须是合法 JSON（没有半截写入），且 done 在 [0, N-1]
+        # 读磁盘：合法 JSON + done 必须是某个真实出现过的中间值（latest-wins 语义）
         path = tmp_path / "prewarm_status" / "prc_test.json"
         assert path.is_file()
         data = _json.loads(path.read_text(encoding="utf-8"))
         assert data["market"] == "prc_test"
-        # F 修复关键：done 字段不应错乱（必须落在 0..N-1 之间），即"最后写入者赢"
-        assert 0 <= data["done"] <= N - 1, f"done 字段超出预期: {data['done']}"
+        # F 关键断言：磁盘 done 必须是某个真实写过的 snapshot 值。
+        # 没有 _persist_lock 时，可能因为 race 写到 0 / N+1 / 错乱字段。
+        assert data["done"] in seen_done_values, (
+            f"磁盘 done={data['done']} 不在真实写过的 snapshot 集合 "
+            f"{sorted(seen_done_values)} 内 — _persist_lock 失效"
+        )
 
 
 # ===========================================================================

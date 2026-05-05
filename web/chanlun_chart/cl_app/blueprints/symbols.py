@@ -307,7 +307,8 @@ _PREWARM_PERSIST_DIRNAME = "prewarm_status"
 # 写盘频率：每完成 N 个标的写一次（额外终态时强制写一次）。
 # 50 是经验值：典型 11k 标的预热 220 次写盘，IO 开销 < 1%；同时崩溃后丢失进度 < 50 个。
 # M3: env PREWARM_PERSIST_EVERY_N_DONE 可覆盖
-_PREWARM_PERSIST_EVERY_N_DONE = _env_int("PREWARM_PERSIST_EVERY_N_DONE", 50)
+# N1 fix: max(1, ...) 防 env 写 0 触发 done_now % 0 的 ZeroDivisionError 杀掉 worker。
+_PREWARM_PERSIST_EVERY_N_DONE = max(1, _env_int("PREWARM_PERSIST_EVERY_N_DONE", 50))
 # Resume 用的"已完成 code 列表"文件后缀：
 # - 每完成一个 code（无论成功/失败）即追加一行，进程崩溃/取消后下次 start() 跳过；
 # - 仅在任务 status==finished（全市场跑完）时删除，cancel/aborted/error 都保留以便续跑；
@@ -325,6 +326,12 @@ PREWARM_RATE_LIMIT_SECONDS = _env_int("PREWARM_RATE_LIMIT_SECONDS", 300)
 # market -> last successful start ts；进程内字典，单 worker 假设下足够。
 _prewarm_last_start_at: Dict[str, float] = {}
 _prewarm_rate_lock = threading.Lock()
+
+# N3 fix: done.txt append 写锁。Windows + NTFS 上 'a' mode 不保证原子，多 worker
+# 并发 append 可能粘连产生 "CODECODE_AB\n\n" 这种坏行；下次 resume 时粘连的 code
+# 不在新 codes 列表里被静默忽略，导致该标的被重复预热（失败也写 done，不会死循环）。
+# 用一把模块级写锁串行化所有 done.txt append；锁开销可忽略（每标的一次单行 IO）。
+_done_file_write_lock = threading.Lock()
 
 class PrewarmTask:
     """单次预热任务的进度对象（线程安全；通过 manager 的锁外部串行化访问）。"""
@@ -848,11 +855,12 @@ class PrewarmManager:
             # M5 resume：把已处理 code（无论成功/失败）追加到 done.txt。
             # 失败也写：避免下次 resume 死循环重试同一个坏 code；
             # 用户判断需要重做时手动删 done.txt 即可。
-            # 不上锁：'a' mode + GIL + 单行短写在同进程多线程下足够安全。
+            # N3 fix: Windows + NTFS 上 'a' mode 不原子，用模块级写锁串行 append。
             if code and done_file_path is not None:
                 try:
-                    with open(done_file_path, "a", encoding="utf-8") as fdone:
-                        fdone.write(code + "\n")
+                    with _done_file_write_lock:
+                        with open(done_file_path, "a", encoding="utf-8") as fdone:
+                            fdone.write(code + "\n")
                 except OSError as e:
                     LogUtil.warning(
                         f"[prewarm] append done failed market={market} code={code}: {e}"
