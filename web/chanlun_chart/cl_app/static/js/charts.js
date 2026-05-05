@@ -63,8 +63,8 @@ function saveClIndependentDrawings(chartId, val) {
 
 const CHART_CONFIG = {
     COLORS: {
-        DING: "#FA8072", DI: "#1E90FF", BI: "#708090", XD: "#00BFFF", ZSD: "#FFA710",
-        BI_ZSS: "#708090", XD_ZSS: "#00BFFF", ZSD_ZSS: "#FFA710",
+        DING: "#FA8072", DI: "#1E90FF", BI: "#708090", XD: "#00BFFF",
+        BI_ZSS: "#708090", XD_ZSS: "#00BFFF",
         BCS: "#D1D4DC", BC_TEXT: "#fccbcd",
         MMD_UP: "#FA8072", MMD_DOWN: "#1E90FF",
         AREA_POS: "#ef5350", AREA_NEG: "#26a69a",
