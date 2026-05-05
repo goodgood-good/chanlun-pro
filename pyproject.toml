@@ -3,7 +3,7 @@ name = "chanlun-pro"
 version = "1.0.0"
 description = "chanlun pro"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.10"
 dependencies = [
     "akshare>=1.16.98",
     "alpaca-py>=0.40.1",
@@ -49,10 +49,31 @@ dependencies = [
     "tqsdk>=3.8.2",
 ]
 
-[tool.uv.sources]
-ta-lib = { path = "package/ta_lib-0.4.25-cp311-cp311-win_amd64.whl" }
+[tool.poetry]
+# package-mode=false: 本项目不发布到 PyPI，Poetry 仅管理依赖，不需要打包配置
+package-mode = false
+
+# 本地 wheel 覆盖（与 [project.dependencies] 中无版本的 pytdx / ta-lib 对应）
+# Python 版本约束 >=3.10,<3.14：当前 chanlun-pro env 是 3.10；上界因 alpaca-py
+# 等包对 3.14+ 的依赖图变化，Poetry resolver 在更宽范围下找不到统一版本。
+[tool.poetry.dependencies]
+python = ">=3.10,<3.14"
+# ta-lib 本地 wheel 按 Python 版本区分；package/ 下有 cp310/cp311/cp312/cp313 多个
+# 此处用 marker 区分，避免锁到单一 Python 版本
+ta-lib = [
+    { path = "package/TA_Lib-0.4.28-cp310-cp310-win_amd64.whl", markers = "python_version == '3.10'" },
+    { path = "package/ta_lib-0.4.25-cp311-cp311-win_amd64.whl", markers = "python_version == '3.11'" },
+    { path = "package/TA_Lib-0.4.32-cp312-cp312-win_amd64.whl", markers = "python_version == '3.12'" },
+    { path = "package/TA_Lib-0.4.32-cp313-cp313-win_amd64.whl", markers = "python_version == '3.13'" },
+]
 pytdx = { path = "package/pytdx-1.72r2-py3-none-any.whl" }
 
-[[tool.uv.index]]
+# 阿里云 PyPI 镜像源（国内网速友好）
+[[tool.poetry.source]]
+name = "aliyun"
 url = "https://mirrors.aliyun.com/pypi/simple/"
-default = true
+priority = "primary"
+
+[build-system]
+requires = ["poetry-core>=2.0.0"]
+build-backend = "poetry.core.masonry.api"

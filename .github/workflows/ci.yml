@@ -28,7 +28,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   dependency-audit:
-    name: Dependency Audit (pip-audit on uv lock)
+    name: Dependency Audit (pip-audit on poetry lock)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -37,10 +37,13 @@ jobs:
         with:
           python-version: '3.11'
       - name: Install audit tools
-        run: pip install uv pip-audit
-      - name: Export uv.lock to requirements
-        # 从 uv.lock 导出 pip 兼容格式（不带 hash 让 pip-audit 不要求严格匹配）
-        run: uv export --frozen --no-hashes -o /tmp/req.txt
+        # poetry-plugin-export: Poetry 2.x 把 export 命令拆出 core，必须装插件才能用
+        run: |
+          pip install poetry pip-audit
+          poetry self add poetry-plugin-export
+      - name: Export poetry.lock to requirements
+        # 从 poetry.lock 导出 pip 兼容格式（不带 hash 让 pip-audit 不要求严格匹配）
+        run: poetry export -f requirements.txt --without-hashes -o /tmp/req.txt
       - name: Audit dependencies (CVE scan)
         # --no-deps 仅扫描列出的顶层包，加快速度；首版不 strict 避免新发布 CVE 即时红
         run: pip-audit -r /tmp/req.txt --no-deps
