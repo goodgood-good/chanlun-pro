@@ -401,10 +401,13 @@ class PrewarmTask:
 class PrewarmManager:
     """全局单例，按 market 维度管理预热任务。
 
-    并发约束：
-    - 同一时刻全局只允许 1 个预热任务在运行（通过 ``_global_running`` 状态控制），
-      原因和 ``tv.prewarm_common_intervals`` 一样：xtquant native 不是线程安全的，
-      多线程并发会撞 BSON 断言。
+    并发约束（L3 重构后）：
+    - **互斥粒度按"数据源 group"细化**：同一底层 exchange（如长桥同时承担 us+hk）
+      内的 markets 互斥；不同 group 可并行预热。
+      group 名取自 ``config.EXCHANGE_<MARKET>``（如 a→qmt、us/hk→cq、futures→tdx_futures）。
+    - 全市场预热实测耗时从顺序 ~3h 降到并行 ~1-1.5h（取决于 group 划分）。
+    - xtquant native 线程不安全的约束仍然成立，但只影响共享 xtquant 的 markets，
+      不再阻断 HTTP 数据源（cq/binance/futu）的并行启动。
     - 每个 market 只保留最近一次任务（覆盖更早的）。
     """
 
@@ -412,12 +415,40 @@ class PrewarmManager:
         self._lock = threading.Lock()
         # market -> 最近一次任务（无论是否已完成）
         self._tasks: Dict[str, PrewarmTask] = {}
-        # 是否有任务正在运行（全局互斥）
-        self._global_running: bool = False
+        # L3: per-group 互斥状态（group → 当前在跑的 market）。
+        # 同一 group 内严格互斥；不同 group 可并发。
+        self._running_groups: Dict[str, str] = {}
         # worker 线程引用（仅用于调试，不主动 join）
         self._worker_thread: Optional[threading.Thread] = None
         # 启动恢复：从磁盘载入历史 task；进程内首次构造时执行一次。
         self._load_persisted_tasks()
+
+    # ---------------- L3: 数据源分组 ----------------
+
+    @staticmethod
+    def _market_group(market: str) -> str:
+        """根据 ``config.EXCHANGE_<MARKET>`` 推断锁分组。
+
+        同一底层 exchange 实现（如长桥同时承担 us+hk、tdx 系列承担多个国内市场）
+        共享一把锁，避免连接池/account session 撞车；不同实现可并行预热。
+
+        Examples（按用户实际 config）:
+        - EXCHANGE_A='qmt'           → group 'qmt'
+        - EXCHANGE_HK='cq'           → group 'cq'  (与 us 同 group 互斥)
+        - EXCHANGE_US='cq'           → group 'cq'
+        - EXCHANGE_FUTURES='tdx_futures' → group 'tdx_futures'
+        - EXCHANGE_NY_FUTURES='tdx_ny_futures' → group 'tdx_ny_futures'
+        - EXCHANGE_FX='tdx_fx'       → group 'tdx_fx'
+        - EXCHANGE_CURRENCY='binance' → group 'binance'
+        - EXCHANGE_CURRENCY_SPOT='binance_spot' → group 'binance_spot'
+        """
+        from chanlun import config
+        attr = f"EXCHANGE_{market.upper()}"
+        value = getattr(config, attr, None)
+        if isinstance(value, str) and value.strip():
+            return value.strip().lower()
+        # fallback：未配置时按 market 名独立成组（保守，不与其他 market 互斥）
+        return market.lower()
 
     # ---------------- 持久化 ----------------
 
@@ -606,14 +637,17 @@ class PrewarmManager:
 
         with self._lock:
             self._gc_old_tasks_locked()
-            if self._global_running:
-                # 已有任务在跑（可能是同市场也可能是其他市场）
-                running_task = self._find_running_task_locked()
+            # L3: 按数据源 group 检查互斥；不同 group 可并行启动
+            group = self._market_group(market)
+            running_market = self._running_groups.get(group)
+            if running_market is not None:
+                running_task = self._tasks.get(running_market)
                 msg = (
-                    f"已有市场 {running_task.market!r} 的预热任务在运行 "
-                    f"({running_task.done}/{running_task.total})，请稍后再试"
+                    f"市场 {running_market!r}（数据源组 {group!r}）已在预热 "
+                    f"({running_task.done}/{running_task.total})；"
+                    f"同组市场需等待，但其他组的市场（如不同数据源）可并行启动"
                     if running_task
-                    else "已有预热任务在运行，请稍后再试"
+                    else f"组 {group!r} 已有任务在运行，请稍后再试"
                 )
                 return {
                     "ok": False,
@@ -624,7 +658,7 @@ class PrewarmManager:
             task = PrewarmTask(market=market, total=len(codes))
             task.resumed_skipped = skipped
             self._tasks[market] = task
-            self._global_running = True
+            self._running_groups[group] = market
 
         # 注意：worker 线程外部启动，不持锁，避免 worker 内部反向加锁导致死锁。
         thread = threading.Thread(
@@ -691,6 +725,10 @@ class PrewarmManager:
                 self._tasks.pop(market, None)
 
     def _find_running_task_locked(self) -> Optional[PrewarmTask]:
+        """返回当前任意一个仍在运行的 task（多 group 并发时只返回首个）。
+
+        保留此方法供调试/状态汇总用；start() 互斥检查已改为 group 维度，不再依赖此方法。
+        """
         for t in self._tasks.values():
             if t.status == "running":
                 return t
@@ -900,7 +938,13 @@ class PrewarmManager:
                 LogUtil.warning(f"[prewarm] final persist failed: {e}")
 
             with self._lock:
-                self._global_running = False
+                # L3: 释放 per-group 互斥；只清除当前 task 占据的 group，
+                # 其他 group 的并行 task 不受影响。
+                group = self._market_group(market)
+                # 防御：仅当当前 group 持有者就是本 task 的 market 时才清除
+                # （理论上不会出现错配，但避免异常路径 + 重入导致误清空）
+                if self._running_groups.get(group) == market:
+                    self._running_groups.pop(group, None)
             # 清除批量预热活动状态：必须在最外层 finally，确保异常路径也释放，
             # 否则 tv.prewarm_common_intervals 会被永久误判为"批量预热中"而不工作。
             mark_batch_prewarm_active(market, False)

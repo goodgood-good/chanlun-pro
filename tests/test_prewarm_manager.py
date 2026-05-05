@@ -224,3 +224,56 @@ class TestRateLimit:
         monkeypatch.setattr(manager, "_run_task", lambda task, codes: None)
         result = manager.start("first_run", [{"code": "X", "name": "X"}])
         assert result.get("code") != "rate_limited"
+
+
+# ===========================================================================
+# L3：互斥按数据源 group 细化
+# ===========================================================================
+
+
+class TestSourceGroupMutex:
+    def test_market_group_uses_config_exchange(self, monkeypatch):
+        import chanlun.config as cfg
+
+        monkeypatch.setattr(cfg, "EXCHANGE_M_TEST", "shared_bus", raising=False)
+        assert PrewarmManager._market_group("m_test") == "shared_bus"
+
+    def test_market_group_falls_back_to_market_name(self, monkeypatch):
+        # 故意删一个不存在的属性确保 fallback 走 market 名
+        assert PrewarmManager._market_group("never_configured_xyz") == "never_configured_xyz"
+
+    def test_same_group_markets_are_mutually_exclusive(self, manager, monkeypatch):
+        """同一 group（如 us 和 hk 都是 cq 长桥）不能并发预热。"""
+        import chanlun.config as cfg
+        import cl_app.blueprints.symbols as s
+
+        monkeypatch.setattr(cfg, "EXCHANGE_GA", "shared_bus", raising=False)
+        monkeypatch.setattr(cfg, "EXCHANGE_GB", "shared_bus", raising=False)
+        # 关掉 rate limit + mock _run_task 让 worker 立即结束
+        monkeypatch.setattr(s, "PREWARM_RATE_LIMIT_SECONDS", 0)
+        monkeypatch.setattr(manager, "_run_task", lambda task, codes: None)
+
+        r1 = manager.start("ga", [{"code": "X", "name": "X"}])
+        assert r1["ok"] is True
+
+        r2 = manager.start("gb", [{"code": "Y", "name": "Y"}])
+        # 同 group 'shared_bus' → 互斥
+        assert r2["ok"] is False
+        assert "shared_bus" in r2["msg"] or "已在预热" in r2["msg"]
+
+    def test_different_groups_can_run_concurrently(self, manager, monkeypatch):
+        """不同 group 的 market（不同 exchange）可以并发预热（L3 核心收益）。"""
+        import chanlun.config as cfg
+        import cl_app.blueprints.symbols as s
+
+        monkeypatch.setattr(cfg, "EXCHANGE_GA", "bus_alpha", raising=False)
+        monkeypatch.setattr(cfg, "EXCHANGE_GB", "bus_beta", raising=False)
+        monkeypatch.setattr(s, "PREWARM_RATE_LIMIT_SECONDS", 0)
+        monkeypatch.setattr(manager, "_run_task", lambda task, codes: None)
+
+        r1 = manager.start("ga", [{"code": "X", "name": "X"}])
+        assert r1["ok"] is True
+
+        r2 = manager.start("gb", [{"code": "Y", "name": "Y"}])
+        # 不同 group → 不互斥，应能成功启动
+        assert r2["ok"] is True, f"L3 应允许跨 group 并发，但被拒绝: {r2.get('msg')}"
