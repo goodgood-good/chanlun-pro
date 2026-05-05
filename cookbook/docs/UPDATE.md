@@ -2,6 +2,17 @@
 
 ---
 
+### 2026-05-06 删除走势段 (zsd) 与趋势段 (qsd)
+
+- 已彻底移除走势段、趋势段两级结构（核心代码、配置、UI、策略、文档）
+- 现有用户配置文件中残留的 `chart_show_zsd_*`、`chart_show_qsd_*`、`zsd_qj`、`zsd_bzh` 等键将被静默忽略
+- 旧缓存文件中的 `zsds`、`zsd_zss`、`qsds`、`qsd_zss` 字段将被丢弃，不影响新缓存生成
+- 旧 notebook (`回测_*.ipynb`) 涉及 zsd/qsd 的 cell 已删除，旧执行输出可能与新代码不一致，需要重新跑
+- 配置枚举 `Config.ZSD_BZH_*` 重命名为 `Config.XD_BZH_*`（xd 标准化复用此枚举），字符串值由 `zsd_bzh_*` 改为 `xd_bzh_*`
+- 策略 `strategy_zsd_xd_bi_1mmd` 已删除；`strategy_a_xd_trade_model` 多级别确认由走势段降级为线段（`get_zsds()` → `get_xds()`，`bc_exists(["zsd","pz","qs"])` → `bc_exists(["xd","pz","qs"])`）
+- TradingView datafeed bundle (`bundle.js`) 已通过手工 patch 清理对象 key 引用；如发现前端异常请重新构建 datafeed
+- 保留：盘整背驰 (`pz`)、趋势背驰 (`qs`) 仍是 bi/xd 上的有效背驰类型，不受影响
+
 ### 2025-09-03
 
 > config.py 中增加 CTP 相关配置
