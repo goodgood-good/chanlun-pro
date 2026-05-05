@@ -429,6 +429,10 @@ class PrewarmManager:
         # 首次 start/get_status/cancel 时再触发一次 _load_persisted_tasks。
         self._loaded: bool = False
         self._load_lock = threading.Lock()  # 独立锁避免与 self._lock 嵌套
+        # F: _persist_task 序列化锁——避免多 worker 并发触发持久化时
+        # 后到者用旧 snapshot 把磁盘 done 数 replace 倒退。
+        # 把 to_dict() + write + replace 整体放进 lock 内，保证 latest-wins。
+        self._persist_lock = threading.Lock()
 
     # ---------------- L3: 数据源分组 ----------------
 
@@ -579,12 +583,17 @@ class PrewarmManager:
             return
         path = d / f"{task.market}.json"
         tmp = d / f"{task.market}.json.tmp.{uuid.uuid4().hex}"
+        # F: 整体串行化 snapshot+write+replace。
+        # 否则多 worker 并发场景下：T1 在 done=50 启动 persist、T2 在 done=100 启动
+        # persist，若 T2 先 replace 完成、T1 后 replace，磁盘 done 反而退到 50。
+        # 锁内 to_dict 保证每次写盘都用 acquire 时的最新 done 值，latest-wins 语义。
         try:
-            data = task.to_dict()
-            tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-            # Windows 上 Path.replace 是原子的（同卷），避免半截文件。
-            tmp.replace(path)
-            task.persist_fail_count = 0  # 成功一次就清零
+            with self._persist_lock:
+                data = task.to_dict()
+                tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+                # Windows 上 Path.replace 是原子的（同卷），避免半截文件。
+                tmp.replace(path)
+                task.persist_fail_count = 0  # 成功一次就清零
         except OSError as e:
             task.persist_fail_count += 1
             # 持久化失败本身不影响内存进度（status 接口读内存），但会让进程崩溃后

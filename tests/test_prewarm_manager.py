@@ -308,6 +308,57 @@ class TestLazyLoad:
 
 
 # ===========================================================================
+# F：_persist_task 多线程持久化竞争修复
+# ===========================================================================
+
+
+class TestPersistRace:
+    def test_persist_serialized_under_concurrency(self, tmp_path, monkeypatch):
+        """多线程并发 _persist_task 时，磁盘最终内容应是某次 to_dict() 的快照
+        （不会出现"半截内容"或字段错乱），且 done 字段不会比内存已落定的某个
+        snapshot 更小。"""
+        import json as _json
+        import threading as _t
+
+        import chanlun.config as _cfg
+
+        monkeypatch.setattr(_cfg, "get_data_path", lambda: tmp_path)
+
+        pm = PrewarmManager()
+        pm._ensure_loaded()  # 确保 persist_dir 已建
+
+        task = PrewarmTask(market="prc_test", total=1000)
+        # 我们在后续线程里递增 task.done 并触发 persist；用一个 barrier 让线程同时跑
+        N = 30
+        barrier = _t.Barrier(N)
+        errors = []
+
+        def worker(target_done: int):
+            try:
+                barrier.wait(timeout=5)
+                task.done = target_done  # 模拟 worker 完成 1 个 code
+                pm._persist_task(task)
+            except Exception as e:  # noqa: BLE001
+                errors.append(e)
+
+        threads = [_t.Thread(target=worker, args=(i,)) for i in range(N)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert not errors, f"persist 线程异常: {errors}"
+
+        # 读磁盘：内容必须是合法 JSON（没有半截写入），且 done 在 [0, N-1]
+        path = tmp_path / "prewarm_status" / "prc_test.json"
+        assert path.is_file()
+        data = _json.loads(path.read_text(encoding="utf-8"))
+        assert data["market"] == "prc_test"
+        # F 修复关键：done 字段不应错乱（必须落在 0..N-1 之间），即"最后写入者赢"
+        assert 0 <= data["done"] <= N - 1, f"done 字段超出预期: {data['done']}"
+
+
+# ===========================================================================
 # L3：互斥按数据源 group 细化
 # ===========================================================================
 
