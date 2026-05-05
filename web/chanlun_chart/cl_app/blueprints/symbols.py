@@ -424,8 +424,11 @@ class PrewarmManager:
         self._running_groups: Dict[str, str] = {}
         # worker 线程引用（仅用于调试，不主动 join）
         self._worker_thread: Optional[threading.Thread] = None
-        # 启动恢复：从磁盘载入历史 task；进程内首次构造时执行一次。
-        self._load_persisted_tasks()
+        # D: 历史任务文件改为惰性加载——避免 Flask 启动时同步扫盘阻塞，
+        # 也让数据目录暂时不可达（如网络盘未挂载）时进程仍能起来；
+        # 首次 start/get_status/cancel 时再触发一次 _load_persisted_tasks。
+        self._loaded: bool = False
+        self._load_lock = threading.Lock()  # 独立锁避免与 self._lock 嵌套
 
     # ---------------- L3: 数据源分组 ----------------
 
@@ -455,6 +458,21 @@ class PrewarmManager:
         return market.lower()
 
     # ---------------- 持久化 ----------------
+
+    def _ensure_loaded(self) -> None:
+        """首次调用时载入历史任务（D：惰性加载）。
+
+        double-checked locking 防止重复 IO；快路径无锁直接返回。
+        所有 public method（start/get_status/cancel）入口处调用此方法，
+        线程安全且对正常路径几乎零开销。
+        """
+        if self._loaded:
+            return
+        with self._load_lock:
+            if self._loaded:
+                return
+            self._load_persisted_tasks()
+            self._loaded = True
 
     def _load_persisted_tasks(self) -> None:
         """启动时扫描 prewarm_status/*.json 还原 _tasks。
@@ -604,6 +622,9 @@ class PrewarmManager:
         if not codes:
             return {"ok": False, "msg": "标的列表为空，无需预热", "task": None}
 
+        # D: 惰性加载历史任务文件
+        self._ensure_loaded()
+
         # M1: 速率限制 — 同一 market 在 PREWARM_RATE_LIMIT_SECONDS 内只允许 1 次启动
         if PREWARM_RATE_LIMIT_SECONDS > 0:
             with _prewarm_rate_lock:
@@ -692,11 +713,13 @@ class PrewarmManager:
         return {"ok": True, "msg": msg, "task": task.to_dict()}
 
     def get_status(self, market: str) -> Optional[dict]:
+        self._ensure_loaded()  # D: 惰性加载
         with self._lock:
             task = self._tasks.get(market)
             return task.to_dict() if task else None
 
     def cancel(self, market: str) -> dict:
+        self._ensure_loaded()  # D: 惰性加载
         with self._lock:
             task = self._tasks.get(market)
             if task is None:

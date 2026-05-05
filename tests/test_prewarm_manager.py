@@ -227,6 +227,87 @@ class TestRateLimit:
 
 
 # ===========================================================================
+# D：_load_persisted_tasks 惰性加载
+# ===========================================================================
+
+
+class TestLazyLoad:
+    def test_init_does_not_load(self, tmp_path, monkeypatch):
+        """PrewarmManager() 不应在 __init__ 时同步扫盘。"""
+        import json as _json
+
+        import chanlun.config as _cfg
+
+        monkeypatch.setattr(_cfg, "get_data_path", lambda: tmp_path)
+
+        # 先在数据目录写一个 task json，看 __init__ 是否真不读它
+        persist_dir = tmp_path / "prewarm_status"
+        persist_dir.mkdir(parents=True, exist_ok=True)
+        (persist_dir / "lazyt.json").write_text(
+            _json.dumps({
+                "market": "lazyt", "total": 100, "done": 50,
+                "succeeded": 40, "failed": 10,
+                "status": "aborted",
+                "started_at": time.time(),
+                "current_code": "", "current_name": "",
+            }),
+            encoding="utf-8",
+        )
+
+        pm = PrewarmManager()
+        # __init__ 后 _loaded 应该是 False，_tasks 还没加载
+        assert pm._loaded is False
+        assert "lazyt" not in pm._tasks
+
+    def test_get_status_triggers_load(self, tmp_path, monkeypatch):
+        """get_status 首次调用时触发 _ensure_loaded。"""
+        import json as _json
+
+        import chanlun.config as _cfg
+
+        monkeypatch.setattr(_cfg, "get_data_path", lambda: tmp_path)
+
+        persist_dir = tmp_path / "prewarm_status"
+        persist_dir.mkdir(parents=True, exist_ok=True)
+        (persist_dir / "lazy_get.json").write_text(
+            _json.dumps({
+                "market": "lazy_get", "total": 100, "done": 80,
+                "succeeded": 75, "failed": 5,
+                "status": "aborted",
+                "started_at": time.time(),
+                "current_code": "", "current_name": "",
+            }),
+            encoding="utf-8",
+        )
+
+        pm = PrewarmManager()
+        assert pm._loaded is False
+
+        result = pm.get_status("lazy_get")
+        # get_status 触发了 _ensure_loaded，并能读到磁盘 task
+        assert pm._loaded is True
+        assert result is not None
+        assert result["market"] == "lazy_get"
+        assert result["done"] == 80
+
+    def test_ensure_loaded_idempotent(self, tmp_path, monkeypatch):
+        """重复调用 _ensure_loaded 不重复扫盘。"""
+        import chanlun.config as _cfg
+
+        monkeypatch.setattr(_cfg, "get_data_path", lambda: tmp_path)
+
+        pm = PrewarmManager()
+        pm._ensure_loaded()
+        assert pm._loaded is True
+        # 第二次直接 fast path 返回，不会再调 _load_persisted_tasks
+        # 通过 monkey-patch 验证：把 _load_persisted_tasks 替成会抛异常的函数
+        called = []
+        monkeypatch.setattr(pm, "_load_persisted_tasks", lambda: called.append(1))
+        pm._ensure_loaded()
+        assert called == [], "_ensure_loaded 第二次不应再调 _load_persisted_tasks"
+
+
+# ===========================================================================
 # L3：互斥按数据源 group 细化
 # ===========================================================================
 
