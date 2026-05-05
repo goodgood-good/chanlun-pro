@@ -22,6 +22,29 @@ from chanlun.db import db
 from chanlun.exchange import Exchange
 from chanlun.tools.log_util import LogUtil
 
+
+class _ChartCacheSafeUnpickler(pickle.Unpickler):
+    """图表缓存 pickle 的安全反序列化器（defense-in-depth）。
+
+    背景：chart cache 文件是本进程自己写的，但磁盘文件在多人/多进程共享部署
+    或被恶意置换时存在被污染的风险。pickle.load 在反序列化时就会执行 __reduce__
+    里的代码，导致任意命令执行。
+
+    防御策略：
+    chart cache 的 entry 只可能是 ``dict / list / tuple / str / int / float /
+    bool / None`` 这类原生类型（参见 _build_chart_cache_entry：值都来自
+    list[int|float|None] + 几个标量字段）。原生类型走专用 opcode，不经过
+    ``find_class``；任何 ``find_class`` 调用都意味着 pickle 流里塞了 class /
+    function 引用，这是 RCE 的入口——直接 raise 拒绝，外层 except 把文件
+    当损坏删除即可。
+    """
+
+    def find_class(self, module, name):  # noqa: D401  (pickle override)
+        raise pickle.UnpicklingError(
+            f"chart cache pickle 拒绝外部 class/function 引用: {module}.{name}"
+        )
+
+
 class FileCacheDB(object):
     """
     文件数据对象
@@ -599,7 +622,9 @@ class FileCacheDB(object):
             return None
         try:
             with open(path, "rb") as fp:
-                obj = pickle.load(fp)
+                # SafeUnpickler：拒绝任何 class/function 引用，仅放原生数据通过。
+                # 任何 RCE payload 在这里会触发 UnpicklingError，被外层 except 当损坏处理。
+                obj = _ChartCacheSafeUnpickler(fp).load()
             if not isinstance(obj, dict):
                 # 老格式或被串改：直接当作 miss 处理。
                 path.unlink(missing_ok=True)
@@ -607,7 +632,7 @@ class FileCacheDB(object):
             return obj
         except Exception as e:
             LogUtil.warning(
-                f"[FileCacheDB.get_chart_cache] pkl 损坏 path={path} err={e}, 删除"
+                f"[FileCacheDB.get_chart_cache] pkl 损坏/不安全 path={path} err={e}, 删除"
             )
             try:
                 path.unlink(missing_ok=True)

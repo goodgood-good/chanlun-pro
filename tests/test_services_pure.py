@@ -310,3 +310,63 @@ class TestProcessStockList:
 
     def test_empty_input(self):
         assert _process_stock_list([]) == []
+
+
+# =============================================================================
+# file_db SafeUnpickler（C — pickle 防御加固）
+# =============================================================================
+
+
+class TestChartCacheSafeUnpickler:
+    """验证 _ChartCacheSafeUnpickler 拒绝任意 class/function 引用，
+    仅放原生数据通过。
+    """
+
+    def test_pure_dict_loads_fine(self):
+        import io
+        import pickle
+
+        from chanlun.file_db import _ChartCacheSafeUnpickler
+
+        # 模拟典型 chart cache entry：纯原生类型
+        entry = {
+            "data": {"t": [1, 2, 3], "c": [10.5, None, 20.0]},
+            "min_time": 1,
+            "max_time": 3,
+            "validated_at": 1234567890.0,
+            "is_full_snapshot": True,
+        }
+        buf = io.BytesIO(pickle.dumps(entry))
+        loaded = _ChartCacheSafeUnpickler(buf).load()
+        assert loaded == entry
+
+    def test_rejects_class_reference(self):
+        import io
+        import pickle
+
+        from chanlun.file_db import _ChartCacheSafeUnpickler
+
+        # 一个有 class 引用的 pickle（datetime 是 builtin 模块的 class，触发 find_class）
+        import datetime as dt
+
+        buf = io.BytesIO(pickle.dumps(dt.datetime(2025, 1, 1)))
+        with pytest.raises(pickle.UnpicklingError):
+            _ChartCacheSafeUnpickler(buf).load()
+
+    def test_rejects_malicious_reduce_payload(self):
+        """模拟攻击者放进 chart cache pkl 的 RCE payload。"""
+        import io
+        import pickle
+
+        from chanlun.file_db import _ChartCacheSafeUnpickler
+
+        class Exploit:
+            def __reduce__(self):
+                # 经典 pickle RCE 模式：在反序列化时调用 os.system
+                import os
+
+                return (os.system, ("echo PWNED",))
+
+        buf = io.BytesIO(pickle.dumps(Exploit()))
+        with pytest.raises(pickle.UnpicklingError):
+            _ChartCacheSafeUnpickler(buf).load()
