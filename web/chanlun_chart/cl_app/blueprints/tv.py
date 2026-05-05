@@ -81,8 +81,8 @@ MARKET_D_TO_W_RATIO = {
     "fx": 5,             # 外汇通常 5天
 }
 
-# 基础数据缓存
-stock_cache = TTLCache(maxsize=100, ttl=7200)
+# stock_cache + 全套 symbols 预加载逻辑已迁到 services.stock_list (Tier 4 P2)，
+# 见模块顶部 re-export。
 
 # 图表缓存基础设施（chart_data_cache / cache_lock / 工具函数）已迁移到
 # ..services.chart_cache（L1 Phase 2）。这里 re-export 让 tv.py 内部既有引用
@@ -168,6 +168,21 @@ from ..services.user_activity import (  # noqa: E402
     _get_last_user_request_time,
     _get_user_recent_codes,
     _mark_user_request,
+)
+# stock_list 服务（Tier 4 P2）：symbols 预加载、缓存、读取
+from ..services.stock_list import (  # noqa: E402
+    _preload_single_exchange,
+    _process_stock_list,
+    _safe_all_stocks,
+    _trigger_async_refresh,
+    PRELOAD_EXCHANGES,
+    PRELOAD_INTERVAL_SECONDS,
+    PRELOAD_PARALLEL_WORKERS,
+    PRELOAD_STARTUP_DELAY_SECONDS,
+    get_cached_processed_stocks,
+    preload_symbols,
+    start_symbol_preload_thread,
+    stock_cache,
 )
 
 
@@ -672,127 +687,9 @@ chart_calc_locks = _SafeLockRegistry()
 # 注意：必须用 with _history_req_locks.get(key) 模式，详见 _SafeLockRegistry 注释。
 _history_req_locks = _SafeLockRegistry()
 
-# 全部支持的市场（用于校验配置项）
-_ALL_PRELOAD_EXCHANGES = [
-    "a", "hk", "fx", "us", "futures", "ny_futures", "currency", "currency_spot",
-]
-
-def _resolve_preload_exchanges():
-    """从 config 读取 PRELOAD_MARKETS（list[str]）。
-    - 未配置时回退默认仅预加载 a/hk/us（避免 futures/currency 这类境外/超时频发的市场拖慢启动）。
-    - 配置中包含未知市场名时仅记 warning, 不中断。
-    用户用不到的市场可在 config.py 中显式置空 PRELOAD_MARKETS = [] 关闭预加载。
-    """
-    raw = getattr(config, "PRELOAD_MARKETS", None)
-    if raw is None:
-        return ["a", "hk", "us"]
-    if not isinstance(raw, (list, tuple)):
-        LogUtil.warning(f"config.PRELOAD_MARKETS 类型应为 list, 当前为 {type(raw).__name__}, 已忽略并使用默认值")
-        return ["a", "hk", "us"]
-    valid = []
-    for ex in raw:
-        if ex in _ALL_PRELOAD_EXCHANGES:
-            valid.append(ex)
-        else:
-            LogUtil.warning(f"config.PRELOAD_MARKETS 包含未知市场 {ex}, 已跳过")
-    return valid
-
-PRELOAD_EXCHANGES = _resolve_preload_exchanges()
-PRELOAD_INTERVAL_SECONDS = 3600
-# 启动后延迟多少秒才开始第一轮预加载, 让启动初期完全静默,
-# 也避免抢占用户首次加载页面所需要的 CPU/网络资源。
-# 可通过 config.PRELOAD_STARTUP_DELAY_SECONDS 覆盖, 默认 30s。
-PRELOAD_STARTUP_DELAY_SECONDS = max(0, int(getattr(config, "PRELOAD_STARTUP_DELAY_SECONDS", 30)))
-# 并发度自适应: 不超过待加载市场数量, 也不超过原上限 8。
-PRELOAD_PARALLEL_WORKERS = min(8, max(1, len(PRELOAD_EXCHANGES))) if PRELOAD_EXCHANGES else 1
-
-# 单市场单次刷新的最大耗时阈值, 仅用于日志告警, 不会强制 kill 任务。
-_PRELOAD_SLOW_WARN_SECONDS = 10
-
-# 正在异步刷新的市场集合, 防止同一市场被并发触发多次刷新而堆积慢请求。
-_async_refresh_in_flight = set()
-_async_refresh_lock = threading.Lock()
-
-def _safe_all_stocks(ex, exchange: str):
-    """统一的 all_stocks 调用入口。
-
-    历史 bug：``ExchangeChangQiao`` 是 ``@fun.singleton``, A/HK/US 三个市场共享同一实例。
-    如果只靠实例字段 ``default_market`` 区分市场, 后注册的市场会覆盖前面的字段, 结果
-    所有市场拿到的都是最后一个市场的数据 (实测复现)。所以这里强制把 ``exchange`` 作为
-    参数传下去——cq 实现的 ``all_stocks`` 接受可选 ``market`` 参数; 其它 exchange 的
-    签名是无参的, 用 try/except 优雅降级即可。
-    """
-    try:
-        return ex.all_stocks(exchange)
-    except TypeError:
-        # 大多数非 cq 的 exchange 是无参签名, 退回原行为。
-        return ex.all_stocks()
-
-def _preload_single_exchange(exchange: str) -> None:
-    """加载单个市场的 symbol 列表并写入缓存。任何异常都被吞掉，仅记日志，避免影响其他市场。"""
-    try:
-        start_ts = time.time()
-        ex = get_exchange(Market(exchange))
-        # 短路: 如果交易所实例标记了 init_failed (例如通达信连接超时),
-        # 直接跳过 all_stocks 调用, 避免再次 30s 阻塞。
-        if getattr(ex, "init_failed", False):
-            LogUtil.warning(f"市场 {exchange} 交易所初始化失败, 跳过本次预加载")
-            return
-        all_stocks = _safe_all_stocks(ex, exchange)
-        processed_stocks = _process_stock_list(all_stocks)
-        with cache_lock:
-            stock_cache[exchange] = processed_stocks
-        elapsed = time.time() - start_ts
-        log_fn = LogUtil.warning if elapsed > _PRELOAD_SLOW_WARN_SECONDS else LogUtil.info
-        log_fn(
-            f"市场 {exchange} symbols 预加载完成，共 {len(processed_stocks)} 条，耗时 {elapsed:.2f}s"
-        )
-    except Exception as e:
-        LogUtil.error(f"预加载市场 {exchange} symbols 失败: {e}")
-
-def preload_symbols():
-    """常驻线程入口：并行预加载配置中的市场 symbols，并周期性刷新。
-
-    设计要点：
-    1. 启动后先静默 PRELOAD_STARTUP_DELAY_SECONDS 秒再开始第一轮, 让启动初期日志干净、
-       不和用户首次访问页面争抢资源。
-    2. 每轮使用 ThreadPoolExecutor 并行触发, 单轮总耗时由最慢的市场决定。
-    3. 单个市场失败不会影响其他市场。
-    4. 该函数本身运行在 daemon 线程中, 不阻塞主进程。
-    5. 如果 PRELOAD_EXCHANGES 为空, 直接退出线程, 不再周期性刷新。
-    """
-    # 通过局部导入避免在模块顶层增加额外依赖项的可见性
-    from concurrent.futures import ThreadPoolExecutor
-
-    if not PRELOAD_EXCHANGES:
-        LogUtil.info("config.PRELOAD_MARKETS 为空, 跳过 symbols 预加载线程")
-        return
-
-    # 启动延迟: 让 web 服务先静默就绪, 用户可立即开始使用 (按需触发的市场会走异步刷新路径)。
-    if PRELOAD_STARTUP_DELAY_SECONDS > 0:
-        time.sleep(PRELOAD_STARTUP_DELAY_SECONDS)
-
-    while True:
-        LogUtil.info("开始预加载并更新所有市场的 symbols（并行）...")
-        round_start = time.time()
-        try:
-            with ThreadPoolExecutor(
-                max_workers=PRELOAD_PARALLEL_WORKERS,
-                thread_name_prefix="SymbolPreloadWorker",
-            ) as pool:
-                # 提交后等待所有 future 结束（_preload_single_exchange 已自行吞异常）
-                list(pool.map(_preload_single_exchange, PRELOAD_EXCHANGES))
-        except Exception as e:
-            LogUtil.error(f"symbols 预加载轮次异常: {e}")
-        LogUtil.info(f"本轮 symbols 预加载完成，总耗时 {time.time() - round_start:.2f}s")
-
-        time.sleep(PRELOAD_INTERVAL_SECONDS)
-
-def start_symbol_preload_thread():
-    """启动后台 symbol 预加载线程。线程为 daemon，不会阻塞进程退出，也不会阻塞调用方。"""
-    t = threading.Thread(target=preload_symbols, daemon=True, name="SymbolPreloadThread")
-    t.start()
-    return t
+# symbols 预加载逻辑（_resolve_preload_exchanges / _safe_all_stocks /
+# _preload_single_exchange / preload_symbols / start_symbol_preload_thread 等）
+# 已迁到 services.stock_list（Tier 4 P2），见模块顶部 re-export。
 
 @tv_bp.route("/tv/config")
 @login_required
@@ -930,85 +827,8 @@ def tv_symbols():
     return info
 
 
-def _process_stock_list(all_stocks):
-    processed_list = []
-    for stock in all_stocks:
-        stock_copy = stock.copy()
-        stock_copy['code_lower'] = stock['code'].lower()
-        stock_copy['name_lower'] = stock['name'].lower()
-        try:
-            stock_copy['pinyin_initials'] = "".join([
-                pinyin.get_initial(_p)[0] for _p in stock["name"]
-            ]).lower()
-        except Exception:
-            stock_copy['pinyin_initials'] = ""
-        processed_list.append(stock_copy)
-    return processed_list
-
-
-def _trigger_async_refresh(exchange: str) -> None:
-    """触发后台线程异步刷新该市场的 symbols, 不阻塞调用方。
-    使用 _async_refresh_in_flight 集合做单例化, 避免同一市场并发刷新堆积。
-    """
-    with _async_refresh_lock:
-        if exchange in _async_refresh_in_flight:
-            return
-        _async_refresh_in_flight.add(exchange)
-
-    def _worker():
-        try:
-            _preload_single_exchange(exchange)
-        finally:
-            with _async_refresh_lock:
-                _async_refresh_in_flight.discard(exchange)
-
-    t = threading.Thread(target=_worker, daemon=True, name=f"SymbolAsyncRefresh-{exchange}")
-    t.start()
-
-def get_cached_processed_stocks(exchange, allow_sync_fallback: bool = False):
-    """获取指定市场已缓存的 symbols 列表。
-
-    设计要点 (启动慢优化):
-    - 缓存命中: 直接返回。
-    - 缓存 miss + ``allow_sync_fallback=False``: 触发后台异步刷新并 raise, 适合那些"宁可
-      报错也不能阻塞"的入口 (如图表页面初始化时的 symbol_info 探测)。
-    - 缓存 miss + ``allow_sync_fallback=True``: 同步调用一次 ``ex.all_stocks()`` 直接构建
-      并写入缓存, 适合"用户主动点搜索"这种愿意等几秒的场景。否则启动后 60s 预加载空窗期内
-      搜索接口会全 500, 用户体感是"搜索框完全坏了"。
-    - 同步路径里任何异常 (包括交易所连接超时) 都吞掉并返回 ``[]``, 搜索框最差是"无结果"。
-    """
-    with cache_lock:
-        cached = stock_cache.get(exchange)
-    if cached is not None:
-        return cached
-
-    if not allow_sync_fallback:
-        _trigger_async_refresh(exchange)
-        raise RuntimeError(
-            f"市场 {exchange} symbols 尚未就绪 (后台正在加载, 请稍后重试)"
-        )
-
-    # 同步兜底路径: 直接构建一次。即使较慢 (a/hk/us 通常 1~5s), 也比让用户看到 500 好。
-    try:
-        ex = get_exchange(Market(exchange))
-        if getattr(ex, "init_failed", False):
-            LogUtil.warning(
-                f"[get_cached_processed_stocks] {exchange} 交易所初始化失败, 同步兜底返回空列表"
-            )
-            return []
-        all_stocks = _safe_all_stocks(ex, exchange) or []
-        processed = _process_stock_list(all_stocks)
-        with cache_lock:
-            stock_cache[exchange] = processed
-        LogUtil.info(
-            f"[get_cached_processed_stocks] {exchange} 同步兜底加载完成, 共 {len(processed)} 条"
-        )
-        return processed
-    except Exception as e:
-        LogUtil.error(
-            f"[get_cached_processed_stocks] {exchange} 同步兜底加载失败: {e}"
-        )
-        return []
+# _process_stock_list / _trigger_async_refresh / get_cached_processed_stocks
+# 已迁到 services.stock_list（Tier 4 P2），见模块顶部 re-export。
 
 
 @tv_bp.route("/tv/search")
