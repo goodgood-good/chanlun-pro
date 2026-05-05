@@ -70,20 +70,12 @@ def render_charts(
         "chart_show_fx": True,
         "chart_show_bi": True,
         "chart_show_xd": True,
-        "chart_show_zsd": True,
-        "chart_show_qsd": True,
         "chart_show_bi_zs": True,
         "chart_show_xd_zs": True,
-        "chart_show_zsd_zs": True,
-        "chart_show_qsd_zs": False,
         "chart_show_bi_mmd": True,
         "chart_show_xd_mmd": True,
-        "chart_show_zsd_mmd": True,
-        "chart_show_qsd_mmd": True,
         "chart_show_bi_bc": True,
         "chart_show_xd_bc": True,
-        "chart_show_zsd_bc": True,
-        "chart_show_qsd_bc": True,
         "chart_show_ma": True,
         "chart_show_ama": True,
         "chart_show_boll": False,
@@ -145,12 +137,6 @@ def render_charts(
     color_xd = "#00BFFF"
     color_xd_zs = "#A1C0FC"
 
-    color_zsd = "#FFA710"
-    color_zsd_zs = "#e9967a"
-
-    color_qsd = "#9932CC"
-    color_qsd_zs = "#8B008B"
-
     # color_last_bi_zs = 'RGB(144,238,144,0.5)'
     # color_last_xd_zs = 'RGB(255,182,193,0.5)'
 
@@ -191,10 +177,6 @@ def render_charts(
     fxs = cl_data.get_fxs()
     bis = cl_data.get_bis()
     xds = cl_data.get_xds()
-    zsds = cl_data.get_zsds()
-    qsds = cl_data.get_qsds()
-    zsd_zss = cl_data.get_zsd_zss()
-    qsd_zss = cl_data.get_qsd_zss()
     # last_bi_zs = cl_data.get_last_bi_zs()
     # last_xd_zs = cl_data.get_last_xd_zs()
 
@@ -298,17 +280,6 @@ def render_charts(
         line_xds, line_xu_xds = lines_to_charts(xds)
     else:
         line_xds = line_xu_xds = {"index": [], "val": []}
-    # 画 走势段
-    if config["chart_show_zsd"]:
-        line_zsds, line_xu_zsds = lines_to_charts(zsds)
-    else:
-        line_zsds = line_xu_zsds = {"index": [], "val": []}
-    # 画 趋势段
-    if config["chart_show_qsd"]:
-        line_qsds, line_xu_qsds = lines_to_charts(qsds)
-    else:
-        line_qsds = line_xu_qsds = {"index": [], "val": []}
-
     # 转换x坐标的时间周期
     line_bis["index"] = datetime_convert_frequency(line_bis["index"], target_dates)
     line_xu_bis["index"] = datetime_convert_frequency(
@@ -317,14 +288,6 @@ def render_charts(
     line_xds["index"] = datetime_convert_frequency(line_xds["index"], target_dates)
     line_xu_xds["index"] = datetime_convert_frequency(
         line_xu_xds["index"], target_dates
-    )
-    line_zsds["index"] = datetime_convert_frequency(line_zsds["index"], target_dates)
-    line_xu_zsds["index"] = datetime_convert_frequency(
-        line_xu_zsds["index"], target_dates
-    )
-    line_qsds["index"] = datetime_convert_frequency(line_qsds["index"], target_dates)
-    line_xu_qsds["index"] = datetime_convert_frequency(
-        line_xu_qsds["index"], target_dates
     )
 
     # 画 笔 中枢 (遍历所有计算的中枢类型)
@@ -341,24 +304,10 @@ def render_charts(
             xd_zss = cl_data.get_xd_zss(zs_type)
             line_xd_zss += zss_to_charts(xd_zss)
 
-    # 画 走势段 中枢
-    line_zsd_zss = []
-    if config["chart_show_zsd_zs"] is True:
-        line_zsd_zss = zss_to_charts(zsd_zss)
-
-    # 画 趋势段 中枢
-    line_qsd_zss = []
-    if config["chart_show_qsd_zs"] is True:
-        line_qsd_zss = zss_to_charts(qsd_zss)
-
     # 转换x坐标的时间周期
     for _zs in line_bi_zss:
         _zs[0] = datetime_convert_frequency(_zs[0], target_dates)
     for _zs in line_xd_zss:
-        _zs[0] = datetime_convert_frequency(_zs[0], target_dates)
-    for _zs in line_zsd_zss:
-        _zs[0] = datetime_convert_frequency(_zs[0], target_dates)
-    for _zs in line_qsd_zss:
         _zs[0] = datetime_convert_frequency(_zs[0], target_dates)
 
     # 分型中的 背驰 和 买卖点信息，归类，一起显示
@@ -368,8 +317,8 @@ def render_charts(
         if _fx.index not in fx_bcs_mmds.keys():
             fx_bcs_mmds[_fx.index] = {
                 "fx": _fx,
-                "bcs": {"bi": [], "xd": [], "zsd": [], "qsd": []},
-                "mmds": {"bi": [], "xd": [], "zsd": [], "qsd": []},
+                "bcs": {"bi": [], "xd": []},
+                "mmds": {"bi": [], "xd": []},
             }
         for zs_type in cl_data.get_config()["zs_bi_type"]:
             for _bc in _bi.get_bcs(zs_type):
@@ -386,8 +335,8 @@ def render_charts(
         if _fx.index not in fx_bcs_mmds.keys():
             fx_bcs_mmds[_fx.index] = {
                 "fx": _fx,
-                "bcs": {"bi": [], "xd": [], "zsd": [], "qsd": []},
-                "mmds": {"bi": [], "xd": [], "zsd": [], "qsd": []},
+                "bcs": {"bi": [], "xd": []},
+                "mmds": {"bi": [], "xd": []},
             }
         for zs_type in cl_data.get_config()["zs_xd_type"]:
             for _bc in _xd.get_bcs(zs_type):
@@ -399,52 +348,16 @@ def render_charts(
                 if config["chart_show_xd_mmd"] is False:
                     break
                 fx_bcs_mmds[_fx.index]["mmds"]["xd"].append(_mmd)
-    for _zsd in zsds:
-        _fx = _zsd.end
-        if _fx.index not in fx_bcs_mmds.keys():
-            fx_bcs_mmds[_fx.index] = {
-                "fx": _fx,
-                "bcs": {"bi": [], "xd": [], "zsd": [], "qsd": []},
-                "mmds": {"bi": [], "xd": [], "zsd": [], "qsd": []},
-            }
-        for _bc in _zsd.bcs:
-            if config["chart_show_zsd_bc"] is False:
-                break
-            if _bc.bc:
-                fx_bcs_mmds[_fx.index]["bcs"]["zsd"].append(_bc)
-        for _mmd in _zsd.mmds:
-            if config["chart_show_zsd_mmd"] is False:
-                break
-            fx_bcs_mmds[_fx.index]["mmds"]["zsd"].append(_mmd)
-    for _qsd in qsds:
-        _fx = _qsd.end
-        if _fx.index not in fx_bcs_mmds.keys():
-            fx_bcs_mmds[_fx.index] = {
-                "fx": _fx,
-                "bcs": {"bi": [], "xd": [], "zsd": [], "qsd": []},
-                "mmds": {"bi": [], "xd": [], "zsd": [], "qsd": []},
-            }
-        for _bc in _qsd.bcs:
-            if config["chart_show_qsd_bc"] is False:
-                break
-            if _bc.bc:
-                fx_bcs_mmds[_fx.index]["bcs"]["qsd"].append(_bc)
-        for _mmd in _qsd.mmds:
-            if config["chart_show_qsd_mmd"] is False:
-                break
-            fx_bcs_mmds[_fx.index]["mmds"]["qsd"].append(_mmd)
 
     # 画 背驰
     scatter_bc = {"i": [], "val": []}  # 背驰
     bc_maps = {
         "bi": "背驰",
         "xd": "背驰",
-        "zsd": "背驰",
-        "qsd": "背驰",
         "pz": "盘整背驰",
         "qs": "趋势背驰",
     }
-    line_type_maps = {"bi": "笔", "xd": "线段", "zsd": "走势段", "qsd": "趋势段"}
+    line_type_maps = {"bi": "笔", "xd": "线段"}
     for fx_index, fx_bc_info in fx_bcs_mmds.items():
         bc_label = ""
         fx = fx_bc_info["fx"]
@@ -780,64 +693,6 @@ def render_charts(
                 )
             )
 
-    # 画 完成走势段
-    overlap_kline = overlap_kline.overlap(
-        (
-            Line()
-            .add_xaxis(line_zsds["index"])
-            .add_yaxis(
-                "走势段",
-                line_zsds["val"],
-                label_opts=opts.LabelOpts(is_show=False),
-                linestyle_opts=opts.LineStyleOpts(width=2, color=color_zsd),
-            )
-        )
-    )
-    # 画 未完成走势段
-    overlap_kline = overlap_kline.overlap(
-        (
-            Line()
-            .add_xaxis(line_xu_zsds["index"])
-            .add_yaxis(
-                "走势段",
-                line_xu_zsds["val"],
-                label_opts=opts.LabelOpts(is_show=False),
-                linestyle_opts=opts.LineStyleOpts(
-                    width=2, type_="dashed", color=color_zsd
-                ),
-            )
-        )
-    )
-
-    # 画 完成趋势段
-    overlap_kline = overlap_kline.overlap(
-        (
-            Line()
-            .add_xaxis(line_qsds["index"])
-            .add_yaxis(
-                "趋势段",
-                line_qsds["val"],
-                label_opts=opts.LabelOpts(is_show=False),
-                linestyle_opts=opts.LineStyleOpts(width=2, color=color_qsd),
-            )
-        )
-    )
-    # 画 未完成趋势段
-    overlap_kline = overlap_kline.overlap(
-        (
-            Line()
-            .add_xaxis(line_xu_qsds["index"])
-            .add_yaxis(
-                "趋势段",
-                line_xu_qsds["val"],
-                label_opts=opts.LabelOpts(is_show=False),
-                linestyle_opts=opts.LineStyleOpts(
-                    width=2, type_="dashed", color=color_qsd
-                ),
-            )
-        )
-    )
-
     # 画趋势通道线
     idx_qstd = cl_qstd(
         cl_data,
@@ -1048,49 +903,6 @@ def render_charts(
                 )
             )
         )
-    # 画 走势段 中枢
-    for zs in line_zsd_zss:
-        overlap_kline = overlap_kline.overlap(
-            (
-                Line()
-                .add_xaxis(zs[0])
-                .add_yaxis(
-                    "走势段中枢",
-                    zs[1],
-                    symbol=None,
-                    label_opts=opts.LabelOpts(is_show=False),
-                    linestyle_opts=opts.LineStyleOpts(
-                        width=zs[2],
-                        color=color_zsd_zs,
-                        type_="solid" if zs[3] else "dashed",
-                    ),
-                    areastyle_opts=opts.AreaStyleOpts(opacity=0.2, color=color_zsd_zs),
-                    tooltip_opts=opts.TooltipOpts(is_show=False),
-                )
-            )
-        )
-    # 画 趋势段 中枢
-    for zs in line_qsd_zss:
-        overlap_kline = overlap_kline.overlap(
-            (
-                Line()
-                .add_xaxis(zs[0])
-                .add_yaxis(
-                    "趋势段中枢",
-                    zs[1],
-                    symbol=None,
-                    label_opts=opts.LabelOpts(is_show=False),
-                    linestyle_opts=opts.LineStyleOpts(
-                        width=zs[2],
-                        color=color_qsd_zs,
-                        type_="solid" if zs[3] else "dashed",
-                    ),
-                    areastyle_opts=opts.AreaStyleOpts(opacity=0.2, color=color_qsd_zs),
-                    tooltip_opts=opts.TooltipOpts(is_show=False),
-                )
-            )
-        )
-
     # 展示背驰
     overlap_kline = overlap_kline.overlap(
         (
@@ -1320,16 +1132,12 @@ def render_charts(
     macd_bar_line = bar_macd.overlap(line_macd_dif)
 
     # 显示笔 or 线段的力度
-    if config["chart_show_ld"] in ["bi", "xd", "zsd", "qsd"] and to_frequency is None:
+    if config["chart_show_ld"] in ["bi", "xd"] and to_frequency is None:
         line_macd_lds = []
         point_macd_lds = {"y": [], "x": []}
         lines = bis
         if config["chart_show_ld"] == "xd":
             lines = xds
-        elif config["chart_show_ld"] == "zsd":
-            lines = zsds
-        elif config["chart_show_ld"] == "qsd":
-            lines = qsds
         for _l in lines:
             ld = _l.get_ld(cl_data)
             val = (
