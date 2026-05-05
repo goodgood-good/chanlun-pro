@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+# 同 ref 的 workflow 连续触发时取消旧的 run，避免连续 push 浪费 minutes
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  secret-scan:
+    name: Secret Scan (gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # gitleaks 全历史扫描需要完整 git
+      - name: Run gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  dependency-audit:
+    name: Dependency Audit (pip-audit on uv lock)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install audit tools
+        run: pip install uv pip-audit
+      - name: Export uv.lock to requirements
+        # 从 uv.lock 导出 pip 兼容格式（不带 hash 让 pip-audit 不要求严格匹配）
+        run: uv export --frozen --no-hashes -o /tmp/req.txt
+      - name: Audit dependencies (CVE scan)
+        # --no-deps 仅扫描列出的顶层包，加快速度；首版不 strict 避免新发布 CVE 即时红
+        run: pip-audit -r /tmp/req.txt --no-deps
+        continue-on-error: true
