@@ -221,26 +221,26 @@ class StrategyAXDTradeModel(Strategy):
             "buy", price, stop_loss_price, self._max_loss_rate
         )
 
-        # 低级别线段走势段要有配合的背驰或买卖点
+        # 低级别线段要有配合的背驰或买卖点
         xds_down_30m = [
             _xd
             for _xd in cd_30m.get_xds()
             if _xd.start.k.date >= xd_day.start.k.date and _xd.type == "down"
         ]
-        zsds_down_30m = [
-            _zsd
-            for _zsd in cd_30m.get_zsds()
-            if _zsd.start.k.date >= xd_day.start.k.date and _zsd.type == "down"
+        xds_down_30m_confirm = [
+            _xd_confirm
+            for _xd_confirm in cd_30m.get_xds()
+            if _xd_confirm.start.k.date >= xd_day.start.k.date and _xd_confirm.type == "down"
         ]
         xds_down_5m = [
             _xd
             for _xd in cd_5m.get_xds()
             if _xd.start.k.date >= xd_day.start.k.date and _xd.type == "down"
         ]
-        zsds_down_5m = [
-            _zsd
-            for _zsd in cd_5m.get_zsds()
-            if _zsd.start.k.date >= xd_day.start.k.date and _zsd.type == "down"
+        xds_down_5m_confirm = [
+            _xd_confirm
+            for _xd_confirm in cd_5m.get_xds()
+            if _xd_confirm.start.k.date >= xd_day.start.k.date and _xd_confirm.type == "down"
         ]
 
         score_val = 0
@@ -250,9 +250,9 @@ class StrategyAXDTradeModel(Strategy):
             ):
                 score_val += 1
                 break
-        for _zsd in zsds_down_30m[-2:]:
-            if _zsd.mmd_exists(["1buy", "2buy", "3buy"]) or _zsd.bc_exists(
-                ["zsd", "pz", "qs"]
+        for _xd_confirm in xds_down_30m_confirm[-2:]:
+            if _xd_confirm.mmd_exists(["1buy", "2buy", "3buy"]) or _xd_confirm.bc_exists(
+                ["xd", "pz", "qs"]
             ):
                 score_val += 1
         for _xd in xds_down_5m[-4:]:
@@ -261,9 +261,9 @@ class StrategyAXDTradeModel(Strategy):
             ):
                 score_val += 1
                 break
-        for _zsd in zsds_down_5m[-2:]:
-            if _zsd.mmd_exists(["1buy", "2buy", "3buy"]) or _zsd.bc_exists(
-                ["zsd", "pz", "qs"]
+        for _xd_confirm in xds_down_5m_confirm[-2:]:
+            if _xd_confirm.mmd_exists(["1buy", "2buy", "3buy"]) or _xd_confirm.bc_exists(
+                ["xd", "pz", "qs"]
             ):
                 score_val += 1
 
@@ -271,8 +271,8 @@ class StrategyAXDTradeModel(Strategy):
             return opts
 
         info = {
-            "day_zsd_type": (
-                0 if len(cd_day.get_zsds()) == 0 else cd_day.get_zsds()[-1].type
+            "day_xd_type": (
+                0 if len(cd_day.get_xds()) == 0 else cd_day.get_xds()[-1].type
             ),
             "day_bi": f"{bi_day.type}_{bi_day.is_done()}",
             "xd_start_date": xd_day.start.k.date,
