@@ -7,6 +7,7 @@ route implementations.
 """
 
 __all__ = [
+    "chart_cache",
     "constants",
     "prewarm_status",
     "user_activity",

@@ -55,6 +55,12 @@ from flask_login import login_required
 from chanlun.cl_utils import query_cl_chart_config
 from chanlun.tools.log_util import LogUtil
 
+from ..services.chart_cache import (
+    _build_cache_key,
+    _get_chart_cache_entry,
+    cache_lock,
+    chart_data_cache,
+)
 from ..services.constants import market_types, resolution_maps
 from ..services.prewarm_status import mark_batch_prewarm_active
 from ..services.user_activity import (
@@ -62,20 +68,9 @@ from ..services.user_activity import (
     _get_user_recent_codes,
 )
 
-# 仍由 tv.py 提供（Phase 2 才会迁到 services/chart_cache.py）：
-# _build_cache_key / _get_chart_cache_entry / chart_data_cache / cache_lock 是
-# 共享的 chart 缓存基础设施，迁移涉及 _stable_hash + _normalize_cache_entry +
-# _build_chart_cache_entry + fdb 等多依赖，留作下一轮 L1 Phase 2 处理。
-# compute_and_cache_chart_data / get_cached_processed_stocks 是路由级业务函数，
-# 留在 tv.py 合适。
-from .tv import (
-    _build_cache_key,
-    _get_chart_cache_entry,
-    cache_lock,
-    chart_data_cache,
-    compute_and_cache_chart_data,
-    get_cached_processed_stocks,
-)
+# 仅保留 tv.py 的公开业务函数（路由级 helper，留在 tv.py 内合适）。
+# 经 L1 Phase 1 + Phase 2 后，本文件不再 import tv.py 任何下划线"私有"符号。
+from .tv import compute_and_cache_chart_data, get_cached_processed_stocks
 
 symbols_bp = Blueprint("symbols", __name__)
 
