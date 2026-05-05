@@ -1,8 +1,38 @@
+import os
 import pathlib
 
 """
 服务总配置文件
 """
+
+
+def _load_dotenv() -> None:
+    """极简 .env 加载器：从项目根 .env 读 KEY=VALUE 注入到 os.environ。
+
+    - 不覆盖进程已存在的真实 env（优先级：真实 env > .env 文件 > 代码默认 ''）。
+    - 免依赖（不引 python-dotenv），仅支持 KEY=VALUE / # 注释 / 空行。
+    - 解决 IDE（PyCharm 等）启动早于 setx 时读不到环境变量的问题。
+    - .env 已在 .gitignore 中，不会被纳入 git。
+    """
+    try:
+        # config.py 位于 src/chanlun/，项目根是 parents[2]
+        env_file = pathlib.Path(__file__).resolve().parents[2] / '.env'
+        if not env_file.is_file():
+            return
+        for line in env_file.read_text(encoding='utf-8').splitlines():
+            line = line.strip()
+            if not line or line.startswith('#') or '=' not in line:
+                continue
+            k, v = line.split('=', 1)
+            k = k.strip()
+            v = v.strip().strip('"').strip("'")
+            if k:
+                os.environ.setdefault(k, v)
+    except OSError:
+        pass
+
+
+_load_dotenv()
 
 # WEB服务访问IP地址，本机部署设置为 127.0.0.1；局域网或外网部署，设置为该机器的IP地址，或者设置 0.0.0.0 则可使用机器所有IP地址进行访问。
 WEB_HOST = '0.0.0.0'
