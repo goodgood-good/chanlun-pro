@@ -662,16 +662,22 @@ class PrewarmManager:
                 # 每批结束后重新按"用户最近看过"排序剩余 pending。
                 batch_size = max(code_parallelism * 4, 8)
                 cursor = 0
+                # M2: 缓存上一轮的 hot_codes 哈希，hot 列表没变就跳过 O(N) 重排。
+                # 典型场景：11k 标的 / 11000 / 8 = 1375 批，用户在跑期间通常只切几次
+                # 标的，每次切才需要一次重排；从 O(N²/batch) 降到 ~O(M·N) 实际工作量。
+                last_hot_hash = None
                 while cursor < len(pending) and not task.cancel_event.is_set():
                     # 优先级调整：把用户最近看过且还没处理的标的提到队首
                     try:
                         hot_codes = _get_user_recent_codes(market) or []
                     except Exception:
                         hot_codes = []
-                    if hot_codes:
+                    cur_hot_hash = tuple(hot_codes) if hot_codes else None
+                    if hot_codes and cur_hot_hash != last_hot_hash:
                         pending = self._prioritize_hot_codes(
                             pending, hot_codes, processed, cursor
                         )
+                        last_hot_hash = cur_hot_hash
 
                     end = min(cursor + batch_size, len(pending))
                     batch = pending[cursor:end]
@@ -882,10 +888,27 @@ class PrewarmManager:
                 acquired = _PREWARM_INFLIGHT_SEMAPHORE.acquire(timeout=min(1.0, remaining))
 
             try:
-                return bool(compute_and_cache_chart_data(market, code, freq, cl_config))
-            except Exception as e:
+                # M4: 1 次 2s 退避重试覆盖数据源短暂抖动（HTTP 超时/连接重置等）。
+                # 不做更多次重试，避免数据源真宕机时把信号量占住挤掉用户实时请求。
+                # cancel-aware：重试前检查 cancel_event，避免取消后还跑一遍。
+                last_err: Optional[BaseException] = None
+                for attempt in range(2):
+                    try:
+                        if compute_and_cache_chart_data(market, code, freq, cl_config):
+                            if attempt > 0:
+                                LogUtil.info(
+                                    f"[prewarm] compute retry succeeded "
+                                    f"{market}/{code}/{interval}"
+                                )
+                            return True
+                        last_err = RuntimeError("compute returned False")
+                    except Exception as e:
+                        last_err = e
+                    if attempt == 0 and not cancel_event.is_set():
+                        time.sleep(2.0)
                 LogUtil.error(
-                    f"[prewarm] compute failed {market}/{code} interval={interval}: {e}"
+                    f"[prewarm] compute failed after retry "
+                    f"{market}/{code} interval={interval}: {last_err}"
                 )
                 return False
             finally:
