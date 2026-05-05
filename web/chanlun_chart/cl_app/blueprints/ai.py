@@ -10,6 +10,8 @@ from flask_login import login_required
 
 from chanlun.tools.ai_analyse import AIAnalyse
 
+from ..services.constants import market_types
+
 
 ai_bp = Blueprint("ai", __name__)
 
@@ -17,9 +19,15 @@ ai_bp = Blueprint("ai", __name__)
 @ai_bp.route("/ai/analyse", methods=["POST"])
 @login_required
 def ai_analyse():
-    market = request.form["market"]
-    code = request.form["code"]
-    frequency = request.form["frequency"]
+    # 输入校验：market 走白名单，code/frequency 必填，避免 KeyError 500 与未知 market
+    # 透传到下游引发更难诊断的异常。
+    market = (request.form.get("market") or "").strip().lower()
+    if market not in market_types:
+        return {"ok": False, "msg": f"未知市场: {market!r}"}, 400
+    code = (request.form.get("code") or "").strip()
+    frequency = (request.form.get("frequency") or "").strip()
+    if not code or not frequency:
+        return {"ok": False, "msg": "code 与 frequency 为必填字段"}, 400
 
     ai_analyse_obj = AIAnalyse(market)
     ai_res = ai_analyse_obj.analyse(code, frequency)
