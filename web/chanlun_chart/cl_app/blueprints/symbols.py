@@ -13,10 +13,11 @@
 
 预热实现要点（2026-04 重构后）：
 - 同一时刻全局只允许 1 个市场在预热（避免多市场互相冲击）；
-- 在该市场内：**多标的并行 + 单标的内 4 周期并行**（最大化吞吐）：
-  - 多标的并行度按市场配置（a 股 xtquant 必须 1，us/hk 等 HTTP 数据源 4）；
-  - 单标的内 4 周期固定 4 个线程并行；
-  - 总并发上限受 chart_calc_locks 自然约束（同一 cache_key 永远只有一个在算）；
+- 在该市场内：**多标的并行 + 单标的内 2 周期并行**（吞吐与连接池平衡）：
+  - 多标的并行度按市场配置（a 股 xtquant 必须 1，us/hk 等 HTTP 数据源 2-3）；
+  - 单标的内 4 周期固定用 2 个线程并行（PREWARM_FREQ_PARALLELISM=2，
+    见该常量注释：实测 4 并发会打爆长桥连接池，2 是 throughput 与稳定性平衡点）；
+  - 总并发上限受 chart_calc_locks + INFLIGHT_SEMAPHORE 共同约束。
 - 计算结果直接写入 ``tv.chart_data_cache``，与用户实际查看图表时的 cache_key 完全一致，
   之后切换标的命中缓存可秒开；
 - 用户最近看过的标的优先插队（每批调度时重排剩余 pending）；
@@ -253,8 +254,10 @@ PREWARM_CODE_PARALLELISM_BY_MARKET = {
 }
 PREWARM_CODE_PARALLELISM_DEFAULT = 1
 
-# ⚠️ 关键：全局在飞请求数信号量上限（绝对真理）。
-# 这是预热可同时打到数据源的最大请求数，不论标的并行度 × 周期并行度乘出来多大，都受这个限制。
+# ⚠️ 关键：全局在飞请求数信号量上限。
+# 这是单个 worker 进程内预热可同时打到数据源的最大请求数。
+# 注意：threading.Semaphore 是**进程内**真理，不跨进程；本服务由 app.py 单进程启动
+# （见 app.py:87-92 严禁多进程部署的注释），多 worker 部署下此上限会被乘 N 失效。
 # 留出余量给用户的实时请求（用户的 tv_history 不走这个信号量，永远优先）。
 # 2026-04 二次调优（M2 落盘后）：2 → 6。
 # 长桥/futu 单连接池 QPS 上限实测 ~10，预热占 6，给用户实时请求和 polling 留 4 个余量。
@@ -295,13 +298,13 @@ class PrewarmTask:
         "done",
         "succeeded",
         "failed",
-        "current_code",
-        "current_name",
+        "current",
         "status",
         "started_at",
         "finished_at",
         "cancel_event",
         "error_msg",
+        "persist_fail_count",
     )
 
     def __init__(self, market: str, total: int):
@@ -311,15 +314,19 @@ class PrewarmTask:
         self.done: int = 0
         self.succeeded: int = 0
         self.failed: int = 0
-        self.current_code: str = ""
-        self.current_name: str = ""
+        # (current_code, current_name) 一对原子写：避免多 worker 并发裸写两个独立属性
+        # 时被读端观察到 (新 code, 旧 name) 撕裂组合。
+        self.current: tuple = ("", "")
         self.status: str = "running"  # running | finished | cancelled | error
         self.started_at: float = time.time()
         self.finished_at: Optional[float] = None
         self.cancel_event: threading.Event = threading.Event()
         self.error_msg: str = ""
+        # 连续持久化失败计数（运行时；不持久化跨重启）。≥3 次时升级为 ERROR + 写 error_msg。
+        self.persist_fail_count: int = 0
 
     def to_dict(self) -> dict:
+        cur_code, cur_name = self.current
         return {
             "task_id": self.task_id,
             "market": self.market,
@@ -327,8 +334,8 @@ class PrewarmTask:
             "done": self.done,
             "succeeded": self.succeeded,
             "failed": self.failed,
-            "current_code": self.current_code,
-            "current_name": self.current_name,
+            "current_code": cur_code,
+            "current_name": cur_name,
             "status": self.status,
             "started_at": self.started_at,
             "finished_at": self.finished_at,
@@ -344,8 +351,7 @@ class PrewarmTask:
         t.done = int(d.get("done", 0))
         t.succeeded = int(d.get("succeeded", 0))
         t.failed = int(d.get("failed", 0))
-        t.current_code = d.get("current_code", "")
-        t.current_name = d.get("current_name", "")
+        t.current = (d.get("current_code", ""), d.get("current_name", ""))
         t.status = d.get("status", "aborted")
         t.started_at = float(d.get("started_at", time.time()))
         finished = d.get("finished_at")
@@ -447,8 +453,24 @@ class PrewarmManager:
             tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
             # Windows 上 Path.replace 是原子的（同卷），避免半截文件。
             tmp.replace(path)
+            task.persist_fail_count = 0  # 成功一次就清零
         except OSError as e:
-            LogUtil.warning(f"[prewarm] persist task failed market={task.market}: {e}")
+            task.persist_fail_count += 1
+            # 持久化失败本身不影响内存进度（status 接口读内存），但会让进程崩溃后
+            # 恢复值偏旧。连续 ≥3 次失败时升级到 ERROR 并写入 task.error_msg，
+            # 让前端能看到磁盘异常（典型场景：磁盘满 / 权限改变）。
+            if task.persist_fail_count >= 3:
+                LogUtil.error(
+                    f"[prewarm] persist failing {task.persist_fail_count} times "
+                    f"market={task.market}: {e}"
+                )
+                if not task.error_msg:
+                    task.error_msg = (
+                        f"持久化失败 {task.persist_fail_count} 次: {e}; "
+                        "进程崩溃后恢复进度可能偏旧"
+                    )
+            else:
+                LogUtil.warning(f"[prewarm] persist task failed market={task.market}: {e}")
             try:
                 if tmp.exists():
                     tmp.unlink()
@@ -511,11 +533,24 @@ class PrewarmManager:
         with self._lock:
             task = self._tasks.get(market)
             if task is None:
-                return {"ok": False, "msg": "该市场没有预热任务"}
+                # 这是真正的"找不到资源"，路由侧映射为 404。
+                return {"ok": False, "code": "not_found", "msg": "该市场没有预热任务"}
             if task.status != "running":
-                return {"ok": False, "msg": f"任务状态为 {task.status}，无需取消", "task": task.to_dict()}
+                # 任务已结束（finished/cancelled/aborted/error）：cancel 是幂等 no-op，
+                # 按 200 OK 返回；前端不应把"任务已完成"当作错误处理。
+                return {
+                    "ok": True,
+                    "cancelled": False,
+                    "msg": f"任务状态为 {task.status}，无需取消",
+                    "task": task.to_dict(),
+                }
             task.cancel_event.set()
-            return {"ok": True, "msg": "已发送取消信号，将在当前标的完成后停止", "task": task.to_dict()}
+            return {
+                "ok": True,
+                "cancelled": True,
+                "msg": "已发送取消信号，将在当前批次完成后停止（通常 ≤ 30 秒）",
+                "task": task.to_dict(),
+            }
 
     # ---------------- 内部实现 ----------------
 
@@ -567,9 +602,9 @@ class PrewarmManager:
                     task.done += 1
                 return
 
-            # 当前正在处理（多个 worker 时只展示最新的，无所谓哪一个）
-            task.current_code = code
-            task.current_name = name
+            # 当前正在处理（多个 worker 时只展示最新的，无所谓哪一个）；
+            # tuple 整体替换避免代码-名称撕裂读。
+            task.current = (code, name)
 
             LogUtil.info(
                 f"[prewarm] >>> {market}/{code} ({name}) "
@@ -647,14 +682,29 @@ class PrewarmManager:
                         if task.cancel_event.is_set():
                             break
                         c = item.get("code", "")
-                        if c:
-                            processed.add(c)
-                        fut = executor.submit(_process_one, item)
+                        try:
+                            fut = executor.submit(_process_one, item)
+                        except RuntimeError as e:
+                            # executor 已 shutdown 等异常：把当前 item 放回 pending 队首
+                            # 不要把 c 加进 processed，否则后续轮次的 hot_codes 重排会跳过它，
+                            # 该标的会被静默漏算。
+                            LogUtil.warning(
+                                f"[prewarm] submit failed market={market} code={c}: {e}"
+                            )
+                            break
                         futures[fut] = c
+                        if c:
+                            # 仅在 submit 成功之后才标记为已处理，与 hot_codes 重排逻辑保持一致。
+                            processed.add(c)
 
                     # 等本批完成再调度下一批，确保 hot_codes 重排能生效
+                    cancelled_in_batch = False
                     for fut in as_completed(futures):
-                        if task.cancel_event.is_set():
+                        if task.cancel_event.is_set() and not cancelled_in_batch:
+                            # 取消时主动让 executor 丢弃尚未启动的 future（Py3.9+），
+                            # 否则 with 退出会 join 全部 future，最坏要等 batch_size × 信号量超时。
+                            cancelled_in_batch = True
+                            executor.shutdown(wait=False, cancel_futures=True)
                             break
                         try:
                             fut.result()
@@ -669,8 +719,7 @@ class PrewarmManager:
                 else:
                     task.status = "finished"
                 task.finished_at = time.time()
-                task.current_code = ""
-                task.current_name = ""
+                task.current = ("", "")
 
             LogUtil.info(
                 f"[prewarm] task done market={market} status={task.status} "
@@ -679,9 +728,13 @@ class PrewarmManager:
             )
         except Exception as e:
             with self._lock:
-                task.status = "error"
-                task.error_msg = str(e)
-                task.finished_at = time.time()
+                # 仅当任务仍处 running 时才覆盖为 error。
+                # 若 try 块尾部（如 LogUtil.info 的 finished_at-started_at 格式化）抛异常，
+                # 此时 status 已经是 finished/cancelled，不应被倒退为 error。
+                if task.status == "running":
+                    task.status = "error"
+                    task.error_msg = str(e)
+                    task.finished_at = time.time()
             LogUtil.error(f"[prewarm] worker crashed market={market}: {e}")
         finally:
             # 终态强制持久化一次（保证崩溃 / 取消都能落盘最后状态）
@@ -813,12 +866,20 @@ class PrewarmManager:
 
             # 全局信号量：限制同一时刻有多少个预热请求在打数据源
             # 用户的实时 tv_history 请求不受这个信号量限制，永远优先
-            acquired = _PREWARM_INFLIGHT_SEMAPHORE.acquire(timeout=30.0)
-            if not acquired:
-                LogUtil.warning(
-                    f"[prewarm] semaphore timeout, skip {market}/{code}/{interval}"
-                )
-                return False
+            # 用 1s 轮询而非一次 30s acquire：让 cancel_event 能在 ≤1s 内打断等待，
+            # 避免取消信号要等 30s 信号量超时才生效。
+            acquired = False
+            deadline = time.time() + 30.0
+            while not acquired:
+                if cancel_event.is_set():
+                    return False
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    LogUtil.warning(
+                        f"[prewarm] semaphore timeout, skip {market}/{code}/{interval}"
+                    )
+                    return False
+                acquired = _PREWARM_INFLIGHT_SEMAPHORE.acquire(timeout=min(1.0, remaining))
 
             try:
                 return bool(compute_and_cache_chart_data(market, code, freq, cl_config))
@@ -917,5 +978,9 @@ def symbols_prewarm_cancel():
         return jsonify({"ok": False, "msg": f"未知市场: {market!r}"}), 400
 
     result = _prewarm_manager.cancel(market)
-    status_code = 200 if result["ok"] else 409
+    if result["ok"]:
+        status_code = 200
+    else:
+        # 当前唯一 ok=False 的分支是 "not_found"；其他状态走 200 幂等返回。
+        status_code = 404 if result.get("code") == "not_found" else 409
     return jsonify(result), status_code
