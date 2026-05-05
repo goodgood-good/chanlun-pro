@@ -65,14 +65,9 @@ class CL(ICL):
         self.bi_zss_calculator = ZsCalculator()
 
 
-        # 存储各级别数据
-        # self.zsds: List[XD] = []  # 走势段列表
-        # self.qsds: List[XD] = []  # 趋势段列表
         # 中枢数据
         # ★ G1：原 self.bi_zss 字段已废弃。笔中枢统一从 self.bi_zss_calculator
         # 经 get_bi_zss() / type_bi_zss 读取，不再维护本地缓存字典，避免双源歧义。
-        self.zsd_zss: List[ZS] = []  # 走势段中枢
-        self.qsd_zss: List[ZS] = []  # 趋势段中枢
 
         # 最后中枢缓存
         self._last_bi_zs: Union[ZS, None] = None
@@ -111,7 +106,7 @@ class CL(ICL):
 
             # 线段配置
             'xd_qj': Config.XD_QJ_DD.value,
-            'xd_bzh': Config.ZSD_BZH_YES.value,
+            'xd_bzh': Config.XD_BZH_YES.value,
             'xd_bi_pohuai': Config.XD_BI_POHUAI_NO.value,
 
             # 中枢配置
@@ -273,14 +268,6 @@ class CL(ICL):
         """返回线段列表（浅拷贝）"""
         return list(self.xd_calculator.xds)
 
-    def get_zsds(self) -> List[XD]:
-        """返回走势段列表"""
-        return []
-
-    def get_qsds(self) -> List[XD]:
-        """返回趋势段列表"""
-        return []
-
     def get_bi_zss(self, zs_type: str = None) -> List[ZS]:
         """返回笔中枢列表
 
@@ -301,14 +288,6 @@ class CL(ICL):
         if self.zss_calculator.pending_zs:
             zss.append(self.zss_calculator.pending_zs)
         return zss
-
-    def get_zsd_zss(self) -> List[ZS]:
-        """返回走势段中枢列表"""
-        return self.zsd_zss
-
-    def get_qsd_zss(self) -> List[ZS]:
-        """返回趋势段中枢列表"""
-        return self.qsd_zss
 
     def get_last_bi_zs(self) -> Union[ZS, None]:
         """返回最后的笔中枢
@@ -526,14 +505,6 @@ class CL(ICL):
         return self.xd_calculator.xds
 
     @property
-    def zsds(self) -> List[XD]:
-        return self.get_zsds()
-
-    @property
-    def qsds(self) -> List[XD]:
-        return self.get_qsds()
-
-    @property
     def last_bi_zs(self) -> Union[ZS, None]:
         return self.get_last_bi_zs()
 
@@ -548,10 +519,6 @@ class CL(ICL):
     @property
     def type_xd_zss(self) -> dict:
         return {Config.ZS_TYPE_BZ.value: self.get_xd_zss(Config.ZS_TYPE_BZ.value)}
-
-    @property
-    def type_zsd_zss(self) -> dict:
-        return {Config.ZS_TYPE_BZ.value: self.get_zsd_zss()}
 
     def default_bi_zs_type(self) -> str:
         return self.config.get('zs_type_bi', Config.ZS_TYPE_BZ.value)

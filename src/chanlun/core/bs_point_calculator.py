@@ -60,9 +60,9 @@ class BsPointCalculator:
         strict_3_mode: bool = False,
         min_signal_interval: int = 10,
     ):
-        if zs_type not in ('bi', 'xd', 'zsd'):
+        if zs_type not in ('bi', 'xd'):
             raise ValueError(
-                f"zs_type 必须是 'bi' / 'xd' / 'zsd' 之一, 当前传入: {zs_type}"
+                f"zs_type 必须是 'bi' / 'xd' 之一, 当前传入: {zs_type}"
             )
         if min_signal_interval < 0:
             raise ValueError(
