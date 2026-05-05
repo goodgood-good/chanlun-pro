@@ -312,6 +312,78 @@ class TestLazyLoad:
 # ===========================================================================
 
 
+class TestResumeIntegration:
+    """resume 端到端集成测试（mock compute_and_cache_chart_data）."""
+
+    def test_start_skips_codes_already_in_done_file(self, tmp_path, monkeypatch):
+        """已写入 done.txt 的 code 在 start() 时应被过滤掉，task.resumed_skipped 准确。"""
+        import chanlun.config as _cfg
+        import cl_app.blueprints.symbols as s
+
+        monkeypatch.setattr(_cfg, "get_data_path", lambda: tmp_path)
+        s._prewarm_last_start_at.clear()
+        monkeypatch.setattr(s, "PREWARM_RATE_LIMIT_SECONDS", 0)
+        # mock _run_task 让 worker 立即结束，不跑真实 compute
+        monkeypatch.setattr(PrewarmManager, "_run_task", lambda self, task, codes: None)
+
+        # 预先在磁盘写一份"上次已完成"的 done.txt
+        done_dir = tmp_path / "prewarm_status"
+        done_dir.mkdir(parents=True, exist_ok=True)
+        (done_dir / "rtest_done.txt").write_text(
+            "CODE_1\nCODE_2\nCODE_3\n", encoding="utf-8"
+        )
+
+        pm = PrewarmManager()
+        codes = [{"code": f"CODE_{i}", "name": "X"} for i in range(1, 11)]  # 10 个
+
+        result = pm.start("rtest", codes)
+        assert result["ok"] is True
+        # 已 done 的 3 个被跳过
+        assert result["task"]["resumed_skipped"] == 3
+        # task.total 应反映剩余工作量
+        assert result["task"]["total"] == 7
+
+    def test_start_returns_false_when_all_done(self, tmp_path, monkeypatch):
+        """全部 code 都在 done.txt 时，start() 应返回 ok=False 提示无需再跑。"""
+        import chanlun.config as _cfg
+        import cl_app.blueprints.symbols as s
+
+        monkeypatch.setattr(_cfg, "get_data_path", lambda: tmp_path)
+        s._prewarm_last_start_at.clear()
+        monkeypatch.setattr(s, "PREWARM_RATE_LIMIT_SECONDS", 0)
+
+        done_dir = tmp_path / "prewarm_status"
+        done_dir.mkdir(parents=True, exist_ok=True)
+        (done_dir / "all_done_test_done.txt").write_text(
+            "X1\nX2\nX3\n", encoding="utf-8"
+        )
+
+        pm = PrewarmManager()
+        codes = [{"code": c, "name": "n"} for c in ("X1", "X2", "X3")]
+
+        result = pm.start("all_done_test", codes)
+        assert result["ok"] is False
+        # msg 应提示如何强制重做
+        assert "all_done_test_done.txt" in result["msg"]
+
+    def test_start_no_skip_when_done_file_missing(self, tmp_path, monkeypatch):
+        """done.txt 不存在时，start() 应正常启动且 resumed_skipped=0。"""
+        import chanlun.config as _cfg
+        import cl_app.blueprints.symbols as s
+
+        monkeypatch.setattr(_cfg, "get_data_path", lambda: tmp_path)
+        s._prewarm_last_start_at.clear()
+        monkeypatch.setattr(s, "PREWARM_RATE_LIMIT_SECONDS", 0)
+        monkeypatch.setattr(PrewarmManager, "_run_task", lambda self, task, codes: None)
+
+        pm = PrewarmManager()
+        codes = [{"code": f"FRESH_{i}", "name": "f"} for i in range(5)]
+        result = pm.start("fresh_test", codes)
+        assert result["ok"] is True
+        assert result["task"]["resumed_skipped"] == 0
+        assert result["task"]["total"] == 5
+
+
 class TestPersistRace:
     def test_persist_serialized_under_concurrency(self, tmp_path, monkeypatch):
         """多线程并发 _persist_task 时，磁盘最终内容应是某次 to_dict() 的快照
