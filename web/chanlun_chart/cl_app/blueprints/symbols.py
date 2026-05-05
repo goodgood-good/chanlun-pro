@@ -61,6 +61,7 @@ from ..services.chart_cache import (
     cache_lock,
     chart_data_cache,
 )
+from ..services.chart_compute import compute_and_cache_chart_data
 from ..services.constants import market_types, resolution_maps
 from ..services.prewarm_status import mark_batch_prewarm_active
 from ..services.stock_list import get_cached_processed_stocks
@@ -69,10 +70,8 @@ from ..services.user_activity import (
     _get_user_recent_codes,
 )
 
-# 仅保留 tv.py 的公开业务函数（route-level，留在蓝图里）。
-# 经 L1 + Tier 4 重构后，本文件全部依赖均从 services 引入，
-# 仅 compute_and_cache_chart_data 仍是 tv.py 内的业务计算路径。
-from .tv import compute_and_cache_chart_data
+# 经 L1 + Tier 4 全套重构后，symbols.py 不再 import 任何 .tv 符号；
+# 全部依赖均从 services 引入，蓝图与蓝图之间无任何越界耦合。
 
 symbols_bp = Blueprint("symbols", __name__)
 
