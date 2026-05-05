@@ -227,20 +227,10 @@ class StrategyAXDTradeModel(Strategy):
             for _xd in cd_30m.get_xds()
             if _xd.start.k.date >= xd_day.start.k.date and _xd.type == "down"
         ]
-        xds_down_30m_confirm = [
-            _xd_confirm
-            for _xd_confirm in cd_30m.get_xds()
-            if _xd_confirm.start.k.date >= xd_day.start.k.date and _xd_confirm.type == "down"
-        ]
         xds_down_5m = [
             _xd
             for _xd in cd_5m.get_xds()
             if _xd.start.k.date >= xd_day.start.k.date and _xd.type == "down"
-        ]
-        xds_down_5m_confirm = [
-            _xd_confirm
-            for _xd_confirm in cd_5m.get_xds()
-            if _xd_confirm.start.k.date >= xd_day.start.k.date and _xd_confirm.type == "down"
         ]
 
         score_val = 0
@@ -250,22 +240,12 @@ class StrategyAXDTradeModel(Strategy):
             ):
                 score_val += 1
                 break
-        for _xd_confirm in xds_down_30m_confirm[-2:]:
-            if _xd_confirm.mmd_exists(["1buy", "2buy", "3buy"]) or _xd_confirm.bc_exists(
-                ["xd", "pz", "qs"]
-            ):
-                score_val += 1
         for _xd in xds_down_5m[-4:]:
             if _xd.mmd_exists(["1buy", "2buy", "3buy"]) or _xd.bc_exists(
                 ["xd", "pz", "qs"]
             ):
                 score_val += 1
                 break
-        for _xd_confirm in xds_down_5m_confirm[-2:]:
-            if _xd_confirm.mmd_exists(["1buy", "2buy", "3buy"]) or _xd_confirm.bc_exists(
-                ["xd", "pz", "qs"]
-            ):
-                score_val += 1
 
         if score_val < 2:
             return opts
