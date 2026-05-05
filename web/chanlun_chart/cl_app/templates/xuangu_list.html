@@ -122,7 +122,7 @@
                 const form = layui.form;
                 const layer = layui.layer;
 
-                const task_infos = eval('({{ task_infos| tojson }})');
+                const task_infos = {{ task_infos | tojson }};
 
                 form.on('select(task_name)', function (d) {
                     let task_name = d.value;
