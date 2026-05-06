@@ -52,6 +52,7 @@ def _env_float(key: str, default: float) -> float:
 from flask import Blueprint, jsonify, render_template, request
 from flask_login import login_required
 
+from chanlun import config
 from chanlun.cl_utils import query_cl_chart_config
 from chanlun.tools.log_util import LogUtil
 
@@ -130,6 +131,21 @@ def _apply_market_filter(market: str, all_stocks: List[dict]) -> List[dict]:
         ]
     if market == "us":
         all_stocks = [s for s in all_stocks if not _is_us_non_stock(s.get("name", ""))]
+    # B-a：US 市场 prewarm 仅限自选股，保护长桥月度配额。
+    # query_all_zs_stocks 返回 [{"zx_name": ..., "stocks": [{"code", "name", ...}, ...]}, ...]，
+    # 需要从分组的 stocks 子列表里抽 code 拍扁。
+    if market == "us" and getattr(config, "US_PREWARM_ZIXUAN_ONLY", False):
+        from chanlun.zixuan import ZiXuan
+        zx_codes = {
+            stock["code"]
+            for group in ZiXuan("us").query_all_zs_stocks()
+            for stock in group.get("stocks", [])
+        }
+        before = len(all_stocks)
+        all_stocks = [s for s in all_stocks if s.get("code") in zx_codes]
+        LogUtil.info(
+            f"[_apply_market_filter] US prewarm 仅限自选股，{before} → {len(all_stocks)}"
+        )
     return all_stocks
 
 
