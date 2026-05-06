@@ -52,6 +52,54 @@ from chanlun import config
 from cl_app import create_app
 from cl_app.blueprints.tv import start_symbol_preload_thread
 
+def _warm_chart_cache_from_disk() -> None:
+    """启动期 chart_data 预热。把上次访问的 entry 从 fdb 回填 RAM。
+
+    cache_key 由 (market, code, frequency, hash(cl_config)) 组成；这里用
+    query_cl_chart_config(market, code) 获取 cl_config——与 tv.py history 入口
+    的 key 构造方式完全一致，命中率最高。
+    """
+    from cl_app.services.last_chart_state import load_last_state
+    state = load_last_state()
+    if not state:
+        return
+    market = state["market"]
+    code = state["code"]
+    frequency = state["frequency"]
+
+    from chanlun.cl_utils import query_cl_chart_config
+    from cl_app.services.chart_cache import (
+        _build_cache_key,
+        _normalize_cache_entry,
+        chart_data_cache,
+    )
+    from chanlun.file_db import fdb
+
+    cl_config = query_cl_chart_config(market, code)
+    if not isinstance(cl_config, dict):
+        cl_config = {}
+    cache_key = _build_cache_key(market, code, frequency, cl_config)
+    try:
+        disk_entry = fdb.get_chart_cache(cache_key)
+    except Exception as e:
+        LogUtil.warning(
+            f"[chart_warm] 读磁盘 entry 失败 key={cache_key} err={e}"
+        )
+        return
+    if disk_entry is None:
+        LogUtil.info(
+            f"[chart_warm] 磁盘冷层无 {market}:{code}:{frequency} entry，跳过"
+        )
+        return
+    normalized = _normalize_cache_entry(disk_entry)
+    if normalized is None:
+        return
+    chart_data_cache[cache_key] = normalized
+    LogUtil.info(
+        f"[chart_warm] 已预热 {market}:{code}:{frequency} 到 RAM"
+    )
+
+
 def main() -> None:
     """Start the Tornado HTTP server hosting the Flask app."""
     is_wpf_launcher = "wpf_launcher" in sys.argv
@@ -114,6 +162,15 @@ def main() -> None:
         # 先启动 symbol 预加载后台线程：daemon 线程，不阻塞主流程，
         # 让其与 HTTP 服务启动并行，争取在用户首次发起请求前完成首轮缓存填充。
         start_symbol_preload_thread()
+
+        # B5: chart_data 启动预热——把"用户上次访问"的 chart_data entry 从
+        # 磁盘冷层（fdb）回填 RAM 热层。这样用户首个 first=true history 请求
+        # 直接 RAM 命中（~3ms）而不是落盘读（~50-100ms）。
+        # 失败/无历史状态都是空操作，不影响主流程。
+        try:
+            _warm_chart_cache_from_disk()
+        except Exception as e:
+            LogUtil.warning(f"[chart_warm] 启动预热未执行: {e}")
 
         LogUtil.info("启动成功")
         # LB-6：长桥月度配额可观测 — 每次启动一眼看到当月用量、是否耗尽、US 历史源选择
