@@ -241,8 +241,23 @@ def _process_stock_list(all_stocks):
     return processed_list
 
 
-def _preload_single_exchange(exchange: str) -> None:
-    """加载单个市场的 symbol 列表并写入缓存。任何异常都被吞掉，仅记日志，避免影响其他市场。"""
+def _preload_single_exchange(exchange: str, skip_if_disk_warm: bool = False) -> None:
+    """加载单个市场的 symbol 列表并写入缓存。任何异常都被吞掉，仅记日志，避免影响其他市场。
+
+    ``skip_if_disk_warm=True`` 时，若 ``stock_cache[exchange]`` 已经被
+    ``_warm_cache_from_disk`` 填充，则跳过本次抓取（首轮启动避免与磁盘恢复
+    重复劳动）。后续轮次仍按 ``PRELOAD_INTERVAL_SECONDS`` 节奏正常全量刷新，
+    保证缓存最终一致。``_trigger_async_refresh`` 走默认 False，行为不变。
+    """
+    if skip_if_disk_warm:
+        with cache_lock:
+            cached = stock_cache.get(exchange)
+        if cached:
+            LogUtil.info(
+                f"市场 {exchange} 已由磁盘恢复 {len(cached)} 条，跳过本轮预加载，"
+                f"下一轮按 PRELOAD_INTERVAL_SECONDS 定时刷新"
+            )
+            return
     try:
         start_ts = time.time()
         ex = get_exchange(Market(exchange))
@@ -286,6 +301,9 @@ def preload_symbols():
     if PRELOAD_STARTUP_DELAY_SECONDS > 0:
         time.sleep(PRELOAD_STARTUP_DELAY_SECONDS)
 
+    # 首轮特殊处理：磁盘恢复命中的市场跳过本次抓取，等下一轮 PRELOAD_INTERVAL_SECONDS
+    # 到点再正常全量刷新。避免启动后立刻和 _warm_cache_from_disk 重复工作。
+    first_round = True
     while True:
         LogUtil.info("开始预加载并更新所有市场的 symbols（并行）...")
         round_start = time.time()
@@ -295,11 +313,18 @@ def preload_symbols():
                 thread_name_prefix="SymbolPreloadWorker",
             ) as pool:
                 # 提交后等待所有 future 结束（_preload_single_exchange 已自行吞异常）
-                list(pool.map(_preload_single_exchange, PRELOAD_EXCHANGES))
+                if first_round:
+                    list(pool.map(
+                        lambda ex: _preload_single_exchange(ex, skip_if_disk_warm=True),
+                        PRELOAD_EXCHANGES,
+                    ))
+                else:
+                    list(pool.map(_preload_single_exchange, PRELOAD_EXCHANGES))
         except Exception as e:
             LogUtil.error(f"symbols 预加载轮次异常: {e}")
         LogUtil.info(f"本轮 symbols 预加载完成，总耗时 {time.time() - round_start:.2f}s")
 
+        first_round = False
         time.sleep(PRELOAD_INTERVAL_SECONDS)
 
 

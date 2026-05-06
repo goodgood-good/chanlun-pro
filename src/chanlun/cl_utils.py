@@ -398,7 +398,7 @@ def query_cl_chart_config(
         "enable_kchart_low_to_high": "0",
         # 画图默认配置
         "chart_show_infos": "0",
-        "chart_show_fx": "0",
+        "chart_show_fx": "1",
         "chart_show_bi": "1",
         "chart_show_xd": "1",
         "chart_show_bi_zs": "1",
@@ -739,12 +739,22 @@ def cl_data_to_tv_chart(
 
     fx_data = []
     if config["chart_show_fx"] == "1":
-        for fx in cd.get_fxs():
+        # 只输出"被笔确认"的有效分型：每一笔的起止端点（bi.start / bi.end）
+        # 必为分型，是缠论意义上"有效"的分型；同一分型可能同时是上一笔
+        # 的 end 与下一笔的 start，按时间戳去重。
+        valid_fxs = {}
+        for bi in cd.get_bis():
+            for fx in (bi.start, bi.end):
+                if fx is None:
+                    continue
+                ts = fun.datetime_to_int(fx.k.date)
+                valid_fxs[ts] = fx
+        for ts, fx in valid_fxs.items():
             fx_data.append(
                 {
                     "points": [
-                        {"time": fun.datetime_to_int(fx.k.date), "price": fx.val},
-                        {"time": fun.datetime_to_int(fx.k.date), "price": fx.val},
+                        {"time": ts, "price": fx.val},
+                        {"time": ts, "price": fx.val},
                     ],
                     "text": fx.type,
                 }

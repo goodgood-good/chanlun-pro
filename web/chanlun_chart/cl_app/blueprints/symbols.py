@@ -116,11 +116,18 @@ def _is_us_non_stock(name: str) -> bool:
     )
 
 
-def _apply_market_filter(market: str, all_stocks: List[dict]) -> List[dict]:
+def _apply_market_filter(
+    market: str, all_stocks: List[dict], for_prewarm: bool = False
+) -> List[dict]:
     """对标的列表应用市场过滤(type 白名单 + 美股 name 黑名单).
 
     供 symbols_list (展示) 和 symbols_prewarm (预热) 共用, 确保
     预热范围与用户能搜到的标的一致, 不浪费 CPU/磁盘算 ETF 等.
+
+    ``for_prewarm=True`` 时启用仅供预热路径的额外过滤
+    (如 US 市场 ``US_PREWARM_ZIXUAN_ONLY`` 的自选股交集),
+    展示路径必须保持默认 False, 否则用户看到的列表会被错误地
+    截断为自选股 (历史 bug: prewarm 自选股交集错误地溢出到展示路径).
     """
     allow_types = STOCK_ONLY_TYPES_BY_MARKET.get(market)
     if allow_types is not None:
@@ -134,7 +141,7 @@ def _apply_market_filter(market: str, all_stocks: List[dict]) -> List[dict]:
     # B-a：US 市场 prewarm 仅限自选股，保护长桥月度配额。
     # query_all_zs_stocks 返回 [{"zx_name": ..., "stocks": [{"code", "name", ...}, ...]}, ...]，
     # 需要从分组的 stocks 子列表里抽 code 拍扁。
-    if market == "us" and getattr(config, "US_PREWARM_ZIXUAN_ONLY", False):
+    if for_prewarm and market == "us" and getattr(config, "US_PREWARM_ZIXUAN_ONLY", False):
         from chanlun.zixuan import ZiXuan
         zx_codes = {
             stock["code"]
@@ -1216,7 +1223,9 @@ def symbols_prewarm():
         return jsonify({"ok": False, "msg": f"获取标的列表失败: {e}"}), 500
 
     # 与展示列表过滤同步: 不预热被列表过滤掉的 ETF/Fund/非个股.
-    all_stocks = _apply_market_filter(market, all_stocks)
+    # for_prewarm=True 启用 US 市场仅自选股的额外过滤(保护长桥月度配额),
+    # 展示路径不能开此开关, 否则会把用户能看到的列表截断为自选股.
+    all_stocks = _apply_market_filter(market, all_stocks, for_prewarm=True)
 
     codes = [
         {"code": s.get("code", ""), "name": s.get("name", "")}
