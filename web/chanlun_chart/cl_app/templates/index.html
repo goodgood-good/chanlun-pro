@@ -579,8 +579,9 @@
   <script>
     // 右栏「标的列表」区块：按市场浏览全部标的，点击代码列在新窗口打开缠论图表。
     // 不依赖 layui.table，纯 jQuery + AJAX 渲染，避免折叠面板内表格高度计算问题。
-    $(function () {
-      layui.use(['form'], function () {
+    // F2: SymbolsPanel.init() 已挪到下方 init_web() 之后用 requestIdleCallback 延后启动。
+    // 原入口：$(function () { layui.use(['form'], function () { ... SymbolsPanel.init(); ... }); });
+    layui.use(['form'], function () {
         var lform = layui.form;
 
         var SymbolsPanel = {
@@ -1029,9 +1030,8 @@
           }
         };
 
-        SymbolsPanel.init();
+        // F2: SymbolsPanel.init() 推迟到主 widget 后 requestIdleCallback 中执行（见下方 __defer）
       });
-    });
   </script>
   <script>
     $(function () {
@@ -1402,8 +1402,25 @@
         ZiXuan.render_zixuan_opts();
       }
 
+      // F2: 关键路径——立即创建 TV widget
       init_web();
-      interval_update_rates = setInterval(ZiXuan.stocks_update_rate(), 30000);
+
+      // F2: 非关键 UI 初始化推到主 widget 后续渲染窗口，避免抢首屏 HTTP worker
+      var __defer = (window.requestIdleCallback
+        ? function (cb) { window.requestIdleCallback(cb, { timeout: 1000 }); }
+        : function (cb) { setTimeout(cb, 200); });
+      __defer(function () {
+        try {
+          layui.use(function () {
+            if (typeof SymbolsPanel !== 'undefined') {
+              SymbolsPanel.init();
+            }
+          });
+        } catch (e) { console.warn('SymbolsPanel.init defer error', e); }
+        try {
+          interval_update_rates = setInterval(ZiXuan.stocks_update_rate(), 30000);
+        } catch (e) { console.warn('stocks_update_rate defer error', e); }
+      });
     });
   </script>
 
