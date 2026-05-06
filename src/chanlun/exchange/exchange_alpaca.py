@@ -102,9 +102,24 @@ class ExchangeAlpaca(Exchange):
             "1m": TimeFrame(1, TimeFrameUnit.Minute),
         }
         timeframe = frequency_map[frequency]
+
+        def _to_datetime(v):
+            """统一把 str/datetime 输入转成 datetime；None 时返回 None。"""
+            if v is None:
+                return None
+            if isinstance(v, dt.datetime):
+                return v
+            if isinstance(v, dt.date):
+                return dt.datetime.combine(v, dt.time())
+            # str 兜底
+            if len(v) == 10:
+                return fun.str_to_datetime(v, "%Y-%m-%d")
+            return fun.str_to_datetime(v)
+
         try:
             if end_date is None:
-                end_date = datetime.datetime.now()
+                end_date = dt.datetime.now()
+                # 免费 / paper 账号不能拿"最近"数据（SIP），保守往前推一天再截到日界
                 end_date = (
                     end_date + dt.timedelta(days=1)
                     if self.is_vip
@@ -114,10 +129,8 @@ class ExchangeAlpaca(Exchange):
                     fun.datetime_to_str(end_date, "%Y-%m-%d"), "%Y-%m-%d"
                 )
             else:
-                if len(end_date) == 10:
-                    end_date = fun.str_to_datetime(end_date, "%Y-%m-%d")
-                else:
-                    end_date = fun.str_to_datetime(end_date)
+                end_date = _to_datetime(end_date)
+
             if start_date is None:
                 if frequency == "1m":
                     start_date = end_date - dt.timedelta(days=15)
@@ -136,17 +149,20 @@ class ExchangeAlpaca(Exchange):
                 elif frequency == "y":
                     start_date = end_date - dt.timedelta(days=15000)
             else:
-                if len(end_date) == 10:
-                    start_date = fun.str_to_datetime(start_date, "%Y-%m-%d")
-                else:
-                    start_date = fun.str_to_datetime(start_date)
-            req = StockBarsRequest(
+                start_date = _to_datetime(start_date)
+
+            # 免费 / paper 账户必须指定 feed=IEX，否则 alpaca 默认走 SIP 报：
+            # "subscription does not permit querying recent SIP data"。
+            req_kwargs = dict(
                 symbol_or_symbols=alpaca_symbol,
                 timeframe=timeframe,
                 start=start_date,
                 end=end_date,
                 limit=5000,
             )
+            if not self.is_vip:
+                req_kwargs["feed"] = DataFeed.IEX
+            req = StockBarsRequest(**req_kwargs)
             bars = self.client.get_stock_bars(req)
             # bars.data 是 dict[symbol -> List[Bar]]；alpaca 找不到 symbol 时 key 不存在
             bar_list = bars.data.get(alpaca_symbol, []) if hasattr(bars, "data") else []
