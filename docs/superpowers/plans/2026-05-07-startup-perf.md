@@ -1430,3 +1430,108 @@ cd D:/project/chanlun-pro && python web/chanlun_chart/app.py nobrowser
 8. `perf(frontend): TV widget loading_screen + 骨架占位 (F1)` — Task 8
 9. `perf(frontend): 推迟 SymbolsPanel/ZiXuan 启动到主 widget 之后 (F2)` — Task 9
 10. `chore(assets): 裁剪用不到的 i18n 包到 bundles_unused/ (R1)` — Task 10
+
+---
+
+## Validation Results (2026-05-07 实施完成后追加)
+
+**实施完成 commit 范围**：`aa08668..899d253`（含两次 follow-up 修复 `d5e771f` / `738e0fd`）
+
+实际 commit 顺序（含 follow-up 与穿插的用户独立 commit）：
+
+```
+aa08668 perf(stocks): symbols 列表磁盘缓存（启动恢复 + 周期落盘）  ← Task 0 前置基线
+93966fd perf(static): 添加启动期预压缩工具 (B2)                    ← Task 1
+d5e771f perf(static): 预压缩用原子写避免半截 .gz (Task 1 follow-up)
+af83cf6 perf(static): 添加 CachedStaticFileHandler (B1)            ← Task 2
+738e0fd perf(static): CachedStaticFileHandler 改用 validate_absolute_path (B1 follow-up)
+d07c2cf perf(static): 接入预压缩 + Tornado 路由分发 (B2+B3)        ← Task 3
+340b222 perf(startup): 默认不自动开浏览器 (B4)                     ← Task 4
+366af91 perf(startup): 添加 last_chart_state 持久化模块 (B5 part 1) ← Task 5
+ae3d70c perf(startup): tv_history 入口记录最后访问状态 (B5 part 2)  ← Task 6
+fc1135d perf(startup): 启动期把上次访问的 chart_data 预热到 RAM (B5 part 3) ← Task 7
+f59e0e8 perf(frontend): TV widget loading_screen + 骨架占位 (F1)   ← Task 8
+3ff2d06 perf(frontend): 推迟 SymbolsPanel/ZiXuan 启动到主 widget 之后 (F2) ← Task 9
+899d253 chore(assets): 裁剪用不到的 i18n 包到 bundles_unused/ (R1) ← Task 10
+```
+
+### 自动化验证（已通过）
+
+- **AST 语法**：9 个改动文件 + 3 个测试文件全部 `ast.parse` 通过。
+- **单元测试**（前 3 个 TDD 任务）：
+  - `tests/test_static_precompress.py`: 6/6 passed
+  - `tests/test_cached_static_handler.py`: 5/5 passed（含 ETag 对称性锁定测试）
+  - `tests/test_last_chart_state.py`: 6/6 passed
+- **静态资源 cache + gzip 头部**（Task 3 实测）：
+  - `Cache-Control: public, max-age=31536000, immutable` ✓
+  - `Content-Encoding: gzip` ✓ + `Vary: Accept-Encoding` ✓
+  - 不带 `Accept-Encoding: gzip` 时退回原文件 ✓
+- **预压缩生成结果**：
+  - `charting_library.standalone.js`: 55KB → `.js.gz` 15KB（**73% reduction**）
+  - `bundles/zh.938.*.js`: 188KB → `.js.gz` 44KB（**77% reduction**）
+  - 启动期一次性预压缩 1367 文件耗时 2.65s（gzip level 9）
+  - 后续启动 mtime 跳过，<100ms
+- **i18n 裁剪结果**：
+  - 移走 1240 个 locale 私有 chunks + 782 个 `.gz` 兄弟文件 = **2022 个文件**到 `bundles_unused/`
+  - `bundles/` 体积：24MB → 14MB
+  - 实际节省 ≈ 10MB（远超 spec 预估的 3.6MB，因为每 locale 实际有 ~62 webpack chunks，不是 spec 假设的仅 .938 + .2578 两个）
+  - 共享 chunks（无 locale 前缀如 `1485.*.js` / `1727.*.js`）正确保留在 `bundles/`
+- **webbrowser.open opt-in**（Task 4）：布尔逻辑验证两个分支 `should_open` True/False 正确切换。
+- **Fallback 路由**（Task 3）：Flask `/symbols/list` 仍能正常响应（302 redirect 到登录），证明 Tornado FallbackHandler 工作正常。
+
+### 体感时间验证（需要你这边手动跑两次）
+
+后端的修复都已落地，但"启动 → 第一根 K 线"的实际秒数取决于浏览器和你的 widget 初始化时间。请按下面跑两次记录数据：
+
+#### 第一次启动（首次预压缩 + 清浏览器 cache）
+
+1. 关掉所有 chanlun-pro 浏览器 tab
+2. 浏览器清掉 `127.0.0.1:9900` 所有缓存（设置 → 隐私 → 清除浏览数据 → 缓存的图片和文件 + Cookie）
+3. 启动：`cd D:/project/chanlun-pro && python web/chanlun_chart/app.py`
+4. 观察日志（首次：预压缩可能跑 2-15s）：
+   - `[precompress] charting_library: 压缩=N 跳过=M 耗时=X.XXs`
+   - `[precompress] datafeeds: 压缩=N 跳过=M 耗时=X.XXs`
+   - `[stocks_cache] 从磁盘恢复 a/hk/us stocks` 或 `市场 X 预加载完成`
+   - `[chart_warm] 已预热 ...` 或 `[chart_warm] 磁盘冷层无 ... entry，跳过`
+   - `>>> Web 已启动，请在浏览器访问：http://127.0.0.1:9900`
+5. 浏览器访问，记录从 URL 回车到 K 线渲染的时间。**期望：8-12s**（无浏览器 cache，主要时间在下载已压缩的 charting library + widget 内部初始化）
+
+#### 第二次启动（disk cache + 浏览器 cache 双命中）
+
+1. **不要清浏览器 cache**
+2. Ctrl+C 关掉服务，再次启动
+3. 观察 `[precompress]` 这次应该几乎全是 `跳过=N 耗时=<0.1s`
+4. 浏览器访问，F12 → Network → Disable cache **不勾选**、Preserve log 勾选，刷新一次
+5. **关键观察**：charting library 静态资源 status 应是 `200 (from disk cache)` 或 `(memory cache)`，0 网络请求；`library.668013...js` 主 bundle 应在 `<10ms` 完成
+6. 记录从访问到 K 线渲染时间。**期望：2-5s**
+
+#### 切回上次标的（chart_data 预热验证）
+
+服务启动后，进图表页面，**用上次最后看的标的+周期**，看后端日志：
+
+```
+[tv_history] >>> a:SH.000001 1m first=true ...
+[tv_history] a:SH.000001 1m bars=4579 first=true elapsed=3ms
+```
+
+`elapsed=3ms` 表示 chart_data RAM 命中（B5 启动预热生效）。如果显示几十 ms 但仍然没拉网络，说明走到磁盘冷层了——也是预期可接受路径。
+
+#### 把测出来的时间贴回来
+
+把第一次启动 + 第二次启动 + 切回上次标的的关键日志贴回来；我会对照 spec §9.3 的预期表确认是否达标，达标则关闭整个 plan，未达标则继续诊断剩余瓶颈。
+
+### 已知不在本 plan 范围的潜在剩余瓶颈
+
+- TradingView widget 内部初始化时间（resolveSymbol → onChartReady → 首次 getBars 链路）。如果第二次启动仍然 >5s，下一步要看 `Performance` 面板录制看 widget 初始化哪一步耗时长。
+- pydev debugger attach 模式下前端 JS 执行会变慢。在生产环境（直接 `python app.py` 不挂 PyCharm 调试器）的耗时通常会更短。
+
+### 用户 WIP 状态
+
+实施过程中保留了你正在做的 4 个 wip 文件未触动：
+- `src/chanlun/cl_utils.py`
+- `web/chanlun_chart/cl_app/blueprints/symbols.py`
+- `web/chanlun_chart/cl_app/services/stock_list.py`
+- `web/chanlun_chart/cl_app/templates/index.html`（其中 plan 改动的几行已隔离 commit，wip 区域未触动）
+
+`git status` 在 plan 完成时仍会显示这 4 个文件 modified——这是预期，由你后续决定是 commit / discard / 留着继续。
+
