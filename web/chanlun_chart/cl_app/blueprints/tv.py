@@ -718,17 +718,24 @@ def tv_history():
             LogUtil.warning(f"[tv_history] invalid symbol: {symbol}")
             return {"s": "no_data"}
 
+        frequency = resolution_maps.get(resolution)
+        if frequency is None:
+            LogUtil.warning(f"[tv_history] Unsupported resolution: {resolution}")
+            return {"s": "no_data"}
+
         # 标记用户活跃度，供批量预热（symbols.py）让位 / 优先插队使用。
         # 关键：仅 firstDataRequest=true（用户主动切标的/切周期）才标记活跃；
         # firstDataRequest=false 是 TradingView 后台 polling（每 ~3 秒 1 次），
         # 如果也算"用户活跃"，会把批量预热永久卡死。
         if firstDataRequest == "true":
             _mark_user_request(market, code)
-
-        frequency = resolution_maps.get(resolution)
-        if frequency is None:
-            LogUtil.warning(f"[tv_history] Unsupported resolution: {resolution}")
-            return {"s": "no_data"}
+            # B5: 记录最后访问状态，供下次启动预热 RAM chart_data_cache。
+            # 失败吞异常——这是观测/优化用，不能影响 history 主流程。
+            try:
+                from cl_app.services.last_chart_state import record_user_request
+                record_user_request(market, code, frequency)
+            except Exception:
+                pass
 
         tz_sh = pytz.timezone("Asia/Shanghai")
         log_args = dict(args)
