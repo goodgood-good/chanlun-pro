@@ -39,6 +39,7 @@ def precompress_directory(root: str) -> tuple[int, int, float]:
                 continue
             src = os.path.join(dirpath, fn)
             dst = src + ".gz"
+            tmp_path = None
             try:
                 if os.path.getsize(src) < _MIN_SIZE_BYTES:
                     skipped += 1
@@ -49,17 +50,25 @@ def precompress_directory(root: str) -> tuple[int, int, float]:
                 ):
                     skipped += 1
                     continue
+                tmp_path = dst + ".tmp"
                 with open(src, "rb") as fi, gzip.open(
-                    dst, "wb", compresslevel=_GZIP_LEVEL
+                    tmp_path, "wb", compresslevel=_GZIP_LEVEL
                 ) as fo:
                     while True:
                         buf = fi.read(1024 * 256)
                         if not buf:
                             break
                         fo.write(buf)
+                os.replace(tmp_path, dst)
+                tmp_path = None  # 已原子替换成功，无需清理
                 compressed += 1
             except Exception as e:
                 LogUtil.warning(f"[precompress] {src} 失败: {e}")
+                if tmp_path and os.path.isfile(tmp_path):
+                    try:
+                        os.unlink(tmp_path)
+                    except OSError:
+                        pass
     return (compressed, skipped, time.time() - t0)
 
 
