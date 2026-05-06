@@ -76,7 +76,39 @@ def main() -> None:
         except (TypeError, ValueError):
             http_workers = 32
         LogUtil.info(f"HTTP 线程池容量: {http_workers}")
-        s = HTTPServer(WSGIContainer(app, executor=ThreadPoolExecutor(http_workers)))
+        # B2: 启动期预压缩 charting_library / datafeeds 下的 .js/.css 为 .gz。
+        # 第一次启动会多 5-15s（gzip level 9 单核），之后凭 mtime 跳过。
+        from cl_app.services.static_precompress import precompress_static_assets
+        static_root = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "cl_app", "static",
+        )
+        precompress_static_assets(static_root)
+
+        # B1+B3: Tornado Application 路由——charting_library / datafeeds 走自定义
+        # CachedStaticFileHandler（immutable cache + 透明 gzip），其余 fallback Flask
+        from tornado.web import Application, FallbackHandler
+        from cl_app.handlers.cached_static import CachedStaticFileHandler
+
+        wsgi_container = WSGIContainer(
+            app, executor=ThreadPoolExecutor(http_workers)
+        )
+        tornado_app = Application(
+            [
+                (
+                    r"/static/charting_library/(.*)",
+                    CachedStaticFileHandler,
+                    {"path": os.path.join(static_root, "charting_library")},
+                ),
+                (
+                    r"/static/datafeeds/(.*)",
+                    CachedStaticFileHandler,
+                    {"path": os.path.join(static_root, "datafeeds")},
+                ),
+                (r".*", FallbackHandler, {"fallback": wsgi_container}),
+            ]
+        )
+        s = HTTPServer(tornado_app)
         s.bind(9900, config.WEB_HOST)
 
         # 先启动 symbol 预加载后台线程：daemon 线程，不阻塞主流程，
