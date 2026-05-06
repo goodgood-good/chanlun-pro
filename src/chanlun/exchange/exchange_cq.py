@@ -117,15 +117,29 @@ class RateLimiter:
                     time.sleep(wait_time)
 
 
+class _PreemptiveQuotaExhausted(Exception):
+    """LbQuotaTracker 检测到当月配额已耗尽时的内部哨兵异常。
+
+    不抛 OpenApiException 是因为它的真实 ABI 是 4 参 (kind, code, trace_id, message)
+    构造极易因 SDK 升级 ABI 不兼容；用内部异常类彻底解耦。
+    上层 _fetch_segment_data 的 except 通过 isinstance 识别，code 属性给一致接口。
+    """
+    code = 301607
+    message = "history kline symbol count out of limit (preemptive)"
+
+
 def is_retryable_exception(exception):
     """
     判断异常是否需要重试
     """
+    # 内部哨兵：本进程已知配额耗尽，retry 不会让配额变多，直接 break
+    if isinstance(exception, _PreemptiveQuotaExhausted):
+        return False
     if isinstance(exception, OpenApiException):
         # 301600: out of minute kline begin date - 数据超限，不重试
-        # 使用 getattr 避免 LSP 或版本差异导致属性不存在报错
+        # 301607: history kline symbol count out of limit - 配额耗尽，retry 也是浪费 6s
         code = getattr(exception, 'code', None)
-        if code == 301600:
+        if code in (301600, 301607):
             return False
     return True
 
@@ -468,18 +482,24 @@ class ExchangeChangQiao(Exchange):
         """
         带限流和重试的 history kline API 调用。
 
-        前置短路：当月配额已耗尽且 symbol 不在本月已查过的集合里 → 抛 OpenApiException(301607)
+        前置短路：当月配额已耗尽且 symbol 不在本月已查过的集合里 → 抛 _PreemptiveQuotaExhausted
         让上层 _fetch_segment_data 走"已知失败"分支，避免无意义的 SDK 调用浪费 retry 预算。
+        用内部哨兵异常而非 OpenApiException 是为了避开 SDK 4 参 ABI（kind, code, trace_id, message）。
         """
         tracker = LbQuotaTracker.instance()
         limit = getattr(config, "LB_QUOTA_MONTHLY_LIMIT", 0)
+        if limit <= 0 and not getattr(self, "_quota_limit_zero_warned", False):
+            LogUtil.warning(
+                "[lb_quota] LB_QUOTA_MONTHLY_LIMIT not configured (=0), preemptive "
+                "short-circuit disabled; only reactive mark_exhausted() will work"
+            )
+            self._quota_limit_zero_warned = True
         if tracker.is_exhausted(limit) and not tracker.has_symbol(symbol):
-            err = OpenApiException("history kline symbol count out of limit (preemptive)")
-            try:
-                err.code = 301607  # 模拟错误码方便上层识别
-            except Exception:
-                pass
-            raise err
+            LogUtil.debug(
+                f"[lb_quota] preemptive short-circuit symbol={symbol} "
+                f"count={tracker.count()} limit={limit}"
+            )
+            raise _PreemptiveQuotaExhausted()
 
         self.rate_limiter.wait()
         result = self._quote_ctx().history_candlesticks_by_offset(
@@ -531,7 +551,8 @@ class ExchangeChangQiao(Exchange):
                 err_code = getattr(inner, 'code', None)
                 if isinstance(inner, OpenApiException) and err_code == 301600:
                     LogUtil.warning(f"Data limit reached (301600) for {code}, stopping segment.")
-                elif isinstance(inner, OpenApiException) and err_code == 301607:
+                elif (isinstance(inner, _PreemptiveQuotaExhausted) or
+                      (isinstance(inner, OpenApiException) and err_code == 301607)):
                     # 月度 symbol 配额耗尽：标记 exhausted 让后续调用立刻短路
                     LbQuotaTracker.instance().mark_exhausted()
                     LogUtil.error(
