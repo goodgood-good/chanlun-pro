@@ -4,12 +4,16 @@
 头，并按 Accept-Encoding 透明分发预压缩好的 .gz 文件。
 
   - Cache-Control: public, max-age=31536000, immutable
-      文件名都带 hash（library.668013b6b41ce2feaa5c.js），永久 cache 安全
+      文件名都带 hash（library.668013b6b41ce2feaa5c.js），永久 cache 安全。
+      **警告**：immutable 仅适用于 hash-named 子树。仅在
+      charting_library/、datafeeds/ 等内容哈希命名的目录下挂载本
+      handler；切勿挂载到 /static/ 根路径——那会把 index.html 等普通
+      资源锁定长达一年。
   - Content-Encoding: gzip + Vary: Accept-Encoding
       仅当客户端支持 gzip 且兄弟 .gz 存在时启用
   - Content-Type 修正
-      Tornado 父类对 .js.gz 会返回 application/x-gzip；我们透明发的是 .js，
-      要把 mime 还回去
+      Tornado 父类对 .js.gz 会返回 application/gzip（RFC 6713）；
+      我们透明发的是 .js，要把 mime 还回去
 """
 import os
 
@@ -27,14 +31,30 @@ _MIME_BY_EXT = {
 
 
 class CachedStaticFileHandler(StaticFileHandler):
-    def get_absolute_path(self, root, path):
-        full = super().get_absolute_path(root, path)
+    @classmethod
+    def get_absolute_path(cls, root, path):
+        """直通父类实现。
+
+        保留显式重写是为了说明为何不在此处做 gzip 协商：
+        get_absolute_path 是 classmethod，没有 request 上下文，不能读
+        Accept-Encoding 头；gzip 协商在 validate_absolute_path 中完成。
+        """
+        return super().get_absolute_path(root, path)
+
+    def validate_absolute_path(self, root, absolute_path):
+        """在父类校验前做 per-request 的 gzip 协商。
+
+        validate_absolute_path 是实例方法，可访问 self.request。
+        协商结果写入 self._serving_gz 供 set_extra_headers /
+        get_content_type 使用。
+        """
         accept = self.request.headers.get("Accept-Encoding", "")
-        if "gzip" in accept and os.path.isfile(full + ".gz"):
+        if "gzip" in accept and os.path.isfile(absolute_path + ".gz"):
             self._serving_gz = True
-            return full + ".gz"
-        self._serving_gz = False
-        return full
+            absolute_path = absolute_path + ".gz"
+        else:
+            self._serving_gz = False
+        return super().validate_absolute_path(root, absolute_path)
 
     def set_extra_headers(self, path):
         self.set_header(

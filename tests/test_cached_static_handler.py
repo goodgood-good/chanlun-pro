@@ -77,3 +77,36 @@ class CachedStaticHandlerTest(AsyncHTTPTestCase):
     def test_404_for_missing_file(self):
         resp = self.fetch("/nope.js", method="GET")
         assert resp.code == 404
+
+    def test_etag_asymmetry_awareness(self):
+        """Document the ETag behaviour between plain and gzip variants.
+
+        Tornado's get_version() classmethod derives the ETag from the *relative*
+        path (e.g. "lib.js"), not from the absolute path we swap in
+        validate_absolute_path.  As a result both variants share the same ETag in
+        current Tornado versions.  This is RFC-compliant because the Vary:
+        Accept-Encoding response header tells caches to treat them as distinct
+        representations — a shared ETag is legal when Vary is present.
+
+        This test locks in the *observed* contract: both requests succeed and the
+        gzip variant carries Vary: Accept-Encoding.  If a future Tornado version
+        starts computing ETags per-file (making them differ), update the assertion
+        below to assert plain_etag != gz_etag.
+        """
+        plain = self.fetch("/lib.js", method="GET")
+        gz = self.fetch(
+            "/lib.js",
+            method="GET",
+            headers={"Accept-Encoding": "gzip"},
+            decompress_response=False,
+        )
+        assert plain.code == 200 and gz.code == 200
+        # The gzip variant must advertise Vary so that shared-ETag caches are safe.
+        assert "Accept-Encoding" in gz.headers.get("Vary", "")
+        # ETags may be present or absent depending on Tornado version; when
+        # present they are currently identical (ETag keyed on relative path).
+        plain_etag = plain.headers.get("Etag")
+        gz_etag = gz.headers.get("Etag")
+        if plain_etag and gz_etag:
+            # Currently equal; update to != if Tornado switches to per-file ETags.
+            assert plain_etag == gz_etag
