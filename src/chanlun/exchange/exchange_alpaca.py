@@ -194,12 +194,21 @@ class ExchangeAlpaca(Exchange):
 
     def ticks(self, codes: List[str]) -> Dict[str, Tick]:
         """
-        获取行情Tick数据
+        获取行情Tick数据（IEX feed，非交易时段返回最近一笔）
         """
         code_ticks = {}
-        req = StockSnapshotRequest(symbol_or_symbols=codes, feed=DataFeed.IEX)
+        # chanlun 项目美股 symbol 形态是 "{TICKER}.US"，alpaca 仅接受裸 ticker；
+        # 这里维护双向映射：发请求用裸 ticker，回填字典 key 用外部 code 形态。
+        alpaca_to_orig = {}
+        alpaca_codes = []
+        for c in codes:
+            ac = c[:-3].upper() if c.upper().endswith(".US") else c.upper()
+            alpaca_codes.append(ac)
+            alpaca_to_orig[ac] = c
+        req = StockSnapshotRequest(symbol_or_symbols=alpaca_codes, feed=DataFeed.IEX)
         res = self.client.get_stock_snapshot(req)
-        for _c, _t in res.items():
+        for _ac, _t in res.items():
+            _c = alpaca_to_orig.get(_ac, _ac)
             code_ticks[_c] = Tick(
                 code=_c,
                 last=_t.latest_trade.price,
