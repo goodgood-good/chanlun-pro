@@ -1,30 +1,23 @@
-// 板块概念 JS 封装：两层"搜索 + 分页 table"模式
-// 上层：板块（行业/概念）选择；下层：板块成员股票
-// 搜索均为前端子串过滤，不调后端。后端仅 /a/bkgn_list 与 /a/bkgn_codes
+// 板块概念面板：两层"搜索 + 分页 table"模式（A 股专用）
+// 搜索为前端子串过滤；后端仅 GET /a/bkgn_list 与 POST /a/bkgn_codes
 var BKGN = (function () {
-  // ---- 状态 ----
-  var allBkgnList = [];         // 板块全量缓存（首次 GET /a/bkgn_list 后永驻）
+  var allBkgnList = [];         // 板块全量缓存（首次拉取后永驻）
   var stocksCache = new Map();  // 成员股票按板块缓存：key="hy|白酒"
-  var currentBkgnKey = null;    // 当前选中板块的 key（用于翻页后恢复高亮）
-  var currentStockData = [];    // 下层当前完整数据（搜索过滤的源）
+  var currentBkgnKey = null;    // 用于翻页 / 搜索 reload 后恢复高亮
+  var currentStockData = [];    // 下层完整数据，前端过滤的源
   var bkgnRowClickBound = false;
   var stockRowClickBound = false;
   var searchHandlersBound = false;
   var SEARCH_DEBOUNCE_MS = 200;
-  var bkgnSearchTimer = null;
-  var stockSearchTimer = null;
   var TABLE_HEIGHT = 280;
 
-  // ---- 入口 ----
   function init_bkgn_opts() {
     bind_search_handlers();
     fetch_bkgn_list();
   }
 
-  // ---- 板块层 ----
   function fetch_bkgn_list() {
     if (allBkgnList.length > 0) {
-      // 二次进入：直接复用缓存
       render_bkgn_table(allBkgnList);
       return;
     }
@@ -49,9 +42,7 @@ var BKGN = (function () {
     layui.table.render({
       elem: "#bkgn_table",
       data: tableData,
-      cols: [[
-        { field: "bkgn_name", title: "板块名" }
-      ]],
+      cols: [[{ field: "bkgn_name", title: "板块名" }]],
       page: true,
       limit: 20,
       skin: "row",
@@ -76,7 +67,6 @@ var BKGN = (function () {
   }
 
   function restore_bkgn_highlight() {
-    // 翻页或搜索 reload 后，依据 currentBkgnKey 恢复行高亮
     var cache = layui.table.cache && layui.table.cache.bkgn_table;
     if (!cache) return;
     for (var i = 0; i < cache.length; i++) {
@@ -87,7 +77,6 @@ var BKGN = (function () {
     }
   }
 
-  // ---- 成员股票层 ----
   function load_bkgn_codes(type, code) {
     var key = type + "|" + code;
     if (stocksCache.has(key)) {
@@ -123,7 +112,7 @@ var BKGN = (function () {
 
   function render_bkgn_stock_table(stocks) {
     currentStockData = stocks_to_list(stocks);
-    $("#bkgn_stock_search").val(""); // 切换板块时清空下层搜索框
+    $("#bkgn_stock_search").val(""); // 切换板块时清空下层搜索
     do_render_stock_table(currentStockData);
   }
 
@@ -155,46 +144,26 @@ var BKGN = (function () {
     layui.table.setRowChecked("bkgn_stock_table", { index: obj.index });
   }
 
-  // ---- 搜索栏 ----
+  // 搜索框三件套：input(keyup 防抖 + Enter 即时)、查询按钮、重置按钮
+  function bind_search_box(input, btn, reset, doSearch) {
+    var timer = null;
+    $(input).on("keyup", function (e) {
+      var kw = $(this).val().trim();
+      clearTimeout(timer);
+      if (e.key === "Enter") {
+        doSearch(kw);
+      } else {
+        timer = setTimeout(function () { doSearch(kw); }, SEARCH_DEBOUNCE_MS);
+      }
+    });
+    $(btn).on("click", function () { doSearch($(input).val().trim()); });
+    $(reset).on("click", function () { $(input).val(""); doSearch(""); });
+  }
+
   function bind_search_handlers() {
     if (searchHandlersBound) return;
-
-    // 板块搜索
-    $("#bkgn_search").on("keyup", function (e) {
-      var kw = $(this).val().trim();
-      clearTimeout(bkgnSearchTimer);
-      if (e.key === "Enter") {
-        do_bkgn_search(kw);
-      } else {
-        bkgnSearchTimer = setTimeout(function () { do_bkgn_search(kw); }, SEARCH_DEBOUNCE_MS);
-      }
-    });
-    $("#bkgn_search_btn").on("click", function () {
-      do_bkgn_search($("#bkgn_search").val().trim());
-    });
-    $("#bkgn_reset_btn").on("click", function () {
-      $("#bkgn_search").val("");
-      do_bkgn_search("");
-    });
-
-    // 成员股票搜索
-    $("#bkgn_stock_search").on("keyup", function (e) {
-      var kw = $(this).val().trim();
-      clearTimeout(stockSearchTimer);
-      if (e.key === "Enter") {
-        do_stock_search(kw);
-      } else {
-        stockSearchTimer = setTimeout(function () { do_stock_search(kw); }, SEARCH_DEBOUNCE_MS);
-      }
-    });
-    $("#bkgn_stock_search_btn").on("click", function () {
-      do_stock_search($("#bkgn_stock_search").val().trim());
-    });
-    $("#bkgn_stock_reset_btn").on("click", function () {
-      $("#bkgn_stock_search").val("");
-      do_stock_search("");
-    });
-
+    bind_search_box("#bkgn_search", "#bkgn_search_btn", "#bkgn_reset_btn", do_bkgn_search);
+    bind_search_box("#bkgn_stock_search", "#bkgn_stock_search_btn", "#bkgn_stock_reset_btn", do_stock_search);
     searchHandlersBound = true;
   }
 
@@ -219,7 +188,5 @@ var BKGN = (function () {
     do_render_stock_table(filtered);
   }
 
-  return {
-    init_bkgn_opts: init_bkgn_opts,
-  };
+  return { init_bkgn_opts: init_bkgn_opts };
 })();
