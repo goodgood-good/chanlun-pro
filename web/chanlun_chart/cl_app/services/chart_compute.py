@@ -190,7 +190,7 @@ def _merge_chart_data(existing_data: dict, new_data: dict):
                     merged_values[bar_time] = val
         merged[key] = [merged_values.get(bar_time) for bar_time in all_times]
 
-    for key in ["fxs", "bis", "xds", "zsds", "bi_zss", "xd_zss", "zsd_zss", "bcs", "mmds"]:
+    for key in ["fxs", "bis", "xds", "bi_zss", "xd_zss", "bcs", "mmds"]:
         merged[key] = _merge_shape_lists(existing_data.get(key, []), new_data.get(key, []))
 
     return merged

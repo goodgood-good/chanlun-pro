@@ -111,7 +111,6 @@ class FileCacheDB(object):
             "fx_check_k_nums",
             "allow_bi_fx_strict",
             "xd_qj",
-            "zsd_qj",
             "xd_allow_bi_pohuai",
             "xd_allow_split_no_highlow",
             "xd_allow_split_zs_kz",

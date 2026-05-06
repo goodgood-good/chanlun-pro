@@ -356,7 +356,6 @@ def query_cl_chart_config(
         "allow_bi_fx_strict": "0",
         # 线段配置
         "xd_qj": Config.XD_QJ_DD.value,
-        "zsd_qj": Config.ZSD_QJ_DD.value,
         "xd_zs_max_lines_split": 11,
         "xd_allow_bi_pohuai": Config.XD_BI_POHUAI_YES.value,
         "xd_allow_split_no_highlow": "1",
@@ -402,20 +401,12 @@ def query_cl_chart_config(
         "chart_show_fx": "0",
         "chart_show_bi": "1",
         "chart_show_xd": "1",
-        "chart_show_zsd": "1",
-        "chart_show_qsd": "0",
         "chart_show_bi_zs": "1",
         "chart_show_xd_zs": "1",
-        "chart_show_zsd_zs": "0",
-        "chart_show_qsd_zs": "0",
         "chart_show_bi_mmd": "1",
         "chart_show_xd_mmd": "1",
-        "chart_show_zsd_mmd": "1",
-        "chart_show_qsd_mmd": "1",
         "chart_show_bi_bc": "1",
         "chart_show_xd_bc": "1",
-        "chart_show_zsd_bc": "1",
-        "chart_show_qsd_bc": "1",
         "chart_show_ma": "0",
         "chart_show_boll": "0",
         "chart_show_futu": "macd",
@@ -797,25 +788,6 @@ def cl_data_to_tv_chart(
                 }
             )
 
-    zsd_chart_data = []
-    if config["chart_show_zsd"] == "1":
-        for zsd in cd.get_zsds():
-            zsd_chart_data.append(
-                {
-                    "points": [
-                        {
-                            "time": fun.datetime_to_int(zsd.start.k.date),
-                            "price": zsd.start.val,
-                        },
-                        {
-                            "time": fun.datetime_to_int(zsd.end.k.date),
-                            "price": zsd.end.val,
-                        },
-                    ],
-                    "linestyle": "0" if zsd.is_done() else "1",
-                }
-            )
-
     bi_zs_chart_data = []
     if config["chart_show_bi_zs"] == "1":
         for zs_type in config["zs_bi_type"]:
@@ -856,19 +828,6 @@ def cl_data_to_tv_chart(
                     }
                 )
 
-    zsd_zs_chart_data = []
-    if config["chart_show_zsd_zs"] == "1":
-        for zs in cd.get_zsd_zss():
-            zsd_zs_chart_data.append(
-                {
-                    "points": [
-                        {"time": fun.datetime_to_int(zs.start.k.date), "price": zs.zg},
-                        {"time": fun.datetime_to_int(zs.end.k.date), "price": zs.zd},
-                    ],
-                    "linestyle": "0" if zs.done else "1",
-                }
-            )
-
     # 背驰信息
     bc_infos = {}
     # 买卖点信息
@@ -877,14 +836,11 @@ def cl_data_to_tv_chart(
     lines = {
         "bi": cd.get_bis(),
         "xd": cd.get_xds(),
-        "zsd": cd.get_zsds(),
     }
-    line_type_map = {"bi": "笔", "xd": "段", "zsd": "走", "qsd": "趋"}
+    line_type_map = {"bi": "笔", "xd": "段"}
     bc_type_map = {
         "bi": "BI",
         "xd": "XD",
-        "zsd": "ZSD",
-        "qsd": "QSD",
         "pz": "PZ",
         "qs": "QS",
     }
@@ -963,10 +919,8 @@ def cl_data_to_tv_chart(
     fx_data.sort(key=lambda v: v["points"][0]["time"], reverse=False)
     bi_chart_data.sort(key=lambda v: v["points"][0]["time"], reverse=False)
     xd_chart_data.sort(key=lambda v: v["points"][0]["time"], reverse=False)
-    zsd_chart_data.sort(key=lambda v: v["points"][0]["time"], reverse=False)
     bi_zs_chart_data.sort(key=lambda v: v["points"][0]["time"], reverse=False)
     xd_zs_chart_data.sort(key=lambda v: v["points"][0]["time"], reverse=False)
-    zsd_zs_chart_data.sort(key=lambda v: v["points"][0]["time"], reverse=False)
     bc_chart_data.sort(key=lambda v: v["points"]["time"], reverse=False)
     mmd_chart_data.sort(key=lambda v: v["points"]["time"], reverse=False)
     # 获取 MACD 数据
@@ -1015,10 +969,8 @@ def cl_data_to_tv_chart(
         "fxs": fx_data,
         "bis": bi_chart_data,
         "xds": xd_chart_data,
-        "zsds": zsd_chart_data,
         "bi_zss": bi_zs_chart_data,
         "xd_zss": xd_zs_chart_data,
-        "zsd_zss": zsd_zs_chart_data,
         "bcs": bc_chart_data,
         "mmds": mmd_chart_data,
     }

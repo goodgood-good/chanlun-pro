@@ -9,7 +9,7 @@
 // -----------------------------------------------------------------------
 
 // 默认的缠论显示项配置
-const CL_SHOW_DEFAULT = { fx: true, bi: true, xd: true, zsd: true, zs: true, bc: true, mmd: true };
+const CL_SHOW_DEFAULT = { fx: true, bi: true, xd: true, zs: true, bc: true, mmd: true };
 
 // 工具：按图表 id 读取/写入显示配置
 function loadClShowConfig(chartId) {
@@ -63,28 +63,28 @@ function saveClIndependentDrawings(chartId, val) {
 
 const CHART_CONFIG = {
     COLORS: {
-        DING: "#FA8072", DI: "#1E90FF", BI: "#708090", XD: "#00BFFF", ZSD: "#FFA710",
-        BI_ZSS: "#708090", XD_ZSS: "#00BFFF", ZSD_ZSS: "#FFA710",
+        DING: "#FA8072", DI: "#1E90FF", BI: "#708090", XD: "#00BFFF",
+        BI_ZSS: "#708090", XD_ZSS: "#00BFFF",
         BCS: "#D1D4DC", BC_TEXT: "#fccbcd",
         MMD_UP: "#FA8072", MMD_DOWN: "#1E90FF",
         AREA_POS: "#ef5350", AREA_NEG: "#26a69a",
     },
     LINE_STYLES: { SOLID: 0, DOTTED: 1, DASHED: 2 },
-    CHART_TYPES: ["fxs", "bis", "xds", "zsds", "bi_zss", "xd_zss", "zsd_zss", "bcs", "mmds"],
+    CHART_TYPES: ["fxs", "bis", "xds", "bi_zss", "xd_zss", "bcs", "mmds"],
 };
 
 const DEFAULT_COLORS = {
-    bis: CHART_CONFIG.COLORS.BI, xds: CHART_CONFIG.COLORS.XD, zsds: CHART_CONFIG.COLORS.ZSD,
-    bi_zss: CHART_CONFIG.COLORS.BI_ZSS, xd_zss: CHART_CONFIG.COLORS.XD_ZSS, zsd_zss: CHART_CONFIG.COLORS.ZSD_ZSS,
+    bis: CHART_CONFIG.COLORS.BI, xds: CHART_CONFIG.COLORS.XD,
+    bi_zss: CHART_CONFIG.COLORS.BI_ZSS, xd_zss: CHART_CONFIG.COLORS.XD_ZSS,
 };
 
 const DYNAMIC_CHART_COLORS = {
-    "1": { ...DEFAULT_COLORS, bis: "#DF8344", xds: "#9C27B0", xd_zss: "#4FADEA", zsds: "#4FADEA", bi_zss: "#FFFF55" },
-    "5": { ...DEFAULT_COLORS, bis: "#9C27B0", xds: "#4FADEA", xd_zss: "#EA3323", zsds: "#EA3323", bi_zss: "#4FADEA" },
-    "30": { ...DEFAULT_COLORS, bis: "#4FADEA", xds: "#EA3323", xd_zss: "#9FCE63", zsds: "#9FCE63", bi_zss: "#EA3323" },
-    "1D": { ...DEFAULT_COLORS, bis: "#EA3323", xds: "#9FCE63", xd_zss: "#4274B1", zsds: "#4274B1", bi_zss: "#9FCE63" },
-    "1W": { ...DEFAULT_COLORS, bis: "#9FCE63", xds: "#4274B1", xd_zss: "#C638DD", zsds: "#C638DD", bi_zss: "#4274B1" },
-    "1M": { ...DEFAULT_COLORS, bis: "#4274B1", xds: "#C638DD", xd_zss: "#5E813F", zsds: "#5E813F", bi_zss: "#C638DD" },
+    "1": { ...DEFAULT_COLORS, bis: "#DF8344", xds: "#9C27B0", xd_zss: "#4FADEA", bi_zss: "#FFFF55" },
+    "5": { ...DEFAULT_COLORS, bis: "#9C27B0", xds: "#4FADEA", xd_zss: "#EA3323", bi_zss: "#4FADEA" },
+    "30": { ...DEFAULT_COLORS, bis: "#4FADEA", xds: "#EA3323", xd_zss: "#9FCE63", bi_zss: "#EA3323" },
+    "1D": { ...DEFAULT_COLORS, bis: "#EA3323", xds: "#9FCE63", xd_zss: "#4274B1", bi_zss: "#9FCE63" },
+    "1W": { ...DEFAULT_COLORS, bis: "#9FCE63", xds: "#4274B1", xd_zss: "#C638DD", bi_zss: "#4274B1" },
+    "1M": { ...DEFAULT_COLORS, bis: "#4274B1", xds: "#C638DD", xd_zss: "#5E813F", bi_zss: "#C638DD" },
 };
 
 function getDynamicColor(interval, elementType) {
@@ -690,7 +690,6 @@ class ChartManager {
                         <label style="display:block; cursor:pointer;"><input type="checkbox" id="${cbId('fx')}" ${cfg.fx ? 'checked' : ''} style="margin-right: 8px; vertical-align: middle;"> 分型</label>
                         <label style="display:block; cursor:pointer;"><input type="checkbox" id="${cbId('bi')}" ${cfg.bi ? 'checked' : ''} style="margin-right: 8px; vertical-align: middle;"> 笔</label>
                         <label style="display:block; cursor:pointer;"><input type="checkbox" id="${cbId('xd')}" ${cfg.xd ? 'checked' : ''} style="margin-right: 8px; vertical-align: middle;"> 线段</label>
-                        <label style="display:block; cursor:pointer;"><input type="checkbox" id="${cbId('zsd')}" ${cfg.zsd ? 'checked' : ''} style="margin-right: 8px; vertical-align: middle;"> 走势段</label>
                         <label style="display:block; cursor:pointer;"><input type="checkbox" id="${cbId('zs')}" ${cfg.zs ? 'checked' : ''} style="margin-right: 8px; vertical-align: middle;"> 中枢</label>
                         <label style="display:block; cursor:pointer;"><input type="checkbox" id="${cbId('bc')}" ${cfg.bc ? 'checked' : ''} style="margin-right: 8px; vertical-align: middle;"> 背驰</label>
                         <label style="display:block; cursor:pointer;"><input type="checkbox" id="${cbId('mmd')}" ${cfg.mmd ? 'checked' : ''} style="margin-right: 8px; vertical-align: middle;"> 买卖点</label>
@@ -738,7 +737,7 @@ class ChartManager {
                     left: (btnRect.left + window.scrollX) + 'px'
                 });
 
-                const keys = ['fx', 'bi', 'xd', 'zsd', 'zs', 'bc', 'mmd'];
+                const keys = ['fx', 'bi', 'xd', 'zs', 'bc', 'mmd'];
                 keys.forEach(k => {
                     $('#' + cbId(k)).change(function () {
                         self.cl_show_config[k] = $(this).is(':checked');
@@ -1055,10 +1054,8 @@ class ChartManager {
             fxs: barsResult.fxs?.length || 0,
             bis: barsResult.bis?.length || 0,
             xds: barsResult.xds?.length || 0,
-            zsds: barsResult.zsds?.length || 0,
             bi_zss: barsResult.bi_zss?.length || 0,
             xd_zss: barsResult.xd_zss?.length || 0,
-            zsd_zss: barsResult.zsd_zss?.length || 0,
             bcs: barsResult.bcs?.length || 0,
             mmds: barsResult.mmds?.length || 0,
         });
@@ -1078,10 +1075,8 @@ class ChartManager {
         this.reconcile('fxs', cfg.fx ? barsResult.fxs : [], from, symbolKey, (item) => safeCreate(ChartUtils.createFxShape(this.chart, item), 'fx'), false);
         this.reconcile('bis', cfg.bi ? barsResult.bis : [], from, symbolKey, (item) => safeCreate(ChartUtils.createLineShape(this.chart, item, { color: getDynamicColor(currentInterval, "bis"), linewidth: 2 }), 'bi'));
         this.reconcile('xds', cfg.xd ? barsResult.xds : [], from, symbolKey, (item) => safeCreate(ChartUtils.createLineShape(this.chart, item, { color: getDynamicColor(currentInterval, "xds"), linewidth: 2 }), 'xd'));
-        this.reconcile('zsds', cfg.zsd ? barsResult.zsds : [], from, symbolKey, (item) => safeCreate(ChartUtils.createLineShape(this.chart, item, { color: getDynamicColor(currentInterval, "zsds"), linewidth: 3 }), 'zsd'));
         this.reconcile('bi_zss', cfg.zs ? barsResult.bi_zss : [], from, symbolKey, (item) => safeCreate(ChartUtils.createZhongshuShape(this.chart, item, { color: getDynamicColor(currentInterval, "bi_zss"), linewidth: 1 }), 'bi_zs'));
         this.reconcile('xd_zss', cfg.zs ? barsResult.xd_zss : [], from, symbolKey, (item) => safeCreate(ChartUtils.createZhongshuShape(this.chart, item, { color: getDynamicColor(currentInterval, "xd_zss"), linewidth: 2 }), 'xd_zs'));
-        this.reconcile('zsd_zss', cfg.zs ? barsResult.zsd_zss : [], from, symbolKey, (item) => safeCreate(ChartUtils.createZhongshuShape(this.chart, item, { color: getDynamicColor(currentInterval, "zsd_zss"), linewidth: 2 }), 'zsd_zs'));
         this.reconcile('bcs', cfg.bc ? barsResult.bcs : [], from, symbolKey, (item) => safeCreate(ChartUtils.createBcShape(this.chart, item), 'bc'), false);
         this.reconcile('mmds', cfg.mmd ? barsResult.mmds : [], from, symbolKey, (item) => safeCreate(ChartUtils.createMmdShape(this.chart, item), 'mmd'), false);
     }
@@ -1132,7 +1127,7 @@ class ChartManager {
         const lastBarSec = (chartData.barsResult.bars?.[chartData.barsResult.bars.length - 1]?.time || 0) / 1000;
         console.log(`[CHANLUN-TIMING] @${performance.now().toFixed(0)}ms draw_chanlun executing interval=${symbolInterval.interval}`);
         console.log(`[CHANLUN-TIMING]   from=${chartData.from} (visibleRange.from), barsRange=[${firstBarSec.toFixed(0)}, ${lastBarSec.toFixed(0)}], visibleRange=[${vr?.from?.toFixed(0)}, ${vr?.to?.toFixed(0)}]`);
-        console.log(`[CHANLUN-TIMING]   barsResult: bars=${chartData.barsResult.bars?.length || 0} fxs=${chartData.barsResult.fxs?.length || 0} bis=${chartData.barsResult.bis?.length || 0} xds=${chartData.barsResult.xds?.length || 0} zsds=${chartData.barsResult.zsds?.length || 0} bi_zss=${chartData.barsResult.bi_zss?.length || 0} mmds=${chartData.barsResult.mmds?.length || 0}`);
+        console.log(`[CHANLUN-TIMING]   barsResult: bars=${chartData.barsResult.bars?.length || 0} fxs=${chartData.barsResult.fxs?.length || 0} bis=${chartData.barsResult.bis?.length || 0} xds=${chartData.barsResult.xds?.length || 0} bi_zss=${chartData.barsResult.bi_zss?.length || 0} mmds=${chartData.barsResult.mmds?.length || 0}`);
 
         // 统计 from 过滤效果（看到底过滤掉了多少）
         const bisInside = (chartData.barsResult.bis || []).filter(b => (b.points?.[0]?.time ?? 0) >= chartData.from).length;

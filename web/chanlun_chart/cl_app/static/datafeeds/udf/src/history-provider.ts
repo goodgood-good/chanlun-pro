@@ -43,10 +43,8 @@ interface HistoryFullDataResponse extends UdfOkResponse {
   fxs: TextPoint[];
   bis: LineSegment[];
   xds: LineSegment[];
-  zsds: LineSegment[];
   bi_zss: LineSegment[];
   xd_zss: LineSegment[];
-  zsd_zss: LineSegment[];
   bcs: TextPoint[];
   mmds: TextPoint[];
   update: boolean;
@@ -101,10 +99,8 @@ export interface GetBarsResult {
   fxs: TextPoint[];
   bis: LineSegment[];
   xds: LineSegment[];
-  zsds: LineSegment[];
   bi_zss: LineSegment[];
   xd_zss: LineSegment[];
-  zsd_zss: LineSegment[];
   bcs: TextPoint[];
   mmds: TextPoint[];
   chart_color?: Map<string, string>;
@@ -384,10 +380,8 @@ export class HistoryProvider {
           fxs: (response as HistoryFullDataResponse).fxs,
           bis: (response as HistoryFullDataResponse).bis,
           xds: (response as HistoryFullDataResponse).xds,
-          zsds: (response as HistoryFullDataResponse).zsds,
           bi_zss: (response as HistoryFullDataResponse).bi_zss,
           xd_zss: (response as HistoryFullDataResponse).xd_zss,
-          zsd_zss: (response as HistoryFullDataResponse).zsd_zss,
           bcs: (response as HistoryFullDataResponse).bcs,
           mmds: (response as HistoryFullDataResponse).mmds,
           chart_color: (response as HistoryFullDataResponse).chart_color,
@@ -437,7 +431,7 @@ export class HistoryProvider {
           );
         };
 
-        // 处理LineSegment类型数据（bis, xds, zsds, bi_zss, xd_zss, zsd_zss）
+        // 处理LineSegment类型数据（bis, xds, bi_zss, xd_zss）
         const updateLineSegments = (
           existingSegments: LineSegment[],
           newSegments: LineSegment[]
@@ -489,10 +483,6 @@ export class HistoryProvider {
           obj_res.xds,
           (response as HistoryFullDataResponse).xds
         );
-        obj_res.zsds = updateLineSegments(
-          obj_res.zsds,
-          (response as HistoryFullDataResponse).zsds
-        );
         obj_res.bi_zss = updateLineSegments(
           obj_res.bi_zss,
           (response as HistoryFullDataResponse).bi_zss
@@ -500,10 +490,6 @@ export class HistoryProvider {
         obj_res.xd_zss = updateLineSegments(
           obj_res.xd_zss,
           (response as HistoryFullDataResponse).xd_zss
-        );
-        obj_res.zsd_zss = updateLineSegments(
-          obj_res.zsd_zss,
-          (response as HistoryFullDataResponse).zsd_zss
         );
         obj_res.bcs = updateTextPoints(
           obj_res.bcs,
@@ -543,10 +529,8 @@ export class HistoryProvider {
       fxs: (response as HistoryFullDataResponse).fxs,
       bis: (response as HistoryFullDataResponse).bis,
       xds: (response as HistoryFullDataResponse).xds,
-      zsds: (response as HistoryFullDataResponse).zsds,
       bi_zss: (response as HistoryFullDataResponse).bi_zss,
       xd_zss: (response as HistoryFullDataResponse).xd_zss,
-      zsd_zss: (response as HistoryFullDataResponse).zsd_zss,
       bcs: (response as HistoryFullDataResponse).bcs,
       mmds: (response as HistoryFullDataResponse).mmds,
       chart_color: (response as HistoryFullDataResponse).chart_color,

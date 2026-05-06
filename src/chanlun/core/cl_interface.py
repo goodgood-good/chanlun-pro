@@ -62,12 +62,9 @@ class Config(Enum):
     XD_BI_POHUAI_YES = "yes"  # 线段支持笔破坏
     XD_BI_POHUAI_YES_QK = "yes_qk"  # 线段支持笔破坏（笔内必须有缺口）
 
-    # 走势段配置项
-    ZSD_BZH_NO = "zsd_bzh_no"  # TODO 移除配置。走势段不进行标准化
-    ZSD_BZH_YES = "zsd_bzh_yes"  # TODO 移除配置。走势段进行标准化
-    ZSD_QJ_DD = "zsd_qj_dd"  # 走势段区间，使用线段的顶底点作为区间
-    ZSD_QJ_CK = "zsd_qj_ck"  # 走势段区间，使用线段中缠论K线的最高最低作为区间
-    ZSD_QJ_K = "zsd_qj_k"  # 走势段区间，使用线段中原始K线的最高最低作为区间
+    # 线段标准化配置项（xd 复用，原 ZSD_BZH_*）
+    XD_BZH_NO = "xd_bzh_no"  # 线段不进行标准化
+    XD_BZH_YES = "xd_bzh_yes"  # 线段进行标准化
 
     # 中枢配置项
     ZS_TYPE_BZ = "zs_type_bz"  # 计算的中枢类型，标准中枢，中枢维持的方法
@@ -521,7 +518,7 @@ class ZS:
             line_num: int = 0,
             level: Level = Level.M1,
     ):
-        self.zs_type = zs_type  # 'bi' 笔中枢, 'xd' 线段中枢, 'zsd' 走势段中枢
+        self.zs_type = zs_type  # 'bi' 笔中枢, 'xd' 线段中枢
         self.start = start
         self.end = end
         self.lines: List[LINE] = []  # 构成中枢的线段
@@ -741,7 +738,7 @@ class BC:
         bc: bool,
     ):
         self.type: str = (
-            _type  # 背驰类型 （bi 笔背驰 xd 线段背驰 zsd 走势段背驰 pz 盘整背驰 qs 趋势背驰）
+            _type  # 背驰类型 （bi 笔背驰 xd 线段背驰 pz 盘整背驰 qs 趋势背驰）
         )
         self.zs: Union[ZS, None] = zs  # 背驰对应的中枢
         self.compare_line: LINE = (
@@ -1583,20 +1580,6 @@ class ICL(metaclass=ABCMeta):
         pass
 
     @abstractmethod
-    def get_zsds(self) -> List[XD]:
-        """
-        返回计算缠论走势段列表
-        """
-        pass
-
-    @abstractmethod
-    def get_qsds(self) -> List[XD]:
-        """
-        返回计算缠论趋势段列表
-        """
-        pass
-
-    @abstractmethod
     def get_bi_zss(self, zs_type: str = None) -> List[ZS]:
         """
         返回计算缠论笔中枢列表
@@ -1607,20 +1590,6 @@ class ICL(metaclass=ABCMeta):
     def get_xd_zss(self, zs_type: str = None) -> List[ZS]:
         """
         返回计算缠论线段中枢（走势中枢）
-        """
-        pass
-
-    @abstractmethod
-    def get_zsd_zss(self) -> List[ZS]:
-        """
-        返回走势段中枢
-        """
-        pass
-
-    @abstractmethod
-    def get_qsd_zss(self) -> List[ZS]:
-        """
-        返回趋势段中枢
         """
         pass
 
