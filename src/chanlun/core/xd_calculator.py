@@ -225,6 +225,42 @@ class XdCalculator:
 
     # ----------------------------------------------------------
     def _find_start(self, all_bis: List[BI]) -> int:
+        """寻找首段起点。
+
+        优先策略（关键笔判定，对齐旧 segment.py 行为）：
+          扫描 bi[i]，要求 bi[i].start/end 同时是 (bi[i], bi[i+2], bi[i+4]) 中的
+          方向极值——up 笔取最低、down 笔取最高，并且 bi[i] 与 bi[i+2] 有重叠。
+          满足即视作"关键笔"，第一段从此起步。
+          这样能保证段起点恰好是该方向的局部极值，避免出现 bi[i].start 被段内
+          某根反向笔的端点击穿（如 bi[1].end < bi[0].start）造成 xd.start.val 与
+          xd.low/high 语义不一致的退化首段。
+
+        回退策略：扫不到关键笔时退回为旧逻辑——只找第一对 (bi[i], bi[i+2]) 重叠
+          的位置。再失败则返回 0，由主循环用 pos+=1 兜底推进。
+        """
+        # 路径 1：关键笔扫描（需要 i+4 存在，即至少 5 笔）
+        for i in range(len(all_bis) - 4):
+            bi_i = all_bis[i]
+            bi_i2 = all_bis[i + 2]
+            bi_i4 = all_bis[i + 4]
+            if bi_i.type == 'up':
+                is_extreme = (
+                    bi_i.start.val < bi_i2.start.val
+                    and bi_i.start.val < bi_i4.start.val
+                    and bi_i.end.val < bi_i2.end.val
+                    and bi_i.end.val < bi_i4.end.val
+                )
+            else:  # down
+                is_extreme = (
+                    bi_i.start.val > bi_i2.start.val
+                    and bi_i.start.val > bi_i4.start.val
+                    and bi_i.end.val > bi_i2.end.val
+                    and bi_i.end.val > bi_i4.end.val
+                )
+            if is_extreme and _overlap(bi_i, bi_i2):
+                return i
+
+        # 路径 2：回退到 overlap-only
         for i in range(len(all_bis) - 2):
             if _overlap(all_bis[i], all_bis[i + 2]):
                 return i
@@ -701,13 +737,21 @@ class XdCalculator:
           若主路径选出的极值笔位置导致 pending_bis < 3 根
           （典型场景：段第一根同向笔就是全段极值，后续震荡不再突破），
           则改用 candidates 中**最后一根**同向笔作为终点。
-          这保证了"只要 candidates 有 ≥3 根 done 笔，就一定输出未完成段"。
+          这保证了"只要 candidates 有 ≥3 根笔，就一定输出未完成段"。
 
         缠论依据：
           已完成段由 _try_end 严格判定终点；未完成段无完整反向特征序列可用，
           只能保守估计。极值优先体现"线段记录方向极值"，兜底体现"实盘需有持续反馈"。
+
+        ★ candidates 不再过滤 is_done()：
+          BiCalculator 始终把最后一根笔标 pending（end.done=False）。原先此处
+          只收 done 笔，会出现"反向段恰好 3 根（末根 pending）→ candidates 只剩 2"
+          的塌陷窗口（典型如 1min 高频段刚被破坏 + 反向第三笔正在画），导致
+          整段无未完成线段输出。pending 笔的 high/low 仍由 LINE.update_high_low
+          计算为有效价格，参与极值/兜底逻辑无副作用；这与旧 segment.py 把
+          pending_stroke 直接 append 到 pending_segment 的行为一致。
         """
-        candidates = [bi for bi in all_bis[start:] if bi.is_done()]
+        candidates = list(all_bis[start:])
         if len(candidates) < 3:
             return
 
