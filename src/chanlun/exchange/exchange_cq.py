@@ -119,16 +119,11 @@ def is_retryable_exception(exception):
     """
     判断异常是否需要重试
     """
-    # DIAGNOSTIC (probe #1)：每次 retry 决策都打日志，便于排查长桥连续拒绝模式
-    _diag_code = getattr(exception, 'code', None)
-    _diag_msg = getattr(exception, 'message', None) or str(exception)[:200]
-    LogUtil.warning(
-        f"[retry-decision] type={type(exception).__name__} code={_diag_code} msg={_diag_msg}"
-    )
     if isinstance(exception, OpenApiException):
         # 301600: out of minute kline begin date - 数据超限，不重试
         # 使用 getattr 避免 LSP 或版本差异导致属性不存在报错
-        if _diag_code == 301600:
+        code = getattr(exception, 'code', None)
+        if code == 301600:
             return False
     return True
 
@@ -512,20 +507,7 @@ class ExchangeChangQiao(Exchange):
                 if isinstance(e, OpenApiException) and err_code == 301600:
                     LogUtil.warning(f"Data limit reached (301600) for {code}, stopping segment.")
                 else:
-                    # DIAGNOSTIC (probe #1)：解包 RetryError 拿到底层 OpenApiException 真实信息
-                    _inner = e
-                    if hasattr(e, 'last_attempt'):
-                        try:
-                            _inner = e.last_attempt.exception() or e
-                        except Exception:
-                            pass
-                    LogUtil.error(
-                        f"API Retry failed segment={end_dt} code={code} period={period} "
-                        f"err_type={type(_inner).__name__} err_code={getattr(_inner, 'code', None)} "
-                        f"err_msg={getattr(_inner, 'message', None) or str(_inner)[:200]} "
-                        f"trace_id={getattr(_inner, 'trace_id', None)} "
-                        f"outer={type(e).__name__}"
-                    )
+                    LogUtil.error(f"API Retry failed for segment {end_dt}: {e}")
                 break
 
             if not candlesticks:
