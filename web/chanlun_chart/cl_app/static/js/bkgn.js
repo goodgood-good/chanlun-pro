@@ -43,12 +43,12 @@ var BKGN = (function () {
       elem: "#bkgn_table",
       data: tableData,
       cols: [[{ field: "bkgn_name", title: "板块名" }]],
-      page: true,
-      limit: 20,
+      page: false,
       skin: "row",
       even: true,
       height: TABLE_HEIGHT,
       done: function () {
+        $("#bkgn_total_tip").text("共 " + tableData.length + " 个板块");
         if (currentBkgnKey) restore_bkgn_highlight();
       },
     });
@@ -121,14 +121,25 @@ var BKGN = (function () {
       elem: "#bkgn_stock_table",
       data: data,
       cols: [[
-        { field: "code", title: "代码", width: "48%" },
+        {
+          field: "code",
+          title: "代码",
+          width: "48%",
+          templet: function (d) {
+            var market = (typeof Utils !== "undefined" && Utils.get_market) ? Utils.get_market() : "a";
+            var url = "/?market=" + encodeURIComponent(market) + "&code=" + encodeURIComponent(d.code);
+            return '<a class="symbol-code-link" href="' + url + '" target="_blank" rel="noopener">' + d.code + "</a>";
+          },
+        },
         { field: "name", title: "名称", width: "48%" },
       ]],
-      page: true,
-      limit: 20,
+      page: false,
       skin: "row",
       even: true,
       height: TABLE_HEIGHT,
+      done: function () {
+        $("#bkgn_stock_total_tip").text("共 " + data.length + " 个股票");
+      },
     });
     if (!stockRowClickBound) {
       layui.table.on("row(bkgn_stock_table)", on_stock_row_click);
