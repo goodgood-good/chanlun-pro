@@ -16,6 +16,9 @@ API：
 - ``get_cached_processed_stocks(exchange, allow_sync_fallback=False)``: 读取入口
 - ``_trigger_async_refresh(exchange)``: 单例化的异步刷新触发器
 """
+import json
+import os
+import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -32,6 +35,10 @@ from .chart_cache import cache_lock
 
 # 基础数据缓存（市场 → processed symbols list）
 stock_cache: TTLCache = TTLCache(maxsize=100, ttl=7200)
+
+# 落盘缓存格式版本：未来若 schema 变更（如新增字段、改 raw 为 processed），递增此值，
+# 旧文件会被忽略并被新版本覆盖，避免反序列化时 KeyError。
+_STOCKS_CACHE_VERSION = 1
 
 # 全部支持的市场（用于校验配置项）
 _ALL_PRELOAD_EXCHANGES = [
@@ -77,6 +84,129 @@ _PRELOAD_SLOW_WARN_SECONDS = 10
 # 正在异步刷新的市场集合，防止同一市场被并发触发多次刷新而堆积慢请求。
 _async_refresh_in_flight: set = set()
 _async_refresh_lock = threading.Lock()
+
+
+def _stocks_cache_dir() -> str:
+    """返回 stocks 落盘缓存目录，缺失则创建。
+
+    复用 ``config.get_data_path()`` 作为基础路径，与 chart 缓存等保持一致；
+    创建失败仅记 warning 并返回原路径——上层 _save 会再 try/except 一次。
+    """
+    base = config.get_data_path()
+    cache_dir = os.path.join(str(base), "cache", "symbols")
+    try:
+        os.makedirs(cache_dir, exist_ok=True)
+    except OSError as e:
+        LogUtil.warning(f"[stocks_cache] mkdir 失败 {cache_dir}: {e}")
+    return cache_dir
+
+
+def _stocks_cache_file(exchange: str) -> str:
+    return os.path.join(_stocks_cache_dir(), f"{exchange}.json")
+
+
+def _load_stocks_from_disk(exchange: str):
+    """从落盘文件读取 raw stocks 列表；任何错误返回 None，调用方走原路径。"""
+    path = _stocks_cache_file(exchange)
+    try:
+        if not os.path.isfile(path):
+            return None
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return None
+        if data.get("version") != _STOCKS_CACHE_VERSION:
+            LogUtil.info(
+                f"[stocks_cache] {path} version={data.get('version')!r} "
+                f"与当前 {_STOCKS_CACHE_VERSION} 不符，忽略"
+            )
+            return None
+        if data.get("market") != exchange:
+            LogUtil.warning(
+                f"[stocks_cache] {path} market={data.get('market')!r} "
+                f"与目标 {exchange!r} 不符，忽略"
+            )
+            return None
+        stocks = data.get("stocks")
+        if not isinstance(stocks, list) or not stocks:
+            return None
+        return stocks
+    except Exception as e:
+        LogUtil.warning(f"[stocks_cache] 读 {path} 失败: {e}")
+        return None
+
+
+def _save_stocks_to_disk(exchange: str, raw_stocks) -> None:
+    """原子写 raw stocks 到落盘文件。空列表跳过（避免覆盖已有的好缓存）。
+
+    只持久化 ``code`` / ``name`` 两个原始字段——``code_lower`` / ``pinyin_initials``
+    等 processed 字段会在恢复时由 ``_process_stock_list`` 重新计算，避免文件膨胀
+    和未来 processed schema 变更带来的兼容性坑。
+    """
+    if not raw_stocks:
+        return
+    path = _stocks_cache_file(exchange)
+    payload = {
+        "version": _STOCKS_CACHE_VERSION,
+        "market": exchange,
+        "updated_at": int(time.time()),
+        "count": len(raw_stocks),
+        "stocks": [
+            {"code": s.get("code", ""), "name": s.get("name", "")}
+            for s in raw_stocks
+        ],
+    }
+    tmp_path = None
+    try:
+        dir_ = os.path.dirname(path)
+        # delete=False：上下文退出时不删除，由我们自己 os.replace；异常分支才删。
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            suffix=".tmp",
+            dir=dir_,
+            delete=False,
+        ) as tf:
+            json.dump(payload, tf, ensure_ascii=False)
+            tmp_path = tf.name
+        os.replace(tmp_path, path)
+        tmp_path = None  # 已替换成功，无需清理
+    except Exception as e:
+        LogUtil.warning(f"[stocks_cache] 写 {path} 失败: {e}")
+        if tmp_path and os.path.isfile(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+
+
+def _warm_cache_from_disk() -> None:
+    """启动期同步从落盘文件恢复 stocks 缓存。
+
+    设计要点：
+    - 文件命中：当场把 processed 后的列表写入 ``stock_cache``，首次 ``/symbols/list``
+      或 ``/tv/search`` 直接命中，不再触发 28s 同步兜底；之后预加载线程仍会异步
+      跑一遍把数据刷新成最新。
+    - 文件缺失/损坏：静默跳过，回退到原有 preload + sync fallback 路径。
+    - 异常被吞掉：启动路径绝不能因为缓存损坏而 raise，宁可慢也不能挂。
+    """
+    if not PRELOAD_EXCHANGES:
+        return
+    for exchange in PRELOAD_EXCHANGES:
+        raw_stocks = _load_stocks_from_disk(exchange)
+        if not raw_stocks:
+            continue
+        try:
+            processed = _process_stock_list(raw_stocks)
+            with cache_lock:
+                # 防御：极端情况下 preload 已经先把缓存填了，则不覆盖；磁盘数据可能更陈旧。
+                if exchange not in stock_cache:
+                    stock_cache[exchange] = processed
+            LogUtil.info(
+                f"[stocks_cache] 从磁盘恢复 {exchange} stocks，共 {len(processed)} 条"
+            )
+        except Exception as e:
+            LogUtil.warning(f"[stocks_cache] 恢复 {exchange} 失败: {e}")
 
 
 def _safe_all_stocks(ex, exchange: str):
@@ -125,6 +255,9 @@ def _preload_single_exchange(exchange: str) -> None:
         processed_stocks = _process_stock_list(all_stocks)
         with cache_lock:
             stock_cache[exchange] = processed_stocks
+        # 写盘：让下次冷启动直接秒读文件，不再等 28s 通达信。
+        # 失败仅 warn 不影响主流程；空 all_stocks 会被 _save_stocks_to_disk 内部短路。
+        _save_stocks_to_disk(exchange, all_stocks)
         elapsed = time.time() - start_ts
         log_fn = LogUtil.warning if elapsed > _PRELOAD_SLOW_WARN_SECONDS else LogUtil.info
         log_fn(
@@ -171,7 +304,12 @@ def preload_symbols():
 
 
 def start_symbol_preload_thread():
-    """启动后台 symbol 预加载线程。线程为 daemon，不会阻塞进程退出，也不会阻塞调用方。"""
+    """启动后台 symbol 预加载线程。线程为 daemon，不会阻塞进程退出，也不会阻塞调用方。
+
+    在起线程前先 **同步** 从落盘文件恢复一次 stocks 缓存——文件命中时首请求秒返回，
+    后台线程仍然会跑一遍把缓存刷成最新。文件不存在时按原路径走，等预加载完成。
+    """
+    _warm_cache_from_disk()
     t = threading.Thread(target=preload_symbols, daemon=True, name="SymbolPreloadThread")
     t.start()
     return t
@@ -232,6 +370,8 @@ def get_cached_processed_stocks(exchange, allow_sync_fallback: bool = False):
         processed = _process_stock_list(all_stocks)
         with cache_lock:
             stock_cache[exchange] = processed
+        # 同步兜底成功后也写盘：下次冷启动可直接秒读，跟 preload 路径保持一致。
+        _save_stocks_to_disk(exchange, all_stocks)
         LogUtil.info(
             f"[get_cached_processed_stocks] {exchange} 同步兜底加载完成，共 {len(processed)} 条"
         )
