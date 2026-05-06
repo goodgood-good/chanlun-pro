@@ -86,6 +86,10 @@ class ExchangeAlpaca(Exchange):
     ) -> [pd.DataFrame, None]:
         if args is None:
             args = {}
+        # chanlun 项目美股 symbol 形态是 "{TICKER}.US"（如 "QQQ.US"），
+        # alpaca-py 仅接受裸 ticker（"QQQ"）；这里剥后缀后发请求，
+        # 但保存到结果 dict 时仍用外部传入的 code（保持下游 code 形态一致）。
+        alpaca_symbol = code[:-3].upper() if code.upper().endswith(".US") else code.upper()
         frequency_map = {
             "m": TimeFrame.Month,
             "w": TimeFrame.Week,
@@ -137,15 +141,17 @@ class ExchangeAlpaca(Exchange):
                 else:
                     start_date = fun.str_to_datetime(start_date)
             req = StockBarsRequest(
-                symbol_or_symbols=code.upper(),
+                symbol_or_symbols=alpaca_symbol,
                 timeframe=timeframe,
                 start=start_date,
                 end=end_date,
                 limit=5000,
             )
             bars = self.client.get_stock_bars(req)
+            # bars.data 是 dict[symbol -> List[Bar]]；alpaca 找不到 symbol 时 key 不存在
+            bar_list = bars.data.get(alpaca_symbol, []) if hasattr(bars, "data") else []
             klines = []
-            for _b in bars.data[code.upper()]:
+            for _b in bar_list:
                 klines.append(
                     {
                         "code": code,
@@ -160,7 +166,7 @@ class ExchangeAlpaca(Exchange):
             klines = pd.DataFrame(klines)
             return klines
         except Exception as e:
-            print(f"alpaca 获取行情异常 {code} Exception ：{str(e)}")
+            print(f"alpaca 获取行情异常 code={code} alpaca_symbol={alpaca_symbol} Exception ：{str(e)}")
         return None
 
     def stock_info(self, code: str) -> [Dict, None]:
