@@ -185,9 +185,73 @@
           </div>
           <div class="layui-collapse lay-accordion" lay-filter="collapse-opts">
             <div class="layui-colla-item">
+              {# 自选内容 #}
+              <div class="layui-colla-title" data-ca-title="自选组">自选组</div>
+              <div
+                class="layui-colla-content layui-show"
+                style="padding: 0; position: relative; height: 100%">
+                <form
+                  class="layui-form zixuan-form-bg"
+                  style="
+                    width: 100%;
+                    position: sticky;
+                    top: 0;
+                    z-index: 10;
+                    padding: 5px 0;
+                  ">
+                  <div class="layui-form-item">
+                    <div class="layui-inline">
+                      <div
+                        class="layui-input-inline layui-input-wrap"
+                        style="width: 60%; float: left">
+                        <label for="zixuan_groups">
+                          <select
+                            id="zixuan_groups"
+                            name="zixuan_groups"
+                            lay-filter="select_zx_group"></select>
+                        </label>
+                      </div>
+                      <div
+                        class="layui-form-mid"
+                        style="padding: 4px 0 !important; float: left">
+                        <button
+                          type="button"
+                          id="add_zixuan"
+                          class="layui-btn layui-btn-primary layui-border-red layui-btn-sm">
+                          <i class="layui-icon layui-icon-add-1"></i> 自选
+                        </button>
+                      </div>
+                      <div
+                        class="layui-form-mid"
+                        style="padding: 4px 0 !important; float: left">
+                        <button
+                          type="button"
+                          id="refresh_zixuan"
+                          class="layui-btn layui-btn-primary layui-border-red layui-btn-sm">
+                          <i class="layui-icon layui-icon-refresh"></i>
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </form>
+                <div
+                  style="
+                    overflow-y: auto;
+                    height: calc(100% - 50px);
+                    margin-top: 5px;
+                  ">
+                  <table
+                    class="layui-hide"
+                    id="table_zixuan_list"
+                    style="width: 100%"></table>
+                </div>
+                <hr class="layui-border-red" />
+              </div>
+            </div>
+            <div class="layui-colla-item">
               {# 标的列表：按市场浏览全部标的，点击代码列在新窗口打开图表 #}
               <div class="layui-colla-title" data-ca-title="标的列表">标的列表</div>
-              <div class="layui-colla-content layui-show" style="padding: 8px;">
+              <div class="layui-colla-content" style="padding: 8px;">
                 <form class="layui-form" onsubmit="return false;">
                   <div class="layui-form-item" style="margin-bottom: 6px;">
                     <div class="layui-input-block" style="margin-left: 0;">
@@ -267,70 +331,6 @@
               </div>
             </div>
             <div class="layui-colla-item">
-              {# 自选内容 #}
-              <div class="layui-colla-title" data-ca-title="自选组">自选组</div>
-              <div
-                class="layui-colla-content layui-show"
-                style="padding: 0; position: relative; height: 100%">
-                <form
-                  class="layui-form zixuan-form-bg"
-                  style="
-                    width: 100%;
-                    position: sticky;
-                    top: 0;
-                    z-index: 10;
-                    padding: 5px 0;
-                  ">
-                  <div class="layui-form-item">
-                    <div class="layui-inline">
-                      <div
-                        class="layui-input-inline layui-input-wrap"
-                        style="width: 60%; float: left">
-                        <label for="zixuan_groups">
-                          <select
-                            id="zixuan_groups"
-                            name="zixuan_groups"
-                            lay-filter="select_zx_group"></select>
-                        </label>
-                      </div>
-                      <div
-                        class="layui-form-mid"
-                        style="padding: 4px 0 !important; float: left">
-                        <button
-                          type="button"
-                          id="add_zixuan"
-                          class="layui-btn layui-btn-primary layui-border-red layui-btn-sm">
-                          <i class="layui-icon layui-icon-add-1"></i> 自选
-                        </button>
-                      </div>
-                      <div
-                        class="layui-form-mid"
-                        style="padding: 4px 0 !important; float: left">
-                        <button
-                          type="button"
-                          id="refresh_zixuan"
-                          class="layui-btn layui-btn-primary layui-border-red layui-btn-sm">
-                          <i class="layui-icon layui-icon-refresh"></i>
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-                </form>
-                <div
-                  style="
-                    overflow-y: auto;
-                    height: calc(100% - 50px);
-                    margin-top: 5px;
-                  ">
-                  <table
-                    class="layui-hide"
-                    id="table_zixuan_list"
-                    style="width: 100%"></table>
-                </div>
-                <hr class="layui-border-red" />
-              </div>
-            </div>
-            <div class="layui-colla-item">
               <div class="layui-colla-title" data-ca-title="监控提醒">
                 监控提醒
               </div>
@@ -363,22 +363,50 @@
                 板块概念
               </div>
               <div class="layui-colla-content" style="padding: 0">
-                <form
-                  class="layui-form"
-                  lay-filter="bkgn_form"
-                  style="padding: 10px 10px 0 10px">
-                  <div class="layui-form-item" style="margin-bottom: 5px">
-                    <div class="layui-input-inline" style="width: 100%">
-                      <div id="bkgn_xm_select"></div>
+                <!-- 上层：板块选择（搜索框 + 分页 table） -->
+                <div style="padding: 10px 10px 0 10px;">
+                  <div class="layui-form-item" style="margin-bottom: 6px;">
+                    <div class="layui-input-inline" style="width: 60%;">
+                      <input
+                        type="text"
+                        id="bkgn_search"
+                        class="layui-input"
+                        placeholder="搜索板块名（行业/概念）"
+                        autocomplete="off" />
                     </div>
+                    <button type="button" id="bkgn_search_btn"
+                      class="layui-btn layui-bg-red layui-btn-sm">查询</button>
+                    <button type="button" id="bkgn_reset_btn"
+                      class="layui-btn layui-btn-primary layui-btn-sm">重置</button>
                   </div>
-                </form>
-                <div style="padding: 10px">
                   <table
                     class="layui-hide"
                     id="bkgn_table"
                     lay-filter="bkgn_table"
-                    style="width: 100%; display: none"></table>
+                    style="width: 100%;"></table>
+                </div>
+                <hr style="margin: 8px 0;" />
+                <!-- 下层：板块成员股票（搜索框 + 分页 table） -->
+                <div style="padding: 0 10px 10px 10px;">
+                  <div class="layui-form-item" style="margin-bottom: 6px;">
+                    <div class="layui-input-inline" style="width: 60%;">
+                      <input
+                        type="text"
+                        id="bkgn_stock_search"
+                        class="layui-input"
+                        placeholder="搜索代码 / 名称"
+                        autocomplete="off" />
+                    </div>
+                    <button type="button" id="bkgn_stock_search_btn"
+                      class="layui-btn layui-bg-red layui-btn-sm">查询</button>
+                    <button type="button" id="bkgn_stock_reset_btn"
+                      class="layui-btn layui-btn-primary layui-btn-sm">重置</button>
+                  </div>
+                  <table
+                    class="layui-hide"
+                    id="bkgn_stock_table"
+                    lay-filter="bkgn_stock_table"
+                    style="width: 100%;"></table>
                 </div>
                 <hr class="layui-border-red" />
               </div>
