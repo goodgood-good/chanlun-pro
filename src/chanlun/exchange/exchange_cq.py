@@ -17,10 +17,12 @@ from longbridge.openapi import Config, QuoteContext, TradeContext, Market, Perio
 
 # Chanlun SDK imports
 from chanlun import fun
+from chanlun import config
 from chanlun.exchange import Exchange
 from chanlun.exchange.exchange import Tick
 from chanlun.fun import str_to_datetime
 from chanlun.tools.log_util import LogUtil
+from chanlun.exchange.lb_quota_tracker import LbQuotaTracker
 
 # 统一时区设置
 __tz = pytz.timezone("Asia/Shanghai")
@@ -464,10 +466,23 @@ class ExchangeChangQiao(Exchange):
            retry=retry_if_exception(is_retryable_exception))
     def _fetch_candlesticks_api(self, symbol, period, adjust_type, count, time_cursor, trade_sessions):
         """
-        带限流和重试的 API 调用
+        带限流和重试的 history kline API 调用。
+
+        前置短路：当月配额已耗尽且 symbol 不在本月已查过的集合里 → 抛 OpenApiException(301607)
+        让上层 _fetch_segment_data 走"已知失败"分支，避免无意义的 SDK 调用浪费 retry 预算。
         """
+        tracker = LbQuotaTracker.instance()
+        limit = getattr(config, "LB_QUOTA_MONTHLY_LIMIT", 0)
+        if tracker.is_exhausted(limit) and not tracker.has_symbol(symbol):
+            err = OpenApiException("history kline symbol count out of limit (preemptive)")
+            try:
+                err.code = 301607  # 模拟错误码方便上层识别
+            except Exception:
+                pass
+            raise err
+
         self.rate_limiter.wait()
-        return self._quote_ctx().history_candlesticks_by_offset(
+        result = self._quote_ctx().history_candlesticks_by_offset(
             symbol=symbol,
             period=period,
             adjust_type=adjust_type,
@@ -476,6 +491,9 @@ class ExchangeChangQiao(Exchange):
             time=time_cursor,
             trade_sessions=trade_sessions
         )
+        # 记录本次成功的 symbol 进入本月配额集合
+        tracker.add_symbol(symbol)
+        return result
 
     def _fetch_segment_data(self, code, period, adjust, end_dt, start_dt_limit):
         """
@@ -503,11 +521,31 @@ class ExchangeChangQiao(Exchange):
                 )
             except Exception as e:
                 # tenacity 重试失败或遇到不可重试异常
-                err_code = getattr(e, 'code', None)
-                if isinstance(e, OpenApiException) and err_code == 301600:
+                # 解包 RetryError 拿底层 OpenApiException 真实 code
+                inner = e
+                if hasattr(e, 'last_attempt'):
+                    try:
+                        inner = e.last_attempt.exception() or e
+                    except Exception:
+                        pass
+                err_code = getattr(inner, 'code', None)
+                if isinstance(inner, OpenApiException) and err_code == 301600:
                     LogUtil.warning(f"Data limit reached (301600) for {code}, stopping segment.")
+                elif isinstance(inner, OpenApiException) and err_code == 301607:
+                    # 月度 symbol 配额耗尽：标记 exhausted 让后续调用立刻短路
+                    LbQuotaTracker.instance().mark_exhausted()
+                    LogUtil.error(
+                        f"Monthly quota exhausted (301607) for {code}: "
+                        f"{getattr(inner, 'message', None) or str(inner)[:200]}. "
+                        f"考虑切到 alpaca: 设 config.US_HISTORY_KLINE_SOURCE = 'alpaca'"
+                    )
                 else:
-                    LogUtil.error(f"API Retry failed for segment {end_dt}: {e}")
+                    LogUtil.error(
+                        f"API Retry failed segment={end_dt} code={code} period={period} "
+                        f"err_type={type(inner).__name__} err_code={err_code} "
+                        f"err_msg={getattr(inner, 'message', None) or str(inner)[:200]} "
+                        f"outer={type(e).__name__}"
+                    )
                 break
 
             if not candlesticks:
