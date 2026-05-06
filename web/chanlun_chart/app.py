@@ -139,10 +139,20 @@ def main() -> None:
         # 如需扩容，请用反向代理 + 多端口部署，或先把缓存改造到 Redis。
         s.start(1)
 
-        if len(sys.argv) >= 2 and sys.argv[1] == "nobrowser":
-            pass
+        # B4: 默认不自动开浏览器，避免每次启动浏览器进程冷启动 5-10s。
+        # set CHANLUN_AUTO_OPEN=1 恢复旧行为；nobrowser 命令行参数继续兼容。
+        # WPF launcher 是 GUI 启动器、期望自动跳浏览器，保留它的旧行为。
+        url = "http://127.0.0.1:9900"
+        auto_open = os.environ.get("CHANLUN_AUTO_OPEN", "0").strip()
+        nobrowser_flag = len(sys.argv) >= 2 and sys.argv[1] == "nobrowser"
+        is_wpf = "wpf_launcher" in sys.argv
+        if not nobrowser_flag and (auto_open == "1" or is_wpf):
+            webbrowser.open(url)
         else:
-            webbrowser.open("http://127.0.0.1:9900")
+            LogUtil.info("")
+            LogUtil.info(f">>> Web 已启动，请在浏览器访问：{url}")
+            LogUtil.info('>>> 想恢复"启动后自动开浏览器"，set CHANLUN_AUTO_OPEN=1')
+            LogUtil.info("")
         IOLoop.instance().start()
 
     except Exception:
