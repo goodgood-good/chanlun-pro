@@ -596,6 +596,18 @@ class ChartManager {
         this.save_load_adapter = save_load_adapter;
 
         this.widget = window.tvWidget = new TradingView.widget({
+            // F1: loading_screen 让 widget 内部加载阶段显示 spinner 而非空白
+            loading_screen: (function () {
+                var isDark = false;
+                try {
+                    var t = JSON.parse(localStorage.tv_chart || '{}');
+                    isDark = (t.theme === 'dark');
+                } catch (e) {}
+                return {
+                    backgroundColor: isDark ? '#1e1e1e' : '#ffffff',
+                    foregroundColor: '#1e9fff',
+                };
+            })(),
             debug: false, autosize: true, fullscreen: false,
             container: "tv_chart_container_" + this.id,
             symbol: Utils.get_market() + ":" + Utils.get_code(),
@@ -782,6 +794,9 @@ class ChartManager {
 
         });
         this.widget.onChartReady(() => {
+            // F1: 移除骨架占位（首屏 widget 就绪后立即清掉）
+            var sk = document.getElementById('tv_charts_skeleton');
+            if (sk) sk.remove();
             this.chart = this.widget.activeChart();
             if (!this.chart) return;
             // 默认指标加载已移至 handleDataReady()，确保数据就绪后再创建

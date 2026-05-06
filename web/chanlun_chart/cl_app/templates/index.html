@@ -49,7 +49,17 @@
               height: 100%;
               display: flex;
               flex-direction: column;
-            "></div>
+            ">
+            <div
+              id="tv_charts_skeleton"
+              style="
+                display: flex; align-items: center; justify-content: center;
+                height: 100%; color: #888; font-size: 14px;
+                font-family: -apple-system, sans-serif;
+              ">
+              图表加载中...
+            </div>
+          </div>
         </div>
         {#
           可拖拽分隔条：通过 ChartMenuResize 模块控制
