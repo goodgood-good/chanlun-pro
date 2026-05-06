@@ -84,6 +84,22 @@ def main() -> None:
         start_symbol_preload_thread()
 
         LogUtil.info("启动成功")
+        # LB-6：长桥月度配额可观测 — 每次启动一眼看到当月用量、是否耗尽、US 历史源选择
+        try:
+            from chanlun.exchange.lb_quota_tracker import LbQuotaTracker
+            from chanlun import config as _cfg
+            _tracker = LbQuotaTracker.instance()
+            _used = _tracker.count()
+            _limit = getattr(_cfg, "LB_QUOTA_MONTHLY_LIMIT", 0)
+            _exhausted = _tracker.is_exhausted(_limit)
+            _src = getattr(_cfg, "US_HISTORY_KLINE_SOURCE", "longbridge")
+            LogUtil.info(
+                f"[lb_quota] 当月已用 {_used}/{_limit if _limit > 0 else '∞'} symbol，"
+                f"exhausted={_exhausted}，US_HISTORY_KLINE_SOURCE={_src}"
+            )
+        except Exception as _e:
+            # 配额横幅打印失败不应阻断主流程
+            LogUtil.warning(f"[lb_quota] 启动配额读取失败: {_e}")
         # ⚠️ 严禁改为 s.start(0) 或 s.start(N)（多进程模式）！
         # 当前架构所有缓存（tv.py 的 chart_data_cache / stock_cache / chart_calc_locks /
         # _history_req_locks，以及 file_db、QMT/CQ 的 singleton 实例字段）都是
