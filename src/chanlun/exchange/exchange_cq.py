@@ -120,13 +120,10 @@ def is_retryable_exception(exception):
     判断异常是否需要重试
     """
     if isinstance(exception, OpenApiException):
-        # 不可重试码（重试只会浪费 retry 预算，让其它 segment 排队更久）：
-        #   301600: out of minute kline begin date — 数据超限
-        #   301607: history kline symbol count out of limit — 同时活跃历史 K 线 symbol 数量超出账号订阅配额；
-        #           需通过外层 history_kline_mutex 串行化避免触发，retry 不能解决
+        # 301600: out of minute kline begin date - 数据超限，不重试
         # 使用 getattr 避免 LSP 或版本差异导致属性不存在报错
         code = getattr(exception, 'code', None)
-        if code in (301600, 301607):
+        if code == 301600:
             return False
     return True
 
@@ -177,12 +174,6 @@ class ExchangeChangQiao(Exchange):
         # 初始化限流器 (3 QPS)。长桥行情接口默认配额很紧张（约 10 QPS），
         # 这里保守用 3 QPS 留出突发余量，避免触发 301600。如确认账号配额更高可调大。
         self.rate_limiter = RateLimiter(calls=3, period=1.0)
-
-        # 历史 K 线全局串行锁：避免触发 301607 (history kline symbol count out of limit)。
-        # 长桥按账号订阅级别限制"同时活跃的历史 K 线 symbol 数量"（Nasdaq Basic 实测约为 1）；
-        # prewarm 4 周期 + 多 segment 并发同打 history_candlesticks_by_offset 会立刻撞墙。
-        # 全局 Lock 保证 history kline 调用永远串行，QQQ.US 首次冷加载多 ~2 秒，已预热 symbol 零影响。
-        self._history_kline_mutex = threading.Lock()
 
         # G8：进程退出时显式关闭线程池，避免长桥 SDK 的 quote/trade 网络上下文
         # 在 daemon 线程里被强行打断造成日志噪音/连接半关。
@@ -473,21 +464,18 @@ class ExchangeChangQiao(Exchange):
            retry=retry_if_exception(is_retryable_exception))
     def _fetch_candlesticks_api(self, symbol, period, adjust_type, count, time_cursor, trade_sessions):
         """
-        带限流和重试的 API 调用。
-        history_kline_mutex 保证全进程同时只有一个历史 K 线请求在飞，避免 301607。
-        tenacity 退避期间 mutex 已释放，其它 segment 可以排队进入。
+        带限流和重试的 API 调用
         """
-        with self._history_kline_mutex:
-            self.rate_limiter.wait()
-            return self._quote_ctx().history_candlesticks_by_offset(
-                symbol=symbol,
-                period=period,
-                adjust_type=adjust_type,
-                forward=False,  # 向前追溯
-                count=count,
-                time=time_cursor,
-                trade_sessions=trade_sessions
-            )
+        self.rate_limiter.wait()
+        return self._quote_ctx().history_candlesticks_by_offset(
+            symbol=symbol,
+            period=period,
+            adjust_type=adjust_type,
+            forward=False,  # 向前追溯
+            count=count,
+            time=time_cursor,
+            trade_sessions=trade_sessions
+        )
 
     def _fetch_segment_data(self, code, period, adjust, end_dt, start_dt_limit):
         """
@@ -515,30 +503,11 @@ class ExchangeChangQiao(Exchange):
                 )
             except Exception as e:
                 # tenacity 重试失败或遇到不可重试异常
-                # 解包 RetryError，使底层 OpenApiException 的 code/message 在两种路径都可见：
-                #   - 不可重试码（301600/301607）：tenacity 不包装，e 本身就是 OpenApiException
-                #   - 可重试码 retry 耗尽：e 是 RetryError，需要 last_attempt 取底层
-                inner = e
-                if hasattr(e, 'last_attempt'):
-                    try:
-                        inner = e.last_attempt.exception() or e
-                    except Exception:
-                        pass
-                err_code = getattr(inner, 'code', None)
-                if isinstance(inner, OpenApiException) and err_code in (301600, 301607):
-                    # 数据/配额触底，是正常停止信号而非异常
-                    LogUtil.warning(
-                        f"history kline stopped code={err_code} symbol={code} "
-                        f"msg={getattr(inner, 'message', None) or str(inner)[:200]}"
-                    )
+                err_code = getattr(e, 'code', None)
+                if isinstance(e, OpenApiException) and err_code == 301600:
+                    LogUtil.warning(f"Data limit reached (301600) for {code}, stopping segment.")
                 else:
-                    LogUtil.error(
-                        f"API Retry failed segment={end_dt} code={code} period={period} "
-                        f"err_type={type(inner).__name__} err_code={err_code} "
-                        f"err_msg={getattr(inner, 'message', None) or str(inner)[:200]} "
-                        f"trace_id={getattr(inner, 'trace_id', None)} "
-                        f"outer={type(e).__name__}"
-                    )
+                    LogUtil.error(f"API Retry failed for segment {end_dt}: {e}")
                 break
 
             if not candlesticks:
