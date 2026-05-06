@@ -609,6 +609,19 @@ class ExchangeChangQiao(Exchange):
 
         return segment_candles
 
+    def _should_use_alpaca(self, symbol: str) -> bool:
+        """美股 + config 配置 alpaca 时走 alpaca fallback。"""
+        if not isinstance(symbol, str) or not symbol.endswith(".US"):
+            return False
+        return getattr(config, "US_HISTORY_KLINE_SOURCE", "longbridge") == "alpaca"
+
+    def _get_alpaca(self):
+        """惰性拿到 ExchangeAlpaca 单例（避免启动时无意义触网）。"""
+        if not hasattr(self, "_alpaca_instance") or self._alpaca_instance is None:
+            from chanlun.exchange.exchange_alpaca import ExchangeAlpaca
+            self._alpaca_instance = ExchangeAlpaca()
+        return self._alpaca_instance
+
     @time_logger  # 开启耗时监控
     def klines(
             self,
@@ -621,6 +634,12 @@ class ExchangeChangQiao(Exchange):
         """
         获取 Kline 线 (并发优化版)
         """
+        # D-iii 路由：US 历史 K 线按 config.US_HISTORY_KLINE_SOURCE 选源
+        if self._should_use_alpaca(code):
+            return self._get_alpaca().klines(
+                code, frequency, start_date=start_date, end_date=end_date, args=args
+            )
+
         tz = pytz.timezone("Asia/Shanghai")
 
         # 长桥 API 需要 "<code>.<exchange>" 格式 (如 00700.HK / 600519.SH);
