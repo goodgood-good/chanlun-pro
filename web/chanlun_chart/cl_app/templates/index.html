@@ -577,8 +577,9 @@
   <script>
     // 右栏「标的列表」区块：按市场浏览全部标的，点击代码列在新窗口打开缠论图表。
     // 不依赖 layui.table，纯 jQuery + AJAX 渲染，避免折叠面板内表格高度计算问题。
-    // F2: SymbolsPanel.init() 已挪到下方 init_web() 之后用 requestIdleCallback 延后启动。
-    // 原入口：$(function () { layui.use(['form'], function () { ... SymbolsPanel.init(); ... }); });
+    // F2 (revised): 移除原外层 $(function () { ... }); 包装，让 layui.use(['form']) 直接异步加载
+    // form module，加载完成后调 SymbolsPanel.init()（见下方）。layui.use 本身已经异步，
+    // 不会和首屏 TV widget 抢同一帧的 JS 执行预算。
     layui.use(['form'], function () {
         var lform = layui.form;
 
@@ -1028,7 +1029,11 @@
           }
         };
 
-        // F2: SymbolsPanel.init() 推迟到主 widget 后 requestIdleCallback 中执行（见下方 __defer）
+        // F2 (revised): SymbolsPanel.init() 留在 layui form module ready 后立即调用。
+        // 之前 Task 9 把它搬到下方 __defer 里，但 var SymbolsPanel 是这个 callback 的
+        // 局部变量，defer 块的 typeof 检查永远 undefined，导致面板永远停在"加载中..."。
+        // layui.use 本身就是异步加载，已经不会阻塞首屏 widget，无需再延迟。
+        SymbolsPanel.init();
       });
   </script>
   <script>
@@ -1403,18 +1408,13 @@
       // F2: 关键路径——立即创建 TV widget
       init_web();
 
-      // F2: 非关键 UI 初始化推到主 widget 后续渲染窗口，避免抢首屏 HTTP worker
+      // F2 (revised): 把 interval_update_rates 推到主 widget 渲染后再启动定时刷新；
+      // SymbolsPanel.init() 已还原到上方 layui form callback 内部立即调用，因为
+      // var SymbolsPanel 在 callback 外不可见，原方案 defer 永远拿不到这个变量。
       var __defer = (window.requestIdleCallback
         ? function (cb) { window.requestIdleCallback(cb, { timeout: 1000 }); }
         : function (cb) { setTimeout(cb, 200); });
       __defer(function () {
-        try {
-          layui.use(function () {
-            if (typeof SymbolsPanel !== 'undefined') {
-              SymbolsPanel.init();
-            }
-          });
-        } catch (e) { console.warn('SymbolsPanel.init defer error', e); }
         try {
           interval_update_rates = setInterval(ZiXuan.stocks_update_rate(), 30000);
         } catch (e) { console.warn('stocks_update_rate defer error', e); }
