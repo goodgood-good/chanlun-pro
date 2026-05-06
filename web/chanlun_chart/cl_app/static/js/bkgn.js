@@ -5,6 +5,8 @@ var BKGN = (function () {
   var stocksCache = new Map();  // 成员股票按板块缓存：key="hy|白酒"
   var currentBkgnKey = null;    // 用于翻页 / 搜索 reload 后恢复高亮
   var currentStockData = [];    // 下层完整数据，前端过滤的源
+  var visibleStocks = [];       // 当前下层 table 渲染中的数据（搜索过滤后）
+  var currentStockIndex = -1;   // 键盘导航当前选中行（基于 visibleStocks）
   var bkgnRowClickBound = false;
   var stockRowClickBound = false;
   var searchHandlersBound = false;
@@ -117,6 +119,8 @@ var BKGN = (function () {
   }
 
   function do_render_stock_table(data) {
+    visibleStocks = data;
+    currentStockIndex = -1;
     layui.table.render({
       elem: "#bkgn_stock_table",
       data: data,
@@ -139,6 +143,7 @@ var BKGN = (function () {
       height: TABLE_HEIGHT,
       done: function () {
         $("#bkgn_stock_total_tip").text("共 " + data.length + " 个股票");
+        bind_stock_table_keyboard();
       },
     });
     if (!stockRowClickBound) {
@@ -148,11 +153,59 @@ var BKGN = (function () {
   }
 
   function on_stock_row_click(obj) {
+    currentStockIndex = obj.index;
     var data = obj.data;
     change_chart_ticker(Utils.get_market(), data.code);
     $("#ai_code").val(data.code);
     layui.table.setRowChecked("bkgn_stock_table", { index: "all", checked: false });
     layui.table.setRowChecked("bkgn_stock_table", { index: obj.index });
+    // 让 table 容器获得焦点，点完后可直接 ↑/↓ 继续浏览
+    $('.layui-table-view[lay-id="bkgn_stock_table"]').focus();
+  }
+
+  // 键盘导航：在 layui table 渲染出的容器上监听 ↑/↓/Home/End/Enter
+  // 切到目标行时立即调 change_chart_ticker，主图表跟着翻
+  function bind_stock_table_keyboard() {
+    var $view = $('.layui-table-view[lay-id="bkgn_stock_table"]');
+    if (!$view.length) return;
+    if (!$view.attr("tabindex")) $view.attr("tabindex", "-1");
+    $view.off("keydown.bkgn").on("keydown.bkgn", function (e) {
+      var n = visibleStocks.length;
+      if (!n) return;
+      var key = e.key || "";
+      if (key === "ArrowDown") {
+        e.preventDefault();
+        select_stock_index(currentStockIndex < 0 ? 0 : Math.min(currentStockIndex + 1, n - 1));
+      } else if (key === "ArrowUp") {
+        e.preventDefault();
+        select_stock_index(currentStockIndex <= 0 ? 0 : currentStockIndex - 1);
+      } else if (key === "Home") {
+        e.preventDefault();
+        select_stock_index(0);
+      } else if (key === "End") {
+        e.preventDefault();
+        select_stock_index(n - 1);
+      } else if (key === "Enter" && currentStockIndex >= 0) {
+        e.preventDefault();
+        var item = visibleStocks[currentStockIndex];
+        if (item) change_chart_ticker(Utils.get_market(), item.code);
+      }
+    });
+  }
+
+  function select_stock_index(idx) {
+    if (idx < 0 || idx >= visibleStocks.length) return;
+    if (idx === currentStockIndex) return;
+    currentStockIndex = idx;
+    var item = visibleStocks[idx];
+    layui.table.setRowChecked("bkgn_stock_table", { index: "all", checked: false });
+    layui.table.setRowChecked("bkgn_stock_table", { index: idx });
+    var $row = $('.layui-table-view[lay-id="bkgn_stock_table"] .layui-table-body tr[data-index="' + idx + '"]');
+    if ($row.length && $row[0].scrollIntoView) {
+      $row[0].scrollIntoView({ block: "nearest" });
+    }
+    change_chart_ticker(Utils.get_market(), item.code);
+    $("#ai_code").val(item.code);
   }
 
   // 搜索框三件套：input(keyup 防抖 + Enter 即时)、查询按钮、重置按钮
