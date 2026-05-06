@@ -14,9 +14,11 @@ import datetime
 import json
 import pathlib
 import threading
+import uuid
 from typing import Optional, Set
 
 from chanlun import config
+from chanlun.tools.log_util import LogUtil
 
 
 class LbQuotaTracker:
@@ -66,27 +68,36 @@ class LbQuotaTracker:
             if data.get("month") == self._month:
                 self._symbols = set(data.get("symbols", []))
                 self._exhausted = bool(data.get("exhausted", False))
-        except (OSError, ValueError, json.JSONDecodeError):
-            # 文件损坏 / 权限问题：从空集开始，不阻断
-            pass
+        except (OSError, ValueError, json.JSONDecodeError) as e:
+            # 文件损坏 / 权限问题：从空集开始，不阻断主流程；但要让用户能在日志里看到
+            LogUtil.warning(f"[lb_quota] load failed month={self._month} path={path}: {e}")
 
     def _save_to_disk(self) -> None:
+        """原子写：tmp + replace 避免半截 JSON 在 kill -9 / 断电时丢配额状态。
+
+        故意把 I/O 圈进调用方的 self._lock 内：月度仅 ~100 次写，
+        低频写场景下"强一致优先于读吞吐"，避免引入第二把 IO 锁带来的 TOCTOU。
+        """
         path = self._file_path()
+        payload = json.dumps(
+            {
+                "month": self._month,
+                "symbols": sorted(self._symbols),
+                "exhausted": self._exhausted,
+            },
+            ensure_ascii=False,
+        )
+        tmp = path.with_suffix(path.suffix + f".tmp.{uuid.uuid4().hex}")
         try:
-            path.write_text(
-                json.dumps(
-                    {
-                        "month": self._month,
-                        "symbols": sorted(self._symbols),
-                        "exhausted": self._exhausted,
-                    },
-                    ensure_ascii=False,
-                ),
-                encoding="utf-8",
-            )
-        except OSError:
-            # 落盘失败不阻断主流程，下次再写
-            pass
+            tmp.write_text(payload, encoding="utf-8")
+            tmp.replace(path)  # Windows 同卷原子；POSIX rename 也原子
+        except OSError as e:
+            LogUtil.warning(f"[lb_quota] save failed month={self._month}: {e}")
+            try:
+                if tmp.exists():
+                    tmp.unlink()
+            except OSError:
+                pass
 
     def _check_month_rollover(self) -> None:
         current = self._current_month_key()

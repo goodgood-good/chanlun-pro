@@ -1,9 +1,7 @@
 """LbQuotaTracker：月度 history kline symbol 配额追踪器单测。"""
 import datetime
 import json
-import os
 import pathlib
-from unittest.mock import patch
 
 import pytest
 
