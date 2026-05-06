@@ -1,0 +1,14 @@
+此目录存放从 ../bundles/ 移走的、项目用不到的 TradingView i18n 包。
+保留下来便于回滚（mv 回 bundles/ 即可）。
+
+裁剪原因（spec 见 docs/superpowers/specs/2026-05-07-startup-perf-design.md §7）：
+- charting_library 共 22 个 locale，每 locale 2 个文件（.938.*.js + .2578.*.js）
+- 每个 locale ~180KB，20 个 locale ≈ 3.6MB 静态资源
+- 项目只用 zh / en，其余的浏览器加载只是浪费
+
+升级 charting library 时（解压新版到 bundles/），需要重新执行裁剪：
+  cd web/chanlun_chart/cl_app/static/charting_library/bundles
+  for L in ar ca_ES de es fr he_IL hu_HU id_ID it ja ko ms_MY pl pt ru sv th tr vi zh_TW; do
+    git mv "$L".938.*.js ../bundles_unused/ 2>/dev/null || true
+    git mv "$L".2578.*.js ../bundles_unused/ 2>/dev/null || true
+  done
