@@ -365,11 +365,28 @@
               <div class="layui-colla-content" style="padding: 0">
                 <style>
                   .symbol-code-link { color: #1e9fff; cursor: pointer; font-weight: 500; }
-                  .bkgn-total-tip { margin-left: 8px; color: #888; font-size: 12px; }
+                  .bkgn-total-tip { color: #888; font-size: 12px; }
+                  .bkgn-layer-header {
+                    display: flex; align-items: center; justify-content: space-between;
+                    padding: 6px 10px; cursor: pointer; user-select: none;
+                    background: #f7f7f7; border-radius: 2px; font-size: 13px;
+                  }
+                  .bkgn-layer-header:hover { background: #efefef; }
+                  .bkgn-layer-header .caret { transition: transform 0.15s; }
+                  .bkgn-layer-header.is-collapsed .caret { transform: rotate(-90deg); }
+                  .bkgn-search-row { display: flex; gap: 4px; margin-bottom: 6px; }
+                  .bkgn-search-row .layui-input { flex: 1; }
+                  .bkgn-action-row {
+                    display: flex; align-items: center; gap: 6px; margin-bottom: 6px;
+                  }
                 </style>
-                <div style="padding: 10px 10px 0 10px;">
-                  <div class="layui-form-item" style="margin-bottom: 6px;">
-                    <div class="layui-input-inline" style="width: 50%;">
+                <div id="bkgn_layer" style="padding: 6px 10px 0 10px;">
+                  <div class="bkgn-layer-header" id="bkgn_layer_toggle">
+                    <span><i class="layui-icon layui-icon-triangle-d caret"></i> 选择板块</span>
+                    <span id="bkgn_total_tip" class="bkgn-total-tip"></span>
+                  </div>
+                  <div id="bkgn_layer_body" style="padding-top: 6px;">
+                    <div class="bkgn-search-row">
                       <input
                         type="text"
                         id="bkgn_search"
@@ -377,33 +394,38 @@
                         placeholder="代码 / 名称 / 拼音首字母"
                         autocomplete="off" />
                     </div>
-                    <button type="button" id="bkgn_search_btn"
-                      class="layui-btn layui-bg-red layui-btn-sm">
-                      <i class="layui-icon layui-icon-search"></i> 查询
-                    </button>
-                    <button type="button" id="bkgn_reset_btn"
-                      class="layui-btn layui-btn-primary layui-border-red layui-btn-sm">
-                      <i class="layui-icon layui-icon-refresh"></i> 重置
-                    </button>
-                    <span id="bkgn_total_tip" class="bkgn-total-tip"></span>
+                    <div class="bkgn-action-row">
+                      <button type="button" id="bkgn_search_btn"
+                        class="layui-btn layui-bg-red layui-btn-sm">
+                        <i class="layui-icon layui-icon-search"></i> 查询
+                      </button>
+                      <button type="button" id="bkgn_reset_btn"
+                        class="layui-btn layui-btn-primary layui-border-red layui-btn-sm">
+                        <i class="layui-icon layui-icon-refresh"></i> 重置
+                      </button>
+                    </div>
+                    <table
+                      class="layui-hide"
+                      id="bkgn_table"
+                      lay-filter="bkgn_table"
+                      style="width: 100%;"></table>
                   </div>
-                  <table
-                    class="layui-hide"
-                    id="bkgn_table"
-                    lay-filter="bkgn_table"
-                    style="width: 100%;"></table>
                 </div>
                 <hr style="margin: 8px 0;" />
                 <div style="padding: 0 10px 10px 10px;">
-                  <div class="layui-form-item" style="margin-bottom: 6px;">
-                    <div class="layui-input-inline" style="width: 50%;">
-                      <input
-                        type="text"
-                        id="bkgn_stock_search"
-                        class="layui-input"
-                        placeholder="代码 / 名称"
-                        autocomplete="off" />
-                    </div>
+                  <div class="bkgn-layer-header" style="cursor: default; background: transparent; padding: 0 0 6px 0;">
+                    <span>个股票</span>
+                    <span id="bkgn_stock_total_tip" class="bkgn-total-tip"></span>
+                  </div>
+                  <div class="bkgn-search-row">
+                    <input
+                      type="text"
+                      id="bkgn_stock_search"
+                      class="layui-input"
+                      placeholder="代码 / 名称"
+                      autocomplete="off" />
+                  </div>
+                  <div class="bkgn-action-row">
                     <button type="button" id="bkgn_stock_search_btn"
                       class="layui-btn layui-bg-red layui-btn-sm">
                       <i class="layui-icon layui-icon-search"></i> 查询
@@ -412,7 +434,6 @@
                       class="layui-btn layui-btn-primary layui-border-red layui-btn-sm">
                       <i class="layui-icon layui-icon-refresh"></i> 重置
                     </button>
-                    <span id="bkgn_stock_total_tip" class="bkgn-total-tip"></span>
                   </div>
                   <table
                     class="layui-hide"

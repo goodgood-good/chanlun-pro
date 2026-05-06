@@ -15,7 +15,16 @@ var BKGN = (function () {
 
   function init_bkgn_opts() {
     bind_search_handlers();
+    bind_layer_toggle();
     fetch_bkgn_list();
+  }
+
+  // 板块层标题点击折叠 / 展开 body
+  function bind_layer_toggle() {
+    $("#bkgn_layer_toggle").off("click.bkgn").on("click.bkgn", function () {
+      $(this).toggleClass("is-collapsed");
+      $("#bkgn_layer_body").slideToggle(120);
+    });
   }
 
   function fetch_bkgn_list() {
@@ -46,6 +55,7 @@ var BKGN = (function () {
       data: tableData,
       cols: [[{ field: "bkgn_name", title: "板块名" }]],
       page: false,
+      size: "sm",
       skin: "row",
       even: true,
       height: TABLE_HEIGHT,
@@ -138,6 +148,7 @@ var BKGN = (function () {
         { field: "name", title: "名称", width: "48%" },
       ]],
       page: false,
+      size: "sm",
       skin: "row",
       even: true,
       height: TABLE_HEIGHT,
