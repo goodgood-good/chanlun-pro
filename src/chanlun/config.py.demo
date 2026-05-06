@@ -207,3 +207,24 @@ def get_data_path():
     if data_path.is_dir() is False:
         data_path.mkdir(parents=True)
     return data_path
+
+
+# ===== 长桥（cq）月度配额防御配置 =====
+# 长桥按订阅级别限制每月可查询的不同 history kline symbol 数量：
+#   基础账户 100 / 10K HKD+ 400 / 800K HKD+ 2000 / 6M HKD+ 3000
+# 触发 301607 后到月初前任何"新"symbol 都拿不到 K 线。
+# 下面三项用于把烧配额行为收敛到可控范围。
+
+# 月度配额上限（按你的实际订阅级别填）。设为 0 表示不做预检查（仅在 301607 后被动收敛）。
+LB_QUOTA_MONTHLY_LIMIT = 100
+
+# 美股历史 K 线数据源：
+#   "longbridge" - 走长桥（默认；占用 LB_QUOTA_MONTHLY_LIMIT 配额）
+#   "alpaca"     - 走 alpaca，需配置 ALPACA_APIKEY/ALPACA_SECRET 且账号已开
+# 长桥实时报价不受影响，仍走 cq。
+US_HISTORY_KLINE_SOURCE = "longbridge"
+
+# 美股 prewarm 范围限制：
+#   True  - 仅预热自选股（zixuan 表中 market='us' 的所有股票），保护配额
+#   False - 全市场预热（旧行为，会很快烧光基础账户配额）
+US_PREWARM_ZIXUAN_ONLY = True
