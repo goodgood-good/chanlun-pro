@@ -67,6 +67,16 @@ UV 和 Conda 任选一个自己喜欢的就行
       
       uv venv --python=3.11 .venv
       uv sync
+      # 默认仅装核心依赖（不含市场专用 SDK）。按需启用扩展（多选用空格分隔）：
+      #   uv sync --extra us            # 美股 (alpaca / polygon / ib-insync)
+      #   uv sync --extra hk            # 港股 (futu)
+      #   uv sync --extra cn-extra      # A 股备用 (baostock)
+      #   uv sync --extra futures       # 期货 (tqsdk / openctp-ctp)
+      #   uv sync --extra ai            # AI 分析 (openai)
+      #   uv sync --extra notify        # 飞书通知 (lark-oapi)
+      #   uv sync --extra backtest      # 回测报告 (pyfolio)
+      #   uv sync --extra monitor       # 监控 (playwright)
+      #   uv sync --all-extras          # 一次装齐
 
       # 检查环境
       uv run check_env.py
@@ -81,11 +91,15 @@ UV 和 Conda 任选一个自己喜欢的就行
       # 切换到新创建的 chanlun 环境  
       conda activate chanlun
 
-      # PIP 安装项目依赖包
+      # 安装 Poetry，并使用项目的 pyproject.toml 安装依赖
       pip3 config set global.index-url https://mirrors.aliyun.com/pypi/simple/
+      pip3 install poetry
       pip3 install package/pytdx-1.72r2-py3-none-any.whl
       pip3 install package/ta_lib-0.4.25-cp311-cp311-win_amd64.whl
-      pip3 install -r requirements.txt
+      poetry install
+      # 默认仅装核心依赖。按需启用扩展（空格分隔多选）：
+      #   poetry install --extras "us hk futures"
+      #   poetry install --all-extras       # 一次装齐
 
       # 检查环境
       python check_env.py

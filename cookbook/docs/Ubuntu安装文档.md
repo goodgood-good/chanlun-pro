@@ -26,13 +26,14 @@
          # conda 安装相关的库会比较方便
          conda install -y -c conda-forge ta-lib
              
-         # PIP 安装项目依赖包
+         # 安装 Poetry，并使用项目的 pyproject.toml 安装依赖
          pip3 config set global.index-url https://mirrors.aliyun.com/pypi/simple/
-         pip3 install -r requirements.txt
-             
-         # 安装 pytdx 包
-         pip3 install wheel
+         pip3 install poetry wheel
          pip3 install package/pytdx-1.72r2-py3-none-any.whl
+         poetry install
+         # 默认仅装核心依赖。按需启用扩展（空格分隔多选）：
+         #   poetry install --extras "us hk futures"
+         #   poetry install --all-extras       # 一次装齐
 
 ### 3. 设置 `PYTHONPATH` 环境变量
 

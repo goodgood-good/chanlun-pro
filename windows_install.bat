@@ -1,36 +1,41 @@
 @echo off
 setlocal enabledelayedexpansion
 
-REM »ñÈ¡½Å±¾ËùÔÚÄ¿Â¼£¨ÏîÄ¿¸ùÄ¿Â¼£©
+REM ï¿½ï¿½È¡ï¿½Å±ï¿½ï¿½ï¿½ï¿½ï¿½Ä¿Â¼ï¿½ï¿½ï¿½ï¿½Ä¿ï¿½ï¿½Ä¿Â¼ï¿½ï¿½
 set "ROOT_DIR=%~dp0"
 cd /d "%ROOT_DIR%"
 
-REM ROOT_DIR µÄÖµ
+REM ROOT_DIR ï¿½ï¿½Öµ
 echo ROOT_DIR: %ROOT_DIR%
 
 echo 1. uv Ä¿Â¼
 set "UV_DIR=%ROOT_DIR%script\bin\uv.exe"
 echo UV_DIR: %UV_DIR%
 
-echo 2. ´´½¨ÐéÄâ»·¾³
+echo 2. ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½â»·ï¿½ï¿½
 %UV_DIR% python install 3.11
 %UV_DIR% venv --python=3.11 .venv
 %UV_DIR% sync
+REM Default install: core deps only. Optional extras (one or more):
+REM   us / hk / cn-extra / futures / ai / notify / backtest / monitor
+REM Examples:
+REM   %UV_DIR% sync --extra us --extra hk
+REM   %UV_DIR% sync --all-extras
 
-echo 3. ¼ì²éÅäÖÃÎÄ¼þ
+echo 3. ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ä¼ï¿½
 if not exist "%ROOT_DIR%src\chanlun\config.py" (
-    echo ´´½¨ÅäÖÃÎÄ¼þ...
+    echo ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ä¼ï¿½...
     copy "%ROOT_DIR%src\chanlun\config.py.demo" "%ROOT_DIR%src\chanlun\config.py" >nul
 )
 
-echo 4. ÉèÖÃ»·¾³±äÁ¿
+echo 4. ï¿½ï¿½ï¿½Ã»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 set "PYTHONPATH=%ROOT_DIR%src"
-echo ÉèÖÃPYTHONPATH: !PYTHONPATH!
+echo ï¿½ï¿½ï¿½ï¿½PYTHONPATH: !PYTHONPATH!
 
-echo 5. ÔËÐÐ»·¾³¼ì²é½Å±¾
+echo 5. ï¿½ï¿½ï¿½Ð»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Å±ï¿½
 if exist "%ROOT_DIR%check_env.py" (
     %UV_DIR% run "%ROOT_DIR%check_env.py"
 )
 
-echo »·¾³ÅäÖÃÍê³É£¡
+echo ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½É£ï¿½
 pause

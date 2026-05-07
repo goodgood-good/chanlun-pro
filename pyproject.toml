@@ -6,30 +6,20 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "akshare>=1.16.98",
-    "alpaca-py>=0.40.1",
     "apscheduler>=3.11.0",
-    "baostock>=0.8.9",
     "ccxt>=4.4.88",
     "chardet>=5.2.0",
     "dtaidistance>=2.3.13",
     "flask>=3.1.1",
     "flask-login>=0.6.3",
-    "futu-api>=9.2.5208",
-    "ib-insync>=0.9.86",
-    "lark-oapi>=1.4.17",
     "matplotlib>=3.10.3",
     "mytt>=2.9.3",
     "numpy==1.26.4",
-    "openai>=1.84.0",
-    "openctp-ctp>=6.7.11.0",
     "pandas==2.1.0",
     "pinyin>=0.4.0",
-    "playwright>=1.53.0",
-    "polygon-api-client>=1.14.6",
     "prettytable>=3.16.0",
     "pyarrow>=22.0.0",
     "pyecharts==2.0.8",
-    "pyfolio-reloaded>=0.9.9",
     "pymysql>=1.1.1",
     "pytdx",
     "pytest>=8.4.1",
@@ -42,7 +32,39 @@ dependencies = [
     "tenacity>=9.1.2",
     "tornado>=6.5.1",
     "tqdm>=4.67.1",
+]
+
+# 可选依赖：按需求场景分组安装（默认不装）
+#   poetry install --extras us / hk / cn-extra / futures / ai / notify / backtest / monitor
+#   poetry install --all-extras       # 一次装齐
+[project.optional-dependencies]
+us = [
+    "alpaca-py>=0.40.1",
+    "polygon-api-client>=1.14.6",
+    "ib-insync>=0.9.86",
+]
+hk = ["futu-api>=9.2.5208"]
+cn-extra = ["baostock>=0.8.9"]
+futures = [
     "tqsdk>=3.8.2",
+    "openctp-ctp>=6.7.11.0",
+]
+ai = ["openai>=1.84.0"]
+notify = ["lark-oapi>=1.4.17"]
+backtest = ["pyfolio-reloaded>=0.9.9"]
+monitor = ["playwright>=1.53.0"]
+all = [
+    "alpaca-py>=0.40.1",
+    "polygon-api-client>=1.14.6",
+    "ib-insync>=0.9.86",
+    "futu-api>=9.2.5208",
+    "baostock>=0.8.9",
+    "tqsdk>=3.8.2",
+    "openctp-ctp>=6.7.11.0",
+    "openai>=1.84.0",
+    "lark-oapi>=1.4.17",
+    "pyfolio-reloaded>=0.9.9",
+    "playwright>=1.53.0",
 ]
 
 [tool.poetry]

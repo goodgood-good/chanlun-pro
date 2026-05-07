@@ -268,9 +268,10 @@ reference = "aliyun"
 name = "alpaca-py"
 version = "0.43.4"
 description = "The Official Python SDK for Alpaca APIs"
-optional = false
+optional = true
 python-versions = ">=3.8.0,<4.0.0"
 groups = ["main"]
+markers = "extra == \"us\" or extra == \"all\""
 files = [
     {file = "alpaca_py-0.43.4-py3-none-any.whl", hash = "sha256:dd49ac30e0f2a8f38550ef1f27a58e7fd8f3f3875deaa4e757443cdbd033a1b4"},
     {file = "alpaca_py-0.43.4.tar.gz", hash = "sha256:7d529b3654d4e817d9fd7ab461131c4f06a315c736b6a9e4a87d5406bb71114a"},
@@ -294,9 +295,10 @@ reference = "aliyun"
 name = "annotated-types"
 version = "0.7.0"
 description = "Reusable constraint types to use with typing.Annotated"
-optional = false
+optional = true
 python-versions = ">=3.8"
 groups = ["main"]
+markers = "extra == \"us\" or extra == \"all\" or extra == \"ai\""
 files = [
     {file = "annotated_types-0.7.0-py3-none-any.whl", hash = "sha256:1f02e8b43a8fbbc3f3e0d4f0f4bfc8131bcb4eebe8849b8e5c773f3a1c582a53"},
     {file = "annotated_types-0.7.0.tar.gz", hash = "sha256:aff07c09a53a08bc8cfccb9c85b05f1aa9a2a6f23728d790723543408344ce89"},
@@ -311,9 +313,10 @@ reference = "aliyun"
 name = "anyio"
 version = "4.13.0"
 description = "High-level concurrency and networking framework on top of asyncio or Trio"
-optional = false
+optional = true
 python-versions = ">=3.10"
 groups = ["main"]
+markers = "extra == \"ai\" or extra == \"all\" or extra == \"notify\""
 files = [
     {file = "anyio-4.13.0-py3-none-any.whl", hash = "sha256:08b310f9e24a9594186fd75b4f73f4a4152069e3853f1ed8bfbf58369f4ad708"},
     {file = "anyio-4.13.0.tar.gz", hash = "sha256:334b70e641fd2221c1505b3890c69882fe4a2df910cba14d97019b90b24439dc"},
@@ -369,9 +372,10 @@ reference = "aliyun"
 name = "asttokens"
 version = "3.0.1"
 description = "Annotate AST trees with source code positions"
-optional = false
+optional = true
 python-versions = ">=3.8"
 groups = ["main"]
+markers = "extra == \"backtest\" or extra == \"all\""
 files = [
     {file = "asttokens-3.0.1-py3-none-any.whl", hash = "sha256:15a3ebc0f43c2d0a50eeafea25e19046c68398e487b9f1f5b517f7c0f40f976a"},
     {file = "asttokens-3.0.1.tar.gz", hash = "sha256:71a4ee5de0bde6a31d64f6b13f2293ac190344478f081c3d1bccfcf5eacb0cb7"},
@@ -425,9 +429,10 @@ reference = "aliyun"
 name = "baostock"
 version = "0.9.1"
 description = "A tool for obtaining historical data of China stock market"
-optional = false
+optional = true
 python-versions = "*"
 groups = ["main"]
+markers = "extra == \"cn-extra\" or extra == \"all\""
 files = [
     {file = "baostock-0.9.1-py3-none-any.whl", hash = "sha256:a30749f095fd58ecd7ba3799dad605d355ad8e6d19310bc437039e1e526f15fe"},
     {file = "baostock-0.9.1.tar.gz", hash = "sha256:5ec3a44cbec9471872b0a4ae02c39aea29db688bb740b769167393bc6e244a39"},
@@ -490,9 +495,10 @@ reference = "aliyun"
 name = "bottleneck"
 version = "1.6.0"
 description = "Fast NumPy array functions written in C"
-optional = false
+optional = true
 python-versions = ">=3.10"
 groups = ["main"]
+markers = "extra == \"backtest\" or extra == \"all\""
 files = [
     {file = "bottleneck-1.6.0-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:40de6be68218ba32cd15addbf4ad7bbbf0075b5c5c4347c579aeae110a5c9a96"},
     {file = "bottleneck-1.6.0-cp310-cp310-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl", hash = "sha256:1ad1882ba8c8da1f404de2610b45b05291e39eec56150270b03b5b25cf2bbb7f"},
@@ -1348,9 +1354,10 @@ reference = "aliyun"
 name = "distro"
 version = "1.9.0"
 description = "Distro - an OS platform information API"
-optional = false
+optional = true
 python-versions = ">=3.6"
 groups = ["main"]
+markers = "extra == \"ai\" or extra == \"all\""
 files = [
     {file = "distro-1.9.0-py3-none-any.whl", hash = "sha256:7bffd925d65168f85027d8da9af6bddab658135b840670a223589bc0c8ef02b2"},
     {file = "distro-1.9.0.tar.gz", hash = "sha256:2fa77c6fd8940f116ee1d6b94a2f90b13b5ea8d019b98bc8bafdcabcdd9bdbed"},
@@ -1408,10 +1415,10 @@ reference = "aliyun"
 name = "empyrical-reloaded"
 version = "0.5.10"
 description = "empyrical computes performance and risk statistics commonly used in quantitative finance"
-optional = false
+optional = true
 python-versions = ">=3.7"
 groups = ["main"]
-markers = "python_version >= \"3.12\""
+markers = "python_version >= \"3.12\" and (extra == \"backtest\" or extra == \"all\")"
 files = [
     {file = "empyrical_reloaded-0.5.10-py3-none-any.whl", hash = "sha256:757483187e786af342d6c816994393b1af7ec2f2beef6068bbc927823774f3db"},
     {file = "empyrical_reloaded-0.5.10.tar.gz", hash = "sha256:7ce653afa9705cb800f85e5e7af00201281c89725cd375b39b1b95d74e87dd6e"},
@@ -1440,10 +1447,10 @@ reference = "aliyun"
 name = "empyrical-reloaded"
 version = "0.5.12"
 description = "empyrical computes performance and risk statistics commonly used in quantitative finance"
-optional = false
+optional = true
 python-versions = ">=3.9"
 groups = ["main"]
-markers = "python_version < \"3.12\""
+markers = "python_version < \"3.12\" and (extra == \"backtest\" or extra == \"all\")"
 files = [
     {file = "empyrical_reloaded-0.5.12-py3-none-any.whl", hash = "sha256:1bd8b53810c760ae5a12a03f2cefc6af0e905f854b71e7d99074b673abdd4fd6"},
     {file = "empyrical_reloaded-0.5.12.tar.gz", hash = "sha256:e01f0bbf24f0aaab2767c85a7dee8f05a59d25355cf50c3371efda056613e323"},
@@ -1489,9 +1496,10 @@ reference = "aliyun"
 name = "eventkit"
 version = "1.0.3"
 description = "Event-driven data pipelines"
-optional = false
+optional = true
 python-versions = "*"
 groups = ["main"]
+markers = "extra == \"us\" or extra == \"all\""
 files = [
     {file = "eventkit-1.0.3-py3-none-any.whl", hash = "sha256:0e199527a89aff9d195b9671ad45d2cc9f79ecda0900de8ecfb4c864d67ad6a2"},
     {file = "eventkit-1.0.3.tar.gz", hash = "sha256:99497f6f3c638a50ff7616f2f8cd887b18bbff3765dc1bd8681554db1467c933"},
@@ -1533,9 +1541,10 @@ reference = "aliyun"
 name = "executing"
 version = "2.2.1"
 description = "Get the currently executing AST node of a frame, and other information"
-optional = false
+optional = true
 python-versions = ">=3.8"
 groups = ["main"]
+markers = "extra == \"backtest\" or extra == \"all\""
 files = [
     {file = "executing-2.2.1-py2.py3-none-any.whl", hash = "sha256:760643d3452b4d777d295bb167ccc74c64a81df23fb5e08eff250c425a4b2017"},
     {file = "executing-2.2.1.tar.gz", hash = "sha256:3632cc370565f6648cc328b32435bd120a1e4ebb20c77e3fdde9a13cd1e533c4"},
@@ -1553,9 +1562,10 @@ reference = "aliyun"
 name = "filelock"
 version = "3.29.0"
 description = "A platform independent file lock."
-optional = false
+optional = true
 python-versions = ">=3.10"
 groups = ["main"]
+markers = "extra == \"futures\" or extra == \"all\""
 files = [
     {file = "filelock-3.29.0-py3-none-any.whl", hash = "sha256:96f5f6344709aa1572bbf631c640e4ebeeb519e08da902c39a001882f30ac258"},
     {file = "filelock-3.29.0.tar.gz", hash = "sha256:69974355e960702e789734cb4871f884ea6fe50bd8404051a3530bc07809cf90"},
@@ -1843,9 +1853,10 @@ reference = "aliyun"
 name = "futu-api"
 version = "10.4.6408"
 description = "Futu Quantitative Trading API"
-optional = false
+optional = true
 python-versions = "*"
 groups = ["main"]
+markers = "extra == \"hk\" or extra == \"all\""
 files = [
     {file = "futu_api-10.4.6408.tar.gz", hash = "sha256:acc030cd6a00027f54b0d4c91d3b145c362388809e0160a917ad07e094eecb18"},
 ]
@@ -1865,9 +1876,10 @@ reference = "aliyun"
 name = "graphql-core"
 version = "3.2.8"
 description = "GraphQL implementation for Python, a port of GraphQL.js, the JavaScript reference implementation for GraphQL."
-optional = false
+optional = true
 python-versions = ">=3.7,<4"
 groups = ["main"]
+markers = "extra == \"futures\" or extra == \"all\""
 files = [
     {file = "graphql_core-3.2.8-py3-none-any.whl", hash = "sha256:cbee07bee1b3ed5e531723685369039f32ff815ef60166686e0162f540f1520c"},
     {file = "graphql_core-3.2.8.tar.gz", hash = "sha256:015457da5d996c924ddf57a43f4e959b0b94fb695b85ed4c29446e508ed65cf3"},
@@ -1885,6 +1897,7 @@ description = "Lightweight in-process concurrent programming"
 optional = false
 python-versions = ">=3.10"
 groups = ["main"]
+markers = "platform_machine == \"aarch64\" or platform_machine == \"ppc64le\" or platform_machine == \"x86_64\" or platform_machine == \"amd64\" or platform_machine == \"AMD64\" or platform_machine == \"win32\" or platform_machine == \"WIN32\" or extra == \"monitor\" or extra == \"all\""
 files = [
     {file = "greenlet-3.5.0-cp310-cp310-macosx_11_0_universal2.whl", hash = "sha256:29ea813b2e1f45fa9649a17853b2b5465c4072fbcb072e5af6cd3a288216574a"},
     {file = "greenlet-3.5.0-cp310-cp310-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:804a70b328e706b785c6ef16187051c394a63dd1a906d89be24b6ad77759f13f"},
@@ -1960,9 +1973,10 @@ reference = "aliyun"
 name = "h11"
 version = "0.16.0"
 description = "A pure-Python, bring-your-own-I/O implementation of HTTP/1.1"
-optional = false
+optional = true
 python-versions = ">=3.8"
 groups = ["main"]
+markers = "extra == \"ai\" or extra == \"all\" or extra == \"notify\""
 files = [
     {file = "h11-0.16.0-py3-none-any.whl", hash = "sha256:63cf8bbe7522de3bf65932fda1d9c2772064ffb3dae62d55932da54b31cb6c86"},
     {file = "h11-0.16.0.tar.gz", hash = "sha256:4e35b956cf45792e4caa5885e69fba00bdbc6ffafbfa020300e549b208ee5ff1"},
@@ -2004,9 +2018,10 @@ reference = "aliyun"
 name = "httpcore"
 version = "1.0.9"
 description = "A minimal low-level HTTP client."
-optional = false
+optional = true
 python-versions = ">=3.8"
 groups = ["main"]
+markers = "extra == \"ai\" or extra == \"all\" or extra == \"notify\""
 files = [
     {file = "httpcore-1.0.9-py3-none-any.whl", hash = "sha256:2d400746a40668fc9dec9810239072b40b4484b640a8c38fd654a024c7a1bf55"},
     {file = "httpcore-1.0.9.tar.gz", hash = "sha256:6e34463af53fd2ab5d807f399a9b45ea31c3dfa2276f15a2c3f00afff6e176e8"},
@@ -2031,9 +2046,10 @@ reference = "aliyun"
 name = "httpx"
 version = "0.28.1"
 description = "The next generation HTTP client."
-optional = false
+optional = true
 python-versions = ">=3.8"
 groups = ["main"]
+markers = "extra == \"ai\" or extra == \"all\" or extra == \"notify\""
 files = [
     {file = "httpx-0.28.1-py3-none-any.whl", hash = "sha256:d909fcccc110f8c7faf814ca82a9a4d816bc5a6dbfea25d6591d6985b8ba59ad"},
     {file = "httpx-0.28.1.tar.gz", hash = "sha256:75e98c5f16b0f35b567856f597f06ff2270a374470a5c2392242528e3e3e42fc"},
@@ -2061,9 +2077,10 @@ reference = "aliyun"
 name = "ib-insync"
 version = "0.9.86"
 description = "Python sync/async framework for Interactive Brokers API"
-optional = false
+optional = true
 python-versions = ">=3.6"
 groups = ["main"]
+markers = "extra == \"us\" or extra == \"all\""
 files = [
     {file = "ib_insync-0.9.86-py3-none-any.whl", hash = "sha256:a61fbe56ff405d93d211dad8238d7300de76dd6399eafc04c320470edec9a4a4"},
     {file = "ib_insync-0.9.86.tar.gz", hash = "sha256:73af602ca2463f260999970c5bd937b1c4325e383686eff301743a4de08d381e"},
@@ -2119,10 +2136,10 @@ reference = "aliyun"
 name = "ipython"
 version = "8.39.0"
 description = "IPython: Productive Interactive Computing"
-optional = false
+optional = true
 python-versions = ">=3.10"
 groups = ["main"]
-markers = "python_version == \"3.10\""
+markers = "python_version == \"3.10\" and (extra == \"backtest\" or extra == \"all\")"
 files = [
     {file = "ipython-8.39.0-py3-none-any.whl", hash = "sha256:bb3c51c4fa8148ab1dea07a79584d1c854e234ea44aa1283bcb37bc75054651f"},
     {file = "ipython-8.39.0.tar.gz", hash = "sha256:4110ae96012c379b8b6db898a07e186c40a2a1ef5d57a7fa83166047d9da7624"},
@@ -2164,10 +2181,10 @@ reference = "aliyun"
 name = "ipython"
 version = "9.13.0"
 description = "IPython: Productive Interactive Computing"
-optional = false
+optional = true
 python-versions = ">=3.11"
 groups = ["main"]
-markers = "python_version >= \"3.11\""
+markers = "python_version >= \"3.11\" and (extra == \"backtest\" or extra == \"all\")"
 files = [
     {file = "ipython-9.13.0-py3-none-any.whl", hash = "sha256:57f9d4639e20818d328d287c7b549af3d05f12486ea8f2e7f73e52a36ec4d201"},
     {file = "ipython-9.13.0.tar.gz", hash = "sha256:7e834b6afc99f020e3f05966ced34792f40267d64cb1ea9043886dab0dde5967"},
@@ -2204,10 +2221,10 @@ reference = "aliyun"
 name = "ipython-pygments-lexers"
 version = "1.1.1"
 description = "Defines a variety of Pygments lexers for highlighting IPython code."
-optional = false
+optional = true
 python-versions = ">=3.8"
 groups = ["main"]
-markers = "python_version >= \"3.11\""
+markers = "python_version >= \"3.11\" and (extra == \"backtest\" or extra == \"all\")"
 files = [
     {file = "ipython_pygments_lexers-1.1.1-py3-none-any.whl", hash = "sha256:a9462224a505ade19a605f71f8fa63c2048833ce50abc86768a0d81d876dc81c"},
     {file = "ipython_pygments_lexers-1.1.1.tar.gz", hash = "sha256:09c0138009e56b6854f9535736f4171d855c8c08a563a0dcd8022f78355c7e81"},
@@ -2242,9 +2259,10 @@ reference = "aliyun"
 name = "jedi"
 version = "0.20.0"
 description = "An autocompletion tool for Python that can be used for text editors."
-optional = false
+optional = true
 python-versions = ">=3.10"
 groups = ["main"]
+markers = "extra == \"backtest\" or extra == \"all\""
 files = [
     {file = "jedi-0.20.0-py2.py3-none-any.whl", hash = "sha256:7bdd9c2634f56713299976f4cbd59cb3fa92165cc5e05ea811fb253480728b67"},
     {file = "jedi-0.20.0.tar.gz", hash = "sha256:c3f4ccbd276696f4b19c54618d4fb18f9fc24b0aef02acf704b23f487daa1011"},
@@ -2289,9 +2307,10 @@ reference = "aliyun"
 name = "jiter"
 version = "0.14.0"
 description = "Fast iterable JSON parser."
-optional = false
+optional = true
 python-versions = ">=3.9"
 groups = ["main"]
+markers = "extra == \"ai\" or extra == \"all\""
 files = [
     {file = "jiter-0.14.0-cp310-cp310-macosx_10_12_x86_64.whl", hash = "sha256:02f36a5c700f105ac04a6556fe664a59037a2c200db3b7e88784fac2ddf02531"},
     {file = "jiter-0.14.0-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:41eab6c09ceffb6f0fe25e214b3068146edb1eda3649ca2aee2a061029c7ba2e"},
@@ -2413,9 +2432,10 @@ reference = "aliyun"
 name = "joblib"
 version = "1.5.3"
 description = "Lightweight pipelining with Python functions"
-optional = false
+optional = true
 python-versions = ">=3.9"
 groups = ["main"]
+markers = "extra == \"backtest\" or extra == \"all\""
 files = [
     {file = "joblib-1.5.3-py3-none-any.whl", hash = "sha256:5fc3c5039fc5ca8c0276333a188bbd59d6b7ab37fe6632daa76bc7f9ec18e713"},
     {file = "joblib-1.5.3.tar.gz", hash = "sha256:8561a3269e6801106863fd0d6d84bb737be9e7631e33aaed3fb9ce5953688da3"},
@@ -2578,9 +2598,10 @@ reference = "aliyun"
 name = "lark-oapi"
 version = "1.5.5"
 description = "Lark OpenAPI SDK for Python"
-optional = false
+optional = true
 python-versions = ">=3.7"
 groups = ["main"]
+markers = "extra == \"notify\" or extra == \"all\""
 files = [
     {file = "lark_oapi-1.5.5-py3-none-any.whl", hash = "sha256:c953d3f87e5b43d9e99cdee7c2d962568ac05d5c01ef57ad662fbb5d4ec0e69f"},
 ]
@@ -2976,9 +2997,10 @@ reference = "aliyun"
 name = "matplotlib-inline"
 version = "0.2.1"
 description = "Inline Matplotlib backend for Jupyter"
-optional = false
+optional = true
 python-versions = ">=3.9"
 groups = ["main"]
+markers = "extra == \"backtest\" or extra == \"all\""
 files = [
     {file = "matplotlib_inline-0.2.1-py3-none-any.whl", hash = "sha256:d56ce5156ba6085e00a9d54fead6ed29a9c47e215cd1bba2e976ef39f5710a76"},
     {file = "matplotlib_inline-0.2.1.tar.gz", hash = "sha256:e1ee949c340d771fc39e241ea75683deb94762c8fa5f2927ec57c83c4dffa9fe"},
@@ -3041,9 +3063,10 @@ reference = "aliyun"
 name = "msgpack"
 version = "1.1.2"
 description = "MessagePack serializer"
-optional = false
+optional = true
 python-versions = ">=3.9"
 groups = ["main"]
+markers = "extra == \"us\" or extra == \"all\""
 files = [
     {file = "msgpack-1.1.2-cp310-cp310-macosx_10_9_x86_64.whl", hash = "sha256:0051fffef5a37ca2cd16978ae4f0aef92f164df86823871b5162812bebecd8e2"},
     {file = "msgpack-1.1.2-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:a605409040f2da88676e9c9e5853b3449ba8011973616189ea5ee55ddbc5bc87"},
@@ -3303,9 +3326,10 @@ reference = "aliyun"
 name = "nest-asyncio"
 version = "1.6.0"
 description = "Patch asyncio to allow nested event loops"
-optional = false
+optional = true
 python-versions = ">=3.5"
 groups = ["main"]
+markers = "extra == \"us\" or extra == \"all\""
 files = [
     {file = "nest_asyncio-1.6.0-py3-none-any.whl", hash = "sha256:87af6efd6b5e897c81050477ef65c62e2b2f35d51703cae01aff2905b1852e1c"},
     {file = "nest_asyncio-1.6.0.tar.gz", hash = "sha256:6f172d5449aca15afd6c646851f4e31e02c598d553a667e38cafa997cfec55fe"},
@@ -3371,9 +3395,10 @@ reference = "aliyun"
 name = "openai"
 version = "2.34.0"
 description = "The official Python library for the openai API"
-optional = false
+optional = true
 python-versions = ">=3.9"
 groups = ["main"]
+markers = "extra == \"ai\" or extra == \"all\""
 files = [
     {file = "openai-2.34.0-py3-none-any.whl", hash = "sha256:c996a71b1a210f3569844572ad4c609307e978515fb76877cf449b72596e549e"},
     {file = "openai-2.34.0.tar.gz", hash = "sha256:828b4efcbb126352c2b5eb97d33ae890c92a71ab72511aefc1b7fe64aeccb07b"},
@@ -3404,9 +3429,10 @@ reference = "aliyun"
 name = "openctp-ctp"
 version = "6.7.11.0"
 description = "A package for CTPAPI"
-optional = false
+optional = true
 python-versions = ">=3.7"
 groups = ["main"]
+markers = "extra == \"futures\" or extra == \"all\""
 files = [
     {file = "openctp_ctp-6.7.11.0-cp310-cp310-win32.whl", hash = "sha256:523b00464a46ba1fc2b8aa166a7b405ca644868513c0f4fb8b396969a81fd9e5"},
     {file = "openctp_ctp-6.7.11.0-cp310-cp310-win_amd64.whl", hash = "sha256:a55aade6b7a563b7c83b6d437f6ef78cfa6474ecfe1ebfc873233fedd0289d03"},
@@ -3541,9 +3567,10 @@ reference = "aliyun"
 name = "parso"
 version = "0.8.7"
 description = "A Python Parser"
-optional = false
+optional = true
 python-versions = ">=3.6"
 groups = ["main"]
+markers = "extra == \"backtest\" or extra == \"all\""
 files = [
     {file = "parso-0.8.7-py2.py3-none-any.whl", hash = "sha256:a8926eb2a1b915486941fdbd31e86a4baf88fe8c210f25f2f35ecec5b574ca1c"},
     {file = "parso-0.8.7.tar.gz", hash = "sha256:eaaac4c9fdd5e9e8852dc778d2d7405897ec510f2a298071453e5e3a07914bb1"},
@@ -3562,9 +3589,10 @@ reference = "aliyun"
 name = "peewee"
 version = "3.17.3"
 description = "a little orm"
-optional = false
+optional = true
 python-versions = "*"
 groups = ["main"]
+markers = "extra == \"backtest\" or extra == \"all\""
 files = [
     {file = "peewee-3.17.3.tar.gz", hash = "sha256:ef15f90b628e41a584be8306cdc3243c51f73ce88b06154d9572f6d0284a0169"},
 ]
@@ -3578,10 +3606,10 @@ reference = "aliyun"
 name = "pexpect"
 version = "4.9.0"
 description = "Pexpect allows easy control of interactive console applications."
-optional = false
+optional = true
 python-versions = "*"
 groups = ["main"]
-markers = "sys_platform != \"win32\" and sys_platform != \"emscripten\""
+markers = "(extra == \"backtest\" or extra == \"all\") and sys_platform != \"win32\" and sys_platform != \"emscripten\""
 files = [
     {file = "pexpect-4.9.0-py2.py3-none-any.whl", hash = "sha256:7236d1e080e4936be2dc3e326cec0af72acf9212a7e1d060210e70a47e253523"},
     {file = "pexpect-4.9.0.tar.gz", hash = "sha256:ee7d41123f3c9911050ea2c2dac107568dc43b2d3b0c7557a33212c398ead30f"},
@@ -3729,9 +3757,10 @@ reference = "aliyun"
 name = "playwright"
 version = "1.59.0"
 description = "A high-level API to automate web browsers"
-optional = false
+optional = true
 python-versions = ">=3.9"
 groups = ["main"]
+markers = "extra == \"monitor\" or extra == \"all\""
 files = [
     {file = "playwright-1.59.0-py3-none-macosx_10_13_x86_64.whl", hash = "sha256:bfc6940100b57423175c819ce2422ec5880d55fa2769987f62ab7a1f5fe6783e"},
     {file = "playwright-1.59.0-py3-none-macosx_11_0_arm64.whl", hash = "sha256:af068143a0c045ec11608b67d6c42e58db7e9cf65a742dd21fddedc1a9802c47"},
@@ -3777,9 +3806,10 @@ reference = "aliyun"
 name = "polygon-api-client"
 version = "1.16.3"
 description = "Official Polygon.io REST and Websocket client."
-optional = false
+optional = true
 python-versions = ">=3.9,<4.0"
 groups = ["main"]
+markers = "extra == \"us\" or extra == \"all\""
 files = [
     {file = "polygon_api_client-1.16.3-py3-none-any.whl", hash = "sha256:4dec9e27fb5d17a36aacd9372d1df30af2f2b7639b4166ca10d2d48d128d2cd8"},
     {file = "polygon_api_client-1.16.3.tar.gz", hash = "sha256:df575ff6a4a7636cc92272803749adca7e81d2340af493c51a19fe75b51530fc"},
@@ -3822,9 +3852,10 @@ reference = "aliyun"
 name = "prompt-toolkit"
 version = "3.0.52"
 description = "Library for building powerful interactive command lines in Python"
-optional = false
+optional = true
 python-versions = ">=3.8"
 groups = ["main"]
+markers = "extra == \"backtest\" or extra == \"all\""
 files = [
     {file = "prompt_toolkit-3.0.52-py3-none-any.whl", hash = "sha256:9aac639a3bbd33284347de5ad8d68ecc044b91a762dc39b7c21095fcd6a19955"},
     {file = "prompt_toolkit-3.0.52.tar.gz", hash = "sha256:28cde192929c8e7321de85de1ddbe736f1375148b02f2e17edd840042b1be855"},
@@ -3979,9 +4010,10 @@ reference = "aliyun"
 name = "protobuf"
 version = "7.34.1"
 description = ""
-optional = false
+optional = true
 python-versions = ">=3.10"
 groups = ["main"]
+markers = "extra == \"hk\" or extra == \"all\""
 files = [
     {file = "protobuf-7.34.1-cp310-abi3-macosx_10_9_universal2.whl", hash = "sha256:d8b2cc79c4d8f62b293ad9b11ec3aebce9af481fa73e64556969f7345ebf9fc7"},
     {file = "protobuf-7.34.1-cp310-abi3-manylinux2014_aarch64.whl", hash = "sha256:5185e0e948d07abe94bb76ec9b8416b604cfe5da6f871d67aad30cbf24c3110b"},
@@ -4002,9 +4034,10 @@ reference = "aliyun"
 name = "psutil"
 version = "7.2.2"
 description = "Cross-platform lib for process and system monitoring."
-optional = false
+optional = true
 python-versions = ">=3.6"
 groups = ["main"]
+markers = "(extra == \"futures\" or extra == \"all\" or extra == \"backtest\") and (python_version >= \"3.11\" or extra == \"futures\" or extra == \"all\")"
 files = [
     {file = "psutil-7.2.2-cp313-cp313t-macosx_10_13_x86_64.whl", hash = "sha256:2edccc433cbfa046b980b0df0171cd25bcaeb3a68fe9022db0979e7aa74a826b"},
     {file = "psutil-7.2.2-cp313-cp313t-macosx_11_0_arm64.whl", hash = "sha256:e78c8603dcd9a04c7364f1a3e670cea95d51ee865e4efb3556a3a63adef958ea"},
@@ -4042,10 +4075,10 @@ reference = "aliyun"
 name = "ptyprocess"
 version = "0.7.0"
 description = "Run a subprocess in a pseudo terminal"
-optional = false
+optional = true
 python-versions = "*"
 groups = ["main"]
-markers = "sys_platform != \"win32\" and sys_platform != \"emscripten\""
+markers = "(extra == \"backtest\" or extra == \"all\") and sys_platform != \"win32\" and sys_platform != \"emscripten\""
 files = [
     {file = "ptyprocess-0.7.0-py2.py3-none-any.whl", hash = "sha256:4b41f3967fce3af57cc7e94b888626c18bf37a083e3651ca8feeb66d492fef35"},
     {file = "ptyprocess-0.7.0.tar.gz", hash = "sha256:5c5d0a3b48ceee0b48485e0c26037c0acd7d29765ca3fbb5cb3831d347423220"},
@@ -4060,9 +4093,10 @@ reference = "aliyun"
 name = "pure-eval"
 version = "0.2.3"
 description = "Safely evaluate AST nodes without side effects"
-optional = false
+optional = true
 python-versions = "*"
 groups = ["main"]
+markers = "extra == \"backtest\" or extra == \"all\""
 files = [
     {file = "pure_eval-0.2.3-py3-none-any.whl", hash = "sha256:1db8e35b67b3d218d818ae653e27f06c3aa420901fa7b081ca98cbedc874e0d0"},
     {file = "pure_eval-0.2.3.tar.gz", hash = "sha256:5f4e983f40564c576c7c8635ae88db5956bb2229d7e9237d03b3c0b0190eaf42"},
@@ -4289,9 +4323,10 @@ reference = "aliyun"
 name = "pycryptodome"
 version = "3.23.0"
 description = "Cryptographic library for Python"
-optional = false
+optional = true
 python-versions = ">=2.7, !=3.0.*, !=3.1.*, !=3.2.*, !=3.3.*, !=3.4.*, !=3.5.*, !=3.6.*"
 groups = ["main"]
+markers = "extra == \"hk\" or extra == \"all\" or extra == \"notify\""
 files = [
     {file = "pycryptodome-3.23.0-cp27-cp27m-macosx_10_9_x86_64.whl", hash = "sha256:a176b79c49af27d7f6c12e4b178b0824626f40a7b9fed08f712291b6d54bf566"},
     {file = "pycryptodome-3.23.0-cp27-cp27m-manylinux2010_i686.whl", hash = "sha256:573a0b3017e06f2cffd27d92ef22e46aa3be87a2d317a5abf7cc0e84e321bd75"},
@@ -4345,9 +4380,10 @@ reference = "aliyun"
 name = "pydantic"
 version = "2.13.3"
 description = "Data validation using Python type hints"
-optional = false
+optional = true
 python-versions = ">=3.9"
 groups = ["main"]
+markers = "extra == \"us\" or extra == \"all\" or extra == \"ai\""
 files = [
     {file = "pydantic-2.13.3-py3-none-any.whl", hash = "sha256:6db14ac8dfc9a1e57f87ea2c0de670c251240f43cb0c30a5130e9720dc612927"},
     {file = "pydantic-2.13.3.tar.gz", hash = "sha256:af09e9d1d09f4e7fe37145c1f577e1d61ceb9a41924bf0094a36506285d0a84d"},
@@ -4372,9 +4408,10 @@ reference = "aliyun"
 name = "pydantic-core"
 version = "2.46.3"
 description = "Core functionality for Pydantic validation and serialization"
-optional = false
+optional = true
 python-versions = ">=3.9"
 groups = ["main"]
+markers = "extra == \"us\" or extra == \"all\" or extra == \"ai\""
 files = [
     {file = "pydantic_core-2.46.3-cp310-cp310-macosx_10_12_x86_64.whl", hash = "sha256:1da3786b8018e60349680720158cc19161cc3b4bdd815beb0a321cd5ce1ad5b1"},
     {file = "pydantic_core-2.46.3-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:cc0988cb29d21bf4a9d5cf2ef970b5c0e38d8d8e107a493278c05dc6c1dda69f"},
@@ -4538,9 +4575,10 @@ reference = "aliyun"
 name = "pyee"
 version = "13.0.1"
 description = "A rough port of Node.js's EventEmitter to Python with a few tricks of its own"
-optional = false
+optional = true
 python-versions = ">=3.8"
 groups = ["main"]
+markers = "extra == \"monitor\" or extra == \"all\""
 files = [
     {file = "pyee-13.0.1-py3-none-any.whl", hash = "sha256:af2f8fede4171ef667dfded53f96e2ed0d6e6bd7ee3bb46437f77e3b57689228"},
     {file = "pyee-13.0.1.tar.gz", hash = "sha256:0b931f7c14535667ed4c7e0d531716368715e860b988770fc7eb8578d1f67fc8"},
@@ -4561,9 +4599,10 @@ reference = "aliyun"
 name = "pyfolio-reloaded"
 version = "0.9.9"
 description = "Performance and risk analysis of financial portfolios with Python"
-optional = false
+optional = true
 python-versions = ">=3.9"
 groups = ["main"]
+markers = "extra == \"backtest\" or extra == \"all\""
 files = [
     {file = "pyfolio_reloaded-0.9.9-py3-none-any.whl", hash = "sha256:aa0e136b379bc6c7a48a74746c784c263de986575af5377348330eb1aed8791c"},
     {file = "pyfolio_reloaded-0.9.9.tar.gz", hash = "sha256:4dcd0bc6e07249458685e6591a105daafaa87c6b79a0680f71ba8e58435b5c0c"},
@@ -4617,9 +4656,10 @@ reference = "aliyun"
 name = "pyjwt"
 version = "2.12.1"
 description = "JSON Web Token implementation in Python"
-optional = false
+optional = true
 python-versions = ">=3.9"
 groups = ["main"]
+markers = "extra == \"futures\" or extra == \"all\""
 files = [
     {file = "pyjwt-2.12.1-py3-none-any.whl", hash = "sha256:28ca37c070cad8ba8cd9790cd940535d40274d22f80ab87f3ac6a713e6e8454c"},
     {file = "pyjwt-2.12.1.tar.gz", hash = "sha256:c74a7a2adf861c04d002db713dd85f84beb242228e671280bf709d765b03672b"},
@@ -4826,9 +4866,10 @@ reference = "aliyun"
 name = "requests-toolbelt"
 version = "1.0.0"
 description = "A utility belt for advanced users of python-requests"
-optional = false
+optional = true
 python-versions = ">=2.7, !=3.0.*, !=3.1.*, !=3.2.*, !=3.3.*"
 groups = ["main"]
+markers = "extra == \"notify\" or extra == \"all\""
 files = [
     {file = "requests-toolbelt-1.0.0.tar.gz", hash = "sha256:7681a0a3d047012b5bdc0ee37d7f8f07ebe76ab08caeccfc3921ce23c88d5bc6"},
     {file = "requests_toolbelt-1.0.0-py2.py3-none-any.whl", hash = "sha256:cccfdd665f0a24fcf4726e690f65639d272bb0637b9b92dfd91a5568ccf6bd06"},
@@ -4870,10 +4911,10 @@ reference = "aliyun"
 name = "scikit-learn"
 version = "1.7.2"
 description = "A set of python modules for machine learning and data mining"
-optional = false
+optional = true
 python-versions = ">=3.10"
 groups = ["main"]
-markers = "python_version == \"3.10\""
+markers = "python_version == \"3.10\" and (extra == \"backtest\" or extra == \"all\")"
 files = [
     {file = "scikit_learn-1.7.2-cp310-cp310-macosx_10_9_x86_64.whl", hash = "sha256:6b33579c10a3081d076ab403df4a4190da4f4432d443521674637677dc91e61f"},
     {file = "scikit_learn-1.7.2-cp310-cp310-macosx_12_0_arm64.whl", hash = "sha256:36749fb62b3d961b1ce4fedf08fa57a1986cd409eff2d783bca5d4b9b5fce51c"},
@@ -4932,10 +4973,10 @@ reference = "aliyun"
 name = "scikit-learn"
 version = "1.8.0"
 description = "A set of python modules for machine learning and data mining"
-optional = false
+optional = true
 python-versions = ">=3.11"
 groups = ["main"]
-markers = "python_version >= \"3.11\""
+markers = "python_version >= \"3.11\" and (extra == \"backtest\" or extra == \"all\")"
 files = [
     {file = "scikit_learn-1.8.0-cp311-cp311-macosx_10_9_x86_64.whl", hash = "sha256:146b4d36f800c013d267b29168813f7a03a43ecd2895d04861f1240b564421da"},
     {file = "scikit_learn-1.8.0-cp311-cp311-macosx_12_0_arm64.whl", hash = "sha256:f984ca4b14914e6b4094c5d52a32ea16b49832c03bd17a110f004db3c223e8e1"},
@@ -5155,9 +5196,10 @@ reference = "aliyun"
 name = "seaborn"
 version = "0.13.2"
 description = "Statistical data visualization"
-optional = false
+optional = true
 python-versions = ">=3.8"
 groups = ["main"]
+markers = "extra == \"backtest\" or extra == \"all\""
 files = [
     {file = "seaborn-0.13.2-py3-none-any.whl", hash = "sha256:636f8336facf092165e27924f223d3c62ca560b1f2bb5dff7ab7fad265361987"},
     {file = "seaborn-0.13.2.tar.gz", hash = "sha256:93e60a40988f4d65e9f4885df477e2fdaff6b73a9ded434c1ab356dd57eefff7"},
@@ -5208,9 +5250,10 @@ reference = "aliyun"
 name = "sgqlc"
 version = "18"
 description = "Simple GraphQL Client"
-optional = false
+optional = true
 python-versions = ">=3.8,<4"
 groups = ["main"]
+markers = "extra == \"futures\" or extra == \"all\""
 files = [
     {file = "sgqlc-18-py3-none-any.whl", hash = "sha256:7af53b5c1aab4602a98a36d6d32bd641e33f602b9b72468885f2505c59c536af"},
     {file = "sgqlc-18.tar.gz", hash = "sha256:a09f76fb69a2760523144f8d3acbf06a1b3710f63bf87fbac142d3538b1d639b"},
@@ -5234,9 +5277,10 @@ reference = "aliyun"
 name = "shinny-structlog"
 version = "0.0.4"
 description = "Shinny StructLog"
-optional = false
+optional = true
 python-versions = ">=3.6"
 groups = ["main"]
+markers = "extra == \"futures\" or extra == \"all\""
 files = [
     {file = "shinny-structlog-0.0.4.tar.gz", hash = "sha256:e30db15314ce81f15af025b0f49715dcfdcb932e539bfbc7d462b8b61c3afeb3"},
     {file = "shinny_structlog-0.0.4-py3-none-any.whl", hash = "sha256:989f96f484eeefae2a37a80fd262a3d3c92d14e3fe8346c218f45dff0a3412c8"},
@@ -5379,9 +5423,10 @@ reference = "aliyun"
 name = "sniffio"
 version = "1.3.1"
 description = "Sniff out which async library your code is running under"
-optional = false
+optional = true
 python-versions = ">=3.7"
 groups = ["main"]
+markers = "extra == \"ai\" or extra == \"all\""
 files = [
     {file = "sniffio-1.3.1-py3-none-any.whl", hash = "sha256:2f6da418d1f1e0fddd844478f41680e794e6051915791a034ff65e5f100525a2"},
     {file = "sniffio-1.3.1.tar.gz", hash = "sha256:f4324edc670a0f49750a81b895f35c3adb843cca46f0530f79fc1babb23789dc"},
@@ -5520,9 +5565,10 @@ reference = "aliyun"
 name = "sseclient-py"
 version = "1.9.0"
 description = "SSE client for Python"
-optional = false
+optional = true
 python-versions = ">=3.7"
 groups = ["main"]
+markers = "extra == \"us\" or extra == \"all\""
 files = [
     {file = "sseclient_py-1.9.0-py3-none-any.whl", hash = "sha256:340062b1587fc2880892811e2ab5b176d98ef3eee98b3672ff3a3ba1e8ed0f6f"},
 ]
@@ -5536,9 +5582,10 @@ reference = "aliyun"
 name = "stack-data"
 version = "0.6.3"
 description = "Extract data from python stack frames and tracebacks for informative displays"
-optional = false
+optional = true
 python-versions = "*"
 groups = ["main"]
+markers = "extra == \"backtest\" or extra == \"all\""
 files = [
     {file = "stack_data-0.6.3-py3-none-any.whl", hash = "sha256:d5558e0c25a4cb0853cddad3d77da9891a08cb85dd9f9f91b9f8cd66e511e695"},
     {file = "stack_data-0.6.3.tar.gz", hash = "sha256:836a778de4fec4dcd1dcd89ed8abff8a221f58308462e1c4aa2a3cf30148f0b9"},
@@ -5678,9 +5725,10 @@ reference = "aliyun"
 name = "threadpoolctl"
 version = "3.6.0"
 description = "threadpoolctl"
-optional = false
+optional = true
 python-versions = ">=3.9"
 groups = ["main"]
+markers = "extra == \"backtest\" or extra == \"all\""
 files = [
     {file = "threadpoolctl-3.6.0-py3-none-any.whl", hash = "sha256:43a0b8fd5a2928500110039e43a5eed8480b918967083ea48dc3ab9f13c4a7fb"},
     {file = "threadpoolctl-3.6.0.tar.gz", hash = "sha256:8ab8b4aa3491d812b623328249fab5302a68d2d71745c8a4c719a2fcaba9f44e"},
@@ -5810,9 +5858,10 @@ reference = "aliyun"
 name = "tqsdk"
 version = "3.9.5"
 description = "TianQin SDK"
-optional = false
+optional = true
 python-versions = ">=3.8"
 groups = ["main"]
+markers = "extra == \"futures\" or extra == \"all\""
 files = [
     {file = "tqsdk-3.9.5-py3-none-any.whl", hash = "sha256:39811ff5574cbab82832d7e928a1a77e84fa07c2373941259acd7288d8e629ac"},
     {file = "tqsdk-3.9.5.tar.gz", hash = "sha256:ab7bbce8f0193f606a21c298d32c21fe25fb8be61349a0863f79c9a4635c647d"},
@@ -5845,9 +5894,10 @@ reference = "aliyun"
 name = "tqsdk-ctpse"
 version = "1.0.2"
 description = "TianQin SDK - ctpse lib"
-optional = false
+optional = true
 python-versions = ">=3"
 groups = ["main"]
+markers = "extra == \"futures\" or extra == \"all\""
 files = [
     {file = "tqsdk-ctpse-1.0.2.tar.gz", hash = "sha256:24483b38b695e9feaebc9d6046b214373ed2f21c76ca925123281a272e1adfc3"},
     {file = "tqsdk_ctpse-1.0.2-py3-none-any.whl", hash = "sha256:f529e3e0cf66c395fb0b4b45035f4e2fbda528ae3c34534b44ae69b06395b260"},
@@ -5865,9 +5915,10 @@ reference = "aliyun"
 name = "tqsdk-sm"
 version = "1.0.5"
 description = "TianQin SDK - sm lib"
-optional = false
+optional = true
 python-versions = ">=3"
 groups = ["main"]
+markers = "extra == \"futures\" or extra == \"all\""
 files = [
     {file = "tqsdk-sm-1.0.5.tar.gz", hash = "sha256:0871d41f1ddad8027c11a8d33f25dbab39e79beb33f718642b35f4f9af75a609"},
     {file = "tqsdk_sm-1.0.5-py3-none-any.whl", hash = "sha256:49eb823ae4f489bd5873d414f70c3b8aa9a593d5bb242369dc56a21a0ea5ee56"},
@@ -5885,9 +5936,10 @@ reference = "aliyun"
 name = "traitlets"
 version = "5.14.3"
 description = "Traitlets Python configuration system"
-optional = false
+optional = true
 python-versions = ">=3.8"
 groups = ["main"]
+markers = "extra == \"backtest\" or extra == \"all\""
 files = [
     {file = "traitlets-5.14.3-py3-none-any.whl", hash = "sha256:b74e89e397b1ed28cc831db7aea759ba6640cb3de13090ca145426688ff1ac4f"},
     {file = "traitlets-5.14.3.tar.gz", hash = "sha256:9ed0579d3502c94b4b3732ac120375cda96f923114522847de4b3bb98b96b6b7"},
@@ -5923,9 +5975,10 @@ reference = "aliyun"
 name = "typing-inspection"
 version = "0.4.2"
 description = "Runtime typing introspection tools"
-optional = false
+optional = true
 python-versions = ">=3.9"
 groups = ["main"]
+markers = "extra == \"us\" or extra == \"all\" or extra == \"ai\""
 files = [
     {file = "typing_inspection-0.4.2-py3-none-any.whl", hash = "sha256:4ed1cacbdc298c220f1bd249ed5287caa16f34d44ef4e9c3d0cbad5b521545e7"},
     {file = "typing_inspection-0.4.2.tar.gz", hash = "sha256:ba561c48a67c5958007083d386c3295464928b01faa735ab8547c5692e87f464"},
@@ -6040,9 +6093,10 @@ reference = "aliyun"
 name = "websockets"
 version = "16.0"
 description = "An implementation of the WebSocket Protocol (RFC 6455 & 7692)"
-optional = false
+optional = true
 python-versions = ">=3.10"
 groups = ["main"]
+markers = "extra == \"us\" or extra == \"all\" or extra == \"futures\" or extra == \"notify\""
 files = [
     {file = "websockets-16.0-cp310-cp310-macosx_10_9_universal2.whl", hash = "sha256:04cdd5d2d1dacbad0a7bf36ccbcd3ccd5a30ee188f2560b7a62a30d14107b31a"},
     {file = "websockets-16.0-cp310-cp310-macosx_10_9_x86_64.whl", hash = "sha256:8ff32bb86522a9e5e31439a58addbb0166f0204d64066fb955265c4e214160f0"},
@@ -6305,7 +6359,18 @@ type = "legacy"
 url = "https://mirrors.aliyun.com/pypi/simple"
 reference = "aliyun"
 
+[extras]
+ai = ["openai"]
+all = ["alpaca-py", "baostock", "futu-api", "ib-insync", "lark-oapi", "openai", "openctp-ctp", "playwright", "polygon-api-client", "pyfolio-reloaded", "tqsdk"]
+backtest = ["pyfolio-reloaded"]
+cn-extra = ["baostock"]
+futures = ["openctp-ctp", "tqsdk"]
+hk = ["futu-api"]
+monitor = ["playwright"]
+notify = ["lark-oapi"]
+us = ["alpaca-py", "ib-insync", "polygon-api-client"]
+
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.10,<3.14"
-content-hash = "6cdb26483610be90855c452395cbf7c2f01b9617edf8a604befe18cb1204b24e"
+content-hash = "09964e92dab85fa10b7ceb393abed0fab869f7922a6c7882218b0989a6525e7c"
