@@ -396,23 +396,28 @@
                         const validNewSegments = newSegments.filter((segment) => Array.isArray(segment.points) && segment.points.length > 0 && segment.points[0] && segment.points[0].time !== undefined && segment.points[0].time !== null);
                         if (validNewSegments.length === 0)
                             return existingSegments || [];
-                        const newTimes = validNewSegments.map((segment) => segment.points[0].time);
-                        const minResponseTime = Math.min(...newTimes);
-                        const maxResponseTime = Math.max(...newTimes);
-                        const updatedSegments = [];
+                        // 改为 key 合并去重：避免按 minResponseTime 切割导致「起点在窗口内、
+                        // 终点在窗口外」的跨界线段在 backward 历史响应处理中被永久丢弃。
+                        // 未完成线段（linestyle=1）以 起点+linestyle 为 key，让新版本覆盖旧版本。
+                        const segmentKey = (s) => {
+                            const pts = s.points;
+                            const head = pts[0];
+                            if (s.linestyle == '1' || s.linestyle == 1) {
+                                return `unfinished_${head.time}_${head.price}_1`;
+                            }
+                            const tail = pts[pts.length - 1];
+                            return `${head.time}_${head.price}_${tail.time}_${tail.price}_${s.linestyle || 0}`;
+                        };
+                        const merged = new Map();
                         for (const segment of existingSegments) {
                             if (Array.isArray(segment.points) && segment.points.length > 0) {
-                                const segTime = segment.points[0].time;
-                                // Keep segments OUTSIDE the response window
-                                if (segTime < minResponseTime || segTime > maxResponseTime) {
-                                    updatedSegments.push(segment);
-                                }
+                                merged.set(segmentKey(segment), segment);
                             }
                         }
                         for (const segment of validNewSegments) {
-                            updatedSegments.push(segment);
+                            merged.set(segmentKey(segment), segment);
                         }
-                        return updatedSegments.sort((a, b) => {
+                        return Array.from(merged.values()).sort((a, b) => {
                             const at = (Array.isArray(a.points) && a.points[0]) ? a.points[0].time : -Infinity;
                             const bt = (Array.isArray(b.points) && b.points[0]) ? b.points[0].time : -Infinity;
                             return at - bt;

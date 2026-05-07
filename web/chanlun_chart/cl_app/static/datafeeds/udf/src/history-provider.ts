@@ -432,6 +432,9 @@ export class HistoryProvider {
         };
 
         // 处理LineSegment类型数据（bis, xds, bi_zss, xd_zss）
+        // 用 key 合并去重：避免按 minResponseTime 切割导致「起点在窗口内、
+        // 终点在窗口外」的跨界线段在 backward 历史响应处理中被永久丢弃。
+        // 未完成线段（linestyle=1）以 起点+linestyle 为 key，让新版本覆盖旧版本。
         const updateLineSegments = (
           existingSegments: LineSegment[],
           newSegments: LineSegment[]
@@ -441,28 +444,29 @@ export class HistoryProvider {
           if (!existingSegments || existingSegments.length === 0)
             return newSegments;
 
-          const minResponseTime = Math.min(
-            ...newSegments.map((segment) => segment.points[0].time)
-          );
+          const segmentKey = (s: LineSegment): string => {
+            const pts = s.points;
+            const head = pts[0];
+            if ((s as any).linestyle == '1' || (s as any).linestyle == 1) {
+              return `unfinished_${head.time}_${head.price}_1`;
+            }
+            const tail = pts[pts.length - 1];
+            return `${head.time}_${head.price}_${tail.time}_${tail.price}_${(s as any).linestyle || 0}`;
+          };
 
-          const updatedSegments: LineSegment[] = [];
-
-          // 保留起始时间小于最小时间点的线段
+          const merged = new Map<string, LineSegment>();
           for (const segment of existingSegments) {
             if (segment.points.length > 0) {
-              if (segment.points[0].time < minResponseTime) {
-                updatedSegments.push(segment);
-              }
+              merged.set(segmentKey(segment), segment);
+            }
+          }
+          for (const segment of newSegments) {
+            if (segment.points.length > 0) {
+              merged.set(segmentKey(segment), segment);
             }
           }
 
-          // 添加返回数据中剩余的新线段
-          for (const segment of newSegments) {
-            updatedSegments.push(segment);
-          }
-
-          // 按起始时间排序
-          return updatedSegments.sort((a, b) => {
+          return Array.from(merged.values()).sort((a, b) => {
             if (a.points.length === 0 && b.points.length === 0) return 0;
             if (a.points.length === 0) return -1;
             if (b.points.length === 0) return 1;

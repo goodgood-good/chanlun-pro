@@ -1008,19 +1008,29 @@ class ChartManager {
         const newKeys = new Set();
         const itemsToProcess = [];
 
+        // 多点形态（笔/线段/中枢）用「末端 >= from」判定：只要线段终点
+        // 进入可视区，即便起点早于 from（线段从画外延伸进来）也保留。
+        // 单点形态（fxs/bcs/mmds）仍按「点位 >= from」判定。
         renderList.forEach(item => {
-            const itemTime = Array.isArray(item.points) ? item.points[0]?.time : item.points?.time;
-            if (itemTime >= from) {
+            let headTime, tailTime;
+            if (Array.isArray(item.points)) {
+                headTime = item.points[0]?.time;
+                tailTime = item.points[item.points.length - 1]?.time;
+            } else {
+                headTime = tailTime = item.points?.time;
+            }
+            if (tailTime >= from) {
                 const key = this.makeKey(item);
                 newKeys.add(key);
-                itemsToProcess.push({ item, key, time: itemTime });
+                itemsToProcess.push({ item, key, time: headTime, tailTime });
             }
         });
 
         // 1. Remove items not in new list or outside window (batch filter for O(n) performance)
         const toKeep = [];
         for (const existing of container) {
-            if (newKeys.has(existing.key) && existing.time >= from) {
+            const existingTail = existing.tailTime ?? existing.time;
+            if (newKeys.has(existing.key) && existingTail >= from) {
                 toKeep.push(existing);
             } else {
                 this.safeRemove(existing.id);
@@ -1031,11 +1041,12 @@ class ChartManager {
 
         // 2. Create new items
         const existingKeys = new Set(container.map(item => item.key));
-        itemsToProcess.forEach(({ item, key, time }) => {
+        itemsToProcess.forEach(({ item, key, time, tailTime }) => {
             if (!existingKeys.has(key)) {
                 const id = createFunc(item);
                 container.push({
                     time: time,
+                    tailTime: tailTime,
                     key: key,
                     isUnfinished: (item.linestyle == '1' || item.linestyle == 1),
                     id: id

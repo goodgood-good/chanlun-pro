@@ -989,13 +989,20 @@ def tv_history():
                 )
 
                 def filter_shapes(shapes):
+                    """
+                    多点形态（笔/线段/中枢）：与 [from_ts, to_ts) 有重叠即保留——
+                    线段起点早于 to_ts 且终点晚于 from_ts。避免「跨可视边界」
+                    的线段被丢弃后，前端合并时永久丢失。
+                    单点形态（分型/背驰/买卖点）：点位需落在窗口内。
+                    """
                     res = []
                     for shape in shapes:
                         if isinstance(shape, dict) and "points" in shape:
                             pts = shape["points"]
                             if isinstance(pts, list) and len(pts) > 0:
-                                t = pts[-1].get("time", 0)
-                                if t >= from_ts and (to_ts == 0 or t < to_ts):
+                                t_start = pts[0].get("time", 0)
+                                t_end = pts[-1].get("time", 0)
+                                if t_end >= from_ts and (to_ts == 0 or t_start < to_ts):
                                     res.append(shape)
                             elif isinstance(pts, dict):
                                 t = pts.get("time", 0)
