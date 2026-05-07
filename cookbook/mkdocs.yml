@@ -18,7 +18,6 @@ plugins:
 
 nav:
   - 功能: 功能.md
-  - 售价与联系方式: 售价与联系方式.md
   - 项目展示: 项目展示.md
   - 更新日志: UPDATE.md
   - FAQ: FAQ.md
@@ -29,7 +28,6 @@ nav:
       - Ubuntu 安装文档: Ubuntu安装文档.md
       - Mac 安装文档: Mac安装文档.md
       - 配置文件说明: 配置文件说明.md
-      - 授权方式: 授权方式.md
       - Web页面功能: Web页面功能.md
       - JupyterLab 安装与使用: JupyterLab安装与使用.md
       - 消息推送支持图片: 消息推送支持图片.md

@@ -8,8 +8,6 @@ import telnetlib
 
 import pymysql
 import redis
-import pathlib
-import re
 
 
 def check_env():
@@ -70,23 +68,6 @@ def check_env():
         print(
             "MySQL 连接失败，请检查是否安装并运行 MySQL，并且检查配置的 ip、端口、用户名、密码、数据库 是否正确"
         )
-
-    # 检查授权信息
-    pyarmor_path = pathlib.Path().cwd() / "src" / "pyarmor_runtime_005445"
-    if (pyarmor_path / "pyarmor.rkey").is_file() is False:
-        print(" - " * 20)
-        print("授权文件不存在")
-        print("请联系作者，获取试用授权文件")
-        print(f"并将授权文件文件存放在 ：{pyarmor_path} 路径之下")
-        print(" - " * 20)
-    else:
-        with open(pyarmor_path / "pyarmor.rkey", "rb") as fp:
-            key_str = fp.read()
-            mac_re = r"([0-9a-f]{2}(?::[0-9a-f]{2}){5})"
-            key_str = str(key_str)
-            match = re.search(mac_re, key_str)
-            if match:
-                print("授权信息：", match.group(0))
 
     print("环境OK")
 

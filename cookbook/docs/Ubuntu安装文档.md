@@ -48,9 +48,7 @@
          conda activate chanlun
          python check_env.py
 
-### 6. 加作者微信，获取授权许可文件，并放置在项目中的 `src/pyarmor_runtime_005445` 目录下
-
-### 7. 到 `web/chanlun_chart` 目录，启动 web 服务
+### 6. 到 `web/chanlun_chart` 目录，启动 web 服务
 
          conda activate chanlun
          cd web/chanlun_chart
