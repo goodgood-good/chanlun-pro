@@ -128,6 +128,24 @@ class _PreemptiveQuotaExhausted(Exception):
     message = "history kline symbol count out of limit (preemptive)"
 
 
+def _quota_exhausted_advice(symbol) -> str:
+    """按 LB symbol 的市场后缀返回针对性的 fallback 建议。
+
+    旧实现硬编码 "考虑切到 alpaca: 设 config.US_HISTORY_KLINE_SOURCE = 'alpaca'"
+    会误导港股/A 股用户——alpaca 仅美股；这里按 .HK / .US / .SH/.SZ/.BJ 分支。
+    """
+    if not isinstance(symbol, str) or not symbol:
+        return "考虑等待月初配额重置，或切到非长桥数据源"
+    upper = symbol.upper()
+    if upper.endswith(".HK"):
+        return "港股建议切回通达信: 设 config.EXCHANGE_HK = 'tdx_hk'"
+    if upper.endswith(".US"):
+        return "美股建议切到 alpaca: 设 config.US_HISTORY_KLINE_SOURCE = 'alpaca'"
+    if upper.endswith((".SH", ".SZ", ".BJ")):
+        return "A 股建议切到通达信: 设 config.EXCHANGE_A = 'tdx'"
+    return "考虑等待月初配额重置，或切到非长桥数据源"
+
+
 def is_retryable_exception(exception):
     """
     判断异常是否需要重试
@@ -558,7 +576,7 @@ class ExchangeChangQiao(Exchange):
                     LogUtil.error(
                         f"Monthly quota exhausted (301607) for {code}: "
                         f"{getattr(inner, 'message', None) or str(inner)[:200]}. "
-                        f"考虑切到 alpaca: 设 config.US_HISTORY_KLINE_SOURCE = 'alpaca'"
+                        f"{_quota_exhausted_advice(code)}"
                     )
                 else:
                     LogUtil.error(
