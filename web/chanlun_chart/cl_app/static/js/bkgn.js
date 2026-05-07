@@ -140,9 +140,7 @@ var BKGN = (function () {
           title: "代码",
           width: "48%",
           templet: function (d) {
-            var market = (typeof Utils !== "undefined" && Utils.get_market) ? Utils.get_market() : "a";
-            var url = "/?market=" + encodeURIComponent(market) + "&code=" + encodeURIComponent(d.code);
-            return '<a class="symbol-code-link" href="' + url + '" target="_blank" rel="noopener">' + d.code + "</a>";
+            return '<span class="symbol-code-link">' + d.code + "</span>";
           },
         },
         { field: "name", title: "名称", width: "48%" },
