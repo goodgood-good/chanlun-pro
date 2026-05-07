@@ -173,3 +173,19 @@ src/cl_vnpy/.vntrader
 src/cl_myquant/gmcache
 # 无用的排除
 /my_debug
+
+# Codex / OMC 临时产物（保留 .omc/scientist/ 等已跟踪目录）
+.codex_debug_venv/
+.omc/state/
+.omc/sessions/
+.omc/logs/
+.omc/plans/
+.omc/research/
+.omc/project-memory.json
+.omc/notepad.md
+
+# TradingView charting_library 预压缩产物（构建生成，无需入库）
+web/chanlun_chart/cl_app/static/charting_library/bundles/*.gz
+
+# 不应入库的电子书
+*.epub
