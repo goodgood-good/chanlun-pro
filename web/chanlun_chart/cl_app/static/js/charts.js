@@ -184,6 +184,13 @@ class ChartManager {
         // reconcile 失败自动重试状态：{count, timer}，count 累计失败重试次数，
         // timer 跟踪当前已排队的 setTimeout 句柄，避免重复排队。
         this._reconcileRetry = { count: 0, timer: null };
+        // 多点形态源 key 缓存：{ [symbolKey]: { [type]: Set<string> } }
+        // 命中即 skip 整个 reconcile，避免 zoom/pan 触发不必要的全量 rebuild 闪烁。
+        this._lastReconcileSourceKeys = {};
+        // 自动补绘相关：full rebuild 后 500ms 再触发一次 rebuild，让 TV 在稳定
+        // 布局上重新落位被画错的 shape。
+        this._verifyRebuildTimer = null;
+        this._verifyingUntil = null;  // performance.now() 时间戳；在此之前所有 reconcile 都视为 verify 内部
     }
 
     getDrawingsCacheKey(symbol, interval) {
@@ -1008,17 +1015,18 @@ class ChartManager {
 
     reconcile(type, sourceList, from, symbolKey, createFunc, useUnique = true) {
         const container = this.obj_charts[symbolKey][type];
+        const beforeCount = container.length;
         let renderList = sourceList || [];
+        const sourceCount = renderList.length;
         if (useUnique) {
             renderList = this.getUniqueRenderList(renderList);
         }
+        const afterUniqueCount = renderList.length;
 
+        // 公共：先按可视窗口过滤，保留视觉密度合理（line type 历史上 bis 可达数百根，
+        // 全画出来视觉杂乱）。多点 / 单点形态都使用相同的 tailTime>=from 过滤。
         const newKeys = new Set();
         const itemsToProcess = [];
-
-        // 多点形态（笔/线段/中枢）用「末端 >= from」判定：只要线段终点
-        // 进入可视区，即便起点早于 from（线段从画外延伸进来）也保留。
-        // 单点形态（fxs/bcs/mmds）仍按「点位 >= from」判定。
         renderList.forEach(item => {
             let headTime, tailTime;
             if (Array.isArray(item.points)) {
@@ -1034,7 +1042,85 @@ class ChartManager {
             }
         });
 
-        // 1. Remove items not in new list or outside window (batch filter for O(n) performance)
+        // 多点形态走"窗口内 key 集缓存 + 集合一致就 skip + 否则全量 rebuild"路径。
+        //   全量 rebuild 是为了规避 TV 的 createMultipointShape 在不同时刻分批创建
+        //   trend_line 会让相邻段出现 1-2px 视觉断缝（toggle 之所以能"治好"就是因为
+        //   它走的是一次性重建路径）。
+        //   缓存窗口内 key 集是为了让 zoom/pan 没改变可见 shape 集合时（最常见的
+        //   微调缩放、平移在同一组形态范围内）直接 skip，不闪烁。
+        // 单点形态（fxs/bcs/mmds）保持原 incremental（无连续性问题，且数量更多）。
+        const isLineType = type === 'xds' || type === 'bis' || type === 'bi_zss' || type === 'xd_zss';
+
+        if (isLineType) {
+            if (!this._lastReconcileSourceKeys) this._lastReconcileSourceKeys = {};
+            if (!this._lastReconcileSourceKeys[symbolKey]) this._lastReconcileSourceKeys[symbolKey] = {};
+            const cachedKeys = this._lastReconcileSourceKeys[symbolKey][type];
+            const sameAsCached = cachedKeys && cachedKeys.size === newKeys.size
+                && [...newKeys].every(k => cachedKeys.has(k));
+            if (sameAsCached) {
+                console.log(`[DataVerify][Reconcile] ${type} skip (windowKeys unchanged, inWindow=${itemsToProcess.length})`);
+                return;
+            }
+
+            // 数据 / 窗口集合变了 → 全量 rebuild（一次 remove + 一次 create 保证连贯）
+            const removedCount = container.length;
+            for (const existing of container) {
+                this.safeRemove(existing.id);
+            }
+            container.length = 0;
+
+            let dispatchedCreates = 0;
+            itemsToProcess.forEach(({ item, key, time, tailTime }) => {
+                dispatchedCreates += 1;
+                const result = createFunc(item);
+                const entry = {
+                    time: time,
+                    tailTime: tailTime,
+                    key: key,
+                    isUnfinished: (item.linestyle == '1' || item.linestyle == 1),
+                };
+                if (result != null && typeof result.then === 'function') {
+                    result.then(realId => {
+                        if (realId == null) {
+                            console.warn(`[DataVerify][Reconcile] ${type} create→null key=${key.slice(0,40)}`);
+                            this._scheduleReconcileRetry(`${type}:async-null`);
+                            return;
+                        }
+                        entry.id = realId;
+                        container.push(entry);
+                    }).catch((e) => {
+                        console.warn(`[DataVerify][Reconcile] ${type} create→reject key=${key.slice(0,40)}`, e);
+                        this._scheduleReconcileRetry(`${type}:async-reject`);
+                    });
+                } else if (result != null) {
+                    entry.id = result;
+                    container.push(entry);
+                } else {
+                    console.warn(`[DataVerify][Reconcile] ${type} create→sync-null key=${key.slice(0,40)}`);
+                    this._scheduleReconcileRetry(`${type}:sync-null`);
+                }
+            });
+
+            this._lastReconcileSourceKeys[symbolKey][type] = newKeys;
+
+            console.log(
+                `[DataVerify][Reconcile] ${type} src=${sourceCount} unique=${afterUniqueCount} ` +
+                `inWindow=${itemsToProcess.length} removed=${removedCount} ` +
+                `dispatchedCreates=${dispatchedCreates} containerNow=${container.length} (full rebuild)`
+            );
+
+            // ★ 自动补绘：第一次 full rebuild 时 TV 内部布局/异步 bars 可能还在过渡，
+            //   shape 会被画到错位（用户描述："未显示的K线的线段画错"）；用户手动
+            //   toggle 时会再走一次"全清空+重建"自然修正。这里把这一步自动化：
+            //   500ms 后强制清掉缓存再 draw_chanlun 一次，让 TV 在稳定布局上重新
+            //   落位 shape。verify-rebuild 自身不会再触发下一次 verify（_isVerifyingNow 守门）。
+            if (!this._isVerifyingNow()) {
+                this._scheduleVerifyRebuild();
+            }
+            return;
+        }
+
+        // ===== 单点形态：原 incremental + 窗口过滤路径 =====
         const toKeep = [];
         for (const existing of container) {
             const existingTail = existing.tailTime ?? existing.time;
@@ -1047,15 +1133,6 @@ class ChartManager {
         container.length = 0;
         toKeep.forEach(item => container.push(item));
 
-        // 2. Create new items
-        // ★ 关键修复（2026-05）：createFunc 可能同步返回 null/undefined（chart 还没 ready
-        //   被 ChartUtils.createShape 短路，或 createMultipointShape 异常），也可能返回
-        //   promise（异步 reject 后被 safeCreate 兜成 null）。两种"创建失败"路径下，
-        //   旧逻辑都把失败结果当 id 写进 container，下次 reconcile 时 existingKeys.has(key)
-        //   命中就跳过重试 → 这一段 shape 永远画不出。表现：图上线段不连续，但用户
-        //   "取消显示再显示"会清空 container 触发全量重建（此时 chart 已 ready）就好了。
-        //   修复：同步失败不 push；promise 路径 await resolve，失败不 push，成功后再 push。
-        //   兜底：失败时调度自动重试，不依赖用户手动操作。
         const existingKeys = new Set(container.map(item => item.key));
         itemsToProcess.forEach(({ item, key, time, tailTime }) => {
             if (existingKeys.has(key)) return;
@@ -1067,7 +1144,6 @@ class ChartManager {
                 isUnfinished: (item.linestyle == '1' || item.linestyle == 1),
             };
             if (result != null && typeof result.then === 'function') {
-                // 异步：promise resolve 拿到 id 才 push；resolve 为 null 视为失败 → 调度重试
                 result.then(realId => {
                     if (realId == null) {
                         this._scheduleReconcileRetry(`${type}:async-null`);
@@ -1076,15 +1152,12 @@ class ChartManager {
                     entry.id = realId;
                     container.push(entry);
                 }).catch(() => {
-                    // safeCreate 已 catch；这里兜底防 unhandled，并触发重试
                     this._scheduleReconcileRetry(`${type}:async-reject`);
                 });
             } else if (result != null) {
-                // 同步成功
                 entry.id = result;
                 container.push(entry);
             } else {
-                // 同步返回 null/undefined → chart 未 ready，调度重试
                 this._scheduleReconcileRetry(`${type}:sync-null`);
             }
         });
@@ -1100,14 +1173,16 @@ class ChartManager {
             this._reconcileRetry = { count: 0, timer: null };
         }
         const state = this._reconcileRetry;
-        if (state.count >= 6) return;          // 最多 6 次（约 0.4+0.8+1.6+3.2+6.4+12.8≈25s）
+        if (state.count >= 7) return;          // 最多 7 次：100→200→400→800→1600→3200→6400ms ≈ 12.7s
         if (state.timer) return;               // 已排队，避免叠加
-        const delayMs = Math.min(400 * Math.pow(2, state.count), 12800);
+        const delayMs = Math.min(100 * Math.pow(2, state.count), 6400);
         state.count += 1;
         state.timer = setTimeout(() => {
             state.timer = null;
             console.log(`[CHANLUN-TIMING] reconcile retry #${state.count} (${reason}) after ${delayMs}ms`);
-            this.debouncedDrawChanlun();
+            // 绕过 debouncedDrawChanlun：用户持续缩放会让 visibleRangeChange 不停 reset
+            // 300ms 防抖，retry 通过 debounced 路径会被无限期延后；直接调用 draw_chanlun。
+            this.draw_chanlun();
         }, delayMs);
     }
 
@@ -1116,6 +1191,40 @@ class ChartManager {
             clearTimeout(this._reconcileRetry.timer);
         }
         this._reconcileRetry = { count: 0, timer: null };
+        // 清除场景下同步清掉 source key 缓存，否则下次源数据相同时会被误 skip
+        this._lastReconcileSourceKeys = {};
+        // 同时取消 pending verify-rebuild
+        if (this._verifyRebuildTimer) {
+            clearTimeout(this._verifyRebuildTimer);
+            this._verifyRebuildTimer = null;
+        }
+        this._verifyingUntil = null;
+    }
+
+    // ★ 自动补绘调度：full rebuild 后定时再做一次 rebuild。
+    //   多次 full rebuild 期间 timer 会被 reset，最终只在最后一次 rebuild 后 500ms
+    //   触发一次 verify-rebuild。verify-rebuild 内部走 draw_chanlun 时打开
+    //   _isVerifyingNow() 守门，避免它自己又排队下一次 verify。
+    //   守门用 timestamp 而非微任务标志：draw_chanlun 是 async，用 microtask 重置
+    //   标志会在它的第一个 await（setTimeout 0）之前就跑掉，导致 verify 自身的
+    //   reconcile 再排一次 verify → 每 500ms 自触发循环。改用"在 verify 起点
+    //   后 X ms 内一律视为正在 verify"，1500ms 足够覆盖 draw_chanlun 走完一遍。
+    _scheduleVerifyRebuild() {
+        if (this._verifyRebuildTimer) {
+            clearTimeout(this._verifyRebuildTimer);
+        }
+        this._verifyRebuildTimer = setTimeout(() => {
+            this._verifyRebuildTimer = null;
+            this._verifyingUntil = performance.now() + 1500;
+            // 清掉缓存确保 reconcile 走全量 rebuild 路径，重新基于稳定布局落位 shape
+            this._lastReconcileSourceKeys = {};
+            console.log(`[CHANLUN-TIMING] verify-rebuild firing`);
+            this.draw_chanlun();
+        }, 500);
+    }
+
+    _isVerifyingNow() {
+        return this._verifyingUntil != null && performance.now() < this._verifyingUntil;
     }
 
     initChartContainer(symbolKey) {
