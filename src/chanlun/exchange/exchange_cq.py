@@ -665,16 +665,16 @@ class ExchangeChangQiao(Exchange):
         # 在请求边界一次性转换, 输出 DataFrame 的 code 列继续保留项目格式不变。
         lb_symbol = self._to_lb_symbol(code)
 
-        # 1. 默认回看周期配置
+        # 1. 默认回看周期配置（与 alpaca/polygon 对齐：所有市场使用同一组 lookback）
         DEFAULT_LOOKBACK = {
-            "1m": timedelta(days=30),
-            "5m": timedelta(days=90),
-            "15m": timedelta(days=180),
-            "30m": timedelta(days=365),
-            "60m": timedelta(days=365 * 2),
-            "d": timedelta(days=365 * 3),
-            "w": timedelta(days=365 * 10),
-            "m": timedelta(days=365 * 30),
+            "1m": timedelta(days=60),
+            "5m": timedelta(days=365),
+            "15m": timedelta(days=730),
+            "30m": timedelta(days=1095),
+            "60m": timedelta(days=1825),
+            "d": timedelta(days=7300),
+            "w": timedelta(days=10950),
+            "m": timedelta(days=10950),
         }
 
         # 2. 时间标准化处理

@@ -150,24 +150,33 @@ class ExchangeFutu(Exchange):
                     end_datetime = dt.datetime(
                         *time.strptime(end_date, time_format)[:6]
                     )
+                    # 与 alpaca/polygon/cq 对齐：所有市场使用同一组 lookback
                     if frequency == "1m":
-                        start_date = (end_datetime - dt.timedelta(days=5)).strftime(
+                        start_date = (end_datetime - dt.timedelta(days=60)).strftime(
                             time_format
                         )
                     elif frequency == "5m":
-                        start_date = (end_datetime - dt.timedelta(days=25)).strftime(
+                        start_date = (end_datetime - dt.timedelta(days=365)).strftime(
+                            time_format
+                        )
+                    elif frequency == "15m":
+                        start_date = (end_datetime - dt.timedelta(days=730)).strftime(
                             time_format
                         )
                     elif frequency == "30m":
-                        start_date = (end_datetime - dt.timedelta(days=150)).strftime(
+                        start_date = (end_datetime - dt.timedelta(days=1095)).strftime(
+                            time_format
+                        )
+                    elif frequency == "60m":
+                        start_date = (end_datetime - dt.timedelta(days=1825)).strftime(
                             time_format
                         )
                     elif frequency == "d":
-                        start_date = (end_datetime - dt.timedelta(days=1500)).strftime(
+                        start_date = (end_datetime - dt.timedelta(days=7300)).strftime(
                             time_format
                         )
                     elif frequency == "w":
-                        start_date = (end_datetime - dt.timedelta(days=2500)).strftime(
+                        start_date = (end_datetime - dt.timedelta(days=10950)).strftime(
                             time_format
                         )
                 ret, kline, pk = CTX().request_history_kline(

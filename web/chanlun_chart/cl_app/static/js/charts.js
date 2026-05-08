@@ -181,6 +181,9 @@ class ChartManager {
         this._saveScheduled = false;
         this._saveInFlight = null;
         this._barReadyHandler = null;
+        // reconcile 失败自动重试状态：{count, timer}，count 累计失败重试次数，
+        // timer 跟踪当前已排队的 setTimeout 句柄，避免重复排队。
+        this._reconcileRetry = { count: 0, timer: null };
     }
 
     getDrawingsCacheKey(symbol, interval) {
@@ -326,6 +329,8 @@ class ChartManager {
             //   有概率只显示最新一段"的根因。
             //   修复：与 chart 状态同步置空 obj_charts，让 reconcile 走"全量重建"路径。
             this.obj_charts = {};
+            // 全量重建路径同样需要重置失败重试计数
+            this._resetReconcileRetry();
             if (!this.isTokenCurrent(token)) {
                 return false;
             }
@@ -914,6 +919,9 @@ class ChartManager {
 
     clear_draw_chanlun(clear_type) {
         this.markDrawingMutationStart('chanlun-clear');
+        // 全量/末段清除都让 reconcile 走重新创建路径，重置失败重试计数
+        // 避免上次首屏未 ready 攒到上限后影响切换/清除后的新一轮重试
+        this._resetReconcileRetry();
         const removePromises = [];
         if (clear_type == "last") {
             for (const symbolKey in this.obj_charts) {
@@ -1040,19 +1048,74 @@ class ChartManager {
         toKeep.forEach(item => container.push(item));
 
         // 2. Create new items
+        // ★ 关键修复（2026-05）：createFunc 可能同步返回 null/undefined（chart 还没 ready
+        //   被 ChartUtils.createShape 短路，或 createMultipointShape 异常），也可能返回
+        //   promise（异步 reject 后被 safeCreate 兜成 null）。两种"创建失败"路径下，
+        //   旧逻辑都把失败结果当 id 写进 container，下次 reconcile 时 existingKeys.has(key)
+        //   命中就跳过重试 → 这一段 shape 永远画不出。表现：图上线段不连续，但用户
+        //   "取消显示再显示"会清空 container 触发全量重建（此时 chart 已 ready）就好了。
+        //   修复：同步失败不 push；promise 路径 await resolve，失败不 push，成功后再 push。
+        //   兜底：失败时调度自动重试，不依赖用户手动操作。
         const existingKeys = new Set(container.map(item => item.key));
         itemsToProcess.forEach(({ item, key, time, tailTime }) => {
-            if (!existingKeys.has(key)) {
-                const id = createFunc(item);
-                container.push({
-                    time: time,
-                    tailTime: tailTime,
-                    key: key,
-                    isUnfinished: (item.linestyle == '1' || item.linestyle == 1),
-                    id: id
+            if (existingKeys.has(key)) return;
+            const result = createFunc(item);
+            const entry = {
+                time: time,
+                tailTime: tailTime,
+                key: key,
+                isUnfinished: (item.linestyle == '1' || item.linestyle == 1),
+            };
+            if (result != null && typeof result.then === 'function') {
+                // 异步：promise resolve 拿到 id 才 push；resolve 为 null 视为失败 → 调度重试
+                result.then(realId => {
+                    if (realId == null) {
+                        this._scheduleReconcileRetry(`${type}:async-null`);
+                        return;
+                    }
+                    entry.id = realId;
+                    container.push(entry);
+                }).catch(() => {
+                    // safeCreate 已 catch；这里兜底防 unhandled，并触发重试
+                    this._scheduleReconcileRetry(`${type}:async-reject`);
                 });
+            } else if (result != null) {
+                // 同步成功
+                entry.id = result;
+                container.push(entry);
+            } else {
+                // 同步返回 null/undefined → chart 未 ready，调度重试
+                this._scheduleReconcileRetry(`${type}:sync-null`);
             }
         });
+    }
+
+    // ★ 失败重试调度：reconcile 中 createFunc 返回 null（chart 未 ready）时，
+    //   定时再触发一次 debouncedDrawChanlun 让缺失 shape 重新创建。
+    //   过去仅依赖 visibleRangeChange / interval 切换 / 用户切换显示开关来重试，
+    //   首屏数据加载完毕但 chart 仍未完成布局时极易丢失若干 shape，导致线段不连续。
+    //   通过指数退避并限制次数，避免重试风暴。
+    _scheduleReconcileRetry(reason) {
+        if (!this._reconcileRetry) {
+            this._reconcileRetry = { count: 0, timer: null };
+        }
+        const state = this._reconcileRetry;
+        if (state.count >= 6) return;          // 最多 6 次（约 0.4+0.8+1.6+3.2+6.4+12.8≈25s）
+        if (state.timer) return;               // 已排队，避免叠加
+        const delayMs = Math.min(400 * Math.pow(2, state.count), 12800);
+        state.count += 1;
+        state.timer = setTimeout(() => {
+            state.timer = null;
+            console.log(`[CHANLUN-TIMING] reconcile retry #${state.count} (${reason}) after ${delayMs}ms`);
+            this.debouncedDrawChanlun();
+        }, delayMs);
+    }
+
+    _resetReconcileRetry() {
+        if (this._reconcileRetry && this._reconcileRetry.timer) {
+            clearTimeout(this._reconcileRetry.timer);
+        }
+        this._reconcileRetry = { count: 0, timer: null };
     }
 
     initChartContainer(symbolKey) {

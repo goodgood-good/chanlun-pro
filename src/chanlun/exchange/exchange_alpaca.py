@@ -133,21 +133,23 @@ class ExchangeAlpaca(Exchange):
 
             if start_date is None:
                 if frequency == "1m":
-                    start_date = end_date - dt.timedelta(days=15)
+                    start_date = end_date - dt.timedelta(days=60)
                 elif frequency == "5m":
-                    start_date = end_date - dt.timedelta(days=15)
+                    start_date = end_date - dt.timedelta(days=365)
+                elif frequency == "15m":
+                    start_date = end_date - dt.timedelta(days=730)
                 elif frequency == "30m":
-                    start_date = end_date - dt.timedelta(days=75)
+                    start_date = end_date - dt.timedelta(days=1095)
                 elif frequency == "60m":
-                    start_date = end_date - dt.timedelta(days=150)
+                    start_date = end_date - dt.timedelta(days=1825)
                 elif frequency == "120m":
-                    start_date = end_date - dt.timedelta(days=150)
+                    start_date = end_date - dt.timedelta(days=1825)
                 elif frequency == "d":
-                    start_date = end_date - dt.timedelta(days=5000)
+                    start_date = end_date - dt.timedelta(days=7300)
                 elif frequency == "w":
-                    start_date = end_date - dt.timedelta(days=7800)
+                    start_date = end_date - dt.timedelta(days=10950)
                 elif frequency == "y":
-                    start_date = end_date - dt.timedelta(days=15000)
+                    start_date = end_date - dt.timedelta(days=18250)
             else:
                 start_date = _to_datetime(start_date)
 

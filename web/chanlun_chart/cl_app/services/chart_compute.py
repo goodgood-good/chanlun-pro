@@ -118,6 +118,7 @@ chart_calc_locks = _SafeLockRegistry()
 # ---------------- chart data 合并（纯函数）----------------
 
 def _shape_time(shape):
+    """末点 time（仅排序用）。"""
     if not isinstance(shape, dict):
         return None
     points = shape.get("points")
@@ -130,25 +131,45 @@ def _shape_time(shape):
     return None
 
 
+def _shape_id(shape):
+    """身份键：起点 (time, price)。
+    一根线段/中枢从某个起点出发任意时刻只该有一个版本——
+    末点会随 K 线包含合并漂移、linestyle 会从 1 翻成 0，
+    用末点做去重会让"同一身份的新旧两版"同时保留 → 视觉上线段重叠/断裂。
+    单点形态（fxs/bcs/mmds）的 (time, price) 也唯一。
+    """
+    if not isinstance(shape, dict):
+        return None
+    points = shape.get("points")
+    if isinstance(points, list) and len(points) > 0:
+        first = points[0]
+        if isinstance(first, dict):
+            return (first.get("time"), first.get("price"))
+    if isinstance(points, dict):
+        return (points.get("time"), points.get("price"))
+    return None
+
+
 def _merge_shape_lists(existing_shapes, new_shapes):
-    if not existing_shapes:
-        return list(new_shapes or [])
-    if not new_shapes:
-        return list(existing_shapes or [])
-
-    new_times = [t for t in (_shape_time(shape) for shape in new_shapes) if t is not None]
-    if len(new_times) == 0:
-        return list(existing_shapes or [])
-
-    min_time = min(new_times)
-    max_time = max(new_times)
-    merged = []
-    for shape in existing_shapes:
-        shape_time = _shape_time(shape)
-        if shape_time is None or shape_time < min_time or shape_time > max_time:
-            merged.append(shape)
-    merged.extend(new_shapes)
-    return sorted(merged, key=lambda shape: (_shape_time(shape) or 0))
+    """按起点身份合并去重，新覆盖旧。
+    旧实现按 new 数据的 end_time 区间切割旧数据：
+    增量更新时新数据可能没覆盖到中间某段而中间段 end_time 却落在区间内
+    → 中间段被永久删除 → 线段不连续。
+    未完成段／中枢则起点稳定末点漂移，每次累积一份"双胞胎"。
+    起点身份键能同时解决两类问题。
+    """
+    if not existing_shapes and not new_shapes:
+        return []
+    merged = {}
+    for shape in (existing_shapes or []):
+        sid = _shape_id(shape)
+        if sid is not None:
+            merged[sid] = shape
+    for shape in (new_shapes or []):
+        sid = _shape_id(shape)
+        if sid is not None:
+            merged[sid] = shape  # 新版本覆盖旧
+    return sorted(merged.values(), key=lambda s: (_shape_time(s) or 0))
 
 
 def _merge_chart_data(existing_data: dict, new_data: dict):

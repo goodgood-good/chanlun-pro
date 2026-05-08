@@ -396,17 +396,14 @@
                         const validNewSegments = newSegments.filter((segment) => Array.isArray(segment.points) && segment.points.length > 0 && segment.points[0] && segment.points[0].time !== undefined && segment.points[0].time !== null);
                         if (validNewSegments.length === 0)
                             return existingSegments || [];
-                        // 改为 key 合并去重：避免按 minResponseTime 切割导致「起点在窗口内、
-                        // 终点在窗口外」的跨界线段在 backward 历史响应处理中被永久丢弃。
-                        // 未完成线段（linestyle=1）以 起点+linestyle 为 key，让新版本覆盖旧版本。
+                        // 身份 key：仅用起点 (head.time, head.price)。
+                        // 一根线段从某个起点出发任意时刻只该有一个版本——
+                        // 端点(tail)随 K 线包含合并会漂移、linestyle 会从 1 翻成 0，
+                        // 把它们写进 key 会让同一根段的新旧两版同时保留 → 视觉上线段重叠/断裂。
+                        // 用 head 作身份，Map.set 让最新版本覆盖旧版本。
                         const segmentKey = (s) => {
-                            const pts = s.points;
-                            const head = pts[0];
-                            if (s.linestyle == '1' || s.linestyle == 1) {
-                                return `unfinished_${head.time}_${head.price}_1`;
-                            }
-                            const tail = pts[pts.length - 1];
-                            return `${head.time}_${head.price}_${tail.time}_${tail.price}_${s.linestyle || 0}`;
+                            const head = s.points[0];
+                            return `${head.time}_${head.price}`;
                         };
                         const merged = new Map();
                         for (const segment of existingSegments) {

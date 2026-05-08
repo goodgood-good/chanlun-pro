@@ -142,14 +142,15 @@ class ExchangeBaostock(Exchange):
             "15m": "15",
             "5m": "5",
         }
+        # 与 alpaca/polygon/cq/futu 对齐：所有市场使用同一组 lookback
         default_start_day_map = {
-            "m": 5000,
-            "w": 5000,
-            "d": 1000,
-            "60m": 200,
-            "30m": 100,
-            "15m": 60,
-            "5m": 20,
+            "m": 10950,
+            "w": 10950,
+            "d": 7300,
+            "60m": 1825,
+            "30m": 1095,
+            "15m": 730,
+            "5m": 365,
         }
         if frequency not in frequency_map:
             raise Exception("不支持的周期 : " + frequency)
