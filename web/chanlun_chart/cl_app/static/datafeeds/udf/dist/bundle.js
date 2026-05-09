@@ -77,9 +77,10 @@
             this._requester = requester;
             this._limitedServerResponse = limitedServerResponse;
             this._options = options;
-            this.bars_result = new Map();
             this._barsResultMaxSize = options.barsResultMaxSize || 100;
+            this.bars_result = new Map();
         }
+        /** 把 bars_result 裁到 _barsResultMaxSize 以内，按插入顺序淘汰最老条目。 */
         _pruneBarsResult() {
             while (this.bars_result.size > this._barsResultMaxSize) {
                 const oldestKey = this.bars_result.keys().next().value;
@@ -89,6 +90,10 @@
                 this.bars_result.delete(oldestKey);
             }
         }
+        /**
+         * TV onResetCacheNeeded 触发时清掉对应 symbol+resolution 的缓存。
+         * 由 UDFCompatibleDatafeedBase.subscribeBars 注册的 reset 回调调用。
+         */
         _clearBarsResultForSymbolResolution(symbol, resolution) {
             if (!symbol || !resolution) {
                 return;
@@ -96,21 +101,9 @@
             const resKey = String(symbol).toLowerCase() + String(resolution).toLowerCase();
             this.bars_result.delete(resKey);
         }
+        /** 通知前端：bars_result[resKey] 已就绪，可以读出来画缠论了。 */
         _emitBarsReady(resKey, requestParams) {
             try {
-                const obj = this.bars_result.get(resKey);
-                if (obj) {
-                    console.log("[DataVerify][Datafeed] emitBarsReady key=" + resKey, {
-                        bars: obj.bars ? obj.bars.length : 0,
-                        fxs: obj.fxs ? obj.fxs.length : 0,
-                        bis: obj.bis ? obj.bis.length : 0,
-                        xds: obj.xds ? obj.xds.length : 0,
-                        zsds: obj.zsds ? obj.zsds.length : 0,
-                        bi_zss: obj.bi_zss ? obj.bi_zss.length : 0,
-                        bcs: obj.bcs ? obj.bcs.length : 0,
-                        mmds: obj.mmds ? obj.mmds.length : 0,
-                    });
-                }
                 window.dispatchEvent(new CustomEvent('chanlun-bars-ready', {
                     detail: {
                         key: resKey,
@@ -120,7 +113,7 @@
                     }
                 }));
             }
-            catch (e) { }
+            catch (e) { /* SSR 或测试环境无 window 时静默忽略 */ }
         }
         getBars(symbolInfo, resolution, periodParams) {
             const requestParams = {
@@ -179,8 +172,6 @@
                         requestParams.to = Math.round(result.bars[0].time / 1000);
                     }
                     const followupResponse = await this._requester.sendRequest(this._datafeedUrl, "history", requestParams);
-                    // 分页后续请求必须使用合并模式，避免覆盖前一页的 MACD 数据
-                    followupResponse.update = true;
                     const followupResult = this._processHistoryResponse(followupResponse, requestParams);
                     lastResultLength = followupResult.bars.length;
                     // merge result with results collected so far
@@ -229,31 +220,6 @@
                 meta.nextTime = response.nextTime;
             }
             else {
-                // Trim future bars from response before processing
-                const nowSec = Math.floor(Date.now() / 1000);
-                let futureIdx = response.t.length;
-                for (let fi = 0; fi < response.t.length; fi++) {
-                    if (response.t[fi] > nowSec) {
-                        futureIdx = fi;
-                        break;
-                    }
-                }
-                if (futureIdx < response.t.length) {
-                    console.log(`HistoryProvider: trimmed ${response.t.length - futureIdx} future bar(s)`);
-                    response.t = response.t.slice(0, futureIdx);
-                    response.c = response.c.slice(0, futureIdx);
-                    if (response.o) response.o = response.o.slice(0, futureIdx);
-                    if (response.h) response.h = response.h.slice(0, futureIdx);
-                    if (response.l) response.l = response.l.slice(0, futureIdx);
-                    if (response.v) response.v = response.v.slice(0, futureIdx);
-                    if (response.macd_dif) response.macd_dif = response.macd_dif.slice(0, futureIdx);
-                    if (response.macd_dea) response.macd_dea = response.macd_dea.slice(0, futureIdx);
-                    if (response.macd_hist) response.macd_hist = response.macd_hist.slice(0, futureIdx);
-                    if (response.macd_area) response.macd_area = response.macd_area.slice(0, futureIdx);
-                    if (response.higher_macd_dif) response.higher_macd_dif = response.higher_macd_dif.slice(0, futureIdx);
-                    if (response.higher_macd_dea) response.higher_macd_dea = response.higher_macd_dea.slice(0, futureIdx);
-                    if (response.higher_macd_hist) response.higher_macd_hist = response.higher_macd_hist.slice(0, futureIdx);
-                }
                 const volumePresent = response.v !== undefined;
                 const ohlPresent = response.o !== undefined;
                 for (let i = 0; i < response.t.length; ++i) {
@@ -299,10 +265,7 @@
                         let val = newArr[i];
                         if (val === null || val === undefined)
                             val = NaN;
-                        // 仅当新值有效时才覆盖，避免 NaN 覆盖已有的有效值
-                        if (!Number.isNaN(val) || !map.has(t) || Number.isNaN(map.get(t))) {
-                            map.set(t, val);
-                        }
+                        map.set(t, val);
                     });
                     const allTimes = Array.from(new Set([...existingTimes, ...newTimes])).sort((a, b) => a - b);
                     return {
@@ -357,85 +320,80 @@
                             return existingPoints || [];
                         if (!existingPoints || existingPoints.length === 0)
                             return newPoints;
+                        // 获取点位时间的辅助函数，处理points可能是对象或数组的情况
                         const getPointTime = (point) => {
-                            if (!point || !point.points)
-                                return null;
                             if (Array.isArray(point.points)) {
-                                if (!point.points[0])
-                                    return null;
+                                // 如果是数组，取第一个元素的time
                                 return point.points[0].time;
                             }
-                            return point.points.time;
+                            else {
+                                // 如果是单个对象，直接取time
+                                return point.points.time;
+                            }
                         };
-                        const validNewPoints = newPoints.filter((point) => getPointTime(point) !== null && getPointTime(point) !== undefined);
-                        if (validNewPoints.length === 0)
-                            return existingPoints || [];
-                        const newTimes = validNewPoints.map(getPointTime);
-                        const minResponseTime = Math.min(...newTimes);
-                        const maxResponseTime = Math.max(...newTimes);
+                        const minResponseTime = Math.min(...newPoints.map(getPointTime));
                         const updatedPoints = [];
+                        // 保留小于最小时间点的数据
                         for (const point of existingPoints) {
-                            const pointTime = getPointTime(point);
-                            if (pointTime !== null && pointTime !== undefined) {
-                                // Keep points OUTSIDE the response window
-                                if (pointTime < minResponseTime || pointTime > maxResponseTime) {
-                                    updatedPoints.push(point);
-                                }
+                            if (getPointTime(point) < minResponseTime) {
+                                updatedPoints.push(point);
                             }
                         }
-                        for (const point of validNewPoints) {
+                        // 添加返回数据中剩余的新点位
+                        for (const point of newPoints) {
                             updatedPoints.push(point);
                         }
+                        // 按时间排序，使用getPointTime辅助函数获取时间
                         return updatedPoints.sort((a, b) => getPointTime(a) - getPointTime(b));
                     };
+                    // 处理LineSegment类型数据（bis, xds, bi_zss, xd_zss）
+                    // 用 key 合并去重：避免按 minResponseTime 切割导致「起点在窗口内、
+                    // 终点在窗口外」的跨界线段在 backward 历史响应处理中被永久丢弃。
+                    // 未完成线段（linestyle=1）以 起点+linestyle 为 key，让新版本覆盖旧版本。
                     const updateLineSegments = (existingSegments, newSegments) => {
                         if (!newSegments || newSegments.length === 0)
                             return existingSegments || [];
                         if (!existingSegments || existingSegments.length === 0)
                             return newSegments;
-                        const validNewSegments = newSegments.filter((segment) => Array.isArray(segment.points) && segment.points.length > 0 && segment.points[0] && segment.points[0].time !== undefined && segment.points[0].time !== null);
-                        if (validNewSegments.length === 0)
-                            return existingSegments || [];
                         // 身份 key：仅用起点 (head.time, head.price)。
-                        // 一根线段从某个起点出发任意时刻只该有一个版本——
-                        // 端点(tail)随 K 线包含合并会漂移、linestyle 会从 1 翻成 0，
-                        // 把它们写进 key 会让同一根段的新旧两版同时保留 → 视觉上线段重叠/断裂。
-                        // 用 head 作身份，Map.set 让最新版本覆盖旧版本。
+                        // 一根线段从某个起点出发，任意时刻只该有一个版本——
+                        // 端点(tail)随 K 线包含合并会漂移（CLKline.k.date 会变），
+                        // linestyle 也会从 1(未完成) 翻成 0(完成)，
+                        // 把它们写进 key 会让"同一根段的新旧两版"都被保留 → 视觉上线段重叠/断裂。
+                        // 用 head 作为身份，Map.set 让最新版本覆盖旧版本即可。
                         const segmentKey = (s) => {
                             const head = s.points[0];
                             return `${head.time}_${head.price}`;
                         };
                         const merged = new Map();
                         for (const segment of existingSegments) {
-                            if (Array.isArray(segment.points) && segment.points.length > 0) {
+                            if (segment.points.length > 0) {
                                 merged.set(segmentKey(segment), segment);
                             }
                         }
-                        for (const segment of validNewSegments) {
-                            merged.set(segmentKey(segment), segment);
+                        for (const segment of newSegments) {
+                            if (segment.points.length > 0) {
+                                merged.set(segmentKey(segment), segment);
+                            }
                         }
                         return Array.from(merged.values()).sort((a, b) => {
-                            const at = (Array.isArray(a.points) && a.points[0]) ? a.points[0].time : -Infinity;
-                            const bt = (Array.isArray(b.points) && b.points[0]) ? b.points[0].time : -Infinity;
-                            return at - bt;
+                            if (a.points.length === 0 && b.points.length === 0)
+                                return 0;
+                            if (a.points.length === 0)
+                                return -1;
+                            if (b.points.length === 0)
+                                return 1;
+                            return a.points[0].time - b.points[0].time;
                         });
                     };
+                    // 更新所有数据
                     obj_res.fxs = updateTextPoints(obj_res.fxs, response.fxs);
                     obj_res.bis = updateLineSegments(obj_res.bis, response.bis);
                     obj_res.xds = updateLineSegments(obj_res.xds, response.xds);
-                    obj_res.zsds = updateLineSegments(obj_res.zsds, response.zsds);
                     obj_res.bi_zss = updateLineSegments(obj_res.bi_zss, response.bi_zss);
                     obj_res.xd_zss = updateLineSegments(obj_res.xd_zss, response.xd_zss);
-                    obj_res.zsd_zss = updateLineSegments(obj_res.zsd_zss, response.zsd_zss);
                     obj_res.bcs = updateTextPoints(obj_res.bcs, response.bcs);
                     obj_res.mmds = updateTextPoints(obj_res.mmds, response.mmds);
-                    // Fix: Merge new bars into obj_res.bars so handleTick can detect new bar times
-                    if (bars.length > 0) {
-                        const newBarTimes = new Set(bars.map(b => b.time));
-                        obj_res.bars = obj_res.bars.filter(b => !newBarTimes.has(b.time));
-                        obj_res.bars.push(...bars);
-                        obj_res.bars.sort((a, b) => a.time - b.time);
-                    }
                     obj_res.chart_color = response.chart_color;
                     const oldTimes = obj_res.times || [];
                     const difObj = mergeAlignedArrays(oldTimes, obj_res.macd_dif, raw_times, macd_dif);
@@ -536,10 +494,7 @@
             if (!this._subscribers.hasOwnProperty(listenerGuid)) {
                 return;
             }
-            // Filter out future bars to prevent time order violations
-            // Exchange may return bars with end-of-period timestamps ahead of current time
-            const nowMs = Date.now();
-            const bars = result.bars.filter(b => b.time <= nowMs);
+            const bars = result.bars;
             if (bars.length === 0) {
                 return;
             }
@@ -552,11 +507,11 @@
             // Pulse updating may miss some trades data (ie, if pulse period = 10 secods and new bar is started 5 seconds later after the last update, the
             // old bar's last 5 seconds trades will be lost). Thus, at fist we should broadcast old bar updates when it's ready.
             if (isNewBar) {
-                if (bars.length >= 2) {
-                    const previousBar = bars[bars.length - 2];
-                    subscriptionRecord.listener(previousBar);
+                if (bars.length < 2) {
+                    throw new Error('Not enough bars in history for proper pulse update. Need at least 2.');
                 }
-                // If bars.length < 2 (e.g. future bar was filtered out), skip previous bar update
+                const previousBar = bars[bars.length - 2];
+                subscriptionRecord.listener(previousBar);
             }
             subscriptionRecord.lastBarTime = lastBar.time;
             subscriptionRecord.listener(lastBar);
@@ -851,9 +806,9 @@
         constructor(datafeedURL, quotesProvider, requester, updateFrequency = 10 * 1000, limitedServerResponse, options = {}) {
             this._configuration = defaultConfiguration();
             this._symbolsStorage = null;
+            this._subscribersResetCallbacks = {};
             this._datafeedURL = datafeedURL;
             this._requester = requester;
-            this._options = options;
             this._historyProvider = new HistoryProvider(datafeedURL, this._requester, limitedServerResponse, options);
             this._quotesProvider = quotesProvider;
             this._dataPulseProvider = new DataPulseProvider(this._historyProvider, updateFrequency);
@@ -1073,9 +1028,11 @@
         }
         subscribeBars(symbolInfo, resolution, onTick, listenerGuid, _onResetCacheNeededCallback) {
             this._dataPulseProvider.subscribeBars(symbolInfo, resolution, onTick, listenerGuid);
+            // TV 通过 onResetCacheNeeded 通知 datafeed 当前 symbol+resolution 的缓存需要清空
+            // （比如盘后数据修正、合约换月等）。我们在原回调外再清掉 bars_result，避免缠论形态
+            // 还基于已失效的 bars 渲染。
             if (_onResetCacheNeededCallback) {
                 const originalCallback = _onResetCacheNeededCallback;
-                this._subscribersResetCallbacks = this._subscribersResetCallbacks || {};
                 this._subscribersResetCallbacks[listenerGuid] = () => {
                     this._historyProvider._clearBarsResultForSymbolResolution(symbolInfo.ticker || symbolInfo.name, resolution);
                     originalCallback();
@@ -1085,9 +1042,7 @@
         }
         unsubscribeBars(listenerGuid) {
             this._dataPulseProvider.unsubscribeBars(listenerGuid);
-            if (this._subscribersResetCallbacks) {
-                delete this._subscribersResetCallbacks[listenerGuid];
-            }
+            delete this._subscribersResetCallbacks[listenerGuid];
         }
         _requestConfiguration() {
             return this._send('config')

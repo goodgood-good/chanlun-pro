@@ -409,9 +409,16 @@ class ChartManager {
         if (detail.resolution && detail.resolution !== identity.interval.toLowerCase()) {
             return;
         }
-        console.log(`[CHANLUN-TIMING] @${performance.now().toFixed(0)}ms handleBarsReadyEvent ✓ symbol=${detail.symbol} res=${detail.resolution} bars=${detail.bars || '?'} fxs=${detail.fxs || '?'} bis=${detail.bis || '?'} xds=${detail.xds || '?'}`);
+        const wasInitialLoad = !this._initialLoadDone;
+        console.log(`[CHANLUN-TIMING] @${performance.now().toFixed(0)}ms handleBarsReadyEvent ✓ symbol=${detail.symbol} res=${detail.resolution} bars=${detail.bars || '?'} fxs=${detail.fxs || '?'} bis=${detail.bis || '?'} xds=${detail.xds || '?'} wasInitialLoad=${wasInitialLoad}`);
         this._initialLoadDone = true;
-        this.debouncedDrawChanlun();
+        // 切换标的/周期后第一次 bars 到达：跳过 300ms debounce 直接重绘，缩短感知延迟。
+        // 后续 tick / visibleRangeChange / 配置变更仍走 debouncedDrawChanlun 防抖。
+        if (wasInitialLoad) {
+            this.draw_chanlun();
+        } else {
+            this.debouncedDrawChanlun();
+        }
     }
 
     init() {

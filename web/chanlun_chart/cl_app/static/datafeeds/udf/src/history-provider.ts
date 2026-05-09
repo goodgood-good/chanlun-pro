@@ -123,21 +123,78 @@ export interface LimitedResponseConfiguration {
   expectedOrder: "latestFirst" | "earliestFirst";
 }
 
+export interface HistoryProviderOptions {
+  /**
+   * bars_result 的 LRU 上限。默认 100。
+   * 用户长时间在多标的多周期间反复切换，bars_result 会无限增长 → 内存泄漏。
+   * 超过上限时按插入顺序淘汰最老条目（Map 的迭代顺序即插入顺序）。
+   */
+  barsResultMaxSize?: number;
+  /**
+   * 多图表时用于事件分发：每个 datafeed 实例绑定一个 managerId，
+   * dispatch 'chanlun-bars-ready' 时回填到 detail，前端 ChartManager 据此过滤
+   * 只响应自己 datafeed 触发的事件。
+   */
+  managerId?: string | null;
+}
+
 export class HistoryProvider {
   private _datafeedUrl: string;
   private readonly _requester: IRequester;
   private readonly _limitedServerResponse?: LimitedResponseConfiguration;
+  private readonly _options: HistoryProviderOptions;
+  private readonly _barsResultMaxSize: number;
   public bars_result: Map<string, GetBarsResult>;
 
   public constructor(
     datafeedUrl: string,
     requester: IRequester,
-    limitedServerResponse?: LimitedResponseConfiguration
+    limitedServerResponse?: LimitedResponseConfiguration,
+    options: HistoryProviderOptions = {}
   ) {
     this._datafeedUrl = datafeedUrl;
     this._requester = requester;
     this._limitedServerResponse = limitedServerResponse;
+    this._options = options;
+    this._barsResultMaxSize = options.barsResultMaxSize || 100;
     this.bars_result = new Map();
+  }
+
+  /** 把 bars_result 裁到 _barsResultMaxSize 以内，按插入顺序淘汰最老条目。 */
+  private _pruneBarsResult(): void {
+    while (this.bars_result.size > this._barsResultMaxSize) {
+      const oldestKey = this.bars_result.keys().next().value;
+      if (oldestKey === undefined) {
+        break;
+      }
+      this.bars_result.delete(oldestKey);
+    }
+  }
+
+  /**
+   * TV onResetCacheNeeded 触发时清掉对应 symbol+resolution 的缓存。
+   * 由 UDFCompatibleDatafeedBase.subscribeBars 注册的 reset 回调调用。
+   */
+  public _clearBarsResultForSymbolResolution(symbol: string, resolution: string): void {
+    if (!symbol || !resolution) {
+      return;
+    }
+    const resKey = String(symbol).toLowerCase() + String(resolution).toLowerCase();
+    this.bars_result.delete(resKey);
+  }
+
+  /** 通知前端：bars_result[resKey] 已就绪，可以读出来画缠论了。 */
+  private _emitBarsReady(resKey: string, requestParams: RequestParams): void {
+    try {
+      window.dispatchEvent(new CustomEvent('chanlun-bars-ready', {
+        detail: {
+          key: resKey,
+          symbol: String(requestParams["symbol"] || '').toLowerCase(),
+          resolution: String(requestParams["resolution"] || '').toLowerCase(),
+          managerId: this._options.managerId || null,
+        }
+      }));
+    } catch (e) { /* SSR 或测试环境无 window 时静默忽略 */ }
   }
 
   public getBars(
@@ -386,6 +443,8 @@ export class HistoryProvider {
           mmds: (response as HistoryFullDataResponse).mmds,
           chart_color: (response as HistoryFullDataResponse).chart_color,
         });
+        this._pruneBarsResult();
+        this._emitBarsReady(res_key, requestParams);
       } else {
         // 更新存在的数据
         // 更新逻辑，找到大于等于返回的第一个时间的所有数据；
@@ -525,6 +584,8 @@ export class HistoryProvider {
         obj_res.higher_macd_hist = hHistObj.values;
 
         this.bars_result.set(res_key, obj_res);
+        this._pruneBarsResult();
+        this._emitBarsReady(res_key, requestParams);
       }
     }
 

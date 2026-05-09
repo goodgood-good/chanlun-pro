@@ -31,6 +31,7 @@ import {
 import {
 	GetBarsResult,
 	HistoryProvider,
+	HistoryProviderOptions,
 	LimitedResponseConfiguration,
 	PeriodParamsWithOptionalCountback,
 } from './history-provider';
@@ -118,19 +119,23 @@ export class UDFCompatibleDatafeedBase implements IExternalDatafeed, IDatafeedQu
 
 	private readonly _requester: IRequester;
 
+	private _subscribersResetCallbacks: Record<string, () => void> = {};
+
 	protected constructor(
 		datafeedURL: string,
 		quotesProvider: IQuotesProvider,
 		requester: IRequester,
 		updateFrequency: number = 10 * 1000,
-		limitedServerResponse?: LimitedResponseConfiguration
+		limitedServerResponse?: LimitedResponseConfiguration,
+		options: HistoryProviderOptions = {}
 	) {
 		this._datafeedURL = datafeedURL;
 		this._requester = requester;
 		this._historyProvider = new HistoryProvider(
 			datafeedURL,
 			this._requester,
-			limitedServerResponse
+			limitedServerResponse,
+			options
 		);
 		this._quotesProvider = quotesProvider;
 
@@ -382,10 +387,25 @@ export class UDFCompatibleDatafeedBase implements IExternalDatafeed, IDatafeedQu
 
 	public subscribeBars(symbolInfo: LibrarySymbolInfo, resolution: ResolutionString, onTick: SubscribeBarsCallback, listenerGuid: string, _onResetCacheNeededCallback: () => void): void {
 		this._dataPulseProvider.subscribeBars(symbolInfo, resolution, onTick, listenerGuid);
+		// TV 通过 onResetCacheNeeded 通知 datafeed 当前 symbol+resolution 的缓存需要清空
+		// （比如盘后数据修正、合约换月等）。我们在原回调外再清掉 bars_result，避免缠论形态
+		// 还基于已失效的 bars 渲染。
+		if (_onResetCacheNeededCallback) {
+			const originalCallback = _onResetCacheNeededCallback;
+			this._subscribersResetCallbacks[listenerGuid] = () => {
+				this._historyProvider._clearBarsResultForSymbolResolution(
+					symbolInfo.ticker || symbolInfo.name,
+					resolution
+				);
+				originalCallback();
+			};
+			_onResetCacheNeededCallback = this._subscribersResetCallbacks[listenerGuid];
+		}
 	}
 
 	public unsubscribeBars(listenerGuid: string): void {
 		this._dataPulseProvider.unsubscribeBars(listenerGuid);
+		delete this._subscribersResetCallbacks[listenerGuid];
 	}
 
 	protected _requestConfiguration(): Promise<UdfCompatibleConfiguration | null> {
