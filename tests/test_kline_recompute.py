@@ -101,3 +101,75 @@ def test_merge_klines_df_empty_cached_returns_new():
         merged.reset_index(drop=True),
         new.sort_values("date").reset_index(drop=True),
     )
+
+
+@pytest.fixture
+def cl_config_min():
+    """精简 cl_config,只填必需字段,其余由 cl.CL._init_default_config 兜底。"""
+    return {
+        "chart_show_fx": "1",
+        "chart_show_bi": "1",
+        "chart_show_xd": "1",
+        "chart_show_bi_zs": "1",
+        "chart_show_xd_zs": "1",
+        "chart_show_bi_mmd": "1",
+        "chart_show_xd_mmd": "1",
+        "chart_show_bi_bc": "1",
+        "chart_show_xd_bc": "1",
+        "zs_bi_type": ["zs_type_bz"],
+        "zs_xd_type": ["zs_type_bz"],
+        "idx_macd_fast": 12,
+        "idx_macd_slow": 26,
+        "idx_macd_signal": 9,
+    }
+
+
+def test_recompute_chart_data_from_klines_returns_full_xd(cl_config_min):
+    """全量重算应输出非空的 K 线时间序列 t,以及形如 list 的 xds 数组。"""
+    from cl_app.services.kline_recompute import recompute_chart_data_from_klines
+
+    klines = _make_klines("2024-01-01 09:30", 200)
+    chart_data = recompute_chart_data_from_klines("a", "TEST.001", "1m", cl_config_min, klines)
+    assert chart_data is not None
+    assert isinstance(chart_data.get("t"), list) and len(chart_data["t"]) == 200
+    assert isinstance(chart_data.get("xds"), list)
+
+
+def test_recompute_split_then_merge_equals_full(cl_config_min):
+    """**核心断言**:把 K 线分两段(模拟向左滚动)后合并重算 vs 一次性全量计算,
+    生成的 xds / bis / fxs 数组必须 1:1 相等。这是本次修复要保证的不变量。"""
+    from cl_app.services.kline_recompute import (
+        merge_klines_df,
+        recompute_chart_data_from_klines,
+    )
+
+    full = _make_klines("2024-01-01 09:30", 400)
+
+    # 1) 一次性全量
+    expected = recompute_chart_data_from_klines(
+        "a", "TEST.002", "1m", cl_config_min, full
+    )
+
+    # 2) 模拟用户:先看后半段,再向左滚动加载前半段
+    later_half = full.iloc[200:].reset_index(drop=True)
+    earlier_half = full.iloc[:200].reset_index(drop=True)
+    merged = merge_klines_df(later_half, earlier_half)
+    actual = recompute_chart_data_from_klines(
+        "a", "TEST.002", "1m", cl_config_min, merged
+    )
+
+    assert actual["t"] == expected["t"], "K 线时间序列不一致"
+
+    def _shape_signature(shape):
+        # 用 (起点, 终点) 作为身份;linestyle 允许差异(end pending 可能不同)
+        pts = shape.get("points")
+        if isinstance(pts, list) and len(pts) >= 2:
+            return (pts[0]["time"], pts[0]["price"], pts[-1]["time"], pts[-1]["price"])
+        if isinstance(pts, dict):
+            return (pts["time"], pts["price"])
+        return None
+
+    for key in ("xds", "bis", "fxs"):
+        a = sorted(filter(None, (_shape_signature(s) for s in actual.get(key, []))))
+        e = sorted(filter(None, (_shape_signature(s) for s in expected.get(key, []))))
+        assert a == e, f"{key} 在分段重算 vs 全量 间不一致"

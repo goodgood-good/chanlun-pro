@@ -69,3 +69,35 @@ def merge_klines_df(cached: pd.DataFrame, new: pd.DataFrame) -> pd.DataFrame:
     combined = combined.drop_duplicates(subset=["date"], keep="last")
     combined = combined.sort_values("date").reset_index(drop=True)
     return combined
+
+
+def recompute_chart_data_from_klines(
+    market: str,
+    code: str,
+    frequency: str,
+    cl_config: dict,
+    klines: pd.DataFrame,
+    to_frequency: Optional[str] = None,
+) -> Optional[dict]:
+    """从一份**完整连续**的 K 线 DataFrame 出发,直接构造空 CL → process_klines →
+    cl_data_to_tv_chart,返回新鲜的 chart_data dict。
+
+    关键:
+      - 不复用 ``fdb.get_web_cl_data`` 的 .pkl 缓存(那条路径有"末尾追加"假设,
+        与"向左滚动"语义不兼容,会触发不必要的全量/增量分裂)。
+      - 不调用 ``_merge_chart_data``;调用方拿到的就是基于完整 K 线的"权威"
+        chart_data,直接整体替换 chart_data_cache。
+      - to_frequency 用于"低周期合成高周期"场景,直接透传给 cl_data_to_tv_chart。
+    返回 None 当 klines 为空(调用方用 _mark_negative_cache 兜底)。
+    """
+    if klines is None or len(klines) == 0:
+        return None
+
+    # 局部 import,避免顶层 import 循环(chanlun.cl_utils 反向依赖 chart_compute 几率小,
+    # 但 cl.CL 的初始化栈较深,放到调用时 import 更稳)。
+    from chanlun.core.cl import CL
+    from chanlun.cl_utils import cl_data_to_tv_chart
+
+    cd = CL(code, frequency, dict(cl_config))
+    cd.process_klines(klines)
+    return cl_data_to_tv_chart(cd, cl_config, to_frequency=to_frequency)
