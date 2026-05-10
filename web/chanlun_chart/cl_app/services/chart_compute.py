@@ -173,6 +173,12 @@ def _merge_shape_lists(existing_shapes, new_shapes):
 
 
 def _merge_chart_data(existing_data: dict, new_data: dict):
+    # ★ 历史背景(2026-05):本函数把"两份独立计算的 chart_data"按 shape 起点合并,
+    # 在向左滚动场景会让 XD 出现"局部计算 → 起点替换 → 视觉跳变"。
+    # web/tv 范围请求路径已迁移到 kline_recompute.prepend_klines_and_replace_cache,
+    # 该入口直接基于"完整 K 线集"全量重算,整体替换 chart_data_cache。
+    # 这里仅保留以兼容首屏 cache_tail_gap / firstDataRequest 路径——它们的合并语义
+    # 和"只补未来 K 线 + shape"的契约一致,不会触发 XD 起点跳变问题。
     if not existing_data:
         return new_data
     if not new_data:
