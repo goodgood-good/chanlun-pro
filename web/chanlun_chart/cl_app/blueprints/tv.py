@@ -167,6 +167,9 @@ from ..services.chart_compute import (  # noqa: E402
     chart_calc_locks,
     compute_and_cache_chart_data,
 )
+from ..services.kline_recompute import (  # noqa: E402
+    prepend_klines_and_replace_cache,
+)
 
 
 # _stable_hash / _build_cache_key 已迁到 services.chart_cache，见模块顶部 re-export
@@ -888,22 +891,46 @@ def tv_history():
                         with cache_lock:
                             _mark_chart_cache_validated(cache_key)
                         return {"s": "no_data"}
-                    cd = web_batch_get_cl_datas(
-                        market, code, {frequency: klines}, cl_config
-                    )[0]
+
+                    # ★ 方案 A:范围请求(向左滚动)走分层缓存——
+                    # 把新 K 线合并进 L1,基于完整 K 线集全量重算,整体替换 L2。
+                    # 不再走 web_batch_get_cl_datas + _merge_chart_data,
+                    # 那条老路径会用窄范围 K 线独立计算 XD 再"按起点合并",
+                    # 导致用户向左滚动时看到 XD 跳变(详见 docs/superpowers/plans/
+                    # 2026-05-10-kline-cl-layered-cache.md)。
+                    if (
+                        is_range_request
+                        and cache_miss_reason in ("cache_head_gap", "cache_partial_snapshot")
+                    ):
+                        cl_chart_data = prepend_klines_and_replace_cache(
+                            market, code, frequency, cl_config,
+                            new_klines=klines, cache_key=cache_key,
+                            to_frequency=None,
+                        )
+                        if cl_chart_data is None:
+                            with cache_lock:
+                                _mark_chart_cache_validated(cache_key)
+                            return {"s": "no_data"}
+                        # prepend 内部已经写回 cache,跳过下面的 _merge_chart_data 路径
+                        cd = None
+                    else:
+                        cd = web_batch_get_cl_datas(
+                            market, code, {frequency: klines}, cl_config
+                        )[0]
 
                 if _to > 0 and len(klines) > 0 and _to < fun.datetime_to_int(klines.iloc[0]["date"]):
                     with cache_lock:
                         _mark_chart_cache_validated(cache_key)
                     return {"s": "no_data"}
 
-                cl_chart_data = cl_data_to_tv_chart(
-                    cd, cl_config, to_frequency=kchart_to_frequency
-                )
-                if cl_chart_data is None:
-                    with cache_lock:
-                        _mark_chart_cache_validated(cache_key)
-                    return {"s": "no_data"}
+                if cd is not None:
+                    cl_chart_data = cl_data_to_tv_chart(
+                        cd, cl_config, to_frequency=kchart_to_frequency
+                    )
+                    if cl_chart_data is None:
+                        with cache_lock:
+                            _mark_chart_cache_validated(cache_key)
+                        return {"s": "no_data"}
 
                 ratio = HIGHER_MACD_RATIO.get(frequency)
                 if ratio is None and frequency == "30m":
@@ -945,17 +972,24 @@ def tv_history():
                     except Exception as e:
                         LogUtil.error(f"[tv_history] Scaled MACD calc failed: {e}")
 
-                with cache_lock:
-                    existing_entry = _get_chart_cache_entry(cache_key)
-                    if existing_entry is not None:
-                        cl_chart_data = _merge_chart_data(
-                            existing_entry.get("data", {}), cl_chart_data
+                if cd is not None:
+                    with cache_lock:
+                        existing_entry = _get_chart_cache_entry(cache_key)
+                        if existing_entry is not None:
+                            cl_chart_data = _merge_chart_data(
+                                existing_entry.get("data", {}), cl_chart_data
+                            )
+                        _set_chart_cache_entry(
+                            cache_key,
+                            cl_chart_data,
+                            is_full_snapshot=(not is_range_request) or (existing_entry or {}).get("is_full_snapshot", False),
                         )
-                    _set_chart_cache_entry(
-                        cache_key,
-                        cl_chart_data,
-                        is_full_snapshot=(not is_range_request) or (existing_entry or {}).get("is_full_snapshot", False),
-                    )
+
+                # prepend 路径在补完 higher_macd 后,需要把 cl_chart_data 重新写回 cache,
+                # 否则下次相同范围请求 hit 时拿到的还是无 higher_macd 的版本。
+                if cd is None and cl_chart_data is not None:
+                    with cache_lock:
+                        _set_chart_cache_entry(cache_key, cl_chart_data, is_full_snapshot=True)
 
                 # firstDataRequest 成功后，后台预热其他常用周期的缓存
                 if firstDataRequest == "true":
