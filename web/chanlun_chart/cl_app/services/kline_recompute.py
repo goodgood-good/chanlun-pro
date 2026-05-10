@@ -44,3 +44,28 @@ def extract_klines_df_from_chart_data(chart_data: dict) -> pd.DataFrame:
         "close": c,
         "volume": v,
     })
+
+
+def merge_klines_df(cached: pd.DataFrame, new: pd.DataFrame) -> pd.DataFrame:
+    """合并两段 K 线 DataFrame,按 date 去重 + 升序排序。
+
+    重叠优先级:cached > new。
+      - cached K 线通常已经是"已完成 bar",值更稳定;
+      - new 可能在边界拉到的是仍在波动的当前 bar(尤其分钟级范围请求),
+        若以 new 覆盖 cached,会把已经稳定的 bar 重新打波动状态,
+        导致下游 process_klines 触发不必要的"末根更新"路径,且边界处的
+        OHLC 可能与缓存里不一致 → 缠论笔/段重新画。
+    入参为空时直接返回另一边的副本(始终按 date 升序)。
+    """
+    if cached is None or len(cached) == 0:
+        if new is None or len(new) == 0:
+            return pd.DataFrame()
+        return new.sort_values("date").reset_index(drop=True)
+    if new is None or len(new) == 0:
+        return cached.sort_values("date").reset_index(drop=True)
+
+    # cached 后到,使其在 drop_duplicates(keep='last') 下覆盖 new 的同 date 行
+    combined = pd.concat([new, cached], ignore_index=True)
+    combined = combined.drop_duplicates(subset=["date"], keep="last")
+    combined = combined.sort_values("date").reset_index(drop=True)
+    return combined
