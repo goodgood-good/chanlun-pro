@@ -101,3 +101,47 @@ def recompute_chart_data_from_klines(
     cd = CL(code, frequency, dict(cl_config))
     cd.process_klines(klines)
     return cl_data_to_tv_chart(cd, cl_config, to_frequency=to_frequency)
+
+
+def prepend_klines_and_replace_cache(
+    market: str,
+    code: str,
+    frequency: str,
+    cl_config: dict,
+    new_klines: pd.DataFrame,
+    cache_key: str,
+    to_frequency: Optional[str] = None,
+) -> Optional[dict]:
+    """范围请求(向左滚动)主入口。
+
+    流程:
+      1. 从 chart_data_cache 取既有 entry,反构建已缓存 K 线 DataFrame
+      2. 与 new_klines 合并(cached 优先 + 去重 + 升序)
+      3. 用合并后的"完整连续 K 线集"重新构造空 CL,跑 process_klines,产出新 chart_data
+      4. **整体替换** chart_data_cache(is_full_snapshot=True,不再走 _merge_chart_data)
+
+    调用方(tv_history)在 chart_calc_locks.get(cache_key) 持锁期间调用本函数,
+    保证"反构建 → 合并 → 重算 → 写回"原子性,前端不会读到中间态。
+
+    返回新 chart_data;若 new_klines 为空且无缓存,返回 None。
+    """
+    # 局部 import 避免和 chart_compute 形成 import 链
+    from . import chart_cache as _chart_cache
+
+    cached_df = pd.DataFrame()
+    cached_entry = _chart_cache._get_chart_cache_entry(cache_key)
+    if cached_entry is not None:
+        cached_df = extract_klines_df_from_chart_data(cached_entry.get("data") or {})
+
+    merged = merge_klines_df(cached_df, new_klines)
+    if merged is None or len(merged) == 0:
+        return None
+
+    new_chart_data = recompute_chart_data_from_klines(
+        market, code, frequency, cl_config, merged, to_frequency=to_frequency,
+    )
+    if new_chart_data is None:
+        return None
+
+    _chart_cache._set_chart_cache_entry(cache_key, new_chart_data, is_full_snapshot=True)
+    return new_chart_data

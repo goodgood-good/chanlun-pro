@@ -173,3 +173,45 @@ def test_recompute_split_then_merge_equals_full(cl_config_min):
         a = sorted(filter(None, (_shape_signature(s) for s in actual.get(key, []))))
         e = sorted(filter(None, (_shape_signature(s) for s in expected.get(key, []))))
         assert a == e, f"{key} 在分段重算 vs 全量 间不一致"
+
+
+def test_prepend_klines_and_replace_cache_writes_full(cl_config_min, monkeypatch):
+    """高层入口:给定旧 chart_data + 新 K 线,应当返回基于"完整 K 线"重算后的 chart_data,
+    且向 chart_data_cache 写入的 entry.is_full_snapshot=True、min/max_time 覆盖完整范围。"""
+    from cl_app.services import chart_cache, kline_recompute
+
+    # 构造"已缓存的 chart_data"(模拟用户首次进入时算出的近 100 根)
+    early = _make_klines("2024-01-01 09:30", 100)
+    cached_chart_data = kline_recompute.recompute_chart_data_from_klines(
+        "a", "TEST.003", "1m", cl_config_min, early
+    )
+
+    cache_key = chart_cache._build_cache_key("a", "TEST.003", "1m", cl_config_min)
+    chart_cache._set_chart_cache_entry(cache_key, cached_chart_data, is_full_snapshot=True)
+
+    # 用户向左滚动,新拉取了"更早 100 根"
+    earlier = _make_klines("2024-01-01 07:50", 100)
+    new_chart_data = kline_recompute.prepend_klines_and_replace_cache(
+        "a", "TEST.003", "1m", cl_config_min, earlier, cache_key=cache_key
+    )
+
+    assert new_chart_data is not None
+    assert len(new_chart_data["t"]) == 200, "完整 K 线应是 100(旧) + 100(新)"
+
+    # 缓存项已被整体替换
+    entry = chart_cache._get_chart_cache_entry(cache_key)
+    assert entry["is_full_snapshot"] is True
+    assert entry["min_time"] == new_chart_data["t"][0]
+    assert entry["max_time"] == new_chart_data["t"][-1]
+
+
+def test_prepend_klines_no_cache_fallbacks_to_new_only(cl_config_min):
+    """无既有缓存时,prepend 入口应当退化为"以 new 为唯一 K 线源"重算。"""
+    from cl_app.services.kline_recompute import prepend_klines_and_replace_cache
+
+    klines = _make_klines("2024-01-01 09:30", 50)
+    chart_data = prepend_klines_and_replace_cache(
+        "a", "TEST.004", "1m", cl_config_min, klines, cache_key="non-existent-key"
+    )
+    assert chart_data is not None
+    assert len(chart_data["t"]) == 50
