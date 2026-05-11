@@ -995,8 +995,13 @@ class ChartManager {
 
 
     makeKey(item) {
+        // 2026-05-12 修复:不再把 linestyle 写入 key。
+        //   原因:多点形态(笔/段/中枢)末段会从 pending(linestyle=1)翻转成
+        //   done(linestyle=0),把 linestyle 写进 key 会让"同一身份的 shape"
+        //   在前后两次 reconcile 中被视为两个不同 shape → 触发全量 rebuild → 闪烁。
+        //   起点 / 终点已能唯一标识一根多点形态;单点形态用 (time, price, text)。
         if (Array.isArray(item.points)) {
-            return item.points.map(p => `${p.time}_${p.price}`).join('_') + `_${item.linestyle || 0}`;
+            return item.points.map(p => `${p.time}_${p.price}`).join('_');
         } else if (item.points?.time !== undefined) {
             return `${item.points.time}_${item.points.price}_${item.text || ''}`;
         }
@@ -1049,85 +1054,24 @@ class ChartManager {
             }
         });
 
-        // 多点形态走"窗口内 key 集缓存 + 集合一致就 skip + 否则全量 rebuild"路径。
-        //   全量 rebuild 是为了规避 TV 的 createMultipointShape 在不同时刻分批创建
-        //   trend_line 会让相邻段出现 1-2px 视觉断缝（toggle 之所以能"治好"就是因为
-        //   它走的是一次性重建路径）。
-        //   缓存窗口内 key 集是为了让 zoom/pan 没改变可见 shape 集合时（最常见的
-        //   微调缩放、平移在同一组形态范围内）直接 skip，不闪烁。
-        // 单点形态（fxs/bcs/mmds）保持原 incremental（无连续性问题，且数量更多）。
-        const isLineType = type === 'xds' || type === 'bis' || type === 'bi_zss' || type === 'xd_zss';
-
-        if (isLineType) {
-            if (!this._lastReconcileSourceKeys) this._lastReconcileSourceKeys = {};
-            if (!this._lastReconcileSourceKeys[symbolKey]) this._lastReconcileSourceKeys[symbolKey] = {};
-            const cachedKeys = this._lastReconcileSourceKeys[symbolKey][type];
-            const sameAsCached = cachedKeys && cachedKeys.size === newKeys.size
-                && [...newKeys].every(k => cachedKeys.has(k));
-            if (sameAsCached) {
-                console.log(`[DataVerify][Reconcile] ${type} skip (windowKeys unchanged, inWindow=${itemsToProcess.length})`);
-                return;
-            }
-
-            // 数据 / 窗口集合变了 → 全量 rebuild（一次 remove + 一次 create 保证连贯）
-            const removedCount = container.length;
-            for (const existing of container) {
-                this.safeRemove(existing.id);
-            }
-            container.length = 0;
-
-            let dispatchedCreates = 0;
-            itemsToProcess.forEach(({ item, key, time, tailTime }) => {
-                dispatchedCreates += 1;
-                const result = createFunc(item);
-                const entry = {
-                    time: time,
-                    tailTime: tailTime,
-                    key: key,
-                    isUnfinished: (item.linestyle == '1' || item.linestyle == 1),
-                };
-                if (result != null && typeof result.then === 'function') {
-                    result.then(realId => {
-                        if (realId == null) {
-                            console.warn(`[DataVerify][Reconcile] ${type} create→null key=${key.slice(0,40)}`);
-                            this._scheduleReconcileRetry(`${type}:async-null`);
-                            return;
-                        }
-                        entry.id = realId;
-                        container.push(entry);
-                    }).catch((e) => {
-                        console.warn(`[DataVerify][Reconcile] ${type} create→reject key=${key.slice(0,40)}`, e);
-                        this._scheduleReconcileRetry(`${type}:async-reject`);
-                    });
-                } else if (result != null) {
-                    entry.id = result;
-                    container.push(entry);
-                } else {
-                    console.warn(`[DataVerify][Reconcile] ${type} create→sync-null key=${key.slice(0,40)}`);
-                    this._scheduleReconcileRetry(`${type}:sync-null`);
-                }
-            });
-
-            this._lastReconcileSourceKeys[symbolKey][type] = newKeys;
-
-            console.log(
-                `[DataVerify][Reconcile] ${type} src=${sourceCount} unique=${afterUniqueCount} ` +
-                `inWindow=${itemsToProcess.length} removed=${removedCount} ` +
-                `dispatchedCreates=${dispatchedCreates} containerNow=${container.length} (full rebuild)`
-            );
-
-            // ★ 自动补绘：第一次 full rebuild 时 TV 内部布局/异步 bars 可能还在过渡，
-            //   shape 会被画到错位（用户描述："未显示的K线的线段画错"）；用户手动
-            //   toggle 时会再走一次"全清空+重建"自然修正。这里把这一步自动化：
-            //   500ms 后强制清掉缓存再 draw_chanlun 一次，让 TV 在稳定布局上重新
-            //   落位 shape。verify-rebuild 自身不会再触发下一次 verify（_isVerifyingNow 守门）。
-            if (!this._isVerifyingNow()) {
-                this._scheduleVerifyRebuild();
-            }
-            return;
-        }
-
-        // ===== 单点形态：原 incremental + 窗口过滤路径 =====
+        // ===== 统一增量 reconcile 路径(多点 + 单点形态共用)=====
+        //
+        // 2026-05-12 回归说明:
+        //   此前对多点形态(xds/bis/bi_zss/xd_zss)使用"窗口 key 集缓存 + 集合一致 skip
+        //   + 否则 full rebuild + 500ms 后 verify-rebuild"策略,目的是规避 TV
+        //   createMultipointShape 在不同时刻分批创建 trend_line 的"1-2px 视觉断缝"。
+        //   实测代价:
+        //     - 向左滚动 / 缩放扩窗时窗口内 key 集几乎必然变化(末段 pending 端点漂移、
+        //       新前缀段进入窗口等),sameAsCached 极少命中 → 几乎每次都全量 rebuild。
+        //     - full rebuild 在 K 线布局尚未稳定时调用 createMultipointShape,shape
+        //       会被画到错位;500ms 后 verify-rebuild 修正 → 用户看到"先错位 → 修正"。
+        //     - 笔不闪是因为其 key 在 zoom/pan 时较稳定能命中 skip;线段几乎永远不命中
+        //       → 视觉上闪烁问题集中在线段上(用户报告)。
+        //   回归到与单点形态相同的增量路径:既有 shape 一律保留,只 remove 真正
+        //   不在新 key 集 / 已出窗口的、只 create 真正新增的。makeKey 已移除
+        //   linestyle 字段,pending→done 翻转不再触发重建。
+        //   1-2px 端点视觉断缝作为已知 trade-off 接受;它远比"闪烁 + 错位 → 修正"
+        //   双段视觉对用户友好。
         const toKeep = [];
         for (const existing of container) {
             const existingTail = existing.tailTime ?? existing.time;
