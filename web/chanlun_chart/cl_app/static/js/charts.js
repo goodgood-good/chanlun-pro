@@ -1161,8 +1161,11 @@ class ChartManager {
                 key: key,
                 isUnfinished: (item.linestyle == '1' || item.linestyle == 1),
             };
-            // 保存原始 points 到 entry,sweep 后用于"setPoints 重新投影"修正错位
+            // 保存重建所需上下文到 entry:sweep 时如果 K 线布局尚未稳定,
+            // 通过 remove + recreate 在稳定布局上重新画 shape(等价于用户 toggle)。
             entry.points = item.points;
+            entry.item = item;
+            entry.createFunc = createFunc;
             entry.needsReproject = true;
             if (result != null && typeof result.then === 'function') {
                 createAsync += 1;
@@ -1410,32 +1413,66 @@ class ChartManager {
 
         // 2026-05-12 修复"create 时 K 线布局未稳定 → shape 落错位"
         // (用户描述:错位长斜线;手动 toggle 显示线段一次后正常):
-        //   sweep 时机是 drawChartElements 后 100ms,K 线布局通常已稳定。
-        //   对所有 needsReproject=true 的 entry 调 chart.getShapeById(id).setPoints(原 points),
-        //   强制 TV 用当前(稳定)布局重新投影,无闪烁修正错位。
+        //   sweep 时机是 drawChartElements 后 100ms,debounce 已收敛,K 线布局稳定。
+        //   setPoints 实测对系统创建的 shape 不触发坐标重算(只更新数据),
+        //   改用"remove + recreate":等价于用户手动 toggle 一次,在稳定布局上重新画。
+        //   container 立即用旧 entry 占位,promise resolve 后 patch 新 id。
         let reprojected = 0, reprojectFail = 0;
+        const reprojectTargets = [];
         Object.values(this.obj_charts || {}).forEach(symbolData => {
             Object.values(symbolData || {}).forEach(items => {
-                (items || []).forEach(item => {
-                    if (!item || !item.needsReproject || item.id == null) return;
-                    if (!item.points) { item.needsReproject = false; return; }
-                    try {
-                        const api = this.chart.getShapeById(item.id);
-                        if (api && typeof api.setPoints === 'function') {
-                            api.setPoints(item.points);
-                            reprojected += 1;
-                        } else {
-                            reprojectFail += 1;
-                        }
-                    } catch (e) {
-                        reprojectFail += 1;
+                (items || []).forEach(entry => {
+                    if (!entry || !entry.needsReproject || entry.id == null) return;
+                    if (!entry.createFunc || !entry.item) {
+                        entry.needsReproject = false;
+                        return;
                     }
-                    item.needsReproject = false;
+                    reprojectTargets.push(entry);
                 });
             });
         });
+
+        reprojectTargets.forEach(entry => {
+            const oldId = entry.id;
+            try {
+                this.chart.removeEntity(oldId);
+            } catch (e) {
+                console.warn(`[CHANLUN-DIAG][reproject] removeEntity 抛错 id=${oldId}`, e);
+            }
+            this._reconcileOwnedIds.delete(oldId);
+            entry.id = null;
+            entry.needsReproject = false;
+
+            let result;
+            try { result = entry.createFunc(entry.item); }
+            catch (e) {
+                console.warn(`[CHANLUN-DIAG][reproject] createFunc 抛错`, e);
+                reprojectFail += 1;
+                return;
+            }
+            if (result != null && typeof result.then === 'function') {
+                result.then(newId => {
+                    if (newId == null) {
+                        console.warn(`[CHANLUN-DIAG][reproject] createFunc 返回 null`);
+                        return;
+                    }
+                    entry.id = newId;
+                    this._reconcileOwnedIds.add(newId);
+                }).catch((e) => {
+                    console.warn(`[CHANLUN-DIAG][reproject] createFunc reject`, e);
+                });
+                reprojected += 1;
+            } else if (result != null) {
+                entry.id = result;
+                this._reconcileOwnedIds.add(result);
+                reprojected += 1;
+            } else {
+                reprojectFail += 1;
+            }
+        });
+
         if (reprojected > 0 || reprojectFail > 0) {
-            console.log(`[CHANLUN-DIAG][sweep] reproject ok=${reprojected} fail=${reprojectFail}`);
+            console.log(`[CHANLUN-DIAG][sweep] reproject(rebuild) ok=${reprojected} fail=${reprojectFail}`);
         }
     }
 
