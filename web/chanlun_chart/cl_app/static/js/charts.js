@@ -184,6 +184,14 @@ class ChartManager {
         // reconcile 失败自动重试状态：{count, timer}，count 累计失败重试次数，
         // timer 跟踪当前已排队的 setTimeout 句柄，避免重复排队。
         this._reconcileRetry = { count: 0, timer: null };
+        // 2026-05-12 修复孤儿 shape:reconcile 创建过的所有 entity id 全集。
+        //   incremental reconcile 模式下,如果某次 safeRemove 在 TV 内部静默失败、
+        //   或同一 key 因端点漂移被走两次 create 路径,container 会和 TV 实际
+        //   shape 列表脱钩,屏幕上残留无主长斜线。
+        //   sweep 时:凡是 _reconcileOwnedIds 里有但所有 container 里都没的 → 孤儿,
+        //   removeEntity 强制清掉。
+        //   不污染用户手画 shape:用户自己用 line tool 创建的从未进过此 set。
+        this._reconcileOwnedIds = new Set();
         // 多点形态源 key 缓存：{ [symbolKey]: { [type]: Set<string> } }
         // 命中即 skip 整个 reconcile，避免 zoom/pan 触发不必要的全量 rebuild 闪烁。
         this._lastReconcileSourceKeys = {};
@@ -923,10 +931,12 @@ class ChartManager {
             return entityId.then(id => {
                 if (id) {
                     try { this.chart.removeEntity(id); } catch (e) { }
+                    if (this._reconcileOwnedIds) this._reconcileOwnedIds.delete(id);
                 }
             }).catch(e => { });
         } else {
             try { this.chart.removeEntity(entityId); } catch (e) { }
+            if (this._reconcileOwnedIds) this._reconcileOwnedIds.delete(entityId);
             return Promise.resolve();
         }
     }
@@ -1102,12 +1112,14 @@ class ChartManager {
                     }
                     entry.id = realId;
                     container.push(entry);
+                    this._reconcileOwnedIds.add(realId);
                 }).catch(() => {
                     this._scheduleReconcileRetry(`${type}:async-reject`);
                 });
             } else if (result != null) {
                 entry.id = result;
                 container.push(entry);
+                this._reconcileOwnedIds.add(result);
             } else {
                 this._scheduleReconcileRetry(`${type}:sync-null`);
             }
@@ -1228,6 +1240,60 @@ class ChartManager {
         this.reconcile('xd_zss', cfg.zs ? barsResult.xd_zss : [], from, symbolKey, (item) => safeCreate(ChartUtils.createZhongshuShape(this.chart, item, { color: getDynamicColor(currentInterval, "xd_zss"), linewidth: 2 }), 'xd_zs'));
         this.reconcile('bcs', cfg.bc ? barsResult.bcs : [], from, symbolKey, (item) => safeCreate(ChartUtils.createBcShape(this.chart, item), 'bc'), false);
         this.reconcile('mmds', cfg.mmd ? barsResult.mmds : [], from, symbolKey, (item) => safeCreate(ChartUtils.createMmdShape(this.chart, item), 'mmd'), false);
+
+        // 一轮 reconcile 完后扫一次孤儿,清理 race 残留(safeRemove 静默失败 / container 提前清零)。
+        // 因为 reconcile 内 create 是异步的,延后到下一帧执行,等所有 promise resolve 后再扫。
+        if (this._sweepOrphanTimer) clearTimeout(this._sweepOrphanTimer);
+        this._sweepOrphanTimer = setTimeout(() => {
+            this._sweepOrphanTimer = null;
+            this.sweepOrphanShapes();
+        }, 100);
+    }
+
+    /**
+     * 扫描并清理孤儿 shape:存在于 _reconcileOwnedIds 但所有 container 都已不引用的 entity。
+     *
+     * 触发场景:
+     *   1. safeRemove 在 TV 内部静默失败(removeEntity 抛错被 try/catch 吞)
+     *   2. reconcile 之间的 race:旧 container 已清零,async safeRemove 还未真的删
+     *   3. 同一 key 因端点漂移走两次 create 路径,产生重复 shape
+     *
+     * 不会误删用户手画的 line tool:它们从未通过 reconcile 创建,不在 _reconcileOwnedIds 中。
+     */
+    sweepOrphanShapes() {
+        if (!this.chart || !this._reconcileOwnedIds || this._reconcileOwnedIds.size === 0) {
+            return;
+        }
+        // 收集所有 container 当前持有的 id
+        const inUseIds = new Set();
+        Object.values(this.obj_charts || {}).forEach(symbolData => {
+            Object.values(symbolData || {}).forEach(items => {
+                (items || []).forEach(item => {
+                    if (item && item.id != null && typeof item.id !== 'object') {
+                        inUseIds.add(item.id);
+                    }
+                });
+            });
+        });
+        // _reconcileOwnedIds 里有但 inUseIds 里没有的 → 孤儿
+        const orphans = [];
+        this._reconcileOwnedIds.forEach(id => {
+            if (!inUseIds.has(id)) orphans.push(id);
+        });
+        if (orphans.length === 0) return;
+        let removed = 0;
+        orphans.forEach(id => {
+            try {
+                this.chart.removeEntity(id);
+                removed += 1;
+            } catch (e) {
+                // TV 内部可能已经不持有这个 entity,直接忽略
+            }
+            this._reconcileOwnedIds.delete(id);
+        });
+        if (removed > 0) {
+            console.log(`[DataVerify][SweepOrphan] removed=${removed} owned=${this._reconcileOwnedIds.size}`);
+        }
     }
 
     async draw_chanlun() {
