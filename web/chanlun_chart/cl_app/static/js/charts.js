@@ -1161,6 +1161,9 @@ class ChartManager {
                 key: key,
                 isUnfinished: (item.linestyle == '1' || item.linestyle == 1),
             };
+            // 保存原始 points 到 entry,sweep 后用于"setPoints 重新投影"修正错位
+            entry.points = item.points;
+            entry.needsReproject = true;
             if (result != null && typeof result.then === 'function') {
                 createAsync += 1;
                 result.then(realId => {
@@ -1391,20 +1394,49 @@ class ChartManager {
             });
         }
 
-        if (ownedOrphans.length === 0) {
-            return;
+        if (ownedOrphans.length > 0) {
+            let removed = 0;
+            ownedOrphans.forEach(id => {
+                try {
+                    this.chart.removeEntity(id);
+                    removed += 1;
+                } catch (e) {
+                    console.warn(`[CHANLUN-DIAG][sweep] removeEntity 抛错 id=${id}`, e);
+                }
+                this._reconcileOwnedIds.delete(id);
+            });
+            console.log(`[CHANLUN-DIAG][sweep] orphan removed=${removed} owned-after=${this._reconcileOwnedIds.size}`);
         }
-        let removed = 0;
-        ownedOrphans.forEach(id => {
-            try {
-                this.chart.removeEntity(id);
-                removed += 1;
-            } catch (e) {
-                console.warn(`[CHANLUN-DIAG][sweep] removeEntity 抛错 id=${id}`, e);
-            }
-            this._reconcileOwnedIds.delete(id);
+
+        // 2026-05-12 修复"create 时 K 线布局未稳定 → shape 落错位"
+        // (用户描述:错位长斜线;手动 toggle 显示线段一次后正常):
+        //   sweep 时机是 drawChartElements 后 100ms,K 线布局通常已稳定。
+        //   对所有 needsReproject=true 的 entry 调 chart.getShapeById(id).setPoints(原 points),
+        //   强制 TV 用当前(稳定)布局重新投影,无闪烁修正错位。
+        let reprojected = 0, reprojectFail = 0;
+        Object.values(this.obj_charts || {}).forEach(symbolData => {
+            Object.values(symbolData || {}).forEach(items => {
+                (items || []).forEach(item => {
+                    if (!item || !item.needsReproject || item.id == null) return;
+                    if (!item.points) { item.needsReproject = false; return; }
+                    try {
+                        const api = this.chart.getShapeById(item.id);
+                        if (api && typeof api.setPoints === 'function') {
+                            api.setPoints(item.points);
+                            reprojected += 1;
+                        } else {
+                            reprojectFail += 1;
+                        }
+                    } catch (e) {
+                        reprojectFail += 1;
+                    }
+                    item.needsReproject = false;
+                });
+            });
         });
-        console.log(`[CHANLUN-DIAG][sweep] orphan removed=${removed} owned-after=${this._reconcileOwnedIds.size}`);
+        if (reprojected > 0 || reprojectFail > 0) {
+            console.log(`[CHANLUN-DIAG][sweep] reproject ok=${reprojected} fail=${reprojectFail}`);
+        }
     }
 
     async draw_chanlun() {
