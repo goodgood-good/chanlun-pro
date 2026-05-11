@@ -450,6 +450,51 @@ class ChartManager {
         window.tvDatafeed = this.udf_datafeed; // 兼容旧代码
         // ---------------------------------------
 
+        // 2026-05-12 诊断:在 console 跑 __chanlunDiag() 一键 dump 当前图表状态
+        const _diagCm = this;
+        window.__chanlunDiag = function () {
+            try {
+                const cm = _diagCm;
+                const ch = cm.chart;
+                if (!ch) { console.log('[CHANLUN-DIAG] chart 未就绪'); return; }
+                const owned = cm._reconcileOwnedIds || new Set();
+                const tvShapes = ch.getAllShapes ? (ch.getAllShapes() || []) : [];
+                const tvIds = new Set(tvShapes.map(s => s.id));
+                const containerByType = {};
+                const containerIds = new Set();
+                Object.entries(cm.obj_charts || {}).forEach(([sk, types]) => {
+                    Object.entries(types || {}).forEach(([t, arr]) => {
+                        containerByType[`${sk}/${t}`] = (arr || []).length;
+                        (arr || []).forEach(item => {
+                            if (item && item.id != null && typeof item.id !== 'object') containerIds.add(item.id);
+                        });
+                    });
+                });
+                const ghostsInTv = tvShapes.filter(s => !containerIds.has(s.id));
+                const ghostsByName = {};
+                ghostsInTv.forEach(g => { ghostsByName[g.name || '<noname>'] = (ghostsByName[g.name || '<noname>'] || 0) + 1; });
+                const ownedNotInTv = [...owned].filter(id => !tvIds.has(id));
+                console.log('========= [CHANLUN-DIAG] manual dump =========');
+                console.log('TV.getAllShapes.length =', tvShapes.length);
+                console.log('owned ids =', owned.size, ' container ids =', containerIds.size);
+                console.log('container by type:', containerByType);
+                console.log('TV 里有但 container 没有 (ghosts):', ghostsInTv.length, ' by name:', ghostsByName);
+                console.log('owned 有但 TV 没 (已删 但 owned 未清):', ownedNotInTv.length);
+                if (ghostsInTv.length > 0) {
+                    console.log('--- ghosts 详情(前 10):');
+                    ghostsInTv.slice(0, 10).forEach(g => {
+                        let pts = null;
+                        try { pts = ch.getShapeById(g.id)?.getPoints?.(); } catch (e) {}
+                        console.log({ id: g.id, name: g.name, points: pts });
+                    });
+                }
+                console.log('=============================================');
+                return { tvShapes: tvShapes.length, owned: owned.size, container: containerIds.size, ghosts: ghostsInTv.length };
+            } catch (e) {
+                console.error('[CHANLUN-DIAG] dump failed:', e);
+            }
+        };
+
         this._barReadyHandler = this.handleBarsReadyEvent.bind(this);
         window.addEventListener('chanlun-bars-ready', this._barReadyHandler);
 
@@ -930,13 +975,21 @@ class ChartManager {
         if (typeof entityId.then === 'function') {
             return entityId.then(id => {
                 if (id) {
-                    try { this.chart.removeEntity(id); } catch (e) { }
+                    let ok = false;
+                    try { this.chart.removeEntity(id); ok = true; }
+                    catch (e) { console.warn(`[CHANLUN-DIAG][safeRemove] removeEntity 抛错 id=${id}`, e); }
                     if (this._reconcileOwnedIds) this._reconcileOwnedIds.delete(id);
+                    if (!ok) console.warn(`[CHANLUN-DIAG][safeRemove] async path 静默失败,id=${id} 可能成为孤儿`);
                 }
-            }).catch(e => { });
+            }).catch(e => {
+                console.warn('[CHANLUN-DIAG][safeRemove] async path promise rejected', e);
+            });
         } else {
-            try { this.chart.removeEntity(entityId); } catch (e) { }
+            let ok = false;
+            try { this.chart.removeEntity(entityId); ok = true; }
+            catch (e) { console.warn(`[CHANLUN-DIAG][safeRemove] removeEntity 抛错 id=${entityId}`, e); }
             if (this._reconcileOwnedIds) this._reconcileOwnedIds.delete(entityId);
+            if (!ok) console.warn(`[CHANLUN-DIAG][safeRemove] sync path 静默失败,id=${entityId} 可能成为孤儿`);
             return Promise.resolve();
         }
     }
@@ -1082,21 +1135,25 @@ class ChartManager {
         //   linestyle 字段,pending→done 翻转不再触发重建。
         //   1-2px 端点视觉断缝作为已知 trade-off 接受;它远比"闪烁 + 错位 → 修正"
         //   双段视觉对用户友好。
+        const beforeContainerLen = container.length;
         const toKeep = [];
+        let removedCount = 0;
         for (const existing of container) {
             const existingTail = existing.tailTime ?? existing.time;
             if (newKeys.has(existing.key) && existingTail >= from) {
                 toKeep.push(existing);
             } else {
                 this.safeRemove(existing.id);
+                removedCount += 1;
             }
         }
         container.length = 0;
         toKeep.forEach(item => container.push(item));
 
         const existingKeys = new Set(container.map(item => item.key));
+        let createSync = 0, createAsync = 0, createSkip = 0;
         itemsToProcess.forEach(({ item, key, time, tailTime }) => {
-            if (existingKeys.has(key)) return;
+            if (existingKeys.has(key)) { createSkip += 1; return; }
             const result = createFunc(item);
             const entry = {
                 time: time,
@@ -1105,25 +1162,40 @@ class ChartManager {
                 isUnfinished: (item.linestyle == '1' || item.linestyle == 1),
             };
             if (result != null && typeof result.then === 'function') {
+                createAsync += 1;
                 result.then(realId => {
                     if (realId == null) {
+                        console.warn(`[CHANLUN-DIAG][reconcile.${type}] async create→null key=${(key||'').slice(0,40)}`);
                         this._scheduleReconcileRetry(`${type}:async-null`);
                         return;
                     }
                     entry.id = realId;
                     container.push(entry);
                     this._reconcileOwnedIds.add(realId);
-                }).catch(() => {
+                }).catch((e) => {
+                    console.warn(`[CHANLUN-DIAG][reconcile.${type}] async create→reject key=${(key||'').slice(0,40)}`, e);
                     this._scheduleReconcileRetry(`${type}:async-reject`);
                 });
             } else if (result != null) {
                 entry.id = result;
                 container.push(entry);
                 this._reconcileOwnedIds.add(result);
+                createSync += 1;
             } else {
+                console.warn(`[CHANLUN-DIAG][reconcile.${type}] sync create→null key=${(key||'').slice(0,40)}`);
                 this._scheduleReconcileRetry(`${type}:sync-null`);
             }
         });
+
+        // [CHANLUN-DIAG] 单行总结:有任何动作时才打
+        if (removedCount > 0 || createSync > 0 || createAsync > 0) {
+            console.log(
+                `[CHANLUN-DIAG][reconcile.${type}] src=${sourceCount} unique=${afterUniqueCount} ` +
+                `inWin=${itemsToProcess.length} containerWas=${beforeContainerLen}→${container.length} ` +
+                `removed=${removedCount} createSync=${createSync} createAsync=${createAsync} skip=${createSkip} ` +
+                `from=${from} owned=${this._reconcileOwnedIds?.size ?? '?'}`
+            );
+        }
     }
 
     // ★ 失败重试调度：reconcile 中 createFunc 返回 null（chart 未 ready）时，
@@ -1261,7 +1333,12 @@ class ChartManager {
      * 不会误删用户手画的 line tool:它们从未通过 reconcile 创建,不在 _reconcileOwnedIds 中。
      */
     sweepOrphanShapes() {
-        if (!this.chart || !this._reconcileOwnedIds || this._reconcileOwnedIds.size === 0) {
+        if (!this.chart) {
+            console.log('[CHANLUN-DIAG][sweep] skipped: this.chart is null');
+            return;
+        }
+        if (!this._reconcileOwnedIds) {
+            console.log('[CHANLUN-DIAG][sweep] skipped: _reconcileOwnedIds is null');
             return;
         }
         // 收集所有 container 当前持有的 id
@@ -1275,25 +1352,59 @@ class ChartManager {
                 });
             });
         });
-        // _reconcileOwnedIds 里有但 inUseIds 里没有的 → 孤儿
-        const orphans = [];
+        // TV 实际 shape 列表(便于诊断 owned 与 TV 之间的偏差)
+        let tvShapes = [];
+        try { tvShapes = this.chart.getAllShapes() || []; }
+        catch (e) { console.warn('[CHANLUN-DIAG][sweep] getAllShapes 抛错', e); }
+        const tvIds = new Set(tvShapes.map(s => s.id));
+
+        // 类别 A:owned 里有但 inUseIds 里没的 → container 失联,我们应该清的孤儿
+        const ownedOrphans = [];
         this._reconcileOwnedIds.forEach(id => {
-            if (!inUseIds.has(id)) orphans.push(id);
+            if (!inUseIds.has(id)) ownedOrphans.push(id);
         });
-        if (orphans.length === 0) return;
+
+        // 类别 B:TV 里有但 inUseIds 没有 AND owned 也没有 → "我们从未跟踪过" 的 shape
+        //          (理论上=用户手画;但若 race 让 owned 漏 add,会落到此类)
+        const trulyForeign = tvShapes.filter(s => !inUseIds.has(s.id) && !this._reconcileOwnedIds.has(s.id));
+
+        console.log(
+            `[CHANLUN-DIAG][sweep] tvShapes=${tvShapes.length} owned=${this._reconcileOwnedIds.size} ` +
+            `inUse=${inUseIds.size} ownedOrphans=${ownedOrphans.length} trulyForeign=${trulyForeign.length}`
+        );
+
+        // 打头 5 个真正"我们没跟踪但 TV 里有"的 shape — 诊断用,看是不是用户手画 vs 漏跟踪
+        if (trulyForeign.length > 0) {
+            console.log('[CHANLUN-DIAG][sweep] trulyForeign sample:', trulyForeign.slice(0, 5).map(s => ({
+                id: s.id, name: s.name,
+                // EntityInfo 含 zorder/visible 等;具体 points 需用 getShapeById 取
+            })));
+            // 进一步:对前 3 个尝试 getShapeById 拿 points,确认是 trend_line 错位
+            trulyForeign.slice(0, 3).forEach(s => {
+                try {
+                    const api = this.chart.getShapeById(s.id);
+                    const points = api?.getPoints?.();
+                    console.log(`[CHANLUN-DIAG][sweep] foreign detail id=${s.id} name=${s.name} points=`, points);
+                } catch (e) {
+                    console.log(`[CHANLUN-DIAG][sweep] foreign detail id=${s.id} getShapeById 抛错`, e);
+                }
+            });
+        }
+
+        if (ownedOrphans.length === 0) {
+            return;
+        }
         let removed = 0;
-        orphans.forEach(id => {
+        ownedOrphans.forEach(id => {
             try {
                 this.chart.removeEntity(id);
                 removed += 1;
             } catch (e) {
-                // TV 内部可能已经不持有这个 entity,直接忽略
+                console.warn(`[CHANLUN-DIAG][sweep] removeEntity 抛错 id=${id}`, e);
             }
             this._reconcileOwnedIds.delete(id);
         });
-        if (removed > 0) {
-            console.log(`[DataVerify][SweepOrphan] removed=${removed} owned=${this._reconcileOwnedIds.size}`);
-        }
+        console.log(`[CHANLUN-DIAG][sweep] orphan removed=${removed} owned-after=${this._reconcileOwnedIds.size}`);
     }
 
     async draw_chanlun() {
