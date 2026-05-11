@@ -495,6 +495,41 @@ class ChartManager {
             }
         };
 
+        // 2026-05-12 新增:打印当前所有 xds / bis 的 (start_time, start_price, end_time, end_price)
+        // 用于定位"错位长线段"到底是哪类形态、跨度多大、起止价位是多少。
+        window.__chanlunDumpLines = function (type = 'xds') {
+            try {
+                const cm = _diagCm;
+                if (!cm.chart) { console.log('[CHANLUN-DIAG] chart 未就绪'); return; }
+                const allInContainer = [];
+                Object.entries(cm.obj_charts || {}).forEach(([sk, types]) => {
+                    (types[type] || []).forEach(entry => allInContainer.push({ sk, entry }));
+                });
+                console.log(`========= [CHANLUN-DIAG] dump ${type} (count=${allInContainer.length}) =========`);
+                allInContainer.forEach(({ sk, entry }, i) => {
+                    const pts = entry.points || [];
+                    let geom = '';
+                    if (pts.length >= 2) {
+                        const t0 = pts[0].time, p0 = pts[0].price;
+                        const t1 = pts[pts.length - 1].time, p1 = pts[pts.length - 1].price;
+                        const dt = t1 - t0;
+                        const dpct = p0 ? (Math.abs(p1 - p0) / p0 * 100).toFixed(2) : '?';
+                        geom = `[${new Date(t0 * 1000).toISOString().slice(0,16)} → ${new Date(t1 * 1000).toISOString().slice(0,16)}] dt=${dt}s p=${p0}→${p1} (${dpct}%)`;
+                    }
+                    // 同时通过 TV API 取当前 shape 在 TV 内的实际 points(可能与 entry.points 不同)
+                    let tvPts = null;
+                    try { tvPts = cm.chart.getShapeById(entry.id)?.getPoints?.(); } catch (e) {}
+                    const tvGeom = tvPts && tvPts.length >= 2
+                        ? `TV=[${new Date(tvPts[0].time * 1000).toISOString().slice(0,16)}→${new Date(tvPts[tvPts.length-1].time * 1000).toISOString().slice(0,16)}] p=${tvPts[0].price}→${tvPts[tvPts.length-1].price}`
+                        : 'TV=<no points>';
+                    console.log(`#${i} id=${entry.id} linestyle=${entry.isUnfinished ? 1 : 0} ${geom} | ${tvGeom}`);
+                });
+                console.log('=============================================');
+            } catch (e) {
+                console.error('[CHANLUN-DIAG] dump lines failed:', e);
+            }
+        };
+
         this._barReadyHandler = this.handleBarsReadyEvent.bind(this);
         window.addEventListener('chanlun-bars-ready', this._barReadyHandler);
 
