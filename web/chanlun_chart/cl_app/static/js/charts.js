@@ -192,6 +192,11 @@ class ChartManager {
         //   removeEntity 强制清掉。
         //   不污染用户手画 shape:用户自己用 line tool 创建的从未进过此 set。
         this._reconcileOwnedIds = new Set();
+        // 2026-05-12 修复 createMultipointShape 起点被 snap:TV 在 K 线 series 尚未
+        //   加载到 shape.points[0].time 时,把起点 time 自动 snap 到当时最早 K 线。
+        //   每次 emitBarsReady 后 _barsVersion++;sweep 仅在 _barsVersion 大于
+        //   entry.lastAttemptBarsVersion 时重试 snap 修复,避免反复无效 remove+recreate。
+        this._barsVersion = 0;
         // 多点形态源 key 缓存：{ [symbolKey]: { [type]: Set<string> } }
         // 命中即 skip 整个 reconcile，避免 zoom/pan 触发不必要的全量 rebuild 闪烁。
         this._lastReconcileSourceKeys = {};
@@ -418,7 +423,9 @@ class ChartManager {
             return;
         }
         const wasInitialLoad = !this._initialLoadDone;
-        console.log(`[CHANLUN-TIMING] @${performance.now().toFixed(0)}ms handleBarsReadyEvent ✓ symbol=${detail.symbol} res=${detail.resolution} bars=${detail.bars || '?'} fxs=${detail.fxs || '?'} bis=${detail.bis || '?'} xds=${detail.xds || '?'} wasInitialLoad=${wasInitialLoad}`);
+        // K 线 series 又加载了一批 → bars version +1,让 sweep 可以重试 snap 修复
+        this._barsVersion = (this._barsVersion || 0) + 1;
+        console.log(`[CHANLUN-TIMING] @${performance.now().toFixed(0)}ms handleBarsReadyEvent ✓ symbol=${detail.symbol} res=${detail.resolution} bars=${detail.bars || '?'} fxs=${detail.fxs || '?'} bis=${detail.bis || '?'} xds=${detail.xds || '?'} wasInitialLoad=${wasInitialLoad} barsVer=${this._barsVersion}`);
         this._initialLoadDone = true;
         // 切换标的/周期后第一次 bars 到达：跳过 300ms debounce 直接重绘，缩短感知延迟。
         // 后续 tick / visibleRangeChange / 配置变更仍走 debouncedDrawChanlun 防抖。
@@ -1196,12 +1203,12 @@ class ChartManager {
                 key: key,
                 isUnfinished: (item.linestyle == '1' || item.linestyle == 1),
             };
-            // 保存重建所需上下文到 entry:sweep 时如果 K 线布局尚未稳定,
-            // 通过 remove + recreate 在稳定布局上重新画 shape(等价于用户 toggle)。
+            // 保存重建所需上下文到 entry。
+            //   sweep 会用 entry.points 比对 chart.getShapeById(id).getPoints():
+            //   若 TV 端 time 被 snap → remove + entry.createFunc(entry.item) 重建。
             entry.points = item.points;
             entry.item = item;
             entry.createFunc = createFunc;
-            entry.needsReproject = true;
             if (result != null && typeof result.then === 'function') {
                 createAsync += 1;
                 result.then(realId => {
@@ -1446,68 +1453,72 @@ class ChartManager {
             console.log(`[CHANLUN-DIAG][sweep] orphan removed=${removed} owned-after=${this._reconcileOwnedIds.size}`);
         }
 
-        // 2026-05-12 修复"create 时 K 线布局未稳定 → shape 落错位"
-        // (用户描述:错位长斜线;手动 toggle 显示线段一次后正常):
-        //   sweep 时机是 drawChartElements 后 100ms,debounce 已收敛,K 线布局稳定。
-        //   setPoints 实测对系统创建的 shape 不触发坐标重算(只更新数据),
-        //   改用"remove + recreate":等价于用户手动 toggle 一次,在稳定布局上重新画。
-        //   container 立即用旧 entry 占位,promise resolve 后 patch 新 id。
-        let reprojected = 0, reprojectFail = 0;
-        const reprojectTargets = [];
+        // 2026-05-12 方案 B:用 TV 自己返回的 getPoints() 检测 snap 错位 + 重试。
+        //   根因:createMultipointShape 在 K 线 series 尚未加载到 points[0].time 时,
+        //   把起点 time 自动 snap 到当时最早 K 线 → 屏幕上 shape 起点错位。
+        //   修复:每次 sweep 遍历所有 owned entry,比对 entry.points 与
+        //   chart.getShapeById(id).getPoints():time 不匹配 → 起点被 snap → remove+recreate。
+        //   重试受 _barsVersion 节流:同一个 bars 版本下不重复 remove+recreate
+        //   (K 线没新加载 → recreate 仍会被 snap);等 emitBarsReady 触发 _barsVersion++
+        //   后才再试,直到 K 线已加载到起点 time,TV 不再 snap → snap-check 通过。
+        let snapDetected = 0, repaired = 0, recreateFail = 0;
+        const curBarsVer = this._barsVersion || 0;
+        const snapTargets = [];
         Object.values(this.obj_charts || {}).forEach(symbolData => {
             Object.values(symbolData || {}).forEach(items => {
                 (items || []).forEach(entry => {
-                    if (!entry || !entry.needsReproject || entry.id == null) return;
-                    if (!entry.createFunc || !entry.item) {
-                        entry.needsReproject = false;
+                    if (!entry || entry.id == null) return;
+                    if (!entry.createFunc || !entry.item || !entry.points) return;
+                    if (entry.lastAttemptBarsVersion === curBarsVer) return;
+                    let tvPts;
+                    try { tvPts = this.chart.getShapeById(entry.id)?.getPoints?.(); }
+                    catch (e) { return; }
+                    if (!tvPts || tvPts.length !== entry.points.length) return;
+                    let mismatch = false;
+                    for (let i = 0; i < entry.points.length; i++) {
+                        if (entry.points[i].time !== tvPts[i].time) { mismatch = true; break; }
+                    }
+                    if (!mismatch) {
+                        // TV 端点对齐了 → 锚定正确,标记本版本"已检测过"避免下次再扫
+                        entry.lastAttemptBarsVersion = curBarsVer;
                         return;
                     }
-                    reprojectTargets.push(entry);
+                    snapDetected += 1;
+                    snapTargets.push(entry);
                 });
             });
         });
 
-        reprojectTargets.forEach(entry => {
+        snapTargets.forEach(entry => {
             const oldId = entry.id;
-            try {
-                this.chart.removeEntity(oldId);
-            } catch (e) {
-                console.warn(`[CHANLUN-DIAG][reproject] removeEntity 抛错 id=${oldId}`, e);
-            }
+            try { this.chart.removeEntity(oldId); }
+            catch (e) { console.warn(`[CHANLUN-DIAG][snap-fix] removeEntity 抛错 id=${oldId}`, e); }
             this._reconcileOwnedIds.delete(oldId);
             entry.id = null;
-            entry.needsReproject = false;
+            entry.lastAttemptBarsVersion = curBarsVer;
 
             let result;
             try { result = entry.createFunc(entry.item); }
-            catch (e) {
-                console.warn(`[CHANLUN-DIAG][reproject] createFunc 抛错`, e);
-                reprojectFail += 1;
-                return;
-            }
+            catch (e) { recreateFail += 1; return; }
+
             if (result != null && typeof result.then === 'function') {
                 result.then(newId => {
-                    if (newId == null) {
-                        console.warn(`[CHANLUN-DIAG][reproject] createFunc 返回 null`);
-                        return;
-                    }
+                    if (newId == null) return;
                     entry.id = newId;
                     this._reconcileOwnedIds.add(newId);
-                }).catch((e) => {
-                    console.warn(`[CHANLUN-DIAG][reproject] createFunc reject`, e);
-                });
-                reprojected += 1;
+                }).catch(() => {});
+                repaired += 1;
             } else if (result != null) {
                 entry.id = result;
                 this._reconcileOwnedIds.add(result);
-                reprojected += 1;
+                repaired += 1;
             } else {
-                reprojectFail += 1;
+                recreateFail += 1;
             }
         });
 
-        if (reprojected > 0 || reprojectFail > 0) {
-            console.log(`[CHANLUN-DIAG][sweep] reproject(rebuild) ok=${reprojected} fail=${reprojectFail}`);
+        if (snapDetected > 0 || recreateFail > 0) {
+            console.log(`[CHANLUN-DIAG][sweep] snap-check barsVer=${curBarsVer} detected=${snapDetected} repaired=${repaired} fail=${recreateFail}`);
         }
     }
 
