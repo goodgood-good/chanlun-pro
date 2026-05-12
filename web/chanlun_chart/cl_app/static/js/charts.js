@@ -1140,8 +1140,20 @@ class ChartManager {
         }
         const afterUniqueCount = renderList.length;
 
-        // 公共：先按可视窗口过滤，保留视觉密度合理（line type 历史上 bis 可达数百根，
-        // 全画出来视觉杂乱）。多点 / 单点形态都使用相同的 tailTime>=from 过滤。
+        // 公共:先按可视窗口过滤(line type 历史上 bis 可达数百根,全画出来视觉杂乱)。
+        //
+        // 2026-05-12 修复:过滤条件从 `tailTime >= from` 改为 `headTime >= from`。
+        //   原条件让"起点早于可见窗、末端进入可见窗"的 shape 也被画,但 TV
+        //   createMultipointShape 实测不能正确锚定起点在可见窗外的 shape:
+        //   会把起点 time 自动 snap 到 visibleRange.from → 屏幕上出现错位长斜线
+        //   (起点被强制定位在可见窗左边界,但 price 仍是原起点 price,跨度被放大)。
+        //   sweep 的 snap-check 试图 remove+recreate 修复,但 recreate 仍走同一个
+        //   TV API,起点仍被 snap → 无限重试(用户日志显示 detected=1 repaired=1
+        //   随 barsVer 反复出现)。
+        //   改成 headTime >= from:只画起点也在可见窗内的 shape;从画外延伸的
+        //   shape 暂时不显示,等用户滚到能看见它起点的位置再画——此时新
+        //   createMultipointShape 能正确锚定。trade-off:屏幕边缘可能"少一截
+        //   半截延伸进来的线",但不再有错位长斜线。
         const newKeys = new Set();
         const itemsToProcess = [];
         renderList.forEach(item => {
@@ -1152,7 +1164,7 @@ class ChartManager {
             } else {
                 headTime = tailTime = item.points?.time;
             }
-            if (tailTime >= from) {
+            if (headTime >= from) {
                 const key = this.makeKey(item);
                 newKeys.add(key);
                 itemsToProcess.push({ item, key, time: headTime, tailTime });
