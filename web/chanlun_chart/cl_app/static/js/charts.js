@@ -1142,18 +1142,17 @@ class ChartManager {
 
         // 公共:先按可视窗口过滤(line type 历史上 bis 可达数百根,全画出来视觉杂乱)。
         //
-        // 2026-05-12 修复:过滤条件从 `tailTime >= from` 改为 `headTime >= from`。
-        //   原条件让"起点早于可见窗、末端进入可见窗"的 shape 也被画,但 TV
-        //   createMultipointShape 实测不能正确锚定起点在可见窗外的 shape:
-        //   会把起点 time 自动 snap 到 visibleRange.from → 屏幕上出现错位长斜线
-        //   (起点被强制定位在可见窗左边界,但 price 仍是原起点 price,跨度被放大)。
-        //   sweep 的 snap-check 试图 remove+recreate 修复,但 recreate 仍走同一个
-        //   TV API,起点仍被 snap → 无限重试(用户日志显示 detected=1 repaired=1
-        //   随 barsVer 反复出现)。
-        //   改成 headTime >= from:只画起点也在可见窗内的 shape;从画外延伸的
-        //   shape 暂时不显示,等用户滚到能看见它起点的位置再画——此时新
-        //   createMultipointShape 能正确锚定。trade-off:屏幕边缘可能"少一截
-        //   半截延伸进来的线",但不再有错位长斜线。
+        // 2026-05-12 终版策略:
+        //   过滤条件 `tailTime >= from`(末端进入可见窗即画,允许起点早于 from)。
+        //   但 TV createMultipointShape 不能正确锚定起点在可见窗外的 shape——
+        //   会自动 snap 到 visibleRange.from,导致错位长斜线。
+        //   修复:对 headTime < from 的多点 shape,在传给 TV 前**裁剪 + 线性插值
+        //   起点 price**,让 TV 拿到的 shape 起点严格 ≥ from,不会被 snap。
+        //   key 仍用**原始 item** 计算(确保 visibleRange 滚动时既有 entry 的
+        //   key 不变,走 skip 路径,不闪烁)。
+        //   trade-off:从画外延伸的线段,起点会"定格"在初次创建时的
+        //   visibleRange.from 位置,不随用户后续滚动更新位置;但视觉上比
+        //   "错位长斜线"或"放大消失"都自然。
         const newKeys = new Set();
         const itemsToProcess = [];
         renderList.forEach(item => {
@@ -1164,10 +1163,24 @@ class ChartManager {
             } else {
                 headTime = tailTime = item.points?.time;
             }
-            if (headTime >= from) {
+            if (tailTime >= from) {
+                let effectiveItem = item;
+                // 多点形态:起点在可见窗外 → 裁剪 + 线性插值起点 price
+                if (Array.isArray(item.points) && headTime < from && tailTime > from) {
+                    const p0 = item.points[0];
+                    const pN = item.points[item.points.length - 1];
+                    if (p0 && pN && typeof p0.price === 'number' && typeof pN.price === 'number'
+                            && pN.time !== p0.time) {
+                        const ratio = (from - p0.time) / (pN.time - p0.time);
+                        const interpPrice = p0.price + (pN.price - p0.price) * ratio;
+                        const clippedPoints = [{ time: from, price: interpPrice }, ...item.points.slice(1)];
+                        effectiveItem = { ...item, points: clippedPoints };
+                    }
+                }
+                // key 用**原始 item** 算,让 visibleRange 滚动不引起 reconcile rebuild
                 const key = this.makeKey(item);
                 newKeys.add(key);
-                itemsToProcess.push({ item, key, time: headTime, tailTime });
+                itemsToProcess.push({ item: effectiveItem, key, time: headTime, tailTime });
             }
         });
 
