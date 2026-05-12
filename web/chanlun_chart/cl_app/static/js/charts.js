@@ -192,11 +192,6 @@ class ChartManager {
         //   removeEntity 强制清掉。
         //   不污染用户手画 shape:用户自己用 line tool 创建的从未进过此 set。
         this._reconcileOwnedIds = new Set();
-        // 2026-05-12 修复 createMultipointShape 起点被 snap:TV 在 K 线 series 尚未
-        //   加载到 shape.points[0].time 时,把起点 time 自动 snap 到当时最早 K 线。
-        //   每次 emitBarsReady 后 _barsVersion++;sweep 仅在 _barsVersion 大于
-        //   entry.lastAttemptBarsVersion 时重试 snap 修复,避免反复无效 remove+recreate。
-        this._barsVersion = 0;
         // 多点形态源 key 缓存：{ [symbolKey]: { [type]: Set<string> } }
         // 命中即 skip 整个 reconcile，避免 zoom/pan 触发不必要的全量 rebuild 闪烁。
         this._lastReconcileSourceKeys = {};
@@ -423,9 +418,7 @@ class ChartManager {
             return;
         }
         const wasInitialLoad = !this._initialLoadDone;
-        // K 线 series 又加载了一批 → bars version +1,让 sweep 可以重试 snap 修复
-        this._barsVersion = (this._barsVersion || 0) + 1;
-        console.log(`[CHANLUN-TIMING] @${performance.now().toFixed(0)}ms handleBarsReadyEvent ✓ symbol=${detail.symbol} res=${detail.resolution} bars=${detail.bars || '?'} fxs=${detail.fxs || '?'} bis=${detail.bis || '?'} xds=${detail.xds || '?'} wasInitialLoad=${wasInitialLoad} barsVer=${this._barsVersion}`);
+        console.log(`[CHANLUN-TIMING] @${performance.now().toFixed(0)}ms handleBarsReadyEvent ✓ symbol=${detail.symbol} res=${detail.resolution} bars=${detail.bars || '?'} fxs=${detail.fxs || '?'} bis=${detail.bis || '?'} xds=${detail.xds || '?'} wasInitialLoad=${wasInitialLoad}`);
         this._initialLoadDone = true;
         // 切换标的/周期后第一次 bars 到达：跳过 300ms debounce 直接重绘，缩短感知延迟。
         // 后续 tick / visibleRangeChange / 配置变更仍走 debouncedDrawChanlun 防抖。
@@ -1163,24 +1156,19 @@ class ChartManager {
             } else {
                 headTime = tailTime = item.points?.time;
             }
-            if (tailTime >= from) {
-                let effectiveItem = item;
-                // 多点形态:起点在可见窗外 → 裁剪 + 线性插值起点 price
-                if (Array.isArray(item.points) && headTime < from && tailTime > from) {
-                    const p0 = item.points[0];
-                    const pN = item.points[item.points.length - 1];
-                    if (p0 && pN && typeof p0.price === 'number' && typeof pN.price === 'number'
-                            && pN.time !== p0.time) {
-                        const ratio = (from - p0.time) / (pN.time - p0.time);
-                        const interpPrice = p0.price + (pN.price - p0.price) * ratio;
-                        const clippedPoints = [{ time: from, price: interpPrice }, ...item.points.slice(1)];
-                        effectiveItem = { ...item, points: clippedPoints };
-                    }
-                }
-                // key 用**原始 item** 算,让 visibleRange 滚动不引起 reconcile rebuild
+            // 2026-05-12 终极策略:对齐到笔(BI)的行为。
+            //   笔/段视觉差异不在代码路径(都走 createMultipointShape),
+            //   而在跨度:笔跨几根 K 线,起点几乎总在可见窗内 → 永远完美显示;
+            //   段跨度大,起点常在可见窗外 → TV 自动 snap → 错位长斜线。
+            //   TV ShapePoint 无 disableSnapping 选项,任何"显示从画外延伸进来的
+            //   shape"方案都会引入新问题(错位/不完整/起点定格)。
+            //   统一过滤为 headTime >= from:只画起点也在可见窗内的多点形态,
+            //   与笔的视觉行为完全一致。trade-off:跨可见窗的 XD 在缩放级别低
+            //   时不显示;收益:零错位、零裁剪、零 toggle、视觉模型统一。
+            if (headTime >= from) {
                 const key = this.makeKey(item);
                 newKeys.add(key);
-                itemsToProcess.push({ item: effectiveItem, key, time: headTime, tailTime });
+                itemsToProcess.push({ item, key, time: headTime, tailTime });
             }
         });
 
@@ -1228,12 +1216,6 @@ class ChartManager {
                 key: key,
                 isUnfinished: (item.linestyle == '1' || item.linestyle == 1),
             };
-            // 保存重建所需上下文到 entry。
-            //   sweep 会用 entry.points 比对 chart.getShapeById(id).getPoints():
-            //   若 TV 端 time 被 snap → remove + entry.createFunc(entry.item) 重建。
-            entry.points = item.points;
-            entry.item = item;
-            entry.createFunc = createFunc;
             if (result != null && typeof result.then === 'function') {
                 createAsync += 1;
                 result.then(realId => {
@@ -1478,73 +1460,9 @@ class ChartManager {
             console.log(`[CHANLUN-DIAG][sweep] orphan removed=${removed} owned-after=${this._reconcileOwnedIds.size}`);
         }
 
-        // 2026-05-12 方案 B:用 TV 自己返回的 getPoints() 检测 snap 错位 + 重试。
-        //   根因:createMultipointShape 在 K 线 series 尚未加载到 points[0].time 时,
-        //   把起点 time 自动 snap 到当时最早 K 线 → 屏幕上 shape 起点错位。
-        //   修复:每次 sweep 遍历所有 owned entry,比对 entry.points 与
-        //   chart.getShapeById(id).getPoints():time 不匹配 → 起点被 snap → remove+recreate。
-        //   重试受 _barsVersion 节流:同一个 bars 版本下不重复 remove+recreate
-        //   (K 线没新加载 → recreate 仍会被 snap);等 emitBarsReady 触发 _barsVersion++
-        //   后才再试,直到 K 线已加载到起点 time,TV 不再 snap → snap-check 通过。
-        let snapDetected = 0, repaired = 0, recreateFail = 0;
-        const curBarsVer = this._barsVersion || 0;
-        const snapTargets = [];
-        Object.values(this.obj_charts || {}).forEach(symbolData => {
-            Object.values(symbolData || {}).forEach(items => {
-                (items || []).forEach(entry => {
-                    if (!entry || entry.id == null) return;
-                    if (!entry.createFunc || !entry.item || !entry.points) return;
-                    if (entry.lastAttemptBarsVersion === curBarsVer) return;
-                    let tvPts;
-                    try { tvPts = this.chart.getShapeById(entry.id)?.getPoints?.(); }
-                    catch (e) { return; }
-                    if (!tvPts || tvPts.length !== entry.points.length) return;
-                    let mismatch = false;
-                    for (let i = 0; i < entry.points.length; i++) {
-                        if (entry.points[i].time !== tvPts[i].time) { mismatch = true; break; }
-                    }
-                    if (!mismatch) {
-                        // TV 端点对齐了 → 锚定正确,标记本版本"已检测过"避免下次再扫
-                        entry.lastAttemptBarsVersion = curBarsVer;
-                        return;
-                    }
-                    snapDetected += 1;
-                    snapTargets.push(entry);
-                });
-            });
-        });
-
-        snapTargets.forEach(entry => {
-            const oldId = entry.id;
-            try { this.chart.removeEntity(oldId); }
-            catch (e) { console.warn(`[CHANLUN-DIAG][snap-fix] removeEntity 抛错 id=${oldId}`, e); }
-            this._reconcileOwnedIds.delete(oldId);
-            entry.id = null;
-            entry.lastAttemptBarsVersion = curBarsVer;
-
-            let result;
-            try { result = entry.createFunc(entry.item); }
-            catch (e) { recreateFail += 1; return; }
-
-            if (result != null && typeof result.then === 'function') {
-                result.then(newId => {
-                    if (newId == null) return;
-                    entry.id = newId;
-                    this._reconcileOwnedIds.add(newId);
-                }).catch(() => {});
-                repaired += 1;
-            } else if (result != null) {
-                entry.id = result;
-                this._reconcileOwnedIds.add(result);
-                repaired += 1;
-            } else {
-                recreateFail += 1;
-            }
-        });
-
-        if (snapDetected > 0 || recreateFail > 0) {
-            console.log(`[CHANLUN-DIAG][sweep] snap-check barsVer=${curBarsVer} detected=${snapDetected} repaired=${repaired} fail=${recreateFail}`);
-        }
+        // 2026-05-12 终极策略下:reconcile 入口已用 headTime >= from 过滤,
+        // TV 拿到的 shape 起点严格在可见窗内,不会再被 snap → 不需要 snap-check + remove+recreate。
+        // 这里仅保留孤儿扫描(上面的 ownedOrphans 段),清理 race 残留即可。
     }
 
     async draw_chanlun() {
