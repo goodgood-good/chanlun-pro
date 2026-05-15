@@ -1165,19 +1165,10 @@ class ChartManager {
         }
         const afterUniqueCount = renderList.length;
 
-        // 公共:先按可视窗口过滤(line type 历史上 bis 可达数百根,全画出来视觉杂乱)。
-        //
-        // 2026-05-12 终版策略:
-        //   过滤条件 `tailTime >= from`(末端进入可见窗即画,允许起点早于 from)。
-        //   但 TV createMultipointShape 不能正确锚定起点在可见窗外的 shape——
-        //   会自动 snap 到 visibleRange.from,导致错位长斜线。
-        //   修复:对 headTime < from 的多点 shape,在传给 TV 前**裁剪 + 线性插值
-        //   起点 price**,让 TV 拿到的 shape 起点严格 ≥ from,不会被 snap。
-        //   key 仍用**原始 item** 计算(确保 visibleRange 滚动时既有 entry 的
-        //   key 不变,走 skip 路径,不闪烁)。
-        //   trade-off:从画外延伸的线段,起点会"定格"在初次创建时的
-        //   visibleRange.from 位置,不随用户后续滚动更新位置;但视觉上比
-        //   "错位长斜线"或"放大消失"都自然。
+        // 按可视窗口过滤 (历史 bis 可达数百根, 全画视觉杂乱)。详细策略 ADR 见
+        // docs/superpowers/plans/2026-05-12-tv-shape-window-filter.md
+        // 简述: tailTime >= from + headTime < from 时裁剪起点; key 用原始 item
+        // (滚动时既有 entry 不闪烁)。trade-off: 画外起点会定格在创建时位置。
         const newKeys = new Set();
         const itemsToProcess = [];
         renderList.forEach(item => {
@@ -1188,15 +1179,9 @@ class ChartManager {
             } else {
                 headTime = tailTime = item.points?.time;
             }
-            // 2026-05-12 终极策略:对齐到笔(BI)的行为。
-            //   笔/段视觉差异不在代码路径(都走 createMultipointShape),
-            //   而在跨度:笔跨几根 K 线,起点几乎总在可见窗内 → 永远完美显示;
-            //   段跨度大,起点常在可见窗外 → TV 自动 snap → 错位长斜线。
-            //   TV ShapePoint 无 disableSnapping 选项,任何"显示从画外延伸进来的
-            //   shape"方案都会引入新问题(错位/不完整/起点定格)。
-            //   统一过滤为 headTime >= from:只画起点也在可见窗内的多点形态,
-            //   与笔的视觉行为完全一致。trade-off:跨可见窗的 XD 在缩放级别低
-            //   时不显示;收益:零错位、零裁剪、零 toggle、视觉模型统一。
+            // 终极策略: headTime >= from (与笔的视觉行为一致, 避免 TV
+            // createMultipointShape snap 造成错位长斜线)。trade-off: 跨可见窗的
+            // XD 在缩放级别低时不显示; 收益: 零错位 / 零裁剪 / 零 toggle。
             if (headTime >= from) {
                 const key = this.makeKey(item);
                 newKeys.add(key);
@@ -1204,24 +1189,12 @@ class ChartManager {
             }
         });
 
-        // ===== 统一增量 reconcile 路径(多点 + 单点形态共用)=====
-        //
-        // 2026-05-12 回归说明:
-        //   此前对多点形态(xds/bis/bi_zss/xd_zss)使用"窗口 key 集缓存 + 集合一致 skip
-        //   + 否则 full rebuild + 500ms 后 verify-rebuild"策略,目的是规避 TV
-        //   createMultipointShape 在不同时刻分批创建 trend_line 的"1-2px 视觉断缝"。
-        //   实测代价:
-        //     - 向左滚动 / 缩放扩窗时窗口内 key 集几乎必然变化(末段 pending 端点漂移、
-        //       新前缀段进入窗口等),sameAsCached 极少命中 → 几乎每次都全量 rebuild。
-        //     - full rebuild 在 K 线布局尚未稳定时调用 createMultipointShape,shape
-        //       会被画到错位;500ms 后 verify-rebuild 修正 → 用户看到"先错位 → 修正"。
-        //     - 笔不闪是因为其 key 在 zoom/pan 时较稳定能命中 skip;线段几乎永远不命中
-        //       → 视觉上闪烁问题集中在线段上(用户报告)。
-        //   回归到与单点形态相同的增量路径:既有 shape 一律保留,只 remove 真正
-        //   不在新 key 集 / 已出窗口的、只 create 真正新增的。makeKey 已移除
-        //   linestyle 字段,pending→done 翻转不再触发重建。
-        //   1-2px 端点视觉断缝作为已知 trade-off 接受;它远比"闪烁 + 错位 → 修正"
-        //   双段视觉对用户友好。
+        // ===== 统一增量 reconcile 路径 (多点 + 单点形态共用) =====
+        // 既有 shape 保留, 只 remove 真正出窗的 + create 真正新增的; makeKey 已
+        // 移除 linestyle 字段, pending→done 翻转不触发重建。trade-off: 1-2px 端
+        // 点视觉断缝 (远比"先错位 → 修正"对用户友好)。
+        // 历史背景 (废弃的 key 集缓存 + full rebuild + verify-rebuild 策略) 见
+        // 2026-05-12 commit 9d1b0af~0d8970b ADR。
         const beforeContainerLen = container.length;
         const toKeep = [];
         let removedCount = 0;

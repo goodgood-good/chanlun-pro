@@ -55,13 +55,9 @@ cache_lock: RLock = RLock()
 # 不再单独维护 chart_data_validated_at TTLCache。
 _CACHE_REVALIDATION_INTERVAL = 30  # 秒，缓存在此时间内被验证过则视为有效
 
-# 首屏全量快照（is_full_snapshot=True）的过期阈值。
-# 触发场景：程序长时间停机后启动 → 磁盘冷层里的 entry.validated_at 已是停机前的时间戳，
-# 但 tv_history 在 firstDataRequest=true 路径只看 is_full_snapshot 标记，
-# 旧实现会直接命中过期快照、返回缺最近 N 天 K 线的数据。
-# 这个阈值远大于 polling 间隔（30s 推一次 validated_at），程序连续运行不会误判；
-# 又远小于"用户停机一两天"的尺度，重启后能识别为过期，强制走 cache miss 重新拉新数据。
-_SNAPSHOT_STALE_AFTER = 3600  # 秒；超过此时长未验证过的全量快照视为过期
+# firstDataRequest=true 路径下 is_full_snapshot 快照的过期阈值 (远大于 polling 30s,
+# 远小于"停机数天"; 重启后磁盘冷层旧 entry 能识别为过期, 强制 cache miss 拉新数据)。
+_SNAPSHOT_STALE_AFTER = 3600  # 秒
 
 
 # ---------------- 工具函数 ----------------
