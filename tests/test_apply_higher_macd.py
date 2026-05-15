@@ -243,3 +243,39 @@ def test_bin_keys_unknown_market_falls_back_to_utc():
     times = np.array([1700000000, 1700086400], dtype=np.int64)  # 相差 1 天
     bins = _bin_keys_for_higher(times, "d", "unknown_market")
     assert bins[1] == bins[0] + 1
+
+
+def test_resample_evolving_close_same_bin():
+    """同一 bin 内多根 close: higher_closes 取 bin 内最后一根 (演化模式)。"""
+    import numpy as np
+    from cl_app.services.chart_compute import _resample_closes_to_higher
+
+    closes = np.array([100.0, 101.0, 102.0, 103.0], dtype=float)
+    bin_keys = np.array([1, 1, 1, 1], dtype=np.int64)  # 全部同 bin
+    higher_closes, low2high = _resample_closes_to_higher(closes, bin_keys)
+    assert len(higher_closes) == 1
+    assert higher_closes[0] == 103.0  # bin 内 last close
+    assert list(low2high) == [0, 0, 0, 0]
+
+
+def test_resample_bin_switches():
+    """bin 切换: higher_closes 长度增加, low2high 对应索引递增。"""
+    import numpy as np
+    from cl_app.services.chart_compute import _resample_closes_to_higher
+
+    closes = np.array([100.0, 101.0, 200.0, 201.0, 300.0], dtype=float)
+    bin_keys = np.array([1, 1, 2, 2, 3], dtype=np.int64)
+    higher_closes, low2high = _resample_closes_to_higher(closes, bin_keys)
+    assert list(higher_closes) == [101.0, 201.0, 300.0]
+    assert list(low2high) == [0, 0, 1, 1, 2]
+
+
+def test_resample_empty_input():
+    import numpy as np
+    from cl_app.services.chart_compute import _resample_closes_to_higher
+
+    closes = np.array([], dtype=float)
+    bin_keys = np.array([], dtype=np.int64)
+    higher_closes, low2high = _resample_closes_to_higher(closes, bin_keys)
+    assert len(higher_closes) == 0
+    assert len(low2high) == 0

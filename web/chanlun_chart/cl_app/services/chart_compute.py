@@ -702,3 +702,43 @@ def _bin_keys_for_higher(
         else:
             raise ValueError(f"Unsupported target_freq: {target_freq}")
     return out
+
+
+def _resample_closes_to_higher(
+    closes: "np.ndarray",
+    bin_keys: "np.ndarray",
+) -> "tuple[np.ndarray, np.ndarray]":
+    """按 bin_keys 把 closes 合成到高周期 closes (演化模式)。
+
+    返回:
+      higher_closes: 每个唯一 bin 的 close (bin 内最后一根低周期 close)
+      low_to_higher_idx: 长度 == len(closes), 每个值是该低周期 K 线对应的
+                        higher_closes 索引。
+
+    "演化模式": 同 bin 内的多根低周期 K 线, higher_closes 用最新一根 close
+    覆盖。每次重算时 higher_closes[-1] 反映当前 bin 内最新 close, 等价于
+    "未收盘高周期 bar 实时演化"。
+
+    假设 bin_keys 是按低周期 K 线时间顺序排列的(同一 bin 在数组里相邻),
+    这由调用方保证 (chart_data["t"] 本身按时间升序)。
+    """
+    n = len(closes)
+    if n == 0:
+        return (
+            np.empty(0, dtype=float),
+            np.empty(0, dtype=np.int64),
+        )
+    higher_closes: "list[float]" = []
+    low_to_higher_idx = np.empty(n, dtype=np.int64)
+    prev_bin = None
+    cur_higher_idx = -1
+    for i in range(n):
+        bk = bin_keys[i]
+        if bk != prev_bin:
+            cur_higher_idx += 1
+            higher_closes.append(float(closes[i]))
+            prev_bin = bk
+        else:
+            higher_closes[cur_higher_idx] = float(closes[i])
+        low_to_higher_idx[i] = cur_higher_idx
+    return np.array(higher_closes, dtype=float), low_to_higher_idx
