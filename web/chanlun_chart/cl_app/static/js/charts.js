@@ -221,9 +221,12 @@ class ChartManager {
         //   removeEntity 强制清掉。
         //   不污染用户手画 shape:用户自己用 line tool 创建的从未进过此 set。
         this._reconcileOwnedIds = new Set();
-        // 多点形态源 key 缓存：{ [symbolKey]: { [type]: Set<string> } }
-        // 命中即 skip 整个 reconcile，避免 zoom/pan 触发不必要的全量 rebuild 闪烁。
-        this._lastReconcileSourceKeys = {};
+        // W1: reconcile 签名守卫 — { 'symbolKey__type': signature }
+        // signature = `size|from|sortedKeys.slice(0,256)`
+        // 同 (symbolKey, type) 下若 newKeys + from 都未变, 整个 reconcile 直接 return,
+        // 跳过容器遍历 + safeRemove + createFunc 的 O(N+M) 开销。
+        // 触发场景: zoom/pan 在同样 visible range 内重复触发, TV 内部冗余 fire。
+        this._reconcileGuard = {};
         // 自动补绘相关：full rebuild 后 500ms 再触发一次 rebuild，让 TV 在稳定
         // 布局上重新落位被画错的 shape。
         this._verifyRebuildTimer = null;
@@ -1189,6 +1192,23 @@ class ChartManager {
             }
         });
 
+        // W1 守卫: signature = size + from + sortedKeys (截断 256 字符).
+        // 同 (symbolKey, type) 下 signature 未变 → newKeys + from 都没变 → 容器
+        // 状态本就一致, 直接 return 省掉下方 O(N+M) 遍历.
+        // 注: 不放在最前面 (newKeys 计算必须先做), 但放在容器遍历之前.
+        const sortedKeys = [...newKeys].sort();
+        const signature = `${newKeys.size}|${from}|${sortedKeys.join(',').slice(0, 256)}`;
+        const guardKey = `${symbolKey}__${type}`;
+        if (this._reconcileGuard[guardKey] === signature) {
+            if (window.__chanlunDebug) {
+                console.log(
+                    `[CHANLUN-DIAG][reconcile.${type}] W1 guard skip ` +
+                    `(unchanged: ${newKeys.size} keys, from=${from})`
+                );
+            }
+            return;
+        }
+
         // ===== 统一增量 reconcile 路径 (多点 + 单点形态共用) =====
         // 既有 shape 保留, 只 remove 真正出窗的 + create 真正新增的; makeKey 已
         // 移除 linestyle 字段, pending→done 翻转不触发重建。trade-off: 1-2px 端
@@ -1247,6 +1267,11 @@ class ChartManager {
             }
         });
 
+        // W1: 同步路径完成后记录签名, 下次同样的 newKeys+from 即可短路返回.
+        // 异步 create 还在 pending 也无所谓: 它们会在 promise resolve 时 push 到
+        // container, 与签名所代表的"目标状态"一致, 下次进入 guard 时容器已正确.
+        this._reconcileGuard[guardKey] = signature;
+
         // [CHANLUN-DIAG] 单行总结:有任何动作时才打
         // (M5) 仅在 window.__chanlunDebug=true 时输出, 避免生产 console 刷屏。
         // 真正的错误诊断仍走 console.warn 不受此开关影响。
@@ -1288,8 +1313,8 @@ class ChartManager {
             clearTimeout(this._reconcileRetry.timer);
         }
         this._reconcileRetry = { count: 0, timer: null };
-        // 清除场景下同步清掉 source key 缓存，否则下次源数据相同时会被误 skip
-        this._lastReconcileSourceKeys = {};
+        // 清除场景下同步清掉守卫缓存, 否则下次源数据相同时会被误 skip
+        this._reconcileGuard = {};
         // 同时取消 pending verify-rebuild
         if (this._verifyRebuildTimer) {
             clearTimeout(this._verifyRebuildTimer);
@@ -1313,8 +1338,8 @@ class ChartManager {
         this._verifyRebuildTimer = setTimeout(() => {
             this._verifyRebuildTimer = null;
             this._verifyingUntil = performance.now() + 1500;
-            // 清掉缓存确保 reconcile 走全量 rebuild 路径，重新基于稳定布局落位 shape
-            this._lastReconcileSourceKeys = {};
+            // 清掉守卫缓存确保 reconcile 走全量 rebuild 路径, 重新基于稳定布局落位 shape
+            this._reconcileGuard = {};
             console.log(`[CHANLUN-TIMING] verify-rebuild firing`);
             this.draw_chanlun();
         }, 500);
