@@ -9,9 +9,15 @@ import pytest
 
 
 def _make_klines(start: str, periods: int, freq: str = "1min", base_price: float = 100.0):
-    """造一段 toy K 线:用正弦波 + 漂移让缠论能识别出多组分型/笔/段。"""
+    """造一段 toy K 线:用正弦波 + 漂移让缠论能识别出多组分型/笔/段。
+
+    date 列带 UTC tz——与 ex.klines() 真实返回形态一致(alpaca 直接 UTC、cq 转
+    Asia/Shanghai 都是 tz-aware)。早期 toy 数据是 naive,使得 merge 路径的 tz
+    bug 在单测里测不到,直到 2026-05-13 才在生产暴露 ``Cannot compare tz-naive
+    and tz-aware timestamps``。
+    """
     import numpy as np
-    dates = pd.date_range(start=start, periods=periods, freq=freq)
+    dates = pd.date_range(start=start, periods=periods, freq=freq, tz="UTC")
     t = np.arange(periods)
     closes = base_price + 5 * np.sin(t / 6.0) + t * 0.05
     highs = closes + 0.6
@@ -215,3 +221,160 @@ def test_prepend_klines_no_cache_fallbacks_to_new_only(cl_config_min):
     )
     assert chart_data is not None
     assert len(chart_data["t"]) == 50
+
+
+# =============================================================================
+# Regression: tz-naive vs tz-aware merge crash (2026-05-13)
+# =============================================================================
+#
+# 报错栈:tv_history → prepend_klines_and_replace_cache → merge_klines_df →
+#   sort_values("date") → TypeError: Cannot compare tz-naive and tz-aware timestamps
+# 根因:extract_klines_df_from_chart_data 用 pd.to_datetime(ts, unit="s") 返回 naive,
+# 而 ex.klines() 返回带 UTC tz 的 datetime。两边 concat 后 sort_values 直接抛。
+# 修复:extract 用 utc=True;merge_klines_df 加 _ensure_tz_aware 兜底。
+
+def test_extract_klines_df_date_is_tz_aware_utc():
+    """反构建出的 date 列必须是 tz-aware UTC,与 ex.klines() 输出兼容。"""
+    from cl_app.services.kline_recompute import extract_klines_df_from_chart_data
+
+    chart_data = {
+        "t": [1700000000, 1700000060, 1700000120],
+        "o": [1.0, 2.0, 3.0],
+        "h": [1.1, 2.1, 3.1],
+        "l": [0.9, 1.9, 2.9],
+        "c": [1.05, 2.05, 3.05],
+        "v": [100, 200, 300],
+    }
+    df = extract_klines_df_from_chart_data(chart_data)
+    assert df["date"].dt.tz is not None, "date 必须 tz-aware,否则 merge 会抛 TypeError"
+    assert str(df["date"].dt.tz) == "UTC"
+
+
+def test_merge_klines_df_naive_cached_aware_new_does_not_crash():
+    """回归测试:cached 是 naive (老格式),new 是 tz-aware,merge 不再抛 TypeError。"""
+    from cl_app.services.kline_recompute import merge_klines_df
+
+    cached = pd.DataFrame({
+        "date": pd.to_datetime([1700000000, 1700000060], unit="s"),  # naive
+        "open": [1.0, 2.0], "high": [1.1, 2.1], "low": [0.9, 1.9],
+        "close": [1.05, 2.05], "volume": [100, 200],
+    })
+    new = pd.DataFrame({
+        "date": pd.to_datetime([1700000120, 1700000180], unit="s", utc=True),  # UTC tz-aware
+        "open": [3.0, 4.0], "high": [3.1, 4.1], "low": [2.9, 3.9],
+        "close": [3.05, 4.05], "volume": [300, 400],
+    })
+
+    # 修复前会抛 TypeError: Cannot compare tz-naive and tz-aware timestamps
+    merged = merge_klines_df(cached, new)
+    assert len(merged) == 4
+    assert merged["date"].is_monotonic_increasing
+    # 合并后所有 date 都应是 tz-aware
+    assert merged["date"].dt.tz is not None
+
+
+def test_merge_klines_df_aware_cached_naive_new_does_not_crash():
+    """对称回归:cached tz-aware,new naive,也应能 merge。"""
+    from cl_app.services.kline_recompute import merge_klines_df
+
+    cached = pd.DataFrame({
+        "date": pd.to_datetime([1700000000, 1700000060], unit="s", utc=True),
+        "open": [1.0, 2.0], "high": [1.1, 2.1], "low": [0.9, 1.9],
+        "close": [1.05, 2.05], "volume": [100, 200],
+    })
+    new = pd.DataFrame({
+        "date": pd.to_datetime([1700000120, 1700000180], unit="s"),  # naive
+        "open": [3.0, 4.0], "high": [3.1, 4.1], "low": [2.9, 3.9],
+        "close": [3.05, 4.05], "volume": [300, 400],
+    })
+    merged = merge_klines_df(cached, new)
+    assert len(merged) == 4
+    assert merged["date"].is_monotonic_increasing
+
+
+def test_merge_klines_df_cross_tz_aware_alpaca_vs_cq():
+    """alpaca 返回 UTC tz,cq 返回 Asia/Shanghai tz——两边都 tz-aware,跨 tz 比较 pandas
+    会内部对齐到 UTC,不需要在我们这边强转,merge 仍正确。"""
+    from cl_app.services.kline_recompute import merge_klines_df
+
+    cached = pd.DataFrame({
+        "date": pd.to_datetime([1700000000, 1700000060], unit="s", utc=True),
+        "open": [1.0, 2.0], "high": [1.1, 2.1], "low": [0.9, 1.9],
+        "close": [1.05, 2.05], "volume": [100, 200],
+    })
+    new = pd.DataFrame({
+        "date": pd.to_datetime([1700000120, 1700000180], unit="s", utc=True).tz_convert("Asia/Shanghai"),
+        "open": [3.0, 4.0], "high": [3.1, 4.1], "low": [2.9, 3.9],
+        "close": [3.05, 4.05], "volume": [300, 400],
+    })
+    merged = merge_klines_df(cached, new)
+    assert len(merged) == 4
+    assert merged["date"].is_monotonic_increasing
+
+
+# =============================================================================
+# Regression: cross-tz merge degrades to object dtype, crashes _preprocess (2026-05-15)
+# =============================================================================
+#
+# 报错栈:tv_history → prepend_klines_and_replace_cache → recompute_chart_data_from_klines
+#   → cd.process_klines(merged) → KlineDataProcessor._preprocess line 75 调用
+#   pd.to_datetime(klines['date']) →
+#   ValueError: Tz-aware datetime.datetime cannot be converted to datetime64 unless utc=True, at position N
+#
+# 根因:pd.concat 两个 *不同* tz 的 datetime64 列会降级为 object dtype。
+# 之前的 _ensure_tz_aware 只处理 naive→UTC,没处理"两边都 aware 但 tz 不同"。
+# 在用户配置 EXCHANGE_US='cq' 且 QQQ.US 走 cq 长桥分支(返回 Asia/Shanghai tz)、
+# 同时 extract_klines_df_from_chart_data 返回 UTC 时复现。
+
+def test_merge_klines_df_cross_tz_keeps_datetime64_dtype():
+    """合并后 date 列必须保持 datetime64 dtype。
+
+    KlineDataProcessor._preprocess 用 ``is_datetime64_any_dtype`` 判断是否要走
+    ``pd.to_datetime`` fallback;一旦降级到 object dtype 且元素带不同 tz,
+    无 ``utc=True`` 的 ``pd.to_datetime`` 立刻抛 ValueError。
+    """
+    from cl_app.services.kline_recompute import merge_klines_df
+
+    cached = pd.DataFrame({
+        "date": pd.to_datetime([1700000000, 1700000060], unit="s", utc=True),
+        "open": [1.0, 2.0], "high": [1.1, 2.1], "low": [0.9, 1.9],
+        "close": [1.05, 2.05], "volume": [100, 200],
+    })
+    new = pd.DataFrame({
+        "date": pd.to_datetime([1700000120, 1700000180], unit="s", utc=True).tz_convert("Asia/Shanghai"),
+        "open": [3.0, 4.0], "high": [3.1, 4.1], "low": [2.9, 3.9],
+        "close": [3.05, 4.05], "volume": [300, 400],
+    })
+    merged = merge_klines_df(cached, new)
+    assert pd.api.types.is_datetime64_any_dtype(merged["date"]), (
+        f"merged date dtype 必须是 datetime64,实际 {merged['date'].dtype}"
+        " — 下游 _preprocess 会调用 pd.to_datetime(无 utc=True) 抛 ValueError"
+    )
+
+
+def test_recompute_chart_data_with_cross_tz_cached_new(cl_config_min):
+    """端到端回归:cached UTC + new Asia/Shanghai 合并后 recompute 不抛。"""
+    from cl_app.services.kline_recompute import (
+        merge_klines_df,
+        recompute_chart_data_from_klines,
+    )
+
+    ts_cached = list(range(1700000000, 1700000000 + 100 * 60, 60))
+    cached = pd.DataFrame({
+        "date": pd.to_datetime(ts_cached, unit="s", utc=True),
+        "open": [100.0] * 100, "high": [100.5] * 100, "low": [99.5] * 100,
+        "close": [100.0] * 100, "volume": [1000] * 100,
+    })
+    ts_new = list(range(1700000000 + 100 * 60, 1700000000 + 120 * 60, 60))
+    new = pd.DataFrame({
+        "date": pd.to_datetime(ts_new, unit="s", utc=True).tz_convert("Asia/Shanghai"),
+        "open": [101.0] * 20, "high": [101.5] * 20, "low": [100.5] * 20,
+        "close": [101.0] * 20, "volume": [1100] * 20,
+    })
+
+    merged = merge_klines_df(cached, new)
+    chart_data = recompute_chart_data_from_klines(
+        "us", "QQQ.US", "1m", cl_config_min, merged
+    )
+    assert chart_data is not None
+    assert len(chart_data["t"]) == 120

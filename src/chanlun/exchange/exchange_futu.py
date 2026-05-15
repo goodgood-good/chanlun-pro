@@ -150,33 +150,37 @@ class ExchangeFutu(Exchange):
                     end_datetime = dt.datetime(
                         *time.strptime(end_date, time_format)[:6]
                     )
-                    # 与 alpaca/polygon/cq 对齐：所有市场使用同一组 lookback
+                    # 2026-05-14 与 qmt / cq / alpaca / polygon 对齐统一 lookback
                     if frequency == "1m":
-                        start_date = (end_datetime - dt.timedelta(days=60)).strftime(
+                        start_date = (end_datetime - dt.timedelta(days=30)).strftime(
                             time_format
                         )
                     elif frequency == "5m":
-                        start_date = (end_datetime - dt.timedelta(days=365)).strftime(
+                        start_date = (end_datetime - dt.timedelta(days=90)).strftime(
                             time_format
                         )
                     elif frequency == "15m":
-                        start_date = (end_datetime - dt.timedelta(days=730)).strftime(
+                        start_date = (end_datetime - dt.timedelta(days=180)).strftime(
                             time_format
                         )
                     elif frequency == "30m":
-                        start_date = (end_datetime - dt.timedelta(days=1095)).strftime(
+                        start_date = (end_datetime - dt.timedelta(days=365)).strftime(
                             time_format
                         )
                     elif frequency == "60m":
-                        start_date = (end_datetime - dt.timedelta(days=1825)).strftime(
+                        start_date = (end_datetime - dt.timedelta(days=365 * 2)).strftime(
                             time_format
                         )
                     elif frequency == "d":
-                        start_date = (end_datetime - dt.timedelta(days=7300)).strftime(
+                        start_date = (end_datetime - dt.timedelta(days=365 * 3)).strftime(
                             time_format
                         )
                     elif frequency == "w":
-                        start_date = (end_datetime - dt.timedelta(days=10950)).strftime(
+                        start_date = (end_datetime - dt.timedelta(days=365 * 10)).strftime(
+                            time_format
+                        )
+                    elif frequency == "m":
+                        start_date = (end_datetime - dt.timedelta(days=365 * 30)).strftime(
                             time_format
                         )
                 ret, kline, pk = CTX().request_history_kline(

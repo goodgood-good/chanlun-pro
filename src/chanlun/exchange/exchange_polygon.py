@@ -122,24 +122,27 @@ class ExchangePolygon(Exchange):
                 else:
                     end_date = fun.str_to_datetime(end_date)
             if start_date is None:
+                # 2026-05-14 与 qmt / cq / alpaca / futu 对齐统一 lookback
                 if frequency == "1m":
-                    start_date = end_date - dt.timedelta(days=60)
+                    start_date = end_date - dt.timedelta(days=30)
                 elif frequency == "5m":
-                    start_date = end_date - dt.timedelta(days=365)
+                    start_date = end_date - dt.timedelta(days=90)
                 elif frequency == "15m":
-                    start_date = end_date - dt.timedelta(days=730)
+                    start_date = end_date - dt.timedelta(days=180)
                 elif frequency == "30m":
-                    start_date = end_date - dt.timedelta(days=1095)
+                    start_date = end_date - dt.timedelta(days=365)
                 elif frequency == "60m":
-                    start_date = end_date - dt.timedelta(days=1825)
+                    start_date = end_date - dt.timedelta(days=365 * 2)
                 elif frequency == "120m":
-                    start_date = end_date - dt.timedelta(days=1825)
+                    start_date = end_date - dt.timedelta(days=365 * 2)
                 elif frequency == "d":
-                    start_date = end_date - dt.timedelta(days=7300)
+                    start_date = end_date - dt.timedelta(days=365 * 3)
                 elif frequency == "w":
-                    start_date = end_date - dt.timedelta(days=10950)
+                    start_date = end_date - dt.timedelta(days=365 * 10)
+                elif frequency == "m":
+                    start_date = end_date - dt.timedelta(days=365 * 30)
                 elif frequency == "y":
-                    start_date = end_date - dt.timedelta(days=18250)
+                    start_date = end_date - dt.timedelta(days=365 * 30)
             else:
                 if len(end_date) == 10:
                     start_date = fun.str_to_datetime(start_date, "%Y-%m-%d")

@@ -65,6 +65,7 @@ from ..services.chart_cache import (  # noqa: E402
     _build_chart_cache_entry,
     _cache_entry_recently_validated,
     _chart_cache_disk_executor,
+    _full_snapshot_is_stale,
     _get_chart_cache_entry,
     _is_negatively_cached,
     _mark_chart_cache_validated,
@@ -812,9 +813,15 @@ def tv_history():
             cache_min_time = _cache_entry.get("min_time")
             cache_max_time = _cache_entry.get("max_time")
             if not is_range_request:
-                if _cache_entry.get("is_full_snapshot", False):
-                    return True, cached_data, None
-                return False, None, "cache_partial_snapshot"
+                if not _cache_entry.get("is_full_snapshot", False):
+                    return False, None, "cache_partial_snapshot"
+                # 即便 is_full_snapshot=True，也要校验时效；否则程序停机数天后第一个
+                # firstDataRequest=true 请求会直接命中过期 snapshot（磁盘冷层），
+                # 用户看到的图表缺停机期间产生的 K 线。
+                # _SNAPSHOT_STALE_AFTER 远大于 polling 间隔，正常运行不会误判。
+                if _full_snapshot_is_stale(_cache_entry):
+                    return False, None, "cache_stale_snapshot"
+                return True, cached_data, None
             if cache_min_time is None or cache_max_time is None:
                 return False, None, "cache_no_coverage"
             if _from < cache_min_time:
@@ -892,15 +899,24 @@ def tv_history():
                             _mark_chart_cache_validated(cache_key)
                         return {"s": "no_data"}
 
-                    # ★ 方案 A:范围请求(向左滚动)走分层缓存——
+                    # ★ 方案 A:范围请求走分层缓存——
                     # 把新 K 线合并进 L1,基于完整 K 线集全量重算,整体替换 L2。
                     # 不再走 web_batch_get_cl_datas + _merge_chart_data,
                     # 那条老路径会用窄范围 K 线独立计算 XD 再"按起点合并",
                     # 导致用户向左滚动时看到 XD 跳变(详见 docs/superpowers/plans/
                     # 2026-05-10-kline-cl-layered-cache.md)。
+                    #
+                    # 2026-05 扩大覆盖:cache_tail_gap (polling 拉新末段 K 线) 也
+                    # 必须走 prepend(整体替换)。否则 polling 末段触发 XD 重新划分时,
+                    # 新旧两份 XD 起点身份 (time, price) 不一致, _merge_shape_lists
+                    # 按起点合并 → 不去重 → 同一段 K 线上出现多条线段 ("XD 双胞胎")。
                     if (
                         is_range_request
-                        and cache_miss_reason in ("cache_head_gap", "cache_partial_snapshot")
+                        and cache_miss_reason in (
+                            "cache_head_gap",
+                            "cache_partial_snapshot",
+                            "cache_tail_gap",
+                        )
                     ):
                         cl_chart_data = prepend_klines_and_replace_cache(
                             market, code, frequency, cl_config,

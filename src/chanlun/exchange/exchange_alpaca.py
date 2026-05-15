@@ -13,6 +13,49 @@ from chanlun.exchange.exchange import *
 g_all_stocks = []
 
 
+# 分钟级 K 线 RTH (Regular Trading Hours) 过滤窗口：美东 09:30-16:00 EDT。
+# Alpaca IEX feed 默认会返回 04:00-09:30 盘前 + 16:00-20:00 盘后数据；
+# 缠论项目希望图表只看正常交易时段，否则 TV 上"今日第一根"会落在 NY 08:00
+# (=Shanghai 20:00) 之类的盘前 bar，与用户期望的开盘 09:30 第一根不符。
+# 日 K / 周 K / 月 K 的 timestamp 是美东 00:00，不在过滤窗口内，必须跳过过滤，
+# 否则会被全部清空。
+_RTH_MINUTE_FREQS = frozenset({"1m", "5m", "10m", "15m", "30m", "60m", "120m"})
+
+
+def _filter_alpaca_rth_bars(bar_list, frequency):
+    """对分钟级 bar 列表做 RTH 过滤。
+
+    - frequency 不在 _RTH_MINUTE_FREQS 集合时（如 'd' / 'w' / 'm'）原样返回。
+    - bar.timestamp 必须是 datetime；其它类型放行避免误删未识别数据。
+    - 周末 bar 兜底过滤（alpaca 一般不返回，这里属于防御性删除）。
+    - 严格按 [09:30, 16:00) NY 时区窗口；60m 的 09:00 bar 会被丢弃。
+
+    抽成模块级函数是为了：1) 单测时不依赖 alpaca SDK / ExchangeAlpaca 单例；
+    2) 后续如需放宽 60m 边界（保留"包含开盘"的 bar）可以在这里集中改。
+    """
+    if frequency not in _RTH_MINUTE_FREQS or not bar_list:
+        return bar_list
+    ny_tz = pytz.timezone("America/New_York")
+    rth_start = datetime.time(9, 30)
+    rth_end = datetime.time(16, 0)
+
+    def _is_rth(bar) -> bool:
+        ts = getattr(bar, "timestamp", None)
+        if not isinstance(ts, datetime.datetime):
+            return True
+        ny_dt = (
+            ts.astimezone(ny_tz)
+            if ts.tzinfo is not None
+            else pytz.utc.localize(ts).astimezone(ny_tz)
+        )
+        if ny_dt.weekday() >= 5:
+            return False
+        t = ny_dt.time()
+        return rth_start <= t < rth_end
+
+    return [b for b in bar_list if _is_rth(b)]
+
+
 @fun.singleton
 class ExchangeAlpaca(Exchange):
     """
@@ -132,24 +175,27 @@ class ExchangeAlpaca(Exchange):
                 end_date = _to_datetime(end_date)
 
             if start_date is None:
+                # 2026-05-14 与 qmt / cq / polygon / futu 对齐统一 lookback
                 if frequency == "1m":
-                    start_date = end_date - dt.timedelta(days=60)
+                    start_date = end_date - dt.timedelta(days=30)
                 elif frequency == "5m":
-                    start_date = end_date - dt.timedelta(days=365)
+                    start_date = end_date - dt.timedelta(days=90)
                 elif frequency == "15m":
-                    start_date = end_date - dt.timedelta(days=730)
+                    start_date = end_date - dt.timedelta(days=180)
                 elif frequency == "30m":
-                    start_date = end_date - dt.timedelta(days=1095)
+                    start_date = end_date - dt.timedelta(days=365)
                 elif frequency == "60m":
-                    start_date = end_date - dt.timedelta(days=1825)
+                    start_date = end_date - dt.timedelta(days=365 * 2)
                 elif frequency == "120m":
-                    start_date = end_date - dt.timedelta(days=1825)
+                    start_date = end_date - dt.timedelta(days=365 * 2)
                 elif frequency == "d":
-                    start_date = end_date - dt.timedelta(days=7300)
+                    start_date = end_date - dt.timedelta(days=365 * 3)
                 elif frequency == "w":
-                    start_date = end_date - dt.timedelta(days=10950)
+                    start_date = end_date - dt.timedelta(days=365 * 10)
+                elif frequency == "m":
+                    start_date = end_date - dt.timedelta(days=365 * 30)
                 elif frequency == "y":
-                    start_date = end_date - dt.timedelta(days=18250)
+                    start_date = end_date - dt.timedelta(days=365 * 30)
             else:
                 start_date = _to_datetime(start_date)
 
@@ -177,6 +223,11 @@ class ExchangeAlpaca(Exchange):
             bars = self.client.get_stock_bars(req)
             # bars.data 是 dict[symbol -> List[Bar]]；alpaca 找不到 symbol 时 key 不存在
             bar_list = bars.data.get(alpaca_symbol, []) if hasattr(bars, "data") else []
+
+            # 分钟级 K 线只保留美东 RTH (09:30-16:00 EDT)；详见模块级
+            # _filter_alpaca_rth_bars 文档。日 K / 周 K / 月 K 不受影响。
+            bar_list = _filter_alpaca_rth_bars(bar_list, frequency)
+
             klines = []
             for _b in bar_list:
                 klines.append(

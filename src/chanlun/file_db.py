@@ -192,12 +192,32 @@ class FileCacheDB(object):
         原子化写入 pickle，避免并发读到半写入文件。
 
         H2：失败时主动清理 .tmp 残留，避免临时文件长期堆积撑爆磁盘配额。
+
+        2026-05 修复：Windows 上 ``os.replace`` 不能覆盖被其它进程 / 线程"打开"
+        的目标文件（即使只是读），实测在并发 polling + 缓存校验场景下会撞
+        ``PermissionError [WinError 5] 拒绝访问``，导致缠论 .pkl 写不进去、下次
+        请求又得全量重算。
+        Linux 的 rename 是原子覆盖，没这个问题。
+        这里对 ``os.replace`` 加短指数退避重试（仅 PermissionError），让出 CPU
+        给读端关闭句柄；超过最大重试次数才真正放弃。
         """
         tmp = self._make_unique_tmp_path(path)
         try:
             with open(tmp, "wb") as fp:
                 pickle.dump(obj, fp, protocol=self._PICKLE_PROTOCOL)
-            os.replace(tmp, path)
+            # Windows 文件锁兜底重试：4 次共约 30+60+120+240 = 450ms 退避。
+            # 实测 Windows 上读端关闭文件句柄通常 < 100ms，450ms 足够覆盖正常并发。
+            _delays_ms = (30, 60, 120, 240)
+            for _attempt, _delay in enumerate((0, *_delays_ms)):
+                if _delay:
+                    time.sleep(_delay / 1000.0)
+                try:
+                    os.replace(tmp, path)
+                    break
+                except PermissionError:
+                    if _attempt == len(_delays_ms):
+                        raise  # 重试用完仍失败，让外层捕获 + 清理 tmp
+                    continue
         except Exception:
             # os.replace 失败 / pickle dump 失败 / 磁盘满 等场景，清掉残留 tmp。
             try:
@@ -380,8 +400,21 @@ class FileCacheDB(object):
                         need_recompute = True
 
                     # 2. 数据一致性校验（防止复权导致的历史数据变更）
-                    if not need_recompute and len(cached_klines) >= 2 and len(klines) >= 2:
-                        cd_pre_kline = cached_klines[-2]
+                    #
+                    # 2026-05 修复：原来用 cached_klines[-2] 作参考点 + Decimal 严格相等。
+                    # 长桥/IEX 等实时源在盘中场景下，最近几根 bar 的 OHLCV 会因 SIP
+                    # 后到 / tape 修正 / 撤单回报反复微调，``cached_klines[-2]`` 在每个
+                    # tv_history polling 周期里几乎都对不上新拉的同 date 数据，
+                    # 触发"检测到历史数据差异，重算" → 全量重算 → 高频写 .pkl →
+                    # Windows 上撞 os.replace 文件锁。
+                    #
+                    # 真正的复权事件是"全部历史 bar 等比例缩放"，任何位置任何字段都能检出，
+                    # 因此把参考点往里跳到一个稳定中段 bar，并且把 volume 改成相对容差
+                    # （成交量本来就有 SIP/IEX/exchange 分摊差异，不该用精确相等）。
+                    if not need_recompute and len(cached_klines) >= 12 and len(klines) >= 12:
+                        # 跳到一个足够"稳定"的中段 bar：至少 10 根之前，且不超过总长 1/4。
+                        ref_idx = -max(10, min(len(cached_klines) // 4, 100))
+                        cd_pre_kline = cached_klines[ref_idx]
                         target_rows = klines[klines["date"] == cd_pre_kline.date]
 
                         if len(target_rows) == 0:
@@ -389,15 +422,22 @@ class FileCacheDB(object):
                             need_recompute = True
                         else:
                             row = target_rows.iloc[0]
-                            # 校验 OHLCVA
-                            is_diff = (
+                            # OHLC 仍然精确相等（复权一定会改 price）
+                            ohlc_diff = (
                                     Decimal(str(row["close"])) != Decimal(str(cd_pre_kline.c)) or
                                     Decimal(str(row["high"])) != Decimal(str(cd_pre_kline.h)) or
                                     Decimal(str(row["low"])) != Decimal(str(cd_pre_kline.l)) or
-                                    Decimal(str(row["open"])) != Decimal(str(cd_pre_kline.o)) or
-                                    Decimal(str(row["volume"])) != Decimal(str(cd_pre_kline.a))
+                                    Decimal(str(row["open"])) != Decimal(str(cd_pre_kline.o))
                             )
-                            if is_diff:
+                            # volume 用相对容差（>5% 才算复权候选），避免 SIP 后到微调误判
+                            src_vol = float(row["volume"])
+                            cached_vol = float(cd_pre_kline.a)
+                            if cached_vol > 0:
+                                vol_diff_ratio = abs(src_vol - cached_vol) / cached_vol
+                                vol_diff = vol_diff_ratio > 0.05
+                            else:
+                                vol_diff = src_vol > 0  # 缓存 0、新值非 0 也算差异
+                            if ohlc_diff or vol_diff:
                                 logger.warning(f"{log_id} 检测到历史数据差异（可能发生复权），重算")
                                 need_recompute = True
 

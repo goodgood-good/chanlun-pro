@@ -24,6 +24,12 @@ def extract_klines_df_from_chart_data(chart_data: dict) -> pd.DataFrame:
     chart_data["t"] 是 unix 秒时间戳(int 列表),与 cl_data_to_tv_chart 输出对齐。
     返回的 DataFrame 列与 ex.klines() 一致:date / open / high / low / close / volume。
     若任一关键列缺失或长度不一致,返回空 DataFrame(调用方据此回退到全量拉取)。
+
+    ``date`` 列必须带 UTC tz——ex.klines() 返回的 ``new_klines["date"]`` 是 tz-aware
+    (alpaca 直接 UTC,cq 转 Asia/Shanghai),后续 ``merge_klines_df`` 的 sort_values
+    会比较两边;一边 naive 一边 aware 会抛 ``TypeError: Cannot compare tz-naive
+    and tz-aware timestamps``。这里直接用 ``utc=True`` 让反构建结果带 UTC tz,
+    pandas 跨 tz 比较时会内部对齐到 UTC,不影响排序/去重正确性。
     """
     if not isinstance(chart_data, dict):
         return pd.DataFrame()
@@ -37,13 +43,46 @@ def extract_klines_df_from_chart_data(chart_data: dict) -> pd.DataFrame:
     if n == 0 or not (len(o) == len(h) == len(low_arr) == len(c) == len(v) == n):
         return pd.DataFrame()
     return pd.DataFrame({
-        "date": pd.to_datetime(ts, unit="s"),
+        "date": pd.to_datetime(ts, unit="s", utc=True),
         "open": o,
         "high": h,
         "low": low_arr,
         "close": c,
         "volume": v,
     })
+
+
+def _ensure_tz_aware(df: pd.DataFrame) -> pd.DataFrame:
+    """把 ``date`` 列统一规范成 ``datetime64[ns, UTC]``。
+
+    pandas 不允许 naive 和 aware 的 Timestamp 互相比较 / sort,所以两个数据源
+    的 ``date`` 列必须 tz 一致才能 concat → drop_duplicates → sort_values。
+
+    更进一步:``pd.concat`` 两个 *不同 tz* 的 ``datetime64`` 列会降级到 ``object``
+    dtype(每行变成带各自 tzinfo 的 Python datetime)。下游 ``KlineDataProcessor.
+    _preprocess`` 用 ``is_datetime64_any_dtype`` 判断后会走 ``pd.to_datetime``
+    fallback,而该调用没传 ``utc=True``,遇到混合 tz 会抛
+    ``ValueError: Tz-aware datetime.datetime cannot be converted to datetime64
+    unless utc=True``(2026-05-15 在用户 ``EXCHANGE_US='cq'`` 路由 QQQ.US 到长桥
+    分支时复现:cached 是 UTC、new 是 Asia/Shanghai)。
+
+    因此这里同时处理两种情形:
+      - naive → ``tz_localize("UTC")`` 贴 UTC 标签(``extract_klines_df_from_chart_data``
+        与 ``ex.klines()`` 的 epoch 语义一致,无时区偏移)。
+      - 非 UTC 的 tz-aware → ``tz_convert("UTC")`` 转换到 UTC(不改变 epoch,
+        只是统一时区标签,保证 ``concat`` 后 dtype 仍是 ``datetime64[ns, UTC]``)。
+    """
+    if df is None or len(df) == 0 or "date" not in df.columns:
+        return df
+    tz = getattr(df["date"].dt, "tz", None)
+    if tz is None:
+        df = df.copy()
+        df["date"] = df["date"].dt.tz_localize("UTC")
+        return df
+    if str(tz) != "UTC":
+        df = df.copy()
+        df["date"] = df["date"].dt.tz_convert("UTC")
+    return df
 
 
 def merge_klines_df(cached: pd.DataFrame, new: pd.DataFrame) -> pd.DataFrame:
@@ -60,9 +99,14 @@ def merge_klines_df(cached: pd.DataFrame, new: pd.DataFrame) -> pd.DataFrame:
     if cached is None or len(cached) == 0:
         if new is None or len(new) == 0:
             return pd.DataFrame()
-        return new.sort_values("date").reset_index(drop=True)
+        return _ensure_tz_aware(new).sort_values("date").reset_index(drop=True)
     if new is None or len(new) == 0:
-        return cached.sort_values("date").reset_index(drop=True)
+        return _ensure_tz_aware(cached).sort_values("date").reset_index(drop=True)
+
+    # 两边 tz 状态对齐(各自 naive 则补 UTC 标签),否则 sort_values 会抛
+    # "Cannot compare tz-naive and tz-aware timestamps"。
+    cached = _ensure_tz_aware(cached)
+    new = _ensure_tz_aware(new)
 
     # cached 后到,使其在 drop_duplicates(keep='last') 下覆盖 new 的同 date 行
     combined = pd.concat([new, cached], ignore_index=True)

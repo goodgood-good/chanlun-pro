@@ -11,6 +11,22 @@
 // 默认的缠论显示项配置
 const CL_SHOW_DEFAULT = { fx: true, bi: true, xd: true, zs: true, bc: true, mmd: true };
 
+// 各市场的 TV 显示时区。与后端 services/constants.py:market_timezone 保持一致。
+// 之前 widget options 里硬编码 "Asia/Shanghai"，导致美股 K 线在 X 轴上按北京时区
+// 显示（NY 09:30 EDT 开盘 → 21:30；alpaca 默认包含的盘前 NY 08:00 EDT 显示成 20:00）。
+// 改为按 market 查表，未列出的市场（数字货币等）回退到 Asia/Shanghai。
+const MARKET_TIMEZONE = {
+    a: "Asia/Shanghai",
+    hk: "Asia/Shanghai",
+    fx: "Asia/Shanghai",
+    us: "America/New_York",
+    futures: "Asia/Shanghai",
+    ny_futures: "Asia/Shanghai",
+};
+function getMarketTimezone(market) {
+    return MARKET_TIMEZONE[market] || "Asia/Shanghai";
+}
+
 // 工具：按图表 id 读取/写入显示配置
 function loadClShowConfig(chartId) {
     try {
@@ -723,7 +739,7 @@ class ChartManager {
             library_path: "static/charting_library/",
             theme: Utils.get_local_data("theme"),
             numeric_formatting: { decimal_sign: "." },
-            time_frames: [], timezone: "Asia/Shanghai", locale: "zh",
+            time_frames: [], timezone: getMarketTimezone(Utils.get_market()), locale: "zh",
             symbol_search_request_delay: 100, auto_save_delay: 5, study_count_limit: 100,
             disabled_features: ["go_to_date"],
             enabled_features: ["study_templates", "seconds_resolution", "saveload_separate_drawings_storage"],

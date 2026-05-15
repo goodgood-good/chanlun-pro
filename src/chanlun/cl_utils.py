@@ -57,16 +57,34 @@ def web_batch_get_cl_datas(
 ) -> List[ICL]:
     """
     WEB端批量计算并获取 缠论 数据
-    内部使用文件缓存，只能进行增量更新，不可用来获取并计算历史k线数据
+
+    2026-05-14 修改:不再走 ``fdb.get_web_cl_data`` 的 .pkl 持久化缓存。
+    原实现把 cd 对象 pickle 到磁盘,下次反序列化 + ``process_klines(new)`` 做增量。
+    实测在长时间运行 / 数据源切换 / IEX→SIP volume 漂移等场景下,
+    xd_calculator 的增量算法会让"老版本 XD"和"新版本 XD"同时残留在 cd.xds 里,
+    生产环境出现 xds=213 → 410 的累积,前端表现为"同一段 K 线多条线段"。
+
+    现改成:每次调用都从空 ``cl.CL()`` 开始,``process_klines(full)`` 全量重算。
+    性能代价:每次 web 请求都全量算缠论 (~几百毫秒到几秒)。
+    收益:cd 状态完全无残留,xds/bis/fxs 数量与"一次性算完整 K 线"严格一致。
+
+    ``fdb.get_web_cl_data`` 仍然保留给 notebook / 回测脚本使用,它们的
+    "末尾追加增量" 假设跟 web 路径不同,不动。
+
     :param market: 市场
     :param code: 计算的标的
-    :param klines: 计算的 k线 数据，每个周期对应一个 k线DataFrame，例如 ：{'30m': klines_30m, '5m': klines_5m}
+    :param klines: 计算的 k线 数据,每个周期对应一个 k线DataFrame
     :param cl_config: 缠论配置
-    :return: 返回计算好的缠论数据对象，List 列表格式，按照传入的 klines.keys 顺序返回 如上调用：[0] 返回 30m 周期数据 [1] 返回 5m 数据
+    :return: 缠论数据对象列表,顺序与 klines.keys 一致
     """
+    # 局部 import 避免 cl_utils 顶层 import chanlun.core.cl(后者依赖 chain 较深)。
+    from chanlun.core.cl import CL
+
     cls = []
     for f, k in klines.items():
-        cls.append(fdb.get_web_cl_data(market, code, f, cl_config, k))
+        cd = CL(code, f, dict(cl_config) if cl_config else {})
+        cd.process_klines(k)
+        cls.append(cd)
     return cls
 
 
