@@ -103,7 +103,9 @@ class KlineDataProcessor:
             # pandas 在 >= 比较时若两侧 tz 不一致会抛 TypeError，
             # 这里统一对齐到 DataFrame 列的时区语义后再比较。
             df_dt = klines['date']
-            df_is_tz_aware = pd.api.types.is_datetime64tz_dtype(df_dt)
+            # F3: pandas 2.1 起 ``is_datetime64tz_dtype`` 已 deprecated,
+            # 改用 isinstance(dtype, pd.DatetimeTZDtype) (官方迁移指南推荐路径)。
+            df_is_tz_aware = isinstance(df_dt.dtype, pd.DatetimeTZDtype)
             last_ts = pd.Timestamp(last_date)
             if df_is_tz_aware:
                 if last_ts.tzinfo is None:
