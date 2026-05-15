@@ -188,3 +188,8 @@ web/chanlun_chart/cl_app/static/charting_library/bundles/*.gz
 
 # 不应入库的电子书
 *.epub
+
+# V4: 真实标的 K 线 fixture 与本地 baseline (机器本地数据, 隐私 + 体积考量)
+# 用 script/dev/export_real_kline_fixtures.py 在本地生成
+tests/fixtures/klines/
+tests/core/baselines.local.json

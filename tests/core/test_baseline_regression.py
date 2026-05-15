@@ -22,13 +22,27 @@ from chanlun.core.cl import CL
 
 
 _BASELINES_PATH = pathlib.Path(__file__).resolve().parent / "baselines.json"
+_BASELINES_LOCAL_PATH = pathlib.Path(__file__).resolve().parent / "baselines.local.json"
 _FIXTURES_DIR = pathlib.Path(__file__).resolve().parent.parent / "fixtures" / "klines"
 
 
 def _load_baselines() -> Dict[str, Any]:
+    """合并加载 baselines.json (check-in, 合成) + baselines.local.json (本地, 真实)。
+
+    real_klines 优先取 .local.json (开发者本地 baseline); 若 .local.json 不
+    存在或没有 real_klines 节, 退化为空 (real_klines 测试统一 skip)。
+    """
     if not _BASELINES_PATH.exists():
         pytest.fail(f"baselines.json 不存在: {_BASELINES_PATH} —— 跑 `python -m tests.core._record_baseline` 生成")
-    return json.loads(_BASELINES_PATH.read_text(encoding="utf-8"))
+    data = json.loads(_BASELINES_PATH.read_text(encoding="utf-8"))
+    if _BASELINES_LOCAL_PATH.exists():
+        try:
+            local = json.loads(_BASELINES_LOCAL_PATH.read_text(encoding="utf-8"))
+            if isinstance(local, dict) and isinstance(local.get("real_klines"), dict):
+                data["real_klines"] = local["real_klines"]
+        except Exception:
+            pass
+    return data
 
 
 def _snapshot_md5(cd: CL) -> str:
