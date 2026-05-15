@@ -1,3 +1,4 @@
+import atexit
 import datetime
 import os
 import hashlib
@@ -7,6 +8,7 @@ import random
 import threading
 import time
 import uuid
+from concurrent.futures import Future, ThreadPoolExecutor
 from decimal import Decimal
 from typing import Optional, Union
 
@@ -21,6 +23,26 @@ from chanlun.config import get_data_path
 from chanlun.db import db
 from chanlun.exchange import Exchange
 from chanlun.tools.log_util import LogUtil
+
+
+# US-007: pickle 异步落盘线程池。
+# 历史: _atomic_write_pickle 含 Windows 文件锁 450ms 同步退避, 直接卡在 web 请求线程,
+# 配合上层 per-key 锁会自我放大成"秒级请求"。这里挪到独立 ThreadPoolExecutor,
+# 调用方 (cl 对象 save、cache_pkl、TV chart cache) 立即返回 Future, web 线程不再卡。
+# 失败在 worker 内 LogUtil.warning, 不向外传 (写盘失败 = 下次重算, 不应崩调用栈)。
+_PICKLE_WRITE_WORKERS = 4
+_PICKLE_WRITE_EXECUTOR = ThreadPoolExecutor(
+    max_workers=_PICKLE_WRITE_WORKERS,
+    thread_name_prefix="FileDbPickleWriter",
+)
+
+
+def _shutdown_pickle_write_executor() -> None:
+    # 进程退出时优雅关闭, 等所有 pending 写盘完成 (避免最后一次落盘丢)。
+    _PICKLE_WRITE_EXECUTOR.shutdown(wait=True)
+
+
+atexit.register(_shutdown_pickle_write_executor)
 
 
 class _ChartCacheSafeUnpickler(pickle.Unpickler):
@@ -187,11 +209,9 @@ class FileCacheDB(object):
         )
         return path.with_suffix(path.suffix + suffix)
 
-    def _atomic_write_pickle(self, path: pathlib.Path, obj: object):
+    def _atomic_write_pickle_blocking(self, path: pathlib.Path, obj: object):
         """
-        原子化写入 pickle，避免并发读到半写入文件。
-
-        H2：失败时主动清理 .tmp 残留，避免临时文件长期堆积撑爆磁盘配额。
+        原子化写入 pickle (同步阻塞)，避免并发读到半写入文件。
 
         2026-05 修复：Windows 上 ``os.replace`` 不能覆盖被其它进程 / 线程"打开"
         的目标文件（即使只是读），实测在并发 polling + 缓存校验场景下会撞
@@ -200,13 +220,17 @@ class FileCacheDB(object):
         Linux 的 rename 是原子覆盖，没这个问题。
         这里对 ``os.replace`` 加短指数退避重试（仅 PermissionError），让出 CPU
         给读端关闭句柄；超过最大重试次数才真正放弃。
+
+        US-007: 本方法被 ``_atomic_write_pickle`` 包装到独立 ThreadPoolExecutor
+        中异步调用, 不再阻塞 web 线程; web 调用方拿到 Future 后立即返回。
+        失败在 worker 内 LogUtil.warning, 不向外传播。
         """
         tmp = self._make_unique_tmp_path(path)
         try:
             with open(tmp, "wb") as fp:
                 pickle.dump(obj, fp, protocol=self._PICKLE_PROTOCOL)
             # Windows 文件锁兜底重试：4 次共约 30+60+120+240 = 450ms 退避。
-            # 实测 Windows 上读端关闭文件句柄通常 < 100ms，450ms 足够覆盖正常并发。
+            # 现在跑在 _PICKLE_WRITE_EXECUTOR 的 worker 上, 不再卡 web 线程。
             _delays_ms = (30, 60, 120, 240)
             for _attempt, _delay in enumerate((0, *_delays_ms)):
                 if _delay:
@@ -226,10 +250,54 @@ class FileCacheDB(object):
             except Exception as cleanup_exc:
                 # 清理失败不能掩盖原异常，仅记录 debug 用于事后排查（如磁盘只读、权限等）。
                 LogUtil.debug(
-                    f"[FileCacheDB._atomic_write_pickle] cleanup tmp failed "
+                    f"[FileCacheDB._atomic_write_pickle_blocking] cleanup tmp failed "
                     f"path={tmp} err={cleanup_exc}"
                 )
             raise
+
+    def _atomic_write_pickle(self, path: pathlib.Path, obj: object) -> Future:
+        """异步 fire-and-forget 写入 pickle (US-007)。
+
+        立刻返回 Future, web 调用线程不再阻塞 450ms 重试退避。worker 内调用
+        ``_atomic_write_pickle_blocking`` 真正落盘; 失败仅记 LogUtil.warning,
+        不抛到调用栈 (写盘失败 = 下次重算, 不应崩 web 链路)。
+
+        调用方语义变化:
+        - 此前: 同步, 异常会向上传播, save_web_cl_data 可据此知道"写盘失败"。
+        - 现在: 异步, 失败被 worker 吞掉 + log; 调用方不再有写盘错误反馈通道。
+          如有强一致性需求, 显式 await 返回的 Future 即可: ``fut.result()``。
+
+        executor 已关闭等极端场景下, fallback 为同步调用 (与 chart_cache 异步落盘
+        路径同款兜底), 保证不丢写。
+        """
+        def _worker():
+            try:
+                self._atomic_write_pickle_blocking(path, obj)
+            except Exception as e:
+                LogUtil.warning(
+                    f"[FileCacheDB._atomic_write_pickle] async write failed "
+                    f"path={path} err={e}"
+                )
+
+        try:
+            return _PICKLE_WRITE_EXECUTOR.submit(_worker)
+        except RuntimeError as e:
+            # executor 已 shutdown (atexit 后) — fallback 同步, 至少不丢写
+            # 进程正在 finalize 时降级到 debug, 避免 stderr 已关闭后再写造成
+            # "I/O operation on closed file" 噪音 (architect review R2)
+            import sys as _sys
+            _log_fn = LogUtil.debug if _sys.is_finalizing() else LogUtil.warning
+            _log_fn(
+                f"[FileCacheDB._atomic_write_pickle] executor shutdown, "
+                f"fallback sync write path={path} err={e}"
+            )
+            fut: Future = Future()
+            try:
+                self._atomic_write_pickle_blocking(path, obj)
+                fut.set_result(None)
+            except Exception as inner:
+                fut.set_exception(inner)
+            return fut
 
     def _atomic_write_csv(self, path: pathlib.Path, df: pd.DataFrame):
         """
@@ -293,23 +361,86 @@ class FileCacheDB(object):
         finally:
             self._cleanup_lock.release()
 
+    # US-008: parquet K 线缓存底层 API (公共方法, 任意调用方可直接使用) ----
+    def _kline_parquet_path(self, market: str, code: str, frequency: str) -> pathlib.Path:
+        return self.klines_path / market / f"{code.replace('.', '_')}_{frequency}.parquet"
+
+    def _kline_csv_path(self, market: str, code: str, frequency: str) -> pathlib.Path:
+        return self.klines_path / market / f"{code.replace('.', '_')}_{frequency}.csv"
+
+    def save_klines_parquet(
+        self, market: str, code: str, frequency: str, df: pd.DataFrame
+    ) -> bool:
+        """K 线 DataFrame 落盘为 parquet (pyarrow + zstd)。
+
+        相比 CSV: 体积小 60-80%, 读写快 5x, 原生保留 datetime / tz / dtype。
+        与 save_tdx_klines 的关系: 后者会同时调本方法 (双写过渡), 见下文。
+        """
+        path = self._kline_parquet_path(market, code, frequency)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # 写 tmp 后 os.replace 保证原子性 (与 CSV / pickle 一致)
+        tmp = self._make_unique_tmp_path(path)
+        try:
+            df.to_parquet(tmp, engine="pyarrow", compression="zstd", index=False)
+            os.replace(tmp, path)
+            return True
+        except Exception as exc:
+            try:
+                if tmp.exists():
+                    tmp.unlink(missing_ok=True)
+            except Exception as cleanup_exc:
+                LogUtil.debug(
+                    f"[FileCacheDB.save_klines_parquet] cleanup tmp failed "
+                    f"path={tmp} err={cleanup_exc}"
+                )
+            LogUtil.warning(
+                f"[FileCacheDB.save_klines_parquet] write failed "
+                f"market={market} code={code} freq={frequency} err={exc}"
+            )
+            return False
+
+    def load_klines_parquet(
+        self, market: str, code: str, frequency: str
+    ) -> Union[None, pd.DataFrame]:
+        """读 parquet K 线, 不存在或损坏返回 None (调用方可走 CSV fallback)。"""
+        path = self._kline_parquet_path(market, code, frequency)
+        if not path.is_file():
+            return None
+        try:
+            return pd.read_parquet(path, engine="pyarrow")
+        except Exception as exc:
+            LogUtil.debug(
+                f"[FileCacheDB.load_klines_parquet] read failed (file corrupt?), "
+                f"unlinking path={path} err={exc}"
+            )
+            path.unlink(missing_ok=True)
+            return None
+
+    # ---- tdx K 线读写: parquet 优先 + CSV 兜底 (双写过渡) ----
     def get_tdx_klines(
         self, market: str, code: str, frequency: str
     ) -> Union[None, pd.DataFrame]:
         """
-        获取缓存在文件中的股票数据
+        获取缓存在文件中的股票数据。
+
+        US-008: 优先读 parquet (体积小 + 读快), 失败 fallback CSV (兼容老数据)。
+        新数据由 save_tdx_klines 同时写 parquet + CSV (双写过渡), 灰度期满后
+        可拆掉 CSV 路径只留 parquet。
         """
-        file_pathname = (
-            self.klines_path / market / f"{code.replace('.', '_')}_{frequency}.csv"
-        )
-        if file_pathname.is_file() is False:
-            return None
-        try:
-            _klines = pd.read_csv(file_pathname, parse_dates=["date"])  # 直接解析日期列
-        except Exception:
-            # H3：用 missing_ok 防止并发清理线程已经删过该文件时再次抛错。
-            file_pathname.unlink(missing_ok=True)
-            return None
+        # 优先 parquet
+        _klines = self.load_klines_parquet(market, code, frequency)
+        if _klines is None:
+            # fallback CSV
+            file_pathname = self._kline_csv_path(market, code, frequency)
+            if file_pathname.is_file() is False:
+                return None
+            try:
+                _klines = pd.read_csv(file_pathname, parse_dates=["date"])
+            except Exception:
+                # H3:用 missing_ok 防止并发清理线程已经删过该文件时再次抛错。
+                file_pathname.unlink(missing_ok=True)
+                return None
+
         if len(_klines) > 0:
             # 如果 date 有 Nan 则返回 None
             if _klines["date"].isnull().any():
@@ -329,33 +460,38 @@ class FileCacheDB(object):
     def save_tdx_klines(
         self, market: str, code: str, frequency: str, kline: pd.DataFrame
     ):
+        """保存通达信 k 线数据对象到文件中。
+
+        US-008: 同时写 parquet (主) + CSV (兜底, 灰度期), 保证:
+        - 新部署有 parquet, 旧 reader 走 CSV 仍能工作
+        - 灰度期满后, 只需删 _atomic_write_csv 这一行 + clear 里的 csv glob
         """
-        保存通达信k线数据对象到文件中
-        """
-        file_pathname = (
-            self.klines_path / market / f"{code.replace('.', '_')}_{frequency}.csv"
-        )
-        self._atomic_write_csv(file_pathname, kline)
+        # 写 parquet (主路径, 失败不影响 CSV 兜底)
+        self.save_klines_parquet(market, code, frequency, kline)
+        # 写 CSV (双写过渡, 旧 reader 仍可读)
+        csv_path = self._kline_csv_path(market, code, frequency)
+        self._atomic_write_csv(csv_path, kline)
         return True
 
     def clear_tdx_old_klines(self, market):
-        """
-        删除15天前的k线数据，不活跃的，减少占用空间
-        """
+        """删除 15 天前的 k 线数据 (parquet + CSV 都清), 减少占用空间。"""
         del_lt_times = fun.datetime_to_int(datetime.datetime.now()) - (
             15 * 24 * 60 * 60
         )
-        for filename in (self.klines_path / market).glob("*.csv"):
-            try:
-                if filename.stat().st_mtime < del_lt_times:
-                    # missing_ok=True：防御 glob 拿到文件名后、unlink 调用前被并发清理
-                    filename.unlink(missing_ok=True)
-            except Exception as exc:
-                # 单个文件清理失败不影响其它文件继续清理，仅 debug 留痕。
-                LogUtil.debug(
-                    f"[FileCacheDB.clear_tdx_old_klines] unlink failed "
-                    f"file={filename} err={exc}"
-                )
+        market_dir = self.klines_path / market
+        # US-008: parquet 和 CSV 一起清; 二者文件名同源 (只是后缀不同), mtime 同步更新
+        for pattern in ("*.csv", "*.parquet"):
+            for filename in market_dir.glob(pattern):
+                try:
+                    if filename.stat().st_mtime < del_lt_times:
+                        # missing_ok=True:防御 glob 拿到文件名后、unlink 调用前被并发清理
+                        filename.unlink(missing_ok=True)
+                except Exception as exc:
+                    # 单个文件清理失败不影响其它文件继续清理,仅 debug 留痕。
+                    LogUtil.debug(
+                        f"[FileCacheDB.clear_tdx_old_klines] unlink failed "
+                        f"file={filename} err={exc}"
+                    )
         return True
 
     def get_web_cl_data(
