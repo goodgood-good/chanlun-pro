@@ -472,16 +472,32 @@ class LINE:
         return j if self.end.val > self.start.val else -j
 
     def __eq__(self, other):
-        """判断两个BI对象是否相等"""
-        if not isinstance(other, BI):
+        """判断两条线 (LINE 子类: BI / XD / ZSLX) 是否相同。
+
+        P6 修复 (原代码锁死 ``isinstance(other, BI)``):
+        - LINE 是基类, BI / XD / ZSLX 都继承它。旧实现写死成 BI 类型,
+          导致两个 XD 之间 ``==`` 永远 False, 用 ``in [...]`` / ``set()``
+          去重失效。
+        - 改为 ``type(self) is type(other)`` 严格类型匹配: BI 只与 BI 比较,
+          XD 只与 XD 比较 (一段笔 != 一段线段, 即使端点 k_index 相同)。
+        - 非 LINE 子类返回 ``NotImplemented`` (Python 数据模型推荐做法,
+          让另一边的 __eq__ 兜底)。
+        """
+        if not isinstance(other, LINE):
+            return NotImplemented
+        if type(self) is not type(other):
             return False
         return (self.start.k.k_index == other.start.k.k_index and
                 self.end.k.k_index == other.end.k.k_index and
                 self.type == other.type)
 
     def __hash__(self):
-        """返回BI对象的哈希值"""
-        return hash((self.start.k.k_index, self.end.k.k_index, self.type))
+        """返回 LINE 对象的哈希值 (与 __eq__ 一致)。
+
+        加入 ``type(self).__name__`` 让 BI 与 XD 即使端点相同也 hash 不同,
+        避免 set/dict 上的不必要冲突 (Python 契约不要求, 仅性能优化)。
+        """
+        return hash((type(self).__name__, self.start.k.k_index, self.end.k.k_index, self.type))
 
 
     def to_dict(self):
