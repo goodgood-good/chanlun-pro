@@ -28,8 +28,13 @@ from openctp_ctp.thosttraderapi import (
     THOST_FTDC_D_Sell,  # 卖出
     THOST_FTDC_HF_Speculation,  # 投机
     THOST_FTDC_OF_Close,  # 平仓
+    THOST_FTDC_OF_Open,  # 开仓 (B2 follow-up: ApiStruct 迁移)
     THOST_FTDC_OPT_LimitPrice,  # 限价单
 )
+
+# 报单/查询的回报等待超时 (秒). 取代原 time.sleep(1) 硬编码:
+# 回报快时立即返回, 回报慢时也不超过 _CTP_CALLBACK_TIMEOUT 才放弃.
+_CTP_CALLBACK_TIMEOUT = 3.0
 
 from chanlun import utils
 from chanlun.backtesting.backtest_trader import BackTestTrader
@@ -109,10 +114,16 @@ class MyTraderCallback(CThostFtdcTraderApi):
     def OnRspQryInvestorPosition(
         self, pInvestorPosition, pRspInfo, nRequestID, bIsLast
     ):
-        """持仓查询回报 (CTP callback 线程, B2 改走 state.set_position)"""
+        """持仓查询回报 (CTP callback 线程).
+
+        B2: set_position 加锁写入.
+        B2 follow-up: bIsLast=True 时唤醒等待中的主线程, 取代 time.sleep(1).
+        """
         if pInvestorPosition:
             key = f"{pInvestorPosition.InstrumentID}_{pInvestorPosition.PosiDirection}"
             self.state.set_position(key, pInvestorPosition)
+        if bIsLast:
+            self.state.mark_position_query_done()
 
 
 class CTPTrader(BackTestTrader):
@@ -168,41 +179,45 @@ class CTPTrader(BackTestTrader):
         if code not in tick:
             return False
 
-        # 检查持仓数量
+        # 检查持仓数量 (B2 follow-up: ApiStruct → CThostFtdc + Event 等待)
+        qry_req = CThostFtdcQryInvestorPositionField()
+        qry_req.BrokerID = self.ex.broker_id
+        qry_req.InvestorID = self.ex.user_id
+        qry_req.InstrumentID = code
+        self.trader_api.state.prepare_position_query()
         self.trader_api.ReqQryInvestorPosition(
-            ApiStruct.QryInvestorPosition(
-                BrokerID=self.broker_id, InvestorID=self.user_id, InstrumentID=code
-            ),
-            0,
+            qry_req, self.trader_api.state.next_request_id()
         )
-        time.sleep(1)  # 等待查询结果
+        if not self.trader_api.state.wait_for_position_query(_CTP_CALLBACK_TIMEOUT):
+            return False
 
         if self.trader_api.state.get_position_count() >= self.max_pos:
             return False
 
         # 下单
         order_ref = self.trader_api.state.next_order_ref()
-        req = ApiStruct.InputOrder(
-            InstrumentID=code,
-            OrderPriceType=ApiStruct.THOST_FTDC_OPT_LimitPrice,
-            Direction=ApiStruct.THOST_FTDC_D_Buy,
-            CombOffsetFlag=ApiStruct.THOST_FTDC_OF_Open,
-            CombHedgeFlag=ApiStruct.THOST_FTDC_HF_Speculation,
-            LimitPrice=tick[code].last,
-            VolumeTotalOriginal=amount or 1,
-            TimeCondition=ApiStruct.THOST_FTDC_TC_GFD,
-            VolumeCondition=ApiStruct.THOST_FTDC_VC_AV,
-            MinVolume=1,
-            ContingentCondition=ApiStruct.THOST_FTDC_CC_Immediately,
-            OrderRef=order_ref,
-        )
+        self.trader_api.state.register_order_wait(order_ref)
+        req = CThostFtdcInputOrderField()
+        req.InstrumentID = code
+        req.OrderPriceType = THOST_FTDC_OPT_LimitPrice
+        req.Direction = THOST_FTDC_D_Buy
+        req.CombOffsetFlag = THOST_FTDC_OF_Open
+        req.CombHedgeFlag = THOST_FTDC_HF_Speculation
+        req.LimitPrice = tick[code].last
+        req.VolumeTotalOriginal = amount or 1
+        req.TimeCondition = THOST_FTDC_TC_GFD
+        req.VolumeCondition = THOST_FTDC_VC_AV
+        req.MinVolume = 1
+        req.ContingentCondition = THOST_FTDC_CC_Immediately
+        req.OrderRef = order_ref
 
         result = self.trader_api.ReqOrderInsert(req, 0)
         if result != 0:
             return False
 
-        # 等待订单回报
-        time.sleep(1)
+        # 等待订单回报 (B2 follow-up: Event 取代 time.sleep)
+        if not self.trader_api.state.wait_for_order(order_ref, _CTP_CALLBACK_TIMEOUT):
+            return False
         order = self.trader_api.state.get_order(order_ref)
         if not order:
             return False
@@ -233,41 +248,43 @@ class CTPTrader(BackTestTrader):
             return False
 
         # 检查持仓数量
+        qry_req = CThostFtdcQryInvestorPositionField()
+        qry_req.BrokerID = self.ex.broker_id
+        qry_req.InvestorID = self.ex.user_id
+        qry_req.InstrumentID = code
+        self.trader_api.state.prepare_position_query()
         self.trader_api.ReqQryInvestorPosition(
-            ApiStruct.QryInvestorPosition(
-                BrokerID=self.ex.broker_id,
-                InvestorID=self.ex.user_id,
-                InstrumentID=code,
-            ),
-            0,
+            qry_req, self.trader_api.state.next_request_id()
         )
-        time.sleep(1)
+        if not self.trader_api.state.wait_for_position_query(_CTP_CALLBACK_TIMEOUT):
+            return False
 
         if self.trader_api.state.get_position_count() >= self.max_pos:
             return False
 
         # 下单
         order_ref = self.trader_api.state.next_order_ref()
-        req = ApiStruct.InputOrder(
-            InstrumentID=code,
-            OrderPriceType=ApiStruct.THOST_FTDC_OPT_LimitPrice,
-            Direction=ApiStruct.THOST_FTDC_D_Sell,  # 卖出开仓
-            CombOffsetFlag=ApiStruct.THOST_FTDC_OF_Open,  # 开仓
-            CombHedgeFlag=ApiStruct.THOST_FTDC_HF_Speculation,
-            LimitPrice=tick[code].last,
-            VolumeTotalOriginal=amount or 1,
-            TimeCondition=ApiStruct.THOST_FTDC_TC_GFD,
-            VolumeCondition=ApiStruct.THOST_FTDC_VC_AV,
-            MinVolume=1,
-            ContingentCondition=ApiStruct.THOST_FTDC_CC_Immediately,
-            OrderRef=order_ref,
-        )
+        self.trader_api.state.register_order_wait(order_ref)
+        req = CThostFtdcInputOrderField()
+        req.InstrumentID = code
+        req.OrderPriceType = THOST_FTDC_OPT_LimitPrice
+        req.Direction = THOST_FTDC_D_Sell  # 卖出开仓
+        req.CombOffsetFlag = THOST_FTDC_OF_Open  # 开仓
+        req.CombHedgeFlag = THOST_FTDC_HF_Speculation
+        req.LimitPrice = tick[code].last
+        req.VolumeTotalOriginal = amount or 1
+        req.TimeCondition = THOST_FTDC_TC_GFD
+        req.VolumeCondition = THOST_FTDC_VC_AV
+        req.MinVolume = 1
+        req.ContingentCondition = THOST_FTDC_CC_Immediately
+        req.OrderRef = order_ref
 
         result = self.trader_api.ReqOrderInsert(req, 0)
         if result != 0:
             return False
 
-        time.sleep(1)
+        if not self.trader_api.state.wait_for_order(order_ref, _CTP_CALLBACK_TIMEOUT):
+            return False
         order = self.trader_api.state.get_order(order_ref)
         if not order:
             return False
@@ -297,26 +314,27 @@ class CTPTrader(BackTestTrader):
             return False
 
         order_ref = self.trader_api.state.next_order_ref()
-        req = ApiStruct.InputOrder(
-            InstrumentID=code,
-            OrderPriceType=ApiStruct.THOST_FTDC_OPT_LimitPrice,
-            Direction=ApiStruct.THOST_FTDC_D_Sell,
-            CombOffsetFlag=ApiStruct.THOST_FTDC_OF_Close,
-            CombHedgeFlag=ApiStruct.THOST_FTDC_HF_Speculation,
-            LimitPrice=tick[code].last,
-            VolumeTotalOriginal=pos.amount,
-            TimeCondition=ApiStruct.THOST_FTDC_TC_GFD,
-            VolumeCondition=ApiStruct.THOST_FTDC_VC_AV,
-            MinVolume=1,
-            ContingentCondition=ApiStruct.THOST_FTDC_CC_Immediately,
-            OrderRef=order_ref,
-        )
+        self.trader_api.state.register_order_wait(order_ref)
+        req = CThostFtdcInputOrderField()
+        req.InstrumentID = code
+        req.OrderPriceType = THOST_FTDC_OPT_LimitPrice
+        req.Direction = THOST_FTDC_D_Sell
+        req.CombOffsetFlag = THOST_FTDC_OF_Close
+        req.CombHedgeFlag = THOST_FTDC_HF_Speculation
+        req.LimitPrice = tick[code].last
+        req.VolumeTotalOriginal = pos.amount
+        req.TimeCondition = THOST_FTDC_TC_GFD
+        req.VolumeCondition = THOST_FTDC_VC_AV
+        req.MinVolume = 1
+        req.ContingentCondition = THOST_FTDC_CC_Immediately
+        req.OrderRef = order_ref
 
         result = self.trader_api.ReqOrderInsert(req, 0)
         if result != 0:
             return False
 
-        time.sleep(1)
+        if not self.trader_api.state.wait_for_order(order_ref, _CTP_CALLBACK_TIMEOUT):
+            return False
         order = self.trader_api.state.get_order(order_ref)
         if not order:
             return False
@@ -344,26 +362,27 @@ class CTPTrader(BackTestTrader):
             return False
 
         order_ref = self.trader_api.state.next_order_ref()
-        req = ApiStruct.InputOrder(
-            InstrumentID=code,
-            OrderPriceType=ApiStruct.THOST_FTDC_OPT_LimitPrice,
-            Direction=ApiStruct.THOST_FTDC_D_Buy,  # 买入平仓
-            CombOffsetFlag=ApiStruct.THOST_FTDC_OF_Close,  # 平仓
-            CombHedgeFlag=ApiStruct.THOST_FTDC_HF_Speculation,
-            LimitPrice=tick[code].last,
-            VolumeTotalOriginal=pos.amount,
-            TimeCondition=ApiStruct.THOST_FTDC_TC_GFD,
-            VolumeCondition=ApiStruct.THOST_FTDC_VC_AV,
-            MinVolume=1,
-            ContingentCondition=ApiStruct.THOST_FTDC_CC_Immediately,
-            OrderRef=order_ref,
-        )
+        self.trader_api.state.register_order_wait(order_ref)
+        req = CThostFtdcInputOrderField()
+        req.InstrumentID = code
+        req.OrderPriceType = THOST_FTDC_OPT_LimitPrice
+        req.Direction = THOST_FTDC_D_Buy  # 买入平仓
+        req.CombOffsetFlag = THOST_FTDC_OF_Close  # 平仓
+        req.CombHedgeFlag = THOST_FTDC_HF_Speculation
+        req.LimitPrice = tick[code].last
+        req.VolumeTotalOriginal = pos.amount
+        req.TimeCondition = THOST_FTDC_TC_GFD
+        req.VolumeCondition = THOST_FTDC_VC_AV
+        req.MinVolume = 1
+        req.ContingentCondition = THOST_FTDC_CC_Immediately
+        req.OrderRef = order_ref
 
         result = self.trader_api.ReqOrderInsert(req, 0)
         if result != 0:
             return False
 
-        time.sleep(1)
+        if not self.trader_api.state.wait_for_order(order_ref, _CTP_CALLBACK_TIMEOUT):
+            return False
         order = self.trader_api.state.get_order(order_ref)
         if not order:
             return False
@@ -393,59 +412,47 @@ class CTPTrader(BackTestTrader):
             return False
 
         # 查询当前持仓
+        qry_req = CThostFtdcQryInvestorPositionField()
+        qry_req.BrokerID = self.ex.broker_id
+        qry_req.InvestorID = self.ex.user_id
+        qry_req.InstrumentID = code
+        self.trader_api.state.prepare_position_query()
         self.trader_api.ReqQryInvestorPosition(
-            ApiStruct.QryInvestorPosition(
-                BrokerID=self.ex.broker_id,
-                InvestorID=self.ex.user_id,
-                InstrumentID=code,
-            ),
-            0,
+            qry_req, self.trader_api.state.next_request_id()
         )
-        time.sleep(1)
+        if not self.trader_api.state.wait_for_position_query(_CTP_CALLBACK_TIMEOUT):
+            return False
 
         # 根据持仓方向决定锁仓方向
+        order_ref = self.trader_api.state.next_order_ref()
+        self.trader_api.state.register_order_wait(order_ref)
+        req = CThostFtdcInputOrderField()
+        req.InstrumentID = code
+        req.OrderPriceType = THOST_FTDC_OPT_LimitPrice
         if pos.direction == "buy":
             # 持有多仓，开空仓锁仓
-            order_ref = self.trader_api.state.next_order_ref()
-            req = ApiStruct.InputOrder(
-                InstrumentID=code,
-                OrderPriceType=ApiStruct.THOST_FTDC_OPT_LimitPrice,
-                Direction=ApiStruct.THOST_FTDC_D_Sell,  # 开空仓
-                CombOffsetFlag=ApiStruct.THOST_FTDC_OF_Open,
-                CombHedgeFlag=ApiStruct.THOST_FTDC_HF_Speculation,
-                LimitPrice=tick[code].last,
-                VolumeTotalOriginal=pos.amount,  # 锁仓数量等于持仓数量
-                TimeCondition=ApiStruct.THOST_FTDC_TC_GFD,
-                VolumeCondition=ApiStruct.THOST_FTDC_VC_AV,
-                MinVolume=1,
-                ContingentCondition=ApiStruct.THOST_FTDC_CC_Immediately,
-                OrderRef=order_ref,
-            )
+            req.Direction = THOST_FTDC_D_Sell  # 开空仓
             direction = "sell"
         else:
             # 持有空仓，开多仓锁仓
-            order_ref = self.trader_api.state.next_order_ref()
-            req = ApiStruct.InputOrder(
-                InstrumentID=code,
-                OrderPriceType=ApiStruct.THOST_FTDC_OPT_LimitPrice,
-                Direction=ApiStruct.THOST_FTDC_D_Buy,  # 开多仓
-                CombOffsetFlag=ApiStruct.THOST_FTDC_OF_Open,
-                CombHedgeFlag=ApiStruct.THOST_FTDC_HF_Speculation,
-                LimitPrice=tick[code].last,
-                VolumeTotalOriginal=pos.amount,  # 锁仓数量等于持仓数量
-                TimeCondition=ApiStruct.THOST_FTDC_TC_GFD,
-                VolumeCondition=ApiStruct.THOST_FTDC_VC_AV,
-                MinVolume=1,
-                ContingentCondition=ApiStruct.THOST_FTDC_CC_Immediately,
-                OrderRef=order_ref,
-            )
+            req.Direction = THOST_FTDC_D_Buy  # 开多仓
             direction = "buy"
+        req.CombOffsetFlag = THOST_FTDC_OF_Open
+        req.CombHedgeFlag = THOST_FTDC_HF_Speculation
+        req.LimitPrice = tick[code].last
+        req.VolumeTotalOriginal = pos.amount  # 锁仓数量等于持仓数量
+        req.TimeCondition = THOST_FTDC_TC_GFD
+        req.VolumeCondition = THOST_FTDC_VC_AV
+        req.MinVolume = 1
+        req.ContingentCondition = THOST_FTDC_CC_Immediately
+        req.OrderRef = order_ref
 
         result = self.trader_api.ReqOrderInsert(req, 0)
         if result != 0:
             return False
 
-        time.sleep(1)
+        if not self.trader_api.state.wait_for_order(order_ref, _CTP_CALLBACK_TIMEOUT):
+            return False
         order = self.trader_api.state.get_order(order_ref)
         if not order:
             return False
@@ -475,6 +482,7 @@ class CTPTrader(BackTestTrader):
             return False
 
         order_ref = self.trader_api.state.next_order_ref()
+        self.trader_api.state.register_order_wait(order_ref)
 
         # 根据持仓方向决定平仓方向和价格
         if pos.direction == "buy":
@@ -504,7 +512,8 @@ class CTPTrader(BackTestTrader):
         if result != 0:
             return False
 
-        time.sleep(1)
+        if not self.trader_api.state.wait_for_order(order_ref, _CTP_CALLBACK_TIMEOUT):
+            return False
         order = self.trader_api.state.get_order(order_ref)
         if not order:
             return False
@@ -543,8 +552,12 @@ class CTPTrader(BackTestTrader):
         req = CThostFtdcQryInvestorPositionField()
         req.BrokerID = self.ex.broker_id
         req.InvestorID = self.ex.user_id
-        self.trader_api.ReqQryInvestorPosition(req, 0)
-        time.sleep(1)
+        self.trader_api.state.prepare_position_query()
+        self.trader_api.ReqQryInvestorPosition(
+            req, self.trader_api.state.next_request_id()
+        )
+        if not self.trader_api.state.wait_for_position_query(_CTP_CALLBACK_TIMEOUT):
+            return []
 
         results = []
         for key, pos_info in self.trader_api.state.get_positions_snapshot().items():
@@ -568,14 +581,14 @@ class CTPTrader(BackTestTrader):
         req = CThostFtdcSettlementInfoConfirmField()
         req.BrokerID = self.ex.broker_id
         req.InvestorID = self.ex.user_id
-        self.trader_api.ReqSettlementInfoConfirm(req, self.trader_api.state.order_ref)
+        self.trader_api.ReqSettlementInfoConfirm(req, self.trader_api.state.next_request_id())
 
     def query_instrument(self, code=""):
         """查询合约"""
         req = CThostFtdcQryInstrumentField()
         if code:
             req.InstrumentID = code
-        self.trader_api.ReqQryInstrument(req, self.trader_api.state.order_ref)
+        self.trader_api.ReqQryInstrument(req, self.trader_api.state.next_request_id())
 
     def cancel_order(self, order_ref: str):
         """撤单"""
@@ -591,7 +604,7 @@ class CTPTrader(BackTestTrader):
         req.BrokerID = self.ex.broker_id
         req.InvestorID = self.ex.user_id
 
-        return self.trader_api.ReqOrderAction(req, self.trader_api.state.order_ref) == 0
+        return self.trader_api.ReqOrderAction(req, self.trader_api.state.next_request_id()) == 0
 
     def OnRspSettlementInfoConfirm(
         self, pSettlementInfoConfirm, pRspInfo, nRequestID, bIsLast
@@ -641,7 +654,7 @@ class CTPTrader(BackTestTrader):
         req = CThostFtdcQryTradingAccountField()
         req.BrokerID = self.ex.broker_id
         req.InvestorID = self.ex.user_id
-        self.trader_api.ReqQryTradingAccount(req, self.trader_api.state.order_ref)
+        self.trader_api.ReqQryTradingAccount(req, self.trader_api.state.next_request_id())
 
     def query_orders(self, code=""):
         """查询委托"""
@@ -650,7 +663,7 @@ class CTPTrader(BackTestTrader):
         req.InvestorID = self.ex.user_id
         if code:
             req.InstrumentID = code
-        self.trader_api.ReqQryOrder(req, self.trader_api.state.order_ref)
+        self.trader_api.ReqQryOrder(req, self.trader_api.state.next_request_id())
 
     def query_trades(self, code=""):
         """查询成交"""
@@ -659,7 +672,7 @@ class CTPTrader(BackTestTrader):
         req.InvestorID = self.ex.user_id
         if code:
             req.InstrumentID = code
-        self.trader_api.ReqQryTrade(req, self.trader_api.state.order_ref)
+        self.trader_api.ReqQryTrade(req, self.trader_api.state.next_request_id())
 
     def get_position(self, code: str) -> Dict:
         """获取单个合约的持仓"""
