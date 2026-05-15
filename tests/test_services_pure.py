@@ -189,23 +189,33 @@ class TestMergeShapeLists:
         result = _merge_shape_lists(existing, [])
         assert result == existing
 
-    def test_overlap_window_drops_existing(self):
-        # existing 有 t=50, 150；new 有 t=100, 200 → window=[100,200]
-        # existing t=150 在窗内，会被 drop
+    def test_merge_dedupes_by_start_point_identity(self):
+        """新实现按"起点 (time, price)"身份去重, new 覆盖 old。
+
+        旧行为 (test_overlap_window_drops_existing): 用 new 末点 time 划区间, 区间内的
+        existing 全 drop —— 注释明确指出该行为已废弃, 原因见 _merge_shape_lists
+        docstring (中间段 end_time 落在区间内会被永久删除 → 线段不连续)。
+
+        新行为: 起点 (time, price) 不冲突的 existing 全部保留, 起点冲突时 new 覆盖。
+        本测试锁定新语义, 防止未来谁误回退到旧的区间切割。
+        """
         existing = [
-            {"id": "old_outside", "points": [{"time": 50}]},
-            {"id": "old_inside", "points": [{"time": 150}]},
+            {"id": "old_a", "points": [{"time": 50, "price": 10.0}, {"time": 60}]},
+            {"id": "old_b", "points": [{"time": 150, "price": 12.0}, {"time": 160}]},
         ]
         new = [
-            {"id": "new1", "points": [{"time": 100}]},
-            {"id": "new2", "points": [{"time": 200}]},
+            {"id": "old_b_v2", "points": [{"time": 150, "price": 12.0}, {"time": 200}]},  # 同起点, 覆盖 old_b
+            {"id": "new_c", "points": [{"time": 100, "price": 11.0}, {"time": 130}]},
         ]
         merged = _merge_shape_lists(existing, new)
         ids = [s["id"] for s in merged]
-        assert "old_outside" in ids
-        assert "old_inside" not in ids
-        assert "new1" in ids
-        assert "new2" in ids
+        # old_a (起点 t=50, p=10.0) 起点不冲突 → 保留
+        assert "old_a" in ids
+        # old_b (起点 t=150, p=12.0) 被 old_b_v2 同起点身份覆盖 → drop
+        assert "old_b" not in ids
+        assert "old_b_v2" in ids
+        # new_c (起点 t=100, p=11.0) 全新身份 → 加入
+        assert "new_c" in ids
 
     def test_result_sorted_by_time(self):
         existing = [{"id": "a", "points": [{"time": 100}]}]
