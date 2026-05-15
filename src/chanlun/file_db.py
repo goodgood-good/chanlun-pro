@@ -189,20 +189,16 @@ class FileCacheDB(object):
     def _make_unique_tmp_path(path: pathlib.Path) -> pathlib.Path:
         """生成保证唯一的 .tmp 文件路径。
 
-        2026-04 修复：之前只用毫秒时间戳，并发场景（用户 polling + 全市场预热同时写
-        同一个 cache_key 文件）下两个线程会拿到完全相同的 tmp 路径，触发 race：
-        线程 A 写完 tmp → A 调 os.replace 把 tmp move 走 → 线程 B 写完同名 tmp →
-        B 调 os.replace 时 tmp 已不存在 → 抛 FileNotFoundError，写盘失败。
-        日志体现为 ``[us-XXX-1m-...] 写入缓存失败 ... .tmp-XXX -> ...pkl``，
-        同时同一 cache_key 的请求 elapsed 飙到 10+ 秒（per-key chart_calc_locks
-        在 race 状态下被卡）。
+        唯一性由 ``pid + 线程 id + uuid4[:8]`` 三元组保证 (任意两个线程拿到的
+        tmp 路径不可能相同, 解决 2026-04 并发 polling + 全市场预热同写一个
+        cache_key 的 race: 线程 A 调 os.replace 把 tmp move 走后, B 的同名
+        tmp 已不存在 → FileNotFoundError 写盘失败)。
 
-        修复：tmp 路径加上 pid + 线程 id + uuid4 后 8 位，让任意两个线程拿到的
-        tmp 路径不可能相同。最后哪个 os.replace 后到就用哪个的结果（idempotent，
-        反正同一 cache_key 算出来的内容等价）。
+        N3 (P8 follow-up): 文件名前缀从毫秒时间戳改 ``%H%M%S`` (6 字符), 保留人
+        工 ls 查看时间的便利, 同时缩短文件名。
         """
         suffix = (
-            f".tmp-{int(time.time() * 1000)}"
+            f".tmp-{datetime.datetime.now().strftime('%H%M%S')}"
             f"-{os.getpid()}"
             f"-{threading.get_ident()}"
             f"-{uuid.uuid4().hex[:8]}"
