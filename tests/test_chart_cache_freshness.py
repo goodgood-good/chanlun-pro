@@ -69,3 +69,51 @@ def test_legacy_full_snapshot_is_stale_still_works():
     # unknown / malformed 仍按 stale 处理 (与旧实现一致)
     assert _full_snapshot_is_stale(None) is True
     assert _full_snapshot_is_stale({}) is True
+
+
+def test_persist_chart_cache_async_snapshots_entry():
+    """回归: _persist_chart_cache_async 应当 deepcopy entry, 避免主线程在 cache_lock
+    外 in-place 修改 entry["data"] (例如 tv_history cache hit 路径 lazy 补算
+    apply_higher_macd_to_chart_data) 时, 异步 pickle.dump 抛
+    "RuntimeError: dictionary changed size during iteration"。
+    """
+    import threading
+    from cl_app.services import chart_cache
+
+    captured: dict = {}
+    captured_event = threading.Event()
+
+    def fake_set_chart_cache(key, entry):
+        captured["key"] = key
+        captured["entry"] = entry
+        captured_event.set()
+
+    orig_set = chart_cache.fdb.set_chart_cache
+    chart_cache.fdb.set_chart_cache = fake_set_chart_cache
+    try:
+        entry = {
+            "data": {"t": [1, 2, 3], "c": [100.0, 101.0, 102.0]},
+            "min_time": 1,
+            "is_full_snapshot": True,
+        }
+        chart_cache._persist_chart_cache_async("test_snapshot_key", entry)
+        # 立即在调用方线程 in-place 修改 entry["data"], 模拟 lazy 补算 / 后续路径
+        entry["data"]["t"].append(4)
+        entry["data"]["new_field"] = "added"
+        del entry["data"]["c"]
+
+        assert captured_event.wait(timeout=5), "disk worker did not complete in time"
+        snapshot = captured["entry"]
+        # 关键断言: worker 拿到的 snapshot 不应受 in-place 改动影响
+        assert snapshot["data"]["t"] == [1, 2, 3], (
+            f"snapshot should NOT contain in-place append; got t={snapshot['data']['t']}"
+        )
+        assert "new_field" not in snapshot["data"], (
+            "snapshot should NOT contain new in-place key 'new_field'"
+        )
+        assert "c" in snapshot["data"], (
+            "snapshot should NOT lose 'c' key after caller deletes from original entry"
+        )
+        assert snapshot["data"]["c"] == [100.0, 101.0, 102.0]
+    finally:
+        chart_cache.fdb.set_chart_cache = orig_set

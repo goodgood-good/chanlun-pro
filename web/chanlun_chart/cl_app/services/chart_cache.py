@@ -23,6 +23,7 @@ L1 Phase 2 + Tier 4 P1 重构：把 tv.py 里 chart cache 相关的状态 + 函�
 - ``_persist_chart_cache_async``: 提交磁盘写入，异常 fallback 同步
 - ``_is_negatively_cached`` / ``_mark_negative_cache``: 空数据负缓存
 """
+import copy
 import hashlib
 import json
 import random
@@ -252,9 +253,20 @@ _chart_cache_disk_executor = ThreadPoolExecutor(
 
 
 def _persist_chart_cache_async(cache_key: str, entry: dict) -> None:
-    """提交一次磁盘写入；调用方不阻塞。"""
+    """提交一次磁盘写入；调用方不阻塞。
+
+    deepcopy entry 后再提交, 避免与主线程并发 in-place 修改 ``entry["data"]``
+    (例如 tv_history cache hit 路径 lazy 补算 ``apply_higher_macd_to_chart_data``、
+    或 ``_merge_chart_data`` 之后某些 prepend 后续操作) 产生
+    ``RuntimeError: dictionary changed size during iteration`` 写盘失败。
+
+    调用方(``_set_chart_cache_entry``)在 cache_lock 内调本函数, 此处 deepcopy
+    在 cache_lock 保护下做, 期间没有其他线程能改 entry, 拿到的 snapshot 安全。
+    成本: chart_data 通常 1KB~几十 KB, deepcopy < 1ms, 主线程同步代价可接受。
+    """
+    snapshot = copy.deepcopy(entry)
     try:
-        _chart_cache_disk_executor.submit(fdb.set_chart_cache, cache_key, entry)
+        _chart_cache_disk_executor.submit(fdb.set_chart_cache, cache_key, snapshot)
     except Exception as e:
         # executor 已关闭 / 队列满等极端场景：直接同步 fallback 写一次，
         # 写失败也只是丢这条，下次预热会重新算。
@@ -262,7 +274,7 @@ def _persist_chart_cache_async(cache_key: str, entry: dict) -> None:
             f"[chart_cache] async submit failed, fallback sync write key={cache_key} err={e}"
         )
         try:
-            fdb.set_chart_cache(cache_key, entry)
+            fdb.set_chart_cache(cache_key, snapshot)
         except Exception as e2:
             LogUtil.error(f"[chart_cache] fallback sync write failed key={cache_key} err={e2}")
 
