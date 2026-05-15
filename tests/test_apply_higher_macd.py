@@ -53,7 +53,10 @@ def test_ratio_unknown_frequency_returns_none():
 
 def test_apply_short_series_no_op():
     """close 数量不足时不写 higher_macd_* 字段。"""
-    chart_data = {"c": [100.0] * 5}
+    chart_data = {
+        "t": [1700000000 + i * 60 for i in range(5)],
+        "c": [100.0] * 5,
+    }
     apply_higher_macd_to_chart_data(chart_data, "1m", "a", {})
     assert "higher_macd_dif" not in chart_data
     assert "higher_macd_dea" not in chart_data
@@ -62,9 +65,10 @@ def test_apply_short_series_no_op():
 
 def test_apply_long_series_writes_fields():
     """足够长的 close 序列会写 higher_macd_*。"""
-    # ratio for 30m (8 倍 d) — fast=96, slow=208, signal=72 → 至少需要 280 根
-    # 用 1m × 5 倍 = fast=60, slow=130, signal=45 → 至少 175 根
-    chart_data = {"c": [100.0 + i * 0.1 for i in range(500)]}
+    chart_data = {
+        "t": [1700000000 + i * 60 for i in range(500)],
+        "c": [100.0 + i * 0.1 for i in range(500)],
+    }
     cfg = {"idx_macd_fast": 12, "idx_macd_slow": 26, "idx_macd_signal": 9}
     apply_higher_macd_to_chart_data(chart_data, "1m", "a", cfg)
     assert "higher_macd_dif" in chart_data
@@ -75,7 +79,10 @@ def test_apply_long_series_writes_fields():
 
 def test_apply_nan_replaced_with_none():
     """MACD 计算结果中头部 slow+signal 根都是 NaN, 应转成 None。"""
-    chart_data = {"c": [100.0 + i * 0.1 for i in range(500)]}
+    chart_data = {
+        "t": [1700000000 + i * 60 for i in range(500)],
+        "c": [100.0 + i * 0.1 for i in range(500)],
+    }
     apply_higher_macd_to_chart_data(chart_data, "1m", "a", {})
     # 头部应有 None (talib 在 slow+signal-1 根之前都返回 NaN)
     assert chart_data["higher_macd_dif"][0] is None
@@ -84,8 +91,11 @@ def test_apply_nan_replaced_with_none():
 
 
 def test_apply_unknown_frequency_no_op():
-    """未知 frequency → ratio=None → 不改 chart_data。"""
-    chart_data = {"c": [100.0] * 500}
+    """未知 frequency → target_freq=None → 不改 chart_data。"""
+    chart_data = {
+        "t": [1700000000 + i * 60 for i in range(500)],
+        "c": [100.0] * 500,
+    }
     before = dict(chart_data)
     apply_higher_macd_to_chart_data(chart_data, "999x", "a", {})
     assert chart_data == before
@@ -93,7 +103,7 @@ def test_apply_unknown_frequency_no_op():
 
 def test_apply_empty_closes_no_op():
     """close 为空时也不该崩。"""
-    chart_data = {"c": []}
+    chart_data = {"t": [], "c": []}
     apply_higher_macd_to_chart_data(chart_data, "1m", "a", {})
     assert "higher_macd_dif" not in chart_data
 
@@ -279,3 +289,73 @@ def test_resample_empty_input():
     higher_closes, low2high = _resample_closes_to_higher(closes, bin_keys)
     assert len(higher_closes) == 0
     assert len(low2high) == 0
+
+
+def test_apply_numerical_equivalence_to_real_5m_macd():
+    """新算法 HTF 投影回 1m 后, 必须 == 直接对手动合成 5m closes 跑
+    talib.MACD(12,26,9) 得到的 hist 投影。
+    """
+    import numpy as np
+    import talib
+    from cl_app.services.chart_compute import (
+        _bin_keys_for_higher,
+        _resample_closes_to_higher,
+    )
+
+    # 构造 500 根 1m, 时间戳连续 60s 步长 (无跨夜)
+    base = 1700000000
+    t = np.array([base + i * 60 for i in range(500)], dtype=np.int64)
+    c = np.array([100.0 + i * 0.1 for i in range(500)], dtype=float)
+    chart_data = {"t": t.tolist(), "c": c.tolist()}
+    cfg = {"idx_macd_fast": 12, "idx_macd_slow": 26, "idx_macd_signal": 9}
+    apply_higher_macd_to_chart_data(chart_data, "1m", "us", cfg)
+
+    # 手动合成 5m closes 跑 ref MACD
+    bin_keys = _bin_keys_for_higher(t, "5m", "us")
+    higher_closes, low2high = _resample_closes_to_higher(c, bin_keys)
+    _, _, ref_hist = talib.MACD(higher_closes, 12, 26, 9)
+
+    # 投影回 1m, 与 apply 输出对比
+    actual = chart_data["higher_macd_hist"]
+    for i in range(500):
+        expected = ref_hist[low2high[i]]
+        a = actual[i]
+        if np.isnan(expected):
+            assert a is None, f"i={i}: expected None, got {a}"
+        else:
+            assert a is not None, f"i={i}: expected {expected}, got None"
+            assert abs(a - expected) < 1e-6, f"i={i}: expected {expected}, got {a}"
+
+
+def test_apply_no_overnight_contamination():
+    """跨夜两根 1m 必须落在不同 5m bin, 避免 EMA 穿越夜间。"""
+    import numpy as np
+    from cl_app.services.chart_compute import (
+        _bin_keys_for_higher,
+        apply_higher_macd_to_chart_data,
+    )
+
+    base = 1700000000
+    # 前 300 根模拟"昨日", 后 300 根跨 17h 间隔后开盘
+    t_with_overnight = (
+        [base + i * 60 for i in range(300)]
+        + [base + 300 * 60 + 17 * 3600 + i * 60 for i in range(300)]
+    )
+    c_with_overnight = (
+        [100.0 + i * 0.1 for i in range(300)]
+        + [200.0 + i * 0.1 for i in range(300)]
+    )
+
+    cd = {"t": t_with_overnight, "c": c_with_overnight}
+    apply_higher_macd_to_chart_data(cd, "1m", "us", {})
+    # 关键契约: 跨夜两根 1m bin_keys 必不同 (EMA 不再穿越夜间)
+    bin_keys_b = _bin_keys_for_higher(
+        np.array(t_with_overnight, dtype=np.int64), "5m", "us"
+    )
+    assert bin_keys_b[299] != bin_keys_b[300], (
+        f"跨夜两根必须落不同 bin: bin[299]={bin_keys_b[299]}, "
+        f"bin[300]={bin_keys_b[300]}"
+    )
+    # apply 完成后字段必然写入 (600 根 1m 合成约 120 根 5m, 远超 35 根门槛)
+    assert "higher_macd_hist" in cd
+    assert len(cd["higher_macd_hist"]) == 600

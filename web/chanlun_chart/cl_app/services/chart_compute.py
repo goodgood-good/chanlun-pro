@@ -470,50 +470,65 @@ def apply_higher_macd_to_chart_data(
 ) -> None:
     """计算并 in-place 写入 chart_data 的 higher_macd_dif/dea/hist 字段。
 
-    跨周期 MACD 思路: 用 frequency × ratio 放大 fast/slow/signal 周期, 在原
-    close 序列上跑 talib.MACD, 输出对齐到 chart_data["c"] 长度。
+    实现:把低周期 closes 按市场时区合成目标高周期 closes(演化模式),
+    在 higher_closes 上跑标准 talib.MACD(12,26,9),再把结果按低-高 idx
+    映射投影回低周期长度。
 
-    P5 third step (2026-05-15): 抽自 tv.py::tv_history 与 chart_compute.py
-    ::compute_and_cache_chart_data 两份几乎相同的代码块 (各 ~40 行)。统一
-    到一处后, 后续修 ratio / 修 talib 参数 / 改 NaN 处理只需要改 1 处。
+    与旧"参数 × ratio"近似法相比:
+    1. 数学上等价"用真实高周期 K 线跑标准 MACD"
+    2. 跨夜断层、半日休市、午休由 bin 分组自然处理,不再污染 EMA
 
     Args:
-        chart_data: 已含 "c" 字段的 chart_data dict, 本函数 in-place 修改
-                   并加入 higher_macd_* 字段; ratio 为 None 时不修改 dict。
-        frequency: 当前 K 线周期 (1m / 5m / ... / d / w / m)
-        market: 市场标识 (用于 30m_TO_D / D_TO_W 倍率特殊处理)
+        chart_data: 已含 "t" + "c" 字段的 chart_data dict, in-place 写入
+                   higher_macd_*; target_freq is None 或数据不足时不修改。
+        frequency: 当前 K 线周期 (1m / 5m / 30m / d / w / M)
+        market: 市场标识 (用于 d/w/M 的市场时区)
         cl_config: 缠论配置 (取 idx_macd_fast/slow/signal, 默认 12/26/9)
     """
-    ratio = _resolve_higher_macd_ratio(frequency, market)
-    if ratio is None:
-        return  # 该 frequency 无高周期对照, 不做事
+    target_freq = _resolve_higher_target_freq(frequency, market)
+    if target_freq is None:
+        return  # 月线或未知 freq, 无高周期对照
+
+    times_list = chart_data.get("t", [])
+    closes_list = chart_data.get("c", [])
+    if not times_list or not closes_list:
+        return
+    if len(times_list) != len(closes_list):
+        LogUtil.error(
+            f"[apply_higher_macd] t/c length mismatch: "
+            f"{len(times_list)} vs {len(closes_list)}"
+        )
+        return
 
     try:
-        closes = np.array(chart_data.get("c", []), dtype=float)
-        fast = int(cl_config.get("idx_macd_fast", 12)) * ratio
-        slow = int(cl_config.get("idx_macd_slow", 26)) * ratio
-        signal = int(cl_config.get("idx_macd_signal", 9)) * ratio
-        # 确保有足够的 bar 数量用于 MACD 计算 (至少 slow+signal 根 K 线)
-        min_bars = slow + signal
-        if len(closes) <= min_bars:
+        times = np.array(times_list, dtype=np.int64)
+        closes = np.array(closes_list, dtype=float)
+        bin_keys = _bin_keys_for_higher(times, target_freq, market)
+        higher_closes, low2high = _resample_closes_to_higher(closes, bin_keys)
+
+        fast = int(cl_config.get("idx_macd_fast", 12))
+        slow = int(cl_config.get("idx_macd_slow", 26))
+        signal = int(cl_config.get("idx_macd_signal", 9))
+        if len(higher_closes) <= slow + signal:
             return
+
         h_dif, h_dea, h_hist = talib.MACD(
-            closes, fastperiod=fast, slowperiod=slow, signalperiod=signal,
+            higher_closes, fastperiod=fast, slowperiod=slow, signalperiod=signal,
         )
-        h_dif_rounded = np.round(h_dif, 6)
-        h_dea_rounded = np.round(h_dea, 6)
-        h_hist_rounded = np.round(h_hist, 6)
+        low_dif = np.round(h_dif[low2high], 6)
+        low_dea = np.round(h_dea[low2high], 6)
+        low_hist = np.round(h_hist[low2high], 6)
         chart_data["higher_macd_dif"] = np.where(
-            np.isnan(h_dif_rounded), None, h_dif_rounded
+            np.isnan(low_dif), None, low_dif
         ).tolist()
         chart_data["higher_macd_dea"] = np.where(
-            np.isnan(h_dea_rounded), None, h_dea_rounded
+            np.isnan(low_dea), None, low_dea
         ).tolist()
         chart_data["higher_macd_hist"] = np.where(
-            np.isnan(h_hist_rounded), None, h_hist_rounded
+            np.isnan(low_hist), None, low_hist
         ).tolist()
     except Exception as e:
-        LogUtil.error(f"[apply_higher_macd] Scaled MACD calc failed: {e}")
+        LogUtil.error(f"[apply_higher_macd] resample MACD calc failed: {e}")
 
 
 # ===========================================================================
