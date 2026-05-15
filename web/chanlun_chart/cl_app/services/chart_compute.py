@@ -6,7 +6,8 @@ Tier 4 P3 重构：从 blueprints/tv.py 抽出 ``compute_and_cache_chart_data`` 
 包含：
 - ``_SafeLockRegistry``: weakref + 引用计数的 per-key 锁注册表
 - ``chart_calc_locks``: chart_data_cache 的 per-key 计算锁
-- ``HIGHER_MACD_RATIO`` / ``MARKET_30M_TO_D_RATIO`` / ``MARKET_D_TO_W_RATIO``: 跨周期 MACD 倍率
+- ``HIGHER_FREQ_MAP`` / ``MARKET_TZ``: HTF MACD 频率映射与市场时区
+- ``_bin_keys_for_higher`` / ``_resample_closes_to_higher``: HTF MACD 合成核心
 - ``_shape_time`` / ``_merge_shape_lists`` / ``_merge_chart_data``: chart 数据合并的纯函数
 - ``compute_and_cache_chart_data``: cache miss 后的完整计算路径
 
@@ -65,39 +66,6 @@ MARKET_TZ = {
     "currency": "UTC",
     "currency_spot": "UTC",
     "fx": "UTC",
-}
-
-
-# ---------------- 跨周期 MACD 倍率 (旧近似法, 即将由 HIGHER_FREQ_MAP 取代) ----------------
-
-# key = 当前K线频率, value = 倍率（高级别周期包含多少根当前周期K线）
-HIGHER_MACD_RATIO = {
-    "1m": 5,     # 1分钟 → 5分钟 MACD，参数乘以5
-    "5m": 6,     # 5分钟 → 30分钟 MACD，参数乘以6
-}
-
-# 30m → 日线的倍率因市场交易时长不同
-MARKET_30M_TO_D_RATIO = {
-    "a": 8,              # A股 4小时交易 = 8个30分钟
-    "hk": 8,             # 港股
-    "us": 13,            # 美股 6.5小时 = 13个30分钟
-    "futures": 8,        # 国内期货
-    "ny_futures": 13,    # 纽约期货
-    "currency": 48,      # 数字货币 24小时 = 48个30分钟
-    "currency_spot": 48,
-    "fx": 48,            # 外汇
-}
-
-# 日线 → 周线的倍率
-MARKET_D_TO_W_RATIO = {
-    "a": 5,              # 5个交易日
-    "hk": 5,
-    "us": 5,
-    "futures": 5,
-    "ny_futures": 5,
-    "currency": 7,       # 数字货币 7天
-    "currency_spot": 7,
-    "fx": 5,             # 外汇通常 5天
 }
 
 
@@ -444,24 +412,6 @@ def trim_future_bars(chart_data: dict, to_ts: int) -> dict:
 # 的重复实现, 改动一处即可)
 # ===========================================================================
 
-def _resolve_higher_macd_ratio(frequency: str, market: str):
-    """返回 frequency 对应的"高周期 MACD 倍率", 找不到返回 None。
-
-    优先查 HIGHER_MACD_RATIO 通用表; 特殊 frequency 走市场专属表
-    (30m_TO_D / D_TO_W) 或硬编码 (w=4, m=12)。
-    """
-    ratio = HIGHER_MACD_RATIO.get(frequency)
-    if ratio is None and frequency == "30m":
-        ratio = MARKET_30M_TO_D_RATIO.get(market, 8)
-    elif ratio is None and frequency == "d":
-        ratio = MARKET_D_TO_W_RATIO.get(market, 5)
-    elif ratio is None and frequency == "w":
-        ratio = 4
-    elif ratio is None and frequency == "m":
-        ratio = 12
-    return ratio
-
-
 def apply_higher_macd_to_chart_data(
     chart_data: dict,
     frequency: str,
@@ -667,10 +617,10 @@ def fetch_klines_and_compute_cl_data(
 # ===========================================================================
 
 def _resolve_higher_target_freq(frequency: str, market: str) -> "str | None":
-    """frequency -> 目标高周期标识符;无对照返回 None。
+    """frequency -> 目标高周期标识符;无对照(月线 M 或未知 freq)返回 None。
 
-    与旧 _resolve_higher_macd_ratio 的区别:不再返回"倍率",直接返回目标
-    周期字符串,后续由 _bin_keys_for_higher 决定具体怎么合成。
+    后续由 _bin_keys_for_higher 决定具体怎么合成。market 参数当前未使用,
+    保留以便未来按市场差异化映射(例如某些市场无 30m→d 对照时)。
     """
     return HIGHER_FREQ_MAP.get(frequency)
 

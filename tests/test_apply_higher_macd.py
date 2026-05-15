@@ -1,54 +1,16 @@
-"""tests/test_apply_higher_macd.py — P5 third step: apply_higher_macd_to_chart_data。
+"""tests/test_apply_higher_macd.py — apply_higher_macd_to_chart_data 单元测试。
 
-测试覆盖:
-- ratio 解析 (HIGHER_MACD_RATIO / 30m_TO_D / D_TO_W / w=4 / m=12 / 未知 freq)
-- close 序列足/不足时 MACD 输出
-- NaN 处理 (头部 slow+signal 根都是 NaN)
-- 错误兜底 (close 含非数值时仍不崩)
+新算法(resample-based HTF MACD)测试覆盖:
+- _resolve_higher_target_freq: 频率映射 + 未知 freq
+- _bin_keys_for_higher: 5m / 30m / d / w / M 各分支, 含跨夜断层与未知市场
+- _resample_closes_to_higher: 演化模式 + bin 切换 + 空输入
+- apply_higher_macd_to_chart_data: 端到端 (短/长序列, NaN→None,
+  未知 freq, 空 closes, numerical equivalence, 跨夜污染验证)
 """
 
 from __future__ import annotations
 
-from cl_app.services.chart_compute import (
-    HIGHER_MACD_RATIO,
-    MARKET_30M_TO_D_RATIO,
-    MARKET_D_TO_W_RATIO,
-    _resolve_higher_macd_ratio,
-    apply_higher_macd_to_chart_data,
-)
-
-
-def test_ratio_resolution_table_hit():
-    """已知 frequency 直接从 HIGHER_MACD_RATIO 表取。"""
-    for freq, expected in HIGHER_MACD_RATIO.items():
-        assert _resolve_higher_macd_ratio(freq, "a") == expected
-
-
-def test_ratio_30m_uses_market_table():
-    """30m 走 MARKET_30M_TO_D_RATIO; HIGHER_MACD_RATIO 里没有 30m 才走特殊表。"""
-    if "30m" not in HIGHER_MACD_RATIO:
-        for market, expected in MARKET_30M_TO_D_RATIO.items():
-            assert _resolve_higher_macd_ratio("30m", market) == expected
-        # 未知 market 默认 8
-        assert _resolve_higher_macd_ratio("30m", "unknown_market") == 8
-
-
-def test_ratio_d_uses_market_table():
-    if "d" not in HIGHER_MACD_RATIO:
-        for market, expected in MARKET_D_TO_W_RATIO.items():
-            assert _resolve_higher_macd_ratio("d", market) == expected
-        assert _resolve_higher_macd_ratio("d", "unknown") == 5
-
-
-def test_ratio_w_and_m_hardcoded():
-    if "w" not in HIGHER_MACD_RATIO:
-        assert _resolve_higher_macd_ratio("w", "a") == 4
-    if "m" not in HIGHER_MACD_RATIO:
-        assert _resolve_higher_macd_ratio("m", "a") == 12
-
-
-def test_ratio_unknown_frequency_returns_none():
-    assert _resolve_higher_macd_ratio("999x", "a") is None
+from cl_app.services.chart_compute import apply_higher_macd_to_chart_data
 
 
 def test_apply_short_series_no_op():
