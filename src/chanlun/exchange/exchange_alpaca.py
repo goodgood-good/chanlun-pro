@@ -25,23 +25,34 @@ g_all_stocks = []
 # 否则会被全部清空。
 _RTH_MINUTE_FREQS = frozenset({"1m", "5m", "10m", "15m", "30m", "60m", "120m"})
 
+# N1: bar 区间长度 (分钟), 用于"bar 区间与 RTH 窗口有交集"判定。
+# alpaca 60m bar 的 timestamp 是 NY 09:00 起点, 跨 09:00-10:00 覆盖了 09:30 开盘
+# —— 用"bar 起点必须 in [09:30,16:00)"判定会丢弃这根关键开盘 bar。
+# 改成"bar 区间与 [09:30,16:00) 有交集即保留"。
+_RTH_FREQ_MINUTES = {
+    "1m": 1, "5m": 5, "10m": 10, "15m": 15, "30m": 30, "60m": 60, "120m": 120,
+}
+
 
 def _filter_alpaca_rth_bars(bar_list, frequency):
     """对分钟级 bar 列表做 RTH 过滤。
 
-    - frequency 不在 _RTH_MINUTE_FREQS 集合时（如 'd' / 'w' / 'm'）原样返回。
-    - bar.timestamp 必须是 datetime；其它类型放行避免误删未识别数据。
-    - 周末 bar 兜底过滤（alpaca 一般不返回，这里属于防御性删除）。
-    - 严格按 [09:30, 16:00) NY 时区窗口；60m 的 09:00 bar 会被丢弃。
+    - frequency 不在 _RTH_MINUTE_FREQS 集合时 (如 'd' / 'w' / 'm') 原样返回。
+    - bar.timestamp 必须是 datetime; 其它类型放行避免误删未识别数据。
+    - 周末 bar 兜底过滤 (alpaca 一般不返回, 这里属于防御性删除)。
+    - **(N1 修复)** 按"bar 区间 [start, start+freq) 与 [09:30, 16:00) 有交集"
+      判定。此前用"bar 起点 in [09:30, 16:00)" 会丢弃 60m 09:00 起点的 bar
+      (虽然这根 bar 覆盖了 09:30 开盘真实数据)。
 
-    抽成模块级函数是为了：1) 单测时不依赖 alpaca SDK / ExchangeAlpaca 单例；
-    2) 后续如需放宽 60m 边界（保留"包含开盘"的 bar）可以在这里集中改。
+    抽成模块级函数是为了: 1) 单测时不依赖 alpaca SDK / ExchangeAlpaca 单例;
+    2) RTH 边界策略变更可在这里集中改。
     """
     if frequency not in _RTH_MINUTE_FREQS or not bar_list:
         return bar_list
     ny_tz = pytz.timezone("America/New_York")
-    rth_start = datetime.time(9, 30)
-    rth_end = datetime.time(16, 0)
+    freq_minutes = _RTH_FREQ_MINUTES.get(frequency, 1)
+    rth_start_min = 9 * 60 + 30  # 09:30 → 570
+    rth_end_min = 16 * 60        # 16:00 → 960
 
     def _is_rth(bar) -> bool:
         ts = getattr(bar, "timestamp", None)
@@ -54,8 +65,10 @@ def _filter_alpaca_rth_bars(bar_list, frequency):
         )
         if ny_dt.weekday() >= 5:
             return False
-        t = ny_dt.time()
-        return rth_start <= t < rth_end
+        bar_start_min = ny_dt.hour * 60 + ny_dt.minute
+        bar_end_min = bar_start_min + freq_minutes
+        # 区间相交: bar_end > rth_start AND bar_start < rth_end
+        return bar_end_min > rth_start_min and bar_start_min < rth_end_min
 
     return [b for b in bar_list if _is_rth(b)]
 
