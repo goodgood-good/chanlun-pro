@@ -20,6 +20,17 @@ CL_*** 配置项，可以在调用缠论计算时，通过传递 config 变量�
 """
 
 
+def _slot_setstate(obj, state):
+    """P4 __slots__ 兼容 helper: 旧 (无 __slots__) pickle state 为 dict, 新为 (None, {slots}) tuple."""
+    if isinstance(state, dict):
+        for k, v in state.items():
+            setattr(obj, k, v)
+    else:
+        _, slot_dict = state
+        for k, v in (slot_dict or {}).items():
+            setattr(obj, k, v)
+
+
 class Config(Enum):
     """
     缠论配置项
@@ -103,6 +114,8 @@ class Kline:
     ``index`` 表示原始K线在源数据序列中的坐标，可直接用于原始指标数组下标。
     """
 
+    __slots__ = ("index", "date", "h", "l", "o", "c", "a")
+
     def __init__(
         self,
         index: int,
@@ -120,6 +133,9 @@ class Kline:
         self.o: float = o
         self.c: float = c
         self.a: float = a
+
+    def __setstate__(self, state):
+        _slot_setstate(self, state)
 
     def to_dict(self):
         """将Kline对象转换为字典"""
@@ -151,6 +167,11 @@ class CLKline:
     - MACD 切片、原始K线跨度、原始序列定位，使用 ``k_index``
     """
 
+    __slots__ = (
+        "k_index", "date", "h", "l", "o", "c", "a",
+        "klines", "index", "n", "q", "up_qs",
+    )
+
     def __init__(
         self,
         k_index: int,
@@ -179,6 +200,9 @@ class CLKline:
         self.n: int = _n  # 记录包含的K线数量
         self.q: bool = _q  # 是否有缺口
         self.up_qs = None  # 合并时之前的趋势
+
+    def __setstate__(self, state):
+        _slot_setstate(self, state)
 
     @property
     def cl_index(self) -> int:
@@ -218,6 +242,8 @@ class FX:
     分型对象
     """
 
+    __slots__ = ("type", "k", "klines", "val", "index", "done")
+
     def __init__(
         self,
         _type: str,
@@ -233,6 +259,9 @@ class FX:
         self.val: float = val
         self.index: int = index
         self.done: bool = done  # 分型是否完成
+
+    def __setstate__(self, state):
+        _slot_setstate(self, state)
 
     def ld(self) -> int:
         """
@@ -727,10 +756,15 @@ class MMD:
     买卖点对象
     """
 
+    __slots__ = ("name", "zs", "msg")
+
     def __init__(self, name: str, zs: ZS):
         self.name: str = name  # 买卖点名称
         self.zs: ZS = zs  # 买卖点对应的中枢对象
         self.msg: str = ""  # 买卖点信息
+
+    def __setstate__(self, state):
+        _slot_setstate(self, state)
 
     def to_dict(self):
         """将MMD对象转换为字典"""
@@ -750,6 +784,8 @@ class BC:
     背驰对象
     """
 
+    __slots__ = ("type", "zs", "compare_line", "compare_lines", "bc")
+
     def __init__(
         self,
         _type: str,
@@ -767,6 +803,9 @@ class BC:
         )
         self.compare_lines: List[LINE] = compare_lines  # 在趋势背驰的时候使用
         self.bc = bc  # 是否背驰
+
+    def __setstate__(self, state):
+        _slot_setstate(self, state)
 
     def to_dict(self):
         """将BC对象转换为字典"""
