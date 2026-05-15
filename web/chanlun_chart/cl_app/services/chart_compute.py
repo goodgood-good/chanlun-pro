@@ -24,6 +24,7 @@ import numpy as np
 import pytz
 import talib
 
+from chanlun import fun
 from chanlun.cl_utils import (
     cl_data_to_tv_chart,
     kcharts_frequency_h_l_map,
@@ -489,3 +490,134 @@ def apply_higher_macd_to_chart_data(
         ).tolist()
     except Exception as e:
         LogUtil.error(f"[apply_higher_macd] Scaled MACD calc failed: {e}")
+
+
+# ===========================================================================
+# P5 fourth step: cache miss 路径的 "拉 K 线 + 算 cl 数据" 抽到 helper
+# ===========================================================================
+# 这是 P5 中最复杂的一步, 涉及:
+#   - ex.klines() IO 调用
+#   - enable_kchart_low_to_high 分支
+#   - prepend_klines_and_replace_cache 决策 (head_gap/partial_snapshot/tail_gap)
+#   - cl_data_to_tv_chart 转换
+#   - 多个 early return 路径 (no_data)
+# 通过返回 Optional[dict] 让调用方处理 no_data, 副作用 _mark_chart_cache_validated
+# 已在 helper 内部完成 (与原 tv_history 行为一致)。
+
+
+def fetch_klines_and_compute_cl_data(
+    market: str,
+    code: str,
+    frequency: str,
+    cl_config: dict,
+    kline_args: dict,
+    is_range_request: bool,
+    cache_miss_reason: str,
+    cache_key: str,
+    to_ts: int,
+):
+    """cache miss 路径: 拉 K 线 + 算 cl 数据。
+
+    P5 fourth step (2026-05-15): 抽自 tv.py::tv_history 中 ~50 行 cache miss
+    主路径, 含 enable_kchart_low_to_high / prepend / cl_data_to_tv_chart 三个
+    decision point。
+
+    Args:
+        market / code / frequency / cl_config: 标的参数
+        kline_args: 拉 K 线的参数 (start_date / end_date)
+        is_range_request: 是否窄范围请求 (firstDataRequest=false + 有 from/to)
+        cache_miss_reason: 来自 evaluate_cache_for_tv_history 的 miss 原因
+                          ("cache_empty" / "cache_head_gap" / 等), 决定是否走
+                          prepend_klines_and_replace_cache
+        cache_key: chart_data_cache 的 key
+        to_ts: 请求 to 时间戳 (用于"_to < first_kline_date 早返"判定)
+
+    Returns:
+        ``dict`` 含 ``cl_chart_data``/``cd``/``kchart_to_frequency`` 三键:
+            - cl_chart_data: 计算结果
+            - cd: 普通路径的 CL 对象 (供调用方后续写回 cache); prepend 路径下为 None
+            - kchart_to_frequency: 高/低周期映射的目标 frequency (供 cl_data_to_tv_chart
+              使用); 普通路径下为 None
+        ``None`` 表示无数据 / prepend 失败 / cl 转换失败, 调用方应 return {"s": "no_data"}。
+        helper 内部已 _mark_chart_cache_validated 标记 cache 时效, 调用方不需再做。
+    """
+    # 注意: 这里要懒 import 避免 chart_compute → kline_recompute → chart_cache
+    # 循环依赖 (kline_recompute 在自己模块里 import chart_cache)。
+    from .kline_recompute import prepend_klines_and_replace_cache
+
+    ex = get_exchange(Market(market))
+    frequency_low, kchart_to_frequency = kcharts_frequency_h_l_map(market, frequency)
+
+    if (
+        cl_config.get("enable_kchart_low_to_high") == "1"
+        and kchart_to_frequency is not None
+        and frequency_low is not None
+    ):
+        klines = ex.klines(code, frequency_low, **kline_args)
+        if klines is None or len(klines) == 0:
+            with cache_lock:
+                _mark_chart_cache_validated(cache_key)
+            return None
+        cd = web_batch_get_cl_datas(market, code, {frequency_low: klines}, cl_config)[0]
+    else:
+        kchart_to_frequency = None
+        klines = ex.klines(code, frequency, **kline_args)
+        if klines is None or len(klines) == 0:
+            with cache_lock:
+                _mark_chart_cache_validated(cache_key)
+            return None
+
+        # 方案 A: 范围请求走分层缓存 — 把新 K 线合并进 L1, 基于完整 K 线集
+        # 全量重算, 整体替换 L2。不再走 web_batch_get_cl_datas + _merge_chart_data,
+        # 那条老路径会用窄范围 K 线独立计算 XD 再"按起点合并",
+        # 导致用户向左滚动时看到 XD 跳变。
+        # 2026-05 扩大覆盖: cache_tail_gap (polling 拉新末段 K 线) 也必须走 prepend
+        # (整体替换), 否则 polling 末段触发 XD 重新划分时, 新旧 XD 起点身份不一致,
+        # _merge_shape_lists 按起点合并 → 不去重 → "XD 双胞胎"。
+        if (
+            is_range_request
+            and cache_miss_reason in (
+                "cache_head_gap",
+                "cache_partial_snapshot",
+                "cache_tail_gap",
+            )
+        ):
+            cl_chart_data = prepend_klines_and_replace_cache(
+                market, code, frequency, cl_config,
+                new_klines=klines, cache_key=cache_key,
+                to_frequency=None,
+            )
+            if cl_chart_data is None:
+                with cache_lock:
+                    _mark_chart_cache_validated(cache_key)
+                return None
+            # prepend 内部已经写回 cache, 跳过下面的 cl_data_to_tv_chart 路径
+            cd = None
+        else:
+            cd = web_batch_get_cl_datas(market, code, {frequency: klines}, cl_config)[0]
+
+    # _to < first_kline_date: 用户请求的窗口完全在数据起点之前 → no_data
+    if to_ts > 0 and len(klines) > 0 and to_ts < fun.datetime_to_int(klines.iloc[0]["date"]):
+        with cache_lock:
+            _mark_chart_cache_validated(cache_key)
+        return None
+
+    # 普通路径: cd 非空 → 跑 cl_data_to_tv_chart 转 chart_data
+    cl_chart_data_local = None
+    if cd is not None:
+        cl_chart_data_local = cl_data_to_tv_chart(
+            cd, cl_config, to_frequency=kchart_to_frequency
+        )
+        if cl_chart_data_local is None:
+            with cache_lock:
+                _mark_chart_cache_validated(cache_key)
+            return None
+    else:
+        # prepend 路径: cl_chart_data 已由 prepend_klines_and_replace_cache 计算
+        cl_chart_data_local = cl_chart_data  # noqa: F821 (上面 if 块定义)
+
+    return {
+        "cl_chart_data": cl_chart_data_local,
+        "cd": cd,
+        "kchart_to_frequency": kchart_to_frequency,
+    }

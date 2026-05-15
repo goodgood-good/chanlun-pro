@@ -168,6 +168,7 @@ from ..services.chart_compute import (  # noqa: E402
     apply_higher_macd_to_chart_data,
     chart_calc_locks,
     compute_and_cache_chart_data,
+    fetch_klines_and_compute_cl_data,
     slice_chart_data_to_window,
     trim_future_bars,
 )
@@ -812,8 +813,6 @@ def tv_history():
                     return {"s": "no_data"}
 
                 LogUtil.debug(f"[tv_history] Cache miss ({cache_miss_reason}) req={req_tag}")
-                ex = get_exchange(Market(market))
-                frequency_low, kchart_to_frequency = kcharts_frequency_h_l_map(market, frequency)
                 kline_args = {}
                 if is_range_request:
                     kline_args["start_date"] = datetime.datetime.fromtimestamp(
@@ -830,77 +829,25 @@ def tv_history():
                         "%Y-%m-%d %H:%M:%S"
                     )
 
-                if (
-                    cl_config.get("enable_kchart_low_to_high") == "1"
-                    and kchart_to_frequency is not None
-                    and frequency_low is not None
-                ):
-                    klines = ex.klines(code, frequency_low, **kline_args)
-                    if klines is None or len(klines) == 0:
-                        with cache_lock:
-                            _mark_chart_cache_validated(cache_key)
-                        return {"s": "no_data"}
-                    cd = web_batch_get_cl_datas(
-                        market, code, {frequency_low: klines}, cl_config
-                    )[0]
-                else:
-                    kchart_to_frequency = None
-                    klines = ex.klines(code, frequency, **kline_args)
-                    if klines is None or len(klines) == 0:
-                        with cache_lock:
-                            _mark_chart_cache_validated(cache_key)
-                        return {"s": "no_data"}
-
-                    # ★ 方案 A:范围请求走分层缓存——
-                    # 把新 K 线合并进 L1,基于完整 K 线集全量重算,整体替换 L2。
-                    # 不再走 web_batch_get_cl_datas + _merge_chart_data,
-                    # 那条老路径会用窄范围 K 线独立计算 XD 再"按起点合并",
-                    # 导致用户向左滚动时看到 XD 跳变(详见 docs/superpowers/plans/
-                    # 2026-05-10-kline-cl-layered-cache.md)。
-                    #
-                    # 2026-05 扩大覆盖:cache_tail_gap (polling 拉新末段 K 线) 也
-                    # 必须走 prepend(整体替换)。否则 polling 末段触发 XD 重新划分时,
-                    # 新旧两份 XD 起点身份 (time, price) 不一致, _merge_shape_lists
-                    # 按起点合并 → 不去重 → 同一段 K 线上出现多条线段 ("XD 双胞胎")。
-                    if (
-                        is_range_request
-                        and cache_miss_reason in (
-                            "cache_head_gap",
-                            "cache_partial_snapshot",
-                            "cache_tail_gap",
-                        )
-                    ):
-                        cl_chart_data = prepend_klines_and_replace_cache(
-                            market, code, frequency, cl_config,
-                            new_klines=klines, cache_key=cache_key,
-                            to_frequency=None,
-                        )
-                        if cl_chart_data is None:
-                            with cache_lock:
-                                _mark_chart_cache_validated(cache_key)
-                            return {"s": "no_data"}
-                        # prepend 内部已经写回 cache,跳过下面的 _merge_chart_data 路径
-                        cd = None
-                    else:
-                        cd = web_batch_get_cl_datas(
-                            market, code, {frequency: klines}, cl_config
-                        )[0]
-
-                if _to > 0 and len(klines) > 0 and _to < fun.datetime_to_int(klines.iloc[0]["date"]):
-                    with cache_lock:
-                        _mark_chart_cache_validated(cache_key)
+                # P5 fourth step: cache miss 主路径 (拉 K 线 + cl 计算 + prepend 决策)
+                # 抽到 chart_compute.fetch_klines_and_compute_cl_data。
+                # helper 返回 None 表示 "调用方应 return {"s": "no_data"}"
+                # (_mark_chart_cache_validated 已在 helper 内部做)。
+                _fetch_result = fetch_klines_and_compute_cl_data(
+                    market, code, frequency, cl_config,
+                    kline_args=kline_args,
+                    is_range_request=is_range_request,
+                    cache_miss_reason=cache_miss_reason,
+                    cache_key=cache_key,
+                    to_ts=_to,
+                )
+                if _fetch_result is None:
                     return {"s": "no_data"}
+                cl_chart_data = _fetch_result["cl_chart_data"]
+                cd = _fetch_result["cd"]
+                kchart_to_frequency = _fetch_result["kchart_to_frequency"]
 
-                if cd is not None:
-                    cl_chart_data = cl_data_to_tv_chart(
-                        cd, cl_config, to_frequency=kchart_to_frequency
-                    )
-                    if cl_chart_data is None:
-                        with cache_lock:
-                            _mark_chart_cache_validated(cache_key)
-                        return {"s": "no_data"}
-
-                # P5 third step: 跨周期 MACD 计算抽到 chart_compute.apply_higher_macd_to_chart_data
+                # 跨周期 MACD (P5 third step)
                 apply_higher_macd_to_chart_data(cl_chart_data, frequency, market, cl_config)
 
                 if cd is not None:

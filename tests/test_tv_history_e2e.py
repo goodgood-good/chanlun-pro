@@ -92,9 +92,12 @@ def mock_exchange(monkeypatch):
     def _factory(_market):
         return fake_ex
 
-    # 打到两处可能的 import 路径 (tv.py 顶部 + 局部 import)
+    # 打到所有可能的 import 路径
     monkeypatch.setattr("chanlun.exchange.get_exchange", _factory)
     monkeypatch.setattr("cl_app.blueprints.tv.get_exchange", _factory, raising=False)
+    # P5 fourth step: fetch_klines_and_compute_cl_data 从 chart_compute 模块
+    # 调 get_exchange, 也要 patch 它的 namespace
+    monkeypatch.setattr("cl_app.services.chart_compute.get_exchange", _factory, raising=False)
 
     # 也 monkeypatch query_cl_chart_config 避免 db 依赖
     from tests.core.conftest import DEFAULT_CL_CONFIG
