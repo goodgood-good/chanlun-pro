@@ -18,7 +18,9 @@
 - ``_detect_2buy_2sell``：依赖一买已识别 + ``cl.beichi_pz``，Step 4 实现
 """
 from __future__ import annotations
-from typing import List, Optional, TYPE_CHECKING
+
+import bisect
+from typing import List, Optional, Tuple, TYPE_CHECKING
 
 from chanlun.core.cl_interface import LINE, ZS
 from chanlun.tools.log_util import LogUtil
@@ -86,15 +88,75 @@ class BsPointCalculator:
         if not lines or not zss:
             return
 
+        # P7: 预过滤 + 预计算 start_keys, 把 valid_zss 切片从 O(M) 降到 O(log M)。
+        # ZsCalculator 输出的 zss 按 zs.start.start.k.k_index 严格升序 (实测断言通过)。
+        # bisect_left 找 now_end_k 插入位置即得 valid prefix。
+        # 注意: 不能因 clean_zss 为空就 early return —— 2buy 条件 A (now.low >=
+        # prev_1line.low) 不依赖 zss, 必须跑完整套 detect。
+        clean_zss, start_keys = self._build_zss_index(zss)
+
         # 顺序不可调整：2buy 依赖 1buy 已被识别（通过 mmd_exists 反查）
-        self._detect_1buy_1sell(lines, zss)
-        self._detect_2buy_2sell(lines, zss)
-        self._detect_3buy_3sell(lines, zss)
+        self._detect_1buy_1sell(lines, zss, clean_zss, start_keys)
+        self._detect_2buy_2sell(lines, zss, clean_zss, start_keys)
+        self._detect_3buy_3sell(lines, zss, clean_zss, start_keys)
+
+    # ------------------------------------------------------------------
+    # P7: bisect 优化辅助 (供 _detect_* 复用)
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _build_zss_index(zss: List[ZS]) -> Tuple[List[ZS], List[int]]:
+        """预过滤 zss + 抽 start.k.k_index 升序数组, 供 bisect 二分。
+
+        过滤掉 zs.start / zs.start.start 为 None 的项 (ZsCalculator 早期阶段
+        可能产生占位 zs)。剩下 clean_zss 与 start_keys 同长度且顺序一致。
+        """
+        clean_zss: List[ZS] = []
+        start_keys: List[int] = []
+        for zs in zss:
+            if zs.start is None or zs.start.start is None:
+                continue
+            clean_zss.append(zs)
+            start_keys.append(zs.start.start.k.k_index)
+        return clean_zss, start_keys
+
+    @staticmethod
+    def _filter_valid_zss_by_now_end_k(
+        clean_zss: List[ZS],
+        start_keys: List[int],
+        now_end_k: int,
+        require_end_complete: bool = False,
+    ) -> List[ZS]:
+        """按 zs.start.start.k.k_index < now_end_k 切片 (bisect O(log M))。
+
+        前提: ``start_keys`` 严格升序 (来自 ``_build_zss_index``)。
+
+        Args:
+            clean_zss: 已预过滤的 zss
+            start_keys: 与 clean_zss 同长的 start.k.k_index 升序数组
+            now_end_k: 当前线段结束 K index
+            require_end_complete: True 时额外过滤 zs.end.end.k.k_index < now_end_k
+                                  (用于 3buy/3sell, 要求中枢必须已完成 end 段)
+        """
+        idx = bisect.bisect_left(start_keys, now_end_k)
+        prefix = clean_zss[:idx]
+        if not require_end_complete:
+            return prefix
+        return [
+            zs for zs in prefix
+            if zs.end is not None and zs.end.end is not None
+            and zs.end.end.k.k_index < now_end_k
+        ]
 
     # ------------------------------------------------------------------
     # 第一类买卖点（Step 3 实现，本期占位）
     # ------------------------------------------------------------------
-    def _detect_1buy_1sell(self, lines: List[LINE], zss: List[ZS]) -> None:
+    def _detect_1buy_1sell(
+        self,
+        lines: List[LINE],
+        zss: List[ZS],
+        clean_zss: Optional[List[ZS]] = None,
+        start_keys: Optional[List[int]] = None,
+    ) -> None:
         """
         第一类买卖点 = 趋势背驰（直接复用 ``cl.beichi_qs``）
 
@@ -127,14 +189,12 @@ class BsPointCalculator:
             # 正确语义：每个 now_line 只能用「自身形成时已存在的中枢」判定。
             #
             # 切片规则：zs 必须在 now_line 完成之前已经形成（zs.start 的进入段
-            # 起点 K 索引 < now_line 结束 K 索引）。
+            # 起点 K 索引 < now_line 结束 K 索引）。P7 用 bisect 把这步从
+            # O(M) 降到 O(log M)。
             now_end_k = now_line.end.k.k_index
-            valid_zss = [
-                zs for zs in zss
-                if zs.start is not None
-                and zs.start.start is not None
-                and zs.start.start.k.k_index < now_end_k
-            ]
+            valid_zss = self._filter_valid_zss_by_now_end_k(
+                clean_zss, start_keys, now_end_k
+            )
             if len(valid_zss) < 2:
                 continue
 
@@ -213,7 +273,13 @@ class BsPointCalculator:
     # ------------------------------------------------------------------
     # 第二类买卖点（Step 4 实现，本期占位）
     # ------------------------------------------------------------------
-    def _detect_2buy_2sell(self, lines: List[LINE], zss: List[ZS]) -> None:
+    def _detect_2buy_2sell(
+        self,
+        lines: List[LINE],
+        zss: List[ZS],
+        clean_zss: Optional[List[ZS]] = None,
+        start_keys: Optional[List[int]] = None,
+    ) -> None:
         """
         第二类买卖点 = 一类买卖点后的反抽再回调（不创新低/高），或盘整背驰
 
@@ -255,13 +321,11 @@ class BsPointCalculator:
             # ---- 准备 valid_zss（条件 B 用，提到外面避免每个 prev 重复计算）----
             # ★ 偏差 #7 修复（未来函数）：cl.beichi_pz 用 zss[-1] 做盘整对照，
             # 必须按 now_line 时间位置切片 zss，避免历史 xd 用未来中枢做对照。
+            # P7 用 bisect 把切片从 O(M) 降到 O(log M)。
             now_end_k = now_line.end.k.k_index
-            valid_zss_2 = [
-                zs for zs in zss
-                if zs.start is not None
-                and zs.start.start is not None
-                and zs.start.start.k.k_index < now_end_k
-            ]
+            valid_zss_2 = self._filter_valid_zss_by_now_end_k(
+                clean_zss, start_keys, now_end_k
+            )
 
             # 对每个候选 prev_1line 尝试判定（找到第一个命中的就跳出）
             for prev_1line in prev_1lines:
@@ -404,7 +468,13 @@ class BsPointCalculator:
     # ------------------------------------------------------------------
     # 第三类买卖点（本期实现）
     # ------------------------------------------------------------------
-    def _detect_3buy_3sell(self, lines: List[LINE], zss: List[ZS]) -> None:
+    def _detect_3buy_3sell(
+        self,
+        lines: List[LINE],
+        zss: List[ZS],
+        clean_zss: Optional[List[ZS]] = None,
+        start_keys: Optional[List[int]] = None,
+    ) -> None:
         """
         第三类买卖点 = 中枢形成后，离开中枢的次级别走势 + 反抽不回中枢区间 [ZG, ZD]
 
@@ -423,17 +493,12 @@ class BsPointCalculator:
             # ★ 偏差 #7 修复（未来函数）：3buy/3sell 关联中枢必须在 now_line
             # 完成之前就已"完成"。若直接传入全量 zss，历史 xd 会被未来才完成
             # 的中枢"事后追认"为 3buy/3sell，与实时识别语义不符。
+            # P7 用 bisect 把 start 切片从 O(M) 降到 O(log M); end 过滤仍在
+            # prefix 上做 list comp (prefix 通常远小于 M)。
             now_end_k = now_line.end.k.k_index
-            valid_zss = [
-                zs for zs in zss
-                if zs.start is not None
-                and zs.start.start is not None
-                and zs.start.start.k.k_index < now_end_k
-                # 中枢的"完成"也必须在 now_line 之前（end 段已成型）
-                and zs.end is not None
-                and zs.end.end is not None
-                and zs.end.end.k.k_index < now_end_k
-            ]
+            valid_zss = self._filter_valid_zss_by_now_end_k(
+                clean_zss, start_keys, now_end_k, require_end_complete=True
+            )
 
             # ★ B4 增强已回滚：3buy/3sell 必须只对照"紧邻离开段"的最近一个中枢，
             # 否则远期价格远低/高于早期中枢时，会让每个反抽段对所有早期中枢都报 3 类信号
