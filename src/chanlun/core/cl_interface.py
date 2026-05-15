@@ -6,10 +6,14 @@ from abc import ABCMeta, abstractmethod
 from dataclasses import dataclass, asdict
 from enum import Enum
 from typing import Dict, List, Tuple, Union, Any, Optional
-from scipy import stats
 
 import numpy as np
 import pandas as pd
+
+# P6: scipy lazy import — 原顶层 ``from scipy import stats`` 让所有 import
+# cl_interface 的代码 (包括只要 LINE/BI/XD 等纯数据类型的) 都被迫拖入 scipy
+# (~50ms cold import + 拉一堆 BLAS 依赖)。lazy import 仅在 ZS.line_r_squared
+# 等真正需要回归计算时才付出代价。
 
 """
 CL_*** 配置项，可以在调用缠论计算时，通过传递 config 变量进行变更，如 config['CL_BI_FX_STRICT'] = True
@@ -661,8 +665,9 @@ class ZS:
         x = np.array(prices)
         y = np.array(zs_zigzag)
 
-        # 使用线性回归计算 R²
-        slope, intercept, r_value, p_value, std_err = stats.linregress(x, y)
+        # 使用线性回归计算 R² (P6: lazy import 避免顶层拖入 scipy)
+        from scipy.stats import linregress
+        slope, intercept, r_value, p_value, std_err = linregress(x, y)
         return round(r_value**2, 6)
 
     def zs_mmds(self, zs_type="|") -> List[str]:
