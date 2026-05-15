@@ -1,5 +1,12 @@
 from typing import Union
-import baostock as bs
+
+try:
+    import baostock as bs
+except ImportError as _e:
+    raise ImportError(
+        "ExchangeBaostock requires extras: pip install 'chanlun-pro[cn-extra]' "
+        "(or `poetry install --extras cn-extra`)"
+    ) from _e
 from chanlun import fun
 
 from chanlun.exchange.exchange import *

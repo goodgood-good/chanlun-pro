@@ -3,7 +3,13 @@ from tenacity import retry, stop_after_attempt, wait_random, retry_if_result
 from chanlun import config, fun
 from chanlun.exchange.exchange import *
 
-from futu import *
+try:
+    from futu import *
+except ImportError as _e:
+    raise ImportError(
+        "ExchangeFutu requires extras: pip install 'chanlun-pro[hk]' "
+        "(or `poetry install --extras hk`)"
+    ) from _e
 
 g_ctx = None
 g_ttx = None
@@ -150,39 +156,12 @@ class ExchangeFutu(Exchange):
                     end_datetime = dt.datetime(
                         *time.strptime(end_date, time_format)[:6]
                     )
-                    # 2026-05-14 与 qmt / cq / alpaca / polygon 对齐统一 lookback
-                    if frequency == "1m":
-                        start_date = (end_datetime - dt.timedelta(days=30)).strftime(
-                            time_format
-                        )
-                    elif frequency == "5m":
-                        start_date = (end_datetime - dt.timedelta(days=90)).strftime(
-                            time_format
-                        )
-                    elif frequency == "15m":
-                        start_date = (end_datetime - dt.timedelta(days=180)).strftime(
-                            time_format
-                        )
-                    elif frequency == "30m":
-                        start_date = (end_datetime - dt.timedelta(days=365)).strftime(
-                            time_format
-                        )
-                    elif frequency == "60m":
-                        start_date = (end_datetime - dt.timedelta(days=365 * 2)).strftime(
-                            time_format
-                        )
-                    elif frequency == "d":
-                        start_date = (end_datetime - dt.timedelta(days=365 * 3)).strftime(
-                            time_format
-                        )
-                    elif frequency == "w":
-                        start_date = (end_datetime - dt.timedelta(days=365 * 10)).strftime(
-                            time_format
-                        )
-                    elif frequency == "m":
-                        start_date = (end_datetime - dt.timedelta(days=365 * 30)).strftime(
-                            time_format
-                        )
+                    # 2026-05-15 US-005: 从 chanlun.exchange._lookback 读统一表,
+                    # 与 qmt / cq / alpaca / polygon 对齐 (修改请改 _lookback.py)
+                    from chanlun.exchange._lookback import get_lookback_timedelta
+
+                    _lb = get_lookback_timedelta(frequency, default=dt.timedelta(days=30))
+                    start_date = (end_datetime - _lb).strftime(time_format)
                 ret, kline, pk = CTX().request_history_kline(
                     code=code,
                     start=start_date,

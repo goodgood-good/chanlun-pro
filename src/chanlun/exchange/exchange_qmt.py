@@ -68,19 +68,16 @@ class ExchangeQMT(Exchange):
             "m": "1d",
         }
 
-        # 默认回看时长：原本 60m=8年 / d=10年 / 1m=90天 等过长，会让 xtquant 一次性
-        # 拉取数十万根 K 线，BSON payload 极大，是触发 `u < 1000000` 断言的主因。
-        # 这里大幅缩短到合理值：分钟线最多 90 天，日线 3 年，周线 10 年，月线 30 年。
-        # 上层（如 tv_history）通常一次只要 300 根 K 线，进一步用 args["limit"] 短路。
+        # 默认回看时长:原本 60m=8 年 / d=10 年 / 1m=90 天等过长,会让 xtquant 一次性
+        # 拉取数十万根 K 线,BSON payload 极大,是触发 `u < 1000000` 断言的主因。
+        # 2026-05-15 US-005: 抽到 chanlun.exchange._lookback 单一来源,
+        # 5 个 exchange (cq/qmt/alpaca/polygon/futu) 共用同一组数值;
+        # 上层 (如 tv_history) 通常一次只要 300 根 K 线,进一步用 args["limit"] 短路。
+        # 保留 self.DEFAULT_LOOKBACK 字段以兼容外部访问 (本类内部不再读).
+        from chanlun.exchange._lookback import DEFAULT_LOOKBACK_DAYS
+
         self.DEFAULT_LOOKBACK = {
-            "1m": timedelta(days=30),
-            "5m": timedelta(days=90),
-            "15m": timedelta(days=180),
-            "30m": timedelta(days=365),
-            "60m": timedelta(days=365 * 2),
-            "d": timedelta(days=365 * 3),
-            "w": timedelta(days=365 * 10),
-            "m": timedelta(days=365 * 30),
+            freq: timedelta(days=days) for freq, days in DEFAULT_LOOKBACK_DAYS.items()
         }
 
     def code_to_tdx(self, code: str):

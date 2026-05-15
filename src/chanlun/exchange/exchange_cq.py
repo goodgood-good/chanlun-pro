@@ -665,18 +665,11 @@ class ExchangeChangQiao(Exchange):
         # 在请求边界一次性转换, 输出 DataFrame 的 code 列继续保留项目格式不变。
         lb_symbol = self._to_lb_symbol(code)
 
-        # 1. 默认回看周期配置（与 alpaca/polygon 对齐：所有市场使用同一组 lookback）
+        # 1. 默认回看周期配置:
         # 2026-05-14 与 qmt / alpaca / polygon / futu 对齐到统一 lookback
-        DEFAULT_LOOKBACK = {
-            "1m": timedelta(days=30),
-            "5m": timedelta(days=90),
-            "15m": timedelta(days=180),
-            "30m": timedelta(days=365),
-            "60m": timedelta(days=365 * 2),
-            "d": timedelta(days=365 * 3),
-            "w": timedelta(days=365 * 10),
-            "m": timedelta(days=365 * 30),
-        }
+        # 2026-05-15 US-005: 进一步抽到 chanlun.exchange._lookback 单一来源,
+        #            避免 5 处独立维护漂移; 修改请改 _lookback.py 而非这里。
+        from chanlun.exchange._lookback import get_lookback_timedelta
 
         # 2. 时间标准化处理
         # 标记：是否是“历史查询”模式（即用户是否指定了截止日期）
@@ -707,11 +700,11 @@ class ExchangeChangQiao(Exchange):
             else:
                 start_dt = start_dt.astimezone(tz)
         else:
-            lookback = DEFAULT_LOOKBACK.get(frequency, timedelta(days=30))
+            lookback = get_lookback_timedelta(frequency, default=timedelta(days=30))
             start_dt = end_dt - lookback
 
-        # 限制最大回看范围：不允许请求超过 DEFAULT_LOOKBACK 的历史数据
-        max_lookback = DEFAULT_LOOKBACK.get(frequency, timedelta(days=30))
+        # 限制最大回看范围:不允许请求超过统一 lookback 表的历史数据
+        max_lookback = get_lookback_timedelta(frequency, default=timedelta(days=30))
         earliest_allowed = now_dt - max_lookback
         if start_dt < earliest_allowed:
             start_dt = earliest_allowed

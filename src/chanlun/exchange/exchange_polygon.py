@@ -6,7 +6,13 @@ import datetime as dt
 import os
 from typing import Union
 
-from polygon.rest import RESTClient
+try:
+    from polygon.rest import RESTClient
+except ImportError as _e:
+    raise ImportError(
+        "ExchangePolygon requires extras: pip install 'chanlun-pro[us]' "
+        "(or `poetry install --extras us`)"
+    ) from _e
 from tenacity import retry_if_result, wait_random, stop_after_attempt, retry
 
 from chanlun import config
@@ -122,27 +128,13 @@ class ExchangePolygon(Exchange):
                 else:
                     end_date = fun.str_to_datetime(end_date)
             if start_date is None:
-                # 2026-05-14 与 qmt / cq / alpaca / futu 对齐统一 lookback
-                if frequency == "1m":
-                    start_date = end_date - dt.timedelta(days=30)
-                elif frequency == "5m":
-                    start_date = end_date - dt.timedelta(days=90)
-                elif frequency == "15m":
-                    start_date = end_date - dt.timedelta(days=180)
-                elif frequency == "30m":
-                    start_date = end_date - dt.timedelta(days=365)
-                elif frequency == "60m":
-                    start_date = end_date - dt.timedelta(days=365 * 2)
-                elif frequency == "120m":
-                    start_date = end_date - dt.timedelta(days=365 * 2)
-                elif frequency == "d":
-                    start_date = end_date - dt.timedelta(days=365 * 3)
-                elif frequency == "w":
-                    start_date = end_date - dt.timedelta(days=365 * 10)
-                elif frequency == "m":
-                    start_date = end_date - dt.timedelta(days=365 * 30)
-                elif frequency == "y":
-                    start_date = end_date - dt.timedelta(days=365 * 30)
+                # 2026-05-15 US-005: 从 chanlun.exchange._lookback 读统一表,
+                # 与 qmt / cq / alpaca / futu 对齐 (修改请改 _lookback.py)
+                from chanlun.exchange._lookback import get_lookback_timedelta
+
+                start_date = end_date - get_lookback_timedelta(
+                    frequency, default=dt.timedelta(days=30)
+                )
             else:
                 if len(end_date) == 10:
                     start_date = fun.str_to_datetime(start_date, "%Y-%m-%d")

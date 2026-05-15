@@ -6,14 +6,21 @@ from typing import Any, Dict, List, Union
 
 import pandas as pd
 import pytz
-from openctp_ctp.thostmduserapi import (
-    CThostFtdcDepthMarketDataField,
-    CThostFtdcMdApi,
-    CThostFtdcReqAuthenticateField,
-    CThostFtdcReqUserLoginField,
-    CThostFtdcRspInfoField,
-    CThostFtdcRspUserLoginField,
-)
+
+try:
+    from openctp_ctp.thostmduserapi import (
+        CThostFtdcDepthMarketDataField,
+        CThostFtdcMdApi,
+        CThostFtdcReqAuthenticateField,
+        CThostFtdcReqUserLoginField,
+        CThostFtdcRspInfoField,
+        CThostFtdcRspUserLoginField,
+    )
+except ImportError as _e:
+    raise ImportError(
+        "ExchangeCtp requires extras: pip install 'chanlun-pro[futures]' "
+        "(or `poetry install --extras futures`)"
+    ) from _e
 from tenacity import retry, retry_if_result, stop_after_attempt, wait_random
 
 from chanlun import config

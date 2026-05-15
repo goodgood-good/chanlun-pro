@@ -6,9 +6,16 @@ from typing import Dict, List, Union
 
 import pandas as pd
 import pytz
-import tqsdk
+
+try:
+    import tqsdk
+    from tqsdk.objs import Account, Position, Quote
+except ImportError as _e:
+    raise ImportError(
+        "ExchangeTq requires extras: pip install 'chanlun-pro[futures]' "
+        "(or `poetry install --extras futures`)"
+    ) from _e
 from tenacity import retry, retry_if_result, stop_after_attempt, wait_random
-from tqsdk.objs import Account, Position, Quote
 
 from chanlun import config, fun
 from chanlun.exchange.exchange import Exchange, Tick
