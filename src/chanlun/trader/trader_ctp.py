@@ -3,6 +3,8 @@ import time
 from datetime import datetime
 from typing import Any, Dict
 
+from chanlun.trader._ctp_state import CTPState
+
 from openctp_ctp.thostmduserapi import (
     CThostFtdcInputOrderActionField,
     THOST_FTDC_AF_Delete,
@@ -47,9 +49,9 @@ class MyTraderCallback(CThostFtdcTraderApi):
         self.authenticated: bool = False  # 添加认证状态
         self.front_id: int | None = None
         self.session_id: int | None = None
-        self.order_ref: int = 0
-        self.orders: Dict[str, CThostFtdcOrderField] = {}
-        self.positions: Dict[str, Any] = {}
+        # B2: 线程安全状态容器, 替代原 self.order_ref / orders / positions
+        # CTP 回调线程与主线程都通过 self.state.xxx() 访问, 内部加锁
+        self.state = CTPState()
 
     def OnFrontConnected(self):
         print("交易服务器连接成功")
@@ -94,9 +96,9 @@ class MyTraderCallback(CThostFtdcTraderApi):
             print(f"交易服务器登录失败：{pRspInfo.ErrorMsg}")
 
     def OnRtnOrder(self, pOrder):
-        """委托回报"""
+        """委托回报 (CTP callback 线程, B2 改走 state.set_order)"""
         print(f"委托回报: {pOrder.InstrumentID} {pOrder.OrderStatus}")
-        self.orders[pOrder.OrderRef] = pOrder
+        self.state.set_order(pOrder.OrderRef, pOrder)
 
     def OnRtnTrade(self, pTrade):
         """成交回报"""
@@ -107,10 +109,10 @@ class MyTraderCallback(CThostFtdcTraderApi):
     def OnRspQryInvestorPosition(
         self, pInvestorPosition, pRspInfo, nRequestID, bIsLast
     ):
-        """持仓查询回报"""
+        """持仓查询回报 (CTP callback 线程, B2 改走 state.set_position)"""
         if pInvestorPosition:
             key = f"{pInvestorPosition.InstrumentID}_{pInvestorPosition.PosiDirection}"
-            self.positions[key] = pInvestorPosition
+            self.state.set_position(key, pInvestorPosition)
 
 
 class CTPTrader(BackTestTrader):
@@ -175,11 +177,11 @@ class CTPTrader(BackTestTrader):
         )
         time.sleep(1)  # 等待查询结果
 
-        if len(self.trader_api.positions) >= self.max_pos:
+        if self.trader_api.state.get_position_count() >= self.max_pos:
             return False
 
         # 下单
-        self.trader_api.order_ref += 1
+        order_ref = self.trader_api.state.next_order_ref()
         req = ApiStruct.InputOrder(
             InstrumentID=code,
             OrderPriceType=ApiStruct.THOST_FTDC_OPT_LimitPrice,
@@ -192,7 +194,7 @@ class CTPTrader(BackTestTrader):
             VolumeCondition=ApiStruct.THOST_FTDC_VC_AV,
             MinVolume=1,
             ContingentCondition=ApiStruct.THOST_FTDC_CC_Immediately,
-            OrderRef=str(self.trader_api.order_ref),
+            OrderRef=order_ref,
         )
 
         result = self.trader_api.ReqOrderInsert(req, 0)
@@ -201,7 +203,7 @@ class CTPTrader(BackTestTrader):
 
         # 等待订单回报
         time.sleep(1)
-        order = self.trader_api.orders.get(str(self.trader_api.order_ref))
+        order = self.trader_api.state.get_order(order_ref)
         if not order:
             return False
 
@@ -241,11 +243,11 @@ class CTPTrader(BackTestTrader):
         )
         time.sleep(1)
 
-        if len(self.trader_api.positions) >= self.max_pos:
+        if self.trader_api.state.get_position_count() >= self.max_pos:
             return False
 
         # 下单
-        self.trader_api.order_ref += 1
+        order_ref = self.trader_api.state.next_order_ref()
         req = ApiStruct.InputOrder(
             InstrumentID=code,
             OrderPriceType=ApiStruct.THOST_FTDC_OPT_LimitPrice,
@@ -258,7 +260,7 @@ class CTPTrader(BackTestTrader):
             VolumeCondition=ApiStruct.THOST_FTDC_VC_AV,
             MinVolume=1,
             ContingentCondition=ApiStruct.THOST_FTDC_CC_Immediately,
-            OrderRef=str(self.trader_api.order_ref),
+            OrderRef=order_ref,
         )
 
         result = self.trader_api.ReqOrderInsert(req, 0)
@@ -266,7 +268,7 @@ class CTPTrader(BackTestTrader):
             return False
 
         time.sleep(1)
-        order = self.trader_api.orders.get(str(self.trader_api.order_ref))
+        order = self.trader_api.state.get_order(order_ref)
         if not order:
             return False
 
@@ -294,7 +296,7 @@ class CTPTrader(BackTestTrader):
         if code not in tick:
             return False
 
-        self.trader_api.order_ref += 1
+        order_ref = self.trader_api.state.next_order_ref()
         req = ApiStruct.InputOrder(
             InstrumentID=code,
             OrderPriceType=ApiStruct.THOST_FTDC_OPT_LimitPrice,
@@ -307,7 +309,7 @@ class CTPTrader(BackTestTrader):
             VolumeCondition=ApiStruct.THOST_FTDC_VC_AV,
             MinVolume=1,
             ContingentCondition=ApiStruct.THOST_FTDC_CC_Immediately,
-            OrderRef=str(self.trader_api.order_ref),
+            OrderRef=order_ref,
         )
 
         result = self.trader_api.ReqOrderInsert(req, 0)
@@ -315,7 +317,7 @@ class CTPTrader(BackTestTrader):
             return False
 
         time.sleep(1)
-        order = self.trader_api.orders.get(str(self.trader_api.order_ref))
+        order = self.trader_api.state.get_order(order_ref)
         if not order:
             return False
 
@@ -341,7 +343,7 @@ class CTPTrader(BackTestTrader):
         if code not in tick:
             return False
 
-        self.trader_api.order_ref += 1
+        order_ref = self.trader_api.state.next_order_ref()
         req = ApiStruct.InputOrder(
             InstrumentID=code,
             OrderPriceType=ApiStruct.THOST_FTDC_OPT_LimitPrice,
@@ -354,7 +356,7 @@ class CTPTrader(BackTestTrader):
             VolumeCondition=ApiStruct.THOST_FTDC_VC_AV,
             MinVolume=1,
             ContingentCondition=ApiStruct.THOST_FTDC_CC_Immediately,
-            OrderRef=str(self.trader_api.order_ref),
+            OrderRef=order_ref,
         )
 
         result = self.trader_api.ReqOrderInsert(req, 0)
@@ -362,7 +364,7 @@ class CTPTrader(BackTestTrader):
             return False
 
         time.sleep(1)
-        order = self.trader_api.orders.get(str(self.trader_api.order_ref))
+        order = self.trader_api.state.get_order(order_ref)
         if not order:
             return False
 
@@ -404,7 +406,7 @@ class CTPTrader(BackTestTrader):
         # 根据持仓方向决定锁仓方向
         if pos.direction == "buy":
             # 持有多仓，开空仓锁仓
-            self.trader_api.order_ref += 1
+            order_ref = self.trader_api.state.next_order_ref()
             req = ApiStruct.InputOrder(
                 InstrumentID=code,
                 OrderPriceType=ApiStruct.THOST_FTDC_OPT_LimitPrice,
@@ -417,12 +419,12 @@ class CTPTrader(BackTestTrader):
                 VolumeCondition=ApiStruct.THOST_FTDC_VC_AV,
                 MinVolume=1,
                 ContingentCondition=ApiStruct.THOST_FTDC_CC_Immediately,
-                OrderRef=str(self.trader_api.order_ref),
+                OrderRef=order_ref,
             )
             direction = "sell"
         else:
             # 持有空仓，开多仓锁仓
-            self.trader_api.order_ref += 1
+            order_ref = self.trader_api.state.next_order_ref()
             req = ApiStruct.InputOrder(
                 InstrumentID=code,
                 OrderPriceType=ApiStruct.THOST_FTDC_OPT_LimitPrice,
@@ -435,7 +437,7 @@ class CTPTrader(BackTestTrader):
                 VolumeCondition=ApiStruct.THOST_FTDC_VC_AV,
                 MinVolume=1,
                 ContingentCondition=ApiStruct.THOST_FTDC_CC_Immediately,
-                OrderRef=str(self.trader_api.order_ref),
+                OrderRef=order_ref,
             )
             direction = "buy"
 
@@ -444,7 +446,7 @@ class CTPTrader(BackTestTrader):
             return False
 
         time.sleep(1)
-        order = self.trader_api.orders.get(str(self.trader_api.order_ref))
+        order = self.trader_api.state.get_order(order_ref)
         if not order:
             return False
 
@@ -472,7 +474,7 @@ class CTPTrader(BackTestTrader):
         if code not in tick:
             return False
 
-        self.trader_api.order_ref += 1
+        order_ref = self.trader_api.state.next_order_ref()
 
         # 根据持仓方向决定平仓方向和价格
         if pos.direction == "buy":
@@ -496,14 +498,14 @@ class CTPTrader(BackTestTrader):
         req.VolumeCondition = THOST_FTDC_VC_AV
         req.MinVolume = 1
         req.ContingentCondition = THOST_FTDC_CC_Immediately
-        req.OrderRef = str(self.trader_api.order_ref)
+        req.OrderRef = order_ref
 
         result = self.trader_api.ReqOrderInsert(req, 0)
         if result != 0:
             return False
 
         time.sleep(1)
-        order = self.trader_api.orders.get(str(self.trader_api.order_ref))
+        order = self.trader_api.state.get_order(order_ref)
         if not order:
             return False
 
@@ -545,7 +547,7 @@ class CTPTrader(BackTestTrader):
         time.sleep(1)
 
         results = []
-        for key, pos_info in self.trader_api.positions.items():
+        for key, pos_info in self.trader_api.state.get_positions_snapshot().items():
             code = pos_info.InstrumentID
             direction = "buy" if pos_info.PosiDirection == "2" else "sell"
             amount = pos_info.Position
@@ -566,21 +568,20 @@ class CTPTrader(BackTestTrader):
         req = CThostFtdcSettlementInfoConfirmField()
         req.BrokerID = self.ex.broker_id
         req.InvestorID = self.ex.user_id
-        self.trader_api.ReqSettlementInfoConfirm(req, self.trader_api.order_ref)
+        self.trader_api.ReqSettlementInfoConfirm(req, self.trader_api.state.order_ref)
 
     def query_instrument(self, code=""):
         """查询合约"""
         req = CThostFtdcQryInstrumentField()
         if code:
             req.InstrumentID = code
-        self.trader_api.ReqQryInstrument(req, self.trader_api.order_ref)
+        self.trader_api.ReqQryInstrument(req, self.trader_api.state.order_ref)
 
     def cancel_order(self, order_ref: str):
         """撤单"""
-        if order_ref not in self.trader_api.orders:
+        order = self.trader_api.state.get_order(order_ref)
+        if order is None:
             return False
-
-        order = self.trader_api.orders[order_ref]
         req = CThostFtdcInputOrderActionField()
         req.InstrumentID = order.InstrumentID
         req.OrderRef = order_ref
@@ -590,7 +591,7 @@ class CTPTrader(BackTestTrader):
         req.BrokerID = self.ex.broker_id
         req.InvestorID = self.ex.user_id
 
-        return self.trader_api.ReqOrderAction(req, self.trader_api.order_ref) == 0
+        return self.trader_api.ReqOrderAction(req, self.trader_api.state.order_ref) == 0
 
     def OnRspSettlementInfoConfirm(
         self, pSettlementInfoConfirm, pRspInfo, nRequestID, bIsLast
@@ -640,7 +641,7 @@ class CTPTrader(BackTestTrader):
         req = CThostFtdcQryTradingAccountField()
         req.BrokerID = self.ex.broker_id
         req.InvestorID = self.ex.user_id
-        self.trader_api.ReqQryTradingAccount(req, self.trader_api.order_ref)
+        self.trader_api.ReqQryTradingAccount(req, self.trader_api.state.order_ref)
 
     def query_orders(self, code=""):
         """查询委托"""
@@ -649,7 +650,7 @@ class CTPTrader(BackTestTrader):
         req.InvestorID = self.ex.user_id
         if code:
             req.InstrumentID = code
-        self.trader_api.ReqQryOrder(req, self.trader_api.order_ref)
+        self.trader_api.ReqQryOrder(req, self.trader_api.state.order_ref)
 
     def query_trades(self, code=""):
         """查询成交"""
@@ -658,12 +659,12 @@ class CTPTrader(BackTestTrader):
         req.InvestorID = self.ex.user_id
         if code:
             req.InstrumentID = code
-        self.trader_api.ReqQryTrade(req, self.trader_api.order_ref)
+        self.trader_api.ReqQryTrade(req, self.trader_api.state.order_ref)
 
     def get_position(self, code: str) -> Dict:
         """获取单个合约的持仓"""
         positions = {}
-        for key, pos in self.trader_api.positions.items():
+        for key, pos in self.trader_api.state.get_positions_snapshot().items():
             if pos.InstrumentID == code:
                 direction = "buy" if pos.PosiDirection == "2" else "sell"
                 positions[direction] = {
@@ -679,7 +680,7 @@ class CTPTrader(BackTestTrader):
     def get_all_positions(self) -> Dict:
         """获取所有持仓"""
         positions = {}
-        for key, pos in self.trader_api.positions.items():
+        for key, pos in self.trader_api.state.get_positions_snapshot().items():
             code = pos.InstrumentID
             direction = "buy" if pos.PosiDirection == "2" else "sell"
             if code not in positions:
