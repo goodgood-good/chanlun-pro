@@ -115,3 +115,75 @@ def test_resolve_higher_target_freq_no_higher():
     from cl_app.services.chart_compute import _resolve_higher_target_freq
     assert _resolve_higher_target_freq("M", "us") is None
     assert _resolve_higher_target_freq("999x", "us") is None
+
+
+def test_bin_keys_5m_basic():
+    import numpy as np
+    from cl_app.services.chart_compute import _bin_keys_for_higher
+
+    # 5 根 1m, 每根相隔 60s, 跨过一个 5m 边界 (1700000100):
+    #   1700000000 // 300 = 5666666  (bin A)
+    #   1700000060 // 300 = 5666666  (bin A)
+    #   1700000120 // 300 = 5666667  (bin B)
+    #   1700000180 // 300 = 5666667  (bin B)
+    #   1700000240 // 300 = 5666667  (bin B)
+    times = np.array(
+        [1700000000, 1700000060, 1700000120, 1700000180, 1700000240],
+        dtype=np.int64,
+    )
+    bins = _bin_keys_for_higher(times, "5m", "us")
+    assert bins[0] == bins[1]
+    assert bins[2] == bins[3] == bins[4]
+    assert bins[2] == bins[0] + 1
+
+
+def test_bin_keys_5m_cross_boundary():
+    """跨过 5m 边界 (epoch 整除 300 边界) 必须 bin+1。"""
+    import numpy as np
+    from cl_app.services.chart_compute import _bin_keys_for_higher
+
+    # 5666667 * 300 = 1700000100 是 bin 5666667 起点
+    # [1700000100, 1700000400) 全部属于 bin 5666667; 1700000400 进入 5666668
+    times = np.array([1700000100, 1700000300, 1700000400], dtype=np.int64)
+    bins = _bin_keys_for_higher(times, "5m", "us")
+    assert bins[0] == bins[1]              # 同 bin (5666667)
+    assert bins[2] == bins[0] + 1          # 跨界 +1 (5666668)
+
+
+def test_bin_keys_5m_cross_overnight():
+    """美股 1m 跨夜: 昨日 16:00 与今日 09:30 必须落在不同 5m bin。"""
+    import numpy as np
+    import datetime
+    import pytz
+    from cl_app.services.chart_compute import _bin_keys_for_higher
+
+    tz = pytz.timezone("America/New_York")
+    # 取 2024-01-02 (周二, 交易日)
+    yesterday_close = int(tz.localize(datetime.datetime(2024, 1, 2, 15, 59)).timestamp())
+    today_open = int(tz.localize(datetime.datetime(2024, 1, 3, 9, 30)).timestamp())
+    times = np.array([yesterday_close, today_open], dtype=np.int64)
+    bins = _bin_keys_for_higher(times, "5m", "us")
+    assert bins[0] != bins[1]  # 跨夜两根必不同 bin
+
+
+def test_bin_keys_30m_basic():
+    import numpy as np
+    from cl_app.services.chart_compute import _bin_keys_for_higher
+
+    # 30m = 1800s
+    # 取明显跨 30m 边界的 epoch
+    # 1700000000 / 1800 = 944444.444...
+    # 1700001800 / 1800 = 944445.444...
+    times = np.array(
+        [1700000000, 1700001799, 1700001800, 1700003600],
+        dtype=np.int64,
+    )
+    bins = _bin_keys_for_higher(times, "30m", "us")
+    # 1700000000 // 1800 = 944444
+    # 1700001799 // 1800 = 944444 (差 1799 还在同 bin? 1800*944444=1699999200,
+    #                                所以 1700001799 // 1800 = 944445)
+    # 实际: (1700001799 - 1699999200) // 1800 = 2599 // 1800 = 1, 所以 944445
+    # 让我重新构造让断言可靠
+    # 直接验证 bin_id 差: 1700003600 - 1700000000 = 3600 = 2*1800
+    # 所以 bins[3] - bins[0] 应该是 2
+    assert bins[3] - bins[0] == 2

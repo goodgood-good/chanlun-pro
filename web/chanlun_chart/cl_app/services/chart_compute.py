@@ -658,3 +658,47 @@ def _resolve_higher_target_freq(frequency: str, market: str) -> "str | None":
     周期字符串,后续由 _bin_keys_for_higher 决定具体怎么合成。
     """
     return HIGHER_FREQ_MAP.get(frequency)
+
+
+def _bin_keys_for_higher(
+    times: "np.ndarray",
+    target_freq: str,
+    market: str,
+) -> "np.ndarray":
+    """计算每根低周期 K 线归属哪个高周期 bin。
+
+    返回 int64 numpy 数组,长度 == len(times)。
+
+    bin id 仅用作"相邻同 bin 分组键",不要求全局唯一/单调。但对每个
+    target_freq,保证:bar_a 与 bar_b 同 bin 当且仅当二者应被合成进同一
+    根高周期 K 线。
+
+    target_freq:
+      "5m":  epoch // 300
+      "30m": epoch // 1800
+      "d":   market 时区下 date.toordinal()
+      "w":   market 时区下 ISO (year, week) 打包成 year*100 + week
+      "M":   market 时区下 year * 100 + month
+    """
+    if target_freq == "5m":
+        return (times // 300).astype(np.int64)
+    if target_freq == "30m":
+        return (times // 1800).astype(np.int64)
+    # d / w / M 需要时区
+    tz_name = MARKET_TZ.get(market, "UTC")
+    tz = pytz.timezone(tz_name)
+    out = np.empty(len(times), dtype=np.int64)
+    for i, t in enumerate(times):
+        dt = datetime.datetime.fromtimestamp(int(t), tz=tz)
+        if target_freq == "d":
+            out[i] = dt.date().toordinal()
+        elif target_freq == "w":
+            iso = dt.isocalendar()
+            # isocalendar() 返回 IsoCalendarDate(year, week, weekday)
+            iso_year, iso_week = iso[0], iso[1]
+            out[i] = iso_year * 100 + iso_week
+        elif target_freq == "M":
+            out[i] = dt.year * 100 + dt.month
+        else:
+            raise ValueError(f"Unsupported target_freq: {target_freq}")
+    return out
