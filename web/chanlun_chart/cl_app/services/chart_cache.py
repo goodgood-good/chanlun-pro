@@ -145,25 +145,50 @@ def _get_chart_cache_entry(cache_key: str):
     return entry
 
 
+def _entry_freshness(cache_entry: dict, mode: str) -> str:
+    """统一的 cache entry 新鲜度判定 (M3 清理: 把两个独立阈值汇成一个函数)。
+
+    Args:
+        cache_entry: chart_data_cache 条目, dict with ``validated_at`` 浮点字段。
+        mode: 判定模式, 决定使用哪个阈值:
+            - ``"polling"``: 30s 阈值, 用于 firstDataRequest=false 的 polling 路径。
+              频率上 TV 每 ~3 秒推一次 polling, 推 validated_at, 30s 内不重算。
+            - ``"first_request"``: 3600s 阈值, 用于 firstDataRequest=true 路径。
+              程序停机期间 polling 不推 validated_at, 重启后看磁盘冷层 entry
+              是否还在 1 小时内 (远小于"停机一两天"的尺度, 重启能识别为过期)。
+
+    Returns:
+        ``"fresh"`` / ``"stale"`` / ``"unknown"``。
+        ``"unknown"`` 表示 entry 不规范或缺 validated_at (上游应按 stale 处理)。
+    """
+    if not isinstance(cache_entry, dict):
+        return "unknown"
+    validated_at = cache_entry.get("validated_at")
+    if not isinstance(validated_at, (int, float)) or validated_at <= 0:
+        return "unknown"
+
+    threshold = (
+        _CACHE_REVALIDATION_INTERVAL if mode == "polling" else _SNAPSHOT_STALE_AFTER
+    )
+    return "fresh" if (time.time() - validated_at) < threshold else "stale"
+
+
 def _cache_entry_recently_validated(cache_entry: dict) -> bool:
-    validated_at = cache_entry.get("validated_at", 0) if isinstance(cache_entry, dict) else 0
-    return (time.time() - validated_at) < _CACHE_REVALIDATION_INTERVAL
+    """polling 路径专用: 30s 内验证过即视为有效。委托给 _entry_freshness。"""
+    return _entry_freshness(cache_entry, mode="polling") == "fresh"
 
 
 def _full_snapshot_is_stale(cache_entry: dict) -> bool:
-    """全量快照是否过期：validated_at 距今超过 _SNAPSHOT_STALE_AFTER。
+    """全量快照是否过期: validated_at 距今超过 _SNAPSHOT_STALE_AFTER。
 
     用于 tv_history 在 firstDataRequest=true 路径下校验从磁盘冷层加载的 entry
-    时效：程序停机期间没有 polling 推 validated_at，重启后第一个请求若不做时效
-    校验会直接命中老快照，导致缺停机期间产生的 K 线。
-    None / 非 dict / 缺字段一律视为过期（保守降级，触发 cache miss 重新拉取）。
+    时效: 程序停机期间没有 polling 推 validated_at, 重启后第一个请求若不做时效
+    校验会直接命中老快照, 导致缺停机期间产生的 K 线。
+    None / 非 dict / 缺字段一律视为过期 (保守降级, 触发 cache miss 重新拉取)。
+
+    委托给 _entry_freshness("first_request"); ``unknown`` 也按过期处理。
     """
-    if not isinstance(cache_entry, dict):
-        return True
-    validated_at = cache_entry.get("validated_at")
-    if not isinstance(validated_at, (int, float)) or validated_at <= 0:
-        return True
-    return (time.time() - validated_at) > _SNAPSHOT_STALE_AFTER
+    return _entry_freshness(cache_entry, mode="first_request") != "fresh"
 
 
 # ---------------- 写入：RAM + 异步落盘 ----------------
