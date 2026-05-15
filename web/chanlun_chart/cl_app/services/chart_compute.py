@@ -44,7 +44,31 @@ from .chart_cache import (
     cache_lock,
 )
 
-# ---------------- 跨周期 MACD 倍率 ----------------
+# ---------------- HTF MACD: 频率映射与市场时区 ----------------
+
+# 当前周期 -> 目标高周期(去除"放大倍率"概念,改用"目标周期标识符")
+HIGHER_FREQ_MAP = {
+    "1m": "5m",
+    "5m": "30m",
+    "30m": "d",
+    "d": "w",
+    "w": "M",
+}
+
+# 市场时区,决定 d/w/M bin 切割时的"自然日界"
+MARKET_TZ = {
+    "a": "Asia/Shanghai",
+    "hk": "Asia/Hong_Kong",
+    "us": "America/New_York",
+    "ny_futures": "America/New_York",
+    "futures": "Asia/Shanghai",
+    "currency": "UTC",
+    "currency_spot": "UTC",
+    "fx": "UTC",
+}
+
+
+# ---------------- 跨周期 MACD 倍率 (旧近似法, 即将由 HIGHER_FREQ_MAP 取代) ----------------
 
 # key = 当前K线频率, value = 倍率（高级别周期包含多少根当前周期K线）
 HIGHER_MACD_RATIO = {
@@ -621,3 +645,16 @@ def fetch_klines_and_compute_cl_data(
         "cd": cd,
         "kchart_to_frequency": kchart_to_frequency,
     }
+
+
+# ===========================================================================
+# HTF MACD: 真合成算法核心 (替代旧"参数 × ratio"近似法)
+# ===========================================================================
+
+def _resolve_higher_target_freq(frequency: str, market: str) -> "str | None":
+    """frequency -> 目标高周期标识符;无对照返回 None。
+
+    与旧 _resolve_higher_macd_ratio 的区别:不再返回"倍率",直接返回目标
+    周期字符串,后续由 _bin_keys_for_higher 决定具体怎么合成。
+    """
+    return HIGHER_FREQ_MAP.get(frequency)

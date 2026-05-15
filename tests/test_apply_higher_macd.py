@@ -96,3 +96,22 @@ def test_apply_empty_closes_no_op():
     chart_data = {"c": []}
     apply_higher_macd_to_chart_data(chart_data, "1m", "a", {})
     assert "higher_macd_dif" not in chart_data
+
+
+# === New algorithm tests (resample-based HTF MACD) ===
+# 后续 task 会在 chart_compute.py 中新增以下符号。
+
+
+def test_resolve_higher_target_freq_mappings():
+    from cl_app.services.chart_compute import _resolve_higher_target_freq
+    assert _resolve_higher_target_freq("1m", "a") == "5m"
+    assert _resolve_higher_target_freq("5m", "a") == "30m"
+    assert _resolve_higher_target_freq("30m", "us") == "d"
+    assert _resolve_higher_target_freq("d", "us") == "w"
+    assert _resolve_higher_target_freq("w", "us") == "M"
+
+
+def test_resolve_higher_target_freq_no_higher():
+    from cl_app.services.chart_compute import _resolve_higher_target_freq
+    assert _resolve_higher_target_freq("M", "us") is None
+    assert _resolve_higher_target_freq("999x", "us") is None
