@@ -24,6 +24,7 @@
 - 任务对象内存维护，TTL 1 小时自动清理（避免页面长期不刷导致泄漏）。
 """
 
+import hashlib
 import json
 import os
 import pathlib
@@ -32,7 +33,7 @@ import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 
 # M3: env 优先的常量读取助手；解析失败兜底默认值，不让坏 env 炸服务启动。
@@ -90,6 +91,65 @@ MARKETS = [
 
 DEFAULT_PAGE_SIZE = 50
 MAX_PAGE_SIZE = 500
+
+# W2: 缓存 ``_apply_market_filter`` 的结果 (TTL 60s), 避免每次请求重跑 11k 条
+# 的正则 / type 检查. (market → (filtered_list, fingerprint, refreshed_at))
+# fingerprint 是基于 items 数量 + 首/中/尾 code 的 12-char md5, 仅在结果
+# 真变化时才变, 配合 ETag 304 短路二次请求 (?all=1 时收益 ~1MB 流量).
+_market_filtered_cache: Dict[str, Tuple[List[dict], str, float]] = {}
+_market_filtered_lock = threading.Lock()
+_MARKET_FILTERED_TTL = 60.0
+
+
+def _items_fingerprint(items: List[dict]) -> str:
+    """快速 fingerprint: 不对 11k 条做完整 md5, 取 count + 首/中/尾 code."""
+    if not items:
+        return "0"
+    n = len(items)
+    parts = [
+        str(n),
+        items[0].get("code", ""),
+        items[n // 2].get("code", ""),
+        items[-1].get("code", ""),
+    ]
+    return hashlib.md5("|".join(parts).encode()).hexdigest()[:12]
+
+
+def _get_market_filtered_stocks(market: str) -> Tuple[List[dict], str]:
+    """带 TTL 缓存的 (filtered_list, fingerprint).
+
+    cache miss / expired 时:
+    1. 调 ``get_cached_processed_stocks`` 取原始列表
+    2. 跑 ``_apply_market_filter`` (a 股 type 过滤 + us 黑名单正则)
+    3. 计算 fingerprint, 写回缓存
+    """
+    now = time.time()
+    with _market_filtered_lock:
+        cached = _market_filtered_cache.get(market)
+        if cached and now - cached[2] < _MARKET_FILTERED_TTL:
+            return cached[0], cached[1]
+
+    try:
+        raw = get_cached_processed_stocks(market, allow_sync_fallback=True) or []
+    except Exception as e:
+        LogUtil.error(f"[symbols_list] get stocks failed market={market}: {e}")
+        raw = []
+    filtered = _apply_market_filter(market, raw)
+    fp = _items_fingerprint(filtered)
+    with _market_filtered_lock:
+        _market_filtered_cache[market] = (filtered, fp, now)
+    return filtered, fp
+
+
+def _build_response_etag(
+    market_fp: str, q: str, page: int, page_size: int, return_all: bool
+) -> str:
+    """W2 ETag: 市场数据 fingerprint + 请求参数, 任一变化 ETag 即变.
+
+    用 weak ETag (W/) 是因 fingerprint 不是字节精确的内容 hash, 仅近似。
+    """
+    raw = f"{market_fp}|{q}|{page}|{page_size}|{int(return_all)}"
+    return f'W/"{hashlib.md5(raw.encode()).hexdigest()[:16]}"'
 
 # 标的列表"仅显示个股"的 type 白名单。市场不在表中则不过滤。
 # 港股/美股因数据源不返回 type 字段，本期不过滤；期货/外汇/数字货币本无个股概念。
@@ -207,15 +267,15 @@ def symbols_list():
     if page_size > MAX_PAGE_SIZE:
         page_size = MAX_PAGE_SIZE
 
-    # allow_sync_fallback=True：用户在该页主动等待数据是合理的，宁可慢几秒也不能 500。
-    try:
-        all_stocks = get_cached_processed_stocks(market, allow_sync_fallback=True) or []
-    except Exception as e:
-        LogUtil.error(f"[symbols_list] get stocks failed market={market}: {e}")
-        all_stocks = []
+    # W2: 缓存 + ETag, 避免每次重跑 _apply_market_filter 11k 条正则
+    all_stocks, market_fp = _get_market_filtered_stocks(market)
 
-    # 应用市场过滤(与预热路径共用同一函数, 确保展示列表和预热范围一致)
-    all_stocks = _apply_market_filter(market, all_stocks)
+    # ETag 检查在过滤/分页之前: 同一 (market_fp, q, page, page_size, all)
+    # 命中即 304, 服务端跳过 query 字串扫描和切片
+    etag = _build_response_etag(market_fp, query, page, page_size, return_all)
+    if request.headers.get("If-None-Match") == etag:
+        resp = ("", 304)
+        return resp
 
     if query:
         filtered = [
@@ -251,7 +311,7 @@ def symbols_list():
         for s in page_items
     ]
 
-    return jsonify(
+    resp = jsonify(
         {
             "ok": True,
             "market": market,
@@ -261,6 +321,11 @@ def symbols_list():
             "items": items,
         }
     )
+    resp.headers["ETag"] = etag
+    # private: 含用户特定数据 (虽然 symbols 公开, 走 login_required 不应被 CDN 缓存)
+    # max-age=600: 与 _MARKET_FILTERED_TTL 60s 协同, 浏览器最多 10min 重发
+    resp.headers["Cache-Control"] = "private, max-age=600"
+    return resp
 
 # ---------------------------------------------------------------------------
 # 缠论数据预热（Pre-warm）
