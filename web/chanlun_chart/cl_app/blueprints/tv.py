@@ -44,7 +44,6 @@ from ..services.constants import (
     market_timezone,
     market_types,
 )
-from ..services.state import history_req_counter as __history_req_counter
 
 
 tv_bp = Blueprint("tv", __name__)
@@ -441,10 +440,8 @@ def prewarm_common_intervals(market, code, cl_config):
 
 # _SafeLockRegistry / chart_calc_locks 已迁到 services.chart_compute（Tier 4 P3），
 # 见模块顶部 re-export。
-# H7（保守版）：__history_req_counter 的 per-key 节流锁。
-# 仅 tv_history 内部使用，本地实例化 _SafeLockRegistry（从 service 导入的 class）。
-# 注意：必须用 with _history_req_locks.get(key) 模式，详见 _SafeLockRegistry 注释。
-_history_req_locks = _SafeLockRegistry()
+# (M2 清理: 原 _history_req_locks 仅服务于已删除的 __history_req_counter 节流计数,
+# 一并移除; 如未来需要真限流, 直接复用 chart_calc_locks 或新建一份。)
 
 # symbols 预加载逻辑（_resolve_preload_exchanges / _safe_all_stocks /
 # _preload_single_exchange / preload_symbols / start_symbol_preload_thread 等）
@@ -756,38 +753,10 @@ def tv_history():
         LogUtil.debug(f"tv_history request args: {log_args}")
 
         req_tag = f"{symbol}|{resolution}|{firstDataRequest}|{_from}->{_to}"
-        _symbol_res_old_k_time_key = f"{symbol}_{resolution}"
-        now_time = time.time()
-        if firstDataRequest == "false":
-            # H7（保守版）：per-key 锁替代全局 req_lock，不同 symbol/resolution 并发不互斥。
-            # 必须先 get 出 RLock 再 with，确保整个临界区内强引用持续（WeakValueDictionary 语义）。
-            _req_lock = _history_req_locks.get(_symbol_res_old_k_time_key)
-            with _req_lock:
-                if _symbol_res_old_k_time_key not in __history_req_counter.keys():
-                    __history_req_counter[_symbol_res_old_k_time_key] = {
-                        "counter": 0,
-                        "tm": now_time,
-                    }
-                else:
-                    if __history_req_counter[_symbol_res_old_k_time_key]["counter"] >= 30:
-                        __history_req_counter[_symbol_res_old_k_time_key] = {
-                            "counter": 0,
-                            "tm": now_time,
-                        }
-                        LogUtil.warning(
-                            f"[tv_history] Too many requests in short time: {_symbol_res_old_k_time_key}, counter reset"
-                        )
-                    elif (
-                        now_time - __history_req_counter[_symbol_res_old_k_time_key]["tm"]
-                        <= 5
-                    ):
-                        __history_req_counter[_symbol_res_old_k_time_key]["counter"] += 1
-                        __history_req_counter[_symbol_res_old_k_time_key]["tm"] = now_time
-                    else:
-                        __history_req_counter[_symbol_res_old_k_time_key] = {
-                            "counter": 0,
-                            "tm": now_time,
-                        }
+        # (M2 清理) 原 __history_req_counter 30 行 per-key 节流计数被移除:
+        # 计数 ≥30 时只 reset + log warning, 没有 return 短路也没有真限流,
+        # 是 spaghetti 死代码。监控/限流应放到反代层 (nginx/cloudflare) 或独立中间件,
+        # 不在请求处理路径内做"半路计数"。
 
         cl_config = query_cl_chart_config(market, code)
         if not isinstance(cl_config, dict):
