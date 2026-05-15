@@ -311,7 +311,238 @@ class _KlineCacheMixin:
         return True
 
 
-class FileCacheDB(_GenericPklCacheMixin, _ChartDataCacheMixin, _KlineCacheMixin):
+# ===========================================================================
+# P8 step 2.4: CLObjectCacheMixin
+# ---------------------------------------------------------------------------
+# 负责 cd 对象 .pkl 持久化 + 4 重一致性校验 (连续性 / OHLC / 密度 / 数据量)。
+# get_web_cl_data 已被 web 路径绕开 (cl_utils.web_batch_get_cl_datas 改走
+# cl_object_cache.py), 这里保留是供 notebook / 回测脚本使用。
+# 依赖 FileCacheDB 主类提供的:
+#   字段 ``cl_data_path``
+#   方法 ``_config_md5()`` / ``_atomic_write_pickle()`` / ``_try_run_cleanup()``
+# ===========================================================================
+class _CLObjectCacheMixin:
+    """缠论对象 .pkl 缓存方法 (P8 拆分)。"""
+
+    def get_web_cl_data(
+            self,
+            market: str,
+            code: str,
+            frequency: str,
+            cl_config: dict,
+            klines: pd.DataFrame,
+    ) -> 'ICL':
+        """获取 web 缓存的缠论数据对象。"""
+        logger = LogUtil.get_logger()
+        key = self._config_md5(cl_config)
+        log_id = f"[{market}-{code}-{frequency}-{key}]"
+
+        file_pathname = (
+                self.cl_data_path
+                / market
+                / f"{market}_{code.replace('/', '_').replace('.', '_')}_{frequency}_{key}.pkl"
+        )
+
+        cd: 'ICL' = cl.CL(code, frequency, cl_config)
+        need_recompute = False
+
+        if file_pathname.is_file():
+            try:
+                with open(file_pathname, "rb") as fp:
+                    cd = pickle.load(fp)
+
+                # --- 校验逻辑 ---
+                cached_klines = cd.get_src_klines()
+
+                if len(cached_klines) > 0 and len(klines) > 0:
+                    # 1. 连续性校验: 判断缓存末尾是否在给定数据时间范围之外
+                    if cached_klines[-1].date < klines.iloc[0]["date"] or cached_klines[0].date > klines.iloc[-1]["date"]:
+                        logger.warning(f"{log_id} 历史数据错位/不连续, 将全量重算")
+                        need_recompute = True
+
+                    # 2. 数据一致性校验 (防止复权导致的历史数据变更)
+                    # 2026-05 修复: 原 cached_klines[-2] 参考点 + Decimal 严格相等。
+                    # 长桥/IEX 实时源场景下最近几根 bar 因 SIP 后到 / tape 修正会反复
+                    # 微调, 参考点跳到稳定中段 + volume 改相对容差。
+                    if not need_recompute and len(cached_klines) >= 12 and len(klines) >= 12:
+                        # 跳到稳定中段 bar: 至少 10 根之前, 不超过总长 1/4。
+                        ref_idx = -max(10, min(len(cached_klines) // 4, 100))
+                        cd_pre_kline = cached_klines[ref_idx]
+                        target_rows = klines[klines["date"] == cd_pre_kline.date]
+
+                        if len(target_rows) == 0:
+                            logger.warning(f"{log_id} 缓存参考点日期在输入数据中不存在, 重算")
+                            need_recompute = True
+                        else:
+                            row = target_rows.iloc[0]
+                            ohlc_diff = (
+                                    Decimal(str(row["close"])) != Decimal(str(cd_pre_kline.c)) or
+                                    Decimal(str(row["high"])) != Decimal(str(cd_pre_kline.h)) or
+                                    Decimal(str(row["low"])) != Decimal(str(cd_pre_kline.l)) or
+                                    Decimal(str(row["open"])) != Decimal(str(cd_pre_kline.o))
+                            )
+                            src_vol = float(row["volume"])
+                            cached_vol = float(cd_pre_kline.a)
+                            if cached_vol > 0:
+                                vol_diff_ratio = abs(src_vol - cached_vol) / cached_vol
+                                vol_diff = vol_diff_ratio > 0.05
+                            else:
+                                vol_diff = src_vol > 0
+                            if ohlc_diff or vol_diff:
+                                logger.warning(f"{log_id} 检测到历史数据差异 (可能发生复权), 重算")
+                                need_recompute = True
+
+                    # 3. 密度校验: 检查最近 100 根 K 线数量是否对得上
+                    if not need_recompute and len(cached_klines) >= 100 and len(klines) >= 100:
+                        _v_cd = cached_klines[-100:]
+                        _v_src = klines[(klines["date"] >= _v_cd[0].date) & (klines["date"] <= _v_cd[-1].date)]
+                        if len(_v_cd) != len(_v_src):
+                            logger.warning(f"{log_id} 局部数据缺失 [Cache:{len(_v_cd)} vs Src:{len(_v_src)}], 重算")
+                            need_recompute = True
+
+                    # 4. 数据量校验 (G6): 仅当输入左侧扩展超过缓存量一半时才全量重算。
+                    if (
+                        not need_recompute
+                        and len(cached_klines) > 0
+                        and klines.iloc[0]["date"] < cached_klines[0].date
+                    ):
+                        left_extend_count = int(
+                            (klines["date"] < cached_klines[0].date).sum()
+                        )
+                        if left_extend_count > len(cached_klines) // 2:
+                            logger.warning(
+                                f"{log_id} 输入左侧扩展 {left_extend_count} 根早于缓存头"
+                                f"(缓存量 {len(cached_klines)}), 全量重算"
+                            )
+                            need_recompute = True
+
+                if need_recompute:
+                    cd = cl.CL(code, frequency, cl_config)
+
+            except Exception as e:
+                logger.error(f"{log_id} 读取缓存或校验过程异常: {str(e)}", exc_info=True)
+                try:
+                    if file_pathname.exists():
+                        file_pathname.unlink()
+                except Exception as un_e:
+                    logger.error(f"{log_id} 尝试删除损坏缓存失败: {str(un_e)}")
+                cd = cl.CL(code, frequency, cl_config)
+
+        # 增量计算
+        try:
+            cd.process_klines(klines)
+        except Exception as e:
+            # G7: process_klines 抛错时 cd 处于半 applied 状态, 返回全新空白 CL 让
+            # 调用方下次请求自然重算。
+            logger.error(
+                f"{log_id} 执行缠论计算 process_klines 失败: {str(e)}", exc_info=True
+            )
+            return cl.CL(code, frequency, cl_config)
+
+        # 写入缓存
+        try:
+            self._atomic_write_pickle(file_pathname, cd)
+        except Exception as e:
+            # H2: 写盘失败是"下次还会从空缓存重算"的 silent 放大源, critical 级。
+            logger.critical(
+                f"{log_id} 写入缓存失败 path={file_pathname} err={str(e)}",
+                exc_info=True,
+            )
+
+        # H6: 随机清理旧数据, 统一通过 _try_run_cleanup 节流 + 互斥。
+        if random.randint(0, 1000) <= 5:
+            self._try_run_cleanup(
+                "web_cl",
+                self.clear_old_web_cl_data,
+                on_error=lambda exc: logger.error(f"清理旧缓存数据异常: {exc}"),
+            )
+
+        return cd
+
+    def clear_web_cl_data(self, market: str, code: str):
+        """清除指定市场下标的缠论缓存对象。"""
+        for filename in (self.cl_data_path / market).glob("*.pkl"):
+            try:
+                if f"{market}_{code.replace('/', '_').replace('.', '_')}" in str(filename):
+                    filename.unlink(missing_ok=True)
+            except Exception as exc:
+                LogUtil.debug(
+                    f"[FileCacheDB.clear_web_cl_data] unlink failed "
+                    f"file={filename} err={exc}"
+                )
+        return True
+
+    def clear_old_web_cl_data(self):
+        """清除时间超过 15 天的缓存数据。"""
+        del_lt_times = fun.datetime_to_int(datetime.datetime.now()) - (
+            15 * 24 * 60 * 60
+        )
+        for _market in Market:
+            for filename in (self.cl_data_path / _market.value).glob("*.pkl"):
+                try:
+                    if filename.stat().st_mtime < del_lt_times:
+                        filename.unlink(missing_ok=True)
+                except Exception as exc:
+                    LogUtil.debug(
+                        f"[FileCacheDB.clear_old_web_cl_data] unlink failed "
+                        f"file={filename} err={exc}"
+                    )
+        return True
+
+    def clear_all_cl_data(self):
+        """删除所有缓存的计算结果文件。"""
+        for _market in Market:
+            for filename in (self.cl_data_path / _market.value).glob("*.pkl"):
+                try:
+                    filename.unlink(missing_ok=True)
+                except Exception as exc:
+                    LogUtil.debug(
+                        f"[FileCacheDB.clear_all_cl_data] unlink failed "
+                        f"file={filename} err={exc}"
+                    )
+        return True
+
+    def get_low_to_high_cl_data(
+        self, db_ex: Exchange, market: str, code: str, frequency: str, cl_config: dict
+    ) -> ICL:
+        """专门为递归到高级别图表写的方法, 初始数据量较多, 从数据库获取后落盘。
+
+        建议定时频繁读取保持更新, 避免太多时间不读取造成数据缺失。
+        """
+        key = self._config_md5(cl_config)
+        filename = (
+            self.cl_data_path
+            / f'{market}_{code.replace("/", "_")}_{frequency}_{key}.pkl'
+        )
+        cd: ICL = None
+        if filename.is_file():
+            try:
+                with open(filename, "rb") as fp:
+                    cd = pickle.load(fp)
+            except Exception as e:
+                LogUtil.warning(
+                    f"[FileCacheDB.get_low_to_high_cl_data] pkl 损坏 file={filename} err={e}, 将重新计算"
+                )
+                try:
+                    filename.unlink(missing_ok=True)
+                except Exception as unlink_exc:
+                    LogUtil.debug(
+                        f"[FileCacheDB.get_low_to_high_cl_data] unlink corrupted pkl failed "
+                        f"file={filename} err={unlink_exc}"
+                    )
+                cd = None
+        if cd is None:
+            cd = cl.CL(code, frequency, cl_config)
+        limit = 200000
+        if len(cd.get_klines()) > 10000:
+            limit = 1000
+        klines = db_ex.klines(code, frequency, args={"limit": limit})
+        cd.process_klines(klines)
+        self._atomic_write_pickle(filename, cd)
+        return cd
+
+
+class FileCacheDB(_GenericPklCacheMixin, _ChartDataCacheMixin, _KlineCacheMixin, _CLObjectCacheMixin):
     """
     文件数据对象
     """
@@ -609,275 +840,10 @@ class FileCacheDB(_GenericPklCacheMixin, _ChartDataCacheMixin, _KlineCacheMixin)
     # =====================================================================
 
     # =====================================================================
-    # P8 区段 2/4: 缠论对象缓存 (CLObjectCache)
-    # ---------------------------------------------------------------------
-    # 负责 cd 对象 .pkl 持久化 + 4 重一致性校验 (连续性 / OHLC / 密度 /
-    # 数据量)。get_web_cl_data 已被 web 路径绕开 (cl_utils.web_batch_get_cl_datas
-    # 现走 cl_object_cache.py), 这里保留是供 notebook / 回测脚本使用。
-    # 包含方法: get_web_cl_data / clear_web_cl_data / clear_old_web_cl_data /
-    # clear_all_cl_data / get_low_to_high_cl_data
+    # P8 区段 2/4: CLObjectCache 方法已抽到 _CLObjectCacheMixin (见文件顶部)
+    # get_web_cl_data / clear_web_cl_data / clear_old_web_cl_data /
+    # clear_all_cl_data / get_low_to_high_cl_data 通过 Mixin 继承挂到 FileCacheDB。
     # =====================================================================
-    def get_web_cl_data(
-            self,
-            market: str,
-            code: str,
-            frequency: str,
-            cl_config: dict,
-            klines: pd.DataFrame,
-    ) -> 'ICL':
-        """
-        获取web缓存的的缠论数据对象
-        """
-        logger = LogUtil.get_logger()  # 获取日志实例
-        key = self._config_md5(cl_config)
-
-        # 统一标识符用于日志输出
-        log_id = f"[{market}-{code}-{frequency}-{key}]"
-
-        file_pathname = (
-                self.cl_data_path
-                / market
-                / f"{market}_{code.replace('/', '_').replace('.', '_')}_{frequency}_{key}.pkl"
-        )
-
-        cd: 'ICL' = cl.CL(code, frequency, cl_config)
-        need_recompute = False
-
-        if file_pathname.is_file():
-            try:
-                with open(file_pathname, "rb") as fp:
-                    cd = pickle.load(fp)
-
-                # --- 校验逻辑 ---
-                cached_klines = cd.get_src_klines()
-
-                if len(cached_klines) > 0 and len(klines) > 0:
-                    # 1. 连续性校验：判断缓存末尾是否在给定数据时间范围之外
-                    if cached_klines[-1].date < klines.iloc[0]["date"] or cached_klines[0].date > klines.iloc[-1][
-                        "date"]:
-                        logger.warning(f"{log_id} 历史数据错位/不连续，将全量重算")
-                        need_recompute = True
-
-                    # 2. 数据一致性校验（防止复权导致的历史数据变更）
-                    #
-                    # 2026-05 修复：原来用 cached_klines[-2] 作参考点 + Decimal 严格相等。
-                    # 长桥/IEX 等实时源在盘中场景下，最近几根 bar 的 OHLCV 会因 SIP
-                    # 后到 / tape 修正 / 撤单回报反复微调，``cached_klines[-2]`` 在每个
-                    # tv_history polling 周期里几乎都对不上新拉的同 date 数据，
-                    # 触发"检测到历史数据差异，重算" → 全量重算 → 高频写 .pkl →
-                    # Windows 上撞 os.replace 文件锁。
-                    #
-                    # 真正的复权事件是"全部历史 bar 等比例缩放"，任何位置任何字段都能检出，
-                    # 因此把参考点往里跳到一个稳定中段 bar，并且把 volume 改成相对容差
-                    # （成交量本来就有 SIP/IEX/exchange 分摊差异，不该用精确相等）。
-                    if not need_recompute and len(cached_klines) >= 12 and len(klines) >= 12:
-                        # 跳到一个足够"稳定"的中段 bar：至少 10 根之前，且不超过总长 1/4。
-                        ref_idx = -max(10, min(len(cached_klines) // 4, 100))
-                        cd_pre_kline = cached_klines[ref_idx]
-                        target_rows = klines[klines["date"] == cd_pre_kline.date]
-
-                        if len(target_rows) == 0:
-                            logger.warning(f"{log_id} 缓存参考点日期在输入数据中不存在，重算")
-                            need_recompute = True
-                        else:
-                            row = target_rows.iloc[0]
-                            # OHLC 仍然精确相等（复权一定会改 price）
-                            ohlc_diff = (
-                                    Decimal(str(row["close"])) != Decimal(str(cd_pre_kline.c)) or
-                                    Decimal(str(row["high"])) != Decimal(str(cd_pre_kline.h)) or
-                                    Decimal(str(row["low"])) != Decimal(str(cd_pre_kline.l)) or
-                                    Decimal(str(row["open"])) != Decimal(str(cd_pre_kline.o))
-                            )
-                            # volume 用相对容差（>5% 才算复权候选），避免 SIP 后到微调误判
-                            src_vol = float(row["volume"])
-                            cached_vol = float(cd_pre_kline.a)
-                            if cached_vol > 0:
-                                vol_diff_ratio = abs(src_vol - cached_vol) / cached_vol
-                                vol_diff = vol_diff_ratio > 0.05
-                            else:
-                                vol_diff = src_vol > 0  # 缓存 0、新值非 0 也算差异
-                            if ohlc_diff or vol_diff:
-                                logger.warning(f"{log_id} 检测到历史数据差异（可能发生复权），重算")
-                                need_recompute = True
-
-                    # 3. 密度校验：检查最近100根K线数量是否对得上
-                    if not need_recompute and len(cached_klines) >= 100 and len(klines) >= 100:
-                        _v_cd = cached_klines[-100:]
-                        _v_src = klines[(klines["date"] >= _v_cd[0].date) & (klines["date"] <= _v_cd[-1].date)]
-                        if len(_v_cd) != len(_v_src):
-                            logger.warning(f"{log_id} 局部数据缺失 [Cache:{len(_v_cd)} vs Src:{len(_v_src)}]，重算")
-                            need_recompute = True
-
-                    # 4. 数据量校验（G6 修正）：原始逻辑 len(klines) > len(cached_klines) * 2
-                    # 会把「缓存是窄范围、本次拉取标准范围」这类**正常增量**误判为全量重算，
-                    # 把已经算好的中枢/笔/段全部丢弃，性能浪费严重。
-                    #
-                    # 真正需要全量重算的只有一种场景：输入头部时间显著早于缓存头部时间，
-                    # 即「输入往左侧扩了一大块缓存里没有的旧数据」，此时缓存的 idx/中枢
-                    # 都是基于较短的尾段建立的，无法直接拼接更早的历史。
-                    #
-                    # 仅当输入头早于缓存头、且左侧延伸出来的数据量超过缓存量的一半时，
-                    # 才认为不值得增量、直接全量重算。
-                    if (
-                        not need_recompute
-                        and len(cached_klines) > 0
-                        and klines.iloc[0]["date"] < cached_klines[0].date
-                    ):
-                        # 缓存覆盖区间内的输入数据条数（粗略：以缓存头时间为分界）
-                        left_extend_count = int(
-                            (klines["date"] < cached_klines[0].date).sum()
-                        )
-                        if left_extend_count > len(cached_klines) // 2:
-                            logger.warning(
-                                f"{log_id} 输入左侧扩展 {left_extend_count} 根早于缓存头("
-                                f"缓存量 {len(cached_klines)})，全量重算"
-                            )
-                            need_recompute = True
-
-                if need_recompute:
-                    cd = cl.CL(code, frequency, cl_config)
-
-            except Exception as e:
-                logger.error(f"{log_id} 读取缓存或校验过程异常: {str(e)}", exc_info=True)
-                try:
-                    if file_pathname.exists():
-                        file_pathname.unlink()
-                except Exception as un_e:
-                    logger.error(f"{log_id} 尝试删除损坏缓存失败: {str(un_e)}")
-                cd = cl.CL(code, frequency, cl_config)
-
-        # 增量计算
-        try:
-            cd.process_klines(klines)
-        except Exception as e:
-            # G7：process_klines 抛错时 cd 处于半 applied 状态（子计算器 snapshot
-            # 已被 cl.py 内部 _clean_state_on_failure 推平，但本对象的中枢/MMD
-            # 数据可能只算到一半）。
-            # 这里既不写盘（避免污染下次请求的起点），也不返回半成品给上层
-            # 误用，统一返回一个全新空白 CL 让调用方下次请求自然重算。
-            logger.error(
-                f"{log_id} 执行缠论计算 process_klines 失败: {str(e)}", exc_info=True
-            )
-            return cl.CL(code, frequency, cl_config)
-
-        # 写入缓存
-        try:
-            self._atomic_write_pickle(file_pathname, cd)
-        except Exception as e:
-            # H2：写盘失败是「下次还会从空缓存重算」的 silent 放大源，
-            # 必须 critical 级 + 完整堆栈，便于运维及时发现磁盘/权限问题。
-            logger.critical(
-                f"{log_id} 写入缓存失败 path={file_pathname} err={str(e)}",
-                exc_info=True,
-            )
-
-        # H6：随机清理旧数据，统一通过 _try_run_cleanup 节流 + 互斥。
-        if random.randint(0, 1000) <= 5:
-            self._try_run_cleanup(
-                "web_cl",
-                self.clear_old_web_cl_data,
-                on_error=lambda exc: logger.error(f"清理旧缓存数据异常: {exc}"),
-            )
-
-        return cd
-
-    def clear_web_cl_data(self, market: str, code: str):
-        """
-        清除指定市场下标的缠论缓存对象
-        """
-        for filename in (self.cl_data_path / market).glob("*.pkl"):
-            try:
-                if f"{market}_{code.replace('/', '_').replace('.', '_')}" in str(
-                    filename
-                ):
-                    # missing_ok=True：防御 glob 与并发清理任务的 race
-                    filename.unlink(missing_ok=True)
-            except Exception as exc:
-                LogUtil.debug(
-                    f"[FileCacheDB.clear_web_cl_data] unlink failed "
-                    f"file={filename} err={exc}"
-                )
-        return True
-
-    def clear_old_web_cl_data(self):
-        """
-        清除时间超过15天的缓存数据
-        """
-        del_lt_times = fun.datetime_to_int(datetime.datetime.now()) - (
-            15 * 24 * 60 * 60
-        )
-        for _market in Market:
-            for filename in (self.cl_data_path / _market.value).glob("*.pkl"):
-                try:
-                    if filename.stat().st_mtime < del_lt_times:
-                        # missing_ok=True：防御 glob 与并发清理任务的 race
-                        filename.unlink(missing_ok=True)
-
-                except Exception as exc:
-                    LogUtil.debug(
-                        f"[FileCacheDB.clear_old_web_cl_data] unlink failed "
-                        f"file={filename} err={exc}"
-                    )
-        return True
-
-    def clear_all_cl_data(self):
-        """
-        删除所有缓存的计算结果文件
-        """
-        for _market in Market:
-            for filename in (self.cl_data_path / _market.value).glob("*.pkl"):
-                try:
-                    # missing_ok=True：防御 glob 与并发清理任务的 race
-                    filename.unlink(missing_ok=True)
-                except Exception as exc:
-                    LogUtil.debug(
-                        f"[FileCacheDB.clear_all_cl_data] unlink failed "
-                        f"file={filename} err={exc}"
-                    )
-        return True
-
-    def get_low_to_high_cl_data(
-        self, db_ex: Exchange, market: str, code: str, frequency: str, cl_config: dict
-    ) -> ICL:
-        """
-        专门为递归到高级别图表写的方法，初始数据量较多，所以只能从数据库中获取
-        计算一次后进行落盘保存，后续读盘进行更新操作，减少重复计算的时间
-        建议定时频繁的进行读取，保持更新，避免太多时间不读取，后续造成数据缺失情况
-        """
-
-        key = self._config_md5(cl_config)
-        filename = (
-            self.cl_data_path
-            / f'{market}_{code.replace("/", "_")}_{frequency}_{key}.pkl'
-        )
-        cd: ICL = None
-        # 与 get_web_cl_data 保持一致：pkl 文件可能因进程被强杀、磁盘异常等原因损坏，
-        # 这里加 try/except，损坏时回退为重建对象（避免长期卡死无法读取）。
-        if filename.is_file():
-            try:
-                with open(filename, "rb") as fp:
-                    cd = pickle.load(fp)
-            except Exception as e:
-                LogUtil.warning(
-                    f"[FileCacheDB.get_low_to_high_cl_data] pkl 损坏 file={filename} err={e}, 将重新计算"
-                )
-                try:
-                    filename.unlink(missing_ok=True)
-                except Exception as unlink_exc:
-                    LogUtil.debug(
-                        f"[FileCacheDB.get_low_to_high_cl_data] unlink corrupted pkl failed "
-                        f"file={filename} err={unlink_exc}"
-                    )
-                cd = None
-        if cd is None:
-            cd = cl.CL(code, frequency, cl_config)
-        limit = 200000
-        if len(cd.get_klines()) > 10000:
-            limit = 1000
-        klines = db_ex.klines(code, frequency, args={"limit": limit})
-        cd.process_klines(klines)
-        self._atomic_write_pickle(filename, cd)
-        return cd
 
     # =====================================================================
     # P8 区段 3/4: GenericPklCache 方法已抽到 _GenericPklCacheMixin (见文件顶部)
