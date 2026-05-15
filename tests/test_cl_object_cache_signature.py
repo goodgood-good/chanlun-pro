@@ -61,16 +61,16 @@ def test_signature_stable_for_same_data():
     assert _compute_kline_signature(df) == _compute_kline_signature(df)
 
 
-def test_signature_changes_when_mid_ohlc_modified():
-    """中段 ref-bar 任一 OHLC 改变 → signature 一定变化。"""
-    from cl_app.services.cl_object_cache import _compute_kline_signature
+def test_signature_changes_when_ref_ohlc_modified():
+    """ref-bar (绝对位置 _ref_bar_index(n)) 任一 OHLC 改变 → signature 一定变化。"""
+    from cl_app.services.cl_object_cache import _compute_kline_signature, _ref_bar_index
 
     df1 = _mk_df(n=200)
     sig1 = _compute_kline_signature(df1)
 
-    # 改中段一根 high
+    # F1: 用绝对位置 ref_idx (min(50, n//4))
     n = len(df1)
-    ref_idx = n - max(10, min(n // 4, 100))
+    ref_idx = _ref_bar_index(n)
     df2 = df1.copy()
     df2.loc[df2.index[ref_idx], "high"] = df2["high"].iloc[ref_idx] + 1.0
 

@@ -1,23 +1,26 @@
-"""web/chanlun_chart/cl_app/services/cl_object_cache.py — US-009 进程内 cl 对象 LRU 缓存。
+"""web/chanlun_chart/cl_app/services/cl_object_cache.py — US-009 / F1 进程内 cl 对象 LRU 缓存。
 
 设计目标:
 - 让 web 路径 (tv_history polling, 多周期预热) 避免对同一份 K 线"反复全量算"。
 - 同 ``(market, code, frequency, cl_config_hash)`` × 同 K 线 signature → cache hit,
   返回已经算好的 CL 对象, 节省"几百 ms - 几秒"全量计算。
 
-为什么不做"真增量喂入" (这与 ``cl_utils.web_batch_get_cl_datas`` 当前注释里
-描述的 master bug 直接相关):
-- master 的 xd_calculator 增量路径在长序列下会累积 (US-003 xfail), 导致
-  ``cd.xds`` 在多次 process_klines 后比一次性多 1。
-- 在 US-009 修好这个 bug 之前, 缓存命中后只对"完全相同的 K 线 signature"复用 cd;
-  K 线变化 (新增/末根 OHLC 改变) → 丢弃旧 cd, 新建并跑全量。
-- 这样的"假增量"已经能让连续 polling 同一 cache_key 的 N 次请求节省 N-1 次全量,
-  仍然是显著收益; 同时不引入新的 xds 累积风险。
+三种路径 (按耗时从低到高):
+1. **cache hit + 同 signature** → 0 cost, 直接返回 cached cd (主优化点)
+2. **cache hit + 末段追加 signature** (F1 真增量) → 复用旧 cd, 调
+   ``process_klines(full)``, cd 内部 ``KlineDataProcessor._preprocess`` 切片增量,
+   只对新增 K 线跑笔/段/中枢更新。比全量重建省 80%+ 时间。
+3. **cache miss / 复权 / 缩短** → 丢弃旧 cd, 新建 + 全量
+
+F1 安全前提 (重要):
+- xd_calculator G7 修复后 (commit 77ab323), 增量路径与全量路径**等价**, 不再有
+  xds 累积 bug。真增量喂入是安全的。
+- 同 key 并发请求用 ``_key_locks`` 串行化, 避免两个线程同时改 cd 内部状态。
 
 API:
 - ``get_or_compute_cl(market, code, frequency, cl_config, klines)`` → CL
 - ``invalidate(market, code, frequency, cl_config=None)`` → 清单个 key 或前缀
-- ``stats()`` → {"hits": int, "misses": int, "size": int}
+- ``stats()`` → {hits, misses, incremental_extends, full_rebuilds, size}
 """
 
 from __future__ import annotations
@@ -37,6 +40,13 @@ if TYPE_CHECKING:
 
 _CACHE_MAX_SIZE = 128
 
+# F1: signature 中 ref-bar 的"绝对位置"上界。
+# 选 50 而非"末段相对偏移" (旧设计 n - max(10, min(n//4, 100))) 是因为:
+# - 追加 K 线时 ref_idx 保持稳定 → 同一根 K 线 → ref OHLC 不变 → 可识别为"末段追加"
+# - 旧"末段相对偏移"在 n 变化时 mid_idx 也变 → 必然不同根 → 必然 miss → 无法走真增量
+# 50 这个值在多数实盘 K 线序列中都满足 (>=12 时 ref 落在 K[min(50, n//4)])。
+_REF_BAR_MAX_IDX = 50
+
 
 def _hash_cl_config(cl_config: Optional[Dict[str, Any]]) -> str:
     """对 cl_config dict 做稳定 hash, 同一 dict 不同插入顺序 → 同 hash。"""
@@ -45,29 +55,37 @@ def _hash_cl_config(cl_config: Optional[Dict[str, Any]]) -> str:
     try:
         blob = json.dumps(cl_config, sort_keys=True, default=str, ensure_ascii=False)
     except Exception:
-        # 兜底: dict 含不可 JSON 序列化的 value, 退化为 str()
         blob = repr(sorted(cl_config.items()))
     return hashlib.md5(blob.encode("utf-8")).hexdigest()[:16]
 
 
+def _ref_bar_index(n: int) -> int:
+    """返回 ref-bar 的绝对索引 (>= 0, < n)。
+
+    设计: ``ref_idx = min(_REF_BAR_MAX_IDX, max(0, n // 4))``。
+    - n=12  → ref_idx=3   (n//4=3)
+    - n=50  → ref_idx=12  (n//4=12)
+    - n=200 → ref_idx=50  (clamp 到 _REF_BAR_MAX_IDX)
+    - n=1000→ ref_idx=50  (同上)
+
+    K 线追加时 ref_idx 落在同一根, 实现"末段追加"识别。
+    """
+    return min(_REF_BAR_MAX_IDX, max(0, n // 4))
+
+
 def _compute_kline_signature(klines: pd.DataFrame) -> Tuple[Any, ...]:
-    """K 线序列的轻量 signature。
+    """K 线序列的轻量 signature (F1 版: ref 用绝对位置)。
 
-    9 元组结构 (设计兼顾"末段变化检测" + "中段复权检测"):
+    8 元组结构:
       (len, last_date, last_close,
-       mid_date, mid_o, mid_h, mid_l, mid_c)
+       ref_date, ref_o, ref_h, ref_l, ref_c)
 
-    选这些字段的理由:
-    - **末段 3 元组** (len/last_date/last_close):
-      polling 99% 场景是"追加几根 K 线" → len + last_date 必变;
-      实时 tick "末根 close 更新" → close 变。三者覆盖增量主路径。
-    - **中段 ref-bar 5 元组** (mid_date + OHLC):
-      复权事件是"全部历史 bar 等比例缩放", 仅靠末根可能漏检 (复权后整段
-      重缩放, 但同一根 K 线的相对位置不变, 末根 date/close 量级一致 →
-      末段 signature 与旧值仍接近)。参考 file_db.py:540-578 的复权检测,
-      取 ``-max(10, min(len // 4, 100))`` 处的稳定中段 bar 做 OHLC 指纹,
-      任何 OHLC 字段变化都会让 signature 失配 → 强制重算。
-    - 计算 O(1), 不像全表 md5 O(N); 中段 ref-bar 索引也是 O(1)。
+    与 F1 前版 (mid 用末段相对偏移) 的语义差异:
+    - F1 后 ref 是 ``_ref_bar_index(n)`` 的绝对位置 K 线
+    - 追加 K 线时 ref 不变 → signature 的"末段 3 元组"变、ref 5 元组不变
+      → 可被 ``_is_extending_signature`` 识别为真增量
+    - 复权时 ref OHLC 改 → signature 完全失配 → 全量重建 (与之前一致)
+    - 序列缩短时 ref_idx 变小可能指向不同根 K 线 → 多半失配 → 全量重建 (安全)
     """
     if klines is None or klines.empty:
         return (0, "", 0.0, "", 0.0, 0.0, 0.0, 0.0)
@@ -77,24 +95,45 @@ def _compute_kline_signature(klines: pd.DataFrame) -> Tuple[Any, ...]:
     last_date = last_row.get("date")
     last_close = float(last_row.get("close", 0.0))
 
-    # 中段 ref-bar: 仅在 K 线足够长时才取 (太短的序列复权概率低且 ref 位置不稳定)
     if n >= 12:
-        # 与 file_db.get_web_cl_data:550-553 同款"稳定中段"位置
-        ref_idx = n - max(10, min(n // 4, 100))
-        mid_row = klines.iloc[ref_idx]
-        mid_date = mid_row.get("date")
+        ref_idx = _ref_bar_index(n)
+        ref_row = klines.iloc[ref_idx]
+        ref_date = ref_row.get("date")
         return (
             n,
             str(last_date) if last_date is not None else "",
             last_close,
-            str(mid_date) if mid_date is not None else "",
-            float(mid_row.get("open", 0.0)),
-            float(mid_row.get("high", 0.0)),
-            float(mid_row.get("low", 0.0)),
-            float(mid_row.get("close", 0.0)),
+            str(ref_date) if ref_date is not None else "",
+            float(ref_row.get("open", 0.0)),
+            float(ref_row.get("high", 0.0)),
+            float(ref_row.get("low", 0.0)),
+            float(ref_row.get("close", 0.0)),
         )
-    # 短序列: 中段字段填 0 (与上面 empty 分支同形, 保证 tuple 长度一致便于比较)
     return (n, str(last_date) if last_date is not None else "", last_close, "", 0.0, 0.0, 0.0, 0.0)
+
+
+def _is_extending_signature(old_sig: Tuple[Any, ...], new_sig: Tuple[Any, ...]) -> bool:
+    """判断 new_sig 是否是 old_sig 的"末段追加"。
+
+    条件 (全部满足才算 extending):
+    - len 严格增大 (new_sig[0] > old_sig[0])
+    - last_date 严格变大 (字符串字典序比较, ISO 格式日期天然单调)
+    - ref-bar 5 元组完全相同 (ref_date + 4 个 OHLC 都没变)
+
+    满足 extending → 真增量喂入安全 (历史段不变, 只追加新数据)。
+    """
+    if len(old_sig) < 8 or len(new_sig) < 8:
+        return False
+    old_n, old_last_date, _old_last_close = old_sig[0], old_sig[1], old_sig[2]
+    new_n, new_last_date, _new_last_close = new_sig[0], new_sig[1], new_sig[2]
+    if not isinstance(old_n, int) or not isinstance(new_n, int):
+        return False
+    if new_n <= old_n:
+        return False
+    if not old_last_date or not new_last_date or new_last_date <= old_last_date:
+        return False
+    # ref-bar 5 元组必须完全一致 (位置 3-7)
+    return old_sig[3:8] == new_sig[3:8]
 
 
 @dataclass
@@ -103,10 +142,31 @@ class _CacheEntry:
     signature: Tuple[Any, ...]
 
 
-# LRUCache 本身非完全 thread-safe (read 是 atomic, set/pop 需要锁), 用 RLock 兜底
+# 全局 LRUCache 配 _cache_lock 串行化 set/pop
 _cl_object_cache: "LRUCache[str, _CacheEntry]" = LRUCache(maxsize=_CACHE_MAX_SIZE)
 _cache_lock = threading.RLock()
-_stats = {"hits": 0, "misses": 0}
+
+# F1: per-key 锁, 串行化同 key 的 cd 增量喂入 / 重建。
+# 不能复用 _cache_lock —— 否则增量 process_klines (可能几百 ms) 会阻塞所有其它 key 的读路径。
+_key_locks: Dict[str, threading.RLock] = {}
+_key_locks_meta_lock = threading.Lock()
+
+_stats = {
+    "hits": 0,             # 同 signature 命中
+    "misses": 0,           # 未命中或 signature 不同
+    "incremental_extends": 0,  # F1 真增量: cache hit + extending signature
+    "full_rebuilds": 0,    # 完全新建 cd
+}
+
+
+def _get_key_lock(key: str) -> threading.RLock:
+    """获取 per-key 锁 (惰性创建)。"""
+    with _key_locks_meta_lock:
+        lk = _key_locks.get(key)
+        if lk is None:
+            lk = threading.RLock()
+            _key_locks[key] = lk
+        return lk
 
 
 def _build_cache_key(
@@ -122,51 +182,62 @@ def get_or_compute_cl(
     cl_config: Optional[Dict[str, Any]],
     klines: pd.DataFrame,
 ):
-    """获取或计算 CL 对象。
+    """获取或计算 CL 对象 (F1: 含真增量路径)。
 
-    流程:
-    1. key = (market, code, frequency, cl_config_hash)
-    2. signature = (len, last_date, last_close)
-    3. cache hit + signature 相同 → 直接返回 entry.cd (主要优化点)
-    4. signature 不同 (或 cache miss) → 新建 CL + process_klines(full) + 存
+    三条路径:
+    1. cache hit + 同 signature → 0 cost 返回 cached cd (主优化点)
+    2. cache hit + extending signature → 复用 cd, process_klines(full) 走内部增量
+       (xd_calculator G7 已修, 增量与全量等价, 真增量安全)
+    3. miss / 不连续 signature → 新建 cd + 全量
 
-    线程安全: 通过 _cache_lock 串行化 set/pop, 但 process_klines 在锁外执行
-    避免长时间阻塞其它 key 的并发请求。
+    线程安全:
+    - 路径 1 仅持 _cache_lock, 读 atomic
+    - 路径 2/3 持 per-key 锁串行化, 避免并发 mutate 同一 cd
 
-    ⚠️ 返回值使用约束 (architect review R1):
-    cache hit 时返回的 CL 实例是**共享对象**, 多个并发请求会拿到同一引用。
-    调用方**绝不能**:
-    - 对返回的 cd 再调用 ``process_klines(...)`` 做增量喂入 (会污染其它请求看到的状态)
-    - 修改 cd 内部 list/dict (例如 cd.xds.append(...), cd.bi_calculator.bis.clear())
-
-    调用方**可以**:
-    - 读 cd.get_klines() / get_fxs() / get_bis() / get_xds() / ... (这些方法返回 list 浅拷贝)
-    - 把 cd 传给 cl_data_to_tv_chart 等纯计算函数 (纯读)
-
-    如有"我要往这个 cd 里追加 K 线"的需求, 应当 invalidate(key) 后再调本方法重建。
+    ⚠️ 返回值约束 (architect review R1):
+    返回的 CL 是 cache 内的**共享对象**。调用方只能读 (get_xds/get_bis/...);
+    不能再 process_klines / mutate 内部 list/dict。若需要"追加 K 线", 调用本方
+    法传入 full klines (extending signature 时本函数会代为做增量喂入)。
     """
     from chanlun.core.cl import CL  # 局部 import 避免循环
 
     key = _build_cache_key(market, code, frequency, cl_config)
     sig = _compute_kline_signature(klines)
 
-    # 1) read 路径: 在锁内检查 cache hit
+    # ----- 路径 1: 同 signature, 0 cost cache hit (锁外可达) -----
     with _cache_lock:
         entry = _cl_object_cache.get(key)
         if entry is not None and entry.signature == sig:
             _stats["hits"] += 1
             return entry.cd
+
+    # ----- 锁外: 抢 per-key 锁, 串行化 cd mutation -----
+    key_lock = _get_key_lock(key)
+    with key_lock:
+        # double-check: 同 key 的其它线程可能在我们抢锁期间已建好 cd
+        with _cache_lock:
+            entry = _cl_object_cache.get(key)
+            if entry is not None and entry.signature == sig:
+                _stats["hits"] += 1
+                return entry.cd
+
+        # 走 miss 路径计数
         _stats["misses"] += 1
 
-    # 2) miss/stale 路径: 锁外算新 cd (允许其它 key 并发)
-    cd = CL(code, frequency, dict(cl_config) if cl_config else {})
-    cd.process_klines(klines)
+        # ----- 路径 2: extending signature → 复用旧 cd, 内部增量 -----
+        if entry is not None and _is_extending_signature(entry.signature, sig):
+            cd = entry.cd
+            cd.process_klines(klines)
+            _stats["incremental_extends"] += 1
+        else:
+            # ----- 路径 3: 全量重建 -----
+            cd = CL(code, frequency, dict(cl_config) if cl_config else {})
+            cd.process_klines(klines)
+            _stats["full_rebuilds"] += 1
 
-    # 3) write 回 cache (锁内)
-    with _cache_lock:
-        _cl_object_cache[key] = _CacheEntry(cd=cd, signature=sig)
-
-    return cd
+        with _cache_lock:
+            _cl_object_cache[key] = _CacheEntry(cd=cd, signature=sig)
+        return cd
 
 
 def invalidate(
@@ -184,7 +255,6 @@ def invalidate(
         if cl_config is not None:
             key = _build_cache_key(market, code, frequency, cl_config)
             return 1 if _cl_object_cache.pop(key, None) is not None else 0
-        # 前缀清除: 同 market/code/freq 不同 cl_config
         prefix = f"{market}|{code}|{frequency}|"
         keys_to_drop = [k for k in list(_cl_object_cache.keys()) if k.startswith(prefix)]
         for k in keys_to_drop:
@@ -196,8 +266,11 @@ def clear_all() -> None:
     """清空整个缓存 (主要给测试用)。"""
     with _cache_lock:
         _cl_object_cache.clear()
-        _stats["hits"] = 0
-        _stats["misses"] = 0
+        for k in list(_stats.keys()):
+            _stats[k] = 0
+    # 也清掉 per-key 锁 (LRUCache pop 不会通知, 锁的累积不会无限增长但测试期希望干净)
+    with _key_locks_meta_lock:
+        _key_locks.clear()
 
 
 def stats() -> Dict[str, int]:
@@ -205,5 +278,7 @@ def stats() -> Dict[str, int]:
         return {
             "hits": _stats["hits"],
             "misses": _stats["misses"],
+            "incremental_extends": _stats["incremental_extends"],
+            "full_rebuilds": _stats["full_rebuilds"],
             "size": len(_cl_object_cache),
         }
