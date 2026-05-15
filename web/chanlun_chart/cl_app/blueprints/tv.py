@@ -873,6 +873,28 @@ def tv_history():
                 if firstDataRequest == "true":
                     prewarm_common_intervals(market, code, cl_config)
 
+        # Cache hit 路径 lazy 补算 HTF MACD:
+        # apply_higher_macd_to_chart_data 只在上面的 ``if not is_cache_hit`` 块里调,
+        # cache hit 时若 cache 内 chart_data 缺 ``higher_macd_*`` (旧版 prewarm 路径
+        # 漏调 apply、或 prepend 半态写入残留), 每次 hit 都会让 server 返回
+        # ``higher_macd_hist: []`` 给前端 — 前端 study 拿不到 HTF 数据。
+        # 这里 lazy 检测并即时补算 + 回写 cache, 一次修好后续 hit 都走快路径。
+        if is_cache_hit and cl_chart_data is not None:
+            _htf_hist = cl_chart_data.get("higher_macd_hist") or []
+            _bar_count = len(cl_chart_data.get("t", []))
+            if _bar_count > 0 and len(_htf_hist) != _bar_count:
+                LogUtil.debug(
+                    f"[tv_history] cache hit but HTF missing/short "
+                    f"(bars={_bar_count} htf={len(_htf_hist)}), lazy-applying"
+                )
+                apply_higher_macd_to_chart_data(cl_chart_data, frequency, market, cl_config)
+                with cache_lock:
+                    _existing = _get_chart_cache_entry(cache_key)
+                    _is_full = (_existing or {}).get("is_full_snapshot", False)
+                    _set_chart_cache_entry(
+                        cache_key, cl_chart_data, is_full_snapshot=_is_full,
+                    )
+
         if cl_chart_data is None:
             return {"s": "no_data"}
 
