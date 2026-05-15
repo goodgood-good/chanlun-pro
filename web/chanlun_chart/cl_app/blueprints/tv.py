@@ -156,8 +156,11 @@ from ..services.stock_list import (  # noqa: E402
     start_symbol_preload_thread,
     stock_cache,
 )
-# chart_compute 服务（Tier 4 P3）：HTF MACD + 锁注册表 + chart 合并 + 主计算路径
+# chart_compute 服务（Tier 4 P3）：MACD 倍率 + 锁注册表 + chart 合并 + 主计算路径
 from ..services.chart_compute import (  # noqa: E402
+    HIGHER_MACD_RATIO,
+    MARKET_30M_TO_D_RATIO,
+    MARKET_D_TO_W_RATIO,
     _SafeLockRegistry,
     _merge_chart_data,
     _merge_shape_lists,

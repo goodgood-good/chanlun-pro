@@ -6,8 +6,7 @@ Tier 4 P3 重构：从 blueprints/tv.py 抽出 ``compute_and_cache_chart_data`` 
 包含：
 - ``_SafeLockRegistry``: weakref + 引用计数的 per-key 锁注册表
 - ``chart_calc_locks``: chart_data_cache 的 per-key 计算锁
-- ``HIGHER_FREQ_MAP`` / ``MARKET_TZ``: HTF MACD 频率映射与市场时区
-- ``_bin_keys_for_higher`` / ``_resample_closes_to_higher``: HTF MACD 合成核心
+- ``HIGHER_MACD_RATIO`` / ``MARKET_30M_TO_D_RATIO`` / ``MARKET_D_TO_W_RATIO``: 跨周期 MACD 倍率
 - ``_shape_time`` / ``_merge_shape_lists`` / ``_merge_chart_data``: chart 数据合并的纯函数
 - ``compute_and_cache_chart_data``: cache miss 后的完整计算路径
 
@@ -45,27 +44,36 @@ from .chart_cache import (
     cache_lock,
 )
 
-# ---------------- HTF MACD: 频率映射与市场时区 ----------------
+# ---------------- 跨周期 MACD 倍率 ----------------
 
-# 当前周期 -> 目标高周期(去除"放大倍率"概念,改用"目标周期标识符")
-HIGHER_FREQ_MAP = {
-    "1m": "5m",
-    "5m": "30m",
-    "30m": "d",
-    "d": "w",
-    "w": "M",
+# key = 当前K线频率, value = 倍率（高级别周期包含多少根当前周期K线）
+HIGHER_MACD_RATIO = {
+    "1m": 5,     # 1分钟 → 5分钟 MACD，参数乘以5
+    "5m": 6,     # 5分钟 → 30分钟 MACD，参数乘以6
 }
 
-# 市场时区,决定 d/w/M bin 切割时的"自然日界"
-MARKET_TZ = {
-    "a": "Asia/Shanghai",
-    "hk": "Asia/Hong_Kong",
-    "us": "America/New_York",
-    "ny_futures": "America/New_York",
-    "futures": "Asia/Shanghai",
-    "currency": "UTC",
-    "currency_spot": "UTC",
-    "fx": "UTC",
+# 30m → 日线的倍率因市场交易时长不同
+MARKET_30M_TO_D_RATIO = {
+    "a": 8,              # A股 4小时交易 = 8个30分钟
+    "hk": 8,             # 港股
+    "us": 13,            # 美股 6.5小时 = 13个30分钟
+    "futures": 8,        # 国内期货
+    "ny_futures": 13,    # 纽约期货
+    "currency": 48,      # 数字货币 24小时 = 48个30分钟
+    "currency_spot": 48,
+    "fx": 48,            # 外汇
+}
+
+# 日线 → 周线的倍率
+MARKET_D_TO_W_RATIO = {
+    "a": 5,              # 5个交易日
+    "hk": 5,
+    "us": 5,
+    "futures": 5,
+    "ny_futures": 5,
+    "currency": 7,       # 数字货币 7天
+    "currency_spot": 7,
+    "fx": 5,             # 外汇通常 5天
 }
 
 
@@ -412,6 +420,24 @@ def trim_future_bars(chart_data: dict, to_ts: int) -> dict:
 # 的重复实现, 改动一处即可)
 # ===========================================================================
 
+def _resolve_higher_macd_ratio(frequency: str, market: str):
+    """返回 frequency 对应的"高周期 MACD 倍率", 找不到返回 None。
+
+    优先查 HIGHER_MACD_RATIO 通用表; 特殊 frequency 走市场专属表
+    (30m_TO_D / D_TO_W) 或硬编码 (w=4, m=12)。
+    """
+    ratio = HIGHER_MACD_RATIO.get(frequency)
+    if ratio is None and frequency == "30m":
+        ratio = MARKET_30M_TO_D_RATIO.get(market, 8)
+    elif ratio is None and frequency == "d":
+        ratio = MARKET_D_TO_W_RATIO.get(market, 5)
+    elif ratio is None and frequency == "w":
+        ratio = 4
+    elif ratio is None and frequency == "m":
+        ratio = 12
+    return ratio
+
+
 def apply_higher_macd_to_chart_data(
     chart_data: dict,
     frequency: str,
@@ -420,65 +446,50 @@ def apply_higher_macd_to_chart_data(
 ) -> None:
     """计算并 in-place 写入 chart_data 的 higher_macd_dif/dea/hist 字段。
 
-    实现:把低周期 closes 按市场时区合成目标高周期 closes(演化模式),
-    在 higher_closes 上跑标准 talib.MACD(12,26,9),再把结果按低-高 idx
-    映射投影回低周期长度。
+    跨周期 MACD 思路: 用 frequency × ratio 放大 fast/slow/signal 周期, 在原
+    close 序列上跑 talib.MACD, 输出对齐到 chart_data["c"] 长度。
 
-    与旧"参数 × ratio"近似法相比:
-    1. 数学上等价"用真实高周期 K 线跑标准 MACD"
-    2. 跨夜断层、半日休市、午休由 bin 分组自然处理,不再污染 EMA
+    P5 third step (2026-05-15): 抽自 tv.py::tv_history 与 chart_compute.py
+    ::compute_and_cache_chart_data 两份几乎相同的代码块 (各 ~40 行)。统一
+    到一处后, 后续修 ratio / 修 talib 参数 / 改 NaN 处理只需要改 1 处。
 
     Args:
-        chart_data: 已含 "t" + "c" 字段的 chart_data dict, in-place 写入
-                   higher_macd_*; target_freq is None 或数据不足时不修改。
-        frequency: 当前 K 线周期 (1m / 5m / 30m / d / w / M)
-        market: 市场标识 (用于 d/w/M 的市场时区)
+        chart_data: 已含 "c" 字段的 chart_data dict, 本函数 in-place 修改
+                   并加入 higher_macd_* 字段; ratio 为 None 时不修改 dict。
+        frequency: 当前 K 线周期 (1m / 5m / ... / d / w / m)
+        market: 市场标识 (用于 30m_TO_D / D_TO_W 倍率特殊处理)
         cl_config: 缠论配置 (取 idx_macd_fast/slow/signal, 默认 12/26/9)
     """
-    target_freq = _resolve_higher_target_freq(frequency, market)
-    if target_freq is None:
-        return  # 月线或未知 freq, 无高周期对照
-
-    times_list = chart_data.get("t", [])
-    closes_list = chart_data.get("c", [])
-    if not times_list or not closes_list:
-        return
-    if len(times_list) != len(closes_list):
-        LogUtil.error(
-            f"[apply_higher_macd] t/c length mismatch: "
-            f"{len(times_list)} vs {len(closes_list)}"
-        )
-        return
+    ratio = _resolve_higher_macd_ratio(frequency, market)
+    if ratio is None:
+        return  # 该 frequency 无高周期对照, 不做事
 
     try:
-        times = np.array(times_list, dtype=np.int64)
-        closes = np.array(closes_list, dtype=float)
-        bin_keys = _bin_keys_for_higher(times, target_freq, market)
-        higher_closes, low2high = _resample_closes_to_higher(closes, bin_keys)
-
-        fast = int(cl_config.get("idx_macd_fast", 12))
-        slow = int(cl_config.get("idx_macd_slow", 26))
-        signal = int(cl_config.get("idx_macd_signal", 9))
-        if len(higher_closes) <= slow + signal:
+        closes = np.array(chart_data.get("c", []), dtype=float)
+        fast = int(cl_config.get("idx_macd_fast", 12)) * ratio
+        slow = int(cl_config.get("idx_macd_slow", 26)) * ratio
+        signal = int(cl_config.get("idx_macd_signal", 9)) * ratio
+        # 确保有足够的 bar 数量用于 MACD 计算 (至少 slow+signal 根 K 线)
+        min_bars = slow + signal
+        if len(closes) <= min_bars:
             return
-
         h_dif, h_dea, h_hist = talib.MACD(
-            higher_closes, fastperiod=fast, slowperiod=slow, signalperiod=signal,
+            closes, fastperiod=fast, slowperiod=slow, signalperiod=signal,
         )
-        low_dif = np.round(h_dif[low2high], 6)
-        low_dea = np.round(h_dea[low2high], 6)
-        low_hist = np.round(h_hist[low2high], 6)
+        h_dif_rounded = np.round(h_dif, 6)
+        h_dea_rounded = np.round(h_dea, 6)
+        h_hist_rounded = np.round(h_hist, 6)
         chart_data["higher_macd_dif"] = np.where(
-            np.isnan(low_dif), None, low_dif
+            np.isnan(h_dif_rounded), None, h_dif_rounded
         ).tolist()
         chart_data["higher_macd_dea"] = np.where(
-            np.isnan(low_dea), None, low_dea
+            np.isnan(h_dea_rounded), None, h_dea_rounded
         ).tolist()
         chart_data["higher_macd_hist"] = np.where(
-            np.isnan(low_hist), None, low_hist
+            np.isnan(h_hist_rounded), None, h_hist_rounded
         ).tolist()
     except Exception as e:
-        LogUtil.error(f"[apply_higher_macd] resample MACD calc failed: {e}")
+        LogUtil.error(f"[apply_higher_macd] Scaled MACD calc failed: {e}")
 
 
 # ===========================================================================
@@ -610,100 +621,3 @@ def fetch_klines_and_compute_cl_data(
         "cd": cd,
         "kchart_to_frequency": kchart_to_frequency,
     }
-
-
-# ===========================================================================
-# HTF MACD: 真合成算法核心 (替代旧"参数 × ratio"近似法)
-# ===========================================================================
-
-def _resolve_higher_target_freq(frequency: str, market: str) -> "str | None":
-    """frequency -> 目标高周期标识符;无对照(月线 M 或未知 freq)返回 None。
-
-    后续由 _bin_keys_for_higher 决定具体怎么合成。market 参数当前未使用,
-    保留以便未来按市场差异化映射(例如某些市场无 30m→d 对照时)。
-    """
-    return HIGHER_FREQ_MAP.get(frequency)
-
-
-def _bin_keys_for_higher(
-    times: "np.ndarray",
-    target_freq: str,
-    market: str,
-) -> "np.ndarray":
-    """计算每根低周期 K 线归属哪个高周期 bin。
-
-    返回 int64 numpy 数组,长度 == len(times)。
-
-    bin id 仅用作"相邻同 bin 分组键",不要求全局唯一/单调。但对每个
-    target_freq,保证:bar_a 与 bar_b 同 bin 当且仅当二者应被合成进同一
-    根高周期 K 线。
-
-    target_freq:
-      "5m":  epoch // 300
-      "30m": epoch // 1800
-      "d":   market 时区下 date.toordinal()
-      "w":   market 时区下 ISO (year, week) 打包成 year*100 + week
-      "M":   market 时区下 year * 100 + month
-    """
-    if target_freq == "5m":
-        return (times // 300).astype(np.int64)
-    if target_freq == "30m":
-        return (times // 1800).astype(np.int64)
-    # d / w / M 需要时区
-    tz_name = MARKET_TZ.get(market, "UTC")
-    tz = pytz.timezone(tz_name)
-    out = np.empty(len(times), dtype=np.int64)
-    for i, t in enumerate(times):
-        dt = datetime.datetime.fromtimestamp(int(t), tz=tz)
-        if target_freq == "d":
-            out[i] = dt.date().toordinal()
-        elif target_freq == "w":
-            iso = dt.isocalendar()
-            # isocalendar() 返回 IsoCalendarDate(year, week, weekday)
-            iso_year, iso_week = iso[0], iso[1]
-            out[i] = iso_year * 100 + iso_week
-        elif target_freq == "M":
-            out[i] = dt.year * 100 + dt.month
-        else:
-            raise ValueError(f"Unsupported target_freq: {target_freq}")
-    return out
-
-
-def _resample_closes_to_higher(
-    closes: "np.ndarray",
-    bin_keys: "np.ndarray",
-) -> "tuple[np.ndarray, np.ndarray]":
-    """按 bin_keys 把 closes 合成到高周期 closes (演化模式)。
-
-    返回:
-      higher_closes: 每个唯一 bin 的 close (bin 内最后一根低周期 close)
-      low_to_higher_idx: 长度 == len(closes), 每个值是该低周期 K 线对应的
-                        higher_closes 索引。
-
-    "演化模式": 同 bin 内的多根低周期 K 线, higher_closes 用最新一根 close
-    覆盖。每次重算时 higher_closes[-1] 反映当前 bin 内最新 close, 等价于
-    "未收盘高周期 bar 实时演化"。
-
-    假设 bin_keys 是按低周期 K 线时间顺序排列的(同一 bin 在数组里相邻),
-    这由调用方保证 (chart_data["t"] 本身按时间升序)。
-    """
-    n = len(closes)
-    if n == 0:
-        return (
-            np.empty(0, dtype=float),
-            np.empty(0, dtype=np.int64),
-        )
-    higher_closes: "list[float]" = []
-    low_to_higher_idx = np.empty(n, dtype=np.int64)
-    prev_bin = None
-    cur_higher_idx = -1
-    for i in range(n):
-        bk = bin_keys[i]
-        if bk != prev_bin:
-            cur_higher_idx += 1
-            higher_closes.append(float(closes[i]))
-            prev_bin = bk
-        else:
-            higher_closes[cur_higher_idx] = float(closes[i])
-        low_to_higher_idx[i] = cur_higher_idx
-    return np.array(higher_closes, dtype=float), low_to_higher_idx
