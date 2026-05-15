@@ -58,28 +58,47 @@ def web_batch_get_cl_datas(
     """
     WEB端批量计算并获取 缠论 数据
 
-    2026-05-14 修改:不再走 ``fdb.get_web_cl_data`` 的 .pkl 持久化缓存。
-    原实现把 cd 对象 pickle 到磁盘,下次反序列化 + ``process_klines(new)`` 做增量。
+    历史 (2026-05-14): 不再走 ``fdb.get_web_cl_data`` 的 .pkl 持久化缓存。
+    原实现把 cd 对象 pickle 到磁盘, 下次反序列化 + ``process_klines(new)`` 做增量。
     实测在长时间运行 / 数据源切换 / IEX→SIP volume 漂移等场景下,
     xd_calculator 的增量算法会让"老版本 XD"和"新版本 XD"同时残留在 cd.xds 里,
-    生产环境出现 xds=213 → 410 的累积,前端表现为"同一段 K 线多条线段"。
+    生产环境出现 xds=213 → 410 的累积。
 
-    现改成:每次调用都从空 ``cl.CL()`` 开始,``process_klines(full)`` 全量重算。
-    性能代价:每次 web 请求都全量算缠论 (~几百毫秒到几秒)。
-    收益:cd 状态完全无残留,xds/bis/fxs 数量与"一次性算完整 K 线"严格一致。
+    US-009 (2026-05-15): 接入进程内 cl 对象 LRU 缓存 (cl_object_cache)。
+    cache hit 条件: 同 (market, code, frequency, cl_config_hash) × 同 K 线 signature。
+    cache miss / signature 不同时仍走"新建 CL + process_klines(full)", 与之前等价
+    但避免触发 xds 累积 bug (这是 cache 不做"真增量喂入"的核心原因, 详见
+    cl_object_cache.py 模块文档)。
 
-    ``fdb.get_web_cl_data`` 仍然保留给 notebook / 回测脚本使用,它们的
-    "末尾追加增量" 假设跟 web 路径不同,不动。
+    收益: tv polling / 多标的预热场景下, 同 cache_key 重复请求由 cache 直接返回,
+    省掉每次几百 ms - 几秒的全量计算。
+
+    ``fdb.get_web_cl_data`` 仍然保留给 notebook / 回测脚本使用, 它们的
+    "末尾追加增量" 假设跟 web 路径不同, 不动。
 
     :param market: 市场
     :param code: 计算的标的
-    :param klines: 计算的 k线 数据,每个周期对应一个 k线DataFrame
+    :param klines: 计算的 k线 数据, 每个周期对应一个 k线DataFrame
     :param cl_config: 缠论配置
-    :return: 缠论数据对象列表,顺序与 klines.keys 一致
+    :return: 缠论数据对象列表, 顺序与 klines.keys 一致
     """
-    # 局部 import 避免 cl_utils 顶层 import chanlun.core.cl(后者依赖 chain 较深)。
-    from chanlun.core.cl import CL
+    # 局部 import: cl_object_cache 在 web 层, 而 cl_utils 在 src 层 — 这里用局部
+    # import 避免 src 层硬依赖 web 层 (调用栈本身就来自 web, import 不会循环)
+    try:
+        from cl_app.services.cl_object_cache import get_or_compute_cl
+        _cache_available = True
+    except ImportError:
+        _cache_available = False
 
+    if _cache_available:
+        cls = []
+        for f, k in klines.items():
+            cd = get_or_compute_cl(market, code, f, cl_config, k)
+            cls.append(cd)
+        return cls
+
+    # 兜底: 非 web 环境调用 (notebook / cli) 直接全量, 不接 cache
+    from chanlun.core.cl import CL
     cls = []
     for f, k in klines.items():
         cd = CL(code, f, dict(cl_config) if cl_config else {})
