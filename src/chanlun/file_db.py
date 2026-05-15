@@ -361,7 +361,15 @@ class FileCacheDB(object):
         finally:
             self._cleanup_lock.release()
 
-    # US-008: parquet K 线缓存底层 API (公共方法, 任意调用方可直接使用) ----
+    # =====================================================================
+    # P8 区段 1/4: K 线缓存 (KlineCache)
+    # ---------------------------------------------------------------------
+    # 负责 tdx K 线 CSV + parquet 双写过渡 (US-008), 与缠论对象/chart_data/通用
+    # pkl 等其它职责独立。后续 PR 可整段抽到 ``_KlineCacheMixin`` 或独立类
+    # ``KlineCsvCache`` (见 architect 评审建议)。
+    # 包含方法: _kline_parquet_path / _kline_csv_path / save_klines_parquet /
+    # load_klines_parquet / get_tdx_klines / save_tdx_klines / clear_tdx_old_klines
+    # =====================================================================
     def _kline_parquet_path(self, market: str, code: str, frequency: str) -> pathlib.Path:
         return self.klines_path / market / f"{code.replace('.', '_')}_{frequency}.parquet"
 
@@ -494,6 +502,15 @@ class FileCacheDB(object):
                     )
         return True
 
+    # =====================================================================
+    # P8 区段 2/4: 缠论对象缓存 (CLObjectCache)
+    # ---------------------------------------------------------------------
+    # 负责 cd 对象 .pkl 持久化 + 4 重一致性校验 (连续性 / OHLC / 密度 /
+    # 数据量)。get_web_cl_data 已被 web 路径绕开 (cl_utils.web_batch_get_cl_datas
+    # 现走 cl_object_cache.py), 这里保留是供 notebook / 回测脚本使用。
+    # 包含方法: get_web_cl_data / clear_web_cl_data / clear_old_web_cl_data /
+    # clear_all_cl_data / get_low_to_high_cl_data
+    # =====================================================================
     def get_web_cl_data(
             self,
             market: str,
@@ -756,6 +773,13 @@ class FileCacheDB(object):
         self._atomic_write_pickle(filename, cd)
         return cd
 
+    # =====================================================================
+    # P8 区段 3/4: 通用 pkl 缓存 (GenericPklCache)
+    # ---------------------------------------------------------------------
+    # 任意 Python 对象的 pickle 持久化, 与上面三类专用 cache 独立, 供外部
+    # 临时缓存使用 (notebook / 选股脚本 / 自定义工具)。
+    # 包含方法: cache_pkl_to_file / cache_pkl_from_file
+    # =====================================================================
     def cache_pkl_to_file(self, filename: str, data: object):
         """
         将缓存数据持久化到文件中
@@ -782,6 +806,14 @@ class FileCacheDB(object):
     # - 写入走 _atomic_write_pickle，崩溃也不会留下半写文件；
     # - 不在这里维护 in-memory 索引，调用方自己用 RAM 做热层。
 
+    # =====================================================================
+    # P8 区段 4/4: TV chart_data 缓存 (ChartDataCache)
+    # ---------------------------------------------------------------------
+    # TradingView /tv/history 路径专用的 chart_data dict 缓存, 配合 SafeUnpickler
+    # 防御 pickle RCE。RAM 热层在 services/chart_cache.py, 这里只管磁盘冷层。
+    # 包含方法: _chart_cache_path_for / get_chart_cache / set_chart_cache /
+    # delete_chart_cache / clear_old_chart_cache / maybe_cleanup_chart_cache
+    # =====================================================================
     def _chart_cache_path_for(self, cache_key: str) -> pathlib.Path:
         # cache_key 形如 "us_GDS.US_30m_<md5hex>"；点 / 斜杠不是所有 FS 都安全，做轻度清洗。
         safe = cache_key.replace("/", "_").replace(".", "_")
