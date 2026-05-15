@@ -378,3 +378,42 @@ def test_recompute_chart_data_with_cross_tz_cached_new(cl_config_min):
     )
     assert chart_data is not None
     assert len(chart_data["t"]) == 120
+
+
+def test_recompute_handles_object_dtype_with_mixed_tz(cl_config_min):
+    """回归: 当传入 klines 的 'date' 列是 object dtype 且元素混合 tz-aware/naive
+    (长桥 SDK 边界场景导致 pd.concat 后 dtype 退化), recompute 应能透明归一化
+    为 datetime64[ns, UTC] 并完成计算, 而不是在下游 _preprocess L75 的
+    pd.to_datetime(不传 utc=True) 抛 ValueError。
+    """
+    import datetime
+    from cl_app.services.kline_recompute import recompute_chart_data_from_klines
+
+    # 造 200 根 toy 数据, 前 100 根是 tz-naive Python datetime, 后 100 根是
+    # tz-aware Asia/Shanghai Python datetime — 模拟 pd.concat 后 dtype 退化的
+    # object 列。
+    rows = []
+    base = datetime.datetime(2026, 5, 14, 9, 30)
+    tz = pd.Timestamp("2026-05-14", tz="Asia/Shanghai").tz
+    for i in range(100):
+        rows.append({
+            "date": base + datetime.timedelta(minutes=i),  # tz-naive
+            "open": 100.0 + i * 0.05, "high": 100.5 + i * 0.05,
+            "low": 99.5 + i * 0.05, "close": 100.0 + i * 0.05, "volume": 1000,
+        })
+    for i in range(100):
+        rows.append({
+            "date": (base + datetime.timedelta(minutes=100 + i)).replace(tzinfo=tz),
+            "open": 100.0 + i * 0.05, "high": 100.5 + i * 0.05,
+            "low": 99.5 + i * 0.05, "close": 100.0 + i * 0.05, "volume": 1000,
+        })
+    klines = pd.DataFrame(rows)
+    # 验证我们造的 'date' 列确实是 object dtype(混合 tz)
+    assert klines["date"].dtype == object
+
+    # 调用 recompute, 应当不抛
+    chart_data = recompute_chart_data_from_klines(
+        "us", "TEST.001", "1m", cl_config_min, klines
+    )
+    assert chart_data is not None
+    assert len(chart_data["t"]) > 0

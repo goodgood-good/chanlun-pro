@@ -148,6 +148,19 @@ def recompute_chart_data_from_klines(
     if klines is None or len(klines) == 0:
         return None
 
+    # 防御性 tz 归一化:``merge_klines_df`` 之后 dtype 通常已是 datetime64[ns, UTC],
+    # 但极端 edge case(数据源混合返回 tz-aware/naive datetime 对象、长桥 SDK 边界
+    # 行带 tzinfo 而其他行不带)会让 'date' 列退化成 object dtype。下游
+    # ``KlineDataProcessor._preprocess`` 在 ``pd.api.types.is_datetime64_any_dtype``
+    # 判断后会走 ``pd.to_datetime(klines['date'])`` —— 不传 ``utc=True``,pandas 2.x
+    # 遇到混合 tz 会抛 ``ValueError: Tz-aware datetime.datetime cannot be converted
+    # to datetime64 unless utc=True``,整条 prepend 路径崩。在这里提前用 ``utc=True``
+    # 强制归一化为 ``datetime64[ns, UTC]``,既绕开 _preprocess 的脆弱分支,又不改
+    # 其通用入口契约。
+    if 'date' in klines.columns and not pd.api.types.is_datetime64_any_dtype(klines['date']):
+        klines = klines.copy()
+        klines['date'] = pd.to_datetime(klines['date'], utc=True)
+
     # 局部 import,避免顶层 import 循环(chanlun.cl_utils 反向依赖 chart_compute 几率小,
     # 但 cl.CL 的初始化栈较深,放到调用时 import 更稳)。
     from chanlun.core.cl import CL
