@@ -191,6 +191,56 @@ def _full_snapshot_is_stale(cache_entry: dict) -> bool:
     return _entry_freshness(cache_entry, mode="first_request") != "fresh"
 
 
+def evaluate_cache_for_tv_history(
+    cache_entry: Optional[dict],
+    from_ts: int,
+    to_ts: int,
+    is_range_request: bool,
+) -> tuple:
+    """评估 chart_data_cache entry 是否能满足 tv_history 当前请求。
+
+    P5 (2026-05-15): 从 ``tv.py::tv_history`` 内嵌 ``_evaluate_cache`` 闭包提取
+    成 module-level 纯函数。原内嵌实现依赖 ``_from``/``_to``/``is_range_request``
+    三个 outer var; 提取后通过参数显式传递, 不再隐式依赖 closure 状态, 单测可独立。
+
+    Args:
+        cache_entry: chart_data_cache 中的 entry (None 表示 cache miss)
+        from_ts: 请求 from 时间戳 (unix 秒, 0/负数表示未指定)
+        to_ts: 请求 to 时间戳 (unix 秒)
+        is_range_request: 是否窄范围请求 (firstDataRequest=false 且 from/to 都 >0)
+
+    Returns:
+        (is_hit, cached_data, miss_reason):
+        - is_hit=True: cache 命中, cached_data 为 chart_data dict
+        - is_hit=False: cache miss, miss_reason 是字符串原因 ("cache_empty" /
+          "cache_partial_snapshot" / "cache_stale_snapshot" / "cache_no_coverage" /
+          "cache_head_gap" / "cache_tail_gap")
+    """
+    if cache_entry is None:
+        return False, None, "cache_empty"
+    cached_data = cache_entry.get("data", {})
+    cache_min_time = cache_entry.get("min_time")
+    cache_max_time = cache_entry.get("max_time")
+    if not is_range_request:
+        if not cache_entry.get("is_full_snapshot", False):
+            return False, None, "cache_partial_snapshot"
+        # 即便 is_full_snapshot=True, 也要校验时效; 否则程序停机数天后第一个
+        # firstDataRequest=true 请求会直接命中过期 snapshot (磁盘冷层),
+        # 用户看到的图表缺停机期间产生的 K 线。
+        if _full_snapshot_is_stale(cache_entry):
+            return False, None, "cache_stale_snapshot"
+        return True, cached_data, None
+    if cache_min_time is None or cache_max_time is None:
+        return False, None, "cache_no_coverage"
+    if from_ts < cache_min_time:
+        return False, None, "cache_head_gap"
+    if to_ts > cache_max_time:
+        if _cache_entry_recently_validated(cache_entry):
+            return True, cached_data, None
+        return False, None, "cache_tail_gap"
+    return True, cached_data, None
+
+
 # ---------------- 写入：RAM + 异步落盘 ----------------
 
 # 磁盘异步写入器（chart_data_cache 落盘）。

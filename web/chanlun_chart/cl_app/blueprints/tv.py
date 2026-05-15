@@ -75,6 +75,7 @@ from ..services.chart_cache import (  # noqa: E402
     _stable_hash,
     cache_lock,
     chart_data_cache,
+    evaluate_cache_for_tv_history,
 )
 
 # 磁盘异步写入器 / 落盘函数已迁到 services.chart_cache（Tier 4 P1），见模块顶部 re-export。
@@ -774,32 +775,9 @@ def tv_history():
             and _to >= _from
         )
 
-        # 内联函数：根据当前缓存项判断是否命中。提取出来供 double-check locking 复用。
-        def _evaluate_cache(_cache_entry):
-            if _cache_entry is None:
-                return False, None, "cache_empty"
-            cached_data = _cache_entry.get("data", {})
-            cache_min_time = _cache_entry.get("min_time")
-            cache_max_time = _cache_entry.get("max_time")
-            if not is_range_request:
-                if not _cache_entry.get("is_full_snapshot", False):
-                    return False, None, "cache_partial_snapshot"
-                # 即便 is_full_snapshot=True，也要校验时效；否则程序停机数天后第一个
-                # firstDataRequest=true 请求会直接命中过期 snapshot（磁盘冷层），
-                # 用户看到的图表缺停机期间产生的 K 线。
-                # _SNAPSHOT_STALE_AFTER 远大于 polling 间隔，正常运行不会误判。
-                if _full_snapshot_is_stale(_cache_entry):
-                    return False, None, "cache_stale_snapshot"
-                return True, cached_data, None
-            if cache_min_time is None or cache_max_time is None:
-                return False, None, "cache_no_coverage"
-            if _from < cache_min_time:
-                return False, None, "cache_head_gap"
-            if _to > cache_max_time:
-                if _cache_entry_recently_validated(_cache_entry):
-                    return True, cached_data, None
-                return False, None, "cache_tail_gap"
-            return True, cached_data, None
+        # P5 清理: 原 _evaluate_cache 内嵌 closure (~25 行) 已抽到
+        # services.chart_cache.evaluate_cache_for_tv_history (module-level 纯函数),
+        # 参数 (entry, from_ts, to_ts, is_range_request) 显式传递, 不再依赖 closure。
 
         # 注意：必须先 get 出 RLock 对象再 with，确保整个临界区内引用持续存在
         # （_SafeLockRegistry 用 WeakValueDictionary 存储锁，无强引用会被 GC）
@@ -807,7 +785,9 @@ def tv_history():
         with _calc_lock:
             with cache_lock:
                 cache_entry = _get_chart_cache_entry(cache_key)
-                is_cache_hit, cl_chart_data, miss_reason = _evaluate_cache(cache_entry)
+                is_cache_hit, cl_chart_data, miss_reason = evaluate_cache_for_tv_history(
+                    cache_entry, _from, _to, is_range_request
+                )
                 if not is_cache_hit:
                     cache_miss_reason = miss_reason
 
