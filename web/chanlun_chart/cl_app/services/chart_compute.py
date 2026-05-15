@@ -14,6 +14,7 @@ Tier 4 P3 重构：从 blueprints/tv.py 抽出 ``compute_and_cache_chart_data`` 
 - ``prewarm_common_intervals``: OLD prewarm 路径，与 tv_history 流深度耦合，未迁
 - ``_history_req_locks``: 仅 tv_history 内部使用的节流锁（实例化 _SafeLockRegistry）
 """
+import bisect
 import datetime
 import threading
 import weakref
@@ -334,3 +335,117 @@ def compute_and_cache_chart_data(market: str, code: str, frequency: str, cl_conf
             )
         _set_chart_cache_entry(cache_key, cl_chart_data, is_full_snapshot=True)
     return True
+
+
+# ===========================================================================
+# P5 second step: chart_data 切片 / 裁未来 bar 抽到 module-level
+# ===========================================================================
+
+# 所有可能是"按 t 长度对齐的数组字段"列表 (用于 _slice_window / _trim_future_bars)。
+_CHART_ARRAY_FIELDS = (
+    "t", "o", "h", "l", "c", "v",
+    "macd_dif", "macd_dea", "macd_hist", "macd_area",
+    "higher_macd_dif", "higher_macd_dea", "higher_macd_hist",
+)
+
+# 形态字段 (笔/段/中枢/分型/背驰/买卖点) - 不是按 t 长度对齐, 走 filter_shapes_in_window
+_CHART_SHAPE_FIELDS = ("fxs", "bis", "xds", "bi_zss", "xd_zss", "bcs", "mmds")
+
+
+def filter_shapes_in_window(shapes, from_ts: int, to_ts: int) -> list:
+    """按 [from_ts, to_ts) 窗口过滤形态 (笔/段/中枢/分型/背驰/买卖点)。
+
+    多点形态 (笔/段/中枢): 与 [from_ts, to_ts) 有重叠即保留 (起点早于 to_ts 且
+    终点晚于 from_ts), 避免"跨可视边界"形态丢失。
+    单点形态 (分型/背驰/买卖点): 点位需落在窗口内。
+
+    Args:
+        shapes: list of shape dict (每个含 "points": list[dict] 或 dict)
+        from_ts: 窗口起点 (unix 秒)
+        to_ts: 窗口终点 (unix 秒, 0 表示无上界)
+
+    Returns:
+        过滤后的 list (不修改原输入)。
+    """
+    res = []
+    for shape in shapes:
+        if not (isinstance(shape, dict) and "points" in shape):
+            continue
+        pts = shape["points"]
+        if isinstance(pts, list) and len(pts) > 0:
+            t_start = pts[0].get("time", 0)
+            t_end = pts[-1].get("time", 0)
+            if t_end >= from_ts and (to_ts == 0 or t_start < to_ts):
+                res.append(shape)
+        elif isinstance(pts, dict):
+            t = pts.get("time", 0)
+            if t >= from_ts and (to_ts == 0 or t < to_ts):
+                res.append(shape)
+    return res
+
+
+def slice_chart_data_to_window(chart_data: dict, from_ts: int, to_ts: int) -> dict:
+    """把 chart_data 按 [from_ts, to_ts) 切窗口 (P5 second step, 抽自 tv_history)。
+
+    bar_times 用 ``bisect_left`` 找 start_idx/end_idx (左闭右开, 与 TV UDF 一致);
+    所有 t 长度对齐字段按 [start_idx:end_idx] 切片; 形态字段走 filter_shapes_in_window。
+
+    Args:
+        chart_data: 完整 chart_data dict (含 t/o/h/l/c/v/macd_*/fxs/bis/...)
+        from_ts: 窗口起点
+        to_ts: 窗口终点 (0 表示无上界, 取 bar_times 全长)
+
+    Returns:
+        切片后的新 chart_data dict (浅拷贝, 不改原 dict)。
+    """
+    bar_times = chart_data.get("t", []) or []
+    if not bar_times:
+        return dict(chart_data)
+
+    start_idx = bisect.bisect_left(bar_times, from_ts)
+    # bisect_left 让 to_ts 排他上界, 避免向左滚动返回相同 K 线
+    end_idx = bisect.bisect_left(bar_times, to_ts) if to_ts > 0 else len(bar_times)
+
+    sliced: dict = {}
+    for field in _CHART_ARRAY_FIELDS:
+        arr = chart_data.get(field) or []
+        sliced[field] = arr[start_idx:end_idx] if arr else []
+    for field in _CHART_SHAPE_FIELDS:
+        sliced[field] = filter_shapes_in_window(
+            chart_data.get(field, []) or [], from_ts, to_ts
+        )
+    return sliced
+
+
+def trim_future_bars(chart_data: dict, to_ts: int) -> dict:
+    """裁剪 chart_data 中时间戳 > to_ts 的"未来" bar (P5 second step)。
+
+    交易所偶尔返回尚未完成的下一根 K 线 (timestamp > 当前时间), TradingView
+    缓存后会在 DataPulse 更新时撞 time order violation。本函数对所有 t 长度
+    对齐字段做 [:_resp_end] 切片, ``_resp_end`` = ``bisect_right(t, to_ts)``。
+
+    Args:
+        chart_data: 已切到可视窗口的 chart_data
+        to_ts: 请求 to 时间戳 (0/负数 → 不裁)
+
+    Returns:
+        裁剪后的新 dict (浅拷贝)。形态字段不裁 (笔/段/中枢的 end.time 可能 > to_ts
+        但起点在窗口内, 仍要展示, 由 ``filter_shapes_in_window`` 保留)。
+    """
+    if to_ts <= 0:
+        return dict(chart_data)
+    times = chart_data.get("t") or []
+    if not times or times[-1] <= to_ts:
+        return dict(chart_data)
+    resp_end = bisect.bisect_right(times, to_ts)
+    if resp_end >= len(times):
+        return dict(chart_data)
+
+    trimmed: dict = {}
+    for field in _CHART_ARRAY_FIELDS:
+        arr = chart_data.get(field) or []
+        trimmed[field] = arr[:resp_end] if arr else []
+    # 形态字段保持原样
+    for field in _CHART_SHAPE_FIELDS:
+        trimmed[field] = chart_data.get(field, []) or []
+    return trimmed

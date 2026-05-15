@@ -167,6 +167,8 @@ from ..services.chart_compute import (  # noqa: E402
     _shape_time,
     chart_calc_locks,
     compute_and_cache_chart_data,
+    slice_chart_data_to_window,
+    trim_future_bars,
 )
 from ..services.kline_recompute import (  # noqa: E402
     prepend_klines_and_replace_cache,
@@ -974,104 +976,29 @@ def tv_history():
         else:
             LogUtil.debug(f"[tv_history] Cache Hit req={req_tag}, bars={len(bar_times)}")
 
+        # P5 second step: 切片到 [_from, _to) 窗口 (内嵌 filter_shapes closure + 88 行
+        # 字段 boilerplate 抽到 services.chart_compute.slice_chart_data_to_window)
         if firstDataRequest == "false" and len(bar_times) > 0:
             try:
-                from_ts = _from
-                to_ts = _to
-                start_idx = bisect.bisect_left(bar_times, from_ts)
-                # bisect_left 使 to_ts 为排他上界（与 TradingView UDF 协议一致），
-                # 避免 backward request 返回与请求 to 时间戳完全相同的 K 线（会导致重复 bar + 多余请求）
-                end_idx = (
-                    bisect.bisect_left(bar_times, to_ts)
-                    if to_ts > 0
-                    else len(bar_times)
-                )
-
-                def filter_shapes(shapes):
-                    """
-                    多点形态（笔/线段/中枢）：与 [from_ts, to_ts) 有重叠即保留——
-                    线段起点早于 to_ts 且终点晚于 from_ts。避免「跨可视边界」
-                    的线段被丢弃后，前端合并时永久丢失。
-                    单点形态（分型/背驰/买卖点）：点位需落在窗口内。
-                    """
-                    res = []
-                    for shape in shapes:
-                        if isinstance(shape, dict) and "points" in shape:
-                            pts = shape["points"]
-                            if isinstance(pts, list) and len(pts) > 0:
-                                t_start = pts[0].get("time", 0)
-                                t_end = pts[-1].get("time", 0)
-                                if t_end >= from_ts and (to_ts == 0 or t_start < to_ts):
-                                    res.append(shape)
-                            elif isinstance(pts, dict):
-                                t = pts.get("time", 0)
-                                if t >= from_ts and (to_ts == 0 or t < to_ts):
-                                    res.append(shape)
-                    return res
-
-                cl_chart_data = {
-                    "t": cl_chart_data.get("t", [])[start_idx:end_idx],
-                    "c": cl_chart_data.get("c", [])[start_idx:end_idx],
-                    "o": cl_chart_data.get("o", [])[start_idx:end_idx],
-                    "h": cl_chart_data.get("h", [])[start_idx:end_idx],
-                    "l": cl_chart_data.get("l", [])[start_idx:end_idx],
-                    "v": cl_chart_data.get("v", [])[start_idx:end_idx],
-                    "macd_dif": cl_chart_data.get("macd_dif", [])[start_idx:end_idx]
-                    if cl_chart_data.get("macd_dif")
-                    else [],
-                    "macd_dea": cl_chart_data.get("macd_dea", [])[start_idx:end_idx]
-                    if cl_chart_data.get("macd_dea")
-                    else [],
-                    "macd_hist": cl_chart_data.get("macd_hist", [])[start_idx:end_idx]
-                    if cl_chart_data.get("macd_hist")
-                    else [],
-                    "macd_area": cl_chart_data.get("macd_area", [])[start_idx:end_idx]
-                    if cl_chart_data.get("macd_area")
-                    else [],
-                    "higher_macd_dif": cl_chart_data.get("higher_macd_dif", [])[start_idx:end_idx]
-                    if cl_chart_data.get("higher_macd_dif")
-                    else [],
-                    "higher_macd_dea": cl_chart_data.get("higher_macd_dea", [])[start_idx:end_idx]
-                    if cl_chart_data.get("higher_macd_dea")
-                    else [],
-                    "higher_macd_hist": cl_chart_data.get("higher_macd_hist", [])[start_idx:end_idx]
-                    if cl_chart_data.get("higher_macd_hist")
-                    else [],
-                    "fxs": filter_shapes(cl_chart_data.get("fxs", [])),
-                    "bis": filter_shapes(cl_chart_data.get("bis", [])),
-                    "xds": filter_shapes(cl_chart_data.get("xds", [])),
-                    "bi_zss": filter_shapes(cl_chart_data.get("bi_zss", [])),
-                    "xd_zss": filter_shapes(cl_chart_data.get("xd_zss", [])),
-                    "bcs": filter_shapes(cl_chart_data.get("bcs", [])),
-                    "mmds": filter_shapes(cl_chart_data.get("mmds", [])),
-                }
+                cl_chart_data = slice_chart_data_to_window(cl_chart_data, _from, _to)
             except Exception as e:
                 LogUtil.error(f"[tv_history] Slice data failed: {e}")
 
-        # 切片后无数据，返回 no_data 阻止 TradingView 继续向前请求
+        # 切片后无数据,返回 no_data 阻止 TradingView 继续向前请求
         if len(cl_chart_data.get("t", [])) == 0:
             return {"s": "no_data"}
 
-        # 裁剪超出请求 _to 的「未来」K 线
-        # 交易所可能返回尚未完成的下一根 K 线（时间戳 > 当前时间），
-        # TradingView 缓存后会导致 DataPulse 更新时 time order violation
-        _resp_times = cl_chart_data.get("t", [])
-        _resp_end = len(_resp_times)
-        if _to > 0 and _resp_times and _resp_times[-1] > _to:
-            _resp_end = bisect.bisect_right(_resp_times, _to)
-            if _resp_end < len(_resp_times):
-                LogUtil.warning(
-                    f"[tv_history] Trimmed {len(_resp_times) - _resp_end} future bar(s) beyond to={_to}"
-                )
-
-        def _trim(arr):
-            """对列表做 [:_resp_end] 切片，不修改缓存原对象"""
-            if not arr or _resp_end >= len(arr):
-                return arr
-            return arr[:_resp_end]
+        # P5 second step: 裁未来 bar (内嵌 _trim closure + bisect_right 抽到
+        # services.chart_compute.trim_future_bars)
+        _resp_times = cl_chart_data.get("t", []) or []
+        cl_chart_data = trim_future_bars(cl_chart_data, _to)
+        _resp_t = cl_chart_data.get("t", []) or []
+        if len(_resp_t) < len(_resp_times):
+            LogUtil.warning(
+                f"[tv_history] Trimmed {len(_resp_times) - len(_resp_t)} future bar(s) beyond to={_to}"
+            )
 
         # [DataVerify] Log response shape counts for frontend correlation
-        _resp_t = _trim(cl_chart_data.get("t", []))
         LogUtil.debug(
             f"[DataVerify][Backend] symbol={symbol} resolution={resolution} "
             f"update={firstDataRequest != 'true'} bars={len(_resp_t)} "
@@ -1091,19 +1018,19 @@ def tv_history():
 
         return {
             "s": "ok",
-            "t": _trim(cl_chart_data.get("t", [])),
-            "c": _trim(cl_chart_data.get("c", [])),
-            "o": _trim(cl_chart_data.get("o", [])),
-            "h": _trim(cl_chart_data.get("h", [])),
-            "l": _trim(cl_chart_data.get("l", [])),
-            "v": _trim(cl_chart_data.get("v", [])),
-            "macd_dif": _trim(cl_chart_data.get("macd_dif", [])),
-            "macd_dea": _trim(cl_chart_data.get("macd_dea", [])),
-            "macd_hist": _trim(cl_chart_data.get("macd_hist", [])),
-            "macd_area": _trim(cl_chart_data.get("macd_area", [])),
-            "higher_macd_dif": _trim(cl_chart_data.get("higher_macd_dif", [])),
-            "higher_macd_dea": _trim(cl_chart_data.get("higher_macd_dea", [])),
-            "higher_macd_hist": _trim(cl_chart_data.get("higher_macd_hist", [])),
+            "t": cl_chart_data.get("t", []),
+            "c": cl_chart_data.get("c", []),
+            "o": cl_chart_data.get("o", []),
+            "h": cl_chart_data.get("h", []),
+            "l": cl_chart_data.get("l", []),
+            "v": cl_chart_data.get("v", []),
+            "macd_dif": cl_chart_data.get("macd_dif", []),
+            "macd_dea": cl_chart_data.get("macd_dea", []),
+            "macd_hist": cl_chart_data.get("macd_hist", []),
+            "macd_area": cl_chart_data.get("macd_area", []),
+            "higher_macd_dif": cl_chart_data.get("higher_macd_dif", []),
+            "higher_macd_dea": cl_chart_data.get("higher_macd_dea", []),
+            "higher_macd_hist": cl_chart_data.get("higher_macd_hist", []),
             "fxs": cl_chart_data.get("fxs", []),
             "bis": cl_chart_data.get("bis", []),
             "xds": cl_chart_data.get("xds", []),
