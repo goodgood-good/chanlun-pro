@@ -170,20 +170,76 @@ def test_bin_keys_30m_basic():
     import numpy as np
     from cl_app.services.chart_compute import _bin_keys_for_higher
 
-    # 30m = 1800s
-    # 取明显跨 30m 边界的 epoch
-    # 1700000000 / 1800 = 944444.444...
-    # 1700001800 / 1800 = 944445.444...
+    # 30m = 1800s; 1700003600 - 1700000000 = 3600 = 2 * 1800
     times = np.array(
         [1700000000, 1700001799, 1700001800, 1700003600],
         dtype=np.int64,
     )
     bins = _bin_keys_for_higher(times, "30m", "us")
-    # 1700000000 // 1800 = 944444
-    # 1700001799 // 1800 = 944444 (差 1799 还在同 bin? 1800*944444=1699999200,
-    #                                所以 1700001799 // 1800 = 944445)
-    # 实际: (1700001799 - 1699999200) // 1800 = 2599 // 1800 = 1, 所以 944445
-    # 让我重新构造让断言可靠
-    # 直接验证 bin_id 差: 1700003600 - 1700000000 = 3600 = 2*1800
-    # 所以 bins[3] - bins[0] 应该是 2
     assert bins[3] - bins[0] == 2
+
+
+def test_bin_keys_d_us_market_tz_overnight():
+    """美股 ET 16:00 后的 30m bar (若存在) 应归属当日, 不被 UTC 切到次日。"""
+    import numpy as np
+    import datetime
+    import pytz
+    from cl_app.services.chart_compute import _bin_keys_for_higher
+
+    tz = pytz.timezone("America/New_York")
+    # 2024-01-02 (周二) 同一交易日内三个时刻
+    morning = int(tz.localize(datetime.datetime(2024, 1, 2, 9, 30)).timestamp())
+    afternoon = int(tz.localize(datetime.datetime(2024, 1, 2, 15, 59)).timestamp())
+    next_day_morning = int(tz.localize(datetime.datetime(2024, 1, 3, 9, 30)).timestamp())
+
+    times = np.array([morning, afternoon, next_day_morning], dtype=np.int64)
+    bins = _bin_keys_for_higher(times, "d", "us")
+    assert bins[0] == bins[1]      # 同一交易日 (2024-01-02)
+    assert bins[2] == bins[0] + 1  # 跨日 (2024-01-03)
+
+
+def test_bin_keys_w_iso_monday_first():
+    """ISO 周: 周一为首, 周一-周五同 bin, 下周一 bin+1。"""
+    import numpy as np
+    import datetime
+    import pytz
+    from cl_app.services.chart_compute import _bin_keys_for_higher
+
+    tz = pytz.timezone("America/New_York")
+    # 2024-01-01 是周一; 2024-01-05 是周五; 2024-01-08 是下周一
+    monday = int(tz.localize(datetime.datetime(2024, 1, 1, 9, 30)).timestamp())
+    friday = int(tz.localize(datetime.datetime(2024, 1, 5, 15, 0)).timestamp())
+    next_monday = int(tz.localize(datetime.datetime(2024, 1, 8, 9, 30)).timestamp())
+
+    times = np.array([monday, friday, next_monday], dtype=np.int64)
+    bins = _bin_keys_for_higher(times, "w", "us")
+    assert bins[0] == bins[1]
+    assert bins[2] != bins[0]
+
+
+def test_bin_keys_M_year_month():
+    import numpy as np
+    import datetime
+    import pytz
+    from cl_app.services.chart_compute import _bin_keys_for_higher
+
+    tz = pytz.timezone("America/New_York")
+    jan = int(tz.localize(datetime.datetime(2024, 1, 31, 23, 59)).timestamp())
+    feb = int(tz.localize(datetime.datetime(2024, 2, 1, 0, 1)).timestamp())
+    next_year_jan = int(tz.localize(datetime.datetime(2025, 1, 1, 0, 1)).timestamp())
+
+    times = np.array([jan, feb, next_year_jan], dtype=np.int64)
+    bins = _bin_keys_for_higher(times, "M", "us")
+    assert bins[0] != bins[1]
+    assert bins[2] != bins[1]
+    assert bins[2] > bins[1] > bins[0]
+
+
+def test_bin_keys_unknown_market_falls_back_to_utc():
+    """未知 market 用 UTC, 不应崩。"""
+    import numpy as np
+    from cl_app.services.chart_compute import _bin_keys_for_higher
+
+    times = np.array([1700000000, 1700086400], dtype=np.int64)  # 相差 1 天
+    bins = _bin_keys_for_higher(times, "d", "unknown_market")
+    assert bins[1] == bins[0] + 1
