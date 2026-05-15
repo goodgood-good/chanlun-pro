@@ -16,8 +16,16 @@ import numpy as np
 import pandas as pd
 import prettytable as pt
 import pyfolio as pf
-from pyecharts import options as opts
-from pyecharts.charts import Bar, Grid, Line
+# F2: pyecharts 已移到 [backtest]/[charts] extras
+try:
+    from pyecharts import options as opts
+    from pyecharts.charts import Bar, Grid, Line
+except ImportError as _e:
+    raise ImportError(
+        "chanlun.backtesting.backtest requires extras: "
+        "pip install 'chanlun-pro[backtest]' "
+        "(or `poetry install --extras backtest`)"
+    ) from _e
 from tqdm.auto import tqdm
 
 from chanlun import fun, kcharts

@@ -7,12 +7,18 @@ import numpy as np
 import pandas as pd
 import talib
 
-# 画图配置
-from pyecharts import options as opts
-from pyecharts.charts import Bar, Grid, Line, Scatter
-from pyecharts.charts import Kline as cKline
-from pyecharts.commons.utils import JsCode
-from pyecharts.globals import CurrentConfig
+# 画图配置 (F2: pyecharts 已移到 [charts] extras, 用户需 pip install 'chanlun-pro[charts]')
+try:
+    from pyecharts import options as opts
+    from pyecharts.charts import Bar, Grid, Line, Scatter
+    from pyecharts.charts import Kline as cKline
+    from pyecharts.commons.utils import JsCode
+    from pyecharts.globals import CurrentConfig
+except ImportError as _e:
+    raise ImportError(
+        "chanlun.kcharts requires extras: pip install 'chanlun-pro[charts]' "
+        "(or `poetry install --extras charts`)"
+    ) from _e
 
 from chanlun.backtesting.base import Strategy
 from chanlun.cl_analyse import LinesFormAnalyse

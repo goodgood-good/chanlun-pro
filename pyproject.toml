@@ -12,14 +12,12 @@ dependencies = [
     "dtaidistance>=2.3.13",
     "flask>=3.1.1",
     "flask-login>=0.6.3",
-    "matplotlib>=3.10.3",
     "mytt>=2.9.3",
     "numpy==1.26.4",
     "pandas==2.1.0",
     "pinyin>=0.4.0",
     "prettytable>=3.16.0",
     "pyarrow>=22.0.0",
-    "pyecharts==2.0.8",
     "pymysql>=1.1.1",
     "pytdx",
     "pytest>=8.4.1",
@@ -51,7 +49,19 @@ futures = [
 ]
 ai = ["openai>=1.84.0"]
 notify = ["lark-oapi>=1.4.17"]
-backtest = ["pyfolio-reloaded>=0.9.9"]
+# F2 (2026-05-15): pyecharts 与 matplotlib 移到 [charts] extras
+# matplotlib 在 src/ 中没有任何 import (顶层依赖纯死代码), pyecharts 只在
+# kcharts.py 和 backtesting/backtest.py 用 (图表渲染 / 回测可视化)。
+# web 服务运行不需要这两个包, 顶层依赖让 docker 部署多装 ~100MB 无意义。
+charts = [
+    "pyecharts==2.0.8",
+    "matplotlib>=3.10.3",
+]
+backtest = [
+    "pyfolio-reloaded>=0.9.9",
+    "pyecharts==2.0.8",
+    "matplotlib>=3.10.3",
+]
 monitor = ["playwright>=1.53.0"]
 all = [
     "alpaca-py>=0.40.1",
@@ -64,6 +74,8 @@ all = [
     "openai>=1.84.0",
     "lark-oapi>=1.4.17",
     "pyfolio-reloaded>=0.9.9",
+    "pyecharts==2.0.8",
+    "matplotlib>=3.10.3",
     "playwright>=1.53.0",
 ]
 
