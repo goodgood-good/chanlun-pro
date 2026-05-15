@@ -50,29 +50,57 @@ def _hash_cl_config(cl_config: Optional[Dict[str, Any]]) -> str:
     return hashlib.md5(blob.encode("utf-8")).hexdigest()[:16]
 
 
-def _compute_kline_signature(klines: pd.DataFrame) -> Tuple[int, str, float]:
-    """K 线序列的轻量 signature: (长度, 末根 date, 末根 close)。
+def _compute_kline_signature(klines: pd.DataFrame) -> Tuple[Any, ...]:
+    """K 线序列的轻量 signature。
 
-    选这三个字段而非全表 hash 的理由:
-    - polling 场景下 99% 变化是"追加几根 K 线", 末根 date 必变, 长度也变
-    - 实时 tick 场景下"同一根末根 close 更新" → close 变, 也能区分
-    - 计算 O(1), 不像全表 md5 O(N)
+    9 元组结构 (设计兼顾"末段变化检测" + "中段复权检测"):
+      (len, last_date, last_close,
+       mid_date, mid_o, mid_h, mid_l, mid_c)
+
+    选这些字段的理由:
+    - **末段 3 元组** (len/last_date/last_close):
+      polling 99% 场景是"追加几根 K 线" → len + last_date 必变;
+      实时 tick "末根 close 更新" → close 变。三者覆盖增量主路径。
+    - **中段 ref-bar 5 元组** (mid_date + OHLC):
+      复权事件是"全部历史 bar 等比例缩放", 仅靠末根可能漏检 (复权后整段
+      重缩放, 但同一根 K 线的相对位置不变, 末根 date/close 量级一致 →
+      末段 signature 与旧值仍接近)。参考 file_db.py:540-578 的复权检测,
+      取 ``-max(10, min(len // 4, 100))`` 处的稳定中段 bar 做 OHLC 指纹,
+      任何 OHLC 字段变化都会让 signature 失配 → 强制重算。
+    - 计算 O(1), 不像全表 md5 O(N); 中段 ref-bar 索引也是 O(1)。
     """
     if klines is None or klines.empty:
-        return (0, "", 0.0)
+        return (0, "", 0.0, "", 0.0, 0.0, 0.0, 0.0)
+
+    n = len(klines)
     last_row = klines.iloc[-1]
     last_date = last_row.get("date")
-    return (
-        int(len(klines)),
-        str(last_date) if last_date is not None else "",
-        float(last_row.get("close", 0.0)),
-    )
+    last_close = float(last_row.get("close", 0.0))
+
+    # 中段 ref-bar: 仅在 K 线足够长时才取 (太短的序列复权概率低且 ref 位置不稳定)
+    if n >= 12:
+        # 与 file_db.get_web_cl_data:550-553 同款"稳定中段"位置
+        ref_idx = n - max(10, min(n // 4, 100))
+        mid_row = klines.iloc[ref_idx]
+        mid_date = mid_row.get("date")
+        return (
+            n,
+            str(last_date) if last_date is not None else "",
+            last_close,
+            str(mid_date) if mid_date is not None else "",
+            float(mid_row.get("open", 0.0)),
+            float(mid_row.get("high", 0.0)),
+            float(mid_row.get("low", 0.0)),
+            float(mid_row.get("close", 0.0)),
+        )
+    # 短序列: 中段字段填 0 (与上面 empty 分支同形, 保证 tuple 长度一致便于比较)
+    return (n, str(last_date) if last_date is not None else "", last_close, "", 0.0, 0.0, 0.0, 0.0)
 
 
 @dataclass
 class _CacheEntry:
     cd: "CL"
-    signature: Tuple[int, str, float]
+    signature: Tuple[Any, ...]
 
 
 # LRUCache 本身非完全 thread-safe (read 是 atomic, set/pop 需要锁), 用 RLock 兜底
