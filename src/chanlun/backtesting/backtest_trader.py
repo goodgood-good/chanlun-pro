@@ -947,9 +947,7 @@ class BackTestTrader(Trader):
                 # 唯一key判断
                 if opt.key in pos.close_keys.keys():
                     return False
-                if opt.close_uid != "clear" and opt.close_uid in [
-                    _or["close_uid"] for _or in pos.close_records
-                ]:
+                if opt.close_uid != "clear" and opt.close_uid in pos._close_uids:
                     return False
                 # 修正错误的平仓比例
                 opt.pos_rate = (
@@ -1028,6 +1026,7 @@ class BackTestTrader(Trader):
                         "pos_rate": opt.pos_rate,
                     }
                 )
+                pos._close_uids.add(opt.close_uid)
 
                 # 平仓的uid不是 clear，不进行实质性的平仓，只记录当前的盈亏情况
                 if opt.close_uid == "clear":
@@ -1089,9 +1088,7 @@ class BackTestTrader(Trader):
                 # 唯一key判断
                 if opt.key in pos.close_keys.keys():
                     return False
-                if opt.close_uid != "clear" and opt.close_uid in [
-                    _or["close_uid"] for _or in pos.close_records
-                ]:
+                if opt.close_uid != "clear" and opt.close_uid in pos._close_uids:
                     return False
                 # 修正错误的平仓比例
                 opt.pos_rate = (
@@ -1174,6 +1171,7 @@ class BackTestTrader(Trader):
                         "pos_rate": opt.pos_rate,
                     }
                 )
+                pos._close_uids.add(opt.close_uid)
 
                 # 平仓的uid不是 clear，不进行实质性的平仓，只记录当前的盈亏情况
                 if opt.close_uid == "clear":
