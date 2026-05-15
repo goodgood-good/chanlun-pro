@@ -171,6 +171,31 @@ class XdCalculator:
         is_incremental = bool(self.xds)
         start_index_for_delta = 0
 
+        # ★ G7 修复 (US-003 xfail 解锁): 增量场景下校验"关键笔起点"漂移。
+        # 早期 bis 列表短 (< 5 根) 时 _find_start 必走 overlap-only fallback,
+        # 返回一个"权宜起点" (例如 bi#0); 当 bis 增长后, _find_strict_start
+        # 才能找到真正的关键笔 (例如 bi#3, 真起点显著晚于权宜起点)。
+        # 若不在此处校验, 增量逻辑会沿用旧的"权宜起点"建立的 xds[0], 永远
+        # 多一段; 表现为"逐根 process_klines 后 xds 比一次性多 1"。
+        #
+        # 校验语义: strict 找到的真起点 != xds[0] 的起始笔位置 → 旧 xds 是基于
+        # fallback 建立的, 关键笔已成立, 作废所有 xds 走全量重建。strict 返回 -1
+        # 表示关键笔还未成立, 保持现状不动 (避免在 fallback 还没切到 strict 时抖动)。
+        if self.xds and all_bis:
+            strict_start = self._find_strict_start(all_bis)
+            if strict_start >= 0:
+                old_first_xd_start_bi_idx = self._locate_bi(
+                    all_bis, self.xds[0].start_line
+                )
+                if old_first_xd_start_bi_idx >= 0 and strict_start != old_first_xd_start_bi_idx:
+                    _log.debug(
+                        f"XdCalculator G7: 关键笔起点漂移 旧={old_first_xd_start_bi_idx} "
+                        f"新={strict_start}, 作废 {len(self.xds)} 个旧 xds 全量重建"
+                    )
+                    self.xds.clear()
+                    self._last_bi_snapshot = None
+                    is_incremental = False
+
         if self.xds and all_bis and self._last_bi_snapshot:
             lb = all_bis[-1]
             # ★ B3 修复：snapshot 同时校验 end.k.k_index。
@@ -224,21 +249,20 @@ class XdCalculator:
         return self.xds[start_index_for_delta:] if is_incremental else self.xds
 
     # ----------------------------------------------------------
-    def _find_start(self, all_bis: List[BI]) -> int:
-        """寻找首段起点。
+    def _find_strict_start(self, all_bis: List[BI]) -> int:
+        """关键笔起点扫描 (严格版, 不走 fallback)。
 
-        优先策略（关键笔判定，对齐旧 segment.py 行为）：
-          扫描 bi[i]，要求 bi[i].start/end 同时是 (bi[i], bi[i+2], bi[i+4]) 中的
-          方向极值——up 笔取最低、down 笔取最高，并且 bi[i] 与 bi[i+2] 有重叠。
-          满足即视作"关键笔"，第一段从此起步。
-          这样能保证段起点恰好是该方向的局部极值，避免出现 bi[i].start 被段内
-          某根反向笔的端点击穿（如 bi[1].end < bi[0].start）造成 xd.start.val 与
-          xd.low/high 语义不一致的退化首段。
+        条件: bi[i].start/end 同时是 (bi[i], bi[i+2], bi[i+4]) 中的方向极值
+        ——up 笔取最低, down 笔取最高——并且 bi[i] 与 bi[i+2] 有重叠。
 
-        回退策略：扫不到关键笔时退回为旧逻辑——只找第一对 (bi[i], bi[i+2]) 重叠
-          的位置。再失败则返回 0，由主循环用 pos+=1 兜底推进。
+        Returns:
+            int: 找到的起点位置 (>= 0); 未找到返回 -1。
+
+        与 ``_find_start`` 的关系: 后者在 strict 找不到时 fallback 到 overlap-only,
+        给出权宜起点供首次建段; 但 calculate() 增量路径必须用 strict 校验,
+        否则会出现"早期权宜起点 → 后续真起点出现 → 增量沿用错起点 → xds 多 1"
+        的 bug (详见 calculate 内 G7 注释)。
         """
-        # 路径 1：关键笔扫描（需要 i+4 存在，即至少 5 笔）
         for i in range(len(all_bis) - 4):
             bi_i = all_bis[i]
             bi_i2 = all_bis[i + 2]
@@ -259,8 +283,21 @@ class XdCalculator:
                 )
             if is_extreme and _overlap(bi_i, bi_i2):
                 return i
+        return -1
 
-        # 路径 2：回退到 overlap-only
+    def _find_start(self, all_bis: List[BI]) -> int:
+        """寻找首段起点 (含 fallback)。
+
+        优先策略 (关键笔, 见 ``_find_strict_start``): 段起点恰好是方向极值,
+        避免 ``xd.start.val 与 xd.low/high 语义不一致的退化首段``。
+
+        回退策略: strict 找不到时退回 overlap-only 的"权宜起点", 让首段能建立。
+          再失败返回 0, 主循环 pos+=1 兜底。
+        """
+        strict = self._find_strict_start(all_bis)
+        if strict >= 0:
+            return strict
+        # Fallback: overlap-only
         for i in range(len(all_bis) - 2):
             if _overlap(all_bis[i], all_bis[i + 2]):
                 return i

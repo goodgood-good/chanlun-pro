@@ -4,22 +4,25 @@
 - 对同一份 K 线, 无论"一次性喂入" / "逐根喂入" / "分批喂入",
   最终 ``cl_snapshot(cd)`` 必须完全相等。
 
-实际探测 (commit c9c2553 附近的 master) 结果:
+历史 bug (commit c9c2553~ 8d2ba0b 的 master):
 - 逐根 / 分批增量后, ``xds`` 数量会比全量多 1 (full=2, inc=3)。
-  根因初判: ``xd_calculator`` 在中间步骤产生的 pending 段没在后续被回收;
-  以及 ``bi_zss_calculator.calculate`` 调用时携带的尾段状态影响。
-- 末根 OHLC 微变能正确更新 cd 内部 K 线, 结构数稳定。
+- 根因: ``XdCalculator._find_start`` 在 bis 列表早期 (<5 根, 无关键笔)
+  走 overlap-only fallback 给出"权宜起点", 增量逻辑沿用此起点建立 xds[0];
+  bis 增长后 _find_strict_start 找到真正关键笔起点 (位置不同), 但
+  ``self.xds`` 已非空 → 不再走 _find_start → 永久多一段。
+- 修复 (xd_calculator.py G7): calculate() 入口校验
+  ``_find_strict_start(all_bis)`` 与旧 xds[0] 起点是否一致; 不一致即"关键笔
+  起点漂移", 作废所有 xds 走全量重建。这是单向 fallback→strict 切换,
+  不会抖动。
 
 本测试文件:
-- 用例 1/2 (逐根 / 分批): 标 ``xfail(strict=True)`` —— 当前已知 bug, US-009
-  (web 路径接入进程内 cl 对象 LRU 缓存) 要求把这个 bug 修掉,
-  那时这两条会自动 xpass 并触发 CI 红灯, 提醒移除 xfail 标记。
-- 用例 3 (末根微变): 不标 xfail, 当前 master 已正确, 作为回归网。
+- 用例 1 (逐根): 200 根 K 线逐根 process_klines vs 一次性, snapshot 必须相等
+- 用例 2 (分批): 10/50/100/200 分批 vs 一次性, snapshot 必须相等
+- 用例 3 (末根微变): 末根 OHLC 变化必须传播到 cd 内部
+- 用例 4 (幂等): 同一份 df 跑两次 process_klines, cd 状态不变
 """
 
 from __future__ import annotations
-
-import pytest
 
 from tests.core.conftest import _generate_kline_df, DEFAULT_CL_CONFIG, cl_snapshot
 from chanlun.core.cl import CL
@@ -32,14 +35,6 @@ def _make_full_snapshot(n: int = 200, seed: int = 42):
     return df, cl_snapshot(cd)
 
 
-@pytest.mark.xfail(
-    reason=(
-        "已知 master bug: 逐根增量后 xds 比全量多 1。"
-        "US-009 (cl 对象 LRU 缓存接入 web) 必须先修掉此 bug, "
-        "届时本用例会自动 xpass 并强制移除 xfail 标记。"
-    ),
-    strict=True,
-)
 def test_incremental_per_kline_matches_full():
     """用例 1: 逐根 process_klines 200 次 vs 一次性 process_klines(full)。"""
     df, snap_full = _make_full_snapshot(200, seed=42)
@@ -56,13 +51,6 @@ def test_incremental_per_kline_matches_full():
     )
 
 
-@pytest.mark.xfail(
-    reason=(
-        "已知 master bug: 分批增量 (10/50/100/200) 后 xds 比全量多 1。"
-        "与 test_incremental_per_kline_matches_full 同根, 由 US-009 一并修复。"
-    ),
-    strict=True,
-)
 def test_incremental_batch_matches_full():
     """用例 2: 分批喂入 [10, 50, 100, 200] vs 一次性 process_klines(full)。"""
     df, snap_full = _make_full_snapshot(200, seed=42)
