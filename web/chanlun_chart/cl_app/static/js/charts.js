@@ -15,6 +15,9 @@ const CL_SHOW_DEFAULT = { fx: true, bi: true, xd: true, zs: true, bc: true, mmd:
 // 之前 widget options 里硬编码 "Asia/Shanghai"，导致美股 K 线在 X 轴上按北京时区
 // 显示（NY 09:30 EDT 开盘 → 21:30；alpaca 默认包含的盘前 NY 08:00 EDT 显示成 20:00）。
 // 改为按 market 查表，未列出的市场（数字货币等）回退到 Asia/Shanghai。
+// (N5) 前端 timezone 表与后端 services/constants.py:market_timezone 保持一致;
+// currency / currency_spot 在后端用 get_localzone() (容器/服务器本地时区),
+// 前端无法直接拿到, 这里用浏览器的 Intl 解析的 IANA tz 作等价回退。
 const MARKET_TIMEZONE = {
     a: "Asia/Shanghai",
     hk: "Asia/Shanghai",
@@ -23,7 +26,17 @@ const MARKET_TIMEZONE = {
     futures: "Asia/Shanghai",
     ny_futures: "Asia/Shanghai",
 };
+function _browserLocalTz() {
+    try {
+        return (Intl.DateTimeFormat().resolvedOptions().timeZone) || "Asia/Shanghai";
+    } catch (e) {
+        return "Asia/Shanghai";
+    }
+}
 function getMarketTimezone(market) {
+    if (market === "currency" || market === "currency_spot") {
+        return _browserLocalTz();
+    }
     return MARKET_TIMEZONE[market] || "Asia/Shanghai";
 }
 
@@ -466,6 +479,9 @@ class ChartManager {
         window.tvDatafeed = this.udf_datafeed; // 兼容旧代码
         // ---------------------------------------
 
+        // (M5) 诊断工具默认启用, 但调用方应在 console 设 window.__chanlunDebug=true
+        // 才会输出"无事件"路径的 console.log; 函数本身一直挂着, 用户在生产 console
+        // 里仍能手动调 window.__chanlunDiag() / __chanlunDumpLines() 排错。
         // 2026-05-12 诊断:在 console 跑 __chanlunDiag() 一键 dump 当前图表状态
         const _diagCm = this;
         window.__chanlunDiag = function () {
@@ -1259,7 +1275,9 @@ class ChartManager {
         });
 
         // [CHANLUN-DIAG] 单行总结:有任何动作时才打
-        if (removedCount > 0 || createSync > 0 || createAsync > 0) {
+        // (M5) 仅在 window.__chanlunDebug=true 时输出, 避免生产 console 刷屏。
+        // 真正的错误诊断仍走 console.warn 不受此开关影响。
+        if (window.__chanlunDebug && (removedCount > 0 || createSync > 0 || createAsync > 0)) {
             console.log(
                 `[CHANLUN-DIAG][reconcile.${type}] src=${sourceCount} unique=${afterUniqueCount} ` +
                 `inWin=${itemsToProcess.length} containerWas=${beforeContainerLen}→${container.length} ` +
@@ -1439,10 +1457,13 @@ class ChartManager {
         //          (理论上=用户手画;但若 race 让 owned 漏 add,会落到此类)
         const trulyForeign = tvShapes.filter(s => !inUseIds.has(s.id) && !this._reconcileOwnedIds.has(s.id));
 
-        console.log(
-            `[CHANLUN-DIAG][sweep] tvShapes=${tvShapes.length} owned=${this._reconcileOwnedIds.size} ` +
-            `inUse=${inUseIds.size} ownedOrphans=${ownedOrphans.length} trulyForeign=${trulyForeign.length}`
-        );
+        // (M5) sweep 总结仅在 window.__chanlunDebug 时输出
+        if (window.__chanlunDebug) {
+            console.log(
+                `[CHANLUN-DIAG][sweep] tvShapes=${tvShapes.length} owned=${this._reconcileOwnedIds.size} ` +
+                `inUse=${inUseIds.size} ownedOrphans=${ownedOrphans.length} trulyForeign=${trulyForeign.length}`
+            );
+        }
 
         // 打头 5 个真正"我们没跟踪但 TV 里有"的 shape — 诊断用,看是不是用户手画 vs 漏跟踪
         if (trulyForeign.length > 0) {
@@ -1473,7 +1494,9 @@ class ChartManager {
                 }
                 this._reconcileOwnedIds.delete(id);
             });
-            console.log(`[CHANLUN-DIAG][sweep] orphan removed=${removed} owned-after=${this._reconcileOwnedIds.size}`);
+            if (window.__chanlunDebug) {
+                console.log(`[CHANLUN-DIAG][sweep] orphan removed=${removed} owned-after=${this._reconcileOwnedIds.size}`);
+            }
         }
 
         // 2026-05-12 终极策略下:reconcile 入口已用 headTime >= from 过滤,
