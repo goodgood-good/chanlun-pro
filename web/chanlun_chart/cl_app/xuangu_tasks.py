@@ -225,4 +225,8 @@ class XuanguTasks(object):
 
 if __name__ == "__main__":
     xt = XuanguTasks(None)
-    print(process_xuangu_task("a", "xg_single_xd_and_bi_mmd", ["d"], "测试"))
+    print(
+        process_xuangu_task(
+            "a", "xg_single_xd_and_bi_mmd", ["d"], ["long"], "all", "测试"
+        )
+    )

@@ -15,7 +15,7 @@ import json
 import os
 import uuid
 
-from flask import Blueprint, render_template, request, send_file
+from flask import Blueprint, Response, render_template, request
 from flask_login import login_required
 from werkzeug.utils import secure_filename
 
@@ -90,20 +90,16 @@ def opt_zixuan_export():
     zx_group = request.args.get("zx_group")
     zx = ZiXuan(market)
     stock_list = zx.zx_stocks(zx_group)
-    output = ""
-    for s in stock_list:
-        output += f"{s['code']},{s['name']}\n"
-    # 用 uuid 命名，避免并发导出互相覆盖；下载名由用户传入，secure_filename 防注入。
-    down_file = get_data_path() / f"zx_export_{uuid.uuid4().hex}.txt"
+    output = "".join(f"{s['code']},{s['name']}\n" for s in stock_list)
+    # 直接走内存 Response，不落临时文件：导出内容仅几 KB；旧实现的
+    # finally os.remove 会在 send_file 推流前执行，Windows 上文件被 send_file
+    # 占用 → 删除失败 → zx_export_*.txt 永久泄漏。下载名经 secure_filename 防注入。
     safe_name = secure_filename(f"zixuan_{zx_group}.txt") or "zixuan.txt"
-    try:
-        down_file.write_text(output, encoding="utf-8")
-        return send_file(down_file, as_attachment=True, download_name=safe_name)
-    finally:
-        try:
-            os.remove(down_file)
-        except OSError:
-            pass
+    return Response(
+        output,
+        mimetype="text/plain; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{safe_name}"'},
+    )
 
 
 @zixuan_bp.route("/zixuan_opt_import", methods=["POST"])

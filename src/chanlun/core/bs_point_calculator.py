@@ -408,25 +408,6 @@ class BsPointCalculator:
     # ------------------------------------------------------------------
     # 二买的辅助方法
     # ------------------------------------------------------------------
-    def _find_prev_1mmd_line(
-        self, prev_lines: List[LINE], target_type: str
-    ) -> Optional[LINE]:
-        """
-        从 ``prev_lines`` 中倒序查找最近一根挂了 ``1buy`` 或 ``1sell`` 的同方向线段。
-
-        :param prev_lines: 候选线段列表（必须不含当前 now_line）
-        :param target_type: ``'down'`` 找 1buy；``'up'`` 找 1sell
-        :return: 该线段，或 ``None``
-        """
-        target_mmd_name = '1buy' if target_type == 'down' else '1sell'
-        for line in reversed(prev_lines):
-            if line.type != target_type:
-                continue
-            mmds = getattr(line, 'zs_type_mmds', {}).get(self.zs_type, [])
-            if any(mmd.name == target_mmd_name for mmd in mmds):
-                return line
-        return None
-
     def _find_recent_1mmd_lines(
         self, prev_lines: List[LINE], target_type: str, max_count: int = 3
     ) -> List[LINE]:
@@ -540,8 +521,8 @@ class BsPointCalculator:
             - ``now_line`` 必须严格在中枢离开段之后（不能是中枢内部线段，也不能是离开段本身）
             - 取所有合法中枢中"离开段最近"的那一个
 
-        注意：主流程改用 ``_find_all_candidate_zss_for_3rd``，本方法保留作为
-        向后兼容（取候选列表第一个 = 最近的），不再被主流程调用。
+        说明：本方法委托 ``_find_all_candidate_zss_for_3rd`` 取候选列表第一个
+        （= 离开段最近的中枢）；``_detect_3buy_3sell`` 主流程即调用本方法。
 
         :param now_line: 候选反抽线段
         :param zss: 中枢列表（按 index 升序）

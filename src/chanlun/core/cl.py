@@ -128,7 +128,7 @@ class CL(ICL):
         # 返回增量更新或新增的K线数据列表
         src_klines: List[Kline] = self.kline_processor.process_kline(klines)
         if not src_klines:
-            return
+            return self
 
         try:
             # 直接引用内部数据，避免 deepcopy

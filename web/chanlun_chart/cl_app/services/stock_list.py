@@ -29,10 +29,11 @@ from chanlun.base import Market
 from chanlun.exchange import get_exchange
 from chanlun.tools.log_util import LogUtil
 
-from .chart_cache import cache_lock
-
 # 基础数据缓存（市场 → processed symbols list）
 stock_cache: TTLCache = TTLCache(maxsize=100, ttl=7200)
+# stock_cache 专用锁（M3）。曾与 chart_cache.cache_lock 共用一把锁，导致一次
+# chart 缓存的磁盘读会阻塞 symbol 列表读写；此处独立成锁，两个无关缓存互不干扰。
+_stock_cache_lock = threading.Lock()
 
 # 落盘缓存格式版本：未来若 schema 变更（如新增字段、改 raw 为 processed），递增此值，
 # 旧文件会被忽略并被新版本覆盖，避免反序列化时 KeyError。
@@ -196,7 +197,7 @@ def _warm_cache_from_disk() -> None:
             continue
         try:
             processed = _process_stock_list(raw_stocks)
-            with cache_lock:
+            with _stock_cache_lock:
                 # 防御：极端情况下 preload 已经先把缓存填了，则不覆盖；磁盘数据可能更陈旧。
                 if exchange not in stock_cache:
                     stock_cache[exchange] = processed
@@ -248,7 +249,7 @@ def _preload_single_exchange(exchange: str, skip_if_disk_warm: bool = False) -> 
     保证缓存最终一致。``_trigger_async_refresh`` 走默认 False，行为不变。
     """
     if skip_if_disk_warm:
-        with cache_lock:
+        with _stock_cache_lock:
             cached = stock_cache.get(exchange)
         if cached:
             LogUtil.info(
@@ -266,7 +267,7 @@ def _preload_single_exchange(exchange: str, skip_if_disk_warm: bool = False) -> 
             return
         all_stocks = _safe_all_stocks(ex, exchange)
         processed_stocks = _process_stock_list(all_stocks)
-        with cache_lock:
+        with _stock_cache_lock:
             stock_cache[exchange] = processed_stocks
         # 写盘：让下次冷启动直接秒读文件，不再等 28s 通达信。
         # 失败仅 warn 不影响主流程；空 all_stocks 会被 _save_stocks_to_disk 内部短路。
@@ -370,7 +371,7 @@ def get_cached_processed_stocks(exchange, allow_sync_fallback: bool = False):
       搜索接口会全 500，用户体感是"搜索框完全坏了"。
     - 同步路径里任何异常（包括交易所连接超时）都吞掉并返回 ``[]``，搜索框最差是"无结果"。
     """
-    with cache_lock:
+    with _stock_cache_lock:
         cached = stock_cache.get(exchange)
     if cached is not None:
         return cached
@@ -391,7 +392,7 @@ def get_cached_processed_stocks(exchange, allow_sync_fallback: bool = False):
             return []
         all_stocks = _safe_all_stocks(ex, exchange) or []
         processed = _process_stock_list(all_stocks)
-        with cache_lock:
+        with _stock_cache_lock:
             stock_cache[exchange] = processed
         # 同步兜底成功后也写盘：下次冷启动可直接秒读，跟 preload 路径保持一致。
         _save_stocks_to_disk(exchange, all_stocks)

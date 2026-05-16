@@ -71,15 +71,27 @@ class MACD:
             self._incremental_calculation(klines[-1], is_update_last=True)
 
         elif current_count > self._last_kline_count:
-            # 模式C：新增 Bar 追加计算
-            new_klines = klines[self._last_kline_count:]
-            for k in new_klines:
-                # 计算新 Bar 前，当前的 val 变成 prev
-                self._ema_fast_val_prev = self._ema_fast_val
-                self._ema_slow_val_prev = self._ema_slow_val
-                self._dea_val_prev = self._dea_val
+            # 模式C：新增 Bar。一次更新可能同时"重绘旧末根 + 追加新根"
+            # （polling 在 bar 边界很常见：上一根 bar 收定使 close 变化，同时新
+            # bar 开启）。process_macd 仅凭 len(klines) 判断模式，若只算新追加
+            # 的 bar，被重绘的旧末根 close 变化不会反映 → EMA 基准被污染。
+            # 故先回滚旧末根、以"更新末根"语义重算它，再逐根追加新 Bar。
+            if self._last_kline_count < 2:
+                # 仅 1 根历史时旧末根是 bar0（无前驱），增量重算边界不成立，
+                # 直接全量重算，避开 bar0 的退化情形。
+                self._full_calculation(klines)
+            else:
+                self._rollback_state()
+                self._incremental_calculation(
+                    klines[self._last_kline_count - 1], is_update_last=True
+                )
+                for k in klines[self._last_kline_count:]:
+                    # 计算新 Bar 前，当前的 val 变成 prev
+                    self._ema_fast_val_prev = self._ema_fast_val
+                    self._ema_slow_val_prev = self._ema_slow_val
+                    self._dea_val_prev = self._dea_val
 
-                self._incremental_calculation(k, is_update_last=False)
+                    self._incremental_calculation(k, is_update_last=False)
 
         self._last_kline_count = current_count
 
@@ -148,15 +160,11 @@ class MACD:
         self._ema_slow_val = new_ema_slow
         self._dea_val = new_dea
 
-        # Tick 更新模式下列表已在 _rollback_state pop 过，两种模式都用 append
-        if is_update_last:
-            self.dif.append(new_dif)
-            self.dea.append(new_dea)
-            self.hist.append(new_hist)
-        else:
-            self.dif.append(new_dif)
-            self.dea.append(new_dea)
-            self.hist.append(new_hist)
+        # Tick 更新模式下列表已在 _rollback_state pop 过，两种模式都用 append。
+        # is_update_last 保留作调用方语义标识；append 行为对两种模式一致。
+        self.dif.append(new_dif)
+        self.dea.append(new_dea)
+        self.hist.append(new_hist)
 
         self._calculate_hist_area_incremental(self.hist, start_index=len(self.hist) - 1)
 

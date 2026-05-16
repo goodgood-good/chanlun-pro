@@ -1820,6 +1820,9 @@ def user_custom_mmd(
 
     if len(lines) < 4 or len(zss) == 0:
         return False
+    # line.index < 2 时 lines[line.index - 2] 会负索引环绕取到错误的线，提前返回。
+    if line.index < 2:
+        return False
 
     # 类二类买卖点，如果前一笔同向的线段出现二类买卖点，当前与二类买卖点笔有重叠（形成中枢），不创前一笔的高点或低点，增加类二类买卖点
     pre_same_line = lines[line.index - 2]

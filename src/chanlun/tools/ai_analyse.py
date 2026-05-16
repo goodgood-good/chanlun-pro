@@ -119,10 +119,13 @@ class AIAnalyse:
 
         record_dicts = []
         for _r in records:
-            _dr = _r.__dict__
-            # SQLAlchemy 内部状态字段，不暴露给调用方
-            if "_sa_instance_state" in _dr.keys():
-                del _dr["_sa_instance_state"]
+            # 构造新 dict，不直接 mutate ORM 实例的 __dict__——删
+            # _sa_instance_state 会破坏 mapped 实例的内部状态。
+            _dr = {
+                k: v
+                for k, v in _r.__dict__.items()
+                if k != "_sa_instance_state"
+            }
             _dr["dt"] = fun.datetime_to_str(_dr["dt"])
             record_dicts.append(_dr)
         return record_dicts, total
@@ -261,7 +264,14 @@ class AIAnalyse:
                 "model": config.AI_MODEL,
             }
 
-        msg = ai_res["choices"][0]["message"]["content"]
+        try:
+            msg = ai_res["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError) as e:
+            return {
+                "ok": False,
+                "msg": f"AI 接口返回结构异常：{e}",
+                "model": config.AI_MODEL,
+            }
         return {"ok": True, "msg": msg, "model": config.AI_MODEL}
 
     def req_openrouter_ai_model(self, prompt: str) -> dict:

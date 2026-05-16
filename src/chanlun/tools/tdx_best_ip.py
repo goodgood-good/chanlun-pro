@@ -200,6 +200,10 @@ def select_best_ip(_type="stock"):
 
     results = [x[1] for x in sorted(results, key=lambda x: x[0])]
 
+    if not results:
+        raise ConnectionError(
+            f"无可用的 TDX {_type} 服务器：候选 IP 全部 ping 失败或响应过慢"
+        )
     return results[0]
 
 

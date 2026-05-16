@@ -435,7 +435,7 @@ def apply_higher_macd_to_chart_data(
     frequency: str,
     market: str,
     cl_config: dict,
-) -> None:
+) -> bool:
     """计算并 in-place 写入 chart_data 的 higher_macd_dif/dea/hist 字段。
 
     跨周期 MACD 思路: 用 frequency × ratio 放大 fast/slow/signal 周期, 在原
@@ -447,10 +447,14 @@ def apply_higher_macd_to_chart_data(
         frequency: 当前 K 线周期 (1m / 5m / ... / d / w / m)
         market: 市场标识 (用于 30m_TO_D / D_TO_W 倍率特殊处理)
         cl_config: 缠论配置 (取 idx_macd_fast/slow/signal, 默认 12/26/9)
+
+    Returns:
+        bool: True 表示已写入 higher_macd_* 字段; False 表示未写入
+              (无倍率 / bar 数不足 / 计算异常)。调用方据此决定是否回写缓存。
     """
     ratio = _resolve_higher_macd_ratio(frequency, market)
     if ratio is None:
-        return  # 该 frequency 无高周期对照, 不做事
+        return False  # 该 frequency 无高周期对照, 不做事
 
     try:
         closes = np.array(chart_data.get("c", []), dtype=float)
@@ -460,7 +464,7 @@ def apply_higher_macd_to_chart_data(
         # 确保有足够的 bar 数量用于 MACD 计算 (至少 slow+signal 根 K 线)
         min_bars = slow + signal
         if len(closes) <= min_bars:
-            return
+            return False  # bar 数不足以算高周期 MACD, 不写字段
         h_dif, h_dea, h_hist = talib.MACD(
             closes, fastperiod=fast, slowperiod=slow, signalperiod=signal,
         )
@@ -476,8 +480,33 @@ def apply_higher_macd_to_chart_data(
         chart_data["higher_macd_hist"] = np.where(
             np.isnan(h_hist_rounded), None, h_hist_rounded
         ).tolist()
+        return True
     except Exception as e:
         LogUtil.error(f"[apply_higher_macd] Scaled MACD calc failed: {e}")
+        return False
+
+
+def should_lazy_apply_higher_macd(
+    chart_data: dict, frequency: str, market: str
+) -> bool:
+    """判断 cache hit 路径是否需要 lazy 补算 higher_macd (M1)。
+
+    返回 True 需同时满足:
+      1. 该 frequency 确有高周期倍率 (``_resolve_higher_macd_ratio`` 非 None);
+      2. chart_data 有 bar;
+      3. ``higher_macd_hist`` 长度与 bar 数不一致 (缺失或残缺)。
+
+    对 15m / 60m / 2m 等无高周期倍率的 frequency, higher_macd 本就该缺失,
+    返回 False —— 否则 tv_history 每次 polling (~3s) 都会因"长度不符"误判为
+    需补算, 触发一次冗余的 _set_chart_cache_entry + 异步写盘。
+    """
+    if _resolve_higher_macd_ratio(frequency, market) is None:
+        return False
+    bar_count = len(chart_data.get("t", []) or [])
+    if bar_count == 0:
+        return False
+    htf_hist = chart_data.get("higher_macd_hist") or []
+    return len(htf_hist) != bar_count
 
 
 def fetch_klines_and_compute_cl_data(

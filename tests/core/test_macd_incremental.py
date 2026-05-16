@@ -12,8 +12,11 @@
 
 from __future__ import annotations
 
+import datetime
+
 import pytest
 
+from chanlun.core.cl_interface import Kline
 from chanlun.core.macd import MACD
 
 
@@ -54,3 +57,52 @@ def test_hist_area_incremental_equals_full(hist, desc):
     full = _full_area(hist)
     inc = _incremental_area(hist)
     assert inc == full, f"{desc}: 增量 {inc} != 全量 {full}"
+
+
+# =============================================================================
+# process_macd mode C — 一次更新同时"重绘旧末根 + 追加新根"的等价性
+# =============================================================================
+
+
+def _mk_klines(closes: list[float]) -> list[Kline]:
+    """用 close 列表构造最小 Kline 列表(MACD 计算只读 .c)。"""
+    base = datetime.datetime(2024, 1, 1, 9, 30)
+    return [
+        Kline(
+            index=i,
+            date=base + datetime.timedelta(minutes=i),
+            h=c + 1.0,
+            l=c - 1.0,
+            o=c,
+            c=c,
+            a=1000.0,
+        )
+        for i, c in enumerate(closes)
+    ]
+
+
+def test_process_macd_mode_c_recomputes_repainted_last_bar():
+    """mode C:一次更新同时重绘旧末根 + 追加新根时,旧末根必须被重算。
+
+    polling 在 bar 边界很常见:上一根 bar 收定(close 变化)+ 新 bar 开启,
+    一次 process_macd 调用里既"更新末根"又"追加新根"。process_macd 仅凭
+    len(klines) 判断模式,mode C 若只算新追加的 bar,被重绘的旧末根 close
+    变化不会反映 → EMA 基准被污染,后续所有 bar 的 dif/dea/hist 都偏移。
+    """
+    closes_v1 = [
+        10.0, 11.0, 12.0, 11.5, 12.5, 13.0, 12.0, 11.0,
+        10.5, 11.0, 12.0, 13.0, 14.0, 13.5, 12.0,
+    ]
+    # v2:前 14 根不变,第 15 根(idx 14)被重绘 12.0 → 15.0,再追加 1 根新 bar。
+    closes_v2 = closes_v1[:-1] + [15.0, 16.0]
+
+    m = MACD()
+    m.process_macd(_mk_klines(closes_v1))   # 首次:全量(mode A)
+    m.process_macd(_mk_klines(closes_v2))   # mode C:count 15 → 16
+
+    fresh = MACD()
+    fresh.process_macd(_mk_klines(closes_v2))  # 权威全量
+
+    assert m.dif == pytest.approx(fresh.dif), "mode C dif 与全量不一致"
+    assert m.dea == pytest.approx(fresh.dea), "mode C dea 与全量不一致"
+    assert m.hist == pytest.approx(fresh.hist), "mode C hist 与全量不一致"

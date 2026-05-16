@@ -206,10 +206,15 @@ class _CLObjectCacheMixin:
         建议定时频繁读取保持更新, 避免太多时间不读取造成数据缺失。
         """
         key = self._config_md5(cl_config)
+        # 与 get_web_cl_data 一致：落到 cl_data_path/<market>/ 子目录。
+        # 否则 clear_old_web_cl_data 只 glob <market> 子目录，清不到平铺在
+        # cl_data_path 根目录的文件 → 这些 .pkl 永不被清理（M7 磁盘泄漏）。
         filename = (
             self.cl_data_path
-            / f'{market}_{code.replace("/", "_")}_{frequency}_{key}.pkl'
+            / market
+            / f'{market}_{code.replace("/", "_").replace(".", "_")}_{frequency}_{key}.pkl'
         )
+        filename.parent.mkdir(parents=True, exist_ok=True)
         cd: ICL = None
         if filename.is_file():
             try:

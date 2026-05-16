@@ -15,6 +15,7 @@ from cl_app.services.chart_compute import (
     MARKET_D_TO_W_RATIO,
     _resolve_higher_macd_ratio,
     apply_higher_macd_to_chart_data,
+    should_lazy_apply_higher_macd,
 )
 
 
@@ -96,3 +97,58 @@ def test_apply_empty_closes_no_op():
     chart_data = {"c": []}
     apply_higher_macd_to_chart_data(chart_data, "1m", "a", {})
     assert "higher_macd_dif" not in chart_data
+
+
+# =============================================================================
+# M1: should_lazy_apply_higher_macd — cache hit 路径是否需要 lazy 补算 HTF
+# =============================================================================
+
+
+def test_lazy_no_ratio_frequency_skips():
+    """无高周期倍率的 frequency(15m 等):HTF 本就该缺失,不应触发 lazy 补算。
+
+    历史 bug:旧逻辑只看 len(htf) != bar_count,对 15m/60m 等周期恒为真,
+    每次 polling 都冗余重写缓存 + 异步写盘。
+    """
+    chart_data = {"t": [1, 2, 3], "higher_macd_hist": []}
+    assert should_lazy_apply_higher_macd(chart_data, "15m", "a") is False
+
+
+def test_lazy_ratio_frequency_missing_htf_needs_apply():
+    """有高周期倍率的 frequency(5m)且 HTF 缺失 → 需要补算。"""
+    chart_data = {"t": [1, 2, 3], "higher_macd_hist": []}
+    assert should_lazy_apply_higher_macd(chart_data, "5m", "a") is True
+
+
+def test_lazy_ratio_frequency_complete_htf_skips():
+    """HTF 已齐(长度与 bar 数一致)→ 不重复补算。"""
+    chart_data = {"t": [1, 2, 3], "higher_macd_hist": [0.1, 0.2, 0.3]}
+    assert should_lazy_apply_higher_macd(chart_data, "5m", "a") is False
+
+
+def test_lazy_empty_chart_data_skips():
+    """无 bar → 不补算。"""
+    assert should_lazy_apply_higher_macd({"t": []}, "5m", "a") is False
+
+
+# =============================================================================
+# M1/M2 补强:apply_higher_macd_to_chart_data 返回"是否真正写入"
+# =============================================================================
+
+
+def test_apply_returns_true_when_fields_written():
+    """有倍率 + bar 数充足 → 写入字段并返回 True。"""
+    chart_data = {"c": [100.0 + i * 0.1 for i in range(500)]}
+    assert apply_higher_macd_to_chart_data(chart_data, "1m", "a", {}) is True
+
+
+def test_apply_returns_false_for_short_series():
+    """bar 数不足 → 不写字段,返回 False(调用方据此跳过冗余回写)。"""
+    chart_data = {"c": [100.0] * 5}
+    assert apply_higher_macd_to_chart_data(chart_data, "1m", "a", {}) is False
+
+
+def test_apply_returns_false_for_unknown_frequency():
+    """无高周期倍率的 frequency → 不写字段,返回 False。"""
+    chart_data = {"c": [100.0] * 500}
+    assert apply_higher_macd_to_chart_data(chart_data, "999x", "a", {}) is False

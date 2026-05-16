@@ -129,6 +129,11 @@ class KlineDataProcessor:
         """将DataFrame转换为Kline对象列表。index 暂置 0，由 _update_internal_klines 修正。"""
         klines = []
         for row in df.to_dict('records'):
+            # volume 可能不存在 / 为 None / 经 to_numeric coerce 成 NaN。
+            # NaN 是 truthy，不能用 `or 0.0` 兜底（nan or 0.0 求值为 nan），
+            # 否则 NaN 会进入 Kline.a 并经 cl_kline 合并 a=k1.a+k2.a 扩散。
+            _vol = row.get('volume')
+            vol = 0.0 if _vol is None or pd.isna(_vol) else float(_vol)
             kline = Kline(
                 index=0,  # 占位符，将在 _update_internal_klines 中被修正
                 date=row['date'],
@@ -136,8 +141,7 @@ class KlineDataProcessor:
                 l=float(row['low']),
                 o=float(row['open']),
                 c=float(row['close']),
-                # volume 可能不存在或为 None，用 or 0.0 兜底
-                a=float(row.get('volume') or 0.0)
+                a=vol,
             )
             klines.append(kline)
         return klines

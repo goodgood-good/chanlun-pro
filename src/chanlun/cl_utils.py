@@ -465,6 +465,7 @@ def query_cl_chart_config(
     config = None
     now = time.time()
     should_skip_db = False
+    db_consulted = False  # DB 是否被成功读取（无论命中与否）
     global _cl_config_db_backoff_until
     with _cl_config_cache_lock:
         if now < _cl_config_db_backoff_until:
@@ -475,6 +476,7 @@ def query_cl_chart_config(
             config = db.cache_get(f"cl_config_{market}_{code}{suffix}")
             if config is None:
                 config = db.cache_get(f"cl_config_{market}_common{suffix}")
+            db_consulted = True
             with _cl_config_cache_lock:
                 _cl_config_db_backoff_until = 0.0
         except Exception as e:
@@ -490,7 +492,12 @@ def query_cl_chart_config(
         for _key, _val in config.items():
             result_config[_key] = _val
 
-    _cl_config_cache_set(local_cache_key, result_config)
+    # 只有成功读过 DB 才写本地缓存（M8）。退避期跳过 / 读失败时返回的是
+    # "默认配置兜底"，若也缓存，一次 DB 抖动会把默认配置钉住
+    # _cl_config_cache_ttl（300s）—— 即便 DB 已恢复，用户的自选配置仍被
+    # 默认值覆盖数分钟。不缓存兜底值即可让退避到期后立刻读回真实配置。
+    if db_consulted:
+        _cl_config_cache_set(local_cache_key, result_config)
     return result_config
 
 

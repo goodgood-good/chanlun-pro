@@ -109,32 +109,38 @@ def _get_chart_cache_entry(cache_key: str):
     后续相同 cache_key 的访问就走 RAM 热层。
 
     磁盘读失败（损坏/IO 异常）由 fdb.get_chart_cache 内部处理，这里看到的是 None。
+
+    线程安全：``chart_data_cache`` 是非线程安全的 TTLCache，所有读写都必须在
+    ``cache_lock`` 内。本函数自带 ``cache_lock``（可重入 RLock），调用方无需
+    （也可重复）持锁——既保护直接调用方，也保护经 kline_recompute / symbols
+    等不持锁路径进来的访问。
     """
-    entry = _normalize_cache_entry(chart_data_cache.get(cache_key))
-    if entry is not None:
-        return entry
+    with cache_lock:
+        entry = _normalize_cache_entry(chart_data_cache.get(cache_key))
+        if entry is not None:
+            return entry
 
-    # RAM miss → 尝试磁盘冷层
-    try:
-        disk_entry = fdb.get_chart_cache(cache_key)
-    except Exception as e:
-        LogUtil.warning(f"[chart_cache] disk read failed key={cache_key} err={e}")
-        disk_entry = None
-    entry = _normalize_cache_entry(disk_entry)
-    if entry is None:
-        return None
-
-    # 回填 RAM；不再异步写盘（来源就是磁盘）。
-    chart_data_cache[cache_key] = entry
-
-    # 机会型清理：极低概率触发，避免 chart_cache 目录膨胀。
-    if random.randint(0, 2000) <= 1:
+        # RAM miss → 尝试磁盘冷层
         try:
-            fdb.maybe_cleanup_chart_cache()
-        except Exception:
-            pass
+            disk_entry = fdb.get_chart_cache(cache_key)
+        except Exception as e:
+            LogUtil.warning(f"[chart_cache] disk read failed key={cache_key} err={e}")
+            disk_entry = None
+        entry = _normalize_cache_entry(disk_entry)
+        if entry is None:
+            return None
 
-    return entry
+        # 回填 RAM；不再异步写盘（来源就是磁盘）。
+        chart_data_cache[cache_key] = entry
+
+        # 机会型清理：极低概率触发，避免 chart_cache 目录膨胀。
+        if random.randint(0, 2000) <= 1:
+            try:
+                fdb.maybe_cleanup_chart_cache()
+            except Exception:
+                pass
+
+        return entry
 
 
 def _entry_freshness(cache_entry: dict, mode: str) -> str:
@@ -271,21 +277,28 @@ def _persist_chart_cache_async(cache_key: str, entry: dict) -> None:
 
 
 def _set_chart_cache_entry(cache_key: str, cl_chart_data: dict, is_full_snapshot: bool):
-    """两层缓存写入：RAM 立即可见，磁盘异步持久化。"""
+    """两层缓存写入：RAM 立即可见，磁盘异步持久化。
+
+    本函数自带 ``cache_lock``（可重入 RLock），调用方无需（也可重复）持锁——
+    ``deepcopy`` 在锁内做，与 ``_persist_chart_cache_async`` 的 snapshot 不变量一致。
+    """
     entry = _build_chart_cache_entry(cl_chart_data, is_full_snapshot=is_full_snapshot)
-    chart_data_cache[cache_key] = entry
-    _persist_chart_cache_async(cache_key, entry)
+    with cache_lock:
+        chart_data_cache[cache_key] = entry
+        _persist_chart_cache_async(cache_key, entry)
     return entry
 
 
 def _mark_chart_cache_validated(cache_key: str):
     # H4: validated_at 只更新到 entry 内部；entry 本身的 TTL 由 chart_data_cache 统一管理。
     # 若 cache 已被 TTL 淘汰，没有 entry 可标记，直接返回（下次请求自然重算）。
-    entry = _get_chart_cache_entry(cache_key)
-    if entry is None:
-        return
-    entry["validated_at"] = time.time()
-    chart_data_cache[cache_key] = entry
+    # 自带 cache_lock（可重入）；_get_chart_cache_entry 同样自锁，嵌套获取安全。
+    with cache_lock:
+        entry = _get_chart_cache_entry(cache_key)
+        if entry is None:
+            return
+        entry["validated_at"] = time.time()
+        chart_data_cache[cache_key] = entry
 
 
 # ---------------- 负缓存（空数据短期记忆）----------------

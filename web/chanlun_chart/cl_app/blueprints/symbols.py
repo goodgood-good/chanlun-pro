@@ -339,6 +339,29 @@ PREWARM_INTERVALS = ["1D", "30", "5", "1"]
 # env PREWARM_FREQ_PARALLELISM 可覆盖
 PREWARM_FREQ_PARALLELISM = _env_int("PREWARM_FREQ_PARALLELISM", 2)
 
+# native 数据源（xtquant / tdx 系列）客户端线程不安全，单标的内多周期计算必须串行。
+# 按 config.EXCHANGE_<MARKET> 实际数据源归类：a→qmt(xtquant)、futures→tdx_futures、
+# ny_futures→tdx_ny_futures、fx→tdx_fx 均为 native；hk/us→cq(长桥 HTTP)、
+# currency/currency_spot→binance(HTTP) 可并行。
+# 注：不沿用 tv.py 的 _PREWARM_INTERVALS_PARALLEL_MARKETS——那份集合把 tdx 的 fx
+# 误列为可并行，是既有缺陷。
+_NATIVE_SERIAL_MARKETS = frozenset({"a", "futures", "ny_futures", "fx"})
+
+
+def _resolve_freq_parallelism(market: str) -> int:
+    """返回单标的内"周期并行度"。
+
+    native 市场（a 股 xtquant、tdx 期货）→ 1（强制串行，客户端线程不安全）；
+    其余 HTTP 数据源市场 → ``PREWARM_FREQ_PARALLELISM``。
+
+    历史 bug：旧实现对所有市场统一用 PREWARM_FREQ_PARALLELISM，a 股批量预热
+    会并发 2 个 xtquant ``ex.klines`` 调用，与"native 必须串行"约束冲突。
+    """
+    if market in _NATIVE_SERIAL_MARKETS:
+        return 1
+    return PREWARM_FREQ_PARALLELISM
+
+
 # 多个标的之间并行处理的 worker 数。按市场区分：
 # - a 股 xtquant native 不是线程安全的，必须串行 → 1
 # - 其他 native 数据源（tdx 期货）也保险串行 → 1
@@ -855,7 +878,8 @@ class PrewarmManager:
         )
         LogUtil.info(
             f"[prewarm] task starting market={market} total={task.total} "
-            f"code_parallelism={code_parallelism} freq_parallelism={PREWARM_FREQ_PARALLELISM}"
+            f"code_parallelism={code_parallelism} "
+            f"freq_parallelism={_resolve_freq_parallelism(market)}"
         )
 
         # pending 用 list + 索引推进的方式实现"用户最近看过的标的优先插队"
@@ -1130,12 +1154,13 @@ class PrewarmManager:
         为什么可以并行：
         - 每个周期独立拉数据（ex.klines）→ 独立算缠论 → 独立写 cache_key 不同的缓存；
         - 4 个周期之间没有数据依赖（higher_macd 是从当前周期 closes 算的，不依赖其他周期）；
-        - cache_lock 是写缓存的细粒度锁，多个 cache_key 同时写不会冲突；
-        - chart_calc_locks 是 per-cache_key 锁，确保即使用户切到该标的同一周期，
-          tv_history 和这里的预热也只会有一个在算（另一个等结果）。
+        - cache_lock 是写缓存的细粒度锁，多个 cache_key 同时写不会冲突。
 
-        移除了 _wait_for_user_idle：让 chart_calc_locks 自然处理"用户切到正在预热的标的"
-        的情况，不再阻塞 worker。
+        注意（M5 修正）：compute_and_cache_chart_data 并不获取 chart_calc_locks，
+        故批量预热与用户 tv_history 对同一 cache_key 可能各算一遍（结果一致，
+        仅多一次计算）；cache_lock 保证两边写入不冲突，正确性不受影响。
+        单标的内的周期并行度由 _resolve_freq_parallelism(market) 决定：native
+        市场（a/futures/ny_futures）强制串行 1。
         """
         any_success = False
         success_lock = threading.Lock()
@@ -1208,7 +1233,7 @@ class PrewarmManager:
 
         # 单标的内 4 周期并行
         with ThreadPoolExecutor(
-            max_workers=PREWARM_FREQ_PARALLELISM,
+            max_workers=_resolve_freq_parallelism(market),
             thread_name_prefix=f"PrewarmFreq[{market}/{code}]",
         ) as freq_executor:
             future_to_interval = {

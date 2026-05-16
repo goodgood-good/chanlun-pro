@@ -28,7 +28,8 @@ def _wrap_stdio_gbk() -> None:
             self.target = target
 
         def write(self, s):
-            self.target.buffer.write(s.encode("gbk"))
+            # errors="replace"：日志含非 GBK 字符（emoji 等）时不让 WPF 模式崩溃。
+            self.target.buffer.write(s.encode("gbk", errors="replace"))
             self.target.flush()
 
         def flush(self):

@@ -163,3 +163,40 @@ def test_ref_bar_index_stable_for_appending():
     # 短序列时 ref_idx = n//4
     assert _ref_bar_index(40) == 10
     assert _ref_bar_index(12) == 3
+
+
+# =============================================================================
+# M6: 增量喂入失败时,坏 cd 必须从缓存逐出(防止后续请求命中坏对象)
+# =============================================================================
+
+
+def test_evicts_broken_cd_on_incremental_failure():
+    """路径2(extending)中 process_klines 抛错 → 半 applied 的 cd 必须从
+    _cl_object_cache 逐出。否则后续同 signature 的请求会走路径1命中,
+    把这个坏对象继续返回给调用方。
+    """
+    from cl_app.services import cl_object_cache as coc
+
+    df_full = _generate_kline_df(205, seed=42, multi_freq=True)
+    df_initial = df_full.iloc[:200].copy()
+    df_extended = df_full.copy()
+
+    key = coc._build_cache_key("a", "T", "1m", DEFAULT_CL_CONFIG)
+    old_sig = coc._compute_kline_signature(df_initial)
+
+    class _BrokenCd:
+        def process_klines(self, klines):
+            raise RuntimeError("incremental feed boom")
+
+    # 预置缓存:cd 是 process_klines 必抛错的 stub,signature = old_sig。
+    with coc._cache_lock:
+        coc._cl_object_cache[key] = coc._CacheEntry(
+            cd=_BrokenCd(), signature=old_sig
+        )
+
+    # extending klines → 走路径2 → stub.process_klines 抛错
+    with pytest.raises(RuntimeError, match="incremental feed boom"):
+        coc.get_or_compute_cl("a", "T", "1m", DEFAULT_CL_CONFIG, df_extended)
+
+    # 坏 cd 必须被逐出,不能继续被服务
+    assert key not in coc._cl_object_cache, "增量失败后坏 cd 未被逐出"

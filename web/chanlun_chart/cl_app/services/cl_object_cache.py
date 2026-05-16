@@ -210,7 +210,16 @@ def get_or_compute_cl(
         # ----- 路径 2: extending signature → 复用旧 cd, 内部增量 -----
         if entry is not None and _is_extending_signature(entry.signature, sig):
             cd = entry.cd
-            cd.process_klines(klines)
+            try:
+                cd.process_klines(klines)
+            except Exception:
+                # 增量喂入中途抛异常 → cd 处于半 applied 状态, 且它仍挂在
+                # _cl_object_cache 里; 后续同 signature 的请求会走路径 1 命中,
+                # 把这个坏对象继续返回。逐出该 key, 迫使下次请求走路径 3
+                # 新建一个干净 cd (M6)。
+                with _cache_lock:
+                    _cl_object_cache.pop(key, None)
+                raise
             _stats["incremental_extends"] += 1
         else:
             # ----- 路径 3: 全量重建 -----

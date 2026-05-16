@@ -372,7 +372,7 @@ var ZiXuan = (function () {
                     if (val) {
                         $.ajax({
                             type: "GET",
-                            url: "/tv/search?limit=30&type=&query=" + val + "&exchange=" + Utils.get_market(),
+                            url: "/tv/search?limit=30&type=&query=" + encodeURIComponent(val) + "&exchange=" + Utils.get_market(),
                             dataType: "json",
                             success: function (res) {
                                 let lst = [];

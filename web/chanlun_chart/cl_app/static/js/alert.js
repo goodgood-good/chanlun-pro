@@ -102,14 +102,14 @@ var Alert = (function () {
                 },
               },
               {
-                filed: "frequency",
+                field: "frequency",
                 title: "周期",
                 templet: function (d) {
                   return d.frequency;
                 },
               },
               {
-                filed: "interval_minutes",
+                field: "interval_minutes",
                 title: "运行间隔(分钟)",
                 sort: true,
                 templet: function (d) {
@@ -117,49 +117,49 @@ var Alert = (function () {
                 },
               },
               {
-                filed: "check_bi_type",
+                field: "check_bi_type",
                 title: "笔方向",
                 templet: function (d) {
                   return d.check_bi_type;
                 },
               },
               {
-                filed: "check_bi_beichi",
+                field: "check_bi_beichi",
                 title: "笔背驰",
                 templet: function (d) {
                   return d.check_bi_beichi;
                 },
               },
               {
-                filed: "check_bi_mmd",
+                field: "check_bi_mmd",
                 title: "笔买卖点",
                 templet: function (d) {
                   return d.check_bi_mmd;
                 },
               },
               {
-                filed: "check_xd_type",
+                field: "check_xd_type",
                 title: "线段方向",
                 templet: function (d) {
                   return d.check_xd_type;
                 },
               },
               {
-                filed: "check_xd_beichi",
+                field: "check_xd_beichi",
                 title: "线段背驰",
                 templet: function (d) {
                   return d.check_xd_beichi;
                 },
               },
               {
-                filed: "check_xd_mmd",
+                field: "check_xd_mmd",
                 title: "线段买卖点",
                 templet: function (d) {
                   return d.check_xd_mmd;
                 },
               },
               {
-                filed: "is_send_msg",
+                field: "is_send_msg",
                 title: "发送消息",
                 sort: true,
                 templet: function (d) {
@@ -171,7 +171,7 @@ var Alert = (function () {
                 },
               },
               {
-                filed: "is_run",
+                field: "is_run",
                 title: "启用",
                 sort: true,
                 templet: function (d) {

@@ -55,7 +55,9 @@ def xuangu_task_add():
     market = request.form["market"]
     task_name = request.form["task_name"]
     frequencys = request.form["frequencys"]
-    zx_group = request.form["zx_group"]
+    # 与 xuangu_list.html 表单字段对齐：选股源 src_zx_group + 目标自选组 target_zx_group。
+    src_zx_group = request.form["src_zx_group"]
+    target_zx_group = request.form["target_zx_group"]
     opt_type = request.form["opt_type"]
 
     frequencys = frequencys.split(",")
@@ -74,7 +76,7 @@ def xuangu_task_add():
         }
 
     run_res = _xuangu_tasks.run_xuangu(
-        market, task_name, frequencys, opt_type, zx_group
+        market, task_name, frequencys, opt_type, src_zx_group, target_zx_group
     )
 
     return {

@@ -6,25 +6,15 @@ TradingView 相关接口蓝图。
 """
 import pytz
 import json
-import hashlib
 import datetime
-import random
 import time
 import threading
-import weakref
-import numpy as np
-import talib
-from cachetools import TTLCache
-from collections import OrderedDict
-from concurrent.futures import ThreadPoolExecutor
-from threading import RLock, Semaphore
-from typing import Dict, List, Optional
-import bisect
+from threading import Semaphore
+from typing import Dict
 from flask import Blueprint, request
 from flask_login import login_required
-import pinyin
 
-from chanlun import config, fun
+from chanlun import fun
 from chanlun.base import Market
 from chanlun.cl_utils import (
     cl_data_to_tv_chart,
@@ -34,7 +24,6 @@ from chanlun.cl_utils import (
 )
 from chanlun.db import db
 from chanlun.exchange import get_exchange
-from chanlun.file_db import fdb
 from chanlun.tools.log_util import LogUtil
 
 from ..csrf import csrf
@@ -46,7 +35,7 @@ from ..services.constants import (
     market_timezone,
     market_types,
 )
-
+from ..services.last_chart_state import record_user_request
 
 tv_bp = Blueprint("tv", __name__)
 
@@ -149,6 +138,7 @@ from ..services.chart_compute import (  # noqa: E402
     chart_calc_locks,
     compute_and_cache_chart_data,
     fetch_klines_and_compute_cl_data,
+    should_lazy_apply_higher_macd,
     slice_chart_data_to_window,
     trim_future_bars,
 )
@@ -691,7 +681,6 @@ def tv_history():
             _mark_user_request(market, code)
             # 记录最后访问状态，供下次启动预热 RAM chart_data_cache；失败吞异常不影响主流程。
             try:
-                from cl_app.services.last_chart_state import record_user_request
                 record_user_request(market, code, frequency)
             except Exception:
                 pass
@@ -818,21 +807,29 @@ def tv_history():
         # 漏调 apply、或 prepend 半态写入残留), 每次 hit 都会让 server 返回
         # ``higher_macd_hist: []`` 给前端 — 前端 study 拿不到 HTF 数据。
         # 这里 lazy 检测并即时补算 + 回写 cache, 一次修好后续 hit 都走快路径。
+        # M1: 仅对"确有高周期倍率"的 frequency 补算（should_lazy_apply_higher_macd
+        #     内已判定）。15m/60m 等无倍率周期 HTF 本就该缺失，旧逻辑只看长度不符
+        #     会让它们每次 polling 都误判为需补算 → 冗余重写缓存 + 异步写盘。
+        # M2: 补算 + 回写整体放进 cache_lock。apply_higher_macd 是对 cache 内共享
+        #     chart_data 的 in-place 修改，必须与 _persist_chart_cache_async 的
+        #     deepcopy 互斥；should_lazy 在锁内复查，并发请求只有一个真正补算。
         if is_cache_hit and cl_chart_data is not None:
-            _htf_hist = cl_chart_data.get("higher_macd_hist") or []
-            _bar_count = len(cl_chart_data.get("t", []))
-            if _bar_count > 0 and len(_htf_hist) != _bar_count:
-                LogUtil.debug(
-                    f"[tv_history] cache hit but HTF missing/short "
-                    f"(bars={_bar_count} htf={len(_htf_hist)}), lazy-applying"
-                )
-                apply_higher_macd_to_chart_data(cl_chart_data, frequency, market, cl_config)
-                with cache_lock:
-                    _existing = _get_chart_cache_entry(cache_key)
-                    _is_full = (_existing or {}).get("is_full_snapshot", False)
-                    _set_chart_cache_entry(
-                        cache_key, cl_chart_data, is_full_snapshot=_is_full,
+            with cache_lock:
+                if should_lazy_apply_higher_macd(cl_chart_data, frequency, market):
+                    LogUtil.debug(
+                        f"[tv_history] cache hit but HTF missing/short, "
+                        f"lazy-applying {symbol} {resolution}"
                     )
+                    # 仅当 apply 真正写入了 higher_macd_*（有倍率且 bar 数足够）
+                    # 才回写缓存——否则 bar 数不足的周期每次 polling 都冗余写盘。
+                    if apply_higher_macd_to_chart_data(
+                        cl_chart_data, frequency, market, cl_config
+                    ):
+                        _existing = _get_chart_cache_entry(cache_key)
+                        _is_full = (_existing or {}).get("is_full_snapshot", False)
+                        _set_chart_cache_entry(
+                            cache_key, cl_chart_data, is_full_snapshot=_is_full,
+                        )
 
         if cl_chart_data is None:
             return {"s": "no_data"}
@@ -1067,6 +1064,10 @@ def tv_charts(version):
             }
         else:
             chart = db.tv_chart_get("chart", chart_id, client_id, user_id)
+            if chart is None:
+                # chart_id 不存在（已删除 / 脏 id）→ 返回 error，前端
+                # getChartContent 对 status!='ok' 取 null，优雅降级，不 500。
+                return {"status": "error"}
             return {
                 "status": "ok",
                 "data": {
@@ -1130,6 +1131,9 @@ def tv_study_templates(version):
             template = db.tv_chart_get_by_name(
                 "template", template, client_id, user_id
             )
+            if template is None:
+                # template 不存在 → 返回 error，避免 None.name 抛 AttributeError。
+                return {"status": "error"}
             return {
                 "status": "ok",
                 "data": {"name": template.name, "content": template.content},
