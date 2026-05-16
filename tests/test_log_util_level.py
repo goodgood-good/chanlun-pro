@@ -16,7 +16,10 @@ def _fresh_logutil(monkeypatch, env: dict):
     lu.LogUtil._logger = None
     # 清掉 logging 模块级残留 handler，确保级别重新生效
     _named = logging.getLogger("Logger")
+    for h in list(_named.handlers):
+        h.close()
     _named.handlers.clear()
+    _named.setLevel(logging.NOTSET)   # 清除上轮测试残留 level，确保 get_logger 重新按 env 设级
     logger = lu.LogUtil.get_logger()
     return lu.LogUtil, logger
 
@@ -32,6 +35,7 @@ def test_root_logger_defaults_to_info(monkeypatch):
 def test_log_level_env_override_to_debug(monkeypatch):
     """LOG_LEVEL=DEBUG 时根 logger 恢复 DEBUG（排查场景）。"""
     _LogUtil, logger = _fresh_logutil(monkeypatch, {"LOG_LEVEL": "DEBUG"})
+    assert logger.level == logging.DEBUG
     assert logger.isEnabledFor(logging.DEBUG) is True
 
 
