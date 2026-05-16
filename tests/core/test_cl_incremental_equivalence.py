@@ -24,8 +24,15 @@
 
 from __future__ import annotations
 
+import pathlib
+
+import pandas as pd
+import pytest
+
 from tests.core.conftest import _generate_kline_df, DEFAULT_CL_CONFIG, cl_snapshot
 from chanlun.core.cl import CL
+
+_FIXTURES_DIR = pathlib.Path(__file__).resolve().parent.parent / "fixtures" / "klines"
 
 
 def _make_full_snapshot(n: int = 200, seed: int = 42):
@@ -104,3 +111,51 @@ def test_full_recompute_idempotent():
     snap_second = cl_snapshot(cd)
 
     assert snap_second == snap_first
+
+
+def _batch_snapshot(df: pd.DataFrame, n_batches: int = 12) -> dict:
+    """分批累进喂入 df 后的 cl_snapshot。"""
+    cd = CL("T", "1m", dict(DEFAULT_CL_CONFIG))
+    n = len(df)
+    step = max(1, n // n_batches)
+    for upto in range(step, n + 1, step):
+        cd.process_klines(df.iloc[:upto])
+    cd.process_klines(df)  # 确保末根被喂入
+    return cl_snapshot(cd)
+
+
+@pytest.mark.parametrize(
+    "trend, seed",
+    [("up", 7), ("oscillate", 42), ("oscillate", 555), ("down", 99), ("up", 1)],
+)
+def test_incremental_matches_full_multi_synthetic(trend: str, seed: int):
+    """用例 5: 多 trend/seed 的全量 vs 分批增量等价性。
+
+    历史 bug:增量 xd 计算冻结已 done 的线段、只 pop 末段重算,无法复现
+    "追加新笔后全量把历史 done 线段重新拆分"的回溯划分,导致增量 xds 偏少。
+    (trend=up seed=7 在第 384 根处即可触发。)
+    """
+    df = _generate_kline_df(400, seed=seed, trend=trend, multi_freq=True)
+    cd_full = CL("T", "1m", dict(DEFAULT_CL_CONFIG))
+    cd_full.process_klines(df)
+    assert _batch_snapshot(df) == cl_snapshot(cd_full)
+
+
+@pytest.mark.parametrize(
+    "fixture",
+    [
+        "a_SZ_301004_1m.csv",
+        "a_SZ_301004_30m.csv",
+        "us_TSLA_US_30m.csv",
+        "us_TSLA_US_5m.csv",
+    ],
+)
+def test_incremental_matches_full_real_fixtures(fixture: str):
+    """用例 6: 真实标的行情的全量 vs 分批增量等价性。"""
+    csv = _FIXTURES_DIR / fixture
+    if not csv.exists():
+        pytest.skip(f"缺少 fixture: {fixture}")
+    df = pd.read_csv(csv, parse_dates=["date"])
+    cd_full = CL("T", "1m", dict(DEFAULT_CL_CONFIG))
+    cd_full.process_klines(df)
+    assert _batch_snapshot(df) == cl_snapshot(cd_full)

@@ -182,13 +182,18 @@ class MACD:
             prev_idx = start_index - 1
             if prev_idx >= 0:
                 current_area = self.hist_area[prev_idx]
-                val_prev = hist_data[prev_idx]
-                if val_prev > 0:
-                    direction = 1
-                elif val_prev < 0:
-                    direction = -1
-                else:
-                    direction = 0
+                # direction 必须回溯到最近一个"非零"hist 的符号:循环内
+                # |val| < 1e-9 会被当作 0（只 carry 面积、不改方向），增量
+                # 重建若只看 hist[prev_idx] 单根原始符号，遇到它接近 0（尤其
+                # 与主趋势反号的微小值）会误判方向，导致同向柱被错误重置面积，
+                # 增量结果与全量不一致。
+                direction = 0
+                for j in range(prev_idx, -1, -1):
+                    vj = hist_data[j]
+                    if abs(vj) < 1e-9:
+                        continue
+                    direction = 1 if vj > 0 else -1
+                    break
             else:
                 current_area = 0.0
                 direction = 0

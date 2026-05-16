@@ -154,8 +154,18 @@ class XdCalculator:
     # 公共接口
     # ----------------------------------------------------------
     def calculate(self, bis: List[BI]) -> List[XD]:
-        """根据笔列表计算线段；增量模式下仅返回新增的 xds，全量模式返回全部。"""
+        """根据笔列表全量计算线段并返回全部 xds。
+
+        线段不做增量计算:已 done 的线段并非不可变 —— 追加新笔后,全量划分
+        可能把一段已完成的 up 段重新拆成 up/down/up。增量只能 pop 末段重算、
+        冻结历史 done 段,无法复现这种回溯拆分,导致增量结果与全量不一致
+        (实测逐根增量 vs 全量 xds 数量/端点分歧)。笔数通常仅数百,全量
+        _build_segments 成本可忽略,故每次都全量重算以保证正确性。
+        """
         all_bis = bis
+        # 强制全量:清空旧 xds 与增量快照,下方逻辑随之统一走全量重建路径。
+        self.xds.clear()
+        self._last_bi_snapshot = None
         is_incremental = bool(self.xds)
         start_index_for_delta = 0
 

@@ -653,9 +653,19 @@ def tv_history():
         firstDataRequest = request.args.get("firstDataRequest", "false")
         _from = _normalize_unix_ts(request.args.get("from", "0"))
         _to = _normalize_unix_ts(request.args.get("to", "0"))
+        tz_sh = pytz.timezone("Asia/Shanghai")
+
+        def _fmt_ts(ts: int) -> str:
+            """把 unix 时间戳格式化为上海时区可读时间;非正值(缺省 0)原样返回。"""
+            if ts <= 0:
+                return str(ts)
+            return datetime.datetime.fromtimestamp(ts, tz_sh).strftime(
+                "%Y-%m-%d %H:%M:%S"
+            )
+
         LogUtil.info(
             f"[tv_history] >>> {symbol} {resolution} first={firstDataRequest} "
-            f"from={_from} to={_to}"
+            f"from={_fmt_ts(_from)} to={_fmt_ts(_to)}"
         )
 
         if not symbol or not resolution:
@@ -686,7 +696,6 @@ def tv_history():
             except Exception:
                 pass
 
-        tz_sh = pytz.timezone("Asia/Shanghai")
         log_args = dict(args)
         for key in ("from", "to"):
             if key in log_args:

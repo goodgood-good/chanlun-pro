@@ -1190,11 +1190,6 @@ class XD(LINE):
         self.zs_type_mmds: Dict[str, List[MMD]] = {}
         self.zs_type_bcs: Dict[str, List[BC]] = {}
 
-        self.default_zs_type: str = default_zs_type
-        # 记录不同中枢下的背驰和买卖点
-        self.zs_type_mmds: Dict[str, List[MMD]] = {}
-        self.zs_type_bcs: Dict[str, List[BC]] = {}
-
         self.not_del: bool = False  # 计算过程中，不允许删除重新计算
         self.not_yx: bool = False  # 计算过程中，不允许进行延续计算
 

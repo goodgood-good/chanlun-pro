@@ -75,7 +75,17 @@ class BsPointCalculator:
         :param lines: 本级别的所有线段（or 笔）
         :param zss: 本级别已识别的中枢列表（来自 ``ZsCalculator.calculate``）
         """
-        if not lines or not zss:
+        if not lines:
+            return
+
+        # 每次 calculate 先抹掉上一轮在本级别识别的买卖点/背驰,再从零重算。
+        # BsPointCalculator 是无状态纯重算引擎,process_mmd 每轮增量都会调用它;
+        # 不清空就直接 append,买卖点会随增量轮数成倍累积 —— 去重无法跨轮可靠
+        # 生效(ZS 对象每轮重建,mmd.zs is zs 身份比较恒失效)。清空后增量结果
+        # 恒等于一次性全量计算。
+        self._clear_previous_results(lines)
+
+        if not zss:
             return
 
         # 预过滤 + 预计算 start_keys, 把 valid_zss 切片从 O(M) 降到 O(log M)。
@@ -88,6 +98,21 @@ class BsPointCalculator:
         self._detect_1buy_1sell(lines, zss, clean_zss, start_keys)
         self._detect_2buy_2sell(lines, zss, clean_zss, start_keys)
         self._detect_3buy_3sell(lines, zss, clean_zss, start_keys)
+
+    def _clear_previous_results(self, lines: List[LINE]) -> None:
+        """清空 ``lines`` 上 ``self.zs_type`` 维度的旧买卖点与背驰。
+
+        ``BsPointCalculator`` 的结果只写入 ``LINE.zs_type_mmds`` /
+        ``zs_type_bcs`` 这两个按 zs_type 分桶的字典,故只需清空对应桶。
+
+        前提契约:``zs_type_mmds['bi'/'xd']`` / ``zs_type_bcs['bi'/'xd']``
+        这两个桶由 ``BsPointCalculator`` 独占写入。若将来有其他写入者往
+        同名桶写入自定义买卖点,此处整桶清空会静默吞掉它们 —— 那种场景
+        应改用独立的 zs_type key。
+        """
+        for line in lines:
+            line.zs_type_mmds[self.zs_type] = []
+            line.zs_type_bcs[self.zs_type] = []
 
     # bisect 二分辅助 (供 _detect_* 复用)
     @staticmethod
@@ -204,8 +229,12 @@ class BsPointCalculator:
             # 命名：下跌段背驰 → 一买；上涨段背驰 → 一卖
             mmd_name = '1buy' if now_line.type == 'down' else '1sell'
 
-            # 去重：同一线段同一中枢同一名字不重复挂（增量计算保护）
-            if self._mmd_already_attached(now_line, mmd_name, zss[-1]):
+            # 对照中枢统一用 valid_zss[-1]（now_line 时间位置上的实际末中枢），
+            # 不能用全量 zss[-1]：后者对历史线段是"未来才形成的中枢"。
+            ref_zs = valid_zss[-1]
+
+            # 去重：同一线段同一名字不重复挂（增量计算保护）
+            if self._mmd_already_attached(now_line, mmd_name, ref_zs):
                 continue
 
             # 信号最小间隔过滤：上一次同方向 + 同对照中枢的 1 类信号若在
@@ -228,16 +257,16 @@ class BsPointCalculator:
             # 写入背驰
             now_line.add_bc(
                 _type='qs',
-                zs=zss[-1],
+                zs=ref_zs,
                 compare_line=compare_lines[0],
                 compare_lines=compare_lines,
                 bc=True,
                 zs_type=self.zs_type,
             )
-            # 写入买卖点（zs 挂在"末中枢"上，符合区间套靠近末端识别的语义）
+            # 写入买卖点（zs 挂在 now_line 时间位置上的末中枢，符合区间套语义）
             now_line.add_mmd(
                 name=mmd_name,
-                zs=zss[-1],
+                zs=ref_zs,
                 zs_type=self.zs_type,
                 msg=(
                     f'趋势背驰：当前 {now_line.type} 段相对 '
@@ -246,7 +275,7 @@ class BsPointCalculator:
             )
             LogUtil.debug(
                 f"[BsPointCalculator] 识别到 {mmd_name}: line.index={now_line.index}, "
-                f"compare_idx={compare_lines[0].index}, zs.index={zss[-1].index}"
+                f"compare_idx={compare_lines[0].index}, zs.index={ref_zs.index}"
             )
 
     # ------------------------------------------------------------------
