@@ -15,13 +15,7 @@ import time
 import urllib.parse
 from typing import Dict, Optional, Union
 
-import lark_oapi as lark
 import requests
-from lark_oapi.api.im.v1 import (
-    CreateMessageRequest,
-    CreateMessageRequestBody,
-    CreateMessageResponse,
-)
 
 from chanlun import config
 from chanlun.db import db
@@ -106,6 +100,7 @@ def send_dd_msg(market: str, msg: Union[str, Dict[str, str]]) -> bool:
     - `msg` 为字符串时发送文本消息。
     - `msg` 为字典时发送 markdown 消息，形如 `{"title": "标题", "text": "markdown内容"}`。
     """
+    import lark_oapi as lark  # lazy import: optional extra
     dd_info = config_get_dingding_keys(market)
     if dd_info is None or dd_info["token"] == "" or dd_info["secret"] == "":
         return True  # no-op when not configured
@@ -169,6 +164,12 @@ def send_fs_msg(market: str, title: str, contents: Union[str, list]) -> bool:
     """
     发送飞书消息（富文本 post）。
     """
+    import lark_oapi as lark  # lazy import: optional extra
+    from lark_oapi.api.im.v1 import (
+        CreateMessageRequest,
+        CreateMessageRequestBody,
+        CreateMessageResponse,
+    )
     fs_key = config_get_feishu_keys(market)
     if (
         fs_key is None

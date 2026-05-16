@@ -21,10 +21,6 @@ from flask import Flask, redirect, render_template, request
 from flask_login import LoginManager, UserMixin, login_required, login_user
 from chanlun import config, fun
 from chanlun.security import get_flask_secret_key, verify_login_password
-from .alert_tasks import AlertTasks
-from .csrf import csrf
-from .other_tasks import OtherTasks
-from .xuangu_tasks import XuanguTasks
 __all__ = ["create_app"]
 
 
@@ -88,6 +84,9 @@ def create_app(test_config=None):
         market_types,
     )
 
+    from .alert_tasks import AlertTasks
+    from .other_tasks import OtherTasks
+    from .xuangu_tasks import XuanguTasks
     _alert_tasks = AlertTasks(scheduler)
     _alert_tasks.run()
 
@@ -109,6 +108,7 @@ def create_app(test_config=None):
 
     # CSRF 保护：图表页常长时间打开，禁用过期防止用户操作时报错（session 仍由 secret_key 签名兜底）。
     app.config["WTF_CSRF_TIME_LIMIT"] = None
+    from .csrf import csrf
     csrf.init_app(app)
 
     login_manager = LoginManager()  # 实例化登录管理对象

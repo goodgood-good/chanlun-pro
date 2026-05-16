@@ -10,14 +10,6 @@ import traceback
 import uuid
 from typing import List
 
-import lark_oapi as lark
-from lark_oapi.api.im.v1 import (
-    CreateImageRequest,
-    CreateImageRequestBody,
-    CreateImageResponse,
-)
-from playwright.sync_api import sync_playwright
-
 from chanlun import config, fun, kcharts
 from chanlun.backtesting.base import Strategy
 from chanlun.core.cl_interface import ICL
@@ -361,6 +353,15 @@ def kchart_to_png(market: str, title: str, cd: ICL, cl_config: dict) -> str:
        生成相同 html / png 文件名互相覆盖。
     3. ``finally`` 不仅删除 png，还删除中间产物 html，避免长期残留。
     """
+    # lazy import optional extras（lark_oapi / playwright 不在基础依赖中）
+    import lark_oapi as lark
+    from lark_oapi.api.im.v1 import (
+        CreateImageRequest,
+        CreateImageRequestBody,
+        CreateImageResponse,
+    )
+    from playwright.sync_api import sync_playwright
+
     # 没有启用图片则不生产图片
     if config.FEISHU_KEYS["enable_img"] is False:
         return ""
