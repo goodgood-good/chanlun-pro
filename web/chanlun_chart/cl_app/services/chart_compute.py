@@ -201,6 +201,7 @@ def _merge_chart_data(existing_data: dict, new_data: dict):
     ]
     # ★ P-005 优化：existing/new 的 time->index 映射只建一次，跨 12 个字段复用，
     # 避免原实现对每个字段各重建一遍 dict。
+    # 重复时间戳行为与原循环一致：dict comprehension 后者覆盖前者 → 保留最后一个 index。
     existing_idx = {bar_time: i for i, bar_time in enumerate(existing_times)}
     new_idx = {bar_time: i for i, bar_time in enumerate(new_times)}
     for key in aligned_keys:

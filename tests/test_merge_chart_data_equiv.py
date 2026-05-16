@@ -1,8 +1,4 @@
 """P-005 _merge_chart_data 优化前后等价测试。"""
-import sys
-sys.path.insert(0, "src")
-sys.path.insert(0, "web/chanlun_chart")
-
 from cl_app.services.chart_compute import _merge_chart_data
 
 
@@ -35,8 +31,25 @@ def test_merge_none_does_not_override():
            "xd_zss": [], "bcs": [], "mmds": []}
     merged = _merge_chart_data(existing, new)
     assert merged["c"] == [10, 20, 30]
+    assert merged["t"] == [1, 2, 3]
 
 
 def test_merge_empty_sides():
     assert _merge_chart_data({}, {"t": [1]}) == {"t": [1]}
     assert _merge_chart_data({"t": [1]}, {}) == {"t": [1]}
+
+
+def test_merge_duplicate_timestamps_last_wins():
+    """existing_times 含重复时间戳时，保留最后一个 index 的值（与原循环一致）。"""
+    existing = {"t": [1, 2, 2], "c": [10, 20, 99],
+                "o": [], "h": [], "l": [], "v": [],
+                "fxs": [], "bis": [], "xds": [], "bi_zss": [],
+                "xd_zss": [], "bcs": [], "mmds": []}
+    new = {"t": [], "c": [],
+           "o": [], "h": [], "l": [], "v": [],
+           "fxs": [], "bis": [], "xds": [], "bi_zss": [],
+           "xd_zss": [], "bcs": [], "mmds": []}
+    merged = _merge_chart_data(existing, new)
+    # t=2 在 existing 里出现两次，保留最后一个 index(2) 的值 99
+    assert merged["t"] == [1, 2]
+    assert merged["c"] == [10, 99]
