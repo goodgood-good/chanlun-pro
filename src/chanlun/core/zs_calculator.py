@@ -252,7 +252,7 @@ class ZsCalculator:
 
             center = ZS(zs_type='xd', start=entry_seg, _type=seg_b.type)
             center.lines = core_lines
-            center._bounds_dirty = True  # ★ P-009：整体赋值后边界缓存失效
+            center._bounds_dirty = True  # ★ P-009：防御性置脏（__init__ 已为 True，此处显式标注整体赋值使缓存失效）
             # 初始中枢范围由前三段重叠决定
             center.zg, center.zd = zg, zd
             center.update_boundaries()  # 初始更新zg, zd

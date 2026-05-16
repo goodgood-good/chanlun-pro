@@ -629,9 +629,20 @@ class ZS:
         # 两个中枢有价格重叠区间
         return max(self.dd, other.dd) <= min(self.gg, other.gg)
 
+    def __setstate__(self, state):
+        # ★ P-009 兼容：旧 pickle 的 __dict__ 不含增量边界缓存字段，补默认值，
+        # 避免反序列化后调用 update_boundaries 抛 AttributeError。
+        state.setdefault('_gg_cache', None)
+        state.setdefault('_dd_cache', None)
+        state.setdefault('_bounds_dirty', True)
+        self.__dict__.update(state)
+
     def add_line(self, line: LINE) -> bool:
         """
-        添加 笔 or 线段
+        添加 笔 or 线段。
+        注意：本方法只做 append，不调用 update_boundaries()；
+        调用方在所有 add_line 完成后须显式调用 update_boundaries()，
+        以保持 gg/dd 及 P-009 增量缓存与 self.lines 同步。
         """
         self.lines.append(line)
         self.line_num = len(self.lines)
