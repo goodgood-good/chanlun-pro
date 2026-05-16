@@ -64,12 +64,19 @@ class KlineDataProcessor:
         ★ P-002 优化：已有 self.klines 时，先按 last_date 把传入帧裁到尾段，
         再对小切片做 copy + to_numeric + sort。避免对全 N 行做无用重活
         （tick 更新场景里前 N-1 行最终都会被丢弃）。
+
+        Args:
+            klines_df (pd.DataFrame): 原始K线数据 (可能是全量或增量)。
+
+        Returns:
+            pd.DataFrame: 经过预处理和剪切的K线数据 (仅包含增量部分)。
         """
         # ---- 快速路径：已有数据时先粗筛到尾段 ----
         if self.klines:
             last_date = self.klines[-1].date
             date_col = klines_df['date']
-            # 仅为比较把 date 列规范成 datetime（不动数值列，不 copy 整帧）
+            # 仅为比较把 date 列规范成 datetime（不动数值列，不 copy 整帧）；
+            # 下方裁到尾段后的 copy 路径会对 klines['date'] 再正式转换一次。
             if not pd.api.types.is_datetime64_any_dtype(date_col):
                 date_col = pd.to_datetime(date_col)
 
@@ -90,6 +97,7 @@ class KlineDataProcessor:
                 idx = date_col.searchsorted(last_ts, side='left')
                 klines_df = klines_df.iloc[idx:]
             else:
+                # date_col 与 klines_df 同 index，boolean mask 自动对齐
                 klines_df = klines_df[date_col >= last_ts]
 
             if klines_df.empty:
