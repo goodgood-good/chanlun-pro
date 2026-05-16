@@ -19,6 +19,7 @@ import requests
 
 from chanlun import config
 from chanlun.db import db
+from chanlun.tools.log_util import LogUtil
 
 
 def config_get_proxy() -> Dict[str, str]:
@@ -100,7 +101,6 @@ def send_dd_msg(market: str, msg: Union[str, Dict[str, str]]) -> bool:
     - `msg` 为字符串时发送文本消息。
     - `msg` 为字典时发送 markdown 消息，形如 `{"title": "标题", "text": "markdown内容"}`。
     """
-    import lark_oapi as lark  # lazy import: optional extra
     dd_info = config_get_dingding_keys(market)
     if dd_info is None or dd_info["token"] == "" or dd_info["secret"] == "":
         return True  # no-op when not configured
@@ -140,19 +140,19 @@ def send_dd_msg(market: str, msg: Union[str, Dict[str, str]]) -> bool:
                 timeout=request_timeout,
             )
     except requests.RequestException as exc:
-        lark.logger.error(f"send_dd_msg request failed: {exc}")
+        LogUtil.error(f"send_dd_msg request failed: {exc}")
         return False
 
     # 钉钉成功返回 errcode == 0，否则视为失败但不抛出，避免上层任务被打断。
     try:
         body = res.json()
         if body.get("errcode", 0) != 0:
-            lark.logger.error(
+            LogUtil.error(
                 f"send_dd_msg api error, errcode={body.get('errcode')}, errmsg={body.get('errmsg')}"
             )
             return False
     except ValueError:
-        lark.logger.error(
+        LogUtil.error(
             f"send_dd_msg got non-json response, status={res.status_code}, text={res.text[:200]}"
         )
         return False
