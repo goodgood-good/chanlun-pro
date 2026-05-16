@@ -166,22 +166,22 @@ class ExchangeIB(Exchange):
             return None
 
         # 向量化 __convert_date：00:00:00 → 09:30:00
+        # date 列此时为 tz-aware(US/Eastern, 有 DST)。直接对 tz-aware 列做
+        # Timedelta 算术是在 UTC 上加偏移, 跨 DST 切换日会与原 .apply(replace())
+        # 的"墙钟字段替换"语义偏差 1 小时。故先转 naive 墙钟时间做算术, 再 localize,
+        # 保持与逐元素 replace(hour=9, minute=30) 完全等价。
+        _date_naive = klines_df["date"].dt.tz_localize(None)
         _midnight_mask = (
-            (klines_df["date"].dt.hour == 0)
-            & (klines_df["date"].dt.minute == 0)
-            & (klines_df["date"].dt.second == 0)
+            (_date_naive.dt.hour == 0)
+            & (_date_naive.dt.minute == 0)
+            & (_date_naive.dt.second == 0)
         )
-        klines_df["date"] = klines_df["date"].mask(
-            _midnight_mask, klines_df["date"] + pd.Timedelta(hours=9, minutes=30)
+        _date_naive = _date_naive.mask(
+            _midnight_mask, _date_naive + pd.Timedelta(hours=9, minutes=30)
         )
+        klines_df["date"] = _date_naive.dt.tz_localize(self.tz)
 
         return klines_df
-
-    @staticmethod
-    def __convert_date(dt: datetime.datetime):
-        if dt.hour == 0 and dt.minute == 0 and dt.second == 0:
-            return dt.replace(hour=9, minute=30)
-        return dt
 
     def ticks(self, codes: List[str]) -> Dict[str, Tick]:
         ticks = {}

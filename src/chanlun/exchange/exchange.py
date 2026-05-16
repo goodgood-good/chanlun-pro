@@ -905,11 +905,11 @@ def convert_tdx_ny_f_kline_frequency(klines: pd.DataFrame, to_f: str) -> pd.Data
         _td_mask = klines["date"].dt.hour < 6
         klines["trade_day"] = _td_norm.mask(_td_mask, _td_norm - pd.Timedelta(days=1))
         grouped = klines.groupby("trade_day")
-        # 向量化 replace(hour=15, minute=0, second=0)：normalize() + 15h
+        # 向量化 replace(hour=15, minute=0, second=0)：trade_day 已 normalize 过, 直接 +15h
         _day_dates = grouped["trade_day"].first()
         period_klines = pd.DataFrame(
             {
-                "date": _day_dates.dt.normalize() + pd.Timedelta(hours=15),
+                "date": _day_dates + pd.Timedelta(hours=15),
                 "frequency": to_f,
                 "code": grouped["code"].first(),
                 "open": grouped["open"].first(),

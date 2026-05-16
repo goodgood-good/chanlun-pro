@@ -191,12 +191,6 @@ class ExchangeFutu(Exchange):
 
         return None
 
-    @staticmethod
-    def __convert_date(dt):
-        if dt.hour == 0 and dt.minute == 0 and dt.second == 0:
-            return dt.replace(hour=16, minute=0)
-        return dt
-
     def ticks(self, codes: List[str]) -> Dict[str, Tick]:
         # CTX().subscribe(codes, [SubType.QUOTE], subscribe_push=False)
         ret, data = CTX().get_market_snapshot(codes)

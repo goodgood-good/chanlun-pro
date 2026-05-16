@@ -110,6 +110,17 @@ def test_classC2_baostock_convert_date():
     assert (old.view("int64").to_numpy() == new.view("int64").to_numpy()).all()
 
 
+def _ib_convert_date_vectorized(s: pd.Series, tz) -> pd.Series:
+    """exchange_ib.py 生产逻辑的 DST-safe 向量化版：
+    tz-aware 列先转 naive 墙钟做算术, 再 tz_localize 回去, 保持与
+    逐元素 replace(hour=9, minute=30) 的"字段替换"语义等价。
+    """
+    naive = s.dt.tz_localize(None)
+    mask = (naive.dt.hour == 0) & (naive.dt.minute == 0) & (naive.dt.second == 0)
+    naive = naive.mask(mask, naive + pd.Timedelta(hours=9, minutes=30))
+    return naive.dt.tz_localize(tz)
+
+
 def test_classC2_ib_convert_date():
     """类 C-2 ib：midnight (tz-aware) → replace(hour=9, minute=30)，其余不变"""
     tz = pytz.timezone("America/New_York")
@@ -120,9 +131,48 @@ def test_classC2_ib_convert_date():
         if (dt.hour == 0 and dt.minute == 0 and dt.second == 0)
         else dt
     )
-    mask = (s.dt.hour == 0) & (s.dt.minute == 0) & (s.dt.second == 0)
-    new = s.mask(mask, s + pd.Timedelta(hours=9, minutes=30))
+    new = _ib_convert_date_vectorized(s, tz)
     assert (old.view("int64").to_numpy() == new.view("int64").to_numpy()).all()
+
+
+def test_classC2_ib_convert_date_dst_transition():
+    """类 C-2 ib DST 专项：跨美国春/秋令时切换日, tz-aware replace(hour=H) 等价验证。
+
+    直接对 tz-aware 列做 Timedelta 算术会在 UTC 上加偏移, 跨 DST 切换日
+    与逐元素 replace() 的墙钟字段替换偏差 1 小时。本测试验证生产代码采用的
+    tz_localize(None) 往返写法在切换日仍与 .apply(replace()) 完全等价。
+    """
+    tz = pytz.timezone("America/New_York")
+    # 2024-03-10 美国春令时(02:00 EST→03:00 EDT)
+    # 2024-11-03 美国秋令时(02:00 EDT→01:00 EST)
+    naive = pd.to_datetime(
+        [
+            "2024-03-09 00:00:00",
+            "2024-03-10 00:00:00",  # 春令时切换当天的午夜
+            "2024-03-11 00:00:00",
+            "2024-11-02 00:00:00",
+            "2024-11-03 00:00:00",  # 秋令时切换当天的午夜
+            "2024-11-04 00:00:00",
+            "2024-03-10 14:30:00",  # 非午夜行, 不应被改写
+        ]
+    )
+    # nonexistent/ambiguous 用 shift_forward/infer 兜底, 确保 localize 不抛错
+    s = pd.Series(naive).dt.tz_localize(
+        tz, nonexistent="shift_forward", ambiguous=True
+    )
+    old = s.apply(
+        lambda dt: dt.replace(hour=9, minute=30)
+        if (dt.hour == 0 and dt.minute == 0 and dt.second == 0)
+        else dt
+    )
+    new = _ib_convert_date_vectorized(s, tz)
+    assert (old.view("int64").to_numpy() == new.view("int64").to_numpy()).all()
+    # 反向断言：朴素的 tz-aware Timedelta 加法在切换日确实会偏差, 证明 DST-safe 写法必要
+    mask = (s.dt.hour == 0) & (s.dt.minute == 0) & (s.dt.second == 0)
+    naive_wrong = s.mask(mask, s + pd.Timedelta(hours=9, minutes=30))
+    assert not (
+        old.view("int64").to_numpy() == naive_wrong.view("int64").to_numpy()
+    ).all()
 
 
 def test_classC2_futu_convert_date():
