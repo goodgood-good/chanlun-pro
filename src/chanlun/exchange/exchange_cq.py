@@ -162,7 +162,6 @@ def is_retryable_exception(exception):
     return True
 
 
-# === 性能监控装饰器 ===
 def time_logger(func):
     """
     用于监控函数执行耗时的装饰器
@@ -209,10 +208,9 @@ class ExchangeChangQiao(Exchange):
         # 这里保守用 3 QPS 留出突发余量，避免触发 301600。如确认账号配额更高可调大。
         self.rate_limiter = RateLimiter(calls=3, period=1.0)
 
-        # G8：进程退出时显式关闭线程池，避免长桥 SDK 的 quote/trade 网络上下文
+        # 进程退出时显式关闭线程池，避免长桥 SDK 的 quote/trade 网络上下文
         # 在 daemon 线程里被强行打断造成日志噪音/连接半关。
-        # 用 weakref 避免闭包持有 self 阻碍单例 GC（虽然 fun.singleton 通常永生，
-        # 但保持 weakref 风格更安全）。
+        # 用 weakref 避免闭包持有 self 阻碍单例 GC。
         _self_ref = weakref.ref(self)
 
         def _shutdown_on_exit():
@@ -486,7 +484,7 @@ class ExchangeChangQiao(Exchange):
                 LogUtil.warning(f"Error checking trading session: {e}")
                 return False
 
-        # Add timeout wrapper to prevent blocking the main thread
+        # 用线程池提交并设 2s 超时，防止行情 ws 断开时阻塞主线程
         try:
             future = self.executor.submit(_do_check)
             return future.result(timeout=2.0)
@@ -593,9 +591,8 @@ class ExchangeChangQiao(Exchange):
             # 获取这批数据中最老的一条时间，用于更新游标
             oldest_candle = candlesticks[0]
 
-            # --- [修复] 统一转为带时区的 datetime 进行比较 ---
-            # 注意：pd.to_datetime(标量) 返回 Timestamp（不是 Series），没有 .dt 访问器，
-            # 直接 .dt.tz_convert 会抛 AttributeError，这里使用 pd.Timestamp 构造。
+            # --- 统一转为带时区的 datetime 进行比较 ---
+            # pd.to_datetime(标量) 返回 Timestamp，没有 .dt 访问器，使用 pd.Timestamp 构造。
             try:
                 ts = oldest_candle.timestamp
                 if isinstance(ts, (int, float)):
@@ -652,7 +649,7 @@ class ExchangeChangQiao(Exchange):
         """
         获取 Kline 线 (并发优化版)
         """
-        # D-iii 路由：US 历史 K 线按 config.US_HISTORY_KLINE_SOURCE 选源
+        # 美股历史 K 线按 config.US_HISTORY_KLINE_SOURCE 选源
         if self._should_use_alpaca(code):
             return self._get_alpaca().klines(
                 code, frequency, start_date=start_date, end_date=end_date, args=args
@@ -665,10 +662,7 @@ class ExchangeChangQiao(Exchange):
         # 在请求边界一次性转换, 输出 DataFrame 的 code 列继续保留项目格式不变。
         lb_symbol = self._to_lb_symbol(code)
 
-        # 1. 默认回看周期配置:
-        # 2026-05-14 与 qmt / alpaca / polygon / futu 对齐到统一 lookback
-        # 2026-05-15 US-005: 进一步抽到 chanlun.exchange._lookback 单一来源,
-        #            避免 5 处独立维护漂移; 修改请改 _lookback.py 而非这里。
+        # 默认回看周期从统一表读取，修改请改 _lookback.py 而非这里。
         from chanlun.exchange._lookback import get_lookback_timedelta
 
         # 2. 时间标准化处理
@@ -777,35 +771,30 @@ class ExchangeChangQiao(Exchange):
 
             df = pd.DataFrame(data, columns=["date", "open", "high", "low", "close", "volume"])
 
-            # === [智能时间处理逻辑] ===
+            # === 时间处理逻辑 ===
             if len(data) > 0:
                 first_ts = data[0][0]
 
-                # 情况 A: 必须明确区分 Unix Timestamp 和 Datetime Object
+                # 区分 Unix Timestamp 和 Datetime Object
                 if isinstance(first_ts, (int, float)):
                     # Unix Timestamp: 必须指定 unit='s' 和 utc=True，然后转上海
                     df["date"] = pd.to_datetime(df["date"], unit='s', utc=True)
                     df["date"] = df["date"].dt.tz_convert("Asia/Shanghai")
                 else:
-                    # 情况 B: 已经是 Datetime 对象 (你现在的场景)
+                    # 已经是 Datetime 对象
                     df["date"] = pd.to_datetime(df["date"])
 
                     if df["date"].dt.tz is None:
-                        # 关键修复：
-                        # 如果是 Naive 时间，且数值已经是本地时间 (如 00:07)，
-                        # 使用 tz_localize 仅仅加上时区标签，不要转换数值。
+                        # Naive 时间数值已是本地时间，用 tz_localize 贴标签而非转换数值。
                         df["date"] = df["date"].dt.tz_localize("Asia/Shanghai")
                     else:
                         # 如果自带时区，则转换为上海时间
                         df["date"] = df["date"].dt.tz_convert("Asia/Shanghai")
             # ==========================
 
-            # === [智能过滤逻辑] ===
-            # 1. 下界过滤：必须大于等于 start_dt (保留)
+            # 下界过滤 >= start_dt；上界仅历史查询时限制 <= end_dt，
+            # 查实时增量时不过滤，避免本地时钟微小差异丢掉最新 K 线。
             mask = df["date"] >= start_dt
-
-            # 2. 上界过滤：仅当用户查历史 (指定了 end_date) 时才严格过滤
-            # 查实时增量时，不做 <= end_dt 过滤，避免因本地时钟微小差异丢掉最新 K 线
             if is_history_query:
                 mask = mask & (df["date"] <= end_dt)
 
@@ -861,7 +850,7 @@ class ExchangeChangQiao(Exchange):
                 LogUtil.error(f"Error in ticks: {e}")
                 return {}
 
-        # Add timeout wrapper to prevent blocking the main thread
+        # 与 now_trading 保持一致：线程池 + 2s 超时，防止网络抖动阻塞主线程
         try:
             future = self.executor.submit(_do_ticks)
             return future.result(timeout=2.0)

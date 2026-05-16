@@ -21,43 +21,28 @@ from chanlun.tools import tdx_best_ip as best_ip
 
 @fun.singleton
 class ExchangeTDXHK(Exchange):
-    """
-    通达信香港行情接口
-    """
+    """通达信香港行情适配器。"""
 
     g_all_stocks = []
 
-    # 单次初始化的最大 IP 重试次数。原实现 ``while True`` 配合 ``except TdxConnectionError``
-    # 在网络不稳定时也只能拦住 ``TdxConnectionError`` 这一种异常, 而 ``client.get_markets()``
-    # 的 socket ``TimeoutError`` 会直接冒泡到外层 ``except Exception`` 里被吞掉,
-    # 整个对象就处于"半初始化"状态(没 ``connect_info``/``market_maps``), 后面
-    # ``all_stocks`` / ``klines`` 一调就 AttributeError。这里改成有限次"换 IP 重试"。
+    # 网络不稳定时 socket.timeout 等异常无法被 TdxConnectionError 捕获，有限次换 IP 重试
+    # 比 while True 更安全，防止初始化卡死或进入半初始化状态。
     _INIT_MAX_RETRY = 3
 
     def __init__(self):
-        # super().__init__()
-
-        # 设置时区
         self.tz = pytz.timezone("Asia/Shanghai")
-
-        # 文件缓存
         self.fdb = FileCacheDB()
 
-        # 失败标记 + 字段预初始化:
-        # 1. ``init_failed=True`` 让上层 (web 的 _preload_single_exchange /
-        #    get_cached_processed_stocks 以及 cq fallback) 能短路, 不再重复触发 30s 超时;
-        # 2. 预初始化 ``connect_info`` / ``market_maps`` 避免半初始化状态下被属性访问爆 AttributeError。
+        # @fun.singleton 缓存实例，init_failed 让上层短路，预初始化字段防止半初始化状态 AttributeError
         self.init_failed = False
         self.connect_info = None
         self.market_maps = {}
 
         try:
-            # 选择最优的服务器，并保存到 cache 中
             self.connect_info = db.cache_get("tdxex_connect_ip")
             if self.connect_info is None:
                 self.connect_info = self.reset_tdx_ip()
 
-            # 初始化，映射交易所代码
             last_error = None
             for retry_count in range(self._INIT_MAX_RETRY):
                 try:
@@ -76,11 +61,9 @@ class ExchangeTDXHK(Exchange):
                     last_error = None
                     break
                 except Exception as e:
-                    # 不只接 TdxConnectionError, ``socket.timeout`` 等也要在重试时被消化掉,
-                    # 否则整个 __init__ 失败, 调用方再也走不到 all_stocks。
+                    # socket.timeout 等也要消化掉，否则整个 __init__ 失败
                     last_error = e
                     if retry_count < self._INIT_MAX_RETRY - 1:
-                        # 换一个 IP 再试; 不再使用上次的坏 IP 缓存。
                         try:
                             self.reset_tdx_ip()
                         except Exception as ip_e:
@@ -94,9 +77,7 @@ class ExchangeTDXHK(Exchange):
             print("通达信 香港行情接口初始化失败，香港行情不可用")
 
     def reset_tdx_ip(self):
-        """
-        重新选择tdx最优服务器
-        """
+        """重新选择 TDX 最优服务器并写入缓存。"""
         connect_info = best_ip.select_best_ip("future")
         connect_info = {"ip": connect_info["ip"], "port": int(connect_info["port"])}
         db.cache_set("tdxex_connect_ip", connect_info)
@@ -121,15 +102,11 @@ class ExchangeTDXHK(Exchange):
         }
 
     def all_stocks(self):
-        """
-        使用 通达信的方式获取所有股票代码
-        """
+        """获取通达信港股标的列表（category=2）。"""
         if len(self.g_all_stocks) > 0:
             return self.g_all_stocks
 
-        # 初始化失败时直接返回空列表, 避免再次走 client.connect 卡 30s 超时, 也防止
-        # connect_info=None 时的 KeyError。上层 (cq fallback / web search) 见到空列表
-        # 会以"无结果"的体感降级, 远比卡死或 500 好。
+        # 初始化失败时直接返回空列表，避免 client.connect 再卡 30s 或 connect_info=None 引发 KeyError
         if getattr(self, "init_failed", False) or not self.connect_info or not self.market_maps:
             return []
 
@@ -157,14 +134,10 @@ class ExchangeTDXHK(Exchange):
                     break
 
         self.g_all_stocks = __all_stocks
-        # print(f"香港获取数量：{len(self.g_all_stocks)}")
-
         return self.g_all_stocks
 
     def to_tdx_code(self, code):
-        """
-        转换为 tdx 对应的代码
-        """
+        """将 "KH.00700" 格式代码拆分为 (market_int, tdx_code)。"""
         code_infos = code.split(".")
         market_info = self.market_maps[code_infos[0]]
         return market_info["market"], code_infos[1]
@@ -182,9 +155,7 @@ class ExchangeTDXHK(Exchange):
         end_date: str = None,
         args=None,
     ) -> Union[pd.DataFrame, None]:
-        """
-        通达信，不支持按照时间查找
-        """
+        """通达信不支持按时间区间查找，分页拉取后与文件缓存合并去重，再做前复权处理。"""
         if args is None:
             args = {}
         if "pages" not in args.keys():
@@ -209,7 +180,6 @@ class ExchangeTDXHK(Exchange):
             print("不支持的调用参数")
             return None
 
-        # _time_s = time.time()
         try:
             client = TdxExHq_API(raise_exception=True, auto_retry=True)
             with client.connect(self.connect_info["ip"], self.connect_info["port"]):
@@ -217,7 +187,6 @@ class ExchangeTDXHK(Exchange):
                     Market.HK.value, code, frequency
                 )
                 if klines_df is None:
-                    # 获取 8*700 = 5600 条数据
                     klines_df = pd.concat(
                         [
                             client.to_df(
@@ -238,7 +207,6 @@ class ExchangeTDXHK(Exchange):
                     klines_df.sort_values("date", inplace=True)
                 else:
                     for i in range(1, args["pages"] + 1):
-                        # print(f'{code} 使用缓存，更新获取第 {i} 页')
                         _ks = client.to_df(
                             client.get_instrument_bars(
                                 frequency_map[frequency],
@@ -253,11 +221,11 @@ class ExchangeTDXHK(Exchange):
                         new_start_dt = _ks.iloc[0]["date"]
                         old_end_dt = klines_df.iloc[-1]["date"]
                         klines_df = pd.concat([klines_df, _ks], ignore_index=True)
-                        # 如果请求的第一个时间大于缓存的最后一个时间，退出
+                        # 新一页起始时间早于缓存末尾，说明已覆盖，无需继续
                         if old_end_dt >= new_start_dt:
                             break
 
-            # 删除重复数据
+            # 去重：分页重叠时保留最新一条
             klines_df = klines_df.drop_duplicates(["date"], keep="last").sort_values(
                 "date"
             )
@@ -281,13 +249,10 @@ class ExchangeTDXHK(Exchange):
             print(f"获取行情异常 {code} Exception ：{str(e)}")
         finally:
             pass
-            # print(f'请求行情用时：{time.time() - _s_time}')
         return None
 
     def stock_info(self, code: str) -> Union[Dict, None]:
-        """
-        获取股票名称
-        """
+        """获取港股标的名称。"""
         all_stock = self.all_stocks()
         stock = [_s for _s in all_stock if _s["code"] == code]
         if not stock:
@@ -295,11 +260,7 @@ class ExchangeTDXHK(Exchange):
         return {"code": stock[0]["code"], "name": stock[0]["name"]}
 
     def ticks(self, codes: List[str]) -> Dict[str, Tick]:
-        """
-        如果可以使用 富途 的接口，就用 富途的，否则就用 日线的 K线计算
-        使用 富途 的接口会很快，日线则很慢
-        获取日线的k线，并返回最后一根k线的数据
-        """
+        """获取港股实时报价（通达信盘口接口）。"""
         ticks = {}
         client = TdxExHq_API(raise_exception=True, auto_retry=True)
         with client.connect(self.connect_info["ip"], self.connect_info["port"]):
@@ -308,14 +269,6 @@ class ExchangeTDXHK(Exchange):
                 if _market is None:
                     continue
                 _quote = client.get_instrument_quote(_market, _tdx_code)
-                # OrderedDict(
-                #     [('market', 1), ('code', '00700'), ('pre_close', 362.8000183105469), ('open', 372.20001220703125),
-                #      ('high', 374.8000183105469), ('low', 364.4000244140625), ('price', 367.6000061035156),
-                #      ('kaicang', 0), ('zongliang', 17784504), ('xianliang', 1189500), ('neipan', 8892299),
-                #      ('waipan', 8892205), ('chicang', 0), ('bid1', 0.0), ('bid2', 0.0), ('bid3', 0.0), ('bid4', 0.0),
-                #      ('bid5', 0.0), ('bid_vol1', 0), ('bid_vol2', 0), ('bid_vol3', 0), ('bid_vol4', 0), ('bid_vol5', 0),
-                #      ('ask1', 0.0), ('ask2', 0.0), ('ask3', 0.0), ('ask4', 0.0), ('ask5', 0.0), ('ask_vol1', 0),
-                #      ('ask_vol2', 0), ('ask_vol3', 0), ('ask_vol4', 0), ('ask_vol5', 0)])
                 if len(_quote) > 0:
                     _quote = _quote[0]
                     ticks[_code] = Tick(
@@ -341,10 +294,7 @@ class ExchangeTDXHK(Exchange):
         return ticks
 
     def now_trading(self):
-        """
-        返回当前是否是交易时间
-        TODO 简单判断 ：9:00-16:00
-        """
+        """返回当前是否是港股交易时间（简化判断：09:00-15:59）。"""
         hour = int(time.strftime("%H"))
         if hour in {9, 10, 11, 12, 13, 14, 15}:
             return True
@@ -379,7 +329,7 @@ class ExchangeTDXHK(Exchange):
             qfq_factor_df["qfq_factor"] = qfq_factor_df["qfq_factor"].astype(float)
             qfq_factor_df = qfq_factor_df.drop(columns=["date"])
 
-            # 合并k线与复权因子，进行复权计算
+            # 合并 K 线与复权因子，向前填充 qfq_factor 后相乘
             df = pd.concat([klines, qfq_factor_df], axis=0)
             df["qfq_date"].fillna(df["date"], inplace=True)
             df.sort_values(by="qfq_date", inplace=True)
@@ -398,7 +348,7 @@ class ExchangeTDXHK(Exchange):
 
     @staticmethod
     def __convert_date(dt: datetime.datetime):
-        # 通达信后对其，将日期及以上周期的时间统一设置为 16 点
+        # 通达信日线后对齐，统一设为 16:00 与分钟线区分
         return dt.replace(hour=16, minute=0)
 
     def balance(self):
@@ -419,14 +369,5 @@ class ExchangeTDXHK(Exchange):
 
 if __name__ == "__main__":
     ex = ExchangeTDXHK()
-    # stocks = ex.all_stocks()
-    # print(len(stocks))
-    # print(stocks)
-    #
-    # print(ex.to_tdx_code('KH.00700'))
-    #
     klines = ex.klines("KH.09618", "d")
     print(klines.tail(20))
-
-    # ticks = ex.ticks(['KH.00700'])
-    # print(ticks)

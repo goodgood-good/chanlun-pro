@@ -27,23 +27,19 @@ class StrategyDemo(Strategy):
         if len(data_now.get_bis()) == 0 or len(data_now.get_bi_zss()) == 0:
             return opts
 
-        # 笔没有完成，退出
         bi_now = data_now.get_bis()[-1]
         if bi_now.is_done() is False:
             bi_now = data_now.get_bis()[-2]
 
-        # 笔没有买卖点，退出
         if len(bi_now.line_mmds()) == 0:
             return opts
 
-        # 笔没有停顿，退出
         if self.bi_td(bi_now, data_now) is False:
             return opts
 
-        # 保证唯一
         mmds = bi_now.line_mmds()
         price = data_now.get_klines()[-1].c
-        # 缠论K线 第二个 的高低点做止损点
+        # 止损点取笔结束分型倒数第二根缠论K线的高/低点，比用极值更保守
         ck_kline_2_low = bi_now.end.klines[-2].l
         ck_kline_2_high = bi_now.end.klines[-2].h
 
@@ -98,7 +94,6 @@ class StrategyDemo(Strategy):
         data_now = market_data.get_cl_data(code, market_data.frequencys[0])
         price = data_now.get_klines()[-1].c
 
-        # 止盈止损检查
         if "buy" in mmd:
             if price < pos.loss_price:
                 return Operation(code, "sell", mmd, msg="%s 止损" % mmd)
@@ -106,7 +101,7 @@ class StrategyDemo(Strategy):
             if price > pos.loss_price:
                 return Operation(code, "sell", mmd, msg="%s 止损" % mmd)
 
-        # 自建仓之后的反向笔
+        # 找到开仓后第一根完成的反向笔作为平仓判断依据
         pos_bi_now: BI
         pos_bi_now = pos.info["cl_datas"]["bi_now"]
         next_bi_now = None
@@ -122,7 +117,7 @@ class StrategyDemo(Strategy):
             return None
 
         if "buy" in mmd:
-            # 买入做多，检查卖点，笔向上，出现停顿，并且出现 卖点或背驰
+            # 做多持仓：反向笔向上停顿，且出现卖点或背驰，平仓
             if (
                 next_bi_now.type == "up"
                 and self.bi_td(next_bi_now, data_now)
@@ -148,7 +143,7 @@ class StrategyDemo(Strategy):
                 )
 
         if "sell" in mmd:
-            # 买入做空，检查买点，笔向下，出现停顿，并且出现 买点或背驰
+            # 做空持仓：反向笔向下停顿，且出现买点或背驰，平仓
             if (
                 next_bi_now.type == "down"
                 and self.bi_td(next_bi_now, data_now)
@@ -180,7 +175,6 @@ if __name__ == "__main__":
     from chanlun.config import get_data_path
     from chanlun.exchange.exchange_tdx import ExchangeTDX
 
-    # 获取所有股票代码
     ex = ExchangeTDX()
     stocks = ex.all_stocks()
     run_codes = [
@@ -190,45 +184,26 @@ if __name__ == "__main__":
     print(f"回测代码数量：{len(run_codes)}")
 
     cl_config = query_cl_chart_config("a", "SHSE.000001")
-    # 量化配置
     bt_config = {
-        # 策略结果保存的文件
         "save_file": str(get_data_path() / "backtest" / "a_demo_v0_signal.pkl"),
-        # 设置策略对象
         "strategy": StrategyDemo(),
-        # 回测模式：signal 信号模式，固定金额开仓； trade 交易模式，按照实际金额开仓
         "mode": "signal",
-        # 市场配置，currency 数字货币  a 沪深  hk  港股  futures  期货
         "market": "a",
-        # 基准代码，用于获取回测的时间列表
         "base_code": "SH.000001",
-        # 回测的标的代码
-        # "codes": ["SH.600519"],  # 制定单个代码进行测试
         "codes": run_codes,
-        # 回测的周期，这里设置里，在策略中才能取到对应周期的数据
         "frequencys": ["d"],
-        # 回测开始的时间
         "start_datetime": "2020-01-01 00:00:00",
-        # 回测的结束时间
         "end_datetime": "2025-06-01 00:00:00",
-        # mode 为 trade 生效，初始账户资金
         "init_balance": 1000000,
-        # mode 为 trade 生效，交易手续费率
         "fee_rate": 0.001,
-        # mode 为 trade 生效，最大持仓数量（分仓）
         "max_pos": 8,
-        # 缠论计算的配置，详见缠论配置说明
         "cl_config": cl_config,
     }
 
     BT = backtest.BackTest(bt_config)
-    # BT.datas.del_volume_zero = True
 
-    # 运行回测
-    # BT.run()  # 单个股票用这个
-    BT.run_process(max_workers=5)  # 多个股票的信号模式，用这个，充分利用多核性能
-    # BT.load(BT.save_file)
-    # 保存回测结果到文件中
+    # 多标的信号模式使用多进程，充分利用多核
+    BT.run_process(max_workers=5)
     BT.save()
     BT.result()
     print("Done")

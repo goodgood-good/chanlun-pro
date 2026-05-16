@@ -219,14 +219,11 @@ var TvIdxCMCM = (function () {
           format: {},
         },
         constructor: function () {
-          this.init = function (context, inputCallback) {
-            // 初始化
-          };
+          this.init = function (context, inputCallback) {};
           this.main = function (context, inputCallback) {
             this._context = context;
             this._input = inputCallback;
 
-            // 获取价格数据
             const h = this._context.new_var(PineJS.Std.high(this._context));
             const l = this._context.new_var(PineJS.Std.low(this._context));
             const c = this._context.new_var(PineJS.Std.close(this._context));
@@ -289,13 +286,12 @@ var TvIdxCMCM = (function () {
             // 高位:A>50,COLORYELLOW,NODRAW;
             const high_position = a > 50 ? 1 : 0;
 
-            // 参考线
             const ref_10 = 10;
             const ref_20 = 20;
             const ref_50 = 50;
             const ref_60 = 60;
 
-            // STICKLINE部分的实现，转换为条件绘制
+            // STICKLINE 转条件绘制：同色段拆为独立 plot，配合 histogramBase 对齐原始 STICKLINE 视觉
 
             // STICKLINE(A>50,50,A,0.5,0),COLORYELLOW; - 高位黄色
             // 注意：需要排除A>50 AND A<REF(A,1)的情况，因为那种情况要显示绿色
@@ -320,7 +316,6 @@ var TvIdxCMCM = (function () {
             // STICKLINE(买点=1,22,A,0.5,0),COLORBLUE; - 买点信号
             const buy_signal = buy_point ? a : NaN;
 
-            // 返回所有计算结果
             return [
               a, // 0: A线，主要指标线
               ref_10, // 1: 参考线10

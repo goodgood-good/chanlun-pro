@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-缠论K线包含关系处理模块 - 修复增量更新问题
+缠论K线包含关系处理模块（支持增量更新）
 """
 from typing import List
 from chanlun.core.cl_interface import Kline, CLKline
@@ -23,9 +23,7 @@ class CL_Kline_Process:
 
     def _need_merge(self, k1: CLKline, k2: CLKline) -> bool:
         """判断两根缠论K线是否存在包含关系"""
-        # k1 包含 k2
         k1_contains_k2 = k1.h >= k2.h and k1.l <= k2.l
-        # k2 包含 k1
         k2_contains_k1 = k2.h >= k1.h and k2.l <= k1.l
         return k1_contains_k2 or k2_contains_k1
 
@@ -54,24 +52,24 @@ class CL_Kline_Process:
     def _merge_klines(self, k1: CLKline, k2: CLKline, direction: str) -> CLKline:
         """根据指定方向合并两根K线。"""
         if direction == 'up':
-            # 向上合并：取 高-高, 高-低
+            # 向上合并：高取高、低取高
             h, l = max(k1.h, k2.h), max(k1.l, k2.l)
-            o, c = l, h  # 示意性赋值，实际上缠论合并K线不强调OC，但保持逻辑一致
+            o, c = l, h  # 缠论合并K线不强调OC，仅示意性赋值
             date, k_index = (k1.date, k1.k_index) if k1.h > k2.h else (k2.date, k2.k_index)
         else:  # 'down'
-            # 向下合并：取 低-高, 低-低
+            # 向下合并：高取低、低取低
             h, l = min(k1.h, k2.h), min(k1.l, k2.l)
             o, c = h, l
             date, k_index = (k1.date, k1.k_index) if k1.l < k2.l else (k2.date, k2.k_index)
 
         merged = CLKline(
-            # k_index 继续落在原始K线坐标系中，供 MACD 切片、角度计算等逻辑使用。
+            # k_index 落在原始K线坐标系，供 MACD 切片、角度计算使用
             k_index=k_index, date=date, h=h, l=l, o=o, c=c, a=k1.a + k2.a,
-            klines=k1.klines + k2.klines,  # 累积所有原始K线
-            # index 保持缠论K线序号稳定，供 BiCalculator 增量回退与成笔距离判断使用。
+            klines=k1.klines + k2.klines,
+            # index 保持缠论K线序号稳定，供 BiCalculator 增量回退与成笔距离判断使用
             index=k1.index,
-            _n=k1.n + k2.n,  # 累积合并的K线数量
-            _q=k1.q  # 缺口属性继承
+            _n=k1.n + k2.n,
+            _q=k1.q
         )
         merged.up_qs = direction
         return merged
@@ -94,9 +92,7 @@ class CL_Kline_Process:
         # --- B. 获取当前最新的缠论 K 线 ---
         last_cl_k = self.cl_klines[-1]
 
-        # 创建新对象的包装：
-        # - k_index 使用原始K线坐标
-        # - index 使用缠论K线序号
+        # k_index 用原始K线坐标，index 用缠论K线序号
         new_cl_k = CLKline(
             k_index=current_k.index, date=current_k.date,
             h=current_k.h, l=current_k.l, o=current_k.o, c=current_k.c, a=current_k.a,
@@ -104,7 +100,7 @@ class CL_Kline_Process:
         )
 
         # --- C. 判断包含关系 ---
-        # 1. 检查是否有缺口 (即无重叠)
+        # 无重叠即视为缺口
         has_gap = new_cl_k.l > last_cl_k.h or new_cl_k.h < last_cl_k.l
 
         if has_gap:
@@ -117,11 +113,8 @@ class CL_Kline_Process:
             #   1. 上一根缠论 K 已经标记过方向（last_cl_k.up_qs）→ 沿用
             #   2. 上一根缠论 K 与更前一根有明确高低关系 → 用上文趋势判断
             #   3. 都不可用 → 用 new_cl_k 与 last_cl_k 的高低做兜底
-            #
-            # ★ A3 修复：原代码在 elif 链里 default 'up'，当 len(cl_klines)==1 或
-            # last_cl_k.h == prev_cl_k.h 时会强制按 'up' 合并，可能把"高高低低"
-            # 错合成"高高高高"，永久污染整段缠论 K 线序列。
-            # 现在所有未确定的分支都收敛到 _resolve_direction 兜底，避免方向错判。
+            # 所有未确定的分支都收敛到 _resolve_direction 兜底，避免误按 'up'
+            # 合并把"高高低低"错合成"高高高高"污染整段缠论 K 线序列。
             direction: str
             if last_cl_k.up_qs is not None:
                 direction = last_cl_k.up_qs
@@ -137,7 +130,6 @@ class CL_Kline_Process:
                 direction = self._resolve_direction(last_cl_k, new_cl_k)
 
             merged_k = self._merge_klines(last_cl_k, new_cl_k, direction)
-            # 原地替换
             merged_k.index = last_cl_k.index
             self.cl_klines[-1] = merged_k
 
@@ -168,15 +160,9 @@ class CL_Kline_Process:
 
             # --- 情况2: 这是一个更新数据 ---
             if current_k.index == self._last_src_kline_index:
-                # ★ D2 优化：原实现无条件 pop dirty_cl_k → 重放 valid_prev_klines → 处理 current_k。
-                # 这在「dirty_cl_k 只含 current_k 一根」的最常见场景里会做很多无意义工作：
-                #   - dirty_cl_k 只包含 current_k 时，valid_prev_klines 是空的，
-                #     重放循环本身就跳过；但 pop 之后 _process_one_kline(current_k)
-                #     还要重新跑一次 _need_merge / 合并方向判断，事实上等价于
-                #     「在原位修改 cl_klines[-1] 的 h/l/c/o/a」。
-                # 所以拆成两个分支：
+                # 拆成两个分支避免最常见场景下的无意义重算：
                 #   - fast path: dirty_cl_k 只含 current_k → 原地重做最后一个 cl_k 的字段
-                #   - slow path: dirty_cl_k 由多根原始 K 合并而来 → 走原来的 pop+重放逻辑
+                #   - slow path: dirty_cl_k 由多根原始 K 合并而来 → 走 pop + 重放逻辑
                 if not self.cl_klines:
                     self._process_one_kline(current_k)
                     continue

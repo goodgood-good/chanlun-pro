@@ -121,9 +121,7 @@
             layui.use(function () {
                 const form = layui.form;
                 const layer = layui.layer;
-                // 提交事件
                 form.on('submit(setting_save)', function (data) {
-                    // data = form.val('setting_form');
                     console.log(data.field);
                     $.ajax({
                         type: "POST",

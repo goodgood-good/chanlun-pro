@@ -1,17 +1,14 @@
 #:  -*- coding: utf-8 -*-
+"""定时同步港股 K 线到本地数据库（通过富途 OpenD 接口）。"""
 from chanlun.exchange.exchange_db import ExchangeDB
 from chanlun.exchange.exchange_futu import ExchangeFutu
 import traceback
 import time
 
-"""
-同步股票数据到数据库中
-"""
-
 exchange = ExchangeDB("hk")
 line_exchange = ExchangeFutu()
 
-# 从自选中获取同步股票 手动指定吧
+# 手动指定要同步的港股代码列表
 run_codes = []
 
 

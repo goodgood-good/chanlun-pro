@@ -495,10 +495,9 @@ class LinesFormAnalyse:
                 loop_find_zs(_zs.lines[0], _zs, zs_type, qs_zs_infos)
             return
 
-        # 倒推起始为下跌中枢
+        # 分别以"下跌中枢起始"和"上涨中枢起始"两个方向做倒推
         down_qs_zs_infos: Dict[str, List[ZS]] = {}
         loop_find_zs(lines[-1], None, "down", down_qs_zs_infos)
-        # 倒推起始为下跌中枢
         up_qs_zs_infos: Dict[str, List[ZS]] = {}
         loop_find_zs(lines[-1], None, "up", up_qs_zs_infos)
 
@@ -541,7 +540,6 @@ class LinesFormAnalyse:
         return bwlqs
 
 
-# 使用示例
 if __name__ == "__main__":
     from chanlun.core import cl
     from chanlun.cl_utils import query_cl_chart_config

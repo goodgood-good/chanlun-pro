@@ -86,10 +86,9 @@ class ExchangeAlpaca(Exchange):
             api_key=config.ALPACA_APIKEY, secret_key=config.ALPACA_SECRET
         )
 
-        # 设置时区
         self.tz = pytz.timezone("US/Eastern")
 
-        # is vip 如果是付费的，可以查询最新的数据，否则只能查询历史
+        # 免费/paper 账户只能查 15 分钟延迟的 IEX 数据；付费账户可实时获取
         self.is_vip = False
 
     def default_code(self):
@@ -192,8 +191,7 @@ class ExchangeAlpaca(Exchange):
                 end_date = _to_datetime(end_date)
 
             if start_date is None:
-                # 2026-05-15 US-005: 从 chanlun.exchange._lookback 读统一表,
-                # 与 qmt / cq / polygon / futu 对齐 (修改请改 _lookback.py)
+                # 回看时长从统一表读取，修改请改 _lookback.py
                 from chanlun.exchange._lookback import get_lookback_timedelta
 
                 # 未知 frequency 走 30 天兜底, 与历史行为保持一致 (避免请求空 start_date)
@@ -205,16 +203,8 @@ class ExchangeAlpaca(Exchange):
 
             # 免费 / paper 账户必须指定 feed=IEX，否则 alpaca 默认走 SIP 报：
             # "subscription does not permit querying recent SIP data"。
-            #
-            # ★ 关键：不要传 limit！alpaca-py 的 StockBarsRequest.limit 不是"每页大小"，
-            #   而是"整个调用总条数上限"——_data_get 内部累计达到 limit 就停止分页：
-            #     if limit:
-            #         request_limit = max(min(limit-total_items, max_response_size), 0)
-            #         if request_limit == 0: break
-            #   传 limit=5000 时，5min/365 天本应 ~28000 条会被截到 5000 条
-            #   （≈64 个交易日），中间几个月的 bar 直接消失。
-            #   省略 limit（None）则自动分页直到 next_page_token 耗尽，拉全区间。
-            #   start/end 已限定时间范围，无需 limit 兜底。
+            # 不传 limit：StockBarsRequest.limit 是整个调用总条数上限而非每页大小，
+            # 传入后会截断分页，导致长区间 bar 不完整。省略则自动分页拉全区间。
             req_kwargs = dict(
                 symbol_or_symbols=alpaca_symbol,
                 timeframe=timeframe,

@@ -5,7 +5,7 @@ from cl_wtpy.strategy.base_strategy import BaseStrategy
 from chanlun.strategy.strategy_xd_mmd import StrategyXDMMD
 
 if __name__ == "__main__":
-    # 创建一个运行环境，并加入策略
+    # 创建 CTA 回测引擎；bDumpCfg=True 会将合并后的配置落盘便于调试
     engine = WtBtEngine(EngineType.ET_CTA, logCfg='logcfgbt.json', isFile=False, bDumpCfg=True)
     engine.init('./common/', "configbt.json")
     engine.configBacktest(201909100930, 201912011500)

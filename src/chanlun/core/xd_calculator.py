@@ -121,19 +121,9 @@ def _resolve_pivot_bi(elem: dict, seg_type: str):
         target = max(merged, key=lambda b: b.high) if seg_type == 'up' else min(merged, key=lambda b: b.low)
     return target
 
-# ============================================================
-# 模块级配置常量
-# ============================================================
-# _try_end 中"反向 CS 元素扫描上限"。
-# 用途：防止"反向 CS 一直被包含合并、second_elems 永远凑不齐 2 个"导致
-# 单次 _try_end 一直扫到数组末尾，造成 O(n²) 退化甚至无法返回。
-# 经验值依据：正常一段反向走势的反向 CS 笔通常不超过十几根，50 已远超合理上限；
-# 一旦触发即可判定该方向无法形成有效反向段，直接放弃本轮判定。
-#
-# ★ D4 优化：默认值仍为 50，但允许通过两种方式调优：
-#   - 环境变量 CHANLUN_XD_LOOKAHEAD（部署侧统一控制）
-#   - XdCalculator(config={'xd_safety_lookahead': N}) 实例级覆盖
-# 实例级配置优先于环境变量；都没设则用默认 50。
+# _try_end 中"反向 CS 元素扫描上限"：防止反向 CS 一直被包含合并、
+# second_elems 凑不齐 2 个，导致单次扫到数组末尾造成 O(n²) 退化。
+# 默认 50，可用环境变量 CHANLUN_XD_LOOKAHEAD 或 config 实例级覆盖（config 优先）。
 import os as _os
 
 def _get_default_safety_lookahead() -> int:
@@ -152,11 +142,8 @@ def _get_default_safety_lookahead() -> int:
 SAFETY_LOOKAHEAD = _get_default_safety_lookahead()
 
 
-# ============================================================
-# XdCalculator v2
-# ============================================================
-
 class XdCalculator:
+    """线段计算器：基于笔列表识别线段，支持末尾追加场景的增量计算。"""
 
     def __init__(self, config: dict):
         self.config = config
@@ -167,20 +154,15 @@ class XdCalculator:
     # 公共接口
     # ----------------------------------------------------------
     def calculate(self, bis: List[BI]) -> List[XD]:
+        """根据笔列表计算线段；增量模式下仅返回新增的 xds，全量模式返回全部。"""
         all_bis = bis
         is_incremental = bool(self.xds)
         start_index_for_delta = 0
 
-        # ★ G7 修复 (US-003 xfail 解锁): 增量场景下校验"关键笔起点"漂移。
-        # 早期 bis 列表短 (< 5 根) 时 _find_start 必走 overlap-only fallback,
-        # 返回一个"权宜起点" (例如 bi#0); 当 bis 增长后, _find_strict_start
-        # 才能找到真正的关键笔 (例如 bi#3, 真起点显著晚于权宜起点)。
-        # 若不在此处校验, 增量逻辑会沿用旧的"权宜起点"建立的 xds[0], 永远
-        # 多一段; 表现为"逐根 process_klines 后 xds 比一次性多 1"。
-        #
-        # 校验语义: strict 找到的真起点 != xds[0] 的起始笔位置 → 旧 xds 是基于
-        # fallback 建立的, 关键笔已成立, 作废所有 xds 走全量重建。strict 返回 -1
-        # 表示关键笔还未成立, 保持现状不动 (避免在 fallback 还没切到 strict 时抖动)。
+        # 增量场景下校验"关键笔起点"漂移：bis 短时 _find_start 走 fallback 给出权宜
+        # 起点，bis 增长后 _find_strict_start 才能定位真正的关键笔。strict 真起点 !=
+        # xds[0] 起始笔位置时旧 xds 基于 fallback 建立，作废走全量重建；strict 返回 -1
+        # 表示关键笔未成立，保持现状不动以避免抖动。
         if self.xds and all_bis:
             strict_start = self._find_strict_start(all_bis)
             if strict_start >= 0:
@@ -189,7 +171,7 @@ class XdCalculator:
                 )
                 if old_first_xd_start_bi_idx >= 0 and strict_start != old_first_xd_start_bi_idx:
                     _log.debug(
-                        f"XdCalculator G7: 关键笔起点漂移 旧={old_first_xd_start_bi_idx} "
+                        f"XdCalculator: 关键笔起点漂移 旧={old_first_xd_start_bi_idx} "
                         f"新={strict_start}, 作废 {len(self.xds)} 个旧 xds 全量重建"
                     )
                     self.xds.clear()
@@ -198,12 +180,9 @@ class XdCalculator:
 
         if self.xds and all_bis and self._last_bi_snapshot:
             lb = all_bis[-1]
-            # ★ B3 修复：snapshot 同时校验 end.k.k_index。
-            # 缠论 K 线层会发生包含合并，导致同一根 BI 的 end.k.k_index 在新 K 线
-            # 到来后悄悄变化（合并/拆分），但 end.val（价格）和 index（笔序号）不变。
-            # 只校验 (index, end.val) 会让 XdCalculator 误判"无变化"直接 return，
-            # 但下游 ZsCalculator / BsPointCalculator 用到的 bi.end.k.k_index 已经变了，
-            # 结果不一致。snapshot 增加 k_index 后任何端点漂移都会触发重算。
+            # snapshot 同时校验 end.k.k_index：K 线包含合并会让同一根 BI 的
+            # end.k.k_index 变化而 end.val / index 不变，只校验 (index, end.val) 会误判
+            # "无变化"，但下游 ZsCalculator / BsPointCalculator 依赖 k_index，结果不一致。
             last_k_index = lb.end.k.k_index if lb.end is not None and lb.end.k is not None else -1
             if (
                 lb.index == self._last_bi_snapshot[0]
@@ -260,8 +239,7 @@ class XdCalculator:
 
         与 ``_find_start`` 的关系: 后者在 strict 找不到时 fallback 到 overlap-only,
         给出权宜起点供首次建段; 但 calculate() 增量路径必须用 strict 校验,
-        否则会出现"早期权宜起点 → 后续真起点出现 → 增量沿用错起点 → xds 多 1"
-        的 bug (详见 calculate 内 G7 注释)。
+        否则会出现"早期权宜起点 → 后续真起点出现 → 增量沿用错起点 → xds 多 1"的 bug。
         """
         for i in range(len(all_bis) - 4):
             bi_i = all_bis[i]
@@ -336,10 +314,11 @@ class XdCalculator:
     # 主循环
     # ----------------------------------------------------------
     def _build_segments(self, all_bis: List[BI], start: int):
+        """主循环：从 start 笔起逐段构造线段（延伸/吸收/_try_end 判定终结）。"""
         pos = start
         reverse_end_hint = None  # 上一段 _try_end 已探明的反向线段终点位置
-        # ★ 记录"已被 _emit_segment 处理过的最后一个段终点位置"，
-        # 主循环结束后兜底用 _emit_pending 输出最后一段未完成线段（详见循环末尾注释）。
+        # 记录已被 _emit_segment 处理过的最后一个段终点位置，
+        # 主循环结束后兜底用 _emit_pending 输出最后一段未完成线段。
         last_emitted_end_idx: int = -1
 
         while pos + 2 < len(all_bis):
@@ -441,21 +420,10 @@ class XdCalculator:
                 self._emit_pending(all_bis, seg_start, seg_type)
                 break
 
-        # ★ 兜底输出最后一段未完成线段。
-        #
-        # 必要性：上面循环里 `_emit_pending` 仅在「内层 while 自然结束」（else 分支）时触发，
-        # 而以下场景内层不会自然结束、_emit_pending 永远跑不到，导致末尾的反向未完成段丢失：
-        #   1. 当前段在序列尾部附近被 _try_end 命中并 _emit_segment 完成后，
-        #      pos 跳到反向段起点 next_start；若 next_start + 2 >= len(all_bis)，
-        #      外层 while 直接退出，反向段（笔不够 3 根，含末尾 pending 笔）从未被构造。
-        #   2. 外层 `pos += 1; continue` 兜底分支把 pos 推到末尾，同样不会触发 _emit_pending。
-        #
-        # 现象：图表上"当前线段被破坏 + 新线段第三笔未完成"时看不到任何未完成线段。
-        #
-        # 修复策略：以「最后一个已完成段终点之后」（last_emitted_end_idx + 1）为新段起点，
-        # 再尝试一次 _emit_pending。新段方向 = last_emitted 段方向取反；若整轮没有任何
-        # _emit_segment（last_emitted_end_idx == -1），则用整段起点 + 起点笔方向。
-        # _emit_pending 内部已对「候选笔不足 3 根」做了保护，不会产出非法段。
+        # 兜底输出最后一段未完成线段：内层 while 的 _emit_pending 只在自然结束时触发，
+        # 段尾被 _try_end 命中或外层 continue 推到末尾时不会触发，末尾反向未完成段会丢失。
+        # 以「最后一个已完成段终点之后」为新段起点再尝试一次 _emit_pending；整轮无
+        # _emit_segment 时用整段起点 + 起点笔方向。_emit_pending 内部已保护候选不足 3 根。
         if last_emitted_end_idx >= 0:
             pending_start = last_emitted_end_idx + 1
             if pending_start < len(all_bis):
@@ -477,7 +445,10 @@ class XdCalculator:
     def _try_end(self, all_bis, seg_start, seg_end, seg_type,
                  seg_high, seg_low, check_pos,
                  seg_cs_bis_cache: Optional[List[BI]] = None) -> Optional[tuple]:
+        """尝试用反向特征序列分型判定当前线段是否终结。
 
+        命中返回 (当前段终点笔位置, 反向段起点, 反向段终点)，否则返回 None。
+        """
         cs_bi_type = 'down' if seg_type == 'up' else 'up'
         inc_dir = 'up' if seg_type == 'up' else 'down'
         frac_name = '顶分型' if seg_type == 'up' else '底分型'
@@ -523,7 +494,6 @@ class XdCalculator:
         # 否则下一轮外层吸收一根 CS 后 first_elem 又会被新的反向笔替换，
         # second_elems 永远凑不到 2 个，导致死循环（segment 无限延伸）。
         min_second = 2
-        # SAFETY_LOOKAHEAD: 模块级常量，详见文件顶部定义。
         ready = False
         i = check_pos
         while i < len(all_bis):
@@ -635,7 +605,7 @@ class XdCalculator:
     # _check_type2
     # ----------------------------------------------------------
     def _check_type2(self, all_bis, mid_elem, seg_type) -> bool:
-
+        """第二种情况（特征序列有缺口）的额外校验：确认反向段已形成所需分型。"""
         target_bi = _resolve_pivot_bi(mid_elem, seg_type)
 
         start_pos = self._bi_pos[id(target_bi)] + 1
@@ -668,10 +638,9 @@ class XdCalculator:
         while i < len(all_bis):
             bi = all_bis[i]
 
-            # 原线段严格创新高/低检查（> / <，等价不算创新极值）
-            # 修复点：原逻辑直接 return False，会让"等价新高 + 跨段后续创新高"误判为段延伸
-            #        现改为"先把这根创新高/低的笔收进 cs2_elems 再判定分型"，
-            #        若分型成立则反向段成立 → return True；否则才 return False。
+            # 原线段严格创新高/低检查（> / <，等价不算创新极值）。
+            # 直接 return False 会让"等价新高 + 跨段后续创新高"误判为段延伸，
+            # 故先把创新高/低的笔收进 cs2_elems 再判定分型，分型成立才认反向段。
             is_strict_new_extreme = (
                 (seg_type == 'up' and bi.type == 'up' and bi.high > target_bi.high)
                 or (seg_type == 'down' and bi.type == 'down' and bi.low < target_bi.low)
@@ -780,13 +749,9 @@ class XdCalculator:
           已完成段由 _try_end 严格判定终点；未完成段无完整反向特征序列可用，
           只能保守估计。极值优先体现"线段记录方向极值"，兜底体现"实盘需有持续反馈"。
 
-        ★ candidates 不再过滤 is_done()：
-          BiCalculator 始终把最后一根笔标 pending（end.done=False）。原先此处
-          只收 done 笔，会出现"反向段恰好 3 根（末根 pending）→ candidates 只剩 2"
-          的塌陷窗口（典型如 1min 高频段刚被破坏 + 反向第三笔正在画），导致
-          整段无未完成线段输出。pending 笔的 high/low 仍由 LINE.update_high_low
-          计算为有效价格，参与极值/兜底逻辑无副作用；这与旧 segment.py 把
-          pending_stroke 直接 append 到 pending_segment 的行为一致。
+        candidates 不过滤 is_done()：BiCalculator 把最后一根笔标 pending，只收 done
+        笔会出现"反向段恰好 3 根（末根 pending）→ candidates 只剩 2"的塌陷窗口。
+        pending 笔 high/low 仍有效，参与极值/兜底逻辑无副作用。
         """
         candidates = list(all_bis[start:])
         if len(candidates) < 3:

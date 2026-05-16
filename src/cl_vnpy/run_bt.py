@@ -4,6 +4,7 @@ from datetime import datetime
 
 from cl_vnpy.strategies.chanlun_xdmmd_strategy import ChanlunXdmmdStrategy
 
+# 单标的 CTA 回测入口脚本；直接运行即可，结果通过 show_chart 展示
 engine = BacktestingEngine()
 
 engine.set_parameters(

@@ -51,39 +51,13 @@ class StrategyAXDTradeModel(Strategy):
         self._max_loss_rate = 10
 
     def on_bt_loop_start(self, bt: BackTest):
-        """
-        判断大盘，是否可以进行交易
-        筛选有线段买卖点和背驰的代码
-        """
-        # 每天执行一次
+        """每日开始时预筛选候选代码，避免对全量标的运行完整策略逻辑。"""
+        # 同一天只执行一次，通过日期 key 去重
         if bt.datas.now_date.day == self._date_day_key:
             return True
         self._date_day_key = bt.datas.now_date.day
 
-        # 获取大盘的日线数据
-        # for code_key, info in self._trade_infos.items():
-        #     # 获取周线的数据，并计算，根据周线笔来筛选是否可交易
-        #     index_w_klines = bt.datas.klines(info['code'], bt.frequencys[0])
-        #     index_w_klines = convert_stock_kline_frequency(index_w_klines, 'w')
-        #     if len(index_w_klines) == 0:
-        #         continue
-        #     if info['code'] in self._index_cds.keys():
-        #         self._index_cds[info['code']].process_klines(index_w_klines)
-        #     else:
-        #         self._index_cds[info['code']] = cl.CL(info['code'], 'w', bt.cl_config).process_klines(index_w_klines)
-        #     index_w_cd = self._index_cds[info['code']]
-        #     # index_30m_cd = bt.datas.get_cl_data(info['code'], bt.frequencys[1])
-        #     if len(index_w_cd.get_bis()) == 0:
-        #         continue
-        #     index_bi = index_w_cd.get_bis()[-1]
-        #     if (index_bi.type == 'down' and index_bi.is_done()) or (
-        #             index_bi.type == 'up' and index_bi.is_done() is False):
-        #         info['trade'] = True
-        #         info['trade_days'].append(fun.datetime_to_str(bt.datas.now_date, '%Y-%m-%d'))
-        #     else:
-        #         info['trade'] = False
-
-        # 循环获取所有代码数据，初步判断代码是否可以进行交易
+        # 初步过滤：只保留当前线段向下且已有买点或盘整背驰的标的
         self._run_codes = []
         for code in bt.codes:
             if self._trade_infos[code[:7]]["trade"] is False:
@@ -95,13 +69,12 @@ class StrategyAXDTradeModel(Strategy):
                 if xd.type == "down" and (
                     xd.mmd_exists(["1buy", "2buy", "3buy"]) or xd.bc_exists(["pz"])
                 ):
+                    # 三买须有至少两个线段中枢作背景，否则可能是趋势延续而非反转
                     if xd.mmd_exists(["3buy"]) and len(xd_zss) < 2:
                         continue
-                    # if xd.type == 'down' and xd.bc_exists(['pz']):
                     self._run_codes.append(code)
-        # 将持仓中的代码加入进去
+        # 已持仓标的无论筛选结果如何，均须纳入以便执行平仓检查
         self._run_codes += bt.trader.position_codes()
-        # print('运行代码：', self._trade_infos)
         return True
 
     def open(
@@ -131,7 +104,7 @@ class StrategyAXDTradeModel(Strategy):
 
         price = cd_5m.get_klines()[-1].c
 
-        # 日线笔要下跌情况，并且笔要完成
+        # 日线向下笔已完成，且当前价格已突破笔结束分型最后K线高点（确认反弹启动）
         bi_day = cd_day.get_bis()[-1]
         if (
             bi_day.type == "down"
@@ -142,11 +115,11 @@ class StrategyAXDTradeModel(Strategy):
         else:
             return opts
 
-        # 笔距离线段不能太远，太远可能随时结束
+        # 笔距离线段结束笔不超过4笔，防止入场时机过晚
         if bi_day.index - xd_day.end_line.index > 4:
             return opts
 
-        # 日线的笔要基本符合基本，30m一段 或者 5m五段
+        # 次级别结构验证：日线笔对应 30m 至少1段，或 5m 至少5段（确保次级别有完整走势）
         xds_30m = [
             _xd
             for _xd in cd_30m.get_xds()
@@ -171,11 +144,11 @@ class StrategyAXDTradeModel(Strategy):
             # 30m 线段不满足条件
             return opts
 
-        # 检查 5M 情况，第一次3买，或第一次一买，进行买入
+        # 5m 级别次级别入场确认：只接受第一次出现的买点，防止重复信号
         is_ok_5m = False
         low_level_5m_msg = ""
 
-        # 确定只做第一个三买
+        # 只做第一个三买，出现多个三买说明走势已延续，不再是初始反转
         if is_ok_5m is False:
             bis_5m_3buy = [
                 _bi
@@ -187,7 +160,7 @@ class StrategyAXDTradeModel(Strategy):
                 is_ok_5m = True
                 low_level_5m_msg = "5m 三买点"
 
-        # 确定做第一个一买，后续笔不创新低
+        # 只做第一个一买
         if is_ok_5m is False:
             bis_5m_1buy = [
                 _bi
@@ -198,7 +171,7 @@ class StrategyAXDTradeModel(Strategy):
             if len(bis_5m_1buy) == 1:
                 is_ok_5m = True
                 low_level_5m_msg = "5m 一买点"
-        # 确定做第一个二买
+        # 只做第一个二买
         if is_ok_5m is False:
             bis_5m_2buy = [
                 _bi
@@ -212,7 +185,7 @@ class StrategyAXDTradeModel(Strategy):
 
         if is_ok_5m is False:
             return opts
-        # 计算止损价格
+        # 止损取日/30m/5m 三个级别最低点中的最低值，再按最大止损比例收窄
         bi_day = cd_day.get_bis()[-1]
         bi_30m = cd_30m.get_bis()[-1]
         bi_5m = cd_5m.get_bis()[-1]
@@ -221,7 +194,7 @@ class StrategyAXDTradeModel(Strategy):
             "buy", price, stop_loss_price, self._max_loss_rate
         )
 
-        # 低级别线段要有配合的背驰或买卖点
+        # 低级别线段评分：30m 和 5m 各贡献 1 分，须同时有背驰或买点支撑才入场（score >= 2）
         xds_down_30m = [
             _xd
             for _xd in cd_30m.get_xds()
@@ -272,7 +245,7 @@ class StrategyAXDTradeModel(Strategy):
 
         for mmd in xd_day.get_mmds():
             if mmd.name == "3buy":
-                # 过滤三买点， 之前中枢大于九段的三买
+                # 中枢超过9段说明中枢已过于成熟，三买可靠性下降，跳过
                 if mmd.zs.line_num > 9:
                     continue
                 info["zs_juli_rate"] = (price - mmd.zs.zg) / mmd.zs.zg * 100
@@ -325,19 +298,12 @@ class StrategyAXDTradeModel(Strategy):
         cd_30m = market_data.get_cl_data(code, market_data.frequencys[1])
         cd_5m = market_data.get_cl_data(code, market_data.frequencys[2])
 
-        # 检查是否触发止损，如果5m向下笔背驰，并且是上午，不触发止损
-        # bi_5m = cd_5m.get_bis()[-1]
-        # last_day_date = cd_5m.get_klines()[-1].date
         price = cd_5m.get_klines()[-1].c
         opt = self.check_loss(mmd, pos, price)
         if opt is not None:
-            # if bi_5m.bc_exists(['bi', 'pz', 'q']) and last_day_date.hour <= 11:
-            #     pos.info['is_pause_loss'] = 1
-            # else:
             return opt
 
         info = pos.info
-        # 日线后续出现的顶分型，是否小于5日均线，必须要下午14点30分以后才可以
         ma5_day = self.idx_ma(cd_day, 5)[-1]
         last_day_date = cd_day.get_klines()[-1].date
         bi_day = self.last_done_bi(cd_day.get_bis())
@@ -347,7 +313,7 @@ class StrategyAXDTradeModel(Strategy):
             and last_day_date > bi_day.end.klines[-1].klines[-1].date
         ):
             if price < bi_day.end.klines[-1].l and price < ma5_day:
-                # 该笔，在30m至少一段，5m至少5段
+                # 确认日线向上笔结构有效（30m >= 1段 或 5m >= 5段），再触发平仓
                 xds_30m = [
                     _xd
                     for _xd in cd_30m.get_xds()
@@ -368,7 +334,7 @@ class StrategyAXDTradeModel(Strategy):
                         msg=f"日线向上笔结束(30m:{len(xds_30m)}/5m:{len(xds_5m)})，并且价格小于5日均线，平仓退出",
                     )
 
-        # 30M 线段 至少做3段
+        # 30m 走势至少完成3段后，出现卖点即平仓（等待走势充分展开）
         xds_30m = [
             _xd for _xd in cd_30m.get_xds() if _xd.start.k.date >= info["bi_end_date"]
         ]
@@ -386,7 +352,7 @@ class StrategyAXDTradeModel(Strategy):
                     msg=f"30m级别出现卖点 {bi_30m.line_mmds()}",
                 )
 
-        # 5m 出现三类卖点，退出
+        # 5m 走势满5段后，日线顶分型破位时出现三卖，退出
         bi_day = cd_day.get_bis()[-1]
         xds_5m = [
             _xd for _xd in cd_5m.get_xds() if _xd.start.k.date >= info["bi_end_date"]

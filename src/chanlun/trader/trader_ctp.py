@@ -62,7 +62,7 @@ class MyTraderCallback(CThostFtdcTraderApi):
         print("交易服务器连接成功")
         self.connected = True
 
-        # 如果设置了AppID，先进行认证
+        # 新版 CTP 要求先 AppID/AuthCode 认证后才能登录；旧柜台无此字段可直接登录
         if self.trader.ex.app_id:
             req = CThostFtdcReqAuthenticateField()
             req.BrokerID = self.trader.ex.broker_id
@@ -71,7 +71,6 @@ class MyTraderCallback(CThostFtdcTraderApi):
             req.AuthCode = self.trader.ex.auth_code
             self.ReqAuthenticate(req, 0)
         else:
-            # 没有设置AppID，直接登录
             self._login()
 
     def OnRspAuthenticate(self, pRspAuthenticateField, pRspInfo, nRequestID, bIsLast):

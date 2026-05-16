@@ -26,27 +26,26 @@ class StrategyCustomLevelMLA(Strategy):
         """
         开仓监控，返回开仓配置
         """
-        self.kg.cl_config = market_data.cl_config  # 使用回测配置中缠论配置项
+        # KlinesGenerator 需要缠论配置，从回测上下文中实时获取而非构造时固定
+        self.kg.cl_config = market_data.cl_config
 
         opts = []
         low_klines = market_data.klines(code, market_data.frequencys[0])
         high_data = self.kg.update_klines(low_klines)
-        # 没有笔或中枢，退出
         if len(high_data.get_bis()) == 0:
             return opts
 
-        # 笔没有完成，退出
         high_bi = high_data.get_bis()[-1]
 
-        # 如果当前K线距离笔结束太远，退出
+        # 当前缠论K线距离笔结束超过4根，说明已进入新的走势，不再入场
         if high_data.get_cl_klines()[-1].index - high_bi.end.k.index > 4:
             return opts
 
-        # 当前笔没有背驰和买卖点，退出
+        # 笔须有买卖点或盘整/趋势背驰才入场
         if len(high_bi.line_mmds()) and high_bi.bc_exists(["pz", "qs"]) is False:
             return opts
 
-        # 买卖点、背驰对应的中枢，要回拉零轴
+        # 对应中枢须经历 MACD 零轴回拉，确认走势能量充分释放
         for mmd in high_bi.mmds:
             if mmd.zs is not None and self.judge_macd_back_zero(high_data, mmd.zs) == 0:
                 return opts
@@ -58,23 +57,17 @@ class StrategyCustomLevelMLA(Strategy):
             ):
                 return opts
 
-        # 多级别分析，低级别是否有盘整或趋势背驰
+        # 低级别出现盘整或趋势背驰，且低级别笔已停顿，双重确认入场
         low_data = market_data.get_cl_data(code, market_data.frequencys[0])
         mla = MultiLevelAnalyse(high_data, low_data)
         low_info = mla.low_level_qs(high_bi, "bi")
         if low_info.pz_bc is False and low_info.qs_bc is False:
             return opts
 
-        # 判断低级别笔停顿
         if self.bi_td(low_info.last_line, low_data) is False:
             return opts
 
-        # 收盘前不进行开仓
-        # last_kline = low_data.get_klines()[-1]
-        # if last_kline.date.hour in [14, 22] and last_kline.date.minute >= 55:
-        #     return opts
-
-        # 止损放在笔结束分型的顶底
+        # 止损设在高级别笔结束分型的极值（顶/底）
         loss_price = high_bi.end.val
 
         for mmd in high_bi.line_mmds():
@@ -92,7 +85,8 @@ class StrategyCustomLevelMLA(Strategy):
         for bc in high_bi.line_bcs():
             if bc not in ["pz", "qs"]:
                 continue
-            mmd = f'{high_bi.type}_{bc}_bc_{("buy" if high_bi.type == "down" else "sell")}'  # down_pz_bc_buy
+            # 按方向构造背驰 mmd 名，格式：down_pz_bc_buy / up_qs_bc_sell
+            mmd = f'{high_bi.type}_{bc}_bc_{("buy" if high_bi.type == "down" else "sell")}'
             opts.append(
                 Operation(
                     code=code,
@@ -119,30 +113,22 @@ class StrategyCustomLevelMLA(Strategy):
         low_klines = market_data.klines(code, market_data.frequencys[0])
         high_data = self.kg.update_klines(low_klines)
         low_data = market_data.get_cl_data(code, market_data.frequencys[0])
-        # 没有笔或中枢，退出
         if len(high_data.get_bis()) == 0:
             return None
 
-        # 止损判断
         price = high_data.get_klines()[-1].c
         loss_opt = self.check_loss(mmd, pos, price)
         if loss_opt is not None:
             return loss_opt
 
-        # 收盘前退出
-        # last_kline = low_data.get_klines()[-1]
-        # if last_kline.date.hour in [14, 22] and last_kline.date.minute >= 55:
-        #     return Operation('sell', mmd, msg=f'收盘退出')
-
         high_bi = high_data.get_bis()[-1]
 
-        # 低级别趋势 盘整或趋势背驰
+        # 平仓条件与开仓对称：低级别盘整/趋势背驰且笔停顿
         mla = MultiLevelAnalyse(high_data, low_data)
         low_info = mla.low_level_qs(high_bi, "bi")
         if low_info.pz_bc is False and low_info.qs_bc is False:
             return None
 
-        # 低级别笔要停顿
         if self.bi_td(low_info.last_line, low_data) is False:
             return None
 

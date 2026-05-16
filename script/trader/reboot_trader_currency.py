@@ -1,4 +1,5 @@
 #:  -*- coding: utf-8 -*-
+"""数字货币（Binance）自动化交易启动脚本，每 5 分钟触发一次策略执行。"""
 import time
 import traceback
 
@@ -16,6 +17,7 @@ logger.info("数字货币自动化交易程序")
 try:
     ex = ExchangeBinance()
     run_num = 30
+    # 初始取 24h 交易量排行前 30 个品种，每小时动态刷新
     run_codes = ex.ticker24HrRank(run_num)
     frequencys = ["30m"]
 
@@ -39,16 +41,10 @@ try:
 
     p_redis_key = "trader_currency"
 
-    # 交易对象
     TR = TraderCurrency("Currency", log=logger.info)
-    # 从 Redis 中加载数据
     TR.load_from_pkl(p_redis_key)
-    # 数据对象
     Data = OnlineMarketDatas("currency", frequencys, ex, cl_config)
-    # 设置使用的策略
     STR = StrategyDemo()
-
-    # 将策略与数据对象加入到交易对象中
     TR.set_strategy(STR)
     TR.set_data(Data)
 
@@ -59,7 +55,7 @@ try:
             seconds = int(time.time())
 
             if seconds % (60 * 60) == 0:
-                # 每一个小时，更新 24 小时交易量排行代码
+                # 每小时更新 24h 交易量排行，动态调整监控品种
                 run_codes = ex.ticker24HrRank(run_num)
                 logger.info("Run symbols: %s" % run_codes)
 
@@ -67,7 +63,7 @@ try:
                 time.sleep(1)
                 continue
 
-            # 增加当前持仓中的交易对儿
+            # 持仓中的标的也纳入本轮执行
             run_codes = TR.position_codes() + run_codes
             run_codes = list(set(run_codes))
 
@@ -77,10 +73,9 @@ try:
                 except Exception as e:
                     logger.error(traceback.format_exc())
 
-            # 清空之前获取的k线缓存，避免后续无法获取最新数据
+            # 每轮结束后清空 K 线缓存，确保下轮能拉到最新数据
             Data.clear_cache()
 
-            # 保存交易数据到 Redis 中
             TR.save_to_pkl(p_redis_key)
 
         except Exception as e:

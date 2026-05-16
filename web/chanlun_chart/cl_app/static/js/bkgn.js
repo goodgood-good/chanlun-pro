@@ -217,7 +217,7 @@ var BKGN = (function () {
     $("#ai_code").val(item.code);
   }
 
-  // 搜索框三件套：input(keyup 防抖 + Enter 即时)、查询按钮、重置按钮
+  // 搜索框绑定：keyup 防抖 + Enter 即时触发、查询按钮、重置按钮三件套
   function bind_search_box(input, btn, reset, doSearch) {
     var timer = null;
     $(input).on("keyup", function (e) {

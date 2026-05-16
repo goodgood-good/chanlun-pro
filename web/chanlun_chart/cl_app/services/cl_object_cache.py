@@ -1,23 +1,13 @@
-"""web/chanlun_chart/cl_app/services/cl_object_cache.py — US-009 / F1 进程内 cl 对象 LRU 缓存。
+"""进程内 CL 对象 LRU 缓存，避免对同一份 K 线反复全量计算。
 
-设计目标:
-- 让 web 路径 (tv_history polling, 多周期预热) 避免对同一份 K 线"反复全量算"。
-- 同 ``(market, code, frequency, cl_config_hash)`` × 同 K 线 signature → cache hit,
-  返回已经算好的 CL 对象, 节省"几百 ms - 几秒"全量计算。
+三种路径（按耗时从低到高）：
+1. cache hit + 同 signature → 直接返回 cached cd（0 cost）
+2. cache hit + 末段追加 signature → 复用旧 cd，process_klines 走内部增量，省 80%+ 时间
+3. cache miss / 复权 / 缩短 → 新建 cd 全量计算
 
-三种路径 (按耗时从低到高):
-1. **cache hit + 同 signature** → 0 cost, 直接返回 cached cd (主优化点)
-2. **cache hit + 末段追加 signature** (F1 真增量) → 复用旧 cd, 调
-   ``process_klines(full)``, cd 内部 ``KlineDataProcessor._preprocess`` 切片增量,
-   只对新增 K 线跑笔/段/中枢更新。比全量重建省 80%+ 时间。
-3. **cache miss / 复权 / 缩短** → 丢弃旧 cd, 新建 + 全量
+增量路径安全前提：xd_calculator 增量路径与全量路径等价；同 key 并发用 _key_locks 串行化。
 
-F1 安全前提 (重要):
-- xd_calculator G7 修复后 (commit 77ab323), 增量路径与全量路径**等价**, 不再有
-  xds 累积 bug。真增量喂入是安全的。
-- 同 key 并发请求用 ``_key_locks`` 串行化, 避免两个线程同时改 cd 内部状态。
-
-API:
+API：
 - ``get_or_compute_cl(market, code, frequency, cl_config, klines)`` → CL
 - ``invalidate(market, code, frequency, cl_config=None)`` → 清单个 key 或前缀
 - ``stats()`` → {hits, misses, incremental_extends, full_rebuilds, size}
@@ -40,11 +30,9 @@ if TYPE_CHECKING:
 
 _CACHE_MAX_SIZE = 128
 
-# F1: signature 中 ref-bar 的"绝对位置"上界。
-# 选 50 而非"末段相对偏移" (旧设计 n - max(10, min(n//4, 100))) 是因为:
-# - 追加 K 线时 ref_idx 保持稳定 → 同一根 K 线 → ref OHLC 不变 → 可识别为"末段追加"
-# - 旧"末段相对偏移"在 n 变化时 mid_idx 也变 → 必然不同根 → 必然 miss → 无法走真增量
-# 50 这个值在多数实盘 K 线序列中都满足 (>=12 时 ref 落在 K[min(50, n//4)])。
+# signature 中 ref-bar 的绝对位置上界。
+# 用绝对位置而非末段相对偏移：追加 K 线时 ref_idx 指向同一根，OHLC 不变，
+# 可被 _is_extending_signature 识别为"末段追加"走真增量路径。
 _REF_BAR_MAX_IDX = 50
 
 
@@ -146,8 +134,8 @@ class _CacheEntry:
 _cl_object_cache: "LRUCache[str, _CacheEntry]" = LRUCache(maxsize=_CACHE_MAX_SIZE)
 _cache_lock = threading.RLock()
 
-# F1: per-key 锁, 串行化同 key 的 cd 增量喂入 / 重建。
-# 不能复用 _cache_lock —— 否则增量 process_klines (可能几百 ms) 会阻塞所有其它 key 的读路径。
+# per-key 锁，串行化同 key 的 cd 增量喂入/重建。
+# 不复用 _cache_lock：process_klines 可能耗时几百 ms，会阻塞所有其他 key 的读路径。
 _key_locks: Dict[str, threading.RLock] = {}
 _key_locks_meta_lock = threading.Lock()
 
@@ -182,22 +170,17 @@ def get_or_compute_cl(
     cl_config: Optional[Dict[str, Any]],
     klines: pd.DataFrame,
 ):
-    """获取或计算 CL 对象 (F1: 含真增量路径)。
+    """获取或计算 CL 对象（含真增量路径）。
 
     三条路径:
-    1. cache hit + 同 signature → 0 cost 返回 cached cd (主优化点)
-    2. cache hit + extending signature → 复用 cd, process_klines(full) 走内部增量
-       (xd_calculator G7 已修, 增量与全量等价, 真增量安全)
-    3. miss / 不连续 signature → 新建 cd + 全量
+    1. cache hit + 同 signature → 0 cost 返回 cached cd
+    2. cache hit + extending signature → 复用 cd, process_klines 走内部增量（增量与全量等价）
+    3. miss / 不连续 signature → 新建 cd 全量计算
 
-    线程安全:
-    - 路径 1 仅持 _cache_lock, 读 atomic
-    - 路径 2/3 持 per-key 锁串行化, 避免并发 mutate 同一 cd
+    线程安全：路径 1 仅持 _cache_lock；路径 2/3 持 per-key 锁串行化。
 
-    ⚠️ 返回值约束 (architect review R1):
-    返回的 CL 是 cache 内的**共享对象**。调用方只能读 (get_xds/get_bis/...);
-    不能再 process_klines / mutate 内部 list/dict。若需要"追加 K 线", 调用本方
-    法传入 full klines (extending signature 时本函数会代为做增量喂入)。
+    ⚠️ 返回的 CL 是 cache 内共享对象，调用方只能读；若需追加 K 线，传入 full klines
+    由本函数代为处理增量喂入。
     """
     from chanlun.core.cl import CL  # 局部 import 避免循环
 

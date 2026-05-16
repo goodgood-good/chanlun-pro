@@ -1,6 +1,8 @@
 """
-TradingView相关接口蓝图。
-(终极修复版：修复 minmov 校验错误 + 全量数据返回 + 内存缓存)
+TradingView 相关接口蓝图。
+
+提供 /tv/config、/tv/symbols、/tv/search、/tv/history 等标准 UDF 接口，
+以及图表/模板/画线存取和自定义 Marks 支持。
 """
 import pytz
 import json
@@ -48,16 +50,8 @@ from ..services.constants import (
 
 tv_bp = Blueprint("tv", __name__)
 
-# 跨周期 MACD 倍率常量已迁到 services.chart_compute（Tier 4 P3），
-# 见模块顶部 re-export。
-
-# stock_cache + 全套 symbols 预加载逻辑已迁到 services.stock_list (Tier 4 P2)，
-# 见模块顶部 re-export。
-
-# 图表缓存基础设施（chart_data_cache / cache_lock / 工具函数）已迁移到
-# ..services.chart_cache（L1 Phase 2）。这里 re-export 让 tv.py 内部既有引用
-# （_set_chart_cache_entry / _mark_chart_cache_validated / _persist_chart_cache_async
-# 等业务函数）以及 line 600 处的 _stable_hash 调用都不需要修改即可继续工作。
+# 图表缓存、symbols 预加载、跨周期 MACD 等基础设施均已迁至 services 子包，
+# 以下 re-export 保持本模块内部引用不变。
 from ..services.chart_cache import (  # noqa: E402
     _CACHE_REVALIDATION_INTERVAL,
     _build_cache_key,
@@ -78,21 +72,15 @@ from ..services.chart_cache import (  # noqa: E402
     evaluate_cache_for_tv_history,
 )
 
-# 磁盘异步写入器 / 落盘函数已迁到 services.chart_cache（Tier 4 P1），见模块顶部 re-export。
-
 
 # ---------------------------------------------------------------------------
 # 批量预热活动注册表（service 层，与 symbols.py PrewarmManager 协作）
 # ---------------------------------------------------------------------------
-# L1 重构后，状态与函数迁移到 ..services.prewarm_status；这里 re-export 让
-# 本模块内部既有的 ``is_batch_prewarm_active(market)`` 调用（line 660 等）
-# 不需要修改即可继续工作；symbols.py 直接 import 自 service 模块。
 from ..services.prewarm_status import (  # noqa: E402
     is_batch_prewarm_active,
     mark_batch_prewarm_active,
 )
 
-# Pre-warm cache for common interval switches to reduce recomputation
 _MAX_PREWARMED_SIZE = 50  # prewarmed 集合上限，防止线程异常导致无限增长
 # 已"在飞行中"的 prewarm cache_key 集合，避免同一个 key 被多个 prewarm 任务重复计算。
 # 设计上始终通过 discard 移除，size 不会超过同时 in-flight 的预热任务数（极小）。
@@ -124,24 +112,16 @@ _PREWARM_DEDUPE_TTL_SECONDS = 30.0
 _prewarm_recent_targets: Dict[str, float] = {}
 _prewarm_dedupe_lock = threading.Lock()
 
-# 负缓存（_is_negatively_cached / _mark_negative_cache）已迁到 services.chart_cache，
-# 见模块顶部 re-export。
-
-# 注：原 _CACHE_REVALIDATION_INTERVAL / cache_lock 定义已迁到 services.chart_cache，
-# 见模块顶部 re-export。原 req_lock 全局 RLock 已被 H7 拆为 per-key 的
-# _history_req_locks（见下方），全文已无任何引用，故移除避免误用。
 
 # ---------------------------------------------------------------------------
 # 用户活跃度跟踪（service 层，供 symbols.py 的批量预热让位用）
 # ---------------------------------------------------------------------------
-# L1 重构后，状态与函数迁移到 ..services.user_activity；本模块内部仅在
-# tv_history 入口处调用 ``_mark_user_request`` 写入；symbols.py 直接 import 自 service。
 from ..services.user_activity import (  # noqa: E402
     _get_last_user_request_time,
     _get_user_recent_codes,
     _mark_user_request,
 )
-# stock_list 服务（Tier 4 P2）：symbols 预加载、缓存、读取
+# stock_list 服务：symbols 预加载、缓存、读取
 from ..services.stock_list import (  # noqa: E402
     _preload_single_exchange,
     _process_stock_list,
@@ -156,7 +136,7 @@ from ..services.stock_list import (  # noqa: E402
     start_symbol_preload_thread,
     stock_cache,
 )
-# chart_compute 服务（Tier 4 P3）：MACD 倍率 + 锁注册表 + chart 合并 + 主计算路径
+# chart_compute 服务：MACD 倍率 + 锁注册表 + chart 合并 + 主计算路径
 from ..services.chart_compute import (  # noqa: E402
     HIGHER_MACD_RATIO,
     MARKET_30M_TO_D_RATIO,
@@ -176,8 +156,6 @@ from ..services.kline_recompute import (  # noqa: E402
     prepend_klines_and_replace_cache,
 )
 
-
-# _stable_hash / _build_cache_key 已迁到 services.chart_cache，见模块顶部 re-export
 
 def _safe_int(value, default=0):
     try:
@@ -217,18 +195,6 @@ def _parse_tv_symbol(symbol: str):
     return None, None
 
 
-# _build_chart_cache_entry / _normalize_cache_entry / _get_chart_cache_entry 已迁到
-# services.chart_cache，见模块顶部 re-export
-
-
-# _set_chart_cache_entry / _mark_chart_cache_validated / _cache_entry_recently_validated
-# 已迁到 services.chart_cache，见模块顶部 re-export
-
-
-# _shape_time / _merge_shape_lists / _merge_chart_data 已迁到 services.chart_compute
-# （Tier 4 P3），见模块顶部 re-export。
-
-
 def _drawing_storage_name(chart_id: str, layout_id: str, symbol: str, resolution: str):
     return f"drawings_{layout_id}_{chart_id}_{symbol}_{resolution}"
 
@@ -236,9 +202,6 @@ def _drawing_storage_name(chart_id: str, layout_id: str, symbol: str, resolution
 def _legacy_drawing_storage_name(symbol: str, resolution: str):
     return f"drawings_{symbol}_{resolution}"
 
-
-# compute_and_cache_chart_data 已迁到 services.chart_compute（Tier 4 P3），
-# 见模块顶部 re-export。
 
 # 单标的内 4 周期是否并行预热。
 # - HTTP 数据源（cq/polygon/futu）：True，并行可省 3-4 倍时间
@@ -324,7 +287,7 @@ def prewarm_common_intervals(market, code, cl_config):
 
             LogUtil.info(f"[prewarm] >>> {market}:{code} interval={interval}")
 
-            # Skip if already in cache or being computed
+            # 已在缓存或正在计算中则跳过
             with cache_lock:
                 if cache_key in chart_data_cache or cache_key in chart_data_cache_stats["prewarmed"]:
                     return True
@@ -397,9 +360,7 @@ def prewarm_common_intervals(market, code, cl_config):
 
             use_parallel = market in _PREWARM_INTERVALS_PARALLEL_MARKETS
             if use_parallel:
-                # HTTP 市场：4 周期并行，总耗时 ≈ max(各周期) ≈ 5s
-                # 注意：worker 数 = len(COMMON_INTERVALS)，每个周期一个线程，互不阻塞
-                # 局部 import 与 preload_symbols 风格一致，避免顶层依赖扩散
+                # HTTP 市场：4 周期并行，总耗时 ≈ max(各周期)；局部 import 避免顶层依赖扩散
                 from concurrent.futures import ThreadPoolExecutor
                 with ThreadPoolExecutor(
                     max_workers=len(COMMON_INTERVALS),
@@ -442,15 +403,6 @@ def prewarm_common_intervals(market, code, cl_config):
     t.start()
     LogUtil.info(f"[tv_history] Started pre-warm thread for {market}:{code}")
 
-
-# _SafeLockRegistry / chart_calc_locks 已迁到 services.chart_compute（Tier 4 P3），
-# 见模块顶部 re-export。
-# (M2 清理: 原 _history_req_locks 仅服务于已删除的 __history_req_counter 节流计数,
-# 一并移除; 如未来需要真限流, 直接复用 chart_calc_locks 或新建一份。)
-
-# symbols 预加载逻辑（_resolve_preload_exchanges / _safe_all_stocks /
-# _preload_single_exchange / preload_symbols / start_symbol_preload_thread 等）
-# 已迁到 services.stock_list（Tier 4 P2），见模块顶部 re-export。
 
 @tv_bp.route("/tv/config")
 @login_required
@@ -545,8 +497,7 @@ def tv_symbols():
         except Exception:
             pass
 
-    # --- 修复 minmov 错误的关键部分 ---
-    # 获取 precision，默认值设为 100 (2位小数)
+    # precision 缺失或非法时默认 100（即 2 位小数），避免 TradingView minmov 校验失败
     precision = stocks.get("precision")
     if precision is None:
         precision = 100
@@ -557,7 +508,6 @@ def tv_symbols():
                 precision = 100
         except:
             precision = 100
-    # --------------------------------
 
     info = {
         "name": stocks["code"],
@@ -568,8 +518,6 @@ def tv_symbols():
         "type": market_types.get(market, "stock"),
         "session": market_session.get(market, "24x7"),
         "timezone": market_timezone.get(market, "Asia/Shanghai"),
-
-        # 显式设置 minmov 和 pricescale
         "minmov": 1,
         "pricescale": precision,
 
@@ -586,10 +534,6 @@ def tv_symbols():
         "industry": industry,
     }
     return info
-
-
-# _process_stock_list / _trigger_async_refresh / get_cached_processed_stocks
-# 已迁到 services.stock_list（Tier 4 P2），见模块顶部 re-export。
 
 
 @tv_bp.route("/tv/search")
@@ -735,8 +679,7 @@ def tv_history():
         # 如果也算"用户活跃"，会把批量预热永久卡死。
         if firstDataRequest == "true":
             _mark_user_request(market, code)
-            # B5: 记录最后访问状态，供下次启动预热 RAM chart_data_cache。
-            # 失败吞异常——这是观测/优化用，不能影响 history 主流程。
+            # 记录最后访问状态，供下次启动预热 RAM chart_data_cache；失败吞异常不影响主流程。
             try:
                 from cl_app.services.last_chart_state import record_user_request
                 record_user_request(market, code, frequency)
@@ -758,11 +701,6 @@ def tv_history():
         LogUtil.debug(f"tv_history request args: {log_args}")
 
         req_tag = f"{symbol}|{resolution}|{firstDataRequest}|{_from}->{_to}"
-        # (M2 清理) 原 __history_req_counter 30 行 per-key 节流计数被移除:
-        # 计数 ≥30 时只 reset + log warning, 没有 return 短路也没有真限流,
-        # 是 spaghetti 死代码。监控/限流应放到反代层 (nginx/cloudflare) 或独立中间件,
-        # 不在请求处理路径内做"半路计数"。
-
         cl_config = query_cl_chart_config(market, code)
         if not isinstance(cl_config, dict):
             cl_config = {}
@@ -778,10 +716,6 @@ def tv_history():
             and _to > 0
             and _to >= _from
         )
-
-        # P5 清理: 原 _evaluate_cache 内嵌 closure (~25 行) 已抽到
-        # services.chart_cache.evaluate_cache_for_tv_history (module-level 纯函数),
-        # 参数 (entry, from_ts, to_ts, is_range_request) 显式传递, 不再依赖 closure。
 
         # 注意：必须先 get 出 RLock 对象再 with，确保整个临界区内引用持续存在
         # （_SafeLockRegistry 用 WeakValueDictionary 存储锁，无强引用会被 GC）
@@ -829,10 +763,6 @@ def tv_history():
                         "%Y-%m-%d %H:%M:%S"
                     )
 
-                # P5 fourth step: cache miss 主路径 (拉 K 线 + cl 计算 + prepend 决策)
-                # 抽到 chart_compute.fetch_klines_and_compute_cl_data。
-                # helper 返回 None 表示 "调用方应 return {"s": "no_data"}"
-                # (_mark_chart_cache_validated 已在 helper 内部做)。
                 _fetch_result = fetch_klines_and_compute_cl_data(
                     market, code, frequency, cl_config,
                     kline_args=kline_args,
@@ -909,8 +839,6 @@ def tv_history():
         else:
             LogUtil.debug(f"[tv_history] Cache Hit req={req_tag}, bars={len(bar_times)}")
 
-        # P5 second step: 切片到 [_from, _to) 窗口 (内嵌 filter_shapes closure + 88 行
-        # 字段 boilerplate 抽到 services.chart_compute.slice_chart_data_to_window)
         if firstDataRequest == "false" and len(bar_times) > 0:
             try:
                 cl_chart_data = slice_chart_data_to_window(cl_chart_data, _from, _to)
@@ -921,8 +849,6 @@ def tv_history():
         if len(cl_chart_data.get("t", [])) == 0:
             return {"s": "no_data"}
 
-        # P5 second step: 裁未来 bar (内嵌 _trim closure + bisect_right 抽到
-        # services.chart_compute.trim_future_bars)
         _resp_times = cl_chart_data.get("t", []) or []
         cl_chart_data = trim_future_bars(cl_chart_data, _to)
         _resp_t = cl_chart_data.get("t", []) or []
@@ -931,7 +857,6 @@ def tv_history():
                 f"[tv_history] Trimmed {len(_resp_times) - len(_resp_t)} future bar(s) beyond to={_to}"
             )
 
-        # [DataVerify] Log response shape counts for frontend correlation
         LogUtil.debug(
             f"[DataVerify][Backend] symbol={symbol} resolution={resolution} "
             f"update={firstDataRequest != 'true'} bars={len(_resp_t)} "

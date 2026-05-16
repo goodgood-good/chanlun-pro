@@ -21,7 +21,7 @@ class OptimizationSetting:
         self.cl_config_params[name] = values
 
     def generate_cl_settings(self) -> List[dict]:
-        """"""
+        """笛卡尔积展开所有参数组合，返回待优化的配置列表"""
         keys = self.cl_config_params.keys()
         values = self.cl_config_params.values()
         products = list(product(*values))

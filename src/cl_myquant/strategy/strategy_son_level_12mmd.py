@@ -34,27 +34,27 @@ cl_config = query_cl_chart_config("a", "SH.000001")
 
 
 def init(context):
+    """掘金策略入口，初始化数据/交易/策略对象，并注册月度选股定时任务。"""
     global market_data, trader, strategy
-    # 初始化数据对象、策略、交易对象
     market_data = MyQuantData(context, ["1d", "1800s", "300s"], cl_config)
     strategy = strategy_son_level_1mmd.StrategySonLevel1MMD()
     trader = MyQuantTrader("a", context)
     trader.set_data(market_data)
     trader.set_strategy(strategy)
 
-    # 每月执行一遍选股
+    # 每月开盘前（9:20）执行一次选股并重新订阅
     schedule(schedule_func=xuangu_macd, date_rule="1m", time_rule="9:20:00")
 
 
 def xuangu_macd(context: Context):
     """
-    根据月线MACD 柱子是红的选择
+    月度选股：筛选上市超 1 年、市值 > 100 亿、月线 MACD 柱为正（红柱）的股票，
+    同时保留当前持仓；重新订阅并刷新缠论数据缓存。
     """
     global market_data
 
     s_time = time.time()
 
-    # 查询所有股票标的
     instruments = get_instruments(
         symbols=None,
         exchanges=["SHSE", "SZSE"],
@@ -65,7 +65,7 @@ def xuangu_macd(context: Context):
         fields=None,
         df=False,
     )
-    # 上市日期要大于 1 年
+    # 剔除上市不足 1 年的次新股，避免历史数据不足影响 MACD 计算
     symbols = [
         _i["symbol"]
         for _i in instruments
@@ -73,7 +73,7 @@ def xuangu_macd(context: Context):
     ]
     print(f"获取所有上市大于1年的股票标的数量{len(symbols)}")
 
-    # 查获取市值大于100亿的股票列表
+    # 市值过滤：只保留 > 100 亿，减少后续逐笔计算 MACD 的标的数量
     fundamentals = stk_get_daily_mktvalue_pt(
         symbols=symbols,
         trade_date=fun.datetime_to_str(context.now, "%Y-%m-%d"),
@@ -87,7 +87,7 @@ def xuangu_macd(context: Context):
         f"获取 {fun.datetime_to_str(context.now, '%Y-%m-%d')} 市值大于100亿的股票列表：{len(symbols)}"
     )
 
-    # 计算月线MACD 是红柱子的股票
+    # 逐标的拉取日线并聚合为月线，筛选月线 MACD 柱 > 0（红柱趋势向上）
     macd_up_symbols = []
     for symbol in symbols:
         try:
@@ -114,18 +114,17 @@ def xuangu_macd(context: Context):
             )
             if macd_hist[-1] is not None and macd_hist[-1] > 0:
                 macd_up_symbols.append(symbol)
-            # print(f'{symbol} cal macd use time : {(time.time() - _macd_s_time)}')
         except Exception as e:
             print(f"{symbol} - 异常： {e}")
             print(traceback.format_exc())
 
     print("Macd 红柱子股票数量：", len(macd_up_symbols))
 
-    # 取合集
+    # 取市值筛选与 MACD 筛选的交集
     symbols = list(set(symbols) & set(macd_up_symbols))
     print("最终获取股票合集：", len(symbols))
 
-    # 查询当前持仓
+    # 持仓标的无条件保留，避免因未被选中而无法触发平仓信号
     positions = context.account().positions()
     pos_symbols = [_p["symbol"] for _p in positions if _p["amount"] > 0]
     print(f"当前持仓股票列表：{pos_symbols}")
@@ -133,12 +132,11 @@ def xuangu_macd(context: Context):
     symbols = symbols + pos_symbols
     symbols = list(set(symbols))
 
-    # 进行重新订阅（取消之前的订阅）
+    # 重新订阅会取消上月订阅，切换到新标的池
     subscribe(symbols=symbols, frequency="1d", count=2000)
     subscribe(symbols=symbols, frequency="1800s", count=2000)
     subscribe(symbols=symbols, frequency="300s", count=2000)
 
-    # 初始化缠论数据
     market_data.init_cl_datas(symbols, ["1d", "1800s", "300s"])
 
     print("选股总耗时：", time.time() - s_time)
@@ -147,10 +145,7 @@ def xuangu_macd(context: Context):
 
 
 def on_bar(context, bars):
+    """每根 K 线推送时增量更新缠论数据并执行策略信号判断。"""
     global market_data, trader
-    # print(f"on bar : {bars[0]['symbol']} {bars[0]['eob']}")
-    # 更新缠论数据
     market_data.update_bars(bars)
-
-    # 执行策略
     trader.run(bars[0]["symbol"])

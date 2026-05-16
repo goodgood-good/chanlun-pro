@@ -374,14 +374,12 @@ var TvIdxHLBLW = (function () {
         },
         constructor: function () {
           this.init = function (context, inputCallback) {
-            // 初始化状态变量
             context.prevTowerc = NaN;
           };
           this.main = function (context, inputCallback) {
             this._context = context;
             this._input = inputCallback;
 
-            // 获取价格数据
             const c = this._context.new_var(PineJS.Std.close(this._context));
 
             // 计算A1-A5: FORCAST(EMA(CLOSE,N),6)
@@ -501,13 +499,11 @@ var TvIdxHLBLW = (function () {
 
             if (!PineJS.Std.na(currentTowerc) && !PineJS.Std.na(prevTowerc)) {
               if (currentTowerc >= prevTowerc) {
-                // 上升蜡烛：当前值大于等于前值
                 upOpen = prevTowerc;
                 upClose = currentTowerc;
                 upHigh = Math.max(prevTowerc, currentTowerc);
                 upLow = Math.min(prevTowerc, currentTowerc);
               } else {
-                // 下降蜡烛：当前值小于前值
                 downOpen = prevTowerc;
                 downClose = currentTowerc;
                 downHigh = Math.max(prevTowerc, currentTowerc);

@@ -31,21 +31,20 @@ class StrategyLastZs3mmd(Strategy):
         ):
             return opts
 
-        # 获取最后一个笔中枢
+        # 仅对已完成的笔中枢判断三类买卖点，未完成中枢方向未确定
         high_last_bi_zs = high_data.get_last_bi_zs()
         if high_last_bi_zs is None or high_last_bi_zs.done is False:
             return opts
 
-        # 判断最后一个中枢与最后一笔是否形成三类买卖点
         high_last_done_bi = self.last_done_bi(high_data.get_bis())
         high_last_xd = high_data.get_xds()[-1]
         last_price = high_data.get_klines()[-1].c
 
-        # 最后一个中枢限制一下，振幅不能太大
+        # 振幅过小的中枢缺乏有效震荡，三类买卖点可靠性低
         if high_last_bi_zs.zf() <= 30:
             return opts
 
-        # TODO 测试一下三类买卖点后的强分型成功率
+        # 最后分型须为强分型（力度 >= 5），且价格已突破分型确认 K 线极值
         high_fx = high_data.get_fxs()[-1]
         if (
             high_fx.type == "di"
@@ -83,10 +82,10 @@ class StrategyLastZs3mmd(Strategy):
                 )
             )
 
-        # 设置止损价格 (设置为笔结束位置)
+        # 止损设在笔结束分型极值
         loss_price = high_last_done_bi.end.val
 
-        # 保证笔的强度，最后一个确认笔后不能有未完成的笔（即最后一笔就是完成笔）
+        # 最后一笔须是当前最新笔，避免中枢被延伸后误判
         if high_last_done_bi.index != high_data.get_bis()[-1].index:
             return opts
 
@@ -94,12 +93,11 @@ class StrategyLastZs3mmd(Strategy):
             high_last_done_bi.type == "down"
             and high_last_done_bi.low > high_last_bi_zs.zg
         ):
-            # 三类买点
-            # 线根据线段过滤一下，线段要向下完成或者线上延伸才可以
+            # 三类买点：线段须向下完成或向上延伸（走势方向允许反转）
             if (high_last_xd.type == "down" and high_last_xd.is_done()) or (
                 high_last_xd.type == "up" and high_last_xd.is_done() is False
             ):
-                # 中枢内部出现强底分型即可
+                # 中枢内部须有强底分型（力度 >= 5），说明中枢有有效支撑
                 exists_qfx = False
                 fxs = high_data.get_fxs()[
                     high_last_bi_zs.lines[1]
@@ -111,7 +109,7 @@ class StrategyLastZs3mmd(Strategy):
                     if fx.type == "di" and fx.ld() >= 5:
                         exists_qfx = True
                         break
-                # 中枢内部笔没有出现过卖点（1、2类买卖点）
+                # 中枢内部未出现一/二类卖点，说明中枢方向未被破坏
                 exists_sell_mmd = False
                 for line in high_last_bi_zs.lines:
                     if line.mmd_exists(["1sell", "2sell"]):
@@ -137,12 +135,11 @@ class StrategyLastZs3mmd(Strategy):
             high_last_done_bi.type == "up"
             and high_last_done_bi.high < high_last_bi_zs.zd
         ):
-            # 三类卖点
-            # 线根据线段过滤一下，线段要向上完成或者线下延伸才可以
+            # 三类卖点：线段须向上完成或向下延伸
             if (high_last_xd.type == "up" and high_last_xd.is_done()) or (
                 high_last_xd.type == "down" and high_last_xd.is_done() is False
             ):
-                # 中枢内部出现强顶分型即可
+                # 中枢内部须有强顶分型（力度 >= 5）
                 exists_qfx = False
                 fxs = high_data.get_fxs()[
                     high_last_bi_zs.lines[1]
@@ -154,7 +151,7 @@ class StrategyLastZs3mmd(Strategy):
                     if fx.type == "ding" and fx.ld() >= 5:
                         exists_qfx = True
                         break
-                # 中枢内部笔没有出现过买点（1、2类买卖点）
+                # 中枢内部未出现一/二类买点，说明中枢方向未被破坏
                 exists_buy_mmd = False
                 for line in high_last_bi_zs.lines:
                     if line.mmd_exists(["1buy", "2buy"]):
@@ -189,21 +186,13 @@ class StrategyLastZs3mmd(Strategy):
 
         high_data = market_data.get_cl_data(code, market_data.frequencys[0])
         price = high_data.get_klines()[-1].c
-        # 检查是否触发止损操作
         loss_opt = self.check_loss(mmd, pos, price)
         if loss_opt:
             return loss_opt
 
         high_bi = self.last_done_bi(high_data.get_bis())
 
-        # 卖出条件：根据趋势背驰延伸出来的不标准走势之小转大
-        # 这里简单的用高级别的验证分型来平仓
-        # if 'buy' in mmd and high_bi.type == 'up' and high_bi.is_done() and self.bi_yanzhen_fx(high_bi, high_data):
-        #     return Operation('sell', mmd, msg='高级别验证分型平仓')
-        # if 'sell' in mmd and high_bi.type == 'down' and high_bi.is_done() and self.bi_yanzhen_fx(high_bi, high_data):
-        #     return Operation('sell', mmd, msg='高级别验证分型平仓')
-
-        # 笔出现卖点
+        # 笔出现卖点（停顿确认），平仓
         if (
             "buy" in mmd
             and high_bi.type == "up"
@@ -223,7 +212,7 @@ class StrategyLastZs3mmd(Strategy):
                 code, "sell", mmd, msg="高级别笔买点（%s）" % high_bi.line_mmds()
             )
 
-        # 高级别笔背驰
+        # 笔出现背驰（停顿确认），平仓
         if (
             "buy" in mmd
             and high_bi.type == "up"
@@ -242,11 +231,5 @@ class StrategyLastZs3mmd(Strategy):
             return Operation(
                 code, "sell", mmd, msg="高级别笔背驰（%s）" % high_bi.line_bcs()
             )
-
-        # # 低级别笔出现一二类买卖点
-        # if 'buy' in mmd and low_bi.mmd_exists(['1sell', '2sell']) and high_bi.type == 'up' and high_bi.is_done():
-        #     return Operation(code, 'sell', mmd, msg='低级别笔卖点（%s）' % low_bi.line_mmds())
-        # if 'sell' in mmd and low_bi.mmd_exists(['1buy', '2buy']) and high_bi.type == 'down' and high_bi.is_done():
-        #     return Operation(code, 'sell', mmd, msg='低级别笔买点（%s）' % low_bi.line_mmds())
 
         return None

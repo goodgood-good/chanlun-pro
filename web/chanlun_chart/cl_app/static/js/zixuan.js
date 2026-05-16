@@ -1,9 +1,8 @@
 var ZiXuan = (function () {
   var zx_group = "我的关注";
-  // 定义一个模块级变量来存储定时器ID
   var interval_update_rates = null;
 
-  // 停止定时器的辅助函数
+  // 停止行情轮询定时器（切换分组/重新渲染前调用，防止多个定时器并存）
   function stop_timer() {
     if (interval_update_rates) {
       clearInterval(interval_update_rates);
@@ -20,7 +19,6 @@ var ZiXuan = (function () {
         success: function (res) {
           let data = [];
           layui.each(res, function (i, e) {
-            // 修复：添加 let 防止全局变量污染
             let templet = "";
             if (e["exists"] === 0) {
               templet = '<span><input type="checkbox" /> ' + e["zx_name"] + "</span>";
@@ -44,10 +42,9 @@ var ZiXuan = (function () {
       });
     },
 
+    // 批量请求当前列表中所有股票的实时涨跌幅并刷新 DOM
     stocks_update_rate: function () {
-      // 更新展示的股票列表涨跌幅
       let codes = [];
-      // 仅获取当前DOM中存在的代码，避免请求无用数据
       $(".code_rate").each(function () {
         codes.push($(this).data("code"));
       });
@@ -58,7 +55,6 @@ var ZiXuan = (function () {
 
       layui.use(["laytpl"], function () {
         var laytpl = layui.laytpl;
-        // 预编译模版，提高循环渲染性能
         var rate_show_tpl =
           "<div style='color:{{= d.color }}' class='code_rate' data-code='{{= d.code }}'>" +
           "<div style='color:{{= d.color }}' class='layui-font-14'>{{= d.rate }}%</div>" +
@@ -71,28 +67,25 @@ var ZiXuan = (function () {
           data: { market: Utils.get_market(), codes: JSON.stringify(codes) },
           dataType: "json",
           success: function (ticks) {
-            // 遍历更新 DOM
             for (let i = 0; i < ticks["ticks"].length; i++) {
               let tick = ticks["ticks"][i];
-              let color = "#1e9fff"; // 默认平盘色（或灰色）
+              let color = "#1e9fff"; // 平盘
               if (tick["rate"] > 0) color = "#ff5722"; // 涨
               else if (tick["rate"] < 0) color = "#16baaa"; // 跌
 
-              // 找到对应的 DOM 元素
               let obj_span_rate = $('.code_rate[data-code="' + tick["code"] + '"]');
 
-              // 使用 laytpl 渲染
               laytpl(rate_show_tpl).render({
                 code: tick["code"],
                 price: tick["price"],
                 rate: tick["rate"],
                 color: color,
               }, function(html){
-                  obj_span_rate.html(html); // 替换内容
+                  obj_span_rate.html(html);
               });
             }
 
-            // 如果后端返回当前非交易时间，停止轮询以节省资源
+            // 后端返回非交易时间标志时停止轮询，节省资源
             let now_trading = ticks["now_trading"];
             if (now_trading !== true) {
               console.log("非交易时间，停止自动刷新");
@@ -104,7 +97,6 @@ var ZiXuan = (function () {
     },
 
     render_zixuan_stocks: function () {
-      // 每次重新渲染表格前，先停止旧的定时器，防止重复
       stop_timer();
 
       layui.use(["table", "dropdown", "util", "laytpl"], function () {
@@ -115,7 +107,6 @@ var ZiXuan = (function () {
         var code_show_tpl = laytpl(
           "<div style='color:{{= d.color }}' class='layui-font-14'>{{= d.name }}</div><div class='layui-font-12 layui-font-gray'>{{= d.code }}</div>"
         );
-        // 初始渲染的占位模版
         var rate_show_tpl = laytpl(
           "<div class='code_rate' data-code='{{= d.code }}'><div class='layui-font-14'>- %</div><div class='layui-font-12'>-</div><div>"
         );
@@ -157,35 +148,28 @@ var ZiXuan = (function () {
             ],
           ],
           done: function () {
-            // 1. 表格加载完成后，立即执行一次更新
             ZiXuan.stocks_update_rate();
-
-            // 2. 启动定时器，每 3000 毫秒（3秒）刷新一次
-            // 注意：这里赋值给模块顶部的 interval_update_rates 变量
+            // 赋值给模块级变量，便于 stop_timer 取消
             interval_update_rates = setInterval(function() {
                 ZiXuan.stocks_update_rate();
             }, 3000);
           },
         });
 
-        // 行单击事件
         table.on("row(table_zixuan_list)", function (obj) {
           const data = obj.data;
           const code = data.code;
           change_chart_ticker(Utils.get_market(), code);
           $("#ai_code").val(code);
-          // 清除其他行选中样式
           table.setRowChecked("table_zixuan_list", {
             index: "all",
             checked: false,
           });
-          // 选中当前行
           table.setRowChecked("table_zixuan_list", {
             index: obj.index,
           });
         });
 
-        // 右键菜单 (保持原有逻辑不变)
         table.on("rowContextmenu(table_zixuan_list)", function (obj) {
           let data = obj.data;
           let menu_data = [
@@ -240,7 +224,6 @@ var ZiXuan = (function () {
             data: menu_data,
             click: function (menuData, othis) {
               if (menuData["id"] === "del") {
-                // 删除逻辑
                 $.ajax({
                   type: "POST",
                   url: "/set_stock_zixuan",
@@ -263,7 +246,6 @@ var ZiXuan = (function () {
                   },
                 });
               } else if (menuData["title"] === "色彩") {
-                 // 颜色设置逻辑
                  $.ajax({
                     type: "POST",
                     url: "/set_stock_zixuan",
@@ -284,7 +266,6 @@ var ZiXuan = (function () {
                 menuData["id"] === "sort_1" ||
                 menuData["id"] === "sort_2"
               ) {
-                // 排序逻辑
                 $.ajax({
                     type: "POST",
                     url: "/set_stock_zixuan",
@@ -313,16 +294,12 @@ var ZiXuan = (function () {
       });
     },
 
-    // ... init_zixuan_opts 保持不变 ...
     init_zixuan_opts: function () {
-        // (这部分代码没有逻辑错误，为了节省篇幅，这里可以直接使用你原有的代码，或者复制过来)
-        // 建议：确保里面的 Utils.get_market() 都能正常获取
         layui.use(function () {
            var layer = layui.layer;
            var dropdown = layui.dropdown;
            var form = layui.form;
 
-           // 获取自选组
            $.ajax({
              type: "GET",
              url: "/get_zixuan_groups/" + Utils.get_market(),
@@ -336,13 +313,10 @@ var ZiXuan = (function () {
                  );
                });
                layui.form.render($(zixuan_groups));
-               // 触发第一个点击
+               // 自动选中第一个分组，触发 render_zixuan_stocks 加载列表
                $(zixuan_groups).siblings("div.layui-form-select").find("dl").find("dd")[0].click();
              },
            });
-
-           // 后续的 dropdown.render, form.on, xmSelect.render 等逻辑保持原样即可
-           // ...
 
             dropdown.render({
                 elem: "#add_zixuan",
@@ -384,7 +358,6 @@ var ZiXuan = (function () {
                 ZiXuan.render_zixuan_stocks();
             });
 
-             // 代码搜索逻辑(保持不变)...
              const searchSelect = xmSelect.render({
                 el: "#code_search",
                 filterable: true,

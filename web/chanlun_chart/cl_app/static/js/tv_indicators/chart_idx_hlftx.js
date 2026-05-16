@@ -148,49 +148,35 @@ var TvIdxHLFTX = (function () {
           format: {},
         },
         constructor: function () {
-          this.init = function (context, inputCallback) {
-            // 初始化
-          };
+          this.init = function (context, inputCallback) {};
           this.main = function (context, inputCallback) {
             this._context = context;
             this._input = inputCallback;
 
-            // 获取输入参数
             var N1 = this._input(0); // STOCHLENGTH
             var N2 = this._input(1); // FASTLENGTH
             var N3 = this._input(2); // SLOWLENGTH
             var N4 = this._input(3); // SIGNALLENGTH
 
-            // 获取价格和成交量数据
             const o = this._context.new_var(PineJS.Std.open(this._context));
             const h = this._context.new_var(PineJS.Std.high(this._context));
             const l = this._context.new_var(PineJS.Std.low(this._context));
             const c = this._context.new_var(PineJS.Std.close(this._context));
             const v = this._context.new_var(PineJS.Std.volume(this._context));
 
-            // 成交量柱状图逻辑
-            // STICKLINE(CLOSE>=OPEN,VOL,0,0.8,1),COLORFF3232;
-            // STICKLINE(CLOSE<OPEN,VOL,0,0.8,0),COLOR00A843;
+            // STICKLINE(CLOSE>=OPEN,VOL,0,0.8,1) / STICKLINE(CLOSE<OPEN,VOL,0,0.8,0)
             const vol_up = c.get(0) >= o.get(0) ? v.get(0) : NaN;
             const vol_down = c.get(0) < o.get(0) ? v.get(0) : NaN;
 
-            // 参考线
             const over_bought = 10;
             const over_sold = -10;
             const zero_line = 0;
 
-            // HIGHEST HIGH OVER N1 PERIOD
             const highhv = PineJS.Std.highest(h, N1, this._context);
-
-            // LOWEST LOW OVER N1 PERIOD
             const lowlv = PineJS.Std.lowest(l, N1, this._context);
-
-            // EXPONENTIAL MOVING AVERAGE OF CLOSE OVER N2 PERIOD
             const fast_ma = this._context.new_var(
               PineJS.Std.ema(c, N2, this._context)
             );
-
-            // EXPONENTIAL MOVING AVERAGE OF CLOSE OVER N3 PERIOD
             const slow_ma = this._context.new_var(
               PineJS.Std.ema(c, N3, this._context)
             );

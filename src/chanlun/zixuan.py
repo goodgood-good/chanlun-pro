@@ -15,16 +15,12 @@ class ZiXuan(object):
     """
 
     def __init__(self, market_type):
-        """
-        初始化
-        """
         self.market_type = market_type
         self.zixuan_list = self.get_zx_groups()
 
         self.zx_names = [_zx["name"] for _zx in self.zixuan_list]
 
     def get_zx_groups(self):
-        # 获取自选分组
         zx_groups = db.zx_get_groups(self.market_type)
         if len(zx_groups) == 0:
             db.zx_add_group(self.market_type, "我的关注")
@@ -92,7 +88,7 @@ class ZiXuan(object):
         """
         if zx_group not in self.zx_names:
             return False
-        # 如果名称为空，则自动通过交易所接口获取
+        # 名称为空时自动通过交易所接口获取；拉取失败则以 code 兜底
         if name is None or name == "" or name == "undefined":
             try:
                 ex = get_exchange(Market(self.market_type))

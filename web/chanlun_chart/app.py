@@ -12,7 +12,6 @@ import sys
 
 from chanlun.tools.log_util import LogUtil
 
-# 将项目中的 src 目录，添加到 sys.path 中
 src_path = pathlib.Path(__file__).parent.parent / ".." / "src"
 sys.path.append(str(src_path))
 web_server_path = pathlib.Path(__file__).parent
@@ -103,20 +102,15 @@ def _warm_chart_cache_from_disk() -> None:
 def main() -> None:
     """Start the Tornado HTTP server hosting the Flask app."""
     is_wpf_launcher = "wpf_launcher" in sys.argv
-    # WPF 启动，每次 print 都 flush，并且将字符编码转为 GBK（避免乱码）
     if is_wpf_launcher:
         _wrap_stdio_gbk()
 
     try:
         app = create_app()
 
-        # ★ B5 修复：HTTP 线程池容量可配置，默认从 10 提升到 32。
-        # 之前的 10 worker 在多 tab + 多周期同时切换时极易堵塞：
-        # 一个图表初始化就要并行 N 个请求（symbols/config/history/marks/...），
-        # 多余请求在 Tornado 队列里排队，叠加 history 单仓信号量限流后体感"卡死"。
-        # tv.py 里大部分耗时在 IO（QMT/CQ 拉数据），不是 CPU 密集，
-        # 即使把 worker 数放大到 32~64 也不会显著抢占 GIL。
-        # 用环境变量 CHANLUN_HTTP_WORKERS 覆盖，便于按部署环境调优。
+        # HTTP 线程池容量可配置，默认 32。
+        # 多 tab + 多周期并发时 IO（QMT/CQ 拉数据）是瓶颈而非 CPU，扩大 worker 数
+        # 不会显著抢占 GIL；用环境变量 CHANLUN_HTTP_WORKERS 覆盖。
         try:
             http_workers = int(os.environ.get('CHANLUN_HTTP_WORKERS', '32'))
             if http_workers < 1:
@@ -124,7 +118,7 @@ def main() -> None:
         except (TypeError, ValueError):
             http_workers = 32
         LogUtil.info(f"HTTP 线程池容量: {http_workers}")
-        # B2: 启动期预压缩 charting_library / datafeeds 下的 .js/.css 为 .gz。
+        # 启动期预压缩 charting_library / datafeeds 下的 .js/.css 为 .gz。
         # 第一次启动会多 5-15s（gzip level 9 单核），之后凭 mtime 跳过。
         from cl_app.services.static_precompress import precompress_static_assets
         static_root = os.path.join(
@@ -133,7 +127,7 @@ def main() -> None:
         )
         precompress_static_assets(static_root)
 
-        # B1+B3: Tornado Application 路由——charting_library / datafeeds 走自定义
+        # Tornado Application 路由——charting_library / datafeeds 走自定义
         # CachedStaticFileHandler（immutable cache + 透明 gzip），其余 fallback Flask
         from tornado.web import Application, FallbackHandler
         from cl_app.handlers.cached_static import CachedStaticFileHandler
@@ -163,17 +157,15 @@ def main() -> None:
         # 让其与 HTTP 服务启动并行，争取在用户首次发起请求前完成首轮缓存填充。
         start_symbol_preload_thread()
 
-        # B5: chart_data 启动预热——把"用户上次访问"的 chart_data entry 从
-        # 磁盘冷层（fdb）回填 RAM 热层。这样用户首个 first=true history 请求
-        # 直接 RAM 命中（~3ms）而不是落盘读（~50-100ms）。
-        # 失败/无历史状态都是空操作，不影响主流程。
+        # chart_data 启动预热：把用户上次访问的 entry 从磁盘冷层回填 RAM，
+        # 首个 first=true 请求直接 RAM 命中。失败/无历史状态均为空操作。
         try:
             _warm_chart_cache_from_disk()
         except Exception as e:
             LogUtil.warning(f"[chart_warm] 启动预热未执行: {e}")
 
         LogUtil.info("启动成功")
-        # LB-6：长桥月度配额可观测 — 每次启动一眼看到当月用量、是否耗尽、US 历史源选择
+        # 启动时打印长桥月度配额状态，便于确认当月用量与数据源选择
         try:
             from chanlun.exchange.lb_quota_tracker import LbQuotaTracker
             from chanlun import config as _cfg
@@ -196,8 +188,7 @@ def main() -> None:
         # 如需扩容，请用反向代理 + 多端口部署，或先把缓存改造到 Redis。
         s.start(1)
 
-        # B4 (revised): 恢复"默认自动开浏览器"作为缺省行为；显式 opt-out 才不开。
-        # opt-out 方式：环境变量 CHANLUN_NO_AUTO_OPEN=1 或命令行 nobrowser 参数。
+        # 默认自动开浏览器；opt-out：环境变量 CHANLUN_NO_AUTO_OPEN=1 或命令行 nobrowser。
         url = "http://127.0.0.1:9900"
         no_auto_open = os.environ.get("CHANLUN_NO_AUTO_OPEN", "0").strip() == "1"
         nobrowser_flag = len(sys.argv) >= 2 and sys.argv[1] == "nobrowser"

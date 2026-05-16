@@ -130,7 +130,6 @@ var TvIdxHDLY = (function () {
                 green_value = big_money.get(0) * 2;
               }
             }
-            // 更新前一个周期的big_money
             this.prev_big_money = big_money.get(0);
             return [red_value, green_value];
           };

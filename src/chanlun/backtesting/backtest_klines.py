@@ -1,4 +1,3 @@
-# 回放行情所需
 import datetime
 import hashlib
 import json
@@ -97,7 +96,7 @@ class BackTestKlines(MarketDatas):
         }
 
     def init(self, base_code: str, frequency: Union[str, list]):
-        # 初始化，获取循环的日期列表
+        """按基准代码与周期初始化回放，构建循环用的日期列表与进度条"""
         self.base_code = base_code
         if frequency is None:
             frequency = [self.frequencys[-1]]
@@ -133,21 +132,21 @@ class BackTestKlines(MarketDatas):
         return True
 
     def next(self, frequency: str = ""):
+        """推进到下一个回放时间点，无数据时清理缓存并返回 False"""
         if frequency == "" or frequency is None:
             frequency = self.frequencys[-1]
         if len(self.loop_datetime_list[frequency]) == 0:
             self.clear_all_cache()
             return False
         self.now_date = self.loop_datetime_list[frequency].pop(0)
-        # for _f, loop_dt_list in self.loop_datetime_list.items():
-        #     self.loop_datetime_list[_f] = [d for d in loop_dt_list if d >= self.now_date]
-        # 清除之前的 cl_datas 、klines 缓存，重新计算
+        # 清除上一时间点的 cl_datas、klines 缓存，使新时间点重新计算
         self.cache_cl_datas = {}
         self.cache_klines = {}
         self.bar.update(1)
         return True
 
     def last_k_info(self, code) -> dict:
+        """返回指定代码最后一根 K 线的 OHLC 信息"""
         kline = self.klines(code, self.frequencys[-1])
         return {
             "date": kline.iloc[-1]["date"],
@@ -158,6 +157,7 @@ class BackTestKlines(MarketDatas):
         }
 
     def get_cl_data(self, code, frequency, cl_config: dict = None) -> ICL:
+        """获取指定代码与周期的缠论计算数据，带配置哈希缓存与增量更新"""
         _time = time.time()
         try:
             # 根据回测配置，可自定义不同周期所使用的缠论配置项
@@ -232,6 +232,7 @@ class BackTestKlines(MarketDatas):
             self._use_times["get_cl_data"] += time.time() - _time
 
     def klines(self, code, frequency) -> pd.DataFrame:
+        """获取截至当前回放时间点的指定周期 K 线（去除未来数据）"""
         if (
             code in self.cache_klines.keys()
             and len(self.cache_klines[code][frequency]) > 0
@@ -458,7 +459,4 @@ if __name__ == "__main__":
         k = bkt.klines(code, "d")
         ks = klines_to_heikin_ashi_klines(k.iloc[-1000::])
 
-        # print(
-        #     f"{code} - {f} : kline last date : {k.iloc[-1]['date']} close: {k.iloc[-1]['close']}"
-        # )
     print(f"总耗时：{time.time() - s_time}")

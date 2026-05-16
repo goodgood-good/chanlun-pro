@@ -26,28 +26,23 @@ class ExchangeBinanceSpot(Exchange):
         params = {}
 
         proxy = config_get_proxy()
-        # print(proxy)
 
-        # 设置是否使用代理
         if proxy["host"] != "":
             params["proxies"] = {
                 "https": f"http://{proxy['host']}:{proxy['port']}",
                 "http": f"http://{proxy['host']}:{proxy['port']}",
             }
 
-        # 设置是否设置交易 api
         if config.BINANCE_APIKEY != "":
             params["apiKey"] = config.BINANCE_APIKEY
             params["secret"] = config.BINANCE_SECRET
 
+        # 现货使用 ccxt.binance（而非 binanceusdm 合约）
         self.exchange = ccxt.binance(params)
-        # self.exchange = ccxt.htx(params)
-        # self.exchange = ccxt.okx(params)
 
         self.db_exchange = ExchangeDB(Market.CURRENCY_SPOT.value)
 
-        # 设置时区
-        # self.tz = pytz.timezone("Asia/Shanghai")
+        # 使用本机时区，与 ExchangeBinance(合约) 保持一致
         self.tz = pytz.timezone(str(get_localzone()))
 
     def default_code(self):
@@ -127,11 +122,9 @@ class ExchangeBinanceSpot(Exchange):
             args = {}
 
         if "use_online" in args.keys() and args["use_online"]:
-            # 个别情况需要直接调用交易所结果，不需要通过数据库
             return self.online_klines(code, frequency, start_date, end_date, args)
 
         try:
-            # 查询数据库，如果数据库为0，api查询并插入数据库
             db_klines = self.db_exchange.klines(code, frequency, args={"limit": 10000})
             if len(db_klines) == 0:
                 online_klines = self.increment_klines_by_online(
@@ -140,7 +133,7 @@ class ExchangeBinanceSpot(Exchange):
                 self.db_exchange.insert_klines(code, frequency, online_klines)
                 return online_klines
             else:
-                # 根据数据库中的最后时间，调用api进行返回数据
+                # 取倒数第二条作为增量起点，让最后一根未收盘 bar 也能被覆盖更新
                 last_datetime = db_klines.iloc[-2]["date"].strftime("%Y-%m-%d %H:%M:%S")
                 online_klines = self.increment_klines_by_online(
                     code, frequency, start_date=last_datetime
@@ -181,7 +174,7 @@ class ExchangeBinanceSpot(Exchange):
             - 如果start_date为空，则从最新数据往前获取，直到获取10000根或返回不足1000根
             - 如果start_date有值，则从该时间点开始往后获取，直到获取到最新数据
         """
-        # 1m  3m  5m  15m  30m  1h  2h  4h  6h  8h  12h  1d  3d  1w  1M
+        # 币安现货支持的原生周期；10m/2m/3h 是项目自定义级别，用基础周期拉数据后再合并
         if args is None:
             args = {}
         frequency_map = {
@@ -204,7 +197,6 @@ class ExchangeBinanceSpot(Exchange):
         if frequency not in frequency_map.keys():
             raise Exception(f"不支持的周期: {frequency}")
 
-        # 转换时间戳
         start_timestamp = None
 
         if start_date is not None:
@@ -217,46 +209,40 @@ class ExchangeBinanceSpot(Exchange):
                 * 1000
             )
 
-        # 存储所有获取的K线数据
         all_klines = []
-        target_count = 10000  # 目标K线数量
+        target_count = 10000
 
         if start_date is None:
-            # 从最新数据往前获取
-            current_end = None  # 初始为None表示获取最新数据
+            # 无起点时从最新数据向前翻页，累积至 target_count 根或历史耗尽
+            current_end = None
             while len(all_klines) < target_count:
                 params = {}
                 if current_end is not None:
                     params["endTime"] = current_end
-                # 获取K线数据
                 kline = self.exchange.fetch_ohlcv(
                     symbol=code,
                     timeframe=frequency_map[frequency],
                     limit=1000,
                     params=params,
                 )
-                # 如果返回的数据少于1000条，说明已经没有更多历史数据了
                 if len(kline) < 1000:
                     all_klines = kline + all_klines
                     break
 
-                # 更新结束时间为当前批次的第一条记录的时间（最早的时间）
+                # 下一页的结束时间 = 当前页最早一条的时间戳
                 current_end = kline[0][0]
 
-                # 将当前批次添加到结果中（注意顺序）
                 all_klines = kline + all_klines
 
-                # 如果已经获取足够多的数据，就停止
                 if len(all_klines) >= target_count:
                     break
         else:
-            # 从指定的开始时间往后获取，直到最新数据
+            # 有起点时从指定时间向后翻页，直到数据量不足一页（已到最新）
             current_start = start_timestamp
 
             while True:
                 params = {"startTime": current_start}
 
-                # 获取K线数据
                 kline = self.exchange.fetch_ohlcv(
                     symbol=code,
                     timeframe=frequency_map[frequency],
@@ -264,21 +250,18 @@ class ExchangeBinanceSpot(Exchange):
                     params=params,
                 )
 
-                # 如果返回的数据少于1000条，说明已经到达最新数据
                 if len(kline) < 1000:
                     all_klines.extend(kline)
                     break
 
                 all_klines.extend(kline)
 
-                # 更新开始时间为当前批次的最后一条记录的时间（最新的时间）
+                # 下一页的起始时间 = 当前页最后一条的时间戳
                 current_start = kline[-1][0]
 
-        # 如果没有获取到数据，返回None
         if len(all_klines) == 0:
             return None
 
-        # 转换为DataFrame
         kline_pd = pd.DataFrame(
             all_klines, columns=["date", "open", "high", "low", "close", "volume"]
         )
@@ -287,7 +270,7 @@ class ExchangeBinanceSpot(Exchange):
         kline_pd = kline_pd[["code", "date", "open", "close", "high", "low", "volume"]]
         kline_pd.drop_duplicates(subset=["date"], keep="last", inplace=True)
 
-        # 自定义级别，需要进行转换
+        # 项目自定义周期（10m/2m/3h）需要将基础周期 K 线合并
         if frequency in ["10m", "2m", "3h"] and len(kline_pd) > 0:
             kline_pd = convert_currency_kline_frequency(kline_pd, frequency)
 
@@ -301,10 +284,7 @@ class ExchangeBinanceSpot(Exchange):
         end_date: str = None,
         args=None,
     ) -> Union[pd.DataFrame, None]:
-        """
-        api 接口请求行情数据
-        """
-        # 1m  3m  5m  15m  30m  1h  2h  4h  6h  8h  12h  1d  3d  1w  1M
+        """直接请求币安现货 API 获取 K 线，不走本地数据库缓存，单次最多 1000 根。"""
         if args is None:
             args = {}
         frequency_map = {
@@ -360,12 +340,10 @@ class ExchangeBinanceSpot(Exchange):
         kline_pd = pd.DataFrame(
             kline, columns=["date", "open", "high", "low", "close", "volume"]
         )
-        # kline_pd.loc[:, 'code'] = code
-        # kline_pd.loc[:, 'date'] = kline_pd['date'].apply(lambda x: datetime.datetime.fromtimestamp(x / 1e3))
         kline_pd["code"] = code
         kline_pd["date"] = pd.to_datetime(kline_pd["date"], unit="ms", utc=True).dt.tz_convert(self.tz)
         kline_pd = kline_pd[["code", "date", "open", "close", "high", "low", "volume"]]
-        # 自定义级别，需要进行转换
+        # 项目自定义周期（10m/2m/3h）需要将基础周期 K 线合并
         if frequency in ["10m", "2m", "3h"] and len(kline_pd) > 0:
             kline_pd = convert_currency_kline_frequency(kline_pd, frequency)
         return kline_pd
@@ -396,7 +374,6 @@ class ExchangeBinanceSpot(Exchange):
     def positions(self, code: str = ""):
         raise RuntimeWarning("交易接口未实现")
 
-    # 撤销所有挂单
     def cancel_all_order(self, code):
         raise RuntimeWarning("交易接口未实现")
 

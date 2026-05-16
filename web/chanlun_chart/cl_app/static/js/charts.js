@@ -1,23 +1,13 @@
-// -----------------------------------------------------------------------
-// 文件名: charts.js
-// 修复版: V48_Registry_And_Fix
-// 说明：缠论显示设置（cl_show_config）与独立周期画线开关（cl_independent_drawings）
-//      已改为按 ChartManager 实例（即每个图表面板）独立维护，互不干扰。
-//      存储 key 形如 cl_show_config_<chartId> / cl_independent_drawings_<chartId>。
-//      旧的全局 key（cl_show_config / cl_independent_drawings）只在新 key 不存在时
-//      作为初始默认值迁移过来，保证老用户的设置不丢。
-// -----------------------------------------------------------------------
+// 缠论显示配置（cl_show_config）与独立周期画线开关（cl_independent_drawings）
+// 按 ChartManager 实例独立维护，key 形如 cl_show_config_<chartId>；
+// 旧全局 key 仅在新 key 不存在时作为默认值迁移，老用户设置不丢失。
 
 // 默认的缠论显示项配置
 const CL_SHOW_DEFAULT = { fx: true, bi: true, xd: true, zs: true, bc: true, mmd: true };
 
-// 各市场的 TV 显示时区。与后端 services/constants.py:market_timezone 保持一致。
-// 之前 widget options 里硬编码 "Asia/Shanghai"，导致美股 K 线在 X 轴上按北京时区
-// 显示（NY 09:30 EDT 开盘 → 21:30；alpaca 默认包含的盘前 NY 08:00 EDT 显示成 20:00）。
-// 改为按 market 查表，未列出的市场（数字货币等）回退到 Asia/Shanghai。
-// (N5) 前端 timezone 表与后端 services/constants.py:market_timezone 保持一致;
-// currency / currency_spot 在后端用 get_localzone() (容器/服务器本地时区),
-// 前端无法直接拿到, 这里用浏览器的 Intl 解析的 IANA tz 作等价回退。
+// 各市场的 TV 显示时区，与后端 services/constants.py:market_timezone 保持一致。
+// 之前硬编码 "Asia/Shanghai" 导致美股 K 线按北京时区显示（NY 09:30 EDT → 21:30）。
+// currency/currency_spot 在后端用 get_localzone()，前端改为读取浏览器 Intl IANA tz 等价回退。
 const MARKET_TIMEZONE = {
     a: "Asia/Shanghai",
     hk: "Asia/Shanghai",
@@ -40,14 +30,13 @@ function getMarketTimezone(market) {
     return MARKET_TIMEZONE[market] || "Asia/Shanghai";
 }
 
-// 工具：按图表 id 读取/写入显示配置
 function loadClShowConfig(chartId) {
     try {
         const raw = localStorage.getItem('cl_show_config_' + chartId);
         if (raw) {
             return Object.assign({}, CL_SHOW_DEFAULT, JSON.parse(raw));
         }
-        // 兼容旧版全局 key，作为首次默认值（不再写回旧 key）
+        // 兼容旧版全局 key 作为首次默认值，不写回旧 key
         const legacy = localStorage.getItem('cl_show_config');
         if (legacy) {
             return Object.assign({}, CL_SHOW_DEFAULT, JSON.parse(legacy));
@@ -195,9 +184,9 @@ class ChartManager {
         // 每个图表面板独立维护缠论显示配置与独立周期画线开关
         this.cl_show_config = loadClShowConfig(this.id);
         this.cl_independent_drawings = loadClIndependentDrawings(this.id);
-        this._initialLoadDone = false; // 标记初始数据加载完成，之后才响应 visibleRangeChange
+        this._initialLoadDone = false; // 首次数据就绪前屏蔽 visibleRangeChange 重绘
         this._intervalVersion = 0;
-        this._drawingsCache = new Map();  // Lightweight cache for drawings per interval
+        this._drawingsCache = new Map();  // 按 symbol+interval 缓存用户画线状态
         this._intervalSwitchSeq = 0;
         this._drawingsRequestSeq = 0;
         this._latestAppliedBarTime = null;
@@ -210,27 +199,21 @@ class ChartManager {
         this._saveScheduled = false;
         this._saveInFlight = null;
         this._barReadyHandler = null;
-        // reconcile 失败自动重试状态：{count, timer}，count 累计失败重试次数，
-        // timer 跟踪当前已排队的 setTimeout 句柄，避免重复排队。
+        // reconcile 失败自动重试状态：count 累计失败次数，timer 已排队的句柄（防重复）
         this._reconcileRetry = { count: 0, timer: null };
-        // 2026-05-12 修复孤儿 shape:reconcile 创建过的所有 entity id 全集。
-        //   incremental reconcile 模式下,如果某次 safeRemove 在 TV 内部静默失败、
-        //   或同一 key 因端点漂移被走两次 create 路径,container 会和 TV 实际
-        //   shape 列表脱钩,屏幕上残留无主长斜线。
-        //   sweep 时:凡是 _reconcileOwnedIds 里有但所有 container 里都没的 → 孤儿,
-        //   removeEntity 强制清掉。
-        //   不污染用户手画 shape:用户自己用 line tool 创建的从未进过此 set。
+        // reconcile 创建过的全部 entity id 集合，用于 sweep 时识别孤儿 shape。
+        // safeRemove 静默失败或同一 key 两次 create 时 container 与 TV 会脱钩，
+        // 孤儿 shape 残留为长斜线；sweep 强制 removeEntity 清除。
+        // 用户手画的 shape 从未进入此 set，不会被误删。
         this._reconcileOwnedIds = new Set();
-        // W1: reconcile 签名守卫 — { 'symbolKey__type': signature }
+        // reconcile 签名守卫：{ 'symbolKey__type': signature }
         // signature = `size|from|sortedKeys.slice(0,256)`
-        // 同 (symbolKey, type) 下若 newKeys + from 都未变, 整个 reconcile 直接 return,
-        // 跳过容器遍历 + safeRemove + createFunc 的 O(N+M) 开销。
-        // 触发场景: zoom/pan 在同样 visible range 内重复触发, TV 内部冗余 fire。
+        // 同 (symbolKey, type) 下 newKeys+from 未变时直接 return，
+        // 跳过 O(N+M) 遍历，防止 zoom/pan 触发的 TV 冗余事件造成无效开销。
         this._reconcileGuard = {};
-        // 自动补绘相关：full rebuild 后 500ms 再触发一次 rebuild，让 TV 在稳定
-        // 布局上重新落位被画错的 shape。
+        // full rebuild 后 500ms 补一次 verify-rebuild，让 TV 在稳定布局上重新落位 shape
         this._verifyRebuildTimer = null;
-        this._verifyingUntil = null;  // performance.now() 时间戳；在此之前所有 reconcile 都视为 verify 内部
+        this._verifyingUntil = null;  // performance.now() 时间戳，在此之前的 reconcile 属于 verify 内部
     }
 
     getDrawingsCacheKey(symbol, interval) {
@@ -368,15 +351,10 @@ class ChartManager {
         this.markDrawingMutationStart('apply-user-drawings');
         try {
             this.chart.removeAllShapes();
-            // ★ 关键修复：chart.removeAllShapes() 会把所有 shape 从画面上删掉，
-            //   包括之前 reconcile 创建的缠论 bi/xd/zs 等形态。但 obj_charts 仍记录
-            //   着这些 entity 的 {key, id, time}，下次 reconcile 时会因为旧 key 命中
-            //   newKeys 而进入 toKeep 分支，导致不重新创建 shape——结果图上空空，
-            //   只有"最新一段"（端点变化使 key 不同）会被新建。这就是"切回原周期
-            //   有概率只显示最新一段"的根因。
-            //   修复：与 chart 状态同步置空 obj_charts，让 reconcile 走"全量重建"路径。
+            // removeAllShapes 清空画面后 obj_charts 仍保留旧 entity 记录，
+            // 下次 reconcile 旧 key 命中 toKeep 分支不重建，导致图上空白只剩最新一段。
+            // 同步置空 obj_charts，强制 reconcile 走全量重建路径。
             this.obj_charts = {};
-            // 全量重建路径同样需要重置失败重试计数
             this._resetReconcileRetry();
             if (!this.isTokenCurrent(token)) {
                 return false;
@@ -452,8 +430,7 @@ class ChartManager {
         const wasInitialLoad = !this._initialLoadDone;
         console.log(`[CHANLUN-TIMING] @${performance.now().toFixed(0)}ms handleBarsReadyEvent ✓ symbol=${detail.symbol} res=${detail.resolution} bars=${detail.bars || '?'} fxs=${detail.fxs || '?'} bis=${detail.bis || '?'} xds=${detail.xds || '?'} wasInitialLoad=${wasInitialLoad}`);
         this._initialLoadDone = true;
-        // 切换标的/周期后第一次 bars 到达：跳过 300ms debounce 直接重绘，缩短感知延迟。
-        // 后续 tick / visibleRangeChange / 配置变更仍走 debouncedDrawChanlun 防抖。
+        // 首次 bars 到达直接重绘，跳过 debounce 缩短感知延迟；后续事件仍走防抖路径
         if (wasInitialLoad) {
             this.draw_chanlun();
         } else {
@@ -471,7 +448,7 @@ class ChartManager {
         registry.datafeeds.set(this.instanceId, this.udf_datafeed);
         registry.activeManagerId = this.instanceId;
 
-        // --- 核心修复：多图表 Datafeed 注册机制 ---
+        // GlobalTVDatafeeds 供 MACD_HTF 等自定义指标跨图表查找 bars 数据
         if (!window.GlobalTVDatafeeds) {
             window.GlobalTVDatafeeds = [];
         }
@@ -479,13 +456,10 @@ class ChartManager {
             window.GlobalTVDatafeeds.shift();
         }
         window.GlobalTVDatafeeds.push(this.udf_datafeed);
-        window.tvDatafeed = this.udf_datafeed; // 兼容旧代码
-        // ---------------------------------------
+        window.tvDatafeed = this.udf_datafeed; // 兼容旧版单图表引用
 
-        // (M5) 诊断工具默认启用, 但调用方应在 console 设 window.__chanlunDebug=true
-        // 才会输出"无事件"路径的 console.log; 函数本身一直挂着, 用户在生产 console
-        // 里仍能手动调 window.__chanlunDiag() / __chanlunDumpLines() 排错。
-        // 2026-05-12 诊断:在 console 跑 __chanlunDiag() 一键 dump 当前图表状态
+        // 诊断工具挂在 window，生产环境默认静默；设 window.__chanlunDebug=true 可开启详细日志。
+        // 在 console 跑 __chanlunDiag() 一键 dump 当前图表状态，__chanlunDumpLines() 打印 shape 端点。
         const _diagCm = this;
         window.__chanlunDiag = function () {
             try {
@@ -530,8 +504,7 @@ class ChartManager {
             }
         };
 
-        // 2026-05-12 新增:打印当前所有 xds / bis 的 (start_time, start_price, end_time, end_price)
-        // 用于定位"错位长线段"到底是哪类形态、跨度多大、起止价位是多少。
+        // 打印当前所有 xds/bis 的端点坐标，用于定位错位长线段的起止时间和价格
         window.__chanlunDumpLines = function (type = 'xds') {
             try {
                 const cm = _diagCm;
@@ -551,7 +524,7 @@ class ChartManager {
                         const dpct = p0 ? (Math.abs(p1 - p0) / p0 * 100).toFixed(2) : '?';
                         geom = `[${new Date(t0 * 1000).toISOString().slice(0,16)} → ${new Date(t1 * 1000).toISOString().slice(0,16)}] dt=${dt}s p=${p0}→${p1} (${dpct}%)`;
                     }
-                    // 同时通过 TV API 取当前 shape 在 TV 内的实际 points(可能与 entry.points 不同)
+                    // 从 TV 取 shape 实际端点，与 entry.points 对比可定位漂移问题
                     let tvPts = null;
                     try { tvPts = cm.chart.getShapeById(entry.id)?.getPoints?.(); } catch (e) {}
                     const tvGeom = tvPts && tvPts.length >= 2
@@ -738,7 +711,7 @@ class ChartManager {
         this.save_load_adapter = save_load_adapter;
 
         this.widget = window.tvWidget = new TradingView.widget({
-            // F1: loading_screen 让 widget 内部加载阶段显示 spinner 而非空白
+            // loading_screen 让 widget 内部加载阶段显示 spinner 而非空白
             loading_screen: (function () {
                 var isDark = false;
                 try {
@@ -793,25 +766,21 @@ class ChartManager {
         const self = this;
         this.measureShapeId = null;
 
-        // 深度扫描函数：在复杂的对象里寻找坐标点
+        // TV shape 事件携带的对象结构因版本而异，递归深度扫描兼容多种 points 字段位置
         const scanForPoints = (obj, depth = 0) => {
             if (!obj || depth > 3) return null;
             try {
-                // 1. 检查当前层级是否有 points
                 if (Array.isArray(obj.points) && obj.points.length >= 2 && obj.points[0].time) return obj.points;
                 if (Array.isArray(obj._points) && obj._points.length >= 2 && obj._points[0].time) return obj._points;
 
-                // 2. 遍历属性寻找
                 const keys = Object.keys(obj);
                 for (let k of keys) {
                     const val = obj[k];
                     if (val && typeof val === 'object') {
-                        // 特征匹配：如果是数组且看起来像坐标
                         if (Array.isArray(val) && val.length >= 2 && val[0] && val[0].hasOwnProperty('time')) {
                             console.log(`[MACD] 通过深度扫描在属性 [${k}] 中找到坐标!`);
                             return val;
                         }
-                        // 递归查找 (限制深度防止死循环)
                         if (!Array.isArray(val) && k !== 'parent' && k !== 'chart') {
                             const found = scanForPoints(val, depth + 1);
                             if (found) return found;
@@ -826,7 +795,7 @@ class ChartManager {
             var btnDisplay = global_widget.createButton();
             btnDisplay.textContent = "缠论显示设置 ▾";
             btnDisplay.addEventListener("click", function () {
-                // 每个图表面板都有自己独立的菜单 DOM，避免双图/三图布局下互相干扰
+                // 每个图表面板独立一套菜单 DOM，防止多图布局下互相干扰
                 const menuId = 'cl_display_menu_' + self.id;
                 const backdropId = 'cl_menu_backdrop_' + self.id;
                 if ($('#' + menuId).length > 0) {
@@ -853,11 +822,9 @@ class ChartManager {
                 `;
                 $('body').append(html);
 
-                // 计算按钮在主文档（top window）坐标系下的位置。
-                // TradingView 通过 createButton() 创建的按钮位于 widget 内部 iframe 中，
-                // btnDisplay.getBoundingClientRect() 返回的是 iframe 内部的相对坐标，
-                // 直接挂到主页面 body 上会全部错位（多图表场景下尤其明显，看起来像
-                // "所有弹层都跑到了第一个图表那边"）。需要逐层向上累加 iframe 偏移。
+                // TV createButton() 创建的按钮在 widget 内部 iframe 里，
+                // getBoundingClientRect() 返回 iframe 内部坐标，需逐层累加 iframe 偏移
+                // 才能正确定位到主文档坐标系（多图表场景下尤其关键）。
                 function getElementRectInTopWindow(el) {
                     const rect = el.getBoundingClientRect();
                     let top = rect.top;
@@ -876,7 +843,7 @@ class ChartManager {
                             right += fr.left;
                             win = frameEl.ownerDocument && frameEl.ownerDocument.defaultView;
                         } catch (e) {
-                            // 跨域 iframe 访问失败时停止累加，使用当前已有偏移
+                            // 跨域 iframe 无法访问 frameElement，使用已累加的偏移
                             break;
                         }
                     }
@@ -885,7 +852,7 @@ class ChartManager {
 
                 const btnRect = getElementRectInTopWindow(btnDisplay);
 
-                // Position the menu right below the button（已是主文档坐标，再补上滚动偏移）
+                // 已转换到主文档坐标，补上滚动偏移后定位到按钮正下方
                 $('#' + menuId).css({
                     top: (btnRect.bottom + window.scrollY + 5) + 'px',
                     left: (btnRect.left + window.scrollX) + 'px'
@@ -910,7 +877,7 @@ class ChartManager {
                     layer.msg(self.cl_independent_drawings ? '已切换为独立周期画线' : '已切换为共享画线', { time: 1000 });
                 });
 
-                // 点击非弹框区域时关闭菜单（使用透明遮罩确保可靠捕获点击）
+                // 透明遮罩覆盖全屏，确保点击弹框外任意区域都能可靠关闭菜单
                 const backdrop = $('<div id="' + backdropId + '" style="position:fixed;top:0;left:0;width:100%;height:100%;z-index:99999998;background:transparent;"></div>');
                 $('body').append(backdrop);
                 backdrop.on('click', function () {
@@ -936,12 +903,11 @@ class ChartManager {
 
         });
         this.widget.onChartReady(() => {
-            // F1: 移除骨架占位（首屏 widget 就绪后立即清掉）
+            // widget 就绪后移除首屏骨架占位
             var sk = document.getElementById('tv_charts_skeleton');
             if (sk) sk.remove();
             this.chart = this.widget.activeChart();
             if (!this.chart) return;
-            // 默认指标加载已移至 handleDataReady()，确保数据就绪后再创建
             this.chart.applyOverrides({ "mainSeriesProperties.candleStyle.upColor": "#ef5350", "mainSeriesProperties.candleStyle.downColor": "#26a69a" });
             const registry = getTVRegistry();
             registry.widgets.set(this.instanceId, this.widget);
@@ -959,8 +925,7 @@ class ChartManager {
 
             this.reloadDrawingsForCurrentContext('initial-load');
 
-            // 注入 MACD 区间统计功能（工具栏按钮 + 右键菜单 + 侧边面板）
-            // 该模块在 macd_stats.js 中定义，依赖 chart/widget 已就绪
+            // 注入 MACD 区间统计（工具栏按钮 + 右键菜单 + 侧边面板），依赖 chart/widget 已就绪
             try {
                 if (window.MacdStats && typeof window.MacdStats.attach === 'function') {
                     window.MacdStats.attach(this);
@@ -1128,11 +1093,8 @@ class ChartManager {
 
 
     makeKey(item) {
-        // 2026-05-12 修复:不再把 linestyle 写入 key。
-        //   原因:多点形态(笔/段/中枢)末段会从 pending(linestyle=1)翻转成
-        //   done(linestyle=0),把 linestyle 写进 key 会让"同一身份的 shape"
-        //   在前后两次 reconcile 中被视为两个不同 shape → 触发全量 rebuild → 闪烁。
-        //   起点 / 终点已能唯一标识一根多点形态;单点形态用 (time, price, text)。
+        // linestyle 不写入 key：末段 pending→done 翻转（linestyle 1→0）不应被视为不同 shape，
+        // 否则每次翻转都触发全量 rebuild 导致闪烁。起/终点足以唯一标识多点形态。
         if (Array.isArray(item.points)) {
             return item.points.map(p => `${p.time}_${p.price}`).join('_');
         } else if (item.points?.time !== undefined) {
@@ -1168,10 +1130,8 @@ class ChartManager {
         }
         const afterUniqueCount = renderList.length;
 
-        // 按可视窗口过滤 (历史 bis 可达数百根, 全画视觉杂乱)。详细策略 ADR 见
-        // docs/superpowers/plans/2026-05-12-tv-shape-window-filter.md
-        // 简述: tailTime >= from + headTime < from 时裁剪起点; key 用原始 item
-        // (滚动时既有 entry 不闪烁)。trade-off: 画外起点会定格在创建时位置。
+        // 按可视窗口过滤：历史 bis 可达数百根全画视觉杂乱；
+        // headTime >= from 才入渲染，画外起点定格在创建时位置（可接受的 trade-off）
         const newKeys = new Set();
         const itemsToProcess = [];
         renderList.forEach(item => {
@@ -1182,9 +1142,8 @@ class ChartManager {
             } else {
                 headTime = tailTime = item.points?.time;
             }
-            // 终极策略: headTime >= from (与笔的视觉行为一致, 避免 TV
-            // createMultipointShape snap 造成错位长斜线)。trade-off: 跨可见窗的
-            // XD 在缩放级别低时不显示; 收益: 零错位 / 零裁剪 / 零 toggle。
+            // headTime >= from：避免 createMultipointShape snap 把画外起点吸附到可见区边缘造成错位长斜线；
+            // 代价是缩放级别低时跨可见窗的 XD 不显示，收益是零错位
             if (headTime >= from) {
                 const key = this.makeKey(item);
                 newKeys.add(key);
@@ -1192,10 +1151,8 @@ class ChartManager {
             }
         });
 
-        // W1 守卫: signature = size + from + sortedKeys (截断 256 字符).
-        // 同 (symbolKey, type) 下 signature 未变 → newKeys + from 都没变 → 容器
-        // 状态本就一致, 直接 return 省掉下方 O(N+M) 遍历.
-        // 注: 不放在最前面 (newKeys 计算必须先做), 但放在容器遍历之前.
+        // 签名守卫：newKeys+from 都未变时直接 return，省掉 O(N+M) 容器遍历
+        // 必须在 newKeys 计算完成后、容器遍历之前执行
         const sortedKeys = [...newKeys].sort();
         const signature = `${newKeys.size}|${from}|${sortedKeys.join(',').slice(0, 256)}`;
         const guardKey = `${symbolKey}__${type}`;
@@ -1209,12 +1166,7 @@ class ChartManager {
             return;
         }
 
-        // ===== 统一增量 reconcile 路径 (多点 + 单点形态共用) =====
-        // 既有 shape 保留, 只 remove 真正出窗的 + create 真正新增的; makeKey 已
-        // 移除 linestyle 字段, pending→done 翻转不触发重建。trade-off: 1-2px 端
-        // 点视觉断缝 (远比"先错位 → 修正"对用户友好)。
-        // 历史背景 (废弃的 key 集缓存 + full rebuild + verify-rebuild 策略) 见
-        // 2026-05-12 commit 9d1b0af~0d8970b ADR。
+        // makeKey 不含 linestyle，pending→done 翻转（虚→实）不触发重建，避免端点漂移
         const beforeContainerLen = container.length;
         const toKeep = [];
         let removedCount = 0;
@@ -1267,14 +1219,12 @@ class ChartManager {
             }
         });
 
-        // W1: 同步路径完成后记录签名, 下次同样的 newKeys+from 即可短路返回.
-        // 异步 create 还在 pending 也无所谓: 它们会在 promise resolve 时 push 到
-        // container, 与签名所代表的"目标状态"一致, 下次进入 guard 时容器已正确.
+        // 同步路径完成后记录签名；异步 create 仍在 pending 无妨，resolve 后 push 到
+        // container 与签名目标状态一致，下次 guard 时容器已正确
         this._reconcileGuard[guardKey] = signature;
 
-        // [CHANLUN-DIAG] 单行总结:有任何动作时才打
-        // (M5) 仅在 window.__chanlunDebug=true 时输出, 避免生产 console 刷屏。
-        // 真正的错误诊断仍走 console.warn 不受此开关影响。
+        // 仅在 window.__chanlunDebug=true 时输出调试摘要，避免生产 console 刷屏
+        // 错误诊断走 console.warn，不受此开关控制
         if (window.__chanlunDebug && (removedCount > 0 || createSync > 0 || createAsync > 0)) {
             console.log(
                 `[CHANLUN-DIAG][reconcile.${type}] src=${sourceCount} unique=${afterUniqueCount} ` +
@@ -1285,11 +1235,9 @@ class ChartManager {
         }
     }
 
-    // ★ 失败重试调度：reconcile 中 createFunc 返回 null（chart 未 ready）时，
-    //   定时再触发一次 debouncedDrawChanlun 让缺失 shape 重新创建。
-    //   过去仅依赖 visibleRangeChange / interval 切换 / 用户切换显示开关来重试，
-    //   首屏数据加载完毕但 chart 仍未完成布局时极易丢失若干 shape，导致线段不连续。
-    //   通过指数退避并限制次数，避免重试风暴。
+    // 失败重试调度：createFunc 返回 null（chart 未 ready）时定时重触 draw_chanlun。
+    // 首屏数据就绪但布局未完成时极易丢失 shape，导致线段不连续；
+    // 通过指数退避并限制次数，避免重试风暴。
     _scheduleReconcileRetry(reason) {
         if (!this._reconcileRetry) {
             this._reconcileRetry = { count: 0, timer: null };
@@ -1302,8 +1250,8 @@ class ChartManager {
         state.timer = setTimeout(() => {
             state.timer = null;
             console.log(`[CHANLUN-TIMING] reconcile retry #${state.count} (${reason}) after ${delayMs}ms`);
-            // 绕过 debouncedDrawChanlun：用户持续缩放会让 visibleRangeChange 不停 reset
-            // 300ms 防抖，retry 通过 debounced 路径会被无限期延后；直接调用 draw_chanlun。
+            // 绕过防抖直接调用：持续缩放时 visibleRangeChange 会不停 reset 300ms 防抖，
+            // retry 经 debounced 路径会被无限期延后
             this.draw_chanlun();
         }, delayMs);
     }
@@ -1313,9 +1261,8 @@ class ChartManager {
             clearTimeout(this._reconcileRetry.timer);
         }
         this._reconcileRetry = { count: 0, timer: null };
-        // 清除场景下同步清掉守卫缓存, 否则下次源数据相同时会被误 skip
+        // 同步清掉守卫缓存，否则下次源数据相同时会被 W1 guard 误 skip
         this._reconcileGuard = {};
-        // 同时取消 pending verify-rebuild
         if (this._verifyRebuildTimer) {
             clearTimeout(this._verifyRebuildTimer);
             this._verifyRebuildTimer = null;
@@ -1323,14 +1270,9 @@ class ChartManager {
         this._verifyingUntil = null;
     }
 
-    // ★ 自动补绘调度：full rebuild 后定时再做一次 rebuild。
-    //   多次 full rebuild 期间 timer 会被 reset，最终只在最后一次 rebuild 后 500ms
-    //   触发一次 verify-rebuild。verify-rebuild 内部走 draw_chanlun 时打开
-    //   _isVerifyingNow() 守门，避免它自己又排队下一次 verify。
-    //   守门用 timestamp 而非微任务标志：draw_chanlun 是 async，用 microtask 重置
-    //   标志会在它的第一个 await（setTimeout 0）之前就跑掉，导致 verify 自身的
-    //   reconcile 再排一次 verify → 每 500ms 自触发循环。改用"在 verify 起点
-    //   后 X ms 内一律视为正在 verify"，1500ms 足够覆盖 draw_chanlun 走完一遍。
+    // 补绘调度：full rebuild 后 500ms 触发一次 verify-rebuild，用于补齐布局抖动遗漏的 shape。
+    // 守门用 timestamp（_verifyingUntil）而非微任务标志：draw_chanlun 是 async，
+    // microtask 重置会在首个 await 之前跑掉，导致 verify 自身又排队 → 500ms 自循环。
     _scheduleVerifyRebuild() {
         if (this._verifyRebuildTimer) {
             clearTimeout(this._verifyRebuildTimer);
@@ -1338,7 +1280,7 @@ class ChartManager {
         this._verifyRebuildTimer = setTimeout(() => {
             this._verifyRebuildTimer = null;
             this._verifyingUntil = performance.now() + 1500;
-            // 清掉守卫缓存确保 reconcile 走全量 rebuild 路径, 重新基于稳定布局落位 shape
+            // 清掉守卫缓存，确保 reconcile 走全量 rebuild 路径，基于稳定布局重新落位 shape
             this._reconcileGuard = {};
             console.log(`[CHANLUN-TIMING] verify-rebuild firing`);
             this.draw_chanlun();
@@ -1390,7 +1332,7 @@ class ChartManager {
             return promise;
         };
 
-        // Reconcile each type（使用本图表实例的显示配置，确保多图独立）
+        // 使用本图表实例独立的显示配置，多图布局下互不影响
         const cfg = this.cl_show_config;
         this.reconcile('fxs', cfg.fx ? barsResult.fxs : [], from, symbolKey, (item) => safeCreate(ChartUtils.createFxShape(this.chart, item), 'fx'), false);
         this.reconcile('bis', cfg.bi ? barsResult.bis : [], from, symbolKey, (item) => safeCreate(ChartUtils.createLineShape(this.chart, item, { color: getDynamicColor(currentInterval, "bis"), linewidth: 2 }), 'bi'));
@@ -1428,7 +1370,6 @@ class ChartManager {
             console.log('[CHANLUN-DIAG][sweep] skipped: _reconcileOwnedIds is null');
             return;
         }
-        // 收集所有 container 当前持有的 id
         const inUseIds = new Set();
         Object.values(this.obj_charts || {}).forEach(symbolData => {
             Object.values(symbolData || {}).forEach(items => {
@@ -1439,23 +1380,21 @@ class ChartManager {
                 });
             });
         });
-        // TV 实际 shape 列表(便于诊断 owned 与 TV 之间的偏差)
         let tvShapes = [];
         try { tvShapes = this.chart.getAllShapes() || []; }
         catch (e) { console.warn('[CHANLUN-DIAG][sweep] getAllShapes 抛错', e); }
         const tvIds = new Set(tvShapes.map(s => s.id));
 
-        // 类别 A:owned 里有但 inUseIds 里没的 → container 失联,我们应该清的孤儿
+        // ownedOrphans：owned 有但 container 已无引用 → 应删除的孤儿
         const ownedOrphans = [];
         this._reconcileOwnedIds.forEach(id => {
             if (!inUseIds.has(id)) ownedOrphans.push(id);
         });
 
-        // 类别 B:TV 里有但 inUseIds 没有 AND owned 也没有 → "我们从未跟踪过" 的 shape
-        //          (理论上=用户手画;但若 race 让 owned 漏 add,会落到此类)
+        // trulyForeign：TV 里有但 owned/inUse 都无记录 → 理论上是用户手画，race 时可能漏 add
         const trulyForeign = tvShapes.filter(s => !inUseIds.has(s.id) && !this._reconcileOwnedIds.has(s.id));
 
-        // (M5) sweep 总结仅在 window.__chanlunDebug 时输出
+        // sweep 总结仅在 window.__chanlunDebug 时输出，避免生产 console 刷屏
         if (window.__chanlunDebug) {
             console.log(
                 `[CHANLUN-DIAG][sweep] tvShapes=${tvShapes.length} owned=${this._reconcileOwnedIds.size} ` +
@@ -1497,9 +1436,8 @@ class ChartManager {
             }
         }
 
-        // 2026-05-12 终极策略下:reconcile 入口已用 headTime >= from 过滤,
-        // TV 拿到的 shape 起点严格在可见窗内,不会再被 snap → 不需要 snap-check + remove+recreate。
-        // 这里仅保留孤儿扫描(上面的 ownedOrphans 段),清理 race 残留即可。
+        // reconcile 入口已用 headTime >= from 过滤，shape 起点严格在可见窗内，
+        // 不会被 TV snap 到边缘，无需 snap-check + remove+recreate，仅保留孤儿扫描即可。
     }
 
     async draw_chanlun() {
@@ -1550,7 +1488,6 @@ class ChartManager {
         console.log(`[CHANLUN-TIMING]   from=${chartData.from} (visibleRange.from), barsRange=[${firstBarSec.toFixed(0)}, ${lastBarSec.toFixed(0)}], visibleRange=[${vr?.from?.toFixed(0)}, ${vr?.to?.toFixed(0)}]`);
         console.log(`[CHANLUN-TIMING]   barsResult: bars=${chartData.barsResult.bars?.length || 0} fxs=${chartData.barsResult.fxs?.length || 0} bis=${chartData.barsResult.bis?.length || 0} xds=${chartData.barsResult.xds?.length || 0} bi_zss=${chartData.barsResult.bi_zss?.length || 0} mmds=${chartData.barsResult.mmds?.length || 0}`);
 
-        // 统计 from 过滤效果（看到底过滤掉了多少）
         const bisInside = (chartData.barsResult.bis || []).filter(b => (b.points?.[0]?.time ?? 0) >= chartData.from).length;
         const xdsInside = (chartData.barsResult.xds || []).filter(x => (x.points?.[0]?.time ?? 0) >= chartData.from).length;
         const totalBis = chartData.barsResult.bis?.length || 0;
@@ -1560,15 +1497,9 @@ class ChartManager {
         const drawStartTs = performance.now();
         try {
             this.drawChartElements(chartData, symbolInterval.interval);
-            // ★ 关键修复："切走再切回原周期后只显示可视区一部分缠论形态"。
-            //   handleIntervalChange 把 _initialLoadDone 置为 false，需要 handleDataReady
-            //   重新置 true，handleVisibleRangeChange 才会响应缩放/平移补绘左边形态。
-            //   但切回原周期时，bars 已在 datafeed 缓存中，TV 不会再触发 onDataLoaded，
-            //   于是 handleDataReady 永远不来，_initialLoadDone 一直 false，
-            //   后续所有缩放都被 handleVisibleRangeChange 屏蔽——左边形态再也补不上。
-            //
-            //   兜底：只要 draw_chanlun 成功执行过一次（说明 chart 已有可绘制数据），
-            //   就把 _initialLoadDone 置 true，恢复 visibleRangeChange 的响应能力。
+            // 切回已缓存周期时 TV 不再触发 onDataLoaded，handleDataReady 不来，
+            // _initialLoadDone 永远 false，导致后续缩放平移无法补绘左侧形态。
+            // 兜底：draw_chanlun 成功执行说明 chart 已有数据，强制置 true 恢复响应能力。
             this._initialLoadDone = true;
             console.log(`[CHANLUN-TIMING] @${performance.now().toFixed(0)}ms draw_chanlun DONE (took ${(performance.now() - drawStartTs).toFixed(0)}ms) [_initialLoadDone=true]`);
         } finally {

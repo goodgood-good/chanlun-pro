@@ -63,35 +63,32 @@ class StrategySonLevel1MMD(Strategy):
         if len(high_data.get_bis()) == 0 or len(high_data.get_bi_zss()) == 0:
             return opts
         high_bi = self.last_done_bi(high_data.get_bis())
-        # 如果最后 缠论K线，距离结束分型太远，退出
+        # 当前缠论K线距笔结束超过3根，信号已过时
         if high_data.get_cl_klines()[-1].index - high_bi.end.klines[-1].index > 3:
             return opts
-        # 如果没有背驰和买卖点，直接返回
         if len(high_bi.line_bcs()) == 0 and (high_bi.line_mmds()) == 0:
             return opts
-        # 确定高级别笔停顿
         if self.bi_td(high_bi, high_data) is False:
             return opts
 
-        # 记录低级别中是否出现1/2类买卖点，根据高级别笔结束分型的时间范围
+        # 在高级别笔结束分型的时间范围内，检查低级别是否出现一/二类买卖点
         low_level_1mmd = False
         low_frequency = None
-        # 高级别分型的时间段 TODO 注意事项：K线时间前对齐 or 后对齐 获取的结束时间是有区别的
+        # 注意：数字货币 K 线前对齐，沪深/期货后对齐，取分型时间范围的方式不同
         if market_data.market == "currency":
-            # 前对齐 (数字货币)
+            # 前对齐：分型首根 K 线到下一根 K 线起点
             start_cl_k_date = high_bi.end.klines[0].date
             end_cl_k_date = high_data.get_klines()[
                 high_bi.end.klines[-1].k_index + 1
             ].date
         else:
-            # 后对齐（沪深、期货）
+            # 后对齐：分型首根 K 线的前一根到分型末根 K 线
             start_cl_k_date = high_data.get_klines()[
                 high_bi.end.klines[0].k_index - 1
             ].date
             end_cl_k_date = high_bi.end.klines[-1].date
         low_infos = None
         for f in market_data.frequencys[1:]:
-            # 低级别信息
             low_data = market_data.get_cl_data(code, f)
             low_infos = self.check_low_info_by_datetime(
                 low_data, start_cl_k_date, end_cl_k_date
@@ -112,7 +109,7 @@ class StrategySonLevel1MMD(Strategy):
         if low_level_1mmd is False:
             return opts
 
-        # 设置止损价格
+        # 止损取笔分型极值与按最大止损比例的价格中较优的一个
         price = high_data.get_klines()[-1].c
         if self._max_loss_rate is not None:
             if high_bi.type == "up":
@@ -130,7 +127,6 @@ class StrategySonLevel1MMD(Strategy):
                 else high_bi.end.klines[-1].h
             )
 
-        # 买卖点开仓
         for mmd in high_bi.line_mmds():
             opts.append(
                 Operation(
@@ -142,7 +138,7 @@ class StrategySonLevel1MMD(Strategy):
                     f"高级别买卖点 {mmd}, 低级别 {low_frequency} 出现 {self.info_msg(low_infos)}",
                 )
             )
-        # 背驰开仓
+        # 仅对盘整/趋势背驰开仓，笔级别背驰（bi）信号太弱不单独开仓
         for bc in high_bi.line_bcs():
             if bc not in ["pz", "qs"]:
                 continue
@@ -186,24 +182,21 @@ class StrategySonLevel1MMD(Strategy):
 
         high_bi = self.last_done_bi(high_data.get_bis())
         high_xd = high_data.get_xds()[-1]
-        # 如果没有背驰和买卖点，直接返回
         if len(high_bi.line_bcs()) == 0 and len(high_bi.line_mmds()) == 0:
             return False
         if self.bi_td(high_bi, high_data) is False:
             return False
 
-        # 记录低级别中是否出现1类买卖点，根据高级别笔结束分型的时间范围
+        # 同开仓逻辑，在高级别笔结束分型时间范围内检查低级别一/二类买卖点
         low_level_1mmd = False
         low_frequency = None
-        # 高级别分型的时间段 TODO 注意事项：K线时间前对齐 or 后对齐 获取的结束时间是有区别的
+        # 注意：数字货币前对齐，沪深/期货后对齐，取时间范围方式不同
         if market_data.market == "currency":
-            # 前对齐 (数字货币)
             start_cl_k_date = high_bi.end.klines[0].date
             end_cl_k_date = high_data.get_klines()[
                 high_bi.end.klines[-1].k_index + 1
             ].date
         else:
-            # 后对齐（沪深、期货）
             start_cl_k_date = high_data.get_klines()[
                 high_bi.end.klines[0].k_index - 1
             ].date
@@ -211,7 +204,6 @@ class StrategySonLevel1MMD(Strategy):
 
         low_infos = None
         for f in market_data.frequencys[1:]:
-            # 低级别信息
             low_data = market_data.get_cl_data(code, f)
             low_infos = self.check_low_info_by_datetime(
                 low_data, start_cl_k_date, end_cl_k_date
@@ -227,7 +219,6 @@ class StrategySonLevel1MMD(Strategy):
                 low_frequency = f
                 break
 
-                # 低级别出现一类买卖点
         if low_level_1mmd is False:
             return False
 

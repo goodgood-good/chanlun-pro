@@ -10,7 +10,7 @@ from vnpy_datamanager import DataManagerApp
 
 
 def main():
-    """Start VeighNa Trader"""
+    """启动 VeighNa Trader 图形界面，加载 CTP 网关及 CTA/回测/数据管理等应用。"""
     qapp = create_qapp()
 
     event_engine = EventEngine()

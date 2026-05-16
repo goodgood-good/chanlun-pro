@@ -7,12 +7,13 @@ from chanlun.db_models.base import Base
 
 
 class TableByAIAnalyse(Base):
-    # AI 分析结果记录
+    """AI 分析结果记录表 (cl_ai_analyses)。"""
+
     __tablename__ = "cl_ai_analyses"
     id = Column(Integer, primary_key=True, autoincrement=True)
-    market = Column(String(20), comment="市场")  # 市场
-    stock_code = Column(String(20), comment="标的")  # 标的
-    stock_name = Column(String(100), comment="标的名称")  # 标的名称
+    market = Column(String(20), comment="市场")
+    stock_code = Column(String(20), comment="标的")
+    stock_name = Column(String(100), comment="标的名称")
     frequency = Column(String(10), comment="分析周期")
     dt = Column(DateTime, comment="分析时间")
     model = Column(String(100), comment="分析模型")

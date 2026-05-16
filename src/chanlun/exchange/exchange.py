@@ -21,6 +21,8 @@ __tz = pytz.timezone("Asia/Shanghai")
 
 @dataclass
 class Tick:
+    """实时行情快照，buy1/sell1 为盘口一档价格，rate 为涨跌幅百分比。"""
+
     code: str
     last: float
     buy1: float
@@ -33,38 +35,26 @@ class Tick:
 
 
 class Exchange(ABC):
-    """
-    交易所类
-    """
+    """各数据源/交易所适配器的抽象基类，定义统一行情与交易接口。"""
 
     @abstractmethod
     def default_code(self) -> str:
-        """
-        返回WEB默认展示的代码
-        """
+        """返回 WEB 端默认展示的标的代码。"""
 
     @abstractmethod
     def support_frequencys(self) -> dict:
-        """
-        返回交易所支持的周期对照关系
+        """返回该数据源支持的周期映射，格式为 {内部周期key: WEB展示名称}。
 
-        内部使用代码 ： WEB端展示名称
-        例如 ：{'d': 'Day'}  # 内部使用的周期是 d，在web端展示  Day
+        例如 {'d': 'Day', '60m': '60m'}。
         """
 
     @abstractmethod
     def all_stocks(self):
-        """
-        获取支持的所有股票列表
-        :return:
-        """
+        """获取该市场全量标的列表，每项包含 code/name/type 等字段。"""
 
     @abstractmethod
     def now_trading(self):
-        """
-        返回当前是否可交易
-        :return bool
-        """
+        """返回当前是否处于可交易时段（bool）。"""
 
     @abstractmethod
     def klines(
@@ -75,89 +65,57 @@ class Exchange(ABC):
         end_date: str = None,
         args=None,
     ) -> Union[pd.DataFrame, None]:
-        """
-        获取 Kline 线
-        :param code:
-        :param frequency:
-        :param start_date:
-        :param end_date:
-        :param args:
-        :return:
+        """获取 K 线数据，返回含 date/open/high/low/close/volume 列的 DataFrame。
+
+        :param code: 标的代码
+        :param frequency: 周期，如 'd'/'60m'/'5m'
+        :param start_date: 起始时间字符串，部分数据源不支持
+        :param end_date: 结束时间字符串，部分数据源不支持
+        :param args: 额外参数，如 {'pages': 8, 'fq': 'qfq'}
         """
 
     @abstractmethod
     def ticks(self, codes: List[str]) -> Dict[str, Tick]:
-        """
-        获取股票列表的 Tick 信息
-        :param codes:
-        :return:
-        """
+        """批量获取实时 Tick 信息，返回 {code: Tick} 字典。"""
 
     @abstractmethod
     def stock_info(self, code: str) -> Union[Dict, None]:
-        """
-        获取股票的基本信息
-        :param code:
-        :return:
-        """
+        """获取标的基本信息（名称、精度等），不存在时返回 None。"""
 
     @abstractmethod
     def stock_owner_plate(self, code: str):
-        """
-        股票所属板块信息
-        :param code:
-        :return:
-        return {
-            'HY': [{'code': '行业代码', 'name': '行业名称'}],
-            'GN': [{'code': '概念代码', 'name': '概念名称'}],
-        }
+        """获取标的所属行业/概念板块。
+
+        返回格式：
+        {'HY': [{'code': '行业名', 'name': '行业名'}], 'GN': [...]}
         """
 
     @abstractmethod
     def plate_stocks(self, code: str):
-        """
-        获取板块股票列表信息
-        :param code: 板块代码
-        :return:
-        return [{'code': 'SH.000001', 'name': '上证指数'}]
+        """获取板块内的成分股列表。
+
+        返回格式：[{'code': 'SH.000001', 'name': '上证指数'}]
         """
 
     @abstractmethod
     def balance(self):
-        """
-        账户资产信息
-        :return:
-        """
+        """获取账户资产信息（仅交易型适配器实现，行情型抛异常）。"""
 
     @abstractmethod
     def positions(self, code: str = ""):
-        """
-        当前账户持仓信息
-        :param code:
-        :return:
-        """
+        """获取当前持仓信息（仅交易型适配器实现，行情型抛异常）。"""
 
     @abstractmethod
     def order(self, code: str, o_type: str, amount: float, args=None):
-        """
-        下单接口
-        :param args:
-        :param code:
-        :param o_type:
-        :param amount:
-        :return:
-        """
+        """下单接口（仅交易型适配器实现，行情型抛异常）。"""
 
 
 def convert_stock_kline_frequency(klines: pd.DataFrame, to_f: str) -> pd.DataFrame:
+    """将沪深 A 股 K 线合成到指定周期，时间戳向后对齐（bar 结束时刻）。
+
+    :param klines: 原始 K 线 DataFrame，需含 date/code/open/high/low/close/volume 列
+    :param to_f: 目标周期，如 '5m'/'30m'/'60m'/'120m'/'d'/'w'/'m'
     """
-    转换股票 k 线到指定的周期
-    时间是向后对齐的
-    :param klines:
-    :param to_f:
-    :return:
-    """
-    # 直接使用 pandas 的 resample 方法进行合并周期
     period_maps = {
         "1m": "1min",
         "2m": "2min",
@@ -184,7 +142,7 @@ def convert_stock_kline_frequency(klines: pd.DataFrame, to_f: str) -> pd.DataFra
             "volume": "sum",
         }
 
-        # 通达信的时间对其方式，日线及以下是后对其，周与月是前对其（周、月的第一个交易日）
+        # 通达信周/月线时间戳取首个交易日（前对齐），日线及以下取最后一根（后对齐）
         if to_f in ["w", "m"]:
             agg_dict["date"] = "first"
         else:
@@ -196,8 +154,7 @@ def convert_stock_kline_frequency(klines: pd.DataFrame, to_f: str) -> pd.DataFra
         period_klines["code"] = code
         period_klines["frequency"] = to_f
 
-        # 后对其的，最后一个k线的时间不是未来的结束时间，需要特殊处理一下
-        # 周期是 d、w、m，将时间设置为 15点收盘时间
+        # d/w/m 时间戳统一规整到当日 15:00（A 股收盘），避免 resample 产生的 00:00 被误判为隔天
         if to_f in ["d", "w", "m"]:
             period_klines["date"] = pd.to_datetime(
                 {
@@ -223,7 +180,7 @@ def convert_stock_kline_frequency(klines: pd.DataFrame, to_f: str) -> pd.DataFra
             ["date", "frequency", "code", "high", "low", "open", "close", "volume"]
         ]
 
-    # 60m 周期特殊，9:30-10:30/10:30-11:30
+    # 60m/120m 无法用 resample 整除，需按 A 股交易时段手工分段合并
     freq_config_maps = {
         "60m": {
             "10:30:00": ["09:00:00+08:00", "10:30:00+08:00"],
@@ -269,7 +226,7 @@ def convert_stock_kline_frequency(klines: pd.DataFrame, to_f: str) -> pd.DataFra
     klines_groups["code"] = code
     klines_groups["frequency"] = to_f
     klines_groups["date"] = klines_groups.index
-    # 转换完成后，再将日期转换成本地时间
+    # groupby 索引为 naive datetime，合并后补上时区信息
     klines_groups["date"] = pd.to_datetime(klines_groups["date"]).dt.tz_localize(__tz)
 
     klines_groups.reset_index(drop=True, inplace=True)
@@ -280,8 +237,9 @@ def convert_stock_kline_frequency(klines: pd.DataFrame, to_f: str) -> pd.DataFra
 
 
 def convert_currency_kline_frequency(klines: pd.DataFrame, to_f: str) -> pd.DataFrame:
-    """
-    数字货币k线转换方法
+    """将数字货币 K 线合成到指定周期，时间戳前对齐（bar 开始时刻）。
+
+    日线以 UTC+8 08:00 为自然日分割点，与交易所惯例一致。
     """
 
     period_maps = {
@@ -305,7 +263,7 @@ def convert_currency_kline_frequency(klines: pd.DataFrame, to_f: str) -> pd.Data
     code = klines.iloc[0]["code"]
 
     if to_f == "d":
-        # 日期的特殊处理
+        # 数字货币日线以 08:00 为换日点，凌晨 00:00-07:59 归属前一自然日
         mask = (klines["date"].dt.time >= pd.to_datetime("08:00:00").time()) | (
             klines["date"].dt.time < pd.to_datetime("08:00:00").time()
         )
@@ -329,12 +287,11 @@ def convert_currency_kline_frequency(klines: pd.DataFrame, to_f: str) -> pd.Data
             }
         )
         period_klines = period_klines.reset_index(drop=True)
-        # period_klines["date"] = period_klines["date"].dt.tz_convert(__tz)
         return period_klines[
             ["date", "frequency", "code", "high", "low", "open", "close", "volume"]
         ]
 
-    # 删除 volume 列为 0 的行
+    # 数字货币行情偶有成交量为 0 的空 bar，合并前过滤避免干扰 OHLC 聚合
     klines = klines[klines["volume"] != 0]
 
     klines.insert(0, column="date_index", value=klines["date"])
@@ -371,15 +328,13 @@ def convert_currency_kline_frequency(klines: pd.DataFrame, to_f: str) -> pd.Data
 def convert_futures_kline_frequency(
     klines: pd.DataFrame, to_f: str, process_exchange_type="gm"
 ) -> pd.DataFrame:
-    """
-    期货数据 转换 k 线到指定的周期
-    期货的K线数据日期是向前看其， 10:00 30分钟线表示的是 10:00 - 10:30 分钟数据
-    :param klines:
-    :param to_f:
-    :return:
-    """
+    """将国内期货 K 线合成到指定周期，时间戳前对齐（bar 开始时刻）。
 
-    # 直接使用 pandas 的 resample 方法进行合并周期
+    :param klines: 原始 K 线，需含 date/code/open/high/low/close/volume 列
+    :param to_f: 目标周期，如 '5m'/'30m'/'60m'/'d'
+    :param process_exchange_type: 'gm' 掘金/天勤口径，其他值按标准 30min 边界处理；
+        二者在 10:15-10:30 休市期的合并方式不同，导致 30m/60m 边界有差异。
+    """
     period_maps = {
         "1m": "1min",
         "2m": "2min",
@@ -424,10 +379,10 @@ def convert_futures_kline_frequency(
         period_klines.drop("date_index", axis=1, inplace=True)
         return period_klines[["code", "date", "open", "close", "high", "low", "volume"]]
 
-    # 因为 10:15 10:30 休息 15分钟， 这一部分 掘金和天勤上的处理逻辑是不一样的，在合成 30m，60m 数据时时有差异的
+    # 10:15-10:30 为期货休市，掘金把该段并入前一个 bar 凑足分钟数，天勤则按自然 30min 边界切割
     if process_exchange_type == "gm":
         freq_config_maps = {
-            # 掘金的处理逻辑，凑够符合分钟数的数据 (有夜盘交易的还是有差异，暂时不考虑)
+            # 掘金口径：凑够符合分钟数的数据（有夜盘的品种仍有差异，暂不处理）
             "30m": {
                 "09:00:00": ["09:00:00", "09:29:59"],
                 "09:30:00": ["09:30:00", "09:59:59"],
@@ -508,7 +463,7 @@ def convert_futures_kline_frequency(
         raise Exception(f"不支持的转换周期：{to_f}")
 
     klines["new_dt"] = pd.Series(dtype="datetime64[ns, Asia/Shanghai]")
-    # 如果是 hour 0 minutes 0 的日期，则减一分钟
+    # 夜盘跨零点：00:00 的 bar 实际属于前一日夜盘最后一根，减 1 分钟归入正确分段
     mask = (klines["date"].dt.hour == 0) & (klines["date"].dt.minute == 0)
     klines.loc[mask, "date"] = klines.loc[mask, "date"] - pd.Timedelta(minutes=1)
 
@@ -557,15 +512,10 @@ def convert_futures_kline_frequency(
 def convert_tdx_futures_kline_frequency(
     klines: pd.DataFrame, to_f: str
 ) -> pd.DataFrame:
-    """
-    期货数据 转换 k 线到指定的周期
-    通达信期货数据格式，时间是向后对其，凑够指定分数
-    :param klines:
-    :param to_f:
-    :return:
-    """
+    """将通达信期货 K 线合成到指定周期，时间戳后对齐（bar 结束时刻）。
 
-    # 直接使用 pandas 的 resample 方法进行合并周期
+    通达信期货行情时间戳为 bar 结束时刻，与掘金/天勤（前对齐）相反，需用不同的 resample 参数。
+    """
     period_maps = {
         "2m": "2min",
         "3m": "3min",
@@ -581,7 +531,7 @@ def convert_tdx_futures_kline_frequency(
 
     if to_f in period_maps.keys():
         if to_f in ["d", "w"]:
-            # 如果是日线，在 21 点之后的，算下一天的（向量化）
+            # 夜盘（21-02 点）数据属于次一交易日，整体偏移 3h 后 resample 才能归到正确的自然日
             _night_mask = klines["date"].dt.hour.isin([21, 22, 23, 0, 1, 2])
             klines["date"] = klines["date"].mask(
                 _night_mask, klines["date"] + pd.Timedelta(hours=3)
@@ -590,7 +540,7 @@ def convert_tdx_futures_kline_frequency(
         klines.insert(0, column="date_index", value=klines["date"])
         klines.set_index("date_index", inplace=True)
         period_type = period_maps[to_f]
-        # 前对其
+        # 通达信后对齐：label='left'、closed='right' 对应 bar 结束时刻
         agg_dict = {
             "date": "last",
             "open": "first",
@@ -602,7 +552,7 @@ def convert_tdx_futures_kline_frequency(
         period_klines = klines.resample(period_type, label="left", closed="right").agg(
             agg_dict
         )
-        # 如果是日线的，统一将时间修改为 15:00
+        # d/w 统一设置为 15:00，与 A 股期货收盘时间对齐，方便多市场对比
         if to_f in ["d", "w"]:
             period_klines["date"] = pd.to_datetime(
                 {
@@ -663,7 +613,7 @@ def convert_tdx_futures_kline_frequency(
             "02:00:00": ["01:01:00", "02:00:00"],
         },
     }
-    # 有夜盘的到 02:30:00 的，60m的处理比较特殊
+    # 黄金(AU)/白银(AG)/原油(SC)/商品指数(TI.T) 夜盘延伸至 02:30，60m 分段与普通品种不同
     if (
         code.startswith("QS.AU")
         or code.startswith("QS.AG")
@@ -683,6 +633,7 @@ def convert_tdx_futures_kline_frequency(
             "02:00:00": ["01:01:00", "02:00:00"],
         }
 
+    # 中金所股指/国债期货（IF/IH/IC/IM/TL/T/TF/TS）无夜盘且收盘 15:15，分段边界与商品期货不同
     if (
         code.startswith("CZ.TL")
         or code.startswith("CZ.T")
@@ -716,7 +667,7 @@ def convert_tdx_futures_kline_frequency(
         raise Exception(f"不支持的转换周期：{to_f}")
 
     klines["new_dt"] = pd.Series(dtype="datetime64[ns, Asia/Shanghai]")
-    # 如果是 hour 0 minutes 0 的日期，则减一分钟
+    # 夜盘跨零点：00:00 的 bar 实际属于前一日夜盘最后一根，减 1 分钟归入正确分段
     mask = (klines["date"].dt.hour == 0) & (klines["date"].dt.minute == 0)
     klines.loc[mask, "date"] = klines.loc[mask, "date"] - pd.Timedelta(minutes=1)
 
@@ -766,10 +717,7 @@ def convert_tdx_futures_kline_frequency(
 
 
 def convert_us_kline_frequency(klines: pd.DataFrame, to_f: str) -> pd.DataFrame:
-    """
-    美股k线转换方法
-    基于 IB（盈透证券）行情的K线转换，时间是前对其
-    """
+    """将美股 K 线（IB/盈透证券口径）合成到指定周期，时间戳前对齐（bar 开始时刻）。"""
     period_maps = {
         "2m": "2min",
         "5m": "5min",
@@ -797,7 +745,7 @@ def convert_us_kline_frequency(klines: pd.DataFrame, to_f: str) -> pd.DataFrame:
         "volume": "sum",
     }
 
-    if to_f in ["w"]:  # 周线是末尾的时间
+    if to_f in ["w"]:  # IB 周线取周末最后一根的时间戳
         agg_dict["date"] = "last"
 
     period_klines = klines.resample(period_type, label="right", closed="left").agg(
@@ -812,9 +760,9 @@ def convert_us_kline_frequency(klines: pd.DataFrame, to_f: str) -> pd.DataFrame:
 
 
 def convert_us_tdx_kline_frequency(klines: pd.DataFrame, to_f: str) -> pd.DataFrame:
-    """
-    美股k线转换方法
-    基于 通达信行情的K线转换，时间是后对其
+    """将美股 K 线（通达信口径）合成到指定周期，时间戳后对齐（bar 结束时刻）。
+
+    通达信美股行情时间为 UTC+8 存储，resample 前需先转 UTC 才能按自然小时对齐。
     """
     period_maps = {
         "2m": "2min",
@@ -852,14 +800,11 @@ def convert_us_tdx_kline_frequency(klines: pd.DataFrame, to_f: str) -> pd.DataFr
     period_klines.reset_index(inplace=True)
     period_klines.drop("date_index", axis=1, inplace=True)
 
-    # period_klines["date"] = period_klines["date"].apply(
-    #     lambda dt: dt.astimezone(pytz.timezone("US/Eastern"))
-    # )
-
     return period_klines[["code", "date", "open", "high", "low", "close", "volume"]]
 
 
 def get_ny_future_trade_day(dt: pd.Timestamp) -> pd.Timestamp:
+    """计算纽约期货所属交易日（06:00 前的 bar 归属前一自然日）。"""
     if dt.hour < 6:
         trade_day = (dt - pd.Timedelta(days=1)).replace(
             hour=0, minute=0, second=0, microsecond=0
@@ -870,18 +815,16 @@ def get_ny_future_trade_day(dt: pd.Timestamp) -> pd.Timestamp:
 
 
 def get_ny_future_trade_week(dt: pd.Timestamp) -> pd.Timestamp:
+    """计算纽约期货所属交易周的周一日期（周起始对齐）。"""
     trade_day = get_ny_future_trade_day(dt)
     week_start = trade_day - pd.Timedelta(days=trade_day.weekday())
     return week_start
 
 
 def convert_tdx_ny_f_kline_frequency(klines: pd.DataFrame, to_f: str) -> pd.DataFrame:
-    """
-    纽约期货的k线转换
-    交易时间：周一到周五 早上6点，到第二天早上5点
-    :param klines:
-    :param to_f:
-    :return:
+    """将通达信纽约期货 K 线合成到指定周期。
+
+    交易时段为周一至周五 06:00 至次日 05:59（北京时间），06:00 前的 bar 归属前一自然日。
     """
 
     period_maps = {
@@ -895,17 +838,17 @@ def convert_tdx_ny_f_kline_frequency(klines: pd.DataFrame, to_f: str) -> pd.Data
 
     code = klines["code"].iloc[0]
 
-    # 删除 volume == 0 的列
+    # 纽约期货成交量为 0 的 bar 无意义，过滤后再合并
     klines = klines[klines["volume"] != 0]
 
     if to_f == "d":
         klines = klines.copy()
-        # 向量化 get_ny_future_trade_day：hour < 6 → 前一天 00:00
+        # 向量化计算交易日：hour < 6 的 bar 归属前一自然日
         _td_norm = klines["date"].dt.normalize()
         _td_mask = klines["date"].dt.hour < 6
         klines["trade_day"] = _td_norm.mask(_td_mask, _td_norm - pd.Timedelta(days=1))
         grouped = klines.groupby("trade_day")
-        # 向量化 replace(hour=15, minute=0, second=0)：trade_day 已 normalize 过, 直接 +15h
+        # trade_day 已 normalize，直接 +15h 作为日线时间戳
         _day_dates = grouped["trade_day"].first()
         period_klines = pd.DataFrame(
             {
@@ -925,7 +868,7 @@ def convert_tdx_ny_f_kline_frequency(klines: pd.DataFrame, to_f: str) -> pd.Data
         ]
     elif to_f == "w":
         klines = klines.copy()
-        # 向量化 get_ny_future_trade_week：先算 trade_day，再减去 weekday
+        # 先算 trade_day（同日线逻辑），再向后对齐到本周一作为 groupby key
         _td_norm = klines["date"].dt.normalize()
         _td_mask = klines["date"].dt.hour < 6
         _trade_day = _td_norm.mask(_td_mask, _td_norm - pd.Timedelta(days=1))
@@ -933,7 +876,7 @@ def convert_tdx_ny_f_kline_frequency(klines: pd.DataFrame, to_f: str) -> pd.Data
             _trade_day.dt.dayofweek, unit="D"
         )
         grouped = klines.groupby("trade_week")
-        # 向量化 replace(hour=15, minute=0, second=0)
+        # 周线时间戳取本周最后一根 bar 的自然日 +15h
         _week_max_dates = grouped["date"].max()
         period_klines = pd.DataFrame(
             {
@@ -987,15 +930,10 @@ def convert_tdx_ny_f_kline_frequency(klines: pd.DataFrame, to_f: str) -> pd.Data
 def convert_kline_frequency(
     klines: pd.DataFrame, to_f: str, dt_align_type: str = "eob"
 ) -> pd.DataFrame:
-    """
-    通用的k线转换方法
-    可通过 dt_align_type 参数，选择对齐方式，默认为 eob，即对齐结束时间，可选值：
-    eob: 对齐结束时间，如 9:29:00 对齐到 9:30:00
-    bob: 对齐结束时间，如 9:31:00 对齐到 9:30:00
+    """通用 K 线周期合成，支持 eob（后对齐）和 bob（前对齐）两种时间戳模式。
 
-    dt_align_type 对其方式的选择，根据你原始K线的方式来；
-    原始K线是 eob，则转换K线也是 eob
-    原始K线是 bob，则转换K线也是 bob
+    :param dt_align_type: 'eob'（end-of-bar，bar 结束时刻，默认）或 'bob'（begin-of-bar，bar 开始时刻）。
+        应与原始 K 线的对齐方式一致，错误匹配会导致 OHLC 取错方向。
     """
     period_maps = {
         "2m": "2min",
@@ -1069,21 +1007,3 @@ if __name__ == "__main__":
     print(f"转换后的 {to_f} 数据")
     print(convert_ch.tail(10))
     print("Done")
-
-    # convert_klines_d = convert_us_kline_frequency(klines_30m, 'd')
-    # print('klines_d')
-    # print(klines_d.tail())
-    # print('convert_klines_d')
-    # print(convert_klines_d.tail())
-
-    # convert_klines_60m = convert_us_kline_frequency(klines_30m, '60m')
-    # print('klines_60m')
-    # print(klines_60m.tail())
-    # print('convert_klines_60m')
-    # print(convert_klines_60m.tail())
-
-    # print('klines_30m')
-    # print(klines_30m.tail(30))
-    # print(klines_30m.tail(30))
-    # print(klines_30m.tail(30))
-    # print(klines_30m.tail(30))

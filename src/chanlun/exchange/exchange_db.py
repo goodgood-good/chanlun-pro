@@ -19,19 +19,17 @@ from chanlun.exchange.exchange import (
 
 
 class ExchangeDB(Exchange):
-    """
-    数据库行情
-    """
+    """从本地数据库读取 K 线的行情适配器，不支持实时 Tick 和交易接口。"""
 
     def __init__(self, market):
         """
-        :param market: 市场 a A股市场 hk 香港市场 us 美股市场 currency 数字货币市场  futures 期货市场
+        :param market: 市场标识，如 'a'/'hk'/'us'/'currency'/'currency_spot'/'futures'
         """
         self.market = market
         self.exchange = None
         self.online_ex = None
 
-        # 设置时区
+        # 美股使用东部时间，数字货币使用本机本地时区，其余默认上海时区
         self.tz = pytz.timezone("Asia/Shanghai")
         if self.market == "us":
             self.tz = pytz.timezone("US/Eastern")
@@ -146,29 +144,16 @@ class ExchangeDB(Exchange):
         return {"d": "D", "30m": "30m"}
 
     def query_last_datetime(self, code, frequency) -> Union[None, str]:
-        """
-        查询交易对儿最后更新时间
-        :param frequency:
-        :param code:
-        :return:
-        """
+        """查询指定标的和周期在数据库中的最后一条 K 线时间，用于增量同步判断。"""
         return db.klines_last_datetime(self.market, code, frequency)
 
     def insert_klines(self, code, frequency, klines):
-        """
-        批量添加交易对儿Kline数据
-        :param code:
-        :param frequency
-        :param klines:
-        :return:
-        """
+        """批量写入 K 线数据到数据库。"""
         db.klines_insert(self.market, code, frequency, klines)
         return True
 
     def del_klines(self, code, frequency, _datetime: datetime.datetime):
-        """
-        删除一条记录
-        """
+        """删除指定时间点的单条 K 线记录。"""
         db.klines_delete(self.market, code, frequency, _datetime)
         return
 
@@ -198,6 +183,7 @@ class ExchangeDB(Exchange):
         if "order" in args.keys():
             order = args["order"]
 
+        # 同时指定起止时间时不限制条数，否则可能截断历史区间
         if start_date is not None and end_date is not None and "limit" not in args:
             limit = None
         if start_date is not None:
@@ -239,11 +225,7 @@ class ExchangeDB(Exchange):
         return kline_pd
 
     def __convert_date(self, dt: datetime.datetime):
-        """
-        统一各个市场的时间格式
-        TODO 需要根据自己数据源的数据格式进行调整
-        TODO 将日及以上周期（大多数这类的时间都是 0点0分），修改为交易日结束或开始时间（根据日期是前对其还是后对其来决定是开盘时间还是收盘时间）
-        """
+        """将数据库中 00:00 的日级时间戳规整为各市场的收盘时刻，便于与分钟级数据时间轴对齐。"""
         if self.market == Market.A.value:
             if dt.hour == 0 and dt.minute == 0:
                 return dt.replace(hour=15, minute=0)
@@ -259,9 +241,7 @@ class ExchangeDB(Exchange):
         return dt
 
     def convert_kline_frequency(self, klines: pd.DataFrame, to_f: str) -> pd.DataFrame:
-        """
-        转换K线周期
-        """
+        """按市场类型分发到对应的周期合成函数。"""
         if (
             self.market == Market.CURRENCY.value
             or self.market == Market.CURRENCY_SPOT.value
@@ -281,6 +261,7 @@ class ExchangeDB(Exchange):
         pass
 
     def ticks(self, codes: List[str]) -> Dict[str, Tick]:
+        """用最新一根日线 K 线模拟 Tick，ExchangeDB 无实时行情接口。"""
         ticks = {}
         for _code in codes:
             klines = self.klines(_code, "d", args={"limit": 1})
@@ -323,11 +304,6 @@ class ExchangeDB(Exchange):
 
 if __name__ == "__main__":
     ex = ExchangeDB(Market.CURRENCY_SPOT.value)
-    # ticks = ex.ticks(['SHSE.000001'])
-    # print(ticks)
-
-    # ex.del_klines_by_code_freq("BTC/USDT", "4h")
-
     klines = ex.klines(
         "BTC/USDT",
         "4h",

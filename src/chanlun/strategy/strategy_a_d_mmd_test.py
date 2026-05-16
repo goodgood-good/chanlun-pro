@@ -46,17 +46,17 @@ class StrategyADMMDTest(Strategy):
         return True
 
     def filter_opts(self, opts: List[Operation], trader: Trader = None):
+        """对开/平仓操作排序：平仓优先执行，买入按指定字段排序（控制持仓优先级）。"""
         if len(opts) == 0:
             return opts
-        # 按照买入和卖出操作进行分组
         buy_opts = [_o for _o in opts if _o.opt == "buy"]
         sell_opts = [_o for _o in opts if _o.opt == "sell"]
-        # 按照 opts 中 info 对象中的 loss_rate，从大到小 (风险越大，收益越大，与 k_change 类似，长得多，止损越大)
+        # 风险越大（止损率/涨幅越大）的信号优先买入，通过 filter_reverse 可切换排序方向
         buy_opts = sorted(
             opts, key=lambda x: x.info[self.filter_key], reverse=self.filter_reverse
         )
 
-        # 卖出的操作在前，买入的操作在后
+        # 平仓操作先于开仓，避免满仓时无法执行新买入
         return sell_opts + buy_opts
 
     def open(
@@ -64,37 +64,33 @@ class StrategyADMMDTest(Strategy):
     ) -> List[Operation]:
         opts = []
 
-        # 获取日线数据
         cd_d = market_data.get_cl_data(code, market_data.frequencys[1])
         if len(cd_d.get_bis()) == 0:
             return opts
         price = cd_d.get_src_klines()[-1].c
         bi_d = cd_d.get_bis()[-1]
-        # 只做向下笔的买点，向上笔跳过
+        # 只做向下笔结束后的买点（反转），向上笔延续时不入场
         if bi_d.type == "up":
             return opts
-        # 如果当前笔没有买点，跳过
         if len(bi_d.line_mmds("|")) == 0:
             return opts
-        # 如果笔没有完成，则不操作
         if bi_d.is_done() is False:
             return opts
 
         k_now_d = cd_d.get_src_klines()[-1]
         k_pre_d = cd_d.get_src_klines()[-2]
-        # 当前成加量大于昨日成交量，并且当前k线要是上涨的
+        # 量价配合过滤：要求当日收盘上涨且成交量放大，确认向上动能
         if k_now_d.c < k_pre_d.c:
             return opts
         if k_now_d.a < k_pre_d.a:
             return opts
 
-        # 如果当日有过涨停，不进行交易
+        # 涨停日不入场：当日最高触及涨停价，次日可能无法卖出
         zt_price = self.code_zt_price(code, k_pre_d.c)
-        # 判断 k_now_d.h 是否在 zt_price+-0.01 之间
         if zt_price - 0.01 <= k_now_d.h <= zt_price + 0.01:
             return opts
 
-        # 记录开仓买卖点的信息
+        # 构建开仓特征 DataFrame，后续可通过 pos_querys 对特征列做 query 过滤
         pos_df = []
         for _mmd in bi_d.line_mmds("|"):
             pos_df.append(
@@ -105,7 +101,7 @@ class StrategyADMMDTest(Strategy):
             )
         pos_df = pd.DataFrame(pos_df)
 
-        # 日线周期的 k线、笔、线段信息
+        # 日线笔/线段特征（供后续 query 过滤使用）
         if True:
             bi_pre_d = cd_d.get_bis()[-2]
             xd_d = cd_d.get_xds()[-1]
@@ -115,9 +111,8 @@ class StrategyADMMDTest(Strategy):
             pos_df["bi_pre_d_bcs"] = "/".join(sorted(bi_pre_d.line_bcs("|")))
             pos_df["xd_d_type"] = f"{xd_d.type}_{xd_d.is_done()}"
 
-        # 计算指标数据
+        # 日线均线与 MACD 指标特征
         if True:
-            # 日线周期 5、10、20 均线
             idx_ma5 = self.idx_ma(cd_d, 5)
             idx_ma10 = self.idx_ma(cd_d, 10)
             idx_ma20 = self.idx_ma(cd_d, 20)
@@ -128,27 +123,23 @@ class StrategyADMMDTest(Strategy):
             pos_df["idx_ma_5_by_ma_20"] = idx_ma5[-1] > idx_ma20[-1]
             pos_df["idx_ma_10_by_ma_20"] = idx_ma10[-1] > idx_ma20[-1]
 
-            # 日线macd信息
             idx_macd = cd_d.get_idx()["macd"]
             pos_df["idx_macd_hist_by_0"] = idx_macd["hist"][-1] > 0
             pos_df["idx_macd_dif_by_0"] = idx_macd["dif"][-1] > 0
             pos_df["idx_macd_dea_by_0"] = idx_macd["dea"][-1] > 0
 
-        # 周线级别的信息
+        # 周线笔/线段/均线特征（大级别趋势背景）
         cd_w = market_data.get_cl_data(code, market_data.frequencys[0])
         if len(cd_w.get_xds()) == 0:
             return opts
 
-        # 周线的笔线段信息
         if True:
             bi_w = cd_w.get_bis()[-1]
             xd_w = cd_w.get_xds()[-1]
             pos_df["bi_w_type"] = f"{bi_w.type}_{bi_w.is_done()}"
             pos_df["xd_w_type"] = f"{xd_w.type}_{bi_w.is_done()}"
 
-        # 周线的均线信息
         if True:
-            # 周线周期 5、10、20 均线
             idx_ma5_w = self.idx_ma(cd_w, 5)
             idx_ma10_w = self.idx_ma(cd_w, 10)
             idx_ma20_w = self.idx_ma(cd_w, 20)
@@ -159,13 +150,11 @@ class StrategyADMMDTest(Strategy):
             pos_df["idx_ma_5_by_ma_20_w"] = idx_ma5_w[-1] > idx_ma20_w[-1]
             pos_df["idx_ma_10_by_ma_20_w"] = idx_ma10_w[-1] > idx_ma20_w[-1]
 
-        # 获取上证指数数据
+        # 上证指数大盘特征（市场环境过滤）
         if True:
             cd_d_zs = market_data.get_cl_data(self.zs_code, market_data.frequencys[1])
             bi_d_zs = cd_d_zs.get_bis()[-1]
-            # 记录上证指数的一些信息
             pos_df["zs_bi_type"] = f"{bi_d_zs.type}_{bi_d_zs.is_done()}"
-            # 上证指数，日线 5、10、20 均线
             zs_ma5 = self.idx_ma(cd_d_zs, 5)
             zs_ma10 = self.idx_ma(cd_d_zs, 10)
             zs_ma20 = self.idx_ma(cd_d_zs, 20)
@@ -177,13 +166,12 @@ class StrategyADMMDTest(Strategy):
             pos_df["zs_ma_5_by_ma_20"] = zs_ma5[-1] > zs_ma20[-1]
             pos_df["zs_ma_10_by_ma_20"] = zs_ma10[-1] > zs_ma20[-1]
 
-        # 止损信息
+        # 止损价使用当日最低点，loss_rate 为止损比例（供 filter_opts 排序使用）
         if True:
-            # 使用当前K线的低点作为止损
             pos_df["__loss_price"] = k_now_d.l
             pos_df["loss_rate"] = (price - k_now_d.l) / price * 100
 
-        # TODO 对信息进行过滤
+        # pos_querys 为空时不过滤，可在此追加 pandas query 字符串实现特征筛选
         pos_querys = []
         for _q in pos_querys:
             pos_df = pos_df.query(_q)
@@ -216,7 +204,7 @@ class StrategyADMMDTest(Strategy):
         if pos.balance <= 0:
             return opts
 
-        open_k_date = pos.info["__open_k_date"]  # 开仓当天日期
+        open_k_date = pos.info["__open_k_date"]
 
         cd_d = market_data.get_cl_data(code, market_data.frequencys[1])
         k_now_d = cd_d.get_src_klines()[-1]
@@ -224,9 +212,8 @@ class StrategyADMMDTest(Strategy):
         price = cd_d.get_src_klines()[-1].c
         open_next_klines = [_k for _k in cd_d.get_src_klines() if _k.date > open_k_date]
 
-        # 判断当前是否是跌停价格，跌停直接返回，不操作
+        # 跌停时记录但不平仓（无法成交），等次日开盘价确认后再处理
         dt_price = self.code_dt_price(code, k_pre_d.c)
-        # 判断 price 是否在 dt_price+-0.01 之间
         if dt_price - 0.01 <= price <= dt_price + 0.01:
             pos.info["__dt_price"] = dt_price
             return opts
@@ -239,7 +226,7 @@ class StrategyADMMDTest(Strategy):
             else:
                 is_day_close = False
 
-        # TODO 如果之前有经历过跌停，这就进行平仓，这个不限时间，可以再开盘后就触发
+        # 前日曾跌停且今日开盘低于跌停价，立即以开盘价平仓（不受收盘限制）
         if True:
             if "__dt_price" in pos.info.keys() and k_now_d.o < pos.info["__dt_price"]:
                 opts.append(
@@ -247,13 +234,13 @@ class StrategyADMMDTest(Strategy):
                         code,
                         "sell",
                         mmd,
-                        loss_price=k_now_d.o,  # 这里指定平仓使用的价格
+                        loss_price=k_now_d.o,  # 指定以开盘价平仓
                         msg="之前有跌停，当前价格小于跌停价格",
                         close_uid="跌停平仓",
                     )
                 )
 
-        # TODO 跳空低开，直接止损平仓，这个不限时间，可以再开盘后就触发
+        # 跳空低开（开盘价低于昨日最低）立即止损，不等收盘（不受收盘限制）
         if True:
             if k_now_d.o < k_pre_d.l:
                 opts.append(
@@ -261,7 +248,7 @@ class StrategyADMMDTest(Strategy):
                         code,
                         "sell",
                         mmd,
-                        loss_price=k_now_d.o,  # 这里指定平仓使用的价格
+                        loss_price=k_now_d.o,  # 指定以开盘价平仓
                         msg="跳空低开，直接止损平仓",
                         close_uid="跳空低开",
                     )
@@ -270,14 +257,13 @@ class StrategyADMMDTest(Strategy):
         if is_day_close is False:
             return opts
 
-        ### 以下内容就是只有再收盘时刻才会进行检查
+        # 以下条件仅在收盘时刻检查
 
-        # 检查是否有止损
         loss_opt = self.check_loss(mmd, pos, price)
         if loss_opt is not None:
             opts.append(loss_opt)
 
-        # TODO 移动止损，使用昨日低点作为止损点，同样是在收盘的时候进行检查
+        # 移动止损：开仓后次日起，收盘价跌破昨日最低即止损（趋势跟踪）
         if True:
             if len(open_next_klines) >= 1 and k_now_d.c < k_pre_d.l:
                 opts.append(
@@ -290,7 +276,7 @@ class StrategyADMMDTest(Strategy):
                     )
                 )
 
-        # TODO 日线顶分型，如果当前价格低于分型中间k线低点，止损
+        # 日线顶分型确认后，收盘价跌破分型中间K线低点，止损
         if True:
             bi_d = self.last_done_bi(cd_d.get_bis())
             if (
@@ -309,7 +295,7 @@ class StrategyADMMDTest(Strategy):
                     )
                 )
 
-        # TODO 单个阴线，并且跌破均线5
+        # 持仓期间曾站上均线后，阴线跌破均线则止损（确认持仓期间价格曾有效突破均线才启用）
         if True:
             if k_now_d.c < k_now_d.o:
                 idx_ma5 = self.idx_ma(cd_d, 5)
@@ -329,7 +315,6 @@ class StrategyADMMDTest(Strategy):
                             close_uid="低于5日均线",
                         )
                     )
-        # TODO 单个阴线，并且跌破均线10
         if True:
             if k_now_d.c < k_now_d.o:
                 idx_ma10 = self.idx_ma(cd_d, 10)
@@ -349,7 +334,6 @@ class StrategyADMMDTest(Strategy):
                             close_uid="低于10日均线",
                         )
                     )
-        # TODO 单个阴线，并且跌破均线20
         if True:
             if k_now_d.c < k_now_d.o:
                 idx_ma20 = self.idx_ma(cd_d, 20)
@@ -370,7 +354,7 @@ class StrategyADMMDTest(Strategy):
                         )
                     )
 
-        # TODO 收盘最大盈利回调5%，止盈
+        # 从开仓后最高价回调超过阈值时分档止盈（5%/10%/15%/20%/30%/50%），同时触发多个时均记录
         if True and len(open_next_klines) > 0:
             nex_k_high = max([_k.h for _k in open_next_klines])
             nex_k_callback_rate = (price - nex_k_high) / nex_k_high * 100
@@ -437,7 +421,7 @@ class StrategyADMMDTest(Strategy):
 
         bi_d = self.last_done_bi(cd_d.get_bis())
 
-        # 向上笔，有盘整或卖点，在停顿时卖出，这里真正的完成平仓
+        # 向上笔出现盘整/趋势背驰或卖点，且笔停顿，为完整平仓信号
         if (
             bi_d.type == "up"
             and bi_d.end.k.date > open_k_date
@@ -483,56 +467,37 @@ if __name__ == "__main__":
     from chanlun.cl_utils import query_cl_chart_config
     from chanlun.exchange.exchange_tdx import ExchangeTDX
 
-    # 获取所有股票代码
+    # 获取沪深A股全量代码（通达信格式）并转换为掘金格式
     ex = ExchangeTDX()
     stocks = ex.all_stocks()
     run_codes = [
         _s["code"] for _s in stocks if _s["code"][0:5] in ["SH.60", "SZ.00", "SZ.30"]
     ]
-    # 将通达信的代码转换成掘金的格式
     run_codes = [_c.replace("SH.", "SHSE.").replace("SZ.", "SZSE.") for _c in run_codes]
     print(f"回测代码数量：{len(run_codes)}")
 
     cl_config = query_cl_chart_config("a", "SHSE.000001")
-    # 量化配置
     bt_config = {
-        # 策略结果保存的文件
         "save_file": str(get_data_path() / "backtest" / "a_d_mmd_v0_signal.pkl"),
-        # 设置策略对象
         "strategy": StrategyADMMDTest("test"),
-        # 回测模式：signal 信号模式，固定金额开仓； trade 交易模式，按照实际金额开仓
+        # signal 模式：固定金额开仓，用于信号统计；trade 模式：按实际资金开仓
         "mode": "signal",
-        # 市场配置，currency 数字货币  a 沪深  hk  港股  futures  期货
         "market": "a",
-        # 基准代码，用于获取回测的时间列表
         "base_code": "SHSE.000001",
-        # 回测的标的代码
-        # "codes": ["SHSE.600519"],
         "codes": run_codes,
-        # 回测的周期，这里设置里，在策略中才能取到对应周期的数据
+        # frequencys[0]=周线（大级别背景），frequencys[1]=日线（信号级别）
         "frequencys": ["w", "d"],
-        # 回测开始的时间
         "start_datetime": "2020-01-01 00:00:00",
-        # 回测的结束时间
         "end_datetime": "2024-06-01 00:00:00",
-        # mode 为 trade 生效，初始账户资金
         "init_balance": 1000000,
-        # mode 为 trade 生效，交易手续费率
         "fee_rate": 0.001,
-        # mode 为 trade 生效，最大持仓数量（分仓）
         "max_pos": 8,
-        # 缠论计算的配置，详见缠论配置说明
         "cl_config": cl_config,
     }
 
     BT = backtest.BackTest(bt_config)
-    # BT.datas.del_volume_zero = True
 
-    # 运行回测
-    # BT.run()
     BT.run_process(max_workers=5)
-    # BT.load(BT.save_file)
-    # 保存回测结果到文件中
     BT.save()
     BT.result()
     print("Done")

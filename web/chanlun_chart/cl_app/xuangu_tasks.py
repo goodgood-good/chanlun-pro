@@ -11,8 +11,6 @@ from chanlun.xuangu import xuangu
 from chanlun.trader.online_market_datas import OnlineMarketDatas
 from tqdm.auto import tqdm
 from chanlun.cl_utils import query_cl_chart_config, web_batch_get_cl_datas
-from concurrent.futures import ProcessPoolExecutor
-from multiprocessing import get_context
 
 log = fun.get_logger()
 
@@ -142,30 +140,10 @@ def process_xuangu_task(
             run_codes = [_s["code"] for _s in run_codes]
 
         tqdm.write(f"{market} {task_name} 选股任务开始，选股代码数量 {len(run_codes)}")
-        # 注意：原实现一进入就 clear，会让目标自选组在选股过程中处于"空"状态，
-        # 一旦本次选股中途崩溃，原数据也彻底丢失。改为：先把命中结果写到中间 list，
-        # 全部跑完后再 clear + 一次性写入，保证选股过程的原子性。
+        # 先把命中结果写到中间 list，全部跑完后再 clear + 一次性写入，
+        # 避免中途崩溃导致目标自选组被清空。
         xg_results = []
 
-        # 多进程版本
-        # with ProcessPoolExecutor(
-        #     max_workers=5,
-        #     mp_context=get_context("spawn"),
-        # ) as executor:
-        #     bar = tqdm(run_codes, desc="选股进度")
-        #     for _xg_res in executor.map(
-        #         process_xuangu_by_code,
-        #         [(_c, market, freqs, task_name, opt_types) for _c in run_codes],
-        #         chunksize=5,
-        #     ):
-        #         bar.update(1)
-        #         if _xg_res is not None:
-        #             tqdm.write(
-        #                 f"{market} {task_name} 选择 {_xg_res['code']} : {_xg_res['msg']}"
-        #             )
-        #             zx.add_stock(target_zx_group, _xg_res["code"], None)
-
-        # 单进程版本
         for _code in tqdm(run_codes, desc="选股进度"):
             _xg_res = process_xuangu_by_code(
                 (_code, market, freqs, task_name, opt_types)
@@ -247,7 +225,4 @@ class XuanguTasks(object):
 
 if __name__ == "__main__":
     xt = XuanguTasks(None)
-
-    # print(xt.xuangu_list())
-
     print(process_xuangu_task("a", "xg_single_xd_and_bi_mmd", ["d"], "测试"))

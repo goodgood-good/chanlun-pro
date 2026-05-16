@@ -1,8 +1,6 @@
-"""src/chanlun/file_db_mixins/chart_data.py — TV chart_data 磁盘缓存 Mixin。
+"""TV chart_data 磁盘缓存 Mixin。
 
-P8 step 3 (2026-05-15): 从 file_db.py 物理拆出。
-
-含 ``_ChartCacheSafeUnpickler`` (pickle RCE 防御反序列化器, 仅放原生数据) 与
+含 ``_ChartCacheSafeUnpickler``（pickle RCE 防御反序列化器，仅允许原生数据类型）与
 ``_ChartDataCacheMixin``。``_ChartCacheSafeUnpickler`` 通过 file_db.py
 re-export 保持外部 ``from chanlun.file_db import _ChartCacheSafeUnpickler`` 兼容。
 """
@@ -40,16 +38,8 @@ class _ChartCacheSafeUnpickler(pickle.Unpickler):
 
 
 
-# P8 step 2.2: ChartDataCacheMixin
-# ---------------------------------------------------------------------------
-# TradingView /tv/history 路径专用的 chart_data dict 缓存 (磁盘冷层),
-# 配合 _ChartCacheSafeUnpickler 防御 pickle RCE。
-# 依赖 FileCacheDB 主类提供的:
-#   字段 ``chart_cache_path`` / ``chart_cache_max_age_seconds``
-#   方法 ``_atomic_write_pickle()`` / ``_try_run_cleanup()``
-# ===========================================================================
 class _ChartDataCacheMixin:
-    """TV chart_data 磁盘缓存方法 (P8 拆分)。"""
+    """TradingView /tv/history 路径专用磁盘缓存，配合 _ChartCacheSafeUnpickler 防御 pickle RCE。"""
 
     def _chart_cache_path_for(self, cache_key: str) -> pathlib.Path:
         # cache_key 形如 "us_GDS.US_30m_<md5hex>"; 点 / 斜杠不是所有 FS 都安全, 做轻度清洗。
@@ -66,11 +56,9 @@ class _ChartDataCacheMixin:
             return None
         try:
             with open(path, "rb") as fp:
-                # SafeUnpickler: 拒绝任何 class/function 引用, 仅放原生数据通过。
-                # 任何 RCE payload 在这里会触发 UnpicklingError, 被外层 except 当损坏处理。
                 obj = _ChartCacheSafeUnpickler(fp).load()
             if not isinstance(obj, dict):
-                # 老格式或被串改: 直接当作 miss 处理。
+                # 非预期类型（老格式或文件被篡改），当作 miss 处理
                 path.unlink(missing_ok=True)
                 return None
             return obj

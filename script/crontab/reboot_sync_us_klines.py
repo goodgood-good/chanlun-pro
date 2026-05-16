@@ -1,4 +1,10 @@
 #:  -*- coding: utf-8 -*-
+"""
+一次性同步美股 K 线到本地数据库（通过盈透证券 IB 接口）。
+
+盈透数据固定为前复权，无法追加更新，仅适合一次性全量拉取；
+已有记录的标的会跳过，避免重复写入。
+"""
 import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor
@@ -8,16 +14,9 @@ from tqdm.auto import tqdm
 from chanlun.exchange.exchange_db import ExchangeDB
 from chanlun.exchange.exchange_ib import ExchangeIB
 
-"""
-同步美股数据到数据库中
-
-通过盈透数据，因为固定为前复权，不能进行追加更新，暂时定位一次性的数据同步
-"""
-
 exchange = ExchangeDB("us")
 line_exchange = ExchangeIB()
 
-# 从自选中获取同步股票 手动指定吧
 run_codes = [
     "A",
     "TSLA",
@@ -523,10 +522,10 @@ error_codes = []
 
 
 def sync_code(_code: str):
+    """同步单只美股的全部周期 K 线，已有记录则跳过（前复权数据不追加更新）。"""
     for _f, _d in sync_freqs.items():
         try:
             print(f"Sync {_code} - {_f} - {_d}")
-            # 如果数据库中有记录，则跳过同步
             exists_klines = exchange.klines(_code, _f)
             if len(exists_klines) > 0:
                 continue
@@ -547,11 +546,5 @@ def sync_code(_code: str):
 
 
 if __name__ == "__main__":
-    #
     with ThreadPoolExecutor(max_workers=3) as executor:
         list(executor.map(sync_code, run_codes))
-
-    # for _code in tqdm(run_codes):
-    #     sync_code(_code)
-    # print(error_codes)
-    # print('Done')

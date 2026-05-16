@@ -18,6 +18,7 @@ class StrategyFuturesXDMMD(Strategy):
     def open(
         self, code, market_data: MarketDatas, poss: Dict[str, POSITION]
     ) -> List[Operation]:
+        """开仓判断：高级别线段买卖点 + 低级别线段背驰 + 低级别笔三买/三卖"""
         opts = []
 
         high_data = market_data.get_cl_data(code, market_data.frequencys[0])
@@ -28,7 +29,7 @@ class StrategyFuturesXDMMD(Strategy):
         if len(high_xd.tzxls) == 1:
             high_xd = high_data.get_xds()[-2]
         high_bi = self.last_done_bi(high_data.get_bis())
-        # 如果线段没有买卖点，则退出
+        # 高级别线段没有买卖点则不开仓
         if len(high_xd.line_mmds()) == 0:
             return opts
 
@@ -36,12 +37,6 @@ class StrategyFuturesXDMMD(Strategy):
             "2022-06-13 09:30:00"
         ):
             a = 1
-
-        # 高级别最后一笔停顿
-        # if high_xd.type != high_bi.type:
-        #     return opts
-        # if self.bi_td(high_bi, high_data) is False:
-        #     return opts
 
         low_data = market_data.get_cl_data(code, market_data.frequencys[1])
         low_bi = self.last_done_bi(low_data.get_bis())
@@ -110,6 +105,7 @@ class StrategyFuturesXDMMD(Strategy):
     def close(
         self, code, mmd: str, pos: POSITION, market_data: MarketDatas
     ) -> Union[Operation, None, List[Operation]]:
+        """平仓判断：止盈止损，或高级别反向线段 + 低级别背驰 + 低级别反向笔三买卖"""
         if pos.balance == 0:
             return False
 
@@ -121,11 +117,6 @@ class StrategyFuturesXDMMD(Strategy):
         loss_opt = self.check_loss(mmd, pos, price)
         if loss_opt is not None:
             return loss_opt
-
-        # ATR 移动止损
-        # loss_opt = self.check_atr_stop_loss(high_data, pos)
-        # if loss_opt is not None:
-        #     return loss_opt
 
         opts = []
         if len(high_data.get_xds()) == 0:
@@ -140,12 +131,6 @@ class StrategyFuturesXDMMD(Strategy):
 
         if self.bi_td(low_bi, low_data) is False:
             return opts
-
-        # if high_xd.type != high_bi.type:
-        #     return opts
-        #
-        # if self.bi_td(high_bi, high_data) is False:
-        #     return opts
 
         mla = MultiLevelAnalyse(high_data, low_data)
         mla_info = mla.low_level_qs(high_xd, "xd")

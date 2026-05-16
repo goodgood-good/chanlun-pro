@@ -15,11 +15,10 @@ import gc
 BT = backtest.BackTest()
 BT.save_file = str(get_data_path() / "backtest" / "a_d_mmd_v0_signal_no_strategy.pkl")
 BT.load(BT.save_file)
-# BT.base_code = 'SH.600000'
 
 gc.collect()
 
-# 读取当前策略所使用的 close_uid
+# 收集回测所有持仓中出现过的 close_uid（平仓标记）
 close_uids = []
 for _, _poss in BT.trader.positions_history.items():
     for _p in _poss:
@@ -31,13 +30,12 @@ if "clear" in close_uids:
     close_uids.remove("clear")
 
 
-# 获取给定平仓标记组合的盈亏和胜率
 def get_close_uids_profit_rate(close_uids: list):
+    """计算给定平仓标记组合下，各买卖点的总盈亏与平均胜率"""
     pos_df = BT.positions(
         close_uids=close_uids,
     )
     pos_df["_win"] = (pos_df["profit_rate"] > 0).astype(int)
-    # pos_df = pos_df.query("code_is_zt_hys==True and index_SH_000001_k_ashi_red_1==1")
     res = pos_df.groupby(["mmd"]).agg(
         {"profit_rate": {"mean", "sum", "count"}, "_win": {"count", "sum", "mean"}}
     )
@@ -54,9 +52,10 @@ if __name__ == "__main__":
     save_file = pathlib.Path("./sum_profits_v0.pkl")
 
     def get_keys_id(keys: list):
+        """将平仓标记列表排序拼接成唯一标识 key"""
         return "_".join(sorted(keys))
 
-    # 获取 close_uids 中列表，任意个数的组合
+    # 枚举 close_uids 的任意个数组合
     close_groups = []
     # 如果组合文件存在，从文件中读取
     if pathlib.Path("close_groups.pkl").is_file():
@@ -69,7 +68,7 @@ if __name__ == "__main__":
                 _cus.append("clear")
                 if len(_cus) > 10:
                     continue
-                # 过滤有冲突的close_uid
+                # 过滤互相冲突的 close_uid（同类标记不能同时存在两个）
                 if len([_c for _c in _cus if _c.startswith("利润回调")]) >= 2:
                     continue
                 if len([_c for _c in _cus if "日均线" in _c]) >= 2:
@@ -91,7 +90,7 @@ if __name__ == "__main__":
         for _cus_profit in executor.map(get_close_uids_profit_rate, close_groups):
             bar.update(1)
             _id = get_keys_id(_cus_profit["uids"])
-            # 如果 sum_profits 数量大于 10000
+            # 数量超阈值时只保留收益/胜率 top 结果，控制内存
             if len(sum_profits) >= 100000:
                 # 按照 sum_profit 从大到小排序
                 rank_profit = sorted(
@@ -126,7 +125,6 @@ if __name__ == "__main__":
 
                 gc.collect()
 
-            # tqdm.write(f"{_id}: {_cus_profit['sum_profit']}, {_cus_profit['win_mean']}")
             sum_profits[_id] = _cus_profit
 
     # 进行保存

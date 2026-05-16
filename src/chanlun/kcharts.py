@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 import talib
 
-# 画图配置 (F2: pyecharts 已移到 [charts] extras, 用户需 pip install 'chanlun-pro[charts]')
+# pyecharts 已移到 [charts] extras，需 pip install 'chanlun-pro[charts]'
 try:
     from pyecharts import options as opts
     from pyecharts.charts import Bar, Grid, Line, Scatter
@@ -43,12 +43,12 @@ def render_charts(
 ):
     """
     缠论数据图表化展示
-    :param title:
-    :param cl_data:
+    :param title: 图表标题
+    :param cl_data: 缠论计算数据
     :param to_frequency: 将K线数据转换成指定周期的数据并进行展示
-    :param orders:
+    :param orders: 订单记录，叠加到图上展示
     :param config: 画图配置
-    :return:
+    :return: 渲染结果（notebook html / 文件路径 / options 字典）
     """
 
     if orders is None:
@@ -57,7 +57,7 @@ def render_charts(
         config = {}
 
     if "to_file" in config and config["to_file"] != "":
-        # 获取当前文件路径
+        # 输出到文件时，将 pyecharts 静态资源指向本地，避免依赖在线 CDN
         file_path = (
             pathlib.Path(__file__).parent
             / ".."
@@ -68,7 +68,6 @@ def render_charts(
             / "static"
         )
         CurrentConfig.ONLINE_HOST = f"file://{file_path.absolute()}/"
-        # print(CurrentConfig.ONLINE_HOST)
 
     default_config = {
         # 展示配置项
@@ -107,7 +106,6 @@ def render_charts(
         "to_file": "",
     }
 
-    # 配置项整理
     for _k, _v in default_config.items():
         if _k not in config.keys():
             config[_k] = _v
@@ -134,7 +132,6 @@ def render_charts(
                 print(f"{_k} val error {config[_k]}")
                 config[_k] = _v
 
-    # 颜色配置
     color_k_up = "#FD1050"
     color_k_down = "#0CF49B"
     color_bi = "#FDDD60"
@@ -142,9 +139,6 @@ def render_charts(
 
     color_xd = "#00BFFF"
     color_xd_zs = "#A1C0FC"
-
-    # color_last_bi_zs = 'RGB(144,238,144,0.5)'
-    # color_last_xd_zs = 'RGB(255,182,193,0.5)'
 
     color_qstd_up = "RGB(255,127,80,0.7)"
     color_qstd_down = "RGB(100,149,237,0.7)"
@@ -163,7 +157,6 @@ def render_charts(
         brush_type="lineX",
     )
 
-    # K线
     klines = [
         {
             "date": k.date,
@@ -183,8 +176,6 @@ def render_charts(
     fxs = cl_data.get_fxs()
     bis = cl_data.get_bis()
     xds = cl_data.get_xds()
-    # last_bi_zs = cl_data.get_last_bi_zs()
-    # last_xd_zs = cl_data.get_last_xd_zs()
 
     idx = cl_data.get_idx()
     idx_macd_dea = idx["macd"]["dea"]
@@ -220,7 +211,6 @@ def render_charts(
         idx_macd_dif = macd_dif
         idx_macd_hist = macd_hist
 
-    # 展示的K线数据
     klines_xaxis = klines["date"].tolist()
     klines_yaxis = []
     for _k in klines.itertuples(index=False):
@@ -257,13 +247,10 @@ def render_charts(
         )
         vols.append(bar)
 
-    # 找到顶和底的坐标
     point_ding = {"index": [], "val": []}
     point_di = {"index": [], "val": []}
     if config["chart_show_fx"]:
         for fx in fxs:
-            # if fx.ld() < 5:
-            #     continue
             if fx.type == "ding":
                 point_ding["index"].append(fx.k.date)
                 point_ding["val"].append([fx.val, "强分型" if fx.ld() >= 5 else ""])
@@ -276,12 +263,10 @@ def render_charts(
         )
         point_di["index"] = datetime_convert_frequency(point_di["index"], target_dates)
 
-    # 画 笔 (如果有转高级别图标，就不展示笔了)
     if config["chart_show_bi"]:
         line_bis, line_xu_bis = lines_to_charts(bis)
     else:
         line_bis = line_xu_bis = {"index": [], "val": []}
-    # 画 线段
     if config["chart_show_xd"]:
         line_xds, line_xu_xds = lines_to_charts(xds)
     else:
@@ -296,14 +281,12 @@ def render_charts(
         line_xu_xds["index"], target_dates
     )
 
-    # 画 笔 中枢 (遍历所有计算的中枢类型)
     line_bi_zss = []
     if config["chart_show_bi_zs"] is True:
         for zs_type in cl_data.get_config()["zs_bi_type"]:
             bi_zss = cl_data.get_bi_zss(zs_type)
             line_bi_zss += zss_to_charts(bi_zss)
 
-    # 画 线段 中枢
     line_xd_zss = []
     if config["chart_show_xd_zs"] is True:
         for zs_type in cl_data.get_config()["zs_xd_type"]:
@@ -316,7 +299,7 @@ def render_charts(
     for _zs in line_xd_zss:
         _zs[0] = datetime_convert_frequency(_zs[0], target_dates)
 
-    # 分型中的 背驰 和 买卖点信息，归类，一起显示
+    # 将各笔/线段的背驰与买卖点按分型归类，统一显示
     fx_bcs_mmds = {}
     for _bi in bis:
         _fx = _bi.end
@@ -355,8 +338,7 @@ def render_charts(
                     break
                 fx_bcs_mmds[_fx.index]["mmds"]["xd"].append(_mmd)
 
-    # 画 背驰
-    scatter_bc = {"i": [], "val": []}  # 背驰
+    scatter_bc = {"i": [], "val": []}
     bc_maps = {
         "bi": "背驰",
         "xd": "背驰",
@@ -377,7 +359,6 @@ def render_charts(
             scatter_bc["i"].append(fx.k.date)
             scatter_bc["val"].append([fx.val, bc_label.strip(" / ")])
 
-    # 画买卖点
     mmd_maps = {
         "1buy": "1B",
         "2buy": "2B",
@@ -419,10 +400,9 @@ def render_charts(
     scatter_buy["i"] = datetime_convert_frequency(scatter_buy["i"], target_dates)
     scatter_sell["i"] = datetime_convert_frequency(scatter_sell["i"], target_dates)
 
-    # 画订单记录
     scatter_buy_orders = {"i": [], "val": []}
     scatter_sell_orders = {"i": [], "val": []}
-    # 　order type 允许的值：buy 买入 sell 卖出  open_long 开多  close_long 平多 open_short 开空 close_short 平空
+    # order type: buy/sell/open_long/close_long/open_short/close_short
     order_type_maps = {
         "buy": "买入",
         "sell": "卖出",
@@ -461,7 +441,6 @@ def render_charts(
                     ]
                 )
 
-    # 滑动区块设置
     datazoom_opts = [
         opts.DataZoomOpts(
             is_show=False,
@@ -537,7 +516,6 @@ def render_charts(
         )
     )
 
-    # 画 完成笔
     overlap_kline = klines_chart.overlap(
         (
             Line()
@@ -551,7 +529,6 @@ def render_charts(
         )
     )
 
-    # 画 未完成笔
     overlap_kline = overlap_kline.overlap(
         (
             Line()
@@ -568,7 +545,6 @@ def render_charts(
     )
 
     if config["chart_show_fx"]:
-        # 画顶底分型
         overlap_kline = overlap_kline.overlap(
             (
                 Scatter()
@@ -612,7 +588,6 @@ def render_charts(
             )
         )
 
-    # 画 完成线段
     overlap_kline = overlap_kline.overlap(
         (
             Line()
@@ -625,7 +600,6 @@ def render_charts(
             )
         )
     )
-    # 画 未完成线段
     overlap_kline = overlap_kline.overlap(
         (
             Line()
@@ -641,7 +615,7 @@ def render_charts(
         )
     )
 
-    # 画线段的特征序列
+    # 画线段的特征序列（默认关闭，调试时改 if True 启用）
     if False:
         line_xd_xl_dings = []
         line_xd_xl_dis = []
@@ -699,7 +673,6 @@ def render_charts(
                 )
             )
 
-    # 画趋势通道线
     idx_qstd = cl_qstd(
         cl_data,
         config["chart_qstd"].split(",")[0],
@@ -734,7 +707,6 @@ def render_charts(
         )
 
     if config["chart_show_boll"]:
-        # 计算boll线
         boll_up, boll_mid, boll_low = talib.BBANDS(
             np.array(klines["close"].tolist()),
             timeperiod=config["chart_idx_boll_period"],
@@ -775,7 +747,6 @@ def render_charts(
             )
         )
     if config["chart_show_ma"]:
-        # 计算ma线
         ma_colors = [
             "rgb(255,255,255)",
             "rgb(255,255,11)",
@@ -802,7 +773,6 @@ def render_charts(
                 )
             )
     if config["chart_show_ama"]:
-        # 计算ma线
         ama_ags = config["chart_idx_ama_ags"].split(",")[0:3]
         ama = Strategy.idx_ama(
             cl_data,
@@ -827,9 +797,6 @@ def render_charts(
             )
         )
     if config["chart_show_atr_stop_loss"]:
-        # 计算 atr stop loss
-        #  'chart_idx_atr_period': 14,
-        #  'chart_idx_atr_multiplier': 1.5,
         def ATR(CLOSE, HIGH, LOW, N=20):  # 真实波动N日平均值
             TR = MyTT.MAX(
                 MyTT.MAX((HIGH - LOW), MyTT.ABS(MyTT.REF(CLOSE, 1) - HIGH)),
@@ -867,7 +834,6 @@ def render_charts(
             )
         )
 
-    # 画 笔中枢
     for zs in line_bi_zss:
         overlap_kline = overlap_kline.overlap(
             (
@@ -888,7 +854,6 @@ def render_charts(
                 )
             )
         )
-    # 画 线段 中枢
     for zs in line_xd_zss:
         overlap_kline = overlap_kline.overlap(
             (
@@ -909,7 +874,6 @@ def render_charts(
                 )
             )
         )
-    # 展示背驰
     overlap_kline = overlap_kline.overlap(
         (
             Scatter()
@@ -929,7 +893,6 @@ def render_charts(
         )
     )
 
-    # 画买卖点
     overlap_kline = overlap_kline.overlap(
         (
             Scatter()
@@ -974,7 +937,6 @@ def render_charts(
         )
     )
 
-    # 画订单记录
     if orders and len(orders) > 0:
         overlap_kline = overlap_kline.overlap(
             (
@@ -1014,8 +976,6 @@ def render_charts(
             )
         )
 
-    # 成交量
-
     bar_vols = (
         Bar()
         .add_xaxis(xaxis_data=klines_xaxis)
@@ -1041,7 +1001,6 @@ def render_charts(
             ),
         )
     )
-    # 成交量均线
     vols_periods = config["chart_idx_vol_ma_period"].split(",")[0:2]
     vols_line_color = ["white", "yellow"]
     line_vols_ma = (
@@ -1071,7 +1030,6 @@ def render_charts(
             linestyle_opts=opts.LineStyleOpts(width=2),
         )
 
-    # 最下面的柱状图和折线图
     vols_bar_line = bar_vols.overlap(line_vols_ma)
 
     bar_macd = (
@@ -1134,10 +1092,8 @@ def render_charts(
         )
     )
 
-    # 最下面的柱状图和折线图
     macd_bar_line = bar_macd.overlap(line_macd_dif)
 
-    # 显示笔 or 线段的力度
     if config["chart_show_ld"] in ["bi", "xd"] and to_frequency is None:
         line_macd_lds = []
         point_macd_lds = {"y": [], "x": []}
@@ -1166,12 +1122,6 @@ def render_charts(
             )
             point_macd_lds["y"].append(_l.end.k.date)
             point_macd_lds["x"].append([val_x, round(val, 6)])
-        # 转换时间
-        # point_macd_lds['y'] = datetime_convect_frequency(point_macd_lds['y'], target_dates)
-        # print(point_macd_lds['y'])
-        # for lx in line_macd_lds:
-        #     lx['y'] = datetime_convect_frequency(lx['y'], target_dates)
-        #     print(lx['y'])
 
         for line in line_macd_lds:
             macd_bar_line = macd_bar_line.overlap(
@@ -1201,7 +1151,6 @@ def render_charts(
                     )
                 )
             )
-        # 文字显示
         macd_bar_line = macd_bar_line.overlap(
             Scatter()
             .add_xaxis(xaxis_data=point_macd_lds["y"])
@@ -1222,7 +1171,6 @@ def render_charts(
             )
         )
 
-    # 最后的 Grid
     grid_chart = Grid(
         init_opts=opts.InitOpts(
             width=config["chart_width"], height=config["chart_high"], theme="dark"
@@ -1236,7 +1184,6 @@ def render_charts(
         ),
     )
 
-    # Volumn 柱状图
     grid_chart.add(
         vols_bar_line,
         grid_opts=opts.GridOpts(
@@ -1388,7 +1335,6 @@ def render_charts(
     elif config["chart_show_futu"] == "custom":
         pass
 
-    # 副图技术指标
     for i in range(len(futu_charts)):
         grid_chart.add(
             futu_charts[i],
@@ -1419,7 +1365,6 @@ def lines_to_charts(lines: List[LINE]):
     line_no_dones = {"index": [], "val": []}
     dones = [_l for _l in lines if _l.is_done()]
     no_dones = [_l for _l in lines if _l.is_done() is False]
-    # print(f'No dones : {no_dones}')
     if len(dones) > 0:
         line_dones["index"].append(dones[0].start.k.date)
         line_dones["val"].append(dones[0].start.val)

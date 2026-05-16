@@ -30,25 +30,23 @@ class StrategyMultipleZsMMDS(Strategy):
         if len(high_data.get_bis()) == 0 or len(high_data.get_bi_zss()) == 0:
             return opts
 
-        # 笔没有完成，退出
         high_bi = self.last_done_bi(high_data.get_bis())
 
-        # 当前笔所有配置中枢出现的买点交集，如果没有买卖点，退出
+        # "&" 表示取所有中枢配置的买卖点交集，须同时被各配置确认才入场
         mmds = high_bi.line_mmds("&")
         if len(mmds) == 0:
             return opts
 
-        # 笔没有停顿，退出
         if self.bi_td(high_bi, high_data) is False:
             return opts
 
-        # 增加条件，买卖点对应的中枢，需要回拉零轴
+        # 各中枢配置对应的买卖点须均有 MACD 零轴回拉支撑
         for zs_type, mmds in high_bi.zs_type_mmds.items():
             for mmd in mmds:
                 if self.judge_macd_back_zero(high_data, mmd.zs) == 0:
                     return opts
 
-        # 止损放在笔结束分型的顶底
+        # 止损设在笔结束分型的极值
         loss_price = high_bi.end.val
 
         if high_bi.mmd_exists(["1buy", "2buy", "3buy", "l3buy"], "&"):

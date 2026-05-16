@@ -108,14 +108,11 @@ var TvIdxVOL = (function () {
           format: {},
         },
         constructor: function () {
-          this.init = function (context, inputCallback) {
-            // 初始化
-          };
+          this.init = function (context, inputCallback) {};
           this.main = function (context, inputCallback) {
             this._context = context;
             this._input = inputCallback;
 
-            // 获取价格和成交量数据
             const o = this._context.new_var(PineJS.Std.open(this._context));
             const c = this._context.new_var(PineJS.Std.close(this._context));
             const v = this._context.new_var(PineJS.Std.volume(this._context));

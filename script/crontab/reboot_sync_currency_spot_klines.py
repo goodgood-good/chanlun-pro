@@ -1,30 +1,19 @@
 #:  -*- coding: utf-8 -*-
+"""定时同步 Binance 现货数字货币 K 线到本地数据库。"""
 from chanlun.exchange.exchange_binance_spot import ExchangeBinanceSpot
 from chanlun.exchange.exchange_db import ExchangeDB
 import traceback
 from tqdm.auto import tqdm
 
-"""
-同步数字货币行情到数据库中
-"""
-
 exchange = ExchangeDB("currency_spot")
 line_exchange = ExchangeBinanceSpot()
 
-# 创建表
 stocks = line_exchange.all_stocks()
 codes = [s["code"] for s in stocks]
 codes = ["BTC/USDT"]
-# codes = [
-#     'BTC/USDT', 'ETH/USDT', 'ETC/USDT', 'GMT/USDT', 'SOL/USDT', 'BNB/USDT', 'AVAX/USDT', 'OP/USDT', 'TRB/USDT',
-#     'FIL/USDT', 'NEAR/USDT', 'LINK/USDT', 'MATIC/USDT', 'DOGE/USDT', 'ADA/USDT', 'APE/USDT', 'DOT/USDT',
-#     '1000SHIB/USDT', 'ZEC/USDT', 'REN/USDT', 'FLOW/USDT', 'SAND/USDT', 'ROSE/USDT', 'XRP/USDT', 'RSR/USDT',
-#     'CRV/USDT', 'FTM/USDT', 'ATOM/USDT', 'MANA/USDT', 'GALA/USDT', 'UNFI/USDT', 'DYDX/USDT', 'WAVES/USDT',
-#     'LTC/USDT', 'AXS/USDT', 'THETA/USDT', 'EOS/USDT', 'BCH/USDT', 'GRT/USDT', 'RUNE/USDT'
-# ]
 sync_frequencys = ["w", "d", "4h", "60m", "30m", "15m", "10m", "5m", "1m"]
 
-# TODO 同步各个周期的起始时间
+# 各周期首次全量拉取的起始时间（短周期数据量大，起始时间设得较晚以控制存储量）
 f_start_time_maps = {
     "w": "2000-01-01 00:00:00",
     "d": "2000-01-01 00:00:00",

@@ -25,22 +25,17 @@ class ExchangeTDXFX(Exchange):
     g_all_stocks = []
 
     def __init__(self):
-        # super().__init__()
-
-        # 设置时区
         self.tz = pytz.timezone("Asia/Shanghai")
 
-        # 文件缓存
         self.fdb = FileCacheDB()
 
         try:
-            # 选择最优的服务器，并保存到 cache 中
+            # 优先复用缓存中的最优服务器，无缓存则重新选择
             self.connect_info = db.cache_get("tdxex_connect_ip")
             if self.connect_info is None:
                 self.connect_info = self.reset_tdx_ip()
-                # print(f"TDXEX 最优服务器：{self.connect_info}")
 
-            # 初始化，映射交易所代码
+            # 映射外汇交易所代码（category==4 为外汇）
             self.market_maps = {}
             while True:
                 try:
@@ -76,9 +71,11 @@ class ExchangeTDXFX(Exchange):
         return connect_info
 
     def default_code(self):
+        """返回默认外汇代码"""
         return "FX.USDEUR"
 
     def support_frequencys(self):
+        """返回支持的周期及其展示名映射"""
         return {
             "y": "Y",
             "q": "Q",
@@ -128,7 +125,6 @@ class ExchangeTDXFX(Exchange):
                     break
 
         self.g_all_stocks = __all_stocks
-        # print(f"获取数量：{len(self.g_all_stocks)}")
 
         return self.g_all_stocks
 
@@ -192,7 +188,7 @@ class ExchangeTDXFX(Exchange):
                     Market.FX.value, code, frequency
                 )
                 if klines is None:
-                    # 获取 8*700 = 5600 条数据
+                    # 无缓存：按页拉取（每页 700 条），pages 决定总量
                     klines = pd.concat(
                         [
                             client.to_df(
@@ -214,8 +210,8 @@ class ExchangeTDXFX(Exchange):
                     klines.loc[:, "date"] = pd.to_datetime(klines["datetime"])
                     klines.sort_values("date", inplace=True)
                 else:
+                    # 有缓存：逐页向前增量拉取，直到与缓存末尾衔接
                     for i in range(1, args["pages"] + 1):
-                        # print(f'{code} 使用缓存，更新获取第 {i} 页')
                         _ks = client.to_df(
                             client.get_instrument_bars(
                                 frequency_map[frequency],
@@ -230,11 +226,10 @@ class ExchangeTDXFX(Exchange):
                         new_start_dt = _ks.iloc[0]["date"]
                         old_end_dt = klines.iloc[-1]["date"]
                         klines = pd.concat([klines, _ks], ignore_index=True)
-                        # 如果请求的第一个时间大于缓存的最后一个时间，退出
+                        # 新页起始时间已被缓存覆盖，说明数据已衔接，停止拉取
                         if old_end_dt >= new_start_dt:
                             break
 
-            # 删除重复数据
             klines = klines.drop_duplicates(["date"], keep="last").sort_values("date")
             self.fdb.save_tdx_klines(Market.FX.value, code, frequency, klines)
 
@@ -244,7 +239,6 @@ class ExchangeTDXFX(Exchange):
                 self.tz
             )
 
-            # 将 volume 转换成 float类型
             klines[["volume"]] = klines[["volume"]].astype(float)
 
             return klines[["code", "date", "open", "close", "high", "low", "volume"]]
@@ -255,7 +249,6 @@ class ExchangeTDXFX(Exchange):
             traceback.print_exc()
         finally:
             pass
-            # print(f'请求行情用时：{time.time() - _s_time}')
         return None
 
     def stock_info(self, code: str) -> Union[Dict, None]:
@@ -307,9 +300,7 @@ class ExchangeTDXFX(Exchange):
         return ticks
 
     def now_trading(self):
-        """
-        返回当前是否是交易时间
-        """
+        """返回当前是否是交易时间（外汇视为始终可交易）"""
         return True
 
     def balance(self):

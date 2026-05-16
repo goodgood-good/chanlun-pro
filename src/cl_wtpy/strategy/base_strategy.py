@@ -8,21 +8,22 @@ from chanlun.cl_utils import query_cl_chart_config
 
 
 class WTPYMarketData(MarketDatas):
+    """
+    wtpy CTA 行情数据适配类，将 wtpy CtaContext 的 K 线接口桥接到缠论 MarketDatas。
+    """
 
     def __init__(self, context: CtaContext, frequencys: List[str]):
         self.context: CtaContext = context
+        # 以 RB 作为期货缠论配置模板，实际运行时可按品种调整
         cl_config = query_cl_chart_config("futures", "RB")
         super().__init__("futures", frequencys, cl_config)
 
     @staticmethod
     def bars_to_df_klines(code: str, bars: WtBarRecords) -> pd.DataFrame:
         """
-        将 wtpy 的k线数据，转换成 缠论所需的 DataFram 数据
+        将 wtpy WtBarRecords 转换为缠论所需的标准 K 线 DataFrame（含 code/date/OHLCV 列）。
         """
         bars_df = bars.to_df()
-        # Index(['date', 'bartime', 'open', 'high', 'low', 'close', 'settle', 'money',
-        #        'volume', 'hold', 'diff'],
-        #       dtype='object')
         bars_df["code"] = code
         bars_df["date"] = pd.to_datetime(bars_df["bartime"])
         return bars_df[["code", "date", "open", "close", "high", "low", "volume"]]
@@ -61,13 +62,12 @@ class BaseStrategy(BaseCtaStrategy):
         self.code = code
         self.period = period
 
-        # 基于缠论的策略
         self.STR = strategy
 
-        # wtpy 数据转换
+        # on_init 时延迟初始化，避免 CtaContext 尚未就绪
         self.datas = None
 
-        # 记录持仓 TODO 实盘需要进行持久化
+        # TODO 实盘需要将 positions 持久化，重启后从存储恢复，否则会丢失持仓记录
         self.positions: Dict[str, POSITION] = {}
 
     def on_init(self, context: CtaContext):
@@ -156,18 +156,15 @@ class BaseStrategy(BaseCtaStrategy):
         return res
 
     def on_calculate(self, context: CtaContext):
-
+        """每根 K 线结束时由 wtpy 回调，执行缠论策略的开平仓判断。"""
         for code in [self.code]:
-            # 根据实际交易品种，定义交易数量
+            # 每手固定 1 单位；实盘可根据资金动态调整
             trdUnit = 1
 
-            # 读取最新的行情数据，增量更新，不需要太多
             cds = self.get_cl_datas(code, context)
-            # 读取当前仓位
             curPos = context.stra_get_position(code)
 
             if curPos == 0:
-                # 当前空仓，判断是否可以开仓
                 open_opts = self.STR.open(code, self.datas)
                 for opt in open_opts:
                     if "buy" in opt.mmd:
@@ -175,14 +172,12 @@ class BaseStrategy(BaseCtaStrategy):
                     elif "sell" in opt.mmd:
                         self.open_sell(context, code, trdUnit, opt)
             elif curPos > 0:
-                # 查找当前运行代码的持仓记录
                 poss = self.get_poss(code)
                 for pos in poss:
                     opt = self.STR.close(code, pos.mmd, pos, self.datas)
                     if opt is not False:
                         self.close_buy(context, code, opt)
             elif curPos < 0:
-                # 查找当前运行代码的持仓记录
                 poss = self.get_poss(code)
                 for pos in poss:
                     opt = self.STR.close(code, pos.mmd, pos, self.datas)
@@ -191,5 +186,4 @@ class BaseStrategy(BaseCtaStrategy):
         return
 
     def on_tick(self, context: CtaContext, stdCode: str, newTick: dict):
-        # context.stra_log_text ("on tick fired")
         return

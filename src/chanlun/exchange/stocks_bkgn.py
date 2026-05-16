@@ -10,12 +10,10 @@ from tqdm.auto import tqdm
 from chanlun import config, fun
 from chanlun.config import get_data_path
 
-"""
-股票板块概念
-"""
-
 
 class StocksBKGN(object):
+    """A 股行业/概念板块数据管理，支持通达信文件和东方财富两种数据源。"""
+
     def __init__(self):
 
         if config.TDX_PATH == "":
@@ -45,10 +43,7 @@ class StocksBKGN(object):
             return self.reload_dfcf_bkgn()
 
     def reload_dfcf_bkgn(self):
-        """
-        下载更新保存新的板块概念信息
-        通过 东方财富 接口获取板块概念
-        """
+        """通过东方财富接口下载行业/概念板块成分股并落盘。"""
 
         error_msgs = []
         bkgn_hys = []
@@ -64,7 +59,6 @@ class StocksBKGN(object):
             while True:
                 try:
                     time.sleep(3)
-                    # 获取板块的成分股
                     b_stocks = ak.stock_board_industry_cons_em(b_name)
                     self.logger.info(f"{b_name} 行业成分股数量：{len(b_stocks)}")
                     for _, s in b_stocks.iterrows():
@@ -90,7 +84,6 @@ class StocksBKGN(object):
             while True:
                 try:
                     time.sleep(3)
-                    # 获取概念的成分股
                     b_stocks = ak.stock_board_concept_cons_em(b_name)
                     self.logger.info(f"{b_name} 概念成分股数量：{len(b_stocks)}")
                     for _, s in b_stocks.iterrows():
@@ -123,21 +116,16 @@ class StocksBKGN(object):
         return True
 
     def reload_tdx_bkgn(self):
-        """
-        通过读取通达信的文件读取行业与概念
-        """
-
-        # 记录读取到的行业概念信息
+        """解析通达信本地文件（incon.dat / tdxhy.cfg / infoharbor_block.dat）提取行业与概念数据。"""
         bkgn_hys = []
         bkgn_gns = []
         stock_hy_codes = {}
         stock_gn_codes = {}
 
-        # 通达信行业相关文件
         tdx_hy_file = self.tdx_path / "incon.dat"
         tdx_stock_file = self.tdx_path / "T0002" / "hq_cache" / "tdxhy.cfg"
 
-        tdx_hy_info = {}  # 只获取二级行业，并关联二级行业下的子行业
+        tdx_hy_info = {}  # 只取二级行业（5 位代码），三级行业挂载到上级
         with open(tdx_hy_file, "r", encoding="gbk") as fp:
             for l_txt in fp.readlines():
                 l_txt = l_txt.strip()
@@ -156,7 +144,6 @@ class StocksBKGN(object):
                             if hy_code.startswith(_hy_c):  # 获取所属行业
                                 _hy_i["sub_codes"].append(hy_code)
 
-        # 读取股票的与行业的关系
         with open(tdx_stock_file, "r") as fp:
             for l_txt in fp.readlines():
                 l_txt = l_txt.strip()
@@ -182,10 +169,8 @@ class StocksBKGN(object):
         }
         bkgn_hys = list(stock_hy_codes.keys())
 
-        # 概念的文件
         tdx_gn_file = self.tdx_path / "T0002" / "hq_cache" / "infoharbor_block.dat"
         with open(tdx_gn_file, "r", encoding="gbk") as fp:
-            # 读取文件，整理获取概念与代码的关系
             current_gn = None
             codes = []
             for line in fp:
@@ -193,26 +178,22 @@ class StocksBKGN(object):
                 if not line:
                     continue
                 if line.startswith("#"):
-                    # 保存上一个概念
                     if current_gn is not None:
                         stock_gn_codes[current_gn] = codes
-                    # 解析新概念名称
                     parts = line.split(",")
                     if len(parts) > 0:
                         gn_name = parts[0].replace("#GN_", "")
                         current_gn = gn_name
                         codes = []
                 else:
-                    # 解析股票代码
                     for item in line.split(","):
                         item = item.strip()
                         if not item:
                             continue
-                        # 只保留#后面的6位代码
+                        # "#" 后为 6 位股票代码
                         if "#" in item:
                             code = item.split("#")[1]
                             codes.append(code)
-            # 保存最后一个概念
             if current_gn is not None:
                 stock_gn_codes[current_gn] = codes
 
@@ -252,9 +233,7 @@ class StocksBKGN(object):
         return self.cache_file_bk
 
     def get_code_bkgn(self, code: str):
-        """
-        获取代码板块概念
-        """
+        """返回给定股票代码所属的行业（HY）和概念（GN）列表。"""
         code = (
             code.replace("SZ.", "")
             .replace("SH.", "")
@@ -278,18 +257,14 @@ class StocksBKGN(object):
         return {"HY": code_hys, "GN": code_gns}
 
     def get_codes_by_hy(self, hy_name) -> List[str]:
-        """
-        根据行业名称，获取其中的股票代码列表
-        """
+        """根据行业名称获取成分股代码列表。"""
         bkgn_infos = self.file_bkgns()
         if hy_name in bkgn_infos["hy_codes"].keys():
             return bkgn_infos["hy_codes"][hy_name]
         return []
 
     def get_codes_by_gn(self, gn_name):
-        """
-        根据概念名称，获取其中的股票代码列表
-        """
+        """根据概念名称获取成分股代码列表。"""
         bkgn_infos = self.file_bkgns()
         if gn_name in bkgn_infos["gn_codes"].keys():
             return bkgn_infos["gn_codes"][gn_name]
@@ -298,9 +273,7 @@ class StocksBKGN(object):
 
     @staticmethod
     def ths_to_tdx_codes(_codes):
-        """
-        同花顺 6位 数字的代码，转换成通达信的代码
-        """
+        """将同花顺 6 位数字代码转换为通达信格式（含 SH/SZ/BJ 前缀）。"""
         _res_codes = []
         for _c in _codes:
             if _c[0:3] == "688":  # 科创板
@@ -315,48 +288,7 @@ class StocksBKGN(object):
 
 
 if __name__ == "__main__":
-    """
-    更新行业概念信息并保存
-    """
     bkgn = StocksBKGN()
-    # 重新更新并保存行业与板块信息
-
-    # bkgn.reload_bkgn()
-
-    # 所有行业概念
     bkgn_infos = bkgn.file_bkgns()
     print("行业数量：", len(bkgn_infos["hys"]))
     print("概念数量：", len(bkgn_infos["gns"]))
-
-    # for _gn in bkgn_infos["hys"]:
-    #     print(f'"{_gn}",')
-
-    # # 同步所有行业指数到数据库
-    # from chanlun.exchange.exchange_db import ExchangeDB
-
-    # ex = ExchangeDB("a")
-    # for _hy in all_hy_names:
-    #     klines = bkgn.get_index_klines(_hy, "dfcf")
-    #     ex.insert_klines(klines.iloc[0]["code"], "d", klines)
-    #     print(f"Insert {_hy} success len : {len(klines)}")
-
-    # klines = bkgn.get_index_klines("文化传媒", "dfcf")
-    # print(klines)
-
-    # print("行业")
-    # print(all_hy_names)
-    # print("概念")
-    # print(all_gn_names)
-
-    # 获取代码的板块概念信息
-    # code_bkgn = bkgn.get_code_bkgn("SH.600143")
-    # print(code_bkgn)
-
-    # 根据行业获取其中的代码
-    # codes = bkgn.get_codes_by_hy("塑料制品")
-    # print(codes)
-
-    # 根据概念获取其中的代码
-    # codes = bkgn.get_codes_by_gn('电子竞技')
-    # print(codes)
-    # print(codes)

@@ -81,10 +81,6 @@ class BackTestTrader(Trader):
             "position_record": 0,
         }
 
-        # TODO 期货合约信息
-        # https://www.jiaoyixingqiu.com/shouxufei
-        # http://www.hongyuanqh.com/download/20241213/%E4%BF%9D%E8%AF%81%E9%87%91%E6%A0%87%E5%87%8620241213.pdf
-        # 手续费分为 百分比 和 每手固定金额，小于1的就是百分比设置，大于1的就是固定金额的
         self.futures_contracts = futures_contracts.futures_contracts
 
         # 策略对象
@@ -314,16 +310,16 @@ class BackTestTrader(Trader):
             return self.get_opt_close_uids(code, mmd, allow_close_uids[code])
         return ["clear"]
 
-    # 运行的唯一入口
     def run(self, code, is_filter=False):
-        # 如果设置开始执行时间，并且当前时间小于等于设置的时间，则不执行策略
+        """单代码单时间步的策略执行入口：先调用 close 检查平仓，再调用 open 寻找开仓机会。"""
+        # begin_run_dt 用于跳过回测预热期，避免数据不足时产生错误信号
         if (
             self.begin_run_dt is not None
             and self.begin_run_dt >= self.get_now_datetime()
         ):
             return True
 
-        # 优先检查持仓情况
+        # 先平仓再开仓，保证当日释放资金可被新仓位使用
         for _open_uid, pos in self.positions.items():
             if pos.code != code or pos.amount == 0:
                 continue
@@ -348,12 +344,12 @@ class BackTestTrader(Trader):
                         continue
                 self.execute(code, _opt, pos)
 
-        # 再执行检查机会方法
+        # 收集当前代码的有效持仓，传入 open() 以便策略感知当前仓位状态
         poss = [
             _p
             for _uid, _p in self.positions.items()
             if _p.code == code and _p.amount != 0
-        ]  # 只获取有持仓的记录
+        ]
 
         _time = time.time()
         opts = self.strategy.open(code=code, market_data=self.datas, poss=poss)
@@ -362,7 +358,7 @@ class BackTestTrader(Trader):
         for opt in opts:
             opt.code = code
             if is_filter:
-                # 如果是过滤模式，将操作记录到缓冲区，等待批量执行
+                # 过滤模式：暂存到缓冲区，由外部 filter_opts 二次筛选后再统一执行
                 self.buffer_opts.append(opt)
             else:
                 self.execute(code, opt, None)
@@ -382,8 +378,8 @@ class BackTestTrader(Trader):
             self.execute(opt.code, opt, None)
         self.buffer_opts = []
 
-    # 运行结束，统一清仓
     def end(self):
+        """回测结束时强制清仓所有持仓，避免未平仓头寸影响统计结果。"""
         for _uid, pos in self.positions.items():
             if pos.balance > 0:
                 self.execute(
@@ -546,8 +542,8 @@ class BackTestTrader(Trader):
         """
         return [_p for _uid, _p in self.positions.items() if _p.amount != 0]
 
-    # 做多买入
     def open_buy(self, code, opt: Operation, amount: float = None):
+        """计算做多开仓的成交价格和数量；signal 模式用固定名义本金，trade 模式按实际可用资金分仓。"""
         if self.mode == "signal":
             # 信号模式，固定交易金额
             use_balance = 100000 * min(1.0, opt.pos_rate)
@@ -595,8 +591,8 @@ class BackTestTrader(Trader):
 
             return {"price": price, "amount": amount}
 
-    # 做空卖出
     def open_sell(self, code, opt: Operation, amount: float = None):
+        """计算做空开仓的成交价格和数量；逻辑与 open_buy 对称，使用空头保证金率。"""
         if self.mode == "signal":
             use_balance = 100000 * min(1.0, opt.pos_rate)
             price = self.get_price(code)["close"]
@@ -642,15 +638,15 @@ class BackTestTrader(Trader):
 
             return {"price": price, "amount": amount}
 
-    # 做多平仓
     def close_buy(self, code, pos: POSITION, opt: Operation):
-        # 如果操作中设置了止损价格，则按照止损价格执行，否则按照最新价格执行
+        """计算做多平仓的成交价格和数量；有止损价则按止损价成交，否则按当前收盘价。"""
+        # 有止损价时按止损价成交（限价止损），否则以当前收盘价市价平仓
         if opt.loss_price != 0:
             price = opt.loss_price
         else:
             price = self.get_price(code)["close"]
 
-        # 分仓的情况计算要平仓的数量
+        # 分仓平仓：按当前持仓比例折算本次应平数量
         amount = pos.amount / pos.now_pos_rate * opt.pos_rate
 
         if self.mode == "signal":
@@ -660,22 +656,20 @@ class BackTestTrader(Trader):
                 amount = int(amount)
             return {"price": price, "amount": amount}
         else:
-            # TODO 如果是分仓，有可能会是 0，或者平完有剩余，需要再测
+            # TODO 分仓场景下可能出现 amount=0 或平仓后有零头，待验证
             if self.market == "a":
                 amount = int(amount / 100) * 100
             if self.market == "futures":
                 amount = int(amount)
             return {"price": price, "amount": amount}
 
-    # 做空平仓
     def close_sell(self, code, pos: POSITION, opt: Operation):
-        # 如果操作中设置了止损价格，则按照止损价格执行，否则按照最新价格执行
+        """计算做空平仓的成交价格和数量；逻辑与 close_buy 对称。"""
         if opt.loss_price != 0:
             price = opt.loss_price
         else:
             price = self.get_price(code)["close"]
 
-        # 分仓的情况计算要平仓的数量
         amount = pos.amount / pos.now_pos_rate * opt.pos_rate
 
         if self.mode == "signal":
@@ -685,7 +679,7 @@ class BackTestTrader(Trader):
                 amount = int(amount)
             return {"price": price, "amount": amount}
         else:
-            # TODO 如果是分仓，有可能会是 0，或者平完有剩余，需要再测
+            # TODO 分仓场景下可能出现 amount=0 或平仓后有零头，待验证
             if self.market == "a":
                 amount = int(amount / 100) * 100
             if self.market == "futures":
@@ -695,10 +689,10 @@ class BackTestTrader(Trader):
     def cal_fee(
         self, code, price: float, balance: float, amount: float, other_info: dict = {}
     ):
-        # 普通的计算方式就是 成交金额*手续费率
+        """计算单笔成交手续费；各市场规则不同，期货按合约配置，A 股按交易所标准。"""
+        # 默认按成交额 × 手续费率计算（数字货币、港股、美股等通用）
         fee = balance * self.fee_rate
 
-        # 如果是期货，按照期货的规则，计算手续费
         if self.market == "futures":
             contract_config = self.futures_contracts[code]
             fee_rate = contract_config["fee_rate_open"]
@@ -706,7 +700,7 @@ class BackTestTrader(Trader):
                 fee_rate = contract_config["fee_rate_close"]
             if "close_today" in other_info.keys() and other_info["close_today"]:
                 fee_rate = contract_config["fee_rate_close_today"]
-            # 如果 < 1 , 按照成交金额的百分比收取， > 1 按照手数收取
+            # fee_rate < 1：按成交额百分比；>= 1：每手固定金额
             if fee_rate == 0:
                 fee = 0
             elif fee_rate < 1:
@@ -714,19 +708,13 @@ class BackTestTrader(Trader):
             else:
                 fee = fee_rate * amount
 
-        # 沪深A股交易手续费计算
         if self.market == "a":
-            # 过户费 + 经手费 + 证管费 + 印花税 + 佣金
-            # 过户费率 : 0.01‰
-            gh_fee_rate = 0.00001
-            # 经手费：0.0341‰
-            js_fee_rate = 0.0000341
-            # 证管费：0.02‰
-            zg_fee_rate = 0.00002
-            # 印花费率 : 0.5‰
-            yh_fee_rate = 0.0005
+            # A 股费用构成：过户费 + 经手费 + 证管费 + 佣金（最低 5 元），卖出额外收印花税
+            gh_fee_rate = 0.00001    # 过户费：0.01‰
+            js_fee_rate = 0.0000341  # 经手费：0.0341‰
+            zg_fee_rate = 0.00002    # 证管费：0.02‰
+            yh_fee_rate = 0.0005     # 印花税：0.5‰，仅卖出收取
 
-            # 费用 = 过户费 + 经手费 + 证管费 + 佣金(最少5元)
             fee = (
                 (balance * gh_fee_rate)
                 + (balance * js_fee_rate)
@@ -734,27 +722,25 @@ class BackTestTrader(Trader):
                 + max((balance * self.fee_rate), 5)
             )
             if "sell" in other_info.keys() and other_info["sell"]:
-                # 卖出有印花税
                 fee += balance * yh_fee_rate
 
         return fee
 
-    # 打印日志信息
     def _print_log(self, msg):
         self.log_history.append(msg)
         if self.log:
             self.log(msg)
         return
 
-    # 执行操作
     def execute(self, code, opt: Operation, pos: POSITION = None):
+        """执行单笔开仓或平仓操作，更新持仓、资金和订单记录。"""
         _time = time.time()
         try:
-            # 如果是交易模式，将 close_uid 都修改为 clear ，使用 strategy 类中的 allow_close_uid 进行控制
+            # 交易模式下由 allow_close_uids 统一控制平仓权限，close_uid 强制为 clear
             if self.mode != "signal":
                 opt.close_uid = "clear"
 
-            # 传递有持仓对象，则表示要进行平仓操作，判断当前是否有正确的持仓信息
+            # pos 非空表示平仓请求；若持仓已清空则跳过，防止重复平仓
             if pos is not None:
                 if pos.balance == 0.0 or pos.now_pos_rate == 0.0 or pos.amount == 0.0:
                     return True
@@ -780,12 +766,12 @@ class BackTestTrader(Trader):
             res = None
             order_type = None
 
-            # 买点，买入，开仓做多
+            # 买点开多
             if "buy" in opt_mmd and opt.opt == "buy":
-                # 开仓后，不同位置分仓买入的key
+                # 同一位置（key）不重复开仓，防止信号重复触发
                 if opt.key in pos.open_keys.keys():
                     return False
-                # 修正错误的开仓比例
+                # 修正开仓比例，确保累计仓位不超过 1.0
                 opt.pos_rate = min(1.0 - pos.now_pos_rate, opt.pos_rate)
 
                 res = self.open_buy(code, opt)
@@ -796,10 +782,10 @@ class BackTestTrader(Trader):
                 pos.price = res["price"]
                 pos.amount += res["amount"]
 
-                hold_balance = 0  # 此次成交占用的资金
-                fee = 0  # 此次成交的手续费
+                hold_balance = 0
+                fee = 0
                 if self.market == "futures":
-                    # 期货计算占用保证金，手续费
+                    # 期货保证金 = 成交价 × 手数 × 合约乘数 × 保证金率
                     contract_config = self.futures_contracts[code]
                     hold_balance = (
                         res["price"]
@@ -807,7 +793,6 @@ class BackTestTrader(Trader):
                         * contract_config["symbol_size"]
                         * contract_config["margin_rate_long"]
                     )
-                    # 计算总的成交额
                     turnover_balance = (
                         res["price"] * res["amount"] * contract_config["symbol_size"]
                     )
@@ -815,11 +800,9 @@ class BackTestTrader(Trader):
                         code, res["price"], turnover_balance, res["amount"]
                     )
                 else:
-                    # 其他市场默认都是 成交价格 * 成交数量
                     hold_balance = res["price"] * res["amount"]
                     fee = self.cal_fee(code, res["price"], hold_balance, res["amount"])
 
-                # 记录占用资金与手续费
                 pos.balance += hold_balance
                 pos.fee += fee
 
@@ -863,12 +846,10 @@ class BackTestTrader(Trader):
                     f"[{code} - {self.get_now_datetime()}] // {opt_mmd} 做多买入（{res['price']} - {res['amount']}），原因： {opt.msg}"
                 )
 
-            # 卖点，买入，开仓做空（期货）
+            # 卖点开空（仅期货/数字货币等支持做空的市场）
             if self.can_short and "sell" in opt_mmd and opt.opt == "buy":
-                # 唯一key判断
                 if opt.key in pos.open_keys.keys():
                     return False
-                # 修正错误的开仓比例
                 opt.pos_rate = min(1.0 - pos.now_pos_rate, opt.pos_rate)
 
                 res = self.open_sell(code, opt)
@@ -880,7 +861,8 @@ class BackTestTrader(Trader):
 
                 hold_balance = 0
                 fee = 0
-                if self.market == "futures":  # 期货计算占用保证金
+                if self.market == "futures":
+                    # 做空保证金 = 成交价 × 手数 × 合约乘数 × 空头保证金率
                     contract_config = self.futures_contracts[code]
                     hold_balance = (
                         res["price"]
@@ -898,7 +880,6 @@ class BackTestTrader(Trader):
                     hold_balance = res["price"] * res["amount"]
                     fee = self.cal_fee(code, res["price"], hold_balance, res["amount"])
 
-                # 记录占用资金与手续费
                 pos.balance += hold_balance
                 pos.fee += fee
 
@@ -921,7 +902,6 @@ class BackTestTrader(Trader):
                 pos.now_pos_rate += min(1.0, opt.pos_rate)
                 pos.open_keys[opt.key] = opt.pos_rate
 
-                # 本次开仓的记录
                 pos.open_records.append(
                     {
                         "datetime": self.get_now_datetime(),
@@ -942,14 +922,14 @@ class BackTestTrader(Trader):
                     f"[{code} - {self.get_now_datetime()}] // {opt_mmd} 做空卖出（{res['price']} - {res['amount']}），原因： {opt.msg}"
                 )
 
-            # 卖点，卖出，平仓做空（期货）
+            # 卖点平空（期货做空平仓）
             if self.can_short and "sell" in opt_mmd and opt.opt == "sell":
-                # 唯一key判断
                 if opt.key in pos.close_keys.keys():
                     return False
+                # close_uid 非 clear 时做幂等检查，防止同一信号重复平仓
                 if opt.close_uid != "clear" and opt.close_uid in pos._close_uids:
                     return False
-                # 修正错误的平仓比例
+                # 修正平仓比例，不超过当前持仓比例
                 opt.pos_rate = (
                     pos.now_pos_rate
                     if pos.now_pos_rate < opt.pos_rate
@@ -960,31 +940,28 @@ class BackTestTrader(Trader):
                     self.can_close_today is False
                     and pos.open_date == self.get_now_datetime().strftime("%Y-%m-%d")
                 ):
-                    # 股票交易，当日不能卖出
+                    # A 股 T+1 规则：当日开仓不可当日平仓
                     return False
 
                 res = self.close_sell(code, pos, opt)
                 if res is False:
                     return False
 
-                release_balance = 0  # 平仓释放资金
+                release_balance = 0
                 fee = 0
                 if self.market == "futures":
-                    # 计算期货释放保证金与手续费
                     contract_config = self.futures_contracts[code]
-                    # 占用保证金
+                    # 释放保证金 = 平仓价 × 手数 × 合约乘数 × 空头保证金率
                     release_balance = (
                         res["price"]
                         * contract_config["symbol_size"]
                         * res["amount"]
                         * contract_config["margin_rate_short"]
                     )
-                    # 成交金额
                     turnover_balance = (
                         res["price"] * contract_config["symbol_size"] * res["amount"]
                     )
-
-                    # 判断是否平今
+                    # 平今仓手续费率通常更高，需区分
                     fee_other = {"close": True}
                     if pos.open_date == fun.datetime_to_str(
                         self.get_now_datetime(), "%Y-%m-%d"
@@ -1010,7 +987,6 @@ class BackTestTrader(Trader):
                         opt.msg,
                     )
                 )
-                # 本次平仓的记录
                 pos.close_records.append(
                     {
                         "datetime": self.get_now_datetime(),
@@ -1028,7 +1004,7 @@ class BackTestTrader(Trader):
                 )
                 pos._close_uids.add(opt.close_uid)
 
-                # 平仓的uid不是 clear，不进行实质性的平仓，只记录当前的盈亏情况
+                # close_uid 非 clear 时只记录快照，不实际减仓；仅 clear 才执行真正平仓
                 if opt.close_uid == "clear":
                     pos.now_pos_rate -= opt.pos_rate
                     pos.close_keys[opt.key] = opt.pos_rate
@@ -1036,61 +1012,51 @@ class BackTestTrader(Trader):
                     pos.close_datetime = self.get_now_datetime()
                     pos.amount -= res["amount"]
 
-                    # 记录释放的保证金与手续费
                     pos.release_balance += release_balance
                     pos.fee += fee
                     if pos.amount == 0:
-                        # 持仓数量为空，计算持仓总的收益率
                         profit = 0
                         if self.market == "futures":
-                            # 期货盈利的计算方式
+                            # 期货做空盈利 = (开仓保证金 - 平仓保证金) / 保证金率 - 手续费
                             contract_config = self.futures_contracts[code]
                             profit = (
                                 pos.balance - pos.release_balance
                             ) / contract_config["margin_rate_short"] - pos.fee
                             profit_rate = profit / pos.balance * 100
                         else:
-                            # 其他市场的计算方式
                             profit = pos.balance - pos.release_balance - pos.fee
                             profit_rate = profit / pos.balance * 100
 
                         pos.profit = profit
                         pos.profit_rate = profit_rate
 
-                        # 打印记录
                         self._print_log(
                             f"[{code} - {opt_mmd}] // 平仓做空 (开仓：{pos.open_datetime} / {pos.price} 平仓：{pos.close_datetime} / {res['price']}) (开仓资金：{pos.balance} 平仓资金：{pos.release_balance} 手续费：{pos.fee}) 盈亏：{profit} ({profit_rate:.2f}%)"
                         )
 
                         if pos.profit > 0:
-                            # 盈利
                             self.results[opt_mmd]["win_num"] += 1
                             self.results[opt_mmd]["win_balance"] += pos.profit
                         else:
-                            # 亏损
                             self.results[opt_mmd]["loss_num"] += 1
                             self.results[opt_mmd]["loss_balance"] += abs(pos.profit)
 
                         if self.mode == "trade":
                             self.balance += pos.balance + profit
 
-                        # 将持仓添加到历史持仓
                         if pos.code not in self.positions_history.keys():
                             self.positions_history[pos.code] = []
                         self.positions_history[pos.code].append(copy.deepcopy(pos))
-                        # 记录总计手续费
                         self.fee_total += pos.fee
 
                 order_type = "close_short"
 
-            # 买点，卖出，平仓做多
+            # 买点平多
             if "buy" in opt_mmd and opt.opt == "sell":
-                # 唯一key判断
                 if opt.key in pos.close_keys.keys():
                     return False
                 if opt.close_uid != "clear" and opt.close_uid in pos._close_uids:
                     return False
-                # 修正错误的平仓比例
                 opt.pos_rate = (
                     pos.now_pos_rate
                     if pos.now_pos_rate < opt.pos_rate
@@ -1101,31 +1067,28 @@ class BackTestTrader(Trader):
                     self.can_close_today is False
                     and pos.open_date == self.get_now_datetime().strftime("%Y-%m-%d")
                 ):
-                    # 股票交易，当日不能卖出
+                    # A 股 T+1 规则：当日开仓不可当日平仓
                     return False
 
                 res = self.close_buy(code, pos, opt)
                 if res is False:
                     return False
 
-                release_balance = 0  # 平仓释放资金
+                release_balance = 0
                 fee = 0
                 if self.market == "futures":
-                    # 计算期货释放保证金与手续费
                     contract_config = self.futures_contracts[code]
-                    # 占用保证金
+                    # 释放保证金 = 平仓价 × 手数 × 合约乘数 × 多头保证金率
                     release_balance = (
                         res["price"]
                         * contract_config["symbol_size"]
                         * res["amount"]
                         * contract_config["margin_rate_long"]
                     )
-                    # 成交金额
                     turnover_balance = (
                         res["price"] * contract_config["symbol_size"] * res["amount"]
                     )
-
-                    # 判断是否平今
+                    # 平今仓手续费率通常更高，需区分
                     fee_other = {"close": True}
                     if pos.open_date == fun.datetime_to_str(
                         self.get_now_datetime(), "%Y-%m-%d"
@@ -1136,6 +1099,7 @@ class BackTestTrader(Trader):
                     )
                 else:
                     release_balance = res["price"] * res["amount"]
+                    # A 股卖出需传 sell=True 以触发印花税计算
                     fee = self.cal_fee(
                         code,
                         res["price"],
@@ -1173,7 +1137,7 @@ class BackTestTrader(Trader):
                 )
                 pos._close_uids.add(opt.close_uid)
 
-                # 平仓的uid不是 clear，不进行实质性的平仓，只记录当前的盈亏情况
+                # close_uid 非 clear 时只记录快照，不实际减仓；仅 clear 才执行真正平仓
                 if opt.close_uid == "clear":
                     pos.now_pos_rate -= opt.pos_rate
                     pos.close_keys[opt.key] = opt.pos_rate
@@ -1181,49 +1145,41 @@ class BackTestTrader(Trader):
                     pos.close_datetime = self.get_now_datetime()
                     pos.amount -= res["amount"]
 
-                    # 记录释放的保证金与手续费
                     pos.release_balance += release_balance
                     pos.fee += fee
                     if pos.amount == 0:
-                        # 持仓数量为空，计算持仓总的收益率
                         profit = 0
                         if self.market == "futures":
-                            # 期货盈利的计算方式
+                            # 期货做多盈利 = (平仓保证金 - 开仓保证金) / 保证金率 - 手续费
                             contract_config = self.futures_contracts[code]
                             profit = (
                                 pos.release_balance - pos.balance
                             ) / contract_config["margin_rate_long"] - pos.fee
                             profit_rate = profit / pos.balance * 100
                         else:
-                            # 其他市场的计算方式
                             profit = pos.release_balance - pos.balance - pos.fee
                             profit_rate = profit / pos.balance * 100
 
                         pos.profit = profit
                         pos.profit_rate = profit_rate
 
-                        # 打印记录
                         self._print_log(
                             f"[{code} - {opt_mmd}] // 平仓做多 (开仓：{pos.open_datetime} / {pos.price} 平仓：{pos.close_datetime} / {res['price']}) (开仓资金：{pos.balance} 平仓资金：{pos.release_balance} 手续费：{pos.fee}) 盈亏：{profit} ({profit_rate:.2f}%)"
                         )
 
                         if pos.profit > 0:
-                            # 盈利
                             self.results[opt_mmd]["win_num"] += 1
                             self.results[opt_mmd]["win_balance"] += pos.profit
                         else:
-                            # 亏损
                             self.results[opt_mmd]["loss_num"] += 1
                             self.results[opt_mmd]["loss_balance"] += abs(pos.profit)
 
                         if self.mode == "trade":
                             self.balance += pos.balance + profit
 
-                        # 将持仓添加到历史持仓
                         if pos.code not in self.positions_history.keys():
                             self.positions_history[pos.code] = []
                         self.positions_history[pos.code].append(copy.deepcopy(pos))
-                        # 记录总计手续费
                         self.fee_total += pos.fee
 
                 order_type = "close_long"

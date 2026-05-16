@@ -1,4 +1,5 @@
 #:  -*- coding: utf-8 -*-
+"""期货自动化交易启动脚本:加载策略与天勤行情,循环驱动 TraderFutures 执行交易。"""
 import time
 import traceback
 
@@ -16,7 +17,6 @@ logger.info("期货自动化交易程序")
 try:
     zx = zixuan.ZiXuan("futures")
     ex = ExchangeTq(use_account=True)
-    # 执行的 标的与周期 设置
     frequencys = ["10s"]
     cl_config = {
         # 分型默认配置
@@ -30,62 +30,6 @@ try:
         # 线段默认配置
         "xd_bzh": Config.XD_BZH_NO.value,
         "xd_qj": Config.XD_QJ_DD.value,
-        # 中枢默认配置
-        "zs_bi_type": Config.ZS_TYPE_DN.value,  # 笔中枢类型
-        "zs_xd_type": Config.ZS_TYPE_DN.value,  # 走势中枢类型
-        "zs_qj": Config.ZS_QJ_CK.value,
-        "zs_wzgx": Config.ZS_WZGX_ZGD.value,
-    }
-
-    p_redis_key = "trader_futures"
-
-    # 交易对象
-    TR = TraderFutures("futures", log=logger.info)
-    # 从Redis 中加载交易数据
-    TR.load_from_pkl(p_redis_key)
-    # 数据对象
-    Data = OnlineMarketDatas("futures", frequencys, ex, cl_config)
-    # 设置使用的策略
-    STR = strategy_demo.StrategyDemo()
-
-    # 将策略与数据对象加入到交易对象中
-    TR.set_strategy(STR)
-    TR.set_data(Data)
-
-    cl_config = {
-        # 分型默认配置
-        "fx_qj": Config.FX_QJ_K.value,
-        "fx_bh": Config.FX_BH_YES.value,
-        # 笔默认配置
-        "bi_type": Config.BI_TYPE_NEW.value,
-        "bi_bzh": Config.BI_BZH_YES.value,
-        "bi_fx_cgd": Config.BI_FX_CHD_NO.value,
-        "bi_qj": Config.BI_QJ_DD.value,
-        # 线段默认配置
-        "xd_bzh": Config.XD_BZH_NO.value,
-        "xd_qj": Config.XD_QJ_DD.value,
-        # 走势类型默认配置
-        "zslx_bzh": Config.ZSLX_BZH_NO.value,
-        "zslx_qj": Config.ZSLX_QJ_DD.value,
-        # 中枢默认配置
-        "zs_bi_type": Config.ZS_TYPE_DN.value,  # 笔中枢类型
-        "zs_xd_type": Config.ZS_TYPE_DN.value,  # 走势中枢类型
-        "zs_qj": Config.ZS_QJ_CK.value,
-        "zs_wzgx": Config.ZS_WZGX_ZGD.value,
-    }
-
-    cl_config = {
-        # 分型默认配置
-        "fx_qj": Config.FX_QJ_K.value,
-        "fx_bh": Config.FX_BH_YES.value,
-        # 笔默认配置
-        "bi_type": Config.BI_TYPE_NEW.value,
-        "bi_bzh": Config.BI_BZH_YES.value,
-        "bi_fx_cgd": Config.BI_FX_CHD_NO.value,
-        "bi_qj": Config.BI_QJ_DD.value,
-        # 线段默认配置
-        "xd_bzh": Config.XD_BZH_NO.value,
-        "xd_qj": Config.XD_QJ_DD.value,
         # 走势类型默认配置
         "zslx_bzh": Config.ZSLX_BZH_NO.value,
         "zslx_qj": Config.ZSLX_QJ_DD.value,
@@ -98,16 +42,12 @@ try:
 
     p_redis_key = "trader_futures"
 
-    # 交易对象
     TR = TraderFutures("futures", log=logger.info)
-    # 从Redis 中加载交易数据
+    # 进程重启后从 pkl 恢复持仓与交易状态
     TR.load_from_pkl(p_redis_key)
-    # 数据对象
     Data = OnlineMarketDatas("futures", frequencys, ex, cl_config)
-    # 设置使用的策略
     STR = strategy_demo.StrategyDemo()
 
-    # 将策略与数据对象加入到交易对象中
     TR.set_strategy(STR)
     TR.set_data(Data)
 
@@ -115,7 +55,7 @@ try:
         try:
             seconds = int(time.time())
 
-            # 每 5 分钟执行一次
+            # 每 10 秒检查一次行情,其余时间休眠让出 CPU
             if seconds % (10) != 0:
                 time.sleep(1)
                 continue
@@ -123,13 +63,11 @@ try:
             if ex.now_trading() is False:
                 continue
 
-            # 增加当前持仓中的交易对儿
+            # 合并"我的持仓"自选组与交易器已有持仓,作为本轮要驱动的标的
             stocks = zx.zx_stocks("我的持仓")
             run_codes = [_s["code"] for _s in stocks]
             run_codes = TR.position_codes() + run_codes
             run_codes = list(set(run_codes))
-
-            # print('Run Codes %s' % run_codes)
 
             for code in run_codes:
                 try:

@@ -49,21 +49,21 @@ class StrategyZSTupo(Strategy):
         bi_lv1 = cd_lv1.get_bis()[-1]
         xd_lv0 = cd_lv0.get_xds()[-1]
         xd_zs_lv0 = cd_lv0.get_xd_zss()[-1]
-        # 最新的线段要属于线段中枢内的线段
+        # 最新线段须是中枢最后一条线段，确保中枢仍在震荡中（未突破）
         if xd_lv0.index != xd_zs_lv0.lines[-1].index:
             return opts
 
-        # 统计中枢震荡区间的用时（用lv1[日线] 的K线数量，来获取交易日时间）
+        # 用日线 K 线数量估算中枢震荡天数（排除节假日影响）
         zd_days = len(
             [_k for _k in cd_lv1.get_klines() if xd_zs_lv0.start.k.date <= _k.date]
         )
         if (self.zs_zd_days[0] <= zd_days <= self.zs_zd_days[1]) is False:
             return opts
 
-        # 计算中枢之前的趋势涨跌幅
+        # 计算进入中枢前那段趋势的涨/跌幅；前趋势振幅过小说明中枢缺乏动能
         into_zs_xd_lv0 = xd_zs_lv0.lines[0]
         if into_zs_xd_lv0.type == "up":
-            # 进入线段是向上，找上涨这段趋势的涨幅（如果之前同向的线段笔当前的低，取前一段）
+            # 进入线段向上：向上做多；若前一同向线段低点更低，以更早的线段作为起点计算涨幅
             opt_direction = "buy"
             start_up_xd_lv0 = into_zs_xd_lv0
             if (
@@ -76,7 +76,7 @@ class StrategyZSTupo(Strategy):
                 (into_zs_xd_lv0.high - start_up_xd_lv0.low) / start_up_xd_lv0.low * 100
             )
         else:
-            # 进入线段是向下，找下跌这段趋势的跌幅（如果之前同向的线段笔当前的高，取前一段）
+            # 进入线段向下：向下做空；若前一同向线段低点更低，以更早的线段作为起点计算跌幅
             opt_direction = "sell"
             start_up_xd_lv0 = into_zs_xd_lv0
             if (
@@ -89,13 +89,12 @@ class StrategyZSTupo(Strategy):
                 (into_zs_xd_lv0.low - start_up_xd_lv0.high) / start_up_xd_lv0.high * 100
             )
 
-        # 判断振幅是否在区间内
         if (self.pre_zf_rate[0] <= zf_rate <= self.pre_zf_rate[1]) is False:
             return opts
 
-        # 计算  EMA 是否 多头或空头排列
+        # EMA 排列确认趋势方向：多头排列才做多，空头排列才做空
         if opt_direction == "buy":
-            # EMA 要多头排列
+            # EMA 多头排列（短周期 > 中周期 > 长周期）
             klines_lv1 = [
                 _k for _k in cd_lv1.get_klines() if _k.date <= into_zs_xd_lv0.end.k.date
             ]
@@ -108,7 +107,7 @@ class StrategyZSTupo(Strategy):
             if (ema_idx[0][-1] > ema_idx[1][-1] > ema_idx[2][-1]) is False:
                 return opts
         else:
-            # EMA 要空头排列
+            # EMA 空头排列（短周期 < 中周期 < 长周期）
             klines_lv1 = [
                 _k for _k in cd_lv1.get_klines() if _k.date <= into_zs_xd_lv0.end.k.date
             ]
@@ -124,7 +123,7 @@ class StrategyZSTupo(Strategy):
         kline_lv1 = cd_lv1.get_klines()[-1]
         kline_lv0 = cd_lv0.get_klines()[-1]
 
-        # 要根据前两根K线，验证是否是才突破的，不然后续平仓后，在中枢上方or下方符合条件，又开仓造成损失
+        # 验证突破是否是刚发生的：前两根 K 线须有一根价格仍在中枢内，防止平仓后在中枢外重复开仓
         kline_p1_lv1 = cd_lv1.get_klines()[-2]
         kline_p2_lv1 = cd_lv1.get_klines()[-3]
 
@@ -141,8 +140,7 @@ class StrategyZSTupo(Strategy):
             "open_date": kline_lv1.date,
         }
 
-        # 操作方向是买入，当lv1（日线）的收盘价大于 中枢高点，并且价格大于 ema 10 均线，并且lv1 K线是阳线，买入
-        # kline_p1_lv1.c > kline_p1_lv1.o and kline_p1_lv1.c > xd_zs_lv0.zg and \
+        # 做多开仓：收盘突破中枢 zg，价格站上 EMA 最短周期，当日阳线，且前两根有 K 线仍在中枢内（刚突破）
         if (
             opt_direction == "buy"
             and kline_lv1.c > ema_idx[0][-1]
@@ -154,7 +152,7 @@ class StrategyZSTupo(Strategy):
             open_pos_rate = self.get_open_pos_rate(
                 self.max_loss_rate, kline_lv1.c, loss_price
             )
-            info["open_pos_rate"] = open_pos_rate  # 记录开仓占比
+            info["open_pos_rate"] = open_pos_rate  # 记录开仓仓位比例，供平仓分批使用
             opts.append(
                 Operation(
                     code,
@@ -166,8 +164,7 @@ class StrategyZSTupo(Strategy):
                     pos_rate=open_pos_rate,
                 )
             )
-        # 操作方向是卖出，当lv1（日线）的收盘价 小于 中枢低点，价格小于 ema 10 均线， 并且lv1 K线是阴线，卖出
-        # kline_p1_lv1.c < kline_p1_lv1.o and kline_p1_lv1.c < xd_zs_lv0.zd and \
+        # 做空开仓：收盘跌破中枢 zd，价格低于 EMA 最短周期，当日阴线，且前两根有 K 线仍在中枢内（刚突破）
         if (
             opt_direction == "sell"
             and kline_lv1.c < ema_idx[0][-1]
@@ -207,7 +204,6 @@ class StrategyZSTupo(Strategy):
         cd_lv1 = market_data.get_cl_data(code, market_data.frequencys[0])
         cd_lv0 = market_data.get_cl_data(code, market_data.frequencys[1])
         price = cd_lv0.get_src_klines()[-1].c
-        # 止盈止损检查
         loss_opt = self.check_loss(mmd, pos, price)
         if loss_opt is not None:
             return loss_opt
@@ -215,7 +211,7 @@ class StrategyZSTupo(Strategy):
         kline_lv1 = cd_lv1.get_klines()[-1]
         kline_lv0 = cd_lv0.get_klines()[-1]
 
-        # 自开仓之后 5 个交易日，平仓 三分之一（根据K线数量判断，日期会有节假日的情况）
+        # 开仓后第 5 个交易日触发分批减仓：用日线 K 线计数规避节假日误差
         open_days = len(
             [_k for _k in cd_lv1.get_klines() if _k.date > pos.info["open_date"]]
         )
@@ -230,19 +226,19 @@ class StrategyZSTupo(Strategy):
                         mmd,
                         msg=f'开仓后 5 日，进行平仓三分之一 ({pos.info["open_date"]} / {kline_lv1.date} [{open_days}])',
                         pos_rate=round(pos.info["open_pos_rate"] * 0.3, 2),
-                        key="5",  # 设置一个Key，后续接到相同的key，则不进行处理，这样保证平仓只执行一次
+                        key="5",  # key 唯一，防止同一批次重复触发
                     )
                 )
-            # 止损价格移动到入场位置，关闭风险
+            # 5 日后将止损上移至入场价，锁定保本，消除持仓风险
             pos.loss_price = pos.price
 
-        # 在 5 日内，不检查 EMA 平仓条件
+        # 开仓 5 日内给予趋势发展空间，不提前用 EMA 干预
         if open_days < 5:
             return opts
 
         kline_closes = np.array([_k.c for _k in cd_lv1.get_klines()][-100:])
 
-        # 下穿 ema 10 , 平仓 三分之一
+        # 做多持仓跌破 EMA10（短均线），趋势可能转弱，先减仓三分之一
         ema_idx_10 = ta.EMA(kline_closes, 10)
         if "buy" in mmd and kline_lv1.c < ema_idx_10[-1] and kline_lv1.c < kline_lv1.o:
             opts.append(
@@ -255,6 +251,7 @@ class StrategyZSTupo(Strategy):
                     key="10",
                 )
             )
+        # 做空持仓上穿 EMA10，趋势可能转强，先减仓三分之一
         if "sell" in mmd and kline_lv1.c > ema_idx_10[-1] and kline_lv1.c > kline_lv1.o:
             opts.append(
                 Operation(
@@ -267,7 +264,7 @@ class StrategyZSTupo(Strategy):
                 )
             )
 
-        # 下穿 ema 20， 平仓
+        # 做多持仓跌破 EMA20（中均线），趋势确认转弱，全仓平仓
         ema_idx_20 = ta.EMA(kline_closes, 20)
         if "buy" in mmd and kline_lv1.c < ema_idx_20[-1] and kline_lv1.c < kline_lv1.o:
             opts.append(
@@ -278,6 +275,7 @@ class StrategyZSTupo(Strategy):
                     msg=f"价格下穿EMA20均线，平仓（{kline_lv1.c} < {ema_idx_20[-1]}）",
                 )
             )
+        # 做空持仓上穿 EMA20，趋势确认转强，全仓平仓
         if "sell" in mmd and kline_lv1.c > ema_idx_20[-1] and kline_lv1.c > kline_lv1.o:
             opts.append(
                 Operation(

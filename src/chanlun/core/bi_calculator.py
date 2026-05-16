@@ -25,13 +25,8 @@ class BiCalculator:
         self.cl_klines: List[CLKline] = []
         self.bi_mode = bi_mode  # 'strict' (严格笔) 或 'new' (新笔)
         self._last_kline_snapshot: Optional[tuple] = None
-        # 增量计算相关字段必须在 __init__ 里初始化：
-        # 否则全新实例第一次 calculate() 进入 _try_incremental_extend 时
-        # 会直接 AttributeError（_try_incremental_extend 在 calculate 内
-        # 优先于 _update_prefix_fingerprint 调用，而后者才是这两个字段的
-        # 唯一赋值入口）。这同时也兼容了从旧版 pickle 反序列化出来、
-        # 缺少新增字段的对象（unpickle 不会调 __init__，但配合 cl.py 入口
-        # 的属性兜底可以补齐）。
+        # 增量字段必须在此初始化：calculate() 里 _try_incremental_extend 先于
+        # _update_prefix_fingerprint（唯一赋值入口）调用，否则首次调用 AttributeError。
         self._last_processed_kline_count: int = 0
         self._last_prefix_fingerprint: Optional[tuple] = None
 
@@ -72,6 +67,7 @@ class BiCalculator:
         return None
 
     def _collect_fxs(self, cl_klines: List[CLKline]) -> List[FX]:
+        """全量扫描缠论 K 线序列，识别所有分型。"""
         fxs: List[FX] = []
         for i in range(1, len(cl_klines) - 1):
             current_fx = self._find_fractal(cl_klines[i - 1], cl_klines[i], cl_klines[i + 1])
@@ -122,6 +118,7 @@ class BiCalculator:
             self.bis.append(self.pending_bi)
 
     def _rebuild_from_fxs(self, fxs: List[FX]):
+        """从分型列表全量重放笔状态机，重建 confirmed_bis 与 pending_bi。"""
         self.confirmed_bis = []
         self.pending_bi = None
 
@@ -189,14 +186,12 @@ class BiCalculator:
         """
         计算笔列表。
 
-        ★ D1 优化：分三档处理
-          1. 末根 snapshot 命中 → 直接 return（最快，已有逻辑）
-          2. 前缀指纹命中 + 仅末尾追加 → 增量扩展 fxs（新逻辑）
+        分三档处理：
+          1. 末根 snapshot 命中 → 直接 return
+          2. 前缀指纹命中 + 仅末尾追加 → 增量扩展 fxs
           3. 其他情况（前缀变更、长度缩短、首次计算）→ 全量重放
-        增量分支只在「绝对安全」时启用：
-          - 上次处理过的前 N-1 根缠论 K 线在新输入里完全没动
-          - 新输入只是末尾追加了若干根
-        否则一律降级到全量，保证正确性优先。
+        增量分支只在前 N-1 根缠论 K 线完全没动、仅末尾追加时启用，
+        否则一律降级到全量，正确性优先。
         """
         if not cl_klines:
             self.cl_klines = []

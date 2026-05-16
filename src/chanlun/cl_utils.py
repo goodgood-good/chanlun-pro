@@ -73,31 +73,18 @@ def web_batch_get_cl_datas(
     market: str, code: str, klines: Dict[str, pd.DataFrame], cl_config: dict = None
 ) -> List[ICL]:
     """
-    WEB端批量计算并获取 缠论 数据
+    WEB 端批量计算并获取缠论数据。
 
-    历史 (2026-05-14): 不再走 ``fdb.get_web_cl_data`` 的 .pkl 持久化缓存。
-    原实现把 cd 对象 pickle 到磁盘, 下次反序列化 + ``process_klines(new)`` 做增量。
-    实测在长时间运行 / 数据源切换 / IEX→SIP volume 漂移等场景下,
-    xd_calculator 的增量算法会让"老版本 XD"和"新版本 XD"同时残留在 cd.xds 里,
-    生产环境出现 xds=213 → 410 的累积。
-
-    US-009 (2026-05-15): 接入进程内 cl 对象 LRU 缓存 (cl_object_cache)。
-    cache hit 条件: 同 (market, code, frequency, cl_config_hash) × 同 K 线 signature。
-    cache miss / signature 不同时仍走"新建 CL + process_klines(full)", 与之前等价
-    但避免触发 xds 累积 bug (这是 cache 不做"真增量喂入"的核心原因, 详见
-    cl_object_cache.py 模块文档)。
-
-    收益: tv polling / 多标的预热场景下, 同 cache_key 重复请求由 cache 直接返回,
-    省掉每次几百 ms - 几秒的全量计算。
-
-    ``fdb.get_web_cl_data`` 仍然保留给 notebook / 回测脚本使用, 它们的
-    "末尾追加增量" 假设跟 web 路径不同, 不动。
+    不走 fdb.get_web_cl_data 的 pkl 缓存：pkl 增量路径在数据源切换 / 长期运行时
+    会导致旧版 XD 残留累积（xds 异常膨胀），因此 web 路径统一走进程内 LRU 缓存
+    (cl_object_cache)，cache miss 时每次全量 process_klines。
+    fdb.get_web_cl_data 仍保留给 notebook/回测脚本（其末尾追加增量假设不同）。
 
     :param market: 市场
     :param code: 计算的标的
-    :param klines: 计算的 k线 数据, 每个周期对应一个 k线DataFrame
+    :param klines: 每个周期对应一个 K 线 DataFrame
     :param cl_config: 缠论配置
-    :return: 缠论数据对象列表, 顺序与 klines.keys 一致
+    :return: 缠论数据对象列表，顺序与 klines.keys 一致
     """
     # 局部 import: cl_object_cache 在 web 层, 而 cl_utils 在 src 层 — 这里用局部
     # import 避免 src 层硬依赖 web 层 (调用栈本身就来自 web, import 不会循环)
@@ -308,9 +295,7 @@ def cal_macd_bis_is_bc(bis: List[BI], cd: ICL) -> Tuple[bool, bool]:
         last_bi_hist_dumps,
     ) = get_macd_dump_info(bis[-1].start, bis[-1].end)
     last_bi_sum_hist = sum([sum(_hists) for _hists in last_bi_hist_dumps])
-    # print(
-    #     f'最后一笔macd 信息： max_hist {last_bi_max_hist} max_dif {last_bi_max_dif} max_dea {last_bi_max_dea} sum_hist {last_bi_sum_hist}')
-    # 根据中枢数量，来获取要比较的部分
+    # 根据中枢数量确定比较基准段
     zss = cd.create_dn_zs("bi", bis)
     if len(zss) == 0:
         # 没有中枢，就用上一笔
@@ -334,8 +319,6 @@ def cal_macd_bis_is_bc(bis: List[BI], cd: ICL) -> Tuple[bool, bool]:
         compare_hist_dumps,
     ) = get_macd_dump_info(compare_start_fx, compare_end_fx)
     compare_max_sum_hist = max([sum(_hists) for _hists in compare_hist_dumps])
-    # print(
-    #     f'要比较的macd信息： max_hist {compare_max_hist} max_dif {compare_max_dif} max_dea {compare_max_dea} sum_hist {compare_max_sum_hist}')
 
     hist_bc = False
     deadif_bc = False
@@ -379,7 +362,8 @@ def query_cl_chart_config(
     """
     查询指定市场和标的下的缠论和画图配置
     """
-    # 如果是期货，代码进行特殊处理，只保留核心的交易所和品种信息，其他的去掉
+    # 期货代码去除主力合约后缀（如 KQ.M@SHFE.RB → SHFE.RB）并剔除月份数字，
+    # 使不同到期月的合约共享同一份配置（如 SHFE.RB2501 和 SHFE.RB2502 都对应 SHFE.RB）。
     if market == "futures":
         code = code.upper().replace("KQ.M@", "")
         code = "".join([i for i in code if not i.isdigit()])
@@ -388,7 +372,7 @@ def query_cl_chart_config(
     cached_config = _cl_config_cache_get(local_cache_key)
     if cached_config is not None:
         return cached_config
-    # 默认配置设置，用于在前台展示设置值
+    # 默认配置；未在 DB 中设置时直接使用这套值
     default_config = {
         "config_use_type": "common",
         # 个人定制配置
@@ -516,12 +500,12 @@ def set_cl_chart_config(
     """
     设置指定市场和标的下的缠论和画图配置
     """
-    # 如果是期货，代码进行特殊处理，只保留核心的交易所和品种信息，其他的去掉
+    # 期货代码规范化（同 query_cl_chart_config，保证 key 一致）
     if market == "futures":
         code = code.upper().replace("KQ.M@", "")
         code = "".join([i for i in code if not i.isdigit()])
 
-    # 读取原来的配置，使用新的配置项进行覆盖，并保存
+    # 读取已有配置后做增量覆盖，避免遗漏未传入的字段
     old_config = query_cl_chart_config(market, code, suffix)
     if config["config_use_type"] == "custom" and code is None:
         return False
@@ -546,7 +530,7 @@ def del_cl_chart_config(market: str, code: str, suffix: str = "") -> bool:
     """
     删除指定市场标的的独立配置项
     """
-    # 如果是期货，代码进行特殊处理，只保留核心的交易所和品种信息，其他的去掉
+    # 期货代码规范化（同 query_cl_chart_config）
     if market == "futures":
         code = code.upper().replace("KQ.M@", "")
         code = "".join([i for i in code if not i.isdigit()])
@@ -634,7 +618,6 @@ def cl_qstd(cd: ICL, line_type="xd", line_num: int = 5):
     if len(qs_lines) != line_num:
         return None
 
-    # 获取线段的高低点并排序
     line_highs = [
         {"val": l.high, "index": l.end.k.k_index, "date": l.end.k.date}
         for l in qs_lines
@@ -651,7 +634,6 @@ def cl_qstd(cd: ICL, line_type="xd", line_num: int = 5):
     line_lows = sorted(line_lows, key=lambda v: v["val"], reverse=False)
 
     def xl(one, two):
-        # 计算斜率
         k = (one["val"] - two["val"]) / (one["index"] - two["index"])
         return k
 
@@ -667,7 +649,6 @@ def cl_qstd(cd: ICL, line_type="xd", line_num: int = 5):
             "xl": xl(line_lows[0], line_lows[1]),
         },
     }
-    # 图标上展示的坐标设置
     chart_up_start = {
         "val": line_highs[0]["val"]
         - qstd["up"]["xl"] * (line_highs[0]["index"] - qs_lines[-1].start.k.k_index),
@@ -703,7 +684,6 @@ def cl_qstd(cd: ICL, line_type="xd", line_num: int = 5):
         "index": [chart_down_start["index"], chart_down_start["index"]],
     }
 
-    # 计算当前价格和趋势线的位置关系
     now_point = {
         "val": cd.get_klines()[-1].c,
         "index": cd.get_klines()[-1].index,
@@ -754,7 +734,6 @@ def cl_data_to_tv_chart(
     """
     将缠论数据，转换成 tv 画图的坐标数据
     """
-    # K线
     klines = [
         {
             "date": k.date,
@@ -771,7 +750,7 @@ def cl_data_to_tv_chart(
         return None
     klines.loc[:, "code"] = cd.get_code()
     if to_frequency is not None:
-        # 将数据转换成指定的周期数据
+        # to_frequency 格式为 "market:frequency"，如 "a:30m"
         market = to_frequency.split(":")[0]
         frequency = to_frequency.split(":")[1]
         if market == "a":
@@ -783,7 +762,6 @@ def cl_data_to_tv_chart(
         else:
             raise Exception(f"图表周期数据转换，不支持的市场 {market}")
 
-    # K 线数据
     kline_ts = klines["date"].map(fun.datetime_to_int).tolist()
     kline_cs = klines["close"].tolist()
     kline_os = klines["open"].tolist()
@@ -892,9 +870,7 @@ def cl_data_to_tv_chart(
                     }
                 )
 
-    # 背驰信息
     bc_infos = {}
-    # 买卖点信息
     mmd_infos = {}
 
     lines = {
@@ -1120,11 +1096,9 @@ def klines_to_heikin_ashi_klines(ks: pd.DataFrame) -> pd.DataFrame:
     """
     将缠论数据的普通K线，转换成平均K线数据，返回格式 pd.DataFrame
     """
-    # s_time = time.time()
     cd_klines = ks.to_dict(orient="records")
-    # print(f"转换成列表数据格式耗时: {time.time() - s_time:.2f}s")
 
-    # s_time = time.time()
+    # 平均K线公式：open=(前开+前收)/2，close=(开+高+低+收)/4，high/low 取与 open/close 的极值
     mean_klines: list = []
     for i in range(len(cd_klines)):
         if i == 0:
@@ -1132,10 +1106,6 @@ def klines_to_heikin_ashi_klines(ks: pd.DataFrame) -> pd.DataFrame:
             continue
         mk = mean_klines[i - 1]
         nk = cd_klines[i]
-        # 开盘价 =（前一根烛台的开盘价+ 前一根烛台的收盘价）/2
-        # 收盘价 =（当前烛台的开盘价 + 最高价 + 最低价 + 收盘价）/4
-        # 最大值（或最高价）= 当前周期的最高价、当前周期的平均 K 线图开盘价或收盘价中的最大值。
-        # 最小值（或最低价）= 当前周期的最低价、当前周期的平均 K 线图开盘价或收盘价中的最小值
         _open = (mk["open"] + mk["close"]) / 2
         _close = (nk["open"] + nk["high"] + nk["low"] + nk["close"]) / 4
         _high = max(nk["high"], _open, _close)
@@ -1152,12 +1122,8 @@ def klines_to_heikin_ashi_klines(ks: pd.DataFrame) -> pd.DataFrame:
                 "volume": _volume,
             }
         )
-    # print(f"转换成平均K线数据格式耗时: {time.time() - s_time:.2f}s")
 
-    # s_time = time.time()
     df = pd.DataFrame(mean_klines)
-    # print(f"转换成 pd.DataFrame 数据格式耗时: {time.time() - s_time:.2f}s")
-
     return df
 
 

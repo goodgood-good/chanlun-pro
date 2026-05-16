@@ -74,14 +74,12 @@ class POSITION:
         self._close_uids: set = set()
 
     def __close_records_by_uids(self, uids: List[str] = None):
-        """
-        根据 uid 关闭记录
-        """
+        """按 uid 列表查找对应的平仓记录；始终附加 'clear' 以兜底全平情形。"""
         if uids is None:
             return None
         if "clear" not in uids:
             uids.append("clear")
-        # 按照时间从早到晚排序
+        # 按时间从早到晚排序，取第一个匹配的 uid，保证返回最早平仓快照
         close_profit = sorted(
             self.close_uid_profit.items(), key=lambda _r: _r[1]["close_datetime"]
         )
@@ -112,8 +110,6 @@ class POSITION:
             "close_msg": close_profit["close_msg"],
         }
 
-    # def __str__(self):
-    #     return f'code : {self.code} mmd : {self.mmd} type : {self.type}'
 
 
 class Operation:
@@ -134,19 +130,16 @@ class Operation:
         open_uid: str = None,
         close_uid: str = "clear",
     ):
-        # TODO 历史原因，后期 opt 值修改为 open  close ，分别表示 开仓与平仓
-        # TODO 但是为了兼容之前的  buy sell ，这里单独做个转换，内部还是使用 buy sell 进行判断开平仓
+        # 历史遗留：外部接口已改用 open/close，内部逻辑仍依赖 buy/sell，此处做一次转换保持兼容
         opt_map = {
             "open": "buy",
             "close": "sell",
         }
-        # 旧的 操作指示  buy  买入  sell  卖出 （buy 表示开仓 sell 表示平仓，新的用 open  close 进行表示了）
-        # 新的 操作指示  open 开仓  close  平仓
         self.opt: str = opt if opt not in opt_map.keys() else opt_map[opt]
 
-        # 触发指示的
-        # 买卖点 例如：1buy 2buy l2buy 3buy l3buy  1sell 2sell l2sell 3sell l3sell down_pz_bc_buy
-        # 背驰点 例如：down_bi_bc_buy down_pz_bc_buy down_qs_bc_buy up_bi_bc_sell up_pz_bc_sell up_qs_bc_sell
+        # mmd 格式示例：
+        #   买卖点：1buy 2buy l2buy 3buy l3buy  1sell 2sell l2sell 3sell l3sell
+        #   背驰点：down_bi_bc_buy down_pz_bc_buy down_qs_bc_buy up_bi_bc_sell up_pz_bc_sell up_qs_bc_sell
         self.mmd: str = mmd  # 触发买卖点
         self.loss_price: float = loss_price  # 止损价格
         self.info: Dict[str, object] = info  # 自定义保存的一些信息
@@ -177,10 +170,10 @@ class MarketDatas(ABC):
         self.frequencys = frequencys
         self.cl_config = cl_config
 
-        # 按照 code_frequency 进行索引保存，存储周期对应的缠论数据
+        # 按 code_frequency 索引缓存缠论数据，跨循环持久保存
         self.cl_datas: Dict[str, ICL] = {}
 
-        # 按照 code_frequency 进行索引保存，减少多次计算时间消耗；每次循环缓存的计算，在下次循环会重置为 {}
+        # 单次回测循环内的二级缓存，避免同一根 K 线被重复计算；每次 next() 后自动清空
         self.cache_cl_datas: Dict[str, ICL] = {}
 
     @abstractmethod
@@ -363,28 +356,14 @@ class Strategy(ABC):
 
     @staticmethod
     def idx_rsi(cd: ICL, period=14):
-        # 指标说明：
-        # RSI的基本原理是在一个正常的股市中，多空买卖双方的力道必须得到均衡，股价才能稳定；而RSI是对于固定期间内，股价上涨总幅度平均值占总幅度平均值的比例。
-        # 1. RSI值于0 - 100 之间呈常态分配，当6日RSI值为80‰以上时，股市呈超买现象，若出现M头，市场风险较大；当6日RSI值在20‰以下时，股市呈超卖现象，若出现W头，市场机会增大。
-        # 2. RSI一般选用6日、12日、24日作为参考基期，基期越长越有趋势性(慢速RSI)，基期越短越有敏感性(快速RSI)。当快速RSI由下往上突破慢速RSI时，机会增大；当快速RSI由上而下跌破慢速RSI时，风险增大。
+        """返回 RSI 指标数组；取 period+120 根 K 线以预热，避免首端 NaN 过多。"""
         prices = np.array([k.c for k in cd.get_klines()[-(period + 120) :]])
         rsi = talib.RSI(prices, timeperiod=period)
         return rsi
 
     @staticmethod
     def idx_atr(cd: ICL, period=14, end_datetime=None):
-        # 原理：
-        # （1）
-        #     A=最高价-最低价
-        #     B=（前一收盘价-最高价）的绝对值
-        #     C=A与B两者较大者
-        #     D=（前一收盘价-最低价）的绝对值
-        #     TR=C与D两者较大者
-        # （2）
-        #     ATR=TR在N个周期的简单移动平均
-        # 用法：
-        #     在上升通道中，ATR真实波幅向上时，且TR黄线上穿ATR蓝线，此时K线收阴者可买入。下降通道中不买。
-
+        """返回 ATR（平均真实波幅）数组；支持 end_datetime 截止以避免使用未来数据。"""
         close_prices = np.array(
             [
                 k.c
@@ -411,11 +390,7 @@ class Strategy(ABC):
 
     @staticmethod
     def idx_cci(cd: ICL, period=14):
-        # 指标说明：
-        # 按市场的通行的标准，CCI指标的运行区间可分为三大类：大于﹢100、小于 - 100 和﹢100——-100 之间。
-        # 1. 当CCI＞﹢100 时，表明股价已经进入非常态区间——超买区间，股价的异动现象应多加关注。
-        # 2. 当CCI＜-100 时，表明股价已经进入另一个非常态区间——超卖区间，投资者可以逢低吸纳股票。
-        # 3. 当CCI介于﹢100——-100 之间时表明股价处于窄幅振荡整理的区间——常态区间，投资者应以观望为主。
+        """返回 CCI 指标数组；>+100 超买，<-100 超卖，介于之间为常态震荡。"""
         close_prices = np.array([k.c for k in cd.get_klines()[-(period + 120) :]])
         high_prices = np.array([k.h for k in cd.get_klines()[-(period + 120) :]])
         low_prices = np.array([k.l for k in cd.get_klines()[-(period + 120) :]])
@@ -424,14 +399,7 @@ class Strategy(ABC):
 
     @staticmethod
     def idx_kdj(cd: ICL, period=9, M1=3, M2=3, end_datetime=None):
-        # 指标说明：
-        # KDJ，其综合动量观念、强弱指标及移动平均线的优点，早年应用在期货投资方面，功能颇为显著，目前为股市中最常被使用的指标之一。买卖原则：
-        # 1. K线由右边向下交叉D值做卖，K线由右边向上交叉D值做买。
-        # 2. 高档连续二次向下交叉确认跌势，低挡连续二次向上交叉确认涨势。
-        # 3. D值 < 20 % 超卖，D值 > 80 % 超买，J > 100 % 超买，J < 10 % 超卖。
-        # 4. KD值于50 % 左右徘徊或交叉时，无意义。
-        # 5. 投机性太强的个股不适用。
-        # 6. 可观察KD值同股价的背离，以确认高低点。
+        """返回 KDJ 指标字典 {'k', 'd', 'j'}；支持 end_datetime 截止防止使用未来数据。"""
         close_prices = np.array(
             [
                 k.c
@@ -460,8 +428,7 @@ class Strategy(ABC):
 
     @staticmethod
     def idx_macd(cd: ICL, fast=12, slow=26, signal=9, end_datetime=None):
-        # 指标说明：
-        # MACD
+        """返回 MACD 指标字典 {'dif', 'dea', 'hist'}；hist 已乘以 2 与通达信/同花顺保持一致。"""
         close_prices = np.array(
             [
                 k.c
@@ -478,25 +445,14 @@ class Strategy(ABC):
 
     @staticmethod
     def idx_mtm(cd: ICL, N=12, M=6):
-        # 参数：N 间隔天数，也是求移动平均的天数，一般为6
-        # MTM向上突破零，买入信号
-        # MTM向下突破零，卖出信号
+        """返回 MTM 动量指标字典 {'mtm', 'mtma'}；MTM 上穿零轴为买入信号，下穿为卖出信号。"""
         close_prices = np.array([k.c for k in cd.get_klines()[-(N + 120) :]])
         mtm, mtma = MyTT.MTM(close_prices, N, M)
         return {"mtm": mtm, "mtma": mtma}
 
     @staticmethod
     def idx_psy(cd: ICL, N=12, M=6):
-        # 原理：
-        #     心理线是一种建立在研究投资人心理趋向基础上，将某段时间内投资者倾向买方还是卖方的心理与事实转化为数值，形成人气指标，做为买卖的参考。
-        #     PSY＝N日内的上涨天数/N×100
-        #     N一般设定为12日，最大不超过24，周线的最长不超过26。
-        #
-        # 用法：
-        #     1.PSY>75为超买，如形成M头时为卖出信号；
-        #     2.PSY<25为超卖，如形成W底时为卖出信号；
-        #     3.心理线主要反映市场心理的超买或超卖，因此，当百分比值在常态区域上下移动时，一般应持观望态度；
-        #     4.PSY一般不可单独使用，需配合VR指标和逆时针曲线同时使用，可提高准确度。
+        """返回 PSY 心理线指标字典 {'psy', 'psya'}；>75 超买，<25 超卖，建议配合 VR 使用。"""
         close_prices = np.array([k.c for k in cd.get_klines()[-(N + 120) :]])
         psy, psya = MyTT.PSY(close_prices, N, M)
         return {"psy": psy, "psya": psya}
@@ -525,6 +481,7 @@ class Strategy(ABC):
 
     @staticmethod
     def idx_ama(cd: ICL, N=10, fast_N=2, slow_N=30) -> np.array:
+        """返回自适应移动平均（AMA）数组；趋势明显时贴近价格，震荡时平滑减少噪音。"""
         CLOSE = np.array([k.c for k in cd.get_src_klines()])
 
         DIR = MyTT.ABS(CLOSE - MyTT.REF(CLOSE, N))
@@ -540,6 +497,7 @@ class Strategy(ABC):
         for _i in range(len(CQ)):
             _cq = CQ[_i]
             if _cq != _cq:
+                # CQ 为 NaN（预热期）时，以收盘价初始化，避免 AMA 从 0 开始拉偏
                 AMA[_i] = CLOSE[_i]
             else:
                 AMA[_i] = AMA[_i - 1] + _cq * (CLOSE[_i] - AMA[_i - 1])
@@ -556,11 +514,7 @@ class Strategy(ABC):
 
     @staticmethod
     def idx_sar(cd: ICL, acceleration=0.02, maximum=0.2):
-        # 指标说明：
-        # 1、当股票价格从SAR曲线下方开始向上突破SAR曲线时，为买入信号，预示着股票价格一轮上升行情可能展开，投资者应迅速及时地买进该股票。
-        # 2、当股票价格向上突破SAR曲线后继续向上，而SAR曲线也同时向上运动时，表明上涨趋势已形成。SAR曲线对股票价格构成强劲的支撑，投资者应坚决看多或逢低买入该股票。
-        # 3、当股票价格从SAR曲线上方开始向下突破SAR曲线时，为卖出信号，预示着股票价格一轮下跌行情可能展开，投资者应及时地卖出该股票。
-        # 4、当股票价格向下突破SAR曲线后继续向下，而SAR曲线也同时向下运动的话，表明下跌趋势已形成，SAR曲线对价格会构成巨大的压力，投资者应坚决看空或逢高做空该股票。
+        """返回抛物线 SAR 数组；价格上穿 SAR 为买入信号，下穿为卖出信号。"""
         high_prices = np.array([k.h for k in cd.get_klines()])
         low_prices = np.array([k.l for k in cd.get_klines()])
         sar = talib.SAR(
@@ -639,10 +593,7 @@ class Strategy(ABC):
 
     @staticmethod
     def check_loss(mmd: str, pos: POSITION, price: float):
-        """
-        检查是否触发止损，止损返回操作对象，不出发返回 None
-        """
-        # 止盈止损检查
+        """检查当前价格是否触及止损位，触发则返回平仓 Operation，否则返回 None。"""
         if pos.loss_price is None or pos.loss_price == 0:
             return None
 
@@ -670,13 +621,10 @@ class Strategy(ABC):
 
     @staticmethod
     def break_even(pos: POSITION, loss_multiple: int = 2):
-        """
-        保本方法，当最大盈利超过止损 N 倍的时候，将止损设置在成本价上
-        """
-        # 如果之前已经设置过，退出
+        """当最大浮盈超过初始止损幅度的 N 倍时，将止损移至成本价实现保本。"""
+        # 已保本则无需重复操作
         if pos.loss_price == pos.price:
             return None
-        # 止损比例
         loss_rate = abs((pos.price - pos.loss_price) / pos.price * 100)
         if pos.max_profit_rate >= (loss_rate * loss_multiple):
             pos.loss_price = pos.price
@@ -719,7 +667,8 @@ class Strategy(ABC):
         @param open_price: 开仓价格
         @param loss_price: 止损价格
         """
-        balance = 100000  # 信号模式下，回测每次开仓的金额
+        # 信号模式固定名义本金为 10 万，与 open_buy/open_sell 中的 use_balance 保持一致
+        balance = 100000
         open_balance = (
             (max_loss_rate / 100 * balance) / abs(open_price - loss_price) * open_price
         )
@@ -910,9 +859,9 @@ class Strategy(ABC):
         """
         if len(points) == 0:
             return 0
-        # 去一下棱角
+        # 对原始点做 2 周期 MA 平滑，消除单点毛刺干扰角度计算
         points = talib.MA(np.array(points), 2)
-        # 先给原始数据编序号
+        # 给平滑后的点编序号，用于后续计算斜率
         new_points = []
         for i in range(len(points)):
             if points[i] is not None:
@@ -945,11 +894,8 @@ class Strategy(ABC):
         )
 
         def jiaodu(_p1: list, _p2: list):
-            # 计算斜率
             k = (_p1[1] - _p2[1]) / (_p1[0] - _p2[0])
-            # 斜率转弧度
             k = math.atan(k)
-            # 弧度转角度
             j = math.degrees(k)
             return j
 
@@ -1064,13 +1010,11 @@ class Strategy(ABC):
 
 
 def fee_a(opt: str, price: float, amount: float):
-    """
-    A 股交易所费用计算方法
-    """
-    fee_rate = 0.3  # 单位 %
+    """计算 A 股单笔交易费用（佣金+过户费，卖出加收印花税）。"""
+    fee_rate = 0.3  # 佣金率，单位 %
     min_fee = 5
-    yhs_rate = 0.1  # 印花税 单位 % 出让方（卖出）收取
-    ghf_rate = 0.02  # 过户费 单位 % 双向收取
+    yhs_rate = 0.1  # 印花税率，单位 %，仅卖出方收取
+    ghf_rate = 0.02  # 过户费率，单位 %，双向收取
 
     trade_volume = price * amount
     fee_sum = max([min_fee, trade_volume * fee_rate / 100])

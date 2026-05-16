@@ -1,3 +1,4 @@
+/* layui 内部通过检测该元素宽度判断 layui-admin 是否已加载，保持不变 */
 html #layuicss-layuiAdmin {
   display: none;
   position: absolute;
@@ -555,6 +556,7 @@ html {
   background-color: #20222a;
   box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.15);
 }
+/* 两条 color 声明：第一条作为不支持 rgba 的旧浏览器回退，第二条为实际生效值 */
 .layui-layout-admin .layui-logo,
 .layui-layout-admin .layui-logo a {
   color: #fff;

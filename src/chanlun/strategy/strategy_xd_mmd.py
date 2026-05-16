@@ -31,7 +31,7 @@ class StrategyXDMMD(Strategy):
         if len(xd.line_mmds()) == 0:
             return opts
 
-        # 获取最后一完成笔，以及同向的前一笔
+        # 取最后完成笔及其前一同向笔，用于判断线段转折
         bi_1 = data.get_bis()[-1]
         if bi_1.is_done() is False:
             bi_1 = data.get_bis()[-2]
@@ -43,7 +43,7 @@ class StrategyXDMMD(Strategy):
             and bi_1.high < bi_2.high
             and self.bi_td(bi_1, data)
         ):
-            # 线段向上，找转折，最后一笔的高点要小于前一笔的高点
+            # 向上线段：次笔高点低于前同向笔，说明线段可能终结
             pass
         elif (
             xd.type == "down"
@@ -51,12 +51,11 @@ class StrategyXDMMD(Strategy):
             and bi_1.low > bi_2.low
             and self.bi_td(bi_1, data)
         ):
-            # 线段向下，找转折，最后一笔的低点要大于前一笔的低点
+            # 向下线段：次笔低点高于前同向笔，说明线段可能终结
             pass
         else:
             return opts
 
-        # 保证唯一
         mmds = xd.line_mmds()
         price = data.get_klines()[-1].c
 
@@ -104,7 +103,6 @@ class StrategyXDMMD(Strategy):
         data = market_data.get_cl_data(code, market_data.frequencys[0])
         price = data.get_klines()[-1].c
 
-        # 止盈止损检查
         if pos.loss_price is not None:
             if "buy" in mmd:
                 if price < pos.loss_price:
@@ -113,7 +111,7 @@ class StrategyXDMMD(Strategy):
                 if price > pos.loss_price:
                     return Operation(code, "sell", mmd, msg="%s 止损" % mmd)
 
-        # 自建仓之后的反向线段
+        # 找开仓后第一个反向线段作为平仓判断依据
         pos_xd: XD
         pos_xd = pos.info["cl_datas"]["xd"]
         xd = None
@@ -124,15 +122,13 @@ class StrategyXDMMD(Strategy):
         if xd is None:
             return False
 
-        # 获取最后一完成笔，以及同向的前一笔
         bi_1 = data.get_bis()[-1]
         if bi_1.is_done() is False:
             bi_1 = data.get_bis()[-2]
         bi_2 = data.get_bis()[bi_1.index - 2]
 
         if "buy" in mmd:
-            # 买入做多，检查卖点
-            # 笔出现一卖点
+            # 做多持仓：笔出现一/二卖点，平仓
             if (
                 bi_1.type == "up"
                 and self.bi_td(bi_1, data)
@@ -145,7 +141,7 @@ class StrategyXDMMD(Strategy):
                     msg="%s %s 笔出现 卖点 (%s) 背驰 （%s），多仓清仓"
                     % (mmd, data.get_frequency(), bi_1.line_mmds(), bi_1.line_bcs()),
                 )
-            # 反向线段有可能结束的时候，清仓
+            # 次笔不创新高，向上线段可能终结，平仓
             if (
                 xd.type == "up"
                 and bi_1.type == "up"
@@ -159,7 +155,7 @@ class StrategyXDMMD(Strategy):
                     msg="%s %s 向上线段有可能终结 后笔（%s）低于前笔（%s），多仓清仓"
                     % (mmd, data.get_frequency(), bi_1.high, bi_2.high),
                 )
-            # 线段出现背驰、卖点，清仓
+            # 线段出现背驰或卖点，平仓
             if (
                 xd.type == "up"
                 and xd.is_done()
@@ -177,8 +173,7 @@ class StrategyXDMMD(Strategy):
                 )
 
         if "sell" in mmd:
-            # 买入做多，检查卖点
-            # 笔出现一买点
+            # 做空持仓：笔出现一/二买点，平仓
             if (
                 bi_1.type == "down"
                 and self.bi_td(bi_1, data)
@@ -191,7 +186,7 @@ class StrategyXDMMD(Strategy):
                     msg="%s %s 笔出现 卖点 (%s) 背驰 （%s），空仓清仓"
                     % (mmd, data.get_frequency(), bi_1.line_mmds(), bi_1.line_bcs()),
                 )
-            # 反向线段有可能结束的时候，清仓
+            # 次笔不创新低，向下线段可能终结，平仓
             if (
                 xd.type == "down"
                 and bi_1.type == "down"
@@ -205,7 +200,7 @@ class StrategyXDMMD(Strategy):
                     msg="%s %s 向下线段有可能终结 后笔（%s）高于前笔（%s），空仓清仓"
                     % (mmd, data.get_frequency(), bi_1.low, bi_2.low),
                 )
-            # 线段出现背驰、卖点，清仓
+            # 线段出现背驰或买点，平仓
             if (
                 xd.type == "down"
                 and xd.is_done()

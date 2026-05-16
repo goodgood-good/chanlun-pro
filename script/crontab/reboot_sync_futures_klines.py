@@ -1,14 +1,9 @@
 #:  -*- coding: utf-8 -*-
+"""定时同步期货 K 线到本地数据库（通过天勤 API，需要专业版权限）。"""
 from chanlun.exchange.exchange_db import ExchangeDB
 from chanlun.exchange.exchange_tq import ExchangeTq
 import traceback
 import time
-
-"""
-同步期货到数据库中
-
-需要有 天勤专业版 权限才可以执行
-"""
 
 db_ex = ExchangeDB("futures")
 line_ex = ExchangeTq()
@@ -78,12 +73,12 @@ _sync_codes = [
 
 
 def is_sync_code(_code):
+    """判断合约代码是否在预设同步列表中（含主力合约 KQ.m 和指定品种）。"""
     for sc in _sync_codes:
         if sc in _code:
             return True
 
 
-# 从自选中获取同步股票
 stocks = line_ex.all_stocks()
 run_codes = []
 for s in stocks:

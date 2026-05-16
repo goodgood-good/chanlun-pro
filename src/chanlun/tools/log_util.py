@@ -44,99 +44,75 @@ class LogUtil:
 
     @staticmethod
     def get_logger():
-        """
-        获取并配置 logger 实例。
-        这是一个内部方法，确保 logger 只被初始化一次（单例模式）。
-        """
+        """获取全局单例 logger，首次调用时完成初始化（控制台 + 滚动文件双 handler）。"""
         if LogUtil._logger is not None:
             return LogUtil._logger
 
-        # 1. 创建 logger 实例
-        # 我们使用一个固定的名字，这样在项目的任何地方获取到的都是同一个 logger 实例
+        # 固定名称保证全项目取到同一实例
         logger = logging.getLogger("Logger")
-        # 根 logger 默认 INFO：DEBUG 记录会在 Logger.debug() 内的 isEnabledFor
-        # 处直接 short-circuit，不进入 _log/handler/stat 链路（hot loop 里的
-        # _log.debug 开销因此归零）。排查时 export LOG_LEVEL=DEBUG 即可全开。
+        # 根 logger 默认 INFO：DEBUG 记录在 isEnabledFor 处 short-circuit，
+        # hot loop 里的 _log.debug 开销归零；排查时 export LOG_LEVEL=DEBUG 全开。
         logger.setLevel(_resolve_level("LOG_LEVEL", logging.INFO))
 
-        # 2. 防止日志重复输出
-        # 如果 logger.handlers 已经有内容，说明已经配置过了，直接返回
+        # handlers 非空说明已初始化（多次 import 防重复挂载）
         if logger.handlers:
             LogUtil._logger = logger
             return logger
 
-        # 3. 创建日志格式
-        # 定义日志输出的格式，包括时间、日志级别、文件名、行号和日志消息
         formatter = logging.Formatter(
             '%(asctime)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s'
         )
 
-        # 4. 创建并配置控制台 Handler
-        # 控制台默认 INFO，能看到关键运行节点（启动、预热、刷新完成等）。
-        # 由于高频日志（K线缓存命中、tv_history 请求、线段构造等）已统一改为 DEBUG，
-        # 控制台不会再被刷屏；要看全量调试日志：export LOG_CONSOLE_LEVEL=DEBUG
+        # 控制台默认 INFO：高频 DEBUG 日志（K线缓存命中、线段构造等）不会刷屏；
+        # 需要全量调试时：export LOG_CONSOLE_LEVEL=DEBUG
         console_level = _resolve_level("LOG_CONSOLE_LEVEL", logging.INFO)
         console_handler = logging.StreamHandler()
         console_handler.setLevel(console_level)
         console_handler.setFormatter(formatter)
 
-        # 5. 创建并配置日志文件 Handler
-        # 确保日志文件夹存在
         log_dir = 'logs'
         if not os.path.exists(log_dir):
             os.makedirs(log_dir)
 
         log_path = os.path.join(log_dir, 'app.log')
 
-        # 使用 RotatingFileHandler 可以让日志文件在达到一定大小时自动创建新文件。
-        # 文件默认 INFO，与根 logger 保持一致；排查时 export LOG_LEVEL=DEBUG 全开。
         file_level = _resolve_level("LOG_FILE_LEVEL", logging.INFO)
         file_handler = RotatingFileHandler(
             filename=log_path,
-            maxBytes=5 * 1024 * 1024,  # 单个日志文件最大为 5MB
-            backupCount=5,  # 最多保留5个备份日志文件
+            maxBytes=5 * 1024 * 1024,  # 单文件上限 5 MB，超出后自动滚动
+            backupCount=5,
             encoding='utf-8'
         )
         file_handler.setLevel(file_level)
         file_handler.setFormatter(formatter)
 
-        # 6. 将 Handlers 添加到 logger
         logger.addHandler(console_handler)
         logger.addHandler(file_handler)
 
         LogUtil._logger = logger
         return logger
 
-    # --- 提供给外部调用的静态方法 ---
-    # 通过 stacklevel 让 %(filename)s:%(lineno)d 指向真实调用方，而不是本文件。
-    # 注意：stacklevel 是 Python 3.8+ 才支持的 logging 关键字。
-
     @staticmethod
     def debug(message, *args, **kwargs):
-        """记录一条 debug 级别的日志"""
         kwargs.setdefault("stacklevel", LogUtil._STACKLEVEL)
         LogUtil.get_logger().debug(message, *args, **kwargs)
 
     @staticmethod
     def info(message, *args, **kwargs):
-        """记录一条 info 级别的日志"""
         kwargs.setdefault("stacklevel", LogUtil._STACKLEVEL)
         LogUtil.get_logger().info(message, *args, **kwargs)
 
     @staticmethod
     def warning(message, *args, **kwargs):
-        """记录一条 warning 级别的日志"""
         kwargs.setdefault("stacklevel", LogUtil._STACKLEVEL)
         LogUtil.get_logger().warning(message, *args, **kwargs)
 
     @staticmethod
     def error(message, *args, **kwargs):
-        """记录一条 error 级别的日志"""
         kwargs.setdefault("stacklevel", LogUtil._STACKLEVEL)
         LogUtil.get_logger().error(message, *args, **kwargs)
 
     @staticmethod
     def critical(message, *args, **kwargs):
-        """记录一条 critical 级别的日志"""
         kwargs.setdefault("stacklevel", LogUtil._STACKLEVEL)
         LogUtil.get_logger().critical(message, *args, **kwargs)

@@ -55,9 +55,7 @@ var TvIdxFCX = (function () {
           },
         },
         constructor: function () {
-          this.init = function () {
-            // 初始化
-          };
+          this.init = function () {};
           this.main = function (context, inputCallback) {
             this._context = context;
             this._input = inputCallback;

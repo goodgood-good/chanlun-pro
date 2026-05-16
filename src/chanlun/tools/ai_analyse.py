@@ -24,6 +24,7 @@ except Exception as _e:
 
 
 class AIAnalyse:
+    """缠论 AI 分析器：将缠论数据（笔/线段/中枢）组装为 Markdown prompt 并调用大模型分析。"""
 
     def __init__(self, market: str):
         self.market = market
@@ -62,9 +63,7 @@ class AIAnalyse:
         }
 
     def analyse(self, code: str, frequency: str) -> dict:
-        """
-        获取缠论数据，生成 prompt，调用接口进行分析，并返回数据
-        """
+        """获取缠论数据，生成 prompt，调用大模型分析，持久化记录并返回结果。"""
 
         cl_config = query_cl_chart_config(self.market, code)
         stock = self.ex.stock_info(code)
@@ -97,25 +96,17 @@ class AIAnalyse:
         return {"ok": True, "msg": analyse_res["msg"]}
 
     def analyse_records(self, page: int = 1, limit: int = 20):
-        """
-        返回市场中历史的分析记录（支持分页）
+        """返回当前市场的历史 AI 分析记录（按时间倒序分页）。
 
-        Args:
-            page: 页码，从1开始
-            limit: 每页记录数
-
-        Returns:
-            tuple: (记录列表, 总记录数)
+        :return: (记录列表, 总记录数)
         """
         with db.Session() as session:
-            # 查询总记录数
             total = (
                 session.query(TableByAIAnalyse)
                 .filter(TableByAIAnalyse.market == self.market)
                 .count()
             )
 
-            # 分页查询记录
             offset = (page - 1) * limit
             records = (
                 session.query(TableByAIAnalyse)
@@ -129,10 +120,9 @@ class AIAnalyse:
         record_dicts = []
         for _r in records:
             _dr = _r.__dict__
-            # 删除 _dr 中的 _sa_instance_state
+            # SQLAlchemy 内部状态字段，不暴露给调用方
             if "_sa_instance_state" in _dr.keys():
                 del _dr["_sa_instance_state"]
-            # 时间转换
             _dr["dt"] = fun.datetime_to_str(_dr["dt"])
             record_dicts.append(_dr)
         return record_dicts, total
@@ -148,12 +138,13 @@ class AIAnalyse:
         return "|".join(bcs)
 
     def prompt(self, cd: ICL) -> str:
+        """将缠论数据序列化为 Markdown 格式 prompt，供大模型分析。"""
         stock_info = self.ex.stock_info(cd.get_code())
         if stock_info is None:
             raise Exception(f"股票信息获取失败 {cd.get_code()}")
         stock_name = stock_info["name"]
 
-        # 设置数值的精度变量
+        # precision 字段长度 - 1 得到小数位数（如 "0.001" → 长度4 - 1 = 3位）
         precision = (
             len(str(stock_info["precision"])) - 1
             if "precision" in stock_info.keys()
@@ -161,13 +152,11 @@ class AIAnalyse:
         )
 
         k = cd.get_src_klines()[-1]
-        # Markdown 格式的提示词
         prompt = "```markdown\n# 缠论技术分析\n\n"
         prompt += "请根据以下缠论数据，分析后续可能走势，并按照概率排序输出。\n\n"
         prompt += "**输出格式：Markdown**\n\n"
         prompt += f"## 当前品种\n- **代码/名称**：`{cd.get_code()} - {stock_name}`\n- **数据周期**：`{cd.get_frequency()}`\n- **当前时间**：`{fun.datetime_to_str(k.date)}`\n- **最新价格**：`{round(k.c, precision)}`\n\n"
 
-        # 笔数据
         bis_count = 9 if len(cd.get_bis()) >= 9 else len(cd.get_bis())
         prompt += f"## 最新的 {bis_count} 条缠论笔数据\n\n"
         prompt += "| 起始时间 | 结束时间 | 方向 | 起始值 | 完成状态 | 买点 | 背驰 |\n"
@@ -176,7 +165,6 @@ class AIAnalyse:
             prompt += f"| {fun.datetime_to_str(bi.start.k.date)} | {fun.datetime_to_str(bi.end.k.date)} | {self.map_dircetion_type[bi.type]} | {round(bi.start.val, precision)} - {round(bi.end.val, precision)} | {bi.is_done()} | {self.get_line_mmds(bi)} | {self.get_line_bcs(bi)} |\n"
         prompt += "\n"
 
-        # 线段数据
         xds_count = 3 if len(cd.get_xds()) >= 3 else len(cd.get_xds())
         prompt += f"## 最新的 {xds_count} 条缠论线段数据\n\n"
         prompt += "| 起始时间 | 结束时间 | 方向 | 起始值 | 完成状态 | 买点 | 背驰 |\n"
@@ -185,7 +173,6 @@ class AIAnalyse:
             prompt += f"| {fun.datetime_to_str(xd.start.k.date)} | {fun.datetime_to_str(xd.end.k.date)} | {self.map_dircetion_type[xd.type]} | {round(xd.start.val, precision)} - {round(xd.end.val, precision)} | {xd.is_done()} | {self.get_line_mmds(xd)} | {self.get_line_bcs(xd)} |\n"
         prompt += "\n"
 
-        # 中枢数据
         for zs_type in cd.get_config()["zs_bi_type"]:
             zss = cd.get_bi_zss(zs_type)
             if len(zss) >= 1:
@@ -207,9 +194,7 @@ class AIAnalyse:
         return prompt
 
     def req_llm_ai_model(self, prompt: str) -> dict:
-        """
-        根据配置，调用不同的大模型服务
-        """
+        """按配置优先级路由到 OpenRouter 或 SiliconFlow 大模型服务。"""
         if config.OPENROUTER_AI_KEYS != "" and config.OPENROUTER_AI_MODEL != "":
             return self.req_openrouter_ai_model(prompt)
         if config.AI_TOKEN != "" and config.AI_MODEL != "":
@@ -222,11 +207,6 @@ class AIAnalyse:
         }
 
     def req_siliconflow_ai_model(self, prompt: str) -> dict:
-
-        # TODO 测试
-        # msg = "根据缠论技术分析，结合当前行情数据，以下是操作建议：\n\n### 1. **当前笔分析**\n   - **最新笔**：方向向上，起始值3140.98，结束值3274.39，尚未完成（笔完成状态为False）。\n   - **上一笔**：方向向下，起始值3418.95，结束值3140.98，已完成（笔完成状态为True）。\n   - **当前笔尚未完成**，且处于上升趋势中。如果价格继续上涨并突破3274.39，可能会形成新的上升笔。如果价格回落并跌破3140.98，则当前笔可能结束并形成新的下降笔。\n\n### 2. **当前线段分析**\n   - **最新线段**：方向向下，起始值3674.41，结束值3140.98，尚未完成（线段完成状态为False）。\n   - **当前线段处于下降趋势中**，但最新笔的上升可能预示着线段的调整或反转。如果价格继续上涨并突破3674.41，则可能结束当前的下降线段并开始新的上升线段。\n\n### 3. **中枢分析**\n   - **标准中枢**：震荡中枢，最高值3674.41，最低值3140.98，中枢高点3509.82，中枢低点3227.35。\n   - **段内中枢**：震荡中枢，最高值3509.82，最低值3140.98，中枢高点3494.87，中枢低点3227.35。\n   - **当前价格3250.6位于标准中枢的中枢低点3227.35和中枢高点3509.82之间**。如果价格继续上涨并突破3509.82，可能会进入强势区域；如果价格回落并跌破3227.35，则可能进入弱势区域。\n\n### 4. **均线分析**\n   - **5日均线**：最新值为3238.39、3235.69、3234.52、3236.68、3237.93。\n   - **10日均线**：最新值为3220.37、3218.72、3220.6、3229.01、3237.99。\n   - **20日均线**：最新值为3272.92、3263"
-        # return {"ok": True, "msg": msg}
-
         url = "https://api.siliconflow.cn/v1/chat/completions"
 
         payload = {
@@ -285,13 +265,7 @@ class AIAnalyse:
         return {"ok": True, "msg": msg, "model": config.AI_MODEL}
 
     def req_openrouter_ai_model(self, prompt: str) -> dict:
-        """
-        调用大语言模型，返回回答内容。
-        :param key: OpenRouter API Key
-        :param model: 模型名称（如 openai/gpt-4o）
-        :param prompt: 问题内容（如 markdown 格式）
-        :return: 回答内容
-        """
+        """调用 OpenRouter API 发送 prompt，返回模型回答内容。"""
 
         try:
             client = openai.OpenAI(

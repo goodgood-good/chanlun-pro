@@ -29,6 +29,7 @@ class DayData:
         self.hold = 0  # 空盘量(总持？持仓量)
 
 def httpGet(url, encoding='utf-8'):
+    """发送 GET 请求并返回响应文本；支持 gzip 压缩，异常时返回空字符串。"""
     request = urllib.request.Request(url)
     request.add_header('Accept-encoding', 'gzip')
     request.add_header(
@@ -44,8 +45,9 @@ def httpGet(url, encoding='utf-8'):
         return f.read().decode(encoding)
     except:
         return ""
-    
+
 def httpPost(url, datas, encoding='utf-8'):
+    """发送 POST 请求并返回响应文本；支持 gzip 压缩，异常时返回空字符串。"""
     headers = {
         'User-Agent': 'Mozilla/4.0 (compatible; MSIE 5.5; Windows NT)',
         'Accept-encoding': 'gzip'
@@ -70,9 +72,14 @@ class RqCacheMonExchg(WtCacheMon):
     '''
     
     def __init__ (self,start_date,end_date,pkl_file=""):
+        """
+        初始化米筐缓存器；从 rqdatac 拉取期货合约元数据，
+        过滤出 start_date~end_date 范围内存续的合约后调用 init_cache 补充缺失日线数据。
+        """
         super().__init__()
         self.pkl_file = pkl_file
         self.all_info = rq.all_instruments("Future")
+        # 过滤掉上市/退市日期为 0000-00-00 的无效合约
         self.all_info = self.all_info[(self.all_info["listed_date"]!="0000-00-00") & (self.all_info["de_listed_date"]!="0000-00-00")]
         self.all_info["listed_date"] = pd.to_datetime(self.all_info["listed_date"])
         self.all_info["de_listed_date"] = pd.to_datetime(self.all_info["de_listed_date"])
@@ -83,13 +90,18 @@ class RqCacheMonExchg(WtCacheMon):
         self.all_info = self.all_info[(self.all_info["de_listed_date"] > start_date) & (self.all_info["listed_date"] < end_date)]
         self.init_cache()
         self.all_info = self.all_info.set_index("order_book_id")
+
     def init_cache(self):
+        """
+        从 pkl_file 加载已有日线缓存，然后对尚未下载到最新日期的合约增量拉取并回写。
+        pkl_file 为空时跳过持久化。
+        """
         try:
             with open(self.pkl_file,"rb") as f:
                 self.day_cache = pickle.load(f)
         except:
             pass
-        # 过滤已有的数据
+        # 统计各合约已加载到的最新日期，用于后续增量判断
         loaded_date = {}
         for key,value in self.day_cache.items():
             for exchg,item in value.items():
@@ -105,6 +117,7 @@ class RqCacheMonExchg(WtCacheMon):
                 comm = row["order_book_id"]
                 de_listed_date = row["de_listed_date"]
                 last_loaded = loaded_date.get(comm,datetime.datetime(1996,1,1))
+                # 退市日期晚于已加载最新日期，且今天还未加载，则需要补充
                 if (de_listed_date > last_loaded) and (now.date() > last_loaded.date()):
                     comms.add(comm)
             if len(comms) == 0:
@@ -116,6 +129,7 @@ class RqCacheMonExchg(WtCacheMon):
                 month = re.search("(\d+)",code)[0]
                 pid = re.search("[a-zA-Z]+",code)[0]
                 item = DayData()
+                # CZCE/CFFEX 品种代码大写，CZCE 合约月份只取后 3 位（年份单位不同）
                 if exchg in ["CZCE","CFFEX"]:
                     pid = pid.upper()
                     if exchg == "CZCE":
@@ -133,7 +147,7 @@ class RqCacheMonExchg(WtCacheMon):
                 if exchg not in self.day_cache[dtStr].keys():
                     self.day_cache[dtStr][exchg] = dict()
                 self.day_cache[dtStr][exchg][item.code] = item
-                
+
         if self.pkl_file != "":
             with open(self.pkl_file,"wb") as f:
                 pickle.dump(self.day_cache,f)
@@ -173,19 +187,20 @@ if __name__ == '__main__':
     root = "../common"
     start_date = dt.datetime(2010,1,1)
     end_date = None
-    
+
     hotFile = "hots.json"
     secFile = "seconds.json"
-    cacher = RqCacheMonExchg(start_date,end_date,"rq_daily_cache.pkl") 
+    # 使用米筐数据构建缓存；也可改用 WtCacheMonSS 直接读取 datakit 快照
+    cacher = RqCacheMonExchg(start_date,end_date,"rq_daily_cache.pkl")
 
-    # 从datakit落地的行情快照直接读取
+    # 从datakit落地的行情快照直接读取（备选方案）
     # cacher = WtCacheMonSS("../storage/his/snapshot/")
 
     picker = hotpicker.WtHotPicker(hotFile=hotFile, secFile=secFile)
     picker.set_cacher(cacher)
 
     sDate = start_date
-    eDate = None # 可以设置为None，None则自动设置为当前日期
+    eDate = None  # None 则自动取当前日期
     hotRules,secRules = picker.execute_rebuild(sDate, eDate, wait=True)
     print(hotRules)
     print(secRules)

@@ -1,4 +1,5 @@
 #:  -*- coding: utf-8 -*-
+"""港股自动化交易启动脚本，每 5 分钟触发一次策略执行。"""
 import time
 import traceback
 
@@ -13,8 +14,7 @@ logger = fun.get_logger("trader_hk_stock.log")
 
 logger.info("港股自动化交易程序")
 
-# 保存交易日期列表
-G_Trade_days = None
+G_Trade_days = None  # 交易日历缓存，供扩展用
 
 ex = ExchangeFutu()
 
@@ -101,16 +101,10 @@ try:
 
     p_redis_key = "trader_hk_stock"
 
-    # 交易对象
     TR = TraderHKStock("hk", log=logger.info)
-    # 从Redis 中加载交易数据
     TR.load_from_pkl(p_redis_key)
-    # 数据对象
     Data = OnlineMarketDatas("hk", frequencys, ex, cl_config)
-    # 设置使用的策略
     STR = StrategyDemo()
-
-    # 将策略与数据对象加入到交易对象中
     TR.set_strategy(STR)
     TR.set_data(Data)
 
@@ -122,11 +116,10 @@ try:
                 time.sleep(1)
                 continue
 
-            # 判断是否是交易时间
             if ex.now_trading() is False:
                 continue
 
-            # 增加当前持仓中的交易对儿
+            # 持仓中的标的也纳入本轮执行
             run_codes = TR.position_codes() + run_codes
             run_codes = list(set(run_codes))
 
@@ -136,9 +129,8 @@ try:
                 except Exception as e:
                     logger.error(traceback.format_exc())
 
-            # 清空之前获取的k线缓存，避免后续无法获取最新数据
+            # 每轮结束后清空 K 线缓存，确保下轮能拉到最新数据
             Data.clear_cache()
-            # 保存交易数据到 Redis 中
             TR.save_to_pkl(p_redis_key)
 
         except Exception as e:

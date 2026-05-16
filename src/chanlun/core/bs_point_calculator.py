@@ -2,20 +2,10 @@
 """
 三类买卖点识别引擎
 
-按 docs/bs_point_calculator_design.md 落地。本文件实现 Step 1（类骨架）+ Step 2（三买几何判定）。
+按 docs/bs_point_calculator_design.md 落地，识别 1/2/3 类买卖点。
 
-复用资产：
-- ``cl.beichi_pz`` / ``cl.beichi_qs`` / ``cl.zss_is_qs``：背驰与趋势判定（已存在）
-- ``LINE.add_mmd`` / ``LINE.add_bc``：把识别结果挂到笔/线段上（已存在）
-- ``MMD`` / ``BC`` 数据结构（已存在）
-
-本期实现：
-- ``BsPointCalculator``：主类骨架 + 主入口 ``calculate``
-- ``_detect_3buy_3sell``：第三类买卖点（中枢离开后反抽不回中枢区间）
-
-未实现（保留为占位 + NotImplementedError，由后续阶段补全）：
-- ``_detect_1buy_1sell``：依赖 ``cl.beichi_qs``，Step 3 实现
-- ``_detect_2buy_2sell``：依赖一买已识别 + ``cl.beichi_pz``，Step 4 实现
+复用 ``cl.beichi_pz`` / ``cl.beichi_qs`` / ``cl.zss_is_qs`` 做背驰与趋势判定，
+通过 ``LINE.add_mmd`` / ``LINE.add_bc`` 把识别结果挂到笔/线段上。
 """
 from __future__ import annotations
 
@@ -88,9 +78,8 @@ class BsPointCalculator:
         if not lines or not zss:
             return
 
-        # P7: 预过滤 + 预计算 start_keys, 把 valid_zss 切片从 O(M) 降到 O(log M)。
-        # ZsCalculator 输出的 zss 按 zs.start.start.k.k_index 严格升序 (实测断言通过)。
-        # bisect_left 找 now_end_k 插入位置即得 valid prefix。
+        # 预过滤 + 预计算 start_keys, 把 valid_zss 切片从 O(M) 降到 O(log M)。
+        # ZsCalculator 输出的 zss 按 zs.start.start.k.k_index 严格升序。
         # 注意: 不能因 clean_zss 为空就 early return —— 2buy 条件 A (now.low >=
         # prev_1line.low) 不依赖 zss, 必须跑完整套 detect。
         clean_zss, start_keys = self._build_zss_index(zss)
@@ -100,9 +89,7 @@ class BsPointCalculator:
         self._detect_2buy_2sell(lines, zss, clean_zss, start_keys)
         self._detect_3buy_3sell(lines, zss, clean_zss, start_keys)
 
-    # ------------------------------------------------------------------
-    # P7: bisect 优化辅助 (供 _detect_* 复用)
-    # ------------------------------------------------------------------
+    # bisect 二分辅助 (供 _detect_* 复用)
     @staticmethod
     def _build_zss_index(zss: List[ZS]) -> Tuple[List[ZS], List[int]]:
         """预过滤 zss + 抽 start.k.k_index 升序数组, 供 bisect 二分。
@@ -148,7 +135,7 @@ class BsPointCalculator:
         ]
 
     # ------------------------------------------------------------------
-    # 第一类买卖点（Step 3 实现，本期占位）
+    # 第一类买卖点
     # ------------------------------------------------------------------
     def _detect_1buy_1sell(
         self,
@@ -176,21 +163,16 @@ class BsPointCalculator:
             # cl.beichi_qs 内部已防御 len(zss)<2，但提前 short-circuit 可省一次循环
             return
 
-        # ★ B2 信号最小间隔过滤：记录每个 (type, zs_index) 维度上"最近一次"
-        # 已识别的 1 类信号 xd index，用于丢弃与之间隔 < min_signal_interval 的后续同类信号。
-        # 设计目的：避免「同一波趋势背驰被密集多次报点」的密度问题
-        # （例如修复前 xd[159]/[161]/[165]/[167] 在 2.5 天内对照同一段连续 4 次报 1sell）。
+        # 信号最小间隔过滤：记录每个 (type, zs_index) 维度上"最近一次"已识别的
+        # 1 类信号 xd index，丢弃间隔 < min_signal_interval 的后续同类信号，
+        # 避免同一波趋势背驰被密集多次报点。
         last_signal_xd_idx: dict[tuple[str, int], int] = {}
 
         for now_line in lines:
-            # ★ 偏差 #7 修复（未来函数）：beichi_qs 内部用 zss[-2:] 做趋势判定，
-            # 若直接传入全量 zss，会让历史 xd 用「未来形成的中枢」做对照（事后追认），
-            # 同一个 xd 在不同时间快照下会被反复识别为 1buy/1sell/无信号。
-            # 正确语义：每个 now_line 只能用「自身形成时已存在的中枢」判定。
-            #
-            # 切片规则：zs 必须在 now_line 完成之前已经形成（zs.start 的进入段
-            # 起点 K 索引 < now_line 结束 K 索引）。P7 用 bisect 把这步从
-            # O(M) 降到 O(log M)。
+            # 防未来函数：每个 now_line 只能用自身形成前已存在的中枢判定，否则
+            # beichi_qs 内部 zss[-2:] 会让历史 xd 用未来中枢做对照（事后追认），
+            # 同一 xd 在不同快照下被反复识别。切片规则：zs.start 进入段起点 K
+            # 索引 < now_line 结束 K 索引。bisect 把这步从 O(M) 降到 O(log M)。
             now_end_k = now_line.end.k.k_index
             valid_zss = self._filter_valid_zss_by_now_end_k(
                 clean_zss, start_keys, now_end_k
@@ -198,7 +180,7 @@ class BsPointCalculator:
             if len(valid_zss) < 2:
                 continue
 
-            # ★ 直接复用 cl.beichi_qs（内部已做趋势校验 + 力度对比）
+            # 复用 cl.beichi_qs（内部已做趋势校验 + 力度对比）
             try:
                 is_bc, compare_lines = self.cl.beichi_qs(lines, valid_zss, now_line)
             except Exception as e:
@@ -211,10 +193,8 @@ class BsPointCalculator:
             if not is_bc or not compare_lines:
                 continue
 
-            # ★ 偏差 #3 修复：趋势背驰必须创新低/高（按缠论原文段 482）
-            # cl.beichi_qs 仅做 MACD 力度衰减比较，未校验价格几何条件。
-            # 原文要求 1buy 必须满足「创新低 + 力度衰减」复合条件，否则
-            # 仅是中枢内震荡而非趋势背驰。
+            # 趋势背驰必须创新低/高（缠论原文段 482）：beichi_qs 仅做 MACD 力度
+            # 衰减比较，未校验价格几何条件，需补「创新低/高 + 力度衰减」复合条件。
             base_line = compare_lines[0]
             if now_line.type == 'down' and now_line.low >= base_line.low:
                 continue  # 下跌段未创新低 → 不构成 1buy
@@ -228,10 +208,9 @@ class BsPointCalculator:
             if self._mmd_already_attached(now_line, mmd_name, zss[-1]):
                 continue
 
-            # ★ B2 信号最小间隔过滤：检查同方向 + 同对照中枢的上一次 1 类信号
-            # 是否就在 min_signal_interval 个 xd 之内，是的话跳过本次（保留更早那个）。
-            # 注意：valid_zss 切片后 valid_zss[-1] 才是 now_line 实际对照的中枢，
-            # 不是全量的 zss[-1]！这里用 valid_zss[-1].index 做 key 才能正确去重。
+            # 信号最小间隔过滤：上一次同方向 + 同对照中枢的 1 类信号若在
+            # min_signal_interval 个 xd 内则跳过本次（保留更早那个）。
+            # key 必须用 valid_zss[-1].index（实际对照中枢），不是全量 zss[-1]。
             if self.min_signal_interval > 0:
                 key = (now_line.type, valid_zss[-1].index)
                 last_idx = last_signal_xd_idx.get(key)
@@ -271,7 +250,7 @@ class BsPointCalculator:
             )
 
     # ------------------------------------------------------------------
-    # 第二类买卖点（Step 4 实现，本期占位）
+    # 第二类买卖点
     # ------------------------------------------------------------------
     def _detect_2buy_2sell(
         self,
@@ -307,21 +286,17 @@ class BsPointCalculator:
                 # 二买/二卖至少需要 1 个一买 + 1 段反抽 + 当前段 = 3 段
                 continue
 
-            # ★ B4 方向 Y 增强：扩大反查窗口，扫描最近 3 个同向 1 类信号（不止 1 个），
-            # 每个都尝试构建 2buy/2sell。这样能覆盖以下场景：
-            # - 一波趋势中有多个 1buy 锚点（如 xd[110] + xd[132] 都是 1buy），
-            #   后续反弹回踩既可对照 xd[110] 又可对照 xd[132]，应都允许识别
-            # - 命中第一个就跳过后面（避免过度堆叠），但每个 prev 都尝试一次
+            # 扫描最近 3 个同向 1 类信号各自尝试构建 2buy/2sell：一波趋势中可
+            # 有多个 1buy 锚点，后续回踩对照其中任一个都应允许识别。
             prev_1lines = self._find_recent_1mmd_lines(
                 lines[:i], target_type=now_line.type, max_count=3
             )
             if not prev_1lines:
                 continue
 
-            # ---- 准备 valid_zss（条件 B 用，提到外面避免每个 prev 重复计算）----
-            # ★ 偏差 #7 修复（未来函数）：cl.beichi_pz 用 zss[-1] 做盘整对照，
-            # 必须按 now_line 时间位置切片 zss，避免历史 xd 用未来中枢做对照。
-            # P7 用 bisect 把切片从 O(M) 降到 O(log M)。
+            # 准备 valid_zss（条件 B 用，提到外面避免每个 prev 重复计算）。
+            # 防未来函数：cl.beichi_pz 用 zss[-1] 做盘整对照，必须按 now_line
+            # 时间位置切片 zss，避免历史 xd 用未来中枢做对照。
             now_end_k = now_line.end.k.k_index
             valid_zss_2 = self._filter_valid_zss_by_now_end_k(
                 clean_zss, start_keys, now_end_k
@@ -333,7 +308,7 @@ class BsPointCalculator:
                 if i - prev_1line.index < 2:
                     continue
 
-                # ---- 条件 A：不创新低 / 不创新高（强条件，B3 方向 Y 边界宽容：>= / <=）----
+                # ---- 条件 A：不创新低 / 不创新高（强条件，边界宽容：>= / <=）----
                 mmd_name: Optional[str] = None
                 msg = ""
                 if now_line.type == 'down' and now_line.low >= prev_1line.low:
@@ -349,7 +324,7 @@ class BsPointCalculator:
                         f'now.high={now_line.high} <= prev_1line.high={prev_1line.high}'
                     )
 
-                # ---- 条件 B：创新低/高但盘整背驰（弱条件，B3 方向 Y 增强：双中枢对照）----
+                # ---- 条件 B：创新低/高但盘整背驰（弱条件，双中枢对照）----
                 if mmd_name is None and valid_zss_2:
                     # 优先用末中枢，失败再尝试次末中枢（覆盖更多场景）
                     candidates_zs = [valid_zss_2[-1]]
@@ -428,7 +403,7 @@ class BsPointCalculator:
     ) -> List[LINE]:
         """
         从 ``prev_lines`` 中倒序查找最近 ``max_count`` 根挂了 ``1buy`` 或 ``1sell``
-        的同方向线段（B3 方向 Y 增强：替代 _find_prev_1mmd_line 用于多锚点 2buy 识别）。
+        的同方向线段（多锚点 2buy 识别，一波趋势中可有多个一买锚点）。
 
         返回顺序：从最近到最远（``[最近, 次近, 更早, ...]``）
 
@@ -466,7 +441,7 @@ class BsPointCalculator:
         return None
 
     # ------------------------------------------------------------------
-    # 第三类买卖点（本期实现）
+    # 第三类买卖点
     # ------------------------------------------------------------------
     def _detect_3buy_3sell(
         self,
@@ -490,20 +465,15 @@ class BsPointCalculator:
         :param zss: 本级别中枢列表
         """
         for now_line in lines:
-            # ★ 偏差 #7 修复（未来函数）：3buy/3sell 关联中枢必须在 now_line
-            # 完成之前就已"完成"。若直接传入全量 zss，历史 xd 会被未来才完成
-            # 的中枢"事后追认"为 3buy/3sell，与实时识别语义不符。
-            # P7 用 bisect 把 start 切片从 O(M) 降到 O(log M); end 过滤仍在
-            # prefix 上做 list comp (prefix 通常远小于 M)。
+            # 防未来函数：3buy/3sell 关联中枢必须在 now_line 完成之前就已
+            # "完成"，否则历史 xd 会被未来才完成的中枢事后追认。
             now_end_k = now_line.end.k.k_index
             valid_zss = self._filter_valid_zss_by_now_end_k(
                 clean_zss, start_keys, now_end_k, require_end_complete=True
             )
 
-            # ★ B4 增强已回滚：3buy/3sell 必须只对照"紧邻离开段"的最近一个中枢，
-            # 否则远期价格远低/高于早期中枢时，会让每个反抽段对所有早期中枢都报 3 类信号
-            # （实测在 90 天数据里 3sell 数量从 48 爆炸到 1079）。
-            # 缠论原文 3 类语义就是"中枢离开后的紧邻反抽"，不应放宽到所有历史中枢。
+            # 3buy/3sell 只对照"紧邻离开段"的最近一个中枢（缠论原文 3 类语义），
+            # 放宽到所有历史中枢会让每个反抽段对所有早期中枢都报点、信号爆炸。
             related_zs = self._find_related_zs_for_3rd(now_line, valid_zss)
             if related_zs is None:
                 continue
@@ -541,8 +511,8 @@ class BsPointCalculator:
             - ``now_line`` 必须严格在中枢离开段之后（不能是中枢内部线段，也不能是离开段本身）
             - 取所有合法中枢中"离开段最近"的那一个
 
-        注意：B4 方向 Y 增强后，新代码改为调用 ``_find_all_candidate_zss_for_3rd``，
-        本方法保留作为向后兼容（取列表第一个 = 最近的），不再被主流程调用。
+        注意：主流程改用 ``_find_all_candidate_zss_for_3rd``，本方法保留作为
+        向后兼容（取候选列表第一个 = 最近的），不再被主流程调用。
 
         :param now_line: 候选反抽线段
         :param zss: 中枢列表（按 index 升序）
@@ -555,7 +525,7 @@ class BsPointCalculator:
         self, now_line: LINE, zss: List[ZS]
     ) -> List[ZS]:
         """
-        B4 方向 Y 增强：扫描所有满足时间/状态条件的候选中枢，按"离开段距离 now_line 由近到远"排序。
+        扫描所有满足时间/状态条件的候选中枢，按"离开段距离 now_line 由近到远"排序。
 
         规则（与 _find_related_zs_for_3rd 一致）：
             - 中枢已完成（``done == True``）且有效（``real == True``）

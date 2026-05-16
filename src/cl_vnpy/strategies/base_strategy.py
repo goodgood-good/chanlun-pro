@@ -15,12 +15,15 @@ from chanlun.strategy.strategy_demo import StrategyDemo
 
 
 class VNPYTrader(BackTestTrader):
+    """
+    vnpy CTA 交易适配类，将缠论信号转换为 vnpy 买卖/平仓指令。
+    """
 
     def __init__(self, name, cta):
         super().__init__(name, "online", market="futures")
         self.cta = cta
 
-        # 固定交易手数
+        # 固定每次下单手数；实盘时可根据资金动态计算
         self.fixed_amount = 1
 
     def open_buy(self, code, opt: Operation):
@@ -78,7 +81,8 @@ class VNPYTrader(BackTestTrader):
 
 class VNPYDatas(MarketDatas):
     """
-    VNPY 的数据类，只有单个行情的，所以这里的 code 没太大用处
+    vnpy CTA 行情数据适配类；vnpy 单标的策略中 code 参数无实际筛选意义，
+    以 symbol 固定标识当前合约。
     """
 
     def __init__(self, symbol, frequencys: List[str], cl_config: dict):
@@ -87,7 +91,7 @@ class VNPYDatas(MarketDatas):
         self.symbol = symbol
         self.frequencys = frequencys
         self.now_date = None
-        # 用来保存k线数据
+        # 按周期键缓存 K 线数据，由各 on_Xm_bar 回调追加
         self.cache_klines: Dict[str, pd.DataFrame] = {}
         for f in self.frequencys:
             self.cache_klines[f] = pd.DataFrame(
@@ -198,6 +202,7 @@ class VNPYDatas(MarketDatas):
         }
 
     def get_cl_data(self, code, frequency, cl_config: dict = None) -> ICL:
+        """按周期获取缠论数据对象，首次调用时创建，后续增量更新。"""
         klines = self.klines(code, frequency)
         if frequency not in self.cl_datas.keys():
             self.cl_datas[frequency] = cl.CL(
@@ -210,7 +215,7 @@ class VNPYDatas(MarketDatas):
 
 class BaseStrategy(CtaTemplate):
     """
-    单标的，多周期回测基类
+    缠论 vnpy 单标的多周期 CTA 策略基类；子类通过替换 STR 注入不同缠论策略。
     """
 
     author = "WX"
@@ -218,26 +223,22 @@ class BaseStrategy(CtaTemplate):
     variables = []
 
     def __init__(self, cta_engine, strategy_name, vt_symbol, setting):
-        """"""
         super().__init__(cta_engine, strategy_name, vt_symbol, setting)
-        # 缠论计算配置
+        # 缠论计算配置；xd_bzh_no 表示线段不做笔标准化处理
         self.cl_config = {"xd_bzh": "xd_bzh_no"}
         self.frequencys = ["5_1m", "1_1m"]
 
-        # 交易对象
         self.TR = VNPYTrader("backtest", self)
-        # 数据对象
         self.Data = VNPYDatas(self.vt_symbol, self.frequencys, self.cl_config)
 
-        # 这里指定缠论策略，根据策略信号进行交易
+        # 子类可覆盖 STR 以切换不同缠论策略
         self.STR: Strategy = StrategyDemo()
         self.TR.set_strategy(self.STR)
         self.TR.set_data(self.Data)
 
-        # 合成的对象
         self.bgs: Dict[str, BarGenerator] = {}
 
-        # 要运行的周期，以及回调的方法（大周期的在前面）
+        # intervals 列表决定多周期合成顺序，大周期在前以保证回调先于小周期触发
         self.intervals = [
             {
                 "windows": 5,
@@ -261,43 +262,35 @@ class BaseStrategy(CtaTemplate):
             )
 
     def on_init(self):
-        """
-        Callback when strategies is inited.
-        """
+        """策略初始化回调：预加载历史数据以填充各周期 BarGenerator 缓冲区。"""
         self.write_log("策略初始化")
 
         def update_bar(bar: BarData):
             for _, bg in self.bgs.items():
                 bg.update_bar(bar)
 
-        # 默认加载几天的历史数据（根据回测开始时间进行算，这几天的数据不参与策略计算）
+        # 预加载 5 天历史数据用于填充 BarGenerator，这部分数据不参与策略信号计算
         self.load_bar(5, callback=update_bar)
 
     def on_start(self):
-        """
-        Callback when strategies is started.
-        """
+        """策略启动回调。"""
         self.write_log("策略启动")
 
     def on_stop(self):
-        """
-        Callback when strategies is stopped.
-        """
+        """策略停止回调。"""
         self.write_log("策略停止")
 
     def on_tick(self, tick: TickData):
         """
-        实盘的时候才会执行，用于生成 bar
+        实盘 tick 回调，仅用于驱动 BarGenerator 生成 1m bar；
+        只需喂给第一个 bg，后续周期由 on_bar 统一推进。
         """
         for _key, _bg in self.bgs.items():
-            # 只需要执行一下就好
             _bg.update_tick(tick)
             break
 
     def on_bar(self, bar: BarData):
-        """
-        Callback of new bar data update.
-        """
+        """1m bar 推送时驱动所有周期 BarGenerator，并触发缠论策略计算。"""
         for _, bg in self.bgs.items():
             bg.update_bar(bar)
 
@@ -306,19 +299,10 @@ class BaseStrategy(CtaTemplate):
         self.put_event()
 
     def on_order(self, order: OrderData):
-        """
-        Callback of new order data update.
-        """
         pass
 
     def on_trade(self, trade: TradeData):
-        """
-        Callback of new trade data update.
-        """
         self.put_event()
 
     def on_stop_order(self, stop_order: StopOrder):
-        """
-        Callback of stop order update.
-        """
         pass

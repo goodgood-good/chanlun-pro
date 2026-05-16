@@ -67,7 +67,6 @@ def create_app(test_config=None):
                     job.next_run_time
                 )
             scheduler.my_task_list[job_id]["state"] = state_map[event.code]
-            # print('任务更新', task_list[job_id])
         return
 
     scheduler.add_listener(run_tasks_listener, EVENT_ALL)
@@ -111,9 +110,9 @@ def create_app(test_config=None):
     from .csrf import csrf
     csrf.init_app(app)
 
-    login_manager = LoginManager()  # 实例化登录管理对象
-    login_manager.init_app(app)  # 初始化应用
-    login_manager.login_view = "login_opt"  # 设置用户登录视图函数 endpoint
+    login_manager = LoginManager()
+    login_manager.init_app(app)
+    login_manager.login_view = "login_opt"
 
     class LoginUser(UserMixin):
         def __init__(self) -> None:

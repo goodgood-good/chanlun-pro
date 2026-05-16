@@ -18,39 +18,27 @@ from chanlun.tools import tdx_best_ip as best_ip
 
 @fun.singleton
 class ExchangeTDXNYFutures(Exchange):
-    """
-    通达信纽约期货行情接口
-    """
+    """通达信纽约期货行情适配器（market=16/17，category=3）。"""
 
     g_all_stocks = []
 
-    # 连接超时 (秒), 与 ExchangeTDXFutures 保持一致, 详见该类同名常量注释。
+    # 连接超时与 ExchangeTDXFutures 保持一致；auto_retry=False 避免 pytdx 内部叠加重试导致 60s+ 卡顿
     _CONNECT_TIMEOUT = 5
     _INIT_MAX_RETRY = 2
 
     def __init__(self):
-        # super().__init__()
-
-        # 设置时区
         self.tz = pytz.timezone("Asia/Shanghai")
-
-        # 文件缓存
         self.fdb = FileCacheDB()
 
-        # 初始化失败标记。@fun.singleton 会缓存实例, 不能在此 raise,
-        # 否则会破坏其他依赖通达信的功能;调用方应根据 init_failed 自行短路。
+        # @fun.singleton 缓存实例，init_failed 让调用方短路而不是再次触发超时
         self.init_failed = False
         self.market_maps = {}
 
         try:
-            # 选择最优的服务器，并保存到 cache 中
             self.connect_info = db.cache_get("tdxex_connect_ip")
             if self.connect_info is None:
                 self.connect_info = self.reset_tdx_ip()
-                # print(f"TDXEX 最优服务器：{self.connect_info}")
 
-            # 初始化，映射交易所代码
-            # auto_retry=False + 显式 retry_count, 避免 pytdx 内部叠加重试导致 60s+ 卡顿。
             retry_count = 0
             last_error = None
             while retry_count < self._INIT_MAX_RETRY:
@@ -83,9 +71,7 @@ class ExchangeTDXNYFutures(Exchange):
             print("通达信 期货行情接口初始化失败，期货行情不可用")
 
     def reset_tdx_ip(self):
-        """
-        重新选择tdx最优服务器
-        """
+        """重新选择 TDX 最优服务器并写入缓存。"""
         connect_info = best_ip.select_best_ip("future")
         connect_info = {"ip": connect_info["ip"], "port": int(connect_info["port"])}
         db.cache_set("tdxex_connect_ip", connect_info)
@@ -109,9 +95,7 @@ class ExchangeTDXNYFutures(Exchange):
         }
 
     def all_stocks(self):
-        """
-        使用 通达信的方式获取所有股票代码
-        """
+        """获取纽约期货标的列表（category=3，market 16/17），过滤无 tick 标的。"""
         if len(self.g_all_stocks) > 0:
             return self.g_all_stocks
 
@@ -142,20 +126,16 @@ class ExchangeTDXNYFutures(Exchange):
                 if len(instruments) < count:
                     break
 
-        # 获取 tick ，如果没有tick 的，则不显示code
+        # 过滤无实时 tick 的标的（已下市合约），避免无效请求
         ticks = self.all_ticks()
         tick_codes = [_c for _c, _t in ticks.items()]
         __all_stocks = [_s for _s in __all_stocks if _s["code"] in tick_codes]
 
         self.g_all_stocks = __all_stocks
-        # print(f"期货获取数量：{len(self.g_all_stocks)}")
-
         return self.g_all_stocks
 
     def to_tdx_code(self, code):
-        """
-        转换为 tdx 对应的代码
-        """
+        """将 "CO.GC00W" 格式代码拆分为 (market_int, tdx_code)。"""
         code_infos = code.split(".")
         market_info = self.market_maps[code_infos[0]]
         return market_info["market"], code_infos[1]
@@ -173,9 +153,7 @@ class ExchangeTDXNYFutures(Exchange):
         end_date: str = None,
         args=None,
     ) -> Union[pd.DataFrame, None]:
-        """
-        通达信，不支持按照时间查找
-        """
+        """通达信不支持按时间区间查找，分页拉取后与文件缓存合并去重；夜盘时间由 fix_yp_date 修正。"""
         if args is None:
             args = {}
         if "pages" not in args.keys():
@@ -200,7 +178,6 @@ class ExchangeTDXNYFutures(Exchange):
             print("不支持的调用参数")
             return None
 
-        # _time_s = time.time()
         try:
             client = TdxExHq_API(raise_exception=True, auto_retry=True)
             with client.connect(self.connect_info["ip"], self.connect_info["port"]):
@@ -208,7 +185,6 @@ class ExchangeTDXNYFutures(Exchange):
                     Market.NY_FUTURES.value, code, frequency
                 )
                 if klines is None:
-                    # 获取 8*700 = 5600 条数据
                     klines = pd.concat(
                         [
                             client.to_df(
@@ -234,7 +210,6 @@ class ExchangeTDXNYFutures(Exchange):
                     klines.sort_values("date", inplace=True)
                 else:
                     for i in range(1, args["pages"] + 1):
-                        # print(f'{code} 使用缓存，更新获取第 {i} 页')
                         _ks = client.to_df(
                             client.get_instrument_bars(
                                 frequency_map[frequency],
@@ -252,11 +227,11 @@ class ExchangeTDXNYFutures(Exchange):
                         new_start_dt = _ks.iloc[0]["date"]
                         old_end_dt = klines.iloc[-1]["date"]
                         klines = pd.concat([klines, _ks], ignore_index=True)
-                        # 如果请求的第一个时间大于缓存的最后一个时间，退出
+                        # 新一页起始时间早于缓存末尾，说明已覆盖，无需继续
                         if old_end_dt >= new_start_dt:
                             break
 
-            # 删除重复数据
+            # 去重：分页重叠时保留最新一条
             klines = klines.drop_duplicates(["date"], keep="last").sort_values("date")
             self.fdb.save_tdx_klines(Market.NY_FUTURES.value, code, frequency, klines)
 
@@ -267,10 +242,6 @@ class ExchangeTDXNYFutures(Exchange):
             )
             klines.sort_values("date", inplace=True)
 
-            # if frequency in {"y", "q", "m", "w", "d"}:
-            #     klines["date"] = klines["date"].apply(self.__convert_date)
-
-            # 将 volume 转换成 float类型
             klines[["volume"]] = klines[["volume"]].astype(float)
 
             return klines[["code", "date", "open", "close", "high", "low", "volume"]]
@@ -281,22 +252,17 @@ class ExchangeTDXNYFutures(Exchange):
             traceback.print_exc()
         finally:
             pass
-            # print(f'请求行情用时：{time.time() - _s_time}')
         return None
 
     @staticmethod
     def fix_yp_date(code: str, dt: datetime.datetime):
-        """
-        修复夜盘的时间，tdx将夜盘的时间归类到了第二天，修复为前一天
-        """
+        """纽约期货 00-05 点数据归属次一交易日（TDX 夜盘时间错位修正）。"""
         if dt.hour in [0, 1, 2, 3, 4, 5]:
             dt = dt + datetime.timedelta(days=1)
         return dt
 
     def stock_info(self, code: str) -> Union[Dict, None]:
-        """
-        获取股票名称
-        """
+        """获取纽约期货标的名称。"""
         all_stock = self.all_stocks()
         stock = [_s for _s in all_stock if _s["code"] == code]
         if not stock:
@@ -304,11 +270,7 @@ class ExchangeTDXNYFutures(Exchange):
         return {"code": stock[0]["code"], "name": stock[0]["name"]}
 
     def ticks(self, codes: List[str]) -> Dict[str, Tick]:
-        """
-        如果可以使用 富途 的接口，就用 富途的，否则就用 日线的 K线计算
-        使用 富途 的接口会很快，日线则很慢
-        获取日线的k线，并返回最后一根k线的数据
-        """
+        """获取纽约期货实时报价（通达信盘口接口）。"""
         ticks = {}
         client = TdxExHq_API(raise_exception=True, auto_retry=True)
         with client.connect(self.connect_info["ip"], self.connect_info["port"]):
@@ -317,13 +279,6 @@ class ExchangeTDXNYFutures(Exchange):
                 if _market is None:
                     continue
                 _quote = client.get_instrument_quote(_market, _tdx_code)
-                # [OrderedDict([('market', 1), ('code', 'FG2305'), ('pre_close', 1546.0), ('open', 1548.0),
-                # ('high', 1558.0), ('low', 1536.0), ('price', 1543.0), ('kaicang', 341886), ('zongliang', 367292),
-                # ('xianliang', 1), ('neipan', 192905), ('waipan', 174387), ('chicang', 993096), ('bid1', 1543.0),
-                # ('bid2', 0.0), ('bid3', 0.0), ('bid4', 0.0), ('bid5', 0.0), ('bid_vol1', 903), ('bid_vol2', 0),
-                # ('bid_vol3', 0), ('bid_vol4', 0), ('bid_vol5', 0), ('ask1', 1544.0), ('ask2', 0.0), ('ask3', 0.0),
-                # ('ask4', 0.0), ('ask5', 0.0), ('ask_vol1', 512), ('ask_vol2', 0), ('ask_vol3', 0), ('ask_vol4', 0),
-                # ('ask_vol5', 0)])]
                 if len(_quote) > 0:
                     _quote = _quote[0]
                     ticks[_code] = Tick(
@@ -367,11 +322,6 @@ class ExchangeTDXNYFutures(Exchange):
                     if len(_qs) < 80:
                         break
                 for _quote in _quotes:
-                    # OrderedDict([('market', 28), ('code', 'MA2509'),
-                    # ('BiShu', 10569), ('ZuoJie', 2262.0), ('JinKai', 2260.0), ('ZuiGao', 2266.0), ('ZuiDi', 2242.0), ('MaiChu', 2258.0), ('KaiCang', 262905),
-                    # ('ZongLiang', 254179), ('XianLiang', 2), ('ZongJinE', 5730089472.0), ('NeiPan', 128701), ('WaiPan', 125478),
-                    # ('ChiCangLiang', 674677), ('MaiRuJia', 2257.0), ('MaiRuLiang', 72), ('MaiChuJia', 2258.0), ('MaiChuLiang', 25)])
-
                     if _quote["MaiChu"] == 0.0 or _quote["ZongLiang"] == 0.0:
                         continue
 
@@ -398,14 +348,12 @@ class ExchangeTDXNYFutures(Exchange):
         return ticks
 
     def now_trading(self):
-        """
-        返回当前是否是交易时间
-        """
+        """纽约期货近似 24 小时交易，始终返回 True。"""
         return True
 
     @staticmethod
     def __convert_date(dt: datetime.datetime):
-        # 通达信行情是后对其的，统一将 日以上级别的行情日期转换成 23点
+        # 通达信日线后对齐，统一设为 00:00
         return dt.replace(hour=0, minute=0)
 
     def balance(self):
@@ -426,32 +374,6 @@ class ExchangeTDXNYFutures(Exchange):
 
 if __name__ == "__main__":
     ex = ExchangeTDXNYFutures()
-    # print(ex.market_maps)
-    # stocks = ex.all_stocks()
-    # print(len(stocks))
-
-    # for _s in stocks:
-    #     print(_s["code"], _s["name"])
-
-    # for s in stocks:
-    #     #     if "黄金" in s["name"]:
-    #     print(s)
-    # print(len(stocks))
-    # print(ex.market_maps)
-    # for s in stocks:
-    #     if '原油' in s["name"]:
-    #         print(s)
-
-    # print(ex.to_tdx_code('QS.ZN2306'))
-
-    # ticks = ex.all_ticks()
-    # print(len(ticks))
-    # for _code, _tick in ticks.items():
-    #     print(_code, _tick.last, _tick.volume)
-
     klines = ex.klines("CO.GC00W", "30m")
     print(len(klines))
     print(klines)
-
-    # ticks = ex.all_ticks()
-    # print(len(ticks))

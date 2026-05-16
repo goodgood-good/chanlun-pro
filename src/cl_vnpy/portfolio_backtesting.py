@@ -6,6 +6,9 @@ from cl_vnpy.strategies.chanlun_xdmmd_strategy import ChanlunXdmmdStrategy
 
 
 def run_backtesting(strategy_class, setting, vt_symbol, interval, start, end, rate, slippage, size, pricetick, capital):
+    """
+    对单个标的运行 vnpy CTA 回测，返回逐日盈亏 DataFrame，用于后续组合叠加。
+    """
     engine = BacktestingEngine()
     engine.set_parameters(
         vt_symbol=vt_symbol,
@@ -25,6 +28,7 @@ def run_backtesting(strategy_class, setting, vt_symbol, interval, start, end, ra
     return df
 
 def show_portafolio(df):
+    """计算组合统计指标并展示权益曲线图。"""
     engine = BacktestingEngine()
     engine.calculate_statistics(df)
     engine.show_chart(df)

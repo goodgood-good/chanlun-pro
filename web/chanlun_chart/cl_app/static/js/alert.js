@@ -4,7 +4,6 @@ var Alert = (function () {
       layui.use(["table", "form"], function () {
         let form = layui.form;
 
-        // 获取提醒任务列表并填充到select中
         $.get("/alert_list/" + Utils.get_market(), function (res) {
           if (res.code == 0) {
             let task_name_select = $("#task_name_select");
@@ -19,7 +18,6 @@ var Alert = (function () {
           }
         });
 
-        // 监听select选择器，选择后刷新列表
         form.on("select(task_name_select)", function (data) {
           Alert.get_alert_records();
         });
@@ -75,9 +73,8 @@ var Alert = (function () {
             ],
           ],
         });
-        // 单击警报内容列表
         table.on("row(table_alert_reocrds)", function (obj) {
-          let data = obj.data; // 获取当前行数据
+          let data = obj.data;
           change_chart_ticker(Utils.get_market(), data.code);
         });
       });
@@ -188,23 +185,20 @@ var Alert = (function () {
             ],
           ],
         });
-        // 行双击事件( 双击事件为: rowDouble )
         table.on("row(table_alerts)", function (obj) {
-          let data = obj.data; // 获取当前行数据
+          let data = obj.data;
           layer.open({
             type: 2,
             title: "修改警报提醒",
             area: ["1000px", "90vh"],
             content: "/alert_edit/" + Utils.get_market() + "/" + data.id,
             anim: 1,
-            fixed: true, // 不固定
+            fixed: true,
             shadeClose: true,
           });
         });
-        // 右键菜单
         table.on("rowContextmenu(table_alerts)", function (obj) {
-          let data = obj.data; // 获取当前行数据
-          // 右键操作
+          let data = obj.data;
           dropdown.render({
             trigger: "contextmenu",
             show: true,

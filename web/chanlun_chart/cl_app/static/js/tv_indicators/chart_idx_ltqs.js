@@ -91,14 +91,11 @@ var TvIdxLTQS = (function () {
           format: {},
         },
         constructor: function () {
-          this.init = function (context, inputCallback) {
-            // 初始化
-          };
+          this.init = function (context, inputCallback) {};
           this.main = function (context, inputCallback) {
             this._context = context;
             this._input = inputCallback;
 
-            // 获取收盘价
             const c = this._context.new_var(PineJS.Std.close(this._context));
 
             // VAR1:=EMA(EMA(CLOSE,9),9);
@@ -136,7 +133,6 @@ var TvIdxLTQS = (function () {
             const down_stick =
               var2_current < var2_ref && var2_current > 0 ? var2_current : NaN;
 
-            // 零轴线
             const zero_line = 0;
 
             return [

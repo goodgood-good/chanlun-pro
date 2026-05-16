@@ -31,14 +31,9 @@ class AlertTasks(object):
             if _t.is_run != 1:
                 continue
 
-            # 关键修复：原实现使用 cron 的 minute=f"*/{interval_minutes}"，
-            # 在 interval_minutes 不能整除 60 时（例如 7、25、50 分钟），cron
-            # 会在每个整点重置触发序列，导致边界附近重复触发；并且原代码
-            # `args={_t.id}` 用了 set 而非 tuple/list，依赖位置实参时
-            # 行为依赖元素 hash 顺序，是潜在 bug。
-            #
-            # 现统一改为 IntervalTrigger，按"自上次触发起经过 N 分钟"调度，
-            # 行为更可预期；同时 args 改为 tuple，避免 set 顺序问题。
+            # 用 IntervalTrigger 替代 cron：cron 在 interval_minutes 不整除 60
+            # 时会在整点重置触发序列，导致边界附近重复触发；args 也从 set 改为 tuple
+            # 以避免位置实参依赖 hash 顺序。
             interval_minutes = max(int(_t.interval_minutes or 1), 1)
             _job = self.scheduler.add_job(
                 func=self.alert_run,

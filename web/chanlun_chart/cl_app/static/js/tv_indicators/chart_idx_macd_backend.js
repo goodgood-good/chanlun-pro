@@ -1,8 +1,5 @@
-// -----------------------------------------------------------------------
-// 文件名: chart_idx_macd_backend.js
-// 版本: V32 (Cross-Timeframe MACD)
-// 功能: 支持跨周期 MACD 显示 (1m->5m, 5m->30m, 30m->d)
-// -----------------------------------------------------------------------
+// MACD_HTF：从 datafeed 缓存中读取后端已算好的跨周期 MACD 数据并在 TV 图上渲染。
+// 支持 1m→5m、5m→30m、30m→d 等降频显示。
 
 var TvIdxMACDBackend = (function () {
 
@@ -67,7 +64,7 @@ var TvIdxMACDBackend = (function () {
     return { widget: preferredWidget, datafeeds: preferredDatafeeds };
   }
 
-  // 智能时间搜索 (保持 5天 容错)
+  // 二分查找最近 bar，按周期自适应容差（小时级1h，日级2d，周级5d）
   function smartSearch(times, target, intervalStr) {
     if (target === undefined || target === null || isNaN(target)) return -1;
     const isSeconds = target < 10000000000;
@@ -180,14 +177,13 @@ var TvIdxMACDBackend = (function () {
                 return [NaN, 0, NaN, NaN];
               }
 
-              // 1. 获取并修正输入参数 (关键修复!)
               let rawTicker = String(context.symbol.ticker || "").toLowerCase();
               let rawInterval = String(context.symbol.interval || "").toLowerCase();
 
               const preferredContext = getPreferredChartContext(rawTicker);
               const preferredWidget = preferredContext.widget;
 
-              // [FIX V31] 优先从实例级 Widget 获取真实的周期
+              // TV 自定义指标拿到的 interval 有时是数字字符串，需从 widget.symbolInterval() 修正
               if (preferredWidget) {
                 try {
                   if (preferredWidget.symbolInterval) {
@@ -209,24 +205,16 @@ var TvIdxMACDBackend = (function () {
                 }
               }
 
-              // 2. 获取数据源
               let datafeeds = preferredContext.datafeeds || [];
 
-              // 3. 解析目标
-              let targetCode = rawTicker; // 直接使用完整的 ticker 进行匹配，例如 a:sh.000001
-              
-              // 增加调试日志，方便排查 MACD 数据是否成功匹配
-              if (Math.random() < 0.01) { // 降低日志频率
-                  // console.log("[MACD-DEBUG] Searching for:", targetCode, "Interval:", rawInterval);
-              }
-
+              // targetCode 使用完整 ticker（如 a:sh.000001）进行 fuzzy 匹配
+              let targetCode = rawTicker;
               let targetInterval = rawInterval;
               const mappings = { 'd': '1d', '1d': 'd', 'w': '1w', '1w': 'w', 'm': '1m', '1m': 'm', '1440': '1d', '240': '4h' };
               if (mappings[rawInterval]) targetInterval = mappings[rawInterval];
 
               let barsResult = null;
 
-              // 4. 遍历查找 (Fuzzy Match)
               for (const df of datafeeds) {
                 if (df._historyProvider && df._historyProvider.bars_result) {
                   const barsMap = df._historyProvider.bars_result;
@@ -251,8 +239,6 @@ var TvIdxMACDBackend = (function () {
                 }
                 if (barsResult) break;
               }
-
-              // 5. 提取数据 (优先使用跨周期 higher_macd 数据)
 
               if (barsResult && barsResult.times) {
                 // 判断是否有跨周期 MACD 数据

@@ -1,6 +1,7 @@
-"""src/chanlun/file_db_mixins/kline_cache.py — K 线 CSV/parquet 缓存 Mixin。
+"""K 线 CSV/parquet 双写缓存 Mixin。
 
-P8 step 3 (2026-05-15): 从 file_db.py 物理拆出。
+负责通达信 K 线的 CSV + parquet 双写过渡（parquet 为主，CSV 为灰度期兜底），
+挂载到 FileCacheDB 主类通过多继承提供方法。
 """
 
 from __future__ import annotations
@@ -17,15 +18,8 @@ from chanlun import fun
 from chanlun.tools.log_util import LogUtil
 
 
-# P8 step 2.3: KlineCacheMixin
-# ---------------------------------------------------------------------------
-# 负责 tdx K 线 CSV + parquet 双写过渡 (US-008)。
-# 依赖 FileCacheDB 主类提供的:
-#   字段 ``klines_path``
-#   方法 ``_make_unique_tmp_path()`` / ``_atomic_write_csv()`` / ``_try_run_cleanup()``
-# ===========================================================================
 class _KlineCacheMixin:
-    """K 线 CSV/parquet 缓存方法 (P8 拆分)。"""
+    """K 线 CSV/parquet 双写缓存，parquet 为主，CSV 为灰度期兜底。"""
 
     def _kline_parquet_path(self, market: str, code: str, frequency: str) -> pathlib.Path:
         return self.klines_path / market / f"{code.replace('.', '_')}_{frequency}.parquet"
@@ -86,9 +80,9 @@ class _KlineCacheMixin:
         """
         获取缓存在文件中的股票数据。
 
-        US-008: 优先读 parquet (体积小 + 读快), 失败 fallback CSV (兼容老数据)。
-        新数据由 save_tdx_klines 同时写 parquet + CSV (双写过渡), 灰度期满后
-        可拆掉 CSV 路径只留 parquet。
+        优先读 parquet（体积小、读快），失败 fallback CSV（兼容老数据）。
+        新数据由 save_tdx_klines 同时写 parquet + CSV（双写过渡），
+        灰度期满后可拆掉 CSV 路径只留 parquet。
         """
         _klines = self.load_klines_parquet(market, code, frequency)
         if _klines is None:
@@ -98,7 +92,7 @@ class _KlineCacheMixin:
             try:
                 _klines = pd.read_csv(file_pathname, parse_dates=["date"])
             except Exception:
-                # H3:用 missing_ok 防止并发清理线程已经删过该文件时再次抛错。
+                # missing_ok 防止并发清理线程已删过该文件时再次抛错
                 file_pathname.unlink(missing_ok=True)
                 return None
 
@@ -107,7 +101,7 @@ class _KlineCacheMixin:
                 return None
             _klines = _klines.iloc[0:-1:]
 
-        # H6: 随机概率清理历史缓存, 真正的并发节流由 _try_run_cleanup 保证。
+        # 随机概率清理历史缓存，真正的并发节流由 _try_run_cleanup 保证。
         if random.randint(0, 1000) <= 5:
             self._try_run_cleanup(
                 f"tdx::{market}",
@@ -120,7 +114,7 @@ class _KlineCacheMixin:
     ):
         """保存通达信 k 线数据对象到文件中。
 
-        US-008: 同时写 parquet (主) + CSV (兜底, 灰度期); 灰度期满后只删
+        同时写 parquet（主）+ CSV（兜底，灰度期）；灰度期满后只删
         _atomic_write_csv 这一行 + clear 里的 csv glob 即可。
         """
         self.save_klines_parquet(market, code, frequency, kline)
@@ -134,7 +128,7 @@ class _KlineCacheMixin:
             15 * 24 * 60 * 60
         )
         market_dir = self.klines_path / market
-        # US-008: parquet 和 CSV 一起清; 二者文件名同源, mtime 同步更新
+        # parquet 和 CSV 一起清，二者文件名同源，mtime 同步更新
         for pattern in ("*.csv", "*.parquet"):
             for filename in market_dir.glob(pattern):
                 try:

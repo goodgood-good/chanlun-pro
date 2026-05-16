@@ -1,4 +1,5 @@
 #:  -*- coding: utf-8 -*-
+"""沪深 A 股自动化交易启动脚本，每 30 分钟触发一次策略执行。"""
 import time
 import traceback
 
@@ -8,10 +9,6 @@ from chanlun.exchange.exchange_tdx import ExchangeTDX
 from chanlun.strategy.strategy_xd_mmd import StrategyXDMMD
 from chanlun.trader.online_market_datas import OnlineMarketDatas
 from chanlun.trader.trader_a_stock import TraderAStock
-
-"""
-运行依赖 futuOpenD
-"""
 
 logger = fun.get_logger("trader_a_stock.log")
 
@@ -636,17 +633,11 @@ try:
 
     p_redis_key = "trader_a_stock"
 
-    # 交易所对象
     ex = ExchangeTDX()
-    # 交易对象
     TR = TraderAStock("AStock", log=logger.info)
-    # 行情数据对象
     Data = OnlineMarketDatas("a", frequencys, ex, cl_config)
-    # 从 redis 中加载数据
     TR.load_from_pkl(p_redis_key)
-    # 策略
     STR = StrategyXDMMD()
-    # 将策略与数据对象加入到交易对象中
     TR.set_strategy(STR)
     TR.set_data(Data)
 
@@ -662,7 +653,7 @@ try:
             if ex.now_trading() is False:
                 continue
 
-            # 增加当前持仓中的交易对儿
+            # 持仓中的标的也纳入本轮执行，确保持仓管理不遗漏
             run_codes = TR.position_codes() + run_codes
             run_codes = list(set(run_codes))
 
@@ -672,10 +663,9 @@ try:
                 except Exception as e:
                     logger.error(traceback.format_exc())
 
-            # 清空之前获取的k线缓存，避免后续无法获取最新数据
+            # 每轮结束后清空 K 线缓存，确保下轮能拉到最新数据
             Data.clear_cache()
 
-            # 保存交易数据到 Redis 中
             TR.save_to_pkl(p_redis_key)
 
         except Exception as e:

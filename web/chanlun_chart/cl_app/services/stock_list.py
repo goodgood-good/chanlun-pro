@@ -1,7 +1,5 @@
 """标的列表服务（service）。
 
-Tier 4 P2 重构：从 blueprints/tv.py 抽出全套 symbols 预加载 + 缓存逻辑。
-
 设计要点：
 - 启动后延迟 ``PRELOAD_STARTUP_DELAY_SECONDS`` 才开始第一轮，让首次访问页面
   不被预加载抢占资源；之后每 ``PRELOAD_INTERVAL_SECONDS`` 周期性刷新。

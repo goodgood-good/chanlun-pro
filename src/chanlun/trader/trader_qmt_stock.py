@@ -13,70 +13,47 @@ from xtquant import xtconstant
 
 
 class MyXtQuantTraderCallback(XtQuantTraderCallback):
+    """QMT 交易回调，当前仅打印日志，可按需扩展业务逻辑。"""
+
     def on_disconnected(self):
-        """
-        连接断开
-        :return:
-        """
         print("connection lost")
 
     def on_stock_order(self, order):
-        """
-        委托回报推送
-        :param order: XtOrder对象
-        :return:
-        """
+        """委托回报推送。"""
         print("on order callback:")
         print(order.stock_code, order.order_status, order.order_sysid)
 
     def on_stock_trade(self, trade):
-        """
-        成交变动推送
-        :param trade: XtTrade对象
-        :return:
-        """
+        """成交变动推送。"""
         print("on trade callback")
         print(trade.account_id, trade.stock_code, trade.order_id)
 
     def on_order_error(self, order_error):
-        """
-        委托失败推送
-        :param order_error:XtOrderError 对象
-        :return:
-        """
+        """委托失败推送。"""
         print("on order_error callback")
         print(order_error.order_id, order_error.error_id, order_error.error_msg)
 
     def on_cancel_error(self, cancel_error):
-        """
-        撤单失败推送
-        :param cancel_error: XtCancelError 对象
-        :return:
-        """
+        """撤单失败推送。"""
         print("on cancel_error callback")
         print(cancel_error.order_id, cancel_error.error_id, cancel_error.error_msg)
 
     def on_order_stock_async_response(self, response):
-        """
-        异步下单回报推送
-        :param response: XtOrderResponse 对象
-        :return:
-        """
+        """异步下单回报推送。"""
         print("on_order_stock_async_response")
         print(response.account_id, response.order_id, response.seq)
 
     def on_account_status(self, status):
-        """
-        :param response: XtAccountStatus 对象
-        :return:
-        """
+        """账户状态变更推送。"""
         print("on_account_status")
         print(status.account_id, status.account_type, status.status)
 
 
 class QMTTraderStock(BackTestTrader):
-    """
-    QMT A股票交易对象
+    """QMT A股实盘交易器，支持实盘与模拟双模式。
+
+    持仓数 >= max_pos 时降级为模拟（记录+通知但不实际下单）；
+    实盘下单后 sleep(5) 轮询回报以获取成交价/量。
     """
 
     def __init__(self, name, log=None):
@@ -86,40 +63,35 @@ class QMTTraderStock(BackTestTrader):
         self.zx = zixuan.ZiXuan("a")
         self.zx_group = "QMT交易"
 
-        # 最大持仓数量，当前持仓大于这个数量，则不进行实际交易
+        # 超过此持仓数时降级为模拟通知，不实际下单
         self.max_pos = 3
 
-        # path为mini qmt客户端安装目录下userdata_mini路径
+        # mini QMT 客户端的 userdata_mini 路径
         self.qmt_path = r"C:\trade\国金证券QMT交易端\userdata_mini"
-        # session_id为会话编号，策略使用方对于不同的Python策略需要使用不同的会话编号
+        # 每个 Python 策略使用不同 session_id，避免 QMT 内部混淆回报
         self.session_id = int(time.time())
         self.xt_trader = XtQuantTrader(self.qmt_path, self.session_id)
-        # 创建资金账号为******的证券账号对象
         self.acc = StockAccount("11111111")  # TODO 替换自己的资金账号
-        # 创建交易回调类对象，并声明接收回调
         self.trader_callback = MyXtQuantTraderCallback()
         self.xt_trader.register_callback(self.trader_callback)
-        # 启动交易线程
         self.xt_trader.start()
-        # 建立交易连接，返回0表示连接成功
         connect_result = self.xt_trader.connect()
         print("建立交易连接 (0表示成功)：", connect_result)
-        # 对交易回调进行订阅，订阅后可以收到交易主推，返回0表示订阅成功
         subscribe_result = self.xt_trader.subscribe(self.acc)
         print("交易回调进行订阅 (0表示成功):", subscribe_result)
 
     def close(self):
+        """释放 QMT 连接资源。"""
         self.xt_trader.unsubscribe(self.acc)
         self.xt_trader.stop()
 
-    # 做多买入
     def open_buy(self, code, opt: Operation, amount: float = None):
+        """买入开多；持仓已满时降级为模拟（固定 50000 元估算，仅通知）。"""
         tick = self.ex.ticks([code])
         if code not in tick.keys():
             return False
 
         is_real_trade = True
-        # 检查持仓数量
         hold_positions: List[XtPosition] = self.xt_trader.query_stock_positions(
             self.acc
         )
@@ -132,7 +104,7 @@ class QMTTraderStock(BackTestTrader):
             return False
 
         if is_real_trade:
-            # 计算开仓金额
+            # 留 2% 缓冲，按剩余仓位均分可用资金
             account: XtAsset = self.xt_trader.query_stock_asset(self.acc)
             balance = round((account.cash * 0.98) / (self.max_pos - hold_pos_num), 0)
             amount = int(balance / price / 100) * 100
@@ -154,6 +126,7 @@ class QMTTraderStock(BackTestTrader):
                     order_remark=opt.msg,
                 )
 
+                # QMT 无同步回报，sleep 后轮询委托列表获取成交价/量
                 time.sleep(5)
 
                 order_list: List[XtOrder] = self.xt_trader.query_stock_orders(
@@ -174,7 +147,7 @@ class QMTTraderStock(BackTestTrader):
 
         self.zx.add_stock("我的持仓", stock["code"], stock["name"])
 
-        # 保存订单记录到 数据库 中，这样可以在图表中标识出买卖卖出的位置
+        # 写入数据库，图表可据此标注买卖位置
         db.order_save(
             "a",
             code,
@@ -188,12 +161,12 @@ class QMTTraderStock(BackTestTrader):
 
         return {"price": price, "amount": amount}
 
-    # 做空卖出
     def open_sell(self, code, opt: Operation, amount: float = None):
+        """A股不支持做空，直接返回 False。"""
         return False
 
-    # 做多平仓
     def close_buy(self, code, pos: POSITION, opt):
+        """平多仓；can_use_volume=0（T+1 限制当日买入不可卖）时降级为模拟通知。"""
         tick = self.ex.ticks([code])
         if code not in tick.keys():
             return False
@@ -207,6 +180,7 @@ class QMTTraderStock(BackTestTrader):
         )
         hold_pos: XtPosition = None
         for _p in hold_positions:
+            # can_use_volume > 0 才可卖出（T+1：当日买入次日才可用）
             if _p.can_use_volume > 0 and _p.stock_code == self.ex.code_to_qmt(code):
                 hold_pos = _p
                 is_real_trade = True
@@ -248,7 +222,6 @@ class QMTTraderStock(BackTestTrader):
 
         self.zx.del_stock("我的持仓", stock["code"])
 
-        # 保存订单记录到 数据库 中
         db.order_save(
             "a",
             code,
@@ -262,8 +235,8 @@ class QMTTraderStock(BackTestTrader):
 
         return {"price": price, "amount": amount}
 
-    # 做空平仓
     def close_sell(self, code, pos: POSITION, opt):
+        """A股不支持做空，直接返回 False。"""
         return False
 
 

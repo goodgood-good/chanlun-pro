@@ -14,27 +14,22 @@ class ChanlunXdmmdStrategy(BaseStrategy):
     variables = []
 
     def __init__(self, cta_engine, strategy_name, vt_symbol, setting):
-        """"""
         super().__init__(cta_engine, strategy_name, vt_symbol, setting)
 
-        # 缠论计算配置
         self.cl_config = {'xd_bzh': 'xd_bzh_no'}
         self.frequencys = ['5_1m', '1_1m']
 
-        # 交易对象
         self.TR = VNPYTrader('backtest', self)
-        # 数据对象
         self.Data = VNPYDatas(self.vt_symbol, self.frequencys, self.cl_config)
 
-        # 这里指定缠论策略，根据策略信号进行交易
+        # 注入线段买卖点策略；替换此处即可切换缠论策略
         self.STR: Strategy = StrategyXDMMD()
         self.TR.set_strategy(self.STR)
         self.TR.set_data(self.Data)
 
-        # 合成的对象
         self.bgs: Dict[str, BarGenerator] = {}
 
-        # 要运行的周期，以及回调的方法（大周期的在前面）
+        # 大周期在前，保证合成顺序正确
         self.intervals = [
             {'windows': 5, 'interval': Interval.MINUTE, 'callback': self.Data.on_5m_bar},
             {'windows': 1, 'interval': Interval.MINUTE, 'callback': self.Data.on_1m_bar},

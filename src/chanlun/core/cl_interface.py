@@ -10,10 +10,8 @@ from typing import Dict, List, Tuple, Union, Any, Optional
 import numpy as np
 import pandas as pd
 
-# P6: scipy lazy import — 原顶层 ``from scipy import stats`` 让所有 import
-# cl_interface 的代码 (包括只要 LINE/BI/XD 等纯数据类型的) 都被迫拖入 scipy
-# (~50ms cold import + 拉一堆 BLAS 依赖)。lazy import 仅在 ZS.line_r_squared
-# 等真正需要回归计算时才付出代价。
+# scipy 延迟到 ZS.r2 等真正需要回归计算时才 import：避免只用 LINE/BI/XD
+# 等纯数据类型的调用方被迫拖入 scipy (~50ms cold import + 一堆 BLAS 依赖)。
 
 """
 CL_*** 配置项，可以在调用缠论计算时，通过传递 config 变量进行变更，如 config['CL_BI_FX_STRICT'] = True
@@ -21,7 +19,7 @@ CL_*** 配置项，可以在调用缠论计算时，通过传递 config 变量�
 
 
 def _slot_setstate(obj, state):
-    """P4 __slots__ 兼容 helper: 旧 (无 __slots__) pickle state 为 dict, 新为 (None, {slots}) tuple."""
+    """__slots__ pickle 兼容: 旧 (无 __slots__) state 为 dict, 新为 (None, {slots}) tuple。"""
     if isinstance(state, dict):
         for k, v in state.items():
             setattr(obj, k, v)
@@ -507,14 +505,10 @@ class LINE:
     def __eq__(self, other):
         """判断两条线 (LINE 子类: BI / XD / ZSLX) 是否相同。
 
-        P6 修复 (原代码锁死 ``isinstance(other, BI)``):
-        - LINE 是基类, BI / XD / ZSLX 都继承它。旧实现写死成 BI 类型,
-          导致两个 XD 之间 ``==`` 永远 False, 用 ``in [...]`` / ``set()``
-          去重失效。
-        - 改为 ``type(self) is type(other)`` 严格类型匹配: BI 只与 BI 比较,
-          XD 只与 XD 比较 (一段笔 != 一段线段, 即使端点 k_index 相同)。
-        - 非 LINE 子类返回 ``NotImplemented`` (Python 数据模型推荐做法,
-          让另一边的 __eq__ 兜底)。
+        用 type(self) is type(other) 严格类型匹配：BI 只与 BI 比、XD 只与
+        XD 比（一段笔 != 一段线段，即使端点 k_index 相同），否则两个 XD
+        间 == 永远 False 导致 in / set 去重失效。非 LINE 子类返回
+        NotImplemented，让另一边的 __eq__ 兜底。
         """
         if not isinstance(other, LINE):
             return NotImplemented
@@ -527,8 +521,8 @@ class LINE:
     def __hash__(self):
         """返回 LINE 对象的哈希值 (与 __eq__ 一致)。
 
-        加入 ``type(self).__name__`` 让 BI 与 XD 即使端点相同也 hash 不同,
-        避免 set/dict 上的不必要冲突 (Python 契约不要求, 仅性能优化)。
+        加入 type(self).__name__ 让 BI 与 XD 即使端点相同也 hash 不同，
+        减少 set/dict 上的冲突。
         """
         return hash((type(self).__name__, self.start.k.k_index, self.end.k.k_index, self.type))
 
@@ -571,8 +565,8 @@ class ZS:
         self.start = start
         self.end = end
         self.lines: List[LINE] = []  # 构成中枢的线段
-        # ★ P-009：gg/dd 增量维护缓存。append 时增量更新，pop / 重新赋值时
-        # 置脏，下次 update_boundaries 全量重算。
+        # gg/dd 增量维护缓存：append 时增量更新，pop / 重新赋值时置脏，
+        # 下次 update_boundaries 全量重算。
         self._gg_cache = None
         self._dd_cache = None
         self._bounds_dirty = True
@@ -630,7 +624,7 @@ class ZS:
         return max(self.dd, other.dd) <= min(self.gg, other.gg)
 
     def __setstate__(self, state):
-        # ★ P-009 兼容：旧 pickle 的 __dict__ 不含增量边界缓存字段，补默认值，
+        # 旧 pickle 的 __dict__ 不含增量边界缓存字段，补默认值，
         # 避免反序列化后调用 update_boundaries 抛 AttributeError。
         state.setdefault('_gg_cache', None)
         state.setdefault('_dd_cache', None)
@@ -642,7 +636,7 @@ class ZS:
         添加 笔 or 线段。
         注意：本方法只做 append，不调用 update_boundaries()；
         调用方在所有 add_line 完成后须显式调用 update_boundaries()，
-        以保持 gg/dd 及 P-009 增量缓存与 self.lines 同步。
+        以保持 gg/dd 及增量缓存与 self.lines 同步。
         """
         self.lines.append(line)
         self.line_num = len(self.lines)
@@ -720,7 +714,7 @@ class ZS:
         x = np.array(prices)
         y = np.array(zs_zigzag)
 
-        # 使用线性回归计算 R² (P6: lazy import 避免顶层拖入 scipy)
+        # 线性回归算 R²（延迟 import，避免顶层拖入 scipy）
         from scipy.stats import linregress
         slope, intercept, r_value, p_value, std_err = linregress(x, y)
         return round(r_value**2, 6)
@@ -746,7 +740,7 @@ class ZS:
 
     def zs_down_bcs(self, zs_type="|") -> List[str]:
         """
-        获取中枢内，向上线段的背驰列表
+        获取中枢内，向下线段的背驰列表
         """
         bcs = []
         for _l in self.lines:
@@ -1395,6 +1389,7 @@ class ZSLX(LINE):
         self.zslx_level = zslx_level
         self.done = done
         self.zslx_type = "盘整"  # 默认类型
+        self.zss: List[ZS] = []  # 走势类型包含的中枢列表（to_dict/__repr__ 依赖此属性）
 
     def is_done(self) -> bool:
         """
@@ -1464,7 +1459,7 @@ class LOW_LEVEL_QS:
 class MACD_INFOS:
     # 记录中枢内，macd 的变化情况
     dif_up_cross_num = 0  # dif 线上穿零轴的次数
-    dea_up_cross_num = 0  # dea 线上穿令咒的次数
+    dea_up_cross_num = 0  # dea 线上穿零轴的次数
     dif_down_cross_num = 0  # dif 线下穿零轴的次数
     dea_down_cross_num = 0  # dea 线下穿零轴的次数
     gold_cross_num = 0  # 金叉次数
@@ -1586,12 +1581,6 @@ class ICL(metaclass=ABCMeta):
         可增量多次调用，重复已计算的会自动跳过，最后一个 bar 会进行更新
         """
         pass
-
-    # @abstractmethod
-    # def check_bi_inside_bc(self, bi: BI):
-    #     """
-    #
-    #     """
 
     @abstractmethod
     def get_code(self) -> str:

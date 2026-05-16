@@ -2,9 +2,7 @@ from enum import Enum
 
 
 class Market(Enum):
-    """
-    交易市场
-    """
+    """支持的交易市场枚举。"""
 
     A = "a"  # A股
     HK = "hk"  # 港股

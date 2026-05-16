@@ -71,6 +71,7 @@
         <table class="layui-hide" id="symbols_table" lay-filter="symbols_table"></table>
     </div>
 
+    <!-- 标的列表页脚本：按市场分页展示所有标的，支持关键词搜索，点击代码跳转缠论图表 -->
     <script>
         $(function () {
             layui.use(['form', 'table', 'layer'], function () {
@@ -135,7 +136,6 @@
                     renderTable();
                 });
 
-                // 回车触发查询
                 $('#search_input').keydown(function (e) {
                     if (e.keyCode === 13) {
                         e.preventDefault();
@@ -149,7 +149,6 @@
                     renderTable();
                 });
 
-                // 首次渲染
                 renderTable();
             });
         });

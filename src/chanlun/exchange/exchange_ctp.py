@@ -28,11 +28,12 @@ from chanlun.exchange.exchange import Exchange, Tick
 
 
 class MarketCTP(Exchange):
+    """CTP 期货行情接口（仅行情，交易功能在 trader 目录实现）"""
+
     def __init__(self):
-        # 设置时区
         self.tz = pytz.timezone("Asia/Shanghai")
 
-        # CTP配置，从配置文件读取
+        # CTP 配置，优先从配置文件读取，缺失时回退默认值
         self.broker_id = (
             config.CTP_BROKER_ID if hasattr(config, "CTP_BROKER_ID") else "9999"
         )
@@ -40,10 +41,10 @@ class MarketCTP(Exchange):
         self.password = config.CTP_PASSWORD if hasattr(config, "CTP_PASSWORD") else ""
         self.app_id = (
             config.CTP_APP_ID if hasattr(config, "CTP_APP_ID") else ""
-        )  # 添加AppID
+        )
         self.auth_code = (
             config.CTP_AUTH_CODE if hasattr(config, "CTP_AUTH_CODE") else ""
-        )  # 添加授权码
+        )
 
         # 行情和交易服务器地址
         self.md_front = (
@@ -85,13 +86,13 @@ class MarketCTP(Exchange):
                 self.market = market
                 self.connected: bool = False
                 self.logged_in: bool = False
-                self.authenticated: bool = False  # 添加认证状态
+                self.authenticated: bool = False
 
             def OnFrontConnected(self) -> None:
                 print("行情服务器连接成功")
                 self.connected = True
 
-                # 如果设置了AppID，先进行认证
+                # 设置了 AppID 时需先认证再登录，否则直接登录
                 if self.market.app_id:
                     req = CThostFtdcReqAuthenticateField()
                     req.BrokerID = self.market.broker_id
@@ -133,7 +134,7 @@ class MarketCTP(Exchange):
             ) -> None:
                 if pRspInfo and pRspInfo.ErrorID == 0:
                     self.logged_in = True
-                    # 检查是否有Level2权限
+                    # 检查是否有 Level2 行情权限
                     self.has_level2 = (
                         hasattr(pRspUserLogin, "UserLevel")
                         and pRspUserLogin.UserLevel > 0
@@ -174,7 +175,7 @@ class MarketCTP(Exchange):
                     ),
                 }
 
-                # Level2行情数据
+                # Level2 二十档行情
                 if self.has_level2 and hasattr(pDepthMarketData, "BidPrice20"):
                     for i in range(1, 21):
                         tick_data[f"buy{i}"] = getattr(pDepthMarketData, f"BidPrice{i}")
@@ -265,9 +266,7 @@ class MarketCTP(Exchange):
         end_date: str = None,
         args=None,
     ) -> Union[pd.DataFrame, None]:
-        """获取K线数据"""
-        # 这里需要实现从CTP获取历史K线数据的逻辑
-        # 由于CTP不直接提供历史数据，可能需要对接其他数据源
+        """获取 K 线数据（CTP 不提供历史行情，需对接其他数据源，暂未实现）"""
         pass
 
     def ticks(self, codes: List[str]) -> Dict[str, Tick]:

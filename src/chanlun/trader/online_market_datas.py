@@ -13,9 +13,7 @@ from chanlun.file_db import FileCacheDB
 
 
 class OnlineMarketDatas(MarketDatas):
-    """
-    线上实盘交易数据获取类
-    """
+    """实盘行情数据适配器，封装交易所接口并提供单次循环内的 K 线缓存。"""
 
     def __init__(
         self,
@@ -26,8 +24,9 @@ class OnlineMarketDatas(MarketDatas):
         use_cache=True,
     ):
         """
-        初始化
-        use_cache 是否使用缓存，如果设置为 True，在每次循环都需要显式调用 clear_cache 清除缓存，避免后续无法获取最新行情数据
+        :param use_cache: 是否开启循环内 K 线缓存。
+            开启时同一根 K 线在一次循环内只请求一次，循环结束后须调用 clear_cache() 清除，
+            否则下次循环仍会读到旧数据。
         """
         super().__init__(market, frequencys, cl_config)
         self.ex = ex
@@ -35,22 +34,20 @@ class OnlineMarketDatas(MarketDatas):
 
         self.use_cache = use_cache
 
-        # 缓存请求的 k 线数据，需要显示清除，key 为 code_frequency 格式
+        # key 为 "{code}_{frequency}"，循环结束需显式清除
         self.cache_klines: Dict[str, pd.DataFrame] = {}
 
     def clear_cache(self):
-        """
-        需要在实盘每次循环完后清空缓存
-        """
-        # 缓存请求的 k 线数据，需要显示清除，key 为 code_frequency 格式
+        """每次实盘循环结束后调用，清空 K 线缓存以便下次取到最新行情。"""
         self.cache_klines = {}
         return True
 
     def klines(self, code, frequency) -> pd.DataFrame:
+        """获取 K 线数据；use_cache=True 时循环内复用缓存，避免重复请求。"""
         key = f"{code}_{frequency}"
         if self.use_cache and key in self.cache_klines.keys():
             return self.cache_klines[key]
-        klines = self.ex.klines(code, frequency)  # TDX 接口尽量返回数据多一些
+        klines = self.ex.klines(code, frequency)
         if self.use_cache:
             self.cache_klines[key] = klines
         return klines
@@ -66,7 +63,8 @@ class OnlineMarketDatas(MarketDatas):
         }
 
     def get_cl_data(self, code, frequency, cl_config: dict = None) -> ICL:
-        # 根据回测配置，可自定义不同周期所使用的缠论配置项
+        """返回指定标的+周期的缠论计算结果；cl_config 优先级：code > frequency > 'default' > 全局。"""
+        # 支持按标的或周期单独配置缠论参数，优先级依次降低
         if code in self.cl_config.keys():
             cl_config = self.cl_config[code]
         elif frequency in self.cl_config.keys():

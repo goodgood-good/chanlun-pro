@@ -36,33 +36,20 @@ class ExchangeTDXFutures(Exchange):
     _INIT_MAX_RETRY = 2
 
     def __init__(self):
-        # super().__init__()
-
-        # 设置时区
         self.tz = pytz.timezone("Asia/Shanghai")
-
-        # 文件缓存
         self.fdb = FileCacheDB()
 
-        # 标记初始化是否成功。
-        # 失败时设为 True, 后续所有走 client.connect 的方法 (all_stocks/klines/...)
-        # 都应快速失败, 而不是再次卡 30s 超时。
-        # 注意: 不在 __init__ 内部 raise, 因为 @fun.singleton 会缓存实例,
-        # 调用方 (preload / get_cached_processed_stocks / klines) 自行处理 init_failed。
+        # @fun.singleton 缓存实例，初始化失败时不 raise，调用方通过 init_failed 短路
         self.init_failed = False
         self.market_maps = {}
 
         try:
-            # 选择最优的服务器，并保存到 cache 中
+            # 优先从 cache 读取上次选出的最优服务器
             self.connect_info = db.cache_get("tdxex_connect_ip")
-            # self.connect_info = None
             if self.connect_info is None:
                 self.connect_info = self.reset_tdx_ip()
-                # print(f"TDXEX 最优服务器：{self.connect_info}")
 
-            # 初始化，映射交易所代码
-            # 注意: auto_retry=False 避免 pytdx 内部再叠加一次 30s 超时;
-            # 这里用显式的 retry_count 上限替代原来的 while True 死循环。
+            # auto_retry=False 避免 pytdx 内部再叠加超时；用有限次重试替代 while True 死循环
             retry_count = 0
             last_error = None
             while retry_count < self._INIT_MAX_RETRY:
@@ -190,9 +177,7 @@ class ExchangeTDXFutures(Exchange):
         end_date: str = None,
         args=None,
     ) -> Union[pd.DataFrame, None]:
-        """
-        通达信，不支持按照时间查找
-        """
+        """获取期货 K 线，不支持按时间区间筛选（通达信接口限制）。"""
         if args is None:
             args = {}
         if "pages" not in args.keys():
@@ -275,7 +260,7 @@ class ExchangeTDXFutures(Exchange):
                         if old_end_dt >= new_start_dt:
                             break
 
-            # 删除重复数据
+            # 多页数据合并后去重，保留最新一条
             klines = klines.drop_duplicates(["date"], keep="last").sort_values("date")
             self.fdb.save_tdx_klines(
                 Market.FUTURES.value, f"v1_{code}", frequency, klines
@@ -291,7 +276,6 @@ class ExchangeTDXFutures(Exchange):
             if frequency in {"y", "q", "m", "w", "d"}:
                 klines["date"] = klines["date"].apply(self.__convert_date)
 
-            # 将 volume 转换成 float类型
             klines[["volume"]] = klines[["volume"]].astype(float)
             if frequency in ["2m", "3m"]:
                 klines = convert_tdx_futures_kline_frequency(klines, frequency)
@@ -342,11 +326,7 @@ class ExchangeTDXFutures(Exchange):
         return {"code": stock[0]["code"], "name": stock[0]["name"]}
 
     def ticks(self, codes: List[str]) -> Dict[str, Tick]:
-        """
-        如果可以使用 富途 的接口，就用 富途的，否则就用 日线的 K线计算
-        使用 富途 的接口会很快，日线则很慢
-        获取日线的k线，并返回最后一根k线的数据
-        """
+        """获取期货实时行情快照。"""
         ticks = {}
         client = TdxExHq_API(raise_exception=True, auto_retry=True)
         with client.connect(self.connect_info["ip"], self.connect_info["port"]):
@@ -436,10 +416,7 @@ class ExchangeTDXFutures(Exchange):
         return ticks
 
     def now_trading(self):
-        """
-        返回当前是否是交易时间
-        TODO 简单判断 ：9-12 , 13:30-15:00 21:00-02:30
-        """
+        """返回当前是否处于期货交易时段（简化判断，未区分品种夜盘差异）。"""
         hour = int(time.strftime("%H"))
         minute = int(time.strftime("%M"))
         if (
@@ -452,7 +429,7 @@ class ExchangeTDXFutures(Exchange):
 
     @staticmethod
     def __convert_date(dt: datetime.datetime):
-        # 通达信行情是后对其的，统一将 日以上级别的行情日期转换成 23点
+        # 通达信期货日线时间后对齐，统一设为 23:00 与分钟线区分
         return dt.replace(hour=23, minute=0)
 
     def balance(self):
@@ -473,29 +450,6 @@ class ExchangeTDXFutures(Exchange):
 
 if __name__ == "__main__":
     ex = ExchangeTDXFutures()
-    # print(ex.market_maps)
-    # stocks = ex.all_stocks()
-    # for s in stocks:
-    #     if "HTIL8" in s["code"]:
-    #         print(s)
-    # print(len(stocks))
-    # print(ex.market_maps)
-    # for s in stocks:
-    #     if '原油' in s["name"]:
-    #         print(s)
-
-    # print(ex.to_tdx_code('QS.ZN2306'))
 
     klines = ex.klines("PR.HHIL8", "5m")
     print(klines)
-    #
-    # for _f in ex.support_frequencys().keys():
-    #     klines = ex.klines("QZ.SR2601", _f)
-    #     # klines = ex.klines(ex.default_code(), "60m")
-    #     print(_f)
-    #     print(len(klines))
-    #     print(klines.tail(5))
-
-    # ticks = ex.all_ticks()
-    # print(len(ticks))
-    # print(len(ticks))

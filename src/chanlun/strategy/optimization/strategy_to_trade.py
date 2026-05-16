@@ -18,6 +18,7 @@ close_uid = [
 
 
 def run_bt(ags: tuple):
+    """以给定的过滤字段、过滤方向、最大持仓数执行一次回测并保存结果，跳过已存在的文件。"""
     _f_k = ags[0]
     _f_r = ags[1]
     _n = ags[2]
@@ -38,9 +39,8 @@ def run_bt(ags: tuple):
     s_to_t.trade_strategy = StrategyADMMDTest(
         "test", filter_key=_f_k, filter_reverse=_f_r
     )
-    # s_to_t.trade_pos_querys = pos_querys
     s_to_t.trade_max_pos = _n
-    s_to_t.log = None  # 不输出日志
+    s_to_t.log = None  # 不输出日志，避免多进程下日志混乱
     bt = s_to_t.run_bt(bt_file)
     bt.result()
     bt.save_file = save_to_file
@@ -76,12 +76,9 @@ if __name__ == "__main__":
             bar.update(1)
             bt_files.append(_)
 
-    # for _lags in loop_args:
-    #     bt_files.append(run_bt(_lags))
-
     print(len(bt_files))
 
-    # 加载并计算每个回测最终的余额
+    # 加载每个回测结果，比较最终余额以找出最优参数组合
     bt_balances = []
     for _f in bt_files:
         BT = backtest.BackTest()
@@ -89,7 +86,6 @@ if __name__ == "__main__":
         BT.load(BT.save_file)
         bt_balances.append({"bt_file": _f, "balance": BT.trader.balance})
 
-    # 按照 balance 由大到小进行排序，并打印前10名
     bt_ranks = sorted(bt_balances, key=lambda b: b["balance"], reverse=True)
     for _r in bt_ranks:
         print(_r["bt_file"])

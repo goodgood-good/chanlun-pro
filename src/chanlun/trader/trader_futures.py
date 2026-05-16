@@ -8,14 +8,12 @@ from chanlun.backtesting.base import Operation, POSITION
 from chanlun.backtesting.backtest_trader import BackTestTrader
 
 """
-期货使用天勤自带的模拟账号测试
+期货交易 Demo，使用天勤自带的模拟账号进行测试。
 """
 
 
 class TraderFutures(BackTestTrader):
-    """
-    期货交易 Demo
-    """
+    """基于天勤（TqSdk）的期货实盘/模拟交易器 Demo。"""
 
     def __init__(self, name, log=None):
         super().__init__(name=name, mode="online", market="futures", log=log)
@@ -23,11 +21,11 @@ class TraderFutures(BackTestTrader):
 
         self.zx = zixuan.ZiXuan("futures")
 
-        # 每单交易手数
+        # 每笔开仓固定手数
         self.unit_volume = 2
 
-    # 做多买入
     def open_buy(self, code, opt: Operation, amount: float = None):
+        """开多仓；若已有多头持仓则跳过，避免重复开仓。"""
         try:
             positions = self.ex.positions(code)
             if len(positions) > 0 and positions[code].pos_long > 0:
@@ -47,7 +45,6 @@ class TraderFutures(BackTestTrader):
 
             self.zx.add_stock("我的持仓", stock_info["code"], stock_info["name"])
 
-            # 保存订单记录到 数据库 中
             db.order_save(
                 "futures",
                 code,
@@ -66,8 +63,8 @@ class TraderFutures(BackTestTrader):
             )
             return False
 
-    # 做空卖出
     def open_sell(self, code, opt: Operation, amount: float = None):
+        """开空仓；若已有空头持仓则跳过，避免重复开仓。"""
         try:
             positions = self.ex.positions(code)
             if len(positions) > 0 and positions[code].pos_short > 0:
@@ -87,7 +84,6 @@ class TraderFutures(BackTestTrader):
 
             self.zx.add_stock("我的持仓", stock_info["code"], stock_info["name"])
 
-            # 保存订单记录到 数据库 中
             db.order_save(
                 "futures",
                 code,
@@ -106,12 +102,11 @@ class TraderFutures(BackTestTrader):
             )
             return False
 
-    # 做多平仓
     def close_buy(self, code, pos: POSITION, opt: Operation):
+        """平多仓；无多头持仓时视为已平，直接返回原始价/量。"""
         try:
             hold_position = self.ex.positions(code)
             if len(hold_position) == 0 or hold_position[code].pos_long == 0:
-                # 当前无持仓，不进行操作
                 return {"price": pos.price, "amount": pos.amount}
             hold_position = hold_position[code]
 
@@ -125,7 +120,6 @@ class TraderFutures(BackTestTrader):
 
             self.zx.del_stock("我的持仓", code)
 
-            # 保存订单记录到 数据库 中
             db.order_save(
                 "futures",
                 code,
@@ -144,12 +138,11 @@ class TraderFutures(BackTestTrader):
             )
             return False
 
-    # 做空平仓
     def close_sell(self, code, pos: POSITION, opt: Operation):
+        """平空仓；无空头持仓时视为已平，直接返回原始价/量。"""
         try:
             hold_position = self.ex.positions(code)
             if len(hold_position) == 0 or hold_position[code].pos_short == 0:
-                # 当前无持仓，不进行操作
                 return {"price": pos.price, "amount": pos.amount}
             hold_position = hold_position[code]
 
@@ -163,7 +156,6 @@ class TraderFutures(BackTestTrader):
 
             self.zx.del_stock("我的持仓", code)
 
-            # 保存订单记录到 数据库 中
             db.order_save(
                 "futures",
                 code,

@@ -1,3 +1,4 @@
+"""期货 CTP 自动化交易启动脚本，每 5 分钟触发一次策略执行，含止损与持仓时间风控。"""
 import time
 import traceback
 
@@ -13,14 +14,11 @@ logger = fun.get_logger("trader_ctp.log")
 logger.info("期货自动化交易程序")
 
 try:
-    # 初始化CTP行情接口
     market = MarketCTP()
 
-    # 交易品种列表
-    run_codes = ["rb2405", "IF2403", "IC2403", "au2406"]  # 可根据需要修改
-    frequencys = ["15m", "5m"]  # 使用的K线周期
+    run_codes = ["rb2405", "IF2403", "IC2403", "au2406"]  # 按需修改交易品种
+    frequencys = ["15m", "5m"]
 
-    # 缠论配置
     cl_config = {
         "fx_qj": Config.FX_QJ_K.value,
         "fx_bh": Config.FX_BH_YES.value,
@@ -36,16 +34,10 @@ try:
 
     p_strategy_key = "trader_ctp"
 
-    # 初始化交易对象
     TR = CTPTrader("CTP", log=logger.info)
-    # 从Redis加载数据
     TR.load_from_pkl(p_strategy_key)
-    # 数据对象
     Data = OnlineMarketDatas("futures", frequencys, market, cl_config)
-    # 设置策略
     STR = StrategyDemo()
-
-    # 设置策略和数据
     TR.set_strategy(STR)
     TR.set_data(Data)
 
@@ -65,7 +57,7 @@ try:
                 time.sleep(1)
                 continue
 
-            # 合并持仓品种和监控品种
+            # 持仓中的标的也纳入本轮执行
             run_codes = TR.position_codes() + run_codes
             run_codes = list(set(run_codes))
 
@@ -75,14 +67,11 @@ try:
                 except Exception:
                     logger.error(f"{code} 策略运行异常: {traceback.format_exc()}")
 
-            # 清空K线缓存
             Data.clear_cache()
-
-            # 保存交易数据
             TR.save_to_pkl(p_strategy_key)
 
-            # 风控检查
-            if seconds % (60 * 5) == 0:  # 每5分钟检查一次
+            # 风控检查：止损 + 持仓时间超限强平
+            if seconds % (60 * 5) == 0:
                 positions = TR.get_positions()
                 for pos in positions:
                     # 检查止损

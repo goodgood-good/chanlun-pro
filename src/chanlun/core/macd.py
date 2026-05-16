@@ -1,11 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-技术指标计算模块 - MACD 高精度修正版 (支持增量更新)
-------------------------------------------------
-修改内容：
-1. 引入增量计算逻辑 (Incremental Logic)，避免每次全量重算。
-2. 支持 'Tick级别更新' (更新最后一根) 和 'Bar级别更新' (新增K线)。
-3. 优化 hist_area 算法，准确处理红绿柱切换时的面积归档。
+技术指标计算模块 - MACD 高精度修正版
+
+支持增量更新（Tick 级更新最后一根、Bar 级新增 K 线），避免每次全量重算。
 """
 from typing import List, Dict, Tuple
 import pandas as pd
@@ -14,7 +11,7 @@ from chanlun.core.cl_interface import Kline
 
 class MACD:
     """
-    MACD指标计算类 (增量优化版)
+    MACD指标计算类（支持增量更新）
     """
 
     def __init__(self, fast_period: int = 12, slow_period: int = 26, signal_period: int = 9, china_mode: bool = True):
@@ -30,21 +27,19 @@ class MACD:
         self.signal_period = signal_period
         self.china_mode = china_mode
 
-        # 缓存计算参数 (用于 EMA 增量计算)
+        # EMA 增量计算的衰减系数
         self.fast_alpha = 2 / (self.fast_period + 1)
         self.slow_alpha = 2 / (self.slow_period + 1)
         self.signal_alpha = 2 / (self.signal_period + 1)
 
-        # 存储计算结果
         self.dif: List[float] = []
         self.dea: List[float] = []
         self.hist: List[float] = []
         self.hist_area: List[float] = []
 
-        # 内部状态缓存 (用于增量计算)
-        # _ema_fast_val: 当前最后一根K线的EMA值 (N)
+        # _val 为当前最后一根 K 线 EMA 值(N)，_prev 为倒数第二根(N-1)；
+        # Tick 更新最后一根时需要回到 N-1 重算 N。
         self._ema_fast_val: float = 0.0
-        # _ema_fast_val_prev: 倒数第二根K线的EMA值 (N-1)，用于Tick更新时重算N
         self._ema_fast_val_prev: float = 0.0
 
         self._ema_slow_val: float = 0.0
@@ -62,57 +57,45 @@ class MACD:
         """
         current_count = len(klines)
 
-        # 1. 数据重置或异常情况
         if current_count == 0:
             self._reset_data()
             return
 
-        # 2. 判断更新模式
         if self._last_kline_count == 0 or current_count < self._last_kline_count:
-            # [模式A] 全量计算 (初始化或历史数据变动)
+            # 模式A：全量计算（初始化或历史数据变动）
             self._full_calculation(klines)
 
         elif current_count == self._last_kline_count:
-            # [模式B] Tick 更新 (只更新最后一根)
-            # 回滚状态到倒数第二根 (把上次临时算的最后一根删掉)
+            # 模式B：Tick 更新最后一根，先回滚到倒数第二根再重算
             self._rollback_state()
-            # 重新计算最后一根
             self._incremental_calculation(klines[-1], is_update_last=True)
 
         elif current_count > self._last_kline_count:
-            # [模式C] 新增 Bar (追加计算)
-            # 计算新增的部分 (通常是1根)
+            # 模式C：新增 Bar 追加计算
             new_klines = klines[self._last_kline_count:]
             for k in new_klines:
-                # 在计算新Bar之前，当前的 val 变成了 prev
+                # 计算新 Bar 前，当前的 val 变成 prev
                 self._ema_fast_val_prev = self._ema_fast_val
                 self._ema_slow_val_prev = self._ema_slow_val
                 self._dea_val_prev = self._dea_val
 
                 self._incremental_calculation(k, is_update_last=False)
 
-        # 更新长度记录
         self._last_kline_count = current_count
 
     def _full_calculation(self, klines: List[Kline]):
         """全量 Pandas 计算 (初始化用)"""
         close_prices = pd.Series([k.c for k in klines], dtype='float64')
 
-        # Pandas EWM 计算
         ema_fast = close_prices.ewm(span=self.fast_period, adjust=False).mean()
         ema_slow = close_prices.ewm(span=self.slow_period, adjust=False).mean()
 
         dif_series = ema_fast - ema_slow
         dea_series = dif_series.ewm(span=self.signal_period, adjust=False).mean()
 
-        # 保存结果列表
         self.dif = dif_series.fillna(0).tolist()
         self.dea = dea_series.fillna(0).tolist()
 
-        # 计算 Hist
-        # ★ P3.5 清理：原代码用三元 `self.dif - self.dea if not isinstance(self.dif, list)`，
-        # 但前两行刚把 self.dif/self.dea 赋值为 list，三元永远走 else，写得绕。
-        # 直接用 Series 减法即可。
         hist_series = pd.Series(self.dif) - pd.Series(self.dea)
 
         if self.china_mode:
@@ -120,7 +103,7 @@ class MACD:
 
         self.hist = hist_series.fillna(0).tolist()
 
-        # 缓存 EMA 状态
+        # 缓存 EMA 状态，供后续增量计算续接
         if len(klines) > 0:
             self._ema_fast_val = ema_fast.iloc[-1]
             self._ema_slow_val = ema_slow.iloc[-1]
@@ -131,69 +114,50 @@ class MACD:
                 self._ema_slow_val_prev = ema_slow.iloc[-2]
                 self._dea_val_prev = dea_series.iloc[-2]
             else:
-                # 只有1根K线，prev 可以设为初始值(通常是第0根的值或者根据adjust算法)
-                # adjust=False, mean(span). 初始值通常就是 price (对于Price EMA)
-                # 对于DEA (EMA of DIF), 初始值是 DIF[0]
-                # 这里简单起见，如果只有1根，prev设为同值，虽然Tick更新可能会有问题（因为没有前值），
-                # 但第1根K线的Tick更新通常就是重算。
+                # 只有 1 根 K 线时无前值，prev 设为同值；
+                # 第 1 根的 Tick 更新本就走重算，不依赖 prev。
                 self._ema_fast_val_prev = self._ema_fast_val
                 self._ema_slow_val_prev = self._ema_slow_val
                 self._dea_val_prev = self._dea_val
 
-        # 全量计算面积
-        self.hist_area = []  # 清空
+        self.hist_area = []
         self._calculate_hist_area_incremental(self.hist, start_index=0)
 
     def _incremental_calculation(self, kline: Kline, is_update_last: bool = False):
         """增量单根计算 (手动实现 EMA 公式)"""
         close = kline.c
 
-        # 确定计算基准 (Previous EMA)
-        # 如果是更新最后一根 (Tick Update)，基准是 prev (N-1)
-        # 如果是新增 (New Bar)，在 process_macd 循环中，我们已经把 N 变成了 prev，所以基准也是 prev
-        # 所以这里统统使用 _prev 变量作为基准
+        # 基准统一用 _prev：Tick 更新基准是 N-1；新增 Bar 时 process_macd
+        # 循环已把 N 滚成 prev，故两种模式都以 _prev 为基准。
         base_fast = self._ema_fast_val_prev
         base_slow = self._ema_slow_val_prev
         base_dea = self._dea_val_prev
 
-        # 1. 计算 Fast EMA
-        # 公式: EMA_today = alpha * Price + (1 - alpha) * EMA_prev
+        # EMA_today = alpha * Price + (1 - alpha) * EMA_prev
         new_ema_fast = (close * self.fast_alpha) + (base_fast * (1 - self.fast_alpha))
-
-        # 2. 计算 Slow EMA
         new_ema_slow = (close * self.slow_alpha) + (base_slow * (1 - self.slow_alpha))
-
-        # 3. 计算 DIF
         new_dif = new_ema_fast - new_ema_slow
-
-        # 4. 计算 DEA (是对 DIF 的 EMA)
+        # DEA 是对 DIF 的 EMA
         new_dea = (new_dif * self.signal_alpha) + (base_dea * (1 - self.signal_alpha))
 
-        # 5. 计算 Hist
         new_hist = (new_dif - new_dea)
         if self.china_mode:
             new_hist *= 2
 
-        # 更新当前 Tip 状态
         self._ema_fast_val = new_ema_fast
         self._ema_slow_val = new_ema_slow
         self._dea_val = new_dea
 
-        # 6. 更新列表
+        # Tick 更新模式下列表已在 _rollback_state pop 过，两种模式都用 append
         if is_update_last:
-            # Tick 更新模式：直接替换列表最后一个值
-            # 列表在 _rollback_state 时已经 pop 过了，所以这里是 append
             self.dif.append(new_dif)
             self.dea.append(new_dea)
             self.hist.append(new_hist)
         else:
-            # New Bar 模式
             self.dif.append(new_dif)
             self.dea.append(new_dea)
             self.hist.append(new_hist)
 
-        # 7. 计算面积 (仅计算最后一个)
-        # start_index 是当前加入元素的索引
         self._calculate_hist_area_incremental(self.hist, start_index=len(self.hist) - 1)
 
     def _rollback_state(self):
@@ -209,13 +173,12 @@ class MACD:
         增量计算面积
         :param start_index: 开始计算的索引。
         """
-        # 1. 初始化状态
         if start_index == 0:
             current_area = 0.0
             direction = 0
             self.hist_area = [0.0] * len(hist_data)
         else:
-            # 继承前一个状态
+            # 增量模式：继承前一个索引的面积与方向状态
             prev_idx = start_index - 1
             if prev_idx >= 0:
                 current_area = self.hist_area[prev_idx]
@@ -234,7 +197,6 @@ class MACD:
             if len(self.hist_area) < len(hist_data):
                 self.hist_area.extend([0.0] * (len(hist_data) - len(self.hist_area)))
 
-        # 2. 循环计算 (增量模式下循环次数通常为 1)
         for i in range(start_index, len(hist_data)):
             val = hist_data[i]
 

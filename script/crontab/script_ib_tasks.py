@@ -1,3 +1,10 @@
+"""
+盈透证券 IB 任务处理进程：监听 Redis 队列，代理执行行情/交易指令。
+
+启动多个客户端进程（每个对应一个 IB clientId），通过 blpop 阻塞等待
+search_stocks / klines / ticks / balance / positions / orders 等命令，
+执行后将结果 lpush 回调方队列。
+"""
 import datetime
 import json
 import time
@@ -24,7 +31,7 @@ def run_tasks(client_id: int):
     ib: ib_insync.IB = ib_insync.IB()
     ib_insync.util.allowCtrlC()
 
-    fdb = FileCacheDB()  # 保存存储的k线数据
+    fdb = FileCacheDB()  # K 线本地缓存，用于增量更新
 
     tz = pytz.timezone("US/Eastern")
 
@@ -65,13 +72,13 @@ def run_tasks(client_id: int):
             )
             new_durationStr = durationStr
             if history_klines is not None and len(history_klines) >= 100:
-                # 如果有之前保存的历史行情，则进行比较与增量更新
+                # 有本地缓存时仅拉取增量，减少 IB API 请求量
                 diff_days = (
                     datetime.datetime.now() - history_klines.iloc[-1]["date"]
                 ).days + 30
                 new_durationStr = f"{diff_days} D"
 
-            re_request_bars = False  # 是否重新进行请求
+            re_request_bars = False  # 末根收盘价不一致时置 True，触发全量重新请求
             bars = get_ib().reqHistoricalData(
                 contract,
                 endDateTime="",
@@ -138,7 +145,7 @@ def run_tasks(client_id: int):
                         }
                     )
             else:
-                # 进行增量更新
+                # 增量合并：与本地缓存拼接，去重后按时间排序
                 klines_df = pd.DataFrame(klines_res)
                 klines_df["date"] = pd.to_datetime(klines_df["date"])
                 klines_df = pd.concat([history_klines, klines_df], ignore_index=True)
@@ -146,7 +153,6 @@ def run_tasks(client_id: int):
                     ["date"], keep="last"
                 ).sort_values("date")
                 klines_res = []
-                # 将时间转换成字符串
                 klines_df["date"] = klines_df["date"].apply(
                     lambda d: fun.datetime_to_str(d)
                 )
@@ -155,7 +161,6 @@ def run_tasks(client_id: int):
 
             if len(klines_res) == 0:
                 continue
-            # 进行本地保存
             klines_df = pd.DataFrame(klines_res)
             fdb.save_tdx_klines(
                 Market.US.value,
@@ -197,13 +202,6 @@ def run_tasks(client_id: int):
 
     def balance():
         account = get_ib().accountSummary(account=config.IB_ACCOUNT)
-        # Demo
-        # {'AccruedCash': '561.00', 'AvailableFunds': '1000561.00', 'BuyingPower': '4002244.00',
-        # 'EquityWithLoanValue': '1000561.00', 'ExcessLiquidity': '1000561.00', 'FullAvailableFunds': '1000561.00',
-        # 'FullExcessLiquidity': '1000561.00', 'FullInitMarginReq': '0.00', 'FullMaintMarginReq': '0.00',
-        # 'GrossPositionValue': '0.00', 'InitMarginReq': '0.00', 'LookAheadAvailableFunds': '1000561.00',
-        # 'LookAheadExcessLiquidity': '1000561.00', 'LookAheadInitMarginReq': '0.00', 'LookAheadMaintMarginReq': '0.00',
-        # 'MaintMarginReq': '0.00', 'NetLiquidation': '1000561.00', 'SMA': '1000561.00', 'TotalCashValue': '1000000.00'}
         info = {_a.tag: float(_a.value) for _a in account if _a.currency == "USD"}
         return info
 
@@ -244,9 +242,7 @@ def run_tasks(client_id: int):
         }
 
     def get_contract_by_code(code: str):
-        """
-        获取合约对象
-        """
+        """根据内部 code 格式构建 IB 合约对象（股票/指数/期货/加密货币）。"""
         if "_IND_" in code:
             return ib_insync.Index(
                 symbol=code.split("_")[0], exchange=code.split("_")[2], currency="USD"
@@ -260,8 +256,8 @@ def run_tasks(client_id: int):
                 symbol=code.split("_")[0], exchange=code.split("_")[2], currency="USD"
             )
         else:
-            # 读取代码所属交易所信息，在合约中添加
             contract = ib_insync.Stock(symbol=code, exchange="SMART", currency="USD")
+            # primaryExchange 缓存在 Redis，避免每次重复调用 reqContractDetails
             primaryExchange = rd.Robj().hget("us_contract_details", code)
             if primaryExchange is None:
                 details = get_ib().reqContractDetails(contract)
@@ -307,11 +303,9 @@ def run_tasks(client_id: int):
             args: dict = json.loads(args)
             info = ""
             if cmd == CmdEnum.SEARCH_STOCKS.value:
-                # log.info(f'{client_id} Task Search Stocks: {args}')
                 info = args["search"]
                 res = search_stocks(args["search"])
             elif cmd == CmdEnum.KLINES.value:
-                # log.info(f'{client_id} Task Klines: {args}')
                 info = (
                     f"{args['code']} - {args['durationStr']} - {args['barSizeSetting']}"
                 )
@@ -322,23 +316,18 @@ def run_tasks(client_id: int):
                     args["timeout"],
                 )
             elif cmd == CmdEnum.TICKS.value:
-                # log.info(f'{client_id} Task Ticks: {args}')
                 info = args["codes"]
                 res = ticks(args["codes"])
             elif cmd == CmdEnum.STOCK_INFO.value:
-                # log.info(f'{client_id} Task Stock Info: {args}')
                 info = args["code"]
                 res = stock_info(args["code"])
             elif cmd == CmdEnum.BALANCE.value:
-                # log.info(f'{client_id} Task Balance: {args}')
                 info = "balance"
                 res = balance()
             elif cmd == CmdEnum.POSITIONS.value:
-                # log.info(f'{client_id} Task Positions: {args}')
                 info = args["code"]
                 res = positions(args["code"])
             elif cmd == CmdEnum.ORDERS.value:
-                # log.info(f'{client_id} Task Orders: {args}')
                 info = args["code"]
                 res = orders(args["code"], args["type"], args["amount"])
 
@@ -354,7 +343,7 @@ def run_tasks(client_id: int):
 if __name__ == "__main__":
     print("Start Run")
 
-    # 清空原来的队列
+    # 启动前清空残留队列和结果，防止旧数据干扰
     for _k in [
         CmdEnum.SEARCH_STOCKS.value,
         CmdEnum.KLINES.value,
@@ -366,19 +355,13 @@ if __name__ == "__main__":
     ]:
         rd.Robj().delete(_k)
 
-    # 清空原来的结果
     h_keys = rd.Robj().keys(f"{ib_res_hkey}*")
     for _k in h_keys:
         rd.Robj().delete(_k)
 
-    # Debug
-    # run_tasks(11)
-
-    # 启动 5 个客户端接收
+    # 启动 5 个客户端进程，clientId 21-25 各自独立连接 IB
     start_client_num = 5
     with ProcessPoolExecutor(
         start_client_num, mp_context=get_context("spawn")
     ) as executor:
         executor.map(run_tasks, [21, 22, 23, 24, 25])
-
-    # run_tasks(0)

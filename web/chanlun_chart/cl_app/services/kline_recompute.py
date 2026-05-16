@@ -45,9 +45,8 @@ def extract_klines_df_from_chart_data(chart_data: dict) -> pd.DataFrame:
     if n == 0:
         return pd.DataFrame()
     if not (len(o) == len(h) == len(low_arr) == len(c) == len(v) == n):
-        # (N4) 列长度不一致说明 chart_data 内部不一致 (上游 cl_data_to_tv_chart
-        # 出 bug, 或者磁盘 pickle 半态读取). 静默返回空 DF 让调用方回退到全量,
-        # 但要在日志里留痕 —— 否则下次复现就丢线索。
+        # 列长度不一致说明 chart_data 内部不一致（上游 bug 或磁盘半态读取），
+        # 静默返回空 DF 让调用方回退到全量，日志留痕便于排查。
         LogUtil.warning(
             f"[kline_recompute] chart_data 列长度不一致, 回退到全量拉取: "
             f"t={n} o={len(o)} h={len(h)} l={len(low_arr)} c={len(c)} v={len(v)}"

@@ -1,14 +1,9 @@
-// -----------------------------------------------------------------------
-// 文件名: macd_stats.js
-// 功能: 在 TradingView 图表上统计任意区间的 MACD / MACD_HTF
-//       红绿柱高低点与面积，并提供区间选择交互与侧边面板。
+// MACD 区间统计：在 TradingView 图表上选区间统计 MACD/MACD_HTF 红绿柱面积与峰谷，
+// 提供工具栏按钮 + 右键菜单选点 + 可拖拽侧边面板。
 // 依赖: charts.js (ChartManager / ChanlunTVRegistry / GlobalTVDatafeeds)
-//       layui (用于面板 UI，可选；未加载时降级为原生 div)
-// -----------------------------------------------------------------------
 
 var MacdStats = (function () {
 
-    // ===================== 常量 =====================
     const PANEL_ID = 'macd-stats-panel';
     const RANGE_SHAPE_TAG = 'macd-stats-range';
     const MARKER_SHAPE_TAG = 'macd-stats-marker';
@@ -17,9 +12,7 @@ var MacdStats = (function () {
     const COLOR_NEG = '#26a69a'; // 绿柱
     const COLOR_RANGE_BG = '#FFD54F';
 
-    // ===================== 工具：时间二分查找 =====================
-    // 复制自 chart_idx_macd_backend.js 的 smartSearch，
-    // 避免跨文件耦合，后续可统一抽到 utils.js。
+    // 复制自 chart_idx_macd_backend.js 的 smartSearch，避免跨文件耦合
     function smartSearch(times, target, intervalStr) {
         if (target === undefined || target === null || isNaN(target)) return -1;
         if (!times || times.length === 0) return -1;
@@ -50,7 +43,6 @@ var MacdStats = (function () {
         return bestIdx;
     }
 
-    // ===================== 工具：定位 barsResult =====================
     function findBarsResult(targetCode, targetInterval) {
         const datafeeds = [];
         if (window.GlobalTVDatafeeds && window.GlobalTVDatafeeds.length > 0) {
@@ -78,7 +70,6 @@ var MacdStats = (function () {
         return null;
     }
 
-    // ===================== 核心算法：区间统计 =====================
     /**
      * 在指定区间内统计 MACD 红绿柱信息。
      * @param {number[]} times - bar 时间戳数组
@@ -113,8 +104,7 @@ var MacdStats = (function () {
             result.endIdx = realEnd;
         }
 
-        // HTF 去重：按 hist 值变化分段，重复值只取一次
-        // 普通 MACD：每根独立累加
+        // HTF 模式按 hist 值变化分段，重复值跳过；普通 MACD 每根独立累加
         let prevHistVal = null;
         let curSeg = null; // {startIdx, endIdx, area, peak, peakIdx, sign}
 
@@ -204,7 +194,7 @@ var MacdStats = (function () {
         return hints;
     }
 
-    // ===================== 控制器：每个 ChartManager 一个 =====================
+    // 每个 ChartManager 实例独立持有一个控制器
     class MacdStatsController {
         constructor(chartManager) {
             this.cm = chartManager;
@@ -309,7 +299,7 @@ var MacdStats = (function () {
                 console.warn('[MacdStats] subscribe crossHairMoved failed', e);
             }
 
-            // ✅ 用 TV 官方的 widget.subscribe('mouse_down') 事件
+            // 用 TV 官方的 widget.subscribe('mouse_down') 事件
             // 这是 TV 提供的标准 API，专门用于监听图表内的鼠标按下，不会被 canvas 吞掉
             const onMouseDown = (params) => {
                 // 防止按钮点击的同一次事件被立即捕获
@@ -464,8 +454,6 @@ var MacdStats = (function () {
             this.cm.markDrawingMutationStart('macd-stats');
             try {
                 this._removeShapes();
-                // this._drawRangeRect(times, startIdx, endIdx);
-                // this._drawMarkers(times, statsLocal, statsHtf);
             } finally {
                 this.cm.markDrawingMutationEnd('macd-stats');
             }
@@ -697,7 +685,6 @@ var MacdStats = (function () {
         }
     }
 
-    // ===================== 对外接口 =====================
     return {
         attach(chartManager) {
             if (!chartManager) return null;

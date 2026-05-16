@@ -1,6 +1,7 @@
-"""src/chanlun/file_db_mixins/cl_object_cache.py — 缠论对象 .pkl 缓存 Mixin。
+"""缠论对象 .pkl 缓存 Mixin。
 
-P8 step 3 (2026-05-15): 从 file_db.py 物理拆出。
+负责 cd 对象的 pickle 持久化与 4 重一致性校验（连续性/OHLC/密度/数据量），
+挂载到 FileCacheDB 主类通过多继承提供方法。
 """
 
 from __future__ import annotations
@@ -20,17 +21,8 @@ from chanlun.exchange import Exchange
 from chanlun.tools.log_util import LogUtil
 
 
-# P8 step 2.4: CLObjectCacheMixin
-# ---------------------------------------------------------------------------
-# 负责 cd 对象 .pkl 持久化 + 4 重一致性校验 (连续性 / OHLC / 密度 / 数据量)。
-# get_web_cl_data 已被 web 路径绕开 (cl_utils.web_batch_get_cl_datas 改走
-# cl_object_cache.py), 这里保留是供 notebook / 回测脚本使用。
-# 依赖 FileCacheDB 主类提供的:
-#   字段 ``cl_data_path``
-#   方法 ``_config_md5()`` / ``_atomic_write_pickle()`` / ``_try_run_cleanup()``
-# ===========================================================================
 class _CLObjectCacheMixin:
-    """缠论对象 .pkl 缓存方法 (P8 拆分)。"""
+    """缠论对象 .pkl 缓存方法，含 4 重一致性校验（连续性/OHLC/密度/数据量）。"""
 
     def get_web_cl_data(
             self,
@@ -69,9 +61,8 @@ class _CLObjectCacheMixin:
                         need_recompute = True
 
                     # 2. 数据一致性校验 (防止复权导致的历史数据变更)
-                    # 2026-05 修复: 原 cached_klines[-2] 参考点 + Decimal 严格相等。
-                    # 长桥/IEX 实时源场景下最近几根 bar 因 SIP 后到 / tape 修正会反复
-                    # 微调, 参考点跳到稳定中段 + volume 改相对容差。
+                    # 参考点取稳定中段 bar（避免实时源最新几根因 tape 修正反复微调），
+                    # volume 用相对容差而非严格相等。
                     if not need_recompute and len(cached_klines) >= 12 and len(klines) >= 12:
                         # 跳到稳定中段 bar: 至少 10 根之前, 不超过总长 1/4。
                         ref_idx = -max(10, min(len(cached_klines) // 4, 100))
@@ -108,7 +99,7 @@ class _CLObjectCacheMixin:
                             logger.warning(f"{log_id} 局部数据缺失 [Cache:{len(_v_cd)} vs Src:{len(_v_src)}], 重算")
                             need_recompute = True
 
-                    # 4. 数据量校验 (G6): 仅当输入左侧扩展超过缓存量一半时才全量重算。
+                    # 4. 数据量校验: 仅当输入左侧扩展超过缓存量一半时才全量重算。
                     if (
                         not need_recompute
                         and len(cached_klines) > 0
@@ -136,28 +127,25 @@ class _CLObjectCacheMixin:
                     logger.error(f"{log_id} 尝试删除损坏缓存失败: {str(un_e)}")
                 cd = cl.CL(code, frequency, cl_config)
 
-        # 增量计算
         try:
             cd.process_klines(klines)
         except Exception as e:
-            # G7: process_klines 抛错时 cd 处于半 applied 状态, 返回全新空白 CL 让
-            # 调用方下次请求自然重算。
+            # process_klines 抛错时 cd 处于半 applied 状态，返回空白 CL 让调用方下次自然重算
             logger.error(
                 f"{log_id} 执行缠论计算 process_klines 失败: {str(e)}", exc_info=True
             )
             return cl.CL(code, frequency, cl_config)
 
-        # 写入缓存
         try:
             self._atomic_write_pickle(file_pathname, cd)
         except Exception as e:
-            # H2: 写盘失败是"下次还会从空缓存重算"的 silent 放大源, critical 级。
+            # 写盘失败会导致下次请求从空缓存重算，影响放大，故用 critical 级
             logger.critical(
                 f"{log_id} 写入缓存失败 path={file_pathname} err={str(e)}",
                 exc_info=True,
             )
 
-        # H6: 随机清理旧数据, 统一通过 _try_run_cleanup 节流 + 互斥。
+        # 低概率触发清理，由 _try_run_cleanup 负责节流与互斥
         if random.randint(0, 1000) <= 5:
             self._try_run_cleanup(
                 "web_cl",

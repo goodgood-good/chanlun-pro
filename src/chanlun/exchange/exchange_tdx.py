@@ -23,33 +23,22 @@ from chanlun.tools import tdx_best_ip as best_ip
 
 @fun.singleton
 class ExchangeTDX(Exchange):
-    """
-    通达信行情接口
-    """
+    """通达信沪深 A 股行情适配器（含复权处理）。"""
 
     g_all_stocks = []
 
     def __init__(self):
-        # super().__init__()
-
         try:
-            # 选择最优的服务器，并保存到 cache 中
+            # 优先从 cache 读取上次选出的最优服务器，避免每次启动都重新测速
             self.connect_info = db.cache_get("tdx_connect_ip")
-            # self.connect_info = None  # 手动重新选择最优服务器
             if self.connect_info is None:
                 self.connect_info = self.reset_tdx_ip()
-                # print(f"最优服务器：{self.connect_info}")
         except Exception:
             print(traceback.format_exc())
             print("通达信 沪深行情接口初始化失败，沪深行情不可用")
 
-        # 板块概念信息
         self.stock_bkgn = StocksBKGN()
-
-        # 文件缓存
         self.fdb = FileCacheDB()
-
-        # 设置时区
         self.tz = pytz.timezone("Asia/Shanghai")
 
     def reset_tdx_ip(self):
@@ -125,7 +114,7 @@ class ExchangeTDX(Exchange):
             self.reset_tdx_ip()
             return self.all_stocks()
 
-        # 添加北京A股的股票
+        # 北京交易所（BJ）股票通达信 API 不直接返回，从本地维护的静态列表补充
         for _c, _n in tdx_codes_by_bj.items():
             __all_stocks.append(
                 {
@@ -185,9 +174,7 @@ class ExchangeTDX(Exchange):
         end_date: str = None,
         args=None,
     ) -> Union[pd.DataFrame, None]:
-        """
-        通达信，不支持按照时间查找
-        """
+        """获取 K 线数据，不支持按时间区间筛选（通达信接口限制），通过分页拉取最新 N*700 条。"""
         if args is None:
             args = {}
         if "fq" not in args.keys():
@@ -213,7 +200,7 @@ class ExchangeTDX(Exchange):
             "2m": 8,
             "1m": 8,
         }
-        # 周线数据，使用日线复权后的数据进行合并，所以多请求点数据
+        # 周线由日线复权后合并，需要更多原始数据才能覆盖足够的周数
         if frequency == "w":
             args["pages"] = 12
 
@@ -276,9 +263,8 @@ class ExchangeTDX(Exchange):
                         # 如果请求的第一个时间大于缓存的最后一个时间，退出
                         if old_end_dt >= new_start_dt:
                             break
-            # TODO 如果是分钟数据，当天的数据会有问题，在 13:00，应该是 11:00
+            # 通达信分钟线午休结束后的第一根 bar 时间戳为 13:00，实际应归属上午 11:30（最后一根）
             if len(frequency) >= 2 and frequency.endswith("m"):
-                # 将 13:00 修改为 11:30
                 def dt_1300_to_1130(_d: datetime.datetime):
                     if _d.hour == 13 and _d.minute == 0:
                         return _d.replace(hour=11, minute=30)
@@ -286,7 +272,7 @@ class ExchangeTDX(Exchange):
 
                 ks["date"] = ks["date"].apply(dt_1300_to_1130)
 
-            # 删除重复数据
+            # 多页数据合并后去重，保留最新一条（数据源可能在更新中返回重复 bar）
             ks = ks.drop_duplicates(["date"], keep="last").sort_values("date")
 
             self.fdb.save_tdx_klines(Market.A.value, code, frequency, ks)
@@ -294,15 +280,15 @@ class ExchangeTDX(Exchange):
             ks.loc[:, "code"] = code
             ks.loc[:, "volume"] = ks["vol"]
 
-            # 转换时区
             ks["date"] = ks["date"].dt.tz_localize(self.tz)
+            # 日线及以上统一设为 15:00（A 股收盘），便于与分钟线时间轴对齐
             if frequency in ["d", "w", "m", "q", "y"]:
-                # 将时间转换成 15:00:00
                 ks["date"] = ks["date"].apply(lambda _d: _d.replace(hour=15, minute=0))
 
-            if frequency == "m":  # 月设置为每月的一号
+            # 月线时间戳规整到月初，年线规整到年初，保持惯例
+            if frequency == "m":
                 ks["date"] = ks["date"].apply(lambda _d: _d.replace(day=1))
-            if frequency == "y":  # 年设置为一月一号
+            if frequency == "y":
                 ks["date"] = ks["date"].apply(lambda _d: _d.replace(month=1, day=1))
             ks = ks.drop_duplicates(["date"], keep="last").sort_values("date")
 
@@ -353,11 +339,7 @@ class ExchangeTDX(Exchange):
         return stock[0]
 
     def ticks(self, codes: List[str]) -> Dict[str, Tick]:
-        """
-        如果可以使用 富途 的接口，就用 富途的，否则就用 日线的 K线计算
-        使用 富途 的接口会很快，日线则很慢
-        获取日线的k线，并返回最后一根k线的数据
-        """
+        """批量获取实时行情快照，通过 get_security_quotes 分批拉取（每批最多 80 只）。"""
         ticks = {}
         if len(codes) == 0:
             return ticks
@@ -372,9 +354,8 @@ class ExchangeTDX(Exchange):
                 stock_types[_c] = _t
         client = TdxHq_API(raise_exception=True, auto_retry=True)
         with client.connect(self.connect_info["ip"], self.connect_info["port"]):
-            # 获取总数据量
             total_quotes = len(query_stocks)
-            # 分批次获取数据
+            # 通达信单次 get_security_quotes 最多传 80 个标的，超出需分批
             batch_size = 80
             quotes = []
             error_codes = []
@@ -413,7 +394,7 @@ class ExchangeTDX(Exchange):
                     if len(_code) == 0:
                         continue
                     _code = _code[0]
-                # 如果 stock_type == etf_cn , 则价格需要 / 10
+                # 通达信 ETF 报价单位为分（整数），需除以 10 转换为元
                 if stock_types[_q["code"]] == "etf_cn":
                     _q["price"] /= 10
                     _q["bid1"] /= 10
@@ -624,16 +605,13 @@ class ExchangeTDX(Exchange):
         return data
 
     def klines_fq(self, fq_klines: pd.DataFrame, xdxr_data, fq_type: str):
-        """
-        对行情进行复权处理
-        """
+        """对 K 线进行前复权（qfq）或后复权（hfq）处理，先处理扩缩股（category=11），再处理分红配股（category=1）。"""
         if len(xdxr_data) == 0:
             return fq_klines
 
-        # 先处理扩缩股数据 (category==11)
         suogu_info = copy.deepcopy(xdxr_data.query("category==11"))
         if len(suogu_info) > 0:
-            # 处理扩缩股数据，对日期之前的行情数据进行缩股处理
+            # 扩缩股：对事件日期之前的历史价格除以 suogu 系数，成交量乘以 suogu（保持总额不变）
             suogu_info.loc[:, "idx_date"] = (
                 suogu_info["date"].dt.tz_localize(self.tz).dt.tz_convert("UTC")
             )
@@ -649,14 +627,12 @@ class ExchangeTDX(Exchange):
                     # 找到该日期之前的所有K线数据
                     before_data = fq_klines.loc[fq_klines.index < idx]
                     if len(before_data) > 0:
-                        # 对价格数据进行缩股处理
                         for col in ["open", "high", "low", "close"]:
                             if col in before_data.columns:
                                 fq_klines.loc[fq_klines.index < idx, col] = (
                                     fq_klines.loc[fq_klines.index < idx, col]
                                     / row["suogu"]
                                 )
-                        # 对成交量数据进行扩股处理（成交量应该乘以suogu）
                         if "volume" in before_data.columns:
                             fq_klines.loc[fq_klines.index < idx, "volume"] = (
                                 fq_klines.loc[fq_klines.index < idx, "volume"]
@@ -668,11 +644,10 @@ class ExchangeTDX(Exchange):
                                 * row["suogu"]
                             )
 
-            # 重置索引，准备后续处理
             fq_klines = fq_klines.reset_index(drop=True)
             fq_klines = fq_klines.drop(columns=["idx_date"], errors="ignore")
 
-        # 再处理除权除息数据 (category==1)
+        # 再处理除权除息数据（分红/配股/送转股，category=1）
         info = copy.deepcopy(xdxr_data.query("category==1"))
         if len(info) == 0:
             return fq_klines
@@ -681,14 +656,13 @@ class ExchangeTDX(Exchange):
         )
         info.set_index("idx_date", inplace=True)
 
-        # 如果之前没有处理扩缩股，需要重新设置索引
+        # 若未经过扩缩股处理，需补建 idx_date 索引用于后续 concat 对齐
         if "idx_date" not in fq_klines.columns:
             fq_klines = fq_klines.assign(if_trade=1)
             fq_klines.loc[:, "idx_date"] = fq_klines["date"].dt.tz_convert("UTC")
             fq_klines.set_index("idx_date", inplace=True)
 
         if len(info) > 0:
-            # 有除权数据
             with warnings.catch_warnings():
                 warnings.filterwarnings("ignore", category=FutureWarning)
                 data = pd.concat(
@@ -723,26 +697,24 @@ class ExchangeTDX(Exchange):
                 axis=1,
             )
 
-        # 数据补全
         data = data.fillna(0)
 
-        # 计算前日收盘
+        # 前日收盘价 = (前收盘*10 - 分红 + 配股价*配股数) / (10 + 配股数 + 送转股数)
         data["preclose"] = (
             data["close"].shift(1) * 10
             - data["fenhong"]
             + data["peigu"] * data["peigujia"]
         ) / (10 + data["peigu"] + data["songzhuangu"])
 
-        # 前复权
+        # 前复权：adj 从最新往历史累积，历史价格乘以 adj 使最新价保持原始价格
         if fq_type == "qfq":
             data["adj"] = (
                 (data["preclose"].shift(-1) / data["close"]).fillna(1)[::-1].cumprod()
             )
-            # ohlc 数据进行复权计算
             for col in ["open", "high", "low", "close"]:
                 data[col] = round(data[col] * data["adj"], 3)
 
-        # 后复权
+        # 后复权：adj 从历史往最新累积，历史价格除以 adj 还原未复权基准
         if fq_type == "hfq":
             data["adj"] = (
                 (data["close"] / data["preclose"].shift(-1))
@@ -750,11 +722,8 @@ class ExchangeTDX(Exchange):
                 .shift(1)
                 .fillna(1)
             )
-            # ohlc 数据进行复权计算
             for col in ["open", "high", "low", "close"]:
                 data[col] = round(data[col] / data["adj"], 3)
-
-        # data['volume'] = data['volume'] / data['adj'] if 'volume' in data.columns else data['vol'] / data['adj']
 
         data = data.query("if_trade==1 and open != 0")
 
@@ -762,31 +731,6 @@ class ExchangeTDX(Exchange):
 
 
 if __name__ == "__main__":
-
     ex = ExchangeTDX()
-    # all_stocks = ex.all_stocks()
-    # print(len(all_stocks))
-
-    # klines = ex.klines("SZ.000001", "5m")
-    # print(klines.head(5))
-    # print(klines.tail(10))
-    # print(len(klines))
-
-    # print("use time : ", time.time() - s_time)
-    # 207735
-    #
     klines = ex.klines("SH.512800", "d")
     print(klines.tail(20))
-
-    # stock = ex.stock_info("SH.512800")
-    # print(stock)
-
-    # ticks = ex.ticks(["SH.000001", "BJ.837592"])
-    # for _c, _t in ticks.items():
-    #     print(_c, _t)
-
-    # 获取复权相关信息
-    # code = "SZ.002165"
-    # market, tdx_code, _ = ex.to_tdx_code(code)
-    # xdxr_data = ex.xdxr(market, code, tdx_code)
-    # print(xdxr_data)

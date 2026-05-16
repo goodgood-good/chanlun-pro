@@ -8,7 +8,8 @@ from chanlun.db_models.base import Base
 
 
 class TableByTVCharts(Base):
-    # TV 图表的布局
+    """TradingView 图表布局持久化表 (cl_tv_charts)。"""
+
     __tablename__ = "cl_tv_charts"
     id = Column(Integer, primary_key=True, autoincrement=True, comment="id")
     client_id = Column(String(50), comment="客户端id")
@@ -19,5 +20,4 @@ class TableByTVCharts(Base):
     content = Column(Text, comment="布局内容")
     timestamp = Column(Integer, comment="时间戳")
     name = Column(String(50), comment="布局名称")
-    # 添加配置设置编码
     __table_args__ = {"mysql_collate": "utf8mb4_general_ci"}

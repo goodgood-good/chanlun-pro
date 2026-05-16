@@ -17,22 +17,19 @@ var Utils = (function () {
       });
     },
     add_to_cache: function (data) {
-      // 获取之前的列表
       let selectedItems =
         JSON.parse(
           localStorage.getItem(Utils.get_market() + "_selectedItems")
         ) || [];
 
-      // 将当前选择的项目添加到列表的最前面
       selectedItems.unshift({
         name: data.arr[0].name,
         value: data.arr[0].value,
       });
 
-      // 只保留最近的30个
+      // 最多保留30条，先截断再去重，保留最近搜索顺序
       selectedItems = selectedItems.slice(0, 30);
 
-      // 在最后放到缓存之前去重，保留最近的项
       const uniqueItems = [];
       const seenValues = new Set();
 
@@ -43,7 +40,6 @@ var Utils = (function () {
         }
       }
 
-      // 更新 localStorage
       localStorage.setItem(
         Utils.get_market() + "_selectedItems",
         JSON.stringify(uniqueItems)
@@ -55,24 +51,19 @@ var Utils = (function () {
     get_code: function () {
       return Utils.get_local_data(Utils.get_market() + "_code");
     },
+    // 渲染底部固定工具栏，提供侧边菜单栏的折叠/展开按钮
     render_fixbar: function () {
-      // 渲染底部工具栏
-      // 固定条，显示与隐藏菜单栏
       layui.use(function () {
         var util = layui.util;
         util.fixbar({
           bars: [
             {
-              // 定义可显示的 bar 列表信息 -- v2.8.0 新增
               type: "hide_menu",
-              icon: "layui-icon-spread-left", // layui-icon-shrink-right
+              icon: "layui-icon-spread-left",
             },
           ],
           default: false,
-          on: {
-            // 任意事件 --  v2.8.0 新增
-          },
-          // 点击事件
+          on: {},
           click: function (type) {
             if (type === "hide_menu") {
               var fixed_li = $(".layui-fixbar  li:first-child");

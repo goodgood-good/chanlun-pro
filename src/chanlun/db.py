@@ -44,6 +44,7 @@ from chanlun.db_models.zixuan import TableByZixuan
 from chanlun.db_models.zixuan_group import TableByZxGroup
 @fun.singleton
 class DB(object):
+    """SQLAlchemy ORM 封装的数据库访问单例，支持 MySQL 和 SQLite。"""
 
     def __init__(self) -> None:
         if config.DB_TYPE == "sqlite":
@@ -136,7 +137,6 @@ class DB(object):
             return self.__cache_tables[table_name]
 
         class TableByKlines(Base):
-            # 表名
             __tablename__ = table_name
             __table_args__ = (
                 UniqueConstraint("code", "dt", "f", name="table_code_dt_f_unique"),
@@ -144,7 +144,6 @@ class DB(object):
                 Index("idx_code_f_dt", "code", "f", "dt"),
                 {"mysql_collate": "utf8mb4_general_ci"},
             )
-            # 表结构
             code = Column(String(20), primary_key=True, comment="标的代码")
             dt = Column(DateTime, primary_key=True, comment="日期")
             f = Column(String(5), primary_key=True, comment="周期")
@@ -197,7 +196,6 @@ class DB(object):
         """
         with self.Session() as session:
             table = self.klines_tables(market, code)
-            # 查询数据库
             filter = (table.code == code, table.f == frequency)
             if start_date is not None:
                 filter += (table.dt >= start_date,)
@@ -216,13 +214,7 @@ class DB(object):
             return rows
 
     def klines_last_datetime(self, market, code, frequency):
-        """
-        查询k线表中最后一条记录的日期
-        :param market:
-        :param code:
-        :param frequency:
-        :return:
-        """
+        """查询指定标的 K 线表中最新一条记录的日期字符串，无数据时返回 None。"""
         # 命中轻量级缓存（加锁），减少数据库查询
         cached = self._get_last_dt_cache(market, code, frequency)
         if cached is not None:
@@ -280,7 +272,6 @@ class DB(object):
                 f"klines_insert({market},{code},{frequency}) 中存在无法解析的 date 值"
             )
 
-        # 映射列名：API返回的列名 -> 数据库列名
         rename_map = {
             "open": "o",
             "close": "c",
@@ -291,16 +282,14 @@ class DB(object):
         }
         df.rename(columns=rename_map, inplace=True)
 
-        # 填充必要的索引列
         df["code"] = code
         df["f"] = frequency
 
-        # 筛选需要入库的列
         db_columns = ["code", "dt", "f", "o", "c", "h", "l", "v"]
         if "p" in df.columns:
             db_columns.append("p")
 
-        # 仅保留存在的列，防止 KeyError
+        # 只保留实际存在的列，防止上游未传 position 时出现 KeyError
         final_columns = [col for col in db_columns if col in df.columns]
         data_to_insert = df[final_columns].to_dict(orient="records")
 
@@ -367,14 +356,7 @@ class DB(object):
         frequency: str = None,
         dt: datetime.datetime = None,
     ):
-        """
-        删除k线
-        :param market:
-        :param code:
-        :param frequency:
-        :param dt:
-        :return:
-        """
+        """删除 K 线记录；frequency/dt 为空时删除该标的全部数据。"""
         # 删除前先失效缓存（无论后续是否成功），避免读到过期值。
         if frequency is not None:
             self._invalidate_last_dt_cache(market, code, frequency)
@@ -466,7 +448,7 @@ class DB(object):
     ):
         with self.Session() as session:
             try:
-                # 添加前，统一删除在自选组下的股票信息
+                # 先删后插实现幂等：避免重复添加同一标的
                 session.query(TableByZixuan).filter(
                     TableByZixuan.market == market,
                     TableByZixuan.zx_group == zx_group,
@@ -559,13 +541,11 @@ class DB(object):
     def zx_stock_sort_top(self, market: str, zx_group: str, stock_code: str):
         with self.Session() as session:
             try:
-                # market、zx_group 结果下的 position + 1
                 session.query(TableByZixuan).filter(TableByZixuan.market == market).filter(
                     TableByZixuan.zx_group == zx_group
                 ).update(
                     {"position": TableByZixuan.position + 1}, synchronize_session=False
                 )
-                # 再将指定的股票 postition 更新为 0
                 session.query(TableByZixuan).filter(TableByZixuan.market == market).filter(
                     TableByZixuan.zx_group == zx_group
                 ).filter(TableByZixuan.stock_code == stock_code).update(
@@ -581,14 +561,12 @@ class DB(object):
     def zx_stock_sort_bottom(self, market: str, zx_group: str, stock_code: str):
         with self.Session() as session:
             try:
-                # 获取 market zx_group 结果下最大的position
                 max_position = (
                     session.query(func.max(TableByZixuan.position))
                     .filter(TableByZixuan.market == market)
                     .filter(TableByZixuan.zx_group == zx_group)
                     .scalar()
                 )
-                # 将 market zx_group stock_code 结果下的 position 更新为 max_position + 1
                 session.query(TableByZixuan).filter(TableByZixuan.market == market).filter(
                     TableByZixuan.zx_group == zx_group
                 ).filter(TableByZixuan.stock_code == stock_code).update(
@@ -604,7 +582,6 @@ class DB(object):
     def zx_clear_by_group(self, market: str, zx_group: str):
         with self.Session() as session:
             try:
-                # 删除 market、zx_group 下所有的记录
                 session.query(TableByZixuan).filter(TableByZixuan.market == market).filter(
                     TableByZixuan.zx_group == zx_group
                 ).delete(synchronize_session=False)
@@ -616,8 +593,8 @@ class DB(object):
         return True
 
     def zx_query_group_by_code(self, market: str, stock_code: str) -> List[str]:
+        """查询指定标的所在的所有自选分组名称列表。"""
         with self.Session() as session:
-            # 查询 market 下 stock_code 的所有去重的 zx_group 记录
             return [
                 _[0]
                 for _ in (
@@ -642,7 +619,6 @@ class DB(object):
     ):
         with self.Session() as session:
             try:
-                # 保存订单
                 order = TableByOrder(
                     market=market,
                     stock_code=stock_code,
@@ -663,7 +639,6 @@ class DB(object):
 
     def order_query_by_code(self, market: str, stock_code: str) -> List[TableByOrder]:
         with self.Session() as session:
-            # 查询 market 下 stock_code 的所有订单
             orders = (
                 session.query(TableByOrder)
                 .filter(TableByOrder.market == market)
@@ -671,15 +646,8 @@ class DB(object):
                 .all()
             )
 
-        # {
-        #     "code": "SH.000001",
-        #     "datetime": "2021-10-19 10:09:51",
-        #     "type": "buy", (允许的值：buy 买入 sell 卖出  open_long 开多  close_long 平多 open_short 开空 close_short 平空)
-        #     "price": 205.8,
-        #     "amount": 300.0,
-        #     "info": "涨涨涨"
-        # }
-        return [  # 兼容之前的
+        # 返回与历史接口兼容的字典格式
+        return [
             {
                 "code": _o.stock_code,
                 "name": _o.stock_name,
@@ -695,7 +663,6 @@ class DB(object):
     def order_clear_by_code(self, market: str, stock_code: str):
         with self.Session() as session:
             try:
-                # 清除 market 下 stock_code 的所有订单
                 session.query(TableByOrder).filter(TableByOrder.market == market).filter(
                     TableByOrder.stock_code == stock_code
                 ).delete()
@@ -726,7 +693,6 @@ class DB(object):
     ):
         with self.Session() as session:
             try:
-                # 保存任务
                 session.add(
                     TableByAlertTask(
                         market=market,
@@ -766,7 +732,6 @@ class DB(object):
           避免上层静默丢弃多余记录。
         """
         with self.Session() as session:
-            # 查询任务
             query = session.query(TableByAlertTask)
             filter = ()
             if market is not None:
@@ -783,7 +748,6 @@ class DB(object):
     def task_delete(self, id: int):
         with self.Session() as session:
             try:
-                # 删除任务
                 session.query(TableByAlertTask).filter(TableByAlertTask.id == id).delete()
                 session.commit()
             except Exception:
@@ -897,14 +861,7 @@ class DB(object):
         line_type: str,
         line_dt: datetime.datetime,
     ) -> TableByAlertRecord:
-        """
-        查询预警记录
-        :param market:
-        :param stock_code:
-        :param frequency:
-        :param dt:
-        :return:
-        """
+        """查询指定标的、周期、线类型和线起点时间的最新预警记录。"""
         with self.Session() as session:
             return (
                 session.query(TableByAlertRecord)
@@ -922,14 +879,7 @@ class DB(object):
     def alert_record_query(
         self, market: str, task_name: str = None
     ) -> List[TableByAlertRecord]:
-        """
-        查询预警记录
-        :param market:
-        :param stock_code:
-        :param frequency:
-        :param dt:
-        :return:
-        """
+        """查询预警记录列表（最近 100 条，降序），可按 task_name 过滤。"""
         with self.Session() as session:
             query = session.query(TableByAlertRecord)
             query = query.filter(TableByAlertRecord.market == market)
@@ -964,7 +914,7 @@ class DB(object):
         """
         with self.Session() as session:
             try:
-                # 相同的 market,code/mark_time/mark_label 只能又一个，先删除一下
+                # 同 (market, code, mark_time, mark_label) 只保留一条，先删后插
                 session.query(TableByTVMarks).filter(
                     TableByTVMarks.market == market,
                     TableByTVMarks.stock_code == stock_code,
@@ -995,12 +945,7 @@ class DB(object):
     def marks_query(
         self, market: str, stock_code: str, start_date: int = None
     ) -> List[TableByTVMarks]:
-        """
-        查询图表标记
-        :param market:
-        :param stock_code:
-        :return:
-        """
+        """查询时间轴图表标记列表，start_date（时间戳）可限制查询起点。"""
         with self.Session() as session:
             query = session.query(TableByTVMarks).filter(
                 TableByTVMarks.market == market,
@@ -1041,7 +986,7 @@ class DB(object):
         """
         with self.Session() as session:
             try:
-                # 相同的 market,code/mark_time/mark_label 只能有一个，先删除一下
+                # 同 (market, code, mark_time, mark_label) 只保留一条，先删后插
                 session.query(TableByTVMarks).filter(
                     TableByTVMarks.market == market,
                     TableByTVMarks.stock_code == stock_code,
@@ -1073,12 +1018,7 @@ class DB(object):
     def marks_query_by_price(
         self, market: str, stock_code: str, start_date: int = None
     ) -> List[TableByTVMarksPrice]:
-        """
-        查询图表标记
-        :param market:
-        :param stock_code:
-        :return:
-        """
+        """查询价格主图标记列表，start_date（时间戳）可限制查询起点。"""
         with self.Session() as session:
             query = session.query(TableByTVMarksPrice).filter(
                 TableByTVMarksPrice.market == market,
@@ -1091,8 +1031,7 @@ class DB(object):
     def marks_del_by_price(self, market: str, mark_label: str):
         with self.Session() as session:
             try:
-                # 修复原 bug：原代码这里把 TableByTVMarks.market 与 TableByTVMarksPrice 混用，
-                # 实际期望删除的是 TableByTVMarksPrice，统一改为 TableByTVMarksPrice.market。
+                # 原代码混用了 TableByTVMarks.market，实际应删 TableByTVMarksPrice，统一修正。
                 session.query(TableByTVMarksPrice).filter(
                     TableByTVMarksPrice.market == market,
                     TableByTVMarksPrice.mark_label == mark_label,
@@ -1139,9 +1078,9 @@ class DB(object):
     def tv_chart_save(
         self, chart_type, client_id, user_id, name, content, symbol, resolution
     ):
-        # 保存图表布局，并返回 id
+        """保存图表布局，返回记录 id；drawing/study_template 类型按名称做覆盖更新。"""
         with self.Session() as session:
-            # 如果是 drawing 或 study_template，先尝试根据名称查找并更新，实现覆盖保存
+            # drawing/study_template 按名称覆盖，避免同名模板重复堆积
             if chart_type in ["drawing", "study_template"]:
                 chart = (
                     session.query(TableByTVCharts)
@@ -1179,7 +1118,6 @@ class DB(object):
     def tv_chart_update(
         self, chart_type, id, client_id, user_id, name, content, symbol, resolution
     ):
-        # 更新图表布局
         with self.Session() as session:
             session.query(TableByTVCharts).filter(
                 TableByTVCharts.id == id,
@@ -1199,7 +1137,6 @@ class DB(object):
         return True
 
     def tv_chart_get(self, chart_type, id, client_id, user_id):
-        # 获取图表布局
         with self.Session() as session:
             return (
                 session.query(TableByTVCharts)
@@ -1213,7 +1150,6 @@ class DB(object):
             )
 
     def tv_chart_get_by_name(self, chart_type, name, client_id, user_id):
-        # 获取图表布局
         with self.Session() as session:
             return (
                 session.query(TableByTVCharts)
@@ -1228,7 +1164,6 @@ class DB(object):
             )
 
     def tv_chart_del(self, chart_type, id, client_id, user_id):
-        # 删除图表布局
         with self.Session() as session:
             try:
                 session.query(TableByTVCharts).filter(
@@ -1244,7 +1179,6 @@ class DB(object):
         return True
 
     def tv_chart_del_by_name(self, chart_type, name, client_id, user_id):
-        # 根据名称删除图表布局
         with self.Session() as session:
             try:
                 session.query(TableByTVCharts).filter(

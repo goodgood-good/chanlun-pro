@@ -24,7 +24,6 @@ class ExchangeBaostock(Exchange):
     def __init__(self):
         bs.login()
 
-        # 设置时区
         self.tz = pytz.timezone("Asia/Shanghai")
 
     def default_code(self):
@@ -87,7 +86,6 @@ class ExchangeBaostock(Exchange):
         rs = bs.query_all_stock(day=day)
         __all_stocks = []
         while (rs.error_code == "0") & rs.next():
-            # 获取一条记录，将记录合并在一起
             row = rs.get_row_data()
             if row[0][:6] in ["sz.399", "sh.000"]:
                 continue
@@ -139,6 +137,7 @@ class ExchangeBaostock(Exchange):
         if "fq" not in args.keys():
             args["fq"] = "qfq"
 
+        # baostock 复权参数：1=后复权 2=前复权 3=不复权
         fq_map = {"qfq": "2", "hfq": "1"}
         frequency_map = {
             "m": "m",
@@ -162,10 +161,6 @@ class ExchangeBaostock(Exchange):
         if frequency not in frequency_map:
             raise Exception("不支持的周期 : " + frequency)
 
-        #### 获取沪深A股历史K线数据 ####
-        # 详细指标参数，参见“历史行情指标参数”章节；“分钟线”参数与“日线”参数不同。
-        # 分钟线指标：date,time,code,open,high,low,close,volume,amount,adjustflag
-        # 周月线指标：date,code,open,high,low,close,volume,amount,adjustflag,turn,pctChg
         if start_date is None:
             start_date = datetime.datetime.now() - datetime.timedelta(
                 days=default_start_day_map[frequency]
@@ -181,6 +176,7 @@ class ExchangeBaostock(Exchange):
             adjustflag=fq_map[args["fq"]],
         )
         if rs.error_code in ["10001001", "10002007"]:
+            # session 超时或需要重新登录，重连后重试
             bs.login()
             return self.klines(code, frequency, start_date, end_date, args)
         if rs.error_code != "0":
@@ -190,7 +186,6 @@ class ExchangeBaostock(Exchange):
 
         data_list = []
         while (rs.error_code == "0") & rs.next():
-            # 获取一条记录，将记录合并在一起
             data_list.append(rs.get_row_data())
         kline = pd.DataFrame(data_list, columns=rs.fields)
         kline["date"] = pd.to_datetime(kline["date"])
@@ -263,7 +258,6 @@ class ExchangeBaostock(Exchange):
         rs = bs.query_stock_basic(code=code)
         data_list = []
         while (rs.error_code == "0") & rs.next():
-            # 获取一条记录，将记录合并在一起
             data_list.append(rs.get_row_data())
         if data_list:
             return {"code": data_list[0][0], "name": data_list[0][1]}

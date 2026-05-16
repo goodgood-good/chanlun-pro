@@ -3,20 +3,17 @@ from chanlun.base import Market
 from chanlun.exchange.exchange import Exchange
 from chanlun.exchange.exchange_cq import ExchangeChangQiao
 
-# 全局保存交易所对象，避免创建多个交易所对象
+# 进程级单例缓存，避免每次调用重新初始化（TDX/QMT 初始化耗时且有状态）
 g_exchange_obj = {}
 
 
 def get_exchange(market: Market) -> Exchange:
-    """
-    获取市场的交易所对象，根据config配置中设置的进行获取
-    """
+    """根据 config 配置返回指定市场的交易所适配器单例。"""
     global g_exchange_obj
     if market.value in g_exchange_obj.keys():
         return g_exchange_obj[market.value]
 
     if market == Market.A:
-        # 沪深 A股 交易所
         if config.EXCHANGE_A == "tdx":
             from chanlun.exchange.exchange_tdx import ExchangeTDX
 
@@ -50,7 +47,6 @@ def get_exchange(market: Market) -> Exchange:
             raise Exception(f"不支持的沪深交易所 {config.EXCHANGE_A}")
 
     elif market == Market.HK:
-        # 港股 交易所
         if config.EXCHANGE_HK == "tdx_hk":
             from chanlun.exchange.exchange_tdx_hk import ExchangeTDXHK
 
@@ -73,7 +69,6 @@ def get_exchange(market: Market) -> Exchange:
             raise Exception(f"不支持的香港交易所 {config.EXCHANGE_HK}")
 
     elif market == Market.FUTURES:
-        # 期货 交易所
         if config.EXCHANGE_FUTURES == "tq":
             from chanlun.exchange.exchange_tq import ExchangeTq
 
@@ -89,7 +84,6 @@ def get_exchange(market: Market) -> Exchange:
         else:
             raise Exception(f"不支持的期货交易所 {config.EXCHANGE_FUTURES}")
     elif market == Market.NY_FUTURES:
-        # 美股期货 交易所
         if config.EXCHANGE_NY_FUTURES == "tdx_ny_futures":
             from chanlun.exchange.exchange_tdx_ny_futures import ExchangeTDXNYFutures
 
@@ -99,7 +93,6 @@ def get_exchange(market: Market) -> Exchange:
 
             g_exchange_obj[market.value] = ExchangeDB(Market.NY_FUTURES.value)
     elif market == Market.FX:
-        # 外汇市场行情
         if config.EXCHANGE_FX == "tdx_fx":
             from chanlun.exchange.exchange_tdx_fx import ExchangeTDXFX
 
@@ -118,7 +111,6 @@ def get_exchange(market: Market) -> Exchange:
             raise Exception(f"不支持的外汇交易所 {config.EXCHANGE_FX}")
 
     elif market == Market.CURRENCY:
-        # 数字货币 交易所
         if config.EXCHANGE_CURRENCY == "binance":
             from chanlun.exchange.exchange_binance import ExchangeBinance
 
@@ -130,7 +122,6 @@ def get_exchange(market: Market) -> Exchange:
         else:
             raise Exception(f"不支持的数字货币交易所 {config.EXCHANGE_CURRENCY}")
     elif market == Market.CURRENCY_SPOT:
-        # 数字货币 交易所
         if config.EXCHANGE_CURRENCY_SPOT == "binance_spot":
             from chanlun.exchange.exchange_binance_spot import ExchangeBinanceSpot
 
@@ -142,7 +133,6 @@ def get_exchange(market: Market) -> Exchange:
         else:
             raise Exception(f"不支持的数字货币交易所 {config.EXCHANGE_CURRENCY_SPOT}")
     elif market == Market.US:
-        # 美股 交易所
         if config.EXCHANGE_US == "alpaca":
             from chanlun.exchange.exchange_alpaca import ExchangeAlpaca
 

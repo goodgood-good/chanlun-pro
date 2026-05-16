@@ -8,26 +8,25 @@ from chanlun.backtesting.base import Operation, POSITION
 from chanlun.backtesting.backtest_trader import BackTestTrader
 
 """
-使用富途的交易接口
+港股实盘交易器，使用富途（Futu OpenD）交易接口。
 """
 
 
 class TraderHKStock(BackTestTrader):
-    """
-    港股股票交易对象
-    """
+    """港股实盘交易器，通过富途 API 下单。"""
 
     def __init__(self, name, log=None):
         super().__init__(name=name, mode="online", market="hk", log=log)
 
         self.ex = ExchangeFutu()
 
-        self.b_space = 3  # 资金分割数量
+        # 最大同时持仓数，资金按仓位数均分
+        self.b_space = 3
 
         self.zx = zixuan.ZiXuan("hk")
 
-    # 做多买入
     def open_buy(self, code, opt: Operation, amount: float = None):
+        """买入开多；按剩余仓位均分可用保证金，并对齐港股 lot_size（最小交易单位）。"""
         positions = self.ex.positions()
         if len(positions) >= self.b_space:
             return False
@@ -38,6 +37,7 @@ class TraderHKStock(BackTestTrader):
         if can_tv is None:
             return False
         max_amount = can_tv["max_margin_buy"] / (self.b_space - len(positions))
+        # 港股必须按 lot_size 取整，否则富途拒单
         max_amount = max_amount - (max_amount % stock_info["lot_size"])
 
         if max_amount == 0:
@@ -54,7 +54,6 @@ class TraderHKStock(BackTestTrader):
 
         self.zx.add_stock("我的持仓", stock_info["code"], stock_info["name"])
 
-        # 保存订单记录
         db.order_save(
             "hk",
             code,
@@ -68,8 +67,8 @@ class TraderHKStock(BackTestTrader):
 
         return {"price": order["dealt_avg_price"], "amount": order["dealt_amount"]}
 
-    # 做空卖出
     def open_sell(self, code, opt: Operation, amount: float = None):
+        """卖空开空；使用 max_margin_short 计算可用融券额度，同样对齐 lot_size。"""
         positions = self.ex.positions()
         if len(positions) >= self.b_space:
             return False
@@ -95,7 +94,6 @@ class TraderHKStock(BackTestTrader):
 
         self.zx.add_stock("我的持仓", stock_info["code"], stock_info["name"])
 
-        # 保存订单记录
         db.order_save(
             "hk",
             code,
@@ -109,8 +107,8 @@ class TraderHKStock(BackTestTrader):
 
         return {"price": order["dealt_avg_price"], "amount": order["dealt_amount"]}
 
-    # 做多平仓
     def close_buy(self, code, pos: POSITION, opt: Operation):
+        """平多仓；无持仓时视为已平，直接返回原始价/量。"""
         positions = self.ex.positions(code)
         if len(positions) == 0:
             return {"price": pos.price, "amount": pos.amount}
@@ -138,7 +136,6 @@ class TraderHKStock(BackTestTrader):
 
         self.zx.del_stock("我的持仓", stock_info["code"])
 
-        # 保存订单记录
         db.order_save(
             "hk",
             code,
@@ -152,8 +149,8 @@ class TraderHKStock(BackTestTrader):
 
         return {"price": order["dealt_avg_price"], "amount": order["dealt_amount"]}
 
-    # 做空平仓
     def close_sell(self, code, pos: POSITION, opt: Operation):
+        """平空仓（买入回补）；无持仓时视为已平，直接返回原始价/量。"""
         positions = self.ex.positions(code)
         if len(positions) == 0:
             return {"price": pos.price, "amount": pos.amount}
@@ -181,7 +178,6 @@ class TraderHKStock(BackTestTrader):
 
         self.zx.del_stock("我的持仓", stock_info["code"])
 
-        # 保存订单记录
         db.order_save(
             "hk",
             code,

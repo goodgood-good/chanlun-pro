@@ -63,8 +63,6 @@ var TvIdxDemo = (function () {
 
             const h = this._context.new_var(PineJS.Std.high(this._context));
             const high_val = PineJS.Std.highest(h, 20, this._context);
-            // console.log(high_val);
-
             return [high_val];
           };
         },

@@ -15,7 +15,8 @@ from chanlun.cl_utils import (
 )
 
 """
-根据缠论数据，选择自己所需要的形态方法集合
+选股函数集合：根据缠论数据（笔/线段/中枢/背驰/买卖点）筛选目标标的。
+每个函数接受 code、mk_datas、opt_type 参数，返回 {"code": ..., "msg": ...} 或 None。
 """
 
 direction_types = {"long": ["down"], "short": ["up"]}
@@ -26,6 +27,7 @@ mmd_types = {
 
 
 def get_opt_types(opt_type: list = []):
+    """将 opt_type（如 ['long', 'short']）展开为对应的笔方向列表和买卖点类型列表。"""
     if len(opt_type) == 0:
         opt_type = ["long"]
     opt_direction = list(
@@ -563,22 +565,22 @@ def xg_single_bi_1buy_next_l3buy_mmd(
         return None
     bi = cd.get_bis()[-1]
 
-    if bi.type == "up":  # 笔向上，跳过
+    if bi.type == "up":
         return None
 
-    # 找寻前面的一买笔
+    # 从最新笔向前找最近一根有一买信号的笔
     bi_by_1buy = None
     for _bi in cd.get_bis()[::-1]:
         if _bi.mmd_exists(["1buy"], "|"):
             bi_by_1buy = _bi
             break
 
-    if bi_by_1buy is None:  # 没有找到有一买
+    if bi_by_1buy is None:
         return None
 
-    # 一买后的笔创建一个中枢，如果没有中枢或多余1个中枢都是不符合条件的
+    # 一买后续笔构成恰好一个中枢才符合条件（无中枢或多中枢均排除）
     zs_lines = cd.get_bis()[bi_by_1buy.index + 1 :]
-    # 一买后续有大于9笔，那就不找了
+    # 一买后超过 9 笔说明结构已发展充分，不再关注
     if len(zs_lines) > 9:
         return None
     zs = cd.create_dn_zs("bi", zs_lines)
@@ -586,23 +588,24 @@ def xg_single_bi_1buy_next_l3buy_mmd(
         return None
 
     zs = zs[0]
-    if bi.index not in [_l.index for _l in zs.lines]:  # 当前笔不在创建的中枢内
+    if bi.index not in [_l.index for _l in zs.lines]:
         return None
 
-    # 过滤中枢的起始笔不是一买后的第一个笔
+    # 中枢起始笔必须紧接一买后的第一笔，否则中间有缺口
     if zs.lines[0].index != zs_lines[0].index:
         return None
 
-    # 中枢线段的最低点
+    # 排除中枢进入段（lines[0]），取后续线段的最低价
     zs_min_price = min([_l.low for _l in zs.lines[1:]])
 
-    zss_by_1buy = []  # 一买的中枢，根据配置的不用，可能会有多个
+    # 一买可能属于多种中枢配置，收集所有对应中枢
+    zss_by_1buy = []
     for _zs_type, _mmds in bi_by_1buy.zs_type_mmds.items():
         for _m in _mmds:
             if _m.name == "1buy":
                 zss_by_1buy.append(_m.zs)
     for _zs_1buy in zss_by_1buy:
-        # 一买后续中枢低点不能低于一买中枢的中心
+        # 一买后中枢最低点须高于一买中枢的中心价，确保后续结构不破坏一买有效性
         _zs_1buy_mid_price = _zs_1buy.zg - (_zs_1buy.zg - _zs_1buy.zd) / 2
         if zs_min_price > _zs_1buy_mid_price:
             return {
@@ -627,36 +630,39 @@ def xg_single_find_qs_by_zhuanzhe_zs(
     if len(cd.get_bis()) <= 5 or len(cd.get_xds()) < 2 or len(cd.get_bi_zss()) < 3:
         return None
     zss = cd.get_bi_zss()
-    # 比较最后两个中枢的位置关系
+    # 判断倒数第二、三个中枢是否构成趋势（up/down）
     zs_qs = cd.zss_is_qs(zss[-3], zss[-2])
     if zs_qs not in opt_direction:
         return None
 
     if zss[-2].lines[0].index - zss[-3].lines[-1].index >= 3:
         return None
-    # 最新的中枢
     zs = zss[-1]
-    # 最新的中枢其实笔，要与中枢趋势不同
+    # 最新中枢的进入段方向须与趋势相反，才是真正的转折
     if zs.lines[0].type == zs_qs:
         return None
-    # 当前中枢进行时
+    # 最新中枢仍在进行中（最后一笔即当前笔）
     bi = cd.get_bis()[-1]
     if zs.lines[-1].index != bi.index:
         return None
-    # 两个中枢不能离得太远
+    # 两个中枢间距过大说明已充分发展，不再是"第一个转折中枢"
     if zs.lines[0].index - zss[-2].lines[-1].index >= 5:
         return None
     return {"code": cd.get_code(), "msg": "出现趋势转折的第一个中枢了"}
 
 
 def xg_single_xdzs_bimmdbc(code: str, mk_datas: MarketDatas, opt_type: list = []):
+    """向上线段中枢内，笔回调至中枢 zd 附近（±8%）且有买卖点或背驰信号。
+    周期：单周期
+    适用市场：沪深A股
+    """
     deviation_rate = 0.08
     cd = mk_datas.get_cl_data(code, mk_datas.frequencys[0])
     if len(cd.get_xd_zss()) == 0:
         return None
     xd_zs = cd.get_xd_zss()[-1]
     xd = cd.get_xds()[-1]
-    # 线段的进入段要是向上的
+    # 线段中枢进入段必须向上（排除下跌中枢）
     if xd_zs.lines[0].type != "up":
         return None
     if xd_zs.lines[-1].type == "up":
@@ -665,20 +671,19 @@ def xg_single_xdzs_bimmdbc(code: str, mk_datas: MarketDatas, opt_type: list = []
         return None
     if xd_zs.line_num >= 9:
         return None
-    # 进入线段的起始要是最低的
+    # 进入段起点必须是中枢最低点，否则不是标准上涨中枢形态
     if xd_zs.lines[0].low != min([_l.low for _l in xd_zs.lines]):
         return None
     if "1sell" in xd_zs.zs_mmds() or "2sell" in xd_zs.zs_mmds():
         return None
 
-    # 判断笔条件（获取最后一个下跌笔）
     bi = cd.get_bis()[-1]
     if bi.type != "down":
         bi = cd.get_bis()[-2]
     if len(bi.line_mmds()) == 0 and len(bi.line_bcs()) == 0:
         return None
 
-    # 判断笔的结束价格，是否再 xd_zs.zd 的 deviation_rate 范围内
+    # 笔结束价格落在 zd ±deviation_rate 区间内，视为回调到位
     if xd_zs.zd * (1 - deviation_rate) <= bi.end.val <= xd_zs.zd * (1 + deviation_rate):
         return {
             "code": code,
@@ -697,7 +702,7 @@ def xg_single_week_k_overlap(code: str, mk_datas: MarketDatas, opt_type: list = 
     klines_week: pd.DataFrame = mk_datas.klines(code, mk_datas.frequencys[0])
     if len(klines_week) < 100:
         return None
-    # 判断最新三根K线是否有重叠
+    # 先验证最新三根 K 线之间有重叠，作为"重叠区间"基准
     cross_low = klines_week.iloc[-3:]["low"].max()
     cross_high = klines_week.iloc[-3:]["high"].min()
     if cross_low > cross_high:
@@ -708,7 +713,7 @@ def xg_single_week_k_overlap(code: str, mk_datas: MarketDatas, opt_type: list = 
     for _i in range(1, len(klines_week) - 1):
         _lh = max(klines_week.iloc[-_i]["low"], cross_low)
         _hl = min(klines_week.iloc[-_i]["high"], cross_high)
-        # 最近三根也要有重叠
+        # 连续三根也须互相重叠，避免孤立 K 线误入重叠段计数
         if _i > 3:
             _three_overlap = (
                 klines_week.iloc[-_i : -(_i - 3)]["low"].max()
@@ -724,7 +729,7 @@ def xg_single_week_k_overlap(code: str, mk_datas: MarketDatas, opt_type: list = 
     if overlap_nums < 13:
         return None
 
-    # 重叠k线的平均成交量，要大于之前的平均成交量
+    # 重叠区间的成交量须不低于前期，说明筹码仍然活跃而非死水
     overlap_avg_volume = klines_week.iloc[-overlap_nums:]["volume"].mean()
     pre_avg_volume = klines_week.iloc[-(overlap_nums * 2) : -overlap_nums][
         "volume"
@@ -756,18 +761,17 @@ def xg_single_xd_next_zz(
     bi = cd.get_bis()[-1]
     if xd.type not in opt_direction:
         return None
-    # 线段与笔的方向是否一致
     if xd.type != bi.type:
         return None
-    # 笔是不是线段结束笔的下下一笔
+    # 当前笔须是线段结束笔的下下一笔（+2），即转折后的第一笔
     if bi.index != xd.end_line.index + 2:
         return None
-    # 是否高于或低于线段结束的高低点
+    # 转折笔须未突破线段极值，否则不是"未转折"形态
     if bi.type == "down" and bi.low < xd.end_line.low:
         return None
     if bi.type == "up" and bi.high > xd.end_line.high:
         return None
-    # 检查线段内的中枢数量
+    # 线段内至少有两个中枢，才符合"多中枢震荡后转折"逻辑
     xd_zss = [
         _zs
         for _zs in cd.get_bi_zss()
@@ -815,7 +819,7 @@ def xg_single_xd_zs_nei_3mmds(
     if bi.mmd_exists(check_mmds, "|") is False:
         return None
 
-    # 中枢要是一个标准的中枢，进入端的起点要是中枢的最高或最低
+    # 进入段起点须是中枢内最高/最低点，确保中枢结构标准
     xd_zs_high = max([_l.high for _l in xd_zs.lines])
     xd_zs_low = min([_l.low for _l in xd_zs.lines])
     if xd_zs.lines[0].type == "down" and xd_zs_high != xd_zs.lines[0].high:
@@ -823,7 +827,7 @@ def xg_single_xd_zs_nei_3mmds(
     if xd_zs.lines[0].type == "up" and xd_zs_low != xd_zs.lines[0].low:
         return None
 
-    # 计数，记录自线段开始后的笔出现的买卖点次数
+    # 仅在线段内第一次出现三买/三卖时提醒，避免重复信号
     mmd_count = 0
     for _bi in cd.get_bis():
         if _bi.index < xd.start_line.index:
@@ -831,7 +835,7 @@ def xg_single_xd_zs_nei_3mmds(
         if _bi.type == bi.type and _bi.mmd_exists(["3buy", "3sell"], "|"):
             mmd_count += 1
 
-    if mmd_count >= 2:  # 只提醒第一次的买卖点
+    if mmd_count >= 2:
         return None
 
     return {

@@ -439,15 +439,12 @@ var TvIdxMACDBL = (function () {
             },
           };
 
-          this.init = function (context, inputCallback) {
-            // 初始化
-          };
+          this.init = function (context, inputCallback) {};
 
           this.main = function (context, inputCallback) {
             this._context = context;
             this._input = inputCallback;
 
-            // 获取输入参数
             const fast_length = this._input(0);
             const slow_length = this._input(1);
             const signal_length = this._input(2);
@@ -456,12 +453,10 @@ var TvIdxMACDBL = (function () {
             const plotBull = this._input(5);
             const plotBear = this._input(6);
 
-            // 获取价格数据
             const h = this._context.new_var(PineJS.Std.high(this._context));
             const l = this._context.new_var(PineJS.Std.low(this._context));
             const c = this._context.new_var(PineJS.Std.close(this._context));
 
-            // 计算MACD
             const fast_ma = PineJS.Std.ema(c, fast_length, this._context);
             const slow_ma = PineJS.Std.ema(c, slow_length, this._context);
             const macd = this._context.new_var(fast_ma - slow_ma);
@@ -470,12 +465,10 @@ var TvIdxMACDBL = (function () {
             );
             const hist = this._context.new_var(macd - signal);
 
-            // 使用简化的金叉死叉检测
             const crossResult = this.detectCross(macd, signal, this._context);
             const crossGold = crossResult.crossGold;
             const crossDead = crossResult.crossDead;
 
-            // // 直接标记金叉死叉，不使用复杂的范围判断
             const crossJudgeGold = plotGold && crossGold ? macd.get(0) : NaN;
             const crossJudgeDead = plotDead && crossDead ? macd.get(0) : NaN;
 
@@ -487,16 +480,6 @@ var TvIdxMACDBL = (function () {
               else colorIndex = v_hist > prev_hist ? 2 : 3;
             }
 
-            // ==================== 背离检测逻辑 ====================
-            /**
-             * 背离检测的核心逻辑：
-             * 1. 检测MACD的枢轴点（pivotlow和pivothigh）
-             * 2. 记录枢轴点的位置、价格和MACD值
-             * 3. 比较新出现的枢轴点与之前的枢轴点
-             * 4. 检测价格与MACD的背离情况
-             */
-
-            // 检测MACD的枢轴点
             const pivotResult = this.checkPivotPoints(
               hist,
               h,
@@ -507,11 +490,8 @@ var TvIdxMACDBL = (function () {
             let bullShape = NaN; // 底背离标识
             let bearShape = NaN; // 顶背离标识
 
-            // 检测并记录枢轴低点
             if (pivotResult.hasBottom) {
               const bottomInfo = pivotResult.bottomInfo;
-
-              // 记录底部枢轴点
               this.divergenceManager.addBottom(
                 bottomInfo.price,
                 bottomInfo.hist
@@ -530,11 +510,8 @@ var TvIdxMACDBL = (function () {
               }
             }
 
-            // 检测并记录枢轴高点
             if (pivotResult.hasTop) {
               const topInfo = pivotResult.topInfo;
-
-              // 记录顶部枢轴点
               this.divergenceManager.addTop(topInfo.price, topInfo.hist);
 
               // 检测顶背离
@@ -550,7 +527,6 @@ var TvIdxMACDBL = (function () {
               }
             }
 
-            // 返回所有指标值
             return [
               hist.get(0), // 0: 直方图
               colorIndex, // 1: 颜色索引

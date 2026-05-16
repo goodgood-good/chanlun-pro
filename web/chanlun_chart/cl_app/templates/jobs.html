@@ -18,19 +18,16 @@
     $(function () {
       layui.use('table', function () {
         var table = layui.table;
-        // 已知数据渲染
         table.render({
           elem: '#table-jobs',
-          cols: [[ //标题栏
+          cols: [[
             { field: 'name', title: '任务名称', width: 300 },
             { field: 'state', title: '状态', width: 100 },
             { field: 'update_dt', title: '上次执行时间', width: 160 },
             { field: 'next_run_dt', title: '下次执行时间', width: 160 },
           ]],
           data: {{ jobs | tojson }},
-      //skin: 'line', // 表格风格
-      //even: true,
-      page: false, // 是否显示分页
+      page: false,
               });
           });
       });

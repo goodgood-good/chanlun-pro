@@ -8,29 +8,27 @@ from chanlun.backtesting.base import Operation, POSITION
 from chanlun.backtesting.backtest_trader import BackTestTrader
 
 """
-指定使用 binance 接口
+数字货币实盘交易器，使用 Binance 合约接口。
 """
 
 
 class TraderCurrency(BackTestTrader):
-    """
-    数字货币交易者
-    """
+    """Binance 合约实盘交易器，支持多空双向开平仓。"""
 
     def __init__(self, name, log=None):
         super().__init__(name=name, mode="online", market="currency", log=log)
 
         self.ex = ExchangeBinance()
 
-        # 分仓数
+        # 最大同时持仓数，超过则拒绝新开仓
         self.poss_max = 8
-        # 使用的杠杆倍数
+        # 杠杆倍数，用于计算开仓名义量
         self.leverage = 2
 
         self.zx = zixuan.ZiXuan("currency")
 
-    # 做多买入
     def open_buy(self, code, opt: Operation, amount: float = None):
+        """开多仓：按可用余额均分资金（留 2% 缓冲）并乘以杠杆倍数计算开仓量。"""
         try:
             positions = self.ex.positions()
             if len(positions) >= self.poss_max:
@@ -41,6 +39,7 @@ class TraderCurrency(BackTestTrader):
                 )
                 return False
             balance = self.ex.balance()
+            # 0.98 预留手续费/滑点缓冲，避免因余额不足被拒单
             open_usdt = balance["free"] / (self.poss_max - len(positions)) * 0.98
             ticks = self.ex.ticks([code])
             amount = (open_usdt / ticks[code].last) * self.leverage
@@ -55,7 +54,6 @@ class TraderCurrency(BackTestTrader):
 
             self.zx.add_stock("我的持仓", code, code)
 
-            # 保存订单记录到 数据库 中
             db.order_save(
                 "currency",
                 code,
@@ -74,8 +72,8 @@ class TraderCurrency(BackTestTrader):
             )
             return False
 
-    # 做空卖出
     def open_sell(self, code, opt: Operation, amount: float = None):
+        """开空仓：逻辑与 open_buy 对称，使用 open_short 方向。"""
         try:
             positions = self.ex.positions()
             if len(positions) >= self.poss_max:
@@ -100,7 +98,6 @@ class TraderCurrency(BackTestTrader):
             utils.send_fs_msg("currency", "数字货币交易提醒", msg)
             self.zx.add_stock("我的持仓", code, code)
 
-            # 保存订单记录到 数据库 中
             db.order_save(
                 "currency",
                 code,
@@ -119,8 +116,8 @@ class TraderCurrency(BackTestTrader):
             )
             return False
 
-    # 做多平仓
     def close_buy(self, code, pos: POSITION, opt: Operation):
+        """平多仓；若交易所无持仓则视为已平，直接返回原始价/量避免重复操作。"""
         try:
             hold_position = self.ex.positions(code)
             if len(hold_position) == 0:
@@ -143,7 +140,6 @@ class TraderCurrency(BackTestTrader):
 
             self.zx.del_stock("我的持仓", code)
 
-            # 保存订单记录到 数据库 中
             db.order_save(
                 "currency",
                 code,
@@ -162,8 +158,8 @@ class TraderCurrency(BackTestTrader):
             )
             return False
 
-    # 做空平仓
     def close_sell(self, code, pos: POSITION, opt: Operation):
+        """平空仓；若交易所无持仓则视为已平，直接返回原始价/量。"""
         try:
             hold_position = self.ex.positions(code)
             if len(hold_position) == 0:
@@ -186,7 +182,6 @@ class TraderCurrency(BackTestTrader):
 
             self.zx.del_stock("我的持仓", code)
 
-            # 保存订单记录到 数据库 中
             db.order_save(
                 "currency",
                 code,

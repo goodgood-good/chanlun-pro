@@ -502,12 +502,10 @@
     {% include 'sub_temp.html' %}
   </body>
   <script>
-    // 定时更新tick涨跌幅的对象
     var interval_update_rates;
     var interval_get_alert_records;
 
     var market_frequencys = `{{ market_frequencys| tojson }}`;
-    // 解析 json 字符串
     var market_frequencys = JSON.parse(market_frequencys);
 
     // 支持通过 URL 参数 ?market=&code= 直接定位到指定标的（来自 /symbols 列表页跳转）。
@@ -572,7 +570,6 @@
     };
     var chart_widgets = [];
 
-    // 变更图表展示的标的
     function change_chart_ticker(_market, _code) {
       var market = _market;
       var code = _code;
@@ -610,11 +607,8 @@
   <script src="{{ url_for('static', filename='js/ai.js') }}"></script>
   <script src="{{ url_for('static', filename='js/bkgn.js') }}"></script>
   <script>
-    // 右栏「标的列表」区块：按市场浏览全部标的，点击代码列在新窗口打开缠论图表。
+    // 右栏「标的列表」区块：按市场全量加载标的，本地过滤，点击代码直接切图。
     // 不依赖 layui.table，纯 jQuery + AJAX 渲染，避免折叠面板内表格高度计算问题。
-    // F2 (revised): 移除原外层 $(function () { ... }); 包装，让 layui.use(['form']) 直接异步加载
-    // form module，加载完成后调 SymbolsPanel.init()（见下方）。layui.use 本身已经异步，
-    // 不会和首屏 TV widget 抢同一帧的 JS 执行预算。
     layui.use(['form'], function () {
         var lform = layui.form;
 
@@ -1064,10 +1058,8 @@
           }
         };
 
-        // F2 (revised): SymbolsPanel.init() 留在 layui form module ready 后立即调用。
-        // 之前 Task 9 把它搬到下方 __defer 里，但 var SymbolsPanel 是这个 callback 的
-        // 局部变量，defer 块的 typeof 检查永远 undefined，导致面板永远停在"加载中..."。
-        // layui.use 本身就是异步加载，已经不会阻塞首屏 widget，无需再延迟。
+        // SymbolsPanel 是此 callback 的局部变量，必须在 layui form ready 后立即调用；
+        // 若移到外部 defer 块则 typeof 检查永远 undefined，面板停在"加载中"。
         SymbolsPanel.init();
       });
   </script>
@@ -1178,7 +1170,7 @@
                   "/" +
                   Utils.get_code().replace("/", "__"),
                 anim: 1,
-                fixed: true, // 不固定
+                fixed: true,
                 shadeClose: true,
               });
             } else if (item.title === "自选组管理") {
@@ -1188,7 +1180,7 @@
                 area: ["800px", "50vh"],
                 content: "/zixuan_group/" + Utils.get_market(),
                 anim: 1,
-                fixed: true, // 不固定
+                fixed: true,
                 shadeClose: true,
               });
             } else if (item.title === "监控列表") {
@@ -1198,7 +1190,7 @@
                 area: ["1000px", "50vh"],
                 content: $("#layer-wrapper-alert-task-list"),
                 anim: 1,
-                fixed: true, // 不固定
+                fixed: true,
                 shadeClose: true,
                 btn: ["刷新"],
                 btn1: function (index, layero, that) {
@@ -1221,7 +1213,7 @@
                 area: ["1000px", "90vh"],
                 content: "/alert_edit/" + Utils.get_market() + "/0",
                 anim: 1,
-                fixed: true, // 不固定
+                fixed: true,
                 shadeClose: true,
               });
             } else if (item.title === "运行选股") {
@@ -1231,7 +1223,7 @@
                 area: ["1000px", "50vh"],
                 content: "/xuangu/task_list/" + Utils.get_market(),
                 anim: 1,
-                fixed: true, // 不固定
+                fixed: true,
                 shadeClose: true,
               });
             } else if (item.title === "当前任务") {
@@ -1241,7 +1233,7 @@
                 area: ["1000px", "50vh"],
                 content: "/jobs",
                 anim: 1,
-                fixed: true, // 不固定
+                fixed: true,
                 shadeClose: true,
               });
             } else if (item.title.startsWith("布局-")) {
@@ -1262,20 +1254,19 @@
                 area: ["1000px", "50vh"],
                 content: "/setting",
                 anim: 1,
-                fixed: true, // 不固定
+                fixed: true,
                 shadeClose: true,
               });
             }
           },
         });
 
-        // 自选操作初始
         ZiXuan.init_zixuan_opts();
 
-        // 折叠面板事件
+        // 折叠面板展开/收起事件
         element.on("collapse(collapse-opts)", function (data) {
-          let is_open = data.show; // 得到当前面板的展开状态，true or false
-          let ca_title = $(data.title).attr("data-ca-title"); // 得到当前点击面板的标题区域对象
+          let is_open = data.show;
+          let ca_title = $(data.title).attr("data-ca-title");
 
           if (ca_title === "自选组") {
             if (is_open) {
@@ -1290,7 +1281,6 @@
           if (ca_title === "监控提醒") {
             if (is_open) {
               Alert.init();
-              // 获取警报记录
               Alert.get_alert_records();
               interval_get_alert_records = setInterval(
                 Alert.get_alert_records,
@@ -1303,34 +1293,26 @@
 
           if (ca_title === "板块概念") {
             if (is_open) {
-              // 板块概念
               BKGN.init_bkgn_opts();
             }
           }
         });
 
-        // 初始赋值
         form.val("select_market_form", {
           market: Utils.get_market(),
         });
-        // 表单变动
         form.on("select(select_market)", function (data) {
           var market = data.value;
           Utils.set_local_data("market", market);
           location.reload();
         });
 
-        // 固定条（"显示与隐藏菜单栏"按钮）已移除，改用右栏内置的收起按钮 #chart_menu_toggle
-        // Utils.render_fixbar();
-
-        // AI 分析助手
         AI.init_ai_opts();
         AI.get_ai_analyse_records();
       });
 
-      // 初始化展示页面
       function init_web() {
-        // 如果市场不是 a，则隐藏 collapse-bkgn
+        // 非 A 股市场隐藏板块概念面板（仅 A 股有板块数据）
         if (Utils.get_market() !== "a") {
           $("#collapse-bkgn").hide();
         }
@@ -1424,7 +1406,6 @@
                 (cfg.style || "") +
                 '"></div>'
             );
-            // 计算每个图表的高度/宽度
             let chart_height =
               chart_layout_type === "single"
                 ? win_height
@@ -1440,12 +1421,10 @@
         ZiXuan.render_zixuan_opts();
       }
 
-      // F2: 关键路径——立即创建 TV widget
       init_web();
 
-      // F2 (revised): 把 interval_update_rates 推到主 widget 渲染后再启动定时刷新；
-      // SymbolsPanel.init() 已还原到上方 layui form callback 内部立即调用，因为
-      // var SymbolsPanel 在 callback 外不可见，原方案 defer 永远拿不到这个变量。
+      // interval_update_rates 推到主 widget 渲染后再启动，避免抢占首屏资源；
+      // requestIdleCallback 不可用时退化到 setTimeout(200ms)。
       var __defer = (window.requestIdleCallback
         ? function (cb) { window.requestIdleCallback(cb, { timeout: 1000 }); }
         : function (cb) { setTimeout(cb, 200); });

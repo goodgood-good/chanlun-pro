@@ -35,7 +35,6 @@ class ExchangePolygon(Exchange):
 
         self.trade_days = None
 
-        # 设置时区
         self.tz = pytz.timezone("US/Eastern")
 
     def default_code(self):
@@ -128,8 +127,7 @@ class ExchangePolygon(Exchange):
                 else:
                     end_date = fun.str_to_datetime(end_date)
             if start_date is None:
-                # 2026-05-15 US-005: 从 chanlun.exchange._lookback 读统一表,
-                # 与 qmt / cq / alpaca / futu 对齐 (修改请改 _lookback.py)
+                # 回看时长从统一表读取，修改请改 _lookback.py
                 from chanlun.exchange._lookback import get_lookback_timedelta
 
                 start_date = end_date - get_lookback_timedelta(
@@ -167,6 +165,8 @@ class ExchangePolygon(Exchange):
             klines_df = pd.DataFrame(klines_df)
             klines_df.sort_values("date", inplace=True)
             if frequency in ["y", "q", "m", "w", "d"]:
+                # polygon 日/周/月/季/年 bar 的时间戳是美东 00:00，
+                # 统一修正为 09:30 与分钟线保持一致，方便缠论计算时间对比
                 klines_df["date"] = klines_df["date"].apply(
                     lambda _d: _d.replace(hour=9, minute=30)
                 )
@@ -187,17 +187,6 @@ class ExchangePolygon(Exchange):
         return None
 
     def ticks(self, codes: List[str]) -> Dict[str, Tick]:
-        """
-        使用富途的接口获取行情Tick数据
-        """
-        # ticks = {}
-        # for _c in codes:
-        #     _t = self.client.get_daily_open_close_agg(_c)
-        #     ticks[_c] = Tick(
-        #         code=_c, last=_t.close, buy1=_t.close, sell1=_t.close,
-        #         high=_t.high, low=_t.low, open=_t.open, volume=_t.volume,
-        #         rate=_t.
-        #     )
         raise Exception("交易所不支持")
 
     def now_trading(self):

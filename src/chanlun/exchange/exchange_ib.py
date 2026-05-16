@@ -29,7 +29,7 @@ class ExchangeIB(Exchange):
     def __init__(self):
         self.tz = pytz.timezone("US/Eastern")
 
-        # 缓存，避免重复调用接口
+        # 本地内存缓存 search_stocks / stock_info，避免对同一 code 重复走 Redis 消息队列
         self.cache = {}
 
     @staticmethod
@@ -120,7 +120,7 @@ class ExchangeIB(Exchange):
             "1m": "1 min",
         }
 
-        # 控制获取的数量
+        # IB 每次请求的回看时长上限，超出会被服务端拒绝
         duration_map = {
             "m": "30 Y",
             "w": "20 Y",

@@ -8,16 +8,16 @@ from chanlun.backtesting.backtest_trader import BackTestTrader
 from chanlun.backtesting.base import Operation, POSITION
 
 """
-使用通达信的行情接口，其中部分接口依赖 富途，需要启动富途才可正常使用
-不实际产生交易，只添加持仓并发送短信通知
+A股信号通知交易器：使用通达信行情接口，不实际下单，
+仅将信号写入持仓自选并通过飞书消息通知，用户自行决定是否手动操作。
 """
 
 
 class TraderAStock(BackTestTrader):
-    """
-    A股票交易对象
+    """A股模拟交易器（仅通知，不实际下单）。
 
-    没有实际的交易接口，只用来记录添加到持仓自选，并发送消息，实盘需要根据消息自行决定是否进行买卖操作
+    触发买卖信号时记录到数据库并发送飞书消息；
+    实盘执行需用户根据消息手动操作。
     """
 
     def __init__(self, name, log=None):
@@ -27,8 +27,8 @@ class TraderAStock(BackTestTrader):
 
         self.zx = zixuan.ZiXuan("a")
 
-    # 做多买入
     def open_buy(self, code, opt: Operation, amount: float = None):
+        """模拟买入：发送飞书通知并记录订单，不实际下单。金额固定 50000，按 100 股取整。"""
         tick = self.ex.ticks([code])
         if code not in tick.keys():
             return False
@@ -40,6 +40,7 @@ class TraderAStock(BackTestTrader):
         balance = 50000
         price = tick[code].last
         amount = balance / price
+        # A股最小交易单位 100 股，向下取整
         amount = amount - amount % 100
 
         msg = (
@@ -49,7 +50,7 @@ class TraderAStock(BackTestTrader):
 
         self.zx.add_stock("我的持仓", stock["code"], stock["name"])
 
-        # 保存订单记录到 数据库 中，这样可以在图表中标识出买卖卖出的位置
+        # 写入数据库，图表可据此标注买卖位置
         db.order_save(
             "a",
             code,
@@ -63,12 +64,12 @@ class TraderAStock(BackTestTrader):
 
         return {"price": price, "amount": amount}
 
-    # 做空卖出
     def open_sell(self, code, opt: Operation, amount: float = None):
+        """A股不支持做空，直接返回 False。"""
         return False
 
-    # 做多平仓
     def close_buy(self, code, pos: POSITION, opt):
+        """模拟平多：发送飞书通知并记录订单，不实际下单。"""
         tick = self.ex.ticks([code])
         if code not in tick.keys():
             return False
@@ -82,7 +83,6 @@ class TraderAStock(BackTestTrader):
 
         self.zx.del_stock("我的持仓", stock["code"])
 
-        # 保存订单记录到 数据库 中
         db.order_save(
             "a",
             code,
@@ -96,6 +96,6 @@ class TraderAStock(BackTestTrader):
 
         return {"price": price, "amount": pos.amount}
 
-    # 做空平仓
     def close_sell(self, code, pos: POSITION, opt):
+        """A股不支持做空，直接返回 False。"""
         return False

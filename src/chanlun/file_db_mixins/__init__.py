@@ -1,10 +1,10 @@
-"""src/chanlun/file_db_mixins/__init__.py — FileCacheDB 4 职责 Mixin 拆分包。
+"""FileCacheDB 四类职责 Mixin 拆分包。
 
-P8 step 3 (2026-05-15): 把 file_db.py 内的 4 个 Mixin + _ChartCacheSafeUnpickler
-物理拆到独立文件。FileCacheDB 主类通过多继承聚合, 调用方零改动。
+将 file_db.py 内的 4 个 Mixin + _ChartCacheSafeUnpickler 按职责拆到独立文件，
+FileCacheDB 主类通过多继承聚合，调用方无需感知此包结构。
 
-外部 ``from chanlun.file_db import _ChartCacheSafeUnpickler`` 等 import 仍工作
-(file_db.py 顶部 re-export)。
+外部 ``from chanlun.file_db import _ChartCacheSafeUnpickler`` 等 import
+通过 file_db.py 顶部 re-export 保持兼容。
 """
 
 from .chart_data import _ChartCacheSafeUnpickler, _ChartDataCacheMixin

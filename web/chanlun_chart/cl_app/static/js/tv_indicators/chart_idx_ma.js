@@ -2,7 +2,7 @@ var TvIdxMA = (function () {
   return {
     idx: function (PineJS) {
       return {
-        name: "MA均线", // 注意：这里的名字必须和 createStudy 中的一致
+        name: "MA均线", // 必须与 createStudy() 调用时的名称一致
         metainfo: {
           _metainfoVersion: 53,
           id: "CustomIndicatorsMA@tv-basicstudies-1",

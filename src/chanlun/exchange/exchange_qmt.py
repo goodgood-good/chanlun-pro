@@ -12,9 +12,6 @@ from chanlun.exchange.exchange import Exchange, Tick, convert_stock_kline_freque
 from chanlun.tools.log_util import LogUtil
 from xtquant import xtdata
 
-"""
-QMT 沪深行情
-"""
 
 
 # xtquant 的 native 客户端不是线程安全的：多线程并发调用 download_history_data /
@@ -27,20 +24,19 @@ _XTDATA_NATIVE_LOCK = threading.RLock()
 
 
 class ExchangeQMT(Exchange):
+    """QMT（xtquant）沪深 A 股行情适配器。"""
+
     def __init__(self):
         xtdata.enable_hello = False
 
-        # 设置时区
         self.tz = pytz.timezone("Asia/Shanghai")
 
-        # H1: g_all_stocks 必须为实例属性，且并发构建期间用 Lock 保护，
-        # 避免多线程同时进入 all_stocks() 时各自跑一次 5500 只股票全量扫描，
-        # 也避免类属性被多实例共享导致的状态穿透。
+        # g_all_stocks 必须为实例属性，并发构建期间用 Lock 保护，
+        # 避免多线程同时进入 all_stocks() 各自跑全量扫描，以及类属性多实例共享穿透。
         self.g_all_stocks: list = []
         self._all_stocks_lock = threading.Lock()
 
-        # 1. 读取数据的周期映射 (用于 get_market_data)
-        # 注意：移除 "y": "1y"，xtquant 实际不支持年线 period，传入会被 native 层拒绝甚至触发 BSON 异常。
+        # get_market_data 周期映射；"y" 已移除，xtquant 不支持年线 period，传入会触发 BSON 断言崩溃
         self.frequency_map = {
             "1m": "1m",
             "5m": "5m",
@@ -52,28 +48,21 @@ class ExchangeQMT(Exchange):
             "m": "1mon",
         }
 
-        # 2. 新增：下载数据的周期映射 (用于 download_history_data)
-        # QMT 下载接口通常只支持基础周期：1m, 5m, 1d (Tick)
-        # 逻辑：日线及以上下载 1d，分钟线下载 1m 或 5m
-        # 注意：为了数据精确性和合成的灵活性，建议 1m, 5m, 15m, 30m, 60m 都下载基础的 1m 或 5m 数据
-        # 这里为了效率，5m及倍数周期下载 5m，1m 下载 1m
+        # download_history_data 周期映射：QMT 下载接口仅支持 1m/5m/1d 基础周期；
+        # 15m/30m/60m 用 5m 下载后由 get_market_data 合成，比直接下载高阶周期更灵活
         self.download_frequency_map = {
             "1m": "1m",
             "5m": "5m",
-            "15m": "5m",  # 15m 是 5m 的倍数，下载 5m 数据即可合成
-            "30m": "5m",  # 30m 是 5m 的倍数，下载 5m 数据即可合成
-            "60m": "5m",  # 60m 是 5m 的倍数，下载 5m 数据即可合成
+            "15m": "5m",
+            "30m": "5m",
+            "60m": "5m",
             "d": "1d",
             "w": "1d",
             "m": "1d",
         }
 
-        # 默认回看时长:原本 60m=8 年 / d=10 年 / 1m=90 天等过长,会让 xtquant 一次性
-        # 拉取数十万根 K 线,BSON payload 极大,是触发 `u < 1000000` 断言的主因。
-        # 2026-05-15 US-005: 抽到 chanlun.exchange._lookback 单一来源,
-        # 5 个 exchange (cq/qmt/alpaca/polygon/futu) 共用同一组数值;
-        # 上层 (如 tv_history) 通常一次只要 300 根 K 线,进一步用 args["limit"] 短路。
-        # 保留 self.DEFAULT_LOOKBACK 字段以兼容外部访问 (本类内部不再读).
+        # 默认回看窗口来自 _lookback 统一来源，修改请改 _lookback.py。
+        # 保留 self.DEFAULT_LOOKBACK 字段供外部访问，类内部通过 get_start_date_by_frequency 使用。
         from chanlun.exchange._lookback import DEFAULT_LOOKBACK_DAYS
 
         self.DEFAULT_LOOKBACK = {
@@ -101,8 +90,7 @@ class ExchangeQMT(Exchange):
         return self.frequency_map
 
     def all_stocks(self):
-        # H1: 双检锁（double-checked locking）防止并发线程都进入构建临界区。
-        # 已就绪后所有读者无锁直接返回，零开销。
+        # 双检锁防止并发线程同时进入构建临界区，已就绪后无锁直接返回。
         if len(self.g_all_stocks) > 0:
             return self.g_all_stocks
 
@@ -111,7 +99,7 @@ class ExchangeQMT(Exchange):
             if len(self.g_all_stocks) > 0:
                 return self.g_all_stocks
 
-            # G5：黑名单改为 set，避免 5500+ 次 list 线性查找（O(n) → O(1)）
+            # 黑名单用 set 避免 5500+ 次 list 线性查找
             black_codes = {
                 "SZ.399290", "SZ.399289", "SZ.399302", "SZ.399298", "SZ.399481",
                 "SZ.399299", "SZ.399301", "SH.000013", "SH.000022", "SH.000116",
@@ -119,13 +107,8 @@ class ExchangeQMT(Exchange):
                 "SZ.980001", "SZ.980023",
             }
 
-            # G5 性能优化：
-        # - 把全市场扫描放在一把大锁内，避免 5500+ 次抢锁/释放锁的开销，
-        #   同时规避 xtdata 多线程穿插调用触发 BSON 断言。RLock 可重入。
-        # - 原实现每只股票要走 stock_info() → 内部再调 get_instrument_detail，
-        #   总计 2 次 native 调用 + 一次 code_to_qmt(code_to_tdx(_c)) 来回转换。
-        #   这里直接 inline 拿 detail，单只股票降为 1 次 native 调用，整体减半。
-            # - 黑名单改为循环内提前过滤，省一次列表二次遍历。
+            # 全市场扫描放在一把大锁内：避免多线程穿插调用触发 BSON 断言，
+            # 同时 inline 拿 instrument_detail 减少 native 调用次数。
             with _XTDATA_NATIVE_LOCK:
                 ticks = xtdata.get_full_tick(["SH", "SZ", "BJ"])
                 tick_codes = list(ticks.keys())
@@ -205,26 +188,18 @@ class ExchangeQMT(Exchange):
     ) -> pd.DataFrame:
         empty_df = pd.DataFrame(columns=['code', 'date', 'open', 'high', 'low', 'close', 'volume'])
 
-        # 1. 确定 读取周期 (Read Period) 和 下载周期 (Download Period)
         qmt_read_period = self.frequency_map.get(frequency, "1m")
         qmt_code = self.code_to_qmt(code)
 
-        # 核心修改：根据请求周期，选择合适的“基础周期”进行下载
-        # 如果请求是 30m，我们下载 5m 数据（因为 5m 是 30m 的因子，且 QMT 支持 5m 下载）
-        # 如果请求是 1m，下载 1m
-        # 如果请求是 d，下载 1d
+        # 按 download_frequency_map 选取下载基础周期，映射外的周期按日内/日线降级
         qmt_download_period = self.download_frequency_map.get(frequency)
-
-        # 兜底逻辑：如果映射里没有，按日内/日线区分
         if qmt_download_period is None:
             if frequency in ["1m", "5m", "15m", "30m", "60m"]:
-                qmt_download_period = "1m"  # 分钟线兜底下载 1m，最稳妥但数据量大
+                qmt_download_period = "1m"
             else:
                 qmt_download_period = "1d"
 
-        # 2. 确定时间范围
-        # 上层若传了 args["req_counts"]（实际只要 N 根 K 线），用它来收紧默认回看窗口，
-        # 避免一次性拉超长历史触发 xtquant BSON 断言。
+        # args["req_counts"] 允许上层声明实际需要的 K 线数量，用于收紧回看窗口
         req_counts = args.get("req_counts") if args else None
         if start_date:
             query_start = start_date.replace("-", "").replace(" ", "").replace(":", "")
@@ -233,13 +208,8 @@ class ExchangeQMT(Exchange):
 
         dividend_type = args.get("dividend_type", "front") if args else "front"
 
-        # 3. 智能增量下载 + 4. 获取数据
-        # 用全局锁串行化所有 xtdata 调用，规避 native 层 BSON 断言崩溃。
-        # 关键点：
-        # - 把 download + get_market_data 一起包住，避免两调用之间被其它线程
-        #   插入新的 native 请求（半包/状态错乱也是触发崩溃的诱因之一）。
-        # - download 改用 incrementally=True，避免每次都全量下载导致 BSON
-        #   payload 过大触发 `u < 1000000` 断言。
+        # download + get_market_data 一起持锁，防止其他线程在两次调用之间插入导致状态错乱
+        # incrementally=True 避免全量下载，减小 BSON payload，降低 `u < 1000000` 断言触发概率
         field_list = ["time", "open", "high", "low", "close", "volume"]
         with _XTDATA_NATIVE_LOCK:
             try:
@@ -270,9 +240,7 @@ class ExchangeQMT(Exchange):
                 )
                 raise
 
-        # 数据完整性检查
-        # 注意：xtdata.get_market_data 返回的字段值，老版本是 pd.DataFrame（有 .empty），
-        # 新版本可能是 np.ndarray（没有 .empty，但有 .size）。这里两种都兼容。
+        # xtdata.get_market_data 老版本返回 pd.DataFrame，新版本可能是 np.ndarray，需兼容两种检空方式
         if not raw_data:
             return empty_df
         time_col = raw_data.get("time")
@@ -293,7 +261,6 @@ class ExchangeQMT(Exchange):
             )
             return empty_df
 
-        # 5. 极速构建 DataFrame
         try:
             data_dict = {
                 "date": raw_data["time"].values[0],
@@ -311,7 +278,6 @@ class ExchangeQMT(Exchange):
         if klines_df.empty:
             return empty_df
 
-        # 6. 时间列处理
         try:
             klines_df["date"] = pd.to_datetime(klines_df["date"], unit="ms", utc=True)
             klines_df["date"] = klines_df["date"].dt.tz_convert(self.tz)
@@ -326,16 +292,15 @@ class ExchangeQMT(Exchange):
 
         klines_df["code"] = code
 
-        # 7. 整理格式
         klines_df = klines_df[["code", "date", "open", "high", "low", "close", "volume"]]
         cols_to_float = ["open", "high", "low", "close", "volume"]
         klines_df[cols_to_float] = klines_df[cols_to_float].astype(float)
 
-        # 8. 非原生周期重采样 (如需)
+        # 非原生周期（如 2m/10m）通过 convert_stock_kline_frequency 从 1m 合成
         if frequency not in self.frequency_map:
             klines_df = convert_stock_kline_frequency(klines_df, frequency)
 
-        # 截断数据
+        # 按调用方声明的 req_counts 截断，避免返回超过需要的数据
         if args and "req_counts" in args:
             req_counts = args["req_counts"]
             if len(klines_df) > req_counts:
@@ -453,14 +418,10 @@ class ExchangeQMT(Exchange):
         """
         返回当前是否是交易时间。
 
-        H10 修正：
-        - 用 self.tz（Asia/Shanghai）替换 datetime.now() 裸调用，避免服务器
-          所在时区不在 +8 时整体判错。
-        - 增加集合竞价时段 09:15-09:25：A 股该时段是有 tick 数据的，
-          上游若用 now_trading 决定是否拉 tick / 订阅，会漏掉早盘竞价数据。
+        用 self.tz（Asia/Shanghai）避免服务器时区不在 +8 时判错。
+        含集合竞价时段 09:15-09:25（A 股该时段有 tick 数据）。
 
-        交易时段（含集合竞价）：
-            周一至周五
+        交易时段：周一至周五
             09:15-09:25 集合竞价
             09:30-11:30 上午连续竞价
             13:00-15:00 下午连续竞价
@@ -507,53 +468,14 @@ class ExchangeQMT(Exchange):
 if __name__ == "__main__":
     ex = ExchangeQMT()
 
-    # stocks = ex.all_stocks()
-    # stock_maps = {}
-    # for _s in stocks:
-    #     stock_maps[_s["code"][0:5]] = _s
-    # for _t, _s in stock_maps.items():
-    #     print(_t, _s)
-    # print(len(stocks))
-
     klines = ex.klines(
         "SZ.002645",
         "1m",
     )
 
-    # 2026-02-04 日期的 volume 累加
+    # 验证指定日期的 volume 累加是否正确
     klines["ddd"] = klines["date"].apply(lambda x: x.strftime("%Y-%m-%d"))
     volume = klines[klines["ddd"] == "2026-02-04"]["volume"].sum()
 
     print(klines[klines["ddd"] == "2026-02-04"])
     print(volume)
-
-    # stock = ex.stock_info("SH.000001")
-    # print(stock)
-
-    # df = ex.get_divid_factors("SH.600519")
-
-    # print(df)
-
-    # def on_klines(_qmt_code, tick):
-    #     if _qmt_code != "600519.SH":
-    #         return
-    #     print(
-    #         _qmt_code,
-    #         "最新价格",
-    #         tick["lastPrice"],
-    #         " 时间：",
-    #         fun.timeint_to_datetime(int(tick["time"] / 1000)),
-    #     )
-    #     _tdx_code = ex.code_to_tdx(_qmt_code)
-    #     print(tick)
-    #     # for _f in ["1m", "5m", "d"]:
-    #     #     print(f"周期：{_f}")
-    #     #     klines_df = ex.klines(_tdx_code, _f, args={"req_counts": 2})
-
-    #     #     print(klines_df)
-    #     print("-" * 20)
-
-    # ex.subscribe_all_ticks(on_klines)
-
-    # ticks = ex.all_ticks()
-    # print(len(ticks))

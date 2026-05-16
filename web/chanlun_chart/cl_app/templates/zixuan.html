@@ -90,6 +90,7 @@
     </fieldset>
 
 
+    <!-- 自选组管理脚本：新增/删除自选组，以及按组导入（txt 文件）/导出标的列表 -->
     <script>
 
         $(function () {
@@ -140,7 +141,7 @@
                 // 自选导入操作
                 upload.render({
                     elem: '#zixuan_opt_import_file', // 绑定多个元素
-                    url: '/zixuan_opt_import', // 此处配置你自己的上传接口即可
+                    url: '/zixuan_opt_import',
                     field: 'file', // 文件域的字段名
                     accept: 'file', // 普通文件
                     exts: 'txt',
@@ -153,31 +154,6 @@
                         }
                     }
                 });
-                // $('#zixuan_opt_import_submit').click(function () {
-                //     let zx_group = $('#export_zx_group').val()
-                //     // 定义文件对象
-                //     const file = $('#zixuan_opt_import_file')[0].files[0];
-
-                //     // 创建 FormData 对象
-                //     const formData = new FormData();
-
-                //     // 追加文件
-                //     formData.append('file', file);
-                //     formData.append('zx_group', zx_group);
-                //     formData.append('market', market);
-
-                //     // 发送 ajax 请求  
-                //     $.ajax({
-                //         url: '/zixuan_opt_import',
-                //         type: 'POST',
-                //         data: formData,
-                //         processData: false,
-                //         contentType: false,
-                //         success: function (data) {
-                //             console.log(data); // 打印返回数据
-                //         }
-                //     });
-                // });
 
             });
         });

@@ -1,29 +1,18 @@
 #:  -*- coding: utf-8 -*-
+"""定时同步 Binance 数字货币（合约）全品种 K 线到本地数据库。"""
 from chanlun.exchange.exchange_binance import ExchangeBinance
 from chanlun.exchange.exchange_db import ExchangeDB
 import traceback
 from tqdm.auto import tqdm
 
-"""
-同步数字货币行情到数据库中
-"""
-
 exchange = ExchangeDB("currency")
 line_exchange = ExchangeBinance()
 
-# 创建表
 stocks = line_exchange.all_stocks()
 codes = [s["code"] for s in stocks]
-# codes = [
-#     "BTC/USDT",
-#     "ETH/USDT",
-#     "ETC/USDT",
-#     "GMT/USDT",
-#     "SOL/USDT",
-# ] # 可以自己按需增加 或者 更新全部的标的
 sync_frequencys = ["w", "d", "4h", "60m", "30m", "15m", "10m", "5m", "1m"]
 
-# TODO 同步各个周期的起始时间
+# 各周期首次全量拉取的起始时间
 f_start_time_maps = {
     "w": "2000-01-01 00:00:00",
     "d": "2000-01-01 00:00:00",

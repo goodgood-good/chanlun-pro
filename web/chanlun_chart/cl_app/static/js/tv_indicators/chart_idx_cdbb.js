@@ -40,7 +40,6 @@ var TvIdxCDBB = (function () {
         },
         constructor: function () {
           this.init = function (context, inputCallback) {
-            // 初始化历史数据存储
             context.yaod17_history = [];
             context.yaod19_history = [];
             context.yaod20_history = [];
@@ -53,7 +52,6 @@ var TvIdxCDBB = (function () {
             this._context = context;
             this._input = inputCallback;
 
-            // 获取价格数据
             const h = this._context.new_var(PineJS.Std.high(this._context));
             const l = this._context.new_var(PineJS.Std.low(this._context));
             const c = this._context.new_var(PineJS.Std.close(this._context));
@@ -167,7 +165,6 @@ var TvIdxCDBB = (function () {
             // YAOD17: YAOD5 AND YAOD12 AND YAOD16
             const yaod17 = yaod5 && yaod12 && yaod16;
 
-            // 存储YAOD17历史值
             this._context.yaod17_history.push(yaod17);
             if (this._context.yaod17_history.length > 50) {
               this._context.yaod17_history.shift();
@@ -194,7 +191,6 @@ var TvIdxCDBB = (function () {
               macd_line.get(0) - macd_signal.get(0)
             );
 
-            // 获取REF(YAOD17,1) - 前一个周期的YAOD17值
             const yaod17_ref1 =
               this._context.yaod17_history.length >= 2
                 ? this._context.yaod17_history[
@@ -215,7 +211,6 @@ var TvIdxCDBB = (function () {
               this._context.yaod19_filter_last = this._context.bar_count;
             }
 
-            // 存储YAOD19历史值
             this._context.yaod19_history.push(yaod19);
             if (this._context.yaod19_history.length > 20) {
               this._context.yaod19_history.shift();
@@ -235,7 +230,6 @@ var TvIdxCDBB = (function () {
               this._context.yaod20_filter_last = this._context.bar_count;
             }
 
-            // 存储YAOD20历史值
             this._context.yaod20_history.push(yaod20);
             if (this._context.yaod20_history.length > 15) {
               this._context.yaod20_history.shift();
@@ -243,7 +237,6 @@ var TvIdxCDBB = (function () {
 
             // 抄底必备: COUNT(YAOD20,13)>=1 AND YAOD19
             let count_yaod20 = 0;
-            // 统计过去13个周期内YAOD20为1的次数
             const lookback_periods = Math.min(
               13,
               this._context.yaod20_history.length
@@ -257,7 +250,6 @@ var TvIdxCDBB = (function () {
 
             const cdbb_signal = count_yaod20 >= 1 && yaod19 ? c.get(0) : NaN;
 
-            // 更新bar_count
             this._context.bar_count++;
 
             return [cdbb_signal];

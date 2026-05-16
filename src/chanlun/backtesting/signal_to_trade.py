@@ -1,5 +1,3 @@
-# 信号回测文件，转换成交易模式
-
 import datetime
 import time
 from typing import Dict, List
@@ -28,6 +26,7 @@ bt.save()
 
 
 class SignalToTrade(BackTestTrader):
+    """将信号模式回测结果重新以交易模式回放，用于评估实际资金曲线。"""
 
     def __init__(
         self,
@@ -76,6 +75,7 @@ class SignalToTrade(BackTestTrader):
         self.positions_now_holding: List[dict] = []
 
     def get_price(self, code):
+        """按当前回放时间返回指定代码的最新价格，首次访问时从数据库加载并缓存全量 K 线。"""
         try:
             if code not in self.cache_klines.keys():
                 s_time = time.time()
@@ -118,9 +118,11 @@ class SignalToTrade(BackTestTrader):
             raise Exception(f"{code} - {self.now_datetime} 没有价格")
 
     def get_now_datetime(self):
+        """返回当前回放时刻（由外部驱动循环更新）。"""
         return self.now_datetime
 
     def run_bt(self, bt_file: str):
+        """加载信号回测 pkl 文件，以交易模式按时间轴重放所有开平仓信号，返回填充后的 BackTest 对象。"""
         BT = BackTest()
         BT.save_file = bt_file
         BT.load(BT.save_file)
@@ -160,7 +162,7 @@ class SignalToTrade(BackTestTrader):
         )
         base_dates = base_dates["date"].to_list()
 
-        # 获取所有的历史持仓
+        # 提取信号持仓中自定义 info 字段的全集，用于后续 add_columns 透传
         info_keys = []
         for _, _poss in BT.trader.positions_history.items():
             for _p in _poss:
@@ -215,7 +217,7 @@ class SignalToTrade(BackTestTrader):
             )
             self.add_times("st_query_open_poss", time.time() - s_time)
 
-            # 优先进行平仓操作
+            # 先平仓再开仓，确保当日释放资金可被新仓位复用
             for _pos in close_poss:
                 # 删除在self.positions_now_holding中 _pos 持仓记录
                 self.positions_now_holding = [
@@ -276,7 +278,7 @@ class SignalToTrade(BackTestTrader):
                 self.execute(_opt.code, _opt)
             self.add_times("st_execute", time.time() - s_time)
 
-            # 如果启动了补全交易模式，则进行补全操作（之前的持仓退出后，如果之前还有信号没有平仓，从未平仓的信号中，排序，并补充到最大持仓数量）
+            # full 模式：持仓退出后若仍有未平信号，从中补充持仓至 max_pos 满仓，实现连续满仓策略
             if (
                 self.real_trade_mode == "full"
                 and len(self.positions_now_holding) > 0

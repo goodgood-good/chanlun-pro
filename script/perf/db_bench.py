@@ -1,3 +1,10 @@
+"""script/perf/db_bench.py — DB K 线存取吞吐量基准。
+
+衡量单线程不同数据量下 insert/query/delete 耗时，以及多线程并发写入的总耗时与峰值内存。
+
+用法:
+    python -m script.perf.db_bench
+"""
 import sys
 import time
 import tracemalloc
@@ -9,7 +16,7 @@ import numpy as np
 import pandas as pd
 
 
-# Ensure src is on sys.path when running from repo root
+# 确保从仓库根目录运行时 src 在 sys.path 中
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SRC_DIR = REPO_ROOT / "src"
 if SRC_DIR.as_posix() not in [p.replace("\\", "/") for p in sys.path]:
@@ -20,7 +27,7 @@ from chanlun.base import Market  # noqa: E402
 
 
 def make_klines(n: int) -> pd.DataFrame:
-    """Generate synthetic kline dataframe with n rows."""
+    """生成 n 根合成 K 线数据帧，用于基准测试。"""
     start = datetime.datetime.now().replace(microsecond=0) - datetime.timedelta(
         minutes=n
     )
@@ -43,6 +50,7 @@ def make_klines(n: int) -> pd.DataFrame:
 
 
 def bench_insert_query_delete(db: DB, market: str, code: str, frequency: str, n: int):
+    """单线程 insert/query/delete 三步耗时与峰值内存。"""
     print(f"[single] market={market} code={code} f={frequency} rows={n}")
     df = make_klines(n)
     tracemalloc.start()
@@ -78,6 +86,7 @@ def _insert_task(db: DB, market: str, code: str, frequency: str, n: int):
 def bench_concurrent_inserts(
     db: DB, market: str, base_code: str, frequency: str, workers: int, n: int
 ):
+    """多线程并发写入基准：统计总耗时、各线程用时及峰值内存。"""
     print(
         f"[concurrent] market={market} base={base_code} f={frequency} workers={workers} rows={n}"
     )
@@ -104,11 +113,11 @@ def main():
     market = Market.US.value
     frequency = "1m"
 
-    # Single-thread benchmarks for various scales
+    # 单线程基准：测试不同数据量下的 insert/query/delete 耗时
     for n in [1000, 5000, 20000]:
         bench_insert_query_delete(db, market, "BENCH_CODE", frequency, n)
 
-    # Concurrent inserts simulation
+    # 多线程并发写入基准
     bench_concurrent_inserts(db, market, "BENCH_PAR", frequency, workers=4, n=5000)
 
 

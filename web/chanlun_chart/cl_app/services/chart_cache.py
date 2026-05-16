@@ -41,12 +41,7 @@ from chanlun.tools.log_util import LogUtil
 # ---------------- 状态 ----------------
 
 # 图表数据计算结果缓存（RAM 热层）。
-#
-# 2026-04 重构：把 chart_data_cache 从「单层 RAM」改成「RAM 热层 + 磁盘冷层」。
-# - 旧设计 maxsize=100 / ttl=600 仅适合"短时切周期防抖"场景；
-# - 全市场预热（11755 标的 × 4 周期 ≈ 47k entry）时，RAM 灌不下，TTL 也撑不住，
-#   预热刚算完就被淘汰，用户切标的依然要等待重新计算。
-# 现在 RAM 仅做热点加速，maxsize/ttl 适当上调；持久化由 fdb.set/get_chart_cache 兜底。
+# RAM 仅做热点加速，持久化由 fdb.set/get_chart_cache 兜底（RAM 淘汰后磁盘仍可命中）。
 chart_data_cache: TTLCache = TTLCache(maxsize=512, ttl=3600)
 
 cache_lock: RLock = RLock()
@@ -143,20 +138,16 @@ def _get_chart_cache_entry(cache_key: str):
 
 
 def _entry_freshness(cache_entry: dict, mode: str) -> str:
-    """统一的 cache entry 新鲜度判定 (M3 清理: 把两个独立阈值汇成一个函数)。
+    """统一的 cache entry 新鲜度判定。
 
     Args:
-        cache_entry: chart_data_cache 条目, dict with ``validated_at`` 浮点字段。
-        mode: 判定模式, 决定使用哪个阈值:
-            - ``"polling"``: 30s 阈值, 用于 firstDataRequest=false 的 polling 路径。
-              频率上 TV 每 ~3 秒推一次 polling, 推 validated_at, 30s 内不重算。
-            - ``"first_request"``: 3600s 阈值, 用于 firstDataRequest=true 路径。
-              程序停机期间 polling 不推 validated_at, 重启后看磁盘冷层 entry
-              是否还在 1 小时内 (远小于"停机一两天"的尺度, 重启能识别为过期)。
+        cache_entry: chart_data_cache 条目，含 ``validated_at`` 浮点字段。
+        mode: ``"polling"``（30s 阈值，TV polling 路径）或
+              ``"first_request"``（3600s 阈值，firstDataRequest=true 路径，
+              用于重启后识别停机期间过期的磁盘快照）。
 
     Returns:
-        ``"fresh"`` / ``"stale"`` / ``"unknown"``。
-        ``"unknown"`` 表示 entry 不规范或缺 validated_at (上游应按 stale 处理)。
+        ``"fresh"`` / ``"stale"`` / ``"unknown"``（缺字段时按 stale 处理）。
     """
     if not isinstance(cache_entry, dict):
         return "unknown"

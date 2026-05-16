@@ -33,22 +33,18 @@ class ExchangeTq(Exchange):
     g_account_enable: bool = False
 
     def __init__(self, use_simulate_account=True):
-        # 是否使用模拟账号，进行交易测试（这种模式无需设置实盘账号）
+        # True=快期模拟账号（无需实盘配置），False=读 config 中的实盘账号
         self.use_simulate_account = use_simulate_account
 
-        # 命令任务队列
+        # 行情订阅命令队列，由主线程 append，thread_run_tasks 消费
         self.command_tasks: List[str] = []
-        # 记录已经收到并执行的命令
         self.past_commands = []
-        # K线返回对象
         self.res_klines: Dict[str, pd.DataFrame] = {}
-        # Tick 返回对象
         self.res_ticks: Dict[str, Quote] = {}
 
-        # 设置时区
         self.tz = pytz.timezone("Asia/Shanghai")
 
-        # 运行的子进程
+        # 独立线程持续运行天勤事件循环，主线程通过 command_tasks 传指令
         self.stop_thread = False
         self.t = threading.Thread(target=self.thread_run_tasks)
         self.t.start()
@@ -99,7 +95,6 @@ class ExchangeTq(Exchange):
             async with self.get_api().register_update_notify() as update_chan:
                 async for _ in update_chan:
                     if self.get_api().is_changing(quote):
-                        # print(f'Tick {code} 更新信息：', quote)
                         self.res_ticks[code] = quote
 
         async def get_kline(code, frequency):
@@ -110,7 +105,6 @@ class ExchangeTq(Exchange):
             async with self.get_api().register_update_notify() as update_chan:
                 async for _ in update_chan:
                     if self.get_api().is_changing(kline):
-                        # print(f'Kline {code} {frequency} 更新信息：', len(kline))
                         self.res_klines[f"{code}_{frequency}"] = kline
 
         def reset_api(force: bool = False):
@@ -192,13 +186,12 @@ class ExchangeTq(Exchange):
         return True
 
     def get_account(self):
-        # 使用快期的模拟账号
+        """返回账户对象：模拟模式用快期 TqKq，实盘模式用 config 里配置的期货公司账号。"""
         if self.use_simulate_account:
             if self.g_account is None:
                 self.g_account = tqsdk.TqKq()
             return self.g_account
 
-        # 天勤的实盘账号，如果有设置则使用
         if config.TQ_SP_ACCOUNT == "":
             return None
         if self.g_account is None:
@@ -279,17 +272,16 @@ class ExchangeTq(Exchange):
         if start_date is not None and end_date is not None:
             raise Exception("期货行情不支持历史数据查询，因为账号不是专业版，没权限")
 
-        # 添加命令
         kline_key = f"{code}_{frequency_maps[frequency]}"
+        # 向子线程投递订阅命令，子线程会异步调用天勤 API 并写入 res_klines
         self.command_tasks.append(f"kline:{code}:{frequency_maps[frequency]}")
-        # 获取返回的K线
         klines = None
         try_nums = 0
         while True:
             if kline_key not in self.res_klines.keys():
                 time.sleep(1)
                 try_nums += 1
-                if try_nums > 5:  # 5秒后没有结果直接返回空
+                if try_nums > 5:  # 超过 5s 未收到推送，认为订阅失败
                     return None
                 continue
             klines = self.res_klines[kline_key]
@@ -306,16 +298,10 @@ class ExchangeTq(Exchange):
         return klines[["code", "date", "open", "close", "high", "low", "volume"]]
 
     def ticks(self, codes: List[str]) -> Dict[str, Tick]:
-        """
-        获取代码列表的 Tick 信息
-        :param codes:
-        :return:
-        """
-        # 循环增加命令
+        """订阅代码列表并返回最新 Tick，数据由子线程异步推送更新。"""
         for code in codes:
             self.command_tasks.append(f"tick:{code}")
-        time.sleep(1)
-        # 循环获取更新后的 tick
+        time.sleep(1)  # 给子线程一秒时间完成首次推送
         res_ticks = {}
         for code in codes:
             try_nums = 0
@@ -438,26 +424,23 @@ class ExchangeTq(Exchange):
         if self.g_account_enable is False:
             raise Exception("账户链接失败，暂时不可用，请稍后尝试")
 
-        # 查询持仓
         if offset == "CLOSE":
             pos = self.positions(code)[code]
-            if direction == "BUY":  # 平空，检查空仓
+            if direction == "BUY":  # 平空
                 if pos.pos_short < amount:
-                    # 持仓手数少于要平仓的，修正为持仓数量
-                    amount = pos.pos_short
+                    amount = pos.pos_short  # 修正为实际空仓数量
 
+                # 上期所/原油(INE.sc) 区分平昨/平今，优先平昨仓
                 if "SHFE" in code or "INE.sc" in code:
                     if pos.pos_short_his >= amount:
                         offset = "CLOSE"
                     elif pos.pos_short_today >= amount:
                         offset = "CLOSETODAY"
                     else:
-                        # 持仓不够，返回错误
                         return False
-            else:
+            else:  # 平多
                 if pos.pos_long < amount:
-                    # 持仓手数少于要平仓的，修正为持仓数量
-                    amount = pos.pos_long
+                    amount = pos.pos_long  # 修正为实际多仓数量
 
                 if "SHFE" in code or "INE.sc" in code:
                     if pos.pos_long_his >= amount:
@@ -465,7 +448,6 @@ class ExchangeTq(Exchange):
                     elif pos.pos_long_today >= amount:
                         offset = "CLOSETODAY"
                     else:
-                        # 持仓不够，返回错误
                         return False
 
         order = None
@@ -492,7 +474,7 @@ class ExchangeTq(Exchange):
                     return False
                 break
             else:
-                # 取消订单，未成交的部分继续挂单
+                # 超时未完全成交：撤单，用 volume_left 继续挂新单
                 self.cancel_order(order)
                 if order.is_error:
                     print(f"下单失败，原因：{order.last_msg}")
@@ -536,7 +518,6 @@ class ExchangeTq(Exchange):
         for _id in orders:
             _o = orders[_id]
             if _o.status == "ALIVE":
-                # 有效的订单，进行撤单处理
                 self.cancel_order(_o)
 
         return True

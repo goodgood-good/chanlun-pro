@@ -30,7 +30,6 @@ class ExchangeZB(Exchange):
 
         params["verify"] = False
 
-        # 设置时区
         self.tz = pytz.timezone("Asia/Shanghai")
 
         self.exchange = ccxt.zb(params)
@@ -38,9 +37,11 @@ class ExchangeZB(Exchange):
         self.db_exchange = ExchangeDB("currency")
 
     def default_code(self):
+        """返回默认交易对"""
         return "BTC/USDT"
 
     def support_frequencys(self):
+        """返回支持的周期及其展示名映射"""
         return {
             "w": "W",
             "d": "D",
@@ -53,6 +54,7 @@ class ExchangeZB(Exchange):
         }
 
     def all_stocks(self):
+        """获取全部交易对列表（仅保留含 / 的现货交易对，结果全局缓存）"""
         global g_all_stocks
         if len(g_all_stocks) > 0:
             return g_all_stocks
@@ -72,6 +74,7 @@ class ExchangeZB(Exchange):
         end_date: str = None,
         args=None,
     ) -> [pd.DataFrame, None]:
+        """获取 K 线数据，优先用数据库缓存并增量补全在线行情"""
         if args is None:
             args = {}
         try:
@@ -118,7 +121,8 @@ class ExchangeZB(Exchange):
         end_date: str = None,
         args=None,
     ) -> [pd.DataFrame, None]:
-        # 1m  3m  5m  15m  30m  1h  2h  4h  6h  8h  12h  1d  3d  1w  1M
+        """直接从交易所拉取 K 线（ccxt fetch_ohlcv，单次最多 1000 条）"""
+        # 交易所支持的周期：1m 3m 5m 15m 30m 1h 2h 4h 6h 8h 12h 1d 3d 1w 1M
         if args is None:
             args = {}
         frequency_map = {
@@ -167,11 +171,10 @@ class ExchangeZB(Exchange):
             lambda x: datetime.datetime.fromtimestamp(x / 1e3)
         )
         kline_pd["date"] = kline_pd["date"].dt.tz_localize(self.tz)
-        # kline_pd['date'] = pd.to_datetime(kline_pd['date'].values / 1000, unit='s', utc=True).tz_convert(
-        # 'Asia/Shanghai')
         return kline_pd[["code", "date", "open", "close", "high", "low", "volume"]]
 
     def ticks(self, codes: List[str]) -> Dict[str, Tick]:
+        """批量获取指定交易对的实时行情"""
         res_ticks = {}
         for code in codes:
             try:
@@ -203,14 +206,15 @@ class ExchangeZB(Exchange):
     def positions(self, code: str = ""):
         raise Exception("现货没有持仓，根据当前资产判断持有那些币")
 
-    # 撤销所有挂单
     def cancel_all_order(self, code):
+        """撤销指定交易对的所有挂单"""
         orders = self.exchange.fetch_open_orders(code)
         for _o in orders:
             self.exchange.cancel_order(_o["id"], code)
         return True
 
     def order(self, code: str, o_type: str, amount: float, args=None):
+        """下单（现货仅支持市价开多/平多，不支持做空）"""
         trade_maps = {
             "open_long": {"side": "BUY", "positionSide": "LONG"},
             "open_short": {"side": "SELL", "positionSide": "SHORT"},

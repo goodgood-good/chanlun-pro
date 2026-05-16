@@ -117,7 +117,6 @@ var TvIdxHeima = (function () {
         },
         constructor: function () {
           this.init = function (context, inputCallback) {
-            // 初始化ZIG变量的存储
             context.zigValues = [];
             context.prevZigValue = NaN;
           };
@@ -194,7 +193,6 @@ var TvIdxHeima = (function () {
                 : 0
             );
 
-            // 信号判断
             // 掘底买点：VAR2<-110 AND VAR3>0
             const buy_signal = var2.get(0) < -110 && var3.get(0) > 0 ? 87 : NaN;
 

@@ -13,9 +13,7 @@ __tz = pytz.timezone(str(get_localzone()))
 
 
 def get_logger(filename=None, level=logging.INFO) -> logging.Logger:
-    """
-    获取一个日志记录的对象
-    """
+    """获取日志记录器；filename 非空时同时写入文件。重复调用不会重复添加 handler。"""
     log_path = get_data_path() / "logs"
     if log_path.is_dir() is False:
         log_path.mkdir(parents=True)
@@ -24,7 +22,7 @@ def get_logger(filename=None, level=logging.INFO) -> logging.Logger:
     fmt = logging.Formatter("%(asctime)s - %(levelname)s : %(message)s")
     stream_handler = logging.StreamHandler()
 
-    # 判断之前的handle 是否存在，不存在添加
+    # 防止重复 addHandler（getLogger 返回同一个实例，多次调用会叠加 handler）
     stream_exists = False
     file_exists = False
     for _h in logger.handlers:
@@ -46,6 +44,7 @@ def get_logger(filename=None, level=logging.INFO) -> logging.Logger:
 
 
 def singleton(cls):
+    """类装饰器：保证每个类只实例化一次（进程级单例）。"""
     instance = {}
 
     @wraps(cls)
@@ -58,63 +57,34 @@ def singleton(cls):
 
 
 def timeint_to_str(_t, _format="%Y-%m-%d %H:%M:%S", tz=__tz):
-    """
-    时间戳转字符串
-    :param _t:
-    :param _format:
-    :return:
-    """
+    """时间戳（int）转格式化字符串。"""
     time_arr = time.localtime(int(_t))
     return time.strftime(_format, time_arr)
 
 
 def timeint_to_datetime(_t, _format="%Y-%m-%d %H:%M:%S", tz=__tz):
-    """
-    时间戳转日期
-    :param _t:
-    :param _format:
-    :return:
-    """
+    """时间戳（int）转 datetime 对象。"""
     time_arr = time.localtime(int(_t))
     return str_to_datetime(time.strftime(_format, time_arr), _format, tz=tz)
 
 
 def str_to_timeint(_t, _format="%Y-%m-%d %H:%M:%S"):
-    """
-    字符串转时间戳
-    :param _t:
-    :param _format:
-    :return:
-    """
+    """格式化字符串转 Unix 时间戳（int）。"""
     return int(time.mktime(time.strptime(_t, _format)))
 
 
 def str_to_datetime(_s, _format="%Y-%m-%d %H:%M:%S", tz=__tz):
-    """
-    字符串转datetime类型
-    :param _s:
-    :param _format:
-    :return:
-    """
+    """格式化字符串转 datetime 对象（带时区）。"""
     return datetime.datetime.strptime(_s, _format).astimezone(tz)
 
 
 def datetime_to_str(_dt: datetime.datetime, _format="%Y-%m-%d %H:%M:%S"):
-    """
-    datetime转字符串
-    :param _dt:
-    :param _format:
-    :return:
-    """
+    """datetime 对象转格式化字符串。"""
     return _dt.strftime(_format)
 
 
 def datetime_to_int(_dt: datetime.datetime):
-    """
-    datetime转时间戳
-    :param _dt:
-    :return:
-    """
+    """datetime 对象转 Unix 时间戳（int）。"""
     return int(_dt.timestamp())
 
 
@@ -136,24 +106,15 @@ def now_dt():
 
 
 def reverse_decimal_to_power_of_ten(decimal_number):
-    """
-    将小数转换为对应的小数点后几位的 10 的幂次方。
-    参数:
-        decimal_number (float): 输入的小数。
-    返回:
-        int: 对应的小数点后几位的 10 的幂次方。
-    """
-    # 检查输入是否为正数且小于 1 的小数
+    """将小数转换为其小数位数对应的 10 的幂次方（如 0.001 → 1000）。"""
     if decimal_number <= 0 or decimal_number >= 1:
         return 1000
-    # 转换成 str
     decimal_str = str(decimal_number)
-    # 如果其中包括 . 则说明有小数点，否则没有小数点
     if "." in decimal_str:
         num_zeros = len(decimal_str) - decimal_str.index(".") - 1
     if "e-" in decimal_str:
+        # 科学计数法（如 1e-8）直接读指数位
         num_zeros = int(decimal_str[decimal_str.index("e-") + 2 :])
-    # 返回对应的 10 的幂次方
     return 10**num_zeros
 
 

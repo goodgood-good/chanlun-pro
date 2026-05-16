@@ -36,7 +36,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Optional, Tuple
 
 
-# M3: env 优先的常量读取助手；解析失败兜底默认值，不让坏 env 炸服务启动。
+# env 优先的常量读取助手；解析失败兜底默认值，不让坏 env 炸服务启动。
 def _env_int(key: str, default: int) -> int:
     try:
         return int(os.environ.get(key, str(default)))
@@ -92,10 +92,8 @@ MARKETS = [
 DEFAULT_PAGE_SIZE = 50
 MAX_PAGE_SIZE = 500
 
-# W2: 缓存 ``_apply_market_filter`` 的结果 (TTL 60s), 避免每次请求重跑 11k 条
-# 的正则 / type 检查. (market → (filtered_list, fingerprint, refreshed_at))
-# fingerprint 是基于 items 数量 + 首/中/尾 code 的 12-char md5, 仅在结果
-# 真变化时才变, 配合 ETag 304 短路二次请求 (?all=1 时收益 ~1MB 流量).
+# 缓存 ``_apply_market_filter`` 的结果 (TTL 60s), 避免每次请求重跑 11k 条正则/type 检查。
+# fingerprint 基于 items 数量 + 首/中/尾 code 的 12-char md5，配合 ETag 304 短路重复请求。
 _market_filtered_cache: Dict[str, Tuple[List[dict], str, float]] = {}
 _market_filtered_lock = threading.Lock()
 _MARKET_FILTERED_TTL = 60.0
@@ -144,9 +142,9 @@ def _get_market_filtered_stocks(market: str) -> Tuple[List[dict], str]:
 def _build_response_etag(
     market_fp: str, q: str, page: int, page_size: int, return_all: bool
 ) -> str:
-    """W2 ETag: 市场数据 fingerprint + 请求参数, 任一变化 ETag 即变.
+    """ETag: 市场数据 fingerprint + 请求参数，任一变化 ETag 即变。
 
-    用 weak ETag (W/) 是因 fingerprint 不是字节精确的内容 hash, 仅近似。
+    用 weak ETag (W/) 是因 fingerprint 不是字节精确的内容 hash，仅近似。
     """
     raw = f"{market_fp}|{q}|{page}|{page_size}|{int(return_all)}"
     return f'W/"{hashlib.md5(raw.encode()).hexdigest()[:16]}"'
@@ -198,9 +196,8 @@ def _apply_market_filter(
         ]
     if market == "us":
         all_stocks = [s for s in all_stocks if not _is_us_non_stock(s.get("name", ""))]
-    # B-a：US 市场 prewarm 仅限自选股，保护长桥月度配额。
-    # query_all_zs_stocks 返回 [{"zx_name": ..., "stocks": [{"code", "name", ...}, ...]}, ...]，
-    # 需要从分组的 stocks 子列表里抽 code 拍扁。
+    # US 市场 prewarm 仅限自选股，保护长桥月度配额。
+    # query_all_zs_stocks 返回分组嵌套结构，需从 stocks 子列表抽 code 拍扁。
     if for_prewarm and market == "us" and getattr(config, "US_PREWARM_ZIXUAN_ONLY", False):
         from chanlun.zixuan import ZiXuan
         zx_codes = {
@@ -267,11 +264,10 @@ def symbols_list():
     if page_size > MAX_PAGE_SIZE:
         page_size = MAX_PAGE_SIZE
 
-    # W2: 缓存 + ETag, 避免每次重跑 _apply_market_filter 11k 条正则
+    # 带 TTL 缓存 + ETag，避免每次重跑 _apply_market_filter 11k 条正则
     all_stocks, market_fp = _get_market_filtered_stocks(market)
 
-    # ETag 检查在过滤/分页之前: 同一 (market_fp, q, page, page_size, all)
-    # 命中即 304, 服务端跳过 query 字串扫描和切片
+    # ETag 检查在过滤/分页之前：同一参数组合命中即 304，服务端跳过 query 扫描和切片
     etag = _build_response_etag(market_fp, query, page, page_size, return_all)
     if request.headers.get("If-None-Match") == etag:
         resp = ("", 304)
@@ -337,21 +333,17 @@ def symbols_list():
 PREWARM_INTERVALS = ["1D", "30", "5", "1"]
 
 # 单标的内并发计算的周期数（每个周期一个线程）。
-# 2026-04 调优：4 → 2。原因：实测全市场预热同时打 8 个并发请求时（2 标的 × 4 周期），
-# 长桥 HTTP 连接池被占满，前端 polling 请求（每 3 秒 1 次/面板，4 面板 = 1.3 QPS）被排到
-# 队列后面，导致已切换标的的旧请求耗时 10-18 秒，用户感觉切换很卡。
-# 维持 2，让总在飞请求数 ≤ INFLIGHT_LIMIT，避免 4 周期同时抢一把信号量。
-# M3: env PREWARM_FREQ_PARALLELISM 可覆盖
+# 实测全市场预热同时打 8 个并发请求时（2 标的 × 4 周期），长桥 HTTP 连接池被占满，
+# 前端 polling 请求被排到队列后面，导致切换标的耗时 10-18 秒。
+# 维持 2，让总在飞请求数 ≤ INFLIGHT_LIMIT，避免 4 周期同时抢信号量。
+# env PREWARM_FREQ_PARALLELISM 可覆盖
 PREWARM_FREQ_PARALLELISM = _env_int("PREWARM_FREQ_PARALLELISM", 2)
 
 # 多个标的之间并行处理的 worker 数。按市场区分：
 # - a 股 xtquant native 不是线程安全的，必须串行 → 1
 # - 其他 native 数据源（tdx 期货）也保险串行 → 1
-# - HTTP 数据源（长桥/futu）放开并行：
-#   2026-04 二次调优（M2 落盘后）：1 → 3 (us) / 1 → 2 (hk)。
-#   现在用户切到已预热标的命中 disk，毫秒级返回；批量预热可以更激进抢占数据源
-#   也不会再让用户体验崩。总在飞 = code_parallelism × freq_parallelism，但实际受
-#   下面 INFLIGHT_LIMIT 全局信号量约束，不会无限叠加。
+# - HTTP 数据源（长桥/futu）放开并行：用户切到已预热标的命中 disk 毫秒级返回，
+#   预热可以更激进抢占数据源。总在飞受 INFLIGHT_LIMIT 全局信号量约束，不会无限叠加。
 PREWARM_CODE_PARALLELISM_BY_MARKET = {
     "a": 1,            # xtquant native，绝对串行
     "futures": 1,      # tdx native，保险串行
@@ -364,25 +356,17 @@ PREWARM_CODE_PARALLELISM_BY_MARKET = {
 }
 PREWARM_CODE_PARALLELISM_DEFAULT = 1
 
-# ⚠️ 关键：全局在飞请求数信号量上限。
-# 这是单个 worker 进程内预热可同时打到数据源的最大请求数。
-# 注意：threading.Semaphore 是**进程内**真理，不跨进程；本服务由 app.py 单进程启动
-# （见 app.py:87-92 严禁多进程部署的注释），多 worker 部署下此上限会被乘 N 失效。
-# 留出余量给用户的实时请求（用户的 tv_history 不走这个信号量，永远优先）。
-# 2026-04 二次调优（M2 落盘后）：2 → 6。
+# 全局在飞请求数信号量上限（进程内，不跨进程；本服务单进程部署假设成立）。
 # 长桥/futu 单连接池 QPS 上限实测 ~10，预热占 6，给用户实时请求和 polling 留 4 个余量。
-# 用户切已预热标的现在走 disk hit 不再走 HTTP，所以可以放心吃满。
-# M3: env PREWARM_GLOBAL_INFLIGHT_LIMIT 可覆盖
+# 用户的 tv_history 不走此信号量，永远优先；用户切已预热标的走 disk hit，不抢 HTTP 配额。
+# env PREWARM_GLOBAL_INFLIGHT_LIMIT 可覆盖
 PREWARM_GLOBAL_INFLIGHT_LIMIT = _env_int("PREWARM_GLOBAL_INFLIGHT_LIMIT", 6)
 
-# 用户活跃度让位：用户最近 N 秒内有 firstDataRequest=true 的请求时，预热请求等一下再发，
-# 避免把用户的实时请求挤到 HTTP 连接队列后面。
-# M3: env PREWARM_USER_ACTIVE_WINDOW_SECONDS 可覆盖
+# 用户最近 N 秒内有 firstDataRequest=true 的请求时，预热等一下再发，
+# 避免把用户实时请求挤到 HTTP 连接队列后面。env PREWARM_USER_ACTIVE_WINDOW_SECONDS 可覆盖
 PREWARM_USER_ACTIVE_WINDOW_SECONDS = _env_float("PREWARM_USER_ACTIVE_WINDOW_SECONDS", 3.0)
-# 让位等待时间（秒）。用户活跃时，预热请求会 sleep 这么久后再继续。
-# 2026-04 二次调优：1.0 → 0.3。1s 让位过长，用户没切其它标的时也会因为单次 first=true
-# 把后续预热堵 5 秒，全市场预热被腰斩。0.3s 既能让用户突发请求优先，又不会浪费太多。
-# M3: env PREWARM_YIELD_SLEEP_SECONDS 可覆盖
+# 让位等待时间（秒）。0.3s 既能让用户突发请求优先，又不会因单次 first=true 把预热堵几秒。
+# env PREWARM_YIELD_SLEEP_SECONDS 可覆盖
 PREWARM_YIELD_SLEEP_SECONDS = _env_float("PREWARM_YIELD_SLEEP_SECONDS", 0.3)
 
 # 任务对象保留时长：完成后超过此时间允许新任务启动，并允许 GC。
@@ -392,10 +376,9 @@ PREWARM_TASK_RETAIN_SECONDS = 3600
 
 # 任务进度持久化目录与写盘频率
 _PREWARM_PERSIST_DIRNAME = "prewarm_status"
-# 写盘频率：每完成 N 个标的写一次（额外终态时强制写一次）。
-# 50 是经验值：典型 11k 标的预热 220 次写盘，IO 开销 < 1%；同时崩溃后丢失进度 < 50 个。
-# M3: env PREWARM_PERSIST_EVERY_N_DONE 可覆盖
-# N1 fix: max(1, ...) 防 env 写 0 触发 done_now % 0 的 ZeroDivisionError 杀掉 worker。
+# 写盘频率：每完成 N 个标的写一次（终态时强制写一次）。
+# 50 是经验值：11k 标的约 220 次写盘，IO 开销 < 1%，崩溃后丢失进度 < 50 个。
+# max(1, ...) 防 env 写 0 触发 done_now % 0 的 ZeroDivisionError。env PREWARM_PERSIST_EVERY_N_DONE 可覆盖。
 _PREWARM_PERSIST_EVERY_N_DONE = max(1, _env_int("PREWARM_PERSIST_EVERY_N_DONE", 50))
 # Resume 用的"已完成 code 列表"文件后缀：
 # - 每完成一个 code（无论成功/失败）即追加一行，进程崩溃/取消后下次 start() 跳过；
@@ -407,18 +390,15 @@ _PREWARM_DONE_SUFFIX = "_done.txt"
 # 这是防止打爆数据源的核心机制。
 _PREWARM_INFLIGHT_SEMAPHORE = threading.Semaphore(PREWARM_GLOBAL_INFLIGHT_LIMIT)
 
-# M1: 启动速率限制。同一 market 在 N 秒内只允许成功启动 1 次预热，
-# 防止用户脚本反复 POST /symbols/prewarm 滥用 CPU/磁盘/数据源 QPS。
-# 设为 0 表示禁用速率限制。env PREWARM_RATE_LIMIT_SECONDS 可覆盖。
+# 启动速率限制：同一 market 在 N 秒内只允许成功启动 1 次预热，
+# 防止反复 POST 滥用 CPU/磁盘/数据源 QPS。设为 0 禁用。env PREWARM_RATE_LIMIT_SECONDS 可覆盖。
 PREWARM_RATE_LIMIT_SECONDS = _env_int("PREWARM_RATE_LIMIT_SECONDS", 300)
 # market -> last successful start ts；进程内字典，单 worker 假设下足够。
 _prewarm_last_start_at: Dict[str, float] = {}
 _prewarm_rate_lock = threading.Lock()
 
-# N3 fix: done.txt append 写锁。Windows + NTFS 上 'a' mode 不保证原子，多 worker
-# 并发 append 可能粘连产生 "CODECODE_AB\n\n" 这种坏行；下次 resume 时粘连的 code
-# 不在新 codes 列表里被静默忽略，导致该标的被重复预热（失败也写 done，不会死循环）。
-# 用一把模块级写锁串行化所有 done.txt append；锁开销可忽略（每标的一次单行 IO）。
+# done.txt append 写锁。Windows + NTFS 上 'a' mode 不保证原子，多 worker
+# 并发 append 可能粘连产生坏行；用模块级写锁串行化所有 append，开销可忽略。
 _done_file_write_lock = threading.Lock()
 
 class PrewarmTask:
@@ -458,7 +438,7 @@ class PrewarmTask:
         self.error_msg: str = ""
         # 连续持久化失败计数（运行时；不持久化跨重启）。≥3 次时升级为 ERROR + 写 error_msg。
         self.persist_fail_count: int = 0
-        # M5 resume：本任务因为续跑而跳过的 code 数（仅展示用，total 已扣除）
+        # 本任务因续跑而跳过的 code 数（仅展示用，total 已扣除）
         self.resumed_skipped: int = 0
 
     def to_dict(self) -> dict:
@@ -514,22 +494,20 @@ class PrewarmManager:
         self._lock = threading.Lock()
         # market -> 最近一次任务（无论是否已完成）
         self._tasks: Dict[str, PrewarmTask] = {}
-        # L3: per-group 互斥状态（group → 当前在跑的 market）。
+        # per-group 互斥状态（group → 当前在跑的 market）。
         # 同一 group 内严格互斥；不同 group 可并发。
         self._running_groups: Dict[str, str] = {}
         # worker 线程引用（仅用于调试，不主动 join）
         self._worker_thread: Optional[threading.Thread] = None
-        # D: 历史任务文件改为惰性加载——避免 Flask 启动时同步扫盘阻塞，
-        # 也让数据目录暂时不可达（如网络盘未挂载）时进程仍能起来；
-        # 首次 start/get_status/cancel 时再触发一次 _load_persisted_tasks。
+        # 历史任务文件惰性加载——避免 Flask 启动时同步扫盘阻塞，
+        # 数据目录暂时不可达时进程仍能起来；首次 start/get_status/cancel 时再触发加载。
         self._loaded: bool = False
         self._load_lock = threading.Lock()  # 独立锁避免与 self._lock 嵌套
-        # F: _persist_task 序列化锁——避免多 worker 并发触发持久化时
-        # 后到者用旧 snapshot 把磁盘 done 数 replace 倒退。
-        # 把 to_dict() + write + replace 整体放进 lock 内，保证 latest-wins。
+        # _persist_task 序列化锁——避免多 worker 并发持久化时后到者用旧 snapshot 倒退 done 数。
+        # to_dict() + write + replace 整体放进 lock 内，保证 latest-wins。
         self._persist_lock = threading.Lock()
 
-    # ---------------- L3: 数据源分组 ----------------
+    # ---------------- 数据源分组 ----------------
 
     @staticmethod
     def _market_group(market: str) -> str:
@@ -559,11 +537,10 @@ class PrewarmManager:
     # ---------------- 持久化 ----------------
 
     def _ensure_loaded(self) -> None:
-        """首次调用时载入历史任务（D：惰性加载）。
+        """首次调用时载入历史任务（惰性加载）。
 
         double-checked locking 防止重复 IO；快路径无锁直接返回。
-        所有 public method（start/get_status/cancel）入口处调用此方法，
-        线程安全且对正常路径几乎零开销。
+        所有 public method（start/get_status/cancel）入口处调用此方法。
         """
         if self._loaded:
             return
@@ -627,7 +604,7 @@ class PrewarmManager:
             LogUtil.warning(f"[prewarm] persist dir create failed: {e}")
             return None
 
-    # ---------------- M5 resume：已完成 code 列表 ----------------
+    # ---------------- 已完成 code 列表（续跑支持） ----------------
 
     def _done_file_path(self, market: str) -> Optional["pathlib.Path"]:
         d = self._persist_dir()
@@ -668,20 +645,17 @@ class PrewarmManager:
 
     def _persist_task(self, task: "PrewarmTask") -> None:
         """把单个 task 状态原子写到 <data>/prewarm_status/<market>.json。
-        写失败仅 warning，不影响内存进度。
-        多 worker 可能并发调用（_process_one 中按 done % 50 触发），tmp 名
-        带 uuid 避免互相覆盖；最终 rename 到同一目标，后到者覆盖前者，符合
-        "保留最新一次写入"语义。
+
+        写失败仅 warning，不影响内存进度。tmp 名带 uuid 避免并发覆盖；
+        最终 rename 到同一目标，后到者覆盖前者，符合 latest-wins 语义。
         """
         d = self._persist_dir()
         if d is None:
             return
         path = d / f"{task.market}.json"
         tmp = d / f"{task.market}.json.tmp.{uuid.uuid4().hex}"
-        # F: 整体串行化 snapshot+write+replace。
-        # 否则多 worker 并发场景下：T1 在 done=50 启动 persist、T2 在 done=100 启动
-        # persist，若 T2 先 replace 完成、T1 后 replace，磁盘 done 反而退到 50。
-        # 锁内 to_dict 保证每次写盘都用 acquire 时的最新 done 值，latest-wins 语义。
+        # 整体串行化 snapshot+write+replace：锁内 to_dict 保证每次写盘都用最新 done 值，
+        # 防止并发时后到的 replace 把磁盘 done 倒退（latest-wins）。
         try:
             with self._persist_lock:
                 data = task.to_dict()
@@ -720,16 +694,16 @@ class PrewarmManager:
         参数 ``codes`` 为 ``[{"code": str, "name": str}, ...]`` 列表。
         返回 ``{"ok": bool, "msg": str, "task": dict | None}``。
 
-        M5 resume：会自动加载 ``<market>_done.txt`` 跳过上次已完成的 code，
-        实现进程崩溃 / 取消后续跑；仅在任务 finished 时清空该文件。
+        自动加载 ``<market>_done.txt`` 跳过上次已完成的 code，实现续跑；
+        仅在任务 finished（全市场跑完）时清空该文件。
         """
         if not codes:
             return {"ok": False, "msg": "标的列表为空，无需预热", "task": None}
 
-        # D: 惰性加载历史任务文件
+        # 惰性加载历史任务文件
         self._ensure_loaded()
 
-        # M1: 速率限制 — 同一 market 在 PREWARM_RATE_LIMIT_SECONDS 内只允许 1 次启动
+        # 速率限制：同一 market 在 PREWARM_RATE_LIMIT_SECONDS 内只允许 1 次启动
         if PREWARM_RATE_LIMIT_SECONDS > 0:
             with _prewarm_rate_lock:
                 last = _prewarm_last_start_at.get(market, 0.0)
@@ -746,7 +720,7 @@ class PrewarmManager:
                         "task": None,
                     }
 
-        # M5 resume：过滤掉上次已完成的 code（done.txt 里有的）
+        # 过滤掉上次已完成的 code（done.txt 里有的），实现续跑
         done_set = self._load_done_codes(market)
         original_total = len(codes)
         if done_set:
@@ -766,7 +740,7 @@ class PrewarmManager:
 
         with self._lock:
             self._gc_old_tasks_locked()
-            # L3: 按数据源 group 检查互斥；不同 group 可并行启动
+            # 按数据源 group 检查互斥；不同 group 可并行启动
             group = self._market_group(market)
             running_market = self._running_groups.get(group)
             if running_market is not None:
@@ -799,7 +773,7 @@ class PrewarmManager:
         self._worker_thread = thread
         thread.start()
 
-        # M1: 仅在确认任务真启动后记录速率限制时间戳；
+        # 仅在确认任务真启动后记录速率限制时间戳；
         # 早期失败（codes 空 / 全已完成 / 已有任务在跑）不计入。
         if PREWARM_RATE_LIMIT_SECONDS > 0:
             with _prewarm_rate_lock:
@@ -817,13 +791,13 @@ class PrewarmManager:
         return {"ok": True, "msg": msg, "task": task.to_dict()}
 
     def get_status(self, market: str) -> Optional[dict]:
-        self._ensure_loaded()  # D: 惰性加载
+        self._ensure_loaded()
         with self._lock:
             task = self._tasks.get(market)
             return task.to_dict() if task else None
 
     def cancel(self, market: str) -> dict:
-        self._ensure_loaded()  # D: 惰性加载
+        self._ensure_loaded()
         with self._lock:
             task = self._tasks.get(market)
             if task is None:
@@ -889,7 +863,7 @@ class PrewarmManager:
         processed: set = set()
         # 多线程并发更新 task 计数器需要小锁
         counter_lock = threading.Lock()
-        # M5 resume：done 文件路径预先解析一次（None 时降级为不写）
+        # done 文件路径预先解析一次（None 时降级为不写）
         done_file_path = self._done_file_path(market)
 
         def _process_one(item: dict) -> None:
@@ -940,10 +914,9 @@ class PrewarmManager:
                 task.done += 1
                 done_now = task.done
 
-            # M5 resume：把已处理 code（无论成功/失败）追加到 done.txt。
-            # 失败也写：避免下次 resume 死循环重试同一个坏 code；
-            # 用户判断需要重做时手动删 done.txt 即可。
-            # N3 fix: Windows + NTFS 上 'a' mode 不原子，用模块级写锁串行 append。
+            # 把已处理 code（无论成功/失败）追加到 done.txt 以支持续跑。
+            # 失败也写：避免下次续跑死循环重试坏 code；需重做时手动删 done.txt。
+            # Windows + NTFS 上 'a' mode 不原子，用模块级写锁串行 append。
             if code and done_file_path is not None:
                 try:
                     with _done_file_write_lock:
@@ -976,9 +949,8 @@ class PrewarmManager:
                 # 每批结束后重新按"用户最近看过"排序剩余 pending。
                 batch_size = max(code_parallelism * 4, 8)
                 cursor = 0
-                # M2: 缓存上一轮的 hot_codes 哈希，hot 列表没变就跳过 O(N) 重排。
-                # 典型场景：11k 标的 / 11000 / 8 = 1375 批，用户在跑期间通常只切几次
-                # 标的，每次切才需要一次重排；从 O(N²/batch) 降到 ~O(M·N) 实际工作量。
+                # 缓存上一轮的 hot_codes 哈希，hot 列表没变就跳过 O(N) 重排。
+                # 用户切标的时才触发重排，避免每批都做 O(N) 扫描。
                 last_hot_hash = None
                 while cursor < len(pending) and not task.cancel_event.is_set():
                     # 优先级调整：把用户最近看过且还没处理的标的提到队首
@@ -1040,8 +1012,8 @@ class PrewarmManager:
                     task.status = "finished"
                 task.finished_at = time.time()
                 task.current = ("", "")
-            # M5 resume：仅在 finished（全市场跑完）时清空 done.txt，
-            # 让下一次预热重新从头开始；cancel/aborted/error 都保留以便续跑。
+            # 仅在 finished（全市场跑完）时清空 done.txt，让下次从头开始；
+            # cancel/aborted/error 都保留，支持续跑。
             if task.status == "finished":
                 self._clear_done_codes(market)
 
@@ -1070,15 +1042,13 @@ class PrewarmManager:
                 LogUtil.warning(f"[prewarm] final persist failed: {e}")
 
             with self._lock:
-                # L3: 释放 per-group 互斥；只清除当前 task 占据的 group，
-                # 其他 group 的并行 task 不受影响。
+                # 释放 per-group 互斥；只清除本 task 占据的 group，其他 group 不受影响。
+                # 防御：仅当 group 持有者确为本 market 时才清除，避免异常路径误清空。
                 group = self._market_group(market)
-                # 防御：仅当当前 group 持有者就是本 task 的 market 时才清除
-                # （理论上不会出现错配，但避免异常路径 + 重入导致误清空）
                 if self._running_groups.get(group) == market:
                     self._running_groups.pop(group, None)
             # 清除批量预热活动状态：必须在最外层 finally，确保异常路径也释放，
-            # 否则 tv.prewarm_common_intervals 会被永久误判为"批量预热中"而不工作。
+            # 否则 prewarm_common_intervals 会被永久误判为"批量预热中"而不工作。
             mark_batch_prewarm_active(market, False)
 
     @staticmethod
@@ -1181,10 +1151,8 @@ class PrewarmManager:
                 if cache_key in chart_data_cache:
                     return True
 
-            # 2026-04 新增：磁盘冷层命中也算预热完成。
-            # 进程重启或 RAM TTL 淘汰后，磁盘里仍有上次预热的结果——直接 warm 回 RAM
-            # 而不重算，可省下整次 ex.klines + 缠论计算 + MACD 的开销。
-            # _get_chart_cache_entry 内部已带磁盘 fallback + RAM 回填。
+            # 磁盘冷层命中也算预热完成：进程重启或 RAM TTL 淘汰后磁盘仍有旧结果，
+            # 直接 warm 回 RAM 而不重算，省下 ex.klines + 缠论计算 + MACD 的开销。
             disk_entry = _get_chart_cache_entry(cache_key)
             if disk_entry is not None and disk_entry.get("is_full_snapshot"):
                 return True
@@ -1212,9 +1180,9 @@ class PrewarmManager:
                 acquired = _PREWARM_INFLIGHT_SEMAPHORE.acquire(timeout=min(1.0, remaining))
 
             try:
-                # M4: 1 次 2s 退避重试覆盖数据源短暂抖动（HTTP 超时/连接重置等）。
+                # 1 次 2s 退避重试覆盖数据源短暂抖动（HTTP 超时/连接重置等）。
                 # 不做更多次重试，避免数据源真宕机时把信号量占住挤掉用户实时请求。
-                # cancel-aware：重试前检查 cancel_event，避免取消后还跑一遍。
+                # 重试前检查 cancel_event，避免取消后还跑一遍。
                 last_err: Optional[BaseException] = None
                 for attempt in range(2):
                     try:

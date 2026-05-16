@@ -1,6 +1,5 @@
 # coding: utf-8
-# see https://github.com/rainx/pytdx/issues/38 IP寻优的简单办法
-# by yutianst
+# IP 寻优参考：https://github.com/rainx/pytdx/issues/38
 
 import datetime
 
@@ -144,6 +143,7 @@ future_ip = [
 
 
 def ping(ip, port=7709, type_="stock"):
+    """连接指定 TDX 服务器并返回响应耗时；无响应或质量差时返回最大 timedelta 表示不可用。"""
     api = TdxHq_API()
     apix = TdxExHq_API()
     __time1 = datetime.datetime.now()
@@ -184,27 +184,20 @@ def ping(ip, port=7709, type_="stock"):
 
 
 def select_best_ip(_type="stock"):
-    """目前这里给的是单线程的选优, 如果需要多进程的选优/ 最优ip缓存 可以参考
+    """单线程遍历候选 IP 列表，返回响应最快的节点。
+
+    多进程/缓存版本可参考：
     https://github.com/QUANTAXIS/QUANTAXIS/blob/master/QUANTAXIS/QAFetch/QATdx.py#L106
-
-
-    Keyword Arguments:
-        _type {str} -- [description] (default: {'stock'})
-
-    Returns:
-        [type] -- [description]
     """
-
     ip_list = stock_ip if _type == "stock" else future_ip
 
     data = [ping(x["ip"], x["port"], _type) for x in ip_list]
     results = []
     for i in range(len(data)):
-        # 删除ping不通的数据
+        # timedelta(9,9,0) 为哨兵值，表示不可用，过滤掉
         if data[i] < datetime.timedelta(0, 9, 0):
             results.append((data[i], ip_list[i]))
 
-    # 按照ping值从小大大排序
     results = [x[1] for x in sorted(results, key=lambda x: x[0])]
 
     return results[0]

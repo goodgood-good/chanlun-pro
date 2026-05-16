@@ -175,12 +175,9 @@ def _merge_shape_lists(existing_shapes, new_shapes):
 
 
 def _merge_chart_data(existing_data: dict, new_data: dict):
-    # ★ 历史背景(2026-05):本函数把"两份独立计算的 chart_data"按 shape 起点合并,
-    # 在向左滚动场景会让 XD 出现"局部计算 → 起点替换 → 视觉跳变"。
-    # web/tv 范围请求路径已迁移到 kline_recompute.prepend_klines_and_replace_cache,
-    # 该入口直接基于"完整 K 线集"全量重算,整体替换 chart_data_cache。
-    # 这里仅保留以兼容首屏 cache_tail_gap / firstDataRequest 路径——它们的合并语义
-    # 和"只补未来 K 线 + shape"的契约一致,不会触发 XD 起点跳变问题。
+    # 范围请求（向左滚动）已迁移到 kline_recompute.prepend_klines_and_replace_cache
+    # 做全量重算整体替换。此函数仅用于首屏 cache_tail_gap / firstDataRequest 路径——
+    # 这些路径只补未来 K 线 + shape，合并语义安全，不会触发 XD 起点跳变。
     if not existing_data:
         return new_data
     if not new_data:
@@ -199,9 +196,7 @@ def _merge_chart_data(existing_data: dict, new_data: dict):
         "macd_dif", "macd_dea", "macd_hist", "macd_area",
         "higher_macd_dif", "higher_macd_dea", "higher_macd_hist",
     ]
-    # ★ P-005 优化：existing/new 的 time->index 映射只建一次，跨 12 个字段复用，
-    # 避免原实现对每个字段各重建一遍 dict。
-    # 重复时间戳行为与原循环一致：dict comprehension 后者覆盖前者 → 保留最后一个 index。
+    # time->index 映射只建一次跨 12 个字段复用；重复时间戳 dict comprehension 后者覆盖前者。
     existing_idx = {bar_time: i for i, bar_time in enumerate(existing_times)}
     new_idx = {bar_time: i for i, bar_time in enumerate(new_times)}
     for key in aligned_keys:
@@ -306,10 +301,6 @@ def compute_and_cache_chart_data(market: str, code: str, frequency: str, cl_conf
         _set_chart_cache_entry(cache_key, cl_chart_data, is_full_snapshot=True)
     return True
 
-
-# ===========================================================================
-# P5 second step: chart_data 切片 / 裁未来 bar 抽到 module-level
-# ===========================================================================
 
 # 所有可能是"按 t 长度对齐的数组字段"列表 (用于 _slice_window / _trim_future_bars)。
 _CHART_ARRAY_FIELDS = (
@@ -421,11 +412,6 @@ def trim_future_bars(chart_data: dict, to_ts: int) -> dict:
     return trimmed
 
 
-# ===========================================================================
-# P5 third step: 跨周期 MACD 计算抽到 module-level (消除 tv.py + chart_compute.py
-# 的重复实现, 改动一处即可)
-# ===========================================================================
-
 def _resolve_higher_macd_ratio(frequency: str, market: str):
     """返回 frequency 对应的"高周期 MACD 倍率", 找不到返回 None。
 
@@ -454,10 +440,6 @@ def apply_higher_macd_to_chart_data(
 
     跨周期 MACD 思路: 用 frequency × ratio 放大 fast/slow/signal 周期, 在原
     close 序列上跑 talib.MACD, 输出对齐到 chart_data["c"] 长度。
-
-    P5 third step (2026-05-15): 抽自 tv.py::tv_history 与 chart_compute.py
-    ::compute_and_cache_chart_data 两份几乎相同的代码块 (各 ~40 行)。统一
-    到一处后, 后续修 ratio / 修 talib 参数 / 改 NaN 处理只需要改 1 处。
 
     Args:
         chart_data: 已含 "c" 字段的 chart_data dict, 本函数 in-place 修改
@@ -498,19 +480,6 @@ def apply_higher_macd_to_chart_data(
         LogUtil.error(f"[apply_higher_macd] Scaled MACD calc failed: {e}")
 
 
-# ===========================================================================
-# P5 fourth step: cache miss 路径的 "拉 K 线 + 算 cl 数据" 抽到 helper
-# ===========================================================================
-# 这是 P5 中最复杂的一步, 涉及:
-#   - ex.klines() IO 调用
-#   - enable_kchart_low_to_high 分支
-#   - prepend_klines_and_replace_cache 决策 (head_gap/partial_snapshot/tail_gap)
-#   - cl_data_to_tv_chart 转换
-#   - 多个 early return 路径 (no_data)
-# 通过返回 Optional[dict] 让调用方处理 no_data, 副作用 _mark_chart_cache_validated
-# 已在 helper 内部完成 (与原 tv_history 行为一致)。
-
-
 def fetch_klines_and_compute_cl_data(
     market: str,
     code: str,
@@ -524,9 +493,8 @@ def fetch_klines_and_compute_cl_data(
 ):
     """cache miss 路径: 拉 K 线 + 算 cl 数据。
 
-    P5 fourth step (2026-05-15): 抽自 tv.py::tv_history 中 ~50 行 cache miss
-    主路径, 含 enable_kchart_low_to_high / prepend / cl_data_to_tv_chart 三个
-    decision point。
+    含 enable_kchart_low_to_high / prepend / cl_data_to_tv_chart 三个决策分支。
+    返回 None 时调用方应 return {"s": "no_data"}（_mark_chart_cache_validated 已在内部完成）。
 
     Args:
         market / code / frequency / cl_config: 标的参数

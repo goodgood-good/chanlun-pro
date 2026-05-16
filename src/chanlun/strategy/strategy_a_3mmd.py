@@ -38,7 +38,7 @@ class StrategyA3mmd(Strategy):
         # 根据中枢类型的不同，判断是否第一个中枢的方法也不同
         high_config = high_data.get_config()
         if Config.ZS_TYPE_DN.value in high_config["zs_bi_type"]:
-            # 段内中枢（类同级别分解，和同级别分解还不太一样），判断段内是否只有一个中枢
+            # 段内中枢：确保当前线段内只有一个笔中枢，即走势处于第一个中枢阶段
             high_xd = high_data.get_xds()[-1]
             high_xd_bi_zss = [
                 _zs
@@ -48,7 +48,7 @@ class StrategyA3mmd(Strategy):
             if len(high_xd_bi_zss) != 1:
                 return opts
         elif Config.ZS_TYPE_BZ.value in high_config["zs_bi_type"]:
-            # 标准中枢，中枢延伸的做法，判断只要不是连续两个同向的中枢即可
+            # 标准中枢延伸模式：连续两个同向中枢意味着趋势延续，不符合三类买卖点前提
             high_bi_zs_1 = high_data.get_bi_zss()[-1]
             high_bi_zs_2 = high_data.get_bi_zss()[-2]
             if high_bi_zs_2.lines[1].type == high_bi_zs_1.lines[1].type:
@@ -58,19 +58,15 @@ class StrategyA3mmd(Strategy):
 
         high_zs = high_data.get_bi_zss()[-1]
 
-        # 第二个条件：中枢要求2，对称中枢
-        # 通过中枢震荡来判断是否对称，振幅大于 50 就算对称中枢，#(把方向去掉) 并且中枢要有明确的方向性
-        # 中枢振幅宽松点，设置成 35
-        if high_zs.zf() < 35:  # or high_zs.type == 'zd':
+        # 对称中枢要求：振幅 >= 35% 才认定为有效震荡中枢（宽松阈值）
+        if high_zs.zf() < 35:
             return opts
 
-        # 第三个条件：中枢要求3，级别的定位
-        # 根据中枢内笔数来计算中枢级别（算上中枢前后一笔，中枢内所有笔要小于等于 7 笔）
+        # 级别定位：中枢内笔数 <= 7，防止中枢级别过高导致三类买卖点失效
         if len(high_zs.lines) > 7:
             return opts
-        # 还要判断黄白线（dif、dea）是否回抽零轴，这里使用 dif 白线 回抽零轴判断，或者两次金叉或死叉来宽松判断
+        # 中枢须有 MACD 零轴回抽（dif 穿零）或至少两次金/死叉，确认走势完整性
         zs_macd_infos = cal_zs_macd_infos(high_zs, high_data)
-        # TODO 是否粘在一起这个不好判断了，就不考虑了
         if (
             zs_macd_infos.dif_down_cross_num > 0 or zs_macd_infos.dif_up_cross_num > 0
         ) or (zs_macd_infos.die_cross_num >= 2 or zs_macd_infos.gold_cross_num >= 2):
@@ -81,7 +77,7 @@ class StrategyA3mmd(Strategy):
         high_bi = self.last_done_bi(high_data.get_bis())
         price = high_data.get_klines()[-1].c
 
-        # 自己加的：之前反向笔、段不能有背驰
+        # 进入中枢前的反向笔/线段若已背驰，说明对应走势已结束，三类买卖点不成立
         high_up_bi = high_data.get_bis()[high_bi.index - 1]
         high_xd = high_data.get_xds()[-1]
         if high_up_bi.bc_exists(["bi", "pz", "qs"]) or (
@@ -89,7 +85,7 @@ class StrategyA3mmd(Strategy):
         ):
             return opts
 
-        # 止损点放在 分型第三根K线的 高低点
+        # 止损点放在分型第三根缠论K线的高/低点
         if self._max_loss_rate is not None:
             if high_bi.type == "down":
                 loss_price = price - (price * (abs(self._max_loss_rate) / 100))
@@ -104,8 +100,7 @@ class StrategyA3mmd(Strategy):
                 loss_price = high_bi.end.klines[-1].h
 
         if high_bi.mmd_exists(["3buy", "3sell"]):
-            # 买入条件：针对本级别中枢的本级别3买卖点
-            # 自己增加一个低级别背驰并且高级别停顿的买入条件
+            # 本级别三类买卖点：要求至少满足"笔强停顿/验证分型/低级别背驰"之一，避免假突破
             mla = MultiLevelAnalyse(
                 high_data, market_data.get_cl_data(code, market_data.frequencys[1])
             )
@@ -132,17 +127,14 @@ class StrategyA3mmd(Strategy):
                         )
                     )
         elif high_zs.done is False:
-            # 买入条件：针对本级别中枢的次级别3买卖点
-            # 买入条件：针对本级别中枢的b-A
-
-            # 中枢未完成，并且最后一笔突破了中枢高低点，但是还没有回调，这时候根据方向分型的强度，在没有回调到中枢内部进行入场
+            # 中枢未完成时，寻找次级别强势分型形成的类三类买卖点（b-A 走法）
+            # 若最后一笔已突破中枢极值（gg/dd），说明中枢可能被突破，暂不入场
             if (high_bi.type == "up" and high_zs.gg > high_bi.high) or (
                 high_bi.type == "down" and high_zs.dd < high_bi.low
             ):
                 return opts
 
-            # 查找所有强势的分型，并且和笔开始的分型类型一致，这样就跟笔的方向相反了
-            # TODO 强势的分型和力度有些区别，力度=2条件比较苛刻，不过苛刻点也好
+            # 在笔起点之后，找同类型（与笔起点分型一致，即方向相反）且力度 >= 2 的强势分型
             high_max_fxs = [
                 _fx
                 for _fx in high_data.get_fxs()
@@ -157,8 +149,7 @@ class StrategyA3mmd(Strategy):
                 return opts
 
             mmd = None
-            # 两个买入条件的有些重复了，这里的止损就没有参考最大止损设置里
-            # 这里定义为 类3买卖点，与本级别的区分开 TODO 这里还是需要优化
+            # 止损设置在强势分型第三K线极值，此处未参考 _max_loss_rate，类三买卖点容忍度更大
             if (
                 high_bi.type == "up"
                 and high_max_fxs[-1].val > high_zs.zg
@@ -214,11 +205,10 @@ class StrategyA3mmd(Strategy):
         high_bi = self.last_done_bi(high_data.get_bis())
         low_bi = self.last_done_bi(low_data.get_bis())
 
-        # 这里的均线根据缠论配置中设置的来
+        # 均线周期由缠论配置决定，此处固定取 5 周期均线
         idx_ma = self.idx_ma(high_data, 5)[-1]
 
-        # 卖出条件：05均线卖出 05均线对应的关键点——走势加速
-        # 均线角度变化计算比较复杂，使用笔的角度来判断，因为没有考虑到加速那一段，所以角度设定为 50
+        # 走势加速卖出：笔角度 > 50 且收盘破均线，用笔角度代替均线角度（计算更简便）
         if (
             "buy" in mmd
             and high_bi.type == "up"
@@ -240,10 +230,7 @@ class StrategyA3mmd(Strategy):
                 code=code, opt="sell", mmd=mmd, msg="笔角度大于50并且当前价格高于均线"
             )
 
-        # 卖出条件：标准走势卖出 标准走势对应的关键点——次级别趋势背驰和反转分型
-        # 卖出条件：次级别盘整背驰卖出
-        # 以上两个可以总结为 次级别 盘整与趋势背驰卖出，线上笔 done，标识高级别也出现了顶底分型
-        # 避免被小级别骗出去，在加一个高级别的笔停顿条件
+        # 次级别盘整/趋势背驰平仓：高级别笔停顿 + 低级别背驰 + 低级别笔停顿，三重确认避免假信号
         mla = MultiLevelAnalyse(high_data, low_data)
         low_qs = mla.low_level_qs(high_bi, "bi")
         if (
@@ -274,8 +261,7 @@ class StrategyA3mmd(Strategy):
                 msg="次级别背驰 %s" % ([low_qs.pz_bc, low_qs.qs_bc]),
             )
 
-        # 卖出条件：根据趋势背驰延伸出来的不标准走势之小转大
-        # 这里简单的用高级别的验证分型来平仓
+        # 小转大平仓：高级别验证分型出现即离场，防止不标准走势延伸带来的回撤
         if (
             "buy" in mmd
             and high_bi.type == "up"
@@ -291,11 +277,7 @@ class StrategyA3mmd(Strategy):
         ):
             return Operation(code, "sell", mmd, msg="高级别验证分型平仓")
 
-        # 卖出条件：次级别5段式背驰+破位05均线卖出
-        # TODO 待实现，次级别背驰级别满足这个条件了
-
-        # TODO 个人回看图表，考虑新增的平仓条件
-        # 高级别笔背驰
+        # 高级别笔背驰平仓
         if (
             "buy" in mmd
             and high_bi.type == "up"
@@ -315,7 +297,7 @@ class StrategyA3mmd(Strategy):
                 code, "sell", mmd, msg="高级别笔背驰（%s）" % high_bi.line_bcs()
             )
 
-        # 低级别笔出现一二类买卖点
+        # 低级别笔出现一/二类买卖点时，高级别笔也已完成，视为趋势转折信号
         if (
             "buy" in mmd
             and low_bi.mmd_exists(["1sell", "2sell"])

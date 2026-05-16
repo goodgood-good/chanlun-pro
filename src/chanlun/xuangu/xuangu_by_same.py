@@ -36,6 +36,10 @@ class XGFeatures:
 
 
 class XuanguBySame:
+    """基于 DTW 相似度的选股器：找出与目标标的形态最相似的股票。
+
+    相似度由 K线、笔、线段三个维度加权合成，权重可通过实例属性调整。
+    """
 
     def __init__(
         self,
@@ -43,12 +47,12 @@ class XuanguBySame:
     ):
         self.market = market
 
-        # 笔和段的数量
+        # 参与相似度计算的 K 线/笔/线段数量
         self.k_num = 200
         self.bi_num = 9
         self.xd_num = 3
 
-        # K线，笔和段权重
+        # 三个维度的加权系数（笔权重最高，形态匹配以笔为主）
         self.k_weight = 0.3
         self.bi_weight = 0.6
         self.xd_weight = 0.1
@@ -121,7 +125,8 @@ class XuanguBySame:
             if features is None:
                 return None
 
-            # 如果目标最后一笔有买卖点或背驰，优先比对要匹配的股票，最后一笔是否也有其中任意一个买卖点或背驰
+            # 目标笔有买卖点/背驰时，候选股的最后一笔也必须有至少一个交集，
+            # 否则形态相似但信号不同，过滤掉
             if len(target_features.bi_mmds) > 0 or len(target_features.bi_bcs) > 0:
                 mmd_bc_is_ok = False
                 if len(set(target_features.bi_mmds) & set(features.bi_mmds)) > 0:
@@ -129,7 +134,7 @@ class XuanguBySame:
                 if len(set(target_features.bi_bcs) & set(features.bi_bcs)) > 0:
                     mmd_bc_is_ok = True
                 if mmd_bc_is_ok is False:
-                    return None  # 背驰或买卖点都没有
+                    return None
             similarity = self.combined_similarity(
                 target_features,
                 features,
@@ -328,7 +333,6 @@ class XuanguBySame:
         计算组合相似度
         :return: 综合相似度(0-1)
         """
-        # 计算形状相似度
         bi_shape_sim = self.calculate_similarity(
             target_features.bi_features, compare_features.bi_features
         )
@@ -336,28 +340,14 @@ class XuanguBySame:
             target_features.xd_features, compare_features.xd_features
         )
 
-        # 计算角度相似度
-        # target_bi_angles = self.calculate_angles(target_features.bi_features)
-        # compare_bi_angles = self.calculate_angles(compare_features.bi_features)
-        # bi_angle_sim = self.angle_similarity(target_bi_angles, compare_bi_angles)
-
-        # target_duan_angles = self.calculate_angles(target_features.xd_features)
-        # compare_duan_angles = self.calculate_angles(compare_features.xd_features)
-        # duan_angle_sim = self.angle_similarity(target_duan_angles, compare_duan_angles)
-
-        # # 组合形状和角度相似度(各50%)
-        # bi_combined = 0.5 * bi_shape_sim + 0.5 * bi_angle_sim
-        # duan_combined = 0.5 * duan_shape_sim + 0.5 * duan_angle_sim
-
+        # 角度相似度经实验效果未提升，当前仅使用形状相似度
         bi_combined = bi_shape_sim
         xd_combined = xd_shape_sim
 
-        # K线的相似度
         k_combined = self.calculate_kline_similarity(
             target_features.k_features, compare_features.k_features
         )
 
-        # 最终加权平均
         total_similarity = (
             self.k_weight * k_combined
             + self.bi_weight * bi_combined

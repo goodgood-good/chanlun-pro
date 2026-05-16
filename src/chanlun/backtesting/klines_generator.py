@@ -34,9 +34,11 @@ class KlinesGenerator:
         self.to_cl_data = None
 
     def update_klines(self, from_klines: pd.DataFrame) -> ICL:
+        """接收源 K 线，合成目标分钟周期后计算缠论数据并返回。"""
         if len(from_klines) == 0:
             return self.to_cl_data
 
+        # 已有合成结果时，只取末尾若干根重叠区域做增量合并，避免全量重算
         convert_klines = (
             from_klines
             if self.to_klines is None or len(self.to_klines) < 10
@@ -46,7 +48,6 @@ class KlinesGenerator:
         convert_klines.insert(0, column="date_index", value=convert_klines["date"])
         convert_klines.set_index("date_index", inplace=True)
         period_type = f"{self.minute}min"
-        # 前对其
 
         if self.dt_align_type == "bob":
             label = "right"
@@ -105,7 +106,7 @@ class KlinesGenerator:
                 ["date"], keep="last"
             ).sort_values("date")
 
-        # 控制一下大小
+        # 合成 K 线超过 20000 根时截断，防止内存无限增长；截断后需重新计算缠论数据
         if len(self.to_klines) > 20000:
             self.to_klines = self.to_klines.iloc[-10000::]
             self.to_cl_data = None

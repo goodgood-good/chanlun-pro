@@ -16,9 +16,7 @@ g_ttx = None
 
 
 def CTX():
-    """
-    返回 富途行情 对象
-    """
+    """返回富途行情上下文单例，未配置 FUTU_HOST 时返回 None。"""
     global g_ctx
     if config.FUTU_HOST == "":
         return None
@@ -27,10 +25,9 @@ def CTX():
             host=config.FUTU_HOST, port=config.FUTU_PORT, is_encrypt=False
         )
     if random.randint(0, 100) > 90:
-        # 随机执行，订阅数量大于  90 ，则关闭所有订阅
+        # 富途订阅上限约 100 个；随机触发检查，超过 90 时全部取消，防止订阅数打满
         ret, sub_data = g_ctx.query_subscription()
         if ret == RET_OK and sub_data["own_used"] >= 90:
-            # 取消订阅
             g_ctx.unsubscribe_all()
     return g_ctx
 
@@ -64,7 +61,6 @@ class ExchangeFutu(Exchange):
     def __init__(self):
         SysConfig.set_all_thread_daemon(True)
 
-        # 设置时区
         self.tz = pytz.timezone("Asia/Shanghai")
 
     def default_code(self):
@@ -86,6 +82,7 @@ class ExchangeFutu(Exchange):
         }
 
     def all_stocks(self):
+        """获取港股通板块（HK.BK1910）的全量股票列表。"""
         if len(self.g_all_stocks) > 0:
             return self.g_all_stocks
         __all_stocks = []
@@ -133,15 +130,13 @@ class ExchangeFutu(Exchange):
 
         try:
             if start_date is None and end_date is None and args["is_history"] is False:
-                # 获取实时 K 线数据
-                # 订阅
+                # 实时模式：先订阅再拉最新 K 线（富途要求先 subscribe 才能 get_cur_kline）
                 CTX().subscribe(
                     [code],
                     [frequency_map[frequency]["subtype"]],
                     is_first_push=False,
                     subscribe_push=False,
                 )
-                # 获取 K 线
                 ret, kline = CTX().get_cur_kline(
                     code, 1000, frequency_map[frequency]["subtype"], args["fq"]
                 )
@@ -156,8 +151,7 @@ class ExchangeFutu(Exchange):
                     end_datetime = dt.datetime(
                         *time.strptime(end_date, time_format)[:6]
                     )
-                    # 2026-05-15 US-005: 从 chanlun.exchange._lookback 读统一表,
-                    # 与 qmt / cq / alpaca / polygon 对齐 (修改请改 _lookback.py)
+                    # 回看时长从统一表读取，修改请改 _lookback.py
                     from chanlun.exchange._lookback import get_lookback_timedelta
 
                     _lb = get_lookback_timedelta(frequency, default=dt.timedelta(days=30))
@@ -192,7 +186,7 @@ class ExchangeFutu(Exchange):
         return None
 
     def ticks(self, codes: List[str]) -> Dict[str, Tick]:
-        # CTX().subscribe(codes, [SubType.QUOTE], subscribe_push=False)
+        """获取标的列表的行情快照，返回 Tick 字典。"""
         ret, data = CTX().get_market_snapshot(codes)
         if ret == RET_OK:
             return {
@@ -376,7 +370,7 @@ class ExchangeFutu(Exchange):
             trd_side=order_type_map[o_type],
         )
         if ret == RET_OK:
-            time.sleep(5)
+            time.sleep(5)  # 等待交易所确认，避免立即查询拿到"待成交"状态
             ret, o = TTX().order_list_query(order_id=data.iloc[0]["order_id"])
             if ret == RET_OK:
                 return {

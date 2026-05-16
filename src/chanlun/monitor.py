@@ -88,8 +88,8 @@ def monitoring_code(
         return []
     cl_datas: List[ICL] = web_batch_get_cl_datas(market, code, klines, cl_config)
 
-    jh_cl_msgs = []  # 这里保存缠论触发的机会信息
-    jh_idx_msgs = []  # 这里保存指标触发的机会信息
+    jh_cl_msgs = []  # 缠论信号（背驰/买卖点）触发记录
+    jh_idx_msgs = []  # 技术指标（MA/MACD）穿越触发记录
     bc_maps = {"xd": "线段背驰", "bi": "笔背驰", "pz": "盘整背驰", "qs": "趋势背驰"}
     mmd_maps = {
         "1buy": "一买点",
@@ -110,7 +110,6 @@ def monitoring_code(
             continue
         end_bi = bis[-1]
         end_xd = cd.get_xds()[-1] if len(cd.get_xds()) > 0 else None
-        # 检查背驰和买卖点
         if end_bi.type in check_cl_types["bi_types"]:
             jh_cl_msgs.extend(
                 {
@@ -143,7 +142,6 @@ def monitoring_code(
             )
 
         if end_xd:
-            # 检查背驰和买卖点
             if end_xd.type in check_cl_types["xd_types"]:
                 jh_cl_msgs.extend(
                     {
@@ -171,7 +169,6 @@ def monitoring_code(
                     if end_xd.mmd_exists([mmd], "|")
                 )
 
-        # 指标监测
         if (
             check_idx_types["idx_ma"]["enable"]
             and len(cd.get_src_klines()) > check_idx_types["idx_ma"]["slow"]
@@ -243,7 +240,6 @@ def monitoring_code(
                 )
 
     send_msgs = []
-    # 记录缠论提醒信息
     for jh in jh_cl_msgs:
         line_type = "bi"
         if "bi" in jh.keys():
@@ -263,10 +259,9 @@ def monitoring_code(
             or is_exists.bi_is_done != is_done
             or is_exists.bi_is_td != is_td
         ):
-            fx_ld = f" FX:{jh['fx_ld']}" if "fx_ld" in jh.keys() else ""  # 分型力度
+            fx_ld = f" FX:{jh['fx_ld']}" if "fx_ld" in jh.keys() else ""
             msg = f"触发 {jh['type']} ({is_done} - {is_td}{fx_ld})"
             send_msgs.append(f"【{name} - {jh['frequency']}】{msg}")
-            # 添加数据库记录
             db.alert_record_save(
                 market,
                 task_name,
@@ -279,7 +274,6 @@ def monitoring_code(
                 line_type,
                 jh["line_dt"],
             )
-            # 添加图表标记
             db.marks_add_by_price(
                 market,
                 code,
@@ -291,13 +285,11 @@ def monitoring_code(
                 "green" if jh["line_type"] == "down" else "red",
                 "red" if jh["line_type"] == "down" else "green",
             )
-    # 记录指标提醒信息
     for jh in jh_idx_msgs:
         is_exists = db.alert_record_query_by_code(
             market, code, jh["frequency"], jh["type"], jh["k_date"]
         )
         if is_exists is None:
-            # 之前没有，进行记录
             msg = f"触发 {jh['msg']}"
             send_msgs.append(f"【{name} - {jh['frequency']}】{msg}")
             db.alert_record_save(
@@ -321,14 +313,12 @@ def monitoring_code(
         if len(hygn["GN"]) > 0:
             send_msgs.append("概念 : " + "/".join([_["name"] for _ in hygn["GN"]]))
 
-    # 添加图片
     if is_send_msg and len(send_msgs) > 0:
         for cd in cl_datas:
             title = f"{name} - {cd.get_frequency()}"
             image_key = kchart_to_png(market, title, cd, cl_config)
             if image_key != "":
                 send_msgs.append(image_key)
-    # 发送消息
     if is_send_msg and len(send_msgs) > 0:
         ok = send_fs_msg(market, f"{task_name} 监控提醒", send_msgs)
         # send_fs_msg 内部已 catch 各种异常并以 False 表达失败，但调用方原本完全不消费返回值，
@@ -344,14 +334,10 @@ def monitoring_code(
 
 def kchart_to_png(market: str, title: str, cd: ICL, cl_config: dict) -> str:
     """
-    缠论数据保存图表并上传网络，返回访问地址。
+    将缠论数据渲染为图表并上传飞书，返回 image_key；失败时返回空字符串。
 
-    重要修复点：
-    1. 不再原地修改入参 ``cl_config``；改为内部深拷贝，避免污染调用方（如 alert_tasks
-       会复用同一个 cl_config 多次，原代码会让 chart_show_ma 等设置被永久篡改）。
-    2. 文件名从 ``int(time.time())`` 改为 ``uuid4``，避免在同一秒内并发调用时
-       生成相同 html / png 文件名互相覆盖。
-    3. ``finally`` 不仅删除 png，还删除中间产物 html，避免长期残留。
+    内部深拷贝 cl_config，避免覆盖调用方复用的配置；文件名含 uuid 防并发冲突；
+    finally 同时清理 html 和 png 中间文件。
     """
     # 没有启用图片则不生产图片（在 lazy import 之前 return，
     # 允许未装 lark_oapi/playwright 的环境以"禁用图片"模式运行）
@@ -398,23 +384,17 @@ def kchart_to_png(market: str, title: str, cd: ICL, cl_config: dict) -> str:
     chart_config["to_file"] = html_file
 
     try:
-        # 渲染并保存图片
         render_file = kcharts.render_charts(title, cd, config=chart_config)
 
         with sync_playwright() as p:
             browser = p.chromium.launch()
             page = browser.new_page()
-            # 设置页面的视口大小
             page.set_viewport_size({"width": 800, "height": 400})
             page.goto(f"file://{render_file}")
-            # 等待页面加载完成
             page.wait_for_load_state("domcontentloaded")
-            # 截图
             page.screenshot(path=png_file, type="png", full_page=True)
             browser.close()
 
-        # 上传图片
-        # 创建client
         client = (
             lark.Client.builder()
             .app_id(fs_keys["app_id"])
@@ -422,7 +402,6 @@ def kchart_to_png(market: str, title: str, cd: ICL, cl_config: dict) -> str:
             .log_level(lark.LogLevel.INFO)
             .build()
         )
-        # 构造请求对象
         with open(png_file, "rb") as img_fp:
             request: CreateImageRequest = (
                 CreateImageRequest.builder()
@@ -434,7 +413,6 @@ def kchart_to_png(market: str, title: str, cd: ICL, cl_config: dict) -> str:
                 )
                 .build()
             )
-            # 发起请求
             response: CreateImageResponse = client.im.v1.image.create(request)
         return response.data.image_key
     except Exception as e:

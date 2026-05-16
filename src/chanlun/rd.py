@@ -8,6 +8,7 @@ rb = None
 
 
 def Robj():
+    """获取返回字符串的 Redis 客户端单例（decode_responses=True）。"""
     global r
     if r is None:
         r = redis.Redis(
@@ -17,6 +18,7 @@ def Robj():
 
 
 def RobjByBytes():
+    """获取返回字节的 Redis 客户端单例（decode_responses=False），用于二进制数据读写。"""
     global rb
     if rb is None:
         rb = redis.Redis(

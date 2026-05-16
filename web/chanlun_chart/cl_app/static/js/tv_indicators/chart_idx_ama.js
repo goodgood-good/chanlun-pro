@@ -123,17 +123,6 @@ var TvIdxAMA = (function () {
             var fast_n = this._input(1);
             var slow_n = this._input(2);
             var cal_type = this._input(3);
-            // console.log(
-            //   "N",
-            //   N,
-            //   "fast_n",
-            //   fast_n,
-            //   "slow_n",
-            //   slow_n,
-            //   "cal_type",
-            //   cal_type
-            // );
-
             const h = this._context.new_var(PineJS.Std.high(this._context));
             const l = this._context.new_var(PineJS.Std.low(this._context));
             const c = this._context.new_var(PineJS.Std.close(this._context));
@@ -182,7 +171,6 @@ var TvIdxAMA = (function () {
               );
             }
 
-            // 颜色设置
             const colorIndex =
               this._context.amas.length >= 2 &&
               this._context.amas[this._context.amas.length - 1] >
@@ -190,7 +178,6 @@ var TvIdxAMA = (function () {
                 ? 0
                 : 1;
 
-            // 返回 this._context.amas 数组最后一个
             return [
               this._context.amas[this._context.amas.length - 1],
               colorIndex,

@@ -1,4 +1,5 @@
 #:  -*- coding: utf-8 -*-
+"""定时同步 A 股 K 线到本地数据库（通过 QMT 接口，后复权）。"""
 import time
 from tqdm.auto import tqdm
 
@@ -6,20 +7,12 @@ from chanlun.exchange.exchange_baostock import ExchangeBaostock
 from chanlun.exchange.exchange_db import ExchangeDB
 from chanlun.exchange.exchange_qmt import ExchangeQMT
 
-"""
-同步股票数据到数据库中
-"""
-
 db_ex = ExchangeDB("a")
 line_ex = ExchangeQMT()
 
-# 获取所有 A 股股票
 stocks = line_ex.all_stocks()
 
-# run_codes = [s['code'] for s in stocks]
-# random.shuffle(run_codes)  # 打乱，可以多进程运行
-
-# 只下载自己回测的股票标的
+# 只下载自己回测的股票标的，按需修改此列表
 run_codes = [
     "SH.600519",
     "SH.601398",
@@ -1238,7 +1231,7 @@ run_codes = [
 print("Run code num: ", len(run_codes))
 
 
-# 周期历史k线开始时间
+# 各周期历史 K 线的最早起始时间（首次全量拉取用）
 f_start_datetime = {
     "m": "1990-01-01",
     "w": "1990-01-01",
@@ -1249,12 +1242,12 @@ f_start_datetime = {
 
 
 def sync_code(_code):
+    """增量同步单只股票的全部周期 K 线，已有记录则从最后时间续拉。"""
     try:
         for f in ["m", "w", "d", "30m", "5m"]:
             time.sleep(1)
             while True:
                 last_dt = db_ex.query_last_datetime(_code, f)
-                # tqdm.write('%s - %s last dt %s' % (_code, f, last_dt))
                 if last_dt is None:
                     klines = line_ex.klines(
                         _code, f, start_date=f_start_datetime[f], args={"fq": "hfq"}

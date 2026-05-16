@@ -1,10 +1,5 @@
 """
-Utilities for external message sending and configuration helpers.
-
-This module centralizes small configuration accessors and wrappers to
-send messages to DingTalk and Feishu, with light caching via the DB
-cache interface. Functions include clear docstrings and type hints,
-and minor fixes to market key mapping.
+消息推送与配置工具：钉钉/飞书消息发送，代理/凭证配置读取（DB 缓存优先）。
 """
 
 import base64

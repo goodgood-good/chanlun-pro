@@ -328,14 +328,11 @@ var TvIdxVegasMA = (function () {
           },
         },
         constructor: function () {
-          this.init = function (context, inputCallback) {
-            // 初始化
-          };
+          this.init = function (context, inputCallback) {};
           this.main = function (context, inputCallback) {
             this._context = context;
             this._input = inputCallback;
 
-            // 获取输入参数
             const flag = this._input(0);
             const ma12 = this._input(1);
             const bei4 = this._input(2);
@@ -345,7 +342,6 @@ var TvIdxVegasMA = (function () {
             const boll = this._input(6);
             const atrFlag = this._input(7);
 
-            // 获取价格数据
             const c = this._context.new_var(PineJS.Std.close(this._context));
             const o = this._context.new_var(PineJS.Std.open(this._context));
             const h = this._context.new_var(PineJS.Std.high(this._context));
@@ -417,7 +413,6 @@ var TvIdxVegasMA = (function () {
               lower = basis - dev;
             }
 
-            // 返回所有指标值
             return [
               fil1, // 0: 过滤线
               fast1Ema, // 1: 快隧道快线

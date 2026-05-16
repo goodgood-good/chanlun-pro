@@ -142,7 +142,7 @@ var TvIdxRSX = (function () {
         },
         constructor: function () {
           this.init = function (context, inputCallback) {
-            // 初始化DMA状态变量
+            // DMA 递推所需的各阶上一步值，逐 bar 更新
             context.f28_prev = NaN;
             context.f30_prev = NaN;
             context.f38_prev = NaN;
@@ -162,13 +162,11 @@ var TvIdxRSX = (function () {
             this._context = context;
             this._input = inputCallback;
 
-            // 获取输入参数
             var LENGTH = this._input(0);
             var OBLEVEL = this._input(1);
             var OSLEVEL = this._input(2);
             var EMA_PERIOD = this._input(3);
 
-            // 获取价格数据
             const h = this._context.new_var(PineJS.Std.high(this._context));
             const l = this._context.new_var(PineJS.Std.low(this._context));
             const c = this._context.new_var(PineJS.Std.close(this._context));
@@ -278,11 +276,9 @@ var TvIdxRSX = (function () {
             const trend = dma(rsx_, emaAlpha, this._context.trend_ema_prev);
             this._context.trend_ema_prev = trend;
 
-            // ===== 填充区域 =====
             const ob_fill = rsx_ > OBLEVEL ? rsx_ : NaN;
             const os_fill = rsx_ < OSLEVEL ? rsx_ : NaN;
 
-            // 返回结果
             return [
               rsx_, // 0: RSX主线
               trend, // 1: 趋势线

@@ -25,9 +25,8 @@ class ZsCalculator:
         # 增量计算状态
         self._last_lines_count: int = 0
         self._last_entry_idx: int = 0  # 上次计算结束时的 entry_idx
-        # ★ B6 修复：增量校验需要的尾段快照
-        # (last_line.index, last_line.start.val, last_line.end.val, last_line 是否 done)
-        # 任何一项变化都意味着前缀已经改变，必须降级到全量重算。
+        # 增量校验用的尾段快照 (index, start.val, end.val, done)，
+        # 任一项变化都意味着前缀已改变，必须降级到全量重算。
         self._last_tail_snapshot: Optional[tuple] = None
 
     def calculate(self, lines: List[LINE]) -> List[ZS]:
@@ -55,12 +54,9 @@ class ZsCalculator:
             self._last_tail_snapshot = self._build_tail_snapshot(lines)
             return []
 
-        # 判断是否为增量更新
-        # ★ B6 修复：除了长度比较，还要校验「上次的尾段在新 lines 里仍然存在且未变化」。
-        # XdCalculator 增量产出新的 xds 时，最后一段的 done 状态可能翻转
-        # （pending 变 confirmed，或反之），此时 lines[N-1] 是不同对象。
-        # 仅看 len 会被错误地走增量分支，从一个不再存在的 pending_zs.start.index
-        # 扫描，可能漏识别中枢。
+        # 判断是否为增量更新：除长度比较外，还要校验上次尾段在新 lines 里仍
+        # 存在且未变化。XdCalculator 增量时末段 done 可能翻转，仅看 len 会误走
+        # 增量分支、从不再存在的 pending_zs 起点扫描而漏识别中枢。
         prefix_unchanged = self._tail_snapshot_consistent(lines)
         is_incremental = (
             self._last_lines_count > 0
@@ -70,12 +66,9 @@ class ZsCalculator:
         )
 
         if is_incremental:
-            # ★ C2(A5) 修复：增量回退点不能信 pending_zs.start.index。
-            # 上游 BiCalculator/XdCalculator 在增量模式下会重排 line.index，
-            # 同一根线段的 index 在两次 calculate 之间可能变化。
-            # 用 (start.val, start.k.k_index, type) 这种业务唯一键
-            # 在新 lines 里重新定位「上次 pending_zs 的进入段位置」更稳。
-            # 没找到匹配项时，安全降级到全量。
+            # 增量回退点不能信 pending_zs.start.index：上游增量会重排 line.index。
+            # 改用业务唯一键 (start.val, start.k.k_index, type) 重新定位上次
+            # pending_zs 的进入段位置，定位失败则安全降级到全量。
             self.all_lines = lines
 
             restart_idx: Optional[int] = None
@@ -115,11 +108,8 @@ class ZsCalculator:
     def _locate_line(lines: List[LINE], target_line: LINE) -> Optional[int]:
         """在 lines 中重新定位 target_line 的位置。
 
-        ★ C2(A5) 配套：用业务唯一键定位，避开 line.index 的漂移问题。
-        匹配键：(start.val, end.val, start.k.k_index, type)
-          - start/end.val：缠论价格不变，可作主键
-          - start.k.k_index：原始 K 索引绝对稳定（KlineDataProcessor 单调递增）
-          - type：方向兜底
+        用业务唯一键 (start.val, end.val, start.k.k_index, type) 定位，避开
+        line.index 漂移：价格不变、原始 K 索引单调递增、type 作方向兜底。
         从尾部往前找，因为同一根线段最可能停留在原位附近。
         """
         try:
@@ -250,22 +240,16 @@ class ZsCalculator:
 
             center = ZS(zs_type='xd', start=entry_seg, _type=seg_b.type)
             center.lines = core_lines
-            center._bounds_dirty = True  # ★ P-009：防御性置脏（__init__ 已为 True，此处显式标注整体赋值使缓存失效）
+            center._bounds_dirty = True  # 整体赋值 lines 后边界缓存失效
             # 初始中枢范围由前三段重叠决定
             center.zg, center.zd = zg, zd
-            center.update_boundaries()  # 初始更新zg, zd
+            center.update_boundaries()
 
             # 3. 尝试延伸中枢，并检查是否完成
             is_completed, exit_idx = self._extend_and_check_complete(center, core_start_idx + 3)
 
             if is_completed:
-                # ----------------------------------------------------
-                # ** 核心验证逻辑 (Core Validation Logic) **
-                # 一个有效的中枢必须满足所有条件：
-                # 1. 具有进入段 (center.start is not None)
-                # 2. 具有离开段 (center.end is not None)
-                # 3. 至少有3个核心线段 (len(center.lines) >= 3)
-                # ----------------------------------------------------
+                # 有效中枢须同时满足：有进入段、有离开段、核心线段 >= 3
                 is_valid_center = (
                         center.start is not None and
                         center.end is not None and
@@ -273,25 +257,20 @@ class ZsCalculator:
                 )
 
                 if is_valid_center:
-                    # ** 有效中枢：添加并前进到离开段 **
                     center.index = len(self.zss)
                     self.zss.append(center)
-                    # 下一个中枢的寻找从离开段开始。
+                    # 下一个中枢从离开段开始找
                     entry_idx = exit_idx
                     self._last_entry_idx = entry_idx
                 else:
-                    # ** 无效中枢：丢弃并从下一个线段开始尝试 **
-                    # (例如，初始的seg_c被确认为离开段，导致核心线段 < 3)
-                    # 丢弃这个无效的中枢，entry_idx 增加 1，
-                    # 从下一个线段 (self.all_lines[entry_idx + 1])
-                    # 重新开始寻找新的“进入段”。
+                    # 无效中枢丢弃（如初始 seg_c 被确认为离开段导致核心 < 3），
+                    # entry_idx +1 从下一线段重新找进入段
                     entry_idx += 1
             else:
-                # 未完成，说明走到了所有线段的末尾
+                # 未完成说明已走到线段末尾，这是最后一个可能的中枢
                 if len(center.lines) >= 3:
                     self.pending_zs = center
                 self._last_entry_idx = entry_idx
-                # 这是最后一个可能的中枢，所以我们跳出循环。
                 break
 
     def _extend_and_check_complete(self, center: ZS, start_j: int) -> tuple[bool, int]:
@@ -308,12 +287,10 @@ class ZsCalculator:
         while j < len(self.all_lines):
             current_seg = self.all_lines[j]
 
-            # 核心逻辑：首先检查当前线段(current_seg)是否与中枢重叠
             current_overlaps = max(current_seg.zs_low, center.zd) < min(current_seg.zs_high, center.zg)
 
             if current_overlaps:
-                # --- 情况 1: 当前线段(j)重叠 ---
-                # 它*可能*是核心，也*可能*是离开段。我们必须检查 j+1。
+                # 情况 1：当前线段(j)重叠，可能是核心也可能是离开段，须看 j+1
 
                 # 1.1 检查是否是最后一条线段
                 if j == len(self.all_lines) - 1:
@@ -360,7 +337,7 @@ class ZsCalculator:
                 # 如果是，说明初始的 seg_c 实际上是离开段，应将其从核心线段中移除。
                 if center.lines and center.lines[-1] is center.end:
                     center.lines.pop()
-                    center._bounds_dirty = True  # ★ P-009：pop 后边界缓存失效
+                    center._bounds_dirty = True  # pop 后边界缓存失效
 
                 return True, j - 1  # 下一个中枢的入口是 j-1
 

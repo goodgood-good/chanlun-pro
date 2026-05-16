@@ -104,7 +104,6 @@ class StrategyBc(Strategy):
         data = market_data.get_cl_data(code, market_data.frequencys[0])
         price = data.get_klines()[-1].c
 
-        # 止盈止损检查
         if "buy" in mmd:
             if price < pos.loss_price:
                 return Operation(code, "sell", mmd, msg="%s 止损" % mmd)
@@ -118,7 +117,7 @@ class StrategyBc(Strategy):
             bi = data.get_bis()[-2]
 
         if "buy" in mmd and xd.type == "up":
-            # 买入做多，检查卖点
+            # 做多持仓：线段和笔同时出现背驰，平仓
             if (
                 xd.type == bi.type
                 and xd.end.index == bi.end.index
@@ -133,7 +132,7 @@ class StrategyBc(Strategy):
                     % (mmd, xd.line_bcs(), bi.line_bcs()),
                 )
         if "sell" in mmd and xd.type == "down":
-            # 卖出做空，检查买点
+            # 做空持仓：线段和笔同时出现背驰，平仓
             if (
                 xd.type == bi.type
                 and xd.end.index == bi.end.index

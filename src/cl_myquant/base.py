@@ -25,7 +25,7 @@ from chanlun.cl_interface import ICL
 
 class MyQuantData(MarketDatas):
     """
-    掘进行情数据类
+    掘金量化行情数据适配类，将掘金 context 数据桥接到缠论 MarketDatas 接口。
     """
 
     def __init__(self, content: Context, frequencys: List[str], cl_config=None):
@@ -39,7 +39,7 @@ class MyQuantData(MarketDatas):
 
     def klines(self, code, frequency, count=2000) -> pd.DataFrame:
         """
-        获取的标的必须要 subscribe 订阅过才可以
+        获取 K 线数据；标的必须已通过 subscribe 订阅，否则掘金 API 返回空。
         """
         klines = self.content.data(
             code,
@@ -53,6 +53,7 @@ class MyQuantData(MarketDatas):
         return klines[["code", "date", "open", "close", "high", "low", "volume"]]
 
     def last_k_info(self, code) -> dict:
+        """返回指定标的最新一根 K 线的 OHLC 信息。"""
         kline = self.klines(code, self.frequencys[-1], count=1)
         return {
             "date": kline.iloc[-1]["date"],
@@ -64,7 +65,8 @@ class MyQuantData(MarketDatas):
 
     def init_cl_datas(self, codes, frequencys):
         """
-        重新初始化指定的标的列表的缠论数据
+        全量重建指定标的 + 周期组合的缠论数据缓存；
+        不在新列表中的旧缓存条目会被删除以释放内存。
         """
         old_key_list = self.cache_cl_datas.keys()
         key_list = []
@@ -80,7 +82,7 @@ class MyQuantData(MarketDatas):
                 else:
                     self.cache_cl_datas[key].process_klines(klines)
 
-        # 删除不在计划数据，节省内存
+        # 删除不在新订阅列表中的旧缓存，避免内存持续增长
         del_key_list = list(set(old_key_list).difference(set(key_list)))
         for key in del_key_list:
             del self.cache_cl_datas[key]
@@ -89,7 +91,7 @@ class MyQuantData(MarketDatas):
 
     def update_bars(self, bars):
         """
-        更新 bars 数据到缠论数据对象中
+        将掘金推送的 bars 数据增量写入对应的缠论数据对象。
         """
         klines = []
         frequency = None
@@ -123,7 +125,7 @@ class MyQuantData(MarketDatas):
 
 class MyQuantTrader(BackTestTrader):
     """
-    掘金交易类
+    掘金量化实盘交易适配类，将缠论信号转换为掘金下单指令。
     """
 
     def __init__(self, name, context: Context):
@@ -134,20 +136,20 @@ class MyQuantTrader(BackTestTrader):
 
         self.max_pos = 10
 
-    # 做多买入
     def open_buy(self, code, opt: Operation, amount: float = None):
-
+        """
+        做多买入：按可用资金均摊仓位，市价下单；循环轮询直到委托终结状态。
+        """
         pos_count = len(self.context.account().positions())
         if pos_count >= self.max_pos:
             return False
 
-        # 获取当前最新价格
         last_price = current_price(symbols=[code])[0]["price"]
 
         available_cash = self.context.account().cash["available"]
         use_cash = available_cash / (self.max_pos - pos_count)
 
-        # 检查可用金额是否可以买100股
+        # A 股最小交易单位为 100 股，不足则放弃
         if use_cash < last_price * 100:
             return False
 
@@ -157,7 +159,7 @@ class MyQuantTrader(BackTestTrader):
         res = order_value(
             code, use_cash, OrderSide_Buy, OrderType_Market, PositionEffect_Open
         )
-        # 查询委托情况，获取成交信息
+        # 轮询委托状态，等待终结（成交/撤单/拒单/过期）
         order_id = res[0]["cl_ord_id"]
         print(f"下单 {res}")
 
@@ -186,13 +188,14 @@ class MyQuantTrader(BackTestTrader):
             "amount": order_info["filled_volume"],
         }
 
-    # 做空卖出
     def open_sell(self, code, opt: Operation, amount: float = None):
+        """做空卖出：A 股不支持做空，直接返回 False。"""
         return False
 
-    # 做多平仓
     def close_buy(self, code, pos: POSITION, opt):
-
+        """
+        做多平仓：目标手数置 0 市价平仓，轮询委托直到终结。
+        """
         position = self.context.account().positions(code, side=PositionSide_Long)
         if position is None:
             return False
@@ -202,7 +205,7 @@ class MyQuantTrader(BackTestTrader):
             position_side=PositionSide_Long,
             order_type=OrderType_Market,
         )
-        # 查询委托情况，获取成交信息
+        # 轮询委托状态，等待终结
         order_id = res[0]["cl_ord_id"]
 
         while True:
@@ -227,6 +230,6 @@ class MyQuantTrader(BackTestTrader):
             "amount": order_info["filled_volume"],
         }
 
-    # 做空平仓
     def close_sell(self, code, pos: POSITION, opt):
+        """做空平仓：A 股不支持做空，直接返回 False。"""
         return False

@@ -16,7 +16,7 @@ import numpy as np
 import pandas as pd
 import prettytable as pt
 import pyfolio as pf
-# F2: pyecharts 已移到 [backtest]/[charts] extras
+# pyecharts 属于可选依赖，未安装时给出明确安装提示
 try:
     from pyecharts import options as opts
     from pyecharts.charts import Bar, Grid, Line
@@ -50,14 +50,10 @@ class BackTest:
     """
 
     def __init__(self, config: dict = None):
-        # 日志记录
         self.log = fun.get_logger("my_backtest.log")
-        # 资源管理
         self._resources = set()
-        # 性能监控
         self._perf_stats = {}
-        # 内存管理阈值
-        self.memory_threshold = 0.8  # 80% 内存使用率阈值
+        self.memory_threshold = 0.8
 
         if config is None:
             return
@@ -89,12 +85,10 @@ class BackTest:
 
         self.init_balance: int = config["init_balance"]
 
-        # 手续费的设置
-        """
-        # 沪深A股的手续费，在 backtest_trader.py cal_fee 方法中计算，有设置 过户费/印花税等 费率，这里只设置券商佣金，cal_fee 里计算的最少 5 元（不免5），如不满要求可自行修改
-        # 期货手续费率，这个不生效，在 futures_contracts.py 中，为每个期货品种单独配置（如果没有配置回测的品种，则会报错）
-        # 其他市场，默认手续费计算方式就是 成交额 * 手续费率
-        """
+        # 手续费说明：
+        #   A 股：cal_fee 按过户费/印花税/佣金计算，此处 fee_rate 仅为券商佣金
+        #   期货：fee_rate 不生效，各品种手续费在 futures_contracts.py 中单独配置
+        #   其他市场：fee = 成交额 × fee_rate
         self.fee_rate: float = config["fee_rate"]
         self.max_pos: int = config["max_pos"]
 
@@ -125,12 +119,12 @@ class BackTest:
         )
         self.trader.set_data(self.datas)
 
-        # 回测循环加载下次周期，默认None 为回测最小周期
+        # 每次回测循环推进的时间步周期，None 表示使用最小周期（frequencys[-1]）
         self.next_frequency = None
-        # 回测中是否将数据批量加载到内存中，True 会占用大量内存，如果内存不足，建议设置为 False
+        # True：全量 K 线预加载到内存（快但耗内存）；False：按需查库（慢但省内存）
         self.load_data_to_cache = True
 
-        # 参数优化，评价指标字段，默认为最终盈利百分比总和
+        # 参数优化时使用的评价指标字段，默认按总盈利百分比排序
         self.evaluate = "profit_rate"
 
         self._process_re_again = False
@@ -195,7 +189,6 @@ class BackTest:
             self.frequencys,
             self.cl_config,
         )
-        # self.log.info('Load OK')
         return
 
     def info(self):
@@ -246,7 +239,7 @@ class BackTest:
             is_ok = self.datas.next(next_frequency)
             if is_ok is False:
                 break
-            # 更新持仓盈亏与资金变化
+            # 每步先更新持仓浮盈/资金曲线，再执行策略，保证当步记录的是开仓前状态
             try:
                 self.trader.update_position_record()
             except Exception:
@@ -262,7 +255,7 @@ class BackTest:
                     self.log.error(traceback.format_exc())
                     # raise e
             try:
-                # 如果有开启操作二次过滤，则调用一下进行执行
+                # 所有代码处理完毕后，对缓冲区信号统一做二次过滤并执行
                 self.trader.buffer_opts = self.strategy.filter_opts(
                     self.trader.buffer_opts, self.trader
                 )
@@ -284,15 +277,14 @@ class BackTest:
         return True
 
     def run_by_code(self, code: str):
-        # 修改回测类中的属性，进行回测
-        # 保存文件更改
+        """为单个标的代码独立运行回测并保存结果，供多进程并行调用。"""
         new_file = (
             self.save_file.split(".pkl")[0]
             + "_"
             + code.lower().replace(".", "_").replace("/", "_")
             + "_process_.pkl"
         )
-        # 默认如果之前的回测文件还有保存，可以直接返回，如果设置 重新运行，则不返回
+        # 幂等：文件已存在且未设置强制重跑时直接复用，避免重复计算
         if self._process_re_again is False and Path(new_file).exists():
             return new_file
 
@@ -331,9 +323,7 @@ class BackTest:
             cost: int = int(end - start)
             self.log.info(f"多进程回测完成，耗时{cost}秒")
 
-            # 记录 资金变动历史
             balance_history = {}
-            # 回测结果合并
             for f in tqdm(results, desc="结果汇总"):
                 BT = BackTest()
                 BT.load(f)
@@ -341,30 +331,25 @@ class BackTest:
                 for mmd, res in BT.trader.results.items():
                     for _k, _v in res.items():
                         self.trader.results[mmd][_k] += _v
-                # 历史持仓合并
                 for _code, _poss in BT.trader.positions_history.items():
                     self.trader.positions_history[_code] = _poss
-                # 持仓盈亏合并
                 for _dt, _hold_profits in BT.trader.hold_profit_history.items():
                     if _dt not in self.trader.hold_profit_history.keys():
                         self.trader.hold_profit_history[_dt] = 0
                     self.trader.hold_profit_history[_dt] += _hold_profits
-                # 合并订单记录
                 for _code, _orders in BT.trader.orders.items():
                     self.trader.orders[_code] = _orders
-                # 资金历史记录
                 balance_history[BT.base_code] = BT.trader.balance_history
-                # 手续费合并
                 self.trader.fee_total += BT.trader.fee_total
 
-                # 释放内存
+                # 合并完成后立即释放子回测对象，防止多品种时内存堆积
                 BT.trader = None
                 BT.strategy = None
                 BT.datas = None
                 del BT
                 gc.collect()
 
-                # 整理并汇总资金变动历史
+            # 将各品种资金曲线对齐时间轴后求和，得到组合整体资金曲线
             try:
                 bh_df = pd.DataFrame(balance_history.values())
                 bh_df = bh_df.T.sort_index().fillna(method="ffill").fillna(0)
@@ -387,9 +372,7 @@ class BackTest:
         """
         参数优化，执行不同的参数配置
 
-        注意事项：如果有修改过 Strategy 策略文件，并需要重新进行参数优化的，需要手动将 notebook/data/bk/_optimization_*.pkl 文件删除
-        注意事项：如果有修改过 Strategy 策略文件，并需要重新进行参数优化的，需要手动将 notebook/data/bk/_optimization_*.pkl 文件删除
-        注意事项：如果有修改过 Strategy 策略文件，并需要重新进行参数优化的，需要手动将 notebook/data/bk/_optimization_*.pkl 文件删除
+        注意：修改 Strategy 策略后需要手动删除 notebook/data/bk/_optimization_*.pkl，否则旧结果会被直接复用。
 
         """
         copy_cl_config = copy.deepcopy(self.cl_config)
@@ -398,38 +381,25 @@ class BackTest:
                 copy_cl_config["default"][k] = v
             else:
                 copy_cl_config[k] = v
-        # 生成一个唯一的key，用于避免重复执行相同配置的回测
+        # 用回测关键参数生成 MD5 作为缓存 key，相同配置直接复用已有结果
         key = f"{self.base_code}_{self.market}_{self.codes}_{self.frequencys}_{self.start_datetime}_{self.end_datetime}_{type(self.strategy)}_{copy_cl_config}"
         key = hashlib.md5(key.encode(encoding="UTF-8")).hexdigest()
-        # 保存到新的文件中，进行落地
         new_save_file = f"./data/bk/_optimization_{key}.pkl"
 
         BT = BackTest(
             {
                 "save_file": new_save_file,
-                # 设置策略对象
                 "strategy": self.strategy,
-                # 回测模式：signal 信号模式，固定金额开仓； trade 交易模式，按照实际金额开仓
                 "mode": self.mode,
-                # 市场配置，currency 数字货币  a 沪深  hk  港股  futures  期货
                 "market": self.market,
-                # 基准代码，用于获取回测的时间列表
                 "base_code": self.base_code,
-                # 回测的标的代码
                 "codes": self.codes,
-                # 回测的周期，这里设置里，在策略中才能取到对应周期的数据
                 "frequencys": self.frequencys,
-                # 回测开始的时间
                 "start_datetime": self.start_datetime,
-                # 回测的结束时间
                 "end_datetime": self.end_datetime,
-                # mode 为 trade 生效，初始账户资金
                 "init_balance": self.init_balance,
-                # mode 为 trade 生效，交易手续费率
                 "fee_rate": self.fee_rate,
-                # mode 为 trade 生效，最大持仓数量（分仓）
                 "max_pos": self.max_pos,
-                # 缠论计算的配置，详见缠论配置说明
                 "cl_config": copy_cl_config,
             }
         )
@@ -441,18 +411,14 @@ class BackTest:
         )
         balance = 0
         try:
-            # 判断文件不存在，执行回测，文件存在，加载回测结果
             if os.path.isfile(new_save_file) is False:
                 BT.log.info(f"落地文件：{new_save_file} 不存在，开始执行回测")
-                BT.run(
-                    self.next_frequency
-                )  # 节省参数优化执行的时间，这里可以手动设置每次循环的周期
+                BT.run(self.next_frequency)
                 BT.save()
             else:
                 BT.log.info(f"落地文件：{new_save_file} 已经存在，直接进行加载")
                 BT.load(new_save_file)
 
-            # 如果是交易模式，评价标准是最终余额，信号模式，总盈利比率
             pos_pd = BT.positions()
             balance = pos_pd[self.evaluate].sum() if len(pos_pd) > 0 else 0
 
@@ -560,7 +526,7 @@ class BackTest:
         @param change_cl_config: 覆盖回测的缠论配置项
         @param chart_config: 覆盖画图配置项
         """
-        # 根据配置中指定的缠论配置进行展示图表
+        # 缠论配置优先级：指定 code > 指定 frequency > default > 全局
         if code in self.cl_config.keys():
             cl_config = self.cl_config[code]
         elif frequency in self.cl_config.keys():
@@ -575,7 +541,6 @@ class BackTest:
         if chart_config is None:
             chart_config = {}
 
-        # 根据传递的参数，暂时修改其缠论配置
         if change_cl_config is None:
             change_cl_config = {}
         show_cl_config = copy.deepcopy(cl_config)
@@ -584,7 +549,7 @@ class BackTest:
         for _i, _v in chart_config.items():
             show_cl_config[_i] = _v
 
-        # 获取行情数据（回测周期内所有的）
+        # 重新加载完整回测区间的 K 线用于绘图，独立于回测过程的增量数据
         bk = BackTestKlines(
             self.market,
             self.start_datetime,
@@ -612,7 +577,7 @@ class BackTest:
         else:
             cd: ICL = cl.CL(code, frequency, show_cl_config).process_klines(klines)
         orders = self.trader.orders[code] if code in self.trader.orders else []
-        # 是否屏蔽锁仓订单
+        # 配置了 not_show_lock_order 时过滤锁仓订单，避免图表过于密集
         if (
             "not_show_lock_order" in show_cl_config
             and show_cl_config["not_show_lock_order"]
@@ -629,8 +594,6 @@ class BackTest:
         """
         res = {"mode": self.mode}
         if self.mode == "trade":
-            # 实际交易所需要看的指标
-            # 基准收益率
             base_klines = self.datas.ex.klines(
                 self.base_code,
                 self.frequencys[0],
@@ -641,12 +604,11 @@ class BackTest:
             base_open = float(base_klines.iloc[0]["open"])
             base_close = float(base_klines.iloc[-1]["close"])
 
-            # 每年交易日设置
+            # A股/美股/港股/期货按 240 交易日年化，数字货币 365 日
             annual_days = 240 if self.market in ["a", "us", "hk" "futures"] else 365
-            # 无风险收益率
-            risk_free = 0.03
+            risk_free = 0.03  # 无风险利率，用于计算 Sharpe Ratio
 
-            # 按照日期聚合资产变化
+            # 将 balance_history 聚合到日级别，同一天取最后一条
             new_day_balances = {}
             for dt, b in self.trader.balance_history.items():
                 day = fun.str_to_datetime(
@@ -667,7 +629,6 @@ class BackTest:
             )
             df["drawdown"] = df["balance"] - df["highlevel"]
             df["ddpercent"] = df["drawdown"] / df["highlevel"] * 100
-            # Calculate statistics value
             start_date = df.index[0]
             end_date = df.index[-1]
             total_days = len(df)
@@ -696,7 +657,6 @@ class BackTest:
 
             return_drawdown_ratio = -total_return / max_ddpercent
 
-            # 总的手续费
             total_fee = self.trader.fee_total
             base_annual_return = (
                 (base_close / base_open - 1) / total_days * annual_days * 100
@@ -773,9 +733,9 @@ class BackTest:
             "up_pz_bc_sell": "上涨盘整背驰",
             "up_qs_bc_sell": "上涨趋势背驰",
         }
-        total_trade_num = 0  # 总的交易数量
-        total_win_num = 0  # 总的盈利数量
-        total_loss_num = 0  # 总的亏损数量
+        total_trade_num = 0
+        total_win_num = 0
+        total_loss_num = 0
         total_win_balance = 0
         total_loss_balance = 0
         for k in self.trader.results.keys():
@@ -900,10 +860,10 @@ class BackTest:
             print("只有交易模式才能使用 pyfolio 计算回测结果")
             return None
 
-        # 按照日期聚合资产变化
+        # 将 balance_history 聚合到日级别（同一天取最后值）
         new_day_balances = {}
         for dt, b in self.trader.balance_history.items():
-            day = dt[0:10]  # 2022-02-22
+            day = dt[0:10]
             new_day_balances[fun.str_to_datetime(day, "%Y-%m-%d")] = b
         df = pd.DataFrame.from_dict(
             new_day_balances, orient="index", columns=["balance"]
@@ -913,19 +873,11 @@ class BackTest:
         df["return"] = df["balance"].pct_change()
 
         if is_return:
-            # 夏普比率（默认无风险利率=0，年化周期=252天）
             sharpe = ep.sharpe_ratio(df["return"])
-
-            # 卡玛比率（需计算年化收益和最大回撤）
             calmar = ep.calmar_ratio(df["return"])
-
-            # 索提诺比率（仅考虑下行波动率）
             sortino = ep.sortino_ratio(df["return"])
-
-            # 欧米茄比率（阈值默认为0）
             omega = ep.omega_ratio(df["return"])
-
-            # 稳定性：年化波动率的倒数（需调整符号确保数值有意义）
+            # 以年化波动率倒数近似表示策略稳定性，波动率为 0 时置 NaN
             annual_volatility = ep.annual_volatility(df["return"])
             stability = 1 / annual_volatility if annual_volatility != 0 else np.nan
 
@@ -938,7 +890,7 @@ class BackTest:
                 "Stability": ep.stability_of_timeseries(df["return"]),
             }
 
-        # 持仓记录
+        # pyfolio 要求 positions 按日期索引，Cash 字段需小写
         positions = {}
         for _dt, _pos_balance in self.trader.positions_balance_history.items():
             _dt = fun.str_to_datetime(_dt[0:10], "%Y-%m-%d")
@@ -950,7 +902,7 @@ class BackTest:
                 positions[_dt][_code] = _b
         positions = pd.DataFrame(positions).T
 
-        # 交易记录
+        # pyfolio transactions：买入为正数量，卖出为负数量
         transactions = []
         for _code, _orders in self.trader.orders.items():
             for _o in _orders:
@@ -971,7 +923,7 @@ class BackTest:
         transactions = pd.DataFrame(transactions)
         transactions.set_index("date", inplace=True)
 
-        # 获取基准的收益率
+        # 获取基准指数日收益率，用于 pyfolio 的 benchmark 对比
         base_klines = self.datas.ex.klines(
             self.base_code,
             "d",
@@ -1003,7 +955,6 @@ class BackTest:
         balance_history = {"datetime": [], "val": []}
         hold_profit_history = {"datetime": [], "val": []}
 
-        # 获取所有的交易日期节点
         base_klines = self.datas.ex.klines(
             self.base_code,
             self.next_frequency,
@@ -1014,7 +965,7 @@ class BackTest:
         dts = list(base_klines["date"].to_list())
         base_prices["val"] = list(base_klines["close"].to_list())
 
-        # 按照时间统计当前时间持仓累计盈亏
+        # 汇总同一时刻所有持仓的浮动盈亏
         _hold_profit_sums = {}
         for _dt, _p in self.trader.hold_profit_history.items():
             if _dt not in _hold_profit_sums.keys():
@@ -1022,12 +973,11 @@ class BackTest:
             else:
                 _hold_profit_sums[_dt] += _p
 
-        # 按照时间累加总的收益
         for _dt in dts:
             _dt = _dt.strftime("%Y-%m-%d %H:%M:%S")
             base_prices["datetime"].append(_dt)
 
-            # 资金余额
+            # 无资金记录时前向填充，保持资金曲线连续
             if _dt in self.trader.balance_history.keys():
                 balance_history["datetime"].append(_dt)
                 balance_history["val"].append(self.trader.balance_history[_dt])
@@ -1037,7 +987,6 @@ class BackTest:
                     balance_history["val"][-1] if len(balance_history["val"]) > 0 else 0
                 )
 
-            # 当前时间持仓累计
             hold_profit_history["datetime"].append(_dt)
             if _dt in _hold_profit_sums.keys():
                 hold_profit_history["val"].append(_hold_profit_sums[_dt])
@@ -1049,7 +998,7 @@ class BackTest:
         )
 
     def backtest_charts_by_close_profit(self):
-        # 获取所有的交易日期节点
+        """按平仓累计收益绘制图表，纵轴为已实现盈亏，区别于 backtest_charts 的持仓浮盈。"""
         base_prices = {"datetime": [], "val": []}
         base_klines = self.datas.ex.klines(
             self.base_code,
@@ -1061,19 +1010,15 @@ class BackTest:
         dts = list(base_klines["date"].to_list())
         base_prices["val"] = list(base_klines["close"].to_list())
 
-        # 获取所有的持仓历史，并按照平仓时间排序
         positions: List[POSITION] = []
         for _code in self.trader.positions_history.keys():
             positions.extend(iter(self.trader.positions_history[_code]))
         positions = sorted(positions, key=lambda p: p.close_datetime, reverse=False)
 
-        # 持仓中的唯一买卖点
         mmds = list(set([p.mmd for p in positions]))
-        # 记录不同买卖点的收益总和
+        # 按买卖点分组记录各时间点的累计已实现盈亏
         dts_mmd_nps = {_m: {} for _m in mmds}
-        # 按照平仓时间统计其中的收益总和
         dts_total_nps = {}
-        # 临时记录不同买卖点的收益
         tmp_mmd_nps = {_m: 0 for _m in mmds}
         tmp_total_nps = 0
         for _dt in dts:
@@ -1088,8 +1033,6 @@ class BackTest:
             dts_total_nps[_dt] = tmp_total_nps
             for _m, _nps in dts_mmd_nps.items():
                 _nps[_dt] = tmp_mmd_nps[_m]
-
-        # print(dts_mmd_nps)
 
         main_chart = (
             Line()
@@ -1160,7 +1103,7 @@ class BackTest:
             return chart.dump_options()
 
     def __get_close_profit(self, pos: POSITION, uids: List[str] = None):
-        # 记录开仓的占用保证金与手续费
+        """根据指定 close_uid 列表计算持仓的实际平仓盈亏，支持分批平仓场景。"""
         hold_balance = 0
         hold_amount = 0
         pos_amount = 0
@@ -1175,7 +1118,7 @@ class BackTest:
             uids = ["clear"]
 
         if uids == "__max_profit":
-            # 获取最大利润的 close_uid
+            # 特殊模式：按价格排序选出最优平仓记录（做多取最高价，做空取最低价）
             query_uids = [_r["close_uid"] for _r in pos.close_records]
             if pos.type == "做多":
                 close_records = sorted(
@@ -1186,15 +1129,12 @@ class BackTest:
                     pos.close_records, key=lambda _r: _r["price"], reverse=False
                 )
         else:
-            # 查询平仓 uids
             query_uids = self.trader.get_opt_close_uids(pos.code, pos.mmd, uids)
             if "clear" not in query_uids:
                 query_uids.append("clear")
-
-            # 按照时间从早到晚排序
+            # 按时间顺序遍历，确保分批平仓的累计计算正确
             close_records = sorted(pos.close_records, key=lambda _r: _r["datetime"])
 
-        # 记录平仓释放的保证金与手续费
         release_balance = 0
         close_price = 0
         close_datetime = None
@@ -1219,11 +1159,11 @@ class BackTest:
                 f"{pos.code} - {pos.mmd} - {pos.open_datetime} 没有找到对应的平仓记录: {query_uids}"
             )
 
-        # 计算盈亏比例
         if pos.type == "做多":
             profit = release_balance - hold_balance - fee
             profit_rate = profit / hold_balance * 100
             if self.market == "futures":
+                # 期货多头：名义盈亏除以保证金率还原杠杆收益，再扣手续费
                 contract_config = futures_contracts.futures_contracts[pos.code]
                 profit = (release_balance - hold_balance) / contract_config[
                     "margin_rate_long"
@@ -1233,6 +1173,7 @@ class BackTest:
             profit = hold_balance - release_balance - fee
             profit_rate = profit / hold_balance * 100
             if self.market == "futures":
+                # 期货空头：方向取反，名义盈亏除以空头保证金率
                 contract_config = futures_contracts.futures_contracts[pos.code]
                 profit = (hold_balance - release_balance) / contract_config[
                     "margin_rate_short"
