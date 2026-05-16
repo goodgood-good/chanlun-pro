@@ -171,7 +171,15 @@ class ExchangeFutu(Exchange):
                     autype=args["fq"],
                 )
             kline["date"] = pd.to_datetime(kline["time_key"]).dt.tz_localize(self.tz)
-            kline["date"] = kline["date"].apply(self.__convert_date)
+            # 向量化 __convert_date：00:00:00 → 16:00:00
+            _midnight_mask = (
+                (kline["date"].dt.hour == 0)
+                & (kline["date"].dt.minute == 0)
+                & (kline["date"].dt.second == 0)
+            )
+            kline["date"] = kline["date"].mask(
+                _midnight_mask, kline["date"] + pd.Timedelta(hours=16)
+            )
             kline = kline[["code", "date", "open", "close", "high", "low", "volume"]]
             if frequency == "120m" and len(kline) > 0:
                 kline = convert_stock_kline_frequency(kline, "120m")

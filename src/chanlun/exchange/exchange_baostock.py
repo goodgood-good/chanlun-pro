@@ -194,7 +194,13 @@ class ExchangeBaostock(Exchange):
             data_list.append(rs.get_row_data())
         kline = pd.DataFrame(data_list, columns=rs.fields)
         kline["date"] = pd.to_datetime(kline["date"])
-        kline["date"] = kline["date"].apply(self.__convert_date)
+        # 向量化 __convert_date：00:00:00 → 15:00:00
+        _midnight_mask = (
+            (kline["date"].dt.hour == 0)
+            & (kline["date"].dt.minute == 0)
+            & (kline["date"].dt.second == 0)
+        )
+        kline["date"] = kline["date"].mask(_midnight_mask, kline["date"] + pd.Timedelta(hours=15))
         kline["open"] = pd.to_numeric(kline["open"])
         kline["close"] = pd.to_numeric(kline["close"])
         kline["high"] = pd.to_numeric(kline["high"])

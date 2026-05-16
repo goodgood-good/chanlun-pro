@@ -581,13 +581,10 @@ def convert_tdx_futures_kline_frequency(
 
     if to_f in period_maps.keys():
         if to_f in ["d", "w"]:
-            # 如果是日线，在 21 点之后的，算下一天的
-            klines["date"] = klines["date"].apply(
-                lambda x: (
-                    x + datetime.timedelta(hours=3)
-                    if x.hour in [21, 22, 23, 0, 1, 2]
-                    else x
-                )
+            # 如果是日线，在 21 点之后的，算下一天的（向量化）
+            _night_mask = klines["date"].dt.hour.isin([21, 22, 23, 0, 1, 2])
+            klines["date"] = klines["date"].mask(
+                _night_mask, klines["date"] + pd.Timedelta(hours=3)
             )
 
         klines.insert(0, column="date_index", value=klines["date"])
@@ -834,7 +831,7 @@ def convert_us_tdx_kline_frequency(klines: pd.DataFrame, to_f: str) -> pd.DataFr
     klines.insert(
         0,
         column="date_index",
-        value=pd.to_datetime(klines["date"].apply(lambda dt: dt.astimezone(pytz.UTC))),
+        value=klines["date"].dt.tz_convert(pytz.UTC),
     )
     klines.set_index("date_index", inplace=True)
     period_type = period_maps[to_f]
@@ -903,13 +900,16 @@ def convert_tdx_ny_f_kline_frequency(klines: pd.DataFrame, to_f: str) -> pd.Data
 
     if to_f == "d":
         klines = klines.copy()
-        klines["trade_day"] = klines["date"].apply(get_ny_future_trade_day)
+        # 向量化 get_ny_future_trade_day：hour < 6 → 前一天 00:00
+        _td_norm = klines["date"].dt.normalize()
+        _td_mask = klines["date"].dt.hour < 6
+        klines["trade_day"] = _td_norm.mask(_td_mask, _td_norm - pd.Timedelta(days=1))
         grouped = klines.groupby("trade_day")
+        # 向量化 replace(hour=15, minute=0, second=0)：normalize() + 15h
+        _day_dates = grouped["trade_day"].first()
         period_klines = pd.DataFrame(
             {
-                "date": grouped["trade_day"]
-                .first()
-                .apply(lambda x: x.replace(hour=15, minute=0, second=0)),
+                "date": _day_dates.dt.normalize() + pd.Timedelta(hours=15),
                 "frequency": to_f,
                 "code": grouped["code"].first(),
                 "open": grouped["open"].first(),
@@ -925,13 +925,19 @@ def convert_tdx_ny_f_kline_frequency(klines: pd.DataFrame, to_f: str) -> pd.Data
         ]
     elif to_f == "w":
         klines = klines.copy()
-        klines["trade_week"] = klines["date"].apply(get_ny_future_trade_week)
+        # 向量化 get_ny_future_trade_week：先算 trade_day，再减去 weekday
+        _td_norm = klines["date"].dt.normalize()
+        _td_mask = klines["date"].dt.hour < 6
+        _trade_day = _td_norm.mask(_td_mask, _td_norm - pd.Timedelta(days=1))
+        klines["trade_week"] = _trade_day - pd.to_timedelta(
+            _trade_day.dt.dayofweek, unit="D"
+        )
         grouped = klines.groupby("trade_week")
+        # 向量化 replace(hour=15, minute=0, second=0)
+        _week_max_dates = grouped["date"].max()
         period_klines = pd.DataFrame(
             {
-                "date": grouped["date"]
-                .max()
-                .apply(lambda x: x.replace(hour=15, minute=0, second=0)),
+                "date": _week_max_dates.dt.normalize() + pd.Timedelta(hours=15),
                 "frequency": to_f,
                 "code": grouped["code"].first(),
                 "open": grouped["open"].first(),

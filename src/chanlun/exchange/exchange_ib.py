@@ -165,7 +165,15 @@ class ExchangeIB(Exchange):
         if len(klines_df) == 0:
             return None
 
-        klines_df["date"] = klines_df["date"].apply(self.__convert_date)
+        # 向量化 __convert_date：00:00:00 → 09:30:00
+        _midnight_mask = (
+            (klines_df["date"].dt.hour == 0)
+            & (klines_df["date"].dt.minute == 0)
+            & (klines_df["date"].dt.second == 0)
+        )
+        klines_df["date"] = klines_df["date"].mask(
+            _midnight_mask, klines_df["date"] + pd.Timedelta(hours=9, minutes=30)
+        )
 
         return klines_df
 

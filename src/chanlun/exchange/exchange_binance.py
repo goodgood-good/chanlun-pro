@@ -285,9 +285,7 @@ class ExchangeBinance(Exchange):
             all_klines, columns=["date", "open", "high", "low", "close", "volume"]
         )
         kline_pd["code"] = code
-        kline_pd["date"] = kline_pd["date"].apply(
-            lambda x: datetime.datetime.fromtimestamp(x / 1e3).astimezone(self.tz)
-        )
+        kline_pd["date"] = pd.to_datetime(kline_pd["date"], unit="ms", utc=True).dt.tz_convert(self.tz)
         kline_pd = kline_pd[["code", "date", "open", "close", "high", "low", "volume"]]
         kline_pd.drop_duplicates(subset=["date"], keep="last", inplace=True)
 
@@ -367,9 +365,7 @@ class ExchangeBinance(Exchange):
         # kline_pd.loc[:, 'code'] = code
         # kline_pd.loc[:, 'date'] = kline_pd['date'].apply(lambda x: datetime.datetime.fromtimestamp(x / 1e3))
         kline_pd["code"] = code
-        kline_pd["date"] = kline_pd["date"].apply(
-            lambda x: datetime.datetime.fromtimestamp(x / 1e3).astimezone(self.tz)
-        )
+        kline_pd["date"] = pd.to_datetime(kline_pd["date"], unit="ms", utc=True).dt.tz_convert(self.tz)
         kline_pd = kline_pd[["code", "date", "open", "close", "high", "low", "volume"]]
         # 自定义级别，需要进行转换
         if frequency in ["10m", "2m", "3h"] and len(kline_pd) > 0:
