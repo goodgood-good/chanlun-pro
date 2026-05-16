@@ -199,25 +199,30 @@ def _merge_chart_data(existing_data: dict, new_data: dict):
         "macd_dif", "macd_dea", "macd_hist", "macd_area",
         "higher_macd_dif", "higher_macd_dea", "higher_macd_hist",
     ]
+    # ★ P-005 优化：existing/new 的 time->index 映射只建一次，跨 12 个字段复用，
+    # 避免原实现对每个字段各重建一遍 dict。
+    existing_idx = {bar_time: i for i, bar_time in enumerate(existing_times)}
+    new_idx = {bar_time: i for i, bar_time in enumerate(new_times)}
     for key in aligned_keys:
         existing_values = existing_data.get(key, [])
         new_values = new_data.get(key, [])
         if not existing_values and not new_values:
             merged[key] = []
             continue
-        merged_values = {}
-        for idx, bar_time in enumerate(existing_times):
-            if idx < len(existing_values):
-                merged_values[bar_time] = existing_values[idx]
-        for idx, bar_time in enumerate(new_times):
-            if idx < len(new_values):
-                val = new_values[idx]
-                # 仅当新值有效时才覆盖，避免 None 覆盖已有的有效值
-                if val is not None:
-                    merged_values[bar_time] = val
-                elif bar_time not in merged_values:
-                    merged_values[bar_time] = val
-        merged[key] = [merged_values.get(bar_time) for bar_time in all_times]
+        merged_col = []
+        for bar_time in all_times:
+            val = None
+            ei = existing_idx.get(bar_time)
+            if ei is not None and ei < len(existing_values):
+                val = existing_values[ei]
+            ni = new_idx.get(bar_time)
+            if ni is not None and ni < len(new_values):
+                new_val = new_values[ni]
+                # 仅当新值有效时覆盖；None 不覆盖已有有效值
+                if new_val is not None or val is None:
+                    val = new_val
+            merged_col.append(val)
+        merged[key] = merged_col
 
     for key in ["fxs", "bis", "xds", "bi_zss", "xd_zss", "bcs", "mmds"]:
         merged[key] = _merge_shape_lists(existing_data.get(key, []), new_data.get(key, []))
