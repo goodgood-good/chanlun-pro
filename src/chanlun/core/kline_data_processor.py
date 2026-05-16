@@ -59,71 +59,63 @@ class KlineDataProcessor:
         return increment_klines
 
     def _preprocess(self, klines_df: pd.DataFrame) -> pd.DataFrame:
-        """
-        预处理K线数据 (排序, 类型转换, 时间过滤, **增量剪切**)。
+        """预处理K线数据 (排序, 类型转换, 时间过滤, **增量剪切**)。
 
-        Args:
-            klines_df (pd.DataFrame): 原始K线数据 (可能是全量或增量)。
-
-        Returns:
-            pd.DataFrame: 经过预处理和剪切的K线数据 (仅包含增量部分)。
+        ★ P-002 优化：已有 self.klines 时，先按 last_date 把传入帧裁到尾段，
+        再对小切片做 copy + to_numeric + sort。避免对全 N 行做无用重活
+        （tick 更新场景里前 N-1 行最终都会被丢弃）。
         """
+        # ---- 快速路径：已有数据时先粗筛到尾段 ----
+        if self.klines:
+            last_date = self.klines[-1].date
+            date_col = klines_df['date']
+            # 仅为比较把 date 列规范成 datetime（不动数值列，不 copy 整帧）
+            if not pd.api.types.is_datetime64_any_dtype(date_col):
+                date_col = pd.to_datetime(date_col)
+
+            # ★ B1 跨时区比较保护（逻辑从原实现前移）
+            last_ts = pd.Timestamp(last_date)
+            df_is_tz_aware = isinstance(date_col.dtype, pd.DatetimeTZDtype)
+            if df_is_tz_aware:
+                if last_ts.tzinfo is None:
+                    last_ts = last_ts.tz_localize(date_col.dt.tz)
+                else:
+                    last_ts = last_ts.tz_convert(date_col.dt.tz)
+            else:
+                if last_ts.tzinfo is not None:
+                    last_ts = last_ts.tz_convert('UTC').tz_localize(None)
+
+            # 有序用 searchsorted O(log N)，无序退回 boolean mask
+            if date_col.is_monotonic_increasing:
+                idx = date_col.searchsorted(last_ts, side='left')
+                klines_df = klines_df.iloc[idx:]
+            else:
+                klines_df = klines_df[date_col >= last_ts]
+
+            if klines_df.empty:
+                return pd.DataFrame()
+
+        # ---- 此时帧已裁到尾段（或首次加载的全量），再做完整预处理 ----
         klines = klines_df.copy()
 
-        # 确保date列是datetime类型
         if 'date' in klines.columns and not pd.api.types.is_datetime64_any_dtype(klines['date']):
             klines['date'] = pd.to_datetime(klines['date'])
 
-        # 确保数值列是float类型
         numeric_cols = ['high', 'low', 'open', 'close', 'volume']
         for col in numeric_cols:
             if col in klines.columns:
                 klines[col] = pd.to_numeric(klines[col], errors='coerce')
 
-        # 仅在无序时排序，避免对已有序数据的无谓开销
         if not klines['date'].is_monotonic_increasing:
             klines = klines.sort_values('date').reset_index(drop=True)
 
-        # 1. 按设定的起始时间过滤
+        # 按设定的起始时间过滤（首次加载路径仍正常生效；尾段路径里尾段行
+        # 必然晚于 last_date >= start_datetime，此过滤不会误删，仅为语义完备）
         if self.start_datetime:
             klines = klines[klines['date'] >= self.start_datetime]
             if klines.empty:
-                return pd.DataFrame()  # 过滤后为空
+                return pd.DataFrame()
 
-        # 2. **核心优化：识别增量数据**
-        #    如果 self.klines 已有数据，我们只处理 "可能" 是增量的数据。
-        #    这能极大地加速 "传入全量数据" 时的处理速度。
-        if self.klines:
-            last_date = self.klines[-1].date
-
-            # ★ B1 修复：跨时区比较保护。
-            # 长桥 / QMT / CSV 等不同数据源返回的 date 列时区可能不一致：
-            #   - DataFrame 列可能是 timezone-naive（多数交易所返回）或 timezone-aware
-            #   - self.klines[-1].date 是 datetime，可能带 tzinfo 也可能不带
-            # pandas 在 >= 比较时若两侧 tz 不一致会抛 TypeError，
-            # 这里统一对齐到 DataFrame 列的时区语义后再比较。
-            df_dt = klines['date']
-            # F3: pandas 2.1 起 ``is_datetime64tz_dtype`` 已 deprecated,
-            # 改用 isinstance(dtype, pd.DatetimeTZDtype) (官方迁移指南推荐路径)。
-            df_is_tz_aware = isinstance(df_dt.dtype, pd.DatetimeTZDtype)
-            last_ts = pd.Timestamp(last_date)
-            if df_is_tz_aware:
-                if last_ts.tzinfo is None:
-                    # naive → 按 DataFrame 列的时区做本地化
-                    last_ts = last_ts.tz_localize(df_dt.dt.tz)
-                else:
-                    # tz-aware → 转换到与 DataFrame 一致的时区
-                    last_ts = last_ts.tz_convert(df_dt.dt.tz)
-            else:
-                if last_ts.tzinfo is not None:
-                    # DataFrame 是 naive 但 last_ts 带 tz → 剥离 tz 后再比较
-                    last_ts = last_ts.tz_convert('UTC').tz_localize(None)
-
-            # 我们只需要关心时间大于或等于最后一根 K 线的数据
-            # DataFrame 的切片操作远快于后续的 _convert
-            klines = klines[df_dt >= last_ts]
-
-        # 返回处理过的、可能已大大缩小的DataFrame
         return klines
 
     def _convert(self, df: pd.DataFrame) -> List[Kline]:
