@@ -99,7 +99,9 @@ class _KlineCacheMixin:
         if len(_klines) > 0:
             if _klines["date"].isnull().any():
                 return None
-            _klines = _klines.iloc[0:-1:]
+            # 丢弃最后一根：缓存写入时末根通常是尚未收盘的当前 bar，不作为
+            # 历史数据返回，调用方按需从实时源补全最新 bar。
+            _klines = _klines.iloc[0:-1]
 
         # 随机概率清理历史缓存，真正的并发节流由 _try_run_cleanup 保证。
         if random.randint(0, 1000) <= 5:

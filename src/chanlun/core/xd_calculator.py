@@ -143,12 +143,11 @@ SAFETY_LOOKAHEAD = _get_default_safety_lookahead()
 
 
 class XdCalculator:
-    """线段计算器：基于笔列表识别线段，支持末尾追加场景的增量计算。"""
+    """线段计算器：基于笔列表全量识别线段（每次调用都全量重算，不做增量）。"""
 
     def __init__(self, config: dict):
         self.config = config
         self.xds: List[XD] = []
-        self._last_bi_snapshot: Optional[tuple] = None
 
     # ----------------------------------------------------------
     # 公共接口
@@ -163,79 +162,18 @@ class XdCalculator:
         _build_segments 成本可忽略,故每次都全量重算以保证正确性。
         """
         all_bis = bis
-        # 强制全量:清空旧 xds 与增量快照,下方逻辑随之统一走全量重建路径。
         self.xds.clear()
-        self._last_bi_snapshot = None
-        is_incremental = bool(self.xds)
-        start_index_for_delta = 0
-
-        # 增量场景下校验"关键笔起点"漂移：bis 短时 _find_start 走 fallback 给出权宜
-        # 起点，bis 增长后 _find_strict_start 才能定位真正的关键笔。strict 真起点 !=
-        # xds[0] 起始笔位置时旧 xds 基于 fallback 建立，作废走全量重建；strict 返回 -1
-        # 表示关键笔未成立，保持现状不动以避免抖动。
-        if self.xds and all_bis:
-            strict_start = self._find_strict_start(all_bis)
-            if strict_start >= 0:
-                old_first_xd_start_bi_idx = self._locate_bi(
-                    all_bis, self.xds[0].start_line
-                )
-                if old_first_xd_start_bi_idx >= 0 and strict_start != old_first_xd_start_bi_idx:
-                    _log.debug(
-                        f"XdCalculator: 关键笔起点漂移 旧={old_first_xd_start_bi_idx} "
-                        f"新={strict_start}, 作废 {len(self.xds)} 个旧 xds 全量重建"
-                    )
-                    self.xds.clear()
-                    self._last_bi_snapshot = None
-                    is_incremental = False
-
-        if self.xds and all_bis and self._last_bi_snapshot:
-            lb = all_bis[-1]
-            # snapshot 同时校验 end.k.k_index：K 线包含合并会让同一根 BI 的
-            # end.k.k_index 变化而 end.val / index 不变，只校验 (index, end.val) 会误判
-            # "无变化"，但下游 ZsCalculator / BsPointCalculator 依赖 k_index，结果不一致。
-            last_k_index = lb.end.k.k_index if lb.end is not None and lb.end.k is not None else -1
-            if (
-                lb.index == self._last_bi_snapshot[0]
-                and abs(lb.end.val - self._last_bi_snapshot[1]) < 1e-9
-                and len(self._last_bi_snapshot) >= 3
-                and last_k_index == self._last_bi_snapshot[2]
-            ):
-                return []
-
-        start_bi_idx = 0
-        if self.xds:
-            if not all_bis:
-                return []
-            last_xd = self.xds.pop()
-            start_index_for_delta = len(self.xds)
-            # 优先用 BI.index 反查（O(1)~O(log n)），失败再回退到 O(n) 全扫描
-            target_bi = last_xd.start_line
-            start_bi_idx = self._locate_bi(all_bis, target_bi)
-            if start_bi_idx < 0:
-                self.xds.clear()
-                is_incremental = False
-                start_bi_idx = self._find_start(all_bis)
-        else:
-            self.xds.clear()
-            is_incremental = False
-            start_bi_idx = self._find_start(all_bis)
+        start_bi_idx = self._find_start(all_bis)
 
         if len(all_bis) < 3:
-            return [] if is_incremental else self.xds
+            return self.xds
 
         self._bi_pos = {id(bi): i for i, bi in enumerate(all_bis)}
-
-        mode = "增量" if is_incremental else "全量"
-        _log.debug(f"XdCalculator: {mode}计算，笔数={len(all_bis)}，起始位置={start_bi_idx}")
-
+        _log.debug(
+            f"XdCalculator: 全量计算，笔数={len(all_bis)}，起始位置={start_bi_idx}"
+        )
         self._build_segments(all_bis, start_bi_idx)
-
-        if all_bis:
-            lb = all_bis[-1]
-            last_k_index = lb.end.k.k_index if lb.end is not None and lb.end.k is not None else -1
-            self._last_bi_snapshot = (lb.index, lb.end.val, last_k_index)
-
-        return self.xds[start_index_for_delta:] if is_incremental else self.xds
+        return self.xds
 
     # ----------------------------------------------------------
     def _find_strict_start(self, all_bis: List[BI]) -> int:
@@ -248,8 +186,7 @@ class XdCalculator:
             int: 找到的起点位置 (>= 0); 未找到返回 -1。
 
         与 ``_find_start`` 的关系: 后者在 strict 找不到时 fallback 到 overlap-only,
-        给出权宜起点供首次建段; 但 calculate() 增量路径必须用 strict 校验,
-        否则会出现"早期权宜起点 → 后续真起点出现 → 增量沿用错起点 → xds 多 1"的 bug。
+        给出权宜起点供首次建段。
         """
         for i in range(len(all_bis) - 4):
             bi_i = all_bis[i]
@@ -290,35 +227,6 @@ class XdCalculator:
             if _overlap(all_bis[i], all_bis[i + 2]):
                 return i
         return 0
-
-    # ----------------------------------------------------------
-    @staticmethod
-    def _locate_bi(all_bis: List[BI], target: BI) -> int:
-        """在 all_bis 中定位 target 笔的位置。
-
-        优先按 BI.index 反查（猜测位置 + 邻域校验），失败回退到 O(n) 线性扫描
-        + 多字段匹配（start/end k.date + type），保证在 BI 对象重建后仍能找回。
-        找不到返回 -1。
-        """
-        # 路径 1: 利用 BI.index 猜测位置（all_bis 通常按 index 升序排列）
-        try:
-            tgt_idx = target.index
-            if 0 <= tgt_idx < len(all_bis):
-                cand = all_bis[tgt_idx]
-                if (cand.type == target.type and
-                        cand.start.k.date == target.start.k.date and
-                        cand.end.k.date == target.end.k.date):
-                    return tgt_idx
-        except AttributeError:
-            pass
-
-        # 路径 2: 回退到全扫描（兼容 BI.index 失效或乱序场景）
-        for i, bi in enumerate(all_bis):
-            if (bi.type == target.type and
-                    bi.start.k.date == target.start.k.date and
-                    bi.end.k.date == target.end.k.date):
-                return i
-        return -1
 
     # ----------------------------------------------------------
     # 主循环

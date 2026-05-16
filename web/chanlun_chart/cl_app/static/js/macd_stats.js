@@ -207,6 +207,8 @@ var MacdStats = (function () {
             this.contextMenuUnsub = null;
             this._toolbarBtn = null;
             this._snapshots = []; // 历史区间快照
+            this._dragMoveHandler = null; // document mousemove handler，dispose 时移除
+            this._dragUpHandler = null;   // document mouseup handler，dispose 时移除
         }
 
         // 注入工具栏按钮（点击进入"取点模式"）
@@ -563,13 +565,17 @@ var MacdStats = (function () {
                 ox = ev.clientX - panel.offsetLeft;
                 oy = ev.clientY - panel.offsetTop;
             });
-            document.addEventListener('mousemove', (ev) => {
+            // mousemove/mouseup 挂在 document 上：handler 存到 this，dispose 时移除。
+            // 否则 panel 每次创建/销毁都会让旧 handler 堆积（连带泄漏旧 panel 元素）。
+            this._dragMoveHandler = (ev) => {
                 if (!isDown) return;
                 panel.style.left = (ev.clientX - ox) + 'px';
                 panel.style.top = (ev.clientY - oy) + 'px';
                 panel.style.right = 'auto';
-            });
-            document.addEventListener('mouseup', () => { isDown = false; });
+            };
+            this._dragUpHandler = () => { isDown = false; };
+            document.addEventListener('mousemove', this._dragMoveHandler);
+            document.addEventListener('mouseup', this._dragUpHandler);
         }
 
         _hidePanel() {
@@ -680,6 +686,14 @@ var MacdStats = (function () {
         dispose() {
             this._removeShapes();
             this._hidePanel();
+            if (this._dragMoveHandler) {
+                document.removeEventListener('mousemove', this._dragMoveHandler);
+                this._dragMoveHandler = null;
+            }
+            if (this._dragUpHandler) {
+                document.removeEventListener('mouseup', this._dragUpHandler);
+                this._dragUpHandler = null;
+            }
             const panel = document.getElementById(PANEL_ID);
             if (panel) panel.remove();
         }

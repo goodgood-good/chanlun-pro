@@ -30,6 +30,12 @@ function getMarketTimezone(market) {
     return MARKET_TIMEZONE[market] || "Asia/Shanghai";
 }
 
+// 高频调试日志统一走 clog：仅 window.__chanlunDebug=true 时输出，避免生产 console 刷屏。
+// 错误诊断（console.warn / console.error）不受此开关控制。
+function clog(...args) {
+    if (window.__chanlunDebug) console.log(...args);
+}
+
 function loadClShowConfig(chartId) {
     try {
         const raw = localStorage.getItem('cl_show_config_' + chartId);
@@ -428,7 +434,7 @@ class ChartManager {
             return;
         }
         const wasInitialLoad = !this._initialLoadDone;
-        console.log(`[CHANLUN-TIMING] @${performance.now().toFixed(0)}ms handleBarsReadyEvent ✓ symbol=${detail.symbol} res=${detail.resolution} bars=${detail.bars || '?'} fxs=${detail.fxs || '?'} bis=${detail.bis || '?'} xds=${detail.xds || '?'} wasInitialLoad=${wasInitialLoad}`);
+        clog(`[CHANLUN-TIMING] @${performance.now().toFixed(0)}ms handleBarsReadyEvent ✓ symbol=${detail.symbol} res=${detail.resolution} bars=${detail.bars || '?'} fxs=${detail.fxs || '?'} bis=${detail.bis || '?'} xds=${detail.xds || '?'} wasInitialLoad=${wasInitialLoad}`);
         this._initialLoadDone = true;
         // 首次 bars 到达直接重绘，跳过 debounce 缩短感知延迟；后续事件仍走防抖路径
         if (wasInitialLoad) {
@@ -968,14 +974,14 @@ class ChartManager {
         this._latestAppliedBarTime = null;
         const currentSeq = ++this._intervalSwitchSeq;
         this._intervalVersion++;
-        console.log(`[CHANLUN-TIMING] @${performance.now().toFixed(0)}ms handleIntervalChange → ${interval} (seq=${currentSeq}, ver=${this._intervalVersion}) [_initialLoadDone reset to false]`);
+        clog(`[CHANLUN-TIMING] @${performance.now().toFixed(0)}ms handleIntervalChange → ${interval} (seq=${currentSeq}, ver=${this._intervalVersion}) [_initialLoadDone reset to false]`);
         Utils.set_local_data(`${market}_interval_${this.id}`, interval);
         this.clear_draw_chanlun();
         this.reloadDrawingsForCurrentContext('interval-change');
     }
 
     handleDataReady() {
-        console.log(`[CHANLUN-TIMING] @${performance.now().toFixed(0)}ms handleDataReady fired [_initialLoadDone=true]`);
+        clog(`[CHANLUN-TIMING] @${performance.now().toFixed(0)}ms handleDataReady fired [_initialLoadDone=true]`);
         this._initialLoadDone = true;
         this.debouncedDrawChanlun();
     }
@@ -988,7 +994,7 @@ class ChartManager {
         if (!latestBar || latestBar.time === this._latestAppliedBarTime) {
             return;
         }
-        console.log("[DataVerify][Charts] handleTick newBar key=" + symbolResKey, {
+        clog("[DataVerify][Charts] handleTick newBar key=" + symbolResKey, {
             barTime: latestBar.time,
             prevTime: this._latestAppliedBarTime,
             barsCount: barsResult?.bars?.length || 0,
@@ -998,10 +1004,10 @@ class ChartManager {
     }
     handleVisibleRangeChange() {
         if (this._initialLoadDone) {
-            console.log(`[CHANLUN-TIMING] @${performance.now().toFixed(0)}ms handleVisibleRangeChange → debouncedDrawChanlun (will fire 300ms later)`);
+            clog(`[CHANLUN-TIMING] @${performance.now().toFixed(0)}ms handleVisibleRangeChange → debouncedDrawChanlun (will fire 300ms later)`);
             this.debouncedDrawChanlun();
         } else {
-            console.log(`[CHANLUN-TIMING] @${performance.now().toFixed(0)}ms handleVisibleRangeChange SKIPPED (_initialLoadDone=false)`);
+            clog(`[CHANLUN-TIMING] @${performance.now().toFixed(0)}ms handleVisibleRangeChange SKIPPED (_initialLoadDone=false)`);
         }
     }
 
@@ -1249,7 +1255,7 @@ class ChartManager {
         state.count += 1;
         state.timer = setTimeout(() => {
             state.timer = null;
-            console.log(`[CHANLUN-TIMING] reconcile retry #${state.count} (${reason}) after ${delayMs}ms`);
+            clog(`[CHANLUN-TIMING] reconcile retry #${state.count} (${reason}) after ${delayMs}ms`);
             // 绕过防抖直接调用：持续缩放时 visibleRangeChange 会不停 reset 300ms 防抖，
             // retry 经 debounced 路径会被无限期延后
             this.draw_chanlun();
@@ -1282,7 +1288,7 @@ class ChartManager {
             this._verifyingUntil = performance.now() + 1500;
             // 清掉守卫缓存，确保 reconcile 走全量 rebuild 路径，基于稳定布局重新落位 shape
             this._reconcileGuard = {};
-            console.log(`[CHANLUN-TIMING] verify-rebuild firing`);
+            clog(`[CHANLUN-TIMING] verify-rebuild firing`);
             this.draw_chanlun();
         }, 500);
     }
@@ -1312,7 +1318,7 @@ class ChartManager {
         if (!barsResult) return;
         this.initChartContainer(symbolKey);
 
-        console.log("[DataVerify][Charts] drawChartElements interval=" + currentInterval, {
+        clog("[DataVerify][Charts] drawChartElements interval=" + currentInterval, {
             fxs: barsResult.fxs?.length || 0,
             bis: barsResult.bis?.length || 0,
             xds: barsResult.xds?.length || 0,
@@ -1465,7 +1471,7 @@ class ChartManager {
             if (!this._drawRetryCount) this._drawRetryCount = 0;
             if (this._drawRetryCount < 10) {
                 this._drawRetryCount++;
-                console.log(`[CHANLUN-TIMING] @${performance.now().toFixed(0)}ms draw_chanlun: chartData=null, retry#${this._drawRetryCount}/10 in 500ms`);
+                clog(`[CHANLUN-TIMING] @${performance.now().toFixed(0)}ms draw_chanlun: chartData=null, retry#${this._drawRetryCount}/10 in 500ms`);
                 setTimeout(() => this.debouncedDrawChanlun(), 500);
             } else {
                 console.warn(`[CHANLUN-TIMING] @${performance.now().toFixed(0)}ms draw_chanlun: chartData=null, retry exhausted`);
@@ -1484,15 +1490,15 @@ class ChartManager {
         const vr = this.chart?.getVisibleRange?.();
         const firstBarSec = (chartData.barsResult.bars?.[0]?.time || 0) / 1000;
         const lastBarSec = (chartData.barsResult.bars?.[chartData.barsResult.bars.length - 1]?.time || 0) / 1000;
-        console.log(`[CHANLUN-TIMING] @${performance.now().toFixed(0)}ms draw_chanlun executing interval=${symbolInterval.interval}`);
-        console.log(`[CHANLUN-TIMING]   from=${chartData.from} (visibleRange.from), barsRange=[${firstBarSec.toFixed(0)}, ${lastBarSec.toFixed(0)}], visibleRange=[${vr?.from?.toFixed(0)}, ${vr?.to?.toFixed(0)}]`);
-        console.log(`[CHANLUN-TIMING]   barsResult: bars=${chartData.barsResult.bars?.length || 0} fxs=${chartData.barsResult.fxs?.length || 0} bis=${chartData.barsResult.bis?.length || 0} xds=${chartData.barsResult.xds?.length || 0} bi_zss=${chartData.barsResult.bi_zss?.length || 0} mmds=${chartData.barsResult.mmds?.length || 0}`);
+        clog(`[CHANLUN-TIMING] @${performance.now().toFixed(0)}ms draw_chanlun executing interval=${symbolInterval.interval}`);
+        clog(`[CHANLUN-TIMING]   from=${chartData.from} (visibleRange.from), barsRange=[${firstBarSec.toFixed(0)}, ${lastBarSec.toFixed(0)}], visibleRange=[${vr?.from?.toFixed(0)}, ${vr?.to?.toFixed(0)}]`);
+        clog(`[CHANLUN-TIMING]   barsResult: bars=${chartData.barsResult.bars?.length || 0} fxs=${chartData.barsResult.fxs?.length || 0} bis=${chartData.barsResult.bis?.length || 0} xds=${chartData.barsResult.xds?.length || 0} bi_zss=${chartData.barsResult.bi_zss?.length || 0} mmds=${chartData.barsResult.mmds?.length || 0}`);
 
         const bisInside = (chartData.barsResult.bis || []).filter(b => (b.points?.[0]?.time ?? 0) >= chartData.from).length;
         const xdsInside = (chartData.barsResult.xds || []).filter(x => (x.points?.[0]?.time ?? 0) >= chartData.from).length;
         const totalBis = chartData.barsResult.bis?.length || 0;
         const totalXds = chartData.barsResult.xds?.length || 0;
-        console.log(`[CHANLUN-TIMING]   FILTER bis: ${bisInside}/${totalBis} pass (filtered out ${totalBis - bisInside}), xds: ${xdsInside}/${totalXds} pass (filtered out ${totalXds - xdsInside})`);
+        clog(`[CHANLUN-TIMING]   FILTER bis: ${bisInside}/${totalBis} pass (filtered out ${totalBis - bisInside}), xds: ${xdsInside}/${totalXds} pass (filtered out ${totalXds - xdsInside})`);
         this.markDrawingMutationStart('chanlun-redraw');
         const drawStartTs = performance.now();
         try {
@@ -1501,7 +1507,7 @@ class ChartManager {
             // _initialLoadDone 永远 false，导致后续缩放平移无法补绘左侧形态。
             // 兜底：draw_chanlun 成功执行说明 chart 已有数据，强制置 true 恢复响应能力。
             this._initialLoadDone = true;
-            console.log(`[CHANLUN-TIMING] @${performance.now().toFixed(0)}ms draw_chanlun DONE (took ${(performance.now() - drawStartTs).toFixed(0)}ms) [_initialLoadDone=true]`);
+            clog(`[CHANLUN-TIMING] @${performance.now().toFixed(0)}ms draw_chanlun DONE (took ${(performance.now() - drawStartTs).toFixed(0)}ms) [_initialLoadDone=true]`);
         } finally {
             this.markDrawingMutationEnd('chanlun-redraw');
         }

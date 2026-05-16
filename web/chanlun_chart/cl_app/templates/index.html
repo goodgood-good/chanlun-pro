@@ -502,7 +502,6 @@
     {% include 'sub_temp.html' %}
   </body>
   <script>
-    var interval_update_rates;
     var interval_get_alert_records;
 
     var market_frequencys = `{{ market_frequencys| tojson }}`;
@@ -1216,16 +1215,6 @@
                 fixed: true,
                 shadeClose: true,
               });
-            } else if (item.title === "运行选股") {
-              layer.open({
-                type: 2,
-                title: "运行选股",
-                area: ["1000px", "50vh"],
-                content: "/xuangu/task_list/" + Utils.get_market(),
-                anim: 1,
-                fixed: true,
-                shadeClose: true,
-              });
             } else if (item.title === "当前任务") {
               layer.open({
                 type: 2,
@@ -1247,16 +1236,6 @@
                 Utils.set_local_data("theme", "Light");
               }
               location.reload();
-            } else if (item.title === "系统设置") {
-              layer.open({
-                type: 2,
-                title: "系统设置",
-                area: ["1000px", "50vh"],
-                content: "/setting",
-                anim: 1,
-                fixed: true,
-                shadeClose: true,
-              });
             }
           },
         });
@@ -1268,16 +1247,8 @@
           let is_open = data.show;
           let ca_title = $(data.title).attr("data-ca-title");
 
-          if (ca_title === "自选组") {
-            if (is_open) {
-              interval_update_rates = setInterval(
-                ZiXuan.stocks_update_rate(),
-                30000
-              );
-            } else {
-              clearInterval(interval_update_rates);
-            }
-          }
+          // 自选组行情刷新定时器由 zixuan.js 的 render_zixuan_stocks 自行管理
+          // （3s 轮询 + 非交易时段自停），此处不再重复启动。
           if (ca_title === "监控提醒") {
             if (is_open) {
               Alert.init();
@@ -1422,17 +1393,6 @@
       }
 
       init_web();
-
-      // interval_update_rates 推到主 widget 渲染后再启动，避免抢占首屏资源；
-      // requestIdleCallback 不可用时退化到 setTimeout(200ms)。
-      var __defer = (window.requestIdleCallback
-        ? function (cb) { window.requestIdleCallback(cb, { timeout: 1000 }); }
-        : function (cb) { setTimeout(cb, 200); });
-      __defer(function () {
-        try {
-          interval_update_rates = setInterval(ZiXuan.stocks_update_rate(), 30000);
-        } catch (e) { console.warn('stocks_update_rate defer error', e); }
-      });
     });
   </script>
 

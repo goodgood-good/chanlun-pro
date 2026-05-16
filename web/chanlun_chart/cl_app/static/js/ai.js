@@ -65,6 +65,8 @@ var AI = (function () {
             data.dt +
             " 模型 " +
             data.model;
+          // 注意：marked v15 不消毒 HTML，data.prompt/data.msg 为 AI 生成内容会原样直通。
+          // 本机单用户 + 登录受限，XSS 风险可接受；若对外暴露需引入 DOMPurify 消毒。
           var show_html =
             '<div class="layui-collapse ai-analyse-div" lay-filter="collapse-ais"><div class="layui-colla-item"><div class="layui-colla-title">缠论状态提示词</div><div class="layui-colla-content">' +
             marked.parse(stripMarkdownCodeBlock(data.prompt)) +

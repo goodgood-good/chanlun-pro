@@ -1,5 +1,6 @@
 import logging
 import os
+import threading
 from logging.handlers import RotatingFileHandler
 
 
@@ -35,6 +36,8 @@ class LogUtil:
         export LOG_CONSOLE_LEVEL=WARNING # 极简模式，只看告警和错误
     """
     _logger = None
+    # 首次初始化加锁：避免多线程并发首调时各自挂一遍 handler 致日志重复。
+    _init_lock = threading.Lock()
 
     # 日志格式中 %(filename)s:%(lineno)d 显示的是 logging 调用点的位置。
     # 业务代码通过 LogUtil.info(...) -> logger.info(...) 调用，默认会打印成
@@ -44,10 +47,22 @@ class LogUtil:
 
     @staticmethod
     def get_logger():
-        """获取全局单例 logger，首次调用时完成初始化（控制台 + 滚动文件双 handler）。"""
+        """获取全局单例 logger，首次调用时完成初始化（控制台 + 滚动文件双 handler）。
+
+        首次初始化在 ``_init_lock`` 内做 double-checked locking，确保并发首调
+        时只构建一次、不会重复挂 handler。
+        """
         if LogUtil._logger is not None:
             return LogUtil._logger
+        with LogUtil._init_lock:
+            if LogUtil._logger is not None:
+                return LogUtil._logger
+            LogUtil._logger = LogUtil._build_logger()
+            return LogUtil._logger
 
+    @staticmethod
+    def _build_logger():
+        """构建全局 logger（仅由 get_logger 在 _init_lock 内调用一次）。"""
         # 固定名称保证全项目取到同一实例
         logger = logging.getLogger("Logger")
         # 根 logger 默认 INFO：DEBUG 记录在 isEnabledFor 处 short-circuit，
@@ -56,7 +71,6 @@ class LogUtil:
 
         # handlers 非空说明已初始化（多次 import 防重复挂载）
         if logger.handlers:
-            LogUtil._logger = logger
             return logger
 
         formatter = logging.Formatter(
@@ -89,7 +103,6 @@ class LogUtil:
         logger.addHandler(console_handler)
         logger.addHandler(file_handler)
 
-        LogUtil._logger = logger
         return logger
 
     @staticmethod
