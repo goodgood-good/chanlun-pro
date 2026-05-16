@@ -26,10 +26,12 @@ class LogUtil:
     - 通过调用静态方法 LogUtil.info("...") 来使用。
 
     级别可通过环境变量动态控制（无需改代码）：
+    - LOG_LEVEL：        根 logger 级别，默认 INFO；排查时 export LOG_LEVEL=DEBUG 全开
     - LOG_CONSOLE_LEVEL：控制台级别，默认 INFO（关键节点日志可见；高频日志已被降级为 DEBUG，不会刷屏）
-    - LOG_FILE_LEVEL：   文件级别，  默认 DEBUG（保留全量日志便于排查）
+    - LOG_FILE_LEVEL：   文件级别，  默认 INFO；排查时 export LOG_FILE_LEVEL=DEBUG 全开
     示例：
-        export LOG_CONSOLE_LEVEL=DEBUG   # 排查问题时全开（连高频 DEBUG 都展示）
+        export LOG_LEVEL=DEBUG           # 排查时全开（根 logger + 文件 + 控制台均开 DEBUG）
+        export LOG_CONSOLE_LEVEL=DEBUG   # 仅控制台全开（连高频 DEBUG 都展示）
         export LOG_CONSOLE_LEVEL=WARNING # 极简模式，只看告警和错误
     """
     _logger = None
@@ -52,7 +54,10 @@ class LogUtil:
         # 1. 创建 logger 实例
         # 我们使用一个固定的名字，这样在项目的任何地方获取到的都是同一个 logger 实例
         logger = logging.getLogger("Logger")
-        logger.setLevel(logging.DEBUG)  # 设置 logger 的最低级别为 DEBUG
+        # 根 logger 默认 INFO：DEBUG 记录会在 Logger.debug() 内的 isEnabledFor
+        # 处直接 short-circuit，不进入 _log/handler/stat 链路（hot loop 里的
+        # _log.debug 开销因此归零）。排查时 export LOG_LEVEL=DEBUG 即可全开。
+        logger.setLevel(_resolve_level("LOG_LEVEL", logging.INFO))
 
         # 2. 防止日志重复输出
         # 如果 logger.handlers 已经有内容，说明已经配置过了，直接返回
@@ -84,8 +89,8 @@ class LogUtil:
         log_path = os.path.join(log_dir, 'app.log')
 
         # 使用 RotatingFileHandler 可以让日志文件在达到一定大小时自动创建新文件。
-        # 文件默认 DEBUG，保留全量信息便于排查（占用磁盘有限：单文件 5MB，最多 5 份备份）。
-        file_level = _resolve_level("LOG_FILE_LEVEL", logging.DEBUG)
+        # 文件默认 INFO，与根 logger 保持一致；排查时 export LOG_LEVEL=DEBUG 全开。
+        file_level = _resolve_level("LOG_FILE_LEVEL", logging.INFO)
         file_handler = RotatingFileHandler(
             filename=log_path,
             maxBytes=5 * 1024 * 1024,  # 单个日志文件最大为 5MB
