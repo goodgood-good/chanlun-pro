@@ -252,6 +252,7 @@ class ZsCalculator:
 
             center = ZS(zs_type='xd', start=entry_seg, _type=seg_b.type)
             center.lines = core_lines
+            center._bounds_dirty = True  # ★ P-009：整体赋值后边界缓存失效
             # 初始中枢范围由前三段重叠决定
             center.zg, center.zd = zg, zd
             center.update_boundaries()  # 初始更新zg, zd
@@ -361,6 +362,7 @@ class ZsCalculator:
                 # 如果是，说明初始的 seg_c 实际上是离开段，应将其从核心线段中移除。
                 if center.lines and center.lines[-1] is center.end:
                     center.lines.pop()
+                    center._bounds_dirty = True  # ★ P-009：pop 后边界缓存失效
 
                 return True, j - 1  # 下一个中枢的入口是 j-1
 

@@ -571,6 +571,11 @@ class ZS:
         self.start = start
         self.end = end
         self.lines: List[LINE] = []  # 构成中枢的线段
+        # ★ P-009：gg/dd 增量维护缓存。append 时增量更新，pop / 重新赋值时
+        # 置脏，下次 update_boundaries 全量重算。
+        self._gg_cache = None
+        self._dd_cache = None
+        self._bounds_dirty = True
 
         self.zg = zg  # 中枢高点
         self.zd = zd  # 中枢低点
@@ -599,8 +604,18 @@ class ZS:
     def update_boundaries(self):
         """根据核心线段更新中枢的边界值"""
         if self.lines:
-            self.gg = max(line.zs_high for line in self.lines)
-            self.dd = min(line.zs_low for line in self.lines)
+            if self._bounds_dirty or self._gg_cache is None:
+                # 全量重算（首次 / pop 后 / lines 被整体替换后）
+                self._gg_cache = max(line.zs_high for line in self.lines)
+                self._dd_cache = min(line.zs_low for line in self.lines)
+                self._bounds_dirty = False
+            else:
+                # 增量：只把最后一段并入 running max/min
+                last = self.lines[-1]
+                self._gg_cache = max(self._gg_cache, last.zs_high)
+                self._dd_cache = min(self._dd_cache, last.zs_low)
+            self.gg = self._gg_cache
+            self.dd = self._dd_cache
             self.line_num = len(self.lines)
 
     def is_extension_candidate(self, min_segments: int = 9) -> bool:
