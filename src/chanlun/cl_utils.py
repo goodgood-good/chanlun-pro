@@ -22,6 +22,20 @@ _cl_config_cache_ttl = 300
 _cl_config_db_backoff_until = 0.0
 
 
+def _shallow_config_copy(cfg: dict) -> dict:
+    """对 cl_config 做"一层 dict + 容器值浅拷贝"。
+
+    cl_config 结构：扁平标量 + 少量短 list / 单层 dict，无多层嵌套。
+    比 copy.deepcopy 省去递归开销，同时仍隔离调用方对 list/dict 值的 in-place 修改。
+    """
+    return {
+        k: (list(v) if isinstance(v, list)
+            else dict(v) if isinstance(v, dict)
+            else v)
+        for k, v in cfg.items()
+    }
+
+
 def _cl_config_cache_get(cache_key: str):
     now = time.time()
     with _cl_config_cache_lock:
@@ -31,7 +45,7 @@ def _cl_config_cache_get(cache_key: str):
         if item["expire_at"] <= now:
             _cl_config_cache.pop(cache_key, None)
             return None
-        return copy.deepcopy(item["config"])
+        return _shallow_config_copy(item["config"])
 
 
 def _cl_config_cache_set(cache_key: str, config: dict):
