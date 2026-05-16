@@ -36,7 +36,7 @@ def get_close_uids_profit_rate(close_uids: list):
     pos_df = BT.positions(
         close_uids=close_uids,
     )
-    pos_df["_win"] = pos_df["profit_rate"].apply(lambda x: int(x > 0))
+    pos_df["_win"] = (pos_df["profit_rate"] > 0).astype(int)
     # pos_df = pos_df.query("code_is_zt_hys==True and index_SH_000001_k_ashi_red_1==1")
     res = pos_df.groupby(["mmd"]).agg(
         {"profit_rate": {"mean", "sum", "count"}, "_win": {"count", "sum", "mean"}}

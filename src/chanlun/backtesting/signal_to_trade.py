@@ -168,7 +168,7 @@ class SignalToTrade(BackTestTrader):
         info_keys = list(sorted(list(set(info_keys))))
 
         pos_df = BT.positions(add_columns=info_keys, close_uids=self.close_uids)
-        pos_df["_win"] = pos_df["profit_rate"].apply(lambda r: 1 if r > 0 else 0)
+        pos_df["_win"] = (pos_df["profit_rate"] > 0).astype(int)
         if self.trade_mmds is not None:
             pos_df = pos_df.query("mmd in @self.trade_mmds")
         if self.allow_codes is not None:
