@@ -223,8 +223,8 @@ def render_charts(
     # 展示的K线数据
     klines_xaxis = klines["date"].tolist()
     klines_yaxis = []
-    for _, _k in klines.iterrows():
-        klines_yaxis.append([_k["open"], _k["close"], _k["low"], _k["high"]])
+    for _k in klines.itertuples(index=False):
+        klines_yaxis.append([_k.open, _k.close, _k.low, _k.high])
     klines_vols = klines["volume"].tolist()
 
     range_start = 0
@@ -247,11 +247,11 @@ def render_charts(
     red_item_style = opts.ItemStyleOpts(color=color_k_up, opacity=0.5)
     green_item_style = opts.ItemStyleOpts(color=color_k_down, opacity=0.5)
     vols = []
-    for _, row in klines.iterrows():
-        item_style = red_item_style if row["close"] > row["open"] else green_item_style
+    for row in klines.itertuples(index=False):
+        item_style = red_item_style if row.close > row.open else green_item_style
         bar = opts.BarItem(
             name="",
-            value=row["volume"],
+            value=row.volume,
             itemstyle_opts=item_style,
             label_opts=label_not_show_opts,
         )
