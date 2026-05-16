@@ -27,6 +27,9 @@ def _shallow_config_copy(cfg: dict) -> dict:
 
     cl_config 结构：扁平标量 + 少量短 list / 单层 dict，无多层嵌套。
     比 copy.deepcopy 省去递归开销，同时仍隔离调用方对 list/dict 值的 in-place 修改。
+    限制：只拷贝一层。若 dict 值内部还嵌套 list/dict（如 {"k": [1,2,3]}），
+    内层容器仍会别名。当前 cl_config 不含此结构（list 值都在顶层），故安全；
+    若 cl_config schema 变化需重新评估。
     """
     return {
         k: (list(v) if isinstance(v, list)

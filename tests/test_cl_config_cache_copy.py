@@ -33,3 +33,16 @@ def test_cache_set_snapshots_input():
     got = _cl_config_cache_get("k2")
     assert got["a"] == 1
     assert got["lst"] == [1, 2]
+
+
+def test_two_cache_hits_return_independent_nested_dicts():
+    """两次 cache_get 命中，各自拿到独立的 nested dict（_shallow_config_copy 的 dict(v) 行为）。"""
+    _cl_config_cache_invalidate()
+    _cl_config_cache_set("k3", {"outer": {"x": 9}})
+
+    got1 = _cl_config_cache_get("k3")
+    got1["outer"]["x"] = -1
+
+    got2 = _cl_config_cache_get("k3")
+    assert got2["outer"]["x"] == 9
+    assert got1["outer"] is not got2["outer"]
