@@ -112,7 +112,9 @@ def test_positions_snapshot_isolation_under_concurrent_writes():
         try:
             i = 100
             while not stop.is_set():
-                state.set_position(f"dyn_{i}", {"i": i})
+                # i % 500 限制 key 空间：持续并发写但 positions 不无界增长，
+                # 避免 CI runner 慢时 iterator 迟迟不结束导致 OOM
+                state.set_position(f"dyn_{i % 500}", {"i": i})
                 i += 1
         except Exception as e:
             writer_errors.append(e)
