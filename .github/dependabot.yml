@@ -1,0 +1,18 @@
+version: 2
+updates:
+  # GitHub Actions 版本更新（如 actions/checkout、setup-python）
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "chore(ci)"
+
+  # Python 依赖（pip ecosystem 可识别 poetry 的 pyproject.toml / poetry.lock）
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "chore(deps)"
+    open-pull-requests-limit: 5
