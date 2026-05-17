@@ -382,7 +382,7 @@ class XdCalculator:
             seg_cs_bis = [all_bis[i] for i in range(seg_start, seg_end + 1)
                           if all_bis[i].type == cs_bi_type]
         if not seg_cs_bis:
-            _log.debug(f"    _try_end: 段内无CS笔 → 跳过")
+            _log.debug("    _try_end: 段内无CS笔 → 跳过")
             return None
         if check_pos >= len(all_bis) or all_bis[check_pos].type != cs_bi_type:
             return None
@@ -483,11 +483,11 @@ class XdCalculator:
         # ---- 步骤5 ----
         mid_elem = combined[frac_idx]
         if has_gap:
-            _log.debug(f"    _try_end: 第二种情况,进入_check_type2验证...")
+            _log.debug("    _try_end: 第二种情况,进入_check_type2验证...")
             if not self._check_type2(all_bis, mid_elem, seg_type):
-                _log.debug(f"    _try_end: _check_type2失败 → 返回None")
+                _log.debug("    _try_end: _check_type2失败 → 返回None")
                 return None
-            _log.debug(f"    _try_end: _check_type2成功")
+            _log.debug("    _try_end: _check_type2成功")
 
         # ---- 步骤6: 定位当前线段结束位置 + 反向线段范围 ----
         target_bi = _resolve_pivot_bi(mid_elem, seg_type)

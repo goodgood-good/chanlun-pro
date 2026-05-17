@@ -83,9 +83,9 @@ class RqCacheMonExchg(WtCacheMon):
         self.all_info = self.all_info[(self.all_info["listed_date"]!="0000-00-00") & (self.all_info["de_listed_date"]!="0000-00-00")]
         self.all_info["listed_date"] = pd.to_datetime(self.all_info["listed_date"])
         self.all_info["de_listed_date"] = pd.to_datetime(self.all_info["de_listed_date"])
-        if start_date == None:
+        if start_date is None:
             start_date = self.all_info["listed_date"].min()
-        if end_date == None:
+        if end_date is None:
             end_date = self.all_info["de_listed_date"].max()
         self.all_info = self.all_info[(self.all_info["de_listed_date"] > start_date) & (self.all_info["listed_date"] < end_date)]
         self.init_cache()

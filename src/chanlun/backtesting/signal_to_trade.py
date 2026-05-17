@@ -223,13 +223,10 @@ class SignalToTrade(BackTestTrader):
                 self.positions_now_holding = [
                     p
                     for p in self.positions_now_holding
-                    if (
-                        (
-                            p["code"] == _pos["code"]
-                            and p["mmd"] == _pos["mmd"]
-                            and p["open_uid"] == _pos["open_uid"]
-                        )
-                        == False
+                    if not (
+                        p["code"] == _pos["code"]
+                        and p["mmd"] == _pos["mmd"]
+                        and p["open_uid"] == _pos["open_uid"]
                     )
                 ]
 

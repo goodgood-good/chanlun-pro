@@ -840,7 +840,7 @@ def xg_single_xd_zs_nei_3mmds(
 
     return {
         "code": code,
-        "msg": f"线段中枢盘整后出现笔的三类买卖点",
+        "msg": "线段中枢盘整后出现笔的三类买卖点",
     }
 
 

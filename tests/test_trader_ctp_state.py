@@ -92,7 +92,7 @@ def test_set_order_get_order_concurrent_writers_readers():
     expected = WRITERS * N_PER_WRITER
     assert len(state.orders) == expected, f"orders={len(state.orders)} != {expected}"
     # 抽查一些 ref 仍可读到
-    assert state.get_order(f"w0_0") == {"ref": "w0_0", "wid": 0}
+    assert state.get_order("w0_0") == {"ref": "w0_0", "wid": 0}
     assert state.get_order(f"w{WRITERS - 1}_{N_PER_WRITER - 1}") is not None
 
 
