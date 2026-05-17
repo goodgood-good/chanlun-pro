@@ -86,6 +86,11 @@ all = [
 # xtquant 是 vendored 的第三方 SDK（迅投 QMT），不纳入 lint
 extend-exclude = ["src/xtquant"]
 
+[tool.ruff.lint]
+# F403/F405: import * 是项目设计（exchange/strategy 子类 import 基类模块）
+# E402: 多为 sys.path 设置后 import / 条件 import，属正当模式
+ignore = ["F403", "F405", "E402"]
+
 [tool.poetry]
 # package-mode=false: 本项目不发布到 PyPI，Poetry 仅管理依赖，不需要打包配置
 package-mode = false
