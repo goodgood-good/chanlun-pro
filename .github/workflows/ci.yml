@@ -50,3 +50,41 @@ jobs:
         # --no-deps 仅扫描列出的顶层包，加快速度；首版不 strict 避免新发布 CVE 即时红
         run: pip-audit -r /tmp/req.txt --no-deps
         continue-on-error: true
+
+  test:
+    name: Test (pytest)
+    # ta-lib 依赖 package/ 下的 win_amd64 wheel，须用 Windows runner
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.10'  # 对应 package/TA_Lib-0.4.28-cp310 wheel
+      - name: Install poetry
+        run: pip install poetry
+      - name: Install dependencies (core + monitor extra)
+        run: poetry install --extras monitor
+      - name: Install longbridge
+        # longbridge 是默认美股数据源依赖，但未在 pyproject.toml 声明，单独补装
+        run: poetry run pip install longbridge
+      - name: Install Playwright browser
+        run: poetry run playwright install chromium
+      - name: Run tests
+        run: poetry run pytest tests/ -q
+
+  lint:
+    name: Lint (ruff)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - name: Run ruff
+        # 软门禁：当前有约 550 处既存问题，先建立可见性，暂不阻塞合并
+        continue-on-error: true
+        run: |
+          pip install ruff
+          ruff check --output-format=github src/ web/ tests/
