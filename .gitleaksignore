@@ -1,0 +1,7 @@
+# 已知历史泄露 finding，登记后 gitleaks 全历史扫描跳过这些指纹。
+# 当前代码已清理（config.py 改用环境变量、run.py 改用 config.GM_TOKEN），
+# 泄露仅存在于旧 commit 历史中。相关密钥应在对应平台后台轮换。
+413fe6b64de916b4a8cc2c74dc297d805070414f:src/chanlun/config.py:generic-api-key:73
+413fe6b64de916b4a8cc2c74dc297d805070414f:src/chanlun/config.py:generic-api-key:74
+8e51c06150831703cfb6cbb95590a0d55c8dc613:src/cl_myquant/run.py:generic-api-key:22
+4c1b0e83d1af17f4b71d4184b311336aae5f25c2:src/cl_myquant/run.py:generic-api-key:22
