@@ -75,6 +75,11 @@ jobs:
       - name: Install Playwright browser
         run: poetry run playwright install chromium
       - name: Run tests
+        env:
+          # longbridge SDK 在无凭证时构建 Config 会抛异常，CI 用占位值绕过
+          LONGBRIDGE_APP_KEY: dummy_ci
+          LONGBRIDGE_APP_SECRET: dummy_ci
+          LONGBRIDGE_ACCESS_TOKEN: dummy_ci
         run: poetry run pytest tests/ -q
 
   lint:
