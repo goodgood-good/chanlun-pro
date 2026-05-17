@@ -107,6 +107,7 @@ class QMTTraderStock(BackTestTrader):
             # 留 2% 缓冲，按剩余仓位均分可用资金
             account: XtAsset = self.xt_trader.query_stock_asset(self.acc)
             balance = round((account.cash * 0.98) / (self.max_pos - hold_pos_num), 0)
+            price = tick[code].last  # 下单前用最新价估算买入数量
             amount = int(balance / price / 100) * 100
             if amount < 100:
                 is_real_trade = False
