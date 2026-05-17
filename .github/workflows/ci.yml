@@ -69,9 +69,6 @@ jobs:
         run: pip install poetry
       - name: Install dependencies (core + monitor extra)
         run: poetry install --extras monitor
-      - name: Install longbridge
-        # longbridge 是默认美股数据源依赖，但未在 pyproject.toml 声明，单独补装
-        run: poetry run pip install longbridge
       - name: Install Playwright browser
         run: poetry run playwright install chromium
       - name: Run tests

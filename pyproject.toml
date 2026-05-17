@@ -14,6 +14,7 @@ dependencies = [
     "flask>=3.1.1",
     "flask-login>=0.6.3",
     "flask-wtf>=1.3.0",
+    "longbridge>=4.1.0",
     "mytt>=2.9.3",
     "numpy==1.26.4",
     "pandas==2.1.0",
@@ -80,6 +81,10 @@ all = [
     "matplotlib>=3.10.3",
     "playwright>=1.53.0",
 ]
+
+[tool.ruff]
+# xtquant 是 vendored 的第三方 SDK（迅投 QMT），不纳入 lint
+extend-exclude = ["src/xtquant"]
 
 [tool.poetry]
 # package-mode=false: 本项目不发布到 PyPI，Poetry 仅管理依赖，不需要打包配置

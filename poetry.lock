@@ -2667,6 +2667,70 @@ url = "https://mirrors.aliyun.com/pypi/simple"
 reference = "aliyun"
 
 [[package]]
+name = "longbridge"
+version = "4.1.0"
+description = "A Python library for Longbridge Open API"
+optional = false
+python-versions = ">=3.8"
+groups = ["main"]
+files = [
+    {file = "longbridge-4.1.0-cp310-cp310-macosx_10_12_x86_64.whl", hash = "sha256:8088ba7990bc0945576012941f1d72341ac77a6386942f04f8d89746dea7a844"},
+    {file = "longbridge-4.1.0-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:4289d289297e97b9e5b53649956dfbbff72df629f93577558bbfe43d802b1ca8"},
+    {file = "longbridge-4.1.0-cp310-cp310-manylinux_2_39_aarch64.whl", hash = "sha256:df0cfbfc5693f9b52ae47a8b5ec444506574fbed129229734ca1419abded15d8"},
+    {file = "longbridge-4.1.0-cp310-cp310-manylinux_2_39_x86_64.whl", hash = "sha256:60c39d5eb62109516f372e18ca499864d7b8ad75460cd0a245b9c65c4a564f76"},
+    {file = "longbridge-4.1.0-cp310-cp310-musllinux_1_2_aarch64.whl", hash = "sha256:0e2bf4b9066f2969de41d794aeeb13a147e72f3a78f7d7a5a20f8bf607b29946"},
+    {file = "longbridge-4.1.0-cp310-cp310-musllinux_1_2_x86_64.whl", hash = "sha256:87399baaf514f0cf2e8127a7086bb1b32a248150897d63e8b6082482bfde06e6"},
+    {file = "longbridge-4.1.0-cp310-cp310-win_amd64.whl", hash = "sha256:f27e0889ce27c621d4f028015a6c6fb703677a0478495c96c2421227ee037808"},
+    {file = "longbridge-4.1.0-cp311-cp311-macosx_10_12_x86_64.whl", hash = "sha256:800dce94e0364c867749b160305897b85575762cc0f67ab93e0ef1acafded751"},
+    {file = "longbridge-4.1.0-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:06516fff0260720f3f9ecff7ca19d4aa1468aea1b1adfad9e44941a525ab6b0d"},
+    {file = "longbridge-4.1.0-cp311-cp311-manylinux_2_39_aarch64.whl", hash = "sha256:65238e3a9297d4f0fdd7abdfde2b60aaa45b2c3672aaa26863b9edb5a54ac4af"},
+    {file = "longbridge-4.1.0-cp311-cp311-manylinux_2_39_x86_64.whl", hash = "sha256:4106b162b1de684d4431cb036fad7600ba0db12cef45fd053288352d82c769fc"},
+    {file = "longbridge-4.1.0-cp311-cp311-musllinux_1_2_aarch64.whl", hash = "sha256:4e370dd6f7bf48f760e347d2d5f4ae2800a96e8b3960150dde9db7ce56230e07"},
+    {file = "longbridge-4.1.0-cp311-cp311-musllinux_1_2_x86_64.whl", hash = "sha256:317d8174f30910356f8ebecfc0877e4dad63e5a7af1f6f1e9a68970e3cb32b08"},
+    {file = "longbridge-4.1.0-cp311-cp311-win_amd64.whl", hash = "sha256:30aab8fe70e82797674a95b24fe8f3a4360c86128d11794972d2a2f200f7919e"},
+    {file = "longbridge-4.1.0-cp312-cp312-macosx_10_12_x86_64.whl", hash = "sha256:b1f672587d3e7870986cf89d32af1411436a1321230a3f76ba9cd7b2942bca32"},
+    {file = "longbridge-4.1.0-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:5fcd6047f0983663cb39e47cdb7cbba222daa14aa07dac8445ec71c0ebdb9be7"},
+    {file = "longbridge-4.1.0-cp312-cp312-manylinux_2_39_aarch64.whl", hash = "sha256:2f8237aa981cc95623ce7cf4a0b34307d7cd364ab8e960271b3e86f10dc910a4"},
+    {file = "longbridge-4.1.0-cp312-cp312-manylinux_2_39_x86_64.whl", hash = "sha256:90626866ba5b5cd9c4e781d31d6143cafbf90d7cb6dd80e6a4c9dfc8cf354a68"},
+    {file = "longbridge-4.1.0-cp312-cp312-musllinux_1_2_aarch64.whl", hash = "sha256:0ab5f9d84e8a6a885cc78ac25d66b789262d2b28f27448fa482ba910c58a5b4f"},
+    {file = "longbridge-4.1.0-cp312-cp312-musllinux_1_2_x86_64.whl", hash = "sha256:ce4ec8ac89a036fcb8ffdfe60f3619cf517053c6db9cdea379125cb72fa2c35a"},
+    {file = "longbridge-4.1.0-cp312-cp312-win_amd64.whl", hash = "sha256:6034f2bffb3bd1626a2212f829bd10de5265f79c347ec3dc668a39eb11648b15"},
+    {file = "longbridge-4.1.0-cp313-cp313-macosx_10_12_x86_64.whl", hash = "sha256:e7de5b4a23bcc875a531781dab143b99bfeb3d4d5b8a50a4b60359ba7923c839"},
+    {file = "longbridge-4.1.0-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:a036e67b82ed6fa25dd0d90ec87d4f2088f912e560564e20d00234a46c81a42f"},
+    {file = "longbridge-4.1.0-cp313-cp313-manylinux_2_39_aarch64.whl", hash = "sha256:8f5c387a5c25e766715c6598acbf3c302c257772e2ee1d5a7660f7478b3426a5"},
+    {file = "longbridge-4.1.0-cp313-cp313-manylinux_2_39_x86_64.whl", hash = "sha256:a90996eb67b98b4939c98da6f1f50a2fd7e818915731ba097fc9dbcc2308f1b0"},
+    {file = "longbridge-4.1.0-cp313-cp313-musllinux_1_2_aarch64.whl", hash = "sha256:3a0ec6e2bef234fd33e9bf21209a19a051214da8f8251f20547f0c5ff65bed82"},
+    {file = "longbridge-4.1.0-cp313-cp313-musllinux_1_2_x86_64.whl", hash = "sha256:dffcb2c79b5a0eba6cd734252beaa1d8731186b1a16936eb024c6307340c9d43"},
+    {file = "longbridge-4.1.0-cp313-cp313-win_amd64.whl", hash = "sha256:5f3f6e9ed2c448aaec8f882ba08db1e93589a6f8654076307cd68b7ee659fac7"},
+    {file = "longbridge-4.1.0-cp314-cp314-macosx_10_12_x86_64.whl", hash = "sha256:aa41160e9043e822a1e6b9f95d109ebb5c323d353a93637d7fd736025b4deec2"},
+    {file = "longbridge-4.1.0-cp314-cp314-macosx_11_0_arm64.whl", hash = "sha256:4fa9c70cf6a42d32b82061069a7d9fb416cf7f3929f08b5c4dc839fac8ea3b01"},
+    {file = "longbridge-4.1.0-cp314-cp314-manylinux_2_39_aarch64.whl", hash = "sha256:9e7e22f0abea435c512dbbca70177f814c65a51210abe2d763cf83534b1453e1"},
+    {file = "longbridge-4.1.0-cp314-cp314-manylinux_2_39_x86_64.whl", hash = "sha256:44fccaef1d596e38a603c424fe4ceb37020680317fa8301a6ffb5f5d9d48df0f"},
+    {file = "longbridge-4.1.0-cp314-cp314-musllinux_1_2_aarch64.whl", hash = "sha256:90687bca026e2ce375d9493cbecc29c181bb2f766c00c184cc186a63279252f7"},
+    {file = "longbridge-4.1.0-cp314-cp314-musllinux_1_2_x86_64.whl", hash = "sha256:b69da24d441a7e7f46606fa1ee8791f0ffa528430dbcdf5057bc11fcaaf9da27"},
+    {file = "longbridge-4.1.0-cp314-cp314-win_amd64.whl", hash = "sha256:6bc07a21699853cc18c41bd3fc1a848ac3fca0b34fa5475c1a7562ecd84016fb"},
+    {file = "longbridge-4.1.0-cp38-cp38-macosx_10_12_x86_64.whl", hash = "sha256:24a5ec07d235da1496141b944237e6f4e381d4d2e41170895cf7cc2e051799f6"},
+    {file = "longbridge-4.1.0-cp38-cp38-macosx_11_0_arm64.whl", hash = "sha256:d72c7bf870b55cdd1c4b5ddaa7feb5ee8eb13aae39d7b920b3057873c06dcb84"},
+    {file = "longbridge-4.1.0-cp38-cp38-manylinux_2_39_aarch64.whl", hash = "sha256:4e4b66b88872496dbf49cc4d134c6689d00789c40379072674fc8ee0ea967e16"},
+    {file = "longbridge-4.1.0-cp38-cp38-manylinux_2_39_x86_64.whl", hash = "sha256:1bcf4847f660fae7ed1edb39848d6d6b89662bc1334fe1c8366799a8dafa2f2d"},
+    {file = "longbridge-4.1.0-cp38-cp38-musllinux_1_2_aarch64.whl", hash = "sha256:bf7a9c1f4e2c8aeb46f1c1e1fc6f65c49ae0f5d289092528e796b9f4e95827ab"},
+    {file = "longbridge-4.1.0-cp38-cp38-musllinux_1_2_x86_64.whl", hash = "sha256:77c56f63fd3e4a3fd7edaa72d9bfdfac50eea6bf8367a850bb1b743f0ba06a53"},
+    {file = "longbridge-4.1.0-cp38-cp38-win_amd64.whl", hash = "sha256:8d2f49f388e16f793559cdd14c6d7bf2cbbcf39a37cf649cef806565c6c710dd"},
+    {file = "longbridge-4.1.0-cp39-cp39-macosx_10_12_x86_64.whl", hash = "sha256:1aa17f23b8a9f1c25df0a2c6cddeb9528310ea12e03653c8b7466d930489c612"},
+    {file = "longbridge-4.1.0-cp39-cp39-macosx_11_0_arm64.whl", hash = "sha256:8e03c946e95cfdbeceef0917ba82e78069ffa567138b5298af194dcbea668740"},
+    {file = "longbridge-4.1.0-cp39-cp39-manylinux_2_39_aarch64.whl", hash = "sha256:7c6db49de60782bf404af9ca528108059e306ec796cd89521753c53f92227d2f"},
+    {file = "longbridge-4.1.0-cp39-cp39-manylinux_2_39_x86_64.whl", hash = "sha256:ff13b3c3401df40ba67c7f0f2a5dc300cc26c2085f1e2aeda373638d072f1943"},
+    {file = "longbridge-4.1.0-cp39-cp39-musllinux_1_2_aarch64.whl", hash = "sha256:485a22cbb11487cddedda4a46e356f50752d2573f5bc032960942e69c3c782b0"},
+    {file = "longbridge-4.1.0-cp39-cp39-musllinux_1_2_x86_64.whl", hash = "sha256:89837584749bc9728f14a6f349fddf97814bd0cea35630043a2229a61711ee67"},
+    {file = "longbridge-4.1.0-cp39-cp39-win_amd64.whl", hash = "sha256:acd183429e17724634301551c610bbe3d84e5d85da5d229764c65e8d5d910914"},
+]
+
+[package.source]
+type = "legacy"
+url = "https://mirrors.aliyun.com/pypi/simple"
+reference = "aliyun"
+
+[[package]]
 name = "lxml"
 version = "6.1.0"
 description = "Powerful and Pythonic XML processing library combining libxml2/libxslt with the ElementTree API."
@@ -6447,4 +6511,4 @@ us = ["alpaca-py", "ib-insync", "polygon-api-client"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.10,<3.14"
-content-hash = "e20304f66e0fa54c05ac3198e19ae38ffd469222fb1d6a924ac1144cc64af1c0"
+content-hash = "a11287062fdcdf71ba3e2a306409697996363ca205f04ae322036187b6dcc7da"
