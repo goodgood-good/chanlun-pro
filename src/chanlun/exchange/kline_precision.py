@@ -11,6 +11,8 @@ docs/superpowers/specs/2026-05-18-kline-precision-normalization-design.md
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Optional
 
+from chanlun.tools.log_util import LogUtil
+
 # 各市场默认 OHLC 小数位数（A股 见 _a_share_decimals 按子类型区分）
 _MARKET_DECIMALS = {
     "hk": 3,
@@ -64,3 +66,36 @@ def _round_half_up(value: Optional[float], decimals: int) -> Optional[float]:
         return value
     quant = Decimal(1).scaleb(-decimals)  # 10^-decimals，如 decimals=3 → 0.001
     return float(d.quantize(quant, rounding=ROUND_HALF_UP))
+
+
+_OHLC_COLUMNS = ("open", "high", "low", "close")
+
+
+def normalize_kline_precision(df, market: str, code: str):
+    """把 K 线 DataFrame 的 OHLC 四列按市场/标的精度严格四舍五入。
+
+    - volume 等其它列原样保留。
+    - df 为 None 或空时原样返回。
+    - 未知市场记 WARNING 并返回未改动的 df。
+    - 不在原地修改调用方对象（内部 copy 后处理）。
+    - 归一是增强功能：任何异常都记 WARNING 并返回原 df，绝不让 klines() 失败。
+    """
+    if df is None or len(df) == 0:
+        return df
+    try:
+        decimals = resolve_decimals(market, code)
+        if decimals is None:
+            LogUtil.warning(
+                f"[kline_precision] 未知市场 {market}，跳过精度归一: {code}"
+            )
+            return df
+        out = df.copy()
+        for col in _OHLC_COLUMNS:
+            if col in out.columns:
+                out[col] = out[col].map(lambda v: _round_half_up(v, decimals))
+        return out
+    except Exception as e:
+        LogUtil.warning(
+            f"[kline_precision] 归一失败 market={market} code={code}: {e}"
+        )
+        return df
