@@ -126,6 +126,13 @@ class LogUtil:
         LogUtil.get_logger().error(message, *args, **kwargs)
 
     @staticmethod
+    def exception(message, *args, **kwargs):
+        # 仅应在 except 块中调用：ERROR 级别，自动附带当前异常堆栈（exc_info=True）。
+        kwargs.setdefault("stacklevel", LogUtil._STACKLEVEL)
+        kwargs.setdefault("exc_info", True)
+        LogUtil.get_logger().exception(message, *args, **kwargs)
+
+    @staticmethod
     def critical(message, *args, **kwargs):
         kwargs.setdefault("stacklevel", LogUtil._STACKLEVEL)
         LogUtil.get_logger().critical(message, *args, **kwargs)
