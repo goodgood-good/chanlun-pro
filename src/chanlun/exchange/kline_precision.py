@@ -11,6 +11,8 @@ docs/superpowers/specs/2026-05-18-kline-precision-normalization-design.md
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Optional
 
+import pandas as pd
+
 from chanlun.tools.log_util import LogUtil
 
 # 各市场默认 OHLC 小数位数（A股 见 _a_share_decimals 按子类型区分）
@@ -71,7 +73,7 @@ def _round_half_up(value: Optional[float], decimals: int) -> Optional[float]:
 _OHLC_COLUMNS = ("open", "high", "low", "close")
 
 
-def normalize_kline_precision(df, market: str, code: str):
+def normalize_kline_precision(df: Optional[pd.DataFrame], market: Optional[str], code: str) -> Optional[pd.DataFrame]:
     """把 K 线 DataFrame 的 OHLC 四列按市场/标的精度严格四舍五入。
 
     - volume 等其它列原样保留。

@@ -1,6 +1,8 @@
 import math
 
-from chanlun.exchange.kline_precision import _round_half_up, resolve_decimals
+import pandas as pd
+
+from chanlun.exchange.kline_precision import _round_half_up, normalize_kline_precision, resolve_decimals
 
 
 def test_a_share_stock_is_2_decimals():
@@ -62,11 +64,6 @@ def test_round_half_up_passes_through_non_finite():
     assert _round_half_up(None, 3) is None
     assert _round_half_up(float("inf"), 3) == float("inf")
     assert _round_half_up(float("-inf"), 3) == float("-inf")
-
-
-import pandas as pd
-
-from chanlun.exchange.kline_precision import normalize_kline_precision
 
 
 def _sample_df():
