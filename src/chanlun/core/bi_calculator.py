@@ -77,7 +77,6 @@ class BiCalculator:
             fxs.append(current_fx)
         return fxs
 
-
     def _create_bi(self, start_fx: FX, end_fx: FX, index: int, done: bool) -> BI:
         bi_type = 'up' if start_fx.type == 'di' else 'down'
         bi = BI(start=start_fx, end=end_fx, _type=bi_type, index=index)
@@ -101,14 +100,19 @@ class BiCalculator:
     def _build_endpoint_stack(self, fxs: List[FX]) -> List[FX]:
         """单调栈构造笔端点序列。
 
-        按缠论原著第六节「笔」[119][123]：
-        - 同类分型取极值压缩；
-        - 异类不成笔时，若栈顶是被新分型与其同类前驱夹击的「多余端点」
-          则弹出，否则（栈顶是创新高/新低的真端点，或新分型不够极端）
-          丢弃新分型。
+        按缠论原著第六节「笔」[119][123]，对每个分型跑一个 while 循环：
+        - 情形①同类：与栈顶同类，更极端则取代栈顶，否则丢弃；
+        - 情形②异类成笔：与栈顶异类且满足成笔条件 → 入栈；
+        - 情形③异类不成笔：栈顶是被新分型与其同类前驱夹击的「多余端点」
+          则弹出，否则（栈顶是创新高/新低的真端点，或新分型不够极端，
+          或栈不足 3 即 R1 兜底）丢弃新分型。
 
         隔夜跳空导致的「真顶/真底贴太近」(如顶底分型共用 K 线) 会落入
-        「丢弃新分型」分支，保持原著严格老笔行为。
+        情形③「丢弃新分型」分支，保持原著严格老笔行为。
+
+        不变量：返回的 stack 始终顶底严格交替。情形②入栈前 fx 与栈顶
+        异类，情形①/③的弹栈不会引入同类相邻。情形③取 stack[-2]/stack[-3]
+        正依赖此不变量（stack[-3] 必与栈顶同类、与 fx 异类）。
         """
         stack: List[FX] = []
         for fx in fxs:
@@ -123,6 +127,8 @@ class BiCalculator:
                         stack.pop()
                         continue
                     break
+                # _check_stroke_validity 要求后者 K 线 index 更大；fxs 按
+                # K 线 index 升序产出、fx 恒晚于栈内任意元素，方向前提成立。
                 if self._check_stroke_validity(last, fx):
                     # 情形②：异类成笔
                     stack.append(fx)
@@ -131,8 +137,8 @@ class BiCalculator:
                 if len(stack) < 3:
                     break  # R1：栈不足，无法判定，丢弃 fx
                 prev = stack[-2]
-                a = stack[-3]
-                if self._is_more_extreme(last, a):
+                last_peer = stack[-3]  # 栈顶 last 的同类前驱
+                if self._is_more_extreme(last, last_peer):
                     break  # last 是创新高/新低的真端点 → 丢弃 fx
                 if not self._is_more_extreme(fx, prev):
                     break  # fx 不够格取代 prev → 丢弃 fx
@@ -149,13 +155,13 @@ class BiCalculator:
 
         endpoints = self._build_endpoint_stack(fxs)
 
-        bis: List[BI] = []
+        all_bis: List[BI] = []
         for i in range(len(endpoints) - 1):
-            bis.append(self._create_bi(endpoints[i], endpoints[i + 1], i, False))
+            all_bis.append(self._create_bi(endpoints[i], endpoints[i + 1], i, False))
 
-        if bis:
-            self.confirmed_bis = bis[:-1]
-            self.pending_bi = bis[-1]
+        if all_bis:
+            self.confirmed_bis = all_bis[:-1]
+            self.pending_bi = all_bis[-1]
 
         self._reindex_bis()
 
