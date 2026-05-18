@@ -17,6 +17,7 @@ from chanlun.db import db
 from chanlun.exchange.exchange import Exchange, Tick
 from chanlun.file_db import FileCacheDB
 from chanlun.tools import tdx_best_ip as best_ip
+from chanlun.exchange.kline_precision import normalize_kline_precision
 
 
 @fun.singleton
@@ -240,6 +241,7 @@ class ExchangeTDXHK(Exchange):
                 ["code", "date", "open", "close", "high", "low", "volume"]
             ]
             klines_df = self.klines_qfq(code, klines_df)
+            klines_df = normalize_kline_precision(klines_df, "hk", code)
             return klines_df
         except TdxConnectionError:
             print("连接失败，重新选择最优服务器")

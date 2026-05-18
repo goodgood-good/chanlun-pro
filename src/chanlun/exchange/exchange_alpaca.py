@@ -13,6 +13,7 @@ except ImportError as _e:
 from chanlun import config
 from chanlun import fun
 from chanlun.exchange.exchange import *
+from chanlun.exchange.kline_precision import normalize_kline_precision
 
 g_all_stocks = []
 
@@ -236,6 +237,7 @@ class ExchangeAlpaca(Exchange):
                     }
                 )
             klines = pd.DataFrame(klines)
+            klines = normalize_kline_precision(klines, "us", code)
             return klines
         except Exception as e:
             print(f"alpaca 获取行情异常 code={code} alpaca_symbol={alpaca_symbol} Exception ：{str(e)}")

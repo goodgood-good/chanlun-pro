@@ -16,6 +16,7 @@ from chanlun.db import db
 from chanlun.exchange.exchange import Exchange, Tick, convert_us_tdx_kline_frequency
 from chanlun.file_db import FileCacheDB
 from chanlun.tools import tdx_best_ip as best_ip
+from chanlun.exchange.kline_precision import normalize_kline_precision
 
 
 @fun.singleton
@@ -203,8 +204,11 @@ class ExchangeTDXUS(Exchange):
                 klines_df = convert_us_tdx_kline_frequency(klines_df, frequency)
 
             if args["fq_type"] == "qfq":
-                return self.klines_qfq(code, klines_df)
+                result = self.klines_qfq(code, klines_df)
+                result = normalize_kline_precision(result, "us", code)
+                return result
             else:
+                klines_df = normalize_kline_precision(klines_df, "us", code)
                 return klines_df
         except TdxConnectionError:
             self.reset_tdx_ip()

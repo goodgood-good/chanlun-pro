@@ -18,6 +18,7 @@ from tenacity import retry_if_result, wait_random, stop_after_attempt, retry
 from chanlun import config
 from chanlun import fun
 from chanlun.exchange.exchange import *
+from chanlun.exchange.kline_precision import normalize_kline_precision
 
 
 @fun.singleton
@@ -170,6 +171,7 @@ class ExchangePolygon(Exchange):
                 klines_df["date"] = klines_df["date"].apply(
                     lambda _d: _d.replace(hour=9, minute=30)
                 )
+            klines_df = normalize_kline_precision(klines_df, "us", code)
             return klines_df
         except Exception as e:
             print("polygon.io 获取行情异常 %s Exception ：%s" % (code, str(e)))

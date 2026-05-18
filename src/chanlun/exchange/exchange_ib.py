@@ -10,6 +10,7 @@ from tenacity import retry, stop_after_attempt, wait_random, retry_if_result
 
 from chanlun import fun, rd
 from chanlun.exchange.exchange import Exchange, Tick, convert_us_kline_frequency
+from chanlun.exchange.kline_precision import normalize_kline_precision
 
 ib_res_hkey = "ib_data_results"
 
@@ -181,6 +182,7 @@ class ExchangeIB(Exchange):
         )
         klines_df["date"] = _date_naive.dt.tz_localize(self.tz)
 
+        klines_df = normalize_kline_precision(klines_df, "us", code)
         return klines_df
 
     def ticks(self, codes: List[str]) -> Dict[str, Tick]:
