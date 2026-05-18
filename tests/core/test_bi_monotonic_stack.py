@@ -14,7 +14,7 @@ import pathlib
 import pandas as pd
 import pytest
 
-from tests.core.conftest import DEFAULT_CL_CONFIG
+from tests.core.conftest import DEFAULT_CL_CONFIG, cl_snapshot
 from chanlun.core.bi_calculator import BiCalculator
 from chanlun.core.cl import CL
 from chanlun.core.cl_interface import CLKline, FX
@@ -160,3 +160,27 @@ def test_513100_0931_keeps_yuanzhu():
     bi = downs[0]
     assert bi.end.k.date == pd.Timestamp("2026-05-18 09:36:00+08:00")
     assert abs(bi.end.val - 2.0700) < 1e-6
+
+
+def test_513100_incremental_equals_full():
+    """513100 1m: 分批喂入与一次性全量, cl_snapshot 必须完全一致。
+
+    单调栈 _build_endpoint_stack 是无跨调用状态的全量重放; 增量路径
+    _try_incremental_extend 命中后仍调用 _rebuild_from_fxs, 结果应与
+    一次性全量 process_klines 完全相同。
+    """
+    if not _FIXTURE.exists():
+        pytest.skip(f"缺少 fixture: {_FIXTURE}")
+    df = pd.read_parquet(_FIXTURE)
+
+    cd_full = CL("SH.513100", "1m", dict(DEFAULT_CL_CONFIG))
+    cd_full.process_klines(df)
+
+    cd_batch = CL("SH.513100", "1m", dict(DEFAULT_CL_CONFIG))
+    n = len(df)
+    step = max(1, n // 12)
+    for upto in range(step, n + 1, step):
+        cd_batch.process_klines(df.iloc[:upto])
+    cd_batch.process_klines(df)  # 确保末根被喂入
+
+    assert cl_snapshot(cd_batch) == cl_snapshot(cd_full)

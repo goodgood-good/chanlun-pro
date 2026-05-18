@@ -153,6 +153,13 @@ class BiCalculator:
         self.confirmed_bis = []
         self.pending_bi = None
 
+        # 所有分型默认视作已完成（done=True）；done=False 仅用于标记最后一笔
+        # 未完成的终点（由 _reindex_bis 设置）。增量路径 _try_incremental_extend
+        # 会复用旧 FX 对象、其 done 可能残留上一轮的 False，故在重建笔之前
+        # 统一重置，保证增量与全量重放结果一致。
+        for fx in fxs:
+            fx.done = True
+
         endpoints = self._build_endpoint_stack(fxs)
 
         all_bis: List[BI] = []
