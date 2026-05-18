@@ -98,12 +98,14 @@ def _ensure_tz_aware(df: pd.DataFrame) -> pd.DataFrame:
 def merge_klines_df(cached: pd.DataFrame, new: pd.DataFrame) -> pd.DataFrame:
     """合并两段 K 线 DataFrame,按 date 去重 + 升序排序。
 
-    重叠优先级:cached > new。
-      - cached K 线通常已经是"已完成 bar",值更稳定;
-      - new 可能在边界拉到的是仍在波动的当前 bar(尤其分钟级范围请求),
-        若以 new 覆盖 cached,会把已经稳定的 bar 重新打波动状态,
-        导致下游 process_klines 触发不必要的"末根更新"路径,且边界处的
-        OHLC 可能与缓存里不一致 → 缠论笔/段重新画。
+    重叠优先级:new > cached。
+      - new 是刚从交易所(ex.klines)拉取的数据,反映该 bar 的最新/最完整状态;
+      - cached 那根往往是"分钟刚开始时被算进缓存的进行中 bar"——此刻只有第一笔
+        成交,o=h=l=c=开盘价、量极小。若让 cached 赢,这根 bar 会被永久冻结在
+        开盘瞬间快照,web 上每根 K 线 OHLC 全塌缩、量只剩第一笔。
+      - 对已收盘的 bar,new 与 cached 等值,new 覆盖是幂等的;对进行中的 bar,
+        new 覆盖正是实时刷新所需。下游 recompute 本就全量 process_klines,
+        不存在"避免末根更新路径"的收益。
     入参为空时直接返回另一边的副本(始终按 date 升序)。
     """
     if cached is None or len(cached) == 0:
@@ -118,8 +120,8 @@ def merge_klines_df(cached: pd.DataFrame, new: pd.DataFrame) -> pd.DataFrame:
     cached = _ensure_tz_aware(cached)
     new = _ensure_tz_aware(new)
 
-    # cached 后到,使其在 drop_duplicates(keep='last') 下覆盖 new 的同 date 行
-    combined = pd.concat([new, cached], ignore_index=True)
+    # new 后到,使其在 drop_duplicates(keep='last') 下覆盖 cached 的同 date 行
+    combined = pd.concat([cached, new], ignore_index=True)
     combined = combined.drop_duplicates(subset=["date"], keep="last")
     combined = combined.sort_values("date").reset_index(drop=True)
     return combined

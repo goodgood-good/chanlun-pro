@@ -200,6 +200,46 @@ def test_tv_history_backward_scroll_extends_cache(client, mock_exchange):
     assert len(chart_data_cache) >= 1, "prepend 后 chart_data_cache 应仍有 entry"
 
 
+def test_tv_history_cold_cache_polling_fetches_full_not_narrow(client, mock_exchange):
+    """回归: 冷缓存(cache_empty)收到窄范围 polling 请求(firstDataRequest=false)时,
+    必须按默认回看全量拉取,不能用窄 start_date 把缓存"种小"。
+
+    否则空缓存被几根 K 线的窄窗口请求种成 partial entry,随后 prepend 又把它
+    标成 is_full_snapshot=True → firstDataRequest=true 命中这个"假全量"快照,
+    前端只拿到最新几根 K 线。
+    """
+    df_full = _make_klines(300)
+    narrow_from = int(df_full["date"].iloc[-5].timestamp())
+    narrow_to = int(df_full["date"].iloc[-1].timestamp())
+
+    # 用独占 symbol,避开其它用例 firstDataRequest=true 触发的后台 prewarm 线程
+    # 对模块级全局 chart_data_cache 的污染(prewarm 只跑默认 a:SH.600519)。
+    cold_symbol = "a:SH.513100"
+
+    # 缓存为空 → 直接来一个窄范围 polling 请求
+    resp = _make_request(
+        client, symbol=cold_symbol, first=False,
+        from_ts=narrow_from, to_ts=narrow_to,
+    )
+    assert resp.status_code == 200
+
+    # 冷缓存这次 ex.klines 不能带窄 start_date(必须全量回看,只给 end_date)
+    assert mock_exchange.klines.call_count >= 1
+    for _args, kwargs in mock_exchange.klines.call_args_list:
+        assert not kwargs.get("start_date"), (
+            f"冷缓存 polling 请求不应带窄 start_date,实际 kwargs={kwargs}"
+        )
+
+    # 缓存应被种成完整快照(is_full_snapshot=True + 完整 300 根)
+    from cl_app.services.chart_cache import _build_cache_key, _get_chart_cache_entry
+    from tests.core.conftest import DEFAULT_CL_CONFIG
+    cache_key = _build_cache_key("a", "SH.513100", "1m", dict(DEFAULT_CL_CONFIG))
+    entry = _get_chart_cache_entry(cache_key)
+    assert entry is not None, "冷缓存 polling 后应已写入缓存"
+    assert entry.get("is_full_snapshot") is True, "冷缓存全量拉取后应标 is_full_snapshot=True"
+    assert len(entry["data"]["t"]) == 300, "冷缓存应种成完整 300 根,而非窄窗口几根"
+
+
 def test_tv_history_polling_uses_cache_for_speedup(client, mock_exchange):
     """同 cache_key 连续 2 次请求 (firstDataRequest=false), 第 2 次应明显快于第 1 次。
 

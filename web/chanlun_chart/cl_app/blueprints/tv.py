@@ -746,7 +746,11 @@ def tv_history():
 
                 LogUtil.debug(f"[tv_history] Cache miss ({cache_miss_reason}) req={req_tag}")
                 kline_args = {}
-                if is_range_request:
+                # cache_empty(冷缓存,缓存里完全没有该 cache_key)即便是窄范围轮询
+                # 请求,也必须按默认回看窗口全量拉取。否则空缓存会被窄窗口请求"种小"
+                # 成只有几根 K 线的 entry,后续 prepend 又把它标成 is_full_snapshot=True,
+                # 导致 firstDataRequest=true 命中这个"假全量"快照只返回几根 K 线。
+                if is_range_request and cache_miss_reason != "cache_empty":
                     kline_args["start_date"] = datetime.datetime.fromtimestamp(
                         _from, tz=tz_sh
                     ).strftime("%Y-%m-%d %H:%M:%S")
@@ -788,7 +792,13 @@ def tv_history():
                         _set_chart_cache_entry(
                             cache_key,
                             cl_chart_data,
-                            is_full_snapshot=(not is_range_request) or (existing_entry or {}).get("is_full_snapshot", False),
+                            # cache_empty 已按全量回看拉取(见上方 kline_args 分支),
+                            # 与非范围请求同样是完整快照,标 is_full_snapshot=True。
+                            is_full_snapshot=(
+                                (not is_range_request)
+                                or cache_miss_reason == "cache_empty"
+                                or (existing_entry or {}).get("is_full_snapshot", False)
+                            ),
                         )
 
                 # prepend 路径在补完 higher_macd 后,需要把 cl_chart_data 重新写回 cache,

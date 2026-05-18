@@ -74,13 +74,14 @@ def test_merge_klines_df_left_extend_no_overlap():
     assert merged["date"].iloc[-1] == cached["date"].iloc[-1]
 
 
-def test_merge_klines_df_overlap_dedup_prefers_cached():
+def test_merge_klines_df_overlap_dedup_prefers_new():
     """场景:新 K 线与缓存 K 线在边界重叠(典型于 ex.klines 返回闭区间)。
-    重叠位置应保留缓存值——缓存的可能已经是"已完成 bar",新拉取可能仍在波动。"""
+    重叠位置必须取 ``new``——``new`` 是刚从交易所拉取的、更完整/更新的数据;
+    ``cached`` 那根往往是分钟刚开始时被缓存下来的"进行中" bar,会塌缩。"""
     from cl_app.services.kline_recompute import merge_klines_df
 
     cached = _make_klines("2024-01-01 10:00", 10)
-    # new 与 cached 的最后 3 根重叠,但 close 故意改成 999.0 用于断言"未覆盖"
+    # new 与 cached 的最前 3 根重叠,close 故意改成 999.0 用于断言"被 new 覆盖"
     new = _make_klines("2024-01-01 09:53", 10).copy()
     overlap_dates = cached["date"].iloc[:3].tolist()
     new.loc[new["date"].isin(overlap_dates), "close"] = 999.0
@@ -89,11 +90,42 @@ def test_merge_klines_df_overlap_dedup_prefers_cached():
 
     # 长度 = cached(10) + new 中独有的(7) = 17
     assert len(merged) == 17
-    # 重叠 3 根的 close 应来自 cached 而非 999.0
+    # 重叠 3 根的 close 应来自 new(999.0),而非 cached
     for d in overlap_dates:
         merged_close = merged.loc[merged["date"] == d, "close"].iloc[0]
-        cached_close = cached.loc[cached["date"] == d, "close"].iloc[0]
-        assert merged_close == cached_close, f"{d} 的重叠 K 线被新数据覆盖了"
+        assert merged_close == 999.0, f"{d} 的重叠 K 线未取 new 值"
+
+
+def test_merge_klines_df_overlap_updates_frozen_inprogress_bar():
+    """回归:重叠 bar 必须用 ``new`` 刷新,否则"进行中" bar 会被永久冻结。
+
+    真实场景:某分钟刚开始(第 1~2 秒)轮询就把那根 bar 算进缓存,此时
+    QMT 只有第一笔成交 → o=h=l=c=开盘价、量极小。之后同一/下一根轮询里
+    ``new`` 已是该 bar 更完整的状态,merge 必须让 ``new`` 覆盖 ``cached``,
+    否则每根 K 线都永远停在开盘瞬间快照(web 上 o=h=l=c 全塌缩)。
+    """
+    from cl_app.services.kline_recompute import merge_klines_df
+
+    # cached:两根都是"进行中"快照,OHLC 全塌缩成开盘价、量极小
+    cached = pd.DataFrame({
+        "date": pd.to_datetime([1700000000, 1700000060], unit="s", utc=True),
+        "open": [10.0, 20.0], "high": [10.0, 20.0], "low": [10.0, 20.0],
+        "close": [10.0, 20.0], "volume": [5, 8],
+    })
+    # new:同样两根 date,已是完整收盘 bar
+    new = pd.DataFrame({
+        "date": pd.to_datetime([1700000000, 1700000060], unit="s", utc=True),
+        "open": [10.0, 20.0], "high": [12.0, 23.0], "low": [9.0, 19.0],
+        "close": [11.0, 21.0], "volume": [5000, 8000],
+    })
+
+    merged = merge_klines_df(cached, new)
+
+    assert len(merged) == 2
+    assert merged["high"].tolist() == [12.0, 23.0], "high 未被 new 刷新,bar 仍冻结"
+    assert merged["low"].tolist() == [9.0, 19.0], "low 未被 new 刷新,bar 仍冻结"
+    assert merged["close"].tolist() == [11.0, 21.0], "close 未被 new 刷新"
+    assert merged["volume"].tolist() == [5000, 8000], "volume 未被 new 刷新"
 
 
 def test_merge_klines_df_empty_cached_returns_new():
