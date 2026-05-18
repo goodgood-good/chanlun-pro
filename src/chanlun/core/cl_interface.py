@@ -762,7 +762,9 @@ class ZS:
             'type': self.type,
             'index': self.index,
             'line_num': self.line_num,
-            'level': self.level,
+            # level 必须输出枚举 .value（与 ZSLX.to_dict 一致）；直接放 Level
+            # 枚举会让 json.dumps(zs.to_dict()) / str(zs) 抛 TypeError。
+            'level': self.level.value if self.level is not None else None,
             'done': self.done,
             'real': self.real,
         }
@@ -1069,9 +1071,9 @@ class TZXL:
             'pre_line': self.pre_line.to_dict() if self.pre_line else None,
             'line_bad': self.line_bad,
             'is_up_line': self.is_up_line,
-            'lines': [l.to_dict() for l in self.lines],
+            'lines': [_l.to_dict() for _l in self.lines],
             'done': self.done,
-            'original_lines': [l.to_dict() for l in self.original_lines],
+            'original_lines': [_l.to_dict() for _l in self.original_lines],
             'is_merged': self.is_merged,
             'max': self.max,
             'min': self.min,
