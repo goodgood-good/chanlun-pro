@@ -294,6 +294,25 @@ class ExchangeChangQiao(Exchange):
         return f"{tail}.{cls._PREFIX_TO_LB_SUFFIX[head]}"
 
     @classmethod
+    def _market_of_code(cls, code: str) -> str:
+        """从项目内部 code 派生市场标识，用于精度归一等需要 market 的场合。
+
+        格式约定（见 _PREFIX_TO_LB_SUFFIX 注释）：
+          A 股  SH.600519 / SZ.000001  → "a"
+          港股  KH.00700               → "hk"
+          美股  TSLA.US                → "us"
+        未识别格式兜底返回 "us"（与原 default_market 默认值保持一致）。
+        """
+        if not code or "." not in code:
+            return "us"
+        head = code.split(".", 1)[0].upper()
+        if head in ("SH", "SZ"):
+            return "a"
+        if head == "KH":
+            return "hk"
+        return "us"
+
+    @classmethod
     def _from_lb_symbol(cls, symbol: str) -> str:
         """长桥 symbol → 项目内部 code。美股保持 TSLA.US 不变。"""
         if not symbol or "." not in symbol:
@@ -807,7 +826,7 @@ class ExchangeChangQiao(Exchange):
             df = df.sort_values(by="date").reset_index(drop=True)
 
             df = df[["date", "frequency", "code", "open", "high", "low", "close", "volume"]]
-            df = normalize_kline_precision(df, getattr(self, "default_market", None), code)
+            df = normalize_kline_precision(df, self._market_of_code(code), code)
             return df
 
         except Exception as e:
