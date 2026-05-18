@@ -284,7 +284,11 @@ class XdCalculator:
                     seg_high = max(seg_high, all_bis[seg_end].end.val)
                 else:
                     seg_low = min(seg_low, all_bis[seg_end].end.val)
-                next_same = all_bis[check]
+                # next_same 取 check+1（同向笔）：延伸的判据是「下一根同向笔是否
+                # 创出段方向新极值」，必须看同向笔。check 本身是反向(cs)笔，其
+                # high/low 恒落在 seg_anchor 一侧，用它判延伸将永不成立（死分支）。
+                # while 条件已保证 check+1 < len(all_bis)，无需再越界检查。
+                next_same = all_bis[check + 1]
 
                 # Step 1: 延伸
                 # 延伸吃掉 [check, check+1] 两根笔，其中 check 是反向笔(cs)、check+1 是同向笔。
@@ -503,6 +507,19 @@ class XdCalculator:
             _log.debug(f"    _try_end: 笔数{end_bi_idx - seg_start + 1}<3 → 返回None")
             return None
 
+        # 方向校验：线段终点必须落在与方向一致的一侧（缠论第七节：向上线段其顶
+        # 必大于第一笔的底，反之亦然）。当段内出现巨幅反向笔使净走向反转时，
+        # _try_end 据特征序列分型算出的终点会与方向矛盾，此处拒绝该终结，让线段
+        # 在后续找到合法终点或交由 _emit_pending 收敛，杜绝输出方向矛盾的已确认段。
+        seg_anchor_val = all_bis[seg_start].start.val
+        seg_end_val = all_bis[end_bi_idx].end.val
+        if seg_type == 'up' and not (seg_end_val > seg_anchor_val):
+            _log.debug(f"    _try_end: up段终点{seg_end_val:.3f}≤起点{seg_anchor_val:.3f} 方向矛盾 → 返回None")
+            return None
+        if seg_type == 'down' and not (seg_end_val < seg_anchor_val):
+            _log.debug(f"    _try_end: down段终点{seg_end_val:.3f}≥起点{seg_anchor_val:.3f} 方向矛盾 → 返回None")
+            return None
+
         # 反向线段: 起点=当前线段终点+1, 终点=look_elems中最远的CS笔位置
         next_start = end_bi_idx + 1
         # look_elems 的最后一个元素对应反向线段已探明的最远同向笔
@@ -660,8 +677,12 @@ class XdCalculator:
         兜底路径（确保有输出）：
           若主路径选出的极值笔位置导致 pending_bis < 3 根
           （典型场景：段第一根同向笔就是全段极值，后续震荡不再突破），
-          则改用 candidates 中**最后一根**同向笔作为终点。
-          这保证了"只要 candidates 有 ≥3 根笔，就一定输出未完成段"。
+          则改用 candidates 中**最后一根**同向笔作为初选终点。
+
+        方向校验（缠论第七节，另见 tests/core/test_xd_segment_direction.py）：
+          上面选出的初选终点若使 pending 段方向矛盾（终点价落在与 seg_type
+          相反的一侧），则改在"方向合法的同向笔"中重新取方向极值；若无任何
+          方向合法的 ≥3 笔终点，则不输出（该区间不构成合法的 seg_type 线段）。
 
         缠论依据：
           已完成段由 _try_end 严格判定终点；未完成段无完整反向特征序列可用，
@@ -702,6 +723,31 @@ class XdCalculator:
 
         if len(pending_bis) < 3:
             return
+
+        # 方向校验：未完成段同样必须方向自洽（缠论第七节）。"极值优先 + 兜底
+        # 末尾同向笔"在段内出现巨幅反向笔时，兜底路径会把终点落到方向相反的
+        # 一侧。若初选 pending 段方向矛盾，则改在"方向合法（终点价落在与 seg_type
+        # 一致一侧）且笔数≥3 的同向笔"中重新取方向极值；无合法候选则不强行成段。
+        seg_anchor = candidates[0].start.val
+        _end_val = pending_bis[-1].end.val
+        _dir_ok = (_end_val > seg_anchor) if seg_type == 'up' else (_end_val < seg_anchor)
+        if not _dir_ok:
+            valid_idx = -1
+            for i in range(len(candidates)):
+                if candidates[i].type != seg_type or i + 1 < 3:
+                    continue
+                ev_i = candidates[i].end.val
+                if not ((ev_i > seg_anchor) if seg_type == 'up' else (ev_i < seg_anchor)):
+                    continue
+                if valid_idx == -1 or (
+                    (seg_type == 'up' and ev_i > candidates[valid_idx].end.val)
+                    or (seg_type == 'down' and ev_i < candidates[valid_idx].end.val)
+                ):
+                    valid_idx = i
+            if valid_idx == -1:
+                _log.debug(f"[未完成] {seg_type} 段无方向合法终点 → 不输出")
+                return
+            pending_bis = candidates[:valid_idx + 1]
 
         xd = self._make_xd(pending_bis, seg_type, done=False)
         sv, ev = pending_bis[0].start.val, pending_bis[-1].end.val
