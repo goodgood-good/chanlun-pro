@@ -9,6 +9,7 @@ from tenacity import retry, retry_if_result, stop_after_attempt, wait_random
 
 from chanlun import fun
 from chanlun.exchange.exchange import Exchange, Tick, convert_stock_kline_frequency
+from chanlun.exchange.kline_precision import normalize_kline_precision
 from chanlun.tools.log_util import LogUtil
 from xtquant import xtdata
 
@@ -306,6 +307,7 @@ class ExchangeQMT(Exchange):
             if len(klines_df) > req_counts:
                 klines_df = klines_df.iloc[-req_counts:]
 
+        klines_df = normalize_kline_precision(klines_df, "a", code)
         return klines_df
 
     def stock_info(self, code: str) -> Union[Dict, None]:

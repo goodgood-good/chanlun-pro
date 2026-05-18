@@ -10,6 +10,7 @@ except ImportError as _e:
 from chanlun import fun
 
 from chanlun.exchange.exchange import *
+from chanlun.exchange.kline_precision import normalize_kline_precision
 
 
 @fun.singleton
@@ -239,7 +240,9 @@ class ExchangeBaostock(Exchange):
             kline = new_kline.sort_values("date")
 
         kline.loc[:, "date"] = kline["date"].dt.tz_localize(self.tz)
-        return kline[["code", "date", "open", "close", "high", "low", "volume"]]
+        result = kline[["code", "date", "open", "close", "high", "low", "volume"]]
+        result = normalize_kline_precision(result, "a", code)
+        return result
 
     def ticks(self, codes: List[str]) -> Dict[str, Tick]:
         """

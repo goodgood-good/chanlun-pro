@@ -15,6 +15,7 @@ from chanlun.base import Market
 from chanlun.config import get_data_path
 from chanlun.db import db
 from chanlun.exchange.exchange import Exchange, Tick, convert_stock_kline_frequency
+from chanlun.exchange.kline_precision import normalize_kline_precision
 from chanlun.exchange.stocks_bkgn import StocksBKGN
 from chanlun.exchange.tdx_a_codes import tdx_codes_by_bj, tdx_codes_by_error
 from chanlun.file_db import FileCacheDB
@@ -300,6 +301,7 @@ class ExchangeTDX(Exchange):
                 ks = convert_stock_kline_frequency(ks, frequency)
 
             ks = ks[["code", "date", "open", "close", "high", "low", "volume"]]
+            ks = normalize_kline_precision(ks, "a", code)
             return ks
         except TdxConnectionError:
             print("连接失败，重新选择最优服务器")
