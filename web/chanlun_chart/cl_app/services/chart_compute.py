@@ -6,7 +6,8 @@ Tier 4 P3 重构：从 blueprints/tv.py 抽出 ``compute_and_cache_chart_data`` 
 包含：
 - ``_SafeLockRegistry``: weakref + 引用计数的 per-key 锁注册表
 - ``chart_calc_locks``: chart_data_cache 的 per-key 计算锁
-- ``HIGHER_MACD_RATIO`` / ``MARKET_30M_TO_D_RATIO`` / ``MARKET_D_TO_W_RATIO``: 跨周期 MACD 倍率
+- ``HIGHER_FREQ_MAP``: 跨周期 MACD 的"当前→高一级"频率映射（真实重采样）
+- ``HIGHER_MACD_RATIO`` / ``MARKET_30M_TO_D_RATIO`` / ``MARKET_D_TO_W_RATIO``: 跨周期倍率（索引分桶兜底 + lazy 判定）
 - ``_shape_time`` / ``_merge_shape_lists`` / ``_merge_chart_data``: chart 数据合并的纯函数
 - ``compute_and_cache_chart_data``: cache miss 后的完整计算路径
 
@@ -74,6 +75,26 @@ MARKET_D_TO_W_RATIO = {
     "currency": 7,       # 数字货币 7天
     "currency_spot": 7,
     "fx": 5,             # 外汇通常 5天
+}
+
+# 当前频率 → 高一级频率。MACD_HTF 真实重采样路径用它把当前 K 线归并到高周期。
+# 注意：与 _resolve_higher_macd_ratio 覆盖同一组 frequency（含高周期对照的）。
+HIGHER_FREQ_MAP = {
+    "1m": "5m",
+    "5m": "30m",
+    "30m": "d",
+    "d": "w",
+    "w": "m",
+    "m": "y",
+}
+
+# 跨 UTC 日界的市场，日级分桶需按本地时区小时偏移修正（其余默认 +8）。
+MARKET_DAY_OFFSET_H = {
+    "us": -5,
+    "ny_futures": -5,
+    "currency": 0,
+    "currency_spot": 0,
+    "fx": 0,
 }
 
 
@@ -241,7 +262,7 @@ def compute_and_cache_chart_data(market: str, code: str, frequency: str, cl_conf
     1. ``ex.klines`` 拉数据（支持 enable_kchart_low_to_high 的低周期合成高周期）
     2. ``web_batch_get_cl_datas`` 计算缠论
     3. ``cl_data_to_tv_chart`` 转 TV 图表格式
-    4. 跨周期 MACD（higher_macd_dif/dea/hist）按市场倍率放大后用 talib.MACD 计算
+    4. 跨周期 MACD（higher_macd_dif/dea/hist）按时间戳重采样到高周期后用 talib.MACD 计算
     5. ``_merge_chart_data`` 与既有缓存合并（如有）
     6. ``_set_chart_cache_entry`` 写入，``is_full_snapshot=True``
     """
@@ -430,6 +451,50 @@ def _resolve_higher_macd_ratio(frequency: str, market: str):
     return ratio
 
 
+def _resolve_higher_freq(frequency: str):
+    """返回 frequency 的高一级频率, 无对照返回 None。"""
+    return HIGHER_FREQ_MAP.get(frequency)
+
+
+def _higher_bucket_keys(times, frequency: str, market: str):
+    """把每根 K 线的时间戳映射成"高一级周期"的分桶 key (numpy int64 数组)。
+
+    key 仅用于分组: 同一高周期 K 线内 key 相同, 且随时间单调不减即可。
+      - 1m → 5m / 5m → 30m: 时间戳按秒整除
+      - 30m → d: 按(带市场时区偏移的) UTC 日整除
+      - d  → w: 按周一对齐的周序号整除
+      - w  → m / m → y: 用 datetime64 取月 / 年
+
+    时间戳缺失或非法时返回 None, 调用方据此退回"按倍率索引分桶"。
+    """
+    higher = _resolve_higher_freq(frequency)
+    if higher is None:
+        return None
+    t = np.asarray(times, dtype=np.int64)
+    if t.size == 0:
+        return None
+    # chart_data["t"] 多为秒级; 偶有毫秒级 → 归一到秒
+    if np.median(t) > 1e11:
+        t = t // 1000
+    if higher == "5m":
+        return t // 300
+    if higher == "30m":
+        return t // 1800
+    offset = MARKET_DAY_OFFSET_H.get(market, 8) * 3600
+    days = (t + offset) // 86400
+    if higher == "d":
+        return days
+    if higher == "w":
+        # 1970-01-01 是周四, +3 后整除 7 即周一对齐的周序号
+        return (days + 3) // 7
+    dt = t.astype("datetime64[s]")
+    if higher == "m":
+        return dt.astype("datetime64[M]").astype(np.int64)
+    if higher == "y":
+        return dt.astype("datetime64[Y]").astype(np.int64)
+    return None
+
+
 def apply_higher_macd_to_chart_data(
     chart_data: dict,
     frequency: str,
@@ -438,51 +503,95 @@ def apply_higher_macd_to_chart_data(
 ) -> bool:
     """计算并 in-place 写入 chart_data 的 higher_macd_dif/dea/hist 字段。
 
-    跨周期 MACD 思路: 用 frequency × ratio 放大 fast/slow/signal 周期, 在原
-    close 序列上跑 talib.MACD, 输出对齐到 chart_data["c"] 长度。
+    跨周期 MACD 思路 (真实重采样): 按时间戳把当前周期 K 线归并到高一级周期
+    (1m→5m / 5m→30m / 30m→d / d→w / w→m / m→y), 取每桶最后一根 close 作为
+    高周期收盘价, 在高周期 close 序列上用原始 fast/slow/signal 算 MACD。
+
+    桶内逐根: 在相邻两个高周期桶的真值之间, 按 bar 位置做线性插值。桶末根严格
+    等于真高周期 MACD, 桶内是平滑过渡的直线段 —— 与高周期图上 MACD 折线的形状
+    一致; 既不会出现"连续 5 根一样"的阶梯, 也不会因把 1m 收盘价噪声画进线里而
+    锯齿抖动。这样 1m 上显示的就是真实 5m 的 MACD、5m 显示真实 30m, 以此类推。
+
+    (旧实现是"参数 × 倍率"的近似: 在当前周期 close 上拉长 EMA 周期, 与真高周期
+    存在零轴附近翻转等偏差, 故改为真实重采样。)
 
     Args:
-        chart_data: 已含 "c" 字段的 chart_data dict, 本函数 in-place 修改
-                   并加入 higher_macd_* 字段; ratio 为 None 时不修改 dict。
-        frequency: 当前 K 线周期 (1m / 5m / ... / d / w / m)
-        market: 市场标识 (用于 30m_TO_D / D_TO_W 倍率特殊处理)
+        chart_data: 已含 "c" 字段的 chart_data dict; 若含等长 "t" 字段则按时间戳
+                   分桶, 否则退回按倍率索引分桶。本函数 in-place 加入 higher_macd_*。
+        frequency: 当前 K 线周期 (1m / 5m / 30m / d / w / m)
+        market: 市场标识 (用于日级分桶的时区偏移)
         cl_config: 缠论配置 (取 idx_macd_fast/slow/signal, 默认 12/26/9)
 
     Returns:
         bool: True 表示已写入 higher_macd_* 字段; False 表示未写入
-              (无倍率 / bar 数不足 / 计算异常)。调用方据此决定是否回写缓存。
+              (无高周期对照 / 桶数不足 / 计算异常)。调用方据此决定是否回写缓存。
     """
-    ratio = _resolve_higher_macd_ratio(frequency, market)
-    if ratio is None:
+    if _resolve_higher_freq(frequency) is None:
         return False  # 该 frequency 无高周期对照, 不做事
 
     try:
-        closes = np.array(chart_data.get("c", []), dtype=float)
-        fast = int(cl_config.get("idx_macd_fast", 12)) * ratio
-        slow = int(cl_config.get("idx_macd_slow", 26)) * ratio
-        signal = int(cl_config.get("idx_macd_signal", 9)) * ratio
-        # 确保有足够的 bar 数量用于 MACD 计算 (至少 slow+signal 根 K 线)
-        min_bars = slow + signal
-        if len(closes) <= min_bars:
-            return False  # bar 数不足以算高周期 MACD, 不写字段
-        h_dif, h_dea, h_hist = talib.MACD(
-            closes, fastperiod=fast, slowperiod=slow, signalperiod=signal,
+        closes = np.asarray(chart_data.get("c", []), dtype=float)
+        n = closes.size
+        if n == 0:
+            return False
+
+        # 分桶: 优先按时间戳; 时间戳不可用时退回按倍率索引分桶
+        times = chart_data.get("t") or []
+        keys = None
+        if len(times) == n:
+            keys = _higher_bucket_keys(times, frequency, market)
+        if keys is None:
+            ratio = _resolve_higher_macd_ratio(frequency, market)
+            if ratio is None:
+                return False
+            keys = np.arange(n, dtype=np.int64) // ratio
+
+        # keys 单调不减 → 桶边界 = key 变化处; bucket_idx[i] = 第 i 根所属桶序号
+        boundaries = np.concatenate(([True], keys[1:] != keys[:-1]))
+        bucket_idx = np.cumsum(boundaries) - 1
+        bucket_count = int(bucket_idx[-1]) + 1
+
+        fast = int(cl_config.get("idx_macd_fast", 12))
+        slow = int(cl_config.get("idx_macd_slow", 26))
+        signal = int(cl_config.get("idx_macd_signal", 9))
+        # talib.MACD 至少需要 slow+signal 根高周期 K 线才有非 NaN 输出
+        if bucket_count <= slow + signal:
+            return False
+
+        # 每桶取最后一根 bar 的 close 作为高周期 K 线收盘价
+        # (后写覆盖前写 → last_pos[b] 落在桶 b 的最后一根)
+        last_pos = np.zeros(bucket_count, dtype=np.int64)
+        last_pos[bucket_idx] = np.arange(n)
+        htf_closes = closes[last_pos]
+
+        # 高周期逐桶 MACD (权威值; talib.MACD 三线统一从 slow+signal-2 起非 NaN)
+        macd_b, dea_b, _ = talib.MACD(
+            htf_closes, fastperiod=fast, slowperiod=slow, signalperiod=signal,
         )
-        h_dif_rounded = np.round(h_dif, 6)
-        h_dea_rounded = np.round(h_dea, 6)
-        h_hist_rounded = np.round(h_hist, 6)
-        chart_data["higher_macd_dif"] = np.where(
-            np.isnan(h_dif_rounded), None, h_dif_rounded
-        ).tolist()
-        chart_data["higher_macd_dea"] = np.where(
-            np.isnan(h_dea_rounded), None, h_dea_rounded
-        ).tolist()
-        chart_data["higher_macd_hist"] = np.where(
-            np.isnan(h_hist_rounded), None, h_hist_rounded
-        ).tolist()
+
+        # 桶内逐根: 把真高周期 MACD 视作"定位在每个桶末根"的点, 相邻两点之间按
+        # bar 位置线性插值。桶末根落在插值锚点上 → 严格等于真高周期 MACD; 桶内
+        # 是平滑直线段, 不阶梯也不锯齿。hist 由插值后的 dif/dea 相减得到, 因线性
+        # 插值对减法可交换, 等价于对真 hist 插值, 故三线自洽。
+        valid = ~np.isnan(macd_b)
+        if int(valid.sum()) < 2:
+            return False  # 有效高周期桶不足以插值
+        anchor_x = last_pos[valid].astype(float)  # 各有效桶的桶末根下标
+        bars = np.arange(n, dtype=float)
+        # 首个有效桶之前的 bar 置 NaN; 末桶锚点即 n-1, 不会发生右外推
+        dif = np.interp(bars, anchor_x, macd_b[valid], left=np.nan)
+        dea = np.interp(bars, anchor_x, dea_b[valid], left=np.nan)
+        hist = dif - dea
+
+        dif = np.round(dif, 6)
+        dea = np.round(dea, 6)
+        hist = np.round(hist, 6)
+        chart_data["higher_macd_dif"] = np.where(np.isnan(dif), None, dif).tolist()
+        chart_data["higher_macd_dea"] = np.where(np.isnan(dea), None, dea).tolist()
+        chart_data["higher_macd_hist"] = np.where(np.isnan(hist), None, hist).tolist()
         return True
     except Exception as e:
-        LogUtil.error(f"[apply_higher_macd] Scaled MACD calc failed: {e}")
+        LogUtil.error(f"[apply_higher_macd] HTF resample MACD calc failed: {e}")
         return False
 
 
