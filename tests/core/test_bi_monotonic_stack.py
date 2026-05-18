@@ -3,6 +3,7 @@
 覆盖:
 - 单元: _build_endpoint_stack 的弹出 / 不弹 / 同类压缩 / 栈不足四条路径。
 - 回归: 513100 真实 1m 行情, 验证 14:27 修复 + 09:31 保持原著。
+- 增量等价: 513100 分批喂入与全量 process_klines 的 cl_snapshot 一致性。
 
 fixture 用 parquet (非 csv): csv 往返的 ~4e-16 浮点噪声会让缠论包含处理
 的笔结果漂移, parquet 二进制存 float64 可 bit-exact 复现生产数据。
