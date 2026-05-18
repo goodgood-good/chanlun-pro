@@ -107,8 +107,18 @@ class LogUtil:
 
     @staticmethod
     def debug(message, *args, **kwargs):
+        # message 支持传入「无参可调用对象」以延迟构建：仅当 DEBUG 真正开启
+        # 时才求值。logger.debug 内部的 isEnabledFor 短路只能省掉格式化与
+        # handler 派发，省不掉调用点已经 eager 构建好的 f-string —— 故热路径
+        # （如线段计算）用 LogUtil.debug(lambda: f"...") 把 f-string 的构建
+        # 也一并延迟（实测线段计算中此项一度占 ~41% 耗时）。
+        logger = LogUtil.get_logger()
+        if callable(message):
+            if not logger.isEnabledFor(logging.DEBUG):
+                return
+            message = message()
         kwargs.setdefault("stacklevel", LogUtil._STACKLEVEL)
-        LogUtil.get_logger().debug(message, *args, **kwargs)
+        logger.debug(message, *args, **kwargs)
 
     @staticmethod
     def info(message, *args, **kwargs):

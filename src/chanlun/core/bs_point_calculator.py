@@ -244,7 +244,7 @@ class BsPointCalculator:
                 key = (now_line.type, valid_zss[-1].index)
                 last_idx = last_signal_xd_idx.get(key)
                 if last_idx is not None and (now_line.index - last_idx) < self.min_signal_interval:
-                    LogUtil.debug(
+                    LogUtil.debug(lambda:
                         f"[BsPointCalculator] {mmd_name} 因最小间隔过滤跳过: "
                         f"line.index={now_line.index}, last_idx={last_idx}, "
                         f"interval={now_line.index - last_idx} < {self.min_signal_interval}"
@@ -273,7 +273,7 @@ class BsPointCalculator:
                     f'index={compare_lines[0].index} 的同向段力度衰减'
                 ),
             )
-            LogUtil.debug(
+            LogUtil.debug(lambda:
                 f"[BsPointCalculator] 识别到 {mmd_name}: line.index={now_line.index}, "
                 f"compare_idx={compare_lines[0].index}, zs.index={ref_zs.index}"
             )
@@ -399,7 +399,7 @@ class BsPointCalculator:
                     zs_type=self.zs_type,
                     msg=msg,
                 )
-                LogUtil.debug(
+                LogUtil.debug(lambda:
                     f"[BsPointCalculator] 识别到 {mmd_name}: line.index={now_line.index}, "
                     f"prev_1line.index={prev_1line.index}, msg={msg}"
                 )
@@ -502,7 +502,7 @@ class BsPointCalculator:
                 zs_type=self.zs_type,
                 msg=msg,
             )
-            LogUtil.debug(
+            LogUtil.debug(lambda:
                 f"[BsPointCalculator] 识别到 {mmd_name}: line.index={now_line.index}, "
                 f"zs.index={related_zs.index}, msg={msg}"
             )

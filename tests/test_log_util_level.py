@@ -2,8 +2,6 @@
 import importlib
 import logging
 
-import pytest
-
 
 def _fresh_logutil(monkeypatch, env: dict):
     """重置 LogUtil 单例并按 env 重新初始化，返回 (LogUtil, logger)。"""
@@ -44,3 +42,46 @@ def test_warning_and_error_always_pass(monkeypatch):
     _LogUtil, logger = _fresh_logutil(monkeypatch, {})
     assert logger.isEnabledFor(logging.WARNING) is True
     assert logger.isEnabledFor(logging.ERROR) is True
+
+
+class _ListHandler(logging.Handler):
+    """把 emit 到的日志消息收集进列表，供断言。"""
+
+    def __init__(self):
+        super().__init__(level=logging.DEBUG)
+        self.msgs = []
+
+    def emit(self, record):
+        self.msgs.append(record.getMessage())
+
+
+def test_debug_lazy_callable_invoked_when_enabled(monkeypatch):
+    """LOG_LEVEL=DEBUG 时，LogUtil.debug 传入的 callable 会被求值，返回值被记录。"""
+    LogUtil, logger = _fresh_logutil(monkeypatch, {"LOG_LEVEL": "DEBUG"})
+    cap = _ListHandler()
+    logger.addHandler(cap)
+    LogUtil.debug(lambda: "lazy-msg-xyz")
+    assert any("lazy-msg-xyz" in m for m in cap.msgs)
+
+
+def test_debug_lazy_callable_skipped_when_disabled(monkeypatch):
+    """默认 INFO（DEBUG 关闭）时，LogUtil.debug 的 callable 不被求值——
+    这是热路径零开销的关键：连 f-string 的构建都被彻底跳过。"""
+    LogUtil, _logger = _fresh_logutil(monkeypatch, {})
+    invoked = []
+
+    def _payload():
+        invoked.append(1)
+        return "should-not-be-built"
+
+    LogUtil.debug(_payload)
+    assert invoked == [], "DEBUG 关闭时 lazy 回调不应被求值"
+
+
+def test_debug_plain_message_still_works(monkeypatch):
+    """向后兼容：普通字符串 message 在 DEBUG 开启时照常记录。"""
+    LogUtil, logger = _fresh_logutil(monkeypatch, {"LOG_LEVEL": "DEBUG"})
+    cap = _ListHandler()
+    logger.addHandler(cap)
+    LogUtil.debug("plain-msg-abc")
+    assert any("plain-msg-abc" in m for m in cap.msgs)
