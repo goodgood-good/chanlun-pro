@@ -31,6 +31,9 @@ def _a_share_decimals(code: str) -> int:
 
     沪市股票 6 开头、深市 0/3 开头、北交所 4/8 开头 → 股票；
     沪市基金/转债 5x/11x/13x、深市基金/转债 15x/16x/18x/12x → 首位 1 或 5。
+
+    数字首位 ∈ {1,5} → 基金/转债；其余首位(0,2,3,4,6,7,8,9) 一律 → 股票（默认）。
+    无数字字符（空串或纯字母代码）亦走默认分支，返回股票精度（2 位）。
     """
     digits = "".join(ch for ch in code if ch.isdigit())
     if digits and digits[0] in ("1", "5"):
@@ -38,7 +41,7 @@ def _a_share_decimals(code: str) -> int:
     return _A_STOCK_DECIMALS
 
 
-def resolve_decimals(market: str, code: str) -> Optional[int]:
+def resolve_decimals(market: Optional[str], code: str) -> Optional[int]:
     """解析某标的的目标小数位数；未知市场返回 None。"""
     if market == "a":
         return _a_share_decimals(code)

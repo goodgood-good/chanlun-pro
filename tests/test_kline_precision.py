@@ -29,3 +29,9 @@ def test_market_defaults():
 
 def test_unknown_market_returns_none():
     assert resolve_decimals("mars", "X") is None
+
+
+def test_a_share_no_digit_code_falls_back_to_stock():
+    # 无数字的异常/内部代码默认按股票精度（2 位）处理
+    assert resolve_decimals("a", "NODIGIT") == 2
+    assert resolve_decimals("a", "") == 2
