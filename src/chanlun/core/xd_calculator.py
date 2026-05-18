@@ -54,45 +54,30 @@ def _merge_two(prev: dict, cur: dict, direction: str) -> dict:
     }
 
 
-def _process_inclusion(elems: List[dict], direction: str) -> List[dict]:
+def _build_standard_seq(elems: List[dict], direction: str) -> List[dict]:
+    """对特征序列元素做标准包含处理（缠论第七节：特征序列元素当 K 线做
+    非包含处理，得到标准特征序列）。
+
+    逐元素扫描：与标准序列末元素存在包含关系即按 ``direction`` 合并
+    （'up' 取高高低高 / 'down' 取低低高低），否则追加。口径与 ``_try_end``
+    收集 ``second_elems``、``_check_type2`` 收集 ``cs2_elems`` 完全一致
+    （单步合并），因此「转折点前的原段特征序列」与「转折点后的反向序列」
+    用同一套包含规则。
+
+    Args:
+        elems: 特征序列元素（``_bi_to_cs_elem`` 产出的 dict）。
+        direction: 包含处理方向（取线段方向）。
+
+    Returns:
+        标准特征序列（已非包含处理）。
     """
-    特征序列包含处理（趋势感知版）。
-
-    规则:
-      - 当CS元素沿趋势方向持续创新极值时（up段CS的high不断升高/down段CS的low不断降低），
-        不做包含合并，直接追加。
-      - 当极值不再创新（拐点）时，对拐点处的元素与前一个元素做包含合并，
-        合并后向前级联（可能继续与更前面的元素合并）。
-    """
-    if len(elems) < 2:
-        return list(elems)
-
-    result = [elems[0].copy()]
-    for i in range(1, len(elems)):
-        cur = elems[i]
-        prev = result[-1]
-
-        # 判断是否仍在趋势中（持续创新极值）
-        if direction == 'up':
-            still_trending = cur['high'] > prev['high']
+    std: List[dict] = []
+    for elem in elems:
+        if std and _has_inclusion(std[-1], elem):
+            std[-1] = _merge_two(std[-1], elem, direction)
         else:
-            still_trending = cur['low'] < prev['low']
-
-        if still_trending:
-            result.append(cur.copy())
-        else:
-            # 拐点：检查包含并合并
-            if _has_inclusion(prev, cur):
-                result[-1] = _merge_two(prev, cur, direction)
-                # 级联：合并后可能与更前面的元素产生包含
-                while len(result) >= 2 and _has_inclusion(result[-2], result[-1]):
-                    merged = _merge_two(result[-2], result[-1], direction)
-                    result.pop()
-                    result[-1] = merged
-            else:
-                result.append(cur.copy())
-
-    return result
+            std.append(elem)
+    return std
 
 
 def _resolve_pivot_bi(elem: dict, seg_type: str):
@@ -396,20 +381,23 @@ class XdCalculator:
         _log.debug(f"    _try_end: 段内CS={len(seg_cs_bis)}根, 当前CS笔={_bi_label(current_cs_bi)}")
 
         # ---- 步骤2 ----
-        if len(seg_cs_bis) >= 2:
-            std_seg = _process_inclusion([_bi_to_cs_elem(bi) for bi in seg_cs_bis[:-1]], inc_dir)
-            std_seg.append(_bi_to_cs_elem(seg_cs_bis[-1]))
-        else:
-            std_seg = [_bi_to_cs_elem(seg_cs_bis[0])]
-        has_gap = not _overlap(std_seg[-1], current_cs_bi)
-        _log.debug(f"    _try_end: 包含处理后std_seg={len(std_seg)}个, 缺口={'有' if has_gap else '无'} → {'第二种' if has_gap else '第一种'}")
+        # 原段标准特征序列：对完整 seg_cs_bis 做标准包含处理（缠论第七节——
+        # 特征序列元素当 K 线做非包含处理）。first_elem（特征序列分型的第一
+        # 元素 / 左肩）取标准序列的末元素。
+        # 注意：不能用未经包含处理的原始末笔——若原段末两个特征元素存在
+        # 吞没式包含，原始末笔会让 first_elem 偏小（up 段）/偏大（down 段）、
+        # 顶/底分型判据偏松，导致线段被系统性提前终结（见 #2）。
+        orig_std = _build_standard_seq(
+            [_bi_to_cs_elem(bi) for bi in seg_cs_bis], inc_dir
+        )
+        # first_elem 取出后冻结：缠论「假设转折点前后的两个元素不可做包含
+        # 处理」——它不与转折点后的 second_elems 合并；但在原段内部，它已
+        # 与原段其它特征元素一并做过标准包含处理（即上面的 orig_std）。
+        first_elem = orig_std[-1]
+        has_gap = not _overlap(first_elem, current_cs_bi)
+        _log.debug(f"    _try_end: 原段标准特征序列={len(orig_std)}个, 缺口={'有' if has_gap else '无'} → {'第二种' if has_gap else '第一种'}")
 
         # ---- 步骤3 ----
-        # 第一元素（属于原段的最后一根CS笔）从 std_seg 中取出冻结，
-        # 按缠论 R8/章节 5.2："假设转折点前后的两个元素不可做包含处理"
-        # 因此 first_elem 不能与后续收集到的元素（属于反向段或原段延续，性质未定）合并。
-        # 只有 second_elems（look_elems[1:]）内部可以做包含处理。
-        first_elem = std_seg.pop(-1)
         second_elems: List[dict] = []
         # 步骤4 需要构成分型 (first_elem, second_elems[0], second_elems[1])，
         # 因此本步骤必须至少收集到 2 个 second_elems（包含合并后），
@@ -447,45 +435,29 @@ class XdCalculator:
             i += 1
         look_elems = [first_elem] + second_elems
 
-        if not look_elems:
-            return None
-
         # ---- 步骤4 ----
-        # 按缠论原文章节 7.1：
-        #   "取分界点前线段的最后一个特征元素（第一元素）
-        #    取从转折点开始的第一笔（第二元素）"
-        # 也即特征序列分型的结构是固定的：
-        #   左肩 = 第一元素 = first_elem        → combined 中位置 = len(std_seg)
-        #   中心 = 第二元素 = second_elems[0]   → combined 中位置 = len(std_seg) + 1
-        #   右肩 = 第三元素 = second_elems[1]   → combined 中位置 = len(std_seg) + 2
-        # 因此分型中心点的位置是固定的，不能在整个 combined 中贪心搜索任意位置。
-        # 否则会错误地把 first_elem 之前的 std_seg 元素当成分型中心，违反 R8/章节 5.2
-        # （第一元素属于原段，不能与反向段元素一起参与分型判定）。
-        combined = std_seg + look_elems
-        if len(combined) < 3:
-            _log.debug(f"    _try_end: combined={len(combined)}个 < 3 → 不足以判断分型")
+        # 特征序列分型的三元素结构固定（缠论章节 7.1）：
+        #   左肩 = 第一元素 = first_elem      = look_elems[0]
+        #   中心 = 第二元素 = second_elems[0] = look_elems[1]
+        #   右肩 = 第三元素 = second_elems[1] = look_elems[2]
+        # 分型中心固定为第二元素，不在序列里贪心搜索——first_elem 属于原段，
+        # 不能被当成分型中心（缠论：第一元素不与反向段元素一起参与判型）。
+        if len(look_elems) < 3:
+            _log.debug(f"    _try_end: look_elems={len(look_elems)}个<3（second_elems<2）→ 无法判定{frac_name}")
             return None
-        # 分型中心固定为第二元素的位置：left=first_elem, mid=second_elems[0], right=second_elems[1]
-        mid_pos = len(std_seg) + 1  # = combined 中 second_elems[0] 的索引
-        if mid_pos + 1 >= len(combined):
-            # second_elems 不足 2 个，无法判定分型
-            elems_str = " ".join(_elem_label(e) for e in combined)
-            _log.debug(f"    _try_end: combined=[{elems_str}] → second_elems<2,无法判定{frac_name}")
-            return None
-        left, mid, right = combined[mid_pos - 1], combined[mid_pos], combined[mid_pos + 1]
+        left, mid, right = look_elems[0], look_elems[1], look_elems[2]
         if seg_type == 'up':
             is_frac = mid['high'] > left['high'] and mid['high'] > right['high']
         else:
             is_frac = mid['low'] < left['low'] and mid['low'] < right['low']
-        elems_str = " ".join(_elem_label(e) for e in combined)
+        elems_str = " ".join(_elem_label(e) for e in look_elems)
         if not is_frac:
-            _log.debug(f"    _try_end: combined=[{elems_str}] mid_pos={mid_pos} → 无{frac_name}")
+            _log.debug(f"    _try_end: look_elems=[{elems_str}] → 无{frac_name}")
             return None
-        frac_idx = mid_pos
-        _log.debug(f"    _try_end: combined=[{elems_str}] → {frac_name}在[{frac_idx}](固定第二元素位置)")
+        _log.debug(f"    _try_end: look_elems=[{elems_str}] → {frac_name}成立（中心=第二元素）")
 
         # ---- 步骤5 ----
-        mid_elem = combined[frac_idx]
+        mid_elem = look_elems[1]
         if has_gap:
             _log.debug("    _try_end: 第二种情况,进入_check_type2验证...")
             if not self._check_type2(all_bis, mid_elem, seg_type):
