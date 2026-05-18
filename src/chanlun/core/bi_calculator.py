@@ -77,25 +77,6 @@ class BiCalculator:
             fxs.append(current_fx)
         return fxs
 
-    def _compress_fxs(self, fxs: List[FX]) -> List[FX]:
-        """
-        压缩连续同类分型，只保留更极端的那个。
-
-        这样可以避免首笔构造阶段被连续同类分型干扰，但不会跨越中间的反向分型。
-        """
-        effective_fxs: List[FX] = []
-        for fx in fxs:
-            if not effective_fxs:
-                effective_fxs.append(fx)
-                continue
-
-            last_fx = effective_fxs[-1]
-            if last_fx.type == fx.type:
-                if self._is_more_extreme(fx, last_fx):
-                    effective_fxs[-1] = fx
-            else:
-                effective_fxs.append(fx)
-        return effective_fxs
 
     def _create_bi(self, start_fx: FX, end_fx: FX, index: int, done: bool) -> BI:
         bi_type = 'up' if start_fx.type == 'di' else 'down'
@@ -117,50 +98,64 @@ class BiCalculator:
         if self.pending_bi is not None:
             self.bis.append(self.pending_bi)
 
+    def _build_endpoint_stack(self, fxs: List[FX]) -> List[FX]:
+        """单调栈构造笔端点序列。
+
+        按缠论原著第六节「笔」[119][123]：
+        - 同类分型取极值压缩；
+        - 异类不成笔时，若栈顶是被新分型与其同类前驱夹击的「多余端点」
+          则弹出，否则（栈顶是创新高/新低的真端点，或新分型不够极端）
+          丢弃新分型。
+
+        隔夜跳空导致的「真顶/真底贴太近」(如顶底分型共用 K 线) 会落入
+        「丢弃新分型」分支，保持原著严格老笔行为。
+        """
+        stack: List[FX] = []
+        for fx in fxs:
+            while True:
+                if not stack:
+                    stack.append(fx)
+                    break
+                last = stack[-1]
+                if fx.type == last.type:
+                    # 情形①：同类，保留更极端者
+                    if self._is_more_extreme(fx, last):
+                        stack.pop()
+                        continue
+                    break
+                if self._check_stroke_validity(last, fx):
+                    # 情形②：异类成笔
+                    stack.append(fx)
+                    break
+                # 情形③：异类不成笔
+                if len(stack) < 3:
+                    break  # R1：栈不足，无法判定，丢弃 fx
+                prev = stack[-2]
+                a = stack[-3]
+                if self._is_more_extreme(last, a):
+                    break  # last 是创新高/新低的真端点 → 丢弃 fx
+                if not self._is_more_extreme(fx, prev):
+                    break  # fx 不够格取代 prev → 丢弃 fx
+                # last 被 fx 与 prev 夹击、显得多余 → 弹出 last 与 prev
+                stack.pop()
+                stack.pop()
+                continue
+        return stack
+
     def _rebuild_from_fxs(self, fxs: List[FX]):
-        """从分型列表全量重放笔状态机，重建 confirmed_bis 与 pending_bi。"""
+        """从分型列表用单调栈重建 confirmed_bis 与 pending_bi。"""
         self.confirmed_bis = []
         self.pending_bi = None
 
-        effective_fxs = self._compress_fxs(fxs)
-        next_bi_index = 0
+        endpoints = self._build_endpoint_stack(fxs)
 
-        for fx_pos, current_fx in enumerate(effective_fxs):
-            if self.pending_bi is None:
-                start_fx = None
-                if self.confirmed_bis:
-                    start_fx = self.confirmed_bis[-1].end
-                elif fx_pos > 0:
-                    start_fx = effective_fxs[fx_pos - 1]
+        bis: List[BI] = []
+        for i in range(len(endpoints) - 1):
+            bis.append(self._create_bi(endpoints[i], endpoints[i + 1], i, False))
 
-                if start_fx and self._check_stroke_validity(start_fx, current_fx):
-                    self.pending_bi = self._create_bi(start_fx, current_fx, next_bi_index, False)
-                    next_bi_index += 1
-                continue
-
-            end_fx_of_pending = self.pending_bi.end
-
-            if current_fx.type == end_fx_of_pending.type:
-                if self._is_more_extreme(current_fx, end_fx_of_pending):
-                    self.pending_bi.end = current_fx
-                    self.pending_bi.end.done = False
-                continue
-
-            if self._check_stroke_validity(end_fx_of_pending, current_fx):
-                self.pending_bi.end.done = True
-                self.confirmed_bis.append(self.pending_bi)
-
-                start_fx_new = self.pending_bi.end
-                self.pending_bi = self._create_bi(start_fx_new, current_fx, next_bi_index, False)
-                next_bi_index += 1
-                continue
-
-            # 异类分型但不满足成笔条件。
-            # 若无已确认笔且该分型比 pending 起点更极端，
-            # 则按理论要求放弃当前 pending（起点被更极端的同类分型取代）。
-            if (not self.confirmed_bis
-                    and self._is_more_extreme(current_fx, self.pending_bi.start)):
-                self.pending_bi = None
+        if bis:
+            self.confirmed_bis = bis[:-1]
+            self.pending_bi = bis[-1]
 
         self._reindex_bis()
 
