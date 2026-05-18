@@ -1,4 +1,6 @@
-from chanlun.exchange.kline_precision import resolve_decimals
+import math
+
+from chanlun.exchange.kline_precision import _round_half_up, resolve_decimals
 
 
 def test_a_share_stock_is_2_decimals():
@@ -35,3 +37,26 @@ def test_a_share_no_digit_code_falls_back_to_stock():
     # 无数字的异常/内部代码默认按股票精度（2 位）处理
     assert resolve_decimals("a", "NODIGIT") == 2
     assert resolve_decimals("a", "") == 2
+
+
+def test_round_half_up_rounds_5_upward():
+    # 银行家舍入会逢偶取偶；ROUND_HALF_UP 一律进位
+    assert _round_half_up(1.2345, 3) == 1.235
+    assert _round_half_up(0.0625, 3) == 0.063
+    assert _round_half_up(2.0005, 3) == 2.001
+
+
+def test_round_half_up_truncates_extra_decimals():
+    assert _round_half_up(12.3456789, 3) == 12.346
+    assert _round_half_up(12.3454, 3) == 12.345
+
+
+def test_round_half_up_kills_float_noise():
+    # 远小于 1e-3、但高于 float64 ULP 的噪声，归一后必须 bit-exact 等于干净值
+    assert _round_half_up(3.21 + 1e-9, 3) == 3.21
+    assert _round_half_up(12.345 - 1e-9, 3) == 12.345
+
+
+def test_round_half_up_passes_through_non_finite():
+    assert math.isnan(_round_half_up(float("nan"), 3))
+    assert _round_half_up(None, 3) is None

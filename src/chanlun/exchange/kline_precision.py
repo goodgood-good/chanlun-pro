@@ -46,3 +46,21 @@ def resolve_decimals(market: Optional[str], code: str) -> Optional[int]:
     if market == "a":
         return _a_share_decimals(code)
     return _MARKET_DECIMALS.get(market)
+
+
+def _round_half_up(value, decimals: int):
+    """对单个数值做严格四舍五入（ROUND_HALF_UP）。
+
+    None / NaN / inf 等非有限值原样返回。任何转换异常也原样返回，
+    保证归一不会破坏数据。
+    """
+    if value is None:
+        return value
+    try:
+        d = Decimal(str(value))
+    except (ValueError, ArithmeticError):
+        return value
+    if not d.is_finite():
+        return value
+    quant = Decimal(1).scaleb(-decimals)  # 10^-decimals，如 decimals=3 → 0.001
+    return float(d.quantize(quant, rounding=ROUND_HALF_UP))
