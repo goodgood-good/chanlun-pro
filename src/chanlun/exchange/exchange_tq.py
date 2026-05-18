@@ -19,6 +19,7 @@ from tenacity import retry, retry_if_result, stop_after_attempt, wait_random
 
 from chanlun import config, fun
 from chanlun.exchange.exchange import Exchange, Tick
+from chanlun.exchange.kline_precision import normalize_kline_precision
 
 
 @fun.singleton
@@ -295,7 +296,8 @@ class ExchangeTq(Exchange):
         klines["date"] = klines["date"].dt.tz_localize(self.tz)
         klines.loc[:, "code"] = code
 
-        return klines[["code", "date", "open", "close", "high", "low", "volume"]]
+        klines = normalize_kline_precision(klines[["code", "date", "open", "close", "high", "low", "volume"]], "futures", code)
+        return klines
 
     def ticks(self, codes: List[str]) -> Dict[str, Tick]:
         """订阅代码列表并返回最新 Tick，数据由子线程异步推送更新。"""

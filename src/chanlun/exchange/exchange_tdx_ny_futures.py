@@ -12,6 +12,7 @@ from chanlun import fun
 from chanlun.base import Market
 from chanlun.db import db
 from chanlun.exchange.exchange import Exchange, Tick
+from chanlun.exchange.kline_precision import normalize_kline_precision
 from chanlun.file_db import FileCacheDB
 from chanlun.tools import tdx_best_ip as best_ip
 
@@ -244,7 +245,8 @@ class ExchangeTDXNYFutures(Exchange):
 
             klines[["volume"]] = klines[["volume"]].astype(float)
 
-            return klines[["code", "date", "open", "close", "high", "low", "volume"]]
+            klines = normalize_kline_precision(klines[["code", "date", "open", "close", "high", "low", "volume"]], "ny_futures", code)
+            return klines
         except TdxConnectionError:
             self.reset_tdx_ip()
         except Exception as e:

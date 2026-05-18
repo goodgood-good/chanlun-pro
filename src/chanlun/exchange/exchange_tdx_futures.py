@@ -17,6 +17,7 @@ from chanlun.exchange.exchange import (
     Tick,
     convert_tdx_futures_kline_frequency,
 )
+from chanlun.exchange.kline_precision import normalize_kline_precision
 from chanlun.file_db import FileCacheDB
 from chanlun.tools import tdx_best_ip as best_ip
 
@@ -280,7 +281,8 @@ class ExchangeTDXFutures(Exchange):
             if frequency in ["2m", "3m"]:
                 klines = convert_tdx_futures_kline_frequency(klines, frequency)
 
-            return klines[["code", "date", "open", "close", "high", "low", "volume"]]
+            klines = normalize_kline_precision(klines[["code", "date", "open", "close", "high", "low", "volume"]], "futures", code)
+            return klines
         except TdxConnectionError:
             self.reset_tdx_ip()
         except Exception as e:
