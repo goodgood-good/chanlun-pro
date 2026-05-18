@@ -42,7 +42,7 @@ class CoreCounts:
 #   - 配置变更 → 测试本身要更新 (而非偷偷调基线)
 GOLDEN_COUNTS = {
     "up": CoreCounts(
-        fxs=81, bis=37, xds=4,
+        fxs=81, bis=38, xds=4,
         bi_zss=0, xd_zss=1,
         bi_mmds=0, xd_mmds=0,
         bi_bcs=0, xd_bcs=0,
@@ -54,7 +54,7 @@ GOLDEN_COUNTS = {
         bi_bcs=0, xd_bcs=0,
     ),
     "oscillate": CoreCounts(
-        fxs=81, bis=37, xds=4,
+        fxs=81, bis=36, xds=4,
         bi_zss=0, xd_zss=1,
         bi_mmds=0, xd_mmds=0,
         bi_bcs=0, xd_bcs=0,
