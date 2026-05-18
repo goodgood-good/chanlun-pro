@@ -1,0 +1,45 @@
+"""K 线 OHLC 精度归一化。
+
+按标的所在市场/类型的主流精度，对 open/high/low/close 做严格四舍五入
+（ROUND_HALF_UP），消除不同数据源间的精度差异与浮点噪声。
+
+接入点：各 exchange_*.py 适配器的 klines() 在 return 前调用
+normalize_kline_precision()。设计文档见
+docs/superpowers/specs/2026-05-18-kline-precision-normalization-design.md
+"""
+
+from decimal import ROUND_HALF_UP, Decimal
+from typing import Optional
+
+# 各市场默认 OHLC 小数位数（A股 见 _a_share_decimals 按子类型区分）
+_MARKET_DECIMALS = {
+    "hk": 3,
+    "us": 3,
+    "futures": 3,
+    "ny_futures": 3,
+    "fx": 5,
+    "currency": 8,
+    "currency_spot": 8,
+}
+
+_A_STOCK_DECIMALS = 2  # A股 股票
+_A_FUND_DECIMALS = 3   # A股 ETF/基金/可转债
+
+
+def _a_share_decimals(code: str) -> int:
+    """A股：代码数字部分首位 ∈ {1,5} 为基金/ETF/可转债（3 位），其余为股票（2 位）。
+
+    沪市股票 6 开头、深市 0/3 开头、北交所 4/8 开头 → 股票；
+    沪市基金/转债 5x/11x/13x、深市基金/转债 15x/16x/18x/12x → 首位 1 或 5。
+    """
+    digits = "".join(ch for ch in code if ch.isdigit())
+    if digits and digits[0] in ("1", "5"):
+        return _A_FUND_DECIMALS
+    return _A_STOCK_DECIMALS
+
+
+def resolve_decimals(market: str, code: str) -> Optional[int]:
+    """解析某标的的目标小数位数；未知市场返回 None。"""
+    if market == "a":
+        return _a_share_decimals(code)
+    return _MARKET_DECIMALS.get(market)
