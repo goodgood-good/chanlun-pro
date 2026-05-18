@@ -43,7 +43,7 @@ def test_round_half_up_rounds_5_upward():
     # 银行家舍入会逢偶取偶；ROUND_HALF_UP 一律进位
     assert _round_half_up(1.2345, 3) == 1.235
     assert _round_half_up(0.0625, 3) == 0.063
-    assert _round_half_up(2.0005, 3) == 2.001
+    assert _round_half_up(2.0005, 3) == 2.001  # 二进制实际值略大于 2.0005，任何舍入模式都进位
 
 
 def test_round_half_up_truncates_extra_decimals():
@@ -60,3 +60,5 @@ def test_round_half_up_kills_float_noise():
 def test_round_half_up_passes_through_non_finite():
     assert math.isnan(_round_half_up(float("nan"), 3))
     assert _round_half_up(None, 3) is None
+    assert _round_half_up(float("inf"), 3) == float("inf")
+    assert _round_half_up(float("-inf"), 3) == float("-inf")

@@ -48,7 +48,7 @@ def resolve_decimals(market: Optional[str], code: str) -> Optional[int]:
     return _MARKET_DECIMALS.get(market)
 
 
-def _round_half_up(value, decimals: int):
+def _round_half_up(value: Optional[float], decimals: int) -> Optional[float]:
     """对单个数值做严格四舍五入（ROUND_HALF_UP）。
 
     None / NaN / inf 等非有限值原样返回。任何转换异常也原样返回，
