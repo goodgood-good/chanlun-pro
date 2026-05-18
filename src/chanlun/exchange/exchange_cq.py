@@ -23,6 +23,7 @@ from chanlun.exchange.exchange import Tick
 from chanlun.fun import str_to_datetime
 from chanlun.tools.log_util import LogUtil
 from chanlun.exchange.lb_quota_tracker import LbQuotaTracker
+from chanlun.exchange.kline_precision import normalize_kline_precision
 
 # 统一时区设置
 __tz = pytz.timezone("Asia/Shanghai")
@@ -805,7 +806,9 @@ class ExchangeChangQiao(Exchange):
             df["frequency"] = frequency
             df = df.sort_values(by="date").reset_index(drop=True)
 
-            return df[["date", "frequency", "code", "open", "high", "low", "close", "volume"]]
+            df = df[["date", "frequency", "code", "open", "high", "low", "close", "volume"]]
+            df = normalize_kline_precision(df, getattr(self, "default_market", None), code)
+            return df
 
         except Exception as e:
             LogUtil.error(f"DataFrame construction error: {e}")

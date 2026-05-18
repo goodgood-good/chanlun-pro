@@ -2,6 +2,7 @@ import random
 from tenacity import retry, stop_after_attempt, wait_random, retry_if_result
 from chanlun import config, fun
 from chanlun.exchange.exchange import *
+from chanlun.exchange.kline_precision import normalize_kline_precision
 
 try:
     from futu import *
@@ -128,6 +129,11 @@ class ExchangeFutu(Exchange):
         if "fq" not in args.keys():
             args["fq"] = AuType.QFQ
 
+        _futu_market = (
+            "hk" if code.startswith("HK.")
+            else "us" if code.startswith("US.")
+            else "a"
+        )
         try:
             if start_date is None and end_date is None and args["is_history"] is False:
                 # 实时模式：先订阅再拉最新 K 线（富途要求先 subscribe 才能 get_cur_kline）
@@ -179,6 +185,7 @@ class ExchangeFutu(Exchange):
                 kline = convert_stock_kline_frequency(kline, "120m")
             if frequency == "10m" and len(kline) > 0:
                 kline = convert_stock_kline_frequency(kline, "10m")
+            kline = normalize_kline_precision(kline, _futu_market, code)
             return kline
         except Exception as e:
             print(f"Futu 请求 {code} - {frequency} 行情异常：{e}")

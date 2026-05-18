@@ -16,6 +16,7 @@ from chanlun.exchange.exchange import (
     convert_stock_kline_frequency,
     convert_us_kline_frequency,
 )
+from chanlun.exchange.kline_precision import normalize_kline_precision
 
 
 class ExchangeDB(Exchange):
@@ -222,6 +223,7 @@ class ExchangeDB(Exchange):
         kline_pd.sort_values(by="date", inplace=True)
         kline_pd = kline_pd.reset_index(drop=True)
 
+        kline_pd = normalize_kline_precision(kline_pd, self.market, code)
         return kline_pd
 
     def __convert_date(self, dt: datetime.datetime):
