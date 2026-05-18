@@ -11,6 +11,7 @@ from chanlun import config, fun
 from chanlun.base import Market
 from chanlun.exchange.exchange import Exchange, Tick, convert_currency_kline_frequency
 from chanlun.exchange.exchange_db import ExchangeDB
+from chanlun.exchange.kline_precision import normalize_kline_precision
 from chanlun.utils import config_get_proxy
 
 
@@ -131,6 +132,7 @@ class ExchangeBinanceSpot(Exchange):
                     code, frequency, start_date=None
                 )
                 self.db_exchange.insert_klines(code, frequency, online_klines)
+                online_klines = normalize_kline_precision(online_klines, "currency_spot", code)
                 return online_klines
             else:
                 # 取倒数第二条作为增量起点，让最后一根未收盘 bar 也能被覆盖更新
@@ -142,7 +144,8 @@ class ExchangeBinanceSpot(Exchange):
             klines = pd.concat([db_klines, online_klines], ignore_index=True)
             klines.drop_duplicates(subset=["date"], keep="last", inplace=True)
             klines = klines.sort_values(by="date", ascending=True)
-            return klines[-10000::]
+            klines = normalize_kline_precision(klines[-10000::], "currency_spot", code)
+            return klines
         except Exception as e:
             print(f"{code} - {frequency} Error : {e}")
             # print(traceback.format_exc())
@@ -346,6 +349,7 @@ class ExchangeBinanceSpot(Exchange):
         # 项目自定义周期（10m/2m/3h）需要将基础周期 K 线合并
         if frequency in ["10m", "2m", "3h"] and len(kline_pd) > 0:
             kline_pd = convert_currency_kline_frequency(kline_pd, frequency)
+        kline_pd = normalize_kline_precision(kline_pd, "currency_spot", code)
         return kline_pd
 
     def ticks(self, codes: List[str]) -> Dict[str, Tick]:

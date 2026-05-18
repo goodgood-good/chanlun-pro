@@ -5,6 +5,7 @@ import pytz
 from chanlun import config
 from chanlun.exchange.exchange import *
 from chanlun.exchange.exchange_db import ExchangeDB
+from chanlun.exchange.kline_precision import normalize_kline_precision
 from chanlun import fun
 
 g_all_stocks = []
@@ -83,6 +84,7 @@ class ExchangeZB(Exchange):
                     code, frequency, start_date, end_date, args
                 )
                 self.db_exchange.insert_klines(code, frequency, online_klines)
+                online_klines = normalize_kline_precision(online_klines, "currency_spot", code)
                 return online_klines
 
             db_klines = self.db_exchange.klines(code, frequency)
@@ -91,6 +93,7 @@ class ExchangeZB(Exchange):
                     code, frequency, start_date, end_date, args
                 )
                 self.db_exchange.insert_klines(code, frequency, online_klines)
+                online_klines = normalize_kline_precision(online_klines, "currency_spot", code)
                 return online_klines
 
             last_datetime = db_klines.iloc[-1]["date"].strftime("%Y-%m-%d %H:%M:%S")
@@ -103,11 +106,13 @@ class ExchangeZB(Exchange):
                     code, frequency, start_date, end_date, args
                 )
                 self.db_exchange.insert_klines(code, frequency, online_klines)
+                online_klines = normalize_kline_precision(online_klines, "currency_spot", code)
                 return online_klines
 
             klines = pd.concat([db_klines, online_klines], ignore_index=True)
             klines.drop_duplicates(subset=["date"], keep="last", inplace=True)
-            return klines[-1000::]
+            klines = normalize_kline_precision(klines[-1000::], "currency_spot", code)
+            return klines
         except Exception as e:
             print(e)
 
