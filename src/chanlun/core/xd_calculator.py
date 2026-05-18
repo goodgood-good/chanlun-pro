@@ -169,7 +169,7 @@ class XdCalculator:
             return self.xds
 
         self._bi_pos = {id(bi): i for i, bi in enumerate(all_bis)}
-        _log.debug(
+        _log.debug(lambda:
             f"XdCalculator: 全量计算，笔数={len(all_bis)}，起始位置={start_bi_idx}"
         )
         self._build_segments(all_bis, start_bi_idx)
@@ -276,7 +276,7 @@ class XdCalculator:
                                      if all_bis[i].type == cs_bi_type]
 
             bi_s = all_bis[seg_start]
-            _log.debug(f"[新线段] {seg_type} 起点={_bi_label(bi_s)}, seg_end={_bi_label(all_bis[seg_end])}, seg_high={seg_high:.3f}, seg_low={seg_low:.3f}")
+            _log.debug(lambda:f"[新线段] {seg_type} 起点={_bi_label(bi_s)}, seg_end={_bi_label(all_bis[seg_end])}, seg_high={seg_high:.3f}, seg_low={seg_low:.3f}")
 
             while check + 1 < len(all_bis):
                 # 仅刷新"顺方向"那一边的极值（反方向边恒等于 seg_anchor，无需重算）
@@ -294,14 +294,14 @@ class XdCalculator:
                 # 延伸吃掉 [check, check+1] 两根笔，其中 check 是反向笔(cs)、check+1 是同向笔。
                 # 增量缓存：把 check 这根 cs 笔追加到 seg_cs_bis。
                 if seg_type == 'up' and next_same.high > seg_high:
-                    _log.debug(f"  [延伸] {_bi_label(next_same)} high={next_same.high:.3f} > seg_high={seg_high:.3f}")
+                    _log.debug(lambda:f"  [延伸] {_bi_label(next_same)} high={next_same.high:.3f} > seg_high={seg_high:.3f}")
                     if all_bis[check].type == cs_bi_type:
                         seg_cs_bis.append(all_bis[check])
                     seg_end = check + 1
                     check += 2
                     continue
                 if seg_type == 'down' and next_same.low < seg_low:
-                    _log.debug(f"  [延伸] {_bi_label(next_same)} low={next_same.low:.3f} < seg_low={seg_low:.3f}")
+                    _log.debug(lambda:f"  [延伸] {_bi_label(next_same)} low={next_same.low:.3f} < seg_low={seg_low:.3f}")
                     if all_bis[check].type == cs_bi_type:
                         seg_cs_bis.append(all_bis[check])
                     seg_end = check + 1
@@ -309,7 +309,7 @@ class XdCalculator:
                     continue
 
                 # Step 2: 分型检测（传入增量缓存避免重算）
-                _log.debug(f"  [检测] seg_end={_bi_label(all_bis[seg_end])}, check={_bi_label(all_bis[check])}")
+                _log.debug(lambda:f"  [检测] seg_end={_bi_label(all_bis[seg_end])}, check={_bi_label(all_bis[check])}")
                 end_result = self._try_end(all_bis, seg_start, seg_end, seg_type,
                                            seg_high, seg_low, check,
                                            seg_cs_bis_cache=seg_cs_bis)
@@ -386,14 +386,14 @@ class XdCalculator:
             seg_cs_bis = [all_bis[i] for i in range(seg_start, seg_end + 1)
                           if all_bis[i].type == cs_bi_type]
         if not seg_cs_bis:
-            _log.debug("    _try_end: 段内无CS笔 → 跳过")
+            _log.debug(lambda:"    _try_end: 段内无CS笔 → 跳过")
             return None
         if check_pos >= len(all_bis) or all_bis[check_pos].type != cs_bi_type:
             return None
 
         current_cs_bi = all_bis[check_pos]
 
-        _log.debug(f"    _try_end: 段内CS={len(seg_cs_bis)}根, 当前CS笔={_bi_label(current_cs_bi)}")
+        _log.debug(lambda:f"    _try_end: 段内CS={len(seg_cs_bis)}根, 当前CS笔={_bi_label(current_cs_bi)}")
 
         # ---- 步骤2 ----
         if len(seg_cs_bis) >= 2:
@@ -402,7 +402,7 @@ class XdCalculator:
         else:
             std_seg = [_bi_to_cs_elem(seg_cs_bis[0])]
         has_gap = not _overlap(std_seg[-1], current_cs_bi)
-        _log.debug(f"    _try_end: 包含处理后std_seg={len(std_seg)}个, 缺口={'有' if has_gap else '无'} → {'第二种' if has_gap else '第一种'}")
+        _log.debug(lambda:f"    _try_end: 包含处理后std_seg={len(std_seg)}个, 缺口={'有' if has_gap else '无'} → {'第二种' if has_gap else '第一种'}")
 
         # ---- 步骤3 ----
         # 第一元素（属于原段的最后一根CS笔）从 std_seg 中取出冻结，
@@ -420,17 +420,17 @@ class XdCalculator:
         i = check_pos
         while i < len(all_bis):
             if i - check_pos > SAFETY_LOOKAHEAD:
-                _log.debug(f"    _try_end: 扫描超过{SAFETY_LOOKAHEAD}笔仍未凑齐second_elems → 放弃本轮")
+                _log.debug(lambda:f"    _try_end: 扫描超过{SAFETY_LOOKAHEAD}笔仍未凑齐second_elems → 放弃本轮")
                 return None
             bi = all_bis[i]
             if bi.type == cs_bi_type:
                 new_elem = _bi_to_cs_elem(bi)
                 if second_elems and _has_inclusion(second_elems[-1], new_elem):
                     second_elems[-1] = _merge_two(second_elems[-1], new_elem, inc_dir)
-                    _log.debug(f"    _try_end: {_bi_label(bi)} 与前元素包含,合并→{_elem_label(second_elems[-1])}")
+                    _log.debug(lambda:f"    _try_end: {_bi_label(bi)} 与前元素包含,合并→{_elem_label(second_elems[-1])}")
                 else:
                     second_elems.append(new_elem)
-                    _log.debug(f"    _try_end: 收集CS {_bi_label(bi)} → second_elems={len(second_elems)}个 (first_elem冻结)")
+                    _log.debug(lambda:f"    _try_end: 收集CS {_bi_label(bi)} → second_elems={len(second_elems)}个 (first_elem冻结)")
                     if len(second_elems) >= min_second:
                         ready = True
             elif ready:
@@ -439,10 +439,10 @@ class XdCalculator:
             else:
                 # 未收集够 second_elems，检查同向笔是否创新极值（线段延伸）
                 if seg_type == 'up' and bi.type == 'up' and bi.high > seg_high:
-                    _log.debug(f"    _try_end: {_bi_label(bi)} 创新高({bi.high:.3f}>{seg_high:.3f}) → 线段应延伸,返回None")
+                    _log.debug(lambda:f"    _try_end: {_bi_label(bi)} 创新高({bi.high:.3f}>{seg_high:.3f}) → 线段应延伸,返回None")
                     return None
                 if seg_type == 'down' and bi.type == 'down' and bi.low < seg_low:
-                    _log.debug(f"    _try_end: {_bi_label(bi)} 创新低({bi.low:.3f}<{seg_low:.3f}) → 线段应延伸,返回None")
+                    _log.debug(lambda:f"    _try_end: {_bi_label(bi)} 创新低({bi.low:.3f}<{seg_low:.3f}) → 线段应延伸,返回None")
                     return None
             i += 1
         look_elems = [first_elem] + second_elems
@@ -463,14 +463,14 @@ class XdCalculator:
         # （第一元素属于原段，不能与反向段元素一起参与分型判定）。
         combined = std_seg + look_elems
         if len(combined) < 3:
-            _log.debug(f"    _try_end: combined={len(combined)}个 < 3 → 不足以判断分型")
+            _log.debug(lambda:f"    _try_end: combined={len(combined)}个 < 3 → 不足以判断分型")
             return None
         # 分型中心固定为第二元素的位置：left=first_elem, mid=second_elems[0], right=second_elems[1]
         mid_pos = len(std_seg) + 1  # = combined 中 second_elems[0] 的索引
         if mid_pos + 1 >= len(combined):
             # second_elems 不足 2 个，无法判定分型
             elems_str = " ".join(_elem_label(e) for e in combined)
-            _log.debug(f"    _try_end: combined=[{elems_str}] → second_elems<2,无法判定{frac_name}")
+            _log.debug(lambda:f"    _try_end: combined=[{elems_str}] → second_elems<2,无法判定{frac_name}")
             return None
         left, mid, right = combined[mid_pos - 1], combined[mid_pos], combined[mid_pos + 1]
         if seg_type == 'up':
@@ -479,32 +479,32 @@ class XdCalculator:
             is_frac = mid['low'] < left['low'] and mid['low'] < right['low']
         elems_str = " ".join(_elem_label(e) for e in combined)
         if not is_frac:
-            _log.debug(f"    _try_end: combined=[{elems_str}] mid_pos={mid_pos} → 无{frac_name}")
+            _log.debug(lambda:f"    _try_end: combined=[{elems_str}] mid_pos={mid_pos} → 无{frac_name}")
             return None
         frac_idx = mid_pos
-        _log.debug(f"    _try_end: combined=[{elems_str}] → {frac_name}在[{frac_idx}](固定第二元素位置)")
+        _log.debug(lambda:f"    _try_end: combined=[{elems_str}] → {frac_name}在[{frac_idx}](固定第二元素位置)")
 
         # ---- 步骤5 ----
         mid_elem = combined[frac_idx]
         if has_gap:
-            _log.debug("    _try_end: 第二种情况,进入_check_type2验证...")
+            _log.debug(lambda:"    _try_end: 第二种情况,进入_check_type2验证...")
             if not self._check_type2(all_bis, mid_elem, seg_type):
-                _log.debug("    _try_end: _check_type2失败 → 返回None")
+                _log.debug(lambda:"    _try_end: _check_type2失败 → 返回None")
                 return None
-            _log.debug("    _try_end: _check_type2成功")
+            _log.debug(lambda:"    _try_end: _check_type2成功")
 
         # ---- 步骤6: 定位当前线段结束位置 + 反向线段范围 ----
         target_bi = _resolve_pivot_bi(mid_elem, seg_type)
 
         end_bi_idx = self._bi_pos[id(target_bi)] - 1
         if end_bi_idx <= seg_start or end_bi_idx >= len(all_bis):
-            _log.debug(f"    _try_end: end_bi_idx={end_bi_idx} 越界(seg_start={seg_start},len={len(all_bis)}) → 返回None")
+            _log.debug(lambda:f"    _try_end: end_bi_idx={end_bi_idx} 越界(seg_start={seg_start},len={len(all_bis)}) → 返回None")
             return None
         if all_bis[end_bi_idx].type != seg_type:
-            _log.debug(f"    _try_end: 终点笔{_bi_label(all_bis[end_bi_idx])} 方向≠{seg_type} → 返回None")
+            _log.debug(lambda:f"    _try_end: 终点笔{_bi_label(all_bis[end_bi_idx])} 方向≠{seg_type} → 返回None")
             return None
         if end_bi_idx - seg_start + 1 < 3:
-            _log.debug(f"    _try_end: 笔数{end_bi_idx - seg_start + 1}<3 → 返回None")
+            _log.debug(lambda:f"    _try_end: 笔数{end_bi_idx - seg_start + 1}<3 → 返回None")
             return None
 
         # 方向校验：线段终点必须落在与方向一致的一侧（缠论第七节：向上线段其顶
@@ -514,10 +514,10 @@ class XdCalculator:
         seg_anchor_val = all_bis[seg_start].start.val
         seg_end_val = all_bis[end_bi_idx].end.val
         if seg_type == 'up' and not (seg_end_val > seg_anchor_val):
-            _log.debug(f"    _try_end: up段终点{seg_end_val:.3f}≤起点{seg_anchor_val:.3f} 方向矛盾 → 返回None")
+            _log.debug(lambda:f"    _try_end: up段终点{seg_end_val:.3f}≤起点{seg_anchor_val:.3f} 方向矛盾 → 返回None")
             return None
         if seg_type == 'down' and not (seg_end_val < seg_anchor_val):
-            _log.debug(f"    _try_end: down段终点{seg_end_val:.3f}≥起点{seg_anchor_val:.3f} 方向矛盾 → 返回None")
+            _log.debug(lambda:f"    _try_end: down段终点{seg_end_val:.3f}≥起点{seg_anchor_val:.3f} 方向矛盾 → 返回None")
             return None
 
         # 反向线段: 起点=当前线段终点+1, 终点=look_elems中最远的CS笔位置
@@ -532,7 +532,7 @@ class XdCalculator:
         # 确保 next_end 至少为 next_start + 2（最少3笔）
         next_end = max(next_end, next_start + 2) if next_end >= next_start else next_start + 2
 
-        _log.debug(f"    _try_end: ✓ 线段结束于{_bi_label(all_bis[end_bi_idx])}, "
+        _log.debug(lambda:f"    _try_end: ✓ 线段结束于{_bi_label(all_bis[end_bi_idx])}, "
                    f"反向线段 bi[{all_bis[next_start].index}]~bi[{all_bis[min(next_end, len(all_bis)-1)].index}]")
         return end_bi_idx, next_start, next_end
 
@@ -545,14 +545,14 @@ class XdCalculator:
 
         start_pos = self._bi_pos[id(target_bi)] + 1
         if start_pos >= len(all_bis):
-            _log.debug(f"      _check_type2: start_pos={start_pos}越界 → False")
+            _log.debug(lambda:f"      _check_type2: start_pos={start_pos}越界 → False")
             return False
 
         cs2_type = 'up' if seg_type == 'up' else 'down'
         cs2_dir = 'down' if seg_type == 'up' else 'up'
         frac2_name = '底分型' if seg_type == 'up' else '顶分型'
 
-        _log.debug(f"      _check_type2: 从{_bi_label(target_bi)}之后开始, 寻找反向线段CS({cs2_type}笔)的{frac2_name}")
+        _log.debug(lambda:f"      _check_type2: 从{_bi_label(target_bi)}之后开始, 寻找反向线段CS({cs2_type}笔)的{frac2_name}")
 
         def _is_tail_fractal(elems: List[dict]) -> bool:
             """O(1) 检查最后三个元素是否构成反向段所需的分型。
@@ -586,25 +586,25 @@ class XdCalculator:
                 new_elem = _bi_to_cs_elem(bi)
                 if cs2_elems and _has_inclusion(cs2_elems[-1], new_elem):
                     cs2_elems[-1] = _merge_two(cs2_elems[-1], new_elem, cs2_dir)
-                    _log.debug(f"      _check_type2: {_bi_label(bi)} 与前元素包含,合并→{_elem_label(cs2_elems[-1])}")
+                    _log.debug(lambda:f"      _check_type2: {_bi_label(bi)} 与前元素包含,合并→{_elem_label(cs2_elems[-1])}")
                 else:
                     cs2_elems.append(new_elem)
-                    _log.debug(f"      _check_type2: 收集CS {_bi_label(bi)} → cs2_elems={len(cs2_elems)}个")
+                    _log.debug(lambda:f"      _check_type2: 收集CS {_bi_label(bi)} → cs2_elems={len(cs2_elems)}个")
 
                 # 每次添加/合并后立即检查分型（仅看尾部三元素，O(1)）
                 if _is_tail_fractal(cs2_elems):
-                    _log.debug(f"      _check_type2: 尾部三元素构成{frac2_name} → True")
+                    _log.debug(lambda:f"      _check_type2: 尾部三元素构成{frac2_name} → True")
                     return True
 
                 # 收完后才判断"严格创新极值停止"：
                 # 此根 cs 笔创了原段方向的新极值，后续走势不可能再形成本段的反向段，
                 # 必须立即停止扫描；反向段是否成立由已收集的 cs2_elems 决定。
                 if is_strict_new_extreme:
-                    _log.debug(f"      _check_type2: {_bi_label(bi)} 创新极值且已收进 cs2_elems → 停止扫描")
+                    _log.debug(lambda:f"      _check_type2: {_bi_label(bi)} 创新极值且已收进 cs2_elems → 停止扫描")
                     break
             elif is_strict_new_extreme:
                 # 非 cs2 笔但创了新极值（兜底）：原段延伸，反向段不成立
-                _log.debug(f"      _check_type2: {_bi_label(bi)} 非CS笔但创新极值 → 原线段延伸,False")
+                _log.debug(lambda:f"      _check_type2: {_bi_label(bi)} 非CS笔但创新极值 → 原线段延伸,False")
                 return False
             # 注：原此处对每根非 cs2 笔重复 find_frac2(cs2_elems) 的 elif 分支已删除——
             # 分型只可能在新元素加入/合并时产生新结构，非 cs2 笔不会改变 cs2_elems，
@@ -612,13 +612,13 @@ class XdCalculator:
             i += 1
 
         if len(cs2_elems) < 3:
-            _log.debug(f"      _check_type2: cs2_elems仅{len(cs2_elems)}个<3 → False")
+            _log.debug(lambda:f"      _check_type2: cs2_elems仅{len(cs2_elems)}个<3 → False")
             return False
         # 走到这里说明扫描结束（要么 i 越界，要么遇到 strict_new_extreme break）
         # 由于循环内每次追加/合并后都已经检查过尾部分型，此处只需对最终状态做一次兜底检查。
         result = _is_tail_fractal(cs2_elems)
         elems_str = " ".join(_elem_label(e) for e in cs2_elems)
-        _log.debug(f"      _check_type2: 最终[{elems_str}] → {frac2_name}{'成立' if result else '不成立'} → {result}")
+        _log.debug(lambda:f"      _check_type2: 最终[{elems_str}] → {frac2_name}{'成立' if result else '不成立'} → {result}")
         return result
 
     # ----------------------------------------------------------
@@ -661,7 +661,7 @@ class XdCalculator:
         seg_bis = all_bis[start: end + 1]
         xd = self._make_xd(seg_bis, seg_type, done=True)
         sv, ev = seg_bis[0].start.val, seg_bis[-1].end.val
-        _log.debug(f"[完成] XD[{xd.index}] {seg_type} {_bi_label(seg_bis[0])}~{_bi_label(seg_bis[-1])} ({len(seg_bis)}笔) {sv:.3f}→{ev:.3f}")
+        _log.debug(lambda:f"[完成] XD[{xd.index}] {seg_type} {_bi_label(seg_bis[0])}~{_bi_label(seg_bis[-1])} ({len(seg_bis)}笔) {sv:.3f}→{ev:.3f}")
 
     def _emit_pending(self, all_bis, start, seg_type):
         """输出未完成线段（方案 A1：全局极值优先 + 兜底末尾同向笔）。
@@ -745,10 +745,10 @@ class XdCalculator:
                 ):
                     valid_idx = i
             if valid_idx == -1:
-                _log.debug(f"[未完成] {seg_type} 段无方向合法终点 → 不输出")
+                _log.debug(lambda:f"[未完成] {seg_type} 段无方向合法终点 → 不输出")
                 return
             pending_bis = candidates[:valid_idx + 1]
 
         xd = self._make_xd(pending_bis, seg_type, done=False)
         sv, ev = pending_bis[0].start.val, pending_bis[-1].end.val
-        _log.debug(f"[未完成] XD[{xd.index}] {seg_type} {_bi_label(pending_bis[0])}~{_bi_label(pending_bis[-1])} ({len(pending_bis)}笔) {sv:.3f}→{ev:.3f}")
+        _log.debug(lambda:f"[未完成] XD[{xd.index}] {seg_type} {_bi_label(pending_bis[0])}~{_bi_label(pending_bis[-1])} ({len(pending_bis)}笔) {sv:.3f}→{ev:.3f}")
