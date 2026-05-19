@@ -25,3 +25,14 @@ def _use_huangbai(seg: LINE) -> bool:
     类型≈1分钟级别走势类型及以上 → 柱子 + 黄白线。
     """
     return not isinstance(seg, BI)
+
+
+def _xingao_xindi(seg_a: LINE, seg_b: LINE) -> bool:
+    """创新高/新低前提（原文细则2：「背驰如果没有创新高，是不存在的」）。
+
+    seg_a 在前、seg_b 在后、同向。up 段要求 seg_b 高点高于 seg_a；
+    down 段要求 seg_b 低点低于 seg_a。
+    """
+    if seg_b.type == "up":
+        return seg_b.high > seg_a.high
+    return seg_b.low < seg_a.low

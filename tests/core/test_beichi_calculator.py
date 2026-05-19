@@ -44,3 +44,21 @@ def test_use_huangbai_xd_and_zslx_use_huangbai():
     """线段(XD)/走势类型(ZSLX)→ 双重确认，需看黄白线（原文：1分钟级别及以上）。"""
     assert bc._use_huangbai(_seg(XD, 0, "up", 4, 8)) is True
     assert bc._use_huangbai(_seg(ZSLX, 0, "up", 4, 8)) is True
+
+
+def test_xingao_xindi_up_requires_new_high():
+    """up 段：后段创出更高的高点 → True；未创新高 → False。"""
+    seg_a = _seg(XD, 0, "up", 4, 8)    # 高点 8
+    seg_b_new = _seg(XD, 2, "up", 5, 10)   # 高点 10 > 8
+    seg_b_old = _seg(XD, 2, "up", 5, 7)    # 高点 7 < 8
+    assert bc._xingao_xindi(seg_a, seg_b_new) is True
+    assert bc._xingao_xindi(seg_a, seg_b_old) is False
+
+
+def test_xingao_xindi_down_requires_new_low():
+    """down 段：后段创出更低的低点 → True；未创新低 → False。"""
+    seg_a = _seg(XD, 0, "down", 10, 5)   # 低点 5
+    seg_b_new = _seg(XD, 2, "down", 9, 3)  # 低点 3 < 5
+    seg_b_old = _seg(XD, 2, "down", 9, 6)  # 低点 6 > 5
+    assert bc._xingao_xindi(seg_a, seg_b_new) is True
+    assert bc._xingao_xindi(seg_a, seg_b_old) is False
