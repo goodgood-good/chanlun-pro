@@ -36,6 +36,9 @@ def _as_units(zslxs: List[ZSLX]) -> List[ZSLX]:
     默认这两者为 0，喂回前必须写入：
     - zs_high/zs_low = 所含中枢的包络 [min(dd), max(gg)]（spec 决策 3）；
     - index 按 0,1,2… 重排（③ 的 _finalize 给所有 ZSLX 置 index=0）。
+
+    前置不变量：每个 ZSLX 的 zss 非空（ZslxCalculator 仅对非空中枢段
+    finalize）；若该不变量被破坏，下面的 max/min 会抛 ValueError。
     """
     for i, zslx in enumerate(zslxs):
         zslx.zs_high = max(zs.gg for zs in zslx.zss)
@@ -49,6 +52,10 @@ def _split_one(zs: ZS) -> List[ZS]:
 
     N%3≠0 时余 1~2 段并入最后一组（保证每组 ≥3）。子中枢边界口径与
     ZsCalculator 初始三段一致：zg/zd 取前三段、gg/dd 由 update_boundaries 全量。
+
+    注：子中枢 start=None（无进入段）。≥9 段中枢的构成段彼此重叠，③划分时
+    子中枢间多为「无步进」、各成盘整——故子中枢趋势走势类型几乎不出现；
+    万一出现，趋势背驰因 prev_zs.start 为 None 不成立（仅盘整背驰可用）。
     """
     lines = zs.lines
     n = len(lines)
