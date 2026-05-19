@@ -245,3 +245,28 @@ def test_beichi_qs_false_when_not_qs():
                                   now, lambda s, e: {}, Config.ZS_WZGX_ZGGDD.value)
     assert is_bc is False
     assert compare == []
+
+
+import pytest
+
+
+@pytest.mark.parametrize("cls", [XD, ZSLX])
+def test_is_beichi_level_agnostic(cls):
+    """级别无关性：XD(线段)与 ZSLX(走势类型)在同一组数据上结论一致。"""
+    seg_a, seg_b = _seg(cls, 0, "up", 4, 8), _seg(cls, 2, "up", 5, 10)
+    provider = {(0, 1): _ld(up_sum=100, dif_max=3), (2, 3): _ld(up_sum=50, dif_max=2)}
+    ldp = lambda s, e: provider[(s.k.k_index, e.k.k_index)]
+    assert bc.is_beichi(seg_a, seg_b, ldp) is True
+
+
+@pytest.mark.parametrize("cls", [XD, ZSLX])
+def test_beichi_pz_level_agnostic(cls):
+    """级别无关性：盘整背驰对线段与走势类型行为一致。"""
+    zs = _zs(zg=8, zd=5, gg=8, dd=4)
+    zs.lines = [_seg(cls, 0, "up", 4, 8), _seg(cls, 2, "down", 8, 5),
+                _seg(cls, 4, "up", 5, 8)]
+    now = _seg(cls, 6, "up", 5, 10)
+    provider = {(0, 1): _ld(up_sum=100, dif_max=3), (6, 7): _ld(up_sum=50, dif_max=2)}
+    ldp = lambda s, e: provider[(s.k.k_index, e.k.k_index)]
+    is_bc, _ = bc.beichi_pz(zs, now, ldp)
+    assert is_bc is True
