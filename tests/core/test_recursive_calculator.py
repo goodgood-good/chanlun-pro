@@ -49,3 +49,26 @@ def _benign_ldp(s, e):
 def test_calculate_empty_returns_empty():
     """无线段 → 空层级列表。"""
     assert rc.RecursiveCalculator().calculate([], _benign_ldp, WZGX) == []
+
+
+def _zslx(zss: list) -> ZSLX:
+    """构造一个走势类型，仅含递归测试需要的 zss。"""
+    z = ZSLX(zslx_level=Level.M1)
+    z.zss = zss
+    return z
+
+
+def _zs(zg, zd, gg, dd) -> ZS:
+    """构造一个中枢（只填边界字段）。"""
+    return ZS(zs_type="xd", start=None, zg=zg, zd=zd, gg=gg, dd=dd)
+
+
+def test_as_units_writes_range_and_index():
+    """_as_units：ZSLX 的 zs_high/zs_low 取中枢包络 [min(dd),max(gg)]，index 重排。"""
+    zslx0 = _zslx([_zs(zg=8, zd=5, gg=9, dd=4), _zs(zg=15, zd=12, gg=17, dd=10)])
+    zslx1 = _zslx([_zs(zg=20, zd=18, gg=22, dd=16)])
+    units = rc._as_units([zslx0, zslx1])
+    assert units is not None and len(units) == 2
+    assert (zslx0.zs_high, zslx0.zs_low) == (17, 4)   # max gg=17, min dd=4
+    assert (zslx1.zs_high, zslx1.zs_low) == (22, 16)
+    assert zslx0.index == 0 and zslx1.index == 1

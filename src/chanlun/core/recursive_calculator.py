@@ -29,6 +29,21 @@ class LevelResult:
     zslxs: List[ZSLX]     # 本级走势类型
 
 
+def _as_units(zslxs: List[ZSLX]) -> List[ZSLX]:
+    """把走势类型列表整备成下一级中枢扫描的走势单元（就地写字段后返回）。
+
+    ZsCalculator 扫描靠构成段的 zs_high/zs_low 判重叠、靠 index 定位；ZSLX
+    默认这两者为 0，喂回前必须写入：
+    - zs_high/zs_low = 所含中枢的包络 [min(dd), max(gg)]（spec 决策 3）；
+    - index 按 0,1,2… 重排（③ 的 _finalize 给所有 ZSLX 置 index=0）。
+    """
+    for i, zslx in enumerate(zslxs):
+        zslx.zs_high = max(zs.gg for zs in zslx.zss)
+        zslx.zs_low = min(zs.dd for zs in zslx.zss)
+        zslx.index = i
+    return zslxs
+
+
 class RecursiveCalculator:
     """递归装配计算器。无状态，每次 calculate 全量重算。"""
 
