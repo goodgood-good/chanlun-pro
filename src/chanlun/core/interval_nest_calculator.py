@@ -11,7 +11,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from chanlun.core.beichi_calculator import LdProvider, beichi_pz, beichi_qs
 from chanlun.core.cl_interface import FX, LINE, XD, ZSLX
@@ -41,7 +41,9 @@ def _units_at_level(
     return list(xds) if k == 0 else list(levels[k - 1].zslxs)
 
 
-def _drill_chain(top_zslx: ZSLX, top_level: int):
+def _drill_chain(
+    top_zslx: ZSLX, top_level: int
+) -> List[Tuple[int, ZSLX, LINE]]:
     """从顶层走势类型沿 zss[-1].lines[-1] 逐级下钻。
 
     返回 [(level, cur_zslx, beichi_seg), ...]——cur_zslx 是该级走势类型，
@@ -115,7 +117,10 @@ def calculate_interval_nest(
     if not chain:
         return None
 
-    # 第 3 步：每重 ② 复核背驰、组装
+    # 第 3 步：每重 ② 复核背驰、组装。
+    # 注：chain[0] 即第 1 步的起点 wt，此处对它的复核必然为 True（起点筛选
+    # 条件就是趋势背驰）；为保持每重统一处理、不特判，接受这一次冗余复核
+    # ——② 复核开销小、下钻链很短。
     links: List[NestLink] = []
     for level, cur, seg in chain:
         units = _units_at_level(levels, xds, level)
