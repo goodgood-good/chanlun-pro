@@ -53,9 +53,8 @@ def _split_one(zs: ZS) -> List[ZS]:
     N%3≠0 时余 1~2 段并入最后一组（保证每组 ≥3）。子中枢边界口径与
     ZsCalculator 初始三段一致：zg/zd 取前三段、gg/dd 由 update_boundaries 全量。
 
-    注：子中枢 start=None（无进入段）。≥9 段中枢的构成段彼此重叠，③划分时
-    子中枢间多为「无步进」、各成盘整——故子中枢趋势走势类型几乎不出现；
-    万一出现，趋势背驰因 prev_zs.start 为 None 不成立（仅盘整背驰可用）。
+    子中枢进入段：首组沿用原中枢进入段（可能为 None），其余组取前一组末段
+    （紧邻本组核心之前的走势段）——子中枢若构成趋势即可参与趋势背驰。
     """
     lines = zs.lines
     n = len(lines)
@@ -65,8 +64,11 @@ def _split_one(zs: ZS) -> List[ZS]:
     for g in range(groups_count):
         size = 3 if g < groups_count - 1 else (n - idx)  # 末组吸收余数
         group = lines[idx:idx + size]
+        # 子中枢进入段：首组沿用原中枢进入段，其余组取前一组末段（= 紧邻本组
+        # 核心之前的走势段），使子中枢若构成趋势可参与趋势背驰。
+        entry = zs.start if idx == 0 else lines[idx - 1]
         idx += size
-        sub = ZS(zs_type=zs.zs_type, start=None)
+        sub = ZS(zs_type=zs.zs_type, start=entry)
         sub.lines = group
         sub._bounds_dirty = True
         sub.zg = min(s.zs_high for s in group[:3])

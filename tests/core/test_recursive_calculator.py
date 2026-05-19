@@ -145,3 +145,29 @@ def test_calculate_few_segments_no_zhongshu():
     """线段太少、扫不出中枢 → 空层级列表。"""
     results = rc.RecursiveCalculator().calculate(_overlap_segs(2), _benign_ldp, WZGX)
     assert results == []
+
+
+def test_split_one_sub_zs_get_entry_segment():
+    """9段分裂的子中枢带进入段：sub[k>0].start=前一组末段、sub[0].start 沿用原中枢。
+
+    使分裂子中枢若构成趋势，beichi_qs 能定位 A 段（否则 start=None 时趋势背驰
+    恒不成立）。
+    """
+    segs = _overlap_segs(9)
+    zs = _zs_with_lines(segs)
+    zs.start = None                      # 原中枢无进入段
+    out = rc._split_oversized([zs])
+    assert len(out) == 3
+    assert out[0].start is None          # 原中枢无进入段 → 首子中枢也无
+    assert out[1].start is segs[2]       # 前一组 (0,1,2) 的末段
+    assert out[2].start is segs[5]       # 前一组 (3,4,5) 的末段
+
+
+def test_split_one_first_sub_inherits_zs_entry():
+    """原中枢有进入段时，首个子中枢沿用之。"""
+    segs = _overlap_segs(9)
+    entry = _seg(99, "down", 8, 5)
+    zs = _zs_with_lines(segs)
+    zs.start = entry
+    out = rc._split_oversized([zs])
+    assert out[0].start is entry
