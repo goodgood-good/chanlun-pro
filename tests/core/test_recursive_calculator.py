@@ -119,3 +119,29 @@ def test_split_oversized_sub_zs_boundaries():
     for sub in out:
         assert (sub.zg, sub.zd) == (8, 5)
         assert (sub.gg, sub.dd) == (8, 5)
+
+
+def test_calculate_eight_overlap_stops_at_L0():
+    """8 根重叠线段 → 1 个 8 段中枢、不分裂 → 1 个盘整 → 不足 3 个、停在 L0。"""
+    results = rc.RecursiveCalculator().calculate(_overlap_segs(8), _benign_ldp, WZGX)
+    assert len(results) == 1
+    assert results[0].level == 0
+    assert len(results[0].zss) == 1
+    assert len(results[0].zslxs) == 1
+
+
+def test_calculate_nine_overlap_recurses_to_L1():
+    """9 根重叠线段 → L0 经 9 段分裂出 3 个子中枢 + 3 个盘整 → 升出 L1。"""
+    results = rc.RecursiveCalculator().calculate(_overlap_segs(9), _benign_ldp, WZGX)
+    assert len(results) == 2
+    assert results[0].level == 0
+    assert len(results[0].zss) == 3        # 9 段分裂后
+    assert len(results[0].zslxs) == 3
+    assert results[1].level == 1
+    assert len(results[1].zss) == 1        # 3 个盘整重叠 → 1 个 L1 中枢
+
+
+def test_calculate_few_segments_no_zhongshu():
+    """线段太少、扫不出中枢 → 空层级列表。"""
+    results = rc.RecursiveCalculator().calculate(_overlap_segs(2), _benign_ldp, WZGX)
+    assert results == []

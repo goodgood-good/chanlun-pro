@@ -90,7 +90,30 @@ class RecursiveCalculator:
     def calculate(
         self, xds: List[XD], ld_provider: LdProvider, wzgx_config: str
     ) -> List[LevelResult]:
-        """把线段递归装配成多级中枢/走势类型层级树。"""
+        """把线段递归装配成多级中枢/走势类型层级树。
+
+        每级：扫描(ZsCalculator) → 9段分裂 → 划分(ZslxCalculator) → 走势类型
+        经 _as_units 变下一级走势单元。终止：扫不出中枢，或走势类型 <3。
+        """
         if not xds:
             return []
-        return []
+
+        results: List[LevelResult] = []
+        units: List[LINE] = list(xds)
+        level = 0
+        while level < _MAX_LEVELS:
+            zss = ZsCalculator(
+                require_alternation=(level == 0)
+            ).calculate(units)
+            zss = _split_oversized(zss)
+            if not zss:
+                break
+            zslxs = ZslxCalculator().calculate(
+                zss, units, ld_provider, wzgx_config
+            )
+            results.append(LevelResult(level, zss, zslxs))
+            if len(zslxs) < 3:
+                break
+            units = _as_units(zslxs)
+            level += 1
+        return results
