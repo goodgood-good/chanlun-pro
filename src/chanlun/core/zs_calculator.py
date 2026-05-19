@@ -245,9 +245,9 @@ class ZsCalculator:
             # 即使 seg_c 之后立即离开中枢，seg_c 仍是构成段——三段重叠即成中枢。
             core_lines = [seg_a, seg_b, seg_c]
 
-            # _type 暂用中间核心段方向 seg_b.type 作占位：中枢本质是盘整、无
-            # 固有方向，其「上涨/下跌中枢」角色应由所在走势类型决定（子项目③
-            # 届时确定方向并一并修订 cl_analyse 等对 zs.type 的消费）。
+            # _type 此处仅置初始占位（中间核心段方向）：线段中枢的真实方向
+            # （上涨/下跌中枢 up/down、盘整中枢 zd）由 ZslxCalculator 在走势
+            # 类型划分后回填（子项目③）；笔中枢未接入 ③，沿用此占位。
             center = ZS(zs_type='xd', start=entry_seg, _type=seg_b.type)
             center.lines = core_lines
             center._bounds_dirty = True  # 整体赋值 lines 后边界缓存失效

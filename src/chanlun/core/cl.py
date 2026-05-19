@@ -5,7 +5,8 @@ import pandas as pd
 
 from chanlun.core.bi_calculator import BiCalculator
 # 笔/段两层中枢统一走 ZsCalculator，create_dn_zs 也用临时 ZsCalculator 实例。
-from chanlun.core.cl_interface import ICL, Kline, CLKline, FX, BI, XD, ZS, Config, LINE, compare_ld_beichi, query_macd_ld
+from chanlun.core.cl_interface import ICL, Kline, CLKline, FX, BI, XD, ZS, ZSLX, Config, LINE, compare_ld_beichi, query_macd_ld
+from chanlun.core.zslx_calculator import ZslxCalculator
 from chanlun.core import beichi_calculator as bc
 from chanlun.core.cl_kline_process import CL_Kline_Process
 from chanlun.core.kline_data_processor import KlineDataProcessor
@@ -60,6 +61,9 @@ class CL(ICL):
         # 笔层中枢计算器，与 zss_calculator（线段层）独立维护。
         self.bi_zss_calculator = ZsCalculator()
 
+        # 走势类型计算器（子项目③）：线段中枢 → 走势类型(ZSLX)，无状态全量重算。
+        self.zslx_calculator = ZslxCalculator()
+        self.xd_zslx: List[ZSLX] = []  # 线段级走势类型列表
 
         # 最后中枢缓存
         self._last_bi_zs: Union[ZS, None] = None
@@ -152,6 +156,17 @@ class CL(ICL):
             # 笔层中枢与线段层对称接入，主流程自动算。两个 ZsCalculator 实例
             # 状态/快照互不污染；任一异常由外层 except 统一清理。
             self.bi_zss_calculator.calculate(self.bi_calculator.bis)
+
+            # 走势类型划分（子项目③）：用线段中枢 + 背驰划出走势类型，并回填
+            # 线段中枢的 zs.type（上涨/下跌中枢 up/down、盘整中枢 zd）。
+            xd_zss = list(self.zss_calculator.zss)
+            if self.zss_calculator.pending_zs is not None:
+                xd_zss.append(self.zss_calculator.pending_zs)
+            ld_provider = lambda s, e: query_macd_ld(self, s, e)
+            wzgx_config = self.config.get('zs_wzgx', Config.ZS_WZGX_ZGGDD.value)
+            self.xd_zslx = self.zslx_calculator.calculate(
+                xd_zss, self.xd_calculator.xds, ld_provider, wzgx_config
+            )
 
             # 每次处理后重置缓存，确保下次访问时重新计算
             self._last_bi_zs = None
@@ -251,6 +266,10 @@ class CL(ICL):
         if self.zss_calculator.pending_zs:
             zss.append(self.zss_calculator.pending_zs)
         return zss
+
+    def get_xd_zslx(self) -> List[ZSLX]:
+        """返回线段级走势类型列表（子项目③产出）。"""
+        return self.xd_zslx
 
     def get_last_bi_zs(self) -> Union[ZS, None]:
         """返回最后的笔中枢
