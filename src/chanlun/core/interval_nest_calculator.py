@@ -79,3 +79,52 @@ def _zslx_is_beichi(
     else:
         is_bc, _ = beichi_pz(zslx.zss[-1], leave_seg, ld_provider)
     return is_bc
+
+
+def calculate_interval_nest(
+    levels: List[LevelResult],
+    xds: List[XD],
+    ld_provider: LdProvider,
+    wzgx_config: str,
+) -> Optional[IntervalNest]:
+    """计算「当下」区间套：最高级别趋势背驰的末走势类型 → 逐级下钻到 L0。
+
+    无任何级别的末走势类型为趋势背驰 → 返回 None。
+    """
+    if not levels:
+        return None
+
+    # 第 1 步：找起点——最高的「末走势类型是趋势且趋势背驰」的级别
+    start = None
+    for k in range(len(levels) - 1, -1, -1):
+        zslxs = levels[k].zslxs
+        if not zslxs:
+            continue
+        wt = zslxs[-1]
+        if wt.zslx_type not in ("上涨", "下跌"):
+            continue
+        units = _units_at_level(levels, xds, k)
+        if _zslx_is_beichi(wt, units, ld_provider, wzgx_config):
+            start = (k, wt)
+            break
+    if start is None:
+        return None
+
+    # 第 2 步：逐级下钻
+    chain = _drill_chain(start[1], start[0])
+    if not chain:
+        return None
+
+    # 第 3 步：每重 ② 复核背驰、组装
+    links: List[NestLink] = []
+    for level, cur, seg in chain:
+        units = _units_at_level(levels, xds, level)
+        links.append(NestLink(
+            level=level,
+            beichi_seg=seg,
+            is_beichi=_zslx_is_beichi(cur, units, ld_provider, wzgx_config),
+        ))
+    last_seg = links[-1].beichi_seg
+    return IntervalNest(
+        links=links, turning_point=last_seg.end, direction=last_seg.type
+    )

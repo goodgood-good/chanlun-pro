@@ -130,3 +130,32 @@ def test_zslx_is_beichi_panzheng_no_lines_false():
     wt.zslx_type = "盘整"
     wt.zss = []
     assert inc._zslx_is_beichi(wt, [], lambda s, e: {}, WZGX) is False
+
+
+def test_calculate_interval_nest_none_when_no_trend():
+    """各级末走势类型都不是趋势 → 返回 None。"""
+    wt = _zslx()
+    wt.zslx_type = "盘整"
+    wt.zss = [_zs_with_lines([_seg(0, "up", 4, 8)])]
+    levels = [LevelResult(0, [], [wt])]
+    assert inc.calculate_interval_nest(levels, [], lambda s, e: {}, WZGX) is None
+
+
+def test_calculate_interval_nest_empty_levels_none():
+    """空层级树 → None。"""
+    assert inc.calculate_interval_nest([], [], lambda s, e: {}, WZGX) is None
+
+
+def test_calculate_interval_nest_single_level():
+    """L0 趋势背驰 → 区间套链长 1，转折点为背驰段终分型。"""
+    wt, units, ldp = _uptrend_beichi_fixture()
+    levels = [LevelResult(0, wt.zss, [wt])]
+    nest = inc.calculate_interval_nest(levels, units, ldp, WZGX)
+    assert nest is not None
+    assert len(nest.links) == 1
+    assert nest.links[0].level == 0
+    assert nest.links[0].is_beichi is True
+    leave = wt.zss[-1].lines[-1]
+    assert nest.links[0].beichi_seg is leave
+    assert nest.turning_point is leave.end
+    assert nest.direction == "up"
