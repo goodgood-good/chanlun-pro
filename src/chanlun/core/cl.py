@@ -13,6 +13,7 @@ from chanlun.core.kline_data_processor import KlineDataProcessor
 from chanlun.core.macd import MACD
 from chanlun.core.xd_calculator import XdCalculator
 from chanlun.core.zs_calculator import ZsCalculator
+from chanlun.core.recursive_calculator import RecursiveCalculator, LevelResult
 from chanlun.tools.log_util import LogUtil
 
 
@@ -273,6 +274,18 @@ class CL(ICL):
     def get_xd_zslx(self) -> List[ZSLX]:
         """返回线段级走势类型列表（子项目③产出）。"""
         return self.xd_zslx
+
+    def get_recursive_levels(self) -> List[LevelResult]:
+        """返回递归装配的多级层级树（子项目④）。
+
+        并存独立子系统：每次现算（层级单元数逐级收缩、开销可忽略），
+        不接入 process_klines、不动周期多级分析与 bs_point_calculator。
+        """
+        ld_provider = lambda s, e: query_macd_ld(self, s, e)
+        wzgx_config = self.config.get('zs_wzgx', Config.ZS_WZGX_ZGGDD.value)
+        return RecursiveCalculator().calculate(
+            self.xd_calculator.xds, ld_provider, wzgx_config
+        )
 
     def get_last_bi_zs(self) -> Union[ZS, None]:
         """返回最后的笔中枢
