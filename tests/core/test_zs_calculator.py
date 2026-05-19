@@ -171,3 +171,19 @@ def test_zhongshu_at_data_start_completes_without_entry():
     assert (zs.zg, zs.zd) == (8, 5)
     assert [l.index for l in zs.lines] == [0, 1, 2]
     assert zs.end is zs.lines[-1]
+
+
+def test_require_alternation_false_allows_same_direction_core():
+    """require_alternation=False：同向三段重叠也能成中枢（供 ④ 的 L≥1 扫描用）。"""
+    # 三段同为 up、范围都含 [5,8]——方向不交替
+    lines = [_seg(0, "up", 5, 8), _seg(1, "up", 5, 8), _seg(2, "up", 5, 8)]
+    assert ZsCalculator(require_alternation=True).calculate(lines) == []
+    zss = ZsCalculator(require_alternation=False).calculate(lines)
+    assert len(zss) == 1, "关闭交替检查后，同向三段重叠应成中枢"
+    assert (zss[0].zg, zss[0].zd) == (8, 5)
+
+
+def test_require_alternation_defaults_true():
+    """默认 require_alternation=True：行为与原实现一致（交替检查照旧）。"""
+    lines = [_seg(0, "up", 5, 8), _seg(1, "up", 5, 8), _seg(2, "up", 5, 8)]
+    assert ZsCalculator().calculate(lines) == []

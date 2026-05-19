@@ -18,7 +18,11 @@ class ZsCalculator:
     采用全量计算方式，确保每次计算都是独立的、无状态污染的。
     """
 
-    def __init__(self):
+    def __init__(self, require_alternation: bool = True):
+        # require_alternation：是否强制核心三段方向交替。
+        # 默认 True——① 主流程线段中枢扫描照旧。④ 递归到 L≥1 时构成段是
+        # 走势类型（含无向盘整、不严格交替），传 False 跳过交替检查。
+        self.require_alternation: bool = require_alternation
         self.all_lines: List[LINE] = []
         self.zss: List[ZS] = []
         self.pending_zs: Optional[ZS] = None
@@ -223,8 +227,11 @@ class ZsCalculator:
 
             seg_a, seg_b, seg_c = self.all_lines[core_start_idx:core_start_idx + 3]
 
-            # 检查线段方向是否交替
-            if not (seg_a.type != seg_b.type and seg_b.type != seg_c.type):
+            # 检查线段方向是否交替（require_alternation=False 时跳过，供 ④ 的
+            # L≥1 走势类型扫描——走势类型含无向盘整、不严格交替）。
+            if self.require_alternation and not (
+                seg_a.type != seg_b.type and seg_b.type != seg_c.type
+            ):
                 entry_idx += 1
                 continue
 
