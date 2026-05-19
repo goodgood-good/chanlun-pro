@@ -39,3 +39,26 @@ def _units_at_level(
 ) -> List[LINE]:
     """级别 k 的走势单元列表：k==0 为线段；k>=1 为第 k-1 级走势类型。"""
     return list(xds) if k == 0 else list(levels[k - 1].zslxs)
+
+
+def _drill_chain(top_zslx: ZSLX, top_level: int):
+    """从顶层走势类型沿 zss[-1].lines[-1] 逐级下钻。
+
+    返回 [(level, cur_zslx, beichi_seg), ...]——cur_zslx 是该级走势类型，
+    beichi_seg 是其离开末中枢的背驰段。背驰段为更低级走势类型(ZSLX) → 继续
+    下钻；为线段(XD) → 即 L0 重，记完停止。
+    """
+    chain = []
+    cur = top_zslx
+    level = top_level
+    while isinstance(cur, ZSLX):
+        if not cur.zss or not cur.zss[-1].lines:
+            break
+        seg = cur.zss[-1].lines[-1]
+        chain.append((level, cur, seg))
+        if isinstance(seg, ZSLX):
+            cur = seg
+            level -= 1
+        else:
+            break
+    return chain

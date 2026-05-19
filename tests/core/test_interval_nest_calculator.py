@@ -49,3 +49,34 @@ def test_units_at_level_l1_is_prev_zslxs():
     z0 = _zslx()
     levels = [LevelResult(0, [], [z0]), LevelResult(1, [], [])]
     assert inc._units_at_level(levels, xds, 1) == [z0]
+
+
+def _zs_with_lines(lines: list) -> ZS:
+    """构造一个中枢，含给定构成段。"""
+    z = ZS(zs_type="xd", start=None)
+    z.lines = lines
+    return z
+
+
+def test_drill_chain_single_level():
+    """L0 走势类型：背驰段是线段(XD) → 链长 1、到 L0 即止。"""
+    leave = _seg(9, "up", 5, 12)
+    wt0 = _zslx()
+    wt0.zss = [_zs_with_lines([_seg(7, "up", 4, 8), leave])]
+    chain = inc._drill_chain(wt0, 0)
+    assert len(chain) == 1
+    level, cur, seg = chain[0]
+    assert level == 0 and cur is wt0 and seg is leave
+
+
+def test_drill_chain_two_levels():
+    """L1 走势类型：背驰段是 L0 走势类型 → 继续下钻到 L0 的线段。"""
+    l0_leave = _seg(9, "up", 5, 12)
+    wt0 = _zslx()
+    wt0.zss = [_zs_with_lines([_seg(7, "up", 4, 8), l0_leave])]
+    wt1 = _zslx()
+    wt1.zss = [_zs_with_lines([_zslx(), wt0])]   # L1 背驰段 = wt0(L0 走势类型)
+    chain = inc._drill_chain(wt1, 1)
+    assert [lv for lv, _, _ in chain] == [1, 0]
+    assert chain[0][2] is wt0          # 第一重背驰段 = wt0
+    assert chain[1][2] is l0_leave     # 第二重(L0)背驰段 = 线段
