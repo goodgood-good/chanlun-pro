@@ -137,3 +137,60 @@ def beichi_pz(
         return False, None
 
     return is_beichi(compare_line, now_seg, ld_provider), compare_line
+
+
+def _seg_end_k_index(seg: LINE) -> Optional[int]:
+    """安全取走势段终点 K 索引；链路任一环节为 None 则返回 None。"""
+    try:
+        return seg.end.k.k_index
+    except AttributeError:
+        return None
+
+
+def beichi_qs(
+    lines: List[LINE],
+    zss: List[ZS],
+    now_seg: LINE,
+    ld_provider: LdProvider,
+    wzgx_config: str,
+) -> Tuple[bool, List[LINE]]:
+    """趋势背驰：≥2 个同向中枢的趋势中，离开末中枢的段相对上一次同向段是否衰竭。
+
+    原文(第二章·第四节·四 A/B/C)：A、C 为同向走势段，B 为居中的中枢；
+    C 段力度小于 A 段即标准背驰。不足 2 个中枢 → 非趋势背驰（原文：第一个
+    走势中枢出现的背驰只算盘整背驰）。
+    返回 (是否背驰, [比较的走势段])。
+    """
+    if len(zss) < 2:
+        return False, []
+
+    last_zs, prev_zs = zss[-1], zss[-2]
+
+    # 最后两个中枢须依次同向构成趋势，且趋势方向与当前段一致
+    qs_direction = is_qs(prev_zs, last_zs, wzgx_config)
+    if not qs_direction or qs_direction != now_seg.type:
+        return False, []
+
+    # 进入前一中枢的同向段时间边界：prev_zs.start 是进入段(LINE)，可能为 None
+    # （子项目①把进入段改为可选）。取其起点 K 索引。
+    prev_entry = prev_zs.start
+    if prev_entry is None:
+        return False, []
+    try:
+        prev_zs_start_k_index = prev_entry.start.k.k_index
+    except AttributeError:
+        return False, []
+
+    # 取边界前最后一个同向段作为比较对象（A 段）
+    compare_lines = []
+    for line in lines:
+        end_k = _seg_end_k_index(line)
+        if end_k is None:
+            continue
+        if line.type == now_seg.type and end_k <= prev_zs_start_k_index:
+            compare_lines.append(line)
+    if not compare_lines:
+        return False, []
+
+    compare_line = compare_lines[-1]
+    return is_beichi(compare_line, now_seg, ld_provider), [compare_line]

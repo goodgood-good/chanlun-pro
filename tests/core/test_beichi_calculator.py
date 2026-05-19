@@ -203,3 +203,45 @@ def test_beichi_pz_false_when_no_same_direction_compare_line():
     is_bc, compare = bc.beichi_pz(zs, now, lambda s, e: {})
     assert is_bc is False
     assert compare is None
+
+
+def test_beichi_qs_false_when_less_than_two_zs():
+    """不足 2 个中枢 → 不是趋势背驰（原文：第一中枢的背驰只算盘整背驰）。"""
+    now = _seg(XD, 10, "up", 5, 12)
+    is_bc, compare = bc.beichi_qs([], [_zs(zg=8, zd=5, gg=9, dd=4)], now,
+                                  lambda s, e: {}, Config.ZS_WZGX_ZGGDD.value)
+    assert is_bc is False
+    assert compare == []
+
+
+def test_beichi_qs_true():
+    """趋势背驰：≥2 同向中枢，离开末中枢段相对连接前一对中枢的同向段衰竭。"""
+    # 连接进入前一中枢的同向段（A 段），end.k.k_index = 1
+    seg_a = _seg(XD, 0, "up", 3, 7)
+    # prev_zs.start 是进入段，其 start.k.k_index = 2 → 比较段须 end <= 2
+    entry_prev = _seg(XD, 2, "up", 4, 8)
+    prev_zs = _zs(zg=8, zd=5, gg=9, dd=4)
+    prev_zs.start = entry_prev
+    last_zs = _zs(zg=15, zd=12, gg=16, dd=10)   # 与 prev_zs 构成向上趋势
+    now = _seg(XD, 20, "up", 12, 20)            # 离开末中枢段，创新高 20 > 7
+    lines = [seg_a]
+    provider = {(0, 1): _ld(up_sum=100, dif_max=3),    # seg_a
+                (20, 21): _ld(up_sum=40, dif_max=1)}   # now
+    ldp = lambda s, e: provider[(s.k.k_index, e.k.k_index)]
+
+    is_bc, compare = bc.beichi_qs(lines, [prev_zs, last_zs], now, ldp,
+                                  Config.ZS_WZGX_ZGGDD.value)
+    assert is_bc is True
+    assert compare == [seg_a]
+
+
+def test_beichi_qs_false_when_not_qs():
+    """两中枢不构成趋势（重叠）→ 非趋势背驰。"""
+    prev_zs = _zs(zg=8, zd=5, gg=9, dd=4)
+    prev_zs.start = _seg(XD, 2, "up", 4, 8)
+    last_zs = _zs(zg=9, zd=6, gg=10, dd=5)      # 与 prev_zs 重叠 → 无趋势
+    now = _seg(XD, 20, "up", 12, 20)
+    is_bc, compare = bc.beichi_qs([_seg(XD, 0, "up", 3, 7)], [prev_zs, last_zs],
+                                  now, lambda s, e: {}, Config.ZS_WZGX_ZGGDD.value)
+    assert is_bc is False
+    assert compare == []
