@@ -165,9 +165,13 @@ class CL(ICL):
             if self.zss_calculator.pending_zs is not None:
                 xd_zss.append(self.zss_calculator.pending_zs)
             ld_provider = lambda s, e: query_macd_ld(self, s, e)
-            wzgx_config = self.config.get('zs_wzgx', Config.ZS_WZGX_ZGGDD.value)
+            # 递归链路（③走势类型 / ④递归 / ⑤区间套）锁定原文严格档 GD：
+            # 趋势判定须按走势中枢中心定理二的 GG/DD 口径（原文「后GG<前DD
+            # → 下跌、后DD>前GG → 上涨」），不随 config.zs_wzgx（默认 ZGGDD
+            # 偏宽、非原文严格口径）。旧买卖点链路的薄壳仍按 config 不变。
+            recursive_wzgx = Config.ZS_WZGX_GD.value
             self.xd_zslx = self.zslx_calculator.calculate(
-                xd_zss, self.xd_calculator.xds, ld_provider, wzgx_config
+                xd_zss, self.xd_calculator.xds, ld_provider, recursive_wzgx
             )
 
             # 每次处理后重置缓存，确保下次访问时重新计算
@@ -283,9 +287,11 @@ class CL(ICL):
         不接入 process_klines、不动周期多级分析与 bs_point_calculator。
         """
         ld_provider = lambda s, e: query_macd_ld(self, s, e)
-        wzgx_config = self.config.get('zs_wzgx', Config.ZS_WZGX_ZGGDD.value)
+        # 递归链路锁定原文严格档 GD（趋势判定按中心定理二 GG/DD 口径），
+        # 不随 config.zs_wzgx——理由见 process_klines ③ 接入处注释。
+        recursive_wzgx = Config.ZS_WZGX_GD.value
         return RecursiveCalculator().calculate(
-            self.xd_calculator.xds, ld_provider, wzgx_config
+            self.xd_calculator.xds, ld_provider, recursive_wzgx
         )
 
     def get_interval_nest(self) -> Optional[IntervalNest]:
@@ -294,12 +300,14 @@ class CL(ICL):
         并存独立子系统：每次现算，不接入 process_klines、不动下游。
         """
         ld_provider = lambda s, e: query_macd_ld(self, s, e)
-        wzgx_config = self.config.get('zs_wzgx', Config.ZS_WZGX_ZGGDD.value)
+        # 递归链路锁定原文严格档 GD（趋势判定按中心定理二 GG/DD 口径），
+        # 不随 config.zs_wzgx——理由见 process_klines ③ 接入处注释。
+        recursive_wzgx = Config.ZS_WZGX_GD.value
         return calculate_interval_nest(
             self.get_recursive_levels(),
             self.xd_calculator.xds,
             ld_provider,
-            wzgx_config,
+            recursive_wzgx,
         )
 
     def get_last_bi_zs(self) -> Union[ZS, None]:
