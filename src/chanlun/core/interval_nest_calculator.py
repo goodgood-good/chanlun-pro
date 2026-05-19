@@ -62,3 +62,20 @@ def _drill_chain(top_zslx: ZSLX, top_level: int):
         else:
             break
     return chain
+
+
+def _zslx_is_beichi(
+    zslx: ZSLX, units: List[LINE], ld_provider: LdProvider, wzgx_config: str
+) -> bool:
+    """② 复核走势类型是否背驰：趋势走 beichi_qs、盘整走 beichi_pz。
+
+    背驰段 = 走势类型末中枢的离开段（zss[-1].lines[-1]）。
+    """
+    if not zslx.zss or not zslx.zss[-1].lines:
+        return False
+    leave_seg = zslx.zss[-1].lines[-1]
+    if zslx.zslx_type in ("上涨", "下跌"):
+        is_bc, _ = beichi_qs(units, zslx.zss, leave_seg, ld_provider, wzgx_config)
+    else:
+        is_bc, _ = beichi_pz(zslx.zss[-1], leave_seg, ld_provider)
+    return is_bc
