@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 import datetime
-from typing import Dict, Union, List, Tuple, Any
+from typing import Dict, Union, List, Tuple, Any, Optional
 import pandas as pd
 
 from chanlun.core.bi_calculator import BiCalculator
@@ -14,6 +14,7 @@ from chanlun.core.macd import MACD
 from chanlun.core.xd_calculator import XdCalculator
 from chanlun.core.zs_calculator import ZsCalculator
 from chanlun.core.recursive_calculator import RecursiveCalculator, LevelResult
+from chanlun.core.interval_nest_calculator import calculate_interval_nest, IntervalNest
 from chanlun.tools.log_util import LogUtil
 
 
@@ -285,6 +286,20 @@ class CL(ICL):
         wzgx_config = self.config.get('zs_wzgx', Config.ZS_WZGX_ZGGDD.value)
         return RecursiveCalculator().calculate(
             self.xd_calculator.xds, ld_provider, wzgx_config
+        )
+
+    def get_interval_nest(self) -> Optional[IntervalNest]:
+        """返回「当下」区间套——从最高级别趋势背驰逐级下钻定位转折点（区间套）。
+
+        并存独立子系统：每次现算，不接入 process_klines、不动下游。
+        """
+        ld_provider = lambda s, e: query_macd_ld(self, s, e)
+        wzgx_config = self.config.get('zs_wzgx', Config.ZS_WZGX_ZGGDD.value)
+        return calculate_interval_nest(
+            self.get_recursive_levels(),
+            self.xd_calculator.xds,
+            ld_provider,
+            wzgx_config,
         )
 
     def get_last_bi_zs(self) -> Union[ZS, None]:
