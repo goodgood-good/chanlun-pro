@@ -173,13 +173,19 @@ def beichi_qs(
 
     # 进入前一中枢的同向段时间边界：prev_zs.start 是进入段(LINE)，可能为 None
     # （子项目①把进入段改为可选）。取其起点 K 索引。
+    # 若进入段未知，退而使用 prev_zs 核心区第一段的末端作为近似边界，
+    # 使得核心区首段仍可作为趋势背驰的比较对象（A 段）。
     prev_entry = prev_zs.start
     if prev_entry is None:
-        return False, []
-    try:
-        prev_zs_start_k_index = prev_entry.start.k.k_index
-    except AttributeError:
-        return False, []
+        try:
+            prev_zs_start_k_index = prev_zs.lines[0].end.k.k_index
+        except (AttributeError, IndexError):
+            return False, []
+    else:
+        try:
+            prev_zs_start_k_index = prev_entry.start.k.k_index
+        except AttributeError:
+            return False, []
 
     # 取边界前最后一个同向段作为比较对象（A 段）
     compare_lines = []

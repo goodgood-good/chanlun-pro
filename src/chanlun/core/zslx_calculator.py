@@ -41,3 +41,82 @@ def _wt_beichi(
     else:
         is_bc, _ = beichi_pz(zss[-1], leave_seg, ld_provider)
     return is_bc
+
+
+def _finalize(
+    zss: List[ZS], lines: List[LINE], wzgx_config: str, done: bool
+) -> ZSLX:
+    """把一个中枢列表收尾成 ZSLX：分类、填字段、回填中枢方向。"""
+    zslx_type, direction = _classify(zss, wzgx_config)
+    first_seg = zss[0].lines[0]
+    last_seg = zss[-1].lines[-1]
+    zslx = ZSLX(
+        zslx_level=zss[0].level,
+        start=first_seg.start,
+        end=last_seg.end,
+        start_line=first_seg,
+        end_line=last_seg,
+        _type=direction,
+        index=0,
+        done=done,
+    )
+    zslx.zss = zss
+    zslx.zslx_type = zslx_type
+    # ①-1b：回填中枢方向——趋势中枢得 up/down，盘整中枢得 zd(震荡)
+    zs_dir = direction if zslx_type != "盘整" else "zd"
+    for zs in zss:
+        zs.type = zs_dir
+    return zslx
+
+
+class ZslxCalculator:
+    """级别无关的走势类型划分计算器。无状态，每次 calculate 全量重算。"""
+
+    def calculate(
+        self,
+        zss: List[ZS],
+        lines: List[LINE],
+        ld_provider: LdProvider,
+        wzgx_config: str,
+    ) -> List[ZSLX]:
+        """把中枢序列切成走势类型列表，末个 done=False。"""
+        if not zss:
+            return []
+
+        wts: List[ZSLX] = []
+        cur: Optional[List[ZS]] = [zss[0]]
+        cur_dir: Optional[str] = None
+
+        for zi in zss[1:]:
+            if cur is None:
+                # 上一个走势类型已被背驰终结，zi 另起
+                cur = [zi]
+                cur_dir = None
+                continue
+
+            qs = is_qs(cur[-1], zi, wzgx_config)
+            if len(cur) >= 2:
+                boundary = (qs != cur_dir)        # 趋势：方向不一致即断裂
+            else:
+                boundary = (qs is None)           # 盘整：无同向关系即断裂
+
+            if boundary:
+                wts.append(_finalize(cur, lines, wzgx_config, done=True))
+                cur = [zi]
+                cur_dir = None
+            else:
+                cur.append(zi)
+                if len(cur) == 2:
+                    cur_dir = qs
+
+            # 背驰信号：当前走势类型在最新中枢离开段处背驰 → 终结
+            if not boundary and cur is not None and _wt_beichi(
+                cur, lines, ld_provider, wzgx_config
+            ):
+                wts.append(_finalize(cur, lines, wzgx_config, done=True))
+                cur = None
+                cur_dir = None
+
+        if cur is not None:
+            wts.append(_finalize(cur, lines, wzgx_config, done=False))
+        return wts

@@ -100,3 +100,64 @@ def test_wt_beichi_no_beichi_false():
     provider = {(0, 1): _ld(up_sum=50, dif_max=2), (4, 5): _ld(up_sum=100, dif_max=3)}
     ldp = lambda s, e: provider[(s.k.k_index, e.k.k_index)]
     assert zc._wt_beichi([zs], [core_a, core_b, core_c], ldp, WZGX) is False
+
+
+def test_calculate_empty_returns_empty():
+    """无中枢 → 空列表。"""
+    assert zc.ZslxCalculator().calculate([], [], lambda s, e: {}, WZGX) == []
+
+
+def test_calculate_single_zs_pending_panzheng():
+    """单中枢 → 1 个 pending 盘整走势类型。"""
+    lines = [_seg(0, "up", 4, 8), _seg(1, "down", 8, 5), _seg(2, "up", 5, 10)]
+    zs = _zs(0, lines, zg=8, zd=5, gg=8, dd=4)
+    wts = zc.ZslxCalculator().calculate([zs], lines, lambda s, e: {}, WZGX)
+    assert len(wts) == 1
+    assert wts[0].zslx_type == "盘整"
+    assert wts[0].done is False
+    assert wts[0].zss == [zs]
+
+
+def test_calculate_two_up_zs_pending_uptrend():
+    """2 个依次向上中枢、无背驰 → 1 个 pending 上涨趋势。"""
+    z1_lines = [_seg(0, "up", 4, 8), _seg(1, "down", 8, 5), _seg(2, "up", 5, 9)]
+    z2_lines = [_seg(3, "up", 12, 16), _seg(4, "down", 16, 13), _seg(5, "up", 13, 18)]
+    z1 = _zs(0, z1_lines, zg=8, zd=5, gg=9, dd=4)
+    z2 = _zs(1, z2_lines, zg=16, zd=13, gg=18, dd=12)
+    ldp = lambda s, e: _ld(up_sum=100, dif_max=5)
+    wts = zc.ZslxCalculator().calculate([z1, z2], z1_lines + z2_lines, ldp, WZGX)
+    assert len(wts) == 1
+    assert wts[0].zslx_type == "上涨"
+    assert wts[0].done is False
+    assert wts[0].zss == [z1, z2]
+
+
+def test_calculate_direction_break_splits():
+    """方向断裂：向上中枢后接向下中枢 → 切成 2 个走势类型。"""
+    z1_lines = [_seg(0, "up", 4, 8), _seg(1, "down", 8, 5), _seg(2, "up", 5, 9)]
+    z2_lines = [_seg(3, "down", 9, 3), _seg(4, "up", 3, 6), _seg(5, "down", 6, 1)]
+    z1 = _zs(0, z1_lines, zg=8, zd=5, gg=9, dd=4)
+    z2 = _zs(1, z2_lines, zg=6, zd=3, gg=9, dd=1)   # 整体在 z1 之下 → 反向
+    ldp = lambda s, e: _ld(up_sum=100, down_sum=100, dif_max=5, dif_min=-5)
+    wts = zc.ZslxCalculator().calculate([z1, z2], z1_lines + z2_lines, ldp, WZGX)
+    assert len(wts) == 2
+    assert wts[0].zss == [z1] and wts[0].done is True
+    assert wts[1].zss == [z2] and wts[1].done is False
+
+
+def test_calculate_beichi_terminates_trend():
+    """背驰终结：2 向上中枢且第二个离开段背驰 → 第一个走势类型 done。"""
+    z1_lines = [_seg(0, "up", 4, 8), _seg(1, "down", 8, 5), _seg(2, "up", 5, 9)]
+    z2_lines = [_seg(3, "up", 12, 16), _seg(4, "down", 16, 13), _seg(5, "up", 13, 20)]
+    z1 = _zs(0, z1_lines, zg=8, zd=5, gg=9, dd=4)
+    z2 = _zs(1, z2_lines, zg=16, zd=13, gg=20, dd=12)
+    all_lines = z1_lines + z2_lines
+    provider = {(0, 1): _ld(up_sum=100, dif_max=5),    # _seg(0) 比较段
+                (5, 6): _ld(up_sum=30, dif_max=1)}     # _seg(5) 离开段，力度弱
+    def ldp(s, e):
+        return provider.get((s.k.k_index, e.k.k_index), _ld(up_sum=80, dif_max=4))
+    wts = zc.ZslxCalculator().calculate([z1, z2], all_lines, ldp, WZGX)
+    assert len(wts) == 1
+    assert wts[0].zss == [z1, z2]
+    assert wts[0].done is True
+    assert wts[0].zslx_type == "上涨"
