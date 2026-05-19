@@ -114,3 +114,26 @@ def is_qs(one_zs: ZS, two_zs: ZS, wzgx_config: str) -> Optional[str]:
         if one_zs.dd > two_zs.gg:
             return "down"
     return None
+
+
+def beichi_pz(
+    zs: ZS, now_seg: LINE, ld_provider: LdProvider
+) -> Tuple[bool, Optional[LINE]]:
+    """盘整背驰：1 个中枢的盘整中，离开段相对中枢内前一同向段是否力度衰竭。
+
+    原文(第二章·第四节)：盘整背驰 = 盘整中当下笔/线段比前一笔/线段力度弱。
+    返回 (是否背驰, 比较的走势段)。
+    """
+    if len(zs.lines) < 2:
+        return False, None
+
+    # 中枢内（除末段外）最近的同向段作比较对象
+    compare_line = None
+    for line in reversed(zs.lines[:-1]):
+        if line.type == now_seg.type:
+            compare_line = line
+            break
+    if compare_line is None:
+        return False, None
+
+    return is_beichi(compare_line, now_seg, ld_provider), compare_line

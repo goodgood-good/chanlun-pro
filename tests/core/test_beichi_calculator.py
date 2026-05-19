@@ -176,3 +176,30 @@ def test_is_qs_gd_strict():
     # gg(9) 不小于 dd(8) → 严格档不成立
     one2, two2 = _zs(zg=8, zd=5, gg=9, dd=4), _zs(zg=10, zd=8, gg=11, dd=8)
     assert bc.is_qs(one2, two2, Config.ZS_WZGX_GD.value) is None
+
+
+def test_beichi_pz_true():
+    """盘整背驰：离开段相对中枢内前一同向段力度衰竭 → True。"""
+    core_a = _seg(XD, 0, "up", 4, 8)     # 中枢内同向段
+    core_b = _seg(XD, 2, "down", 8, 5)
+    core_c = _seg(XD, 4, "up", 5, 8)     # zs.lines[-1]（不参与比较）
+    now = _seg(XD, 6, "up", 5, 10)       # 离开段，创新高 10 > 8
+    zs = _zs(zg=8, zd=5, gg=8, dd=4)
+    zs.lines = [core_a, core_b, core_c]
+    provider = {(0, 1): _ld(up_sum=100, dif_max=3),   # core_a
+                (6, 7): _ld(up_sum=50, dif_max=2)}    # now
+    ldp = lambda s, e: provider[(s.k.k_index, e.k.k_index)]
+
+    is_bc, compare = bc.beichi_pz(zs, now, ldp)
+    assert is_bc is True
+    assert compare is core_a
+
+
+def test_beichi_pz_false_when_no_same_direction_compare_line():
+    """中枢线段不足 2 段 → 非背驰。"""
+    now = _seg(XD, 6, "down", 8, 3)
+    zs = _zs(zg=8, zd=5, gg=8, dd=4)
+    zs.lines = [_seg(XD, 0, "up", 4, 8)]
+    is_bc, compare = bc.beichi_pz(zs, now, lambda s, e: {})
+    assert is_bc is False
+    assert compare is None
