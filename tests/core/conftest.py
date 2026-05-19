@@ -214,6 +214,9 @@ def _zs_snap(zs: Any) -> Dict[str, Any]:
     end = getattr(zs, "end", None)
     return {
         "zs_type": getattr(zs, "zs_type", None),
+        # type 是中枢方向（up/down 趋势中枢、zd 震荡中枢），子项目③ 由
+        # ZslxCalculator 回填——纳入快照以给方向回填回归保护。
+        "type": getattr(zs, "type", None),
         "start_date": _fmt_date(start.k.date) if (start and getattr(start, "k", None)) else None,
         "end_date": _fmt_date(end.k.date) if (end and getattr(end, "k", None)) else None,
         "zg": getattr(zs, "zg", None),
@@ -225,11 +228,22 @@ def _zs_snap(zs: Any) -> Dict[str, Any]:
     }
 
 
+def _zslx_snap(zslx: Any) -> Dict[str, Any]:
+    """走势类型(ZSLX)签名: 类型 + 方向 + 完成态 + 所含中枢数。"""
+    return {
+        "zslx_type": getattr(zslx, "zslx_type", None),
+        "type": getattr(zslx, "type", None),
+        "done": bool(getattr(zslx, "done", False)),
+        "zss_count": len(getattr(zslx, "zss", []) or []),
+    }
+
+
 def cl_snapshot(cd: CL) -> Dict[str, Any]:
     """把 CL 对象的关键算法状态序列化为可比较 dict。
 
     用于 US-003 增量 vs 全量等价性、US-004 真实标的 baseline。
-    覆盖: kline 数量 + fx + bi + xd + bi_zs + xd_zs 全部端点签名。
+    覆盖: kline 数量 + fx + bi + xd + bi_zs + xd_zs 全部端点签名，
+    以及子项目③ 走势类型(xd_zslx) 与 ④ 递归层级(recursive_levels)。
     不覆盖: MACD 内部数组 (浮点不稳定)、bs_points (单独路径)。
     """
     return {
@@ -239,6 +253,17 @@ def cl_snapshot(cd: CL) -> Dict[str, Any]:
         "xds": [_line_snap(x) for x in cd.get_xds()],
         "bi_zss": [_zs_snap(z) for z in cd.get_bi_zss()],
         "xd_zss": [_zs_snap(z) for z in cd.get_xd_zss()],
+        # 子项目③：线段级走势类型划分
+        "xd_zslx": [_zslx_snap(z) for z in cd.get_xd_zslx()],
+        # 子项目④：递归装配的多级层级树（结构化摘要）
+        "recursive_levels": [
+            {
+                "level": lv.level,
+                "zss": len(lv.zss),
+                "zslxs": [_zslx_snap(z) for z in lv.zslxs],
+            }
+            for lv in cd.get_recursive_levels()
+        ],
     }
 
 

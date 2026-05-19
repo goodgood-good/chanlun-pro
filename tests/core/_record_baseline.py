@@ -7,7 +7,9 @@
 用法:
     python -m tests.core._record_baseline
 
-会覆盖 tests/core/baselines.json 的 synthetic 节。
+会覆盖 tests/core/baselines.json 的 synthetic 节，并刷新 baselines.local.json
+的 real_klines 节（扫描 tests/fixtures/klines/*.csv）。baselines.local.json
+被 .gitignore 忽略，仅本地。
 合成数据组合添加/删除时, 也需要同步更新 test_baseline_regression.py 的参数化列表。
 """
 
@@ -19,6 +21,8 @@ import json
 import pathlib
 import sys
 from typing import Any, Dict
+
+import pandas as pd
 
 # 让脚本可直接 python -m tests.core._record_baseline 运行
 PROJECT_ROOT = pathlib.Path(__file__).resolve().parent.parent.parent
@@ -54,6 +58,31 @@ def record_synthetic_baselines() -> Dict[str, Dict[str, Any]]:
     return out
 
 
+_FIXTURES_DIR = PROJECT_ROOT / "tests" / "fixtures" / "klines"
+_BASELINES_LOCAL_PATH = pathlib.Path(__file__).resolve().parent / "baselines.local.json"
+
+
+def record_real_baselines(existing_real: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    """扫描 tests/fixtures/klines/*.csv，刷新 real_klines 节的 md5/kline_count。
+
+    保留已有条目里 source_pkl/market/code/frequency 等元数据。
+    """
+    out: Dict[str, Dict[str, Any]] = {}
+    if not _FIXTURES_DIR.exists():
+        return out
+    for csv_path in sorted(_FIXTURES_DIR.glob("*.csv")):
+        symbol_id = csv_path.stem
+        df = pd.read_csv(csv_path, parse_dates=["date"])
+        cd = CL("T", "1m", dict(DEFAULT_CL_CONFIG))
+        cd.process_klines(df)
+        entry = dict(existing_real.get(symbol_id, {}))  # 保留已有元数据
+        entry["md5"] = compute_snapshot_md5(cd)
+        entry["kline_count"] = len(df)
+        out[symbol_id] = entry
+        print(f"  {symbol_id}: {entry['md5']}")
+    return out
+
+
 def main() -> int:
     baselines_path = pathlib.Path(__file__).resolve().parent / "baselines.json"
     print(f"Regenerating baselines into {baselines_path}")
@@ -82,6 +111,25 @@ def main() -> int:
         encoding="utf-8",
     )
     print(f"Done. {len(new_data['synthetic'])} synthetic baselines written.")
+
+    # 真实标的 baseline → baselines.local.json（.gitignore 忽略，仅本地）。
+    print(f"Regenerating real-kline baselines into {_BASELINES_LOCAL_PATH}")
+    existing_local: Dict[str, Any] = {}
+    if _BASELINES_LOCAL_PATH.exists():
+        existing_local = json.loads(_BASELINES_LOCAL_PATH.read_text(encoding="utf-8"))
+    real = record_real_baselines(existing_local.get("real_klines", {}))
+    if real:
+        local_meta = existing_local.get("_meta", {})
+        local_meta["regenerate_cmd"] = "python -m tests.core._record_baseline"
+        local_meta["recorded_date"] = datetime.date.today().isoformat()
+        local_data = {"_meta": local_meta, "real_klines": real}
+        _BASELINES_LOCAL_PATH.write_text(
+            json.dumps(local_data, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        print(f"Done. {len(real)} real-kline baselines written.")
+    else:
+        print("No real-kline CSV fixtures found; baselines.local.json untouched.")
     return 0
 
 
