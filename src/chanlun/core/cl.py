@@ -189,6 +189,9 @@ class CL(ICL):
             self._last_mmd_sig = None
             self._last_bi_zs = None
             self._last_xd_zs = None
+            # 走势类型随中枢缓存一并清空：否则异常后 xd_zslx 残留旧走势类型，
+            # 其 zss 引用的可能是已失效的中枢实例。
+            self.xd_zslx = []
             # 同时清掉两个 ZsCalculator 的内部 snapshot：否则子计算器的
             # _last_lines_count / _last_tail_snapshot 可能停在「半截状态」，
             # 下次会被当普通增量从错误 entry_idx 续算 → 漏识别中枢。
