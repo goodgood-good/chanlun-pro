@@ -48,8 +48,9 @@ class ZsCalculator:
             self._last_tail_snapshot = None
             return []
 
-        # 检查线段数量
-        if len(lines) < 4:
+        # 检查线段数量：中枢最少由 3 段重叠构成（原文「三段重叠即成中枢」），
+        # 进入段可选，故 3 段即可能成中枢。
+        if len(lines) < 3:
             self._last_lines_count = len(lines)
             self._last_tail_snapshot = self._build_tail_snapshot(lines)
             return []
@@ -78,21 +79,22 @@ class ZsCalculator:
             elif self.zss:
                 # 没有 pending 时，复用上次记录的 exit 位置；
                 # 但 _last_entry_idx 也是基于 line 序号的，越界则降级。
-                if 0 <= self._last_entry_idx <= len(lines) - 4:
+                # -1 是合法值（开头中枢无进入段）。
+                if -1 <= self._last_entry_idx <= len(lines) - 4:
                     restart_idx = self._last_entry_idx
 
             if restart_idx is None:
-                # 任意环节定位失败 → 全量重算，正确性优先
+                # 任意环节定位失败 → 全量重算（-1：从可能的开头中枢扫起）。
                 self.zss = []
                 self.pending_zs = None
-                restart_idx = 0
+                restart_idx = -1
             self._create_zs_full(start_entry_idx=restart_idx)
         else:
-            # 全量模式
+            # 全量模式（-1：从序列开头扫起，开头三段也可成中枢）
             self.zss = []
             self.pending_zs = None
             self.all_lines = lines
-            self._create_zs_full(start_entry_idx=0)
+            self._create_zs_full(start_entry_idx=-1)
 
         # 更新增量状态
         self._last_lines_count = len(lines)
@@ -201,15 +203,22 @@ class ZsCalculator:
             return False
         return True
 
-    def _create_zs_full(self, start_entry_idx: int = 0):
+    def _create_zs_full(self, start_entry_idx: int = -1):
         """
         核心函数：扫描并创建中枢
-        :param start_entry_idx: 扫描起始位置（增量模式下从上次结束位置开始）
+
+        进入段是可选的：原文中枢定义只讲「3+ 连续次级别走势类型重叠」，
+        不含进入段。``entry_idx == -1`` 表示核心段从序列开头 (index 0) 起，
+        此时中枢没有进入段（``ZS.start`` 为 None）。
+
+        :param start_entry_idx: 扫描起始的进入段下标；-1 表示从无进入段的
+                                开头中枢扫起。增量模式下传上次结束位置。
         """
         entry_idx = start_entry_idx
-        # 循环必须为至少一个进入段和3个核心段(共4段)留出空间。
+        # 循环为 3 个核心段留空间；进入段（entry_idx 那一段）可选。
         while entry_idx <= len(self.all_lines) - 4:
-            entry_seg = self.all_lines[entry_idx]
+            # entry_idx == -1：核心段位于序列开头，中枢没有进入段。
+            entry_seg = self.all_lines[entry_idx] if entry_idx >= 0 else None
             core_start_idx = entry_idx + 1
 
             seg_a, seg_b, seg_c = self.all_lines[core_start_idx:core_start_idx + 3]
@@ -223,19 +232,17 @@ class ZsCalculator:
             zg = min(seg_a.zs_high, seg_b.zs_high, seg_c.zs_high)
             zd = max(seg_a.zs_low, seg_b.zs_low, seg_c.zs_low)
 
-            # 1. 检查三段核心是否有重叠
+            # 检查三段核心是否有重叠
             if zd >= zg:
                 entry_idx += 1
                 continue
 
-            # 2. 检查进入段是否与三段核心的重叠区有重叠
-            if not (max(entry_seg.zs_low, zd) < min(entry_seg.zs_high, zg)):
-                entry_idx += 1
-                continue
+            # 进入段不参与中枢成立判定：原文中枢 = 3+ 连续次级别走势类型重叠，
+            # 不要求进入段与中枢区间重叠。旧实现此处的「进入段重叠门槛」属
+            # extra-原文，会漏掉进入段在区间外的合法中枢，已删除。
 
-            # 找到了一个有效的三段核心。
-            # 注意：seg_c 此时被假定为核心，如果它稍后被证明是离开段，
-            # _extend_and_check_complete 将负责将其移除。
+            # 找到了一个有效的三段核心 seg_a / seg_b / seg_c。
+            # 即使 seg_c 之后立即离开中枢，seg_c 仍是构成段——三段重叠即成中枢。
             core_lines = [seg_a, seg_b, seg_c]
 
             center = ZS(zs_type='xd', start=entry_seg, _type=seg_b.type)
@@ -249,9 +256,9 @@ class ZsCalculator:
             is_completed, exit_idx = self._extend_and_check_complete(center, core_start_idx + 3)
 
             if is_completed:
-                # 有效中枢须同时满足：有进入段、有离开段、核心线段 >= 3
+                # 有效中枢须满足：有离开段、核心线段 >= 3。进入段可为 None
+                # （开头中枢无进入段），故不校验 center.start。
                 is_valid_center = (
-                        center.start is not None and
                         center.end is not None and
                         len(center.lines) >= 3
                 )
@@ -263,8 +270,8 @@ class ZsCalculator:
                     entry_idx = exit_idx
                     self._last_entry_idx = entry_idx
                 else:
-                    # 无效中枢丢弃（如初始 seg_c 被确认为离开段导致核心 < 3），
-                    # entry_idx +1 从下一线段重新找进入段
+                    # 防御性分支：完成的中枢核心恒 >= 3、离开段非空，
+                    # 正常情况下不可达；保留以防未来改动产生异常中枢。
                     entry_idx += 1
             else:
                 # 未完成说明已走到线段末尾，这是最后一个可能的中枢
@@ -311,34 +318,25 @@ class ZsCalculator:
                     j += 1
                     continue
                 else:
-                    # 下一线段(j+1)不重叠
-                    # 根据定义:
-                    # - "不进入中枢范围的线段" = next_seg (j+1)
-                    # - "离开段" = "前一个线段" = current_seg (j)
-
-                    # current_seg(j) 是离开段，*不要* 将它加入 center.lines
-                    center.end = current_seg  # 离开段是 current_seg (j)
+                    # 下一线段(j+1)不重叠 → 中枢在此完成。
+                    # current_seg(j) 是最后一个与中枢重叠的线段：它从中枢内
+                    # 伸出到中枢外，既是中枢的「离开段」，也是中枢的构成段。
+                    # 缠论「三个线段重合即成中枢」——离开段必须计入核心，
+                    # 否则最小中枢被迫需要 4 段重叠（见 tests/core/test_zs_calculator）。
+                    center.lines.append(current_seg)
+                    center.update_boundaries()
+                    center.end = current_seg  # 离开段 = 最后一个重叠段
                     center.done = True
-                    return True, j  # 下一个中枢的入口是 j
+                    return True, j  # 下一个中枢的入口仍是离开段 j
 
             else:
-                # --- 情况 2: 当前线段(j)不重叠 ---
-                # 2.1 它就是第一个不进入中枢范围的线段
-                # 根据定义:
-                # - "不进入中枢范围的线段" = current_seg (j)
-                # - "离开段" = "前一个线段" = self.all_lines[j-1]
-
-                center.end = self.all_lines[j - 1]  # 离开段是 j-1
+                # --- 情况 2: 当前线段(j)不重叠 → 中枢在此完成 ---
+                # current_seg(j) 是第一个脱离中枢的线段（反抽 / 新走势的起点）。
+                # 离开段是它前一个线段 j-1，即最后一个重叠段，已在 center.lines
+                # 中（初始 seg_c，或之前 append 进来的延伸段）。它同时是构成段
+                # 与离开段，*不再*从核心中移除——三段重叠即是合法中枢。
+                center.end = self.all_lines[j - 1]  # 离开段 = 最后一个重叠段
                 center.done = True
-
-                # *** 修正点 (使用 'is' 进行严格的对象身份检查) ***:
-                # 检查 self.all_lines[j-1] (即离开段)
-                # 是否 *就是* center.lines 的末尾 (例如初始的 seg_c)。
-                # 如果是，说明初始的 seg_c 实际上是离开段，应将其从核心线段中移除。
-                if center.lines and center.lines[-1] is center.end:
-                    center.lines.pop()
-                    center._bounds_dirty = True  # pop 后边界缓存失效
-
                 return True, j - 1  # 下一个中枢的入口是 j-1
 
         # 循环正常结束 (j == len(self.all_lines))
