@@ -111,8 +111,12 @@ class RecursiveCalculator:
         units: List[LINE] = list(xds)
         level = 0
         while level < _MAX_LEVELS:
+            # L0 构成段是线段 → 最小中枢 4 段（项目口径，偏离原文）；
+            # L≥1 构成段是走势类型 → 按原文「3 个次级别走势类型重叠成
+            # 中枢」用 3。与 require_alternation 同为分级参数。
             zss = ZsCalculator(
-                require_alternation=(level == 0)
+                require_alternation=(level == 0),
+                min_zs_lines=(4 if level == 0 else 3),
             ).calculate(units)
             zss = _split_oversized(zss)
             if not zss:

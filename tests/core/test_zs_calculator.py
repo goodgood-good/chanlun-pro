@@ -1,22 +1,22 @@
 """tests/core/test_zs_calculator.py — 中枢识别(ZsCalculator)回归测试。
 
-锁定缺陷：「恰好三段线段重叠」的中枢被 ZsCalculator 丢弃。
+中枢成立的最小线段数（项目既定口径）：
 
-缠论原文（《缠中说禅股市技术理论解释2017》走势分解章）：
-    「站在最小分析级别的角度，每一线段就是其次级别走势类型，
-      三个线段重合部分就构成最小分析级别的走势中枢。」
+  L0 线段中枢 = 至少 **4** 条线段重叠。线段是最低级别的走势类型，4 条
+  线段重叠才构成 1min 级别中枢。这是项目**有意偏离原文**的口径——原文
+  《缠中说禅股市技术理论解释2017》第三章·第二十五节原话是「三个线段
+  重合部分就构成最小分析级别的走势中枢」(3 段)；本项目按既定口径取 4 段。
+  `ZsCalculator(min_zs_lines=...)` 参数化：L0 默认 4，④ 递归 L≥1（构成段
+  是走势类型）按原文「3 个次级别走势类型重叠成中枢」取 3。
 
-即三段线段重叠即成中枢。旧实现把「最后一个重叠段」当离开段并排除在
-核心段之外，使最小中枢被迫需要 4 段重叠，导致：
-  1. 三段重叠 + 第四段离开中枢 → 中枢被丢弃（三买的基础中枢凭空消失）；
-  2. 单调性破坏：三段已 pending 的中枢，追加一根离开段后反被删除；
-  3. 四段重叠时核心段计数少 1 段。
+离开段（最后一个重叠段）计入核心 ``center.lines``，故「4 段重叠」即
+``len(center.lines) >= 4``。恰好 3 段重叠、第 4 段即离开 → 不构成中枢。
 
-这些用例直接构造受控线段序列喂入真实 ``ZsCalculator``，不走整条 K 线流水线，
-以确定性地复现「三段重叠 + 离开」结构。
+这些用例直接构造受控线段序列喂入真实 ``ZsCalculator``，不走整条 K 线
+流水线，以确定性地复现各种「N 段重叠 + 离开」结构。
 
-子项目①（进入段原文化）新增用例：中枢可以位于序列开头、没有进入段
-（``start=None``）——原文中枢定义只讲「3+ 连续次级别走势类型重叠」，不含进入段。
+进入段可选：中枢可位于序列开头、没有进入段（``start=None``）——中枢
+定义不含进入段。
 """
 
 from __future__ import annotations
@@ -65,38 +65,36 @@ def _three_overlap_segments() -> list[XD]:
     ]
 
 
-def test_three_overlapping_segments_plus_departure_form_one_zhongshu():
-    """三段重叠 + 第四段离开中枢 → 应识别出 1 个中枢（缠论：三段即成中枢）。"""
+def test_three_overlapping_segments_plus_departure_not_zhongshu():
+    """恰好三段重叠 + 第四段离开 → 不构成中枢（最小中枢需 4 段重叠）。"""
     lines = _three_overlap_segments()
-    lines.append(_seg(4, "down", 10, 8.5))  # 离开段：回调到 8.5，不跌破 zg=8
+    lines.append(_seg(4, "down", 10, 8.5))  # 第四段回调到 8.5、不与 [5,8] 重叠 → 离开
 
     zss = ZsCalculator().calculate(lines)
 
-    assert len(zss) == 1, "三段重叠区 [5,8] 应构成 1 个中枢"
-    zs = zss[0]
-    assert zs.done is True
-    assert (zs.zg, zs.zd) == (8, 5)
-    assert [l.index for l in zs.lines] == [1, 2, 3], "核心段应为笔1/2/3"
-    # 离开段 = 最后一个核心段（bs_point_calculator 依据 zs.end.type 判离开方向）
-    assert zs.end is zs.lines[-1]
-    assert zs.end.type == "up", "向上离开 → zs.end.type 须为 up（三买判定依赖）"
+    assert zss == [], "仅三段重叠（第四段即离开）→ 不足 4 段，不构成中枢"
 
 
-def test_pending_three_segment_zhongshu_survives_appended_departure():
-    """单调性：三段 pending 中枢，追加一根离开段后应「完成」而非被删除。"""
+def test_three_segment_overlap_is_not_zhongshu():
+    """三段重叠（数据到此为止）→ 不足 4 段，连 pending 中枢都不构成。"""
+    assert ZsCalculator().calculate(_three_overlap_segments()) == []
+
+
+def test_four_segment_pending_zhongshu_completes_on_appended_departure():
+    """增量：四段重叠的 pending 中枢，追加离开段后应「完成」而非被删除。"""
     calc = ZsCalculator()
 
-    base = _three_overlap_segments()
+    base = _three_overlap_segments() + [_seg(4, "down", 10, 3)]  # 进入段 + 四段核心
     zss_pending = calc.calculate(base)
-    assert len(zss_pending) == 1, "三段重叠（数据到此为止）应为 1 个 pending 中枢"
+    assert len(zss_pending) == 1, "四段重叠（数据到此为止）应为 1 个 pending 中枢"
     assert zss_pending[0].done is False
-    assert [l.index for l in zss_pending[0].lines] == [1, 2, 3]
+    assert [l.index for l in zss_pending[0].lines] == [1, 2, 3, 4]
 
     # 同一计算器追加离开段（走增量路径）
-    zss_done = calc.calculate(base + [_seg(4, "down", 10, 8.5)])
+    zss_done = calc.calculate(base + [_seg(5, "up", 3, 4.5)])
     assert len(zss_done) == 1, "追加离开段后中枢必须仍在（不得被删除）"
     assert zss_done[0].done is True
-    assert [l.index for l in zss_done[0].lines] == [1, 2, 3]
+    assert [l.index for l in zss_done[0].lines] == [1, 2, 3, 4]
 
 
 def test_fourth_overlapping_segment_counts_as_core():
@@ -136,32 +134,35 @@ def test_two_consecutive_zhongshu_are_both_identified():
     assert (zss[1].zg, zss[1].zd) == (9, 8.7)
 
 
-def test_three_segments_form_zhongshu_with_no_entry():
-    """子项目①：恰好三段重叠、序列之前无任何线段 → 1 个 pending 中枢，无进入段。
+def test_four_segments_form_zhongshu_with_no_entry():
+    """恰好四段重叠、序列之前无任何线段 → 1 个 pending 中枢，无进入段。
 
-    缠论中枢定义只讲「3+ 连续次级别走势类型重叠」，不含进入段；
-    旧实现 ``len(lines) < 4`` 直接返回空，与「三段重叠即成中枢」冲突。
+    中枢定义不含进入段；min_zs_lines=4 的门槛对「开头无进入段」中枢同样
+    适用，恰好四段重叠即起步。
     """
     lines = [
         _seg(0, "up", 4, 8),
         _seg(1, "down", 8, 5),
         _seg(2, "up", 5, 10),
+        _seg(3, "down", 10, 6),
     ]
     zss = ZsCalculator().calculate(lines)
-    assert len(zss) == 1, "三段重叠即成中枢，不应因缺进入段而返回空"
+    assert len(zss) == 1, "四段重叠即成中枢，不应因缺进入段而返回空"
     zs = zss[0]
     assert zs.start is None, "序列开头的中枢没有进入段"
+    assert zs.done is False
     assert (zs.zg, zs.zd) == (8, 5)
-    assert [l.index for l in zs.lines] == [0, 1, 2]
+    assert [l.index for l in zs.lines] == [0, 1, 2, 3]
 
 
 def test_zhongshu_at_data_start_completes_without_entry():
-    """子项目①：开头三段重叠 + 第四段离开 → 完成的中枢，进入段为 None。"""
+    """开头四段重叠 + 第五段离开 → 完成的中枢，进入段为 None。"""
     lines = [
         _seg(0, "up", 4, 8),
         _seg(1, "down", 8, 5),
         _seg(2, "up", 5, 10),
-        _seg(3, "down", 10, 8.5),  # 离开段
+        _seg(3, "down", 10, 3),    # 第四段，仍与 [5,8] 重叠 → 计入核心
+        _seg(4, "up", 3, 4.5),     # 第五段，整体在 zd=5 之下 → 离开
     ]
     zss = ZsCalculator().calculate(lines)
     assert len(zss) == 1
@@ -169,21 +170,21 @@ def test_zhongshu_at_data_start_completes_without_entry():
     assert zs.start is None
     assert zs.done is True
     assert (zs.zg, zs.zd) == (8, 5)
-    assert [l.index for l in zs.lines] == [0, 1, 2]
+    assert [l.index for l in zs.lines] == [0, 1, 2, 3]
     assert zs.end is zs.lines[-1]
 
 
 def test_require_alternation_false_allows_same_direction_core():
-    """require_alternation=False：同向三段重叠也能成中枢（供 ④ 的 L≥1 扫描用）。"""
-    # 三段同为 up、范围都含 [5,8]——方向不交替
-    lines = [_seg(0, "up", 5, 8), _seg(1, "up", 5, 8), _seg(2, "up", 5, 8)]
+    """require_alternation=False：同向四段重叠也能成中枢（供 ④ 的 L≥1 扫描用）。"""
+    # 四段同为 up、范围都含 [5,8]——方向不交替
+    lines = [_seg(i, "up", 5, 8) for i in range(4)]
     assert ZsCalculator(require_alternation=True).calculate(lines) == []
     zss = ZsCalculator(require_alternation=False).calculate(lines)
-    assert len(zss) == 1, "关闭交替检查后，同向三段重叠应成中枢"
+    assert len(zss) == 1, "关闭交替检查后，同向四段重叠应成中枢"
     assert (zss[0].zg, zss[0].zd) == (8, 5)
 
 
 def test_require_alternation_defaults_true():
-    """默认 require_alternation=True：行为与原实现一致（交替检查照旧）。"""
-    lines = [_seg(0, "up", 5, 8), _seg(1, "up", 5, 8), _seg(2, "up", 5, 8)]
+    """默认 require_alternation=True：同向段不交替 → 交替检查照旧拦下。"""
+    lines = [_seg(i, "up", 5, 8) for i in range(4)]
     assert ZsCalculator().calculate(lines) == []
