@@ -72,3 +72,50 @@ def test_as_units_writes_range_and_index():
     assert (zslx0.zs_high, zslx0.zs_low) == (17, 4)   # max gg=17, min dd=4
     assert (zslx1.zs_high, zslx1.zs_low) == (22, 16)
     assert zslx0.index == 0 and zslx1.index == 1
+
+
+def _zs_with_lines(lines: list) -> ZS:
+    """构造一个中枢，含给定构成段 lines。"""
+    z = ZS(zs_type="xd", start=None)
+    z.lines = lines
+    z._bounds_dirty = True
+    z.update_boundaries()
+    return z
+
+
+def _overlap_segs(n: int) -> list:
+    """n 根交替、范围都含 [5,8] 的线段。"""
+    return [_seg(i, "up" if i % 2 == 0 else "down",
+                 5 if i % 2 == 0 else 8, 8 if i % 2 == 0 else 5)
+            for i in range(n)]
+
+
+def test_split_oversized_keeps_short_zs():
+    """构成段 ≤8 → 中枢不分裂。"""
+    zs = _zs_with_lines(_overlap_segs(8))
+    out = rc._split_oversized([zs])
+    assert out == [zs]
+
+
+def test_split_oversized_splits_nine_into_three():
+    """构成段 9 → 拆成 3 个三段子中枢。"""
+    zs = _zs_with_lines(_overlap_segs(9))
+    out = rc._split_oversized([zs])
+    assert len(out) == 3
+    assert [len(s.lines) for s in out] == [3, 3, 3]
+
+
+def test_split_oversized_remainder_into_last_group():
+    """N%3≠0：余数并入末组（10→3,3,4；11→3,3,5）。"""
+    out10 = rc._split_oversized([_zs_with_lines(_overlap_segs(10))])
+    assert [len(s.lines) for s in out10] == [3, 3, 4]
+    out11 = rc._split_oversized([_zs_with_lines(_overlap_segs(11))])
+    assert [len(s.lines) for s in out11] == [3, 3, 5]
+
+
+def test_split_oversized_sub_zs_boundaries():
+    """子中枢边界口径与 ZsCalculator 一致：zg=前三段 zs_high 之 min。"""
+    out = rc._split_oversized([_zs_with_lines(_overlap_segs(9))])
+    for sub in out:
+        assert (sub.zg, sub.zd) == (8, 5)
+        assert (sub.gg, sub.dd) == (8, 5)

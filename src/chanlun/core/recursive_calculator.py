@@ -44,6 +44,46 @@ def _as_units(zslxs: List[ZSLX]) -> List[ZSLX]:
     return zslxs
 
 
+def _split_one(zs: ZS) -> List[ZS]:
+    """把一个 ≥9 段中枢按 (123)(456)(789)… 拆成 ⌊N/3⌋ 个三段子中枢。
+
+    N%3≠0 时余 1~2 段并入最后一组（保证每组 ≥3）。子中枢边界口径与
+    ZsCalculator 初始三段一致：zg/zd 取前三段、gg/dd 由 update_boundaries 全量。
+    """
+    lines = zs.lines
+    n = len(lines)
+    groups_count = n // 3
+    subs: List[ZS] = []
+    idx = 0
+    for g in range(groups_count):
+        size = 3 if g < groups_count - 1 else (n - idx)  # 末组吸收余数
+        group = lines[idx:idx + size]
+        idx += size
+        sub = ZS(zs_type=zs.zs_type, start=None)
+        sub.lines = group
+        sub._bounds_dirty = True
+        sub.zg = min(s.zs_high for s in group[:3])
+        sub.zd = max(s.zs_low for s in group[:3])
+        sub.update_boundaries()
+        subs.append(sub)
+    return subs
+
+
+def _split_oversized(zss: List[ZS]) -> List[ZS]:
+    """对中枢列表做 9 段分裂：≥9 段的中枢拆成三段子中枢，其余原样。
+
+    落地缠论段2.1「延伸超9段升级」——单个 ≥9 段中枢经 ③划分只得 1 个盘整、
+    单独无法升级；拆开后子中枢经划分、上一级扫描可聚成高级中枢。
+    """
+    out: List[ZS] = []
+    for zs in zss:
+        if len(zs.lines) <= 8:
+            out.append(zs)
+        else:
+            out.extend(_split_one(zs))
+    return out
+
+
 class RecursiveCalculator:
     """递归装配计算器。无状态，每次 calculate 全量重算。"""
 
