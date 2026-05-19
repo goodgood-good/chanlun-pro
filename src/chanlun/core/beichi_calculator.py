@@ -73,3 +73,15 @@ def _ld_decays(seg_a: LINE, seg_b: LINE, ld_provider: LdProvider) -> bool:
             if not (hb_b > hb_a):
                 return False
     return True
+
+
+def is_beichi(seg_a: LINE, seg_b: LINE, ld_provider: LdProvider) -> bool:
+    """背驰原语：seg_b（在后）相对 seg_a（在前、同向）是否背驰。
+
+    原文(第二章·第四节)：背驰 = 力度衰竭。判定两步——
+      1. 创新高/新低前提（原文细则2）；不满足直接非背驰。
+      2. 力度衰竭（柱子面积 + 级别相关黄白线）。
+    """
+    if not _xingao_xindi(seg_a, seg_b):
+        return False
+    return _ld_decays(seg_a, seg_b, ld_provider)

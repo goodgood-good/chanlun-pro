@@ -116,3 +116,27 @@ def test_ld_decays_down_uses_green_area_and_dif_min():
     provider = {(0, 1): _ld(down_sum=100, dif_min=-3), (2, 3): _ld(down_sum=50, dif_min=-2)}
     ldp = lambda s, e: provider[(s.k.k_index, e.k.k_index)]
     assert bc._ld_decays(seg_a, seg_b, ldp) is True
+
+
+def test_is_beichi_true_when_new_high_and_decay():
+    """创新高 + 力度衰竭 → 背驰。"""
+    seg_a, seg_b = _seg(XD, 0, "up", 4, 8), _seg(XD, 2, "up", 5, 10)
+    provider = {(0, 1): _ld(up_sum=100, dif_max=3), (2, 3): _ld(up_sum=50, dif_max=2)}
+    ldp = lambda s, e: provider[(s.k.k_index, e.k.k_index)]
+    assert bc.is_beichi(seg_a, seg_b, ldp) is True
+
+
+def test_is_beichi_false_without_new_high():
+    """没创新高 → 直接非背驰，即使力度衰竭（原文细则2）。"""
+    seg_a, seg_b = _seg(XD, 0, "up", 4, 8), _seg(XD, 2, "up", 5, 7)  # 高点 7 < 8
+    provider = {(0, 1): _ld(up_sum=100, dif_max=3), (2, 3): _ld(up_sum=50, dif_max=2)}
+    ldp = lambda s, e: provider[(s.k.k_index, e.k.k_index)]
+    assert bc.is_beichi(seg_a, seg_b, ldp) is False
+
+
+def test_is_beichi_false_when_strength_not_decayed():
+    """创新高但力度没衰竭 → 非背驰。"""
+    seg_a, seg_b = _seg(XD, 0, "up", 4, 8), _seg(XD, 2, "up", 5, 10)
+    provider = {(0, 1): _ld(up_sum=50, dif_max=2), (2, 3): _ld(up_sum=100, dif_max=3)}
+    ldp = lambda s, e: provider[(s.k.k_index, e.k.k_index)]
+    assert bc.is_beichi(seg_a, seg_b, ldp) is False
