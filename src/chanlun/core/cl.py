@@ -409,38 +409,6 @@ class CL(ICL):
         return self
 
     @staticmethod
-    def _safe_line_start_k_index(line) -> Union[int, None]:
-        """安全取 line.start.k.k_index，任一环节为 None 返回 None。
-
-        缠论对象链 line.start (FX) → .k (CLKline) → .k_index 在首根中枢/
-        异常构造下可能缺失，故逐层兜底。
-        """
-        try:
-            start = getattr(line, 'start', None)
-            if start is None:
-                return None
-            k = getattr(start, 'k', None)
-            if k is None:
-                return None
-            return getattr(k, 'k_index', None)
-        except AttributeError:
-            return None
-
-    @staticmethod
-    def _safe_line_end_k_index(line) -> Union[int, None]:
-        """安全取 line.end.k.k_index，任一环节为 None 返回 None。"""
-        try:
-            end = getattr(line, 'end', None)
-            if end is None:
-                return None
-            k = getattr(end, 'k', None)
-            if k is None:
-                return None
-            return getattr(k, 'k_index', None)
-        except AttributeError:
-            return None
-
-    @staticmethod
     def _calc_layer_sig(lines) -> tuple:
         """构造单一 line 层（xds 或 bis）的尾部签名，供 xd / bi 两层共用。
 
