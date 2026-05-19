@@ -146,14 +146,20 @@ def test_calculate_direction_break_splits():
 
 
 def test_calculate_beichi_terminates_trend():
-    """背驰终结：2 向上中枢且第二个离开段背驰 → 第一个走势类型 done。"""
-    z1_lines = [_seg(0, "up", 4, 8), _seg(1, "down", 8, 5), _seg(2, "up", 5, 9)]
-    z2_lines = [_seg(3, "up", 12, 16), _seg(4, "down", 16, 13), _seg(5, "up", 13, 20)]
+    """背驰终结：2 向上中枢且第二个离开段趋势背驰 → 第一个走势类型 done。"""
+    # A 段：进入前一中枢之前的同向段，beichi_qs 的比较对象
+    a_seg = _seg(0, "up", 2, 6)
+    # z1 的进入段（一个 LINE），其起点 k_index=2 作为 beichi_qs 的时间边界
+    z1_entry = _seg(2, "up", 3, 8)
+    z1_lines = [_seg(4, "up", 4, 8), _seg(5, "down", 8, 5), _seg(6, "up", 5, 9)]
+    z2_lines = [_seg(7, "up", 12, 16), _seg(8, "down", 16, 13), _seg(9, "up", 13, 20)]
     z1 = _zs(0, z1_lines, zg=8, zd=5, gg=9, dd=4)
+    z1.start = z1_entry          # 进入段，使 beichi_qs 能定位 A 段
     z2 = _zs(1, z2_lines, zg=16, zd=13, gg=20, dd=12)
-    all_lines = z1_lines + z2_lines
-    provider = {(0, 1): _ld(up_sum=100, dif_max=5),    # _seg(0) 比较段
-                (5, 6): _ld(up_sum=30, dif_max=1)}     # _seg(5) 离开段，力度弱
+    all_lines = [a_seg, z1_entry] + z1_lines + z2_lines
+    # A 段(_seg 0)力度强、z2 离开段(_seg 9)力度弱 → 趋势背驰
+    provider = {(0, 1): _ld(up_sum=100, dif_max=5),    # a_seg 比较段
+                (9, 10): _ld(up_sum=30, dif_max=1)}    # _seg(9) 离开段，力度弱
     def ldp(s, e):
         return provider.get((s.k.k_index, e.k.k_index), _ld(up_sum=80, dif_max=4))
     wts = zc.ZslxCalculator().calculate([z1, z2], all_lines, ldp, WZGX)
