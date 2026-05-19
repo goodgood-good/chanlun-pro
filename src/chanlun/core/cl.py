@@ -5,7 +5,8 @@ import pandas as pd
 
 from chanlun.core.bi_calculator import BiCalculator
 # 笔/段两层中枢统一走 ZsCalculator，create_dn_zs 也用临时 ZsCalculator 实例。
-from chanlun.core.cl_interface import ICL, Kline, CLKline, FX, BI, XD, ZS, Config, LINE, compare_ld_beichi
+from chanlun.core.cl_interface import ICL, Kline, CLKline, FX, BI, XD, ZS, Config, LINE, compare_ld_beichi, query_macd_ld
+from chanlun.core import beichi_calculator as bc
 from chanlun.core.cl_kline_process import CL_Kline_Process
 from chanlun.core.kline_data_processor import KlineDataProcessor
 from chanlun.core.macd import MACD
@@ -290,125 +291,22 @@ class CL(ICL):
         return self._last_xd_zs
 
     def beichi_pz(self, zs: ZS, now_line: LINE) -> Tuple[bool, Union[LINE, None]]:
-        """
-        判断中枢与指定线是否构成盘整背驰
-
-        Args:
-            zs: 中枢对象
-            now_line: 当前线
-
-        Returns:
-            (是否背驰, 比较的线)
-        """
-        if len(zs.lines) < 2:
-            return False, None
-
-        # 找到同方向的比较线
-        compare_line = None
-        for line in reversed(zs.lines[:-1]):
-            if line.type == now_line.type:
-                compare_line = line
-                break
-
-        if not compare_line:
-            return False, None
-
-        # 力度比较
-        now_ld = now_line.get_ld(self)
-        compare_ld = compare_line.get_ld(self)
-
-        is_bc = compare_ld_beichi(compare_ld, now_ld, now_line.type)
-
-        return is_bc, compare_line
+        """判断中枢与指定线是否构成盘整背驰（薄壳，逻辑见 beichi_calculator）。"""
+        ld_provider = lambda s, e: query_macd_ld(self, s, e)
+        return bc.beichi_pz(zs, now_line, ld_provider)
 
     def beichi_qs(
             self, lines: List[LINE], zss: List[ZS], now_line: LINE
     ) -> Tuple[bool, List[LINE]]:
-        """
-        判断指定线与之前的中枢，是否形成了趋势背驰
-
-        Args:
-            lines: 线的列表
-            zss: 中枢列表
-            now_line: 当前线
-
-        Returns:
-            (是否背驰, 比较的线列表)
-        """
-        if len(zss) < 2:
-            return False, []
-
-        # 检查最后两个中枢是否形成趋势
-        last_zs = zss[-1]
-        prev_zs = zss[-2]
-
-        qs_direction = self.zss_is_qs(prev_zs, last_zs)
-        if not qs_direction or qs_direction != now_line.type:
-            return False, []
-
-        # 找到进入前一个中枢的同方向线段。
-        # ZS.start 是 LINE/XD/BI 对象，用 .start.k.k_index 取进入段起点 K 索引
-        # 作为时间边界。链路任一环节在边界 case（首根中枢、xd 重建）下可能为
-        # None，故走 _safe_line_start_k_index 避免 AttributeError。
-        prev_zs_start_k_index = self._safe_line_start_k_index(prev_zs.start)
-        if prev_zs_start_k_index is None:
-            return False, []
-
-        compare_lines = []
-        for line in lines:
-            line_end_k_index = self._safe_line_end_k_index(line)
-            if line_end_k_index is None:
-                continue
-            if line.type == now_line.type and line_end_k_index <= prev_zs_start_k_index:
-                compare_lines.append(line)
-
-        if not compare_lines:
-            return False, []
-
-        # 取最后一个同方向线段进行比较
-        compare_line = compare_lines[-1]
-
-        # 力度比较
-        now_ld = now_line.get_ld(self)
-        compare_ld = compare_line.get_ld(self)
-
-        is_bc = compare_ld_beichi(compare_ld, now_ld, now_line.type)
-
-        return is_bc, [compare_line]
+        """判断指定线与之前的中枢是否形成趋势背驰（薄壳，逻辑见 beichi_calculator）。"""
+        ld_provider = lambda s, e: query_macd_ld(self, s, e)
+        wzgx_config = self.config.get('zs_wzgx', Config.ZS_WZGX_ZGGDD.value)
+        return bc.beichi_qs(lines, zss, now_line, ld_provider, wzgx_config)
 
     def zss_is_qs(self, one_zs: ZS, two_zs: ZS) -> Union[str, None]:
-        """
-        判断两个中枢是否形成趋势
-
-        Args:
-            one_zs: 第一个中枢
-            two_zs: 第二个中枢
-
-        Returns:
-            'up' 向上趋势, 'down' 向下趋势, None 无趋势
-        """
+        """判断两个中枢是否形成趋势（薄壳，逻辑见 beichi_calculator）。"""
         wzgx_config = self.config.get('zs_wzgx', Config.ZS_WZGX_ZGGDD.value)
-
-        if wzgx_config == Config.ZS_WZGX_ZGD.value:
-            # 宽松比较：zg与zd
-            if one_zs.zg < two_zs.zd:
-                return 'up'
-            elif one_zs.zd > two_zs.zg:
-                return 'down'
-        elif wzgx_config == Config.ZS_WZGX_ZGGDD.value:
-            # 较为宽松：zg与dd, zd与gg
-            if one_zs.zg < two_zs.dd:
-                return 'up'
-            elif one_zs.zd > two_zs.gg:
-                return 'down'
-        elif wzgx_config == Config.ZS_WZGX_GD.value:
-            # 严格比较：gg与dd
-            if one_zs.gg < two_zs.dd:
-                return 'up'
-            elif one_zs.dd > two_zs.gg:
-                return 'down'
-
-        return None
+        return bc.is_qs(one_zs, two_zs, wzgx_config)
 
     def create_dn_zs(
         self,
