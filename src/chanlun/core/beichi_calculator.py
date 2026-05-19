@@ -85,3 +85,32 @@ def is_beichi(seg_a: LINE, seg_b: LINE, ld_provider: LdProvider) -> bool:
     if not _xingao_xindi(seg_a, seg_b):
         return False
     return _ld_decays(seg_a, seg_b, ld_provider)
+
+
+def is_qs(one_zs: ZS, two_zs: ZS, wzgx_config: str) -> Optional[str]:
+    """趋势关系判定：相邻两中枢是否「依次同向」构成趋势。
+
+    原文：趋势至少两个依次同向的走势中枢。「依次同向」的松紧由 wzgx_config
+    给定——原文「一个中枢整体在另一个之上/下」对应严格档 GD；默认档 ZGGDD
+    较宽，此口径是缠论本身的模糊点，沿用代码库现有默认配置。
+    返回 'up' / 'down' / None。
+    """
+    if wzgx_config == Config.ZS_WZGX_ZGD.value:
+        # 宽松：zg 与 zd
+        if one_zs.zg < two_zs.zd:
+            return "up"
+        if one_zs.zd > two_zs.zg:
+            return "down"
+    elif wzgx_config == Config.ZS_WZGX_ZGGDD.value:
+        # 较宽松：zg 与 dd、zd 与 gg
+        if one_zs.zg < two_zs.dd:
+            return "up"
+        if one_zs.zd > two_zs.gg:
+            return "down"
+    elif wzgx_config == Config.ZS_WZGX_GD.value:
+        # 严格：gg 与 dd
+        if one_zs.gg < two_zs.dd:
+            return "up"
+        if one_zs.dd > two_zs.gg:
+            return "down"
+    return None

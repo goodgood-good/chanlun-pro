@@ -140,3 +140,39 @@ def test_is_beichi_false_when_strength_not_decayed():
     provider = {(0, 1): _ld(up_sum=50, dif_max=2), (2, 3): _ld(up_sum=100, dif_max=3)}
     ldp = lambda s, e: provider[(s.k.k_index, e.k.k_index)]
     assert bc.is_beichi(seg_a, seg_b, ldp) is False
+
+
+from chanlun.core.cl_interface import Config, ZS
+
+
+def _zs(zg, zd, gg, dd) -> ZS:
+    """构造一个中枢（只填趋势判定会读的边界字段）。"""
+    z = ZS(zs_type="xd", start=None, zg=zg, zd=zd, gg=gg, dd=dd)
+    return z
+
+
+def test_is_qs_zggdd_up():
+    """默认档 ZGGDD：前 zg < 后 dd → 向上趋势。"""
+    one, two = _zs(zg=8, zd=5, gg=9, dd=4), _zs(zg=15, zd=12, gg=16, dd=10)
+    assert bc.is_qs(one, two, Config.ZS_WZGX_ZGGDD.value) == "up"
+
+
+def test_is_qs_zggdd_down():
+    """默认档 ZGGDD：前 zd > 后 gg → 向下趋势。"""
+    one, two = _zs(zg=15, zd=12, gg=16, dd=10), _zs(zg=8, zd=5, gg=11, dd=4)
+    assert bc.is_qs(one, two, Config.ZS_WZGX_ZGGDD.value) == "down"
+
+
+def test_is_qs_none_when_overlap():
+    """两中枢重叠 → 无趋势 None。"""
+    one, two = _zs(zg=8, zd=5, gg=9, dd=4), _zs(zg=9, zd=6, gg=10, dd=5)
+    assert bc.is_qs(one, two, Config.ZS_WZGX_ZGGDD.value) is None
+
+
+def test_is_qs_gd_strict():
+    """严格档 GD：前 gg < 后 dd 才算向上趋势。"""
+    one, two = _zs(zg=8, zd=5, gg=9, dd=4), _zs(zg=15, zd=12, gg=16, dd=10)
+    assert bc.is_qs(one, two, Config.ZS_WZGX_GD.value) == "up"
+    # gg(9) 不小于 dd(8) → 严格档不成立
+    one2, two2 = _zs(zg=8, zd=5, gg=9, dd=4), _zs(zg=10, zd=8, gg=11, dd=8)
+    assert bc.is_qs(one2, two2, Config.ZS_WZGX_GD.value) is None
