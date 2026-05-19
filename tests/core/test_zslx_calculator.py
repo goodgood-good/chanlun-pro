@@ -167,3 +167,36 @@ def test_calculate_beichi_terminates_trend():
     assert wts[0].zss == [z1, z2]
     assert wts[0].done is True
     assert wts[0].zslx_type == "上涨"
+
+
+def test_backfill_trend_zs_type_is_direction():
+    """趋势走势类型 → 其中枢 zs.type 回填为 up/down。"""
+    z1_lines = [_seg(0, "up", 4, 8), _seg(1, "down", 8, 5), _seg(2, "up", 5, 9)]
+    z2_lines = [_seg(3, "up", 12, 16), _seg(4, "down", 16, 13), _seg(5, "up", 13, 18)]
+    z1 = _zs(0, z1_lines, zg=8, zd=5, gg=9, dd=4)
+    z2 = _zs(1, z2_lines, zg=16, zd=13, gg=18, dd=12)
+    zc.ZslxCalculator().calculate([z1, z2], z1_lines + z2_lines,
+                                  lambda s, e: _ld(up_sum=100, dif_max=5), WZGX)
+    assert z1.type == "up"
+    assert z2.type == "up"
+
+
+def test_backfill_panzheng_zs_type_is_zd():
+    """盘整走势类型 → 其中枢 zs.type 回填为 zd(震荡)。"""
+    lines = [_seg(0, "up", 4, 8), _seg(1, "down", 8, 5), _seg(2, "up", 5, 10)]
+    zs = _zs(0, lines, zg=8, zd=5, gg=8, dd=4)
+    zc.ZslxCalculator().calculate([zs], lines, lambda s, e: {}, WZGX)
+    assert zs.type == "zd"
+
+
+def test_calculate_level_agnostic_higher_level_zs():
+    """级别无关性：走势类型划分只依赖中枢的 zg/zd/gg/dd 与 lines，
+    不依赖中枢/走势段的具体级别，故对任意级别的中枢序列结论一致。
+    """
+    z1_lines = [_seg(0, "up", 4, 8), _seg(1, "down", 8, 5), _seg(2, "up", 5, 9)]
+    z2_lines = [_seg(3, "up", 12, 16), _seg(4, "down", 16, 13), _seg(5, "up", 13, 18)]
+    z1 = _zs(0, z1_lines, zg=8, zd=5, gg=9, dd=4)
+    z2 = _zs(1, z2_lines, zg=16, zd=13, gg=18, dd=12)
+    wts = zc.ZslxCalculator().calculate([z1, z2], z1_lines + z2_lines,
+                                        lambda s, e: _ld(up_sum=100, dif_max=5), WZGX)
+    assert len(wts) == 1 and wts[0].zslx_type == "上涨"
