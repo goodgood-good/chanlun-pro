@@ -67,3 +67,36 @@ def test_classify_two_down_zs_is_downtrend():
     zslx_type, direction = zc._classify([z1, z2], WZGX)
     assert zslx_type == "下跌"
     assert direction == "down"
+
+
+def _ld(up_sum=0.0, down_sum=0.0, dif_max=0.0, dif_min=0.0) -> dict:
+    """构造 query_macd_ld 风格的 ld 字典。"""
+    return {
+        "dea": {"end": 0.0, "max": 0.0, "min": 0.0},
+        "dif": {"end": 0.0, "max": dif_max, "min": dif_min},
+        "hist": {"sum": up_sum + down_sum, "up_sum": up_sum,
+                 "down_sum": down_sum, "max": 0.0, "min": 0.0, "end": 0.0},
+    }
+
+
+def test_wt_beichi_panzheng_true():
+    """单中枢盘整：离开段相对中枢内前一同向段力度衰竭 → 背驰 True。"""
+    core_a = _seg(0, "up", 4, 8)
+    core_b = _seg(2, "down", 8, 5)
+    core_c = _seg(4, "up", 5, 10)   # 离开段 zs.lines[-1]，创新高 10 > 8
+    zs = _zs(0, [core_a, core_b, core_c], zg=8, zd=5, gg=8, dd=4)
+    provider = {(0, 1): _ld(up_sum=100, dif_max=3),   # core_a
+                (4, 5): _ld(up_sum=50, dif_max=2)}    # core_c 离开段
+    ldp = lambda s, e: provider[(s.k.k_index, e.k.k_index)]
+    assert zc._wt_beichi([zs], [core_a, core_b, core_c], ldp, WZGX) is True
+
+
+def test_wt_beichi_no_beichi_false():
+    """力度未衰竭 → 非背驰。"""
+    core_a = _seg(0, "up", 4, 8)
+    core_b = _seg(2, "down", 8, 5)
+    core_c = _seg(4, "up", 5, 10)
+    zs = _zs(0, [core_a, core_b, core_c], zg=8, zd=5, gg=8, dd=4)
+    provider = {(0, 1): _ld(up_sum=50, dif_max=2), (4, 5): _ld(up_sum=100, dif_max=3)}
+    ldp = lambda s, e: provider[(s.k.k_index, e.k.k_index)]
+    assert zc._wt_beichi([zs], [core_a, core_b, core_c], ldp, WZGX) is False
