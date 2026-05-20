@@ -1246,6 +1246,12 @@ _AUTO_OVERLAY_FREQS = {
     "1D":  ["w", "m"],
     "1W":  ["m"],
 }
+# overlay 合法 freq 白名单——用户从 query 传入 ``overlays=`` 参数时,
+# 必须落在这个集合里才会被喂给 ``ex.klines``。防御不可信输入,即便
+# exchange 实现对未知 freq 已 return [],也避免对内部接口的隐性依赖。
+_OVERLAY_ALLOWED_FREQS = frozenset(
+    f for freqs in _AUTO_OVERLAY_FREQS.values() for f in freqs
+)
 
 
 def _serialize_overlay_zss(cd) -> list:
@@ -1329,9 +1335,12 @@ def tv_overlays():
     if market is None or code is None:
         return {"overlays": {}, "current_interval": interval, "error": "invalid_symbol"}
 
-    # 解析目标 overlay frequencies
+    # 解析目标 overlay frequencies——用户传 ``overlays=`` 时必须落在白名单内
     if overlays_param:
-        overlay_freqs = [f.strip() for f in overlays_param.split(",") if f.strip()]
+        overlay_freqs = [
+            f.strip() for f in overlays_param.split(",")
+            if f.strip() and f.strip() in _OVERLAY_ALLOWED_FREQS
+        ]
     else:
         overlay_freqs = list(_AUTO_OVERLAY_FREQS.get(interval, []))
 
