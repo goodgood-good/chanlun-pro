@@ -5,6 +5,8 @@
 // 默认的缠论显示项配置
 const CL_SHOW_DEFAULT = {
     fx: true, bi: true, xd: true, zs: true, bc: true, mmd: true,
+    // 买卖点/背驰按级别独立 toggle(笔层数量远多于段层、用户常需只看段层):
+    mmd_bi: true, mmd_xd: true, bc_bi: true, bc_xd: true,
     // 原文化新增独立开关(默认全开,用户可在控制面板单独 toggle):
     zs_direction: true,        // 中枢按 zs.type 着色(up/down/zd)
     zs_expanded: true,         // ⑤ 扩展中枢加粗框
@@ -112,6 +114,8 @@ const CHART_CONFIG = {
     LINE_STYLES: { SOLID: 0, DOTTED: 1, DASHED: 2 },
     CHART_TYPES: [
         "fxs", "bis", "xds", "bi_zss", "xd_zss", "bcs", "mmds",
+        // 拆分版买卖点/背驰(笔层 vs 段层),独立 reconcile
+        "bi_mmds", "xd_mmds", "bi_bcs", "xd_bcs",
         // 原文化新增:③ 走势类型 / ④ 递归层级 / 区间套
         "xd_zslx", "recursive_zss_L1", "recursive_zss_L2", "recursive_zss_L3",
         "recursive_zslxs_L1", "recursive_zslxs_L2", "recursive_zslxs_L3",
@@ -246,11 +250,19 @@ const ChartUtils = {
         const isBuy = mmd.text.includes("B");
         const color = isBuy ? CHART_CONFIG.COLORS.MMD_UP : CHART_CONFIG.COLORS.MMD_DOWN;
         const shape = isBuy ? "arrow_up" : "arrow_down";
-        // 去掉"笔:/段:"级别前缀（段:3B → 3B）。arrow_up/arrow_down 自动居中在
-        // 底/顶分型的正下/正上方，位置精准。颜色必须用 arrowColor 参数——旧代码
-        // 误用 markerColor 不生效，才一直显示图表库内置的刺眼亮绿色。
-        const label = mmd.text.replace(/[笔段]:/g, "");
-        return this.createShape(chart, mmd.points, { shape, text: label, overrides: { arrowColor: color, color, fontsize: 12, bold: true, ...options.overrides }, ...options });
+        // 按级别分样式(buy/sell point 数量笔层 >> 段层):
+        //   - 笔层(``options.levelHint === 'bi'``):小字号 + 高透明,「次要级别」
+        //   - 段层(``options.levelHint === 'xd'``):大字号 + 加粗 + 不透明,「主要级别」
+        //   - 缺省(老 mmds 合并版):中等字号
+        // 标签:拆分版 ``mmd.level`` 已带级别字段,前缀「笔/段」直接显示;合并版
+        // 保留原 ``笔:3B/段:1B`` 全文。
+        const isSplit = !!mmd.level;
+        const isXd = isSplit && mmd.level === "xd";
+        const fontsize = isSplit ? (isXd ? 14 : 10) : 12;
+        const transparency = isSplit ? (isXd ? 0 : 40) : 0;
+        const labelPrefix = isSplit ? (isXd ? "段·" : "笔·") : "";
+        const label = labelPrefix + mmd.text.replace(/[笔段]:/g, "");
+        return this.createShape(chart, mmd.points, { shape, text: label, overrides: { arrowColor: color, color, fontsize, bold: isXd, transparency, ...options.overrides }, ...options });
     },
     createBcShape(chart, bc, options = {}) {
         return this.createShape(chart, bc.points, { shape: "balloon", text: bc.text, overrides: { markerColor: CHART_CONFIG.COLORS.BCS, backgroundColor: CHART_CONFIG.COLORS.BCS, textColor: CHART_CONFIG.COLORS.BC_TEXT, transparency: 70, backgroundTransparency: 70, fontsize: 12, ...options.overrides }, ...options });
@@ -901,7 +913,13 @@ class ChartManager {
                         <label style="display:block; cursor:pointer;"><input type="checkbox" id="${cbId('xd')}" ${cfg.xd ? 'checked' : ''} style="margin-right: 8px; vertical-align: middle;"> 线段</label>
                         <label style="display:block; cursor:pointer;"><input type="checkbox" id="${cbId('zs')}" ${cfg.zs ? 'checked' : ''} style="margin-right: 8px; vertical-align: middle;"> 中枢</label>
                         <label style="display:block; cursor:pointer;"><input type="checkbox" id="${cbId('bc')}" ${cfg.bc ? 'checked' : ''} style="margin-right: 8px; vertical-align: middle;"> 背驰</label>
-                        <label style="display:block; cursor:pointer;"><input type="checkbox" id="${cbId('mmd')}" ${cfg.mmd ? 'checked' : ''} style="margin-right: 8px; vertical-align: middle;"> 买卖点</label>
+                        <label style="display:block; cursor:pointer;"><input type="checkbox" id="${cbId('mmd')}" ${cfg.mmd ? 'checked' : ''} style="margin-right: 8px; vertical-align: middle;"> 买卖点(总开关)</label>
+                        <div style="padding-left: 16px; font-size: 12px;">
+                            <label style="display:block; cursor:pointer;"><input type="checkbox" id="${cbId('mmd_bi')}" ${cfg.mmd_bi ? 'checked' : ''} style="margin-right: 8px; vertical-align: middle;"> 笔层(小)</label>
+                            <label style="display:block; cursor:pointer;"><input type="checkbox" id="${cbId('mmd_xd')}" ${cfg.mmd_xd ? 'checked' : ''} style="margin-right: 8px; vertical-align: middle;"> 段层(大)</label>
+                            <label style="display:block; cursor:pointer;"><input type="checkbox" id="${cbId('bc_bi')}" ${cfg.bc_bi ? 'checked' : ''} style="margin-right: 8px; vertical-align: middle;"> 笔背驰</label>
+                            <label style="display:block; cursor:pointer;"><input type="checkbox" id="${cbId('bc_xd')}" ${cfg.bc_xd ? 'checked' : ''} style="margin-right: 8px; vertical-align: middle;"> 段背驰</label>
+                        </div>
                         <hr style="margin: 5px 0;">
                         <div style="font-size: 12px; color: #666; margin-bottom: 4px;">原文化新增</div>
                         <label style="display:block; cursor:pointer;"><input type="checkbox" id="${cbId('zs_direction')}" ${cfg.zs_direction ? 'checked' : ''} style="margin-right: 8px; vertical-align: middle;"> 中枢方向着色</label>
@@ -953,6 +971,8 @@ class ChartManager {
 
                 const keys = [
                     'fx', 'bi', 'xd', 'zs', 'bc', 'mmd',
+                    // 笔/段独立级别开关
+                    'mmd_bi', 'mmd_xd', 'bc_bi', 'bc_xd',
                     'zs_direction', 'zs_expanded', 'xd_zslx',
                     'recursive_levels', 'interval_nest',
                 ];
@@ -1448,8 +1468,29 @@ class ChartManager {
         };
         this.reconcile('bi_zss', cfg.zs ? barsResult.bi_zss : [], from, symbolKey, (item) => safeCreate(wrapZs(getDynamicColor(currentInterval, "bi_zss"))(item), 'bi_zs'));
         this.reconcile('xd_zss', cfg.zs ? barsResult.xd_zss : [], from, symbolKey, (item) => safeCreate(wrapZs(getDynamicColor(currentInterval, "xd_zss"))(item), 'xd_zs'));
-        this.reconcile('bcs', cfg.bc ? barsResult.bcs : [], from, symbolKey, (item) => safeCreate(ChartUtils.createBcShape(this.chart, item), 'bc'), false);
-        this.reconcile('mmds', cfg.mmd ? barsResult.mmds : [], from, symbolKey, (item) => safeCreate(ChartUtils.createMmdShape(this.chart, item), 'mmd'), false);
+        // 背驰/买卖点 —— 拆分版优先(笔/段独立 reconcile + 不同样式 + 独立 toggle);
+        // 后端 ``bi_mmds``/``xd_mmds``/``bi_bcs``/``xd_bcs`` 拿不到时,fallback
+        // 到合并版 ``bcs``/``mmds``(向后兼容旧 web/老 cache 命中场景)。
+        const hasSplitMmds = barsResult.bi_mmds || barsResult.xd_mmds;
+        const hasSplitBcs = barsResult.bi_bcs || barsResult.xd_bcs;
+        const showBiMmd = cfg.mmd_bi !== false;
+        const showXdMmd = cfg.mmd_xd !== false;
+        const showBiBc = cfg.bc_bi !== false;
+        const showXdBc = cfg.bc_xd !== false;
+        if (hasSplitMmds) {
+            this.reconcile('bi_mmds', (cfg.mmd && showBiMmd) ? (barsResult.bi_mmds || []) : [], from, symbolKey, (item) => safeCreate(ChartUtils.createMmdShape(this.chart, item), 'mmd_bi'), false);
+            this.reconcile('xd_mmds', (cfg.mmd && showXdMmd) ? (barsResult.xd_mmds || []) : [], from, symbolKey, (item) => safeCreate(ChartUtils.createMmdShape(this.chart, item), 'mmd_xd'), false);
+            this.reconcile('mmds', [], from, symbolKey, () => null, false);   // 清掉旧合并版
+        } else {
+            this.reconcile('mmds', cfg.mmd ? barsResult.mmds : [], from, symbolKey, (item) => safeCreate(ChartUtils.createMmdShape(this.chart, item), 'mmd'), false);
+        }
+        if (hasSplitBcs) {
+            this.reconcile('bi_bcs', (cfg.bc && showBiBc) ? (barsResult.bi_bcs || []) : [], from, symbolKey, (item) => safeCreate(ChartUtils.createBcShape(this.chart, item), 'bc_bi'), false);
+            this.reconcile('xd_bcs', (cfg.bc && showXdBc) ? (barsResult.xd_bcs || []) : [], from, symbolKey, (item) => safeCreate(ChartUtils.createBcShape(this.chart, item), 'bc_xd'), false);
+            this.reconcile('bcs', [], from, symbolKey, () => null, false);
+        } else {
+            this.reconcile('bcs', cfg.bc ? barsResult.bcs : [], from, symbolKey, (item) => safeCreate(ChartUtils.createBcShape(this.chart, item), 'bc'), false);
+        }
 
         // ③ 走势类型(xd_zslx) —— 半透明矩形区间标记上涨/下跌/盘整
         this.reconcile('xd_zslx', cfg.xd_zslx !== false ? (barsResult.xd_zslx || []) : [], from, symbolKey, (item) => safeCreate(ChartUtils.createZslxShape(this.chart, item), 'xd_zslx'), false);

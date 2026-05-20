@@ -912,6 +912,11 @@ def tv_history():
             "xd_zss": cl_chart_data.get("xd_zss", []),
             "bcs": cl_chart_data.get("bcs", []),
             "mmds": cl_chart_data.get("mmds", []),
+            # 拆分版买卖点/背驰(笔/段独立),前端按级别独立渲染 + 独立 toggle
+            "bi_mmds": cl_chart_data.get("bi_mmds", []),
+            "xd_mmds": cl_chart_data.get("xd_mmds", []),
+            "bi_bcs": cl_chart_data.get("bi_bcs", []),
+            "xd_bcs": cl_chart_data.get("xd_bcs", []),
             # 原文化新增(③④/区间套):走势类型区间 + 递归层级 + 区间套链
             "xd_zslx": cl_chart_data.get("xd_zslx", []),
             "recursive_levels": cl_chart_data.get("recursive_levels", []),

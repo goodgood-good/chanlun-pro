@@ -162,7 +162,8 @@ def _get_key_lock(key: str) -> threading.RLock:
 # 条目自动失效(key 前缀变了 → 全部 miss),无需手工清缓存。
 # v2(2026-05-20):新增 xd_zslx / recursive_levels / interval_nest;
 #                bi_zss/xd_zss 增 type / is_expanded / sub_count 字段。
-_CHART_DATA_SCHEMA_VERSION = "v2"
+# v3(2026-05-20):mmd/bc 按级别拆分,新增 bi_mmds/xd_mmds/bi_bcs/xd_bcs。
+_CHART_DATA_SCHEMA_VERSION = "v3"
 
 
 def _build_cache_key(

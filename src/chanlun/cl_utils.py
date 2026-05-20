@@ -1038,7 +1038,21 @@ def cl_data_to_tv_chart(
                     )
 
     bc_chart_data = []
+    bi_bc_chart_data = []
+    xd_bc_chart_data = []
     for dt, bc in bc_infos.items():
+        ts = fun.datetime_to_int(dt)
+        # 拆分版:笔/段独立产出,前端可分别 reconcile + 独立 toggle + 不同样式
+        for _type, _bcs in bc["bc_infos"].items():
+            if not _bcs:
+                continue
+            target = bi_bc_chart_data if _type == "bi" else xd_bc_chart_data
+            target.append({
+                "points": {"time": ts, "price": bc["price"]},
+                "text": ",".join(list(set(_bcs))),
+                "level": _type,
+            })
+        # 合并版(向后兼容):同时间点笔/段合并到一个 text 里
         bc_text = "/".join(
             [
                 f"{line_type_map[_type]}:{','.join(list(set(_bcs)))}"
@@ -1047,15 +1061,27 @@ def cl_data_to_tv_chart(
             ]
         )
         if len(bc_text) > 0:
-            bc_chart_data.append(
-                {
-                    "points": {"time": fun.datetime_to_int(dt), "price": bc["price"]},
-                    "text": bc_text,
-                }
-            )
+            bc_chart_data.append({
+                "points": {"time": ts, "price": bc["price"]},
+                "text": bc_text,
+            })
 
     mmd_chart_data = []
+    bi_mmd_chart_data = []
+    xd_mmd_chart_data = []
     for dt, mmd in mmd_infos.items():
+        ts = fun.datetime_to_int(dt)
+        # 拆分版:笔/段买卖点独立产出,前端独立渲染
+        for _type, _mmds in mmd["mmd_infos"].items():
+            if not _mmds:
+                continue
+            target = bi_mmd_chart_data if _type == "bi" else xd_mmd_chart_data
+            target.append({
+                "points": {"time": ts, "price": mmd["price"]},
+                "text": ",".join(list(set(_mmds))),
+                "level": _type,
+            })
+        # 合并版(向后兼容)
         mmd_text = "/".join(
             [
                 f"{line_type_map[_type]}:{','.join(list(set(_mmds)))}"
@@ -1064,12 +1090,10 @@ def cl_data_to_tv_chart(
             ]
         )
         if len(mmd_text) > 0:
-            mmd_chart_data.append(
-                {
-                    "points": {"time": fun.datetime_to_int(dt), "price": mmd["price"]},
-                    "text": mmd_text,
-                }
-            )
+            mmd_chart_data.append({
+                "points": {"time": ts, "price": mmd["price"]},
+                "text": mmd_text,
+            })
 
     fx_data.sort(key=lambda v: v["points"][0]["time"], reverse=False)
     bi_chart_data.sort(key=lambda v: v["points"][0]["time"], reverse=False)
@@ -1078,6 +1102,10 @@ def cl_data_to_tv_chart(
     xd_zs_chart_data.sort(key=lambda v: v["points"][0]["time"], reverse=False)
     bc_chart_data.sort(key=lambda v: v["points"]["time"], reverse=False)
     mmd_chart_data.sort(key=lambda v: v["points"]["time"], reverse=False)
+    bi_bc_chart_data.sort(key=lambda v: v["points"]["time"], reverse=False)
+    xd_bc_chart_data.sort(key=lambda v: v["points"]["time"], reverse=False)
+    bi_mmd_chart_data.sort(key=lambda v: v["points"]["time"], reverse=False)
+    xd_mmd_chart_data.sort(key=lambda v: v["points"]["time"], reverse=False)
     # 获取 MACD 数据
     if to_frequency is not None:
         macd = MACD(
@@ -1128,6 +1156,13 @@ def cl_data_to_tv_chart(
         "xd_zss": xd_zs_chart_data,
         "bcs": bc_chart_data,
         "mmds": mmd_chart_data,
+        # 拆分版买卖点/背驰(笔层 vs 段层):前端可独立渲染 + 独立 toggle、
+        # 用不同样式区分级别(笔=小灰、段=大显眼)。``mmds``/``bcs`` 合并版保留
+        # 兼容,新前端应消费 ``bi_mmds``/``xd_mmds``/``bi_bcs``/``xd_bcs``。
+        "bi_mmds": bi_mmd_chart_data,
+        "xd_mmds": xd_mmd_chart_data,
+        "bi_bcs": bi_bc_chart_data,
+        "xd_bcs": xd_bc_chart_data,
         # 新增:③ 走势类型 / ④ 递归层级 / 区间套
         "xd_zslx": xd_zslx_chart_data,
         "recursive_levels": recursive_levels_chart_data,

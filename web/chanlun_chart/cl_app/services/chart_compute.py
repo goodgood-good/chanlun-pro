@@ -241,7 +241,10 @@ def _merge_chart_data(existing_data: dict, new_data: dict):
             merged_col.append(val)
         merged[key] = merged_col
 
-    for key in ["fxs", "bis", "xds", "bi_zss", "xd_zss", "bcs", "mmds", "xd_zslx"]:
+    for key in [
+        "fxs", "bis", "xds", "bi_zss", "xd_zss", "bcs", "mmds", "xd_zslx",
+        "bi_mmds", "xd_mmds", "bi_bcs", "xd_bcs",
+    ]:
         merged[key] = _merge_shape_lists(existing_data.get(key, []), new_data.get(key, []))
 
     # 递归层级树 / 区间套 —— 嵌套结构,不走 shape 合并;新值有则覆盖,否则保留旧值。
@@ -341,7 +344,12 @@ _CHART_ARRAY_FIELDS = (
 # 形态字段 (笔/段/中枢/分型/背驰/买卖点/走势类型) - 不是按 t 长度对齐, 走 filter_shapes_in_window。
 # 注:``recursive_levels`` 与 ``interval_nest`` 是嵌套结构(level/zss/zslxs 或
 # links/turning_point),不在此列——它们走整体透传,不按窗口过滤。
-_CHART_SHAPE_FIELDS = ("fxs", "bis", "xds", "bi_zss", "xd_zss", "bcs", "mmds", "xd_zslx")
+# ``bi_mmds``/``xd_mmds``/``bi_bcs``/``xd_bcs`` 是按级别拆分的买卖点/背驰,
+# 与合并版 ``mmds``/``bcs`` 并存(前端独立 reconcile)。
+_CHART_SHAPE_FIELDS = (
+    "fxs", "bis", "xds", "bi_zss", "xd_zss", "bcs", "mmds", "xd_zslx",
+    "bi_mmds", "xd_mmds", "bi_bcs", "xd_bcs",
+)
 
 
 def filter_shapes_in_window(shapes, from_ts: int, to_ts: int) -> list:
