@@ -276,7 +276,7 @@ class BsPointCalculator:
                 is_bc, compare_lines = self.cl.beichi_qs(lines, valid_zss, now_line)
             except Exception as e:
                 # 力度对比依赖 MACD，缺数据时跳过单根线段，不阻断整批
-                LogUtil.warn(
+                LogUtil.warning(
                     f"[BsPointCalculator] beichi_qs 异常: line.index={now_line.index}, err={e}"
                 )
                 continue
@@ -464,7 +464,7 @@ class BsPointCalculator:
                         try:
                             is_pz_bc, _ = self.cl.beichi_pz(ref_zs_for_pz, now_line)
                         except Exception as e:
-                            LogUtil.warn(
+                            LogUtil.warning(
                                 f"[BsPointCalculator] beichi_pz 异常: "
                                 f"line.index={now_line.index}, zs.index={ref_zs_for_pz.index}, err={e}"
                             )
