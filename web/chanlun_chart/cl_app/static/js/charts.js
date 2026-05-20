@@ -3,7 +3,15 @@
 // 旧全局 key 仅在新 key 不存在时作为默认值迁移，老用户设置不丢失。
 
 // 默认的缠论显示项配置
-const CL_SHOW_DEFAULT = { fx: true, bi: true, xd: true, zs: true, bc: true, mmd: true };
+const CL_SHOW_DEFAULT = {
+    fx: true, bi: true, xd: true, zs: true, bc: true, mmd: true,
+    // 原文化新增独立开关(默认全开,用户可在控制面板单独 toggle):
+    zs_direction: true,        // 中枢按 zs.type 着色(up/down/zd)
+    zs_expanded: true,         // ⑤ 扩展中枢加粗框
+    xd_zslx: true,             // ③ 线段级走势类型区间(半透明矩形)
+    recursive_levels: true,    // ④ 递归 L1+ 高级中枢与走势类型
+    interval_nest: true,       // 区间套链 flags + 精确转折点
+};
 
 // 各市场的 TV 显示时区，与后端 services/constants.py:market_timezone 保持一致。
 // 之前硬编码 "Asia/Shanghai" 导致美股 K 线按北京时区显示（NY 09:30 EDT → 21:30）。
@@ -90,11 +98,25 @@ const CHART_CONFIG = {
         DING: "#FA8072", DI: "#1E90FF", BI: "#708090", XD: "#00BFFF",
         BI_ZSS: "#708090", XD_ZSS: "#00BFFF",
         BCS: "#D1D4DC", BC_TEXT: "#fccbcd",
-        MMD_UP: "#FA8072", MMD_DOWN: "#1E90FF",
+        MMD_UP: "#E64A19", MMD_DOWN: "#1565C0",
         AREA_POS: "#ef5350", AREA_NEG: "#26a69a",
+        // 中枢方向着色(③ ZslxCalculator 回填):上涨中枢=暖红、下跌中枢=冷蓝、震荡=灰
+        ZS_UP: "#E57373", ZS_DOWN: "#64B5F6", ZS_ZD: "#90A4AE",
+        // 走势类型(③ xd_zslx)半透明背景色
+        ZSLX_UP: "#FFCCBC", ZSLX_DOWN: "#BBDEFB", ZSLX_ZHENGLI: "#CFD8DC",
+        // 递归层级 L1+ 高级中枢(④):级别越高颜色越深
+        RECURSIVE_L1: "#7E57C2", RECURSIVE_L2: "#4A148C", RECURSIVE_L3: "#311B92",
+        // 区间套(原文第三章·第六节):链路灰、转折点高亮
+        INTERVAL_NEST_LINK: "#9E9E9E", INTERVAL_NEST_TP: "#FF6F00",
     },
     LINE_STYLES: { SOLID: 0, DOTTED: 1, DASHED: 2 },
-    CHART_TYPES: ["fxs", "bis", "xds", "bi_zss", "xd_zss", "bcs", "mmds"],
+    CHART_TYPES: [
+        "fxs", "bis", "xds", "bi_zss", "xd_zss", "bcs", "mmds",
+        // 原文化新增:③ 走势类型 / ④ 递归层级 / 区间套
+        "xd_zslx", "recursive_zss_L1", "recursive_zss_L2", "recursive_zss_L3",
+        "recursive_zslxs_L1", "recursive_zslxs_L2", "recursive_zslxs_L3",
+        "interval_nest_links", "interval_nest_tp",
+    ],
 };
 
 const DEFAULT_COLORS = {
@@ -164,13 +186,65 @@ const ChartUtils = {
         return this.createShape(chart, line.points, { shape: "trend_line", overrides: { linestyle: parseInt(line.linestyle) || 0, linewidth: options.linewidth || 1, linecolor: options.color || CHART_CONFIG.COLORS.BI, ...options.overrides }, ...options });
     },
     createZhongshuShape(chart, zs, options = {}) {
-        return this.createShape(chart, zs.points, { shape: "rectangle", overrides: { linestyle: parseInt(zs.linestyle) || 0, linewidth: options.linewidth || 1, linecolor: options.color || CHART_CONFIG.COLORS.BI, backgroundColor: options.color || CHART_CONFIG.COLORS.BI, transparency: 95, color: options.color, "trendline.linecolor": options.color, fillBackground: true, filled: true, ...options.overrides }, ...options });
+        // 中枢方向着色(§3.6 回填):options.useDirectionColor=true 时按 zs.type 选色,
+        // 否则用 options.color(老路径,通常是 getDynamicColor 给的级别色)。
+        // ⑤ 扩展中枢(is_expanded):自动加粗+不透明边框,与普通中枢区分。
+        let color = options.color || CHART_CONFIG.COLORS.BI;
+        if (options.useDirectionColor && zs.type) {
+            if (zs.type === "up") color = CHART_CONFIG.COLORS.ZS_UP;
+            else if (zs.type === "down") color = CHART_CONFIG.COLORS.ZS_DOWN;
+            else if (zs.type === "zd") color = CHART_CONFIG.COLORS.ZS_ZD;
+        }
+        let linewidth = options.linewidth || 1;
+        let transparency = 95;
+        if (zs.is_expanded) {
+            linewidth = Math.max(linewidth + 2, 3);
+            transparency = 80;          // 扩展中枢更显眼
+        }
+        return this.createShape(chart, zs.points, { shape: "rectangle", overrides: { linestyle: parseInt(zs.linestyle) || 0, linewidth, linecolor: color, backgroundColor: color, transparency, color, "trendline.linecolor": color, fillBackground: true, filled: true, ...options.overrides }, ...options });
+    },
+    createZslxShape(chart, zslx, options = {}) {
+        // 走势类型区间(③ xd_zslx) —— 用半透明矩形表「上涨/下跌/盘整」区间。
+        // 与中枢矩形区分:linestyle=2(虚线)、更高透明度、无边框填色。
+        let color = CHART_CONFIG.COLORS.ZSLX_ZHENGLI;
+        if (zslx.direction === "up") color = CHART_CONFIG.COLORS.ZSLX_UP;
+        else if (zslx.direction === "down") color = CHART_CONFIG.COLORS.ZSLX_DOWN;
+        return this.createShape(chart, zslx.points, { shape: "rectangle", overrides: { linestyle: 2, linewidth: 1, linecolor: color, backgroundColor: color, transparency: 92, fillBackground: true, filled: true, ...options.overrides }, ...options });
+    },
+    createRecursiveZsShape(chart, zs, options = {}) {
+        // 递归层级中枢(④ L1+) —— 用包络区间(GG/DD)矩形,与 L0 ZS/ZD 核心区
+        // 在几何上视觉分层。颜色按级别:L1=紫、L2=深紫、L3=深紫几乎黑。
+        const levelColors = {
+            1: CHART_CONFIG.COLORS.RECURSIVE_L1,
+            2: CHART_CONFIG.COLORS.RECURSIVE_L2,
+            3: CHART_CONFIG.COLORS.RECURSIVE_L3,
+        };
+        const color = levelColors[options.level] || CHART_CONFIG.COLORS.RECURSIVE_L1;
+        const linewidth = 2 + (options.level || 1);     // 级别越高线越粗
+        const transparency = zs.is_expanded ? 75 : 88;
+        return this.createShape(chart, zs.points, { shape: "rectangle", overrides: { linestyle: parseInt(zs.linestyle) || 0, linewidth, linecolor: color, backgroundColor: color, transparency, fillBackground: true, filled: true, ...options.overrides }, ...options });
+    },
+    createIntervalNestLinkShape(chart, link, options = {}) {
+        // 区间套·一重:在该重背驰段终点处画 flag,标注 ``L{level}`` 与是否真背驰。
+        const color = link.is_beichi ? CHART_CONFIG.COLORS.INTERVAL_NEST_LINK : CHART_CONFIG.COLORS.BCS;
+        const label = `L${link.level}${link.is_beichi ? "✓" : "?"}`;
+        return this.createShape(chart, { time: link.time, price: link.price }, { shape: "flag", text: label, overrides: { markerColor: color, color, backgroundColor: color, transparency: 80, fontsize: 10, ...options.overrides }, ...options });
+    },
+    createIntervalNestTurningPointShape(chart, tp, options = {}) {
+        // 区间套·转折点:最低重背驰段终分型,用大号高亮 icon 表「精确转折」。
+        const color = CHART_CONFIG.COLORS.INTERVAL_NEST_TP;
+        const shape = options.direction === "up" ? "arrow_down" : "arrow_up";
+        return this.createShape(chart, tp, { shape, text: "区间套转折", overrides: { arrowColor: color, color, fontsize: 14, bold: true, ...options.overrides }, ...options });
     },
     createMmdShape(chart, mmd, options = {}) {
         const isBuy = mmd.text.includes("B");
         const color = isBuy ? CHART_CONFIG.COLORS.MMD_UP : CHART_CONFIG.COLORS.MMD_DOWN;
         const shape = isBuy ? "arrow_up" : "arrow_down";
-        return this.createShape(chart, mmd.points, { shape, text: mmd.text, overrides: { markerColor: color, backgroundColor: color, color: color, fontsize: 12, transparency: 80, ...options.overrides }, ...options });
+        // 去掉"笔:/段:"级别前缀（段:3B → 3B）。arrow_up/arrow_down 自动居中在
+        // 底/顶分型的正下/正上方，位置精准。颜色必须用 arrowColor 参数——旧代码
+        // 误用 markerColor 不生效，才一直显示图表库内置的刺眼亮绿色。
+        const label = mmd.text.replace(/[笔段]:/g, "");
+        return this.createShape(chart, mmd.points, { shape, text: label, overrides: { arrowColor: color, color, fontsize: 12, bold: true, ...options.overrides }, ...options });
     },
     createBcShape(chart, bc, options = {}) {
         return this.createShape(chart, bc.points, { shape: "balloon", text: bc.text, overrides: { markerColor: CHART_CONFIG.COLORS.BCS, backgroundColor: CHART_CONFIG.COLORS.BCS, textColor: CHART_CONFIG.COLORS.BC_TEXT, transparency: 70, backgroundTransparency: 70, fontsize: 12, ...options.overrides }, ...options });
@@ -823,6 +897,13 @@ class ChartManager {
                         <label style="display:block; cursor:pointer;"><input type="checkbox" id="${cbId('bc')}" ${cfg.bc ? 'checked' : ''} style="margin-right: 8px; vertical-align: middle;"> 背驰</label>
                         <label style="display:block; cursor:pointer;"><input type="checkbox" id="${cbId('mmd')}" ${cfg.mmd ? 'checked' : ''} style="margin-right: 8px; vertical-align: middle;"> 买卖点</label>
                         <hr style="margin: 5px 0;">
+                        <div style="font-size: 12px; color: #666; margin-bottom: 4px;">原文化新增</div>
+                        <label style="display:block; cursor:pointer;"><input type="checkbox" id="${cbId('zs_direction')}" ${cfg.zs_direction ? 'checked' : ''} style="margin-right: 8px; vertical-align: middle;"> 中枢方向着色</label>
+                        <label style="display:block; cursor:pointer;"><input type="checkbox" id="${cbId('zs_expanded')}" ${cfg.zs_expanded ? 'checked' : ''} style="margin-right: 8px; vertical-align: middle;"> 扩展中枢加粗</label>
+                        <label style="display:block; cursor:pointer;"><input type="checkbox" id="${cbId('xd_zslx')}" ${cfg.xd_zslx ? 'checked' : ''} style="margin-right: 8px; vertical-align: middle;"> 走势类型区间</label>
+                        <label style="display:block; cursor:pointer;"><input type="checkbox" id="${cbId('recursive_levels')}" ${cfg.recursive_levels ? 'checked' : ''} style="margin-right: 8px; vertical-align: middle;"> 递归层级 L1+</label>
+                        <label style="display:block; cursor:pointer;"><input type="checkbox" id="${cbId('interval_nest')}" ${cfg.interval_nest ? 'checked' : ''} style="margin-right: 8px; vertical-align: middle;"> 区间套</label>
+                        <hr style="margin: 5px 0;">
                         <label style="display:block; cursor:pointer;"><input type="checkbox" id="${indCbId}" ${self.cl_independent_drawings ? 'checked' : ''} style="margin-right: 8px; vertical-align: middle;"> 独立周期画线</label>
                     </div>
                 `;
@@ -864,7 +945,11 @@ class ChartManager {
                     left: (btnRect.left + window.scrollX) + 'px'
                 });
 
-                const keys = ['fx', 'bi', 'xd', 'zs', 'bc', 'mmd'];
+                const keys = [
+                    'fx', 'bi', 'xd', 'zs', 'bc', 'mmd',
+                    'zs_direction', 'zs_expanded', 'xd_zslx',
+                    'recursive_levels', 'interval_nest',
+                ];
                 keys.forEach(k => {
                     $('#' + cbId(k)).change(function () {
                         self.cl_show_config[k] = $(this).is(':checked');
@@ -1343,10 +1428,40 @@ class ChartManager {
         this.reconcile('fxs', cfg.fx ? barsResult.fxs : [], from, symbolKey, (item) => safeCreate(ChartUtils.createFxShape(this.chart, item), 'fx'), false);
         this.reconcile('bis', cfg.bi ? barsResult.bis : [], from, symbolKey, (item) => safeCreate(ChartUtils.createLineShape(this.chart, item, { color: getDynamicColor(currentInterval, "bis"), linewidth: 2 }), 'bi'));
         this.reconcile('xds', cfg.xd ? barsResult.xds : [], from, symbolKey, (item) => safeCreate(ChartUtils.createLineShape(this.chart, item, { color: getDynamicColor(currentInterval, "xds"), linewidth: 2 }), 'xd'));
-        this.reconcile('bi_zss', cfg.zs ? barsResult.bi_zss : [], from, symbolKey, (item) => safeCreate(ChartUtils.createZhongshuShape(this.chart, item, { color: getDynamicColor(currentInterval, "bi_zss"), linewidth: 1 }), 'bi_zs'));
-        this.reconcile('xd_zss', cfg.zs ? barsResult.xd_zss : [], from, symbolKey, (item) => safeCreate(ChartUtils.createZhongshuShape(this.chart, item, { color: getDynamicColor(currentInterval, "xd_zss"), linewidth: 2 }), 'xd_zs'));
+        // 中枢方向着色由 cfg.zs_direction 开关(默认 true)控制——开启时按 zs.type
+        // 选 ZS_UP/ZS_DOWN/ZS_ZD,关闭时回退按级别色(老行为)。⑤ 扩展中枢标记
+        // (is_expanded)由 cfg.zs_expanded 控制是否加粗框。两者数据均来自后端。
+        const useDirColor = cfg.zs_direction !== false;
+        const showExpanded = cfg.zs_expanded !== false;
+        const wrapZs = (lvlColor) => (item) => {
+            const zsItem = showExpanded ? item : { ...item, is_expanded: false };
+            return ChartUtils.createZhongshuShape(this.chart, zsItem, {
+                color: lvlColor, linewidth: lvlColor === getDynamicColor(currentInterval, "bi_zss") ? 1 : 2,
+                useDirectionColor: useDirColor,
+            });
+        };
+        this.reconcile('bi_zss', cfg.zs ? barsResult.bi_zss : [], from, symbolKey, (item) => safeCreate(wrapZs(getDynamicColor(currentInterval, "bi_zss"))(item), 'bi_zs'));
+        this.reconcile('xd_zss', cfg.zs ? barsResult.xd_zss : [], from, symbolKey, (item) => safeCreate(wrapZs(getDynamicColor(currentInterval, "xd_zss"))(item), 'xd_zs'));
         this.reconcile('bcs', cfg.bc ? barsResult.bcs : [], from, symbolKey, (item) => safeCreate(ChartUtils.createBcShape(this.chart, item), 'bc'), false);
         this.reconcile('mmds', cfg.mmd ? barsResult.mmds : [], from, symbolKey, (item) => safeCreate(ChartUtils.createMmdShape(this.chart, item), 'mmd'), false);
+
+        // ③ 走势类型(xd_zslx) —— 半透明矩形区间标记上涨/下跌/盘整
+        this.reconcile('xd_zslx', cfg.xd_zslx !== false ? (barsResult.xd_zslx || []) : [], from, symbolKey, (item) => safeCreate(ChartUtils.createZslxShape(this.chart, item), 'xd_zslx'), false);
+
+        // ④ 递归层级树 —— L1/L2/L3 高级中枢与走势类型(L0 已在 xd_zss / xd_zslx)
+        const recLevels = (cfg.recursive_levels !== false ? (barsResult.recursive_levels || []) : []);
+        // 收集到 by-level container(reconcile key 已预先分配 recursive_zss_L1..L3 / _zslxs_L1..L3)
+        for (let L = 1; L <= 3; L++) {
+            const lv = recLevels.find((x) => x.level === L);
+            this.reconcile(`recursive_zss_L${L}`, lv ? lv.zss : [], from, symbolKey, (item) => safeCreate(ChartUtils.createRecursiveZsShape(this.chart, item, { level: L }), `rec_zs_L${L}`));
+            this.reconcile(`recursive_zslxs_L${L}`, lv ? lv.zslxs : [], from, symbolKey, (item) => safeCreate(ChartUtils.createZslxShape(this.chart, item, { overrides: { transparency: 88 } }), `rec_zslx_L${L}`), false);
+        }
+
+        // 区间套 —— 链路 flags + 精确转折点 marker
+        const inest = (cfg.interval_nest !== false ? barsResult.interval_nest : null);
+        this.reconcile('interval_nest_links', inest ? inest.links : [], from, symbolKey, (item) => safeCreate(ChartUtils.createIntervalNestLinkShape(this.chart, item), 'inest_link'), false);
+        const tpItems = (inest && inest.turning_point) ? [{ time: inest.turning_point.time, price: inest.turning_point.price, direction: inest.direction }] : [];
+        this.reconcile('interval_nest_tp', tpItems, from, symbolKey, (item) => safeCreate(ChartUtils.createIntervalNestTurningPointShape(this.chart, item, { direction: item.direction }), 'inest_tp'), false);
 
         // 一轮 reconcile 完后扫一次孤儿,清理 race 残留(safeRemove 静默失败 / container 提前清零)。
         // 因为 reconcile 内 create 是异步的,延后到下一帧执行,等所有 promise resolve 后再扫。
