@@ -58,12 +58,15 @@ class TestStableHash:
 class TestBuildCacheKey:
     def test_format(self):
         k = _build_cache_key("a", "000001", "5m", {"x": 1})
-        # market_code_freq_hash 四段
+        # 格式:schema_version + market + code + freq + hash 五段。
+        # schema_version 是 cache_key 跨版本失效的开关——bump 后旧磁盘 entry
+        # 自动被绕过。
         parts = k.split("_")
-        assert parts[0] == "a"
-        assert parts[1] == "000001"
-        assert parts[2] == "5m"
-        assert len(parts[3]) == 32
+        assert parts[0].startswith("v"), f"schema version 必须以 'v' 开头,实际 {parts[0]!r}"
+        assert parts[1] == "a"
+        assert parts[2] == "000001"
+        assert parts[3] == "5m"
+        assert len(parts[4]) == 32
 
     def test_same_inputs_same_key(self):
         cfg = {"foo": "bar"}

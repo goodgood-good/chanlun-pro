@@ -70,9 +70,26 @@ def _stable_hash(obj) -> str:
     return hashlib.md5(s.encode("utf-8")).hexdigest()
 
 
+# chart_data 序列化结构版本号。
+#
+# 后端 ``cl_data_to_tv_chart`` 输出的 chart_data dict 结构改动(新增/重命名字段、
+# 字段语义变化)时,**必须 bump 这个版本**——否则启动 ``chart_warm`` 会把磁盘
+# (fdb)里旧版本的 chart_data 回填 RAM,endpoint cache hit 永远拿到 stale 数据。
+#
+# 历史:
+# - v5 (2026-05) ── 加入版本号机制本身。本次 bump 让 ``recursive_levels`` /
+#   ``interval_nest`` / ``xd_zslx`` / ``bi_mmds`` / ``xd_mmds`` / ``bi_bcs`` /
+#   ``xd_bcs`` 等原文化新字段在旧 entry 上全部失效,杜绝 endpoint 漏字段。
+_CHART_CACHE_SCHEMA_VERSION = "v5"
+
+
 def _build_cache_key(market: str, code: str, frequency: str, cl_config: dict) -> str:
-    """统一构造 chart_data_cache 的 key，确保所有调用方一致。"""
-    return f"{market}_{code}_{frequency}_{_stable_hash(cl_config)}"
+    """统一构造 chart_data_cache 的 key,确保所有调用方一致。
+
+    key 含 ``_CHART_CACHE_SCHEMA_VERSION`` 前缀——bump 该版本号即可让所有旧
+    磁盘 entry 失效,新版本路径无 stale 字段污染风险。
+    """
+    return f"{_CHART_CACHE_SCHEMA_VERSION}_{market}_{code}_{frequency}_{_stable_hash(cl_config)}"
 
 
 def _build_chart_cache_entry(cl_chart_data: dict, is_full_snapshot: bool, validated_at: float = None):
