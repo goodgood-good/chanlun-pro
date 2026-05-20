@@ -906,8 +906,37 @@ class ChartManager {
                 const cbId = (k) => 'cl_cb_' + k + '_' + self.id;
                 const indCbId = 'cl_cb_independent_drawings_' + self.id;
 
+                // 当前周期 → 各项级别映射(缠论原文「线段 = 1m 走势类型」工程口径):
+                //   笔中枢   = K 线层小级别(亚周期波动重叠)
+                //   线段中枢 = **高一级别中枢**(当前周期下 3 个走势类型重叠成的中枢)
+                //   走势类型区间 = 高一级别走势类型
+                //   递归 L1+ = 再高一级别(高二级别中枢/走势类型)
+                // 把当前周期 → 高一级标签算出来,让用户看懂图上每个矩形是什么级别。
+                let _curInterval = "?";
+                try { _curInterval = self.widget.symbolInterval().interval; } catch (e) {}
+                const FREQ_CHAIN = {
+                    "1": ["1m", "5m", "30m", "日线"],
+                    "5": ["5m", "30m", "日线", "周线"],
+                    "15": ["15m", "60m", "日线", "周线"],
+                    "30": ["30m", "日线", "周线", "月线"],
+                    "60": ["60m", "日线", "周线", "月线"],
+                    "1D": ["日线", "周线", "月线", "年线"],
+                    "1W": ["周线", "月线", "年线", "10年"],
+                    "1M": ["月线", "年线", "10年", "30年"],
+                };
+                const _chain = FREQ_CHAIN[_curInterval] || [_curInterval, "高一级", "高二级", "高三级"];
+                const _lbl = (i) => _chain[i] || `L+${i}`;
+
                 let html = `
-                    <div id="${menuId}" style="position: absolute; z-index: 99999999; background: #fff; border: 1px solid #ccc; box-shadow: 0 2px 10px rgba(0,0,0,0.2); border-radius: 4px; padding: 10px; line-height: 28px; font-size: 14px; color: #333;">
+                    <div id="${menuId}" style="position: absolute; z-index: 99999999; background: #fff; border: 1px solid #ccc; box-shadow: 0 2px 10px rgba(0,0,0,0.2); border-radius: 4px; padding: 10px; line-height: 28px; font-size: 14px; color: #333; min-width: 240px;">
+                        <div style="font-size: 11px; color: #888; line-height: 1.4em; padding-bottom: 6px; border-bottom: 1px dashed #ddd; margin-bottom: 4px;">
+                          当前周期: <b>${_curInterval}</b> · 缠论级别映射:<br>
+                          ⬛ 笔中枢 → <b>${_lbl(0)}</b>K线层<br>
+                          🟥/🟦/⬜ 线段中枢 → <b>${_lbl(1)}</b>(高一级中枢)<br>
+                          ░ 走势类型区间 → <b>${_lbl(1)}</b>走势类型<br>
+                          🟪 递归 L1 → <b>${_lbl(2)}</b>中枢/走势类型<br>
+                          🟪 递归 L2 → <b>${_lbl(3)}</b>中枢/走势类型
+                        </div>
                         <label style="display:block; cursor:pointer;"><input type="checkbox" id="${cbId('fx')}" ${cfg.fx ? 'checked' : ''} style="margin-right: 8px; vertical-align: middle;"> 分型</label>
                         <label style="display:block; cursor:pointer;"><input type="checkbox" id="${cbId('bi')}" ${cfg.bi ? 'checked' : ''} style="margin-right: 8px; vertical-align: middle;"> 笔</label>
                         <label style="display:block; cursor:pointer;"><input type="checkbox" id="${cbId('xd')}" ${cfg.xd ? 'checked' : ''} style="margin-right: 8px; vertical-align: middle;"> 线段</label>
