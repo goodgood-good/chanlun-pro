@@ -982,8 +982,8 @@ class ChartManager {
                         </div>
                         <hr style="margin: 5px 0;">
                         <div style="font-size: 12px; color: #666; margin-bottom: 4px;">原文化新增</div>
-                        <label style="display:block; cursor:pointer;"><input type="checkbox" id="${cbId('zs_direction')}" ${cfg.zs_direction ? 'checked' : ''} style="margin-right: 8px; vertical-align: middle;"> 中枢方向着色</label>
-                        <label style="display:block; cursor:pointer;"><input type="checkbox" id="${cbId('zs_expanded')}" ${cfg.zs_expanded ? 'checked' : ''} style="margin-right: 8px; vertical-align: middle;"> 扩展中枢加粗</label>
+                        <label style="display:block; cursor:pointer;" title="切换 symbol 或刷新页面后生效"><input type="checkbox" id="${cbId('zs_direction')}" ${cfg.zs_direction ? 'checked' : ''} style="margin-right: 8px; vertical-align: middle;"> 中枢方向着色 <span style="color:#999;font-size:11px;">(切换 symbol 生效)</span></label>
+                        <label style="display:block; cursor:pointer;" title="切换 symbol 或刷新页面后生效"><input type="checkbox" id="${cbId('zs_expanded')}" ${cfg.zs_expanded ? 'checked' : ''} style="margin-right: 8px; vertical-align: middle;"> 扩展中枢加粗 <span style="color:#999;font-size:11px;">(切换 symbol 生效)</span></label>
                         <label style="display:block; cursor:pointer;"><input type="checkbox" id="${cbId('xd_zslx')}" ${cfg.xd_zslx ? 'checked' : ''} style="margin-right: 8px; vertical-align: middle;"> 走势类型区间</label>
                         <label style="display:block; cursor:pointer;"><input type="checkbox" id="${cbId('recursive_levels')}" ${cfg.recursive_levels ? 'checked' : ''} style="margin-right: 8px; vertical-align: middle;"> 递归层级 L1+</label>
                         <label style="display:block; cursor:pointer;"><input type="checkbox" id="${cbId('interval_nest')}" ${cfg.interval_nest ? 'checked' : ''} style="margin-right: 8px; vertical-align: middle;"> 区间套</label>
@@ -1037,42 +1037,26 @@ class ChartManager {
                     'zs_direction', 'zs_expanded', 'xd_zslx',
                     'recursive_levels', 'interval_nest', 'overlay_freqs',
                 ];
-                // 「样式型 toggle」: cfg 变化但 makeKey/sourceList 不变,
-                // reconcile 早期 return short-circuit。这类 toggle 需清守卫
-                // + 清掉受影响 container 的 shape,让下一次 drawChartElements
-                // 完整重建。
-                const STYLE_TOGGLE_KEYS = new Set([
-                    'zs_direction', 'zs_expanded',
-                ]);
-                // 「容器映射」: 哪些 cfg key 影响哪些 obj_charts container。
-                // STYLE_TOGGLE 时清空对应 container 强制重建。
-                const TOGGLE_TO_CONTAINERS = {
-                    zs_direction: ['bi_zss', 'xd_zss', 'recursive_zss_L1', 'recursive_zss_L2', 'recursive_zss_L3'],
-                    zs_expanded:  ['bi_zss', 'xd_zss', 'recursive_zss_L1', 'recursive_zss_L2', 'recursive_zss_L3'],
-                };
+                // 样式型 toggle(zs_direction / zs_expanded)只改色/粗细,
+                // TV widget 公开 API 没有 in-place setProperties——要改颜色必须
+                // remove + recreate 整个 shape。强制清空 container 等待
+                // debouncedDrawChanlun(300ms)重建会产生「消失→等待→出现」
+                // 闪烁,体验差。
+                // 折中:样式型 toggle 仅记录 cfg,下次 symbol/interval 切换
+                // 或刷新页面时生效;数据型 toggle(显示/隐藏)走 reconcile 删/加
+                // shape,行为正确无闪烁。
+                const STYLE_TOGGLE_KEYS = new Set(['zs_direction', 'zs_expanded']);
                 keys.forEach(k => {
                     $('#' + cbId(k)).change(function () {
                         const checked = $(this).is(':checked');
                         self.cl_show_config[k] = checked;
                         saveClShowConfig(self.id, self.cl_show_config);
                         console.log(`[cl_show_config] toggle ${k}=${checked}`);
-
                         if (STYLE_TOGGLE_KEYS.has(k)) {
-                            // 样式型:reconcile 的 makeKey 只看 time+price,
-                            // 颜色/线宽/标签变化无法触发 rebuild。清守卫 +
-                            // 清空受影响 container 的 shape,下一帧重建。
-                            const targets = TOGGLE_TO_CONTAINERS[k] || [];
-                            targets.forEach(t => {
-                                const guardKey = `${self.widget?.symbolInterval?.()?.symbol}_${self.widget?.symbolInterval?.()?.interval}__${t}`;
-                                if (self._reconcileGuard) delete self._reconcileGuard[guardKey];
-                                Object.keys(self.obj_charts || {}).forEach(sk => {
-                                    const container = self.obj_charts[sk]?.[t];
-                                    if (!container || container.length === 0) return;
-                                    console.log(`[cl_show_config]   rebuild ${t}: clear ${container.length} shapes`);
-                                    container.forEach(item => self.safeRemove(item.id));
-                                    container.length = 0;
-                                });
-                            });
+                            // 仅 cfg 记录,不重绘——避免闪烁。下次 symbol/interval
+                            // 切换或刷新页面时新 shape 按新 cfg 生效。
+                            console.log(`[cl_show_config]   (样式型 toggle,需切换 symbol 或刷新页面生效)`);
+                            return;
                         }
                         self.debouncedDrawChanlun();
                     });
