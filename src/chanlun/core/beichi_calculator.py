@@ -17,14 +17,28 @@ from chanlun.core.cl_interface import BI, Config, FX, LINE, ZS
 LdProvider = Callable[[FX, FX], dict]
 
 
-def _use_huangbai(seg: LINE) -> bool:
+def _use_huangbai(seg: LINE, frequency: Optional[str] = None) -> bool:
     """力度口径是否包含黄白线。
 
     原文(第三章·第二十五节)细则1：1分钟以下级别只比柱子面积；1分钟级别
-    及以上同时考虑黄白线。本引擎中笔≈1分钟以下波动 → 仅柱子；线段/走势
-    类型≈1分钟级别走势类型及以上 → 柱子 + 黄白线。
+    及以上同时考虑黄白线。
+
+    判据：
+      - ``frequency=None`` (旧 API 兼容)：仅按对象类型——笔(BI)≈1分钟以下
+        波动 → 仅柱子；线段/走势类型 → 加黄白线。
+      - ``frequency='1m'`` / ``'1min'``：笔是 1 分钟以下波动 → 仅柱子；其它
+        段是 1 分钟级别走势类型 → 加黄白线。
+      - ``frequency`` ≥ 5m（含 5m/30m/d/w/m/y）：**所有段** 都已超 1 分钟
+        级别——包括笔(此时笔是 K 线层方向段、跨度远超 1m) → 全部加黄白线。
+
+    旧实现固定 ``not isinstance(seg, BI)``——在 5m/30m/日线 等周期下笔本身
+    就已超 1m,仍按"仅柱子"判错。
     """
-    return not isinstance(seg, BI)
+    if frequency is None:
+        return not isinstance(seg, BI)
+    if frequency in ('1m', '1min') and isinstance(seg, BI):
+        return False
+    return True
 
 
 def _xingao_xindi(seg_a: LINE, seg_b: LINE) -> bool:
@@ -48,11 +62,16 @@ def _ld_huangbai(ld: dict, direction: str) -> float:
     return ld["dif"]["max"] if direction == "up" else ld["dif"]["min"]
 
 
-def _ld_decays(seg_a: LINE, seg_b: LINE, ld_provider: LdProvider) -> bool:
+def _ld_decays(
+    seg_a: LINE, seg_b: LINE, ld_provider: LdProvider,
+    frequency: Optional[str] = None,
+) -> bool:
     """力度是否衰竭（seg_b 在前者 seg_a 之后、同向）。
 
     步骤2 柱子面积衰竭：seg_b 同向柱子面积 < seg_a。
-    步骤3 黄白线衰竭（仅线段及以上）：up 段 DIF 高点更低、down 段 DIF 低点更高。
+    步骤3 黄白线衰竭(仅线段及以上,见 _use_huangbai)：DIF 高度回收 +
+    DIF 回抽 0 轴(任一条衰竭即判黄白线衰竭——原文细则1未明示二者关系,
+    取宽口径)。
     """
     direction = seg_b.type
     ld_a = ld_provider(seg_a.start, seg_a.end)
@@ -62,29 +81,55 @@ def _ld_decays(seg_a: LINE, seg_b: LINE, ld_provider: LdProvider) -> bool:
     if not (_ld_area(ld_b, direction) < _ld_area(ld_a, direction)):
         return False
 
-    # 步骤3：黄白线衰竭——仅线段及以上（笔跳过）
-    if _use_huangbai(seg_b):
-        hb_a = _ld_huangbai(ld_a, direction)
-        hb_b = _ld_huangbai(ld_b, direction)
-        if direction == "up":
-            if not (hb_b < hb_a):
-                return False
-        else:
-            if not (hb_b > hb_a):
-                return False
+    # 步骤3：黄白线衰竭——仅线段及以上(笔跳过,见 _use_huangbai)
+    if _use_huangbai(seg_b, frequency):
+        if not _huangbai_decays(ld_a, ld_b, direction):
+            return False
     return True
 
 
-def is_beichi(seg_a: LINE, seg_b: LINE, ld_provider: LdProvider) -> bool:
+def _huangbai_decays(ld_a: dict, ld_b: dict, direction: str) -> bool:
+    """黄白线是否衰竭。
+
+    原文(第三章·第二十五节)细则1：「同时考虑黄白线回抽0轴的情况」。
+    两条互补判据,任一成立即视为黄白线衰竭：
+      1. DIF 高度衰减——up: seg_b DIF.max < seg_a DIF.max;down: seg_b
+         DIF.min > seg_a DIF.min。
+      2. DIF 回抽 0 轴——up: seg_b DIF 触及/穿越 0(min≤0);down: seg_b
+         DIF 触及/穿越 0(max≥0)。
+    旧实现只比 (1) 高度,漏掉 (2) 回抽 0 轴；典型情境：seg_b 的 DIF 高度
+    没回落多少,但中途已下穿/回抽过 0 轴,亦属力度衰竭,应识别。
+    """
+    hb_a = _ld_huangbai(ld_a, direction)
+    hb_b = _ld_huangbai(ld_b, direction)
+    if direction == "up":
+        # 高度衰减
+        if hb_b < hb_a:
+            return True
+        # DIF 回抽 0 轴(seg_b 任一根 K 线的 DIF 触及/穿越 0)
+        return ld_b["dif"]["min"] <= 0
+    # down
+    if hb_b > hb_a:
+        return True
+    return ld_b["dif"]["max"] >= 0
+
+
+def is_beichi(
+    seg_a: LINE, seg_b: LINE, ld_provider: LdProvider,
+    frequency: Optional[str] = None,
+) -> bool:
     """背驰原语：seg_b（在后）相对 seg_a（在前、同向）是否背驰。
 
     原文(第二章·第四节)：背驰 = 力度衰竭。判定两步——
       1. 创新高/新低前提（原文细则2）；不满足直接非背驰。
       2. 力度衰竭（柱子面积 + 级别相关黄白线）。
+
+    ``frequency`` 传入时按真实 K 线周期决定是否使用黄白线(原文细则1),
+    见 ``_use_huangbai``;缺省按 seg 类型回退。
     """
     if not _xingao_xindi(seg_a, seg_b):
         return False
-    return _ld_decays(seg_a, seg_b, ld_provider)
+    return _ld_decays(seg_a, seg_b, ld_provider, frequency)
 
 
 def is_qs(one_zs: ZS, two_zs: ZS, wzgx_config: str) -> Optional[str]:
@@ -117,11 +162,13 @@ def is_qs(one_zs: ZS, two_zs: ZS, wzgx_config: str) -> Optional[str]:
 
 
 def beichi_pz(
-    zs: ZS, now_seg: LINE, ld_provider: LdProvider
+    zs: ZS, now_seg: LINE, ld_provider: LdProvider,
+    frequency: Optional[str] = None,
 ) -> Tuple[bool, Optional[LINE]]:
     """盘整背驰：1 个中枢的盘整中，离开段相对中枢内前一同向段是否力度衰竭。
 
     原文(第二章·第四节)：盘整背驰 = 盘整中当下笔/线段比前一笔/线段力度弱。
+    ``frequency`` 透传到 ``is_beichi`` 决定黄白线口径。
     返回 (是否背驰, 比较的走势段)。
     """
     if len(zs.lines) < 2:
@@ -136,15 +183,7 @@ def beichi_pz(
     if compare_line is None:
         return False, None
 
-    return is_beichi(compare_line, now_seg, ld_provider), compare_line
-
-
-def _seg_end_k_index(seg: LINE) -> Optional[int]:
-    """安全取走势段终点 K 索引；链路任一环节为 None 则返回 None。"""
-    try:
-        return seg.end.k.k_index
-    except AttributeError:
-        return None
+    return is_beichi(compare_line, now_seg, ld_provider, frequency), compare_line
 
 
 def beichi_qs(
@@ -153,12 +192,27 @@ def beichi_qs(
     now_seg: LINE,
     ld_provider: LdProvider,
     wzgx_config: str,
+    frequency: Optional[str] = None,
 ) -> Tuple[bool, List[LINE]]:
-    """趋势背驰：≥2 个同向中枢的趋势中，离开末中枢的段相对上一次同向段是否衰竭。
+    """趋势背驰：≥2 个同向中枢的趋势中，离开末中枢的段相对连接前两中枢的同向段是否衰竭。
 
-    原文(第二章·第四节·四 A/B/C)：A、C 为同向走势段，B 为居中的中枢；
-    C 段力度小于 A 段即标准背驰。不足 2 个中枢 → 非趋势背驰（原文：第一个
-    走势中枢出现的背驰只算盘整背驰）。
+    原文(第二章·第四节·四 A/B/C)：A、C 为同向走势段，B 为居中的中枢；C 段
+    力度小于 A 段即标准背驰。两中枢场景下 B = prev_zs，**A 段 = 进入 prev_zs
+    的同向段**（即 ``prev_zs.start``，连接 prev_prev_zs 与 prev_zs 的走势段）、
+    C 段 = 离开 last_zs 的段（``now_seg``）。
+
+    返回非背驰的情形：
+    - ``len(zss) < 2`` —— 原文「第一个走势中枢出现的背驰只算盘整背驰」；
+    - 两中枢不构成同向趋势（``is_qs`` 失败）；
+    - prev_zs 无进入段（开头中枢 / 9 段分裂首组无 entry）或方向与 now_seg 不一致
+      （9 段分裂非首组 entry 是前一组离开段、与本组首段方向相反）—— A/C 同向
+      前提不满足。
+
+    ``lines`` 参数已不消费——保留仅为薄壳调用方接口兼容。旧实现在 ``lines``
+    中筛 ``end_k <= prev_zs.start 起点`` 的最末同向段，会把 ``prev_zs.start``
+    本身排除，错位一段（取到 A 段之前的同向段）；本版按原文直接取
+    ``prev_zs.start``。
+
     返回 (是否背驰, [比较的走势段])。
     """
     if len(zss) < 2:
@@ -171,26 +225,9 @@ def beichi_qs(
     if not qs_direction or qs_direction != now_seg.type:
         return False, []
 
-    # 进入前一中枢的同向段时间边界：prev_zs.start 是进入段(LINE)，可能为 None
-    # （子项目①把进入段改为可选）。取其起点 K 索引。
-    prev_entry = prev_zs.start
-    if prev_entry is None:
-        return False, []
-    try:
-        prev_zs_start_k_index = prev_entry.start.k.k_index
-    except AttributeError:
+    # 原文 A 段 = 进入 prev_zs 的同向段（连接前两个中枢的走势段）
+    compare_line = prev_zs.start
+    if compare_line is None or getattr(compare_line, "type", None) != now_seg.type:
         return False, []
 
-    # 取边界前最后一个同向段作为比较对象（A 段）
-    compare_lines = []
-    for line in lines:
-        end_k = _seg_end_k_index(line)
-        if end_k is None:
-            continue
-        if line.type == now_seg.type and end_k <= prev_zs_start_k_index:
-            compare_lines.append(line)
-    if not compare_lines:
-        return False, []
-
-    compare_line = compare_lines[-1]
-    return is_beichi(compare_line, now_seg, ld_provider), [compare_line]
+    return is_beichi(compare_line, now_seg, ld_provider, frequency), [compare_line]

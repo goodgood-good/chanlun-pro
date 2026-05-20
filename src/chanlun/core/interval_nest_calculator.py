@@ -67,19 +67,21 @@ def _drill_chain(
 
 
 def _zslx_is_beichi(
-    zslx: ZSLX, units: List[LINE], ld_provider: LdProvider, wzgx_config: str
+    zslx: ZSLX, units: List[LINE], ld_provider: LdProvider, wzgx_config: str,
+    frequency: Optional[str] = None,
 ) -> bool:
     """② 复核走势类型是否背驰：趋势走 beichi_qs、盘整走 beichi_pz。
 
-    背驰段 = 走势类型末中枢的离开段（zss[-1].lines[-1]）。
+    背驰段 = 走势类型末中枢的离开段（zss[-1].lines[-1]）。``frequency`` 透
+    传到背驰内核决定黄白线口径。
     """
     if not zslx.zss or not zslx.zss[-1].lines:
         return False
     leave_seg = zslx.zss[-1].lines[-1]
     if zslx.zslx_type in ("上涨", "下跌"):
-        is_bc, _ = beichi_qs(units, zslx.zss, leave_seg, ld_provider, wzgx_config)
+        is_bc, _ = beichi_qs(units, zslx.zss, leave_seg, ld_provider, wzgx_config, frequency)
     else:
-        is_bc, _ = beichi_pz(zslx.zss[-1], leave_seg, ld_provider)
+        is_bc, _ = beichi_pz(zslx.zss[-1], leave_seg, ld_provider, frequency)
     return is_bc
 
 
@@ -88,6 +90,7 @@ def calculate_interval_nest(
     xds: List[XD],
     ld_provider: LdProvider,
     wzgx_config: str,
+    frequency: Optional[str] = None,
 ) -> Optional[IntervalNest]:
     """计算「当下」区间套：最高级别趋势背驰的末走势类型 → 逐级下钻到 L0。
 
@@ -106,7 +109,7 @@ def calculate_interval_nest(
         if wt.zslx_type not in ("上涨", "下跌"):
             continue
         units = _units_at_level(levels, xds, k)
-        if _zslx_is_beichi(wt, units, ld_provider, wzgx_config):
+        if _zslx_is_beichi(wt, units, ld_provider, wzgx_config, frequency):
             start = (k, wt)
             break
     if start is None:
@@ -127,7 +130,7 @@ def calculate_interval_nest(
         links.append(NestLink(
             level=level,
             beichi_seg=seg,
-            is_beichi=_zslx_is_beichi(cur, units, ld_provider, wzgx_config),
+            is_beichi=_zslx_is_beichi(cur, units, ld_provider, wzgx_config, frequency),
         ))
     last_seg = links[-1].beichi_seg
     return IntervalNest(

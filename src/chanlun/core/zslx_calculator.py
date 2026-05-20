@@ -28,18 +28,20 @@ def _classify(zss: List[ZS], wzgx_config: str) -> Tuple[str, str]:
 
 
 def _wt_beichi(
-    zss: List[ZS], lines: List[LINE], ld_provider: LdProvider, wzgx_config: str
+    zss: List[ZS], lines: List[LINE], ld_provider: LdProvider, wzgx_config: str,
+    frequency: Optional[str] = None,
 ) -> bool:
     """判定一个走势类型(中枢列表 zss)是否在最新中枢的离开段处背驰。
 
     离开段 = 最新中枢的最后一段核心(zss[-1].lines[-1]，① Tier-1 已把离开段
     计入核心)。≥2 中枢走趋势背驰 beichi_qs，1 中枢走盘整背驰 beichi_pz。
+    ``frequency`` 透传到背驰内核决定黄白线口径(原文细则1)。
     """
     leave_seg = zss[-1].lines[-1]
     if len(zss) >= 2:
-        is_bc, _ = beichi_qs(lines, zss, leave_seg, ld_provider, wzgx_config)
+        is_bc, _ = beichi_qs(lines, zss, leave_seg, ld_provider, wzgx_config, frequency)
     else:
-        is_bc, _ = beichi_pz(zss[-1], leave_seg, ld_provider)
+        is_bc, _ = beichi_pz(zss[-1], leave_seg, ld_provider, frequency)
     return is_bc
 
 
@@ -78,8 +80,13 @@ class ZslxCalculator:
         lines: List[LINE],
         ld_provider: LdProvider,
         wzgx_config: str,
+        frequency: Optional[str] = None,
     ) -> List[ZSLX]:
-        """把中枢序列切成走势类型列表，末个 done=False。"""
+        """把中枢序列切成走势类型列表，末个 done=False。
+
+        ``frequency`` 透传到背驰内核(``_wt_beichi``)决定黄白线口径,见
+        ``beichi_calculator._use_huangbai``。
+        """
         if not zss:
             return []
 
@@ -111,7 +118,7 @@ class ZslxCalculator:
 
             # 背驰信号：当前走势类型在最新中枢离开段处背驰 → 终结
             if not boundary and cur is not None and _wt_beichi(
-                cur, lines, ld_provider, wzgx_config
+                cur, lines, ld_provider, wzgx_config, frequency
             ):
                 wts.append(_finalize(cur, lines, wzgx_config, done=True))
                 cur = None

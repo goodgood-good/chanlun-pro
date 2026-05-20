@@ -41,22 +41,25 @@ class CoreCounts:
 #   - 性能重构 (无语义变化) → 基线必须不变, 不变才算重构成功
 #   - 配置变更 → 测试本身要更新 (而非偷偷调基线)
 GOLDEN_COUNTS = {
+    # 注:bi_zss 在 BI.zs_low/zs_high 修复(子项目⑤ 后续, 2026-05-20)前为 0
+    # —— BI 默认 zs_low/zs_high=0 让笔层中枢重叠判定全部失败、笔中枢识别为
+    # 0。修复后笔层中枢正常识别,bi_mmds(主要为 3 类)随之出现。
     "up": CoreCounts(
         fxs=81, bis=38, xds=4,
-        bi_zss=0, xd_zss=1,
-        bi_mmds=0, xd_mmds=0,
+        bi_zss=7, xd_zss=1,
+        bi_mmds=12, xd_mmds=0,
         bi_bcs=0, xd_bcs=0,
     ),
     "down": CoreCounts(
         fxs=79, bis=40, xds=4,
-        bi_zss=0, xd_zss=1,
-        bi_mmds=0, xd_mmds=0,
+        bi_zss=6, xd_zss=1,
+        bi_mmds=14, xd_mmds=0,
         bi_bcs=0, xd_bcs=0,
     ),
     "oscillate": CoreCounts(
         fxs=81, bis=36, xds=4,
-        bi_zss=0, xd_zss=1,
-        bi_mmds=0, xd_mmds=0,
+        bi_zss=6, xd_zss=1,
+        bi_mmds=12, xd_mmds=0,
         bi_bcs=0, xd_bcs=0,
     ),
 }
@@ -105,5 +108,6 @@ def test_simple_fixture_baseline_unchanged(cl_with_synthetic_klines):
     assert counts.fxs == 11
     assert counts.bis == 10
     assert counts.xds == 1
-    assert counts.bi_zss == 0
+    # BI.zs_low/zs_high 修复后, 笔中枢可正常识别(此前因默认 0 完全失败)
+    assert counts.bi_zss == 1
     assert counts.xd_zss == 0

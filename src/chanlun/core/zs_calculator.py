@@ -242,12 +242,22 @@ class ZsCalculator:
                 entry_idx += 1
                 continue
 
-            # 计算初始三段的重叠区域 (zg, zd)
-            zg = min(seg_a.zs_high, seg_b.zs_high, seg_c.zs_high)
-            zd = max(seg_a.zs_low, seg_b.zs_low, seg_c.zs_low)
+            # 原文(走势中枢中心定理一,kobo.125.1)：ZG=min(g₁,g₂)、
+            # ZD=max(d₁,d₂)——只取**前两段**的高低点定中枢区间。
+            # 旧实现取前三段会让中枢区间偏窄(收到 seg_c 的高/低牵动),非原文。
+            zg = min(seg_a.zs_high, seg_b.zs_high)
+            zd = max(seg_a.zs_low, seg_b.zs_low)
 
-            # 检查三段核心是否有重叠
+            # 检查前两段是否有重叠(若无,[ZD,ZG] 不成立)
             if zd >= zg:
+                entry_idx += 1
+                continue
+
+            # 第三段 seg_c 也须与 [ZD,ZG] 有重叠(原文「3 个连续次级别走势类型
+            # 所重叠的部分」——3 段共重叠才成中枢,seg_c 不与前 2 段定义的区间
+            # 重叠时中枢不成立)。旧实现把 seg_c 卷入 zg/zd 计算时已隐含这一点;
+            # 改用前 2 段后,须把 seg_c 重叠校验显式补回。
+            if max(seg_c.zs_low, zd) >= min(seg_c.zs_high, zg):
                 entry_idx += 1
                 continue
 

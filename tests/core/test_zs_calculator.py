@@ -113,16 +113,21 @@ def test_fourth_overlapping_segment_counts_as_core():
 
 
 def test_two_consecutive_zhongshu_are_both_identified():
-    """连续两个中枢都应被识别（旧实现因丢弃首个三段中枢而错乱）。"""
+    """连续两个中枢都应被识别（旧实现因丢弃首个三段中枢而错乱）。
+
+    原文(kobo.125.1)ZG=min(g₁,g₂)、ZD=max(d₁,d₂)——只取前 2 段。
+    中枢1 前 2 段 seg(0)/seg(1) → zg=min(9,8)=8, zd=max(4,4)=4。
+    中枢2 前 2 段 seg(4)/seg(5) → zg=min(9,10)=9, zd=max(8.5,8.5)=8.5。
+    """
     lines = [
         _seg(0, "down", 9, 4),
         _seg(1, "up", 4, 8),
         _seg(2, "down", 8, 5),
-        _seg(3, "up", 5, 9),        # 中枢1 核心，区间 [5,8]
-        _seg(4, "down", 9, 8.5),    # 中枢1 离开段
+        _seg(3, "up", 5, 9),        # 中枢1 核心末段
+        _seg(4, "down", 9, 8.5),    # 中枢1 离开段(也是中枢2 首段)
         _seg(5, "up", 8.5, 10),
         _seg(6, "down", 10, 8.7),
-        _seg(7, "up", 8.7, 12),     # 中枢2 核心，区间 [8.7,9]
+        _seg(7, "up", 8.7, 12),     # 中枢2 核心末段
         _seg(8, "down", 12, 10.5),  # 中枢2 离开段
     ]
 
@@ -130,8 +135,8 @@ def test_two_consecutive_zhongshu_are_both_identified():
 
     assert len(zss) == 2, "应识别出 2 个连续中枢"
     assert all(zs.done for zs in zss)
-    assert (zss[0].zg, zss[0].zd) == (8, 5)
-    assert (zss[1].zg, zss[1].zd) == (9, 8.7)
+    assert (zss[0].zg, zss[0].zd) == (8, 4)
+    assert (zss[1].zg, zss[1].zd) == (9, 8.5)
 
 
 def test_four_segments_form_zhongshu_with_no_entry():

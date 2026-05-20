@@ -131,6 +131,65 @@ class BsPointCalculator:
             start_keys.append(zs.start.start.k.k_index)
         return clean_zss, start_keys
 
+    def _find_subordinate_1mmd_in_window(
+        self, now_line: LINE, target_type: str
+    ) -> Optional[LINE]:
+        """xd 层定律一(原文 kobo.54.1)用:在 ``now_line`` 时间窗内查找同向的
+        次级别(笔层) 1 类买卖点所挂的笔。
+
+        - 仅在 ``self.zs_type == 'xd'`` 时启用——bi 层无更细次级别。
+        - 时间窗:``[now_line.start.k.k_index, now_line.end.k.k_index]``。
+        - 同向:``bi.type == target_type``;mmd 名 = ``1buy``(down)/``1sell``(up)。
+        - 命中即返回该笔;无命中返回 None。
+        """
+        if self.zs_type != 'xd':
+            return None
+        target_mmd = '1buy' if target_type == 'down' else '1sell'
+        try:
+            start_k = now_line.start.k.k_index
+            end_k = now_line.end.k.k_index
+        except AttributeError:
+            return None
+        for bi in self.cl.get_bis():
+            if bi.type != target_type:
+                continue
+            try:
+                bi_end_k = bi.end.k.k_index
+            except AttributeError:
+                continue
+            if not (start_k <= bi_end_k <= end_k):
+                continue
+            mmds = getattr(bi, 'zs_type_mmds', {}).get('bi', [])
+            if any(m.name == target_mmd for m in mmds):
+                return bi
+        return None
+
+    @staticmethod
+    def _breaks_last_zs(now_line: LINE, last_zs: ZS) -> bool:
+        """now_line 是否在几何上「跌破/突破最后一个走势中枢」(原文 kobo.48.1 / 49.1)。
+
+        判据三条全部满足才算「跌破末中枢」：
+          1. 末中枢已完成(``last_zs.done is True`` 且 ``last_zs.end`` 非 None)——
+             pending 中枢的延伸区间还在变,无法定位「跌破点」;
+          2. ``now_line`` 不在末中枢内部段之前——``now_line.index >= last_zs.end.index``
+             涵盖两种合法位置:① now_line 本身就是末中枢的离开段(``last_zs.end``,
+             被子项目① 并入中枢核心)、② now_line 在离开段之后(脱离中枢后的延续段);
+          3. ``now_line`` 的 low/high 突破末中枢延伸区间 dd/gg——
+             ``low > last_zs.dd`` (下跌) / ``high < last_zs.gg`` (上涨)表示
+             仍在中枢瞬间波动内,非「跌破」。等号(``=``)留给「now_line 自身
+             制造 dd/gg」的离开段——它就是「跌破」的那一段。
+
+        旧实现完全没有几何判据,只靠 ``beichi_qs`` 力度衰减 + 「创新低/高 vs A 段」
+        识别,会把末中枢内部段(low 还在 dd 之上)误识别为 1 买/1 卖。
+        """
+        if not last_zs.done or last_zs.end is None:
+            return False
+        if now_line.index < last_zs.end.index:
+            return False
+        if now_line.type == 'down':
+            return now_line.low <= last_zs.dd
+        return now_line.high >= last_zs.gg
+
     @staticmethod
     def _filter_valid_zss_by_now_end_k(
         clean_zss: List[ZS],
@@ -203,6 +262,13 @@ class BsPointCalculator:
                 clean_zss, start_keys, now_end_k
             )
             if len(valid_zss) < 2:
+                continue
+
+            # 几何判据(原文 kobo.48.1 / 49.1)：1 类买卖点 = 次级别走势类型「向下
+            # 跌破最后一个走势中枢后形成的背驰点」。仅力度衰减不够,还须确认 now_line
+            # 几何上脱离末中枢：末中枢须已完成、now_line 是末中枢的离开段或在其后、
+            # 且 low/high 突破延伸最低/最高(dd/gg)。
+            if not self._breaks_last_zs(now_line, valid_zss[-1]):
                 continue
 
             # 复用 cl.beichi_qs（内部已做趋势校验 + 力度对比）
@@ -291,7 +357,12 @@ class BsPointCalculator:
         """
         第二类买卖点 = 一类买卖点后的反抽再回调（不创新低/高），或盘整背驰
 
-        充要条件（按缠论原文图 39 / 学员补充第 61 讲）：
+        **路径 1·定律一(仅 xd 层)**: 原文 kobo.54.1「任何级别的第二类买卖点都
+        由次级别相应走势的第一类买点构成」——xd 层 ``now_line`` 时间窗内若
+        挂有同向次级别(笔层) 1 类信号,直接识别为本级别 2 类。这是原文严格口径,
+        优先于经验法。要求 ``process_mmd`` 先跑 bi 层(已在 cl.py 中保证)。
+
+        **路径 2·经验法兜底**: 充要条件（按缠论原文图 39 / 学员补充第 61 讲）：
             1. 当前线段往前能找到同方向的 1buy / 1sell（必须先调 ``_detect_1buy_1sell``）
             2. 一买/一卖与当前段之间至少隔了 1 段反向走势（构成"反抽 → 再回调"）
             3. 满足以下任一条件：
@@ -315,6 +386,36 @@ class BsPointCalculator:
                 # 二买/二卖至少需要 1 个一买 + 1 段反抽 + 当前段 = 3 段
                 continue
 
+            # ---- 路径 1·定律一(原文 kobo.54.1) ----
+            # xd 层时,优先看次级别(笔层) 1 类是否在 now_line 时间窗内,有则
+            # 直接产出本级别 2 类,跳过经验法。
+            sub_1bi = self._find_subordinate_1mmd_in_window(now_line, now_line.type)
+            if sub_1bi is not None:
+                now_end_k = now_line.end.k.k_index
+                valid_zss_dl1 = self._filter_valid_zss_by_now_end_k(
+                    clean_zss, start_keys, now_end_k
+                )
+                if valid_zss_dl1:
+                    ref_zs_dl1 = valid_zss_dl1[-1]
+                    mmd_name_dl1 = '2buy' if now_line.type == 'down' else '2sell'
+                    if not self._mmd_already_attached(now_line, mmd_name_dl1, ref_zs_dl1):
+                        now_line.add_mmd(
+                            name=mmd_name_dl1,
+                            zs=ref_zs_dl1,
+                            zs_type=self.zs_type,
+                            msg=(
+                                f'定律一(原文 kobo.54.1): 次级别(笔) {sub_1bi.index} '
+                                f'挂 1 类 → 本级别 2 类'
+                            ),
+                        )
+                        LogUtil.debug(lambda:
+                            f"[BsPointCalculator] 定律一识别到 {mmd_name_dl1}: "
+                            f"line.index={now_line.index}, sub_bi.index={sub_1bi.index}, "
+                            f"zs.index={ref_zs_dl1.index}"
+                        )
+                        continue  # 已识别,跳过经验法
+
+            # ---- 路径 2·经验法兜底 ----
             # 扫描最近 3 个同向 1 类信号各自尝试构建 2buy/2sell：一波趋势中可
             # 有多个 1buy 锚点，后续回踩对照其中任一个都应允许识别。
             prev_1lines = self._find_recent_1mmd_lines(

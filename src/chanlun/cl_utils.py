@@ -105,7 +105,7 @@ def web_batch_get_cl_datas(
     from chanlun.core.cl import CL
     cls = []
     for f, k in klines.items():
-        cd = CL(code, f, dict(cl_config) if cl_config else {})
+        cd = CL(code, f, dict(cl_config) if cl_config else {}, market=market)
         cd.process_klines(k)
         cls.append(cd)
     return cls
@@ -405,12 +405,21 @@ def query_cl_chart_config(
         "zs_xd_type": [Config.ZS_TYPE_BZ.value],
         "zs_qj": Config.ZS_QJ_DD.value,
         "zs_cd": Config.ZS_CD_THREE.value,
-        "zs_wzgx": Config.ZS_WZGX_GD.value,
+        # 趋势判定口径：原文「趋势=≥2 依次同向中枢」只要求中枢核心区间
+        # [ZD,ZG] 一上一下，故用 ZGD（中枢区间口径）。GD（gg/dd 含延伸极值
+        # 不重叠）远严于原文，会让趋势几乎无法成立 → 1/2 类买卖点与背驰
+        # 在图表上全部消失。注：此默认仅作用于 legacy 买卖点/背驰链路；
+        # ④ 递归链路的趋势口径已在 recursive 侧硬锁，不受此值影响。
+        "zs_wzgx": Config.ZS_WZGX_ZGD.value,
         "zs_optimize": "0",
         # MACD 配置（计算力度背驰）
         "idx_macd_fast": 12,
         "idx_macd_slow": 26,
         "idx_macd_signal": 9,
+        # 背驰力度判断用高一周期 MACD（线段是最低级别走势类型，力度应提高
+        # 一级度量：1m→5m、5m→30m…）。"1" 开 / "0" 关；关或无高周期对照时
+        # 自动回退原生 MACD。纳入图表配置 → 进 cache_key，改它即触发重算。
+        "macd_ld_use_htf": "1",
         # 买卖点配置
         # 两中枢及以上趋势背驰，产生一类买卖点
         "cl_mmd_cal_qs_1mmd": "1",
@@ -845,11 +854,15 @@ def cl_data_to_tv_chart(
                     {
                         "points": [
                             {
-                                "time": fun.datetime_to_int(zs.start.k.date),
+                                # ZS.start/end 是 LINE(无 .k);取端点 FX 的 K 日期，
+                                # 与 xd_zs 分支口径一致。start/end 可为 None(中枢位于
+                                # 数据开头无进入段、或末中枢未完成无离开段)，回退到
+                                # 首/末核心段端点。
+                                "time": fun.datetime_to_int(zs.start.end.k.date) if zs.start else fun.datetime_to_int(zs.lines[0].start.k.date),
                                 "price": zs.zg,
                             },
                             {
-                                "time": fun.datetime_to_int(zs.end.k.date),
+                                "time": fun.datetime_to_int(zs.end.start.k.date) if zs.end else fun.datetime_to_int(zs.lines[-1].end.k.date),
                                 "price": zs.zd,
                             },
                         ],

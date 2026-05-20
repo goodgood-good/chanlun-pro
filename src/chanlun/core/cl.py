@@ -11,6 +11,7 @@ from chanlun.core import beichi_calculator as bc
 from chanlun.core.cl_kline_process import CL_Kline_Process
 from chanlun.core.kline_data_processor import KlineDataProcessor
 from chanlun.core.macd import MACD
+from chanlun.core.macd_htf import compute_higher_macd
 from chanlun.core.xd_calculator import XdCalculator
 from chanlun.core.zs_calculator import ZsCalculator
 from chanlun.core.recursive_calculator import RecursiveCalculator, LevelResult
@@ -30,6 +31,7 @@ class CL(ICL):
             frequency: str,
             config: Union[dict, None] = None,
             start_datetime: datetime.datetime = None,
+            market: Union[str, None] = None,
     ):
         """
         初始化缠论分析器
@@ -39,11 +41,14 @@ class CL(ICL):
             frequency: 分析周期
             config: 配置参数字典
             start_datetime: 开始分析时间
+            market: 市场标识（可选）。仅高周期 MACD 的日级及以上分桶用于时区
+                偏移；1m→5m、5m→30m 纯按时间戳重采样，不依赖此值。
         """
         self.code = code
         self.frequency = frequency
         self.config = config if config else {}
         self.start_datetime = start_datetime
+        self.market = market
 
         # 设置默认配置
         self._init_default_config()
@@ -54,6 +59,9 @@ class CL(ICL):
         self.cl_kline_processor = CL_Kline_Process()
         # 实例化MACD计算器
         self.macd_calculator = MACD()
+        # 高周期 MACD（背驰力度判断用）。process_klines 每轮重算；
+        # None 表示不可用（开关关 / 无高周期 / 桶不足），query_macd_ld 回退原生。
+        self._htf_macd: Union[dict, None] = None
         # 实例化笔计算器
         self.bi_calculator = BiCalculator(bi_mode = 'strict')
         # 实例化线段计算器
@@ -114,9 +122,24 @@ class CL(ICL):
             'zs_xd_type': [Config.ZS_TYPE_BZ.value],
             'zs_qj': Config.ZS_QJ_DD.value,
             'zs_cd': Config.ZS_CD_THREE.value,
-            'zs_wzgx': Config.ZS_WZGX_ZGGDD.value,
+            # 中枢位置关系 / 趋势判定档(§1.4 + §3.7):
+            #   - ZGD  (默认): 原文「走势中枢中心定理一」kobo.125.1 的核心区间
+            #     口径——后中枢 zd > 前中枢 zg(或反向)即趋势。最贴近实务、与
+            #     web 入口 ``cl_utils.query_cl_chart_config`` 一致。
+            #   - ZGGDD: 兼容老用法,zg 与 dd、zd 与 gg 比较,略偏宽。
+            #   - GD: 原文 #389「任何瞬间波动也无重叠」的严格档,gg/dd 包络
+            #     无交集才算趋势——大部分真实行情下趋势几乎不成立、1/2 类信号
+            #     极少。仅 opt-in 用于研究/对照场景。
+            # 注:本配置同时驱动 buy/sell 点链路 (cl.beichi_qs / zss_is_qs)
+            # 与递归链路 (③ ZSLX 划分 / ④ recursive / ⑤ interval_nest),
+            # 见 process_klines / get_recursive_levels / get_interval_nest。
+            'zs_wzgx': Config.ZS_WZGX_ZGD.value,
             'cal_last_zs': True,
             'use_macd_ld': True,
+            # 背驰力度判断用高一周期 MACD（线段是最低级别走势类型，度量其
+            # 力度应提高一个级别：1m→5m、5m→30m…）。开关关 / 无高周期 /
+            # 高周期桶不足时 query_macd_ld 自动回退原生 MACD。
+            'macd_ld_use_htf': True,
         }
 
         for key, value in default_config.items():
@@ -141,6 +164,8 @@ class CL(ICL):
             # 直接引用内部数据，避免 deepcopy
             # 使用MACD计算器更新指标
             self.macd_calculator.process_macd(self.kline_processor.klines)
+            # 高周期 MACD：背驰力度按原文应在高一级别上度量。每轮全量重算。
+            self._compute_htf_macd()
 
             # 更新缠论K线：process_cl_klines 是内部状态更新器，不依赖返回值。
             # 下游直接继续消费 self.cl_kline_processor.cl_klines。
@@ -165,14 +190,31 @@ class CL(ICL):
             if self.zss_calculator.pending_zs is not None:
                 xd_zss.append(self.zss_calculator.pending_zs)
             ld_provider = lambda s, e: query_macd_ld(self, s, e)
-            # 递归链路（③走势类型 / ④递归 / ⑤区间套）锁定原文严格档 GD：
+            # 递归链路（③走势类型 / ④递归 / ⑤区间套）默认走原文严格档 GD：
             # 趋势判定须按走势中枢中心定理二的 GG/DD 口径（原文「后GG<前DD
-            # → 下跌、后DD>前GG → 上涨」），不随 config.zs_wzgx（默认 ZGGDD
-            # 偏宽、非原文严格口径）。旧买卖点链路的薄壳仍按 config 不变。
-            recursive_wzgx = Config.ZS_WZGX_GD.value
+            # → 下跌、后DD>前GG → 上涨」）。默认 config.zs_wzgx 在 §1.4 后即
+            # 为 GD,递归链路、买卖点链路统一读 config(§3.7),保证用户显式
+            # opt-out 到 ZGGDD 等较宽档时所有链路口径一致,避免「买卖点说趋
+            # 势 / ZSLX 说盘整」的双口径冲突。
+            recursive_wzgx = self.config.get('zs_wzgx', Config.ZS_WZGX_ZGD.value)
             self.xd_zslx = self.zslx_calculator.calculate(
-                xd_zss, self.xd_calculator.xds, ld_provider, recursive_wzgx
+                xd_zss, self.xd_calculator.xds, ld_provider, recursive_wzgx,
+                self.frequency,
             )
+
+            # 笔中枢方向回填(§3.6,原 ① 路线图遗留)：用同一套 ③ 走势类型划分
+            # 给笔层中枢回填方向(上涨/下跌中枢 up/down、盘整中枢 zd)。下游
+            # cl_analyse 等用 zs.type 做 up/down 二分逻辑时,笔中枢拿到正确
+            # 方向(此前是 ZsCalculator 内部置的 seg_b.type 占位、与原文不符)。
+            # 仅用副作用(回填),不存储 bi_zslx——bi 层走势类型尚无消费方,YAGNI。
+            bi_zss = list(self.bi_zss_calculator.zss)
+            if self.bi_zss_calculator.pending_zs is not None:
+                bi_zss.append(self.bi_zss_calculator.pending_zs)
+            if bi_zss:
+                self.zslx_calculator.calculate(
+                    bi_zss, self.bi_calculator.bis, ld_provider, recursive_wzgx,
+                    self.frequency,
+                )
 
             # 每次处理后重置缓存，确保下次访问时重新计算
             self._last_bi_zs = None
@@ -246,6 +288,27 @@ class CL(ICL):
         # 从MACD计算器获取结果
         return self.macd_calculator.get_results()
 
+    def _compute_htf_macd(self) -> None:
+        """计算高周期 MACD，写入 ``self._htf_macd``，供 query_macd_ld 取用。
+
+        背驰力度按原文应在「高一级别」上度量（本项目以线段为最低级别走势
+        类型）。开关 ``macd_ld_use_htf`` 关、无高周期对照、或高周期 K 线桶
+        不足时置 None —— query_macd_ld 据此回退原生 MACD。
+        """
+        flag = self.config.get('macd_ld_use_htf', True)
+        # 兼容 bool / 字符串("0"/"1") 两种配置写法
+        if flag in (False, 0, '0', 'false', 'False', ''):
+            self._htf_macd = None
+            return
+        self._htf_macd = compute_higher_macd(
+            self.kline_processor.klines,
+            self.frequency,
+            self.market,
+            fast=int(self.config.get('idx_macd_fast', 12)),
+            slow=int(self.config.get('idx_macd_slow', 26)),
+            signal=int(self.config.get('idx_macd_signal', 9)),
+        )
+
     def get_fxs(self) -> List[FX]:
         """返回分型列表（浅拷贝）"""
         return list(self.bi_calculator.fxs)
@@ -287,11 +350,11 @@ class CL(ICL):
         不接入 process_klines、不动周期多级分析与 bs_point_calculator。
         """
         ld_provider = lambda s, e: query_macd_ld(self, s, e)
-        # 递归链路锁定原文严格档 GD（趋势判定按中心定理二 GG/DD 口径），
-        # 不随 config.zs_wzgx——理由见 process_klines ③ 接入处注释。
-        recursive_wzgx = Config.ZS_WZGX_GD.value
+        # 递归链路默认原文严格档 GD,允许 config opt-out(§3.7,统一各链路读
+        # config)——理由见 process_klines ③ 接入处注释。
+        recursive_wzgx = self.config.get('zs_wzgx', Config.ZS_WZGX_ZGD.value)
         return RecursiveCalculator().calculate(
-            self.xd_calculator.xds, ld_provider, recursive_wzgx
+            self.xd_calculator.xds, ld_provider, recursive_wzgx, self.frequency,
         )
 
     def get_interval_nest(self) -> Optional[IntervalNest]:
@@ -300,14 +363,15 @@ class CL(ICL):
         并存独立子系统：每次现算，不接入 process_klines、不动下游。
         """
         ld_provider = lambda s, e: query_macd_ld(self, s, e)
-        # 递归链路锁定原文严格档 GD（趋势判定按中心定理二 GG/DD 口径），
-        # 不随 config.zs_wzgx——理由见 process_klines ③ 接入处注释。
-        recursive_wzgx = Config.ZS_WZGX_GD.value
+        # 递归链路默认原文严格档 GD,允许 config opt-out(§3.7,统一各链路读
+        # config)——理由见 process_klines ③ 接入处注释。
+        recursive_wzgx = self.config.get('zs_wzgx', Config.ZS_WZGX_ZGD.value)
         return calculate_interval_nest(
             self.get_recursive_levels(),
             self.xd_calculator.xds,
             ld_provider,
             recursive_wzgx,
+            self.frequency,
         )
 
     def get_last_bi_zs(self) -> Union[ZS, None]:
@@ -351,7 +415,7 @@ class CL(ICL):
     def beichi_pz(self, zs: ZS, now_line: LINE) -> Tuple[bool, Union[LINE, None]]:
         """判断中枢与指定线是否构成盘整背驰（薄壳，逻辑见 beichi_calculator）。"""
         ld_provider = lambda s, e: query_macd_ld(self, s, e)
-        return bc.beichi_pz(zs, now_line, ld_provider)
+        return bc.beichi_pz(zs, now_line, ld_provider, self.frequency)
 
     def beichi_qs(
             self, lines: List[LINE], zss: List[ZS], now_line: LINE
@@ -359,7 +423,9 @@ class CL(ICL):
         """判断指定线与之前的中枢是否形成趋势背驰（薄壳，逻辑见 beichi_calculator）。"""
         ld_provider = lambda s, e: query_macd_ld(self, s, e)
         wzgx_config = self.config.get('zs_wzgx', Config.ZS_WZGX_ZGGDD.value)
-        return bc.beichi_qs(lines, zss, now_line, ld_provider, wzgx_config)
+        return bc.beichi_qs(
+            lines, zss, now_line, ld_provider, wzgx_config, self.frequency
+        )
 
     def zss_is_qs(self, one_zs: ZS, two_zs: ZS) -> Union[str, None]:
         """判断两个中枢是否形成趋势（薄壳，逻辑见 beichi_calculator）。"""
@@ -443,6 +509,7 @@ class CL(ICL):
 
     def process_idx(self):
         self.macd_calculator.process_macd(self.kline_processor.klines)
+        self._compute_htf_macd()
         return self
 
     def process_fx(self):
@@ -496,9 +563,19 @@ class CL(ICL):
         笔层（zs_type='bi'）与线段层（zs_type='xd'）对称接入 BsPointCalculator，
         共用同一识别引擎，仅输入不同（xd 层用 xds + xd 中枢，bi 层用 bis +
         bi 中枢）。get_bi_zss() / get_xd_zss() 都含 pending_zs，不丢末段买卖点。
-        任一层异常由 process_klines 外层 except 统一清理，内部不单独 try。
+
+        **执行顺序**: bi 层先于 xd 层——原文定律一(kobo.54.1)「任何级别的第二
+        类买卖点都由次级别相应走势的第一类买点构成」要求 xd 层 2 类时能读到
+        bi 层 1 类(BsPointCalculator 据此走定律一路径)。bi 层无更细次级别,
+        2 类走经验法兜底。任一层异常由 process_klines 外层 except 统一清理。
         """
         from chanlun.core.bs_point_calculator import BsPointCalculator
+
+        # --- 笔层(必须先跑,供 xd 层 2 类的定律一路径读取) ---
+        bis = self.bi_calculator.bis
+        bi_zss = self.get_bi_zss()
+        if bis and bi_zss:
+            BsPointCalculator(self, zs_type='bi').calculate(bis, bi_zss)
 
         # --- 线段层 ---
         xds = self.xd_calculator.xds
@@ -507,13 +584,5 @@ class CL(ICL):
         xd_zss = self.get_xd_zss()
         if xds and xd_zss:
             BsPointCalculator(self, zs_type='xd').calculate(xds, xd_zss)
-
-        # --- 笔层 ---
-        # 笔层中短线信号（分钟级 1B/2B/3B）。结果挂在 BI.zs_type_mmds['bi']，
-        # 与 XD.zs_type_mmds['xd'] 不冲突（两套 dict 是 LINE 实例属性）。
-        bis = self.bi_calculator.bis
-        bi_zss = self.get_bi_zss()
-        if bis and bi_zss:
-            BsPointCalculator(self, zs_type='bi').calculate(bis, bi_zss)
 
         return self

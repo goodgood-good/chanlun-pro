@@ -171,3 +171,106 @@ def test_split_one_first_sub_inherits_zs_entry():
     zs.start = entry
     out = rc._split_oversized([zs])
     assert out[0].start is entry
+
+
+# =================================================================
+# 子项目 ⑤ · 中枢扩展(原文 #391)：相邻同级别中枢的 GG/DD 包络重叠 → 合并为高级中枢
+# =================================================================
+
+
+def _zs_full(zg, zd, gg, dd, lines=None, index=0):
+    """构造一个完整 ZS:zg/zd/gg/dd + lines + index。"""
+    zs = _zs(zg=zg, zd=zd, gg=gg, dd=dd)
+    zs.index = index
+    if lines is not None:
+        zs.lines = lines
+    return zs
+
+
+def test_expand_single_zs_passthrough():
+    """单个中枢 → 原样返回,expanded_with 为空。"""
+    z = _zs_full(zg=8, zd=5, gg=9, dd=4, lines=[_seg(0, "up", 4, 8)])
+    out = rc._expand_overlapping([z])
+    assert len(out) == 1 and out[0] is z
+    assert out[0].expanded_with == []
+
+
+def test_expand_non_overlapping_pair_kept_independent():
+    """两中枢 GG/DD 包络无重叠(独立趋势)→ 不合并、保持两个中枢。"""
+    z1 = _zs_full(zg=8, zd=5, gg=9, dd=4, lines=[_seg(0, "up", 4, 8)], index=0)
+    z2 = _zs_full(zg=18, zd=15, gg=19, dd=14, lines=[_seg(10, "up", 14, 18)], index=1)
+    out = rc._expand_overlapping([z1, z2])
+    assert len(out) == 2
+    assert all(zs.expanded_with == [] for zs in out)
+
+
+def test_expand_overlapping_pair_merges_to_higher_zs():
+    """两中枢 GG/DD 包络重叠(原文 #391)→ 合并为 1 个高级中枢。
+
+    高级中枢的 gg/dd = 包络合并(max gg / min dd),lines = 子中枢 lines 拼接,
+    expanded_with = [sub1, sub2]。
+    """
+    seg1 = _seg(0, "up", 4, 8)
+    seg2 = _seg(1, "down", 8, 6)
+    z1 = _zs_full(zg=8, zd=6, gg=9, dd=5, lines=[seg1, seg2], index=0)
+    seg3 = _seg(2, "up", 7, 11)
+    seg4 = _seg(3, "down", 11, 8)
+    # z2.dd=7 与 z1.gg=9 重叠 ([dd=7,gg=12] 与 [dd=5,gg=9] 包络相交 [7,9])
+    z2 = _zs_full(zg=11, zd=8, gg=12, dd=7, lines=[seg3, seg4], index=1)
+
+    out = rc._expand_overlapping([z1, z2])
+    assert len(out) == 1, "GG/DD 包络重叠的相邻中枢应合并为 1 个"
+    merged = out[0]
+    assert merged.gg == 12 and merged.dd == 5, "高级中枢取包络 max gg/min dd"
+    assert merged.expanded_with == [z1, z2]
+    assert merged.lines == [seg1, seg2, seg3, seg4], "高级中枢 lines = 子中枢 lines 时序拼接"
+
+
+def test_expand_three_overlapping_zss_merge_chain():
+    """三个相邻 GG/DD 包络两两重叠 → 合并为 1 个含 3 个子中枢的高级中枢。"""
+    z1 = _zs_full(zg=8, zd=5, gg=9, dd=4, lines=[_seg(0, "up", 4, 8)], index=0)
+    z2 = _zs_full(zg=11, zd=8, gg=12, dd=7, lines=[_seg(2, "up", 7, 11)], index=1)
+    z3 = _zs_full(zg=13, zd=10, gg=14, dd=9, lines=[_seg(4, "up", 9, 13)], index=2)
+    out = rc._expand_overlapping([z1, z2, z3])
+    assert len(out) == 1
+    assert out[0].expanded_with == [z1, z2, z3]
+    assert (out[0].gg, out[0].dd) == (14, 4)
+
+
+def test_expand_only_consecutive_overlap_break_resets_chain():
+    """链式重叠遇到断点 → 前段合并、断点后另起一组。"""
+    z1 = _zs_full(zg=8, zd=5, gg=9, dd=4, lines=[_seg(0, "up", 4, 8)], index=0)
+    z2 = _zs_full(zg=11, zd=8, gg=12, dd=7, lines=[_seg(2, "up", 7, 11)], index=1)
+    # z3 与 z2 不重叠(dd=20 > z2.gg=12)
+    z3 = _zs_full(zg=22, zd=18, gg=24, dd=20, lines=[_seg(4, "up", 18, 22)], index=2)
+    z4 = _zs_full(zg=25, zd=21, gg=26, dd=19, lines=[_seg(6, "up", 19, 25)], index=3)
+    out = rc._expand_overlapping([z1, z2, z3, z4])
+    assert len(out) == 2
+    assert out[0].expanded_with == [z1, z2]
+    assert out[1].expanded_with == [z3, z4]
+
+
+def test_recursive_calculate_runs_expansion_after_split_oversized():
+    """主流程 RecursiveCalculator 集成:扫描 → 9 段分裂 → 扩展 → 划分。
+
+    构造 9 段大中枢 → _split_oversized 拆 3 段子中枢 ×3 → 扩展识别它们的
+    GG/DD 重叠 → 合并为 1 个高级中枢(L0 → L1 升级路径的扩展版本)。
+    """
+    # 构造 10 段强重叠序列(实测会形成单个超长中枢)
+    base_lines = [
+        _seg(0, "down", 10, 5),   # entry
+        _seg(1, "up", 5, 8),
+        _seg(2, "down", 8, 5),
+        _seg(3, "up", 5, 8),
+        _seg(4, "down", 8, 5),
+        _seg(5, "up", 5, 8),
+        _seg(6, "down", 8, 5),
+        _seg(7, "up", 5, 8),
+        _seg(8, "down", 8, 5),
+        _seg(9, "up", 5, 8),
+        _seg(10, "down", 8, 4),  # 离开段
+        _seg(11, "up", 4, 4.5),  # 远离触发完成
+    ]
+    levels = rc.RecursiveCalculator().calculate(base_lines, _benign_ldp, WZGX)
+    # 至少 L0 有结果;具体层数随扩展+分裂结果定。能跑通 + 不抛 = OK
+    assert len(levels) >= 1

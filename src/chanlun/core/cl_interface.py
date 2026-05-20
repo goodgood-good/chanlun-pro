@@ -587,6 +587,11 @@ class ZS:
         self.entry: Optional[LINE] = None  # 进入段
         self.exit: Optional[LINE] = None  # 离开段
 
+        # 子项目 ⑤：中枢扩展(原文 #391)。两个或更多相邻同级别中枢的瞬间波动
+        # 区间(GG/DD 包络)有重叠时,合并为高级中枢；本字段记录构成它的子中枢。
+        # 非扩展中枢(独立、未合并)为空列表。
+        self.expanded_with: List['ZS'] = []
+
     @property
     def type(self) -> Optional[str]:
         return self._type
@@ -629,6 +634,8 @@ class ZS:
         state.setdefault('_gg_cache', None)
         state.setdefault('_dd_cache', None)
         state.setdefault('_bounds_dirty', True)
+        # 子项目 ⑤ 扩展字段:旧 pickle 缺失时补空列表
+        state.setdefault('expanded_with', [])
         self.__dict__.update(state)
 
     def add_line(self, line: LINE) -> bool:
@@ -855,9 +862,19 @@ class BI(LINE):
         end: FX = None,
         _type: str = None,
         index: int = 0,
-        default_zs_type: str = None,
+        default_zs_type: str = 'bi',
     ):
         super().__init__(start, end, _type, index)
+        # 笔(BI)是次级别走势单位,其中枢成立用的高低点等于笔的端点价——
+        # 与 XD 完成段的 ``zs_high/zs_low = max/min(sv, ev)`` 同口径,且
+        # 等价于 LINE.update_high_low 设的 high/low。
+        # LINE.__init__ 在 ``update_high_low()`` 之后把 ``zs_high/zs_low``
+        # 强制重置为 0(为 XD pending 段口径留位),BI 在此显式同步回 high/low。
+        # 缺失此步会让 ZsCalculator 在笔层重叠判定全部失败 → 笔中枢识别为 0、
+        # 笔层 1/2/3 类买卖点全部无法识别(进而 §3.2 定律一在 xd 层失效)。
+        self.zs_high = self.high if self.high is not None else 0
+        self.zs_low = self.low if self.low is not None else 0
+
         self.mmds: List[MMD] = []  # 买卖点
         self.bcs: List[BC] = []  # 背驰信息
 
@@ -1171,7 +1188,7 @@ class XD(LINE):
         ding_fx: XLFX = None,
         di_fx: XLFX = None,
         index: int = 0,
-        default_zs_type: str = None,
+        default_zs_type: str = 'xd',
     ):
         super().__init__(start, end, _type, index)
 
@@ -1724,6 +1741,22 @@ class ICL(metaclass=ABCMeta):
         """
 
 
+def _resolve_ld_macd(cd: ICL) -> dict:
+    """选择背驰力度计算所用的 MACD 源。
+
+    优先用高周期 MACD（``cd._htf_macd``）—— 本项目以线段为最低级别走势
+    类型，度量其背驰力度应提高一个级别（1m→5m、5m→30m…）。高周期 MACD
+    不可用（开关关 / 无高周期 / 桶不足 → CL 置 None）时回退原生 MACD。
+
+    高周期数组与原生一样按原始 K 线逐根对齐（per-bar 插值），故调用方的
+    ``k_index`` 切片逻辑对两者通用。
+    """
+    htf = getattr(cd, "_htf_macd", None)
+    if isinstance(htf, dict) and htf.get("hist"):
+        return htf
+    return cd.get_idx()["macd"]
+
+
 def query_macd_ld(cd: ICL, start_fx: FX, end_fx: FX):
     """
     计算分型区间 macd 力度
@@ -1737,16 +1770,13 @@ def query_macd_ld(cd: ICL, start_fx: FX, end_fx: FX):
             % (cd.get_code(), cd.get_frequency(), cd.get_klines()[-1].date)
         )
 
-    # MACD 数组按原始K线序列对齐，这里必须使用 k_index 进行切片。
-    dea = np.array(
-        cd.get_idx()["macd"]["dea"][start_fx.k.k_index : end_fx.k.k_index + 1]
-    )
-    dif = np.array(
-        cd.get_idx()["macd"]["dif"][start_fx.k.k_index : end_fx.k.k_index + 1]
-    )
-    hist = np.array(
-        cd.get_idx()["macd"]["hist"][start_fx.k.k_index : end_fx.k.k_index + 1]
-    )
+    # 背驰力度的 MACD 源：开关开且高周期 MACD 可用 → 用高一周期 MACD
+    # （线段是最低级别走势类型，力度应提高一级度量）；否则回退原生 MACD。
+    # 两者数组均与原始 K 线等长，下面统一按 k_index 切片。
+    macd = _resolve_ld_macd(cd)
+    dea = np.array(macd["dea"][start_fx.k.k_index : end_fx.k.k_index + 1])
+    dif = np.array(macd["dif"][start_fx.k.k_index : end_fx.k.k_index + 1])
+    hist = np.array(macd["hist"][start_fx.k.k_index : end_fx.k.k_index + 1])
     if len(hist) == 0:
         hist = np.array([0])
     if len(dea) == 0:
@@ -1779,13 +1809,25 @@ def query_macd_ld(cd: ICL, start_fx: FX, end_fx: FX):
     }
 
 
-def compare_ld_beichi(one_ld: dict, two_ld: dict, line_direction: str):
+def compare_ld_beichi(
+    one_ld: dict, two_ld: dict, line_direction: str,
+    dif_check: bool = False,
+):
     """
     比较两个力度，后者小于前者，返回 True
-    :param one_ld:
-    :param two_ld:
-    :param line_direction: [up down] 比较线的方向，向上看macd红柱子之和，向下看macd绿柱子之和
-    :return:
+
+    **口径差异(§3.10)**：本函数仅做柱子面积比较——是原文细则1的子集。原文完整
+    口径(柱子面积 + 级别相关黄白线 + 0 轴回抽 + 创新高前提)见
+    ``chanlun.core.beichi_calculator.is_beichi``,新代码建议直接用该函数。
+    本函数为兼容遗留调用方(``cl_analyse`` / ``signal_monitor`` / 旧 user_custom_mmd)
+    保留,可选 ``dif_check=True`` 启用黄白线高度衰减作渐进升级路径。
+
+    :param one_ld: 前段力度(query_macd_ld 风格,含 ``macd`` 键)
+    :param two_ld: 后段力度
+    :param line_direction: ``'up'`` / ``'down'`` 决定看红柱/绿柱
+    :param dif_check: 默认 False(向后兼容,仅看柱子面积)。True 时再叠加
+        黄白线高度衰减(``up: dif.max 后 < 前;down: dif.min 后 > 前``),
+        更贴近原文细则1。**未含 0 轴回抽**——需要的话用 ``is_beichi``。
     """
     hist_key = "sum"
     if line_direction == "up":
@@ -1794,10 +1836,16 @@ def compare_ld_beichi(one_ld: dict, two_ld: dict, line_direction: str):
         hist_key = "down_sum"
     if "macd" not in two_ld.keys() or "macd" not in one_ld.keys():
         return False
-    if two_ld["macd"]["hist"][hist_key] < one_ld["macd"]["hist"][hist_key]:
-        return True
-    else:
+    if not (two_ld["macd"]["hist"][hist_key] < one_ld["macd"]["hist"][hist_key]):
         return False
+    if dif_check:
+        if line_direction == "up":
+            if not (two_ld["macd"]["dif"]["max"] < one_ld["macd"]["dif"]["max"]):
+                return False
+        elif line_direction == "down":
+            if not (two_ld["macd"]["dif"]["min"] > one_ld["macd"]["dif"]["min"]):
+                return False
+    return True
 
 
 def user_custom_mmd(

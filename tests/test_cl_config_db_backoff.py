@@ -30,18 +30,19 @@ def test_db_failure_fallback_is_not_cached(monkeypatch):
 
     monkeypatch.setattr(cl_utils.db, "cache_get", _boom)
     cfg1 = cl_utils.query_cl_chart_config("a", "M8TESTX")
-    # 默认配置兜底:zs_wzgx 为 zs_wzgx_gd
-    assert cfg1["zs_wzgx"] == "zs_wzgx_gd"
+    # 默认配置兜底:zs_wzgx 为 zs_wzgx_zgd（默认趋势口径）
+    assert cfg1["zs_wzgx"] == "zs_wzgx_zgd"
 
-    # 模拟退避窗口到期 + DB 恢复,返回用户自定义配置
+    # 模拟退避窗口到期 + DB 恢复,返回用户自定义配置（取与默认不同的值,
+    # 才能验证 cfg2 确实读到了 DB 而非沿用兜底默认）
     cl_utils._cl_config_db_backoff_until = 0.0
 
     def _ok(key):
-        return {"zs_wzgx": "zs_wzgx_zgd"} if key.endswith("_common") else None
+        return {"zs_wzgx": "zs_wzgx_gd"} if key.endswith("_common") else None
 
     monkeypatch.setattr(cl_utils.db, "cache_get", _ok)
     cfg2 = cl_utils.query_cl_chart_config("a", "M8TESTX")
-    assert cfg2["zs_wzgx"] == "zs_wzgx_zgd", (
+    assert cfg2["zs_wzgx"] == "zs_wzgx_gd", (
         "DB 恢复后应读到自定义配置;DB 失败兜底不应被缓存"
     )
 
