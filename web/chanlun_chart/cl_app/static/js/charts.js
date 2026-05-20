@@ -1598,42 +1598,59 @@ class ChartManager {
             this.reconcile(`recursive_zslxs_L${L}`, lv ? lv.zslxs : [], from, symbolKey, (item) => safeCreate(ChartUtils.createZslxShape(this.chart, item, { overrides: { transparency: 88 } }), `rec_zslx_L${L}`), false);
         }
 
-        // 多周期叠加(/tv/overlays):高级别周期独立 CL 跑出的中枢/走势类型。
-        // 异步 fetch + 拿到后填入对应 container,reconcile 自动 add/remove。
+        // 多周期叠加(/tv/overlays):高级别 CL 跑出的中枢/走势类型。**缓存**
+        // overlay 数据,只在 symbol/interval 变化时触发 fetch——否则每次
+        // drawChartElements(toggle / 缩放 / 滚动)都 fetch + reconcile 大批
+        // shape,造成 TV widget 重绘闪烁。reconcile 自身 _reconcileGuard
+        // 在 signature 相同时跳过、所以用缓存数据重 reconcile 完全无副作用。
+        const _applyOverlay = (overlays) => {
+            const freqs = Object.keys(overlays).slice(0, 3);
+            freqs.forEach((freq, idx) => {
+                const level = idx + 1;
+                const od = overlays[freq] || {};
+                this.reconcile(`overlay_zss_${level}`, od.xd_zss || [], 0, symbolKey,
+                    (item) => safeCreate(ChartUtils.createOverlayZsShape(this.chart, item, { level }), `ovz${level}`));
+                this.reconcile(`overlay_zslxs_${level}`, od.xd_zslx || [], 0, symbolKey,
+                    (item) => safeCreate(ChartUtils.createOverlayZslxShape(this.chart, item, { level }), `ovx${level}`), false);
+            });
+            for (let lv = freqs.length + 1; lv <= 3; lv++) {
+                this.reconcile(`overlay_zss_${lv}`, [], 0, symbolKey, () => null);
+                this.reconcile(`overlay_zslxs_${lv}`, [], 0, symbolKey, () => null, false);
+            }
+        };
         if (cfg.overlay_freqs !== false) {
             const si = this.widget?.symbolInterval?.();
             const sym = si?.symbol; const intv = si?.interval;
             if (sym && intv) {
-                fetch(`/tv/overlays?symbol=${encodeURIComponent(sym)}&interval=${encodeURIComponent(intv)}`, { cache: 'no-store' })
-                    .then(r => r.ok ? r.json() : { overlays: {} })
-                    .then(data => {
-                        const overlays = data.overlays || {};
-                        const freqs = Object.keys(overlays).slice(0, 3);   // 最多 3 个 slot
-                        // 用 from=0 绕过 reconcile 内 ``headTime >= from`` 时间窗过滤——
-                        // overlay 是高级别中枢/走势类型,起点常远早于当前可视窗,严格
-                        // 过滤会让所有 overlay 都被丢弃。改用 from=0 不过滤任何 item。
-                        freqs.forEach((freq, idx) => {
-                            const level = idx + 1;
-                            const od = overlays[freq] || {};
-                            this.reconcile(`overlay_zss_${level}`, od.xd_zss || [], 0, symbolKey,
-                                (item) => safeCreate(ChartUtils.createOverlayZsShape(this.chart, item, { level }), `ovz${level}`));
-                            this.reconcile(`overlay_zslxs_${level}`, od.xd_zslx || [], 0, symbolKey,
-                                (item) => safeCreate(ChartUtils.createOverlayZslxShape(this.chart, item, { level }), `ovx${level}`), false);
+                const overlayKey = `${sym}__${intv}`;
+                if (!this._overlayState) this._overlayState = { key: null, data: null, inflight: false };
+                if (this._overlayState.key === overlayKey && this._overlayState.data) {
+                    // 缓存命中:reconcile signature 相同自动 short-circuit,无副作用
+                    _applyOverlay(this._overlayState.data);
+                } else if (!this._overlayState.inflight) {
+                    // 仅当 symbol/interval 变化或首次访问才 fetch
+                    this._overlayState.inflight = true;
+                    fetch(`/tv/overlays?symbol=${encodeURIComponent(sym)}&interval=${encodeURIComponent(intv)}`, { cache: 'no-store' })
+                        .then(r => r.ok ? r.json() : { overlays: {} })
+                        .then(data => {
+                            const overlays = data.overlays || {};
+                            this._overlayState = { key: overlayKey, data: overlays, inflight: false };
+                            _applyOverlay(overlays);
+                            const freqs = Object.keys(overlays);
+                            console.log(`[overlay] fetched ${freqs.join(',')} zss=${freqs.map(f => (overlays[f].xd_zss||[]).length).join('/')} zslx=${freqs.map(f => (overlays[f].xd_zslx||[]).length).join('/')}`);
+                        })
+                        .catch(e => {
+                            this._overlayState.inflight = false;
+                            console.warn(`[overlay] fetch failed:`, e);
                         });
-                        // 多余 slot 清空(若上次 freq 多、这次少)
-                        for (let lv = freqs.length + 1; lv <= 3; lv++) {
-                            this.reconcile(`overlay_zss_${lv}`, [], 0, symbolKey, () => null);
-                            this.reconcile(`overlay_zslxs_${lv}`, [], 0, symbolKey, () => null, false);
-                        }
-                        console.log(`[overlay] freqs=${freqs.join(',')} zss=${freqs.map(f => (overlays[f].xd_zss||[]).length).join('/')} zslx=${freqs.map(f => (overlays[f].xd_zslx||[]).length).join('/')}`);
-                    })
-                    .catch(e => console.warn(`[overlay] fetch failed:`, e));
+                }
+                // inflight 中:跳过本轮,等 fetch promise 完成后自动 reconcile
             }
         } else {
             // toggle 关:清空所有 overlay container
             for (let lv = 1; lv <= 3; lv++) {
-                this.reconcile(`overlay_zss_${lv}`, [], from, symbolKey, () => null);
-                this.reconcile(`overlay_zslxs_${lv}`, [], from, symbolKey, () => null, false);
+                this.reconcile(`overlay_zss_${lv}`, [], 0, symbolKey, () => null);
+                this.reconcile(`overlay_zslxs_${lv}`, [], 0, symbolKey, () => null, false);
             }
         }
 
