@@ -1600,10 +1600,14 @@ class ChartManager {
         // ④ 递归层级树 —— L1/L2/L3 高级中枢与走势类型(L0 已在 xd_zss / xd_zslx)
         const recLevels = (cfg.recursive_levels !== false ? (barsResult.recursive_levels || []) : []);
         // 收集到 by-level container(reconcile key 已预先分配 recursive_zss_L1..L3 / _zslxs_L1..L3)
+        // 高级别中枢/走势类型横跨上百根 bars,几乎必然 head_time < visibleRange.from
+        // ——传 from=0 让 reconcile 不按 head 过滤,否则一切到 symbol 就被全过滤、永远
+        // 看不到 L1+ 多级别结构。代价是画外起点会被 createMultipointShape 接受;实测
+        // rectangle 形态(中枢/zslx) 不会出现长斜线 snap 问题。
         for (let L = 1; L <= 3; L++) {
             const lv = recLevels.find((x) => x.level === L);
-            this.reconcile(`recursive_zss_L${L}`, lv ? lv.zss : [], from, symbolKey, (item) => safeCreate(ChartUtils.createRecursiveZsShape(this.chart, item, { level: L }), `rec_zs_L${L}`));
-            this.reconcile(`recursive_zslxs_L${L}`, lv ? lv.zslxs : [], from, symbolKey, (item) => safeCreate(ChartUtils.createZslxShape(this.chart, item, { overrides: { transparency: 88 } }), `rec_zslx_L${L}`), false);
+            this.reconcile(`recursive_zss_L${L}`, lv ? lv.zss : [], 0, symbolKey, (item) => safeCreate(ChartUtils.createRecursiveZsShape(this.chart, item, { level: L }), `rec_zs_L${L}`));
+            this.reconcile(`recursive_zslxs_L${L}`, lv ? lv.zslxs : [], 0, symbolKey, (item) => safeCreate(ChartUtils.createZslxShape(this.chart, item, { overrides: { transparency: 88 } }), `rec_zslx_L${L}`), false);
         }
 
         // 多周期叠加(/tv/overlays):高级别 CL 跑出的中枢/走势类型。**缓存**
