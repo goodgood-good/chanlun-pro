@@ -217,15 +217,14 @@ const ChartUtils = {
         return this.createShape(chart, zs.points, { shape: "rectangle", overrides: { linestyle: parseInt(zs.linestyle) || 0, linewidth, linecolor: color, backgroundColor: color, transparency, color, "trendline.linecolor": color, fillBackground: true, filled: true, ...options.overrides }, ...options });
     },
     createZslxShape(chart, zslx, options = {}) {
-        // 走势类型区间(③ xd_zslx) —— 用 **粗虚线空心矩形** 表「上涨/下跌/盘整」
-        // 区间。与中枢矩形区分:
-        //   - 中枢矩形是半透明填充,会盖在 K 线上;
-        //   - 走势类型只画边框、不填背景,避免与中枢/笔/段视觉冲突;
-        //   - 边框用 dashed/dotted 虚线 + 粗线宽,远看就能识别区间范围。
+        // 走势类型区间(③ xd_zslx) —— 用 **半透明背景 + 粗虚线边框** 让用户
+        // 肉眼能看出区间范围。早期版本用 transparency=100 空心矩形,像素 diff
+        // 只有 0.23% 用户感知不到「toggle 有效果」——加 transparency=70 让
+        // 背景有可见色调,既可见又不严重遮挡 K 线/中枢矩形。
         let color = CHART_CONFIG.COLORS.ZSLX_ZHENGLI;
         if (zslx.direction === "up") color = CHART_CONFIG.COLORS.ZSLX_UP;
         else if (zslx.direction === "down") color = CHART_CONFIG.COLORS.ZSLX_DOWN;
-        return this.createShape(chart, zslx.points, { shape: "rectangle", overrides: { linestyle: 2, linewidth: 3, linecolor: color, backgroundColor: color, transparency: 100, fillBackground: false, filled: false, color, "trendline.linecolor": color, ...options.overrides }, ...options });
+        return this.createShape(chart, zslx.points, { shape: "rectangle", overrides: { linestyle: 2, linewidth: 3, linecolor: color, backgroundColor: color, transparency: 70, fillBackground: true, filled: true, color, "trendline.linecolor": color, ...options.overrides }, ...options });
     },
     createRecursiveZsShape(chart, zs, options = {}) {
         // 递归层级中枢(④ L1+) —— 用包络区间(GG/DD)矩形,与 L0 ZS/ZD 核心区
@@ -984,8 +983,8 @@ class ChartManager {
                         </div>
                         <hr style="margin: 5px 0;">
                         <div style="font-size: 12px; color: #666; margin-bottom: 4px;">原文化新增</div>
-                        <label style="display:block; cursor:pointer;" title="切换 symbol 或刷新页面后生效"><input type="checkbox" id="${cbId('zs_direction')}" ${cfg.zs_direction ? 'checked' : ''} style="margin-right: 8px; vertical-align: middle;"> 中枢方向着色 <span style="color:#999;font-size:11px;">(切换 symbol 生效)</span></label>
-                        <label style="display:block; cursor:pointer;" title="切换 symbol 或刷新页面后生效"><input type="checkbox" id="${cbId('zs_expanded')}" ${cfg.zs_expanded ? 'checked' : ''} style="margin-right: 8px; vertical-align: middle;"> 扩展中枢加粗 <span style="color:#999;font-size:11px;">(切换 symbol 生效)</span></label>
+                        <label style="display:block; cursor:pointer;"><input type="checkbox" id="${cbId('zs_direction')}" ${cfg.zs_direction ? 'checked' : ''} style="margin-right: 8px; vertical-align: middle;"> 中枢方向着色</label>
+                        <label style="display:block; cursor:pointer;"><input type="checkbox" id="${cbId('zs_expanded')}" ${cfg.zs_expanded ? 'checked' : ''} style="margin-right: 8px; vertical-align: middle;"> 扩展中枢加粗</label>
                         <label style="display:block; cursor:pointer;"><input type="checkbox" id="${cbId('xd_zslx')}" ${cfg.xd_zslx ? 'checked' : ''} style="margin-right: 8px; vertical-align: middle;"> 走势类型区间</label>
                         <label style="display:block; cursor:pointer;"><input type="checkbox" id="${cbId('recursive_levels')}" ${cfg.recursive_levels ? 'checked' : ''} style="margin-right: 8px; vertical-align: middle;"> 递归层级 L1+</label>
                         <label style="display:block; cursor:pointer;"><input type="checkbox" id="${cbId('interval_nest')}" ${cfg.interval_nest ? 'checked' : ''} style="margin-right: 8px; vertical-align: middle;"> 区间套</label>
@@ -1039,15 +1038,13 @@ class ChartManager {
                     'zs_direction', 'zs_expanded', 'xd_zslx',
                     'recursive_levels', 'interval_nest', 'overlay_freqs',
                 ];
-                // 样式型 toggle(zs_direction / zs_expanded)只改色/粗细,
-                // TV widget 公开 API 没有 in-place setProperties——要改颜色必须
-                // remove + recreate 整个 shape。强制清空 container 等待
-                // debouncedDrawChanlun(300ms)重建会产生「消失→等待→出现」
-                // 闪烁,体验差。
-                // 折中:样式型 toggle 仅记录 cfg,下次 symbol/interval 切换
-                // 或刷新页面时生效;数据型 toggle(显示/隐藏)走 reconcile 删/加
-                // shape,行为正确无闪烁。
+                // 样式型 toggle(zs_direction / zs_expanded):TV widget 公开 API
+                // 没有 in-place setProperties,改颜色/线宽只能 remove + recreate
+                // 整个 shape。同帧内 safeRemove + 立即调 draw_chanlun(不走
+                // debounce 300ms 等待)能把视觉空白窗压缩到 ~50ms,远比 debounce
+                // 路径(300ms 全空白)流畅;且用户视角能看到 toggle 即时生效。
                 const STYLE_TOGGLE_KEYS = new Set(['zs_direction', 'zs_expanded']);
+                const STYLE_AFFECTED_CONTAINERS = ['bi_zss', 'xd_zss', 'recursive_zss_L1', 'recursive_zss_L2', 'recursive_zss_L3'];
                 keys.forEach(k => {
                     $('#' + cbId(k)).change(function () {
                         const checked = $(this).is(':checked');
@@ -1055,9 +1052,20 @@ class ChartManager {
                         saveClShowConfig(self.id, self.cl_show_config);
                         console.log(`[cl_show_config] toggle ${k}=${checked}`);
                         if (STYLE_TOGGLE_KEYS.has(k)) {
-                            // 仅 cfg 记录,不重绘——避免闪烁。下次 symbol/interval
-                            // 切换或刷新页面时新 shape 按新 cfg 生效。
-                            console.log(`[cl_show_config]   (样式型 toggle,需切换 symbol 或刷新页面生效)`);
+                            // 样式型:清空守卫 + 立即清空受影响 container,
+                            // 跳过 debounce 等待立即调 draw_chanlun 重建 shape。
+                            STYLE_AFFECTED_CONTAINERS.forEach(t => {
+                                const guardKey = `${self.widget?.symbolInterval?.()?.symbol}_${self.widget?.symbolInterval?.()?.interval}__${t}`;
+                                if (self._reconcileGuard) delete self._reconcileGuard[guardKey];
+                                Object.keys(self.obj_charts || {}).forEach(sk => {
+                                    const container = self.obj_charts[sk]?.[t];
+                                    if (!container || container.length === 0) return;
+                                    container.forEach(item => self.safeRemove(item.id));
+                                    container.length = 0;
+                                });
+                            });
+                            // 同帧 setTimeout(0) 调度立即 redraw,不等 300ms debounce
+                            setTimeout(() => self.draw_chanlun(), 0);
                             return;
                         }
                         self.debouncedDrawChanlun();
