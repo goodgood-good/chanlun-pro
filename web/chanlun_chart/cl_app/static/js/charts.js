@@ -13,6 +13,7 @@ const CL_SHOW_DEFAULT = {
     xd_zslx: true,             // ③ 线段级走势类型区间(半透明矩形)
     recursive_levels: true,    // ④ 递归 L1+ 高级中枢与走势类型
     interval_nest: true,       // 区间套链 flags + 精确转折点
+    overlay_freqs: true,       // 多周期叠加(高级别独立 CL 跑出的中枢/走势类型)
 };
 
 // 各市场的 TV 显示时区，与后端 services/constants.py:market_timezone 保持一致。
@@ -110,6 +111,10 @@ const CHART_CONFIG = {
         RECURSIVE_L1: "#7E57C2", RECURSIVE_L2: "#4A148C", RECURSIVE_L3: "#311B92",
         // 区间套(原文第三章·第六节):链路灰、转折点高亮
         INTERVAL_NEST_LINK: "#9E9E9E", INTERVAL_NEST_TP: "#FF6F00",
+        // 多周期叠加(高级别独立 CL 跑出的中枢) —— 与递归层级紫色梯度区分,
+        // 用橙黄→红色梯度,级别越高色越深(与 K 线本身不冲突)。
+        OVERLAY_L1: "#FFA726", OVERLAY_L2: "#F4511E", OVERLAY_L3: "#BF360C",
+        OVERLAY_ZSLX_L1: "#FFCC80", OVERLAY_ZSLX_L2: "#FFAB91", OVERLAY_ZSLX_L3: "#FF8A65",
     },
     LINE_STYLES: { SOLID: 0, DOTTED: 1, DASHED: 2 },
     CHART_TYPES: [
@@ -120,6 +125,10 @@ const CHART_CONFIG = {
         "xd_zslx", "recursive_zss_L1", "recursive_zss_L2", "recursive_zss_L3",
         "recursive_zslxs_L1", "recursive_zslxs_L2", "recursive_zslxs_L3",
         "interval_nest_links", "interval_nest_tp",
+        // 多周期叠加(/tv/overlays):高级别独立 CL 跑出的中枢/走势类型,
+        // 6 个 freq 槽位覆盖常见 5m/30m/60m/1D/1W/1M。
+        "overlay_zss_1", "overlay_zss_2", "overlay_zss_3",
+        "overlay_zslxs_1", "overlay_zslxs_2", "overlay_zslxs_3",
     ],
 };
 
@@ -231,6 +240,28 @@ const ChartUtils = {
         const linewidth = 2 + (options.level || 1);     // 级别越高线越粗
         const transparency = zs.is_expanded ? 70 : 92;
         return this.createShape(chart, zs.points, { shape: "rectangle", overrides: { linestyle: parseInt(zs.linestyle) || 0, linewidth, linecolor: color, backgroundColor: color, transparency, color, "trendline.linecolor": color, fillBackground: true, filled: true, ...options.overrides }, ...options });
+    },
+    createOverlayZsShape(chart, zs, options = {}) {
+        // 多周期叠加中枢(高级别周期独立 CL 产出):粗实线边框 + 透明填充,
+        // 与 L0 线段中枢半透明色块、与 L1+ 递归紫色矩形 在色调上区分。
+        const levelColors = {
+            1: CHART_CONFIG.COLORS.OVERLAY_L1,
+            2: CHART_CONFIG.COLORS.OVERLAY_L2,
+            3: CHART_CONFIG.COLORS.OVERLAY_L3,
+        };
+        const color = levelColors[options.level] || CHART_CONFIG.COLORS.OVERLAY_L1;
+        const linewidth = 2 + (options.level || 1);
+        return this.createShape(chart, zs.points, { shape: "rectangle", overrides: { linestyle: parseInt(zs.linestyle) || 0, linewidth, linecolor: color, backgroundColor: color, transparency: 85, color, "trendline.linecolor": color, fillBackground: true, filled: true, ...options.overrides }, ...options });
+    },
+    createOverlayZslxShape(chart, zslx, options = {}) {
+        // 多周期叠加走势类型:粗虚线空心矩形,与中枢边框区分。
+        const levelColors = {
+            1: CHART_CONFIG.COLORS.OVERLAY_ZSLX_L1,
+            2: CHART_CONFIG.COLORS.OVERLAY_ZSLX_L2,
+            3: CHART_CONFIG.COLORS.OVERLAY_ZSLX_L3,
+        };
+        const color = levelColors[options.level] || CHART_CONFIG.COLORS.OVERLAY_ZSLX_L1;
+        return this.createShape(chart, zslx.points, { shape: "rectangle", overrides: { linestyle: 2, linewidth: 2, linecolor: color, backgroundColor: color, transparency: 100, fillBackground: false, filled: false, color, "trendline.linecolor": color, ...options.overrides }, ...options });
     },
     createIntervalNestLinkShape(chart, link, options = {}) {
         // 区间套·一重:在该重背驰段终点处画 flag,标注 ``L{level}`` 与是否真背驰。
@@ -956,6 +987,7 @@ class ChartManager {
                         <label style="display:block; cursor:pointer;"><input type="checkbox" id="${cbId('xd_zslx')}" ${cfg.xd_zslx ? 'checked' : ''} style="margin-right: 8px; vertical-align: middle;"> 走势类型区间</label>
                         <label style="display:block; cursor:pointer;"><input type="checkbox" id="${cbId('recursive_levels')}" ${cfg.recursive_levels ? 'checked' : ''} style="margin-right: 8px; vertical-align: middle;"> 递归层级 L1+</label>
                         <label style="display:block; cursor:pointer;"><input type="checkbox" id="${cbId('interval_nest')}" ${cfg.interval_nest ? 'checked' : ''} style="margin-right: 8px; vertical-align: middle;"> 区间套</label>
+                        <label style="display:block; cursor:pointer;"><input type="checkbox" id="${cbId('overlay_freqs')}" ${cfg.overlay_freqs ? 'checked' : ''} style="margin-right: 8px; vertical-align: middle;"> 多周期叠加(${_lbl(1)}/${_lbl(2)}/${_lbl(3)})</label>
                         <hr style="margin: 5px 0;">
                         <label style="display:block; cursor:pointer;"><input type="checkbox" id="${indCbId}" ${self.cl_independent_drawings ? 'checked' : ''} style="margin-right: 8px; vertical-align: middle;"> 独立周期画线</label>
                     </div>
@@ -1003,7 +1035,7 @@ class ChartManager {
                     // 笔/段独立级别开关
                     'mmd_bi', 'mmd_xd', 'bc_bi', 'bc_xd',
                     'zs_direction', 'zs_expanded', 'xd_zslx',
-                    'recursive_levels', 'interval_nest',
+                    'recursive_levels', 'interval_nest', 'overlay_freqs',
                 ];
                 // 「样式型 toggle」: cfg 变化但 makeKey/sourceList 不变,
                 // reconcile 早期 return short-circuit。这类 toggle 需清守卫
@@ -1564,6 +1596,45 @@ class ChartManager {
             const lv = recLevels.find((x) => x.level === L);
             this.reconcile(`recursive_zss_L${L}`, lv ? lv.zss : [], from, symbolKey, (item) => safeCreate(ChartUtils.createRecursiveZsShape(this.chart, item, { level: L }), `rec_zs_L${L}`));
             this.reconcile(`recursive_zslxs_L${L}`, lv ? lv.zslxs : [], from, symbolKey, (item) => safeCreate(ChartUtils.createZslxShape(this.chart, item, { overrides: { transparency: 88 } }), `rec_zslx_L${L}`), false);
+        }
+
+        // 多周期叠加(/tv/overlays):高级别周期独立 CL 跑出的中枢/走势类型。
+        // 异步 fetch + 拿到后填入对应 container,reconcile 自动 add/remove。
+        if (cfg.overlay_freqs !== false) {
+            const si = this.widget?.symbolInterval?.();
+            const sym = si?.symbol; const intv = si?.interval;
+            if (sym && intv) {
+                fetch(`/tv/overlays?symbol=${encodeURIComponent(sym)}&interval=${encodeURIComponent(intv)}`, { cache: 'no-store' })
+                    .then(r => r.ok ? r.json() : { overlays: {} })
+                    .then(data => {
+                        const overlays = data.overlays || {};
+                        const freqs = Object.keys(overlays).slice(0, 3);   // 最多 3 个 slot
+                        // 用 from=0 绕过 reconcile 内 ``headTime >= from`` 时间窗过滤——
+                        // overlay 是高级别中枢/走势类型,起点常远早于当前可视窗,严格
+                        // 过滤会让所有 overlay 都被丢弃。改用 from=0 不过滤任何 item。
+                        freqs.forEach((freq, idx) => {
+                            const level = idx + 1;
+                            const od = overlays[freq] || {};
+                            this.reconcile(`overlay_zss_${level}`, od.xd_zss || [], 0, symbolKey,
+                                (item) => safeCreate(ChartUtils.createOverlayZsShape(this.chart, item, { level }), `ovz${level}`));
+                            this.reconcile(`overlay_zslxs_${level}`, od.xd_zslx || [], 0, symbolKey,
+                                (item) => safeCreate(ChartUtils.createOverlayZslxShape(this.chart, item, { level }), `ovx${level}`), false);
+                        });
+                        // 多余 slot 清空(若上次 freq 多、这次少)
+                        for (let lv = freqs.length + 1; lv <= 3; lv++) {
+                            this.reconcile(`overlay_zss_${lv}`, [], 0, symbolKey, () => null);
+                            this.reconcile(`overlay_zslxs_${lv}`, [], 0, symbolKey, () => null, false);
+                        }
+                        console.log(`[overlay] freqs=${freqs.join(',')} zss=${freqs.map(f => (overlays[f].xd_zss||[]).length).join('/')} zslx=${freqs.map(f => (overlays[f].xd_zslx||[]).length).join('/')}`);
+                    })
+                    .catch(e => console.warn(`[overlay] fetch failed:`, e));
+            }
+        } else {
+            // toggle 关:清空所有 overlay container
+            for (let lv = 1; lv <= 3; lv++) {
+                this.reconcile(`overlay_zss_${lv}`, [], from, symbolKey, () => null);
+                this.reconcile(`overlay_zslxs_${lv}`, [], from, symbolKey, () => null, false);
+            }
         }
 
         // 区间套 —— 链路 flags + 精确转折点 marker。reconcile.makeKey 依赖

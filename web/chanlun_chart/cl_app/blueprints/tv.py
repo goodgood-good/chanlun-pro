@@ -1228,3 +1228,139 @@ def tv_drawings(version):
             "status": "ok",
             "data": {},
         }
+
+# ---------------------------------------------------------------------------
+# 多周期叠加 (overlay):在当前周期图上叠加高级别周期的中枢/走势类型
+# ---------------------------------------------------------------------------
+
+# 当前 TV interval → 自动叠加哪些高级别 frequency(内部名)
+# 设计原则:每次默认叠加 2-3 个高一档,既能看清"多级别联立"又控制性能。
+_AUTO_OVERLAY_FREQS = {
+    "1":   ["5m", "30m", "d"],
+    "3":   ["15m", "60m", "d"],
+    "5":   ["30m", "d", "w"],
+    "10":  ["60m", "d", "w"],
+    "15":  ["60m", "d", "w"],
+    "30":  ["d", "w"],
+    "60":  ["d", "w"],
+    "1D":  ["w", "m"],
+    "1W":  ["m"],
+}
+
+
+def _serialize_overlay_zss(cd) -> list:
+    """从一个 overlay CL 对象提取 xd_zss 序列化为 chart 用 dict。"""
+    out = []
+    try:
+        zss = cd.get_xd_zss()
+    except Exception:
+        return out
+    for zs in zss:
+        try:
+            start_date = zs.start.end.k.date if zs.start else zs.lines[0].start.k.date
+            end_date = zs.end.start.k.date if zs.end else zs.lines[-1].end.k.date
+            out.append({
+                "points": [
+                    {"time": fun.datetime_to_int(start_date), "price": zs.zg},
+                    {"time": fun.datetime_to_int(end_date), "price": zs.zd},
+                ],
+                "linestyle": "0" if zs.done else "1",
+                "type": zs.type,
+                "is_expanded": bool(getattr(zs, "expanded_with", [])),
+                "sub_count": len(getattr(zs, "expanded_with", []) or []),
+            })
+        except Exception:
+            continue
+    return out
+
+
+def _serialize_overlay_zslx(cd) -> list:
+    out = []
+    try:
+        zslxs = cd.get_xd_zslx() or []
+    except Exception:
+        return out
+    for zslx in zslxs:
+        try:
+            if not zslx.zss:
+                continue
+            first_zs, last_zs = zslx.zss[0], zslx.zss[-1]
+            start_date = first_zs.start.end.k.date if first_zs.start else first_zs.lines[0].start.k.date
+            end_date = last_zs.end.start.k.date if last_zs.end else last_zs.lines[-1].end.k.date
+            out.append({
+                "points": [
+                    {"time": fun.datetime_to_int(start_date),
+                     "price": max(z.gg for z in zslx.zss)},
+                    {"time": fun.datetime_to_int(end_date),
+                     "price": min(z.dd for z in zslx.zss)},
+                ],
+                "zslx_type": zslx.zslx_type,
+                "direction": zslx.type,
+                "done": bool(zslx.done),
+                "zss_count": len(zslx.zss),
+            })
+        except Exception:
+            continue
+    return out
+
+
+@tv_bp.route("/tv/overlays")
+@login_required
+def tv_overlays():
+    """多周期叠加 endpoint:在当前 interval 图表上,返回若干高级别周期的
+    中枢与走势类型(序列化为 TV chart shape 数据)。
+
+    Query params:
+        symbol:   TV symbol(如 ``a:SH.000001``)
+        interval: 当前 TV interval(``1``/``5``/``30``/``1D``...)
+        overlays: 可选,逗号分隔的目标 frequency(内部名,如 ``5m,30m,d``);
+                  缺省走 ``_AUTO_OVERLAY_FREQS`` 映射。
+
+    Response:
+        ``{"overlays": {"5m": {"xd_zss": [...], "xd_zslx": [...]},
+                        "30m": {...}, ...}, "current_interval": "1"}``
+        失败/无数据时对应 freq 缺失或为空数组。
+    """
+    symbol = request.args.get("symbol", "")
+    interval = request.args.get("interval", "")
+    overlays_param = (request.args.get("overlays", "") or "").strip()
+
+    market, code = _parse_tv_symbol(symbol)
+    if market is None or code is None:
+        return {"overlays": {}, "current_interval": interval, "error": "invalid_symbol"}
+
+    # 解析目标 overlay frequencies
+    if overlays_param:
+        overlay_freqs = [f.strip() for f in overlays_param.split(",") if f.strip()]
+    else:
+        overlay_freqs = list(_AUTO_OVERLAY_FREQS.get(interval, []))
+
+    if not overlay_freqs:
+        return {"overlays": {}, "current_interval": interval}
+
+    cl_config = query_cl_chart_config(market, code)
+
+    try:
+        ex = get_exchange(Market(market))
+    except Exception as e:
+        return {"overlays": {}, "current_interval": interval, "error": f"exchange_init: {e}"}
+
+    out = {}
+    for freq in overlay_freqs:
+        try:
+            klines = ex.klines(code, freq)
+            if klines is None or len(klines) == 0:
+                continue
+            cds = web_batch_get_cl_datas(market, code, {freq: klines}, cl_config)
+            if not cds:
+                continue
+            cd = cds[0]
+            out[freq] = {
+                "xd_zss": _serialize_overlay_zss(cd),
+                "xd_zslx": _serialize_overlay_zslx(cd),
+            }
+        except Exception as e:
+            LogUtil.warning(f"[tv_overlays] symbol={symbol} freq={freq} err={e}")
+            continue
+
+    return {"overlays": out, "current_interval": interval}
