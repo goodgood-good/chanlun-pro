@@ -167,7 +167,7 @@ def recompute_chart_data_from_klines(
     from chanlun.core.cl import CL
     from chanlun.cl_utils import cl_data_to_tv_chart
 
-    cd = CL(code, frequency, dict(cl_config))
+    cd = CL(code, frequency, dict(cl_config), market=market)
     cd.process_klines(klines)
     return cl_data_to_tv_chart(cd, cl_config, to_frequency=to_frequency)
 
