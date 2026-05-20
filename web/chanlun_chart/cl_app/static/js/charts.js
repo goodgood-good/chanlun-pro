@@ -1736,6 +1736,14 @@ var Charts = (function () {
     return {
         show_tv_chart: function (id) {
             const chartManager = new ChartManager(id).init();
+            // 调试钩子:把每个 ChartManager 实例存到 window.__cm[id],
+            // 便于 Playwright/DevTools 直接 inspect cl_show_config / obj_charts。
+            // 生产无害——挂在 window 不影响业务逻辑;若担心暴露面,可改为
+            // 仅当 ``window.__chanlunDebug=true`` 时挂。
+            try {
+                if (!window.__cm) window.__cm = {};
+                window.__cm[id] = chartManager;
+            } catch (e) { /* ignore */ }
             return chartManager.widget;
         },
     };

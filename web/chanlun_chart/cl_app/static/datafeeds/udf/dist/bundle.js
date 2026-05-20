@@ -302,6 +302,16 @@
                         xd_zss: response.xd_zss,
                         bcs: response.bcs,
                         mmds: response.mmds,
+                        // 原文化新增字段(笔/段层独立买卖点/背驰、走势类型、递归层级、区间套):
+                        // 老 bundle 丢字段是用户「toggle 不生效 / 新内容看不见」的根因——
+                        // tv.py 透传 OK,但 datafeed 在前端解析响应时显式枚举丢弃新字段。
+                        bi_mmds: response.bi_mmds,
+                        xd_mmds: response.xd_mmds,
+                        bi_bcs: response.bi_bcs,
+                        xd_bcs: response.xd_bcs,
+                        xd_zslx: response.xd_zslx,
+                        recursive_levels: response.recursive_levels,
+                        interval_nest: response.interval_nest,
                         chart_color: response.chart_color,
                     });
                     this._pruneBarsResult();
@@ -394,6 +404,17 @@
                     obj_res.xd_zss = updateLineSegments(obj_res.xd_zss, response.xd_zss);
                     obj_res.bcs = updateTextPoints(obj_res.bcs, response.bcs);
                     obj_res.mmds = updateTextPoints(obj_res.mmds, response.mmds);
+                    // 原文化新增字段(同 set 分支)。增量合并:笔/段层 mmd/bc 是
+                    // 单点形态走 updateTextPoints;xd_zslx 是多点走 updateLineSegments;
+                    // recursive_levels / interval_nest 是嵌套结构,整体覆盖(后端
+                    // 每轮全量重算)。
+                    obj_res.bi_mmds = updateTextPoints(obj_res.bi_mmds || [], response.bi_mmds);
+                    obj_res.xd_mmds = updateTextPoints(obj_res.xd_mmds || [], response.xd_mmds);
+                    obj_res.bi_bcs = updateTextPoints(obj_res.bi_bcs || [], response.bi_bcs);
+                    obj_res.xd_bcs = updateTextPoints(obj_res.xd_bcs || [], response.xd_bcs);
+                    obj_res.xd_zslx = updateLineSegments(obj_res.xd_zslx || [], response.xd_zslx);
+                    obj_res.recursive_levels = response.recursive_levels;
+                    obj_res.interval_nest = response.interval_nest;
                     obj_res.chart_color = response.chart_color;
                     const oldTimes = obj_res.times || [];
                     const difObj = mergeAlignedArrays(oldTimes, obj_res.macd_dif, raw_times, macd_dif);

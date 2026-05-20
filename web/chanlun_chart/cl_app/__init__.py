@@ -1,4 +1,5 @@
 import datetime
+import os
 import pytz
 from apscheduler.events import (
     EVENT_ALL,
@@ -89,6 +90,10 @@ def create_app(test_config=None):
     _alert_tasks = AlertTasks(scheduler)
     _alert_tasks.run()
 
+    # 注册中枢-free 信号监控任务调度（signal_monitor 独立包，对原代码的唯一接线点）
+    from chanlun.signal_monitor.scheduler import register_signal_jobs
+    register_signal_jobs(scheduler)
+
     _xuangu_tasks = XuanguTasks(scheduler)
 
     # _other_tasks = OtherTasks(scheduler)
@@ -109,6 +114,27 @@ def create_app(test_config=None):
     app.config["WTF_CSRF_TIME_LIMIT"] = None
     from .csrf import csrf
     csrf.init_app(app)
+
+    # 静态资源 cache-bust:Tornado static handler 给所有 /static/* 加
+    # ``Cache-Control: max-age=31536000, immutable``,导致 charts.js / bundle.js
+    # 等核心前端文件被浏览器**永久缓存**——后端修了字段但前端永远拉不到新版本。
+    # 修法:在 Jinja2 模板里给 ``<script src>`` 加 ``?v={{ static_version }}``,
+    # static_version = 关键文件 mtime 的 short hash,文件变即 bust。
+    @app.context_processor
+    def inject_static_version():
+        import hashlib
+        files = [
+            os.path.join(app.static_folder, "js", "charts.js"),
+            os.path.join(app.static_folder, "datafeeds", "udf", "dist", "bundle.js"),
+        ]
+        h = hashlib.md5()
+        for f in files:
+            try:
+                h.update(str(os.path.getmtime(f)).encode())
+                h.update(str(os.path.getsize(f)).encode())
+            except OSError:
+                pass
+        return {"static_version": h.hexdigest()[:10]}
 
     login_manager = LoginManager()
     login_manager.init_app(app)
@@ -173,6 +199,7 @@ def create_app(test_config=None):
     from .blueprints.other import other_bp
     from .blueprints.options import options_bp
     from .blueprints.symbols import symbols_bp
+    from chanlun.signal_monitor.web import signal_compare_bp
 
     app.register_blueprint(zixuan_bp)
     app.register_blueprint(alert_bp)
@@ -183,6 +210,7 @@ def create_app(test_config=None):
     app.register_blueprint(other_bp)
     app.register_blueprint(options_bp)
     app.register_blueprint(symbols_bp)
+    app.register_blueprint(signal_compare_bp)
 
     # 共享对象存入 app.extensions，供蓝图访问
     app.extensions = getattr(app, "extensions", {})
