@@ -912,6 +912,10 @@ def tv_history():
             "xd_zss": cl_chart_data.get("xd_zss", []),
             "bcs": cl_chart_data.get("bcs", []),
             "mmds": cl_chart_data.get("mmds", []),
+            # 原文化新增(③④/区间套):走势类型区间 + 递归层级 + 区间套链
+            "xd_zslx": cl_chart_data.get("xd_zslx", []),
+            "recursive_levels": cl_chart_data.get("recursive_levels", []),
+            "interval_nest": cl_chart_data.get("interval_nest"),
             "update": False if firstDataRequest == "true" else True,
         }
     except Exception as e:

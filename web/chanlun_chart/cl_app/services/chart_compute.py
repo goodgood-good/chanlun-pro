@@ -241,8 +241,16 @@ def _merge_chart_data(existing_data: dict, new_data: dict):
             merged_col.append(val)
         merged[key] = merged_col
 
-    for key in ["fxs", "bis", "xds", "bi_zss", "xd_zss", "bcs", "mmds"]:
+    for key in ["fxs", "bis", "xds", "bi_zss", "xd_zss", "bcs", "mmds", "xd_zslx"]:
         merged[key] = _merge_shape_lists(existing_data.get(key, []), new_data.get(key, []))
+
+    # 递归层级树 / 区间套 —— 嵌套结构,不走 shape 合并;新值有则覆盖,否则保留旧值。
+    # 这两类是「全局视角」数据,通常在窗口移动时整体重算,直接 overwrite 安全。
+    for key in ("recursive_levels", "interval_nest"):
+        if key in new_data:
+            merged[key] = new_data[key]
+        elif key in existing_data:
+            merged[key] = existing_data[key]
 
     return merged
 
@@ -330,8 +338,10 @@ _CHART_ARRAY_FIELDS = (
     "higher_macd_dif", "higher_macd_dea", "higher_macd_hist",
 )
 
-# 形态字段 (笔/段/中枢/分型/背驰/买卖点) - 不是按 t 长度对齐, 走 filter_shapes_in_window
-_CHART_SHAPE_FIELDS = ("fxs", "bis", "xds", "bi_zss", "xd_zss", "bcs", "mmds")
+# 形态字段 (笔/段/中枢/分型/背驰/买卖点/走势类型) - 不是按 t 长度对齐, 走 filter_shapes_in_window。
+# 注:``recursive_levels`` 与 ``interval_nest`` 是嵌套结构(level/zss/zslxs 或
+# links/turning_point),不在此列——它们走整体透传,不按窗口过滤。
+_CHART_SHAPE_FIELDS = ("fxs", "bis", "xds", "bi_zss", "xd_zss", "bcs", "mmds", "xd_zslx")
 
 
 def filter_shapes_in_window(shapes, from_ts: int, to_ts: int) -> list:
@@ -396,6 +406,11 @@ def slice_chart_data_to_window(chart_data: dict, from_ts: int, to_ts: int) -> di
         sliced[field] = filter_shapes_in_window(
             chart_data.get(field, []) or [], from_ts, to_ts
         )
+    # 递归层级树 / 区间套是嵌套结构(不在 SHAPE_FIELDS,不按窗口裁切),整体透传。
+    # 高级中枢和区间套属「全局视角」,跨窗口仍应可见。
+    for field in ("recursive_levels", "interval_nest"):
+        if field in chart_data:
+            sliced[field] = chart_data[field]
     return sliced
 
 
@@ -430,6 +445,10 @@ def trim_future_bars(chart_data: dict, to_ts: int) -> dict:
     # 形态字段保持原样
     for field in _CHART_SHAPE_FIELDS:
         trimmed[field] = chart_data.get(field, []) or []
+    # 递归层级树 / 区间套整体透传(同 _slice_window 决策)。
+    for field in ("recursive_levels", "interval_nest"):
+        if field in chart_data:
+            trimmed[field] = chart_data[field]
     return trimmed
 
 

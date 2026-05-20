@@ -226,15 +226,17 @@ const ChartUtils = {
     },
     createIntervalNestLinkShape(chart, link, options = {}) {
         // 区间套·一重:在该重背驰段终点处画 flag,标注 ``L{level}`` 与是否真背驰。
+        // link 形态为 ``{points:{time,price}, level, is_beichi, direction, ...}``。
         const color = link.is_beichi ? CHART_CONFIG.COLORS.INTERVAL_NEST_LINK : CHART_CONFIG.COLORS.BCS;
         const label = `L${link.level}${link.is_beichi ? "✓" : "?"}`;
-        return this.createShape(chart, { time: link.time, price: link.price }, { shape: "flag", text: label, overrides: { markerColor: color, color, backgroundColor: color, transparency: 80, fontsize: 10, ...options.overrides }, ...options });
+        return this.createShape(chart, link.points, { shape: "flag", text: label, overrides: { markerColor: color, color, backgroundColor: color, transparency: 80, fontsize: 10, ...options.overrides }, ...options });
     },
     createIntervalNestTurningPointShape(chart, tp, options = {}) {
         // 区间套·转折点:最低重背驰段终分型,用大号高亮 icon 表「精确转折」。
+        // tp 形态为 ``{points:{time,price}, direction}``。
         const color = CHART_CONFIG.COLORS.INTERVAL_NEST_TP;
         const shape = options.direction === "up" ? "arrow_down" : "arrow_up";
-        return this.createShape(chart, tp, { shape, text: "区间套转折", overrides: { arrowColor: color, color, fontsize: 14, bold: true, ...options.overrides }, ...options });
+        return this.createShape(chart, tp.points, { shape, text: "区间套转折", overrides: { arrowColor: color, color, fontsize: 14, bold: true, ...options.overrides }, ...options });
     },
     createMmdShape(chart, mmd, options = {}) {
         const isBuy = mmd.text.includes("B");
@@ -1457,10 +1459,19 @@ class ChartManager {
             this.reconcile(`recursive_zslxs_L${L}`, lv ? lv.zslxs : [], from, symbolKey, (item) => safeCreate(ChartUtils.createZslxShape(this.chart, item, { overrides: { transparency: 88 } }), `rec_zslx_L${L}`), false);
         }
 
-        // 区间套 —— 链路 flags + 精确转折点 marker
+        // 区间套 —— 链路 flags + 精确转折点 marker。reconcile.makeKey 依赖
+        // item.points(单点形态用 ``{points:{time,price}}``,多点用 ``{points:[...]}``);
+        // 后端 inest.links / turning_point 是裸 {time,price},包装成 ``points`` 形态。
         const inest = (cfg.interval_nest !== false ? barsResult.interval_nest : null);
-        this.reconcile('interval_nest_links', inest ? inest.links : [], from, symbolKey, (item) => safeCreate(ChartUtils.createIntervalNestLinkShape(this.chart, item), 'inest_link'), false);
-        const tpItems = (inest && inest.turning_point) ? [{ time: inest.turning_point.time, price: inest.turning_point.price, direction: inest.direction }] : [];
+        const linksWrapped = (inest && inest.links ? inest.links : []).map(l => ({
+            ...l, points: { time: l.time, price: l.price }, text: `L${l.level}`,
+        }));
+        this.reconcile('interval_nest_links', linksWrapped, from, symbolKey, (item) => safeCreate(ChartUtils.createIntervalNestLinkShape(this.chart, item), 'inest_link'), false);
+        const tpItems = (inest && inest.turning_point) ? [{
+            points: { time: inest.turning_point.time, price: inest.turning_point.price },
+            direction: inest.direction,
+            text: "转折",
+        }] : [];
         this.reconcile('interval_nest_tp', tpItems, from, symbolKey, (item) => safeCreate(ChartUtils.createIntervalNestTurningPointShape(this.chart, item, { direction: item.direction }), 'inest_tp'), false);
 
         // 一轮 reconcile 完后扫一次孤儿,清理 race 残留(safeRemove 静默失败 / container 提前清零)。
