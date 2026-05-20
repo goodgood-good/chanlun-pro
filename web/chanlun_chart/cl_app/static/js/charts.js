@@ -980,6 +980,24 @@ class ChartManager {
                     $('#' + cbId(k)).change(function () {
                         self.cl_show_config[k] = $(this).is(':checked');
                         saveClShowConfig(self.id, self.cl_show_config);
+                        // 清 reconcile 守卫:样式型 toggle(如 zs_direction/zs_expanded)
+                        // 不改变 makeKey 的 time/price 签名,_reconcileGuard 会误判
+                        // "数据未变"早期 return,toggle 不生效。清守卫让 reconcile
+                        // 走完整 add/remove 流程、按新 cfg 重建所有 shape。
+                        self._reconcileGuard = {};
+                        // 同时清掉所有 owned shape,让 reconcile 完全从空容器重建。
+                        // 不这样的话 makeKey 命中的旧 shape 会被 toKeep 保留,
+                        // 样式 cfg 变了但 shape 没重创建——看起来 toggle 不生效。
+                        if (self.chart) {
+                            CHART_CONFIG.CHART_TYPES.forEach((type) => {
+                                Object.keys(self.obj_charts || {}).forEach((sk) => {
+                                    const container = self.obj_charts[sk] && self.obj_charts[sk][type];
+                                    if (!container || container.length === 0) return;
+                                    container.forEach((item) => self.safeRemove(item.id));
+                                    container.length = 0;
+                                });
+                            });
+                        }
                         self.debouncedDrawChanlun();
                     });
                 });
