@@ -961,41 +961,87 @@ class ChartManager {
                 const _chain = FREQ_CHAIN[_curInterval] || [_curInterval, "高一级", "高二级", "高三级"];
                 const _lbl = (i) => _chain[i] || `L+${i}`;
 
+                // 重组后的菜单:按「功能分组」组织 + 顶部级别映射默认折叠 +
+                // 底部「全选/全清」一键操作。比起原始扁平 14 项更易扫读,
+                // 减少新用户「原文化新增」等晦涩术语的认知负担。
+                const _cbRow = (k, label, indent) => `<label style="display:block; cursor:pointer; ${indent ? 'padding-left:14px; font-size:12px;' : ''}"><input type="checkbox" id="${cbId(k)}" ${cfg[k] ? 'checked' : ''} style="margin-right:6px; vertical-align:middle;">${label}</label>`;
+                const _grpTitle = (t) => `<div style="font-size:11px; color:#4a90e2; padding:5px 0 1px; font-weight:bold;">${t}</div>`;
+
                 let html = `
-                    <div id="${menuId}" style="position: absolute; z-index: 99999999; background: #fff; border: 1px solid #ccc; box-shadow: 0 2px 10px rgba(0,0,0,0.2); border-radius: 4px; padding: 10px; line-height: 28px; font-size: 14px; color: #333; min-width: 240px;">
-                        <div style="font-size: 11px; color: #888; line-height: 1.4em; padding-bottom: 6px; border-bottom: 1px dashed #ddd; margin-bottom: 4px;">
-                          当前周期: <b>${_curInterval}</b> · 缠论级别映射:<br>
-                          ⬛ 笔中枢 → <b>${_lbl(0)}</b>K线层<br>
-                          🟥/🟦/⬜ 线段中枢 → <b>${_lbl(1)}</b>(高一级中枢)<br>
-                          ░ 走势类型区间 → <b>${_lbl(1)}</b>走势类型<br>
-                          🟪 递归 L1 → <b>${_lbl(2)}</b>中枢/走势类型<br>
-                          🟪 递归 L2 → <b>${_lbl(3)}</b>中枢/走势类型
+                    <div id="${menuId}" style="position: absolute; z-index: 99999999; background: #fff; border: 1px solid #ccc; box-shadow: 0 2px 10px rgba(0,0,0,0.2); border-radius: 4px; padding: 10px; line-height: 22px; font-size: 13px; color: #333; min-width: 220px;">
+                        <div id="${menuId}_lvl_toggle" style="cursor:pointer; font-size:11px; color:#888; padding:1px 0; user-select:none;">
+                            <span id="${menuId}_lvl_arrow">▸</span> 级别映射 (当前周期: <b>${_curInterval}</b>)
                         </div>
-                        <label style="display:block; cursor:pointer;"><input type="checkbox" id="${cbId('fx')}" ${cfg.fx ? 'checked' : ''} style="margin-right: 8px; vertical-align: middle;"> 分型</label>
-                        <label style="display:block; cursor:pointer;"><input type="checkbox" id="${cbId('bi')}" ${cfg.bi ? 'checked' : ''} style="margin-right: 8px; vertical-align: middle;"> 笔</label>
-                        <label style="display:block; cursor:pointer;"><input type="checkbox" id="${cbId('xd')}" ${cfg.xd ? 'checked' : ''} style="margin-right: 8px; vertical-align: middle;"> 线段</label>
-                        <label style="display:block; cursor:pointer;"><input type="checkbox" id="${cbId('zs')}" ${cfg.zs ? 'checked' : ''} style="margin-right: 8px; vertical-align: middle;"> 中枢</label>
-                        <label style="display:block; cursor:pointer;"><input type="checkbox" id="${cbId('bc')}" ${cfg.bc ? 'checked' : ''} style="margin-right: 8px; vertical-align: middle;"> 背驰</label>
-                        <label style="display:block; cursor:pointer;"><input type="checkbox" id="${cbId('mmd')}" ${cfg.mmd ? 'checked' : ''} style="margin-right: 8px; vertical-align: middle;"> 买卖点(总开关)</label>
-                        <div style="padding-left: 16px; font-size: 12px;">
-                            <label style="display:block; cursor:pointer;"><input type="checkbox" id="${cbId('mmd_bi')}" ${cfg.mmd_bi ? 'checked' : ''} style="margin-right: 8px; vertical-align: middle;"> 笔层(小)</label>
-                            <label style="display:block; cursor:pointer;"><input type="checkbox" id="${cbId('mmd_xd')}" ${cfg.mmd_xd ? 'checked' : ''} style="margin-right: 8px; vertical-align: middle;"> 段层(大)</label>
-                            <label style="display:block; cursor:pointer;"><input type="checkbox" id="${cbId('bc_bi')}" ${cfg.bc_bi ? 'checked' : ''} style="margin-right: 8px; vertical-align: middle;"> 笔背驰</label>
-                            <label style="display:block; cursor:pointer;"><input type="checkbox" id="${cbId('bc_xd')}" ${cfg.bc_xd ? 'checked' : ''} style="margin-right: 8px; vertical-align: middle;"> 段背驰</label>
+                        <div id="${menuId}_lvl_detail" style="display:none; font-size:11px; color:#888; line-height:1.5em; padding:2px 0 4px 14px; border-left:2px solid #eee; margin:2px 0 4px 4px;">
+                            笔中枢 → <b>${_lbl(0)}</b>层<br>
+                            线段中枢 → <b>${_lbl(1)}</b>(高一级)<br>
+                            走势类型区间 → <b>${_lbl(1)}</b>走势<br>
+                            递归 L1 → <b>${_lbl(2)}</b><br>
+                            递归 L2 → <b>${_lbl(3)}</b>
                         </div>
-                        <hr style="margin: 5px 0;">
-                        <div style="font-size: 12px; color: #666; margin-bottom: 4px;">原文化新增</div>
-                        <label style="display:block; cursor:pointer;"><input type="checkbox" id="${cbId('zs_direction')}" ${cfg.zs_direction ? 'checked' : ''} style="margin-right: 8px; vertical-align: middle;"> 中枢方向着色</label>
-                        <label style="display:block; cursor:pointer;"><input type="checkbox" id="${cbId('zs_expanded')}" ${cfg.zs_expanded ? 'checked' : ''} style="margin-right: 8px; vertical-align: middle;"> 扩展中枢加粗</label>
-                        <label style="display:block; cursor:pointer;"><input type="checkbox" id="${cbId('xd_zslx')}" ${cfg.xd_zslx ? 'checked' : ''} style="margin-right: 8px; vertical-align: middle;"> 走势类型区间</label>
-                        <label style="display:block; cursor:pointer;"><input type="checkbox" id="${cbId('recursive_levels')}" ${cfg.recursive_levels ? 'checked' : ''} style="margin-right: 8px; vertical-align: middle;"> 递归层级 L1+</label>
-                        <label style="display:block; cursor:pointer;"><input type="checkbox" id="${cbId('interval_nest')}" ${cfg.interval_nest ? 'checked' : ''} style="margin-right: 8px; vertical-align: middle;"> 区间套</label>
-                        <label style="display:block; cursor:pointer;"><input type="checkbox" id="${cbId('overlay_freqs')}" ${cfg.overlay_freqs ? 'checked' : ''} style="margin-right: 8px; vertical-align: middle;"> 多周期叠加(${_lbl(1)}/${_lbl(2)}/${_lbl(3)})</label>
-                        <hr style="margin: 5px 0;">
-                        <label style="display:block; cursor:pointer;"><input type="checkbox" id="${indCbId}" ${self.cl_independent_drawings ? 'checked' : ''} style="margin-right: 8px; vertical-align: middle;"> 独立周期画线</label>
+
+                        ${_grpTitle('基础')}
+                        <div style="display:flex; gap:14px; font-size:12px;">
+                            <label style="cursor:pointer;"><input type="checkbox" id="${cbId('fx')}" ${cfg.fx ? 'checked' : ''} style="margin-right:4px; vertical-align:middle;">分型</label>
+                            <label style="cursor:pointer;"><input type="checkbox" id="${cbId('bi')}" ${cfg.bi ? 'checked' : ''} style="margin-right:4px; vertical-align:middle;">笔</label>
+                            <label style="cursor:pointer;"><input type="checkbox" id="${cbId('xd')}" ${cfg.xd ? 'checked' : ''} style="margin-right:4px; vertical-align:middle;">线段</label>
+                        </div>
+
+                        ${_grpTitle('中枢 / 走势')}
+                        ${_cbRow('zs', '中枢', false)}
+                        ${_cbRow('zs_direction', '中枢方向着色', true)}
+                        ${_cbRow('zs_expanded', '扩展中枢加粗', true)}
+                        ${_cbRow('xd_zslx', '走势类型区间 (L0)', false)}
+                        ${_cbRow('recursive_levels', '多级中枢/走势 (L1+)', false)}
+
+                        ${_grpTitle('买卖点')}
+                        ${_cbRow('mmd', '总开关', false)}
+                        <div style="padding-left:14px; font-size:12px; display:flex; gap:12px;">
+                            <label style="cursor:pointer;"><input type="checkbox" id="${cbId('mmd_bi')}" ${cfg.mmd_bi ? 'checked' : ''} style="margin-right:4px; vertical-align:middle;">笔层(小)</label>
+                            <label style="cursor:pointer;"><input type="checkbox" id="${cbId('mmd_xd')}" ${cfg.mmd_xd ? 'checked' : ''} style="margin-right:4px; vertical-align:middle;">段层(大)</label>
+                        </div>
+
+                        ${_grpTitle('背驰')}
+                        ${_cbRow('bc', '总开关', false)}
+                        <div style="padding-left:14px; font-size:12px; display:flex; gap:12px;">
+                            <label style="cursor:pointer;"><input type="checkbox" id="${cbId('bc_bi')}" ${cfg.bc_bi ? 'checked' : ''} style="margin-right:4px; vertical-align:middle;">笔背驰</label>
+                            <label style="cursor:pointer;"><input type="checkbox" id="${cbId('bc_xd')}" ${cfg.bc_xd ? 'checked' : ''} style="margin-right:4px; vertical-align:middle;">段背驰</label>
+                        </div>
+
+                        ${_grpTitle('高级')}
+                        ${_cbRow('interval_nest', '区间套', false)}
+                        ${_cbRow('overlay_freqs', `多周期叠加 (${_lbl(1)}/${_lbl(2)}/${_lbl(3)})`, false)}
+
+                        <hr style="margin:6px 0 4px;">
+                        <label style="display:block; cursor:pointer; font-size:12px;"><input type="checkbox" id="${indCbId}" ${self.cl_independent_drawings ? 'checked' : ''} style="margin-right:6px; vertical-align:middle;">独立周期画线</label>
+                        <div style="display:flex; gap:6px; padding-top:6px;">
+                            <button id="${menuId}_all" type="button" style="flex:1; font-size:11px; padding:3px 4px; cursor:pointer; border:1px solid #ccc; background:#f7f7f7; border-radius:3px;">全选</button>
+                            <button id="${menuId}_none" type="button" style="flex:1; font-size:11px; padding:3px 4px; cursor:pointer; border:1px solid #ccc; background:#f7f7f7; border-radius:3px;">全清</button>
+                        </div>
                     </div>
                 `;
                 $('body').append(html);
+
+                // 级别映射 折叠/展开
+                $('#' + menuId + '_lvl_toggle').on('click', function () {
+                    const $d = $('#' + menuId + '_lvl_detail');
+                    const $a = $('#' + menuId + '_lvl_arrow');
+                    if ($d.is(':visible')) { $d.hide(); $a.text('▸'); }
+                    else { $d.show(); $a.text('▾'); }
+                });
+                // 全选/全清:trigger change 让现有 toggle handler 走完整 cfg 保存 + redraw 流程
+                $('#' + menuId + '_all').on('click', function (e) {
+                    e.stopPropagation();
+                    $('#' + menuId + ' input[type="checkbox"]').each(function () {
+                        if (!this.checked) { this.checked = true; $(this).trigger('change'); }
+                    });
+                });
+                $('#' + menuId + '_none').on('click', function (e) {
+                    e.stopPropagation();
+                    $('#' + menuId + ' input[type="checkbox"]').each(function () {
+                        if (this.checked) { this.checked = false; $(this).trigger('change'); }
+                    });
+                });
 
                 // TV createButton() 创建的按钮在 widget 内部 iframe 里，
                 // getBoundingClientRect() 返回 iframe 内部坐标，需逐层累加 iframe 偏移
