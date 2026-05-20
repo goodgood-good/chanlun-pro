@@ -976,10 +976,43 @@ class ChartManager {
                     'zs_direction', 'zs_expanded', 'xd_zslx',
                     'recursive_levels', 'interval_nest',
                 ];
+                // 「样式型 toggle」: cfg 变化但 makeKey/sourceList 不变,
+                // reconcile 早期 return short-circuit。这类 toggle 需清守卫
+                // + 清掉受影响 container 的 shape,让下一次 drawChartElements
+                // 完整重建。
+                const STYLE_TOGGLE_KEYS = new Set([
+                    'zs_direction', 'zs_expanded',
+                ]);
+                // 「容器映射」: 哪些 cfg key 影响哪些 obj_charts container。
+                // STYLE_TOGGLE 时清空对应 container 强制重建。
+                const TOGGLE_TO_CONTAINERS = {
+                    zs_direction: ['bi_zss', 'xd_zss', 'recursive_zss_L1', 'recursive_zss_L2', 'recursive_zss_L3'],
+                    zs_expanded:  ['bi_zss', 'xd_zss', 'recursive_zss_L1', 'recursive_zss_L2', 'recursive_zss_L3'],
+                };
                 keys.forEach(k => {
                     $('#' + cbId(k)).change(function () {
-                        self.cl_show_config[k] = $(this).is(':checked');
+                        const checked = $(this).is(':checked');
+                        self.cl_show_config[k] = checked;
                         saveClShowConfig(self.id, self.cl_show_config);
+                        console.log(`[cl_show_config] toggle ${k}=${checked}`);
+
+                        if (STYLE_TOGGLE_KEYS.has(k)) {
+                            // 样式型:reconcile 的 makeKey 只看 time+price,
+                            // 颜色/线宽/标签变化无法触发 rebuild。清守卫 +
+                            // 清空受影响 container 的 shape,下一帧重建。
+                            const targets = TOGGLE_TO_CONTAINERS[k] || [];
+                            targets.forEach(t => {
+                                const guardKey = `${self.widget?.symbolInterval?.()?.symbol}_${self.widget?.symbolInterval?.()?.interval}__${t}`;
+                                if (self._reconcileGuard) delete self._reconcileGuard[guardKey];
+                                Object.keys(self.obj_charts || {}).forEach(sk => {
+                                    const container = self.obj_charts[sk]?.[t];
+                                    if (!container || container.length === 0) return;
+                                    console.log(`[cl_show_config]   rebuild ${t}: clear ${container.length} shapes`);
+                                    container.forEach(item => self.safeRemove(item.id));
+                                    container.length = 0;
+                                });
+                            });
+                        }
                         self.debouncedDrawChanlun();
                     });
                 });
