@@ -1595,7 +1595,10 @@ class ChartManager {
         }
 
         // ③ 走势类型(xd_zslx) —— 半透明矩形区间标记上涨/下跌/盘整
-        this.reconcile('xd_zslx', cfg.xd_zslx !== false ? (barsResult.xd_zslx || []) : [], from, symbolKey, (item) => safeCreate(ChartUtils.createZslxShape(this.chart, item), 'xd_zslx'), false);
+        // 与 L1+ 一致用 from=0:xd_zslx 也常跨越可视窗,若按 head_time 过滤会出现
+        // 切到 symbol 时初始可视窗收窄 head_time<from 直接全过滤的隐患
+        // (recursive L1+ 已踩此坑,见 commit de5bbab)。
+        this.reconcile('xd_zslx', cfg.xd_zslx !== false ? (barsResult.xd_zslx || []) : [], 0, symbolKey, (item) => safeCreate(ChartUtils.createZslxShape(this.chart, item), 'xd_zslx'), false);
 
         // ④ 递归层级树 —— L1/L2/L3 高级中枢与走势类型(L0 已在 xd_zss / xd_zslx)
         const recLevels = (cfg.recursive_levels !== false ? (barsResult.recursive_levels || []) : []);
