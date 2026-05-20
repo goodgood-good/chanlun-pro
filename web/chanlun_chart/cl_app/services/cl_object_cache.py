@@ -157,10 +157,18 @@ def _get_key_lock(key: str) -> threading.RLock:
         return lk
 
 
+# chart_data 序列化 schema 版本——每次后端 ``cl_data_to_tv_chart`` 输出结构
+# 变化(新增/重命名字段)递增此值,让现有 chart_data_cache / cl_object_cache 旧
+# 条目自动失效(key 前缀变了 → 全部 miss),无需手工清缓存。
+# v2(2026-05-20):新增 xd_zslx / recursive_levels / interval_nest;
+#                bi_zss/xd_zss 增 type / is_expanded / sub_count 字段。
+_CHART_DATA_SCHEMA_VERSION = "v2"
+
+
 def _build_cache_key(
     market: str, code: str, frequency: str, cl_config: Optional[Dict[str, Any]]
 ) -> str:
-    return f"{market}|{code}|{frequency}|{_hash_cl_config(cl_config)}"
+    return f"{_CHART_DATA_SCHEMA_VERSION}|{market}|{code}|{frequency}|{_hash_cl_config(cl_config)}"
 
 
 def get_or_compute_cl(
@@ -223,7 +231,7 @@ def get_or_compute_cl(
             _stats["incremental_extends"] += 1
         else:
             # ----- 路径 3: 全量重建 -----
-            cd = CL(code, frequency, dict(cl_config) if cl_config else {})
+            cd = CL(code, frequency, dict(cl_config) if cl_config else {}, market=market)
             cd.process_klines(klines)
             _stats["full_rebuilds"] += 1
 

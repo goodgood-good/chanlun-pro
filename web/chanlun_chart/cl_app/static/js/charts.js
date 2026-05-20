@@ -204,16 +204,20 @@ const ChartUtils = {
         return this.createShape(chart, zs.points, { shape: "rectangle", overrides: { linestyle: parseInt(zs.linestyle) || 0, linewidth, linecolor: color, backgroundColor: color, transparency, color, "trendline.linecolor": color, fillBackground: true, filled: true, ...options.overrides }, ...options });
     },
     createZslxShape(chart, zslx, options = {}) {
-        // 走势类型区间(③ xd_zslx) —— 用半透明矩形表「上涨/下跌/盘整」区间。
-        // 与中枢矩形区分:linestyle=2(虚线)、更高透明度、无边框填色。
+        // 走势类型区间(③ xd_zslx) —— 用 **粗虚线空心矩形** 表「上涨/下跌/盘整」
+        // 区间。与中枢矩形区分:
+        //   - 中枢矩形是半透明填充,会盖在 K 线上;
+        //   - 走势类型只画边框、不填背景,避免与中枢/笔/段视觉冲突;
+        //   - 边框用 dashed/dotted 虚线 + 粗线宽,远看就能识别区间范围。
         let color = CHART_CONFIG.COLORS.ZSLX_ZHENGLI;
         if (zslx.direction === "up") color = CHART_CONFIG.COLORS.ZSLX_UP;
         else if (zslx.direction === "down") color = CHART_CONFIG.COLORS.ZSLX_DOWN;
-        return this.createShape(chart, zslx.points, { shape: "rectangle", overrides: { linestyle: 2, linewidth: 1, linecolor: color, backgroundColor: color, transparency: 92, fillBackground: true, filled: true, ...options.overrides }, ...options });
+        return this.createShape(chart, zslx.points, { shape: "rectangle", overrides: { linestyle: 2, linewidth: 3, linecolor: color, backgroundColor: color, transparency: 100, fillBackground: false, filled: false, color, "trendline.linecolor": color, ...options.overrides }, ...options });
     },
     createRecursiveZsShape(chart, zs, options = {}) {
         // 递归层级中枢(④ L1+) —— 用包络区间(GG/DD)矩形,与 L0 ZS/ZD 核心区
         // 在几何上视觉分层。颜色按级别:L1=紫、L2=深紫、L3=深紫几乎黑。
+        // **粗实线边框 + 极淡半透明填充** —— 既能看到边界又不遮挡 L0 中枢。
         const levelColors = {
             1: CHART_CONFIG.COLORS.RECURSIVE_L1,
             2: CHART_CONFIG.COLORS.RECURSIVE_L2,
@@ -221,8 +225,8 @@ const ChartUtils = {
         };
         const color = levelColors[options.level] || CHART_CONFIG.COLORS.RECURSIVE_L1;
         const linewidth = 2 + (options.level || 1);     // 级别越高线越粗
-        const transparency = zs.is_expanded ? 75 : 88;
-        return this.createShape(chart, zs.points, { shape: "rectangle", overrides: { linestyle: parseInt(zs.linestyle) || 0, linewidth, linecolor: color, backgroundColor: color, transparency, fillBackground: true, filled: true, ...options.overrides }, ...options });
+        const transparency = zs.is_expanded ? 70 : 92;
+        return this.createShape(chart, zs.points, { shape: "rectangle", overrides: { linestyle: parseInt(zs.linestyle) || 0, linewidth, linecolor: color, backgroundColor: color, transparency, color, "trendline.linecolor": color, fillBackground: true, filled: true, ...options.overrides }, ...options });
     },
     createIntervalNestLinkShape(chart, link, options = {}) {
         // 区间套·一重:在该重背驰段终点处画 flag,标注 ``L{level}`` 与是否真背驰。
