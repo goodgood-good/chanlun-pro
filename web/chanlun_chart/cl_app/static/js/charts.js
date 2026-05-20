@@ -137,8 +137,15 @@ const DEFAULT_COLORS = {
     bi_zss: CHART_CONFIG.COLORS.BI_ZSS, xd_zss: CHART_CONFIG.COLORS.XD_ZSS,
 };
 
+// 着色规则(缠论原文工程口径):
+//   bis  = 当前周期笔色;
+//   xds  = 当前周期线段色 = **下一级周期的 bis 色**(原文「线段 = 高一级笔」);
+//   bi_zss = 当前周期笔中枢 = **当前周期 xds 色**(笔中枢就是当前周期线段层);
+//   xd_zss = 当前周期线段中枢 = **高一级周期 xds 色**(线段中枢 = 高一级走势类型)。
+// 历史 bug:``"1".bi_zss = "#FFFF55"`` 是孤立黄色,跟「bi_zss=当前 xds」破窗;
+//        现已修正为 "#9C27B0"(= 1m xds)。
 const DYNAMIC_CHART_COLORS = {
-    "1": { ...DEFAULT_COLORS, bis: "#DF8344", xds: "#9C27B0", xd_zss: "#4FADEA", bi_zss: "#FFFF55" },
+    "1": { ...DEFAULT_COLORS, bis: "#DF8344", xds: "#9C27B0", xd_zss: "#4FADEA", bi_zss: "#9C27B0" },
     "5": { ...DEFAULT_COLORS, bis: "#9C27B0", xds: "#4FADEA", xd_zss: "#EA3323", bi_zss: "#4FADEA" },
     "30": { ...DEFAULT_COLORS, bis: "#4FADEA", xds: "#EA3323", xd_zss: "#9FCE63", bi_zss: "#EA3323" },
     "1D": { ...DEFAULT_COLORS, bis: "#EA3323", xds: "#9FCE63", xd_zss: "#4274B1", bi_zss: "#9FCE63" },
@@ -146,11 +153,38 @@ const DYNAMIC_CHART_COLORS = {
     "1M": { ...DEFAULT_COLORS, bis: "#4274B1", xds: "#C638DD", xd_zss: "#5E813F", bi_zss: "#C638DD" },
 };
 
+// 周期递进链:当前 interval → 高一/二/三级 interval。
+// recursive L1+ 中枢、overlay 高级别中枢都按此 chain 取色。
+//   - recursive_L1 色 = chain[2](高二级) xds 色;
+//   - recursive_L2 色 = chain[3](高三级) xds 色;
+//   - overlay_L1   色 = chain[1](高一级) xds 色;
+//   - overlay_L2   色 = chain[2] xds 色;overlay_L3 = chain[3] xds 色。
+// chain 顶端的 1M 自循环兜底,避免 undefined。
+const FREQ_INTERVAL_CHAIN = {
+    "1":  ["1",  "5",  "30", "1D"],
+    "3":  ["3",  "15", "60", "1D"],
+    "5":  ["5",  "30", "1D", "1W"],
+    "10": ["10", "60", "1D", "1W"],
+    "15": ["15", "60", "1D", "1W"],
+    "30": ["30", "1D", "1W", "1M"],
+    "60": ["60", "1D", "1W", "1M"],
+    "1D": ["1D", "1W", "1M", "1M"],
+    "1W": ["1W", "1M", "1M", "1M"],
+    "1M": ["1M", "1M", "1M", "1M"],
+};
+
 function getDynamicColor(interval, elementType) {
     if (DYNAMIC_CHART_COLORS[interval] && DYNAMIC_CHART_COLORS[interval][elementType]) {
         return DYNAMIC_CHART_COLORS[interval][elementType];
     }
     return DEFAULT_COLORS[elementType] || "#FFFFFF";
+}
+
+// 沿 chain 取目标周期的 elementType 色。``offset=0`` 即当前周期。
+function chainColorAt(currentInterval, offset, elementType = "xds") {
+    const chain = FREQ_INTERVAL_CHAIN[currentInterval] || [currentInterval];
+    const idx = Math.min(Math.max(offset, 0), chain.length - 1);
+    return getDynamicColor(chain[idx], elementType);
 }
 
 function debounce(func, wait) {
@@ -228,38 +262,43 @@ const ChartUtils = {
     },
     createRecursiveZsShape(chart, zs, options = {}) {
         // 递归层级中枢(④ L1+) —— 用包络区间(GG/DD)矩形,与 L0 ZS/ZD 核心区
-        // 在几何上视觉分层。颜色按级别:L1=紫、L2=深紫、L3=深紫几乎黑。
-        // **粗实线边框 + 极淡半透明填充** —— 既能看到边界又不遮挡 L0 中枢。
+        // 在几何上视觉分层。**粗实线边框 + 极淡半透明填充** —— 既能看到边界又不遮挡 L0 中枢。
+        // 颜色:调用方通过 ``options.color`` 注入 chain xds 色(L1=高二级 xds、L2=高三级 xds),
+        // 让中枢色直接对应「图上看到的高级别线段色」,避免 hardcoded 紫色梯度跟周期失去关联。
+        // fallback 保留旧紫色梯度,供 options.color 缺省场景。
         const levelColors = {
             1: CHART_CONFIG.COLORS.RECURSIVE_L1,
             2: CHART_CONFIG.COLORS.RECURSIVE_L2,
             3: CHART_CONFIG.COLORS.RECURSIVE_L3,
         };
-        const color = levelColors[options.level] || CHART_CONFIG.COLORS.RECURSIVE_L1;
+        const color = options.color || levelColors[options.level] || CHART_CONFIG.COLORS.RECURSIVE_L1;
         const linewidth = 2 + (options.level || 1);     // 级别越高线越粗
         const transparency = zs.is_expanded ? 70 : 92;
         return this.createShape(chart, zs.points, { shape: "rectangle", overrides: { linestyle: parseInt(zs.linestyle) || 0, linewidth, linecolor: color, backgroundColor: color, transparency, color, "trendline.linecolor": color, fillBackground: true, filled: true, ...options.overrides }, ...options });
     },
     createOverlayZsShape(chart, zs, options = {}) {
         // 多周期叠加中枢(高级别周期独立 CL 产出):粗实线边框 + 透明填充,
-        // 与 L0 线段中枢半透明色块、与 L1+ 递归紫色矩形 在色调上区分。
+        // 颜色:调用方通过 ``options.color`` 注入 chain xds 色(level=N → chain[N] xds),
+        // 让叠加中枢颜色匹配其对应周期的「线段色」。fallback 保留旧橙红梯度。
         const levelColors = {
             1: CHART_CONFIG.COLORS.OVERLAY_L1,
             2: CHART_CONFIG.COLORS.OVERLAY_L2,
             3: CHART_CONFIG.COLORS.OVERLAY_L3,
         };
-        const color = levelColors[options.level] || CHART_CONFIG.COLORS.OVERLAY_L1;
+        const color = options.color || levelColors[options.level] || CHART_CONFIG.COLORS.OVERLAY_L1;
         const linewidth = 2 + (options.level || 1);
         return this.createShape(chart, zs.points, { shape: "rectangle", overrides: { linestyle: parseInt(zs.linestyle) || 0, linewidth, linecolor: color, backgroundColor: color, transparency: 85, color, "trendline.linecolor": color, fillBackground: true, filled: true, ...options.overrides }, ...options });
     },
     createOverlayZslxShape(chart, zslx, options = {}) {
         // 多周期叠加走势类型:粗虚线空心矩形,与中枢边框区分。
+        // 颜色:调用方通过 ``options.color`` 注入 chain xds 色(level=N → chain[N] xds);
+        // fallback 保留旧 OVERLAY_ZSLX 梯度。
         const levelColors = {
             1: CHART_CONFIG.COLORS.OVERLAY_ZSLX_L1,
             2: CHART_CONFIG.COLORS.OVERLAY_ZSLX_L2,
             3: CHART_CONFIG.COLORS.OVERLAY_ZSLX_L3,
         };
-        const color = levelColors[options.level] || CHART_CONFIG.COLORS.OVERLAY_ZSLX_L1;
+        const color = options.color || levelColors[options.level] || CHART_CONFIG.COLORS.OVERLAY_ZSLX_L1;
         return this.createShape(chart, zslx.points, { shape: "rectangle", overrides: { linestyle: 2, linewidth: 2, linecolor: color, backgroundColor: color, transparency: 100, fillBackground: false, filled: false, color, "trendline.linecolor": color, ...options.overrides }, ...options });
     },
     createIntervalNestLinkShape(chart, link, options = {}) {
@@ -1655,10 +1694,13 @@ class ChartManager {
         // ——传 from=0 让 reconcile 不按 head 过滤,否则一切到 symbol 就被全过滤、永远
         // 看不到 L1+ 多级别结构。代价是画外起点会被 createMultipointShape 接受;实测
         // rectangle 形态(中枢/zslx) 不会出现长斜线 snap 问题。
+        // L1 中枢 = chain[2](高二级)xds 色,L2 = chain[3] xds 色,L3 = chain 顶端 xds 色。
+        // 让用户在 K 线层看到的高级中枢矩形,颜色和 chain 上对应周期的「线段色」一致。
         for (let L = 1; L <= 3; L++) {
             const lv = recLevels.find((x) => x.level === L);
-            this.reconcile(`recursive_zss_L${L}`, lv ? lv.zss : [], 0, symbolKey, (item) => safeCreate(ChartUtils.createRecursiveZsShape(this.chart, item, { level: L }), `rec_zs_L${L}`));
-            this.reconcile(`recursive_zslxs_L${L}`, lv ? lv.zslxs : [], 0, symbolKey, (item) => safeCreate(ChartUtils.createZslxShape(this.chart, item, { overrides: { transparency: 88 } }), `rec_zslx_L${L}`), false);
+            const recColor = chainColorAt(currentInterval, L + 1, "xds");
+            this.reconcile(`recursive_zss_L${L}`, lv ? lv.zss : [], 0, symbolKey, (item) => safeCreate(ChartUtils.createRecursiveZsShape(this.chart, item, { level: L, color: recColor }), `rec_zs_L${L}`));
+            this.reconcile(`recursive_zslxs_L${L}`, lv ? lv.zslxs : [], 0, symbolKey, (item) => safeCreate(ChartUtils.createZslxShape(this.chart, item, { overrides: { transparency: 88, linecolor: recColor, backgroundColor: recColor, color: recColor, "trendline.linecolor": recColor } }), `rec_zslx_L${L}`), false);
         }
 
         // 多周期叠加(/tv/overlays):高级别 CL 跑出的中枢/走势类型。**缓存**
@@ -1671,10 +1713,12 @@ class ChartManager {
             freqs.forEach((freq, idx) => {
                 const level = idx + 1;
                 const od = overlays[freq] || {};
+                // overlay_zss/zslx level=N → 对应 chain[N] 周期 xds 色,跟那一级的「线段色」一致。
+                const ovColor = chainColorAt(currentInterval, level, "xds");
                 this.reconcile(`overlay_zss_${level}`, od.xd_zss || [], 0, symbolKey,
-                    (item) => safeCreate(ChartUtils.createOverlayZsShape(this.chart, item, { level }), `ovz${level}`));
+                    (item) => safeCreate(ChartUtils.createOverlayZsShape(this.chart, item, { level, color: ovColor }), `ovz${level}`));
                 this.reconcile(`overlay_zslxs_${level}`, od.xd_zslx || [], 0, symbolKey,
-                    (item) => safeCreate(ChartUtils.createOverlayZslxShape(this.chart, item, { level }), `ovx${level}`), false);
+                    (item) => safeCreate(ChartUtils.createOverlayZslxShape(this.chart, item, { level, color: ovColor }), `ovx${level}`), false);
             });
             for (let lv = freqs.length + 1; lv <= 3; lv++) {
                 this.reconcile(`overlay_zss_${lv}`, [], 0, symbolKey, () => null);
