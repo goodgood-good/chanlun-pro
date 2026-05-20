@@ -26,7 +26,11 @@ from typing import Mapping, Optional
 
 # 跨 exchange 统一回看天数 (与 commit 8d2ba0b 中 5 个 exchange 文件实际值对齐)
 _LOOKBACK_DAYS_RAW: dict[str, int] = {
-    "1m": 30,
+    # 1m 默认 365 天:让低周期能装出 L2/L3 多级递归层级(需要充足历史 K 线
+    # 累积出 ≥3 个 L0 走势类型才能装 L1,L1 ≥3 个走势类型才能装 L2)。
+    # 受限于上游数据源:QMT/Alpaca 等 1m 实际回看通常 ≤ 90 天,本表的 365 是
+    # **上限**,真实拉到多少由 exchange 实际返回为准。
+    "1m": 365,
     "2m": 60,
     "3m": 60,
     "5m": 90,

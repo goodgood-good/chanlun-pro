@@ -28,7 +28,7 @@ def test_lookback_values_match_commit_8d2ba0b_baseline():
 
     任何对本表的修改都要 in this test 里跟着改, 强制提醒"修一个 = 修所有 5 个 exchange"。
     """
-    assert DEFAULT_LOOKBACK_DAYS["1m"] == 30
+    assert DEFAULT_LOOKBACK_DAYS["1m"] == 365
     assert DEFAULT_LOOKBACK_DAYS["5m"] == 90
     assert DEFAULT_LOOKBACK_DAYS["15m"] == 180
     assert DEFAULT_LOOKBACK_DAYS["30m"] == 365
@@ -41,7 +41,7 @@ def test_lookback_values_match_commit_8d2ba0b_baseline():
 
 
 def test_get_lookback_days_returns_int():
-    assert get_lookback_days("1m") == 30
+    assert get_lookback_days("1m") == 365
     assert isinstance(get_lookback_days("d"), int)
 
 
@@ -54,7 +54,7 @@ def test_get_lookback_days_unknown_raises_value_error():
 
 
 def test_get_lookback_timedelta_wraps_int_days():
-    assert get_lookback_timedelta("1m") == timedelta(days=30)
+    assert get_lookback_timedelta("1m") == timedelta(days=365)
     assert get_lookback_timedelta("d") == timedelta(days=365 * 3)
 
 
