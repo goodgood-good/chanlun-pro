@@ -163,7 +163,9 @@ def _get_key_lock(key: str) -> threading.RLock:
 # v2(2026-05-20):新增 xd_zslx / recursive_levels / interval_nest;
 #                bi_zss/xd_zss 增 type / is_expanded / sub_count 字段。
 # v3(2026-05-20):mmd/bc 按级别拆分,新增 bi_mmds/xd_mmds/bi_bcs/xd_bcs。
-_CHART_DATA_SCHEMA_VERSION = "v3"
+# v4(2026-05-20):3 类买卖点 first-touch 限定(原文 kobo.61.1「必须是第一次」),
+#                同一中枢同一类型只挂最早一次 → 3B/3S 数量大幅减少。
+_CHART_DATA_SCHEMA_VERSION = "v4"
 
 
 def _build_cache_key(

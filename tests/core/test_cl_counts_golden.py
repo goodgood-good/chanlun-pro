@@ -47,19 +47,19 @@ GOLDEN_COUNTS = {
     "up": CoreCounts(
         fxs=81, bis=38, xds=4,
         bi_zss=7, xd_zss=1,
-        bi_mmds=12, xd_mmds=0,
+        bi_mmds=6, xd_mmds=0,
         bi_bcs=0, xd_bcs=0,
     ),
     "down": CoreCounts(
         fxs=79, bis=40, xds=4,
         bi_zss=6, xd_zss=1,
-        bi_mmds=14, xd_mmds=0,
+        bi_mmds=5, xd_mmds=0,
         bi_bcs=0, xd_bcs=0,
     ),
     "oscillate": CoreCounts(
         fxs=81, bis=36, xds=4,
         bi_zss=6, xd_zss=1,
-        bi_mmds=12, xd_mmds=0,
+        bi_mmds=6, xd_mmds=0,
         bi_bcs=0, xd_bcs=0,
     ),
 }

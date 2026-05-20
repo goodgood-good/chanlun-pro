@@ -574,7 +574,17 @@ class BsPointCalculator:
 
         :param lines: 本级别所有线段
         :param zss: 本级别中枢列表
+
+        **重要(原文 kobo.61.1)**:「并不是走势中枢上方的任何回调回抽都是第三类
+        买卖点,必须是第一次。」一个中枢只能产生**一个** 3 买、最多再加一个
+        3 卖(扩展性买卖点),后续不破 ZG 的反抽 **不重复挂**。`seen_3rd` 字典
+        以 (zs.index, mmd_name) 为键确保 first-touch 语义。旧实现对每个不破
+        ZG 的反抽都识别,在密集震荡行情下 3 类信号会指数级爆炸。
         """
+        # first-touch 守卫:每个中枢每种 3 类信号只识别一次(原文 kobo.61.1)。
+        # key = (zs.index, mmd_name); value = 已挂的 now_line.index。
+        seen_3rd: dict[tuple[int, str], int] = {}
+
         for now_line in lines:
             # 防未来函数：3buy/3sell 关联中枢必须在 now_line 完成之前就已
             # "完成"，否则历史 xd 会被未来才完成的中枢事后追认。
@@ -593,6 +603,15 @@ class BsPointCalculator:
             if mmd_name is None:
                 continue
 
+            # first-touch 限定(原文 kobo.61.1):同一中枢同一类型 3 类只识别最早一次
+            ftkey = (related_zs.index, mmd_name)
+            if ftkey in seen_3rd:
+                LogUtil.debug(lambda:
+                    f"[BsPointCalculator] {mmd_name} 已被中枢 zs[{related_zs.index}] "
+                    f"在 line[{seen_3rd[ftkey]}] 首次识别,line[{now_line.index}] 跳过(first-touch)"
+                )
+                continue
+
             # 去重：同一线段同一中枢同一名字不重复挂
             if self._mmd_already_attached(now_line, mmd_name, related_zs):
                 continue
@@ -603,6 +622,7 @@ class BsPointCalculator:
                 zs_type=self.zs_type,
                 msg=msg,
             )
+            seen_3rd[ftkey] = now_line.index
             LogUtil.debug(lambda:
                 f"[BsPointCalculator] 识别到 {mmd_name}: line.index={now_line.index}, "
                 f"zs.index={related_zs.index}, msg={msg}"
