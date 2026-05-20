@@ -929,9 +929,11 @@ class ChartManager {
                 const backdropId = 'cl_menu_backdrop_' + self.id;
                 if ($('#' + menuId).length > 0) {
                     $('#' + menuId).remove();
-                    $('#' + backdropId).remove();
+                    $('#' + backdropId).remove();   // 兼容旧版残留 backdrop
                     return;
                 }
+                // 兼容旧版可能遗留的 backdrop(刷新前的旧 charts.js 创建过)
+                $('#' + backdropId).remove();
 
                 const cfg = self.cl_show_config;
                 const cbId = (k) => 'cl_cb_' + k + '_' + self.id;
@@ -1072,13 +1074,27 @@ class ChartManager {
                     layer.msg(self.cl_independent_drawings ? '已切换为独立周期画线' : '已切换为共享画线', { time: 1000 });
                 });
 
-                // 透明遮罩覆盖全屏，确保点击弹框外任意区域都能可靠关闭菜单
-                const backdrop = $('<div id="' + backdropId + '" style="position:fixed;top:0;left:0;width:100%;height:100%;z-index:99999998;background:transparent;"></div>');
-                $('body').append(backdrop);
-                backdrop.on('click', function () {
-                    $('#' + menuId).remove();
-                    $(this).remove();
-                });
+                // **不要用全屏 backdrop**——TV 按钮在 iframe 内,full-screen backdrop
+                // 在 main page 高 z-index 上,会**拦截 iframe 区域所有点击**(包括
+                // 「缠论显示设置」按钮再点击),造成用户菜单一旦打开就无法用按钮
+                // 关闭、TV 工具栏其它按钮也点不动。
+                //
+                // 改用 document-level click handler:监听 capture phase,任何 click
+                // 落在菜单外都关菜单,**不阻塞 iframe 内交互**。延迟一帧绑定避开
+                // 触发本次打开的同一次点击事件。
+                setTimeout(() => {
+                    const closeHandler = (ev) => {
+                        const menuEl = document.getElementById(menuId);
+                        if (!menuEl) {
+                            document.removeEventListener('click', closeHandler, true);
+                            return;
+                        }
+                        if (menuEl.contains(ev.target)) return;     // 菜单内点击不关
+                        menuEl.remove();
+                        document.removeEventListener('click', closeHandler, true);
+                    };
+                    document.addEventListener('click', closeHandler, true);
+                }, 0);
             });
 
             var buttonReload = global_widget.createButton();
