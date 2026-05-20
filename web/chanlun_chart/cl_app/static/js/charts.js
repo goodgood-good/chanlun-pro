@@ -1448,9 +1448,17 @@ class ChartManager {
             } else {
                 headTime = tailTime = item.points?.time;
             }
-            // headTime >= from：避免 createMultipointShape snap 把画外起点吸附到可见区边缘造成错位长斜线；
-            // 代价是缩放级别低时跨可见窗的 XD 不显示，收益是零错位
-            if (headTime >= from) {
+            // 形态分类:
+            //   - 单线段(bi/xd):用 ``headTime >= from``,避免 createMultipointShape
+            //     把画外起点 snap 到可见区边缘造成错位长斜线;
+            //   - 矩形(zss / zslx):用 ``tailTime >= from``,跨可见窗的中枢/走势
+            //     类型 tail 在窗内即渲染——rectangle 形态画外起点不会 snap 错位
+            //     (TV widget 自然裁剪),原 head 过滤会让历史中枢一旦 visibleRange
+            //     收窄就永久消失,跟用户期待严重不符(bi_zss 426→18 缩水 95%)。
+            // 注:对单点形态(item.points 非数组,bcs/mmds/inest)head=tail,两种判定等价。
+            const isRectShape = /^(bi_zss|xd_zss|recursive_zss_|overlay_zss_|xd_zslx|recursive_zslxs_|overlay_zslxs_)/.test(type);
+            const boundaryTime = isRectShape ? tailTime : headTime;
+            if (boundaryTime >= from) {
                 const key = this.makeKey(item);
                 newKeys.add(key);
                 itemsToProcess.push({ item, key, time: headTime, tailTime });
@@ -1655,8 +1663,11 @@ class ChartManager {
                 useDirectionColor: useDirColor,
             });
         };
-        this.reconcile('bi_zss', cfg.zs ? barsResult.bi_zss : [], from, symbolKey, (item) => safeCreate(wrapZs(getDynamicColor(currentInterval, "bi_zss"))(item), 'bi_zs'));
-        this.reconcile('xd_zss', cfg.zs ? barsResult.xd_zss : [], from, symbolKey, (item) => safeCreate(wrapZs(getDynamicColor(currentInterval, "xd_zss"))(item), 'xd_zs'));
+        // 中枢矩形不应走 getUniqueRenderList(那是给 bi/xd 末段 pending 闪烁
+        // 去重用的:它把所有 linestyle=1 的项压成 1 个,但 zss 阵列中**多个**
+        // pending 中枢正常并存,被压成 1 个会让大部分中枢消失。useUnique=false。
+        this.reconcile('bi_zss', cfg.zs ? barsResult.bi_zss : [], from, symbolKey, (item) => safeCreate(wrapZs(getDynamicColor(currentInterval, "bi_zss"))(item), 'bi_zs'), false);
+        this.reconcile('xd_zss', cfg.zs ? barsResult.xd_zss : [], from, symbolKey, (item) => safeCreate(wrapZs(getDynamicColor(currentInterval, "xd_zss"))(item), 'xd_zs'), false);
         // 背驰/买卖点 —— 拆分版优先(笔/段独立 reconcile + 不同样式 + 独立 toggle);
         // 后端 ``bi_mmds``/``xd_mmds``/``bi_bcs``/``xd_bcs`` 拿不到时,fallback
         // 到合并版 ``bcs``/``mmds``(向后兼容旧 web/老 cache 命中场景)。
@@ -1699,7 +1710,8 @@ class ChartManager {
         for (let L = 1; L <= 3; L++) {
             const lv = recLevels.find((x) => x.level === L);
             const recColor = chainColorAt(currentInterval, L + 1, "xds");
-            this.reconcile(`recursive_zss_L${L}`, lv ? lv.zss : [], 0, symbolKey, (item) => safeCreate(ChartUtils.createRecursiveZsShape(this.chart, item, { level: L, color: recColor }), `rec_zs_L${L}`));
+            // useUnique=false:多个 pending L1+ 中枢需并存,见 bi_zss/xd_zss 同源说明。
+            this.reconcile(`recursive_zss_L${L}`, lv ? lv.zss : [], 0, symbolKey, (item) => safeCreate(ChartUtils.createRecursiveZsShape(this.chart, item, { level: L, color: recColor }), `rec_zs_L${L}`), false);
             this.reconcile(`recursive_zslxs_L${L}`, lv ? lv.zslxs : [], 0, symbolKey, (item) => safeCreate(ChartUtils.createZslxShape(this.chart, item, { overrides: { transparency: 88, linecolor: recColor, backgroundColor: recColor, color: recColor, "trendline.linecolor": recColor } }), `rec_zslx_L${L}`), false);
         }
 
@@ -1716,7 +1728,7 @@ class ChartManager {
                 // overlay_zss/zslx level=N → 对应 chain[N] 周期 xds 色,跟那一级的「线段色」一致。
                 const ovColor = chainColorAt(currentInterval, level, "xds");
                 this.reconcile(`overlay_zss_${level}`, od.xd_zss || [], 0, symbolKey,
-                    (item) => safeCreate(ChartUtils.createOverlayZsShape(this.chart, item, { level, color: ovColor }), `ovz${level}`));
+                    (item) => safeCreate(ChartUtils.createOverlayZsShape(this.chart, item, { level, color: ovColor }), `ovz${level}`), false);
                 this.reconcile(`overlay_zslxs_${level}`, od.xd_zslx || [], 0, symbolKey,
                     (item) => safeCreate(ChartUtils.createOverlayZslxShape(this.chart, item, { level, color: ovColor }), `ovx${level}`), false);
             });
