@@ -258,7 +258,9 @@ def invalidate(
         if cl_config is not None:
             key = _build_cache_key(market, code, frequency, cl_config)
             return 1 if _cl_object_cache.pop(key, None) is not None else 0
-        prefix = f"{market}|{code}|{frequency}|"
+        # 注意:cache key 是 ``f"{_CHART_DATA_SCHEMA_VERSION}|{market}|{code}|..."``,
+        # prefix 必须带 schema version——否则永远匹配不到任何 key、invalidate 退化为无操作。
+        prefix = f"{_CHART_DATA_SCHEMA_VERSION}|{market}|{code}|{frequency}|"
         keys_to_drop = [k for k in list(_cl_object_cache.keys()) if k.startswith(prefix)]
         for k in keys_to_drop:
             _cl_object_cache.pop(k, None)
