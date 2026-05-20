@@ -57,9 +57,27 @@ class CachedStaticFileHandler(StaticFileHandler):
         return super().validate_absolute_path(root, absolute_path)
 
     def set_extra_headers(self, path):
-        self.set_header(
-            "Cache-Control", "public, max-age=31536000, immutable"
+        # 对前端关键文件(charts.js / bundle.js / *.html / 其它项目自带 JS)
+        # 用「短 max-age + must-revalidate」,让浏览器每 5 分钟回源验证 Etag。
+        # 这是因为这些文件不带 hash filename 且可能频繁更新,immutable + 1年
+        # max-age 会让用户永久卡在旧版本(即便 index.html ?v=hash bust 也可能
+        # 被某些缓存路径绕过)。
+        # 对 TradingView charting_library 等第三方资源(带 hash filename 或
+        # bundles/* 子路径)保留 immutable,享用最佳缓存性能。
+        p = path.replace("\\", "/").lower()
+        is_project_frontend = (
+            p.endswith("charts.js") or p.endswith("bundle.js") or
+            p.endswith(".html") or
+            ("/js/" in p and "tv_indicators" not in p and "charting_library" not in p)
         )
+        if is_project_frontend:
+            self.set_header(
+                "Cache-Control", "public, max-age=300, must-revalidate"
+            )
+        else:
+            self.set_header(
+                "Cache-Control", "public, max-age=31536000, immutable"
+            )
         if getattr(self, "_serving_gz", False):
             self.set_header("Content-Encoding", "gzip")
             self.set_header("Vary", "Accept-Encoding")

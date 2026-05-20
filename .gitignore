@@ -195,3 +195,5 @@ tests/fixtures/klines/
 tests/core/baselines.local.json
 *.gz
 *.md
+*/.omc/
+/tmp/

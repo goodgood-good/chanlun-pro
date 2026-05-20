@@ -106,6 +106,12 @@ def create_app(test_config=None):
         lambda record: "/static/" not in record.getMessage().lower()
     )  # 过滤静态资源请求日志
 
+    # 强制 Jinja2 每次请求都从磁盘 re-render template,避免 web 长跑后
+    # ``index.html`` 内 ``{{ static_version }}`` 等动态变量被内存缓存。
+    # 性能代价微小(主页面 template,只在 / 请求时 render)。
+    app.config["TEMPLATES_AUTO_RELOAD"] = True
+    app.jinja_env.auto_reload = True
+
     # 添加登录验证
     # secret_key 解析顺序：环境变量 CHANLUN_FLASK_SECRET_KEY > config.FLASK_SECRET_KEY > 数据目录持久化文件。
     app.secret_key = get_flask_secret_key()
