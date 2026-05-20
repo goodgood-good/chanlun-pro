@@ -286,10 +286,12 @@ const ChartUtils = {
         //   - 缺省(老 mmds 合并版):中等字号
         // 标签:拆分版 ``mmd.level`` 已带级别字段,前缀「笔/段」直接显示;合并版
         // 保留原 ``笔:3B/段:1B`` 全文。
+        // 字号偏小:笔层数量多、易拥挤,字号过大会糊成一团。
+        // 段层是主级别保留 bold 即可突出,字号无需太大。
         const isSplit = !!mmd.level;
         const isXd = isSplit && mmd.level === "xd";
-        const fontsize = isSplit ? (isXd ? 14 : 10) : 12;
-        const transparency = isSplit ? (isXd ? 0 : 40) : 0;
+        const fontsize = isSplit ? (isXd ? 10 : 7) : 9;
+        const transparency = isSplit ? (isXd ? 10 : 55) : 10;
         const labelPrefix = isSplit ? (isXd ? "段·" : "笔·") : "";
         const label = labelPrefix + mmd.text.replace(/[笔段]:/g, "");
         return this.createShape(chart, mmd.points, { shape, text: label, overrides: { arrowColor: color, color, fontsize, bold: isXd, transparency, ...options.overrides }, ...options });
