@@ -57,20 +57,20 @@ class CachedStaticFileHandler(StaticFileHandler):
         return super().validate_absolute_path(root, absolute_path)
 
     def set_extra_headers(self, path):
-        # 对前端关键文件(charts.js / bundle.js / *.html / 其它项目自带 JS)
-        # 用「短 max-age + must-revalidate」,让浏览器每 5 分钟回源验证 Etag。
-        # 这是因为这些文件不带 hash filename 且可能频繁更新,immutable + 1年
-        # max-age 会让用户永久卡在旧版本(即便 index.html ?v=hash bust 也可能
-        # 被某些缓存路径绕过)。
-        # 对 TradingView charting_library 等第三方资源(带 hash filename 或
-        # bundles/* 子路径)保留 immutable,享用最佳缓存性能。
+        # ``path`` 是相对 mount root 的子路径(app.py 把 handler 挂到
+        # ``/static/charting_library/(.*)`` 与 ``/static/datafeeds/(.*)`` 下,
+        # path 是 ``(.*)`` 捕获,不含 ``/static/datafeeds/`` 前缀)。
+        # 因此 charts.js / *.html 不进本 handler,走 Flask 默认 static handler
+        # (Flask 默认 ``Cache-Control: no-cache`` 已经是合理的短缓存策略)。
+        #
+        # 本 handler 服务 datafeeds/* 与 charting_library/*。其中:
+        # - ``udf/dist/bundle.js`` 是 webpack 打的项目 datafeed bundle,**不带
+        #   hash filename**,内容会随项目升级而变 —— 必须用短缓存 + 强制 revalidate,
+        #   否则浏览器永久卡在旧版本。
+        # - 其余路径(charting_library/* 及 datafeeds/udf/* TV UDF 官方代码)
+        #   基本不动 + 多数带 hash filename,immutable + 1 年缓存最优。
         p = path.replace("\\", "/").lower()
-        is_project_frontend = (
-            p.endswith("charts.js") or p.endswith("bundle.js") or
-            p.endswith(".html") or
-            ("/js/" in p and "tv_indicators" not in p and "charting_library" not in p)
-        )
-        if is_project_frontend:
+        if p.endswith("udf/dist/bundle.js"):
             self.set_header(
                 "Cache-Control", "public, max-age=300, must-revalidate"
             )
