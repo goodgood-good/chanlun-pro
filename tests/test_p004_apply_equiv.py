@@ -6,7 +6,6 @@
 import datetime
 import sys
 
-import numpy as np
 import pandas as pd
 import pytz
 

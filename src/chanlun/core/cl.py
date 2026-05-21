@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 import datetime
-from typing import Dict, Union, List, Tuple, Any, Optional
+from typing import Union, List, Tuple, Any, Optional
 import pandas as pd
 
 from chanlun.core.bi_calculator import BiCalculator
 # 笔/段两层中枢统一走 ZsCalculator，create_dn_zs 也用临时 ZsCalculator 实例。
-from chanlun.core.cl_interface import ICL, Kline, CLKline, FX, BI, XD, ZS, ZSLX, Config, LINE, compare_ld_beichi, query_macd_ld
+from chanlun.core.cl_interface import ICL, Kline, CLKline, FX, BI, XD, ZS, ZSLX, Config, LINE, query_macd_ld
 from chanlun.core.zslx_calculator import ZslxCalculator
 from chanlun.core import beichi_calculator as bc
 from chanlun.core.cl_kline_process import CL_Kline_Process

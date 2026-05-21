@@ -1,0 +1,7 @@
+{
+  "tool_name": "Bash",
+  "tool_input_preview": "{\"command\":\".venv/Scripts/python.exe -c \\\"import sys; sys.path.insert(0,'src'); from chanlun import config; print('LOGIN_PWD set:', repr(config.LOGIN_PWD)[:20], 'len=', len(config.LOGIN_PWD))\\\" 2>&1\",...",
+  "error": "Exit code 127\n/usr/bin/bash: line 1: .venv/Scripts/python.exe: No such file or directory",
+  "timestamp": "2026-05-19T17:11:29.499Z",
+  "retry_count": 2
+}

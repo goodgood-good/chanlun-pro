@@ -143,9 +143,6 @@ def render_charts(
     color_qstd_up = "RGB(255,127,80,0.7)"
     color_qstd_down = "RGB(100,149,237,0.7)"
 
-    color_last_bi_zs = "RGB(144,238,144,0.5)"
-    color_last_xd_zs = "RGB(255,182,193,0.5)"
-
     color_qstd_up = "RGB(255,127,80,0.7)"
     color_qstd_down = "RGB(100,149,237,0.7)"
 

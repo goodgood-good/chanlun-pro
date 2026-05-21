@@ -1,5 +1,4 @@
 import ccxt
-import pymysql.err
 import pytz
 
 from chanlun import config
@@ -220,12 +219,6 @@ class ExchangeZB(Exchange):
 
     def order(self, code: str, o_type: str, amount: float, args=None):
         """下单（现货仅支持市价开多/平多，不支持做空）"""
-        trade_maps = {
-            "open_long": {"side": "BUY", "positionSide": "LONG"},
-            "open_short": {"side": "SELL", "positionSide": "SHORT"},
-            "close_long": {"side": "SELL", "positionSide": "LONG"},
-            "close_short": {"side": "BUY", "positionSide": "SHORT"},
-        }
         if o_type == "open_long":
             order = self.exchange.create_market_buy_order(code, amount)
             return order

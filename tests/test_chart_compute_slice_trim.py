@@ -6,7 +6,6 @@ slice_chart_data_to_window + trim_future_bars 从 tv_history 抽出, 测试
 
 from __future__ import annotations
 
-import pytest
 
 from cl_app.services.chart_compute import (
     filter_shapes_in_window,

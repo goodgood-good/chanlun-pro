@@ -4,7 +4,7 @@
 
 支持增量更新（Tick 级更新最后一根、Bar 级新增 K 线），避免每次全量重算。
 """
-from typing import List, Dict, Tuple
+from typing import List, Dict
 import pandas as pd
 from chanlun.core.cl_interface import Kline
 

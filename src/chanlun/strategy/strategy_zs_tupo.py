@@ -121,7 +121,6 @@ class StrategyZSTupo(Strategy):
                 return opts
 
         kline_lv1 = cd_lv1.get_klines()[-1]
-        kline_lv0 = cd_lv0.get_klines()[-1]
 
         # 验证突破是否是刚发生的：前两根 K 线须有一根价格仍在中枢内，防止平仓后在中枢外重复开仓
         kline_p1_lv1 = cd_lv1.get_klines()[-2]
@@ -209,7 +208,6 @@ class StrategyZSTupo(Strategy):
             return loss_opt
 
         kline_lv1 = cd_lv1.get_klines()[-1]
-        kline_lv0 = cd_lv0.get_klines()[-1]
 
         # 开仓后第 5 个交易日触发分批减仓：用日线 K 线计数规避节假日误差
         open_days = len(

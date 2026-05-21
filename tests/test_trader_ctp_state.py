@@ -14,7 +14,6 @@
 import threading
 import time
 
-import pytest
 
 from chanlun.trader._ctp_state import CTPState
 

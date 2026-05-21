@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import time
 
-import pytest
 
 from cl_app.services.chart_cache import (
     _CACHE_REVALIDATION_INTERVAL,

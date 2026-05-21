@@ -57,7 +57,7 @@ def _filter_alpaca_rth_bars(bar_list, frequency):
 
     def _is_rth(bar) -> bool:
         ts = getattr(bar, "timestamp", None)
-        if not isinstance(ts, datetime.datetime):
+        if not isinstance(ts, dt.datetime):
             return True
         ny_dt = (
             ts.astimezone(ny_tz)
@@ -290,7 +290,7 @@ class ExchangeAlpaca(Exchange):
         返回当前是否是交易时间
         """
         tz = pytz.timezone("US/Eastern")
-        now = datetime.datetime.now(tz)
+        now = dt.datetime.now(tz)
         weekday = now.weekday()
         hour = now.hour
         minute = now.minute

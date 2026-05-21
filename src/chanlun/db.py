@@ -5,22 +5,19 @@ import time
 import warnings
 from typing import List, Union
 
-import numpy as np
 import pandas as pd
 from sqlalchemy import (
     Column,
     DateTime,
     Float,
-    Integer,
     String,
-    Text,
     UniqueConstraint,
     Index,
     create_engine,
     func,
 )
 from sqlalchemy.dialects.mysql import insert
-from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import QueuePool
 
 from chanlun import config, fun

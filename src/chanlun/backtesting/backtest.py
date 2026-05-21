@@ -1269,7 +1269,6 @@ class BackTest:
         :return:
         """
         main_name = "资金变化"
-        main_x = balance_history["datetime"]
         main_y = balance_history["val"]
 
         main_chart = (

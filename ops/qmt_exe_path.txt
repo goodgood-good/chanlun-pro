@@ -1,0 +1,13 @@
+# chanlun-pro daily-restart: full path of the QMT *launcher* to start.
+#
+# This MUST be XtItClient.exe -- the launcher the desktop shortcut points to.
+# XtItClient.exe performs the (auto-)login and then spawns XtMiniQmt.exe and
+# miniquote.exe. Launching XtMiniQmt.exe directly does NOT log in (it is a
+# child process, not meant to be started on its own).
+#
+# This machine has two QMT installs (江海证券 / 大同证券). The path below is
+# the 大同证券 one the project connects to. If you move or reinstall QMT,
+# update this path (right-click the desktop QMT shortcut -> Properties ->
+# "Target"). Keep it on a single line.
+# Lines starting with '#' are ignored; the first non-comment line is used.
+D:\software\迅投极速策略交易系统交易终端 大同证券QMT实盘\bin.x64\XtItClient.exe

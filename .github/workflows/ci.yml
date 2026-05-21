@@ -89,8 +89,6 @@ jobs:
         with:
           python-version: '3.11'
       - name: Run ruff
-        # 软门禁：当前有约 550 处既存问题，先建立可见性，暂不阻塞合并
-        continue-on-error: true
         run: |
           pip install ruff
           ruff check --output-format=github src/ web/ tests/

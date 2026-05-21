@@ -1,8 +1,5 @@
 from typing import List
 from chanlun.backtesting import backtest
-from chanlun.strategy.strategy_a_d_mmd_test import StrategyADMMDTest
-import pandas as pd
-import numpy as np
 import pickle
 import pathlib
 from itertools import combinations

@@ -11,7 +11,6 @@
   - `/set_stock_zixuan`
 """
 
-import json
 import os
 import uuid
 

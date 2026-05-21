@@ -13,7 +13,6 @@ from __future__ import annotations
 import hashlib
 import json
 
-import pandas as pd
 import pytest
 
 from tests.core.conftest import _generate_kline_df, DEFAULT_CL_CONFIG, cl_snapshot

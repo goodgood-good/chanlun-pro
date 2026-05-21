@@ -3,7 +3,7 @@
     "purpose": "缠论核心算法 cl_snapshot md5 baseline. 任何改变 fxs/bis/xds/bi_zss/xd_zss 端点签名的代码改动会让 md5 失配, CI 红灯.",
     "regenerate_cmd": "python -m tests.core._record_baseline",
     "recorded_at_commit": "c9c2553 附近 master",
-    "recorded_date": "2026-05-20",
+    "recorded_date": "2026-05-21",
     "schema": "json.dumps(cl_snapshot(cd), sort_keys=True, default=str, ensure_ascii=False).encode('utf-8') -> md5.hexdigest()"
   },
   "synthetic": {

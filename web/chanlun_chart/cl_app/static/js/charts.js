@@ -4,12 +4,12 @@
 
 // 默认的缠论显示项配置
 const CL_SHOW_DEFAULT = {
-    fx: true, bi: true, xd: true, zs: true, bc: true, mmd: true,
+    fx: true, bi: true, xd: true, bc: true, mmd: true,
+    // 中枢按级别独立 toggle(笔中枢 / 线段中枢),无总开关,两者平级独立控制:
+    zs_bi: true, zs_xd: true,
     // 买卖点/背驰按级别独立 toggle(笔层数量远多于段层、用户常需只看段层):
     mmd_bi: true, mmd_xd: true, bc_bi: true, bc_xd: true,
     // 原文化新增独立开关(默认全开,用户可在控制面板单独 toggle):
-    zs_direction: true,        // 中枢按 zs.type 着色(up/down/zd)
-    zs_expanded: true,         // ⑤ 扩展中枢加粗框
     xd_zslx: true,             // ③ 线段级走势类型区间(半透明矩形)
     recursive_levels: true,    // ④ 递归 L1+ 高级中枢与走势类型
     interval_nest: true,       // 区间套链 flags + 精确转折点
@@ -47,16 +47,28 @@ function clog(...args) {
     if (window.__chanlunDebug) console.log(...args);
 }
 
+// 旧配置只有单个 ``zs`` 总开关;现已拆成 ``zs_bi``(笔中枢)/``zs_xd``(线段中枢)
+// 两个独立开关。迁移:旧 ``zs`` 的值作为两者初值,保留用户「曾把中枢关掉」的意图。
+function _migrateZsToggle(merged, parsed) {
+    if (parsed && parsed.zs !== undefined) {
+        if (parsed.zs_bi === undefined) merged.zs_bi = parsed.zs;
+        if (parsed.zs_xd === undefined) merged.zs_xd = parsed.zs;
+    }
+    return merged;
+}
+
 function loadClShowConfig(chartId) {
     try {
         const raw = localStorage.getItem('cl_show_config_' + chartId);
         if (raw) {
-            return Object.assign({}, CL_SHOW_DEFAULT, JSON.parse(raw));
+            const parsed = JSON.parse(raw);
+            return _migrateZsToggle(Object.assign({}, CL_SHOW_DEFAULT, parsed), parsed);
         }
         // 兼容旧版全局 key 作为首次默认值，不写回旧 key
         const legacy = localStorage.getItem('cl_show_config');
         if (legacy) {
-            return Object.assign({}, CL_SHOW_DEFAULT, JSON.parse(legacy));
+            const parsed = JSON.parse(legacy);
+            return _migrateZsToggle(Object.assign({}, CL_SHOW_DEFAULT, parsed), parsed);
         }
     } catch (e) {
         console.warn('[CHARTS] loadClShowConfig parse failed', e);
@@ -103,8 +115,6 @@ const CHART_CONFIG = {
         BCS: "#D1D4DC", BC_TEXT: "#fccbcd",
         MMD_UP: "#E64A19", MMD_DOWN: "#1565C0",
         AREA_POS: "#ef5350", AREA_NEG: "#26a69a",
-        // 中枢方向着色(③ ZslxCalculator 回填):上涨中枢=暖红、下跌中枢=冷蓝、震荡=灰
-        ZS_UP: "#E57373", ZS_DOWN: "#64B5F6", ZS_ZD: "#90A4AE",
         // 走势类型(③ xd_zslx)半透明背景色
         ZSLX_UP: "#FFCCBC", ZSLX_DOWN: "#BBDEFB", ZSLX_ZHENGLI: "#CFD8DC",
         // 递归层级 L1+ 高级中枢(④):级别越高颜色越深
@@ -121,6 +131,8 @@ const CHART_CONFIG = {
         "fxs", "bis", "xds", "bi_zss", "xd_zss", "bcs", "mmds",
         // 拆分版买卖点/背驰(笔层 vs 段层),独立 reconcile
         "bi_mmds", "xd_mmds", "bi_bcs", "xd_bcs",
+        // 买卖点文字标签(与 icon 箭头分离的第二个 shape,各自独立 reconcile)
+        "mmd_labels", "bi_mmd_labels", "xd_mmd_labels",
         // 原文化新增:③ 走势类型 / ④ 递归层级 / 区间套
         "xd_zslx", "recursive_zss_L1", "recursive_zss_L2", "recursive_zss_L3",
         "recursive_zslxs_L1", "recursive_zslxs_L2", "recursive_zslxs_L3",
@@ -132,25 +144,35 @@ const CHART_CONFIG = {
     ],
 };
 
+// 买卖点用「双 shape」:小 icon 箭头(定位准,尺寸可调)+text 类型标签(标明几买几卖)。
+// 单个形状无法三者兼得:arrow_up/down 定位准+带文字但尺寸写死偏大;icon 小+定位准但装不了文字;
+// text 能带文字但有横向宽度且无锚点控制、会偏离目标 K 线。
+// 箭头码点取自随库 lt-icons-atlas 的 arrows/ 集(Font Awesome:f062=上箭头、f063=下箭头)。
+const MMD_ICON = { buy: 0xf062, sell: 0xf063 };
+// 尺寸/字号一处可调:段层为主级别略大并加粗、笔层数量多取小值;合并版居中。
+const MMD_ICON_SIZE = { xd: 14, bi: 10, default: 12 };
+const MMD_LABEL_FONTSIZE = { xd: 12, bi: 10, default: 11 };
+// 文字标签相对买卖点价格的纵向让出比例:买点下移、卖点上移,避免标签盖住箭头/K 线。
+// 箭头自身始终使用原始 mmd.points,保证指向真实买卖点。
+const MMD_LABEL_PRICE_OFFSET = 0.0015;
+
 const DEFAULT_COLORS = {
     bis: CHART_CONFIG.COLORS.BI, xds: CHART_CONFIG.COLORS.XD,
     bi_zss: CHART_CONFIG.COLORS.BI_ZSS, xd_zss: CHART_CONFIG.COLORS.XD_ZSS,
 };
 
-// 着色规则(缠论原文工程口径):
-//   bis  = 当前周期笔色;
-//   xds  = 当前周期线段色 = **下一级周期的 bis 色**(原文「线段 = 高一级笔」);
-//   bi_zss = 当前周期笔中枢 = **当前周期 xds 色**(笔中枢就是当前周期线段层);
-//   xd_zss = 当前周期线段中枢 = **高一级周期 xds 色**(线段中枢 = 高一级走势类型)。
-// 历史 bug:``"1".bi_zss = "#FFFF55"`` 是孤立黄色,跟「bi_zss=当前 xds」破窗;
-//        现已修正为 "#9C27B0"(= 1m xds)。
+// 着色规则(按「中枢的构成单元在当前周期的颜色」着色,直观区分笔/段):
+//   bis    = 当前周期笔色;
+//   xds    = 当前周期线段色 = **下一级周期的 bis 色**(原文「线段 = 高一级笔」);
+//   bi_zss = 当前周期笔中枢 = **当前周期 bis 色**(笔中枢由笔构成 → 同笔色);
+//   xd_zss = 当前周期线段中枢 = **当前周期 xds 色**(线段中枢由线段构成 → 同线段色)。
 const DYNAMIC_CHART_COLORS = {
-    "1": { ...DEFAULT_COLORS, bis: "#DF8344", xds: "#9C27B0", xd_zss: "#4FADEA", bi_zss: "#9C27B0" },
-    "5": { ...DEFAULT_COLORS, bis: "#9C27B0", xds: "#4FADEA", xd_zss: "#EA3323", bi_zss: "#4FADEA" },
-    "30": { ...DEFAULT_COLORS, bis: "#4FADEA", xds: "#EA3323", xd_zss: "#9FCE63", bi_zss: "#EA3323" },
-    "1D": { ...DEFAULT_COLORS, bis: "#EA3323", xds: "#9FCE63", xd_zss: "#4274B1", bi_zss: "#9FCE63" },
-    "1W": { ...DEFAULT_COLORS, bis: "#9FCE63", xds: "#4274B1", xd_zss: "#C638DD", bi_zss: "#4274B1" },
-    "1M": { ...DEFAULT_COLORS, bis: "#4274B1", xds: "#C638DD", xd_zss: "#5E813F", bi_zss: "#C638DD" },
+    "1": { ...DEFAULT_COLORS, bis: "#DF8344", xds: "#9C27B0", bi_zss: "#DF8344", xd_zss: "#9C27B0" },
+    "5": { ...DEFAULT_COLORS, bis: "#9C27B0", xds: "#4FADEA", bi_zss: "#9C27B0", xd_zss: "#4FADEA" },
+    "30": { ...DEFAULT_COLORS, bis: "#4FADEA", xds: "#EA3323", bi_zss: "#4FADEA", xd_zss: "#EA3323" },
+    "1D": { ...DEFAULT_COLORS, bis: "#EA3323", xds: "#9FCE63", bi_zss: "#EA3323", xd_zss: "#9FCE63" },
+    "1W": { ...DEFAULT_COLORS, bis: "#9FCE63", xds: "#4274B1", bi_zss: "#9FCE63", xd_zss: "#4274B1" },
+    "1M": { ...DEFAULT_COLORS, bis: "#4274B1", xds: "#C638DD", bi_zss: "#4274B1", xd_zss: "#C638DD" },
 };
 
 // 周期递进链:当前 interval → 高一/二/三级 interval。
@@ -233,21 +255,9 @@ const ChartUtils = {
         return this.createShape(chart, line.points, { shape: "trend_line", overrides: { linestyle: parseInt(line.linestyle) || 0, linewidth: options.linewidth || 1, linecolor: options.color || CHART_CONFIG.COLORS.BI, ...options.overrides }, ...options });
     },
     createZhongshuShape(chart, zs, options = {}) {
-        // 中枢方向着色(§3.6 回填):options.useDirectionColor=true 时按 zs.type 选色,
-        // 否则用 options.color(老路径,通常是 getDynamicColor 给的级别色)。
-        // ⑤ 扩展中枢(is_expanded):自动加粗+不透明边框,与普通中枢区分。
-        let color = options.color || CHART_CONFIG.COLORS.BI;
-        if (options.useDirectionColor && zs.type) {
-            if (zs.type === "up") color = CHART_CONFIG.COLORS.ZS_UP;
-            else if (zs.type === "down") color = CHART_CONFIG.COLORS.ZS_DOWN;
-            else if (zs.type === "zd") color = CHART_CONFIG.COLORS.ZS_ZD;
-        }
-        let linewidth = options.linewidth || 1;
-        let transparency = 95;
-        if (zs.is_expanded) {
-            linewidth = Math.max(linewidth + 2, 3);
-            transparency = 80;          // 扩展中枢更显眼
-        }
+        const color = options.color || CHART_CONFIG.COLORS.BI;
+        const linewidth = options.linewidth || 1;
+        const transparency = 95;
         return this.createShape(chart, zs.points, { shape: "rectangle", overrides: { linestyle: parseInt(zs.linestyle) || 0, linewidth, linecolor: color, backgroundColor: color, transparency, color, "trendline.linecolor": color, fillBackground: true, filled: true, ...options.overrides }, ...options });
     },
     createZslxShape(chart, zslx, options = {}) {
@@ -315,25 +325,53 @@ const ChartUtils = {
         const shape = options.direction === "up" ? "arrow_down" : "arrow_up";
         return this.createShape(chart, tp.points, { shape, text: "区间套转折", overrides: { arrowColor: color, color, fontsize: 14, bold: true, ...options.overrides }, ...options });
     },
+    // 买卖点标签锚点:文字按方向让出一档;箭头本身不偏移,避免指向位置失真。
+    mmdLabelPoint(mmd) {
+        const p = mmd.points || {};
+        if (typeof p.price !== "number") return p;
+        const off = p.price * MMD_LABEL_PRICE_OFFSET;
+        return { ...p, price: mmd.text.includes("B") ? p.price - off : p.price + off };
+    },
+    // 买卖点箭头:icon 单字形,尺寸可控、横向居中锚定到 K 线(定位与分型圆点一致,准确);
+    // 使用原始 mmd.points,保证箭头绑定真实买卖点位置。
     createMmdShape(chart, mmd, options = {}) {
         const isBuy = mmd.text.includes("B");
         const color = isBuy ? CHART_CONFIG.COLORS.MMD_UP : CHART_CONFIG.COLORS.MMD_DOWN;
-        const shape = isBuy ? "arrow_up" : "arrow_down";
-        // 按级别分样式(buy/sell point 数量笔层 >> 段层):
-        //   - 笔层(``options.levelHint === 'bi'``):小字号 + 高透明,「次要级别」
-        //   - 段层(``options.levelHint === 'xd'``):大字号 + 加粗 + 不透明,「主要级别」
-        //   - 缺省(老 mmds 合并版):中等字号
-        // 标签:拆分版 ``mmd.level`` 已带级别字段,前缀「笔/段」直接显示;合并版
-        // 保留原 ``笔:3B/段:1B`` 全文。
-        // 字号偏小:笔层数量多、易拥挤,字号过大会糊成一团。
-        // 段层是主级别保留 bold 即可突出,字号无需太大。
         const isSplit = !!mmd.level;
         const isXd = isSplit && mmd.level === "xd";
-        const fontsize = isSplit ? (isXd ? 10 : 7) : 9;
-        const transparency = isSplit ? (isXd ? 10 : 55) : 10;
-        const labelPrefix = isSplit ? (isXd ? "段·" : "笔·") : "";
-        const label = labelPrefix + mmd.text.replace(/[笔段]:/g, "");
-        return this.createShape(chart, mmd.points, { shape, text: label, overrides: { arrowColor: color, color, fontsize, bold: isXd, transparency, ...options.overrides }, ...options });
+        const size = isSplit ? (isXd ? MMD_ICON_SIZE.xd : MMD_ICON_SIZE.bi) : MMD_ICON_SIZE.default;
+        const icon = isBuy ? MMD_ICON.buy : MMD_ICON.sell;
+        return this.createShape(chart, mmd.points, {
+            shape: "icon",
+            icon,
+            overrides: { color, size, "linetoolicon.color": color, "linetoolicon.size": size, ...options.overrides },
+            ...options,
+        });
+    },
+    // 买卖点文字标签:第二个 shape,标明级别+类型(段1B / 笔3B / 笔L3B…)以区分一二三类。
+    // 标签单独纵向偏移;text 有横向宽度会向右展开,定位以箭头为准,标签仅作说明。
+    createMmdLabelShape(chart, mmd, options = {}) {
+        const isBuy = mmd.text.includes("B");
+        const color = isBuy ? CHART_CONFIG.COLORS.MMD_UP : CHART_CONFIG.COLORS.MMD_DOWN;
+        const isSplit = !!mmd.level;
+        const isXd = isSplit && mmd.level === "xd";
+        const fontsize = isSplit ? (isXd ? MMD_LABEL_FONTSIZE.xd : MMD_LABEL_FONTSIZE.bi) : MMD_LABEL_FONTSIZE.default;
+        const levelPrefix = isSplit ? (isXd ? "段" : "笔") : "";
+        const text = levelPrefix + mmd.text.replace(/[笔段]:/g, "");
+        return this.createShape(chart, this.mmdLabelPoint(mmd), {
+            shape: "text",
+            text,
+            overrides: {
+                color,
+                fontsize,
+                bold: isXd,
+                "linetooltext.color": color,
+                "linetooltext.fontsize": fontsize,
+                "linetooltext.bold": isXd,
+                ...options.overrides,
+            },
+            ...options,
+        });
     },
     createBcShape(chart, bc, options = {}) {
         return this.createShape(chart, bc.points, { shape: "balloon", text: bc.text, overrides: { markerColor: CHART_CONFIG.COLORS.BCS, backgroundColor: CHART_CONFIG.COLORS.BCS, textColor: CHART_CONFIG.COLORS.BC_TEXT, transparency: 70, backgroundTransparency: 70, fontsize: 12, ...options.overrides }, ...options });
@@ -1026,10 +1064,13 @@ class ChartManager {
                             <label style="cursor:pointer;"><input type="checkbox" id="${cbId('xd')}" ${cfg.xd ? 'checked' : ''} style="margin-right:4px; vertical-align:middle;">线段</label>
                         </div>
 
-                        ${_grpTitle('中枢 / 走势')}
-                        ${_cbRow('zs', '中枢', false)}
-                        ${_cbRow('zs_direction', '中枢方向着色', true)}
-                        ${_cbRow('zs_expanded', '扩展中枢加粗', true)}
+                        ${_grpTitle('中枢')}
+                        <div style="display:flex; gap:14px; font-size:12px;">
+                            <label style="cursor:pointer;"><input type="checkbox" id="${cbId('zs_bi')}" ${cfg.zs_bi ? 'checked' : ''} style="margin-right:4px; vertical-align:middle;">笔中枢</label>
+                            <label style="cursor:pointer;"><input type="checkbox" id="${cbId('zs_xd')}" ${cfg.zs_xd ? 'checked' : ''} style="margin-right:4px; vertical-align:middle;">线段中枢</label>
+                        </div>
+
+                        ${_grpTitle('走势')}
                         ${_cbRow('xd_zslx', '走势类型区间 (L0)', false)}
                         ${_cbRow('recursive_levels', '多级中枢/走势 (L1+)', false)}
 
@@ -1119,42 +1160,18 @@ class ChartManager {
                 });
 
                 const keys = [
-                    'fx', 'bi', 'xd', 'zs', 'bc', 'mmd',
-                    // 笔/段独立级别开关
-                    'mmd_bi', 'mmd_xd', 'bc_bi', 'bc_xd',
-                    'zs_direction', 'zs_expanded', 'xd_zslx',
+                    'fx', 'bi', 'xd', 'bc', 'mmd',
+                    // 笔/段独立级别开关(中枢 / 买卖点 / 背驰)
+                    'zs_bi', 'zs_xd', 'mmd_bi', 'mmd_xd', 'bc_bi', 'bc_xd',
+                    'xd_zslx',
                     'recursive_levels', 'interval_nest', 'overlay_freqs',
                 ];
-                // 样式型 toggle(zs_direction / zs_expanded):TV widget 公开 API
-                // 没有 in-place setProperties,改颜色/线宽只能 remove + recreate
-                // 整个 shape。同帧内 safeRemove + 立即调 draw_chanlun(不走
-                // debounce 300ms 等待)能把视觉空白窗压缩到 ~50ms,远比 debounce
-                // 路径(300ms 全空白)流畅;且用户视角能看到 toggle 即时生效。
-                const STYLE_TOGGLE_KEYS = new Set(['zs_direction', 'zs_expanded']);
-                const STYLE_AFFECTED_CONTAINERS = ['bi_zss', 'xd_zss', 'recursive_zss_L1', 'recursive_zss_L2', 'recursive_zss_L3'];
                 keys.forEach(k => {
                     $('#' + cbId(k)).change(function () {
                         const checked = $(this).is(':checked');
                         self.cl_show_config[k] = checked;
                         saveClShowConfig(self.id, self.cl_show_config);
                         console.log(`[cl_show_config] toggle ${k}=${checked}`);
-                        if (STYLE_TOGGLE_KEYS.has(k)) {
-                            // 样式型:清空守卫 + 立即清空受影响 container,
-                            // 跳过 debounce 等待立即调 draw_chanlun 重建 shape。
-                            STYLE_AFFECTED_CONTAINERS.forEach(t => {
-                                const guardKey = `${self.widget?.symbolInterval?.()?.symbol}_${self.widget?.symbolInterval?.()?.interval}__${t}`;
-                                if (self._reconcileGuard) delete self._reconcileGuard[guardKey];
-                                Object.keys(self.obj_charts || {}).forEach(sk => {
-                                    const container = self.obj_charts[sk]?.[t];
-                                    if (!container || container.length === 0) return;
-                                    container.forEach(item => self.safeRemove(item.id));
-                                    container.length = 0;
-                                });
-                            });
-                            // 同帧 setTimeout(0) 调度立即 redraw,不等 300ms debounce
-                            setTimeout(() => self.draw_chanlun(), 0);
-                            return;
-                        }
                         self.debouncedDrawChanlun();
                     });
                 });
@@ -1448,17 +1465,11 @@ class ChartManager {
             } else {
                 headTime = tailTime = item.points?.time;
             }
-            // 形态分类:
-            //   - 单线段(bi/xd):用 ``headTime >= from``,避免 createMultipointShape
-            //     把画外起点 snap 到可见区边缘造成错位长斜线;
-            //   - 矩形(zss / zslx):用 ``tailTime >= from``,跨可见窗的中枢/走势
-            //     类型 tail 在窗内即渲染——rectangle 形态画外起点不会 snap 错位
-            //     (TV widget 自然裁剪),原 head 过滤会让历史中枢一旦 visibleRange
-            //     收窄就永久消失,跟用户期待严重不符(bi_zss 426→18 缩水 95%)。
-            // 注:对单点形态(item.points 非数组,bcs/mmds/inest)head=tail,两种判定等价。
-            const isRectShape = /^(bi_zss|xd_zss|recursive_zss_|overlay_zss_|xd_zslx|recursive_zslxs_|overlay_zslxs_)/.test(type);
-            const boundaryTime = isRectShape ? tailTime : headTime;
-            if (boundaryTime >= from) {
+            // 所有形态(含中枢矩形)统一按 ``headTime >= from`` 入渲染:只在头部进入可视窗
+            // (必已加载)时才创建,避免 createMultipointShape 把画外/未加载的头部角点 snap
+            // 到边缘造成错位。取舍:头在窗外的历史中枢/走势会整体不显示,但优于"显示但错位"。
+            // 注:单点形态(bcs/mmds/inest)head=tail,等价;tailTime 仍用于下方 keep 判定。
+            if (headTime >= from) {
                 const key = this.makeKey(item);
                 newKeys.add(key);
                 itemsToProcess.push({ item, key, time: headTime, tailTime });
@@ -1651,23 +1662,18 @@ class ChartManager {
         this.reconcile('fxs', cfg.fx ? barsResult.fxs : [], from, symbolKey, (item) => safeCreate(ChartUtils.createFxShape(this.chart, item), 'fx'), false);
         this.reconcile('bis', cfg.bi ? barsResult.bis : [], from, symbolKey, (item) => safeCreate(ChartUtils.createLineShape(this.chart, item, { color: getDynamicColor(currentInterval, "bis"), linewidth: 2 }), 'bi'));
         this.reconcile('xds', cfg.xd ? barsResult.xds : [], from, symbolKey, (item) => safeCreate(ChartUtils.createLineShape(this.chart, item, { color: getDynamicColor(currentInterval, "xds"), linewidth: 2 }), 'xd'));
-        // 中枢方向着色由 cfg.zs_direction 开关(默认 true)控制——开启时按 zs.type
-        // 选 ZS_UP/ZS_DOWN/ZS_ZD,关闭时回退按级别色(老行为)。⑤ 扩展中枢标记
-        // (is_expanded)由 cfg.zs_expanded 控制是否加粗框。两者数据均来自后端。
-        const useDirColor = cfg.zs_direction !== false;
-        const showExpanded = cfg.zs_expanded !== false;
-        const wrapZs = (lvlColor) => (item) => {
-            const zsItem = showExpanded ? item : { ...item, is_expanded: false };
-            return ChartUtils.createZhongshuShape(this.chart, zsItem, {
-                color: lvlColor, linewidth: lvlColor === getDynamicColor(currentInterval, "bi_zss") ? 1 : 2,
-                useDirectionColor: useDirColor,
+        const wrapZs = (lvlColor, linewidth) => (item) => {
+            return ChartUtils.createZhongshuShape(this.chart, item, {
+                color: lvlColor,
+                linewidth,
             });
         };
         // 中枢矩形不应走 getUniqueRenderList(那是给 bi/xd 末段 pending 闪烁
         // 去重用的:它把所有 linestyle=1 的项压成 1 个,但 zss 阵列中**多个**
         // pending 中枢正常并存,被压成 1 个会让大部分中枢消失。useUnique=false。
-        this.reconcile('bi_zss', cfg.zs ? barsResult.bi_zss : [], from, symbolKey, (item) => safeCreate(wrapZs(getDynamicColor(currentInterval, "bi_zss"))(item), 'bi_zs'), false);
-        this.reconcile('xd_zss', cfg.zs ? barsResult.xd_zss : [], from, symbolKey, (item) => safeCreate(wrapZs(getDynamicColor(currentInterval, "xd_zss"))(item), 'xd_zs'), false);
+        // 笔中枢 / 线段中枢现按独立开关(zs_bi / zs_xd)分别控制显隐。
+        this.reconcile('bi_zss', cfg.zs_bi ? barsResult.bi_zss : [], from, symbolKey, (item) => safeCreate(wrapZs(getDynamicColor(currentInterval, "bi_zss"), 1)(item), 'bi_zs'), false);
+        this.reconcile('xd_zss', cfg.zs_xd ? barsResult.xd_zss : [], from, symbolKey, (item) => safeCreate(wrapZs(getDynamicColor(currentInterval, "xd_zss"), 2)(item), 'xd_zs'), false);
         // 背驰/买卖点 —— 拆分版优先(笔/段独立 reconcile + 不同样式 + 独立 toggle);
         // 后端 ``bi_mmds``/``xd_mmds``/``bi_bcs``/``xd_bcs`` 拿不到时,fallback
         // 到合并版 ``bcs``/``mmds``(向后兼容旧 web/老 cache 命中场景)。
@@ -1677,12 +1683,21 @@ class ChartManager {
         const showXdMmd = cfg.mmd_xd !== false;
         const showBiBc = cfg.bc_bi !== false;
         const showXdBc = cfg.bc_xd !== false;
+        // 买卖点 = icon 箭头(定位) + text 标签(类型),两套 shape 各自独立 reconcile;
+        // 用同一份(已按 toggle 门控的)数据源,保证箭头与标签一一对应。
         if (hasSplitMmds) {
-            this.reconcile('bi_mmds', (cfg.mmd && showBiMmd) ? (barsResult.bi_mmds || []) : [], from, symbolKey, (item) => safeCreate(ChartUtils.createMmdShape(this.chart, item), 'mmd_bi'), false);
-            this.reconcile('xd_mmds', (cfg.mmd && showXdMmd) ? (barsResult.xd_mmds || []) : [], from, symbolKey, (item) => safeCreate(ChartUtils.createMmdShape(this.chart, item), 'mmd_xd'), false);
-            this.reconcile('mmds', [], from, symbolKey, () => null, false);   // 清掉旧合并版
+            const biMmds = (cfg.mmd && showBiMmd) ? (barsResult.bi_mmds || []) : [];
+            const xdMmds = (cfg.mmd && showXdMmd) ? (barsResult.xd_mmds || []) : [];
+            this.reconcile('bi_mmds', biMmds, from, symbolKey, (item) => safeCreate(ChartUtils.createMmdShape(this.chart, item), 'mmd_bi'), false);
+            this.reconcile('xd_mmds', xdMmds, from, symbolKey, (item) => safeCreate(ChartUtils.createMmdShape(this.chart, item), 'mmd_xd'), false);
+            this.reconcile('bi_mmd_labels', biMmds, from, symbolKey, (item) => safeCreate(ChartUtils.createMmdLabelShape(this.chart, item), 'mmd_bi_label'), false);
+            this.reconcile('xd_mmd_labels', xdMmds, from, symbolKey, (item) => safeCreate(ChartUtils.createMmdLabelShape(this.chart, item), 'mmd_xd_label'), false);
+            this.reconcile('mmds', [], from, symbolKey, () => null, false);          // 清掉旧合并版
+            this.reconcile('mmd_labels', [], from, symbolKey, () => null, false);
         } else {
-            this.reconcile('mmds', cfg.mmd ? barsResult.mmds : [], from, symbolKey, (item) => safeCreate(ChartUtils.createMmdShape(this.chart, item), 'mmd'), false);
+            const mmds = cfg.mmd ? barsResult.mmds : [];
+            this.reconcile('mmds', mmds, from, symbolKey, (item) => safeCreate(ChartUtils.createMmdShape(this.chart, item), 'mmd'), false);
+            this.reconcile('mmd_labels', mmds, from, symbolKey, (item) => safeCreate(ChartUtils.createMmdLabelShape(this.chart, item), 'mmd_label'), false);
         }
         if (hasSplitBcs) {
             this.reconcile('bi_bcs', (cfg.bc && showBiBc) ? (barsResult.bi_bcs || []) : [], from, symbolKey, (item) => safeCreate(ChartUtils.createBcShape(this.chart, item), 'bc_bi'), false);
@@ -1692,27 +1707,23 @@ class ChartManager {
             this.reconcile('bcs', cfg.bc ? barsResult.bcs : [], from, symbolKey, (item) => safeCreate(ChartUtils.createBcShape(this.chart, item), 'bc'), false);
         }
 
-        // ③ 走势类型(xd_zslx) —— 半透明矩形区间标记上涨/下跌/盘整
-        // 与 L1+ 一致用 from=0:xd_zslx 也常跨越可视窗,若按 head_time 过滤会出现
-        // 切到 symbol 时初始可视窗收窄 head_time<from 直接全过滤的隐患
-        // (recursive L1+ 已踩此坑,见 commit de5bbab)。
-        this.reconcile('xd_zslx', cfg.xd_zslx !== false ? (barsResult.xd_zslx || []) : [], 0, symbolKey, (item) => safeCreate(ChartUtils.createZslxShape(this.chart, item), 'xd_zslx'), false);
+        // ③ 走势类型(xd_zslx) —— 半透明矩形区间标记上涨/下跌/盘整。
+        // 矩形类统一走可视窗 headTime 过滤,避免画外/未加载角点被 TV snap 到边缘造成错位。
+        this.reconcile('xd_zslx', cfg.xd_zslx !== false ? (barsResult.xd_zslx || []) : [], from, symbolKey, (item) => safeCreate(ChartUtils.createZslxShape(this.chart, item), 'xd_zslx'), false);
 
         // ④ 递归层级树 —— L1/L2/L3 高级中枢与走势类型(L0 已在 xd_zss / xd_zslx)
         const recLevels = (cfg.recursive_levels !== false ? (barsResult.recursive_levels || []) : []);
         // 收集到 by-level container(reconcile key 已预先分配 recursive_zss_L1..L3 / _zslxs_L1..L3)
-        // 高级别中枢/走势类型横跨上百根 bars,几乎必然 head_time < visibleRange.from
-        // ——传 from=0 让 reconcile 不按 head 过滤,否则一切到 symbol 就被全过滤、永远
-        // 看不到 L1+ 多级别结构。代价是画外起点会被 createMultipointShape 接受;实测
-        // rectangle 形态(中枢/zslx) 不会出现长斜线 snap 问题。
+        // 高级别中枢/走势类型横跨上百根 bars,若头部在窗外则整体不显示;这是为了避免
+        // createMultipointShape 对画外/未加载角点做 snap 后造成矩形错位。
         // L1 中枢 = chain[2](高二级)xds 色,L2 = chain[3] xds 色,L3 = chain 顶端 xds 色。
         // 让用户在 K 线层看到的高级中枢矩形,颜色和 chain 上对应周期的「线段色」一致。
         for (let L = 1; L <= 3; L++) {
             const lv = recLevels.find((x) => x.level === L);
             const recColor = chainColorAt(currentInterval, L + 1, "xds");
             // useUnique=false:多个 pending L1+ 中枢需并存,见 bi_zss/xd_zss 同源说明。
-            this.reconcile(`recursive_zss_L${L}`, lv ? lv.zss : [], 0, symbolKey, (item) => safeCreate(ChartUtils.createRecursiveZsShape(this.chart, item, { level: L, color: recColor }), `rec_zs_L${L}`), false);
-            this.reconcile(`recursive_zslxs_L${L}`, lv ? lv.zslxs : [], 0, symbolKey, (item) => safeCreate(ChartUtils.createZslxShape(this.chart, item, { overrides: { transparency: 88, linecolor: recColor, backgroundColor: recColor, color: recColor, "trendline.linecolor": recColor } }), `rec_zslx_L${L}`), false);
+            this.reconcile(`recursive_zss_L${L}`, lv ? lv.zss : [], from, symbolKey, (item) => safeCreate(ChartUtils.createRecursiveZsShape(this.chart, item, { level: L, color: recColor }), `rec_zs_L${L}`), false);
+            this.reconcile(`recursive_zslxs_L${L}`, lv ? lv.zslxs : [], from, symbolKey, (item) => safeCreate(ChartUtils.createZslxShape(this.chart, item, { overrides: { transparency: 88, linecolor: recColor, backgroundColor: recColor, color: recColor, "trendline.linecolor": recColor } }), `rec_zslx_L${L}`), false);
         }
 
         // 多周期叠加(/tv/overlays):高级别 CL 跑出的中枢/走势类型。**缓存**
@@ -1727,9 +1738,9 @@ class ChartManager {
                 const od = overlays[freq] || {};
                 // overlay_zss/zslx level=N → 对应 chain[N] 周期 xds 色,跟那一级的「线段色」一致。
                 const ovColor = chainColorAt(currentInterval, level, "xds");
-                this.reconcile(`overlay_zss_${level}`, od.xd_zss || [], 0, symbolKey,
+                this.reconcile(`overlay_zss_${level}`, od.xd_zss || [], from, symbolKey,
                     (item) => safeCreate(ChartUtils.createOverlayZsShape(this.chart, item, { level, color: ovColor }), `ovz${level}`), false);
-                this.reconcile(`overlay_zslxs_${level}`, od.xd_zslx || [], 0, symbolKey,
+                this.reconcile(`overlay_zslxs_${level}`, od.xd_zslx || [], from, symbolKey,
                     (item) => safeCreate(ChartUtils.createOverlayZslxShape(this.chart, item, { level, color: ovColor }), `ovx${level}`), false);
             });
             for (let lv = freqs.length + 1; lv <= 3; lv++) {

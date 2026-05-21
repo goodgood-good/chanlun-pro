@@ -1,8 +1,5 @@
 """验证 ExchangeChangQiao.klines 按 config.US_HISTORY_KLINE_SOURCE 路由。"""
-from unittest.mock import MagicMock, patch
 
-import pandas as pd
-import pytest
 
 
 def test_should_use_alpaca_returns_true_for_us_when_config_says_alpaca(monkeypatch):

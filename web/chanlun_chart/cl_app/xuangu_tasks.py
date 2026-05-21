@@ -10,7 +10,7 @@ from chanlun.exchange import Market, get_exchange
 from chanlun.xuangu import xuangu
 from chanlun.trader.online_market_datas import OnlineMarketDatas
 from tqdm.auto import tqdm
-from chanlun.cl_utils import query_cl_chart_config, web_batch_get_cl_datas
+from chanlun.cl_utils import query_cl_chart_config
 
 log = fun.get_logger()
 

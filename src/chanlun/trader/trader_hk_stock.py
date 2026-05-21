@@ -1,7 +1,7 @@
 import datetime
 
 from chanlun.exchange.exchange_futu import ExchangeFutu
-from chanlun import fun, utils
+from chanlun import utils
 from chanlun.db import db
 from chanlun import zixuan
 from chanlun.backtesting.base import Operation, POSITION

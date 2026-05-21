@@ -57,12 +57,12 @@ notify = ["lark-oapi>=1.4.17"]
 # kcharts.py 和 backtesting/backtest.py 用 (图表渲染 / 回测可视化)。
 # web 服务运行不需要这两个包, 顶层依赖让 docker 部署多装 ~100MB 无意义。
 charts = [
-    "pyecharts==2.0.8",
+    "pyecharts==2.1.0",
     "matplotlib>=3.10.3",
 ]
 backtest = [
     "pyfolio-reloaded>=0.9.9",
-    "pyecharts==2.0.8",
+    "pyecharts==2.1.0",
     "matplotlib>=3.10.3",
 ]
 monitor = ["playwright>=1.53.0"]
@@ -77,19 +77,37 @@ all = [
     "openai>=1.84.0",
     "lark-oapi>=1.4.17",
     "pyfolio-reloaded>=0.9.9",
-    "pyecharts==2.0.8",
+    "pyecharts==2.1.0",
     "matplotlib>=3.10.3",
     "playwright>=1.53.0",
 ]
 
 [tool.ruff]
 # xtquant 是 vendored 的第三方 SDK（迅投 QMT），不纳入 lint
-extend-exclude = ["src/xtquant"]
+extend-exclude = [
+    "src/xtquant",
+    # 第三方交易框架/券商 SDK 适配入口，依赖按场景安装，不纳入默认 lint
+    "src/cl_myquant",
+    "src/cl_vnpy",
+    "src/cl_wtpy",
+]
 
 [tool.ruff.lint]
 # F403/F405: import * 是项目设计（exchange/strategy 子类 import 基类模块）
 # E402: 多为 sys.path 设置后 import / 条件 import，属正当模式
-ignore = ["F403", "F405", "E402"]
+# E731/E741: 既有核心算法/单测大量使用短 lambda 与几何变量名，暂作为遗留风格保留
+ignore = ["F403", "F405", "E402", "E731", "E741"]
+
+[tool.ruff.lint.per-file-ignores]
+# 这些模块保留兼容性 re-export / 延迟导入入口，不能被 F401 自动删除。
+"src/chanlun/exchange/__init__.py" = ["F401"]
+"src/chanlun/file_db.py" = ["F401"]
+"web/chanlun_chart/cl_app/__init__.py" = ["F401"]
+"web/chanlun_chart/cl_app/blueprints/tv.py" = ["F401"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
 
 [tool.poetry]
 # package-mode=false: 本项目不发布到 PyPI，Poetry 仅管理依赖，不需要打包配置

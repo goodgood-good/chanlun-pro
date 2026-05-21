@@ -13,7 +13,6 @@ from openctp_ctp.thosttraderapi import (
     THOST_FTDC_TC_GFD,  # 当日有效
     THOST_FTDC_VC_AV,  # 任意数量
     CThostFtdcInputOrderField,
-    CThostFtdcOrderField,
     CThostFtdcQryInstrumentField,
     CThostFtdcQryInvestorPositionField,
     CThostFtdcQryOrderField,

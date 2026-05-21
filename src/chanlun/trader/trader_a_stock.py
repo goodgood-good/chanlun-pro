@@ -1,6 +1,6 @@
 import datetime
 
-from chanlun import fun, utils
+from chanlun import utils
 from chanlun import zixuan
 from chanlun.db import db
 from chanlun.exchange.exchange_tdx import ExchangeTDX

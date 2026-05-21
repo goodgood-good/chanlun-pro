@@ -73,7 +73,6 @@ def test_atomic_write_pickle_logs_and_swallows_worker_errors(
     - LogUtil.warning 至少记一条 "async write failed"
     """
     import logging
-    import chanlun.file_db as _filedb_mod
 
     # 让底层 blocking 写直接抛错
     def _boom(self, p, o):  # noqa: ARG001

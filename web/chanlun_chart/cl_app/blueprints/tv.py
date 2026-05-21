@@ -496,7 +496,7 @@ def tv_symbols():
             precision = int(precision)
             if precision <= 0:
                 precision = 100
-        except:
+        except (TypeError, ValueError):
             precision = 100
 
     info = {
@@ -777,7 +777,6 @@ def tv_history():
                     return {"s": "no_data"}
                 cl_chart_data = _fetch_result["cl_chart_data"]
                 cd = _fetch_result["cd"]
-                kchart_to_frequency = _fetch_result["kchart_to_frequency"]
 
                 # 跨周期 MACD (P5 third step)
                 apply_higher_macd_to_chart_data(cl_chart_data, frequency, market, cl_config)

@@ -117,15 +117,12 @@ class StrategyFuturesXDZS(Strategy):
 
         opts = []
 
-        kline_date = high_data.get_klines()[-1].date
         if len(high_data.get_xd_zss()) == 0:
             return opts
 
         high_bi = high_data.get_bis()[-1]
         high_xd = high_data.get_xds()[-1]
         high_xd_zs = high_data.get_xd_zss()[-1]
-
-        high_xd_zs_mid_price = (high_xd_zs.zg - high_xd_zs.zd) / 2 + high_xd_zs.zd
 
         # 平仓条件：同向线段完成，或价格超出中枢 zg/zd 后笔出现背驰/买卖点
         if "buy" in mmd and high_xd.type == "up" and high_xd.done:

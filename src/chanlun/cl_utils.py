@@ -12,7 +12,6 @@ from chanlun.core.cl_interface import BI, FX, ICL, LINE, MACD_INFOS, ZS, Config,
 from chanlun.core.macd import MACD
 from chanlun.db import db
 from chanlun.exchange import exchange
-from chanlun.file_db import fdb
 from chanlun.tools.log_util import LogUtil
 
 

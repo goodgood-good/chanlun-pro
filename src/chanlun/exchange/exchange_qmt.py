@@ -1,11 +1,10 @@
 import datetime
 import threading
-import time
 from typing import Dict, List, Union
 from datetime import timedelta
 import pandas as pd
 import pytz
-from tenacity import retry, retry_if_result, stop_after_attempt, wait_random
+from tenacity import retry, stop_after_attempt, wait_random
 
 from chanlun import fun
 from chanlun.exchange.exchange import Exchange, Tick, convert_stock_kline_frequency

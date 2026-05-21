@@ -111,3 +111,20 @@ def test_simple_fixture_baseline_unchanged(cl_with_synthetic_klines):
     # BI.zs_low/zs_high 修复后, 笔中枢可正常识别(此前因默认 0 完全失败)
     assert counts.bi_zss == 1
     assert counts.xd_zss == 0
+
+
+def test_recursive_levels_not_starved(cl_with_synthetic_klines):
+    """回归保护: get_recursive_levels 不应被 L0 口径问题饿死在 L0。
+
+    历史 bug (fix/zhongshu-l0 的 l0 改动): 递归 L0 改用主链路 xd_zss/xd_zslx,
+    其走势类型数量远少于递归内部自算 (实测 1~2 vs 3~10), 不足 3 个即在
+    ``if len(l0_zslxs) < 3: return`` 提前终止, 导致 L1+ 全空、图上多级中枢消失。
+    足量数据 (n=1500, up, 内部自算实测装出 L1) 必须能升出 L1+。
+    """
+    cd = cl_with_synthetic_klines(1500, seed=42, trend="up", multi_freq=True)
+    levels = cd.get_recursive_levels()
+    max_level = max((lv.level for lv in levels), default=-1)
+    assert max_level >= 1, (
+        f"递归只到 L{max_level}, L1+ 被饿死——疑似 L0 口径回归。\n"
+        f"levels={[(lv.level, len(lv.zss), len(lv.zslxs)) for lv in levels]}"
+    )

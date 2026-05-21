@@ -1,6 +1,5 @@
 from typing import Dict, List, Union
 
-from chanlun import fun
 from chanlun.backtesting.base import POSITION, MarketDatas, Operation, Strategy
 from chanlun.cl_analyse import LinesFormAnalyse, MultiLevelAnalyse
 
@@ -28,15 +27,9 @@ class StrategyFuturesXDMMD(Strategy):
         high_xd = high_data.get_xds()[-1]
         if len(high_xd.tzxls) == 1:
             high_xd = high_data.get_xds()[-2]
-        high_bi = self.last_done_bi(high_data.get_bis())
         # 高级别线段没有买卖点则不开仓
         if len(high_xd.line_mmds()) == 0:
             return opts
-
-        if high_data.get_klines()[-1].date >= fun.str_to_datetime(
-            "2022-06-13 09:30:00"
-        ):
-            a = 1
 
         low_data = market_data.get_cl_data(code, market_data.frequencys[1])
         low_bi = self.last_done_bi(low_data.get_bis())
@@ -126,7 +119,6 @@ class StrategyFuturesXDMMD(Strategy):
         high_xd = high_data.get_xds()[-1]
         if len(high_xd.tzxls) == 1:
             high_xd = high_data.get_xds()[-2]
-        high_bi = self.last_done_bi(high_data.get_bis())
         low_bi = self.last_done_bi(low_data.get_bis())
 
         if self.bi_td(low_bi, low_data) is False:

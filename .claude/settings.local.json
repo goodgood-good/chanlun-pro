@@ -1,0 +1,37 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | Where-Object { $_.CommandLine -match 'chanlun' } | Select-Object ProcessId, CommandLine | Format-List)",
+      "Skill(superpowers:brainstorming)",
+      "Skill(superpowers:brainstorming:*)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(git check-ignore *)",
+      "Skill(superpowers:writing-plans)",
+      "Skill(superpowers:writing-plans:*)",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/test_kline_precision.py -q)",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/test_kline_precision.py -v)",
+      "mcp__plugin_oh-my-claudecode_t__lsp_diagnostics",
+      "Bash(.venv/Scripts/python.exe -m pyright src/chanlun/exchange/kline_precision.py tests/test_kline_precision.py)",
+      "Bash(.venv/Scripts/python.exe -c ' *)",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/test_kline_precision.py -q -k round_half_up)",
+      "Bash(python -m pytest tests/test_kline_precision.py -v)",
+      "PowerShell(git -C \"D:\\\\project\\\\chanlun-pro\" add src/chanlun/exchange/kline_precision.py tests/test_kline_precision.py)",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/test_kline_precision.py -q -k normalize)",
+      "mcp__plugin_oh-my-claudecode_t__ast_grep_search",
+      "Bash(cd /d \"D:\\\\project\\\\chanlun-pro\")",
+      "Bash(.venv/Scripts/python.exe -c \"import chanlun.exchange.exchange_tdx, chanlun.exchange.exchange_qmt, chanlun.exchange.exchange_baostock; print\\('import ok'\\)\")",
+      "Bash(PYTHONPATH=\"D:/project/chanlun-pro/src\" \"D:/project/chanlun-pro/.venv/Scripts/python.exe\" -c \"import chanlun.exchange.exchange_tdx, chanlun.exchange.exchange_qmt, chanlun.exchange.exchange_baostock; print\\('import ok'\\)\")",
+      "Bash(PYTHONPATH=\"D:/project/chanlun-pro/src\" \"D:/project/chanlun-pro/.venv/Scripts/python.exe\" -c \"import chanlun.exchange.exchange_tdx, chanlun.exchange.exchange_qmt; print\\('import ok'\\)\")",
+      "Bash(PYTHONPATH=\"D:/project/chanlun-pro/src\" \"D:/project/chanlun-pro/.venv/Scripts/python.exe\" -m py_compile src/chanlun/exchange/exchange_baostock.py)",
+      "PowerShell(cd D:\\\\project\\\\chanlun-pro; $env:PYTHONPATH = \"D:\\\\project\\\\chanlun-pro\\\\src\"; .venv\\\\Scripts\\\\python.exe -c \"import chanlun.exchange.exchange_tdx_fx; print\\('import ok'\\)\")",
+      "Bash(.venv/Scripts/python.exe *)",
+      "Bash(python -m pytest tests/test_kline_precision.py -q)",
+      "Bash(git *)",
+      "Bash(\"D:/project/chanlun-pro/.venv/Scripts/python.exe\" -m py_compile \"D:/project/chanlun-pro/src/chanlun/exchange/exchange_cq.py\")",
+      "Skill(superpowers:finishing-a-development-branch)",
+      "Skill(superpowers:finishing-a-development-branch:*)",
+      "Bash(ruff check *)"
+    ]
+  }
+}
