@@ -111,34 +111,48 @@ class BsPointCalculator:
         应改用独立的 zs_type key。
         """
         for line in lines:
+            old_mmds = list(getattr(line, 'zs_type_mmds', {}).get(self.zs_type, []))
+            old_bcs = list(getattr(line, 'zs_type_bcs', {}).get(self.zs_type, []))
+            if getattr(line, 'default_zs_type', None) == self.zs_type:
+                if old_mmds and hasattr(line, 'mmds'):
+                    old_mmd_ids = {id(mmd) for mmd in old_mmds}
+                    line.mmds = [mmd for mmd in line.mmds if id(mmd) not in old_mmd_ids]
+                if old_bcs and hasattr(line, 'bcs'):
+                    old_bc_ids = {id(bc) for bc in old_bcs}
+                    line.bcs = [bc for bc in line.bcs if id(bc) not in old_bc_ids]
             line.zs_type_mmds[self.zs_type] = []
             line.zs_type_bcs[self.zs_type] = []
 
     # bisect 二分辅助 (供 _detect_* 复用)
     @staticmethod
     def _build_zss_index(zss: List[ZS]) -> Tuple[List[ZS], List[int]]:
-        """预过滤 zss + 抽 start.k.k_index 升序数组, 供 bisect 二分。
+        """预过滤 zss + 抽时间锚点 k_index 升序数组, 供 bisect 二分。
 
-        过滤掉 zs.start / zs.start.start 为 None 的项 (ZsCalculator 早期阶段
-        可能产生占位 zs)。剩下 clean_zss 与 start_keys 同长度且顺序一致。
+        开头中枢可以没有进入段(``ZS.start is None``)。这种中枢仍是合法中枢,
+        用第一条核心线段的起点作为时间锚；只有连核心线段起点也不可用时才跳过。
+        剩下 clean_zss 与 start_keys 同长度且顺序一致。
         """
         clean_zss: List[ZS] = []
         start_keys: List[int] = []
         for zs in zss:
-            if zs.start is None or zs.start.start is None:
+            start_line = zs.start
+            if start_line is None and getattr(zs, 'lines', None):
+                start_line = zs.lines[0]
+            if start_line is None or start_line.start is None:
                 continue
             clean_zss.append(zs)
-            start_keys.append(zs.start.start.k.k_index)
+            start_keys.append(start_line.start.k.k_index)
         return clean_zss, start_keys
 
     def _find_subordinate_1mmd_in_window(
-        self, now_line: LINE, target_type: str
+        self, now_line: LINE, target_type: str, end_tolerance: int = 0
     ) -> Optional[LINE]:
-        """xd 层定律一(原文 kobo.54.1)用:在 ``now_line`` 时间窗内查找同向的
+        """xd 层定律一(原文 kobo.54.1)用:在 ``now_line`` 末端查找同向的
         次级别(笔层) 1 类买卖点所挂的笔。
 
         - 仅在 ``self.zs_type == 'xd'`` 时启用——bi 层无更细次级别。
-        - 时间窗:``[now_line.start.k.k_index, now_line.end.k.k_index]``。
+        - 默认只接受落在 ``now_line.end.k.k_index`` 的次级别 1 类点；
+          ``end_tolerance`` 可显式放宽末端容差。
         - 同向:``bi.type == target_type``;mmd 名 = ``1buy``(down)/``1sell``(up)。
         - 命中即返回该笔;无命中返回 None。
         """
@@ -150,6 +164,9 @@ class BsPointCalculator:
             end_k = now_line.end.k.k_index
         except AttributeError:
             return None
+        end_tolerance = max(0, end_tolerance)
+        lower_bound = max(start_k, end_k - end_tolerance)
+        found: Optional[LINE] = None
         for bi in self.cl.get_bis():
             if bi.type != target_type:
                 continue
@@ -157,12 +174,12 @@ class BsPointCalculator:
                 bi_end_k = bi.end.k.k_index
             except AttributeError:
                 continue
-            if not (start_k <= bi_end_k <= end_k):
+            if not (lower_bound <= bi_end_k <= end_k):
                 continue
             mmds = getattr(bi, 'zs_type_mmds', {}).get('bi', [])
             if any(m.name == target_mmd for m in mmds):
-                return bi
-        return None
+                found = bi
+        return found
 
     @staticmethod
     def _breaks_last_zs(now_line: LINE, last_zs: ZS) -> bool:
@@ -358,7 +375,7 @@ class BsPointCalculator:
         第二类买卖点 = 一类买卖点后的反抽再回调（不创新低/高），或盘整背驰
 
         **路径 1·定律一(仅 xd 层)**: 原文 kobo.54.1「任何级别的第二类买卖点都
-        由次级别相应走势的第一类买点构成」——xd 层 ``now_line`` 时间窗内若
+        由次级别相应走势的第一类买点构成」——xd 层 ``now_line`` 末端若
         挂有同向次级别(笔层) 1 类信号,直接识别为本级别 2 类。这是原文严格口径,
         优先于经验法。要求 ``process_mmd`` 先跑 bi 层(已在 cl.py 中保证)。
 
@@ -387,7 +404,7 @@ class BsPointCalculator:
                 continue
 
             # ---- 路径 1·定律一(原文 kobo.54.1) ----
-            # xd 层时,优先看次级别(笔层) 1 类是否在 now_line 时间窗内,有则
+            # xd 层时,优先看次级别(笔层) 1 类是否落在 now_line 末端,有则
             # 直接产出本级别 2 类,跳过经验法。
             sub_1bi = self._find_subordinate_1mmd_in_window(now_line, now_line.type)
             if sub_1bi is not None:
@@ -577,13 +594,13 @@ class BsPointCalculator:
 
         **重要(原文 kobo.61.1)**:「并不是走势中枢上方的任何回调回抽都是第三类
         买卖点,必须是第一次。」一个中枢只能产生**一个** 3 买、最多再加一个
-        3 卖(扩展性买卖点),后续不破 ZG 的反抽 **不重复挂**。`seen_3rd` 字典
+        3 卖(扩展性买卖点),后续不破 ZG 的反抽 **不重复挂**。`first_return_seen` 字典
         以 (zs.index, mmd_name) 为键确保 first-touch 语义。旧实现对每个不破
         ZG 的反抽都识别,在密集震荡行情下 3 类信号会指数级爆炸。
         """
-        # first-touch 守卫:每个中枢每种 3 类信号只识别一次(原文 kobo.61.1)。
-        # key = (zs.index, mmd_name); value = 已挂的 now_line.index。
-        seen_3rd: dict[tuple[int, str], int] = {}
+        # first-touch 守卫:每个中枢每种 3 类信号只处理第一次回抽/回拉(原文 kobo.61.1)。
+        # key = (zs.index, mmd_name); value = 首次回抽/回拉的 now_line.index。
+        first_return_seen: dict[tuple[int, str], int] = {}
 
         for now_line in lines:
             # 防未来函数：3buy/3sell 关联中枢必须在 now_line 完成之前就已
@@ -599,17 +616,28 @@ class BsPointCalculator:
             if related_zs is None:
                 continue
 
-            mmd_name, msg = self._judge_3rd_bs_point(now_line, related_zs)
-            if mmd_name is None:
+            if related_zs.end is None:
+                continue
+            if related_zs.end.type == 'up' and now_line.type == 'down':
+                expected_mmd_name = '3buy'
+            elif related_zs.end.type == 'down' and now_line.type == 'up':
+                expected_mmd_name = '3sell'
+            else:
                 continue
 
-            # first-touch 限定(原文 kobo.61.1):同一中枢同一类型 3 类只识别最早一次
-            ftkey = (related_zs.index, mmd_name)
-            if ftkey in seen_3rd:
+            # First-touch semantics: the first return after leaving a centre
+            # consumes the third-kind opportunity even when it fails the ZG/ZD test.
+            ftkey = (related_zs.index, expected_mmd_name)
+            if ftkey in first_return_seen:
                 LogUtil.debug(lambda:
-                    f"[BsPointCalculator] {mmd_name} 已被中枢 zs[{related_zs.index}] "
-                    f"在 line[{seen_3rd[ftkey]}] 首次识别,line[{now_line.index}] 跳过(first-touch)"
+                    f"[BsPointCalculator] {expected_mmd_name} first return for zs[{related_zs.index}] "
+                    f"was line[{first_return_seen[ftkey]}], skip line[{now_line.index}]"
                 )
+                continue
+            first_return_seen[ftkey] = now_line.index
+
+            mmd_name, msg = self._judge_3rd_bs_point(now_line, related_zs)
+            if mmd_name is None:
                 continue
 
             # 去重：同一线段同一中枢同一名字不重复挂
@@ -622,7 +650,6 @@ class BsPointCalculator:
                 zs_type=self.zs_type,
                 msg=msg,
             )
-            seen_3rd[ftkey] = now_line.index
             LogUtil.debug(lambda:
                 f"[BsPointCalculator] 识别到 {mmd_name}: line.index={now_line.index}, "
                 f"zs.index={related_zs.index}, msg={msg}"

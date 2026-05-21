@@ -282,6 +282,7 @@ class ZsCalculator:
 
             # 3. 尝试延伸中枢，并检查是否完成
             is_completed, exit_idx = self._extend_and_check_complete(center, core_start_idx + 3)
+            self._promote_opening_entry_if_needed(center)
 
             if is_completed:
                 # 有效中枢须满足：有离开段、核心线段 >= min_zs_lines（L0
@@ -310,6 +311,44 @@ class ZsCalculator:
                 self._last_entry_idx = entry_idx
                 break
 
+    def _promote_opening_entry_if_needed(self, center: ZS) -> None:
+        """开头中枢恰好 5 段重叠时，第一段按进入段处理。
+
+        项目 L0 口径为 4 段重叠成中枢，最后一段为离开段；若从数据开头
+        直接看到 5 段连续重叠，则第 1 段不再是核心段，而是进入段，
+        中枢核心应从第 2 段开始。
+        """
+        if (
+            self.min_zs_lines != 4
+            or center.start is not None
+            or len(center.lines) != self.min_zs_lines + 1
+        ):
+            return
+
+        promoted_start = center.lines[0]
+        new_lines = center.lines[1:]
+        if len(new_lines) < self.min_zs_lines:
+            return
+
+        seg_a, seg_b = new_lines[0], new_lines[1]
+        new_zg = min(seg_a.zs_high, seg_b.zs_high)
+        new_zd = max(seg_a.zs_low, seg_b.zs_low)
+        if new_zd >= new_zg:
+            return
+
+        for line in new_lines[2:]:
+            if max(line.zs_low, new_zd) >= min(line.zs_high, new_zg):
+                return
+
+        center.start = promoted_start
+        center.lines = new_lines
+        center.zg = new_zg
+        center.zd = new_zd
+        if center.end is promoted_start:
+            center.end = new_lines[-1]
+        center._bounds_dirty = True
+        center.update_boundaries()
+
     def _extend_and_check_complete(self, center: ZS, start_j: int) -> tuple[bool, int]:
         """
         检查中枢的延伸或完成。
@@ -334,6 +373,8 @@ class ZsCalculator:
                     # 这是最后一条线段，它重叠了，必须是核心成员
                     center.lines.append(current_seg)
                     center.update_boundaries()
+                    if len(center.lines) >= self.min_zs_lines:
+                        center.end = current_seg
                     return False, j
 
                 # 1.2 预读下一条线段 (next_seg) 以判断是否完成

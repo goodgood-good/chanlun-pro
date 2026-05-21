@@ -152,8 +152,8 @@ const MMD_ICON = { buy: 0xf062, sell: 0xf063 };
 // 尺寸/字号一处可调:段层为主级别略大并加粗、笔层数量多取小值;合并版居中。
 const MMD_ICON_SIZE = { xd: 14, bi: 10, default: 12 };
 const MMD_LABEL_FONTSIZE = { xd: 12, bi: 10, default: 11 };
-// 文字标签相对买卖点价格的纵向让出比例:买点下移、卖点上移,避免标签盖住箭头/K 线。
-// 箭头自身始终使用原始 mmd.points,保证指向真实买卖点。
+// 买卖点图标/文字只在绘制层偏移,不改后端真实买卖点价格。买点下移、卖点上移,避免盖住 K 线。
+const MMD_ICON_PRICE_OFFSET = 0.0025;
 const MMD_LABEL_PRICE_OFFSET = 0.0015;
 
 const DEFAULT_COLORS = {
@@ -325,15 +325,25 @@ const ChartUtils = {
         const shape = options.direction === "up" ? "arrow_down" : "arrow_up";
         return this.createShape(chart, tp.points, { shape, text: "区间套转折", overrides: { arrowColor: color, color, fontsize: 14, bold: true, ...options.overrides }, ...options });
     },
-    // 买卖点标签锚点:文字按方向让出一档;箭头本身不偏移,避免指向位置失真。
+    mmdOffsetPoint(mmd, offsetRatio, fromPoint = null) {
+        const src = fromPoint || mmd.points || {};
+        const base = mmd.points || {};
+        if (typeof src.price !== "number" || typeof base.price !== "number") return src;
+        const off = Math.abs(base.price) * offsetRatio;
+        return { ...src, price: mmd.text.includes("B") ? src.price - off : src.price + off };
+    },
+    // 买卖点箭头锚点:买点放到 K 线下方、卖点放到 K 线上方,避免和 high/low 重叠。
+    mmdIconPoint(mmd) {
+        return this.mmdOffsetPoint(mmd, MMD_ICON_PRICE_OFFSET);
+    },
+    // 买卖点标签锚点:文字在箭头外侧再让出一档,避免文字、箭头、K 线三者互相覆盖。
     mmdLabelPoint(mmd) {
         const p = mmd.points || {};
         if (typeof p.price !== "number") return p;
-        const off = p.price * MMD_LABEL_PRICE_OFFSET;
-        return { ...p, price: mmd.text.includes("B") ? p.price - off : p.price + off };
+        return this.mmdOffsetPoint(mmd, MMD_LABEL_PRICE_OFFSET, this.mmdIconPoint(mmd));
     },
     // 买卖点箭头:icon 单字形,尺寸可控、横向居中锚定到 K 线(定位与分型圆点一致,准确);
-    // 使用原始 mmd.points,保证箭头绑定真实买卖点位置。
+    // 使用绘制层偏移点,避免箭头贴住或覆盖 K 线;原始 mmd.points 仍保留真实买卖点位置。
     createMmdShape(chart, mmd, options = {}) {
         const isBuy = mmd.text.includes("B");
         const color = isBuy ? CHART_CONFIG.COLORS.MMD_UP : CHART_CONFIG.COLORS.MMD_DOWN;
@@ -341,7 +351,7 @@ const ChartUtils = {
         const isXd = isSplit && mmd.level === "xd";
         const size = isSplit ? (isXd ? MMD_ICON_SIZE.xd : MMD_ICON_SIZE.bi) : MMD_ICON_SIZE.default;
         const icon = isBuy ? MMD_ICON.buy : MMD_ICON.sell;
-        return this.createShape(chart, mmd.points, {
+        return this.createShape(chart, this.mmdIconPoint(mmd), {
             shape: "icon",
             icon,
             overrides: { color, size, "linetoolicon.color": color, "linetoolicon.size": size, ...options.overrides },

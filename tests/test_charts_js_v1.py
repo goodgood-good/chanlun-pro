@@ -15,12 +15,16 @@
 
 from __future__ import annotations
 
+import pathlib
 import textwrap
 
 import pytest
 
 playwright_module = pytest.importorskip("playwright.sync_api", reason="playwright 未安装")
 sync_playwright = playwright_module.sync_playwright
+
+_REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
+_CHARTS_JS_PATH = _REPO_ROOT / "web" / "chanlun_chart" / "cl_app" / "static" / "js" / "charts.js"
 
 
 # 与 charts.js 中实际定义保持一致 (单一来源是 charts.js 本身;
@@ -73,6 +77,57 @@ def harness_html(tmp_path_factory) -> str:
         </body></html>
     """).strip(), encoding="utf-8")
     return f"file://{p.as_posix()}"
+
+
+@pytest.fixture(scope="module")
+def actual_charts_html(tmp_path_factory) -> str:
+    """加载真实 charts.js,用于验证纯前端绘制辅助函数。"""
+    p = tmp_path_factory.mktemp("charts-real") / "harness.html"
+    p.write_text(textwrap.dedent(f"""
+        <!doctype html>
+        <html><head><meta charset="utf-8"><title>charts.js harness</title></head>
+        <body>
+        <script src="{_CHARTS_JS_PATH.as_uri()}"></script>
+        </body></html>
+    """).strip(), encoding="utf-8")
+    return f"file://{p.as_posix()}"
+
+
+def test_mmd_icon_and_label_are_offset_away_from_kline(actual_charts_html):
+    """买点箭头在 low 下方、卖点箭头在 high 上方,标签在箭头外侧。"""
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.goto(actual_charts_html)
+        page.wait_for_load_state("networkidle")
+        result = page.evaluate("""
+            (() => {
+                const buy = { points: { time: 1, price: 100 }, text: "1B" };
+                const sell = { points: { time: 1, price: 100 }, text: "1S" };
+                const buyIcon = ChartUtils.mmdIconPoint(buy);
+                const buyLabel = ChartUtils.mmdLabelPoint(buy);
+                const sellIcon = ChartUtils.mmdIconPoint(sell);
+                const sellLabel = ChartUtils.mmdLabelPoint(sell);
+                return {
+                    buyPrice: buy.points.price,
+                    sellPrice: sell.points.price,
+                    buyIconPrice: buyIcon.price,
+                    buyLabelPrice: buyLabel.price,
+                    sellIconPrice: sellIcon.price,
+                    sellLabelPrice: sellLabel.price,
+                    buyIconTime: buyIcon.time,
+                    sellIconTime: sellIcon.time,
+                };
+            })()
+        """)
+        browser.close()
+
+    assert result["buyLabelPrice"] < result["buyIconPrice"] < result["buyPrice"]
+    assert result["sellLabelPrice"] > result["sellIconPrice"] > result["sellPrice"]
+    assert result["buyPrice"] == 100
+    assert result["sellPrice"] == 100
+    assert result["buyIconTime"] == 1
+    assert result["sellIconTime"] == 1
 
 
 def test_n5_currency_returns_browser_local_tz(harness_html):

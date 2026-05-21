@@ -49,6 +49,16 @@ def _zs(zg: float, zd: float, gg: float, dd: float, end_xd: XD = None, done: boo
     return z
 
 
+def _done_zs(lines, zg: float, zd: float, gg: float, dd: float, end_xd: XD = None) -> ZS:
+    z = ZS(zs_type="xd", start=lines[0], zg=zg, zd=zd, gg=gg, dd=dd, index=1)
+    z.done = True
+    z.real = True
+    z.lines = list(lines)
+    z.end = end_xd if end_xd is not None else lines[-1]
+    z.line_num = len(z.lines)
+    return z
+
+
 def test_breaks_last_zs_down_pending_zs_returns_false():
     """末中枢未完成 → 无法定位「跌破点」,返回 False(无论 low 多低)。"""
     now = _xd(20, "down", 10, 1)
@@ -107,6 +117,21 @@ def test_breaks_last_zs_up_above_but_below_gg_returns_false():
     last_zs = _zs(zg=8, zd=5, gg=9, dd=4, end_xd=zs_end, done=True)
     now = _xd(20, "up", 5, 8)    # high=8 < gg=9
     assert BsPointCalculator._breaks_last_zs(now, last_zs) is False
+
+
+def test_build_zss_index_keeps_opening_zs_without_entry():
+    """开头四段中枢没有进入段时,买卖点索引应使用首个核心段作时间锚。"""
+    core_1 = _xd(0, "up", 4, 8)
+    core_2 = _xd(2, "down", 8, 5)
+    core_3 = _xd(4, "up", 5, 10)
+    leave = _xd(6, "down", 10, 6)
+    zs = _done_zs([core_1, core_2, core_3, leave], zg=8, zd=5, gg=10, dd=4, end_xd=leave)
+    zs.start = None
+
+    clean_zss, start_keys = BsPointCalculator._build_zss_index([zs])
+
+    assert clean_zss == [zs]
+    assert start_keys == [core_1.start.k.k_index]
 
 
 # ---------------- 真实 K 线 fixture:计数对照 ----------------
@@ -173,6 +198,7 @@ def test_dingli_yi_finds_subordinate_1buy_within_xd_window():
 
     # 笔列表:中间一条 down 笔挂 1buy,end_k 落在 [0, 21] 内
     bi_hit = _FakeBI(index=2, _type="down", start_val=10, end_val=4)
+    bi_hit.end = _fx(21, 4, "di")
     _attach_bi_mmd(bi_hit, "1buy")
     bi_other = _FakeBI(index=4, _type="up", start_val=4, end_val=6)
     # 时间窗外笔
@@ -182,6 +208,19 @@ def test_dingli_yi_finds_subordinate_1buy_within_xd_window():
     calc = BsPointCalculator(_FakeCL([bi_hit, bi_other, bi_outside]), zs_type="xd")
     found = calc._find_subordinate_1mmd_in_window(now_xd, "down")
     assert found is bi_hit
+
+
+def test_dingli_yi_ignores_subordinate_1buy_before_xd_end():
+    """定理一只接受父级线段末端的次级别一买,不能用窗口早期一买触发二买。"""
+    now_xd = _xd(20, "down", 10, 5)
+    now_xd.start = _fx(0, 10, "ding")
+    now_xd.end = _fx(21, 5, "di")
+    bi_early = _FakeBI(index=2, _type="down", start_val=10, end_val=4)
+    bi_early.end = _fx(10, 4, "di")
+    _attach_bi_mmd(bi_early, "1buy")
+
+    calc = BsPointCalculator(_FakeCL([bi_early]), zs_type="xd")
+    assert calc._find_subordinate_1mmd_in_window(now_xd, "down") is None
 
 
 def test_dingli_yi_returns_none_when_bi_layer_no_1buy():
@@ -213,6 +252,52 @@ def test_dingli_yi_returns_none_for_bi_layer_caller():
     _attach_bi_mmd(bi, "1buy")
     calc = BsPointCalculator(_FakeCL([bi]), zs_type="bi")
     assert calc._find_subordinate_1mmd_in_window(now, "down") is None
+
+
+def test_third_buy_first_failed_return_consumes_signal():
+    """三买必须是离开中枢后的第一次回抽,第一次跌回中枢后不能用后续回抽补报。"""
+    core_1 = _xd(0, "up", 8, 10)
+    core_2 = _xd(2, "down", 10, 8)
+    core_3 = _xd(4, "up", 8, 10)
+    leave = _xd(6, "up", 10, 14)
+    first_return_failed = _xd(8, "down", 14, 7)
+    extend = _xd(10, "up", 7, 15)
+    second_return_above_zg = _xd(12, "down", 15, 11)
+    lines = [
+        core_1,
+        core_2,
+        core_3,
+        leave,
+        first_return_failed,
+        extend,
+        second_return_above_zg,
+    ]
+    zs = _done_zs([core_1, core_2, core_3, leave], zg=10, zd=8, gg=14, dd=8, end_xd=leave)
+
+    BsPointCalculator(_FakeCL([]), zs_type="xd").calculate(lines, [zs])
+
+    assert first_return_failed.line_mmds("xd") == []
+    assert second_return_above_zg.line_mmds("xd") == []
+
+
+def test_calculate_clears_default_mmds_between_recalculations():
+    """重复计算同一批线段时,默认 line.mmds 不能残留上一次写入的买卖点对象。"""
+    core_1 = _xd(0, "up", 8, 10)
+    core_2 = _xd(2, "down", 10, 8)
+    core_3 = _xd(4, "up", 8, 10)
+    leave = _xd(6, "up", 10, 14)
+    pullback = _xd(8, "down", 14, 11)
+    lines = [core_1, core_2, core_3, leave, pullback]
+    zs = _done_zs([core_1, core_2, core_3, leave], zg=10, zd=8, gg=14, dd=8, end_xd=leave)
+    calc = BsPointCalculator(_FakeCL([]), zs_type="xd")
+
+    calc.calculate(lines, [zs])
+    calc.calculate(lines, [zs])
+
+    assert pullback.line_mmds("xd") == ["3buy"]
+    assert pullback.line_mmds() == ["3buy"]
+    assert len(pullback.zs_type_mmds["xd"]) == 1
+    assert len(pullback.mmds) == 1
 
 
 # ---------------- 真实 K 线 fixture:计数对照 ----------------

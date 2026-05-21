@@ -156,8 +156,52 @@ def test_four_segments_form_zhongshu_with_no_entry():
     zs = zss[0]
     assert zs.start is None, "序列开头的中枢没有进入段"
     assert zs.done is False
+    assert zs.end is lines[-1], "四段重叠时最后一段就是离开段"
     assert (zs.zg, zs.zd) == (8, 5)
     assert [l.index for l in zs.lines] == [0, 1, 2, 3]
+
+
+def test_five_segments_at_data_start_promotes_first_to_entry():
+    """开头五段连续重叠时,第 1 段应作为进入段,后 4 段构成中枢。"""
+    lines = [
+        _seg(0, "up", 4, 8),
+        _seg(1, "down", 8, 5),
+        _seg(2, "up", 5, 10),
+        _seg(3, "down", 10, 6),
+        _seg(4, "up", 6, 9),
+    ]
+
+    zss = ZsCalculator().calculate(lines)
+
+    assert len(zss) == 1
+    zs = zss[0]
+    assert zs.start is lines[0]
+    assert zs.done is False
+    assert zs.end is lines[-1]
+    assert (zs.zg, zs.zd) == (8, 5)
+    assert [l.index for l in zs.lines] == [1, 2, 3, 4]
+
+
+def test_five_segments_at_data_start_then_departure_uses_first_as_entry():
+    """开头五段重叠并出现后续脱离时,第 1 段仍应保留为进入段。"""
+    lines = [
+        _seg(0, "up", 4, 8),
+        _seg(1, "down", 8, 5),
+        _seg(2, "up", 5, 10),
+        _seg(3, "down", 10, 6),
+        _seg(4, "up", 6, 9),
+        _seg(5, "down", 4.5, 3),
+    ]
+
+    zss = ZsCalculator().calculate(lines)
+
+    assert len(zss) == 1
+    zs = zss[0]
+    assert zs.start is lines[0]
+    assert zs.done is True
+    assert zs.end is lines[4]
+    assert (zs.zg, zs.zd) == (8, 5)
+    assert [l.index for l in zs.lines] == [1, 2, 3, 4]
 
 
 def test_zhongshu_at_data_start_completes_without_entry():
