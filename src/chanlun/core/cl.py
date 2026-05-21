@@ -537,22 +537,39 @@ class CL(ICL):
     def _calc_layer_sig(lines) -> tuple:
         """构造单一 line 层（xds 或 bis）的尾部签名，供 xd / bi 两层共用。
 
-        签名 (长度, 末段 end.k.k_index, 末段 done) 任一项变化都意味着
-        BsPointCalculator 需要重新扫描：长度变化=新增段，end.k.k_index
-        变化=末段端点漂移，done 翻转=pending 段与 confirmed 互转。
+        签名任一项变化都意味着 BsPointCalculator 需要重新扫描：
+        长度变化=新增段；末段端点 K 或价格变化=pending 笔/线段实时漂移；
+        done 翻转=pending 段与 confirmed 互转。
         """
         if not lines:
-            return (0, -1, False)
+            return (0, -1, -1, None, None, None, None, False)
         last_line = lines[-1]
+        start_k_idx = -1
         end_k_idx = -1
+        start_val = None
+        end_val = None
         try:
+            if last_line.start is not None:
+                start_val = last_line.start.val
+                if last_line.start.k is not None:
+                    start_k_idx = last_line.start.k.k_index
             if last_line.end is not None and last_line.end.k is not None:
                 end_k_idx = last_line.end.k.k_index
+            if last_line.end is not None:
+                end_val = last_line.end.val
         except AttributeError:
+            start_k_idx = -1
             end_k_idx = -1
+            start_val = None
+            end_val = None
         return (
             len(lines),
+            start_k_idx,
             end_k_idx,
+            start_val,
+            end_val,
+            getattr(last_line, 'high', None),
+            getattr(last_line, 'low', None),
             bool(getattr(last_line, 'done', False)),
         )
 

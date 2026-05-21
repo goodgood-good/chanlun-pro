@@ -300,6 +300,37 @@ def test_calculate_clears_default_mmds_between_recalculations():
     assert len(pullback.mmds) == 1
 
 
+def test_third_buy_can_attach_to_pending_line():
+    """未完成线段当前满足三买条件时,应实时挂出买卖点。"""
+    core_1 = _xd(0, "up", 8, 10)
+    core_2 = _xd(2, "down", 10, 8)
+    core_3 = _xd(4, "up", 8, 10)
+    leave = _xd(6, "up", 10, 14)
+    pullback = _xd(8, "down", 14, 11)
+    pullback.done = False
+    lines = [core_1, core_2, core_3, leave, pullback]
+    zs = _done_zs([core_1, core_2, core_3, leave], zg=10, zd=8, gg=14, dd=8, end_xd=leave)
+
+    BsPointCalculator(_FakeCL([]), zs_type="xd").calculate(lines, [zs])
+
+    assert pullback.line_mmds("xd") == ["3buy"]
+    assert pullback.line_mmds() == ["3buy"]
+
+
+def test_layer_sig_changes_when_pending_line_price_changes():
+    """pending 末段端点价格变化时,CL 必须重跑买卖点计算。"""
+    pending = _xd(8, "down", 14, 11)
+    pending.done = False
+    sig_before = CL._calc_layer_sig([pending])
+
+    pending.end.val = 10
+    pending.low = 10
+    pending.zs_low = 10
+    sig_after = CL._calc_layer_sig([pending])
+
+    assert sig_after != sig_before
+
+
 # ---------------- 真实 K 线 fixture:计数对照 ----------------
 
 
