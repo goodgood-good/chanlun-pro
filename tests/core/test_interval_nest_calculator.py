@@ -95,24 +95,23 @@ def _ld(up_sum=0.0, down_sum=0.0, dif_max=0.0, dif_min=0.0) -> dict:
 def _uptrend_beichi_fixture():
     """构造一个「上涨趋势 + 趋势背驰」的走势类型 wt 及其走势单元 units、ldp。
 
-    复用 ② beichi_qs 的趋势背驰夹具形态：A 段力度强、离开段力度弱。
-    返回 (wt, units, ldp)。
+    复用 ② beichi_qs 的趋势背驰夹具形态：A 段(连接两中枢的段=末中枢进入段)
+    力度强、离开段(C 段)力度弱。返回 (wt, units, ldp)。
     """
-    a_seg = _seg(0, "up", 3, 7)                 # A 段（比较对象）
-    z1_entry = _seg(2, "up", 4, 8)              # z1 进入段，start.k_index=2
-    leave = _seg(20, "up", 13, 20)              # z2 离开段（背驰段），创新高 20
+    z2_entry = _seg(10, "up", 9, 13)            # A 段 = 连接段 = 末中枢 z2 进入段
+    leave = _seg(20, "up", 13, 20)              # z2 离开段（背驰段=C 段），创新高 20
     z1 = ZS(zs_type="xd", start=None, zg=8, zd=5, gg=9, dd=4)
-    z1.start = z1_entry
     z1.lines = [_seg(4, "up", 4, 8)]
     z2 = ZS(zs_type="xd", start=None, zg=16, zd=13, gg=20, dd=12)
+    z2.start = z2_entry
     z2.lines = [leave]
     wt = _zslx()
     wt.zslx_type = "上涨"
     wt._type = "up"
     wt.zss = [z1, z2]
-    units = [a_seg, z1_entry]
-    provider = {(0, 1): _ld(up_sum=100, dif_max=5),    # a_seg 力度强
-                (20, 21): _ld(up_sum=30, dif_max=1)}   # leave 力度弱 → 背驰
+    units = [z2_entry, leave]
+    provider = {(10, 11): _ld(up_sum=100, dif_max=5),  # A 段(连接段)力度强
+                (20, 21): _ld(up_sum=30, dif_max=1)}   # leave(C 段)力度弱 → 背驰
     def ldp(s, e):
         return provider.get((s.k.k_index, e.k.k_index), _ld(up_sum=80, dif_max=4))
     return wt, units, ldp

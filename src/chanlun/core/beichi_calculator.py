@@ -194,24 +194,24 @@ def beichi_qs(
     wzgx_config: str,
     frequency: Optional[str] = None,
 ) -> Tuple[bool, List[LINE]]:
-    """趋势背驰：≥2 个同向中枢的趋势中，离开末中枢的段相对连接前两中枢的同向段是否衰竭。
+    """趋势背驰：≥2 个同向中枢的趋势中，离开末中枢的段相对连接两中枢的同向段是否衰竭。
 
-    原文(第二章·第四节·四 A/B/C)：A、C 为同向走势段，B 为居中的中枢；C 段
-    力度小于 A 段即标准背驰。两中枢场景下 B = prev_zs，**A 段 = 进入 prev_zs
-    的同向段**（即 ``prev_zs.start``，连接 prev_prev_zs 与 prev_zs 的走势段）、
-    C 段 = 离开 last_zs 的段（``now_seg``）。
+    原文(第24课·行5010-5015 人寿例 / 行5065-5066「9 段结构」)：两中枢趋势 =
+    [中枢0] → A段 → [B=末中枢] → C段。
+      - A 段 = **连接两个中枢的段** = 进入末中枢 last_zs 的段 = ``last_zs.start``
+        (即 prev_zs 的离开段);
+      - B = 末中枢 last_zs;C 段 = 离开末中枢的段 = ``now_seg``。
+    比较 C 段与 A 段力度，C < A 即标准趋势背驰。
+    注意：原文把 A 段(连接段)与「前面低部回拉的第一段」(=``prev_zs.start``)**明确
+    区分**为两根不同的段；旧实现误取 ``prev_zs.start``、对照对象错位一个中枢
+    (审查 F2，已修正为 ``last_zs.start``)。
 
     返回非背驰的情形：
     - ``len(zss) < 2`` —— 原文「第一个走势中枢出现的背驰只算盘整背驰」；
     - 两中枢不构成同向趋势（``is_qs`` 失败）；
-    - prev_zs 无进入段（开头中枢 / 9 段分裂首组无 entry）或方向与 now_seg 不一致
-      （9 段分裂非首组 entry 是前一组离开段、与本组首段方向相反）—— A/C 同向
-      前提不满足。
+    - 末中枢无进入段（开头中枢）或其方向与 now_seg 不一致 —— A/C 同向前提不满足。
 
-    ``lines`` 参数已不消费——保留仅为薄壳调用方接口兼容。旧实现在 ``lines``
-    中筛 ``end_k <= prev_zs.start 起点`` 的最末同向段，会把 ``prev_zs.start``
-    本身排除，错位一段（取到 A 段之前的同向段）；本版按原文直接取
-    ``prev_zs.start``。
+    ``lines`` 参数已不消费——保留仅为薄壳调用方接口兼容。
 
     返回 (是否背驰, [比较的走势段])。
     """
@@ -225,8 +225,9 @@ def beichi_qs(
     if not qs_direction or qs_direction != now_seg.type:
         return False, []
 
-    # 原文 A 段 = 进入 prev_zs 的同向段（连接前两个中枢的走势段）
-    compare_line = prev_zs.start
+    # 原文 A 段 = 连接两个中枢的段 = 进入末中枢的段 = last_zs.start
+    # (= prev_zs 的离开段)。注意区别于「前面低部回拉的第一段」prev_zs.start。
+    compare_line = last_zs.start
     if compare_line is None or getattr(compare_line, "type", None) != now_seg.type:
         return False, []
 

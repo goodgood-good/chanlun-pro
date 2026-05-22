@@ -115,9 +115,9 @@ def test_fourth_overlapping_segment_counts_as_core():
 def test_two_consecutive_zhongshu_are_both_identified():
     """连续两个中枢都应被识别（旧实现因丢弃首个三段中枢而错乱）。
 
-    原文(kobo.125.1)ZG=min(g₁,g₂)、ZD=max(d₁,d₂)——只取前 2 段。
-    中枢1 前 2 段 seg(0)/seg(1) → zg=min(9,8)=8, zd=max(4,4)=4。
-    中枢2 前 2 段 seg(4)/seg(5) → zg=min(9,10)=9, zd=max(8.5,8.5)=8.5。
+    原文(行2835)中枢区间 = A/B/C 三段共同重叠 = (max(三低), min(三高))。
+    中枢1 核心 seg(0)/seg(1)/seg(2) → zg=min(9,8,8)=8, zd=max(4,4,5)=5。
+    中枢2 核心 seg(4)/seg(5)/seg(6) → zg=min(9,10,10)=9, zd=max(8.5,8.5,8.7)=8.7。
     """
     lines = [
         _seg(0, "down", 9, 4),
@@ -135,8 +135,8 @@ def test_two_consecutive_zhongshu_are_both_identified():
 
     assert len(zss) == 2, "应识别出 2 个连续中枢"
     assert all(zs.done for zs in zss)
-    assert (zss[0].zg, zss[0].zd) == (8, 4)
-    assert (zss[1].zg, zss[1].zd) == (9, 8.5)
+    assert (zss[0].zg, zss[0].zd) == (8, 5)
+    assert (zss[1].zg, zss[1].zd) == (9, 8.7)
 
 
 def test_four_segments_form_zhongshu_with_no_entry():
@@ -178,7 +178,7 @@ def test_five_segments_at_data_start_promotes_first_to_entry():
     assert zs.start is lines[0]
     assert zs.done is False
     assert zs.end is lines[-1]
-    assert (zs.zg, zs.zd) == (8, 5)
+    assert (zs.zg, zs.zd) == (8, 6)
     assert [l.index for l in zs.lines] == [1, 2, 3, 4]
 
 
@@ -200,7 +200,7 @@ def test_five_segments_at_data_start_then_departure_uses_first_as_entry():
     assert zs.start is lines[0]
     assert zs.done is True
     assert zs.end is lines[4]
-    assert (zs.zg, zs.zd) == (8, 5)
+    assert (zs.zg, zs.zd) == (8, 6)
     assert [l.index for l in zs.lines] == [1, 2, 3, 4]
 
 

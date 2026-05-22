@@ -3,12 +3,12 @@
     "purpose": "缠论核心算法 cl_snapshot md5 baseline. 任何改变 fxs/bis/xds/bi_zss/xd_zss 端点签名的代码改动会让 md5 失配, CI 红灯.",
     "regenerate_cmd": "python -m tests.core._record_baseline",
     "recorded_at_commit": "c9c2553 附近 master",
-    "recorded_date": "2026-05-22",
+    "recorded_date": "2026-05-23",
     "schema": "json.dumps(cl_snapshot(cd), sort_keys=True, default=str, ensure_ascii=False).encode('utf-8') -> md5.hexdigest()"
   },
   "synthetic": {
     "multi_freq.up.n500.seed42": {
-      "md5": "80ce64be6754d3bb942592b9db9822a9",
+      "md5": "59c645df7434a63b46efe86b3c5edb38",
       "params": {
         "n_klines": 500,
         "seed": 42,
@@ -17,7 +17,7 @@
       }
     },
     "multi_freq.down.n500.seed42": {
-      "md5": "d22c83c3f943f01be2b774c499036f0e",
+      "md5": "3695832f6f953d9ac9465f8943dbf02a",
       "params": {
         "n_klines": 500,
         "seed": 42,
@@ -26,7 +26,7 @@
       }
     },
     "multi_freq.oscillate.n500.seed42": {
-      "md5": "491c7726c8520890f69ad8b41250d72a",
+      "md5": "50188efcb195c241835cbb1a256f49fb",
       "params": {
         "n_klines": 500,
         "seed": 42,
@@ -35,7 +35,7 @@
       }
     },
     "simple.oscillate.n200.seed42": {
-      "md5": "33c751d298c4f5976abb06697bd3ef70",
+      "md5": "ee9e59e37df8d36a763b5c09a433b0a5",
       "params": {
         "n_klines": 200,
         "seed": 42,

@@ -123,17 +123,17 @@ class CL(ICL):
             'zs_qj': Config.ZS_QJ_DD.value,
             'zs_cd': Config.ZS_CD_THREE.value,
             # 中枢位置关系 / 趋势判定档(§1.4 + §3.7):
-            #   - ZGD  (默认): 原文「走势中枢中心定理一」kobo.125.1 的核心区间
-            #     口径——后中枢 zd > 前中枢 zg(或反向)即趋势。最贴近实务、与
-            #     web 入口 ``cl_utils.query_cl_chart_config`` 一致。
-            #   - ZGGDD: 兼容老用法,zg 与 dd、zd 与 gg 比较,略偏宽。
-            #   - GD: 原文 #389「任何瞬间波动也无重叠」的严格档,gg/dd 包络
-            #     无交集才算趋势——大部分真实行情下趋势几乎不成立、1/2 类信号
-            #     极少。仅 opt-in 用于研究/对照场景。
+            #   - GD (默认): 原文严格档——趋势中前后中枢「绝对不存在重叠,包括
+            #     围绕中枢的瞬间波动(GG/DD)之间的重叠」(原文行2891/3565/3566/
+            #     7795)。gg/dd 包络无交集才算趋势;ZG/ZD 分离但 GG/DD 重叠 = 中枢
+            #     扩展(高级别中枢)、非趋势。按原文重做,默认取此严格档。
+            #   - ZGD: 仅比中枢核心区间 zd/zg(后 zd>前 zg 即趋势),宽于原文——
+            #     会把原文判为「中枢扩展」的情形误判为趋势,实务信号更多。
+            #   - ZGGDD: 兼容老用法,zg 与 dd、zd 与 gg 比较,介于两者之间。
             # 注:本配置同时驱动 buy/sell 点链路 (cl.beichi_qs / zss_is_qs)
             # 与递归链路 (③ ZSLX 划分 / ④ recursive / ⑤ interval_nest),
             # 见 process_klines / get_recursive_levels / get_interval_nest。
-            'zs_wzgx': Config.ZS_WZGX_ZGD.value,
+            'zs_wzgx': Config.ZS_WZGX_GD.value,
             'cal_last_zs': True,
             'use_macd_ld': True,
             # 背驰力度判断用高一周期 MACD（线段是最低级别走势类型，度量其
@@ -196,7 +196,7 @@ class CL(ICL):
             # 为 GD,递归链路、买卖点链路统一读 config(§3.7),保证用户显式
             # opt-out 到 ZGGDD 等较宽档时所有链路口径一致,避免「买卖点说趋
             # 势 / ZSLX 说盘整」的双口径冲突。
-            recursive_wzgx = self.config.get('zs_wzgx', Config.ZS_WZGX_ZGD.value)
+            recursive_wzgx = self.config.get('zs_wzgx', Config.ZS_WZGX_GD.value)
             self.xd_zslx = self.zslx_calculator.calculate(
                 xd_zss, self.xd_calculator.xds, ld_provider, recursive_wzgx,
                 self.frequency,
@@ -352,7 +352,7 @@ class CL(ICL):
         ld_provider = lambda s, e: query_macd_ld(self, s, e)
         # 递归链路默认原文严格档 GD,允许 config opt-out(§3.7,统一各链路读
         # config)——理由见 process_klines ③ 接入处注释。
-        recursive_wzgx = self.config.get('zs_wzgx', Config.ZS_WZGX_ZGD.value)
+        recursive_wzgx = self.config.get('zs_wzgx', Config.ZS_WZGX_GD.value)
         return RecursiveCalculator().calculate(
             self.xd_calculator.xds, ld_provider, recursive_wzgx, self.frequency,
         )
@@ -365,7 +365,7 @@ class CL(ICL):
         ld_provider = lambda s, e: query_macd_ld(self, s, e)
         # 递归链路默认原文严格档 GD,允许 config opt-out(§3.7,统一各链路读
         # config)——理由见 process_klines ③ 接入处注释。
-        recursive_wzgx = self.config.get('zs_wzgx', Config.ZS_WZGX_ZGD.value)
+        recursive_wzgx = self.config.get('zs_wzgx', Config.ZS_WZGX_GD.value)
         return calculate_interval_nest(
             self.get_recursive_levels(),
             self.xd_calculator.xds,
@@ -422,14 +422,14 @@ class CL(ICL):
     ) -> Tuple[bool, List[LINE]]:
         """判断指定线与之前的中枢是否形成趋势背驰（薄壳，逻辑见 beichi_calculator）。"""
         ld_provider = lambda s, e: query_macd_ld(self, s, e)
-        wzgx_config = self.config.get('zs_wzgx', Config.ZS_WZGX_ZGGDD.value)
+        wzgx_config = self.config.get('zs_wzgx', Config.ZS_WZGX_GD.value)
         return bc.beichi_qs(
             lines, zss, now_line, ld_provider, wzgx_config, self.frequency
         )
 
     def zss_is_qs(self, one_zs: ZS, two_zs: ZS) -> Union[str, None]:
         """判断两个中枢是否形成趋势（薄壳，逻辑见 beichi_calculator）。"""
-        wzgx_config = self.config.get('zs_wzgx', Config.ZS_WZGX_ZGGDD.value)
+        wzgx_config = self.config.get('zs_wzgx', Config.ZS_WZGX_GD.value)
         return bc.is_qs(one_zs, two_zs, wzgx_config)
 
     def create_dn_zs(

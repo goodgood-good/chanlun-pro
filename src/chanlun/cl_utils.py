@@ -404,12 +404,11 @@ def query_cl_chart_config(
         "zs_xd_type": [Config.ZS_TYPE_BZ.value],
         "zs_qj": Config.ZS_QJ_DD.value,
         "zs_cd": Config.ZS_CD_THREE.value,
-        # 趋势判定口径：原文「趋势=≥2 依次同向中枢」只要求中枢核心区间
-        # [ZD,ZG] 一上一下，故用 ZGD（中枢区间口径）。GD（gg/dd 含延伸极值
-        # 不重叠）远严于原文，会让趋势几乎无法成立 → 1/2 类买卖点与背驰
-        # 在图表上全部消失。注：此默认仅作用于 legacy 买卖点/背驰链路；
-        # ④ 递归链路的趋势口径已在 recursive 侧硬锁，不受此值影响。
-        "zs_wzgx": Config.ZS_WZGX_ZGD.value,
+        # 趋势判定口径：原文「趋势中前后中枢绝对不存在重叠，包括围绕中枢的
+        # 瞬间波动(GG/DD)之间的重叠」(行2891/3565/3566/7795) → 用 GD（gg/dd
+        # 包络不重叠才算趋势）。ZG/ZD 分离但 GG/DD 重叠，原文判为「中枢扩展」、
+        # 非趋势。按原文重做，与 core CL 默认(cl.py)统一取 GD。
+        "zs_wzgx": Config.ZS_WZGX_GD.value,
         "zs_optimize": "0",
         # MACD 配置（计算力度背驰）
         "idx_macd_fast": 12,

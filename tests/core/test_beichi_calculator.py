@@ -284,70 +284,69 @@ def test_beichi_qs_false_when_less_than_two_zs():
 
 
 def test_beichi_qs_true():
-    """趋势背驰：≥2 同向中枢，离开末中枢段相对连接前一对中枢的同向段衰竭。
+    """趋势背驰：≥2 同向中枢，离开末中枢段(C)相对连接两中枢的同向段(A)衰竭。
 
-    原文 A/B/C（第二章·第四节·四）：A 段 = 连接前两个中枢的同向走势段 =
-    进入前一中枢的段 `prev_zs.start`。C 段 = 离开末中枢的段 `now_seg`。
+    原文(第24课 行5010-5015/5065-5066)：A 段 = 连接两个中枢的段 = 进入末中枢
+    的段 `last_zs.start`。C 段 = 离开末中枢的段 `now_seg`。
     """
-    # A 段 = prev_zs.start（进入前一中枢的同向段）
-    entry_prev = _seg(XD, 2, "up", 4, 8)        # 高点 8
     prev_zs = _zs(zg=8, zd=5, gg=9, dd=4)
-    prev_zs.start = entry_prev
+    prev_zs.start = _seg(XD, 0, "up", 3, 8)     # 前面低部回拉第一段(进入中枢0，不参与对照)
+    connect_seg = _seg(XD, 10, "up", 8, 13)     # A 段 = 连接两中枢的段 = last_zs.start
     last_zs = _zs(zg=15, zd=12, gg=16, dd=10)   # 与 prev_zs 构成向上趋势
-    now = _seg(XD, 20, "up", 12, 20)            # 离开末中枢段，创新高 20 > 8
-    # `lines` 参数已在新口径下不消费（A 段直接取 prev_zs.start），保留传入兼容
+    last_zs.start = connect_seg
+    now = _seg(XD, 20, "up", 12, 20)            # 离开末中枢段(C)，创新高 20 > 13
+    # `lines` 参数已不消费（A 段直接取 last_zs.start），保留传入兼容
     lines: list = []
-    provider = {(2, 3): _ld(up_sum=100, dif_max=3),    # entry_prev = A 段
+    provider = {(10, 11): _ld(up_sum=100, dif_max=3),  # connect_seg = A 段
                 (20, 21): _ld(up_sum=40, dif_max=1)}   # now = C 段
     ldp = lambda s, e: provider[(s.k.k_index, e.k.k_index)]
 
     is_bc, compare = bc.beichi_qs(lines, [prev_zs, last_zs], now, ldp,
                                   Config.ZS_WZGX_ZGGDD.value)
     assert is_bc is True
-    assert compare == [entry_prev]
+    assert compare == [connect_seg]
 
 
-def test_beichi_qs_compare_line_is_prev_zs_entry():
-    """A 段身份固化：原文 A/B/C 中 A 段 = prev_zs 的进入段，不是"再前一根同向段"。
+def test_beichi_qs_compare_line_is_last_zs_entry():
+    """A 段身份固化：原文 A 段 = 连接两中枢的段 = last_zs.start，
+    **不是**「前面低部回拉的第一段」prev_zs.start（原文行5065-5066 明确区分二者）。
 
-    旧实现取 `end_k <= prev_zs.start.start.k.k_index` 的最后一根同向段——
-    正好把 prev_zs.start 排除掉，错位一段（取到 prev_zs.start 前面那根）。
-    本测试明确断言 A 段就是 prev_zs.start 本身，固化原文严格口径。
+    设计：让 prev_zs.start 与 now「看似背驰」、last_zs.start(A) 与 now「不背驰」——
+    旧实现取 prev_zs.start 会误判 True，新实现取 last_zs.start 正确判 False。
     """
-    # 一根更早的同向段——按旧实现就是它被错取为 A 段
-    seg_earlier = _seg(XD, 0, "up", 3, 6)
-    entry_prev = _seg(XD, 2, "up", 4, 8)
+    prev_entry = _seg(XD, 0, "up", 3, 8)        # 前面低部回拉第一段(prev_zs.start)
+    connect_seg = _seg(XD, 10, "up", 8, 13)     # A 段 = 连接段 = last_zs.start
+    now = _seg(XD, 20, "up", 12, 20)            # C 段
     prev_zs = _zs(zg=8, zd=5, gg=9, dd=4)
-    prev_zs.start = entry_prev
+    prev_zs.start = prev_entry
     last_zs = _zs(zg=15, zd=12, gg=16, dd=10)
-    now = _seg(XD, 20, "up", 12, 20)
-    lines = [seg_earlier, entry_prev]
-    # 关键设计:让 seg_earlier 与 now "看起来满足背驰"(力度衰竭+创新高),
-    # 但让 entry_prev 与 now "不满足背驰"——则旧实现 True、新实现 False。
-    # 这样断言区分出两种语义。
+    last_zs.start = connect_seg
+    # prev_entry vs now: 力度 100→80 衰竭 → 看似背驰(旧实现误用 → True);
+    # connect_seg(A) vs now: 力度 40→80 不衰竭 → 正确为非背驰。
     provider = {
-        (0, 1): _ld(up_sum=50, dif_max=1),    # seg_earlier: 力度小,now 反而更大
-        (2, 3): _ld(up_sum=100, dif_max=3),   # entry_prev: 力度大,now 衰竭
-        (20, 21): _ld(up_sum=80, dif_max=2),  # now
+        (0, 1): _ld(up_sum=100, dif_max=3),    # prev_entry: 旧实现误用
+        (10, 11): _ld(up_sum=40, dif_max=1),   # connect_seg = A: now 比它更强
+        (20, 21): _ld(up_sum=80, dif_max=2),   # now = C
     }
     ldp = lambda s, e: provider[(s.k.k_index, e.k.k_index)]
 
-    is_bc, compare = bc.beichi_qs(lines, [prev_zs, last_zs], now, ldp,
+    is_bc, compare = bc.beichi_qs([], [prev_zs, last_zs], now, ldp,
                                   Config.ZS_WZGX_ZGGDD.value)
-    # 新口径:A = entry_prev,力度 100→80 衰竭 + dif_max 3→2 衰竭 → 背驰 True
-    assert is_bc is True
-    assert compare == [entry_prev]
+    # 新口径:A = connect_seg,now 力度(80) > A(40) → 不衰竭 → 非背驰
+    assert is_bc is False
+    assert compare == [connect_seg]
 
 
-def test_beichi_qs_false_when_prev_zs_has_no_entry():
-    """prev_zs 无进入段（开头中枢 / 9段分裂首组无 entry）→ 趋势背驰不成立。
+def test_beichi_qs_false_when_last_zs_has_no_entry():
+    """末中枢无进入段（A 段缺失）→ 趋势背驰不成立。
 
-    原文 A/B/C 要求 A 段存在；若进入前一中枢的同向段缺失，按原文降级为
-    非趋势背驰（不能识别为标准趋势背驰）。
+    原文 A/B/C 要求 A 段(=连接两中枢的段=last_zs.start)存在；缺失则降级为
+    非趋势背驰。prev_zs 给有效进入段以隔离"只看 last_zs.start"的口径。
     """
     prev_zs = _zs(zg=8, zd=5, gg=9, dd=4)
-    prev_zs.start = None                         # 无进入段
+    prev_zs.start = _seg(XD, 0, "up", 3, 8)      # prev_zs 有进入段，但不应被用作 A 段
     last_zs = _zs(zg=15, zd=12, gg=16, dd=10)
+    last_zs.start = None                          # 末中枢无进入段 → A 段缺失
     now = _seg(XD, 20, "up", 12, 20)
     is_bc, compare = bc.beichi_qs([], [prev_zs, last_zs], now,
                                   lambda s, e: {}, Config.ZS_WZGX_ZGGDD.value)
@@ -355,17 +354,17 @@ def test_beichi_qs_false_when_prev_zs_has_no_entry():
     assert compare == []
 
 
-def test_beichi_qs_false_when_prev_zs_entry_wrong_direction():
-    """prev_zs 进入段方向与 now_seg 不同 → 非趋势背驰。
+def test_beichi_qs_false_when_last_zs_entry_wrong_direction():
+    """末中枢进入段(A 段)方向与 now_seg(C 段) 不同 → 非趋势背驰。
 
-    9 段分裂子中枢非首组的 entry 是"前一组的离开段"，按方向交替它与本组首段
-    反向、与离开本中枢的 now_seg 也反向——原文 A/C 须同向，不同向直接否决。
+    原文 A/C 须同向；A 段(连接段=last_zs.start)方向与离开末中枢的 now_seg 不一致
+    时直接否决。
     """
-    entry_prev_down = _seg(XD, 2, "down", 8, 4)  # 方向 down
     prev_zs = _zs(zg=8, zd=5, gg=9, dd=4)
-    prev_zs.start = entry_prev_down
+    prev_zs.start = _seg(XD, 0, "up", 3, 8)
     last_zs = _zs(zg=15, zd=12, gg=16, dd=10)
-    now = _seg(XD, 20, "up", 12, 20)             # 方向 up
+    last_zs.start = _seg(XD, 10, "down", 13, 8)  # A 段方向 down
+    now = _seg(XD, 20, "up", 12, 20)             # C 段方向 up
     is_bc, compare = bc.beichi_qs([], [prev_zs, last_zs], now,
                                   lambda s, e: {}, Config.ZS_WZGX_ZGGDD.value)
     assert is_bc is False

@@ -24,10 +24,13 @@ class ZsCalculator:
         # 走势类型（含无向盘整、不严格交替），传 False 跳过交替检查。
         self.require_alternation: bool = require_alternation
         # min_zs_lines：构成中枢的最小核心线段数（含离开段）。默认 4——
-        # 线段是最低级别走势类型，4 条线段重叠才构成 1min 级别中枢（项目
-        # 既定口径，有意偏离原文 line 481「三个线段重合即成中枢」）。④ 递归
-        # 到 L≥1 时构成段是走势类型，按原文 #35/#169「3 个次级别走势类型
-        # 重叠成中枢」传 3。
+        # 这是**原文一致**的，并非偏离：原文要求「前三个次级别走势类型都是
+        # **完成的**才构成中枢」(第18课)，而线段「必须被另一线段破坏才算
+        # 完成」(原文线段定义/线段分解定理)；故第 3 段线段须由第 4 段确认其
+        # 完成，前 3 段方都「完成」、中枢方成立——计入这条确认/离开段，最小即 4。
+        # （勿据「三个线段重合即成中枢」的字面把它改成 3：那忽略了「完成的」
+        # 这一限定，会把第 3 段未确认的形态误判成中枢。）④ 递归到 L≥1 时构成段
+        # 是走势类型——传入的 ZSLX 单元已是完成走势类型，3 个重叠即成中枢，传 3。
         self.min_zs_lines: int = min_zs_lines
         self.all_lines: List[LINE] = []
         self.zss: List[ZS] = []
@@ -242,22 +245,16 @@ class ZsCalculator:
                 entry_idx += 1
                 continue
 
-            # 原文(走势中枢中心定理一,kobo.125.1)：ZG=min(g₁,g₂)、
-            # ZD=max(d₁,d₂)——只取**前两段**的高低点定中枢区间。
-            # 旧实现取前三段会让中枢区间偏窄(收到 seg_c 的高/低牵动),非原文。
-            zg = min(seg_a.zs_high, seg_b.zs_high)
-            zd = max(seg_a.zs_low, seg_b.zs_low)
+            # 原文(行2835·缠回复严格公式)：中枢区间 = (max(a₂,b₂,c₂), min(a₁,b₁,c₁))
+            # ——即 A/B/C **三段共同重叠**;等价于第20课(行3585)同向 Z 段
+            # ZG=min(g₁,g₂)、ZD=max(d₁,d₂)(相邻段共享端点,故两式等价)。
+            # 只取前两段会漏掉 seg_c 的高/低约束、令中枢在趋势侧偏宽(审查 F1)。
+            zg = min(seg_a.zs_high, seg_b.zs_high, seg_c.zs_high)
+            zd = max(seg_a.zs_low, seg_b.zs_low, seg_c.zs_low)
 
-            # 检查前两段是否有重叠(若无,[ZD,ZG] 不成立)
+            # 三段无共同重叠则非中枢。zd<zg 等价于 max(三低)<min(三高),即三段
+            # 确有共同重叠,无须再单独校验 seg_c 是否落在前两段区间内。
             if zd >= zg:
-                entry_idx += 1
-                continue
-
-            # 第三段 seg_c 也须与 [ZD,ZG] 有重叠(原文「3 个连续次级别走势类型
-            # 所重叠的部分」——3 段共重叠才成中枢,seg_c 不与前 2 段定义的区间
-            # 重叠时中枢不成立)。旧实现把 seg_c 卷入 zg/zd 计算时已隐含这一点;
-            # 改用前 2 段后,须把 seg_c 重叠校验显式补回。
-            if max(seg_c.zs_low, zd) >= min(seg_c.zs_high, zg):
                 entry_idx += 1
                 continue
 
@@ -330,13 +327,14 @@ class ZsCalculator:
         if len(new_lines) < self.min_zs_lines:
             return
 
-        seg_a, seg_b = new_lines[0], new_lines[1]
-        new_zg = min(seg_a.zs_high, seg_b.zs_high)
-        new_zd = max(seg_a.zs_low, seg_b.zs_low)
+        seg_a, seg_b, seg_c = new_lines[0], new_lines[1], new_lines[2]
+        new_zg = min(seg_a.zs_high, seg_b.zs_high, seg_c.zs_high)
+        new_zd = max(seg_a.zs_low, seg_b.zs_low, seg_c.zs_low)
         if new_zd >= new_zg:
             return
 
-        for line in new_lines[2:]:
+        # 前三段已定 [new_zd,new_zg];其余段(第 4 段起)须各自与该区间重叠。
+        for line in new_lines[3:]:
             if max(line.zs_low, new_zd) >= min(line.zs_high, new_zg):
                 return
 
