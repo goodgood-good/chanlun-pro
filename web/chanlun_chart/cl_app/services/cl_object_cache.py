@@ -165,7 +165,8 @@ def _get_key_lock(key: str) -> threading.RLock:
 # v3(2026-05-20):mmd/bc 按级别拆分,新增 bi_mmds/xd_mmds/bi_bcs/xd_bcs。
 # v4(2026-05-20):3 类买卖点 first-touch 限定(原文 kobo.61.1「必须是第一次」),
 #                同一中枢同一类型只挂最早一次 → 3B/3S 数量大幅减少。
-_CHART_DATA_SCHEMA_VERSION = "v4"
+# v5(2026-05-22):买卖点层签名纳入未完成笔/段端点,并新增走势类型线段输出。
+_CHART_DATA_SCHEMA_VERSION = "v5"
 
 
 def _build_cache_key(

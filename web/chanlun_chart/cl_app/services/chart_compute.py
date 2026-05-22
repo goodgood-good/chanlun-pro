@@ -243,6 +243,7 @@ def _merge_chart_data(existing_data: dict, new_data: dict):
 
     for key in [
         "fxs", "bis", "xds", "bi_zss", "xd_zss", "bcs", "mmds", "xd_zslx",
+        "xd_zslx_lines",
         "bi_mmds", "xd_mmds", "bi_bcs", "xd_bcs",
     ]:
         merged[key] = _merge_shape_lists(existing_data.get(key, []), new_data.get(key, []))
@@ -348,7 +349,7 @@ _CHART_ARRAY_FIELDS = (
 # 与合并版 ``mmds``/``bcs`` 并存(前端独立 reconcile)。
 _CHART_SHAPE_FIELDS = (
     "fxs", "bis", "xds", "bi_zss", "xd_zss", "bcs", "mmds", "xd_zslx",
-    "bi_mmds", "xd_mmds", "bi_bcs", "xd_bcs",
+    "xd_zslx_lines", "bi_mmds", "xd_mmds", "bi_bcs", "xd_bcs",
 )
 
 

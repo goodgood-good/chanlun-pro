@@ -262,6 +262,12 @@ class TestMergeChartData:
         merged = _merge_chart_data(existing, new)
         assert len(merged["bis"]) == 2  # outside-window + new
 
+    def test_zslx_lines_merged_via_shape_lists(self):
+        existing = {"t": [1, 2], "xd_zslx_lines": [{"points": [{"time": 50}]}]}
+        new = {"t": [2, 3], "xd_zslx_lines": [{"points": [{"time": 200}]}]}
+        merged = _merge_chart_data(existing, new)
+        assert len(merged["xd_zslx_lines"]) == 2
+
 
 class TestSafeLockRegistry:
     def test_same_key_returns_same_lock(self):

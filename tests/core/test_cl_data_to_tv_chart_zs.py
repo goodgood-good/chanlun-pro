@@ -66,3 +66,24 @@ def test_cl_data_to_tv_chart_includes_recursive_l1plus(
         f"图表数据 recursive_levels 无 L1+, 前端将看不到多级中枢。"
         f"levels={levels_present}"
     )
+    assert all("zslx_lines" in item for item in rl), "递归层级应暴露走势类型线段"
+
+
+def test_cl_data_to_tv_chart_exposes_current_level_zslx_lines(
+    cl_with_synthetic_klines, cl_config
+):
+    """当前周期走势类型应同时暴露为线段,供前端作为下一级中枢构件着色。"""
+    cd = cl_with_synthetic_klines(1500, seed=42, trend="up", multi_freq=True)
+    zslxs = [z for z in (cd.get_xd_zslx() or []) if z.zss]
+    assert zslxs, "合成数据应产生当前周期走势类型"
+
+    config = dict(cl_config)
+    config["chart_show_xd_zslx"] = "1"
+    chart_data = cl_data_to_tv_chart(cd, config)
+
+    lines = chart_data["xd_zslx_lines"]
+    assert len(lines) == len(zslxs)
+    first = lines[0]
+    assert first["points"][0]["time"] == fun.datetime_to_int(zslxs[0].start.k.date)
+    assert first["points"][-1]["time"] == fun.datetime_to_int(zslxs[0].end.k.date)
+    assert first["level"] == 0

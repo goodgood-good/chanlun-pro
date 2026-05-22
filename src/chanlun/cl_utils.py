@@ -456,7 +456,7 @@ def query_cl_chart_config(
         # 新增原文化可视化(默认全开,前端可独立 toggle):
         "chart_show_zs_direction": "1",      # 中枢方向着色(up/down/zd)
         "chart_show_zs_expanded": "1",       # ⑤ 扩展中枢加粗框
-        "chart_show_xd_zslx": "1",           # ③ 线段级走势类型区间
+        "chart_show_xd_zslx": "1",           # ③ 当前级别走势类型线段/区间
         "chart_show_recursive_levels": "1",  # ④ 递归层级 L1+ 中枢与走势类型
         "chart_show_interval_nest": "1",     # 区间套链 + 精确转折点
         "chart_show_ma": "0",
@@ -879,6 +879,63 @@ def cl_data_to_tv_chart(
             "sub_count": len(getattr(zs, "expanded_with", []) or []),
         }
 
+    def _zslx_line_points(zslx) -> list:
+        """走势类型的折线端点:用其真实起止分型,而不是中枢矩形边界。"""
+        start = zslx.start or zslx.zss[0].lines[0].start
+        end = zslx.end or zslx.zss[-1].lines[-1].end
+        return [
+            {"time": fun.datetime_to_int(start.k.date), "price": start.val},
+            {"time": fun.datetime_to_int(end.k.date), "price": end.val},
+        ]
+
+    def _zslx_time_bounds(zslx) -> tuple:
+        """走势类型矩形区间的时间边界:沿用中枢进入/离开段口径。"""
+        first_zs, last_zs = zslx.zss[0], zslx.zss[-1]
+        start_date = (
+            first_zs.start.end.k.date
+            if first_zs.start else first_zs.lines[0].start.k.date
+        )
+        end_date = (
+            last_zs.end.start.k.date
+            if last_zs.end else last_zs.lines[-1].end.k.date
+        )
+        return start_date, end_date
+
+    def _zslx_meta(zslx, level: int) -> dict:
+        return {
+            "zslx_type": zslx.zslx_type,
+            "direction": zslx.type,
+            "done": bool(zslx.done),
+            "linestyle": "0" if zslx.done else "1",
+            "zss_count": len(zslx.zss),
+            "level": level,
+        }
+
+    def _zslx_to_band_chart(zslx, level: int = 0) -> dict:
+        """走势类型区间矩形:保留原有半透明背景表达。"""
+        start_date, end_date = _zslx_time_bounds(zslx)
+        return {
+            "points": [
+                {
+                    "time": fun.datetime_to_int(start_date),
+                    "price": max(z.gg for z in zslx.zss),
+                },
+                {
+                    "time": fun.datetime_to_int(end_date),
+                    "price": min(z.dd for z in zslx.zss),
+                },
+            ],
+            "line_points": _zslx_line_points(zslx),
+            **_zslx_meta(zslx, level),
+        }
+
+    def _zslx_to_line_chart(zslx, level: int = 0) -> dict:
+        """走势类型线段:用于表达“本级走势类型作为下一级中枢构件”。"""
+        return {
+            "points": _zslx_line_points(zslx),
+            **_zslx_meta(zslx, level),
+        }
+
     bi_zs_chart_data = []
     if config["chart_show_bi_zs"] == "1":
         for zs_type in config["zs_bi_type"]:
@@ -891,28 +948,17 @@ def cl_data_to_tv_chart(
             for zs in cd.get_xd_zss(zs_type):
                 xd_zs_chart_data.append(_zs_to_chart(zs))
 
-    # 走势类型 (③ xd_zslx):上涨/下跌/盘整区间,前端可背景着色区分。
+    # 走势类型 (③ xd_zslx):矩形区间 + 独立线段。
+    # 线段字段用于把“当前级别走势类型”作为“下一层中枢构件”直接画出来:
+    # 线段(XD) → 当前周期中枢 → 当前周期走势类型线段 → 高一级中枢。
     xd_zslx_chart_data = []
+    xd_zslx_line_chart_data = []
     if config.get("chart_show_xd_zslx", "1") == "1":
         for zslx in (cd.get_xd_zslx() or []):
             if not zslx.zss:
                 continue
-            # 用首中枢 start / 末中枢 end 作为时间边界,价格用所含中枢的包络
-            first_zs, last_zs = zslx.zss[0], zslx.zss[-1]
-            start_date = first_zs.start.end.k.date if first_zs.start else first_zs.lines[0].start.k.date
-            end_date = last_zs.end.start.k.date if last_zs.end else last_zs.lines[-1].end.k.date
-            xd_zslx_chart_data.append({
-                "points": [
-                    {"time": fun.datetime_to_int(start_date),
-                     "price": max(z.gg for z in zslx.zss)},
-                    {"time": fun.datetime_to_int(end_date),
-                     "price": min(z.dd for z in zslx.zss)},
-                ],
-                "zslx_type": zslx.zslx_type,            # "上涨"/"下跌"/"盘整"
-                "direction": zslx.type,                 # "up"/"down"
-                "done": bool(zslx.done),
-                "zss_count": len(zslx.zss),
-            })
+            xd_zslx_chart_data.append(_zslx_to_band_chart(zslx, level=0))
+            xd_zslx_line_chart_data.append(_zslx_to_line_chart(zslx, level=0))
 
     # 递归层级树 (④ recursive_levels):L1+ 中枢、走势类型——多级联立可视化。
     recursive_levels_chart_data = []
@@ -926,28 +972,17 @@ def cl_data_to_tv_chart(
                 continue   # L0 已在 xd_zss / xd_zslx 中展示,递归层级树只画 L1+
             lv_zss = [_zs_to_chart(zs, use_envelope=True) for zs in lv.zss]
             lv_zslxs = []
+            lv_zslx_lines = []
             for zslx in lv.zslxs:
                 if not zslx.zss:
                     continue
-                first_zs, last_zs = zslx.zss[0], zslx.zss[-1]
-                start_date = first_zs.start.end.k.date if first_zs.start else first_zs.lines[0].start.k.date
-                end_date = last_zs.end.start.k.date if last_zs.end else last_zs.lines[-1].end.k.date
-                lv_zslxs.append({
-                    "points": [
-                        {"time": fun.datetime_to_int(start_date),
-                         "price": max(z.gg for z in zslx.zss)},
-                        {"time": fun.datetime_to_int(end_date),
-                         "price": min(z.dd for z in zslx.zss)},
-                    ],
-                    "zslx_type": zslx.zslx_type,
-                    "direction": zslx.type,
-                    "done": bool(zslx.done),
-                    "zss_count": len(zslx.zss),
-                })
+                lv_zslxs.append(_zslx_to_band_chart(zslx, level=lv.level))
+                lv_zslx_lines.append(_zslx_to_line_chart(zslx, level=lv.level))
             recursive_levels_chart_data.append({
                 "level": lv.level,
                 "zss": lv_zss,
                 "zslxs": lv_zslxs,
+                "zslx_lines": lv_zslx_lines,
             })
 
     # 区间套 (interval_nest):从最高级别趋势背驰逐级下钻到 L0 的链 + 精确转折点。
@@ -1105,6 +1140,8 @@ def cl_data_to_tv_chart(
     xd_bc_chart_data.sort(key=lambda v: v["points"]["time"], reverse=False)
     bi_mmd_chart_data.sort(key=lambda v: v["points"]["time"], reverse=False)
     xd_mmd_chart_data.sort(key=lambda v: v["points"]["time"], reverse=False)
+    xd_zslx_chart_data.sort(key=lambda v: v["points"][0]["time"], reverse=False)
+    xd_zslx_line_chart_data.sort(key=lambda v: v["points"][0]["time"], reverse=False)
     # 获取 MACD 数据
     if to_frequency is not None:
         macd = MACD(
@@ -1164,6 +1201,7 @@ def cl_data_to_tv_chart(
         "xd_bcs": xd_bc_chart_data,
         # 新增:③ 走势类型 / ④ 递归层级 / 区间套
         "xd_zslx": xd_zslx_chart_data,
+        "xd_zslx_lines": xd_zslx_line_chart_data,
         "recursive_levels": recursive_levels_chart_data,
         "interval_nest": interval_nest_chart_data,
     }

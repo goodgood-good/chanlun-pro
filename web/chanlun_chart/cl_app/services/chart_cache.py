@@ -80,7 +80,9 @@ def _stable_hash(obj) -> str:
 # - v5 (2026-05) ── 加入版本号机制本身。本次 bump 让 ``recursive_levels`` /
 #   ``interval_nest`` / ``xd_zslx`` / ``bi_mmds`` / ``xd_mmds`` / ``bi_bcs`` /
 #   ``xd_bcs`` 等原文化新字段在旧 entry 上全部失效,杜绝 endpoint 漏字段。
-_CHART_CACHE_SCHEMA_VERSION = "v5"
+# - v6 (2026-05) ── 新增 ``xd_zslx_lines`` 以及 recursive_levels[*].zslx_lines,
+#   让当前级别走势类型以线段形式参与下一层中枢显示。
+_CHART_CACHE_SCHEMA_VERSION = "v6"
 
 
 def _build_cache_key(market: str, code: str, frequency: str, cl_config: dict) -> str:

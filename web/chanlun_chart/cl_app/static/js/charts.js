@@ -10,7 +10,7 @@ const CL_SHOW_DEFAULT = {
     // 买卖点/背驰按级别独立 toggle(笔层数量远多于段层、用户常需只看段层):
     mmd_bi: true, mmd_xd: true, bc_bi: true, bc_xd: true,
     // 原文化新增独立开关(默认全开,用户可在控制面板单独 toggle):
-    xd_zslx: true,             // ③ 线段级走势类型区间(半透明矩形)
+    xd_zslx: true,             // ③ 当前级别走势类型(线段 + 半透明区间)
     recursive_levels: true,    // ④ 递归 L1+ 高级中枢与走势类型
     interval_nest: true,       // 区间套链 flags + 精确转折点
     overlay_freqs: true,       // 多周期叠加(高级别独立 CL 跑出的中枢/走势类型)
@@ -134,13 +134,16 @@ const CHART_CONFIG = {
         // 买卖点文字标签(与 icon 箭头分离的第二个 shape,各自独立 reconcile)
         "mmd_labels", "bi_mmd_labels", "xd_mmd_labels",
         // 原文化新增:③ 走势类型 / ④ 递归层级 / 区间套
-        "xd_zslx", "recursive_zss_L1", "recursive_zss_L2", "recursive_zss_L3",
+        "xd_zslx", "xd_zslx_lines",
+        "recursive_zss_L1", "recursive_zss_L2", "recursive_zss_L3",
         "recursive_zslxs_L1", "recursive_zslxs_L2", "recursive_zslxs_L3",
+        "recursive_zslx_lines_L1", "recursive_zslx_lines_L2", "recursive_zslx_lines_L3",
         "interval_nest_links", "interval_nest_tp",
         // 多周期叠加(/tv/overlays):高级别独立 CL 跑出的中枢/走势类型,
         // 6 个 freq 槽位覆盖常见 5m/30m/60m/1D/1W/1M。
         "overlay_zss_1", "overlay_zss_2", "overlay_zss_3",
         "overlay_zslxs_1", "overlay_zslxs_2", "overlay_zslxs_3",
+        "overlay_zslx_lines_1", "overlay_zslx_lines_2", "overlay_zslx_lines_3",
     ],
 };
 
@@ -153,7 +156,13 @@ const MMD_ICON = { buy: 0xf062, sell: 0xf063 };
 const MMD_ICON_SIZE = { xd: 14, bi: 10, default: 12 };
 const MMD_LABEL_FONTSIZE = { xd: 12, bi: 10, default: 11 };
 // 买卖点图标/文字只在绘制层偏移,不改后端真实买卖点价格。买点下移、卖点上移,避免盖住 K 线。
-const MMD_ICON_PRICE_OFFSET = 0.0025;
+// 偏移基准用「近 N 根 K 线平均振幅(ATR 式)」而非绝对价格百分比:
+// 价格百分比(price × 0.25%)在高价 / 低波动标的(典型如港美股)上,相对可视波动过大,
+// 买卖点会明显浮空、脱离 K 线高低点。改用平均振幅后跨标的 / 周期 / 缩放自适应。
+// ATR 不可用时(无 K 线)回退到旧的价格百分比,保持兼容。
+const MMD_ICON_ATR_RATIO = 0.8;          // 箭头离端点 ≈ 0.8 根典型 K 线高度
+const MMD_LABEL_ATR_RATIO = 1.5;         // 文字标签在箭头外侧 ≈ 1.5 根
+const MMD_ICON_PRICE_OFFSET = 0.0025;    // 回退:无 K 线时按价格百分比
 const MMD_LABEL_PRICE_OFFSET = 0.0015;
 
 const DEFAULT_COLORS = {
@@ -177,8 +186,9 @@ const DYNAMIC_CHART_COLORS = {
 
 // 周期递进链:当前 interval → 高一/二/三级 interval。
 // recursive L1+ 中枢、overlay 高级别中枢都按此 chain 取色。
-//   - recursive_L1 色 = chain[2](高二级) xds 色;
-//   - recursive_L2 色 = chain[3](高三级) xds 色;
+//   - 当前周期走势类型线 = chain[1] xds 色,它是高一级中枢的构件;
+//   - recursive_L1 中枢 = chain[1] xds 色,recursive_L1 走势线 = chain[2] xds 色;
+//   - recursive_L2 中枢 = chain[2] xds 色,recursive_L2 走势线 = chain[3] xds 色;
 //   - overlay_L1   色 = chain[1](高一级) xds 色;
 //   - overlay_L2   色 = chain[2] xds 色;overlay_L3 = chain[3] xds 色。
 // chain 顶端的 1M 自循环兜底,避免 undefined。
@@ -254,6 +264,51 @@ const ChartUtils = {
     createLineShape(chart, line, options = {}) {
         return this.createShape(chart, line.points, { shape: "trend_line", overrides: { linestyle: parseInt(line.linestyle) || 0, linewidth: options.linewidth || 1, linecolor: options.color || CHART_CONFIG.COLORS.BI, ...options.overrides }, ...options });
     },
+    clipTrendLinePointsToFrom(line, from) {
+        const points = Array.isArray(line?.points) ? line.points : [];
+        if (points.length < 2 || !Number.isFinite(from)) return points;
+
+        const start = points[0];
+        const end = points[points.length - 1];
+        const startTime = Number(start?.time);
+        const endTime = Number(end?.time);
+        const startPrice = Number(start?.price);
+        const endPrice = Number(end?.price);
+
+        if (
+            !Number.isFinite(startTime) ||
+            !Number.isFinite(endTime) ||
+            !Number.isFinite(startPrice) ||
+            !Number.isFinite(endPrice) ||
+            startTime >= from ||
+            endTime <= from ||
+            endTime <= startTime
+        ) {
+            return points;
+        }
+
+        const ratio = (from - startTime) / (endTime - startTime);
+        const clippedPrice = startPrice + (endPrice - startPrice) * ratio;
+        return [
+            { ...start, time: from, price: clippedPrice },
+            { ...end },
+        ];
+    },
+    createZslxLineShape(chart, line, options = {}) {
+        const shapeOptions = { ...options };
+        const from = shapeOptions.from;
+        delete shapeOptions.from;
+
+        let color = shapeOptions.color;
+        if (!color) {
+            color = CHART_CONFIG.COLORS.ZSLX_ZHENGLI;
+            if (line.direction === "up") color = CHART_CONFIG.COLORS.MMD_UP;
+            else if (line.direction === "down") color = CHART_CONFIG.COLORS.MMD_DOWN;
+        }
+        const linewidth = shapeOptions.linewidth || 4;
+        const points = this.clipTrendLinePointsToFrom(line, from);
+        return this.createShape(chart, points, { shape: "trend_line", overrides: { linestyle: parseInt(line.linestyle) || 0, linewidth, linecolor: color, color, "trendline.linecolor": color, ...shapeOptions.overrides }, ...shapeOptions });
+    },
     createZhongshuShape(chart, zs, options = {}) {
         const color = options.color || CHART_CONFIG.COLORS.BI;
         const linewidth = options.linewidth || 1;
@@ -325,42 +380,61 @@ const ChartUtils = {
         const shape = options.direction === "up" ? "arrow_down" : "arrow_up";
         return this.createShape(chart, tp.points, { shape, text: "区间套转折", overrides: { arrowColor: color, color, fontsize: 14, bold: true, ...options.overrides }, ...options });
     },
-    mmdOffsetPoint(mmd, offsetRatio, fromPoint = null) {
+    // 买卖点偏移基准:近 N 根 K 线平均振幅(high-low)。波动越大基准越大,
+    // 跨标的 / 周期 / 缩放自适应。无有效 K 线时返回 0,调用方回退到价格百分比。
+    computeMmdOffsetBase(bars) {
+        if (!Array.isArray(bars) || bars.length === 0) return 0;
+        const slice = bars.slice(-60);
+        let sum = 0, cnt = 0;
+        for (const b of slice) {
+            if (b && typeof b.high === "number" && typeof b.low === "number" && b.high >= b.low) {
+                sum += b.high - b.low;
+                cnt++;
+            }
+        }
+        return cnt > 0 ? sum / cnt : 0;
+    },
+    // 偏移点:优先用 ATR 基准(offsetBase × atrRatio);基准不可用时回退价格百分比。
+    mmdOffsetPoint(mmd, atrRatio, priceRatioFallback, offsetBase = 0, fromPoint = null) {
         const src = fromPoint || mmd.points || {};
         const base = mmd.points || {};
         if (typeof src.price !== "number" || typeof base.price !== "number") return src;
-        const off = Math.abs(base.price) * offsetRatio;
+        const off = offsetBase > 0
+            ? offsetBase * atrRatio
+            : Math.abs(base.price) * priceRatioFallback;
         return { ...src, price: mmd.text.includes("B") ? src.price - off : src.price + off };
     },
     // 买卖点箭头锚点:买点放到 K 线下方、卖点放到 K 线上方,避免和 high/low 重叠。
-    mmdIconPoint(mmd) {
-        return this.mmdOffsetPoint(mmd, MMD_ICON_PRICE_OFFSET);
+    mmdIconPoint(mmd, offsetBase = 0) {
+        return this.mmdOffsetPoint(mmd, MMD_ICON_ATR_RATIO, MMD_ICON_PRICE_OFFSET, offsetBase);
     },
     // 买卖点标签锚点:文字在箭头外侧再让出一档,避免文字、箭头、K 线三者互相覆盖。
-    mmdLabelPoint(mmd) {
+    mmdLabelPoint(mmd, offsetBase = 0) {
         const p = mmd.points || {};
         if (typeof p.price !== "number") return p;
-        return this.mmdOffsetPoint(mmd, MMD_LABEL_PRICE_OFFSET, this.mmdIconPoint(mmd));
+        return this.mmdOffsetPoint(mmd, MMD_LABEL_ATR_RATIO, MMD_LABEL_PRICE_OFFSET, offsetBase, this.mmdIconPoint(mmd, offsetBase));
     },
     // 买卖点箭头:icon 单字形,尺寸可控、横向居中锚定到 K 线(定位与分型圆点一致,准确);
     // 使用绘制层偏移点,避免箭头贴住或覆盖 K 线;原始 mmd.points 仍保留真实买卖点位置。
     createMmdShape(chart, mmd, options = {}) {
+        const { offsetBase = 0, ...rest } = options;
         const isBuy = mmd.text.includes("B");
         const color = isBuy ? CHART_CONFIG.COLORS.MMD_UP : CHART_CONFIG.COLORS.MMD_DOWN;
         const isSplit = !!mmd.level;
         const isXd = isSplit && mmd.level === "xd";
         const size = isSplit ? (isXd ? MMD_ICON_SIZE.xd : MMD_ICON_SIZE.bi) : MMD_ICON_SIZE.default;
         const icon = isBuy ? MMD_ICON.buy : MMD_ICON.sell;
-        return this.createShape(chart, this.mmdIconPoint(mmd), {
+        return this.createShape(chart, this.mmdIconPoint(mmd, offsetBase), {
             shape: "icon",
             icon,
-            overrides: { color, size, "linetoolicon.color": color, "linetoolicon.size": size, ...options.overrides },
-            ...options,
+            overrides: { color, size, "linetoolicon.color": color, "linetoolicon.size": size, ...rest.overrides },
+            ...rest,
         });
     },
     // 买卖点文字标签:第二个 shape,标明级别+类型(段1B / 笔3B / 笔L3B…)以区分一二三类。
     // 标签单独纵向偏移;text 有横向宽度会向右展开,定位以箭头为准,标签仅作说明。
     createMmdLabelShape(chart, mmd, options = {}) {
+        const { offsetBase = 0, ...rest } = options;
         const isBuy = mmd.text.includes("B");
         const color = isBuy ? CHART_CONFIG.COLORS.MMD_UP : CHART_CONFIG.COLORS.MMD_DOWN;
         const isSplit = !!mmd.level;
@@ -368,7 +442,7 @@ const ChartUtils = {
         const fontsize = isSplit ? (isXd ? MMD_LABEL_FONTSIZE.xd : MMD_LABEL_FONTSIZE.bi) : MMD_LABEL_FONTSIZE.default;
         const levelPrefix = isSplit ? (isXd ? "段" : "笔") : "";
         const text = levelPrefix + mmd.text.replace(/[笔段]:/g, "");
-        return this.createShape(chart, this.mmdLabelPoint(mmd), {
+        return this.createShape(chart, this.mmdLabelPoint(mmd, offsetBase), {
             shape: "text",
             text,
             overrides: {
@@ -378,9 +452,9 @@ const ChartUtils = {
                 "linetooltext.color": color,
                 "linetooltext.fontsize": fontsize,
                 "linetooltext.bold": isXd,
-                ...options.overrides,
+                ...rest.overrides,
             },
-            ...options,
+            ...rest,
         });
     },
     createBcShape(chart, bc, options = {}) {
@@ -1027,12 +1101,11 @@ class ChartManager {
                 const cbId = (k) => 'cl_cb_' + k + '_' + self.id;
                 const indCbId = 'cl_cb_independent_drawings_' + self.id;
 
-                // 当前周期 → 各项级别映射(缠论原文「线段 = 1m 走势类型」工程口径):
-                //   笔中枢   = K 线层小级别(亚周期波动重叠)
-                //   线段中枢 = **高一级别中枢**(当前周期下 3 个走势类型重叠成的中枢)
-                //   走势类型区间 = 高一级别走势类型
-                //   递归 L1+ = 再高一级别(高二级别中枢/走势类型)
-                // 把当前周期 → 高一级标签算出来,让用户看懂图上每个矩形是什么级别。
+                // 当前周期 → 各项级别映射:
+                //   笔中枢 = 最低级别中枢;
+                //   线段 = 最低级别走势类型;
+                //   线段中枢 / 走势类型 = 当前周期中枢 / 当前周期走势类型;
+                //   当前周期走势类型再作为高一级中枢的构件。
                 let _curInterval = "?";
                 try { _curInterval = self.widget.symbolInterval().interval; } catch (e) {}
                 const FREQ_CHAIN = {
@@ -1060,11 +1133,12 @@ class ChartManager {
                             <span id="${menuId}_lvl_arrow">▸</span> 级别映射 (当前周期: <b>${_curInterval}</b>)
                         </div>
                         <div id="${menuId}_lvl_detail" style="display:none; font-size:11px; color:#888; line-height:1.5em; padding:2px 0 4px 14px; border-left:2px solid #eee; margin:2px 0 4px 4px;">
-                            笔中枢 → <b>${_lbl(0)}</b>层<br>
-                            线段中枢 → <b>${_lbl(1)}</b>(高一级)<br>
-                            走势类型区间 → <b>${_lbl(1)}</b>走势<br>
-                            递归 L1 → <b>${_lbl(2)}</b><br>
-                            递归 L2 → <b>${_lbl(3)}</b>
+                            笔中枢 → 最低级别中枢<br>
+                            线段 → 最低级别走势类型<br>
+                            线段中枢 → <b>${_lbl(0)}</b>中枢<br>
+                            走势类型线 → <b>${_lbl(0)}</b>走势<br>
+                            递归 L1 → <b>${_lbl(1)}</b>中枢/走势<br>
+                            递归 L2 → <b>${_lbl(2)}</b>中枢/走势
                         </div>
 
                         ${_grpTitle('基础')}
@@ -1081,8 +1155,8 @@ class ChartManager {
                         </div>
 
                         ${_grpTitle('走势')}
-                        ${_cbRow('xd_zslx', '走势类型区间 (L0)', false)}
-                        ${_cbRow('recursive_levels', '多级中枢/走势 (L1+)', false)}
+                        ${_cbRow('xd_zslx', '走势类型线/区间', false)}
+                        ${_cbRow('recursive_levels', '多级中枢/走势', false)}
 
                         ${_grpTitle('买卖点')}
                         ${_cbRow('mmd', '总开关', false)}
@@ -1453,7 +1527,7 @@ class ChartManager {
         return finished;
     }
 
-    reconcile(type, sourceList, from, symbolKey, createFunc, useUnique = true) {
+    reconcile(type, sourceList, from, symbolKey, createFunc, useUnique = true, includeOverlaps = false) {
         const container = this.obj_charts[symbolKey][type];
         const beforeCount = container.length;
         let renderList = sourceList || [];
@@ -1463,8 +1537,9 @@ class ChartManager {
         }
         const afterUniqueCount = renderList.length;
 
-        // 按可视窗口过滤：历史 bis 可达数百根全画视觉杂乱；
-        // headTime >= from 才入渲染，画外起点定格在创建时位置（可接受的 trade-off）
+        // 按可视窗口过滤：历史元素可达数百根，全画会造成视觉杂乱。
+        // 默认要求 headTime >= from；走势类型线/高级中枢这类横跨窗口的元素可传
+        // includeOverlaps=true，只要 tailTime >= from 就入渲染。
         const newKeys = new Set();
         const itemsToProcess = [];
         renderList.forEach(item => {
@@ -1475,11 +1550,11 @@ class ChartManager {
             } else {
                 headTime = tailTime = item.points?.time;
             }
-            // 所有形态(含中枢矩形)统一按 ``headTime >= from`` 入渲染:只在头部进入可视窗
-            // (必已加载)时才创建,避免 createMultipointShape 把画外/未加载的头部角点 snap
-            // 到边缘造成错位。取舍:头在窗外的历史中枢/走势会整体不显示,但优于"显示但错位"。
+            // 默认只在头部进入可视窗(必已加载)时创建，避免 createMultipointShape 把画外/未加载
+            // 角点 snap 到边缘造成错位。高级走势类型线会在 createZslxLineShape 内裁剪到窗口左侧。
             // 注:单点形态(bcs/mmds/inest)head=tail,等价;tailTime 仍用于下方 keep 判定。
-            if (headTime >= from) {
+            const shouldRender = includeOverlaps ? tailTime >= from : headTime >= from;
+            if (shouldRender) {
                 const key = this.makeKey(item);
                 newKeys.add(key);
                 itemsToProcess.push({ item, key, time: headTime, tailTime });
@@ -1695,19 +1770,22 @@ class ChartManager {
         const showXdBc = cfg.bc_xd !== false;
         // 买卖点 = icon 箭头(定位) + text 标签(类型),两套 shape 各自独立 reconcile;
         // 用同一份(已按 toggle 门控的)数据源,保证箭头与标签一一对应。
+        // 买卖点偏移基准:近 N 根 K 线平均振幅(ATR 式),让箭头/标签自适应贴近 K 线,
+        // 不再因绝对价格高低而浮空(尤其修复港美股高价 / 低波动标的)。
+        const mmdOpt = { offsetBase: ChartUtils.computeMmdOffsetBase(barsResult.bars) };
         if (hasSplitMmds) {
             const biMmds = (cfg.mmd && showBiMmd) ? (barsResult.bi_mmds || []) : [];
             const xdMmds = (cfg.mmd && showXdMmd) ? (barsResult.xd_mmds || []) : [];
-            this.reconcile('bi_mmds', biMmds, from, symbolKey, (item) => safeCreate(ChartUtils.createMmdShape(this.chart, item), 'mmd_bi'), false);
-            this.reconcile('xd_mmds', xdMmds, from, symbolKey, (item) => safeCreate(ChartUtils.createMmdShape(this.chart, item), 'mmd_xd'), false);
-            this.reconcile('bi_mmd_labels', biMmds, from, symbolKey, (item) => safeCreate(ChartUtils.createMmdLabelShape(this.chart, item), 'mmd_bi_label'), false);
-            this.reconcile('xd_mmd_labels', xdMmds, from, symbolKey, (item) => safeCreate(ChartUtils.createMmdLabelShape(this.chart, item), 'mmd_xd_label'), false);
+            this.reconcile('bi_mmds', biMmds, from, symbolKey, (item) => safeCreate(ChartUtils.createMmdShape(this.chart, item, mmdOpt), 'mmd_bi'), false);
+            this.reconcile('xd_mmds', xdMmds, from, symbolKey, (item) => safeCreate(ChartUtils.createMmdShape(this.chart, item, mmdOpt), 'mmd_xd'), false);
+            this.reconcile('bi_mmd_labels', biMmds, from, symbolKey, (item) => safeCreate(ChartUtils.createMmdLabelShape(this.chart, item, mmdOpt), 'mmd_bi_label'), false);
+            this.reconcile('xd_mmd_labels', xdMmds, from, symbolKey, (item) => safeCreate(ChartUtils.createMmdLabelShape(this.chart, item, mmdOpt), 'mmd_xd_label'), false);
             this.reconcile('mmds', [], from, symbolKey, () => null, false);          // 清掉旧合并版
             this.reconcile('mmd_labels', [], from, symbolKey, () => null, false);
         } else {
             const mmds = cfg.mmd ? barsResult.mmds : [];
-            this.reconcile('mmds', mmds, from, symbolKey, (item) => safeCreate(ChartUtils.createMmdShape(this.chart, item), 'mmd'), false);
-            this.reconcile('mmd_labels', mmds, from, symbolKey, (item) => safeCreate(ChartUtils.createMmdLabelShape(this.chart, item), 'mmd_label'), false);
+            this.reconcile('mmds', mmds, from, symbolKey, (item) => safeCreate(ChartUtils.createMmdShape(this.chart, item, mmdOpt), 'mmd'), false);
+            this.reconcile('mmd_labels', mmds, from, symbolKey, (item) => safeCreate(ChartUtils.createMmdLabelShape(this.chart, item, mmdOpt), 'mmd_label'), false);
         }
         if (hasSplitBcs) {
             this.reconcile('bi_bcs', (cfg.bc && showBiBc) ? (barsResult.bi_bcs || []) : [], from, symbolKey, (item) => safeCreate(ChartUtils.createBcShape(this.chart, item), 'bc_bi'), false);
@@ -1717,23 +1795,29 @@ class ChartManager {
             this.reconcile('bcs', cfg.bc ? barsResult.bcs : [], from, symbolKey, (item) => safeCreate(ChartUtils.createBcShape(this.chart, item), 'bc'), false);
         }
 
-        // ③ 走势类型(xd_zslx) —— 半透明矩形区间标记上涨/下跌/盘整。
-        // 矩形类统一走可视窗 headTime 过滤,避免画外/未加载角点被 TV snap 到边缘造成错位。
+        // ③ 当前周期走势类型:先画淡矩形表达区间,再画粗线表达“走势类型作为
+        // 高一级中枢构件”。在 1min 图上,这些线就是 1min 走势类型线段。
         this.reconcile('xd_zslx', cfg.xd_zslx !== false ? (barsResult.xd_zslx || []) : [], from, symbolKey, (item) => safeCreate(ChartUtils.createZslxShape(this.chart, item), 'xd_zslx'), false);
+        const zslxLineColor = chainColorAt(currentInterval, 1, "xds");
+        this.reconcile('xd_zslx_lines', cfg.xd_zslx !== false ? (barsResult.xd_zslx_lines || []) : [], from, symbolKey, (item) => safeCreate(ChartUtils.createZslxLineShape(this.chart, item, { color: zslxLineColor, linewidth: 4, from }), 'xd_zslx_line'), false, true);
 
-        // ④ 递归层级树 —— L1/L2/L3 高级中枢与走势类型(L0 已在 xd_zss / xd_zslx)
+        // ④ 递归层级树 —— L1/L2/L3 高级中枢与走势类型。
+        // L1 中枢由 L0 走势类型线构成,所以 L1 中枢色与 L0 走势类型线色一致;
+        // L1 走势类型线再作为 L2 中枢构件,颜色向 chain 后移一档。
         const recLevels = (cfg.recursive_levels !== false ? (barsResult.recursive_levels || []) : []);
         // 收集到 by-level container(reconcile key 已预先分配 recursive_zss_L1..L3 / _zslxs_L1..L3)
         // 高级别中枢/走势类型横跨上百根 bars,若头部在窗外则整体不显示;这是为了避免
         // createMultipointShape 对画外/未加载角点做 snap 后造成矩形错位。
-        // L1 中枢 = chain[2](高二级)xds 色,L2 = chain[3] xds 色,L3 = chain 顶端 xds 色。
-        // 让用户在 K 线层看到的高级中枢矩形,颜色和 chain 上对应周期的「线段色」一致。
+        // L1 中枢 = chain[1] xds 色,L2 中枢 = chain[2] xds 色。
+        // 让每级中枢颜色对应构成它的上一层走势类型线。
         for (let L = 1; L <= 3; L++) {
             const lv = recLevels.find((x) => x.level === L);
-            const recColor = chainColorAt(currentInterval, L + 1, "xds");
+            const recZsColor = chainColorAt(currentInterval, L, "xds");
+            const recLineColor = chainColorAt(currentInterval, L + 1, "xds");
             // useUnique=false:多个 pending L1+ 中枢需并存,见 bi_zss/xd_zss 同源说明。
-            this.reconcile(`recursive_zss_L${L}`, lv ? lv.zss : [], from, symbolKey, (item) => safeCreate(ChartUtils.createRecursiveZsShape(this.chart, item, { level: L, color: recColor }), `rec_zs_L${L}`), false);
-            this.reconcile(`recursive_zslxs_L${L}`, lv ? lv.zslxs : [], from, symbolKey, (item) => safeCreate(ChartUtils.createZslxShape(this.chart, item, { overrides: { transparency: 88, linecolor: recColor, backgroundColor: recColor, color: recColor, "trendline.linecolor": recColor } }), `rec_zslx_L${L}`), false);
+            this.reconcile(`recursive_zss_L${L}`, lv ? lv.zss : [], from, symbolKey, (item) => safeCreate(ChartUtils.createRecursiveZsShape(this.chart, item, { level: L, color: recZsColor }), `rec_zs_L${L}`), false, true);
+            this.reconcile(`recursive_zslxs_L${L}`, lv ? lv.zslxs : [], from, symbolKey, (item) => safeCreate(ChartUtils.createZslxShape(this.chart, item, { overrides: { transparency: 88, linecolor: recLineColor, backgroundColor: recLineColor, color: recLineColor, "trendline.linecolor": recLineColor } }), `rec_zslx_L${L}`), false);
+            this.reconcile(`recursive_zslx_lines_L${L}`, lv ? (lv.zslx_lines || []) : [], from, symbolKey, (item) => safeCreate(ChartUtils.createZslxLineShape(this.chart, item, { color: recLineColor, linewidth: 4 + L, from }), `rec_zslx_line_L${L}`), false, true);
         }
 
         // 多周期叠加(/tv/overlays):高级别 CL 跑出的中枢/走势类型。**缓存**
@@ -1749,13 +1833,16 @@ class ChartManager {
                 // overlay_zss/zslx level=N → 对应 chain[N] 周期 xds 色,跟那一级的「线段色」一致。
                 const ovColor = chainColorAt(currentInterval, level, "xds");
                 this.reconcile(`overlay_zss_${level}`, od.xd_zss || [], from, symbolKey,
-                    (item) => safeCreate(ChartUtils.createOverlayZsShape(this.chart, item, { level, color: ovColor }), `ovz${level}`), false);
+                    (item) => safeCreate(ChartUtils.createOverlayZsShape(this.chart, item, { level, color: ovColor }), `ovz${level}`), false, true);
                 this.reconcile(`overlay_zslxs_${level}`, od.xd_zslx || [], from, symbolKey,
                     (item) => safeCreate(ChartUtils.createOverlayZslxShape(this.chart, item, { level, color: ovColor }), `ovx${level}`), false);
+                this.reconcile(`overlay_zslx_lines_${level}`, od.xd_zslx_lines || [], from, symbolKey,
+                    (item) => safeCreate(ChartUtils.createZslxLineShape(this.chart, item, { color: ovColor, linewidth: 3 + level, from }), `ovxl${level}`), false, true);
             });
             for (let lv = freqs.length + 1; lv <= 3; lv++) {
                 this.reconcile(`overlay_zss_${lv}`, [], 0, symbolKey, () => null);
                 this.reconcile(`overlay_zslxs_${lv}`, [], 0, symbolKey, () => null, false);
+                this.reconcile(`overlay_zslx_lines_${lv}`, [], 0, symbolKey, () => null, false);
             }
         };
         if (cfg.overlay_freqs !== false) {

@@ -46,6 +46,9 @@ def _mk_chart_data(times: list, with_shapes: bool = True) -> dict:
         data["xds"] = []
         data["bi_zss"] = []
         data["xd_zss"] = []
+        data["xd_zslx_lines"] = [
+            {"id": "zslx_cross", "points": [{"time": times[0]}, {"time": times[-1]}]},
+        ]
         data["bcs"] = []
         data["mmds"] = []
     return data
@@ -101,6 +104,7 @@ def test_slice_no_data_in_window():
     assert sliced["t"] == []
     assert sliced["o"] == []
     assert sliced["fxs"] == []  # 所有 fx time<500 都被过滤
+    assert sliced["xd_zslx_lines"] == []
 
 
 def test_slice_preserves_higher_macd_when_empty():
@@ -153,6 +157,7 @@ def test_trim_keeps_shapes_intact():
     trimmed = trim_future_bars(data, to_ts=350)
     assert len(trimmed["bis"]) == 1
     assert trimmed["bis"][0]["id"] == "bi_cross"
+    assert len(trimmed["xd_zslx_lines"]) == 1
 
 
 def test_trim_empty_times_no_op():

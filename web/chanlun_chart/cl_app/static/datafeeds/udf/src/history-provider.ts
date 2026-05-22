@@ -47,6 +47,14 @@ interface HistoryFullDataResponse extends UdfOkResponse {
   xd_zss: LineSegment[];
   bcs: TextPoint[];
   mmds: TextPoint[];
+  bi_mmds?: TextPoint[];
+  xd_mmds?: TextPoint[];
+  bi_bcs?: TextPoint[];
+  xd_bcs?: TextPoint[];
+  xd_zslx?: LineSegment[];
+  xd_zslx_lines?: LineSegment[];
+  recursive_levels?: unknown[];
+  interval_nest?: unknown;
   update: boolean;
   chart_color?: Map<string, string>;
 }
@@ -103,6 +111,14 @@ export interface GetBarsResult {
   xd_zss: LineSegment[];
   bcs: TextPoint[];
   mmds: TextPoint[];
+  bi_mmds?: TextPoint[];
+  xd_mmds?: TextPoint[];
+  bi_bcs?: TextPoint[];
+  xd_bcs?: TextPoint[];
+  xd_zslx?: LineSegment[];
+  xd_zslx_lines?: LineSegment[];
+  recursive_levels?: unknown[];
+  interval_nest?: unknown;
   chart_color?: Map<string, string>;
 }
 
@@ -441,6 +457,14 @@ export class HistoryProvider {
           xd_zss: (response as HistoryFullDataResponse).xd_zss,
           bcs: (response as HistoryFullDataResponse).bcs,
           mmds: (response as HistoryFullDataResponse).mmds,
+          bi_mmds: (response as HistoryFullDataResponse).bi_mmds || [],
+          xd_mmds: (response as HistoryFullDataResponse).xd_mmds || [],
+          bi_bcs: (response as HistoryFullDataResponse).bi_bcs || [],
+          xd_bcs: (response as HistoryFullDataResponse).xd_bcs || [],
+          xd_zslx: (response as HistoryFullDataResponse).xd_zslx || [],
+          xd_zslx_lines: (response as HistoryFullDataResponse).xd_zslx_lines || [],
+          recursive_levels: (response as HistoryFullDataResponse).recursive_levels || [],
+          interval_nest: (response as HistoryFullDataResponse).interval_nest,
           chart_color: (response as HistoryFullDataResponse).chart_color,
         });
         this._pruneBarsResult();
@@ -563,6 +587,32 @@ export class HistoryProvider {
           obj_res.mmds,
           (response as HistoryFullDataResponse).mmds
         );
+        obj_res.bi_mmds = updateTextPoints(
+          obj_res.bi_mmds || [],
+          (response as HistoryFullDataResponse).bi_mmds || []
+        );
+        obj_res.xd_mmds = updateTextPoints(
+          obj_res.xd_mmds || [],
+          (response as HistoryFullDataResponse).xd_mmds || []
+        );
+        obj_res.bi_bcs = updateTextPoints(
+          obj_res.bi_bcs || [],
+          (response as HistoryFullDataResponse).bi_bcs || []
+        );
+        obj_res.xd_bcs = updateTextPoints(
+          obj_res.xd_bcs || [],
+          (response as HistoryFullDataResponse).xd_bcs || []
+        );
+        obj_res.xd_zslx = updateLineSegments(
+          obj_res.xd_zslx || [],
+          (response as HistoryFullDataResponse).xd_zslx || []
+        );
+        obj_res.xd_zslx_lines = updateLineSegments(
+          obj_res.xd_zslx_lines || [],
+          (response as HistoryFullDataResponse).xd_zslx_lines || []
+        );
+        obj_res.recursive_levels = (response as HistoryFullDataResponse).recursive_levels || [];
+        obj_res.interval_nest = (response as HistoryFullDataResponse).interval_nest;
         obj_res.chart_color = (response as HistoryFullDataResponse).chart_color;
 
         const oldTimes = obj_res.times || [];
@@ -599,6 +649,14 @@ export class HistoryProvider {
       xd_zss: (response as HistoryFullDataResponse).xd_zss,
       bcs: (response as HistoryFullDataResponse).bcs,
       mmds: (response as HistoryFullDataResponse).mmds,
+      bi_mmds: (response as HistoryFullDataResponse).bi_mmds || [],
+      xd_mmds: (response as HistoryFullDataResponse).xd_mmds || [],
+      bi_bcs: (response as HistoryFullDataResponse).bi_bcs || [],
+      xd_bcs: (response as HistoryFullDataResponse).xd_bcs || [],
+      xd_zslx: (response as HistoryFullDataResponse).xd_zslx || [],
+      xd_zslx_lines: (response as HistoryFullDataResponse).xd_zslx_lines || [],
+      recursive_levels: (response as HistoryFullDataResponse).recursive_levels || [],
+      interval_nest: (response as HistoryFullDataResponse).interval_nest,
       chart_color: (response as HistoryFullDataResponse).chart_color,
     };
 

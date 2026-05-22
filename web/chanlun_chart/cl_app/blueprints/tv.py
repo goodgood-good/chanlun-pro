@@ -918,6 +918,7 @@ def tv_history():
             "xd_bcs": cl_chart_data.get("xd_bcs", []),
             # 原文化新增(③④/区间套):走势类型区间 + 递归层级 + 区间套链
             "xd_zslx": cl_chart_data.get("xd_zslx", []),
+            "xd_zslx_lines": cl_chart_data.get("xd_zslx_lines", []),
             "recursive_levels": cl_chart_data.get("recursive_levels", []),
             "interval_nest": cl_chart_data.get("interval_nest"),
             "update": False if firstDataRequest == "true" else True,
@@ -1309,6 +1310,34 @@ def _serialize_overlay_zslx(cd) -> list:
     return out
 
 
+def _serialize_overlay_zslx_lines(cd) -> list:
+    out = []
+    try:
+        zslxs = cd.get_xd_zslx() or []
+    except Exception:
+        return out
+    for zslx in zslxs:
+        try:
+            if not zslx.zss:
+                continue
+            start = zslx.start or zslx.zss[0].lines[0].start
+            end = zslx.end or zslx.zss[-1].lines[-1].end
+            out.append({
+                "points": [
+                    {"time": fun.datetime_to_int(start.k.date), "price": start.val},
+                    {"time": fun.datetime_to_int(end.k.date), "price": end.val},
+                ],
+                "linestyle": "0" if zslx.done else "1",
+                "zslx_type": zslx.zslx_type,
+                "direction": zslx.type,
+                "done": bool(zslx.done),
+                "zss_count": len(zslx.zss),
+            })
+        except Exception:
+            continue
+    return out
+
+
 @tv_bp.route("/tv/overlays")
 @login_required
 def tv_overlays():
@@ -1366,6 +1395,7 @@ def tv_overlays():
             out[freq] = {
                 "xd_zss": _serialize_overlay_zss(cd),
                 "xd_zslx": _serialize_overlay_zslx(cd),
+                "xd_zslx_lines": _serialize_overlay_zslx_lines(cd),
             }
         except Exception as e:
             LogUtil.warning(f"[tv_overlays] symbol={symbol} freq={freq} err={e}")
