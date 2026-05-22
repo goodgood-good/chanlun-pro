@@ -130,32 +130,6 @@ def test_mmd_icon_and_label_are_offset_away_from_kline(actual_charts_html):
     assert result["sellIconTime"] == 1
 
 
-def test_zslx_line_is_clipped_to_visible_left_edge(actual_charts_html):
-    """高级别走势类型线头部在窗口外时,按原斜率裁剪到可视左边界。"""
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        page = browser.new_page()
-        page.goto(actual_charts_html)
-        page.wait_for_load_state("networkidle")
-        result = page.evaluate("""
-            (() => {
-                const line = {
-                    points: [
-                        { time: 100, price: 10 },
-                        { time: 200, price: 30 },
-                    ],
-                };
-                return ChartUtils.clipTrendLinePointsToFrom(line, 150);
-            })()
-        """)
-        browser.close()
-
-    assert result == [
-        {"time": 150, "price": 20},
-        {"time": 200, "price": 30},
-    ]
-
-
 def test_n5_currency_returns_browser_local_tz(harness_html):
     """N5: market=currency / currency_spot 走 Intl 浏览器时区, 不是默认 Asia/Shanghai。"""
     with sync_playwright() as p:

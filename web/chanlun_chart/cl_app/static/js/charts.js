@@ -9,11 +9,6 @@ const CL_SHOW_DEFAULT = {
     zs_bi: true, zs_xd: true,
     // 买卖点/背驰按级别独立 toggle(笔层数量远多于段层、用户常需只看段层):
     mmd_bi: true, mmd_xd: true, bc_bi: true, bc_xd: true,
-    // 原文化新增独立开关(默认全开,用户可在控制面板单独 toggle):
-    xd_zslx: true,             // ③ 当前级别走势类型(线段 + 半透明区间)
-    recursive_levels: true,    // ④ 递归 L1+ 高级中枢与走势类型
-    interval_nest: true,       // 区间套链 flags + 精确转折点
-    overlay_freqs: true,       // 多周期叠加(高级别独立 CL 跑出的中枢/走势类型)
 };
 
 // 各市场的 TV 显示时区，与后端 services/constants.py:market_timezone 保持一致。
@@ -115,16 +110,6 @@ const CHART_CONFIG = {
         BCS: "#D1D4DC", BC_TEXT: "#fccbcd",
         MMD_UP: "#E64A19", MMD_DOWN: "#1565C0",
         AREA_POS: "#ef5350", AREA_NEG: "#26a69a",
-        // 走势类型(③ xd_zslx)半透明背景色
-        ZSLX_UP: "#FFCCBC", ZSLX_DOWN: "#BBDEFB", ZSLX_ZHENGLI: "#CFD8DC",
-        // 递归层级 L1+ 高级中枢(④):级别越高颜色越深
-        RECURSIVE_L1: "#7E57C2", RECURSIVE_L2: "#4A148C", RECURSIVE_L3: "#311B92",
-        // 区间套(原文第三章·第六节):链路灰、转折点高亮
-        INTERVAL_NEST_LINK: "#9E9E9E", INTERVAL_NEST_TP: "#FF6F00",
-        // 多周期叠加(高级别独立 CL 跑出的中枢) —— 与递归层级紫色梯度区分,
-        // 用橙黄→红色梯度,级别越高色越深(与 K 线本身不冲突)。
-        OVERLAY_L1: "#FFA726", OVERLAY_L2: "#F4511E", OVERLAY_L3: "#BF360C",
-        OVERLAY_ZSLX_L1: "#FFCC80", OVERLAY_ZSLX_L2: "#FFAB91", OVERLAY_ZSLX_L3: "#FF8A65",
     },
     LINE_STYLES: { SOLID: 0, DOTTED: 1, DASHED: 2 },
     CHART_TYPES: [
@@ -133,17 +118,6 @@ const CHART_CONFIG = {
         "bi_mmds", "xd_mmds", "bi_bcs", "xd_bcs",
         // 买卖点文字标签(与 icon 箭头分离的第二个 shape,各自独立 reconcile)
         "mmd_labels", "bi_mmd_labels", "xd_mmd_labels",
-        // 原文化新增:③ 走势类型 / ④ 递归层级 / 区间套
-        "xd_zslx", "xd_zslx_lines",
-        "recursive_zss_L1", "recursive_zss_L2", "recursive_zss_L3",
-        "recursive_zslxs_L1", "recursive_zslxs_L2", "recursive_zslxs_L3",
-        "recursive_zslx_lines_L1", "recursive_zslx_lines_L2", "recursive_zslx_lines_L3",
-        "interval_nest_links", "interval_nest_tp",
-        // 多周期叠加(/tv/overlays):高级别独立 CL 跑出的中枢/走势类型,
-        // 6 个 freq 槽位覆盖常见 5m/30m/60m/1D/1W/1M。
-        "overlay_zss_1", "overlay_zss_2", "overlay_zss_3",
-        "overlay_zslxs_1", "overlay_zslxs_2", "overlay_zslxs_3",
-        "overlay_zslx_lines_1", "overlay_zslx_lines_2", "overlay_zslx_lines_3",
     ],
 };
 
@@ -184,39 +158,11 @@ const DYNAMIC_CHART_COLORS = {
     "1M": { ...DEFAULT_COLORS, bis: "#4274B1", xds: "#C638DD", bi_zss: "#4274B1", xd_zss: "#C638DD" },
 };
 
-// 周期递进链:当前 interval → 高一/二/三级 interval。
-// recursive L1+ 中枢、overlay 高级别中枢都按此 chain 取色。
-//   - 当前周期走势类型线 = chain[1] xds 色,它是高一级中枢的构件;
-//   - recursive_L1 中枢 = chain[1] xds 色,recursive_L1 走势线 = chain[2] xds 色;
-//   - recursive_L2 中枢 = chain[2] xds 色,recursive_L2 走势线 = chain[3] xds 色;
-//   - overlay_L1   色 = chain[1](高一级) xds 色;
-//   - overlay_L2   色 = chain[2] xds 色;overlay_L3 = chain[3] xds 色。
-// chain 顶端的 1M 自循环兜底,避免 undefined。
-const FREQ_INTERVAL_CHAIN = {
-    "1":  ["1",  "5",  "30", "1D"],
-    "3":  ["3",  "15", "60", "1D"],
-    "5":  ["5",  "30", "1D", "1W"],
-    "10": ["10", "60", "1D", "1W"],
-    "15": ["15", "60", "1D", "1W"],
-    "30": ["30", "1D", "1W", "1M"],
-    "60": ["60", "1D", "1W", "1M"],
-    "1D": ["1D", "1W", "1M", "1M"],
-    "1W": ["1W", "1M", "1M", "1M"],
-    "1M": ["1M", "1M", "1M", "1M"],
-};
-
 function getDynamicColor(interval, elementType) {
     if (DYNAMIC_CHART_COLORS[interval] && DYNAMIC_CHART_COLORS[interval][elementType]) {
         return DYNAMIC_CHART_COLORS[interval][elementType];
     }
     return DEFAULT_COLORS[elementType] || "#FFFFFF";
-}
-
-// 沿 chain 取目标周期的 elementType 色。``offset=0`` 即当前周期。
-function chainColorAt(currentInterval, offset, elementType = "xds") {
-    const chain = FREQ_INTERVAL_CHAIN[currentInterval] || [currentInterval];
-    const idx = Math.min(Math.max(offset, 0), chain.length - 1);
-    return getDynamicColor(chain[idx], elementType);
 }
 
 function debounce(func, wait) {
@@ -264,121 +210,11 @@ const ChartUtils = {
     createLineShape(chart, line, options = {}) {
         return this.createShape(chart, line.points, { shape: "trend_line", overrides: { linestyle: parseInt(line.linestyle) || 0, linewidth: options.linewidth || 1, linecolor: options.color || CHART_CONFIG.COLORS.BI, ...options.overrides }, ...options });
     },
-    clipTrendLinePointsToFrom(line, from) {
-        const points = Array.isArray(line?.points) ? line.points : [];
-        if (points.length < 2 || !Number.isFinite(from)) return points;
-
-        const start = points[0];
-        const end = points[points.length - 1];
-        const startTime = Number(start?.time);
-        const endTime = Number(end?.time);
-        const startPrice = Number(start?.price);
-        const endPrice = Number(end?.price);
-
-        if (
-            !Number.isFinite(startTime) ||
-            !Number.isFinite(endTime) ||
-            !Number.isFinite(startPrice) ||
-            !Number.isFinite(endPrice) ||
-            startTime >= from ||
-            endTime <= from ||
-            endTime <= startTime
-        ) {
-            return points;
-        }
-
-        const ratio = (from - startTime) / (endTime - startTime);
-        const clippedPrice = startPrice + (endPrice - startPrice) * ratio;
-        return [
-            { ...start, time: from, price: clippedPrice },
-            { ...end },
-        ];
-    },
-    createZslxLineShape(chart, line, options = {}) {
-        const shapeOptions = { ...options };
-        const from = shapeOptions.from;
-        delete shapeOptions.from;
-
-        let color = shapeOptions.color;
-        if (!color) {
-            color = CHART_CONFIG.COLORS.ZSLX_ZHENGLI;
-            if (line.direction === "up") color = CHART_CONFIG.COLORS.MMD_UP;
-            else if (line.direction === "down") color = CHART_CONFIG.COLORS.MMD_DOWN;
-        }
-        const linewidth = shapeOptions.linewidth || 4;
-        const points = this.clipTrendLinePointsToFrom(line, from);
-        return this.createShape(chart, points, { shape: "trend_line", overrides: { linestyle: parseInt(line.linestyle) || 0, linewidth, linecolor: color, color, "trendline.linecolor": color, ...shapeOptions.overrides }, ...shapeOptions });
-    },
     createZhongshuShape(chart, zs, options = {}) {
         const color = options.color || CHART_CONFIG.COLORS.BI;
         const linewidth = options.linewidth || 1;
         const transparency = 95;
         return this.createShape(chart, zs.points, { shape: "rectangle", overrides: { linestyle: parseInt(zs.linestyle) || 0, linewidth, linecolor: color, backgroundColor: color, transparency, color, "trendline.linecolor": color, fillBackground: true, filled: true, ...options.overrides }, ...options });
-    },
-    createZslxShape(chart, zslx, options = {}) {
-        // 走势类型区间(③ xd_zslx) —— 用 **半透明背景 + 粗虚线边框** 让用户
-        // 肉眼能看出区间范围。早期版本用 transparency=100 空心矩形,像素 diff
-        // 只有 0.23% 用户感知不到「toggle 有效果」——加 transparency=70 让
-        // 背景有可见色调,既可见又不严重遮挡 K 线/中枢矩形。
-        let color = CHART_CONFIG.COLORS.ZSLX_ZHENGLI;
-        if (zslx.direction === "up") color = CHART_CONFIG.COLORS.ZSLX_UP;
-        else if (zslx.direction === "down") color = CHART_CONFIG.COLORS.ZSLX_DOWN;
-        return this.createShape(chart, zslx.points, { shape: "rectangle", overrides: { linestyle: 2, linewidth: 3, linecolor: color, backgroundColor: color, transparency: 70, fillBackground: true, filled: true, color, "trendline.linecolor": color, ...options.overrides }, ...options });
-    },
-    createRecursiveZsShape(chart, zs, options = {}) {
-        // 递归层级中枢(④ L1+) —— 用包络区间(GG/DD)矩形,与 L0 ZS/ZD 核心区
-        // 在几何上视觉分层。**粗实线边框 + 极淡半透明填充** —— 既能看到边界又不遮挡 L0 中枢。
-        // 颜色:调用方通过 ``options.color`` 注入 chain xds 色(L1=高二级 xds、L2=高三级 xds),
-        // 让中枢色直接对应「图上看到的高级别线段色」,避免 hardcoded 紫色梯度跟周期失去关联。
-        // fallback 保留旧紫色梯度,供 options.color 缺省场景。
-        const levelColors = {
-            1: CHART_CONFIG.COLORS.RECURSIVE_L1,
-            2: CHART_CONFIG.COLORS.RECURSIVE_L2,
-            3: CHART_CONFIG.COLORS.RECURSIVE_L3,
-        };
-        const color = options.color || levelColors[options.level] || CHART_CONFIG.COLORS.RECURSIVE_L1;
-        const linewidth = 2 + (options.level || 1);     // 级别越高线越粗
-        const transparency = zs.is_expanded ? 70 : 92;
-        return this.createShape(chart, zs.points, { shape: "rectangle", overrides: { linestyle: parseInt(zs.linestyle) || 0, linewidth, linecolor: color, backgroundColor: color, transparency, color, "trendline.linecolor": color, fillBackground: true, filled: true, ...options.overrides }, ...options });
-    },
-    createOverlayZsShape(chart, zs, options = {}) {
-        // 多周期叠加中枢(高级别周期独立 CL 产出):粗实线边框 + 透明填充,
-        // 颜色:调用方通过 ``options.color`` 注入 chain xds 色(level=N → chain[N] xds),
-        // 让叠加中枢颜色匹配其对应周期的「线段色」。fallback 保留旧橙红梯度。
-        const levelColors = {
-            1: CHART_CONFIG.COLORS.OVERLAY_L1,
-            2: CHART_CONFIG.COLORS.OVERLAY_L2,
-            3: CHART_CONFIG.COLORS.OVERLAY_L3,
-        };
-        const color = options.color || levelColors[options.level] || CHART_CONFIG.COLORS.OVERLAY_L1;
-        const linewidth = 2 + (options.level || 1);
-        return this.createShape(chart, zs.points, { shape: "rectangle", overrides: { linestyle: parseInt(zs.linestyle) || 0, linewidth, linecolor: color, backgroundColor: color, transparency: 85, color, "trendline.linecolor": color, fillBackground: true, filled: true, ...options.overrides }, ...options });
-    },
-    createOverlayZslxShape(chart, zslx, options = {}) {
-        // 多周期叠加走势类型:粗虚线空心矩形,与中枢边框区分。
-        // 颜色:调用方通过 ``options.color`` 注入 chain xds 色(level=N → chain[N] xds);
-        // fallback 保留旧 OVERLAY_ZSLX 梯度。
-        const levelColors = {
-            1: CHART_CONFIG.COLORS.OVERLAY_ZSLX_L1,
-            2: CHART_CONFIG.COLORS.OVERLAY_ZSLX_L2,
-            3: CHART_CONFIG.COLORS.OVERLAY_ZSLX_L3,
-        };
-        const color = options.color || levelColors[options.level] || CHART_CONFIG.COLORS.OVERLAY_ZSLX_L1;
-        return this.createShape(chart, zslx.points, { shape: "rectangle", overrides: { linestyle: 2, linewidth: 2, linecolor: color, backgroundColor: color, transparency: 100, fillBackground: false, filled: false, color, "trendline.linecolor": color, ...options.overrides }, ...options });
-    },
-    createIntervalNestLinkShape(chart, link, options = {}) {
-        // 区间套·一重:在该重背驰段终点处画 flag,标注 ``L{level}`` 与是否真背驰。
-        // link 形态为 ``{points:{time,price}, level, is_beichi, direction, ...}``。
-        const color = link.is_beichi ? CHART_CONFIG.COLORS.INTERVAL_NEST_LINK : CHART_CONFIG.COLORS.BCS;
-        const label = `L${link.level}${link.is_beichi ? "✓" : "?"}`;
-        return this.createShape(chart, link.points, { shape: "flag", text: label, overrides: { markerColor: color, color, backgroundColor: color, transparency: 80, fontsize: 10, ...options.overrides }, ...options });
-    },
-    createIntervalNestTurningPointShape(chart, tp, options = {}) {
-        // 区间套·转折点:最低重背驰段终分型,用大号高亮 icon 表「精确转折」。
-        // tp 形态为 ``{points:{time,price}, direction}``。
-        const color = CHART_CONFIG.COLORS.INTERVAL_NEST_TP;
-        const shape = options.direction === "up" ? "arrow_down" : "arrow_up";
-        return this.createShape(chart, tp.points, { shape, text: "区间套转折", overrides: { arrowColor: color, color, fontsize: 14, bold: true, ...options.overrides }, ...options });
     },
     // 买卖点偏移基准:近 N 根 K 线平均振幅(high-low)。波动越大基准越大,
     // 跨标的 / 周期 / 缩放自适应。无有效 K 线时返回 0,调用方回退到价格百分比。
@@ -1135,10 +971,7 @@ class ChartManager {
                         <div id="${menuId}_lvl_detail" style="display:none; font-size:11px; color:#888; line-height:1.5em; padding:2px 0 4px 14px; border-left:2px solid #eee; margin:2px 0 4px 4px;">
                             笔中枢 → 最低级别中枢<br>
                             线段 → 最低级别走势类型<br>
-                            线段中枢 → <b>${_lbl(0)}</b>中枢<br>
-                            走势类型线 → <b>${_lbl(0)}</b>走势<br>
-                            递归 L1 → <b>${_lbl(1)}</b>中枢/走势<br>
-                            递归 L2 → <b>${_lbl(2)}</b>中枢/走势
+                            线段中枢 → <b>${_lbl(0)}</b>中枢
                         </div>
 
                         ${_grpTitle('基础')}
@@ -1154,10 +987,6 @@ class ChartManager {
                             <label style="cursor:pointer;"><input type="checkbox" id="${cbId('zs_xd')}" ${cfg.zs_xd ? 'checked' : ''} style="margin-right:4px; vertical-align:middle;">线段中枢</label>
                         </div>
 
-                        ${_grpTitle('走势')}
-                        ${_cbRow('xd_zslx', '走势类型线/区间', false)}
-                        ${_cbRow('recursive_levels', '多级中枢/走势', false)}
-
                         ${_grpTitle('买卖点')}
                         ${_cbRow('mmd', '总开关', false)}
                         <div style="padding-left:14px; font-size:12px; display:flex; gap:12px;">
@@ -1171,10 +1000,6 @@ class ChartManager {
                             <label style="cursor:pointer;"><input type="checkbox" id="${cbId('bc_bi')}" ${cfg.bc_bi ? 'checked' : ''} style="margin-right:4px; vertical-align:middle;">笔背驰</label>
                             <label style="cursor:pointer;"><input type="checkbox" id="${cbId('bc_xd')}" ${cfg.bc_xd ? 'checked' : ''} style="margin-right:4px; vertical-align:middle;">段背驰</label>
                         </div>
-
-                        ${_grpTitle('高级')}
-                        ${_cbRow('interval_nest', '区间套', false)}
-                        ${_cbRow('overlay_freqs', `多周期叠加 (${_lbl(1)}/${_lbl(2)}/${_lbl(3)})`, false)}
 
                         <hr style="margin:6px 0 4px;">
                         <label style="display:block; cursor:pointer; font-size:12px;"><input type="checkbox" id="${indCbId}" ${self.cl_independent_drawings ? 'checked' : ''} style="margin-right:6px; vertical-align:middle;">独立周期画线</label>
@@ -1247,8 +1072,6 @@ class ChartManager {
                     'fx', 'bi', 'xd', 'bc', 'mmd',
                     // 笔/段独立级别开关(中枢 / 买卖点 / 背驰)
                     'zs_bi', 'zs_xd', 'mmd_bi', 'mmd_xd', 'bc_bi', 'bc_xd',
-                    'xd_zslx',
-                    'recursive_levels', 'interval_nest', 'overlay_freqs',
                 ];
                 keys.forEach(k => {
                     $('#' + cbId(k)).change(function () {
@@ -1538,7 +1361,7 @@ class ChartManager {
         const afterUniqueCount = renderList.length;
 
         // 按可视窗口过滤：历史元素可达数百根，全画会造成视觉杂乱。
-        // 默认要求 headTime >= from；走势类型线/高级中枢这类横跨窗口的元素可传
+        // 默认要求 headTime >= from；横跨窗口的多点元素可传
         // includeOverlaps=true，只要 tailTime >= from 就入渲染。
         const newKeys = new Set();
         const itemsToProcess = [];
@@ -1551,8 +1374,8 @@ class ChartManager {
                 headTime = tailTime = item.points?.time;
             }
             // 默认只在头部进入可视窗(必已加载)时创建，避免 createMultipointShape 把画外/未加载
-            // 角点 snap 到边缘造成错位。高级走势类型线会在 createZslxLineShape 内裁剪到窗口左侧。
-            // 注:单点形态(bcs/mmds/inest)head=tail,等价;tailTime 仍用于下方 keep 判定。
+            // 角点 snap 到边缘造成错位。
+            // 注:单点形态(bcs/mmds)head=tail,等价;tailTime 仍用于下方 keep 判定。
             const shouldRender = includeOverlaps ? tailTime >= from : headTime >= from;
             if (shouldRender) {
                 const key = this.makeKey(item);
@@ -1794,107 +1617,6 @@ class ChartManager {
         } else {
             this.reconcile('bcs', cfg.bc ? barsResult.bcs : [], from, symbolKey, (item) => safeCreate(ChartUtils.createBcShape(this.chart, item), 'bc'), false);
         }
-
-        // ③ 当前周期走势类型:先画淡矩形表达区间,再画粗线表达“走势类型作为
-        // 高一级中枢构件”。在 1min 图上,这些线就是 1min 走势类型线段。
-        this.reconcile('xd_zslx', cfg.xd_zslx !== false ? (barsResult.xd_zslx || []) : [], from, symbolKey, (item) => safeCreate(ChartUtils.createZslxShape(this.chart, item), 'xd_zslx'), false);
-        const zslxLineColor = chainColorAt(currentInterval, 1, "xds");
-        this.reconcile('xd_zslx_lines', cfg.xd_zslx !== false ? (barsResult.xd_zslx_lines || []) : [], from, symbolKey, (item) => safeCreate(ChartUtils.createZslxLineShape(this.chart, item, { color: zslxLineColor, linewidth: 4, from }), 'xd_zslx_line'), false, true);
-
-        // ④ 递归层级树 —— L1/L2/L3 高级中枢与走势类型。
-        // L1 中枢由 L0 走势类型线构成,所以 L1 中枢色与 L0 走势类型线色一致;
-        // L1 走势类型线再作为 L2 中枢构件,颜色向 chain 后移一档。
-        const recLevels = (cfg.recursive_levels !== false ? (barsResult.recursive_levels || []) : []);
-        // 收集到 by-level container(reconcile key 已预先分配 recursive_zss_L1..L3 / _zslxs_L1..L3)
-        // 高级别中枢/走势类型横跨上百根 bars,若头部在窗外则整体不显示;这是为了避免
-        // createMultipointShape 对画外/未加载角点做 snap 后造成矩形错位。
-        // L1 中枢 = chain[1] xds 色,L2 中枢 = chain[2] xds 色。
-        // 让每级中枢颜色对应构成它的上一层走势类型线。
-        for (let L = 1; L <= 3; L++) {
-            const lv = recLevels.find((x) => x.level === L);
-            const recZsColor = chainColorAt(currentInterval, L, "xds");
-            const recLineColor = chainColorAt(currentInterval, L + 1, "xds");
-            // useUnique=false:多个 pending L1+ 中枢需并存,见 bi_zss/xd_zss 同源说明。
-            this.reconcile(`recursive_zss_L${L}`, lv ? lv.zss : [], from, symbolKey, (item) => safeCreate(ChartUtils.createRecursiveZsShape(this.chart, item, { level: L, color: recZsColor }), `rec_zs_L${L}`), false, true);
-            this.reconcile(`recursive_zslxs_L${L}`, lv ? lv.zslxs : [], from, symbolKey, (item) => safeCreate(ChartUtils.createZslxShape(this.chart, item, { overrides: { transparency: 88, linecolor: recLineColor, backgroundColor: recLineColor, color: recLineColor, "trendline.linecolor": recLineColor } }), `rec_zslx_L${L}`), false);
-            this.reconcile(`recursive_zslx_lines_L${L}`, lv ? (lv.zslx_lines || []) : [], from, symbolKey, (item) => safeCreate(ChartUtils.createZslxLineShape(this.chart, item, { color: recLineColor, linewidth: 4 + L, from }), `rec_zslx_line_L${L}`), false, true);
-        }
-
-        // 多周期叠加(/tv/overlays):高级别 CL 跑出的中枢/走势类型。**缓存**
-        // overlay 数据,只在 symbol/interval 变化时触发 fetch——否则每次
-        // drawChartElements(toggle / 缩放 / 滚动)都 fetch + reconcile 大批
-        // shape,造成 TV widget 重绘闪烁。reconcile 自身 _reconcileGuard
-        // 在 signature 相同时跳过、所以用缓存数据重 reconcile 完全无副作用。
-        const _applyOverlay = (overlays) => {
-            const freqs = Object.keys(overlays).slice(0, 3);
-            freqs.forEach((freq, idx) => {
-                const level = idx + 1;
-                const od = overlays[freq] || {};
-                // overlay_zss/zslx level=N → 对应 chain[N] 周期 xds 色,跟那一级的「线段色」一致。
-                const ovColor = chainColorAt(currentInterval, level, "xds");
-                this.reconcile(`overlay_zss_${level}`, od.xd_zss || [], from, symbolKey,
-                    (item) => safeCreate(ChartUtils.createOverlayZsShape(this.chart, item, { level, color: ovColor }), `ovz${level}`), false, true);
-                this.reconcile(`overlay_zslxs_${level}`, od.xd_zslx || [], from, symbolKey,
-                    (item) => safeCreate(ChartUtils.createOverlayZslxShape(this.chart, item, { level, color: ovColor }), `ovx${level}`), false);
-                this.reconcile(`overlay_zslx_lines_${level}`, od.xd_zslx_lines || [], from, symbolKey,
-                    (item) => safeCreate(ChartUtils.createZslxLineShape(this.chart, item, { color: ovColor, linewidth: 3 + level, from }), `ovxl${level}`), false, true);
-            });
-            for (let lv = freqs.length + 1; lv <= 3; lv++) {
-                this.reconcile(`overlay_zss_${lv}`, [], 0, symbolKey, () => null);
-                this.reconcile(`overlay_zslxs_${lv}`, [], 0, symbolKey, () => null, false);
-                this.reconcile(`overlay_zslx_lines_${lv}`, [], 0, symbolKey, () => null, false);
-            }
-        };
-        if (cfg.overlay_freqs !== false) {
-            const si = this.widget?.symbolInterval?.();
-            const sym = si?.symbol; const intv = si?.interval;
-            if (sym && intv) {
-                const overlayKey = `${sym}__${intv}`;
-                if (!this._overlayState) this._overlayState = { key: null, data: null, inflight: false };
-                if (this._overlayState.key === overlayKey && this._overlayState.data) {
-                    // 缓存命中:reconcile signature 相同自动 short-circuit,无副作用
-                    _applyOverlay(this._overlayState.data);
-                } else if (!this._overlayState.inflight) {
-                    // 仅当 symbol/interval 变化或首次访问才 fetch
-                    this._overlayState.inflight = true;
-                    fetch(`/tv/overlays?symbol=${encodeURIComponent(sym)}&interval=${encodeURIComponent(intv)}`, { cache: 'no-store' })
-                        .then(r => r.ok ? r.json() : { overlays: {} })
-                        .then(data => {
-                            const overlays = data.overlays || {};
-                            this._overlayState = { key: overlayKey, data: overlays, inflight: false };
-                            _applyOverlay(overlays);
-                            const freqs = Object.keys(overlays);
-                            console.log(`[overlay] fetched ${freqs.join(',')} zss=${freqs.map(f => (overlays[f].xd_zss||[]).length).join('/')} zslx=${freqs.map(f => (overlays[f].xd_zslx||[]).length).join('/')}`);
-                        })
-                        .catch(e => {
-                            this._overlayState.inflight = false;
-                            console.warn(`[overlay] fetch failed:`, e);
-                        });
-                }
-                // inflight 中:跳过本轮,等 fetch promise 完成后自动 reconcile
-            }
-        } else {
-            // toggle 关:清空所有 overlay container
-            for (let lv = 1; lv <= 3; lv++) {
-                this.reconcile(`overlay_zss_${lv}`, [], 0, symbolKey, () => null);
-                this.reconcile(`overlay_zslxs_${lv}`, [], 0, symbolKey, () => null, false);
-            }
-        }
-
-        // 区间套 —— 链路 flags + 精确转折点 marker。reconcile.makeKey 依赖
-        // item.points(单点形态用 ``{points:{time,price}}``,多点用 ``{points:[...]}``);
-        // 后端 inest.links / turning_point 是裸 {time,price},包装成 ``points`` 形态。
-        const inest = (cfg.interval_nest !== false ? barsResult.interval_nest : null);
-        const linksWrapped = (inest && inest.links ? inest.links : []).map(l => ({
-            ...l, points: { time: l.time, price: l.price }, text: `L${l.level}`,
-        }));
-        this.reconcile('interval_nest_links', linksWrapped, from, symbolKey, (item) => safeCreate(ChartUtils.createIntervalNestLinkShape(this.chart, item), 'inest_link'), false);
-        const tpItems = (inest && inest.turning_point) ? [{
-            points: { time: inest.turning_point.time, price: inest.turning_point.price },
-            direction: inest.direction,
-            text: "转折",
-        }] : [];
-        this.reconcile('interval_nest_tp', tpItems, from, symbolKey, (item) => safeCreate(ChartUtils.createIntervalNestTurningPointShape(this.chart, item, { direction: item.direction }), 'inest_tp'), false);
 
         // 一轮 reconcile 完后扫一次孤儿,清理 race 残留(safeRemove 静默失败 / container 提前清零)。
         // 因为 reconcile 内 create 是异步的,延后到下一帧执行,等所有 promise resolve 后再扫。
