@@ -357,6 +357,36 @@ class CL(ICL):
             self.xd_calculator.xds, ld_provider, recursive_wzgx, self.frequency,
         )
 
+    def get_recursive_mmds(self) -> dict:
+        """在递归各「升级」级别上识别买卖点（中枢升级买卖点）。
+
+        并存独立子系统：每次现算，结果存入各级走势单元的 ``zs_type_mmds['L{level}']``
+        独立分桶，**不与 bi/xd 基础买卖点冲突**。返回 ``{level: [(name, k_index, val)…]}``。
+
+        原文依据：中枢升级后，升级级别中枢自身的一二三类买卖点（第54课「升级三卖」等）
+        是更高级别的转折信号。注：升级是否出现取决于数据是否具备更高级别结构——
+        低结构标的（整段一个大盘整/扩展）可能升不出级别，属原文-一致。
+        """
+        from chanlun.core.bs_point_calculator import BsPointCalculator
+        levels = self.get_recursive_levels()
+        if not levels:
+            return {}
+        result: dict = {}
+        xds = list(self.xd_calculator.xds)
+        for lv in levels:
+            units = xds if lv.level == 0 else levels[lv.level - 1].zslxs
+            zt = f'L{lv.level}'
+            BsPointCalculator(self, zs_type=zt).calculate(units, lv.zss)
+            pts = []
+            for u in units:
+                for m in u.zs_type_mmds.get(zt, []):
+                    try:
+                        pts.append((m.name, u.end.k.k_index, round(u.end.val, 3)))
+                    except Exception:
+                        pass
+            result[lv.level] = pts
+        return result
+
     def get_interval_nest(self) -> Optional[IntervalNest]:
         """返回「当下」区间套——从最高级别趋势背驰逐级下钻定位转折点（区间套）。
 
@@ -423,14 +453,17 @@ class CL(ICL):
         """判断指定线与之前的中枢是否形成趋势背驰（薄壳，逻辑见 beichi_calculator）。"""
         ld_provider = lambda s, e: query_macd_ld(self, s, e)
         wzgx_config = self.config.get('zs_wzgx', Config.ZS_WZGX_GD.value)
+        # 买卖点链路用「中枢本体包络」判趋势(剔除波动/延伸/离开段)——否则远摆撑爆
+        # 包络、趋势恒判不出、1类不触发(见 combination_calculator.core_envelope)。
         return bc.beichi_qs(
-            lines, zss, now_line, ld_provider, wzgx_config, self.frequency
+            lines, zss, now_line, ld_provider, wzgx_config, self.frequency,
+            use_core_envelope=True,
         )
 
     def zss_is_qs(self, one_zs: ZS, two_zs: ZS) -> Union[str, None]:
         """判断两个中枢是否形成趋势（薄壳，逻辑见 beichi_calculator）。"""
         wzgx_config = self.config.get('zs_wzgx', Config.ZS_WZGX_GD.value)
-        return bc.is_qs(one_zs, two_zs, wzgx_config)
+        return bc.is_qs(one_zs, two_zs, wzgx_config, use_core_envelope=True)
 
     def create_dn_zs(
         self,

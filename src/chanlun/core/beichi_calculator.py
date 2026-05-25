@@ -132,13 +132,21 @@ def is_beichi(
     return _ld_decays(seg_a, seg_b, ld_provider, frequency)
 
 
-def is_qs(one_zs: ZS, two_zs: ZS, wzgx_config: str) -> Optional[str]:
+def is_qs(
+    one_zs: ZS, two_zs: ZS, wzgx_config: str, use_core_envelope: bool = False
+) -> Optional[str]:
     """趋势关系判定：相邻两中枢是否「依次同向」构成趋势。
 
     原文：趋势至少两个依次同向的走势中枢。「依次同向」的松紧由 wzgx_config
     给定——原文「一个中枢整体在另一个之上/下」对应严格档 GD；默认档 ZGGDD
     较宽，此口径是缠论本身的模糊点，沿用代码库现有默认配置。
     返回 'up' / 'down' / None。
+
+    ``use_core_envelope``(仅作用于 GD 档)：True 时 GD 比较用「中枢本体包络」
+    (core_envelope, 剔除围绕中枢的波动/延伸/离开段)而非完整 gg/dd——这是买卖点
+    链路(cl.beichi_qs / zss_is_qs)的正确趋势口径(否则远摆撑爆包络、趋势恒判不出,
+    见 combination_calculator.core_envelope / 第33课)。递归走势类型划分(zslx)保持
+    False(完整 gg/dd), 避免本体口径让走势类型变少、递归被饿死。
     """
     if wzgx_config == Config.ZS_WZGX_ZGD.value:
         # 宽松：zg 与 zd
@@ -153,10 +161,19 @@ def is_qs(one_zs: ZS, two_zs: ZS, wzgx_config: str) -> Optional[str]:
         if one_zs.zd > two_zs.gg:
             return "down"
     elif wzgx_config == Config.ZS_WZGX_GD.value:
-        # 严格：gg 与 dd
-        if one_zs.gg < two_zs.dd:
+        # 严格(定理二)：比较包络 gg/dd。买卖点链路用「中枢本体包络」(core_envelope,
+        # 剔除围绕中枢的波动/延伸/离开段)——才是定理二的正确 GG/DD 口径,否则波动的
+        # 远摆极值撑爆包络、相邻中枢恒重叠、趋势恒判不出(第33课 a+A+b+B+c)。递归
+        # 走势类型划分保持完整 gg/dd(use_core_envelope=False)。
+        if use_core_envelope:
+            one_gg, one_dd = core_envelope(one_zs)
+            two_gg, two_dd = core_envelope(two_zs)
+        else:
+            one_gg, one_dd = one_zs.gg, one_zs.dd
+            two_gg, two_dd = two_zs.gg, two_zs.dd
+        if one_gg < two_dd:
             return "up"
-        if one_zs.dd > two_zs.gg:
+        if one_dd > two_gg:
             return "down"
     return None
 
@@ -193,6 +210,7 @@ def beichi_qs(
     ld_provider: LdProvider,
     wzgx_config: str,
     frequency: Optional[str] = None,
+    use_core_envelope: bool = False,
 ) -> Tuple[bool, List[LINE]]:
     """趋势背驰：≥2 个同向中枢的趋势中，离开末中枢的段相对连接两中枢的同向段是否衰竭。
 
@@ -221,7 +239,7 @@ def beichi_qs(
     last_zs, prev_zs = zss[-1], zss[-2]
 
     # 最后两个中枢须依次同向构成趋势，且趋势方向与当前段一致
-    qs_direction = is_qs(prev_zs, last_zs, wzgx_config)
+    qs_direction = is_qs(prev_zs, last_zs, wzgx_config, use_core_envelope=use_core_envelope)
     if not qs_direction or qs_direction != now_seg.type:
         return False, []
 

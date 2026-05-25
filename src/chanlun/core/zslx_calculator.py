@@ -64,10 +64,18 @@ def _finalize(
     )
     zslx.zss = zss
     zslx.zslx_type = zslx_type
-    # ①-1b：回填中枢方向——趋势中枢得 up/down，盘整中枢得 zd(震荡)
-    zs_dir = direction if zslx_type != "盘整" else "zd"
+    # 回填中枢方向(第24课「中枢形成的三段方向是怎么开始的」)：中枢方向由其**构成**
+    # 决定——向上走势里的中枢=下-上-下、向下=上-下-上，即「核心首段的反向」。
+    #   - 趋势走势类型：继承趋势方向(与各中枢构成一致)。
+    #   - 盘整走势类型：单中枢仍有构成方向(从高/低点起算),不应统一抹成 zd——否则
+    #     「向上=下上下 / 向下=上下上」无从体现(用户 2026-05-23 指出 + 第24课)。
+    # 中枢方向**一律由构成判定**(核心首段的反向)：下-上-下=向上、上-下-上=向下。
+    # 正确划分下,这与所在趋势方向一致(第24课);若某趋势走势类型里的中枢构成与趋势
+    # 相反,说明该中枢划分有误(更深的"走势类型-aware 划分"问题),此处按构成如实标注
+    # 以暴露,不掩盖。走势类型自身方向另存于 zslx._type(供背驰/买卖点用)。
     for zs in zss:
-        zs.type = zs_dir
+        head = zs.lines[0].type if getattr(zs, "lines", None) else None
+        zs.type = ("up" if head == "down" else "down") if head in ("up", "down") else (direction or "zd")
     return zslx
 
 

@@ -52,9 +52,11 @@ class BsPointCalculator:
         strict_3_mode: bool = False,
         min_signal_interval: int = 10,
     ):
-        if zs_type not in ('bi', 'xd'):
+        # 'bi'/'xd' 为基础级别；'L{n}'(如 'L0'/'L1')为递归升级级别——买卖点跑在
+        # 递归各级走势单元上时用独立分桶,不与 bi/xd 基础买卖点冲突。
+        if not zs_type or not (zs_type in ('bi', 'xd') or zs_type.startswith('L')):
             raise ValueError(
-                f"zs_type 必须是 'bi' / 'xd' 之一, 当前传入: {zs_type}"
+                f"zs_type 必须是 'bi'/'xd' 或 'L{{n}}'(递归升级级别), 当前传入: {zs_type}"
             )
         if min_signal_interval < 0:
             raise ValueError(
@@ -398,6 +400,11 @@ class BsPointCalculator:
         if not lines:
             return
 
+        # 原文「2 买 = 1 买后**首次**次级别回抽」：每个 1 买锚点只产一次 2 买，
+        # 后续不破前低的回抽属中枢震荡，不再重复记 2 买（否则一波震荡里一个 1 买
+        # 会刷出十几个 2 买）。key = id(锚点线段)。
+        attached_2_anchors: set = set()
+
         for i, now_line in enumerate(lines):
             if i < 2:
                 # 二买/二卖至少需要 1 个一买 + 1 段反抽 + 当前段 = 3 段
@@ -453,6 +460,9 @@ class BsPointCalculator:
             for prev_1line in prev_1lines:
                 # 校验：一买与当前段之间至少有 1 段反向走势
                 if i - prev_1line.index < 2:
+                    continue
+                # 首次回抽约束：该 1 买锚点已产过 2 买 → 跳过(后续回抽属中枢震荡)
+                if id(prev_1line) in attached_2_anchors:
                     continue
 
                 # ---- 条件 A：不创新低 / 不创新高（强条件，边界宽容：>= / <=）----
@@ -517,6 +527,7 @@ class BsPointCalculator:
                     zs_type=self.zs_type,
                     msg=msg,
                 )
+                attached_2_anchors.add(id(prev_1line))  # 标记该锚点已产 2 买(首次回抽)
                 LogUtil.debug(lambda:
                     f"[BsPointCalculator] 识别到 {mmd_name}: line.index={now_line.index}, "
                     f"prev_1line.index={prev_1line.index}, msg={msg}"

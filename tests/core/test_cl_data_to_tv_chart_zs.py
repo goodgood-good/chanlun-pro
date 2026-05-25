@@ -87,3 +87,30 @@ def test_cl_data_to_tv_chart_exposes_current_level_zslx_lines(
     assert first["points"][0]["time"] == fun.datetime_to_int(zslxs[0].start.k.date)
     assert first["points"][-1]["time"] == fun.datetime_to_int(zslxs[0].end.k.date)
     assert first["level"] == 0
+
+
+def test_cl_data_to_tv_chart_includes_recursive_upgrade_mmds(cl_config):
+    """中枢升级买卖点应合并进 xd_mmds（文本带「升」前缀），且不冲掉基础买卖点。
+
+    用真实 301004 1m fixture（已知能产出 1 个升级三卖），守护「升级买卖点接入
+    图表」这条链路：升级信号可见 + 基础 bi/xd 买卖点完好。
+    """
+    import pathlib
+    import pandas as pd
+    import pytest
+    from chanlun.core.cl import CL
+    from tests.core.conftest import DEFAULT_CL_CONFIG
+
+    csv = pathlib.Path(__file__).resolve().parent.parent / "fixtures" / "klines" / "a_SZ_301004_1m.csv"
+    if not csv.exists():
+        pytest.skip("缺少 a_SZ_301004_1m fixture")
+    cd = CL("301004", "1m", dict(DEFAULT_CL_CONFIG))
+    cd.process_klines(pd.read_csv(csv, parse_dates=["date"]))
+
+    config = dict(cl_config)
+    config["chart_show_recursive_levels"] = "1"
+    config["chart_show_xd_mmd"] = "1"
+    xdm = cl_data_to_tv_chart(cd, config)["xd_mmds"]
+
+    assert any("升" in m["text"] for m in xdm), "应至少有 1 个升级买卖点(升3S)合并进 xd_mmds"
+    assert any("升" not in m["text"] for m in xdm), "基础 xd 买卖点不得被升级买卖点冲掉"

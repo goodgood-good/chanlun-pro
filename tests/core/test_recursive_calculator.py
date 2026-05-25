@@ -237,6 +237,26 @@ def test_expand_three_overlapping_zss_merge_chain():
     assert (out[0].gg, out[0].dd) == (14, 4)
 
 
+def test_merge_zss_core_interval_is_envelope_of_subcores():
+    """升级/扩展中枢的核心区 [ZD,ZG] = 各子中枢 [ZD,ZG] 的包络 [min(子zd), max(子zg)]。
+
+    原文(第57课 L57_03 实例)：3 个 1 分中枢升成 5 分中枢，"中枢区间=三个组合
+    中枢的[ZD,ZG]中的最高和最低"=[4015,4122]——取子核心区的**包络**，非交集。
+    旧实现用交集(min子zg/max子zd)，子核心分离时退化为 gg/dd 包络，与原文不符。
+    """
+    z1 = _zs_full(zg=8, zd=5, gg=9, dd=4, lines=[_seg(0, "up", 4, 8)], index=0)
+    z2 = _zs_full(zg=11, zd=8, gg=12, dd=7, lines=[_seg(2, "up", 7, 11)], index=1)
+    z3 = _zs_full(zg=13, zd=10, gg=14, dd=9, lines=[_seg(4, "up", 9, 13)], index=2)
+    out = rc._expand_overlapping([z1, z2, z3])
+    assert len(out) == 1
+    merged = out[0]
+    # 原文包络：zd=min(5,8,10)=5, zg=max(8,11,13)=13（旧实现给 [4,14]）
+    assert (merged.zg, merged.zd) == (13, 5), (
+        f"升级中枢核心区应为子中枢[ZD,ZG]包络 [5,13]，实际 [{merged.zd},{merged.zg}]"
+    )
+    assert (merged.gg, merged.dd) == (14, 4), "gg/dd 包络不变"
+
+
 def test_expand_only_consecutive_overlap_break_resets_chain():
     """链式重叠遇到断点 → 前段合并、断点后另起一组。"""
     z1 = _zs_full(zg=8, zd=5, gg=9, dd=4, lines=[_seg(0, "up", 4, 8)], index=0)

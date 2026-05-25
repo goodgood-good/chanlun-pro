@@ -119,22 +119,19 @@ def _merge_zss(subs: List[ZS]) -> ZS:
     高级中枢的字段口径:
       - ``gg`` / ``dd`` = 子中枢包络合并(max(sub.gg) / min(sub.dd))——原文
         定义的「瞬间波动区间」自然合并;
-      - ``zg`` / ``zd`` = 子中枢的核心区交集(min(sub.zg) / max(sub.zd))。若
-        交集为空(zd >= zg,常见于完全反向中枢)退化为包络口径,标记此为
-        「弱中枢」(本字段语义在合并场景下原文未严格界定,取包络口径作兜底);
+      - ``zg`` / ``zd`` = 子中枢核心区[ZD,ZG]的**包络**(max(sub.zg) / min(sub.dd
+        →min(sub.zd))。原文(第57课 L57_03 实例「中枢扩展区间取值=三个组合
+        中枢的[ZD,ZG]中的最高和最低」=[4015,4122])即子核心包络,而非交集。
+        旧实现取交集(min sub.zg/max sub.zd),子核心分离时退化为 gg/dd,与原文不符。
+        包络 zd=min(sub.zd)<zg=max(sub.zg) 恒成立,无需空交集兜底。
       - ``lines`` = 子中枢 lines 时序拼接;
       - ``start`` = 首子中枢的 start;``end`` = 末子中枢的 end;``done`` = 全部子完成;
       - ``expanded_with`` = subs(供消费方追溯子结构)。
     """
     gg = max(s.gg for s in subs)
     dd = min(s.dd for s in subs)
-    zg_candidate = min(s.zg for s in subs if s.zg is not None)
-    zd_candidate = max(s.zd for s in subs if s.zd is not None)
-    if zd_candidate >= zg_candidate:
-        # 核心区无交集,退化为包络口径
-        zg, zd = gg, dd
-    else:
-        zg, zd = zg_candidate, zd_candidate
+    zg = max(s.zg for s in subs if s.zg is not None)
+    zd = min(s.zd for s in subs if s.zd is not None)
 
     merged = ZS(
         zs_type=subs[0].zs_type,
@@ -225,9 +222,15 @@ class RecursiveCalculator:
             # L0 构成段是线段 → 最小中枢 4 段（项目口径，偏离原文）；
             # L≥1 构成段是走势类型 → 按原文「3 个次级别走势类型重叠成
             # 中枢」用 3。与 require_alternation 同为分级参数。
+            # 递归子系统**不封顶延伸**(max_zs_lines 给极大值)：本子系统的升级走
+            # _split_oversized「≥9 段拆为 3 段子中枢」这条路(下一行),需要 ≥9 段中枢
+            # 存在才能触发。主链路(cl.zss_calculator)用默认封顶 8 段得到「显示用的
+            # 合理基础中枢」；递归这里保留原始延伸 + 拆分升级——同一数据两种合理划分
+            # (走势多义性)：主链路看基础中枢、递归看升级层级。
             zss = ZsCalculator(
                 require_alternation=(level == 0),
                 min_zs_lines=(4 if level == 0 else 3),
+                max_zs_lines=10 ** 9,
             ).calculate(units)
             # 9 段优先于扩展(spec ⑤ 决策):先把 ≥9 段中枢拆为 3 段子中枢,再做
             # 扩展识别——子中枢之间的 GG/DD 包络重叠由扩展合并,自然涌现

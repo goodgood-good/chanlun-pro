@@ -280,6 +280,31 @@ def test_third_buy_first_failed_return_consumes_signal():
     assert second_return_above_zg.line_mmds("xd") == []
 
 
+def test_second_buy_only_first_pullback_per_anchor():
+    """原文：2 买 = 1 买后**首次**次级别回抽。同一 1 买锚点后续不破前低的
+    回抽属中枢震荡，不应重复记 2 买（否则一个 1 买会刷出十几个 2 买）。
+    """
+    from chanlun.core.cl_interface import MMD, ZS as _ZS
+
+    one_buy = _xd(0, "down", 12, 8)      # 1 买所在段, low=8
+    up1 = _xd(2, "up", 8, 11)
+    pull1 = _xd(4, "down", 11, 9)        # 首次回抽不破 8 → 2 买
+    up2 = _xd(6, "up", 9, 11)
+    pull2 = _xd(8, "down", 11, 9)        # 再次回抽不破 8 → 中枢震荡, 非 2 买
+    lines = [one_buy, up1, pull1, up2, pull2]
+    for ln in lines:
+        ln.zs_type_mmds = {"xd": []}
+    anchor_zs = _ZS(zs_type="xd", start=None, zg=11, zd=9, gg=12, dd=8)
+    one_buy.zs_type_mmds["xd"].append(MMD(name="1buy", zs=anchor_zs))
+
+    calc = BsPointCalculator(_FakeCL([]), zs_type="xd")
+    # 直接调 2 类检测(不走 calculate 以免清空手挂的 1 买); 条件 A 不需要 zss
+    calc._detect_2buy_2sell(lines, [], [], [])
+
+    assert pull1.line_mmds("xd") == ["2buy"]     # 首次回抽 = 2 买
+    assert pull2.line_mmds("xd") == []           # 同锚点二次回抽 ≠ 2 买
+
+
 def test_calculate_clears_default_mmds_between_recalculations():
     """重复计算同一批线段时,默认 line.mmds 不能残留上一次写入的买卖点对象。"""
     core_1 = _xd(0, "up", 8, 10)

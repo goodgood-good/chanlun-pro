@@ -237,3 +237,21 @@ def test_require_alternation_defaults_true():
     """默认 require_alternation=True：同向段不交替 → 交替检查照旧拦下。"""
     lines = [_seg(i, "up", 5, 8) for i in range(4)]
     assert ZsCalculator().calculate(lines) == []
+
+
+def test_extension_capped_per_lesson33():
+    """第33课：中枢延伸≤5段（含核心共≤8段），≥9段升级。
+
+    一段长振荡——12 段都重叠同一核心 [9,12]——不得贪心吸成一个 >8 段的巨型
+    中枢；应封顶在 ≤8 段（升级由更高级别/扩展承接）。这是 TSLA 1m 出现 30 段
+    笔中枢、26 段线段中枢的根因修复。
+    """
+    segs = []
+    for i in range(11):
+        segs.append(_seg(i, "up", 9.0, 12.0) if i % 2 == 0 else _seg(i, "down", 12.0, 9.0))
+    segs.append(_seg(11, "down", 12.0, 3.0))   # 仍重叠[9,12](高=12)→被吸为离开候选
+    segs.append(_seg(12, "up", 3.0, 7.0))      # 脱离[9,12]→促使中枢完成
+    zss = ZsCalculator(min_zs_lines=4).calculate(segs)
+    assert zss, "长振荡应至少识别出 1 个中枢"
+    over = [len(z.lines) for z in zss if len(z.lines) > 8]
+    assert not over, f"中枢延伸应封顶≤8段(第33课)，实际有超限中枢: {[len(z.lines) for z in zss]}"

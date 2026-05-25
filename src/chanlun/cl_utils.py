@@ -446,18 +446,20 @@ def query_cl_chart_config(
         "chart_show_fx": "1",
         "chart_show_bi": "1",
         "chart_show_xd": "1",
-        "chart_show_bi_zs": "1",
-        "chart_show_xd_zs": "1",
-        "chart_show_bi_mmd": "1",
-        "chart_show_xd_mmd": "1",
-        "chart_show_bi_bc": "1",
-        "chart_show_xd_bc": "1",
-        # 新增原文化可视化(默认全开,前端可独立 toggle):
-        "chart_show_zs_direction": "1",      # 中枢方向着色(up/down/zd)
-        "chart_show_zs_expanded": "1",       # ⑤ 扩展中枢加粗框
-        "chart_show_xd_zslx": "1",           # ③ 当前级别走势类型线段/区间
-        "chart_show_recursive_levels": "1",  # ④ 递归层级 L1+ 中枢与走势类型
-        "chart_show_interval_nest": "1",     # 区间套链 + 精确转折点
+        # 缠论叠加层默认全部关闭——只显示 K线/分型/笔/线段(用户口径 2026-05-25:
+        # 中枢/走势类型/5m 重做前先清场)。后端计算逻辑均保留,改这些 chart_show_*
+        # 即可在图上重新打开;前端也可独立 toggle。
+        "chart_show_bi_zs": "0",
+        "chart_show_xd_zs": "0",
+        "chart_show_bi_mmd": "0",
+        "chart_show_xd_mmd": "0",
+        "chart_show_bi_bc": "0",
+        "chart_show_xd_bc": "0",
+        "chart_show_zs_direction": "0",      # 中枢方向着色(up/down/zd)
+        "chart_show_zs_expanded": "0",       # 扩展中枢加粗框
+        "chart_show_xd_zslx": "0",           # 当前级别走势类型线段/区间
+        "chart_show_recursive_levels": "0",  # 递归层级 L1+ 中枢与走势类型
+        "chart_show_interval_nest": "0",     # 区间套链 + 精确转折点
         "chart_show_ma": "0",
         "chart_show_boll": "0",
         "chart_show_futu": "macd",
@@ -961,6 +963,7 @@ def cl_data_to_tv_chart(
 
     # 递归层级树 (④ recursive_levels):L1+ 中枢、走势类型——多级联立可视化。
     recursive_levels_chart_data = []
+    levels = []  # 供下方「中枢升级买卖点」复用(避免重复 get_recursive_levels)
     if config.get("chart_show_recursive_levels", "1") == "1":
         try:
             levels = cd.get_recursive_levels() or []
@@ -1127,6 +1130,33 @@ def cl_data_to_tv_chart(
                 "points": {"time": ts, "price": mmd["price"]},
                 "text": mmd_text,
             })
+
+    # 中枢升级买卖点:在递归各升级级别(L0=线段本身、L1+=上一级走势类型)的走势单元上
+    # 跑买卖点(独立桶 'L{n}',不冲基础 bi/xd),产出更高级别转折信号(第54课升级三卖等)。
+    # 合并进 xd_mmds、文本加「升」前缀以便在图上识别。升级是否出现取决于数据是否具备
+    # 更高级别结构——低结构标的可能升不出级别(原文-一致)。
+    if config.get("chart_show_recursive_levels", "1") == "1" and levels:
+        from chanlun.core.bs_point_calculator import BsPointCalculator
+        for _lv in levels:
+            _units = list(cd.get_xds()) if _lv.level == 0 else levels[_lv.level - 1].zslxs
+            _zt = f"L{_lv.level}"
+            try:
+                BsPointCalculator(cd, zs_type=_zt).calculate(_units, _lv.zss)
+            except Exception:
+                continue
+            for _u in _units:
+                for _m in _u.zs_type_mmds.get(_zt, []):
+                    try:
+                        xd_mmd_chart_data.append({
+                            "points": {
+                                "time": fun.datetime_to_int(_u.end.k.date),
+                                "price": _u.end.val,
+                            },
+                            "text": "升" + mmd_type_map.get(_m.name, _m.name),
+                            "level": "xd",
+                        })
+                    except Exception:
+                        continue
 
     fx_data.sort(key=lambda v: v["points"][0]["time"], reverse=False)
     bi_chart_data.sort(key=lambda v: v["points"][0]["time"], reverse=False)

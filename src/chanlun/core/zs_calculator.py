@@ -18,7 +18,8 @@ class ZsCalculator:
     采用全量计算方式，确保每次计算都是独立的、无状态污染的。
     """
 
-    def __init__(self, require_alternation: bool = True, min_zs_lines: int = 4):
+    def __init__(self, require_alternation: bool = True, min_zs_lines: int = 4,
+                 max_zs_lines: int = 8):
         # require_alternation：是否强制核心三段方向交替。
         # 默认 True——① 主流程线段中枢扫描照旧。④ 递归到 L≥1 时构成段是
         # 走势类型（含无向盘整、不严格交替），传 False 跳过交替检查。
@@ -32,6 +33,13 @@ class ZsCalculator:
         # 这一限定，会把第 3 段未确认的形态误判成中枢。）④ 递归到 L≥1 时构成段
         # 是走势类型——传入的 ZSLX 单元已是完成走势类型，3 个重叠即成中枢，传 3。
         self.min_zs_lines: int = min_zs_lines
+        # max_zs_lines：中枢含核心的最大段数（默认 8 = 3 核心 + 5 延伸）。
+        # 原文第33课：「中枢的延伸不能超过 5 段，一旦出现 6 段的延伸，加上形成
+        # 中枢本身那三段（=9 段），就构成更大级别的中枢了」。故单个中枢封顶 8 段；
+        # 达上限仍重叠 → 在此完成（末段为离开/升级边界），后续振荡由下一中枢承接，
+        # 同区间的多个 ≤8 段中枢经扩展（_expand_overlapping）升级为高级别中枢。
+        # 不封顶会把长振荡贪心吸成 30 段巨型中枢（核心被首两段钉死、与走势脱节）。
+        self.max_zs_lines: int = max_zs_lines
         self.all_lines: List[LINE] = []
         self.zss: List[ZS] = []
         self.pending_zs: Optional[ZS] = None
@@ -359,6 +367,15 @@ class ZsCalculator:
         """
         j = start_j
         while j < len(self.all_lines):
+            # 第33课封顶：中枢含核心达 max_zs_lines 段、仍在延伸（未自然完成）→
+            # 在此封顶完成。末段(center.lines[-1])作离开/升级边界，当前段 j 起下一
+            # 中枢核心、续接振荡；同区间多个 ≤max 段中枢经扩展(_expand_overlapping)
+            # 升级为高级别中枢。不封顶会把长振荡贪心吸成 30 段巨型中枢、与走势脱节。
+            if len(center.lines) >= self.max_zs_lines:
+                center.end = center.lines[-1]
+                center.done = True
+                return True, j - 1
+
             current_seg = self.all_lines[j]
 
             current_overlaps = max(current_seg.zs_low, center.zd) < min(current_seg.zs_high, center.zg)

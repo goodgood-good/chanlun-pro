@@ -8,7 +8,7 @@
   },
   "synthetic": {
     "multi_freq.up.n500.seed42": {
-      "md5": "59c645df7434a63b46efe86b3c5edb38",
+      "md5": "93a1b3fd52aadda2ade3578bee6fe98a",
       "params": {
         "n_klines": 500,
         "seed": 42,
@@ -17,7 +17,7 @@
       }
     },
     "multi_freq.down.n500.seed42": {
-      "md5": "3695832f6f953d9ac9465f8943dbf02a",
+      "md5": "98c8eaf548684d2b5eb4052767a8c54a",
       "params": {
         "n_klines": 500,
         "seed": 42,
@@ -26,7 +26,7 @@
       }
     },
     "multi_freq.oscillate.n500.seed42": {
-      "md5": "50188efcb195c241835cbb1a256f49fb",
+      "md5": "58aa09bfe68025020fc1af38837d2e73",
       "params": {
         "n_klines": 500,
         "seed": 42,
@@ -35,7 +35,7 @@
       }
     },
     "simple.oscillate.n200.seed42": {
-      "md5": "ee9e59e37df8d36a763b5c09a433b0a5",
+      "md5": "1576332d4ab104208501333a3c6154fe",
       "params": {
         "n_klines": 200,
         "seed": 42,

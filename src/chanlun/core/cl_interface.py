@@ -414,6 +414,10 @@ class LINE:
         self.zs_high: float = 0
         self.zs_low: float = 0
 
+        # 买卖点/背驰分桶（按 zs_type 分级存放）。BI/XD 在各自 __init__ 另行初始化；
+        # 这里建在基类，使 ZSLX 等其它 LINE 子类也具备，支持买卖点跑在递归升级级别上。
+        self.zs_type_mmds = {}   # Dict[str, List[MMD]]
+        self.zs_type_bcs = {}    # Dict[str, List[BC]]
 
     def update_high_low(self):
         """

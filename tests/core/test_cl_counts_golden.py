@@ -51,9 +51,11 @@ GOLDEN_COUNTS = {
         bi_bcs=0, xd_bcs=0,
     ),
     "down": CoreCounts(
+        # bi_mmds 6→5：第33课中枢延伸封顶(≤8段)落地后,该合成下跌的笔中枢划分
+        # 收紧、一个原挂在过度延伸中枢上的买卖点消失。封顶是原文修复,5 为新基线。
         fxs=79, bis=40, xds=4,
         bi_zss=6, xd_zss=1,
-        bi_mmds=6, xd_mmds=0,
+        bi_mmds=5, xd_mmds=0,
         bi_bcs=0, xd_bcs=0,
     ),
     "oscillate": CoreCounts(
@@ -128,3 +130,20 @@ def test_recursive_levels_not_starved(cl_with_synthetic_klines):
         f"递归只到 L{max_level}, L1+ 被饿死——疑似 L0 口径回归。\n"
         f"levels={[(lv.level, len(lv.zss), len(lv.zslxs)) for lv in levels]}"
     )
+
+
+def test_get_recursive_mmds_uses_separate_bucket_not_corrupting_base(cl_with_synthetic_klines):
+    """中枢升级买卖点存独立分桶 'L{level}',不得冲掉 bi/xd 基础买卖点。
+
+    L0 升级层的走势单元就是线段(xds)本身,若用 'xd' 桶会清空基础 xd 买卖点;
+    故必须用 'L0' 独立桶。本测试守护该隔离。
+    """
+    cd = cl_with_synthetic_klines(1500, seed=42, trend="up", multi_freq=True)
+    base_xd_before = sum(len(x.zs_type_mmds.get("xd", [])) for x in cd.get_xds())
+
+    rm = cd.get_recursive_mmds()
+
+    base_xd_after = sum(len(x.zs_type_mmds.get("xd", [])) for x in cd.get_xds())
+    assert isinstance(rm, dict)
+    assert all(isinstance(k, int) for k in rm.keys())          # 按 level 分键
+    assert base_xd_after == base_xd_before                     # 基础 xd 买卖点未被冲掉

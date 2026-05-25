@@ -167,24 +167,32 @@ def test_calculate_beichi_terminates_trend():
     assert wts[0].zslx_type == "上涨"
 
 
-def test_backfill_trend_zs_type_is_direction():
-    """趋势走势类型 → 其中枢 zs.type 回填为 up/down。"""
-    z1_lines = [_seg(0, "up", 4, 8), _seg(1, "down", 8, 5), _seg(2, "up", 5, 9)]
-    z2_lines = [_seg(3, "up", 12, 16), _seg(4, "down", 16, 13), _seg(5, "up", 13, 18)]
-    z1 = _zs(0, z1_lines, zg=8, zd=5, gg=9, dd=4)
-    z2 = _zs(1, z2_lines, zg=16, zd=13, gg=18, dd=12)
+def test_backfill_trend_zs_type_from_composition():
+    """趋势走势类型 → 中枢方向按构成回填(第24课:上涨内的中枢=下-上-下=向上)。
+
+    用第24课-合规数据:上涨走势里的中枢核心首段为「下」(从高点起算的调整),
+    构成 下上下 → 中枢方向 up;此时构成方向与趋势方向一致。
+    """
+    z1_lines = [_seg(0, "down", 9, 5), _seg(1, "up", 5, 8), _seg(2, "down", 8, 6)]
+    z2_lines = [_seg(3, "down", 17, 13), _seg(4, "up", 13, 16), _seg(5, "down", 16, 14)]
+    z1 = _zs(0, z1_lines, zg=8, zd=6, gg=9, dd=5)
+    z2 = _zs(1, z2_lines, zg=16, zd=14, gg=17, dd=13)
     zc.ZslxCalculator().calculate([z1, z2], z1_lines + z2_lines,
                                   lambda s, e: _ld(up_sum=100, dif_max=5), WZGX)
-    assert z1.type == "up"
+    assert z1.type == "up"   # 下上下 → 向上
     assert z2.type == "up"
 
 
-def test_backfill_panzheng_zs_type_is_zd():
-    """盘整走势类型 → 其中枢 zs.type 回填为 zd(震荡)。"""
+def test_backfill_zs_direction_from_composition_even_in_panzheng():
+    """盘整走势类型里的中枢同样按构成定方向,不抹成 zd(第24课)。
+
+    单中枢盘整,核心首段为「上」→ 上-下-上 → 向下;旧实现统一回填 zd 丢了方向,
+    导致「向下=上下上 / 向上=下上下」无从体现。
+    """
     lines = [_seg(0, "up", 4, 8), _seg(1, "down", 8, 5), _seg(2, "up", 5, 10)]
-    zs = _zs(0, lines, zg=8, zd=5, gg=8, dd=4)
+    zs = _zs(0, lines, zg=8, zd=5, gg=10, dd=4)
     zc.ZslxCalculator().calculate([zs], lines, lambda s, e: {}, WZGX)
-    assert zs.type == "zd"
+    assert zs.type == "down"   # 上下上 → 向下(不再是 zd)
 
 
 def test_calculate_level_agnostic_higher_level_zs():
