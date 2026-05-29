@@ -245,3 +245,21 @@ def test_node3_clean_uptrend_is_trend_not_expand():
     # 中枢1 本体[5,8] 远低于 中枢2 本体[19,22] → 上涨趋势
     assert all(h.rel_prev == "trend_up" for h in res.live), \
         f"应判 trend_up，实得 {[h.rel_prev for h in res.live]}"
+
+
+def test_two_done_zhongshu_form_uptrend():
+    """两个都完成的中枢构成上涨趋势(评审 H2: ≥2 中枢覆盖)。
+    中枢1[5,8] / 中枢2[16,19] 本体不相交、依次抬高 → trend_up。"""
+    lines = [
+        _seg(0, "up", 5, 8), _seg(1, "down", 8, 5), _seg(2, "up", 5, 8), _seg(3, "down", 8, 5),
+        _seg(4, "up", 5, 19),                                       # 中枢1 离开段(=中枢2进入)
+        _seg(5, "down", 19, 16), _seg(6, "up", 16, 19), _seg(7, "down", 19, 16), _seg(8, "up", 16, 19),
+        _seg(9, "up", 16, 30),                                      # 中枢2 离开段
+        _seg(10, "down", 30, 27), _seg(11, "up", 27, 30), _seg(12, "down", 30, 27),  # 中枢3雏形(3段,未成立)
+    ]
+    res = zs_branch.ZsBranchCalculator().calculate(lines)
+    assert len(res.done_zss) == 2, f"应有2个完成中枢，实得 {len(res.done_zss)}"
+    z1, z2 = res.done_zss
+    assert (z1.zd, z1.zg) == (5, 8)
+    assert (z2.zd, z2.zg) == (16, 19)
+    assert zs_branch.classify_rel(z1, z2) == "trend_up"
