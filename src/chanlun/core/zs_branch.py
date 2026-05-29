@@ -111,7 +111,10 @@ class ZsBranchCalculator:
             else:
                 # 第 j 段不触核心 → 离开确认，中枢 done（左侧冻结）
                 if len(core) >= self.MIN_LINES:
-                    done.append(self._make_zs(core, zd, zg, done_flag=True))
+                    zs = self._make_zs(core, zd, zg, done_flag=True)
+                    # 合法性不变量（防回归）：>=4 段 且 zd<zg（构造已保证，此处兜底）
+                    assert len(zs.lines) >= self.MIN_LINES and zs.zd < zs.zg
+                    done.append(zs)
                     i = j - 1                    # 离开段作下一中枢进入段
                 else:
                     i += 1                       # 不足 4 段，作废

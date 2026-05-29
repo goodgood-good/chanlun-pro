@@ -194,3 +194,27 @@ def test_node3_rel_prev_set_on_live_branches():
     res = zs_branch.ZsBranchCalculator().calculate(base)
     # 中枢1 包络[4,10] 与 中枢2 包络[9,15] 相交[9,10] → expand（中心定理二·包络口径）
     assert all(h.rel_prev == "expand" for h in res.live)
+
+
+# ---------------------------------------------------------------------------
+# Task 9: 左侧冻结 freeze_idx + 合法性不变量
+# ---------------------------------------------------------------------------
+def test_freeze_idx_marks_settled_prefix():
+    base = [
+        _seg(0, "down", 10, 9), _seg(1, "up", 4, 8), _seg(2, "down", 8, 5),
+        _seg(3, "up", 5, 10), _seg(4, "down", 10, 6),
+    ]
+    res = zs_branch.ZsBranchCalculator().calculate(base)
+    # 仅右边缘 pending：freeze_idx 指向核心起点(=1)，其前(进入段0)为 settled 前缀
+    assert res.freeze_idx == 1
+
+
+def test_done_zs_invariants():
+    base = [
+        _seg(0, "down", 10, 9), _seg(1, "up", 4, 8), _seg(2, "down", 8, 5),
+        _seg(3, "up", 5, 10), _seg(4, "down", 10, 6),
+        _seg(5, "up", 9, 14), _seg(6, "down", 14, 11), _seg(7, "up", 11, 15), _seg(8, "down", 15, 12),
+    ]
+    res = zs_branch.ZsBranchCalculator().calculate(base)
+    for z in res.done_zss:
+        assert len(z.lines) >= 4 and z.zd < z.zg
