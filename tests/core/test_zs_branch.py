@@ -112,3 +112,34 @@ def test_right_edge_h1_h2_fork():
     h1 = next(h for h in res.live if h.node1 == "core")
     h2 = next(h for h in res.live if h.node1 == "leave")
     assert h1.zs.done is False and h2.zs.done is True
+
+
+# ---------------------------------------------------------------------------
+# Task 6: 回试 ZG 坍缩（节点①，中心定理一）
+# ---------------------------------------------------------------------------
+def test_extend_confirms_prev_as_core_keeps_two_branches():
+    base = [
+        _seg(0, "down", 10, 9), _seg(1, "up", 4, 8),
+        _seg(2, "down", 8, 5), _seg(3, "up", 5, 10), _seg(4, "down", 10, 6),
+    ]
+    base.append(_seg(5, "up", 6, 9))   # 第5段 [6,9] 触核心 [5,8] → seg4 确认核心、中枢长到5段
+    res = zs_branch.ZsBranchCalculator().calculate(base)
+    assert res.done_zss == []                        # 仍未离开，无冻结
+    assert sorted(h.node1 for h in res.live) == ["core", "leave"]  # 新末段(seg5)再分叉
+    for h in res.live:
+        assert len(h.zs.lines) == 5                  # seg4 已并入核心(5段)
+        assert (h.zs.zd, h.zs.zg) == (5, 8)
+
+
+def test_leave_then_new_structure_freezes_zhongshu():
+    base = [
+        _seg(0, "down", 10, 9), _seg(1, "up", 4, 8),
+        _seg(2, "down", 8, 5), _seg(3, "up", 5, 10), _seg(4, "down", 10, 6),
+        _seg(5, "up", 9, 14),                         # 离开核心[5,8]：[9,14] 不触 [5,8]
+        _seg(6, "down", 14, 11), _seg(7, "up", 11, 15), _seg(8, "down", 15, 12),  # 新结构
+    ]
+    res = zs_branch.ZsBranchCalculator().calculate(base)
+    assert len(res.done_zss) == 1                    # 原 [5,8] 中枢冻结
+    assert res.done_zss[0].done is True
+    assert (res.done_zss[0].zd, res.done_zss[0].zg) == (5, 8)
+    assert len(res.done_zss[0].lines) == 4           # 核心 seg1-4
