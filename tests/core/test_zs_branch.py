@@ -77,3 +77,15 @@ def test_touches_closed_interval():
     # 完全在外 → 不触
     seg_out = _seg(1, "up", 9, 12)
     assert zs_branch.touches(seg_out, 5, 8) is False
+
+
+# ---------------------------------------------------------------------------
+# Task 4: 数据模型 ZsHypothesis / ZsBranchResult
+# ---------------------------------------------------------------------------
+def test_dataclasses_construct():
+    from chanlun.core.cl_interface import ZS
+    zs = ZS(zs_type="xd", start=None)
+    h = zs_branch.ZsHypothesis(zs=zs, node1="core")
+    assert h.node1 == "core" and h.rel_prev is None and h.upgrade is False
+    res = zs_branch.ZsBranchResult(done_zss=[], live=[h], freeze_idx=0)
+    assert res.live[0] is h and res.freeze_idx == 0
