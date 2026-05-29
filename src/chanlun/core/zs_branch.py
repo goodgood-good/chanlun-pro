@@ -117,9 +117,10 @@ class ZsBranchCalculator:
 
     def _fork(self, core: List[LINE], zd: float, zg: float, prev: Optional[ZS]) -> List[ZsHypothesis]:
         # H1：末段为核心，中枢仍开；H2：末段为离开段，中枢完成
+        upgrade = len(core) >= 9                 # 第33课：3 本体 + 6 延伸 = 9 段 → 升级（本计划只标记）
         zs_h1 = self._make_zs(core, zd, zg, done_flag=False)
         zs_h2 = self._make_zs(core, zd, zg, done_flag=True)
         return [
-            ZsHypothesis(zs=zs_h1, node1="core"),
-            ZsHypothesis(zs=zs_h2, node1="leave"),
+            ZsHypothesis(zs=zs_h1, node1="core", upgrade=upgrade),
+            ZsHypothesis(zs=zs_h2, node1="leave", upgrade=upgrade),
         ]

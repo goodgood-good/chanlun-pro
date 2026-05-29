@@ -143,3 +143,26 @@ def test_leave_then_new_structure_freezes_zhongshu():
     assert res.done_zss[0].done is True
     assert (res.done_zss[0].zd, res.done_zss[0].zg) == (5, 8)
     assert len(res.done_zss[0].lines) == 4           # 核心 seg1-4
+
+
+# ---------------------------------------------------------------------------
+# Task 7: 节点② 延伸≤5 / 9 段升级标记（第33课）
+# ---------------------------------------------------------------------------
+def _overlap_core(n_core: int):
+    """构造「进入段 + n_core 段全部重叠核心 [5,8]」的线段序列。"""
+    segs = [_seg(0, "down", 10, 9)]  # 进入段（[9,10] 不与 [5,8] 重叠）
+    vals = [(4, 8)] + [(8, 5), (5, 8)] * 8  # 首段定下沿4，其后 down/up 在 [5,8] 内交替
+    for k in range(1, n_core + 1):
+        s, e = vals[k - 1]
+        segs.append(_seg(k, "up" if s < e else "down", s, e))
+    return segs
+
+
+def test_node2_upgrade_flag_at_9_segments():
+    res = zs_branch.ZsBranchCalculator().calculate(_overlap_core(9))
+    assert any(h.upgrade for h in res.live), "9 段核心应触发升级标记"
+
+
+def test_node2_no_upgrade_at_8_segments():
+    res = zs_branch.ZsBranchCalculator().calculate(_overlap_core(8))
+    assert all(not h.upgrade for h in res.live)
