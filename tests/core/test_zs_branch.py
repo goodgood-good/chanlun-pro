@@ -218,3 +218,30 @@ def test_done_zs_invariants():
     res = zs_branch.ZsBranchCalculator().calculate(base)
     for z in res.done_zss:
         assert len(z.lines) >= 4 and z.zd < z.zg
+
+
+# ---------------------------------------------------------------------------
+# 修复(评审 C1): 本体包络 —— 离开段不得撑大包络、否则趋势恒判不出
+# ---------------------------------------------------------------------------
+def test_body_envelope_excludes_breakout_leg():
+    """中枢本体包络只取前3段定义段，剔除离开段的远摆。"""
+    from chanlun.core.cl_interface import ZS
+    zs = ZS(zs_type="xd", start=None)
+    zs.lines = [_seg(0, "up", 5, 8), _seg(1, "down", 8, 5), _seg(2, "up", 5, 8),
+                _seg(3, "up", 5, 22)]   # 第4段=离开段冲到22
+    zs.dd, zs.gg = 5, 22                 # 完整包络被撑到22
+    assert zs_branch.body_envelope(zs) == (5, 8)   # 本体不含离开段的22
+
+
+def test_node3_clean_uptrend_is_trend_not_expand():
+    """干净上涨趋势(中枢1[5,8] → 离开段冲到22 → 中枢2[19,22])必须判 trend_up，非 expand。"""
+    lines = [
+        _seg(0, "up", 5, 8), _seg(1, "down", 8, 5), _seg(2, "up", 5, 8), _seg(3, "down", 8, 5),
+        _seg(4, "up", 5, 22),                       # 离开段冲到22
+        _seg(5, "down", 22, 19), _seg(6, "up", 19, 22), _seg(7, "down", 22, 19), _seg(8, "up", 19, 22),
+    ]
+    res = zs_branch.ZsBranchCalculator().calculate(lines)
+    assert len(res.done_zss) == 1                    # 中枢1 已完成
+    # 中枢1 本体[5,8] 远低于 中枢2 本体[19,22] → 上涨趋势
+    assert all(h.rel_prev == "trend_up" for h in res.live), \
+        f"应判 trend_up，实得 {[h.rel_prev for h in res.live]}"

@@ -42,14 +42,29 @@ def touches(seg: LINE, lo: float, hi: float) -> bool:
     return max(seg.zs_low, lo) <= min(seg.zs_high, hi)
 
 
-def classify_rel(prev: ZS, cur: ZS) -> str:
-    """节点③：相邻中枢关系（中心定理二，包络口径）。
+def body_envelope(zs: ZS) -> Tuple[float, float]:
+    """中枢本体包络 (DD, GG)：只取前 3 段定义段，剔除延伸/离开段的远摆。
 
-    后 DD>前GG → "trend_up"；后 GG<前DD → "trend_down"；否则包络相交 → "expand"（升级候选，P4 实体化）。
+    若用完整 gg/dd（含离开段），离开段总朝下一中枢延伸 → 相邻中枢包络恒重叠
+    → 趋势恒判不出（only-3rd-bspoint 根因 / 第33课 a+A+b+B+c）。故节点③ 趋势/
+    扩张判定必须用本体包络。无 lines 时退化用 zs.dd/zs.gg（测试/边界）。
     """
-    if cur.dd > prev.gg:
+    if not zs.lines:
+        return (zs.dd, zs.gg)
+    return envelope(zs.lines[:3])
+
+
+def classify_rel(prev: ZS, cur: ZS) -> str:
+    """节点③：相邻中枢关系（中心定理二，**本体包络**口径）。
+
+    比较两中枢的本体包络（剔除离开段远摆）：后 DD>前GG → "trend_up"；
+    后 GG<前DD → "trend_down"；否则本体相交 → "expand"（升级候选，P4 实体化）。
+    """
+    p_dd, p_gg = body_envelope(prev)
+    c_dd, c_gg = body_envelope(cur)
+    if c_dd > p_gg:
         return "trend_up"
-    if cur.gg < prev.dd:
+    if c_gg < p_dd:
         return "trend_down"
     return "expand"
 
