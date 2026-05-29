@@ -27,3 +27,15 @@ def core_interval(seg_a: LINE, seg_b: LINE, seg_c: LINE) -> Optional[Tuple[float
     if zd >= zg:
         return None
     return (zd, zg)
+
+
+def envelope(lines: List[LINE]) -> Tuple[float, float]:
+    """中枢包络 [DD, GG]：DD=min(所有段低), GG=max(所有段高)（第20课瞬间波动区间）。"""
+    dd = min(ln.zs_low for ln in lines)
+    gg = max(ln.zs_high for ln in lines)
+    return (dd, gg)
+
+
+def touches(seg: LINE, lo: float, hi: float) -> bool:
+    """线段是否触及闭区间 [lo, hi]（延伸/扩张口径：触边即算，对应中心定理二的 ≥/≤）。"""
+    return max(seg.zs_low, lo) <= min(seg.zs_high, hi)

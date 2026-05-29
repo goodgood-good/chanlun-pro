@@ -56,3 +56,24 @@ def test_core_interval_no_overlap_returns_none():
     b = _seg(1, "down", 3, 2)   # [2,3]
     c = _seg(2, "up", 5, 9)     # [5,9] —— 与前两段无共同重叠
     assert zs_branch.core_interval(a, b, c) is None
+
+
+# ---------------------------------------------------------------------------
+# Task 2: 包络 envelope
+# ---------------------------------------------------------------------------
+def test_envelope_min_low_max_high():
+    lines = [_seg(0, "up", 4, 8), _seg(1, "down", 8, 3), _seg(2, "up", 3, 11)]
+    # DD=min(4,3,3)=3, GG=max(8,8,11)=11
+    assert zs_branch.envelope(lines) == (3, 11)
+
+
+# ---------------------------------------------------------------------------
+# Task 3: 触及 touches（闭区间口径）
+# ---------------------------------------------------------------------------
+def test_touches_closed_interval():
+    # 触边即算（闭区间）：段 [8,10] 与核心 [5,8] 在 8 处相切 → 触及
+    seg_edge = _seg(0, "up", 8, 10)
+    assert zs_branch.touches(seg_edge, 5, 8) is True
+    # 完全在外 → 不触
+    seg_out = _seg(1, "up", 9, 12)
+    assert zs_branch.touches(seg_out, 5, 8) is False
