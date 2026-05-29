@@ -166,3 +166,31 @@ def test_node2_upgrade_flag_at_9_segments():
 def test_node2_no_upgrade_at_8_segments():
     res = zs_branch.ZsBranchCalculator().calculate(_overlap_core(8))
     assert all(not h.upgrade for h in res.live)
+
+
+# ---------------------------------------------------------------------------
+# Task 8: 节点③ 趋势/扩张分类（中心定理二，包络口径）
+# ---------------------------------------------------------------------------
+def test_node3_classify_trend_and_expand():
+    from chanlun.core.cl_interface import ZS
+
+    def _zs(dd, gg):
+        z = ZS(zs_type="xd", start=None)
+        z.dd, z.gg = dd, gg
+        return z
+
+    assert zs_branch.classify_rel(_zs(0, 5), _zs(6, 10)) == "trend_up"    # 后DD6 > 前GG5
+    assert zs_branch.classify_rel(_zs(6, 10), _zs(0, 5)) == "trend_down"  # 后GG5 < 前DD6
+    assert zs_branch.classify_rel(_zs(0, 5), _zs(4, 9)) == "expand"       # 包络相交 [4,5]
+
+
+def test_node3_rel_prev_set_on_live_branches():
+    # 复用 leave 场景：done=[中枢1 包络4..10], live=中枢2(包络9..15) 的分支
+    base = [
+        _seg(0, "down", 10, 9), _seg(1, "up", 4, 8),
+        _seg(2, "down", 8, 5), _seg(3, "up", 5, 10), _seg(4, "down", 10, 6),
+        _seg(5, "up", 9, 14), _seg(6, "down", 14, 11), _seg(7, "up", 11, 15), _seg(8, "down", 15, 12),
+    ]
+    res = zs_branch.ZsBranchCalculator().calculate(base)
+    # 中枢1 包络[4,10] 与 中枢2 包络[9,15] 相交[9,10] → expand（中心定理二·包络口径）
+    assert all(h.rel_prev == "expand" for h in res.live)

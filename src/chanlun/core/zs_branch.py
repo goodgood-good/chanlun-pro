@@ -42,6 +42,18 @@ def touches(seg: LINE, lo: float, hi: float) -> bool:
     return max(seg.zs_low, lo) <= min(seg.zs_high, hi)
 
 
+def classify_rel(prev: ZS, cur: ZS) -> str:
+    """节点③：相邻中枢关系（中心定理二，包络口径）。
+
+    后 DD>前GG → "trend_up"；后 GG<前DD → "trend_down"；否则包络相交 → "expand"（升级候选，P4 实体化）。
+    """
+    if cur.dd > prev.gg:
+        return "trend_up"
+    if cur.gg < prev.dd:
+        return "trend_down"
+    return "expand"
+
+
 @dataclass
 class ZsHypothesis:
     """右边缘的一个中枢读法（一个 live 分支）。"""
@@ -120,7 +132,9 @@ class ZsBranchCalculator:
         upgrade = len(core) >= 9                 # 第33课：3 本体 + 6 延伸 = 9 段 → 升级（本计划只标记）
         zs_h1 = self._make_zs(core, zd, zg, done_flag=False)
         zs_h2 = self._make_zs(core, zd, zg, done_flag=True)
+        # 节点③：相对最后一个已完成中枢分类（两分支同包络，rel 一致）
+        rel = classify_rel(prev, zs_h1) if prev is not None else None
         return [
-            ZsHypothesis(zs=zs_h1, node1="core", upgrade=upgrade),
-            ZsHypothesis(zs=zs_h2, node1="leave", upgrade=upgrade),
+            ZsHypothesis(zs=zs_h1, node1="core", rel_prev=rel, upgrade=upgrade),
+            ZsHypothesis(zs=zs_h2, node1="leave", rel_prev=rel, upgrade=upgrade),
         ]
