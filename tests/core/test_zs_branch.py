@@ -89,3 +89,26 @@ def test_dataclasses_construct():
     assert h.node1 == "core" and h.rel_prev is None and h.upgrade is False
     res = zs_branch.ZsBranchResult(done_zss=[], live=[h], freeze_idx=0)
     assert res.live[0] is h and res.freeze_idx == 0
+
+
+# ---------------------------------------------------------------------------
+# Task 5: ZsBranchCalculator — 成中枢 + 右边缘 H1/H2 分叉
+# ---------------------------------------------------------------------------
+def test_right_edge_h1_h2_fork():
+    # 进入段(在中枢上方不重叠) + 4 段重叠核心 [5,8]，数据到此为止
+    lines = [
+        _seg(0, "down", 10, 9),   # 进入段（[9,10] 不与 [5,8] 重叠）
+        _seg(1, "up", 4, 8),      # 核心 a
+        _seg(2, "down", 8, 5),    # 核心 b
+        _seg(3, "up", 5, 10),     # 核心 c
+        _seg(4, "down", 10, 6),   # 第4段重叠核心 [5,8]（触及）→ H1/H2 歧义
+    ]
+    res = zs_branch.ZsBranchCalculator().calculate(lines)
+    assert res.done_zss == []                       # 右边缘未确认，无冻结中枢
+    nodes = sorted(h.node1 for h in res.live)
+    assert nodes == ["core", "leave"]               # H1 + H2 两分支
+    for h in res.live:
+        assert (h.zs.zd, h.zs.zg) == (5, 8)         # zg/zd 恒由前三段定
+    h1 = next(h for h in res.live if h.node1 == "core")
+    h2 = next(h for h in res.live if h.node1 == "leave")
+    assert h1.zs.done is False and h2.zs.done is True

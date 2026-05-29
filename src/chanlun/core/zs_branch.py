@@ -59,3 +59,67 @@ class ZsBranchResult:
     done_zss: List[ZS]                # 左侧已冻结的已完成中枢
     live: List[ZsHypothesis]          # 右边缘活分支（通常 1~2 个）
     freeze_idx: int                   # 冻结边界：< freeze_idx 的线段已 settled；live 分支从此起
+
+
+class ZsBranchCalculator:
+    """单级别多假设中枢引擎。全量重算：左侧确定性中枢冻结，右边缘产出 H1/H2 分支。
+
+    本计划（P1）只到结构层：H2 表示「中枢结构完成」，不评背驰、不分 H2a/H2b。
+    """
+
+    MIN_LINES = 4  # L0 最小中枢段数（含离开段）
+
+    def calculate(self, lines: List[LINE]) -> ZsBranchResult:
+        done: List[ZS] = []
+        i = -1                                   # 进入段下标；-1=从开头无进入段中枢扫起
+        n = len(lines)
+        while i <= n - 1 - 3:                     # 需为 3 核心段留空间
+            cs = i + 1                            # 核心起点
+            interval = core_interval(lines[cs], lines[cs + 1], lines[cs + 2])
+            if interval is None:
+                i += 1
+                continue
+            zd, zg = interval
+            core = [lines[cs], lines[cs + 1], lines[cs + 2]]
+            j = cs + 3
+            # 延伸：后续段触及核心则并入
+            while j < n and touches(lines[j], zd, zg):
+                core.append(lines[j])
+                j += 1
+            reached_end = (j >= n)
+            if reached_end:
+                # 右边缘：数据到此为止 → H1/H2 分叉（须 >= MIN_LINES 段）
+                if len(core) >= self.MIN_LINES:
+                    return ZsBranchResult(
+                        done_zss=done,
+                        live=self._fork(core, zd, zg, prev=(done[-1] if done else None)),
+                        freeze_idx=cs,
+                    )
+                break
+            else:
+                # 第 j 段不触核心 → 离开确认，中枢 done（左侧冻结）
+                if len(core) >= self.MIN_LINES:
+                    done.append(self._make_zs(core, zd, zg, done_flag=True))
+                    i = j - 1                    # 离开段作下一中枢进入段
+                else:
+                    i += 1                       # 不足 4 段，作废
+        return ZsBranchResult(done_zss=done, live=[], freeze_idx=max(0, n))
+
+    def _make_zs(self, core: List[LINE], zd: float, zg: float, done_flag: bool) -> ZS:
+        zs = ZS(zs_type="xd", start=None, _type=core[1].type)
+        zs.lines = list(core)
+        zs.zg, zs.zd = zg, zd
+        zs._bounds_dirty = True
+        zs.update_boundaries()                   # 填 gg/dd 包络 + line_num
+        zs.end = core[-1]
+        zs.done = done_flag
+        return zs
+
+    def _fork(self, core: List[LINE], zd: float, zg: float, prev: Optional[ZS]) -> List[ZsHypothesis]:
+        # H1：末段为核心，中枢仍开；H2：末段为离开段，中枢完成
+        zs_h1 = self._make_zs(core, zd, zg, done_flag=False)
+        zs_h2 = self._make_zs(core, zd, zg, done_flag=True)
+        return [
+            ZsHypothesis(zs=zs_h1, node1="core"),
+            ZsHypothesis(zs=zs_h2, node1="leave"),
+        ]
