@@ -84,6 +84,17 @@ class RecursiveBranchCalculator:
                 wzgx=wzgx_config, min_zs_lines=min_lines,
             ).calculate(units)
             if not res.done_zss:
+                # 右边缘只剩 pending 高级中枢(未被离开段确认完成)：记录其 H2(leave 读法)
+                # 中枢 + live 背驰再终止——让层级树展示到右边缘「正在形成」的高级中枢
+                # (不上卷:未完成无法切走势类型)。spec §0 MVP「各级只用 done」在此放宽一档:
+                # 右边缘 pending 中枢入树(用户验收决策 2026-05-31)。
+                pend = [h for h in res.live if h.node1 == "leave"]
+                if pend:
+                    results.append(LevelResult(
+                        level=level, zss=[h.zs for h in pend],
+                        done_divergence=[h.divergence for h in pend],
+                        zslxs=[], upgrade_idx=_mark_upgrades([h.zs for h in pend]),
+                    ))
                 break
             zslxs = zslx_calc.calculate(res.done_zss, res.done_divergence)
             assert zslxs, "done_zss 非空时 zslx_branch 必产 ≥1 走势类型(末段 done=False)"

@@ -113,6 +113,24 @@ def test_calculate_level0_produces_zhongshu():
     assert len(res[0].zslxs) >= 1
 
 
+def test_calculate_records_pending_when_no_done():
+    """某级只有 pending 中枢(无 done 中枢)→ 记录该级 pending 中枢(H2 leave 读法),zslxs 空。
+
+    5 段(进入段 + 4 核心重叠[5,8],右边缘未离开确认)→ zs_branch 产 pending(done_zss 空,
+    live=[H1,H2])。calculate 应记录该级的 H2 pending 中枢,展示右边缘正在形成的高级中枢。
+    """
+    lines = [
+        _seg(0, "down", 10, 9), _seg(1, "up", 4, 8), _seg(2, "down", 8, 5),
+        _seg(3, "up", 5, 10), _seg(4, "down", 10, 6),
+    ]
+    res = recursive_branch.RecursiveBranchCalculator().calculate(
+        lines, _ld_none, Config.ZS_WZGX_ZGD.value)
+    assert len(res) == 1
+    assert res[0].level == 0
+    assert len(res[0].zss) >= 1          # pending 中枢被记录
+    assert res[0].zslxs == []            # pending 未完成 → 不切走势类型
+
+
 def test_calculate_two_levels():
     """L0 走势类型→L1 中枢 关键步骤验证（降级方案）。
 
