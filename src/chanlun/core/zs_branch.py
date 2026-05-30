@@ -13,7 +13,7 @@
 from __future__ import annotations
 
 import copy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
 from chanlun.core.cl_interface import LINE, ZS
@@ -140,6 +140,17 @@ def correct_exit(zs: ZS, min_body: int = 3) -> ZS:
 
 
 @dataclass
+class DivergenceResult:
+    """一个中枢离开段的背驰判定（H2a=背驰 / H2b=无背驰）。"""
+
+    is_beichi: bool                   # 是否背驰
+    kind: str                         # "qs"(趋势背驰) | "pz"(盘整背驰)
+    compare_seg: LINE                 # 比较段 a/b = 中枢进入段 z.start
+    leave_seg: LINE                   # 离开段 c
+    provisional: bool                 # 右边缘未坐实(True) / 已固化(False)
+
+
+@dataclass
 class ZsHypothesis:
     """右边缘的一个中枢读法（一个 live 分支）。"""
 
@@ -147,6 +158,7 @@ class ZsHypothesis:
     node1: str                        # 节点①: "core"(H1·末段为核心/延伸) | "leave"(H2·末段为离开段/完成)
     rel_prev: Optional[str] = None    # 节点③: "trend_up"|"trend_down"|"expand"|None(无前中枢)
     upgrade: bool = False             # 节点②: True=已达 9 段触发升级（本计划只标记，不实体化）
+    divergence: Optional[DivergenceResult] = None   # 节点① H2a: 离开段背驰(H1 恒 None)
 
 
 @dataclass
@@ -156,6 +168,7 @@ class ZsBranchResult:
     done_zss: List[ZS]                # 左侧已冻结的已完成中枢
     live: List[ZsHypothesis]          # 右边缘活分支（通常 1~2 个）
     freeze_idx: int                   # 冻结边界：< freeze_idx 的线段已 settled；live 分支从此起
+    done_divergence: List[Optional[DivergenceResult]] = field(default_factory=list)  # 与 done_zss 索引对齐
 
 
 class ZsBranchCalculator:

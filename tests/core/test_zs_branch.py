@@ -370,3 +370,27 @@ def test_correct_entry_no_shift_when_entry_toward():
     c = zs_branch.correct_entry(zs, 4)
     assert c.start is entry_ok                # 不变
     assert c.lines[0] is s1
+
+
+# ===========================================================================
+# P3: 实时内联背驰（H2a 耦合）
+# ===========================================================================
+def test_divergence_result_dataclass():
+    from chanlun.core.cl_interface import ZS
+    seg = _seg(0, "up", 5, 8)
+    dv = zs_branch.DivergenceResult(
+        is_beichi=True, kind="pz", compare_seg=seg, leave_seg=seg, provisional=True
+    )
+    assert dv.is_beichi is True and dv.kind == "pz" and dv.provisional is True
+
+
+def test_hypothesis_divergence_defaults_none():
+    from chanlun.core.cl_interface import ZS
+    zs = ZS(zs_type="xd", start=None)
+    h = zs_branch.ZsHypothesis(zs=zs, node1="leave")
+    assert h.divergence is None                      # 默认 None（退化）
+
+
+def test_result_done_divergence_defaults_empty():
+    res = zs_branch.ZsBranchResult(done_zss=[], live=[], freeze_idx=0)
+    assert res.done_divergence == []                 # 默认空列表（退化）
