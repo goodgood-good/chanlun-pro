@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
+from chanlun.core.recursive_branch import LevelResult
 from chanlun.core.zs_branch import DivergenceResult
 
 
@@ -49,3 +50,30 @@ class BeichiNestCalculator:
                 if best_w is None or w < best_w:                 # 取最内层
                     best, best_w = hi, w
         return best
+
+    def calculate(self, levels: List[LevelResult]) -> List[NestedDivergence]:
+        """各级 done 背驰段自底向上 BUILD 成嵌套森林。返回顶层森林(所有未被更高
+        级别包含的背驰节点;最高级 + 断链低级各成树根)。"""
+        if not levels:
+            return []
+
+        # 1. 每级抽出「已固化 + is_beichi」的背驰 → 叶节点
+        per_level: List[List[NestedDivergence]] = []
+        for lr in levels:
+            nodes: List[NestedDivergence] = []
+            for zi, dv in enumerate(lr.done_divergence):
+                if dv is not None and dv.is_beichi and not dv.provisional:   # 仅已坐实背驰
+                    nodes.append(NestedDivergence(level=lr.level, zs_index=zi, divergence=dv))
+            per_level.append(nodes)
+
+        # 2. 自底向上:相邻级别 (k → k+1),把 L_k 节点挂到 严格包含+同向 的 L_{k+1} 节点
+        attached: set = set()
+        for k in range(len(per_level) - 1):
+            for lo in per_level[k]:
+                parent = self._find_parent(lo, per_level[k + 1])
+                if parent is not None:
+                    parent.children.append(lo)
+                    attached.add(id(lo))
+
+        # 3. 顶层森林 = 所有未被挂载的节点(最高级别 + 断链的低级别各成树根)
+        return [n for nodes in per_level for n in nodes if id(n) not in attached]

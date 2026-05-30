@@ -72,3 +72,82 @@ def test_find_parent_innermost_wins():
     hi_a = _node(1, 0, "up", 1, 8)
     hi_b = _node(1, 1, "up", 3, 6)
     assert BeichiNestCalculator()._find_parent(lo, [hi_a, hi_b]) is hi_b
+
+
+from chanlun.core.recursive_branch import LevelResult
+
+
+def _lr(level, dvs) -> LevelResult:
+    """造 fake LevelResult：只填 level + done_divergence(其余占位,calculate 不碰)。"""
+    return LevelResult(level=level, zss=[], done_divergence=list(dvs), zslxs=[], upgrade_idx=[])
+
+
+def test_calculate_empty_returns_empty():
+    assert BeichiNestCalculator().calculate([]) == []
+
+
+def test_calculate_basic_nesting():
+    # L0[3,5]up 落在 L1[1,8]up → 挂为 child；顶层森林只剩 L1
+    levels = [_lr(0, [_dv("up", 3, 5)]), _lr(1, [_dv("up", 1, 8)])]
+    forest = BeichiNestCalculator().calculate(levels)
+    assert len(forest) == 1
+    assert forest[0].level == 1
+    assert len(forest[0].children) == 1
+    assert forest[0].children[0].level == 0
+
+
+def test_calculate_opposite_dir_both_top():
+    # 异向 → 不挂，两者皆顶层
+    levels = [_lr(0, [_dv("up", 3, 5)]), _lr(1, [_dv("down", 1, 8)])]
+    forest = BeichiNestCalculator().calculate(levels)
+    assert len(forest) == 2
+
+
+def test_calculate_not_contained_both_top():
+    # L0 右界超出 → 不挂
+    levels = [_lr(0, [_dv("up", 3, 9)]), _lr(1, [_dv("up", 1, 8)])]
+    forest = BeichiNestCalculator().calculate(levels)
+    assert len(forest) == 2
+
+
+def test_calculate_dangling_low_is_root():
+    # L0 背驰无 L1 父(L1 异向) → L0 自成顶层根
+    levels = [_lr(0, [_dv("up", 3, 5)]), _lr(1, [_dv("down", 1, 8)])]
+    forest = BeichiNestCalculator().calculate(levels)
+    levels_in_forest = sorted(n.level for n in forest)
+    assert levels_in_forest == [0, 1]
+
+
+def test_calculate_provisional_excluded():
+    # provisional=True 不入森林
+    levels = [_lr(0, [_dv("up", 3, 5, provisional=True)])]
+    assert BeichiNestCalculator().calculate(levels) == []
+
+
+def test_calculate_non_beichi_excluded():
+    # is_beichi=False 不入森林
+    levels = [_lr(0, [_dv("up", 3, 5, is_beichi=False)])]
+    assert BeichiNestCalculator().calculate(levels) == []
+
+
+def test_calculate_none_divergence_skipped():
+    # done_divergence 含 None(该中枢无背驰) → 跳过不报错
+    levels = [_lr(0, [None, _dv("up", 3, 5)]), _lr(1, [_dv("up", 1, 8)])]
+    forest = BeichiNestCalculator().calculate(levels)
+    assert len(forest) == 1 and forest[0].level == 1
+
+
+def test_calculate_three_level_chain():
+    # L0[4,5] ⊂ L1[3,6] ⊂ L2[1,9] 同向 → 深度 3 链:L2 根→L1→L0
+    levels = [
+        _lr(0, [_dv("up", 4, 5)]),
+        _lr(1, [_dv("up", 3, 6)]),
+        _lr(2, [_dv("up", 1, 9)]),
+    ]
+    forest = BeichiNestCalculator().calculate(levels)
+    assert len(forest) == 1
+    l2 = forest[0]
+    assert l2.level == 2 and len(l2.children) == 1
+    l1 = l2.children[0]
+    assert l1.level == 1 and len(l1.children) == 1
+    assert l1.children[0].level == 0
