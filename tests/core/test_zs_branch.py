@@ -376,12 +376,13 @@ def test_correct_entry_no_shift_when_entry_toward():
 # P3: 实时内联背驰（H2a 耦合）
 # ===========================================================================
 def test_divergence_result_dataclass():
-    from chanlun.core.cl_interface import ZS
-    seg = _seg(0, "up", 5, 8)
+    cseg = _seg(0, "up", 5, 8)
+    lseg = _seg(1, "up", 5, 12)
     dv = zs_branch.DivergenceResult(
-        is_beichi=True, kind="pz", compare_seg=seg, leave_seg=seg, provisional=True
+        is_beichi=True, kind="pz", compare_seg=cseg, leave_seg=lseg, provisional=True
     )
     assert dv.is_beichi is True and dv.kind == "pz" and dv.provisional is True
+    assert dv.compare_seg is cseg and dv.leave_seg is lseg
 
 
 def test_hypothesis_divergence_defaults_none():
