@@ -266,6 +266,8 @@ class ZsBranchCalculator:
         """
         if prev_zs is None:
             return False
+        if zs.zd is None or zs.zg is None or prev_zs.zd is None or prev_zs.zg is None:
+            return False
         d = is_qs(prev_zs, zs, self.wzgx, use_core_envelope=True)
         return d is not None and d == leave.type
 

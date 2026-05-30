@@ -554,3 +554,23 @@ def test_done_zhongshu_no_beichi_when_all_strong():
     assert dv is not None                            # 仍产出判定(只是不背驰)
     assert dv.is_beichi is False                     # H2b：无背驰
     assert dv.kind == "pz"
+
+
+def test_live_h2_qs_divergence():
+    """前有 done 中枢 + 右边缘 live H2 同向离开段(弱) → live 趋势背驰 kind='qs'、provisional=True。"""
+    lines = [
+        _seg(0, "up", 5, 8), _seg(1, "down", 8, 5), _seg(2, "up", 5, 8), _seg(3, "down", 8, 5),
+        _seg(4, "up", 5, 19),                          # 中枢1离开 = 中枢2进入(连接段)
+        _seg(5, "down", 19, 16), _seg(6, "up", 16, 19), _seg(7, "down", 19, 16),  # 中枢2核心(右边缘)
+        _seg(8, "up", 16, 30),                         # 中枢2候选离开段(同向 up、创新高、弱)
+    ]
+    table = _table_all(lines, weak_pairs=[(16, 30)])   # 仅中枢2候选离开段弱
+    res = zs_branch.ZsBranchCalculator(ld_provider=_provider(table)).calculate(lines)
+    assert len(res.done_zss) == 1                       # 中枢1 完成，中枢2 仍在右边缘
+    h2 = next(h for h in res.live if h.node1 == "leave")
+    assert h2.divergence is not None
+    assert h2.divergence.kind == "qs"                  # 前有同向中枢1 → 趋势背驰
+    assert h2.divergence.is_beichi is True
+    assert h2.divergence.provisional is True           # live 未坐实
+    assert h2.divergence.leave_seg is lines[8]
+    assert h2.divergence.compare_seg is lines[4]
