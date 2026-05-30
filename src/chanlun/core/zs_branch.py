@@ -24,6 +24,9 @@ def core_interval(seg_a: LINE, seg_b: LINE, seg_c: LINE) -> Optional[Tuple[float
     """前三段重叠的核心区间 [ZD, ZG]（第18课严格公式）。
 
     ZD=max(三段低), ZG=min(三段高)；严格 ZD<ZG 才算非退化重叠，否则 None。
+
+    primitive：calculate 已委托 ZsCalculator 找中枢、本函数当前未接线，留作
+    下游（P2+ 延伸/扩张判定）复用的缠论几何基元。
     """
     zd = max(seg_a.zs_low, seg_b.zs_low, seg_c.zs_low)
     zg = min(seg_a.zs_high, seg_b.zs_high, seg_c.zs_high)
@@ -40,7 +43,10 @@ def envelope(lines: List[LINE]) -> Tuple[float, float]:
 
 
 def touches(seg: LINE, lo: float, hi: float) -> bool:
-    """线段是否触及闭区间 [lo, hi]（延伸/扩张口径：触边即算，对应中心定理二的 ≥/≤）。"""
+    """线段是否触及闭区间 [lo, hi]（延伸/扩张口径：触边即算，对应中心定理二的 ≥/≤）。
+
+    primitive：同 ``core_interval``，当前未接线，留作下游复用。
+    """
     return max(seg.zs_low, lo) <= min(seg.zs_high, hi)
 
 
@@ -136,14 +142,24 @@ class ZsBranchCalculator:
         return len(lines)
 
     def _fork_pending(self, pending: ZS, prev: Optional[ZS]) -> List[ZsHypothesis]:
-        """在 pending 中枢上分叉：H1=中枢仍开(done=False)，H2=末段为离开段(done=True)。"""
+        """在 pending 中枢上分叉：H1=中枢仍开(done=False)，H2=末段为离开段(done=True)。
+
+        两分支各自独立拷贝（含独立 lines 容器），互不串台——也不别名委托引擎的
+        pending 对象；下游若对某分支实体化/延伸 lines 不会污染另一分支或上游。
+        """
         upgrade = len(pending.lines) >= 9        # 第33课：9 段触发升级（本计划只标记）
         rel = classify_rel(prev, pending) if prev is not None else None
-        h1 = pending                             # 仍开（pending.done 本就 False）
-        h1.done = False
-        h2 = copy.copy(pending)                  # 完成读法（浅拷贝，共享 lines 只读）
-        h2.done = True
+        h1 = self._branch_copy(pending, done=False)   # 仍开
+        h2 = self._branch_copy(pending, done=True)    # 完成读法
         return [
             ZsHypothesis(zs=h1, node1="core", rel_prev=rel, upgrade=upgrade),
             ZsHypothesis(zs=h2, node1="leave", rel_prev=rel, upgrade=upgrade),
         ]
+
+    @staticmethod
+    def _branch_copy(zs: ZS, done: bool) -> ZS:
+        """分支用的独立中枢拷贝：独立 lines 容器（元素 LINE 只读、可继续共享），置 done。"""
+        z = copy.copy(zs)
+        z.lines = list(zs.lines)
+        z.done = done
+        return z

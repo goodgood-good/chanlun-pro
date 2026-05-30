@@ -279,3 +279,33 @@ def test_c2_entry_promotion_via_delegation():
     assert (z1.zd, z1.zg) == (5, 8)
     assert len(z1.lines) == 4                 # 首段提升为进入段 → 核心4段(非手搓5段)
     assert all(h.rel_prev == "trend_up" for h in res.live)   # 中枢2在上 → 趋势
+
+
+def test_fork_branches_have_independent_lines():
+    """评审 High-2: H1/H2 各持独立 lines 容器，改一支不污染另一支。"""
+    lines = [
+        _seg(0, "down", 10, 9), _seg(1, "up", 4, 8),
+        _seg(2, "down", 8, 5), _seg(3, "up", 5, 10), _seg(4, "down", 10, 6),
+    ]
+    res = zs_branch.ZsBranchCalculator().calculate(lines)
+    h1, h2 = res.live
+    assert h1.zs.lines is not h2.zs.lines
+    n1 = len(h1.zs.lines)
+    h2.zs.lines.append(h2.zs.lines[-1])       # 改 H2 的 lines
+    assert len(h1.zs.lines) == n1             # H1 不受影响
+
+
+def test_core_swing_into_next_zhongshu_is_expand():
+    """评审 High-1 驳回: 中枢1 核心段震荡摸到 23(瞬间波动 5~23)，中枢2[19,22] 落其内
+    → 按原文 line 9980(趋势中枢瞬间波动不重叠) 这是扩张、非趋势。body_envelope 计入
+    核心远摆是正确的(区别于离开段：离开段是趋势腿、被 lines[:3] 剔除)。"""
+    lines = [
+        _seg(0, "up", 5, 8), _seg(1, "down", 8, 5), _seg(2, "up", 5, 23), _seg(3, "down", 23, 6),
+        _seg(4, "up", 6, 8), _seg(5, "down", 8, 5),
+        _seg(6, "up", 5, 21),
+        _seg(7, "down", 21, 19), _seg(8, "up", 19, 22), _seg(9, "down", 22, 19), _seg(10, "up", 19, 22),
+    ]
+    res = zs_branch.ZsBranchCalculator().calculate(lines)
+    assert len(res.done_zss) == 1
+    assert res.done_zss[0].gg == 23                       # 中枢1 瞬间波动确实到 23
+    assert all(h.rel_prev == "expand" for h in res.live)  # 中枢2 在中枢1 波动内 → 扩张
