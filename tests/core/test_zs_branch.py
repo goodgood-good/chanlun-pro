@@ -574,3 +574,12 @@ def test_live_h2_qs_divergence():
     assert h2.divergence.provisional is True           # live 未坐实
     assert h2.divergence.leave_seg is lines[8]
     assert h2.divergence.compare_seg is lines[4]
+
+
+# ===========================================================================
+# P4b Task 1: min_zs_lines 参数化
+# ===========================================================================
+def test_calculator_min_zs_lines_param():
+    """min_zs_lines 可配：默认 4(L0)，递归 L≥1 传 3。"""
+    assert zs_branch.ZsBranchCalculator().min_zs_lines == 4
+    assert zs_branch.ZsBranchCalculator(min_zs_lines=3).min_zs_lines == 3

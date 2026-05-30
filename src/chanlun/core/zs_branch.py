@@ -184,7 +184,6 @@ class ZsBranchCalculator:
     给极大值，让中枢能长到 ≥9 段以触发升级标记。
     """
 
-    MIN_LINES = 4         # L0 最小中枢段数（含离开段）
     _NO_CAP = 10 ** 9     # 暂不封顶（C3 留 P4 前修）
 
     def __init__(
@@ -192,31 +191,34 @@ class ZsBranchCalculator:
         ld_provider: Optional[LdProvider] = None,
         frequency: Optional[str] = None,
         wzgx: str = Config.ZS_WZGX_ZGD.value,
+        min_zs_lines: int = 4,
     ):
         """``ld_provider`` 缺省时不判背驰（退化纯结构，保 P1 行为）。
 
         ``wzgx`` 默认 ZGD（核心区间口径，合原文「≥2 依次同向中枢」）；P3 独立，
-        与生产 legacy 的 GD 默认无关。
+        与生产 legacy 的 GD 默认无关。``min_zs_lines`` 最小中枢段数：L0 线段级=4
+        (项目口径)，递归 L≥1 走势类型级=3(原文「3 个次级走势类型重叠」)。
         """
         self.ld_provider = ld_provider
         self.frequency = frequency
         self.wzgx = wzgx
+        self.min_zs_lines = min_zs_lines
 
     def calculate(self, lines: List[LINE]) -> ZsBranchResult:
         if not lines:
             return ZsBranchResult(done_zss=[], live=[], freeze_idx=0, done_divergence=[])
         zc = ZsCalculator(
             require_alternation=False,
-            min_zs_lines=self.MIN_LINES,
+            min_zs_lines=self.min_zs_lines,
             max_zs_lines=self._NO_CAP,
         )
         zc.calculate(lines)
         # 进入段/离开段校正（原文口径）：把误当核心的升/跌入段(进入段)、定向冲出的
         # 离开段从中枢本体剥出（进入段 → z.start，离开段 → z.end）
-        done: List[ZS] = [correct_exit(correct_entry(z, self.MIN_LINES)) for z in zc.zss]
+        done: List[ZS] = [correct_exit(correct_entry(z, self.min_zs_lines)) for z in zc.zss]
         pending: Optional[ZS] = zc.pending_zs    # 右边缘进行中中枢（单解，无离开段）
         if pending is not None:
-            pending = correct_entry(pending, self.MIN_LINES)
+            pending = correct_entry(pending, self.min_zs_lines)
         for z in done:                           # 合法性不变量（防回归）：本体最小 3 段
             assert len(z.lines) >= 3 and z.zd < z.zg
         done_div: List[Optional[DivergenceResult]] = [
