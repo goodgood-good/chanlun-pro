@@ -115,6 +115,30 @@ def correct_entry(zs: ZS, min_lines: int = 4) -> ZS:
     return z
 
 
+def correct_exit(zs: ZS, min_body: int = 3) -> ZS:
+    """离开段剥离（对称于 correct_entry；原文 a+A+b 中 b/离开段是独立次级别段，
+    不属中枢本体）。
+
+    委托的 ZsCalculator 把离开段计入 ``lines``（为"第4段确认第3段完成"的最小 4 段
+    口径），但离开段是确认/出口、不是中枢本体。done 中枢的 ``lines[-1]`` 即离开段
+    （定向冲出区间）→ 剥出本体：``lines = lines[:-1]``，离开段记为 ``z.end``；box /
+    gg/dd 用本体。本体保底 ``min_body`` 段（原文中枢最小 = 3 个走势类型重叠）。
+    """
+    if not zs.done or len(zs.lines) <= min_body:
+        return zs                                  # 未完成 / 剥后不足本体 → 不动
+    last = zs.lines[-1]
+    if last.start is None or last.end is None:
+        return zs
+    if _zone_dist(last.end.val, zs.zd, zs.zg) <= _zone_dist(last.start.val, zs.zd, zs.zg):
+        return zs                                  # 末段没冲出区间 → 不是离开段，不剥
+    z = copy.copy(zs)
+    z.lines = list(zs.lines[:-1])                  # 本体（剥掉离开段）
+    z.end = last                                   # 离开段（本就该是 z.end）
+    z._bounds_dirty = True
+    z.update_boundaries()                          # gg/dd 收紧到本体
+    return z
+
+
 @dataclass
 class ZsHypothesis:
     """右边缘的一个中枢读法（一个 live 分支）。"""
@@ -158,13 +182,14 @@ class ZsBranchCalculator:
             max_zs_lines=self._NO_CAP,
         )
         zc.calculate(lines)
-        # 进入段校正（原文口径）：把被误当核心的升/跌入段还原成进入段，右移中枢起点
-        done: List[ZS] = [correct_entry(z, self.MIN_LINES) for z in zc.zss]
-        pending: Optional[ZS] = zc.pending_zs    # 右边缘进行中中枢（单解）
+        # 进入段/离开段校正（原文口径）：把误当核心的升/跌入段(进入段)、定向冲出的
+        # 离开段从中枢本体剥出（进入段 → z.start，离开段 → z.end）
+        done: List[ZS] = [correct_exit(correct_entry(z, self.MIN_LINES)) for z in zc.zss]
+        pending: Optional[ZS] = zc.pending_zs    # 右边缘进行中中枢（单解，无离开段）
         if pending is not None:
             pending = correct_entry(pending, self.MIN_LINES)
-        for z in done:                           # 合法性不变量（防回归）
-            assert len(z.lines) >= self.MIN_LINES and z.zd < z.zg
+        for z in done:                           # 合法性不变量（防回归）：本体最小 3 段
+            assert len(z.lines) >= 3 and z.zd < z.zg
         if pending is None:
             return ZsBranchResult(done_zss=done, live=[], freeze_idx=len(lines))
         prev = done[-1] if done else None

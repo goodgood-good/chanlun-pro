@@ -277,8 +277,31 @@ def test_c2_entry_promotion_via_delegation():
     assert len(res.done_zss) == 1
     z1 = res.done_zss[0]
     assert (z1.zd, z1.zg) == (5, 8)
-    assert len(z1.lines) == 4                 # 首段提升为进入段 → 核心4段(非手搓5段)
+    assert len(z1.lines) == 3                 # 进入段提升 + 离开段剥离 → 本体3段
     assert all(h.rel_prev == "trend_up" for h in res.live)   # 中枢2在上 → 趋势
+
+
+def test_correct_exit_strips_breakout_leg():
+    """离开段(定向冲出区间)从中枢本体剥出：本体=lines[:-1]，z.end=离开段，gg 收紧。"""
+    s1 = _seg(1, "down", 8, 7); s2 = _seg(2, "up", 7, 9); s3 = _seg(3, "down", 9, 7)
+    exit_leg = _seg(4, "up", 7, 15)            # 离开段：从区间[7,8]定向冲出到15
+    zs = _make_zs(_seg(0, "up", 5, 8), [s1, s2, s3, exit_leg], 7, 8)
+    zs.done = True
+    c = zs_branch.correct_exit(zs, 3)
+    assert len(c.lines) == 3                    # 离开段剥出 → 本体3段
+    assert c.lines[-1] is s3                    # 本体末段 = 最后一根震荡
+    assert c.end is exit_leg                    # 离开段记为 z.end
+    assert c.gg < 15                            # gg 收紧到本体(不含离开段的15)
+
+
+def test_correct_exit_no_strip_when_last_inside_zone():
+    """末段终点仍在区间内(不是离开段)→不剥。"""
+    s1 = _seg(1, "down", 8, 7); s2 = _seg(2, "up", 7, 9)
+    s3 = _seg(3, "down", 9, 7); s4 = _seg(4, "up", 7, 8)
+    zs = _make_zs(_seg(0, "up", 5, 8), [s1, s2, s3, s4], 7, 8)
+    zs.done = True
+    c = zs_branch.correct_exit(zs, 3)
+    assert len(c.lines) == 4                    # 末段终点 8 在区间内 → 不剥
 
 
 def test_fork_branches_have_independent_lines():
