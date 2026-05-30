@@ -16,7 +16,8 @@ import copy
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
-from chanlun.core.cl_interface import LINE, ZS
+from chanlun.core.beichi_calculator import LdProvider
+from chanlun.core.cl_interface import LINE, ZS, Config
 from chanlun.core.zs_calculator import ZsCalculator
 
 
@@ -186,9 +187,24 @@ class ZsBranchCalculator:
     MIN_LINES = 4         # L0 最小中枢段数（含离开段）
     _NO_CAP = 10 ** 9     # 暂不封顶（C3 留 P4 前修）
 
+    def __init__(
+        self,
+        ld_provider: Optional[LdProvider] = None,
+        frequency: Optional[str] = None,
+        wzgx: str = Config.ZS_WZGX_ZGD.value,
+    ):
+        """``ld_provider`` 缺省时不判背驰（退化纯结构，保 P1 行为）。
+
+        ``wzgx`` 默认 ZGD（核心区间口径，合原文「≥2 依次同向中枢」）；P3 独立，
+        与生产 legacy 的 GD 默认无关。
+        """
+        self.ld_provider = ld_provider
+        self.frequency = frequency
+        self.wzgx = wzgx
+
     def calculate(self, lines: List[LINE]) -> ZsBranchResult:
         if not lines:
-            return ZsBranchResult(done_zss=[], live=[], freeze_idx=0)
+            return ZsBranchResult(done_zss=[], live=[], freeze_idx=0, done_divergence=[])
         zc = ZsCalculator(
             require_alternation=False,
             min_zs_lines=self.MIN_LINES,
@@ -203,13 +219,17 @@ class ZsBranchCalculator:
             pending = correct_entry(pending, self.MIN_LINES)
         for z in done:                           # 合法性不变量（防回归）：本体最小 3 段
             assert len(z.lines) >= 3 and z.zd < z.zg
+        done_div: List[Optional[DivergenceResult]] = [None] * len(done)   # Task 4 填真值
         if pending is None:
-            return ZsBranchResult(done_zss=done, live=[], freeze_idx=len(lines))
+            return ZsBranchResult(
+                done_zss=done, live=[], freeze_idx=len(lines), done_divergence=done_div
+            )
         prev = done[-1] if done else None
         return ZsBranchResult(
             done_zss=done,
             live=self._fork_pending(pending, prev),
             freeze_idx=self._line_index(pending.lines[0], lines),
+            done_divergence=done_div,
         )
 
     @staticmethod

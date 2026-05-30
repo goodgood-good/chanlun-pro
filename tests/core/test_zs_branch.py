@@ -395,3 +395,28 @@ def test_hypothesis_divergence_defaults_none():
 def test_result_done_divergence_defaults_empty():
     res = zs_branch.ZsBranchResult(done_zss=[], live=[], freeze_idx=0)
     assert res.done_divergence == []                 # 默认空列表（退化）
+
+
+# ===========================================================================
+# P3 Task 2: ZsBranchCalculator 构造注入 ld_provider/frequency/wzgx
+# ===========================================================================
+def test_calculator_construct_with_ld_provider():
+    calc = zs_branch.ZsBranchCalculator(
+        ld_provider=lambda s, e: {"hist": {"up_sum": 0, "down_sum": 0}, "dif": {"max": 0, "min": 0}},
+        frequency="1m",
+    )
+    assert calc.ld_provider is not None
+    assert calc.frequency == "1m"
+    from chanlun.core.cl_interface import Config
+    assert calc.wzgx == Config.ZS_WZGX_ZGD.value          # 默认 ZGD
+
+
+def test_no_ld_provider_yields_none_divergence():
+    """退化：无 ld_provider → done_divergence 全 None、live 各 divergence 全 None。"""
+    lines = [
+        _seg(0, "up", 5, 8), _seg(1, "down", 8, 5), _seg(2, "up", 5, 8),
+        _seg(3, "down", 8, 5), _seg(4, "up", 5, 12),
+    ]
+    res = zs_branch.ZsBranchCalculator().calculate(lines)   # 无 ld_provider
+    assert all(d is None for d in res.done_divergence)
+    assert all(h.divergence is None for h in res.live)
