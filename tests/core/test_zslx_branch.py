@@ -111,6 +111,7 @@ def test_calculate_expand_is_boundary():
     wts = zslx_branch.ZslxBranchCalculator().calculate([z1, z2], [None, None])
     assert len(wts) == 2                                 # expand 断裂 → 两个盘整
     assert all(w.zslx_type == "盘整" for w in wts)
+    assert wts[0].zss == [z1] and wts[1].zss == [z2]
 
 
 def test_calculate_beichi_terminates_trend():
@@ -124,3 +125,4 @@ def test_calculate_beichi_terminates_trend():
     assert len(wts) == 2
     assert wts[0].zss == [z1, z2, z3] and wts[0].done is True   # 背驰终结
     assert wts[1].zss == [z4] and wts[1].done is False          # z4 另起
+    assert wts[1].zslx_type == "盘整"          # 背驰后新起的单中枢 = 盘整

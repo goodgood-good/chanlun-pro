@@ -27,8 +27,10 @@ class ZslxBranchCalculator:
             z = zss[0]
             # 单中枢盘整方向 = 核心净位移(末核心段终点 vs 首核心段起点)，沿用旧
             # zslx_calculator._classify 的口径(盘整仍有构成方向，不抹成 zd)。
+            # 前提：done 中枢已经 correct_exit，lines 是本体(离开段已剥到 z.end)，故 lines[-1] 即核心末段。
             direction = "up" if z.lines[-1].end.val >= z.lines[0].start.val else "down"
         else:
+            assert cur_dir in ("trend_up", "trend_down"), f"多中枢走势类型 cur_dir 应为趋势方向, 实得 {cur_dir}"
             direction = "up" if cur_dir == "trend_up" else "down"
             zslx_type = "上涨" if direction == "up" else "下跌"
         # 走势类型边界 = 第一中枢进入段 a → 末中枢离开段 b（原文 a+A+b），缺则退化用核心段
@@ -89,7 +91,7 @@ class ZslxBranchCalculator:
                 dv = done_divergence[i]
                 if dv is not None and dv.is_beichi:
                     wts.append(self._finalize(cur, cur_start, cur_dir, done=True))
-                    cur, cur_dir = None, None
+                    cur, cur_dir, cur_start = None, None, -1
 
         if cur is not None:
             wts.append(self._finalize(cur, cur_start, cur_dir, done=False))
