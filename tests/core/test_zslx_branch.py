@@ -104,14 +104,27 @@ def test_calculate_direction_break_splits_two_zslx():
     assert wts[1].zslx_type == "盘整" and wts[1].done is False and wts[1].zss == [z3]
 
 
-def test_calculate_expand_is_boundary():
-    """单中枢后接本体相交的中枢(expand) → 断裂(非趋势延续)。"""
+def test_calculate_expand_does_not_split():
+    """两个本体相交(expand)的中枢——expand 不是方向反转 → 不切，并入同一走势类型。
+    (原文第20课走势级别延续定理一：更大级别中枢产生前本级走势类型延续；升级留 P4b。)"""
     z1 = _zs_at(0, _seg(0, "up", 2, 5), 5, 8)
     z2 = _zs_at(10, _seg(10, "up", 6, 7), 6, 9)         # 本体[6,9] 与 z1[5,8] 相交 → expand
     wts = zslx_branch.ZslxBranchCalculator().calculate([z1, z2], [None, None])
-    assert len(wts) == 2                                 # expand 断裂 → 两个盘整
-    assert all(w.zslx_type == "盘整" for w in wts)
-    assert wts[0].zss == [z1] and wts[1].zss == [z2]
+    assert len(wts) == 1                                 # expand 不切
+    assert wts[0].zss == [z1, z2]
+    assert wts[0].zslx_type == "盘整"                    # 无趋势方向(仅扩张)→ 盘整
+
+
+def test_calculate_expand_midtrend_continues():
+    """上涨趋势中途出现 expand(中枢扩张)→ 不切断趋势，走势类型延续(走势级别延续定理一)。"""
+    z1 = _zs_at(0, _seg(0, "up", 2, 5), 5, 8)
+    z2 = _zs_at(10, _seg(10, "up", 8, 16), 16, 19)      # trend_up(本体分离、抬高)
+    z3 = _zs_at(20, _seg(20, "up", 17, 18), 17, 20)     # 本体[17,20]与z2[16,19]相交→expand
+    z4 = _zs_at(30, _seg(30, "up", 21, 28), 28, 31)     # trend_up(相对z3抬高)
+    wts = zslx_branch.ZslxBranchCalculator().calculate([z1, z2, z3, z4], [None] * 4)
+    assert len(wts) == 1                                 # expand 不切断上涨趋势
+    assert wts[0].zslx_type == "上涨"
+    assert wts[0].zss == [z1, z2, z3, z4]
 
 
 def test_calculate_beichi_terminates_trend():
