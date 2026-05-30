@@ -219,15 +219,22 @@ class ZsBranchCalculator:
             pending = correct_entry(pending, self.MIN_LINES)
         for z in done:                           # 合法性不变量（防回归）：本体最小 3 段
             assert len(z.lines) >= 3 and z.zd < z.zg
-        done_div: List[Optional[DivergenceResult]] = [None] * len(done)   # Task 4 填真值
+        done_div: List[Optional[DivergenceResult]] = [
+            self._divergence_for(z, done[i - 1] if i > 0 else None, live=False)
+            for i, z in enumerate(done)
+        ]
         if pending is None:
             return ZsBranchResult(
                 done_zss=done, live=[], freeze_idx=len(lines), done_divergence=done_div
             )
         prev = done[-1] if done else None
+        live = self._fork_pending(pending, prev)
+        for h in live:
+            if h.node1 == "leave":                    # 仅 H2（离开读法）判背驰
+                h.divergence = self._divergence_for(h.zs, prev, live=True)
         return ZsBranchResult(
             done_zss=done,
-            live=self._fork_pending(pending, prev),
+            live=live,
             freeze_idx=self._line_index(pending.lines[0], lines),
             done_divergence=done_div,
         )

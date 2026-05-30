@@ -455,3 +455,80 @@ def test_divergence_none_when_no_ld_provider_on_helper():
     zs.end = _seg(4, "up", 5, 12)
     calc = zs_branch.ZsBranchCalculator()            # 无 ld_provider
     assert calc._divergence_for(zs, None, live=False) is None
+
+
+# ===========================================================================
+# P3 Task 4: calculate 接线 done + live H2 背驰
+# ===========================================================================
+def _table_all(lines, weak_pairs):
+    """所有段 ld 强(area=200,dif 含回抽0轴)；weak_pairs 列出的(start_val,end_val)段弱(area=40)→ 柱子衰竭。"""
+    t = {(ln.start.val, ln.end.val): _ld(200, 200, 20, -20) for ln in lines}
+    for p in weak_pairs:
+        t[p] = _ld(40, 40, 4, -4)
+    return t
+
+
+def _provider(table):
+    return lambda start_fx, end_fx: table[(start_fx.val, end_fx.val)]
+
+
+def test_live_h2_pz_divergence():
+    """单中枢右边缘：进入段 up(强) → 候选离开段 up(弱) → live H2 盘整背驰、provisional。"""
+    lines = [
+        _seg(0, "up", 5, 8),
+        _seg(1, "down", 8, 5), _seg(2, "up", 5, 8), _seg(3, "down", 8, 5),
+        _seg(4, "up", 5, 12),                         # 候选离开段：同向 up、创新高(12>8)、弱
+    ]
+    table = _table_all(lines, weak_pairs=[(5, 12)])
+    res = zs_branch.ZsBranchCalculator(ld_provider=_provider(table)).calculate(lines)
+    h2 = next(h for h in res.live if h.node1 == "leave")
+    assert h2.divergence is not None
+    assert h2.divergence.is_beichi is True
+    assert h2.divergence.kind == "pz"                 # 无前中枢 → 盘整
+    assert h2.divergence.provisional is True          # 右边缘未坐实
+    assert h2.divergence.leave_seg is lines[4]
+    assert h2.divergence.compare_seg is lines[0]
+    h1 = next(h for h in res.live if h.node1 == "core")
+    assert h1.divergence is None                      # H1 不挂背驰
+
+
+def test_done_zhongshu_pz_divergence_not_provisional():
+    """中枢完成（后随新结构）：done 中枢盘整背驰、provisional=False，离开段=z.end。"""
+    lines = [
+        _seg(0, "up", 5, 8),
+        _seg(1, "down", 8, 5), _seg(2, "up", 5, 8), _seg(3, "down", 8, 5),
+        _seg(4, "up", 5, 12),                         # 中枢1 离开段（剥到 z.end）
+        _seg(5, "down", 12, 11), _seg(6, "up", 11, 14),
+        _seg(7, "down", 14, 11), _seg(8, "up", 11, 14),   # 中枢2 → 中枢1 done
+    ]
+    table = _table_all(lines, weak_pairs=[(5, 12)])
+    res = zs_branch.ZsBranchCalculator(ld_provider=_provider(table)).calculate(lines)
+    assert len(res.done_zss) == 1
+    assert len(res.done_divergence) == 1
+    dv = res.done_divergence[0]
+    assert dv is not None
+    assert dv.is_beichi is True and dv.kind == "pz"
+    assert dv.provisional is False                    # 已坐实
+    assert dv.leave_seg is lines[4]                   # z.end = 离开段
+    assert dv.compare_seg is lines[0]                 # z.start = 进入段
+
+
+def test_done_zhongshu_qs_divergence():
+    """两个同向中枢趋势：对中枢2 判趋势背驰 kind='qs'，c=中枢2离开段、b=中枢2进入段。"""
+    lines = [
+        _seg(0, "up", 5, 8), _seg(1, "down", 8, 5), _seg(2, "up", 5, 8), _seg(3, "down", 8, 5),
+        _seg(4, "up", 5, 19),                         # 中枢1离开 = 中枢2进入（连接段 b）
+        _seg(5, "down", 19, 16), _seg(6, "up", 16, 19), _seg(7, "down", 19, 16), _seg(8, "up", 16, 19),
+        _seg(9, "up", 16, 30),                        # 中枢2离开段 c（弱）
+        _seg(10, "down", 30, 27), _seg(11, "up", 27, 30), _seg(12, "down", 30, 27),  # 中枢3雏形(不成立)
+    ]
+    table = _table_all(lines, weak_pairs=[(16, 30)])  # 仅中枢2离开段弱
+    res = zs_branch.ZsBranchCalculator(ld_provider=_provider(table)).calculate(lines)
+    assert len(res.done_zss) == 2
+    dv2 = res.done_divergence[1]
+    assert dv2 is not None
+    assert dv2.kind == "qs"                           # 中枢1在前、同向 up → 趋势
+    assert dv2.is_beichi is True
+    assert dv2.compare_seg is lines[4]                # b = 中枢2进入段
+    assert dv2.leave_seg is lines[9]                  # c = 中枢2离开段
+    assert dv2.provisional is False
