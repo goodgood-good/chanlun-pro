@@ -263,3 +263,19 @@ def test_two_done_zhongshu_form_uptrend():
     assert (z1.zd, z1.zg) == (5, 8)
     assert (z2.zd, z2.zg) == (16, 19)
     assert zs_branch.classify_rel(z1, z2) == "trend_up"
+
+
+def test_c2_entry_promotion_via_delegation():
+    """评审 C2: 委托 ZsCalculator 后，开头5段重叠的首段被提升为进入段(核心4段)，
+    与证过的引擎一致——不再是手搓的5段。中枢间夹回抽段也不再走样。"""
+    lines = [
+        _seg(0, "up", 5, 8), _seg(1, "down", 8, 5), _seg(2, "up", 5, 8), _seg(3, "down", 8, 5),
+        _seg(4, "up", 5, 12), _seg(5, "down", 12, 11),       # 离开段 + 回抽段
+        _seg(6, "up", 11, 14), _seg(7, "down", 14, 11), _seg(8, "up", 11, 14), _seg(9, "down", 14, 11),
+    ]
+    res = zs_branch.ZsBranchCalculator().calculate(lines)
+    assert len(res.done_zss) == 1
+    z1 = res.done_zss[0]
+    assert (z1.zd, z1.zg) == (5, 8)
+    assert len(z1.lines) == 4                 # 首段提升为进入段 → 核心4段(非手搓5段)
+    assert all(h.rel_prev == "trend_up" for h in res.live)   # 中枢2在上 → 趋势

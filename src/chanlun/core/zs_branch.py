@@ -12,10 +12,12 @@
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
 from chanlun.core.cl_interface import LINE, ZS
+from chanlun.core.zs_calculator import ZsCalculator
 
 
 def core_interval(seg_a: LINE, seg_b: LINE, seg_c: LINE) -> Optional[Tuple[float, float]]:
@@ -89,70 +91,59 @@ class ZsBranchResult:
 
 
 class ZsBranchCalculator:
-    """单级别多假设中枢引擎。全量重算：左侧确定性中枢冻结，右边缘产出 H1/H2 分支。
+    """单级别多假设中枢引擎（薄 manager）。
+
+    「找中枢」委托给已验证的 ``ZsCalculator``——look-ahead 完成判定、进入段提升、
+    扫描定位都在那里解决（避免手搓重蹈覆辙）。本类只在其 pending 中枢上加右边缘
+    H1/H2 分叉 + 节点③ 本体包络分类；已完成中枢即左侧冻结。
 
     本计划（P1）只到结构层：H2 表示「中枢结构完成」，不评背驰、不分 H2a/H2b。
+    C3 段数封顶暂不启用（与 9 段升级标记有交互，留 P4 前小修）：``max_zs_lines``
+    给极大值，让中枢能长到 ≥9 段以触发升级标记。
     """
 
-    MIN_LINES = 4  # L0 最小中枢段数（含离开段）
+    MIN_LINES = 4         # L0 最小中枢段数（含离开段）
+    _NO_CAP = 10 ** 9     # 暂不封顶（C3 留 P4 前修）
 
     def calculate(self, lines: List[LINE]) -> ZsBranchResult:
-        done: List[ZS] = []
-        i = -1                                   # 进入段下标；-1=从开头无进入段中枢扫起
-        n = len(lines)
-        while i <= n - 1 - 3:                     # 需为 3 核心段留空间
-            cs = i + 1                            # 核心起点
-            interval = core_interval(lines[cs], lines[cs + 1], lines[cs + 2])
-            if interval is None:
-                i += 1
-                continue
-            zd, zg = interval
-            core = [lines[cs], lines[cs + 1], lines[cs + 2]]
-            j = cs + 3
-            # 延伸：后续段触及核心则并入
-            while j < n and touches(lines[j], zd, zg):
-                core.append(lines[j])
-                j += 1
-            reached_end = (j >= n)
-            if reached_end:
-                # 右边缘：数据到此为止 → H1/H2 分叉（须 >= MIN_LINES 段）
-                if len(core) >= self.MIN_LINES:
-                    return ZsBranchResult(
-                        done_zss=done,
-                        live=self._fork(core, zd, zg, prev=(done[-1] if done else None)),
-                        freeze_idx=cs,
-                    )
-                break
-            else:
-                # 第 j 段不触核心 → 离开确认，中枢 done（左侧冻结）
-                if len(core) >= self.MIN_LINES:
-                    zs = self._make_zs(core, zd, zg, done_flag=True)
-                    # 合法性不变量（防回归）：>=4 段 且 zd<zg（构造已保证，此处兜底）
-                    assert len(zs.lines) >= self.MIN_LINES and zs.zd < zs.zg
-                    done.append(zs)
-                    i = j - 1                    # 离开段作下一中枢进入段
-                else:
-                    i += 1                       # 不足 4 段，作废
-        return ZsBranchResult(done_zss=done, live=[], freeze_idx=max(0, n))
+        if not lines:
+            return ZsBranchResult(done_zss=[], live=[], freeze_idx=0)
+        zc = ZsCalculator(
+            require_alternation=False,
+            min_zs_lines=self.MIN_LINES,
+            max_zs_lines=self._NO_CAP,
+        )
+        zc.calculate(lines)
+        done: List[ZS] = list(zc.zss)            # 已完成中枢（左侧冻结）
+        pending: Optional[ZS] = zc.pending_zs    # 右边缘进行中中枢（单解）
+        for z in done:                           # 合法性不变量（防回归）
+            assert len(z.lines) >= self.MIN_LINES and z.zd < z.zg
+        if pending is None:
+            return ZsBranchResult(done_zss=done, live=[], freeze_idx=len(lines))
+        prev = done[-1] if done else None
+        return ZsBranchResult(
+            done_zss=done,
+            live=self._fork_pending(pending, prev),
+            freeze_idx=self._line_index(pending.lines[0], lines),
+        )
 
-    def _make_zs(self, core: List[LINE], zd: float, zg: float, done_flag: bool) -> ZS:
-        zs = ZS(zs_type="xd", start=None, _type=core[1].type)
-        zs.lines = list(core)
-        zs.zg, zs.zd = zg, zd
-        zs._bounds_dirty = True
-        zs.update_boundaries()                   # 填 gg/dd 包络 + line_num
-        zs.end = core[-1]
-        zs.done = done_flag
-        return zs
+    @staticmethod
+    def _line_index(target: LINE, lines: List[LINE]) -> int:
+        """pending 中枢第一段在 lines 中的下标（按对象身份）。"""
+        for k, ln in enumerate(lines):
+            if ln is target:
+                return k
+        return len(lines)
 
-    def _fork(self, core: List[LINE], zd: float, zg: float, prev: Optional[ZS]) -> List[ZsHypothesis]:
-        # H1：末段为核心，中枢仍开；H2：末段为离开段，中枢完成
-        upgrade = len(core) >= 9                 # 第33课：3 本体 + 6 延伸 = 9 段 → 升级（本计划只标记）
-        zs_h1 = self._make_zs(core, zd, zg, done_flag=False)
-        zs_h2 = self._make_zs(core, zd, zg, done_flag=True)
-        # 节点③：相对最后一个已完成中枢分类（两分支同包络，rel 一致）
-        rel = classify_rel(prev, zs_h1) if prev is not None else None
+    def _fork_pending(self, pending: ZS, prev: Optional[ZS]) -> List[ZsHypothesis]:
+        """在 pending 中枢上分叉：H1=中枢仍开(done=False)，H2=末段为离开段(done=True)。"""
+        upgrade = len(pending.lines) >= 9        # 第33课：9 段触发升级（本计划只标记）
+        rel = classify_rel(prev, pending) if prev is not None else None
+        h1 = pending                             # 仍开（pending.done 本就 False）
+        h1.done = False
+        h2 = copy.copy(pending)                  # 完成读法（浅拷贝，共享 lines 只读）
+        h2.done = True
         return [
-            ZsHypothesis(zs=zs_h1, node1="core", rel_prev=rel, upgrade=upgrade),
-            ZsHypothesis(zs=zs_h2, node1="leave", rel_prev=rel, upgrade=upgrade),
+            ZsHypothesis(zs=h1, node1="core", rel_prev=rel, upgrade=upgrade),
+            ZsHypothesis(zs=h2, node1="leave", rel_prev=rel, upgrade=upgrade),
         ]
