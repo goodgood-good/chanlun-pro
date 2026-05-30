@@ -53,3 +53,44 @@ def _mark_upgrades(done_zss: List[ZS]) -> List[int]:
         elif i > 0 and classify_rel(done_zss[i - 1], z) == "expand":  # 中枢扩展(中心定理二本体相交)
             out.append(i)
     return out
+
+
+class RecursiveBranchCalculator:
+    """递归装配计算器。无状态，每次 calculate 全量重算。"""
+
+    def calculate(
+        self,
+        xds: List[LINE],
+        ld_provider: LdProvider,
+        wzgx_config: str,
+        frequency: Optional[str] = None,
+    ) -> List[LevelResult]:
+        """把线段递归装配成多级中枢/走势类型层级树。
+
+        每级：zs_branch(中枢+内联背驰) → zslx_branch(走势类型) → _as_units → 下一级。
+        L0 构成段=线段(min_zs_lines=4)，L≥1 构成段=走势类型(=3,原文)。
+        终止：扫不出中枢 / 走势类型 <3 / 触 _MAX_LEVELS。
+        """
+        if not xds:
+            return []
+        results: List[LevelResult] = []
+        units: List[LINE] = list(xds)
+        level = 0
+        while level < _MAX_LEVELS:
+            min_lines = 4 if level == 0 else 3
+            res = ZsBranchCalculator(
+                ld_provider=ld_provider, frequency=frequency,
+                wzgx=wzgx_config, min_zs_lines=min_lines,
+            ).calculate(units)
+            if not res.done_zss:
+                break
+            zslxs = ZslxBranchCalculator().calculate(res.done_zss, res.done_divergence)
+            results.append(LevelResult(
+                level=level, zss=res.done_zss, done_divergence=res.done_divergence,
+                zslxs=zslxs, upgrade_idx=_mark_upgrades(res.done_zss),
+            ))
+            if len(zslxs) < 3:
+                break
+            units = _as_units(zslxs)
+            level += 1
+        return results
