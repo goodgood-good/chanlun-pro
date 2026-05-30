@@ -44,12 +44,13 @@ def _make_zslx(zss, zslx_type, index=99) -> ZSLX:
 
 
 # ---- _as_units: ZSLX index 重排 ----
-def test_as_units_reindexes():
-    z1 = _make_zslx([_make_zs([_seg(0, "up", 5, 8), _seg(1, "down", 8, 5), _seg(2, "up", 5, 8)], 5, 8)], "盘整")
-    z2 = _make_zslx([_make_zs([_seg(3, "up", 16, 19), _seg(4, "down", 19, 16), _seg(5, "up", 16, 19)], 16, 19)], "盘整")
+def test_as_units_reindexes_and_preserves_original():
+    z1 = _make_zslx([_make_zs([_seg(0, "up", 5, 8), _seg(1, "down", 8, 5), _seg(2, "up", 5, 8)], 5, 8)], "盘整", index=5)
+    z2 = _make_zslx([_make_zs([_seg(3, "up", 16, 19), _seg(4, "down", 19, 16), _seg(5, "up", 16, 19)], 16, 19)], "盘整", index=3)
     out = recursive_branch._as_units([z1, z2])
-    assert [u.index for u in out] == [0, 1]
-    assert out[0].zs_high == z1.zss[0].gg            # zs_high 不被改写(P4a 已填)
+    assert [u.index for u in out] == [0, 1]      # 任意输入 index(5,3) → 拷贝重排为 0,1
+    assert z1.index == 5 and z2.index == 3       # 原对象 index 不变(浅拷贝隔离)
+    assert out[0].zs_high == z1.zs_high          # 包络沿用
 
 
 # ---- _mark_upgrades: 9段 / expand 标注 ----
@@ -72,3 +73,11 @@ def test_mark_upgrades_clean_trend_none():
     z1 = _make_zs([_seg(0, "down", 8, 5), _seg(1, "up", 5, 8), _seg(2, "down", 8, 5)], 5, 8)
     z2 = _make_zs([_seg(3, "down", 19, 16), _seg(4, "up", 16, 19), _seg(5, "down", 19, 16)], 16, 19)
     assert recursive_branch._mark_upgrades([z1, z2]) == []
+
+
+def test_mark_upgrades_nine_priority_over_expand():
+    """一个中枢既 9段又与前驱 expand → 只记一次(走 9段分支)。"""
+    z1 = _make_zs([_seg(0, "down", 8, 5), _seg(1, "up", 5, 8), _seg(2, "down", 8, 5)], 5, 8)
+    nine = [_seg(i + 3, "up" if i % 2 == 0 else "down", 6, 9) for i in range(9)]  # body[6,9]∩z1[5,8] 且 9段
+    z2 = _make_zs(nine, 6, 9)
+    assert recursive_branch._mark_upgrades([z1, z2]) == [1]   # z2 记一次(9段优先于 expand)

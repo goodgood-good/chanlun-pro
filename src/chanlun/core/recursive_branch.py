@@ -9,6 +9,7 @@ zslx_branch(走势类型)→_as_units→units 逐级。升级标注(9段/扩展)
 """
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass, field
 from typing import List, Optional
 
@@ -31,11 +32,15 @@ class LevelResult:
 
 
 def _as_units(zslxs: List[ZSLX]) -> List[ZSLX]:
-    """ZSLX 喂回 zs_branch 当输入段：只重排 index 为连续 0,1,2…(ZsCalculator 靠
-    index 定位)。zs_high/zs_low 已由 zslx_branch._finalize 填(中枢包络)，不动。"""
+    """ZSLX 喂回 zs_branch 当输入段：返回 index 重排为连续 0,1,2… 的**浅拷贝**
+    (不改原 ZSLX——原对象 index 保留 start_idx,供 LevelResult 审图定位)。
+    zs_high/zs_low 已由 zslx_branch._finalize 填,浅拷贝沿用。"""
+    out: List[ZSLX] = []
     for i, zslx in enumerate(zslxs):
-        zslx.index = i
-    return zslxs
+        u = copy.copy(zslx)
+        u.index = i
+        out.append(u)
+    return out
 
 
 def _mark_upgrades(done_zss: List[ZS]) -> List[int]:
