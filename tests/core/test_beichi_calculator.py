@@ -247,6 +247,47 @@ def test_is_qs_gd_strict():
     assert bc.is_qs(one2, two2, Config.ZS_WZGX_GD.value) is None
 
 
+def _zs_lines(lines, zg, zd):
+    for ln in lines:                       # 本测试模块的 _seg 不设 zs_high/zs_low，补上
+        ln.zs_high = max(ln.start.val, ln.end.val)
+        ln.zs_low = min(ln.start.val, ln.end.val)
+    z = ZS(zs_type="xd", start=None, zg=zg, zd=zd)
+    z.lines = lines
+    z._bounds_dirty = True
+    z.update_boundaries()
+    return z
+
+
+def test_core_envelope_strips_to_first3_body():
+    """中枢本体包络 = 前3段，剔除离开段/延伸的远摆。"""
+    z = _zs_lines(
+        [_seg(XD, 1, "up", 5, 8), _seg(XD, 2, "down", 8, 5),
+         _seg(XD, 3, "up", 5, 8), _seg(XD, 4, "up", 5, 15)],   # 第4段=离开段冲到15
+        zg=8, zd=5,
+    )
+    assert z.gg == 15                          # 完整包络被离开段撑到15
+    assert bc.core_envelope(z) == (8, 5)       # 本体(前3段)不含离开段的15
+
+
+def test_is_qs_gd_core_envelope_detects_trend_when_full_envelope_hides_it():
+    """GD档 + use_core_envelope: 离开段撑爆完整包络时,完整口径判不出趋势,本体包络能。
+    (修 core_envelope NameError——之前 use_core_envelope=True 调已删函数,
+    生产趋势背驰/买卖点链路报错。)"""
+    z1 = _zs_lines(
+        [_seg(XD, 1, "up", 5, 8), _seg(XD, 2, "down", 8, 5),
+         _seg(XD, 3, "up", 5, 8), _seg(XD, 4, "up", 5, 15)],   # 离开段冲到15
+        zg=8, zd=5,
+    )
+    z2 = _zs_lines(
+        [_seg(XD, 5, "up", 10, 13), _seg(XD, 6, "down", 13, 10), _seg(XD, 7, "up", 10, 13)],
+        zg=13, zd=10,
+    )
+    # 完整 gg/dd：one_gg(15) 不< two_dd(10) → 判不出趋势
+    assert bc.is_qs(z1, z2, Config.ZS_WZGX_GD.value, use_core_envelope=False) is None
+    # 本体包络：one_gg(8) < two_dd(10) → 上涨趋势
+    assert bc.is_qs(z1, z2, Config.ZS_WZGX_GD.value, use_core_envelope=True) == "up"
+
+
 def test_beichi_pz_true():
     """盘整背驰：离开段相对中枢内前一同向段力度衰竭 → True。"""
     core_a = _seg(XD, 0, "up", 4, 8)     # 中枢内同向段

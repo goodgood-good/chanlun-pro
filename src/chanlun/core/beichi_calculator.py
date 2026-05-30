@@ -132,6 +132,24 @@ def is_beichi(
     return _ld_decays(seg_a, seg_b, ld_provider, frequency)
 
 
+def core_envelope(zs: ZS) -> Tuple[float, float]:
+    """中枢本体包络 (GG, DD)：取定义中枢的前 3 段，剔除延伸/离开段的远摆。
+
+    GD 档(中心定理二)比较包络时，若用完整 gg/dd，离开段/延伸的远摆会把包络撑爆、
+    相邻中枢恒重叠、趋势恒判不出(only-3rd-bspoint 根因 / 第33课 a+A+b+B+c)。取前 3 段
+    本体——zs_branch 校正后的中枢离开段已剥离、前3段即本体；旧 ZsCalculator 中枢的
+    离开段/延伸在 ``lines[3:]``，前3段亦正确剔除。无 lines 时退化用 ``zs.gg/zs.dd``。
+
+    与 ``zs_branch.body_envelope`` 同口径（那边返回 (dd,gg)，此处按 ``is_qs`` 调用
+    约定返回 (gg,dd)）。原 ``combination_calculator.core_envelope`` 随中枢重划引擎移除
+    后留下悬空引用(``use_core_envelope=True`` 即 NameError)，此处补回。
+    """
+    body = zs.lines[:3] if zs.lines else None
+    if not body:
+        return zs.gg, zs.dd
+    return max(ln.zs_high for ln in body), min(ln.zs_low for ln in body)
+
+
 def is_qs(
     one_zs: ZS, two_zs: ZS, wzgx_config: str, use_core_envelope: bool = False
 ) -> Optional[str]:
