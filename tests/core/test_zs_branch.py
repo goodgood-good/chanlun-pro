@@ -461,7 +461,11 @@ def test_divergence_none_when_no_ld_provider_on_helper():
 # P3 Task 4: calculate 接线 done + live H2 背驰
 # ===========================================================================
 def _table_all(lines, weak_pairs):
-    """所有段 ld 强(area=200,dif 含回抽0轴)；weak_pairs 列出的(start_val,end_val)段弱(area=40)→ 柱子衰竭。"""
+    """所有段 ld 强(area=200,dif 含回抽0轴)；weak_pairs 列出的(start_val,end_val)段弱(area=40)→ 柱子衰竭。
+
+    注意：键为 (start.val, end.val)，值对相同的多段共享同一条 ld（后写覆盖、静默）。
+    用 weak_pairs 指定弱段时，确保该弱段的端点值对在本组 lines 中唯一，避免误伤同值强段。
+    """
     t = {(ln.start.val, ln.end.val): _ld(200, 200, 20, -20) for ln in lines}
     for p in weak_pairs:
         t[p] = _ld(40, 40, 4, -4)
@@ -532,3 +536,21 @@ def test_done_zhongshu_qs_divergence():
     assert dv2.compare_seg is lines[4]                # b = 中枢2进入段
     assert dv2.leave_seg is lines[9]                  # c = 中枢2离开段
     assert dv2.provisional is False
+
+
+def test_done_zhongshu_no_beichi_when_all_strong():
+    """done 中枢离开段力度不衰竭(全段强)→ 无背驰(H2b)：is_beichi False，但 divergence 仍非 None。"""
+    lines = [
+        _seg(0, "up", 5, 8),
+        _seg(1, "down", 8, 5), _seg(2, "up", 5, 8), _seg(3, "down", 8, 5),
+        _seg(4, "up", 5, 12),
+        _seg(5, "down", 12, 11), _seg(6, "up", 11, 14),
+        _seg(7, "down", 14, 11), _seg(8, "up", 11, 14),
+    ]
+    table = _table_all(lines, weak_pairs=[])         # 全段强 → 离开段不衰竭
+    res = zs_branch.ZsBranchCalculator(ld_provider=_provider(table)).calculate(lines)
+    assert len(res.done_zss) == 1
+    dv = res.done_divergence[0]
+    assert dv is not None                            # 仍产出判定(只是不背驰)
+    assert dv.is_beichi is False                     # H2b：无背驰
+    assert dv.kind == "pz"
