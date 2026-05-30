@@ -77,6 +77,44 @@ def classify_rel(prev: ZS, cur: ZS) -> str:
     return "expand"
 
 
+def _zone_dist(v: float, zd: float, zg: float) -> float:
+    """价 v 到中枢区间 [zd,zg] 的距离（区间内为 0）。"""
+    if zd <= v <= zg:
+        return 0.0
+    return min(abs(v - zd), abs(v - zg))
+
+
+def correct_entry(zs: ZS, min_lines: int = 4) -> ZS:
+    """进入段校正（原文第20课回升/回调形成 + line 21650「别把中枢之前的混进来」）。
+
+    委托的 ZsCalculator 用「第一根与 [ZD,ZG] 几何重叠的段即核心」的口径，会把
+    *方向性升/跌入段* 误当中枢第一段（审图 #3 的病）。原文口径：进入段必须**朝
+    中枢走、升/跌进区间**；若引擎认的进入段 ``zs.start`` **背离**区间（其终点比
+    起点离区间更远），则它不是真进入段——真进入段是 ``zs.lines[0]`` 那根升/跌入
+    段，中枢起点右移到 ``lines[1]``，``zd/zg`` 由新前三段（即原文的 Z 走势段）重算。
+
+    返回校正后的中枢（背离才动，否则原样返回）。
+    """
+    s = zs.start
+    if s is None or s.start is None or s.end is None:
+        return zs                                  # 开头中枢无进入段可测
+    if len(zs.lines) < min_lines + 1:
+        return zs                                  # 移除首段后不足成中枢，保守不动
+    if _zone_dist(s.end.val, zs.zd, zs.zg) <= _zone_dist(s.start.val, zs.zd, zs.zg):
+        return zs                                  # 进入段朝中枢走 → 引擎认对了
+    new_core = zs.lines[1:]                         # 背离 → lines[0] 才是真进入段
+    iv = core_interval(new_core[0], new_core[1], new_core[2])
+    if iv is None:
+        return zs
+    z = copy.copy(zs)
+    z.start = zs.lines[0]                           # 真进入段 = 升/跌入段
+    z.lines = list(new_core)
+    z.zd, z.zg = iv
+    z._bounds_dirty = True
+    z.update_boundaries()                           # 重算 gg/dd 包络
+    return z
+
+
 @dataclass
 class ZsHypothesis:
     """右边缘的一个中枢读法（一个 live 分支）。"""
@@ -120,8 +158,11 @@ class ZsBranchCalculator:
             max_zs_lines=self._NO_CAP,
         )
         zc.calculate(lines)
-        done: List[ZS] = list(zc.zss)            # 已完成中枢（左侧冻结）
+        # 进入段校正（原文口径）：把被误当核心的升/跌入段还原成进入段，右移中枢起点
+        done: List[ZS] = [correct_entry(z, self.MIN_LINES) for z in zc.zss]
         pending: Optional[ZS] = zc.pending_zs    # 右边缘进行中中枢（单解）
+        if pending is not None:
+            pending = correct_entry(pending, self.MIN_LINES)
         for z in done:                           # 合法性不变量（防回归）
             assert len(z.lines) >= self.MIN_LINES and z.zd < z.zg
         if pending is None:

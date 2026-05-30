@@ -309,3 +309,41 @@ def test_core_swing_into_next_zhongshu_is_expand():
     assert len(res.done_zss) == 1
     assert res.done_zss[0].gg == 23                       # 中枢1 瞬间波动确实到 23
     assert all(h.rel_prev == "expand" for h in res.live)  # 中枢2 在中枢1 波动内 → 扩张
+
+
+# ---------------------------------------------------------------------------
+# 进入段校正（审图 #3：升/跌入段被误当核心）—— 原文第20课回升/回调形成 + line 21650
+# ---------------------------------------------------------------------------
+def _make_zs(start_seg, core_segs, zd, zg):
+    from chanlun.core.cl_interface import ZS
+    z = ZS(zs_type="xd", start=start_seg)
+    z.lines = list(core_segs)
+    z.zd, z.zg = zd, zg
+    z._bounds_dirty = True
+    z.update_boundaries()
+    return z
+
+
+def test_correct_entry_shifts_when_entry_diverges():
+    """引擎认的进入段背离中枢[7,8](向下远离)→真进入段是升入段s1,中枢起点右移到第一根下降段。"""
+    entry_wrong = _seg(0, "down", 6, 5)      # 引擎认的"进入段"：向下、远离中枢[7,8]
+    s1 = _seg(1, "up", 5, 8)                  # 真·升入段（从 5 升进区间上沿 8）
+    s2 = _seg(2, "down", 8, 7); s3 = _seg(3, "up", 7, 9)
+    s4 = _seg(4, "down", 9, 7); s5 = _seg(5, "up", 7, 8)
+    zs = _make_zs(entry_wrong, [s1, s2, s3, s4, s5], 7, 8)
+    c = zs_branch.correct_entry(zs, 4)
+    assert c.start is s1                      # 进入段改成升入段
+    assert c.lines[0] is s2                   # 中枢从第一根下降段起（回调形成）
+    assert len(c.lines) == 4
+    assert (c.zd, c.zg) == (7, 8)
+
+
+def test_correct_entry_no_shift_when_entry_toward():
+    """进入段朝中枢走(向上升入区间)→引擎认对了,不动。"""
+    entry_ok = _seg(0, "up", 5, 8)            # 进入段：向上、升进中枢[7,8]
+    s1 = _seg(1, "down", 8, 7); s2 = _seg(2, "up", 7, 9)
+    s3 = _seg(3, "down", 9, 7); s4 = _seg(4, "up", 7, 8)
+    zs = _make_zs(entry_ok, [s1, s2, s3, s4], 7, 8)
+    c = zs_branch.correct_entry(zs, 4)
+    assert c.start is entry_ok                # 不变
+    assert c.lines[0] is s1
