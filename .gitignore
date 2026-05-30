@@ -202,3 +202,4 @@ tests/core/baselines.local.json
 scripts_local/
 zs_branch_review.html
 zslx_branch_review.html
+recursive_branch_review.html
