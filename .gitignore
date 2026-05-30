@@ -198,6 +198,7 @@ tests/core/baselines.local.json
 */.omc/
 /tmp/
 
-# P3 本地验收件（probe 脚本 + 审阅图，不入库）
+# P3/P4 本地验收件（probe 脚本 + 审阅图，不入库）
 scripts_local/
 zs_branch_review.html
+zslx_branch_review.html
