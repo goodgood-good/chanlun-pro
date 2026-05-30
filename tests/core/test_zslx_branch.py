@@ -20,6 +20,7 @@ def _seg(index: int, _type: str, start_val: float, end_val: float) -> XD:
         start, end = _fx(index, start_val, "ding"), _fx(index + 1, end_val, "di")
     xd = XD(start=start, end=end, _type=_type, index=index)
     xd.done = True
+    # zs_high/zs_low = 端点 max/min（中枢重叠判定的依据；classify_rel/包络都读它）
     xd.zs_high = max(start_val, end_val)
     xd.zs_low = min(start_val, end_val)
     return xd
@@ -67,3 +68,59 @@ def test_finalize_uptrend_two_zhongshu():
     assert zslx.zs_low == min(z1.dd, z2.dd)
     assert zslx.start_line is z1.start                        # 第一中枢进入段
     assert zslx.end_line is z2.lines[-1]                      # 末中枢末段(z.end 缺→fallback)
+
+
+# ---- Task 2: calculate 状态机 ----
+def test_calculate_empty_returns_empty():
+    assert zslx_branch.ZslxBranchCalculator().calculate([], []) == []
+
+
+def test_calculate_single_zhongshu_unfinished_consolidation():
+    z = _zs_at(0, _seg(0, "up", 2, 5), 5, 8)
+    wts = zslx_branch.ZslxBranchCalculator().calculate([z], [None])
+    assert len(wts) == 1
+    assert wts[0].zslx_type == "盘整" and wts[0].done is False   # 末个未完成
+
+
+def test_calculate_uptrend_three_zhongshu_one_zslx():
+    """3 个依次抬高的同向中枢 → 1 个上涨趋势(末个 done=False)。"""
+    z1 = _zs_at(0, _seg(0, "up", 2, 5), 5, 8)
+    z2 = _zs_at(10, _seg(10, "up", 8, 16), 16, 19)
+    z3 = _zs_at(20, _seg(20, "up", 19, 27), 27, 30)
+    wts = zslx_branch.ZslxBranchCalculator().calculate([z1, z2, z3], [None, None, None])
+    assert len(wts) == 1
+    assert wts[0].zslx_type == "上涨" and wts[0]._type == "up"
+    assert wts[0].zss == [z1, z2, z3] and wts[0].done is False
+
+
+def test_calculate_direction_break_splits_two_zslx():
+    """上涨趋势(z1,z2) 后接下跌中枢 z3 → 方向断裂 → 切 2 个走势类型。"""
+    z1 = _zs_at(0, _seg(0, "up", 2, 5), 5, 8)
+    z2 = _zs_at(10, _seg(10, "up", 8, 16), 16, 19)
+    z3 = _zs_at(20, _seg(20, "down", 16, 8), 5, 8)      # 本体跌回 [5,8] → trend_down vs cur_dir trend_up
+    wts = zslx_branch.ZslxBranchCalculator().calculate([z1, z2, z3], [None, None, None])
+    assert len(wts) == 2
+    assert wts[0].zslx_type == "上涨" and wts[0].done is True and wts[0].zss == [z1, z2]
+    assert wts[1].zslx_type == "盘整" and wts[1].done is False and wts[1].zss == [z3]
+
+
+def test_calculate_expand_is_boundary():
+    """单中枢后接本体相交的中枢(expand) → 断裂(非趋势延续)。"""
+    z1 = _zs_at(0, _seg(0, "up", 2, 5), 5, 8)
+    z2 = _zs_at(10, _seg(10, "up", 6, 7), 6, 9)         # 本体[6,9] 与 z1[5,8] 相交 → expand
+    wts = zslx_branch.ZslxBranchCalculator().calculate([z1, z2], [None, None])
+    assert len(wts) == 2                                 # expand 断裂 → 两个盘整
+    assert all(w.zslx_type == "盘整" for w in wts)
+
+
+def test_calculate_beichi_terminates_trend():
+    """上涨趋势在 z3 离开段背驰(done_divergence[2].is_beichi) → 走势类型在 z3 终结。"""
+    z1 = _zs_at(0, _seg(0, "up", 2, 5), 5, 8)
+    z2 = _zs_at(10, _seg(10, "up", 8, 16), 16, 19)
+    z3 = _zs_at(20, _seg(20, "up", 19, 27), 27, 30)
+    z4 = _zs_at(30, _seg(30, "up", 30, 38), 38, 41)
+    dv = [None, None, _dv(True), None]                   # z3 处背驰
+    wts = zslx_branch.ZslxBranchCalculator().calculate([z1, z2, z3, z4], dv)
+    assert len(wts) == 2
+    assert wts[0].zss == [z1, z2, z3] and wts[0].done is True   # 背驰终结
+    assert wts[1].zss == [z4] and wts[1].done is False          # z4 另起
