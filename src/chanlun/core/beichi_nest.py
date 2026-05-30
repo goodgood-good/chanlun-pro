@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple
+from typing import List, Optional, Set, Tuple
 
 from chanlun.core.recursive_branch import LevelResult
 from chanlun.core.zs_branch import DivergenceResult
@@ -30,7 +30,7 @@ class BeichiNestCalculator:
     def _span(dv: DivergenceResult) -> Tuple[int, int]:
         """背驰段 = 离开段 c 的 K 线序号区间 [start_k, end_k]。leave_seg 是 LINE
         (XD/ZSLX)，start/end 是 FX、FX.k 是代表 K 线、.k_index 是序号。P3 _divergence_for
-        已守卫 leave_seg.start/end 非 None。"""
+        已守卫 leave_seg.start/end 非 None（FX.k 由 FX 构造保证非 None）。"""
         c = dv.leave_seg
         return (c.start.k.k_index, c.end.k.k_index)
 
@@ -67,7 +67,7 @@ class BeichiNestCalculator:
             per_level.append(nodes)
 
         # 2. 自底向上:相邻级别 (k → k+1),把 L_k 节点挂到 严格包含+同向 的 L_{k+1} 节点
-        attached: set = set()
+        attached: Set[int] = set()
         for k in range(len(per_level) - 1):
             for lo in per_level[k]:
                 parent = self._find_parent(lo, per_level[k + 1])

@@ -151,3 +151,17 @@ def test_calculate_three_level_chain():
     l1 = l2.children[0]
     assert l1.level == 1 and len(l1.children) == 1
     assert l1.children[0].level == 0
+
+
+def test_calculate_same_parent_multiple_children():
+    # 一个 hi 含 2 个并列同向 lo → hi.children 有 2 个
+    # (缠论核心形态:一个大级别背驰段内可含多个次级别背驰段)
+    levels = [
+        _lr(0, [_dv("up", 2, 3), _dv("up", 5, 6)]),
+        _lr(1, [_dv("up", 1, 9)]),
+    ]
+    forest = BeichiNestCalculator().calculate(levels)
+    assert len(forest) == 1
+    assert forest[0].level == 1
+    assert len(forest[0].children) == 2
+    assert sorted(ch.zs_index for ch in forest[0].children) == [0, 1]
