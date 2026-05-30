@@ -75,6 +75,7 @@ class RecursiveBranchCalculator:
             return []
         results: List[LevelResult] = []
         units: List[LINE] = list(xds)
+        zslx_calc = ZslxBranchCalculator()    # 无状态，建一次复用
         level = 0
         while level < _MAX_LEVELS:
             min_lines = 4 if level == 0 else 3
@@ -84,7 +85,8 @@ class RecursiveBranchCalculator:
             ).calculate(units)
             if not res.done_zss:
                 break
-            zslxs = ZslxBranchCalculator().calculate(res.done_zss, res.done_divergence)
+            zslxs = zslx_calc.calculate(res.done_zss, res.done_divergence)
+            assert zslxs, "done_zss 非空时 zslx_branch 必产 ≥1 走势类型(末段 done=False)"
             results.append(LevelResult(
                 level=level, zss=res.done_zss, done_divergence=res.done_divergence,
                 zslxs=zslxs, upgrade_idx=_mark_upgrades(res.done_zss),
