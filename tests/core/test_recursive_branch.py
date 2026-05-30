@@ -123,6 +123,15 @@ def test_calculate_records_pending_when_no_done():
         _seg(0, "down", 10, 9), _seg(1, "up", 4, 8), _seg(2, "down", 8, 5),
         _seg(3, "up", 5, 10), _seg(4, "down", 10, 6),
     ]
+    # 防腐:显式锁定该序列走的是 pending 分支(zs_branch 判 pending、无 done 中枢)——
+    # 否则将来 ZsCalculator 的 pending/done 边界口径变动,此测试可能静默改测别的路径。
+    from chanlun.core.zs_branch import ZsBranchCalculator
+    probe = ZsBranchCalculator(
+        ld_provider=_ld_none, frequency=None,
+        wzgx=Config.ZS_WZGX_ZGD.value, min_zs_lines=4).calculate(lines)
+    assert probe.done_zss == [] and any(h.node1 == "leave" for h in probe.live), \
+        "前提:该序列须无 done 中枢、有 pending H2(leave) —— 锁定测试意图"
+
     res = recursive_branch.RecursiveBranchCalculator().calculate(
         lines, _ld_none, Config.ZS_WZGX_ZGD.value)
     assert len(res) == 1
@@ -171,3 +180,33 @@ def test_calculate_two_levels():
     assert len(res.done_zss) >= 1, "L0 走势类型喂回后应能聚出 L1 中枢"
     assert all(isinstance(seg, ZSLX) for seg in res.done_zss[0].lines), \
         "L1 中枢的构成段应为 ZSLX（L0 走势类型）实例"
+
+
+def test_calculate_reaches_level1_end_to_end():
+    """端到端 线段→L0(≥3走势类型)→_as_units 喂回→L1:覆盖 recursive while 循环的
+    L≥1 升级分支(units=_as_units(zslxs);level+=1 后再跑 ZsBranchCalculator)。该分支
+    被手工构造的 test_calculate_two_levels 绕过(它直接调 ZsBranchCalculator),此前仅
+    真实数据 probe 兜底——本测试补上自动化覆盖(评审 What's Missing)。
+
+    构造:5 个本体大分离([5,8]↔[40,43])、方向交替的中枢→classify_rel 判 trend(非
+    expand)→zslx_branch 经 2 次方向反转切出 ≥3 走势类型→满足 len(zslxs)>=3 的喂回
+    条件→进入 L1。L1 中枢右边缘未完成→由 pending 分支记录(zss≥1、zslxs=[])。
+    """
+    lines = [
+        _seg(0, "up", 4, 8), _seg(1, "down", 8, 5), _seg(2, "up", 5, 8), _seg(3, "down", 8, 5),
+        _seg(4, "up", 5, 42),                                                    # 强上行离开
+        _seg(5, "down", 42, 40), _seg(6, "up", 40, 43), _seg(7, "down", 43, 40), _seg(8, "up", 40, 43),
+        _seg(9, "down", 40, 4),                                                  # 强下行(反转)
+        _seg(10, "up", 4, 8), _seg(11, "down", 8, 5), _seg(12, "up", 5, 8), _seg(13, "down", 8, 5),
+        _seg(14, "up", 5, 44),                                                   # 强上行(反转)
+        _seg(15, "down", 44, 40), _seg(16, "up", 40, 43), _seg(17, "down", 43, 40), _seg(18, "up", 40, 43),
+        _seg(19, "down", 40, 4),                                                 # 强下行(反转)
+        _seg(20, "up", 4, 8), _seg(21, "down", 8, 5), _seg(22, "up", 5, 8), _seg(23, "down", 8, 5),
+        _seg(24, "up", 5, 44), _seg(25, "down", 44, 40),                         # 离开确认中枢5
+    ]
+    res = recursive_branch.RecursiveBranchCalculator().calculate(
+        lines, _ld_none, Config.ZS_WZGX_ZGD.value)
+    assert len(res) >= 2, "应递归到 L1(L0 切出≥3走势类型→_as_units 喂回升级)"
+    assert res[0].level == 0 and len(res[0].zslxs) >= 3   # L0 喂回前提:≥3 走势类型
+    assert res[1].level == 1                              # 升级分支(level+=1)被执行
+    assert len(res[1].zss) >= 1                           # L1 中枢产出(done 或 pending)

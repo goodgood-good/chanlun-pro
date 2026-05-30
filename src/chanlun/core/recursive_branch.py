@@ -45,10 +45,15 @@ def _as_units(zslxs: List[ZSLX]) -> List[ZSLX]:
 
 def _mark_upgrades(done_zss: List[ZS]) -> List[int]:
     """本级中枢中「9 段升级 / 中枢扩展候选」的索引（line16429 解耦：仅标注、不改
-    走势类型；实体化与 2/3 类买点留 P5）。"""
+    走势类型；实体化与 2/3 类买点留 P5）。
+
+    z.lines 元素随级别而异：L0=线段、L≥1=走势类型(ZSLX)，故「9 段」泛指 9 个
+    次级别单元（第33课：9 段=3 个次级别走势类型重合）。
+    注：calculate 的 pending 分支传入的 H2 中枢未剥离开段(含末段读法)，9 段阈值
+    在该路径偏松一档——属 MVP 容差(pending 仅供审图标注，精确实体化留 P5)。"""
     out: List[int] = []
     for i, z in enumerate(done_zss):
-        if len(z.lines) >= 9:                                       # 9 段升级(第33课)
+        if len(z.lines) >= 9:                          # 9 段升级(9 个次级别单元,第33课)
             out.append(i)
         elif i > 0 and classify_rel(done_zss[i - 1], z) == "expand":  # 中枢扩展(中心定理二本体相交)
             out.append(i)
