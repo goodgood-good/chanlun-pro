@@ -16,9 +16,9 @@ import copy
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
-from chanlun.core.beichi_calculator import LdProvider
 from chanlun.core.cl_interface import LINE, ZS, Config
 from chanlun.core.zs_calculator import ZsCalculator
+from chanlun.core.beichi_calculator import is_beichi, is_qs, LdProvider
 
 
 def core_interval(seg_a: LINE, seg_b: LINE, seg_c: LINE) -> Optional[Tuple[float, float]]:
@@ -239,6 +239,50 @@ class ZsBranchCalculator:
             if ln is target:
                 return k
         return len(lines)
+
+    @staticmethod
+    def _leave_seg(zs: ZS, live: bool) -> Optional[LINE]:
+        """中枢离开段 c：live H2 取末段 lines[-1]；done 中枢取剥出的 z.end
+        （correct_exit 已把定向冲出的离开段剥到 z.end），z.end 缺失时退化用末段。"""
+        if live:
+            return zs.lines[-1] if zs.lines else None
+        if zs.end is not None:
+            return zs.end
+        return zs.lines[-1] if zs.lines else None
+
+    def _is_trend(self, prev_zs: Optional[ZS], zs: ZS, leave: LINE) -> bool:
+        """Z 与前一中枢是否依次同向构成趋势，且趋势方向 == 离开段方向。
+
+        use_core_envelope=True：趋势比较用前 3 段本体（剔离开段远摆，宪法 §3.5）。
+        无前中枢 → 非趋势（按盘整背驰处理）。
+        """
+        if prev_zs is None:
+            return False
+        d = is_qs(prev_zs, zs, self.wzgx, use_core_envelope=True)
+        return d is not None and d == leave.type
+
+    def _divergence_for(
+        self, zs: ZS, prev_zs: Optional[ZS], live: bool
+    ) -> Optional[DivergenceResult]:
+        """对中枢 Z 判离开段背驰（is_beichi 原语直连）。
+
+        a = 进入段 z.start（趋势时即连接段 b）；c = 离开段。盘整 b:a 与趋势 c:b
+        在每个中枢上计算同一 = is_beichi(z.start, 离开段)，仅 kind 标签不同（宪法 §3）。
+        无 ld_provider / 无进入段 / 进入段与离开段异向 → None。
+        """
+        if self.ld_provider is None:
+            return None
+        a = zs.start
+        c = self._leave_seg(zs, live)
+        if a is None or a.start is None or a.end is None or c is None:
+            return None
+        if a.type != c.type:                          # 异向不可比力度
+            return None
+        kind = "qs" if self._is_trend(prev_zs, zs, c) else "pz"
+        bc = is_beichi(a, c, self.ld_provider, self.frequency)
+        return DivergenceResult(
+            is_beichi=bc, kind=kind, compare_seg=a, leave_seg=c, provisional=live
+        )
 
     def _fork_pending(self, pending: ZS, prev: Optional[ZS]) -> List[ZsHypothesis]:
         """在 pending 中枢上分叉：H1=中枢仍开(done=False)，H2=末段为离开段(done=True)。

@@ -420,3 +420,38 @@ def test_no_ld_provider_yields_none_divergence():
     res = zs_branch.ZsBranchCalculator().calculate(lines)   # 无 ld_provider
     assert all(d is None for d in res.done_divergence)
     assert all(h.divergence is None for h in res.live)
+
+
+# ===========================================================================
+# P3 Task 3: _divergence_for 边界单测
+# ===========================================================================
+def _ld(up_sum, down_sum, dif_max, dif_min):
+    return {"hist": {"up_sum": up_sum, "down_sum": down_sum},
+            "dif": {"max": dif_max, "min": dif_min}}
+
+
+def test_divergence_none_when_entry_leave_opposite():
+    """进入段 down、离开段 up（异向）→ 不可比力度 → None。"""
+    entry = _seg(0, "down", 10, 8)
+    body = [_seg(1, "up", 5, 8), _seg(2, "down", 8, 5), _seg(3, "up", 5, 8)]
+    zs = _make_zs(entry, body, 5, 8)
+    zs.end = _seg(4, "up", 5, 12)                     # 离开段 up，异向 entry
+    calc = zs_branch.ZsBranchCalculator(ld_provider=lambda s, e: _ld(1, 1, 1, 1))
+    assert calc._divergence_for(zs, None, live=False) is None
+
+
+def test_divergence_none_when_no_entry_segment():
+    """开头中枢无进入段（z.start=None）→ None。"""
+    body = [_seg(1, "up", 5, 8), _seg(2, "down", 8, 5), _seg(3, "up", 5, 8)]
+    zs = _make_zs(None, body, 5, 8)
+    zs.end = _seg(4, "up", 5, 12)
+    calc = zs_branch.ZsBranchCalculator(ld_provider=lambda s, e: _ld(1, 1, 1, 1))
+    assert calc._divergence_for(zs, None, live=False) is None
+
+
+def test_divergence_none_when_no_ld_provider_on_helper():
+    body = [_seg(1, "up", 5, 8), _seg(2, "down", 8, 5), _seg(3, "up", 5, 8)]
+    zs = _make_zs(_seg(0, "up", 5, 8), body, 5, 8)
+    zs.end = _seg(4, "up", 5, 12)
+    calc = zs_branch.ZsBranchCalculator()            # 无 ld_provider
+    assert calc._divergence_for(zs, None, live=False) is None
