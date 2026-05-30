@@ -253,8 +253,9 @@ class ZsBranchCalculator:
     def _is_trend(self, prev_zs: Optional[ZS], zs: ZS, leave: LINE) -> bool:
         """Z 与前一中枢是否依次同向构成趋势，且趋势方向 == 离开段方向。
 
-        use_core_envelope=True：趋势比较用前 3 段本体（剔离开段远摆，宪法 §3.5）。
-        无前中枢 → 非趋势（按盘整背驰处理）。
+        is_qs 的 use_core_envelope 仅在 GD 口径下生效（用前 3 段本体剔离开段远摆，
+        宪法 §3.5）；默认 ZGD/ZGGDD 口径用 zd/zg 核心区间、本就无远摆问题。传 True
+        是为兼容调用方把 wzgx 配成 GD 的情形。无前中枢 → 非趋势（按盘整背驰处理）。
         """
         if prev_zs is None:
             return False
@@ -274,7 +275,8 @@ class ZsBranchCalculator:
             return None
         a = zs.start
         c = self._leave_seg(zs, live)
-        if a is None or a.start is None or a.end is None or c is None:
+        if (a is None or a.start is None or a.end is None
+                or c is None or c.start is None or c.end is None):
             return None
         if a.type != c.type:                          # 异向不可比力度
             return None
