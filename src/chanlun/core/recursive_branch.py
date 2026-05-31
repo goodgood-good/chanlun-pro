@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 from chanlun.core.beichi_calculator import LdProvider
 from chanlun.core.cl_interface import LINE, ZS, ZSLX
@@ -70,6 +70,7 @@ class RecursiveBranchCalculator:
         ld_provider: LdProvider,
         wzgx_config: str,
         frequency: Optional[str] = None,
+        ld_provider_for_level: Optional[Callable[[int], LdProvider]] = None,
     ) -> List[LevelResult]:
         """把线段递归装配成多级中枢/走势类型层级树。
 
@@ -85,8 +86,10 @@ class RecursiveBranchCalculator:
         level = 0
         while level < _MAX_LEVELS:
             min_lines = 4 if level == 0 else 3
+            # 换周期 MACD:各级用对应级别 ld_provider(L0→5m/L1→30m…);无 factory 退化用单一
+            lp = ld_provider_for_level(level) if ld_provider_for_level is not None else ld_provider
             res = ZsBranchCalculator(
-                ld_provider=ld_provider, frequency=frequency,
+                ld_provider=lp, frequency=frequency,
                 wzgx=wzgx_config, min_zs_lines=min_lines,
             ).calculate(units)
             if not res.done_zss:

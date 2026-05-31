@@ -210,3 +210,27 @@ def test_calculate_reaches_level1_end_to_end():
     assert res[0].level == 0 and len(res[0].zslxs) >= 3   # L0 喂回前提:≥3 走势类型
     assert res[1].level == 1                              # 升级分支(level+=1)被执行
     assert len(res[1].zss) >= 1                           # L1 中枢产出(done 或 pending)
+
+
+def test_calculate_ld_provider_for_level():
+    """换周期 MACD:有 factory → 各级用 factory(level) 算背驰、不用单一 ld_provider;无则退化。"""
+    seen_levels = []
+    single_called = []
+
+    def factory(level):
+        seen_levels.append(level)
+        return _ld_none
+
+    def single(s, e):
+        single_called.append(1)
+        return _ld_none(s, e)
+
+    lines = [
+        _seg(0, "down", 10, 9), _seg(1, "up", 4, 8), _seg(2, "down", 8, 5),
+        _seg(3, "up", 5, 10), _seg(4, "down", 10, 6),
+        _seg(5, "up", 9, 14), _seg(6, "down", 14, 11), _seg(7, "up", 11, 15), _seg(8, "down", 15, 12),
+    ]
+    recursive_branch.RecursiveBranchCalculator().calculate(
+        lines, single, Config.ZS_WZGX_ZGD.value, ld_provider_for_level=factory)
+    assert seen_levels and seen_levels[0] == 0            # factory(0) 被调(各级用对应 provider)
+    assert not single_called                             # 有 factory → 单一 ld_provider 未被使用
