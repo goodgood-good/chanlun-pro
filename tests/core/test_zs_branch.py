@@ -519,6 +519,43 @@ def test_divergence_turn_self_compare_none():
     assert calc._divergence_for(zs, prev, live=False) is None
 
 
+def _turn_top_zs():
+    """顶转折型中枢:进入段 up(创新高)、离开段 down(异向);前中枢 up 离开段 high=8。"""
+    entry = _seg(10, "up", 2, 12)                     # 进入段 a (up, high=12)
+    body = [_seg(11, "down", 12, 9), _seg(12, "up", 9, 12), _seg(13, "down", 12, 9)]
+    zs = _make_zs(entry, body, 9, 12)
+    zs.end = _seg(14, "down", 9, 3)                    # 离开段 c (down,异向 a)
+    prev = _make_zs(_seg(0, "down", 10, 4),
+                    [_seg(1, "up", 4, 8), _seg(2, "down", 8, 4), _seg(3, "up", 4, 8)], 4, 8)
+    prev.end = _seg(4, "up", 4, 8)                     # b (up, high=8;a.high12>b.high8 创新高)
+    return zs, entry, prev
+
+
+def test_divergence_turn_judges_beichi_true():
+    """转折型(顶,a=up 创新高)+力度衰减 → is_beichi=True。正向锁 is_beichi(compare=b前,leave=a后)传参方向。"""
+    zs, entry, prev = _turn_top_zs()
+
+    def _prov(s, e):
+        if (s.val, e.val) == (2, 12):                 # a:弱(面积+黄白线衰减)
+            return _ld(10, 0, 1, 0)
+        return _ld(100, 0, 10, 0)                      # b:强
+    calc = zs_branch.ZsBranchCalculator(ld_provider=_prov, frequency="1m")
+    dv = calc._divergence_for(zs, prev, live=False)
+    assert dv is not None
+    assert dv.is_beichi is True                       # a 创新高+力度衰减=背驰
+    assert dv.compare_seg is prev.end and dv.leave_seg is entry
+
+
+def test_divergence_turn_judges_beichi_false():
+    """转折型(顶,a=up 创新高)+力度不衰减(同强) → is_beichi=False。"""
+    zs, entry, prev = _turn_top_zs()
+    calc = zs_branch.ZsBranchCalculator(
+        ld_provider=lambda s, e: _ld(100, 0, 10, 0), frequency="1m")   # 同强,面积不衰减
+    dv = calc._divergence_for(zs, prev, live=False)
+    assert dv is not None
+    assert dv.is_beichi is False                       # 力度不衰减=不背驰
+
+
 # ===========================================================================
 # P3 Task 4: calculate 接线 done + live H2 背驰
 # ===========================================================================

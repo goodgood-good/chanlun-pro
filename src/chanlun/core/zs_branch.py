@@ -295,6 +295,7 @@ class ZsBranchCalculator:
             if (b is None or b is a or b.type != a.type
                     or b.start is None or b.end is None):
                 return None                            # 无前驱/自比/异向/缺端点 → 不判
+                # (值相等异实例的 b/a 由 is_beichi 创新高/低严格不等号前提兜底,不会误判)
             bc = is_beichi(b, a, self.ld_provider, self.frequency)
             return DivergenceResult(
                 is_beichi=bc, kind="qs",               # 转折=趋势背驰
