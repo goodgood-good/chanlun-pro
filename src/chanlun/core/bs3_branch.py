@@ -19,12 +19,12 @@ class Bs3BranchCalculator:
     """多级三类买卖点计算器。无状态，每次 calculate 全量重算。"""
 
     def calculate(self, levels: List[LevelResult]) -> List[BuySellPoint]:
-        """各级中枢出三类(扩张三买=L1+中枢三类)。复用 P5a _third_class,标 level。"""
+        """各级中枢出三类买卖点(扩张三买/三卖=L1+中枢三类)。复用 P5a _third_class,标 level。"""
         out: List[BuySellPoint] = []
         base = BsBranchCalculator()
         for lr in levels:
-            zr = ZsBranchResult(
-                done_zss=lr.zss, live=[], freeze_idx=0,
+            zr = ZsBranchResult(                          # _third_class 只读 done_zss+lines,
+                done_zss=lr.zss, live=[], freeze_idx=0,   # live/freeze_idx/done_divergence 占位
                 done_divergence=lr.done_divergence,
             )
             for p in base._third_class(zr, lr.units):   # 复用 P5a 三类逻辑

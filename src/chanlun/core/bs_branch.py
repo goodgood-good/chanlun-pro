@@ -50,7 +50,8 @@ class BsBranchCalculator:
     def _third_class(self, zs_result: ZsBranchResult,
                      lines: List[LINE]) -> List[BuySellPoint]:
         """三类 = 离开中枢、第一次回试不破核心 ZG/ZD(第20课)。
-        向上离开 & 回试低点 >= ZG → 3buy;向下离开 & 回试高点 <= ZD → 3sell。"""
+        向上离开 & 回试低点 >= ZG → 3buy;向下离开 & 回试高点 <= ZD → 3sell。
+        注:P5c bs3_branch 跨级复用此方法做多级三类——改签名/口径需同步它。"""
         out: List[BuySellPoint] = []
         for z in zs_result.done_zss:
             leave = z.end                                          # 离开段(correct_exit 剥出)
