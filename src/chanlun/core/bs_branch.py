@@ -17,11 +17,12 @@ from chanlun.core.zs_branch import ZsBranchResult, DivergenceResult
 @dataclass
 class BuySellPoint:
     """一个买卖点信号。"""
-    bs_type: str                              # "1buy" | "1sell" | "3buy" | "3sell"
+    bs_type: str                              # "1buy"|"1sell"|"3buy"|"3sell"|"2buy"|"2sell"
     zs: ZS                                    # 关联中枢
-    signal_seg: LINE                          # 信号段(一类=背驰离开段 c;三类=回试段)
-    anchor_fx: FX                             # 出图锚点(一类=c 末端;三类=回试段末端极值)
-    divergence: Optional[DivergenceResult]    # 一类带背驰本体;三类 None
+    signal_seg: LINE                          # 信号段(一类=背驰离开段 c;三类=回试段;二类=次级别一买离开段)
+    anchor_fx: FX                             # 出图锚点(一类=c 末端;三类=回试段末端;二类=次级别一买末端)
+    divergence: Optional[DivergenceResult]    # 一类/二类带背驰本体;三类 None
+    level: Optional[int] = None               # P5b:二类归属级别 L_k;P5a 一三类 None
 
 
 class BsBranchCalculator:
