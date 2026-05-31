@@ -29,7 +29,7 @@ class BsBranchCalculator:
 
     def calculate(self, zs_result: ZsBranchResult,
                   lines: List[LINE]) -> List[BuySellPoint]:
-        return self._first_class(zs_result)
+        return self._first_class(zs_result) + self._third_class(zs_result, lines)
 
     def _first_class(self, zs_result: ZsBranchResult) -> List[BuySellPoint]:
         """一类 = 趋势背驰(done_divergence 里 is_beichi & kind=='qs')。
@@ -45,3 +45,29 @@ class BsBranchCalculator:
             elif c._type == "up":
                 out.append(BuySellPoint("1sell", z, c, c.end, dv))
         return out
+
+    def _third_class(self, zs_result: ZsBranchResult,
+                     lines: List[LINE]) -> List[BuySellPoint]:
+        """三类 = 离开中枢、第一次回试不破核心 ZG/ZD(第20课)。
+        向上离开 & 回试低点 >= ZG → 3buy;向下离开 & 回试高点 <= ZD → 3sell。"""
+        out: List[BuySellPoint] = []
+        for z in zs_result.done_zss:
+            leave = z.end                                          # 离开段(correct_exit 剥出)
+            if leave is None:
+                continue
+            retest = self._next_seg(leave, lines)                  # 紧邻下一段 = 第一次回试
+            if retest is None:                                     # 离开到右边缘、无回试 → 不产
+                continue
+            if leave._type == "up" and retest.end.val >= z.zg:     # 回试低点不破 ZG
+                out.append(BuySellPoint("3buy", z, retest, retest.end, None))
+            elif leave._type == "down" and retest.end.val <= z.zd:  # 回试高点不破 ZD
+                out.append(BuySellPoint("3sell", z, retest, retest.end, None))
+        return out
+
+    @staticmethod
+    def _next_seg(leave: LINE, lines: List[LINE]) -> Optional[LINE]:
+        """离开段在 lines 中的紧邻下一段(按对象身份;leave 是 ZsCalculator 输入段之一)。"""
+        for k, ln in enumerate(lines):
+            if ln is leave:
+                return lines[k + 1] if k + 1 < len(lines) else None
+        return None
