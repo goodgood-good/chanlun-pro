@@ -111,3 +111,17 @@ def test_provisional_excluded():
 
 def test_empty_returns_empty():
     assert Bs2BranchCalculator().calculate([]) == []
+
+
+def test_three_levels_each_has_second():
+    # 多级泛化:L2 一买(k4,v4) + L1 一买(k10,v5) + L0 一买(k21,v6)
+    # L1 二买=L0 一买(k21>10,6≥5);L2 二买=L1 一买(k10>4,5≥4)
+    c_l2 = _seg(3, "down", 11, 4)
+    c_l1 = _seg(9, "down", 10, 5)
+    c_l0 = _seg(20, "down", 9, 6)
+    levels = [_lr(0, [_dv("down", c_l0)]), _lr(1, [_dv("down", c_l1)]), _lr(2, [_dv("down", c_l2)])]
+    pts = Bs2BranchCalculator().calculate(levels)
+    by_level = {p.level: p for p in pts}
+    assert len(pts) == 2
+    assert by_level[1].anchor_fx is c_l0.end     # L1 二买 = L0 一买
+    assert by_level[2].anchor_fx is c_l1.end     # L2 二买 = L1 一买
