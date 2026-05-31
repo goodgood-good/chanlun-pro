@@ -29,6 +29,7 @@ class LevelResult:
     done_divergence: List[Optional[DivergenceResult]]   # 与 zss 索引对齐(本级内联背驰)
     zslxs: List[ZSLX]                                   # 本级走势类型
     upgrade_idx: List[int] = field(default_factory=list)  # 升级标注:9段/扩展候选的中枢索引(P5 用)
+    units: List[LINE] = field(default_factory=list)       # P5c:该级输入段序列(回试段定位)
 
 
 def _as_units(zslxs: List[ZSLX]) -> List[ZSLX]:
@@ -99,13 +100,14 @@ class RecursiveBranchCalculator:
                         level=level, zss=[h.zs for h in pend],
                         done_divergence=[h.divergence for h in pend],
                         zslxs=[], upgrade_idx=_mark_upgrades([h.zs for h in pend]),
+                        units=list(units),
                     ))
                 break
             zslxs = zslx_calc.calculate(res.done_zss, res.done_divergence)
             assert zslxs, "done_zss 非空时 zslx_branch 必产 ≥1 走势类型(末段 done=False)"
             results.append(LevelResult(
                 level=level, zss=res.done_zss, done_divergence=res.done_divergence,
-                zslxs=zslxs, upgrade_idx=_mark_upgrades(res.done_zss),
+                zslxs=zslxs, upgrade_idx=_mark_upgrades(res.done_zss), units=list(units),
             ))
             if len(zslxs) < 3:
                 break
