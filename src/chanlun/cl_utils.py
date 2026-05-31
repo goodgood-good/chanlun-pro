@@ -458,8 +458,8 @@ def query_cl_chart_config(
         "chart_show_zs_direction": "0",      # 中枢方向着色(up/down/zd)
         "chart_show_zs_expanded": "0",       # 扩展中枢加粗框
         "chart_show_xd_zslx": "0",           # 当前级别走势类型线段/区间
-        "chart_show_recursive_levels": "0",  # 递归层级 L1+ 中枢与走势类型
-        "chart_use_branch_core": "0",        # 1=递归层级/买卖点改用新核心(8模块)而非旧链路
+        "chart_show_recursive_levels": "1",  # 递归层级中枢与走势类型(重做完成,默认开显示新核心)
+        "chart_use_branch_core": "1",        # 1=递归层级/买卖点用新核心(8模块,默认);0=旧链路
         "chart_show_interval_nest": "0",     # 区间套链 + 精确转折点
         "chart_show_ma": "0",
         "chart_show_boll": "0",
@@ -974,8 +974,8 @@ def cl_data_to_tv_chart(
         except Exception:
             levels = []
         for lv in levels:
-            if lv.level == 0:
-                continue   # L0 已在 xd_zss / xd_zslx 中展示,递归层级树只画 L1+
+            if lv.level == 0 and config.get("chart_use_branch_core", "0") != "1":
+                continue   # 旧链路 L0 已在 xd_zss 展示;新核心 L0=笔中枢,需在此画出
             lv_zss = [_zs_to_chart(zs, use_envelope=True) for zs in lv.zss]
             lv_zslxs = []
             lv_zslx_lines = []
