@@ -283,7 +283,9 @@ def test_c2_entry_promotion_via_delegation():
 
 def test_correct_exit_strips_breakout_leg():
     """离开段(定向冲出区间)从中枢本体剥出：本体=lines[:-1]，z.end=离开段，gg 收紧。"""
-    s1 = _seg(1, "down", 8, 7); s2 = _seg(2, "up", 7, 9); s3 = _seg(3, "down", 9, 7)
+    s1 = _seg(1, "down", 8, 7)
+    s2 = _seg(2, "up", 7, 9)
+    s3 = _seg(3, "down", 9, 7)
     exit_leg = _seg(4, "up", 7, 15)            # 离开段：从区间[7,8]定向冲出到15
     zs = _make_zs(_seg(0, "up", 5, 8), [s1, s2, s3, exit_leg], 7, 8)
     zs.done = True
@@ -296,8 +298,10 @@ def test_correct_exit_strips_breakout_leg():
 
 def test_correct_exit_no_strip_when_last_inside_zone():
     """末段终点仍在区间内(不是离开段)→不剥。"""
-    s1 = _seg(1, "down", 8, 7); s2 = _seg(2, "up", 7, 9)
-    s3 = _seg(3, "down", 9, 7); s4 = _seg(4, "up", 7, 8)
+    s1 = _seg(1, "down", 8, 7)
+    s2 = _seg(2, "up", 7, 9)
+    s3 = _seg(3, "down", 9, 7)
+    s4 = _seg(4, "up", 7, 8)
     zs = _make_zs(_seg(0, "up", 5, 8), [s1, s2, s3, s4], 7, 8)
     zs.done = True
     c = zs_branch.correct_exit(zs, 3)
@@ -351,8 +355,10 @@ def test_correct_entry_shifts_when_entry_diverges():
     """引擎认的进入段背离中枢[7,8](向下远离)→真进入段是升入段s1,中枢起点右移到第一根下降段。"""
     entry_wrong = _seg(0, "down", 6, 5)      # 引擎认的"进入段"：向下、远离中枢[7,8]
     s1 = _seg(1, "up", 5, 8)                  # 真·升入段（从 5 升进区间上沿 8）
-    s2 = _seg(2, "down", 8, 7); s3 = _seg(3, "up", 7, 9)
-    s4 = _seg(4, "down", 9, 7); s5 = _seg(5, "up", 7, 8)
+    s2 = _seg(2, "down", 8, 7)
+    s3 = _seg(3, "up", 7, 9)
+    s4 = _seg(4, "down", 9, 7)
+    s5 = _seg(5, "up", 7, 8)
     zs = _make_zs(entry_wrong, [s1, s2, s3, s4, s5], 7, 8)
     c = zs_branch.correct_entry(zs, 4)
     assert c.start is s1                      # 进入段改成升入段
@@ -364,8 +370,10 @@ def test_correct_entry_shifts_when_entry_diverges():
 def test_correct_entry_no_shift_when_entry_toward():
     """进入段朝中枢走(向上升入区间)→引擎认对了,不动。"""
     entry_ok = _seg(0, "up", 5, 8)            # 进入段：向上、升进中枢[7,8]
-    s1 = _seg(1, "down", 8, 7); s2 = _seg(2, "up", 7, 9)
-    s3 = _seg(3, "down", 9, 7); s4 = _seg(4, "up", 7, 8)
+    s1 = _seg(1, "down", 8, 7)
+    s2 = _seg(2, "up", 7, 9)
+    s3 = _seg(3, "down", 9, 7)
+    s4 = _seg(4, "up", 7, 8)
     zs = _make_zs(entry_ok, [s1, s2, s3, s4], 7, 8)
     c = zs_branch.correct_entry(zs, 4)
     assert c.start is entry_ok                # 不变
@@ -431,7 +439,7 @@ def _ld(up_sum, down_sum, dif_max, dif_min):
 
 
 def test_divergence_none_when_entry_leave_opposite():
-    """进入段 down、离开段 up（异向）→ 不可比力度 → None。"""
+    """进入段 down、离开段 up(异向)+ 无前驱(prev=None) → None。(P5d:转折型有前驱同向段才判)"""
     entry = _seg(0, "down", 10, 8)
     body = [_seg(1, "up", 5, 8), _seg(2, "down", 8, 5), _seg(3, "up", 5, 8)]
     zs = _make_zs(entry, body, 5, 8)
@@ -455,6 +463,60 @@ def test_divergence_none_when_no_ld_provider_on_helper():
     zs.end = _seg(4, "up", 5, 12)
     calc = zs_branch.ZsBranchCalculator()            # 无 ld_provider
     assert calc._divergence_for(zs, None, live=False) is None
+
+
+# P5d: 转折型背驰（进入段 a 趋势背驰）
+def _turn_zs():
+    """转折型中枢:进入段 down、离开段 up(异向)。"""
+    entry = _seg(10, "down", 10, 6)                  # 进入段 a (down)
+    body = [_seg(11, "up", 6, 9), _seg(12, "down", 9, 6), _seg(13, "up", 6, 9)]
+    zs = _make_zs(entry, body, 6, 9)
+    zs.end = _seg(14, "up", 6, 12)                    # 离开段 c (up,异向 a)
+    return zs, entry
+
+
+def _prev_zs(end_seg):
+    """前中枢,离开段 = end_seg。"""
+    prev = _make_zs(_seg(0, "up", 3, 6),
+                    [_seg(1, "down", 6, 3), _seg(2, "up", 3, 6), _seg(3, "down", 6, 3)], 3, 6)
+    prev.end = end_seg
+    return prev
+
+
+def test_divergence_turn_with_prev_same_dir_judges_entry():
+    """转折型 + 前中枢同向(down)离开段 → 判进入段 a 趋势背驰(leave_seg=a,compare=prev.end,kind=qs)。"""
+    zs, entry = _turn_zs()
+    prev = _prev_zs(_seg(4, "down", 6, 2))            # 前离开段 down,同向 entry(down)
+    calc = zs_branch.ZsBranchCalculator(ld_provider=lambda s, e: _ld(1, 1, 1, 1), frequency="1m")
+    dv = calc._divergence_for(zs, prev, live=False)
+    assert dv is not None
+    assert dv.leave_seg is entry                      # 背驰段 = 进入段 a
+    assert dv.compare_seg is prev.end                 # 比较段 = 前中枢同向离开段
+    assert dv.kind == "qs"                            # 转折=趋势背驰
+    assert isinstance(dv.is_beichi, bool)
+
+
+def test_divergence_turn_no_prev_none():
+    """转折型 + 无前驱 → None(守卫 prev_zs None)。"""
+    zs, _ = _turn_zs()
+    calc = zs_branch.ZsBranchCalculator(ld_provider=lambda s, e: _ld(1, 1, 1, 1))
+    assert calc._divergence_for(zs, None, live=False) is None
+
+
+def test_divergence_turn_prev_opposite_none():
+    """转折型 + 前中枢离开段异向(up,与进入段 down 反向) → None。"""
+    zs, _ = _turn_zs()
+    prev = _prev_zs(_seg(4, "up", 2, 6))              # 前离开段 up,异向 entry(down)
+    calc = zs_branch.ZsBranchCalculator(ld_provider=lambda s, e: _ld(1, 1, 1, 1))
+    assert calc._divergence_for(zs, prev, live=False) is None
+
+
+def test_divergence_turn_self_compare_none():
+    """转折型 + 前中枢离开段恰是本进入段(自比) → None。"""
+    zs, entry = _turn_zs()
+    prev = _prev_zs(entry)                            # prev.end is entry(自比)
+    calc = zs_branch.ZsBranchCalculator(ld_provider=lambda s, e: _ld(1, 1, 1, 1))
+    assert calc._divergence_for(zs, prev, live=False) is None
 
 
 # ===========================================================================

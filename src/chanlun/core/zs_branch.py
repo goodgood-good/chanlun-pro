@@ -289,8 +289,17 @@ class ZsBranchCalculator:
         if (a is None or a.start is None or a.end is None
                 or c is None or c.start is None or c.end is None):
             return None
-        if a.type != c.type:                          # 异向不可比力度
-            return None
+        if a.type != c.type:                          # 转折型(进入/离开异向=趋势转折点)
+            # 转折前趋势的背驰:前中枢同向离开段 vs 本中枢进入段 a(转折前趋势最后段)
+            b = prev_zs.end if prev_zs is not None else None
+            if (b is None or b is a or b.type != a.type
+                    or b.start is None or b.end is None):
+                return None                            # 无前驱/自比/异向/缺端点 → 不判
+            bc = is_beichi(b, a, self.ld_provider, self.frequency)
+            return DivergenceResult(
+                is_beichi=bc, kind="qs",               # 转折=趋势背驰
+                compare_seg=b, leave_seg=a, provisional=live,  # 背驰段=进入段 a
+            )
         kind = "qs" if self._is_trend(prev_zs, zs, c) else "pz"
         bc = is_beichi(a, c, self.ld_provider, self.frequency)
         return DivergenceResult(
