@@ -404,6 +404,50 @@ class CL(ICL):
             self.frequency,
         )
 
+    # ===== 新核心 8 模块 lazy 接入(并存,不动旧版/process_klines/golden) =====
+    def get_recursive_branch_levels(self):
+        """新核心:recursive_branch 多级递归(中枢+内联背驰+走势类型,P1-P4)。
+
+        与旧 get_recursive_levels(RecursiveCalculator)并存独立——本方法走重做的
+        zs_branch/zslx_branch/recursive_branch 链路,默认 ZGD(合原文「≥2 依次同向中枢」)。
+        lazy 现算、不接 process_klines。返回 List[recursive_branch.LevelResult]。
+        """
+        from chanlun.core.recursive_branch import RecursiveBranchCalculator
+        ld = lambda s, e: query_macd_ld(self, s, e)
+        wzgx = self.config.get('zs_wzgx', Config.ZS_WZGX_ZGD.value)
+        return RecursiveBranchCalculator().calculate(
+            self.xd_calculator.xds, ld, wzgx, self.frequency,
+        )
+
+    def get_branch_bspoints(self):
+        """新核心:一/二/三类买卖点(全多级,P5a-d)。lazy 并存。返回 List[BuySellPoint]。
+
+        L0 一三类(bs_branch 单级)+ 二类(bs2 跨级)+ L1+ 扩张三买(bs3,过滤 L0 去重)。
+        一类多级(L1+ 背驰一类)留后。
+        """
+        from chanlun.core.zs_branch import ZsBranchResult
+        from chanlun.core.bs_branch import BsBranchCalculator
+        from chanlun.core.bs2_branch import Bs2BranchCalculator
+        from chanlun.core.bs3_branch import Bs3BranchCalculator
+        levels = self.get_recursive_branch_levels()
+        if not levels:
+            return []
+        l0 = levels[0]
+        zr0 = ZsBranchResult(done_zss=l0.zss, live=[], freeze_idx=0,
+                             done_divergence=l0.done_divergence)
+        pts = list(BsBranchCalculator().calculate(zr0, l0.units))          # L0 一三类
+        pts += Bs2BranchCalculator().calculate(levels)                     # 二类(跨级)
+        pts += [p for p in Bs3BranchCalculator().calculate(levels)
+                if p.level is not None and p.level >= 1]                   # L1+ 扩张三买(不重 L0)
+        return pts
+
+    def get_branch_interval_nest(self):
+        """新核心:区间套可操作性(P6,自顶向下 READ)。lazy 并存。返回 List[NestRead]。"""
+        from chanlun.core.beichi_nest import BeichiNestCalculator
+        from chanlun.core.interval_nest import IntervalNestCalculator
+        forest = BeichiNestCalculator().calculate(self.get_recursive_branch_levels())
+        return IntervalNestCalculator().calculate(forest)
+
     def get_last_bi_zs(self) -> Union[ZS, None]:
         """返回最后的笔中枢
 
