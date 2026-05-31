@@ -38,3 +38,18 @@ def test_branch_bspoints_no_crash_when_few_segments(cl_with_synthetic_klines):
     cd = cl_with_synthetic_klines(30, multi_freq=False)   # 少 K 线 → 少线段
     assert isinstance(cd.get_branch_bspoints(), list)     # 可能空,但不抛
     assert isinstance(cd.get_branch_interval_nest(), list)
+
+
+def test_chart_use_branch_core_switch(cl_with_synthetic_klines):
+    """图表对接:chart_use_branch_core 开关——开→买卖点用新核心(bs_type 文本),关→旧链路(升前缀)。"""
+    from chanlun.cl_utils import cl_data_to_tv_chart
+    cd = cl_with_synthetic_klines(1500, multi_freq=True, trend="up")
+    base = dict(cd.config)
+    base["chart_show_recursive_levels"] = "1"
+    old = cl_data_to_tv_chart(cd, {**base, "chart_use_branch_core": "0"})
+    new = cl_data_to_tv_chart(cd, {**base, "chart_use_branch_core": "1"})
+    bs_set = {"1buy", "1sell", "3buy", "3sell", "2buy", "2sell"}
+    new_bs = [m["text"] for m in new["xd_mmds"] if m.get("text") in bs_set]
+    old_bs = [m["text"] for m in old["xd_mmds"] if m.get("text") in bs_set]
+    assert new_bs                                         # 开关开:新核心买卖点(bs_type)进图表
+    assert not old_bs                                     # 开关关:旧链路用「升」前缀,无 bs_type 文本

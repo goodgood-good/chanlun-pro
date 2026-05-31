@@ -459,6 +459,7 @@ def query_cl_chart_config(
         "chart_show_zs_expanded": "0",       # 扩展中枢加粗框
         "chart_show_xd_zslx": "0",           # 当前级别走势类型线段/区间
         "chart_show_recursive_levels": "0",  # 递归层级 L1+ 中枢与走势类型
+        "chart_use_branch_core": "0",        # 1=递归层级/买卖点改用新核心(8模块)而非旧链路
         "chart_show_interval_nest": "0",     # 区间套链 + 精确转折点
         "chart_show_ma": "0",
         "chart_show_boll": "0",
@@ -966,7 +967,10 @@ def cl_data_to_tv_chart(
     levels = []  # 供下方「中枢升级买卖点」复用(避免重复 get_recursive_levels)
     if config.get("chart_show_recursive_levels", "1") == "1":
         try:
-            levels = cd.get_recursive_levels() or []
+            if config.get("chart_use_branch_core", "0") == "1":
+                levels = cd.get_recursive_branch_levels() or []   # 新核心 8 模块
+            else:
+                levels = cd.get_recursive_levels() or []          # 旧链路(默认)
         except Exception:
             levels = []
         for lv in levels:
@@ -1136,27 +1140,42 @@ def cl_data_to_tv_chart(
     # 合并进 xd_mmds、文本加「升」前缀以便在图上识别。升级是否出现取决于数据是否具备
     # 更高级别结构——低结构标的可能升不出级别(原文-一致)。
     if config.get("chart_show_recursive_levels", "1") == "1" and levels:
-        from chanlun.core.bs_point_calculator import BsPointCalculator
-        for _lv in levels:
-            _units = list(cd.get_xds()) if _lv.level == 0 else levels[_lv.level - 1].zslxs
-            _zt = f"L{_lv.level}"
+        if config.get("chart_use_branch_core", "0") == "1":
+            # 新核心 8 模块:get_branch_bspoints 直接产 BuySellPoint(一/二/三类全多级)
             try:
-                BsPointCalculator(cd, zs_type=_zt).calculate(_units, _lv.zss)
+                for _p in cd.get_branch_bspoints():
+                    xd_mmd_chart_data.append({
+                        "points": {
+                            "time": fun.datetime_to_int(_p.anchor_fx.k.date),
+                            "price": _p.anchor_fx.val,
+                        },
+                        "text": _p.bs_type,
+                        "level": "xd",
+                    })
             except Exception:
-                continue
-            for _u in _units:
-                for _m in _u.zs_type_mmds.get(_zt, []):
-                    try:
-                        xd_mmd_chart_data.append({
-                            "points": {
-                                "time": fun.datetime_to_int(_u.end.k.date),
-                                "price": _u.end.val,
-                            },
-                            "text": "升" + mmd_type_map.get(_m.name, _m.name),
-                            "level": "xd",
-                        })
-                    except Exception:
-                        continue
+                pass
+        else:
+            from chanlun.core.bs_point_calculator import BsPointCalculator
+            for _lv in levels:
+                _units = list(cd.get_xds()) if _lv.level == 0 else levels[_lv.level - 1].zslxs
+                _zt = f"L{_lv.level}"
+                try:
+                    BsPointCalculator(cd, zs_type=_zt).calculate(_units, _lv.zss)
+                except Exception:
+                    continue
+                for _u in _units:
+                    for _m in _u.zs_type_mmds.get(_zt, []):
+                        try:
+                            xd_mmd_chart_data.append({
+                                "points": {
+                                    "time": fun.datetime_to_int(_u.end.k.date),
+                                    "price": _u.end.val,
+                                },
+                                "text": "升" + mmd_type_map.get(_m.name, _m.name),
+                                "level": "xd",
+                            })
+                        except Exception:
+                            continue
 
     fx_data.sort(key=lambda v: v["points"][0]["time"], reverse=False)
     bi_chart_data.sort(key=lambda v: v["points"][0]["time"], reverse=False)
