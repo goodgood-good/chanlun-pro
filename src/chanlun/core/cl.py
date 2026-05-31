@@ -415,8 +415,11 @@ class CL(ICL):
         from chanlun.core.recursive_branch import RecursiveBranchCalculator
         ld = lambda s, e: query_macd_ld(self, s, e)
         wzgx = self.config.get('zs_wzgx', Config.ZS_WZGX_ZGD.value)
+        # L0 输入用笔(bis):线段在 1m 标的上极稀疏(4338K→仅 7 线段→1 中枢/0 买卖点),
+        # 笔(98)才能跑出图表可见的中枢/买卖点结构。取实用(图表要看到内容)而非宪法
+        # 「L0=线段」纯粹——笔中枢本是 1m 图常用细粒度结构(CL 亦有 get_bi_zss 笔中枢层)。
         return RecursiveBranchCalculator().calculate(
-            self.xd_calculator.xds, ld, wzgx, self.frequency,
+            list(self.get_bis()), ld, wzgx, self.frequency,
         )
 
     def get_branch_bspoints(self):
