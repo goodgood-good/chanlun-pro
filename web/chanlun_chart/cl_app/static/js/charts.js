@@ -972,7 +972,8 @@ class ChartManager {
                 // 中枢级别列表(P8):由 recursive_levels 实际层级驱动。
                 // L0 = 本周期线段中枢(保留 zs_xd 键,兼容旧用户配置);
                 // L1/L2/L3 = 扩展高级别中枢,键 zs_L1/zs_L2/zs_L3,标签从 FREQ_CHAIN 取。
-                const _recMaxLevel = Math.max(0, ...((barsResult && barsResult.recursive_levels) || []).map(lv => (lv && lv.level != null) ? lv.level : 0));
+                // 菜单作用域无 barsResult；读 drawChartElements 缓存到实例的最大级别(默认 0=仅 L0,数据未到时)。
+                const _recMaxLevel = self._recMaxLevel || 0;
                 const _zsLevels = [{ label: _chain[0] + '级别', key: 'zs_xd' }];
                 for (let i = 1; i <= _recMaxLevel; i++) {
                     _zsLevels.push({ label: (_chain[i] || ('L' + i)) + '级别', key: 'zs_L' + i });
@@ -1572,6 +1573,8 @@ class ChartManager {
     drawChartElements(chartData, currentInterval) {
         const { symbolKey, barsResult, from } = chartData;
         if (!barsResult) return;
+        // 缓存递归层级最大 level，供「缠论显示设置」菜单动态生成级别开关(菜单 click 作用域无 barsResult)
+        this._recMaxLevel = Math.max(0, ...((barsResult.recursive_levels) || []).map(lv => (lv && lv.level != null) ? lv.level : 0));
         this.initChartContainer(symbolKey);
 
         clog("[DataVerify][Charts] drawChartElements interval=" + currentInterval, {
