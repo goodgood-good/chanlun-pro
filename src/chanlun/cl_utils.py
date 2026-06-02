@@ -751,6 +751,34 @@ def prices_jiaodu(prices):
     return j if prices[-1] > prices[0] else -j
 
 
+def zs_to_chart_dict(zs, use_envelope: bool = False) -> dict:
+    """把 ZS 中枢序列化为前端图表 dict(core/web 共享,多周期叠加复用)。
+
+    - points: 默认中枢核心区 [ZD,ZG]; use_envelope=True 用 [DD,GG] 包络
+      (递归 L≥1 高级中枢 / 扩展中枢 / 多周期叠加需表达「瞬间波动」)。
+    - linestyle: done→"0"(实线) / 未完成→"1"(虚线)。
+    - type: 中枢方向(up/down/zd); is_expanded/sub_count: 扩展中枢标记。
+    """
+    hi = zs.gg if use_envelope else zs.zg
+    lo = zs.dd if use_envelope else zs.zd
+    return {
+        "points": [
+            {
+                "time": fun.datetime_to_int(zs.start.end.k.date) if zs.start else fun.datetime_to_int(zs.lines[0].start.k.date),
+                "price": hi,
+            },
+            {
+                "time": fun.datetime_to_int(zs.end.start.k.date) if zs.end else fun.datetime_to_int(zs.lines[-1].end.k.date),
+                "price": lo,
+            },
+        ],
+        "linestyle": "0" if zs.done else "1",
+        "type": zs.type,
+        "is_expanded": bool(getattr(zs, "expanded_with", [])),
+        "sub_count": len(getattr(zs, "expanded_with", []) or []),
+    }
+
+
 def cl_data_to_tv_chart(
     cd: ICL, config: dict, to_frequency: str = None
 ) -> Union[dict, None]:
@@ -854,32 +882,7 @@ def cl_data_to_tv_chart(
             )
 
     def _zs_to_chart(zs, use_envelope: bool = False) -> dict:
-        """把 ZS 对象序列化为前端图表用的 dict。
-
-        - ``points``: 默认中枢核心区 [ZD,ZG],``use_envelope=True`` 时用 [DD,GG]
-          延伸包络(适用于递归 L≥1 高级中枢、扩展中枢等需要表达「瞬间波动」)。
-        - ``type``: 中枢方向(``up``/``down`` 趋势中枢 / ``zd`` 震荡中枢) ——
-          由 ZslxCalculator 在 ③ 走势类型划分时回填,供前端着色区分。
-        - ``is_expanded`` + ``sub_count``: ⑤ 扩展中枢标记,前端可加粗框区分。
-        """
-        hi = zs.gg if use_envelope else zs.zg
-        lo = zs.dd if use_envelope else zs.zd
-        return {
-            "points": [
-                {
-                    "time": fun.datetime_to_int(zs.start.end.k.date) if zs.start else fun.datetime_to_int(zs.lines[0].start.k.date),
-                    "price": hi,
-                },
-                {
-                    "time": fun.datetime_to_int(zs.end.start.k.date) if zs.end else fun.datetime_to_int(zs.lines[-1].end.k.date),
-                    "price": lo,
-                },
-            ],
-            "linestyle": "0" if zs.done else "1",
-            "type": zs.type,
-            "is_expanded": bool(getattr(zs, "expanded_with", [])),
-            "sub_count": len(getattr(zs, "expanded_with", []) or []),
-        }
+        return zs_to_chart_dict(zs, use_envelope)
 
     def _zslx_line_points(zslx) -> list:
         """走势类型的折线端点:用其真实起止分型,而不是中枢矩形边界。"""
