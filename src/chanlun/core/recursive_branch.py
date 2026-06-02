@@ -79,8 +79,10 @@ def _apply_expansion_overlay(results: List[LevelResult]) -> None:
             break
         nxt = by_level.get(k + 1)
         if nxt is None:
+            # overlay 级无「输入段序列」(非经 zs_branch 算出)，units=[] 与 zslxs=[] 一致；
+            # 不放子中枢——units 语义是输入段(P5c 回试定位)，放 ZS 会成类型陷阱。
             nxt = LevelResult(level=k + 1, zss=[], done_divergence=[],
-                              zslxs=[], upgrade_idx=[], units=list(cur.zss))
+                              zslxs=[], upgrade_idx=[], units=[])
             results.append(nxt)
             by_level[k + 1] = nxt
         # 并入(去重：trend 在 L≥1 多数为空，首版直接 append 扩展产物)
