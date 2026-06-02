@@ -969,14 +969,13 @@ class ChartManager {
                 const _chain = FREQ_CHAIN[_curInterval] || [_curInterval, "高一级", "高二级", "高三级"];
                 const _lbl = (i) => _chain[i] || `L+${i}`;
 
-                // 中枢级别列表(按周期):本周期线段中枢 + 各高周期到 30m(与后端 higher_zs 对齐)。
-                // 元素 {label, key}:本周期级别=线段中枢(zs_xd);高周期级别=higher_zs_<period> 各自独立开关。
+                // 中枢级别列表(P8):由 recursive_levels 实际层级驱动。
+                // L0 = 本周期线段中枢(保留 zs_xd 键,兼容旧用户配置);
+                // L1/L2/L3 = 扩展高级别中枢,键 zs_L1/zs_L2/zs_L3,标签从 FREQ_CHAIN 取。
+                const _recMaxLevel = Math.max(0, ...((barsResult && barsResult.recursive_levels) || []).map(lv => lv && lv.level || 0));
                 const _zsLevels = [{ label: _chain[0] + '级别', key: 'zs_xd' }];
-                const _t30 = _chain.indexOf('30m');
-                if (_t30 > 0) {
-                    for (let i = 1; i <= _t30; i++) {
-                        _zsLevels.push({ label: _chain[i] + '级别', key: 'higher_zs_' + _chain[i] });
-                    }
+                for (let i = 1; i <= _recMaxLevel; i++) {
+                    _zsLevels.push({ label: (_chain[i] || ('L' + i)) + '级别', key: 'zs_L' + i });
                 }
 
                 // 重组后的菜单:按「功能分组」组织 + 顶部级别映射默认折叠 +
@@ -1094,7 +1093,7 @@ class ChartManager {
                     'fx', 'bi', 'xd', 'bc', 'mmd',
                     // 买卖点/背驰 笔段独立开关 + 笔中枢(观察)
                     'zs_bi', 'mmd_bi', 'mmd_xd', 'bc_bi', 'bc_xd',
-                    // 中枢按周期级别:zs_xd(本周期线段中枢) + higher_zs_<period>(各高周期级别),随周期动态
+                    // 中枢按周期级别:zs_xd(L0本周期线段中枢) + zs_L1/zs_L2/zs_L3(P8扩展高级别),随数据动态
                     ..._zsLevels.map((L) => L.key),
                 ];
                 keys.forEach(k => {
@@ -1612,41 +1611,36 @@ class ChartManager {
         // 笔中枢 / 线段中枢现按独立开关(zs_bi / zs_xd)分别控制显隐。
         this.reconcile('bi_zss', cfg.zs_bi ? barsResult.bi_zss : [], from, symbolKey, (item) => safeCreate(wrapZs(getDynamicColor(currentInterval, "bi_zss"), 1)(item), 'bi_zs'), false);
         this.reconcile('xd_zss', cfg.zs_xd ? barsResult.xd_zss : [], from, symbolKey, (item) => safeCreate(wrapZs(getDynamicColor(currentInterval, "xd_zss"), 2)(item), 'xd_zs'), false);
-        // 新核心递归层级中枢(recursive_levels):后端按级别给 [{level, zss, zslxs, ...}]。
-        // 旧 bi_zss/xd_zss 后端默认关闭(2026-05 清场态),重做后的多级中枢全在此画出。
-        // 各级 zss 扁平化(附 _level)后用单 reconcile —— 单 key 增量天然正确;
-        // 按级别选色/线宽:L0(笔中枢)细框,L1+(高级别中枢)粗框。
-        // 线段中枢 = 递归 L0 = 本周期级别(「{周期}级别」按钮 zs_xd)。L1+(单周期升级)实测
-        // 恒空、不展示;更高级别统一走高周期叠加(higher_zss)。笔中枢走 bi_zss(zs_bi)。
+        // 新核心递归层级中枢(recursive_levels, P8):后端按级别给 [{level, zss, zslxs, ...}]。
+        // L0=本周期线段中枢(开关 zs_xd), L1/L2/L3=扩展高级别中枢(开关 zs_L1/zs_L2/zs_L3)。
+        // 各级 zss 扁平化(附 _level)后用单 reconcile;按级别选色/线宽。
         const recZss = [];
         for (const lvObj of (barsResult.recursive_levels || [])) {
             if (!lvObj || !Array.isArray(lvObj.zss)) continue;
-            if ((lvObj.level || 0) !== 0) continue;     // 只画 L0 线段中枢(本周期级别)
-            if (cfg.zs_xd === false) continue;
-            for (const zs of lvObj.zss) recZss.push({ ...zs, _level: 0 });
+            const lvl = lvObj.level || 0;
+            const toggleKey = lvl === 0 ? 'zs_xd' : 'zs_L' + lvl;
+            if (cfg[toggleKey] === false) continue;
+            for (const zs of lvObj.zss) recZss.push({ ...zs, _level: lvl });
         }
         this.reconcile('recursive_zss', recZss, from, symbolKey, (item) => {
             const lvl = item._level || 0;
             const color = RECURSIVE_LEVEL_COLORS[lvl % RECURSIVE_LEVEL_COLORS.length];
             return safeCreate(wrapZs(color, lvl === 0 ? 1 : 2)(item), 'rec_zs');
-        }, false);
-        // 多周期中枢叠加(higher_zs):后端按高周期给 [{period, level_name, zss}]。
-        // 低周期图(1m/5m)叠加真实高周期(5m/30m)的 L1 线段中枢。扁平化(附 _gi 组序)后
-        // 单 reconcile,按高周期序选色(冷色系,与递归中枢区分)。
-        // 高周期级别中枢(higher_zs):后端按高周期给 [{period, level_name, zss}]=该周期线段中枢。
-        // 按 period 独立开关 higher_zs_<period>(对应菜单「{周期}级别」勾选框),冷色系区分。
-        const higherZss = [];
-        (barsResult.higher_zs || []).forEach((grp, gi) => {
-            if (!grp || !Array.isArray(grp.zss)) return;
-            if (cfg['higher_zs_' + grp.period] === false) return;   // 该周期级别开关关→不画
-            grp.zss.forEach(zs => higherZss.push({ ...zs, _gi: gi }));
-        });
-        // includeOverlaps=true:高周期中枢跨度大,起点常在可视窗口左侧外,需"终点在
-        // 窗口内即画"(全局视角),否则滚到右侧时高级别中枢会被窗口过滤掉、看不到。
-        this.reconcile('higher_zss', higherZss, from, symbolKey, (item) => {
-            const color = HIGHER_ZS_COLORS[(item._gi || 0) % HIGHER_ZS_COLORS.length];
-            return safeCreate(wrapZs(color, 2)(item), 'higher_zs');
         }, false, true);
+        // P7 higher_zs 已停用(后端不再产出)。保留空路径防旧 cache 残留数据报错。
+        if (barsResult.higher_zs && barsResult.higher_zs.length) {
+            const higherZss = [];
+            (barsResult.higher_zs || []).forEach((grp, gi) => {
+                if (!grp || !Array.isArray(grp.zss)) return;
+                grp.zss.forEach(zs => higherZss.push({ ...zs, _gi: gi }));
+            });
+            this.reconcile('higher_zss', higherZss, from, symbolKey, (item) => {
+                const color = HIGHER_ZS_COLORS[(item._gi || 0) % HIGHER_ZS_COLORS.length];
+                return safeCreate(wrapZs(color, 2)(item), 'higher_zs');
+            }, false, true);
+        } else {
+            this.reconcile('higher_zss', [], from, symbolKey, (item) => item, false, true);
+        }
         // 背驰/买卖点 —— 拆分版优先(笔/段独立 reconcile + 不同样式 + 独立 toggle);
         // 后端 ``bi_mmds``/``xd_mmds``/``bi_bcs``/``xd_bcs`` 拿不到时,fallback
         // 到合并版 ``bcs``/``mmds``(向后兼容旧 web/老 cache 命中场景)。

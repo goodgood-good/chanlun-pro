@@ -85,7 +85,9 @@ def _stable_hash(obj) -> str:
 # - v7 (2026-06) ── 级别纠正(递归 L0=线段中枢 / 笔中枢走 bi_zss 观察层 / 多周期
 #   higher_zs)+ 中枢区间改用核心区 [ZD,ZG]。均改 chart_data 内容但不进 config,
 #   bump 强制旧磁盘缓存失效重算,否则用户看不到这些改动。
-_CHART_CACHE_SCHEMA_VERSION = "v7"
+# - v8 (2026-06) ── P8 中枢扩展实体化:高级别中枢改由 recursive_levels L1/L2/L3 承载,
+#   P7 higher_zs 停用;图表渲染逻辑随之更新,旧 cache 需强制失效。
+_CHART_CACHE_SCHEMA_VERSION = "v8"
 
 
 def _build_cache_key(market: str, code: str, frequency: str, cl_config: dict) -> str:
