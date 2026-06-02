@@ -928,6 +928,7 @@ def tv_history():
             "xd_zslx": cl_chart_data.get("xd_zslx", []),
             "xd_zslx_lines": cl_chart_data.get("xd_zslx_lines", []),
             "recursive_levels": cl_chart_data.get("recursive_levels", []),
+            "higher_zs": cl_chart_data.get("higher_zs", []),
             "interval_nest": cl_chart_data.get("interval_nest"),
             "update": False if firstDataRequest == "true" else True,
         }

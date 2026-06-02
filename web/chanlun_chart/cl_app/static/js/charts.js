@@ -1623,10 +1623,12 @@ class ChartManager {
             if (!grp || !Array.isArray(grp.zss)) return;
             grp.zss.forEach(zs => higherZss.push({ ...zs, _gi: gi }));
         });
+        // includeOverlaps=true:高周期中枢跨度大,起点常在可视窗口左侧外,需"终点在
+        // 窗口内即画"(全局视角),否则滚到右侧时高级别中枢会被窗口过滤掉、看不到。
         this.reconcile('higher_zss', (cfg.higher_zs !== false) ? higherZss : [], from, symbolKey, (item) => {
             const color = HIGHER_ZS_COLORS[(item._gi || 0) % HIGHER_ZS_COLORS.length];
             return safeCreate(wrapZs(color, 2)(item), 'higher_zs');
-        }, false);
+        }, false, true);
         // 背驰/买卖点 —— 拆分版优先(笔/段独立 reconcile + 不同样式 + 独立 toggle);
         // 后端 ``bi_mmds``/``xd_mmds``/``bi_bcs``/``xd_bcs`` 拿不到时,fallback
         // 到合并版 ``bcs``/``mmds``(向后兼容旧 web/老 cache 命中场景)。
