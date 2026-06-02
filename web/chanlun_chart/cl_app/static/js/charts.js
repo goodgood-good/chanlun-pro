@@ -1604,14 +1604,13 @@ class ChartManager {
         // 旧 bi_zss/xd_zss 后端默认关闭(2026-05 清场态),重做后的多级中枢全在此画出。
         // 各级 zss 扁平化(附 _level)后用单 reconcile —— 单 key 增量天然正确;
         // 按级别选色/线宽:L0(笔中枢)细框,L1+(高级别中枢)粗框。
-        // 递归中枢按级别绑到对应开关:L0=笔中枢(zs_bi)、L1=线段中枢(zs_xd)、L2+=递归中枢(zs_recursive)。
-        // 让「笔中枢/线段中枢」按钮分别控制新核心最低两级(旧 bi_zss/xd_zss 后端清场已产空、是死开关)。
+        // 递归主链 L0=线段中枢→「线段中枢」按钮(zs_xd)、L1+=升级→「递归中枢」按钮(zs_recursive)。
+        // 笔中枢是更小的观察级别,走 bi_zss 字段、由「笔中枢」按钮(zs_bi)单独控制(见上方 bi_zss)。
         const recZss = [];
         for (const lvObj of (barsResult.recursive_levels || [])) {
             if (!lvObj || !Array.isArray(lvObj.zss)) continue;
             const lvl = lvObj.level || 0;
-            const showLvl = lvl === 0 ? (cfg.zs_bi !== false)
-                          : lvl === 1 ? (cfg.zs_xd !== false)
+            const showLvl = lvl === 0 ? (cfg.zs_xd !== false)
                           : (cfg.zs_recursive !== false);
             if (!showLvl) continue;
             for (const zs of lvObj.zss) recZss.push({ ...zs, _level: lvl });

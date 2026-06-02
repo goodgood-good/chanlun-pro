@@ -415,12 +415,26 @@ class CL(ICL):
         from chanlun.core.recursive_branch import RecursiveBranchCalculator
         ld = lambda s, e: query_macd_ld(self, s, e)
         wzgx = self.config.get('zs_wzgx', Config.ZS_WZGX_ZGD.value)
-        # L0 输入用笔(bis):线段在 1m 标的上极稀疏(4338K→仅 7 线段→1 中枢/0 买卖点),
-        # 笔(98)才能跑出图表可见的中枢/买卖点结构。取实用(图表要看到内容)而非宪法
-        # 「L0=线段」纯粹——笔中枢本是 1m 图常用细粒度结构(CL 亦有 get_bi_zss 笔中枢层)。
+        # L0 输入用线段(xds):线段中枢是缠论最低正式级别中枢(宪法 L0=线段),升级链由此起。
+        # 笔中枢是更小的观察级别、不参与升级,单独走 get_bi_zhongshu。
+        # (1m 标的线段稀疏→线段中枢少,但缠论正确;丰富的笔中枢另在观察层显示。)
         return RecursiveBranchCalculator().calculate(
-            list(self.get_bis()), ld, wzgx, self.frequency,
+            list(self.get_xds()), ld, wzgx, self.frequency,
         )
+
+    def get_bi_zhongshu(self):
+        """笔中枢:新核心 zs_branch 直接在笔(bis)上找的中枢。
+
+        缠论里笔中枢是比线段中枢更小的「观察级别」,不参与升级链(升级从线段中枢起,
+        见 get_recursive_branch_levels L0=线段)。返回 List[ZS]。
+        """
+        from chanlun.core.zs_branch import ZsBranchCalculator
+        ld = lambda s, e: query_macd_ld(self, s, e)
+        wzgx = self.config.get('zs_wzgx', Config.ZS_WZGX_ZGD.value)
+        res = ZsBranchCalculator(
+            ld_provider=ld, frequency=self.frequency, wzgx=wzgx, min_zs_lines=4,
+        ).calculate(list(self.get_bis()))
+        return res.done_zss
 
     def get_branch_bspoints(self):
         """新核心:一/二/三类买卖点(全多级,P5a-d)。lazy 并存。返回 List[BuySellPoint]。
@@ -428,11 +442,18 @@ class CL(ICL):
         L0 一三类(bs_branch 单级)+ 二类(bs2 跨级)+ L1+ 扩张三买(bs3,过滤 L0 去重)。
         一类多级(L1+ 背驰一类)留后。
         """
+        from chanlun.core.recursive_branch import RecursiveBranchCalculator
         from chanlun.core.zs_branch import ZsBranchResult
         from chanlun.core.bs_branch import BsBranchCalculator
         from chanlun.core.bs2_branch import Bs2BranchCalculator
         from chanlun.core.bs3_branch import Bs3BranchCalculator
-        levels = self.get_recursive_branch_levels()
+        # 买卖点走笔级递归(细粒度操作信号,保持用户习惯);中枢显示的线段级见
+        # get_recursive_branch_levels。线段中枢稀疏→线段级买卖点很少,笔级更实用。
+        ld = lambda s, e: query_macd_ld(self, s, e)
+        wzgx = self.config.get('zs_wzgx', Config.ZS_WZGX_ZGD.value)
+        levels = RecursiveBranchCalculator().calculate(
+            list(self.get_bis()), ld, wzgx, self.frequency,
+        )
         if not levels:
             return []
         l0 = levels[0]

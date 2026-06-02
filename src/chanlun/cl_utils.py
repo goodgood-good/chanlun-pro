@@ -942,8 +942,12 @@ def cl_data_to_tv_chart(
             **_zslx_meta(zslx, level),
         }
 
+    # 笔中枢:新核心 zs_branch(bis) 观察层(get_bi_zhongshu)。前端「笔中枢」按钮(zs_bi)
+    # 控制显示。不再走旧链路 get_bi_zss(清场已弃),也不门控 chart_show_bi_zs(改前端控制)。
     bi_zs_chart_data = []
-    if config["chart_show_bi_zs"] == "1":
+    if config.get("chart_use_branch_core", "0") == "1":
+        bi_zs_chart_data = [_zs_to_chart(zs) for zs in cd.get_bi_zhongshu()]
+    elif config["chart_show_bi_zs"] == "1":
         for zs_type in config["zs_bi_type"]:
             for zs in cd.get_bi_zss(zs_type):
                 bi_zs_chart_data.append(_zs_to_chart(zs))

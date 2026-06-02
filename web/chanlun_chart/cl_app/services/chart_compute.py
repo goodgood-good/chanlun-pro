@@ -670,10 +670,12 @@ def _higher_zs_for_period(market: str, code: str, hf: str, cl_config: dict) -> l
             return []
         cd = web_batch_get_cl_datas(market, code, {hf: klines}, cl_config)[0]
         levels = cd.get_recursive_branch_levels() or []
-        l1 = next((lv for lv in levels if lv.level == 1), None)
-        if l1 is None:
+        # 取 L0=线段中枢(新核心 L0=线段构建,是该周期最低正式级别中枢)。
+        # "5min 级别"= 5m 数据的线段中枢、"30min 级别"= 30m 的线段中枢。
+        l0 = next((lv for lv in levels if lv.level == 0), None)
+        if l0 is None:
             return []
-        return [zs_to_chart_dict(zs, use_envelope=True) for zs in l1.zss]
+        return [zs_to_chart_dict(zs, use_envelope=True) for zs in l0.zss]
     except Exception as e:
         LogUtil.error(f"[apply_higher_zs] period={hf} code={code} failed: {e}")
         return []
