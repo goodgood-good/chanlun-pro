@@ -283,7 +283,7 @@ def _merge_chart_data(existing_data: dict, new_data: dict):
 
     # 递归层级树 / 区间套 —— 嵌套结构,不走 shape 合并;新值有则覆盖,否则保留旧值。
     # 这两类是「全局视角」数据,通常在窗口移动时整体重算,直接 overwrite 安全。
-    for key in ("recursive_levels", "interval_nest"):
+    for key in ("recursive_levels", "interval_nest", "higher_zs"):
         if key in new_data:
             merged[key] = new_data[key]
         elif key in existing_data:
@@ -450,7 +450,7 @@ def slice_chart_data_to_window(chart_data: dict, from_ts: int, to_ts: int) -> di
         )
     # 递归层级树 / 区间套是嵌套结构(不在 SHAPE_FIELDS,不按窗口裁切),整体透传。
     # 高级中枢和区间套属「全局视角」,跨窗口仍应可见。
-    for field in ("recursive_levels", "interval_nest"):
+    for field in ("recursive_levels", "interval_nest", "higher_zs"):
         if field in chart_data:
             sliced[field] = chart_data[field]
     return sliced
@@ -488,7 +488,7 @@ def trim_future_bars(chart_data: dict, to_ts: int) -> dict:
     for field in _CHART_SHAPE_FIELDS:
         trimmed[field] = chart_data.get(field, []) or []
     # 递归层级树 / 区间套整体透传(同 _slice_window 决策)。
-    for field in ("recursive_levels", "interval_nest"):
+    for field in ("recursive_levels", "interval_nest", "higher_zs"):
         if field in chart_data:
             trimmed[field] = chart_data[field]
     return trimmed

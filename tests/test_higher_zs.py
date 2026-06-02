@@ -70,3 +70,13 @@ def test_higher_zs_for_period_real(monkeypatch):
     assert isinstance(zss, list)  # 可能空(数据不足 L1), 但不报错且结构正确
     for z in zss:
         assert "points" in z and "linestyle" in z
+
+
+def test_higher_zs_passthrough_slice_trim():
+    hz = [{"period": "5m", "level_name": "5min级别", "zss": []}]
+    cd = {"t": [100, 200, 300], "o": [1, 2, 3], "h": [1, 2, 3],
+          "l": [1, 2, 3], "c": [1, 2, 3], "v": [1, 2, 3], "higher_zs": hz}
+    sliced = CC.slice_chart_data_to_window(cd, 100, 300)
+    assert sliced["higher_zs"] == hz          # 整体透传, 不按窗口裁切
+    trimmed = CC.trim_future_bars(cd, 250)
+    assert trimmed["higher_zs"] == hz
