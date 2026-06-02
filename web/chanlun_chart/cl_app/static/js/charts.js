@@ -7,6 +7,7 @@ const CL_SHOW_DEFAULT = {
     fx: true, bi: true, xd: true, bc: true, mmd: true,
     // 中枢按级别独立 toggle(笔中枢 / 线段中枢 / 递归层级中枢),平级独立控制:
     zs_bi: true, zs_xd: true, zs_recursive: true,
+    higher_zs: true,
     // 买卖点/背驰按级别独立 toggle(笔层数量远多于段层、用户常需只看段层):
     mmd_bi: true, mmd_xd: true, bc_bi: true, bc_xd: true,
 };
@@ -120,6 +121,8 @@ const CHART_CONFIG = {
         "mmd_labels", "bi_mmd_labels", "xd_mmd_labels",
         // 新核心递归层级中枢:recursive_levels 各级 zss 扁平化为单容器
         "recursive_zss",
+        // 多周期中枢叠加(低周期图叠加的高周期线段中枢)
+        "higher_zss",
     ],
 };
 
@@ -149,6 +152,9 @@ const DEFAULT_COLORS = {
 // 新核心递归层级中枢按级别配色(L0 笔中枢→L1→L2…);级别越高框越粗(见 drawChartElements)。
 // 与旧 bi_zss/xd_zss(灰/蓝)区分,用暖色系突出"重做后的多级中枢"。超出长度按取模循环。
 const RECURSIVE_LEVEL_COLORS = ["#26A69A", "#EF5350", "#AB47BC", "#FF9800", "#42A5F5", "#EC407A"];
+
+// 多周期叠加中枢按"第几个高周期"配色(5min级别→[0]、30min级别→[1]…),冷色系区分递归中枢。
+const HIGHER_ZS_COLORS = ["#5C6BC0", "#00897B", "#7E57C2", "#3949AB"];
 
 // 着色规则(按「中枢的构成单元在当前周期的颜色」着色,直观区分笔/段):
 //   bis    = 当前周期笔色;
@@ -992,6 +998,7 @@ class ChartManager {
                             <label style="cursor:pointer;"><input type="checkbox" id="${cbId('zs_bi')}" ${cfg.zs_bi ? 'checked' : ''} style="margin-right:4px; vertical-align:middle;">笔中枢</label>
                             <label style="cursor:pointer;"><input type="checkbox" id="${cbId('zs_xd')}" ${cfg.zs_xd ? 'checked' : ''} style="margin-right:4px; vertical-align:middle;">线段中枢</label>
                             <label style="cursor:pointer;"><input type="checkbox" id="${cbId('zs_recursive')}" ${cfg.zs_recursive !== false ? 'checked' : ''} style="margin-right:4px; vertical-align:middle;">递归中枢</label>
+                            <label style="cursor:pointer;"><input type="checkbox" id="${cbId('higher_zs')}" ${cfg.higher_zs !== false ? 'checked' : ''} style="margin-right:4px; vertical-align:middle;">高周期中枢</label>
                         </div>
 
                         ${_grpTitle('买卖点')}
@@ -1081,6 +1088,8 @@ class ChartManager {
                     'zs_bi', 'zs_xd', 'mmd_bi', 'mmd_xd', 'bc_bi', 'bc_xd',
                     // 新核心递归层级中枢开关
                     'zs_recursive',
+                    // 多周期叠加中枢开关
+                    'higher_zs',
                 ];
                 keys.forEach(k => {
                     $('#' + cbId(k)).change(function () {
@@ -1605,6 +1614,18 @@ class ChartManager {
             const lvl = item._level || 0;
             const color = RECURSIVE_LEVEL_COLORS[lvl % RECURSIVE_LEVEL_COLORS.length];
             return safeCreate(wrapZs(color, lvl === 0 ? 1 : 2)(item), 'rec_zs');
+        }, false);
+        // 多周期中枢叠加(higher_zs):后端按高周期给 [{period, level_name, zss}]。
+        // 低周期图(1m/5m)叠加真实高周期(5m/30m)的 L1 线段中枢。扁平化(附 _gi 组序)后
+        // 单 reconcile,按高周期序选色(冷色系,与递归中枢区分)。
+        const higherZss = [];
+        (barsResult.higher_zs || []).forEach((grp, gi) => {
+            if (!grp || !Array.isArray(grp.zss)) return;
+            grp.zss.forEach(zs => higherZss.push({ ...zs, _gi: gi }));
+        });
+        this.reconcile('higher_zss', (cfg.higher_zs !== false) ? higherZss : [], from, symbolKey, (item) => {
+            const color = HIGHER_ZS_COLORS[(item._gi || 0) % HIGHER_ZS_COLORS.length];
+            return safeCreate(wrapZs(color, 2)(item), 'higher_zs');
         }, false);
         // 背驰/买卖点 —— 拆分版优先(笔/段独立 reconcile + 不同样式 + 独立 toggle);
         // 后端 ``bi_mmds``/``xd_mmds``/``bi_bcs``/``xd_bcs`` 拿不到时,fallback
