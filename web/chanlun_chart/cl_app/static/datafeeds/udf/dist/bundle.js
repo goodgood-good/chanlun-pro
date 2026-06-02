@@ -309,6 +309,7 @@
                         xd_zslx: response.xd_zslx || [],
                         xd_zslx_lines: response.xd_zslx_lines || [],
                         recursive_levels: response.recursive_levels || [],
+                        higher_zs: response.higher_zs || [],
                         interval_nest: response.interval_nest,
                         chart_color: response.chart_color,
                     });
@@ -409,6 +410,7 @@
                     obj_res.xd_zslx = updateLineSegments(obj_res.xd_zslx || [], response.xd_zslx || []);
                     obj_res.xd_zslx_lines = updateLineSegments(obj_res.xd_zslx_lines || [], response.xd_zslx_lines || []);
                     obj_res.recursive_levels = response.recursive_levels || [];
+                    obj_res.higher_zs = response.higher_zs || [];
                     obj_res.interval_nest = response.interval_nest;
                     obj_res.chart_color = response.chart_color;
                     const oldTimes = obj_res.times || [];
@@ -449,6 +451,7 @@
                 xd_zslx: response.xd_zslx || [],
                 xd_zslx_lines: response.xd_zslx_lines || [],
                 recursive_levels: response.recursive_levels || [],
+                higher_zs: response.higher_zs || [],
                 interval_nest: response.interval_nest,
                 chart_color: response.chart_color,
             };

@@ -54,6 +54,7 @@ interface HistoryFullDataResponse extends UdfOkResponse {
   xd_zslx?: LineSegment[];
   xd_zslx_lines?: LineSegment[];
   recursive_levels?: unknown[];
+  higher_zs?: unknown[];
   interval_nest?: unknown;
   update: boolean;
   chart_color?: Map<string, string>;
@@ -118,6 +119,7 @@ export interface GetBarsResult {
   xd_zslx?: LineSegment[];
   xd_zslx_lines?: LineSegment[];
   recursive_levels?: unknown[];
+  higher_zs?: unknown[];
   interval_nest?: unknown;
   chart_color?: Map<string, string>;
 }
@@ -464,6 +466,7 @@ export class HistoryProvider {
           xd_zslx: (response as HistoryFullDataResponse).xd_zslx || [],
           xd_zslx_lines: (response as HistoryFullDataResponse).xd_zslx_lines || [],
           recursive_levels: (response as HistoryFullDataResponse).recursive_levels || [],
+          higher_zs: (response as HistoryFullDataResponse).higher_zs || [],
           interval_nest: (response as HistoryFullDataResponse).interval_nest,
           chart_color: (response as HistoryFullDataResponse).chart_color,
         });
@@ -612,6 +615,7 @@ export class HistoryProvider {
           (response as HistoryFullDataResponse).xd_zslx_lines || []
         );
         obj_res.recursive_levels = (response as HistoryFullDataResponse).recursive_levels || [];
+        obj_res.higher_zs = (response as HistoryFullDataResponse).higher_zs || [];
         obj_res.interval_nest = (response as HistoryFullDataResponse).interval_nest;
         obj_res.chart_color = (response as HistoryFullDataResponse).chart_color;
 
@@ -656,6 +660,7 @@ export class HistoryProvider {
       xd_zslx: (response as HistoryFullDataResponse).xd_zslx || [],
       xd_zslx_lines: (response as HistoryFullDataResponse).xd_zslx_lines || [],
       recursive_levels: (response as HistoryFullDataResponse).recursive_levels || [],
+      higher_zs: (response as HistoryFullDataResponse).higher_zs || [],
       interval_nest: (response as HistoryFullDataResponse).interval_nest,
       chart_color: (response as HistoryFullDataResponse).chart_color,
     };
