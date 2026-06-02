@@ -357,8 +357,8 @@ def compute_and_cache_chart_data(market: str, code: str, frequency: str, cl_conf
 
     # P5 third step: 跨周期 MACD 抽到 apply_higher_macd_to_chart_data 共享 helper
     apply_higher_macd_to_chart_data(cl_chart_data, frequency, market, cl_config)
-    # P7: 多周期中枢叠加(低周期图叠加高周期 L1 线段中枢)
-    apply_higher_zs_to_chart_data(cl_chart_data, market, code, frequency, cl_config)
+    # P8 取代 P7：停用真实多周期叠加，高级别中枢改由 recursive_levels 产出
+    # apply_higher_zs_to_chart_data(cl_chart_data, market, code, frequency, cl_config)
 
     with cache_lock:
         existing_entry = _get_chart_cache_entry(cache_key)
@@ -688,7 +688,10 @@ def apply_higher_zs_to_chart_data(
     """低周期图叠加更高真实周期的 L1 线段中枢,in-place 写 chart_data['higher_zs']。
 
     返回是否写入(高周期图/配置关→False)。单级取数失败该级为空,不阻断其他级。
+
+    P8 取代 P7：单周期递归扩展已产出高级别中枢(recursive_levels)，此真实多周期叠加停用；保留实现可逆。
     """
+    return False  # P8 取代 P7：单周期递归扩展已产出高级别中枢(recursive_levels)，此真实多周期叠加停用；保留实现可逆
     if cl_config.get("chart_show_higher_zs", "1") != "1":
         return False
     periods = higher_zs_periods(frequency)

@@ -1,4 +1,9 @@
-"""P7: 多周期中枢叠加 — higher_zs_periods 阶梯映射 + apply_higher_zs 计算/组织。"""
+"""P7(已停用) + P8: 多周期中枢叠加相关测试。
+
+P8 取代 P7: 高级别中枢改由单周期递归扩展(recursive_levels)产出，
+apply_higher_zs_to_chart_data 现在恒返回 False 且不写 chart_data['higher_zs']。
+higher_zs_periods 阶梯映射逻辑保留，可供未来恢复 P7 使用。
+"""
 import numpy as np
 import pandas as pd
 
@@ -36,32 +41,53 @@ def _synth_df(n, slope=0.0):
     })
 
 
+# ---- P8 停用验证: apply_higher_zs_to_chart_data 恒返回 False, 不写 higher_zs ----
+
+def test_apply_higher_zs_p8_disabled_always_false():
+    """P8 停用后：无论配置/频率如何，apply_higher_zs_to_chart_data 恒返回 False。"""
+    for freq, cfg in [
+        ("1m", {}),
+        ("1m", {"chart_show_higher_zs": "1"}),
+        ("1m", {"chart_show_higher_zs": "0"}),
+        ("30m", {}),
+        ("d", {}),
+    ]:
+        cd = {"t": [1, 2, 3]}
+        result = CC.apply_higher_zs_to_chart_data(cd, "a", "X", freq, cfg)
+        assert result is False, f"P8停用后应返回False，freq={freq} cfg={cfg}"
+        assert "higher_zs" not in cd, f"P8停用后不应写higher_zs，freq={freq}"
+
+
 def test_apply_higher_zs_gated_off():
+    """兼容旧名：P8停用后配置关也返回 False（行为一致）。"""
     cd = {"t": [1, 2, 3]}
     assert CC.apply_higher_zs_to_chart_data(cd, "a", "X", "1m", {"chart_show_higher_zs": "0"}) is False
     assert "higher_zs" not in cd
 
 
 def test_apply_higher_zs_high_period_empty():
+    """兼容旧名：P8停用后高周期无映射也返回 False（行为一致）。"""
     cd = {"t": [1, 2, 3]}
     assert CC.apply_higher_zs_to_chart_data(cd, "a", "X", "30m", {}) is False
     assert "higher_zs" not in cd
 
 
-def test_apply_higher_zs_organizes(monkeypatch):
-    # monkeypatch 单周期取数, 验证组织逻辑(1m→两级, 字段结构)
+# ---- P7 实现保留验证（dormant，不执行真实逻辑）----
+
+def test_apply_higher_zs_dormant_does_not_populate(monkeypatch):
+    """P7 dormant: 即使 monkeypatch _higher_zs_for_period，P8早返回前也不会调用。"""
+    called = []
     monkeypatch.setattr(CC, "_higher_zs_for_period",
-                        lambda market, code, hf, cfg: [{"points": [], "type": "zd"}])
+                        lambda market, code, hf, cfg: called.append(hf) or [])
     cd = {"t": [1, 2, 3]}
     ok = CC.apply_higher_zs_to_chart_data(cd, "a", "X", "1m", {})
-    assert ok is True
-    assert [g["period"] for g in cd["higher_zs"]] == ["5m", "30m"]
-    assert [g["level_name"] for g in cd["higher_zs"]] == ["5min级别", "30min级别"]
-    assert all(isinstance(g["zss"], list) for g in cd["higher_zs"])
+    assert ok is False
+    assert "higher_zs" not in cd
+    assert called == [], "P8停用后不应调用 _higher_zs_for_period"
 
 
 def test_higher_zs_for_period_real(monkeypatch):
-    # monkeypatch ex.klines 返回合成趋势 df, 真实跑新核心取 L1 中枢
+    """_higher_zs_for_period 本身逻辑保留可用（P7 dormant，但实现未删）。"""
     class _Ex:
         def klines(self, code, freq, **kw):
             return _synth_df(5000, slope=0.01)
@@ -73,6 +99,7 @@ def test_higher_zs_for_period_real(monkeypatch):
 
 
 def test_higher_zs_passthrough_slice_trim():
+    """slice/trim 对已有 higher_zs 字段仍透传（历史缓存兼容）。"""
     hz = [{"period": "5m", "level_name": "5min级别", "zss": []}]
     cd = {"t": [100, 200, 300], "o": [1, 2, 3], "h": [1, 2, 3],
           "l": [1, 2, 3], "c": [1, 2, 3], "v": [1, 2, 3], "higher_zs": hz}

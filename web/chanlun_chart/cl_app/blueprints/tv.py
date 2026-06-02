@@ -786,8 +786,8 @@ def tv_history():
 
                 # 跨周期 MACD (P5 third step)
                 apply_higher_macd_to_chart_data(cl_chart_data, frequency, market, cl_config)
-                # P7: 多周期中枢叠加(低周期图叠加高周期 L1 线段中枢)
-                apply_higher_zs_to_chart_data(cl_chart_data, market, code, frequency, cl_config)
+                # P8 取代 P7：停用真实多周期叠加，高级别中枢改由 recursive_levels 产出
+                # apply_higher_zs_to_chart_data(cl_chart_data, market, code, frequency, cl_config)
 
                 if cd is not None:
                     with cache_lock:
