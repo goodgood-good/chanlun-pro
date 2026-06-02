@@ -675,7 +675,8 @@ def _higher_zs_for_period(market: str, code: str, hf: str, cl_config: dict) -> l
         l0 = next((lv for lv in levels if lv.level == 0), None)
         if l0 is None:
             return []
-        return [zs_to_chart_dict(zs, use_envelope=True) for zs in l0.zss]
+        # 中枢区间用核心区 [ZD,ZG](标准中枢);GG/DD 是瞬间波动范围、非中枢区间。
+        return [zs_to_chart_dict(zs, use_envelope=False) for zs in l0.zss]
     except Exception as e:
         LogUtil.error(f"[apply_higher_zs] period={hf} code={code} failed: {e}")
         return []

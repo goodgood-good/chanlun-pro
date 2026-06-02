@@ -983,8 +983,9 @@ def cl_data_to_tv_chart(
             levels = []
         for lv in levels:
             if lv.level == 0 and config.get("chart_use_branch_core", "0") != "1":
-                continue   # 旧链路 L0 已在 xd_zss 展示;新核心 L0=笔中枢,需在此画出
-            lv_zss = [_zs_to_chart(zs, use_envelope=True) for zs in lv.zss]
+                continue   # 旧链路 L0 已在 xd_zss 展示;新核心 L0=线段中枢,需在此画出
+            # 中枢区间用核心区 [ZD,ZG](标准中枢=3段重叠区);GG/DD 是瞬间波动范围、非中枢区间。
+            lv_zss = [_zs_to_chart(zs, use_envelope=False) for zs in lv.zss]
             lv_zslxs = []
             lv_zslx_lines = []
             for zslx in lv.zslxs:
