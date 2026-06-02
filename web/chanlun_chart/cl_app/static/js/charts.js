@@ -5,9 +5,9 @@
 // 默认的缠论显示项配置
 const CL_SHOW_DEFAULT = {
     fx: true, bi: true, xd: true, bc: true, mmd: true,
-    // 中枢按级别独立 toggle(笔中枢 / 线段中枢 / 递归层级中枢),平级独立控制:
-    zs_bi: true, zs_xd: true, zs_recursive: true,
-    higher_zs: true,
+    // 中枢按级别独立 toggle(笔中枢 zs_bi / 线段中枢=L0 zs_xd),平级独立控制;
+    // 扩展高级别 zs_L1/zs_L2/zs_L3 在菜单按 recursive_levels 实际级别动态生成、默认开。
+    zs_bi: true, zs_xd: true,
     // 买卖点/背驰按级别独立 toggle(笔层数量远多于段层、用户常需只看段层):
     mmd_bi: true, mmd_xd: true, bc_bi: true, bc_xd: true,
 };
@@ -972,7 +972,7 @@ class ChartManager {
                 // 中枢级别列表(P8):由 recursive_levels 实际层级驱动。
                 // L0 = 本周期线段中枢(保留 zs_xd 键,兼容旧用户配置);
                 // L1/L2/L3 = 扩展高级别中枢,键 zs_L1/zs_L2/zs_L3,标签从 FREQ_CHAIN 取。
-                const _recMaxLevel = Math.max(0, ...((barsResult && barsResult.recursive_levels) || []).map(lv => lv && lv.level || 0));
+                const _recMaxLevel = Math.max(0, ...((barsResult && barsResult.recursive_levels) || []).map(lv => (lv && lv.level != null) ? lv.level : 0));
                 const _zsLevels = [{ label: _chain[0] + '级别', key: 'zs_xd' }];
                 for (let i = 1; i <= _recMaxLevel; i++) {
                     _zsLevels.push({ label: (_chain[i] || ('L' + i)) + '级别', key: 'zs_L' + i });
@@ -1627,7 +1627,8 @@ class ChartManager {
             const color = RECURSIVE_LEVEL_COLORS[lvl % RECURSIVE_LEVEL_COLORS.length];
             return safeCreate(wrapZs(color, lvl === 0 ? 1 : 2)(item), 'rec_zs');
         }, false, true);
-        // P7 higher_zs 已停用(后端不再产出)。保留空路径防旧 cache 残留数据报错。
+        // P7 higher_zs 已停用(后端不再产出)。保留空路径防旧 cache 残留数据报错;
+        // 内存缓存可能短暂命中旧 higher_zs(此时已无 per-period 开关可关),重启服务/清缓存后消失。
         if (barsResult.higher_zs && barsResult.higher_zs.length) {
             const higherZss = [];
             (barsResult.higher_zs || []).forEach((grp, gi) => {
