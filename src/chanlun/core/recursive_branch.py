@@ -74,7 +74,7 @@ def _apply_expansion_overlay(results: List[LevelResult]) -> None:
         cur = by_level.get(k)
         if cur is None or not cur.zss:
             break
-        expanded = materialize_expansions(cur.zss, cur.zslxs)
+        expanded = materialize_expansions(cur.zss)
         if not expanded:
             break
         nxt = by_level.get(k + 1)

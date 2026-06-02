@@ -1,4 +1,4 @@
-from chanlun.core.cl_interface import ZS, ZSLX
+from chanlun.core.cl_interface import ZS
 from chanlun.core.zs_expand import is_zs_expand, materialize_expansions
 
 
@@ -52,66 +52,44 @@ def test_prev_not_done_false():
     assert is_zs_expand(prev, cur) is False
 
 
-def _zslx(zs_low, zs_high, zss):
-    """构造测试用走势类型：zs_low=DD / zs_high=GG，zss=其中枢列表。"""
-    w = ZSLX(zslx_level=None, start=None, end=None)
-    w.zs_low, w.zs_high = zs_low, zs_high
-    w.zss = list(zss)
-    return w
-
-
-def test_materialize_expand_three_zslx():
-    # 2 个扩展中枢 z0,z1，跨越 3 个走势类型 w0,w1,w2(包络分别 [9,13][8,11][8.5,12])
+def test_materialize_expand_three_zhongshu():
+    # 3 个相邻定理二扩展中枢 → 1 个高级别中枢(子中枢包络重合)
     z0 = _zs(zd=10, zg=12, dd=9, gg=13)
-    z1 = _zs(zd=7, zg=9, dd=8, gg=11)
-    w0 = _zslx(9, 13, [z0])
-    w1 = _zslx(8, 11, [z0, z1])   # 盘整走势类型含两扩展中枢
-    w2 = _zslx(8.5, 12, [z1])
-    out = materialize_expansions([z0, z1], [w0, w1, w2])
+    z1 = _zs(zd=7, zg=9, dd=8, gg=11)         # z0-z1: 包络重叠[9,11]+核心区分离(9<10) → 扩展
+    z2 = _zs(zd=13, zg=14, dd=8.5, gg=12)      # z1-z2: 包络重叠+核心区分离(z2.zd=13>z1.zg=9) → 扩展
+    out = materialize_expansions([z0, z1, z2])
     assert len(out) == 1
     hi = out[0]
-    # 核心区=重合：ZG=min(13,11,12)=11，ZD=max(9,8,8.5)=9
-    assert hi.zg == 11 and hi.zd == 9
-    # 包络=并集：GG=max(13,11,12)=13，DD=min(9,8,8.5)=8
-    assert hi.gg == 13 and hi.dd == 8
-    assert hi.done is True            # 跨越 3 走势类型 = 完成式
-    assert hi.expanded_with == [z0, z1]
+    # 核心区=重合：ZD=max(9,8,8.5)=9，ZG=min(13,11,12)=11
+    assert hi.zd == 9 and hi.zg == 11
+    # 包络=并集：DD=min(9,8,8.5)=8，GG=max(13,11,12)=13
+    assert hi.dd == 8 and hi.gg == 13
+    assert hi.done is True                      # 3 子中枢(=9段) = 完成式
+    assert hi.expanded_with == [z0, z1, z2]
 
 
-def test_materialize_forming_two_zslx():
-    # 跨越仅 2 走势类型 → forming(done=False)
+def test_materialize_forming_two_zhongshu():
+    # 仅 2 个扩展中枢 → forming(done=False)
     z0 = _zs(zd=10, zg=12, dd=9, gg=13)
     z1 = _zs(zd=7, zg=9, dd=8, gg=11)
-    w0 = _zslx(9, 13, [z0])
-    w1 = _zslx(8, 11, [z1])
-    out = materialize_expansions([z0, z1], [w0, w1])
-    assert len(out) == 1 and out[0].done is False
-    assert len(out[0].lines) == 2          # 跨越 2 走势类型(补不满 3)
+    out = materialize_expansions([z0, z1])
+    assert len(out) == 1
+    assert out[0].done is False                 # 2 子中枢 < 3 = 进行式
+    assert out[0].zd == 9 and out[0].zg == 11    # 重合 [max(9,8), min(13,11)]
+    assert out[0].expanded_with == [z0, z1]
 
 
 def test_materialize_no_expand_skipped():
     # 趋势(包络分离)：不产升级中枢
     z0 = _zs(zd=10, zg=12, dd=9, gg=13)
     z1 = _zs(zd=15, zg=17, dd=14, gg=18)
-    w0 = _zslx(9, 13, [z0])
-    w1 = _zslx(14, 18, [z1])
-    assert materialize_expansions([z0, z1], [w0, w1]) == []
+    assert materialize_expansions([z0, z1]) == []
 
 
-def test_materialize_extension_nine_lines():
-    # 单中枢 9 段延伸：自成一组升级
-    z = _zs(zd=10, zg=12, dd=9, gg=13, line_num=9)
-    w = _zslx(9, 13, [z])
-    out = materialize_expansions([z], [w])
-    assert len(out) == 1 and out[0].expanded_with == [z]
-
-
-def test_materialize_degenerate_no_overlap_skipped():
-    # 两中枢扩展，但跨越的 3 走势类型无共同核心重合 → 不实体化(退化)
-    z0 = _zs(zd=10, zg=12, dd=9, gg=13)
-    z1 = _zs(zd=7, zg=9, dd=8, gg=11)
-    w0 = _zslx(11, 13, [z0])
-    w1 = _zslx(8, 10.5, [z0, z1])
-    w2 = _zslx(2, 4, [z1])
-    # ZD=max(11,8,2)=11 >= ZG=min(13,10.5,4)=4 → 退化，跳过
-    assert materialize_expansions([z0, z1], [w0, w1, w2]) == []
+def test_materialize_degenerate_no_common_overlap_skipped():
+    # 3 中枢两两扩展，但无共同核心重合(zd>=zg) → 不实体化(退化)
+    z0 = _zs(zd=9.5, zg=10.5, dd=9, gg=11)
+    z1 = _zs(zd=11.5, zg=12.5, dd=10, gg=14)    # z0-z1: 包络重叠[10,11]+核心区分离(11.5>10.5)
+    z2 = _zs(zd=14, zg=15, dd=13, gg=16)         # z1-z2: 包络重叠[13,14]+核心区分离(14>12.5)
+    # ZD=max(9,10,13)=13 >= ZG=min(11,14,16)=11 → 退化，跳过
+    assert materialize_expansions([z0, z1, z2]) == []
