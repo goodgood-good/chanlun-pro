@@ -630,8 +630,9 @@ class ZS:
 
         包络重叠 max(dd)<=min(gg)；核心区分离 other.zg<self.zd 或 other.zd>self.zg。
         核心区也重叠=延伸(同中枢)、包络分离=趋势——均非扩展。
+        两中枢都须 done(扩展是确认结构；未完成中枢不参与扩展判定)。
         """
-        if not other or not other.done:
+        if not self.done or not other or not other.done:
             return False
         if None in (self.zd, self.zg, other.zd, other.zg,
                     self.dd, self.gg, other.dd, other.gg):

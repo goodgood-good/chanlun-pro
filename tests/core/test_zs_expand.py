@@ -43,3 +43,10 @@ def test_not_done_false():
     prev = _zs(zd=10, zg=12, dd=9, gg=13)
     cur = _zs(zd=7, zg=9, dd=8, gg=11, done=False)
     assert is_zs_expand(prev, cur) is False
+
+
+def test_prev_not_done_false():
+    # prev 未完成 → 不参与扩展判定(扩展是确认结构)
+    prev = _zs(zd=10, zg=12, dd=9, gg=13, done=False)
+    cur = _zs(zd=7, zg=9, dd=8, gg=11)
+    assert is_zs_expand(prev, cur) is False
