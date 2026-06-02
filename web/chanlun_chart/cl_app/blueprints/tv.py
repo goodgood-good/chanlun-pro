@@ -469,7 +469,12 @@ def tv_symbols():
         LogUtil.error(f"[tv_symbols] get_exchange failed symbol={raw_symbol} err={e}")
         return {"s": "error", "errmsg": "invalid market"}
 
-    stocks = ex.stock_info(code)
+    try:
+        stocks = ex.stock_info(code)
+    except Exception as e:
+        # 数据源故障(如 QMT/xtquant 不可用)时优雅降级为 error,不抛到 flask 变 500。
+        LogUtil.error(f"[tv_symbols] stock_info failed symbol={raw_symbol} err={e}")
+        return {"s": "error", "errmsg": f"unknown symbol: {raw_symbol}"}
     if stocks is None:
         return {"s": "error", "errmsg": f"unknown symbol: {raw_symbol}"}
 
