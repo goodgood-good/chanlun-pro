@@ -969,6 +969,16 @@ class ChartManager {
                 const _chain = FREQ_CHAIN[_curInterval] || [_curInterval, "高一级", "高二级", "高三级"];
                 const _lbl = (i) => _chain[i] || `L+${i}`;
 
+                // 中枢级别列表(按周期):本周期线段中枢 + 各高周期到 30m(与后端 higher_zs 对齐)。
+                // 元素 {label, key}:本周期级别=线段中枢(zs_xd);高周期级别=higher_zs_<period> 各自独立开关。
+                const _zsLevels = [{ label: _chain[0] + '级别', key: 'zs_xd' }];
+                const _t30 = _chain.indexOf('30m');
+                if (_t30 > 0) {
+                    for (let i = 1; i <= _t30; i++) {
+                        _zsLevels.push({ label: _chain[i] + '级别', key: 'higher_zs_' + _chain[i] });
+                    }
+                }
+
                 // 重组后的菜单:按「功能分组」组织 + 顶部级别映射默认折叠 +
                 // 底部「全选/全清」一键操作。比起原始扁平 14 项更易扫读,
                 // 减少新用户「原文化新增」等晦涩术语的认知负担。
@@ -993,12 +1003,10 @@ class ChartManager {
                             <label style="cursor:pointer;"><input type="checkbox" id="${cbId('xd')}" ${cfg.xd ? 'checked' : ''} style="margin-right:4px; vertical-align:middle;">线段</label>
                         </div>
 
-                        ${_grpTitle('中枢')}
-                        <div style="display:flex; gap:14px; font-size:12px;">
+                        ${_grpTitle('中枢 (按周期级别)')}
+                        <div style="display:flex; gap:12px; font-size:12px; flex-wrap:wrap;">
                             <label style="cursor:pointer;"><input type="checkbox" id="${cbId('zs_bi')}" ${cfg.zs_bi ? 'checked' : ''} style="margin-right:4px; vertical-align:middle;">笔中枢</label>
-                            <label style="cursor:pointer;"><input type="checkbox" id="${cbId('zs_xd')}" ${cfg.zs_xd ? 'checked' : ''} style="margin-right:4px; vertical-align:middle;">线段中枢</label>
-                            <label style="cursor:pointer;"><input type="checkbox" id="${cbId('zs_recursive')}" ${cfg.zs_recursive !== false ? 'checked' : ''} style="margin-right:4px; vertical-align:middle;">递归中枢</label>
-                            <label style="cursor:pointer;"><input type="checkbox" id="${cbId('higher_zs')}" ${cfg.higher_zs !== false ? 'checked' : ''} style="margin-right:4px; vertical-align:middle;">高周期中枢</label>
+                            ${_zsLevels.map((L) => `<label style="cursor:pointer;"><input type="checkbox" id="${cbId(L.key)}" ${cfg[L.key] !== false ? 'checked' : ''} style="margin-right:4px; vertical-align:middle;">${L.label}</label>`).join('')}
                         </div>
 
                         ${_grpTitle('买卖点')}
@@ -1084,12 +1092,10 @@ class ChartManager {
 
                 const keys = [
                     'fx', 'bi', 'xd', 'bc', 'mmd',
-                    // 笔/段独立级别开关(中枢 / 买卖点 / 背驰)
-                    'zs_bi', 'zs_xd', 'mmd_bi', 'mmd_xd', 'bc_bi', 'bc_xd',
-                    // 新核心递归层级中枢开关
-                    'zs_recursive',
-                    // 多周期叠加中枢开关
-                    'higher_zs',
+                    // 买卖点/背驰 笔段独立开关 + 笔中枢(观察)
+                    'zs_bi', 'mmd_bi', 'mmd_xd', 'bc_bi', 'bc_xd',
+                    // 中枢按周期级别:zs_xd(本周期线段中枢) + higher_zs_<period>(各高周期级别),随周期动态
+                    ..._zsLevels.map((L) => L.key),
                 ];
                 keys.forEach(k => {
                     $('#' + cbId(k)).change(function () {
@@ -1610,16 +1616,14 @@ class ChartManager {
         // 旧 bi_zss/xd_zss 后端默认关闭(2026-05 清场态),重做后的多级中枢全在此画出。
         // 各级 zss 扁平化(附 _level)后用单 reconcile —— 单 key 增量天然正确;
         // 按级别选色/线宽:L0(笔中枢)细框,L1+(高级别中枢)粗框。
-        // 递归主链 L0=线段中枢→「线段中枢」按钮(zs_xd)、L1+=升级→「递归中枢」按钮(zs_recursive)。
-        // 笔中枢是更小的观察级别,走 bi_zss 字段、由「笔中枢」按钮(zs_bi)单独控制(见上方 bi_zss)。
+        // 线段中枢 = 递归 L0 = 本周期级别(「{周期}级别」按钮 zs_xd)。L1+(单周期升级)实测
+        // 恒空、不展示;更高级别统一走高周期叠加(higher_zss)。笔中枢走 bi_zss(zs_bi)。
         const recZss = [];
         for (const lvObj of (barsResult.recursive_levels || [])) {
             if (!lvObj || !Array.isArray(lvObj.zss)) continue;
-            const lvl = lvObj.level || 0;
-            const showLvl = lvl === 0 ? (cfg.zs_xd !== false)
-                          : (cfg.zs_recursive !== false);
-            if (!showLvl) continue;
-            for (const zs of lvObj.zss) recZss.push({ ...zs, _level: lvl });
+            if ((lvObj.level || 0) !== 0) continue;     // 只画 L0 线段中枢(本周期级别)
+            if (cfg.zs_xd === false) continue;
+            for (const zs of lvObj.zss) recZss.push({ ...zs, _level: 0 });
         }
         this.reconcile('recursive_zss', recZss, from, symbolKey, (item) => {
             const lvl = item._level || 0;
@@ -1629,14 +1633,17 @@ class ChartManager {
         // 多周期中枢叠加(higher_zs):后端按高周期给 [{period, level_name, zss}]。
         // 低周期图(1m/5m)叠加真实高周期(5m/30m)的 L1 线段中枢。扁平化(附 _gi 组序)后
         // 单 reconcile,按高周期序选色(冷色系,与递归中枢区分)。
+        // 高周期级别中枢(higher_zs):后端按高周期给 [{period, level_name, zss}]=该周期线段中枢。
+        // 按 period 独立开关 higher_zs_<period>(对应菜单「{周期}级别」勾选框),冷色系区分。
         const higherZss = [];
         (barsResult.higher_zs || []).forEach((grp, gi) => {
             if (!grp || !Array.isArray(grp.zss)) return;
+            if (cfg['higher_zs_' + grp.period] === false) return;   // 该周期级别开关关→不画
             grp.zss.forEach(zs => higherZss.push({ ...zs, _gi: gi }));
         });
         // includeOverlaps=true:高周期中枢跨度大,起点常在可视窗口左侧外,需"终点在
         // 窗口内即画"(全局视角),否则滚到右侧时高级别中枢会被窗口过滤掉、看不到。
-        this.reconcile('higher_zss', (cfg.higher_zs !== false) ? higherZss : [], from, symbolKey, (item) => {
+        this.reconcile('higher_zss', higherZss, from, symbolKey, (item) => {
             const color = HIGHER_ZS_COLORS[(item._gi || 0) % HIGHER_ZS_COLORS.length];
             return safeCreate(wrapZs(color, 2)(item), 'higher_zs');
         }, false, true);
