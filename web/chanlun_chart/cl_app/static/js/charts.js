@@ -1120,17 +1120,23 @@ class ChartManager {
                 // 落在菜单外都关菜单,**不阻塞 iframe 内交互**。延迟一帧绑定避开
                 // 触发本次打开的同一次点击事件。
                 setTimeout(() => {
+                    // 菜单 append 在主文档,但图表/工具栏在 TV iframe 内——点击图表「空白区」
+                    // 的 click 落在 iframe document、不冒泡到主文档,故只绑主文档时收不到、
+                    // 菜单关不掉。这里同时给主文档 + 所有同源 iframe 文档绑 capture click,
+                    // 点菜单外任意处(含图表空白)即关。跨源 iframe 访问 contentDocument 会抛错,跳过。
+                    const docs = [document];
+                    document.querySelectorAll('iframe').forEach((f) => {
+                        try { if (f.contentDocument) docs.push(f.contentDocument); } catch (e) { /* 跨源 iframe 跳过 */ }
+                    });
                     const closeHandler = (ev) => {
                         const menuEl = document.getElementById(menuId);
-                        if (!menuEl) {
-                            document.removeEventListener('click', closeHandler, true);
-                            return;
-                        }
-                        if (menuEl.contains(ev.target)) return;     // 菜单内点击不关
+                        const cleanup = () => docs.forEach((d) => d.removeEventListener('click', closeHandler, true));
+                        if (!menuEl) { cleanup(); return; }
+                        if (menuEl.contains(ev.target)) return;     // 菜单内点击不关(ev.target 在主文档菜单内)
                         menuEl.remove();
-                        document.removeEventListener('click', closeHandler, true);
+                        cleanup();
                     };
-                    document.addEventListener('click', closeHandler, true);
+                    docs.forEach((d) => d.addEventListener('click', closeHandler, true));
                 }, 0);
             });
 
