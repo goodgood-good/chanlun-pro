@@ -41,20 +41,22 @@ def _spanning_zslxs(group: List[ZS], zslxs: List[ZSLX]) -> List[ZSLX]:
     return zslxs[lo:hi + 1]
 
 
-def _build_expanded_zs(spanning: List[ZSLX], subs: List[ZS]) -> ZS:
-    """走势类型列表 → 高级别中枢。核心区=重合、包络=并集；done=跨越≥3。"""
+def _build_expanded_zs(spanning: List[ZSLX], subs: List[ZS]) -> Optional[ZS]:
+    """走势类型列表 → 高级别中枢。核心区=重合、包络=并集；done=跨越≥3。
+
+    三走势类型无共同核心重合(zd>=zg) → None：非有效高级别中枢，不实体化。
+    """
     zg = min(w.zs_high for w in spanning)    # 核心区上沿 = 重合
     zd = max(w.zs_low for w in spanning)     # 核心区下沿 = 重合
-    gg = max(w.zs_high for w in spanning)    # 包络上沿 = 并集
-    dd = min(w.zs_low for w in spanning)     # 包络下沿 = 并集
-    z = ZS(zs_type="xd", start=spanning[0], end=spanning[-1],
-           zg=zg, zd=zd, gg=gg, dd=dd)
+    if zd >= zg:                             # 无共同重合区 → 非中枢(退化)
+        return None
+    z = ZS(zs_type="xd", start=spanning[0], end=spanning[-1])
     z.lines = list(spanning)                 # 构成段=次级别走势类型
-    z.line_num = len(spanning)
+    z.update_boundaries()                    # gg/dd=并集(max/min zs_high/zs_low)+同步缓存+line_num
+    z.zg, z.zd = zg, zd                       # 核心区=重合(update_boundaries 不动 zg/zd)
     z.done = len(spanning) >= 3              # 3 走势类型(=9段)才完成(line27278)
     z.real = True
     z.expanded_with = list(subs)             # 记录子中枢链
-    z._bounds_dirty = False                  # 防 update_boundaries 把 gg/dd 重算成并集覆盖核心区
     return z
 
 
@@ -64,7 +66,7 @@ def materialize_expansions(zss: List[ZS], zslxs: List[ZSLX]) -> List[ZS]:
         return []
     n = len(zss)
     used = [False] * n
-    results = []                              # (order_idx, ZS)
+    results = []                              # List[Tuple[int, ZS]]，按 order_idx 排序后取 ZS
     # 扩展：相邻 is_zs_expand 连续组(≥2)
     i = 0
     while i < n:
@@ -74,8 +76,9 @@ def materialize_expansions(zss: List[ZS], zslxs: List[ZSLX]) -> List[ZS]:
         if j > i:
             group = zss[i:j + 1]
             spanning = _spanning_zslxs(group, zslxs)
-            if spanning:
-                results.append((i, _build_expanded_zs(spanning, group)))
+            hi_zs = _build_expanded_zs(spanning, group) if spanning else None
+            if hi_zs is not None:             # 退化(无共同重合)→ _build 返回 None，跳过
+                results.append((i, hi_zs))
             for k in range(i, j + 1):
                 used[k] = True
             i = j + 1
@@ -85,7 +88,8 @@ def materialize_expansions(zss: List[ZS], zslxs: List[ZSLX]) -> List[ZS]:
     for k in range(n):
         if not used[k] and zss[k].is_extension_candidate(9):
             spanning = _spanning_zslxs([zss[k]], zslxs)
-            if spanning:
-                results.append((k, _build_expanded_zs(spanning, [zss[k]])))
+            hi_zs = _build_expanded_zs(spanning, [zss[k]]) if spanning else None
+            if hi_zs is not None:
+                results.append((k, hi_zs))
     results.sort(key=lambda t: t[0])
     return [z for _, z in results]

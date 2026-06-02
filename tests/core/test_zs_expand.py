@@ -1,5 +1,5 @@
-from chanlun.core.cl_interface import ZS
-from chanlun.core.zs_expand import is_zs_expand
+from chanlun.core.cl_interface import ZS, ZSLX
+from chanlun.core.zs_expand import is_zs_expand, materialize_expansions
 
 
 def _zs(zd, zg, dd, gg, done=True, line_num=3):
@@ -52,10 +52,6 @@ def test_prev_not_done_false():
     assert is_zs_expand(prev, cur) is False
 
 
-from chanlun.core.cl_interface import ZSLX
-from chanlun.core.zs_expand import materialize_expansions
-
-
 def _zslx(zs_low, zs_high, zss):
     """构造测试用走势类型：zs_low=DD / zs_high=GG，zss=其中枢列表。"""
     w = ZSLX(zslx_level=None, start=None, end=None)
@@ -90,6 +86,7 @@ def test_materialize_forming_two_zslx():
     w1 = _zslx(8, 11, [z1])
     out = materialize_expansions([z0, z1], [w0, w1])
     assert len(out) == 1 and out[0].done is False
+    assert len(out[0].lines) == 2          # 跨越 2 走势类型(补不满 3)
 
 
 def test_materialize_no_expand_skipped():
@@ -107,3 +104,14 @@ def test_materialize_extension_nine_lines():
     w = _zslx(9, 13, [z])
     out = materialize_expansions([z], [w])
     assert len(out) == 1 and out[0].expanded_with == [z]
+
+
+def test_materialize_degenerate_no_overlap_skipped():
+    # 两中枢扩展，但跨越的 3 走势类型无共同核心重合 → 不实体化(退化)
+    z0 = _zs(zd=10, zg=12, dd=9, gg=13)
+    z1 = _zs(zd=7, zg=9, dd=8, gg=11)
+    w0 = _zslx(11, 13, [z0])
+    w1 = _zslx(8, 10.5, [z0, z1])
+    w2 = _zslx(2, 4, [z1])
+    # ZD=max(11,8,2)=11 >= ZG=min(13,10.5,4)=4 → 退化，跳过
+    assert materialize_expansions([z0, z1], [w0, w1, w2]) == []
