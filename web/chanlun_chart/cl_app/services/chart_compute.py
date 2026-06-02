@@ -88,6 +88,38 @@ HIGHER_FREQ_MAP = {
     "m": "y",
 }
 
+# ---------------- 多周期中枢叠加(P7) ----------------
+
+# 叠加目标周期(MVP 各市场统一;自定义阶梯/目标留扩展)+ 周期→级别展示名
+HIGHER_ZS_TARGET = "30m"
+_PERIOD_LEVEL_NAME = {
+    "5m": "5min级别", "30m": "30min级别", "d": "日线级别", "w": "周线级别",
+}
+
+
+def _zs_level_name(period: str) -> str:
+    return _PERIOD_LEVEL_NAME.get(period, f"{period}级别")
+
+
+def higher_zs_periods(frequency: str):
+    """返回当前周期之上、沿阶梯到 HIGHER_ZS_TARGET(含)途经的 [(周期, 级别名)]。
+
+    当前周期 >= 目标(从它沿 HIGHER_FREQ_MAP 走不到 target) → 返回 []。
+    例: '1m'→[('5m','5min级别'),('30m','30min级别')]; '5m'→[('30m','30min级别')];
+        '30m'/'d'→[]。
+    """
+    out = []
+    cur = frequency
+    seen = set()
+    while cur in HIGHER_FREQ_MAP and cur not in seen:
+        seen.add(cur)
+        nxt = HIGHER_FREQ_MAP[cur]
+        out.append((nxt, _zs_level_name(nxt)))
+        if nxt == HIGHER_ZS_TARGET:
+            return out
+        cur = nxt
+    return []
+
 # 跨 UTC 日界的市场，日级分桶需按本地时区小时偏移修正（其余默认 +8）。
 MARKET_DAY_OFFSET_H = {
     "us": -5,
