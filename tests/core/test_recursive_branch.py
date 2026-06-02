@@ -234,3 +234,33 @@ def test_calculate_ld_provider_for_level():
         lines, single, Config.ZS_WZGX_ZGD.value, ld_provider_for_level=factory)
     assert seen_levels and seen_levels[0] == 0            # factory(0) 被调(各级用对应 provider)
     assert not single_called                             # 有 factory → 单一 ld_provider 未被使用
+
+
+def test_apply_expansion_overlay_adds_higher_level():
+    from chanlun.core.recursive_branch import _apply_expansion_overlay, LevelResult
+    from chanlun.core.cl_interface import ZS, ZSLX
+
+    def _zs(zd, zg, dd, gg, done=True, line_num=3):
+        z = ZS(zs_type="xd", start=None)
+        z.zd, z.zg, z.dd, z.gg = zd, zg, dd, gg
+        z.done = done
+        z.line_num = line_num
+        return z
+
+    def _zslx(zs_low, zs_high, zss):
+        w = ZSLX(zslx_level=None, start=None, end=None)
+        w.zs_low, w.zs_high = zs_low, zs_high
+        w.zss = list(zss)
+        return w
+
+    z0 = _zs(10, 12, 9, 13)
+    z1 = _zs(7, 9, 8, 11)                       # 与 z0 核心区分离+包络重叠 → 扩展
+    w0, w1, w2 = _zslx(9, 13, [z0]), _zslx(8, 11, [z0, z1]), _zslx(8.5, 12, [z1])
+    results = [LevelResult(level=0, zss=[z0, z1], done_divergence=[None, None],
+                           zslxs=[w0, w1, w2], upgrade_idx=[], units=[])]
+    _apply_expansion_overlay(results)
+    assert any(lv.level == 1 for lv in results)
+    l1 = next(lv for lv in results if lv.level == 1)
+    assert l1.zss and l1.zss[0].expanded_with == [z0, z1]
+    assert len(l1.done_divergence) == len(l1.zss)     # 索引对齐不变量
+    assert len(l1.upgrade_idx) == len(l1.zss)         # 升级标注对齐

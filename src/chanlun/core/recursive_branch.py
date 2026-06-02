@@ -17,6 +17,7 @@ from chanlun.core.beichi_calculator import LdProvider
 from chanlun.core.cl_interface import LINE, ZS, ZSLX
 from chanlun.core.zs_branch import DivergenceResult, ZsBranchCalculator, classify_rel
 from chanlun.core.zslx_branch import ZslxBranchCalculator
+from chanlun.core.zs_expand import materialize_expansions
 
 _MAX_LEVELS = 50    # 护栏；走势单元逐级收缩，正常远不及
 
@@ -59,6 +60,36 @@ def _mark_upgrades(done_zss: List[ZS]) -> List[int]:
         elif i > 0 and classify_rel(done_zss[i - 1], z) == "expand":  # 中枢扩展(中心定理二本体相交)
             out.append(i)
     return out
+
+
+def _apply_expansion_overlay(results: List[LevelResult]) -> None:
+    """中枢扩展叠加(中心定理二,递归)：每级中枢借本级走势类型抬升，产出并入 level+1，
+    与走势类型递归并入同一层级树(in-place 修改 results)。
+
+    trend 主链多数只到 L0(Phase0)，扩展在此把单周期推到 L1/L2…。
+    """
+    by_level = {r.level: r for r in results}
+    k = 0
+    while k < _MAX_LEVELS:
+        cur = by_level.get(k)
+        if cur is None or not cur.zss:
+            break
+        expanded = materialize_expansions(cur.zss, cur.zslxs)
+        if not expanded:
+            break
+        nxt = by_level.get(k + 1)
+        if nxt is None:
+            nxt = LevelResult(level=k + 1, zss=[], done_divergence=[],
+                              zslxs=[], upgrade_idx=[], units=list(cur.zss))
+            results.append(nxt)
+            by_level[k + 1] = nxt
+        # 并入(去重：trend 在 L≥1 多数为空，首版直接 append 扩展产物)
+        base = len(nxt.zss)
+        nxt.zss.extend(expanded)
+        nxt.done_divergence.extend([None] * len(expanded))
+        nxt.upgrade_idx.extend(range(base, base + len(expanded)))
+        k += 1
+    results.sort(key=lambda r: r.level)
 
 
 class RecursiveBranchCalculator:
@@ -116,4 +147,5 @@ class RecursiveBranchCalculator:
                 break
             units = _as_units(zslxs)
             level += 1
+        _apply_expansion_overlay(results)
         return results
