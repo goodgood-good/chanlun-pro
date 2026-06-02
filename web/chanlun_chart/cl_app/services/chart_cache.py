@@ -82,7 +82,10 @@ def _stable_hash(obj) -> str:
 #   ``xd_bcs`` 等原文化新字段在旧 entry 上全部失效,杜绝 endpoint 漏字段。
 # - v6 (2026-05) ── 新增 ``xd_zslx_lines`` 以及 recursive_levels[*].zslx_lines,
 #   让当前级别走势类型以线段形式参与下一层中枢显示。
-_CHART_CACHE_SCHEMA_VERSION = "v6"
+# - v7 (2026-06) ── 级别纠正(递归 L0=线段中枢 / 笔中枢走 bi_zss 观察层 / 多周期
+#   higher_zs)+ 中枢区间改用核心区 [ZD,ZG]。均改 chart_data 内容但不进 config,
+#   bump 强制旧磁盘缓存失效重算,否则用户看不到这些改动。
+_CHART_CACHE_SCHEMA_VERSION = "v7"
 
 
 def _build_cache_key(market: str, code: str, frequency: str, cl_config: dict) -> str:
