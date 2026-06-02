@@ -626,11 +626,19 @@ class ZS:
         return self.line_num >= min_segments
 
     def can_expand_with(self, other: 'ZS') -> bool:
-        """判断是否可以与另一个中枢扩展合并"""
+        """中心定理二·中枢扩展：本体包络重叠(闭区间) 且 核心区分离(原文 line10029)。
+
+        包络重叠 max(dd)<=min(gg)；核心区分离 other.zg<self.zd 或 other.zd>self.zg。
+        核心区也重叠=延伸(同中枢)、包络分离=趋势——均非扩展。
+        """
         if not other or not other.done:
             return False
-        # 两个中枢有价格重叠区间
-        return max(self.dd, other.dd) <= min(self.gg, other.gg)
+        if None in (self.zd, self.zg, other.zd, other.zg,
+                    self.dd, self.gg, other.dd, other.gg):
+            return False
+        envelope_overlap = max(self.dd, other.dd) <= min(self.gg, other.gg)
+        core_separated = (other.zg < self.zd) or (other.zd > self.zg)
+        return envelope_overlap and core_separated
 
     def __setstate__(self, state):
         # 旧 pickle 的 __dict__ 不含增量边界缓存字段，补默认值，
