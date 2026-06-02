@@ -5,8 +5,8 @@
 // 默认的缠论显示项配置
 const CL_SHOW_DEFAULT = {
     fx: true, bi: true, xd: true, bc: true, mmd: true,
-    // 中枢按级别独立 toggle(笔中枢 / 线段中枢),无总开关,两者平级独立控制:
-    zs_bi: true, zs_xd: true,
+    // 中枢按级别独立 toggle(笔中枢 / 线段中枢 / 递归层级中枢),平级独立控制:
+    zs_bi: true, zs_xd: true, zs_recursive: true,
     // 买卖点/背驰按级别独立 toggle(笔层数量远多于段层、用户常需只看段层):
     mmd_bi: true, mmd_xd: true, bc_bi: true, bc_xd: true,
 };
@@ -118,6 +118,8 @@ const CHART_CONFIG = {
         "bi_mmds", "xd_mmds", "bi_bcs", "xd_bcs",
         // 买卖点文字标签(与 icon 箭头分离的第二个 shape,各自独立 reconcile)
         "mmd_labels", "bi_mmd_labels", "xd_mmd_labels",
+        // 新核心递归层级中枢:recursive_levels 各级 zss 扁平化为单容器
+        "recursive_zss",
     ],
 };
 
@@ -143,6 +145,10 @@ const DEFAULT_COLORS = {
     bis: CHART_CONFIG.COLORS.BI, xds: CHART_CONFIG.COLORS.XD,
     bi_zss: CHART_CONFIG.COLORS.BI_ZSS, xd_zss: CHART_CONFIG.COLORS.XD_ZSS,
 };
+
+// 新核心递归层级中枢按级别配色(L0 笔中枢→L1→L2…);级别越高框越粗(见 drawChartElements)。
+// 与旧 bi_zss/xd_zss(灰/蓝)区分,用暖色系突出"重做后的多级中枢"。超出长度按取模循环。
+const RECURSIVE_LEVEL_COLORS = ["#26A69A", "#EF5350", "#AB47BC", "#FF9800", "#42A5F5", "#EC407A"];
 
 // 着色规则(按「中枢的构成单元在当前周期的颜色」着色,直观区分笔/段):
 //   bis    = 当前周期笔色;
@@ -985,6 +991,7 @@ class ChartManager {
                         <div style="display:flex; gap:14px; font-size:12px;">
                             <label style="cursor:pointer;"><input type="checkbox" id="${cbId('zs_bi')}" ${cfg.zs_bi ? 'checked' : ''} style="margin-right:4px; vertical-align:middle;">笔中枢</label>
                             <label style="cursor:pointer;"><input type="checkbox" id="${cbId('zs_xd')}" ${cfg.zs_xd ? 'checked' : ''} style="margin-right:4px; vertical-align:middle;">线段中枢</label>
+                            <label style="cursor:pointer;"><input type="checkbox" id="${cbId('zs_recursive')}" ${cfg.zs_recursive !== false ? 'checked' : ''} style="margin-right:4px; vertical-align:middle;">递归中枢</label>
                         </div>
 
                         ${_grpTitle('买卖点')}
@@ -1072,6 +1079,8 @@ class ChartManager {
                     'fx', 'bi', 'xd', 'bc', 'mmd',
                     // 笔/段独立级别开关(中枢 / 买卖点 / 背驰)
                     'zs_bi', 'zs_xd', 'mmd_bi', 'mmd_xd', 'bc_bi', 'bc_xd',
+                    // 新核心递归层级中枢开关
+                    'zs_recursive',
                 ];
                 keys.forEach(k => {
                     $('#' + cbId(k)).change(function () {
@@ -1582,6 +1591,21 @@ class ChartManager {
         // 笔中枢 / 线段中枢现按独立开关(zs_bi / zs_xd)分别控制显隐。
         this.reconcile('bi_zss', cfg.zs_bi ? barsResult.bi_zss : [], from, symbolKey, (item) => safeCreate(wrapZs(getDynamicColor(currentInterval, "bi_zss"), 1)(item), 'bi_zs'), false);
         this.reconcile('xd_zss', cfg.zs_xd ? barsResult.xd_zss : [], from, symbolKey, (item) => safeCreate(wrapZs(getDynamicColor(currentInterval, "xd_zss"), 2)(item), 'xd_zs'), false);
+        // 新核心递归层级中枢(recursive_levels):后端按级别给 [{level, zss, zslxs, ...}]。
+        // 旧 bi_zss/xd_zss 后端默认关闭(2026-05 清场态),重做后的多级中枢全在此画出。
+        // 各级 zss 扁平化(附 _level)后用单 reconcile —— 单 key 增量天然正确;
+        // 按级别选色/线宽:L0(笔中枢)细框,L1+(高级别中枢)粗框。
+        const recZss = [];
+        for (const lvObj of (barsResult.recursive_levels || [])) {
+            if (!lvObj || !Array.isArray(lvObj.zss)) continue;
+            const lvl = lvObj.level || 0;
+            for (const zs of lvObj.zss) recZss.push({ ...zs, _level: lvl });
+        }
+        this.reconcile('recursive_zss', (cfg.zs_recursive !== false) ? recZss : [], from, symbolKey, (item) => {
+            const lvl = item._level || 0;
+            const color = RECURSIVE_LEVEL_COLORS[lvl % RECURSIVE_LEVEL_COLORS.length];
+            return safeCreate(wrapZs(color, lvl === 0 ? 1 : 2)(item), 'rec_zs');
+        }, false);
         // 背驰/买卖点 —— 拆分版优先(笔/段独立 reconcile + 不同样式 + 独立 toggle);
         // 后端 ``bi_mmds``/``xd_mmds``/``bi_bcs``/``xd_bcs`` 拿不到时,fallback
         // 到合并版 ``bcs``/``mmds``(向后兼容旧 web/老 cache 命中场景)。
