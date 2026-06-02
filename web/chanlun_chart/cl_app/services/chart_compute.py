@@ -357,6 +357,8 @@ def compute_and_cache_chart_data(market: str, code: str, frequency: str, cl_conf
 
     # P5 third step: 跨周期 MACD 抽到 apply_higher_macd_to_chart_data 共享 helper
     apply_higher_macd_to_chart_data(cl_chart_data, frequency, market, cl_config)
+    # P7: 多周期中枢叠加(低周期图叠加高周期 L1 线段中枢)
+    apply_higher_zs_to_chart_data(cl_chart_data, market, code, frequency, cl_config)
 
     with cache_lock:
         existing_entry = _get_chart_cache_entry(cache_key)
