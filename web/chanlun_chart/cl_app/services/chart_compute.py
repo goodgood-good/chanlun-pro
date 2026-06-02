@@ -30,6 +30,7 @@ from chanlun.cl_utils import (
     cl_data_to_tv_chart,
     kcharts_frequency_h_l_map,
     web_batch_get_cl_datas,
+    zs_to_chart_dict,
 )
 from chanlun.base import Market
 from chanlun.exchange import get_exchange
@@ -653,6 +654,50 @@ def apply_higher_macd_to_chart_data(
     except Exception as e:
         LogUtil.error(f"[apply_higher_macd] HTF resample MACD calc failed: {e}")
         return False
+
+
+def _higher_zs_for_period(market: str, code: str, hf: str, cl_config: dict) -> list:
+    """取 hf 周期 K 线→新核心→L1 线段中枢→zs_to_chart_dict 列表。
+
+    异常/无数据/无 L1 → 返回 [](优雅降级,不阻断主图)。
+    """
+    try:
+        ex = get_exchange(Market(market))
+        klines = ex.klines(code, hf)
+        if klines is None or len(klines) == 0:
+            return []
+        cd = web_batch_get_cl_datas(market, code, {hf: klines}, cl_config)[0]
+        levels = cd.get_recursive_branch_levels() or []
+        l1 = next((lv for lv in levels if lv.level == 1), None)
+        if l1 is None:
+            return []
+        return [zs_to_chart_dict(zs, use_envelope=True) for zs in l1.zss]
+    except Exception as e:
+        LogUtil.error(f"[apply_higher_zs] period={hf} code={code} failed: {e}")
+        return []
+
+
+def apply_higher_zs_to_chart_data(
+    chart_data: dict, market: str, code: str, frequency: str, cl_config: dict
+) -> bool:
+    """低周期图叠加更高真实周期的 L1 线段中枢,in-place 写 chart_data['higher_zs']。
+
+    返回是否写入(高周期图/配置关→False)。单级取数失败该级为空,不阻断其他级。
+    """
+    if cl_config.get("chart_show_higher_zs", "1") != "1":
+        return False
+    periods = higher_zs_periods(frequency)
+    if not periods:
+        return False
+    result = []
+    for hf, level_name in periods:
+        result.append({
+            "period": hf,
+            "level_name": level_name,
+            "zss": _higher_zs_for_period(market, code, hf, cl_config),
+        })
+    chart_data["higher_zs"] = result
+    return True
 
 
 def should_lazy_apply_higher_macd(
