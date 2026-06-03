@@ -1001,6 +1001,19 @@ def cl_data_to_tv_chart(
                 "zslxs": lv_zslxs,
                 "zslx_lines": lv_zslx_lines,
             })
+        # P9 中枢升级·扩展: L0 线段中枢 → 扩展高级别中枢, 作 5min 级别(L1)渲染。
+        # 走势类型递归 L1+ 暂关(上面 lv.level>=1 gate);正常/延伸 case 待做。算法见 core/zs_upgrade。
+        _l0 = next((lv for lv in levels if lv.level == 0), None)
+        if _l0 and _l0.zss:
+            from chanlun.core.zs_upgrade import kuozhan_zhongshu
+            _kz = kuozhan_zhongshu(_l0.zss, list(cd.get_xds()))
+            if _kz:
+                recursive_levels_chart_data.append({
+                    "level": 1,
+                    "zss": [_zs_to_chart(z, use_envelope=False) for z in _kz],
+                    "zslxs": [],
+                    "zslx_lines": [],
+                })
 
     # 区间套 (interval_nest):从最高级别趋势背驰逐级下钻到 L0 的链 + 精确转折点。
     interval_nest_chart_data = None

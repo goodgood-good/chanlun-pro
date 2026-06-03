@@ -56,3 +56,53 @@ def three_segment_interval(lines: List[LINE]) -> Optional[Tuple[float, float]]:
     seg_gg = [max(x.zs_high for x in g) for g in groups]
     zd, zg = max(seg_dd), min(seg_gg)
     return (zd, zg) if zd < zg else None
+
+
+def _line_index(ln: LINE, xds: List[LINE]) -> Optional[int]:
+    for i, x in enumerate(xds):
+        if x is ln:
+            return i
+    return None
+
+
+def _build_kuozhan_zs(run: List[ZS], region: List[LINE], interval: Tuple[float, float]) -> ZS:
+    """扩展组 → 高级别中枢 ZS。核心区[zd,zg]=三段重合;包络[dd,gg]=区域并集。"""
+    zd, zg = interval
+    dd = min(x.zs_low for x in region)
+    gg = max(x.zs_high for x in region)
+    z = ZS(zs_type="xd", start=run[0].start, end=run[-1].end,
+           zg=zg, zd=zd, gg=gg, dd=dd)
+    z.lines = list(region)
+    z.line_num = len(region)
+    z.done = True
+    z.real = True
+    z.expanded_with = list(run)
+    z._gg_cache, z._dd_cache, z._bounds_dirty = gg, dd, False
+    return z
+
+
+def kuozhan_zhongshu(zss: List[ZS], xds: List[LINE]) -> List[ZS]:
+    """连续 is_kuozhan 中枢成组(≥2)→ 每组取涉及线段区域、按 three_segment_interval
+    产 1 个高级别中枢(原文「中枢以前三个为准+延伸」: 一组只一个中枢)。
+    退化/切不出 3 段 → 跳过该组。按时间序返回。
+    """
+    out: List[ZS] = []
+    n = len(zss)
+    i = 0
+    while i < n - 1:
+        if not is_kuozhan(zss[i], zss[i + 1]):
+            i += 1
+            continue
+        j = i
+        while j + 1 < n and is_kuozhan(zss[j], zss[j + 1]):
+            j += 1
+        run = zss[i:j + 1]
+        i0 = _line_index(run[0].lines[0], xds) if run[0].lines else None
+        i1 = _line_index(run[-1].lines[-1], xds) if run[-1].lines else None
+        if i0 is not None and i1 is not None and i1 > i0:
+            region = xds[i0:i1 + 1]
+            interval = three_segment_interval(region)
+            if interval is not None:
+                out.append(_build_kuozhan_zs(run, region, interval))
+        i = j + 1
+    return out

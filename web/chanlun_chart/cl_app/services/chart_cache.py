@@ -88,7 +88,8 @@ def _stable_hash(obj) -> str:
 # - v8 (2026-06) ── P8 中枢扩展实体化:高级别中枢改由 recursive_levels L1/L2/L3 承载,
 #   P7 higher_zs 停用;图表渲染逻辑随之更新,旧 cache 需强制失效。
 # - v9 (2026-06) ── P8 中枢扩展(错机制)拆除;中枢升级按 line4898 重做中,图表暂时只画 L0。
-_CHART_CACHE_SCHEMA_VERSION = "v9"
+# - v10 (2026-06) ── P9 中枢升级·扩展(line4898 三段重合)上线: L1 由 zs_upgrade.kuozhan_zhongshu 产。
+_CHART_CACHE_SCHEMA_VERSION = "v10"
 
 
 def _build_cache_key(market: str, code: str, frequency: str, cl_config: dict) -> str:

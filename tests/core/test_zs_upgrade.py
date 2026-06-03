@@ -4,7 +4,7 @@
 区间 [1.713,1.737](用户多轮确认的正确值)。
 """
 from chanlun.core.cl_interface import ZS
-from chanlun.core.zs_upgrade import is_kuozhan, three_segment_interval
+from chanlun.core.zs_upgrade import is_kuozhan, kuozhan_zhongshu, three_segment_interval
 
 
 class _L:
@@ -71,3 +71,27 @@ def test_is_kuozhan_trend_false():
     z1 = _zs(1.689, 1.711, 1.664, 1.737)
     z2 = _zs(2.00, 2.10, 1.90, 2.20)
     assert is_kuozhan(z1, z2) is False
+
+
+def test_kuozhan_zhongshu_513100_z1_z2():
+    """z1(线段 xd6-11)+z2(线段 xd13-15)成组 → 1 个扩展中枢 [1.713,1.737]。"""
+    xds = _xds_513100()                  # xd6..xd15
+    z1 = _zs(1.689, 1.711, 1.664, 1.737)
+    z1.lines = xds[0:6]                  # xd6-11
+    z2 = _zs(1.729, 1.742, 1.713, 1.756)
+    z2.lines = xds[7:10]                 # xd13-15
+    out = kuozhan_zhongshu([z1, z2], xds)
+    assert len(out) == 1
+    assert round(out[0].zd, 4) == 1.7130 and round(out[0].zg, 4) == 1.7370
+    assert out[0].expanded_with == [z1, z2]
+    assert out[0].dd <= out[0].zd and out[0].zg <= out[0].gg    # 核心区 ⊂ 包络
+
+
+def test_kuozhan_zhongshu_trend_no_group():
+    """相邻中枢是趋势(包络分离)→ 不成组、无扩展中枢。"""
+    xds = _xds_513100()
+    z1 = _zs(1.689, 1.711, 1.664, 1.737)
+    z1.lines = xds[0:6]
+    z2 = _zs(2.00, 2.10, 1.90, 2.20)     # 整体在上 = 趋势
+    z2.lines = xds[7:10]
+    assert kuozhan_zhongshu([z1, z2], xds) == []
