@@ -3,10 +3,10 @@
 中枢升级本质 = 3 段次级别走势类型重叠（原文 line8131/8155）。三种情况确定区间：
 - 正常（非延伸/扩展）：按走势类型（中枢级，原文 line8155 边界=产生新中枢）。【待做】
 - 延伸 9 段：9 线段 3+3+3 分三组。【待做】
-- 扩展：≥2 中枢按中心定理二重叠 → 涉及线段取「底/顶」切 3 段。【本模块】
+- 扩展：≥2 中枢按中心定理二重叠 → 涉及线段按 line4898 摆动分段(进入段+前3走势)。【本模块】
 
-设计：513100 真实数据验证 [1.713,1.737]=用户确认值；301004 无重叠/无退化。
-孤立、不接 CL。
+设计：扩展区间按「走势」划分(非全局底/顶硬切)，513100→[1.713,1.737]、
+301004 z9-11→[39.01,41.73]，均真实数据人工确认。孤立、不接 CL。
 """
 from __future__ import annotations
 
@@ -28,33 +28,96 @@ def is_kuozhan(a: ZS, b: ZS) -> bool:
     return env_overlap and core_sep
 
 
+def _pivots(lines: List[LINE]) -> List[float]:
+    """线段序列 → 交替转折点价(p[0]=首线段起点, 之后每线段终点)。
+
+    up 线段 起=zs_low 终=zs_high; down 线段 起=zs_high 终=zs_low。
+    线段方向交替, 故转折点也交替(底/顶)。
+    """
+    if not lines:
+        return []
+    first = lines[0]
+    pv = [first.zs_low if first.type == "up" else first.zs_high]
+    for ln in lines:
+        pv.append(ln.zs_high if ln.type == "up" else ln.zs_low)
+    return pv
+
+
+def _segment_swings(pv: List[float], first_up: bool) -> List[Tuple[int, int]]:
+    """交替转折点 → 走势摆动段 [(起idx, 极值idx), ...]。
+
+    line4898: 下跌走势「创新低则延伸; 出现更高低点 或 更高高点 → 结束于最低底」,
+    上涨对称。每段从上一段的极值续起。
+    """
+    n = len(pv)
+    if n < 2:
+        return []
+
+    def is_low(idx: int) -> bool:          # p[0] 类型由首线段定, 之后交替
+        return first_up if idx % 2 == 0 else (not first_up)
+
+    segs: List[Tuple[int, int]] = []
+    s = 0
+    while s < n - 1:
+        down = pv[s + 1] < pv[s]
+        ext_idx = s
+        ref = pv[s]                         # 反向极值参考(下跌=last_top, 上涨=last_bot)
+        end = n - 1
+        i = s + 1
+        while i < n:
+            if down:
+                if is_low(i):
+                    if pv[i] < pv[ext_idx]:
+                        ext_idx = i          # 新低, 延伸
+                    else:
+                        end = ext_idx
+                        break                # 更高低点 → 结束
+                elif pv[i] > ref:
+                    end = ext_idx
+                    break                    # 更高高点 → 结束
+                else:
+                    ref = pv[i]
+            else:
+                if not is_low(i):
+                    if pv[i] > pv[ext_idx]:
+                        ext_idx = i
+                    else:
+                        end = ext_idx
+                        break
+                elif pv[i] < ref:
+                    end = ext_idx
+                    break
+                else:
+                    ref = pv[i]
+            i += 1
+        else:
+            end = ext_idx
+        if end <= s:                         # 防呆(正常不触发)
+            break
+        segs.append((s, end))
+        s = end
+    return segs
+
+
 def three_segment_interval(lines: List[LINE]) -> Optional[Tuple[float, float]]:
     """扩展区域的线段序列 → 高级别中枢区间 [ZD,ZG]。
 
-    line4898 高低点定走势：在区域里取「底」=最低的 down 线段、「顶」=最高的 up 线段
-    （只看 down/up 各自，避开进入段把方向带歪），用底/顶两个内部切点把区域切成 3 段；
-    每段取 [最低,最高]，[ZD,ZG]=[max(3段DD), min(3段GG)]（原文 line8131 中枢=3走势重叠区）。
-    退化（ZD>=ZG，无共同重合）或切不出 3 段 → None。
+    按 line4898 走势把区域切成「进入段 + 若干走势」(摆动分段, 反向极值打断),
+    丢掉进入段、取后面前 3 段走势, 每段 [最低,最高],
+    [ZD,ZG]=[max(3段低), min(3段高)](原文 line8131 中枢=3走势重叠区;前3为准、余为延伸)。
+    退化(ZD>=ZG, 无共同重合)或不足「进入段+3走势」→ None。
+    513100→[1.713,1.737]; 301004 z9-11→[39.01,41.73](均真实数据人工确认)。
     """
-    n = len(lines)
-    if n < 3:
+    pv = _pivots(lines)
+    if len(pv) < 2:
         return None
-    down = [i for i in range(n) if lines[i].type == "down"]
-    up = [i for i in range(n) if lines[i].type == "up"]
-    if not down or not up:
+    swings = _segment_swings(pv, first_up=(lines[0].type == "up"))
+    if len(swings) < 4:                      # 进入段 + 3 走势
         return None
-    p_lo = min(down, key=lambda i: lines[i].zs_low)     # 底：最低 down 线段
-    p_hi = max(up, key=lambda i: lines[i].zs_high)       # 顶：最高 up 线段
-    inner = sorted({p_lo, p_hi} - {0, n - 1})            # 内部切点（边界不算转折）
-    if len(inner) < 2:
-        return None
-    a, b = inner
-    groups = [lines[: a + 1], lines[a + 1: b + 1], lines[b + 1:]]
-    if any(not g for g in groups):
-        return None
-    seg_dd = [min(x.zs_low for x in g) for g in groups]
-    seg_gg = [max(x.zs_high for x in g) for g in groups]
-    zd, zg = max(seg_dd), min(seg_gg)
+    three = swings[1:4]                       # 丢进入段, 取前 3 段走势
+    lows = [min(pv[a:b + 1]) for a, b in three]
+    highs = [max(pv[a:b + 1]) for a, b in three]
+    zd, zg = max(lows), min(highs)
     return (zd, zg) if zd < zg else None
 
 

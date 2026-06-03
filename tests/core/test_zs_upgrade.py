@@ -31,7 +31,7 @@ def _xds_513100():
 
 
 def test_three_segment_interval_513100():
-    """513100 扩展: 底=xd9 顶=xd12 切 3 段(xd6-9/xd10-12/xd13-15) → [1.713,1.737]。"""
+    """513100 扩展: 摆动分段(进入段xd6 + 下xd7-9/上xd10-12/盘xd13-15) → [1.713,1.737]。"""
     res = three_segment_interval(_xds_513100())
     assert res is not None
     zd, zg = res
@@ -39,12 +39,35 @@ def test_three_segment_interval_513100():
     assert round(zg, 4) == 1.7370
 
 
-def test_three_segment_degenerate_returns_none():
-    """3 段无共同重合(后段低点高过前段高点) → 退化 None。"""
+def _xds_301004_z9z11():
+    """301004 z9-11 区域线段 xd63-76(QMT 真实数据)。前 3 段走势:
+    下(到xd66=38.00)/上(到xd69=41.78)/下(到xd74=39.01,xd75创更高高点41.14打断)。"""
+    vals = [
+        ("up", 41.380, 41.730), ("down", 40.100, 41.730), ("up", 40.100, 41.680),
+        ("down", 38.000, 41.680), ("up", 38.000, 41.590), ("down", 39.530, 41.590),
+        ("up", 39.530, 41.780), ("down", 41.000, 41.780), ("up", 41.000, 41.620),
+        ("down", 40.400, 41.620), ("up", 40.400, 40.700), ("down", 39.010, 40.700),
+        ("up", 39.010, 41.140), ("down", 39.730, 41.140),
+    ]
+    return [_L(t, lo, hi) for t, lo, hi in vals]
+
+
+def test_three_segment_interval_301004_z9z11():
+    """301004 z9-11 扩展: 第3段下跌走势在 xd74=39.01 被 xd75 更高高点打断
+    → 中枢 [39.01, 41.73](用户图形确认),不再被全段最低 38.06 撑宽。"""
+    res = three_segment_interval(_xds_301004_z9z11())
+    assert res is not None
+    zd, zg = res
+    assert round(zd, 4) == 39.0100
+    assert round(zg, 4) == 41.7300
+
+
+def test_three_segment_uptrend_too_few_swings_none():
+    """单边上涨只切出 1 段上涨走势, 不足「进入段 + 3 走势」→ None。"""
     lines = [
         _L("up", 1.00, 1.10), _L("down", 1.05, 1.10), _L("up", 1.05, 1.20),
         _L("down", 1.15, 1.20), _L("up", 1.15, 1.30), _L("down", 1.25, 1.30),
-    ]  # 底=idx1(1.05) 顶=idx4(1.30): 段[1.0,1.1]/[1.05,1.3]/[1.25,1.3] → zd=1.25>=zg=1.1
+    ]
     assert three_segment_interval(lines) is None
 
 
