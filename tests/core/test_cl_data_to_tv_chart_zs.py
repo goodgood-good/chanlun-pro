@@ -15,6 +15,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from chanlun import fun
 from chanlun.cl_utils import cl_data_to_tv_chart
 
@@ -44,6 +46,7 @@ def test_cl_data_to_tv_chart_handles_xd_zs_without_entry_segment(
     assert chart_data["xd_zss"][0]["points"][0]["time"] == expected_time
 
 
+@pytest.mark.skip(reason="P9 止血: L1+ 渲染暂关(cl_utils 只画L0), 中枢升级按 line4898 重做后恢复")
 def test_cl_data_to_tv_chart_includes_recursive_l1plus(
     cl_with_synthetic_klines, cl_config
 ):

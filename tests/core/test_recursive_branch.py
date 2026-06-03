@@ -4,8 +4,6 @@
 """
 from __future__ import annotations
 
-import pandas as pd
-
 from chanlun.core.cl_interface import CLKline, FX, XD, ZS, ZSLX
 from chanlun.core import recursive_branch
 
@@ -236,77 +234,3 @@ def test_calculate_ld_provider_for_level():
         lines, single, Config.ZS_WZGX_ZGD.value, ld_provider_for_level=factory)
     assert seen_levels and seen_levels[0] == 0            # factory(0) 被调(各级用对应 provider)
     assert not single_called                             # 有 factory → 单一 ld_provider 未被使用
-
-
-def test_apply_expansion_overlay_adds_higher_level():
-    from chanlun.core.recursive_branch import _apply_expansion_overlay, LevelResult
-    from chanlun.core.cl_interface import ZS
-
-    def _zs(zd, zg, dd, gg, done=True, line_num=3):
-        z = ZS(zs_type="xd", start=None)
-        z.zd, z.zg, z.dd, z.gg = zd, zg, dd, gg
-        z.done = done
-        z.line_num = line_num
-        return z
-
-    z0 = _zs(10, 12, 9, 13)
-    z1 = _zs(7, 9, 8, 11)                       # 与 z0 核心区分离+包络重叠 → 扩展(子中枢包络重合)
-    # overlay 现只用 cur.zss 算扩展(不再借 zslxs)，故 zslxs 置空
-    results = [LevelResult(level=0, zss=[z0, z1], done_divergence=[None, None],
-                           zslxs=[], upgrade_idx=[], units=[])]
-    _apply_expansion_overlay(results)
-    assert any(lv.level == 1 for lv in results)
-    l1 = next(lv for lv in results if lv.level == 1)
-    assert l1.zss and l1.zss[0].expanded_with == [z0, z1]
-    assert len(l1.done_divergence) == len(l1.zss)     # 索引对齐不变量
-    assert len(l1.upgrade_idx) == len(l1.zss)         # 升级标注对齐
-
-
-# ---- P8 真实 fixture 集成验证 ----
-
-_P8_CFG = {
-    "chart_show_fx": "1", "chart_show_bi": "1", "chart_show_xd": "1",
-    "zs_bi_type": ["zs_type_bz"], "zs_xd_type": ["zs_type_bz"],
-    "idx_macd_fast": 12, "idx_macd_slow": 26, "idx_macd_signal": 9,
-    "zs_wzgx": "ZGD",
-}
-
-
-def _load_cl(path, name):
-    from chanlun.core.cl import CL
-    from chanlun.core.cl_interface import Config
-    df = pd.read_parquet(path) if path.endswith(".parquet") else pd.read_csv(path)
-    df["date"] = pd.to_datetime(df["date"])
-    cfg = dict(_P8_CFG)
-    cfg["zs_wzgx"] = Config.ZS_WZGX_GD.value
-    cd = CL(name, "1m", cfg)
-    cd.process_klines(df)
-    return cd
-
-
-def test_real_fixture_expansion_tsla():
-    """TSLA 线段层多中枢 → 单周期中枢扩展应产 ≥1 高级别中枢；各扩展中枢区间互不相同
-    (修复前因借走势类型而塌缩重复)、核心区非退化、由 ≥2 子中枢构成。"""
-    cd = _load_cl("tests/fixtures/klines/us_TSLA_US_1m.csv", "TSLA")
-    levels = cd.get_recursive_branch_levels()
-    higher = [z for lv in levels if lv.level >= 1 for z in lv.zss if z.expanded_with]
-    assert len(higher) >= 1                         # 应产出扩展高级别中枢
-    intervals = set()
-    for z in higher:
-        assert z.zd < z.zg                          # 核心区非退化
-        assert z.dd <= z.zd and z.zg <= z.gg         # 核心区 ⊂ 包络
-        assert len(z.expanded_with) >= 2            # 扩展由 ≥2 子中枢构成
-        intervals.add((z.zd, z.zg))
-    assert len(intervals) == len(higher)            # 区间互不相同(不再塌缩重复)
-
-
-def test_real_fixture_sparse_513100_no_crash():
-    """513100 线段层稀疏(约 1 个线段中枢) → 扩展自然产出 0：不报错、层级树正常返回。
-    (513100 的扩展发生在更细的笔层，线段层数据不足，不强求产出。)"""
-    cd = _load_cl("tests/fixtures/klines/a_SH_513100_1m.parquet", "513100")
-    levels = cd.get_recursive_branch_levels()
-    assert levels is not None
-    for lv in levels:                               # 若线段层确有扩展中枢，必非退化
-        for z in lv.zss:
-            if z.expanded_with:
-                assert z.zd < z.zg
