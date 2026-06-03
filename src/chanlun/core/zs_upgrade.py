@@ -99,6 +99,18 @@ def _segment_swings(pv: List[float], first_up: bool) -> List[Tuple[int, int]]:
     return segs
 
 
+def _interval_from_swings(pv: List[float], sw: List[Tuple[int, int]]) -> Optional[Tuple[float, float]]:
+    """摆动段 → 中枢区间 [ZD,ZG]:丢进入段、取前 3 段走势 [max低,min高]。
+    退化(ZD>=ZG)或不足「进入段+3走势」→ None。"""
+    if len(sw) < 4:
+        return None
+    three = sw[1:4]
+    lows = [min(pv[a:b + 1]) for a, b in three]
+    highs = [max(pv[a:b + 1]) for a, b in three]
+    zd, zg = max(lows), min(highs)
+    return (zd, zg) if zd < zg else None
+
+
 def three_segment_interval(lines: List[LINE]) -> Optional[Tuple[float, float]]:
     """扩展区域的线段序列 → 高级别中枢区间 [ZD,ZG]。
 
@@ -111,14 +123,33 @@ def three_segment_interval(lines: List[LINE]) -> Optional[Tuple[float, float]]:
     pv = _pivots(lines)
     if len(pv) < 2:
         return None
-    swings = _segment_swings(pv, first_up=(lines[0].type == "up"))
-    if len(swings) < 4:                      # 进入段 + 3 走势
-        return None
-    three = swings[1:4]                       # 丢进入段, 取前 3 段走势
-    lows = [min(pv[a:b + 1]) for a, b in three]
-    highs = [max(pv[a:b + 1]) for a, b in three]
-    zd, zg = max(lows), min(highs)
-    return (zd, zg) if zd < zg else None
+    sw = _segment_swings(pv, first_up=(lines[0].type == "up"))
+    return _interval_from_swings(pv, sw)
+
+
+def _termination_idx(pv: List[float], sw: List[Tuple[int, int]],
+                     zd: float, zg: float, n_lines: int) -> int:
+    """中枢结束线段索引(相对区域起点)。
+
+    原文三类买卖点: 某 1min 走势类型离开 [zd,zg](末端越界)且其后回拉走势不再重入
+    → 中枢在该「离开走势」末端线段结束。始终离开即回 → 末段索引(未结束/延续到末尾)。
+    """
+    k = 4                                    # 跳过 进入段 + 前 3 走势(定义段)
+    while k < len(sw):
+        b = sw[k][1]
+        ext = pv[b]
+        if zd <= ext <= zg:                  # 走势末端仍在中枢内 → 继续
+            k += 1
+            continue
+        if k + 1 < len(sw):                  # 离开: 看下一段回拉是否重入
+            ret = pv[sw[k + 1][1]]
+            back = (ret <= zg) if ext > zg else (ret >= zd)
+            if not back:                     # 回拉不重入 → 中枢结束于离开走势末端
+                return max(0, b - 1)
+            k += 2
+        else:
+            break                            # 无回拉段确认 → 未结束
+    return n_lines - 1
 
 
 def _line_index(ln: LINE, xds: List[LINE]) -> Optional[int]:
@@ -129,11 +160,12 @@ def _line_index(ln: LINE, xds: List[LINE]) -> Optional[int]:
 
 
 def _build_kuozhan_zs(run: List[ZS], region: List[LINE], interval: Tuple[float, float]) -> ZS:
-    """扩展组 → 高级别中枢 ZS。核心区[zd,zg]=三段重合;包络[dd,gg]=区域并集。"""
+    """扩展组 → 高级别中枢 ZS。核心区[zd,zg]=三段重合;包络[dd,gg]=区域并集;
+    起止 = region 首末线段(起=进入段起点, 止=离开不回的结束线段)。"""
     zd, zg = interval
     dd = min(x.zs_low for x in region)
     gg = max(x.zs_high for x in region)
-    z = ZS(zs_type="xd", start=run[0].start, end=run[-1].end,
+    z = ZS(zs_type="xd", start=region[0], end=region[-1],
            zg=zg, zd=zd, gg=gg, dd=dd)
     z.lines = list(region)
     z.line_num = len(region)
@@ -145,13 +177,15 @@ def _build_kuozhan_zs(run: List[ZS], region: List[LINE], interval: Tuple[float, 
 
 
 def kuozhan_zhongshu(zss: List[ZS], xds: List[LINE]) -> List[ZS]:
-    """连续 is_kuozhan 中枢成组(≥2)→ 每组取涉及线段区域、按 three_segment_interval
-    产 1 个高级别中枢(原文「中枢以前三个为准+延伸」: 一组只一个中枢)。
-    退化/切不出 3 段 → 跳过该组。按时间序返回。
+    """连续 is_kuozhan 中枢成组(≥2)= 找扩展中枢起点。每组:从起点起按全段 1min 走势
+    取前 3 段重合定区间(line4898),再按「离开不回」(三类买卖点)定结束线段。
+    一组一个高级别中枢;退化/不足 3 段 → 跳过;后一中枢须在前一中枢结束之后(防重叠)。
+    按时间序返回。
     """
     out: List[ZS] = []
     n = len(zss)
     i = 0
+    guard = -1                                   # 上一中枢结束线段(全局), 防时间重叠
     while i < n - 1:
         if not is_kuozhan(zss[i], zss[i + 1]):
             i += 1
@@ -161,11 +195,15 @@ def kuozhan_zhongshu(zss: List[ZS], xds: List[LINE]) -> List[ZS]:
             j += 1
         run = zss[i:j + 1]
         i0 = _line_index(run[0].lines[0], xds) if run[0].lines else None
-        i1 = _line_index(run[-1].lines[-1], xds) if run[-1].lines else None
-        if i0 is not None and i1 is not None and i1 > i0:
-            region = xds[i0:i1 + 1]
-            interval = three_segment_interval(region)
+        if i0 is not None and i0 >= guard:
+            sub = xds[i0:]                        # 从中枢起点起的全段(非 run 区间)
+            pv = _pivots(sub)
+            sw = _segment_swings(pv, first_up=(sub[0].type == "up")) if len(pv) >= 2 else []
+            interval = _interval_from_swings(pv, sw)
             if interval is not None:
+                rel_end = _termination_idx(pv, sw, interval[0], interval[1], len(sub))
+                region = sub[:rel_end + 1]
                 out.append(_build_kuozhan_zs(run, region, interval))
+                guard = i0 + rel_end             # 下一中枢起点须 >= 本中枢结束
         i = j + 1
     return out

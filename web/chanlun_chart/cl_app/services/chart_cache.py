@@ -90,7 +90,8 @@ def _stable_hash(obj) -> str:
 # - v9 (2026-06) ── P8 中枢扩展(错机制)拆除;中枢升级按 line4898 重做中,图表暂时只画 L0。
 # - v10 (2026-06) ── P9 中枢升级·扩展(line4898 三段重合)上线: L1 由 zs_upgrade.kuozhan_zhongshu 产。
 # - v11 (2026-06) ── 扩展区间改「摆动分段」(进入段+前3走势, 非全局底/顶): 301004 z9-11 [38.06]→[39.01]。
-_CHART_CACHE_SCHEMA_VERSION = "v11"
+# - v12 (2026-06) ── 扩展中枢「离开不回」结束(三类买卖点)+全段走势定区间: 301004 出 3 个依次下移中枢。
+_CHART_CACHE_SCHEMA_VERSION = "v12"
 
 
 def _build_cache_key(market: str, code: str, frequency: str, cl_config: dict) -> str:

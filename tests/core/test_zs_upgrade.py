@@ -4,14 +4,23 @@
 区间 [1.713,1.737](用户多轮确认的正确值)。
 """
 from chanlun.core.cl_interface import ZS
-from chanlun.core.zs_upgrade import is_kuozhan, kuozhan_zhongshu, three_segment_interval
+from chanlun.core.zs_upgrade import (
+    _interval_from_swings,
+    _pivots,
+    _segment_swings,
+    _termination_idx,
+    is_kuozhan,
+    kuozhan_zhongshu,
+    three_segment_interval,
+)
 
 
 class _L:
-    """最小线段桩：type / zs_low / zs_high。"""
+    """最小线段桩：type / zs_low / zs_high (+ start/end 占位, 建 ZS 用)。"""
 
     def __init__(self, t, lo, hi):
         self.type, self.zs_low, self.zs_high = t, lo, hi
+        self.start = self.end = None
 
 
 def _xds_513100():
@@ -73,6 +82,36 @@ def test_three_segment_uptrend_too_few_swings_none():
 
 def test_three_segment_too_few_lines_none():
     assert three_segment_interval([_L("up", 1, 2), _L("down", 1, 2)]) is None
+
+
+def _lines_from_pivots(prices):
+    """相邻价格 → _L 线段(方向交替, 每段 prices[k]→prices[k+1])。"""
+    return [_L("up" if prices[k + 1] > prices[k] else "down",
+               min(prices[k], prices[k + 1]), max(prices[k], prices[k + 1]))
+            for k in range(len(prices) - 1)]
+
+
+def _interval_and_end(prices):
+    lines = _lines_from_pivots(prices)
+    pv = _pivots(lines)
+    sw = _segment_swings(pv, first_up=(lines[0].type == "up"))
+    interval = _interval_from_swings(pv, sw)
+    end = _termination_idx(pv, sw, interval[0], interval[1], len(lines))
+    return interval, end, len(lines)
+
+
+def test_termination_leave_up_no_return():
+    """中枢[9.5,11.5]:走势4 上离开到 13、回拉 12.5 不重入 → 结束于离开走势末端线段(提前结束)。"""
+    interval, end, n = _interval_and_end([8, 12, 9, 11.5, 9.5, 11, 10, 13, 12.5])
+    assert (round(interval[0], 2), round(interval[1], 2)) == (9.5, 11.5)
+    assert end == 6                 # 离开走势(到13)末端线段
+    assert end < n - 1              # 确实提前结束
+
+
+def test_termination_return_to_range_ongoing():
+    """离开后回拉重入 [9.5,11.5] → 中枢延续, 未确认结束 → 末段索引。"""
+    _, end, n = _interval_and_end([8, 12, 9, 11.5, 9.5, 11, 10, 13, 10.5])
+    assert end == n - 1             # 未结束
 
 
 def _zs(zd, zg, dd, gg, done=True):
