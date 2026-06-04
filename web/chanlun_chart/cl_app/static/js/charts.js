@@ -1634,11 +1634,16 @@ class ChartManager {
             if (cfg[toggleKey] === false) continue;
             for (const zs of lvObj.zss) recZss.push({ ...zs, _level: lvl });
         }
+        // includeOverlaps=false(末参):中枢框只在「头部(左沿)进入可视窗」时创建,与 xd_zss 一致。
+        // 原 true(tailTime>=from)会渲染头部在窗外的宽框,但 TV createMultipointShape 把窗外/未加载的
+        // 头部角点 snap 到边缘 → 框塌成方块/错位,且被 reconcile 按 key 留存,只有 toggle 删重建才恢复
+        // (用户反馈「缩放后中枢错位、重勾才正常」)。改 false:宽框需左沿在视野内才显(缩放使左沿出界
+        // 会暂隐,但绝不错位);左沿回到视野自动补绘。
         this.reconcile('recursive_zss', recZss, from, symbolKey, (item) => {
             const lvl = item._level || 0;
             const color = RECURSIVE_LEVEL_COLORS[lvl % RECURSIVE_LEVEL_COLORS.length];
             return safeCreate(wrapZs(color, lvl === 0 ? 1 : 2)(item), 'rec_zs');
-        }, false, true);
+        }, false, false);
         // P7 higher_zs 已停用(后端不再产出)。保留空路径防旧 cache 残留数据报错;
         // 内存缓存可能短暂命中旧 higher_zs(此时已无 per-period 开关可关),重启服务/清缓存后消失。
         if (barsResult.higher_zs && barsResult.higher_zs.length) {
