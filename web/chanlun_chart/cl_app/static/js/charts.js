@@ -1447,6 +1447,7 @@ class ChartManager {
 
         const existingKeys = new Set(container.map(item => item.key));
         let createSync = 0, createAsync = 0, createSkip = 0;
+        let createFailed = false;   // 本轮有 create→null(chart 未 ready/点超范围)→ 不落守卫、放行重试
         itemsToProcess.forEach(({ item, key, time, tailTime }) => {
             if (existingKeys.has(key)) { createSkip += 1; return; }
             const result = createFunc(item);
@@ -1461,6 +1462,7 @@ class ChartManager {
                 result.then(realId => {
                     if (realId == null) {
                         console.warn(`[CHANLUN-DIAG][reconcile.${type}] async create→null key=${(key||'').slice(0,40)}`);
+                        delete this._reconcileGuard[guardKey];   // 撤守卫,否则重试同签名被 skip
                         this._scheduleReconcileRetry(`${type}:async-null`);
                         return;
                     }
@@ -1469,6 +1471,7 @@ class ChartManager {
                     this._reconcileOwnedIds.add(realId);
                 }).catch((e) => {
                     console.warn(`[CHANLUN-DIAG][reconcile.${type}] async create→reject key=${(key||'').slice(0,40)}`, e);
+                    delete this._reconcileGuard[guardKey];
                     this._scheduleReconcileRetry(`${type}:async-reject`);
                 });
             } else if (result != null) {
@@ -1478,13 +1481,19 @@ class ChartManager {
                 createSync += 1;
             } else {
                 console.warn(`[CHANLUN-DIAG][reconcile.${type}] sync create→null key=${(key||'').slice(0,40)}`);
+                createFailed = true;
                 this._scheduleReconcileRetry(`${type}:sync-null`);
             }
         });
 
         // 同步路径完成后记录签名；异步 create 仍在 pending 无妨，resolve 后 push 到
-        // container 与签名目标状态一致，下次 guard 时容器已正确
-        this._reconcileGuard[guardKey] = signature;
+        // container 与签名目标状态一致，下次 guard 时容器已正确。
+        // 但若本轮有 sync create→null(chart 未 ready/点超已加载范围),**不落守卫**——否则
+        // 签名未变时 _scheduleReconcileRetry 触发的重画会被上面 W1 guard 误 skip,失败的
+        // shape 永不重建(表现为「中枢框初次不显、点中枢重勾后才出」)。async→null 在其回调删守卫同理。
+        if (!createFailed) {
+            this._reconcileGuard[guardKey] = signature;
+        }
 
         // 仅在 window.__chanlunDebug=true 时输出调试摘要，避免生产 console 刷屏
         // 错误诊断走 console.warn，不受此开关控制
