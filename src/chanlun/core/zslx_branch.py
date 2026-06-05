@@ -28,9 +28,8 @@ class ZslxBranchCalculator:
             direction = "up" if cur_dir == "trend_up" else "down"
             zslx_type = "上涨" if direction == "up" else "下跌"
         else:
-            # 盘整：单中枢，或仅由中枢扩张(expand,本体相交)连接、无趋势方向的多中枢
-            # (高级别中枢候选，实体化留 P4b)。方向 = 整段核心净位移(末中枢末核心段
-            # 终点 vs 首中枢首核心段起点)，沿用旧 zslx_calculator._classify 口径。
+            # 仅由中枢扩张(expand,本体相交)连接、无趋势方向 → 盘整。方向 = 整段核心净位移
+            # (末中枢末核心段终点 vs 首中枢首核心段起点)，沿用旧 zslx_calculator._classify。
             # 前提：done 中枢已 correct_exit，lines 是本体(离开段剥到 z.end)。
             zslx_type = "盘整"
             first_seg, last_seg = zss[0].lines[0], zss[-1].lines[-1]
@@ -86,16 +85,19 @@ class ZslxBranchCalculator:
             )
             if reverse:
                 wts.append(self._finalize(cur, cur_start, cur_dir, done=True))
+                # 反转后新走势类型方向由其后 classify_rel 定(不能用反转方向 rel——反弹高点
+                # 中枢后续若 trend_up 则它是上涨趋势的起点,而非单盘整;原文趋势=≥2依次同向中枢)。
                 cur, cur_start, cur_dir = [zi], i, None
             else:
                 cur.append(zi)
                 if cur_dir is None and rel in ("trend_up", "trend_down"):
                     cur_dir = rel             # 趋势方向坐实(只认 trend_*，expand 不写入)
 
-            # 背驰边界（仅非方向反转时；zi 刚并入 cur，其背驰 = done_divergence[i]）
+            # 背驰边界：只在【趋势背驰 qs】切(走势终完美=趋势完成,原文 7260/22415)；
+            # 盘整背驰 pz 是中枢震荡内的力度衰减、不构成走势类型边界，不切。
             if not reverse and cur is not None:
                 dv = done_divergence[i]
-                if dv is not None and dv.is_beichi:
+                if dv is not None and dv.is_beichi and getattr(dv, "kind", None) == "qs":
                     wts.append(self._finalize(cur, cur_start, cur_dir, done=True))
                     cur, cur_dir, cur_start = None, None, -1
 

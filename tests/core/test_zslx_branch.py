@@ -5,7 +5,7 @@
 """
 from __future__ import annotations
 
-from chanlun.core.cl_interface import CLKline, FX, XD, ZS, ZSLX
+from chanlun.core.cl_interface import CLKline, FX, XD, ZS
 from chanlun.core import zslx_branch
 from chanlun.core.zs_branch import DivergenceResult
 
@@ -42,7 +42,6 @@ def _dv(is_beichi: bool, kind: str = "qs") -> DivergenceResult:
 
 # 一个本体在 [lo,hi] 的标准中枢（进入段 + 3 段核心震荡）
 def _zs_at(base_idx, entry, lo, hi):
-    mid = (lo + hi) / 2
     core = [_seg(base_idx + 1, "down", hi, lo), _seg(base_idx + 2, "up", lo, hi),
             _seg(base_idx + 3, "down", hi, lo)]
     return _make_zs(entry, core, lo, hi)
@@ -139,3 +138,17 @@ def test_calculate_beichi_terminates_trend():
     assert wts[0].zss == [z1, z2, z3] and wts[0].done is True   # 背驰终结
     assert wts[1].zss == [z4] and wts[1].done is False          # z4 另起
     assert wts[1].zslx_type == "盘整"          # 背驰后新起的单中枢 = 盘整
+
+
+def test_calculate_pz_beichi_does_not_terminate():
+    """盘整背驰(pz)是中枢震荡内的力度衰减、非走势类型边界 → 不切；只趋势背驰(qs)才切
+    (原文 7260/22415:走势类型边界=趋势完成=趋势背驰)。"""
+    z1 = _zs_at(0, _seg(0, "up", 2, 5), 5, 8)
+    z2 = _zs_at(10, _seg(10, "up", 8, 16), 16, 19)
+    z3 = _zs_at(20, _seg(20, "up", 19, 27), 27, 30)
+    z4 = _zs_at(30, _seg(30, "up", 30, 38), 38, 41)
+    dv = [None, None, _dv(True, "pz"), None]             # z3 处盘整背驰(pz)
+    wts = zslx_branch.ZslxBranchCalculator().calculate([z1, z2, z3, z4], dv)
+    assert len(wts) == 1                                 # pz 不切,上涨趋势延续
+    assert wts[0].zss == [z1, z2, z3, z4]
+    assert wts[0].zslx_type == "上涨"
