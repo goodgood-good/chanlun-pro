@@ -32,10 +32,15 @@ def _make_zs(core_segs, zd, zg) -> ZS:
     return z
 
 
-def _make_zslx(zss, zslx_type, index=99) -> ZSLX:
+def _make_zslx(zss, zslx_type, index=99, _type=None) -> ZSLX:
+    # 走势类型方向(.type=_type)默认按 zslx_type 推：上涨→up、下跌→down、盘整→up。
+    # 旧版恒置 "up"(连"下跌"也 type=up)会掩盖方向交替——原文 line7268 中枢必为
+    # 上下上/下上下,喂回 zs_branch 判中枢要读对 .type,故此处须给出真实方向。
+    if _type is None:
+        _type = {"上涨": "up", "下跌": "down"}.get(zslx_type, "up")
     z = ZSLX(zslx_level=None, start=zss[0].lines[0].start, end=zss[-1].lines[-1].end,
              start_line=zss[0].lines[0], end_line=zss[-1].lines[-1],
-             _type="up", index=index, done=True)
+             _type=_type, index=index, done=True)
     z.zss = list(zss)
     z.zslx_type = zslx_type
     z.zs_high = max(x.gg for x in zss)
@@ -182,32 +187,69 @@ def test_calculate_two_levels():
         "L1 中枢的构成段应为 ZSLX（L0 走势类型）实例"
 
 
+def test_calculate_same_direction_units_form_no_zhongshu():
+    """原文 line7268:中枢必为『向上+向下+向上』或『向下+向上+向下』方向交替三段重合。
+    3 个同向(down)走势类型即便价格区间重叠也不构成中枢——这是 301004 假 L1 中枢
+    [49.72,49.91](3 个连续下跌走势类型 [49.72,53.08]/[45.58,50.06]/[43.10,49.91] 价格
+    重合处硬挤出)的根因。zs_branch 须强制方向交替校验(require_alternation=True)。"""
+    from chanlun.core.zs_branch import ZsBranchCalculator
+
+    # 4 个同向 down、价格区间依次下移但仍重叠的走势类型(模拟 301004 一路下台阶)
+    u1 = _make_zslx([_make_zs([_seg(0, "up", 7, 10), _seg(1, "down", 10, 7), _seg(2, "up", 7, 10)], 7, 10)], "下跌", index=0)
+    u1.zs_low, u1.zs_high = 7, 10
+    u2 = _make_zslx([_make_zs([_seg(3, "up", 6, 9), _seg(4, "down", 9, 6), _seg(5, "up", 6, 9)], 6, 9)], "下跌", index=1)
+    u2.zs_low, u2.zs_high = 6, 9
+    u3 = _make_zslx([_make_zs([_seg(6, "up", 5, 8), _seg(7, "down", 8, 5), _seg(8, "up", 5, 8)], 5, 8)], "下跌", index=2)
+    u3.zs_low, u3.zs_high = 5, 8
+    u4 = _make_zslx([_make_zs([_seg(9, "up", 1, 4), _seg(10, "down", 4, 1), _seg(11, "up", 1, 4)], 1, 4)], "下跌", index=3)
+    u4.zs_low, u4.zs_high = 1, 4
+    # u1∩u2∩u3 = [max(7,6,5),min(10,9,8)] = [7,8] 非退化(若不校验方向就会挤出假中枢);
+    # 全 down 不交替 → 原文判定无中枢。
+    assert all(u.type == "down" for u in (u1, u2, u3, u4))
+
+    units = recursive_branch._as_units([u1, u2, u3, u4])
+    res = ZsBranchCalculator(min_zs_lines=3).calculate(units)
+    assert res.done_zss == []          # 同向不交替 → 无已完成中枢(原文 line7268)
+    assert res.live == []              # 也无右边缘 pending 中枢(无任何交替三段)
+
+
 def test_calculate_reaches_level1_end_to_end():
     """端到端 线段→L0(≥3走势类型)→_as_units 喂回→L1:覆盖 recursive while 循环的
     L≥1 升级分支(units=_as_units(zslxs);level+=1 后再跑 ZsBranchCalculator)。该分支
     被手工构造的 test_calculate_two_levels 绕过(它直接调 ZsBranchCalculator),此前仅
     真实数据 probe 兜底——本测试补上自动化覆盖(评审 What's Missing)。
 
-    构造:5 个本体大分离([5,8]↔[40,43])、方向交替的中枢→classify_rel 判 trend(非
-    expand)→zslx_branch 经 2 次方向反转切出 ≥3 走势类型→满足 len(zslxs)>=3 的喂回
-    条件→进入 L1。L1 中枢右边缘未完成→由 pending 分支记录(zss≥1、zslxs=[])。
+    构造:6 个中枢,级别 [20,23]/[40,43]/[20,23]/[2,5]/[20,23]/[40,43],关系
+    up,down,down,up,up → zslx_branch 切出 **3 个方向交替**的走势类型
+    [上涨[z1,z2], 下跌[z3,z4], 上涨[z5,z6]](走势3 用双中枢上涨趋势,方向稳为 up、
+    不靠单中枢盘整净值)。3 个 up/down/up 走势类型本体重叠 [20,23] → _as_units 喂回
+    后,L1 zs_branch 在【方向交替校验(require_alternation=True)】下聚出 L1 中枢。
+
+    注:走势类型须**真正方向交替**才成 L1 中枢(原文 line7268:中枢=上下上/下上下)。
+    旧版构造产出『上涨,上涨,盘整』连续同向走势类型,曾靠关闭交替校验的假中枢才递归到
+    L1;交替校验修复后改用本交替构造。
     """
     lines = [
-        _seg(0, "up", 4, 8), _seg(1, "down", 8, 5), _seg(2, "up", 5, 8), _seg(3, "down", 8, 5),
-        _seg(4, "up", 5, 42),                                                    # 强上行离开
+        _seg(0, "up", 19, 23), _seg(1, "down", 23, 20), _seg(2, "up", 20, 23), _seg(3, "down", 23, 20),
+        _seg(4, "up", 20, 42),                                                   # 强上行→中枢2
         _seg(5, "down", 42, 40), _seg(6, "up", 40, 43), _seg(7, "down", 43, 40), _seg(8, "up", 40, 43),
-        _seg(9, "down", 40, 4),                                                  # 强下行(反转)
-        _seg(10, "up", 4, 8), _seg(11, "down", 8, 5), _seg(12, "up", 5, 8), _seg(13, "down", 8, 5),
-        _seg(14, "up", 5, 44),                                                   # 强上行(反转)
-        _seg(15, "down", 44, 40), _seg(16, "up", 40, 43), _seg(17, "down", 43, 40), _seg(18, "up", 40, 43),
-        _seg(19, "down", 40, 4),                                                 # 强下行(反转)
-        _seg(20, "up", 4, 8), _seg(21, "down", 8, 5), _seg(22, "up", 5, 8), _seg(23, "down", 8, 5),
-        _seg(24, "up", 5, 44), _seg(25, "down", 44, 40),                         # 离开确认中枢5
+        _seg(9, "down", 40, 19),                                                 # 强下行(反转)→中枢3
+        _seg(10, "up", 19, 23), _seg(11, "down", 23, 20), _seg(12, "up", 20, 23), _seg(13, "down", 23, 20),
+        _seg(14, "up", 20, 23),                                                  # 中枢3 多一段,结束于 up
+        _seg(15, "down", 23, 2),                                                 # 强下行(反转)→中枢4
+        _seg(16, "up", 2, 5), _seg(17, "down", 5, 2), _seg(18, "up", 2, 5), _seg(19, "down", 5, 2),
+        _seg(20, "up", 2, 23),                                                   # 强上行(反转)→中枢5
+        _seg(21, "down", 23, 20), _seg(22, "up", 20, 23), _seg(23, "down", 23, 20),
+        _seg(24, "up", 20, 42),                                                  # 强上行→中枢6
+        _seg(25, "down", 42, 40), _seg(26, "up", 40, 43), _seg(27, "down", 43, 40), _seg(28, "up", 40, 43),
+        _seg(29, "down", 40, 36),                                                # 离开确认中枢6
     ]
     res = recursive_branch.RecursiveBranchCalculator().calculate(
         lines, _ld_none, Config.ZS_WZGX_ZGD.value)
-    assert len(res) >= 2, "应递归到 L1(L0 切出≥3走势类型→_as_units 喂回升级)"
+    assert len(res) >= 2, "应递归到 L1(L0 切出≥3方向交替走势类型→_as_units 喂回升级)"
     assert res[0].level == 0 and len(res[0].zslxs) >= 3   # L0 喂回前提:≥3 走势类型
+    # 喂回的 3 走势类型须方向交替(up/down/up),否则交替校验下聚不出 L1 中枢
+    assert [zx.type for zx in res[0].zslxs[:3]] == ["up", "down", "up"]
     assert res[1].level == 1                              # 升级分支(level+=1)被执行
     assert len(res[1].zss) >= 1                           # L1 中枢产出(done 或 pending)
 

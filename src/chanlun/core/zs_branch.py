@@ -208,7 +208,12 @@ class ZsBranchCalculator:
         if not lines:
             return ZsBranchResult(done_zss=[], live=[], freeze_idx=0, done_divergence=[])
         zc = ZsCalculator(
-            require_alternation=False,
+            # 强制方向交替:原文 line7268「任何图形上的『向上+向下+向上』或『向下+向上
+            # +向下』都必然产生中枢」+ line24727「三段上下上或下上下…重合就构成中枢」——
+            # 中枢的本质就是 3 段方向交替的重叠区。L0(线段)本就天然交替,此校验是 no-op;
+            # L≥1(走势类型)构成段方向不必然交替,关掉它会把『连续 3 个同向走势类型』的价格
+            # 重合处硬挤成假中枢(301004 假 L1 中枢 [49.72,49.91] 根因),故须开启。
+            require_alternation=True,
             min_zs_lines=self.min_zs_lines,
             max_zs_lines=self._NO_CAP,
         )
