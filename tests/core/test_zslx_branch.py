@@ -140,6 +140,39 @@ def test_calculate_beichi_terminates_trend():
     assert wts[1].zslx_type == "盘整"          # 背驰后新起的单中枢 = 盘整
 
 
+def test_calculate_merges_consecutive_same_type_into_one_extension():
+    """原文 line7264:连续走势类型必转化为其他类型 → 相邻同 zslx_type(下跌|下跌)不可能
+    是两个独立完成走势类型,只能是『一个扩展的走势类型』(line20105:未完成走势类型的延续;
+    line16429:只有背驰且真转折才是走势边界)。
+    301004 病灶:qs 背驰(底背驰)在持续下跌中途切出『下跌→下跌→下跌』——但价格没反转、
+    继续下台阶(=扩展/延续,line20108 反弹不回抽则趋势延续),须合并回一个下跌走势类型。"""
+    # 5 个依次下台阶(本体分离 trend_down)的中枢, z2 处 qs 背驰(底背驰但下跌继续)
+    z0 = _zs_at(0, _seg(0, "down", 46, 43), 40, 43)
+    z1 = _zs_at(10, _seg(10, "down", 43, 33), 30, 33)
+    z2 = _zs_at(20, _seg(20, "down", 33, 23), 20, 23)
+    z3 = _zs_at(30, _seg(30, "down", 23, 13), 10, 13)
+    z4 = _zs_at(40, _seg(40, "down", 13, 3), 0, 3)
+    dv = [None, None, _dv(True, "qs"), None, None]    # z2 qs 背驰切出 下跌|下跌
+    wts = zslx_branch.ZslxBranchCalculator().calculate([z0, z1, z2, z3, z4], dv)
+    assert len(wts) == 1                              # 合并:连续同向下跌 = 一个扩展走势类型
+    assert wts[0].zslx_type == "下跌" and wts[0]._type == "down"
+    assert wts[0].zss == [z0, z1, z2, z3, z4]         # 5 个中枢全并入
+    assert wts[0].done is False                       # 末走势类型未完成
+    assert wts[0].zs_low == min(z.dd for z in [z0, z1, z2, z3, z4])   # 包络覆盖全段
+    assert wts[0].zs_high == max(z.gg for z in [z0, z1, z2, z3, z4])
+
+
+def test_calculate_does_not_merge_different_types():
+    """相邻不同 zslx_type(下跌→盘整)是合法连接(line7264 不同类型),不合并。"""
+    z1 = _zs_at(0, _seg(0, "down", 20, 17), 14, 17)
+    z2 = _zs_at(10, _seg(10, "down", 17, 11), 8, 11)         # trend_down vs z1 → 下跌趋势
+    z3 = _zs_at(20, _seg(20, "down", 11, 9), 8, 11)          # 本体[8,11]∩z2[8,11] → expand → 盘整
+    dv = [None, _dv(True, "qs"), None]                       # z2 qs 背驰 → 下跌[z1,z2] 完成
+    wts = zslx_branch.ZslxBranchCalculator().calculate([z1, z2, z3], dv)
+    assert len(wts) == 2                                     # 下跌 + 盘整,类型不同不合并
+    assert wts[0].zslx_type == "下跌" and wts[1].zslx_type == "盘整"
+
+
 def test_calculate_pz_beichi_does_not_terminate():
     """盘整背驰(pz)是中枢震荡内的力度衰减、非走势类型边界 → 不切；只趋势背驰(qs)才切
     (原文 7260/22415:走势类型边界=趋势完成=趋势背驰)。"""

@@ -50,6 +50,33 @@ class ZslxBranchCalculator:
         zslx.zs_low = min(zs.dd for zs in zss)
         return zslx
 
+    @staticmethod
+    def _merge_same_type(wts: List[ZSLX]) -> List[ZSLX]:
+        """合并相邻同 zslx_type 的走势类型(原文 line7264:连续走势类型必转化为其他类型→
+        相邻同类型不可能是两个独立完成走势类型,只能是『一个扩展的走势类型』)。
+
+        依据:line16429「只有背驰才和走势转折有必然联系」+ line20105「下跌最后一个中枢
+        扩展=未完成走势类型的延续、还在一个走势类型里」+ line20108「背驰后反弹不回抽最后
+        中枢则趋势延续」。病灶(301004):qs 背驰(底背驰)在持续下跌中途切出『下跌→下跌→
+        下跌』,但价格没真反转、继续下台阶(=扩展/延续),把那些中途背驰/反转边界变成走势
+        类型内部、合并回一个下跌走势类型。不同类型(下跌→盘整)是合法连接,不并。
+
+        合并用 _finalize 重收尾:cur_dir 按目标 zslx_type 还原(上涨→trend_up/下跌→
+        trend_down/盘整→None),done 取末段、start_idx 取首段(prev.index=首走势类型 start_idx)。
+        """
+        _dir = {"上涨": "trend_up", "下跌": "trend_down"}
+        merged: List[ZSLX] = []
+        for zx in wts:
+            if merged and zx.zslx_type == merged[-1].zslx_type:
+                prev = merged[-1]
+                combined = list(prev.zss) + list(zx.zss)
+                merged[-1] = ZslxBranchCalculator._finalize(
+                    combined, prev.index, _dir.get(zx.zslx_type), done=zx.done
+                )
+            else:
+                merged.append(zx)
+        return merged
+
     def calculate(
         self,
         done_zss: List[ZS],
@@ -103,4 +130,5 @@ class ZslxBranchCalculator:
 
         if cur is not None:
             wts.append(self._finalize(cur, cur_start, cur_dir, done=False))
-        return wts
+        # 合并相邻同类型走势类型(原文 line7264:连续走势类型必不同类型;同类型=扩展、一个走势类型)
+        return self._merge_same_type(wts)
