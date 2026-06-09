@@ -163,7 +163,11 @@ def _stable_hash(obj) -> str:
 #   原写死 [中枢A本体·连接·中枢B本体],改为 _three_zoushi_overlap——把跨两中枢的区间在最高线段(顶)/
 #   最低线段(底)两处转折切 3 段(上涨/下跌/盘整任意组合、段数可变),取三段重合。扩张中枢区间变(数量
 #   不变),30m tongjibie 随之 3→4。recursive_levels 内容变,强制旧缓存失效。
-_CHART_CACHE_SCHEMA_VERSION = "v29"
+# - v30 (2026-06) ── 30m 同级别分解修正(用户指出原 30m 中枢不对):原「交替腿」从原始线段中枢按中心
+#   分组=级别错。按原文 38/39 课重做:次级别单位=5 分钟走势类型(zslx,原文 25178「Ai 是 5 分钟走势
+#   类型」),经结合运算(line25179 合并相邻同方向)成严格交替段(Ai 奇下偶上),连续 3 段上下上/下上下
+#   重合=中枢(line24727)。000001:5m 图 30m 中枢 2→1[3947,3984]、1m 图 30m 3→1。强制旧缓存失效。
+_CHART_CACHE_SCHEMA_VERSION = "v30"
 
 
 def _build_cache_key(market: str, code: str, frequency: str, cl_config: dict) -> str:

@@ -241,66 +241,63 @@ def _tongjibie_groups(zslxs) -> List[tuple]:
     return groups
 
 
-class _Leg:
-    """同级别分解的一条交替腿(单向运动,含 ≥1 个同向中枢)。
-    供 _tongjibie_groups 读 zs_low/zs_high(腿价格区间 = 腿内中枢包络并 [min dd, max gg])。"""
+class _Seg:
+    """**结合运算**后的一段(原文 line25179):由相邻**同方向**走势类型合并而成,使段序列严格交替
+    (上下上下…)。供 _tongjibie_groups 读 zs_low/zs_high(段价格区间 = 段内走势类型 zs_low/zs_high
+    的并);zss = 段内所有走势类型的中枢(供 region 定位线段)。"""
 
-    __slots__ = ("type", "zss", "zs_low", "zs_high")
+    __slots__ = ("dir", "zss", "zs_low", "zs_high")
 
-    def __init__(self, ztype: str, zss: List[ZS]):
-        self.type = ztype
-        self.zss = list(zss)
-        self.zs_low = min(z.dd for z in zss)
-        self.zs_high = max(z.gg for z in zss)
+    def __init__(self, zslx):
+        self.dir = zslx._type
+        self.zss = list(getattr(zslx, "zss", []) or [])
+        self.zs_low = zslx.zs_low
+        self.zs_high = zslx.zs_high
+
+    def merge(self, zslx) -> None:
+        self.zss.extend(getattr(zslx, "zss", []) or [])
+        self.zs_low = min(self.zs_low, zslx.zs_low)
+        self.zs_high = max(self.zs_high, zslx.zs_high)
 
 
-def _alternating_legs(zss: List[ZS]) -> List[_Leg]:
-    """中枢序列 → **严格交替腿**(上下上下…),同级别分解的正确输入(原文 24727 三段上下上/
-    下上下、24751 操作程式严格交替、25123「更大就分解成小的」= 不把同向多中枢并成大趋势单元)。
-
-    腿 = 一段单向运动:按中枢核心区中心 (zd+zg)/2 比较方向,连续同向中枢并成一腿,方向反转处断开;
-    反转腿从极值中枢起(**共享该端点**——反转发生在极值中枢,它既是上腿之尾又是下腿之头)。这样得到
-    的腿天然 上下上下 交替,任意连续三腿即 上下上 / 下上下,可直接套 _tongjibie_groups 取重合。
-    (区别于 ZslxBranchCalculator 的本体摆动走势类型:那个为递归升级把同向多中枢并成一个趋势 unit、
-    方向不交替,喂给同级别分解凑不出上下上 → 中枢恒 0,见 000001 5m 图实测 0 而本法得 2。)"""
-    n = len(zss)
-    if n == 0:
-        return []
-    if n == 1:
-        return [_Leg("up", [zss[0]])]
-    centers = [(z.zd + z.zg) / 2 for z in zss]
-    legs: List[_Leg] = []
-    start = 0
-    cur_dir: Optional[str] = None
-    for i in range(1, n):
-        d = "up" if centers[i] >= centers[i - 1] else "down"
-        if cur_dir is None:
-            cur_dir = d
-        elif d != cur_dir:
-            legs.append(_Leg(cur_dir, zss[start:i]))      # 收尾当前腿 [start, i-1]
-            start, cur_dir = i - 1, d                       # 反转腿从极值中枢 i-1 起(共享端点)
-    legs.append(_Leg(cur_dir or "up", zss[start:n]))
-    return legs
+def _jiehe_segments(zslxs) -> List[_Seg]:
+    """**结合运算**(原文 line25178/25179):把次级别走势类型(zslx)中**相邻同方向**的合并成一段,
+    得到严格交替(上下上下…)的段序列,使同级别分解的「三段上下上/下上下」(line24727)成立。
+    原文:a+A 分解里 Ai 奇数向下、偶数向上(必交替),正是靠结合运算把同向走势并成一个 Ai。"""
+    segs: List[_Seg] = []
+    for z in zslxs:
+        if segs and segs[-1].dir == z._type:
+            segs[-1].merge(z)
+        else:
+            segs.append(_Seg(z))
+    return segs
 
 
 def tongjibie_zhongshu(zss: List[ZS], xds: List[LINE]) -> List[ZS]:
-    """30m 中枢 = **同级别分解**(操作级,原文 line24727/24735):把中枢序列做**严格交替腿**
-    (_alternating_legs,原文 25123「更大就分解成小的」),连续 3 腿(上下上/下上下)价格区间重合即
-    中枢,**恰好 3 段不延伸、允许盘整+盘整**(区别于 5m 以下 kuozhan 扩展/延伸)。
+    """30m 中枢 = **同级别分解**(原文 38/39 课):次级别单位 = **5 分钟走势类型(zslx)**(原文 25178
+    「Ai 是 5 分钟走势类型」——**不是原始线段中枢**,那是级别错),经**结合运算**(line25179 合并相邻
+    同方向)成严格交替段,连续 3 段(上下上/下上下)价格区间重合即中枢(line24727),**恰好 3 段不延伸、
+    允许盘整+盘整**(line24728:5 分次级别延伸成 6 段 = 两个 30 分钟盘整的连接;区别于 5m 以下 kuozhan
+    扩展/延伸)。
 
-    入参 zss = 该级别中枢序列(5m 图为 5m 线段中枢、1m 图为 5m kuozhan 中枢);**不再吃
-    ZslxBranchCalculator 走势类型**(其同向合并令同级别分解失效)。中枢区间 [zd,zg] = 三腿包络
-    共同重合;region(线段)= 首腿首中枢首线段 ~ 末腿末中枢末线段(供下游 kuozhan_level_signals 补
-    进入/离开段算背驰/买卖点)。完成度 = 纯结束条件(仅序列最后一个未完成,同 kuozhan_zhongshu)。
+    入参 zss = 该级别中枢序列(5m 图为 5m 线段中枢、1m 图为 5m kuozhan 中枢)→ ZslxBranchCalculator
+    出走势类型 → 结合运算 → 三段重合。中枢区间 [zd,zg] = 三段共同重合;region(线段)= 首段首中枢
+    首线段 ~ 末段末中枢末线段(供下游 kuozhan_level_signals 补进入/离开段)。完成度 = 仅最后一个未完成。
     """
-    legs = _alternating_legs(zss)
-    groups = _tongjibie_groups(legs)
+    if not zss:
+        return []
+    from chanlun.core.zslx_branch import ZslxBranchCalculator
+    zslxs = ZslxBranchCalculator().calculate(zss, [None] * len(zss))
+    segs = _jiehe_segments(zslxs)
+    groups = _tongjibie_groups(segs)
     out: List[ZS] = []
     last = len(groups) - 1
     for k, (s, e) in enumerate(groups):
-        tri = legs[s:e + 1]
-        zd = max(lg.zs_low for lg in tri)
-        zg = min(lg.zs_high for lg in tri)
+        tri = segs[s:e + 1]
+        zd = max(sg.zs_low for sg in tri)
+        zg = min(sg.zs_high for sg in tri)
+        if not tri[0].zss or not tri[-1].zss:
+            continue
         first_zs, last_zs = tri[0].zss[0], tri[-1].zss[-1]
         if not first_zs.lines or not last_zs.lines:
             continue
@@ -308,6 +305,6 @@ def tongjibie_zhongshu(zss: List[ZS], xds: List[LINE]) -> List[ZS]:
         b = _line_index(last_zs.lines[-1], xds)
         if a is None or b is None:
             continue
-        run = [z for lg in tri for z in lg.zss]             # 组内全部中枢(腿间共享端点会重,不影响区间)
+        run = [z for sg in tri for z in sg.zss]
         out.append(_build_kuozhan_zs(run, xds[a:b + 1], (zd, zg), done=(k < last)))
     return out
