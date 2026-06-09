@@ -154,6 +154,7 @@ class Result:
     win_rate: float
     n_trades: int
     equity: np.ndarray = field(repr=False, default=None)
+    trades: List["Trade"] = field(repr=False, default_factory=list)
 
 
 class Simulator:
@@ -268,7 +269,7 @@ class Simulator:
         sharpe = float(np.mean(rets) / (np.std(rets) + 1e-12) * ann) if len(rets) else 0.0
         wins = sum(1 for t in trades if t.ret > 0)
         wr = wins / len(trades) if trades else 0.0
-        return Result("", "", total, bh, max_dd, sharpe, wr, len(trades), equity)
+        return Result("", "", total, bh, max_dd, sharpe, wr, len(trades), equity, trades)
 
 
 # ---------------------------------------------------------------------------
