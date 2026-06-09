@@ -41,9 +41,14 @@ def _dv(is_beichi: bool, kind: str = "qs") -> DivergenceResult:
 
 
 # 一个本体在 [lo,hi] 的标准中枢（进入段 + 3 段核心震荡）
-def _zs_at(base_idx, entry, lo, hi):
-    core = [_seg(base_idx + 1, "down", hi, lo), _seg(base_idx + 2, "up", lo, hi),
-            _seg(base_idx + 3, "down", hi, lo)]
+# up_core=True 时核心段首尾为 up（内部净位移=up），用于验证『方向取摆动而非内部段位移』
+def _zs_at(base_idx, entry, lo, hi, up_core=False):
+    if up_core:
+        core = [_seg(base_idx + 1, "up", lo, hi), _seg(base_idx + 2, "down", hi, lo),
+                _seg(base_idx + 3, "up", lo, hi)]
+    else:
+        core = [_seg(base_idx + 1, "down", hi, lo), _seg(base_idx + 2, "up", lo, hi),
+                _seg(base_idx + 3, "down", hi, lo)]
     return _make_zs(entry, core, lo, hi)
 
 
@@ -209,6 +214,34 @@ def test_calculate_trailing_expand_absorbed_into_trend():
     wts = zslx_branch.ZslxBranchCalculator().calculate([z1, z2, z3], dv)
     assert len(wts) == 1                                     # 无本体分离反转 → 一个下跌走势类型
     assert wts[0].zslx_type == "下跌" and wts[0].zss == [z1, z2, z3]
+
+
+def test_calculate_consolidation_inherits_swing_direction():
+    """单中枢盘整的方向(_type) = 摆动方向(相对前段涨跌),非中枢内部段净位移。
+    下跌(z1,z2)后反转上行的单中枢 z3 → 盘整但 _type 应为 up(摆动向上),
+    而非 z3 内部核心段的 down。(原文 line25179 Ai 严格交替=按摆动涨跌定向;旧实现
+    用内部段位移给方向 → 真实数据 000001 5m 单中枢盘整方向系统性反号:[中枢4]下跌摆动
+    标 up、[中枢5]上涨标 down、[中枢10]下跌标 up。)"""
+    z1 = _zs_at(0, _seg(0, "down", 20, 17), 14, 17)
+    z2 = _zs_at(10, _seg(10, "down", 17, 11), 8, 11)      # trend_down
+    z3 = _zs_at(20, _seg(20, "up", 11, 18), 18, 21)       # 反转上行,本体[18,21]脱离z2谷
+    wts = zslx_branch.ZslxBranchCalculator().calculate([z1, z2, z3], [None, None, None])
+    assert len(wts) == 2
+    assert wts[0]._type == "down" and wts[0].zslx_type == "下跌"   # 下跌段
+    assert wts[1].zslx_type == "盘整"
+    assert wts[1]._type == "up"                            # 摆动向上 → up(而非内部段 down)
+
+
+def test_calculate_consolidation_down_swing_direction():
+    """对称:上涨(z1,z2)后反转下行的单中枢 z3 → 盘整 _type 应为 down(摆动向下)。
+    z3 内部核心段净位移恰为 up(_zs_at 反向构造),验证方向取摆动而非内部。"""
+    z1 = _zs_at(0, _seg(0, "up", 5, 8), 8, 11)
+    z2 = _zs_at(10, _seg(10, "up", 11, 17), 17, 20)       # trend_up
+    z3 = _zs_at(20, _seg(20, "down", 17, 10), 7, 10, up_core=True)  # 反转下行,本体[7,10]脱离z2峰
+    wts = zslx_branch.ZslxBranchCalculator().calculate([z1, z2, z3], [None, None, None])
+    assert len(wts) == 2
+    assert wts[0]._type == "up"
+    assert wts[1].zslx_type == "盘整" and wts[1]._type == "down"
 
 
 def test_calculate_pz_beichi_does_not_terminate():

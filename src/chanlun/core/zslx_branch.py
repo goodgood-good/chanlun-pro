@@ -20,20 +20,28 @@ class ZslxBranchCalculator:
 
     @staticmethod
     def _finalize(
-        zss: List[ZS], start_idx: int, cur_dir: Optional[str], done: bool
+        zss: List[ZS], start_idx: int, cur_dir: Optional[str], done: bool,
+        swing_dir: Optional[str] = None,
     ) -> ZSLX:
-        """把一个中枢列表收尾成 ZSLX：分类、边界(含进入/离开段 a/b)、包络。"""
+        """把一个中枢列表收尾成 ZSLX：分类、边界(含进入/离开段 a/b)、包络。
+
+        盘整段方向(_type)取『摆动方向』swing_dir（由 _swing_segments 给，相对前段的涨跌），
+        非中枢内部段净位移——原文 line25179 Ai 严格交替按涨跌定向；旧实现用内部段位移导致
+        单中枢盘整方向系统性反号(000001 5m 实测)。swing_dir 缺省(直接单元测试 _finalize)
+        时退化用内部段净位移。
+        """
         if cur_dir in ("trend_up", "trend_down"):
             # 趋势：≥2 依次同向(本体分离)中枢。
             direction = "up" if cur_dir == "trend_up" else "down"
             zslx_type = "上涨" if direction == "up" else "下跌"
         else:
-            # 仅由中枢扩张(expand,本体相交)连接、无趋势方向 → 盘整。方向 = 整段核心净位移
-            # (末中枢末核心段终点 vs 首中枢首核心段起点)，沿用旧 zslx_calculator._classify。
-            # 前提：done 中枢已 correct_exit，lines 是本体(离开段剥到 z.end)。
+            # 仅由中枢扩张(expand,本体相交)连接、无趋势方向 → 盘整。方向 = 摆动方向。
             zslx_type = "盘整"
-            first_seg, last_seg = zss[0].lines[0], zss[-1].lines[-1]
-            direction = "up" if last_seg.end.val >= first_seg.start.val else "down"
+            if swing_dir in ("up", "down"):
+                direction = swing_dir
+            else:
+                first_seg, last_seg = zss[0].lines[0], zss[-1].lines[-1]
+                direction = "up" if last_seg.end.val >= first_seg.start.val else "down"
         # 走势类型边界 = 第一中枢进入段 a → 末中枢离开段 b（原文 a+A+b），缺则退化用核心段
         first = zss[0].start if zss[0].start is not None else zss[0].lines[0]
         last = zss[-1].end if zss[-1].end is not None else zss[-1].lines[-1]
@@ -52,7 +60,8 @@ class ZslxBranchCalculator:
 
     @staticmethod
     def _swing_segments(zss: List[ZS]) -> List[tuple]:
-        """中枢本体摆动分段 → [(start, end), …]（连续、覆盖全序列；末段含右边缘）。
+        """中枢本体摆动分段 → [(start, end, dir), …]（连续、覆盖全序列；末段含右边缘）。
+        dir = 该摆动腿方向 'up'|'down'（单中枢时 None，方向交回 _finalize 退化处理）。
 
         反转确认 = 反向中枢本体『完全脱离』极值中枢本体（下跌→上涨:某中枢 dd > 谷中枢 gg；
         上涨→下跌:某中枢 gg < 峰中枢 dd），边界落在极值中枢。
@@ -65,7 +74,7 @@ class ZslxBranchCalculator:
         if n == 0:
             return []
         if n == 1:
-            return [(0, 0)]
+            return [(0, 0, None)]
         bounds: List[tuple] = []
         start = 0
         ext_idx = 0                                       # 当前趋势极值中枢索引
@@ -77,17 +86,17 @@ class ZslxBranchCalculator:
                 if z.dd < zext.dd:                        # 创新低 → 下跌延续,更新极值
                     ext_idx = i
                 elif z.dd > zext.gg:                      # 反向中枢本体脱离谷中枢本体 → 反转
-                    bounds.append((start, ext_idx))
+                    bounds.append((start, ext_idx, "down"))
                     start, D = ext_idx + 1, "up"
                     ext_idx = max(range(start, i + 1), key=lambda k: zss[k].gg)
             else:                                          # up
                 if z.gg > zext.gg:                        # 创新高 → 上涨延续
                     ext_idx = i
                 elif z.gg < zext.dd:                      # 反向中枢本体脱离峰中枢本体 → 反转
-                    bounds.append((start, ext_idx))
+                    bounds.append((start, ext_idx, "up"))
                     start, D = ext_idx + 1, "down"
                     ext_idx = min(range(start, i + 1), key=lambda k: zss[k].dd)
-        bounds.append((start, n - 1))
+        bounds.append((start, n - 1, D))
         return bounds
 
     @staticmethod
@@ -160,11 +169,13 @@ class ZslxBranchCalculator:
         if not done_zss:
             return []
         bounds = []
-        for s, e in self._swing_segments(done_zss):
-            bounds.extend(self._subsplit(done_zss, s, e))
+        for s, e, sdir in self._swing_segments(done_zss):
+            for a, b in self._subsplit(done_zss, s, e):
+                bounds.append((a, b, sdir))                # 子段继承摆动腿方向
         last = len(bounds) - 1
         wts: List[ZSLX] = []
-        for k, (a, b) in enumerate(bounds):
+        for k, (a, b, sdir) in enumerate(bounds):
             seg = done_zss[a:b + 1]
-            wts.append(self._finalize(seg, a, self._trend_dir(seg), done=(k < last)))
+            wts.append(self._finalize(
+                seg, a, self._trend_dir(seg), done=(k < last), swing_dir=sdir))
         return wts
