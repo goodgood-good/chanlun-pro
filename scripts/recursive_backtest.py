@@ -164,6 +164,8 @@ class Simulator:
         self.rules = rules
         self.init_cash = init_cash
         self.opens = self.df["open"].to_numpy()
+        self.highs = self.df["high"].to_numpy()
+        self.lows = self.df["low"].to_numpy()
         self.closes = self.df["close"].to_numpy()
         self.dates = self.df["date"].to_list()
 
@@ -180,8 +182,9 @@ class Simulator:
             return True
         return False
 
-    def run(self, decide) -> Result:
-        """decide(i, date, holding, entry_idx) → 'buy'|'sell'|None(在 bar i 收盘后决定,bar i+1 开盘执行)。"""
+    def run(self, decide, stop_pct: Optional[float] = None) -> Result:
+        """decide(i, date, holding, entry_idx) → 'buy'|'sell'|None(在 bar i 收盘后决定,bar i+1 开盘执行)。
+        stop_pct: 硬止损(入场价回撤幅度,盘中 low 触及即平,缺口跳空按 min(open,止损价)成交)。"""
         cash = self.init_cash
         shares = 0.0
         entry_idx = -1
@@ -193,6 +196,21 @@ class Simulator:
         r = self.rules
 
         for i in range(n):
+            # 0) 硬止损(盘中,T+1/涨跌停约束下);缺口跳空按 min(开盘,止损价)成交
+            if (shares > 0 and stop_pct and not self._limit_locked(i, "sell")
+                    and (r.t_plus == 0 or self.dates[i].date() > self.dates[entry_idx].date())):
+                sp = entry_price * (1 - stop_pct)
+                if self.lows[i] <= sp:
+                    fill = min(self.opens[i], sp)
+                    cash += shares * fill * (1 - r.commission - r.stamp_duty)
+                    tr = Trade("long", self.dates[entry_idx], entry_price,
+                               self.dates[i], fill, shares)
+                    tr.ret = fill / entry_price - 1
+                    tr.reason = "止损"
+                    trades.append(tr)
+                    shares = 0.0
+                    entry_idx = -1
+                    pending = None
             # 1) 执行上一bar挂的单(本bar开盘价)
             if pending == "buy" and shares == 0 and not self._limit_locked(i, "buy"):
                 px = self.opens[i]
@@ -264,8 +282,11 @@ class MTFStrategy:
     """
 
     def __init__(self, sig_small: List[Signal], sig_big: List[Signal],
-                 dates5: List[pd.Timestamp], mode: str):
+                 dates5: List[pd.Timestamp], mode: str, gate: str = "up",
+                 exit_mode: str = "any_sell"):
         self.mode = mode
+        self.gate = gate          # "up"=严格(大级别必须up);"not_down"=放松(neutral也允许进场)
+        self.exit_mode = exit_mode  # "any_sell"=任何小级别卖点出;"reversal"=只1/2卖(背驰反转)出,扛过3卖延续
         idx = {d: k for k, d in enumerate(dates5)}
         # 小级别信号 → 5m bar
         self.small_by_bar: Dict[int, List[Signal]] = {}
@@ -300,10 +321,15 @@ class MTFStrategy:
                 return "buy"
             if holding and big_dir == "down":
                 return "sell"
-        elif self.mode == "5m+30m":   # 共振:大级别up窗口内,小级别买点进场;大级别down或小级别卖点出
-            if not holding and big_dir == "up" and any(s.is_buy for s in small):
+        elif self.mode == "5m+30m":   # 共振:大级别窗口内,小级别买点进场;大级别down或小级别卖点出
+            ok = (big_dir == "up") if self.gate == "up" else (big_dir != "down")
+            if not holding and ok and any(s.is_buy for s in small):
                 return "buy"
-            if holding and (big_dir == "down" or any(s.is_sell for s in small)):
+            if self.exit_mode == "reversal":
+                sell_sig = any(s.bs_type in ("1sell", "2sell") for s in small)
+            else:
+                sell_sig = any(s.is_sell for s in small)
+            if holding and (big_dir == "down" or sell_sig):
                 return "sell"
         return None
 
@@ -324,10 +350,19 @@ def backtest_symbol(name: str, prefix: str, code: str, rules: MarketRules,
         sig_big = collect_branch_signals(cd30, use_xd=False)
     sim = Simulator(df5, rules)
     results = []
-    for mode in ("5m_only", "30m_only", "5m+30m"):
-        strat = MTFStrategy(sig_small, sig_big, sim.dates, mode)
-        res = sim.run(strat.decide)
-        res.name, res.strategy = name, mode
+    # (策略名, mode, gate, exit_mode, stop_pct)
+    grid = [
+        ("5m_only", "5m_only", "up", "any_sell", None),
+        ("30m_only", "30m_only", "up", "any_sell", None),
+        ("5m+30m", "5m+30m", "up", "any_sell", None),               # 严格门控
+        ("5m+30m_relax", "5m+30m", "not_down", "any_sell", None),     # 放松门控
+        ("5m+30m_trend", "5m+30m", "not_down", "reversal", None),     # 放松+扛过3卖(吃趋势)
+        ("5m+30m_trend_st", "5m+30m", "not_down", "reversal", 0.05),  # +5%止损兜底
+    ]
+    for sname, mode, gate, exit_mode, stop in grid:
+        strat = MTFStrategy(sig_small, sig_big, sim.dates, mode, gate=gate, exit_mode=exit_mode)
+        res = sim.run(strat.decide, stop_pct=stop)
+        res.name, res.strategy = name, sname
         results.append(res)
     print(f"\n=== {name}({code}) {rules.name} | 5mbars={len(df5)} "
           f"小级别信号={len(sig_small)} 大级别(30m)信号={len(sig_big)} ===")
@@ -346,7 +381,8 @@ def main():
     # 汇总
     print("\n" + "=" * 70)
     print("策略汇总(各模式平均):")
-    for mode in ("5m_only", "30m_only", "5m+30m"):
+    for mode in ("5m_only", "30m_only", "5m+30m", "5m+30m_relax",
+                 "5m+30m_trend", "5m+30m_trend_st"):
         rs = [r for r in rows if r.strategy == mode]
         if rs:
             avg_ex = np.mean([r.total_return - r.buy_hold for r in rs])
