@@ -121,6 +121,10 @@ const CHART_CONFIG = {
         "mmd_labels", "bi_mmd_labels", "xd_mmd_labels",
         // 新核心递归层级中枢:recursive_levels 各级 zss 扁平化为单容器
         "recursive_zss",
+        // 新核心各级(5m/30m…)买卖点/背驰:recursive_levels[].mmds/bcs(箭头/标签/背驰各独立容器)。
+        // ⚠必须注册:reconcile 取 obj_charts[symbolKey][type],未注册→undefined→container.length 抛错→
+        // 5m/30m 买卖点/背驰永不渲染(中枢 recursive_zss 已注册故能显示,买卖点不显示=此遗漏所致)。
+        "recursive_mmds", "recursive_mmd_labels", "recursive_bcs",
         // 多周期中枢叠加(低周期图叠加的高周期线段中枢)
         "higher_zss",
     ],
