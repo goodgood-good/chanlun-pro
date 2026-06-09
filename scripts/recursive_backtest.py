@@ -369,6 +369,49 @@ def backtest_symbol(name: str, prefix: str, code: str, rules: MarketRules,
     return results
 
 
+def generate_report(out_png: str = "scripts/backtest_report.png"):
+    """最优策略(5m+30m_relax)权益曲线 vs 买入持有,各标的子图 + 交易明细。"""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    items = list(SYMBOLS.items())
+    fig, axes = plt.subplots(len(items), 1, figsize=(11, 3.0 * len(items)))
+    if len(items) == 1:
+        axes = [axes]
+    for ax, (name, (prefix, code, rules)) in zip(axes, items):
+        df5 = load_klines(prefix, "5m")
+        df30 = load_klines(prefix, "30m")
+        if df5 is None:
+            continue
+        cd5 = CL(code, "5m", dict(CL_CFG))
+        cd5.process_klines(df5)
+        sig_small = collect_branch_signals(cd5, use_xd=False)
+        sig_big = []
+        if df30 is not None and len(df30) >= 50:
+            cd30 = CL(code, "30m", dict(CL_CFG))
+            cd30.process_klines(df30)
+            sig_big = collect_branch_signals(cd30, use_xd=False)
+        sim = Simulator(df5, rules)
+        strat = MTFStrategy(sig_small, sig_big, sim.dates, "5m+30m", gate="not_down")
+        res = sim.run(strat.decide)
+        x = pd.to_datetime(sim.dates)
+        eq = res.equity / res.equity[0]
+        bh = sim.closes / sim.closes[0]
+        ax.plot(x, eq, label=f"strategy {res.total_return:+.1%}", color="crimson", lw=1.3)
+        ax.plot(x, bh, label=f"buy&hold {res.buy_hold:+.1%}", color="steelblue", lw=1.0, alpha=0.7)
+        ax.set_title(f"{code} ({rules.name})  DD={res.max_dd:.1%} Sharpe={res.sharpe:.1f} "
+                     f"trades={res.n_trades} win={res.win_rate:.0%}", fontsize=9)
+        ax.legend(fontsize=8, loc="upper left")
+        ax.grid(alpha=0.3)
+    fig.suptitle("Chanlun MTF (5m entry + 30m direction, relaxed gate) vs Buy&Hold",
+                 fontsize=11)
+    fig.tight_layout()
+    fig.savefig(out_png, dpi=110)
+    print(f"\n报告已保存: {out_png}")
+    return out_png
+
+
 def main():
     rows = []
     for name, (prefix, code, rules) in SYMBOLS.items():
@@ -391,6 +434,7 @@ def main():
             avg_sh = np.mean([r.sharpe for r in rs])
             print(f"  {mode:9s} 平均收益={avg_ret:+7.1%} 平均超额={avg_ex:+7.1%} "
                   f"平均回撤={avg_dd:5.1%} 平均夏普={avg_sh:5.2f}")
+    generate_report()
 
 
 if __name__ == "__main__":
