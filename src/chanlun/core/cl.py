@@ -525,16 +525,18 @@ class CL(ICL):
         out = []
         cur = l0
         for lvl, (_target, method) in enumerate(chain, start=1):
-            if method == "tongjibie":                    # 30m 同级别分解(3段走势类型重合)
+            if not cur:                                  # 上级空 → 本级空(数据不足),仍出空层
+                nz = []
+            elif method == "tongjibie":                  # 30m 同级别分解(3段走势类型重合)
                 zslxs = ZslxBranchCalculator().calculate(cur, [None] * len(cur))
                 nz = tongjibie_zhongshu(zslxs, xds)
             else:                                         # <30m kuozhan 非同级别(扩展/延伸)
                 nz = kuozhan_zhongshu(cur, xds)
-            if not nz:
-                break
             bsp, bcs = kuozhan_level_signals(nz, xds, ld, wzgx, self.frequency)
             for p in bsp:
                 p.level = lvl
+            # **即使本级空也出层** → 前端菜单选项反映升级链(该周期可用级别)、而非数据是否恰好有中枢:
+            # 短数据下 30m 同级别分解=0 中枢时,30m 选项仍在(空),数据够了自动填充(避免「看不到30m选项」)。
             out.append({"level": lvl, "zss": nz, "bsp": bsp, "bcs": bcs})
             cur = nz
         return out

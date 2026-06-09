@@ -140,7 +140,10 @@ def _stable_hash(obj) -> str:
 #   封顶 30m 操作级——<30m(1m→5m)用 kuozhan(非同级别,延伸/扩展),30m 用 tongjibie_zhongshu
 #   (次级别走势类型恰好3段重合、不延伸、允许盘整+盘整)。get_kuozhan_levels 按 _UPGRADE_CHAIN
 #   分方法;30m/日线图无升级链(只 base)。L2(30m)中枢区间/个数与 v22(纯 kuozhan)不同 → 失效。
-_CHART_CACHE_SCHEMA_VERSION = "v23"
+# - v24 (2026-06) ── get_kuozhan_levels 即使某级空也出层(升级链=该周期可用级别):短数据下 30m
+#   同级别分解=0 中枢时,recursive_levels 仍含(空)level=2 → 前端菜单恒有 30m(zs_L2)选项(修
+#   「1min图看不到30min选项」)。数据够了自动填充。recursive_levels 结构变(多空层)→ 失效。
+_CHART_CACHE_SCHEMA_VERSION = "v24"
 
 
 def _build_cache_key(market: str, code: str, frequency: str, cl_config: dict) -> str:
