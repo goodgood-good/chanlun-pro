@@ -94,7 +94,37 @@ def _stable_hash(obj) -> str:
 # - v13 (2026-06) ── P9 正常case:中枢强制方向交替(line7268)消走势递归假中枢 + 相邻同类型走势
 #   类型合并为扩展(line7264):L0 走势类型 band 渲染随之改变(301004 [下跌×3,盘整]→[下跌,盘整]),
 #   bump 强制旧 cache 失效。
-_CHART_CACHE_SCHEMA_VERSION = "v13"
+# - v14 (2026-06) ── 「正在形成的未完成中枢」入图(虚线框), 两层都改, 旧 cache 强制失效:
+#   (a) L0: recursive_branch 非终止级别原只取 done_zss、丢弃 live → 改经 LevelResult.live_zss
+#       带出右边缘正在形成的 L0(本周期)中枢, recursive_levels[L0].zss 新增 done=False 项。
+#   (b) L1(5m级别)=kuozhan 扩展中枢三修: 主修 guard off-by-overlap(原误杀右边缘整组扩展)、
+#       次修延伸到末线段标 done=False(虚线)、第三修一个 is_kuozhan run 内逐个抽取扩展中枢
+#       (原一个 run 只出首个、跳过剩余 → 右边缘正在形成的 5min 中枢被吞)。
+#       000001 右边缘 5min 中枢空档从 36~42 段 → 1~5 段, recursive_levels[L1] 内容变化。
+# - v15 (2026-06) ── kuozhan 三修是在 v14 之后才落地的: v14 缓存可能已写入旧 kuozhan 输出
+#   (5 个 L1、无右边缘中枢), key 不变会继续命中陈旧数据。bump v15 强制失效, 让 L1 三修生效。
+#   并含「完成度口径回归原文」: L1(5m)扩展中枢的 done 改由**中枢结束条件**判(原文 line10031
+#   三类点 / line7260 走势终完美)——已完成须由后续中枢确认其离开,**序列最后一个中枢恒未完成
+#   (done=False 虚线)**,替换原「离开不回」判据(会把右边缘提前1段离开的最后中枢误判为已完成)。
+#   recursive_levels[L1] 末个中枢 linestyle 0→1。
+# - v16 (2026-06) ── L1(5m)中枢几何重做(对齐原文 line31774/10029, 替代旧摆动 three_segment):
+#   kuozhan 改「子中枢运行交集分组」——沿 is_kuozhan run 累积子中枢、维持包络交集 [max dd,min gg]
+#   有效, 塌缩点切成多个中枢, 区间=组内子中枢包络重合(原旧摆动法过度框选成超宽框, 见 000001
+#   出图对比)。完成度=line26870「2 子中枢=进行式」+ line7260 结束条件「序列最后一个=未完成」。
+#   recursive_levels[L1] 的中枢个数/区间/linestyle 全面变化, 强制旧 cache 失效。
+# - v17 (2026-06) ── L1 完成度口径修正:原 v16「2 子中枢=进行式也算未完成」会让历史中间的 2 子
+#   中枢组全标虚线 → 图上多个未完成中枢(用户:只该有一个)。改为**纯结束条件**:仅序列最后一个
+#   中枢未完成(done=False), 其余全已完成。recursive_levels[L1] 中间中枢 linestyle 1→0。
+# - v18 (2026-06) ── 买卖点分级修正:原 branch core 开时 `get_branch_bspoints` 恒用笔级却全塞
+#   xd_mmds(段)=笔买卖点冒充段买卖点。改为**笔级→bi_mmds、段级(线段)→xd_mmds** 各归其位,
+#   且 branch core 开时不再叠 legacy line_mmds。bi_mmds/xd_mmds 内容全变, 强制失效。
+# - v19 (2026-06) ── 背驰信号接新核心:原图表背驰走 legacy line_bcs(极稀疏 笔3/段2)、与新核心
+#   一类买卖点不一致(用户:背驰信号没有)。branch core 开时改接 get_branch_bcs(笔→bi_bcs/段→
+#   xd_bcs, done_divergence 里 is_beichi 的离开段, QS/PZ)。000001:bi_bcs 3→36、xd_bcs 2→6。
+# - v20 (2026-06) ── L0 结构化二类买卖点:bs2_branch 是跨级(次级别一类=二类)、对 L0 跳过 →
+#   段级/笔级 L0 原无二类。新增 bs_branch.second_class(一类后首次回调不破前低/高=二类),接进
+#   get_branch_bspoints。000001:笔级 +2buy×4/2sell×4、段级 +2sell×1。bi_mmds/xd_mmds 增二类项。
+_CHART_CACHE_SCHEMA_VERSION = "v20"
 
 
 def _build_cache_key(market: str, code: str, frequency: str, cl_config: dict) -> str:

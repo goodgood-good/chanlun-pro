@@ -436,34 +436,61 @@ class CL(ICL):
         ).calculate(list(self.get_bis()))
         return res.done_zss
 
-    def get_branch_bspoints(self):
+    def get_branch_bspoints(self, use_xd: bool = False):
         """新核心:一/二/三类买卖点(全多级,P5a-d)。lazy 并存。返回 List[BuySellPoint]。
 
         L0 一三类(bs_branch 单级)+ 二类(bs2 跨级)+ L1+ 扩张三买(bs3,过滤 L0 去重)。
         一类多级(L1+ 背驰一类)留后。
+
+        ``use_xd``:构成段选择——False=**笔**(细粒度,图表「笔买卖点」bi_mmds);
+        True=**线段**(图表「段买卖点」xd_mmds,与线段中枢同级)。原先恒用笔但图表标成「段」
+        =笔买卖点冒充段买卖点(2026-06 用户指出),故拆成两级各算、各归其位。
         """
         from chanlun.core.recursive_branch import RecursiveBranchCalculator
         from chanlun.core.zs_branch import ZsBranchResult
         from chanlun.core.bs_branch import BsBranchCalculator
         from chanlun.core.bs2_branch import Bs2BranchCalculator
         from chanlun.core.bs3_branch import Bs3BranchCalculator
-        # 买卖点走笔级递归(细粒度操作信号,保持用户习惯);中枢显示的线段级见
-        # get_recursive_branch_levels。线段中枢稀疏→线段级买卖点很少,笔级更实用。
         ld = lambda s, e: query_macd_ld(self, s, e)
         wzgx = self.config.get('zs_wzgx', Config.ZS_WZGX_ZGD.value)
+        units = list(self.get_xds()) if use_xd else list(self.get_bis())
         levels = RecursiveBranchCalculator().calculate(
-            list(self.get_bis()), ld, wzgx, self.frequency,
+            units, ld, wzgx, self.frequency,
         )
         if not levels:
             return []
         l0 = levels[0]
         zr0 = ZsBranchResult(done_zss=l0.zss, live=[], freeze_idx=0,
                              done_divergence=l0.done_divergence)
-        pts = list(BsBranchCalculator().calculate(zr0, l0.units))          # L0 一三类
-        pts += Bs2BranchCalculator().calculate(levels)                     # 二类(跨级)
+        bs = BsBranchCalculator()
+        pts = list(bs.calculate(zr0, l0.units))                            # L0 一三类
+        pts += bs.second_class(zr0, l0.units)                              # L0 二类(结构化:一类后回调不破前低/高)
+        pts += Bs2BranchCalculator().calculate(levels)                     # L1+ 二类(跨级·定律一)
         pts += [p for p in Bs3BranchCalculator().calculate(levels)
                 if p.level is not None and p.level >= 1]                   # L1+ 扩张三买(不重 L0)
         return pts
+
+    def get_branch_bcs(self, use_xd: bool = False):
+        """新核心背驰段(各级 done_divergence 里 is_beichi 的离开段),供图表「背驰信号」显示。
+        返回 [(date, price, kind)],kind='qs'(趋势背驰)/'pz'(盘整背驰)。``use_xd`` 同
+        get_branch_bspoints:False=笔级→笔背驰(bi_bcs)、True=线段级→段背驰(xd_bcs)。
+        原图表背驰信号走 legacy line_bcs(极稀疏)、与新核心买卖点不一致;接此后两者同源(2026-06)。
+        """
+        from chanlun.core.recursive_branch import RecursiveBranchCalculator
+        ld = lambda s, e: query_macd_ld(self, s, e)
+        wzgx = self.config.get('zs_wzgx', Config.ZS_WZGX_ZGD.value)
+        units = list(self.get_xds()) if use_xd else list(self.get_bis())
+        levels = RecursiveBranchCalculator().calculate(units, ld, wzgx, self.frequency)
+        out = []
+        for lv in levels:
+            for dv in lv.done_divergence:
+                if dv is None or not dv.is_beichi or dv.leave_seg is None:
+                    continue
+                seg = dv.leave_seg
+                if seg.end is None:
+                    continue
+                out.append((seg.end.k.date, seg.end.val, dv.kind))
+        return out
 
     def get_branch_interval_nest(self):
         """新核心:区间套可操作性(P6,自顶向下 READ)。lazy 并存。返回 List[NestRead]。"""

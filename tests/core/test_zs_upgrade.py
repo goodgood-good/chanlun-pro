@@ -1,18 +1,10 @@
-"""tests/core/test_zs_upgrade.py — P9 中枢升级·扩展(line4898 3段重合)。
+"""tests/core/test_zs_upgrade.py — P9 中枢升级·扩展(子中枢运行交集分组)。
 
 513100 真实 QMT 数据(z1+z2 涉及线段 xd6-15)当 oracle: 用户标注 下xd7-9/上xd10-12/盘xd13-15,
-区间 [1.713,1.737](用户多轮确认的正确值)。
+扩展中枢区间 [1.713,1.737](用户多轮确认的正确值, = 子中枢包络重合 [max dd, min gg])。
 """
 from chanlun.core.cl_interface import ZS
-from chanlun.core.zs_upgrade import (
-    _interval_from_swings,
-    _pivots,
-    _segment_swings,
-    _termination_idx,
-    is_kuozhan,
-    kuozhan_zhongshu,
-    three_segment_interval,
-)
+from chanlun.core.zs_upgrade import is_kuozhan, kuozhan_zhongshu
 
 
 class _L:
@@ -39,79 +31,11 @@ def _xds_513100():
     ]
 
 
-def test_three_segment_interval_513100():
-    """513100 扩展: 摆动分段(进入段xd6 + 下xd7-9/上xd10-12/盘xd13-15) → [1.713,1.737]。"""
-    res = three_segment_interval(_xds_513100())
-    assert res is not None
-    zd, zg = res
-    assert round(zd, 4) == 1.7130
-    assert round(zg, 4) == 1.7370
-
-
-def _xds_301004_z9z11():
-    """301004 z9-11 区域线段 xd63-76(QMT 真实数据)。前 3 段走势:
-    下(到xd66=38.00)/上(到xd69=41.78)/下(到xd74=39.01,xd75创更高高点41.14打断)。"""
-    vals = [
-        ("up", 41.380, 41.730), ("down", 40.100, 41.730), ("up", 40.100, 41.680),
-        ("down", 38.000, 41.680), ("up", 38.000, 41.590), ("down", 39.530, 41.590),
-        ("up", 39.530, 41.780), ("down", 41.000, 41.780), ("up", 41.000, 41.620),
-        ("down", 40.400, 41.620), ("up", 40.400, 40.700), ("down", 39.010, 40.700),
-        ("up", 39.010, 41.140), ("down", 39.730, 41.140),
-    ]
-    return [_L(t, lo, hi) for t, lo, hi in vals]
-
-
-def test_three_segment_interval_301004_z9z11():
-    """301004 z9-11 扩展: 第3段下跌走势在 xd74=39.01 被 xd75 更高高点打断
-    → 中枢 [39.01, 41.73](用户图形确认),不再被全段最低 38.06 撑宽。"""
-    res = three_segment_interval(_xds_301004_z9z11())
-    assert res is not None
-    zd, zg = res
-    assert round(zd, 4) == 39.0100
-    assert round(zg, 4) == 41.7300
-
-
-def test_three_segment_uptrend_too_few_swings_none():
-    """单边上涨只切出 1 段上涨走势, 不足「进入段 + 3 走势」→ None。"""
-    lines = [
-        _L("up", 1.00, 1.10), _L("down", 1.05, 1.10), _L("up", 1.05, 1.20),
-        _L("down", 1.15, 1.20), _L("up", 1.15, 1.30), _L("down", 1.25, 1.30),
-    ]
-    assert three_segment_interval(lines) is None
-
-
-def test_three_segment_too_few_lines_none():
-    assert three_segment_interval([_L("up", 1, 2), _L("down", 1, 2)]) is None
-
-
 def _lines_from_pivots(prices):
     """相邻价格 → _L 线段(方向交替, 每段 prices[k]→prices[k+1])。"""
     return [_L("up" if prices[k + 1] > prices[k] else "down",
                min(prices[k], prices[k + 1]), max(prices[k], prices[k + 1]))
             for k in range(len(prices) - 1)]
-
-
-def _interval_and_end(prices):
-    lines = _lines_from_pivots(prices)
-    pv = _pivots(lines)
-    sw = _segment_swings(pv, first_up=(lines[0].type == "up"))
-    interval = _interval_from_swings(pv, sw)
-    end = _termination_idx(pv, sw, interval[0], interval[1], len(lines))
-    return interval, end, len(lines)
-
-
-def test_termination_leave_up_no_return():
-    """中枢[9.5,11.5]:走势4 上离开到 13、回拉 12.5 不重入 → 结束于离开走势末端线段(提前结束)。"""
-    interval, end, n = _interval_and_end([8, 12, 9, 11.5, 9.5, 11, 10, 13, 12.5])
-    assert (round(interval[0], 2), round(interval[1], 2)) == (9.5, 11.5)
-    assert end == 6                 # 离开走势(到13)末端线段
-    assert end < n - 1              # 确实提前结束
-
-
-def test_termination_return_to_range_ongoing():
-    """离开后回拉重入 [9.5,11.5] → 中枢延续, 未确认结束 → 末段索引。"""
-    _, end, n = _interval_and_end([8, 12, 9, 11.5, 9.5, 11, 10, 13, 10.5])
-    assert end == n - 1             # 未结束
 
 
 def _zs(zd, zg, dd, gg, done=True):
@@ -157,3 +81,92 @@ def test_kuozhan_zhongshu_trend_no_group():
     z2 = _zs(2.00, 2.10, 1.90, 2.20)     # 整体在上 = 趋势
     z2.lines = xds[7:10]
     assert kuozhan_zhongshu([z1, z2], xds) == []
+
+
+def _guard_overlap_case():
+    """两个独立 is_kuozhan run(中间 trend 断开): run1=[z1,z2](低位[9.5,11.5])、
+    run2=[z3,z4](高位[12,13.1])。新核心运行交集分组把两个 run 各成一个高级别中枢(共 2 个)。"""
+    prices = [9, 11.5, 9.5, 11.5, 9.5, 11.5, 9.6, 13, 12, 13.1, 12.2, 13.0, 12.3, 12.95, 12.4]
+    xds = _lines_from_pivots(prices)
+    z1 = _zs(10.0, 10.5, 9.5, 11.5)
+    z1.lines = xds[0:4]
+    z2 = _zs(10.8, 11.2, 9.5, 11.5)
+    z2.lines = xds[3:7]
+    z3 = _zs(12.2, 12.5, 12.0, 13.1)
+    z3.lines = xds[6:10]                 # 起点 line6 落在 run1 区域内
+    z4 = _zs(12.6, 12.9, 12.0, 13.1)
+    z4.lines = xds[9:14]
+    return [z1, z2, z3, z4], xds
+
+
+def test_kuozhan_keeps_overlapping_later_group():
+    """两个独立 is_kuozhan run(中间 trend 断开)→ 运行交集分组各成一个高级别中枢, 共 2 个。
+    (历史: 旧摆动法曾因 guard off-by-overlap 误杀 run2;新核心运行交集分组无此问题。)"""
+    zss, xds = _guard_overlap_case()
+    assert (is_kuozhan(zss[0], zss[1]) and not is_kuozhan(zss[1], zss[2])
+            and is_kuozhan(zss[2], zss[3])), "前提: run1(z1,z2) + trend断开 + run2(z3,z4)"
+    out = kuozhan_zhongshu(zss, xds)
+    assert len(out) == 2, f"两组扩展都应产出(主修前 guard 误杀 run2 → 仅 1 个), 实得 {len(out)}"
+
+
+def _subs_with_lines(specs):
+    """specs=[(dd,zd,zg,gg),...] → (子中枢列表, xds)。每子中枢给 2 段线段(zs_low/zs_high=dd/gg)
+    依次拼成 xds。新核心 kuozhan 区间只取子中枢 dd/gg(与线段走向无关), 此 helper 直接喂子中枢。"""
+    xds = []
+    subs = []
+    for dd, zd, zg, gg in specs:
+        a, b = _L("up", dd, gg), _L("down", dd, gg)
+        xds.extend([a, b])
+        z = _zs(zd, zg, dd, gg)
+        z.lines = [a, b]
+        subs.append(z)
+    return subs, xds
+
+
+def test_kuozhan_run_splits_at_intersection_collapse():
+    """长 run 按「运行交集塌缩点」切成多个中枢(新核心, 原文 line31774, 替代旧摆动法):4 个
+    下行子中枢两两 is_kuozhan 成一个 run, 但 z1∩z2∩z3 塌缩 → 切成 [z1,z2]+[z3,z4] 两个中枢。"""
+    subs, xds = _subs_with_lines([(10, 10.5, 11, 12), (9, 9.2, 9.8, 11),
+                                  (7, 7.5, 8.5, 9.5), (6, 6.2, 7, 8)])
+    assert all(is_kuozhan(subs[k], subs[k + 1]) for k in range(3)), "前提: 4 子中枢两两成一个 run"
+    out = kuozhan_zhongshu(subs, xds)
+    assert len(out) == 2, f"run 在交集塌缩点切成 2 个中枢, 实得 {len(out)}"
+    assert (round(out[0].zd), round(out[0].zg)) == (10, 11), "中枢1=z1,z2 包络重合[max dd,min gg]"
+    assert (round(out[1].zd), round(out[1].zg)) == (7, 8), "中枢2=z3,z4 包络重合"
+
+
+def test_kuozhan_only_last_zhongshu_unfinished():
+    """完成度=结束条件(原文 line7260「走势终完美」/ line10031 三类点): **只有序列最后一个**中枢
+    未完成(右边缘正在形成、未被后续中枢确认离开);其余(含中间的 2 子中枢组)都已被后续确认 →
+    已完成。任意时刻图上只应有一个未完成的高级别中枢(不能因「2 子中枢=进行式」把历史中间的
+    2 子中枢组也标成未完成——那些早已成定局)。"""
+    # 3 个独立 is_kuozhan run(中间趋势断开), 各 2 子中枢 → 3 个 5min 中枢(中间组也是 2 子中枢)
+    subs, xds = _subs_with_lines([(10, 10.5, 11, 12), (10, 11.5, 11.8, 12),    # run1
+                                  (20, 20.5, 21, 22), (20, 21.5, 21.8, 22),    # run2(中间, 2 子中枢)
+                                  (30, 30.5, 31, 32), (30, 31.5, 31.8, 32)])   # run3(最后)
+    assert is_kuozhan(subs[0], subs[1]) and not is_kuozhan(subs[1], subs[2]), "run1 + 趋势断开"
+    assert is_kuozhan(subs[2], subs[3]) and not is_kuozhan(subs[3], subs[4]), "run2 + 趋势断开"
+    assert is_kuozhan(subs[4], subs[5]), "run3"
+    out = kuozhan_zhongshu(subs, xds)
+    assert len(out) == 3
+    assert out[0].done is True, "首组(非最后) → 已完成"
+    assert out[1].done is True, "中间组(2 子中枢、非最后) → 已完成(不是未完成!)"
+    assert out[2].done is False, "最后一组 → 未完成(右边缘正在形成)"
+    assert sum(1 for z in out if not z.done) == 1, "全图只应有一个未完成中枢"
+
+
+def test_kuozhan_last_zhongshu_unfinished_even_if_region_before_edge():
+    """完成度=结束条件(原文 line7260「走势终完美」): 序列**最后一个**中枢未被后续中枢确认离开
+    → **未完成**(done=False), 即便其区域并未延伸到右边缘末线段(只是子中枢恰好止于边缘前)。"""
+    # 单组 z1,z2(2 子中枢), 其线段区域止于 xds[6], 右边缘是 xds[9](还有 3 段未入任何中枢)
+    prices = [12, 10, 11, 10, 11, 10, 11, 6, 7, 6.5, 7]
+    xds = _lines_from_pivots(prices)
+    z1 = _zs(10.5, 11.0, 10.0, 12.0)
+    z1.lines = xds[0:4]
+    z2 = _zs(9.8, 10.2, 9.5, 11.0)
+    z2.lines = xds[3:7]
+    assert is_kuozhan(z1, z2), "前提: z1,z2 构成扩展"
+    out = kuozhan_zhongshu([z1, z2], xds)
+    assert len(out) == 1
+    assert out[0].lines[-1] is not xds[-1], "前提: 该中枢区域止于右边缘之前"
+    assert out[0].done is False, "序列最后一个中枢未被后续确认 → 未完成(尽管区域未到右边缘)"

@@ -988,6 +988,10 @@ def cl_data_to_tv_chart(
                 continue   # P9 止血: 中枢升级按 line4898 重做中,就绪前只画 L0,不画 L1+(旧走势递归产假宽框)
             # 中枢区间用核心区 [ZD,ZG](标准中枢=3段重叠区);GG/DD 是瞬间波动范围、非中枢区间。
             lv_zss = [_zs_to_chart(zs, use_envelope=False) for zs in lv.zss]
+            # 右边缘正在形成的未完成中枢(live_zss,done=False)→虚线框(_zs_to_chart 按 done 出
+            # linestyle=1)。让用户看到正在形成的 L0(5min)中枢;只展示、不入买卖点/走势类型
+            # (那些只读 lv.zss=已完成中枢, 见 recursive_branch LevelResult.live_zss 注释)。
+            lv_zss += [_zs_to_chart(zs, use_envelope=False) for zs in getattr(lv, "live_zss", [])]
             lv_zslxs = []
             lv_zslx_lines = []
             for zslx in lv.zslxs:
@@ -1104,81 +1108,94 @@ def cl_data_to_tv_chart(
     bc_chart_data = []
     bi_bc_chart_data = []
     xd_bc_chart_data = []
-    for dt, bc in bc_infos.items():
-        ts = fun.datetime_to_int(dt)
-        # 拆分版:笔/段独立产出,前端可分别 reconcile + 独立 toggle + 不同样式
-        for _type, _bcs in bc["bc_infos"].items():
-            if not _bcs:
-                continue
-            target = bi_bc_chart_data if _type == "bi" else xd_bc_chart_data
-            target.append({
-                "points": {"time": ts, "price": bc["price"]},
-                "text": ",".join(list(set(_bcs))),
-                "level": _type,
-            })
-        # 合并版(向后兼容):同时间点笔/段合并到一个 text 里
-        bc_text = "/".join(
-            [
-                f"{line_type_map[_type]}:{','.join(list(set(_bcs)))}"
-                for _type, _bcs in bc["bc_infos"].items()
-                if len(_bcs) > 0
-            ]
-        )
-        if len(bc_text) > 0:
-            bc_chart_data.append({
-                "points": {"time": ts, "price": bc["price"]},
-                "text": bc_text,
-            })
+    if config.get("chart_use_branch_core", "0") == "1":
+        # 新核心背驰信号:笔级→bi_bcs、段级(线段)→xd_bcs,与新核心买卖点**同源**(get_branch_bcs)。
+        # 原图表背驰走 legacy line_bcs(极稀疏)、与新核心一类买卖点不一致(用户 2026-06 指出「背驰
+        # 信号没有」);branch core 开时改接新核心背驰(done_divergence 里 is_beichi 的离开段)。
+        for _use_xd, _bucket in ((False, bi_bc_chart_data), (True, xd_bc_chart_data)):
+            try:
+                for _date, _val, _kind in cd.get_branch_bcs(use_xd=_use_xd):
+                    _bucket.append({
+                        "points": {"time": fun.datetime_to_int(_date), "price": _val},
+                        "text": bc_type_map.get(_kind, str(_kind).upper()),
+                        "level": "xd" if _use_xd else "bi",
+                    })
+            except Exception:
+                pass
+    else:
+        for dt, bc in bc_infos.items():
+            ts = fun.datetime_to_int(dt)
+            # 拆分版:笔/段独立产出,前端可分别 reconcile + 独立 toggle + 不同样式
+            for _type, _bcs in bc["bc_infos"].items():
+                if not _bcs:
+                    continue
+                target = bi_bc_chart_data if _type == "bi" else xd_bc_chart_data
+                target.append({
+                    "points": {"time": ts, "price": bc["price"]},
+                    "text": ",".join(list(set(_bcs))),
+                    "level": _type,
+                })
+            # 合并版(向后兼容):同时间点笔/段合并到一个 text 里
+            bc_text = "/".join(
+                [
+                    f"{line_type_map[_type]}:{','.join(list(set(_bcs)))}"
+                    for _type, _bcs in bc["bc_infos"].items()
+                    if len(_bcs) > 0
+                ]
+            )
+            if len(bc_text) > 0:
+                bc_chart_data.append({
+                    "points": {"time": ts, "price": bc["price"]},
+                    "text": bc_text,
+                })
 
     mmd_chart_data = []
     bi_mmd_chart_data = []
     xd_mmd_chart_data = []
-    for dt, mmd in mmd_infos.items():
-        ts = fun.datetime_to_int(dt)
-        # 拆分版:笔/段买卖点独立产出,前端独立渲染
-        for _type, _mmds in mmd["mmd_infos"].items():
-            if not _mmds:
-                continue
-            target = bi_mmd_chart_data if _type == "bi" else xd_mmd_chart_data
-            target.append({
-                "points": {"time": ts, "price": mmd["price"]},
-                "text": ",".join(list(set(_mmds))),
-                "level": _type,
-            })
-        # 合并版(向后兼容)
-        mmd_text = "/".join(
-            [
-                f"{line_type_map[_type]}:{','.join(list(set(_mmds)))}"
-                for _type, _mmds in mmd["mmd_infos"].items()
-                if len(_mmds) > 0
-            ]
-        )
-        if len(mmd_text) > 0:
-            mmd_chart_data.append({
-                "points": {"time": ts, "price": mmd["price"]},
-                "text": mmd_text,
-            })
-
-    # 中枢升级买卖点:在递归各升级级别(L0=线段本身、L1+=上一级走势类型)的走势单元上
-    # 跑买卖点(独立桶 'L{n}',不冲基础 bi/xd),产出更高级别转折信号(第54课升级三卖等)。
-    # 合并进 xd_mmds、文本加「升」前缀以便在图上识别。升级是否出现取决于数据是否具备
-    # 更高级别结构——低结构标的可能升不出级别(原文-一致)。
-    if config.get("chart_show_recursive_levels", "1") == "1" and levels:
-        if config.get("chart_use_branch_core", "0") == "1":
-            # 新核心 8 模块:get_branch_bspoints 直接产 BuySellPoint(一/二/三类全多级)
+    if config.get("chart_use_branch_core", "0") == "1":
+        # 新核心买卖点:**笔级→bi_mmds、段级(线段)→xd_mmds**,各归其位。原先恒用笔级却全塞
+        # xd_mmds(标 level=xd)= 笔买卖点冒充段买卖点(2026-06 用户指出);拆成两级各算。
+        # branch core 开时不再叠加 legacy line_mmds(避免新核心+旧链路双源混在同一渠道)。
+        for _use_xd, _bucket in ((False, bi_mmd_chart_data), (True, xd_mmd_chart_data)):
             try:
-                for _p in cd.get_branch_bspoints():
-                    xd_mmd_chart_data.append({
+                for _p in cd.get_branch_bspoints(use_xd=_use_xd):
+                    _bucket.append({
                         "points": {
                             "time": fun.datetime_to_int(_p.anchor_fx.k.date),
                             "price": _p.anchor_fx.val,
                         },
                         "text": _p.bs_type,
-                        "level": "xd",
+                        "level": "xd" if _use_xd else "bi",
                     })
             except Exception:
                 pass
-        else:
+    else:
+        # 旧链路:legacy 基础买卖点(line_mmds)笔→bi_mmds、段→xd_mmds + 向后兼容合并版。
+        for dt, mmd in mmd_infos.items():
+            ts = fun.datetime_to_int(dt)
+            for _type, _mmds in mmd["mmd_infos"].items():
+                if not _mmds:
+                    continue
+                target = bi_mmd_chart_data if _type == "bi" else xd_mmd_chart_data
+                target.append({
+                    "points": {"time": ts, "price": mmd["price"]},
+                    "text": ",".join(list(set(_mmds))),
+                    "level": _type,
+                })
+            mmd_text = "/".join(
+                [
+                    f"{line_type_map[_type]}:{','.join(list(set(_mmds)))}"
+                    for _type, _mmds in mmd["mmd_infos"].items()
+                    if len(_mmds) > 0
+                ]
+            )
+            if len(mmd_text) > 0:
+                mmd_chart_data.append({
+                    "points": {"time": ts, "price": mmd["price"]},
+                    "text": mmd_text,
+                })
+        # 中枢升级买卖点(旧链路):各升级级别走势单元上跑买卖点、合并进 xd_mmds、文本加「升」前缀。
+        if config.get("chart_show_recursive_levels", "1") == "1" and levels:
             from chanlun.core.bs_point_calculator import BsPointCalculator
             for _lv in levels:
                 _units = list(cd.get_xds()) if _lv.level == 0 else levels[_lv.level - 1].zslxs

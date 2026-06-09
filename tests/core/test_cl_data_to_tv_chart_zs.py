@@ -117,3 +117,93 @@ def test_cl_data_to_tv_chart_includes_recursive_upgrade_mmds(cl_config):
 
     assert any("升" in m["text"] for m in xdm), "应至少有 1 个升级买卖点(升3S)合并进 xd_mmds"
     assert any("升" not in m["text"] for m in xdm), "基础 xd 买卖点不得被升级买卖点冲掉"
+
+
+def test_cl_data_to_tv_chart_xd_mmds_are_segment_level_not_bi(
+    cl_with_synthetic_klines, cl_config
+):
+    """新核心(branch core 开)下:**段买卖点 xd_mmds 来自线段、笔买卖点 bi_mmds 来自笔**,各归
+    其位。原 bug:`get_branch_bspoints` 恒用笔却全塞 xd_mmds(标 level=xd)=笔买卖点冒充段买卖点。"""
+    cd = cl_with_synthetic_klines(1500, seed=42, trend="up", multi_freq=True)
+    config = dict(cl_config)
+    config["chart_use_branch_core"] = "1"
+    config["chart_show_recursive_levels"] = "1"
+    config["chart_show_bi_mmd"] = "1"
+    config["chart_show_xd_mmd"] = "1"
+    chart = cl_data_to_tv_chart(cd, config)
+    bi_mmds, xd_mmds = chart["bi_mmds"], chart["xd_mmds"]
+    assert bi_mmds, "合成数据应产出笔级买卖点"
+    # level 标签各归其位
+    assert all(m["level"] == "bi" for m in bi_mmds), "bi_mmds 必须全是笔级"
+    assert all(m["level"] == "xd" for m in xd_mmds), "xd_mmds 必须全是段级"
+    # 来源正确:bi_mmds==笔级递归、xd_mmds==段级(线段)递归(非笔冒充)
+    assert len(bi_mmds) == len(cd.get_branch_bspoints(use_xd=False)), "bi_mmds 来自笔"
+    assert len(xd_mmds) == len(cd.get_branch_bspoints(use_xd=True)), "xd_mmds 来自线段"
+    # 线段比笔稀疏 → 段买卖点应少于笔买卖点(确实分开、不是同一份笔买卖点)
+    assert len(xd_mmds) < len(bi_mmds), "段买卖点应少于笔买卖点(线段稀疏), 证明非笔冒充段"
+
+
+def test_cl_data_to_tv_chart_bcs_from_branch_core(cl_config):
+    """新核心(branch core 开)背驰信号 = get_branch_bcs(笔→bi_bcs、段→xd_bcs),与买卖点同源。
+    原图表背驰走 legacy line_bcs(极稀疏)、与新核心一类买卖点不一致(用户:背驰信号没有)。
+    用真实 301004(已知有背驰);合成上涨数据无力度衰减、产不出背驰。"""
+    import pathlib
+    import pandas as pd
+    import pytest
+    from chanlun.core.cl import CL
+    from tests.core.conftest import DEFAULT_CL_CONFIG
+
+    csv = pathlib.Path(__file__).resolve().parent.parent / "fixtures" / "klines" / "a_SZ_301004_1m.csv"
+    if not csv.exists():
+        pytest.skip("缺少 a_SZ_301004_1m fixture")
+    cd = CL("301004", "1m", dict(DEFAULT_CL_CONFIG))
+    cd.process_klines(pd.read_csv(csv, parse_dates=["date"]))
+
+    config = dict(cl_config)
+    config["chart_use_branch_core"] = "1"
+    config["chart_show_bi_bc"] = "1"
+    config["chart_show_xd_bc"] = "1"
+    chart = cl_data_to_tv_chart(cd, config)
+    bi_bcs, xd_bcs = chart["bi_bcs"], chart["xd_bcs"]
+    assert bi_bcs or xd_bcs, "301004 应产出新核心背驰信号"
+    assert all(m["level"] == "bi" for m in bi_bcs), "bi_bcs 必须全是笔级"
+    assert all(m["level"] == "xd" for m in xd_bcs), "xd_bcs 必须全是段级"
+    assert len(bi_bcs) == len(cd.get_branch_bcs(use_xd=False)), "bi_bcs 来自笔级新核心背驰"
+    assert len(xd_bcs) == len(cd.get_branch_bcs(use_xd=True)), "xd_bcs 来自段级新核心背驰"
+    assert all(m["text"] in ("QS", "PZ") for m in bi_bcs + xd_bcs), "背驰类型=QS(趋势)/PZ(盘整)"
+
+
+def test_cl_data_to_tv_chart_renders_forming_l0_zhongshu_dashed(
+    cl_with_synthetic_klines, cl_config, monkeypatch
+):
+    """L0 右边缘正在形成的未完成中枢(LevelResult.live_zss)应序列化进
+    recursive_levels[L0].zss 且 linestyle='1'(虚线),让前端画出正在形成的 5min 中枢。
+
+    解耦:不依赖合成数据恰好停在中枢形成途中(脆弱),而是注入一个含 live_zss 的
+    LevelResult(素材复用真实 L0 中枢),只验证序列化层是否透传未完成中枢到图表。
+    """
+    import copy
+    from chanlun.core.recursive_branch import LevelResult
+
+    cd = cl_with_synthetic_klines(500, seed=42, trend="up", multi_freq=True)
+    levels = cd.get_recursive_branch_levels()
+    l0_real = next((lv for lv in levels if lv.level == 0 and lv.zss), None)
+    assert l0_real, "合成数据应产出 L0 done 中枢作为构造素材"
+
+    done_zs = l0_real.zss[0]
+    forming = copy.copy(done_zs)          # 复用真实中枢做未完成素材, 只翻 done 标志
+    forming.done = False
+    fake = LevelResult(
+        level=0, zss=[done_zs], done_divergence=[None], zslxs=[], live_zss=[forming],
+    )
+    monkeypatch.setattr(cd, "get_recursive_branch_levels", lambda: [fake])
+
+    config = dict(cl_config)
+    config["chart_use_branch_core"] = "1"
+    config["chart_show_recursive_levels"] = "1"
+    chart_data = cl_data_to_tv_chart(cd, config)
+
+    l0 = next(item for item in chart_data["recursive_levels"] if item["level"] == 0)
+    styles = [z["linestyle"] for z in l0["zss"]]
+    assert "1" in styles, f"L0 应含正在形成的未完成中枢(虚线 linestyle=1), 实得 {styles}"
+    assert "0" in styles, f"L0 也应含已完成中枢(实线 linestyle=0), 实得 {styles}"

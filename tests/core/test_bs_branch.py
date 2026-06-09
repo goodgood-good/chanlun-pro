@@ -148,3 +148,46 @@ def test_third_class_down_retest_breaks_zd_none():
     z = _zs_with_leave(leave)
     lines = [leave, retest]
     assert BsBranchCalculator().calculate(_result([z], [None]), lines) == []
+
+
+# ---- 二类(结构化,单级别第二类买卖点:一类后首次回调不破前低/前高) ----
+def _zs_core():
+    return _make_zs([_seg(10, "up", 6, 8), _seg(11, "down", 8, 6), _seg(12, "up", 6, 8)], 6, 8)
+
+
+def test_second_class_1sell_pullback_holds_high_is_2sell():
+    """一卖(顶背驰)后:反弹(down)+首次回调(up)不破前高 → 2sell。"""
+    c = _seg(0, "up", 5, 10)                          # 离开段 up→10 = 一卖点(前高=10)
+    rebound = _seg(1, "down", 10, 7)                  # 反弹下跌
+    pullback = _seg(2, "up", 7, 9)                    # 回调 up→9 (<=10 不破前高)
+    res = _result([_zs_core()], [_dv("up", c)])
+    pts = BsBranchCalculator().second_class(res, [c, rebound, pullback])
+    assert len(pts) == 1 and pts[0].bs_type == "2sell"
+    assert pts[0].anchor_fx is pullback.end
+
+
+def test_second_class_1sell_pullback_breaks_high_none():
+    """回调升破前高 → 不产 2sell。"""
+    c = _seg(0, "up", 5, 10)
+    rebound = _seg(1, "down", 10, 7)
+    pullback = _seg(2, "up", 7, 11)                   # 回调 11 > 10 破前高
+    res = _result([_zs_core()], [_dv("up", c)])
+    assert BsBranchCalculator().second_class(res, [c, rebound, pullback]) == []
+
+
+def test_second_class_1buy_pullback_holds_low_is_2buy():
+    """一买(底背驰)后:反弹(up)+首次回调(down)不破前低 → 2buy。"""
+    c = _seg(0, "down", 10, 5)                        # 离开段 down→5 = 一买点(前低=5)
+    rebound = _seg(1, "up", 5, 8)                     # 反弹上涨
+    pullback = _seg(2, "down", 8, 6)                  # 回调 down→6 (>=5 不破前低)
+    res = _result([_zs_core()], [_dv("down", c)])
+    pts = BsBranchCalculator().second_class(res, [c, rebound, pullback])
+    assert len(pts) == 1 and pts[0].bs_type == "2buy"
+
+
+def test_second_class_no_pullback_seg_none():
+    """一类后不足「反弹+回调」两段 → 不产二类。"""
+    c = _seg(0, "up", 5, 10)
+    rebound = _seg(1, "down", 10, 7)
+    res = _result([_zs_core()], [_dv("up", c)])
+    assert BsBranchCalculator().second_class(res, [c, rebound]) == []   # 缺回调段

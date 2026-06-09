@@ -145,6 +145,37 @@ def test_calculate_records_pending_when_no_done():
     assert res[0].zslxs == []            # pending 未完成 → 不切走势类型
 
 
+def test_calculate_exposes_forming_zhongshu_via_live_zss():
+    """非终止级别(已有 done 中枢)右边缘正在形成的未完成中枢 → 经 live_zss 暴露。
+
+    原 bug:LevelResult.zss=res.done_zss 只取已完成中枢,res.live 里正在形成的
+    未完成中枢被丢弃,前端 recursive_zss 永远拿不到它(用户:看不到未完成的 5min 中枢)。
+    新行为:LevelResult.live_zss 携带该未完成中枢(done=False),不污染 zss(下游
+    买卖点/走势类型仍只读已完成 zss);图表序列化端按 done=False 画虚线框。
+    """
+    lines = [
+        _seg(0, "up", 5, 8), _seg(1, "down", 8, 5), _seg(2, "up", 5, 8), _seg(3, "down", 8, 5),
+        _seg(4, "up", 5, 22),                       # 中枢1 离开段冲到22(中枢1 完成)
+        _seg(5, "down", 22, 19), _seg(6, "up", 19, 22), _seg(7, "down", 22, 19), _seg(8, "up", 19, 22),
+    ]
+    # 防腐:锁定该序列 = 1 个 done 中枢 + 右边缘 pending(core 读法=正在形成)
+    from chanlun.core.zs_branch import ZsBranchCalculator
+    probe = ZsBranchCalculator(
+        ld_provider=_ld_none, frequency=None,
+        wzgx=Config.ZS_WZGX_ZGD.value, min_zs_lines=4).calculate(lines)
+    assert len(probe.done_zss) == 1 and any(h.node1 == "core" for h in probe.live), \
+        "前提:该序列须有 1 done 中枢 + pending core(正在形成) —— 锁定测试意图"
+
+    res = recursive_branch.RecursiveBranchCalculator().calculate(
+        lines, _ld_none, Config.ZS_WZGX_ZGD.value)
+    l0 = next(lv for lv in res if lv.level == 0)
+    assert len(l0.zss) == 1, "zss 仍只含已完成中枢(不被未完成污染)"
+    assert len(l0.live_zss) == 1, "右边缘正在形成的未完成中枢应经 live_zss 暴露"
+    forming = l0.live_zss[0]
+    assert forming.done is False, "未完成 → done=False → 前端按 linestyle=1 画虚线"
+    assert (forming.zd, forming.zg) == (19, 22), "未完成中枢核心区=中枢2 重叠带[19,22]"
+
+
 def test_calculate_two_levels():
     """L0 走势类型→L1 中枢 关键步骤验证（降级方案）。
 

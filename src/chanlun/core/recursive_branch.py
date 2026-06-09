@@ -30,6 +30,8 @@ class LevelResult:
     zslxs: List[ZSLX]                                   # 本级走势类型
     upgrade_idx: List[int] = field(default_factory=list)  # 升级标注:9段/扩展候选的中枢索引(P5 用)
     units: List[LINE] = field(default_factory=list)       # P5c:该级输入段序列(回试段定位)
+    live_zss: List[ZS] = field(default_factory=list)      # 右边缘正在形成的未完成中枢(done=False)。
+    # 纯图表展示用(虚线框);刻意不并入 zss——下游买卖点/走势类型只读已完成 zss,保「各级只用 done」不变量。
 
 
 def _as_units(zslxs: List[ZSLX]) -> List[ZSLX]:
@@ -108,9 +110,14 @@ class RecursiveBranchCalculator:
                 break
             zslxs = zslx_calc.calculate(res.done_zss, res.done_divergence)
             assert zslxs, "done_zss 非空时 zslx_branch 必产 ≥1 走势类型(末段 done=False)"
+            # 右边缘正在形成的未完成中枢(core=仍开读法,done=False):本级已有 done 中枢,
+            # 不再走上面「无 done 放宽一档」分支,但仍要把这个未完成中枢带给图表(否则
+            # 用户看不到正在形成的中枢)。只入 live_zss、不入 zss,不扰动买卖点/走势类型。
+            forming = [h.zs for h in res.live if h.node1 == "core"]
             results.append(LevelResult(
                 level=level, zss=res.done_zss, done_divergence=res.done_divergence,
                 zslxs=zslxs, upgrade_idx=_mark_upgrades(res.done_zss), units=list(units),
+                live_zss=forming,
             ))
             if len(zslxs) < 3:
                 break
