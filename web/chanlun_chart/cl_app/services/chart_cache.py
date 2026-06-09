@@ -143,7 +143,10 @@ def _stable_hash(obj) -> str:
 # - v24 (2026-06) ── get_kuozhan_levels 即使某级空也出层(升级链=该周期可用级别):短数据下 30m
 #   同级别分解=0 中枢时,recursive_levels 仍含(空)level=2 → 前端菜单恒有 30m(zs_L2)选项(修
 #   「1min图看不到30min选项」)。数据够了自动填充。recursive_levels 结构变(多空层)→ 失效。
-_CHART_CACHE_SCHEMA_VERSION = "v24"
+# - v25 (2026-06) ── QMT 1m/5m 回看 90→365 天(exchange_qmt 专属覆盖):lookback 不进 cache_key
+#   (key 只含 config hash),故 lookback 改了旧缓存仍命中陈旧 90 天数据 → 本 bump 强制失效,
+#   让 365 天更长历史(更多 5m/30m 中枢)在重启后立即生效、免手动清缓存。
+_CHART_CACHE_SCHEMA_VERSION = "v25"
 
 
 def _build_cache_key(market: str, code: str, frequency: str, cl_config: dict) -> str:
