@@ -159,7 +159,11 @@ def _stable_hash(obj) -> str:
 #   用户口径):① 延伸=单中枢 line_num≥9 → 3+3+3 分 3 组重合(原 TODO 未实现);② 扩张=相邻两同级别
 #   中枢 GG/DD 重叠 → 三走势[A·连接·B]重合(原用「运行交集」把 N 个囫囵分组);③ 延伸优先于扩张。
 #   000001 1m 图 5m 中枢 22→29(延伸10+扩张19)、30m 中枢随之变。recursive_levels 内容变,强制失效。
-_CHART_CACHE_SCHEMA_VERSION = "v28"
+# - v29 (2026-06) ── 扩张升级的「三走势」改**按股价分**(原文10012,用户口径「复用走势类型分解」):
+#   原写死 [中枢A本体·连接·中枢B本体],改为 _three_zoushi_overlap——把跨两中枢的区间在最高线段(顶)/
+#   最低线段(底)两处转折切 3 段(上涨/下跌/盘整任意组合、段数可变),取三段重合。扩张中枢区间变(数量
+#   不变),30m tongjibie 随之 3→4。recursive_levels 内容变,强制旧缓存失效。
+_CHART_CACHE_SCHEMA_VERSION = "v29"
 
 
 def _build_cache_key(market: str, code: str, frequency: str, cl_config: dict) -> str:

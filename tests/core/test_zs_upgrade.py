@@ -171,6 +171,7 @@ def test_kuozhan_last_zhongshu_unfinished_even_if_region_before_edge():
     out = kuozhan_zhongshu([z1, z2], xds)
     assert len(out) == 1
     assert out[0].lines[-1] is not xds[-1], "前提: 该中枢区域止于右边缘之前"
+    assert out[0].done is False, "序列最后一个中枢未被后续确认 → 未完成(尽管区域未到右边缘)"
 
 
 # ---- 延伸型升级: 单中枢 line_num>=9 → 3+3+3 分 3 组重合(原文 line8157/23045/30290) ----
@@ -204,7 +205,21 @@ def test_kuozhan_yanshen_priority_over_kuozhang():
     out = kuozhan_zhongshu([z0, z1], xds)
     assert len(out) == 1                                 # 仅 z0 延伸升级;z1 被排除、单独不升级
     assert out[0].zd == 12 and out[0].zg == 14           # z0 的延伸区间,非 z0∩z1 扩张区间
-    assert out[0].done is False, "序列最后一个中枢未被后续确认 → 未完成(尽管区域未到右边缘)"
+
+
+# ---- 扩张三走势=按价格分(复用走势类型口径,非写死[A·连接·B]) ----
+def test_three_zoushi_overlap_513100_lines():
+    """扩张三走势:在最高线段(顶)/最低线段(底)两处转折把区间切 3 走势,取三段重合(原文10012)。
+    513100 xd6-15:底=xd6 顶=xd12 → 切成[xd6][xd7-12][xd13-15] → 重合 [1.713,1.737](= 扩展 oracle)。"""
+    from chanlun.core.zs_upgrade import _three_zoushi_overlap
+    zd, zg = _three_zoushi_overlap(_xds_513100())
+    assert round(zd, 4) == 1.7130 and round(zg, 4) == 1.7370
+
+
+def test_three_zoushi_overlap_too_short_none():
+    """不足 3 段切不出三走势 → None(由调用方退化处理)。"""
+    from chanlun.core.zs_upgrade import _three_zoushi_overlap
+    assert _three_zoushi_overlap([_L("up", 1.0, 2.0), _L("down", 1.0, 2.0)]) is None
 
 
 # ---- kuozhan_level_signals: 各级(5m/30m)背驰+买卖点 ----

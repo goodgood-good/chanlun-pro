@@ -89,29 +89,52 @@ def _yanshen_upgrade(z: ZS) -> Optional[ZS]:
     return _build_kuozhan_zs([z], list(lines), (zd, zg))
 
 
+def _three_zoushi_overlap(lines: List[LINE]) -> Optional[Tuple[float, float]]:
+    """按股价把区间线段分**三走势**(复用走势类型口径,原文 line10012 三段重合):在**最高线段(顶)**
+    与**最低线段(底)**两处转折切成 3 段(对应 上涨/下跌/盘整 的自然分界——顶/底是走势方向反转处,
+    其余来回归入相邻段),每段取 [min low, max high],返回三段重合 [max(三段低), min(三段高)]。
+    顶/底落在端点或相邻致空段 → 退化为按段数均分 3 组。线段<3 或重合为空 → None。"""
+    n = len(lines)
+    if n < 3:
+        return None
+    his = [ln.zs_high for ln in lines]
+    los = [ln.zs_low for ln in lines]
+    ih = max(range(n), key=lambda k: his[k])             # 最高线段(顶)
+    il = min(range(n), key=lambda k: los[k])             # 最低线段(底)
+    c1, c2 = sorted((ih, il))
+    g1, g2, g3 = lines[:c1 + 1], lines[c1 + 1:c2 + 1], lines[c2 + 1:]
+    if not (g1 and g2 and g3):                           # 顶/底在端点或相邻 → 退化均分
+        k = n // 3
+        if k < 1:
+            return None
+        g1, g2, g3 = lines[:k], lines[k:2 * k], lines[2 * k:]
+        if not (g1 and g2 and g3):
+            return None
+    lows = [min(ln.zs_low for ln in g) for g in (g1, g2, g3)]
+    highs = [max(ln.zs_high for ln in g) for g in (g1, g2, g3)]
+    zd, zg = max(lows), min(highs)
+    return (zd, zg) if zd < zg else None
+
+
 def _kuozhang_upgrade(a: ZS, b: ZS, xds: List[LINE]) -> Optional[ZS]:
-    """**扩张型升级**(原文中心定理二 line10007/10029):相邻两同级别中枢 GG/DD 包络重叠 → 取三走势
-    [中枢A(盘整)·A→B 连接(趋势)·中枢B(盘整)],升级中枢区间 = 三走势重合 [max(三段低), min(三段高)]
-    (line10012;按 line10018 由首尾两中枢主定,连接段一般不约束)。region = A 首线段 ~ B 末线段
-    (供下游 kuozhan_level_signals 补进入/离开段)。"""
+    """**扩张型升级**(原文中心定理二 line10007/10029):相邻两同级别中枢 GG/DD 包络重叠 → 把跨这两
+    中枢的区间**按股价分三走势**(_three_zoushi_overlap,复用走势类型分解、非写死中枢本体——三走势
+    可能是 上涨/下跌/盘整 任意组合、段数可变),升级中枢区间 = 三走势重合(原文 line10012)。
+    region = A 首线段 ~ B 末线段(供下游 kuozhan_level_signals 补进入/离开段)。"""
     if not a.lines or not b.lines:
         return None
     ia = _line_index(a.lines[0], xds)
     ib = _line_index(b.lines[-1], xds)
     if ia is None or ib is None:
         return None
-    lows = [a.dd, b.dd]                                   # 走势①中枢A、走势③中枢B 本体高低
-    highs = [a.gg, b.gg]
-    ja = _line_index(a.lines[-1], xds)
-    jb = _line_index(b.lines[0], xds)
-    if ja is not None and jb is not None and jb > ja + 1:  # 走势②=A 末段~B 首段之间的连接走势
-        conn = xds[ja + 1:jb]
-        lows.append(min(ln.zs_low for ln in conn))
-        highs.append(max(ln.zs_high for ln in conn))
-    zd, zg = max(lows), min(highs)
-    if zd >= zg:
-        return None
-    return _build_kuozhan_zs([a, b], xds[ia:ib + 1], (zd, zg))
+    region = xds[ia:ib + 1]
+    interval = _three_zoushi_overlap(region)             # 按股价三走势重合
+    if interval is None:                                 # 退化:两中枢包络重合(line10018 首尾主定)
+        zd, zg = max(a.dd, b.dd), min(a.gg, b.gg)
+        if zd >= zg:
+            return None
+        interval = (zd, zg)
+    return _build_kuozhan_zs([a, b], region, interval)
 
 
 def kuozhan_zhongshu(zss: List[ZS], xds: List[LINE]) -> List[ZS]:
