@@ -522,23 +522,32 @@ class CL(ICL):
         xds = list(self.get_xds())                       # 各级中枢.lines 均为线段 → 同一定位基
         ld = lambda s, e: query_macd_ld(self, s, e)      # noqa: E731
         wzgx = self.config.get('zs_wzgx', Config.ZS_WZGX_ZGD.value)
+        import logging
         out = []
         cur = l0
         for lvl, (_target, method) in enumerate(chain, start=1):
-            if not cur:                                  # 上级空 → 本级空(数据不足),仍出空层
-                nz = []
-            elif method == "tongjibie":                  # 30m 同级别分解(3段走势类型重合)
-                zslxs = ZslxBranchCalculator().calculate(cur, [None] * len(cur))
-                nz = tongjibie_zhongshu(zslxs, xds)
-            else:                                         # <30m kuozhan 非同级别(扩展/延伸)
-                nz = kuozhan_zhongshu(cur, xds)
-            bsp, bcs = kuozhan_level_signals(nz, xds, ld, wzgx, self.frequency)
-            for p in bsp:
-                p.level = lvl
-            # **即使本级空也出层** → 前端菜单选项反映升级链(该周期可用级别)、而非数据是否恰好有中枢:
-            # 短数据下 30m 同级别分解=0 中枢时,30m 选项仍在(空),数据够了自动填充(避免「看不到30m选项」)。
-            out.append({"level": lvl, "zss": nz, "bsp": bsp, "bcs": bcs})
-            cur = nz
+            # **逐级容错**:某级(尤其 30m 同级别分解 zslx/tongjibie)在边缘数据上抛异常时,只丢该级、
+            # 不连累其他级(否则整个 get_kuozhan_levels 抛出 → cl_utils 静默吞 → 5m/30m 全没,
+            # 用户「看不到买卖点」的真凶)。失败记 warning(带 traceback)便于定位。
+            try:
+                if not cur:                              # 上级空 → 本级空(数据不足),仍出空层
+                    nz = []
+                elif method == "tongjibie":              # 30m 同级别分解(3段走势类型重合)
+                    zslxs = ZslxBranchCalculator().calculate(cur, [None] * len(cur))
+                    nz = tongjibie_zhongshu(zslxs, xds)
+                else:                                     # <30m kuozhan 非同级别(扩展/延伸)
+                    nz = kuozhan_zhongshu(cur, xds)
+                bsp, bcs = kuozhan_level_signals(nz, xds, ld, wzgx, self.frequency)
+                for p in bsp:
+                    p.level = lvl
+                # **即使本级空也出层** → 前端菜单选项反映升级链(该周期可用级别)、非数据是否恰好有中枢。
+                out.append({"level": lvl, "zss": nz, "bsp": bsp, "bcs": bcs})
+                cur = nz
+            except Exception:
+                logging.getLogger(__name__).warning(
+                    "get_kuozhan_levels L%d(%s) 失败,出空层保留其他级别", lvl, method, exc_info=True)
+                out.append({"level": lvl, "zss": [], "bsp": [], "bcs": []})
+                cur = []
         return out
 
     def get_branch_interval_nest(self):

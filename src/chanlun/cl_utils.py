@@ -1027,6 +1027,9 @@ def cl_data_to_tv_chart(
             try:
                 _kuozhan_levels = cd.get_kuozhan_levels()
             except Exception:
+                import logging
+                logging.getLogger(__name__).warning(
+                    "get_kuozhan_levels 顶层失败 → 无 5m/30m 中枢/买卖点/背驰", exc_info=True)
                 _kuozhan_levels = []
             for _kl in _kuozhan_levels:
                 _flbl = _kuozhan_freq_label(cd.frequency, _kl["level"])
