@@ -155,7 +155,11 @@ def _stable_hash(obj) -> str:
 #   (趋势含多中枢、方向不交替)→ 凑不出上下上 → 30m 中枢恒 0(000001 5m 图实测)。改为从中枢序列
 #   直接建严格交替腿(连续同向并一腿、反转处断开共享极值中枢)→ 三腿重合=中枢。000001:5m 图 30m
 #   中枢 0→2、1m 图 30m 中枢 1→3(+买卖点/背驰)。recursive_levels[30m] 内容变,强制旧缓存失效。
-_CHART_CACHE_SCHEMA_VERSION = "v27"
+# - v28 (2026-06) ── 中枢升级(非同级别)重做为**延伸+扩张+优先级**(原文 line8157/23045/10029,
+#   用户口径):① 延伸=单中枢 line_num≥9 → 3+3+3 分 3 组重合(原 TODO 未实现);② 扩张=相邻两同级别
+#   中枢 GG/DD 重叠 → 三走势[A·连接·B]重合(原用「运行交集」把 N 个囫囵分组);③ 延伸优先于扩张。
+#   000001 1m 图 5m 中枢 22→29(延伸10+扩张19)、30m 中枢随之变。recursive_levels 内容变,强制失效。
+_CHART_CACHE_SCHEMA_VERSION = "v28"
 
 
 def _build_cache_key(market: str, code: str, frequency: str, cl_config: dict) -> str:

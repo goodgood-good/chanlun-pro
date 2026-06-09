@@ -68,63 +68,91 @@ def _build_kuozhan_zs(run: List[ZS], region: List[LINE], interval: Tuple[float, 
     return z
 
 
-def _group_by_running_overlap(zss: List[ZS]) -> List[List[ZS]]:
-    """连续 is_kuozhan 子中枢按「运行交集」分组(原文 line31774 每3段最高最低重合 / line10029
-    定理二)。沿 is_kuozhan run 累积子中枢, 维持包络运行交集 [max(dd),min(gg)] 有效;加入下一
-    个会使交集塌缩(max(dd)>=min(gg))时本组收尾、从破坏点开新组(破坏的子中枢起下一组)。
-    每组 ≥2 子中枢(line10029:2 个同级中枢核心分离+包络重叠即成高级别中枢)。"""
-    groups: List[List[ZS]] = []
-    n = len(zss)
-    i = 0
-    while i < n - 1:
-        if not is_kuozhan(zss[i], zss[i + 1]):
-            i += 1
-            continue
-        grp = [zss[i]]
-        czd, czg = zss[i].dd, zss[i].gg          # 运行交集(子中枢包络的交)
-        j = i + 1
-        while j < n and is_kuozhan(zss[j - 1], zss[j]):
-            nzd, nzg = max(czd, zss[j].dd), min(czg, zss[j].gg)
-            if nzd >= nzg:                       # 加入塌缩交集 → 本组收尾
-                break
-            grp.append(zss[j])
-            czd, czg = nzd, nzg
-            j += 1
-        if len(grp) >= 2:
-            groups.append(grp)
-            i = j                                # 从破坏点继续(破坏的子中枢起新组)
-        else:
-            i += 1
-    return groups
+def _yanshen_upgrade(z: ZS) -> Optional[ZS]:
+    """**延伸型升级**(原文 line8157「非标准趋势延伸 9 段成大中枢」/ line23045「9 段以上次级别走势,
+    每 3 段构成一个中枢」):单中枢延伸到 line_num>=9 → 构成线段按顺序分 3 组(尽量均匀,9→3+3+3),
+    每组取**组内真实**最高/最低(line30290:三角收敛时组高低不一定是组间连接点),升级中枢区间 =
+    三组重合 [max(三组低), min(三组高)](line10012 三段重合公式)。region = 该中枢全部线段。"""
+    lines = z.lines
+    n = len(lines)
+    if n < 9:
+        return None
+    k = n // 3
+    groups = [lines[0:k], lines[k:2 * k], lines[2 * k:]]
+    if any(not g for g in groups):
+        return None
+    lows = [min(ln.zs_low for ln in g) for g in groups]
+    highs = [max(ln.zs_high for ln in g) for g in groups]
+    zd, zg = max(lows), min(highs)
+    if zd >= zg:
+        return None
+    return _build_kuozhan_zs([z], list(lines), (zd, zg))
+
+
+def _kuozhang_upgrade(a: ZS, b: ZS, xds: List[LINE]) -> Optional[ZS]:
+    """**扩张型升级**(原文中心定理二 line10007/10029):相邻两同级别中枢 GG/DD 包络重叠 → 取三走势
+    [中枢A(盘整)·A→B 连接(趋势)·中枢B(盘整)],升级中枢区间 = 三走势重合 [max(三段低), min(三段高)]
+    (line10012;按 line10018 由首尾两中枢主定,连接段一般不约束)。region = A 首线段 ~ B 末线段
+    (供下游 kuozhan_level_signals 补进入/离开段)。"""
+    if not a.lines or not b.lines:
+        return None
+    ia = _line_index(a.lines[0], xds)
+    ib = _line_index(b.lines[-1], xds)
+    if ia is None or ib is None:
+        return None
+    lows = [a.dd, b.dd]                                   # 走势①中枢A、走势③中枢B 本体高低
+    highs = [a.gg, b.gg]
+    ja = _line_index(a.lines[-1], xds)
+    jb = _line_index(b.lines[0], xds)
+    if ja is not None and jb is not None and jb > ja + 1:  # 走势②=A 末段~B 首段之间的连接走势
+        conn = xds[ja + 1:jb]
+        lows.append(min(ln.zs_low for ln in conn))
+        highs.append(max(ln.zs_high for ln in conn))
+    zd, zg = max(lows), min(highs)
+    if zd >= zg:
+        return None
+    return _build_kuozhan_zs([a, b], xds[ia:ib + 1], (zd, zg))
 
 
 def kuozhan_zhongshu(zss: List[ZS], xds: List[LINE]) -> List[ZS]:
-    """子中枢(L0)→ 高级别(5min)中枢:按「运行交集」分组,每组区间=组内子中枢包络重合。
+    """子中枢(本级别)→ 高级别中枢:**非同级别分解**(扩展/扩张)。两种升级,**延伸优先于扩张**
+    (用户口径):
 
-    原文 line31774「扩展后的中枢区间就是每 3 段中的最高最低点的重合区域」+ line10029 定理二:
-    区间 [ZD,ZG] = [max(组内子中枢 dd), min(组内子中枢 gg)](重合);包络 [DD,GG] = 区域并集。
-    长 run 按交集塌缩点切成多个中枢(替代旧摆动 three_segment_interval:旧法把整段囫囵框成
-    超宽框、过度框选,见 000001 出图对比 2026-06)。
+    ① **延伸**(line8157/23045):单中枢延伸到 9 段 → 直接 3+3+3 分 3 组,三组重合成升级中枢;
+    ② **扩张**(中心定理二 line10029):相邻两同级别中枢 GG/DD 包络重叠 → 三走势[A·连接·B]重合成
+       升级中枢。延伸用掉的中枢不再参与扩张。
 
-    完成度 = **结束条件**(原文 line7260「走势终完美」/ line10031 三类点):一个中枢「已完成」须
-    由后续中枢确认其离开;**只有序列最后一个中枢**未被后续确认 → 未完成(done=False, 虚线),其余
-    全部已完成(done=True, 实线)。**任意时刻只有一个未完成中枢**(右边缘正在形成的那个)——历史
-    中间的中枢(含 2 子中枢组)早被后续结构确认离开、是定局,不能因 line26870「2 中枢扩展=进行式」
-    把它们也标成未完成(那只在「当下正在形成」时成立, 即最后一个)。
+    完成度 = **结束条件**(line7260「走势终完美」):只有序列**最后一个**升级中枢未完成(右边缘正在
+    形成,done=False),其余全部已完成(done=True)。
     """
-    groups = _group_by_running_overlap(zss)
-    out: List[ZS] = []
-    last = len(groups) - 1
-    for k, grp in enumerate(groups):
-        a = _line_index(grp[0].lines[0], xds) if grp[0].lines else None
-        b = _line_index(grp[-1].lines[-1], xds) if grp[-1].lines else None
-        if a is None or b is None:
+    found: List[Tuple[int, ZS]] = []                     # (起始线段在 xds 的序, 升级中枢)
+    used = [False] * len(zss)
+    for i, z in enumerate(zss):                          # ① 延伸优先
+        if len(z.lines) >= 9:
+            up = _yanshen_upgrade(z)
+            if up is not None:
+                idx = _line_index(z.lines[0], xds)
+                found.append((idx if idx is not None else i, up))
+                used[i] = True
+    i = 0
+    while i < len(zss) - 1:                              # ② 扩张:相邻两中枢,跳过延伸用掉的
+        if used[i] or used[i + 1]:
+            i += 1
             continue
-        region = xds[a:b + 1]                    # 首子中枢首段 → 末子中枢末段(连续线段区域)
-        zd = max(z.dd for z in grp)              # 核心区 = 子中枢包络重合
-        zg = min(z.gg for z in grp)
-        done = k < last                          # 仅序列最后一个未完成(结束条件), 其余已完成
-        out.append(_build_kuozhan_zs(grp, region, (zd, zg), done=done))
+        if is_kuozhan(zss[i], zss[i + 1]):
+            up = _kuozhang_upgrade(zss[i], zss[i + 1], xds)
+            if up is not None:
+                idx = _line_index(zss[i].lines[0], xds) if zss[i].lines else None
+                found.append((idx if idx is not None else i, up))
+                used[i] = used[i + 1] = True
+                i += 2
+                continue
+        i += 1
+    found.sort(key=lambda t: t[0])                       # 按图上线段顺序
+    out = [z for _, z in found]
+    last = len(out) - 1
+    for k, z in enumerate(out):                          # 仅最后一个未完成(line7260)
+        z.done = k < last
     return out
 
 

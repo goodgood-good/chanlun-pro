@@ -87,8 +87,8 @@ def test_kuozhan_zhongshu_trend_no_group():
 
 
 def _guard_overlap_case():
-    """两个独立 is_kuozhan run(中间 trend 断开): run1=[z1,z2](低位[9.5,11.5])、
-    run2=[z3,z4](高位[12,13.1])。新核心运行交集分组把两个 run 各成一个高级别中枢(共 2 个)。"""
+    """两组相邻 is_kuozhan 中枢(中间 trend 断开): (z1,z2)低位[9.5,11.5]、(z3,z4)高位[12,13.1]。
+    相邻成对扩张 → 各成一个高级别中枢(共 2 个)。"""
     prices = [9, 11.5, 9.5, 11.5, 9.5, 11.5, 9.6, 13, 12, 13.1, 12.2, 13.0, 12.3, 12.95, 12.4]
     xds = _lines_from_pivots(prices)
     z1 = _zs(10.0, 10.5, 9.5, 11.5)
@@ -103,8 +103,7 @@ def _guard_overlap_case():
 
 
 def test_kuozhan_keeps_overlapping_later_group():
-    """两个独立 is_kuozhan run(中间 trend 断开)→ 运行交集分组各成一个高级别中枢, 共 2 个。
-    (历史: 旧摆动法曾因 guard off-by-overlap 误杀 run2;新核心运行交集分组无此问题。)"""
+    """两组相邻 is_kuozhan 中枢(中间 trend 断开)→ 各自相邻成对扩张, 共 2 个升级中枢。"""
     zss, xds = _guard_overlap_case()
     assert (is_kuozhan(zss[0], zss[1]) and not is_kuozhan(zss[1], zss[2])
             and is_kuozhan(zss[2], zss[3])), "前提: run1(z1,z2) + trend断开 + run2(z3,z4)"
@@ -127,8 +126,8 @@ def _subs_with_lines(specs):
 
 
 def test_kuozhan_run_splits_at_intersection_collapse():
-    """长 run 按「运行交集塌缩点」切成多个中枢(新核心, 原文 line31774, 替代旧摆动法):4 个
-    下行子中枢两两 is_kuozhan 成一个 run, 但 z1∩z2∩z3 塌缩 → 切成 [z1,z2]+[z3,z4] 两个中枢。"""
+    """4 个连续两两 is_kuozhan 的下行子中枢, 按**相邻成对扩张**(定理二 line10029)切成
+    [z1,z2]+[z3,z4] 两个升级中枢(各取两中枢包络重合 [max dd, min gg])。"""
     subs, xds = _subs_with_lines([(10, 10.5, 11, 12), (9, 9.2, 9.8, 11),
                                   (7, 7.5, 8.5, 9.5), (6, 6.2, 7, 8)])
     assert all(is_kuozhan(subs[k], subs[k + 1]) for k in range(3)), "前提: 4 子中枢两两成一个 run"
@@ -172,6 +171,39 @@ def test_kuozhan_last_zhongshu_unfinished_even_if_region_before_edge():
     out = kuozhan_zhongshu([z1, z2], xds)
     assert len(out) == 1
     assert out[0].lines[-1] is not xds[-1], "前提: 该中枢区域止于右边缘之前"
+
+
+# ---- 延伸型升级: 单中枢 line_num>=9 → 3+3+3 分 3 组重合(原文 line8157/23045/30290) ----
+def test_kuozhan_yanshen_9_segments_3plus3plus3():
+    """延伸:单中枢9段 → 按3+3+3分3组,每组取**组内真实** max高/min低(line30290 非连接点),
+    升级中枢=三组重合[max(三组低),min(三组高)](line10012/23045)。"""
+    g = ([_L("up", 10, 12), _L("down", 11, 13), _L("up", 12, 14)]    # 组1: low10 high14
+         + [_L("up", 12, 14), _L("down", 13, 15), _L("up", 14, 16)]  # 组2: low12 high16
+         + [_L("up", 11, 13), _L("down", 12, 14), _L("up", 13, 15)])  # 组3: low11 high15
+    xds = list(g)
+    z = _zs(11, 13, 10, 16)
+    z.lines = list(g)                                    # line_num=9 → 延伸
+    out = kuozhan_zhongshu([z], xds)
+    assert len(out) == 1
+    assert out[0].zd == 12 and out[0].zg == 14           # [max(10,12,11), min(14,16,15)]
+    assert out[0].expanded_with == [z]
+
+
+def test_kuozhan_yanshen_priority_over_kuozhang():
+    """延伸优先于扩张(用户硬性):9段中枢即便与相邻中枢包络重叠,也按延伸升级、不参与扩张。"""
+    g0 = [_L("up", 10, 12), _L("down", 11, 13), _L("up", 12, 14),
+          _L("up", 12, 14), _L("down", 13, 15), _L("up", 14, 16),
+          _L("up", 11, 13), _L("down", 12, 14), _L("up", 13, 15)]
+    extra = [_L("up", 13, 17), _L("down", 14, 17)]
+    xds = g0 + extra
+    z0 = _zs(11, 13, 10, 16)
+    z0.lines = list(g0)                                  # 9段延伸
+    z1 = _zs(14, 15, 13, 17)
+    z1.lines = list(extra)
+    assert is_kuozhan(z0, z1), "前提: z0,z1 包络重叠(无优先级则会扩张)"
+    out = kuozhan_zhongshu([z0, z1], xds)
+    assert len(out) == 1                                 # 仅 z0 延伸升级;z1 被排除、单独不升级
+    assert out[0].zd == 12 and out[0].zg == 14           # z0 的延伸区间,非 z0∩z1 扩张区间
     assert out[0].done is False, "序列最后一个中枢未被后续确认 → 未完成(尽管区域未到右边缘)"
 
 
