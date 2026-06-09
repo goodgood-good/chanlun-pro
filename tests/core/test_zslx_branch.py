@@ -103,6 +103,42 @@ def test_calculate_direction_break_splits_two_zslx():
     assert wts[1].zslx_type == "盘整" and wts[1].done is False and wts[1].zss == [z3]
 
 
+def test_calculate_swing_reversal_through_overlap_splits():
+    """反转处中枢重叠 → classify_rel 失明(返回 expand,看不见反转),本体摆动靠『本体分离』切。
+    上涨 z1,z2,z3(峰本体[27,30]) 后 z4[25,28] 与峰重叠(expand,classify_rel 不切),
+    z5[15,18] 本体跌穿峰本体下沿(gg=18<峰 dd=27) → 在峰 z3 确认反转(line24736 第二段[z5]确认)。
+    边界落峰 z3 → z4 归入下跌段(非上涨)。这是旧 classify_rel 算法看不见的反转(原文
+    line24727 本体分离=中枢关系;line30931 升级把次级别当线段、高低点=端点)。"""
+    z1 = _zs_at(0, _seg(0, "up", 2, 5), 5, 8)
+    z2 = _zs_at(10, _seg(10, "up", 8, 16), 16, 19)
+    z3 = _zs_at(20, _seg(20, "up", 19, 27), 27, 30)          # 峰,本体[27,30]
+    z4 = _zs_at(30, _seg(30, "up", 24, 25), 25, 28)          # 本体[25,28]∩z3[27,30] → expand
+    z5 = _zs_at(40, _seg(40, "down", 19, 18), 15, 18)        # 本体[15,18],gg=18 < 峰 dd=27 → 反转
+    wts = zslx_branch.ZslxBranchCalculator().calculate([z1, z2, z3, z4, z5], [None] * 5)
+    assert len(wts) == 2
+    assert wts[0].zslx_type == "上涨" and wts[0].zss == [z1, z2, z3]   # 边界落峰 z3,z4 不并入
+    assert wts[1].zslx_type == "下跌" and wts[1].zss == [z4, z5]       # z4 归下跌段
+    assert wts[0].done is True and wts[1].done is False
+
+
+def test_calculate_subsplit_trend_with_internal_consolidation():
+    """同级别分解(原文 line24735 不延伸/允许盘整+盘整;line24727 3段重合=中枢;line24728
+    延伸成6段=2盘整;line30927 选最优=中枢震荡最清晰):一个上涨趋势中段若含『连续重叠中枢
+    (≥3 个本体相交=同级别中枢=盘整震荡)』→ 拆成 上涨+盘整+上涨,暴露内部中枢震荡。
+    z1,z2 抬高(上涨腿) → z3,z4,z5 同本体重叠(盘整中枢) → z6,z7 再抬高(上涨腿)。"""
+    z1 = _zs_at(0, _seg(0, "up", 1, 4), 2, 5)
+    z2 = _zs_at(10, _seg(10, "up", 5, 9), 8, 11)            # trend_up
+    z3 = _zs_at(20, _seg(20, "up", 11, 13), 12, 15)         # trend_up(进盘整)
+    z4 = _zs_at(30, _seg(30, "up", 13, 14), 12, 15)         # 本体[12,15]∩z3 → expand
+    z5 = _zs_at(40, _seg(40, "down", 15, 13), 12, 15)       # 本体[12,15]∩z4 → expand(≥2连续=盘整)
+    z6 = _zs_at(50, _seg(50, "up", 16, 21), 20, 23)         # trend_up(出盘整,再抬高)
+    z7 = _zs_at(60, _seg(60, "up", 23, 29), 28, 31)         # trend_up
+    wts = zslx_branch.ZslxBranchCalculator().calculate([z1, z2, z3, z4, z5, z6, z7], [None] * 7)
+    assert [w.zslx_type for w in wts] == ["上涨", "盘整", "上涨"]
+    assert wts[0].zss == [z1, z2] and wts[1].zss == [z3, z4, z5] and wts[2].zss == [z6, z7]
+    assert wts[2].done is False and wts[0].done is True       # 仅末段未完成
+
+
 def test_calculate_expand_does_not_split():
     """两个本体相交(expand)的中枢——expand 不是方向反转 → 不切，并入同一走势类型。
     (原文第20课走势级别延续定理一：更大级别中枢产生前本级走势类型延续；升级留 P4b。)"""
@@ -126,26 +162,26 @@ def test_calculate_expand_midtrend_continues():
     assert wts[0].zss == [z1, z2, z3, z4]
 
 
-def test_calculate_beichi_terminates_trend():
-    """上涨趋势在 z3 离开段背驰(done_divergence[2].is_beichi) → 走势类型在 z3 终结。"""
+def test_calculate_midtrend_beichi_new_high_continues():
+    """中途背驰但其后创新高 → 趋势延续不切(原文 line20108:背驰后反弹创新极值则趋势延续;
+    line22547 趋势靠背驰『转折』终结=须价格真反转)。z3 离开段背驰,但 z4 本体再抬高(创新高)
+    → 本体摆动无反转 → 一个上涨走势类型。"""
     z1 = _zs_at(0, _seg(0, "up", 2, 5), 5, 8)
     z2 = _zs_at(10, _seg(10, "up", 8, 16), 16, 19)
     z3 = _zs_at(20, _seg(20, "up", 19, 27), 27, 30)
     z4 = _zs_at(30, _seg(30, "up", 30, 38), 38, 41)
-    dv = [None, None, _dv(True), None]                   # z3 处背驰
+    dv = [None, None, _dv(True), None]                   # z3 处背驰,但 z4 创新高(本体抬高)
     wts = zslx_branch.ZslxBranchCalculator().calculate([z1, z2, z3, z4], dv)
-    assert len(wts) == 2
-    assert wts[0].zss == [z1, z2, z3] and wts[0].done is True   # 背驰终结
-    assert wts[1].zss == [z4] and wts[1].done is False          # z4 另起
-    assert wts[1].zslx_type == "盘整"          # 背驰后新起的单中枢 = 盘整
+    assert len(wts) == 1                                  # 不切,上涨趋势延续
+    assert wts[0].zslx_type == "上涨"
+    assert wts[0].zss == [z1, z2, z3, z4] and wts[0].done is False
 
 
-def test_calculate_merges_consecutive_same_type_into_one_extension():
-    """原文 line7264:连续走势类型必转化为其他类型 → 相邻同 zslx_type(下跌|下跌)不可能
-    是两个独立完成走势类型,只能是『一个扩展的走势类型』(line20105:未完成走势类型的延续;
-    line16429:只有背驰且真转折才是走势边界)。
-    301004 病灶:qs 背驰(底背驰)在持续下跌中途切出『下跌→下跌→下跌』——但价格没反转、
-    继续下台阶(=扩展/延续,line20108 反弹不回抽则趋势延续),须合并回一个下跌走势类型。"""
+def test_calculate_continuous_lower_lows_is_one_downtrend():
+    """连续下台阶(中枢本体依次创新低、无反转)= 一个下跌走势类型。本体摆动不在中途背驰处
+    切——价格没反转、继续创新低(line20108:背驰后仍创新极值则趋势延续);只有本体分离反转
+    才切(line22547 趋势靠背驰『转折』终结=须价格真反转;line7264 连续走势类型必不同类型,
+    故同向下跌不可能是多个独立完成走势类型)。"""
     # 5 个依次下台阶(本体分离 trend_down)的中枢, z2 处 qs 背驰(底背驰但下跌继续)
     z0 = _zs_at(0, _seg(0, "down", 46, 43), 40, 43)
     z1 = _zs_at(10, _seg(10, "down", 43, 33), 30, 33)
@@ -162,15 +198,17 @@ def test_calculate_merges_consecutive_same_type_into_one_extension():
     assert wts[0].zs_high == max(z.gg for z in [z0, z1, z2, z3, z4])
 
 
-def test_calculate_does_not_merge_different_types():
-    """相邻不同 zslx_type(下跌→盘整)是合法连接(line7264 不同类型),不合并。"""
+def test_calculate_trailing_expand_absorbed_into_trend():
+    """下跌趋势末尾的 expand 中枢(本体相交、未反转)并入该下跌走势类型。本体摆动只在
+    『本体分离反转』处切边界,扩张中枢无反转故不另起(原文 line24140 多义性:已完成走势有
+    多种合法分解,本体摆动选『摆动反转』为界;line21637 中枢扩展属盘整=仍在本走势类型内)。"""
     z1 = _zs_at(0, _seg(0, "down", 20, 17), 14, 17)
-    z2 = _zs_at(10, _seg(10, "down", 17, 11), 8, 11)         # trend_down vs z1 → 下跌趋势
-    z3 = _zs_at(20, _seg(20, "down", 11, 9), 8, 11)          # 本体[8,11]∩z2[8,11] → expand → 盘整
-    dv = [None, _dv(True, "qs"), None]                       # z2 qs 背驰 → 下跌[z1,z2] 完成
+    z2 = _zs_at(10, _seg(10, "down", 17, 11), 8, 11)         # trend_down vs z1 → 下跌
+    z3 = _zs_at(20, _seg(20, "down", 11, 9), 8, 11)          # 本体[8,11]∩z2[8,11] → expand,未反转
+    dv = [None, _dv(True, "qs"), None]
     wts = zslx_branch.ZslxBranchCalculator().calculate([z1, z2, z3], dv)
-    assert len(wts) == 2                                     # 下跌 + 盘整,类型不同不合并
-    assert wts[0].zslx_type == "下跌" and wts[1].zslx_type == "盘整"
+    assert len(wts) == 1                                     # 无本体分离反转 → 一个下跌走势类型
+    assert wts[0].zslx_type == "下跌" and wts[0].zss == [z1, z2, z3]
 
 
 def test_calculate_pz_beichi_does_not_terminate():

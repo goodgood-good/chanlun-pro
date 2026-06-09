@@ -124,7 +124,13 @@ def _stable_hash(obj) -> str:
 # - v20 (2026-06) ── L0 结构化二类买卖点:bs2_branch 是跨级(次级别一类=二类)、对 L0 跳过 →
 #   段级/笔级 L0 原无二类。新增 bs_branch.second_class(一类后首次回调不破前低/高=二类),接进
 #   get_branch_bspoints。000001:笔级 +2buy×4/2sell×4、段级 +2sell×1。bi_mmds/xd_mmds 增二类项。
-_CHART_CACHE_SCHEMA_VERSION = "v20"
+# - v21 (2026-06) ── 走势类型分段重写(item2,趋势型L1):原 zslx_branch 用 classify_rel 逐对+
+#   _merge_same_type → 过度合并(000001:21中枢压成2走势类型,升不出L1;且反转处L0中枢重叠时
+#   classify_rel 返回 expand 对反转失明)。重写为**本体摆动**(本体分离反转,line24727/24736/30931)
+#   + **同级别中枢细分**(趋势内连续重叠中枢=盘整,line24727/24728/24735) + **本体分离分类**
+#   (line8152/21637)。000001:2→6 走势类型(方向交替)、recursive 升出 L1 中枢(get_recursive_
+#   branch_levels[L1])、L1 买卖点(Bs3 三类)激活。L0 走势类型显示(xd_zslx)/买卖点变化 → 强制失效。
+_CHART_CACHE_SCHEMA_VERSION = "v21"
 
 
 def _build_cache_key(market: str, code: str, frequency: str, cl_config: dict) -> str:

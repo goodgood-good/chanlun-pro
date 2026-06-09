@@ -51,31 +51,98 @@ class ZslxBranchCalculator:
         return zslx
 
     @staticmethod
-    def _merge_same_type(wts: List[ZSLX]) -> List[ZSLX]:
-        """合并相邻同 zslx_type 的走势类型(原文 line7264:连续走势类型必转化为其他类型→
-        相邻同类型不可能是两个独立完成走势类型,只能是『一个扩展的走势类型』)。
+    def _swing_segments(zss: List[ZS]) -> List[tuple]:
+        """中枢本体摆动分段 → [(start, end), …]（连续、覆盖全序列；末段含右边缘）。
 
-        依据:line16429「只有背驰才和走势转折有必然联系」+ line20105「下跌最后一个中枢
-        扩展=未完成走势类型的延续、还在一个走势类型里」+ line20108「背驰后反弹不回抽最后
-        中枢则趋势延续」。病灶(301004):qs 背驰(底背驰)在持续下跌中途切出『下跌→下跌→
-        下跌』,但价格没真反转、继续下台阶(=扩展/延续),把那些中途背驰/反转边界变成走势
-        类型内部、合并回一个下跌走势类型。不同类型(下跌→盘整)是合法连接,不并。
-
-        合并用 _finalize 重收尾:cur_dir 按目标 zslx_type 还原(上涨→trend_up/下跌→
-        trend_down/盘整→None),done 取末段、start_idx 取首段(prev.index=首走势类型 start_idx)。
+        反转确认 = 反向中枢本体『完全脱离』极值中枢本体（下跌→上涨:某中枢 dd > 谷中枢 gg；
+        上涨→下跌:某中枢 gg < 峰中枢 dd），边界落在极值中枢。
+        为何不用 classify_rel 逐对关系:反转处 L0 中枢常严重重叠 → classify_rel 返回 expand
+        而非 trend_down/up，对真实反转『失明』(000001 顶 z16→z17 全程 expand)。本体极值摆动
+        才看得见反转——这正是原文升级口径(line30931:升级把次级别当线段、高低点=端点;
+        line24727:本体分离=中枢关系;line24736:无背驰时第二段走出来后才分解=本体脱离确认)。
         """
-        _dir = {"上涨": "trend_up", "下跌": "trend_down"}
-        merged: List[ZSLX] = []
-        for zx in wts:
-            if merged and zx.zslx_type == merged[-1].zslx_type:
-                prev = merged[-1]
-                combined = list(prev.zss) + list(zx.zss)
-                merged[-1] = ZslxBranchCalculator._finalize(
-                    combined, prev.index, _dir.get(zx.zslx_type), done=zx.done
-                )
+        n = len(zss)
+        if n == 0:
+            return []
+        if n == 1:
+            return [(0, 0)]
+        bounds: List[tuple] = []
+        start = 0
+        ext_idx = 0                                       # 当前趋势极值中枢索引
+        # 初始方向:首两中枢本体中点净位移
+        D = "down" if (zss[1].dd + zss[1].gg) < (zss[0].dd + zss[0].gg) else "up"
+        for i in range(1, n):
+            z, zext = zss[i], zss[ext_idx]
+            if D == "down":
+                if z.dd < zext.dd:                        # 创新低 → 下跌延续,更新极值
+                    ext_idx = i
+                elif z.dd > zext.gg:                      # 反向中枢本体脱离谷中枢本体 → 反转
+                    bounds.append((start, ext_idx))
+                    start, D = ext_idx + 1, "up"
+                    ext_idx = max(range(start, i + 1), key=lambda k: zss[k].gg)
+            else:                                          # up
+                if z.gg > zext.gg:                        # 创新高 → 上涨延续
+                    ext_idx = i
+                elif z.gg < zext.dd:                      # 反向中枢本体脱离峰中枢本体 → 反转
+                    bounds.append((start, ext_idx))
+                    start, D = ext_idx + 1, "down"
+                    ext_idx = min(range(start, i + 1), key=lambda k: zss[k].dd)
+        bounds.append((start, n - 1))
+        return bounds
+
+    @staticmethod
+    def _trend_dir(seg: List[ZS]) -> Optional[str]:
+        """段内趋势方向:≥2 个本体分离同向中枢 → 'trend_up'|'trend_down';否则 None(盘整)。
+
+        摆动方向已由 _swing_segments 定，但『趋势 vs 盘整』须由本体分离判定:纯 expand
+        重叠链(中枢扩展/延伸)= 盘整(line21637:中枢扩展属盘整),≥2 依次同向【本体分离】
+        中枢才是趋势(line8152)。取净本体分离方向(trend_up 计数 vs trend_down 计数)。
+        """
+        if len(seg) < 2:
+            return None
+        ups = sum(1 for k in range(len(seg) - 1)
+                  if classify_rel(seg[k], seg[k + 1]) == "trend_up")
+        downs = sum(1 for k in range(len(seg) - 1)
+                    if classify_rel(seg[k], seg[k + 1]) == "trend_down")
+        if ups > downs:
+            return "trend_up"
+        if downs > ups:
+            return "trend_down"
+        return None                                        # 无净本体分离方向(纯扩张/平衡)→ 盘整
+
+    @staticmethod
+    def _subsplit(zss: List[ZS], s: int, e: int) -> List[tuple]:
+        """本体摆动趋势段[s..e]内按同级别中枢细分 → [(a,b),…]。
+
+        原文 line24735 同级别分解(不延伸、允许盘整+盘整);line24727(5分钟三段重合即构成
+        中枢);line24728(延伸成6段=两个盘整连接);line30927(选最优分解=中枢震荡最清晰)。
+        段内『连续 ≥2 个 expand gap』(=≥3 个本体相交中枢=一个同级别盘整中枢)→ 切成
+        趋势腿|盘整|趋势腿,暴露内部中枢震荡(否则大趋势作单一粗 unit、升级后是假宽框)。
+        无内部盘整则原样 [(s,e)]。
+        """
+        if e - s < 2:
+            return [(s, e)]
+        gaps = [classify_rel(zss[k - 1], zss[k]) for k in range(s + 1, e + 1)]
+        is_pz = [False] * (e - s + 1)                      # 中枢 zss[s+t] 是否属内部盘整
+        j = 0
+        while j < len(gaps):
+            if gaps[j] == "expand":
+                k = j
+                while k < len(gaps) and gaps[k] == "expand":
+                    k += 1
+                if k - j >= 2:                             # ≥2 连续 expand=≥3 重叠中枢=盘整(line24727)
+                    for t in range(j, k + 1):
+                        is_pz[t] = True
+                j = k
             else:
-                merged.append(zx)
-        return merged
+                j += 1
+        out = []
+        a = s
+        for i in range(s, e + 1):
+            if i == e or is_pz[i - s] != is_pz[i + 1 - s]:
+                out.append((a, i))
+                a = i + 1
+        return out
 
     def calculate(
         self,
@@ -84,51 +151,20 @@ class ZslxBranchCalculator:
     ) -> List[ZSLX]:
         """把已完成中枢序列切成走势类型（末个 done=False）。
 
-        双信号边界：方向反转(classify_rel 上涨↔下跌) + 背驰(查 done_divergence)。
-        expand(中枢扩张/本体相交)不切——按走势级别延续定理一(原文第20课)延续，
-        L1 中枢升级留 P4b。done_divergence 与 done_zss 索引对齐。
+        ① 本体摆动分段(_swing_segments):管重叠失明的大反转;② 趋势段内同级别中枢细分
+        (_subsplit):暴露内部盘整震荡(line24735 同级别分解);③ 本体分离分类(_trend_dir):
+        ≥2 本体分离同向=趋势、否则盘整。背驰(done_divergence)v1 不参与边界——几何摆动自洽
+        (line20108:背驰后仍创新极值则趋势延续);早终结的背驰精修留后。done_divergence 保留
+        入参以稳定 recursive_branch 接口、供后续精修。
         """
         if not done_zss:
             return []
+        bounds = []
+        for s, e in self._swing_segments(done_zss):
+            bounds.extend(self._subsplit(done_zss, s, e))
+        last = len(bounds) - 1
         wts: List[ZSLX] = []
-        cur: Optional[List[ZS]] = [done_zss[0]]
-        cur_start = 0                         # cur 第一个中枢在 done_zss 的索引
-        cur_dir: Optional[str] = None         # "trend_up"|"trend_down"|None(未定/仅扩张)
-
-        for i in range(1, len(done_zss)):
-            zi = done_zss[i]
-            if cur is None:                   # 上一走势类型被背驰终结，zi 另起
-                cur, cur_start, cur_dir = [zi], i, None
-                continue
-
-            rel = classify_rel(cur[-1], zi)   # "trend_up"|"trend_down"|"expand"
-            # 只有【方向反转】(上涨↔下跌)才切断走势类型。expand(中枢本体相交=高级别
-            # 中枢候选)按走势级别延续定理一(第20课)延续、不切——升级实体化(L1 中枢=3
-            # 个方向交替的 L0 走势类型)留 P4b；同向(rel==cur_dir)亦延续。
-            reverse = (
-                cur_dir is not None
-                and rel in ("trend_up", "trend_down")
-                and rel != cur_dir
-            )
-            if reverse:
-                wts.append(self._finalize(cur, cur_start, cur_dir, done=True))
-                # 反转后新走势类型方向由其后 classify_rel 定(不能用反转方向 rel——反弹高点
-                # 中枢后续若 trend_up 则它是上涨趋势的起点,而非单盘整;原文趋势=≥2依次同向中枢)。
-                cur, cur_start, cur_dir = [zi], i, None
-            else:
-                cur.append(zi)
-                if cur_dir is None and rel in ("trend_up", "trend_down"):
-                    cur_dir = rel             # 趋势方向坐实(只认 trend_*，expand 不写入)
-
-            # 背驰边界：只在【趋势背驰 qs】切(走势终完美=趋势完成,原文 7260/22415)；
-            # 盘整背驰 pz 是中枢震荡内的力度衰减、不构成走势类型边界，不切。
-            if not reverse and cur is not None:
-                dv = done_divergence[i]
-                if dv is not None and dv.is_beichi and getattr(dv, "kind", None) == "qs":
-                    wts.append(self._finalize(cur, cur_start, cur_dir, done=True))
-                    cur, cur_dir, cur_start = None, None, -1
-
-        if cur is not None:
-            wts.append(self._finalize(cur, cur_start, cur_dir, done=False))
-        # 合并相邻同类型走势类型(原文 line7264:连续走势类型必不同类型;同类型=扩展、一个走势类型)
-        return self._merge_same_type(wts)
+        for k, (a, b) in enumerate(bounds):
+            seg = done_zss[a:b + 1]
+            wts.append(self._finalize(seg, a, self._trend_dir(seg), done=(k < last)))
+        return wts
