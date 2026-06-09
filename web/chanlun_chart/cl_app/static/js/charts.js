@@ -266,11 +266,12 @@ const ChartUtils = {
     // 使用绘制层偏移点,避免箭头贴住或覆盖 K 线;原始 mmd.points 仍保留真实买卖点位置。
     createMmdShape(chart, mmd, options = {}) {
         const { offsetBase = 0, ...rest } = options;
-        const isBuy = mmd.text.includes("B");
+        const isBuy = mmd.text.toLowerCase().includes("b");   // buy/1B/3buy… 含 b;sell/S 不含
         const color = isBuy ? CHART_CONFIG.COLORS.MMD_UP : CHART_CONFIG.COLORS.MMD_DOWN;
         const isSplit = !!mmd.level;
         const isXd = isSplit && mmd.level === "xd";
-        const size = isSplit ? (isXd ? MMD_ICON_SIZE.xd : MMD_ICON_SIZE.bi) : MMD_ICON_SIZE.default;
+        const isHi = isSplit && mmd.level !== "xd" && mmd.level !== "bi";  // 5m/30m/… 高级别买卖点
+        const size = isHi ? MMD_ICON_SIZE.xd : (isSplit ? (isXd ? MMD_ICON_SIZE.xd : MMD_ICON_SIZE.bi) : MMD_ICON_SIZE.default);
         const icon = isBuy ? MMD_ICON.buy : MMD_ICON.sell;
         return this.createShape(chart, this.mmdIconPoint(mmd, offsetBase), {
             shape: "icon",
@@ -283,12 +284,14 @@ const ChartUtils = {
     // 标签单独纵向偏移;text 有横向宽度会向右展开,定位以箭头为准,标签仅作说明。
     createMmdLabelShape(chart, mmd, options = {}) {
         const { offsetBase = 0, ...rest } = options;
-        const isBuy = mmd.text.includes("B");
+        const isBuy = mmd.text.toLowerCase().includes("b");
         const color = isBuy ? CHART_CONFIG.COLORS.MMD_UP : CHART_CONFIG.COLORS.MMD_DOWN;
         const isSplit = !!mmd.level;
         const isXd = isSplit && mmd.level === "xd";
-        const fontsize = isSplit ? (isXd ? MMD_LABEL_FONTSIZE.xd : MMD_LABEL_FONTSIZE.bi) : MMD_LABEL_FONTSIZE.default;
-        const levelPrefix = isSplit ? (isXd ? "段" : "笔") : "";
+        const isHi = isSplit && mmd.level !== "xd" && mmd.level !== "bi";   // 5m/30m/… 高级别
+        const fontsize = isHi ? MMD_LABEL_FONTSIZE.xd : (isSplit ? (isXd ? MMD_LABEL_FONTSIZE.xd : MMD_LABEL_FONTSIZE.bi) : MMD_LABEL_FONTSIZE.default);
+        // 级别前缀:段/笔(线段/笔)、否则用 freq 标签(5m·/30m·/日线·)
+        const levelPrefix = isSplit ? (isXd ? "段" : mmd.level === "bi" ? "笔" : (mmd.level + "·")) : "";
         const text = levelPrefix + mmd.text.replace(/[笔段]:/g, "");
         return this.createShape(chart, this.mmdLabelPoint(mmd, offsetBase), {
             shape: "text",
@@ -306,7 +309,9 @@ const ChartUtils = {
         });
     },
     createBcShape(chart, bc, options = {}) {
-        return this.createShape(chart, bc.points, { shape: "balloon", text: bc.text, overrides: { markerColor: CHART_CONFIG.COLORS.BCS, backgroundColor: CHART_CONFIG.COLORS.BCS, textColor: CHART_CONFIG.COLORS.BC_TEXT, transparency: 70, backgroundTransparency: 70, fontsize: 12, ...options.overrides }, ...options });
+        const lvl = bc.level;   // 5m/30m/… 高级别背驰加 freq 前缀(段/笔不加)
+        const prefix = (lvl && lvl !== "xd" && lvl !== "bi") ? (lvl + "·") : "";
+        return this.createShape(chart, bc.points, { shape: "balloon", text: prefix + bc.text, overrides: { markerColor: CHART_CONFIG.COLORS.BCS, backgroundColor: CHART_CONFIG.COLORS.BCS, textColor: CHART_CONFIG.COLORS.BC_TEXT, transparency: 70, backgroundTransparency: 70, fontsize: 12, ...options.overrides }, ...options });
     },
 };
 
@@ -1694,6 +1699,19 @@ class ChartManager {
         } else {
             this.reconcile('bcs', cfg.bc ? barsResult.bcs : [], from, symbolKey, (item) => safeCreate(ChartUtils.createBcShape(this.chart, item), 'bc'), false);
         }
+        // 新核心各级(5m/30m/…)买卖点/背驰:recursive_levels[].mmds/bcs,与该级中枢**同 toggle**
+        // (zs_L1/zs_L2/…);受买卖点/背驰主开关(mmd/bc)门控。L0 走 bi/xd_mmds、此处只高级别。
+        const recMmds = [];
+        const recBcs = [];
+        for (const lvObj of (barsResult.recursive_levels || [])) {
+            const _lv = (lvObj && lvObj.level) || 0;
+            if (_lv === 0 || cfg['zs_L' + _lv] === false) continue;
+            if (cfg.mmd !== false) for (const m of (lvObj.mmds || [])) recMmds.push(m);
+            if (cfg.bc !== false) for (const b of (lvObj.bcs || [])) recBcs.push(b);
+        }
+        this.reconcile('recursive_mmds', recMmds, from, symbolKey, (item) => safeCreate(ChartUtils.createMmdShape(this.chart, item, mmdOpt), 'rec_mmd'), false);
+        this.reconcile('recursive_mmd_labels', recMmds, from, symbolKey, (item) => safeCreate(ChartUtils.createMmdLabelShape(this.chart, item, mmdOpt), 'rec_mmd_label'), false);
+        this.reconcile('recursive_bcs', recBcs, from, symbolKey, (item) => safeCreate(ChartUtils.createBcShape(this.chart, item), 'rec_bc'), false);
 
         // 一轮 reconcile 完后扫一次孤儿,清理 race 残留(safeRemove 静默失败 / container 提前清零)。
         // 因为 reconcile 内 create 是异步的,延后到下一帧执行,等所有 promise resolve 后再扫。

@@ -3,8 +3,8 @@
 513100 真实 QMT 数据(z1+z2 涉及线段 xd6-15)当 oracle: 用户标注 下xd7-9/上xd10-12/盘xd13-15,
 扩展中枢区间 [1.713,1.737](用户多轮确认的正确值, = 子中枢包络重合 [max dd, min gg])。
 """
-from chanlun.core.cl_interface import ZS
-from chanlun.core.zs_upgrade import is_kuozhan, kuozhan_zhongshu
+from chanlun.core.cl_interface import ZS, Config
+from chanlun.core.zs_upgrade import is_kuozhan, kuozhan_zhongshu, kuozhan_level_signals
 
 
 class _L:
@@ -170,3 +170,68 @@ def test_kuozhan_last_zhongshu_unfinished_even_if_region_before_edge():
     assert len(out) == 1
     assert out[0].lines[-1] is not xds[-1], "前提: 该中枢区域止于右边缘之前"
     assert out[0].done is False, "序列最后一个中枢未被后续确认 → 未完成(尽管区域未到右边缘)"
+
+
+# ---- kuozhan_level_signals: 各级(5m/30m)背驰+买卖点 ----
+class _LS:
+    """线段桩(带 end.val/end.k,供买卖点锚点/三类回试)。"""
+
+    def __init__(self, t, lo, hi, end_val, kidx=0):
+        self.type, self.zs_low, self.zs_high = t, lo, hi
+        self.start = None
+        self.end = type("FX", (), {"val": end_val,
+                                   "k": type("K", (), {"date": None, "k_index": kidx})()})()
+
+
+def _zs_with_lines(zd, zg, lines):
+    z = _zs(zd, zg, min(x.zs_low for x in lines), max(x.zs_high for x in lines))
+    z.lines = lines
+    return z
+
+
+def _xds_zs_for_3class(leave_type, retest_end):
+    """造『进入+本体2段+离开+回试』5段 xds + 中枢[ZD=6,ZG=9],离开方向/回试端点可调。"""
+    b0 = _LS("up", 6, 9, 9)
+    b1 = _LS("down", 6, 9, 6)
+    if leave_type == "up":
+        enter = _LS("down", 6, 9, 6)
+        leave = _LS("up", 6, 14, 14)
+        retest = _LS("down", retest_end, 14, retest_end)
+    else:
+        enter = _LS("up", 6, 9, 9)
+        leave = _LS("down", 2, 9, 2)
+        retest = _LS("up", 2, retest_end, retest_end)
+    xds = [enter, b0, b1, leave, retest]
+    return xds, _zs_with_lines(6, 9, [b0, b1])
+
+
+def test_kuozhan_level_signals_3buy_geometric():
+    """离开向上(冲出 ZG=9)+回试低点 10≥ZG → 3buy(几何,不需背驰,ld=None)。"""
+    xds, z = _xds_zs_for_3class("up", 10)
+    bsp, bcs = kuozhan_level_signals([z], xds, None, Config.ZS_WZGX_ZGD.value)
+    assert [p.bs_type for p in bsp] == ["3buy"]
+    assert bsp[0].anchor_fx.val == 10 and bcs == []
+
+
+def test_kuozhan_level_signals_3sell_geometric():
+    """离开向下(跌破 ZD=6)+回试高点 5≤ZD → 3sell。"""
+    xds, z = _xds_zs_for_3class("down", 5)
+    bsp, _ = kuozhan_level_signals([z], xds, None, Config.ZS_WZGX_ZGD.value)
+    assert [p.bs_type for p in bsp] == ["3sell"]
+
+
+def test_kuozhan_level_signals_retest_breaks_no_3buy():
+    """回试低点 7<ZG=9(破核心)→ 不产 3buy。"""
+    xds, z = _xds_zs_for_3class("up", 7)
+    bsp, _ = kuozhan_level_signals([z], xds, None, Config.ZS_WZGX_ZGD.value)
+    assert bsp == []
+
+
+def test_kuozhan_level_signals_leave_at_right_edge_no_signal():
+    """中枢区域止于右边缘(无离开段)→ 不产买卖点/背驰。"""
+    b0 = _LS("up", 6, 9, 9)
+    b1 = _LS("down", 6, 9, 6)
+    xds = [_LS("down", 6, 9, 6), b0, b1]          # b1 是末段、无 xds[b0+1]
+    z = _zs_with_lines(6, 9, [b0, b1])
+    bsp, bcs = kuozhan_level_signals([z], xds, None, Config.ZS_WZGX_ZGD.value)
+    assert bsp == [] and bcs == []

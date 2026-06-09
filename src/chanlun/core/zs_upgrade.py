@@ -126,3 +126,46 @@ def kuozhan_zhongshu(zss: List[ZS], xds: List[LINE]) -> List[ZS]:
         done = k < last                          # 仅序列最后一个未完成(结束条件), 其余已完成
         out.append(_build_kuozhan_zs(grp, region, (zd, zg), done=done))
     return out
+
+
+def kuozhan_level_signals(zss: List[ZS], xds: List[LINE], ld_provider, wzgx: str,
+                          frequency: Optional[str] = None):
+    """一级 kuozhan 中枢序列 → (买卖点[一三类], 背驰段)。各级(5m/30m…)复用。
+
+    kuozhan 中枢无独立进入/离开段(z.start/z.end 是本体段),故在 xds 里补:进入段 =
+    xds[a0-1](中枢本体区前一段)、离开段 = xds[b0+1](后一段),a0/b0 = 本体首末段在 xds 的位。
+    - **背驰(中继型)**:进入/离开同向 → is_beichi(进入, 离开, ld);前同向中枢(is_qs)→ 趋势背驰
+      qs → 一类(离开向下=1buy/向上=1sell,原文 3544),否则盘整背驰 pz(不产一类)。
+    - **三类(几何,同 bs_branch._third_class 口径)**:离开向上冲出 + 回试低点 ≥ ZG → 3buy;离开
+      向下 + 回试高点 ≤ ZD → 3sell(原文第20课「离开中枢、第一次回试不破核心」)。
+    返回 (bsp, bcs):bsp = List[BuySellPoint](level 未填,调用方按级别标);bcs = List[(date,val,kind)]。
+    """
+    from chanlun.core.bs_branch import BuySellPoint
+    from chanlun.core.beichi_calculator import is_beichi, is_qs
+    n = len(xds)
+    bsp, bcs = [], []
+    for k, z in enumerate(zss):
+        if not z.lines:
+            continue
+        a0 = _line_index(z.lines[0], xds)
+        b0 = _line_index(z.lines[-1], xds)
+        if a0 is None or b0 is None:
+            continue
+        enter = xds[a0 - 1] if a0 - 1 >= 0 else None        # 进入段
+        leave = xds[b0 + 1] if b0 + 1 < n else None          # 离开段
+        # 背驰 + 一类(中继型:进入/离开同向才比较力度)
+        if (enter is not None and leave is not None and enter.type == leave.type
+                and ld_provider is not None and is_beichi(enter, leave, ld_provider, frequency)):
+            kind = "qs" if (k > 0 and is_qs(zss[k - 1], z, wzgx)) else "pz"
+            bcs.append((leave.end.k.date, leave.end.val, kind))
+            if kind == "qs":                                  # 趋势背驰 → 一类
+                bsp.append(BuySellPoint("1buy" if leave.type == "down" else "1sell",
+                                        z, leave, leave.end, None))
+        # 三类(几何:离开 + 回试不破核心 ZG/ZD)
+        if leave is not None and b0 + 2 < n:
+            retest = xds[b0 + 2]
+            if leave.type == "up" and retest.end.val >= z.zg:
+                bsp.append(BuySellPoint("3buy", z, retest, retest.end, None))
+            elif leave.type == "down" and retest.end.val <= z.zd:
+                bsp.append(BuySellPoint("3sell", z, retest, retest.end, None))
+    return bsp, bcs

@@ -492,6 +492,34 @@ class CL(ICL):
                 out.append((seg.end.k.date, seg.end.val, dv.kind))
         return out
 
+    def get_kuozhan_levels(self, max_level: int = 3):
+        """递归中枢扩展(中心定理二 line10029 套用)各级 = L1(5m)/L2(30m)/L3(日线):
+        每级中枢 + 背驰 + 买卖点(一三类,带 level)。供 1min 图叠加 5m/30m 级别结构。
+
+        中枢用 kuozhan_zhongshu 递归(kuozhan(L0)→L1, kuozhan(L1)→L2…);各级中枢的
+        背驰/买卖点由 kuozhan_level_signals 在 xds 上补进入/离开段后算。返回
+        List[dict]:[{level, zss, bsp(List[BuySellPoint]), bcs(List[(date,val,kind)])}]。
+        """
+        from chanlun.core.zs_upgrade import kuozhan_zhongshu, kuozhan_level_signals
+        levels = self.get_recursive_branch_levels()
+        l0 = next((lv.zss for lv in levels if lv.level == 0), None)
+        if not l0:
+            return []
+        xds = list(self.get_xds())                       # L0 中枢.lines 均为线段 → 同一定位基
+        ld = lambda s, e: query_macd_ld(self, s, e)      # noqa: E731
+        wzgx = self.config.get('zs_wzgx', Config.ZS_WZGX_ZGD.value)
+        out = []
+        kz = kuozhan_zhongshu(l0, xds)
+        lvl = 1
+        while kz and lvl <= max_level:
+            bsp, bcs = kuozhan_level_signals(kz, xds, ld, wzgx, self.frequency)
+            for p in bsp:
+                p.level = lvl                            # 1=5m, 2=30m, 3=日线
+            out.append({"level": lvl, "zss": kz, "bsp": bsp, "bcs": bcs})
+            kz = kuozhan_zhongshu(kz, xds)               # 递归升一级
+            lvl += 1
+        return out
+
     def get_branch_interval_nest(self):
         """新核心:区间套可操作性(P6,自顶向下 READ)。lazy 并存。返回 List[NestRead]。"""
         from chanlun.core.beichi_nest import BeichiNestCalculator

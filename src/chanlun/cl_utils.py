@@ -780,6 +780,19 @@ def zs_to_chart_dict(zs, use_envelope: bool = False) -> dict:
     }
 
 
+_KUOZHAN_FREQ_CHAIN = {
+    "1m": ["1m", "5m", "30m", "日线"], "5m": ["5m", "30m", "日线", "周线"],
+    "15m": ["15m", "60m", "日线", "周线"], "30m": ["30m", "日线", "周线", "月线"],
+    "60m": ["60m", "日线", "周线", "月线"], "d": ["日线", "周线", "月线", "年线"],
+}
+
+
+def _kuozhan_freq_label(base_freq: str, level: int) -> str:
+    """递归 kuozhan 级别(1=高一级…)→ 频率标签,与前端 charts.js FREQ_CHAIN 对齐。"""
+    chain = _KUOZHAN_FREQ_CHAIN.get(base_freq, [base_freq, "高一级", "高二级", "高三级"])
+    return chain[level] if 0 <= level < len(chain) else f"L{level}"
+
+
 def cl_data_to_tv_chart(
     cd: ICL, config: dict, to_frequency: str = None
 ) -> Union[dict, None]:
@@ -973,6 +986,7 @@ def cl_data_to_tv_chart(
     # 递归层级树 (④ recursive_levels):L1+ 中枢、走势类型——多级联立可视化。
     recursive_levels_chart_data = []
     levels = []  # 供下方「中枢升级买卖点」复用(避免重复 get_recursive_levels)
+    _kuozhan_levels = []  # 递归 kuozhan 各级(5m/30m…)中枢+背驰+买卖点,供中枢/买卖点/背驰三处复用
     if config.get("chart_show_recursive_levels", "1") == "1":
         try:
             if config.get("chart_use_branch_core", "0") == "1":
@@ -1005,18 +1019,28 @@ def cl_data_to_tv_chart(
                 "zslxs": lv_zslxs,
                 "zslx_lines": lv_zslx_lines,
             })
-        # P9 中枢升级·扩展: L0 线段中枢 → 扩展高级别中枢, 作 5min 级别(L1)渲染。
-        # 走势类型递归 L1+ 暂关(上面 lv.level>=1 gate);正常/延伸 case 待做。算法见 core/zs_upgrade。
-        _l0 = next((lv for lv in levels if lv.level == 0), None)
-        if _l0 and _l0.zss:
-            from chanlun.core.zs_upgrade import kuozhan_zhongshu
-            _kz = kuozhan_zhongshu(_l0.zss, list(cd.get_xds()))
-            if _kz:
+        # 中枢升级·扩展(中心定理二 line10029 递归套用): L0 线段中枢 → L1(5m)/L2(30m)/L3(日线)。
+        # cd.get_kuozhan_levels() 递归 kuozhan(上级中枢按运行交集分组,同 xds 定位)+ 各级背驰/买卖点;
+        # 此处取中枢渲染,买卖点(xd_mmds)/背驰(xd_bcs)在下方接入(同源 _kuozhan_levels)。走势类型递归
+        # L1+ 仍 gate 关(item2 证其退化成假宽框);递归 kuozhan 实测给紧致中枢(000001: L1=7/L2=2)。
+        if config.get("chart_use_branch_core", "0") == "1":
+            try:
+                _kuozhan_levels = cd.get_kuozhan_levels()
+            except Exception:
+                _kuozhan_levels = []
+            for _kl in _kuozhan_levels:
+                _flbl = _kuozhan_freq_label(cd.frequency, _kl["level"])
                 recursive_levels_chart_data.append({
-                    "level": 1,
-                    "zss": [_zs_to_chart(z, use_envelope=False) for z in _kz],
+                    "level": _kl["level"],
+                    "zss": [_zs_to_chart(z, use_envelope=False) for z in _kl["zss"]],
                     "zslxs": [],
                     "zslx_lines": [],
+                    # 该级买卖点(一三类)/背驰,带 freq 级别标(5m/30m…);前端与该级中枢同 toggle(zs_L1/zs_L2)
+                    "mmds": [{"points": {"time": fun.datetime_to_int(_p.anchor_fx.k.date),
+                                         "price": _p.anchor_fx.val},
+                              "text": _p.bs_type, "level": _flbl} for _p in _kl["bsp"]],
+                    "bcs": [{"points": {"time": fun.datetime_to_int(_d), "price": _v},
+                             "text": str(_k).upper(), "level": _flbl} for _d, _v, _k in _kl["bcs"]],
                 })
 
     # 区间套 (interval_nest):从最高级别趋势背驰逐级下钻到 L0 的链 + 精确转折点。

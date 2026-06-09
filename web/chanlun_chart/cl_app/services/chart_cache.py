@@ -130,7 +130,13 @@ def _stable_hash(obj) -> str:
 #   + **同级别中枢细分**(趋势内连续重叠中枢=盘整,line24727/24728/24735) + **本体分离分类**
 #   (line8152/21637)。000001:2→6 走势类型(方向交替)、recursive 升出 L1 中枢(get_recursive_
 #   branch_levels[L1])、L1 买卖点(Bs3 三类)激活。L0 走势类型显示(xd_zslx)/买卖点变化 → 强制失效。
-_CHART_CACHE_SCHEMA_VERSION = "v21"
+# - v22 (2026-06) ── 多级别(5m/30m)中枢+买卖点+背驰:1min 图叠加高级别结构。递归 kuozhan
+#   (中心定理二 line10029 套用)L0→L1(5m)→L2(30m)→L3(日线),各级中枢入 recursive_levels;
+#   各级背驰/买卖点(cl.get_kuozhan_levels:kuozhan 中枢补进入/离开段→is_beichi 背驰+一类、
+#   几何三类)带 freq 级别标入 xd_mmds/xd_bcs(level=5m/30m/日线)。000001:L1=7/L2=2 中枢、
+#   5m 买卖点 10(含 1sell 顶背驰=L0 漏的)+背驰 3、30m 3buy×1。recursive_levels/xd_mmds/
+#   xd_bcs 内容全变,强制旧缓存失效。
+_CHART_CACHE_SCHEMA_VERSION = "v22"
 
 
 def _build_cache_key(market: str, code: str, frequency: str, cl_config: dict) -> str:
