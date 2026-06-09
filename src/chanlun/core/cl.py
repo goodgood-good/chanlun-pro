@@ -492,32 +492,51 @@ class CL(ICL):
                 out.append((seg.end.k.date, seg.end.val, dv.kind))
         return out
 
-    def get_kuozhan_levels(self, max_level: int = 3):
-        """递归中枢扩展(中心定理二 line10029 套用)各级 = L1(5m)/L2(30m)/L3(日线):
-        每级中枢 + 背驰 + 买卖点(一三类,带 level)。供 1min 图叠加 5m/30m 级别结构。
+    # 升级链(封顶 30m 操作级,原文 line24735):各 base 频率 → [(目标频率, 方法)]。
+    # <30m=kuozhan(非同级别,延伸/扩展);30m=tongjibie(同级别分解,恰好3段走势类型重合不延伸)。
+    _UPGRADE_CHAIN = {
+        "1m": [("5m", "kuozhan"), ("30m", "tongjibie")],
+        "5m": [("30m", "tongjibie")],
+    }
 
-        中枢用 kuozhan_zhongshu 递归(kuozhan(L0)→L1, kuozhan(L1)→L2…);各级中枢的
-        背驰/买卖点由 kuozhan_level_signals 在 xds 上补进入/离开段后算。返回
+    def get_kuozhan_levels(self):
+        """递归升级各级中枢 + 背驰 + 买卖点(带 level)。封顶 30m(操作级,line24735)。
+
+        **<30m 用非同级别分解**(kuozhan 扩展/延伸,line24735「以下级别允许延伸」);**30m 用
+        同级别分解**(tongjibie:次级别走势类型恰好 3 段重合、不延伸、允许盘整+盘整,line24727/
+        24735);30m 以上不考虑(line24735)。30m/日线图无升级链 → 只 base(返回 [])。
+        各级背驰/买卖点由 kuozhan_level_signals 在 xds 补进入/离开段算。返回
         List[dict]:[{level, zss, bsp(List[BuySellPoint]), bcs(List[(date,val,kind)])}]。
         """
-        from chanlun.core.zs_upgrade import kuozhan_zhongshu, kuozhan_level_signals
+        chain = self._UPGRADE_CHAIN.get(self.frequency, [])
+        if not chain:
+            return []
+        from chanlun.core.zs_upgrade import (
+            kuozhan_zhongshu, kuozhan_level_signals, tongjibie_zhongshu,
+        )
+        from chanlun.core.zslx_branch import ZslxBranchCalculator
         levels = self.get_recursive_branch_levels()
         l0 = next((lv.zss for lv in levels if lv.level == 0), None)
         if not l0:
             return []
-        xds = list(self.get_xds())                       # L0 中枢.lines 均为线段 → 同一定位基
+        xds = list(self.get_xds())                       # 各级中枢.lines 均为线段 → 同一定位基
         ld = lambda s, e: query_macd_ld(self, s, e)      # noqa: E731
         wzgx = self.config.get('zs_wzgx', Config.ZS_WZGX_ZGD.value)
         out = []
-        kz = kuozhan_zhongshu(l0, xds)
-        lvl = 1
-        while kz and lvl <= max_level:
-            bsp, bcs = kuozhan_level_signals(kz, xds, ld, wzgx, self.frequency)
+        cur = l0
+        for lvl, (_target, method) in enumerate(chain, start=1):
+            if method == "tongjibie":                    # 30m 同级别分解(3段走势类型重合)
+                zslxs = ZslxBranchCalculator().calculate(cur, [None] * len(cur))
+                nz = tongjibie_zhongshu(zslxs, xds)
+            else:                                         # <30m kuozhan 非同级别(扩展/延伸)
+                nz = kuozhan_zhongshu(cur, xds)
+            if not nz:
+                break
+            bsp, bcs = kuozhan_level_signals(nz, xds, ld, wzgx, self.frequency)
             for p in bsp:
-                p.level = lvl                            # 1=5m, 2=30m, 3=日线
-            out.append({"level": lvl, "zss": kz, "bsp": bsp, "bcs": bcs})
-            kz = kuozhan_zhongshu(kz, xds)               # 递归升一级
-            lvl += 1
+                p.level = lvl
+            out.append({"level": lvl, "zss": nz, "bsp": bsp, "bcs": bcs})
+            cur = nz
         return out
 
     def get_branch_interval_nest(self):

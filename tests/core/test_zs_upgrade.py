@@ -4,7 +4,9 @@
 扩展中枢区间 [1.713,1.737](用户多轮确认的正确值, = 子中枢包络重合 [max dd, min gg])。
 """
 from chanlun.core.cl_interface import ZS, Config
-from chanlun.core.zs_upgrade import is_kuozhan, kuozhan_zhongshu, kuozhan_level_signals
+from chanlun.core.zs_upgrade import (
+    is_kuozhan, kuozhan_zhongshu, kuozhan_level_signals, _tongjibie_groups,
+)
 
 
 class _L:
@@ -235,3 +237,35 @@ def test_kuozhan_level_signals_leave_at_right_edge_no_signal():
     z = _zs_with_lines(6, 9, [b0, b1])
     bsp, bcs = kuozhan_level_signals([z], xds, None, Config.ZS_WZGX_ZGD.value)
     assert bsp == [] and bcs == []
+
+
+# ---- 同级别分解(30m): 3段走势类型重合=中枢,恰好3段不延伸(line24727/24735) ----
+class _W:
+    """走势类型桩(同级别分解只读 zs_low/zs_high 价格区间)。"""
+
+    def __init__(self, lo, hi):
+        self.zs_low, self.zs_high = lo, hi
+
+
+def test_tongjibie_3_overlap_one_zs():
+    """上下上 3 段价格区间重合 → 1 个 30m 中枢(line24727)。"""
+    ws = [_W(10, 20), _W(15, 25), _W(12, 22)]        # 共同重合 [15,20]
+    assert _tongjibie_groups(ws) == [(0, 2)]
+
+
+def test_tongjibie_no_common_overlap_none():
+    """3 段无共同重合区间 → 不成中枢。"""
+    ws = [_W(10, 20), _W(30, 40), _W(50, 60)]
+    assert _tongjibie_groups(ws) == []
+
+
+def test_tongjibie_6_segments_two_zs_not_extended():
+    """6 段都重合 → **2 个**中枢(恰好3段不延伸、允许盘整+盘整,line24728/24735),非1个延伸大中枢。"""
+    ws = [_W(10, 20) for _ in range(6)]
+    assert _tongjibie_groups(ws) == [(0, 2), (3, 5)]
+
+
+def test_tongjibie_advance_one_when_no_zs():
+    """前3段不重合则前移1段试下一组(连接走势不吞段)。"""
+    ws = [_W(10, 20), _W(30, 40), _W(35, 45), _W(33, 43)]   # [1,2,3] 重合 [35,40]
+    assert _tongjibie_groups(ws) == [(1, 3)]

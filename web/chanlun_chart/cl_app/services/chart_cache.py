@@ -136,7 +136,11 @@ def _stable_hash(obj) -> str:
 #   几何三类)带 freq 级别标入 xd_mmds/xd_bcs(level=5m/30m/日线)。000001:L1=7/L2=2 中枢、
 #   5m 买卖点 10(含 1sell 顶背驰=L0 漏的)+背驰 3、30m 3buy×1。recursive_levels/xd_mmds/
 #   xd_bcs 内容全变,强制旧缓存失效。
-_CHART_CACHE_SCHEMA_VERSION = "v22"
+# - v23 (2026-06) ── 30m 中枢改**同级别分解**(原文 line24727/24735,用户硬性要求):升级链
+#   封顶 30m 操作级——<30m(1m→5m)用 kuozhan(非同级别,延伸/扩展),30m 用 tongjibie_zhongshu
+#   (次级别走势类型恰好3段重合、不延伸、允许盘整+盘整)。get_kuozhan_levels 按 _UPGRADE_CHAIN
+#   分方法;30m/日线图无升级链(只 base)。L2(30m)中枢区间/个数与 v22(纯 kuozhan)不同 → 失效。
+_CHART_CACHE_SCHEMA_VERSION = "v23"
 
 
 def _build_cache_key(market: str, code: str, frequency: str, cl_config: dict) -> str:

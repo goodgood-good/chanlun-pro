@@ -169,3 +169,49 @@ def kuozhan_level_signals(zss: List[ZS], xds: List[LINE], ld_provider, wzgx: str
             elif leave.type == "down" and retest.end.val <= z.zd:
                 bsp.append(BuySellPoint("3sell", z, retest, retest.end, None))
     return bsp, bcs
+
+
+def _tongjibie_groups(zslxs) -> List[tuple]:
+    """同级别分解分组:连续 3 段走势类型价格区间重合 → (start,end) 中枢组,**恰好 3 段不延伸**
+    (line24727 三段上下上/下上下重合=中枢 / line24735 不延伸 / line24728 6段=2盘整连接);
+    前 3 段不重合则前移 1 段(连接走势不吞段)。每组用 zs_low/zs_high 取共同重合区间。"""
+    groups = []
+    i = 0
+    n = len(zslxs)
+    while i + 3 <= n:
+        tri = zslxs[i:i + 3]
+        zd = max(z.zs_low for z in tri)
+        zg = min(z.zs_high for z in tri)
+        if zd < zg:                                      # 3 段共同重合 → 中枢
+            groups.append((i, i + 2))
+            i += 3                                        # 恰好 3 段不延伸(6 段→下一组另成中枢)
+        else:
+            i += 1
+    return groups
+
+
+def tongjibie_zhongshu(zslxs, xds: List[LINE]) -> List[ZS]:
+    """30m 中枢 = **同级别分解**(操作级,line24727/24735):连续 3 段次级别走势类型价格区间重合,
+    恰好 3 段不延伸、允许盘整+盘整(区别于 5m 以下的 kuozhan 扩展/延伸)。
+
+    中枢区间 [zd,zg] = 3 段走势类型 zs_low/zs_high 的共同重合;region(线段)= 首段首中枢首线段
+    ~ 末段末中枢末线段(供下游 kuozhan_level_signals 补进入/离开段算背驰/买卖点)。完成度 = 纯
+    结束条件(仅序列最后一个未完成,同 kuozhan_zhongshu / line7260)。
+    """
+    groups = _tongjibie_groups(zslxs)
+    out: List[ZS] = []
+    last = len(groups) - 1
+    for k, (s, e) in enumerate(groups):
+        tri = zslxs[s:e + 1]
+        zd = max(z.zs_low for z in tri)
+        zg = min(z.zs_high for z in tri)
+        fz = getattr(tri[0], "zss", None)
+        lz = getattr(tri[-1], "zss", None)
+        if not fz or not lz or not fz[0].lines or not lz[-1].lines:
+            continue
+        a = _line_index(fz[0].lines[0], xds)
+        b = _line_index(lz[-1].lines[-1], xds)
+        if a is None or b is None:
+            continue
+        out.append(_build_kuozhan_zs(list(tri), xds[a:b + 1], (zd, zg), done=(k < last)))
+    return out
