@@ -146,7 +146,11 @@ def _stable_hash(obj) -> str:
 # - v25 (2026-06) ── QMT 1m/5m 回看 90→365 天(exchange_qmt 专属覆盖):lookback 不进 cache_key
 #   (key 只含 config hash),故 lookback 改了旧缓存仍命中陈旧 90 天数据 → 本 bump 强制失效,
 #   让 365 天更长历史(更多 5m/30m 中枢)在重启后立即生效、免手动清缓存。
-_CHART_CACHE_SCHEMA_VERSION = "v25"
+# - v26 (2026-06) ── get_kuozhan_levels 逐级容错:某级(尤其 30m 同级别 zslx/tongjibie)在边缘
+#   实时数据上抛异常时,原整个函数抛出→cl_utils 静默吞→recursive_levels 只剩[0]、5m/30m 中枢/
+#   买卖点/背驰全没(用户「看不到5m/30m买卖点背驰」真凶)。改逐级 try/except:只丢出错级、其他
+#   级照常产出。用户数据 recursive_levels 从[0]变回[0,1,2]→强制旧缓存失效。
+_CHART_CACHE_SCHEMA_VERSION = "v26"
 
 
 def _build_cache_key(market: str, code: str, frequency: str, cl_config: dict) -> str:
