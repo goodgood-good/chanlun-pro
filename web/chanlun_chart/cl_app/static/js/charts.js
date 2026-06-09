@@ -983,6 +983,15 @@ class ChartManager {
                 for (let i = 1; i <= _recMaxLevel; i++) {
                     _zsLevels.push({ label: (_chain[i] || ('L' + i)) + '级别', key: 'zs_L' + i });
                 }
+                // 买卖点/背驰也按周期级别(与中枢平行):1m级别=本周期线段(mmd_xd/bc_xd),
+                // 5m/30m级别=recursive_levels L1/L2(mmd_L1.../bc_L1...);笔层单列。
+                const _mmdLevels = [{ label: _chain[0] + '级别', key: 'mmd_xd' }];
+                const _bcLevels = [{ label: _chain[0] + '级别', key: 'bc_xd' }];
+                for (let i = 1; i <= _recMaxLevel; i++) {
+                    const _lab = (_chain[i] || ('L' + i)) + '级别';
+                    _mmdLevels.push({ label: _lab, key: 'mmd_L' + i });
+                    _bcLevels.push({ label: _lab, key: 'bc_L' + i });
+                }
 
                 // 重组后的菜单:按「功能分组」组织 + 顶部级别映射默认折叠 +
                 // 底部「全选/全清」一键操作。比起原始扁平 14 项更易扫读,
@@ -1014,18 +1023,18 @@ class ChartManager {
                             ${_zsLevels.map((L) => `<label style="cursor:pointer;"><input type="checkbox" id="${cbId(L.key)}" ${cfg[L.key] !== false ? 'checked' : ''} style="margin-right:4px; vertical-align:middle;">${L.label}</label>`).join('')}
                         </div>
 
-                        ${_grpTitle('买卖点')}
+                        ${_grpTitle('买卖点 (按周期级别)')}
                         ${_cbRow('mmd', '总开关', false)}
-                        <div style="padding-left:14px; font-size:12px; display:flex; gap:12px;">
-                            <label style="cursor:pointer;"><input type="checkbox" id="${cbId('mmd_bi')}" ${cfg.mmd_bi ? 'checked' : ''} style="margin-right:4px; vertical-align:middle;">笔层(小)</label>
-                            <label style="cursor:pointer;"><input type="checkbox" id="${cbId('mmd_xd')}" ${cfg.mmd_xd ? 'checked' : ''} style="margin-right:4px; vertical-align:middle;">段层(大)</label>
+                        <div style="padding-left:14px; font-size:12px; display:flex; gap:12px; flex-wrap:wrap;">
+                            <label style="cursor:pointer;"><input type="checkbox" id="${cbId('mmd_bi')}" ${cfg.mmd_bi ? 'checked' : ''} style="margin-right:4px; vertical-align:middle;">笔层</label>
+                            ${_mmdLevels.map((L) => `<label style="cursor:pointer;"><input type="checkbox" id="${cbId(L.key)}" ${cfg[L.key] !== false ? 'checked' : ''} style="margin-right:4px; vertical-align:middle;">${L.label}</label>`).join('')}
                         </div>
 
-                        ${_grpTitle('背驰')}
+                        ${_grpTitle('背驰 (按周期级别)')}
                         ${_cbRow('bc', '总开关', false)}
-                        <div style="padding-left:14px; font-size:12px; display:flex; gap:12px;">
+                        <div style="padding-left:14px; font-size:12px; display:flex; gap:12px; flex-wrap:wrap;">
                             <label style="cursor:pointer;"><input type="checkbox" id="${cbId('bc_bi')}" ${cfg.bc_bi ? 'checked' : ''} style="margin-right:4px; vertical-align:middle;">笔背驰</label>
-                            <label style="cursor:pointer;"><input type="checkbox" id="${cbId('bc_xd')}" ${cfg.bc_xd ? 'checked' : ''} style="margin-right:4px; vertical-align:middle;">段背驰</label>
+                            ${_bcLevels.map((L) => `<label style="cursor:pointer;"><input type="checkbox" id="${cbId(L.key)}" ${cfg[L.key] !== false ? 'checked' : ''} style="margin-right:4px; vertical-align:middle;">${L.label}</label>`).join('')}
                         </div>
 
                         <hr style="margin:6px 0 4px;">
@@ -1705,9 +1714,10 @@ class ChartManager {
         const recBcs = [];
         for (const lvObj of (barsResult.recursive_levels || [])) {
             const _lv = (lvObj && lvObj.level) || 0;
-            if (_lv === 0 || cfg['zs_L' + _lv] === false) continue;
-            if (cfg.mmd !== false) for (const m of (lvObj.mmds || [])) recMmds.push(m);
-            if (cfg.bc !== false) for (const b of (lvObj.bcs || [])) recBcs.push(b);
+            if (_lv === 0) continue;     // L0 走 bi/xd_mmds;此处高级别(5m/30m)
+            // 买卖点按各级自己的开关(mmd_L1=5m/mmd_L2=30m)+主开关 mmd;背驰同理 bc_L*。
+            if (cfg.mmd !== false && cfg['mmd_L' + _lv] !== false) for (const m of (lvObj.mmds || [])) recMmds.push(m);
+            if (cfg.bc !== false && cfg['bc_L' + _lv] !== false) for (const b of (lvObj.bcs || [])) recBcs.push(b);
         }
         this.reconcile('recursive_mmds', recMmds, from, symbolKey, (item) => safeCreate(ChartUtils.createMmdShape(this.chart, item, mmdOpt), 'rec_mmd'), false);
         this.reconcile('recursive_mmd_labels', recMmds, from, symbolKey, (item) => safeCreate(ChartUtils.createMmdLabelShape(this.chart, item, mmdOpt), 'rec_mmd_label'), false);
