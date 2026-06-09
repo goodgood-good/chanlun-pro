@@ -514,7 +514,6 @@ class CL(ICL):
         from chanlun.core.zs_upgrade import (
             kuozhan_zhongshu, kuozhan_level_signals, tongjibie_zhongshu,
         )
-        from chanlun.core.zslx_branch import ZslxBranchCalculator
         levels = self.get_recursive_branch_levels()
         l0 = next((lv.zss for lv in levels if lv.level == 0), None)
         if not l0:
@@ -532,9 +531,8 @@ class CL(ICL):
             # recursive_levels 只剩[0]、5m/30m 全没,用户「看不到买卖点」真凶)。失败记 warning+traceback。
             nz = []
             try:                                          # ① 中枢(失败也保留其他级,且不连累买卖点)
-                if cur and method == "tongjibie":         # 30m 同级别分解(3段走势类型重合)
-                    zslxs = ZslxBranchCalculator().calculate(cur, [None] * len(cur))
-                    nz = tongjibie_zhongshu(zslxs, xds)
+                if cur and method == "tongjibie":         # 30m 同级别分解(严格交替腿,3腿上下上/下上下重合)
+                    nz = tongjibie_zhongshu(cur, xds)      # 直接吃中枢序列,内部建交替腿(原文24727/24751/25123)
                 elif cur:                                 # <30m kuozhan 非同级别(扩展/延伸)
                     nz = kuozhan_zhongshu(cur, xds)
             except Exception:

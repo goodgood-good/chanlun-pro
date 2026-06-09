@@ -6,6 +6,7 @@
 from chanlun.core.cl_interface import ZS, Config
 from chanlun.core.zs_upgrade import (
     is_kuozhan, kuozhan_zhongshu, kuozhan_level_signals, _tongjibie_groups,
+    _alternating_legs, tongjibie_zhongshu,
 )
 
 
@@ -269,3 +270,50 @@ def test_tongjibie_advance_one_when_no_zs():
     """前3段不重合则前移1段试下一组(连接走势不吞段)。"""
     ws = [_W(10, 20), _W(30, 40), _W(35, 45), _W(33, 43)]   # [1,2,3] 重合 [35,40]
     assert _tongjibie_groups(ws) == [(1, 3)]
+
+
+# ---- 同级别分解的输入=严格交替腿(原文24727上下上/下上下、24751交替程式、25123更大分解成小的) ----
+# 修复:原 tongjibie 喂 ZslxBranchCalculator 合并走势类型(趋势含多中枢、方向不交替)→ 凑不出
+# 上下上/下上下 → 中枢恒0(000001 5m图实测)。改为从中枢序列直接建严格交替腿:连续同向中枢并成
+# 一腿、反转处断开共享极值中枢 → 上下上下交替 → 三腿重合=中枢。
+def _zs_c(center, dd, gg, ln=None):
+    """中枢桩:核心区中心=center(zd/zg=center∓1)、包络[dd,gg];可挂线段 ln 供 region 定位。"""
+    z = _zs(center - 1, center + 1, dd, gg)
+    if ln is not None:
+        z.lines = [ln]
+    return z
+
+
+def test_alternating_legs_merge_trend_split_at_reversal():
+    """连续同向中枢并成一腿,方向反转处断开成上下上、反转腿共享极值中枢(原文24751严格交替)。"""
+    zss = [_zs_c(10, 5, 15), _zs_c(20, 15, 25), _zs_c(15, 10, 20), _zs_c(25, 20, 30)]
+    legs = _alternating_legs(zss)
+    assert [lg.type for lg in legs] == ["up", "down", "up"]
+    assert legs[0].zss[-1] is legs[1].zss[0]      # 顶中枢 z1 在上腿尾/下腿头共享
+    assert legs[1].zss[-1] is legs[2].zss[0]      # 底中枢 z2 在下腿尾/上腿头共享
+
+
+def test_alternating_legs_single_zs():
+    """单中枢 → 单腿(不报错)。"""
+    legs = _alternating_legs([_zs_c(10, 5, 15)])
+    assert len(legs) == 1 and legs[0].zss[0].zd == 9
+
+
+def test_tongjibie_zhongshu_alternating_legs_form_zs():
+    """中枢序列经严格交替腿同级别分解:上下上3腿区间重合 → 1个30m中枢,区间=三腿重合[12,35]。"""
+    lines = [_L("up", 10, 38) for _ in range(4)]   # 占位线段, 供 region/line_index(身份唯一)
+    xds = list(lines)
+    zss = [_zs_c(20, 10, 25, lines[0]), _zs_c(30, 15, 35, lines[1]),
+           _zs_c(22, 12, 28, lines[2]), _zs_c(32, 18, 38, lines[3])]
+    out = tongjibie_zhongshu(zss, xds)
+    assert len(out) == 1
+    assert out[0].zd == 12 and out[0].zg == 35
+
+
+def test_tongjibie_zhongshu_pure_uptrend_no_zs():
+    """纯单调上升(中枢逐级抬高、并成单腿)→ 0中枢:防御性回归,趋势下不臆造同级别中枢。"""
+    lines = [_L("up", 0, 100) for _ in range(4)]
+    xds = list(lines)
+    zss = [_zs_c(10, 8, 12, lines[0]), _zs_c(30, 28, 32, lines[1]),
+           _zs_c(50, 48, 52, lines[2]), _zs_c(70, 68, 72, lines[3])]
+    assert tongjibie_zhongshu(zss, xds) == []

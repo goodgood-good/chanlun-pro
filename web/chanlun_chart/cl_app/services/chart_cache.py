@@ -150,7 +150,12 @@ def _stable_hash(obj) -> str:
 #   实时数据上抛异常时,原整个函数抛出→cl_utils 静默吞→recursive_levels 只剩[0]、5m/30m 中枢/
 #   买卖点/背驰全没(用户「看不到5m/30m买卖点背驰」真凶)。改逐级 try/except:只丢出错级、其他
 #   级照常产出。用户数据 recursive_levels 从[0]变回[0,1,2]→强制旧缓存失效。
-_CHART_CACHE_SCHEMA_VERSION = "v26"
+# - v27 (2026-06) ── 30m 同级别分解改**严格交替腿**(原文 line24727 上下上/下上下、24751 操作
+#   程式严格交替、25123「更大就分解成小的」):原 tongjibie 喂 ZslxBranchCalculator 合并走势类型
+#   (趋势含多中枢、方向不交替)→ 凑不出上下上 → 30m 中枢恒 0(000001 5m 图实测)。改为从中枢序列
+#   直接建严格交替腿(连续同向并一腿、反转处断开共享极值中枢)→ 三腿重合=中枢。000001:5m 图 30m
+#   中枢 0→2、1m 图 30m 中枢 1→3(+买卖点/背驰)。recursive_levels[30m] 内容变,强制旧缓存失效。
+_CHART_CACHE_SCHEMA_VERSION = "v27"
 
 
 def _build_cache_key(market: str, code: str, frequency: str, cl_config: dict) -> str:
