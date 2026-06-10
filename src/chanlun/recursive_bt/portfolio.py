@@ -195,7 +195,9 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
                        require: tuple = ("tech",),
                        big_gate: str = "bsp",
                        buy_priority: str = "1first",
-                       pool_schedule: Optional[list] = None):
+                       pool_schedule: Optional[list] = None,
+                       slippage: float = 0.0,
+                       t_start=None, t_end=None):
     """组合回测。syms 已构建则直接用(QMT缓存路径);否则按 universe 名走 chart_cache。
     market_filter=大盘标的名(其30m方向==down时禁止开新仓)。
     buy_classes=入场只认的买点类别集合(如{1}=只一类买点选股;None=全部1/2/3类)。
@@ -231,10 +233,33 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
         med_start = statistics.median(s["dates"][0].value for s in syms.values())
         cutoff = pd.Timestamp(med_start, tz="Asia/Shanghai") + pd.Timedelta("30D")
         syms = {n: s for n, s in syms.items() if s["dates"][0] <= cutoff}
-    # 主时钟 = 股票池 5m 时间戳交集(A股同时段→覆盖绝大多数bar)
-    master = sorted(set.intersection(*[set(s["dates"]) for s in syms.values()]))
+    # 主时钟 = 全池日期**并集**(审计2修复 2026-06-10:原交集口径下任一票停牌一天→该日整天
+    # 消失,实测bar覆盖率仅67%/信号丢失32%/出现整月空洞)。个股停牌bar:市值冻结最近价、
+    # 不可成交(挂单顺延)、无信号判定。
+    master = sorted(set.union(*[set(s["dates"]) for s in syms.values()]))
     if filt:
-        master = [t for t in master if t in filt["d2i"]]
+        fset = set(filt["d2i"])
+        master = [t for t in master if t in fset]
+    if t_start is not None:
+        master = [t for t in master if t >= t_start]
+    if t_end is not None:
+        master = [t for t in master if t <= t_end]
+    # 每只票: master索引 → (精确bar索引 exact, 最近≤t bar索引 last)。exact=-1 即停牌。
+    mx: Dict[str, np.ndarray] = {}
+    ml: Dict[str, np.ndarray] = {}
+    for name, s in syms.items():
+        d2i_s = s["d2i"]
+        exact = np.full(len(master), -1, dtype=np.int64)
+        lasti = np.full(len(master), -1, dtype=np.int64)
+        last = -1
+        for mi, tt in enumerate(master):
+            j = d2i_s.get(tt)
+            if j is not None:
+                last = j
+                exact[mi] = j
+            lasti[mi] = last
+        mx[name] = exact
+        ml[name] = lasti
 
     cash = init_cash
     positions: Dict[str, dict] = {}
@@ -242,8 +267,8 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
     equity = np.empty(len(master))
     trades: List[PTrade] = []
 
-    def mk(t):  # 市值
-        return cash + sum(syms[n]["close"][syms[n]["d2i"][t]] * p["shares"]
+    def mk(m):  # 市值(停牌票按最近价冻结盯市)
+        return cash + sum(syms[n]["close"][ml[n][m]] * p["shares"]
                           for n, p in positions.items())
 
     pool_idx = -1
@@ -255,11 +280,14 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
             name, act = o[0], o[1]
             w = o[2] if len(o) > 2 else None        # 池模式:目标权重
             s = syms[name]
-            j = s["d2i"][t]
-            px = s["open"][j]
+            j = int(mx[name][m])
+            if j < 0:                               # 停牌:不可成交,挂单顺延
+                carry.append(o)
+                continue
+            px = s["open"][j] * (1 + slippage if o[1] == "buy" else 1 - slippage)
             r = s["rules"]
             if act == "buy" and name not in positions and cash > 0:
-                target = mk(t) * w if w else mk(t) / max_pos
+                target = mk(m) * w if w else mk(m) / max_pos
                 budget = min(target, cash) * 0.99
                 size = budget / (px * (1 + r.commission))
                 if r.lot > 1:
@@ -286,7 +314,9 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
             if name in pend_sell:
                 continue
             s = syms[name]
-            j = s["d2i"][t]
+            j = int(mx[name][m])
+            if j < 0:
+                continue                            # 停牌:无bar无判定
             if _bdir(s, j) == "down" or _sells_at(s, j):
                 is_down = _bdir(s, j) == "down"
                 positions[name]["reason"] = "大级别转空" if is_down else "小级别卖点"
@@ -311,8 +341,8 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
                     s = syms.get(name)
                     if s is None or name in positions or name in pend_buy:
                         continue
-                    j = s["d2i"].get(t)
-                    if j is None or _bdir(s, j) == "down":
+                    j = int(mx[name][m])
+                    if j < 0 or _bdir(s, j) == "down":
                         continue
                     if reentry.get(name) == "wait_buy":      # 卖点减仓后,等买点回补(短差)
                         buys = _buys_at(s, j)
@@ -322,7 +352,7 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
                             continue
                     pending.append((name, "buy", w))
                     reentry.pop(name, None)
-            equity[m] = mk(t)
+            equity[m] = mk(m)
             continue
         free = max_pos - len(positions) - len(pend_buy)
         if free > 0 and not block:
@@ -330,7 +360,9 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
             for name, s in syms.items():
                 if name in positions or name in pend_buy:
                     continue
-                j = s["d2i"][t]
+                j = int(mx[name][m])
+                if j < 0:
+                    continue                        # 停牌:无信号
                 buys = _buys_at(s, j)
                 if buy_classes is not None:                      # 只认指定类别买点(选股系统)
                     buys = [x for x in buys if int(x.bs_type[0]) in buy_classes]
@@ -358,14 +390,15 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
             for c in cands[:free]:
                 pending.append((c[-1], "buy"))
 
-        equity[m] = mk(t)
+        equity[m] = mk(m)
 
-    # 收尾强平
+    # 收尾强平(停牌票按冻结最近价)
     t = master[-1]
+    mi_last = len(master) - 1
     for name in list(positions):
         s = syms[name]
         p = positions[name]
-        px = s["close"][s["d2i"][t]]
+        px = s["close"][ml[name][mi_last]] * (1 - slippage)
         r = s["rules"]
         cash += p["shares"] * px * (1 - r.commission - r.stamp_duty)
         trades.append(PTrade(s["code"], p["entry_date"], p["entry_px"], t, px,
@@ -373,10 +406,10 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
     if positions:
         equity[-1] = cash
     flabel = market_filter if market_filter else ("大盘" if filt else None)
-    return _report(label, master, equity, trades, syms, flabel)
+    return _report(label, master, equity, trades, syms, flabel, ml=ml)
 
 
-def _report(label, master, equity, trades, syms, flabel):
+def _report(label, master, equity, trades, syms, flabel, ml=None):
     total = equity[-1] / equity[0] - 1
     peak = np.maximum.accumulate(equity)
     max_dd = float(np.max((peak - equity) / peak))
@@ -387,10 +420,21 @@ def _report(label, master, equity, trades, syms, flabel):
     sharpe = float(np.mean(rets) / (np.std(rets) + 1e-12) * ann) if len(rets) else 0.0
     wins = sum(1 for t in trades if t.ret > 0)
     wr = wins / len(trades) if trades else 0.0
-    # 基准:等权买入持有(逐bar曲线,可算基准回撤对比风险)
+    # 基准:等权买入持有(逐bar曲线,可算基准回撤对比风险)。并集主时钟下停牌bar用
+    # 最近价冻结(ml);标的首个可用bar前视为现金(1.0)。
     nrm = np.zeros(len(master))
     cnt = 0
-    for s in syms.values():
+    for name, s in syms.items():
+        if ml is not None:
+            li = ml[name]
+            valid = li >= 0
+            if not valid.any():
+                continue
+            base = s["open"][int(li[valid][0])]
+            seq = np.where(valid, s["close"][np.maximum(li, 0)] / base, 1.0)
+            nrm += seq
+            cnt += 1
+            continue
         try:
             idx = np.array([s["d2i"][t] for t in master])
         except KeyError:
@@ -421,16 +465,23 @@ def generate_portfolio_report(syms, filt, out_png="D:/chanlun_pro/reports/portfo
         runs[mp] = portfolio_backtest(syms=syms, filt=None, max_pos=mp, label=f"{len(syms)}只")
     master = runs[10]["master"]
     # 等权基准逐bar曲线(算一次);跳过缺 master 日期的标的(停牌→被主时钟过滤)
+    # 并集主时钟兼容:停牌bar用最近价冻结、首个可用bar前视为现金
     nrm = np.zeros(len(master))
     cnt = 0
     for s in syms.values():
-        if master[0] not in s["d2i"] or master[-1] not in s["d2i"]:
+        d2i_s = s["d2i"]
+        li = np.full(len(master), -1, dtype=np.int64)
+        last = -1
+        for mi, tt in enumerate(master):
+            jj = d2i_s.get(tt)
+            if jj is not None:
+                last = jj
+            li[mi] = last
+        valid = li >= 0
+        if not valid.any():
             continue
-        try:
-            idx = np.array([s["d2i"][t] for t in master])
-        except KeyError:
-            continue
-        nrm += s["close"][idx] / s["open"][s["d2i"][master[0]]]
+        base = s["open"][int(li[valid][0])]
+        nrm += np.where(valid, s["close"][np.maximum(li, 0)] / base, 1.0)
         cnt += 1
     bench = nrm / max(cnt, 1)
     x = pd.to_datetime(master)

@@ -205,9 +205,10 @@ def step(broker: PaperBroker, states: Dict[str, SymbolState], now: str):
                 continue
             buys = [s for s in ss if s.is_buy]
             if buys and states[c].big_dir() != "down":
-                # 排序:日线3买窗口内优先(三级共振) > 3买优先(line23172)
-                cands.append((0 if states[c].in_d3() else 1,
-                              -min(int(s.bs_type[0]) for s in buys), c))
+                # 排序:3买优先(line23172)。d3共振排序已移除——审计2(master并集)修复后
+                # d3增益翻转为噪声级(交集+11.3pp/并集-7.6pp),按数据定夺中性弃用;
+                # in_d3() 观测能力保留(实盘A/B分析备用)。
+                cands.append((-min(int(s.bs_type[0]) for s in buys), c))
         cands.sort()
         for item in cands[:free]:
             c = item[-1]
