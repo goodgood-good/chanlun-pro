@@ -356,3 +356,110 @@ def test_jiehe_then_three_overlap_one_zhongshu():
     zd = max(s.zs_low for s in segs)
     zg = min(s.zs_high for s in segs)
     assert zd == 19 and zg == 22                            # [max(10,18,19), min(25,22,35)]
+
+
+# ---- 段区间口径(原文20课):gn/dn = 次级别走势类型 Zn 的**整段高低点**,非段内中枢包络 ----
+class _FXv:
+    def __init__(self, val):
+        self.val = val
+
+
+class _ZSe:
+    """中枢桩:gg/dd(含瞬间波动的中枢极值)。"""
+
+    def __init__(self, dd, gg):
+        self.dd, self.gg = dd, gg
+
+
+class _Z2:
+    """真 ZSLX 形状的走势类型桩:start/end 分型(端点价) + zss(段内中枢) + 包络字段。"""
+
+    def __init__(self, t, start_v, end_v, zss, lo, hi):
+        self._type = t
+        self.start, self.end = _FXv(start_v), _FXv(end_v)
+        self.zss = list(zss)
+        self.zs_low, self.zs_high = lo, hi      # 旧包络口径(zslx_branch 喂回字段)
+
+
+def test_seg_span_uses_segment_extremes_not_zs_envelope():
+    """整段高低口径:下段从 30 跌到 12(端点超出其段内中枢[20,24]),
+    包络口径三段不重合(max(lo)=20 > min(hi)=18)→饿死;整段口径下段=[12,30]与两上段重合→成中枢。
+    原文20课:ZG=min(g1,g2)/ZD=max(d1,d2),gn、dn 是 Zn 的高、低点(整段极值)。"""
+    up1 = _Z2("up", 10, 18, [_ZSe(10, 18)], 10, 18)         # 上段 [10,18]
+    dn = _Z2("down", 30, 12, [_ZSe(20, 24)], 20, 24)        # 下段端点 30→12,段内中枢[20,24]
+    up2 = _Z2("up", 12, 17, [_ZSe(11, 17)], 11, 17)         # 上段 [11,17]
+    segs = _jiehe_segments([up1, dn, up2])
+    assert [s.dir for s in segs] == ["up", "down", "up"]
+    assert segs[1].zs_low == 12 and segs[1].zs_high == 30   # 下段=整段区间,非中枢包络
+    assert _tongjibie_groups(segs) == [(0, 2)]              # 三段重合 [max(10,12,11), min(18,30,17)]
+
+
+def test_seg_span_unfinished_end_none_falls_back():
+    """末段未完成(end=None)→ 整段口径用 start+中枢极值,不崩。"""
+    z = _Z2("up", 10, 0, [_ZSe(12, 20)], 12, 20)
+    z.end = None
+    segs = _jiehe_segments([z])
+    assert segs[0].zs_low == 10 and segs[0].zs_high == 20
+
+
+# ---- 同级别分解的段粒度信号(30m买卖点/背驰):离开/回试用次级别走势类型段,非单根线段 ----
+class _FXk:
+    """带 k.date 的分型桩。"""
+
+    class _K:
+        def __init__(self, date):
+            self.date = date
+
+    def __init__(self, val, date="2026-01-01"):
+        self.val = val
+        self.k = _FXk._K(date)
+
+
+class _ZSzgzd:
+    def __init__(self, zd, zg):
+        self.zd, self.zg = zd, zg
+
+
+def _mk_seg(t, lo, hi, end_val, end_date="2026-02-01"):
+    from chanlun.core.zs_upgrade import _Seg
+    z = _Z2(t, lo if t == "up" else hi, end_val, [], lo, hi)
+    z.start = _FXk(z.start.val if hasattr(z.start, "val") else lo)
+    z.end = _FXk(end_val, end_date)
+    s = _Seg(z)
+    s.zs_low, s.zs_high = lo, hi          # 显式段区间(桩)
+    return s
+
+
+def test_tongjibie_signals_third_buy_on_retest_segment():
+    """上下上中枢(zg=20)后,回试段(down)终点 22>=zg → 3buy 锚在回试段终点(第20课:
+    向上离开后第一次回抽不破 ZG;段粒度=segs[e+1] 整段即回抽)。"""
+    from chanlun.core.zs_upgrade import tongjibie_level_signals
+    segs = [_mk_seg("up", 10, 18, 18), _mk_seg("down", 14, 18, 14),
+            _mk_seg("up", 14, 25, 25), _mk_seg("down", 22, 25, 22, "2026-03-01")]
+    zss = [_ZSzgzd(zd=14, zg=18)]
+    meta = {"segs": segs, "groups": [(0, 2)]}
+    bsp, bcs = tongjibie_level_signals(zss, meta, None, "zs_wzgx_zgd", "5m")
+    assert [p.bs_type for p in bsp] == ["3buy"]
+    assert bsp[0].anchor_fx.val == 22
+
+
+def test_tongjibie_signals_third_sell_symmetric():
+    """下上下中枢(zd=14)后,回试段(up)终点 12<=zd → 3sell。"""
+    from chanlun.core.zs_upgrade import tongjibie_level_signals
+    segs = [_mk_seg("down", 14, 25, 14), _mk_seg("up", 14, 18, 18),
+            _mk_seg("down", 8, 18, 8), _mk_seg("up", 8, 12, 12)]
+    zss = [_ZSzgzd(zd=14, zg=18)]
+    meta = {"segs": segs, "groups": [(0, 2)]}
+    bsp, bcs = tongjibie_level_signals(zss, meta, None, "zs_wzgx_zgd", "5m")
+    assert [p.bs_type for p in bsp] == ["3sell"]
+
+
+def test_tongjibie_signals_retest_breaks_core_no_signal():
+    """回试段跌破 ZG(终点 16 < zg=18 但 >zd → 破核心上沿回中枢内)→ 无三类。"""
+    from chanlun.core.zs_upgrade import tongjibie_level_signals
+    segs = [_mk_seg("up", 10, 18, 18), _mk_seg("down", 14, 18, 14),
+            _mk_seg("up", 14, 25, 25), _mk_seg("down", 16, 25, 16)]
+    zss = [_ZSzgzd(zd=14, zg=18)]
+    meta = {"segs": segs, "groups": [(0, 2)]}
+    bsp, _ = tongjibie_level_signals(zss, meta, None, "zs_wzgx_zgd", "5m")
+    assert bsp == []

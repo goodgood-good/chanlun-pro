@@ -241,23 +241,58 @@ def _tongjibie_groups(zslxs) -> List[tuple]:
     return groups
 
 
+def _zslx_span(zslx) -> tuple:
+    """走势类型**整段价格区间** (低, 高)——原文20课中枢定义:ZG=min(g1,g2)/ZD=max(d1,d2),
+    gn、dn 是次级别走势类型 Zn 的**高、低点**(整段极值,含进入/离开段超出段内中枢的部分)。
+
+    ⚠ 不能用 zslx.zs_high/zs_low(zslx_branch 喂回字段=段内中枢 gg/dd **包络**):包络口径
+    过严,趋势段两端远超中枢包络 → 三段重合判定饿死(5m图全年 0 个 30m 同级别中枢的根因)。
+    极值取 段端点(start/end.val) ∪ 段内中枢 gg/dd;两者皆缺(纯桩)→ fallback 包络字段。"""
+    vals = []
+    for fx in (getattr(zslx, "start", None), getattr(zslx, "end", None)):
+        v = getattr(fx, "val", None) if fx is not None else None
+        if v is not None:
+            vals.append(v)
+    his = [z.gg for z in (getattr(zslx, "zss", None) or []) if getattr(z, "gg", None) is not None]
+    los = [z.dd for z in (getattr(zslx, "zss", None) or []) if getattr(z, "dd", None) is not None]
+    hi_pool = his + vals
+    lo_pool = los + vals
+    if not hi_pool or not lo_pool:
+        return zslx.zs_low, zslx.zs_high
+    return min(lo_pool), max(hi_pool)
+
+
 class _Seg:
     """**结合运算**后的一段(原文 line25179):由相邻**同方向**走势类型合并而成,使段序列严格交替
-    (上下上下…)。供 _tongjibie_groups 读 zs_low/zs_high(段价格区间 = 段内走势类型 zs_low/zs_high
-    的并);zss = 段内所有走势类型的中枢(供 region 定位线段)。"""
+    (上下上下…)。供 _tongjibie_groups 读 zs_low/zs_high(段价格区间 = 段内走势类型**整段区间**
+    _zslx_span 的并,原文20课 gn/dn 口径);zss = 段内所有走势类型的中枢(供 region 定位线段)。"""
 
-    __slots__ = ("dir", "zss", "zs_low", "zs_high")
+    __slots__ = ("dir", "zss", "zs_low", "zs_high", "start", "end")
 
     def __init__(self, zslx):
         self.dir = zslx._type
         self.zss = list(getattr(zslx, "zss", []) or [])
-        self.zs_low = zslx.zs_low
-        self.zs_high = zslx.zs_high
+        self.zs_low, self.zs_high = _zslx_span(zslx)
+        self.start = getattr(zslx, "start", None)
+        self.end = getattr(zslx, "end", None)
 
     def merge(self, zslx) -> None:
         self.zss.extend(getattr(zslx, "zss", []) or [])
-        self.zs_low = min(self.zs_low, zslx.zs_low)
-        self.zs_high = max(self.zs_high, zslx.zs_high)
+        lo, hi = _zslx_span(zslx)
+        self.zs_low = min(self.zs_low, lo)
+        self.zs_high = max(self.zs_high, hi)
+        self.end = getattr(zslx, "end", None) or self.end
+
+
+class _SegLine:
+    """交替段 → LINE 形状适配(供 is_beichi/_xingao_xindi:type/high/low/start/end)。"""
+
+    __slots__ = ("type", "high", "low", "start", "end")
+
+    def __init__(self, seg: "_Seg"):
+        self.type = seg.dir
+        self.high, self.low = seg.zs_high, seg.zs_low
+        self.start, self.end = seg.start, seg.end
 
 
 def _jiehe_segments(zslxs) -> List[_Seg]:
@@ -284,15 +319,21 @@ def tongjibie_zhongshu(zss: List[ZS], xds: List[LINE]) -> List[ZS]:
     出走势类型 → 结合运算 → 三段重合。中枢区间 [zd,zg] = 三段共同重合;region(线段)= 首段首中枢
     首线段 ~ 末段末中枢末线段(供下游 kuozhan_level_signals 补进入/离开段)。完成度 = 仅最后一个未完成。
     """
+    return tongjibie_zhongshu_ex(zss, xds)[0]
+
+
+def tongjibie_zhongshu_ex(zss: List[ZS], xds: List[LINE]):
+    """同 tongjibie_zhongshu,另返回段元数据 meta={'segs','groups'}(groups 与产出中枢
+    一一对齐),供 tongjibie_level_signals 在**段粒度**上算 30m 买卖点/背驰。"""
     if not zss:
-        return []
+        return [], {"segs": [], "groups": []}
     from chanlun.core.zslx_branch import ZslxBranchCalculator
     zslxs = ZslxBranchCalculator().calculate(zss, [None] * len(zss))
     segs = _jiehe_segments(zslxs)
     groups = _tongjibie_groups(segs)
     out: List[ZS] = []
-    last = len(groups) - 1
-    for k, (s, e) in enumerate(groups):
+    out_groups: List[tuple] = []
+    for s, e in groups:
         tri = segs[s:e + 1]
         zd = max(sg.zs_low for sg in tri)
         zg = min(sg.zs_high for sg in tri)
@@ -306,5 +347,50 @@ def tongjibie_zhongshu(zss: List[ZS], xds: List[LINE]) -> List[ZS]:
         if a is None or b is None:
             continue
         run = [z for sg in tri for z in sg.zss]
-        out.append(_build_kuozhan_zs(run, xds[a:b + 1], (zd, zg), done=(k < last)))
-    return out
+        # 完成度:恰好3段不延伸 → 出现下一交替段(e+1)即本组3段封闭=done;
+        # 右边缘组(无后续段)=正在形成,前端画虚线。
+        out.append(_build_kuozhan_zs(run, xds[a:b + 1], (zd, zg),
+                                     done=(e + 1 < len(segs))))
+        out_groups.append((s, e))
+    return out, {"segs": segs, "groups": out_groups}
+
+
+def tongjibie_level_signals(zss: List[ZS], meta: dict, ld_provider, wzgx: str,
+                            frequency: Optional[str] = None):
+    """同级别分解(30m)买卖点/背驰——**段粒度**(次级别走势类型交替段),非单根线段。
+
+    旧 kuozhan_level_signals 用 xds[b0+1]/[b0+2](单根 5m 线段)当离开/回试段,对 30m 级别
+    级别错配(判定窗口太小→信号恒空)。段粒度语义(第20课/38课):
+    - 三类:上下上中枢(末段 up=向上离开),segs[e+1](down)整段即第一次回抽,其终点 ≥ ZG → 3buy
+      锚回抽段终点;下上下对称 → 3sell。
+    - 背驰/一类:enter=segs[s-1] 与 leave=segs[e+1] 必同向(交替性),is_beichi 比力度
+      (创新高/低前提用段整段 high/low);前中枢依次同向(is_qs)→ 趋势背驰 qs → 一类,否则盘整背驰 pz。
+    """
+    from chanlun.core.bs_branch import BuySellPoint
+    from chanlun.core.beichi_calculator import is_beichi, is_qs
+    segs = meta.get("segs") or []
+    groups = meta.get("groups") or []
+    bsp, bcs = [], []
+    n = len(segs)
+    for k, (z, (s, e)) in enumerate(zip(zss, groups)):
+        enter = segs[s - 1] if s - 1 >= 0 else None
+        after = segs[e + 1] if e + 1 < n else None           # 离开后的第一个交替段(=回抽载体)
+        # 背驰 + 一类(enter/after 同向=交替性保证;末段未完成 end=None 跳过)
+        if (enter is not None and after is not None and enter.dir == after.dir
+                and ld_provider is not None
+                and enter.start is not None and enter.end is not None
+                and after.start is not None and after.end is not None
+                and is_beichi(_SegLine(enter), _SegLine(after), ld_provider, frequency)):
+            kind = "qs" if (k > 0 and is_qs(zss[k - 1], z, wzgx)) else "pz"
+            bcs.append((after.end.k.date, after.end.val, kind))
+            if kind == "qs":
+                bsp.append(BuySellPoint("1buy" if after.dir == "down" else "1sell",
+                                        z, _SegLine(after), after.end, None))
+        # 三类(几何):中枢末段方向=离开方向;after 整段=第一次回抽,终点不破核心
+        if after is not None and after.end is not None:
+            leave_dir = segs[e].dir
+            if leave_dir == "up" and after.dir == "down" and after.end.val >= z.zg:
+                bsp.append(BuySellPoint("3buy", z, _SegLine(after), after.end, None))
+            elif leave_dir == "down" and after.dir == "up" and after.end.val <= z.zd:
+                bsp.append(BuySellPoint("3sell", z, _SegLine(after), after.end, None))
+    return bsp, bcs

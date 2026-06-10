@@ -167,7 +167,11 @@ def _stable_hash(obj) -> str:
 #   分组=级别错。按原文 38/39 课重做:次级别单位=5 分钟走势类型(zslx,原文 25178「Ai 是 5 分钟走势
 #   类型」),经结合运算(line25179 合并相邻同方向)成严格交替段(Ai 奇下偶上),连续 3 段上下上/下上下
 #   重合=中枢(line24727)。000001:5m 图 30m 中枢 2→1[3947,3984]、1m 图 30m 3→1。强制旧缓存失效。
-_CHART_CACHE_SCHEMA_VERSION = "v30"
+# - v31 (2026-06) ── 同级别分解两修:① 段区间改**整段高低点**(原文20课 gn/dn=Zn 的高低点,原用段内
+#   中枢 gg/dd 包络=口径过严,趋势段两端远超包络→三段重合饿死);② 30m 买卖点/背驰改**段粒度**
+#   (tongjibie_level_signals:回抽=中枢后第一个交替段整段,原 kuozhan_level_signals 用单根 5m 线段
+#   =级别错配恒空)。000001 5m 图:30m 中枢 [3817,3984]+3buy@2026-04-08(原买卖点恒空)。强制失效。
+_CHART_CACHE_SCHEMA_VERSION = "v31"
 
 
 def _build_cache_key(market: str, code: str, frequency: str, cl_config: dict) -> str:

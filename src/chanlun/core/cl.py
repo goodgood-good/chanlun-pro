@@ -512,7 +512,8 @@ class CL(ICL):
         if not chain:
             return []
         from chanlun.core.zs_upgrade import (
-            kuozhan_zhongshu, kuozhan_level_signals, tongjibie_zhongshu,
+            kuozhan_zhongshu, kuozhan_level_signals,
+            tongjibie_zhongshu_ex, tongjibie_level_signals,
         )
         levels = self.get_recursive_branch_levels()
         l0 = next((lv.zss for lv in levels if lv.level == 0), None)
@@ -530,17 +531,21 @@ class CL(ICL):
             # 其他级、也不让中枢随买卖点一起消失(原整个 get_kuozhan_levels 抛出 → cl_utils 静默吞 →
             # recursive_levels 只剩[0]、5m/30m 全没,用户「看不到买卖点」真凶)。失败记 warning+traceback。
             nz = []
+            tjb_meta = None
             try:                                          # ① 中枢(失败也保留其他级,且不连累买卖点)
-                if cur and method == "tongjibie":         # 30m 同级别分解(严格交替腿,3腿上下上/下上下重合)
-                    nz = tongjibie_zhongshu(cur, xds)      # 直接吃中枢序列,内部建交替腿(原文24727/24751/25123)
+                if cur and method == "tongjibie":         # 30m 同级别分解(次级别走势类型+结合运算,原文24727/24751/25123)
+                    nz, tjb_meta = tongjibie_zhongshu_ex(cur, xds)
                 elif cur:                                 # <30m kuozhan 非同级别(扩展/延伸)
                     nz = kuozhan_zhongshu(cur, xds)
             except Exception:
                 _log.warning("get_kuozhan_levels 中枢 L%d(%s) 失败", lvl, method, exc_info=True)
-                nz = []
+                nz, tjb_meta = [], None
             bsp, bcs = [], []
             try:                                          # ② 买卖点/背驰(失败不连累中枢显示)
-                bsp, bcs = kuozhan_level_signals(nz, xds, ld, wzgx, self.frequency)
+                if tjb_meta is not None:                  # 同级别分解→段粒度信号(单根线段=级别错配,恒空)
+                    bsp, bcs = tongjibie_level_signals(nz, tjb_meta, ld, wzgx, self.frequency)
+                else:
+                    bsp, bcs = kuozhan_level_signals(nz, xds, ld, wzgx, self.frequency)
                 for p in bsp:
                     p.level = lvl
             except Exception:
