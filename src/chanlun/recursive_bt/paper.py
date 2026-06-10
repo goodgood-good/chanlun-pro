@@ -6,9 +6,9 @@
 A股规则:T+1/印花税/涨跌停粗判。账本持久化 JSON(重启恢复),逐笔与权益落
 D:/chanlun_pro/paper/。挂单下一轮(下一5m bar)以最新开盘价成交,无任何未来信息。
 
-运行:
-  PYTHONPATH="src;web/chanlun_chart;." python -m chanlun.recursive_bt.paper            # 实时循环(交易时段)
-  PYTHONPATH=...                      python -m chanlun.recursive_bt.paper replay 5    # 回放最近5交易日(冒烟/演练)
+运行(建议 -u 关缓冲,否则重定向时看不到逐轮日志;账本 JSON 始终每轮落盘):
+  PYTHONPATH="src;web/chanlun_chart;." python -u -m chanlun.recursive_bt.paper          # 实时循环(交易时段)
+  PYTHONPATH=...                      python -u -m chanlun.recursive_bt.paper replay 5  # 回放冒烟/演练
 池=bt_data 已缓存标的(默认前50只,POOL_SIZE 环境变量调)。
 """
 from __future__ import annotations
