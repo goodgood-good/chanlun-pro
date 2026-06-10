@@ -100,6 +100,13 @@ def main():
     for name, req in configs:
         portfolio_backtest(syms=syms, filt=None, max_pos=10, label=label, require=req)
         print(f"    ↑ {name}")
+    # 大级别门控对照:走势方向(周线笔方向)替代离散买卖点(周线图无买卖点→bsp门控恒neutral失效)
+    if any("trend_dir_at" in s for s in syms.values()):
+        for name, req in [("③技术面 + 走势方向门控", ("tech",)),
+                          ("①+③ + 走势方向门控", ("tech", "fund"))]:
+            portfolio_backtest(syms=syms, filt=None, max_pos=10, label=label,
+                               require=req, big_gate="trend")
+            print(f"    ↑ {name}")
 
 
 if __name__ == "__main__":

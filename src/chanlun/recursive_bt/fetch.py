@@ -14,7 +14,9 @@ import time
 
 import pandas as pd
 
-from chanlun.recursive_bt.engine import collect_branch_signals, CL_CFG, MTFStrategy
+from chanlun.recursive_bt.engine import (
+    collect_branch_signals, CL_CFG, MTFStrategy,
+)
 from chanlun.core.cl import CL
 
 OUT = "D:/chanlun_pro/bt_data"
@@ -109,8 +111,47 @@ def run(codes, out_dir, small_tf, big_tf, start, end, big_delay, min_small=200,
     print(f"完成 ok={ok} skip={skip} fail={fail} 共{len(codes)} {time.time()-t0:.0f}s")
 
 
+def patch_trend(out_dir: str, big_tf: str, start, end):
+    """给已有缓存补「大级别走势方向」(big_trend_events):周线买卖点=0 时门控的替代。
+
+    walk-forward 口径(wf_dir_series,逐根增量重算「当时可见的最后一笔方向」):实盘可复制、
+    无 lookahead。旧「最终序列笔事件+delay」口径已被截断实证废弃(滞后中位9bar,固定delay两头错)。"""
+    import glob
+    from chanlun.exchange.exchange_qmt import ExchangeQMT
+    from chanlun.recursive_bt.engine import wf_dir_series
+    ex = ExchangeQMT()
+    files = sorted(glob.glob(f"{out_dir}/*.pkl"))
+    ok = skip = fail = 0
+    t0 = time.time()
+    print(f"补走势方向(walk-forward) {len(files)}只 {big_tf} → {out_dir}")
+    for i, p in enumerate(files):
+        d = pickle.load(open(p, "rb"))
+        if d.get("trend_mode") == "wf":
+            skip += 1
+            continue
+        try:
+            df = _slice(ex.klines(d["code"], big_tf, start_date=start), start, end)
+            ev = []
+            if df is not None and len(df) >= 30:
+                ev = wf_dir_series(df, d["code"], big_tf)
+            d["big_trend_events"] = ev
+            d["trend_mode"] = "wf"
+            pickle.dump(d, open(p, "wb"))
+            ok += 1
+        except Exception as e:
+            fail += 1
+            print(f"  {d.get('code', p)} 失败: {type(e).__name__} {e}")
+        if (i + 1) % 50 == 0:
+            print(f"  {i+1}/{len(files)} ok={ok} skip={skip} fail={fail} {time.time()-t0:.0f}s")
+    print(f"完成 ok={ok} skip={skip} fail={fail} {time.time()-t0:.0f}s")
+
+
 def main():
-    if len(sys.argv) > 1 and sys.argv[1] == "daily":
+    if len(sys.argv) > 1 and sys.argv[1] == "daily_trend":
+        patch_trend(OUT_DAILY, "w", "2022-01-01", "2024-12-31")
+    elif len(sys.argv) > 1 and sys.argv[1] == "trend":
+        patch_trend(OUT, "30m", None, None)      # 主线(5m+30m近1年)补30m笔方向事件
+    elif len(sys.argv) > 1 and sys.argv[1] == "daily":
         # 熊市验证:沪深300 + 上证指数,日线小级别 + 周线大级别,2022-2024
         codes = universe("沪深300") + ["SH.000001"]
         run(codes, OUT_DAILY, "d", "w", "2022-01-01", "2024-12-31",

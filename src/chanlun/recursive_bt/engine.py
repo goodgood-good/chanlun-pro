@@ -122,6 +122,42 @@ def collect_signals(cd: CL) -> List[Signal]:
     return out
 
 
+def collect_dir_events(cd: CL, use_xd: bool = False) -> List[Tuple[pd.Timestamp, str]]:
+    """[已废弃于门控,仅 validate 滞后实证用] 最终序列笔方向事件流 [(笔 start, dir)]。
+
+    ⚠ 截断实证(validate trend):笔事件「首次稳定出现」滞后中位9bar/p90=20bar——固定 delay
+    小了=lookahead(曾虚出+205%),大了=钝化 → 门控改用 wf_dir_series(真walk-forward)。"""
+    lines = list(cd.get_xds()) if use_xd else list(cd.get_bis())
+    out = []
+    for ln in lines:
+        if ln.start is None or ln.start.k is None:
+            continue
+        out.append((ln.start.k.date, "up" if ln.type == "up" else "down"))
+    return out
+
+
+def wf_dir_series(df: pd.DataFrame, code: str, tf: str,
+                  warmup: int = 30) -> List[Tuple[pd.Timestamp, str]]:
+    """真 walk-forward「当下笔方向」序列:逐根增量重算,每根 bar 收盘时取
+    当时可见的最后一笔方向(含右边缘未完成笔=实盘真实状态)。
+
+    100% 实盘可复制:无确认延迟参数、无 lookahead;右边缘 repaint 的代价(假方向期)
+    原样体现在回测里。返回压缩事件流 [(bar收盘时刻, 'up'|'down'|'neutral')],仅方向
+    变化时发事件;回测端用「事件时刻 + 下一bar」生效(bar 收盘才知道方向)。"""
+    cd = CL(code, tf, dict(CL_CFG))
+    events: List[Tuple[pd.Timestamp, str]] = []
+    cur = None
+    n = len(df)
+    for t in range(min(warmup, n), n + 1):
+        cd.process_klines(df.iloc[:t].reset_index(drop=True))
+        bis = list(cd.get_bis())
+        d = "neutral" if not bis else ("up" if bis[-1].type == "up" else "down")
+        if d != cur:
+            events.append((df["date"].iloc[t - 1], d))
+            cur = d
+    return events
+
+
 def collect_branch_signals(cd: CL, use_xd: bool = False) -> List[Signal]:
     """原生图全量买卖点(get_branch_bspoints, L0 一二三类 + 升级级)。操作级买卖点取此。"""
     out: List[Signal] = []

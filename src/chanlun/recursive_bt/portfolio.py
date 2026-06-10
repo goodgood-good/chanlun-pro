@@ -74,7 +74,7 @@ BT_DATA = os.environ.get("BT_DATA_DIR", "D:/chanlun_pro/bt_data")
 def load_cached(code: str) -> Optional[dict]:
     """从 qmt_fetch 预计算缓存载入一只标的(含按板块的涨跌停 rules)。"""
     import pickle
-    from recursive_backtest import MarketRules
+    from chanlun.recursive_bt.engine import MarketRules
     p = f"{BT_DATA}/{code}.pkl"
     if not os.path.exists(p):
         return None
@@ -84,6 +84,20 @@ def load_cached(code: str) -> Optional[dict]:
                              t_plus=1, allow_short=False, lot=100,
                              limit_pct=d.get("limit_pct", 0.10))
     d["d2i"] = {dt: i for i, dt in enumerate(d["dates"])}
+    # 大级别走势方向(walk-forward 当下笔方向,fetch *_trend 补):周线无买卖点时门控的替代。
+    # wf 口径事件=「该bar收盘时可见」→ 次日(下一bar)生效即可;TREND_DELAY 默认 1 天。
+    ev = d.get("big_trend_events")
+    if ev:
+        delay = pd.Timedelta(os.environ.get("TREND_DELAY", "1D"))
+        dirs = ["neutral"] * len(d["dates"])
+        bi = 0
+        cur = "neutral"
+        for i, t in enumerate(d["dates"]):
+            while bi < len(ev) and ev[bi][0] + delay <= t:
+                cur = ev[bi][1]
+                bi += 1
+            dirs[i] = cur
+        d["trend_dir_at"] = dirs
     return d
 
 
@@ -93,12 +107,19 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
                        syms: Optional[dict] = None, filt: Optional[dict] = None,
                        label: Optional[str] = None,
                        buy_classes: Optional[set] = None,
-                       require: tuple = ("tech",)):
+                       require: tuple = ("tech",),
+                       big_gate: str = "bsp"):
     """组合回测。syms 已构建则直接用(QMT缓存路径);否则按 universe 名走 chart_cache。
     market_filter=大盘标的名(其30m方向==down时禁止开新仓)。
     buy_classes=入场只认的买点类别集合(如{1}=只一类买点选股;None=全部1/2/3类)。
     require=缠论三独立系统门控:('tech',)=只技术面;加'fund'=并需①基本面通过(s['fund_ok'][bar]质量+成长);
-    加'value'=并需②比价低估(s['value_ok'][bar]=ROE年化/PB高于全市场中位=优质却便宜)。三者齐=三系统结合(概率原则)。"""
+    加'value'=并需②比价低估(s['value_ok'][bar]=ROE年化/PB高于全市场中位=优质却便宜)。三者齐=三系统结合(概率原则)。
+    big_gate='bsp'=大级别方向用买卖点事件(big_dir_at,现状);'trend'=用走势方向(trend_dir_at,
+    周线笔方向——周线图无买卖点时 bsp 门控恒 neutral 失效,走势方向是结构化替代)。"""
+    _dir_key = "trend_dir_at" if big_gate == "trend" else "big_dir_at"
+
+    def _bdir(s, j):
+        return s.get(_dir_key, s["big_dir_at"])[j]
     if syms is None:
         syms = {n: prep(n) for n in universe}
         filt = prep(market_filter) if market_filter else None
@@ -109,6 +130,11 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
         import statistics
         med = statistics.median(len(s["dates"]) for s in syms.values())
         syms = {n: s for n, s in syms.items() if len(s["dates"]) >= 0.9 * med}
+        # 剔除中途上市/复牌晚的标的:起点晚于全池中位起点+30天会把交集窗口起点拉后,
+        # 砍掉窗口前段行情(熊市验证曾被截掉2022年1~4月主跌段) → 按起点对齐而非缩窗口
+        med_start = statistics.median(s["dates"][0].value for s in syms.values())
+        cutoff = pd.Timestamp(med_start, tz="Asia/Shanghai") + pd.Timedelta("30D")
+        syms = {n: s for n, s in syms.items() if s["dates"][0] <= cutoff}
     # 主时钟 = 股票池 5m 时间戳交集(A股同时段→覆盖绝大多数bar)
     master = sorted(set.intersection(*[set(s["dates"]) for s in syms.values()]))
     if filt:
@@ -160,13 +186,13 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
                 continue
             s = syms[name]
             j = s["d2i"][t]
-            if s["big_dir_at"][j] == "down" or _sells_at(s, j):
-                positions[name]["reason"] = ("大级别转空" if s["big_dir_at"][j] == "down"
+            if _bdir(s, j) == "down" or _sells_at(s, j):
+                positions[name]["reason"] = ("大级别转空" if _bdir(s, j) == "down"
                                              else "小级别卖点")
                 pending.append((name, "sell"))
 
         # 3) 选股开仓(大盘过滤 + 空仓位时,买点候选按 1>2>3 类排序填仓)
-        block = filt and filt["big_dir_at"][filt["d2i"][t]] == "down"
+        block = filt and _bdir(filt, filt["d2i"][t]) == "down"
         free = max_pos - len(positions) - sum(1 for x in pending if x[1] == "buy")
         if free > 0 and not block:
             cands = []
@@ -177,7 +203,7 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
                 buys = _buys_at(s, j)
                 if buy_classes is not None:                      # 只认指定类别买点(选股系统)
                     buys = [x for x in buys if int(x.bs_type[0]) in buy_classes]
-                if not (s["big_dir_at"][j] != "down" and buys):
+                if not (_bdir(s, j) != "down" and buys):
                     continue
                 if "mid_dir_at" in s and s["mid_dir_at"][j] == "down":  # 三级联立:中级别(5m)也不空
                     continue
@@ -214,19 +240,30 @@ def _report(label, master, equity, trades, syms, flabel):
     peak = np.maximum.accumulate(equity)
     max_dd = float(np.max((peak - equity) / peak))
     rets = np.diff(equity) / equity[:-1]
-    ann = np.sqrt(244 * 48)   # 5m: ~48bar/日 × 244日
+    # 年化系数按 bar 频率自适应(总 bar 数 / 跨度年数),支持 1m/5m/日/周线
+    years = max((master[-1] - master[0]).days / 365.0, 1e-9)
+    ann = np.sqrt(max(len(master) / years, 1.0))
     sharpe = float(np.mean(rets) / (np.std(rets) + 1e-12) * ann) if len(rets) else 0.0
     wins = sum(1 for t in trades if t.ret > 0)
     wr = wins / len(trades) if trades else 0.0
-    # 基准:等权买入持有
-    bh = 0.0
+    # 基准:等权买入持有(逐bar曲线,可算基准回撤对比风险)
+    nrm = np.zeros(len(master))
+    cnt = 0
     for s in syms.values():
-        i0, i1 = s["d2i"][master[0]], s["d2i"][master[-1]]
-        bh += (s["close"][i1] / s["open"][i0] - 1) / len(syms)
+        try:
+            idx = np.array([s["d2i"][t] for t in master])
+        except KeyError:
+            continue
+        nrm += s["close"][idx] / s["open"][s["d2i"][master[0]]]
+        cnt += 1
+    bench = nrm / max(cnt, 1)
+    bh = float(bench[-1] - 1)
+    bpeak = np.maximum.accumulate(bench)
+    bench_dd = float(np.max((bpeak - bench) / bpeak)) if len(bench) else 0.0
     tag = f"+大盘过滤({flabel})" if flabel else ""
     print(f"\n=== 组合回测{tag} | 池={label} 期={master[0].date()}~{master[-1].date()} ===")
     print(f"  组合收益={total:+.1%}  等权基准={bh:+.1%}  超额={total - bh:+.1%}  "
-          f"回撤={max_dd:.1%}  夏普={sharpe:.2f}  胜率={wr:.0%}  交易={len(trades)}")
+          f"回撤={max_dd:.1%}(基准{bench_dd:.1%})  夏普={sharpe:.2f}  胜率={wr:.0%}  交易={len(trades)}")
     return {"total": total, "bh": bh, "max_dd": max_dd, "sharpe": sharpe,
             "wr": wr, "n": len(trades), "trades": trades,
             "equity": equity, "master": master}
@@ -350,11 +387,34 @@ def main_systems():
     return res
 
 
+def main_mtf3():
+    """30m+5m+1m 三级联立 vs 1m+30m 两级对照(去5m中门控)。BT_DATA_DIR 指 bt_data_mtf3。"""
+    syms = _load_bt_universe()
+    filt = load_cached("SH.000001")
+    label = f"{len(syms)}只"
+    print("#" * 64)
+    print(f"# 30m+5m+1m 三级联立 vs 1m+30m 两级 | universe={len(syms)}只(1m bar)")
+    print("#" * 64)
+    for mp in (5, 10):
+        portfolio_backtest(syms=syms, filt=None, max_pos=mp, label=label)
+        print(f"    ↑ 三级联立(1m买点+5m不空+30m不空) max_pos={mp}")
+    if filt:
+        portfolio_backtest(syms=syms, filt=filt, max_pos=10, label=label)
+        print("    ↑ 三级联立 + 大盘过滤 max_pos=10")
+    for s in syms.values():           # 对照:去掉中级别门控 → 退化为两级
+        s.pop("mid_dir_at", None)
+    for mp in (5, 10):
+        portfolio_backtest(syms=syms, filt=None, max_pos=mp, label=label)
+        print(f"    ↑ 两级对照(1m买点+30m不空,无5m中门控) max_pos={mp}")
+
+
 if __name__ == "__main__":
     arg = sys.argv[1] if len(sys.argv) > 1 else ""
     if arg == "chart_cache":
         main()
     elif arg == "systems":
         main_systems()
+    elif arg == "mtf3":
+        main_mtf3()
     else:
         main_qmt()
