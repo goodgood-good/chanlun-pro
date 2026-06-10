@@ -171,7 +171,11 @@ def _stable_hash(obj) -> str:
 #   中枢 gg/dd 包络=口径过严,趋势段两端远超包络→三段重合饿死);② 30m 买卖点/背驰改**段粒度**
 #   (tongjibie_level_signals:回抽=中枢后第一个交替段整段,原 kuozhan_level_signals 用单根 5m 线段
 #   =级别错配恒空)。000001 5m 图:30m 中枢 [3817,3984]+3buy@2026-04-08(原买卖点恒空)。强制失效。
-_CHART_CACHE_SCHEMA_VERSION = "v31"
+# - v32 (2026-06) ── 扩张升级区间改 **[max(前DD,后DD), min(前GG,后GG)]**(原文 line10018 三段重叠
+#   简化公式,Z段=前/后中枢段整段极值;非空性⟺中心定理二触及条件,与 is_kuozhan 自洽)。原「顶/底切
+#   三走势再交集」把中枢本体劈开(violates Z段=完整次级别走势类型),区间系统性偏窄/空(实测10/19流入
+#   退化分支)。kuozhan L1 区间变宽→L2(tongjibie 基于 L1 走势类型)随之。强制失效。
+_CHART_CACHE_SCHEMA_VERSION = "v32"
 
 
 def _build_cache_key(market: str, code: str, frequency: str, cl_config: dict) -> str:

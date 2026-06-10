@@ -207,19 +207,36 @@ def test_kuozhan_yanshen_priority_over_kuozhang():
     assert out[0].zd == 12 and out[0].zg == 14           # z0 的延伸区间,非 z0∩z1 扩张区间
 
 
-# ---- 扩张三走势=按价格分(复用走势类型口径,非写死[A·连接·B]) ----
-def test_three_zoushi_overlap_513100_lines():
-    """扩张三走势:在最高线段(顶)/最低线段(底)两处转折把区间切 3 走势,取三段重合(原文10012)。
-    513100 xd6-15:底=xd6 顶=xd12 → 切成[xd6][xd7-12][xd13-15] → 重合 [1.713,1.737](= 扩展 oracle)。"""
-    from chanlun.core.zs_upgrade import _three_zoushi_overlap
-    zd, zg = _three_zoushi_overlap(_xds_513100())
-    assert round(zd, 4) == 1.7130 and round(zg, 4) == 1.7370
+# ---- 扩张升级区间 = [max(DD),min(GG)](原文10018简化公式,Z段=前/后中枢段整段极值) ----
+def test_kuozhang_interval_is_envelope_overlap_line10018():
+    """扩张升级区间=[max(前DD,后DD), min(前GG,后GG)](line10018「无论哪种情况都可简化为
+    [max(a2,c2),min(a1,c1)]」,A/C=前后中枢段;非空性 ⟺ 中心定理二触及条件)。
+    桩:中枢内部线段极值交错(首根不含 dd/gg)——曾用顶底切三走势会把本体劈开、区间偏窄/空。"""
+    from chanlun.core.zs_upgrade import _kuozhang_upgrade
+    a_lines = [_L("up", 21, 25), _L("down", 19, 23)]      # a: dd=19(第2根) gg=25(第1根)
+    b_lines = [_L("down", 14, 18), _L("up", 16, 20)]      # b: dd=14 gg=20(第2根)
+    xds = a_lines + b_lines
+    a = _zs(20, 22, 19, 25)
+    a.lines = a_lines
+    b = _zs(15, 16, 14, 20)
+    b.lines = b_lines
+    assert is_kuozhan(a, b), "前提:核心分离(16<20)+包络触及(19<=20)"
+    up = _kuozhang_upgrade(a, b, xds)
+    assert up is not None
+    assert (up.zd, up.zg) == (19, 20)                     # [max(19,14), min(25,20)]
 
 
-def test_three_zoushi_overlap_too_short_none():
-    """不足 3 段切不出三走势 → None(由调用方退化处理)。"""
-    from chanlun.core.zs_upgrade import _three_zoushi_overlap
-    assert _three_zoushi_overlap([_L("up", 1.0, 2.0), _L("down", 1.0, 2.0)]) is None
+def test_kuozhang_envelope_separated_none():
+    """包络分离(后GG<前DD)=趋势延续(中心定理二),不升级。"""
+    from chanlun.core.zs_upgrade import _kuozhang_upgrade
+    a_lines = [_L("up", 21, 25), _L("down", 20, 23)]
+    b_lines = [_L("down", 14, 18), _L("up", 15, 17)]
+    a = _zs(21, 22, 20, 25)
+    a.lines = a_lines
+    b = _zs(15, 16, 14, 18)
+    b.lines = b_lines
+    assert not is_kuozhan(a, b)
+    assert _kuozhang_upgrade(a, b, a_lines + b_lines) is None
 
 
 # ---- kuozhan_level_signals: 各级(5m/30m)背驰+买卖点 ----

@@ -1,11 +1,16 @@
-"""zs_upgrade.py — P9 中枢升级（中枢扩展 / 中心定理二）。
+"""zs_upgrade.py — 中枢升级(非同级别分解 kuozhan:延伸/扩张)+ 30m 同级别分解(tongjibie)。
 
-子中枢(L0)→ 高级别(5min)中枢:连续 is_kuozhan(包络重叠 + 核心区分离, 原文 line10029 定理二)
-的子中枢按「运行交集」分组, 区间 = 组内子中枢包络重合 [max(dd),min(gg)](原文 line31774
-「扩展后的中枢区间就是每 3 段中的最高最低点的重合区域」)。完成度 = line26870「2 中枢扩展=
-进行式」+ line7260「走势终完美」结束条件。孤立、不接 CL。
-
-待做（原文 line8155）: 正常型（按走势类型边界）、延伸型（单中枢 ≥9 段 3+3+3）升级。
+原文锚(全部已对齐,2026-06-10 审计):
+- 中枢区间 [ZD,ZG] = 三段重叠 [max(a2,b2,c2), min(a1,b1,c1)],共享端点下**恒可简化为
+  [max(a2,c2), min(a1,c1)]**(line10012-10018,A/C=与中枢方向一致的 Z 走势段整段高低点)。
+- 中心定理一(line10026):延伸 ⟺ Zn 区间与 [ZD,ZG] 重叠;ZD/ZG 由前两 Z 段固定,延伸不改区间。
+- 延伸升级(line23046):「延伸不能超过 5 段,一旦出现 6 段延伸,加上本体三段(=9 段)就构成更大
+  级别中枢」→ _yanshen_upgrade(≥9 段,3+3+3 组真实极值重合,line31774 实例/line34162 结合律)。
+- 扩张升级(中心定理二 line10027):前后中枢核心分离 + 包络触及(后GG≥前DD / 后DD≤前GG)
+  ⟺ 高级别中枢,区间 = [max(DD), min(GG)](10018 公式应用于 Z=前/后中枢段)→ _kuozhang_upgrade。
+- 30m 同级别分解(line24711-24751):次级别走势类型+结合运算成交替段,恰好 3 段重合、不延伸、
+  允许盘整+盘整;买卖点/背驰在段粒度(tongjibie_level_signals)。
+完成度 = line7260「走势终完美」结束条件。孤立、不接 CL(由 cl.get_kuozhan_levels 调)。
 """
 from __future__ import annotations
 
@@ -69,10 +74,12 @@ def _build_kuozhan_zs(run: List[ZS], region: List[LINE], interval: Tuple[float, 
 
 
 def _yanshen_upgrade(z: ZS) -> Optional[ZS]:
-    """**延伸型升级**(原文 line8157「非标准趋势延伸 9 段成大中枢」/ line23045「9 段以上次级别走势,
-    每 3 段构成一个中枢」):单中枢延伸到 line_num>=9 → 构成线段按顺序分 3 组(尽量均匀,9→3+3+3),
-    每组取**组内真实**最高/最低(line30290:三角收敛时组高低不一定是组间连接点),升级中枢区间 =
-    三组重合 [max(三组低), min(三组高)](line10012 三段重合公式)。region = 该中枢全部线段。"""
+    """**延伸型升级**(原文 line23046 精确口径:「中枢的延伸不能超过 5 段,一旦出现 6 段的延伸,
+    加上形成中枢本身那三段(=9 段),就构成更大级别的中枢」;line8157/23045/37215 互证):单中枢
+    本体延伸到 line_num>=9 → 构成线段按顺序分 3 组(尽量均匀,9→3+3+3,line34162「三个三段结合
+    起来看」),每组取**组内真实**最高/最低(line30290:三角收敛时组高低不一定是组间连接点),
+    升级中枢区间 = 三组重合 [max(三组低), min(三组高)](line31774 实例:「扩展后的中枢区间就是
+    每 3 段中的最高最低点的重合区域」)。region = 该中枢全部线段。"""
     lines = z.lines
     n = len(lines)
     if n < 9:
@@ -89,38 +96,17 @@ def _yanshen_upgrade(z: ZS) -> Optional[ZS]:
     return _build_kuozhan_zs([z], list(lines), (zd, zg))
 
 
-def _three_zoushi_overlap(lines: List[LINE]) -> Optional[Tuple[float, float]]:
-    """按股价把区间线段分**三走势**(复用走势类型口径,原文 line10012 三段重合):在**最高线段(顶)**
-    与**最低线段(底)**两处转折切成 3 段(对应 上涨/下跌/盘整 的自然分界——顶/底是走势方向反转处,
-    其余来回归入相邻段),每段取 [min low, max high],返回三段重合 [max(三段低), min(三段高)]。
-    顶/底落在端点或相邻致空段 → 退化为按段数均分 3 组。线段<3 或重合为空 → None。"""
-    n = len(lines)
-    if n < 3:
-        return None
-    his = [ln.zs_high for ln in lines]
-    los = [ln.zs_low for ln in lines]
-    ih = max(range(n), key=lambda k: his[k])             # 最高线段(顶)
-    il = min(range(n), key=lambda k: los[k])             # 最低线段(底)
-    c1, c2 = sorted((ih, il))
-    g1, g2, g3 = lines[:c1 + 1], lines[c1 + 1:c2 + 1], lines[c2 + 1:]
-    if not (g1 and g2 and g3):                           # 顶/底在端点或相邻 → 退化均分
-        k = n // 3
-        if k < 1:
-            return None
-        g1, g2, g3 = lines[:k], lines[k:2 * k], lines[2 * k:]
-        if not (g1 and g2 and g3):
-            return None
-    lows = [min(ln.zs_low for ln in g) for g in (g1, g2, g3)]
-    highs = [max(ln.zs_high for ln in g) for g in (g1, g2, g3)]
-    zd, zg = max(lows), min(highs)
-    return (zd, zg) if zd < zg else None
-
-
 def _kuozhang_upgrade(a: ZS, b: ZS, xds: List[LINE]) -> Optional[ZS]:
-    """**扩张型升级**(原文中心定理二 line10007/10029):相邻两同级别中枢 GG/DD 包络重叠 → 把跨这两
-    中枢的区间**按股价分三走势**(_three_zoushi_overlap,复用走势类型分解、非写死中枢本体——三走势
-    可能是 上涨/下跌/盘整 任意组合、段数可变),升级中枢区间 = 三走势重合(原文 line10012)。
-    region = A 首线段 ~ B 末线段(供下游 kuozhan_level_signals 补进入/离开段)。"""
+    """**扩张型升级**(原文中心定理二 line10027/10029):相邻两同级别中枢核心分离、GG/DD 包络触及
+    → 高级别中枢。
+
+    升级后区间 = **[max(前DD,后DD), min(前GG,后GG)]**(原文 line10018:三段重叠公式「无论哪种
+    情况都可简化为 [max(a2,c2), min(a1,c1)]」——高一级的 Z 走势段 A/C = 前/后中枢段(各自整段
+    极值=GG/DD),中间连接段 B 与两者共享端点、不影响交集)。其非空性 ⟺ 定理二的触及条件
+    (后GG≥前DD / 后DD≤前GG),与 is_kuozhan 自洽——「外围行星发生关系」(line10010 恒星比喻)。
+    ⚠ 曾用「顶/底切三走势再交集」:顶/底常落在中枢内部,把中枢本体劈开(违背 Z 段=完整次级别
+    走势类型),区间系统性偏窄/空(实测 10/19 流入退化)——已废弃(原文 10018 直接给出简化公式)。
+    region = A 首线段 ~ B 末线段(供下游补进入/离开段)。"""
     if not a.lines or not b.lines:
         return None
     ia = _line_index(a.lines[0], xds)
@@ -128,13 +114,10 @@ def _kuozhang_upgrade(a: ZS, b: ZS, xds: List[LINE]) -> Optional[ZS]:
     if ia is None or ib is None:
         return None
     region = xds[ia:ib + 1]
-    interval = _three_zoushi_overlap(region)             # 按股价三走势重合
-    if interval is None:                                 # 退化:两中枢包络重合(line10018 首尾主定)
-        zd, zg = max(a.dd, b.dd), min(a.gg, b.gg)
-        if zd >= zg:
-            return None
-        interval = (zd, zg)
-    return _build_kuozhan_zs([a, b], region, interval)
+    zd, zg = max(a.dd, b.dd), min(a.gg, b.gg)            # line10018 简化公式
+    if zd >= zg:
+        return None
+    return _build_kuozhan_zs([a, b], region, (zd, zg))
 
 
 def kuozhan_zhongshu(zss: List[ZS], xds: List[LINE]) -> List[ZS]:
