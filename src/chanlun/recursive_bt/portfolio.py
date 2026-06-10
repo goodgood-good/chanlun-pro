@@ -165,6 +165,27 @@ def attach_pool_filters(syms: dict, market: dict, ma_win: int = 70, rs_win: int 
         s["rs_ok"] = rs_ok
 
 
+def attach_daily_bsp_window(syms: dict, win_days: int = 10, bs_class: int = 3):
+    """三级共振选股锚(原文line13507缠亲答:日线3买→30m回抽→5m背驰,「必须三个级别共同来」):
+    s['d3_ok'][i] = 第 i 根 bar 是否处于「日线 bs_class 类买点窗口」内——日线买点确认bar
+    收盘**次日**起 win_days 个自然日(无lookahead)。需 pkl 含 daily_bsp(fetch daily_bsp 补)。"""
+    key = f"{bs_class}buy" if bs_class else None     # None=日线任意类买点(宽口径)
+    for s in syms.values():
+        ev = [d for d, bt in (s.get("daily_bsp") or [])
+              if (bt == key if key else bt.endswith("buy"))]
+        n = len(s["dates"])
+        ok = np.zeros(n, bool)
+        if ev:
+            ei = 0
+            active_until = None
+            for i, t in enumerate(s["dates"]):
+                while ei < len(ev) and ev[ei] + pd.Timedelta("1D") <= t:
+                    active_until = ev[ei] + pd.Timedelta(days=1 + win_days)
+                    ei += 1
+                ok[i] = active_until is not None and t <= active_until
+        s["d3_ok"] = ok
+
+
 def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
                        market_filter: Optional[str] = None,
                        init_cash: float = 1_000_000,
@@ -325,12 +346,17 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
                     continue
                 if "rs" in require and not s["rs_ok"][j]:        # ②比价资金流向(第9课,强于大盘)
                     continue
+                if "d3" in require and not s["d3_ok"][j]:        # 三级共振:日线3买窗口(line13507)
+                    continue
                 cls = min(int(x.bs_type[0]) for x in buys)
                 pr = -cls if buy_priority == "3first" else cls   # 3买优先(line23172牛市)或1买优先
-                cands.append((pr, name))
+                # 三级共振**排序融合**(非硬门控):日线3买窗口内的候选排前(line13507 单笔质量
+                # 实证胜率57%→71%),slot 充足时不砍机会、竞争时优先共振标的
+                d3 = s.get("d3_ok")
+                cands.append((0 if (d3 is not None and d3[j]) else 1, pr, name))
             cands.sort()
-            for _pr, name in cands[:free]:
-                pending.append((name, "buy"))
+            for c in cands[:free]:
+                pending.append((c[-1], "buy"))
 
         equity[m] = mk(t)
 

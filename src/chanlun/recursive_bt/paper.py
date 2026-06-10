@@ -39,15 +39,18 @@ def limit_pct(code: str) -> float:
 
 
 class SymbolState:
-    """常驻一只标的的 5m/30m CL 与最新信号状态(增量尾喂)。"""
+    """常驻一只标的的 5m/30m/日线 CL 与最新信号状态(增量尾喂)。"""
 
     def __init__(self, code: str, ex):
         self.code = code
         self.ex = ex
         self.cd5 = CL(code, "5m", dict(CL_CFG))
         self.cd30 = CL(code, "30m", dict(CL_CFG))
+        self.cdd = CL(code, "d", dict(CL_CFG))
         self.last5: Optional[pd.Timestamp] = None
         self.last30: Optional[pd.Timestamp] = None
+        self.lastd: Optional[pd.Timestamp] = None
+        self.d3_until: Optional[pd.Timestamp] = None   # 日线3买窗口截止(三级共振排序,line13507)
         self.last_px: float = 0.0
         self.prev_close: float = 0.0
         self.seen = set()          # 已消费的(信号date,bs_type)
@@ -67,6 +70,19 @@ class SymbolState:
             if len(new30):
                 self.cd30.process_klines(new30.reset_index(drop=True))
                 self.last30 = df30["date"].iloc[-1]
+        # 日线:仅在出现新完整日线 bar 时重算(每日一次),维护日线3买窗口(确认次日起10天,
+        # 三级共振排序信息 line13507;回测实证排序融合 +158.9% vs 基线 +147.6%)
+        dfd = self.ex.klines(self.code, "d")
+        if dfd is not None and len(dfd) >= 100:
+            newd = dfd if self.lastd is None else dfd[dfd["date"] > self.lastd]
+            if len(newd):
+                self.cdd.process_klines(newd.reset_index(drop=True))
+                self.lastd = dfd["date"].iloc[-1]
+                for s in collect_branch_signals(self.cdd, use_xd=False):
+                    if s.bs_type == "3buy":
+                        until = s.date + pd.Timedelta(days=11)
+                        if self.d3_until is None or until > self.d3_until:
+                            self.d3_until = until
         self.last_px = float(df5["close"].iloc[-1])
         self.prev_close = float(df5["close"].iloc[-2]) if len(df5) > 1 else self.last_px
         out = []
@@ -86,6 +102,12 @@ class SymbolState:
         if not bis:
             return "neutral"
         return "up" if bis[-1].type == "up" else "down"
+
+    def in_d3(self) -> bool:
+        """当前是否处于日线3买窗口(三级共振排序用)。"""
+        if self.d3_until is None or self.last5 is None:
+            return False
+        return self.last5 <= self.d3_until
 
 
 class PaperBroker:
@@ -183,9 +205,12 @@ def step(broker: PaperBroker, states: Dict[str, SymbolState], now: str):
                 continue
             buys = [s for s in ss if s.is_buy]
             if buys and states[c].big_dir() != "down":
-                cands.append((-min(int(s.bs_type[0]) for s in buys), c))
+                # 排序:日线3买窗口内优先(三级共振) > 3买优先(line23172)
+                cands.append((0 if states[c].in_d3() else 1,
+                              -min(int(s.bs_type[0]) for s in buys), c))
         cands.sort()
-        for _pr, c in cands[:free]:
+        for item in cands[:free]:
+            c = item[-1]
             broker.pending.append({"code": c, "act": "buy",
                                    "bs": str(min(int(s.bs_type[0]) for s in sigs[c] if s.is_buy))})
     eq = broker.equity({k: s.last_px for k, s in states.items()})

@@ -146,11 +146,48 @@ def patch_trend(out_dir: str, big_tf: str, start, end):
     print(f"完成 ok={ok} skip={skip} fail={fail} {time.time()-t0:.0f}s")
 
 
+def patch_daily_bsp(out_dir: str):
+    """给主线缓存补**日线买卖点**信号(三级共振选股锚,原文line13507缠亲答:
+    「以日线的第三类买点…30分钟的回抽…5分钟的背驰,必须三个级别共同来」)。
+    QMT 日线全历史 → CL → get_branch_bspoints,存 pkl['daily_bsp']=[(date,bs_type)]。
+    口径:anchor_fx.k.date=确认bar收盘(15:00),回测端次日生效(无lookahead,与daily段同源)。"""
+    import glob
+    from chanlun.exchange.exchange_qmt import ExchangeQMT
+    ex = ExchangeQMT()
+    files = sorted(glob.glob(f"{out_dir}/*.pkl"))
+    ok = skip = fail = 0
+    t0 = time.time()
+    print(f"补日线买卖点 {len(files)}只 → {out_dir}")
+    for i, p in enumerate(files):
+        d = pickle.load(open(p, "rb"))
+        if "daily_bsp" in d:
+            skip += 1
+            continue
+        try:
+            df = ex.klines(d["code"], "d")
+            ev = []
+            if df is not None and len(df) >= 100:
+                cd = CL(d["code"], "d", dict(CL_CFG))
+                cd.process_klines(df)
+                ev = [(s.date, s.bs_type) for s in collect_branch_signals(cd, use_xd=False)]
+            d["daily_bsp"] = ev
+            pickle.dump(d, open(p, "wb"))
+            ok += 1
+        except Exception as e:
+            fail += 1
+            print(f"  {d.get('code', p)} 失败: {type(e).__name__} {e}")
+        if (i + 1) % 50 == 0:
+            print(f"  {i+1}/{len(files)} ok={ok} skip={skip} fail={fail} {time.time()-t0:.0f}s")
+    print(f"完成 ok={ok} skip={skip} fail={fail} {time.time()-t0:.0f}s")
+
+
 def main():
     if len(sys.argv) > 1 and sys.argv[1] == "daily_trend":
         patch_trend(OUT_DAILY, "w", "2022-01-01", "2024-12-31")
     elif len(sys.argv) > 1 and sys.argv[1] == "trend":
         patch_trend(OUT, "30m", None, None)      # 主线(5m+30m近1年)补30m笔方向事件
+    elif len(sys.argv) > 1 and sys.argv[1] == "daily_bsp":
+        patch_daily_bsp(OUT)                     # 主线补日线买卖点(三级共振锚)
     elif len(sys.argv) > 1 and sys.argv[1] == "daily":
         # 熊市验证:沪深300 + 上证指数,日线小级别 + 周线大级别,2022-2024
         codes = universe("沪深300") + ["SH.000001"]
