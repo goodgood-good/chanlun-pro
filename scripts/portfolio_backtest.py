@@ -11,6 +11,7 @@
 """
 from __future__ import annotations
 
+import os
 import sys
 from dataclasses import dataclass
 from typing import Dict, List, Optional
@@ -68,12 +69,42 @@ def _sells_at(s: dict, j: int):
     return [x for x in s["small_by_bar"].get(j, []) if x.is_sell]
 
 
-def portfolio_backtest(universe: List[str], max_pos: int = 2,
+BT_DATA = "D:/chanlun_pro/bt_data"
+
+
+def load_cached(code: str) -> Optional[dict]:
+    """从 qmt_fetch 预计算缓存载入一只标的(含按板块的涨跌停 rules)。"""
+    import pickle
+    from recursive_backtest import MarketRules
+    p = f"{BT_DATA}/{code}.pkl"
+    if not os.path.exists(p):
+        return None
+    d = pickle.load(open(p, "rb"))
+    d["name"] = code
+    d["rules"] = MarketRules("A股", commission=0.0003, stamp_duty=0.0005,
+                             t_plus=1, allow_short=False, lot=100,
+                             limit_pct=d.get("limit_pct", 0.10))
+    d["d2i"] = {dt: i for i, dt in enumerate(d["dates"])}
+    return d
+
+
+def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
                        market_filter: Optional[str] = None,
-                       init_cash: float = 1_000_000):
-    """组合回测。market_filter=大盘标的名(其30m方向==down时禁止开新仓)。"""
-    syms = {n: prep(n) for n in universe}
-    filt = prep(market_filter) if market_filter else None
+                       init_cash: float = 1_000_000,
+                       syms: Optional[dict] = None, filt: Optional[dict] = None,
+                       label: Optional[str] = None):
+    """组合回测。syms 已构建则直接用(QMT缓存路径);否则按 universe 名走 chart_cache。
+    market_filter=大盘标的名(其30m方向==down时禁止开新仓)。"""
+    if syms is None:
+        syms = {n: prep(n) for n in universe}
+        filt = prep(market_filter) if market_filter else None
+        label = str(universe)
+    label = label or f"{len(syms)}只"
+    # 过滤重度停牌(bar数 < 0.9×中位数),防个别长停标的把交集主时钟拖垮
+    if len(syms) > 5:
+        import statistics
+        med = statistics.median(len(s["dates"]) for s in syms.values())
+        syms = {n: s for n, s in syms.items() if len(s["dates"]) >= 0.9 * med}
     # 主时钟 = 股票池 5m 时间戳交集(A股同时段→覆盖绝大多数bar)
     master = sorted(set.intersection(*[set(s["dates"]) for s in syms.values()]))
     if filt:
@@ -161,10 +192,11 @@ def portfolio_backtest(universe: List[str], max_pos: int = 2,
                              px / p["entry_px"] - 1, "", "收尾"))
     if positions:
         equity[-1] = cash
-    return _report(universe, master, equity, trades, syms, market_filter)
+    flabel = market_filter if market_filter else ("大盘" if filt else None)
+    return _report(label, master, equity, trades, syms, flabel)
 
 
-def _report(universe, master, equity, trades, syms, market_filter):
+def _report(label, master, equity, trades, syms, flabel):
     total = equity[-1] / equity[0] - 1
     peak = np.maximum.accumulate(equity)
     max_dd = float(np.max((peak - equity) / peak))
@@ -178,26 +210,51 @@ def _report(universe, master, equity, trades, syms, market_filter):
     for s in syms.values():
         i0, i1 = s["d2i"][master[0]], s["d2i"][master[-1]]
         bh += (s["close"][i1] / s["open"][i0] - 1) / len(syms)
-    tag = f"+大盘过滤({market_filter})" if market_filter else ""
-    print(f"\n=== 组合回测{tag} | 池={universe} max_pos 期={master[0].date()}~{master[-1].date()} ===")
+    tag = f"+大盘过滤({flabel})" if flabel else ""
+    print(f"\n=== 组合回测{tag} | 池={label} 期={master[0].date()}~{master[-1].date()} ===")
     print(f"  组合收益={total:+.1%}  等权基准={bh:+.1%}  超额={total - bh:+.1%}  "
           f"回撤={max_dd:.1%}  夏普={sharpe:.2f}  胜率={wr:.0%}  交易={len(trades)}")
     return total, bh, max_dd, sharpe, wr, len(trades), trades
 
 
 def main():
-    # 可交易 A股池(000001 是指数→作大盘择时过滤器)
+    # 旧 chart_cache 小池(3只)——保留对照
     universe = ["纳指ETF", "德赛西威", "嘉益股份"]
-    print("#" * 64)
-    print("# 缠论买点选股 + 组合回测(大小级别结合,原文一二三类买点)")
-    print("#" * 64)
+    print("# 缠论买点选股 + 组合回测(chart_cache 3只对照)")
     for mp in (1, 2, 3):
         portfolio_backtest(universe, max_pos=mp)
-        print(f"    ↑ max_pos={mp}(同时最多持{mp}只)")
-    print("\n--- 加大盘(上证)30m方向择时过滤(大盘转空禁开新仓) ---")
+        print(f"    ↑ max_pos={mp}")
     portfolio_backtest(universe, max_pos=2, market_filter="上证指数")
     print("    ↑ max_pos=2 + 大盘过滤")
 
 
+def main_qmt():
+    """QMT 全市场缓存(bt_data)选股组合回测。"""
+    import glob
+    INDEX = "SH.000001"                # 上证指数:只作大盘过滤器,不进可交易池
+    syms = {}
+    for f in glob.glob(f"{BT_DATA}/*.pkl"):
+        code = os.path.basename(f)[:-4]
+        if code == INDEX:
+            continue
+        d = load_cached(code)
+        if d and len(d["dates"]) > 500:
+            syms[code] = d
+    label = f"{len(syms)}只"
+    filt = load_cached(INDEX)          # 大盘择时过滤器(若已缓存)
+    print("#" * 64)
+    print(f"# 缠论全市场买点选股 + 组合回测(QMT前复权) universe={len(syms)}只")
+    print("#" * 64)
+    for mp in (3, 5, 10, 20):
+        portfolio_backtest(syms=syms, filt=None, max_pos=mp, label=label)
+        print(f"    ↑ max_pos={mp}(同时最多持{mp}只)")
+    if filt:
+        portfolio_backtest(syms=syms, filt=filt, max_pos=10, label=label)
+        print("    ↑ max_pos=10 + 大盘(上证)择时过滤")
+
+
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) > 1 and sys.argv[1] == "chart_cache":
+        main()
+    else:
+        main_qmt()
