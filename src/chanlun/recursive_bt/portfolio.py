@@ -173,7 +173,8 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
                        buy_classes: Optional[set] = None,
                        require: tuple = ("tech",),
                        big_gate: str = "bsp",
-                       buy_priority: str = "1first"):
+                       buy_priority: str = "1first",
+                       pool_schedule: Optional[list] = None):
     """组合回测。syms 已构建则直接用(QMT缓存路径);否则按 universe 名走 chart_cache。
     market_filter=大盘标的名(其30m方向==down时禁止开新仓)。
     buy_classes=入场只认的买点类别集合(如{1}=只一类买点选股;None=全部1/2/3类)。
@@ -184,7 +185,12 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
     require 另支持(须先 attach_pool_filters):'ma'=海选门槛(第8课,收盘>70日线=「能搞的」分类);
     'rs'=比价资金流向(第9课,个股20日收益>大盘=资金流入)。
     buy_priority:'1first'=1买>2买>3买(反转抄底口径);'3first'=3买>2买>1买(line23172
-    「牛市里第三类买点的爆发力是最强的」,突破延续口径)。"""
+    「牛市里第三类买点的爆发力是最强的」,突破延续口径)。
+    pool_schedule=原文三层架构(line38515-38544)的①基本面**结构层**:[(生效时刻,{code:权重})]
+    季度池调度(industry.build_pool_schedule:行业龙头70%+成长30%,季度重算=②比价换股语义)。
+    传入后:只买池内标的、买入预算=组合市值×该标权重(非等权slot)、max_pos 失效;
+    技术面(③执行层)仍管时机——池内标的出现买点才进场,卖点/大级别down退出;被剔池持仓
+    不强平(原文「技术面把握好,在较大级别卖点卖掉被超越者」),但不再开新仓。"""
     _dir_key = "trend_dir_at" if big_gate == "trend" else "big_dir_at"
 
     def _bdir(s, j):
@@ -219,16 +225,20 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
         return cash + sum(syms[n]["close"][syms[n]["d2i"][t]] * p["shares"]
                           for n, p in positions.items())
 
+    pool_idx = -1
+    reentry: Dict[str, str] = {}      # 池模式短差状态:卖点减仓后 'wait_buy'=等买点回补
     for m, t in enumerate(master):
         # 1) 执行上一bar挂单(本bar开盘价)
         carry = []
-        for name, act in pending:
+        for o in pending:
+            name, act = o[0], o[1]
+            w = o[2] if len(o) > 2 else None        # 池模式:目标权重
             s = syms[name]
             j = s["d2i"][t]
             px = s["open"][j]
             r = s["rules"]
             if act == "buy" and name not in positions and cash > 0:
-                target = mk(t) / max_pos
+                target = mk(t) * w if w else mk(t) / max_pos
                 budget = min(target, cash) * 0.99
                 size = budget / (px * (1 + r.commission))
                 if r.lot > 1:
@@ -250,23 +260,54 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
         pending = carry
 
         # 2) 退出信号(持仓中:大级别down 或 小级别卖点)
+        pend_sell = {o[0] for o in pending if o[1] == "sell"}
         for name in list(positions):
-            if (name, "sell") in pending:
+            if name in pend_sell:
                 continue
             s = syms[name]
             j = s["d2i"][t]
             if _bdir(s, j) == "down" or _sells_at(s, j):
-                positions[name]["reason"] = ("大级别转空" if _bdir(s, j) == "down"
-                                             else "小级别卖点")
+                is_down = _bdir(s, j) == "down"
+                positions[name]["reason"] = "大级别转空" if is_down else "小级别卖点"
                 pending.append((name, "sell"))
+                if pool_schedule is not None and not is_down:
+                    reentry[name] = "wait_buy"   # 卖点减仓→等买点回补(短差);down→非down即回补
 
-        # 3) 选股开仓(大盘过滤 + 空仓位时,买点候选按 1>2>3 类排序填仓)
+        # 3) 选股开仓
         block = filt and _bdir(filt, filt["d2i"][t]) == "down"
-        free = max_pos - len(positions) - sum(1 for x in pending if x[1] == "buy")
+        pend_buy = {o[0] for o in pending if o[1] == "buy"}
+        if pool_schedule is not None:
+            # 三层架构:①结构层季度池=**持有为本**(原文38536:70/30配置一直持着,技术面只管
+            # 中枢震荡短差降成本)——非「买点才进场」(那是全池猎手口径,小池会饿死)。
+            # 大级别 not_down 即按权重持有;③技术面短差循环:小级别卖点减仓→**买点回补**,
+            # 大级别 down 退出→非 down 回补。
+            while (pool_idx + 1 < len(pool_schedule)
+                   and pool_schedule[pool_idx + 1][0] <= t):
+                pool_idx += 1
+            cur_pool = pool_schedule[pool_idx][1] if pool_idx >= 0 else {}
+            if not block:
+                for name, w in cur_pool.items():
+                    s = syms.get(name)
+                    if s is None or name in positions or name in pend_buy:
+                        continue
+                    j = s["d2i"].get(t)
+                    if j is None or _bdir(s, j) == "down":
+                        continue
+                    if reentry.get(name) == "wait_buy":      # 卖点减仓后,等买点回补(短差)
+                        buys = _buys_at(s, j)
+                        if buy_classes is not None:
+                            buys = [x for x in buys if int(x.bs_type[0]) in buy_classes]
+                        if not buys:
+                            continue
+                    pending.append((name, "buy", w))
+                    reentry.pop(name, None)
+            equity[m] = mk(t)
+            continue
+        free = max_pos - len(positions) - len(pend_buy)
         if free > 0 and not block:
             cands = []
             for name, s in syms.items():
-                if name in positions or (name, "buy") in pending:
+                if name in positions or name in pend_buy:
                     continue
                 j = s["d2i"][t]
                 buys = _buys_at(s, j)

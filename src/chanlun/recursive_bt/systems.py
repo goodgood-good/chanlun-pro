@@ -143,9 +143,33 @@ def main_v2():
         print(f"    ↑ {name}")
 
 
+def main_v3():
+    """原文三层架构(line38515-38544「三个独立系统完美的组合」):
+    ①基本面结构层=行业龙头70%+成长30%季度池(industry.build_pool_schedule)
+    ②比价再平衡层=季度重算池(市值/行业地位变化→换股)
+    ③技术面执行层=缠论买点(3买优先)+wf走势方向门控定时机。
+    对比:三层架构 vs 基线(全池猎手) vs 池子买入持有(无技术面=剥离③的贡献)。"""
+    from chanlun.recursive_bt.industry import build_pool_schedule
+    syms = _load_bt_universe()
+    sched = build_pool_schedule(syms)
+    label = f"{len(syms)}只"
+    print(f"季度池 {len(sched)} 期, 首期 {len(sched[0][1])} 只" if sched else "池空")
+    print("#" * 64)
+    print("# 原文三层架构(①行业池70/30 ②季度换股 ③缠论时机) vs 基线")
+    print("#" * 64)
+    portfolio_backtest(syms=syms, filt=None, max_pos=10, label=label,
+                       big_gate="trend", buy_priority="3first")
+    print("    ↑ 基线: 全池买点选股(3买优先)+wf门控")
+    portfolio_backtest(syms=syms, filt=None, max_pos=10, label=label,
+                       big_gate="trend", buy_priority="3first", pool_schedule=sched)
+    print("    ↑ 三层架构: ①池70/30 + ②季度换股 + ③买点时机+wf门控")
+
+
 if __name__ == "__main__":
     import sys
     if len(sys.argv) > 1 and sys.argv[1] == "v2":
         main_v2()
+    elif len(sys.argv) > 1 and sys.argv[1] == "v3":
+        main_v3()
     else:
         main()
