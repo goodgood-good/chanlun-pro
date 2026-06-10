@@ -97,8 +97,8 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
     """组合回测。syms 已构建则直接用(QMT缓存路径);否则按 universe 名走 chart_cache。
     market_filter=大盘标的名(其30m方向==down时禁止开新仓)。
     buy_classes=入场只认的买点类别集合(如{1}=只一类买点选股;None=全部1/2/3类)。
-    require=缠论三独立系统门控:('tech',)=只技术面;加'fund'=并需基本面通过(s['fund_ok'][bar]);
-    加'value'=并需比价通过(s['rs'][bar]>0 相对强度=资金流入)。三者齐=三系统结合(概率原则)。"""
+    require=缠论三独立系统门控:('tech',)=只技术面;加'fund'=并需①基本面通过(s['fund_ok'][bar]质量+成长);
+    加'value'=并需②比价低估(s['value_ok'][bar]=ROE年化/PB高于全市场中位=优质却便宜)。三者齐=三系统结合(概率原则)。"""
     if syms is None:
         syms = {n: prep(n) for n in universe}
         filt = prep(market_filter) if market_filter else None
@@ -181,7 +181,7 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
                     continue
                 if "fund" in require and not s["fund_ok"][j]:    # ①基本面独立系统门控
                     continue
-                if "value" in require and not (s["rs"][j] > 0):  # ②比价(相对强度=资金流入)门控
+                if "value" in require and not s["value_ok"][j]:  # ②比价(低估:ROE年化/PB高)门控
                     continue
                 pr = min(int(x.bs_type[0]) for x in buys)        # 1买优先
                 cands.append((pr, name))

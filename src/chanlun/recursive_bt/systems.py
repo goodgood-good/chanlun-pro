@@ -42,6 +42,7 @@ def attach_scores(syms: dict, market: dict, rs_win: int = RS_WIN):
         n = len(dates)
         fund_ok = np.zeros(n, bool)
         rs = np.zeros(n)
+        vscore = np.zeros(n)        # ②比价低估度 = ROE年化/PB(高=优质却便宜,point-in-time)
         ri = -1
         for i in range(n):
             di = dates[i]
@@ -53,17 +54,29 @@ def attach_scores(syms: dict, market: dict, rs_win: int = RS_WIN):
                 grow = max(r["rev_inc"] if r["rev_inc"] is not None else -999,
                            r["np_inc"] if r["np_inc"] is not None else -999)
                 fund_ok[i] = (roe_ann > ROE_ANN_MIN) and (grow > 0)
-            mi = mkt_d2i.get(di)
+                bps = r["bps"]
+                if bps and bps > 0 and close[i] > 0:
+                    vscore[i] = roe_ann * bps / close[i]            # ROE年化 ÷ PB(=价/BPS)
+            mi = mkt_d2i.get(di)                                     # rs 仅留作参考(非比价口径)
             if i >= rs_win and mi is not None and mi >= rs_win:
                 sret = close[i] / close[i - rs_win] - 1
                 mret = mkt_close[mi] / mkt_close[mi - rs_win] - 1
                 rs[i] = sret - mret
         s["fund_ok"] = fund_ok
         s["rs"] = rs
+        s["_vscore"] = vscore
         s["total_share"] = total_share
         passed_fund += int(fund_ok.any())
         passed_any += 1
-    print(f"基本面有数据/通过过(任一bar): {passed_fund}/{passed_any} 只")
+    # ②比价低估:全市场自校准——ROE年化/PB 高于中位=优质却便宜=低估=通过(原文line38539市值与行业地位)
+    allv = np.concatenate([s["_vscore"][s["_vscore"] > 0] for s in syms.values()
+                           if (s["_vscore"] > 0).any()] or [np.zeros(1)])
+    vmed = float(np.median(allv)) if len(allv) else 0.0
+    for s in syms.values():
+        s["value_ok"] = s["_vscore"] > vmed
+    passed_val = sum(int(s["value_ok"].any()) for s in syms.values())
+    print(f"①基本面通过过: {passed_fund}/{passed_any}; ②比价低估阈值(ROE年化/PB)中位={vmed:.2f}, "
+          f"低估过: {passed_val}/{passed_any}")
 
 
 def main():
