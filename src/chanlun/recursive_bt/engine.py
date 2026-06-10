@@ -12,7 +12,9 @@
 from __future__ import annotations
 
 import glob
+import os
 import re
+import sys
 import pickle
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
@@ -21,6 +23,10 @@ import numpy as np
 import pandas as pd
 
 from chanlun.core.cl import CL
+
+# 向后兼容:旧 bt_data 缓存里的 Signal 以模块名 'recursive_backtest' 序列化(本模块原名)。
+# 注册别名,让旧 pkl 仍可反序列化;新缓存以 chanlun.recursive_bt.engine 路径序列化。
+sys.modules.setdefault("recursive_backtest", sys.modules[__name__])
 
 CL_CFG = {
     "chart_show_fx": "1", "chart_show_bi": "1", "chart_show_xd": "1",
@@ -370,7 +376,8 @@ def backtest_symbol(name: str, prefix: str, code: str, rules: MarketRules,
     return results
 
 
-def generate_report(out_png: str = "scripts/backtest_report.png"):
+def generate_report(out_png: str = "D:/chanlun_pro/reports/recursive_single.png"):
+    os.makedirs(os.path.dirname(out_png), exist_ok=True)
     """最优策略(5m+30m_relax)权益曲线 vs 买入持有,各标的子图 + 交易明细。"""
     import matplotlib
     matplotlib.use("Agg")

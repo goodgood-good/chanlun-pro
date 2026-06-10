@@ -12,9 +12,8 @@ import pickle
 import sys
 import time
 
-sys.path.insert(0, "scripts")
-from recursive_backtest import collect_branch_signals, CL_CFG, MTFStrategy  # noqa: E402
-from chanlun.core.cl import CL  # noqa: E402
+from chanlun.recursive_bt.engine import collect_branch_signals, CL_CFG, MTFStrategy
+from chanlun.core.cl import CL
 
 OUT = "D:/chanlun_pro/bt_data"
 

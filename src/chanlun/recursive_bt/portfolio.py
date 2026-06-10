@@ -19,11 +19,10 @@ from typing import Dict, List, Optional
 import numpy as np
 import pandas as pd
 
-sys.path.insert(0, "scripts")
-from recursive_backtest import (  # noqa: E402
+from chanlun.recursive_bt.engine import (
     load_klines, collect_branch_signals, CL_CFG, SYMBOLS, MTFStrategy,
 )
-from chanlun.core.cl import CL  # noqa: E402
+from chanlun.core.cl import CL
 
 
 @dataclass
@@ -231,7 +230,8 @@ def _report(label, master, equity, trades, syms, flabel):
             "equity": equity, "master": master}
 
 
-def generate_portfolio_report(syms, filt, out_png="scripts/portfolio_report.png"):
+def generate_portfolio_report(syms, filt, out_png="D:/chanlun_pro/reports/portfolio.png"):
+    os.makedirs(os.path.dirname(out_png), exist_ok=True)
     """组合权益曲线 vs 等权基准(沪深300选股),多 max_pos 对比。"""
     import matplotlib
     matplotlib.use("Agg")

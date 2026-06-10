@@ -12,7 +12,9 @@ import pickle
 import numpy as np
 import pandas as pd
 
-from portfolio_backtest import _load_bt_universe, load_cached, portfolio_backtest
+from chanlun.recursive_bt.portfolio import (
+    _load_bt_universe, load_cached, portfolio_backtest,
+)
 
 FUND_DIR = "D:/chanlun_pro/bt_data_fund"
 RS_WIN = 960          # 相对强度窗口(~20交易日×48根5m)
