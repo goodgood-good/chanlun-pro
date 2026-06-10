@@ -92,9 +92,14 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
                        market_filter: Optional[str] = None,
                        init_cash: float = 1_000_000,
                        syms: Optional[dict] = None, filt: Optional[dict] = None,
-                       label: Optional[str] = None):
+                       label: Optional[str] = None,
+                       buy_classes: Optional[set] = None,
+                       require: tuple = ("tech",)):
     """组合回测。syms 已构建则直接用(QMT缓存路径);否则按 universe 名走 chart_cache。
-    market_filter=大盘标的名(其30m方向==down时禁止开新仓)。"""
+    market_filter=大盘标的名(其30m方向==down时禁止开新仓)。
+    buy_classes=入场只认的买点类别集合(如{1}=只一类买点选股;None=全部1/2/3类)。
+    require=缠论三独立系统门控:('tech',)=只技术面;加'fund'=并需基本面通过(s['fund_ok'][bar]);
+    加'value'=并需比价通过(s['rs'][bar]>0 相对强度=资金流入)。三者齐=三系统结合(概率原则)。"""
     if syms is None:
         syms = {n: prep(n) for n in universe}
         filt = prep(market_filter) if market_filter else None
@@ -171,9 +176,16 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
                     continue
                 j = s["d2i"][t]
                 buys = _buys_at(s, j)
-                if s["big_dir_at"][j] != "down" and buys:
-                    pr = min(int(x.bs_type[0]) for x in buys)   # 1买优先
-                    cands.append((pr, name))
+                if buy_classes is not None:                      # 只认指定类别买点(选股系统)
+                    buys = [x for x in buys if int(x.bs_type[0]) in buy_classes]
+                if not (s["big_dir_at"][j] != "down" and buys):
+                    continue
+                if "fund" in require and not s["fund_ok"][j]:    # ①基本面独立系统门控
+                    continue
+                if "value" in require and not (s["rs"][j] > 0):  # ②比价(相对强度=资金流入)门控
+                    continue
+                pr = min(int(x.bs_type[0]) for x in buys)        # 1买优先
+                cands.append((pr, name))
             cands.sort()
             for _pr, name in cands[:free]:
                 pending.append((name, "buy"))
@@ -297,8 +309,50 @@ def main_qmt():
     generate_portfolio_report(syms, filt)
 
 
+def _load_bt_universe(index="SH.000001"):
+    import glob
+    syms = {}
+    for f in glob.glob(f"{BT_DATA}/*.pkl"):
+        code = os.path.basename(f)[:-4]
+        if code == index:
+            continue
+        d = load_cached(code)
+        if d and len(d["dates"]) > 500:
+            syms[code] = d
+    return syms
+
+
+def main_systems():
+    """缠论三类买点选股系统(一/二/三类)各自 + 三类结合,对比。"""
+    syms = _load_bt_universe()
+    filt = load_cached("SH.000001")
+    label = f"{len(syms)}只"
+    print("#" * 64)
+    print(f"# 缠论三类买点选股系统 + 结合 | universe={len(syms)}只(沪深300前复权)")
+    print("#" * 64)
+    systems = [
+        ("①一类买点系统(趋势背驰底·抄底反转)", {1}),
+        ("②二类买点系统(1买后回调不破·确认)", {2}),
+        ("③三类买点系统(突破中枢回试不破·延续)", {3}),
+        ("①+②+③ 三类结合(1买优先)", {1, 2, 3}),
+    ]
+    res = {}
+    for name, bc in systems:
+        r = portfolio_backtest(syms=syms, filt=None, max_pos=10, label=label, buy_classes=bc)
+        res[name] = r
+        print(f"    ↑ {name}")
+    # 结合 + 大盘择时过滤
+    if filt:
+        portfolio_backtest(syms=syms, filt=filt, max_pos=10, label=label, buy_classes={1, 2, 3})
+        print("    ↑ ①+②+③ 结合 + 大盘(上证)择时过滤")
+    return res
+
+
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] == "chart_cache":
+    arg = sys.argv[1] if len(sys.argv) > 1 else ""
+    if arg == "chart_cache":
         main()
+    elif arg == "systems":
+        main_systems()
     else:
         main_qmt()
