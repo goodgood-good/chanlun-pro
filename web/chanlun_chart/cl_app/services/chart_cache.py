@@ -175,7 +175,10 @@ def _stable_hash(obj) -> str:
 #   简化公式,Z段=前/后中枢段整段极值;非空性⟺中心定理二触及条件,与 is_kuozhan 自洽)。原「顶/底切
 #   三走势再交集」把中枢本体劈开(violates Z段=完整次级别走势类型),区间系统性偏窄/空(实测10/19流入
 #   退化分支)。kuozhan L1 区间变宽→L2(tongjibie 基于 L1 走势类型)随之。强制失效。
-_CHART_CACHE_SCHEMA_VERSION = "v32"
+# - v33 (2026-06) ── 全链整段口径收口:zslx_branch._finalize 喂回 zs_high/zs_low 改**走势类型
+#   整段高低点**(原文20课 gn/dn,含进入/离开段端点;原中枢 gg/dd 包络=过严)。影响 L1+ 递归树与
+#   bs2/bs3 跨级信号(实测10只:413信号不变/仅1增1减=0.5%,L0 全零变动;kuozhan 各级数量不变)。
+_CHART_CACHE_SCHEMA_VERSION = "v33"
 
 
 def _build_cache_key(market: str, code: str, frequency: str, cl_config: dict) -> str:

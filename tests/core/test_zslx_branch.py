@@ -59,7 +59,8 @@ def test_finalize_single_zhongshu_is_consolidation():
     assert zslx.zslx_type == "盘整"
     assert zslx.zss == [z]
     assert zslx.done is False
-    assert zslx.zs_high == z.gg and zslx.zs_low == z.dd      # 单中枢包络
+    # 喂回口径=整段高低点(原文20课 gn/dn=Zn 高低点,含进入段端点 2;非中枢包络 [dd,gg]=[5,8])
+    assert zslx.zs_high == z.gg and zslx.zs_low == 2
     assert zslx.start_line is z.start                         # 进入段 a
 
 
@@ -69,9 +70,19 @@ def test_finalize_uptrend_two_zhongshu():
     zslx = zslx_branch.ZslxBranchCalculator._finalize([z1, z2], 0, "trend_up", done=True)
     assert zslx.zslx_type == "上涨" and zslx._type == "up"
     assert zslx.zs_high == max(z1.gg, z2.gg)
-    assert zslx.zs_low == min(z1.dd, z2.dd)
+    assert zslx.zs_low == 2                                   # 整段口径:进入段起点 2 < min(dd)=5
     assert zslx.start_line is z1.start                        # 第一中枢进入段
     assert zslx.end_line is z2.lines[-1]                      # 末中枢末段(z.end 缺→fallback)
+
+
+def test_finalize_span_includes_entry_exit_extremes():
+    """喂回 zs_high/zs_low = 走势类型**整段高低点**(原文20课 gn/dn,含进入/离开段超出中枢
+    包络的部分)——L1+ 中枢由本级走势类型三段重叠而成,段区间必须是整段极值;
+    包络口径(max gg/min dd)过严曾致 L1+ 重合判定偏严(与 zs_upgrade._zslx_span 同源同修)。"""
+    z = _zs_at(0, _seg(0, "down", 12, 8), 5, 8)               # 进入段从 12 跌入中枢 [5,8]
+    zslx = zslx_branch.ZslxBranchCalculator._finalize([z], 0, None, done=False)
+    assert zslx.zs_high == 12                                 # 进入段起点 12 > gg=8
+    assert zslx.zs_low == z.dd
 
 
 # ---- Task 2: calculate 状态机 ----
@@ -199,8 +210,8 @@ def test_calculate_continuous_lower_lows_is_one_downtrend():
     assert wts[0].zslx_type == "下跌" and wts[0]._type == "down"
     assert wts[0].zss == [z0, z1, z2, z3, z4]         # 5 个中枢全并入
     assert wts[0].done is False                       # 末走势类型未完成
-    assert wts[0].zs_low == min(z.dd for z in [z0, z1, z2, z3, z4])   # 包络覆盖全段
-    assert wts[0].zs_high == max(z.gg for z in [z0, z1, z2, z3, z4])
+    assert wts[0].zs_low == min(z.dd for z in [z0, z1, z2, z3, z4])   # 整段最低=末中枢 dd
+    assert wts[0].zs_high == 46    # 整段最高=进入段起点(原文20课 gn 整段口径,>max(gg)=43)
 
 
 def test_calculate_trailing_expand_absorbed_into_trend():

@@ -53,9 +53,19 @@ class ZslxBranchCalculator:
         )
         zslx.zss = list(zss)
         zslx.zslx_type = zslx_type
-        # 喂回 zs_branch 备用(P4b)：ZsCalculator 靠构成段 zs_high/zs_low 判重叠
-        zslx.zs_high = max(zs.gg for zs in zss)
-        zslx.zs_low = min(zs.dd for zs in zss)
+        # 喂回 zs_branch 当 L1+ 输入段:zs_high/zs_low = 走势类型**整段高低点**(原文20课
+        # gn/dn=Zn 的高、低点,含进入/离开段端点 start/end——趋势段两端远超中枢包络)。
+        # 曾用段内中枢 gg/dd 包络:口径过严,L1+ 三段重合判定偏严(2026-06-10 全链对齐
+        # line10018,与 zs_upgrade._zslx_span/tongjibie 整段口径同源)。
+        hi = max(zs.gg for zs in zss)
+        lo = min(zs.dd for zs in zss)
+        for fx in (zslx.start, zslx.end):
+            v = getattr(fx, "val", None) if fx is not None else None
+            if v is not None:
+                hi = max(hi, v)
+                lo = min(lo, v)
+        zslx.zs_high = hi
+        zslx.zs_low = lo
         return zslx
 
     @staticmethod
