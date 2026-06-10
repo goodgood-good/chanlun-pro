@@ -109,5 +109,43 @@ def main():
             print(f"    ↑ {name}")
 
 
+def main_v2():
+    """原文选股系统 v2 对比(2026-06-10 深挖第8/9课+line23172):
+    海选门槛(第8课:收盘>70日线=「能搞的」分类,250天线因数据仅1年降级为原文明示的70天线)
+    + ②比价资金流向(第9课原味:「比价关系的变动…和市场资金的流向相关」,20日RS>大盘)
+    + 3买优先(line23172「牛市里第三类买点的爆发力是最强的」)。全部 point-in-time。"""
+    from chanlun.recursive_bt.portfolio import attach_pool_filters
+    syms = _load_bt_universe()
+    market = load_cached("SH.000001")
+    if market is None:
+        print("缺上证指数缓存")
+        return
+    attach_scores(syms, market)
+    attach_pool_filters(syms, market)
+    n_ma = sum(int(s["ma_ok"].any()) for s in syms.values())
+    n_rs = sum(int(s["rs_ok"].any()) for s in syms.values())
+    label = f"{len(syms)}只"
+    print(f"海选(70日线)曾通过: {n_ma}/{len(syms)}; RS(20日强于大盘)曾通过: {n_rs}/{len(syms)}")
+    print("#" * 64)
+    print("# 原文选股系统 v2(第8课海选+第9课比价资金流向+line23172三买优先) wf门控")
+    print("#" * 64)
+    configs = [
+        ("基线: ③技术面买点(1买优先)", ("tech",), "1first"),
+        ("3买优先(line23172 牛市口径)", ("tech",), "3first"),
+        ("+海选70日线(第8课「能搞的」)", ("tech", "ma"), "1first"),
+        ("+RS资金流向(第9课比价)", ("tech", "rs"), "1first"),
+        ("v2: 海选+RS+3买优先", ("tech", "ma", "rs"), "3first"),
+        ("v2+①基本面(乘法原则四过滤)", ("tech", "ma", "rs", "fund"), "3first"),
+    ]
+    for name, req, bp in configs:
+        portfolio_backtest(syms=syms, filt=None, max_pos=10, label=label,
+                           require=req, big_gate="trend", buy_priority=bp)
+        print(f"    ↑ {name}")
+
+
 if __name__ == "__main__":
-    main()
+    import sys
+    if len(sys.argv) > 1 and sys.argv[1] == "v2":
+        main_v2()
+    else:
+        main()

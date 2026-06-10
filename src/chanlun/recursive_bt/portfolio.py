@@ -101,6 +101,70 @@ def load_cached(code: str) -> Optional[dict]:
     return d
 
 
+def _daily_closes(s: dict):
+    """5m/日线 bar 序列 → [(日期, 当日收盘, 当日最后bar索引)](按 bar date 的自然日分组)。"""
+    out = []
+    cur_day = None
+    for i, t in enumerate(s["dates"]):
+        d = t.date()
+        if d != cur_day:
+            out.append([d, s["close"][i], i])
+            cur_day = d
+        else:
+            out[-1][1] = s["close"][i]
+            out[-1][2] = i
+    return out
+
+
+def attach_pool_filters(syms: dict, market: dict, ma_win: int = 70, rs_win: int = 20):
+    """海选(第8课)+比价资金流向(第9课)逐bar过滤数组,全部 point-in-time(用截至**前一完整
+    交易日**收盘的序列,当日盘中不用未完成日线,无lookahead)。
+
+    - s['ma_ok'][i]: 前日收盘 > 前日 ma_win 日均线(第8课「250天线突破…资金量不大可改70天线、
+      35天线」→ 取70,数据仅1年,250日不可得)。均线未满窗口 → False(不在「能搞的」分类)。
+    - s['rs_ok'][i]: 个股 rs_win 日收益 > 大盘同窗收益(第9课「比价关系的变动…和市场资金的
+      流向相关」=资金流入)。窗口不足 → False。
+    """
+    mkt_daily = _daily_closes(market)
+    mkt_idx = {d: k for k, (d, _c, _i) in enumerate(mkt_daily)}
+    mkt_close = [c for _d, c, _i in mkt_daily]
+    for s in syms.values():
+        dly = _daily_closes(s)
+        closes = [c for _d, c, _i in dly]
+        nd = len(dly)
+        # 每日截至收盘的 ma / rs(对齐大盘用日期 map,缺日用大盘最近≤该日的值)
+        csum = np.cumsum(np.asarray(closes, dtype=float))
+        day_ma_ok = [False] * nd
+        day_rs_ok = [False] * nd
+        mk = -1
+        for k in range(nd):
+            d = dly[k][0]
+            if d in mkt_idx:
+                mk = mkt_idx[d]
+            if k + 1 >= ma_win:
+                ma = (csum[k] - (csum[k - ma_win] if k >= ma_win else 0.0)) / ma_win
+                day_ma_ok[k] = closes[k] > ma
+            if k >= rs_win and mk >= rs_win:
+                sret = closes[k] / closes[k - rs_win] - 1
+                mret = mkt_close[mk] / mkt_close[mk - rs_win] - 1
+                day_rs_ok[k] = sret > mret
+        n = len(s["dates"])
+        ma_ok = np.zeros(n, bool)
+        rs_ok = np.zeros(n, bool)
+        k = -1   # 已收盘的最后完整日(当日盘中只用截至前一日)
+        di = 0
+        for i, t in enumerate(s["dates"]):
+            d = t.date()
+            while di < nd and dly[di][0] < d:
+                k = di
+                di += 1
+            if k >= 0:
+                ma_ok[i] = day_ma_ok[k]
+                rs_ok[i] = day_rs_ok[k]
+        s["ma_ok"] = ma_ok
+        s["rs_ok"] = rs_ok
+
+
 def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
                        market_filter: Optional[str] = None,
                        init_cash: float = 1_000_000,
@@ -108,14 +172,19 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
                        label: Optional[str] = None,
                        buy_classes: Optional[set] = None,
                        require: tuple = ("tech",),
-                       big_gate: str = "bsp"):
+                       big_gate: str = "bsp",
+                       buy_priority: str = "1first"):
     """组合回测。syms 已构建则直接用(QMT缓存路径);否则按 universe 名走 chart_cache。
     market_filter=大盘标的名(其30m方向==down时禁止开新仓)。
     buy_classes=入场只认的买点类别集合(如{1}=只一类买点选股;None=全部1/2/3类)。
     require=缠论三独立系统门控:('tech',)=只技术面;加'fund'=并需①基本面通过(s['fund_ok'][bar]质量+成长);
     加'value'=并需②比价低估(s['value_ok'][bar]=ROE年化/PB高于全市场中位=优质却便宜)。三者齐=三系统结合(概率原则)。
     big_gate='bsp'=大级别方向用买卖点事件(big_dir_at,现状);'trend'=用走势方向(trend_dir_at,
-    周线笔方向——周线图无买卖点时 bsp 门控恒 neutral 失效,走势方向是结构化替代)。"""
+    周线笔方向——周线图无买卖点时 bsp 门控恒 neutral 失效,走势方向是结构化替代)。
+    require 另支持(须先 attach_pool_filters):'ma'=海选门槛(第8课,收盘>70日线=「能搞的」分类);
+    'rs'=比价资金流向(第9课,个股20日收益>大盘=资金流入)。
+    buy_priority:'1first'=1买>2买>3买(反转抄底口径);'3first'=3买>2买>1买(line23172
+    「牛市里第三类买点的爆发力是最强的」,突破延续口径)。"""
     _dir_key = "trend_dir_at" if big_gate == "trend" else "big_dir_at"
 
     def _bdir(s, j):
@@ -211,7 +280,12 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
                     continue
                 if "value" in require and not s["value_ok"][j]:  # ②比价(低估:ROE年化/PB高)门控
                     continue
-                pr = min(int(x.bs_type[0]) for x in buys)        # 1买优先
+                if "ma" in require and not s["ma_ok"][j]:        # 海选门槛(第8课,70日线上=能搞的)
+                    continue
+                if "rs" in require and not s["rs_ok"][j]:        # ②比价资金流向(第9课,强于大盘)
+                    continue
+                cls = min(int(x.bs_type[0]) for x in buys)
+                pr = -cls if buy_priority == "3first" else cls   # 3买优先(line23172牛市)或1买优先
                 cands.append((pr, name))
             cands.sort()
             for _pr, name in cands[:free]:

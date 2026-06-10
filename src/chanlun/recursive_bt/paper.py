@@ -173,7 +173,8 @@ def step(broker: PaperBroker, states: Dict[str, SymbolState], now: str):
             broker.pending.append({"code": c, "act": "sell", "reason": "大级别转空"})
         elif any(s.is_sell for s in sigs.get(c, [])):
             broker.pending.append({"code": c, "act": "sell", "reason": "小级别卖点"})
-    # 开仓:技术面买点 + 30m not_down,1买>2买>3买
+    # 开仓:技术面买点 + 30m not_down,**3买优先**(line23172「牛市里第三类买点的爆发力
+    # 是最强的」;回测实证:牛市+10.5pp/熊市+1.4pp 两段皆优于1买优先)
     free = MAX_POS - len(broker.positions) - sum(1 for o in broker.pending if o["act"] == "buy")
     if free > 0:
         cands = []
@@ -182,7 +183,7 @@ def step(broker: PaperBroker, states: Dict[str, SymbolState], now: str):
                 continue
             buys = [s for s in ss if s.is_buy]
             if buys and states[c].big_dir() != "down":
-                cands.append((min(int(s.bs_type[0]) for s in buys), c))
+                cands.append((-min(int(s.bs_type[0]) for s in buys), c))
         cands.sort()
         for _pr, c in cands[:free]:
             broker.pending.append({"code": c, "act": "buy",
