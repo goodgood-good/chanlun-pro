@@ -148,13 +148,51 @@ def wf_dir_series(df: pd.DataFrame, code: str, tf: str,
     events: List[Tuple[pd.Timestamp, str]] = []
     cur = None
     n = len(df)
-    for t in range(min(warmup, n), n + 1):
-        cd.process_klines(df.iloc[:t].reset_index(drop=True))
+    w = min(warmup, n)
+    # 增量尾喂(已验:与全量逐根重算 123/123 一致)——避免 iloc[:t] 的 O(n²) 复制
+    for t in range(w, n + 1):
+        chunk = df.iloc[:w] if t == w else df.iloc[t - 1:t]
+        cd.process_klines(chunk.reset_index(drop=True))
         bis = list(cd.get_bis())
         d = "neutral" if not bis else ("up" if bis[-1].type == "up" else "down")
         if d != cur:
             events.append((df["date"].iloc[t - 1], d))
             cur = d
+    return events
+
+
+def wf_seg38_series(df: pd.DataFrame, code: str, tf: str,
+                    warmup: int = 30) -> List[Tuple[pd.Timestamp, str]]:
+    """38课同级别分解**机械化操作程式**(原文line24751)的 walk-forward 工程版。
+
+    原文程式(30m同级别分解):向上段背驰点先卖;向下第二段不跌破前低→重新买入;
+    向上第三段不创新高→一定先卖出(创新高+盘整背驰也卖,不背驰持有);循环。
+    工程化(实盘可复制,无lookahead):逐根增量喂,当「当下笔方向」翻转时,比较刚完成笔
+    与前一同向笔的极值——down→up 翻转:刚完成 down 笔低点 ≥ 前 down 笔低点(不破低)→buy;
+    up→down 翻转:刚完成 up 笔高点 ≤ 前 up 笔高点(不创新高)→sell。
+    背驰点提前卖在右边缘不可知 → 用翻转确认近似(滞后换严谨);盘整背驰卖出条件留简版(不卖)。
+    返回事件流 [(bar收盘时刻, 'buy'|'sell')]。"""
+    cd = CL(code, tf, dict(CL_CFG))
+    events: List[Tuple[pd.Timestamp, str]] = []
+    cur_dir = None
+    n = len(df)
+    w = min(warmup, n)
+    for t in range(w, n + 1):
+        chunk = df.iloc[:w] if t == w else df.iloc[t - 1:t]
+        cd.process_klines(chunk.reset_index(drop=True))
+        bis = list(cd.get_bis())
+        if not bis:
+            continue
+        d = bis[-1].type
+        if cur_dir is not None and d != cur_dir and len(bis) >= 4:
+            done, prev_same = bis[-2], bis[-4]     # 刚完成笔 vs 前一同向笔
+            if done.end is not None and prev_same.end is not None:
+                date = df["date"].iloc[t - 1]
+                if d == "up" and done.end.val >= prev_same.end.val:
+                    events.append((date, "buy"))     # 向下段不破前低 → 重新买入
+                elif d == "down" and done.end.val <= prev_same.end.val:
+                    events.append((date, "sell"))    # 向上段不创新高 → 先卖出
+        cur_dir = d
     return events
 
 
