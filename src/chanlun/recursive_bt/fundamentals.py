@@ -37,7 +37,7 @@ def fetch(codes):
             continue
         try:
             fd = xtdata.get_financial_data([qc], ["PershareIndex"],
-                                           "20230101", "20260601", report_type="report_time")
+                                           "20210101", "20260601", report_type="report_time")
             pi = fd.get(qc, {}).get("PershareIndex")
             det = xtdata.get_instrument_detail(qc)
             reports = []

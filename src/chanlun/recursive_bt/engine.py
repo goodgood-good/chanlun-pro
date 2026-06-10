@@ -290,7 +290,7 @@ class MTFStrategy:
 
     def __init__(self, sig_small: List[Signal], sig_big: List[Signal],
                  dates5: List[pd.Timestamp], mode: str, gate: str = "up",
-                 exit_mode: str = "any_sell"):
+                 exit_mode: str = "any_sell", big_delay=None):
         self.mode = mode
         self.gate = gate          # "up"=严格(大级别必须up);"not_down"=放松(neutral也允许进场)
         self.exit_mode = exit_mode  # "any_sell"=任何小级别卖点出;"reversal"=只1/2卖(背驰反转)出,扛过3卖延续
@@ -307,7 +307,7 @@ class MTFStrategy:
         big = sorted(sig_big, key=lambda s: s.date)
         bi = 0
         cur = "neutral"
-        delay = pd.Timedelta("30min")
+        delay = big_delay if big_delay is not None else pd.Timedelta("30min")
         for i in range(n):
             while bi < len(big) and big[bi].date + delay <= dates5[i]:
                 cur = "up" if big[bi].is_buy else "down"

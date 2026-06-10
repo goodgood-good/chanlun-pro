@@ -68,7 +68,7 @@ def _sells_at(s: dict, j: int):
     return [x for x in s["small_by_bar"].get(j, []) if x.is_sell]
 
 
-BT_DATA = "D:/chanlun_pro/bt_data"
+BT_DATA = os.environ.get("BT_DATA_DIR", "D:/chanlun_pro/bt_data")
 
 
 def load_cached(code: str) -> Optional[dict]:
@@ -178,6 +178,8 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
                 if buy_classes is not None:                      # 只认指定类别买点(选股系统)
                     buys = [x for x in buys if int(x.bs_type[0]) in buy_classes]
                 if not (s["big_dir_at"][j] != "down" and buys):
+                    continue
+                if "mid_dir_at" in s and s["mid_dir_at"][j] == "down":  # 三级联立:中级别(5m)也不空
                     continue
                 if "fund" in require and not s["fund_ok"][j]:    # ①基本面独立系统门控
                     continue
