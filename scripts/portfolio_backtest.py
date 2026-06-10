@@ -214,7 +214,50 @@ def _report(label, master, equity, trades, syms, flabel):
     print(f"\n=== 组合回测{tag} | 池={label} 期={master[0].date()}~{master[-1].date()} ===")
     print(f"  组合收益={total:+.1%}  等权基准={bh:+.1%}  超额={total - bh:+.1%}  "
           f"回撤={max_dd:.1%}  夏普={sharpe:.2f}  胜率={wr:.0%}  交易={len(trades)}")
-    return total, bh, max_dd, sharpe, wr, len(trades), trades
+    return {"total": total, "bh": bh, "max_dd": max_dd, "sharpe": sharpe,
+            "wr": wr, "n": len(trades), "trades": trades,
+            "equity": equity, "master": master}
+
+
+def generate_portfolio_report(syms, filt, out_png="scripts/portfolio_report.png"):
+    """组合权益曲线 vs 等权基准(沪深300选股),多 max_pos 对比。"""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    runs = {}
+    for mp in (5, 10, 20):
+        runs[mp] = portfolio_backtest(syms=syms, filt=None, max_pos=mp, label=f"{len(syms)}只")
+    master = runs[10]["master"]
+    # 等权基准逐bar曲线(算一次);跳过缺 master 日期的标的(停牌→被主时钟过滤)
+    nrm = np.zeros(len(master))
+    cnt = 0
+    for s in syms.values():
+        if master[0] not in s["d2i"] or master[-1] not in s["d2i"]:
+            continue
+        try:
+            idx = np.array([s["d2i"][t] for t in master])
+        except KeyError:
+            continue
+        nrm += s["close"][idx] / s["open"][s["d2i"][master[0]]]
+        cnt += 1
+    bench = nrm / max(cnt, 1)
+    x = pd.to_datetime(master)
+    fig, ax = plt.subplots(figsize=(12, 6))
+    colors = {5: "orange", 10: "crimson", 20: "purple"}
+    for mp, r in runs.items():
+        eq = r["equity"] / r["equity"][0]
+        ax.plot(x, eq, label=f"select max_pos={mp}  {r['total']:+.0%} (DD {r['max_dd']:.0%}, Sharpe {r['sharpe']:.1f})",
+                color=colors[mp], lw=1.4)
+    ax.plot(x, bench, label=f"HS300 equal-weight buy&hold  {bench[-1] - 1:+.0%}",
+            color="gray", lw=1.2, ls="--")
+    ax.set_title(f"Chanlun buy-point stock selection on HS300 ({len(syms)} stocks, front-adjusted, "
+                 f"{x[0].date()}~{x[-1].date()})", fontsize=11)
+    ax.legend(fontsize=9, loc="upper left")
+    ax.grid(alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(out_png, dpi=110)
+    print(f"\n组合报告已保存: {out_png}")
+    return out_png
 
 
 def main():
@@ -251,6 +294,7 @@ def main_qmt():
     if filt:
         portfolio_backtest(syms=syms, filt=filt, max_pos=10, label=label)
         print("    ↑ max_pos=10 + 大盘(上证)择时过滤")
+    generate_portfolio_report(syms, filt)
 
 
 if __name__ == "__main__":
