@@ -255,6 +255,24 @@ def test_calculate_consolidation_down_swing_direction():
     assert wts[1].zslx_type == "盘整" and wts[1]._type == "down"
 
 
+def test_finalize_consolidation_direction_by_net_displacement():
+    """盘整段方向 = **整段净位移**(start.val→end.val, 即原文 Ai 涨跌语义 line25179),
+    swing_dir 仅在端点缺失时 fallback。
+
+    场景(SH.000001 5m 2025-12~2026-06 实测抽象, fix/zhongshu-l0):up 摆动腿尾部的
+    高位横盘(expand 链)以暴跌离开段收尾——swing_dir=up 但整段净位移向下。旧实现
+    盘整 _type 直接继承 swing_dir → 「上涨(up)+盘整(up)」被 _jiehe_segments 误并成
+    一个净下跌的 up 段 → 30m tongjibie 三段重合建立在失真段上。
+    原文判据:同级别分解段严格按涨跌交替(L25179/C3.2),段的涨跌=净位移而非结构摆动属。"""
+    z_a = _zs_at(0, _seg(0, "down", 20, 13), 13, 16)      # 进入段从 20 跌入,核心[13,16]
+    z_b = _zs_at(10, _seg(10, "down", 16, 12), 12, 15)    # 本体[12,15]∩[13,16] → expand 链
+    zslx = zslx_branch.ZslxBranchCalculator._finalize(
+        [z_a, z_b], 0, None, done=True, swing_dir="up")
+    assert zslx.zslx_type == "盘整"
+    # 整段 20 → 12(末段终点) 净下跌 → down(若取 swing_dir 则错标 up)
+    assert zslx._type == "down"
+
+
 def test_calculate_pz_beichi_does_not_terminate():
     """盘整背驰(pz)是中枢震荡内的力度衰减、非走势类型边界 → 不切；只趋势背驰(qs)才切
     (原文 7260/22415:走势类型边界=趋势完成=趋势背驰)。"""

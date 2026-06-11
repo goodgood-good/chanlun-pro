@@ -25,26 +25,40 @@ class ZslxBranchCalculator:
     ) -> ZSLX:
         """把一个中枢列表收尾成 ZSLX：分类、边界(含进入/离开段 a/b)、包络。
 
-        盘整段方向(_type)取『摆动方向』swing_dir（由 _swing_segments 给，相对前段的涨跌），
-        非中枢内部段净位移——原文 line25179 Ai 严格交替按涨跌定向；旧实现用内部段位移导致
-        单中枢盘整方向系统性反号(000001 5m 实测)。swing_dir 缺省(直接单元测试 _finalize)
-        时退化用内部段净位移。
+        盘整段方向(_type) = **净位移·转折点口径**(进入段起点→离开段起点)：原文 line25179
+        Ai 严格交替按涨跌定向；段端点=转折点(L25128 段起点=前段结束点/L8131 a1=b1 共享
+        端点)，离开段跨越转折属下一段。两类实测病(fix/zhongshu-l0,2026-06-11)：
+        ①继承摆动腿方向 swing_dir——up 腿尾部「高位横盘+暴跌收尾」标 up(SH.000001 5m)；
+        ②净位移用离开段**终点**——600519 5m down 腿 1428→离开段终点1565 翻成 up。
+        净位移缺失/零位移时 fallback swing_dir，再退化内部段净位移——v31 反对的「内部段
+        位移反号」是旧核心段口径的病，fallback 顺位仍保留其教训。
         """
+        # 走势类型边界 = 第一中枢进入段 a → 末中枢离开段 b（原文 a+A+b），缺则退化用核心段
+        first = zss[0].start if zss[0].start is not None else zss[0].lines[0]
+        last = zss[-1].end if zss[-1].end is not None else zss[-1].lines[-1]
         if cur_dir in ("trend_up", "trend_down"):
             # 趋势：≥2 依次同向(本体分离)中枢。
             direction = "up" if cur_dir == "trend_up" else "down"
             zslx_type = "上涨" if direction == "up" else "下跌"
         else:
-            # 仅由中枢扩张(expand,本体相交)连接、无趋势方向 → 盘整。方向 = 摆动方向。
+            # 仅由中枢扩张(expand,本体相交)连接、无趋势方向 → 盘整。
             zslx_type = "盘整"
-            if swing_dir in ("up", "down"):
+            # 净位移终点=**离开段起点**(转折点口径:L25128 段起点=前段结束点/L8131
+            # a1=b1 共享端点):离开段跨越转折、属下一段,用其终点会翻号(600519 down 腿
+            # zslx 1428→离开段终点 1565 错标 up;取离开段起点→down ✓)。无离开段
+            # (fallback lines[-1] 为本体段)时用该段终点。
+            s_val = getattr(first.start, "val", None) if first.start is not None else None
+            if zss[-1].end is not None:
+                e_val = getattr(last.start, "val", None)
+            else:
+                e_val = getattr(last.end, "val", None)
+            if s_val is not None and e_val is not None and s_val != e_val:
+                direction = "up" if e_val > s_val else "down"   # 净位移=Ai 涨跌(L25179)
+            elif swing_dir in ("up", "down"):
                 direction = swing_dir
             else:
                 first_seg, last_seg = zss[0].lines[0], zss[-1].lines[-1]
                 direction = "up" if last_seg.end.val >= first_seg.start.val else "down"
-        # 走势类型边界 = 第一中枢进入段 a → 末中枢离开段 b（原文 a+A+b），缺则退化用核心段
-        first = zss[0].start if zss[0].start is not None else zss[0].lines[0]
-        last = zss[-1].end if zss[-1].end is not None else zss[-1].lines[-1]
         zslx = ZSLX(
             zslx_level=getattr(zss[0], "level", None),   # L0 中枢通常无 level；级别由 P4b 递归时管理
             start=first.start, end=last.end,

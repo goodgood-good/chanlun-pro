@@ -281,13 +281,65 @@ class _SegLine:
 def _jiehe_segments(zslxs) -> List[_Seg]:
     """**结合运算**(原文 line25178/25179):把次级别走势类型(zslx)中**相邻同方向**的合并成一段,
     得到严格交替(上下上下…)的段序列,使同级别分解的「三段上下上/下上下」(line24727)成立。
-    原文:a+A 分解里 Ai 奇数向下、偶数向上(必交替),正是靠结合运算把同向走势并成一个 Ai。"""
+    原文:a+A 分解里 Ai 奇数向下、偶数向上(必交替),正是靠结合运算把同向走势并成一个 Ai。
+
+    primitive:tongjibie 主链 2026-06-11 已改走 _swing_alternating_segs(标签合并对 V/Λ 型
+    expand 链方向歧义),本函数当前未接线;保留作 39 课结合运算原语(将来 C3.3 精确条件版
+    「A2 升破 a 高点且 A3 不跌回」可在此基础上做)。"""
     segs: List[_Seg] = []
     for z in zslxs:
         if segs and segs[-1].dir == z._type:
             segs[-1].merge(z)
         else:
             segs.append(_Seg(z))
+    return segs
+
+
+def _swing_alternating_segs(zss: List[ZS]) -> List[_Seg]:
+    """同级别分解的交替段 = 中枢**本体摆动腿**(直接复用 zslx_branch._swing_segments)。
+
+    曾经的路径「zslx 标签 + _jiehe_segments 同 _type 合并」对 V/Λ 型 expand 链的方向
+    标签存在固有歧义,两类实测各错一半:SH.000001 5m 高位横盘+暴跌收尾标 up 被并入上涨
+    (净下跌的 up 段);SH.600519 5m V 型链净位移 up 与前上涨合并、丢失中间向下段(2026-06-11
+    fix/zhongshu-l0)。同级别分解的段语义是**转折点之间的涨跌摆动**(39课 L25179 Ai 奇下
+    偶上严格交替;42课 L26239 含 N 个不延伸中枢的趋势仍是一段——摆动腿粒度正合此条),
+    摆动腿天然交替且边界落在极值中枢,直接生成、与走势类型标签解耦。
+
+    段端点=**转折点**(18课 L8131 公式 a1=b1:相邻段共享端点;39课 L25128 段起点=前一
+    走势类型结束点):start = 腿首中枢进入段起点 FX,end = 腿末中枢**离开段起点** FX——
+    离开段跨越转折、属下一腿(其终点若计入本腿,down 腿 span 会被拉进下一 up 腿的升幅,
+    600519 实测 down 腿 span 高点 1431→1565 失真)。span = 腿内中枢整段极值(gg/dd)
+    ∪ 两端转折点值。单中枢序列腿方向 None → 净位移 fallback。
+    """
+    from chanlun.core.zslx_branch import ZslxBranchCalculator
+
+    segs: List[_Seg] = []
+    for s, e, leg_dir in ZslxBranchCalculator._swing_segments(zss):
+        run = zss[s:e + 1]
+        seg = _Seg.__new__(_Seg)
+        seg.zss = list(run)
+        first, last = run[0], run[-1]
+        seg.start = first.start.start if first.start is not None else (
+            first.lines[0].start if first.lines else None)
+        seg.end = last.end.start if last.end is not None else (
+            last.lines[-1].end if last.lines else None)
+        lo = min(z.dd for z in run)
+        hi = max(z.gg for z in run)
+        for fx in (seg.start, seg.end):
+            v = getattr(fx, "val", None) if fx is not None else None
+            if v is not None:
+                lo, hi = min(lo, v), max(hi, v)
+        seg.zs_low, seg.zs_high = lo, hi
+        if leg_dir in ("up", "down"):
+            seg.dir = leg_dir
+        else:                                            # 单中枢序列:净位移 fallback
+            sv = getattr(seg.start, "val", None) if seg.start is not None else None
+            ev = getattr(seg.end, "val", None) if seg.end is not None else None
+            if sv is not None and ev is not None and sv != ev:
+                seg.dir = "up" if ev > sv else "down"
+            else:
+                seg.dir = "up"
+        segs.append(seg)
     return segs
 
 
@@ -310,9 +362,9 @@ def tongjibie_zhongshu_ex(zss: List[ZS], xds: List[LINE]):
     一一对齐),供 tongjibie_level_signals 在**段粒度**上算 30m 买卖点/背驰。"""
     if not zss:
         return [], {"segs": [], "groups": []}
-    from chanlun.core.zslx_branch import ZslxBranchCalculator
-    zslxs = ZslxBranchCalculator().calculate(zss, [None] * len(zss))
-    segs = _jiehe_segments(zslxs)
+    # 交替段 = 本体摆动腿(42课 L26239 趋势仍是一段;39课 L25179 严格交替)。
+    # 曾经走 zslx 标签 + _jiehe_segments 合并:V/Λ 型链标签歧义,见 _swing_alternating_segs。
+    segs = _swing_alternating_segs(zss)
     groups = _tongjibie_groups(segs)
     out: List[ZS] = []
     out_groups: List[tuple] = []
