@@ -31,7 +31,8 @@ EXPECT_LEVELS = {"1m": [0, 1, 2], "5m": [0, 1], "30m": [0]}
 def main():
     ex = ExchangeQMT()
     ok = True
-    for freq, sd in [("1m", "2026-01-05"), ("5m", "2025-12-01"), ("30m", "2025-06-03")]:
+    # 窗口=web 真实口径(QMT_LOOKBACK_OVERRIDE_DAYS: 1m/5m=365天;30m 默认)
+    for freq, sd in [("1m", "2025-06-12"), ("5m", "2025-06-12"), ("30m", "2025-06-03")]:
         df = ex.klines("SH.000001", freq, start_date=sd, end_date="2026-06-11")
         cd = CoreCL("SH.000001", freq, dict(CFG))
         cd.process_klines(df)
