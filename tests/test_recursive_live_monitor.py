@@ -244,6 +244,15 @@ def test_collect_monitor_events_applies_regime_ratio_multiplier():
     assert "regime_" not in range_events[0].reason
 
 
+def test_optimization_refresh_due_throttles_by_interval(monkeypatch):
+    from chanlun.recursive_bt import live_monitor
+
+    monkeypatch.setattr(live_monitor, "_LAST_OPT_REFRESH_TS", 0.0)
+    assert live_monitor._optimization_refresh_due(600) is True   # 首轮总是刷新
+    assert live_monitor._optimization_refresh_due(600) is False  # 间隔内节流
+    assert live_monitor._optimization_refresh_due(0) is True     # 0=不节流
+
+
 def test_monitor_symbol_state_incremental_fetch_uses_tail_window():
     import pandas as pd
     from chanlun.recursive_bt.live_monitor import MonitorSymbolState

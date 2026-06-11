@@ -1400,6 +1400,21 @@ def send_runtime_override_notice(notifier, title: str, event: dict | None) -> bo
     return bool(notifier.send(f"{title} 策略覆盖", runtime_override_notice_lines(event)))
 
 
+_LAST_OPT_REFRESH_TS: float = 0.0
+
+
+def _optimization_refresh_due(min_interval_seconds: float) -> bool:
+    """优化报告刷新节流:全套报告(优化/决策/gate/regime/impact)每轮重写耗时
+    ~30-50s,而报告新鲜度只需分钟级——按时间间隔节流,把扫描周期留给信号。
+    首轮(进程启动后)总是刷新;--once 单次模式因此不受影响。"""
+    global _LAST_OPT_REFRESH_TS
+    now_ts = time.time()
+    if now_ts - _LAST_OPT_REFRESH_TS < max(float(min_interval_seconds or 0), 0.0):
+        return False
+    _LAST_OPT_REFRESH_TS = now_ts
+    return True
+
+
 def run_once(args, states: Dict[str, object], notifier, deduper, names=None, broker=None,
              exchange=None) -> int:
     holdings = load_ledger_positions(args.ledger)
@@ -1443,7 +1458,10 @@ def run_once(args, states: Dict[str, object], notifier, deduper, names=None, bro
         paper_summary = broker.performance_summary()
         broker.save()
     optimization_report = None
-    if getattr(args, "optimization_report_enabled", False):
+    refresh_due = _optimization_refresh_due(
+        getattr(args, "optimization_report_min_interval", 600)
+    )
+    if getattr(args, "optimization_report_enabled", False) and refresh_due:
         optimization_report = refresh_optimization_report(
             output_json=args.optimization_report_json,
             output_markdown=args.optimization_report_markdown,
@@ -1717,6 +1735,12 @@ def make_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--regime-ratio-impact-json")
     parser.add_argument("--regime-ratio-impact-markdown")
     parser.add_argument(
+        "--optimization-report-min-interval",
+        type=float,
+        default=None,
+        help="Minimum seconds between full optimization-report refreshes (default 600)",
+    )
+    parser.add_argument(
         "--regime-ratio-multipliers-json",
         default="",
         help='Inline JSON or file path, e.g. {"bear": {"3": 1.25}}: point-in-time '
@@ -1956,6 +1980,11 @@ def main(argv: Optional[list[str]] = None) -> int:
         getattr(args, "regime_lookback_days", 0)
         or market_config.get("regime_lookback_days")
         or 20
+    )
+    args.optimization_report_min_interval = float(
+        getattr(args, "optimization_report_min_interval", None)
+        or market_config.get("optimization_report_min_interval")
+        or 600
     )
     args.regime_ratio_impact_json = str(
         getattr(args, "regime_ratio_impact_json", None)
