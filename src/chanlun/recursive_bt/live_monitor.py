@@ -32,6 +32,7 @@ from chanlun.recursive_bt.engine import (
     CL_CFG,
     buy_class,
     collect_branch_signals,
+    latest_prev_day_close,
     recommended_buy_ratio,
     recommended_sell_ratio,
 )
@@ -780,9 +781,9 @@ class MonitorSymbolState:
         self._refresh_daily_window()
         self.last_open = float(df_op["open"].iloc[-1])
         self.last_px = float(df_op["close"].iloc[-1])
-        self.prev_close = (
-            float(df_op["close"].iloc[-2]) if len(df_op) > 1 else self.last_px
-        )
+        # 涨跌停基准=前一交易日收盘(窗口内无昨日数据时为 0=不判),
+        # 不能用前一根分钟 bar 收盘——日内累计涨停会被漏判。
+        self.prev_close = latest_prev_day_close(df_op)
         out = []
         for sig in collect_branch_signals(self.cd_op, use_xd=False, annotate_nest=True):
             key = (sig.date, sig.bs_type)

@@ -27,6 +27,7 @@ from chanlun.core.cl import CL
 from chanlun.recursive_bt.engine import (
     CL_CFG,
     collect_branch_signals,
+    latest_prev_day_close,
     recommended_buy_ratio,
     recommended_sell_ratio,
 )
@@ -94,7 +95,9 @@ class SymbolState:
                             self.d3_until = until
         self.last_open = float(df5["open"].iloc[-1])
         self.last_px = float(df5["close"].iloc[-1])
-        self.prev_close = float(df5["close"].iloc[-2]) if len(df5) > 1 else self.last_px
+        # 涨跌停基准=前一交易日收盘(窗口内无昨日数据时为 0=不判),
+        # 不能用前一根分钟 bar 收盘——日内累计涨停会被漏判。
+        self.prev_close = latest_prev_day_close(df5)
         out = []
         for s in collect_branch_signals(self.cd5, use_xd=False):
             k = (s.date, s.bs_type)

@@ -1041,6 +1041,7 @@ def test_recursive_portfolio_limit_locked_matches_paper_rules():
     from chanlun.recursive_bt.portfolio import _limit_locked
 
     s = {
+        "dates": list(pd.date_range("2026-01-05", periods=3, freq="1D", tz="Asia/Shanghai")),
         "open": [10.0, 11.0, 9.0],
         "close": [10.0, 10.5, 9.5],
         "rules": MarketRules("A", limit_pct=0.10),
@@ -1402,7 +1403,77 @@ def test_portfolio_backtest_applies_regime_bs_ratio_multipliers_point_in_time():
     assert plain_by_code["QQQ.US"].buy_ratio == pytest.approx(0.5)
 
 
-def test_portfolio_backtest_uses_external_regime_source(monkeypatch):
+def test_prev_day_close_series_minute_and_daily_bars():
+    from chanlun.recursive_bt.engine import prev_day_close_series
+
+    minute_dates = list(
+        pd.date_range("2026-01-05 09:30:00", periods=3, freq="5min", tz="Asia/Shanghai")
+    ) + list(
+        pd.date_range("2026-01-06 09:30:00", periods=3, freq="5min", tz="Asia/Shanghai")
+    )
+    minute_closes = [10.0, 10.1, 10.2, 11.0, 11.1, 11.2]
+    out = prev_day_close_series(minute_dates, minute_closes)
+    # 首日三根无昨收;次日三根的昨收都=首日最后一根 10.2
+    assert all(np.isnan(out[:3]))
+    assert list(out[3:]) == [10.2, 10.2, 10.2]
+
+    daily_dates = list(pd.date_range("2026-01-05", periods=3, freq="1D", tz="Asia/Shanghai"))
+    daily_closes = [10.0, 10.5, 11.0]
+    daily = prev_day_close_series(daily_dates, daily_closes)
+    assert np.isnan(daily[0])
+    assert list(daily[1:]) == [10.0, 10.5]
+
+
+def test_latest_prev_day_close_uses_previous_session():
+    from chanlun.recursive_bt.engine import latest_prev_day_close
+
+    df = pd.DataFrame(
+        {
+            "date": list(
+                pd.date_range("2026-01-05 09:30:00", periods=3, freq="5min", tz="Asia/Shanghai")
+            )
+            + list(
+                pd.date_range("2026-01-06 09:30:00", periods=2, freq="5min", tz="Asia/Shanghai")
+            ),
+            "close": [10.0, 10.1, 10.2, 11.0, 11.1],
+        }
+    )
+    assert latest_prev_day_close(df) == pytest.approx(10.2)
+    same_day = df.iloc[3:].reset_index(drop=True)
+    assert latest_prev_day_close(same_day) == 0.0
+
+
+def test_portfolio_backtest_limit_lock_blocks_intraday_limit_up_buy():
+    from chanlun.recursive_bt.engine import MarketRules
+    from chanlun.recursive_bt.portfolio import portfolio_backtest
+
+    # 两个交易日的 5m bar:day2 盘中逐步推到涨停(昨收 10.0 → 11.0 封板)。
+    # 信号在 10.8 的 bar,挂单在封板 bar 开盘 11.0:相对前一根 bar 只 +1.9%,
+    # 但相对**昨日收盘**是 +10% 涨停——实盘买不进,回测必须锁死。
+    # 旧实现用前一根 bar 收盘判定,会在涨停价照常成交。
+    dates = list(
+        pd.date_range("2026-01-05 09:30:00", periods=4, freq="5min", tz="Asia/Shanghai")
+    ) + list(
+        pd.date_range("2026-01-06 09:30:00", periods=4, freq="5min", tz="Asia/Shanghai")
+    )
+    px = np.array([10.0, 10.0, 10.0, 10.0, 10.5, 10.8, 11.0, 11.0])
+    syms = {
+        "A": {
+            "code": "SH.600000",
+            "dates": dates,
+            "open": px.copy(),
+            "close": px.copy(),
+            "d2i": {d: i for i, d in enumerate(dates)},
+            "small_by_bar": {5: [Signal(dates[5], 0, "3buy", 10.8)]},
+            "big_dir_at": ["neutral"] * len(dates),
+            "rules": MarketRules("A", commission=0.0, stamp_duty=0.0, t_plus=1, lot=100,
+                                 limit_pct=0.10),
+        }
+    }
+
+    result = portfolio_backtest(syms=syms, max_pos=1, require=("tech",), label="limit-up-buy")
+
+    assert result["trades"] == []
     from chanlun.recursive_bt.engine import MarketRules
     from chanlun.recursive_bt.portfolio import portfolio_backtest
 

@@ -370,6 +370,38 @@ class Result:
     trades: List["Trade"] = field(repr=False, default_factory=list)
 
 
+def prev_day_close_series(dates, closes) -> np.ndarray:
+    """逐 bar 的前一交易日收盘价(A股涨跌停判定基准)。
+
+    日线 bar=前一根收盘;分钟 bar=前一交易日最后一根收盘;首日无昨收为 NaN
+    (调用方视为不判)。涨跌停是「相对昨日收盘」的日内累计约束,分钟级回测
+    若用前一根 bar 收盘判定会恒失效(单根分钟 bar 涨不到 10%),涨停板上
+    照常成交,与实盘不一致。"""
+    closes_arr = np.asarray(closes, dtype=float)
+    n = len(closes_arr)
+    if n == 0:
+        return np.empty(0)
+    days = pd.DatetimeIndex(dates).normalize()
+    first_of_day = np.r_[True, (days[1:] != days[:-1])]
+    day_id = np.cumsum(first_of_day) - 1
+    last_close_per_day = closes_arr[np.r_[first_of_day[1:], np.array([True])]]
+    prev_per_day = np.r_[np.nan, last_close_per_day[:-1]]
+    return prev_per_day[day_id]
+
+
+def latest_prev_day_close(df: pd.DataFrame) -> float:
+    """实时 K 线窗口里最后 bar 所在交易日的前一交易日收盘;窗口内没有
+    昨日数据时返回 0.0(调用方视为不判涨跌停)。"""
+    if df is None or len(df) == 0:
+        return 0.0
+    dates = pd.to_datetime(df["date"])
+    last_day = dates.iloc[-1].normalize()
+    mask = dates.dt.normalize() < last_day
+    if not mask.any():
+        return 0.0
+    return float(df["close"][mask].iloc[-1])
+
+
 class Simulator:
     """单标的、单方向(暂只多头)逐bar撮合。进场在 pending bar 的开盘价成交。"""
 
@@ -382,13 +414,16 @@ class Simulator:
         self.lows = self.df["low"].to_numpy()
         self.closes = self.df["close"].to_numpy()
         self.dates = self.df["date"].to_list()
+        self.prev_day_closes = prev_day_close_series(self.dates, self.closes)
 
     def _limit_locked(self, i: int, side: str) -> bool:
-        """涨跌停锁死无法成交(简化:开盘价较前收触及限幅)。"""
+        """涨跌停锁死无法成交(开盘价较**前一交易日收盘**触及限幅)。"""
         lp = self.rules.limit_pct
         if lp is None or i == 0:
             return False
-        prev_close = self.closes[i - 1]
+        prev_close = self.prev_day_closes[i]
+        if not np.isfinite(prev_close) or prev_close <= 0:
+            return False
         chg = self.opens[i] / prev_close - 1
         if side == "buy" and chg >= lp * 0.995:    # 涨停买不进
             return True

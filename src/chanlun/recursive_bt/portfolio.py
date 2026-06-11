@@ -138,12 +138,20 @@ def _nest_filter_ok(sig) -> bool:
 
 
 def _limit_locked(s: dict, j: int, act: str) -> bool:
-    """A股涨跌停粗判，与 paper broker 保持一致。"""
+    """A股涨跌停判定:开盘价较**前一交易日收盘**触及限幅,与 paper broker 一致。
+    分钟级 bar 必须用昨日收盘而非前一根 bar 收盘——单根分钟 bar 涨不到 10%,
+    旧口径在涨停板上恒放行,与实盘不一致。"""
     lp = s["rules"].limit_pct
     if lp is None or j <= 0:
         return False
-    prev_close = s["close"][j - 1]
-    if prev_close == 0:
+    pdc = s.get("_prev_day_close")
+    if pdc is None:
+        from chanlun.recursive_bt.engine import prev_day_close_series
+
+        pdc = prev_day_close_series(s["dates"], s["close"])
+        s["_prev_day_close"] = pdc
+    prev_close = pdc[j]
+    if not np.isfinite(prev_close) or prev_close <= 0:
         return False
     chg = s["open"][j] / prev_close - 1
     if act == "buy" and chg >= lp * 0.995:
