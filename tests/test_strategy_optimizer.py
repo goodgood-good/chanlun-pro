@@ -478,6 +478,76 @@ def test_bs_point_regime_attribution_joins_daily_regimes(tmp_path):
     assert "Sell Points By Regime" in markdown
 
 
+def test_regime_ratio_impact_report_classifies_and_aggregates(tmp_path):
+    from chanlun.recursive_bt.strategy_optimizer import (
+        build_regime_ratio_impact_report,
+        render_regime_ratio_impact_markdown,
+    )
+
+    def write_summary(name, total, max_dd, sharpe=5.0, trades=1000, mults=None):
+        path = tmp_path / name
+        payload = {
+            "market": "a",
+            "total": total,
+            "max_dd": max_dd,
+            "sharpe": sharpe,
+            "trade_count": trades,
+        }
+        if mults:
+            payload["regime_bs_ratio_multipliers"] = mults
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        return path
+
+    default_mtf3 = write_summary("a_default.json", 0.6696, 0.0341)
+    default_all_a = write_summary("b_default.json", 1.2812, 0.0699)
+    boost_mtf3 = write_summary(
+        "a_boost.json", 0.6877, 0.0345, mults={"bear": {"3": 1.25}}
+    )
+    boost_all_a = write_summary(
+        "b_boost.json", 1.3300, 0.0690, mults={"bear": {"3": 1.25}}
+    )
+    reduce_mtf3 = write_summary(
+        "a_reduce.json", 0.6652, 0.0315, mults={"bull": {"1": 0.5}, "range": {"1": 0.5}}
+    )
+    mixed_keep = write_summary("a_mixed_keep.json", 0.6650, 0.0341, mults={"bear": {"3": 1.25}})
+    missing = tmp_path / "nope.json"
+
+    windows = [
+        {"market": "a", "candidate": "bear3_boost", "window": "a_mtf3_300",
+         "default_summary": default_mtf3, "candidate_summary": boost_mtf3},
+        {"market": "a", "candidate": "bear3_boost", "window": "a_all_5m30m_max30",
+         "default_summary": default_all_a, "candidate_summary": boost_all_a},
+        {"market": "a", "candidate": "weak1_reduce", "window": "a_mtf3_300",
+         "default_summary": default_mtf3, "candidate_summary": reduce_mtf3},
+        {"market": "a", "candidate": "mixed", "window": "w1",
+         "default_summary": default_mtf3, "candidate_summary": boost_mtf3},
+        {"market": "a", "candidate": "mixed", "window": "w2",
+         "default_summary": default_mtf3, "candidate_summary": mixed_keep},
+        {"market": "us", "candidate": "weak1_reduce", "window": "us_core9",
+         "default_summary": default_mtf3, "candidate_summary": missing},
+    ]
+
+    report = build_regime_ratio_impact_report(windows=windows)
+
+    rows = {(r["market"], r["candidate"], r["window"]): r for r in report["windows"]}
+    assert rows[("a", "bear3_boost", "a_mtf3_300")]["action"] == "review_regime_ratio"
+    assert rows[("a", "bear3_boost", "a_mtf3_300")]["multipliers"] == {"bear": {"3": 1.25}}
+    assert rows[("a", "bear3_boost", "a_all_5m30m_max30")]["action"] == "review_regime_ratio"
+    assert rows[("a", "weak1_reduce", "a_mtf3_300")]["action"] == "watch_defensive"
+
+    verdicts = {(v["market"], v["candidate"]): v for v in report["verdicts"]}
+    assert verdicts[("a", "bear3_boost")]["verdict"] == "review_regime_ratio"
+    assert verdicts[("a", "bear3_boost")]["positive_windows"] == 2
+    assert verdicts[("a", "weak1_reduce")]["verdict"] == "watch_defensive"
+    assert verdicts[("a", "mixed")]["verdict"] == "keep_default"
+    assert verdicts[("us", "weak1_reduce")]["verdict"] == "evidence_limited"
+    assert any(m["kind"] == "candidate_summary" for m in report["missing_sources"])
+
+    markdown = render_regime_ratio_impact_markdown(report)
+    assert "bear3_boost" in markdown
+    assert "review_regime_ratio" in markdown
+
+
 def test_bs_point_regime_policy_keeps_ratio_changes_review_only():
     regime_report = {
         "markets": [

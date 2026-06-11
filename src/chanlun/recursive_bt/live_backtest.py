@@ -552,6 +552,36 @@ def _load_bs_point_ratio_multipliers(args) -> dict[str, float]:
         return {}
 
 
+def _load_regime_bs_ratio_multipliers(args) -> dict:
+    """解析按行情(bull/range/bear)的买点比例乘数:内联 JSON 或文件路径。
+    形如 {"bear": {"3": 1.25}, "bull": {"1": 0.5}};非法行情键与非数值乘数被丢弃。"""
+    raw = str(getattr(args, "regime_bs_ratio_multipliers_json", "") or "").strip()
+    if not raw:
+        return {}
+    try:
+        if raw.startswith("{"):
+            data = json.loads(raw)
+        else:
+            with open(raw, "r", encoding="utf-8") as fp:
+                data = json.load(fp)
+    except Exception:
+        return {}
+    out: dict = {}
+    for regime, mults in (data or {}).items():
+        regime_key = str(regime).strip().lower()
+        if regime_key not in {"bull", "range", "bear"} or not isinstance(mults, dict):
+            continue
+        inner = {}
+        for cls, val in mults.items():
+            try:
+                inner[str(cls).strip()] = float(val)
+            except Exception:
+                continue
+        if inner:
+            out[regime_key] = inner
+    return out
+
+
 def _trade_rows(trades) -> list[dict]:
     rows = []
     for trade in trades:
@@ -615,6 +645,11 @@ def write_outputs(result: dict, args, syms: dict) -> tuple[str, str]:
         "bs_point_ratio_multipliers": dict(
             getattr(args, "bs_point_ratio_multipliers", {}) or {}
         ),
+        "regime_bs_ratio_multipliers": {
+            str(k): dict(v)
+            for k, v in (getattr(args, "regime_bs_ratio_multipliers", {}) or {}).items()
+        },
+        "regime_lookback_days": int(getattr(args, "regime_lookback_days", 20) or 20),
         "op_level": args.op_level,
         "big_level": args.big_level,
         "mid_level": args.mid_level,
@@ -695,6 +730,8 @@ def run_backtest(args) -> tuple[dict, dict]:
     args.requested_max_pos = args.max_pos
     args.max_pos = resolve_max_pos(args.max_pos, len(syms))
     args.bs_point_ratio_multipliers = _load_bs_point_ratio_multipliers(args)
+    args.regime_bs_ratio_multipliers = _load_regime_bs_ratio_multipliers(args)
+    args.regime_lookback_days = int(getattr(args, "regime_lookback_days", 20) or 20)
     args.sell_classes = tuple(getattr(args, "sell_classes", (1, 2, 3)) or (1, 2, 3))
     args.sell_ratio_overrides = dict(getattr(args, "sell_ratio_overrides", {}) or {})
     args.sell_ratio_override_scope = str(
@@ -726,6 +763,8 @@ def run_backtest(args) -> tuple[dict, dict]:
         regime_mode=args.regime_mode,
         mid_gate=args.mid_gate,
         bs_point_ratio_multipliers=args.bs_point_ratio_multipliers,
+        regime_bs_ratio_multipliers=args.regime_bs_ratio_multipliers,
+        regime_lookback_days=args.regime_lookback_days,
         sell_classes=set(args.sell_classes),
         sell_ratio_overrides=args.sell_ratio_overrides,
         sell_ratio_override_scope=args.sell_ratio_override_scope,
@@ -805,6 +844,13 @@ def make_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--big-gate", choices=("bsp", "trend"), default="bsp")
     parser.add_argument("--regime-mode", choices=("off", "adaptive"), default="off")
     parser.add_argument("--mid-gate", choices=("strict", "soft", "bull_relaxed"), default="strict")
+    parser.add_argument(
+        "--regime-bs-ratio-multipliers-json",
+        default="",
+        help='Inline JSON or file path, e.g. {"bear": {"3": 1.25}}: point-in-time '
+        "regime (bull/range/bear) buy-ratio multipliers by buy class",
+    )
+    parser.add_argument("--regime-lookback-days", type=int, default=20)
     parser.add_argument(
         "--bs-point-ratio-overrides-json",
         default=DEFAULT_BS_POINT_RATIO_OVERRIDES,

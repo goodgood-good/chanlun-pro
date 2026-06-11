@@ -226,6 +226,55 @@ def _apply_sell_ratio_override(
     return round(min(max(value, 0.0), 1.0), 4)
 
 
+def _bench_curve(syms, master, ml=None) -> np.ndarray:
+    """等权买入持有基准逐bar曲线。并集主时钟下停牌bar用最近价冻结(ml);
+    标的首个可用bar前视为现金(1.0)。"""
+    nrm = np.zeros(len(master))
+    cnt = 0
+    for name, s in syms.items():
+        if ml is not None:
+            li = ml[name]
+            valid = li >= 0
+            if not valid.any():
+                continue
+            base = s["open"][int(li[valid][0])]
+            seq = np.where(valid, s["close"][np.maximum(li, 0)] / base, 1.0)
+            nrm += seq
+            cnt += 1
+            continue
+        try:
+            idx = np.array([s["d2i"][t] for t in master])
+        except KeyError:
+            continue
+        nrm += s["close"][idx] / s["open"][s["d2i"][master[0]]]
+        cnt += 1
+    return nrm / max(cnt, 1)
+
+
+def _regime_by_date_lookup(master, bench, lookback_days: int = 20) -> Dict[object, str]:
+    """点时可见的日线行情状态查表:date -> bull/range/bear。
+    分类规则与 live_backtest 归因口径一致(20日基准涨跌±5%、回撤-5%/-10%),
+    但整体向后 shift 一个交易日:bar 当日查询到的是**截至前一交易日收盘**的
+    判定——实盘当日盘中看不到当日收盘,不 shift 就是前视。首日无前日,默认 range。"""
+    if len(master) < 2:
+        return {}
+    daily = (
+        pd.Series(np.asarray(bench, dtype=float), index=pd.to_datetime(master))
+        .resample("1D")
+        .last()
+        .dropna()
+    )
+    if len(daily) < 2:
+        return {}
+    rolling = daily.pct_change(lookback_days).fillna(0.0)
+    dd = daily / daily.cummax() - 1.0
+    regime = pd.Series("range", index=daily.index)
+    regime[(rolling >= 0.05) & (dd > -0.05)] = "bull"
+    regime[(rolling <= -0.05) | (dd <= -0.10)] = "bear"
+    shifted = regime.shift(1).fillna("range")
+    return {ts.date(): str(val) for ts, val in shifted.items()}
+
+
 def _big_dir_scope_ok(scope: str, big_dir: str) -> bool:
     scope = str(scope or "all").strip().lower()
     big_dir = str(big_dir or "neutral").strip().lower()
@@ -385,6 +434,8 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
                        regime_mode: str = "off",
                        mid_gate: str = "strict",
                        bs_point_ratio_multipliers: Optional[Mapping[str, float]] = None,
+                       regime_bs_ratio_multipliers: Optional[Mapping[str, Mapping[str, float]]] = None,
+                       regime_lookback_days: int = 20,
                        pool_schedule: Optional[list] = None,
                        slippage: float = 0.0,
                        t_start=None, t_end=None):
@@ -451,6 +502,15 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
             lasti[mi] = last
         mx[name] = exact
         ml[name] = lasti
+
+    # 等权基准曲线算一次:报告复用;若启用按行情比例乘数,再生成点时 regime 查表
+    # (查表值=截至前一交易日收盘的判定,主循环内只回看不前视)。
+    bench = _bench_curve(syms, master, ml)
+    regime_by_date = (
+        _regime_by_date_lookup(master, bench, regime_lookback_days)
+        if regime_bs_ratio_multipliers
+        else {}
+    )
 
     cash = init_cash
     positions: Dict[str, dict] = {}
@@ -726,6 +786,14 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
                     f"{cls}buy",
                     bs_point_ratio_multipliers,
                 )
+                if regime_by_date:
+                    ratio = _apply_buy_ratio_multiplier(
+                        ratio,
+                        f"{cls}buy",
+                        regime_bs_ratio_multipliers.get(
+                            regime_by_date.get(t.date(), "range")
+                        ),
+                    )
                 if ratio <= 0:
                     continue
                 cands.append((0 if daily_resonance else 1, pr, name, str(cls), ratio))
@@ -750,10 +818,10 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
     if positions:
         equity[-1] = cash
     flabel = market_filter if market_filter else ("大盘" if filt else None)
-    return _report(label, master, equity, trades, syms, flabel, ml=ml)
+    return _report(label, master, equity, trades, syms, flabel, ml=ml, bench=bench)
 
 
-def _report(label, master, equity, trades, syms, flabel, ml=None):
+def _report(label, master, equity, trades, syms, flabel, ml=None, bench=None):
     total = equity[-1] / equity[0] - 1
     peak = np.maximum.accumulate(equity)
     max_dd = float(np.max((peak - equity) / peak))
@@ -764,28 +832,10 @@ def _report(label, master, equity, trades, syms, flabel, ml=None):
     sharpe = float(np.mean(rets) / (np.std(rets) + 1e-12) * ann) if len(rets) else 0.0
     wins = sum(1 for t in trades if t.ret > 0)
     wr = wins / len(trades) if trades else 0.0
-    # 基准:等权买入持有(逐bar曲线,可算基准回撤对比风险)。并集主时钟下停牌bar用
-    # 最近价冻结(ml);标的首个可用bar前视为现金(1.0)。
-    nrm = np.zeros(len(master))
-    cnt = 0
-    for name, s in syms.items():
-        if ml is not None:
-            li = ml[name]
-            valid = li >= 0
-            if not valid.any():
-                continue
-            base = s["open"][int(li[valid][0])]
-            seq = np.where(valid, s["close"][np.maximum(li, 0)] / base, 1.0)
-            nrm += seq
-            cnt += 1
-            continue
-        try:
-            idx = np.array([s["d2i"][t] for t in master])
-        except KeyError:
-            continue
-        nrm += s["close"][idx] / s["open"][s["d2i"][master[0]]]
-        cnt += 1
-    bench = nrm / max(cnt, 1)
+    # 基准:等权买入持有(逐bar曲线,可算基准回撤对比风险)。组合回测主路径已
+    # 预计算并传入;独立调用 _report 时再算一次。
+    if bench is None:
+        bench = _bench_curve(syms, master, ml)
     bh = float(bench[-1] - 1)
     bpeak = np.maximum.accumulate(bench)
     bench_dd = float(np.max((bpeak - bench) / bpeak)) if len(bench) else 0.0

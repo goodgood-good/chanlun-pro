@@ -45,6 +45,27 @@ US_2026Q1_MTF3_SELL3_REBUY3_CANDIDATE_SUMMARY = (
 US_2026Q1_MTF3_SELL3_REBUY_MID3_CANDIDATE_SUMMARY = (
     "D:/chanlun_pro/reports/us_core9_mtf3_2026q1_sell3_rebuy_mid3_summary.json"
 )
+A_MTF3_REGIME_BEAR3BOOST_SUMMARY = (
+    "D:/chanlun_pro/reports/a_bt_mtf3_1m5m30m_regime_bear3boost_summary.json"
+)
+A_MTF3_REGIME_WEAK1REDUCE_SUMMARY = (
+    "D:/chanlun_pro/reports/a_bt_mtf3_1m5m30m_regime_weak1reduce_summary.json"
+)
+A_MTF3_REGIME_COMBO_SUMMARY = (
+    "D:/chanlun_pro/reports/a_bt_mtf3_1m5m30m_regime_combo_summary.json"
+)
+A_ALL_5M30M_DEFAULT_SUMMARY = (
+    "D:/chanlun_pro/reports/walk_forward_a_5m30m_all5145_max30_off_segments_summary.json"
+)
+A_ALL_5M30M_REGIME_BEAR3BOOST_SUMMARY = (
+    "D:/chanlun_pro/reports/walk_forward_a_5m30m_all5145_max30_off_regime_bear3boost_summary.json"
+)
+US_MTF3_REGIME_WEAK1REDUCE_SUMMARY = (
+    "D:/chanlun_pro/reports/us_core9_mtf3_regime_weak1reduce_summary.json"
+)
+US_2026Q1_MTF3_REGIME_WEAK1REDUCE_SUMMARY = (
+    "D:/chanlun_pro/reports/us_core9_mtf3_2026q1_regime_weak1reduce_summary.json"
+)
 
 
 @dataclass(frozen=True)
@@ -1308,6 +1329,279 @@ def default_bs_point_ratio_baseline_summary_path(market: str) -> Path:
     if path.name.endswith(suffix):
         return path.with_name(path.name[: -len(suffix)] + "_no_bs_override_summary.json")
     return path.with_name(path.stem + "_no_bs_override" + path.suffix)
+
+
+def default_regime_ratio_impact_windows() -> list[dict]:
+    """按行情比例乘数候选的默认证据窗口:同窗同参,仅乘数不同。"""
+    return [
+        {
+            "market": "a",
+            "candidate": "bear3_boost",
+            "window": "a_mtf3_300_1m5m30m",
+            "default_summary": A_MTF3_SELL3_REBUY_MID3_DEFAULT_SUMMARY,
+            "candidate_summary": A_MTF3_REGIME_BEAR3BOOST_SUMMARY,
+        },
+        {
+            "market": "a",
+            "candidate": "bear3_boost",
+            "window": "a_all_5m30m_max30",
+            "default_summary": A_ALL_5M30M_DEFAULT_SUMMARY,
+            "candidate_summary": A_ALL_5M30M_REGIME_BEAR3BOOST_SUMMARY,
+        },
+        {
+            "market": "a",
+            "candidate": "weak1_reduce",
+            "window": "a_mtf3_300_1m5m30m",
+            "default_summary": A_MTF3_SELL3_REBUY_MID3_DEFAULT_SUMMARY,
+            "candidate_summary": A_MTF3_REGIME_WEAK1REDUCE_SUMMARY,
+        },
+        {
+            "market": "a",
+            "candidate": "bear3boost_weak1reduce",
+            "window": "a_mtf3_300_1m5m30m",
+            "default_summary": A_MTF3_SELL3_REBUY_MID3_DEFAULT_SUMMARY,
+            "candidate_summary": A_MTF3_REGIME_COMBO_SUMMARY,
+        },
+        {
+            "market": "us",
+            "candidate": "weak1_reduce",
+            "window": "us_core9_current",
+            "default_summary": US_MTF3_DEFAULT_SUMMARY,
+            "candidate_summary": US_MTF3_REGIME_WEAK1REDUCE_SUMMARY,
+        },
+        {
+            "market": "us",
+            "candidate": "weak1_reduce",
+            "window": "us_core9_2026q1",
+            "default_summary": US_2026Q1_MTF3_DEFAULT_SUMMARY,
+            "candidate_summary": US_2026Q1_MTF3_REGIME_WEAK1REDUCE_SUMMARY,
+        },
+    ]
+
+
+def _regime_ratio_window_action(
+    delta_return: float,
+    delta_drawdown: float,
+    *,
+    review_dd_tolerance: float = 0.001,
+    defensive_dd_gain: float = -0.002,
+    defensive_ret_loss_limit: float = -0.02,
+) -> str:
+    if delta_return > 0 and delta_drawdown <= review_dd_tolerance:
+        return "review_regime_ratio"
+    if delta_return > 0:
+        return "watch_positive_tradeoff"
+    if delta_drawdown <= defensive_dd_gain and delta_return >= defensive_ret_loss_limit:
+        return "watch_defensive"
+    return "keep_default"
+
+
+def _regime_ratio_verdict(actions: list[str]) -> tuple[str, dict]:
+    positive = sum(1 for a in actions if a == "review_regime_ratio")
+    tradeoff = sum(1 for a in actions if a == "watch_positive_tradeoff")
+    defensive = sum(1 for a in actions if a == "watch_defensive")
+    negative = sum(1 for a in actions if a == "keep_default")
+    counts = {
+        "positive_windows": positive,
+        "tradeoff_windows": tradeoff,
+        "defensive_windows": defensive,
+        "negative_windows": negative,
+    }
+    if not actions:
+        return "evidence_limited", counts
+    if negative and (positive or tradeoff):
+        return "keep_default", counts
+    if positive >= 2:
+        return "review_regime_ratio", counts
+    if positive == 1:
+        return "watch_regime_ratio", counts
+    if defensive:
+        return "watch_defensive", counts
+    if tradeoff:
+        return "watch_positive_tradeoff", counts
+    return "keep_default", counts
+
+
+def build_regime_ratio_impact_report(
+    windows: Iterable[Mapping] | None = None,
+    *,
+    review_dd_tolerance: float = 0.001,
+    defensive_dd_gain: float = -0.002,
+    defensive_ret_loss_limit: float = -0.02,
+) -> dict:
+    """按行情(bull/range/bear)买点比例乘数候选的 impact 报告。
+
+    每个窗口都是同窗同参对照(仅乘数不同):正向窗口 >= 2 个才给出
+    `review_regime_ratio`,单窗口正向只能 `watch_regime_ratio`;
+    多窗口方向冲突一律保守回到 `keep_default`。不写 runtime overrides。"""
+    from chanlun.recursive_bt.market_runtime import normalize_market
+
+    if windows is None:
+        windows = default_regime_ratio_impact_windows()
+    rows: list[dict] = []
+    missing_sources: list[dict] = []
+    grouped: dict[tuple, list] = {}
+    for spec in windows:
+        market = normalize_market(str(spec.get("market", "a")))
+        candidate = str(spec.get("candidate", ""))
+        window = str(spec.get("window", ""))
+        default_path = Path(spec["default_summary"])
+        candidate_path = Path(spec["candidate_summary"])
+        default, default_reason = _load_summary_or_reason(default_path)
+        cand, cand_reason = _load_summary_or_reason(candidate_path)
+        grouped.setdefault((market, candidate), [])
+        if default_reason or cand_reason:
+            for kind, path, reason in (
+                ("default_summary", default_path, default_reason),
+                ("candidate_summary", candidate_path, cand_reason),
+            ):
+                if reason:
+                    missing_sources.append(
+                        {
+                            "market": market,
+                            "candidate": candidate,
+                            "window": window,
+                            "kind": kind,
+                            "path": str(path),
+                            "reason": reason,
+                        }
+                    )
+            continue
+        delta_return = float(cand.get("total") or 0.0) - float(default.get("total") or 0.0)
+        delta_drawdown = float(cand.get("max_dd") or 0.0) - float(default.get("max_dd") or 0.0)
+        action = _regime_ratio_window_action(
+            delta_return,
+            delta_drawdown,
+            review_dd_tolerance=review_dd_tolerance,
+            defensive_dd_gain=defensive_dd_gain,
+            defensive_ret_loss_limit=defensive_ret_loss_limit,
+        )
+        rows.append(
+            {
+                "market": market,
+                "candidate": candidate,
+                "window": window,
+                "multipliers": dict(cand.get("regime_bs_ratio_multipliers") or {}),
+                "default_return": float(default.get("total") or 0.0),
+                "candidate_return": float(cand.get("total") or 0.0),
+                "delta_return": delta_return,
+                "default_drawdown": float(default.get("max_dd") or 0.0),
+                "candidate_drawdown": float(cand.get("max_dd") or 0.0),
+                "delta_drawdown": delta_drawdown,
+                "default_sharpe": float(default.get("sharpe") or 0.0),
+                "candidate_sharpe": float(cand.get("sharpe") or 0.0),
+                "default_trades": int(default.get("trade_count") or 0),
+                "candidate_trades": int(cand.get("trade_count") or 0),
+                "action": action,
+                "default_summary": str(default_path),
+                "candidate_summary": str(candidate_path),
+            }
+        )
+        grouped[(market, candidate)].append(action)
+    verdicts = []
+    for (market, candidate), actions in sorted(grouped.items()):
+        verdict, counts = _regime_ratio_verdict(actions)
+        verdicts.append(
+            {
+                "market": market,
+                "candidate": candidate,
+                "verdict": verdict,
+                "windows": len(actions),
+                **counts,
+                "note": (
+                    "review_regime_ratio is research-grade evidence only; runtime "
+                    "overrides still require adoption gate and confirmation state"
+                ),
+            }
+        )
+    return {
+        "version": 1,
+        "generated_at": _dt.datetime.now().isoformat(timespec="seconds"),
+        "review_dd_tolerance": review_dd_tolerance,
+        "defensive_dd_gain": defensive_dd_gain,
+        "defensive_ret_loss_limit": defensive_ret_loss_limit,
+        "windows": rows,
+        "verdicts": verdicts,
+        "missing_sources": missing_sources,
+    }
+
+
+def write_regime_ratio_impact_report(
+    output_json: str | Path,
+    *,
+    output_markdown: str | Path | None = None,
+    windows: Iterable[Mapping] | None = None,
+) -> dict:
+    report = build_regime_ratio_impact_report(windows=windows)
+    output_json = Path(output_json)
+    output_json.parent.mkdir(parents=True, exist_ok=True)
+    output_json.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    if output_markdown is not None:
+        output_markdown = Path(output_markdown)
+        output_markdown.parent.mkdir(parents=True, exist_ok=True)
+        output_markdown.write_text(
+            render_regime_ratio_impact_markdown(report), encoding="utf-8"
+        )
+    return report
+
+
+def render_regime_ratio_impact_markdown(report: Mapping[str, object]) -> str:
+    lines = [
+        "# Chanlun Regime Buy-Ratio Impact Report",
+        "",
+        f"Generated: {report.get('generated_at', '')}",
+        "",
+        "| Market | Candidate | Window | Multipliers | Default Ret | Candidate Ret | Delta Ret | Default DD | Candidate DD | Delta DD | Default Sharpe | Candidate Sharpe | Action |",
+        "| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
+    ]
+    for row in report.get("windows", []) or []:
+        lines.append(
+            "| {market} | {candidate} | {window} | `{multipliers}` | {default_return:.2%} | {candidate_return:.2%} | {delta_return:+.2%} | {default_drawdown:.2%} | {candidate_drawdown:.2%} | {delta_drawdown:+.2%} | {default_sharpe:.2f} | {candidate_sharpe:.2f} | {action} |".format(
+                market=row.get("market", ""),
+                candidate=row.get("candidate", ""),
+                window=row.get("window", ""),
+                multipliers=json.dumps(row.get("multipliers") or {}, ensure_ascii=False),
+                default_return=float(row.get("default_return") or 0.0),
+                candidate_return=float(row.get("candidate_return") or 0.0),
+                delta_return=float(row.get("delta_return") or 0.0),
+                default_drawdown=float(row.get("default_drawdown") or 0.0),
+                candidate_drawdown=float(row.get("candidate_drawdown") or 0.0),
+                delta_drawdown=float(row.get("delta_drawdown") or 0.0),
+                default_sharpe=float(row.get("default_sharpe") or 0.0),
+                candidate_sharpe=float(row.get("candidate_sharpe") or 0.0),
+                action=row.get("action", ""),
+            )
+        )
+    lines.extend(
+        [
+            "",
+            "| Market | Candidate | Verdict | Windows | Positive | Tradeoff | Defensive | Negative |",
+            "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: |",
+        ]
+    )
+    for verdict in report.get("verdicts", []) or []:
+        lines.append(
+            "| {market} | {candidate} | {verdict} | {windows} | {positive_windows} | {tradeoff_windows} | {defensive_windows} | {negative_windows} |".format(
+                market=verdict.get("market", ""),
+                candidate=verdict.get("candidate", ""),
+                verdict=verdict.get("verdict", ""),
+                windows=int(verdict.get("windows") or 0),
+                positive_windows=int(verdict.get("positive_windows") or 0),
+                tradeoff_windows=int(verdict.get("tradeoff_windows") or 0),
+                defensive_windows=int(verdict.get("defensive_windows") or 0),
+                negative_windows=int(verdict.get("negative_windows") or 0),
+            )
+        )
+    missing = report.get("missing_sources", []) or []
+    if missing:
+        lines.extend(["", "## Missing Sources", ""])
+        for item in missing:
+            lines.append(
+                f"- {item.get('market', '')} {item.get('candidate', '')} {item.get('window', '')}: "
+                f"{item.get('kind', '')} `{item.get('path', '')}` ({item.get('reason', '')})"
+            )
+    lines.append("")
+    return "\n".join(lines)
 
 
 def build_bs_point_ratio_impact_report(
@@ -4585,6 +4879,14 @@ def make_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--bs-point-regime-policy-min-trades", type=int, default=30)
     parser.add_argument(
+        "--output-regime-ratio-impact-json",
+        default="D:/chanlun_pro/reports/strategy_regime_ratio_impact_report.json",
+    )
+    parser.add_argument(
+        "--output-regime-ratio-impact-markdown",
+        default="D:/chanlun_pro/reports/strategy_regime_ratio_impact_report.md",
+    )
+    parser.add_argument(
         "--output-market-regime-stress-json",
         default="D:/chanlun_pro/reports/strategy_market_regime_stress_report.json",
     )
@@ -4836,6 +5138,10 @@ def main(argv: Optional[list[str]] = None) -> int:
         markets=(args.market,) if args.market else ("a", "us"),
         min_regime_days=args.market_regime_min_days,
     )
+    write_regime_ratio_impact_report(
+        args.output_regime_ratio_impact_json,
+        output_markdown=args.output_regime_ratio_impact_markdown,
+    )
     wrote_us_2026q1_regime_stress = False
     us_2026q1_regime_report = None
     if args.market in (None, "", "us"):
@@ -4970,6 +5276,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     print(
         "bs_point_regime_policy_markdown="
         f"{args.output_bs_point_regime_policy_markdown}"
+    )
+    print(f"regime_ratio_impact={args.output_regime_ratio_impact_json}")
+    print(
+        "regime_ratio_impact_markdown="
+        f"{args.output_regime_ratio_impact_markdown}"
     )
     print(f"market_regime_stress={args.output_market_regime_stress_json}")
     print(

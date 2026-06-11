@@ -1349,6 +1349,123 @@ def test_portfolio_backtest_limits_3sell_reentry_lock_by_big_direction_scope():
     assert neutral["trades"][1].bs_type == "3"
 
 
+def test_portfolio_backtest_applies_regime_bs_ratio_multipliers_point_in_time():
+    from chanlun.recursive_bt.engine import MarketRules
+    from chanlun.recursive_bt.portfolio import portfolio_backtest
+
+    dates = list(pd.date_range("2026-01-01 15:00:00", periods=9, freq="1D", tz="Asia/Shanghai"))
+    px = np.array([10.0, 10.0, 10.0, 8.9, 8.9, 8.9, 8.9, 8.9, 8.9])
+
+    def make_symbol(code: str, signal_bar: int):
+        return {
+            "code": code,
+            "dates": dates,
+            "open": px.copy(),
+            "close": px.copy(),
+            "d2i": {d: i for i, d in enumerate(dates)},
+            "small_by_bar": {
+                signal_bar: [Signal(dates[signal_bar], 0, "3buy", float(px[signal_bar]))],
+                6: [Signal(dates[6], 0, "1sell", float(px[6]))],
+            },
+            "big_dir_at": ["neutral"] * len(dates),
+            "rules": MarketRules("US", commission=0.0, stamp_duty=0.0, t_plus=0, lot=1),
+        }
+
+    # 等权基准在 bar3 当日收盘跌至 0.89(回撤-11%),当日收盘才判 bear:
+    # X 的 3buy 在 bar3 当天,点时只能看到前一日 range,不允许放大;
+    # Y 的 3buy 在 bar4,前一交易日(bar3)收盘已判 bear,允许放大。
+    syms = {
+        "X": make_symbol("SPY.US", 3),
+        "Y": make_symbol("QQQ.US", 4),
+    }
+
+    boosted = portfolio_backtest(
+        syms=syms,
+        max_pos=2,
+        require=("tech",),
+        label="regime-bear3-boost",
+        regime_bs_ratio_multipliers={"bear": {"3": 1.25}},
+        regime_lookback_days=2,
+    )
+    plain = portfolio_backtest(
+        syms=syms,
+        max_pos=2,
+        require=("tech",),
+        label="regime-off",
+    )
+
+    boosted_by_code = {t.code: t for t in boosted["trades"]}
+    plain_by_code = {t.code: t for t in plain["trades"]}
+    assert boosted_by_code["SPY.US"].buy_ratio == pytest.approx(0.5)
+    assert boosted_by_code["QQQ.US"].buy_ratio == pytest.approx(0.625)
+    assert plain_by_code["SPY.US"].buy_ratio == pytest.approx(0.5)
+    assert plain_by_code["QQQ.US"].buy_ratio == pytest.approx(0.5)
+
+
+def test_live_backtest_passes_regime_bs_ratio_multipliers(monkeypatch):
+    from types import SimpleNamespace
+    from chanlun.recursive_bt import live_backtest
+
+    dates = list(pd.date_range("2026-01-01", periods=10, freq="5min"))
+    calls = {}
+
+    def fake_load_chart_cache_syms(*_args, **_kwargs):
+        return {
+            "QQQ.US": {
+                "code": "QQQ.US",
+                "dates": dates,
+                "d2i": {d: i for i, d in enumerate(dates)},
+                "small_by_bar": {},
+                "big_dir_at": ["neutral"] * len(dates),
+            }
+        }
+
+    def fake_portfolio_backtest(**kwargs):
+        calls["regime_multipliers"] = kwargs["regime_bs_ratio_multipliers"]
+        calls["regime_lookback_days"] = kwargs["regime_lookback_days"]
+        return {
+            "master": dates,
+            "total": 0.0,
+            "bh": 0.0,
+            "max_dd": 0.0,
+            "sharpe": 0.0,
+            "wr": 0.0,
+            "n": 0,
+            "trades": [],
+        }
+
+    monkeypatch.setattr(live_backtest, "load_chart_cache_syms", fake_load_chart_cache_syms)
+    monkeypatch.setattr(live_backtest.portfolio_mod, "portfolio_backtest", fake_portfolio_backtest)
+
+    args = SimpleNamespace(
+        market="us",
+        source="chart_cache",
+        codes="QQQ.US",
+        chart_cache="D:/cache",
+        pool_size=0,
+        op_level="1m",
+        big_level="30m",
+        mid_level="5m",
+        max_pos=9,
+        requested_max_pos=None,
+        start=None,
+        end=None,
+        buy_priority="3first",
+        require=("tech",),
+        big_gate="bsp",
+        regime_mode="off",
+        mid_gate="soft",
+        init_cash=1_000_000,
+        regime_bs_ratio_multipliers_json='{"bear": {"3": 1.25}, "bull": {"1": 0.5}}',
+    )
+
+    live_backtest.run_backtest(args)
+
+    assert calls["regime_multipliers"] == {"bear": {"3": 1.25}, "bull": {"1": 0.5}}
+    assert calls["regime_lookback_days"] == 20
+    assert args.regime_bs_ratio_multipliers == {"bear": {"3": 1.25}, "bull": {"1": 0.5}}
+
+
 def test_portfolio_backtest_can_require_mid_3buy_reentry_after_3sell():
     from chanlun.recursive_bt.engine import MarketRules
     from chanlun.recursive_bt.portfolio import portfolio_backtest
