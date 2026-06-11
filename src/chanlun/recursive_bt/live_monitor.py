@@ -37,12 +37,15 @@ from chanlun.recursive_bt.engine import (
 )
 from chanlun.recursive_bt.paper import BT_DATA, MAX_POS, PaperBroker, in_session
 from chanlun.recursive_bt.market_runtime import (
+    INDEX_BY_MARKET,
+    classify_visible_regime,
     default_ledger_path,
     default_monitor_state_path,
     load_chart_cache_klines,
     list_chart_cache_codes,
     merge_codes,
     normalize_code,
+    parse_regime_ratio_multipliers,
     normalize_market,
     parse_codes,
 )
@@ -62,6 +65,9 @@ RUNTIME_OVERRIDE_KEYS = {
     "trend_3boost",
     "sell_scope",
     "enable_selection_pool",
+    "regime_ratio_multipliers",
+    "regime_source_code",
+    "regime_lookback_days",
     "selection_require_three_systems",
     "selection_max_codes",
 }
@@ -474,6 +480,8 @@ def collect_monitor_events(
     nest_mode: str = "off",
     trend_3boost: bool = False,
     bs_point_ratio_multipliers: Mapping[str, float] | None = None,
+    regime_ratio_multipliers: Mapping[str, Mapping[str, float]] | None = None,
+    current_regime: str = "",
 ) -> List[MonitorEvent]:
     """Refresh states once and return strategy-compatible alert events."""
     if require_nest:
@@ -552,6 +560,14 @@ def collect_monitor_events(
                 )
                 if applied_multiplier != 1.0:
                     reason += f" + bs{cls}_ratio_x{applied_multiplier:.2f}"
+                if regime_ratio_multipliers and current_regime:
+                    buy_ratio, regime_multiplier = apply_bs_point_ratio_multiplier(
+                        buy_ratio,
+                        bs_type,
+                        regime_ratio_multipliers.get(current_regime),
+                    )
+                    if regime_multiplier != 1.0:
+                        reason += f" + regime_{current_regime}_x{regime_multiplier:.2f}"
                 buys.append(
                     MonitorEvent(
                         code=code,
@@ -846,6 +862,39 @@ def build_names(codes: Iterable[str], ex) -> dict[str, str]:
             info = None
         names[code] = (info or {}).get("name") or code
     return names
+
+
+_REGIME_CACHE: dict[tuple, str] = {}
+
+
+def current_visible_regime(
+    ex,
+    code: str,
+    lookback_days: int = 20,
+    today: Optional[_dt.date] = None,
+) -> str:
+    """实盘点时行情状态:用截至前一交易日收盘的日线判定 bull/range/bear。
+    当日未完成日线必须丢弃(盘中收盘不可见);取数失败或数据不足返回 range,
+    即不调整买入比例。同一 (code, 日期) 当天只取一次数。"""
+    today = today or _dt.date.today()
+    key = (str(code), str(today), int(lookback_days))
+    cached = _REGIME_CACHE.get(key)
+    if cached:
+        return cached
+    try:
+        klines = ex.klines(code, "d")
+        if klines is None or len(klines) == 0:
+            return "range"
+        dates = pd.to_datetime(klines["date"])
+        closes = klines["close"][[d.date() < today for d in dates]]
+        regime = classify_visible_regime(list(closes), lookback_days)
+    except Exception as exc:
+        fun.get_logger().warning(
+            f"[live_monitor] regime source fetch failed code={code}: {exc}"
+        )
+        return "range"
+    _REGIME_CACHE[key] = regime
+    return regime
 
 
 def market_is_open(ex, market: str, now: _dt.datetime) -> bool:
@@ -1306,8 +1355,17 @@ def send_runtime_override_notice(notifier, title: str, event: dict | None) -> bo
     return bool(notifier.send(f"{title} 策略覆盖", runtime_override_notice_lines(event)))
 
 
-def run_once(args, states: Dict[str, object], notifier, deduper, names=None, broker=None) -> int:
+def run_once(args, states: Dict[str, object], notifier, deduper, names=None, broker=None,
+             exchange=None) -> int:
     holdings = load_ledger_positions(args.ledger)
+    regime_multipliers = getattr(args, "regime_ratio_multipliers", None) or {}
+    current_regime = ""
+    if regime_multipliers and exchange is not None:
+        current_regime = current_visible_regime(
+            exchange,
+            getattr(args, "regime_source_code", "") or INDEX_BY_MARKET.get(args.market, ""),
+            int(getattr(args, "regime_lookback_days", 20) or 20),
+        )
     events = collect_monitor_events(
         states,
         names=names,
@@ -1320,6 +1378,8 @@ def run_once(args, states: Dict[str, object], notifier, deduper, names=None, bro
         nest_mode=args.nest_mode,
         trend_3boost=args.trend_3boost,
         bs_point_ratio_multipliers=getattr(args, "bs_point_ratio_multipliers", None),
+        regime_ratio_multipliers=regime_multipliers,
+        current_regime=current_regime,
     )
     fresh = fresh_monitor_events(events, deduper)
     sent = send_events(events, notifier, deduper, args.title)
@@ -1597,6 +1657,14 @@ def make_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sell3-rebuy3-up-impact-markdown")
     parser.add_argument("--regime-ratio-impact-json")
     parser.add_argument("--regime-ratio-impact-markdown")
+    parser.add_argument(
+        "--regime-ratio-multipliers-json",
+        default="",
+        help='Inline JSON or file path, e.g. {"bear": {"3": 1.25}}: point-in-time '
+        "regime buy-ratio multipliers (uses previous-day index close)",
+    )
+    parser.add_argument("--regime-source-code", default="")
+    parser.add_argument("--regime-lookback-days", type=int, default=20)
     parser.add_argument("--sell3-rebuy-mid3-impact-json")
     parser.add_argument("--sell3-rebuy-mid3-impact-markdown")
     parser.add_argument("--a-5m-sell3-rebuy3-impact-json")
@@ -1815,6 +1883,21 @@ def main(argv: Optional[list[str]] = None) -> int:
         or market_config.get("sell3_rebuy3_up_impact_json")
         or "D:/chanlun_pro/reports/strategy_sell3_rebuy3_up_impact_report.json"
     )
+    args.regime_ratio_multipliers = parse_regime_ratio_multipliers(
+        getattr(args, "regime_ratio_multipliers_json", "")
+        or market_config.get("regime_ratio_multipliers")
+        or {}
+    )
+    args.regime_source_code = str(
+        getattr(args, "regime_source_code", "")
+        or market_config.get("regime_source_code")
+        or INDEX_BY_MARKET.get(args.market, "")
+    )
+    args.regime_lookback_days = int(
+        getattr(args, "regime_lookback_days", 0)
+        or market_config.get("regime_lookback_days")
+        or 20
+    )
     args.regime_ratio_impact_json = str(
         getattr(args, "regime_ratio_impact_json", None)
         or market_config.get("regime_ratio_impact_json")
@@ -2017,7 +2100,7 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     if args.once:
         if args.force or market_is_open(ex, args.market, _dt.datetime.now()):
-            return 0 if run_once(args, states, notifier, deduper, names, broker) >= 0 else 1
+            return 0 if run_once(args, states, notifier, deduper, names, broker, exchange=ex) >= 0 else 1
         print("Outside trading session; use --force to scan anyway.")
         return 0
 
@@ -2030,7 +2113,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     while True:
         now = _dt.datetime.now()
         if args.force or market_is_open(ex, args.market, now):
-            run_once(args, states, notifier, deduper, names, broker)
+            run_once(args, states, notifier, deduper, names, broker, exchange=ex)
         time.sleep(_next_level_seconds(now, args.op_level))
 
 

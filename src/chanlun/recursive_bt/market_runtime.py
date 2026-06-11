@@ -2,11 +2,12 @@
 from __future__ import annotations
 
 import glob
+import json
 import os
 import pickle
 import re
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Iterable, Optional, Sequence
 
 import numpy as np
 import pandas as pd
@@ -37,6 +38,56 @@ def normalize_code(market: str, code: str) -> str:
     if market == "us":
         return code if code.endswith(".US") else f"{code}.US"
     return code
+
+
+def classify_visible_regime(daily_closes: Sequence[float], lookback_days: int = 20) -> str:
+    """日线行情状态分类:bull/range/bear,与回测 `_regime_by_date_lookup` 同规则。
+
+    输入必须是**截至前一交易日收盘**的日线收盘序列(实盘调用方负责丢掉当日
+    未完成日线);数据不足或异常一律返回 range(=不调整买入比例)。"""
+    closes = pd.Series([float(c) for c in daily_closes if c is not None]).dropna()
+    if len(closes) < 2:
+        return "range"
+    rolling = float(closes.pct_change(lookback_days).fillna(0.0).iloc[-1])
+    drawdown = float((closes / closes.cummax() - 1.0).iloc[-1])
+    if rolling <= -0.05 or drawdown <= -0.10:
+        return "bear"
+    if rolling >= 0.05 and drawdown > -0.05:
+        return "bull"
+    return "range"
+
+
+def parse_regime_ratio_multipliers(raw) -> dict:
+    """解析按行情的买点比例乘数:dict、内联 JSON 字符串或 JSON 文件路径。
+    形如 {"bear": {"3": 1.25}};非法行情键与非数值乘数被丢弃。"""
+    if isinstance(raw, dict):
+        data = raw
+    else:
+        text = str(raw or "").strip()
+        if not text:
+            return {}
+        try:
+            if text.startswith("{"):
+                data = json.loads(text)
+            else:
+                with open(text, "r", encoding="utf-8") as fp:
+                    data = json.load(fp)
+        except Exception:
+            return {}
+    out: dict = {}
+    for regime, mults in (data or {}).items():
+        regime_key = str(regime).strip().lower()
+        if regime_key not in {"bull", "range", "bear"} or not isinstance(mults, dict):
+            continue
+        inner = {}
+        for cls, val in mults.items():
+            try:
+                inner[str(cls).strip()] = float(val)
+            except Exception:
+                continue
+        if inner:
+            out[regime_key] = inner
+    return out
 
 
 def code_to_chart_prefix(market: str, code: str) -> str:

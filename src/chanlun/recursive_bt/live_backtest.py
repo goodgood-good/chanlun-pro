@@ -555,31 +555,11 @@ def _load_bs_point_ratio_multipliers(args) -> dict[str, float]:
 def _load_regime_bs_ratio_multipliers(args) -> dict:
     """解析按行情(bull/range/bear)的买点比例乘数:内联 JSON 或文件路径。
     形如 {"bear": {"3": 1.25}, "bull": {"1": 0.5}};非法行情键与非数值乘数被丢弃。"""
-    raw = str(getattr(args, "regime_bs_ratio_multipliers_json", "") or "").strip()
-    if not raw:
-        return {}
-    try:
-        if raw.startswith("{"):
-            data = json.loads(raw)
-        else:
-            with open(raw, "r", encoding="utf-8") as fp:
-                data = json.load(fp)
-    except Exception:
-        return {}
-    out: dict = {}
-    for regime, mults in (data or {}).items():
-        regime_key = str(regime).strip().lower()
-        if regime_key not in {"bull", "range", "bear"} or not isinstance(mults, dict):
-            continue
-        inner = {}
-        for cls, val in mults.items():
-            try:
-                inner[str(cls).strip()] = float(val)
-            except Exception:
-                continue
-        if inner:
-            out[regime_key] = inner
-    return out
+    from chanlun.recursive_bt.market_runtime import parse_regime_ratio_multipliers
+
+    return parse_regime_ratio_multipliers(
+        getattr(args, "regime_bs_ratio_multipliers_json", "")
+    )
 
 
 def _trade_rows(trades) -> list[dict]:

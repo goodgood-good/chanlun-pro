@@ -207,6 +207,97 @@ def test_collect_monitor_events_applies_confirmed_bs_point_ratio_multiplier():
     assert "bs3_ratio_x1.10" in events[0].reason
 
 
+def test_classify_visible_regime_rules():
+    from chanlun.recursive_bt.market_runtime import classify_visible_regime
+
+    flat = [10.0] * 30
+    assert classify_visible_regime(flat, lookback_days=20) == "range"
+    bull = [10.0] * 20 + [10.0 * (1 + 0.003 * i) for i in range(1, 21)]
+    assert classify_visible_regime(bull, lookback_days=20) == "bull"
+    bear = [10.0] * 20 + [10.0 * (1 - 0.004 * i) for i in range(1, 21)]
+    assert classify_visible_regime(bear, lookback_days=20) == "bear"
+    assert classify_visible_regime([10.0], lookback_days=20) == "range"
+    assert classify_visible_regime([], lookback_days=20) == "range"
+
+
+def test_collect_monitor_events_applies_regime_ratio_multiplier():
+    states = {
+        "A": _State([_Sig("3buy", price=12)], big_dir="neutral"),
+    }
+
+    bear_events = collect_monitor_events(
+        states,
+        max_pos=10,
+        regime_ratio_multipliers={"bear": {"3": 1.25}},
+        current_regime="bear",
+    )
+    range_events = collect_monitor_events(
+        states,
+        max_pos=10,
+        regime_ratio_multipliers={"bear": {"3": 1.25}},
+        current_regime="range",
+    )
+
+    assert bear_events[0].buy_ratio == 0.125
+    assert "regime_bear_x1.25" in bear_events[0].reason
+    assert range_events[0].buy_ratio == 0.1
+    assert "regime_" not in range_events[0].reason
+
+
+def test_current_visible_regime_drops_today_and_caches():
+    import pandas as pd
+    from chanlun.recursive_bt.live_monitor import _REGIME_CACHE, current_visible_regime
+
+    _REGIME_CACHE.clear()
+    today = pd.Timestamp("2026-06-11").date()
+    # 最后一根是 today 当日未完成 bar(收盘 99.0),必须被丢弃
+    dates = list(pd.date_range("2026-05-01", periods=21, freq="1D")) + [
+        pd.Timestamp("2026-06-11 15:00:00")
+    ]
+    closes = [10.0] * 20 + [8.9, 99.0]
+
+    class _ExToday:
+        def __init__(self):
+            self.calls = 0
+
+        def klines(self, code, freq):
+            self.calls += 1
+            return pd.DataFrame({"date": dates, "close": closes})
+
+    ex_today = _ExToday()
+    regime = current_visible_regime(ex_today, "SH.000001", lookback_days=2, today=today)
+    # 当日 99.0 被丢弃,可见序列止于 8.9:2 日回看 -11% => bear
+    assert regime == "bear"
+    assert current_visible_regime(ex_today, "SH.000001", lookback_days=2, today=today) == "bear"
+    assert ex_today.calls == 1  # 第二次命中按日缓存
+
+    class _Broken:
+        def klines(self, code, freq):
+            raise RuntimeError("boom")
+
+    _REGIME_CACHE.clear()
+    assert current_visible_regime(_Broken(), "SH.000001", lookback_days=2, today=today) == "range"
+
+
+def test_live_monitor_cli_accepts_regime_ratio_switches():
+    from chanlun.recursive_bt.live_monitor import make_arg_parser
+
+    args = make_arg_parser().parse_args(
+        [
+            "--regime-ratio-multipliers-json",
+            '{"bear": {"3": 1.25}}',
+            "--regime-source-code",
+            "SH.000001",
+            "--regime-lookback-days",
+            "20",
+        ]
+    )
+
+    assert args.regime_ratio_multipliers_json == '{"bear": {"3": 1.25}}'
+    assert args.regime_source_code == "SH.000001"
+    assert args.regime_lookback_days == 20
+
+
 def test_collect_monitor_events_blocks_buy_when_mid_level_is_down():
     states = {
         "A": _State(
