@@ -244,6 +244,33 @@ def test_collect_monitor_events_applies_regime_ratio_multiplier():
     assert "regime_" not in range_events[0].reason
 
 
+def test_regime_ratio_review_status_counts_market_verdicts(tmp_path):
+    from chanlun.recursive_bt.live_monitor import regime_ratio_review_status
+
+    report = tmp_path / "regime_ratio_impact.json"
+    report.write_text(
+        json.dumps(
+            {
+                "verdicts": [
+                    {"market": "a", "candidate": "bear3_boost", "verdict": "review_regime_ratio"},
+                    {"market": "a", "candidate": "combo", "verdict": "review_regime_ratio"},
+                    {"market": "a", "candidate": "weak1_reduce", "verdict": "watch_defensive"},
+                    {"market": "us", "candidate": "weak1_reduce", "verdict": "keep_default"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    a_status = regime_ratio_review_status(str(report), "a")
+    us_status = regime_ratio_review_status(str(report), "us")
+
+    assert a_status["review_regime_ratio"] == 2
+    assert a_status["watch_defensive"] == 1
+    assert us_status["keep_default"] == 1
+    assert regime_ratio_review_status(str(tmp_path / "missing.json"), "a") == {}
+
+
 def test_current_visible_regime_drops_today_and_caches():
     import pandas as pd
     from chanlun.recursive_bt.live_monitor import _REGIME_CACHE, current_visible_regime

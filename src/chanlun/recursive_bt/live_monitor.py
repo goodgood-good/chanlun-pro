@@ -864,6 +864,33 @@ def build_names(codes: Iterable[str], ex) -> dict[str, str]:
     return names
 
 
+def regime_ratio_review_status(path: str, market: str) -> dict:
+    """读取 regime 比例 impact 报告,按市场统计 verdict 分布。只读巡检,不应用乘数。"""
+    if not path or not Path(path).exists():
+        return {}
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    out = {
+        "review_regime_ratio": 0,
+        "watch_regime_ratio": 0,
+        "watch_defensive": 0,
+        "watch_positive_tradeoff": 0,
+        "keep_default": 0,
+        "evidence_limited": 0,
+    }
+    matched = False
+    for verdict in data.get("verdicts", []) or []:
+        if str(verdict.get("market", "")) != market:
+            continue
+        key = str(verdict.get("verdict", ""))
+        if key in out:
+            out[key] += 1
+            matched = True
+    return out if matched else {}
+
+
 _REGIME_CACHE: dict[tuple, str] = {}
 
 
@@ -1488,6 +1515,20 @@ def run_once(args, states: Dict[str, object], notifier, deduper, names=None, bro
                 f" opt_regime_watch={regime_status.get('watch_regime_candidate', 0)}"
                 f" opt_regime_default={regime_status.get('keep_default', 0)}"
                 f" opt_regime_limited={regime_status.get('evidence_limited', 0)}"
+            )
+        ratio_status = regime_ratio_review_status(
+            getattr(args, "regime_ratio_impact_json", ""),
+            normalize_market(getattr(args, "market", "a")),
+        )
+        if ratio_status:
+            watch_total = (
+                ratio_status.get("watch_regime_ratio", 0)
+                + ratio_status.get("watch_defensive", 0)
+                + ratio_status.get("watch_positive_tradeoff", 0)
+            )
+            optimization_status += (
+                f" opt_rratio_review={ratio_status.get('review_regime_ratio', 0)}"
+                f" opt_rratio_watch={watch_total}"
             )
     print(
         f"[{_dt.datetime.now():%Y-%m-%d %H:%M:%S}] "
