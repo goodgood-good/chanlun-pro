@@ -63,6 +63,9 @@ A_GEM = MarketRules("A股创业板", commission=0.0003, stamp_duty=0.0005,
                     t_plus=1, allow_short=False, lot=100, limit_pct=0.20)
 A_BJ = MarketRules("A股北交所", commission=0.0003, stamp_duty=0.0005,
                    t_plus=1, allow_short=False, lot=100, limit_pct=0.30)
+# 主板 ST/*ST ±5%;创业板/科创板 ST 涨跌幅仍 20%(沿用 A_GEM),北交所无 ST 制度
+A_ST = MarketRules("A股主板ST", commission=0.0003, stamp_duty=0.0005,
+                   t_plus=1, allow_short=False, lot=100, limit_pct=0.05)
 US_STOCK = MarketRules("美股", commission=0.0001, stamp_duty=0.0,
                        t_plus=0, allow_short=True, lot=1, limit_pct=None)
 

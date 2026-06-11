@@ -13,7 +13,7 @@ import numpy as np
 import pandas as pd
 
 from chanlun import config as app_config
-from chanlun.recursive_bt.engine import A_BJ, A_GEM, A_STOCK, US_STOCK, MarketRules
+from chanlun.recursive_bt.engine import A_BJ, A_GEM, A_ST, A_STOCK, US_STOCK, MarketRules
 
 CHART_CACHE_DIR = "D:/chanlun_pro/chart_cache"
 _MONITOR_CONFIG = getattr(app_config, "RECURSIVE_MONITOR_CONFIG", {})
@@ -110,7 +110,28 @@ def chart_prefix_to_code(market: str, prefix: str) -> str:
     return f"{parts[0]}.{parts[1]}" if len(parts) == 2 else body
 
 
-def market_rules_for_code(market: str, code: str) -> MarketRules:
+_ST_LIST_CACHE: Optional[dict] = None
+
+
+def st_limit_codes(path: Optional[str] = None) -> dict:
+    """主板 ST/*ST 名单({code: name},±5% 涨跌停),来自 `_st_list.json`
+    (`fetch.py st_list` 用 QMT 名称构建)。文件缺失返回空=不覆盖。
+    名单按当前名称近似:戴帽/摘帽时点未追溯,回测一年窗口内偏差有限。"""
+    global _ST_LIST_CACHE
+    if _ST_LIST_CACHE is not None and path is None:
+        return _ST_LIST_CACHE
+    target = Path(path) if path else Path(BT_DATA_DIR) / "_st_list.json"
+    try:
+        data = json.loads(target.read_text(encoding="utf-8"))
+        out = {str(k): str(v) for k, v in (data or {}).items()}
+    except Exception:
+        out = {}
+    if path is None:
+        _ST_LIST_CACHE = out
+    return out
+
+
+def market_rules_for_code(market: str, code: str, name: str = "") -> MarketRules:
     market = normalize_market(market)
     if market == "us":
         return US_STOCK
@@ -122,6 +143,9 @@ def market_rules_for_code(market: str, code: str) -> MarketRules:
         return A_BJ
     if num[:3] in ("688", "300", "301"):
         return A_GEM
+    # 主板 ST ±5%:显式名称优先,其次 _st_list.json 名单
+    if "ST" in (name or "").upper() or norm in st_limit_codes():
+        return A_ST
     return A_STOCK
 
 

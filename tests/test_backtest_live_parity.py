@@ -1443,6 +1443,74 @@ def test_latest_prev_day_close_uses_previous_session():
     assert latest_prev_day_close(same_day) == 0.0
 
 
+def test_market_rules_for_code_st_main_board_uses_5pct():
+    from chanlun.recursive_bt.market_runtime import market_rules_for_code
+
+    assert market_rules_for_code("a", "SH.600000", name="ST海航").limit_pct == 0.05
+    assert market_rules_for_code("a", "SZ.000001", name="*ST凯撒").limit_pct == 0.05
+    # 主板非 ST 仍 10%
+    assert market_rules_for_code("a", "SH.600000", name="浦发银行").limit_pct == 0.10
+    # 创业板/科创板 ST 涨跌幅仍 20%,北交所无 ST 制度
+    assert market_rules_for_code("a", "SZ.300001", name="ST特锐德").limit_pct == 0.20
+    assert market_rules_for_code("a", "SH.688001", name="*ST华兴").limit_pct == 0.20
+    assert market_rules_for_code("a", "BJ.920111", name="ST某某").limit_pct == 0.30
+
+
+def test_build_st_list_filters_main_board_st_only(tmp_path):
+    from chanlun.recursive_bt.fetch import build_st_list
+
+    names = {
+        "SH.600001": "ST海航",
+        "SH.600002": "浦发银行",
+        "SZ.000003": "*ST凯撒",
+        "SZ.300001": "ST特锐德",   # 创业板 ST 仍 20%,不入名单
+        "BJ.920111": "ST北证",     # 北交所无 ST 制度,不入名单
+    }
+    out_path = tmp_path / "_st_list.json"
+
+    result = build_st_list(
+        str(out_path),
+        codes=list(names),
+        detail_fn=lambda code: {"InstrumentName": names[code]},
+    )
+
+    assert result == {"SH.600001": "ST海航", "SZ.000003": "*ST凯撒"}
+    assert json.loads(out_path.read_text(encoding="utf-8")) == result
+
+
+def test_load_cached_applies_st_limit_from_list(tmp_path, monkeypatch):
+    from chanlun.recursive_bt import portfolio as portfolio_mod
+    from chanlun.recursive_bt import market_runtime as runtime_mod
+
+    dates = list(pd.date_range("2026-01-05", periods=3, freq="1D", tz="Asia/Shanghai"))
+    payload = {
+        "code": "SH.600001",
+        "dates": dates,
+        "open": np.full(3, 10.0),
+        "close": np.full(3, 10.0),
+        "small_by_bar": {},
+        "big_dir_at": ["neutral"] * 3,
+        "limit_pct": 0.10,
+    }
+    with open(tmp_path / "SH.600001.pkl", "wb") as fp:
+        pickle.dump(payload, fp)
+    with open(tmp_path / "SH.600002.pkl", "wb") as fp:
+        pickle.dump({**payload, "code": "SH.600002"}, fp)
+    (tmp_path / "_st_list.json").write_text(
+        json.dumps({"SH.600001": "ST示例"}), encoding="utf-8"
+    )
+
+    monkeypatch.setattr(portfolio_mod, "BT_DATA", str(tmp_path))
+    monkeypatch.setattr(runtime_mod, "_ST_LIST_CACHE", None)
+    monkeypatch.setattr(runtime_mod, "BT_DATA_DIR", str(tmp_path))
+
+    st = portfolio_mod.load_cached("SH.600001")
+    normal = portfolio_mod.load_cached("SH.600002")
+
+    assert st["rules"].limit_pct == 0.05
+    assert normal["rules"].limit_pct == 0.10
+
+
 def test_portfolio_backtest_limit_lock_blocks_intraday_limit_up_buy():
     from chanlun.recursive_bt.engine import MarketRules
     from chanlun.recursive_bt.portfolio import portfolio_backtest

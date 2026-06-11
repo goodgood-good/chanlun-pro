@@ -487,8 +487,43 @@ def patch_nest_annotations(
     print(f"完成 ok={ok} skip={skip} fail={fail} {time.time()-t0:.0f}s")
 
 
+def build_st_list(out_path: str, codes=None, detail_fn=None) -> dict:
+    """构建主板 ST/*ST 名单 `_st_list.json`({code: name},±5% 涨跌停)。
+    创业板/科创板 ST 涨跌幅仍 20%、北交所无 ST 制度,均不入名单。
+    按当前名称近似(戴帽/摘帽时点未追溯)。"""
+    from chanlun.recursive_bt.market_runtime import ashare_board
+
+    if detail_fn is None:
+        from xtquant import xtdata
+
+        def detail_fn(code):
+            num, mkt = code.split(".")[1], code.split(".")[0]
+            return xtdata.get_instrument_detail(f"{num}.{mkt}") or {}
+
+    if codes is None:
+        codes = universe_all_a()
+    out = {}
+    for code in codes:
+        if ashare_board(code) != "main":
+            continue
+        try:
+            name = str((detail_fn(code) or {}).get("InstrumentName") or "")
+        except Exception:
+            continue
+        if "ST" in name.upper():
+            out[code] = name
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    with open(out_path, "w", encoding="utf-8") as fp:
+        json.dump(out, fp, ensure_ascii=False, indent=1)
+    print(f"st_list: {len(out)} codes -> {out_path}")
+    return out
+
+
 def main():
     arg = sys.argv[1] if len(sys.argv) > 1 else ""
+    if arg == "st_list":
+        build_st_list(f"{OUT_ALL_A}/_st_list.json")
+        return
     if arg == "nest_all_a":
         limit = int(sys.argv[2]) if len(sys.argv) > 2 else None
         patch_nest_annotations(OUT_ALL_A, limit=limit)

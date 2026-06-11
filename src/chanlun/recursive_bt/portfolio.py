@@ -318,9 +318,14 @@ def load_cached(code: str) -> Optional[dict]:
         return None
     d = pickle.load(open(p, "rb"))
     d["name"] = code
+    limit = d.get("limit_pct", 0.10)
+    # 主板 ST/*ST ±5%(_st_list.json 名单,fetch st_list 构建);创业/科创 ST 仍 20%
+    from chanlun.recursive_bt.market_runtime import st_limit_codes
+    if code in st_limit_codes():
+        limit = 0.05
     d["rules"] = MarketRules("A股", commission=0.0003, stamp_duty=0.0005,
                              t_plus=1, allow_short=False, lot=100,
-                             limit_pct=d.get("limit_pct", 0.10))
+                             limit_pct=limit)
     d["d2i"] = {dt: i for i, dt in enumerate(d["dates"])}
     # 大级别走势方向(walk-forward 当下笔方向,fetch *_trend 补):周线无买卖点时门控的替代。
     # wf 口径事件=「该bar收盘时可见」→ 次日(下一bar)生效即可;TREND_DELAY 默认 1 天。
