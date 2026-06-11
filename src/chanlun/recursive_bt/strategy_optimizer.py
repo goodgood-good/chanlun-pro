@@ -63,6 +63,12 @@ A_ALL_5M30M_REGIME_BEAR3BOOST_SUMMARY = (
 A_ALL_5M30M_REGIME_COMBO_SUMMARY = (
     "D:/chanlun_pro/reports/walk_forward_a_5m30m_all5145_max30_off_regime_combo_summary.json"
 )
+A_MTF3_REGIME_COMBO_B140_SUMMARY = (
+    "D:/chanlun_pro/reports/a_bt_mtf3_1m5m30m_regime_combo_b140_summary.json"
+)
+A_ALL_5M30M_REGIME_COMBO_B140_SUMMARY = (
+    "D:/chanlun_pro/reports/walk_forward_a_5m30m_all5145_max30_off_regime_combo_b140_summary.json"
+)
 US_MTF3_REGIME_WEAK1REDUCE_SUMMARY = (
     "D:/chanlun_pro/reports/us_core9_mtf3_regime_weak1reduce_summary.json"
 )
@@ -1371,6 +1377,20 @@ def default_regime_ratio_impact_windows() -> list[dict]:
             "window": "a_all_5m30m_max30",
             "default_summary": A_ALL_5M30M_DEFAULT_SUMMARY,
             "candidate_summary": A_ALL_5M30M_REGIME_COMBO_SUMMARY,
+        },
+        {
+            "market": "a",
+            "candidate": "combo_bear3x140",
+            "window": "a_mtf3_300_1m5m30m",
+            "default_summary": A_MTF3_SELL3_REBUY_MID3_DEFAULT_SUMMARY,
+            "candidate_summary": A_MTF3_REGIME_COMBO_B140_SUMMARY,
+        },
+        {
+            "market": "a",
+            "candidate": "combo_bear3x140",
+            "window": "a_all_5m30m_max30",
+            "default_summary": A_ALL_5M30M_DEFAULT_SUMMARY,
+            "candidate_summary": A_ALL_5M30M_REGIME_COMBO_B140_SUMMARY,
         },
         {
             "market": "us",
