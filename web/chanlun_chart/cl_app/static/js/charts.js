@@ -1657,16 +1657,27 @@ class ChartManager {
             if (cfg[toggleKey] === false) continue;
             for (const zs of lvObj.zss) recZss.push({ ...zs, _level: lvl });
         }
-        // includeOverlaps=false(末参):中枢框只在「头部(左沿)进入可视窗」时创建,与 xd_zss 一致。
-        // 原 true(tailTime>=from)会渲染头部在窗外的宽框,但 TV createMultipointShape 把窗外/未加载的
-        // 头部角点 snap 到边缘 → 框塌成方块/错位,且被 reconcile 按 key 留存,只有 toggle 删重建才恢复
-        // (用户反馈「缩放后中枢错位、重勾才正常」)。改 false:宽框需左沿在视野内才显(缩放使左沿出界
-        // 会暂隐,但绝不错位);左沿回到视野自动补绘。
+        // includeOverlaps=true + 左沿 clamp:高级别(5m/30m)中枢框跨度数周~数月,其左沿
+        // 几乎恒在可视窗之前——曾用 false(只渲染左沿入窗的框)导致大级别中枢**永不显示**
+        // (2026-06-11 浏览器实测 recursive_zss 容器恒 0,「图上看不到 30m 中枢」前端真凶)。
+        // 历史教训(为何当初改 false):TV createMultipointShape 把**未加载范围外**的角点
+        // snap 到边缘 → 框塌成方块/错位。两全:渲染前把窗外左沿 clamp 到 from(已加载窗口
+        // 左缘,必已加载)→ 框显示右段、角点不 snap 不错位;滚动使真实左沿入窗后自动恢复
+        // (from 变化 → 签名守卫失效 → 重建,makeKey 基于原始 item、key 稳定)。
+        const clampHeadToFrom = (item) => {
+            if (!Array.isArray(item.points)) return item;
+            let needClamp = false;
+            const pts = item.points.map(p => {
+                if (p && p.time < from) { needClamp = true; return { ...p, time: from }; }
+                return p;
+            });
+            return needClamp ? { ...item, points: pts } : item;
+        };
         this.reconcile('recursive_zss', recZss, from, symbolKey, (item) => {
             const lvl = item._level || 0;
             const color = RECURSIVE_LEVEL_COLORS[lvl % RECURSIVE_LEVEL_COLORS.length];
-            return safeCreate(wrapZs(color, lvl === 0 ? 1 : 2)(item), 'rec_zs');
-        }, false, false);
+            return safeCreate(wrapZs(color, lvl === 0 ? 1 : 2)(clampHeadToFrom(item)), 'rec_zs');
+        }, false, true);
         // P7 higher_zs 已停用(后端不再产出)。保留空路径防旧 cache 残留数据报错;
         // 内存缓存可能短暂命中旧 higher_zs(此时已无 per-period 开关可关),重启服务/清缓存后消失。
         if (barsResult.higher_zs && barsResult.higher_zs.length) {
