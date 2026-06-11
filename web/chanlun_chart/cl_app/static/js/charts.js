@@ -1114,6 +1114,11 @@ class ChartManager {
                     'zs_bi', 'mmd_bi', 'mmd_xd', 'bc_bi', 'bc_xd',
                     // 中枢按周期级别:zs_xd(L0本周期线段中枢) + zs_L1/zs_L2/zs_L3(P8扩展高级别),随数据动态
                     ..._zsLevels.map((L) => L.key),
+                    // Recursive higher-level signal toggles are generated dynamically.
+                    // Without these handlers, mmd_L*/bc_L* checkboxes render but do
+                    // not save config or trigger a redraw.
+                    ..._mmdLevels.slice(1).map((L) => L.key),
+                    ..._bcLevels.slice(1).map((L) => L.key),
                 ];
                 keys.forEach(k => {
                     $('#' + cbId(k)).change(function () {

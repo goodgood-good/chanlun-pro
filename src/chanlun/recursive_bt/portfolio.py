@@ -14,13 +14,17 @@ from __future__ import annotations
 import os
 import sys
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict, List, Mapping, Optional
 
 import numpy as np
 import pandas as pd
 
+from chanlun import config as app_config
 from chanlun.recursive_bt.engine import (
     load_klines, collect_branch_signals, CL_CFG, SYMBOLS, MTFStrategy,
+    buy_class,
+    recommended_buy_ratio,
+    recommended_sell_ratio,
 )
 from chanlun.core.cl import CL
 
@@ -35,6 +39,16 @@ class PTrade:
     ret: float
     bs_type: str
     reason: str = ""
+    exit_bs_type: str = ""
+    sell_ratio: float = 1.0
+    shares: float = 0.0
+    post_exit_bars: int = 0
+    post_exit_ret_5: float = 0.0
+    post_exit_ret_20: float = 0.0
+    post_exit_ret_60: float = 0.0
+    post_exit_mfe_20: float = 0.0
+    post_exit_mae_20: float = 0.0
+    buy_ratio: float = 0.0
 
 
 def prep(name: str) -> dict:
@@ -68,7 +82,174 @@ def _sells_at(s: dict, j: int):
     return [x for x in s["small_by_bar"].get(j, []) if x.is_sell]
 
 
-BT_DATA = os.environ.get("BT_DATA_DIR", "D:/chanlun_pro/bt_data")
+def _mid_buys_at(s: dict, j: int):
+    return [x for x in s.get("mid_by_bar", {}).get(j, []) if x.is_buy]
+
+
+def _pick_buy_class(buys, buy_priority: str) -> int:
+    classes = [buy_class(getattr(x, "bs_type", "")) for x in buys]
+    classes = [c for c in classes if c in (1, 2, 3)]
+    if not classes:
+        return 0
+    return max(classes) if buy_priority == "3first" else min(classes)
+
+
+def _pick_buy_signal(buys, buy_priority: str):
+    ranked = []
+    for idx, sig in enumerate(buys):
+        cls = buy_class(getattr(sig, "bs_type", ""))
+        if cls not in (1, 2, 3):
+            continue
+        pr = -cls if buy_priority == "3first" else cls
+        ranked.append((pr, idx, sig))
+    if not ranked:
+        return None
+    ranked.sort()
+    return ranked[0][2]
+
+
+def _pick_sell_signal(sells):
+    ranked = []
+    for idx, sig in enumerate(sells):
+        cls = buy_class(getattr(sig, "bs_type", ""))
+        if cls not in (1, 2, 3):
+            continue
+        ranked.append((cls, idx, sig))
+    if not ranked:
+        return None
+    ranked.sort()
+    return ranked[0][2]
+
+
+def _filter_sell_signals(sells, sell_classes: Optional[set[int]] = None):
+    if sell_classes is None:
+        return list(sells)
+    allowed = {int(cls) for cls in sell_classes if int(cls) in (1, 2, 3)}
+    if not allowed:
+        return []
+    return [sig for sig in sells if buy_class(getattr(sig, "bs_type", "")) in allowed]
+
+
+def _nest_filter_ok(sig) -> bool:
+    cls = buy_class(getattr(sig, "bs_type", ""))
+    if cls in (1, 2):
+        return getattr(sig, "nest_operable", None) is True
+    return True
+
+
+def _limit_locked(s: dict, j: int, act: str) -> bool:
+    """A股涨跌停粗判，与 paper broker 保持一致。"""
+    lp = s["rules"].limit_pct
+    if lp is None or j <= 0:
+        return False
+    prev_close = s["close"][j - 1]
+    if prev_close == 0:
+        return False
+    chg = s["open"][j] / prev_close - 1
+    if act == "buy" and chg >= lp * 0.995:
+        return True
+    if act == "sell" and chg <= -lp * 0.995:
+        return True
+    return False
+
+
+def _post_exit_stats(syms: dict, ml: Dict[str, np.ndarray], name: str, m: int, exit_px: float) -> dict:
+    stats = {
+        "post_exit_bars": 0,
+        "post_exit_ret_5": 0.0,
+        "post_exit_ret_20": 0.0,
+        "post_exit_ret_60": 0.0,
+        "post_exit_mfe_20": 0.0,
+        "post_exit_mae_20": 0.0,
+    }
+    if exit_px <= 0:
+        return stats
+    li = ml.get(name)
+    s = syms.get(name)
+    if li is None or s is None:
+        return stats
+    closes: list[float] = []
+    end = min(len(li), m + 61)
+    for mm in range(m + 1, end):
+        idx = int(li[mm])
+        if idx < 0:
+            continue
+        closes.append(float(s["close"][idx]))
+    stats["post_exit_bars"] = len(closes)
+    for horizon in (5, 20, 60):
+        if len(closes) >= horizon:
+            stats[f"post_exit_ret_{horizon}"] = closes[horizon - 1] / exit_px - 1
+    window = closes[:20]
+    if window:
+        stats["post_exit_mfe_20"] = max(window) / exit_px - 1
+        stats["post_exit_mae_20"] = min(window) / exit_px - 1
+    return stats
+
+
+def _apply_buy_ratio_multiplier(
+    ratio: float,
+    bs_type: str,
+    multipliers: Optional[Mapping[str, float]] = None,
+) -> float:
+    cls = str(buy_class(bs_type) or "")
+    if not cls or not multipliers:
+        return round(float(ratio or 0.0), 4)
+    try:
+        multiplier = float(multipliers.get(cls, 1.0) or 1.0)
+    except Exception:
+        multiplier = 1.0
+    multiplier = min(max(multiplier, 0.0), 2.0)
+    return round(min(max(float(ratio or 0.0) * multiplier, 0.0), 1.0), 4)
+
+
+def _apply_sell_ratio_override(
+    ratio: float,
+    bs_type: str,
+    big_dir: str = "neutral",
+    overrides: Optional[Mapping[str, float]] = None,
+    scope: str = "all",
+) -> float:
+    cls = str(buy_class(bs_type) or "")
+    if not cls or not overrides:
+        return round(min(max(float(ratio or 0.0), 0.0), 1.0), 4)
+    scope = str(scope or "all").strip().lower()
+    if scope in {"up", "up_only"} and big_dir != "up":
+        return round(min(max(float(ratio or 0.0), 0.0), 1.0), 4)
+    if scope in {"not_down", "non_down"} and big_dir == "down":
+        return round(min(max(float(ratio or 0.0), 0.0), 1.0), 4)
+    try:
+        value = float(
+            overrides.get(cls, overrides.get(f"{cls}sell", ratio))  # type: ignore[arg-type]
+        )
+    except Exception:
+        value = float(ratio or 0.0)
+    return round(min(max(value, 0.0), 1.0), 4)
+
+
+def _big_dir_scope_ok(scope: str, big_dir: str) -> bool:
+    scope = str(scope or "all").strip().lower()
+    big_dir = str(big_dir or "neutral").strip().lower()
+    if scope in {"", "all", "any"}:
+        return True
+    if scope in {"up", "up_only"}:
+        return big_dir == "up"
+    if scope in {"not_up", "non_up"}:
+        return big_dir != "up"
+    if scope in {"down", "down_only"}:
+        return big_dir == "down"
+    if scope in {"not_down", "non_down"}:
+        return big_dir != "down"
+    if scope in {"neutral", "range"}:
+        return big_dir == "neutral"
+    return True
+
+
+_MONITOR_CONFIG = getattr(app_config, "RECURSIVE_MONITOR_CONFIG", {})
+BT_DATA = (
+    (_MONITOR_CONFIG.get("a") or {}).get("bt_data")
+    if isinstance(_MONITOR_CONFIG, dict)
+    else None
+) or "D:/chanlun_pro/bt_data_all_a"
 
 
 def load_cached(code: str) -> Optional[dict]:
@@ -88,7 +269,7 @@ def load_cached(code: str) -> Optional[dict]:
     # wf 口径事件=「该bar收盘时可见」→ 次日(下一bar)生效即可;TREND_DELAY 默认 1 天。
     ev = d.get("big_trend_events")
     if ev:
-        delay = pd.Timedelta(os.environ.get("TREND_DELAY", "1D"))
+        delay = pd.Timedelta(getattr(app_config, "RECURSIVE_BACKTEST_TREND_DELAY", "1D"))
         dirs = ["neutral"] * len(d["dates"])
         bi = 0
         cur = "neutral"
@@ -192,9 +373,18 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
                        syms: Optional[dict] = None, filt: Optional[dict] = None,
                        label: Optional[str] = None,
                        buy_classes: Optional[set] = None,
+                       sell_classes: Optional[set[int]] = None,
+                       sell_ratio_overrides: Optional[Mapping[str, float]] = None,
+                       sell_ratio_override_scope: str = "all",
+                       after_3sell_reentry_buy_classes: Optional[set[int]] = None,
+                       after_3sell_reentry_mid_buy_classes: Optional[set[int]] = None,
+                       after_3sell_reentry_scope: str = "all",
                        require: tuple = ("tech",),
                        big_gate: str = "bsp",
-                       buy_priority: str = "1first",
+                       buy_priority: str = "3first",
+                       regime_mode: str = "off",
+                       mid_gate: str = "strict",
+                       bs_point_ratio_multipliers: Optional[Mapping[str, float]] = None,
                        pool_schedule: Optional[list] = None,
                        slippage: float = 0.0,
                        t_start=None, t_end=None):
@@ -215,6 +405,7 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
     技术面(③执行层)仍管时机——池内标的出现买点才进场,卖点/大级别down退出;被剔池持仓
     不强平(原文「技术面把握好,在较大级别卖点卖掉被超越者」),但不再开新仓。"""
     _dir_key = "trend_dir_at" if big_gate == "trend" else "big_dir_at"
+    nest_mode = "filter" if "nest" in require else ("soft" if "nest_soft" in require else "off")
 
     def _bdir(s, j):
         return s.get(_dir_key, s["big_dir_at"])[j]
@@ -266,6 +457,19 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
     pending: List[tuple] = []
     equity = np.empty(len(master))
     trades: List[PTrade] = []
+    reentry_buy_classes: Dict[str, set[int]] = {}
+    reentry_mid_buy_classes: Dict[str, set[int]] = {}
+    reentry_mid_confirmed: set[str] = set()
+    after_3sell_reentry_buy_classes = (
+        {int(cls) for cls in after_3sell_reentry_buy_classes if int(cls) in (1, 2, 3)}
+        if after_3sell_reentry_buy_classes
+        else set()
+    )
+    after_3sell_reentry_mid_buy_classes = (
+        {int(cls) for cls in after_3sell_reentry_mid_buy_classes if int(cls) in (1, 2, 3)}
+        if after_3sell_reentry_mid_buy_classes
+        else set()
+    )
 
     def mk(m):  # 市值(停牌票按最近价冻结盯市)
         return cash + sum(syms[n]["close"][ml[n][m]] * p["shares"]
@@ -278,11 +482,17 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
         carry = []
         for o in pending:
             name, act = o[0], o[1]
-            w = o[2] if len(o) > 2 else None        # 池模式:目标权重
+            # 池模式第三位是目标权重；普通选股第四位记录买点类别。
+            w = o[2] if len(o) > 2 and isinstance(o[2], (int, float, np.number)) else None
+            order_bs_type = o[3] if len(o) > 3 else ""
             s = syms[name]
             j = int(mx[name][m])
             if j < 0:                               # 停牌:不可成交,挂单顺延
                 carry.append(o)
+                continue
+            if _limit_locked(s, j, act):
+                if act == "sell":
+                    carry.append(o)
                 continue
             px = s["open"][j] * (1 + slippage if o[1] == "buy" else 1 - slippage)
             r = s["rules"]
@@ -295,17 +505,72 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
                 if size > 0:
                     cash -= size * px * (1 + r.commission)
                     positions[name] = {"shares": size, "entry_date": t,
-                                       "entry_px": px, "bs": act}
+                                       "entry_px": px, "bs": act,
+                                       "bs_type": order_bs_type,
+                                       "buy_ratio": float(w or 0.0)}
+                    reentry_buy_classes.pop(name, None)
+                    reentry_mid_buy_classes.pop(name, None)
+                    reentry_mid_confirmed.discard(name)
             elif act == "sell" and name in positions:
                 p = positions[name]
                 if r.t_plus == 0 or t.date() > p["entry_date"].date():
-                    cash += p["shares"] * px * (1 - r.commission - r.stamp_duty)
-                    trades.append(PTrade(s["code"], p["entry_date"], p["entry_px"],
-                                         t, px, px / p["entry_px"] - 1,
-                                         p.get("bs_type", ""), p.get("reason", "")))
-                    del positions[name]
+                    sell_ratio = (
+                        float(o[2])
+                        if len(o) > 2 and isinstance(o[2], (int, float, np.number))
+                        else 1.0
+                    )
+                    sell_ratio = min(max(sell_ratio, 0.0), 1.0)
+                    size = p["shares"] if sell_ratio >= 0.999 else p["shares"] * sell_ratio
+                    if r.lot > 1:
+                        size = (int(size) // r.lot) * r.lot
+                    if size <= 0:
+                        carry.append(o)
+                        continue
+                    exit_bs_type = order_bs_type or str(p.get("exit_bs_type", ""))
+                    cash += size * px * (1 - r.commission - r.stamp_duty)
+                    trades.append(PTrade(
+                        code=s["code"],
+                        entry_date=p["entry_date"],
+                        entry_px=p["entry_px"],
+                        exit_date=t,
+                        exit_px=px,
+                        ret=px / p["entry_px"] - 1,
+                        bs_type=p.get("bs_type", ""),
+                        reason=p.get("reason", ""),
+                        exit_bs_type=exit_bs_type,
+                        sell_ratio=sell_ratio,
+                        shares=size,
+                        **_post_exit_stats(syms, ml, name, m, px),
+                        buy_ratio=float(p.get("buy_ratio") or 0.0),
+                    ))
+                    remain = p["shares"] - size
+                    if remain > 1e-9 and sell_ratio < 0.999:
+                        p["shares"] = remain
+                    else:
+                        reentry_scope_ok = _big_dir_scope_ok(
+                            after_3sell_reentry_scope,
+                            str(p.get("exit_big_dir") or "neutral"),
+                        )
+                        if (
+                            (after_3sell_reentry_buy_classes or after_3sell_reentry_mid_buy_classes)
+                            and reentry_scope_ok
+                            and buy_class(exit_bs_type) == 3
+                            and p.get("reason") == "small_level_sell_point"
+                        ):
+                            if after_3sell_reentry_buy_classes:
+                                reentry_buy_classes[name] = set(after_3sell_reentry_buy_classes)
+                            if after_3sell_reentry_mid_buy_classes:
+                                reentry_mid_buy_classes[name] = set(
+                                    after_3sell_reentry_mid_buy_classes
+                                )
+                                reentry_mid_confirmed.discard(name)
+                        else:
+                            reentry_buy_classes.pop(name, None)
+                            reentry_mid_buy_classes.pop(name, None)
+                            reentry_mid_confirmed.discard(name)
+                        del positions[name]
                 else:
-                    carry.append((name, act))   # T+1 未满足,顺延
+                    carry.append(o)   # T+1 pending
         pending = carry
 
         # 2) 退出信号(持仓中:大级别down 或 小级别卖点)
@@ -317,10 +582,25 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
             j = int(mx[name][m])
             if j < 0:
                 continue                            # 停牌:无bar无判定
-            if _bdir(s, j) == "down" or _sells_at(s, j):
-                is_down = _bdir(s, j) == "down"
-                positions[name]["reason"] = "大级别转空" if is_down else "小级别卖点"
-                pending.append((name, "sell"))
+            sells = _filter_sell_signals(_sells_at(s, j), sell_classes)
+            if _bdir(s, j) == "down" or sells:
+                big_dir = _bdir(s, j)
+                is_down = big_dir == "down"
+                sell_sig = None if is_down else _pick_sell_signal(sells)
+                exit_bs_type = "" if sell_sig is None else str(getattr(sell_sig, "bs_type", ""))
+                sell_ratio = recommended_sell_ratio(exit_bs_type, big_dir="down" if is_down else big_dir)
+                if not is_down:
+                    sell_ratio = _apply_sell_ratio_override(
+                        ratio=sell_ratio,
+                        bs_type=exit_bs_type,
+                        big_dir=big_dir,
+                        overrides=sell_ratio_overrides,
+                        scope=sell_ratio_override_scope,
+                    )
+                positions[name]["reason"] = "big_level_down" if is_down else "small_level_sell_point"
+                positions[name]["exit_bs_type"] = exit_bs_type
+                positions[name]["exit_big_dir"] = big_dir
+                pending.append((name, "sell", sell_ratio, exit_bs_type))
                 if pool_schedule is not None and not is_down:
                     reentry[name] = "wait_buy"   # 卖点减仓→等买点回补(短差);down→非down即回补
 
@@ -348,6 +628,8 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
                         buys = _buys_at(s, j)
                         if buy_classes is not None:
                             buys = [x for x in buys if int(x.bs_type[0]) in buy_classes]
+                        if nest_mode == "filter":
+                            buys = [x for x in buys if _nest_filter_ok(x)]
                         if not buys:
                             continue
                     pending.append((name, "buy", w))
@@ -366,13 +648,35 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
                 buys = _buys_at(s, j)
                 if buy_classes is not None:                      # 只认指定类别买点(选股系统)
                     buys = [x for x in buys if int(x.bs_type[0]) in buy_classes]
+                if nest_mode == "filter":
+                    buys = [x for x in buys if _nest_filter_ok(x)]
+                allowed_reentry = reentry_buy_classes.get(name)
+                if allowed_reentry is not None:
+                    buys = [
+                        x
+                        for x in buys
+                        if buy_class(getattr(x, "bs_type", "")) in allowed_reentry
+                    ]
+                allowed_mid_reentry = reentry_mid_buy_classes.get(name)
+                if allowed_mid_reentry is not None and name not in reentry_mid_confirmed:
+                    mid_buys = [
+                        x
+                        for x in _mid_buys_at(s, j)
+                        if buy_class(getattr(x, "bs_type", "")) in allowed_mid_reentry
+                    ]
+                    if mid_buys:
+                        reentry_mid_confirmed.add(name)
+                    else:
+                        buys = []
                 if not (_bdir(s, j) != "down" and buys):
-                    continue
-                if "mid_dir_at" in s and s["mid_dir_at"][j] == "down":  # 三级联立:中级别(5m)也不空
                     continue
                 if "fund" in require and not s["fund_ok"][j]:    # ①基本面独立系统门控
                     continue
-                if "value" in require and not s["value_ok"][j]:  # ②比价(低估:ROE年化/PB高)门控
+                value_relaxed = (
+                    "value_bull_relaxed" in require
+                    and bool(s.get("market_bull_at", [False] * len(s["dates"]))[j])
+                )
+                if "value" in require and not s["value_ok"][j] and not value_relaxed:
                     continue
                 if "ma" in require and not s["ma_ok"][j]:        # 海选门槛(第8课,70日线上=能搞的)
                     continue
@@ -380,15 +684,54 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
                     continue
                 if "d3" in require and not s["d3_ok"][j]:        # 三级共振:日线3买窗口(line13507)
                     continue
-                cls = min(int(x.bs_type[0]) for x in buys)
+                pick = _pick_buy_signal(buys, buy_priority)
+                if pick is None:
+                    continue
+                cls = buy_class(getattr(pick, "bs_type", ""))
+                if cls == 0:
+                    continue
+                mid_dir = s.get("mid_dir_at", [None] * len(s["dates"]))[j]
+                mid_soft = False
+                if mid_dir == "down":
+                    mid_soft = mid_gate == "soft"
+                    can_relax_mid = (
+                        regime_mode == "adaptive"
+                        and mid_gate == "bull_relaxed"
+                        and _bdir(s, j) == "up"
+                        and cls == 3
+                    )
+                    if not (can_relax_mid or mid_soft):
+                        continue
                 pr = -cls if buy_priority == "3first" else cls   # 3买优先(line23172牛市)或1买优先
                 # 三级共振**排序融合**(非硬门控):日线3买窗口内的候选排前(line13507 单笔质量
                 # 实证胜率57%→71%),slot 充足时不砍机会、竞争时优先共振标的
                 d3 = s.get("d3_ok")
-                cands.append((0 if (d3 is not None and d3[j]) else 1, pr, name))
+                daily_resonance = d3 is not None and d3[j]
+                ratio = recommended_buy_ratio(
+                    f"{cls}buy",
+                    max_pos=max_pos,
+                    big_dir=_bdir(s, j),
+                    daily_resonance=daily_resonance,
+                    regime_mode=regime_mode,
+                    mid_dir=mid_dir or "",
+                    nest_mode=nest_mode,
+                    nest_operable=getattr(pick, "nest_operable", None),
+                    nest_depth=int(getattr(pick, "nest_depth", 0) or 0),
+                    trend_boost="trend3_boost" in require,
+                )
+                if mid_soft:
+                    ratio = round(ratio * 0.5, 4)
+                ratio = _apply_buy_ratio_multiplier(
+                    ratio,
+                    f"{cls}buy",
+                    bs_point_ratio_multipliers,
+                )
+                if ratio <= 0:
+                    continue
+                cands.append((0 if daily_resonance else 1, pr, name, str(cls), ratio))
             cands.sort()
             for c in cands[:free]:
-                pending.append((c[-1], "buy"))
+                pending.append((c[2], "buy", c[4], c[3]))
 
         equity[m] = mk(m)
 
@@ -402,7 +745,8 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
         r = s["rules"]
         cash += p["shares"] * px * (1 - r.commission - r.stamp_duty)
         trades.append(PTrade(s["code"], p["entry_date"], p["entry_px"], t, px,
-                             px / p["entry_px"] - 1, "", "收尾"))
+                             px / p["entry_px"] - 1, p.get("bs_type", ""), "final_close",
+                             "", 1.0, float(p["shares"])))
     if positions:
         equity[-1] = cash
     flabel = market_filter if market_filter else ("大盘" if filt else None)
@@ -449,9 +793,9 @@ def _report(label, master, equity, trades, syms, flabel, ml=None):
     print(f"\n=== 组合回测{tag} | 池={label} 期={master[0].date()}~{master[-1].date()} ===")
     print(f"  组合收益={total:+.1%}  等权基准={bh:+.1%}  超额={total - bh:+.1%}  "
           f"回撤={max_dd:.1%}(基准{bench_dd:.1%})  夏普={sharpe:.2f}  胜率={wr:.0%}  交易={len(trades)}")
-    return {"total": total, "bh": bh, "max_dd": max_dd, "sharpe": sharpe,
-            "wr": wr, "n": len(trades), "trades": trades,
-            "equity": equity, "master": master}
+    return {"total": total, "bh": bh, "max_dd": max_dd, "bench_dd": bench_dd,
+            "sharpe": sharpe, "wr": wr, "n": len(trades), "trades": trades,
+            "equity": equity, "bench": bench, "master": master}
 
 
 def generate_portfolio_report(syms, filt, out_png="D:/chanlun_pro/reports/portfolio.png"):
@@ -462,7 +806,10 @@ def generate_portfolio_report(syms, filt, out_png="D:/chanlun_pro/reports/portfo
     import matplotlib.pyplot as plt
     runs = {}
     for mp in (5, 10, 20):
-        runs[mp] = portfolio_backtest(syms=syms, filt=None, max_pos=mp, label=f"{len(syms)}只")
+        runs[mp] = portfolio_backtest(
+            syms=syms, filt=None, max_pos=mp, label=f"{len(syms)}只",
+            buy_priority="3first",
+        )
     master = runs[10]["master"]
     # 等权基准逐bar曲线(算一次);跳过缺 master 日期的标的(停牌→被主时钟过滤)
     # 并集主时钟兼容:停牌bar用最近价冻结、首个可用bar前视为现金
@@ -532,10 +879,16 @@ def main_qmt():
     print(f"# 缠论全市场买点选股 + 组合回测(QMT前复权) universe={len(syms)}只")
     print("#" * 64)
     for mp in (3, 5, 10, 20):
-        portfolio_backtest(syms=syms, filt=None, max_pos=mp, label=label)
+        portfolio_backtest(
+            syms=syms, filt=None, max_pos=mp, label=label,
+            buy_priority="3first",
+        )
         print(f"    ↑ max_pos={mp}(同时最多持{mp}只)")
     if filt:
-        portfolio_backtest(syms=syms, filt=filt, max_pos=10, label=label)
+        portfolio_backtest(
+            syms=syms, filt=filt, max_pos=10, label=label,
+            buy_priority="3first",
+        )
         print("    ↑ max_pos=10 + 大盘(上证)择时过滤")
     generate_portfolio_report(syms, filt)
 

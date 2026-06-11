@@ -96,6 +96,9 @@ def create_app(test_config=None):
 
     _xuangu_tasks = XuanguTasks(scheduler)
 
+    from chanlun.recursive_bt.app_monitor import register_recursive_monitor_jobs
+    _recursive_monitors = register_recursive_monitor_jobs(scheduler)
+
     # _other_tasks = OtherTasks(scheduler)
 
     __log = fun.get_logger()
@@ -223,6 +226,7 @@ def create_app(test_config=None):
     app.extensions["scheduler"] = scheduler
     app.extensions["alert_tasks"] = _alert_tasks
     app.extensions["xuangu_tasks"] = _xuangu_tasks
+    app.extensions["recursive_monitors"] = _recursive_monitors
     # app.extensions["other_tasks"] = _other_tasks
 
     # 全局安全响应头：仅添加可静态注入、不依赖业务上下文的几项；

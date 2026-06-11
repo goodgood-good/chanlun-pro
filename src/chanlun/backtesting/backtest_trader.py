@@ -299,7 +299,7 @@ class BackTestTrader(Trader):
         # 按照买卖操作的类型，返回对应的 close_uid
         opt_type = "buy" if "buy" in mmd else "sell"
         if isinstance(allow_close_uids, dict) and opt_type in allow_close_uids.keys():
-            return allow_close_uids[mmd]
+            return allow_close_uids[opt_type]
 
         # 按照买卖点的类型，返回对应的 close_uid
         if isinstance(allow_close_uids, dict) and mmd in allow_close_uids.keys():

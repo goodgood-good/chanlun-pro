@@ -15,6 +15,8 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from chanlun import fun
@@ -207,3 +209,97 @@ def test_cl_data_to_tv_chart_renders_forming_l0_zhongshu_dashed(
     styles = [z["linestyle"] for z in l0["zss"]]
     assert "1" in styles, f"L0 应含正在形成的未完成中枢(虚线 linestyle=1), 实得 {styles}"
     assert "0" in styles, f"L0 也应含已完成中枢(实线 linestyle=0), 实得 {styles}"
+
+
+def test_cl_data_to_tv_chart_multitimeframe_overlay_contract(cl_config):
+    """Chart JSON exposes the requested current/higher-level containers."""
+    import pathlib
+    import pandas as pd
+    from chanlun.core.cl import CL
+    from tests.core.conftest import DEFAULT_CL_CONFIG
+
+    base = pathlib.Path(__file__).resolve().parent.parent / "fixtures" / "klines"
+    expected = {
+        "1m": {0, 1, 2},   # current L0 + 5m + 30m
+        "5m": {0, 1},      # current L0 + 30m
+        "30m": {0},        # current L0
+    }
+    for freq, required_levels in expected.items():
+        csv = base / f"a_SZ_301004_{freq}.csv"
+        if not csv.exists():
+            pytest.skip(f"missing fixture: {csv.name}")
+        cd = CL("301004", freq, dict(DEFAULT_CL_CONFIG))
+        cd.process_klines(pd.read_csv(csv, parse_dates=["date"]))
+        config = dict(cl_config)
+        config.update({
+            "chart_use_branch_core": "1",
+            "chart_show_recursive_levels": "1",
+            "chart_show_bi": "1",
+            "chart_show_bi_mmd": "1",
+            "chart_show_bi_bc": "1",
+            "chart_show_xd_mmd": "1",
+            "chart_show_xd_bc": "1",
+        })
+
+        chart = cl_data_to_tv_chart(cd, config)
+
+        assert chart["bis"], f"{freq} chart must expose bi strokes"
+        assert "bi_mmds" in chart and "xd_mmds" in chart
+        assert "bi_bcs" in chart and "xd_bcs" in chart
+        levels = {item["level"] for item in chart["recursive_levels"]}
+        assert required_levels <= levels, f"{freq} recursive_levels={levels}"
+        for item in chart["recursive_levels"]:
+            assert "zss" in item and "zslx_lines" in item
+            if item["level"] >= 1:
+                assert "mmds" in item and "bcs" in item
+
+
+def test_cl_data_to_tv_chart_serializes_l1_l2_mmds_and_bcs(
+    cl_with_synthetic_klines, cl_config, monkeypatch
+):
+    """L1/L2 buy-sell points and divergences ride with recursive_levels."""
+    import pandas as pd
+
+    cd = cl_with_synthetic_klines(
+        500, seed=42, trend="up", multi_freq=True, frequency="1m"
+    )
+    base_ts = pd.Timestamp("2026-01-01 10:00:00", tz="Asia/Shanghai")
+
+    def fake_point(ts, val, bs_type):
+        k = SimpleNamespace(date=ts)
+        fx = SimpleNamespace(k=k, val=val)
+        return SimpleNamespace(anchor_fx=fx, bs_type=bs_type, level=None)
+
+    monkeypatch.setattr(
+        cd,
+        "get_kuozhan_levels",
+        lambda: [
+            {
+                "level": 1,
+                "zss": [],
+                "bsp": [fake_point(base_ts, 10.5, "3buy")],
+                "bcs": [(base_ts, 10.8, "qs")],
+            },
+            {
+                "level": 2,
+                "zss": [],
+                "bsp": [fake_point(base_ts + pd.Timedelta(minutes=5), 11.5, "1sell")],
+                "bcs": [(base_ts + pd.Timedelta(minutes=5), 11.8, "pz")],
+            },
+        ],
+    )
+
+    config = dict(cl_config)
+    config["chart_use_branch_core"] = "1"
+    config["chart_show_recursive_levels"] = "1"
+    chart = cl_data_to_tv_chart(cd, config)
+    levels = {item["level"]: item for item in chart["recursive_levels"]}
+
+    assert levels[1]["mmds"][0]["level"] == "5m"
+    assert levels[1]["mmds"][0]["text"] == "3buy"
+    assert levels[1]["bcs"][0]["level"] == "5m"
+    assert levels[1]["bcs"][0]["text"] == "QS"
+    assert levels[2]["mmds"][0]["level"] == "30m"
+    assert levels[2]["mmds"][0]["text"] == "1sell"
+    assert levels[2]["bcs"][0]["level"] == "30m"
+    assert levels[2]["bcs"][0]["text"] == "PZ"

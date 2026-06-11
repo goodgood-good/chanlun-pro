@@ -669,6 +669,7 @@ class ExchangeChangQiao(Exchange):
         """
         获取 Kline 线 (并发优化版)
         """
+        args = args or {}
         # 美股历史 K 线按 config.US_HISTORY_KLINE_SOURCE 选源
         if self._should_use_alpaca(code):
             return self._get_alpaca().klines(
@@ -718,10 +719,14 @@ class ExchangeChangQiao(Exchange):
             start_dt = end_dt - lookback
 
         # 限制最大回看范围:不允许请求超过统一 lookback 表的历史数据
-        max_lookback = get_lookback_timedelta(frequency, default=timedelta(days=30))
-        earliest_allowed = now_dt - max_lookback
-        if start_dt < earliest_allowed:
-            start_dt = earliest_allowed
+        allow_long_history = bool(
+            args.get("allow_long_history") or args.get("no_lookback_limit")
+        )
+        if not allow_long_history:
+            max_lookback = get_lookback_timedelta(frequency, default=timedelta(days=30))
+            earliest_allowed = now_dt - max_lookback
+            if start_dt < earliest_allowed:
+                start_dt = earliest_allowed
         if start_dt >= end_dt:
             return pd.DataFrame()
 

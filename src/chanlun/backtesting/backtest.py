@@ -246,9 +246,15 @@ class BackTest:
                 self.log.error(f"执行记录持仓信息 : {self.datas.now_date} 异常")
                 self.log.error(traceback.format_exc())
 
-            for code in self.codes:
+            try:
+                self.strategy.on_bt_loop_start(self)
+            except Exception:
+                self.log.error(f"执行策略循环开始钩子 : {self.datas.now_date} 异常")
+                self.log.error(traceback.format_exc())
+
+            run_codes = list(dict.fromkeys(self.trader.position_codes() + self.codes))
+            for code in run_codes:
                 try:
-                    self.strategy.on_bt_loop_start(self)
                     self.trader.run(code, is_filter=self.strategy.is_filter_opts())
                 except Exception:
                     self.log.error(f"执行 {code} : {self.datas.now_date} 异常")
@@ -261,7 +267,7 @@ class BackTest:
                 )
                 self.trader.run_buffer_opts()
             except Exception:
-                self.log.error(f"执行 {code} 操作二次过滤 : {self.datas.now_date} 异常")
+                self.log.error(f"执行操作二次过滤 : {self.datas.now_date} 异常")
                 self.log.error(traceback.format_exc())
             if loop_callback_fun:
                 loop_callback_fun(self)

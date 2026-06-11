@@ -61,8 +61,67 @@ A_INDEX = MarketRules("A股指数", commission=0.0003, stamp_duty=0.0005,
                       t_plus=1, allow_short=False, lot=100, limit_pct=None)
 A_GEM = MarketRules("A股创业板", commission=0.0003, stamp_duty=0.0005,
                     t_plus=1, allow_short=False, lot=100, limit_pct=0.20)
+A_BJ = MarketRules("A股北交所", commission=0.0003, stamp_duty=0.0005,
+                   t_plus=1, allow_short=False, lot=100, limit_pct=0.30)
 US_STOCK = MarketRules("美股", commission=0.0001, stamp_duty=0.0,
                        t_plus=0, allow_short=True, lot=1, limit_pct=None)
+
+
+def buy_class(bs_type: str) -> int:
+    try:
+        return int(str(bs_type)[0])
+    except Exception:
+        return 0
+
+
+def recommended_buy_ratio(
+    bs_type: str,
+    max_pos: int,
+    big_dir: str = "neutral",
+    daily_resonance: bool = False,
+    regime_mode: str = "off",
+    mid_dir: str = "",
+    nest_mode: str = "off",
+    nest_operable: Optional[bool] = None,
+    nest_depth: int = 0,
+    trend_boost: bool = False,
+) -> float:
+    """Portfolio-level target weight for a Chanlun buy signal."""
+    base = 1.0 / max(int(max_pos or 1), 1)
+    cls = buy_class(bs_type)
+    multiplier = {3: 1.0, 2: 0.75, 1: 0.5}.get(cls, 0.5)
+    if big_dir == "up":
+        multiplier += 0.15
+    if daily_resonance:
+        multiplier += 0.15
+    ratio = min(base * min(multiplier, 1.0), 1.0)
+    if regime_mode == "adaptive":
+        if big_dir == "down":
+            ratio = 0.0
+        elif big_dir == "neutral":
+            ratio *= 0.75 if cls == 3 else 0.9
+        if mid_dir == "down":
+            ratio *= 0.5
+    if trend_boost and cls == 3 and big_dir == "up":
+        ratio = min(ratio * 1.25, base * 1.25, 1.0)
+    if nest_mode == "soft" and cls in (1, 2):
+        if nest_operable is True:
+            ratio *= 1.0
+        elif int(nest_depth or 0) > 0:
+            ratio *= 0.75
+        else:
+            ratio *= 0.5
+    return round(ratio, 4)
+
+
+def recommended_sell_ratio(bs_type: str, big_dir: str = "neutral") -> float:
+    """Position share to sell for a Chanlun sell/exit signal."""
+    if big_dir == "down":
+        return 1.0
+    cls = buy_class(bs_type)
+    if cls in (1, 2, 3):
+        return 1.0
+    return 1.0
 
 
 # 标的 → (chart_cache 前缀, CL code, 市场规则)
@@ -99,6 +158,8 @@ class Signal:
     level: int
     bs_type: str
     price: float
+    nest_operable: Optional[bool] = None
+    nest_depth: int = 0
 
     @property
     def is_buy(self) -> bool:
@@ -196,14 +257,86 @@ def wf_seg38_series(df: pd.DataFrame, code: str, tf: str,
     return events
 
 
-def collect_branch_signals(cd: CL, use_xd: bool = False) -> List[Signal]:
+def collect_branch_signals(
+    cd: CL,
+    use_xd: bool = False,
+    annotate_nest: bool = False,
+) -> List[Signal]:
     """原生图全量买卖点(get_branch_bspoints, L0 一二三类 + 升级级)。操作级买卖点取此。"""
+    def _fx_key(fx):
+        if fx is None:
+            return None
+        k = getattr(fx, "k", None)
+        return (
+            getattr(k, "k_index", None),
+            str(getattr(k, "date", "")),
+            round(float(getattr(fx, "val", 0.0) or 0.0), 8),
+        )
+
+    def _div_key(level: int, dv) -> tuple:
+        if dv is None:
+            return ()
+        leave = getattr(dv, "leave_seg", None)
+        return (
+            int(level or 0),
+            str(getattr(dv, "kind", "")),
+            str(getattr(leave, "_type", getattr(leave, "type", ""))),
+            _fx_key(getattr(leave, "start", None)),
+            _fx_key(getattr(leave, "end", None)),
+        )
+
+    def _interval_nest_reads():
+        if not hasattr(cd, "get_bis") or not hasattr(cd, "config"):
+            return cd.get_branch_interval_nest()
+        from chanlun.core.beichi_nest import BeichiNestCalculator
+        from chanlun.core.cl_interface import Config, query_macd_ld
+        from chanlun.core.interval_nest import IntervalNestCalculator
+        from chanlun.core.recursive_branch import RecursiveBranchCalculator
+
+        ld = lambda s, e: query_macd_ld(cd, s, e)
+        wzgx = cd.config.get("zs_wzgx", Config.ZS_WZGX_ZGD.value)
+        units = list(cd.get_xds()) if use_xd else list(cd.get_bis())
+        levels = RecursiveBranchCalculator().calculate(
+            units,
+            ld,
+            wzgx,
+            cd.frequency,
+        )
+        forest = BeichiNestCalculator().calculate(levels)
+        return IntervalNestCalculator().calculate(forest)
+
     out: List[Signal] = []
+    nest_by_divergence: dict[int, object] = {}
+    nest_by_key: dict[tuple, object] = {}
+    if annotate_nest:
+        try:
+            for read in _interval_nest_reads():
+                node = getattr(read, "node", None)
+                dv = getattr(node, "divergence", None)
+                if dv is not None:
+                    nest_by_divergence[id(dv)] = read
+                    nest_by_key[_div_key(getattr(node, "level", 0), dv)] = read
+        except Exception:
+            nest_by_divergence = {}
+            nest_by_key = {}
     for p in cd.get_branch_bspoints(use_xd=use_xd):
         fx = p.anchor_fx
         if fx is None or fx.k is None:
             continue
-        out.append(Signal(fx.k.date, p.level or 0, p.bs_type, fx.val))
+        level = p.level or 0
+        nest_operable = None
+        nest_depth = 0
+        if annotate_nest and getattr(p, "divergence", None) is not None:
+            read = nest_by_divergence.get(id(p.divergence))
+            if read is None:
+                read = nest_by_key.get(_div_key(level, p.divergence))
+            nest_operable = bool(getattr(read, "operable", False)) if read else False
+            nest_depth = int(getattr(read, "depth", 0) or 0) if read else 0
+        out.append(Signal(
+            fx.k.date, level, p.bs_type, fx.val,
+            nest_operable=nest_operable,
+            nest_depth=nest_depth,
+        ))
     out.sort(key=lambda s: s.date)
     return out
 

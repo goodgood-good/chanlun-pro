@@ -7,6 +7,8 @@ CL 重计算(慢)只在此做一次,缓存 {dates,open,close,small_by_bar,big_di
 """
 from __future__ import annotations
 
+import datetime as _dt
+import json
 import os
 import pickle
 import sys
@@ -22,6 +24,19 @@ from chanlun.core.cl import CL
 OUT = "D:/chanlun_pro/bt_data"
 OUT_DAILY = "D:/chanlun_pro/bt_data_daily"
 OUT_MTF3 = "D:/chanlun_pro/bt_data_mtf3"
+OUT_MTF3_ALL_A = "D:/chanlun_pro/bt_data_mtf3_all_a"
+OUT_ALL_A = "D:/chanlun_pro/bt_data_all_a"
+SIGNAL_SCHEMA = {"nest_operable": True, "nest_key": 3}
+ALL_A_ALIASES = {"全A股", "全A", "all_a", "alla", "all"}
+ALL_A_SECTORS = ("沪深A股", "沪深京A股", "上证A股", "深证A股", "北证A股")
+BOARD_ALIASES = {
+    "all": None,
+    "shsz": {"main", "gem", "star"},
+    "non_bj": {"main", "gem", "star"},
+    "non-bj": {"main", "gem", "star"},
+}
+BOARD_ORDER = ("main", "gem", "star", "bj")
+SAMPLE_MODES = {"stratified", "sorted"}
 
 
 def universe(sector: str, limit=None):
@@ -33,11 +48,129 @@ def universe(sector: str, limit=None):
     return out[:limit] if limit else out
 
 
+def universe_all_a(limit=None):
+    from xtquant import xtdata
+    xtdata.download_sector_data()
+    seen = set()
+    out = []
+    for sector in ALL_A_SECTORS:
+        for raw in xtdata.get_stock_list_in_sector(sector) or []:
+            if "." not in raw:
+                continue
+            num, mkt = raw.split(".")
+            if mkt not in ("SH", "SZ", "BJ"):
+                continue
+            code = f"{mkt}.{num}"
+            if code in seen:
+                continue
+            seen.add(code)
+            out.append(code)
+    out.sort()
+    return out[:limit] if limit else out
+
+
 def limit_pct(code: str) -> float:
-    num = code.split(".")[1]
-    if num.startswith("688") or num.startswith("300") or num.startswith("301"):
+    board = ashare_board(code)
+    if board == "bj":
+        return 0.30
+    if board in {"gem", "star"}:
         return 0.20
     return 0.10
+
+
+def ashare_board(code: str) -> str:
+    code = (code or "").strip().upper()
+    if code.startswith("BJ."):
+        return "bj"
+    num = code.split(".")[1]
+    if num.startswith("8") or num.startswith("920"):
+        return "bj"
+    if num.startswith("688"):
+        return "star"
+    if num.startswith(("300", "301")):
+        return "gem"
+    return "main"
+
+
+def parse_board_filter(value: str | None) -> set[str] | None:
+    raw = (value or "all").strip().lower()
+    if raw in BOARD_ALIASES:
+        alias = BOARD_ALIASES[raw]
+        return None if alias is None else set(alias)
+    boards: set[str] = set()
+    for item in raw.replace(";", ",").split(","):
+        board = item.strip().lower()
+        if not board:
+            continue
+        if board in BOARD_ALIASES and BOARD_ALIASES[board] is not None:
+            boards.update(BOARD_ALIASES[board] or set())
+        elif board in BOARD_ORDER:
+            boards.add(board)
+    return boards or None
+
+
+def filter_codes_by_board(codes, board_filter: str | None):
+    boards = parse_board_filter(board_filter)
+    if not boards:
+        return list(codes)
+    return [code for code in codes if ashare_board(code) in boards]
+
+
+def sample_codes_by_board(codes, limit: int | None, sample_mode: str = "stratified"):
+    items = sorted(codes)
+    if not limit or limit <= 0 or len(items) <= limit:
+        return items
+    mode = (sample_mode or "stratified").strip().lower()
+    if mode == "sorted":
+        return items[:limit]
+
+    grouped: dict[str, list[str]] = {board: [] for board in BOARD_ORDER}
+    for code in items:
+        grouped.setdefault(ashare_board(code), []).append(code)
+    active = [board for board in BOARD_ORDER if grouped.get(board)]
+    selected: list[str] = []
+    while active and len(selected) < limit:
+        next_active: list[str] = []
+        for board in active:
+            bucket = grouped.get(board) or []
+            if bucket and len(selected) < limit:
+                selected.append(bucket.pop(0))
+            if bucket:
+                next_active.append(board)
+        active = next_active
+    return selected
+
+
+def _parse_limit_and_board(args: list[str]) -> tuple[int | None, str | None]:
+    limit: int | None = None
+    board_filter: str | None = None
+    for arg in args:
+        value = str(arg).strip()
+        if not value:
+            continue
+        if value.isdigit() and limit is None:
+            limit = int(value)
+        elif board_filter is None:
+            board_filter = value
+    return limit, board_filter
+
+
+def _parse_limit_board_sample(args: list[str]) -> tuple[int | None, str | None, str]:
+    limit: int | None = None
+    board_filter: str | None = None
+    sample_mode = "stratified"
+    for arg in args:
+        value = str(arg).strip()
+        if not value:
+            continue
+        low = value.lower()
+        if value.isdigit() and limit is None:
+            limit = int(value)
+        elif low in SAMPLE_MODES:
+            sample_mode = low
+        elif board_filter is None:
+            board_filter = value
+    return limit, board_filter, sample_mode
 
 
 def _slice(df, start, end):
@@ -50,18 +183,44 @@ def _slice(df, start, end):
     return df.reset_index(drop=True)
 
 
-def _sig(code, ex, tf, start, end, min_bars=30):
+def _sig(code, ex, tf, start, end, min_bars=30, annotate_nest=False):
     df = _slice(ex.klines(code, tf, start_date=start), start, end)
     if df is None or len(df) < min_bars:
         return df, []
     cd = CL(code, tf, dict(CL_CFG))
     cd.process_klines(df)
-    return df, collect_branch_signals(cd, use_xd=False)
+    return df, collect_branch_signals(
+        cd,
+        use_xd=False,
+        annotate_nest=annotate_nest,
+    )
+
+
+def _signals_by_main_bar(signals, dates, delay):
+    out = {}
+    ordered = sorted(signals, key=lambda sig: sig.date)
+    si = 0
+    for i, date in enumerate(dates):
+        while si < len(ordered) and ordered[si].date + delay <= date:
+            out.setdefault(i, []).append(ordered[si])
+            si += 1
+    return out
+
+
+def _freq_delay(tf: str):
+    tf = str(tf or "").strip().lower()
+    if tf.endswith("m") and tf[:-1].isdigit():
+        return pd.Timedelta(minutes=int(tf[:-1]))
+    if tf in {"d", "day", "1d"}:
+        return pd.Timedelta(days=1)
+    if tf in {"w", "week", "1w"}:
+        return pd.Timedelta(days=7)
+    return pd.Timedelta(tf)
 
 
 def build(code, ex, small_tf="5m", big_tf="30m", start=None, end=None,
           big_delay=None, min_small=200, mid_tf=None, mid_delay=None) -> dict | None:
-    dfs, small = _sig(code, ex, small_tf, start, end, min_small)
+    dfs, small = _sig(code, ex, small_tf, start, end, min_small, annotate_nest=True)
     if dfs is None or len(dfs) < min_small:
         return None
     _, big = _sig(code, ex, big_tf, start, end)
@@ -72,28 +231,89 @@ def build(code, ex, small_tf="5m", big_tf="30m", start=None, end=None,
         "open": dfs["open"].to_numpy(), "close": dfs["close"].to_numpy(),
         "small_by_bar": strat.small_by_bar, "big_dir_at": strat.big_dir_at,
         "limit_pct": limit_pct(code), "n_small": len(small), "n_big": len(big),
+        "signal_schema": dict(SIGNAL_SCHEMA),
     }
     if mid_tf:                       # 三级联立:中级别(如5m)方向门控(1m入场+5m中+30m大)
         _, mid = _sig(code, ex, mid_tf, start, end)
         sm = MTFStrategy(small, mid, dates, "5m+30m", gate="not_down", big_delay=mid_delay)
         out["mid_dir_at"] = sm.big_dir_at
+        out["mid_by_bar"] = _signals_by_main_bar(
+            mid,
+            dates,
+            mid_delay if mid_delay is not None else _freq_delay(mid_tf),
+        )
         out["n_mid"] = len(mid)
     return out
 
 
+def _now_iso() -> str:
+    return _dt.datetime.now().isoformat(timespec="seconds")
+
+
+def _manifest_path(out_dir: str, manifest_path: str | None = None) -> str:
+    return manifest_path or os.path.join(out_dir, "_build_manifest.json")
+
+
+def _write_manifest(path: str, manifest: dict) -> None:
+    tmp = f"{path}.tmp"
+    with open(tmp, "w", encoding="utf-8") as fp:
+        json.dump(manifest, fp, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
+
+
+def _manifest_entry(code: str, status: str, path: str, **extra) -> dict:
+    item = {
+        "code": code,
+        "status": status,
+        "path": path,
+        "time": _now_iso(),
+    }
+    item.update({k: v for k, v in extra.items() if v is not None})
+    return item
+
+
 def run(codes, out_dir, small_tf, big_tf, start, end, big_delay, min_small=200,
-        mid_tf=None, mid_delay=None):
+        mid_tf=None, mid_delay=None, manifest_path=None, manifest_label=None,
+        metadata=None, exchange=None):
     os.makedirs(out_dir, exist_ok=True)
-    from chanlun.exchange.exchange_qmt import ExchangeQMT
-    ex = ExchangeQMT()
+    if exchange is None:
+        from chanlun.exchange.exchange_qmt import ExchangeQMT
+        ex = ExchangeQMT()
+    else:
+        ex = exchange
     ok = skip = fail = 0
     t0 = time.time()
     lv = f"{small_tf}+{mid_tf}+{big_tf}" if mid_tf else f"{small_tf}+{big_tf}"
+    manifest_file = _manifest_path(out_dir, manifest_path)
+    manifest = {
+        "version": 1,
+        "label": manifest_label or "",
+        "started_at": _now_iso(),
+        "completed_at": None,
+        "out_dir": out_dir,
+        "levels": {
+            "small_tf": small_tf,
+            "mid_tf": mid_tf,
+            "big_tf": big_tf,
+        },
+        "start": str(start) if start is not None else None,
+        "end": str(end) if end is not None else None,
+        "min_small": int(min_small),
+        "metadata": dict(metadata or {}),
+        "requested_count": len(codes),
+        "counts": {"ok": 0, "skip": 0, "fail": 0},
+        "entries": [],
+    }
+    _write_manifest(manifest_file, manifest)
     print(f"取数 {len(codes)}只 {lv} {start}~{end} → {out_dir}")
     for i, code in enumerate(codes):
         p = f"{out_dir}/{code}.pkl"
         if os.path.exists(p):
             skip += 1
+            manifest["entries"].append(
+                _manifest_entry(code, "skip", p, reason="exists")
+            )
+            manifest["counts"] = {"ok": ok, "skip": skip, "fail": fail}
             continue
         try:
             d = build(code, ex, small_tf, big_tf, start, end, big_delay, min_small,
@@ -101,14 +321,44 @@ def run(codes, out_dir, small_tf, big_tf, start, end, big_delay, min_small=200,
             if d:
                 pickle.dump(d, open(p, "wb"))
                 ok += 1
+                manifest["entries"].append(
+                    _manifest_entry(
+                        code,
+                        "ok",
+                        p,
+                        n_small=d.get("n_small"),
+                        n_mid=d.get("n_mid"),
+                        n_big=d.get("n_big"),
+                        has_mid_by_bar="mid_by_bar" in d,
+                    )
+                )
             else:
                 fail += 1
+                manifest["entries"].append(
+                    _manifest_entry(code, "fail", p, reason="insufficient_data")
+                )
         except Exception as e:
             fail += 1
             print(f"  {code} 失败: {type(e).__name__} {e}")
+            manifest["entries"].append(
+                _manifest_entry(
+                    code,
+                    "fail",
+                    p,
+                    error_type=type(e).__name__,
+                    error=str(e),
+                )
+            )
+        manifest["counts"] = {"ok": ok, "skip": skip, "fail": fail}
         if (i + 1) % 30 == 0:
+            _write_manifest(manifest_file, manifest)
             print(f"  {i+1}/{len(codes)} ok={ok} skip={skip} fail={fail} {time.time()-t0:.0f}s")
-    print(f"完成 ok={ok} skip={skip} fail={fail} 共{len(codes)} {time.time()-t0:.0f}s")
+    manifest["completed_at"] = _now_iso()
+    manifest["elapsed_seconds"] = round(time.time() - t0, 3)
+    manifest["counts"] = {"ok": ok, "skip": skip, "fail": fail}
+    _write_manifest(manifest_file, manifest)
+    print(f"完成 ok={ok} skip={skip} fail={fail} 共{len(codes)} {time.time()-t0:.0f}s manifest={manifest_file}")
+    return manifest
 
 
 def patch_trend(out_dir: str, big_tf: str, start, end):
@@ -181,9 +431,147 @@ def patch_daily_bsp(out_dir: str):
     print(f"完成 ok={ok} skip={skip} fail={fail} {time.time()-t0:.0f}s")
 
 
+def patch_nest_annotations(
+    out_dir: str,
+    small_tf: str = "5m",
+    big_tf: str = "30m",
+    start=None,
+    end=None,
+    big_delay=pd.Timedelta("30min"),
+    mid_tf=None,
+    mid_delay=None,
+    limit: int | None = None,
+    codes: set[str] | None = None,
+):
+    """Rebuild technical signal cache so 1/2 buy points carry interval-nest flags."""
+    import glob
+    from chanlun.exchange.exchange_qmt import ExchangeQMT
+
+    ex = ExchangeQMT()
+    files = sorted(glob.glob(f"{out_dir}/*.pkl"))
+    if codes:
+        files = [p for p in files if os.path.basename(p)[:-4] in codes]
+    ok = skip = fail = 0
+    t0 = time.time()
+    print(f"补区间套标注 {len(files)}只 {small_tf}+{big_tf} → {out_dir}")
+    technical_keys = {
+        "dates", "open", "close", "small_by_bar", "big_dir_at", "mid_dir_at",
+        "mid_by_bar", "limit_pct", "n_small", "n_big", "n_mid", "code", "signal_schema",
+    }
+    for i, p in enumerate(files):
+        d = pickle.load(open(p, "rb"))
+        schema = d.get("signal_schema") or {}
+        if schema.get("nest_operable") and int(schema.get("nest_key") or 0) >= SIGNAL_SCHEMA["nest_key"]:
+            skip += 1
+            continue
+        try:
+            rebuilt = build(
+                d["code"], ex, small_tf, big_tf, start, end, big_delay,
+                mid_tf=mid_tf, mid_delay=mid_delay,
+            )
+            if not rebuilt:
+                fail += 1
+                continue
+            for k, v in d.items():
+                if k not in technical_keys:
+                    rebuilt[k] = v
+            pickle.dump(rebuilt, open(p, "wb"))
+            ok += 1
+            if limit is not None and ok >= limit:
+                break
+        except Exception as e:
+            fail += 1
+            print(f"  {d.get('code', p)} 失败: {type(e).__name__} {e}")
+        if (i + 1) % 50 == 0:
+            print(f"  {i+1}/{len(files)} ok={ok} skip={skip} fail={fail} {time.time()-t0:.0f}s")
+    print(f"完成 ok={ok} skip={skip} fail={fail} {time.time()-t0:.0f}s")
+
+
 def main():
+    arg = sys.argv[1] if len(sys.argv) > 1 else ""
+    if arg == "nest_all_a":
+        limit = int(sys.argv[2]) if len(sys.argv) > 2 else None
+        patch_nest_annotations(OUT_ALL_A, limit=limit)
+        return
+    if arg == "nest_codes_all_a":
+        codes = {
+            item.strip().upper()
+            for item in (sys.argv[2] if len(sys.argv) > 2 else "").replace(";", ",").split(",")
+            if item.strip()
+        }
+        patch_nest_annotations(OUT_ALL_A, codes=codes)
+        return
+    if arg == "nest":
+        limit = int(sys.argv[2]) if len(sys.argv) > 2 else None
+        patch_nest_annotations(OUT, limit=limit)
+        return
+    if arg == "daily_trend":
+        patch_trend(OUT_DAILY, "w", "2022-01-01", "2024-12-31")
+        return
+    if arg == "trend_all_a":
+        patch_trend(OUT_ALL_A, "30m", None, None)
+        return
+    if arg == "daily_bsp_all_a":
+        patch_daily_bsp(OUT_ALL_A)
+        return
+    if arg == "trend":
+        patch_trend(OUT, "30m", None, None)
+        return
+    if arg == "daily_bsp":
+        patch_daily_bsp(OUT)
+        return
+    if arg == "daily":
+        codes = universe("沪深300") + ["SH.000001"]
+        run(codes, OUT_DAILY, "d", "w", "2022-01-01", "2024-12-31",
+            big_delay=pd.Timedelta("7D"), min_small=120)
+        return
+    if arg == "mtf3":
+        sector = sys.argv[2] if len(sys.argv) > 2 else "上证50"
+        codes = universe(sector) + ["SH.000001"]
+        run(codes, OUT_MTF3, "1m", "30m", None, None, big_delay=pd.Timedelta("30min"),
+            min_small=500, mid_tf="5m", mid_delay=pd.Timedelta("5min"),
+            manifest_label="mtf3",
+            metadata={"sector": sector})
+        return
+    if arg == "mtf3_all_a":
+        limit, board_filter, sample_mode = _parse_limit_board_sample(sys.argv[2:])
+        codes = filter_codes_by_board(universe_all_a(None), board_filter)
+        codes = sample_codes_by_board(codes, limit, sample_mode)
+        codes = codes + ["SH.000001"]
+        run(codes, OUT_MTF3_ALL_A, "1m", "30m", None, None,
+            big_delay=pd.Timedelta("30min"), min_small=500,
+            mid_tf="5m", mid_delay=pd.Timedelta("5min"),
+            manifest_label="mtf3_all_a",
+            metadata={
+                "limit": limit,
+                "board_filter": board_filter or "all",
+                "sample_mode": sample_mode,
+            })
+        return
+
+    sector = arg or "上证50"
+    limit, board_filter = _parse_limit_and_board(sys.argv[2:])
+    if sector in ALL_A_ALIASES:
+        codes = filter_codes_by_board(universe_all_a(None), board_filter)
+        if limit:
+            codes = codes[:limit]
+        codes = codes + ["SH.000001"]
+        out_dir = OUT_ALL_A
+    else:
+        codes = universe(sector, limit)
+        out_dir = OUT
+    run(codes, out_dir, "5m", "30m", None, None,
+        big_delay=pd.Timedelta("30min"))
+    return
+
     if len(sys.argv) > 1 and sys.argv[1] == "daily_trend":
         patch_trend(OUT_DAILY, "w", "2022-01-01", "2024-12-31")
+    elif len(sys.argv) > 1 and sys.argv[1] == "trend_all_a":
+        patch_trend(OUT_ALL_A, "30m", None, None)
+    elif len(sys.argv) > 1 and sys.argv[1] == "daily_bsp_all_a":
+        patch_daily_bsp(OUT_ALL_A)
+    elif len(sys.argv) > 1 and sys.argv[1] == "daily_bsp":
+        patch_daily_bsp(OUT)
     elif len(sys.argv) > 1 and sys.argv[1] == "trend":
         patch_trend(OUT, "30m", None, None)      # 主线(5m+30m近1年)补30m笔方向事件
     elif len(sys.argv) > 1 and sys.argv[1] == "daily_bsp":
@@ -202,7 +590,13 @@ def main():
     else:
         sector = sys.argv[1] if len(sys.argv) > 1 else "上证50"
         limit = int(sys.argv[2]) if len(sys.argv) > 2 else None
-        run(universe(sector, limit), OUT, "5m", "30m", None, None,
+        if sector in ALL_A_ALIASES:
+            codes = universe_all_a(limit) + ["SH.000001"]
+            out_dir = OUT_ALL_A
+        else:
+            codes = universe(sector, limit)
+            out_dir = OUT
+        run(codes, out_dir, "5m", "30m", None, None,
             big_delay=pd.Timedelta("30min"))
 
 

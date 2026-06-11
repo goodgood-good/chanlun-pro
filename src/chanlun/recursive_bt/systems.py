@@ -12,11 +12,17 @@ import pickle
 import numpy as np
 import pandas as pd
 
+from chanlun import config as app_config
 from chanlun.recursive_bt.portfolio import (
     _load_bt_universe, load_cached, portfolio_backtest,
 )
 
-FUND_DIR = "D:/chanlun_pro/bt_data_fund"
+_MONITOR_CONFIG = getattr(app_config, "RECURSIVE_MONITOR_CONFIG", {})
+FUND_DIR = (
+    (_MONITOR_CONFIG.get("a") or {}).get("fund_data")
+    if isinstance(_MONITOR_CONFIG, dict)
+    else None
+) or "D:/chanlun_pro/bt_data_fund_all_a"
 RS_WIN = 960          # 相对强度窗口(~20交易日×48根5m)
 ROE_ANN_MIN = 8.0     # 基本面:年化ROE阈值(%)
 
@@ -25,6 +31,18 @@ def attach_scores(syms: dict, market: dict, rs_win: int = RS_WIN):
     """给每只股票按 bar 计算 fund_ok(基本面 point-in-time) + rs(比价相对强度)。"""
     mkt_close = market["close"]
     mkt_d2i = market["d2i"]
+    mkt_daily = (
+        pd.DataFrame(
+            {"close": np.asarray(mkt_close, dtype=float)},
+            index=pd.to_datetime(market["dates"]),
+        )
+        .groupby(lambda ts: ts.date())
+        .last()
+    )
+    mkt_roll = mkt_daily["close"].pct_change(20).fillna(0.0)
+    mkt_dd = mkt_daily["close"] / mkt_daily["close"].cummax() - 1.0
+    # 上一交易日确认的市场状态给下一日使用，避免当天收盘信息倒灌到盘中。
+    mkt_bull_prev = ((mkt_roll >= 0.05) & (mkt_dd > -0.05)).shift(1).fillna(False)
     passed_fund = passed_any = 0
     for code, s in syms.items():
         reports = []
@@ -41,11 +59,13 @@ def attach_scores(syms: dict, market: dict, rs_win: int = RS_WIN):
         close = s["close"]
         n = len(dates)
         fund_ok = np.zeros(n, bool)
+        market_bull_at = np.zeros(n, bool)
         rs = np.zeros(n)
         vscore = np.zeros(n)        # ②比价低估度 = ROE年化/PB(高=优质却便宜,point-in-time)
         ri = -1
         for i in range(n):
             di = dates[i]
+            market_bull_at[i] = bool(mkt_bull_prev.get(di.date(), False))
             while ri + 1 < len(reports) and rep_av[ri + 1] <= di:
                 ri += 1
             if ri >= 0:
@@ -63,6 +83,7 @@ def attach_scores(syms: dict, market: dict, rs_win: int = RS_WIN):
                 mret = mkt_close[mi] / mkt_close[mi - rs_win] - 1
                 rs[i] = sret - mret
         s["fund_ok"] = fund_ok
+        s["market_bull_at"] = market_bull_at
         s["rs"] = rs
         s["_vscore"] = vscore
         s["total_share"] = total_share
