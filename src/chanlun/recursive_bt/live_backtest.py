@@ -650,6 +650,7 @@ def write_outputs(result: dict, args, syms: dict) -> tuple[str, str]:
             for k, v in (getattr(args, "regime_bs_ratio_multipliers", {}) or {}).items()
         },
         "regime_lookback_days": int(getattr(args, "regime_lookback_days", 20) or 20),
+        "regime_source_code": str(getattr(args, "regime_source_code", "") or ""),
         "op_level": args.op_level,
         "big_level": args.big_level,
         "mid_level": args.mid_level,
@@ -732,6 +733,21 @@ def run_backtest(args) -> tuple[dict, dict]:
     args.bs_point_ratio_multipliers = _load_bs_point_ratio_multipliers(args)
     args.regime_bs_ratio_multipliers = _load_regime_bs_ratio_multipliers(args)
     args.regime_lookback_days = int(getattr(args, "regime_lookback_days", 20) or 20)
+    args.regime_source_code = str(getattr(args, "regime_source_code", "") or "")
+    regime_source_sym = None
+    if args.regime_source_code and args.regime_bs_ratio_multipliers:
+        regime_source_sym = syms.get(args.regime_source_code)
+        if regime_source_sym is None and source == "bt_data":
+            old_dir = portfolio_mod.BT_DATA
+            portfolio_mod.BT_DATA = args.bt_data
+            try:
+                regime_source_sym = portfolio_mod.load_cached(args.regime_source_code)
+            finally:
+                portfolio_mod.BT_DATA = old_dir
+        if regime_source_sym is None:
+            raise RuntimeError(
+                f"regime source {args.regime_source_code} not found in pool or bt_data"
+            )
     args.sell_classes = tuple(getattr(args, "sell_classes", (1, 2, 3)) or (1, 2, 3))
     args.sell_ratio_overrides = dict(getattr(args, "sell_ratio_overrides", {}) or {})
     args.sell_ratio_override_scope = str(
@@ -765,6 +781,7 @@ def run_backtest(args) -> tuple[dict, dict]:
         bs_point_ratio_multipliers=args.bs_point_ratio_multipliers,
         regime_bs_ratio_multipliers=args.regime_bs_ratio_multipliers,
         regime_lookback_days=args.regime_lookback_days,
+        regime_source_sym=regime_source_sym,
         sell_classes=set(args.sell_classes),
         sell_ratio_overrides=args.sell_ratio_overrides,
         sell_ratio_override_scope=args.sell_ratio_override_scope,
@@ -851,6 +868,12 @@ def make_arg_parser() -> argparse.ArgumentParser:
         "regime (bull/range/bear) buy-ratio multipliers by buy class",
     )
     parser.add_argument("--regime-lookback-days", type=int, default=20)
+    parser.add_argument(
+        "--regime-source-code",
+        default="",
+        help="External regime source symbol (e.g. SH.000001): regime classification "
+        "uses its closes instead of the equal-weight benchmark; it does not trade",
+    )
     parser.add_argument(
         "--bs-point-ratio-overrides-json",
         default=DEFAULT_BS_POINT_RATIO_OVERRIDES,

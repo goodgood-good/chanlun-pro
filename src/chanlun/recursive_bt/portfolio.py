@@ -436,6 +436,7 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
                        bs_point_ratio_multipliers: Optional[Mapping[str, float]] = None,
                        regime_bs_ratio_multipliers: Optional[Mapping[str, Mapping[str, float]]] = None,
                        regime_lookback_days: int = 20,
+                       regime_source_sym: Optional[dict] = None,
                        pool_schedule: Optional[list] = None,
                        slippage: float = 0.0,
                        t_start=None, t_end=None):
@@ -505,12 +506,28 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
 
     # 等权基准曲线算一次:报告复用;若启用按行情比例乘数,再生成点时 regime 查表
     # (查表值=截至前一交易日收盘的判定,主循环内只回看不前视)。
+    # regime_source_sym=外部行情源(如上证指数,实盘监控可复制的口径),传入时
+    # regime 判定改用该标的收盘价而非组合等权基准;该标的不参与交易。
     bench = _bench_curve(syms, master, ml)
-    regime_by_date = (
-        _regime_by_date_lookup(master, bench, regime_lookback_days)
-        if regime_bs_ratio_multipliers
-        else {}
-    )
+    regime_by_date: Dict[object, str] = {}
+    if regime_bs_ratio_multipliers:
+        if regime_source_sym is not None:
+            d2i_src = regime_source_sym["d2i"]
+            src_last = np.full(len(master), -1, dtype=np.int64)
+            last = -1
+            for mi, tt in enumerate(master):
+                j = d2i_src.get(tt)
+                if j is not None:
+                    last = j
+                src_last[mi] = last
+            src_seq = np.where(
+                src_last >= 0,
+                regime_source_sym["close"][np.maximum(src_last, 0)],
+                np.nan,
+            )
+            regime_by_date = _regime_by_date_lookup(master, src_seq, regime_lookback_days)
+        else:
+            regime_by_date = _regime_by_date_lookup(master, bench, regime_lookback_days)
 
     cash = init_cash
     positions: Dict[str, dict] = {}

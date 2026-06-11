@@ -1402,6 +1402,57 @@ def test_portfolio_backtest_applies_regime_bs_ratio_multipliers_point_in_time():
     assert plain_by_code["QQQ.US"].buy_ratio == pytest.approx(0.5)
 
 
+def test_portfolio_backtest_uses_external_regime_source(monkeypatch):
+    from chanlun.recursive_bt.engine import MarketRules
+    from chanlun.recursive_bt.portfolio import portfolio_backtest
+
+    dates = list(pd.date_range("2026-01-01 15:00:00", periods=9, freq="1D", tz="Asia/Shanghai"))
+    flat = np.full(len(dates), 10.0)
+    falling = np.array([10.0, 10.0, 10.0, 8.9, 8.9, 8.9, 8.9, 8.9, 8.9])
+
+    def make_symbol(code: str, px: np.ndarray, signal_bar: int | None = None):
+        by_bar = {}
+        if signal_bar is not None:
+            by_bar[signal_bar] = [Signal(dates[signal_bar], 0, "3buy", float(px[signal_bar]))]
+            by_bar[6] = [Signal(dates[6], 0, "1sell", float(px[6]))]
+        return {
+            "code": code,
+            "dates": dates,
+            "open": px.copy(),
+            "close": px.copy(),
+            "d2i": {d: i for i, d in enumerate(dates)},
+            "small_by_bar": by_bar,
+            "big_dir_at": ["neutral"] * len(dates),
+            "rules": MarketRules("US", commission=0.0, stamp_duty=0.0, t_plus=0, lot=1),
+        }
+
+    # 交易标的本身平盘(等权基准恒 range),只有外部指数源在 bar3 跌入 bear:
+    # 不传外部源时 bear 乘数不可能触发;传外部源时 bar4 的 3buy 吃到 ×1.25。
+    syms = {"X": make_symbol("QQQ.US", flat, signal_bar=4)}
+    index_sym = make_symbol("SH.000001", falling)
+
+    with_index = portfolio_backtest(
+        syms=syms,
+        max_pos=2,
+        require=("tech",),
+        label="regime-index-source",
+        regime_bs_ratio_multipliers={"bear": {"3": 1.25}},
+        regime_lookback_days=2,
+        regime_source_sym=index_sym,
+    )
+    bench_only = portfolio_backtest(
+        syms=syms,
+        max_pos=2,
+        require=("tech",),
+        label="regime-bench-source",
+        regime_bs_ratio_multipliers={"bear": {"3": 1.25}},
+        regime_lookback_days=2,
+    )
+
+    assert with_index["trades"][0].buy_ratio == pytest.approx(0.625)
+    assert bench_only["trades"][0].buy_ratio == pytest.approx(0.5)
+
+
 def test_live_backtest_passes_regime_bs_ratio_multipliers(monkeypatch):
     from types import SimpleNamespace
     from chanlun.recursive_bt import live_backtest
