@@ -367,6 +367,24 @@ def test_pick_buy_class_respects_priority():
     assert _pick_sell_signal([Sig("3sell"), Sig("1sell"), Sig("2sell")]).bs_type == "1sell"
 
 
+def test_apply_buy_ratio_multiplier_honors_explicit_zero():
+    """显式 0.0 乘数=该买点类彻底跳过(regime 过滤原语),不得被 `or 1.0` 还原成不变。
+
+    回归:`multipliers.get(cls, 1.0) or 1.0` 把 0.0(falsy)当缺失→还原 1.0,
+    使 `{"bear": {"3": 0.0}}` 静默失效(bear 仍满仓买 3 买)。"""
+    from chanlun.recursive_bt.portfolio import _apply_buy_ratio_multiplier
+
+    # 0.0 → 跳过(ratio 归零,调用方据此 continue)
+    assert _apply_buy_ratio_multiplier(1.0, "3buy", {"3": 0.0}) == 0.0
+    # 0.5 → 减半
+    assert _apply_buy_ratio_multiplier(1.0, "3buy", {"3": 0.5}) == 0.5
+    # 缺失键 / None → 不变(1.0 兜底,保持既有语义)
+    assert _apply_buy_ratio_multiplier(0.8, "3buy", {"1": 0.5}) == 0.8
+    assert _apply_buy_ratio_multiplier(0.8, "3buy", {"3": None}) == 0.8
+    # 无乘数表 → 原样
+    assert _apply_buy_ratio_multiplier(0.6, "3buy", None) == 0.6
+
+
 def test_nest_filter_requires_operable_for_divergence_buys():
     from chanlun.recursive_bt.portfolio import _nest_filter_ok
 

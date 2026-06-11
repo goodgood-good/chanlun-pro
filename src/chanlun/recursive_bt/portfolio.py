@@ -203,7 +203,8 @@ def _apply_buy_ratio_multiplier(
     if not cls or not multipliers:
         return round(float(ratio or 0.0), 4)
     try:
-        multiplier = float(multipliers.get(cls, 1.0) or 1.0)
+        raw = multipliers.get(cls)            # 显式 0.0 必须保留(=跳过该买点类),不能用 `or 1.0`
+        multiplier = 1.0 if raw is None else float(raw)   # 仅缺失键/None 兜底 1.0
     except Exception:
         multiplier = 1.0
     multiplier = min(max(multiplier, 0.0), 2.0)
