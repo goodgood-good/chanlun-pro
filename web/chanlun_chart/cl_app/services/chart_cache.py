@@ -178,7 +178,14 @@ def _stable_hash(obj) -> str:
 # - v33 (2026-06) ── 全链整段口径收口:zslx_branch._finalize 喂回 zs_high/zs_low 改**走势类型
 #   整段高低点**(原文20课 gn/dn,含进入/离开段端点;原中枢 gg/dd 包络=过严)。影响 L1+ 递归树与
 #   bs2/bs3 跨级信号(实测10只:413信号不变/仅1增1减=0.5%,L0 全零变动;kuozhan 各级数量不变)。
-_CHART_CACHE_SCHEMA_VERSION = "v33"
+# - v34 (2026-06-11) ── 同级别分解段语义对齐原文(fix/zhongshu-l0):① zslx 盘整段 _type 改净位移·
+#   **转折点口径**(进入段起点→离开段**起点**,L25128 段起点=前段结束点/L8131 a1=b1;原继承摆动腿
+#   方向对「横盘+暴跌收尾」错标,原净位移用离开段终点对 V 型链翻号);② tongjibie 交替段改
+#   **本体摆动腿直出**(_swing_alternating_segs,39课L25179 Ai 严格交替/42课L26239 趋势仍是一段;
+#   原「zslx 标签+_jiehe_segments 同向合并」对 V/Λ 型 expand 链方向歧义)。实测10只:L0 买卖点 64
+#   个零变动;30m 中枢仅 600519 区间收紧[1322,1510]→[1322,1431]、510300 假窄条[4.71,4.78]消失
+#   (z5 本体与前震荡区真实不重叠)。recursive_levels L1+/30m tongjibie 内容变化,强制旧缓存失效。
+_CHART_CACHE_SCHEMA_VERSION = "v34"
 
 
 def _build_cache_key(market: str, code: str, frequency: str, cl_config: dict) -> str:
