@@ -294,6 +294,10 @@ def test_live_monitor_cli_accepts_optimization_report_switches():
             "D:/tmp/sell3_rebuy3_up.json",
             "--sell3-rebuy3-up-impact-markdown",
             "D:/tmp/sell3_rebuy3_up.md",
+            "--regime-ratio-impact-json",
+            "D:/tmp/regime_ratio_impact.json",
+            "--regime-ratio-impact-markdown",
+            "D:/tmp/regime_ratio_impact.md",
             "--sell3-rebuy-mid3-impact-json",
             "D:/tmp/sell3_mid.json",
             "--sell3-rebuy-mid3-impact-markdown",
@@ -361,6 +365,8 @@ def test_live_monitor_cli_accepts_optimization_report_switches():
     assert args.sell3_rebuy3_impact_markdown == "D:/tmp/sell3_rebuy3.md"
     assert args.sell3_rebuy3_up_impact_json == "D:/tmp/sell3_rebuy3_up.json"
     assert args.sell3_rebuy3_up_impact_markdown == "D:/tmp/sell3_rebuy3_up.md"
+    assert args.regime_ratio_impact_json == "D:/tmp/regime_ratio_impact.json"
+    assert args.regime_ratio_impact_markdown == "D:/tmp/regime_ratio_impact.md"
     assert args.sell3_rebuy_mid3_impact_json == "D:/tmp/sell3_mid.json"
     assert args.sell3_rebuy_mid3_impact_markdown == "D:/tmp/sell3_mid.md"
     assert args.a_5m_sell3_rebuy3_impact_json == "D:/tmp/a_5m.json"
@@ -534,6 +540,8 @@ def test_refresh_optimization_report_returns_action_suggestions(tmp_path):
         output_sell3_rebuy3_impact_markdown=str(sell3_rebuy3_md),
         output_sell3_rebuy3_up_impact_json=str(sell3_rebuy3_up_json),
         output_sell3_rebuy3_up_impact_markdown=str(sell3_rebuy3_up_md),
+        output_regime_ratio_impact_json=str(tmp_path / "regime_ratio_impact.json"),
+        output_regime_ratio_impact_markdown=str(tmp_path / "regime_ratio_impact.md"),
         output_sell3_rebuy_mid3_impact_json=str(sell3_mid_json),
         output_sell3_rebuy_mid3_impact_markdown=str(sell3_mid_md),
         output_a_5m_sell3_rebuy3_impact_json=str(a_5m_json),
@@ -619,6 +627,9 @@ def test_refresh_optimization_report_returns_action_suggestions(tmp_path):
     assert result["mtf3_cache_bt_sample_size"] == 5
     assert result["sell3_rebuy3_impact_json"] == str(sell3_rebuy3_json)
     assert result["sell3_rebuy3_up_impact_json"] == str(sell3_rebuy3_up_json)
+    assert result["regime_ratio_impact_json"] == str(tmp_path / "regime_ratio_impact.json")
+    assert (tmp_path / "regime_ratio_impact.json").exists()
+    assert result["regime_ratio_impact_verdicts"] >= 1
     assert result["strategy_adoption_gate_json"] == str(adoption_gate_json)
     assert result["adoption_gate_count"] >= 1
     assert result["attribution_segments"] == 2

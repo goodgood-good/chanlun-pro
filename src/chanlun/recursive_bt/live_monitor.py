@@ -896,6 +896,8 @@ def refresh_optimization_report(
     output_sell3_rebuy3_up_impact_markdown: str | None = None,
     output_a_5m_sell3_rebuy3_impact_json: str | None = None,
     output_a_5m_sell3_rebuy3_impact_markdown: str | None = None,
+    output_regime_ratio_impact_json: str | None = None,
+    output_regime_ratio_impact_markdown: str | None = None,
     output_strategy_adoption_gate_json: str | None = None,
     output_strategy_adoption_gate_markdown: str | None = None,
     runtime_override_audit_jsonl: str | None = None,
@@ -934,6 +936,7 @@ def refresh_optimization_report(
         write_strategy_attribution_report,
         write_strategy_adoption_gate_report,
         write_sell_policy_impact_report,
+        write_regime_ratio_impact_report,
         write_optimization_report,
     )
 
@@ -1181,6 +1184,17 @@ def refresh_optimization_report(
             fun.get_logger().warning(
                 f"[live_monitor] A 5m sell3 rebuy3 impact refresh failed: {exc}"
             )
+    regime_ratio_impact_report = None
+    if output_regime_ratio_impact_json:
+        try:
+            regime_ratio_impact_report = write_regime_ratio_impact_report(
+                output_regime_ratio_impact_json,
+                output_markdown=output_regime_ratio_impact_markdown,
+            )
+        except Exception as exc:
+            fun.get_logger().warning(
+                f"[live_monitor] regime ratio impact refresh failed: {exc}"
+            )
     if output_strategy_adoption_gate_json and mtf3_coverage_report is not None:
         try:
             adoption_gate_report = write_strategy_adoption_gate_report(
@@ -1237,6 +1251,10 @@ def refresh_optimization_report(
         "sell3_rebuy3_impact_json": output_sell3_rebuy3_impact_json,
         "sell3_rebuy3_up_impact_json": output_sell3_rebuy3_up_impact_json,
         "a_5m_sell3_rebuy3_impact_json": output_a_5m_sell3_rebuy3_impact_json,
+        "regime_ratio_impact_json": output_regime_ratio_impact_json,
+        "regime_ratio_impact_verdicts": len(
+            (regime_ratio_impact_report or {}).get("verdicts", []) or []
+        ),
         "strategy_adoption_gate_json": output_strategy_adoption_gate_json,
         "strategy_adoption_gate_markdown": output_strategy_adoption_gate_markdown,
         "candidate_count": len(report.get("candidate_ranking", []) or []),
@@ -1354,6 +1372,8 @@ def run_once(args, states: Dict[str, object], notifier, deduper, names=None, bro
             output_sell3_rebuy3_impact_markdown=args.sell3_rebuy3_impact_markdown,
             output_sell3_rebuy3_up_impact_json=args.sell3_rebuy3_up_impact_json,
             output_sell3_rebuy3_up_impact_markdown=args.sell3_rebuy3_up_impact_markdown,
+            output_regime_ratio_impact_json=args.regime_ratio_impact_json,
+            output_regime_ratio_impact_markdown=args.regime_ratio_impact_markdown,
             output_sell3_rebuy_mid3_impact_json=args.sell3_rebuy_mid3_impact_json,
             output_sell3_rebuy_mid3_impact_markdown=args.sell3_rebuy_mid3_impact_markdown,
             output_a_5m_sell3_rebuy3_impact_json=args.a_5m_sell3_rebuy3_impact_json,
@@ -1575,6 +1595,8 @@ def make_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sell3-rebuy3-impact-markdown")
     parser.add_argument("--sell3-rebuy3-up-impact-json")
     parser.add_argument("--sell3-rebuy3-up-impact-markdown")
+    parser.add_argument("--regime-ratio-impact-json")
+    parser.add_argument("--regime-ratio-impact-markdown")
     parser.add_argument("--sell3-rebuy-mid3-impact-json")
     parser.add_argument("--sell3-rebuy-mid3-impact-markdown")
     parser.add_argument("--a-5m-sell3-rebuy3-impact-json")
@@ -1792,6 +1814,16 @@ def main(argv: Optional[list[str]] = None) -> int:
         args.sell3_rebuy3_up_impact_json
         or market_config.get("sell3_rebuy3_up_impact_json")
         or "D:/chanlun_pro/reports/strategy_sell3_rebuy3_up_impact_report.json"
+    )
+    args.regime_ratio_impact_json = str(
+        getattr(args, "regime_ratio_impact_json", None)
+        or market_config.get("regime_ratio_impact_json")
+        or "D:/chanlun_pro/reports/strategy_regime_ratio_impact_report.json"
+    )
+    args.regime_ratio_impact_markdown = str(
+        getattr(args, "regime_ratio_impact_markdown", None)
+        or market_config.get("regime_ratio_impact_markdown")
+        or "D:/chanlun_pro/reports/strategy_regime_ratio_impact_report.md"
     )
     args.sell3_rebuy3_up_impact_markdown = str(
         args.sell3_rebuy3_up_impact_markdown
