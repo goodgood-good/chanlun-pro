@@ -5,8 +5,11 @@
   - L0 交易信号: get_branch_bspoints(use_xd=True) (mmd,date,val)
   - kuozhan/tongjibie 各级: 中枢数量 + 买卖点(name,date,val) + 背驰数
 用法:
-  python scripts/signal_baseline_diff.py dump <out.pkl>   # 当前代码跑信号
+  python scripts/signal_baseline_diff.py dump <out.pkl> [freq]   # 当前代码跑信号(freq 默认 5m)
   python scripts/signal_baseline_diff.py diff <a.pkl> <b.pkl>
+
+freq=1m 时升级链为 5m kuozhan + 30m tongjibie(验证 kuozhan 级信号语义,V3);
+freq=5m 时升级链仅 30m tongjibie。
 """
 import pickle
 import sys
@@ -26,12 +29,12 @@ CFG = {
 }
 
 
-def _sig_one(code: str) -> dict:
+def _sig_one(code: str, freq: str = "5m") -> dict:
     from chanlun.exchange.exchange_qmt import ExchangeQMT
     from chanlun.core.cl import CL
 
-    df = ExchangeQMT().klines(code, "5m", start_date=START, end_date=END)
-    cd = CL(code, "5m", dict(CFG))
+    df = ExchangeQMT().klines(code, freq, start_date=START, end_date=END)
+    cd = CL(code, freq, dict(CFG))
     cd.process_klines(df)
     out = {"rows": len(df)}
     bsp = cd.get_branch_bspoints(use_xd=True)
@@ -48,11 +51,11 @@ def _sig_one(code: str) -> dict:
     return out
 
 
-def dump(out_path: str):
+def dump(out_path: str, freq: str = "5m"):
     res = {}
     for c in CODES:
         try:
-            res[c] = _sig_one(c)
+            res[c] = _sig_one(c, freq)
             print(f"{c}: rows={res[c]['rows']} l0_bsp={len(res[c]['l0_bsp'])}")
         except Exception as e:  # noqa: BLE001
             res[c] = {"error": repr(e)}
@@ -89,6 +92,6 @@ def diff(a_path: str, b_path: str):
 
 if __name__ == "__main__":
     if sys.argv[1] == "dump":
-        dump(sys.argv[2])
+        dump(sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else "5m")
     elif sys.argv[1] == "diff":
         diff(sys.argv[2], sys.argv[3])

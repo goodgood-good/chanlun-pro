@@ -185,7 +185,11 @@ def _stable_hash(obj) -> str:
 #   原「zslx 标签+_jiehe_segments 同向合并」对 V/Λ 型 expand 链方向歧义)。实测10只:L0 买卖点 64
 #   个零变动;30m 中枢仅 600519 区间收紧[1322,1510]→[1322,1431]、510300 假窄条[4.71,4.78]消失
 #   (z5 本体与前震荡区真实不重叠)。recursive_levels L1+/30m tongjibie 内容变化,强制旧缓存失效。
-_CHART_CACHE_SCHEMA_VERSION = "v34"
+# - v35 (2026-06-11) ── kuozhan 级买卖点/背驰**段粒度化**(V3 审计修复):kuozhan_level_signals_ex
+#   次级别=下级中枢摆动腿(topic2 C2.10:对 5m 中枢,3买回试=「1m 走势类型」,非单根线段;旧
+#   xds[b0+1]/[b0+2] 单线段口径与 30m 修复前同质的级别错配)。影响 1m 图 recursive_levels
+#   L1(5m) 的 bsp/bcs(中枢序列不变);5m/30m 图升级链走 tongjibie 不受影响。强制旧缓存失效。
+_CHART_CACHE_SCHEMA_VERSION = "v35"
 
 
 def _build_cache_key(market: str, code: str, frequency: str, cl_config: dict) -> str:

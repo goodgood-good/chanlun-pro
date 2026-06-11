@@ -505,14 +505,15 @@ class CL(ICL):
         **<30m 用非同级别分解**(kuozhan 扩展/延伸,line24735「以下级别允许延伸」);**30m 用
         同级别分解**(tongjibie:次级别走势类型恰好 3 段重合、不延伸、允许盘整+盘整,line24727/
         24735);30m 以上不考虑(line24735)。30m/日线图无升级链 → 只 base(返回 [])。
-        各级背驰/买卖点由 kuozhan_level_signals 在 xds 补进入/离开段算。返回
+        各级背驰/买卖点段粒度:kuozhan 级=下级中枢摆动腿(kuozhan_level_signals_ex,V3 修复),
+        tongjibie 级=交替段(tongjibie_level_signals)。返回
         List[dict]:[{level, zss, bsp(List[BuySellPoint]), bcs(List[(date,val,kind)])}]。
         """
         chain = self._UPGRADE_CHAIN.get(self.frequency, [])
         if not chain:
             return []
         from chanlun.core.zs_upgrade import (
-            kuozhan_zhongshu, kuozhan_level_signals,
+            kuozhan_zhongshu, kuozhan_level_signals_ex,
             tongjibie_zhongshu_ex, tongjibie_level_signals,
         )
         levels = self.get_recursive_branch_levels()
@@ -544,8 +545,8 @@ class CL(ICL):
             try:                                          # ② 买卖点/背驰(失败不连累中枢显示)
                 if tjb_meta is not None:                  # 同级别分解→段粒度信号(单根线段=级别错配,恒空)
                     bsp, bcs = tongjibie_level_signals(nz, tjb_meta, ld, wzgx, self.frequency)
-                else:
-                    bsp, bcs = kuozhan_level_signals(nz, xds, ld, wzgx, self.frequency)
+                else:                                     # kuozhan→段粒度(次级别=下级中枢摆动腿,V3修复)
+                    bsp, bcs = kuozhan_level_signals_ex(nz, cur, ld, wzgx, self.frequency)
                 for p in bsp:
                     p.level = lvl
             except Exception:

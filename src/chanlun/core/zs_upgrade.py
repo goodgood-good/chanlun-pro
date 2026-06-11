@@ -162,46 +162,108 @@ def kuozhan_zhongshu(zss: List[ZS], xds: List[LINE]) -> List[ZS]:
     return out
 
 
-def kuozhan_level_signals(zss: List[ZS], xds: List[LINE], ld_provider, wzgx: str,
-                          frequency: Optional[str] = None):
-    """一级 kuozhan 中枢序列 → (买卖点[一三类], 背驰段)。各级(5m/30m…)复用。
+def _leg_sub_seg(leg: "_Seg", zz: ZS, side: str) -> Optional["_Seg"]:
+    """腿内子段:升级中枢本体首/末中枢不在腿端点时,腿内剩余部分当进入/离开段(方向=腿向)。
 
-    kuozhan 中枢无独立进入/离开段(z.start/z.end 是本体段),故在 xds 里补:进入段 =
-    xds[a0-1](中枢本体区前一段)、离开段 = xds[b0+1](后一段),a0/b0 = 本体首末段在 xds 的位。
-    - **背驰(中继型)**:进入/离开同向 → is_beichi(进入, 离开, ld);前同向中枢(is_qs)→ 趋势背驰
-      qs → 一类(离开向下=1buy/向上=1sell,原文 3544),否则盘整背驰 pz(不产一类)。
-    - **三类(几何,同 bs_branch._third_class 口径)**:离开向上冲出 + 回试低点 ≥ ZG → 3buy;离开
-      向下 + 回试高点 ≤ ZD → 3sell(原文第20课「离开中枢、第一次回试不破核心」)。
+    side='after' → zz 之后(start = zz 离开线段起点 FX,转折点口径同 _swing_alternating_segs);
+    side='before' → zz 之前(end = zz 首线段起点 FX)。span = 子段内中枢 gg/dd ∪ 两端 FX 值。
+    零跨度(zz 即腿端点的退化)→ None。"""
+    try:
+        idx = next(i for i, z in enumerate(leg.zss) if z is zz)
+    except StopIteration:
+        return None
+    if side == "after":
+        run = leg.zss[idx + 1:]
+        start = zz.end.start if zz.end is not None else (
+            zz.lines[-1].end if zz.lines else None)
+        end = leg.end
+    else:
+        run = leg.zss[:idx]
+        start = leg.start
+        end = zz.start.start if zz.start is not None else (
+            zz.lines[0].start if zz.lines else None)
+    if start is None or end is None:
+        return None
+    fx_vals = [v for v in (getattr(start, "val", None), getattr(end, "val", None))
+               if v is not None]
+    if not run and (len(fx_vals) < 2 or fx_vals[0] == fx_vals[1]):
+        return None
+    lo_pool = [z.dd for z in run] + fx_vals
+    hi_pool = [z.gg for z in run] + fx_vals
+    if not lo_pool:
+        return None
+    seg = _Seg.__new__(_Seg)
+    seg.dir, seg.zss = leg.dir, list(run)
+    seg.start, seg.end = start, end
+    seg.zs_low, seg.zs_high = min(lo_pool), max(hi_pool)
+    return seg
+
+
+def kuozhan_level_signals_ex(zss: List[ZS], lower_zss: List[ZS], ld_provider, wzgx: str,
+                             frequency: Optional[str] = None):
+    """kuozhan 级(<30m)中枢序列 → (买卖点[一三类], 背驰段)——**段粒度**(次级别=下级中枢摆动腿)。
+
+    V3 修复(2026-06-11 审计裁决):旧版用单根线段 xds[b0+1]/[b0+2] 当 L1(5m) 中枢的离开/回试段,
+    与 30m 修复前同质的级别错配(topic2 C2.10:对 5m 中枢,3买回试=「1m 走势类型」——即下级中枢
+    摆动腿,非单根线段;单线段窗口太小,背驰力度与回试判定失真)。
+
+    次级别段 = _swing_alternating_segs(lower_zss)(与 tongjibie 同口径);z 本体由 expanded_with
+    (延伸=[z]/扩张=[a,b])定位段范围:
+    - 本体端点恰为腿端点 → 进入/离开/回试 = 相邻整腿;
+    - 本体在腿中间 → 进入/离开 = 腿内剩余子段(_leg_sub_seg,方向=腿向),回试 = 下一整腿。
+    信号口径与旧版同构(仅判定单位升格):
+    - **背驰(中继型)**:进入/离开同向 → is_beichi;前同向中枢(is_qs)→ 趋势背驰 qs → 一类
+      (离开向下=1buy/向上=1sell,原文 3544),否则盘整背驰 pz(不产一类)。
+    - **三类(几何)**:离开向上冲出 + 回试段终点 ≥ ZG → 3buy;向下 + 回试 ≤ ZD → 3sell
+      (原文第20课「离开中枢、第一次回试不破核心」)。
     返回 (bsp, bcs):bsp = List[BuySellPoint](level 未填,调用方按级别标);bcs = List[(date,val,kind)]。
     """
     from chanlun.core.bs_branch import BuySellPoint
     from chanlun.core.beichi_calculator import is_beichi, is_qs
-    n = len(xds)
+    if not zss or not lower_zss:
+        return [], []
+    segs = _swing_alternating_segs(lower_zss)
+    seg_of = {}
+    for si, sg in enumerate(segs):
+        for zz in sg.zss:
+            seg_of[id(zz)] = si
+    n = len(segs)
     bsp, bcs = [], []
     for k, z in enumerate(zss):
-        if not z.lines:
+        comp = list(getattr(z, "expanded_with", None) or [])
+        if not comp:
             continue
-        a0 = _line_index(z.lines[0], xds)
-        b0 = _line_index(z.lines[-1], xds)
-        if a0 is None or b0 is None:
+        s_seg = seg_of.get(id(comp[0]))
+        e_seg = seg_of.get(id(comp[-1]))
+        if s_seg is None or e_seg is None:
             continue
-        enter = xds[a0 - 1] if a0 - 1 >= 0 else None        # 进入段
-        leave = xds[b0 + 1] if b0 + 1 < n else None          # 离开段
+        if comp[0] is segs[s_seg].zss[0]:                    # 进入段
+            enter = segs[s_seg - 1] if s_seg - 1 >= 0 else None
+        else:
+            enter = _leg_sub_seg(segs[s_seg], comp[0], "before")
+        if comp[-1] is segs[e_seg].zss[-1]:                  # 离开段 + 回试段
+            leave = segs[e_seg + 1] if e_seg + 1 < n else None
+            retest = segs[e_seg + 2] if e_seg + 2 < n else None
+        else:
+            leave = _leg_sub_seg(segs[e_seg], comp[-1], "after")
+            retest = segs[e_seg + 1] if e_seg + 1 < n else None
         # 背驰 + 一类(中继型:进入/离开同向才比较力度)
-        if (enter is not None and leave is not None and enter.type == leave.type
-                and ld_provider is not None and is_beichi(enter, leave, ld_provider, frequency)):
+        if (enter is not None and leave is not None and enter.dir == leave.dir
+                and ld_provider is not None
+                and enter.start is not None and enter.end is not None
+                and leave.start is not None and leave.end is not None
+                and is_beichi(_SegLine(enter), _SegLine(leave), ld_provider, frequency)):
             kind = "qs" if (k > 0 and is_qs(zss[k - 1], z, wzgx)) else "pz"
             bcs.append((leave.end.k.date, leave.end.val, kind))
             if kind == "qs":                                  # 趋势背驰 → 一类
-                bsp.append(BuySellPoint("1buy" if leave.type == "down" else "1sell",
-                                        z, leave, leave.end, None))
-        # 三类(几何:离开 + 回试不破核心 ZG/ZD)
-        if leave is not None and b0 + 2 < n:
-            retest = xds[b0 + 2]
-            if leave.type == "up" and retest.end.val >= z.zg:
-                bsp.append(BuySellPoint("3buy", z, retest, retest.end, None))
-            elif leave.type == "down" and retest.end.val <= z.zd:
-                bsp.append(BuySellPoint("3sell", z, retest, retest.end, None))
+                bsp.append(BuySellPoint("1buy" if leave.dir == "down" else "1sell",
+                                        z, _SegLine(leave), leave.end, None))
+        # 三类(几何:离开 + 回试段终点不破核心 ZG/ZD)
+        if leave is not None and retest is not None and retest.end is not None:
+            if leave.dir == "up" and retest.end.val >= z.zg:
+                bsp.append(BuySellPoint("3buy", z, _SegLine(retest), retest.end, None))
+            elif leave.dir == "down" and retest.end.val <= z.zd:
+                bsp.append(BuySellPoint("3sell", z, _SegLine(retest), retest.end, None))
     return bsp, bcs
 
 

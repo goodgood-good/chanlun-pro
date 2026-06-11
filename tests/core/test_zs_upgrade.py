@@ -5,7 +5,7 @@
 """
 from chanlun.core.cl_interface import ZS, Config
 from chanlun.core.zs_upgrade import (
-    is_kuozhan, kuozhan_zhongshu, kuozhan_level_signals, _tongjibie_groups,
+    is_kuozhan, kuozhan_zhongshu, kuozhan_level_signals_ex, _tongjibie_groups,
     _jiehe_segments,
 )
 
@@ -239,69 +239,120 @@ def test_kuozhang_envelope_separated_none():
     assert _kuozhang_upgrade(a, b, a_lines + b_lines) is None
 
 
-# ---- kuozhan_level_signals: 各级(5m/30m)背驰+买卖点 ----
-class _LS:
-    """线段桩(带 end.val/end.k,供买卖点锚点/三类回试)。"""
+# ---- kuozhan_level_signals_ex: kuozhan 级段粒度背驰+买卖点(次级别=下级中枢摆动腿,V3修复) ----
+class _FX2:
+    def __init__(self, val, kidx=0):
+        self.val = val
+        self.k = type("K", (), {"date": None, "k_index": kidx})()
 
-    def __init__(self, t, lo, hi, end_val, kidx=0):
+
+class _LF:
+    """线段桩(带 start/end FX,供摆动腿端点定位)。"""
+
+    def __init__(self, t, lo, hi, s_val, e_val, kidx=0):
         self.type, self.zs_low, self.zs_high = t, lo, hi
-        self.start = None
-        self.end = type("FX", (), {"val": end_val,
-                                   "k": type("K", (), {"date": None, "k_index": kidx})()})()
+        self.start, self.end = _FX2(s_val, kidx), _FX2(e_val, kidx + 1)
 
 
-def _zs_with_lines(zd, zg, lines):
-    z = _zs(zd, zg, min(x.zs_low for x in lines), max(x.zs_high for x in lines))
-    z.lines = lines
+def _l0(zd, zg, dd, gg, enter_fx, leave_fx, kidx=0):
+    """L0 中枢桩:start 线段 .start=进入起点 FX(enter_fx)、end 线段 .start=离开起点 FX(leave_fx)
+    (与 _swing_alternating_segs/_leg_sub_seg 的转折点端点口径对齐)。"""
+    z = _zs(zd, zg, dd, gg)
+    z.start = _LF("up", dd, gg, enter_fx, gg, kidx)
+    z.end = _LF("down", dd, gg, leave_fx, dd, kidx + 2)
+    z.lines = [z.start, z.end]
     return z
 
 
-def _xds_zs_for_3class(leave_type, retest_end):
-    """造『进入+本体2段+离开+回试』5段 xds + 中枢[ZD=6,ZG=9],离开方向/回试端点可调。"""
-    b0 = _LS("up", 6, 9, 9)
-    b1 = _LS("down", 6, 9, 6)
-    if leave_type == "up":
-        enter = _LS("down", 6, 9, 6)
-        leave = _LS("up", 6, 14, 14)
-        retest = _LS("down", retest_end, 14, retest_end)
-    else:
-        enter = _LS("up", 6, 9, 9)
-        leave = _LS("down", 2, 9, 2)
-        retest = _LS("up", 2, retest_end, retest_end)
-    xds = [enter, b0, b1, leave, retest]
-    return xds, _zs_with_lines(6, 9, [b0, b1])
+def _v_shape_lower(retest_leave_fx):
+    """下跌腿[z0,z1]→上涨腿[z2]→下跌腿[z3]:z_up 本体=腿1 整腿,腿2=离开、腿3=回试。
+    retest_leave_fx = z3 离开转折值(=回试段终点)。"""
+    z0 = _l0(8, 9, 7.5, 9.5, 9.6, 9.4, 0)
+    z1 = _l0(5, 6, 4.5, 6.5, 6.6, 4.6, 4)      # dd 创新低→down 延续
+    z2 = _l0(10, 11, 9.5, 11.5, 9.4, 11.4, 8)  # dd=9.5>z1.gg=6.5→反转(腿1 封闭)
+    z3 = _l0(6.8, 7.2, 6.6, 7.8, 7.7, retest_leave_fx, 12)  # gg=7.8<z2.dd=9.5→反转
+    return [z0, z1, z2, z3], (z0, z1)
 
 
-def test_kuozhan_level_signals_3buy_geometric():
-    """离开向上(冲出 ZG=9)+回试低点 10≥ZG → 3buy(几何,不需背驰,ld=None)。"""
-    xds, z = _xds_zs_for_3class("up", 10)
-    bsp, bcs = kuozhan_level_signals([z], xds, None, Config.ZS_WZGX_ZGD.value)
+def _kz(zd, zg, dd, gg, comp):
+    """升级中枢桩(expanded_with=构成它的下级中枢)。"""
+    z = _zs(zd, zg, dd, gg)
+    z.expanded_with = list(comp)
+    return z
+
+
+def test_kuozhan_signals_ex_3buy_leg_aligned():
+    """本体=下跌腿整腿,离开=上涨腿(冲出 ZG=7.5)+回试腿终点 7.6≥ZG → 3buy 锚回试转折点。"""
+    lower, (z0, z1) = _v_shape_lower(7.6)
+    z = _kz(6.5, 7.5, 4.5, 9.5, [z0, z1])
+    bsp, bcs = kuozhan_level_signals_ex([z], lower, None, Config.ZS_WZGX_ZGD.value)
     assert [p.bs_type for p in bsp] == ["3buy"]
-    assert bsp[0].anchor_fx.val == 10 and bcs == []
+    assert bsp[0].anchor_fx.val == 7.6 and bcs == []
 
 
-def test_kuozhan_level_signals_3sell_geometric():
-    """离开向下(跌破 ZD=6)+回试高点 5≤ZD → 3sell。"""
-    xds, z = _xds_zs_for_3class("down", 5)
-    bsp, _ = kuozhan_level_signals([z], xds, None, Config.ZS_WZGX_ZGD.value)
-    assert [p.bs_type for p in bsp] == ["3sell"]
-
-
-def test_kuozhan_level_signals_retest_breaks_no_3buy():
-    """回试低点 7<ZG=9(破核心)→ 不产 3buy。"""
-    xds, z = _xds_zs_for_3class("up", 7)
-    bsp, _ = kuozhan_level_signals([z], xds, None, Config.ZS_WZGX_ZGD.value)
+def test_kuozhan_signals_ex_retest_breaks_no_3buy():
+    """回试腿终点 7.0<ZG=7.5(破核心)→ 不产 3buy。"""
+    lower, (z0, z1) = _v_shape_lower(7.0)
+    z = _kz(6.5, 7.5, 4.5, 9.5, [z0, z1])
+    bsp, _ = kuozhan_level_signals_ex([z], lower, None, Config.ZS_WZGX_ZGD.value)
     assert bsp == []
 
 
-def test_kuozhan_level_signals_leave_at_right_edge_no_signal():
-    """中枢区域止于右边缘(无离开段)→ 不产买卖点/背驰。"""
-    b0 = _LS("up", 6, 9, 9)
-    b1 = _LS("down", 6, 9, 6)
-    xds = [_LS("down", 6, 9, 6), b0, b1]          # b1 是末段、无 xds[b0+1]
-    z = _zs_with_lines(6, 9, [b0, b1])
-    bsp, bcs = kuozhan_level_signals([z], xds, None, Config.ZS_WZGX_ZGD.value)
+def test_kuozhan_signals_ex_3sell_leg_aligned():
+    """镜像:本体=上涨腿,离开=下跌腿(跌破 ZD=6.5)+回试腿终点 6.4≤ZD → 3sell。"""
+    z0 = _l0(5, 6, 4.5, 6.5, 4.4, 4.6, 0)
+    z1 = _l0(8, 9, 7.5, 9.5, 7.4, 9.4, 4)      # gg 创新高→up 延续
+    z2 = _l0(3, 4, 2.5, 4.5, 4.6, 2.6, 8)      # gg=4.5<z1.dd=7.5→反转
+    z3 = _l0(6.0, 6.3, 5.8, 6.45, 5.7, 6.4, 12)  # dd=5.8>z2.gg=4.5→反转
+    z = _kz(6.5, 7.5, 4.5, 9.5, [z0, z1])
+    bsp, _ = kuozhan_level_signals_ex([z], [z0, z1, z2, z3], None, Config.ZS_WZGX_ZGD.value)
+    assert [p.bs_type for p in bsp] == ["3sell"]
+
+
+def test_kuozhan_signals_ex_leave_at_right_edge_no_signal():
+    """本体腿即末腿(无离开腿)→ 不产买卖点/背驰。"""
+    z0 = _l0(8, 9, 7.5, 9.5, 9.6, 9.4, 0)
+    z1 = _l0(5, 6, 4.5, 6.5, 6.6, 4.6, 4)
+    z = _kz(6.5, 7.5, 4.5, 9.5, [z0, z1])
+    bsp, bcs = kuozhan_level_signals_ex([z], [z0, z1], None, Config.ZS_WZGX_ZGD.value)
     assert bsp == [] and bcs == []
+
+
+def _mid_leg_lower():
+    """下跌腿[z0,z1,z2](z_up 延伸本体=z1 在腿中)→上涨回试腿[z3]→下跌腿[z4]。"""
+    z0 = _l0(8, 9, 7.5, 9.5, 9.6, 9.4, 0)
+    z1 = _l0(6, 7, 5.5, 7.5, 7.6, 7.4, 4)        # dd 创新低→延续
+    z2 = _l0(4, 5, 3.5, 5.5, 5.6, 3.6, 8)        # dd 创新低→延续
+    z3 = _l0(5.7, 5.9, 5.6, 6.0, 3.4, 5.95, 12)  # dd=5.6>z2.gg=5.5→反转(腿1 封闭)
+    z4 = _l0(4.0, 4.5, 3.8, 4.7, 6.05, 4.6, 16)  # gg=4.7<z3.dd=5.6→反转
+    return [z0, z1, z2, z3, z4], z1
+
+
+def test_kuozhan_signals_ex_mid_leg_sub_seg_3sell():
+    """延伸型本体在腿中间:离开=腿内尾子段(z1 之后,方向=腿向 down),回试=下一上涨腿
+    终点 5.95≤ZD=6.0 → 3sell(单线段旧口径下该结构不可表达——钉死腿内子段路径)。"""
+    lower, z1 = _mid_leg_lower()
+    z = _kz(6.0, 7.0, 5.5, 7.5, [z1])
+    bsp, _ = kuozhan_level_signals_ex([z], lower, None, Config.ZS_WZGX_ZGD.value)
+    assert [p.bs_type for p in bsp] == ["3sell"]
+    assert bsp[0].anchor_fx.val == 5.95
+
+
+def test_kuozhan_signals_ex_beichi_qs_1buy():
+    """腿中本体:进入=腿内前子段、离开=腿内尾子段(同向 down),力度衰竭→背驰;
+    前中枢整体在上(is_qs=down)→ 趋势背驰 qs → 1buy 锚离开段终点。"""
+    lower, z1 = _mid_leg_lower()
+    z_prev = _kz(8.0, 9.0, 7.5, 9.5, [])          # 仅作 qs 前件(无 expanded_with→自身无信号)
+    z = _kz(6.0, 7.0, 5.5, 7.5, [z1])
+    ld_by_start = {9.6: {"hist": {"up_sum": 0.0, "down_sum": 10.0},
+                         "dif": {"max": 0.5, "min": -5.0}},
+                   7.4: {"hist": {"up_sum": 0.0, "down_sum": 4.0},
+                         "dif": {"max": 0.5, "min": -1.0}}}
+    ld = lambda s, e: ld_by_start[s.val]          # noqa: E731
+    bsp, bcs = kuozhan_level_signals_ex([z_prev, z], lower, ld, Config.ZS_WZGX_ZGD.value)
+    assert [(d, v, k) for d, v, k in bcs] == [(None, 3.6, "qs")]
+    one = [p for p in bsp if p.bs_type == "1buy"]
+    assert len(one) == 1 and one[0].anchor_fx.val == 3.6
 
 
 # ---- 同级别分解(30m): 3段走势类型重合=中枢,恰好3段不延伸(line24727/24735) ----
