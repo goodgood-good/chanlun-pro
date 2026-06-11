@@ -755,11 +755,26 @@ class MonitorSymbolState:
         self.prev_close = 0.0
         self.seen = set()
 
+    def _fetch_klines(self, frequency: str, last):
+        """首轮全量;有锚点后只拉尾部窗口(锚点回退 5 天覆盖节假日/停牌缓冲)。
+        1m 全量回看 365 天≈10 万根/标的,逐轮全拉曾把 9 标的扫描周期拖到 ~14
+        分钟,远超 1m 操作级时效;CL 喂入本就增量,瓶颈纯在拉取窗口。"""
+        if last is None:
+            return self.ex.klines(self.code, frequency)
+        start = (last - pd.Timedelta(days=5)).strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            return self.ex.klines(self.code, frequency, start_date=start)
+        except TypeError:
+            return self.ex.klines(self.code, frequency)
+
     def _process_level(self, cd: CL, frequency: str, last_attr: str, min_bars: int):
-        df = self.ex.klines(self.code, frequency)
-        if df is None or len(df) < min_bars:
-            return None
         last = getattr(self, last_attr)
+        df = self._fetch_klines(frequency, last)
+        if df is None or len(df) == 0:
+            return None
+        # min_bars 健全性检查只对首轮全量生效;增量尾窗本来就短,不适用
+        if last is None and len(df) < min_bars:
+            return None
         new = df if last is None else df[df["date"] > last]
         if len(new):
             cd.process_klines(new.reset_index(drop=True))
@@ -795,8 +810,10 @@ class MonitorSymbolState:
         return out
 
     def _refresh_daily_window(self) -> None:
-        df = self.ex.klines(self.code, "d")
-        if df is None or len(df) < 100:
+        df = self._fetch_klines("d", self.lastd)
+        if df is None or len(df) == 0:
+            return
+        if self.lastd is None and len(df) < 100:
             return
         new = df if self.lastd is None else df[df["date"] > self.lastd]
         if not len(new):

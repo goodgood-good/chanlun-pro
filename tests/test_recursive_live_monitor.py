@@ -244,6 +244,78 @@ def test_collect_monitor_events_applies_regime_ratio_multiplier():
     assert "regime_" not in range_events[0].reason
 
 
+def test_monitor_symbol_state_incremental_fetch_uses_tail_window():
+    import pandas as pd
+    from chanlun.recursive_bt.live_monitor import MonitorSymbolState
+
+    full = pd.DataFrame(
+        {
+            "date": pd.date_range("2026-01-01 09:30:00", periods=300, freq="1min", tz="Asia/Shanghai"),
+            "open": 10.0,
+            "high": 10.0,
+            "low": 10.0,
+            "close": 10.0,
+            "volume": 100,
+        }
+    )
+
+    class _Ex:
+        def __init__(self):
+            self.calls = []
+
+        def klines(self, code, frequency, start_date=None, *args, **kwargs):
+            self.calls.append((frequency, start_date))
+            if start_date is None:
+                return full
+            cutoff = pd.Timestamp(start_date, tz="Asia/Shanghai")
+            return full[full["date"] >= cutoff].reset_index(drop=True)
+
+    ex = _Ex()
+    state = MonitorSymbolState("SH.600000", ex, op_level="1m", big_level="30m")
+    state.refresh()
+    first_round = [c for c in ex.calls if c[0] == "1m"]
+    assert first_round and first_round[0][1] is None  # 首轮全量
+
+    ex.calls.clear()
+    state.refresh()
+    second_round = [c for c in ex.calls if c[0] == "1m"]
+    # 有锚点后改拉尾部窗口(锚点回退数日缓冲),不再全量
+    assert second_round and second_round[0][1] is not None
+    anchor = pd.Timestamp(second_round[0][1], tz="Asia/Shanghai")
+    assert anchor <= state.last_op
+    assert anchor >= state.last_op - pd.Timedelta(days=7)
+
+
+def test_monitor_symbol_state_incremental_fetch_falls_back_without_start_date():
+    import pandas as pd
+    from chanlun.recursive_bt.live_monitor import MonitorSymbolState
+
+    full = pd.DataFrame(
+        {
+            "date": pd.date_range("2026-01-01 09:30:00", periods=300, freq="1min", tz="Asia/Shanghai"),
+            "open": 10.0,
+            "high": 10.0,
+            "low": 10.0,
+            "close": 10.0,
+            "volume": 100,
+        }
+    )
+
+    class _LegacyEx:
+        def __init__(self):
+            self.calls = 0
+
+        def klines(self, code, frequency):
+            self.calls += 1
+            return full
+
+    ex = _LegacyEx()
+    state = MonitorSymbolState("SH.600000", ex, op_level="1m", big_level="30m")
+    state.refresh()
+    state.refresh()  # 不支持 start_date 的 exchange 必须安全回退全量,不抛错
+    assert ex.calls >= 4
+
+
 def test_regime_ratio_review_status_counts_market_verdicts(tmp_path):
     from chanlun.recursive_bt.live_monitor import regime_ratio_review_status
 
