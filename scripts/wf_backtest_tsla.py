@@ -27,13 +27,14 @@ from chanlun.recursive_bt.engine import (
 from chanlun.core.cl import CL
 
 DIR = "D:/chanlun_pro/chart_cache_us_tsla_1y"
+PREFIX = "us_TSLA_US"              # 缓存文件名前缀(第二标的验证时与 DIR 一起覆盖)
 WARMUP = 400
 COMMISSION = US_STOCK.commission   # 0.0001
 GATE_DELAY = pd.Timedelta("30min")
 
 
 def _load(freq: str) -> pd.DataFrame:
-    e = pickle.loads(Path(f"{DIR}/v33_us_TSLA_US_{freq}_recursivebt.pkl").read_bytes())
+    e = pickle.loads(Path(f"{DIR}/v33_{PREFIX}_{freq}_recursivebt.pkl").read_bytes())
     d = e["data"]
     return pd.DataFrame({
         "date": pd.to_datetime(d["t"], unit="s"),
