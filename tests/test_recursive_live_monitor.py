@@ -244,6 +244,61 @@ def test_collect_monitor_events_applies_regime_ratio_multiplier():
     assert "regime_" not in range_events[0].reason
 
 
+def test_dingtalk_webhook_notifier_injects_keyword_and_posts(monkeypatch):
+    from chanlun.notifications import DingTalkWebhookNotifier
+
+    sent = {}
+
+    class _Resp:
+        def read(self):
+            return json.dumps({"errcode": 0, "errmsg": "ok"}).encode("utf-8")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def fake_urlopen(req, timeout=10):
+        sent["url"] = req.full_url
+        sent["payload"] = json.loads(req.data.decode("utf-8"))
+        return _Resp()
+
+    import urllib.request
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    notifier = DingTalkWebhookNotifier(
+        "https://oapi.dingtalk.com/robot/send?access_token=test", keyword="买卖通知"
+    )
+    assert notifier.available
+    assert notifier.send("缠论实时买卖点提醒(A股)", ["SH.600000 3buy", "建议买入=10%"]) is True
+    content = sent["payload"]["text"]["content"]
+    assert "买卖通知" in content      # 自定义关键词必须注入,否则机器人拒收
+    assert "建议买入=10%" in content
+    assert sent["url"].startswith("https://oapi.dingtalk.com/robot/send")
+
+    # dry_run 不发网络请求
+    dry = DingTalkWebhookNotifier("", keyword="买卖通知", dry_run=True)
+    assert dry.available and dry.send("t", "b") is True
+
+
+def test_monitor_config_prefers_dingtalk_webhook_notifier(tmp_path):
+    from chanlun.notifications import DingTalkWebhookNotifier
+    from chanlun.recursive_bt.app_monitor import DynamicRecursiveMonitor, DynamicMonitorConfig
+
+    config = DynamicMonitorConfig(
+        market="a",
+        state_file=str(tmp_path / "state.json"),
+        dingtalk_webhook="https://oapi.dingtalk.com/robot/send?access_token=test",
+        dingtalk_keyword="买卖通知",
+        dry_run=True,
+    )
+    monitor = DynamicRecursiveMonitor(config)
+
+    assert isinstance(monitor.notifier, DingTalkWebhookNotifier)
+    assert monitor.notifier.keyword == "买卖通知"
+
+
 def test_monitor_refresh_emits_lagged_confirmed_signals(monkeypatch):
     """买卖点首次可见时刻滞后确认bar若干根(分型/笔需右侧结构,中位9bar):
     新鲜判定必须是「本轮新出现+日期在新鲜窗口内」,而不是恰好等于最新bar——

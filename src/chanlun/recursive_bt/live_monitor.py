@@ -26,7 +26,7 @@ from chanlun import config as app_config
 from chanlun import fun
 from chanlun.core.cl import CL
 from chanlun.exchange import get_exchange
-from chanlun.notifications import ClaudeHookNotifier
+from chanlun.notifications import ClaudeHookNotifier, DingTalkWebhookNotifier
 from chanlun.recursive_bt.chanlun_selector import ASelectionConfig, OriginalChanlunASelector
 from chanlun.recursive_bt.engine import (
     CL_CFG,
@@ -1817,6 +1817,16 @@ def make_arg_parser() -> argparse.ArgumentParser:
         help="Minimum seconds between full optimization-report refreshes (default 600)",
     )
     parser.add_argument(
+        "--dingtalk-webhook",
+        default="",
+        help="DingTalk robot webhook for buy/sell alerts (overrides config)",
+    )
+    parser.add_argument(
+        "--dingtalk-keyword",
+        default="",
+        help="DingTalk robot custom keyword injected into every alert",
+    )
+    parser.add_argument(
         "--regime-ratio-multipliers-json",
         default="",
         help='Inline JSON or file path, e.g. {"bear": {"3": 1.25}}: point-in-time '
@@ -2240,12 +2250,29 @@ def main(argv: Optional[list[str]] = None) -> int:
         mid_level=args.mid_level,
     )
     names = build_names(codes, ex)
-    notifier = ClaudeHookNotifier(
-        command=args.hook_command,
-        settings_path=args.settings_path,
-        cwd=os.getcwd(),
-        dry_run=args.dry_run,
+    dingtalk_webhook = str(
+        getattr(args, "dingtalk_webhook", "")
+        or market_config.get("dingtalk_webhook")
+        or ""
     )
+    if dingtalk_webhook:
+        # 买卖点通知专用钉钉机器人(自定义关键词通道),优先于 Claude hook
+        notifier = DingTalkWebhookNotifier(
+            dingtalk_webhook,
+            keyword=str(
+                getattr(args, "dingtalk_keyword", "")
+                or market_config.get("dingtalk_keyword")
+                or ""
+            ),
+            dry_run=args.dry_run,
+        )
+    else:
+        notifier = ClaudeHookNotifier(
+            command=args.hook_command,
+            settings_path=args.settings_path,
+            cwd=os.getcwd(),
+            dry_run=args.dry_run,
+        )
     send_runtime_override_notice(
         notifier,
         args.title,

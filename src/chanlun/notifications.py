@@ -53,6 +53,64 @@ def discover_claude_notification_command(
     return commands[0]
 
 
+class DingTalkWebhookNotifier:
+    """直发钉钉自定义机器人 webhook 的通知器(买卖点提醒专用通道)。
+
+    机器人安全设置为「自定义关键词」时,消息文本必须包含该关键词才会被
+    接受——send() 会在缺失时自动注入到消息首部。webhook 含 access_token,
+    应只放在不入库的本地配置(config.py 在 .gitignore)。"""
+
+    def __init__(
+        self,
+        webhook: str,
+        keyword: str = "",
+        timeout: int = 10,
+        dry_run: bool = False,
+    ) -> None:
+        self.webhook = str(webhook or "")
+        self.keyword = str(keyword or "")
+        self.timeout = timeout
+        self.dry_run = dry_run
+
+    @property
+    def available(self) -> bool:
+        return bool(self.webhook) or self.dry_run
+
+    def send(self, title: str, lines: list[str] | str) -> bool:
+        body = lines if isinstance(lines, str) else "\n".join(str(x) for x in lines)
+        message = f"{title}\n{body}" if body else str(title)
+        if self.keyword and self.keyword not in message:
+            message = f"[{self.keyword}] {message}"
+        if self.dry_run:
+            print(message)
+            return True
+        if not self.webhook:
+            fun.get_logger().warning("[notify] DingTalk webhook not configured")
+            return False
+        import urllib.request
+
+        payload = json.dumps(
+            {"msgtype": "text", "text": {"content": message}}, ensure_ascii=False
+        ).encode("utf-8")
+        req = urllib.request.Request(
+            self.webhook,
+            data=payload,
+            headers={"Content-Type": "application/json; charset=utf-8"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+        except Exception as exc:
+            fun.get_logger().warning(f"[notify] DingTalk webhook failed: {exc}")
+            return False
+        if int(data.get("errcode", -1)) != 0:
+            fun.get_logger().warning(
+                f"[notify] DingTalk webhook rejected: {data.get('errcode')} {data.get('errmsg')}"
+            )
+            return False
+        return True
+
+
 class ClaudeHookNotifier:
     """Send a text notification through the configured Claude Code hook."""
 

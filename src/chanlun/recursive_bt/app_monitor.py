@@ -19,7 +19,7 @@ from chanlun import config as app_config
 from chanlun import fun
 from chanlun.base import Market
 from chanlun.exchange import get_exchange
-from chanlun.notifications import ClaudeHookNotifier
+from chanlun.notifications import ClaudeHookNotifier, DingTalkWebhookNotifier
 from chanlun.recursive_bt.engine import recommended_buy_ratio
 from chanlun.recursive_bt.chanlun_selector import (
     ASelectionConfig,
@@ -155,6 +155,8 @@ class DynamicMonitorConfig:
     sell_scope: str = "all"
     force: bool = False
     dry_run: bool = False
+    dingtalk_webhook: str = ""
+    dingtalk_keyword: str = ""
     paper_enabled: bool = False
     optimization_report_enabled: bool = False
     optimization_report_json: str = "D:/chanlun_pro/reports/strategy_optimization_report.json"
@@ -250,6 +252,8 @@ class DynamicMonitorConfig:
             sell_scope=str(settings.get("sell_scope") or "all"),
             force=_config_bool(settings.get("force"), False),
             dry_run=_config_bool(settings.get("dry_run"), False),
+            dingtalk_webhook=str(settings.get("dingtalk_webhook") or ""),
+            dingtalk_keyword=str(settings.get("dingtalk_keyword") or ""),
             paper_enabled=_config_bool(settings.get("paper_enabled"), False),
             optimization_report_enabled=_config_bool(
                 settings.get("optimization_report_enabled"),
@@ -382,10 +386,20 @@ class DynamicRecursiveMonitor:
         self.states: dict[str, object] = {}
         self.names: dict[str, str] = {}
         self.last_selection_candidates: list[SelectionCandidate] = []
-        self.notifier = notifier or ClaudeHookNotifier(
-            cwd=os.getcwd(),
-            dry_run=config.dry_run,
-        )
+        if notifier is not None:
+            self.notifier = notifier
+        elif config.dingtalk_webhook:
+            # 买卖点通知专用钉钉机器人(自定义关键词通道),优先于 Claude hook
+            self.notifier = DingTalkWebhookNotifier(
+                config.dingtalk_webhook,
+                keyword=config.dingtalk_keyword,
+                dry_run=config.dry_run,
+            )
+        else:
+            self.notifier = ClaudeHookNotifier(
+                cwd=os.getcwd(),
+                dry_run=config.dry_run,
+            )
         self.deduper = deduper or JsonDeduper(config.state_file)
         self.log = fun.get_logger()
 
