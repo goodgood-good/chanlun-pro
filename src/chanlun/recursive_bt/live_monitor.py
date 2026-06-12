@@ -807,6 +807,10 @@ class MonitorSymbolState:
         self.last_px = 0.0
         self.prev_close = 0.0
         self.seen = set()
+        # 新鲜窗口=30个op bar:买卖点首次可见滞后确认bar中位9bar/p90=20bar,
+        # 30bar 覆盖 p90+余量;超窗的「新出现」信号视为深度回溯修正,不发。
+        op_minutes = int(op_level[:-1]) if str(op_level).endswith("m") else 5
+        self.signal_freshness = pd.Timedelta(minutes=max(op_minutes * 30, 30))
 
     # 首轮 warmup 限窗(天):监控信号=笔级买点+笔方向,不需要图表递归级别的
     # 365 天 1m 全量;90 只候选池若全量 warmup 需 ~2 小时,限窗后约几十秒/只。
@@ -871,7 +875,13 @@ class MonitorSymbolState:
             if key in self.seen:
                 continue
             self.seen.add(key)
-            if self.last_op is not None and sig.date == self.last_op:
+            if self.last_op is None:
+                continue
+            # 新鲜判定=「本轮新出现 + 确认bar在新鲜窗口内」。买卖点首次可见
+            # 时刻滞后确认bar若干根(分型/笔需右侧结构,实证中位9bar/p90=20bar),
+            # 旧判定 sig.date==last_op 要求恰好零滞后,把全部真实新信号静默
+            # 吞掉(实战全天零事件,而同日盘面有12只双up+1m买点)。
+            if self.last_op - sig.date <= self.signal_freshness:
                 out.append(sig)
         return out
 

@@ -244,6 +244,50 @@ def test_collect_monitor_events_applies_regime_ratio_multiplier():
     assert "regime_" not in range_events[0].reason
 
 
+def test_monitor_refresh_emits_lagged_confirmed_signals(monkeypatch):
+    """买卖点首次可见时刻滞后确认bar若干根(分型/笔需右侧结构,中位9bar):
+    新鲜判定必须是「本轮新出现+日期在新鲜窗口内」,而不是恰好等于最新bar——
+    旧判定 sig.date==last_op 把所有滞后确认的真实新信号静默吞掉(全天零事件)。"""
+    import pandas as pd
+    from types import SimpleNamespace
+    from chanlun.recursive_bt import live_monitor
+
+    base = pd.Timestamp.now(tz="Asia/Shanghai").normalize() - pd.Timedelta(days=1)
+    dates = pd.date_range(base, periods=300, freq="1min")
+    full = pd.DataFrame(
+        {"date": dates, "open": 10.0, "high": 10.0, "low": 10.0, "close": 10.0, "volume": 100}
+    )
+
+    class _Ex:
+        def klines(self, code, frequency, start_date=None, *a, **kw):
+            return full
+
+    emitted = []
+
+    def fake_collect(cd, use_xd=False, annotate_nest=False):
+        return list(emitted)
+
+    monkeypatch.setattr(live_monitor, "collect_branch_signals", fake_collect)
+    state = live_monitor.MonitorSymbolState("SH.600000", _Ex(), op_level="1m", big_level="30m")
+    state.refresh()  # warmup:无信号
+
+    last_bar = full["date"].iloc[-1]
+    lagged = SimpleNamespace(
+        date=last_bar - pd.Timedelta(minutes=8), bs_type="3buy", is_buy=True, is_sell=False
+    )
+    stale = SimpleNamespace(
+        date=last_bar - pd.Timedelta(minutes=120), bs_type="1buy", is_buy=True, is_sell=False
+    )
+    emitted.extend([lagged, stale])
+
+    out = state.refresh()
+    types = [s.bs_type for s in out]
+    assert "3buy" in types      # 滞后8分钟首次可见 → 必须发出
+    assert "1buy" not in types  # 滞后120分钟(超新鲜窗)→ 丢弃
+
+    assert state.refresh() == []  # 已见信号不重复发
+
+
 def test_rescan_selection_pool_adds_and_evicts(tmp_path, monkeypatch):
     from types import SimpleNamespace
     from chanlun.recursive_bt import live_monitor

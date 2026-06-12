@@ -64,6 +64,9 @@ class SymbolState:
         self.last_px: float = 0.0
         self.prev_close: float = 0.0
         self.seen = set()          # 已消费的(信号date,bs_type)
+        # 新鲜窗口=30个5m bar:买卖点首次可见滞后确认bar中位9bar/p90=20bar,
+        # 旧判定 s.date==last5 要求零滞后,真实新信号被静默吞掉
+        self.signal_freshness = pd.Timedelta(minutes=150)
 
     def refresh(self) -> List:
         """拉最新K线,尾喂新完整bar;返回**新增**的5m买卖点信号。"""
@@ -104,8 +107,10 @@ class SymbolState:
             if k in self.seen:
                 continue
             self.seen.add(k)
-            # 只消费「最新bar」上的新信号(历史首轮灌入时全部标记已见、不触发交易)
-            if self.last5 is not None and s.date == self.last5:
+            # 消费「本轮新出现且确认bar在新鲜窗口内」的信号(历史首轮灌入时
+            # 全部标记已见、不触发交易);信号首次可见滞后确认bar若干根,
+            # 要求恰好等于最新bar会把全部真实新信号吞掉
+            if self.last5 is not None and self.last5 - s.date <= self.signal_freshness:
                 out.append(s)
         return out
 
