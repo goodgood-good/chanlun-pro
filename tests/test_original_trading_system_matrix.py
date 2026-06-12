@@ -43,10 +43,9 @@ def test_original_trading_system_matrix_marks_remaining_system_gaps(tmp_path, mo
     )
     _write_json(reports / "chanlun_original_logic_matrix.json", {"gap_count": 0})
     _write_json(
-        reports
-        / "us_tsla_mtf3_wffull_window_upgrade_l0min3_include_l0_v7_registry_hit_summary.json",
+        reports / "us_core3_mtf3_20260601_0610_v8_registry_layered_summary.json",
         {
-            "trade_count": 1,
+            "trade_count": 3,
             "no_future_policy": {
                 "strict_no_future": True,
                 "decision_time": "visible bar close",
@@ -59,9 +58,25 @@ def test_original_trading_system_matrix_marks_remaining_system_gaps(tmp_path, mo
     _write_json(
         reports / "tsla_cascade_confirmation_audit.json",
         {
-            "signals": "D:/x/us_tsla_mtf3_wffull_window_upgrade_l0min3_include_l0_v7_registry_hit_signals.csv",
+            "signals": "D:/x/us_tsla_mtf3_20260601_0610_v8_registry_layered_signals.csv",
             "min_level": 1,
-            "events": [{"event": {"bs_type": "3buy"}}],
+            "events": [
+                {
+                    "event": {"bs_type": "3buy"},
+                    "snapshots": [
+                        {"label": "anchor_time", "matched_signal_present": False},
+                        {"label": "before_visible", "matched_signal_present": False},
+                        {"label": "visible_time", "matched_signal_present": True},
+                    ],
+                },
+                {
+                    "event": {"bs_type": "3sell"},
+                    "snapshots": [
+                        {"label": "anchor_time", "matched_signal_present": False},
+                        {"label": "visible_time", "matched_signal_present": True},
+                    ],
+                },
+            ],
         },
     )
 

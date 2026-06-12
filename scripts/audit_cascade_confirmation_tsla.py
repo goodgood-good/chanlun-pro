@@ -23,7 +23,7 @@ from chanlun.recursive_bt.market_runtime import load_chart_cache_klines
 
 DEFAULT_SIGNALS = (
     "D:/chanlun_pro/reports/"
-    "us_tsla_mtf3_wffull_window_upgrade_l0min3_include_l0_v7_registry_hit_signals.csv"
+    "us_tsla_mtf3_20260601_0610_v8_registry_layered_signals.csv"
 )
 DEFAULT_OUT_JSON = "D:/chanlun_pro/reports/tsla_cascade_confirmation_audit.json"
 DEFAULT_OUT_MD = "D:/chanlun_pro/reports/tsla_cascade_confirmation_audit.md"
@@ -435,7 +435,7 @@ def render_markdown(report: Mapping[str, Any]) -> str:
         "their own same-level confirmation.",
         "",
         (
-            "The default source is the v7 continuous-registry signal CSV, so stale "
+            "The default source is the v8 continuous-registry signal CSV, so stale "
             "signals first seen before the trade window are absent from this audit."
         ),
         "",
