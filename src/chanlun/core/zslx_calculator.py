@@ -82,6 +82,50 @@ def _finalize(
 class ZslxCalculator:
     """级别无关的走势类型划分计算器。无状态，每次 calculate 全量重算。"""
 
+    def __init__(self):
+        self._cache: dict[tuple, List[ZSLX]] = {}
+
+    @staticmethod
+    def _line_sig(line: LINE) -> tuple:
+        return (
+            getattr(line, "type", None),
+            getattr(getattr(line.start, "k", None), "index", None),
+            getattr(getattr(line.end, "k", None), "index", None),
+            line.start.val,
+            line.end.val,
+            bool(getattr(line, "done", False)),
+        )
+
+    def _signature(
+        self,
+        zss: List[ZS],
+        lines: List[LINE],
+        wzgx_config: str,
+        frequency: Optional[str],
+    ) -> tuple:
+        def zs_sig(zs: ZS) -> tuple:
+            zs_lines = getattr(zs, "lines", []) or []
+            first = zs_lines[0] if zs_lines else None
+            last = zs_lines[-1] if zs_lines else None
+            return (
+                getattr(zs, "level", 0),
+                bool(getattr(zs, "done", False)),
+                len(zs_lines),
+                None if first is None else self._line_sig(first),
+                None if last is None else self._line_sig(last),
+                getattr(zs, "zd", None),
+                getattr(zs, "zg", None),
+            )
+
+        return (
+            str(wzgx_config),
+            str(frequency or ""),
+            tuple(zs_sig(zs) for zs in zss),
+            len(lines),
+            None if not lines else self._line_sig(lines[0]),
+            None if not lines else self._line_sig(lines[-1]),
+        )
+
     def calculate(
         self,
         zss: List[ZS],
@@ -97,6 +141,10 @@ class ZslxCalculator:
         """
         if not zss:
             return []
+        sig = self._signature(zss, lines, wzgx_config, frequency)
+        cached = self._cache.get(sig)
+        if cached is not None:
+            return cached
 
         wts: List[ZSLX] = []
         cur: Optional[List[ZS]] = [zss[0]]
@@ -134,4 +182,7 @@ class ZslxCalculator:
 
         if cur is not None:
             wts.append(_finalize(cur, lines, wzgx_config, done=False))
+        if len(self._cache) > 16:
+            self._cache.clear()
+        self._cache[sig] = wts
         return wts

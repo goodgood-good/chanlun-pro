@@ -190,14 +190,15 @@ class ZsBranchCalculator:
         self,
         ld_provider: Optional[LdProvider] = None,
         frequency: Optional[str] = None,
-        wzgx: str = Config.ZS_WZGX_ZGD.value,
+        wzgx: str = Config.ZS_WZGX_GD.value,
         min_zs_lines: int = 4,
     ):
         """``ld_provider`` 缺省时不判背驰（退化纯结构，保 P1 行为）。
 
-        ``wzgx`` 默认 ZGD（核心区间口径，合原文「≥2 依次同向中枢」）；P3 独立，
-        与生产 legacy 的 GD 默认无关。``min_zs_lines`` 最小中枢段数：L0 线段级=4
-        (项目口径)，递归 L≥1 走势类型级=3(原文「3 个次级走势类型重叠」)。
+        ``wzgx`` 默认 GD（原文走势中枢定理二的 GG/DD 严格口径，与 CL_CFG 默认
+        一致；生产链路均由调用方显式传入，默认值只影响裸构造。此前默认 ZGD
+        与全局默认分裂，2026-06-12 审计修复）。``min_zs_lines`` 最小中枢段数：
+        L0 线段级=4(项目口径)，递归 L≥1 走势类型级=3(原文「3 个次级走势类型重叠」)。
         """
         self.ld_provider = ld_provider
         self.frequency = frequency

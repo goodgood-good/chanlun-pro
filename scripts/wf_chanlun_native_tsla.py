@@ -146,6 +146,103 @@ def exec_events_gated(events, df5, gate, label, gate_mode="not_down"):
           f"胜率={wins / trades * 100 if trades else 0:3.0f}%")
 
 
+def _map_events_to_bars(events, dates):
+    d2i = {d: i for i, d in enumerate(dates)}
+    n = len(dates)
+    acts = []
+    import bisect
+    for t, act in events:
+        i = d2i.get(t)
+        if i is None:
+            i = bisect.bisect_left(dates, t)
+            if i >= n:
+                continue
+        acts.append((i, act))
+    acts.sort()
+    return acts
+
+
+def exec_events_sleeves(events, df5, label, core_fraction=0.0, active_fraction=1.0, verbose=True):
+    """Replay independent capital sleeves: passive core, active 38-course sleeve, idle cash."""
+    if core_fraction < 0 or active_fraction < 0 or core_fraction + active_fraction > 1.0000001:
+        raise ValueError("core_fraction + active_fraction must be in [0, 1]")
+    dates = list(df5["date"])
+    opens = df5["open"].to_numpy()
+    closes = df5["close"].to_numpy()
+    acts = _map_events_to_bars(events, dates)
+
+    idle_cash = 1.0 - core_fraction - active_fraction
+    core_cash, core_sh = core_fraction, 0.0
+    active_cash, active_sh, active_entry = active_fraction, 0.0, 0.0
+    if core_cash > 0.0 and len(opens) > 0 and opens[0] > 0:
+        core_sh = core_cash / (opens[0] * (1 + COMMISSION))
+        core_cash = 0.0
+
+    peak, mdd = 1.0, 0.0
+    trades, wins = 0, 0
+    pend = None
+    ai = 0
+    for i in range(len(dates)):
+        if pend is not None:
+            px = opens[i]
+            if pend == "buy" and active_sh == 0.0 and active_cash > 0.0 and px > 0:
+                active_sh = active_cash * 0.99 / (px * (1 + COMMISSION))
+                active_cash -= active_sh * px * (1 + COMMISSION)
+                active_entry = px
+            elif pend == "sell" and active_sh > 0.0 and px > 0:
+                active_cash += active_sh * px * (1 - COMMISSION)
+                trades += 1
+                wins += px > active_entry
+                active_sh = 0.0
+            pend = None
+        while ai < len(acts) and acts[ai][0] == i:
+            pend = acts[ai][1]
+            ai += 1
+        eq = idle_cash + core_cash + core_sh * closes[i] + active_cash + active_sh * closes[i]
+        peak = max(peak, eq)
+        mdd = max(mdd, (peak - eq) / peak)
+
+    final_eq = idle_cash + core_cash + active_cash
+    if core_sh > 0.0:
+        final_eq += core_sh * closes[-1] * (1 - COMMISSION)
+    if active_sh > 0.0:
+        final_eq += active_sh * closes[-1] * (1 - COMMISSION)
+        trades += 1
+        wins += closes[-1] > active_entry
+    result = {
+        "label": label,
+        "core_fraction": round(core_fraction, 4),
+        "active_fraction": round(active_fraction, 4),
+        "idle_fraction": round(idle_cash, 4),
+        "ret": final_eq - 1.0,
+        "max_dd": mdd,
+        "trades": trades,
+        "win_rate": (wins / trades) if trades else 0.0,
+        "score_ret_minus_2dd": (final_eq - 1.0) - 2 * mdd,
+    }
+    if verbose:
+        print(f"{label:>22}: core={core_fraction:4.0%} active={active_fraction:4.0%} "
+              f"ret={result['ret']:+7.1%} dd={mdd:6.1%} trades={trades:3d} "
+              f"win={result['win_rate'] * 100:3.0f}%")
+    return result
+
+
+def scan_sleeve_grid(events, df5):
+    core_fracs = (0.0, 0.25, 0.33, 0.50, 0.67, 0.75, 1.0)
+    active_fracs = (0.0, 0.25, 0.33, 0.50, 0.67, 0.75, 1.0)
+    rows = []
+    for core in core_fracs:
+        for active in active_fracs:
+            if core == 0.0 and active == 0.0:
+                continue
+            if core + active > 1.0000001:
+                continue
+            label = f"sleeve c{core:.2f} a{active:.2f}"
+            rows.append(exec_events_sleeves(events, df5, label, core, active, verbose=False))
+    rows.sort(key=lambda r: (r["score_ret_minus_2dd"], r["ret"]), reverse=True)
+    return rows
+
+
 def main() -> int:
     import pickle as _p
     from wf_backtest_tsla import _gate_by_bar
@@ -173,6 +270,19 @@ def main() -> int:
     exec_events_gated(ev5, df5, gate, "seg38_5m+gate(not_down)", "not_down")
     exec_events_gated(ev5, df5, gate, "seg38_5m+gate(up)", "up")
     exec_events_gated(ev30, df5, gate, "seg38_30m+gate(not_down)", "not_down")
+    if "--sleeve-grid" in sys.argv:
+        import json
+        rows = scan_sleeve_grid(ev5, df5)
+        out = Path("D:/chanlun_pro/reports/wf_native_tsla_sleeve_grid.json")
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
+        print("\nsleeve grid top by ret-2*dd:")
+        for row in rows[:10]:
+            print(f"  core={row['core_fraction']:4.0%} active={row['active_fraction']:4.0%} "
+                  f"idle={row['idle_fraction']:4.0%} ret={row['ret']:+7.1%} "
+                  f"dd={row['max_dd']:6.1%} score={row['score_ret_minus_2dd']:+7.1%} "
+                  f"trades={row['trades']:3d}")
+        print(f"sleeve grid report: {out}")
     return 0
 
 

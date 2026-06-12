@@ -9,6 +9,7 @@ from chanlun.recursive_bt.strategy_optimizer import (
     build_bs_point_ratio_impact_report,
     build_bs_point_regime_attribution_report,
     build_bs_point_regime_policy_report,
+    build_layer_attribution_report,
     build_mtf3_cache_coverage_report,
     build_market_regime_stress_report,
     build_regime_strategy_policy_report,
@@ -36,6 +37,7 @@ from chanlun.recursive_bt.strategy_optimizer import (
     render_bs_point_ratio_impact_markdown,
     render_bs_point_regime_attribution_markdown,
     render_bs_point_regime_policy_markdown,
+    render_layer_attribution_markdown,
     render_mtf3_cache_coverage_markdown,
     render_market_regime_stress_markdown,
     render_regime_strategy_policy_markdown,
@@ -51,10 +53,24 @@ from chanlun.recursive_bt.strategy_optimizer import (
     update_bs_point_ratio_state_file,
     write_runtime_overrides_file,
     write_bs_point_attribution_report,
+    write_layer_attribution_report,
     write_bs_point_ratio_overrides_file,
     write_strategy_attribution_report,
     write_optimization_report,
 )
+
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_default_runtime_sources(monkeypatch):
+    """默认 runtime 源指向真实 D:/chanlun_pro 的 paper ledger / live-parity 报告，
+    而常驻 live_monitor 实盘进程会持续改写它们——2026-06-12 首批真实 paper 交易
+    落账后，本文件依赖 build_optimization_report 的测试随盘面状态漂移（瞬态
+    review_runtime_gap）。测试一律密闭：默认源清空，各用例只用自己注入的 tmp 数据。"""
+    from chanlun.recursive_bt import strategy_optimizer as _so
+    monkeypatch.setattr(
+        _so, "default_runtime_summary_sources", lambda markets=("a", "us"): []
+    )
 
 
 def test_a_selection_systems_define_three_independent_confirmations():
@@ -355,6 +371,68 @@ def test_runtime_observations_flag_live_parity_lag_without_switching():
     assert actions[0]["action"] == "keep_candidate"
 
 
+def test_runtime_gap_review_requires_enough_paper_trades():
+    report = {
+        "candidate_ranking": [
+            {
+                "id": "us_core9_default",
+                "market": "us",
+                "score": {
+                    "total_return": 0.196,
+                    "max_drawdown": 0.015,
+                    "trade_count": 450,
+                },
+                "monitor_config": {"max_pos": 9},
+            }
+        ],
+        "runtime_ranking": [
+            {
+                "source": {
+                    "id": "us_live_parity_backtest",
+                    "market": "us",
+                    "kind": "backtest_summary",
+                    "path": "summary.json",
+                },
+                "score": {
+                    "score": 0.25,
+                    "total_return": 0.23,
+                    "max_drawdown": 0.03,
+                    "trade_count": 23,
+                },
+                "summary": {},
+            },
+            {
+                "source": {
+                    "id": "us_paper_ledger",
+                    "market": "us",
+                    "kind": "paper_ledger",
+                    "path": "ledger.json",
+                },
+                "score": {
+                    "score": -0.04,
+                    "total_return": -0.001,
+                    "max_drawdown": 0.001,
+                    "trade_count": 2,
+                },
+                "summary": {},
+            },
+        ],
+        "recommendations": [
+            {
+                "market": "us",
+                "embedded_candidate": "us_core9_default",
+                "best_runtime_summary": "us_live_parity_backtest",
+            }
+        ],
+    }
+
+    assert build_action_suggestions(report)[0]["action"] == "keep_candidate"
+    assert (
+        build_action_suggestions(report, runtime_gap_min_trades=2)[0]["action"]
+        == "review_runtime_gap"
+    )
+
+
 def test_bs_point_attribution_summarizes_trade_classes_and_guidance(tmp_path):
     trades = tmp_path / "trades.csv"
     rows = [
@@ -415,6 +493,74 @@ def test_bs_point_attribution_summarizes_trade_classes_and_guidance(tmp_path):
     assert "Sell Points" in output_md.read_text(encoding="utf-8")
     assert "Post 20" in output_md.read_text(encoding="utf-8")
     assert "allow_boost" in render_bs_point_attribution_markdown(report)
+
+
+def test_layer_attribution_summarizes_layers_levels_and_guidance(tmp_path):
+    summary = tmp_path / "summary.json"
+    trades = tmp_path / "trades.csv"
+    summary.write_text(
+        json.dumps(
+            {
+                "total_return": 0.032,
+                "buy_hold": -0.041,
+                "max_drawdown": 0.018,
+                "trade_count": 3,
+                "signal_event_count": 4,
+                "core_signal_level": 2,
+                "swing_signal_level": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+    rows = [
+        "code,entry_date,entry_px,exit_date,exit_px,ret,entry_layer,exit_layer,entry_level,exit_level,reason",
+        "TSLA,2026-06-09 17:16:00,390,2026-06-09 18:16:00,397,0.018,swing,swing,1,1,1sell",
+        "TSLA,2026-06-10 15:30:00,380,2026-06-10 16:30:00,385,0.013,swing,swing,1,1,3sell",
+        "TSLA,2026-06-10 17:00:00,384,2026-06-10 17:30:00,381,-0.008,scalp,scalp,0,0,1m sell",
+    ]
+    trades.write_text("\n".join(rows) + "\n", encoding="utf-8")
+    output_json = tmp_path / "layer.json"
+    output_md = tmp_path / "layer.md"
+
+    report = write_layer_attribution_report(
+        output_json,
+        output_markdown=output_md,
+        summary_path=summary,
+        trade_path=trades,
+        min_trades=2,
+    )
+    entry_layers = {
+        item["bs_class"]: item
+        for item in report["entry_layer_groups"]
+    }
+    entry_levels = {
+        item["bs_class"]: item
+        for item in report["entry_level_groups"]
+    }
+    exit_layers = {
+        item["bs_class"]: item
+        for item in report["exit_layer_groups"]
+    }
+    guidance = {
+        item["layer"]: item
+        for item in report["layer_guidance"]
+    }
+
+    assert report["summary"]["core_signal_level"] == 2
+    assert report["summary"]["swing_signal_level"] == 1
+    assert report["trade_count"] == 3
+    assert entry_layers["swing"]["trade_count"] == 2
+    assert entry_layers["swing"]["sample_state"] == "enough"
+    assert entry_layers["scalp"]["sample_state"] == "thin"
+    assert entry_levels["1"]["trade_count"] == 2
+    assert exit_layers["swing"]["trade_count"] == 2
+    assert guidance["swing"]["action"] == "keep_or_boost"
+    assert guidance["scalp"]["action"] == "watch"
+    assert json.loads(output_json.read_text(encoding="utf-8"))["version"] == 1
+    markdown = output_md.read_text(encoding="utf-8")
+    assert "Chanlun Layer Attribution Report" in markdown
+    assert "Entry Layers" in markdown
+    assert "keep_or_boost" in render_layer_attribution_markdown(report)
 
 
 def test_bs_point_regime_attribution_joins_daily_regimes(tmp_path):

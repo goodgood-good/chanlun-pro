@@ -902,6 +902,7 @@ def build_action_suggestions(
     drawdown_alert_multiplier: float = 1.25,
     drawdown_alert_floor: float = 0.02,
     score_gap_alert: float = 0.10,
+    runtime_gap_min_trades: int = 10,
 ) -> list[dict]:
     """Turn rankings into concrete keep/switch/degrade suggestions.
 
@@ -952,28 +953,30 @@ def build_action_suggestions(
             candidates_by_market.get(market, []),
             exclude_id=target_id,
         )
-        if paper_runtime and target_candidate and low_dd_candidate:
+        if paper_runtime and target_candidate:
             paper_score = paper_runtime.get("score") or {}
             target_score = target_candidate.get("score") or {}
             paper_dd = _float_first(paper_score, "max_drawdown")
             target_dd = _float_first(target_score, "max_drawdown")
-            threshold = max(
-                target_dd * drawdown_alert_multiplier,
-                target_dd + drawdown_alert_floor,
-            )
-            low_dd_score = low_dd_candidate.get("score") or {}
-            low_dd = _float_first(low_dd_score, "max_drawdown")
-            if target_dd > 0 and low_dd < target_dd and paper_dd > threshold:
-                action = "degrade_candidate"
-                target_id = str(low_dd_candidate.get("id") or target_id)
-                target_candidate = low_dd_candidate
-                reason = (
-                    f"paper drawdown {paper_dd:.1%} exceeds alert threshold "
-                    f"{threshold:.1%}; prefer lower-drawdown candidate"
+            if low_dd_candidate:
+                threshold = max(
+                    target_dd * drawdown_alert_multiplier,
+                    target_dd + drawdown_alert_floor,
                 )
-            elif action == "keep_candidate":
+                low_dd_score = low_dd_candidate.get("score") or {}
+                low_dd = _float_first(low_dd_score, "max_drawdown")
+                if target_dd > 0 and low_dd < target_dd and paper_dd > threshold:
+                    action = "degrade_candidate"
+                    target_id = str(low_dd_candidate.get("id") or target_id)
+                    target_candidate = low_dd_candidate
+                    reason = (
+                        f"paper drawdown {paper_dd:.1%} exceeds alert threshold "
+                        f"{threshold:.1%}; prefer lower-drawdown candidate"
+                    )
+            if action == "keep_candidate":
                 best_runtime = runtime_by_market_id.get(market, {}).get(runtime_id)
-                if best_runtime:
+                paper_trades = int(_float_first(paper_score, "trade_count"))
+                if best_runtime and paper_trades >= max(0, runtime_gap_min_trades):
                     paper_runtime_score = _float_first(paper_score, "score")
                     best_runtime_score = _float_first(
                         best_runtime.get("score") or {},
@@ -3546,6 +3549,231 @@ def write_bs_point_attribution_report(
         output_markdown = Path(output_markdown)
         output_markdown.parent.mkdir(parents=True, exist_ok=True)
         output_markdown.write_text(render_bs_point_attribution_markdown(report), encoding="utf-8")
+    return report
+
+
+def _group_rows_by_key(
+    rows: Iterable[Mapping[str, object]],
+    key: str,
+    *,
+    min_trades: int,
+) -> list[dict]:
+    groups: dict[str, list[Mapping[str, object]]] = {}
+    for row in rows:
+        name = str(row.get(key) or "unknown").strip() or "unknown"
+        groups.setdefault(name, []).append(row)
+    return [
+        _summarize_trade_group(name, list(items), min_trades=min_trades)
+        for name, items in sorted(groups.items())
+    ]
+
+
+def _layer_guidance(groups: Iterable[Mapping[str, object]], *, min_trades: int) -> list[dict]:
+    out: list[dict] = []
+    for group in groups:
+        layer = str(group.get("bs_class") or "unknown")
+        count = int(group.get("trade_count") or 0)
+        avg_return = float(group.get("avg_return") or 0.0)
+        win_rate = float(group.get("win_rate") or 0.0)
+        max_dd = float(group.get("max_drawdown") or 0.0)
+        if count < min_trades:
+            action = "watch"
+            reason = "sample too thin for layer policy adjustment"
+        elif avg_return < 0.0 and win_rate < 0.45:
+            action = "reduce_layer_risk"
+            reason = "negative average return and weak win rate"
+        elif avg_return > 0.005 and win_rate >= 0.55 and max_dd <= 0.10:
+            action = "keep_or_boost"
+            reason = "positive layer edge with controlled drawdown"
+        else:
+            action = "keep_watch"
+            reason = "no confirmed layer edge change"
+        out.append(
+            {
+                "layer": layer,
+                "action": action,
+                "reason": reason,
+                "trade_count": count,
+                "win_rate": win_rate,
+                "avg_return": avg_return,
+                "max_drawdown": max_dd,
+            }
+        )
+    return out
+
+
+def build_layer_attribution_report(
+    summary_path: str | Path,
+    trade_path: str | Path | None = None,
+    *,
+    min_trades: int = 10,
+) -> dict:
+    summary_path = Path(summary_path)
+    trade_path = Path(trade_path) if trade_path is not None else _summary_to_trades_path(summary_path)
+    summary: Mapping[str, object] = {}
+    rows: list[dict] = []
+    missing_sources: list[dict] = []
+    if not summary_path.exists():
+        missing_sources.append({"kind": "summary_json", "path": str(summary_path), "reason": "missing"})
+    else:
+        try:
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            missing_sources.append(
+                {"kind": "summary_json", "path": str(summary_path), "reason": type(exc).__name__}
+            )
+    if not trade_path.exists():
+        missing_sources.append({"kind": "trade_csv", "path": str(trade_path), "reason": "missing"})
+    else:
+        try:
+            rows = _load_trade_rows(trade_path)
+        except Exception as exc:
+            missing_sources.append(
+                {"kind": "trade_csv", "path": str(trade_path), "reason": type(exc).__name__}
+            )
+    entry_layer_groups = _group_rows_by_key(rows, "entry_layer", min_trades=min_trades)
+    entry_level_groups = _group_rows_by_key(rows, "entry_level", min_trades=min_trades)
+    exit_layer_groups = _group_rows_by_key(rows, "exit_layer", min_trades=min_trades)
+    return {
+        "version": 1,
+        "generated_at": _dt.datetime.now().isoformat(timespec="seconds"),
+        "summary_path": str(summary_path),
+        "trade_path": str(trade_path),
+        "min_trades": int(min_trades),
+        "summary": {
+            "total_return": _float_first(summary, "total_return", "total"),
+            "buy_hold": _float_first(summary, "buy_hold", "bh"),
+            "max_drawdown": _float_first(summary, "max_drawdown", "max_dd"),
+            "trade_count": int(_float_first(summary, "trade_count", "n")),
+            "signal_event_count": int(_float_first(summary, "signal_event_count")),
+            "core_signal_level": int(_float_first(summary, "core_signal_level")),
+            "swing_signal_level": int(_float_first(summary, "swing_signal_level")),
+        },
+        "trade_count": len(rows),
+        "entry_layer_groups": entry_layer_groups,
+        "entry_level_groups": entry_level_groups,
+        "exit_layer_groups": exit_layer_groups,
+        "layer_guidance": _layer_guidance(entry_layer_groups, min_trades=min_trades),
+        "missing_sources": missing_sources,
+    }
+
+
+def render_layer_attribution_markdown(report: Mapping[str, object]) -> str:
+    summary = report.get("summary") or {}
+    lines = [
+        "# Chanlun Layer Attribution Report",
+        "",
+        f"Generated: {report.get('generated_at', '')}",
+        f"Summary: `{report.get('summary_path', '')}`",
+        f"Trades: `{report.get('trade_path', '')}`",
+        "",
+        "## Replay Summary",
+        "",
+        "| Total Return | Buy Hold | Max DD | Trades | Signals | Core Level | Swing Level |",
+        "| ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "| {ret:.2%} | {bh:.2%} | {dd:.2%} | {trades} | {signals} | {core} | {swing} |".format(
+            ret=float(summary.get("total_return") or 0.0),
+            bh=float(summary.get("buy_hold") or 0.0),
+            dd=float(summary.get("max_drawdown") or 0.0),
+            trades=int(summary.get("trade_count") or 0),
+            signals=int(summary.get("signal_event_count") or 0),
+            core=int(summary.get("core_signal_level") or 0),
+            swing=int(summary.get("swing_signal_level") or 0),
+        ),
+        "",
+        "## Entry Layers",
+        "",
+        "| Layer | Trades | Win Rate | Avg Ret | Compound | Max DD | Avg Hold H | Guidance |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
+    ]
+    guidance_by_layer = {
+        str(item.get("layer") or ""): item
+        for item in report.get("layer_guidance", []) or []
+    }
+    for group in report.get("entry_layer_groups", []) or []:
+        layer = str(group.get("bs_class") or "unknown")
+        guidance = guidance_by_layer.get(layer, {})
+        lines.append(
+            "| {layer} | {trades} | {win:.1%} | {avg:.2%} | {comp:.2%} | {dd:.2%} | {hold:.1f} | {action}: {reason} |".format(
+                layer=layer,
+                trades=int(group.get("trade_count") or 0),
+                win=float(group.get("win_rate") or 0.0),
+                avg=float(group.get("avg_return") or 0.0),
+                comp=float(group.get("compound_return") or 0.0),
+                dd=float(group.get("max_drawdown") or 0.0),
+                hold=float(group.get("avg_hold_hours") or 0.0),
+                action=guidance.get("action") or "watch",
+                reason=str(guidance.get("reason") or "").replace("|", "/"),
+            )
+        )
+    lines.extend(
+        [
+            "",
+            "## Entry Levels",
+            "",
+            "| Level | Trades | Win Rate | Avg Ret | Compound | Max DD |",
+            "| --- | ---: | ---: | ---: | ---: | ---: |",
+        ]
+    )
+    for group in report.get("entry_level_groups", []) or []:
+        lines.append(
+            "| {level} | {trades} | {win:.1%} | {avg:.2%} | {comp:.2%} | {dd:.2%} |".format(
+                level=group.get("bs_class") or "unknown",
+                trades=int(group.get("trade_count") or 0),
+                win=float(group.get("win_rate") or 0.0),
+                avg=float(group.get("avg_return") or 0.0),
+                comp=float(group.get("compound_return") or 0.0),
+                dd=float(group.get("max_drawdown") or 0.0),
+            )
+        )
+    lines.extend(
+        [
+            "",
+            "## Exit Layers",
+            "",
+            "| Exit Layer | Trades | Win Rate | Avg Ret | Compound | Max DD |",
+            "| --- | ---: | ---: | ---: | ---: | ---: |",
+        ]
+    )
+    for group in report.get("exit_layer_groups", []) or []:
+        lines.append(
+            "| {layer} | {trades} | {win:.1%} | {avg:.2%} | {comp:.2%} | {dd:.2%} |".format(
+                layer=group.get("bs_class") or "unknown",
+                trades=int(group.get("trade_count") or 0),
+                win=float(group.get("win_rate") or 0.0),
+                avg=float(group.get("avg_return") or 0.0),
+                comp=float(group.get("compound_return") or 0.0),
+                dd=float(group.get("max_drawdown") or 0.0),
+            )
+        )
+    if report.get("missing_sources"):
+        lines.extend(["", "## Missing Sources", ""])
+        for item in report.get("missing_sources", []) or []:
+            lines.append(f"- `{item.get('path')}`: {item.get('reason')}")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def write_layer_attribution_report(
+    output_json: str | Path,
+    *,
+    output_markdown: str | Path | None = None,
+    summary_path: str | Path,
+    trade_path: str | Path | None = None,
+    min_trades: int = 10,
+) -> dict:
+    report = build_layer_attribution_report(
+        summary_path,
+        trade_path,
+        min_trades=min_trades,
+    )
+    output_json = Path(output_json)
+    output_json.parent.mkdir(parents=True, exist_ok=True)
+    output_json.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    if output_markdown is not None:
+        output_markdown = Path(output_markdown)
+        output_markdown.parent.mkdir(parents=True, exist_ok=True)
+        output_markdown.write_text(render_layer_attribution_markdown(report), encoding="utf-8")
     return report
 
 

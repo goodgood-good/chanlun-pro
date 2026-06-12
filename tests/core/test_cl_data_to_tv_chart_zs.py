@@ -303,3 +303,19 @@ def test_cl_data_to_tv_chart_serializes_l1_l2_mmds_and_bcs(
     assert levels[2]["mmds"][0]["text"] == "1sell"
     assert levels[2]["bcs"][0]["level"] == "30m"
     assert levels[2]["bcs"][0]["text"] == "PZ"
+
+
+def test_original_level_ladder_contract_uses_30m_same_level_decomposition():
+    """用户指定的原文级别规则：30m 同级别，30m 以下非同级别。
+
+    1m 图展示 1m/5m/30m；5m 图展示 5m/30m；30m 图只展示本级别。
+    低于 30m 的升级采用 kuozhan(非同级别分解：延伸/扩展/扩张)，到 30m 时采用
+    tongjibie(同级别分解：三段走势类型重合，不延伸)。
+    """
+    from chanlun.core.cl import CL
+
+    assert CL._UPGRADE_CHAIN == {
+        "1m": [("5m", "kuozhan"), ("30m", "tongjibie")],
+        "5m": [("30m", "tongjibie")],
+    }
+    assert "30m" not in CL._UPGRADE_CHAIN

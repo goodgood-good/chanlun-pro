@@ -57,6 +57,45 @@ class KlineDataProcessor:
             LogUtil.debug(lambda:f"KlineProcessor: 实际产生增量K线 {len(increment_klines)} 条。Last Date: {self.klines[-1].date}")
         return increment_klines
 
+    def process_kline_values(
+        self,
+        date,
+        open_,
+        high,
+        low,
+        close,
+        volume=0.0,
+    ) -> List[Kline]:
+        """Fast path for one already-normalized bar.
+
+        Walk-forward replay feeds one visible bar at a time.  Building a
+        one-row DataFrame for every bar spends most of its time in pandas, so
+        this path creates the same ``Kline`` object directly and then reuses the
+        normal internal append/update logic.
+        """
+        if date is None:
+            return []
+        ts = pd.Timestamp(date)
+        if self.start_datetime is not None:
+            start_ts = pd.Timestamp(self.start_datetime)
+            if ts.tzinfo is not None and start_ts.tzinfo is None:
+                start_ts = start_ts.tz_localize(ts.tzinfo)
+            elif ts.tzinfo is None and start_ts.tzinfo is not None:
+                ts = ts.tz_localize(start_ts.tzinfo)
+            if ts < start_ts:
+                return []
+        vol = 0.0 if volume is None or pd.isna(volume) else float(volume)
+        kline = Kline(
+            index=0,
+            date=ts,
+            h=float(high),
+            l=float(low),
+            o=float(open_),
+            c=float(close),
+            a=vol,
+        )
+        return self._update_internal_klines([kline])
+
     def _preprocess(self, klines_df: pd.DataFrame) -> pd.DataFrame:
         """预处理K线数据 (排序, 类型转换, 时间过滤, 增量剪切)。
 

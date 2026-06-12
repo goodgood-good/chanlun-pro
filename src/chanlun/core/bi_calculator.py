@@ -172,6 +172,19 @@ class BiCalculator:
 
         self._reindex_bis()
 
+    @staticmethod
+    def _fx_sig(fx: FX) -> tuple:
+        return (
+            fx.type,
+            getattr(fx.k, "index", None),
+            fx.val,
+        )
+
+    def _same_fxs(self, left: List[FX], right: List[FX]) -> bool:
+        if len(left) != len(right):
+            return False
+        return all(self._fx_sig(a) == self._fx_sig(b) for a, b in zip(left, right))
+
     def _snapshot_matches(self, cl_klines: List[CLKline]) -> bool:
         if not self._last_kline_snapshot or not cl_klines:
             return False
@@ -301,6 +314,14 @@ class BiCalculator:
         # 给 new_fxs 重新编号（接续 kept_fxs）
         for offset, fx in enumerate(new_fxs):
             fx.index = keep_until + offset
+        if keep_until == len(self.fxs) and not new_fxs:
+            return True
+        old_tail = self.fxs[keep_until:]
+        if len(old_tail) == len(new_fxs) and all(
+            self._fx_sig(old) == self._fx_sig(new)
+            for old, new in zip(old_tail, new_fxs)
+        ):
+            return True
         self.fxs = kept_fxs + new_fxs
         # 笔的状态机重放仍走全量（safer），但 _collect_fxs 的扫描量已经省下了
         self._rebuild_from_fxs(self.fxs)

@@ -23,6 +23,8 @@ class BuySellPoint:
     anchor_fx: FX                             # 出图锚点(一类=c 末端;三类=回试段末端;二类=次级别一买末端)
     divergence: Optional[DivergenceResult]    # 一类/二类带背驰本体;三类 None
     level: Optional[int] = None               # P5b:二类归属级别 L_k;P5a 一三类 None
+    structural_stop_below: Optional[float] = None  # 买点失效下边界:1/2买前低、3买 ZG
+    structural_stop_above: Optional[float] = None  # 卖点失效上边界:1/2卖前高、3卖 ZD
 
 
 class BsBranchCalculator:
@@ -85,10 +87,24 @@ class BsBranchCalculator:
             extreme = bp.anchor_fx.val                            # 一类点极值(前低/前高)
             if (bp.bs_type == "1buy" and rebound._type == "up"
                     and pullback._type == "down" and pullback.end.val >= extreme):
-                out.append(BuySellPoint("2buy", bp.zs, pullback, pullback.end, bp.divergence))
+                out.append(BuySellPoint(
+                    "2buy",
+                    bp.zs,
+                    pullback,
+                    pullback.end,
+                    bp.divergence,
+                    structural_stop_below=extreme,
+                ))
             elif (bp.bs_type == "1sell" and rebound._type == "down"
                     and pullback._type == "up" and pullback.end.val <= extreme):
-                out.append(BuySellPoint("2sell", bp.zs, pullback, pullback.end, bp.divergence))
+                out.append(BuySellPoint(
+                    "2sell",
+                    bp.zs,
+                    pullback,
+                    pullback.end,
+                    bp.divergence,
+                    structural_stop_above=extreme,
+                ))
         return out
 
     @staticmethod

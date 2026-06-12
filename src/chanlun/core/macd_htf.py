@@ -1,11 +1,16 @@
 # -*- coding: utf-8 -*-
-"""高周期 MACD —— 背驰力度按原文应在「高一级别」上度量。
+"""高周期 MACD —— 背驰力度度量的【工程近似，非原文判据】。
 
-本项目以**线段**为最低级别走势类型。线段跨多根 K 线、本质是高一层结构，
+⚠ 原文口径：MACD 只是辅助工具，背驰在「当下走势级别」的图上看（级别=走势
+结构级别≠K线周期，原文反复强调显微镜论/级别与周期无关，L7972/L33465/L26527）。
+原文**没有**「用高一档 K 线周期的 MACD 判背驰」的依据——本模块是工程取舍：
+项目以**线段**为最低级别走势类型，线段跨多根 K 线、本质是高一层结构，
 度量其背驰力度时若用原生 K 线 MACD 过于细碎，导致 1/2 类买卖点与背驰难
-以稳定识别。本模块按 K 线时间戳把当前周期重采样到高一周期
+以稳定识别。故按 K 线时间戳把当前周期重采样到高一周期
 （``1m→5m, 5m→30m, 30m→d, d→w, w→m, m→y``），在高周期 close 上算 MACD，
-再线性插值回每根 K 线，供 ``query_macd_ld`` 取用。
+再线性插值回每根 K 线，供 ``query_macd_ld`` 取用。可经
+``CL_CFG['macd_ld_use_htf']=False`` 关闭回退原生 MACD（2026-06-12 原文一致性
+审计：标注为自创项，量化其对信号的影响留待 A/B 对照轮）。
 
 口径与 web 端 ``apply_higher_macd_to_chart_data`` 一致：真实重采样 + 桶末
 锚点线性插值。区别仅在高周期 MACD 用本仓自带的 ``core.macd.MACD``
@@ -164,3 +169,252 @@ def compute_higher_macd(
         hist = hist * 2.0
 
     return {"dif": dif.tolist(), "dea": dea.tolist(), "hist": hist.tolist()}
+
+
+class HigherMACDCalculator:
+    """Incremental equivalent of ``compute_higher_macd``.
+
+    The full helper is intentionally kept as the reference implementation.  This
+    stateful calculator is for live/walk-forward CL objects: it keeps higher
+    timeframe buckets and only rewrites the interpolation suffix affected by the
+    latest lower-timeframe bar.
+    """
+
+    def __init__(
+        self,
+        frequency: str,
+        market: Optional[str] = None,
+        fast: int = 12,
+        slow: int = 26,
+        signal: int = 9,
+        china_mode: bool = True,
+    ):
+        self.frequency = frequency
+        self.market = market
+        self.fast = int(fast)
+        self.slow = int(slow)
+        self.signal = int(signal)
+        self.china_mode = bool(china_mode)
+        self.higher = HIGHER_FREQ_MAP.get(frequency)
+        self.macd = MACD(
+            fast_period=self.fast,
+            slow_period=self.slow,
+            signal_period=self.signal,
+            china_mode=self.china_mode,
+        )
+        self.keys: list[int] = []
+        self.bucket_last_pos: list[int] = []
+        self.bucket_klines: list[Kline] = []
+        self.dif: list[float] = []
+        self.dea: list[float] = []
+        self.hist: list[float] = []
+        self._result = {"dif": self.dif, "dea": self.dea, "hist": self.hist}
+        self._last_sig: Optional[tuple] = None
+
+    def reset(self) -> None:
+        self.macd = MACD(
+            fast_period=self.fast,
+            slow_period=self.slow,
+            signal_period=self.signal,
+            china_mode=self.china_mode,
+        )
+        self.keys = []
+        self.bucket_last_pos = []
+        self.bucket_klines = []
+        self.dif = []
+        self.dea = []
+        self.hist = []
+        self._result = {"dif": self.dif, "dea": self.dea, "hist": self.hist}
+        self._last_sig = None
+
+    def update(self, klines: List[Kline]) -> Optional[dict]:
+        if self.higher is None:
+            return None
+        n = len(klines)
+        if n == 0:
+            self.reset()
+            return None
+        if not self.keys:
+            return self._rebuild(klines)
+        if n < len(self.keys):
+            return self._rebuild(klines)
+        if not self._can_increment(klines, n):
+            return self._rebuild(klines)
+
+        old_n = len(self.keys)
+        try:
+            if n == old_n:
+                self._update_existing_last(klines[-1])
+            else:
+                self._update_existing_last(klines[old_n - 1])
+                for pos in range(old_n, n):
+                    self._append_bar(klines[pos])
+        except ValueError:
+            return self._rebuild(klines)
+        self._last_sig = self._signature(klines[-1], n)
+        return self._maybe_result()
+
+    def _can_increment(self, klines: List[Kline], n: int) -> bool:
+        if self._last_sig is None:
+            return False
+        if n == len(self.keys):
+            return True
+        if len(self.keys) == 0:
+            return False
+        try:
+            prev = klines[len(self.keys) - 1]
+            return self._key_for(prev) == self.keys[-1]
+        except Exception:
+            return False
+
+    def _signature(self, kline: Kline, n: int) -> tuple:
+        return (
+            n,
+            getattr(kline, "date", None),
+            float(getattr(kline, "c", 0.0) or 0.0),
+        )
+
+    def _key_for(self, kline: Kline) -> int:
+        try:
+            ts = int(kline.date.timestamp())
+        except (ValueError, TypeError, AttributeError, OverflowError, OSError) as exc:
+            raise ValueError("invalid kline date for higher MACD") from exc
+        keys = _bucket_keys(np.array([ts], dtype=np.int64), self.higher, self.market)
+        if keys is None or keys.size != 1:
+            raise ValueError("unsupported higher MACD bucket")
+        return int(keys[0])
+
+    def _bucket_kline(self, bucket_idx: int, close: float) -> Kline:
+        return Kline(
+            index=bucket_idx,
+            date=None,
+            h=0.0,
+            l=0.0,
+            o=0.0,
+            c=float(close),
+            a=0.0,
+        )
+
+    def _rebuild(self, klines: List[Kline]) -> Optional[dict]:
+        self.reset()
+        if self.higher is None or not klines:
+            return None
+        try:
+            t = np.array([k.date.timestamp() for k in klines], dtype=np.int64)
+        except (ValueError, TypeError, AttributeError, OverflowError, OSError):
+            self.reset()
+            return None
+        keys = _bucket_keys(t, self.higher, self.market)
+        if keys is None:
+            self.reset()
+            return None
+        self.keys = [int(k) for k in keys.tolist()]
+        boundaries = np.concatenate(([True], keys[1:] != keys[:-1]))
+        bucket_idx = np.cumsum(boundaries) - 1
+        bucket_count = int(bucket_idx[-1]) + 1
+        last_pos = np.zeros(bucket_count, dtype=np.int64)
+        last_pos[bucket_idx] = np.arange(len(klines))
+        self.bucket_last_pos = [int(x) for x in last_pos.tolist()]
+        self.bucket_klines = [
+            self._bucket_kline(i, float(klines[pos].c))
+            for i, pos in enumerate(self.bucket_last_pos)
+        ]
+        self.macd.process_macd(self.bucket_klines)
+        self._last_sig = self._signature(klines[-1], len(klines))
+        if bucket_count <= self.slow + self.signal:
+            return None
+        self._rebuild_interp_all(len(klines))
+        return self._result
+
+    def _update_existing_last(self, kline: Kline) -> None:
+        pos = len(self.keys) - 1
+        key = self._key_for(kline)
+        if key != self.keys[pos] or not self.bucket_last_pos:
+            raise ValueError("higher MACD tail bucket changed")
+        bucket_idx = len(self.bucket_last_pos) - 1
+        if self.bucket_last_pos[bucket_idx] != pos:
+            raise ValueError("higher MACD tail bucket mismatch")
+        self.bucket_klines[bucket_idx].c = float(kline.c)
+        self.macd.process_macd(self.bucket_klines)
+        self._rewrite_interp_suffix()
+
+    def _append_bar(self, kline: Kline) -> None:
+        pos = len(self.keys)
+        key = self._key_for(kline)
+        self.keys.append(key)
+        if not self.bucket_last_pos or key != self.keys[pos - 1]:
+            bucket_idx = len(self.bucket_last_pos)
+            self.bucket_last_pos.append(pos)
+            self.bucket_klines.append(self._bucket_kline(bucket_idx, float(kline.c)))
+        else:
+            bucket_idx = len(self.bucket_last_pos) - 1
+            self.bucket_last_pos[bucket_idx] = pos
+            self.bucket_klines[bucket_idx].c = float(kline.c)
+        self.macd.process_macd(self.bucket_klines)
+        self._rewrite_interp_suffix()
+
+    def _maybe_result(self) -> Optional[dict]:
+        if len(self.bucket_last_pos) <= self.slow + self.signal:
+            return None
+        if len(self.dif) != len(self.keys):
+            self._rebuild_interp_all(len(self.keys))
+        return self._result
+
+    def _rebuild_interp_all(self, n: int) -> None:
+        anchor_x = np.asarray(self.bucket_last_pos, dtype=float)
+        bars = np.arange(n, dtype=float)
+        dif_b = np.asarray(self.macd.dif, dtype=float)
+        dea_b = np.asarray(self.macd.dea, dtype=float)
+        dif = np.interp(bars, anchor_x, dif_b)
+        dea = np.interp(bars, anchor_x, dea_b)
+        hist = dif - dea
+        if self.china_mode:
+            hist = hist * 2.0
+        self.dif[:] = dif.tolist()
+        self.dea[:] = dea.tolist()
+        self.hist[:] = hist.tolist()
+
+    def _rewrite_interp_suffix(self) -> None:
+        if len(self.bucket_last_pos) <= self.slow + self.signal:
+            return
+        n = len(self.keys)
+        if len(self.dif) == 0 or len(self.dif) > n:
+            self._rebuild_interp_all(n)
+            return
+        if len(self.dif) < n:
+            missing = n - len(self.dif)
+            last_dif = self.dif[-1]
+            last_dea = self.dea[-1]
+            last_hist = self.hist[-1]
+            self.dif.extend([last_dif] * missing)
+            self.dea.extend([last_dea] * missing)
+            self.hist.extend([last_hist] * missing)
+        cur_pos = self.bucket_last_pos[-1]
+        cur_dif = float(self.macd.dif[-1])
+        cur_dea = float(self.macd.dea[-1])
+        if len(self.bucket_last_pos) == 1:
+            start = 0
+            dif_vals = np.full(cur_pos + 1, cur_dif, dtype=float)
+            dea_vals = np.full(cur_pos + 1, cur_dea, dtype=float)
+        else:
+            prev_pos = self.bucket_last_pos[-2]
+            start = prev_pos + 1
+            x = np.array([prev_pos, cur_pos], dtype=float)
+            bars = np.arange(start, cur_pos + 1, dtype=float)
+            dif_vals = np.interp(
+                bars,
+                x,
+                np.array([float(self.macd.dif[-2]), cur_dif], dtype=float),
+            )
+            dea_vals = np.interp(
+                bars,
+                x,
+                np.array([float(self.macd.dea[-2]), cur_dea], dtype=float),
+            )
+        hist_vals = dif_vals - dea_vals
+        if self.china_mode:
+            hist_vals = hist_vals * 2.0
+        end = cur_pos + 1
+        self.dif[start:end] = dif_vals.tolist()
+        self.dea[start:end] = dea_vals.tolist()
+        self.hist[start:end] = hist_vals.tolist()

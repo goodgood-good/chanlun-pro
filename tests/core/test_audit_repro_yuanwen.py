@@ -182,3 +182,28 @@ def test_f6_gg_dd_include_overlapping_extension_segment_pokes():
     assert (zs.gg, zs.dd) == (12, 3), (
         f"GG/DD 应含延伸段(含 range-重叠离开段)探出 → (12,3)，实际 ({zs.gg},{zs.dd})"
     )
+
+
+# ===========================================================================
+# F7: config 缺键时所有链路 wzgx fallback 必须统一为 GD（2026-06-12 审计修复）
+# ===========================================================================
+def test_f7_wzgx_fallback_unified_to_gd_everywhere():
+    """同一 CL 对象只能有一个趋势口径。此前 cl.py 5 处新核心 getter 的 fallback
+    写死 ZGD，而 process_klines/beichi_qs 内部 fallback 是 GD——活动构造的 CL
+    因 __init__ 合并默认配置不受影响，但**反序列化的旧 pickle CL**（web/file_db
+    cl_object_cache）config 可能缺 zs_wzgx 键，此时同一对象内部口径分裂：图表
+    （新核心 getter）与买卖点/走势类型（process_klines）对「趋势 vs 盘整」给出
+    矛盾结论。统一后唯一解析点 = CL._recursive_wzgx()，fallback=GD（定理二）。
+    """
+    from chanlun.core.cl import CL
+    from chanlun.core import zs_branch
+
+    cd = CL("T", "1m", {})
+    cd.config.pop("zs_wzgx", None)   # 模拟旧 pickle 反序列化出的缺键 config
+    assert cd._recursive_wzgx() == Config.ZS_WZGX_GD.value, (
+        "缺键 config 的 wzgx fallback 应为原文严格档 GD（定理二），不得回退 ZGD"
+    )
+    # 裸构造的 ZsBranchCalculator 默认档必须与 CL_CFG/CL fallback 一致
+    assert zs_branch.ZsBranchCalculator().wzgx == Config.ZS_WZGX_GD.value, (
+        "ZsBranchCalculator 签名默认 wzgx 应为 GD，与全局默认一致"
+    )

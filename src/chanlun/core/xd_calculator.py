@@ -148,6 +148,22 @@ class XdCalculator:
     def __init__(self, config: dict):
         self.config = config
         self.xds: List[XD] = []
+        self._last_bis_signature: Optional[tuple] = None
+        self._last_bis_obj: Optional[List[BI]] = None
+
+    @staticmethod
+    def _bi_signature(bis: List[BI]) -> tuple:
+        out = []
+        for bi in bis:
+            out.append((
+                bi.type,
+                getattr(bi.start.k, "index", None),
+                getattr(bi.end.k, "index", None),
+                bi.start.val,
+                bi.end.val,
+                bool(getattr(bi.end, "done", False)),
+            ))
+        return tuple(out)
 
     # ----------------------------------------------------------
     # 公共接口
@@ -162,10 +178,18 @@ class XdCalculator:
         _build_segments 成本可忽略,故每次都全量重算以保证正确性。
         """
         all_bis = bis
+        if all_bis is self._last_bis_obj:
+            return self.xds
+        sig = self._bi_signature(all_bis)
+        if sig == self._last_bis_signature:
+            self._last_bis_obj = all_bis
+            return self.xds
         self.xds.clear()
         start_bi_idx = self._find_start(all_bis)
 
         if len(all_bis) < 3:
+            self._last_bis_signature = sig
+            self._last_bis_obj = all_bis
             return self.xds
 
         self._bi_pos = {id(bi): i for i, bi in enumerate(all_bis)}
@@ -173,6 +197,8 @@ class XdCalculator:
             f"XdCalculator: 全量计算，笔数={len(all_bis)}，起始位置={start_bi_idx}"
         )
         self._build_segments(all_bis, start_bi_idx)
+        self._last_bis_signature = sig
+        self._last_bis_obj = all_bis
         return self.xds
 
     # ----------------------------------------------------------

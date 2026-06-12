@@ -49,6 +49,14 @@ class PTrade:
     post_exit_mfe_20: float = 0.0
     post_exit_mae_20: float = 0.0
     buy_ratio: float = 0.0
+    entry_level: int = 0
+    exit_level: int = 0
+    entry_layer: str = ""
+    exit_layer: str = ""
+    core_shares_before: float = 0.0
+    activity_shares_before: float = 0.0
+    swing_shares_before: float = 0.0
+    scalp_shares_before: float = 0.0
 
 
 def prep(name: str) -> dict:
@@ -119,6 +127,13 @@ def _pick_sell_signal(sells):
         return None
     ranked.sort()
     return ranked[0][2]
+
+
+def _signal_level(sig) -> int:
+    try:
+        return int(getattr(sig, "level", 0) or 0)
+    except Exception:
+        return 0
 
 
 def _filter_sell_signals(sells, sell_classes: Optional[set[int]] = None):
@@ -302,6 +317,37 @@ def _big_dir_scope_ok(scope: str, big_dir: str) -> bool:
     return True
 
 
+def _is_activity_refill_order(order: tuple) -> bool:
+    return len(order) > 4 and order[4] == "activity_refill"
+
+
+def _is_big_down_activity_order(order: tuple) -> bool:
+    return len(order) > 4 and order[4] == "big_down_activity"
+
+
+def _order_signal_level(order: tuple) -> int:
+    try:
+        return int(order[5] if len(order) > 5 else 0)
+    except Exception:
+        return 0
+
+
+def _order_structural_stop_below(order: tuple) -> Optional[float]:
+    try:
+        value = order[6] if len(order) > 6 else None
+        return None if value is None else float(value)
+    except Exception:
+        return None
+
+
+def _order_structural_stop_above(order: tuple) -> Optional[float]:
+    try:
+        value = order[7] if len(order) > 7 else None
+        return None if value is None else float(value)
+    except Exception:
+        return None
+
+
 _MONITOR_CONFIG = getattr(app_config, "RECURSIVE_MONITOR_CONFIG", {})
 BT_DATA = (
     (_MONITOR_CONFIG.get("a") or {}).get("bt_data")
@@ -439,6 +485,7 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
                        sell_classes: Optional[set[int]] = None,
                        sell_ratio_overrides: Optional[Mapping[str, float]] = None,
                        sell_ratio_override_scope: str = "all",
+                       sell_ratio_policy: str = "all_out",
                        after_3sell_reentry_buy_classes: Optional[set[int]] = None,
                        after_3sell_reentry_mid_buy_classes: Optional[set[int]] = None,
                        after_3sell_reentry_scope: str = "all",
@@ -451,6 +498,11 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
                        regime_bs_ratio_multipliers: Optional[Mapping[str, Mapping[str, float]]] = None,
                        regime_lookback_days: int = 20,
                        regime_source_sym: Optional[dict] = None,
+                       trend_core_hold_ratio: float = 0.0,
+                       trend_core_source: str = "gate",
+                       core_signal_level: Optional[int] = None,
+                       swing_signal_level: Optional[int] = None,
+                       big_down_activity_buy_ratio_multiplier: float = 0.0,
                        pool_schedule: Optional[list] = None,
                        slippage: float = 0.0,
                        t_start=None, t_end=None):
@@ -472,9 +524,276 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
     不强平(原文「技术面把握好,在较大级别卖点卖掉被超越者」),但不再开新仓。"""
     _dir_key = "trend_dir_at" if big_gate == "trend" else "big_dir_at"
     nest_mode = "filter" if "nest" in require else ("soft" if "nest_soft" in require else "off")
+    trend_core_hold_ratio = min(max(float(trend_core_hold_ratio or 0.0), 0.0), 1.0)
+    trend_core_source = str(trend_core_source or "gate").strip().lower()
+    sell_ratio_policy = str(sell_ratio_policy or "all_out").strip().lower()
+    core_signal_level = max(int(core_signal_level or 0), 0)
+    swing_signal_level = max(int(swing_signal_level or 0), 0)
+    big_down_activity_buy_ratio_multiplier = min(
+        max(float(big_down_activity_buy_ratio_multiplier or 0.0), 0.0),
+        1.0,
+    )
 
     def _bdir(s, j):
         return s.get(_dir_key, s["big_dir_at"])[j]
+
+    def _core_dir(s, j):
+        if trend_core_source in {"trend", "trend_dir", "trend_dir_at"}:
+            return s.get("trend_dir_at", s.get(_dir_key, s["big_dir_at"]))[j]
+        if trend_core_source in {"bsp", "big", "big_dir", "big_dir_at"}:
+            return s["big_dir_at"][j]
+        return _bdir(s, j)
+
+    def _allow_big_down_activity(sig) -> bool:
+        if big_down_activity_buy_ratio_multiplier <= 0:
+            return False
+        return core_signal_level <= 0 or _signal_level(sig) < core_signal_level
+
+    def _entry_layer(entry_level: int, core_shares: float) -> str:
+        if core_shares > 0:
+            return "core_swing" if swing_signal_level > 0 else "core_activity"
+        if swing_signal_level > 0:
+            return "swing" if entry_level >= swing_signal_level else "scalp"
+        return "activity"
+
+    def _activity_parts(p: dict, total_shares: Optional[float] = None) -> tuple[float, float, float]:
+        shares = float(p.get("shares") if total_shares is None else total_shares)
+        core = float(p.get("core_shares") or 0.0)
+        swing = float(p.get("swing_shares") or 0.0)
+        scalp = float(p.get("scalp_shares") or 0.0)
+        activity = max(shares - core, 0.0)
+        if swing_signal_level <= 0 or swing + scalp <= 1e-9:
+            swing = activity
+            scalp = 0.0
+        return activity, swing, scalp
+
+    def _sellable_layer_shares(p: dict, layer: str, before_shares: float) -> float:
+        core = float(p.get("core_shares") or 0.0)
+        activity, swing, scalp = _activity_parts(p, before_shares)
+        if layer == "scalp":
+            return scalp
+        if layer in {"swing", "activity"}:
+            return activity if layer == "activity" else swing + scalp
+        if layer in {"core_all", "all"}:
+            return before_shares
+        return max(before_shares - core, 0.0)
+
+    def _deplete_activity_layers(p: dict, size: float, layer: str):
+        remain = max(float(size), 0.0)
+        if remain <= 0:
+            return
+        if layer in {"core_all", "all"}:
+            return
+        scalp = float(p.get("scalp_shares") or 0.0)
+        swing = float(p.get("swing_shares") or 0.0)
+        if layer in {"scalp", "swing", "activity"}:
+            take = min(scalp, remain)
+            scalp -= take
+            remain -= take
+        if layer in {"swing", "activity"} and remain > 1e-9:
+            take = min(swing, remain)
+            swing -= take
+            remain -= take
+        p["scalp_shares"] = max(scalp, 0.0)
+        p["swing_shares"] = max(swing, 0.0)
+
+    def _signal_structural_stop_below(sig) -> Optional[float]:
+        try:
+            value = getattr(sig, "structural_stop_below", None)
+            return None if value is None else float(value)
+        except Exception:
+            return None
+
+    def _signal_structural_stop_above(sig) -> Optional[float]:
+        try:
+            value = getattr(sig, "structural_stop_above", None)
+            return None if value is None else float(value)
+        except Exception:
+            return None
+
+    def _buy_signal_actionable_at_price(sig, px: float) -> bool:
+        stop_below = _signal_structural_stop_below(sig)
+        if stop_below is not None and float(px) < stop_below:
+            return False
+        stop_above = _signal_structural_stop_above(sig)
+        if stop_above is not None and float(px) > stop_above:
+            return False
+        return True
+
+    def _buy_order_actionable_at_price(order: tuple, px: float) -> bool:
+        stop_below = _order_structural_stop_below(order)
+        if stop_below is not None and float(px) < stop_below:
+            return False
+        stop_above = _order_structural_stop_above(order)
+        if stop_above is not None and float(px) > stop_above:
+            return False
+        return True
+
+    def _buy_order_from_candidate(c: tuple) -> tuple:
+        tag = c[5] if len(c) > 5 else ""
+        level = c[6] if len(c) > 6 else 0
+        stop_below = c[7] if len(c) > 7 else None
+        stop_above = c[8] if len(c) > 8 else None
+        return (c[2], "buy", c[4], c[3], tag or "", level, stop_below, stop_above)
+
+    def _merge_structural_stops(p: dict, stop_below: Optional[float], stop_above: Optional[float]):
+        if stop_below is not None:
+            old = p.get("structural_stop_below")
+            p["structural_stop_below"] = (
+                float(stop_below)
+                if old is None
+                else max(float(old), float(stop_below))
+            )
+        if stop_above is not None:
+            old = p.get("structural_stop_above")
+            p["structural_stop_above"] = (
+                float(stop_above)
+                if old is None
+                else min(float(old), float(stop_above))
+            )
+
+    def _bar_low(s: dict, j: int) -> float:
+        arr = s.get("low")
+        return float((arr if arr is not None else s["close"])[j])
+
+    def _bar_high(s: dict, j: int) -> float:
+        arr = s.get("high")
+        return float((arr if arr is not None else s["close"])[j])
+
+    def _position_structural_invalidation(p: dict, s: dict, j: int):
+        stop_below = p.get("structural_stop_below")
+        if stop_below is not None and _bar_low(s, j) < float(stop_below):
+            return "structural_stop_below"
+        stop_above = p.get("structural_stop_above")
+        if stop_above is not None and _bar_high(s, j) > float(stop_above):
+            return "structural_stop_above"
+        return ""
+
+    def _build_open_buy_candidate(
+        name: str,
+        s: dict,
+        j: int,
+        t,
+        *,
+        allowed_reentry: Optional[set[int]] = None,
+        allowed_mid_reentry: Optional[set[int]] = None,
+        min_signal_level: int = 0,
+    ):
+        buys = _buys_at(s, j)
+        min_signal_level = max(int(min_signal_level or 0), 0)
+        if min_signal_level > 0:
+            buys = [x for x in buys if _signal_level(x) >= min_signal_level]
+        if buy_classes is not None:
+            buys = [
+                x for x in buys
+                if buy_class(getattr(x, "bs_type", "")) in buy_classes
+            ]
+        if nest_mode == "filter":
+            buys = [x for x in buys if _nest_filter_ok(x)]
+        if allowed_reentry is not None:
+            buys = [
+                x
+                for x in buys
+                if buy_class(getattr(x, "bs_type", "")) in allowed_reentry
+            ]
+        if allowed_mid_reentry is not None and name not in reentry_mid_confirmed:
+            mid_buys = [
+                x
+                for x in _mid_buys_at(s, j)
+                if buy_class(getattr(x, "bs_type", "")) in allowed_mid_reentry
+            ]
+            if mid_buys:
+                reentry_mid_confirmed.add(name)
+            else:
+                buys = []
+        big_dir_now = _bdir(s, j)
+        if not buys:
+            return None
+        pick = _pick_buy_signal(buys, buy_priority)
+        if pick is None:
+            return None
+        cls = buy_class(getattr(pick, "bs_type", ""))
+        if cls == 0:
+            return None
+        if not _buy_signal_actionable_at_price(pick, float(s["close"][j])):
+            return None
+        big_down_activity = False
+        if big_dir_now == "down":
+            if not _allow_big_down_activity(pick):
+                return None
+            big_down_activity = True
+        if "fund" in require and not s["fund_ok"][j]:
+            return None
+        value_relaxed = (
+            "value_bull_relaxed" in require
+            and bool(s.get("market_bull_at", [False] * len(s["dates"]))[j])
+        )
+        if "value" in require and not s["value_ok"][j] and not value_relaxed:
+            return None
+        if "ma" in require and not s["ma_ok"][j]:
+            return None
+        if "rs" in require and not s["rs_ok"][j]:
+            return None
+        if "d3" in require and not s["d3_ok"][j]:
+            return None
+        mid_dir = s.get("mid_dir_at", [None] * len(s["dates"]))[j]
+        mid_soft = False
+        if mid_dir == "down":
+            mid_soft = mid_gate == "soft"
+            can_relax_mid = (
+                regime_mode == "adaptive"
+                and mid_gate == "bull_relaxed"
+                and big_dir_now == "up"
+                and cls == 3
+            )
+            if not (can_relax_mid or mid_soft):
+                return None
+        pr = -cls if buy_priority == "3first" else cls
+        d3 = s.get("d3_ok")
+        daily_resonance = d3 is not None and d3[j]
+        ratio = recommended_buy_ratio(
+            f"{cls}buy",
+            max_pos=max_pos,
+            big_dir=big_dir_now,
+            daily_resonance=daily_resonance,
+            regime_mode=regime_mode,
+            mid_dir=mid_dir or "",
+            nest_mode=nest_mode,
+            nest_operable=getattr(pick, "nest_operable", None),
+            nest_depth=int(getattr(pick, "nest_depth", 0) or 0),
+            trend_boost="trend3_boost" in require,
+        )
+        if mid_soft:
+            ratio = round(ratio * 0.5, 4)
+        if big_down_activity:
+            ratio = round(ratio * big_down_activity_buy_ratio_multiplier, 4)
+        ratio = _apply_buy_ratio_multiplier(
+            ratio,
+            f"{cls}buy",
+            bs_point_ratio_multipliers,
+        )
+        if regime_by_date:
+            ratio = _apply_buy_ratio_multiplier(
+                ratio,
+                f"{cls}buy",
+                regime_bs_ratio_multipliers.get(
+                    regime_by_date.get(t.date(), "range")
+                ),
+            )
+        if ratio <= 0:
+            return None
+        order_tag = "big_down_activity" if big_down_activity else ""
+        return (
+            0 if daily_resonance else 1,
+            pr,
+            name,
+            str(cls),
+            ratio,
+            order_tag,
+            _signal_level(pick),
+            _signal_structural_stop_below(pick),
+            _signal_structural_stop_above(pick),
+        )
     if syms is None:
         syms = {n: prep(n) for n in universe}
         filt = prep(market_filter) if market_filter else None
@@ -587,21 +906,112 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
                 continue
             px = s["open"][j] * (1 + slippage if o[1] == "buy" else 1 - slippage)
             r = s["rules"]
-            if act == "buy" and name not in positions and cash > 0:
-                target = mk(m) * w if w else mk(m) / max_pos
-                budget = min(target, cash) * 0.99
-                size = budget / (px * (1 + r.commission))
-                if r.lot > 1:
-                    size = (int(size) // r.lot) * r.lot
-                if size > 0:
-                    cash -= size * px * (1 + r.commission)
-                    positions[name] = {"shares": size, "entry_date": t,
-                                       "entry_px": px, "bs": act,
-                                       "bs_type": order_bs_type,
-                                       "buy_ratio": float(w or 0.0)}
-                    reentry_buy_classes.pop(name, None)
-                    reentry_mid_buy_classes.pop(name, None)
-                    reentry_mid_confirmed.discard(name)
+            if act == "buy" and cash > 0:
+                if not _buy_order_actionable_at_price(o, px):
+                    continue
+                if _is_activity_refill_order(o):
+                    if name not in positions:
+                        continue
+                    p = positions[name]
+                    target_shares = float(
+                        p.get("activity_target_shares") or p.get("shares") or 0.0
+                    )
+                    deficit = max(target_shares - float(p.get("shares") or 0.0), 0.0)
+                    if deficit <= 1e-9:
+                        p.pop("activity_reentry", None)
+                        p.pop("activity_reentry_buy_classes", None)
+                        continue
+                    size = min(deficit, cash * 0.99 / (px * (1 + r.commission)))
+                    if r.lot > 1:
+                        size = (int(size) // r.lot) * r.lot
+                    if size > 0:
+                        old_shares = float(p["shares"])
+                        old_entry_px = float(p["entry_px"])
+                        cash -= size * px * (1 + r.commission)
+                        new_shares = old_shares + size
+                        p["entry_px"] = (
+                            old_shares * old_entry_px + size * px
+                        ) / new_shares
+                        p["shares"] = new_shares
+                        core_shares = float(p.get("core_shares") or 0.0)
+                        p["activity_shares"] = float(max(new_shares - core_shares, 0.0))
+                        refill_level = _order_signal_level(o)
+                        if swing_signal_level > 0:
+                            if refill_level >= swing_signal_level:
+                                p["swing_shares"] = float(p.get("swing_shares") or 0.0) + size
+                                p["swing_target_shares"] = max(
+                                    float(p.get("swing_target_shares") or 0.0),
+                                    float(p.get("swing_shares") or 0.0),
+                                )
+                            else:
+                                p["scalp_shares"] = float(p.get("scalp_shares") or 0.0) + size
+                                p["scalp_target_shares"] = max(
+                                    float(p.get("scalp_target_shares") or 0.0),
+                                    float(p.get("scalp_shares") or 0.0),
+                                )
+                        p["last_refill_level"] = refill_level
+                        _merge_structural_stops(
+                            p,
+                            _order_structural_stop_below(o),
+                            _order_structural_stop_above(o),
+                        )
+                        if new_shares >= target_shares - 1e-9:
+                            p.pop("activity_reentry", None)
+                            p.pop("activity_reentry_buy_classes", None)
+                elif name not in positions:
+                    target = mk(m) * w if w else mk(m) / max_pos
+                    budget = min(target, cash) * 0.99
+                    size = budget / (px * (1 + r.commission))
+                    if r.lot > 1:
+                        size = (int(size) // r.lot) * r.lot
+                    if size > 0:
+                        is_big_down_activity = _is_big_down_activity_order(o)
+                        entry_level = _order_signal_level(o)
+                        core_entry_allowed = (
+                            core_signal_level <= 0 or entry_level >= core_signal_level
+                        )
+                        core_ratio = (
+                            0.0
+                            if is_big_down_activity or not core_entry_allowed
+                            else (
+                                trend_core_hold_ratio
+                                if _core_dir(s, j) == "up"
+                                else 0.0
+                            )
+                        )
+                        core_shares = float(size * core_ratio)
+                        activity_shares = float(max(size - core_shares, 0.0))
+                        if swing_signal_level > 0:
+                            if entry_level >= swing_signal_level:
+                                swing_shares = activity_shares
+                                scalp_shares = 0.0
+                            else:
+                                swing_shares = 0.0
+                                scalp_shares = activity_shares
+                        else:
+                            swing_shares = 0.0
+                            scalp_shares = 0.0
+                        cash -= size * px * (1 + r.commission)
+                        positions[name] = {"shares": size, "entry_date": t,
+                                           "entry_px": px, "bs": act,
+                                           "bs_type": order_bs_type,
+                                           "buy_ratio": float(w or 0.0),
+                                           "entry_level": entry_level,
+                                           "entry_layer": _entry_layer(entry_level, core_shares),
+                                           "core_hold_ratio": core_ratio,
+                                           "core_shares": core_shares,
+                                           "activity_shares": activity_shares,
+                                           "swing_shares": swing_shares,
+                                           "scalp_shares": scalp_shares,
+                                           "activity_target_shares": float(size),
+                                           "swing_target_shares": swing_shares,
+                                           "scalp_target_shares": scalp_shares,
+                                           "structural_stop_below": _order_structural_stop_below(o),
+                                           "structural_stop_above": _order_structural_stop_above(o),
+                                           "big_down_activity": is_big_down_activity}
+                        reentry_buy_classes.pop(name, None)
+                        reentry_mid_buy_classes.pop(name, None)
+                        reentry_mid_confirmed.discard(name)
             elif act == "sell" and name in positions:
                 p = positions[name]
                 if r.t_plus == 0 or t.date() > p["entry_date"].date():
@@ -611,13 +1021,31 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
                         else 1.0
                     )
                     sell_ratio = min(max(sell_ratio, 0.0), 1.0)
-                    size = p["shares"] if sell_ratio >= 0.999 else p["shares"] * sell_ratio
+                    before_shares = float(p["shares"])
+                    size = before_shares if sell_ratio >= 0.999 else before_shares * sell_ratio
+                    core_shares = float(p.get("core_shares") or 0.0)
+                    activity_shares, swing_shares, scalp_shares = _activity_parts(p, before_shares)
+                    exit_layer = str(p.get("exit_layer") or "")
+                    if p.get("reason") == "small_level_sell_point":
+                        size = min(size, _sellable_layer_shares(p, exit_layer, before_shares))
                     if r.lot > 1:
                         size = (int(size) // r.lot) * r.lot
                     if size <= 0:
-                        carry.append(o)
+                        if (
+                            p.get("reason") == "small_level_sell_point"
+                            and _sellable_layer_shares(p, exit_layer, before_shares) <= 1e-9
+                        ):
+                            continue
+                        if not (
+                            p.get("reason") == "small_level_sell_point"
+                            and core_shares > 0
+                            and before_shares <= core_shares + 1e-9
+                        ):
+                            carry.append(o)
                         continue
+                    actual_sell_ratio = min(max(size / before_shares, 0.0), 1.0)
                     exit_bs_type = order_bs_type or str(p.get("exit_bs_type", ""))
+                    exit_level = _order_signal_level(o)
                     cash += size * px * (1 - r.commission - r.stamp_duty)
                     trades.append(PTrade(
                         code=s["code"],
@@ -629,14 +1057,39 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
                         bs_type=p.get("bs_type", ""),
                         reason=p.get("reason", ""),
                         exit_bs_type=exit_bs_type,
-                        sell_ratio=sell_ratio,
+                        sell_ratio=actual_sell_ratio,
                         shares=size,
                         **_post_exit_stats(syms, ml, name, m, px),
                         buy_ratio=float(p.get("buy_ratio") or 0.0),
+                        entry_level=int(p.get("entry_level") or 0),
+                        exit_level=exit_level,
+                        entry_layer=str(p.get("entry_layer") or ""),
+                        exit_layer=exit_layer,
+                        core_shares_before=core_shares,
+                        activity_shares_before=activity_shares,
+                        swing_shares_before=swing_shares,
+                        scalp_shares_before=scalp_shares,
                     ))
-                    remain = p["shares"] - size
-                    if remain > 1e-9 and sell_ratio < 0.999:
+                    remain = before_shares - size
+                    if remain > 1e-9 and actual_sell_ratio < 0.999:
+                        _deplete_activity_layers(p, size, exit_layer)
                         p["shares"] = remain
+                        p["activity_shares"] = float(
+                            (p.get("swing_shares") or 0.0) + (p.get("scalp_shares") or 0.0)
+                            if swing_signal_level > 0
+                            else max(remain - core_shares, 0.0)
+                        )
+                        if p.get("reason") == "small_level_sell_point" and core_shares > 0:
+                            p["activity_reentry"] = "wait_buy"
+                            p["activity_target_shares"] = max(
+                                float(p.get("activity_target_shares") or before_shares),
+                                before_shares,
+                            )
+                            p["activity_reentry_buy_classes"] = (
+                                {int(cls) for cls in buy_classes if int(cls) in (1, 2, 3)}
+                                if buy_classes is not None
+                                else {1, 2, 3}
+                            )
                     else:
                         reentry_scope_ok = _big_dir_scope_ok(
                             after_3sell_reentry_scope,
@@ -664,6 +1117,8 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
                     carry.append(o)   # T+1 pending
         pending = carry
 
+        block = filt and _bdir(filt, filt["d2i"][t]) == "down"
+
         # 2) 退出信号(持仓中:大级别down 或 小级别卖点)
         pend_sell = {o[0] for o in pending if o[1] == "sell"}
         for name in list(positions):
@@ -673,14 +1128,49 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
             j = int(mx[name][m])
             if j < 0:
                 continue                            # 停牌:无bar无判定
+            big_dir = _bdir(s, j)
+            if big_dir != "down":
+                positions[name].pop("big_down_activity", None)
+            structural_invalid = _position_structural_invalidation(positions[name], s, j)
+            if structural_invalid:
+                positions[name]["reason"] = "structural_invalidation"
+                positions[name]["exit_bs_type"] = structural_invalid
+                positions[name]["exit_big_dir"] = big_dir
+                positions[name]["exit_layer"] = "all"
+                pending.append((
+                    name,
+                    "sell",
+                    1.0,
+                    structural_invalid,
+                    "",
+                    int(positions[name].get("entry_level") or 0),
+                ))
+                continue
             sells = _filter_sell_signals(_sells_at(s, j), sell_classes)
-            if _bdir(s, j) == "down" or sells:
-                big_dir = _bdir(s, j)
-                is_down = big_dir == "down"
-                sell_sig = None if is_down else _pick_sell_signal(sells)
+            core_sells = (
+                [sig for sig in sells if _signal_level(sig) >= core_signal_level]
+                if core_signal_level > 0
+                else []
+            )
+            force_big_down_exit = (
+                big_dir == "down" and not bool(positions[name].get("big_down_activity"))
+            )
+            if force_big_down_exit or sells:
+                is_down = force_big_down_exit
+                core_sell_sig = _pick_sell_signal(core_sells) if core_sells else None
+                sell_sig = None if is_down else (core_sell_sig or _pick_sell_signal(sells))
                 exit_bs_type = "" if sell_sig is None else str(getattr(sell_sig, "bs_type", ""))
-                sell_ratio = recommended_sell_ratio(exit_bs_type, big_dir="down" if is_down else big_dir)
-                if not is_down:
+                is_core_sell = (core_sell_sig is not None)
+                exit_level = _signal_level(sell_sig) if sell_sig is not None else 0
+                sell_ratio = recommended_sell_ratio(
+                    exit_bs_type,
+                    big_dir="down" if (is_down or is_core_sell) else big_dir,
+                    policy=sell_ratio_policy,
+                    exit_level=exit_level,
+                    core_signal_level=core_signal_level,
+                    swing_signal_level=swing_signal_level,
+                )
+                if not is_down and not is_core_sell:
                     sell_ratio = _apply_sell_ratio_override(
                         ratio=sell_ratio,
                         bs_type=exit_bs_type,
@@ -688,16 +1178,102 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
                         overrides=sell_ratio_overrides,
                         scope=sell_ratio_override_scope,
                     )
-                positions[name]["reason"] = "big_level_down" if is_down else "small_level_sell_point"
+                positions[name]["reason"] = (
+                    "big_level_down"
+                    if is_down
+                    else ("big_level_sell_point" if is_core_sell else "small_level_sell_point")
+                )
                 positions[name]["exit_bs_type"] = exit_bs_type
                 positions[name]["exit_big_dir"] = big_dir
-                pending.append((name, "sell", sell_ratio, exit_bs_type))
+                if is_down:
+                    exit_layer = "all"
+                elif is_core_sell:
+                    exit_layer = "core_all"
+                elif swing_signal_level > 0:
+                    exit_layer = "swing" if exit_level >= swing_signal_level else "scalp"
+                else:
+                    exit_layer = "activity"
+                positions[name]["exit_layer"] = exit_layer
+                pending.append((name, "sell", sell_ratio, exit_bs_type, "", exit_level))
+                before_shares = float(positions[name].get("shares") or 0.0)
+                can_roll_up_same_bar = (
+                    not block
+                    and pool_schedule is None
+                    and not is_down
+                    and not is_core_sell
+                    and swing_signal_level > 0
+                    and sell_ratio >= 0.999
+                    and before_shares > 1e-9
+                    and _sellable_layer_shares(
+                        positions[name], exit_layer, before_shares
+                    ) >= before_shares - 1e-9
+                )
+                if can_roll_up_same_bar:
+                    roll_buy = _build_open_buy_candidate(
+                        name,
+                        s,
+                        j,
+                        t,
+                        min_signal_level=exit_level + 1,
+                    )
+                    if roll_buy is not None and int(roll_buy[6]) > exit_level:
+                        pending.append(_buy_order_from_candidate(roll_buy))
                 if pool_schedule is not None and not is_down:
                     reentry[name] = "wait_buy"   # 卖点减仓→等买点回补(短差);down→非down即回补
 
         # 3) 选股开仓
-        block = filt and _bdir(filt, filt["d2i"][t]) == "down"
         pend_buy = {o[0] for o in pending if o[1] == "buy"}
+        pend_sell = {o[0] for o in pending if o[1] == "sell"}
+        if not block:
+            for name, p in list(positions.items()):
+                if name in pend_buy or name in pend_sell:
+                    continue
+                if p.get("activity_reentry") != "wait_buy":
+                    continue
+                s = syms[name]
+                j = int(mx[name][m])
+                if j < 0 or _bdir(s, j) == "down":
+                    continue
+                target_shares = float(p.get("activity_target_shares") or p.get("shares") or 0.0)
+                if target_shares <= float(p.get("shares") or 0.0) + 1e-9:
+                    p.pop("activity_reentry", None)
+                    p.pop("activity_reentry_buy_classes", None)
+                    continue
+                buys = _buys_at(s, j)
+                allowed = p.get("activity_reentry_buy_classes")
+                if allowed is not None:
+                    buys = [
+                        x
+                        for x in buys
+                        if buy_class(getattr(x, "bs_type", "")) in allowed
+                    ]
+                elif buy_classes is not None:
+                    buys = [
+                        x
+                        for x in buys
+                        if buy_class(getattr(x, "bs_type", "")) in buy_classes
+                    ]
+                if nest_mode == "filter":
+                    buys = [x for x in buys if _nest_filter_ok(x)]
+                pick = _pick_buy_signal(buys, buy_priority)
+                if pick is None:
+                    continue
+                cls = buy_class(getattr(pick, "bs_type", ""))
+                if cls == 0:
+                    continue
+                if not _buy_signal_actionable_at_price(pick, float(s["close"][j])):
+                    continue
+                pending.append((
+                    name,
+                    "buy",
+                    None,
+                    str(cls),
+                    "activity_refill",
+                    _signal_level(pick),
+                    _signal_structural_stop_below(pick),
+                    _signal_structural_stop_above(pick),
+                ))
+                pend_buy.add(name)
         if pool_schedule is not None:
             # 三层架构:①结构层季度池=**持有为本**(原文38536:70/30配置一直持着,技术面只管
             # 中枢震荡短差降成本)——非「买点才进场」(那是全池猎手口径,小池会饿死)。
@@ -727,7 +1303,10 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
                     reentry.pop(name, None)
             equity[m] = mk(m)
             continue
-        free = max_pos - len(positions) - len(pend_buy)
+        pending_open_buys = {
+            o[0] for o in pending if o[1] == "buy" and not _is_activity_refill_order(o)
+        }
+        free = max_pos - len(positions) - len(pending_open_buys)
         if free > 0 and not block:
             cands = []
             for name, s in syms.items():
@@ -736,101 +1315,19 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
                 j = int(mx[name][m])
                 if j < 0:
                     continue                        # 停牌:无信号
-                buys = _buys_at(s, j)
-                if buy_classes is not None:                      # 只认指定类别买点(选股系统)
-                    buys = [x for x in buys if int(x.bs_type[0]) in buy_classes]
-                if nest_mode == "filter":
-                    buys = [x for x in buys if _nest_filter_ok(x)]
-                allowed_reentry = reentry_buy_classes.get(name)
-                if allowed_reentry is not None:
-                    buys = [
-                        x
-                        for x in buys
-                        if buy_class(getattr(x, "bs_type", "")) in allowed_reentry
-                    ]
-                allowed_mid_reentry = reentry_mid_buy_classes.get(name)
-                if allowed_mid_reentry is not None and name not in reentry_mid_confirmed:
-                    mid_buys = [
-                        x
-                        for x in _mid_buys_at(s, j)
-                        if buy_class(getattr(x, "bs_type", "")) in allowed_mid_reentry
-                    ]
-                    if mid_buys:
-                        reentry_mid_confirmed.add(name)
-                    else:
-                        buys = []
-                if not (_bdir(s, j) != "down" and buys):
-                    continue
-                if "fund" in require and not s["fund_ok"][j]:    # ①基本面独立系统门控
-                    continue
-                value_relaxed = (
-                    "value_bull_relaxed" in require
-                    and bool(s.get("market_bull_at", [False] * len(s["dates"]))[j])
+                cand = _build_open_buy_candidate(
+                    name,
+                    s,
+                    j,
+                    t,
+                    allowed_reentry=reentry_buy_classes.get(name),
+                    allowed_mid_reentry=reentry_mid_buy_classes.get(name),
                 )
-                if "value" in require and not s["value_ok"][j] and not value_relaxed:
-                    continue
-                if "ma" in require and not s["ma_ok"][j]:        # 海选门槛(第8课,70日线上=能搞的)
-                    continue
-                if "rs" in require and not s["rs_ok"][j]:        # ②比价资金流向(第9课,强于大盘)
-                    continue
-                if "d3" in require and not s["d3_ok"][j]:        # 三级共振:日线3买窗口(line13507)
-                    continue
-                pick = _pick_buy_signal(buys, buy_priority)
-                if pick is None:
-                    continue
-                cls = buy_class(getattr(pick, "bs_type", ""))
-                if cls == 0:
-                    continue
-                mid_dir = s.get("mid_dir_at", [None] * len(s["dates"]))[j]
-                mid_soft = False
-                if mid_dir == "down":
-                    mid_soft = mid_gate == "soft"
-                    can_relax_mid = (
-                        regime_mode == "adaptive"
-                        and mid_gate == "bull_relaxed"
-                        and _bdir(s, j) == "up"
-                        and cls == 3
-                    )
-                    if not (can_relax_mid or mid_soft):
-                        continue
-                pr = -cls if buy_priority == "3first" else cls   # 3买优先(line23172牛市)或1买优先
-                # 三级共振**排序融合**(非硬门控):日线3买窗口内的候选排前(line13507 单笔质量
-                # 实证胜率57%→71%),slot 充足时不砍机会、竞争时优先共振标的
-                d3 = s.get("d3_ok")
-                daily_resonance = d3 is not None and d3[j]
-                ratio = recommended_buy_ratio(
-                    f"{cls}buy",
-                    max_pos=max_pos,
-                    big_dir=_bdir(s, j),
-                    daily_resonance=daily_resonance,
-                    regime_mode=regime_mode,
-                    mid_dir=mid_dir or "",
-                    nest_mode=nest_mode,
-                    nest_operable=getattr(pick, "nest_operable", None),
-                    nest_depth=int(getattr(pick, "nest_depth", 0) or 0),
-                    trend_boost="trend3_boost" in require,
-                )
-                if mid_soft:
-                    ratio = round(ratio * 0.5, 4)
-                ratio = _apply_buy_ratio_multiplier(
-                    ratio,
-                    f"{cls}buy",
-                    bs_point_ratio_multipliers,
-                )
-                if regime_by_date:
-                    ratio = _apply_buy_ratio_multiplier(
-                        ratio,
-                        f"{cls}buy",
-                        regime_bs_ratio_multipliers.get(
-                            regime_by_date.get(t.date(), "range")
-                        ),
-                    )
-                if ratio <= 0:
-                    continue
-                cands.append((0 if daily_resonance else 1, pr, name, str(cls), ratio))
+                if cand is not None:
+                    cands.append(cand)
             cands.sort()
             for c in cands[:free]:
-                pending.append((c[2], "buy", c[4], c[3]))
+                pending.append(_buy_order_from_candidate(c))
 
         equity[m] = mk(m)
 
@@ -842,10 +1339,23 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
         p = positions[name]
         px = s["close"][ml[name][mi_last]] * (1 - slippage)
         r = s["rules"]
+        core_shares = float(p.get("core_shares") or 0.0)
+        swing_shares = float(p.get("swing_shares") or 0.0)
+        scalp_shares = float(p.get("scalp_shares") or 0.0)
+        shares = float(p["shares"])
         cash += p["shares"] * px * (1 - r.commission - r.stamp_duty)
         trades.append(PTrade(s["code"], p["entry_date"], p["entry_px"], t, px,
                              px / p["entry_px"] - 1, p.get("bs_type", ""), "final_close",
-                             "", 1.0, float(p["shares"])))
+                             "", 1.0, shares,
+                             buy_ratio=float(p.get("buy_ratio") or 0.0),
+                             entry_level=int(p.get("entry_level") or 0),
+                             exit_level=0,
+                             entry_layer=str(p.get("entry_layer") or ""),
+                             exit_layer="all",
+                             core_shares_before=core_shares,
+                             activity_shares_before=max(shares - core_shares, 0.0),
+                             swing_shares_before=swing_shares,
+                             scalp_shares_before=scalp_shares))
     if positions:
         equity[-1] = cash
     flabel = market_filter if market_filter else ("大盘" if filt else None)

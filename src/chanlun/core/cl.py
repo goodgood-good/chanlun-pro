@@ -11,7 +11,7 @@ from chanlun.core import beichi_calculator as bc
 from chanlun.core.cl_kline_process import CL_Kline_Process
 from chanlun.core.kline_data_processor import KlineDataProcessor
 from chanlun.core.macd import MACD
-from chanlun.core.macd_htf import compute_higher_macd
+from chanlun.core.macd_htf import HigherMACDCalculator
 from chanlun.core.xd_calculator import XdCalculator
 from chanlun.core.zs_calculator import ZsCalculator
 from chanlun.core.recursive_calculator import RecursiveCalculator, LevelResult
@@ -62,6 +62,7 @@ class CL(ICL):
         # 高周期 MACD（背驰力度判断用）。process_klines 每轮重算；
         # None 表示不可用（开关关 / 无高周期 / 桶不足），query_macd_ld 回退原生。
         self._htf_macd: Union[dict, None] = None
+        self._htf_macd_calculator: Union[HigherMACDCalculator, None] = None
         # 实例化笔计算器
         self.bi_calculator = BiCalculator(bi_mode = 'strict')
         # 实例化线段计算器
@@ -157,6 +158,16 @@ class CL(ICL):
         """
         # 返回增量更新或新增的K线数据列表
         src_klines: List[Kline] = self.kline_processor.process_kline(klines)
+        return self._process_src_klines(src_klines)
+
+    def process_kline_values(self, date, open_, high, low, close, volume=0.0):
+        """Process one normalized bar without constructing a DataFrame."""
+        src_klines: List[Kline] = self.kline_processor.process_kline_values(
+            date, open_, high, low, close, volume
+        )
+        return self._process_src_klines(src_klines)
+
+    def _process_src_klines(self, src_klines: List[Kline]):
         if not src_klines:
             return self
 
@@ -180,9 +191,11 @@ class CL(ICL):
             # 计算中枢 - 直接引用 xds
             self.zss_calculator.calculate(self.xd_calculator.xds)
 
-            # 笔层中枢与线段层对称接入，主流程自动算。两个 ZsCalculator 实例
-            # 状态/快照互不污染；任一异常由外层 except 统一清理。
-            self.bi_zss_calculator.calculate(self.bi_calculator.bis)
+            skip_legacy_zslx = self.config.get('skip_legacy_zslx', False)
+            # 笔层中枢与线段层对称接入，主流程自动算。升级链 walk-forward
+            # 回放不消费 legacy bi_zss/xd_zslx，可显式跳过以保留无未来语义并降低成本。
+            if not skip_legacy_zslx:
+                self.bi_zss_calculator.calculate(self.bi_calculator.bis)
 
             # 走势类型划分（子项目③）：用线段中枢 + 背驰划出走势类型，并回填
             # 线段中枢的 zs.type（上涨/下跌中枢 up/down、盘整中枢 zd）。
@@ -196,20 +209,25 @@ class CL(ICL):
             # 为 GD,递归链路、买卖点链路统一读 config(§3.7),保证用户显式
             # opt-out 到 ZGGDD 等较宽档时所有链路口径一致,避免「买卖点说趋
             # 势 / ZSLX 说盘整」的双口径冲突。
-            recursive_wzgx = self.config.get('zs_wzgx', Config.ZS_WZGX_GD.value)
-            self.xd_zslx = self.zslx_calculator.calculate(
-                xd_zss, self.xd_calculator.xds, ld_provider, recursive_wzgx,
-                self.frequency,
-            )
+            recursive_wzgx = self._recursive_wzgx()
+            if not skip_legacy_zslx:
+                self.xd_zslx = self.zslx_calculator.calculate(
+                    xd_zss, self.xd_calculator.xds, ld_provider, recursive_wzgx,
+                    self.frequency,
+                )
+            else:
+                self.xd_zslx = []
 
             # 笔中枢方向回填(§3.6,原 ① 路线图遗留)：用同一套 ③ 走势类型划分
             # 给笔层中枢回填方向(上涨/下跌中枢 up/down、盘整中枢 zd)。下游
             # cl_analyse 等用 zs.type 做 up/down 二分逻辑时,笔中枢拿到正确
             # 方向(此前是 ZsCalculator 内部置的 seg_b.type 占位、与原文不符)。
             # 仅用副作用(回填),不存储 bi_zslx——bi 层走势类型尚无消费方,YAGNI。
-            bi_zss = list(self.bi_zss_calculator.zss)
-            if self.bi_zss_calculator.pending_zs is not None:
-                bi_zss.append(self.bi_zss_calculator.pending_zs)
+            bi_zss = []
+            if not skip_legacy_zslx:
+                bi_zss = list(self.bi_zss_calculator.zss)
+                if self.bi_zss_calculator.pending_zs is not None:
+                    bi_zss.append(self.bi_zss_calculator.pending_zs)
             if bi_zss:
                 self.zslx_calculator.calculate(
                     bi_zss, self.bi_calculator.bis, ld_provider, recursive_wzgx,
@@ -228,7 +246,9 @@ class CL(ICL):
                 self._calc_layer_sig(self.xd_calculator.xds),
                 self._calc_layer_sig(self.bi_calculator.bis),
             )
-            if new_sig != self._last_mmd_sig:
+            if self.config.get('skip_legacy_mmd', False):
+                self._last_mmd_sig = new_sig
+            elif new_sig != self._last_mmd_sig:
                 self.process_mmd()
                 self._last_mmd_sig = new_sig
         except Exception:
@@ -300,14 +320,27 @@ class CL(ICL):
         if flag in (False, 0, '0', 'false', 'False', ''):
             self._htf_macd = None
             return
-        self._htf_macd = compute_higher_macd(
-            self.kline_processor.klines,
-            self.frequency,
-            self.market,
-            fast=int(self.config.get('idx_macd_fast', 12)),
-            slow=int(self.config.get('idx_macd_slow', 26)),
-            signal=int(self.config.get('idx_macd_signal', 9)),
-        )
+        fast = int(self.config.get('idx_macd_fast', 12))
+        slow = int(self.config.get('idx_macd_slow', 26))
+        signal = int(self.config.get('idx_macd_signal', 9))
+        calc = self._htf_macd_calculator
+        if (
+            calc is None
+            or calc.frequency != self.frequency
+            or calc.market != self.market
+            or calc.fast != fast
+            or calc.slow != slow
+            or calc.signal != signal
+        ):
+            calc = HigherMACDCalculator(
+                self.frequency,
+                self.market,
+                fast=fast,
+                slow=slow,
+                signal=signal,
+            )
+            self._htf_macd_calculator = calc
+        self._htf_macd = calc.update(self.kline_processor.klines)
 
     def get_fxs(self) -> List[FX]:
         """返回分型列表（浅拷贝）"""
@@ -352,7 +385,7 @@ class CL(ICL):
         ld_provider = lambda s, e: query_macd_ld(self, s, e)
         # 递归链路默认原文严格档 GD,允许 config opt-out(§3.7,统一各链路读
         # config)——理由见 process_klines ③ 接入处注释。
-        recursive_wzgx = self.config.get('zs_wzgx', Config.ZS_WZGX_GD.value)
+        recursive_wzgx = self._recursive_wzgx()
         return RecursiveCalculator().calculate(
             self.xd_calculator.xds, ld_provider, recursive_wzgx, self.frequency,
         )
@@ -395,7 +428,7 @@ class CL(ICL):
         ld_provider = lambda s, e: query_macd_ld(self, s, e)
         # 递归链路默认原文严格档 GD,允许 config opt-out(§3.7,统一各链路读
         # config)——理由见 process_klines ③ 接入处注释。
-        recursive_wzgx = self.config.get('zs_wzgx', Config.ZS_WZGX_GD.value)
+        recursive_wzgx = self._recursive_wzgx()
         return calculate_interval_nest(
             self.get_recursive_levels(),
             self.xd_calculator.xds,
@@ -405,20 +438,33 @@ class CL(ICL):
         )
 
     # ===== 新核心 8 模块 lazy 接入(并存,不动旧版/process_klines/golden) =====
+    def _recursive_wzgx(self) -> str:
+        """统一解析中枢位置关系口径(zs_wzgx):所有链路必须经此单点读取。
+
+        fallback=原文严格档 GD(走势中枢定理二:后DD>前GG=上涨延续、后GG<前DD=
+        下跌延续,比较 GG/DD 包络)。任何方法不得自带 fallback——此前 5 处新核心
+        getter fallback 写死 ZGD、与 process_klines 内部的 GD 形成「同一 CL 对象
+        内口径分裂」(config 缺键时图表与回测对趋势/盘整结论矛盾),2026-06-12
+        原文一致性审计修复。
+        """
+        return self.config.get('zs_wzgx', Config.ZS_WZGX_GD.value)
+
     def get_recursive_branch_levels(self):
         """新核心:recursive_branch 多级递归(中枢+内联背驰+走势类型,P1-P4)。
 
         与旧 get_recursive_levels(RecursiveCalculator)并存独立——本方法走重做的
-        zs_branch/zslx_branch/recursive_branch 链路,默认 ZGD(合原文「≥2 依次同向中枢」)。
+        zs_branch/zslx_branch/recursive_branch 链路,wzgx 统一读 config(fallback=
+        原文严格档 GD,定理二,见 _recursive_wzgx)。
         lazy 现算、不接 process_klines。返回 List[recursive_branch.LevelResult]。
         """
         from chanlun.core.recursive_branch import RecursiveBranchCalculator
         ld = lambda s, e: query_macd_ld(self, s, e)
-        wzgx = self.config.get('zs_wzgx', Config.ZS_WZGX_ZGD.value)
+        wzgx = self._recursive_wzgx()
+        l0_min = int(self.config.get('recursive_l0_min_zs_lines', 4) or 4)
         # L0 输入用线段(xds):线段中枢是缠论最低正式级别中枢(宪法 L0=线段),升级链由此起。
         # 笔中枢是更小的观察级别、不参与升级,单独走 get_bi_zhongshu。
         # (1m 标的线段稀疏→线段中枢少,但缠论正确;丰富的笔中枢另在观察层显示。)
-        return RecursiveBranchCalculator().calculate(
+        return RecursiveBranchCalculator(l0_min_zs_lines=l0_min).calculate(
             list(self.get_xds()), ld, wzgx, self.frequency,
         )
 
@@ -430,7 +476,7 @@ class CL(ICL):
         """
         from chanlun.core.zs_branch import ZsBranchCalculator
         ld = lambda s, e: query_macd_ld(self, s, e)
-        wzgx = self.config.get('zs_wzgx', Config.ZS_WZGX_ZGD.value)
+        wzgx = self._recursive_wzgx()
         res = ZsBranchCalculator(
             ld_provider=ld, frequency=self.frequency, wzgx=wzgx, min_zs_lines=4,
         ).calculate(list(self.get_bis()))
@@ -452,9 +498,10 @@ class CL(ICL):
         from chanlun.core.bs2_branch import Bs2BranchCalculator
         from chanlun.core.bs3_branch import Bs3BranchCalculator
         ld = lambda s, e: query_macd_ld(self, s, e)
-        wzgx = self.config.get('zs_wzgx', Config.ZS_WZGX_ZGD.value)
+        wzgx = self._recursive_wzgx()
+        l0_min = int(self.config.get('recursive_l0_min_zs_lines', 4) or 4)
         units = list(self.get_xds()) if use_xd else list(self.get_bis())
-        levels = RecursiveBranchCalculator().calculate(
+        levels = RecursiveBranchCalculator(l0_min_zs_lines=l0_min).calculate(
             units, ld, wzgx, self.frequency,
         )
         if not levels:
@@ -478,9 +525,12 @@ class CL(ICL):
         """
         from chanlun.core.recursive_branch import RecursiveBranchCalculator
         ld = lambda s, e: query_macd_ld(self, s, e)
-        wzgx = self.config.get('zs_wzgx', Config.ZS_WZGX_ZGD.value)
+        wzgx = self._recursive_wzgx()
+        l0_min = int(self.config.get('recursive_l0_min_zs_lines', 4) or 4)
         units = list(self.get_xds()) if use_xd else list(self.get_bis())
-        levels = RecursiveBranchCalculator().calculate(units, ld, wzgx, self.frequency)
+        levels = RecursiveBranchCalculator(l0_min_zs_lines=l0_min).calculate(
+            units, ld, wzgx, self.frequency,
+        )
         out = []
         for lv in levels:
             for dv in lv.done_divergence:
@@ -522,7 +572,7 @@ class CL(ICL):
             return []
         xds = list(self.get_xds())                       # 各级中枢.lines 均为线段 → 同一定位基
         ld = lambda s, e: query_macd_ld(self, s, e)      # noqa: E731
-        wzgx = self.config.get('zs_wzgx', Config.ZS_WZGX_ZGD.value)
+        wzgx = self._recursive_wzgx()
         import logging
         _log = logging.getLogger(__name__)
         out = []
@@ -612,7 +662,7 @@ class CL(ICL):
     ) -> Tuple[bool, List[LINE]]:
         """判断指定线与之前的中枢是否形成趋势背驰（薄壳，逻辑见 beichi_calculator）。"""
         ld_provider = lambda s, e: query_macd_ld(self, s, e)
-        wzgx_config = self.config.get('zs_wzgx', Config.ZS_WZGX_GD.value)
+        wzgx_config = self._recursive_wzgx()
         # 买卖点链路用「中枢本体包络」判趋势(剔除波动/延伸/离开段)——否则远摆撑爆
         # 包络、趋势恒判不出、1类不触发(见 combination_calculator.core_envelope)。
         return bc.beichi_qs(
@@ -622,7 +672,7 @@ class CL(ICL):
 
     def zss_is_qs(self, one_zs: ZS, two_zs: ZS) -> Union[str, None]:
         """判断两个中枢是否形成趋势（薄壳，逻辑见 beichi_calculator）。"""
-        wzgx_config = self.config.get('zs_wzgx', Config.ZS_WZGX_GD.value)
+        wzgx_config = self._recursive_wzgx()
         return bc.is_qs(one_zs, two_zs, wzgx_config, use_core_envelope=True)
 
     def create_dn_zs(

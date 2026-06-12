@@ -10,10 +10,11 @@ from __future__ import annotations
 import datetime
 
 import numpy as np
+import pytest
 
 from chanlun.core.cl_interface import Kline
 from chanlun.core.macd import MACD
-from chanlun.core.macd_htf import compute_higher_macd
+from chanlun.core.macd_htf import HigherMACDCalculator, compute_higher_macd
 
 
 def _klines(n: int, step_min: int = 1, start_close: float = 100.0) -> list[Kline]:
@@ -97,3 +98,48 @@ def test_5m_to_30m_resamples_by_timestamp():
     res = compute_higher_macd(klines, "5m")
     assert res is not None
     assert len(res["hist"]) == len(klines)
+
+
+def _assert_macd_result_equal(left, right):
+    if right is None:
+        assert left is None
+        return
+    assert left is not None
+    for key in ("dif", "dea", "hist"):
+        assert np.asarray(left[key], dtype=float) == pytest.approx(
+            np.asarray(right[key], dtype=float)
+        )
+
+
+def test_incremental_higher_macd_matches_full_recompute_on_appends():
+    """Stateful higher-MACD must match the full reference helper at every step."""
+    calc = HigherMACDCalculator("1m")
+    klines = _klines(260)
+
+    for end in range(1, len(klines) + 1):
+        incremental = calc.update(klines[:end])
+        full = compute_higher_macd(klines[:end], "1m")
+        _assert_macd_result_equal(incremental, full)
+
+
+def test_incremental_higher_macd_matches_full_recompute_on_last_bar_update():
+    calc = HigherMACDCalculator("1m")
+    klines = _klines(260)
+    base = list(klines[:220])
+    _assert_macd_result_equal(calc.update(base), compute_higher_macd(base, "1m"))
+
+    updated = list(base)
+    last = updated[-1]
+    updated[-1] = Kline(
+        index=last.index,
+        date=last.date,
+        h=last.h + 3.0,
+        l=last.l,
+        o=last.o,
+        c=last.c + 2.5,
+        a=last.a,
+    )
+
+    incremental = calc.update(updated)
+    full = compute_higher_macd(updated, "1m")
+    _assert_macd_result_equal(incremental, full)

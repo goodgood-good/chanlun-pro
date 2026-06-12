@@ -66,6 +66,9 @@ def _mark_upgrades(done_zss: List[ZS]) -> List[int]:
 class RecursiveBranchCalculator:
     """递归装配计算器。无状态，每次 calculate 全量重算。"""
 
+    def __init__(self, l0_min_zs_lines: int = 4):
+        self.l0_min_zs_lines = int(l0_min_zs_lines or 4)
+
     def calculate(
         self,
         xds: List[LINE],
@@ -87,7 +90,7 @@ class RecursiveBranchCalculator:
         zslx_calc = ZslxBranchCalculator()    # 无状态，建一次复用
         level = 0
         while level < _MAX_LEVELS:
-            min_lines = 4 if level == 0 else 3
+            min_lines = self.l0_min_zs_lines if level == 0 else 3
             # 换周期 MACD:各级用对应级别 ld_provider(L0→5m/L1→30m…);无 factory 退化用单一
             lp = ld_provider_for_level(level) if ld_provider_for_level is not None else ld_provider
             res = ZsBranchCalculator(

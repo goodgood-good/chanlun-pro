@@ -54,6 +54,7 @@ def test_basic_2buy():
     assert pts[0].bs_type == "2buy" and pts[0].level == 1
     assert pts[0].anchor_fx is c_sub.end
     assert pts[0].divergence is not None
+    assert pts[0].structural_stop_below == 5
 
 
 def test_2buy_breaks_prev_low_filtered():
@@ -100,6 +101,7 @@ def test_2sell_symmetric():
     levels = [_lr(0, [_dv("up", c_sub)]), _lr(1, [_dv("up", c_k)])]
     pts = Bs2BranchCalculator().calculate(levels)
     assert len(pts) == 1 and pts[0].bs_type == "2sell" and pts[0].level == 1
+    assert pts[0].structural_stop_above == 15
 
 
 def test_provisional_excluded():
@@ -123,5 +125,8 @@ def test_three_levels_each_has_second():
     pts = Bs2BranchCalculator().calculate(levels)
     by_level = {p.level: p for p in pts}
     assert len(pts) == 2
+    assert by_level[1].structural_stop_below == 5
+    assert by_level[2].structural_stop_below == 4
+    assert by_level[2].anchor_fx is c_l1.end
     assert by_level[1].anchor_fx is c_l0.end     # L1 二买 = L0 一买
     assert by_level[2].anchor_fx is c_l1.end     # L2 二买 = L1 一买

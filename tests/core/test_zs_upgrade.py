@@ -6,7 +6,7 @@
 from chanlun.core.cl_interface import ZS, Config
 from chanlun.core.zs_upgrade import (
     is_kuozhan, kuozhan_zhongshu, kuozhan_level_signals_ex, _tongjibie_groups,
-    _jiehe_segments,
+    _tongjibie_candidate_groups, _jiehe_segments,
 )
 
 
@@ -379,6 +379,17 @@ def test_tongjibie_6_segments_two_zs_not_extended():
     """6 段都重合 → **2 个**中枢(恰好3段不延伸、允许盘整+盘整,line24728/24735),非1个延伸大中枢。"""
     ws = [_W(10, 20) for _ in range(6)]
     assert _tongjibie_groups(ws) == [(0, 2), (3, 5)]
+
+
+def test_tongjibie_overlapping_candidates_are_audit_only():
+    """重叠三段候选可被审计,但同级别操作只采用一条非重叠唯一分解路径。
+
+    原文 36/39 课允许结合律下的多义组合,但实际操作强调同级别唯一性分解;
+    因此 (0,2) 采用后,(1,3) 这种重叠候选不能再同时作为交易中枢。
+    """
+    ws = [_W(10, 20), _W(12, 21), _W(14, 22), _W(16, 23), _W(30, 40)]
+    assert _tongjibie_candidate_groups(ws) == [(0, 2), (1, 3)]
+    assert _tongjibie_groups(ws) == [(0, 2)]
 
 
 def test_tongjibie_advance_one_when_no_zs():

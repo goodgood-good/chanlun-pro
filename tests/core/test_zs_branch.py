@@ -416,7 +416,9 @@ def test_calculator_construct_with_ld_provider():
     assert calc.ld_provider is not None
     assert calc.frequency == "1m"
     from chanlun.core.cl_interface import Config
-    assert calc.wzgx == Config.ZS_WZGX_ZGD.value          # 默认 ZGD
+    # 2026-06-12 审计修复：默认与 CL_CFG 统一为原文严格档 GD（定理二），
+    # 不再保留 P3 时期的 ZGD 独立默认（详见 test_audit_repro_yuanwen F7）。
+    assert calc.wzgx == Config.ZS_WZGX_GD.value
 
 
 def test_no_ld_provider_yields_none_divergence():
@@ -682,3 +684,23 @@ def test_calculator_min_zs_lines_param():
     """min_zs_lines 可配：默认 4(L0)，递归 L≥1 传 3。"""
     assert zs_branch.ZsBranchCalculator().min_zs_lines == 4
     assert zs_branch.ZsBranchCalculator(min_zs_lines=3).min_zs_lines == 3
+
+
+def test_calculator_min3_confirms_three_segment_center_on_next_leave():
+    """原文三段中枢本体 + 下一段脱离确认可见，二者不能混成 4 段定义。"""
+    lines = [
+        _seg(0, "up", 4, 8),      # core a [4,8]
+        _seg(1, "down", 8, 5),    # core b [5,8]
+        _seg(2, "up", 5, 10),     # core c [5,10] => center [5,8]
+        _seg(3, "down", 10, 9),   # leave/confirmation, outside [5,8]
+    ]
+
+    res = zs_branch.ZsBranchCalculator(min_zs_lines=3).calculate(lines)
+
+    assert len(res.done_zss) == 1
+    z = res.done_zss[0]
+    assert (z.zd, z.zg) == (5, 8)
+    assert len(z.lines) == 3
+    assert z.start is None
+    assert z.end is lines[2]
+    assert res.live == []

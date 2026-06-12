@@ -31,7 +31,20 @@ class Bs2BranchCalculator:
                 if found is not None:
                     zs_sub, dv_sub, c_sub = found
                     bs = "2buy" if c_k._type == "down" else "2sell"
-                    out.append(BuySellPoint(bs, zs_sub, c_sub, c_sub.end, dv_sub, level=k))
+                    stop_kwargs = (
+                        {"structural_stop_below": c_k.end.val}
+                        if bs == "2buy"
+                        else {"structural_stop_above": c_k.end.val}
+                    )
+                    out.append(BuySellPoint(
+                        bs,
+                        zs_sub,
+                        c_sub,
+                        c_sub.end,
+                        dv_sub,
+                        level=k,
+                        **stop_kwargs,
+                    ))
         return out
 
     @staticmethod

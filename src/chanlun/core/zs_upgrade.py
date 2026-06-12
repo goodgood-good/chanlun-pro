@@ -267,6 +267,24 @@ def kuozhan_level_signals_ex(zss: List[ZS], lower_zss: List[ZS], ld_provider, wz
     return bsp, bcs
 
 
+def _tongjibie_candidate_groups(zslxs) -> List[tuple]:
+    """同级别分解审计候选:所有连续 3 段共同重合的三元组。
+
+    原文 36/39 课允许按结合律选择不同当下组合,但一套同级别操作必须维持
+    已确认前缀的唯一分解；因此这些候选只用于解释和审计,不能同时作为交易
+    中枢入选。
+    """
+    candidates = []
+    n = len(zslxs)
+    for i in range(0, max(n - 2, 0)):
+        tri = zslxs[i:i + 3]
+        zd = max(z.zs_low for z in tri)
+        zg = min(z.zs_high for z in tri)
+        if zd < zg:
+            candidates.append((i, i + 2))
+    return candidates
+
+
 def _tongjibie_groups(zslxs) -> List[tuple]:
     """同级别分解分组:连续 3 段走势类型价格区间重合 → (start,end) 中枢组,**恰好 3 段不延伸**
     (line24727 三段上下上/下上下重合=中枢 / line24735 不延伸 / line24728 6段=2盘整连接);
@@ -428,6 +446,7 @@ def tongjibie_zhongshu_ex(zss: List[ZS], xds: List[LINE]):
     # 曾经走 zslx 标签 + _jiehe_segments 合并:V/Λ 型链标签歧义,见 _swing_alternating_segs。
     segs = _swing_alternating_segs(zss)
     groups = _tongjibie_groups(segs)
+    all_groups = _tongjibie_candidate_groups(segs)
     out: List[ZS] = []
     out_groups: List[tuple] = []
     for s, e in groups:
@@ -449,7 +468,7 @@ def tongjibie_zhongshu_ex(zss: List[ZS], xds: List[LINE]):
         out.append(_build_kuozhan_zs(run, xds[a:b + 1], (zd, zg),
                                      done=(e + 1 < len(segs))))
         out_groups.append((s, e))
-    return out, {"segs": segs, "groups": out_groups}
+    return out, {"segs": segs, "groups": out_groups, "all_groups": all_groups}
 
 
 def tongjibie_level_signals(zss: List[ZS], meta: dict, ld_provider, wzgx: str,

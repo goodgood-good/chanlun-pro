@@ -104,6 +104,20 @@ def _event(code="SH.600000"):
     )
 
 
+import pytest
+
+@pytest.fixture(autouse=True)
+def _hermetic_default_runtime_sources(monkeypatch):
+    """默认 runtime 源指向真实 D:/chanlun_pro 的 paper ledger / live-parity 报告，
+    而常驻 live_monitor 实盘进程会持续改写它们——2026-06-12 首批真实 paper 交易
+    落账后，本文件依赖 build_optimization_report 的测试随盘面状态漂移（瞬态
+    review_runtime_gap）。测试一律密闭：默认源清空，各用例只用自己注入的 tmp 数据。"""
+    from chanlun.recursive_bt import strategy_optimizer as _so
+    monkeypatch.setattr(
+        _so, "default_runtime_summary_sources", lambda markets=("a", "us"): []
+    )
+
+
 def test_discover_claude_notification_command_prefers_dingtalk(tmp_path):
     settings = {
         "hooks": {

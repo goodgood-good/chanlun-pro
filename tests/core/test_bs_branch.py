@@ -164,6 +164,7 @@ def test_second_class_1sell_pullback_holds_high_is_2sell():
     pts = BsBranchCalculator().second_class(res, [c, rebound, pullback])
     assert len(pts) == 1 and pts[0].bs_type == "2sell"
     assert pts[0].anchor_fx is pullback.end
+    assert pts[0].structural_stop_above == 10
 
 
 def test_second_class_1sell_pullback_breaks_high_none():
@@ -183,6 +184,7 @@ def test_second_class_1buy_pullback_holds_low_is_2buy():
     res = _result([_zs_core()], [_dv("down", c)])
     pts = BsBranchCalculator().second_class(res, [c, rebound, pullback])
     assert len(pts) == 1 and pts[0].bs_type == "2buy"
+    assert pts[0].structural_stop_below == 5
 
 
 def test_second_class_no_pullback_seg_none():

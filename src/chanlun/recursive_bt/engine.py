@@ -34,6 +34,8 @@ CL_CFG = {
     "chart_show_xd_mmd": "1", "chart_show_bi_bc": "1", "chart_show_xd_bc": "1",
     "zs_bi_type": ["zs_type_bz"], "zs_xd_type": ["zs_type_bz"],
     "idx_macd_fast": 12, "idx_macd_slow": 26, "idx_macd_signal": 9,
+    # 原文中枢本体为三段次级别走势类型重叠；4 段只应作为 legacy 确认门控显式传入。
+    "recursive_l0_min_zs_lines": 3,
 }
 
 CACHE_DIR = "D:/chanlun_pro/chart_cache"
@@ -117,13 +119,41 @@ def recommended_buy_ratio(
     return round(ratio, 4)
 
 
-def recommended_sell_ratio(bs_type: str, big_dir: str = "neutral") -> float:
-    """Position share to sell for a Chanlun sell/exit signal."""
+def recommended_sell_ratio(
+    bs_type: str,
+    big_dir: str = "neutral",
+    *,
+    policy: str = "all_out",
+    exit_level: int = 0,
+    core_signal_level: int = 0,
+    swing_signal_level: int = 0,
+) -> float:
+    """Position share to sell for a Chanlun sell/exit signal.
+
+    ``all_out`` preserves the legacy behavior.  ``original_layered`` keeps the
+    original-text "multi-voice" idea mechanical: lower-level sells manage
+    activity layers while the higher-level trend has not broken, and only the
+    controlling/core level or a visible higher-level down state forces a full
+    exit.
+    """
     if big_dir == "down":
         return 1.0
     cls = buy_class(bs_type)
-    if cls in (1, 2, 3):
+    if cls not in (1, 2, 3):
         return 1.0
+    if str(policy or "all_out").strip().lower() != "original_layered":
+        return 1.0
+    exit_level = max(int(exit_level or 0), 0)
+    core_signal_level = max(int(core_signal_level or 0), 0)
+    swing_signal_level = max(int(swing_signal_level or 0), 0)
+    if core_signal_level > 0 and exit_level >= core_signal_level:
+        return 1.0
+    if big_dir == "up":
+        if swing_signal_level > 0 and exit_level >= swing_signal_level:
+            return {1: 1.0, 2: 0.75, 3: 0.5}.get(cls, 1.0)
+        return {1: 1.0, 2: 0.5, 3: 0.25}.get(cls, 1.0)
+    if big_dir == "neutral":
+        return {1: 1.0, 2: 0.75, 3: 0.5}.get(cls, 1.0)
     return 1.0
 
 
@@ -163,6 +193,10 @@ class Signal:
     price: float
     nest_operable: Optional[bool] = None
     nest_depth: int = 0
+    structural_stop_below: Optional[float] = None
+    structural_stop_above: Optional[float] = None
+    zs_zd: Optional[float] = None
+    zs_zg: Optional[float] = None
 
     @property
     def is_buy(self) -> bool:
@@ -173,6 +207,36 @@ class Signal:
         return self.bs_type in SELLS
 
 
+def _structural_signal_fields(p) -> dict:
+    z = getattr(p, "zs", None)
+    zd = getattr(z, "zd", None)
+    zg = getattr(z, "zg", None)
+    explicit_below = getattr(p, "structural_stop_below", None)
+    explicit_above = getattr(p, "structural_stop_above", None)
+    anchor = getattr(p, "anchor_fx", None)
+    anchor_val = getattr(anchor, "val", None)
+    fields = {
+        "structural_stop_below": (
+            float(explicit_below) if explicit_below is not None else None
+        ),
+        "structural_stop_above": (
+            float(explicit_above) if explicit_above is not None else None
+        ),
+        "zs_zd": float(zd) if zd is not None else None,
+        "zs_zg": float(zg) if zg is not None else None,
+    }
+    bs_type = str(getattr(p, "bs_type", ""))
+    if fields["structural_stop_below"] is None and bs_type == "1buy" and anchor_val is not None:
+        fields["structural_stop_below"] = float(anchor_val)
+    elif fields["structural_stop_above"] is None and bs_type == "1sell" and anchor_val is not None:
+        fields["structural_stop_above"] = float(anchor_val)
+    elif fields["structural_stop_below"] is None and bs_type == "3buy" and zg is not None:
+        fields["structural_stop_below"] = float(zg)
+    elif fields["structural_stop_above"] is None and bs_type == "3sell" and zd is not None:
+        fields["structural_stop_above"] = float(zd)
+    return fields
+
+
 def collect_signals(cd: CL) -> List[Signal]:
     """升级级买卖点(get_kuozhan_levels, L1+)。"""
     out: List[Signal] = []
@@ -181,7 +245,13 @@ def collect_signals(cd: CL) -> List[Signal]:
             fx = p.anchor_fx
             if fx is None or fx.k is None:
                 continue
-            out.append(Signal(fx.k.date, p.level or lv["level"], p.bs_type, fx.val))
+            out.append(Signal(
+                fx.k.date,
+                p.level or lv["level"],
+                p.bs_type,
+                fx.val,
+                **_structural_signal_fields(p),
+            ))
     out.sort(key=lambda s: s.date)
     return out
 
@@ -297,9 +367,12 @@ def collect_branch_signals(
         from chanlun.core.recursive_branch import RecursiveBranchCalculator
 
         ld = lambda s, e: query_macd_ld(cd, s, e)
-        wzgx = cd.config.get("zs_wzgx", Config.ZS_WZGX_ZGD.value)
+        # fallback 必须与 CL._recursive_wzgx 一致(原文严格档 GD,定理二)——
+        # 此前写死 ZGD,config 缺键时与 CL 内部口径分裂(2026-06-12 审计修复)。
+        wzgx = cd.config.get("zs_wzgx", Config.ZS_WZGX_GD.value)
+        l0_min = int(cd.config.get("recursive_l0_min_zs_lines", 4) or 4)
         units = list(cd.get_xds()) if use_xd else list(cd.get_bis())
-        levels = RecursiveBranchCalculator().calculate(
+        levels = RecursiveBranchCalculator(l0_min_zs_lines=l0_min).calculate(
             units,
             ld,
             wzgx,
@@ -339,6 +412,7 @@ def collect_branch_signals(
             fx.k.date, level, p.bs_type, fx.val,
             nest_operable=nest_operable,
             nest_depth=nest_depth,
+            **_structural_signal_fields(p),
         ))
     out.sort(key=lambda s: s.date)
     return out

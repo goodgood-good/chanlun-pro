@@ -10,6 +10,89 @@ from chanlun.backtesting.backtest_trader import BackTestTrader
 from chanlun.recursive_bt.engine import Signal
 
 
+def test_structural_signal_fields_preserves_explicit_second_class_stop():
+    from types import SimpleNamespace
+
+    from chanlun.recursive_bt.engine import _structural_signal_fields
+
+    p = SimpleNamespace(
+        bs_type="2buy",
+        structural_stop_below=403.41,
+        anchor_fx=SimpleNamespace(val=418.35),
+        zs=SimpleNamespace(zd=418.35, zg=421.71),
+    )
+
+    fields = _structural_signal_fields(p)
+
+    assert fields["structural_stop_below"] == pytest.approx(403.41)
+    assert fields["structural_stop_above"] is None
+    assert fields["zs_zd"] == pytest.approx(418.35)
+    assert fields["zs_zg"] == pytest.approx(421.71)
+
+
+def test_no_future_policy_distinguishes_full_history_from_bounded_warmup():
+    from types import SimpleNamespace
+
+    from chanlun.recursive_bt.live_backtest import _no_future_policy_summary
+
+    full = _no_future_policy_summary(
+        SimpleNamespace(
+            signal_mode="walk_forward",
+            signal_warmup_bars=-1,
+            signal_scan_chunk_bars=5000,
+            start=None,
+        )
+    )
+    full_with_start = _no_future_policy_summary(
+        SimpleNamespace(
+            signal_mode="walk_forward",
+            signal_warmup_bars=-1,
+            signal_scan_chunk_bars=5000,
+            start="2026-04-14T16:00:00+00:00",
+        )
+    )
+    full_with_complete_registry = _no_future_policy_summary(
+        SimpleNamespace(
+            signal_mode="walk_forward",
+            signal_warmup_bars=-1,
+            signal_scan_chunk_bars=5000,
+            start="2026-04-14T16:00:00+00:00",
+        ),
+        signal_seen_registry_complete=True,
+    )
+    bounded = _no_future_policy_summary(
+        SimpleNamespace(
+            signal_mode="walk_forward",
+            signal_warmup_bars=1200,
+            signal_scan_chunk_bars=3000,
+            start="2026-04-14T16:00:00+00:00",
+        )
+    )
+
+    assert full["strict_no_future"] is True
+    assert full["history_state_complete"] is True
+    assert full["history_state"] == "full_prior_history"
+    assert full["anchor_time_tradeable"] is False
+    assert full["chunked_signal_scan"] is False
+    assert full["signal_scan_chunk_bars"] == 0
+    assert full["requested_signal_scan_chunk_bars"] == 5000
+    assert full["signal_seen_registry_complete"] is True
+    assert full["stale_reappearing_signal_risk"] is False
+    assert full_with_start["history_state_complete"] is True
+    assert full_with_start["signal_seen_registry_complete"] is False
+    assert full_with_start["stale_reappearing_signal_risk"] is True
+    assert "first-seen registry" in full_with_start["warning"]
+    assert full_with_complete_registry["signal_seen_registry_complete"] is True
+    assert full_with_complete_registry["stale_reappearing_signal_risk"] is False
+    assert full_with_complete_registry["warning"] == ""
+    assert bounded["strict_no_future"] is True
+    assert bounded["history_state_complete"] is False
+    assert bounded["history_state"] == "bounded_warmup"
+    assert bounded["chunked_signal_scan"] is True
+    assert bounded["signal_seen_registry_complete"] is False
+    assert "bounded warmup" in bounded["warning"]
+
+
 class _State:
     def __init__(self, last_open, last_px, prev_close):
         self.last_open = last_open
@@ -345,6 +428,38 @@ def test_recommended_buy_ratio_caps_at_one_slot():
     assert recommended_sell_ratio("1sell") == 1.0
     assert recommended_sell_ratio("3sell", big_dir="up") == 1.0
     assert recommended_sell_ratio("", big_dir="down") == 1.0
+    assert recommended_sell_ratio(
+        "3sell",
+        big_dir="up",
+        policy="original_layered",
+        exit_level=0,
+        core_signal_level=2,
+        swing_signal_level=1,
+    ) == 0.25
+    assert recommended_sell_ratio(
+        "3sell",
+        big_dir="up",
+        policy="original_layered",
+        exit_level=1,
+        core_signal_level=2,
+        swing_signal_level=1,
+    ) == 0.5
+    assert recommended_sell_ratio(
+        "3sell",
+        big_dir="up",
+        policy="original_layered",
+        exit_level=2,
+        core_signal_level=2,
+        swing_signal_level=1,
+    ) == 1.0
+    assert recommended_sell_ratio(
+        "2sell",
+        big_dir="neutral",
+        policy="original_layered",
+        exit_level=1,
+        core_signal_level=2,
+        swing_signal_level=1,
+    ) == 0.75
 
 
 def test_pick_buy_class_respects_priority():
@@ -447,6 +562,842 @@ def test_mid_signals_map_to_first_main_bar_after_confirmation_delay():
 
     assert list(mapped) == [5]
     assert mapped[5][0].bs_type == "3buy"
+
+
+def test_walk_forward_trend_dir_waits_for_high_level_delay_and_warmup(monkeypatch):
+    from types import SimpleNamespace
+    from chanlun.recursive_bt import live_backtest
+
+    class FakeCL:
+        def __init__(self, *_args, **_kwargs):
+            self.rows = 0
+
+        def process_klines(self, df):
+            self.rows += len(df)
+
+        def get_bis(self):
+            if self.rows < 2:
+                return []
+            return [SimpleNamespace(type="up")]
+
+    monkeypatch.setattr(live_backtest, "CL", FakeCL)
+    main_dates = list(pd.date_range("2026-01-01 09:30:00", periods=12, freq="min", tz="UTC"))
+    high_dates = list(pd.date_range("2026-01-01 09:30:00", periods=2, freq="5min", tz="UTC"))
+    df = pd.DataFrame(
+        {
+            "date": high_dates,
+            "open": np.ones(2),
+            "high": np.ones(2),
+            "low": np.ones(2),
+            "close": np.ones(2),
+            "volume": np.ones(2),
+        }
+    )
+
+    dirs = live_backtest._walk_forward_trend_dir_by_main_bar(
+        "QQQ.US",
+        "5m",
+        df,
+        main_dates,
+        available_delay=pd.Timedelta(minutes=5),
+        warmup_bars=2,
+    )
+
+    assert dirs[:10] == ["neutral"] * 10
+    assert dirs[10:] == ["up", "up"]
+
+
+def test_native_5m_events_shift_to_closing_1m_bar_before_fill():
+    from scripts.wf_native_recursive_context_tsla import _native_events_to_1m
+
+    dates = list(pd.date_range("2026-01-01 09:30:00", periods=10, freq="min"))
+    mapped = _native_events_to_1m([(dates[0], "buy")], dates)
+
+    assert mapped[0]["bar"] == 4
+    assert mapped[0]["anchor_time"] == str(dates[0])
+    assert mapped[0]["visible_time"] == str(dates[4])
+
+
+def test_build_symbol_walk_forward_uses_visible_new_signals(monkeypatch):
+    from chanlun.recursive_bt import live_backtest
+
+    class FakeCL:
+        def __init__(self, _code, frequency, _config):
+            self.frequency = frequency
+            self.dates = []
+
+        def process_klines(self, df):
+            self.dates.extend(list(df["date"]))
+
+    def fake_collect(cd, use_xd=False, annotate_nest=False):
+        if not cd.dates:
+            return []
+        last = cd.dates[-1]
+        return [Signal(last, 0, "3buy", 10.0)]
+
+    monkeypatch.setattr(live_backtest, "CL", FakeCL)
+    monkeypatch.setattr(live_backtest, "collect_branch_signals", fake_collect)
+
+    dates = list(pd.date_range("2026-01-01 09:30:00", periods=6, freq="5min", tz="UTC"))
+    df = pd.DataFrame(
+        {
+            "date": dates,
+            "open": np.ones(6) * 10,
+            "high": np.ones(6) * 11,
+            "low": np.ones(6) * 9,
+            "close": np.ones(6) * 10,
+            "volume": np.ones(6),
+        }
+    )
+
+    sym = live_backtest.build_symbol_from_klines(
+        "us",
+        "TSLA.US",
+        df,
+        op_level="5m",
+        signal_mode="walk_forward",
+        signal_warmup_bars=2,
+    )
+
+    assert min(sym["small_by_bar"]) == 2
+    assert [sig.date for sig in sym["small_by_bar"][2]] == [dates[2]]
+    assert sym["signal_mode"] == "walk_forward"
+    assert sym["signal_events"][0]["anchor_time"] == str(dates[2])
+    assert sym["signal_events"][0]["visible_time"] == str(dates[2])
+    assert sym["signal_events"][0]["next_fill_time"] == str(dates[3])
+    assert sym["signal_events"][0]["anchor_to_visible_bars"] == 0
+
+
+def test_build_symbol_walk_forward_keeps_prior_history_but_trades_window(monkeypatch):
+    from chanlun.recursive_bt import live_backtest
+
+    chunk_lengths = []
+
+    class FakeCL:
+        def __init__(self, _code, frequency, _config):
+            self.frequency = frequency
+            self.dates = []
+            self._last_mmd_sig = None
+
+        def process_klines(self, df):
+            chunk_lengths.append(len(df))
+            self.dates.extend(list(df["date"]))
+            self._last_mmd_sig = ("tail", str(self.dates[-1]))
+
+    def fake_collect(cd, use_xd=False, annotate_nest=False):
+        if not cd.dates:
+            return []
+        last = cd.dates[-1]
+        return [Signal(last, 0, "3buy", 10.0)]
+
+    monkeypatch.setattr(live_backtest, "CL", FakeCL)
+    monkeypatch.setattr(live_backtest, "collect_branch_signals", fake_collect)
+
+    dates = list(pd.date_range("2026-01-01 09:30:00", periods=10, freq="min", tz="UTC"))
+    df = pd.DataFrame(
+        {
+            "date": dates,
+            "open": np.arange(10, dtype=float) + 10,
+            "high": np.arange(10, dtype=float) + 11,
+            "low": np.arange(10, dtype=float) + 9,
+            "close": np.arange(10, dtype=float) + 10,
+            "volume": np.ones(10),
+        }
+    )
+
+    sym = live_backtest.build_symbol_from_klines(
+        "us",
+        "TSLA.US",
+        df,
+        op_level="1m",
+        signal_mode="walk_forward",
+        signal_warmup_bars=-1,
+        trade_start=str(dates[5]),
+        trade_end=str(dates[9]),
+    )
+
+    assert sym["dates"] == dates[5:10]
+    assert list(sym["open"]) == pytest.approx(list(np.arange(5, 10, dtype=float) + 10))
+    assert chunk_lengths[:6] == [1, 1, 1, 1, 1, 1]
+    assert min(sym["small_by_bar"]) == 1
+    assert sym["small_by_bar"][1][0].date == dates[6]
+
+
+def test_walk_forward_preserves_initial_direction_without_reemitting_old_signal(monkeypatch):
+    from chanlun.recursive_bt import live_backtest
+
+    class FakeCL:
+        def __init__(self, _code, frequency, _config):
+            self.frequency = frequency
+            self.dates = []
+            self._last_mmd_sig = None
+
+        def process_klines(self, df):
+            self.dates.extend(list(df["date"]))
+            self._last_mmd_sig = ("stable",)
+
+    dates = list(pd.date_range("2026-01-01 09:30:00", periods=8, freq="min", tz="UTC"))
+
+    def fake_collect(cd, use_xd=False, annotate_nest=False):
+        if not cd.dates:
+            return []
+        return [Signal(dates[1], 0, "3sell", 10.0)]
+
+    monkeypatch.setattr(live_backtest, "CL", FakeCL)
+    monkeypatch.setattr(live_backtest, "collect_branch_signals", fake_collect)
+
+    df = pd.DataFrame(
+        {
+            "date": dates,
+            "open": np.ones(8) * 10,
+            "high": np.ones(8) * 11,
+            "low": np.ones(8) * 9,
+            "close": np.ones(8) * 10,
+            "volume": np.ones(8),
+        }
+    )
+    state = {}
+    by_bar = live_backtest._walk_forward_signals_by_main_bar(
+        "TSLA.US",
+        "1m",
+        df,
+        dates[5:],
+        available_delay=pd.Timedelta(0),
+        warmup_bars=-1,
+        initial_state_out=state,
+        signal_cache_dir="",
+    )
+
+    assert by_bar == {}
+    assert state["dir"] == "down"
+    assert live_backtest._dir_series_from_signal_bars(
+        by_bar,
+        len(dates[5:]),
+        initial_dir=state["dir"],
+    ) == ["down", "down", "down"]
+
+
+def test_walk_forward_full_history_registry_suppresses_stale_reappearing_signal(monkeypatch):
+    from chanlun.recursive_bt import live_backtest
+
+    class FakeCL:
+        def __init__(self, _code, frequency, _config):
+            self.frequency = frequency
+            self.dates = []
+            self._last_mmd_sig = None
+
+        def process_klines(self, df):
+            self.dates.extend(list(df["date"]))
+            self._last_mmd_sig = ("rows", len(self.dates))
+
+    dates = list(pd.date_range("2026-01-01 09:30:00", periods=8, freq="min", tz="UTC"))
+    stale = Signal(dates[2], 0, "3sell", 10.0)
+
+    def fake_collect(cd, use_xd=False, annotate_nest=False):
+        n = len(cd.dates)
+        if n in {3, 7}:
+            return [stale]
+        return []
+
+    monkeypatch.setattr(live_backtest, "CL", FakeCL)
+    monkeypatch.setattr(live_backtest, "collect_branch_signals", fake_collect)
+
+    df = pd.DataFrame(
+        {
+            "date": dates,
+            "open": np.ones(8) * 10,
+            "high": np.ones(8) * 11,
+            "low": np.ones(8) * 9,
+            "close": np.ones(8) * 10,
+            "volume": np.ones(8),
+        }
+    )
+    state = {}
+    by_bar = live_backtest._walk_forward_signals_by_main_bar(
+        "TSLA.US",
+        "1m",
+        df,
+        dates,
+        available_delay=pd.Timedelta(0),
+        warmup_bars=-1,
+        initial_state_out=state,
+        signal_cache_dir="",
+        emit_start_idx=5,
+    )
+
+    assert by_bar == {}
+    assert state["dir"] == "neutral"
+
+
+def test_build_symbol_walk_forward_signal_cache_reuses_visible_events(monkeypatch, tmp_path):
+    from chanlun.recursive_bt import live_backtest
+
+    class FakeCL:
+        def __init__(self, _code, frequency, _config):
+            self.frequency = frequency
+            self.dates = []
+
+        def process_klines(self, df):
+            self.dates.extend(list(df["date"]))
+
+    def fake_collect(cd, use_xd=False, annotate_nest=False):
+        if not cd.dates:
+            return []
+        last = cd.dates[-1]
+        return [Signal(last, 0, "3buy", 10.0)]
+
+    monkeypatch.setattr(live_backtest, "CL", FakeCL)
+    monkeypatch.setattr(live_backtest, "collect_branch_signals", fake_collect)
+
+    dates = list(pd.date_range("2026-01-01 09:30:00", periods=6, freq="5min", tz="UTC"))
+    df = pd.DataFrame(
+        {
+            "date": dates,
+            "open": np.ones(6) * 10,
+            "high": np.ones(6) * 11,
+            "low": np.ones(6) * 9,
+            "close": np.ones(6) * 10,
+            "volume": np.ones(6),
+        }
+    )
+
+    first = live_backtest.build_symbol_from_klines(
+        "us",
+        "TSLA.US",
+        df,
+        op_level="5m",
+        signal_mode="walk_forward",
+        signal_warmup_bars=2,
+        signal_cache_dir=str(tmp_path),
+    )
+
+    assert first["signal_cache_stats"]["misses"] == 1
+    assert first["signal_cache_stats"]["writes"] == 1
+    assert list(tmp_path.glob("*.pkl"))
+
+    class ExplodingCL:
+        def __init__(self, *_args, **_kwargs):
+            raise AssertionError("cache hit should not instantiate CL")
+
+    monkeypatch.setattr(live_backtest, "CL", ExplodingCL)
+    second = live_backtest.build_symbol_from_klines(
+        "us",
+        "TSLA.US",
+        df,
+        op_level="5m",
+        signal_mode="walk_forward",
+        signal_warmup_bars=2,
+        signal_cache_dir=str(tmp_path),
+    )
+
+    assert second["signal_cache_stats"]["hits"] == 1
+    assert second["signal_cache_stats"]["misses"] == 0
+    assert second["small_by_bar"].keys() == first["small_by_bar"].keys()
+    assert [sig.date for sig in second["small_by_bar"][2]] == [dates[2]]
+
+
+def test_build_symbol_walk_forward_can_use_segment_level_signals(monkeypatch):
+    from chanlun.recursive_bt import live_backtest
+
+    calls = []
+
+    class FakeCL:
+        def __init__(self, *_args, **_kwargs):
+            self.dates = []
+
+        def process_klines(self, df):
+            self.dates.extend(list(df["date"]))
+
+    def fake_collect(cd, use_xd=False, annotate_nest=False):
+        calls.append(bool(use_xd))
+        if not cd.dates:
+            return []
+        return [Signal(cd.dates[-1], 0, "3buy", 10.0)]
+
+    monkeypatch.setattr(live_backtest, "CL", FakeCL)
+    monkeypatch.setattr(live_backtest, "collect_branch_signals", fake_collect)
+
+    dates = list(pd.date_range("2026-01-01 09:30:00", periods=6, freq="5min", tz="UTC"))
+    df = pd.DataFrame(
+        {
+            "date": dates,
+            "open": np.ones(6) * 10,
+            "high": np.ones(6) * 11,
+            "low": np.ones(6) * 9,
+            "close": np.ones(6) * 10,
+            "volume": np.ones(6),
+        }
+    )
+
+    sym = live_backtest.build_symbol_from_klines(
+        "us",
+        "TSLA.US",
+        df,
+        op_level="5m",
+        signal_mode="walk_forward",
+        signal_warmup_bars=2,
+        signal_unit="xd",
+    )
+
+    assert sym["signal_unit"] == "xd"
+    assert calls and all(calls)
+
+
+def test_build_symbol_walk_forward_can_use_recursive_upgrade_signals(monkeypatch):
+    from chanlun.recursive_bt import live_backtest
+
+    calls = {"upgrade": 0}
+    configs = []
+
+    class FakeCL:
+        def __init__(self, _code, _frequency, config):
+            self.dates = []
+            self._last_mmd_sig = None
+            configs.append(dict(config))
+
+        def process_klines(self, df):
+            self.dates.extend(list(df["date"]))
+            self._last_mmd_sig = ("tail", str(self.dates[-1]))
+
+    def fake_collect_upgrade(cd):
+        calls["upgrade"] += 1
+        if not cd.dates:
+            return []
+        last = cd.dates[-1]
+        return [
+            Signal(last, 1, "3buy", 10.0),
+            Signal(last, 2, "1sell", 11.0),
+        ]
+
+    monkeypatch.setattr(live_backtest, "CL", FakeCL)
+    monkeypatch.setattr(live_backtest, "collect_upgrade_signals", fake_collect_upgrade)
+
+    dates = list(pd.date_range("2026-01-01 09:30:00", periods=6, freq="min", tz="UTC"))
+    df = pd.DataFrame(
+        {
+            "date": dates,
+            "open": np.ones(6) * 10,
+            "high": np.ones(6) * 11,
+            "low": np.ones(6) * 9,
+            "close": np.ones(6) * 10,
+            "volume": np.ones(6),
+        }
+    )
+
+    sym = live_backtest.build_symbol_from_klines(
+        "us",
+        "TSLA.US",
+        df,
+        op_level="1m",
+        mid_level="5m",
+        big_level="30m",
+        signal_mode="walk_forward",
+        signal_warmup_bars=2,
+        signal_source="upgrade",
+        recursive_l0_min_zs_lines=3,
+    )
+
+    assert sym["signal_source"] == "upgrade"
+    assert sym["recursive_l0_min_zs_lines"] == 3
+    assert configs and all(cfg["recursive_l0_min_zs_lines"] == 3 for cfg in configs)
+    assert all(cfg.get("skip_legacy_mmd") is True for cfg in configs)
+    assert calls["upgrade"] >= 3
+    assert [sig.level for sig in sym["small_by_bar"][2]] == [1, 2]
+    assert [sig.level for sig in sym["mid_by_bar"][2]] == [1]
+    assert sym["mid_dir_at"][1] == "up"
+    assert sym["mid_dir_at"][2] == "up"
+    assert sym["big_dir_at"][1] == "down"
+    assert sym["big_dir_at"][2] == "down"
+
+
+def test_build_symbol_walk_forward_can_include_l0_upgrade_scalp_signals(monkeypatch):
+    from chanlun.recursive_bt import live_backtest
+
+    branch_calls = []
+
+    class FakeCL:
+        def __init__(self, _code, _frequency, config):
+            self.dates = []
+            self._last_mmd_sig = None
+            self.config = dict(config)
+
+        def process_klines(self, df):
+            self.dates.extend(list(df["date"]))
+            self._last_mmd_sig = ("tail", str(self.dates[-1]))
+
+    def fake_collect_upgrade(cd):
+        if not cd.dates:
+            return []
+        last = cd.dates[-1]
+        return [
+            Signal(last, 1, "3buy", 10.0),
+            Signal(last, 2, "1sell", 11.0),
+        ]
+
+    def fake_collect_branch(cd, use_xd=False, annotate_nest=False):
+        branch_calls.append((use_xd, annotate_nest))
+        if not cd.dates:
+            return []
+        last = cd.dates[-1]
+        return [
+            Signal(last, 0, "1buy", 9.0),
+            Signal(last, 1, "3buy", 10.0),
+        ]
+
+    monkeypatch.setattr(live_backtest, "CL", FakeCL)
+    monkeypatch.setattr(live_backtest, "collect_upgrade_signals", fake_collect_upgrade)
+    monkeypatch.setattr(live_backtest, "collect_branch_signals", fake_collect_branch)
+
+    dates = list(pd.date_range("2026-01-01 09:30:00", periods=6, freq="min", tz="UTC"))
+    df = pd.DataFrame(
+        {
+            "date": dates,
+            "open": np.ones(6) * 10,
+            "high": np.ones(6) * 11,
+            "low": np.ones(6) * 9,
+            "close": np.ones(6) * 10,
+            "volume": np.ones(6),
+        }
+    )
+
+    sym = live_backtest.build_symbol_from_klines(
+        "us",
+        "TSLA.US",
+        df,
+        op_level="1m",
+        mid_level="5m",
+        big_level="30m",
+        signal_mode="walk_forward",
+        signal_warmup_bars=2,
+        signal_source="upgrade",
+        recursive_l0_min_zs_lines=3,
+        include_l0_upgrade_signals=True,
+    )
+
+    assert sym["include_l0_upgrade_signals"] is True
+    assert branch_calls and all(call == (True, False) for call in branch_calls)
+    assert [sig.level for sig in sym["small_by_bar"][2]] == [0, 1, 2]
+    assert [sig.level for sig in sym["mid_by_bar"][2]] == [1]
+    assert sym["big_dir_at"][2] == "down"
+
+
+def test_walk_forward_skips_signal_collection_when_structure_signature_unchanged(monkeypatch):
+    from chanlun.recursive_bt import live_backtest
+
+    calls = {"collect": 0}
+
+    class StableCL:
+        def __init__(self, _code, frequency, _config):
+            self.frequency = frequency
+            self.dates = []
+            self._last_mmd_sig = ("stable",)
+
+        def process_klines(self, df):
+            self.dates.extend(list(df["date"]))
+            self._last_mmd_sig = ("stable",)
+
+    def fake_collect(cd, use_xd=False, annotate_nest=False):
+        calls["collect"] += 1
+        return [Signal(cd.dates[-1], 0, "3buy", 10.0)] if cd.dates else []
+
+    monkeypatch.setattr(live_backtest, "CL", StableCL)
+    monkeypatch.setattr(live_backtest, "collect_branch_signals", fake_collect)
+
+    dates = list(pd.date_range("2026-01-01 09:30:00", periods=20, freq="min", tz="UTC"))
+    df = pd.DataFrame(
+        {
+            "date": dates,
+            "open": np.ones(20) * 10,
+            "high": np.ones(20) * 11,
+            "low": np.ones(20) * 9,
+            "close": np.ones(20) * 10,
+            "volume": np.ones(20),
+        }
+    )
+
+    live_backtest.build_symbol_from_klines(
+        "us",
+        "TSLA.US",
+        df,
+        op_level="1m",
+        signal_mode="walk_forward",
+        signal_warmup_bars=1,
+    )
+
+    assert calls["collect"] == 1
+
+
+def test_walk_forward_chunked_scan_matches_continuous_scan(monkeypatch):
+    from chanlun.recursive_bt import live_backtest
+
+    class FakeCL:
+        def __init__(self, _code, frequency, _config):
+            self.frequency = frequency
+            self.dates = []
+            self._last_mmd_sig = None
+
+        def process_klines(self, df):
+            self.dates.extend(list(df["date"]))
+            self._last_mmd_sig = ("tail", str(self.dates[-1]))
+
+    def fake_collect(cd, use_xd=False, annotate_nest=False):
+        if not cd.dates:
+            return []
+        last = cd.dates[-1]
+        return [Signal(last, 0, "3buy", 10.0)]
+
+    monkeypatch.setattr(live_backtest, "CL", FakeCL)
+    monkeypatch.setattr(live_backtest, "collect_branch_signals", fake_collect)
+
+    dates = list(pd.date_range("2026-01-01 09:30:00", periods=20, freq="min", tz="UTC"))
+    df = pd.DataFrame(
+        {
+            "date": dates,
+            "open": np.ones(20) * 10,
+            "high": np.ones(20) * 11,
+            "low": np.ones(20) * 9,
+            "close": np.ones(20) * 10,
+            "volume": np.ones(20),
+        }
+    )
+
+    continuous = live_backtest.build_symbol_from_klines(
+        "us",
+        "TSLA.US",
+        df,
+        op_level="1m",
+        signal_mode="walk_forward",
+        signal_warmup_bars=2,
+    )
+    chunked = live_backtest.build_symbol_from_klines(
+        "us",
+        "TSLA.US",
+        df,
+        op_level="1m",
+        signal_mode="walk_forward",
+        signal_warmup_bars=2,
+        signal_scan_chunk_bars=5,
+    )
+
+    assert chunked["signal_scan_chunk_bars"] == 5
+    assert sorted(chunked["small_by_bar"]) == sorted(continuous["small_by_bar"])
+    assert [sig.date for sig in chunked["small_by_bar"][5]] == [dates[5]]
+
+
+def test_build_symbol_walk_forward_delays_higher_level_to_main_clock(monkeypatch):
+    from chanlun.recursive_bt import live_backtest
+
+    class FakeCL:
+        def __init__(self, _code, frequency, _config):
+            self.frequency = frequency
+            self.dates = []
+
+        def process_klines(self, df):
+            self.dates.extend(list(df["date"]))
+
+    def fake_collect(cd, use_xd=False, annotate_nest=False):
+        if not cd.dates:
+            return []
+        last = cd.dates[-1]
+        return [Signal(last, 0, "3buy", 10.0)]
+
+    monkeypatch.setattr(live_backtest, "CL", FakeCL)
+    monkeypatch.setattr(live_backtest, "collect_branch_signals", fake_collect)
+
+    main_dates = list(pd.date_range("2026-01-01 09:30:00", periods=260, freq="min", tz="UTC"))
+    mid_dates = list(pd.date_range(main_dates[0], periods=52, freq="5min", tz="UTC"))
+    df_main = pd.DataFrame(
+        {
+            "date": main_dates,
+            "open": np.ones(len(main_dates)) * 10,
+            "high": np.ones(len(main_dates)) * 11,
+            "low": np.ones(len(main_dates)) * 9,
+            "close": np.ones(len(main_dates)) * 10,
+            "volume": np.ones(len(main_dates)),
+        }
+    )
+    df_mid = pd.DataFrame(
+        {
+            "date": mid_dates,
+            "open": np.ones(len(mid_dates)) * 10,
+            "high": np.ones(len(mid_dates)) * 11,
+            "low": np.ones(len(mid_dates)) * 9,
+            "close": np.ones(len(mid_dates)) * 10,
+            "volume": np.ones(len(mid_dates)),
+        }
+    )
+
+    sym = live_backtest.build_symbol_from_klines(
+        "us",
+        "TSLA.US",
+        df_main,
+        op_level="1m",
+        df_mid=df_mid,
+        mid_level="5m",
+        signal_mode="walk_forward",
+        signal_warmup_bars=1,
+    )
+
+    assert min(sym["mid_by_bar"]) == 10
+    assert sym["mid_by_bar"][10][0].date == mid_dates[1]
+    assert sym["mid_dir_at"][9] == "up"
+    assert sym["mid_dir_at"][10] == "up"
+
+
+def test_slice_df_for_signal_window_keeps_only_prior_warmup_and_no_future():
+    from chanlun.recursive_bt.live_backtest import _slice_df_for_signal_window
+
+    dates = list(pd.date_range("2026-01-01 09:30:00", periods=10, freq="min", tz="UTC"))
+    df = pd.DataFrame(
+        {
+            "date": dates,
+            "open": np.arange(10, dtype=float),
+            "high": np.arange(10, dtype=float),
+            "low": np.arange(10, dtype=float),
+            "close": np.arange(10, dtype=float),
+            "volume": np.ones(10),
+        }
+    )
+
+    sliced = _slice_df_for_signal_window(
+        df,
+        start="2026-01-01 09:35:00+00:00",
+        end="2026-01-01 09:37:00+00:00",
+        warmup_bars=2,
+    )
+
+    assert list(sliced["date"]) == dates[3:8]
+    assert sliced["date"].min() == dates[3]
+    assert sliced["date"].max() == dates[7]
+
+
+def test_slice_df_for_signal_window_negative_warmup_keeps_all_prior_history():
+    from chanlun.recursive_bt.live_backtest import _slice_df_for_signal_window
+
+    dates = list(pd.date_range("2026-01-01 09:30:00", periods=10, freq="min", tz="UTC"))
+    df = pd.DataFrame(
+        {
+            "date": dates,
+            "open": np.arange(10, dtype=float),
+            "high": np.arange(10, dtype=float),
+            "low": np.arange(10, dtype=float),
+            "close": np.arange(10, dtype=float),
+            "volume": np.ones(10),
+        }
+    )
+
+    sliced = _slice_df_for_signal_window(
+        df,
+        start="2026-01-01 09:35:00+00:00",
+        end="2026-01-01 09:37:00+00:00",
+        warmup_bars=-1,
+    )
+
+    assert list(sliced["date"]) == dates[:8]
+    assert sliced["date"].max() == dates[7]
+
+
+def test_load_chart_cache_syms_slices_requested_window_before_signal_scan(monkeypatch):
+    from chanlun.recursive_bt import live_backtest
+
+    captured = {}
+    dates = list(pd.date_range("2026-01-01 09:30:00", periods=150, freq="min", tz="UTC"))
+    df = pd.DataFrame(
+        {
+            "date": dates,
+            "open": np.ones(150) * 10,
+            "high": np.ones(150) * 11,
+            "low": np.ones(150) * 9,
+            "close": np.ones(150) * 10,
+            "volume": np.ones(150),
+        }
+    )
+
+    def fake_load_chart_cache_klines(_market, _code, _freq, _cache_dir):
+        return df.copy()
+
+    def fake_build_symbol_from_klines(_market, code, df_op, df_big=None, **kwargs):
+        captured[code] = {
+            "op_dates": list(df_op["date"]),
+            "big_dates": list(df_big["date"]),
+            "kwargs": kwargs,
+        }
+        return {"dates": list(df_op["date"])}
+
+    monkeypatch.setattr(live_backtest, "load_chart_cache_klines", fake_load_chart_cache_klines)
+    monkeypatch.setattr(live_backtest, "build_symbol_from_klines", fake_build_symbol_from_klines)
+
+    syms = live_backtest.load_chart_cache_syms(
+        "us",
+        ["TSLA.US"],
+        cache_dir="unused",
+        pool_size=1,
+        op_level="1m",
+        big_level="30m",
+        signal_warmup_bars=100,
+        start=str(dates[120]),
+        end=str(dates[140]),
+    )
+
+    assert "TSLA.US" in syms
+    assert captured["TSLA.US"]["op_dates"] == dates[20:141]
+    assert captured["TSLA.US"]["big_dates"] == dates[20:141]
+
+
+def test_live_backtest_rejects_walk_forward_signal_mode_on_bt_data():
+    from types import SimpleNamespace
+    from chanlun.recursive_bt import live_backtest
+
+    args = SimpleNamespace(
+        market="a",
+        codes=None,
+        source="bt_data",
+        signal_mode="walk_forward",
+        signal_warmup_bars=1,
+        require=("tech",),
+    )
+
+    with pytest.raises(ValueError, match="requires raw klines"):
+        live_backtest.run_backtest(args)
+
+
+def test_live_backtest_cli_defaults_to_walk_forward_signal_mode():
+    from chanlun.recursive_bt.live_backtest import (
+        _cl_config,
+        _signal_cache_meta,
+        make_arg_parser,
+    )
+
+    args = make_arg_parser().parse_args([])
+
+    assert args.signal_mode == "walk_forward"
+    assert args.signal_cache_dir.endswith("live_backtest_signal_cache")
+    assert args.signal_scan_chunk_bars == 0
+    assert args.recursive_l0_min_zs_lines == 3
+
+    cfg = _cl_config()
+    assert cfg["recursive_l0_min_zs_lines"] == 3
+
+    df = pd.DataFrame(
+        {
+            "date": pd.date_range("2026-01-01 09:30:00", periods=2, freq="min", tz="UTC"),
+            "open": [1.0, 1.0],
+            "high": [1.0, 1.0],
+            "low": [1.0, 1.0],
+            "close": [1.0, 1.0],
+            "volume": [1.0, 1.0],
+        }
+    )
+    meta = _signal_cache_meta(
+        "TSLA.US",
+        "1m",
+        df,
+        list(df["date"]),
+        available_delay=pd.Timedelta("0min"),
+        warmup_bars=-1,
+        annotate_nest=False,
+    )
+    assert meta["recursive_l0_min_zs_lines"] == 3
 
 
 def test_live_backtest_resolves_auto_max_pos():
@@ -709,7 +1660,8 @@ def test_live_backtest_passes_confirmed_bs_point_ratio_multipliers(monkeypatch, 
     )
     calls = {}
 
-    def fake_load_chart_cache_syms(*_args, **_kwargs):
+    def fake_load_chart_cache_syms(*_args, **kwargs):
+        calls["include_l0_upgrade_signals"] = kwargs["include_l0_upgrade_signals"]
         return {
             "QQQ.US": {
                 "code": "QQQ.US",
@@ -725,9 +1677,16 @@ def test_live_backtest_passes_confirmed_bs_point_ratio_multipliers(monkeypatch, 
         calls["sell_classes"] = kwargs["sell_classes"]
         calls["sell_ratio_overrides"] = kwargs["sell_ratio_overrides"]
         calls["sell_ratio_override_scope"] = kwargs["sell_ratio_override_scope"]
+        calls["sell_ratio_policy"] = kwargs["sell_ratio_policy"]
         calls["after_3sell_reentry_buy_classes"] = kwargs["after_3sell_reentry_buy_classes"]
         calls["after_3sell_reentry_mid_buy_classes"] = kwargs[
             "after_3sell_reentry_mid_buy_classes"
+        ]
+        calls["trend_core_hold_ratio"] = kwargs["trend_core_hold_ratio"]
+        calls["core_signal_level"] = kwargs["core_signal_level"]
+        calls["swing_signal_level"] = kwargs["swing_signal_level"]
+        calls["big_down_activity_buy_ratio_multiplier"] = kwargs[
+            "big_down_activity_buy_ratio_multiplier"
         ]
         return {
             "master": dates,
@@ -752,6 +1711,8 @@ def test_live_backtest_passes_confirmed_bs_point_ratio_multipliers(monkeypatch, 
         op_level="1m",
         big_level="30m",
         mid_level="5m",
+        signal_source="upgrade",
+        include_l0_upgrade_signals=True,
         max_pos=9,
         requested_max_pos=None,
         start=None,
@@ -764,8 +1725,11 @@ def test_live_backtest_passes_confirmed_bs_point_ratio_multipliers(monkeypatch, 
         sell_classes=(1, 2, 3),
         sell_ratio_overrides={"3": 0.5},
         sell_ratio_override_scope="up",
+        sell_ratio_policy="original_layered",
         after_3sell_reentry_buy_classes=(3,),
         after_3sell_reentry_mid_buy_classes=(3,),
+        trend_core_hold_ratio=0.5,
+        big_down_activity_buy_ratio_multiplier=0.25,
         init_cash=1_000_000,
         bs_point_ratio_overrides_enabled=True,
         bs_point_ratio_overrides_json=str(overrides),
@@ -777,9 +1741,58 @@ def test_live_backtest_passes_confirmed_bs_point_ratio_multipliers(monkeypatch, 
     assert calls["sell_classes"] == {1, 2, 3}
     assert calls["sell_ratio_overrides"] == {"3": 0.5}
     assert calls["sell_ratio_override_scope"] == "up"
+    assert calls["sell_ratio_policy"] == "original_layered"
     assert calls["after_3sell_reentry_buy_classes"] == {3}
     assert calls["after_3sell_reentry_mid_buy_classes"] == {3}
+    assert calls["trend_core_hold_ratio"] == pytest.approx(0.5)
+    assert calls["core_signal_level"] == 2
+    assert calls["swing_signal_level"] == 1
+    assert calls["include_l0_upgrade_signals"] is True
+    assert calls["big_down_activity_buy_ratio_multiplier"] == pytest.approx(0.25)
     assert args.bs_point_ratio_multipliers == {"3": 1.1}
+
+
+def test_walk_forward_dedupes_reappearing_signal_identity(monkeypatch):
+    from chanlun.recursive_bt import live_backtest
+
+    dates = list(pd.date_range("2026-01-01 09:30:00", periods=5, freq="min", tz="UTC"))
+    df = pd.DataFrame({
+        "date": dates,
+        "open": np.full(len(dates), 10.0),
+        "high": np.full(len(dates), 10.0),
+        "low": np.full(len(dates), 10.0),
+        "close": np.full(len(dates), 10.0),
+        "volume": np.full(len(dates), 100.0),
+    })
+    sig = Signal(dates[1], 1, "3sell", 10.0)
+    snapshots = [[], [sig], [], [sig], []]
+
+    class FakeCL:
+        def __init__(self, *_args, **_kwargs):
+            self.seen_rows = 0
+
+        def process_klines(self, rows):
+            self.seen_rows += len(rows)
+
+    def fake_collect(cd, **_kwargs):
+        return list(snapshots[min(cd.seen_rows - 1, len(snapshots) - 1)])
+
+    monkeypatch.setattr(live_backtest, "CL", FakeCL)
+    monkeypatch.setattr(live_backtest, "_collection_state_signature", lambda cd, _source: cd.seen_rows)
+    monkeypatch.setattr(live_backtest, "_collect_visible_signals", fake_collect)
+
+    by_bar = live_backtest._walk_forward_signals_by_main_bar(
+        "TSLA.US",
+        "1m",
+        df,
+        dates,
+        available_delay=pd.Timedelta("0min"),
+        warmup_bars=0,
+        signal_source="upgrade",
+        signal_cache_dir="",
+    )
+
+    assert by_bar == {1: [sig]}
 
 
 def test_live_backtest_accepts_bt_data_mtf3_cache(monkeypatch):
@@ -1277,6 +2290,477 @@ def test_portfolio_backtest_limits_3sell_half_exit_to_big_level_up():
     assert len(neutral["trades"]) == 1
     assert neutral["trades"][0].exit_bs_type == "3sell"
     assert neutral["trades"][0].sell_ratio == pytest.approx(1.0)
+
+
+def test_portfolio_backtest_trend_core_holds_through_small_sells_until_big_down():
+    from chanlun.recursive_bt.engine import MarketRules
+    from chanlun.recursive_bt.portfolio import portfolio_backtest
+
+    dates = list(pd.date_range("2026-01-01 09:30:00", periods=9, freq="5min", tz="Asia/Shanghai"))
+    syms = {
+        "S": {
+            "code": "QQQ.US",
+            "dates": dates,
+            "open": np.full(len(dates), 10.0),
+            "close": np.full(len(dates), 10.0),
+            "d2i": {d: i for i, d in enumerate(dates)},
+            "small_by_bar": {
+                1: [Signal(dates[1], 0, "3buy", 10.0)],
+                3: [Signal(dates[3], 0, "3sell", 10.0)],
+                5: [Signal(dates[5], 0, "1sell", 10.0)],
+            },
+            "big_dir_at": ["up", "up", "up", "up", "up", "up", "down", "down", "down"],
+            "rules": MarketRules("US", commission=0.0, stamp_duty=0.0, t_plus=0, lot=1),
+        }
+    }
+
+    result = portfolio_backtest(
+        syms=syms,
+        max_pos=1,
+        require=("tech",),
+        label="trend-core",
+        trend_core_hold_ratio=0.5,
+    )
+    trades = result["trades"]
+
+    assert len(trades) == 2
+    assert trades[0].reason == "small_level_sell_point"
+    assert trades[0].sell_ratio == pytest.approx(0.5)
+    assert trades[1].reason == "big_level_down"
+    assert trades[1].sell_ratio == pytest.approx(1.0)
+    assert trades[0].shares == pytest.approx(trades[1].shares)
+
+
+def test_portfolio_backtest_trend_core_refills_activity_on_later_buy_point():
+    from chanlun.recursive_bt.engine import MarketRules
+    from chanlun.recursive_bt.portfolio import portfolio_backtest
+
+    dates = list(pd.date_range("2026-01-01 09:30:00", periods=10, freq="5min", tz="Asia/Shanghai"))
+    syms = {
+        "S": {
+            "code": "QQQ.US",
+            "dates": dates,
+            "open": np.full(len(dates), 10.0),
+            "close": np.full(len(dates), 10.0),
+            "d2i": {d: i for i, d in enumerate(dates)},
+            "small_by_bar": {
+                1: [Signal(dates[1], 0, "3buy", 10.0)],
+                3: [Signal(dates[3], 0, "3sell", 10.0)],
+                5: [Signal(dates[5], 0, "1buy", 10.0)],
+            },
+            "big_dir_at": ["up", "up", "up", "up", "up", "up", "up", "up", "down", "down"],
+            "rules": MarketRules("US", commission=0.0, stamp_duty=0.0, t_plus=0, lot=1),
+        }
+    }
+
+    result = portfolio_backtest(
+        syms=syms,
+        max_pos=1,
+        require=("tech",),
+        label="trend-core-refill",
+        trend_core_hold_ratio=0.5,
+    )
+    trades = result["trades"]
+
+    assert len(trades) == 2
+    assert trades[0].reason == "small_level_sell_point"
+    assert trades[0].sell_ratio == pytest.approx(0.5)
+    assert trades[1].reason == "big_level_down"
+    assert trades[1].sell_ratio == pytest.approx(1.0)
+    assert trades[1].shares == pytest.approx(trades[0].shares * 2)
+
+
+def test_portfolio_backtest_core_signal_level_exits_trend_core():
+    from chanlun.recursive_bt.engine import MarketRules
+    from chanlun.recursive_bt.portfolio import portfolio_backtest
+
+    dates = list(pd.date_range("2026-01-01 09:30:00", periods=9, freq="5min", tz="Asia/Shanghai"))
+    syms = {
+        "S": {
+            "code": "QQQ.US",
+            "dates": dates,
+            "open": np.full(len(dates), 10.0),
+            "close": np.full(len(dates), 10.0),
+            "d2i": {d: i for i, d in enumerate(dates)},
+            "small_by_bar": {
+                1: [Signal(dates[1], 2, "3buy", 10.0)],
+                3: [Signal(dates[3], 1, "3sell", 10.0)],
+                5: [Signal(dates[5], 2, "3sell", 10.0)],
+            },
+            "big_dir_at": ["up"] * len(dates),
+            "rules": MarketRules("US", commission=0.0, stamp_duty=0.0, t_plus=0, lot=1),
+        }
+    }
+
+    result = portfolio_backtest(
+        syms=syms,
+        max_pos=1,
+        require=("tech",),
+        label="core-level-exit",
+        trend_core_hold_ratio=0.5,
+        core_signal_level=2,
+        swing_signal_level=1,
+        sell_ratio_overrides={"3": 0.25},
+    )
+    trades = result["trades"]
+
+    assert len(trades) == 2
+    assert trades[0].reason == "small_level_sell_point"
+    assert trades[0].sell_ratio == pytest.approx(0.25)
+    assert trades[0].entry_level == 2
+    assert trades[0].exit_level == 1
+    assert trades[0].entry_layer == "core_swing"
+    assert trades[0].exit_layer == "swing"
+    assert trades[0].core_shares_before > 0
+    assert trades[0].activity_shares_before > 0
+    assert trades[0].swing_shares_before > 0
+    assert trades[0].scalp_shares_before == pytest.approx(0.0)
+    assert trades[1].reason == "big_level_sell_point"
+    assert trades[1].sell_ratio == pytest.approx(1.0)
+    assert trades[1].entry_level == 2
+    assert trades[1].exit_level == 2
+    assert trades[1].exit_layer == "core_all"
+    assert trades[1].shares > trades[0].shares
+
+
+def test_portfolio_backtest_low_level_buy_does_not_create_core_when_core_level_set():
+    from chanlun.recursive_bt.engine import MarketRules
+    from chanlun.recursive_bt.portfolio import portfolio_backtest
+
+    dates = list(pd.date_range("2026-01-01 09:30:00", periods=7, freq="5min", tz="Asia/Shanghai"))
+    syms = {
+        "S": {
+            "code": "QQQ.US",
+            "dates": dates,
+            "open": np.full(len(dates), 10.0),
+            "close": np.full(len(dates), 10.0),
+            "d2i": {d: i for i, d in enumerate(dates)},
+            "small_by_bar": {
+                1: [Signal(dates[1], 1, "3buy", 10.0)],
+                3: [Signal(dates[3], 1, "3sell", 10.0)],
+            },
+            "big_dir_at": ["up"] * len(dates),
+            "rules": MarketRules("US", commission=0.0, stamp_duty=0.0, t_plus=0, lot=1),
+        }
+    }
+
+    result = portfolio_backtest(
+        syms=syms,
+        max_pos=1,
+        require=("tech",),
+        label="low-level-no-core",
+        trend_core_hold_ratio=0.5,
+        core_signal_level=2,
+        swing_signal_level=1,
+        sell_ratio_overrides={"3": 0.25},
+    )
+    trades = result["trades"]
+
+    assert len(trades) == 2
+    assert trades[0].entry_level == 1
+    assert trades[0].entry_layer == "swing"
+    assert trades[0].core_shares_before == pytest.approx(0.0)
+    assert trades[0].activity_shares_before == pytest.approx(trades[0].shares * 4)
+    assert trades[0].swing_shares_before == pytest.approx(trades[0].activity_shares_before)
+    assert trades[0].scalp_shares_before == pytest.approx(0.0)
+    assert trades[1].reason == "final_close"
+    assert trades[1].core_shares_before == pytest.approx(0.0)
+
+
+def test_portfolio_backtest_scalp_sell_does_not_sell_swing_layer():
+    from chanlun.recursive_bt.engine import MarketRules
+    from chanlun.recursive_bt.portfolio import portfolio_backtest
+
+    dates = list(pd.date_range("2026-01-01 09:30:00", periods=7, freq="5min", tz="Asia/Shanghai"))
+    syms = {
+        "S": {
+            "code": "QQQ.US",
+            "dates": dates,
+            "open": np.full(len(dates), 10.0),
+            "close": np.full(len(dates), 10.0),
+            "d2i": {d: i for i, d in enumerate(dates)},
+            "small_by_bar": {
+                1: [Signal(dates[1], 1, "3buy", 10.0)],
+                3: [Signal(dates[3], 0, "3sell", 10.0)],
+            },
+            "big_dir_at": ["up"] * len(dates),
+            "rules": MarketRules("US", commission=0.0, stamp_duty=0.0, t_plus=0, lot=1),
+        }
+    }
+
+    result = portfolio_backtest(
+        syms=syms,
+        max_pos=1,
+        require=("tech",),
+        label="scalp-sell-keeps-swing",
+        core_signal_level=2,
+        swing_signal_level=1,
+    )
+    trades = result["trades"]
+
+    assert len(trades) == 1
+    assert trades[0].reason == "final_close"
+    assert trades[0].entry_layer == "swing"
+    assert trades[0].swing_shares_before > 0
+    assert trades[0].scalp_shares_before == pytest.approx(0.0)
+
+
+def test_portfolio_backtest_same_bar_scalp_sell_rolls_into_higher_level_buy():
+    from chanlun.recursive_bt.engine import MarketRules
+    from chanlun.recursive_bt.portfolio import portfolio_backtest
+
+    dates = list(pd.date_range("2026-01-01 09:30:00", periods=8, freq="5min", tz="Asia/Shanghai"))
+    syms = {
+        "S": {
+            "code": "QQQ.US",
+            "dates": dates,
+            "open": np.full(len(dates), 10.0),
+            "close": np.full(len(dates), 10.0),
+            "d2i": {d: i for i, d in enumerate(dates)},
+            "small_by_bar": {
+                1: [Signal(dates[1], 0, "3buy", 10.0)],
+                3: [
+                    Signal(dates[3], 0, "3sell", 10.0),
+                    Signal(dates[3], 0, "3buy", 10.0),
+                    Signal(dates[3], 1, "3buy", 10.0),
+                ],
+            },
+            "big_dir_at": ["up"] * len(dates),
+            "rules": MarketRules("US", commission=0.0, stamp_duty=0.0, t_plus=0, lot=1),
+        }
+    }
+
+    result = portfolio_backtest(
+        syms=syms,
+        max_pos=1,
+        require=("tech",),
+        label="scalp-to-swing-roll",
+        core_signal_level=2,
+        swing_signal_level=1,
+    )
+    trades = result["trades"]
+
+    assert len(trades) == 2
+    assert trades[0].entry_date == dates[2]
+    assert trades[0].exit_date == dates[4]
+    assert trades[0].reason == "small_level_sell_point"
+    assert trades[0].exit_bs_type == "3sell"
+    assert trades[0].entry_layer == "scalp"
+    assert trades[0].exit_layer == "scalp"
+    assert trades[0].entry_level == 0
+    assert trades[0].exit_level == 0
+    assert trades[0].sell_ratio == pytest.approx(1.0)
+    assert trades[1].entry_date == dates[4]
+    assert trades[1].reason == "final_close"
+    assert trades[1].bs_type == "3"
+    assert trades[1].entry_layer == "swing"
+    assert trades[1].entry_level == 1
+    assert trades[1].swing_shares_before > 0
+    assert trades[1].scalp_shares_before == pytest.approx(0.0)
+
+
+def test_portfolio_backtest_cancels_buy_when_fill_breaks_structural_boundary():
+    from chanlun.recursive_bt.engine import MarketRules
+    from chanlun.recursive_bt.portfolio import portfolio_backtest
+
+    dates = list(pd.date_range("2026-01-01 09:30:00", periods=6, freq="5min", tz="Asia/Shanghai"))
+    syms = {
+        "S": {
+            "code": "QQQ.US",
+            "dates": dates,
+            "open": np.array([10.0, 10.0, 9.8, 10.0, 10.0, 10.0]),
+            "close": np.array([10.0, 10.2, 9.8, 10.0, 10.0, 10.0]),
+            "d2i": {d: i for i, d in enumerate(dates)},
+            "small_by_bar": {
+                1: [Signal(
+                    dates[1],
+                    1,
+                    "3buy",
+                    10.2,
+                    structural_stop_below=10.0,
+                    zs_zg=10.0,
+                )],
+            },
+            "big_dir_at": ["up"] * len(dates),
+            "rules": MarketRules("US", commission=0.0, stamp_duty=0.0, t_plus=0, lot=1),
+        }
+    }
+
+    result = portfolio_backtest(
+        syms=syms,
+        max_pos=1,
+        require=("tech",),
+        label="cancel-invalid-3buy",
+        core_signal_level=2,
+        swing_signal_level=1,
+    )
+
+    assert result["trades"] == []
+
+
+def test_portfolio_backtest_exits_next_bar_after_structural_invalidation():
+    from chanlun.recursive_bt.engine import MarketRules
+    from chanlun.recursive_bt.portfolio import portfolio_backtest
+
+    dates = list(pd.date_range("2026-01-01 09:30:00", periods=6, freq="5min", tz="Asia/Shanghai"))
+    syms = {
+        "S": {
+            "code": "QQQ.US",
+            "dates": dates,
+            "open": np.array([10.0, 10.0, 10.2, 9.8, 10.0, 10.0]),
+            "high": np.array([10.1, 10.3, 10.3, 10.0, 10.0, 10.0]),
+            "low": np.array([9.9, 10.1, 9.9, 9.7, 10.0, 10.0]),
+            "close": np.array([10.0, 10.2, 10.1, 9.9, 10.0, 10.0]),
+            "d2i": {d: i for i, d in enumerate(dates)},
+            "small_by_bar": {
+                1: [Signal(
+                    dates[1],
+                    1,
+                    "3buy",
+                    10.2,
+                    structural_stop_below=10.0,
+                    zs_zg=10.0,
+                )],
+            },
+            "big_dir_at": ["up"] * len(dates),
+            "rules": MarketRules("US", commission=0.0, stamp_duty=0.0, t_plus=0, lot=1),
+        }
+    }
+
+    result = portfolio_backtest(
+        syms=syms,
+        max_pos=1,
+        require=("tech",),
+        label="exit-invalid-3buy",
+        core_signal_level=2,
+        swing_signal_level=1,
+    )
+    trades = result["trades"]
+
+    assert len(trades) == 1
+    assert trades[0].entry_date == dates[2]
+    assert trades[0].exit_date == dates[3]
+    assert trades[0].reason == "structural_invalidation"
+    assert trades[0].exit_bs_type == "structural_stop_below"
+    assert trades[0].exit_layer == "all"
+    assert trades[0].entry_layer == "swing"
+    assert trades[0].ret == pytest.approx(9.8 / 10.2 - 1)
+
+
+def test_portfolio_backtest_blocks_big_down_activity_by_default():
+    from chanlun.recursive_bt.engine import MarketRules
+    from chanlun.recursive_bt.portfolio import portfolio_backtest
+
+    dates = list(pd.date_range("2026-01-01 09:30:00", periods=7, freq="5min", tz="Asia/Shanghai"))
+    syms = {
+        "S": {
+            "code": "QQQ.US",
+            "dates": dates,
+            "open": np.array([10.0, 10.0, 10.0, 10.0, 11.0, 11.0, 11.0]),
+            "close": np.array([10.0, 10.0, 10.0, 10.0, 11.0, 11.0, 11.0]),
+            "d2i": {d: i for i, d in enumerate(dates)},
+            "small_by_bar": {
+                1: [Signal(dates[1], 1, "3buy", 10.0)],
+                4: [Signal(dates[4], 1, "3sell", 11.0)],
+            },
+            "big_dir_at": ["down"] * len(dates),
+            "rules": MarketRules("US", commission=0.0, stamp_duty=0.0, t_plus=0, lot=1),
+        }
+    }
+
+    result = portfolio_backtest(
+        syms=syms,
+        max_pos=1,
+        require=("tech",),
+        label="strict-big-down",
+        core_signal_level=2,
+    )
+
+    assert result["trades"] == []
+
+
+def test_portfolio_backtest_allows_lower_level_activity_in_big_down_when_enabled():
+    from chanlun.recursive_bt.engine import MarketRules
+    from chanlun.recursive_bt.portfolio import portfolio_backtest
+
+    dates = list(pd.date_range("2026-01-01 09:30:00", periods=7, freq="5min", tz="Asia/Shanghai"))
+    syms = {
+        "S": {
+            "code": "QQQ.US",
+            "dates": dates,
+            "open": np.array([10.0, 10.0, 10.0, 10.0, 11.0, 11.0, 11.0]),
+            "close": np.array([10.0, 10.0, 10.0, 10.0, 11.0, 11.0, 11.0]),
+            "d2i": {d: i for i, d in enumerate(dates)},
+            "small_by_bar": {
+                1: [Signal(dates[1], 1, "3buy", 10.0)],
+                4: [Signal(dates[4], 1, "3sell", 11.0)],
+            },
+            "big_dir_at": ["down"] * len(dates),
+            "rules": MarketRules("US", commission=0.0, stamp_duty=0.0, t_plus=0, lot=1),
+        }
+    }
+
+    result = portfolio_backtest(
+        syms=syms,
+        max_pos=1,
+        require=("tech",),
+        label="big-down-activity",
+        core_signal_level=2,
+        swing_signal_level=1,
+        big_down_activity_buy_ratio_multiplier=0.25,
+    )
+    trades = result["trades"]
+
+    assert len(trades) == 1
+    assert trades[0].entry_date == dates[2]
+    assert trades[0].exit_date == dates[5]
+    assert trades[0].bs_type == "3"
+    assert trades[0].reason == "small_level_sell_point"
+    assert trades[0].exit_bs_type == "3sell"
+    assert trades[0].buy_ratio == pytest.approx(0.25)
+    assert trades[0].entry_level == 1
+    assert trades[0].exit_level == 1
+    assert trades[0].entry_layer == "swing"
+    assert trades[0].exit_layer == "swing"
+    assert trades[0].core_shares_before == pytest.approx(0.0)
+    assert trades[0].swing_shares_before == pytest.approx(trades[0].shares)
+    assert trades[0].scalp_shares_before == pytest.approx(0.0)
+    assert trades[0].ret == pytest.approx(0.1)
+
+
+def test_portfolio_backtest_preserves_buy_ratio_on_final_close():
+    from chanlun.recursive_bt.engine import MarketRules
+    from chanlun.recursive_bt.portfolio import portfolio_backtest
+
+    dates = list(pd.date_range("2026-01-01 09:30:00", periods=5, freq="5min", tz="Asia/Shanghai"))
+    syms = {
+        "S": {
+            "code": "QQQ.US",
+            "dates": dates,
+            "open": np.full(len(dates), 10.0),
+            "close": np.full(len(dates), 10.0),
+            "d2i": {d: i for i, d in enumerate(dates)},
+            "small_by_bar": {
+                1: [Signal(dates[1], 1, "3buy", 10.0)],
+            },
+            "big_dir_at": ["neutral"] * len(dates),
+            "rules": MarketRules("US", commission=0.0, stamp_duty=0.0, t_plus=0, lot=1),
+        }
+    }
+
+    result = portfolio_backtest(
+        syms=syms,
+        max_pos=1,
+        require=("tech",),
+        label="final-buy-ratio",
+    )
+
+    assert len(result["trades"]) == 1
+    assert result["trades"][0].reason == "final_close"
+    assert result["trades"][0].buy_ratio == pytest.approx(1.0)
+    assert result["trades"][0].entry_level == 1
+    assert result["trades"][0].entry_layer == "activity"
+    assert result["trades"][0].exit_layer == "all"
 
 
 def test_portfolio_backtest_can_require_3buy_reentry_after_3sell():
