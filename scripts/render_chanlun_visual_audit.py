@@ -462,19 +462,19 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--cache-dir", default="D:/chanlun_pro/chart_cache_us_tsla_1y")
     parser.add_argument("--prefix", default="us_TSLA_US")
-    parser.add_argument("--out", default="D:/chanlun_pro/reports/chanlun_visual_audit_tsla_v7_registry.html")
+    parser.add_argument("--out", default="D:/chanlun_pro/reports/chanlun_visual_audit_tsla_v8_registry.html")
     parser.add_argument("--recursive-l0-min-zs-lines", type=int, choices=(3, 4), default=3)
     parser.add_argument(
         "--summary",
-        default="D:/chanlun_pro/reports/us_tsla_mtf3_wffull_window_upgrade_l0min3_include_l0_v7_registry_hit_summary.json",
+        default="D:/chanlun_pro/reports/us_tsla_mtf3_20260601_0610_v8_registry_layered_summary.json",
     )
     parser.add_argument(
         "--trades",
-        default="D:/chanlun_pro/reports/us_tsla_mtf3_wffull_window_upgrade_l0min3_include_l0_v7_registry_hit_trades.csv",
+        default="D:/chanlun_pro/reports/us_tsla_mtf3_20260601_0610_v8_registry_layered_trades.csv",
     )
     parser.add_argument(
         "--signals",
-        default="D:/chanlun_pro/reports/us_tsla_mtf3_wffull_window_upgrade_l0min3_include_l0_v7_registry_hit_signals.csv",
+        default="D:/chanlun_pro/reports/us_tsla_mtf3_20260601_0610_v8_registry_layered_signals.csv",
     )
     args = parser.parse_args(argv)
 

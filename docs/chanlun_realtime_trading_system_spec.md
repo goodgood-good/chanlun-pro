@@ -4601,4 +4601,33 @@ L0 滞后中位 9 bar，而 **L1 滞后 170-519 bar（数小时到隔日）**—
 
 TSLA 窗口内 36 事件 0 成交的归因同时落地：10 个买点全为 L0 级（深跌段左侧 1buy/2buy），按门控（30m/5m 向下时 scalp 不准入）被正确拦截；25 个 3sell 正确标识下跌结构。空仓使 TSLA 严格口径躲过基准 -9.6%。
 
-NVDA -10.60% 案例的结构化审计（`nvda_core3_v8_trade_invalidation_audit.md`，注意其中 QQQ 行为工具按 NVDA 价格误算，仅 NVDA 两行有效）：入场后 **MFE 仅 +0.06%**、MAE -10.70%，7 天阴跌至结构边界 201.488 才退出——「L1 3buy 可见即入场、无次级别回试确认、止损边界过远」三重问题的完整standing案例。区间套介入闭环（gap D）设计研究本轮立项，研究报告完成后在本节追加。
+NVDA -10.60% 案例的结构化审计（`nvda_core3_v8_trade_invalidation_audit.md`，注意其中 QQQ 行为工具按 NVDA 价格误算，仅 NVDA 两行有效）：入场后 **MFE 仅 +0.06%**、MAE -10.70%，7 天阴跌至结构边界 201.488 才退出——「L1 3buy 可见即入场、无次级别回试确认、止损边界过远」三重问题的完整standing案例。
+
+### 五、区间套介入闭环设计研究（gap D 立项定稿）
+
+完整报告：`D:/chanlun_pro/reports/qujiantao_intervention_design_research.md`（412 行，五节，含 2026-06-13 实跑试算）。要点：
+
+**原文判据（带 chanlun.txt 行号）**：
+1. 候选机制的原文依据=C5.41（61课 行33015-33017）「没实际走出来……都可以先假设是进入背驰段；一旦力度大于前者，断定背驰段不成立」——**大级别候选先假设成立、可被证伪，无须等大级别自身完成确认**，这是解除 L1 滞后 170-519 bar 的理论钥匙；
+2. 介入点=候选背驰段**内部结构**中次级别背驰点/一类买点的当下出现（C5.38 程序定理 行17064-17068、C2.16「3买回试完成以再次级别 3 段呈现为准，精确买点参考该次级别第一类买点」L10399-10401）；
+3. 现状「严格时间包含+同向」近似（`beichi_nest.py:48`）只取了时间投影，**丢了结构归属（次级别背驰须属于 c 内部针对最近中枢的离开段）与创新高/新低逐重收缩（C5.42）两个维度**——这就是 gap D 的实质；
+4. 实战级差以一档为宜（C5.46 行18062「30 分钟的背驰段用 5 分钟找买点」），不必一推到底。
+
+**现状根因（file:line 实锤）**：v8 生产主链（upgrade 源）根本没接 nest——`_collect_visible_signals` 的 upgrade 分支不传 annotate_nest（live_backtest.py:741-750），98 事件 CSV 的 `nest_operable` 全空实测；且 operable 的标注时点 ≥ 大级别信号可见时点（嵌套森林只收已固化背驰段），**结构上不可能提前介入**——filter/soft 只能在既定时点丢信号/打折仓位。
+
+**闭环设计**：每级只跟踪最近中枢候选（对齐 v8 语义）的状态机：`CANDIDATE(离开腿冲出)→ENTRY_EMITTED(回试腿内笔级买点首次可见)→CONFIRMED(原生 L1 3buy 闭合)/INVALIDATED(回试破 ZG→nest_invalid 强退)`。新 `signal_source="nest_cascade"`（meta 含 source → 缓存键天然隔离，**无需 bump v9**）；新事件 `3buy_nest/1buy_nest`（buy_class 兼容现有 ratio 通道）与 `nest_invalid_*`（强退优先级=结构失效）；次级别确认本身用 branch 流的 wf 首次可见语义（无任何未来引用）。NVDA 案例预期：入场 225.6→约 211-216，同一失效边界下止损距离 10.7%→4.7-6.7%，MFE +0.06%→+4.6-7.0%，最坏亏损 -10.6%→约 -5~-7%（**减亏近半但不是免亏——区间套修复的是风险收益比的分母**）。
+
+**试算修正设计方向（估计器 A，已实跑）**：用现有 v8 CSV 事后配对——「任意 L0 买点」做确认反而**均值 -1.97% 价格劣化**（3buy 回试向下走，早期 L0 买点更贵：TSLA/NVDA 提前 200+ bar 贵 5%）；「严格 L0 1buy」仅 1/11 匹配（upgrade 流无笔级事件，系统性低估）。**结论：提前≠改善；确认池必须是笔级（branch 流）一/二买（回试结束类，C2.16 精确口径），不可放宽**。正式度量=估计器 B（提前 10 交易日窗口、upgrade vs nest_cascade 双流配对，指标含 no_subconfirm 诚实空集率与 false_positive 假阳性成本）。
+
+**关键风险**：①假阳性成本未知（候选破 ZG 失效单笔 ≈4-7%，频率未知）；②破 ZG 失效口径对插针敏感（建议收盘价口径+两个反例 fixture）；③同 anchor 的 3buy+1buy 并发候选需去重；④nest_cascade 每 bar 全量 collect 性能约翻倍；⑤**门控交互：nest_entry 是左侧介入，第69轮已证 30m 门控对左侧低吸净伤害——建议默认绕过 mid 门控、保留 big_dir!=down 红线，留参数给回测裁决**；⑥A 股扩展前必须过涨停锁死验证（第63轮纪律）。
+
+**推进顺序（下轮执行）**：最小闭环（仅 L1 3buy 候选+笔级一/二买确认+破 ZG 失效）→ 测试钉法 1-3（受控构造/快照无未来断言/缓存回归 byte-identical）→ 估计器 B 跑 NVDA/TSLA/QQQ 提前窗口 → NVDA 验收 fixture → 再扩 1buy 与卖向。全程不动 v8 既有缓存与 nest_mode 行为；结果只进 review 候选，不自动采纳。
+
+### 六、v8 多级别图表证据刷新
+
+`render_chanlun_visual_audit.py` 默认源切到 v8 layered 报告，产出 `chanlun_visual_audit_tsla_v8_registry.html`（2.0MB）：3 个 SVG 面板（1m=笔+1m/5m/30m 中枢/买卖点/背驰、5m=笔+5m/30m、30m=笔+30m）+ Strict Replay Metrics/Layer Trades/Signal Visibility Audit 三个数据节，图元 716 polyline/10794 rect/174 circle 非空图——用户三周期展示口径在 v8 下的可视证据。
+
+### 七、本轮工程教训
+
+1. **后台子代理产出会丢**：两次研究代理（OMC architect 与 general-purpose）的最终回复均被替换为一句空话且 transcript 0 字节（疑似 OMC stop-hook 干扰）——**对策=要求代理边研究边把报告写入指定文件**（第三次成功，49 次工具调用产出 412 行报告零丢失）；
+2. `.gitignore` 的 `*.md` 全局忽略曾使主日志与全部设计文档零版本保护（76 轮记录只存在于工作目录，今晚恰逢 GPU 级系统不稳定）——已加 `!docs/**/*.md` 例外并首次入库 33 份文档。
