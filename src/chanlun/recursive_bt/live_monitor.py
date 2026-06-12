@@ -683,6 +683,59 @@ def fresh_monitor_events(
     return deduper.unseen(unique_monitor_events(events))
 
 
+def rescan_selection_pool(selector, states: Dict[str, object], names: dict, ex, args,
+                          initial_codes=None) -> int:
+    """每日重选:selector(静态 bt_data 缓存口径)重新选池——日级选股+1m 实时择时。
+    新候选创建 state 并 warmup(现有信号只登记不触发);不在新结果且非持仓、
+    非初始自选的旧候选移出,防止池子无界增长。返回新增标的数。"""
+    log = fun.get_logger()
+    try:
+        fresh = [c.code for c in selector.select()]
+    except Exception as exc:
+        log.warning(f"[live_monitor] selection rescan failed: {exc}")
+        return 0
+    holdings = load_ledger_positions(getattr(args, "ledger", ""))
+    keep = set(initial_codes or ()) | set(holdings)
+    target = [
+        code
+        for code in merge_codes(fresh, holdings, args.market)
+        if code != INDEX_CODE
+    ]
+    target_set = set(target) | keep
+    added = 0
+    for code in target:
+        if code in states:
+            continue
+        try:
+            state = MonitorSymbolState(
+                code,
+                ex,
+                op_level=args.op_level,
+                big_level=args.big_level,
+                mid_level=args.mid_level,
+            )
+            state.refresh()
+            states[code] = state
+            added += 1
+        except Exception as exc:
+            log.warning(f"[live_monitor] rescan add failed code={code}: {exc}")
+            continue
+        if code not in names:
+            try:
+                info = ex.stock_info(code)
+            except Exception:
+                info = None
+            names[code] = (info or {}).get("name") or code
+    for code in list(states):
+        if code not in target_set:
+            states.pop(code, None)
+    if added or len(states) != len(target_set):
+        log.info(
+            f"[live_monitor] selection rescan: pool={len(states)} added={added}"
+        )
+    return added
+
+
 def warmup_states(states: Dict[str, object]) -> None:
     log = fun.get_logger()
     for code, state in states.items():
@@ -755,11 +808,24 @@ class MonitorSymbolState:
         self.prev_close = 0.0
         self.seen = set()
 
+    # 首轮 warmup 限窗(天):监控信号=笔级买点+笔方向,不需要图表递归级别的
+    # 365 天 1m 全量;90 只候选池若全量 warmup 需 ~2 小时,限窗后约几十秒/只。
+    WARMUP_DAYS_BY_FREQ = {"1m": 30, "5m": 120}
+
     def _fetch_klines(self, frequency: str, last):
-        """首轮全量;有锚点后只拉尾部窗口(锚点回退 5 天覆盖节假日/停牌缓冲)。
-        1m 全量回看 365 天≈10 万根/标的,逐轮全拉曾把 9 标的扫描周期拖到 ~14
-        分钟,远超 1m 操作级时效;CL 喂入本就增量,瓶颈纯在拉取窗口。"""
+        """首轮按级别限窗 warmup;有锚点后只拉尾部窗口(锚点回退 5 天覆盖
+        节假日/停牌缓冲)。1m 全量回看 365 天≈10 万根/标的,逐轮全拉曾把
+        9 标的扫描周期拖到 ~14 分钟;CL 喂入本就增量,瓶颈纯在拉取窗口。"""
         if last is None:
+            warmup_days = self.WARMUP_DAYS_BY_FREQ.get(str(frequency))
+            if warmup_days:
+                start = (
+                    pd.Timestamp.now() - pd.Timedelta(days=warmup_days)
+                ).strftime("%Y-%m-%d %H:%M:%S")
+                try:
+                    return self.ex.klines(self.code, frequency, start_date=start)
+                except TypeError:
+                    pass
             return self.ex.klines(self.code, frequency)
         start = (last - pd.Timedelta(days=5)).strftime("%Y-%m-%d %H:%M:%S")
         try:
@@ -2118,6 +2184,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
     explicit_codes = parse_codes(args.market, args.codes)
     holdings = load_ledger_positions(args.ledger)
+    selector = None
     if args.market == "a" and not explicit_codes:
         selector = OriginalChanlunASelector(
             ASelectionConfig(
@@ -2198,8 +2265,20 @@ def main(argv: Optional[list[str]] = None) -> int:
         f"{'+' + args.mid_level if args.mid_level else ''}+{args.op_level} "
         f"symbols={len(states)} state={args.state_file}"
     )
+    initial_codes = set(codes)
+    last_rescan_date = _dt.date.today()  # 启动时已选过一轮
     while True:
         now = _dt.datetime.now()
+        if (
+            selector is not None
+            and now.date() != last_rescan_date
+            and now.time() >= _dt.time(9, 0)
+        ):
+            # 每日开盘前重选(静态缓存日级口径):新候选入池 warmup,旧候选淘汰
+            rescan_selection_pool(
+                selector, states, names, ex, args, initial_codes=initial_codes
+            )
+            last_rescan_date = now.date()
         if args.force or market_is_open(ex, args.market, now):
             run_once(args, states, notifier, deduper, names, broker, exchange=ex)
         time.sleep(_next_level_seconds(now, args.op_level))

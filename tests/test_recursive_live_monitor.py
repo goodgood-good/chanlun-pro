@@ -244,6 +244,60 @@ def test_collect_monitor_events_applies_regime_ratio_multiplier():
     assert "regime_" not in range_events[0].reason
 
 
+def test_rescan_selection_pool_adds_and_evicts(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from chanlun.recursive_bt import live_monitor
+
+    class _FakeState:
+        def __init__(self, code, ex, **_kw):
+            self.code = code
+            self.refreshed = 0
+
+        def refresh(self):
+            self.refreshed += 1
+            return []
+
+    class _FakeSelector:
+        def select(self):
+            return [SimpleNamespace(code="SH.600100"), SimpleNamespace(code="SH.600200")]
+
+    class _FakeEx:
+        def stock_info(self, code):
+            return {"name": f"name-{code}"}
+
+    monkeypatch.setattr(live_monitor, "MonitorSymbolState", _FakeState)
+    ledger = tmp_path / "ledger.json"
+    ledger.write_text(json.dumps({"positions": {"SZ.000001": {"shares": 100}}}), encoding="utf-8")
+
+    states = {
+        "SH.600100": _FakeState("SH.600100", None),   # 已在池,保留
+        "SH.601000": _FakeState("SH.601000", None),   # 旧候选,不在新结果且非持仓非初始 → 淘汰
+        "SZ.000001": _FakeState("SZ.000001", None),   # 持仓,保留
+        "SH.513100": _FakeState("SH.513100", None),   # 初始自选,保留
+    }
+    names = {code: code for code in states}
+    args = SimpleNamespace(
+        market="a", ledger=str(ledger), op_level="1m", big_level="30m", mid_level="5m"
+    )
+
+    added = live_monitor.rescan_selection_pool(
+        _FakeSelector(), states, names, _FakeEx(), args, initial_codes={"SH.513100"}
+    )
+
+    assert added == 1                                  # 新增 SH.600200
+    assert "SH.600200" in states and states["SH.600200"].refreshed == 1  # 新标的已 warmup
+    assert "SH.601000" not in states                   # 旧候选被淘汰
+    assert "SZ.000001" in states and "SH.513100" in states  # 持仓与初始自选保留
+    assert names["SH.600200"] == "name-SH.600200"
+
+
+def test_default_a_selection_lookback_covers_previous_day():
+    from chanlun import config as app_config
+
+    bars = int(app_config.RECURSIVE_MONITOR_CONFIG["a"]["selection_lookback_bars"])
+    assert bars >= 48  # 至少覆盖昨日整天(48根5m):日级选股+1m实时择时
+
+
 def test_optimization_refresh_due_throttles_by_interval(monkeypatch):
     from chanlun.recursive_bt import live_monitor
 
@@ -257,9 +311,10 @@ def test_monitor_symbol_state_incremental_fetch_uses_tail_window():
     import pandas as pd
     from chanlun.recursive_bt.live_monitor import MonitorSymbolState
 
+    base = pd.Timestamp.now(tz="Asia/Shanghai").normalize() - pd.Timedelta(days=3)
     full = pd.DataFrame(
         {
-            "date": pd.date_range("2026-01-01 09:30:00", periods=300, freq="1min", tz="Asia/Shanghai"),
+            "date": pd.date_range(base, periods=300, freq="1min"),
             "open": 10.0,
             "high": 10.0,
             "low": 10.0,
@@ -283,12 +338,16 @@ def test_monitor_symbol_state_incremental_fetch_uses_tail_window():
     state = MonitorSymbolState("SH.600000", ex, op_level="1m", big_level="30m")
     state.refresh()
     first_round = [c for c in ex.calls if c[0] == "1m"]
-    assert first_round and first_round[0][1] is None  # 首轮全量
+    # 首轮 1m 限窗 warmup(约30天),不再全量拉365天
+    assert first_round and first_round[0][1] is not None
+    warm_start = pd.Timestamp(first_round[0][1], tz="Asia/Shanghai")
+    now = pd.Timestamp.now(tz="Asia/Shanghai")
+    assert now - pd.Timedelta(days=31) <= warm_start <= now - pd.Timedelta(days=29)
 
     ex.calls.clear()
     state.refresh()
     second_round = [c for c in ex.calls if c[0] == "1m"]
-    # 有锚点后改拉尾部窗口(锚点回退数日缓冲),不再全量
+    # 有锚点后改拉尾部窗口(锚点回退数日缓冲)
     assert second_round and second_round[0][1] is not None
     anchor = pd.Timestamp(second_round[0][1], tz="Asia/Shanghai")
     assert anchor <= state.last_op
