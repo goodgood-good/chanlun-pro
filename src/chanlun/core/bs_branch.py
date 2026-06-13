@@ -55,11 +55,12 @@ class BsBranchCalculator:
         向上离开 & 回试低点 >= ZG → 3buy;向下离开 & 回试高点 <= ZD → 3sell。
         注:P5c bs3_branch 跨级复用此方法做多级三类——改签名/口径需同步它。"""
         out: List[BuySellPoint] = []
+        index = self._line_index(lines)                            # O(1) 查表,避免 O(n²)
         for z in zs_result.done_zss:
             leave = z.end                                          # 离开段(correct_exit 剥出)
             if leave is None:
                 continue
-            retest = self._next_seg(leave, lines)                  # 紧邻下一段 = 第一次回试
+            retest = self._next_seg(leave, lines, index)           # 紧邻下一段 = 第一次回试
             if retest is None:                                     # 离开到右边缘、无回试 → 不产
                 continue
             if leave._type == "up" and retest.end.val >= z.zg:     # 回试低点不破 ZG
@@ -79,9 +80,10 @@ class BsBranchCalculator:
         signal_seg 在 lines 后的第一段即「转折点之后的反弹段」,中继/转折统一处理。
         """
         out: List[BuySellPoint] = []
+        index = self._line_index(lines)                           # O(1) 查表,避免 O(n²)
         for bp in self._first_class(zs_result):
-            rebound = self._next_seg(bp.signal_seg, lines)        # 转折点后反弹
-            pullback = self._next_seg(rebound, lines) if rebound is not None else None
+            rebound = self._next_seg(bp.signal_seg, lines, index)  # 转折点后反弹
+            pullback = self._next_seg(rebound, lines, index) if rebound is not None else None
             if rebound is None or pullback is None:
                 continue
             extreme = bp.anchor_fx.val                            # 一类点极值(前低/前高)
@@ -108,8 +110,29 @@ class BsBranchCalculator:
         return out
 
     @staticmethod
-    def _next_seg(leave: LINE, lines: List[LINE]) -> Optional[LINE]:
-        """离开段在 lines 中的紧邻下一段(按对象身份;leave 是 ZsCalculator 输入段之一)。"""
+    def _line_index(lines: List[LINE]) -> dict:
+        """{id(line): 首次位置} —— _next_seg 的 O(1) 查表。
+
+        _third_class(遍历中枢)/second_class(遍历一类点)在循环里反复调 _next_seg,
+        原 _next_seg 每次 O(n) 线性扫描 lines → 整体 O(n²)(TSLA 97k bar nest_cascade
+        实测 80% 时间耗在 _next_seg)。建表一次 O(n)、查表 O(1) → O(n²)→O(n),结果不变。
+        setdefault 保留首次出现,与原「首个 ln is leave」语义一致(段无重复,实质无差)。"""
+        index: dict = {}
+        for k, ln in enumerate(lines):
+            index.setdefault(id(ln), k)
+        return index
+
+    @staticmethod
+    def _next_seg(leave: LINE, lines: List[LINE],
+                  index: Optional[dict] = None) -> Optional[LINE]:
+        """离开段在 lines 中的紧邻下一段(按对象身份;leave 是 ZsCalculator 输入段之一)。
+
+        ``index`` 给定时 O(1) 查表(_line_index 预建),否则 O(n) 线性扫描兜底(对象身份等价)。"""
+        if index is not None:
+            k = index.get(id(leave))
+            if k is None:
+                return None
+            return lines[k + 1] if k + 1 < len(lines) else None
         for k, ln in enumerate(lines):
             if ln is leave:
                 return lines[k + 1] if k + 1 < len(lines) else None
