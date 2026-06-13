@@ -15,6 +15,32 @@ from chanlun.core.cl_interface import ZS, ZSLX
 from chanlun.core.zs_branch import DivergenceResult, classify_rel
 
 
+def _swing_body(z: ZS) -> tuple:
+    """摆动腿反转判定用的中枢本体包络 (lo, hi)：剔除已确认的离开段远摆。
+
+    反转判定原本直接用 zs.dd/zs.gg(全段本体极值)。但 3 段成枢时,若末段是离开段
+    (定向冲出核心区、终点比起点更远离 [zd,zg]),其远摆会把 gg/dd 撑爆 → 反向中枢
+    无法「脱离」该极值 → 反转判定永假(R84 摆动腿失明,2026-06-13;SH.600519 5m V 型
+    底中枢 z2 dd=1322 gg=1565,L1 kuozhan 中枢全丢)。correct_exit 因 min_body=3 对
+    3 段中枢剥不动离开段,故在此为反转判定单独剥:末段确为离开段(终点更远离核心区)
+    且剥后≥2 段时,用剩余段的 [min low, max high]。退化(无 lines/不足/末段非离开)→
+    用 zs.dd/zs.gg,与旧行为一致(4 段及以上中枢的离开段已由 correct_exit 剥除)。
+    """
+    lines = getattr(z, "lines", None)
+    if lines and len(lines) >= 3:
+        last = lines[-1]
+        if last.start is not None and last.end is not None:
+            zd, zg = z.zd, z.zg
+            d_end = 0.0 if zd <= last.end.val <= zg else min(
+                abs(last.end.val - zd), abs(last.end.val - zg))
+            d_start = 0.0 if zd <= last.start.val <= zg else min(
+                abs(last.start.val - zd), abs(last.start.val - zg))
+            if d_end > d_start:                       # 末段终点更远离核心区 → 离开段,剥除
+                body = lines[:-1]
+                return (min(ln.zs_low for ln in body), max(ln.zs_high for ln in body))
+    return (z.dd, z.gg)
+
+
 class ZslxBranchCalculator:
     """级别无关的走势类型划分（基于 zs_branch 中枢+内联背驰）。无状态，全量重算。"""
 
@@ -99,27 +125,29 @@ class ZslxBranchCalculator:
             return []
         if n == 1:
             return [(0, 0, None)]
+        bodies = [_swing_body(z) for z in zss]            # 剔除离开段远摆的本体包络(见 _swing_body)
         bounds: List[tuple] = []
         start = 0
         ext_idx = 0                                       # 当前趋势极值中枢索引
         # 初始方向:首两中枢本体中点净位移
-        D = "down" if (zss[1].dd + zss[1].gg) < (zss[0].dd + zss[0].gg) else "up"
+        D = "down" if (bodies[1][0] + bodies[1][1]) < (bodies[0][0] + bodies[0][1]) else "up"
         for i in range(1, n):
-            z, zext = zss[i], zss[ext_idx]
+            z_lo, z_hi = bodies[i]
+            e_lo, e_hi = bodies[ext_idx]
             if D == "down":
-                if z.dd < zext.dd:                        # 创新低 → 下跌延续,更新极值
+                if z_lo < e_lo:                           # 创新低 → 下跌延续,更新极值
                     ext_idx = i
-                elif z.dd > zext.gg:                      # 反向中枢本体脱离谷中枢本体 → 反转
+                elif z_lo > e_hi:                         # 反向中枢本体脱离谷中枢本体 → 反转
                     bounds.append((start, ext_idx, "down"))
                     start, D = ext_idx + 1, "up"
-                    ext_idx = max(range(start, i + 1), key=lambda k: zss[k].gg)
+                    ext_idx = max(range(start, i + 1), key=lambda k: bodies[k][1])
             else:                                          # up
-                if z.gg > zext.gg:                        # 创新高 → 上涨延续
+                if z_hi > e_hi:                           # 创新高 → 上涨延续
                     ext_idx = i
-                elif z.gg < zext.dd:                      # 反向中枢本体脱离峰中枢本体 → 反转
+                elif z_hi < e_lo:                         # 反向中枢本体脱离峰中枢本体 → 反转
                     bounds.append((start, ext_idx, "up"))
                     start, D = ext_idx + 1, "down"
-                    ext_idx = min(range(start, i + 1), key=lambda k: zss[k].dd)
+                    ext_idx = min(range(start, i + 1), key=lambda k: bodies[k][0])
         bounds.append((start, n - 1, D))
         return bounds
 

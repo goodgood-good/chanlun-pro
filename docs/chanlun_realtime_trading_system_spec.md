@@ -4658,3 +4658,23 @@ NVDA -10.60% 案例的结构化审计（`nvda_core3_v8_trade_invalidation_audit.
 ### 四、修复路线图（矩阵定稿，每轮一主题，全程 v8 严格口径对照、结果只进 review）
 
 R78 区间套介入闭环（6b+价格距离闸+C2.7 失效口径）→ R79 退出重构（领先退出+等反抽+旧3卖免疫+3buy盘整高点出）→ R80 门控重构（主跌段识别+策略分层）→ R81 39课程式主线化 → R82 背驰重构（分级MACD+趋势前提+盘整柱剔除+黄白线条件，bump v9）→ R83 仓位状态机+中阴检测 → R84 结构底层（新笔A/B+取整容差+9段强制+摆动腿失明修复，全基线重算）。
+
+## 第七十八轮 R78 候选判定层 + R84 摆动腿失明修复（缓存 v8→v9）
+
+本轮起执行路线图。两项落地：
+
+### 一、R78 第一步：区间套介入候选判定层
+
+`zs_upgrade.kuozhan_level_candidates` + `NestCandidate`（6b 设计 §3.1 最小可验证落地，纯结构/无未来/不碰信号链与缓存）：离开腿冲出 ZG 但回试腿未走出（retest=None）窗口产 3buy 候选，`kuozhan_level_signals_ex` 此窗口正好留白（其 3buy 要 retest.end≥ZG），二者按 retest 是否走出**互斥**。解 L1 确认滞后 170-519 bar（原文 H.56 行13922「没必要等回抽走完，在次级别第一类买点介入即可」）。3 个 TDD 测试 + commit c9813327。后续 R78：collect_nest_cascade_signals（L0 确认下推）+ nest_cascade source + portfolio 退出 + 全基线对照。
+
+### 二、R84 提前落地：摆动腿反转失明修复
+
+R84 本是路线图收尾项，但 R78 探测确认摆动腿失明是**硬阻断**（600519 类 V 型标的 L1 kuozhan/L2 tongjibie 中枢全丢，candidates/signals_ex 皆无输入），按「先修数据再调参，缺陷数据上的优化不可信」纪律提前。
+
+**根因（精确机制）**：3 段成枢的 V 型底/顶中枢，第三段是暴力离开段（反弹/回落腿）冲出核心区；`correct_exit` 因 `min_body=3` 对 3 段中枢剥不动离开段（剥后仅 2 段<本体下限）→ 中枢本体 gg/dd 被离开段远摆撑爆（600519 z2 dd=1322 但 gg=1565=全窗口最高）→ `_swing_segments` 反转确认「后中枢 dd>谷中枢 gg=1565」永假 → 摆动腿退化单条 → 升级链全断。4 段及以上中枢无此病（离开段已由 correct_exit 剥除）。
+
+**修复**：新增 `zslx_branch._swing_body(z)`——反转判定专用本体包络：末段确为离开段（终点比起点更远离核心区 [zd,zg]）且剥后≥2 段时取剩余段 [min low, max high]，否则退化 `zs.dd/zs.gg`（与旧行为一致）。`_swing_segments` 全部 dd/gg 访问改用 `_swing_body`。
+
+**实测（600519 5m 3 段口径）**：摆动腿 单腿失明 → `up/down/up/down` 4 腿严格交替；30m tongjibie 中枢 0→1（zd=1325）；L1 kuozhan 中枢 0→1。**不破坏**：4 段口径（`test_600519_5m_v_shape` down/up/down 保持）、000001（tongjibie zd∈3850-3900 保持）、全量 **909 passed**。失明现状测试 `test_600519_5m_l0min3_swing_blindness_known_issue` 反转为正向修复确认 `test_600519_5m_l0min3_swing_reversal_restored`。
+
+**缓存 v8→v9**：摆动腿语义变更影响所有标的 L1/L2 中枢与信号 → 按第75轮纪律 bump（旧 v8 core3 证据作废，待 v9 全基线重建回填信号变化量化）。只影响回测 signal cache，不影响实时 live_monitor（后者用实时扫描非 wf 缓存）。

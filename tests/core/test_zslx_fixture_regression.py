@@ -105,17 +105,17 @@ def test_600519_5m_v_shape_leg_and_tongjibie():
     assert abs(zss30[0].zd - 1322.01) < 1.0, f"30m 中枢 zd 漂移: {zss30[0].zd}"
 
 
-def test_600519_5m_l0min3_swing_blindness_known_issue():
-    """【现状记录·已知开放问题】生产 3 段口径下 600519 同窗口的摆动腿反转失明。
+def test_600519_5m_l0min3_swing_reversal_restored():
+    """【R84 修复确认】3 段口径下 600519 V 型转折的摆动腿反转恢复。
 
-    机理（2026-06-13 第77轮 F8 修复暴露）：3 段成枢的 V 型转折点中枢 z2
-    （dd=1322, gg=1565）——第三段暴力拉升使中枢包络吃进整个离开段；
-    _swing_segments 的反转确认要求后续中枢 dd > 谷中枢 gg=1565（全窗口最高）
-    → 永假 → 全程单条 down 腿 → 30m tongjibie 中枢丢失。
-    与 G 清单 1.23 core_envelope 张力同源（买卖点链路已用本体包络防远摆撑爆，
-    _swing_segments 仍用原始 gg/dd）；疑为 §102「30m 同级别信号稀疏」系统性根因。
-    修复候选（矩阵主轴六）：脱离判定改用核心区/本体包络，或第三段暴力离开的
-    成枢语义裁决（38/20课）。修复落地时本测试应反转为正向断言。"""
+    根因（2026-06-13 第77轮 F8 暴露）：3 段成枢的 V 型底中枢 z2（dd=1322, gg=1565）
+    ——第三段暴力拉升（离开段）把中枢本体 gg 撑爆到全窗口最高 1565，_swing_segments
+    反转确认 `dd>谷.gg=1565` 永假 → 单腿失明 → L1 kuozhan / 30m tongjibie 中枢全丢
+    （疑为 §102「30m 信号稀疏」系统性根因）。
+    修复（_swing_body）：反转判定时剔除已确认的离开段远摆（末段终点更远离核心区
+    → 剥末段取剩余本体包络）；correct_exit 因 min_body=3 对 3 段中枢剥不动，故在
+    摆动层单独剥。修复后摆动腿恢复交替、L1/L2 中枢重新产出；不破坏 4 段口径（其
+    离开段已由 correct_exit 剥除 → _swing_body 退化用 zs.dd/zs.gg）与 000001。"""
     fixture = _FIXTURE.parent / "a_SH_600519_5m.parquet"
     if not fixture.exists():
         pytest.skip(f"缺少 fixture: {fixture}")
@@ -127,10 +127,15 @@ def test_600519_5m_l0min3_swing_blindness_known_issue():
     lv0 = next(lv for lv in cd.get_recursive_branch_levels() if lv.level == 0)
     from chanlun.core.zs_upgrade import _swing_alternating_segs, tongjibie_zhongshu_ex
     segs = _swing_alternating_segs(lv0.zss)
+    # 反转恢复：不再单腿失明，摆动腿严格交替
+    assert len(segs) >= 3, f"摆动腿仍失明(<3 腿): {[s.dir for s in segs]}"
+    for i in range(1, len(segs)):
+        assert segs[i].dir != segs[i - 1].dir, (
+            f"摆动腿应严格交替: {[s.dir for s in segs]}")
+    # V 型转折产出 30m tongjibie 中枢（失明时为 0）
     zss30, _meta = tongjibie_zhongshu_ex(lv0.zss, list(cd.get_xds()))
-    # 现状钉死（防无声漂移）：单腿 + 零 30m 中枢；修复后此断言应失败并被反转
-    assert [s.dir for s in segs[:3]] == ["down"], (
-        f"3段口径摆动腿现状已变化: {[s.dir for s in segs[:3]]} — 若已修复反转失明, "
-        "请把本测试反转为 down/up/down + 30m 中枢存在的正向断言"
-    )
-    assert len(zss30) == 0
+    assert len(zss30) >= 1, "反转恢复后 V 型转折应产出 30m 中枢"
+    # L1 kuozhan 中枢恢复（失明时为 0）
+    kl = cd.get_kuozhan_levels()
+    l1 = next((x for x in kl if x["level"] == 1), {"zss": []})
+    assert len(l1["zss"]) >= 1, "反转恢复后应产出 L1 kuozhan 中枢"
