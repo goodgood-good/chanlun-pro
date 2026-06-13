@@ -4878,3 +4878,22 @@ R83 仓位/时间风控的最直接候选=**退出后再入场冷却**(结构失
 | R84 摆动腿 | ✅ 回撤 -30% |
 
 **全部投资到证据级结论**。可落地正向价值=R84(回撤)+R78(区间套买点)已交付;R79/R80/R81/R82/R83 经实测/勘查均为负或标的特异——**这组负结果本身就是对用户核心问题的完整答案:缠论逻辑没错,收益短板是缠论实时右边缘买卖不对称+主动交易趋势市磨损的结构必然,非加功能/调门控可修**。系统定位=低回撤受控配置工具(震荡/熊市跑赢、趋势市跑输裸持)。要博趋势市收益须根本不同方法(趋势跟随),超出基于缠论原文范畴。
+
+### 回测性能优化轮——nest_cascade O(n²) 三连修复 + 快速迭代工作流(2026-06-13/14)
+
+用户:TSLA 全年(97k 根 1m)nest_cascade wf 回测**永远跑不完**(1h36m+ 未完),无法快速迭代分析。cProfile 定位**两堵 O(n²) 墙**并各个击破(全 result-identical、910 passed、不 bump 缓存):
+
+| # | 瓶颈(cProfile 定位) | 修复 | 实测 | commit |
+| --- | --- | --- | --- | --- |
+| 1 | `bs_branch._next_seg` 按身份**线性扫描** lines,被 `_third_class`/`second_class` 循环反复调=O(中枢×段)=O(n²)(占 get_branch_bspoints 80%) | 预建 `{id:位置}` 查表,_next_seg O(n)→O(1) | 单次采集 98.8→45ms@40k | `7a9c6642` |
+| 2 | 单次 `_collect_visible_signals` 里 get_recursive_branch_levels×3/get_kuozhan_levels×2/get_branch_bspoints×2 冗余重算 | CL `_recursive_memo` 按状态缓存,新 K 线清空 | 叠加 ~1.3-1.6× | `ae8dc476` |
+| 3 | **legacy MMD(`bs_point_calculator`)每 bar 跑**(220M 次 `__eq__`),nest_cascade 根本不用它——skip_legacy 此前仅 upgrade 开、漏了 nest_cascade | skip_legacy_{mmd,zslx} 扩到 `in("upgrade","nest_cascade")` | **per-bar 797→13.75ms@90k(58×)** | `d5d03580` |
+
+**残余 O(n²) 不动**:per-bar 仍随 n 增长(3.6→13.75ms),热点在**核心笔/线段增量重建**(`bi_calculator._build_endpoint_stack` 每次重扫全 fx、`_check_stroke_validity` 1M 次/120bar)。这是浮点敏感的核心缠论逻辑([[project-bi-float-sensitivity]]),改它会动所有信号、毁已验证基线 → **风险>收益,不优化**。
+
+**★快速迭代工作流(定档,现成 `--start` 即可)**:
+- **改策略/仓位参数** → 信号源不变、信号缓存命中 → 只重跑组合,**秒级**。
+- **改信号逻辑快迭代** → `--start <近期日期>` 窗口化(切输入 K 线、CL 从该日起算)→ **TSLA 近 6 周 16 秒**(对比全年 1h36m+)。⚠窗口让 CL 无更早 warmup,**相对比较准、绝对数字与全量略差**(全量才是最终口径)。
+- **全量最终验证** → 不加 --start,偶尔跑(全年 ~20min,三修复后从"卡死"变"能完成")。
+
+**TSLA 近 6 周窗口 nest_cascade(--start 2026-05-01,16s)**:收益 +0.3%/回撤 3.5%(基准 +4.3%/16%)/夏普 0.29/胜率 50%/2 笔——与结构定论一致(区间套稀疏、低回撤、上行窗跑输基准)。**核心收获:回测耗时问题=信号采集 O(n²)(已修)+核心笔增量固有成本(窗口化规避),迭代用 --start 窗口、全量偶尔验证。**
