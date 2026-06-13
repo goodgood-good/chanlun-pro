@@ -322,18 +322,32 @@ def kuozhan_level_candidates(zss, lower_zss, wzgx, frequency=None, level=1):
         return []
     if comp[-1] is segs[e_seg].zss[-1]:
         leave = segs[e_seg + 1] if e_seg + 1 < n else None
-        retest = segs[e_seg + 2] if e_seg + 2 < n else None
+        retest_idx = e_seg + 2
     else:
         leave = _leg_sub_seg(segs[e_seg], comp[-1], "after")
-        retest = segs[e_seg + 1] if e_seg + 1 < n else None
+        retest_idx = e_seg + 1
+    retest = segs[retest_idx] if 0 <= retest_idx < n else None
     out = []
-    if (leave is not None and leave.dir == "up" and retest is None
-            and leave.end is not None and leave.end.val >= z.zg):
-        out.append(NestCandidate(
-            "3buy", level, z,
-            leave.end.k.date if getattr(leave.end, "k", None) is not None else None,
-            z.zg, z.zd, z.zg,
-        ))
+    if leave is not None and leave.dir == "up" and leave.end is not None \
+            and leave.end.val >= z.zg:
+        # 候选 active 窗口 = 离开冲出 ZG 后、回试腿钉死前:回试腿不存在(刚冲出),或
+        # 回试腿是右边缘最后一腿(进行中 provisional)且可见低点未破核心区上沿 ZG。
+        # 覆盖 L0 确认(回试腿内次级别买点)真正出现的窗口——retest=None 单一窗口与
+        # L0 确认时间错位(NVDA 实测 0 介入),故扩到「回试进行中」。retest 已钉死
+        # (后面还有反向腿)则回试已完成,signals_ex 接管,本函数不产。
+        retest_pending = (retest is None) or (retest_idx == n - 1)
+        retest_low_ok = True
+        if retest is not None:
+            rlow = min((zz.dd for zz in getattr(retest, "zss", []) or []), default=None)
+            if rlow is None and retest.end is not None:
+                rlow = retest.end.val
+            retest_low_ok = (rlow is None) or (rlow >= z.zg)
+        if retest_pending and retest_low_ok:
+            out.append(NestCandidate(
+                "3buy", level, z,
+                leave.end.k.date if getattr(leave.end, "k", None) is not None else None,
+                z.zg, z.zd, z.zg,
+            ))
     return out
 
 
