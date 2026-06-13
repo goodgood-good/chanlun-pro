@@ -21,7 +21,7 @@ from chanlun.recursive_bt.chanlun_selector import (
     DEFAULT_FUND_DATA,
     OriginalChanlunASelector,
 )
-from chanlun.recursive_bt.engine import CL_CFG, MTFStrategy, collect_branch_signals
+from chanlun.recursive_bt.engine import CL_CFG, MTFStrategy, collect_branch_signals, collect_nest_cascade_signals
 from chanlun.recursive_bt.engine import collect_signals as collect_upgrade_signals
 from chanlun.recursive_bt.market_runtime import (
     BT_DATA_DIR,
@@ -719,7 +719,7 @@ def _line_signature(line) -> tuple:
 
 
 def _collection_state_signature(cd: CL, signal_source: str):
-    if signal_source == "upgrade" and hasattr(cd, "get_xds"):
+    if signal_source in ("upgrade", "nest_cascade") and hasattr(cd, "get_xds"):
         try:
             xds = list(cd.get_xds())
             tail = xds[-3:] if len(xds) >= 3 else xds
@@ -738,7 +738,7 @@ def _collect_visible_signals(
     level_filter: Optional[tuple[int, ...]] = None,
     include_l0_upgrade_signals: bool = False,
 ) -> list:
-    if signal_source == "upgrade":
+    if signal_source in ("upgrade", "nest_cascade"):
         signals = list(collect_upgrade_signals(cd))
         if include_l0_upgrade_signals:
             l0_signals = [
@@ -747,7 +747,11 @@ def _collect_visible_signals(
                 if int(getattr(sig, "level", 0) or 0) == 0
             ]
             signals.extend(l0_signals)
-            signals.sort(key=lambda sig: (getattr(sig, "date", ""), int(getattr(sig, "level", 0) or 0)))
+        if signal_source == "nest_cascade":
+            # R78 区间套介入:原生 upgrade 流(L1+ CONFIRMED 闭合与门控方向不缺位)
+            # + 候选×次级别确认的提前介入事件(3buy_nest)
+            signals.extend(collect_nest_cascade_signals(cd))
+        signals.sort(key=lambda sig: (getattr(sig, "date", ""), int(getattr(sig, "level", 0) or 0)))
     else:
         signals = collect_branch_signals(
             cd,
@@ -2261,9 +2265,9 @@ def make_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--signal-source",
-        choices=("branch", "upgrade"),
+        choices=("branch", "upgrade", "nest_cascade"),
         default="branch",
-        help="branch uses current branch buy/sell points; upgrade uses get_kuozhan_levels() L1/L2 recursive visible signals",
+        help="branch=current branch buy/sell points; upgrade=get_kuozhan_levels() L1/L2 recursive visible signals; nest_cascade=upgrade + 区间套介入事件(3buy_nest)",
     )
     parser.add_argument(
         "--include-l0-upgrade-signals",

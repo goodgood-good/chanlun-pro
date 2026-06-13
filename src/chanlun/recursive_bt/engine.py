@@ -39,7 +39,7 @@ CL_CFG = {
 }
 
 CACHE_DIR = "D:/chanlun_pro/chart_cache"
-BUYS = ("1buy", "2buy", "3buy")
+BUYS = ("1buy", "2buy", "3buy", "3buy_nest", "1buy_nest")
 SELLS = ("1sell", "2sell", "3sell")
 
 
@@ -252,6 +252,39 @@ def collect_signals(cd: CL) -> List[Signal]:
                 fx.val,
                 **_structural_signal_fields(p),
             ))
+    out.sort(key=lambda s: s.date)
+    return out
+
+
+def collect_nest_cascade_signals(cd: CL) -> List[Signal]:
+    """R78 区间套介入信号:大级别候选 × 次级别(L0/笔)确认 → 介入事件(3buy_nest)。
+
+    候选(get_kuozhan_candidates)=大级别离开腿冲出 ZG、回试腿未走出;在回试窗口内用
+    L0/笔级买点(collect_branch_signals)首次可见作为介入触发,免等大级别回试腿钉死的
+    170-519 bar 滞后(6b 设计;原文 H.56 行13922「没必要等回抽走完,在次级别第一类买点
+    介入即可」)。无未来:候选与确认都只用当根可见状态。确认过滤:买向 + 价格域(确认价
+    ≥ZG,保证回试不破核心) + 时间域(确认晚于候选离开段终点,落在回试窗口内);每候选只
+    触发一次(wf fresh 机制按 date 身份去重)。退出走现有结构失效(structural_stop_below=
+    cand.invalid_below=ZG)。第一版只产 3buy_nest;1buy_nest 与失效事件留后续。"""
+    cands = cd.get_kuozhan_candidates()
+    if not cands:
+        return []
+    sub = collect_branch_signals(cd, use_xd=False, annotate_nest=False)
+    out: List[Signal] = []
+    for cand in cands:
+        if cand.kind != "3buy":
+            continue
+        for s in sub:
+            if not s.is_buy or s.price < cand.zg:
+                continue
+            if cand.leave_end_date is not None and s.date <= cand.leave_end_date:
+                continue
+            out.append(Signal(
+                s.date, cand.level, "3buy_nest", s.price,
+                structural_stop_below=cand.invalid_below,
+                zs_zd=cand.zd, zs_zg=cand.zg,
+            ))
+            break
     out.sort(key=lambda s: s.date)
     return out
 
