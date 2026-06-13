@@ -4729,3 +4729,7 @@ v9 预热信号变化：QQQ events 25→25（无 V 型失明，不变）、**NVD
 ### R78 实现关键细节(2026-06-13,collect_qs_beichi_candidates 必读)
 
 若用 l0.done_divergence(已完成趋势底背驰段)会遇到与 nest_cascade 相同的 stale 问题:背驰段在线段离开段钉死时才可见,那时笔级底背驰确认(低点)已是过去 bar,被 walk-forward first-seen/stale 丢弃。真闭环必须用 provisional(进行中)趋势背驰段(L0 live hypotheses,ZsHypothesis.divergence provisional=True),而 LevelResult(recursive_branch.py:25)当前只暴露 done_divergence、未暴露 live。前置:①get_recursive_branch_levels 暴露 L0 live provisional qs 底背驰段;②collect_qs_beichi_candidates 在 provisional 背驰段 active 时配对其后首次可见笔级 1buy(use_xd=False)介入;③退出走 C5.41 力度证伪。与 6b §3.1 状态机本质一致。
+
+### R78 第六层(最底层)结论(2026-06-13)
+
+diag_live_qs.py 实测 NVDA L0 live leave hypothesis 背驰:05-13/06-09=None、06-02=pz+up顶背驰,无(is_beichi+qs+down)底背驰,故 live_qs_divergence 恒空。根因 zs_branch._is_trend:qs 须>=2 同向中枢本体分离,右边缘 pending 中枢与前中枢常 expand/方向不定,趋势底背驰段进行中多被判 core 读法或 pz。区间套进行中趋势背驰段在右边缘天然难识别(趋势需结构、结构形成中),缠论实时区间套本质困难非 bug。真闭环最后一公里=zs_branch 增强 live 趋势底背驰识别,研究级。基础设施 LevelResult.live_qs_divergence+collect_qs_beichi_candidates 已就绪 910 passed,待底层数据充实激活。
