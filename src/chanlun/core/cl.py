@@ -617,6 +617,36 @@ class CL(ICL):
             cur = nz
         return out
 
+    def get_kuozhan_candidates(self):
+        """R78 区间套介入候选(各 kuozhan 级最近中枢)。lazy。返回 List[NestCandidate]。
+
+        复用 get_kuozhan_levels 升级中枢链:对每个 kuozhan 级(<30m,method='kuozhan'),
+        用该级中枢 + 下级中枢调 kuozhan_level_candidates(离开冲出 ZG 但回试腿未走出
+        窗口产 3buy 候选,signals_ex 此窗口留白)。tongjibie 级(30m 同级别分解)候选留后
+        (摆动段语义不同)。无未来:候选只用当根可见的离开段端点。"""
+        chain = self._UPGRADE_CHAIN.get(self.frequency, [])
+        if not chain:
+            return []
+        from chanlun.core.zs_upgrade import kuozhan_level_candidates
+        levels = self.get_recursive_branch_levels()
+        l0 = next((lv.zss for lv in levels if lv.level == 0), None)
+        if not l0:
+            return []
+        wzgx = self._recursive_wzgx()
+        kl = self.get_kuozhan_levels()
+        out = []
+        cur = l0
+        for lvl, (_target, method) in enumerate(chain, start=1):
+            lv_zss = next((x["zss"] for x in kl if x["level"] == lvl), [])
+            if method == "kuozhan" and lv_zss and cur:
+                try:
+                    out.extend(kuozhan_level_candidates(
+                        lv_zss, cur, wzgx, self.frequency, level=lvl))
+                except Exception:
+                    pass
+            cur = lv_zss
+        return out
+
     def get_branch_interval_nest(self):
         """新核心:区间套可操作性(P6,自顶向下 READ)。lazy 并存。返回 List[NestRead]。"""
         from chanlun.core.beichi_nest import BeichiNestCalculator
