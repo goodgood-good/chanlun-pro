@@ -1995,7 +1995,7 @@ def run_backtest(args) -> tuple[dict, dict]:
         raw_signal_mode = "batch" if source == "bt_data" else DEFAULT_SIGNAL_MODE
     args.signal_mode = str(raw_signal_mode or DEFAULT_SIGNAL_MODE).strip().lower()
     args.signal_source = str(getattr(args, "signal_source", "branch") or "branch").strip().lower()
-    if args.signal_source not in {"branch", "upgrade"}:
+    if args.signal_source not in {"branch", "upgrade", "nest_cascade"}:
         raise ValueError(f"unsupported signal_source: {args.signal_source!r}")
     args.include_l0_upgrade_signals = bool(
         getattr(args, "include_l0_upgrade_signals", False)
