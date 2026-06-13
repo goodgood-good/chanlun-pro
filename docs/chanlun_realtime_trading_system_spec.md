@@ -4733,3 +4733,7 @@ v9 预热信号变化：QQQ events 25→25（无 V 型失明，不变）、**NVD
 ### R78 第六层(最底层)结论(2026-06-13)
 
 diag_live_qs.py 实测 NVDA L0 live leave hypothesis 背驰:05-13/06-09=None、06-02=pz+up顶背驰,无(is_beichi+qs+down)底背驰,故 live_qs_divergence 恒空。根因 zs_branch._is_trend:qs 须>=2 同向中枢本体分离,右边缘 pending 中枢与前中枢常 expand/方向不定,趋势底背驰段进行中多被判 core 读法或 pz。区间套进行中趋势背驰段在右边缘天然难识别(趋势需结构、结构形成中),缠论实时区间套本质困难非 bug。真闭环最后一公里=zs_branch 增强 live 趋势底背驰识别,研究级。基础设施 LevelResult.live_qs_divergence+collect_qs_beichi_candidates 已就绪 910 passed,待底层数据充实激活。
+
+### R78 真闭环解法方向(新会话第一步)
+
+第六层根因的解=zs_branch._is_trend(live=True) 逻辑增强:当前要求 live pending 中枢本身与前中枢构成趋势(右边缘常不成立),改为若已 done 中枢序列已确立下跌趋势(>=2 同向本体分离)且 live 离开段向下延续,则判 live 离开段为趋势底背驰段。需传 done 趋势上下文入 _divergence_for。风险:影响图表 live 背驰+须全基线回测,fixture 钉死 NVDA 05-11 应识别+000001 不误报。落地后 live_qs_divergence 充实→collect_qs_beichi_candidates 激活。诊断完整+解法明确+基础设施就绪(910 passed)。
