@@ -207,3 +207,36 @@ def test_f7_wzgx_fallback_unified_to_gd_everywhere():
     assert zs_branch.ZsBranchCalculator().wzgx == Config.ZS_WZGX_GD.value, (
         "ZsBranchCalculator 签名默认 wzgx 应为 GD，与全局默认一致"
     )
+
+
+# ===========================================================================
+# F8: config 缺键时 recursive_l0_min_zs_lines fallback 必须统一为 3
+#     (2026-06-13 第77轮全文一致性审计修复, 与 F7 wzgx 分裂同构)
+# ===========================================================================
+def test_f8_l0_min_zs_lines_fallback_unified_to_3_everywhere():
+    """第71轮把 L0 中枢默认口径切到原文三段本体(CL_CFG 恒带 3),但 cl.py 3 处
+    与 engine.py 1 处的 config.get fallback 仍写死 legacy 4——缺键 config 的
+    反序列化旧 pickle CL 会静默用 4 段口径, 同一进程内图表与信号口径分裂。
+    统一后唯一解析点 = CL._recursive_l0_min_zs_lines(), fallback=3。
+    """
+    import inspect
+    import re
+    from chanlun.core.cl import CL
+    from chanlun.core import cl as cl_mod
+    from chanlun.recursive_bt import engine as engine_mod
+
+    cd = CL("T", "1m", {})
+    cd.config.pop("recursive_l0_min_zs_lines", None)  # 模拟旧 pickle 缺键 config
+    assert cd._recursive_l0_min_zs_lines() == 3, (
+        "缺键 config 的 l0_min fallback 应为原文三段本体口径 3, 不得回退 legacy 4"
+    )
+    # 源码级钉死: cl.py / engine.py 不得再出现自带 fallback 的散装读取
+    for mod in (cl_mod, engine_mod):
+        src = inspect.getsource(mod)
+        rogue = re.findall(
+            r"get\(['\"]recursive_l0_min_zs_lines['\"]\s*,\s*4\)", src
+        )
+        assert not rogue, (
+            f"{mod.__name__} 存在散装 fallback=4 的 recursive_l0_min_zs_lines 读取: {rogue}; "
+            "必须统一经 CL._recursive_l0_min_zs_lines() 单点解析"
+        )

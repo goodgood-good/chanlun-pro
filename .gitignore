@@ -214,3 +214,6 @@ interval_nest_review.html
 bs2_branch_review.html
 bs3_branch_review.html
 bs_turn_review.html
+
+# 126MB 原文 docx：隐私+体积，不入库
+docs/*.docx

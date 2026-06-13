@@ -370,7 +370,7 @@ def collect_branch_signals(
         # fallback 必须与 CL._recursive_wzgx 一致(原文严格档 GD,定理二)——
         # 此前写死 ZGD,config 缺键时与 CL 内部口径分裂(2026-06-12 审计修复)。
         wzgx = cd.config.get("zs_wzgx", Config.ZS_WZGX_GD.value)
-        l0_min = int(cd.config.get("recursive_l0_min_zs_lines", 4) or 4)
+        l0_min = cd._recursive_l0_min_zs_lines()
         units = list(cd.get_xds()) if use_xd else list(cd.get_bis())
         levels = RecursiveBranchCalculator(l0_min_zs_lines=l0_min).calculate(
             units,

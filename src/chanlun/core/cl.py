@@ -449,6 +449,16 @@ class CL(ICL):
         """
         return self.config.get('zs_wzgx', Config.ZS_WZGX_GD.value)
 
+    def _recursive_l0_min_zs_lines(self) -> int:
+        """统一解析递归 L0 中枢成枢线数:所有链路必须经此单点读取。
+
+        fallback=3(原文三段本体口径,第71轮已设为生产默认且 CL_CFG 恒带 3)。
+        此前 cl.py 3 处与 engine.py 1 处 fallback 写死 4(legacy 确认门控),
+        config 缺键的反序列化旧 pickle CL 会在同一对象内口径分裂(与 zs_wzgx
+        分裂同构),2026-06-13 第77轮全文一致性审计修复。
+        """
+        return int(self.config.get('recursive_l0_min_zs_lines', 3) or 3)
+
     def get_recursive_branch_levels(self):
         """新核心:recursive_branch 多级递归(中枢+内联背驰+走势类型,P1-P4)。
 
@@ -460,7 +470,7 @@ class CL(ICL):
         from chanlun.core.recursive_branch import RecursiveBranchCalculator
         ld = lambda s, e: query_macd_ld(self, s, e)
         wzgx = self._recursive_wzgx()
-        l0_min = int(self.config.get('recursive_l0_min_zs_lines', 4) or 4)
+        l0_min = self._recursive_l0_min_zs_lines()
         # L0 输入用线段(xds):线段中枢是缠论最低正式级别中枢(宪法 L0=线段),升级链由此起。
         # 笔中枢是更小的观察级别、不参与升级,单独走 get_bi_zhongshu。
         # (1m 标的线段稀疏→线段中枢少,但缠论正确;丰富的笔中枢另在观察层显示。)
@@ -499,7 +509,7 @@ class CL(ICL):
         from chanlun.core.bs3_branch import Bs3BranchCalculator
         ld = lambda s, e: query_macd_ld(self, s, e)
         wzgx = self._recursive_wzgx()
-        l0_min = int(self.config.get('recursive_l0_min_zs_lines', 4) or 4)
+        l0_min = self._recursive_l0_min_zs_lines()
         units = list(self.get_xds()) if use_xd else list(self.get_bis())
         levels = RecursiveBranchCalculator(l0_min_zs_lines=l0_min).calculate(
             units, ld, wzgx, self.frequency,
@@ -526,7 +536,7 @@ class CL(ICL):
         from chanlun.core.recursive_branch import RecursiveBranchCalculator
         ld = lambda s, e: query_macd_ld(self, s, e)
         wzgx = self._recursive_wzgx()
-        l0_min = int(self.config.get('recursive_l0_min_zs_lines', 4) or 4)
+        l0_min = self._recursive_l0_min_zs_lines()
         units = list(self.get_xds()) if use_xd else list(self.get_bis())
         levels = RecursiveBranchCalculator(l0_min_zs_lines=l0_min).calculate(
             units, ld, wzgx, self.frequency,

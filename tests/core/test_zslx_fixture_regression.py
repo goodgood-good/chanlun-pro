@@ -83,12 +83,18 @@ def test_600519_5m_v_shape_leg_and_tongjibie():
     三段重合产出 30m 中枢（zd≈1322）。
 
     修复前两类病在此标的的表现：净位移（离开段终点口径）把 down 腿标 up →
-    与后段合并 → 仅 2 段无三段重合 → 30m 中枢丢失。"""
+    与后段合并 → 仅 2 段无三段重合 → 30m 中枢丢失。
+
+    口径说明：v34 摆动腿语义在 legacy 4 段确认口径下钉死（显式声明，不再依赖
+    config 缺键 fallback——第77轮 F8 把缺键 fallback 统一为生产口径 3，本测试
+    曾隐式跑在 4 上）。3 段口径下同窗口的退化是已知开放问题，见下一个测试。"""
     fixture = _FIXTURE.parent / "a_SH_600519_5m.parquet"
     if not fixture.exists():
         pytest.skip(f"缺少 fixture: {fixture}")
     df = pd.read_parquet(fixture)
-    cd = CL("SH.600519", "5m", dict(DEFAULT_CL_CONFIG))
+    cfg = dict(DEFAULT_CL_CONFIG)
+    cfg["recursive_l0_min_zs_lines"] = 4
+    cd = CL("SH.600519", "5m", cfg)
     cd.process_klines(df)
     lv0 = next(lv for lv in cd.get_recursive_branch_levels() if lv.level == 0)
     from chanlun.core.zs_upgrade import _swing_alternating_segs, tongjibie_zhongshu_ex
@@ -97,3 +103,34 @@ def test_600519_5m_v_shape_leg_and_tongjibie():
     zss30, _meta = tongjibie_zhongshu_ex(lv0.zss, list(cd.get_xds()))
     assert len(zss30) >= 1, "下上下三段重合应产出 30m 中枢"
     assert abs(zss30[0].zd - 1322.01) < 1.0, f"30m 中枢 zd 漂移: {zss30[0].zd}"
+
+
+def test_600519_5m_l0min3_swing_blindness_known_issue():
+    """【现状记录·已知开放问题】生产 3 段口径下 600519 同窗口的摆动腿反转失明。
+
+    机理（2026-06-13 第77轮 F8 修复暴露）：3 段成枢的 V 型转折点中枢 z2
+    （dd=1322, gg=1565）——第三段暴力拉升使中枢包络吃进整个离开段；
+    _swing_segments 的反转确认要求后续中枢 dd > 谷中枢 gg=1565（全窗口最高）
+    → 永假 → 全程单条 down 腿 → 30m tongjibie 中枢丢失。
+    与 G 清单 1.23 core_envelope 张力同源（买卖点链路已用本体包络防远摆撑爆，
+    _swing_segments 仍用原始 gg/dd）；疑为 §102「30m 同级别信号稀疏」系统性根因。
+    修复候选（矩阵主轴六）：脱离判定改用核心区/本体包络，或第三段暴力离开的
+    成枢语义裁决（38/20课）。修复落地时本测试应反转为正向断言。"""
+    fixture = _FIXTURE.parent / "a_SH_600519_5m.parquet"
+    if not fixture.exists():
+        pytest.skip(f"缺少 fixture: {fixture}")
+    df = pd.read_parquet(fixture)
+    cfg = dict(DEFAULT_CL_CONFIG)
+    cfg["recursive_l0_min_zs_lines"] = 3
+    cd = CL("SH.600519", "5m", cfg)
+    cd.process_klines(df)
+    lv0 = next(lv for lv in cd.get_recursive_branch_levels() if lv.level == 0)
+    from chanlun.core.zs_upgrade import _swing_alternating_segs, tongjibie_zhongshu_ex
+    segs = _swing_alternating_segs(lv0.zss)
+    zss30, _meta = tongjibie_zhongshu_ex(lv0.zss, list(cd.get_xds()))
+    # 现状钉死（防无声漂移）：单腿 + 零 30m 中枢；修复后此断言应失败并被反转
+    assert [s.dir for s in segs[:3]] == ["down"], (
+        f"3段口径摆动腿现状已变化: {[s.dir for s in segs[:3]]} — 若已修复反转失明, "
+        "请把本测试反转为 down/up/down + 30m 中枢存在的正向断言"
+    )
+    assert len(zss30) == 0
