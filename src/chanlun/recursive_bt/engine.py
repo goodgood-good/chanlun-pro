@@ -294,13 +294,22 @@ def collect_nest_cascade_signals(cd: CL) -> List[Signal]:
 
 
 def collect_qs_beichi_candidates(cd: CL) -> List[Signal]:
-    """R78 真闭环:L0 进行中趋势底背驰段(provisional qs)+ 笔级一类买点确认 → 介入(1buy_nest)。
+    """R78 真闭环:L0 进行中趋势底背驰段(provisional qs)+ 次级别(笔)买点确认 → 介入(1buy_nest)。
 
     用 LevelResult.live_qs_divergence(右边缘 node1=leave 读法的 provisional qs 背驰段),
     而非 done_divergence——后者在背驰段钉死时才可见、笔级确认已 stale(spec R78 实现关键细节)。
-    背驰段进行中(下跌)时,配对其内首次可见的笔级 1buy(底背驰,collect_branch_signals use_xd=False)
+    背驰段进行中(下跌)时,配对其内首次可见的笔级买点(collect_branch_signals use_xd=False)
     介入,免等线段级背驰段钉死。退出走结构失效(跌破中枢本体下沿 zs.dd,C5.41 力度证伪)。
-    对齐原文 27/61课区间套:背驰段进行中即下推次级别一类买点,不等中枢升级。"""
+    对齐原文 27/61课区间套:背驰段进行中即下推次级别买点,不等中枢升级。
+
+    次级别确认口径(R78 实测定档,2026-06-13):原文 H.56「次级别第一类买点介入」严格读法
+    在工程上次优。wf 实测(NVDA 真底前下跌段)显示:笔级 **1buy 是「转折前」趋势背驰点**,
+    在多腿下跌中每条下跌腿都触发一次,全是假底(05-01@198.65 笔级 1buy→价继续跌到 194.51);
+    而笔级 **2buy/3buy 是「转折后」确认**(中枢重夺/回调不破),才标志最小级别真正转上
+    (05-05@197.90 笔级 3buy→反弹到 215,+8.6%)。L0 背驰段(down+is_beichi,创新低+力度衰竭)
+    是「大级别背驰背景」硬门控,段内**首个笔级 2buy/3buy 转折确认**即介入,zs.dd 结构止损兜底。
+    取 2buy/3buy(排除转折前 1buy)而非原文严格 1buy,是低回撤导向的实测定档;早 entry 在
+    protracted 下跌中仍有残留假底(如 05-04 3buy 小幅止损),区间套提前量与假底风险的固有权衡。"""
     levels = cd.get_recursive_branch_levels()
     l0 = next((lv for lv in levels if getattr(lv, "level", None) == 0), None)
     if l0 is None:
@@ -319,8 +328,8 @@ def collect_qs_beichi_candidates(cd: CL) -> List[Signal]:
             continue
         start_date = seg.start.k.date if getattr(seg.start, "k", None) is not None else None
         for s in sub:
-            if s.bs_type != "1buy":
-                continue
+            if s.bs_type not in ("2buy", "3buy"):
+                continue  # 转折后确认(中枢重夺/回调不破),排除转折前 1buy 假底(见 docstring)
             if start_date is not None and s.date < start_date:
                 continue  # 确认须落在背驰段内(段起点之后)
             out.append(Signal(

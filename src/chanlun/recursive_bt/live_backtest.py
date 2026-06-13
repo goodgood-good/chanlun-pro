@@ -21,7 +21,13 @@ from chanlun.recursive_bt.chanlun_selector import (
     DEFAULT_FUND_DATA,
     OriginalChanlunASelector,
 )
-from chanlun.recursive_bt.engine import CL_CFG, MTFStrategy, collect_branch_signals, collect_nest_cascade_signals
+from chanlun.recursive_bt.engine import (
+    CL_CFG,
+    MTFStrategy,
+    collect_branch_signals,
+    collect_nest_cascade_signals,
+    collect_qs_beichi_candidates,
+)
 from chanlun.recursive_bt.engine import collect_signals as collect_upgrade_signals
 from chanlun.recursive_bt.market_runtime import (
     BT_DATA_DIR,
@@ -44,7 +50,7 @@ DEFAULT_SIGNAL_SCAN_CHUNK_BARS = 0
 DEFAULT_TREND_DIR_WARMUP_BARS = 200
 DEFAULT_RECURSIVE_L0_MIN_ZS_LINES = 3
 DEFAULT_BS_POINT_RATIO_OVERRIDES = "D:/chanlun_pro/reports/strategy_bs_point_ratio_overrides.json"
-_SIGNAL_CACHE_VERSION = "v9"
+_SIGNAL_CACHE_VERSION = "v11"  # R78 真闭环:nest_cascade 接线修复(wf 路径真正采集介入事件)+1buy_nest 上线(笔级2buy/3buy转折确认)+笔级触发签名,bump 失效旧 nest 缓存
 _SIGNAL_CHECKPOINT_VERSION = "v1"
 UPGRADE_CHAIN = getattr(
     CL,
@@ -723,7 +729,17 @@ def _collection_state_signature(cd: CL, signal_source: str):
         try:
             xds = list(cd.get_xds())
             tail = xds[-3:] if len(xds) >= 3 else xds
-            return ("upgrade_xd", len(xds), tuple(_line_signature(x) for x in tail))
+            sig = ("upgrade_xd", len(xds), tuple(_line_signature(x) for x in tail))
+            if signal_source == "nest_cascade":
+                # R78 漏单根因:区间套介入(1buy_nest/3buy_nest)由**笔级**买点触发
+                # (L0 live_qs 背驰段 / 大级别候选 内首个笔级 buy),而线段(xd)tail 签名对
+                # 笔级变化不敏感——笔级买点出现在某线段中途时 xd 签名不变 → wf 不在该 bar
+                # 重算 collection → 进行中(transient)的 nest 介入信号永不被捕获。故 nest_cascade
+                # 须并入笔级触发。笔级买卖点只在「笔完成」时新增(基于完成的笔/中枢,非进行中笔),
+                # 故只需 len(bis)——新笔完成即触发重算;不并入末笔签名,避免进行中笔每根延伸都
+                # 触发重算(否则每 bar 全量 collect_upgrade_signals 递归装配,回测慢数十倍)。
+                sig = sig + (len(list(cd.get_bis())),)
+            return sig
         except Exception:
             pass
     return getattr(cd, "_last_mmd_sig", None)
@@ -750,7 +766,10 @@ def _collect_visible_signals(
         if signal_source == "nest_cascade":
             # R78 区间套介入:原生 upgrade 流(L1+ CONFIRMED 闭合与门控方向不缺位)
             # + 候选×次级别确认的提前介入事件(3buy_nest)
+            # + L0 进行中趋势底背驰段×次级别买点确认的提前介入(1buy_nest,真闭环,
+            #   R78 实测定档 2026-06-13:NVDA 真底 05-05 提前~24h 于 done 背驰坐实)
             signals.extend(collect_nest_cascade_signals(cd))
+            signals.extend(collect_qs_beichi_candidates(cd))
         signals.sort(key=lambda sig: (getattr(sig, "date", ""), int(getattr(sig, "level", 0) or 0)))
     else:
         signals = collect_branch_signals(
@@ -1303,7 +1322,11 @@ def build_symbol_from_klines(
         mid_by_bar_upgrade = None
         mid_dir_at_upgrade = None
         big_initial_dir = "neutral"
-        if signal_source == "upgrade":
+        if signal_source in ("upgrade", "nest_cascade"):
+            # R78 真闭环接线:nest_cascade 复用 upgrade 的多级别拆分路径,但传入真实
+            # signal_source(此前硬编码 "upgrade",致 nest_cascade 的介入事件
+            # collect_nest_cascade_signals/collect_qs_beichi_candidates 在 wf 路径
+            # 从不执行——nest_cascade 长期静默回落 branch 的根因,2026-06-13 修)。
             upgrade_initial_state: dict = {}
             small_by_bar = _walk_forward_signals_by_main_bar(
                 code,
@@ -1314,7 +1337,7 @@ def build_symbol_from_klines(
                 warmup_bars=signal_warmup_bars,
                 annotate_nest=False,
                 use_xd=use_xd_signals,
-                signal_source="upgrade",
+                signal_source=signal_source,
                 recursive_l0_min_zs_lines=recursive_l0_min_zs_lines,
                 include_l0_upgrade_signals=include_l0_upgrade_signals,
                 initial_state_out=upgrade_initial_state,
@@ -1462,7 +1485,7 @@ def build_symbol_from_klines(
     }
     if signal_mode == "walk_forward" and trend_dir_at is not None:
         out["trend_dir_at"] = trend_dir_at
-    if signal_mode == "walk_forward" and signal_source == "upgrade":
+    if signal_mode == "walk_forward" and signal_source in ("upgrade", "nest_cascade"):
         if mid_by_bar_upgrade is not None:
             out["mid_dir_at"] = mid_dir_at_upgrade
             out["mid_by_bar"] = mid_by_bar_upgrade
@@ -2098,10 +2121,10 @@ def run_backtest(args) -> tuple[dict, dict]:
     )
     args.trend_core_source = str(getattr(args, "trend_core_source", "gate") or "gate")
     args.core_signal_level = max(int(getattr(args, "core_signal_level", 0) or 0), 0)
-    if args.core_signal_level <= 0 and args.signal_source == "upgrade":
+    if args.core_signal_level <= 0 and args.signal_source in ("upgrade", "nest_cascade"):
         args.core_signal_level = _upgrade_level_for(args.op_level, args.big_level) or 0
     args.swing_signal_level = max(int(getattr(args, "swing_signal_level", 0) or 0), 0)
-    if args.swing_signal_level <= 0 and args.signal_source == "upgrade":
+    if args.swing_signal_level <= 0 and args.signal_source in ("upgrade", "nest_cascade"):
         args.swing_signal_level = _upgrade_level_for(args.op_level, args.mid_level) or 0
     args.big_down_activity_buy_ratio_multiplier = min(
         max(

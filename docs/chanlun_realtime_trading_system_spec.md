@@ -4737,3 +4737,37 @@ diag_live_qs.py 实测 NVDA L0 live leave hypothesis 背驰:05-13/06-09=None、0
 ### R78 真闭环解法方向(新会话第一步)
 
 第六层根因的解=zs_branch._is_trend(live=True) 逻辑增强:当前要求 live pending 中枢本身与前中枢构成趋势(右边缘常不成立),改为若已 done 中枢序列已确立下跌趋势(>=2 同向本体分离)且 live 离开段向下延续,则判 live 离开段为趋势底背驰段。需传 done 趋势上下文入 _divergence_for。风险:影响图表 live 背驰+须全基线回测,fixture 钉死 NVDA 05-11 应识别+000001 不误报。落地后 live_qs_divergence 充实→collect_qs_beichi_candidates 激活。诊断完整+解法明确+基础设施就绪(910 passed)。
+
+### R78 第七层(真闭环达成)——推翻第六层误判,真正阻塞点与修复(2026-06-13)
+
+**第六层结论是测试假象,予以推翻。** 第六层「live_qs_divergence 恒空、需 zs_branch._is_trend 研究级增强」的诊断错在 **cut 选错**:diag_live_qs.py 测的 05-12/05-13/06-02/06-09 **全是 NVDA 见顶后的上涨/顶背驰区**(中枢 215~222、leave_dir 全 up,是卖区而非买区);"05-11 应识别买点"是误记——05-11 NVDA 正在 215 局部高点,做空信号才对。
+
+逼近**真实趋势底背驰**(L0 done[4]@05-05,zs.dd=194.51)逐 cut 实测(diag_lead_nvda_0505.py)推翻全部:05-04 17:00~05-05 15:30 区间,live leave 读法 **a=down c=down is_beichi=True rel(prev,live)=trend_down**,即**当前 _is_trend 无需任何改动**就把它判为 qs(classify_rel==trend_down ⟺ is_qs(prev,live,GD,core)==down,代数等价)。直接验证:这些 cut **L0.live_qs=1 早已非空**。zs_branch 增强方向(第六层解法)是不必要的——基础设施本就工作。
+
+**真正的阻塞点**在 collect_qs_beichi_candidates 的次级别确认口径 `s.bs_type=="1buy"` 过严:
+- 笔级 1buy 在 L0 背驰段内**结构性极罕见**(单条 L0 离开段往往不含 ≥2 笔级中枢、无法成笔级趋势背驰);
+- 且**反向有害**:NVDA 真底 194.51 之前的笔级 1buy 全是下跌途中假底(04-29@207.34、05-01@198.65,均在 L0 背驰段开始前 05-05 13:46),严格 1buy 要么不触发要么提前套牢;
+- L0 背驰段窗口内唯一买向笔级信号是 **3buy@197.90(05-05 14:32)**——真底 194.51 之后、笔级已重夺中枢、是更可靠的介入点。
+
+**真正的根因(比第七层更底层)——nest_cascade 在 walk_forward 模式整条死线**:run_backtest 的 wf 信号流装配(_walk_forward_signals 调用处)只有 `if signal_source=="upgrade"` 与 `else→"branch"` 两支,**全无 nest_cascade 分支**;`--signal-source nest_cascade` 静默落入 else 用 `signal_source="branch"` 采集 → collect_nest_cascade_signals / collect_qs_beichi_candidates **在 wf 路径从不执行**(_collect_visible_signals 里的 nest 采集逻辑对 run_backtest 是死代码)。这才是 R78 长期 0 介入的**首要**根因——此前各轮宣称 nest_cascade「已接入」从未在真 wf 验证过。修复:wf 装配的 upgrade 分支条件改 `signal_source in ("upgrade","nest_cascade")` 且传真实 signal_source(原硬编码 "upgrade");mid 流与 core_signal_level/swing_signal_level 自动设档同步纳入 nest_cascade。
+
+**第二根因——wf 重算签名对笔级失明**:_collection_state_signature 对 upgrade/nest_cascade 只用线段(xd)tail,笔级买点出现在某线段中途时签名不变 → wf 不在该 bar 重算 → 进行中(transient)nest 介入信号永不被捕获。修复:nest_cascade 签名并入 `len(bis)`(新笔完成即触发重算;不并末笔签名,避免进行中笔每根延伸全量重算拖慢数十倍)。
+
+**第三:次级别确认口径**:`s.bs_type=="1buy"` → `s.bs_type in ("2buy","3buy")`。wf 实测(NVDA 下跌段)证笔级 1buy 是「转折前」趋势背驰点、多腿下跌每腿触发一次全假底(05-01@198.65→续跌 194.51);2buy/3buy 是「转折后」确认(中枢重夺),才标志最小级别真转上(05-05@197.90→反弹 215,+8.6%)。原文 H.56「第一类买点」严格读法低回撤导向下次优,定档 2buy/3buy。缓存 bump v9→v11。
+
+**验证**:① 信号级:真底 05-05 14:40 触发 1buy_nest@197.90/stop<194.506,**提前于 done 背驰坐实(05-05 16:20)**;2buy/3buy 口径排除 05-01 1buy 假底、保留 05-04+05-05 两个 3buy;② 上涨区 3 cut + A 股 SH.000001(5.8万 bar 仅 1 趋势底背驰)全无误报;③ wf 实测信号链已产 1buy_nest/3buy_nest(btail is_buy 版曾产 4+4,2buy/3buy 收敛);④ 全量 910 passed(v11 全改动后)。
+
+**终版 wf 端到端实证(NVDA 单标的 max-pos 1,2026-04-14~06-10,基准 +5.1%/DD15.5%)**:nest_cascade -3.2%/DD12.3%/3 笔/胜率 33%(1buy_nest 信号 3 个=05-01 1buy 假底已被 2buy/3buy 排除;3buy_nest 4 个)。**关键正面验证——区间套提前介入抓到真底大反弹**:首笔 = 1buy_nest 05-04 17:33 入场 @196.9 → 05-11 16:45 small_level_sell_point 出场 **+11.95%**(吃满 196.9→~220 全程反弹)。无区间套(纯 upgrade)首仓须等 L1/L2 升级信号(晚得多、滞后 170-519 根 1m bar),这 +11.95% 正是区间套兑现的滞后削减。组合 -3.2% 的拖累全在**后续两笔非 nest 的 upgrade 流亏损**(05-13 -5.5%、06-02 -6.7%,NVDA 该窗口后段震荡下行+结构失效退出),非区间套入场之过。**结论:区间套机制端到端跑通且提前介入兑现单笔大幅 alpha(+11.95% vs 等基础设施下更晚入场);整体收益受标的难做窗口+upgrade 流出场拖累,指向 R79 退出重构(非更多入场)是下一杠杆——与第八层稀疏性结论、R84 退出修复主体一致。**
+
+### R78 第八层——区间套买点的结构稀疏性(诚实定量,2026-06-13)
+
+全量扫描(diag_scan_qs_bottoms.py,各标的最终结构 L0/L1 下跌趋势底背驰计数):
+
+| 标的 | bars | L0 done中枢 | L0 down背驰 | **L0 趋势底背驰** | L1 趋势底背驰 | up背驰(对照) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| NVDA | 15601 | 19 | 2 | **1** | 0 | 2 |
+| TSLA | 97339 | 139 | 13 | **8** | 0 | 20 |
+| QQQ | 15601 | 21 | 0 | **0** | 0 | 5 |
+| SH.000001 | 58804 | 86 | 3 | **1** | 0 | 14 |
+
+两条架构性事实:① **趋势底背驰只在 L0、L1 恒 0**(L1 走势类型级在这些周期/区间里从不形成 ≥2 同向下跌中枢)→ 原「大级别(L1)→小级别(L0)」区间套结构性空集,旧 nest_cascade 用 get_kuozhan 升级 L1 中枢作候选基础是错配的级别;真区间套是 **L0 下跌趋势背景 → 笔级提前确认**。② **买侧(down 趋势底背驰)天然稀疏**(NVDA 1/TSLA 8/SH 1,即便 5.8 万 bar),up背驰恒多于 down背驰——区间套 1buy_nest 是低频但真实的提前介入增强,不会淹没回测(无误报风险已证),但对总收益的贡献量级有限,系统主体买卖点仍来自 3buy/3sell。**诚实结论:区间套解决了稀疏趋势底背驰买点的滞后,但这类买点本身不多;R84(摆动腿失明→回撤降 30%)仍是已验证的最大收益杠杆,下一杠杆是 R79 退出重构而非更多买点。**
