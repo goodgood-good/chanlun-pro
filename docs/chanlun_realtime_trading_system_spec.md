@@ -4665,7 +4665,11 @@ R78 区间套介入闭环（6b+价格距离闸+C2.7 失效口径）→ R79 退�
 
 ### 一、R78 第一步：区间套介入候选判定层
 
-`zs_upgrade.kuozhan_level_candidates` + `NestCandidate`（6b 设计 §3.1 最小可验证落地，纯结构/无未来/不碰信号链与缓存）：离开腿冲出 ZG 但回试腿未走出（retest=None）窗口产 3buy 候选，`kuozhan_level_signals_ex` 此窗口正好留白（其 3buy 要 retest.end≥ZG），二者按 retest 是否走出**互斥**。解 L1 确认滞后 170-519 bar（原文 H.56 行13922「没必要等回抽走完，在次级别第一类买点介入即可」）。3 个 TDD 测试 + commit c9813327。后续 R78：collect_nest_cascade_signals（L0 确认下推）+ nest_cascade source + portfolio 退出 + 全基线对照。
+`zs_upgrade.kuozhan_level_candidates` + `NestCandidate`（6b 设计 §3.1 最小可验证落地，纯结构/无未来/不碰信号链与缓存）：离开腿冲出 ZG 但回试腿未走出（retest=None）窗口产 3buy 候选，`kuozhan_level_signals_ex` 此窗口正好留白（其 3buy 要 retest.end≥ZG），二者按 retest 是否走出**互斥**。解 L1 确认滞后 170-519 bar（原文 H.56 行13922「没必要等回抽走完，在次级别第一类买点介入即可」）。3 个 TDD 测试 + commit c9813327。
+
+**R78 信号链接入（commits f8736727/c03fe402/bd9ff260/2f2f01f5）**：`collect_nest_cascade_signals`（engine.py，候选×L0 确认）+ `3buy_nest/1buy_nest` 注册入 BUYS + `signal_source=nest_cascade`（live_backtest，=upgrade 全流+介入事件，meta 隔离免污染 v9 缓存；补齐 3 处硬编码 signal_source 校验白名单）。候选窗口扩到回试腿进行中。全量 909 passed。
+
+**已知未闭环（R78 核心剩余工作）**：NVDA nest_cascade 实测 **0 介入事件**，尽管该窗口确有 1 个 L1 3buy。根因＝`collect_nest_cascade_signals` 是**无状态同 bar 合取**（当 bar 候选 active AND 当 bar L0 买点 price≥ZG），与时间错位冲突：候选 active（回试腿进行中）时回试腿内的 L0 底背驰买点尚未首次可见；待 L0 可见时回试腿往往已钉死、候选消失。正解＝6b §3.1 的**跨 bar 候选状态机**——walk-forward 循环维护 active 候选集合（候选首次出现即登记、持续到 L0 确认/破 ZG 失效/中枢易主），而非单 bar 无状态合取。这是 R78 下一步核心改造（live_backtest walk-forward 循环层）。当前机制接入（源/信号链/缓存/校验/候选判定）完成，产出闭环待状态机。
 
 ### 二、R84 提前落地：摆动腿反转失明修复
 
