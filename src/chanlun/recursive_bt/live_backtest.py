@@ -822,7 +822,7 @@ def _walk_forward_signals_by_main_bar(
     warmup = int(warmup_bars or 0)
     warmup_gate = max(warmup, 0)
     signal_source = str(signal_source or "branch").strip().lower()
-    if signal_source not in {"branch", "upgrade"}:
+    if signal_source not in {"branch", "upgrade", "nest_cascade"}:
         raise ValueError(f"unsupported signal_source: {signal_source!r}")
     if level_filter is not None:
         level_filter = tuple(int(x) for x in level_filter)
@@ -1273,7 +1273,7 @@ def build_symbol_from_klines(
     if signal_unit not in {"bi", "xd"}:
         raise ValueError(f"unsupported signal_unit: {signal_unit!r}")
     signal_source = str(signal_source or "branch").strip().lower()
-    if signal_source not in {"branch", "upgrade"}:
+    if signal_source not in {"branch", "upgrade", "nest_cascade"}:
         raise ValueError(f"unsupported signal_source: {signal_source!r}")
     recursive_l0_min_zs_lines = int(
         recursive_l0_min_zs_lines or DEFAULT_RECURSIVE_L0_MIN_ZS_LINES
