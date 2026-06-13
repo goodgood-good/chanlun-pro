@@ -4669,7 +4669,13 @@ R78 区间套介入闭环（6b+价格距离闸+C2.7 失效口径）→ R79 退�
 
 **R78 信号链接入（commits f8736727/c03fe402/bd9ff260/2f2f01f5）**：`collect_nest_cascade_signals`（engine.py，候选×L0 确认）+ `3buy_nest/1buy_nest` 注册入 BUYS + `signal_source=nest_cascade`（live_backtest，=upgrade 全流+介入事件，meta 隔离免污染 v9 缓存；补齐 3 处硬编码 signal_source 校验白名单）。候选窗口扩到回试腿进行中。全量 909 passed。
 
-**已知未闭环（R78 核心剩余工作）**：NVDA nest_cascade 实测 **0 介入事件**，尽管该窗口确有 1 个 L1 3buy。根因＝`collect_nest_cascade_signals` 是**无状态同 bar 合取**（当 bar 候选 active AND 当 bar L0 买点 price≥ZG），与时间错位冲突：候选 active（回试腿进行中）时回试腿内的 L0 底背驰买点尚未首次可见；待 L0 可见时回试腿往往已钉死、候选消失。正解＝6b §3.1 的**跨 bar 候选状态机**——walk-forward 循环维护 active 候选集合（候选首次出现即登记、持续到 L0 确认/破 ZG 失效/中枢易主），而非单 bar 无状态合取。这是 R78 下一步核心改造（live_backtest walk-forward 循环层）。当前机制接入（源/信号链/缓存/校验/候选判定）完成，产出闭环待状态机。
+**已知未闭环（R78 核心剩余工作）**：NVDA nest_cascade 实测 **0 介入事件**，尽管该窗口确有 1 个 L1 3buy。根因＝`collect_nest_cascade_signals` 是**无状态同 bar 合取**（当 bar 候选 active AND 当 bar L0 买点 price≥ZG），与时间错位冲突：候选 active（回试腿进行中）时回试腿内的 L0 底背驰买点尚未首次可见；待 L0 可见时回试腿往往已钉死、候选消失。正解＝遍历所有 L1 中枢 + 回试窗口配对（无状态等价跨 bar 状态机:每 bar 重算所有中枢候选 + wf fresh 去重,无需显式 active 集合）。
+
+**R78 闭环根因与修复(commits ae86b0f8 + 对象身份修复)**:
+1. **候选只看 zss[-1]**:walk-forward 中枢快速易主,最近中枢回试窗口瞬时,错过历史中枢(如 NVDA L1 3buy 中枢 zd=211.256 在产生 3buy 时已非最近)。改 kuozhan_level_candidates 遍历所有中枢 + NestCandidate 加 retest_end_date,候选窗口 = 离开冲出 ZG + 回试腿已开始且未破核心,确认配对限 (leave_end, retest_end]。
+2. **对象身份不一致(真根因)**:get_kuozhan_candidates 曾单独调 get_recursive_branch_levels() 拿 L0,而 get_kuozhan_levels() 内部又调一次——两次返回不同对象实例,L1 中枢 expanded_with(指向第二次 L0 对象)在第一次 L0 的 seg_of[id] 查不到 → 段定位全失败 → 候选恒空。修复:get_kuozhan_levels 返回各级 lower,候选复用同次对象(id 一致)。诊断脚本 scripts/diag_nest_nvda.py 验证 cands=2 nest=2,全量 910 passed。
+
+候选/确认/对象一致三层已修通(诊断脚本 cut=06-04 cands=2 nest=2)。但端到端 backtest 两个窗口(06-01~06-10、含候选段 05-08~05-20)仍 NEST=0,揭示第三层根因:候选依赖「已形成的 kuozhan L1 中枢」,而该中枢形成晚于离开腿冲出。诊断脚本 cut=06-04 能看到 05-11 候选,是因数据到 06-04 时 L1 中枢已事后形成;但 walk-forward 在 05-11~05-12 回试进行的 bar,kuozhan L1 中枢尚未形成 → 候选空;待 L1 中枢首次可见(更晚),回试 L0 买点 anchor 已是过去 bar → 被 first-seen/stale 机制丢弃。R78 真正闭环需把候选触发基础从「kuozhan L1 中枢」下移到「L0 摆动腿离开冲出事件」(早于 L1 中枢形成),非当前会话能完成;机制三层已修通,为该重设计扫清前置障碍。
 
 ### 二、R84 提前落地：摆动腿反转失明修复
 
