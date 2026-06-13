@@ -356,26 +356,34 @@ def test_kuozhan_signals_ex_beichi_qs_1buy():
 
 
 # ---- kuozhan_level_candidates: 区间套介入候选(R78,离开冲出+回试未走出窗口) ----
-def test_kuozhan_candidates_3buy_when_leave_out_retest_pending():
-    """离开腿冲出 ZG=7.5、回试腿尚未走出(右边缘最后一腿)→ 产 3buy 候选;
-    同窗口 signals_ex 留白(retest=None 不产 3buy)——二者按 retest 是否走出互斥。"""
+def test_kuozhan_candidates_3buy_when_retest_in_progress_unbroken():
+    """离开腿冲出 ZG=7.5 + 回试腿已开始且可见低点未破核心区上沿(7.6≥7.5)→ 产 3buy 候选,
+    回试窗口 (leave_end, retest_end] 供 L0 确认下推。"""
     z0 = _l0(8, 9, 7.5, 9.5, 9.6, 9.4, 0)
     z1 = _l0(5, 6, 4.5, 6.5, 6.6, 4.6, 4)
-    z2 = _l0(10, 11, 9.5, 11.5, 9.4, 11.4, 8)   # 上涨离开腿,冲出 ZG=7.5,右边缘最后一腿
+    z2 = _l0(10, 11, 9.5, 11.5, 9.4, 11.4, 8)   # 上涨离开腿,冲出 ZG=7.5
+    z3 = _l0(7.8, 8.2, 7.6, 8.5, 11.3, 7.7, 12)  # 回试腿,可见低点 dd=7.6≥ZG,未破核心
     z = _kz(6.5, 7.5, 4.5, 9.5, [z0, z1])
-    bsp, _ = kuozhan_level_signals_ex([z], [z0, z1, z2], None, Config.ZS_WZGX_ZGD.value)
-    assert bsp == []                              # signals_ex 此窗口留白
-    cands = kuozhan_level_candidates([z], [z0, z1, z2], Config.ZS_WZGX_ZGD.value)
+    cands = kuozhan_level_candidates([z], [z0, z1, z2, z3], Config.ZS_WZGX_ZGD.value)
     assert len(cands) == 1
     c = cands[0]
     assert c.kind == "3buy" and c.zg == 7.5 and c.zd == 6.5 and c.invalid_below == 7.5
 
 
-def test_kuozhan_candidates_none_when_retest_walked_out():
-    """回试腿已走出 → signals_ex 接管(retest≠None),候选消失(互斥)。"""
-    lower, (z0, z1) = _v_shape_lower(7.6)
+def test_kuozhan_candidates_none_when_retest_breaks_core():
+    """回试腿可见低点跌破核心区上沿(z3.dd=6.6<ZG=7.5)→ 3buy 几何失效,不产候选。"""
+    lower, (z0, z1) = _v_shape_lower(7.6)   # z3.dd=6.6<7.5
     z = _kz(6.5, 7.5, 4.5, 9.5, [z0, z1])
     assert kuozhan_level_candidates([z], lower, Config.ZS_WZGX_ZGD.value) == []
+
+
+def test_kuozhan_candidates_none_when_retest_not_started():
+    """回试腿尚未开始(retest=None,无 L0 确认时间窗口)→ 不产候选(下一 bar 回试出现再产)。"""
+    z0 = _l0(8, 9, 7.5, 9.5, 9.6, 9.4, 0)
+    z1 = _l0(5, 6, 4.5, 6.5, 6.6, 4.6, 4)
+    z2 = _l0(10, 11, 9.5, 11.5, 9.4, 11.4, 8)
+    z = _kz(6.5, 7.5, 4.5, 9.5, [z0, z1])
+    assert kuozhan_level_candidates([z], [z0, z1, z2], Config.ZS_WZGX_ZGD.value) == []
 
 
 def test_kuozhan_candidates_none_when_leave_not_formed():

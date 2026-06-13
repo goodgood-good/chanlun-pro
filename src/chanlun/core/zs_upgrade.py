@@ -272,13 +272,16 @@ class NestCandidate:
     在大级别买卖点自身钉死前生成(解 L1 确认滞后 170-519 bar),供次级别确认下推介入。
     纯结构、无未来:仅用当根可见的离开段端点判定。"""
 
-    __slots__ = ("kind", "level", "zs", "leave_end_date", "zg", "zd", "invalid_below")
+    __slots__ = ("kind", "level", "zs", "leave_end_date", "retest_end_date",
+                 "zg", "zd", "invalid_below")
 
-    def __init__(self, kind, level, zs, leave_end_date, zg, zd, invalid_below):
+    def __init__(self, kind, level, zs, leave_end_date, zg, zd, invalid_below,
+                 retest_end_date=None):
         self.kind = kind
         self.level = level
         self.zs = zs
-        self.leave_end_date = leave_end_date
+        self.leave_end_date = leave_end_date      # 时间域下界:确认须晚于离开段终点
+        self.retest_end_date = retest_end_date    # 时间域上界:确认须不晚于回试段终点(回试腿内)
         self.zg = zg
         self.zd = zd
         self.invalid_below = invalid_below
@@ -312,42 +315,42 @@ def kuozhan_level_candidates(zss, lower_zss, wzgx, frequency=None, level=1):
         for zz in sg.zss:
             seg_of[id(zz)] = si
     n = len(segs)
-    z = zss[-1]
-    comp = list(getattr(z, "expanded_with", None) or [])
-    if not comp:
-        return []
-    s_seg = seg_of.get(id(comp[0]))
-    e_seg = seg_of.get(id(comp[-1]))
-    if s_seg is None or e_seg is None:
-        return []
-    if comp[-1] is segs[e_seg].zss[-1]:
-        leave = segs[e_seg + 1] if e_seg + 1 < n else None
-        retest_idx = e_seg + 2
-    else:
-        leave = _leg_sub_seg(segs[e_seg], comp[-1], "after")
-        retest_idx = e_seg + 1
-    retest = segs[retest_idx] if 0 <= retest_idx < n else None
     out = []
-    if leave is not None and leave.dir == "up" and leave.end is not None \
-            and leave.end.val >= z.zg:
-        # 候选 active 窗口 = 离开冲出 ZG 后、回试腿钉死前:回试腿不存在(刚冲出),或
-        # 回试腿是右边缘最后一腿(进行中 provisional)且可见低点未破核心区上沿 ZG。
-        # 覆盖 L0 确认(回试腿内次级别买点)真正出现的窗口——retest=None 单一窗口与
-        # L0 确认时间错位(NVDA 实测 0 介入),故扩到「回试进行中」。retest 已钉死
-        # (后面还有反向腿)则回试已完成,signals_ex 接管,本函数不产。
-        retest_pending = (retest is None) or (retest_idx == n - 1)
-        retest_low_ok = True
-        if retest is not None:
-            rlow = min((zz.dd for zz in getattr(retest, "zss", []) or []), default=None)
-            if rlow is None and retest.end is not None:
-                rlow = retest.end.val
-            retest_low_ok = (rlow is None) or (rlow >= z.zg)
-        if retest_pending and retest_low_ok:
-            out.append(NestCandidate(
-                "3buy", level, z,
-                leave.end.k.date if getattr(leave.end, "k", None) is not None else None,
-                z.zg, z.zd, z.zg,
-            ))
+    for z in zss:   # 遍历所有中枢:walk-forward 中枢快速易主,只看 zss[-1] 会漏掉历史中枢回试窗口
+        comp = list(getattr(z, "expanded_with", None) or [])
+        if not comp:
+            continue
+        s_seg = seg_of.get(id(comp[0]))
+        e_seg = seg_of.get(id(comp[-1]))
+        if s_seg is None or e_seg is None:
+            continue
+        if comp[-1] is segs[e_seg].zss[-1]:
+            leave = segs[e_seg + 1] if e_seg + 1 < n else None
+            retest_idx = e_seg + 2
+        else:
+            leave = _leg_sub_seg(segs[e_seg], comp[-1], "after")
+            retest_idx = e_seg + 1
+        retest = segs[retest_idx] if 0 <= retest_idx < n else None
+        # 3buy 候选:离开腿向上冲出核心区上沿 ZG + 回试腿已开始(回试腿定义 L0 确认时间窗口
+        # [leave_end, retest_end])。遍历所有中枢 + 每 bar 重算 + wf fresh 去重 = 无状态
+        # 等价跨 bar 候选状态机:回试腿内 L0 买点首次可见时 collect_nest_cascade_signals 触发。
+        if leave is None or leave.dir != "up" or leave.end is None \
+                or leave.end.val < z.zg:
+            continue
+        if retest is None:
+            continue                      # 回试腿未开始,无 L0 确认窗口(下一 bar 回试出现再产)
+        rlow = min((zz.dd for zz in getattr(retest, "zss", []) or []), default=None)
+        if rlow is None and retest.end is not None:
+            rlow = retest.end.val
+        if rlow is not None and rlow < z.zg:
+            continue                      # 回试破核心区上沿 → 3buy 几何失效
+        out.append(NestCandidate(
+            "3buy", level, z,
+            leave.end.k.date if getattr(leave.end, "k", None) is not None else None,
+            z.zg, z.zd, z.zg,
+            retest_end_date=(retest.end.k.date if (retest.end is not None
+                             and getattr(retest.end, "k", None) is not None) else None),
+        ))
     return out
 
 

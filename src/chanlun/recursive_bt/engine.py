@@ -277,7 +277,11 @@ def collect_nest_cascade_signals(cd: CL) -> List[Signal]:
         for s in sub:
             if not s.is_buy or s.price < cand.zg:
                 continue
+            # 时间窗口:确认须落在回试腿内 (leave_end, retest_end]——晚于离开段终点
+            # (回试已开始) 且不晚于回试段终点 (回试腿内的次级别买点,非回试之后)。
             if cand.leave_end_date is not None and s.date <= cand.leave_end_date:
+                continue
+            if cand.retest_end_date is not None and s.date > cand.retest_end_date:
                 continue
             out.append(Signal(
                 s.date, cand.level, "3buy_nest", s.price,
