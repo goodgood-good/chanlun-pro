@@ -293,6 +293,47 @@ def collect_nest_cascade_signals(cd: CL) -> List[Signal]:
     return out
 
 
+def collect_qs_beichi_candidates(cd: CL) -> List[Signal]:
+    """R78 真闭环:L0 进行中趋势底背驰段(provisional qs)+ 笔级一类买点确认 → 介入(1buy_nest)。
+
+    用 LevelResult.live_qs_divergence(右边缘 node1=leave 读法的 provisional qs 背驰段),
+    而非 done_divergence——后者在背驰段钉死时才可见、笔级确认已 stale(spec R78 实现关键细节)。
+    背驰段进行中(下跌)时,配对其内首次可见的笔级 1buy(底背驰,collect_branch_signals use_xd=False)
+    介入,免等线段级背驰段钉死。退出走结构失效(跌破中枢本体下沿 zs.dd,C5.41 力度证伪)。
+    对齐原文 27/61课区间套:背驰段进行中即下推次级别一类买点,不等中枢升级。"""
+    levels = cd.get_recursive_branch_levels()
+    l0 = next((lv for lv in levels if getattr(lv, "level", None) == 0), None)
+    if l0 is None:
+        return []
+    live_qs = getattr(l0, "live_qs_divergence", None) or []
+    if not live_qs:
+        return []
+    sub = collect_branch_signals(cd, use_xd=False, annotate_nest=False)
+    out: List[Signal] = []
+    for zs, dv in live_qs:
+        seg = getattr(dv, "leave_seg", None)
+        if seg is None or seg.start is None:
+            continue
+        seg_down = (getattr(seg, "type", None) == "down") or (getattr(seg, "dir", None) == "down")
+        if not seg_down:
+            continue
+        start_date = seg.start.k.date if getattr(seg.start, "k", None) is not None else None
+        for s in sub:
+            if s.bs_type != "1buy":
+                continue
+            if start_date is not None and s.date < start_date:
+                continue  # 确认须落在背驰段内(段起点之后)
+            out.append(Signal(
+                s.date, int(getattr(l0, "level", 0) or 0), "1buy_nest", s.price,
+                structural_stop_below=float(zs.dd) if zs.dd is not None else None,
+                zs_zd=float(zs.zd) if zs.zd is not None else None,
+                zs_zg=float(zs.zg) if zs.zg is not None else None,
+            ))
+            break
+    out.sort(key=lambda s: s.date)
+    return out
+
+
 def collect_dir_events(cd: CL, use_xd: bool = False) -> List[Tuple[pd.Timestamp, str]]:
     """[已废弃于门控,仅 validate 滞后实证用] 最终序列笔方向事件流 [(笔 start, dir)]。
 

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass, field
-from typing import Callable, List, Optional
+from typing import Callable, List, Optional, Tuple
 
 from chanlun.core.beichi_calculator import LdProvider
 from chanlun.core.cl_interface import LINE, ZS, ZSLX
@@ -32,6 +32,10 @@ class LevelResult:
     units: List[LINE] = field(default_factory=list)       # P5c:该级输入段序列(回试段定位)
     live_zss: List[ZS] = field(default_factory=list)      # 右边缘正在形成的未完成中枢(done=False)。
     # 纯图表展示用(虚线框);刻意不并入 zss——下游买卖点/走势类型只读已完成 zss,保「各级只用 done」不变量。
+    live_qs_divergence: List[Tuple[ZS, DivergenceResult]] = field(default_factory=list)
+    # R78 区间套真闭环:右边缘 node1=="leave" 读法(中枢完成、末段为离开段)的 provisional 趋势背驰段
+    # (kind=="qs" 且 is_beichi)。candidates 用「进行中背驰段」而非 done_divergence,避免回试钉死时
+    # 确认已过期的 stale(见 spec R78 实现关键细节)。同样只读不入 zss,不扰动既有信号链。
 
 
 def _as_units(zslxs: List[ZSLX]) -> List[ZSLX]:
@@ -117,10 +121,15 @@ class RecursiveBranchCalculator:
             # 不再走上面「无 done 放宽一档」分支,但仍要把这个未完成中枢带给图表(否则
             # 用户看不到正在形成的中枢)。只入 live_zss、不入 zss,不扰动买卖点/走势类型。
             forming = [h.zs for h in res.live if h.node1 == "core"]
+            live_qs = [
+                (h.zs, h.divergence) for h in res.live
+                if h.node1 == "leave" and h.divergence is not None
+                and h.divergence.is_beichi and h.divergence.kind == "qs"
+            ]   # R78:进行中趋势背驰段(离开读法、provisional qs 背驰),供区间套候选下推确认
             results.append(LevelResult(
                 level=level, zss=res.done_zss, done_divergence=res.done_divergence,
                 zslxs=zslxs, upgrade_idx=_mark_upgrades(res.done_zss), units=list(units),
-                live_zss=forming,
+                live_zss=forming, live_qs_divergence=live_qs,
             ))
             if len(zslxs) < 3:
                 break
