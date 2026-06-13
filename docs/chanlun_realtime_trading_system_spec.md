@@ -4725,3 +4725,7 @@ v9 预热信号变化：QQQ events 25→25（无 V 型失明，不变）、**NVD
 ### R78 第五层(最终)结论——真闭环方向定案(2026-06-13)
 
 追查 kuozhan_zhongshu(zs_upgrade.py:123)确证:扩张型 L1 中枢(is_kuozhan,行148)需两个完整 L0 中枢的包络重叠,第二个 L0 中枢完整时离开+回试早已过去,故扩张型升级天然滞后于价格(非 bug、非 pending 可解:扩张语义是两中枢关系而非 3 段重叠)。R78 真闭环不能依赖 kuozhan 升级的 L1 中枢,须新增独立检测:直接在 L0 摆动腿/中枢序列上识别趋势(>=2 同向中枢本体分离)+背驰段进行中,在背驰段内下推次级别笔级一类买点介入,这正是原文 27/61课区间套本义(背驰段进行中即下推、不等中枢升级;C5.38/C5.41 先假设进入背驰段可证伪)。当前 nest_cascade 用 get_kuozhan_levels 已升级 L1 中枢作候选基础是方向性偏差。R78 下一步=engine 新增 collect_qs_beichi_candidates(基于 L0 中枢趋势+背驰段,不经 kuozhan 升级),组件已备(is_qs/is_beichi/_swing_alternating_segs/笔级买点)。机制三层+五层诊断已扫清全部前置。
+
+### R78 实现关键细节(2026-06-13,collect_qs_beichi_candidates 必读)
+
+若用 l0.done_divergence(已完成趋势底背驰段)会遇到与 nest_cascade 相同的 stale 问题:背驰段在线段离开段钉死时才可见,那时笔级底背驰确认(低点)已是过去 bar,被 walk-forward first-seen/stale 丢弃。真闭环必须用 provisional(进行中)趋势背驰段(L0 live hypotheses,ZsHypothesis.divergence provisional=True),而 LevelResult(recursive_branch.py:25)当前只暴露 done_divergence、未暴露 live。前置:①get_recursive_branch_levels 暴露 L0 live provisional qs 底背驰段;②collect_qs_beichi_candidates 在 provisional 背驰段 active 时配对其后首次可见笔级 1buy(use_xd=False)介入;③退出走 C5.41 力度证伪。与 6b §3.1 状态机本质一致。
