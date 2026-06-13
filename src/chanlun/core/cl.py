@@ -613,7 +613,7 @@ class CL(ICL):
                 _log.warning("get_kuozhan_levels 买卖点/背驰 L%d 失败", lvl, exc_info=True)
                 bsp, bcs = [], []
             # **即使本级空也出层** → 前端菜单选项反映升级链(该周期可用级别)、非数据是否恰好有中枢。
-            out.append({"level": lvl, "zss": nz, "bsp": bsp, "bcs": bcs})
+            out.append({"level": lvl, "zss": nz, "bsp": bsp, "bcs": bcs, "lower": cur})
             cur = nz
         return out
 
@@ -628,23 +628,22 @@ class CL(ICL):
         if not chain:
             return []
         from chanlun.core.zs_upgrade import kuozhan_level_candidates
-        levels = self.get_recursive_branch_levels()
-        l0 = next((lv.zss for lv in levels if lv.level == 0), None)
-        if not l0:
-            return []
         wzgx = self._recursive_wzgx()
-        kl = self.get_kuozhan_levels()
+        kl = self.get_kuozhan_levels()      # 同一次计算:各级 zss 与其 lower 的 expanded_with 对象一致
         out = []
-        cur = l0
         for lvl, (_target, method) in enumerate(chain, start=1):
-            lv_zss = next((x["zss"] for x in kl if x["level"] == lvl), [])
-            if method == "kuozhan" and lv_zss and cur:
-                try:
-                    out.extend(kuozhan_level_candidates(
-                        lv_zss, cur, wzgx, self.frequency, level=lvl))
-                except Exception:
-                    pass
-            cur = lv_zss
+            lv = next((x for x in kl if x["level"] == lvl), None)
+            if lv is None or method != "kuozhan":
+                continue
+            zss = lv.get("zss") or []
+            lower = lv.get("lower") or []    # 用同次计算的 L0(非单独 get_recursive_branch_levels,
+            if not zss or not lower:         # 否则 id 不匹配 seg_of 查不到 → 候选恒空,R78 0 介入根因)
+                continue
+            try:
+                out.extend(kuozhan_level_candidates(
+                    zss, lower, wzgx, self.frequency, level=lvl))
+            except Exception:
+                pass
         return out
 
     def get_branch_interval_nest(self):
