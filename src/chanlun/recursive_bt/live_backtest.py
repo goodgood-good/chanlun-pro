@@ -928,8 +928,8 @@ def _walk_forward_signals_by_main_bar(
             frequency,
             _cl_config(
                 recursive_l0_min_zs_lines,
-                skip_legacy_mmd=(signal_source == "upgrade"),
-                skip_legacy_zslx=(signal_source == "upgrade"),
+                skip_legacy_mmd=(signal_source in ("upgrade", "nest_cascade")),
+                skip_legacy_zslx=(signal_source in ("upgrade", "nest_cascade")),
             ),
         )
         row_pos = 0
@@ -1424,8 +1424,8 @@ def build_symbol_from_klines(
             op_level,
             _cl_config(
                 recursive_l0_min_zs_lines,
-                skip_legacy_mmd=(signal_source == "upgrade"),
-                skip_legacy_zslx=(signal_source == "upgrade"),
+                skip_legacy_mmd=(signal_source in ("upgrade", "nest_cascade")),
+                skip_legacy_zslx=(signal_source in ("upgrade", "nest_cascade")),
             ),
         )
         cd_op.process_klines(df_op)
