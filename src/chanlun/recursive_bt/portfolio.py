@@ -486,6 +486,7 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
                        sell_ratio_overrides: Optional[Mapping[str, float]] = None,
                        sell_ratio_override_scope: str = "all",
                        sell_ratio_policy: str = "all_out",
+                       allow_nest_buy_big_down: bool = False,
                        after_3sell_reentry_buy_classes: Optional[set[int]] = None,
                        after_3sell_reentry_mid_buy_classes: Optional[set[int]] = None,
                        after_3sell_reentry_scope: str = "all",
@@ -719,9 +720,16 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
             return None
         big_down_activity = False
         if big_dir_now == "down":
-            if not _allow_big_down_activity(pick):
+            # R80 衰竭即放行(A2.28,默认关):big_dir==down 但买点是区间套 1buy_nest
+            # (L0 趋势底背驰=衰竭底,live_qs 已确认力度衰竭)→ 满仓放行,不受
+            # big_down_activity 拦截/减仓。原文「主跌段拦截、衰竭即放行」——live_qs
+            # 趋势底背驰正是衰竭判据;非衰竭的 big-down 买点仍走原拦截逻辑。
+            if allow_nest_buy_big_down and str(getattr(pick, "bs_type", "")) == "1buy_nest":
+                pass
+            elif not _allow_big_down_activity(pick):
                 return None
-            big_down_activity = True
+            else:
+                big_down_activity = True
         if "fund" in require and not s["fund_ok"][j]:
             return None
         value_relaxed = (

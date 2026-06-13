@@ -2195,6 +2195,7 @@ def run_backtest(args) -> tuple[dict, dict]:
         sell_ratio_overrides=args.sell_ratio_overrides,
         sell_ratio_override_scope=args.sell_ratio_override_scope,
         sell_ratio_policy=args.sell_ratio_policy,
+        allow_nest_buy_big_down=bool(getattr(args, "allow_nest_buy_big_down", False)),
         after_3sell_reentry_buy_classes=set(args.after_3sell_reentry_buy_classes)
         if args.after_3sell_reentry_buy_classes
         else None,
@@ -2246,6 +2247,15 @@ def make_arg_parser() -> argparse.ArgumentParser:
         help=(
             "all_out preserves legacy full sell behavior; original_layered uses "
             "level-aware partial exits while higher-level trend has not broken"
+        ),
+    )
+    parser.add_argument(
+        "--allow-nest-buy-big-down",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "R80 衰竭即放行(默认关):big_dir==down 但买点是区间套 1buy_nest(L0 趋势底背驰"
+            "=衰竭底)时满仓放行,不受 big-down 拦截。原文 A2.28;须 nest_cascade 源 + 全基线验证"
         ),
     )
     parser.add_argument(
