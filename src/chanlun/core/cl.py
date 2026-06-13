@@ -63,6 +63,13 @@ class CL(ICL):
         # None 表示不可用（开关关 / 无高周期 / 桶不足），query_macd_ld 回退原生。
         self._htf_macd: Union[dict, None] = None
         self._htf_macd_calculator: Union[HigherMACDCalculator, None] = None
+        # 递归装配 memo:get_recursive_branch_levels / get_branch_bspoints /
+        # get_kuozhan_levels / get_kuozhan_candidates 是无状态全量重算且互相调用,
+        # 一次 walk-forward 信号采集里被多个 collector 重复触发(nest_cascade 尤甚:
+        # upgrade+nest+qs 三流各自重算)。同一 CL 状态下结果恒等 → 按状态缓存,
+        # 新 K 线进来(_process_src_klines)即清空。消除「单次采集内」冗余重算
+        # (TSLA 97k bar nest_cascade O(n²)→实测瓶颈),结果不变、纯加速。
+        self._recursive_memo: dict = {}
         # 实例化笔计算器
         self.bi_calculator = BiCalculator(bi_mode = 'strict')
         # 实例化线段计算器
@@ -170,6 +177,7 @@ class CL(ICL):
     def _process_src_klines(self, src_klines: List[Kline]):
         if not src_klines:
             return self
+        self._recursive_memo.clear()   # 新 K 线 → 状态变,递归装配 memo 失效
 
         try:
             # 直接引用内部数据，避免 deepcopy
@@ -467,6 +475,9 @@ class CL(ICL):
         原文严格档 GD,定理二,见 _recursive_wzgx)。
         lazy 现算、不接 process_klines。返回 List[recursive_branch.LevelResult]。
         """
+        cached = self._recursive_memo.get("rbl")
+        if cached is not None:
+            return cached
         from chanlun.core.recursive_branch import RecursiveBranchCalculator
         ld = lambda s, e: query_macd_ld(self, s, e)
         wzgx = self._recursive_wzgx()
@@ -474,9 +485,11 @@ class CL(ICL):
         # L0 输入用线段(xds):线段中枢是缠论最低正式级别中枢(宪法 L0=线段),升级链由此起。
         # 笔中枢是更小的观察级别、不参与升级,单独走 get_bi_zhongshu。
         # (1m 标的线段稀疏→线段中枢少,但缠论正确;丰富的笔中枢另在观察层显示。)
-        return RecursiveBranchCalculator(l0_min_zs_lines=l0_min).calculate(
+        result = RecursiveBranchCalculator(l0_min_zs_lines=l0_min).calculate(
             list(self.get_xds()), ld, wzgx, self.frequency,
         )
+        self._recursive_memo["rbl"] = result
+        return result
 
     def get_bi_zhongshu(self):
         """笔中枢:新核心 zs_branch 直接在笔(bis)上找的中枢。
@@ -502,6 +515,10 @@ class CL(ICL):
         True=**线段**(图表「段买卖点」xd_mmds,与线段中枢同级)。原先恒用笔但图表标成「段」
         =笔买卖点冒充段买卖点(2026-06 用户指出),故拆成两级各算、各归其位。
         """
+        memo_key = ("bsp", bool(use_xd))
+        cached = self._recursive_memo.get(memo_key)
+        if cached is not None:
+            return cached
         from chanlun.core.recursive_branch import RecursiveBranchCalculator
         from chanlun.core.zs_branch import ZsBranchResult
         from chanlun.core.bs_branch import BsBranchCalculator
@@ -515,6 +532,7 @@ class CL(ICL):
             units, ld, wzgx, self.frequency,
         )
         if not levels:
+            self._recursive_memo[memo_key] = []
             return []
         l0 = levels[0]
         zr0 = ZsBranchResult(done_zss=l0.zss, live=[], freeze_idx=0,
@@ -525,6 +543,7 @@ class CL(ICL):
         pts += Bs2BranchCalculator().calculate(levels)                     # L1+ 二类(跨级·定律一)
         pts += [p for p in Bs3BranchCalculator().calculate(levels)
                 if p.level is not None and p.level >= 1]                   # L1+ 扩张三买(不重 L0)
+        self._recursive_memo[memo_key] = pts
         return pts
 
     def get_branch_bcs(self, use_xd: bool = False):
@@ -572,6 +591,9 @@ class CL(ICL):
         chain = self._UPGRADE_CHAIN.get(self.frequency, [])
         if not chain:
             return []
+        cached = self._recursive_memo.get("kuozhan_levels")
+        if cached is not None:
+            return cached
         from chanlun.core.zs_upgrade import (
             kuozhan_zhongshu, kuozhan_level_signals_ex,
             tongjibie_zhongshu_ex, tongjibie_level_signals,
@@ -615,6 +637,7 @@ class CL(ICL):
             # **即使本级空也出层** → 前端菜单选项反映升级链(该周期可用级别)、非数据是否恰好有中枢。
             out.append({"level": lvl, "zss": nz, "bsp": bsp, "bcs": bcs, "lower": cur})
             cur = nz
+        self._recursive_memo["kuozhan_levels"] = out
         return out
 
     def get_kuozhan_candidates(self):
@@ -627,6 +650,9 @@ class CL(ICL):
         chain = self._UPGRADE_CHAIN.get(self.frequency, [])
         if not chain:
             return []
+        cached = self._recursive_memo.get("kuozhan_candidates")
+        if cached is not None:
+            return cached
         from chanlun.core.zs_upgrade import kuozhan_level_candidates
         wzgx = self._recursive_wzgx()
         kl = self.get_kuozhan_levels()      # 同一次计算:各级 zss 与其 lower 的 expanded_with 对象一致
@@ -644,6 +670,7 @@ class CL(ICL):
                     zss, lower, wzgx, self.frequency, level=lvl))
             except Exception:
                 pass
+        self._recursive_memo["kuozhan_candidates"] = out
         return out
 
     def get_branch_interval_nest(self):
