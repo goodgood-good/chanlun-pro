@@ -6,7 +6,7 @@
 from chanlun.core.cl_interface import ZS, Config
 from chanlun.core.zs_upgrade import (
     is_kuozhan, kuozhan_zhongshu, kuozhan_level_signals_ex, _tongjibie_groups,
-    _tongjibie_candidate_groups, _jiehe_segments,
+    _tongjibie_candidate_groups, _jiehe_segments, kuozhan_level_candidates,
 )
 
 
@@ -353,6 +353,37 @@ def test_kuozhan_signals_ex_beichi_qs_1buy():
     assert [(d, v, k) for d, v, k in bcs] == [(None, 3.6, "qs")]
     one = [p for p in bsp if p.bs_type == "1buy"]
     assert len(one) == 1 and one[0].anchor_fx.val == 3.6
+
+
+# ---- kuozhan_level_candidates: 区间套介入候选(R78,离开冲出+回试未走出窗口) ----
+def test_kuozhan_candidates_3buy_when_leave_out_retest_pending():
+    """离开腿冲出 ZG=7.5、回试腿尚未走出(右边缘最后一腿)→ 产 3buy 候选;
+    同窗口 signals_ex 留白(retest=None 不产 3buy)——二者按 retest 是否走出互斥。"""
+    z0 = _l0(8, 9, 7.5, 9.5, 9.6, 9.4, 0)
+    z1 = _l0(5, 6, 4.5, 6.5, 6.6, 4.6, 4)
+    z2 = _l0(10, 11, 9.5, 11.5, 9.4, 11.4, 8)   # 上涨离开腿,冲出 ZG=7.5,右边缘最后一腿
+    z = _kz(6.5, 7.5, 4.5, 9.5, [z0, z1])
+    bsp, _ = kuozhan_level_signals_ex([z], [z0, z1, z2], None, Config.ZS_WZGX_ZGD.value)
+    assert bsp == []                              # signals_ex 此窗口留白
+    cands = kuozhan_level_candidates([z], [z0, z1, z2], Config.ZS_WZGX_ZGD.value)
+    assert len(cands) == 1
+    c = cands[0]
+    assert c.kind == "3buy" and c.zg == 7.5 and c.zd == 6.5 and c.invalid_below == 7.5
+
+
+def test_kuozhan_candidates_none_when_retest_walked_out():
+    """回试腿已走出 → signals_ex 接管(retest≠None),候选消失(互斥)。"""
+    lower, (z0, z1) = _v_shape_lower(7.6)
+    z = _kz(6.5, 7.5, 4.5, 9.5, [z0, z1])
+    assert kuozhan_level_candidates([z], lower, Config.ZS_WZGX_ZGD.value) == []
+
+
+def test_kuozhan_candidates_none_when_leave_not_formed():
+    """离开腿未形成(本体即末腿,无离开)→ 无候选。"""
+    z0 = _l0(8, 9, 7.5, 9.5, 9.6, 9.4, 0)
+    z1 = _l0(5, 6, 4.5, 6.5, 6.6, 4.6, 4)
+    z = _kz(6.5, 7.5, 4.5, 9.5, [z0, z1])
+    assert kuozhan_level_candidates([z], [z0, z1], Config.ZS_WZGX_ZGD.value) == []
 
 
 # ---- 同级别分解(30m): 3段走势类型重合=中枢,恰好3段不延伸(line24727/24735) ----

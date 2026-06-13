@@ -267,6 +267,76 @@ def kuozhan_level_signals_ex(zss: List[ZS], lower_zss: List[ZS], ld_provider, wz
     return bsp, bcs
 
 
+class NestCandidate:
+    """区间套介入候选(6b 设计 §3.1):大级别背驰类买点的「进行中」状态——
+    在大级别买卖点自身钉死前生成(解 L1 确认滞后 170-519 bar),供次级别确认下推介入。
+    纯结构、无未来:仅用当根可见的离开段端点判定。"""
+
+    __slots__ = ("kind", "level", "zs", "leave_end_date", "zg", "zd", "invalid_below")
+
+    def __init__(self, kind, level, zs, leave_end_date, zg, zd, invalid_below):
+        self.kind = kind
+        self.level = level
+        self.zs = zs
+        self.leave_end_date = leave_end_date
+        self.zg = zg
+        self.zd = zd
+        self.invalid_below = invalid_below
+
+    def __repr__(self):
+        return (f"NestCandidate({self.kind} L{self.level} "
+                f"zg={self.zg} zd={self.zd} inv<{self.invalid_below})")
+
+
+def kuozhan_level_candidates(zss, lower_zss, wzgx, frequency=None, level=1):
+    """右边缘区间套候选(只看最近中枢 zss[-1],对齐 v8「最近中枢」语义)。
+
+    候选 = 离开腿已冲出核心区上沿 ZG、但回试腿尚未走出(leave 是右边缘最后一腿、
+    retest=None)——kuozhan_level_signals_ex 此窗口正好留白(其 3buy 要 retest.end≥ZG)。
+    候选 active 期间由 collect_nest_cascade_signals(R78 后续)下推 L0 确认触发介入,
+    免去等回试腿钉死的 170-519 bar 滞后(6b 设计;原文 H.56 行13922「没必要等回抽走完,
+    在次级别第一类买点介入即可」)。
+
+    与 kuozhan_level_signals_ex 段定位口径一致(enter/leave/retest);二者按 retest
+    是否走出**互斥**:retest=None→本函数产候选、signals_ex 留白;retest 存在→signals_ex
+    接管、本函数不产。纯结构、无未来:仅用当根可见的 leave 段端点。
+
+    第一版只产 3buy 候选(回试腿未形成窗口)。1buy 候选(趋势背驰假设)、回试进行中
+    (retest provisional)更细窗口、3sell 镜像留后续(需 walk-forward 逐根语境)。
+    """
+    if not zss or not lower_zss:
+        return []
+    segs = _swing_alternating_segs(lower_zss)
+    seg_of = {}
+    for si, sg in enumerate(segs):
+        for zz in sg.zss:
+            seg_of[id(zz)] = si
+    n = len(segs)
+    z = zss[-1]
+    comp = list(getattr(z, "expanded_with", None) or [])
+    if not comp:
+        return []
+    s_seg = seg_of.get(id(comp[0]))
+    e_seg = seg_of.get(id(comp[-1]))
+    if s_seg is None or e_seg is None:
+        return []
+    if comp[-1] is segs[e_seg].zss[-1]:
+        leave = segs[e_seg + 1] if e_seg + 1 < n else None
+        retest = segs[e_seg + 2] if e_seg + 2 < n else None
+    else:
+        leave = _leg_sub_seg(segs[e_seg], comp[-1], "after")
+        retest = segs[e_seg + 1] if e_seg + 1 < n else None
+    out = []
+    if (leave is not None and leave.dir == "up" and retest is None
+            and leave.end is not None and leave.end.val >= z.zg):
+        out.append(NestCandidate(
+            "3buy", level, z,
+            leave.end.k.date if getattr(leave.end, "k", None) is not None else None,
+            z.zg, z.zd, z.zg,
+        ))
+    return out
+
+
 def _tongjibie_candidate_groups(zslxs) -> List[tuple]:
     """同级别分解审计候选:所有连续 3 段共同重合的三元组。
 
