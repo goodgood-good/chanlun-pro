@@ -156,6 +156,20 @@ class ZslxCalculator:
             None if not lines else self._line_sig(lines[-1]),
         )
 
+    @staticmethod
+    def backfill_zs_directions(zss: List[ZS]) -> None:
+        """笔层中枢方向回填(cl.py §3.6)——纯 per-zs 副作用:zs.type = 核心首段方向的反向
+        (第24课:向上走势的中枢=下-上-下→type=up)。**不依赖走势类型分组**:正常中枢
+        lines[0].type∈{up,down},_finalize 与缓存命中回放在此条件下等价(见 calculate 回放
+        分支),状态机的 direction/zd 分支是该前提下的死路。bi 流(cl.py)仅取此回填、走势
+        类型返回值被丢弃,故直调本方法可省去 zslx 全部签名+状态机+缓存开销(占 zslx 调用约半)。
+        等价性由 golden(快照含 zs.type)+ test_incremental_equivalence(bi_zss type)守。"""
+        for zs in zss:
+            zs_lines = getattr(zs, "lines", None)
+            head = zs_lines[0].type if zs_lines else None
+            if head in ("up", "down"):
+                zs.type = "up" if head == "down" else "down"
+
     def calculate(
         self,
         zss: List[ZS],

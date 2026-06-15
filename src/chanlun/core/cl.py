@@ -243,10 +243,10 @@ class CL(ICL):
                 if self.bi_zss_calculator.pending_zs is not None:
                     bi_zss.append(self.bi_zss_calculator.pending_zs)
             if bi_zss:
-                self.zslx_calculator.calculate(
-                    bi_zss, self.bi_calculator.bis, ld_provider, recursive_wzgx,
-                    self.frequency,
-                )
+                # bi 流仅需「中枢方向回填」副作用(走势类型返回值不消费,见上注释),直调
+                # 纯回填、不跑状态机/签名/缓存——回填是 per-zs(核心首段反向)、与完整
+                # zslx 等价(见 backfill_zs_directions),省去 bi 流全部 zslx 开销。
+                self.zslx_calculator.backfill_zs_directions(bi_zss)
 
             # 每次处理后重置缓存，确保下次访问时重新计算
             self._last_bi_zs = None
