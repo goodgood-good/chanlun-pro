@@ -347,16 +347,18 @@ class BiCalculator:
         # 因为分型需要 [i-1, i, i+1] 三根上下文。
         # _collect_fxs 已经按 1..N-1 扫描，重做这一段只针对新增段。
         new_fxs = self._incremental_collect_fxs(cl_klines, start=max(prev_len - 2, 1))
-        # 用新 fxs 替换原 fxs 的尾部（从 anchor_pos-1 之后的所有分型都重做）
-        # 找到 fxs 中 k.index < anchor_idx 的边界
-        keep_until = 0
-        for i, fx in enumerate(self.fxs):
-            if fx.k.index < anchor.index:
-                keep_until = i + 1
+        # 用新 fxs 替换原 fxs 的尾部（从 anchor_pos-1 之后的所有分型都重做）。
+        # keep_until = fxs 中 k.index < anchor.index 的数量。fxs 按 k.index 严格升序、
+        # 且 anchor 在尾部(prev_len-2)→变化区只是末尾一小段;故**从尾向前扫**(O(尾段)),
+        # 取代原从头全扫 O(F)(walk-forward 每根 O(F) → 整体 O(n²) 主源)。等价:升序下
+        # 「< anchor 的前缀」与「>= anchor 的后缀」互补,两向扫得同一边界。
+        keep_until = len(self.fxs)
+        for i in range(len(self.fxs) - 1, -1, -1):
+            if self.fxs[i].k.index >= anchor.index:
+                keep_until = i
             else:
                 break
-        kept_fxs = self.fxs[:keep_until]
-        # 给 new_fxs 重新编号（接续 kept_fxs）
+        # 给 new_fxs 重新编号（接续保留前缀）
         for offset, fx in enumerate(new_fxs):
             fx.index = keep_until + offset
         if keep_until == len(self.fxs) and not new_fxs:
@@ -367,7 +369,10 @@ class BiCalculator:
             for old, new in zip(old_tail, new_fxs)
         ):
             return True
-        self.fxs = kept_fxs + new_fxs
+        # 原地删尾 + extend(O(尾段))取代 kept_fxs + new_fxs 的 O(F) 切片+拼接;前缀 FX
+        # 对象不动,_rebuild_from_fxs 按 fxs **内容**(经 _fx_sig,非列表身份)增量,等价。
+        del self.fxs[keep_until:]
+        self.fxs.extend(new_fxs)
         # 笔状态机走持久栈增量(append-only,见 _build_endpoint_stack)
         self._rebuild_from_fxs(self.fxs, incremental=True)
         return True
