@@ -36,6 +36,10 @@ class BiCalculator:
         self._endpoint_stack: List[FX] = []
         self._endpoint_stack_n: int = 0
         self._endpoint_stack_tail_sig: Optional[tuple] = None
+        self._endpoint_stable_prefix: int = 0
+        # 持久笔列表(建笔增量):复用稳定前缀笔、只重建活跃尾部,消除每次全量
+        # _create_bi 的 O(n·B)。与 _endpoint_stack 对齐(len = 端点数 - 1)。
+        self._all_bis: List[BI] = []
 
     def _check_stroke_validity(self, fx1: FX, fx2: FX) -> bool:
         """检查两个分型是否能构成有效的一笔。"""
@@ -132,9 +136,11 @@ class BiCalculator:
         if can_incr:
             stack = self._endpoint_stack
             new_fxs = fxs[n:]
+            stable = len(stack)
         else:
             stack = []
             new_fxs = fxs
+            stable = 0
         for fx in new_fxs:
             while True:
                 if not stack:
@@ -145,6 +151,8 @@ class BiCalculator:
                     # 情形①：同类，保留更极端者
                     if self._is_more_extreme(fx, last):
                         stack.pop()
+                        if len(stack) < stable:
+                            stable = len(stack)
                         continue
                     break
                 # _check_stroke_validity 要求后者 K 线 index 更大；fxs 按
@@ -165,37 +173,42 @@ class BiCalculator:
                 # last 被 fx 与 prev 夹击、显得多余 → 弹出 last 与 prev
                 stack.pop()
                 stack.pop()
+                if len(stack) < stable:
+                    stable = len(stack)
                 continue
         self._endpoint_stack = stack
         self._endpoint_stack_n = len(fxs)
         self._endpoint_stack_tail_sig = self._fx_sig(fxs[-1]) if fxs else None
+        self._endpoint_stable_prefix = stable
         return stack
 
     def _rebuild_from_fxs(self, fxs: List[FX], incremental: bool = False):
-        """从分型列表用单调栈重建 confirmed_bis 与 pending_bi。
+        """从分型列表用单调栈重建笔列表(端点栈 + 建笔双增量)。
 
-        ``incremental=True``(档2 append-only 路径)→ 持久栈增量;档3 全量降级
-        用新 FX 对象,传 False 触发栈重置重建。
+        ``incremental=True``(档2 append-only)→ 持久栈增量 + 复用稳定前缀笔、
+        只重建活跃尾部笔;档3 全量降级用新 FX 对象,传 False 触发重置全建。
+
+        done 不再全量重置:笔 FX 的 ``done`` 仅 ``BI.is_done()`` 经 ``bi.end.done``
+        消费(XD 读的是自身 XLFX.done、非笔 FX),且 FX 新建默认 done=True;
+        ``_reindex_bis`` 会覆盖所有当前笔端点的 done(confirmed=True/pending=False),
+        非端点 FX 的残留 done 无人读,故省去原 O(F) 的全量 ``fx.done=True``。
         """
-        self.confirmed_bis = []
-        self.pending_bi = None
-
-        # 所有分型默认视作已完成（done=True）；done=False 仅用于标记最后一笔
-        # 未完成的终点（由 _reindex_bis 设置）。增量路径 _try_incremental_extend
-        # 会复用旧 FX 对象、其 done 可能残留上一轮的 False，故在重建笔之前
-        # 统一重置，保证增量与全量重放结果一致。
-        for fx in fxs:
-            fx.done = True
-
         endpoints = self._build_endpoint_stack(fxs, incremental=incremental)
 
-        all_bis: List[BI] = []
-        for i in range(len(endpoints) - 1):
-            all_bis.append(self._create_bi(endpoints[i], endpoints[i + 1], i, False))
+        # 端点栈稳定前缀 → 笔稳定前缀:bi[i] 用 endpoints[i] 与 endpoints[i+1],
+        # 故 endpoints[:stable] 稳定 ⇒ bi[:stable-1] 可复用、bi[stable-1:] 重建。
+        stable_bi = max(0, self._endpoint_stable_prefix - 1)
+        bis = self._all_bis
+        del bis[stable_bi:]
+        for i in range(stable_bi, len(endpoints) - 1):
+            bis.append(self._create_bi(endpoints[i], endpoints[i + 1], i, False))
 
-        if all_bis:
-            self.confirmed_bis = all_bis[:-1]
-            self.pending_bi = all_bis[-1]
+        if bis:
+            self.confirmed_bis = bis[:-1]
+            self.pending_bi = bis[-1]
+        else:
+            self.confirmed_bis = []
+            self.pending_bi = None
 
         self._reindex_bis()
 
@@ -254,6 +267,8 @@ class BiCalculator:
             self._endpoint_stack = []
             self._endpoint_stack_n = 0
             self._endpoint_stack_tail_sig = None
+            self._endpoint_stable_prefix = 0
+            self._all_bis = []
             return
 
         # 档 1：末根快照命中（数据完全没变）

@@ -108,9 +108,11 @@ def test_bi_xd_incremental_matches_batch(stem, limit):
 
 
 @pytest.mark.xfail(strict=False, reason=(
-    "已知既有差异:笔层中枢 bi_zss(type/line_num/start/边界)与部分 3 类买卖点 mmd "
-    "的增量路径与全量 batch 不等价(笔/段结构本身一致,见 test_bi_xd_*)。"
-    "独立于 P3 bi 性能优化,待另案排查(疑似 bi_zss 增量状态机或 process_mmd 签名缓存)。"
+    "既有差异(部分已随 bi 建笔增量缓解,故 strict=False 容忍 xpass):"
+    "「纯 mmd 差异」类(QQQ.US_30m/SH.600519_5m)已因建笔增量复用 BI 保留 mmds、"
+    "缓解 process_mmd 签名漏判而转一致(xpass);剩「bi_zss 差异」类"
+    "(SH.600519_d/QQQ.US_d/SH.600519_30m)笔层中枢 type/line_num/start/边界 仍≠batch。"
+    "笔/段结构始终严格一致见 test_bi_xd_*;bi_zss 增量状态机待另案(P4)。"
 ))
 @pytest.mark.parametrize("stem,limit", CASES)
 def test_full_snapshot_incremental_matches_batch(stem, limit):
