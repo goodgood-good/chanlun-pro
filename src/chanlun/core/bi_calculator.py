@@ -29,6 +29,13 @@ class BiCalculator:
         # _update_prefix_fingerprint（唯一赋值入口）调用，否则首次调用 AttributeError。
         self._last_processed_kline_count: int = 0
         self._last_prefix_fingerprint: Optional[tuple] = None
+        # 持久化单调端点栈(增量):fxs 在增量路径恒为 append-only(前缀不改写,见
+        # _try_incremental_extend,实测 rewrite-depth 恒 0),故维护持久栈,新分型
+        # 只续跑单调栈(均摊 O(1)/fx),消除每次全量重建的 O(F²)。全量降级(档3)
+        # 用新 FX 对象重建,故 incremental=False 时重置;末尾签名再做双保险。
+        self._endpoint_stack: List[FX] = []
+        self._endpoint_stack_n: int = 0
+        self._endpoint_stack_tail_sig: Optional[tuple] = None
 
     def _check_stroke_validity(self, fx1: FX, fx2: FX) -> bool:
         """检查两个分型是否能构成有效的一笔。"""
@@ -97,25 +104,38 @@ class BiCalculator:
         if self.pending_bi is not None:
             self.bis.append(self.pending_bi)
 
-    def _build_endpoint_stack(self, fxs: List[FX]) -> List[FX]:
-        """单调栈构造笔端点序列。
+    def _build_endpoint_stack(self, fxs: List[FX], incremental: bool = False) -> List[FX]:
+        """单调栈构造笔端点序列(持久栈增量版)。
 
-        按缠论原著第六节「笔」[119][123]，对每个分型跑一个 while 循环：
+        ``fxs`` 在增量路径(档2 _try_incremental_extend)恒为 append-only —— 前缀
+        不改写、仅尾部追加 0~1 个新分型(实测 rewrite-depth 恒 0)。故维护持久栈
+        ``self._endpoint_stack``:``incremental=True`` 且本次 fxs 是上次 append 扩展
+        (前 ``_endpoint_stack_n`` 个未变,O(1) 末尾签名校验)时只续跑新增分型
+        (均摊 O(1)/fx);否则(全量降级/校验失败)重置栈从头重建。消除原本每次
+        对全部分型重跑单调栈的 O(F²)。全量降级走新 FX 对象重建,故档3
+        ``_rebuild_from_fxs(incremental=False)`` 传 False。
+
+        单调栈语义(对每个分型跑 while 循环,逐字保留原情形①②③):
         - 情形①同类：与栈顶同类，更极端则取代栈顶，否则丢弃；
         - 情形②异类成笔：与栈顶异类且满足成笔条件 → 入栈；
-        - 情形③异类不成笔：栈顶是被新分型与其同类前驱夹击的「多余端点」
-          则弹出，否则（栈顶是创新高/新低的真端点，或新分型不够极端，
-          或栈不足 3 即 R1 兜底）丢弃新分型。
-
-        隔夜跳空导致的「真顶/真底贴太近」(如顶底分型共用 K 线) 会落入
-        情形③「丢弃新分型」分支，保持原著严格老笔行为。
-
-        不变量：返回的 stack 始终顶底严格交替。情形②入栈前 fx 与栈顶
-        异类，情形①/③的弹栈不会引入同类相邻。情形③取 stack[-2]/stack[-3]
-        正依赖此不变量（stack[-3] 必与栈顶同类、与 fx 异类）。
+        - 情形③异类不成笔：栈顶是被新分型与其同类前驱夹击的「多余端点」则弹出，
+          否则（真端点/新分型不够极端/栈不足 3 即 R1 兜底）丢弃新分型。
+        不变量：stack 始终顶底严格交替（情形③取 stack[-2]/stack[-3] 依赖此）。
         """
-        stack: List[FX] = []
-        for fx in fxs:
+        n = self._endpoint_stack_n
+        can_incr = (
+            incremental
+            and 0 < n <= len(fxs)
+            and self._endpoint_stack_tail_sig is not None
+            and self._fx_sig(fxs[n - 1]) == self._endpoint_stack_tail_sig
+        )
+        if can_incr:
+            stack = self._endpoint_stack
+            new_fxs = fxs[n:]
+        else:
+            stack = []
+            new_fxs = fxs
+        for fx in new_fxs:
             while True:
                 if not stack:
                     stack.append(fx)
@@ -146,10 +166,17 @@ class BiCalculator:
                 stack.pop()
                 stack.pop()
                 continue
+        self._endpoint_stack = stack
+        self._endpoint_stack_n = len(fxs)
+        self._endpoint_stack_tail_sig = self._fx_sig(fxs[-1]) if fxs else None
         return stack
 
-    def _rebuild_from_fxs(self, fxs: List[FX]):
-        """从分型列表用单调栈重建 confirmed_bis 与 pending_bi。"""
+    def _rebuild_from_fxs(self, fxs: List[FX], incremental: bool = False):
+        """从分型列表用单调栈重建 confirmed_bis 与 pending_bi。
+
+        ``incremental=True``(档2 append-only 路径)→ 持久栈增量;档3 全量降级
+        用新 FX 对象,传 False 触发栈重置重建。
+        """
         self.confirmed_bis = []
         self.pending_bi = None
 
@@ -160,7 +187,7 @@ class BiCalculator:
         for fx in fxs:
             fx.done = True
 
-        endpoints = self._build_endpoint_stack(fxs)
+        endpoints = self._build_endpoint_stack(fxs, incremental=incremental)
 
         all_bis: List[BI] = []
         for i in range(len(endpoints) - 1):
@@ -224,6 +251,9 @@ class BiCalculator:
             self._last_kline_snapshot = None
             self._last_processed_kline_count = 0
             self._last_prefix_fingerprint = None
+            self._endpoint_stack = []
+            self._endpoint_stack_n = 0
+            self._endpoint_stack_tail_sig = None
             return
 
         # 档 1：末根快照命中（数据完全没变）
@@ -323,8 +353,8 @@ class BiCalculator:
         ):
             return True
         self.fxs = kept_fxs + new_fxs
-        # 笔的状态机重放仍走全量（safer），但 _collect_fxs 的扫描量已经省下了
-        self._rebuild_from_fxs(self.fxs)
+        # 笔状态机走持久栈增量(append-only,见 _build_endpoint_stack)
+        self._rebuild_from_fxs(self.fxs, incremental=True)
         return True
 
     def _incremental_collect_fxs(self, cl_klines: List[CLKline], start: int) -> List[FX]:
