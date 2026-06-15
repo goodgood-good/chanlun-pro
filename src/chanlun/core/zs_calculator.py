@@ -49,6 +49,11 @@ class ZsCalculator:
         # 增量校验用的尾段快照 (index, start.val, end.val, done)，
         # 任一项变化都意味着前缀已改变，必须降级到全量重算。
         self._last_tail_snapshot: Optional[tuple] = None
+        # 上轮喂入的 lines 列表对象引用,供「末段变化但前缀稳定」时按 identity 二分
+        # 求公共前缀(_prefix_stable_restart),替代 11% 全量回退。仅当 lines 为
+        # 「变更换新列表」(bis 语义:bi_calculator 变更换新对象、prefix 对象身份保留)
+        # 时有效;xds 原地改 → lines is _last_lines_obj → 该路径自动让位全量。
+        self._last_lines_obj: Optional[List[LINE]] = None
 
     def calculate(self, lines: List[LINE]) -> List[ZS]:
         """
@@ -67,6 +72,7 @@ class ZsCalculator:
             self._last_lines_count = 0
             self._last_entry_idx = 0
             self._last_tail_snapshot = None
+            self._last_lines_obj = None
             return []
 
         # 检查线段数量：中枢最少由 min_zs_lines 段重叠构成（L0 线段中枢
@@ -75,6 +81,7 @@ class ZsCalculator:
         if len(lines) < self.min_zs_lines:
             self._last_lines_count = len(lines)
             self._last_tail_snapshot = self._build_tail_snapshot(lines)
+            self._last_lines_obj = lines
             return []
 
         # 判断是否为增量更新：除长度比较外，还要校验上次尾段在新 lines 里仍
@@ -88,17 +95,15 @@ class ZsCalculator:
         # 从提升后的 entry≥0 重启无法在中枢延伸到 6 段时 un-promote 回 entry=-1,
         # 会与全量(每次从 -1 重判)分叉(见 tests/chan_core/test_incremental_equivalence)。
         # 第一个中枢一旦完成进 self.zss 即定型(核心段不再延伸),此后增量安全。
-        is_incremental = (
+        grow = (
             self._last_lines_count > 0
             and len(lines) >= self._last_lines_count
             and bool(self.zss)
-            and prefix_unchanged
         )
 
-        if is_incremental:
-            # 增量回退点不能信 pending_zs.start.index：上游增量会重排 line.index。
-            # 改用业务唯一键 (start.val, start.k.k_index, type) 重新定位上次
-            # pending_zs 的进入段位置，定位失败则安全降级到全量。
+        if grow and prefix_unchanged:
+            # 末段也稳定:原增量路径。回退点不能信 pending_zs.start.index(上游增量
+            # 会重排 line.index),改用业务唯一键重定位,失败则安全降级全量。
             self.all_lines = lines
 
             restart_idx: Optional[int] = None
@@ -118,6 +123,10 @@ class ZsCalculator:
                 self.pending_zs = None
                 restart_idx = -1
             self._create_zs_full(start_entry_idx=restart_idx)
+        elif self._prefix_stable_restart(lines, grow):
+            # 末段变了但「换新列表 + identity 前缀稳定」:已在内部保留安全完成中枢、
+            # 从其 exit 重启,替代昂贵的 O(n) 全量回退(bi 笔层中枢主热点)。
+            pass
         else:
             # 全量模式（-1：从序列开头扫起，开头三段也可成中枢）
             self.zss = []
@@ -128,6 +137,7 @@ class ZsCalculator:
         # 更新增量状态
         self._last_lines_count = len(lines)
         self._last_tail_snapshot = self._build_tail_snapshot(lines)
+        self._last_lines_obj = lines
 
         # 组合并返回结果
         final_zss = self.zss.copy()
@@ -230,6 +240,56 @@ class ZsCalculator:
             return False
         if cand_done != prev_done:
             return False
+        return True
+
+    @staticmethod
+    def _identity_prefix_len(new_lines: List[LINE], old_lines: List[LINE]) -> int:
+        """二分求 new_lines 与 old_lines 的 identity 公共前缀长度 O(log L)。
+
+        依赖上游 rebuild 契约(bi/xd 均「删后缀 + 新建」):一次变更只换连续后缀对象、
+        共享前缀对象不动,故 ``new_lines[i] is old_lines[i]`` 在分歧点前恒真、之后
+        恒假(单调),可二分定位。仅在 new/old 为不同列表对象时调用(见 _prefix_stable_restart)。
+        """
+        lo, hi = 0, min(len(new_lines), len(old_lines))
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if new_lines[mid] is old_lines[mid]:
+                lo = mid + 1
+            else:
+                hi = mid
+        return lo
+
+    def _prefix_stable_restart(self, lines: List[LINE], grow: bool) -> bool:
+        """末段变化但前缀稳定时的增量重启(替代全量回退):返回 True 表示已处理。
+
+        仅当 ``lines`` 是「变更换新列表」(bis 语义:bi_calculator 变更时换新对象、
+        prefix 对象身份保留;xds 原地改 → lines is _last_lines_obj → 不适用,返回
+        False 让位全量)且与上轮存在 identity 公共前缀时启用。
+
+        保留 ``end.index + 1 < ident_lcp`` 的完成中枢——其核心段及「完成判定回看的
+        下一段 lines[end+1]」(两种完成路径均只回看 +1,见 _extend_and_check_complete)
+        全落在稳定前缀内,故 frozen 安全;从最后一个安全中枢的 exit 重启重扫,丢弃失效
+        pending 与不安全的尾部中枢。只复用**已完成**中枢 → 不触及开头中枢 promote 雷区
+        (与「必须有完成中枢才增量」不变量一致)。等价性由对拍网 test_incremental_equivalence 守。
+        """
+        if not grow or lines is self._last_lines_obj or self._last_lines_obj is None:
+            return False
+        ident_lcp = self._identity_prefix_len(lines, self._last_lines_obj)
+        keep = 0
+        restart_idx = -1
+        for k, zs in enumerate(self.zss):
+            e = zs.end.index if zs.end is not None else -1
+            if e >= 0 and e + 1 < ident_lcp:
+                keep = k + 1
+                restart_idx = e
+            else:
+                break
+        if keep <= 0 or not (0 <= restart_idx <= len(lines) - 4):
+            return False
+        del self.zss[keep:]
+        self.pending_zs = None
+        self.all_lines = lines
+        self._create_zs_full(start_entry_idx=restart_idx)
         return True
 
     def _create_zs_full(self, start_entry_idx: int = -1):
