@@ -92,6 +92,12 @@ class CL(ICL):
         # 签名同时覆盖 xd / bi 尾部，任一层变化都需重跑。
         self._last_mmd_sig: Union[tuple, None] = None
 
+        # bs_point 买卖点引擎持久实例(bi/xd 两层),跨 process_mmd 复用以承载增量
+        # 状态(① 增量化)。惰性创建(避开 cl<->bs_point 循环 import)。calculate 现为
+        # 无状态全量重算,复用实例与每次 new 行为完全一致(纯分配优化)。
+        self._bi_bsp = None
+        self._xd_bsp = None
+
         # 兼容运行时期望字段
         self.debug: bool = False
         self.use_time: dict = {}
@@ -895,13 +901,17 @@ class CL(ICL):
         bi 层 1 类(BsPointCalculator 据此走定律一路径)。bi 层无更细次级别,
         2 类走经验法兜底。任一层异常由 process_klines 外层 except 统一清理。
         """
-        from chanlun.core.bs_point_calculator import BsPointCalculator
+        # bs_point 引擎用持久实例(承载 ① 增量状态);惰性创建避开 cl<->bs_point 循环 import。
+        if self._bi_bsp is None:
+            from chanlun.core.bs_point_calculator import BsPointCalculator
+            self._bi_bsp = BsPointCalculator(self, zs_type='bi')
+            self._xd_bsp = BsPointCalculator(self, zs_type='xd')
 
         # --- 笔层(必须先跑,供 xd 层 2 类的定律一路径读取) ---
         bis = self.bi_calculator.bis
         bi_zss = self.get_bi_zss()
         if bis and bi_zss:
-            BsPointCalculator(self, zs_type='bi').calculate(bis, bi_zss)
+            self._bi_bsp.calculate(bis, bi_zss)
 
         # --- 线段层 ---
         xds = self.xd_calculator.xds
@@ -909,6 +919,6 @@ class CL(ICL):
         # 中枢，但趋势背驰常发生在最后一个中枢未完成时，否则末段买卖点会丢。
         xd_zss = self.get_xd_zss()
         if xds and xd_zss:
-            BsPointCalculator(self, zs_type='xd').calculate(xds, xd_zss)
+            self._xd_bsp.calculate(xds, xd_zss)
 
         return self
