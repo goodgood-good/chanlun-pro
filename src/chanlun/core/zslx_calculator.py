@@ -144,6 +144,16 @@ class ZslxCalculator:
         sig = self._signature(zss, lines, wzgx_config, frequency)
         cached = self._cache.get(sig)
         if cached is not None:
+            # 缓存命中:走势类型(返回值)可复用,但「中枢方向回填」是对传入 zss
+            # 的**副作用**(_finalize 按核心首段反向设 zs.type,第24课),仅在未命中
+            # 经 _finalize 执行。命中时传入的是 zs_calculator 本轮新建的中枢
+            # (zs.type 仍为 _create_zs 的占位 seg_b.type),必须在此重放回填,否则
+            # 与未命中路径分叉(cl.py:240 调本方法仅取副作用回填 bi_zss 方向;
+            # 见 tests/chan_core/test_incremental_equivalence 的 bi_zss type)。
+            for zs in zss:
+                head = zs.lines[0].type if getattr(zs, "lines", None) else None
+                if head in ("up", "down"):
+                    zs.type = "up" if head == "down" else "down"
             return cached
 
         wts: List[ZSLX] = []

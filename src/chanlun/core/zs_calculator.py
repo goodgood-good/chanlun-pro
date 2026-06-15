@@ -81,10 +81,17 @@ class ZsCalculator:
         # 存在且未变化。XdCalculator 增量时末段 done 可能翻转，仅看 len 会误走
         # 增量分支、从不再存在的 pending_zs 起点扫描而漏识别中枢。
         prefix_unchanged = self._tail_snapshot_consistent(lines)
+        # 必须有「已完成中枢」(self.zss 非空)才增量。仅有 pending 中枢(第一个
+        # 中枢尚未完成)时不可增量——开头中枢的进入段提升
+        # (_promote_opening_entry_if_needed:开头恰好 5 段→提升第1段为进入段、
+        # core 从第2段起 entry≥0;6 段则不提升 entry=-1)随段数变化且**不可逆**:
+        # 从提升后的 entry≥0 重启无法在中枢延伸到 6 段时 un-promote 回 entry=-1,
+        # 会与全量(每次从 -1 重判)分叉(见 tests/chan_core/test_incremental_equivalence)。
+        # 第一个中枢一旦完成进 self.zss 即定型(核心段不再延伸),此后增量安全。
         is_incremental = (
             self._last_lines_count > 0
             and len(lines) >= self._last_lines_count
-            and (self.zss or self.pending_zs)
+            and bool(self.zss)
             and prefix_unchanged
         )
 

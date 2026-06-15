@@ -14,12 +14,11 @@ bi/xd/zs 等 calculator,走「逐根增量喂」(``process_kline_values``)与「
    ``_build_endpoint_stack`` 改成「真增量」(只重放活跃尾部)的**贴身安全网**:
    任何笔/段分叉立即报警。
 
-2. ``test_full_snapshot_incremental_matches_batch``(xfail):**全快照**(含笔层
-   中枢 bi_zss / 线段中枢 xd_zss / 买卖点 mmd / 背驰 bcs)。当前存在**既有**的
-   增量≠全量差异 —— 笔层中枢的 type/line_num/start/边界 与部分 3 类买卖点在
-   增量路径下与全量 batch 不一致(而笔/段结构本身一致,见第 1 层)。此差异
-   **独立于 P3 笔计算性能优化**,疑似 bi_zss 增量状态机或 process_mmd 尾部签名
-   缓存所致,待另案排查;此处用 xfail 留痕,修复后会转 xpass 提醒摘标记。
+2. ``test_full_snapshot_incremental_matches_batch``:**全快照**(含笔层中枢
+   bi_zss / 线段中枢 xd_zss / 买卖点 mmd / 背驰 bcs)逐前缀完全一致。曾有既有
+   差异(bi_zss 笔层中枢方向/结构 + 部分 mmd),已由两处修复消除:① zs_calculator
+   第一个中枢未完成时不增量、全量从 -1 重判(开头中枢进入段提升随段数变化不可逆);
+   ② zslx_calculator 缓存命中时重放「中枢方向回填」副作用。5m 3000bar 加严 0 分叉。
 
 现有 ``test_golden_master`` 只钉一次性全量的**终态**,测不到中间每步的增量
 一致性,故另立此网。
@@ -107,16 +106,16 @@ def test_bi_xd_incremental_matches_batch(stem, limit):
         assert got == exp, f"{stem} L={L}:笔/段结构 增量 vs 全量 batch 分叉"
 
 
-@pytest.mark.xfail(strict=False, reason=(
-    "既有差异(部分已随 bi 建笔增量缓解,故 strict=False 容忍 xpass):"
-    "「纯 mmd 差异」类(QQQ.US_30m/SH.600519_5m)已因建笔增量复用 BI 保留 mmds、"
-    "缓解 process_mmd 签名漏判而转一致(xpass);剩「bi_zss 差异」类"
-    "(SH.600519_d/QQQ.US_d/SH.600519_30m)笔层中枢 type/line_num/start/边界 仍≠batch。"
-    "笔/段结构始终严格一致见 test_bi_xd_*;bi_zss 增量状态机待另案(P4)。"
-))
 @pytest.mark.parametrize("stem,limit", CASES)
 def test_full_snapshot_incremental_matches_batch(stem, limit):
-    """全快照(含 bi_zss/xd_zss/mmd/bcs):记录既有的增量≠全量差异(预期 xfail)。"""
+    """全快照(含 bi_zss/xd_zss/mmd/bcs):增量 vs 全量 batch 逐前缀完全一致。
+
+    曾有既有差异(bi_zss 笔层中枢方向/结构 + 部分 mmd),已由两处修复消除:
+    ① zs_calculator:第一个中枢未完成(pending)时不增量、全量从 -1 重判——
+       开头中枢进入段提升 _promote_opening_entry_if_needed 随段数变化且不可逆;
+    ② zslx_calculator:缓存命中时重放「中枢方向回填」副作用(否则新中枢 type
+       保持 _create_zs 占位)。SH.600519_5m 3000bar 加严全快照对拍亦 0 分叉。
+    """
     for L, si, sb in _iter_checkpoints(stem, limit):
         assert canonical_json(si) == canonical_json(sb), \
             f"{stem} L={L}:全快照 增量 vs 全量 batch 分叉"
