@@ -239,13 +239,15 @@ def query_macd_ld(cd: ICL, start_fx: FX, end_fx: FX):
         dif = np.array([0])
 
     hist_abs = abs(hist)
-    hist_up = np.array([_i for _i in hist if _i > 0])
-    hist_down = np.array([_i for _i in hist if _i < 0])
     hist_max = np.max(hist)
     hist_min = np.min(hist)
     hist_sum = hist_abs.sum()
-    hist_up_sum = hist_up.sum()
-    hist_down_sum = abs(hist_down.sum())
+    # 向量化正/负柱求和(原 Python 列表推导 [_i for _i in hist if ...] 是递归层背驰
+    # 力度查询的主热点:每段 O(段长) Python 循环 ×1.2万次/2000bar)。numpy 布尔索引
+    # 同序 ⇒ 求和逐位一致;hist_sum 仍由 abs().sum() 独立算(不从 up+down 推导)以保
+    # 浮点求和顺序不变、背驰比较结果不漂移。
+    hist_up_sum = hist[hist > 0].sum()
+    hist_down_sum = abs(hist[hist < 0].sum())
     end_dea = dea[-1]
     end_dif = dif[-1]
     end_hist = hist[-1]
