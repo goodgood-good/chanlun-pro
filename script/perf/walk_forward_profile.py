@@ -81,6 +81,65 @@ def scale(n1: int, n2: int):
     print(f"\n  bar 倍率 {ratio_n:.2f}x -> 时间倍率 {ratio_t:.2f}x  (标度指数 ~ {exp:.2f}; 1=线性, 2=O(n^2))")
 
 
+# 分函数标度诊断:这些核心组件的 cumtime 随 N 的标度指数(1=线性,2=O(n²)),
+# 用于精确定位「假增量」全量重建的真凶,而非只看某一规模下的绝对占比。
+KEY_FUNCS = [
+    ("bi_calculator.py", "calculate"),
+    ("bi_calculator.py", "_rebuild_from_fxs"),
+    ("bi_calculator.py", "_build_endpoint_stack"),
+    ("bi_calculator.py", "_collect_fxs"),
+    ("bi_calculator.py", "_try_incremental_extend"),
+    ("xd_calculator.py", "calculate"),
+    ("xd_calculator.py", "_build_segments"),
+    ("zs_calculator.py", "calculate"),
+    ("zslx_calculator.py", "calculate"),
+    ("bs_point_calculator.py", "calculate"),
+    ("cl.py", "process_mmd"),
+]
+
+
+def _func_snapshot(df: pd.DataFrame) -> dict:
+    """cProfile 一次,抽出 {(文件名, 函数名): (ncalls, tottime, cumtime)}。"""
+    pr = cProfile.Profile()
+    pr.enable()
+    _feed(df)
+    pr.disable()
+    ps = pstats.Stats(pr)
+    snap = {}
+    for (fn, _lineno, name), (_cc, nc, tt, ct, _callers) in ps.stats.items():
+        snap[(Path(fn).name, name)] = (nc, tt, ct)
+    return snap
+
+
+def _func_scale(n1: int, n2: int):
+    """各核心组件 cumtime 在 N1 vs N2 的标度指数,精确定位 O(n²) 真凶。"""
+    import math
+    snaps = {}
+    for n in (n1, n2):
+        df = _load(n)
+        print(f"[scale-fn] profiling {len(df)} bar ...")
+        snaps[n] = _func_snapshot(df)
+    rn = n2 / n1
+    print(f"\n  bar 倍率 {rn:.2f}x  (cumtime 标度指数:1=线性, 2=O(n^2))\n")
+    hdr = f"  {'file:func':<42}{'ncalls':>9}{'ct1(ms)':>10}{'ct2(ms)':>10}{'ratio':>8}{'exp':>6}"
+    print(hdr)
+    print("  " + "-" * (len(hdr) - 2))
+    for key in KEY_FUNCS:
+        s1 = snaps[n1].get(key)
+        s2 = snaps[n2].get(key)
+        label = f"{key[0]}:{key[1]}"
+        if not s1 or not s2:
+            print(f"  {label:<42}{'(missing)':>9}")
+            continue
+        ct1, ct2, nc2 = s1[2], s2[2], s2[0]
+        if ct1 > 0 and rn > 1:
+            r = ct2 / ct1
+            exp = math.log(r) / math.log(rn) if r > 0 else float('nan')
+        else:
+            r = exp = float('nan')
+        print(f"  {label:<42}{nc2:>9}{ct1*1000:>10.1f}{ct2*1000:>10.1f}{r:>8.2f}{exp:>6.2f}")
+
+
 def _timed(df: pd.DataFrame) -> float:
     t0 = time.perf_counter()
     _feed(df)
@@ -92,9 +151,14 @@ if __name__ == "__main__":
     ap.add_argument("--n", type=int, default=2000, help="喂入 bar 数(0=全量)")
     ap.add_argument("--top", type=int, default=30, help="cumtime top N")
     ap.add_argument("--scale", type=int, nargs=2, metavar=("N1", "N2"),
-                    help="缩放模式:量 N1 vs N2 墙钟,推断标度指数")
+                    help="缩放模式:量 N1 vs N2 墙钟,推断整体标度指数")
+    ap.add_argument("--scale-fn", type=int, nargs=2, metavar=("N1", "N2"),
+                    dest="scale_fn",
+                    help="分函数标度:量各核心组件 cumtime 在 N1 vs N2 的标度指数")
     a = ap.parse_args()
-    if a.scale:
+    if a.scale_fn:
+        _func_scale(a.scale_fn[0], a.scale_fn[1])
+    elif a.scale:
         scale(a.scale[0], a.scale[1])
     else:
         profile(a.n, a.top)
