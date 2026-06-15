@@ -148,22 +148,35 @@ class XdCalculator:
     def __init__(self, config: dict):
         self.config = config
         self.xds: List[XD] = []
-        self._last_bis_signature: Optional[tuple] = None
+        # 上轮喂入的 bis 列表对象。bi_calculator 在 bis 变更时换新列表、未变时返回
+        # 同一对象;且变更只「删后缀 + 新建」(_rebuild_from_fxs:del bis[stable:]),
+        # 共享前缀对象按 identity 保留。故可用 identity 二分(_identity_prefix_len)
+        # O(log B) 求公共前缀,取代原每次 O(B) 重建值签名 + O(B) 值-LCP 两处 O(n)
+        # (walk-forward 整体 O(n²) 主因之一,profiler 实测 _bi_signature 占 xd 69%)。
         self._last_bis_obj: Optional[List[BI]] = None
 
     @staticmethod
-    def _bi_signature(bis: List[BI]) -> tuple:
-        out = []
-        for bi in bis:
-            out.append((
-                bi.type,
-                getattr(bi.start.k, "index", None),
-                getattr(bi.end.k, "index", None),
-                bi.start.val,
-                bi.end.val,
-                bool(getattr(bi.end, "done", False)),
-            ))
-        return tuple(out)
+    def _identity_prefix_len(new_bis: List[BI], old_bis: Optional[List[BI]]) -> int:
+        """二分求 new_bis 与 old_bis 的 identity 公共前缀长度 O(log B)。
+
+        依赖 bi_calculator 的 rebuild 契约(_rebuild_from_fxs:del bis[stable:] + 新建):
+        一次变更只换连续后缀对象、共享前缀对象不动,故 ``new_bis[i] is old_bis[i]``
+        在分歧点前恒真、之后恒假(单调),可二分定位边界。
+
+        identity-match ⊆ value-match(同对象必同值),故返回值是「值意义公共前缀」的
+        保守下界:用作增量重启 LCP 时,>= restart_pos 即可安全复用线段前缀,偶有
+        保守降级到全量重建但输出恒等价(见 _incremental_restart)。
+        """
+        if old_bis is None:
+            return 0
+        lo, hi = 0, min(len(new_bis), len(old_bis))
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if new_bis[mid] is old_bis[mid]:
+                lo = mid + 1
+            else:
+                hi = mid
+        return lo
 
     # ----------------------------------------------------------
     # 公共接口
@@ -180,49 +193,48 @@ class XdCalculator:
         all_bis = bis
         if all_bis is self._last_bis_obj:
             return self.xds
-        sig = self._bi_signature(all_bis)
-        if sig == self._last_bis_signature:
+
+        old_bis = self._last_bis_obj
+        ident_lcp = self._identity_prefix_len(all_bis, old_bis)
+
+        # 脏检查:新列表但每根笔(按 identity)与上次完全一致 → 复用上轮线段。
+        # bi rebuild 必换尾部对象,正常不命中,留作正确性兜底(等价旧「值签名相等」分支)。
+        if (old_bis is not None and len(all_bis) == len(old_bis)
+                and ident_lcp == len(all_bis)):
             self._last_bis_obj = all_bis
             return self.xds
 
         if len(all_bis) < 3:
             self.xds.clear()
-            self._last_bis_signature = sig
             self._last_bis_obj = all_bis
             return self.xds
 
-        restart = self._incremental_restart(all_bis, sig)
+        restart = self._incremental_restart(all_bis, ident_lcp)
         if restart is not None:
             self._build_segments(all_bis, restart)
         else:
             self.xds.clear()
             self._build_segments(all_bis, self._find_start(all_bis))
 
-        self._last_bis_signature = sig
         self._last_bis_obj = all_bis
         return self.xds
 
-    def _incremental_restart(self, all_bis: List[BI], new_sig: tuple) -> Optional[int]:
+    def _incremental_restart(self, all_bis: List[BI], ident_lcp: int) -> Optional[int]:
         """段增量重启点:保留稳定段前缀、返回需重算的起点笔位置;不可增量返回 None。
 
         回溯拆分深度恒 ≤1 → 删末 2 段(留 1 段 buffer)、从倒数第 2 段起点重算。
-        笔 append-only 前提用签名前缀 LCP 校验:重算起点之前的笔须全部未变,
-        否则(bi 档3 全量降级改了前缀)降级全量。
+        ``ident_lcp`` 为 new/old bis 的 identity 公共前缀长度(_identity_prefix_len),
+        是「值意义公共前缀」的保守下界:>= restart_pos 即证重算起点之前的笔全未变、
+        可安全复用线段前缀;否则(bi 档3 全量降级改了前缀,或保守起见)降级全量。
+        原 O(B) 值-LCP 循环由 O(log B) 二分等价替代(identity ⊆ value,只会更保守)。
         """
-        old_sig = self._last_bis_signature
-        if old_sig is None or len(self.xds) < 3:
+        if self._last_bis_obj is None or len(self.xds) < 3:
             return None
         keep = len(self.xds) - 2
         restart_pos = self.xds[keep].start_line.index
         if restart_pos < 1 or restart_pos >= len(all_bis):
             return None
-        lcp = 0
-        for a, b in zip(old_sig, new_sig):
-            if a == b:
-                lcp += 1
-            else:
-                break
-        if lcp < restart_pos:
+        if ident_lcp < restart_pos:
             return None
         del self.xds[keep:]
         return restart_pos
