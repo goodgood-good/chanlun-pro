@@ -15,6 +15,7 @@ from __future__ import annotations
 import copy
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
+from weakref import WeakKeyDictionary
 
 from chanlun.core.types import LINE, ZS, Config
 from chanlun.core.zs_calculator import ZsCalculator
@@ -216,6 +217,10 @@ class ZsBranchCalculator:
         # done 中枢离开段背驰缓存(值签名 key):稳定中枢的 a/c 段+prev 不变 → is_beichi
         # (含 query_macd_ld)结果冻结、跨 K 复用,免对所有中枢每 K 重判背驰。见 _divergence_for。
         self._div_cache: dict = {}
+        # 进入/离开段校正缓存(按底层中枢身份):稳定中枢冻结(correct_* 返副本不 mutate 底层、
+        # ZsCalculator 稳定前缀冻结)→ 校正结果确定、跨 K 复用,免对所有中枢每 K 重算。WeakKeyDict
+        # 弱键中枢 GC 自动剔除;未改动存哨兵(而非中枢本身)以免强值钉住弱键。见 _corrected。
+        self._correct_cache: "WeakKeyDictionary[ZS, object]" = WeakKeyDictionary()
 
     def calculate(self, lines: List[LINE]) -> ZsBranchResult:
         if not lines:
@@ -228,7 +233,7 @@ class ZsBranchCalculator:
         zc.calculate(lines)
         # 进入段/离开段校正（原文口径）：把误当核心的升/跌入段(进入段)、定向冲出的
         # 离开段从中枢本体剥出（进入段 → z.start，离开段 → z.end）
-        done: List[ZS] = [correct_exit(correct_entry(z, self.min_zs_lines)) for z in zc.zss]
+        done: List[ZS] = [self._corrected(z) for z in zc.zss]
         pending: Optional[ZS] = zc.pending_zs    # 右边缘进行中中枢（单解，无离开段）
         if pending is not None:
             pending = correct_entry(pending, self.min_zs_lines)
@@ -286,7 +291,18 @@ class ZsBranchCalculator:
         d = is_qs(prev_zs, zs, self.wzgx, use_core_envelope=True)
         return d is not None and d == leave.type
 
-    _DIV_MISS = object()    # 背驰缓存"未命中"哨兵(区分缓存的 None 结果)
+    _DIV_MISS = object()             # 背驰缓存"未命中"哨兵(区分缓存的 None 结果)
+    _CORRECT_UNCHANGED = object()    # 校正缓存"无改动"哨兵(见 _corrected)
+
+    def _corrected(self, z: ZS) -> ZS:
+        """correct_entry/exit 的身份缓存包装(见 __init__):底层中枢冻结时跨 K 复用校正结果。
+        未改动(correct_* 原样返回 z)时缓存哨兵、返回 z,以免弱键被强值(z 本身)钉住不 GC。"""
+        hit = self._correct_cache.get(z)
+        if hit is not None:
+            return z if hit is self._CORRECT_UNCHANGED else hit
+        done_z = correct_exit(correct_entry(z, self.min_zs_lines))
+        self._correct_cache[z] = self._CORRECT_UNCHANGED if done_z is z else done_z
+        return done_z
 
     @staticmethod
     def _div_key(zs: ZS, c: LINE, prev_zs: Optional[ZS]):
