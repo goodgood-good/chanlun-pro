@@ -195,10 +195,8 @@ tests/fixtures/klines/
 tests/core/baselines.local.json
 *.gz
 *.md
-# 例外: docs/ 下的 md 是主日志(每轮必追加)与设计/判据文档, 核心资产必须入库;
-# 126MB 原文 docx 不匹配 *.md, 不受影响
-!docs/*.md
-!docs/**/*.md
+# 知识库配图(1061张~100MB)由 docx 经 tools/build_kb.py 再生, 不入库
+knowledge_base/images/
 */.omc/
 /tmp/
 
