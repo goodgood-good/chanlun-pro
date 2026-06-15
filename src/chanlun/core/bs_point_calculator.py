@@ -67,6 +67,17 @@ class BsPointCalculator:
         self.strict_3_mode = strict_3_mode
         self.min_signal_interval = min_signal_interval
 
+        # ① 增量化:仅 bi 层持久实例启用(xd/L 层 + fresh 实例无前轮状态恒走全量 P=0)。
+        # 3 检测器跨轮累积状态改为实例字段,并按「提交该条目的 line.index」记录值;增量重启
+        # 时过滤掉 value >= 重启点 P 的尾部条目即复原到「as-of P」(检测器全 backward-only:
+        # 一条线的买卖点只依赖其之前的线/中枢/状态,故前缀稳定 + 状态复原即等价全量)。
+        self._inc_enabled = (zs_type == 'bi')
+        self._st_1buy: dict = {}   # (type, ref_zs.index) -> 最近 1 类信号 line.index
+        self._st_2buy: dict = {}   # (anchor.type, anchor.index) -> 该锚点 2 类回抽 line.index
+        self._st_3buy: dict = {}   # (zs.index, name) -> 首次回抽/回拉 line.index(含失败触碰)
+        self._last_lines_obj = None
+        self._last_zss_obj = None
+
     # ------------------------------------------------------------------
     # 主入口
     # ------------------------------------------------------------------
@@ -78,14 +89,25 @@ class BsPointCalculator:
         :param zss: 本级别已识别的中枢列表（来自 ``ZsCalculator.calculate``）
         """
         if not lines:
+            self._reset_bsp_state()
+            self._last_lines_obj = None
+            self._last_zss_obj = None
             return
 
-        # 每次 calculate 先抹掉上一轮在本级别识别的买卖点/背驰,再从零重算。
-        # BsPointCalculator 是无状态纯重算引擎,process_mmd 每轮增量都会调用它;
-        # 不清空就直接 append,买卖点会随增量轮数成倍累积 —— 去重无法跨轮可靠
-        # 生效(ZS 对象每轮重建,mmd.zs is zs 身份比较恒失效)。清空后增量结果
-        # 恒等于一次性全量计算。
-        self._clear_previous_results(lines)
+        # ① 增量重启点 P(仅 bi 层持久实例可 >0):lines[0:P] 的买卖点/背驰可原样保留
+        # (3 检测器 backward-only + 前缀 lines/zss 稳定 + 状态复原到 as-of P)。P=0 即
+        # 退化为原「无状态全量重算」。BsPointCalculator 原每轮全清重算、增量结果恒等于
+        # 一次性全量;持久化 + 状态复原后改为只重放活跃尾部 [P:],等价不变(对拍网守)。
+        P = self._bsp_restart_point(lines, zss) if zss else 0
+        if P > 0:
+            self._clear_previous_results(lines, start=P)   # 只清尾部,前缀 mmd 保留
+            self._restore_bsp_state(P)                     # 状态复原到 as-of P
+        else:
+            self._clear_previous_results(lines)
+            self._reset_bsp_state()
+        # 记录本轮输入对象供下次增量 identity 比对(zss 空也更新,避免下次 LCP 失真)。
+        self._last_lines_obj = lines
+        self._last_zss_obj = zss
 
         if not zss:
             return
@@ -96,12 +118,13 @@ class BsPointCalculator:
         # prev_1line.low) 不依赖 zss, 必须跑完整套 detect。
         clean_zss, start_keys = self._build_zss_index(zss)
 
-        # 顺序不可调整：2buy 依赖 1buy 已被识别（通过 mmd_exists 反查）
-        self._detect_1buy_1sell(lines, zss, clean_zss, start_keys)
-        self._detect_2buy_2sell(lines, zss, clean_zss, start_keys)
-        self._detect_3buy_3sell(lines, zss, clean_zss, start_keys)
+        # 顺序不可调整：2buy 依赖 1buy 已被识别（通过 mmd_exists 反查）。
+        # start=P:增量时只从重启点起重放(前缀检测结果已保留、状态已复原)。
+        self._detect_1buy_1sell(lines, zss, clean_zss, start_keys, start=P)
+        self._detect_2buy_2sell(lines, zss, clean_zss, start_keys, start=P)
+        self._detect_3buy_3sell(lines, zss, clean_zss, start_keys, start=P)
 
-    def _clear_previous_results(self, lines: List[LINE]) -> None:
+    def _clear_previous_results(self, lines: List[LINE], start: int = 0) -> None:
         """清空 ``lines`` 上 ``self.zs_type`` 维度的旧买卖点与背驰。
 
         ``BsPointCalculator`` 的结果只写入 ``LINE.zs_type_mmds`` /
@@ -112,7 +135,7 @@ class BsPointCalculator:
         同名桶写入自定义买卖点,此处整桶清空会静默吞掉它们 —— 那种场景
         应改用独立的 zs_type key。
         """
-        for line in lines:
+        for line in lines[start:]:
             old_mmds = list(getattr(line, 'zs_type_mmds', {}).get(self.zs_type, []))
             old_bcs = list(getattr(line, 'zs_type_bcs', {}).get(self.zs_type, []))
             if getattr(line, 'default_zs_type', None) == self.zs_type:
@@ -124,6 +147,87 @@ class BsPointCalculator:
                     line.bcs = [bc for bc in line.bcs if id(bc) not in old_bc_ids]
             line.zs_type_mmds[self.zs_type] = []
             line.zs_type_bcs[self.zs_type] = []
+
+    # ------------------------------------------------------------------
+    # ① 增量重启:重启点 + 状态复原
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _identity_prefix_len(new_seq, old_seq) -> int:
+        """二分求 new/old 序列的 identity 公共前缀长度 O(log n)。
+
+        依赖上游 rebuild 契约(bi 笔/bi_zss 完成中枢均「换新列表/对象、共享前缀身份
+        保留」):一次变更只换连续后缀对象,故 ``new[i] is old[i]`` 单调,可二分。
+        """
+        if old_seq is None:
+            return 0
+        lo, hi = 0, min(len(new_seq), len(old_seq))
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if new_seq[mid] is old_seq[mid]:
+                lo = mid + 1
+            else:
+                hi = mid
+        return lo
+
+    @staticmethod
+    def _zs_anchor_k(zs: ZS):
+        """中枢时间锚 k_index(进入段起点;无进入段用首核心段起点),与 _build_zss_index
+        一致。取不到返回 None。"""
+        start_line = zs.start
+        if start_line is None and getattr(zs, 'lines', None):
+            start_line = zs.lines[0]
+        if start_line is None or start_line.start is None:
+            return None
+        try:
+            return start_line.start.k.k_index
+        except AttributeError:
+            return None
+
+    def _reset_bsp_state(self) -> None:
+        self._st_1buy = {}
+        self._st_2buy = {}
+        self._st_3buy = {}
+
+    def _restore_bsp_state(self, p: int) -> None:
+        """复原 3 检测器状态到「as-of P」:只保留 value(提交时 line.index) < P 的条目,
+        丢弃上轮尾部 [P:] 的贡献(那些线本轮重算)。"""
+        self._st_1buy = {k: v for k, v in self._st_1buy.items() if v < p}
+        self._st_2buy = {k: v for k, v in self._st_2buy.items() if v < p}
+        self._st_3buy = {k: v for k, v in self._st_3buy.items() if v < p}
+
+    def _bsp_restart_point(self, lines: List[LINE], zss: List[ZS]) -> int:
+        """增量重启点 P:lines[0:P] 买卖点可保留。仅 bi 层持久实例可 >0,否则 0(全量)。
+
+        约束取交集(全 backward-only,无需前瞻 buffer,仅留 1 段防 off-by-one):
+          - bis identity 公共前缀 d_lines(bi_calculator 变更换新列表、前缀对象身份保留);
+          - zss 稳定:首个「非 identity 稳定」中枢(含每轮变化的 pending)的时间锚 k 之后
+            的线,其 valid_zss 触及该变化中枢 → 不安全,P 须 ≤ 这些线之前。
+        任一前提不满足(首次/对象未换/锚取不到)→ 0,安全退化全量。
+        """
+        if not self._inc_enabled or self._last_lines_obj is None:
+            return 0
+        if lines is self._last_lines_obj:
+            return 0  # 列表对象未换(理论上 process_mmd 仅在变化时触发),保守全量
+        p = self._identity_prefix_len(lines, self._last_lines_obj)
+        if self._last_zss_obj is not None and zss is not self._last_zss_obj:
+            d_zss = self._identity_prefix_len(zss, self._last_zss_obj)
+            if d_zss < len(zss):
+                thr = self._zs_anchor_k(zss[d_zss])
+                if thr is None:
+                    return 0
+                # bis 的 end.k.k_index 随笔序单调升;从 min(p,len)-1 向前找首个 < thr 的笔,
+                # 其位置+1 即「valid_zss 全在稳定中枢前缀内」的安全线数上界。
+                bound = 0
+                for i in range(min(p, len(lines)) - 1, -1, -1):
+                    try:
+                        ek = lines[i].end.k.k_index
+                    except AttributeError:
+                        return 0
+                    if ek < thr:
+                        bound = i + 1
+                        break
+                p = min(p, bound)
+        return max(0, min(p, len(lines)) - 1)
 
     # bisect 二分辅助 (供 _detect_* 复用)
     @staticmethod
@@ -303,6 +407,7 @@ class BsPointCalculator:
         zss: List[ZS],
         clean_zss: Optional[List[ZS]] = None,
         start_keys: Optional[List[int]] = None,
+        start: int = 0,
     ) -> None:
         """
         第一类买卖点 = 趋势背驰（直接复用 ``cl.beichi_qs``）
@@ -326,9 +431,10 @@ class BsPointCalculator:
         # 信号最小间隔过滤：记录每个 (type, zs_index) 维度上"最近一次"已识别的
         # 1 类信号 xd index，丢弃间隔 < min_signal_interval 的后续同类信号，
         # 避免同一波趋势背驰被密集多次报点。
-        last_signal_xd_idx: dict[tuple[str, int], int] = {}
+        # 增量:复用实例级持久状态(已由 _restore_bsp_state 复原到 as-of start)。
+        last_signal_xd_idx = self._st_1buy
 
-        for now_line in lines:
+        for now_line in lines[start:]:
             # 防未来函数：每个 now_line 只能用自身形成前已存在的中枢判定，否则
             # beichi_qs 内部 zss[-2:] 会让历史 xd 用未来中枢做对照（事后追认），
             # 同一 xd 在不同快照下被反复识别。切片规则：zs.start 进入段起点 K
@@ -429,6 +535,7 @@ class BsPointCalculator:
         zss: List[ZS],
         clean_zss: Optional[List[ZS]] = None,
         start_keys: Optional[List[int]] = None,
+        start: int = 0,
     ) -> None:
         """
         第二类买卖点 = 一类买卖点后的反抽再回调（不创新低/高），或盘整背驰
@@ -459,8 +566,9 @@ class BsPointCalculator:
 
         # 原文「2 买 = 1 买后**首次**次级别回抽」：每个 1 买锚点只产一次 2 买，
         # 后续不破前低的回抽属中枢震荡，不再重复记 2 买（否则一波震荡里一个 1 买
-        # 会刷出十几个 2 买）。key = id(锚点线段)。
-        attached_2_anchors: set = set()
+        # 会刷出十几个 2 买）。key 改 (anchor.type, anchor.index) 业务键(增量跨轮稳定,
+        # 不用 id);value = 该锚点 2 买回抽 line.index。复用实例级持久状态(已复原到 as-of start)。
+        attached_2_anchors = self._st_2buy
 
         # 增量化(消除 _find_recent_1mmd_lines per-line 倒扫 O(n²)):1 类信号此时已
         # 全挂好且本方法不改它 → 预建按方向的 1mmd 线池一次,循环内 O(log) 查询。
@@ -476,7 +584,8 @@ class BsPointCalculator:
             if self.zs_type == 'xd' else None
         )
 
-        for i, now_line in enumerate(lines):
+        for i in range(start, len(lines)):
+            now_line = lines[i]
             if i < 2:
                 # 二买/二卖至少需要 1 个一买 + 1 段反抽 + 当前段 = 3 段
                 continue
@@ -536,7 +645,7 @@ class BsPointCalculator:
                 if i - prev_1line.index < 2:
                     continue
                 # 首次回抽约束：该 1 买锚点已产过 2 买 → 跳过(后续回抽属中枢震荡)
-                if id(prev_1line) in attached_2_anchors:
+                if (prev_1line.type, prev_1line.index) in attached_2_anchors:
                     continue
 
                 # ---- 条件 A：不创新低 / 不创新高（强条件，边界宽容：>= / <=）----
@@ -601,7 +710,7 @@ class BsPointCalculator:
                     zs_type=self.zs_type,
                     msg=msg,
                 )
-                attached_2_anchors.add(id(prev_1line))  # 标记该锚点已产 2 买(首次回抽)
+                attached_2_anchors[(prev_1line.type, prev_1line.index)] = now_line.index  # 标记该锚点已产 2 买(首次回抽)
                 LogUtil.debug(lambda:
                     f"[BsPointCalculator] 识别到 {mmd_name}: line.index={now_line.index}, "
                     f"prev_1line.index={prev_1line.index}, msg={msg}"
@@ -690,6 +799,7 @@ class BsPointCalculator:
         zss: List[ZS],
         clean_zss: Optional[List[ZS]] = None,
         start_keys: Optional[List[int]] = None,
+        start: int = 0,
     ) -> None:
         """
         第三类买卖点 = 中枢形成后，离开中枢的次级别走势 + 反抽不回中枢区间 [ZG, ZD]
@@ -713,7 +823,8 @@ class BsPointCalculator:
         """
         # first-touch 守卫:每个中枢每种 3 类信号只处理第一次回抽/回拉(原文 kobo.61.1)。
         # key = (zs.index, mmd_name); value = 首次回抽/回拉的 now_line.index。
-        first_return_seen: dict[tuple[int, str], int] = {}
+        # 复用实例级持久状态(已复原到 as-of start);含「失败触碰」项故不可从 mmds 重建。
+        first_return_seen = self._st_3buy
 
         # 增量化(消除 O(n²)):related_zs == _find_related_zs_for_3rd 的结果 ==
         # 「zs.end.index 最大且 < now_line.index(cond-C)」的结构合格中枢。
@@ -731,7 +842,7 @@ class BsPointCalculator:
         )
         _elig_end_idx = [zs.end.index for zs in _elig]
 
-        for now_line in lines:
+        for now_line in lines[start:]:
             _k = bisect.bisect_left(_elig_end_idx, now_line.index)
             related_zs = _elig[_k - 1] if _k > 0 else None
             if related_zs is None:
