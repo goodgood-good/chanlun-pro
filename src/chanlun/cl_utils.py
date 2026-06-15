@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 
 from chanlun import fun
-from chanlun.core.cl_interface import BI, FX, ICL, LINE, MACD_INFOS, ZS, Config, Kline
+from chanlun.core.types import BI, FX, ICL, LINE, MACD_INFOS, ZS, Config, Kline
 from chanlun.core.macd import MACD
 from chanlun.db import db
 from chanlun.exchange import exchange

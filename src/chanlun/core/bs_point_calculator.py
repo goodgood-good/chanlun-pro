@@ -12,7 +12,7 @@ from __future__ import annotations
 import bisect
 from typing import List, Optional, Tuple, TYPE_CHECKING
 
-from chanlun.core.cl_interface import LINE, ZS
+from chanlun.core.types import LINE, ZS
 from chanlun.tools.log_util import LogUtil
 
 if TYPE_CHECKING:

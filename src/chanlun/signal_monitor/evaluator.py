@@ -14,7 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, List
 
-from chanlun.core.cl_interface import ICL, LINE
+from chanlun.core.types import ICL, LINE
 from chanlun.signal_monitor.cl_signal import (
     DIRECTION_BEARISH,
     DIRECTION_BULLISH,

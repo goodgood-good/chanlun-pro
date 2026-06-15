@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 from typing import List, Optional
 
-from chanlun.core.cl_interface import FX, BI, CLKline
+from chanlun.core.types import FX, BI, CLKline
 
 
 class BiCalculator:

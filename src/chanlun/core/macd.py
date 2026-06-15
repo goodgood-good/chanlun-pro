@@ -6,7 +6,7 @@
 """
 from typing import List, Dict
 import pandas as pd
-from chanlun.core.cl_interface import Kline
+from chanlun.core.types import Kline
 
 
 class MACD:

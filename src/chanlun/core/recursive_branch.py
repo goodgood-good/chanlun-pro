@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from typing import Callable, List, Optional, Tuple
 
 from chanlun.core.beichi_calculator import LdProvider
-from chanlun.core.cl_interface import LINE, ZS, ZSLX
+from chanlun.core.types import LINE, ZS, ZSLX
 from chanlun.core.zs_branch import DivergenceResult, ZsBranchCalculator, classify_rel
 from chanlun.core.zslx_branch import ZslxBranchCalculator
 

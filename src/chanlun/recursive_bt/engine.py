@@ -449,7 +449,7 @@ def collect_branch_signals(
         if not hasattr(cd, "get_bis") or not hasattr(cd, "config"):
             return cd.get_branch_interval_nest()
         from chanlun.core.beichi_nest import BeichiNestCalculator
-        from chanlun.core.cl_interface import Config, query_macd_ld
+        from chanlun.core.types import Config, query_macd_ld
         from chanlun.core.interval_nest import IntervalNestCalculator
         from chanlun.core.recursive_branch import RecursiveBranchCalculator
 

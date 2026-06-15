@@ -1,7 +1,7 @@
 import datetime
 from typing import List
 import pandas as pd
-from chanlun.core.cl_interface import Kline
+from chanlun.core.types import Kline
 from chanlun.tools.log_util import LogUtil
 
 

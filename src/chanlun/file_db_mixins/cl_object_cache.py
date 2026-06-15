@@ -16,7 +16,7 @@ import pandas as pd
 from chanlun import fun
 from chanlun.base import Market
 from chanlun.core import cl
-from chanlun.core.cl_interface import ICL
+from chanlun.core.types import ICL
 from chanlun.exchange import Exchange
 from chanlun.tools.log_util import LogUtil
 

@@ -36,7 +36,7 @@ from chanlun.backtesting.backtest_trader import BackTestTrader
 from chanlun.backtesting.base import POSITION, Strategy
 from chanlun.backtesting.klines_generator import KlinesGenerator
 from chanlun.backtesting.optimize import OptimizationSetting
-from chanlun.core.cl_interface import ICL
+from chanlun.core.types import ICL
 from chanlun.exchange.exchange import (
     convert_currency_kline_frequency,
     convert_futures_kline_frequency,

@@ -3,7 +3,7 @@
 缠论K线包含关系处理模块（支持增量更新）
 """
 from typing import List
-from chanlun.core.cl_interface import Kline, CLKline
+from chanlun.core.types import Kline, CLKline
 
 
 class CL_Kline_Process:

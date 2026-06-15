@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from typing import List, Optional
 
 from chanlun.core.beichi_calculator import LdProvider
-from chanlun.core.cl_interface import LINE, XD, ZS, ZSLX
+from chanlun.core.types import LINE, XD, ZS, ZSLX
 from chanlun.core.zs_calculator import ZsCalculator
 from chanlun.core.zslx_calculator import ZslxCalculator
 

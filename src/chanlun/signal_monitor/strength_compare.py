@@ -16,7 +16,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 
-from chanlun.core.cl_interface import ICL, LINE, compare_ld_beichi
+from chanlun.core.types import ICL, LINE, compare_ld_beichi
 
 
 @dataclass

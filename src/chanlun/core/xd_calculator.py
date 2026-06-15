@@ -5,7 +5,7 @@
 """
 from typing import List, Optional
 
-from chanlun.core.cl_interface import BI, XD
+from chanlun.core.types import BI, XD
 from chanlun.tools.log_util import LogUtil
 
 _log = LogUtil

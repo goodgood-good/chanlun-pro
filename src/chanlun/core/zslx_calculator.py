@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import List, Optional, Tuple
 
 from chanlun.core.beichi_calculator import LdProvider, beichi_pz, beichi_qs, is_qs
-from chanlun.core.cl_interface import LINE, ZS, ZSLX
+from chanlun.core.types import LINE, ZS, ZSLX
 
 
 def _classify(zss: List[ZS], wzgx_config: str) -> Tuple[str, str]:

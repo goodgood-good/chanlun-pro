@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
 from chanlun.core.beichi_calculator import LdProvider, beichi_pz, beichi_qs
-from chanlun.core.cl_interface import FX, LINE, XD, ZSLX
+from chanlun.core.types import FX, LINE, XD, ZSLX
 from chanlun.core.recursive_calculator import LevelResult
 
 

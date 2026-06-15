@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-from chanlun.core.cl_interface import LINE
+from chanlun.core.types import LINE
 from chanlun.signal_monitor.strength_compare import StrengthCompareResult
 
 # ---------------------- 信号种类 ----------------------

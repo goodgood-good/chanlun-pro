@@ -1,7 +1,7 @@
 from typing import Dict, List, Union
 
 from chanlun.backtesting.base import POSITION, MarketDatas, Operation, Strategy
-from chanlun.core.cl_interface import BI
+from chanlun.core.types import BI
 
 
 class StrategyDemo(Strategy):

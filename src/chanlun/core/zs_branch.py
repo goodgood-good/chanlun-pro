@@ -16,7 +16,7 @@ import copy
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
-from chanlun.core.cl_interface import LINE, ZS, Config
+from chanlun.core.types import LINE, ZS, Config
 from chanlun.core.zs_calculator import ZsCalculator
 from chanlun.core.beichi_calculator import is_beichi, is_qs, LdProvider
 

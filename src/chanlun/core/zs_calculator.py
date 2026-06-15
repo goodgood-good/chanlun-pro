@@ -8,7 +8,7 @@ ZsCalculator: 负责根据笔或线段列表，识别和构建本级别的中枢
 from __future__ import annotations
 from typing import List, Optional
 
-from chanlun.core.cl_interface import ZS, LINE
+from chanlun.core.types import ZS, LINE
 
 
 class ZsCalculator:

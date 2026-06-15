@@ -1,6 +1,6 @@
 from typing import Dict, List, Union
 
-from chanlun.core.cl_interface import (
+from chanlun.core.types import (
     BI,
     BW_LINE_QS_INFOS,
     ICL,

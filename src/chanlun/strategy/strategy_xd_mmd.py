@@ -1,6 +1,6 @@
 from typing import Dict, List, Union
 from chanlun.backtesting.base import *
-from chanlun.core.cl_interface import *
+from chanlun.core.types import *
 
 
 class StrategyXDMMD(Strategy):

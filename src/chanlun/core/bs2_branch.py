@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import List, Optional, Tuple
 
-from chanlun.core.cl_interface import LINE, ZS
+from chanlun.core.types import LINE, ZS
 from chanlun.core.recursive_branch import LevelResult
 from chanlun.core.zs_branch import DivergenceResult
 from chanlun.core.bs_branch import BuySellPoint

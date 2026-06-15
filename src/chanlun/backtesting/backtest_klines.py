@@ -11,7 +11,7 @@ from tqdm.auto import tqdm
 from chanlun import fun
 from chanlun.core import cl
 from chanlun.backtesting.base import MarketDatas
-from chanlun.core.cl_interface import ICL
+from chanlun.core.types import ICL
 from chanlun.exchange.exchange_db import ExchangeDB
 
 

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Callable, List, Optional, Tuple
 
-from chanlun.core.cl_interface import BI, Config, FX, LINE, ZS
+from chanlun.core.types import BI, Config, FX, LINE, ZS
 
 # 力度 provider 类型：给定走势段的起止分型，返回 query_macd_ld 风格的 ld 字典
 LdProvider = Callable[[FX, FX], dict]

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import List, Optional
 
-from chanlun.core.cl_interface import ZS, ZSLX
+from chanlun.core.types import ZS, ZSLX
 from chanlun.core.zs_branch import DivergenceResult, classify_rel
 
 

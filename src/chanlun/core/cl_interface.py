@@ -10,6 +10,6 @@ from chanlun.core.types import *          # noqa: F401,F403
 from chanlun.core.types import __all__    # noqa: F401
 
 # 旧 cl_interface 顶层 `from typing import ...` 把这些名泄漏成可从本模块导入;
-# 个别调用方依赖了(如 strategy_a_d_mmd_test 的 `from ...cl_interface import Dict, List`),
-# facade 显式补回,保持 import 兼容。
+# 为兼容可能依赖此泄漏的外部/历史调用方(repo 内调用方已迁至 chanlun.core.types),
+# facade 显式补回这些 typing 名。
 from typing import Any, Dict, List, Optional, Tuple, Union  # noqa: F401

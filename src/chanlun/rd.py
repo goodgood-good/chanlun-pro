@@ -1,7 +1,7 @@
 import redis
 
 from chanlun import config
-from chanlun.core.cl_interface import *
+from chanlun.core.types import *
 
 r = None
 rb = None

@@ -18,7 +18,7 @@ import pytz
 from chanlun import fun
 from chanlun.core import cl
 from chanlun.base import Market
-from chanlun.core.cl_interface import ICL
+from chanlun.core.types import ICL
 from chanlun.config import get_data_path
 from chanlun.db import db
 from chanlun.exchange import Exchange

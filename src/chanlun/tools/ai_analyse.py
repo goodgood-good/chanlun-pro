@@ -2,7 +2,7 @@ from typing import Union
 import openai
 import requests
 
-from chanlun.core.cl_interface import BI, ICL, XD
+from chanlun.core.types import BI, ICL, XD
 from chanlun.db_models.ai_analyse import TableByAIAnalyse
 from chanlun.exchange import get_exchange, Market
 from chanlun.cl_utils import query_cl_chart_config, web_batch_get_cl_datas

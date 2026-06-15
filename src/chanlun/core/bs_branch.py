@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import List, Optional
 
-from chanlun.core.cl_interface import LINE, FX, ZS
+from chanlun.core.types import LINE, FX, ZS
 from chanlun.core.zs_branch import ZsBranchResult, DivergenceResult
 
 

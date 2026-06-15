@@ -1,7 +1,7 @@
 import pandas as pd
 
 from chanlun.core import cl
-from chanlun.core.cl_interface import ICL
+from chanlun.core.types import ICL
 
 
 class KlinesGenerator:

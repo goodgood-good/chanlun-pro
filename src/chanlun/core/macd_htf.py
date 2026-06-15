@@ -23,7 +23,7 @@ from typing import List, Optional
 
 import numpy as np
 
-from chanlun.core.cl_interface import Kline
+from chanlun.core.types import Kline
 from chanlun.core.macd import MACD
 
 # 当前频率 → 高一级频率。无对照（如已是最高周期）→ 不做高周期 MACD。
