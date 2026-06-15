@@ -717,13 +717,11 @@ class BsPointCalculator:
             if now_line.index <= zs.end.index:
                 continue
 
-            # now_line 不能是中枢的核心线段
-            if now_line in zs.lines:
-                continue
-            # now_line 不能就是离开段
-            if now_line is zs.end:
-                continue
-
+            # now_line.index > zs.end.index(上面 717 已保证)⇒ now_line 必在中枢
+            # 所有核心线段(index ≤ zs.end.index)之后,也不可能是离开段本身;故原
+            # `now_line in zs.lines`(对每条核心线调 __eq__,3 类检测的主热点来源)
+            # 与 `now_line is zs.end` 两个判断恒为假、冗余,删除以消除 per-zs 的
+            # O(zs.lines) __eq__ 扫描。行为由大网(SH.600519_5m,809笔/83个3类点)钉死。
             candidates.append(zs)
 
         # 按 zs.end.index 倒序（最近的 zs 排第一）
