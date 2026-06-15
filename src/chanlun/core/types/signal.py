@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import json
-from typing import List, Union
+from typing import TYPE_CHECKING, List, Union
 
-# 运行期 MMD/BC 的字段值由 line/zhongshu 的对象填充，但本模块只在类型注解中
-# 引用 ZS/LINE（已被 ``from __future__ import annotations`` 字符串化），故顶层
-# 无需 import zhongshu/line，避免与依赖序（line/zhongshu 在本模块之左）成环。
+# MMD/BC 只在类型注解里引用 ZS/LINE（已被 ``from __future__ import annotations``
+# 字符串化）。放 TYPE_CHECKING 块：满足 ruff/类型工具,运行期不执行 → 不成环。
+if TYPE_CHECKING:
+    from chanlun.core.types.line import LINE
+    from chanlun.core.types.zhongshu import ZS
 
 
 class MMD:

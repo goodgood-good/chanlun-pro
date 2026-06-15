@@ -4,10 +4,16 @@ from __future__ import annotations
 import json
 import math
 from abc import abstractmethod
-from typing import Dict, List, Union
+from typing import TYPE_CHECKING, Dict, List, Union
 
 from chanlun.core.types.config import Level
-from chanlun.core.types.kline import FX, Kline
+from chanlun.core.types.kline import FX
+
+if TYPE_CHECKING:
+    # 仅类型注解引用（运行期由方法内局部 import 提供实体），放 TYPE_CHECKING
+    # 块满足 ruff/类型工具，运行期不执行 → 不与依赖序（signal/zhongshu 在本模块之右）成环。
+    from chanlun.core.types.signal import BC, MMD
+    from chanlun.core.types.zhongshu import ZS
 
 
 class LINE:
