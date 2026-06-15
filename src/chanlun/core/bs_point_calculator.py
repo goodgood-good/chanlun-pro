@@ -77,6 +77,7 @@ class BsPointCalculator:
         self._st_3buy: dict = {}   # (zs.index, name) -> 首次回抽/回拉 line.index(含失败触碰)
         self._last_lines_obj = None
         self._last_zss_obj = None
+        self._pool = None          # 按方向的 1 类信号线池(增量维护,见 _build_1mmd_pools_inc)
 
     # ------------------------------------------------------------------
     # 主入口
@@ -573,14 +574,14 @@ class BsPointCalculator:
         # 增量化(消除 _find_recent_1mmd_lines per-line 倒扫 O(n²)):1 类信号此时已
         # 全挂好且本方法不改它 → 预建按方向的 1mmd 线池一次,循环内 O(log) 查询。
         # 等价性见 tests/chan_core/test_bs_point_1mmd.py。
-        _1mmd_pools, _1mmd_keys = self._build_1mmd_pools(lines, self.zs_type)
+        _1mmd_pools, _1mmd_keys = self._build_1mmd_pools_inc(lines, start)
 
         # 路径1·定律一(仅 xd 层):预建「带笔层 1 类的笔」索引一次,消除
         # _find_subordinate_1mmd_in_window per-line 全量笔扫 O(xds×bis)。bi 层无
         # 次级别 → 不建,后续 sub_1bi 恒 None(与 scan 在 bi 层恒返回 None 等价)。
         # bi 此刻已定(bi 层 calculate 先于 xd 层跑完),循环内不变,故可外提。
         _sub_1mmd_index = (
-            self._build_sub_1mmd_index(self.cl.get_bis())
+            self._sub_index_from_bi_pool()
             if self.zs_type == 'xd' else None
         )
 
@@ -763,6 +764,48 @@ class BsPointCalculator:
                     pools['up'].append(line)
         keys = {k: [line.index for line in v] for k, v in pools.items()}
         return pools, keys
+
+    def _build_1mmd_pools_inc(self, lines: List[LINE], start: int):
+        """_build_1mmd_pools 的增量包装(消除每轮 O(n) 全量建池):
+        start>0 时复用上轮 self._pool 的稳定前缀(index<start 且 lines[index] 仍是该对象,
+        后一条件剔除上轮尾部已被重建的 stale 笔)+ 对 lines[start:] 全量建池后并接;
+        否则全量。1 类信号 index 升序天然有序,并接后仍升序。"""
+        prev = self._pool
+        if start <= 0 or prev is None:
+            pools, keys = self._build_1mmd_pools(lines, self.zs_type)
+        else:
+            n = len(lines)
+            pools = {
+                d: [l for l in prev.get(d, []) if l.index < start and l.index < n and lines[l.index] is l]
+                for d in ('down', 'up')
+            }
+            tail, _ = self._build_1mmd_pools(lines[start:], self.zs_type)
+            pools['down'].extend(tail['down'])
+            pools['up'].extend(tail['up'])
+            keys = {d: [l.index for l in pools[d]] for d in ('down', 'up')}
+        self._pool = pools
+        return pools, keys
+
+    def _sub_index_from_bi_pool(self) -> dict:
+        """xd 层定律一用「带 bi 层 1 类的笔」按 end_k 升序索引。bi 层(process_mmd 中先跑)
+        已把这些笔收进 cl._bi_bsp._pool(增量维护),直接复用其稀疏池建 end_k 键(O(signals)),
+        取代每轮 self.cl.get_bis() 的 O(bis) 全量重扫(并绕开 get_bis 的 deepcopy)。
+        池缺失(bi 层尚无中枢/未启用)时回退原全量 scan。"""
+        bi_bsp = getattr(self.cl, '_bi_bsp', None)
+        bi_pool = getattr(bi_bsp, '_pool', None) if bi_bsp is not None else None
+        if bi_pool is None:
+            return self._build_sub_1mmd_index(self.cl.get_bis())
+        out = {}
+        for d in ('down', 'up'):
+            keys, bis_ = [], []
+            for b in bi_pool.get(d, []):
+                try:
+                    keys.append(b.end.k.k_index)
+                except AttributeError:
+                    continue
+                bis_.append(b)
+            out[d] = (keys, bis_)
+        return out
 
     @staticmethod
     def _recent_1mmd_from_pool(pools, keys, target_type: str, before_index: int, max_count: int = 3):
