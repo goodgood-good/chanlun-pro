@@ -405,6 +405,11 @@ class BsPointCalculator:
         # 会刷出十几个 2 买）。key = id(锚点线段)。
         attached_2_anchors: set = set()
 
+        # 增量化(消除 _find_recent_1mmd_lines per-line 倒扫 O(n²)):1 类信号此时已
+        # 全挂好且本方法不改它 → 预建按方向的 1mmd 线池一次,循环内 O(log) 查询。
+        # 等价性见 tests/chan_core/test_bs_point_1mmd.py。
+        _1mmd_pools, _1mmd_keys = self._build_1mmd_pools(lines, self.zs_type)
+
         for i, now_line in enumerate(lines):
             if i < 2:
                 # 二买/二卖至少需要 1 个一买 + 1 段反抽 + 当前段 = 3 段
@@ -442,8 +447,8 @@ class BsPointCalculator:
             # ---- 路径 2·经验法兜底 ----
             # 扫描最近 3 个同向 1 类信号各自尝试构建 2buy/2sell：一波趋势中可
             # 有多个 1buy 锚点，后续回踩对照其中任一个都应允许识别。
-            prev_1lines = self._find_recent_1mmd_lines(
-                lines[:i], target_type=now_line.type, max_count=3
+            prev_1lines = self._recent_1mmd_from_pool(
+                _1mmd_pools, _1mmd_keys, now_line.type, i, max_count=3
             )
             if not prev_1lines:
                 continue
@@ -562,6 +567,34 @@ class BsPointCalculator:
                 if len(result) >= max_count:
                     break
         return result
+
+    @staticmethod
+    def _build_1mmd_pools(lines: List[LINE], zs_type: str):
+        """预建「按方向的 1 类信号线池」(index 升序),供 _recent_1mmd_from_pool
+        O(log) 查询,消除 _find_recent_1mmd_lines 的 per-line 倒扫 O(n²)。
+        'down' 池 = 挂 1buy 的 down 线;'up' 池 = 挂 1sell 的 up 线。
+        前提:调用时 1 类信号已全部挂好(_detect_1buy_1sell 先跑)且后续不改。"""
+        pools = {'down': [], 'up': []}
+        for line in lines:
+            mmds = getattr(line, 'zs_type_mmds', {}).get(zs_type, [])
+            if line.type == 'down':
+                if any(m.name == '1buy' for m in mmds):
+                    pools['down'].append(line)
+            elif line.type == 'up':
+                if any(m.name == '1sell' for m in mmds):
+                    pools['up'].append(line)
+        keys = {k: [line.index for line in v] for k, v in pools.items()}
+        return pools, keys
+
+    @staticmethod
+    def _recent_1mmd_from_pool(pools, keys, target_type: str, before_index: int, max_count: int = 3):
+        """等价于 _find_recent_1mmd_lines(lines[:before_index], target_type, max_count):
+        取 target_type 池中 index < before_index 的最近 max_count 根,最近在前。"""
+        pool = pools.get(target_type, [])
+        if not pool:
+            return []
+        cut = bisect.bisect_left(keys[target_type], before_index)
+        return pool[max(0, cut - max_count):cut][::-1]
 
     def _find_mmd_zs_on_line(
         self, line: LINE, target_name: str
