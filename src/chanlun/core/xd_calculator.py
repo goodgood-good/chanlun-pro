@@ -192,7 +192,6 @@ class XdCalculator:
             self._last_bis_obj = all_bis
             return self.xds
 
-        self._bi_pos = {id(bi): i for i, bi in enumerate(all_bis)}
         _log.debug(lambda:
             f"XdCalculator: 全量计算，笔数={len(all_bis)}，起始位置={start_bi_idx}"
         )
@@ -522,7 +521,9 @@ class XdCalculator:
         # ---- 步骤6: 定位当前线段结束位置 + 反向线段范围 ----
         target_bi = _resolve_pivot_bi(mid_elem, seg_type)
 
-        end_bi_idx = self._bi_pos[id(target_bi)] - 1
+        # bi.index 恒等于其在 all_bis 中的位置(bi_calculator._reindex_bis 保证),
+        # 故直接用 .index 代替原 _bi_pos[id(bi)] 映射,省去每次 calculate O(B) 重建。
+        end_bi_idx = target_bi.index - 1
         if end_bi_idx <= seg_start or end_bi_idx >= len(all_bis):
             _log.debug(lambda:f"    _try_end: end_bi_idx={end_bi_idx} 越界(seg_start={seg_start},len={len(all_bis)}) → 返回None")
             return None
@@ -552,9 +553,9 @@ class XdCalculator:
         last_look = look_elems[-1]
         last_look_bis = last_look.get('merged_bis')
         if last_look_bis:
-            next_end = max(self._bi_pos[id(b)] for b in last_look_bis)
+            next_end = max(b.index for b in last_look_bis)
         else:
-            next_end = self._bi_pos[id(last_look['bi'])]
+            next_end = last_look['bi'].index
         # 确保 next_end 至少为 next_start + 2（最少3笔）
         next_end = max(next_end, next_start + 2) if next_end >= next_start else next_start + 2
 
@@ -569,7 +570,7 @@ class XdCalculator:
         """第二种情况（特征序列有缺口）的额外校验：确认反向段已形成所需分型。"""
         target_bi = _resolve_pivot_bi(mid_elem, seg_type)
 
-        start_pos = self._bi_pos[id(target_bi)] + 1
+        start_pos = target_bi.index + 1
         if start_pos >= len(all_bis):
             _log.debug(lambda:f"      _check_type2: start_pos={start_pos}越界 → False")
             return False
