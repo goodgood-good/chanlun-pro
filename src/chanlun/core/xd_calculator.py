@@ -169,13 +169,13 @@ class XdCalculator:
     # 公共接口
     # ----------------------------------------------------------
     def calculate(self, bis: List[BI]) -> List[XD]:
-        """根据笔列表全量计算线段并返回全部 xds。
+        """根据笔列表计算线段(段增量版)。
 
-        线段不做增量计算:已 done 的线段并非不可变 —— 追加新笔后,全量划分
-        可能把一段已完成的 up 段重新拆成 up/down/up。增量只能 pop 末段重算、
-        冻结历史 done 段,无法复现这种回溯拆分,导致增量结果与全量不一致
-        (实测逐根增量 vs 全量 xds 数量/端点分歧)。笔数通常仅数百,全量
-        _build_segments 成本可忽略,故每次都全量重算以保证正确性。
+        笔列表恒 append-only(前缀不改写,见 bi_calculator),且线段回溯拆分深度
+        实测恒 ≤1,故保留稳定段前缀、删末 2 段(留 1 段 buffer)从其起点不 clear
+        地重算尾部段;签名前缀校验(LCP ≥ 重算起点)失败或段不足 3 则降级全量。
+        (原"线段不做增量"注释已废:回溯深度实测恒 1,增量可行且经对拍网钉死。)
+        等价性见 tests/chan_core/test_incremental_equivalence.py(对拍网含 xds)。
         """
         all_bis = bis
         if all_bis is self._last_bis_obj:
@@ -184,21 +184,48 @@ class XdCalculator:
         if sig == self._last_bis_signature:
             self._last_bis_obj = all_bis
             return self.xds
-        self.xds.clear()
-        start_bi_idx = self._find_start(all_bis)
 
         if len(all_bis) < 3:
+            self.xds.clear()
             self._last_bis_signature = sig
             self._last_bis_obj = all_bis
             return self.xds
 
-        _log.debug(lambda:
-            f"XdCalculator: 全量计算，笔数={len(all_bis)}，起始位置={start_bi_idx}"
-        )
-        self._build_segments(all_bis, start_bi_idx)
+        restart = self._incremental_restart(all_bis, sig)
+        if restart is not None:
+            self._build_segments(all_bis, restart)
+        else:
+            self.xds.clear()
+            self._build_segments(all_bis, self._find_start(all_bis))
+
         self._last_bis_signature = sig
         self._last_bis_obj = all_bis
         return self.xds
+
+    def _incremental_restart(self, all_bis: List[BI], new_sig: tuple) -> Optional[int]:
+        """段增量重启点:保留稳定段前缀、返回需重算的起点笔位置;不可增量返回 None。
+
+        回溯拆分深度恒 ≤1 → 删末 2 段(留 1 段 buffer)、从倒数第 2 段起点重算。
+        笔 append-only 前提用签名前缀 LCP 校验:重算起点之前的笔须全部未变,
+        否则(bi 档3 全量降级改了前缀)降级全量。
+        """
+        old_sig = self._last_bis_signature
+        if old_sig is None or len(self.xds) < 3:
+            return None
+        keep = len(self.xds) - 2
+        restart_pos = self.xds[keep].start_line.index
+        if restart_pos < 1 or restart_pos >= len(all_bis):
+            return None
+        lcp = 0
+        for a, b in zip(old_sig, new_sig):
+            if a == b:
+                lcp += 1
+            else:
+                break
+        if lcp < restart_pos:
+            return None
+        del self.xds[keep:]
+        return restart_pos
 
     # ----------------------------------------------------------
     def _find_strict_start(self, all_bis: List[BI]) -> int:
@@ -382,9 +409,15 @@ class XdCalculator:
                     and self.xds[-1].type == pending_seg_type
                 if not already_pending:
                     self._emit_pending(all_bis, pending_start, pending_seg_type)
-        elif start < len(all_bis) and not self.xds:
-            # 整轮一次 _emit_segment 都没触发：尝试以 start 笔的方向输出未完成段
-            self._emit_pending(all_bis, start, all_bis[start].type)
+        elif start < len(all_bis):
+            # 本轮无 _emit_segment(全量整轮 / 增量重算尾部段):以 start 笔方向输出
+            # 未完成段。already_pending 保护:增量保留的前缀末段若已是同向 pending
+            # 则不重复 append(全量时 self.xds 为空,保护自然不触发)。
+            seg_type = all_bis[start].type
+            already_pending = bool(self.xds) and (not self.xds[-1].done) \
+                and self.xds[-1].type == seg_type
+            if not already_pending:
+                self._emit_pending(all_bis, start, seg_type)
 
     # ----------------------------------------------------------
     # _try_end
