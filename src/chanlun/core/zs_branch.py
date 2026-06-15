@@ -213,6 +213,9 @@ class ZsBranchCalculator:
             min_zs_lines=min_zs_lines,
             max_zs_lines=self._NO_CAP,
         )
+        # done 中枢离开段背驰缓存(值签名 key):稳定中枢的 a/c 段+prev 不变 → is_beichi
+        # (含 query_macd_ld)结果冻结、跨 K 复用,免对所有中枢每 K 重判背驰。见 _divergence_for。
+        self._div_cache: dict = {}
 
     def calculate(self, lines: List[LINE]) -> ZsBranchResult:
         if not lines:
@@ -283,6 +286,20 @@ class ZsBranchCalculator:
         d = is_qs(prev_zs, zs, self.wzgx, use_core_envelope=True)
         return d is not None and d == leave.type
 
+    _DIV_MISS = object()    # 背驰缓存"未命中"哨兵(区分缓存的 None 结果)
+
+    @staticmethod
+    def _div_key(zs: ZS, c: LINE, prev_zs: Optional[ZS]):
+        """done 背驰缓存值签名:a(进入段 zs.start)/c(离开段)/zs 区间 + prev 背驰相关状态。
+        稳定中枢这些值冻结 → key 稳定命中;活跃尾部 c 延伸 → key 变 → 重算。MACD 对过去区间
+        固定,故值签名充分决定 is_beichi(a,c) 与 _is_trend(prev) 结果。"""
+        def seg(s):
+            if s is None or s.start is None or s.end is None:
+                return None
+            return (s.type, s.start.k.k_index, s.end.k.k_index, s.start.val, s.end.val)
+        pz = None if prev_zs is None else (seg(prev_zs.end), prev_zs.zd, prev_zs.zg)
+        return (seg(zs.start), seg(c), zs.zd, zs.zg, pz)
+
     def _divergence_for(
         self, zs: ZS, prev_zs: Optional[ZS], live: bool
     ) -> Optional[DivergenceResult]:
@@ -299,23 +316,38 @@ class ZsBranchCalculator:
         if (a is None or a.start is None or a.end is None
                 or c is None or c.start is None or c.end is None):
             return None
+        # done 背驰值签名缓存:稳定中枢(a/c/prev 冻结)跨 K 命中,免重判 is_beichi/query_macd_ld;
+        # live(pending)或活跃尾部(c 延伸 → key 变)不命中、照算。
+        key = None
+        if not live:
+            key = self._div_key(zs, c, prev_zs)
+            cached = self._div_cache.get(key, self._DIV_MISS)
+            if cached is not self._DIV_MISS:
+                return cached
         if a.type != c.type:                          # 转折型(进入/离开异向=趋势转折点)
             # 转折前趋势的背驰:前中枢同向离开段 vs 本中枢进入段 a(转折前趋势最后段)
             b = prev_zs.end if prev_zs is not None else None
             if (b is None or b is a or b.type != a.type
                     or b.start is None or b.end is None):
-                return None                            # 无前驱/自比/异向/缺端点 → 不判
+                result = None                          # 无前驱/自比/异向/缺端点 → 不判
                 # (值相等异实例的 b/a 由 is_beichi 创新高/低严格不等号前提兜底,不会误判)
-            bc = is_beichi(b, a, self.ld_provider, self.frequency)
-            return DivergenceResult(
-                is_beichi=bc, kind="qs",               # 转折=趋势背驰
-                compare_seg=b, leave_seg=a, provisional=live,  # 背驰段=进入段 a
+            else:
+                bc = is_beichi(b, a, self.ld_provider, self.frequency)
+                result = DivergenceResult(
+                    is_beichi=bc, kind="qs",           # 转折=趋势背驰
+                    compare_seg=b, leave_seg=a, provisional=live,  # 背驰段=进入段 a
+                )
+        else:
+            kind = "qs" if self._is_trend(prev_zs, zs, c) else "pz"
+            bc = is_beichi(a, c, self.ld_provider, self.frequency)
+            result = DivergenceResult(
+                is_beichi=bc, kind=kind, compare_seg=a, leave_seg=c, provisional=live
             )
-        kind = "qs" if self._is_trend(prev_zs, zs, c) else "pz"
-        bc = is_beichi(a, c, self.ld_provider, self.frequency)
-        return DivergenceResult(
-            is_beichi=bc, kind=kind, compare_seg=a, leave_seg=c, provisional=live
-        )
+        if key is not None:
+            if len(self._div_cache) > 4096:
+                self._div_cache.clear()
+            self._div_cache[key] = result
+        return result
 
     def _fork_pending(self, pending: ZS, prev: Optional[ZS]) -> List[ZsHypothesis]:
         """在 pending 中枢上分叉：H1=中枢仍开(done=False)，H2=末段为离开段(done=True)。
