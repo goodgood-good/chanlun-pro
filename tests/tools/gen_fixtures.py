@@ -36,6 +36,9 @@ FIXTURES = [
     {"key": "SH.600519_30m", "market": Market.A,  "code": "SH.600519", "freq": "30m", "start": "2026-03-01 00:00:00", "end": "2026-05-31 23:59:59"},
     {"key": "QQQ.US_d",      "market": Market.US, "code": "QQQ.US",     "freq": "d",   "start": "2025-01-01 00:00:00", "end": "2026-05-31 23:59:59"},
     {"key": "QQQ.US_30m",    "market": Market.US, "code": "QQQ.US",     "freq": "30m", "start": "2026-03-01 00:00:00", "end": "2026-05-31 23:59:59"},
+    # 大网(~12072 bar / 809笔 / 83个3类买卖点):钉死无界历史扫描的行为,
+    # 供 P3 把 _find_recent_1mmd_lines/_detect_3buy_3sell 收界后零漂移验证。
+    {"key": "SH.600519_5m",  "market": Market.A,  "code": "SH.600519", "freq": "5m",  "start": "2025-06-01 00:00:00", "end": "2026-06-15 23:59:59"},
 ]
 
 
