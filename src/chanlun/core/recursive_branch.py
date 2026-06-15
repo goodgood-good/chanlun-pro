@@ -78,6 +78,46 @@ class RecursiveBranchCalculator:
         # 仍全量(留级联阶段)。本实例须按「塔」(笔/段)分持久,见 cl._recursive_branch_calc。
         self._zs_branch_by_level: dict = {}
         self._zslx_calc = ZslxBranchCalculator()
+        # L1+ 级联增量:_as_units 按走势类型值签名缓存 unit 副本。稳定走势类型(几何不变)→
+        # 复用同一 unit 对象 → 上级 ZsCalculator 输入 identity 稳定 → 其增量 + 背驰/校正缓存
+        # 对上级中枢级联生效。zslx_branch 每 K 产新 ZSLX 对象,但稳定者值签名不变 → 命中。
+        self._units_cache: dict = {}
+
+    @staticmethod
+    def _zslx_key(zslx) -> tuple:
+        """走势类型几何值签名(L1+ 级联缓存 key):上级 ZsCalculator 把走势类型当 LINE、用其
+        _type/zs_high/zs_low/start/end 几何;稳定走势类型这些不变 → key 稳定 → 复用同一 unit。
+        附 zss 段数防几何巧合碰撞。"""
+        s = getattr(zslx, "start", None)
+        e = getattr(zslx, "end", None)
+
+        def fx(f):
+            k = getattr(f, "k", None) if f is not None else None
+            return None if k is None else (k.k_index, f.val)
+
+        return (
+            getattr(zslx, "_type", None),
+            getattr(zslx, "zs_high", None), getattr(zslx, "zs_low", None),
+            fx(s), fx(e), len(getattr(zslx, "zss", None) or []),
+        )
+
+    def _as_units_cached(self, zslxs: List[ZSLX], level: int) -> List[ZSLX]:
+        """_as_units 的级联缓存版:稳定走势类型复用同一 unit 对象(身份稳定 → 上级 ZsCalculator
+        增量 + 背驰/校正缓存级联生效)。unit.index 每轮按位置刷新(稳定前缀位置不变、无副作用)。
+        key 含 level:防不同级别几何巧合相同的走势类型共用同一 unit(index 互相覆盖)。"""
+        cache = self._units_cache
+        if len(cache) > 8192:
+            cache.clear()
+        out: List[ZSLX] = []
+        for i, zslx in enumerate(zslxs):
+            key = (level, self._zslx_key(zslx))
+            u = cache.get(key)
+            if u is None:
+                u = copy.copy(zslx)
+                cache[key] = u
+            u.index = i
+            out.append(u)
+        return out
 
     def calculate(
         self,
@@ -149,6 +189,6 @@ class RecursiveBranchCalculator:
             ))
             if len(zslxs) < 3:
                 break
-            units = _as_units(zslxs)
+            units = self._as_units_cached(zslxs, level)
             level += 1
         return results
