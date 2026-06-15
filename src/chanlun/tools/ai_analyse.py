@@ -9,7 +9,7 @@ from chanlun.cl_utils import query_cl_chart_config, web_batch_get_cl_datas
 from chanlun import config, fun
 import json
 import datetime
-from chanlun.db import db
+from chanlun.persistence.db import db
 from chanlun.db_models.base import Base
 from chanlun.tools.log_util import LogUtil
 

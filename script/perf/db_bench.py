@@ -22,7 +22,7 @@ SRC_DIR = REPO_ROOT / "src"
 if SRC_DIR.as_posix() not in [p.replace("\\", "/") for p in sys.path]:
     sys.path.insert(0, str(SRC_DIR))
 
-from chanlun.db import DB  # noqa: E402
+from chanlun.persistence.db import DB  # noqa: E402
 from chanlun.base import Market  # noqa: E402
 
 

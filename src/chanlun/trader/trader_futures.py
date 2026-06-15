@@ -3,7 +3,7 @@ import datetime
 from chanlun.exchange.exchange_tq import ExchangeTq
 from chanlun import utils
 from chanlun import zixuan
-from chanlun.db import db
+from chanlun.persistence.db import db
 from chanlun.trading.base import Operation, POSITION
 from chanlun.trading.backtest_trader import BackTestTrader
 

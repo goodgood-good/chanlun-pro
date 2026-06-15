@@ -2,7 +2,7 @@ import datetime
 
 from chanlun.exchange.exchange_futu import ExchangeFutu
 from chanlun import utils
-from chanlun.db import db
+from chanlun.persistence.db import db
 from chanlun import zixuan
 from chanlun.trading.base import Operation, POSITION
 from chanlun.trading.backtest_trader import BackTestTrader

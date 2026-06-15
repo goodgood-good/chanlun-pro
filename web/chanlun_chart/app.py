@@ -73,7 +73,7 @@ def _warm_chart_cache_from_disk() -> None:
         _normalize_cache_entry,
         chart_data_cache,
     )
-    from chanlun.file_db import fdb
+    from chanlun.persistence.file_db import fdb
 
     cl_config = query_cl_chart_config(market, code)
     if not isinstance(cl_config, dict):

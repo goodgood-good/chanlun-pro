@@ -6,8 +6,8 @@ from typing import Dict, List, Tuple
 from chanlun import fun
 from chanlun.trading import futures_contracts
 from chanlun.trading.base import POSITION, MarketDatas, Operation, Strategy, Trader
-from chanlun.db import db
-from chanlun.file_db import fdb
+from chanlun.persistence.db import db
+from chanlun.persistence.file_db import fdb
 
 
 class BackTestTrader(Trader):

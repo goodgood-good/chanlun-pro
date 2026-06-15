@@ -19,7 +19,7 @@ import pytz
 from chanlun import config, fun, rd
 from chanlun.base import Market
 from chanlun.exchange.exchange_ib import CmdEnum, ib_res_hkey
-from chanlun.file_db import FileCacheDB
+from chanlun.persistence.file_db import FileCacheDB
 
 
 def run_tasks(client_id: int):

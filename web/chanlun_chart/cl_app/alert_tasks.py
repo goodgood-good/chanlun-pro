@@ -7,7 +7,7 @@ from tqdm.auto import tqdm
 
 from chanlun import fun, monitor
 from chanlun.cl_utils import query_cl_chart_config
-from chanlun.db import TableByAlertTask, db
+from chanlun.persistence.db import TableByAlertTask, db
 from chanlun.exchange import Market, get_exchange
 from chanlun.zixuan import ZiXuan
 

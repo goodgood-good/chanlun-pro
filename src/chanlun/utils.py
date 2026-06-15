@@ -13,7 +13,7 @@ from typing import Dict, Optional, Union
 import requests
 
 from chanlun import config
-from chanlun.db import db
+from chanlun.persistence.db import db
 from chanlun.tools.log_util import LogUtil
 
 

@@ -7,7 +7,7 @@ import datetime
 from chanlun import fun, zixuan  # noqa: F401
 from chanlun.base import Market
 from chanlun.cl_utils import query_cl_chart_config
-from chanlun.db import db
+from chanlun.persistence.db import db
 from chanlun.exchange import get_exchange
 from chanlun.xuangu.xuangu_by_same import XuanguBySame
 

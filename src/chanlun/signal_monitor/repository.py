@@ -10,7 +10,7 @@ from __future__ import annotations
 import datetime
 from typing import List, Optional
 
-from chanlun.db import db
+from chanlun.persistence.db import db
 from chanlun.db_models.base import Base
 from chanlun.signal_monitor.db_models import (
     TableBySignalMonitorTask,

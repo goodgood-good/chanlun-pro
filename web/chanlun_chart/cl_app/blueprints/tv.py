@@ -22,7 +22,7 @@ from chanlun.cl_utils import (
     query_cl_chart_config,
     web_batch_get_cl_datas,
 )
-from chanlun.db import db
+from chanlun.persistence.db import db
 from chanlun.exchange import get_exchange
 from chanlun.tools.log_util import LogUtil
 

@@ -35,7 +35,7 @@ from typing import Dict, Optional
 
 from cachetools import TTLCache
 
-from chanlun.file_db import fdb
+from chanlun.persistence.file_db import fdb
 from chanlun.tools.log_util import LogUtil
 
 # ---------------- 状态 ----------------

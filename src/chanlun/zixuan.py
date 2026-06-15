@@ -2,7 +2,7 @@ from typing import List, Dict
 
 from chanlun import fun
 from chanlun.base import Market
-from chanlun.db import db
+from chanlun.persistence.db import db
 
 from chanlun.exchange import get_exchange
 

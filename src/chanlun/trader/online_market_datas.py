@@ -9,7 +9,7 @@ import pandas as pd
 from chanlun.trading.base import MarketDatas
 from chanlun.core.types import ICL
 from chanlun.exchange.exchange import Exchange
-from chanlun.file_db import FileCacheDB
+from chanlun.persistence.file_db import FileCacheDB
 
 
 class OnlineMarketDatas(MarketDatas):

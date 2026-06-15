@@ -14,7 +14,7 @@ from chanlun import config, fun, kcharts
 from chanlun.trading.base import Strategy
 from chanlun.core.types import ICL
 from chanlun.cl_utils import bi_td, web_batch_get_cl_datas
-from chanlun.db import db
+from chanlun.persistence.db import db
 from chanlun.exchange import Market, get_exchange
 from chanlun.utils import send_fs_msg
 

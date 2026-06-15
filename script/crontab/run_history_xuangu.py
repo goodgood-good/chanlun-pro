@@ -12,7 +12,7 @@ from chanlun.core.types import BI, ICL
 from chanlun.cl_utils import (
     query_cl_chart_config,
 )
-from chanlun.db import db
+from chanlun.persistence.db import db
 from chanlun.zixuan import ZiXuan
 from chanlun.config import get_data_path
 from tqdm.auto import tqdm

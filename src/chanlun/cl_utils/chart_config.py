@@ -4,7 +4,7 @@ from threading import RLock
 from typing import Dict
 
 from chanlun.core.types import Config
-from chanlun.db import db
+from chanlun.persistence.db import db
 from chanlun.tools.log_util import LogUtil
 
 

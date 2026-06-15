@@ -15,7 +15,7 @@ from flask_login import login_required
 
 from chanlun.base import Market
 from chanlun import fun
-from chanlun.db import db
+from chanlun.persistence.db import db
 from chanlun.exchange import get_exchange
 from chanlun.tools.log_util import LogUtil
 from chanlun.zixuan import ZiXuan

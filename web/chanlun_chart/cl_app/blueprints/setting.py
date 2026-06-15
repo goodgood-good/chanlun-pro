@@ -8,7 +8,7 @@
 from flask import Blueprint, render_template, request
 from flask_login import login_required
 
-from chanlun.db import db
+from chanlun.persistence.db import db
 from chanlun.security import decrypt_str, encrypt_str, mask_secret
 
 

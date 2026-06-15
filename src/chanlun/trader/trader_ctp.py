@@ -38,7 +38,7 @@ _CTP_CALLBACK_TIMEOUT = 3.0
 from chanlun import utils
 from chanlun.trading.backtest_trader import BackTestTrader
 from chanlun.trading.base import POSITION, Operation
-from chanlun.db import db
+from chanlun.persistence.db import db
 from chanlun.exchange.exchange_ctp import MarketCTP
 
 
