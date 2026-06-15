@@ -10,8 +10,9 @@ expand(中枢扩张/本体相交)不切——按走势级别延续定理一(原�
 from __future__ import annotations
 
 from typing import List, Optional
+from weakref import WeakKeyDictionary
 
-from chanlun.core.types import ZS, ZSLX
+from chanlun.core.types import LINE, ZS, ZSLX
 from chanlun.core.zs_branch import DivergenceResult, classify_rel
 
 
@@ -42,7 +43,80 @@ def _swing_body(z: ZS) -> tuple:
 
 
 class ZslxBranchCalculator:
-    """级别无关的走势类型划分（基于 zs_branch 中枢+内联背驰）。无状态，全量重算。"""
+    """级别无关的走势类型划分（基于 zs_branch 中枢+内联背驰）。
+
+    输出是 done_zss 的**纯函数**(done_divergence v1 不参与边界,见 calculate;且无
+    zs.type 等副作用,区别于 legacy ZslxCalculator)。done_zss 已 identity 稳定、
+    append-only frozen(进入/离开段校正身份缓存),跨 K 多数不变 → 按值签名 memo
+    「边界划分计划」(swing_segments+subsplit+trend_dir,占本调用 ~82% 的 classify_rel
+    密集部分);ZSLX 仍每次 _finalize **新建**,语义与全量重算等价(对象新鲜、无跨 K
+    共享突变——chart 旧链路会就地写 zslx.zs_type_mmds,故不缓存 wts 本身)。
+    增量等价由 tests/chan_core/test_incremental_equivalence 递归层对拍守。"""
+
+    def __init__(self) -> None:
+        # 计划缓存:sig(done_zss) → [(a, b, swing_dir, trend_dir), …]。命中即跳过
+        # swing_segments/subsplit/trend_dir 全部 classify_rel 重扫(纯函数,只依赖 done_zss)。
+        self._plan_cache: dict = {}
+        # done 中枢 zs_sig 弱键缓存:done 中枢几何冻结,签名计算一次即复用,使每次
+        # _signature 仅 O(中枢数) 廉价查表(不重建每中枢 line_sig)。WeakKeyDictionary:
+        # 中枢 GC 时自动剔除、不污染 ZS.__dict__(快照/pickle 无感),ZS 默认 id-hash 可弱键。
+        self._zs_sig_cache: "WeakKeyDictionary[ZS, tuple]" = WeakKeyDictionary()
+
+    def __getstate__(self):
+        # WeakKeyDictionary 不可 pickle 且为瞬态(可重建),序列化时丢弃;_plan_cache
+        # 键是值签名(非身份),反序列化后仍有效,可保留。
+        state = self.__dict__.copy()
+        state.pop("_zs_sig_cache", None)
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        if "_zs_sig_cache" not in self.__dict__:
+            self._zs_sig_cache = WeakKeyDictionary()
+        if "_plan_cache" not in self.__dict__:
+            self._plan_cache = {}
+
+    @staticmethod
+    def _line_sig(line: LINE) -> tuple:
+        return (
+            getattr(line, "type", None),
+            getattr(getattr(line.start, "k", None), "index", None),
+            getattr(getattr(line.end, "k", None), "index", None),
+            line.start.val,
+            line.end.val,
+            bool(getattr(line, "done", False)),
+        )
+
+    def _zs_sig(self, zs: ZS) -> tuple:
+        """单中枢值签名:忠实覆盖 calculate 读到的全部几何——
+        scalar(level/done/zd/zg/dd/gg)、进入段 zs.start / 离开段 zs.end(均为 LINE 或
+        None)、core lines 全段(classify_rel 取 lines[:3]、_swing_body 取 lines[:-1]、
+        _finalize 取 lines[0]/[-1]) → 等签名 ⟺ 等几何 ⟺ 等输出。done 中枢弱键缓存。"""
+        done = bool(getattr(zs, "done", False))
+        cache = self._zs_sig_cache
+        if done:
+            hit = cache.get(zs)
+            if hit is not None:
+                return hit
+        lines = getattr(zs, "lines", None) or []
+        entry = getattr(zs, "start", None)   # 进入段(LINE 或 None)
+        leave = getattr(zs, "end", None)     # 离开段(LINE 或 None)
+        sig = (
+            getattr(zs, "level", None),
+            done,
+            getattr(zs, "zd", None), getattr(zs, "zg", None),
+            getattr(zs, "dd", None), getattr(zs, "gg", None),
+            None if entry is None else self._line_sig(entry),
+            None if leave is None else self._line_sig(leave),
+            len(lines),
+            tuple(self._line_sig(ln) for ln in lines),
+        )
+        if done:
+            cache[zs] = sig
+        return sig
+
+    def _signature(self, done_zss: List[ZS]) -> tuple:
+        return tuple(self._zs_sig(zs) for zs in done_zss)
 
     @staticmethod
     def _finalize(
@@ -220,14 +294,23 @@ class ZslxBranchCalculator:
         """
         if not done_zss:
             return []
-        bounds = []
-        for s, e, sdir in self._swing_segments(done_zss):
-            for a, b in self._subsplit(done_zss, s, e):
-                bounds.append((a, b, sdir))                # 子段继承摆动腿方向
-        last = len(bounds) - 1
+        # 边界划分计划(swing_segments+subsplit+trend_dir)是 done_zss 纯函数、占本调用
+        # ~82%(classify_rel 密集);按值签名 memo,跨 K 不变即命中跳过全部重扫。trend_dir
+        # 并入计划(亦 classify_rel),命中时连同 a/b/swing_dir 一并复用。
+        sig = self._signature(done_zss)
+        plan = self._plan_cache.get(sig)
+        if plan is None:
+            plan = []
+            for s, e, sdir in self._swing_segments(done_zss):
+                for a, b in self._subsplit(done_zss, s, e):   # 子段继承摆动腿方向
+                    plan.append((a, b, sdir, self._trend_dir(done_zss[a:b + 1])))
+            if len(self._plan_cache) > 64:                    # 多级共用一实例,留余量(见 __init__)
+                self._plan_cache.clear()
+            self._plan_cache[sig] = plan
+        # ZSLX 每次新建(语义同全量重算:对象新鲜、无跨 K 共享突变)。
+        last = len(plan) - 1
         wts: List[ZSLX] = []
-        for k, (a, b, sdir) in enumerate(bounds):
-            seg = done_zss[a:b + 1]
+        for k, (a, b, sdir, tdir) in enumerate(plan):
             wts.append(self._finalize(
-                seg, a, self._trend_dir(seg), done=(k < last), swing_dir=sdir))
+                done_zss[a:b + 1], a, tdir, done=(k < last), swing_dir=sdir))
         return wts
