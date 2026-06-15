@@ -184,6 +184,63 @@ class BsPointCalculator:
         return found
 
     @staticmethod
+    def _build_sub_1mmd_index(bis: List[LINE]) -> dict:
+        """预建「带次级别(笔层) 1 类信号的笔」索引,供 ``_sub_1mmd_from_index``
+        O(log) 窗口查找,消除 ``_find_subordinate_1mmd_in_window`` 的 per-line
+        全量笔扫描 O(xds×bis)。仅 xd 层用(bi 层无更细次级别,不建)。
+
+        按笔方向分桶:每桶只收「``bi.type == 桶向`` 且挂有该向 1 类信号
+        (down→``1buy`` / up→``1sell``)」的笔,与 scan 的命中条件逐字对齐。
+        笔的 ``end.k.k_index`` 沿 ``get_bis()`` 顺序严格递增(相邻笔共享端点
+        分型),故各桶 keys 天然升序、可直接 bisect。等价性见
+        ``tests/chan_core/test_bs_point_sub1mmd.py``。
+
+        :return: ``{'down': (keys, bis), 'up': (keys, bis)}``,keys 与 bis 同长对齐。
+        """
+        out = {'down': ([], []), 'up': ([], [])}
+        for bi in bis:
+            t = getattr(bi, 'type', None)
+            if t not in ('down', 'up'):
+                continue
+            try:
+                bi_end_k = bi.end.k.k_index
+            except AttributeError:
+                continue
+            target_mmd = '1buy' if t == 'down' else '1sell'
+            mmds = getattr(bi, 'zs_type_mmds', {}).get('bi', [])
+            if any(m.name == target_mmd for m in mmds):
+                keys, lst = out[t]
+                keys.append(bi_end_k)
+                lst.append(bi)
+        return out
+
+    @staticmethod
+    def _sub_1mmd_from_index(
+        index: dict, now_line: LINE, target_type: str, end_tolerance: int = 0
+    ) -> Optional[LINE]:
+        """``_find_subordinate_1mmd_in_window`` 的索引版(O(log) 等价)。
+
+        在 ``index[target_type]`` 上 bisect 出落在窗口
+        ``[max(start_k, end_k-tol), end_k]`` 内的笔,取窗口内末端 K 最大的一根
+        (= scan 的「最后命中覆盖 found」语义,因 keys 升序即遍历序)。无则 None。
+        """
+        if target_type not in ('down', 'up'):
+            return None
+        try:
+            start_k = now_line.start.k.k_index
+            end_k = now_line.end.k.k_index
+        except AttributeError:
+            return None
+        end_tolerance = max(0, end_tolerance)
+        lower_bound = max(start_k, end_k - end_tolerance)
+        keys, lst = index[target_type]
+        hi = bisect.bisect_right(keys, end_k)
+        lo = bisect.bisect_left(keys, lower_bound)
+        if hi > lo:
+            return lst[hi - 1]
+        return None
+
+    @staticmethod
     def _breaks_last_zs(now_line: LINE, last_zs: ZS) -> bool:
         """now_line 是否在几何上「跌破/突破最后一个走势中枢」(原文 kobo.48.1 / 49.1)。
 
@@ -410,6 +467,15 @@ class BsPointCalculator:
         # 等价性见 tests/chan_core/test_bs_point_1mmd.py。
         _1mmd_pools, _1mmd_keys = self._build_1mmd_pools(lines, self.zs_type)
 
+        # 路径1·定律一(仅 xd 层):预建「带笔层 1 类的笔」索引一次,消除
+        # _find_subordinate_1mmd_in_window per-line 全量笔扫 O(xds×bis)。bi 层无
+        # 次级别 → 不建,后续 sub_1bi 恒 None(与 scan 在 bi 层恒返回 None 等价)。
+        # bi 此刻已定(bi 层 calculate 先于 xd 层跑完),循环内不变,故可外提。
+        _sub_1mmd_index = (
+            self._build_sub_1mmd_index(self.cl.get_bis())
+            if self.zs_type == 'xd' else None
+        )
+
         for i, now_line in enumerate(lines):
             if i < 2:
                 # 二买/二卖至少需要 1 个一买 + 1 段反抽 + 当前段 = 3 段
@@ -417,8 +483,11 @@ class BsPointCalculator:
 
             # ---- 路径 1·定律一(原文 kobo.54.1) ----
             # xd 层时,优先看次级别(笔层) 1 类是否落在 now_line 末端,有则
-            # 直接产出本级别 2 类,跳过经验法。
-            sub_1bi = self._find_subordinate_1mmd_in_window(now_line, now_line.type)
+            # 直接产出本级别 2 类,跳过经验法。(索引版,等价于 scan 见上)
+            sub_1bi = (
+                self._sub_1mmd_from_index(_sub_1mmd_index, now_line, now_line.type)
+                if _sub_1mmd_index is not None else None
+            )
             if sub_1bi is not None:
                 now_end_k = now_line.end.k.k_index
                 valid_zss_dl1 = self._filter_valid_zss_by_now_end_k(
