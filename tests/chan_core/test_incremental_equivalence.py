@@ -119,3 +119,63 @@ def test_full_snapshot_incremental_matches_batch(stem, limit):
     for L, si, sb in _iter_checkpoints(stem, limit):
         assert canonical_json(si) == canonical_json(sb), \
             f"{stem} L={L}:全快照 增量 vs 全量 batch 分叉"
+
+
+def _recursive_sig(cd) -> tuple:
+    """递归层(回测真正消费的 L0/L1 中枢 + 多级买卖点)的稳定快照。
+
+    cl_snapshot 只覆盖 legacy 层(bis/xds/bi_zss/xd_zss/mmd);回测走 recursive_branch
+    (get_recursive_branch_levels / get_branch_bspoints),不在 cl_snapshot 内,故另取。
+    """
+    def r(v):
+        return round(v, 6) if isinstance(v, (int, float)) else v
+
+    def bsp(pts):
+        out = []
+        for p in pts:
+            af = getattr(p, "anchor_fx", None)
+            out.append((
+                p.bs_type, p.level,
+                getattr(getattr(af, "k", None), "date", None) if af else None,
+                r(getattr(af, "val", None)),
+                r(p.structural_stop_below), r(p.structural_stop_above),
+            ))
+        return out
+
+    def lvl(levels):
+        return [
+            (lv.level, len(lv.zss), len(lv.zslxs),
+             tuple((r(getattr(z, "zg", None)), r(getattr(z, "zd", None)), z.type)
+                   for z in lv.zss))
+            for lv in levels
+        ]
+
+    return (
+        tuple(bsp(cd.get_branch_bspoints(use_xd=False))),
+        tuple(bsp(cd.get_branch_bspoints(use_xd=True))),
+        tuple(lvl(cd.get_recursive_branch_levels())),
+    )
+
+
+@pytest.mark.parametrize("stem,limit", CASES)
+def test_recursive_branch_incremental_matches_batch(stem, limit):
+    """递归层(回测真正消费的 L0/L1 中枢 + 多级买卖点)增量 vs 全量逐前缀一致。
+
+    回测/实盘走 recursive_branch(get_recursive_branch_levels / get_branch_bspoints),
+    每根 K 全量重算(_recursive_memo 每 K clear + RecursiveBranchCalculator new 实例),
+    本应纯函数 inc==batch;此网钉死该不变量、防未来递归层增量化引入分叉(legacy 层
+    的 bi_zss 增量化曾因 _promote 不可逆 / zslx 缓存漏回填而分叉,见上)。
+    """
+    df = _load(stem, limit)
+    code, freq = stem.rsplit("_", 1)
+    cps = _checkpoints(len(df))
+    inc = _new_cl(code, freq)
+    for i, row in enumerate(df.itertuples(index=False)):
+        _feed(inc, row)
+        L = i + 1
+        if L not in cps:
+            continue
+        batch = _new_cl(code, freq)
+        batch.process_klines(df.iloc[:L])
+        assert _recursive_sig(inc) == _recursive_sig(batch), \
+            f"{stem} L={L}:递归层 增量 vs 全量 batch 分叉"
