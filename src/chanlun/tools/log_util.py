@@ -84,7 +84,10 @@ class LogUtil:
         console_handler.setLevel(console_level)
         console_handler.setFormatter(formatter)
 
-        log_dir = 'logs'
+        # 日志目录:默认 'logs'(cwd 相对,保持历史行为不破坏实盘部署);设
+        # CHANLUN_LOG_DIR 可覆盖为固定/绝对路径,避免从不同 cwd 运行时日志散落
+        # 各处(repo根/src/xuangu/web 各建一份,见 dir_structure_audit)。
+        log_dir = os.environ.get("CHANLUN_LOG_DIR", "logs")
         if not os.path.exists(log_dir):
             os.makedirs(log_dir)
 
