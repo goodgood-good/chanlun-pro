@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 from typing import List, Optional, Tuple
+from weakref import WeakKeyDictionary
 
 from chanlun.core.beichi_calculator import LdProvider, beichi_pz, beichi_qs, is_qs
 from chanlun.core.types import LINE, ZS, ZSLX
@@ -84,6 +85,25 @@ class ZslxCalculator:
 
     def __init__(self):
         self._cache: dict[tuple, List[ZSLX]] = {}
+        # done 中枢 zs_sig 弱键缓存。本实例被 cl.py 的 bi_zss(方向回填)/xd_zss
+        # (走势类型)两路交替调用,单槽前缀 splice 会互相冲刷;改按中枢对象缓存其
+        # sig:done 中枢字段(level/done/lines/zd/zg)并入 ZsCalculator.zss 后冻结
+        # (append 前已 done + promote 完毕,之后不原地改;扩展是递归层独立对象、
+        # 不回改 legacy 中枢),故任意调用流可复用,消除每次 _signature 重建全部中枢
+        # 的 2×_line_sig(profiler 实测 _line_sig 占 zslx 近半)。WeakKeyDictionary:
+        # 中枢 GC 时自动剔除、不污染 ZS.__dict__(快照/pickle 无感),ZS 默认 id-hash 可弱键。
+        self._zs_sig_cache: "WeakKeyDictionary[ZS, tuple]" = WeakKeyDictionary()
+
+    def __getstate__(self):
+        # WeakKeyDictionary 不可 pickle 且为瞬态(可重建),序列化时丢弃。
+        state = self.__dict__.copy()
+        state.pop("_zs_sig_cache", None)
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        if "_zs_sig_cache" not in self.__dict__:
+            self._zs_sig_cache = WeakKeyDictionary()
 
     @staticmethod
     def _line_sig(line: LINE) -> tuple:
@@ -103,19 +123,29 @@ class ZslxCalculator:
         wzgx_config: str,
         frequency: Optional[str],
     ) -> tuple:
+        cache = self._zs_sig_cache
+
         def zs_sig(zs: ZS) -> tuple:
+            done = bool(getattr(zs, "done", False))
+            if done:
+                hit = cache.get(zs)
+                if hit is not None:
+                    return hit
             zs_lines = getattr(zs, "lines", []) or []
             first = zs_lines[0] if zs_lines else None
             last = zs_lines[-1] if zs_lines else None
-            return (
+            sig = (
                 getattr(zs, "level", 0),
-                bool(getattr(zs, "done", False)),
+                done,
                 len(zs_lines),
                 None if first is None else self._line_sig(first),
                 None if last is None else self._line_sig(last),
                 getattr(zs, "zd", None),
                 getattr(zs, "zg", None),
             )
+            if done:
+                cache[zs] = sig
+            return sig
 
         return (
             str(wzgx_config),
