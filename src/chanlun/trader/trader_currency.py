@@ -4,8 +4,8 @@ from chanlun.exchange.exchange_binance import ExchangeBinance
 from chanlun import utils
 from chanlun.db import db
 from chanlun import zixuan
-from chanlun.backtesting.base import Operation, POSITION
-from chanlun.backtesting.backtest_trader import BackTestTrader
+from chanlun.trading.base import Operation, POSITION
+from chanlun.trading.backtest_trader import BackTestTrader
 
 """
 数字货币实盘交易器，使用 Binance 合约接口。

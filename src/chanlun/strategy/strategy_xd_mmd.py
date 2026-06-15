@@ -1,5 +1,5 @@
 from typing import Dict, List, Union
-from chanlun.backtesting.base import *
+from chanlun.trading.base import *
 from chanlun.core.types import *
 
 

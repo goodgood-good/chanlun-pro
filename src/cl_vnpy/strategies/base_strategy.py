@@ -9,8 +9,8 @@ from vnpy_ctastrategy import (
     BarGenerator,
 )
 
-from chanlun.backtesting.backtest_trader import BackTestTrader
-from chanlun.backtesting.base import *
+from chanlun.trading.backtest_trader import BackTestTrader
+from chanlun.trading.base import *
 from chanlun.strategy.strategy_demo import StrategyDemo
 
 

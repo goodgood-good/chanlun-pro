@@ -30,10 +30,10 @@ from tqdm.auto import tqdm
 
 from chanlun import fun, kcharts
 from chanlun.core import cl
-from chanlun.backtesting import futures_contracts
-from chanlun.backtesting.backtest_klines import BackTestKlines
-from chanlun.backtesting.backtest_trader import BackTestTrader
-from chanlun.backtesting.base import POSITION, Strategy
+from chanlun.trading import futures_contracts
+from chanlun.trading.backtest_klines import BackTestKlines
+from chanlun.trading.backtest_trader import BackTestTrader
+from chanlun.trading.base import POSITION, Strategy
 from chanlun.backtesting.klines_generator import KlinesGenerator
 from chanlun.backtesting.optimize import OptimizationSetting
 from chanlun.core.types import ICL

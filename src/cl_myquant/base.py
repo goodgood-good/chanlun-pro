@@ -18,8 +18,8 @@ from gm.api import (
     order_value,
 )
 
-from chanlun.backtesting.backtest_trader import BackTestTrader
-from chanlun.backtesting.base import POSITION, MarketDatas, Operation
+from chanlun.trading.backtest_trader import BackTestTrader
+from chanlun.trading.base import POSITION, MarketDatas, Operation
 from chanlun.cl_interface import ICL
 
 

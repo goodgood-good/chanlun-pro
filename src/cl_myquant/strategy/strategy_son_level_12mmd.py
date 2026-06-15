@@ -19,7 +19,7 @@ from gm.api import (
 )
 
 from chanlun import fun
-from chanlun.backtesting.base import Strategy
+from chanlun.trading.base import Strategy
 from chanlun.cl_utils import query_cl_chart_config
 from chanlun.exchange.exchange import convert_stock_kline_frequency
 from chanlun.strategy import strategy_son_level_1mmd

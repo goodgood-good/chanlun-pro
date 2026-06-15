@@ -6,8 +6,8 @@ import traceback
 import talib
 
 from chanlun import fun
-from chanlun.backtesting.backtest_klines import BackTestKlines
-from chanlun.backtesting.base import Strategy
+from chanlun.trading.backtest_klines import BackTestKlines
+from chanlun.trading.base import Strategy
 from chanlun.core.types import BI, ICL
 from chanlun.cl_utils import (
     query_cl_chart_config,

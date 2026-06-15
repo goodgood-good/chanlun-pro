@@ -1,6 +1,6 @@
 from typing import Dict, List, Union
 
-from chanlun.backtesting.base import POSITION, MarketDatas, Operation, Strategy
+from chanlun.trading.base import POSITION, MarketDatas, Operation, Strategy
 from chanlun.core.types import BI
 
 

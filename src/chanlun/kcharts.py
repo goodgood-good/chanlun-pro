@@ -20,7 +20,7 @@ except ImportError as _e:
         "(or `poetry install --extras charts`)"
     ) from _e
 
-from chanlun.backtesting.base import Strategy
+from chanlun.trading.base import Strategy
 from chanlun.cl_analyse import LinesFormAnalyse
 from chanlun.core.types import ICL, LINE, ZS
 from chanlun.cl_utils import cl_qstd, klines_to_heikin_ashi_klines

@@ -6,8 +6,8 @@ import pandas as pd
 from tqdm.auto import tqdm
 
 from chanlun.backtesting.backtest import BackTest
-from chanlun.backtesting.backtest_trader import BackTestTrader
-from chanlun.backtesting.base import Operation, Strategy
+from chanlun.trading.backtest_trader import BackTestTrader
+from chanlun.trading.base import Operation, Strategy
 from chanlun.exchange.exchange_db import ExchangeDB
 
 """

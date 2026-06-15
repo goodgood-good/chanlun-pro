@@ -4,8 +4,8 @@ from chanlun import utils
 from chanlun import zixuan
 from chanlun.db import db
 from chanlun.exchange.exchange_tdx import ExchangeTDX
-from chanlun.backtesting.backtest_trader import BackTestTrader
-from chanlun.backtesting.base import Operation, POSITION
+from chanlun.trading.backtest_trader import BackTestTrader
+from chanlun.trading.base import Operation, POSITION
 
 """
 A股信号通知交易器：使用通达信行情接口，不实际下单，

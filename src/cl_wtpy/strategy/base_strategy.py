@@ -2,7 +2,7 @@ from pandas.core.api import DataFrame as DataFrame
 from wtpy import BaseCtaStrategy, WtBarRecords
 from wtpy import CtaContext
 
-from chanlun.backtesting.base import *
+from chanlun.trading.base import *
 from chanlun.core.types import *
 from chanlun.cl_utils import query_cl_chart_config
 

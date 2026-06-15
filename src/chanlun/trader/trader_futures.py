@@ -4,8 +4,8 @@ from chanlun.exchange.exchange_tq import ExchangeTq
 from chanlun import utils
 from chanlun import zixuan
 from chanlun.db import db
-from chanlun.backtesting.base import Operation, POSITION
-from chanlun.backtesting.backtest_trader import BackTestTrader
+from chanlun.trading.base import Operation, POSITION
+from chanlun.trading.backtest_trader import BackTestTrader
 
 """
 期货交易 Demo，使用天勤自带的模拟账号进行测试。
