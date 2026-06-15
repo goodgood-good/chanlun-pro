@@ -613,17 +613,25 @@ class BsPointCalculator:
         # key = (zs.index, mmd_name); value = 首次回抽/回拉的 now_line.index。
         first_return_seen: dict[tuple[int, str], int] = {}
 
-        for now_line in lines:
-            # 防未来函数：3buy/3sell 关联中枢必须在 now_line 完成之前就已
-            # "完成"，否则历史 xd 会被未来才完成的中枢事后追认。
-            now_end_k = now_line.end.k.k_index
-            valid_zss = self._filter_valid_zss_by_now_end_k(
-                clean_zss, start_keys, now_end_k, require_end_complete=True
-            )
+        # 增量化(消除 O(n²)):related_zs == _find_related_zs_for_3rd 的结果 ==
+        # 「zs.end.index 最大且 < now_line.index(cond-C)」的结构合格中枢。
+        # 在严格递进的线序里 zs.end.index < now_line.index ⇒ zs 的 start/end 的
+        # k_index 必 < now_line.end.k.k_index(now_end_k),故 cond-C 已 subsume 原
+        # _filter_valid_zss_by_now_end_k 的 cond-S/cond-E(require_end_complete 防未来
+        # 函数);防未来函数语义不变。结构合格中枢按 end.index 升序,每根 now_line 用
+        # bisect O(log M) 取「< now_line.index 的最大 end.index」,取代 per-line 全扫
+        # valid_zss(原 O(n²) 主因)。行为由大网 SH.600519_5m(809笔/83个3类点)钉死。
+        _src_zss = clean_zss if clean_zss is not None else zss
+        _elig = sorted(
+            (zs for zs in _src_zss
+             if zs.done and zs.real and zs.end is not None and zs.end.end is not None),
+            key=lambda zs: zs.end.index,
+        )
+        _elig_end_idx = [zs.end.index for zs in _elig]
 
-            # 3buy/3sell 只对照"紧邻离开段"的最近一个中枢（缠论原文 3 类语义），
-            # 放宽到所有历史中枢会让每个反抽段对所有早期中枢都报点、信号爆炸。
-            related_zs = self._find_related_zs_for_3rd(now_line, valid_zss)
+        for now_line in lines:
+            _k = bisect.bisect_left(_elig_end_idx, now_line.index)
+            related_zs = _elig[_k - 1] if _k > 0 else None
             if related_zs is None:
                 continue
 
