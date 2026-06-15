@@ -350,11 +350,15 @@ class ZsCalculator:
             center._bounds_dirty = True  # 整体赋值 lines 后边界缓存失效
             # 初始中枢范围由前三段重叠决定
             center.zg, center.zd = zg, zd
-            center.update_boundaries()
 
             # 3. 尝试延伸中枢，并检查是否完成
             is_completed, exit_idx = self._extend_and_check_complete(center, core_start_idx + 3)
             self._promote_opening_entry_if_needed(center)
+            # gg/dd(延伸包络)在中枢构建中不被读(延伸/完成判据只用核心区 zd/zg),故把
+            # update_boundaries 批到此处算一次(center 仍 _bounds_dirty=True → 全量重算
+            # 末段 gg/dd;promote 分支已自行 update 则此处走增量幂等),取代 _extend 内每
+            # append 一次的 update_boundaries(实测 124k 次→中枢数,省 ~0.1s 纯调用开销)。
+            center.update_boundaries()
 
             if is_completed:
                 # 有效中枢须满足：有离开段、核心线段 >= min_zs_lines（L0
@@ -454,7 +458,6 @@ class ZsCalculator:
                 if j == len(self.all_lines) - 1:
                     # 这是最后一条线段，它重叠了，必须是核心成员
                     center.lines.append(current_seg)
-                    center.update_boundaries()
                     if len(center.lines) >= self.min_zs_lines:
                         center.end = current_seg
                     return False, j
@@ -467,7 +470,6 @@ class ZsCalculator:
                     # 下一线段(j+1)也重叠
                     # 这证明 current_seg(j) *不是* 离开段，它 *是* 核心成员
                     center.lines.append(current_seg)
-                    center.update_boundaries()
                     j += 1
                     continue
                 else:
@@ -476,7 +478,6 @@ class ZsCalculator:
                     # 伸出到中枢外，既是中枢的「离开段」，也是中枢的构成段，
                     # 计入核心一并参与「>= 4 段重叠」的成立判定。
                     center.lines.append(current_seg)
-                    center.update_boundaries()
                     center.end = current_seg  # 离开段 = 最后一个重叠段
                     center.done = True
                     return True, j  # 下一个中枢的入口仍是离开段 j
