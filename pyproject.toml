@@ -102,6 +102,8 @@ ignore = ["F403", "F405", "E402", "E731", "E741"]
 # 这些模块保留兼容性 re-export / 延迟导入入口，不能被 F401 自动删除。
 "src/chanlun/exchange/__init__.py" = ["F401"]
 "src/chanlun/file_db.py" = ["F401"]
+"src/chanlun/core/cl_interface.py" = ["F401", "F403"]
+"src/chanlun/core/types/__init__.py" = ["F401", "F403"]
 "web/chanlun_chart/cl_app/__init__.py" = ["F401"]
 "web/chanlun_chart/cl_app/blueprints/tv.py" = ["F401"]
 
