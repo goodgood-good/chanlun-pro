@@ -28,7 +28,18 @@ class BuySellPoint:
 
 
 class BsBranchCalculator:
-    """买卖点计算器。无状态，每次 calculate 全量重算。"""
+    """买卖点计算器。每次 calculate 全量重算（同 K 内对同一入参 memo 去重）。
+
+    实例每根 K 新建(cl.get_branch_bspoints / bs3_branch),故按入参**对象身份**(is)
+    memo 仅在单实例内复用、绝不跨 K 污染、与全量重算逐字节等价:同一 lines 的
+    _line_index、同一 zs_result 的 _first_class 在 calculate/_third_class/second_class
+    间反复调,memo 后只算一次(_line_index 同 K 2 次→1 次,占递归层 tottime 大头)。"""
+
+    def __init__(self) -> None:
+        self._index_lines: Optional[List[LINE]] = None      # 上次建表的 lines(身份键)
+        self._index_cache: Optional[dict] = None
+        self._fc_zr: Optional[ZsBranchResult] = None        # 上次算一类的 zs_result(身份键)
+        self._fc_cache: Optional[List["BuySellPoint"]] = None
 
     def calculate(self, zs_result: ZsBranchResult,
                   lines: List[LINE]) -> List[BuySellPoint]:
@@ -36,7 +47,12 @@ class BsBranchCalculator:
 
     def _first_class(self, zs_result: ZsBranchResult) -> List[BuySellPoint]:
         """一类 = 趋势背驰(done_divergence 里 is_beichi & kind=='qs')。
-        离开段向下→1buy(跌势衰竭)、向上→1sell;锚离开段末端极值。"""
+        离开段向下→1buy(跌势衰竭)、向上→1sell;锚离开段末端极值。
+
+        同 K memo:calculate 与 second_class 对同一 zs_result 各算一次,身份命中即复用
+        (返回 list 调用方只读/`+` 不就地改,共享安全)。"""
+        if zs_result is self._fc_zr and self._fc_cache is not None:
+            return self._fc_cache
         out: List[BuySellPoint] = []
         for i, dv in enumerate(zs_result.done_divergence):
             if dv is None or not dv.is_beichi or dv.kind != "qs":   # 仅趋势背驰
@@ -47,6 +63,8 @@ class BsBranchCalculator:
                 out.append(BuySellPoint("1buy", z, c, c.end, dv))
             elif c._type == "up":
                 out.append(BuySellPoint("1sell", z, c, c.end, dv))
+        self._fc_zr = zs_result
+        self._fc_cache = out
         return out
 
     def _third_class(self, zs_result: ZsBranchResult,
@@ -109,17 +127,21 @@ class BsBranchCalculator:
                 ))
         return out
 
-    @staticmethod
-    def _line_index(lines: List[LINE]) -> dict:
-        """{id(line): 首次位置} —— _next_seg 的 O(1) 查表。
+    def _line_index(self, lines: List[LINE]) -> dict:
+        """{id(line): 首次位置} —— _next_seg 的 O(1) 查表（同 lines 同 K memo 复用）。
 
         _third_class(遍历中枢)/second_class(遍历一类点)在循环里反复调 _next_seg,
         原 _next_seg 每次 O(n) 线性扫描 lines → 整体 O(n²)(TSLA 97k bar nest_cascade
         实测 80% 时间耗在 _next_seg)。建表一次 O(n)、查表 O(1) → O(n²)→O(n),结果不变。
-        setdefault 保留首次出现,与原「首个 ln is leave」语义一致(段无重复,实质无差)。"""
+        setdefault 保留首次出现,与原「首个 ln is leave」语义一致(段无重复,实质无差)。
+        同 K 内 calculate→_third_class 与 second_class 传入同一 lines,身份命中复用该表。"""
+        if lines is self._index_lines and self._index_cache is not None:
+            return self._index_cache
         index: dict = {}
         for k, ln in enumerate(lines):
             index.setdefault(id(ln), k)
+        self._index_lines = lines
+        self._index_cache = index
         return index
 
     @staticmethod
