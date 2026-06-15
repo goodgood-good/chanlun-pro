@@ -72,6 +72,12 @@ class RecursiveBranchCalculator:
 
     def __init__(self, l0_min_zs_lines: int = 4):
         self.l0_min_zs_lines = int(l0_min_zs_lines or 4)
+        # 递归层增量化:持久化各级 ZsBranchCalculator(内含持久 ZsCalculator)+ ZslxBranch,
+        # 跨 calculate(跨 K)复用 → 各级 calculator 增量状态保留。L0 输入(units=xds/bis 浅
+        # 拷贝)identity 稳定 → L0 增量立即生效;L1+ 输入(_as_units 每次 copy.copy)暂不稳定、
+        # 仍全量(留级联阶段)。本实例须按「塔」(笔/段)分持久,见 cl._recursive_branch_calc。
+        self._zs_branch_by_level: dict = {}
+        self._zslx_calc = ZslxBranchCalculator()
 
     def calculate(
         self,
@@ -91,16 +97,26 @@ class RecursiveBranchCalculator:
             return []
         results: List[LevelResult] = []
         units: List[LINE] = list(xds)
-        zslx_calc = ZslxBranchCalculator()    # 无状态，建一次复用
+        zslx_calc = self._zslx_calc    # 持久复用(见 __init__)
         level = 0
         while level < _MAX_LEVELS:
             min_lines = self.l0_min_zs_lines if level == 0 else 3
             # 换周期 MACD:各级用对应级别 ld_provider(L0→5m/L1→30m…);无 factory 退化用单一
             lp = ld_provider_for_level(level) if ld_provider_for_level is not None else ld_provider
-            res = ZsBranchCalculator(
-                ld_provider=lp, frequency=frequency,
-                wzgx=wzgx_config, min_zs_lines=min_lines,
-            ).calculate(units)
+            # 复用本级持久 ZsBranchCalculator(其持久 ZsCalculator 承载增量状态);ld/freq/wzgx
+            # 每轮可变(同 CL 内实际稳定),更新即可;min_zs_lines 按级固定(L0=l0_min/L≥1=3)。
+            zb = self._zs_branch_by_level.get(level)
+            if zb is None:
+                zb = ZsBranchCalculator(
+                    ld_provider=lp, frequency=frequency,
+                    wzgx=wzgx_config, min_zs_lines=min_lines,
+                )
+                self._zs_branch_by_level[level] = zb
+            else:
+                zb.ld_provider = lp
+                zb.frequency = frequency
+                zb.wzgx = wzgx_config
+            res = zb.calculate(units)
             if not res.done_zss:
                 # 右边缘只剩 pending 高级中枢(未被离开段确认完成)：记录其 H2(leave 读法)
                 # 中枢 + live 背驰再终止——让层级树展示到右边缘「正在形成」的高级中枢

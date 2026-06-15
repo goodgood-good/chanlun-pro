@@ -97,6 +97,9 @@ class CL(ICL):
         # 无状态全量重算,复用实例与每次 new 行为完全一致(纯分配优化)。
         self._bi_bsp = None
         self._xd_bsp = None
+        # 递归层持久 RecursiveBranchCalculator,按「塔」(use_xd:False=笔/True=段)分实例
+        # (各塔输入不同 → 各自 identity 稳定、不互相抖动),跨 K 复用承载递归层增量状态。
+        self._rbc: dict = {}
 
         # 兼容运行时期望字段
         self.debug: bool = False
@@ -473,6 +476,17 @@ class CL(ICL):
         """
         return int(self.config.get('recursive_l0_min_zs_lines', 3) or 3)
 
+    def _recursive_branch_calc(self, use_xd: bool):
+        """按塔(use_xd:False=笔/True=段)取持久 RecursiveBranchCalculator(递归层增量化:
+        跨 K 复用其各级持久子 calculator 的增量状态;memo 仍每 K clear 缓存结果,实例与
+        增量状态跨 K 保留)。各塔输入不同 → 各自 identity 稳定、不互相抖动。"""
+        rbc = self._rbc.get(use_xd)
+        if rbc is None:
+            from chanlun.core.recursive_branch import RecursiveBranchCalculator
+            rbc = RecursiveBranchCalculator(l0_min_zs_lines=self._recursive_l0_min_zs_lines())
+            self._rbc[use_xd] = rbc
+        return rbc
+
     def get_recursive_branch_levels(self):
         """新核心:recursive_branch 多级递归(中枢+内联背驰+走势类型,P1-P4)。
 
@@ -484,14 +498,12 @@ class CL(ICL):
         cached = self._recursive_memo.get("rbl")
         if cached is not None:
             return cached
-        from chanlun.core.recursive_branch import RecursiveBranchCalculator
         ld = lambda s, e: query_macd_ld(self, s, e)
         wzgx = self._recursive_wzgx()
-        l0_min = self._recursive_l0_min_zs_lines()
         # L0 输入用线段(xds):线段中枢是缠论最低正式级别中枢(宪法 L0=线段),升级链由此起。
         # 笔中枢是更小的观察级别、不参与升级,单独走 get_bi_zhongshu。
         # (1m 标的线段稀疏→线段中枢少,但缠论正确;丰富的笔中枢另在观察层显示。)
-        result = RecursiveBranchCalculator(l0_min_zs_lines=l0_min).calculate(
+        result = self._recursive_branch_calc(True).calculate(
             list(self.get_xds()), ld, wzgx, self.frequency,
         )
         self._recursive_memo["rbl"] = result
@@ -525,16 +537,14 @@ class CL(ICL):
         cached = self._recursive_memo.get(memo_key)
         if cached is not None:
             return cached
-        from chanlun.core.recursive_branch import RecursiveBranchCalculator
         from chanlun.core.zs_branch import ZsBranchResult
         from chanlun.core.bs_branch import BsBranchCalculator
         from chanlun.core.bs2_branch import Bs2BranchCalculator
         from chanlun.core.bs3_branch import Bs3BranchCalculator
         ld = lambda s, e: query_macd_ld(self, s, e)
         wzgx = self._recursive_wzgx()
-        l0_min = self._recursive_l0_min_zs_lines()
         units = list(self.get_xds()) if use_xd else list(self.get_bis())
-        levels = RecursiveBranchCalculator(l0_min_zs_lines=l0_min).calculate(
+        levels = self._recursive_branch_calc(use_xd).calculate(
             units, ld, wzgx, self.frequency,
         )
         if not levels:

@@ -204,20 +204,24 @@ class ZsBranchCalculator:
         self.frequency = frequency
         self.wzgx = wzgx
         self.min_zs_lines = min_zs_lines
+        # 持久 ZsCalculator(递归层增量化):跨 calculate 复用 → 其 identity-LCP 增量
+        # (_prefix_stable_restart)在 identity 稳定输入(L0 = xds/bis 浅拷贝、同对象前缀)
+        # 上生效,取代原每次 new 实例的全量重建。require_alternation 含义见下方原注释。
+        # 调用方(RecursiveBranchCalculator)须按「级别/塔」分实例持久,以免输入抖动。
+        self._zc = ZsCalculator(
+            require_alternation=True,
+            min_zs_lines=min_zs_lines,
+            max_zs_lines=self._NO_CAP,
+        )
 
     def calculate(self, lines: List[LINE]) -> ZsBranchResult:
         if not lines:
             return ZsBranchResult(done_zss=[], live=[], freeze_idx=0, done_divergence=[])
-        zc = ZsCalculator(
-            # 强制方向交替:原文 line7268「任何图形上的『向上+向下+向上』或『向下+向上
-            # +向下』都必然产生中枢」+ line24727「三段上下上或下上下…重合就构成中枢」——
-            # 中枢的本质就是 3 段方向交替的重叠区。L0(线段)本就天然交替,此校验是 no-op;
-            # L≥1(走势类型)构成段方向不必然交替,关掉它会把『连续 3 个同向走势类型』的价格
-            # 重合处硬挤成假中枢(301004 假 L1 中枢 [49.72,49.91] 根因),故须开启。
-            require_alternation=True,
-            min_zs_lines=self.min_zs_lines,
-            max_zs_lines=self._NO_CAP,
-        )
+        # 复用持久 ZsCalculator(见 __init__):identity 稳定输入走增量,否则其内部自动
+        # 降级全量(identity-LCP d=0)。require_alternation=True:原文 line7268/24727 中枢=
+        # 3 段方向交替重叠区;L0(线段)天然交替此为 no-op,L≥1(走势类型)构成段不必然交替,
+        # 关掉会把『连续 3 个同向走势类型』价格重合处硬挤成假中枢(301004 假 L1 根因)。
+        zc = self._zc
         zc.calculate(lines)
         # 进入段/离开段校正（原文口径）：把误当核心的升/跌入段(进入段)、定向冲出的
         # 离开段从中枢本体剥出（进入段 → z.start，离开段 → z.end）
