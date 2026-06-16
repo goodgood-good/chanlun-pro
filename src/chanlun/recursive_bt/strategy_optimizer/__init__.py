@@ -13,4 +13,5 @@ from chanlun.recursive_bt.strategy_optimizer.reports_mtf3 import *  # noqa: F401
 from chanlun.recursive_bt.strategy_optimizer.reports_strategy import *  # noqa: F401,F403
 from chanlun.recursive_bt.strategy_optimizer.reports_attribution import *  # noqa: F401,F403
 from chanlun.recursive_bt.strategy_optimizer.reports_regime import *  # noqa: F401,F403
+from chanlun.recursive_bt.strategy_optimizer.decision import *  # noqa: F401,F403
 from chanlun.recursive_bt.strategy_optimizer._impl import *  # noqa: F401,F403
