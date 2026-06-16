@@ -22,7 +22,7 @@ sys.path.insert(0, str(_HERE.parents[1] / "chan_core"))  # for `from snapshot im
 
 from chanlun.market import Market                          # noqa: E402
 from chanlun.core.cl import CL                           # noqa: E402
-from chanlun.recursive_bt.engine import CL_CFG           # noqa: E402
+from chanlun.recursive_bt.engine.engine import CL_CFG           # noqa: E402
 from snapshot import cl_snapshot, canonical_json         # noqa: E402
 
 FIX_DIR = _HERE.parents[1] / "fixtures"

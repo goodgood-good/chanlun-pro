@@ -1,9 +1,9 @@
-"""chanlun.recursive_bt.fetch — 用 QMT 拉前复权 K线 + 预计算缠论信号,缓存本地。
+"""chanlun.recursive_bt.data.fetch — 用 QMT 拉前复权 K线 + 预计算缠论信号,缓存本地。
 
 CL 重计算(慢)只在此做一次,缓存 {dates,open,close,small_by_bar,big_dir_at,limit_pct} 到 out_dir/{code}.pkl。
 可断点续传(已存在跳过)。涨跌停按板块:科创688/创业300/301=20%,主板=10%。
-- 默认(近1年)5m小级别+30m大级别 → bt_data:   python -m chanlun.recursive_bt.fetch 沪深300
-- 日线级(2022~2024,熊市验证)1d小+1w大 → bt_data_daily: python -m chanlun.recursive_bt.fetch daily
+- 默认(近1年)5m小级别+30m大级别 → bt_data:   python -m chanlun.recursive_bt.data.fetch 沪深300
+- 日线级(2022~2024,熊市验证)1d小+1w大 → bt_data_daily: python -m chanlun.recursive_bt.data.fetch daily
 """
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ import time
 
 import pandas as pd
 
-from chanlun.recursive_bt.engine import (
+from chanlun.recursive_bt.engine.engine import (
     collect_branch_signals, CL_CFG, MTFStrategy,
 )
 from chanlun.core.cl import CL
@@ -368,7 +368,7 @@ def patch_trend(out_dir: str, big_tf: str, start, end):
     无 lookahead。旧「最终序列笔事件+delay」口径已被截断实证废弃(滞后中位9bar,固定delay两头错)。"""
     import glob
     from chanlun.exchange.exchange_qmt import ExchangeQMT
-    from chanlun.recursive_bt.engine import wf_dir_series
+    from chanlun.recursive_bt.engine.engine import wf_dir_series
     ex = ExchangeQMT()
     files = sorted(glob.glob(f"{out_dir}/*.pkl"))
     ok = skip = fail = 0
@@ -491,7 +491,7 @@ def build_st_list(out_path: str, codes=None, detail_fn=None) -> dict:
     """构建主板 ST/*ST 名单 `_st_list.json`({code: name},±5% 涨跌停)。
     创业板/科创板 ST 涨跌幅仍 20%、北交所无 ST 制度,均不入名单。
     按当前名称近似(戴帽/摘帽时点未追溯)。"""
-    from chanlun.recursive_bt.market_runtime import ashare_board
+    from chanlun.recursive_bt.engine.market_runtime import ashare_board
 
     if detail_fn is None:
         from xtquant import xtdata

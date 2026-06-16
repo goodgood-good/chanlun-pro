@@ -25,7 +25,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from chanlun.core.cl import CL                       # noqa: E402
-from chanlun.recursive_bt.engine import CL_CFG       # noqa: E402
+from chanlun.recursive_bt.engine.engine import CL_CFG       # noqa: E402
 
 FIX = REPO_ROOT / "tests" / "fixtures" / "SH.600519_5m.parquet"
 

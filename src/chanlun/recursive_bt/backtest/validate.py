@@ -2,14 +2,14 @@
 
 量化「确认滞后 + 幻影信号(右边缘 repaint)」对收益的影响:若两者接近,则预算信号回测=实盘可信;
 若 walk-forward 明显更低,则预算回测乐观。5m-only 多头、忽略费用(对比差值,费用两边抵消)。
-运行: PYTHONPATH="src;web/chanlun_chart;." python -m chanlun.recursive_bt.validate [trend]
+运行: PYTHONPATH="src;web/chanlun_chart;." python -m chanlun.recursive_bt.backtest.validate [trend]
 trend 子命令: 周线笔方向事件确认滞后实证(截断重算)——定 trend 门控 delay 下界,防 lookahead。
 """
 import glob
 import os
 import sys
 
-from chanlun.recursive_bt.engine import CL_CFG, collect_branch_signals
+from chanlun.recursive_bt.engine.engine import CL_CFG, collect_branch_signals
 from chanlun.core.cl import CL
 from chanlun.exchange.exchange_qmt import ExchangeQMT
 
@@ -94,7 +94,7 @@ def trend_lag(n_codes: int = 8, tf: str = "w", start="2022-01-01", end="2024-12-
     trend 门控 delay 必须 ≥ 高分位滞后,否则回测用了「事后才确认的笔起点」=lookahead。"""
     import numpy as np
     import pandas as pd
-    from chanlun.recursive_bt.engine import collect_dir_events
+    from chanlun.recursive_bt.engine.engine import collect_dir_events
     ex = ExchangeQMT()
     codes = sorted(os.path.basename(f)[:-4]
                    for f in glob.glob("D:/chanlun_pro/bt_data_daily/*.pkl")

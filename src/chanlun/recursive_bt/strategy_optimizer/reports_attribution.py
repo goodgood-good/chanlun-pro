@@ -28,7 +28,7 @@ def build_bs_point_attribution_report(
     trade_paths: Mapping[str, str | Path] | None = None,
     min_trades: int = 10,
 ) -> dict:
-    from chanlun.recursive_bt.market_runtime import default_backtest_report_paths, normalize_market
+    from chanlun.recursive_bt.engine.market_runtime import default_backtest_report_paths, normalize_market
 
     trade_paths = dict(trade_paths or {})
     market_reports = []
@@ -334,7 +334,7 @@ def build_bs_point_regime_attribution_report(
     trade_paths: Mapping[str, str | Path] | None = None,
     min_trades: int = 10,
 ) -> dict:
-    from chanlun.recursive_bt.market_runtime import normalize_market
+    from chanlun.recursive_bt.engine.market_runtime import normalize_market
 
     summary_paths = dict(summary_paths or {})
     trade_paths = dict(trade_paths or {})

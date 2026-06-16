@@ -17,7 +17,7 @@ import pandas as pd
 
 # Importing engine also registers the legacy ``recursive_backtest`` pickle
 # module alias used by older cached Signal objects.
-from chanlun.recursive_bt.engine import Signal  # noqa: F401
+from chanlun.recursive_bt.engine.engine import Signal  # noqa: F401
 
 
 INDEX_CODE = "SH.000001"

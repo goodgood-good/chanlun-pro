@@ -157,7 +157,7 @@ def _paper_ledger_is_baseline_only(data: Mapping[str, object]) -> bool:
 def default_runtime_summary_sources(
     markets: Iterable[str] = ("a", "us"),
 ) -> list[RuntimeSummarySource]:
-    from chanlun.recursive_bt.market_runtime import (
+    from chanlun.recursive_bt.engine.market_runtime import (
         default_backtest_report_paths,
         default_ledger_path,
         normalize_market,

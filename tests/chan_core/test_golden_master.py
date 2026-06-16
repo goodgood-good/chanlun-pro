@@ -14,7 +14,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from snapshot import cl_snapshot, canonical_json  # noqa: E402
 from chanlun.core.cl import CL                     # noqa: E402
-from chanlun.recursive_bt.engine import CL_CFG     # noqa: E402
+from chanlun.recursive_bt.engine.engine import CL_CFG     # noqa: E402
 
 FIX_DIR = Path(__file__).resolve().parents[1] / "fixtures"
 GOLD_DIR = Path(__file__).resolve().parents[1] / "golden"

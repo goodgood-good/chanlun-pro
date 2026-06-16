@@ -13,7 +13,7 @@ import numpy as np
 import pandas as pd
 
 from chanlun import config as app_config
-from chanlun.recursive_bt.portfolio import (
+from chanlun.recursive_bt.sim.portfolio import (
     _load_bt_universe, load_cached, portfolio_backtest,
 )
 
@@ -135,7 +135,7 @@ def main_v2():
     海选门槛(第8课:收盘>70日线=「能搞的」分类,250天线因数据仅1年降级为原文明示的70天线)
     + ②比价资金流向(第9课原味:「比价关系的变动…和市场资金的流向相关」,20日RS>大盘)
     + 3买优先(line23172「牛市里第三类买点的爆发力是最强的」)。全部 point-in-time。"""
-    from chanlun.recursive_bt.portfolio import attach_pool_filters
+    from chanlun.recursive_bt.sim.portfolio import attach_pool_filters
     syms = _load_bt_universe()
     market = load_cached("SH.000001")
     if market is None:
@@ -170,7 +170,7 @@ def main_v3():
     ②比价再平衡层=季度重算池(市值/行业地位变化→换股)
     ③技术面执行层=缠论买点(3买优先)+wf走势方向门控定时机。
     对比:三层架构 vs 基线(全池猎手) vs 池子买入持有(无技术面=剥离③的贡献)。"""
-    from chanlun.recursive_bt.industry import build_pool_schedule
+    from chanlun.recursive_bt.select.industry import build_pool_schedule
     syms = _load_bt_universe()
     sched = build_pool_schedule(syms)
     label = f"{len(syms)}只"
@@ -190,7 +190,7 @@ def main_resonance():
     """三级共振(小资金形态深化,原文line13507缠亲答:日线3买→30m回抽→5m背驰
     「必须三个级别共同来才可以」;语境=小资金按日线3买操作「一月内至少可操作7、8次」):
     选股锚=日线3买窗口,进场=窗口内5m买点(3买优先),方向=30m wf 不空。对比基线与窗口敏感性。"""
-    from chanlun.recursive_bt.portfolio import attach_daily_bsp_window
+    from chanlun.recursive_bt.sim.portfolio import attach_daily_bsp_window
     syms = _load_bt_universe()
     label = f"{len(syms)}只"
     n_sig = sum(1 for s in syms.values() if s.get("daily_bsp"))

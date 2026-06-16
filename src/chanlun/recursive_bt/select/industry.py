@@ -1,4 +1,4 @@
-"""chanlun.recursive_bt.industry — ①基本面**结构层**(原文line38524-38534三层架构之一)。
+"""chanlun.recursive_bt.select.industry — ①基本面**结构层**(原文line38524-38534三层架构之一)。
 
 原文完整策略:选行业(须有季线/月线级中枢上移空间)→选企业——「或者是当下的龙头,或者是今后
 某一时刻超越当下龙头的企业」→ **70%投龙头(可能两家) + 30%投最有成长性(两三家)**;「只要行业
@@ -11,7 +11,7 @@
   绝对值失真但行业内排名大体稳);成长=行业内「营收/净利同比增速max」最高(只用**已公告**报告,
   公告次日生效,无lookahead)。
 - 输出池调度 [(生效日, {code: weight})]:龙头组共70%、成长组共30%,组内等权。
-运行: python -m chanlun.recursive_bt.industry  (构建并打印各季度池子供肉眼核验)
+运行: python -m chanlun.recursive_bt.select.industry  (构建并打印各季度池子供肉眼核验)
 """
 from __future__ import annotations
 
@@ -133,7 +133,7 @@ def build_pool_schedule(syms: dict, n_leader: int = 1, n_growth: int = 1,
 
 
 def main():
-    from chanlun.recursive_bt.portfolio import _load_bt_universe
+    from chanlun.recursive_bt.sim.portfolio import _load_bt_universe
     syms = _load_bt_universe()
     sched = build_pool_schedule(syms)
     ind = build_industry_map(list(syms))

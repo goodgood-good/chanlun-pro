@@ -6,7 +6,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src" if (Path(__fi
 from chanlun.core.cl import CL
 from chanlun.core import cl_interface
 from chanlun.core.types import zhongshu, line as line_mod
-from chanlun.recursive_bt.engine import CL_CFG
+from chanlun.recursive_bt.engine.engine import CL_CFG
 
 FIX = Path(__file__).resolve().parents[1] / "fixtures" / "SH.600519_d.parquet"
 

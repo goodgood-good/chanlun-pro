@@ -24,8 +24,8 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from chanlun.recursive_bt.live_backtest import build_symbol_from_klines
-from chanlun.recursive_bt.portfolio import portfolio_backtest
+from chanlun.recursive_bt.backtest.live_backtest import build_symbol_from_klines
+from chanlun.recursive_bt.sim.portfolio import portfolio_backtest
 
 FIX_DIR = Path(__file__).resolve().parents[1] / "fixtures"
 _OP_BARS = 2000  # 茅台 5m 截取窗口(指纹随此数变,勿改)

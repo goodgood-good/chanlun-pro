@@ -20,7 +20,7 @@ def build_mtf3_cache_coverage_report(
     mtf3_bt_data_dir: str | Path | None = None,
     bt_sample_size: int = 300,
 ) -> dict:
-    from chanlun.recursive_bt.market_runtime import (
+    from chanlun.recursive_bt.engine.market_runtime import (
         ashare_board,
         list_chart_cache_codes,
         normalize_market,
@@ -233,7 +233,7 @@ def _mtf3_cache_recommended_next_actions(item: Mapping[str, object]) -> list[dic
                         "build a first SH/SZ MTF3 sample before promoting 1m live rules"
                     ),
                     "command": (
-                        "PYTHONPATH=src python -m chanlun.recursive_bt.fetch "
+                        "PYTHONPATH=src python -m chanlun.recursive_bt.data.fetch "
                         "mtf3_all_a 300 shsz"
                     ),
                 }
@@ -246,7 +246,7 @@ def _mtf3_cache_recommended_next_actions(item: Mapping[str, object]) -> list[dic
                         "5m-three-buy reentry candidate on the wider A-share sample"
                     ),
                     "command": (
-                        "PYTHONPATH=src python -m chanlun.recursive_bt.live_backtest "
+                        "PYTHONPATH=src python -m chanlun.recursive_bt.backtest.live_backtest "
                         "--market a --source bt_data --bt-data "
                         "D:/chanlun_pro/bt_data_mtf3_all_a --bt-pool-mode "
                         "walk_forward --selection-scan-limit 300 --selection-sample-mode "
@@ -294,7 +294,7 @@ def _default_us_mtf3_cache_command() -> str:
     start = start_dt.strftime("%Y-%m-%d %H:%M:%S")
     end = end_dt.strftime("%Y-%m-%d %H:%M:%S")
     return (
-        "PYTHONPATH=src python -m chanlun.recursive_bt.us_mtf3_cache "
+        "PYTHONPATH=src python -m chanlun.recursive_bt.data.us_mtf3_cache "
         f'--start-date "{start}" --end-date "{end}"'
     )
 
@@ -363,7 +363,7 @@ def _manifest_retry_command(manifest: Mapping[str, object]) -> str:
         limit = metadata.get("limit")
         board_filter = str(metadata.get("board_filter") or "shsz")
         sample_mode = str(metadata.get("sample_mode") or "stratified")
-        parts = ["PYTHONPATH=src python -m chanlun.recursive_bt.fetch", "mtf3_all_a"]
+        parts = ["PYTHONPATH=src python -m chanlun.recursive_bt.data.fetch", "mtf3_all_a"]
         if limit:
             parts.append(str(limit))
         if board_filter:
@@ -373,8 +373,8 @@ def _manifest_retry_command(manifest: Mapping[str, object]) -> str:
         return " ".join(parts)
     if label == "mtf3":
         sector = str(metadata.get("sector") or "上证50")
-        return f"PYTHONPATH=src python -m chanlun.recursive_bt.fetch mtf3 {sector}"
-    return "PYTHONPATH=src python -m chanlun.recursive_bt.fetch mtf3_all_a 300 shsz"
+        return f"PYTHONPATH=src python -m chanlun.recursive_bt.data.fetch mtf3 {sector}"
+    return "PYTHONPATH=src python -m chanlun.recursive_bt.data.fetch mtf3_all_a 300 shsz"
 
 
 def _audit_a_bt_data_mtf3_cache(

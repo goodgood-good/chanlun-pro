@@ -20,7 +20,7 @@ import numpy as np
 import pandas as pd
 
 from chanlun import config as app_config
-from chanlun.recursive_bt.engine import (
+from chanlun.recursive_bt.engine.engine import (
     load_klines, collect_branch_signals, CL_CFG, SYMBOLS, MTFStrategy,
     buy_class,
     recommended_buy_ratio,
@@ -161,7 +161,7 @@ def _limit_locked(s: dict, j: int, act: str) -> bool:
         return False
     pdc = s.get("_prev_day_close")
     if pdc is None:
-        from chanlun.recursive_bt.engine import prev_day_close_series
+        from chanlun.recursive_bt.engine.engine import prev_day_close_series
 
         pdc = prev_day_close_series(s["dates"], s["close"])
         s["_prev_day_close"] = pdc
@@ -359,7 +359,7 @@ BT_DATA = (
 def load_cached(code: str) -> Optional[dict]:
     """从 qmt_fetch 预计算缓存载入一只标的(含按板块的涨跌停 rules)。"""
     import pickle
-    from chanlun.recursive_bt.engine import MarketRules
+    from chanlun.recursive_bt.engine.engine import MarketRules
     p = f"{BT_DATA}/{code}.pkl"
     if not os.path.exists(p):
         return None
@@ -367,7 +367,7 @@ def load_cached(code: str) -> Optional[dict]:
     d["name"] = code
     limit = d.get("limit_pct", 0.10)
     # 主板 ST/*ST ±5%(_st_list.json 名单,fetch st_list 构建);创业/科创 ST 仍 20%
-    from chanlun.recursive_bt.market_runtime import st_limit_codes
+    from chanlun.recursive_bt.engine.market_runtime import st_limit_codes
     if code in st_limit_codes():
         limit = 0.05
     d["rules"] = MarketRules("A股", commission=0.0003, stamp_duty=0.0005,

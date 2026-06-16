@@ -47,7 +47,7 @@ def build_strategy_attribution_report(
     ledger_paths: Mapping[str, str | Path] | None = None,
     ensure_baseline_ledgers: bool = False,
 ) -> dict:
-    from chanlun.recursive_bt.market_runtime import default_ledger_path, normalize_market
+    from chanlun.recursive_bt.engine.market_runtime import default_ledger_path, normalize_market
 
     ledger_paths = dict(ledger_paths or {})
     market_reports = []
@@ -129,7 +129,7 @@ def ensure_paper_ledger_baseline(
     *,
     now: str | None = None,
 ) -> dict | None:
-    from chanlun.recursive_bt.paper import PaperBroker
+    from chanlun.recursive_bt.sim.paper import PaperBroker
 
     now = now or _dt.datetime.now().isoformat(sep=" ", timespec="seconds")
     broker = PaperBroker(str(path), market=market)

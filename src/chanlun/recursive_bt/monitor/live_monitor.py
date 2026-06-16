@@ -1,7 +1,7 @@
 """Realtime alerting for the recursive Chanlun paper/live strategy.
 
 Run:
-    PYTHONPATH="src;web/chanlun_chart;." python -u -m chanlun.recursive_bt.live_monitor
+    PYTHONPATH="src;web/chanlun_chart;." python -u -m chanlun.recursive_bt.monitor.live_monitor
 
 The monitor reuses ``paper.SymbolState`` so buy/sell point detection stays on
 the same path as the paper/live trading loop. DingTalk delivery is delegated to
@@ -27,8 +27,8 @@ from chanlun import fun
 from chanlun.core.cl import CL
 from chanlun.exchange import get_exchange
 from chanlun.notifications import ClaudeHookNotifier, DingTalkWebhookNotifier
-from chanlun.recursive_bt.chanlun_selector import ASelectionConfig, OriginalChanlunASelector
-from chanlun.recursive_bt.engine import (
+from chanlun.recursive_bt.select.chanlun_selector import ASelectionConfig, OriginalChanlunASelector
+from chanlun.recursive_bt.engine.engine import (
     CL_CFG,
     buy_class,
     collect_branch_signals,
@@ -36,8 +36,8 @@ from chanlun.recursive_bt.engine import (
     recommended_buy_ratio,
     recommended_sell_ratio,
 )
-from chanlun.recursive_bt.paper import BT_DATA, MAX_POS, PaperBroker, in_session
-from chanlun.recursive_bt.market_runtime import (
+from chanlun.recursive_bt.sim.paper import BT_DATA, MAX_POS, PaperBroker, in_session
+from chanlun.recursive_bt.engine.market_runtime import (
     INDEX_BY_MARKET,
     classify_visible_regime,
     default_ledger_path,

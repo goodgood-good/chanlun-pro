@@ -13,7 +13,7 @@ import numpy as np
 import pandas as pd
 
 from chanlun import config as app_config
-from chanlun.recursive_bt.engine import A_BJ, A_GEM, A_ST, A_STOCK, US_STOCK, MarketRules
+from chanlun.recursive_bt.engine.engine import A_BJ, A_GEM, A_ST, A_STOCK, US_STOCK, MarketRules
 
 CHART_CACHE_DIR = "D:/chanlun_pro/chart_cache"
 _MONITOR_CONFIG = getattr(app_config, "RECURSIVE_MONITOR_CONFIG", {})

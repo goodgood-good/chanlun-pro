@@ -40,7 +40,7 @@ from chanlun.recursive_bt.strategy_optimizer.utils import (
 
 
 def default_bs_point_ratio_baseline_summary_path(market: str) -> Path:
-    from chanlun.recursive_bt.market_runtime import default_backtest_report_paths, normalize_market
+    from chanlun.recursive_bt.engine.market_runtime import default_backtest_report_paths, normalize_market
 
     summary, _trades = default_backtest_report_paths(normalize_market(market))
     path = Path(summary)
@@ -174,7 +174,7 @@ def build_regime_ratio_impact_report(
     每个窗口都是同窗同参对照(仅乘数不同):正向窗口 >= 2 个才给出
     `review_regime_ratio`,单窗口正向只能 `watch_regime_ratio`;
     多窗口方向冲突一律保守回到 `keep_default`。不写 runtime overrides。"""
-    from chanlun.recursive_bt.market_runtime import normalize_market
+    from chanlun.recursive_bt.engine.market_runtime import normalize_market
 
     if windows is None:
         windows = default_regime_ratio_impact_windows()
@@ -350,7 +350,7 @@ def build_bs_point_ratio_impact_report(
     summary_paths: Mapping[str, str | Path] | None = None,
     baseline_summary_paths: Mapping[str, str | Path] | None = None,
 ) -> dict:
-    from chanlun.recursive_bt.market_runtime import default_backtest_report_paths, normalize_market
+    from chanlun.recursive_bt.engine.market_runtime import default_backtest_report_paths, normalize_market
 
     summary_paths = dict(summary_paths or {})
     baseline_summary_paths = dict(baseline_summary_paths or {})
@@ -464,7 +464,7 @@ def render_bs_point_ratio_impact_markdown(report: Mapping[str, object]) -> str:
 
 
 def default_sell_policy_candidate_summary_path(market: str, label: str = "sell12") -> Path:
-    from chanlun.recursive_bt.market_runtime import default_backtest_report_paths, normalize_market
+    from chanlun.recursive_bt.engine.market_runtime import default_backtest_report_paths, normalize_market
 
     summary, _trades = default_backtest_report_paths(normalize_market(market))
     path = Path(summary)
@@ -482,7 +482,7 @@ def build_sell_policy_impact_report(
     candidate_summary_paths: Mapping[str, str | Path] | None = None,
     candidate_label: str = "sell12",
 ) -> dict:
-    from chanlun.recursive_bt.market_runtime import default_backtest_report_paths, normalize_market
+    from chanlun.recursive_bt.engine.market_runtime import default_backtest_report_paths, normalize_market
 
     summary_paths = dict(summary_paths or {})
     candidate_summary_paths = dict(candidate_summary_paths or {})
@@ -621,7 +621,7 @@ def render_sell_policy_impact_markdown(report: Mapping[str, object]) -> str:
 def default_regime_stress_summary_paths(
     markets: Iterable[str] = ("a", "us"),
 ) -> dict[str, dict[str, str]]:
-    from chanlun.recursive_bt.market_runtime import normalize_market
+    from chanlun.recursive_bt.engine.market_runtime import normalize_market
 
     wanted = {normalize_market(market) for market in markets}
     paths: dict[str, dict[str, str]] = {}
@@ -647,7 +647,7 @@ def build_market_regime_stress_report(
     summary_paths: Mapping[str, Mapping[str, str | Path]] | None = None,
     min_regime_days: int = 10,
 ) -> dict:
-    from chanlun.recursive_bt.market_runtime import normalize_market
+    from chanlun.recursive_bt.engine.market_runtime import normalize_market
 
     defaults = default_regime_stress_summary_paths(markets)
     custom = summary_paths or {}

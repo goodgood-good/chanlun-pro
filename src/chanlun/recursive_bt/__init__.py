@@ -10,9 +10,9 @@
 - validate      : 真·walk-forward 抽样验证(实盘真实性)
 
 运行入口(PYTHONPATH=src):
-    python -m chanlun.recursive_bt.fetch 沪深300       # 取数
-    python -m chanlun.recursive_bt.fundamentals        # 取基本面
-    python -m chanlun.recursive_bt.portfolio           # 全市场选股组合回测
-    python -m chanlun.recursive_bt.systems             # 三个独立系统组合
-    python -m chanlun.recursive_bt.validate            # 实盘真实性验证
+    python -m chanlun.recursive_bt.data.fetch 沪深300       # 取数
+    python -m chanlun.recursive_bt.engine.fundamentals        # 取基本面
+    python -m chanlun.recursive_bt.sim.portfolio           # 全市场选股组合回测
+    python -m chanlun.recursive_bt.select.systems             # 三个独立系统组合
+    python -m chanlun.recursive_bt.backtest.validate            # 实盘真实性验证
 """

@@ -96,7 +96,7 @@ def create_app(test_config=None):
 
     _xuangu_tasks = XuanguTasks(scheduler)
 
-    from chanlun.recursive_bt.app_monitor import register_recursive_monitor_jobs
+    from chanlun.recursive_bt.monitor.app_monitor import register_recursive_monitor_jobs
     _recursive_monitors = register_recursive_monitor_jobs(scheduler)
 
     # _other_tasks = OtherTasks(scheduler)

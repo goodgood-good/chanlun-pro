@@ -25,7 +25,7 @@ import pandas as pd
 from chanlun.core.cl import CL
 
 # 向后兼容:旧 bt_data 缓存里的 Signal 以模块名 'recursive_backtest' 序列化(本模块原名)。
-# 注册别名,让旧 pkl 仍可反序列化;新缓存以 chanlun.recursive_bt.engine 路径序列化。
+# 注册别名,让旧 pkl 仍可反序列化;新缓存以 chanlun.recursive_bt.engine.engine 路径序列化。
 sys.modules.setdefault("recursive_backtest", sys.modules[__name__])
 
 CL_CFG = {

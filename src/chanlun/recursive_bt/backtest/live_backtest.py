@@ -16,20 +16,20 @@ import pandas as pd
 from chanlun.market import Market
 from chanlun.core.cl import CL
 from chanlun.exchange import get_exchange
-from chanlun.recursive_bt.chanlun_selector import (
+from chanlun.recursive_bt.select.chanlun_selector import (
     ASelectionConfig,
     DEFAULT_FUND_DATA,
     OriginalChanlunASelector,
 )
-from chanlun.recursive_bt.engine import (
+from chanlun.recursive_bt.engine.engine import (
     CL_CFG,
     MTFStrategy,
     collect_branch_signals,
     collect_nest_cascade_signals,
     collect_qs_beichi_candidates,
 )
-from chanlun.recursive_bt.engine import collect_signals as collect_upgrade_signals
-from chanlun.recursive_bt.market_runtime import (
+from chanlun.recursive_bt.engine.engine import collect_signals as collect_upgrade_signals
+from chanlun.recursive_bt.engine.market_runtime import (
     BT_DATA_DIR,
     CHART_CACHE_DIR,
     ashare_board,
@@ -41,7 +41,7 @@ from chanlun.recursive_bt.market_runtime import (
     normalize_market,
     parse_codes,
 )
-from chanlun.recursive_bt import portfolio as portfolio_mod
+from chanlun.recursive_bt.sim import portfolio as portfolio_mod
 
 DEFAULT_MAX_POS = 10
 DEFAULT_SIGNAL_MODE = "walk_forward"
@@ -1250,7 +1250,7 @@ def _attach_walk_forward_scores(syms: dict, bt_data_dir: str, fund_data: str) ->
         portfolio_mod.BT_DATA = old_dir
     if market is None:
         return False
-    from chanlun.recursive_bt import systems as systems_mod
+    from chanlun.recursive_bt.select import systems as systems_mod
 
     old_fund_dir = systems_mod.FUND_DIR
     systems_mod.FUND_DIR = fund_data
@@ -1779,7 +1779,7 @@ def _load_bs_point_ratio_multipliers(args) -> dict[str, float]:
 def _load_regime_bs_ratio_multipliers(args) -> dict:
     """解析按行情(bull/range/bear)的买点比例乘数:内联 JSON 或文件路径。
     形如 {"bear": {"3": 1.25}, "bull": {"1": 0.5}};非法行情键与非数值乘数被丢弃。"""
-    from chanlun.recursive_bt.market_runtime import parse_regime_ratio_multipliers
+    from chanlun.recursive_bt.engine.market_runtime import parse_regime_ratio_multipliers
 
     return parse_regime_ratio_multipliers(
         getattr(args, "regime_bs_ratio_multipliers_json", "")

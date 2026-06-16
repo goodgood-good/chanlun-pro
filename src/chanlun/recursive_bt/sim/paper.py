@@ -1,4 +1,4 @@
-"""chanlun.recursive_bt.paper — 仿实盘实时交易(paper trading)。
+"""chanlun.recursive_bt.sim.paper — 仿实盘实时交易(paper trading)。
 
 实盘同款决策链(与回测定论一致的策略A):每根 5m bar 收盘后增量更新各标的 CL(尾喂,
 与全量重算已验一致),小级别(5m)技术面买点进场 + 大级别(30m)wf 当下笔方向门控
@@ -7,8 +7,8 @@ A股规则:T+1/印花税/涨跌停粗判。账本持久化 JSON(重启恢复),�
 D:/chanlun_pro/paper/。挂单下一轮(下一5m bar)以最新开盘价成交,无任何未来信息。
 
 运行(建议 -u 关缓冲,否则重定向时看不到逐轮日志;账本 JSON 始终每轮落盘):
-  PYTHONPATH="src;web/chanlun_chart;." python -u -m chanlun.recursive_bt.paper          # 实时循环(交易时段)
-  PYTHONPATH=...                      python -u -m chanlun.recursive_bt.paper replay 5  # 回放冒烟/演练
+  PYTHONPATH="src;web/chanlun_chart;." python -u -m chanlun.recursive_bt.sim.paper          # 实时循环(交易时段)
+  PYTHONPATH=...                      python -u -m chanlun.recursive_bt.sim.paper replay 5  # 回放冒烟/演练
 池=bt_data 已缓存标的(默认前50只,POOL_SIZE 环境变量调)。
 """
 from __future__ import annotations
@@ -24,14 +24,14 @@ from typing import Dict, List, Optional
 import pandas as pd
 
 from chanlun.core.cl import CL
-from chanlun.recursive_bt.engine import (
+from chanlun.recursive_bt.engine.engine import (
     CL_CFG,
     collect_branch_signals,
     latest_prev_day_close,
     recommended_buy_ratio,
     recommended_sell_ratio,
 )
-from chanlun.recursive_bt.market_runtime import (
+from chanlun.recursive_bt.engine.market_runtime import (
     market_rules_for_code,
     normalize_market,
 )
@@ -454,7 +454,7 @@ def main():
         rounds = int(sys.argv[2]) if len(sys.argv) > 2 else 3
         for r in range(rounds):
             step(broker, states, now=str(pd.Timestamp.now()))
-        print("回放冒烟完成(链路通)。实时模式: python -m chanlun.recursive_bt.paper")
+        print("回放冒烟完成(链路通)。实时模式: python -m chanlun.recursive_bt.sim.paper")
         return
 
     print("实时循环:每5m一轮(交易时段),Ctrl+C 退出。")
