@@ -98,6 +98,20 @@ def test_portfolio_param_variants(maotai):
     assert r1["sharpe"] == pytest.approx(-1.871094225203, rel=1e-6)
 
 
+def test_portfolio_layered_positions(maotai):
+    """仓位分层路径(swing_signal_level>0 + core_signal_level>0):显式覆盖 P1 第二刀抽出的
+    _entry_layer / _activity_parts / _sellable_layer_shares / _deplete_activity_layers 的完整
+    core/swing/scalp 分层撮合逻辑——默认参数下这些走简化路径(swing<=0),等于没测到执行。"""
+    res = portfolio_backtest(
+        universe=["SH.600519"], syms={"SH.600519": dict(maotai)},
+        max_pos=3, swing_signal_level=1, core_signal_level=2,
+    )
+    assert res["n"] == 6
+    assert res["total"] == pytest.approx(0.0034130017, rel=1e-6)
+    assert res["max_dd"] == pytest.approx(0.0096168992, rel=1e-6)
+    assert res["sharpe"] == pytest.approx(0.7744295356, rel=1e-6)
+
+
 def test_qqq_fingerprint(qqq):
     """美股标的(QQQ.US 30m/d):不同数据 → 固定信号与回测指纹。"""
     assert len(qqq["signal_events"]) == 10
