@@ -21,81 +21,44 @@ from chanlun.recursive_bt.strategy_optimizer.utils import (
     _float_values,
 )
 
-A_MTF3_SELL3_REBUY_MID3_DEFAULT_SUMMARY = (
-    "D:/chanlun_pro/reports/a_bt_mtf3_1m5m30m_default_summary.json"
-)
-A_MTF3_SELL3_REBUY_MID3_CANDIDATE_SUMMARY = (
-    "D:/chanlun_pro/reports/a_bt_mtf3_1m5m30m_sell3_rebuy_mid3_summary.json"
-)
-A_MTF3_SELL3_REBUY3_CANDIDATE_SUMMARY = (
-    "D:/chanlun_pro/reports/a_bt_mtf3_1m5m30m_sell3_rebuy3_summary.json"
-)
-A_MTF3_SELL3_REBUY3_UP_CANDIDATE_SUMMARY = (
-    "D:/chanlun_pro/reports/a_bt_mtf3_1m5m30m_sell3_rebuy3_up_summary.json"
-)
-US_MTF3_DEFAULT_SUMMARY = (
-    "D:/chanlun_pro/reports/us_core9_mtf3_default_summary.json"
-)
-US_MTF3_SELL3_REBUY3_CANDIDATE_SUMMARY = (
-    "D:/chanlun_pro/reports/us_core9_mtf3_sell3_rebuy3_summary.json"
-)
-US_MTF3_SELL3_REBUY_MID3_CANDIDATE_SUMMARY = (
-    "D:/chanlun_pro/reports/us_core9_mtf3_sell3_rebuy_mid3_summary.json"
-)
-US_2026Q1_MTF3_DEFAULT_SUMMARY = (
-    "D:/chanlun_pro/reports/us_core9_mtf3_2026q1_default_summary.json"
-)
-US_2026Q1_MTF3_SELL3_REBUY3_CANDIDATE_SUMMARY = (
-    "D:/chanlun_pro/reports/us_core9_mtf3_2026q1_sell3_rebuy3_summary.json"
-)
-US_2026Q1_MTF3_SELL3_REBUY_MID3_CANDIDATE_SUMMARY = (
-    "D:/chanlun_pro/reports/us_core9_mtf3_2026q1_sell3_rebuy_mid3_summary.json"
-)
-A_MTF3_REGIME_BEAR3BOOST_SUMMARY = (
-    "D:/chanlun_pro/reports/a_bt_mtf3_1m5m30m_regime_bear3boost_summary.json"
-)
-A_MTF3_REGIME_WEAK1REDUCE_SUMMARY = (
-    "D:/chanlun_pro/reports/a_bt_mtf3_1m5m30m_regime_weak1reduce_summary.json"
-)
-A_MTF3_REGIME_COMBO_SUMMARY = (
-    "D:/chanlun_pro/reports/a_bt_mtf3_1m5m30m_regime_combo_summary.json"
-)
-A_ALL_5M30M_DEFAULT_SUMMARY = (
-    "D:/chanlun_pro/reports/walk_forward_a_5m30m_all5145_max30_off_segments_summary.json"
-)
-A_ALL_5M30M_REGIME_BEAR3BOOST_SUMMARY = (
-    "D:/chanlun_pro/reports/walk_forward_a_5m30m_all5145_max30_off_regime_bear3boost_summary.json"
-)
-A_ALL_5M30M_REGIME_COMBO_SUMMARY = (
-    "D:/chanlun_pro/reports/walk_forward_a_5m30m_all5145_max30_off_regime_combo_summary.json"
-)
-A_MTF3_REGIME_COMBO_B140_SUMMARY = (
-    "D:/chanlun_pro/reports/a_bt_mtf3_1m5m30m_regime_combo_b140_summary.json"
-)
-A_ALL_5M30M_REGIME_COMBO_B140_SUMMARY = (
-    "D:/chanlun_pro/reports/walk_forward_a_5m30m_all5145_max30_off_regime_combo_b140_summary.json"
-)
-US_MTF3_REGIME_WEAK1REDUCE_SUMMARY = (
-    "D:/chanlun_pro/reports/us_core9_mtf3_regime_weak1reduce_summary.json"
-)
-US_2026Q1_MTF3_REGIME_WEAK1REDUCE_SUMMARY = (
-    "D:/chanlun_pro/reports/us_core9_mtf3_2026q1_regime_weak1reduce_summary.json"
+from chanlun.recursive_bt.strategy_optimizer.constants import (
+    A_ALL_5M30M_DEFAULT_SUMMARY,
+    A_ALL_5M30M_REGIME_BEAR3BOOST_SUMMARY,
+    A_ALL_5M30M_REGIME_COMBO_B140_SUMMARY,
+    A_ALL_5M30M_REGIME_COMBO_SUMMARY,
+    A_MTF3_REGIME_BEAR3BOOST_SUMMARY,
+    A_MTF3_REGIME_COMBO_B140_SUMMARY,
+    A_MTF3_REGIME_COMBO_SUMMARY,
+    A_MTF3_REGIME_WEAK1REDUCE_SUMMARY,
+    A_MTF3_SELL3_REBUY3_CANDIDATE_SUMMARY,
+    A_MTF3_SELL3_REBUY3_UP_CANDIDATE_SUMMARY,
+    A_MTF3_SELL3_REBUY_MID3_CANDIDATE_SUMMARY,
+    A_MTF3_SELL3_REBUY_MID3_DEFAULT_SUMMARY,
+    REGIME_ORDER,
+    US_2026Q1_MTF3_DEFAULT_SUMMARY,
+    US_2026Q1_MTF3_REGIME_WEAK1REDUCE_SUMMARY,
+    US_2026Q1_MTF3_SELL3_REBUY3_CANDIDATE_SUMMARY,
+    US_2026Q1_MTF3_SELL3_REBUY_MID3_CANDIDATE_SUMMARY,
+    US_MTF3_DEFAULT_SUMMARY,
+    US_MTF3_REGIME_WEAK1REDUCE_SUMMARY,
+    US_MTF3_SELL3_REBUY3_CANDIDATE_SUMMARY,
+    US_MTF3_SELL3_REBUY_MID3_CANDIDATE_SUMMARY,
 )
 
 
-from chanlun.recursive_bt.strategy_optimizer.models import (  # noqa: E402
+from chanlun.recursive_bt.strategy_optimizer.models import (
     ScoreWeights,
     ScoredRuntimeSummary,
 )
 
 
-from chanlun.recursive_bt.strategy_optimizer.candidates import (  # noqa: E402
+from chanlun.recursive_bt.strategy_optimizer.candidates import (
     a_selection_systems,
     default_strategy_candidates,
 )
 
 
-from chanlun.recursive_bt.strategy_optimizer.scoring import (  # noqa: E402
+from chanlun.recursive_bt.strategy_optimizer.scoring import (
     default_runtime_summary_sources,
     discover_backtest_summary_sources,
     load_summary,
@@ -1406,9 +1369,6 @@ def render_sell_policy_impact_markdown(report: Mapping[str, object]) -> str:
             )
     lines.append("")
     return "\n".join(lines)
-
-
-REGIME_ORDER = ("bull", "range", "bear")
 
 
 def default_regime_stress_summary_paths(
