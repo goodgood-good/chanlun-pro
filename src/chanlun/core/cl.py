@@ -75,7 +75,7 @@ class CL(ICL):
         # 实例化线段计算器
         self.xd_calculator = XdCalculator(self.config)
 
-        self.zss_calculator = ZsCalculator()
+        self.zss_calculator = ZsCalculator(allow_tail_noop=True)
         # 笔层中枢计算器，与 zss_calculator（线段层）独立维护。
         self.bi_zss_calculator = ZsCalculator(allow_tail_noop=True)
 
