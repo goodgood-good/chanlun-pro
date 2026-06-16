@@ -19,11 +19,16 @@ class ZsCalculator:
     """
 
     def __init__(self, require_alternation: bool = True, min_zs_lines: int = 4,
-                 max_zs_lines: int = 8):
+                 max_zs_lines: int = 8, allow_tail_noop: bool = False):
         # require_alternation：是否强制核心三段方向交替。
         # 默认 True——① 主流程线段中枢扫描照旧。④ 递归到 L≥1 时构成段是
         # 走势类型（含无向盘整、不严格交替），传 False 跳过交替检查。
         self.require_alternation: bool = require_alternation
+        # 尾部 no-op 优化(末尾不足成新中枢→保留 zss 直接返回)仅对「不被 recursive_branch
+        # 消费 pending」的中枢计算器安全:CL 笔层 bi_zss_calculator 仅做方向回填、可开;
+        # 线段层 zss_calculator 的 zss+pending 喂 recursive(走势类型/L0 中枢),必须保守
+        # 全量(默认 False),否则中途 get_branch_* 触发的重算会与全量分叉。
+        self.allow_tail_noop: bool = allow_tail_noop
         # min_zs_lines：构成中枢的最小核心线段数（含离开段）。默认 4——
         # 这是**原文一致**的，并非偏离：原文要求「前三个次级别走势类型都是
         # **完成的**才构成中枢」(第18课)，而线段「必须被另一线段破坏才算
@@ -102,30 +107,62 @@ class ZsCalculator:
         )
 
         if grow and prefix_unchanged:
-            # 末段也稳定:原增量路径。回退点不能信 pending_zs.start.index(上游增量
-            # 会重排 line.index),改用业务唯一键重定位,失败则安全降级全量。
+            # 末段也稳定:增量路径。
             self.all_lines = lines
 
-            restart_idx: Optional[int] = None
-            if self.pending_zs and self.pending_zs.start is not None:
-                restart_idx = self._locate_line(lines, self.pending_zs.start)
-                self.pending_zs = None
-            elif self.zss:
-                # 没有 pending 时，复用上次记录的 exit 位置；
-                # 但 _last_entry_idx 也是基于 line 序号的，越界则降级。
-                # -1 是合法值（开头中枢无进入段）。
-                if -1 <= self._last_entry_idx <= len(lines) - 4:
-                    restart_idx = self._last_entry_idx
+            # 续扫快路径:有进行中中枢(pending)且非开头中枢时,从上次扫到的末尾续扫
+            # 新段(O 新增),取代「从 pending 起点经 _extend 重扫整个 pending」的
+            # O(pending) 全扫——后者在中枢稀疏时是 walk-forward 头号 O(n²) 热点。
+            # 续扫 pending 必非开头中枢(grow 要求 zss 非空,开头中枢完成后才增量),
+            # 故彻底绕开 _promote_opening 不可逆雷区。等价见 test_incremental_equivalence。
+            if (self.pending_zs is not None
+                    and self.pending_zs.start is not None
+                    and self.pending_zs.lines
+                    and 1 <= self._last_lines_count <= len(lines)):
+                self._resume_pending()
+            else:
+                # 回退点不能信 pending_zs.start.index(上游增量会重排 line.index),
+                # 改用业务唯一键重定位,失败则安全降级全量。
+                restart_idx: Optional[int] = None
+                if self.pending_zs and self.pending_zs.start is not None:
+                    restart_idx = self._locate_line(lines, self.pending_zs.start)
+                    self.pending_zs = None
+                elif self.zss:
+                    # 没有 pending 时，复用上次记录的 exit 位置；
+                    # 但 _last_entry_idx 也是基于 line 序号的，越界则降级。
+                    # -1 是合法值（开头中枢无进入段）。
+                    if -1 <= self._last_entry_idx <= len(lines) - 4:
+                        restart_idx = self._last_entry_idx
 
-            if restart_idx is None:
-                # 任意环节定位失败 → 全量重算（-1：从可能的开头中枢扫起）。
-                self.zss = []
-                self.pending_zs = None
-                restart_idx = -1
-            self._create_zs_full(start_entry_idx=restart_idx)
+                if restart_idx is None:
+                    # 无 pending、最后完成中枢 exit 已达末尾不足 4 段(_last_entry_idx
+                    # > len-4):新增段不足成新中枢,而 prefix_unchanged 保证现有 zss 不变,
+                    # 保留即可——避免全量 -1 重扫所有中枢(A-else 降级是 zs 全量扫描最大
+                    # 来源,占 walk-forward O(n²) 主体)。否则(无中枢可依/定位异常)真全量。
+                    if (self.allow_tail_noop and self.zss and self.pending_zs is None
+                            and self._last_entry_idx > len(lines) - 4):
+                        # 末尾不足成新中枢,结果不变。**直接返回且不更新任何 _last_***:
+                        # _last_entry_idx 只在 _create_zs_full 内更新,若此处走 calculate
+                        # 末尾的 _last_lines_obj/count 更新而 _last_entry_idx 保持旧值,
+                        # 二者失同步,下次 restart 用 stale entry 与全量分叉(recursive_branch
+                        # 中途 get 触发 calculate 会暴露此 stale)。保持整套状态指向上次
+                        # 真正计算的点,等价「本次调用未发生」。
+                        return self.zss.copy()
+                    else:
+                        self.zss = []
+                        self.pending_zs = None
+                        self._create_zs_full(start_entry_idx=-1)
+                else:
+                    self._create_zs_full(start_entry_idx=restart_idx)
         elif self._prefix_stable_restart(lines, grow):
             # 末段变了但「换新列表 + identity 前缀稳定」:已在内部保留安全完成中枢、
             # 从其 exit 重启,替代昂贵的 O(n) 全量回退(bi 笔层中枢主热点)。
+            pass
+        elif self._inplace_stable_restart(lines, grow):
+            # 末段变了且「原地改同列表」(xds 场景:xd_calculator 原地改末 1~2 段):
+            # identity 前缀失效(对象未换),改用长度 buffer 判稳定前缀,保留安全完成
+            # 中枢、从最后一个的 exit 重扫 pending 区域(有界 ≤ 中枢间距+max_zs_lines),
+            # 替代全量 -1 重扫所有中枢——zs walk-forward 头号 O(n²)(全量占 97.6% 扫描)。
             pass
         else:
             # 全量模式（-1：从序列开头扫起，开头三段也可成中枢）
@@ -144,6 +181,55 @@ class ZsCalculator:
         if self.pending_zs:
             final_zss.append(self.pending_zs)
         return final_zss
+
+    def _resume_pending(self) -> None:
+        """pending 中枢延伸快路径:从上次末尾续扫新段,O(新增段)。
+
+        消除 walk-forward 头号 O(n²):pending 核心区 [zd,zg] 由前三段定、稳定,
+        新段只需续判延伸/离开,无需从 pending 起点经 _extend 重扫整段。gg/dd 对
+        续扫新增段做 running max/min 增量并入(不置 _bounds_dirty、不全量重扫),
+        与全量 update_boundaries 结果一致。pending 必非开头中枢(start≠None)→无
+        _promote 雷区。完成则并入 zss 并从离开段继续找后续中枢;否则仍作 pending。
+        等价性由 test_incremental_equivalence(全快照逐前缀对拍)守。
+        """
+        center = self.pending_zs
+        n_old = len(center.lines)
+        start_j = self._last_lines_count   # 上次 all_lines 长度 = 新段起点
+        is_completed, exit_idx = self._extend_and_check_complete(center, start_j, resume=True)
+
+        # 续扫新增段增量并入 gg/dd(O 新增);与全量 dirty 全扫结果一致但省 O(len)。
+        if len(center.lines) > n_old:
+            if center._gg_cache is not None and center._dd_cache is not None:
+                gg, dd = center._gg_cache, center._dd_cache
+                for seg in center.lines[n_old:]:
+                    if seg.zs_high > gg:
+                        gg = seg.zs_high
+                    if seg.zs_low < dd:
+                        dd = seg.zs_low
+                center._gg_cache, center._dd_cache = gg, dd
+                center.gg, center.dd = gg, dd
+                center.line_num = len(center.lines)
+            else:
+                # 缓存缺失兜底(罕见):全量重算一次
+                center._bounds_dirty = True
+                center.update_boundaries()
+
+        if is_completed:
+            is_valid = (center.end is not None and len(center.lines) >= self.min_zs_lines)
+            if is_valid:
+                center.index = len(self.zss)
+                self.zss.append(center)
+                self.pending_zs = None
+                self._last_entry_idx = exit_idx
+                # 从离开段继续找后续中枢(exit_idx 近末尾 → O 新增)
+                self._create_zs_full(start_entry_idx=exit_idx)
+            else:
+                # 完成但不足 min(理论不达:作 pending 输出时已 ≥min)。安全兜底:
+                # 丢弃该 pending,从其 entry 重扫尾部(降级,极罕见)。
+                self.pending_zs = None
+                restart = self._last_entry_idx if -1 <= self._last_entry_idx <= len(self.all_lines) - 4 else -1
+                self._create_zs_full(start_entry_idx=restart)
+        # else: 仍 pending,_last_entry_idx 保持(pending entry 未变)
 
     @staticmethod
     def _locate_line(lines: List[LINE], target_line: LINE) -> Optional[int]:
@@ -292,6 +378,36 @@ class ZsCalculator:
         self._create_zs_full(start_entry_idx=restart_idx)
         return True
 
+    def _inplace_stable_restart(self, lines: List[LINE], grow: bool) -> bool:
+        """xds 原地改(``lines is _last_lines_obj``、末段值变)场景的增量重启。
+
+        与 _prefix_stable_restart 同构,但原地改时 identity 前缀失效(对象身份未变、
+        值已改),改用长度 buffer 定稳定前缀:xd 原地改回溯深度实测恒 ≤1(见 xd_calculator
+        ._incremental_restart「删末2段留1段buffer」),故旧 ``lines[:_last_count-2]`` 稳定。
+        保留 ``end+1 < safe_prefix`` 的完成中枢(核心段及完成回看的 +1 段全落稳定前缀),
+        从最后一个安全中枢的 exit 重扫 pending 区域(有界),替代全量 -1 重扫所有中枢。
+        等价性由对拍网 test_incremental_equivalence(全快照逐前缀)守。
+        """
+        if not grow or lines is not self._last_lines_obj or self._last_lines_count < 4:
+            return False
+        safe_prefix = self._last_lines_count - 2   # xd 回溯≤1,留 1 段 buffer
+        keep = 0
+        restart_idx = -1
+        for k, zs in enumerate(self.zss):
+            e = zs.end.index if zs.end is not None else -1
+            if e >= 0 and e + 1 < safe_prefix:
+                keep = k + 1
+                restart_idx = e
+            else:
+                break
+        if keep <= 0 or not (0 <= restart_idx <= len(lines) - 4):
+            return False
+        del self.zss[keep:]
+        self.pending_zs = None
+        self.all_lines = lines
+        self._create_zs_full(start_entry_idx=restart_idx)
+        return True
+
     def _create_zs_full(self, start_entry_idx: int = -1):
         """
         核心函数：扫描并创建中枢
@@ -426,7 +542,8 @@ class ZsCalculator:
         center._bounds_dirty = True
         center.update_boundaries()
 
-    def _extend_and_check_complete(self, center: ZS, start_j: int) -> tuple[bool, int]:
+    def _extend_and_check_complete(self, center: ZS, start_j: int,
+                                   resume: bool = False) -> tuple[bool, int]:
         """
         检查中枢的延伸或完成。
 
@@ -437,6 +554,20 @@ class ZsCalculator:
                  如果已完成，返回 (True, exit_segment_index)。
         """
         j = start_j
+        if resume:
+            # 续扫入口:center.lines[-1] 是上次 pending 的待定末段(位于 start_j-1,
+            # 已 append、gg/dd 已并入),上次因 all_lines[start_j] 不存在而搁置其
+            # 「是否离开」判定。现补判,与全量在 start_j-1 处「重叠且预读 start_j」
+            # 的分支严格等价(待定末段上次因重叠才 append,故此处只需看下一段)。
+            if start_j >= len(self.all_lines):
+                return False, start_j - 1
+            nxt = self.all_lines[start_j]
+            if not (max(nxt.zs_low, center.zd) < min(nxt.zs_high, center.zg)):
+                # 下一段不重叠 → 待定末段即离开段,中枢完成(离开段计入核心)
+                center.end = center.lines[-1]
+                center.done = True
+                return True, start_j - 1
+            # 下一段也重叠 → 待定末段确认为核心,落入 while 从 start_j 续扫
         while j < len(self.all_lines):
             # 第33课封顶：中枢含核心达 max_zs_lines 段、仍在延伸（未自然完成）→
             # 在此封顶完成。末段(center.lines[-1])作离开/升级边界，当前段 j 起下一

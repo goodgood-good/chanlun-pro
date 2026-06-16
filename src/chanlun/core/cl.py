@@ -77,7 +77,7 @@ class CL(ICL):
 
         self.zss_calculator = ZsCalculator()
         # 笔层中枢计算器，与 zss_calculator（线段层）独立维护。
-        self.bi_zss_calculator = ZsCalculator()
+        self.bi_zss_calculator = ZsCalculator(allow_tail_noop=True)
 
         # 走势类型计算器（子项目③）：线段中枢 → 走势类型(ZSLX)，无状态全量重算。
         self.zslx_calculator = ZslxCalculator()
