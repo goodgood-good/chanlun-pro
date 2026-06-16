@@ -15,6 +15,13 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Iterable, Mapping, Optional
 
+from chanlun.recursive_bt.strategy_optimizer.utils import (
+    _avg,
+    _float_first,
+    _float_values,
+    _path_key,
+)
+
 A_MTF3_SELL3_REBUY_MID3_DEFAULT_SUMMARY = (
     "D:/chanlun_pro/reports/a_bt_mtf3_1m5m30m_default_summary.json"
 )
@@ -523,41 +530,6 @@ def render_optimization_markdown(report: Mapping[str, object]) -> str:
             )
     lines.append("")
     return "\n".join(lines)
-
-
-def _float_first(summary: Mapping[str, object], *keys: str) -> float:
-    for key in keys:
-        if key not in summary:
-            continue
-        try:
-            value = float(summary[key] or 0.0)
-        except (TypeError, ValueError):
-            continue
-        if value == value:
-            return value
-    return 0.0
-
-
-def _float_values(rows: Iterable[Mapping[str, object]], key: str) -> list[float]:
-    values: list[float] = []
-    for row in rows:
-        if key not in row:
-            continue
-        raw = row.get(key)
-        if raw is None or str(raw).strip() == "":
-            continue
-        try:
-            value = float(raw)
-        except (TypeError, ValueError):
-            continue
-        if value == value:
-            values.append(value)
-    return values
-
-
-def _avg(values: Iterable[float]) -> float:
-    values = list(values)
-    return sum(values) / len(values) if values else 0.0
 
 
 def _infer_market_from_summary_path(path: Path) -> str:
@@ -4703,13 +4675,6 @@ def match_candidate_from_monitor_config(
         ):
             return candidate.id
     return ""
-
-
-def _path_key(path: str | Path) -> str:
-    try:
-        return str(Path(path).resolve()).replace("\\", "/").lower()
-    except Exception:
-        return str(path).replace("\\", "/").lower()
 
 
 def _candidate_rankings_by_market(
