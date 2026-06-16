@@ -153,7 +153,6 @@ class ExchangeTDXFutures(Exchange):
                     break
 
         self.g_all_stocks = __all_stocks
-        # print(f"期货获取数量：{len(self.g_all_stocks)}")
 
         return self.g_all_stocks
 
@@ -239,7 +238,6 @@ class ExchangeTDXFutures(Exchange):
                     klines.sort_values("date", inplace=True)
                 else:
                     for i in range(1, args["pages"] + 1):
-                        # print(f'{code} 使用缓存，更新获取第 {i} 页')
                         _ks = client.to_df(
                             client.get_instrument_bars(
                                 frequency_map[frequency],
@@ -290,7 +288,6 @@ class ExchangeTDXFutures(Exchange):
             traceback.print_exc()
         finally:
             pass
-            # print(f'请求行情用时：{time.time() - _s_time}')
         return None
 
     @staticmethod

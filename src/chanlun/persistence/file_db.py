@@ -327,9 +327,6 @@ if __name__ == "__main__":
     # ex = ExchangeDB(market)
 
     fdb = FileCacheDB()
-    # cd = fdb.get_low_to_high_cl_data(ex, market, code, frequency, cl_config)
-    # print(len(cd.get_klines()))
-    # print(cd)
 
     ex = ExchangeBinance()
     market = "currency"

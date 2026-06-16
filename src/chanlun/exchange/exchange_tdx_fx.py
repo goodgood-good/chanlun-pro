@@ -327,7 +327,6 @@ if __name__ == "__main__":
     stocks = ex.all_stocks()
     print(len(stocks))
     print(stocks)
-    # print(ex.market_maps)
 
     klines = ex.klines("FX.GBPEUR", "1m", args={"pages": 10})
     print(len(klines))

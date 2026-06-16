@@ -152,7 +152,6 @@ class ExchangeBinance(Exchange):
             return klines
         except Exception as e:
             print(f"{code} - {frequency} Error : {e}")
-            # print(traceback.format_exc())
             # exit()
 
         return None
@@ -447,35 +446,5 @@ class ExchangeBinance(Exchange):
 if __name__ == "__main__":
     ex = ExchangeBinance()
 
-    # stocks = ex.all_stocks()
-    # print(len(stocks))
-    # print(stocks[0])
-
     klines = ex.klines("BTC/USDT", "d")
     print(klines)
-
-    # ticks = ex.ticks(["BTC/USDT", "ETH/USDT"])
-    # for _c, _t in ticks.items():
-    #     print(
-    #         _c, _t.last, _t.buy1, _t.sell1, _t.high, _t.low, _t.open, _t.volume, _t.rate
-    #     )
-
-    # zx = zixuan.ZiXuan("currency")
-    # zx_group = "选股"
-    # run_codes = zx.zx_stocks("策略代码")
-    # run_codes = [_s["code"] for _s in run_codes]
-    # error_codes = []
-    # for code in run_codes:
-    #     try:
-    #         klines = ex.klines(code, "60m")
-    #         print(code)
-    #         print(klines.tail())
-    #         print(len(klines))
-    #     except Exception as e:
-    #         print(f"ERROR {code}")
-    #         error_codes.append(code)
-
-    # print("Error codes : ", error_codes)
-
-    # balance = ex.balance()
-    # print(balance)

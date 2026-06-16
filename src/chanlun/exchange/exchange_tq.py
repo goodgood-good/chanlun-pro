@@ -212,7 +212,6 @@ class ExchangeTq(Exchange):
         codes = []
         for c in ["FUTURE", "CONT"]:
             codes += self.get_api().query_quotes(ins_class=c, expired=False)
-            # print(f'tq type {c} codes : {len(codes)}')
         infos = self.get_api().query_symbol_info(codes)
 
         __all_stocks = []
@@ -550,28 +549,8 @@ class ExchangeTq(Exchange):
 if __name__ == "__main__":
     ex = ExchangeTq(use_simulate_account=False)
 
-    # print("all_stocks", len(ex.all_stocks()))
-    # for c in ['FUTURE', 'CONT']:
-    #     res = ex.get_api().query_quotes(ins_class=c)
-    #     print(c, len(res))
-
-    # main_codes = ex.get_api().query_cont_quotes()
-    # print(main_codes)
-
-    # klines = ex.klines("KQ.m@SHFE.ss", "10m")
-    # print(klines.tail())
-
-    # klines = klines[klines['date'] <= '2023-10-16 15:00:00']
-
-    # print(len(klines), klines.tail(20))
-
-    # tick = ex.ticks(['DCE.l2401'])
-    # print(tick)
-
     balance = ex.balance()
     print(balance)
-
-    # ex.close_task_thread()
     # ex.restart_task_thread()
     # ex.close_task_thread()
     # ex.close_api()

@@ -219,15 +219,6 @@ class ExchangePolygon(Exchange):
 if __name__ == "__main__":
     ex = ExchangePolygon()
 
-    # is_trading = ex.now_trading()
-    # print(is_trading)
-
-    # klines = ex.klines(ex.default_code(), "30m")
-    # print(klines.tail(50))
-
-    # ticks = ex.ticks([ex.default_code()])
-    # print(ticks)
-
     tickers = ex.client.list_tickers(
         type="CS", market="stocks", active=True, limit=1000
     )

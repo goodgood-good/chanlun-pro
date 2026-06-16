@@ -319,4 +319,3 @@ class AIAnalyse:
 if __name__ == "__main__":
     ai = AIAnalyse("a")
     print(ai.analyse("SH.000001", "d"))
-    # print(ai.analyse_records())

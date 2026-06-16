@@ -1227,7 +1227,6 @@ class BackTestTrader(Trader):
             "close_short": "earningUp",
         }
         for _code, _orders in self.orders.items():
-            # print(f"Draw Mark {_code} : {len(_orders) / 2}")
             for _o in _orders:
                 if close_uid is not None:
                     if "close_" in _o["type"] and _o["close_uid"] not in close_uid:

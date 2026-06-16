@@ -119,18 +119,6 @@ def reverse_decimal_to_power_of_ten(decimal_number):
 
 
 if __name__ == "__main__":
-    # nowdt = now_dt()
-    # print(nowdt)
-
-    # print(str_to_datetime(nowdt))
-
-    # dtint = str_to_timeint(nowdt)
-    # print(dtint)
-
-    # print(timeint_to_datetime(int(1745550739000 / 1000)))
-
-    # print(timeint_to_str(dtint))
-
     for i in range(1, 10):
         dn = 1 / (10**i)
         print(dn, reverse_decimal_to_power_of_ten(dn))

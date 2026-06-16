@@ -286,31 +286,5 @@ class ExchangeIB(Exchange):
 if __name__ == "__main__":
     ex = ExchangeIB()
 
-    # stock_list = ex.search_stocks("UTHR")
-    # print(stock_list)
-    #
-    # ticks = ex.ticks(["JAPAY"])
-    # print(ticks)
-    #
-    # stock_info = ex.stock_info('DOCU')
-    # print(stock_info)
-    #
-    # klines = ex.klines("NVDA", "60m")
-    # print(klines.tail(20))
-
-    # balance = ex.balance()
-    # print(balance)
-
-    # #
-    # position = ex.positions()
-    # print(position)
-    # print(len(position))
-
-    # order = ex.order('MSFT', 'buy', 1)
-    # print(order)
-
     stock_info = ex.stock_info('META')
     print(stock_info)
-
-    # res = ex.ib.reqSmartComponents('NASDAQ')
-    # print(res)

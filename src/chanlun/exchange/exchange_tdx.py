@@ -132,7 +132,6 @@ class ExchangeTDX(Exchange):
         ]
 
         self.g_all_stocks = __all_stocks
-        # print(f"股票共获取数量：{len(self.g_all_stocks)}")
         return self.g_all_stocks
 
     def to_tdx_code(self, code):
@@ -244,7 +243,6 @@ class ExchangeTDX(Exchange):
                     ks.sort_values("date", inplace=True)
                 else:
                     for i in range(1, args["pages"] + 1):
-                        # print(f'{code} 使用缓存，更新获取第 {i} 页')
                         _ks = client.to_df(
                             get_bars(
                                 frequency_map[frequency],
@@ -311,7 +309,6 @@ class ExchangeTDX(Exchange):
             print(traceback.format_exc())
         finally:
             pass
-            # print(f'请求行情用时：{time.time() - _s_time}')
         return None
 
     @staticmethod
@@ -601,7 +598,6 @@ class ExchangeTDX(Exchange):
                 data["date"] = pd.to_datetime(data["date"])
             data.to_pickle(str(xdxr_file))
         else:
-            # print('直接读取缓存')
             data = pd.read_pickle(str(xdxr_file))
 
         return data

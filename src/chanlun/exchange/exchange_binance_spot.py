@@ -148,7 +148,6 @@ class ExchangeBinanceSpot(Exchange):
             return klines
         except Exception as e:
             print(f"{code} - {frequency} Error : {e}")
-            # print(traceback.format_exc())
             # exit()
 
         return None
@@ -400,11 +399,3 @@ if __name__ == "__main__":
     for _s in stocks[0:10]:
         print(_s)
 
-    # klines = ex.klines("BTC/USDT", "5m")
-    # print(klines)
-
-    # ticks = ex.ticks(["BTC/USDT"])
-    # for _c, _t in ticks.items():
-    #     print(
-    #         _c, _t.last, _t.buy1, _t.sell1, _t.high, _t.low, _t.open, _t.volume, _t.rate
-    #     )

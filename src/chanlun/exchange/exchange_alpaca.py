@@ -324,8 +324,5 @@ class ExchangeAlpaca(Exchange):
 if __name__ == "__main__":
     ex = ExchangeAlpaca()
 
-    # klines = ex.klines(ex.default_code(), '30m')
-    # print(klines.tail())
-
     ticks = ex.ticks([ex.default_code()])
     print(ticks)

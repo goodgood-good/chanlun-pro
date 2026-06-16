@@ -381,7 +381,6 @@ if __name__ == "__main__":
         cl_config=cl_config,
         run_type="process",
     )
-    # print(res_similarity)
     # 按照 相似度排序
     res_similarity = sorted(res_similarity, key=lambda x: x["similarity"], reverse=True)
     # 输出前 10
