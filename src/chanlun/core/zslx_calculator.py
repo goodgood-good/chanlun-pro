@@ -94,12 +94,14 @@ class ZslxCalculator:
         # 中枢 GC 时自动剔除、不污染 ZS.__dict__(快照/pickle 无感),ZS 默认 id-hash 可弱键。
         self._zs_sig_cache: "WeakKeyDictionary[ZS, tuple]" = WeakKeyDictionary()
         self._backfill_cache: Optional[List[ZS]] = None  # 上轮 backfill 的 bi_zss,增量跳过 identity 稳定前缀
+        self._wt_state: Optional[Tuple[List[ZS], List[ZSLX]]] = None  # (上轮zss, 完成走势类型),增量重启
 
     def __getstate__(self):
         # WeakKeyDictionary 不可 pickle 且为瞬态(可重建),序列化时丢弃。
         state = self.__dict__.copy()
         state.pop("_zs_sig_cache", None)
         state.pop("_backfill_cache", None)  # 瞬态优化缓存,丢弃后下次全量回填一次重建
+        state.pop("_wt_state", None)  # 瞬态增量重启状态,丢弃后下次全量重算一次重建
         return state
 
     def __setstate__(self, state):
@@ -189,6 +191,41 @@ class ZslxCalculator:
                 zs.type = "up" if head == "down" else "down"
         self._backfill_cache = zss
 
+    def _wt_restart(self, zss: List[ZS]) -> Tuple[List[ZSLX], int, Optional[List[ZS]], Optional[str]]:
+        """走势类型增量重启:复用身份稳定前缀的完成走势类型,返回
+        (kept_done_wts, start_zs_idx, cur, cur_dir)。从最后安全完成走势类型的下一中枢起,
+        状态机从边界重建(cur=[zss[covered]], cur_dir=None)。
+
+        安全判据:完成走势类型覆盖的中枢全落在 zss 身份公共前缀内、留 2 中枢 buffer(防末
+        中枢背驰回看 + 边界判定)。zss 由 ZsCalculator copy + 尾部 no-op→对象身份保留,可
+        二分前缀。首次/前缀过短→全量(返回 [],1,[zss[0]],None)。"""
+        state = self._wt_state
+        if state is None:
+            return [], 1, [zss[0]], None
+        last_zss, last_done_wts = state
+        lo, hi = 0, min(len(zss), len(last_zss))
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if zss[mid] is last_zss[mid]:
+                lo = mid + 1
+            else:
+                hi = mid
+        safe = lo - 2
+        if safe < 1:
+            return [], 1, [zss[0]], None
+        kept: List[ZSLX] = []
+        covered = 0
+        for wt in last_done_wts:
+            m = len(getattr(wt, "zss", None) or [])
+            if m > 0 and covered + m <= safe:
+                kept.append(wt)
+                covered += m
+            else:
+                break
+        if covered < 1 or covered >= len(zss):
+            return [], 1, [zss[0]], None
+        return kept, covered + 1, [zss[covered]], None
+
     def calculate(
         self,
         zss: List[ZS],
@@ -203,27 +240,20 @@ class ZslxCalculator:
         ``beichi_calculator._use_huangbai``。
         """
         if not zss:
+            self._wt_state = None
             return []
-        sig = self._signature(zss, lines, wzgx_config, frequency)
-        cached = self._cache.get(sig)
-        if cached is not None:
-            # 缓存命中:走势类型(返回值)可复用,但「中枢方向回填」是对传入 zss
-            # 的**副作用**(_finalize 按核心首段反向设 zs.type,第24课),仅在未命中
-            # 经 _finalize 执行。命中时传入的是 zs_calculator 本轮新建的中枢
-            # (zs.type 仍为 _create_zs 的占位 seg_b.type),必须在此重放回填,否则
-            # 与未命中路径分叉(cl.py:240 调本方法仅取副作用回填 bi_zss 方向;
-            # 见 tests/chan_core/test_incremental_equivalence 的 bi_zss type)。
-            for zs in zss:
-                head = zs.lines[0].type if getattr(zs, "lines", None) else None
-                if head in ("up", "down"):
-                    zs.type = "up" if head == "down" else "down"
-            return cached
+        # 增量重启:复用稳定前缀的完成走势类型(done=True),从最后安全完成处重扫尾部(pending
+        # 区域),替代旧 _signature+_cache(pending 每 bar 变→sig 必变→_cache 必 miss→O(zss)
+        # 全量重扫所有中枢=O(n²))。完成走势类型的中枢序列+离开段背驰全落身份稳定前缀内→冻结
+        # 安全;从最后安全完成走势类型的下一中枢起重建状态机(cur 从边界、cur_dir=None)。
+        kept, start_idx, cur, cur_dir = self._wt_restart(zss)
+        wts: List[ZSLX] = list(kept)
 
-        wts: List[ZSLX] = []
-        cur: Optional[List[ZS]] = [zss[0]]
-        cur_dir: Optional[str] = None
-
-        for zi in zss[1:]:
+        i = start_idx
+        _n = len(zss)
+        while i < _n:
+            zi = zss[i]
+            i += 1
             if cur is None:
                 # 上一个走势类型已被背驰终结，zi 另起
                 cur = [zi]
@@ -255,7 +285,7 @@ class ZslxCalculator:
 
         if cur is not None:
             wts.append(_finalize(cur, lines, wzgx_config, done=False))
-        if len(self._cache) > 16:
-            self._cache.clear()
-        self._cache[sig] = wts
+        # 稳定前缀中枢 zs.type 已由上轮 _finalize 设、本轮同对象(identity)保留;尾部重扫的
+        # _finalize 设其余。记录 (zss, 完成走势类型) 供下次增量重启。
+        self._wt_state = (zss, [w for w in wts if w.done])
         return wts
