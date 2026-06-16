@@ -728,14 +728,14 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
                 for x in buys
                 if buy_class(getattr(x, "bs_type", "")) in allowed_reentry
             ]
-        if allowed_mid_reentry is not None and name not in reentry_mid_confirmed:
+        if allowed_mid_reentry is not None and name not in sim.reentry_mid_confirmed:
             mid_buys = [
                 x
                 for x in _mid_buys_at(s, j)
                 if buy_class(getattr(x, "bs_type", "")) in allowed_mid_reentry
             ]
             if mid_buys:
-                reentry_mid_confirmed.add(name)
+                sim.reentry_mid_confirmed.add(name)
             else:
                 buys = []
         big_dir_now = _bdir(s, j)
@@ -902,14 +902,14 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
             regime_by_date = _regime_by_date_lookup(master, bench, regime_lookback_days)
 
     sim = _PortfolioSim()
-    cash = init_cash
-    positions: Dict[str, dict] = {}
-    pending: List[tuple] = []
-    equity = np.empty(len(master))
-    trades: List[PTrade] = []
-    reentry_buy_classes: Dict[str, set[int]] = {}
-    reentry_mid_buy_classes: Dict[str, set[int]] = {}
-    reentry_mid_confirmed: set[str] = set()
+    sim.cash = init_cash
+    sim.positions: Dict[str, dict] = {}
+    sim.pending: List[tuple] = []
+    sim.equity = np.empty(len(master))
+    sim.trades: List[PTrade] = []
+    sim.reentry_buy_classes: Dict[str, set[int]] = {}
+    sim.reentry_mid_buy_classes: Dict[str, set[int]] = {}
+    sim.reentry_mid_confirmed: set[str] = set()
     after_3sell_reentry_buy_classes = (
         {int(cls) for cls in after_3sell_reentry_buy_classes if int(cls) in (1, 2, 3)}
         if after_3sell_reentry_buy_classes
@@ -922,17 +922,16 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
     )
 
     def mk(m):  # 市值(停牌票按最近价冻结盯市)
-        return cash + sum(syms[n]["close"][ml[n][m]] * p["shares"]
-                          for n, p in positions.items())
+        return sim.cash + sum(syms[n]["close"][ml[n][m]] * p["shares"]
+                          for n, p in sim.positions.items())
 
     sim.pool_idx = -1
-    reentry: Dict[str, str] = {}      # 池模式短差状态:卖点减仓后 'wait_buy'=等买点回补
+    sim.reentry: Dict[str, str] = {}      # 池模式短差状态:卖点减仓后 'wait_buy'=等买点回补
     def _execute_pending(m, t):
         # 1) 执行上一bar挂单(本bar开盘价)。原主循环阶段①原样下沉为闭包(P1 第三刀)，
-        # 仅 cash/pending 需 nonlocal,其余 positions/trades/reentry_* 为可变容器引用。
-        nonlocal cash, pending
+        # 仅 sim.cash/sim.pending 需 nonlocal,其余 sim.positions/sim.trades/reentry_* 为可变容器引用。
         carry = []
-        for o in pending:
+        for o in sim.pending:
             name, act = o[0], o[1]
             # 池模式第三位是目标权重；普通选股第四位记录买点类别。
             w = o[2] if len(o) > 2 and isinstance(o[2], (int, float, np.number)) else None
@@ -948,13 +947,13 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
                 continue
             px = s["open"][j] * (1 + slippage if o[1] == "buy" else 1 - slippage)
             r = s["rules"]
-            if act == "buy" and cash > 0:
+            if act == "buy" and sim.cash > 0:
                 if not _buy_order_actionable_at_price(o, px):
                     continue
                 if _is_activity_refill_order(o):
-                    if name not in positions:
+                    if name not in sim.positions:
                         continue
-                    p = positions[name]
+                    p = sim.positions[name]
                     target_shares = float(
                         p.get("activity_target_shares") or p.get("shares") or 0.0
                     )
@@ -963,13 +962,13 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
                         p.pop("activity_reentry", None)
                         p.pop("activity_reentry_buy_classes", None)
                         continue
-                    size = min(deficit, cash * 0.99 / (px * (1 + r.commission)))
+                    size = min(deficit, sim.cash * 0.99 / (px * (1 + r.commission)))
                     if r.lot > 1:
                         size = (int(size) // r.lot) * r.lot
                     if size > 0:
                         old_shares = float(p["shares"])
                         old_entry_px = float(p["entry_px"])
-                        cash -= size * px * (1 + r.commission)
+                        sim.cash -= size * px * (1 + r.commission)
                         new_shares = old_shares + size
                         p["entry_px"] = (
                             old_shares * old_entry_px + size * px
@@ -1000,9 +999,9 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
                         if new_shares >= target_shares - 1e-9:
                             p.pop("activity_reentry", None)
                             p.pop("activity_reentry_buy_classes", None)
-                elif name not in positions:
+                elif name not in sim.positions:
                     target = mk(m) * w if w else mk(m) / max_pos
-                    budget = min(target, cash) * 0.99
+                    budget = min(target, sim.cash) * 0.99
                     size = budget / (px * (1 + r.commission))
                     if r.lot > 1:
                         size = (int(size) // r.lot) * r.lot
@@ -1033,8 +1032,8 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
                         else:
                             swing_shares = 0.0
                             scalp_shares = 0.0
-                        cash -= size * px * (1 + r.commission)
-                        positions[name] = {"shares": size, "entry_date": t,
+                        sim.cash -= size * px * (1 + r.commission)
+                        sim.positions[name] = {"shares": size, "entry_date": t,
                                            "entry_px": px, "bs": act,
                                            "bs_type": order_bs_type,
                                            "buy_ratio": float(w or 0.0),
@@ -1051,11 +1050,11 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
                                            "structural_stop_below": _order_structural_stop_below(o),
                                            "structural_stop_above": _order_structural_stop_above(o),
                                            "big_down_activity": is_big_down_activity}
-                        reentry_buy_classes.pop(name, None)
-                        reentry_mid_buy_classes.pop(name, None)
-                        reentry_mid_confirmed.discard(name)
-            elif act == "sell" and name in positions:
-                p = positions[name]
+                        sim.reentry_buy_classes.pop(name, None)
+                        sim.reentry_mid_buy_classes.pop(name, None)
+                        sim.reentry_mid_confirmed.discard(name)
+            elif act == "sell" and name in sim.positions:
+                p = sim.positions[name]
                 if r.t_plus == 0 or t.date() > p["entry_date"].date():
                     sell_ratio = (
                         float(o[2])
@@ -1088,8 +1087,8 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
                     actual_sell_ratio = min(max(size / before_shares, 0.0), 1.0)
                     exit_bs_type = order_bs_type or str(p.get("exit_bs_type", ""))
                     exit_level = _order_signal_level(o)
-                    cash += size * px * (1 - r.commission - r.stamp_duty)
-                    trades.append(PTrade(
+                    sim.cash += size * px * (1 - r.commission - r.stamp_duty)
+                    sim.trades.append(PTrade(
                         code=s["code"],
                         entry_date=p["entry_date"],
                         entry_px=p["entry_px"],
@@ -1144,26 +1143,26 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
                             and p.get("reason") == "small_level_sell_point"
                         ):
                             if after_3sell_reentry_buy_classes:
-                                reentry_buy_classes[name] = set(after_3sell_reentry_buy_classes)
+                                sim.reentry_buy_classes[name] = set(after_3sell_reentry_buy_classes)
                             if after_3sell_reentry_mid_buy_classes:
-                                reentry_mid_buy_classes[name] = set(
+                                sim.reentry_mid_buy_classes[name] = set(
                                     after_3sell_reentry_mid_buy_classes
                                 )
-                                reentry_mid_confirmed.discard(name)
+                                sim.reentry_mid_confirmed.discard(name)
                         else:
-                            reentry_buy_classes.pop(name, None)
-                            reentry_mid_buy_classes.pop(name, None)
-                            reentry_mid_confirmed.discard(name)
-                        del positions[name]
+                            sim.reentry_buy_classes.pop(name, None)
+                            sim.reentry_mid_buy_classes.pop(name, None)
+                            sim.reentry_mid_confirmed.discard(name)
+                        del sim.positions[name]
                 else:
-                    carry.append(o)   # T+1 pending
-        pending = carry
+                    carry.append(o)   # T+1 sim.pending
+        sim.pending = carry
 
     def _process_exits(m, t, block):
         # 2) 退出信号(持仓中:大级别down 或 小级别卖点)。原阶段②下沉为闭包(P1 第四刀)：
-        # 仅 append pending / 改 positions·reentry(容器引用)、读 block(入参)，无需 nonlocal。
-        pend_sell = {o[0] for o in pending if o[1] == "sell"}
-        for name in list(positions):
+        # 仅 append sim.pending / 改 sim.positions·sim.reentry(容器引用)、读 block(入参)，无需 nonlocal。
+        pend_sell = {o[0] for o in sim.pending if o[1] == "sell"}
+        for name in list(sim.positions):
             if name in pend_sell:
                 continue
             s = syms[name]
@@ -1172,20 +1171,20 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
                 continue                            # 停牌:无bar无判定
             big_dir = _bdir(s, j)
             if big_dir != "down":
-                positions[name].pop("big_down_activity", None)
-            structural_invalid = _position_structural_invalidation(positions[name], s, j)
+                sim.positions[name].pop("big_down_activity", None)
+            structural_invalid = _position_structural_invalidation(sim.positions[name], s, j)
             if structural_invalid:
-                positions[name]["reason"] = "structural_invalidation"
-                positions[name]["exit_bs_type"] = structural_invalid
-                positions[name]["exit_big_dir"] = big_dir
-                positions[name]["exit_layer"] = "all"
-                pending.append((
+                sim.positions[name]["reason"] = "structural_invalidation"
+                sim.positions[name]["exit_bs_type"] = structural_invalid
+                sim.positions[name]["exit_big_dir"] = big_dir
+                sim.positions[name]["exit_layer"] = "all"
+                sim.pending.append((
                     name,
                     "sell",
                     1.0,
                     structural_invalid,
                     "",
-                    int(positions[name].get("entry_level") or 0),
+                    int(sim.positions[name].get("entry_level") or 0),
                 ))
                 continue
             sells = _filter_sell_signals(_sells_at(s, j), sell_classes)
@@ -1195,7 +1194,7 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
                 else []
             )
             force_big_down_exit = (
-                big_dir == "down" and not bool(positions[name].get("big_down_activity"))
+                big_dir == "down" and not bool(sim.positions[name].get("big_down_activity"))
             )
             if force_big_down_exit or sells:
                 is_down = force_big_down_exit
@@ -1220,13 +1219,13 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
                         overrides=sell_ratio_overrides,
                         scope=sell_ratio_override_scope,
                     )
-                positions[name]["reason"] = (
+                sim.positions[name]["reason"] = (
                     "big_level_down"
                     if is_down
                     else ("big_level_sell_point" if is_core_sell else "small_level_sell_point")
                 )
-                positions[name]["exit_bs_type"] = exit_bs_type
-                positions[name]["exit_big_dir"] = big_dir
+                sim.positions[name]["exit_bs_type"] = exit_bs_type
+                sim.positions[name]["exit_big_dir"] = big_dir
                 if is_down:
                     exit_layer = "all"
                 elif is_core_sell:
@@ -1235,9 +1234,9 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
                     exit_layer = "swing" if exit_level >= swing_signal_level else "scalp"
                 else:
                     exit_layer = "activity"
-                positions[name]["exit_layer"] = exit_layer
-                pending.append((name, "sell", sell_ratio, exit_bs_type, "", exit_level))
-                before_shares = float(positions[name].get("shares") or 0.0)
+                sim.positions[name]["exit_layer"] = exit_layer
+                sim.pending.append((name, "sell", sell_ratio, exit_bs_type, "", exit_level))
+                before_shares = float(sim.positions[name].get("shares") or 0.0)
                 can_roll_up_same_bar = (
                     not block
                     and pool_schedule is None
@@ -1247,7 +1246,7 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
                     and sell_ratio >= 0.999
                     and before_shares > 1e-9
                     and _sellable_layer_shares(
-                        positions[name], exit_layer, before_shares, swing_signal_level
+                        sim.positions[name], exit_layer, before_shares, swing_signal_level
                     ) >= before_shares - 1e-9
                 )
                 if can_roll_up_same_bar:
@@ -1259,18 +1258,18 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
                         min_signal_level=exit_level + 1,
                     )
                     if roll_buy is not None and int(roll_buy[6]) > exit_level:
-                        pending.append(_buy_order_from_candidate(roll_buy))
+                        sim.pending.append(_buy_order_from_candidate(roll_buy))
                 if pool_schedule is not None and not is_down:
-                    reentry[name] = "wait_buy"   # 卖点减仓→等买点回补(短差);down→非down即回补
+                    sim.reentry[name] = "wait_buy"   # 卖点减仓→等买点回补(短差);down→非down即回补
 
     def _process_entries(m, t, block):
-        # 3) 选股开仓 + 收盘盯市记 equity。原阶段③下沉为闭包(P1 第五刀);原 `for m` 的
-        # continue(pool 路径记 equity 后跳过常规开仓)改为 return,故常规路径 equity 记录
+        # 3) 选股开仓 + 收盘盯市记 sim.equity。原阶段③下沉为闭包(P1 第五刀);原 `for m` 的
+        # continue(pool 路径记 sim.equity 后跳过常规开仓)改为 return,故常规路径 sim.equity 记录
         # 一并纳入函数末尾,两路径各记一次、语义等价。pool_idx 已迁入 sim 状态容器(类化)。
-        pend_buy = {o[0] for o in pending if o[1] == "buy"}
-        pend_sell = {o[0] for o in pending if o[1] == "sell"}
+        pend_buy = {o[0] for o in sim.pending if o[1] == "buy"}
+        pend_sell = {o[0] for o in sim.pending if o[1] == "sell"}
         if not block:
-            for name, p in list(positions.items()):
+            for name, p in list(sim.positions.items()):
                 if name in pend_buy or name in pend_sell:
                     continue
                 if p.get("activity_reentry") != "wait_buy":
@@ -1308,7 +1307,7 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
                     continue
                 if not _buy_signal_actionable_at_price(pick, float(s["close"][j])):
                     continue
-                pending.append((
+                sim.pending.append((
                     name,
                     "buy",
                     None,
@@ -1331,12 +1330,12 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
             if not block:
                 for name, w in cur_pool.items():
                     s = syms.get(name)
-                    if s is None or name in positions or name in pend_buy:
+                    if s is None or name in sim.positions or name in pend_buy:
                         continue
                     j = int(mx[name][m])
                     if j < 0 or _bdir(s, j) == "down":
                         continue
-                    if reentry.get(name) == "wait_buy":      # 卖点减仓后,等买点回补(短差)
+                    if sim.reentry.get(name) == "wait_buy":      # 卖点减仓后,等买点回补(短差)
                         buys = _buys_at(s, j)
                         if buy_classes is not None:
                             buys = [x for x in buys if int(x.bs_type[0]) in buy_classes]
@@ -1344,18 +1343,18 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
                             buys = [x for x in buys if _nest_filter_ok(x)]
                         if not buys:
                             continue
-                    pending.append((name, "buy", w))
-                    reentry.pop(name, None)
-            equity[m] = mk(m)
+                    sim.pending.append((name, "buy", w))
+                    sim.reentry.pop(name, None)
+            sim.equity[m] = mk(m)
             return
         pending_open_buys = {
-            o[0] for o in pending if o[1] == "buy" and not _is_activity_refill_order(o)
+            o[0] for o in sim.pending if o[1] == "buy" and not _is_activity_refill_order(o)
         }
-        free = max_pos - len(positions) - len(pending_open_buys)
+        free = max_pos - len(sim.positions) - len(pending_open_buys)
         if free > 0 and not block:
             cands = []
             for name, s in syms.items():
-                if name in positions or name in pend_buy:
+                if name in sim.positions or name in pend_buy:
                     continue
                 j = int(mx[name][m])
                 if j < 0:
@@ -1365,16 +1364,16 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
                     s,
                     j,
                     t,
-                    allowed_reentry=reentry_buy_classes.get(name),
-                    allowed_mid_reentry=reentry_mid_buy_classes.get(name),
+                    allowed_reentry=sim.reentry_buy_classes.get(name),
+                    allowed_mid_reentry=sim.reentry_mid_buy_classes.get(name),
                 )
                 if cand is not None:
                     cands.append(cand)
             cands.sort()
             for c in cands[:free]:
-                pending.append(_buy_order_from_candidate(c))
+                sim.pending.append(_buy_order_from_candidate(c))
 
-        equity[m] = mk(m)
+        sim.equity[m] = mk(m)
 
     for m, t in enumerate(master):
         _execute_pending(m, t)
@@ -1385,17 +1384,17 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
     # 收尾强平(停牌票按冻结最近价)
     t = master[-1]
     mi_last = len(master) - 1
-    for name in list(positions):
+    for name in list(sim.positions):
         s = syms[name]
-        p = positions[name]
+        p = sim.positions[name]
         px = s["close"][ml[name][mi_last]] * (1 - slippage)
         r = s["rules"]
         core_shares = float(p.get("core_shares") or 0.0)
         swing_shares = float(p.get("swing_shares") or 0.0)
         scalp_shares = float(p.get("scalp_shares") or 0.0)
         shares = float(p["shares"])
-        cash += p["shares"] * px * (1 - r.commission - r.stamp_duty)
-        trades.append(PTrade(s["code"], p["entry_date"], p["entry_px"], t, px,
+        sim.cash += p["shares"] * px * (1 - r.commission - r.stamp_duty)
+        sim.trades.append(PTrade(s["code"], p["entry_date"], p["entry_px"], t, px,
                              px / p["entry_px"] - 1, p.get("bs_type", ""), "final_close",
                              "", 1.0, shares,
                              buy_ratio=float(p.get("buy_ratio") or 0.0),
@@ -1407,10 +1406,10 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
                              activity_shares_before=max(shares - core_shares, 0.0),
                              swing_shares_before=swing_shares,
                              scalp_shares_before=scalp_shares))
-    if positions:
-        equity[-1] = cash
+    if sim.positions:
+        sim.equity[-1] = sim.cash
     flabel = market_filter if market_filter else ("大盘" if filt else None)
-    return _report(label, master, equity, trades, syms, flabel, ml=ml, bench=bench)
+    return _report(label, master, sim.equity, sim.trades, syms, flabel, ml=ml, bench=bench)
 
 
 def _report(label, master, equity, trades, syms, flabel, ml=None, bench=None):
