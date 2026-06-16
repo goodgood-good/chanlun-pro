@@ -497,7 +497,9 @@ def cl_data_to_tv_chart(
 
     # 区间套 (interval_nest):从最高级别趋势背驰逐级下钻到 L0 的链 + 精确转折点。
     interval_nest_chart_data = None
-    if config.get("chart_show_interval_nest", "1") == "1":
+    # 默认 fallback 对齐 chart_config DEFAULT("0"):区间套链前端尚无渲染(charts.js 不消费),
+    # 默认不算/不传,避免任何缺 key 路径意外触发 get_interval_nest 白算。需要时显式置 "1"。
+    if config.get("chart_show_interval_nest", "0") == "1":
         try:
             inest = cd.get_interval_nest()
         except Exception:
