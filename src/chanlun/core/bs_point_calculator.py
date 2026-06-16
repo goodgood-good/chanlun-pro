@@ -212,8 +212,9 @@ class BsPointCalculator:
             return 0
         if lines is self._last_lines_obj:
             # xds 原地改(同列表对象,末段 done/end 翻转或原地 append):identity 前缀失效
-            # (对象身份不变、值已改),改用长度 buffer 定稳定前缀(xd 回溯≤1,留 1 段),
-            # fall through 做 zss 稳定检查 + off-by-one。bi 层 bis 恒换新列表、不走此支。
+            # (对象身份不变、值已改),改用长度 buffer 定稳定前缀(删末2段容纳 xd 回溯 d≤2,
+            # 实测上界2、buffer=0),fall through 做 zss 稳定检查 + off-by-one。bi 层 bis
+            # 恒换新列表、不走此支。
             p = max(0, len(lines) - 2)
         else:
             p = self._identity_prefix_len(lines, self._last_lines_obj)

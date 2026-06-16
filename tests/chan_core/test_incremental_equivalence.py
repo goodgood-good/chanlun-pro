@@ -216,3 +216,27 @@ def test_xd_zslx_incremental_matches_batch(stem, limit):
         batch.process_klines(df.iloc[:L])
         assert _wt_sig(inc) == _wt_sig(batch), \
             f"{stem} L={L}:走势类型 增量 vs 全量 batch 分叉"
+
+
+def test_synth_strong_inclusion_every_bar():
+    """A-CRIT-1 回归网:强包含合成数据**逐根**全快照对拍(钉死 zs_calculator
+    ``len<min`` 早退分支不残留陈旧中枢)。
+
+    此前 zs_calculator.calculate 在「段数从 ≥min_zs_lines 跌回 <min」时只更新
+    ``_last_*`` 而未清 ``self.zss``/``pending_zs``,致 get_bi_zss 读到陈旧中枢、
+    增量 bi_zss 与全量分叉(本 fixture L=113~121 连续 9 个 fork:bi_zss len
+    inc=1 vs batch=0,L=122 段数恢复后自愈)。生产 5 fixture 因真实笔/段前缀
+    不在 min 边界(3↔4)横跳而触发不到,且上面 ``_checkpoints()`` 抽样会整段
+    跳过该瞬态窗——故须用病态强包含合成数据 + **逐根**(非抽样)检查点专门钉死。
+    fixture 由 ``np.random.default_rng(0)`` 经 synth_strong_inclusion 生成、
+    固化为 parquet 保精度(见对应修复 commit)。
+    """
+    df = pd.read_parquet(FIX_DIR / "synthetic" / "SYN_strong_inclusion_5m.parquet")
+    inc = _new_cl("SYN.incl", "5m")
+    for i, row in enumerate(df.itertuples(index=False)):
+        _feed(inc, row)
+        L = i + 1
+        batch = _new_cl("SYN.incl", "5m")
+        batch.process_klines(df.iloc[:L])
+        assert canonical_json(cl_snapshot(inc)) == canonical_json(cl_snapshot(batch)), \
+            f"SYN.incl L={L}:全快照 增量 vs 全量 batch 分叉(A-CRIT-1 回归)"

@@ -184,10 +184,11 @@ class XdCalculator:
     def calculate(self, bis: List[BI]) -> List[XD]:
         """根据笔列表计算线段(段增量版)。
 
-        笔列表恒 append-only(前缀不改写,见 bi_calculator),且线段回溯拆分深度
-        实测恒 ≤1,故保留稳定段前缀、删末 2 段(留 1 段 buffer)从其起点不 clear
-        地重算尾部段;签名前缀校验(LCP ≥ 重算起点)失败或段不足 3 则降级全量。
-        (原"线段不做增量"注释已废:回溯深度实测恒 1,增量可行且经对拍网钉死。)
+        笔列表恒 append-only(前缀不改写,见 bi_calculator),线段回溯拆分深度实测
+        ≤2(QQQ.US_d L165 / 5m L2240 实测 d=2,5+40 极端样本未见 d≥3),故保留稳定段
+        前缀、删末 2 段(保留前 len-2 段恰好容纳 d≤2、buffer=0)从其起点不 clear 地
+        重算尾部段;签名前缀校验(LCP ≥ 重算起点)失败或段不足 3 则降级全量。
+        (原"线段不做增量"注释已废:增量可行且经对拍网钉死。)
         等价性见 tests/chan_core/test_incremental_equivalence.py(对拍网含 xds)。
         """
         all_bis = bis
@@ -222,7 +223,7 @@ class XdCalculator:
     def _incremental_restart(self, all_bis: List[BI], ident_lcp: int) -> Optional[int]:
         """段增量重启点:保留稳定段前缀、返回需重算的起点笔位置;不可增量返回 None。
 
-        回溯拆分深度恒 ≤1 → 删末 2 段(留 1 段 buffer)、从倒数第 2 段起点重算。
+        回溯拆分深度实测 ≤2 → 删末 2 段(保留前 len-2 段恰好容纳 d≤2、buffer=0)、从倒数第 2 段起点重算。
         ``ident_lcp`` 为 new/old bis 的 identity 公共前缀长度(_identity_prefix_len),
         是「值意义公共前缀」的保守下界:>= restart_pos 即证重算起点之前的笔全未变、
         可安全复用线段前缀;否则(bi 档3 全量降级改了前缀,或保守起见)降级全量。

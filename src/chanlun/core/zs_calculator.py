@@ -84,6 +84,13 @@ class ZsCalculator:
         # 默认 4，离开段计入核心；④ 的 L≥1 走势类型中枢为 3）。进入段可选，
         # 故 min_zs_lines 段即起步、不足则不可能成中枢。
         if len(lines) < self.min_zs_lines:
+            # 段数跌回 <min(末段被回撤):必须清空中枢,与「全新实例从同样 <min 的
+            # lines 起算 = 0 中枢」一致。否则只更新 _last_* 而残留上一轮 zss/pending_zs,
+            # 在段数从 ≥min 跌回 <min 时遗留陈旧中枢(get_bi_zss 直读 zss+pending_zs、
+            # 不重算 calculate),致增量 bi_zss 与全量分叉(对拍网合成强包含 SYN.incl
+            # L=113~121 实证连续 9 个 fork:bi_zss len inc=1 vs batch=0)。
+            self.zss = []
+            self.pending_zs = None
             self._last_lines_count = len(lines)
             self._last_tail_snapshot = self._build_tail_snapshot(lines)
             self._last_lines_obj = lines
@@ -382,15 +389,17 @@ class ZsCalculator:
         """xds 原地改(``lines is _last_lines_obj``、末段值变)场景的增量重启。
 
         与 _prefix_stable_restart 同构,但原地改时 identity 前缀失效(对象身份未变、
-        值已改),改用长度 buffer 定稳定前缀:xd 原地改回溯深度实测恒 ≤1(见 xd_calculator
-        ._incremental_restart「删末2段留1段buffer」),故旧 ``lines[:_last_count-2]`` 稳定。
+        值已改),改用长度 buffer 定稳定前缀:删末 2 段保留前 ``len-2`` 段。安全条件=
+        保留段⊆未变段=回溯深度 d≤2(实测 QQQ.US_d L165 / 5m L2240 均 d=2,5+40 极端
+        样本未见 d≥3),即 ``len-2`` 恰好容纳 d≤2、无额外余量(buffer=0);若现 d≥3 此处
+        会与全量分叉,需调大 buffer 或加运行时回溯深度哨兵。
         保留 ``end+1 < safe_prefix`` 的完成中枢(核心段及完成回看的 +1 段全落稳定前缀),
         从最后一个安全中枢的 exit 重扫 pending 区域(有界),替代全量 -1 重扫所有中枢。
         等价性由对拍网 test_incremental_equivalence(全快照逐前缀)守。
         """
         if not grow or lines is not self._last_lines_obj or self._last_lines_count < 4:
             return False
-        safe_prefix = self._last_lines_count - 2   # xd 回溯≤1,留 1 段 buffer
+        safe_prefix = self._last_lines_count - 2   # 删末2段容纳 xd 回溯 d≤2(实测上界2、buffer=0)
         keep = 0
         restart_idx = -1
         for k, zs in enumerate(self.zss):
