@@ -412,7 +412,10 @@ def cl_data_to_tv_chart(
                 bi_zs_chart_data.append(_zs_to_chart(zs))
 
     xd_zs_chart_data = []
-    if config["chart_show_xd_zs"] == "1":
+    # branch core 开时 L0 段中枢由 recursive_levels[0] 唯一承载,不再叠加 legacy xd_zss
+    # (否则同段区域 legacy + 新核心双框;对齐 mmds/bcs 在 branch core 下不双源的处理,见 line 628)。
+    if (config["chart_show_xd_zs"] == "1"
+            and config.get("chart_use_branch_core", "0") != "1"):
         for zs_type in config["zs_xd_type"]:
             for zs in cd.get_xd_zss(zs_type):
                 xd_zs_chart_data.append(_zs_to_chart(zs))
