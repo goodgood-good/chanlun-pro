@@ -6,4 +6,5 @@
 公共 API `from chanlun.recursive_bt.strategy_optimizer import <符号>` 经此 facade 不变。
 """
 from chanlun.recursive_bt.strategy_optimizer.models import *  # noqa: F401,F403
+from chanlun.recursive_bt.strategy_optimizer.candidates import *  # noqa: F401,F403
 from chanlun.recursive_bt.strategy_optimizer._impl import *  # noqa: F401,F403
