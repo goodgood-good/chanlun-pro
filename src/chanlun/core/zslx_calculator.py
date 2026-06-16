@@ -93,11 +93,13 @@ class ZslxCalculator:
         # 的 2×_line_sig(profiler 实测 _line_sig 占 zslx 近半)。WeakKeyDictionary:
         # 中枢 GC 时自动剔除、不污染 ZS.__dict__(快照/pickle 无感),ZS 默认 id-hash 可弱键。
         self._zs_sig_cache: "WeakKeyDictionary[ZS, tuple]" = WeakKeyDictionary()
+        self._backfill_cache: Optional[List[ZS]] = None  # 上轮 backfill 的 bi_zss,增量跳过 identity 稳定前缀
 
     def __getstate__(self):
         # WeakKeyDictionary 不可 pickle 且为瞬态(可重建),序列化时丢弃。
         state = self.__dict__.copy()
         state.pop("_zs_sig_cache", None)
+        state.pop("_backfill_cache", None)  # 瞬态优化缓存,丢弃后下次全量回填一次重建
         return state
 
     def __setstate__(self, state):
@@ -156,19 +158,36 @@ class ZslxCalculator:
             None if not lines else self._line_sig(lines[-1]),
         )
 
-    @staticmethod
-    def backfill_zs_directions(zss: List[ZS]) -> None:
+    def backfill_zs_directions(self, zss: List[ZS]) -> None:
         """笔层中枢方向回填(cl.py §3.6)——纯 per-zs 副作用:zs.type = 核心首段方向的反向
         (第24课:向上走势的中枢=下-上-下→type=up)。**不依赖走势类型分组**:正常中枢
         lines[0].type∈{up,down},_finalize 与缓存命中回放在此条件下等价(见 calculate 回放
         分支),状态机的 direction/zd 分支是该前提下的死路。bi 流(cl.py)仅取此回填、走势
         类型返回值被丢弃,故直调本方法可省去 zslx 全部签名+状态机+缓存开销(占 zslx 调用约半)。
-        等价性由 golden(快照含 zs.type)+ test_incremental_equivalence(bi_zss type)守。"""
-        for zs in zss:
+        等价性由 golden(快照含 zs.type)+ test_incremental_equivalence(bi_zss type)守。
+
+        增量:bi_zss 每轮新列表但中枢对象身份保留(ZsCalculator copy + 尾部 no-op),identity
+        前缀稳定的中枢其 lines[0] 不变(完成中枢冻结、pending 延伸不改首段)→ type 已在上轮
+        设妥、可跳过,只回填新增/变化尾部。消除每 bar 全量回填 O(bi_zss)·O(n)调用 = O(n²)
+        (profiler 实测 backfill exp 2.02 是 zslx 最大头)。
+        """
+        cache = getattr(self, "_backfill_cache", None)
+        start = 0
+        if cache is not None:
+            lo, hi = 0, min(len(zss), len(cache))
+            while lo < hi:
+                mid = (lo + hi) // 2
+                if zss[mid] is cache[mid]:
+                    lo = mid + 1
+                else:
+                    hi = mid
+            start = lo
+        for zs in zss[start:]:
             zs_lines = getattr(zs, "lines", None)
             head = zs_lines[0].type if zs_lines else None
             if head in ("up", "down"):
                 zs.type = "up" if head == "down" else "down"
+        self._backfill_cache = zss
 
     def calculate(
         self,
