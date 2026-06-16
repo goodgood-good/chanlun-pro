@@ -140,6 +140,20 @@ def test_portfolio_main_loop_branches(maotai, label, kwargs, n, total, sharpe):
     assert res["sharpe"] == pytest.approx(sharpe, rel=1e-6)
 
 
+def test_portfolio_pool_schedule(maotai):
+    """pool_schedule 季度池路径(grid/默认参数都不覆盖)——守护 pool_idx/reentry 在 pool
+    分支的行为,是 PortfolioSimulator 类化逐变量迁移的贴身网(此前完全无覆盖的盲区)。"""
+    dates = maotai["dates"]
+    psched = [(dates[0], {"SH.600519": 1.0}), (dates[len(dates) // 2], {"SH.600519": 0.5})]
+    res = portfolio_backtest(
+        universe=["SH.600519"], syms={"SH.600519": dict(maotai)}, max_pos=1, pool_schedule=psched,
+    )
+    assert res["n"] == 6
+    assert res["total"] == pytest.approx(-0.0028856889, rel=1e-6)
+    assert res["max_dd"] == pytest.approx(0.039371367, rel=1e-6)
+    assert res["sharpe"] == pytest.approx(-0.1463138605, rel=1e-6)
+
+
 def test_reproducible():
     """两次独立构建+回测,核心指标逐位一致(确定性:无随机/无序依赖/无隐藏状态)。"""
     def run():

@@ -626,6 +626,12 @@ def _deplete_activity_layers(p: dict, size: float, layer: str):
     p["swing_shares"] = max(swing, 0.0)
 
 
+class _PortfolioSim:
+    """portfolio_backtest 的撮合状态容器(P1 类化进行中)。逐个状态变量迁入为属性、
+    消除闭包 nonlocal;迁齐后把 _execute_pending/_process_exits/_process_entries 等
+    闭包升级为方法、portfolio_backtest 收为薄壳 sim.run()。每刀 147-hash 零漂移守护。"""
+
+
 def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
                        market_filter: Optional[str] = None,
                        init_cash: float = 1_000_000,
@@ -895,6 +901,7 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
         else:
             regime_by_date = _regime_by_date_lookup(master, bench, regime_lookback_days)
 
+    sim = _PortfolioSim()
     cash = init_cash
     positions: Dict[str, dict] = {}
     pending: List[tuple] = []
@@ -918,7 +925,7 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
         return cash + sum(syms[n]["close"][ml[n][m]] * p["shares"]
                           for n, p in positions.items())
 
-    pool_idx = -1
+    sim.pool_idx = -1
     reentry: Dict[str, str] = {}      # 池模式短差状态:卖点减仓后 'wait_buy'=等买点回补
     def _execute_pending(m, t):
         # 1) 执行上一bar挂单(本bar开盘价)。原主循环阶段①原样下沉为闭包(P1 第三刀)，
@@ -1257,10 +1264,9 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
                     reentry[name] = "wait_buy"   # 卖点减仓→等买点回补(短差);down→非down即回补
 
     def _process_entries(m, t, block):
-        # 3) 选股开仓 + 收盘盯市记 equity。原阶段③下沉为闭包(P1 第五刀):pool_idx 自增需
-        # nonlocal;原 `for m` 的 continue(pool 路径记 equity 后跳过常规开仓)改为 return,
-        # 故常规路径的 equity 记录一并纳入函数末尾,两路径各记一次、语义等价。
-        nonlocal pool_idx
+        # 3) 选股开仓 + 收盘盯市记 equity。原阶段③下沉为闭包(P1 第五刀);原 `for m` 的
+        # continue(pool 路径记 equity 后跳过常规开仓)改为 return,故常规路径 equity 记录
+        # 一并纳入函数末尾,两路径各记一次、语义等价。pool_idx 已迁入 sim 状态容器(类化)。
         pend_buy = {o[0] for o in pending if o[1] == "buy"}
         pend_sell = {o[0] for o in pending if o[1] == "sell"}
         if not block:
@@ -1318,10 +1324,10 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
             # 中枢震荡短差降成本)——非「买点才进场」(那是全池猎手口径,小池会饿死)。
             # 大级别 not_down 即按权重持有;③技术面短差循环:小级别卖点减仓→**买点回补**,
             # 大级别 down 退出→非 down 回补。
-            while (pool_idx + 1 < len(pool_schedule)
-                   and pool_schedule[pool_idx + 1][0] <= t):
-                pool_idx += 1
-            cur_pool = pool_schedule[pool_idx][1] if pool_idx >= 0 else {}
+            while (sim.pool_idx + 1 < len(pool_schedule)
+                   and pool_schedule[sim.pool_idx + 1][0] <= t):
+                sim.pool_idx += 1
+            cur_pool = pool_schedule[sim.pool_idx][1] if sim.pool_idx >= 0 else {}
             if not block:
                 for name, w in cur_pool.items():
                     s = syms.get(name)
