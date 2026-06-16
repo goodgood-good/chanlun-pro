@@ -561,6 +561,71 @@ def _position_structural_invalidation(p: dict, s: dict, j: int):
     return ""
 
 
+# ---- 仓位分层(core/swing/scalp/activity)逻辑簇,原为 portfolio_backtest 内嵌闭包。
+# 引用的外层配置(swing_signal_level / core_signal_level / big_down_activity_buy_ratio_multiplier)
+# 改为显式入参后即为模块级纯函数,抽出以继续缩减 portfolio_backtest 体量(P1 第二刀)。
+# 行为等价由 tests/chan_core/test_recursive_bt_e2e.py 端到端特征网守护。
+def _allow_big_down_activity(sig, big_down_activity_buy_ratio_multiplier: float,
+                             core_signal_level: int) -> bool:
+    if big_down_activity_buy_ratio_multiplier <= 0:
+        return False
+    return core_signal_level <= 0 or _signal_level(sig) < core_signal_level
+
+
+def _entry_layer(entry_level: int, core_shares: float, swing_signal_level: int) -> str:
+    if core_shares > 0:
+        return "core_swing" if swing_signal_level > 0 else "core_activity"
+    if swing_signal_level > 0:
+        return "swing" if entry_level >= swing_signal_level else "scalp"
+    return "activity"
+
+
+def _activity_parts(p: dict, swing_signal_level: int,
+                    total_shares: Optional[float] = None) -> tuple[float, float, float]:
+    shares = float(p.get("shares") if total_shares is None else total_shares)
+    core = float(p.get("core_shares") or 0.0)
+    swing = float(p.get("swing_shares") or 0.0)
+    scalp = float(p.get("scalp_shares") or 0.0)
+    activity = max(shares - core, 0.0)
+    if swing_signal_level <= 0 or swing + scalp <= 1e-9:
+        swing = activity
+        scalp = 0.0
+    return activity, swing, scalp
+
+
+def _sellable_layer_shares(p: dict, layer: str, before_shares: float,
+                           swing_signal_level: int) -> float:
+    core = float(p.get("core_shares") or 0.0)
+    activity, swing, scalp = _activity_parts(p, swing_signal_level, before_shares)
+    if layer == "scalp":
+        return scalp
+    if layer in {"swing", "activity"}:
+        return activity if layer == "activity" else swing + scalp
+    if layer in {"core_all", "all"}:
+        return before_shares
+    return max(before_shares - core, 0.0)
+
+
+def _deplete_activity_layers(p: dict, size: float, layer: str):
+    remain = max(float(size), 0.0)
+    if remain <= 0:
+        return
+    if layer in {"core_all", "all"}:
+        return
+    scalp = float(p.get("scalp_shares") or 0.0)
+    swing = float(p.get("swing_shares") or 0.0)
+    if layer in {"scalp", "swing", "activity"}:
+        take = min(scalp, remain)
+        scalp -= take
+        remain -= take
+    if layer in {"swing", "activity"} and remain > 1e-9:
+        take = min(swing, remain)
+        swing -= take
+        remain -= take
+    p["scalp_shares"] = max(scalp, 0.0)
+    p["swing_shares"] = max(swing, 0.0)
+
+
 def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
                        market_filter: Optional[str] = None,
                        init_cash: float = 1_000_000,
@@ -630,59 +695,6 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
             return s["big_dir_at"][j]
         return _bdir(s, j)
 
-    def _allow_big_down_activity(sig) -> bool:
-        if big_down_activity_buy_ratio_multiplier <= 0:
-            return False
-        return core_signal_level <= 0 or _signal_level(sig) < core_signal_level
-
-    def _entry_layer(entry_level: int, core_shares: float) -> str:
-        if core_shares > 0:
-            return "core_swing" if swing_signal_level > 0 else "core_activity"
-        if swing_signal_level > 0:
-            return "swing" if entry_level >= swing_signal_level else "scalp"
-        return "activity"
-
-    def _activity_parts(p: dict, total_shares: Optional[float] = None) -> tuple[float, float, float]:
-        shares = float(p.get("shares") if total_shares is None else total_shares)
-        core = float(p.get("core_shares") or 0.0)
-        swing = float(p.get("swing_shares") or 0.0)
-        scalp = float(p.get("scalp_shares") or 0.0)
-        activity = max(shares - core, 0.0)
-        if swing_signal_level <= 0 or swing + scalp <= 1e-9:
-            swing = activity
-            scalp = 0.0
-        return activity, swing, scalp
-
-    def _sellable_layer_shares(p: dict, layer: str, before_shares: float) -> float:
-        core = float(p.get("core_shares") or 0.0)
-        activity, swing, scalp = _activity_parts(p, before_shares)
-        if layer == "scalp":
-            return scalp
-        if layer in {"swing", "activity"}:
-            return activity if layer == "activity" else swing + scalp
-        if layer in {"core_all", "all"}:
-            return before_shares
-        return max(before_shares - core, 0.0)
-
-    def _deplete_activity_layers(p: dict, size: float, layer: str):
-        remain = max(float(size), 0.0)
-        if remain <= 0:
-            return
-        if layer in {"core_all", "all"}:
-            return
-        scalp = float(p.get("scalp_shares") or 0.0)
-        swing = float(p.get("swing_shares") or 0.0)
-        if layer in {"scalp", "swing", "activity"}:
-            take = min(scalp, remain)
-            scalp -= take
-            remain -= take
-        if layer in {"swing", "activity"} and remain > 1e-9:
-            take = min(swing, remain)
-            swing -= take
-            remain -= take
-        p["scalp_shares"] = max(scalp, 0.0)
-        p["swing_shares"] = max(swing, 0.0)
-
     def _build_open_buy_candidate(
         name: str,
         s: dict,
@@ -739,7 +751,7 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
             # 趋势底背驰正是衰竭判据;非衰竭的 big-down 买点仍走原拦截逻辑。
             if allow_nest_buy_big_down and str(getattr(pick, "bs_type", "")) == "1buy_nest":
                 pass
-            elif not _allow_big_down_activity(pick):
+            elif not _allow_big_down_activity(pick, big_down_activity_buy_ratio_multiplier, core_signal_level):
                 return None
             else:
                 big_down_activity = True
@@ -1018,7 +1030,7 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
                                            "bs_type": order_bs_type,
                                            "buy_ratio": float(w or 0.0),
                                            "entry_level": entry_level,
-                                           "entry_layer": _entry_layer(entry_level, core_shares),
+                                           "entry_layer": _entry_layer(entry_level, core_shares, swing_signal_level),
                                            "core_hold_ratio": core_ratio,
                                            "core_shares": core_shares,
                                            "activity_shares": activity_shares,
@@ -1045,16 +1057,16 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
                     before_shares = float(p["shares"])
                     size = before_shares if sell_ratio >= 0.999 else before_shares * sell_ratio
                     core_shares = float(p.get("core_shares") or 0.0)
-                    activity_shares, swing_shares, scalp_shares = _activity_parts(p, before_shares)
+                    activity_shares, swing_shares, scalp_shares = _activity_parts(p, swing_signal_level, before_shares)
                     exit_layer = str(p.get("exit_layer") or "")
                     if p.get("reason") == "small_level_sell_point":
-                        size = min(size, _sellable_layer_shares(p, exit_layer, before_shares))
+                        size = min(size, _sellable_layer_shares(p, exit_layer, before_shares, swing_signal_level))
                     if r.lot > 1:
                         size = (int(size) // r.lot) * r.lot
                     if size <= 0:
                         if (
                             p.get("reason") == "small_level_sell_point"
-                            and _sellable_layer_shares(p, exit_layer, before_shares) <= 1e-9
+                            and _sellable_layer_shares(p, exit_layer, before_shares, swing_signal_level) <= 1e-9
                         ):
                             continue
                         if not (
@@ -1226,7 +1238,7 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
                     and sell_ratio >= 0.999
                     and before_shares > 1e-9
                     and _sellable_layer_shares(
-                        positions[name], exit_layer, before_shares
+                        positions[name], exit_layer, before_shares, swing_signal_level
                     ) >= before_shares - 1e-9
                 )
                 if can_roll_up_same_bar:
