@@ -476,6 +476,91 @@ def attach_daily_bsp_window(syms: dict, win_days: int = 10, bs_class: int = 3):
         s["d3_ok"] = ok
 
 
+# ---- 以下纯函数（结构止损 / 价格可成交 / bar 访问与失效判定）原为 portfolio_backtest
+# 内嵌闭包，不依赖任何外层状态（仅入参 + 模块级 _order_structural_stop_*），抽到模块级以
+# 缩减 portfolio_backtest 体量、提升可测性与可读性。行为等价：调用点经名字解析自动指向
+# 这些模块级函数（由 tests/chan_core/test_recursive_bt_e2e.py 端到端特征网守护）。
+def _signal_structural_stop_below(sig) -> Optional[float]:
+    try:
+        value = getattr(sig, "structural_stop_below", None)
+        return None if value is None else float(value)
+    except Exception:
+        return None
+
+
+def _signal_structural_stop_above(sig) -> Optional[float]:
+    try:
+        value = getattr(sig, "structural_stop_above", None)
+        return None if value is None else float(value)
+    except Exception:
+        return None
+
+
+def _buy_signal_actionable_at_price(sig, px: float) -> bool:
+    stop_below = _signal_structural_stop_below(sig)
+    if stop_below is not None and float(px) < stop_below:
+        return False
+    stop_above = _signal_structural_stop_above(sig)
+    if stop_above is not None and float(px) > stop_above:
+        return False
+    return True
+
+
+def _buy_order_actionable_at_price(order: tuple, px: float) -> bool:
+    stop_below = _order_structural_stop_below(order)
+    if stop_below is not None and float(px) < stop_below:
+        return False
+    stop_above = _order_structural_stop_above(order)
+    if stop_above is not None and float(px) > stop_above:
+        return False
+    return True
+
+
+def _buy_order_from_candidate(c: tuple) -> tuple:
+    tag = c[5] if len(c) > 5 else ""
+    level = c[6] if len(c) > 6 else 0
+    stop_below = c[7] if len(c) > 7 else None
+    stop_above = c[8] if len(c) > 8 else None
+    return (c[2], "buy", c[4], c[3], tag or "", level, stop_below, stop_above)
+
+
+def _merge_structural_stops(p: dict, stop_below: Optional[float], stop_above: Optional[float]):
+    if stop_below is not None:
+        old = p.get("structural_stop_below")
+        p["structural_stop_below"] = (
+            float(stop_below)
+            if old is None
+            else max(float(old), float(stop_below))
+        )
+    if stop_above is not None:
+        old = p.get("structural_stop_above")
+        p["structural_stop_above"] = (
+            float(stop_above)
+            if old is None
+            else min(float(old), float(stop_above))
+        )
+
+
+def _bar_low(s: dict, j: int) -> float:
+    arr = s.get("low")
+    return float((arr if arr is not None else s["close"])[j])
+
+
+def _bar_high(s: dict, j: int) -> float:
+    arr = s.get("high")
+    return float((arr if arr is not None else s["close"])[j])
+
+
+def _position_structural_invalidation(p: dict, s: dict, j: int):
+    stop_below = p.get("structural_stop_below")
+    if stop_below is not None and _bar_low(s, j) < float(stop_below):
+        return "structural_stop_below"
+    stop_above = p.get("structural_stop_above")
+    if stop_above is not None and _bar_high(s, j) > float(stop_above):
+        return "structural_stop_above"
+    return ""
+
+
 def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
                        market_filter: Optional[str] = None,
                        init_cash: float = 1_000_000,
@@ -597,78 +682,6 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
             remain -= take
         p["scalp_shares"] = max(scalp, 0.0)
         p["swing_shares"] = max(swing, 0.0)
-
-    def _signal_structural_stop_below(sig) -> Optional[float]:
-        try:
-            value = getattr(sig, "structural_stop_below", None)
-            return None if value is None else float(value)
-        except Exception:
-            return None
-
-    def _signal_structural_stop_above(sig) -> Optional[float]:
-        try:
-            value = getattr(sig, "structural_stop_above", None)
-            return None if value is None else float(value)
-        except Exception:
-            return None
-
-    def _buy_signal_actionable_at_price(sig, px: float) -> bool:
-        stop_below = _signal_structural_stop_below(sig)
-        if stop_below is not None and float(px) < stop_below:
-            return False
-        stop_above = _signal_structural_stop_above(sig)
-        if stop_above is not None and float(px) > stop_above:
-            return False
-        return True
-
-    def _buy_order_actionable_at_price(order: tuple, px: float) -> bool:
-        stop_below = _order_structural_stop_below(order)
-        if stop_below is not None and float(px) < stop_below:
-            return False
-        stop_above = _order_structural_stop_above(order)
-        if stop_above is not None and float(px) > stop_above:
-            return False
-        return True
-
-    def _buy_order_from_candidate(c: tuple) -> tuple:
-        tag = c[5] if len(c) > 5 else ""
-        level = c[6] if len(c) > 6 else 0
-        stop_below = c[7] if len(c) > 7 else None
-        stop_above = c[8] if len(c) > 8 else None
-        return (c[2], "buy", c[4], c[3], tag or "", level, stop_below, stop_above)
-
-    def _merge_structural_stops(p: dict, stop_below: Optional[float], stop_above: Optional[float]):
-        if stop_below is not None:
-            old = p.get("structural_stop_below")
-            p["structural_stop_below"] = (
-                float(stop_below)
-                if old is None
-                else max(float(old), float(stop_below))
-            )
-        if stop_above is not None:
-            old = p.get("structural_stop_above")
-            p["structural_stop_above"] = (
-                float(stop_above)
-                if old is None
-                else min(float(old), float(stop_above))
-            )
-
-    def _bar_low(s: dict, j: int) -> float:
-        arr = s.get("low")
-        return float((arr if arr is not None else s["close"])[j])
-
-    def _bar_high(s: dict, j: int) -> float:
-        arr = s.get("high")
-        return float((arr if arr is not None else s["close"])[j])
-
-    def _position_structural_invalidation(p: dict, s: dict, j: int):
-        stop_below = p.get("structural_stop_below")
-        if stop_below is not None and _bar_low(s, j) < float(stop_below):
-            return "structural_stop_below"
-        stop_above = p.get("structural_stop_above")
-        if stop_above is not None and _bar_high(s, j) > float(stop_above):
-            return "structural_stop_above"
-        return ""
 
     def _build_open_buy_candidate(
         name: str,
