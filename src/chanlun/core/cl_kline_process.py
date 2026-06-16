@@ -152,7 +152,17 @@ class CL_Kline_Process:
         if not src_klines:
             return
 
-        for current_k in src_klines:
+        # 调用方每根新 bar 都传入全量 src_klines(= KlineDataProcessor.klines)，前缀里
+        # index < _last_src_kline_index 的旧数据必然全部命中下方「情况1」被跳过。
+        # KlineDataProcessor 保证 klines[i].index == i（连续 0-based），故可 O(1) 直接切到
+        # 尾部起点，免去每根 bar 都 O(n) 空转扫描整列（此前是 O(n^2) 累积热点）。语义不变：
+        # 起点恰是第一个 index>=_last 的元素，逐根处理逻辑一字未动；「情况1」的 continue
+        # 作为防御保留（万一坐标系异常则退化回原全量扫描的安全行为）。
+        start = self._last_src_kline_index
+        if start < 0:
+            start = 0
+
+        for current_k in src_klines[start:]:
 
             # --- 情况1: 这是一个旧数据 ---
             if current_k.index < self._last_src_kline_index:
