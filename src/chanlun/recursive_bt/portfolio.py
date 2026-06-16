@@ -920,8 +920,10 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
 
     pool_idx = -1
     reentry: Dict[str, str] = {}      # 池模式短差状态:卖点减仓后 'wait_buy'=等买点回补
-    for m, t in enumerate(master):
-        # 1) 执行上一bar挂单(本bar开盘价)
+    def _execute_pending(m, t):
+        # 1) 执行上一bar挂单(本bar开盘价)。原主循环阶段①原样下沉为闭包(P1 第三刀)，
+        # 仅 cash/pending 需 nonlocal,其余 positions/trades/reentry_* 为可变容器引用。
+        nonlocal cash, pending
         carry = []
         for o in pending:
             name, act = o[0], o[1]
@@ -1149,6 +1151,9 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
                 else:
                     carry.append(o)   # T+1 pending
         pending = carry
+
+    for m, t in enumerate(master):
+        _execute_pending(m, t)
 
         block = filt and _bdir(filt, filt["d2i"][t]) == "down"
 
