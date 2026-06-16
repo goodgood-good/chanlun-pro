@@ -400,6 +400,12 @@ class ZsCalculator:
         if not grow or lines is not self._last_lines_obj or self._last_lines_count < 4:
             return False
         safe_prefix = self._last_lines_count - 2   # 删末2段容纳 xd 回溯 d≤2(实测上界2、buffer=0)
+        # A-HIGH-1/A-9-1 运行时哨兵(对齐 xd_calculator):复用前缀依赖倒数第3段 xd
+        # (safe_prefix-1)已 done(线段终结靠反向特征序列分型、done 段冻结不回溯;最近段
+        # 试探性可回溯)。若它仍 pending(末尾可变段>2、回溯深度疑≥3),len-2 buffer 不足 →
+        # 降级全量(恒正确),把「实测 d≤2」从注释承诺升级为运行时保证。
+        if safe_prefix >= 1 and not getattr(lines[safe_prefix - 1], "done", True):
+            return False
         keep = 0
         restart_idx = -1
         for k, zs in enumerate(self.zss):

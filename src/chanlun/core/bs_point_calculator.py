@@ -216,6 +216,10 @@ class BsPointCalculator:
             # 实测上界2、buffer=0),fall through 做 zss 稳定检查 + off-by-one。bi 层 bis
             # 恒换新列表、不走此支。
             p = max(0, len(lines) - 2)
+            # A-HIGH-1/A-9-1 运行时哨兵(对齐 xd/zs):复用前缀依赖倒数第3段 xd(p-1)已 done;
+            # 若它仍 pending(回溯深度疑≥3),len-2 不足 → return 0 全量重启(恒正确)。
+            if p >= 1 and not getattr(lines[p - 1], "done", True):
+                return 0
         else:
             p = self._identity_prefix_len(lines, self._last_lines_obj)
         if self._last_zss_obj is not None and zss is not self._last_zss_obj:
