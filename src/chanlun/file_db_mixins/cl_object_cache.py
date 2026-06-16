@@ -14,7 +14,7 @@ from decimal import Decimal
 import pandas as pd
 
 from chanlun import fun
-from chanlun.base import Market
+from chanlun.market import Market
 from chanlun.core import cl
 from chanlun.core.types import ICL
 from chanlun.exchange import Exchange

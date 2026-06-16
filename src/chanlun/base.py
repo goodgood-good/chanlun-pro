@@ -1,19 +1,8 @@
-from enum import Enum
+# -*- coding: utf-8 -*-
+"""Facade shim:``Market`` 枚举已迁至 :mod:`chanlun.market`。
 
-
-class Market(Enum):
-    """支持的交易市场枚举。"""
-
-    A = "a"  # A股
-    HK = "hk"  # 港股
-    FUTURES = "futures"  # 期货
-    NY_FUTURES = "ny_futures"  # 纽约期货
-    CURRENCY = "currency"  # 数字货币合约
-    CURRENCY_SPOT = "currency_spot"  # 数字货币现货
-    US = "us"  # 美股
-    FX = "fx"  # 外汇
-
-
-if __name__ == "__main__":
-    for market in Market:
-        print(market.name, market.value)
+原模块名 ``base`` 名不副实(实为市场枚举,非任何基类),已正名为 ``market``。
+本 shim 保留旧的 ``chanlun.base`` 导入路径一个迁移周期;全调用方已迁
+``chanlun.market``,新代码请直接用 ``chanlun.market``,后续可清理本文件。
+"""
+from chanlun.market import Market  # noqa: F401

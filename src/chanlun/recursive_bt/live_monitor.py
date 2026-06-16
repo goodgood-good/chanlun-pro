@@ -21,7 +21,7 @@ from typing import Dict, Iterable, List, Mapping, Optional
 
 import pandas as pd
 
-from chanlun.base import Market
+from chanlun.market import Market
 from chanlun import config as app_config
 from chanlun import fun
 from chanlun.core.cl import CL

@@ -8,7 +8,7 @@ from tenacity import retry, retry_if_result, stop_after_attempt, wait_random
 from tzlocal import get_localzone
 
 from chanlun import config, fun
-from chanlun.base import Market
+from chanlun.market import Market
 from chanlun.exchange.exchange import Exchange, Tick, convert_currency_kline_frequency
 from chanlun.exchange.exchange_db import ExchangeDB
 from chanlun.exchange.kline_precision import normalize_kline_precision

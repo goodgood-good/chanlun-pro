@@ -32,7 +32,7 @@ from chanlun.cl_utils import (
     web_batch_get_cl_datas,
     zs_to_chart_dict,
 )
-from chanlun.base import Market
+from chanlun.market import Market
 from chanlun.exchange import get_exchange
 from chanlun.tools.log_util import LogUtil
 

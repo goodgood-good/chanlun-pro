@@ -10,7 +10,7 @@ import threading
 
 from tzlocal import get_localzone
 
-from chanlun.base import Market
+from chanlun.market import Market
 from chanlun.exchange import get_exchange
 from chanlun.tools.log_util import LogUtil
 

@@ -10,7 +10,7 @@ from pytdx.exhq import TdxExHq_API
 from tenacity import retry, retry_if_result, stop_after_attempt, wait_random
 
 from chanlun import fun
-from chanlun.base import Market
+from chanlun.market import Market
 from chanlun.config import get_data_path
 from chanlun.persistence.db import db
 from chanlun.exchange.exchange import Exchange, Tick, convert_us_tdx_kline_frequency

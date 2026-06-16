@@ -9,7 +9,7 @@ from pytdx.exhq import TdxExHq_API
 from tenacity import retry, retry_if_result, stop_after_attempt, wait_random
 
 from chanlun import fun
-from chanlun.base import Market
+from chanlun.market import Market
 from chanlun.persistence.db import db
 from chanlun.exchange.exchange import Exchange, Tick
 from chanlun.exchange.kline_precision import normalize_kline_precision

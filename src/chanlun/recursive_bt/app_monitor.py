@@ -17,7 +17,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 
 from chanlun import config as app_config
 from chanlun import fun
-from chanlun.base import Market
+from chanlun.market import Market
 from chanlun.exchange import get_exchange
 from chanlun.notifications import ClaudeHookNotifier, DingTalkWebhookNotifier
 from chanlun.recursive_bt.engine import recommended_buy_ratio

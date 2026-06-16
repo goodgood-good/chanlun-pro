@@ -12,7 +12,7 @@ from typing import Iterable, Mapping
 
 import pandas as pd
 
-from chanlun.base import Market
+from chanlun.market import Market
 from chanlun.exchange import get_exchange
 from chanlun.recursive_bt.market_runtime import (
     CHART_CACHE_DIR,

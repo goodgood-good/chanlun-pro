@@ -13,7 +13,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-from chanlun.base import Market
+from chanlun.market import Market
 from chanlun.core.cl import CL
 from chanlun.exchange import get_exchange
 from chanlun.recursive_bt.chanlun_selector import (

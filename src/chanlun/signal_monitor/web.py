@@ -10,7 +10,7 @@
 from flask import Blueprint, request
 from flask_login import login_required
 
-from chanlun.base import Market
+from chanlun.market import Market
 from chanlun.cl_utils import query_cl_chart_config, web_batch_get_cl_datas
 from chanlun.exchange import get_exchange
 from chanlun.signal_monitor.strength_compare import (

@@ -20,7 +20,7 @@ _ROOT = _HERE.parents[2]                       # 项目根
 sys.path.insert(0, str(_ROOT / "src"))         # 兜底:未安装时也能 import chanlun
 sys.path.insert(0, str(_HERE.parents[1] / "chan_core"))  # for `from snapshot import`
 
-from chanlun.base import Market                          # noqa: E402
+from chanlun.market import Market                          # noqa: E402
 from chanlun.core.cl import CL                           # noqa: E402
 from chanlun.recursive_bt.engine import CL_CFG           # noqa: E402
 from snapshot import cl_snapshot, canonical_json         # noqa: E402

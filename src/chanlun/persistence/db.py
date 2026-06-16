@@ -21,7 +21,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import QueuePool
 
 from chanlun import config, fun
-from chanlun.base import Market
+from chanlun.market import Market
 from chanlun.config import get_data_path
 from chanlun.tools.log_util import LogUtil
 

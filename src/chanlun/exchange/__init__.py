@@ -1,5 +1,5 @@
 from chanlun import config
-from chanlun.base import Market
+from chanlun.market import Market
 from chanlun.exchange.exchange import Exchange
 from chanlun.exchange.exchange_cq import ExchangeChangQiao
 

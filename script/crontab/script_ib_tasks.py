@@ -17,7 +17,7 @@ import pandas as pd
 import pytz
 
 from chanlun import config, fun, rd
-from chanlun.base import Market
+from chanlun.market import Market
 from chanlun.exchange.exchange_ib import CmdEnum, ib_res_hkey
 from chanlun.persistence.file_db import FileCacheDB
 

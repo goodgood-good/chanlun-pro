@@ -17,7 +17,7 @@ import pytz
 
 from chanlun import fun
 from chanlun.core import cl
-from chanlun.base import Market
+from chanlun.market import Market
 from chanlun.core.types import ICL
 from chanlun.config import get_data_path
 from chanlun.persistence.db import db

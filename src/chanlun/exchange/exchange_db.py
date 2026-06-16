@@ -6,7 +6,7 @@ import pytz
 from tzlocal import get_localzone
 
 from chanlun import fun
-from chanlun.base import Market
+from chanlun.market import Market
 from chanlun.persistence.db import db
 from chanlun.exchange.exchange import (
     Exchange,

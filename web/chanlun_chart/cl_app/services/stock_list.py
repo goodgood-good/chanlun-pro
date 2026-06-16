@@ -25,7 +25,7 @@ from cachetools import TTLCache
 import pinyin
 
 from chanlun import config
-from chanlun.base import Market
+from chanlun.market import Market
 from chanlun.exchange import get_exchange
 from chanlun.tools.log_util import LogUtil
 

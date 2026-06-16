@@ -13,7 +13,7 @@ import json
 from flask import Blueprint, render_template, request, current_app
 from flask_login import login_required
 
-from chanlun.base import Market
+from chanlun.market import Market
 from chanlun import fun
 from chanlun.persistence.db import db
 from chanlun.exchange import get_exchange

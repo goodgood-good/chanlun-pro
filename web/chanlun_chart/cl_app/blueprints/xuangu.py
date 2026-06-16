@@ -8,7 +8,7 @@
 from flask import Blueprint, render_template, request, current_app
 from flask_login import login_required
 
-from chanlun.base import Market
+from chanlun.market import Market
 from chanlun.exchange import get_exchange
 from chanlun.zixuan import ZiXuan
 

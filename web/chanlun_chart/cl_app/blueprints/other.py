@@ -9,7 +9,7 @@ import json
 from flask import Blueprint, request
 from flask_login import login_required
 
-from chanlun.base import Market
+from chanlun.market import Market
 from chanlun.exchange import get_exchange
 from chanlun.tools.log_util import LogUtil
 
