@@ -1152,12 +1152,9 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
                     carry.append(o)   # T+1 pending
         pending = carry
 
-    for m, t in enumerate(master):
-        _execute_pending(m, t)
-
-        block = filt and _bdir(filt, filt["d2i"][t]) == "down"
-
-        # 2) 退出信号(持仓中:大级别down 或 小级别卖点)
+    def _process_exits(m, t, block):
+        # 2) 退出信号(持仓中:大级别down 或 小级别卖点)。原阶段②下沉为闭包(P1 第四刀)：
+        # 仅 append pending / 改 positions·reentry(容器引用)、读 block(入参)，无需 nonlocal。
         pend_sell = {o[0] for o in pending if o[1] == "sell"}
         for name in list(positions):
             if name in pend_sell:
@@ -1258,6 +1255,11 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
                         pending.append(_buy_order_from_candidate(roll_buy))
                 if pool_schedule is not None and not is_down:
                     reentry[name] = "wait_buy"   # 卖点减仓→等买点回补(短差);down→非down即回补
+
+    for m, t in enumerate(master):
+        _execute_pending(m, t)
+        block = filt and _bdir(filt, filt["d2i"][t]) == "down"
+        _process_exits(m, t, block)
 
         # 3) 选股开仓
         pend_buy = {o[0] for o in pending if o[1] == "buy"}
