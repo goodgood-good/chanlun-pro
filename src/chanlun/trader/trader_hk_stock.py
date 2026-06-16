@@ -40,7 +40,7 @@ class TraderHKStock(BackTestTrader):
         # 港股必须按 lot_size 取整，否则富途拒单
         max_amount = max_amount - (max_amount % stock_info["lot_size"])
 
-        if max_amount == 0:
+        if max_amount <= 0:
             return False
         order = self.ex.order(code, "buy", max_amount)
         if order is False:
@@ -80,7 +80,7 @@ class TraderHKStock(BackTestTrader):
             return False
         max_amount = can_tv["max_margin_short"] / (self.b_space - len(positions))
         max_amount = max_amount - (max_amount % stock_info["lot_size"])
-        if max_amount == 0:
+        if max_amount <= 0:
             return False
         order = self.ex.order(code, "sell", max_amount)
         if order is False:

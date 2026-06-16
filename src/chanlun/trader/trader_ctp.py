@@ -36,10 +36,24 @@ from openctp_ctp.thosttraderapi import (
 _CTP_CALLBACK_TIMEOUT = 3.0
 
 from chanlun import utils
+from chanlun.tools.log_util import LogUtil
 from chanlun.trading.backtest_trader import BackTestTrader
 from chanlun.trading.base import POSITION, Operation
 from chanlun.persistence.db import db
 from chanlun.exchange.exchange_ctp import MarketCTP
+
+
+def _precheck_ctp_order(amount, price) -> bool:
+    """下单前防御:数量须为正、价格须 >0,挡 NaN/负/零价穿透到券商真实下单。
+
+    开仓 ``amount or 1`` 对 NaN 不兜底(``float('nan') or 1`` → NaN 仍穿透)、
+    LimitPrice 直取 tick.last 不校验——信号层异常 amount 或行情快照异常时,会下出
+    NaN/负量单或零价/负价限价单。此处统一前置拦截,异常即由调用方 return False + 告警。
+    """
+    try:
+        return bool(amount == amount and amount > 0 and price == price and price > 0)
+    except TypeError:
+        return False
 
 
 class MyTraderCallback(CThostFtdcTraderApi):
@@ -192,6 +206,10 @@ class CTPTrader(BackTestTrader):
         if self.trader_api.state.get_position_count() >= self.max_pos:
             return False
 
+        # 下单前防御:挡 NaN/负数量、非正价格穿透到券商(amount=None/0 仍走 `or 1` 兜底1手)
+        if not _precheck_ctp_order(amount or 1, tick[code].last):
+            LogUtil.warning(f"CTP open_buy 拒单:异常 amount={amount}、price={tick[code].last}")
+            return False
         # 下单
         order_ref = self.trader_api.state.next_order_ref()
         self.trader_api.state.register_order_wait(order_ref)
@@ -260,6 +278,10 @@ class CTPTrader(BackTestTrader):
         if self.trader_api.state.get_position_count() >= self.max_pos:
             return False
 
+        # 下单前防御:挡 NaN/负数量、非正价格穿透到券商(amount=None/0 仍走 `or 1` 兜底1手)
+        if not _precheck_ctp_order(amount or 1, tick[code].last):
+            LogUtil.warning(f"CTP open_sell 拒单:异常 amount={amount}、price={tick[code].last}")
+            return False
         # 下单
         order_ref = self.trader_api.state.next_order_ref()
         self.trader_api.state.register_order_wait(order_ref)
@@ -311,6 +333,10 @@ class CTPTrader(BackTestTrader):
         if code not in tick:
             return False
 
+        # 下单前防御:挡 NaN/负持仓量、非正价格穿透到券商(pos.amount 异常=数据问题)
+        if not _precheck_ctp_order(pos.amount, tick[code].last):
+            LogUtil.warning(f"CTP close_buy 拒单:异常 pos.amount={pos.amount}、price={tick[code].last}")
+            return False
         order_ref = self.trader_api.state.next_order_ref()
         self.trader_api.state.register_order_wait(order_ref)
         req = CThostFtdcInputOrderField()
@@ -359,6 +385,10 @@ class CTPTrader(BackTestTrader):
         if code not in tick:
             return False
 
+        # 下单前防御:挡 NaN/负持仓量、非正价格穿透到券商(pos.amount 异常=数据问题)
+        if not _precheck_ctp_order(pos.amount, tick[code].last):
+            LogUtil.warning(f"CTP close_sell 拒单:异常 pos.amount={pos.amount}、price={tick[code].last}")
+            return False
         order_ref = self.trader_api.state.next_order_ref()
         self.trader_api.state.register_order_wait(order_ref)
         req = CThostFtdcInputOrderField()
