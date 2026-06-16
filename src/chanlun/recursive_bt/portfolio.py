@@ -1256,12 +1256,11 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
                 if pool_schedule is not None and not is_down:
                     reentry[name] = "wait_buy"   # 卖点减仓→等买点回补(短差);down→非down即回补
 
-    for m, t in enumerate(master):
-        _execute_pending(m, t)
-        block = filt and _bdir(filt, filt["d2i"][t]) == "down"
-        _process_exits(m, t, block)
-
-        # 3) 选股开仓
+    def _process_entries(m, t, block):
+        # 3) 选股开仓 + 收盘盯市记 equity。原阶段③下沉为闭包(P1 第五刀):pool_idx 自增需
+        # nonlocal;原 `for m` 的 continue(pool 路径记 equity 后跳过常规开仓)改为 return,
+        # 故常规路径的 equity 记录一并纳入函数末尾,两路径各记一次、语义等价。
+        nonlocal pool_idx
         pend_buy = {o[0] for o in pending if o[1] == "buy"}
         pend_sell = {o[0] for o in pending if o[1] == "sell"}
         if not block:
@@ -1342,7 +1341,7 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
                     pending.append((name, "buy", w))
                     reentry.pop(name, None)
             equity[m] = mk(m)
-            continue
+            return
         pending_open_buys = {
             o[0] for o in pending if o[1] == "buy" and not _is_activity_refill_order(o)
         }
@@ -1370,6 +1369,12 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
                 pending.append(_buy_order_from_candidate(c))
 
         equity[m] = mk(m)
+
+    for m, t in enumerate(master):
+        _execute_pending(m, t)
+        block = filt and _bdir(filt, filt["d2i"][t]) == "down"
+        _process_exits(m, t, block)
+        _process_entries(m, t, block)
 
     # 收尾强平(停牌票按冻结最近价)
     t = master[-1]
