@@ -124,6 +124,22 @@ def test_qqq_fingerprint(qqq):
     assert res["sharpe"] == pytest.approx(7.022712970662, rel=1e-6)
 
 
+@pytest.mark.parametrize("label,kwargs,n,total,sharpe", [
+    ("sell_classes={1}", dict(max_pos=2, sell_classes={1}), 4, 0.0030347368, 0.4180935818),
+    ("after_3sell_reentry", dict(max_pos=2, after_3sell_reentry_buy_classes={1, 2}), 1, -0.0014125835, -1.8720685745),
+    ("require_nest", dict(max_pos=2, require=("tech", "nest")), 5, 0.0072383778, 1.1136689149),
+    ("slippage=0.001", dict(max_pos=2, slippage=0.001), 6, 0.0013448604, 0.2214176414),
+    ("init_cash=5e5", dict(max_pos=2, init_cash=500000), 5, 0.0048255852, 1.1051174144),
+])
+def test_portfolio_main_loop_branches(maotai, label, kwargs, n, total, sharpe):
+    """主撮合循环分支覆盖:卖点类别过滤 / 3卖后重入 / nest 门控 / 滑点 / 资金约束。
+    单组默认参数走不到这些分支(数据无对应场景),显式触发以在重构主循环前织密安全网。"""
+    res = portfolio_backtest(universe=["SH.600519"], syms={"SH.600519": dict(maotai)}, **kwargs)
+    assert res["n"] == n
+    assert res["total"] == pytest.approx(total, rel=1e-6)
+    assert res["sharpe"] == pytest.approx(sharpe, rel=1e-6)
+
+
 def test_reproducible():
     """两次独立构建+回测,核心指标逐位一致(确定性:无随机/无序依赖/无隐藏状态)。"""
     def run():
