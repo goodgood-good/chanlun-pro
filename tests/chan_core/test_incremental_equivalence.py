@@ -179,3 +179,40 @@ def test_recursive_branch_incremental_matches_batch(stem, limit):
         batch.process_klines(df.iloc[:L])
         assert _recursive_sig(inc) == _recursive_sig(batch), \
             f"{stem} L={L}:递归层 增量 vs 全量 batch 分叉"
+
+
+def _wt_sig(cd) -> tuple:
+    """线段层走势类型(xd_zslx)的稳定快照:每个 ZSLX 的端点 K index/方向/done/中枢数。"""
+    out = []
+    for w in (cd.get_xd_zslx() or []):
+        out.append((
+            getattr(getattr(w.start, "k", None), "index", None),
+            getattr(getattr(w.end, "k", None), "index", None),
+            getattr(w, "_type", None),
+            bool(getattr(w, "done", False)),
+            len(getattr(w, "zss", None) or []),
+        ))
+    return tuple(out)
+
+
+@pytest.mark.parametrize("stem,limit", CASES)
+def test_xd_zslx_incremental_matches_batch(stem, limit):
+    """线段层走势类型(xd_zslx:图表「走势类型」+ 中枢方向回填的来源)增量 vs 全量逐前缀一致。
+
+    走势类型不在 cl_snapshot(只 zs.type 经 golden 间接覆盖),是 zslx_calculator 增量重启
+    (_wt_restart:保留完成走势类型 + 从最后安全完成处重扫 pending 区域 + _wt_beichi 背驰
+    状态复原)的贴身 oracle——此前完全无覆盖,本网钉死走势类型 wts 增量==全量。
+    """
+    df = _load(stem, limit)
+    code, freq = stem.rsplit("_", 1)
+    cps = _checkpoints(len(df))
+    inc = _new_cl(code, freq)
+    for i, row in enumerate(df.itertuples(index=False)):
+        _feed(inc, row)
+        L = i + 1
+        if L not in cps:
+            continue
+        batch = _new_cl(code, freq)
+        batch.process_klines(df.iloc[:L])
+        assert _wt_sig(inc) == _wt_sig(batch), \
+            f"{stem} L={L}:走势类型 增量 vs 全量 batch 分叉"
