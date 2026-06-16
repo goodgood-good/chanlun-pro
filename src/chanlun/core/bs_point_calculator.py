@@ -67,11 +67,14 @@ class BsPointCalculator:
         self.strict_3_mode = strict_3_mode
         self.min_signal_interval = min_signal_interval
 
-        # ① 增量化:仅 bi 层持久实例启用(xd/L 层 + fresh 实例无前轮状态恒走全量 P=0)。
-        # 3 检测器跨轮累积状态改为实例字段,并按「提交该条目的 line.index」记录值;增量重启
-        # 时过滤掉 value >= 重启点 P 的尾部条目即复原到「as-of P」(检测器全 backward-only:
-        # 一条线的买卖点只依赖其之前的线/中枢/状态,故前缀稳定 + 状态复原即等价全量)。
-        self._inc_enabled = (zs_type == 'bi')
+        # ① 增量化:bi 层(bis 换新列表→identity 前缀)+ xd 层(xds 原地改→长度 buffer
+        # 前缀,见 _bsp_restart_point)持久实例启用;L 层 + fresh 实例无前轮状态恒走全量 P=0。
+        # xd 层 legacy 买卖点写 zs_type_mmds['xd']、不被 recursive_branch 消费(后者用独立
+        # L 级 BsPointCalculator),故增量安全。3 检测器跨轮累积状态改为实例字段,并按「提交
+        # 该条目的 line.index」记录值;增量重启时过滤掉 value >= 重启点 P 的尾部条目即复原到
+        # 「as-of P」(检测器全 backward-only:一条线的买卖点只依赖其之前的线/中枢/状态,故
+        # 前缀稳定 + 状态复原即等价全量)。
+        self._inc_enabled = (zs_type in ('bi', 'xd'))
         self._st_1buy: dict = {}   # (type, ref_zs.index) -> 最近 1 类信号 line.index
         self._st_2buy: dict = {}   # (anchor.type, anchor.index) -> 该锚点 2 类回抽 line.index
         self._st_3buy: dict = {}   # (zs.index, name) -> 首次回抽/回拉 line.index(含失败触碰)
@@ -208,8 +211,12 @@ class BsPointCalculator:
         if not self._inc_enabled or self._last_lines_obj is None:
             return 0
         if lines is self._last_lines_obj:
-            return 0  # 列表对象未换(理论上 process_mmd 仅在变化时触发),保守全量
-        p = self._identity_prefix_len(lines, self._last_lines_obj)
+            # xds 原地改(同列表对象,末段 done/end 翻转或原地 append):identity 前缀失效
+            # (对象身份不变、值已改),改用长度 buffer 定稳定前缀(xd 回溯≤1,留 1 段),
+            # fall through 做 zss 稳定检查 + off-by-one。bi 层 bis 恒换新列表、不走此支。
+            p = max(0, len(lines) - 2)
+        else:
+            p = self._identity_prefix_len(lines, self._last_lines_obj)
         if self._last_zss_obj is not None and zss is not self._last_zss_obj:
             d_zss = self._identity_prefix_len(zss, self._last_zss_obj)
             if d_zss < len(zss):
