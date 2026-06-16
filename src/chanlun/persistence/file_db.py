@@ -21,7 +21,6 @@ from chanlun.market import Market
 from chanlun.core.types import ICL
 from chanlun.config import get_data_path
 from chanlun.persistence.db import db
-from chanlun.exchange import Exchange
 from chanlun.tools.log_util import LogUtil
 
 
