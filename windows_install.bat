@@ -1,41 +1,37 @@
 @echo off
 setlocal enabledelayedexpansion
 
-REM ��ȡ�ű�����Ŀ¼����Ŀ��Ŀ¼��
+REM Resolve script directory (project root)
 set "ROOT_DIR=%~dp0"
 cd /d "%ROOT_DIR%"
-
-REM ROOT_DIR ��ֵ
 echo ROOT_DIR: %ROOT_DIR%
 
-echo 1. uv Ŀ¼
-set "UV_DIR=%ROOT_DIR%script\bin\uv.exe"
-echo UV_DIR: %UV_DIR%
+REM 1. Install poetry (matches CI; requires Python 3.10+ already on PATH)
+echo 1. Installing poetry...
+pip install poetry
 
-echo 2. �������⻷��
-%UV_DIR% python install 3.11
-%UV_DIR% venv --python=3.11 .venv
-%UV_DIR% sync
-REM Default install: core deps only. Optional extras (one or more):
-REM   us / hk / cn-extra / futures / ai / notify / backtest / monitor
-REM Examples:
-REM   %UV_DIR% sync --extra us --extra hk
-REM   %UV_DIR% sync --all-extras
+REM 2. Install dependencies (core only by default).
+REM    Optional extras: us / hk / cn-extra / futures / ai / notify / backtest / monitor / charts
+REM    e.g.  poetry install --extras us --extras hk
+REM          poetry install --all-extras
+echo 2. Installing dependencies...
+poetry install
 
-echo 3. ��������ļ�
+REM 3. Create config.py from template if missing
+echo 3. Preparing config file...
 if not exist "%ROOT_DIR%src\chanlun\config.py" (
-    echo ���������ļ�...
     copy "%ROOT_DIR%src\chanlun\config.py.demo" "%ROOT_DIR%src\chanlun\config.py" >nul
 )
 
-echo 4. ���û�������
+REM 4. Set PYTHONPATH
 set "PYTHONPATH=%ROOT_DIR%src"
-echo ����PYTHONPATH: !PYTHONPATH!
+echo PYTHONPATH: !PYTHONPATH!
 
-echo 5. ���л������ű�
+REM 5. Run environment check
+echo 5. Running env check...
 if exist "%ROOT_DIR%check_env.py" (
-    %UV_DIR% run "%ROOT_DIR%check_env.py"
+    poetry run python "%ROOT_DIR%check_env.py"
 )
 
-echo ����������ɣ�
+echo Install complete.
 pause
