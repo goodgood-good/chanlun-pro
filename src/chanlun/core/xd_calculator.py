@@ -232,6 +232,18 @@ class XdCalculator:
         if self._last_bis_obj is None or len(self.xds) < 3:
             return None
         keep = len(self.xds) - 2
+        # A-HIGH-1 运行时哨兵:删末2段复用前缀 [:keep] 的安全前提=回溯拆分深度 d≤2,
+        # 即倒数第3段 xds[keep-1] 不会被新笔回溯改写。线段终结靠反向特征序列分型
+        # (_try_end),最近若干段的终点是「试探性」的、会随新笔回溯;已 done 段是反向
+        # 段确认终结的、不再改写。故复用前缀末段须已 done;若仍 pending(末尾可变段 >2、
+        # 回溯深度疑 ≥3),len-2 buffer 不足 → 降级全量(恒正确)+ 留痕,把「实测 d≤2」
+        # 从注释承诺升级为运行时保证。实测 5fixture+40合成样本 d 恒≤2、正常零触发。
+        if not self.xds[keep - 1].done:
+            _log.warning(
+                f"[xd增量哨兵] 复用前缀末段 xds[{keep - 1}] 仍 pending、回溯深度疑 ≥3"
+                f"(共 {len(self.xds)} 段),降级全量重建以保 inc==batch"
+            )
+            return None
         restart_pos = self.xds[keep].start_line.index
         if restart_pos < 1 or restart_pos >= len(all_bis):
             return None
