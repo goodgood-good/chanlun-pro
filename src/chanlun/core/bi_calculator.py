@@ -40,17 +40,37 @@ class BiCalculator:
         # 持久笔列表(建笔增量):复用稳定前缀笔、只重建活跃尾部,消除每次全量
         # _create_bi 的 O(n·B)。与 _endpoint_stack 对齐(len = 端点数 - 1)。
         self._all_bis: List[BI] = []
+        # 重索引增量:上次 pending 笔位置。_reindex_bis 只重置
+        # [min(稳定前缀边界, 上次pending位置), 末尾] 的 index/done——稳定前缀 confirmed
+        # 笔的 index(由 _create_bi 设)与 done(历轮已 True、归纳保持)不变,而 done 的唯一
+        # 变化(pending→confirmed)只发生在「上次pending位置」。消除原 O(全部笔)/调用。
+        self._prev_pending_pos: int = -1
 
     def _check_stroke_validity(self, fx1: FX, fx2: FX) -> bool:
-        """检查两个分型是否能构成有效的一笔。"""
+        """检查两个分型是否能构成有效的一笔。
+
+        成笔距离两种模式忠于各自原文定义、且度量在不同坐标空间：
+          strict 老笔(L62/L77)：顶底之间≥1根「独立(包含处理后)缠论K线」
+              ⟺ 合并缠论K线坐标 ``fx.k.index`` 距离 ≥4。
+          new   新笔(L81)：顶峰原始K线与底谷原始K线之间(不含两端)、「不考虑包含
+              关系」≥3根原始K线 ⟺ 原始K线坐标距离 ≥4。
+        见 audit/bi_faithfulness_audit.md F1。
+        """
         if fx1.type == fx2.type:
             return False
 
-        min_distance = 4 if self.bi_mode == 'strict' else 3
-        if fx2.k.index <= fx1.k.index:
-            return False
-        if (fx2.k.index - fx1.k.index) < min_distance:
-            return False
+        if self.bi_mode == 'strict':
+            if fx2.k.index <= fx1.k.index:
+                return False
+            if (fx2.k.index - fx1.k.index) < 4:
+                return False
+        else:
+            s1 = self._extreme_src_index(fx1)
+            s2 = self._extreme_src_index(fx2)
+            if s2 <= s1:
+                return False
+            if (s2 - s1) < 4:
+                return False
 
         if fx1.type == 'ding':
             if fx2.val >= fx1.val:
@@ -60,6 +80,22 @@ class BiCalculator:
                 return False
 
         return True
+
+    @staticmethod
+    def _extreme_src_index(fx: FX) -> int:
+        """新笔(L81)成笔距离用：分型「极值原始K线」的原始坐标 index。
+
+        顶分型→峰缠论K线内 h 最大的原始K线 index；底分型→谷缠论K线内 l 最小的
+        原始K线 index。对应原文「顶分型中最高K线 / 底分型的最低K线」，「不考虑
+        包含关系」即落在原始K线坐标系(非合并缠论K线序号)。无原始K线明细时退回
+        ``k_index`` 兜底。
+        """
+        srcs = fx.k.klines
+        if not srcs:
+            return fx.k.k_index
+        if fx.type == 'ding':
+            return max(srcs, key=lambda k: k.h).index
+        return min(srcs, key=lambda k: k.l).index
 
     @staticmethod
     def _is_more_extreme(new_fx: FX, old_fx: FX) -> bool:
@@ -94,16 +130,35 @@ class BiCalculator:
         bi.end.done = done
         return bi
 
-    def _reindex_bis(self):
-        for i, bi in enumerate(self.confirmed_bis):
+    def _reindex_bis(self, stable_from: int = 0):
+        """重置笔的 index/done(增量版)。
+
+        仅 [start, 末尾] 需要重置:``start = min(稳定前缀边界 stable_from, 上次 pending 位置)``。
+        ① start 之前的 confirmed 笔由 _create_bi 设过 index、且历轮已置 done=True(归纳保持),
+        不变;② done 的唯一变化=上次 pending 笔(_prev_pending_pos)本轮转 confirmed,需补
+        done=True——故 start 下探到该位置。直连 ``_end`` 避开 property getter(原 _reindex 全量
+        遍历占链路 ~30% tottime、.end getter 被调数十万次)。正确性由 test_incremental_equivalence
+        + test_bi_reindex_dense(逐前缀含 done) 守护。
+        """
+        start = stable_from
+        if 0 <= self._prev_pending_pos < start:
+            start = self._prev_pending_pos
+        if start < 0:
+            start = 0
+        nconf = len(self.confirmed_bis)
+        for i in range(start, nconf):
+            bi = self.confirmed_bis[i]
             bi.index = i
-            bi.end.done = True
+            bi._end.done = True
 
         if self.pending_bi is not None:
-            self.pending_bi.index = len(self.confirmed_bis)
-            self.pending_bi.end.done = False
+            self.pending_bi.index = nconf
+            self.pending_bi._end.done = False
+            self._prev_pending_pos = nconf
+        else:
+            self._prev_pending_pos = -1
 
-        self.bi_index = len(self.confirmed_bis) + (1 if self.pending_bi is not None else 0)
+        self.bi_index = nconf + (1 if self.pending_bi is not None else 0)
         self.bis = list(self.confirmed_bis)
         if self.pending_bi is not None:
             self.bis.append(self.pending_bi)
@@ -165,6 +220,15 @@ class BiCalculator:
                 if len(stack) < 3:
                     break  # R1：栈不足，无法判定，丢弃 fx
                 prev = stack[-2]
+                # 读法A(77课唯一性 + 成笔距离回溯)：prev→last 满足成笔距离 ⇒ last 是
+                # 「合法距离的反弹/回调端点」,不应被「过路的近距分型 fx」回溯吞并。
+                # 丢弃 fx,待后续达成笔距离的真实端点经情形②自然接出下一笔。
+                # 见 audit/bi_faithfulness_audit.md §12 / 真实案例 301004 笔2628。
+                if self._check_stroke_validity(prev, last):
+                    break
+                # 以下原「夹击弹出」回溯分支:因栈内相邻对 (prev, last) 恒满足成笔距离
+                # (均经情形②压入 / 情形①同类替换保持该不变量),上面守卫恒 break ⇒ 此
+                # 分支恒不可达,保留作防御性兜底(未来栈维护契约若变动致相邻对可不合法)。
                 last_peer = stack[-3]  # 栈顶 last 的同类前驱
                 if self._is_more_extreme(last, last_peer):
                     break  # last 是创新高/新低的真端点 → 丢弃 fx
@@ -210,7 +274,7 @@ class BiCalculator:
             self.confirmed_bis = []
             self.pending_bi = None
 
-        self._reindex_bis()
+        self._reindex_bis(stable_bi)
 
     @staticmethod
     def _fx_sig(fx: FX) -> tuple:
@@ -269,6 +333,7 @@ class BiCalculator:
             self._endpoint_stack_tail_sig = None
             self._endpoint_stable_prefix = 0
             self._all_bis = []
+            self._prev_pending_pos = -1
             return
 
         # 档 1：末根快照命中（数据完全没变）
