@@ -597,42 +597,6 @@ def main():
         out_dir = OUT
     run(codes, out_dir, "5m", "30m", None, None,
         big_delay=pd.Timedelta("30min"))
-    return
-
-    if len(sys.argv) > 1 and sys.argv[1] == "daily_trend":
-        patch_trend(OUT_DAILY, "w", "2022-01-01", "2024-12-31")
-    elif len(sys.argv) > 1 and sys.argv[1] == "trend_all_a":
-        patch_trend(OUT_ALL_A, "30m", None, None)
-    elif len(sys.argv) > 1 and sys.argv[1] == "daily_bsp_all_a":
-        patch_daily_bsp(OUT_ALL_A)
-    elif len(sys.argv) > 1 and sys.argv[1] == "daily_bsp":
-        patch_daily_bsp(OUT)
-    elif len(sys.argv) > 1 and sys.argv[1] == "trend":
-        patch_trend(OUT, "30m", None, None)      # 主线(5m+30m近1年)补30m笔方向事件
-    elif len(sys.argv) > 1 and sys.argv[1] == "daily_bsp":
-        patch_daily_bsp(OUT)                     # 主线补日线买卖点(三级共振锚)
-    elif len(sys.argv) > 1 and sys.argv[1] == "daily":
-        # 熊市验证:沪深300 + 上证指数,日线小级别 + 周线大级别,2022-2024
-        codes = universe("沪深300") + ["SH.000001"]
-        run(codes, OUT_DAILY, "d", "w", "2022-01-01", "2024-12-31",
-            big_delay=pd.Timedelta("7D"), min_small=120)
-    elif len(sys.argv) > 1 and sys.argv[1] == "mtf3":
-        # 30m+5m+1m 三级联立:1m入场(小)+5m中+30m大,近1年(分钟数据仅~1年)
-        sector = sys.argv[2] if len(sys.argv) > 2 else "上证50"
-        codes = universe(sector) + ["SH.000001"]
-        run(codes, OUT_MTF3, "1m", "30m", None, None, big_delay=pd.Timedelta("30min"),
-            min_small=500, mid_tf="5m", mid_delay=pd.Timedelta("5min"))
-    else:
-        sector = sys.argv[1] if len(sys.argv) > 1 else "上证50"
-        limit = int(sys.argv[2]) if len(sys.argv) > 2 else None
-        if sector in ALL_A_ALIASES:
-            codes = universe_all_a(limit) + ["SH.000001"]
-            out_dir = OUT_ALL_A
-        else:
-            codes = universe(sector, limit)
-            out_dir = OUT
-        run(codes, out_dir, "5m", "30m", None, None,
-            big_delay=pd.Timedelta("30min"))
 
 
 if __name__ == "__main__":

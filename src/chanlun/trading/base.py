@@ -1021,13 +1021,6 @@ def fee_a(opt: str, price: float, amount: float):
     return fee_sum
 
 
-def fee_us(opt: str, price: float, amlunt: float):
-    """
-    美股的交易费用计算
-    """
-    pass
-
-
 if __name__ == "__main__":
     from chanlun.core import cl
     from chanlun.exchange.exchange_tdx import ExchangeTDX
