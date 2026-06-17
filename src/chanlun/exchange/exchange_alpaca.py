@@ -122,20 +122,6 @@ class ExchangeAlpaca(Exchange):
             g_all_stocks.append({"code": s[1]["code"], "name": s[1]["name"]})
         return g_all_stocks
 
-        # 以下是从网络获取
-        # if len(g_all_stocks) > 0:
-        #     return g_all_stocks
-        # g_all_stocks = rd.get_ex('us_stocks_all')
-        # if g_all_stocks is not None:
-        #     return g_all_stocks
-        # g_all_stocks = []
-        #
-        # g_all_stocks = [el.symbol for el in self.api.list_assets(status='active', asset_class='us_equity')]
-        # if len(g_all_stocks) > 0:
-        #     rd.save_ex('us_stocks_all', 24 * 60 * 60, g_all_stocks)
-        #
-        # return g_all_stocks
-
     def klines(
         self,
         code: str,

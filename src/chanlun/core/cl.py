@@ -103,7 +103,6 @@ class CL(ICL):
 
         # 兼容运行时期望字段
         self.debug: bool = False
-        self.use_time: dict = {}
 
     def _init_default_config(self):
         """初始化默认配置参数"""
@@ -824,9 +823,6 @@ class CL(ICL):
     def write_debug_log(self, msg: str):
         if self.debug:
             LogUtil.debug(msg)
-
-    def _add_time(self, key: str, value: float):
-        self.use_time[key] = value
 
     # --- process_xxx 系列：手工分步触发的兼容入口 ---
     # 保留给历史调用方（notebook、单测、外部脚本）。子计算器内部已做脏检查，

@@ -94,14 +94,6 @@ def _mid_buys_at(s: dict, j: int):
     return [x for x in s.get("mid_by_bar", {}).get(j, []) if x.is_buy]
 
 
-def _pick_buy_class(buys, buy_priority: str) -> int:
-    classes = [buy_class(getattr(x, "bs_type", "")) for x in buys]
-    classes = [c for c in classes if c in (1, 2, 3)]
-    if not classes:
-        return 0
-    return max(classes) if buy_priority == "3first" else min(classes)
-
-
 def _pick_buy_signal(buys, buy_priority: str):
     ranked = []
     for idx, sig in enumerate(buys):

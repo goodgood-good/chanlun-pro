@@ -32,21 +32,6 @@ def is_kuozhan(a: ZS, b: ZS) -> bool:
     return env_overlap and core_sep
 
 
-def _pivots(lines: List[LINE]) -> List[float]:
-    """线段序列 → 交替转折点价(p[0]=首线段起点, 之后每线段终点)。
-
-    up 线段 起=zs_low 终=zs_high; down 线段 起=zs_high 终=zs_low。
-    线段方向交替, 故转折点也交替(底/顶)。
-    """
-    if not lines:
-        return []
-    first = lines[0]
-    pv = [first.zs_low if first.type == "up" else first.zs_high]
-    for ln in lines:
-        pv.append(ln.zs_high if ln.type == "up" else ln.zs_low)
-    return pv
-
-
 def _line_index(ln: LINE, xds: List[LINE]) -> Optional[int]:
     for i, x in enumerate(xds):
         if x is ln:

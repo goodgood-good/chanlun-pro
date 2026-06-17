@@ -102,17 +102,6 @@ def _split_oversized(zss: List[ZS]) -> List[ZS]:
     return out
 
 
-def _envelope_overlaps(a: ZS, b: ZS) -> bool:
-    """两中枢的 GG/DD 包络是否相交。
-
-    原文 #391:「其波动触及上一个走势中枢或延伸时的某个瞬间波动区间」——
-    「瞬间波动区间」即 [dd, gg]。包络相交 ⇔ max(a.dd, b.dd) <= min(a.gg, b.gg)。
-    """
-    if a.dd is None or a.gg is None or b.dd is None or b.gg is None:
-        return False
-    return max(a.dd, b.dd) <= min(a.gg, b.gg)
-
-
 def _merge_zss(subs: List[ZS]) -> ZS:
     """把 N(≥2)个子中枢合并为 1 个高级扩展中枢(原文 #391·走势中枢扩展)。
 

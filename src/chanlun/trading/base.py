@@ -810,9 +810,6 @@ class Strategy(ABC):
         if len(next_fxs) == 0:
             return False
         next_fx = next_fxs[0]
-        # # 当前bar与验证分型第三个bar相隔大于2个bar，直接返回 False
-        # if last_k.index - next_fx.klines[-1].klines[-1].index > 2:
-        #     return False
 
         # 两个分型不能相隔太远，两个分型中间最多两根缠论K线
         if next_fx.k.k_index - bi.end.k.k_index > 3:

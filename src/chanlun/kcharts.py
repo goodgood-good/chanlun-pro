@@ -1413,4 +1413,3 @@ def datetime_convert_frequency(src_dates, target_dates):
         else:
             res_dates.append(_dts.iloc[-1])
     return res_dates
-    return res_dates
