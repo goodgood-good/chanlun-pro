@@ -26,6 +26,7 @@ import pytz
 import talib
 
 from chanlun import fun
+from chanlun.exchange.lb_priority import lb_low_priority
 from chanlun.cl_utils import (
     cl_data_to_tv_chart,
     kcharts_frequency_h_l_map,
@@ -331,7 +332,8 @@ def compute_and_cache_chart_data(market: str, code: str, frequency: str, cl_conf
         and kchart_to_frequency is not None
         and frequency_low is not None
     ):
-        klines = ex.klines(code, frequency_low, **kline_args)
+        with lb_low_priority():
+            klines = ex.klines(code, frequency_low, **kline_args)
         if klines is None or len(klines) == 0:
             _mark_negative_cache(cache_key)
             with cache_lock:
@@ -340,7 +342,8 @@ def compute_and_cache_chart_data(market: str, code: str, frequency: str, cl_conf
         cd = web_batch_get_cl_datas(market, code, {frequency_low: klines}, cl_config)[0]
     else:
         kchart_to_frequency = None
-        klines = ex.klines(code, frequency, **kline_args)
+        with lb_low_priority():
+            klines = ex.klines(code, frequency, **kline_args)
         if klines is None or len(klines) == 0:
             _mark_negative_cache(cache_key)
             with cache_lock:

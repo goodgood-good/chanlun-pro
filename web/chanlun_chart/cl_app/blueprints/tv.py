@@ -24,6 +24,7 @@ from chanlun.cl_utils import (
 )
 from chanlun.persistence.db import db
 from chanlun.exchange import get_exchange
+from chanlun.exchange.lb_priority import lb_low_priority
 from chanlun.tools.log_util import LogUtil
 
 from ..csrf import csrf
@@ -308,14 +309,17 @@ def prewarm_common_intervals(market, code, cl_config):
                 if cl_config.get("enable_kchart_low_to_high") == "1":
                     frequency_low, to_frequency = kcharts_frequency_h_l_map(market, freq)
                     if frequency_low is not None and to_frequency is not None:
-                        klines = ex.klines(code, frequency_low, **kline_args)
+                        with lb_low_priority():
+                            klines = ex.klines(code, frequency_low, **kline_args)
                         cd = web_batch_get_cl_datas(market, code, {frequency_low: klines}, cl_config)[0]
                     else:
-                        klines = ex.klines(code, freq, **kline_args)
+                        with lb_low_priority():
+                            klines = ex.klines(code, freq, **kline_args)
                         cd = web_batch_get_cl_datas(market, code, {freq: klines}, cl_config)[0]
                         to_frequency = None
                 else:
-                    klines = ex.klines(code, freq, **kline_args)
+                    with lb_low_priority():
+                        klines = ex.klines(code, freq, **kline_args)
                     cd = web_batch_get_cl_datas(market, code, {freq: klines}, cl_config)[0]
 
                 cl_chart_data = cl_data_to_tv_chart(cd, cl_config, to_frequency=to_frequency)

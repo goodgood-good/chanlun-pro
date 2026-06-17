@@ -9,7 +9,7 @@ from typing import Dict, List, Union
 import pandas as pd
 import pytz
 from decimal import Decimal
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception
 
 from longbridge.openapi import Config, QuoteContext, TradeContext, Market, Period, \
@@ -23,6 +23,7 @@ from chanlun.exchange.exchange import Tick
 from chanlun.fun import str_to_datetime
 from chanlun.tools.log_util import LogUtil
 from chanlun.exchange.lb_quota_tracker import LbQuotaTracker
+from chanlun.exchange.lb_priority import lb_low_priority, _lb_call_priority  # noqa: F401  (lb_low_priority 供 web 层 prewarm 标记)
 from chanlun.exchange.kline_precision import normalize_kline_precision
 
 # 统一时区设置
@@ -40,6 +41,15 @@ def _get_env_bool(new_key: str, legacy_key: str = None, default: bool = False) -
     if value is None:
         return default
     return value.lower() == "true"
+
+
+def _env_int(key: str, default: int) -> int:
+    """读取整型环境变量；非法或 <1 时回退默认值。用于限流 QPS 等可调参数。"""
+    try:
+        v = int(os.getenv(key, str(default)))
+        return v if v >= 1 else default
+    except (TypeError, ValueError):
+        return default
 
 
 def _build_longbridge_config() -> Config:
@@ -106,16 +116,18 @@ class RateLimiter:
         self.lock = threading.Lock()
 
     def wait(self):
-        with self.lock:
-            while True:
+        # 注意：sleep 必须在锁外。否则持锁睡眠会把所有调用方串成一条不公平的队列
+        # （突发时一个等待者持锁 sleep，其余全堵在 with self.lock 上、轮不到也不公平）。
+        while True:
+            with self.lock:
                 now = time.time()
                 self.timestamps = [t for t in self.timestamps if now - t < self.period]
                 if len(self.timestamps) < self.calls:
                     self.timestamps.append(now)
                     return
                 wait_time = self.timestamps[0] + self.period - now
-                if wait_time > 0:
-                    time.sleep(wait_time)
+            if wait_time > 0:
+                time.sleep(wait_time)
 
 
 class _PreemptiveQuotaExhausted(Exception):
@@ -206,9 +218,24 @@ class ExchangeChangQiao(Exchange):
         # 线程池配置
         # 建议设置在 8-16 之间。过高可能导致 API 触发流控限制 (Rate Limit)
         self.executor = ThreadPoolExecutor(max_workers=16)
-        # 初始化限流器 (3 QPS)。长桥行情接口默认配额很紧张（约 10 QPS），
-        # 这里保守用 3 QPS 留出突发余量，避免触发 301600。如确认账号配额更高可调大。
-        self.rate_limiter = RateLimiter(calls=3, period=1.0)
+        # _quote_call 专用线程池，与上面批量 K 线分段用的 self.executor 物理隔离。
+        # 关键：klines() 把 N 个分段任务 submit 到 self.executor，每个分段内部又经
+        # _fetch_candlesticks_api → _quote_call 再 submit；若共用一个有界池，分段填满
+        # 16 个 worker 后内层 _quote_call 抢不到 worker → 分段阻塞在 future.result 上
+        # → 8s 超时风暴(经典有界池嵌套提交死锁)。独立池让内层调用永远有 worker 可用。
+        self._quote_call_executor = ThreadPoolExecutor(
+            max_workers=16, thread_name_prefix="lb-qcall"
+        )
+        # 限流器。长桥行情接口默认配额约 10 QPS。交互请求(tv_history)与 prewarm/批量用两把
+        # 独立令牌桶：交互默认 6 QPS、prewarm 默认 2 QPS(两者独立、峰值合计 8<10)，这样 prewarm
+        # 突发不会饿死用户的增量轮询。均可用环境变量覆盖；嫌慢且账号配额够可调大
+        # CHANLUN_LB_QUOTE_QPS，触发 301606 限流码则调小。
+        self.rate_limiter = RateLimiter(
+            calls=_env_int("CHANLUN_LB_QUOTE_QPS", 6), period=1.0
+        )
+        self.prewarm_rate_limiter = RateLimiter(
+            calls=_env_int("CHANLUN_LB_PREWARM_QPS", 2), period=1.0
+        )
 
         # 进程退出时显式关闭线程池，避免长桥 SDK 的 quote/trade 网络上下文
         # 在 daemon 线程里被强行打断造成日志噪音/连接半关。
@@ -221,6 +248,7 @@ class ExchangeChangQiao(Exchange):
                 return
             try:
                 inst.executor.shutdown(wait=False, cancel_futures=True)
+                inst._quote_call_executor.shutdown(wait=False, cancel_futures=True)
             except Exception:
                 # atexit 钩子内进程已在退出，logger 可能也已关闭；任何异常都不再传播。
                 pass
@@ -245,6 +273,14 @@ class ExchangeChangQiao(Exchange):
 
     _QUOTE_CALL_TIMEOUT = 8.0  # 秒；比 now_trading/ticks 的 2s 宽松，给 K 线接口留余量
 
+    # 重建退避：ticks/now_trading/klines/watchdog 可能在 1~8s 内几乎同时超时。若每次
+    # 超时都重建，会反复新建 QuoteContext——而旧 ctx 还被卡住的 in-flight 调用(worker
+    # 线程)持有，引用计数>0、del 不触发 Rust Drop，旧 ws 连接泄漏累积，可能触发长桥连接
+    # 数限制形成恶性循环(越重建越连不上)。故两次重建至少间隔 _REBUILD_MIN_INTERVAL 秒；
+    # 冷却窗口内的并发超时只让第一个线程真正重建，其余直接降级返回(不重建)。
+    _REBUILD_MIN_INTERVAL = 30.0  # 秒
+    _last_rebuild_ts = None  # 上次重建的 time.monotonic()；类属性默认，实例首次重建时写
+
     def _quote_ctx(self) -> QuoteContext:
         """懒加载 QuoteContext 并返回当前实例（加锁保护引用读写）。"""
         with self._quote_context_lock:
@@ -259,11 +295,31 @@ class ExchangeChangQiao(Exchange):
         → Core::run() 检测到 recv() 返回 None → 任务正常退出。
         旧线程池线程若仍在 Rust 层阻塞，最多再等 REQUEST_TIMEOUT(30s) 后释放。
         """
+        old_executor = None
         with self._quote_context_lock:
+            now = time.monotonic()
+            last = self._last_rebuild_ts
+            if last is not None and (now - last) < self._REBUILD_MIN_INTERVAL:
+                # 退避：距上次重建不足 _REBUILD_MIN_INTERVAL，跳过本次，避免重建风暴。
+                # 并发超时只让第一个线程真正重建，其余落到这里直接返回（调用方降级）。
+                return
             old = self._quote_context
+            old_executor = self._quote_call_executor
             self._quote_context = QuoteContext(self.config)
+            # 同时换掉 _quote_call 专用池：真正卡死(永不返回)的 longbridge 调用会占住该池
+            # 的 worker 泄漏，换新池让后续调用拿到干净 worker，不被僵尸占满。
+            self._quote_call_executor = ThreadPoolExecutor(
+                max_workers=16, thread_name_prefix="lb-qcall"
+            )
+            self._last_rebuild_ts = now
             del old
-        LogUtil.warning("[lb] QuoteContext rebuilt due to connection hang")
+        # 锁外 shutdown 旧池(不 wait，里面可能有卡死线程；cancel 掉还没开始的排队任务)
+        if old_executor is not None:
+            try:
+                old_executor.shutdown(wait=False, cancel_futures=True)
+            except Exception:
+                pass
+        LogUtil.warning("[lb] QuoteContext + quote-call executor rebuilt due to connection hang")
 
     def _quote_call(self, fn, timeout: float = None):
         """在线程池里执行 fn()，超时则重建 QuoteContext 并重新抛出异常。
@@ -275,10 +331,16 @@ class ExchangeChangQiao(Exchange):
         超时后主线程调 _rebuild_quote_ctx() 可安全拿到锁，不会死锁。
         """
         t = timeout if timeout is not None else self._QUOTE_CALL_TIMEOUT
-        future = self.executor.submit(fn)
+        # 用专用池 _quote_call_executor，绝不能用批量 self.executor：klines() 把分段任务
+        # submit 到 self.executor，分段内部又经 _fetch_candlesticks_api → 本函数再 submit，
+        # 共用同一有界池会嵌套死锁(分段占满 worker、内层抢不到)。详见 __init__ 注释。
+        future = self._quote_call_executor.submit(fn)
         try:
             return future.result(timeout=t)
-        except TimeoutError:
+        except (FuturesTimeoutError, TimeoutError):
+            # 关键：future.result(timeout=) 抛的是 concurrent.futures.TimeoutError，
+            # Python<3.11 它不是 builtin TimeoutError(OSError 子类)。两个都列上，
+            # 否则超时捕获不到 → _rebuild_quote_ctx() 永不执行、连接半死无法自愈。
             LogUtil.error(
                 f"[lb] QuoteContext call timed out after {t}s, rebuilding ctx"
             )
@@ -306,7 +368,7 @@ class ExchangeChangQiao(Exchange):
                         lambda: inst._quote_ctx().trading_session(),
                         timeout=5.0,
                     )
-                except TimeoutError:
+                except (FuturesTimeoutError, TimeoutError):
                     pass  # _quote_call 内已重建并记日志
                 except Exception:
                     pass  # 其他偶发错误（如 OpenApiException）不影响守护循环
@@ -597,7 +659,8 @@ class ExchangeChangQiao(Exchange):
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10),
            retry=retry_if_exception(is_retryable_exception))
-    def _fetch_candlesticks_api(self, symbol, period, adjust_type, count, time_cursor, trade_sessions):
+    def _fetch_candlesticks_api(self, symbol, period, adjust_type, count, time_cursor, trade_sessions,
+                                priority="interactive"):
         """
         带限流和重试的 history kline API 调用。
 
@@ -620,7 +683,9 @@ class ExchangeChangQiao(Exchange):
             )
             raise _PreemptiveQuotaExhausted()
 
-        self.rate_limiter.wait()
+        # prewarm/批量走独立低优先令牌桶，不与交互请求争抢同一个 3~6 QPS 额度
+        limiter = self.prewarm_rate_limiter if priority == "prewarm" else self.rate_limiter
+        limiter.wait()
         result = self._quote_call(
             lambda: self._quote_ctx().history_candlesticks_by_offset(
                 symbol=symbol,
@@ -636,7 +701,7 @@ class ExchangeChangQiao(Exchange):
         tracker.add_symbol(symbol)
         return result
 
-    def _fetch_segment_data(self, code, period, adjust, end_dt, start_dt_limit):
+    def _fetch_segment_data(self, code, period, adjust, end_dt, start_dt_limit, priority="interactive"):
         """
         [内部并发任务] 获取特定时间片段的数据
         策略：从 end_dt 向前获取，直到遇到 start_dt_limit 或数据耗尽
@@ -658,7 +723,8 @@ class ExchangeChangQiao(Exchange):
                     adjust_type=adjust,
                     count=1000,
                     time_cursor=current_cursor,
-                    trade_sessions=TradeSessions.Intraday
+                    trade_sessions=TradeSessions.Intraday,
+                    priority=priority
                 )
             except Exception as e:
                 # tenacity 重试失败或遇到不可重试异常
@@ -839,6 +905,10 @@ class ExchangeChangQiao(Exchange):
         else:
             chunk_days = 3650
 
+        # 读取本次调用优先级(prewarm 由 lb_low_priority() 在 caller 线程上标记)，随分段透传，
+        # 让 _fetch_candlesticks_api 选对应限流桶；分段跑在别的 worker 线程上拿不到 threadlocal，
+        # 必须显式随 submit 传参。
+        priority = getattr(_lb_call_priority, "value", "interactive")
         tasks = []
         curr_end = api_cursor_dt  # 使用带 Buffer 的游标
 
@@ -849,7 +919,7 @@ class ExchangeChangQiao(Exchange):
 
             tasks.append(self.executor.submit(
                 self._fetch_segment_data,
-                lb_symbol, period, adjust, curr_end, curr_start
+                lb_symbol, period, adjust, curr_end, curr_start, priority
             ))
             curr_end = curr_start
             if curr_end <= start_dt:
@@ -935,7 +1005,10 @@ class ExchangeChangQiao(Exchange):
                 lb_symbols = [self._to_lb_symbol(c) for c in codes]
                 lb_to_project = {lb: orig for lb, orig in zip(lb_symbols, codes)}
 
-                quotes = self._quote_call(lambda: self._quote_ctx().quote(lb_symbols))
+                # 直接调用：外层 _quote_call(_do_ticks, timeout=2.0) 已统一负责超时
+                # 检测与重建，这里再套一层 _quote_call 会多占一个 16-worker 线程池名额
+                # （且外 2s / 内 8s 双超时无实际意义）。由外层兜底即可。
+                quotes = self._quote_ctx().quote(lb_symbols)
                 res = {}
                 for q in quotes:
                     last_done = float(q.last_done)
