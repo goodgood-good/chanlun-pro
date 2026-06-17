@@ -192,6 +192,7 @@ class ExchangeChangQiao(Exchange):
         # 真正访问长桥时再懒加载 QuoteContext / TradeContext，避免应用启动阶段因网络问题直接失败。
         self.config = _build_longbridge_config()
         self._quote_context = None
+        self._quote_context_lock = threading.Lock()  # 保护 _quote_context 引用的读写
         self._trade_context = None
         # 历史 bug：原来用单一字段 stock_list_cache 缓存 all_stocks 结果，且 all_stocks 写死
         # 只查 Market.US 的列表。配合 @fun.singleton（A/HK/US 共享同一实例），结果是任何
@@ -226,11 +227,96 @@ class ExchangeChangQiao(Exchange):
 
         atexit.register(_shutdown_on_exit)
 
+        # 启动后台心跳探针：每 30s 发一次 trading_session() 探活，
+        # 发现卡死（超过 5s 不返回）时主动重建 QuoteContext，
+        # 避免等到业务调用才发现连接已死。
+        self._start_quote_ctx_watchdog()
+
+    # ------------------------------------------------------------------
+    # QuoteContext 生命周期管理
+    # ------------------------------------------------------------------
+    # 背景：长桥 SDK 底层（Rust wsclient）在 WS 断开时会立即取消所有
+    # in-flight 请求，但上层 Core::run() 的重连循环期间不会通知
+    # command_rx 队列里已排队的命令失败——导致 quote()/trading_session()
+    # 等同步调用永久阻塞，直到进程重启。Config 无任何超时参数可配置。
+    # 缓解策略：用外层 TimeoutError 检测阻塞，检测到后主动重建 QuoteContext。
+    # 重建时 del old 触发 Rust Drop → command_rx 关闭 → Core::run() 退出。
+    # ------------------------------------------------------------------
+
+    _QUOTE_CALL_TIMEOUT = 8.0  # 秒；比 now_trading/ticks 的 2s 宽松，给 K 线接口留余量
+
     def _quote_ctx(self) -> QuoteContext:
-        # QuoteContext 建立时会初始化行情连接，这里按需创建并复用单例连接。
-        if self._quote_context is None:
+        """懒加载 QuoteContext 并返回当前实例（加锁保护引用读写）。"""
+        with self._quote_context_lock:
+            if self._quote_context is None:
+                self._quote_context = QuoteContext(self.config)
+            return self._quote_context
+
+    def _rebuild_quote_ctx(self) -> None:
+        """重建 QuoteContext。在检测到调用永久阻塞（超时）后调用。
+
+        del old 触发 Rust 侧 Drop：command_rx 发送端关闭
+        → Core::run() 检测到 recv() 返回 None → 任务正常退出。
+        旧线程池线程若仍在 Rust 层阻塞，最多再等 REQUEST_TIMEOUT(30s) 后释放。
+        """
+        with self._quote_context_lock:
+            old = self._quote_context
             self._quote_context = QuoteContext(self.config)
-        return self._quote_context
+            del old
+        LogUtil.warning("[lb] QuoteContext rebuilt due to connection hang")
+
+    def _quote_call(self, fn, timeout: float = None):
+        """在线程池里执行 fn()，超时则重建 QuoteContext 并重新抛出异常。
+
+        用法：
+            result = self._quote_call(lambda: self._quote_ctx().quote(symbols))
+
+        注意：fn 内部通过 self._quote_ctx() 取引用（锁外执行），
+        超时后主线程调 _rebuild_quote_ctx() 可安全拿到锁，不会死锁。
+        """
+        t = timeout if timeout is not None else self._QUOTE_CALL_TIMEOUT
+        future = self.executor.submit(fn)
+        try:
+            return future.result(timeout=t)
+        except TimeoutError:
+            LogUtil.error(
+                f"[lb] QuoteContext call timed out after {t}s, rebuilding ctx"
+            )
+            self._rebuild_quote_ctx()
+            raise
+
+    def _start_quote_ctx_watchdog(self, interval: float = 30.0) -> None:
+        """启动后台守护线程，定期用 trading_session() 探活 QuoteContext。
+
+        trading_session() 无 symbol 参数，不触发 per-symbol 速率限制(301606)。
+        30s 间隔远小于 SDK 心跳死亡判定阈值(120s)，可在业务调用前主动发现并重建。
+        """
+        _self_ref = weakref.ref(self)
+
+        def _watchdog():
+            while True:
+                time.sleep(interval)
+                inst = _self_ref()
+                if inst is None:
+                    return  # 实例已被 GC，退出守护线程
+                if inst._quote_context is None:
+                    continue  # 尚未初始化，跳过本轮
+                try:
+                    inst._quote_call(
+                        lambda: inst._quote_ctx().trading_session(),
+                        timeout=5.0,
+                    )
+                except TimeoutError:
+                    pass  # _quote_call 内已重建并记日志
+                except Exception:
+                    pass  # 其他偶发错误（如 OpenApiException）不影响守护循环
+
+        t = threading.Thread(
+            target=_watchdog,
+            daemon=True,
+            name="lb-quote-watchdog",
+        )
+        t.start()
 
     def _trade_ctx(self) -> TradeContext:
         # TradeContext 同样使用懒加载，避免只查行情时也初始化交易连接。
@@ -338,12 +424,6 @@ class ExchangeChangQiao(Exchange):
         if not stocks:
             return stocks
 
-        try:
-            qctx = self._quote_ctx()
-        except Exception as e:
-            LogUtil.info(f"_enrich_us_names: get quote_ctx failed, skip enrich: {e}")
-            return stocks
-
         # 用 dict 把 code → name 重映射回去，避免 O(n*m) 查找
         code_to_name: Dict[str, str] = {}
         codes = [s["code"] for s in stocks if s.get("code")]
@@ -355,7 +435,9 @@ class ExchangeChangQiao(Exchange):
         for i in range(0, len(codes), batch_size):
             batch = codes[i:i + batch_size]
             try:
-                infos = qctx.static_info(batch)
+                # 用默认参数固定当前批次的 batch（避免 lambda 延迟捕获循环变量）。
+                # 每次通过 self._quote_ctx() 取最新实例，避免重建后仍用旧引用。
+                infos = self._quote_call(lambda b=batch: self._quote_ctx().static_info(b))
                 for info in infos:
                     sym = getattr(info, "symbol", None)
                     if not sym:
@@ -441,8 +523,10 @@ class ExchangeChangQiao(Exchange):
             lb_market = self._LB_MARKET_MAP.get(market_key)
             if lb_market is not None:
                 # 美股：长桥唯一支持 security_list 的市场，保留原 Overnight 行为。
-                resp = self._quote_ctx().security_list(
-                    lb_market, SecurityListCategory.Overnight
+                resp = self._quote_call(
+                    lambda: self._quote_ctx().security_list(
+                        lb_market, SecurityListCategory.Overnight
+                    )
                 )
                 stocks = [
                     {"code": info.symbol, "name": getattr(info, "name_cn", None) or info.name_en}
@@ -504,10 +588,9 @@ class ExchangeChangQiao(Exchange):
                 LogUtil.warning(f"Error checking trading session: {e}")
                 return False
 
-        # 用线程池提交并设 2s 超时，防止行情 ws 断开时阻塞主线程
+        # 用 _quote_call 提交并设 2s 超时，检测到卡死时自动重建 QuoteContext
         try:
-            future = self.executor.submit(_do_check)
-            return future.result(timeout=2.0)
+            return self._quote_call(_do_check, timeout=2.0)
         except Exception as e:
             LogUtil.error(f"now_trading timeout or error: {e}")
             return False
@@ -538,14 +621,16 @@ class ExchangeChangQiao(Exchange):
             raise _PreemptiveQuotaExhausted()
 
         self.rate_limiter.wait()
-        result = self._quote_ctx().history_candlesticks_by_offset(
-            symbol=symbol,
-            period=period,
-            adjust_type=adjust_type,
-            forward=False,  # 向前追溯
-            count=count,
-            time=time_cursor,
-            trade_sessions=trade_sessions
+        result = self._quote_call(
+            lambda: self._quote_ctx().history_candlesticks_by_offset(
+                symbol=symbol,
+                period=period,
+                adjust_type=adjust_type,
+                forward=False,  # 向前追溯
+                count=count,
+                time=time_cursor,
+                trade_sessions=trade_sessions
+            )
         )
         # 记录本次成功的 symbol 进入本月配额集合
         tracker.add_symbol(symbol)
@@ -850,7 +935,7 @@ class ExchangeChangQiao(Exchange):
                 lb_symbols = [self._to_lb_symbol(c) for c in codes]
                 lb_to_project = {lb: orig for lb, orig in zip(lb_symbols, codes)}
 
-                quotes = self._quote_ctx().quote(lb_symbols)
+                quotes = self._quote_call(lambda: self._quote_ctx().quote(lb_symbols))
                 res = {}
                 for q in quotes:
                     last_done = float(q.last_done)
@@ -877,10 +962,9 @@ class ExchangeChangQiao(Exchange):
                 LogUtil.error(f"Error in ticks: {e}")
                 return {}
 
-        # 与 now_trading 保持一致：线程池 + 2s 超时，防止网络抖动阻塞主线程
+        # 用 _quote_call 提交并设 2s 超时，检测到卡死时自动重建 QuoteContext
         try:
-            future = self.executor.submit(_do_ticks)
-            return future.result(timeout=2.0)
+            return self._quote_call(_do_ticks, timeout=2.0)
         except Exception as e:
             LogUtil.error(f"ticks timeout or error: {e}")
             return {}
@@ -893,7 +977,7 @@ class ExchangeChangQiao(Exchange):
             # 旧实现强行给 code 拼 ".US", 港股/A 股直接被拼成 "KH.00700.US" 之类的非法 symbol,
             # static_info 返回空, 上层就以为"标的不存在"。这里改成走统一的 symbol 转换。
             symbol = self._to_lb_symbol(code)
-            infos = self._quote_ctx().static_info([symbol])
+            infos = self._quote_call(lambda: self._quote_ctx().static_info([symbol]))
             if not infos:
                 return None
             info = infos[0]
