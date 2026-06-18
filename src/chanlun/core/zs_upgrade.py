@@ -509,14 +509,19 @@ def tongjibie_zhongshu(zss: List[ZS], xds: List[LINE]) -> List[ZS]:
     return tongjibie_zhongshu_ex(zss, xds)[0]
 
 
-def tongjibie_zhongshu_ex(zss: List[ZS], xds: List[LINE]):
-    """同 tongjibie_zhongshu,另返回段元数据 meta={'segs','groups'}(groups 与产出中枢
-    一一对齐),供 tongjibie_level_signals 在**段粒度**上算 30m 买卖点/背驰。"""
-    if not zss:
-        return [], {"segs": [], "groups": []}
-    # 交替段 = 本体摆动腿(42课 L26239 趋势仍是一段;39课 L25179 严格交替)。
-    # 曾经走 zslx 标签 + _jiehe_segments 合并:V/Λ 型链标签歧义,见 _swing_alternating_segs。
-    segs = _swing_alternating_segs(zss)
+def tongjibie_zhongshu_ex(zslxs, xds: List[LINE]):
+    """同级别分解(30m)中枢 + 段元数据 meta={'segs','groups','all_groups'},供
+    tongjibie_level_signals 在段粒度算 30m 买卖点/背驰。
+
+    ★R5 D-③(2026-06-18):入参 = 块R **走势类型**(L_{k-1}.zslxs,即原文 L038「5m 走势
+    类型」),经结合运算(`_jiehe_segments` 合并相邻同向走势类型,39课 L25179)成交替段、
+    连续 3 段价格重合成 30m 中枢(line24727,不延伸、允许盘整+盘整)。去掉旧
+    `_swing_alternating_segs`(中枢→摆动腿,审计 D3 疑其合并过激致 30m 饿死);走势类型
+    `_type` 已由 zslx_branch._finalize 修正净位移转折点口径(旧 V/Λ 标签歧义已解)。
+    """
+    if not zslxs:
+        return [], {"segs": [], "groups": [], "all_groups": []}
+    segs = _jiehe_segments(zslxs)
     groups = _tongjibie_groups(segs)
     all_groups = _tongjibie_candidate_groups(segs)
     out: List[ZS] = []

@@ -599,99 +599,92 @@ class CL(ICL):
     }
 
     def get_kuozhan_levels(self):
-        """递归升级各级中枢 + 背驰 + 买卖点(带 level)。封顶 30m(操作级,line24735)。
+        """递归升级各级中枢 + 背驰 + 买卖点(带 level)。封顶 30m(操作级,line24736)。
 
-        **<30m 用非同级别分解**(kuozhan 扩展/延伸,line24735「以下级别允许延伸」);**30m 用
-        同级别分解**(tongjibie:次级别走势类型恰好 3 段重合、不延伸、允许盘整+盘整,line24727/
-        24735);30m 以上不考虑(line24735)。30m/日线图无升级链 → 只 base(返回 [])。
-        各级背驰/买卖点段粒度:kuozhan 级=下级中枢摆动腿(kuozhan_level_signals_ex,V3 修复),
-        tongjibie 级=交替段(tongjibie_level_signals)。返回
-        List[dict]:[{level, zss, bsp(List[BuySellPoint]), bcs(List[(date,val,kind)])}]。
+        ★R5(2026-06-18)统一到块R递归:升级层走 `get_recursive_branch_levels` 的走势类型
+        递归(课17/84 自同构),消除旧块U(kuozhan 延伸/扩张)↔块R 不一致;U1(_yanshen n//3
+        偏离每3段)随 kuozhan 废弃而消失。**保留本接口签名**(tv_chart 调用,D-图表),内部改块R。
+        - **<30m kuozhan 级 = 块R 走势类型递归 L1/L2 中枢** + 买卖点 bs1(L1+一类)/bs2(二类)/
+          bs3(扩张三买);背驰段 = 该级 done_divergence。
+        - **30m tongjibie 级 = 同级别分解**(块R 上级走势类型 zslxs,去摆动腿直用走势类型 D-③,
+          恰好 3 段重合、不延伸、允许盘整+盘整,line24727/24736);买卖点 tongjibie_level_signals。
+        - 30m 以上不考虑(line24736)。30m/日线图无升级链 → 返回 []。
+        频率标签(5m/30m)= 块R 递归 depth 的显示名(近似映射,D-①)。返回
+        List[dict]:[{level, zss, bsp(List[BuySellPoint]), bcs(List[(date,val,kind)]), lower}]。
         """
+        from collections import defaultdict
+
         chain = self._UPGRADE_CHAIN.get(self.frequency, [])
         if not chain:
             return []
         cached = self._recursive_memo.get("kuozhan_levels")
         if cached is not None:
             return cached
-        from chanlun.core.zs_upgrade import (
-            kuozhan_zhongshu, kuozhan_level_signals_ex,
-            tongjibie_zhongshu_ex, tongjibie_level_signals,
-        )
+        from chanlun.core.bs1_branch import Bs1BranchCalculator
+        from chanlun.core.bs2_branch import Bs2BranchCalculator
+        from chanlun.core.bs3_branch import Bs3BranchCalculator
+        from chanlun.core.zs_upgrade import tongjibie_zhongshu_ex, tongjibie_level_signals
         levels = self.get_recursive_branch_levels()
-        l0 = next((lv.zss for lv in levels if lv.level == 0), None)
-        if not l0:
+        if not levels:
             return []
-        xds = list(self.get_xds())                       # 各级中枢.lines 均为线段 → 同一定位基
+        by_blevel = {lv.level: lv for lv in levels}
+        if 0 not in by_blevel:
+            return []
+        xds = list(self.get_xds())
         ld = lambda s, e: query_macd_ld(self, s, e)      # noqa: E731
         wzgx = self._recursive_wzgx()
+        # 块R 多级升级买卖点(bs1 L1+一类 + bs2 二类 + bs3 扩张三买),按块R level 分组
+        branch_bsp = (Bs1BranchCalculator().calculate(levels)
+                      + Bs2BranchCalculator().calculate(levels)
+                      + Bs3BranchCalculator().calculate(levels))
+        bsp_by_blevel = defaultdict(list)
+        for p in branch_bsp:
+            if p.level is not None:
+                bsp_by_blevel[p.level].append(p)
         import logging
         _log = logging.getLogger(__name__)
         out = []
-        cur = l0
+        blockr_level = 0                                  # 当前图频率线段中枢所在块R级别
+        cur_zslxs = list(by_blevel[0].zslxs or [])        # 当前级别走势类型(tongjibie 的次级别单位)
         for lvl, (_target, method) in enumerate(chain, start=1):
-            # **中枢与买卖点/背驰分开容错**:任一在边缘实时数据上抛异常时,只丢出错的那部分、不连累
-            # 其他级、也不让中枢随买卖点一起消失(原整个 get_kuozhan_levels 抛出 → cl_utils 静默吞 →
-            # recursive_levels 只剩[0]、5m/30m 全没,用户「看不到买卖点」真凶)。失败记 warning+traceback。
-            nz = []
-            tjb_meta = None
-            try:                                          # ① 中枢(失败也保留其他级,且不连累买卖点)
-                if cur and method == "tongjibie":         # 30m 同级别分解(次级别走势类型+结合运算,原文24727/24751/25123)
-                    nz, tjb_meta = tongjibie_zhongshu_ex(cur, xds)
-                elif cur:                                 # <30m kuozhan 非同级别(扩展/延伸)
-                    nz = kuozhan_zhongshu(cur, xds)
-            except Exception:
-                _log.warning("get_kuozhan_levels 中枢 L%d(%s) 失败", lvl, method, exc_info=True)
-                nz, tjb_meta = [], None
-            bsp, bcs = [], []
-            try:                                          # ② 买卖点/背驰(失败不连累中枢显示)
-                if tjb_meta is not None:                  # 同级别分解→段粒度信号(单根线段=级别错配,恒空)
-                    bsp, bcs = tongjibie_level_signals(nz, tjb_meta, ld, wzgx, self.frequency)
-                else:                                     # kuozhan→段粒度(次级别=下级中枢摆动腿,V3修复)
-                    bsp, bcs = kuozhan_level_signals_ex(nz, cur, ld, wzgx, self.frequency)
+            nz, bsp, bcs = [], [], []
+            lower = cur_zslxs
+            try:
+                if method == "kuozhan":                   # 块R 走势类型递归升一级
+                    blockr_level += 1
+                    lv = by_blevel.get(blockr_level)
+                    if lv is not None:
+                        nz = list(lv.zss)
+                        cur_zslxs = list(lv.zslxs or [])
+                        bsp = list(bsp_by_blevel.get(blockr_level, []))
+                        bcs = [
+                            (dv.leave_seg.end.k.date, dv.leave_seg.end.val, dv.kind)
+                            for dv in (lv.done_divergence or [])
+                            if dv is not None and dv.is_beichi
+                            and dv.leave_seg is not None and dv.leave_seg.end is not None
+                        ]
+                    else:
+                        cur_zslxs = []
+                elif method == "tongjibie":               # 同级别分解(块R 上级走势类型,D-③)
+                    nz, meta = tongjibie_zhongshu_ex(cur_zslxs, xds)
+                    bsp, bcs = tongjibie_level_signals(nz, meta, ld, wzgx, self.frequency)
                 for p in bsp:
                     p.level = lvl
             except Exception:
-                _log.warning("get_kuozhan_levels 买卖点/背驰 L%d 失败", lvl, exc_info=True)
-                bsp, bcs = [], []
-            # **即使本级空也出层** → 前端菜单选项反映升级链(该周期可用级别)、非数据是否恰好有中枢。
-            out.append({"level": lvl, "zss": nz, "bsp": bsp, "bcs": bcs, "lower": cur})
-            cur = nz
+                _log.warning("get_kuozhan_levels L%d(%s) 失败", lvl, method, exc_info=True)
+                nz, bsp, bcs = [], [], []
+            # **即使本级空也出层** → 前端菜单反映升级链(该周期可用级别)。
+            out.append({"level": lvl, "zss": nz, "bsp": bsp, "bcs": bcs, "lower": lower})
         self._recursive_memo["kuozhan_levels"] = out
         return out
 
     def get_kuozhan_candidates(self):
-        """R78 区间套介入候选(各 kuozhan 级最近中枢)。lazy。返回 List[NestCandidate]。
-
-        复用 get_kuozhan_levels 升级中枢链:对每个 kuozhan 级(<30m,method='kuozhan'),
-        用该级中枢 + 下级中枢调 kuozhan_level_candidates(离开冲出 ZG 但回试腿未走出
-        窗口产 3buy 候选,signals_ex 此窗口留白)。tongjibie 级(30m 同级别分解)候选留后
-        (摆动段语义不同)。无未来:候选只用当根可见的离开段端点。"""
-        chain = self._UPGRADE_CHAIN.get(self.frequency, [])
-        if not chain:
-            return []
-        cached = self._recursive_memo.get("kuozhan_candidates")
-        if cached is not None:
-            return cached
-        from chanlun.core.zs_upgrade import kuozhan_level_candidates
-        wzgx = self._recursive_wzgx()
-        kl = self.get_kuozhan_levels()      # 同一次计算:各级 zss 与其 lower 的 expanded_with 对象一致
-        out = []
-        for lvl, (_target, method) in enumerate(chain, start=1):
-            lv = next((x for x in kl if x["level"] == lvl), None)
-            if lv is None or method != "kuozhan":
-                continue
-            zss = lv.get("zss") or []
-            lower = lv.get("lower") or []    # 用同次计算的 L0(非单独 get_recursive_branch_levels,
-            if not zss or not lower:         # 否则 id 不匹配 seg_of 查不到 → 候选恒空,R78 0 介入根因)
-                continue
-            try:
-                out.extend(kuozhan_level_candidates(
-                    zss, lower, wzgx, self.frequency, level=lvl))
-            except Exception:
-                pass
-        self._recursive_memo["kuozhan_candidates"] = out
-        return out
+        """R78 区间套介入候选。★R5(2026-06-18)弃用:区间套介入统一到块R——
+        `engine.collect_qs_beichi_candidates` 用块R `LevelResult.live_qs_divergence`
+        (右边缘进行中趋势背驰段)产 1buy_nest 介入,取代旧块U NestCandidate/
+        kuozhan_level_candidates(块U 升级已废,见 get_kuozhan_levels R5 重写)。
+        保留接口、恒返回 [](nest_cascade 模式现走 collect_qs_beichi)。"""
+        return []
 
     def get_xiaozhuanda_candidates(self):
         """新核心:小转大(小背驰-大转折)候选/预警(B6,只读结构,不接交易信号)。lazy。
