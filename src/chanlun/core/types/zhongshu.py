@@ -87,26 +87,6 @@ class ZS:
             self.dd = self._dd_cache
             self.line_num = len(self.lines)
 
-    def is_extension_candidate(self, min_segments: int = 9) -> bool:
-        """判断是否符合延伸条件"""
-        return self.line_num >= min_segments
-
-    def can_expand_with(self, other: 'ZS') -> bool:
-        """中心定理二·中枢扩展：本体包络重叠(闭区间) 且 核心区分离(原文 line10029)。
-
-        包络重叠 max(dd)<=min(gg)；核心区分离 other.zg<self.zd 或 other.zd>self.zg。
-        核心区也重叠=延伸(同中枢)、包络分离=趋势——均非扩展。
-        两中枢都须 done(扩展是确认结构；未完成中枢不参与扩展判定)。
-        """
-        if not self.done or not other or not other.done:
-            return False
-        if None in (self.zd, self.zg, other.zd, other.zg,
-                    self.dd, self.gg, other.dd, other.gg):
-            return False
-        envelope_overlap = max(self.dd, other.dd) <= min(self.gg, other.gg)
-        core_separated = (other.zg < self.zd) or (other.zd > self.zg)
-        return envelope_overlap and core_separated
-
     def __setstate__(self, state):
         # 旧 pickle 的 __dict__ 不含增量边界缓存字段，补默认值，
         # 避免反序列化后调用 update_boundaries 抛 AttributeError。
