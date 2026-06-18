@@ -693,6 +693,22 @@ class CL(ICL):
         self._recursive_memo["kuozhan_candidates"] = out
         return out
 
+    def get_xiaozhuanda_candidates(self):
+        """新核心:小转大(小背驰-大转折)候选/预警(B6,只读结构,不接交易信号)。lazy。
+        返回 List[XiaoZhuanDaCandidate]。
+
+        原文 L044 小背驰-大转折定理:必要条件 = 大级别走势最后一个次级别中枢出现三类点
+        (「只有必要条件,而没有充分条件」)→ 输出候选/预警、非定性买卖点。基于块R 多级
+        LevelResult(与 R5 升级统一到块R 前向兼容)。当下:只用 done 中枢 + 当下三类点。
+        """
+        cached = self._recursive_memo.get("xzd_candidates")
+        if cached is not None:
+            return cached
+        from chanlun.core.xiaozhuanda_branch import XiaoZhuanDaCalculator
+        out = XiaoZhuanDaCalculator().calculate(self.get_recursive_branch_levels())
+        self._recursive_memo["xzd_candidates"] = out
+        return out
+
     def get_branch_interval_nest(self):
         """新核心:区间套可操作性(P6,自顶向下 READ)。lazy 并存。返回 List[NestRead]。"""
         from chanlun.core.beichi_nest import BeichiNestCalculator
