@@ -130,7 +130,9 @@ class RecursiveBranchCalculator:
         """把线段递归装配成多级中枢/走势类型层级树。
 
         每级：zs_branch(中枢+内联背驰) → zslx_branch(走势类型) → _as_units → 下一级。
-        L0 构成段=线段(min_zs_lines=4)，L≥1 构成段=走势类型(=3,原文)。
+        L0 构成段=线段(min_zs_lines=4=**工程完成确认门**,右边缘当下性 robustness;原文形成口径
+        实为 3 段,见 cl._recursive_l0_min_zs_lines/L054:15,§9#1 拍板保 4)；L≥1 构成段=走势类型
+        (min=3=**原文形成口径**,走势类型已是完成单元)。
         终止：扫不出中枢 / 走势类型 <3 / 触 _MAX_LEVELS。
         """
         if not xds:
