@@ -17,8 +17,14 @@ from chanlun.core.bs_branch import BuySellPoint
 class Bs2BranchCalculator:
     """二类买卖点计算器。无状态，每次 calculate 全量重算。"""
 
-    def calculate(self, levels: List[LevelResult]) -> List[BuySellPoint]:
-        """各级识别一类点,跨级关联二类:L_k 一买后、L_{k-1} 不破前低的第一个一买。"""
+    def calculate(self, levels: List[LevelResult],
+                  ld_provider=None, frequency=None) -> List[BuySellPoint]:
+        """各级识别一类点,跨级关联二类(定律一):L_k 一买后、L_{k-1} 第一个一买。
+
+        L101 三情况:① 不破前低/高=强/一般档(止损用 L_k 极值);② **最弱档(B4,L101:23)**=次级别
+        一买**跌破 L_k 一买 BUT 对其构成盘整背驰**(is_beichi)→ 最弱二买(止损下移到次级别新低)。
+        最弱档需 ``ld_provider``;缺省只产强/一般档。
+        """
         first_by_level = {lr.level: self._first_points(lr) for lr in levels}
         out: List[BuySellPoint] = []
         for lr in levels:
@@ -27,23 +33,18 @@ class Bs2BranchCalculator:
                 continue
             sub = first_by_level.get(k - 1, [])          # 次级别 L_{k-1} 一类点
             for _zs_k, _dv_k, c_k in self._first_points(lr):
-                found = self._find_second(c_k, sub)
+                found = self._find_second(c_k, sub, ld_provider, frequency)
                 if found is not None:
                     zs_sub, dv_sub, c_sub = found
                     bs = "2buy" if c_k._type == "down" else "2sell"
-                    stop_kwargs = (
-                        {"structural_stop_below": c_k.end.val}
-                        if bs == "2buy"
-                        else {"structural_stop_above": c_k.end.val}
-                    )
+                    # 最弱档(破前低/高):止损用次级别一买自身极值;强/一般:用 L_k 极值
+                    breaks = ((c_k._type == "down" and c_sub.end.val < c_k.end.val)
+                              or (c_k._type == "up" and c_sub.end.val > c_k.end.val))
+                    stop_val = c_sub.end.val if breaks else c_k.end.val
+                    stop_kwargs = ({"structural_stop_below": stop_val} if bs == "2buy"
+                                   else {"structural_stop_above": stop_val})
                     out.append(BuySellPoint(
-                        bs,
-                        zs_sub,
-                        c_sub,
-                        c_sub.end,
-                        dv_sub,
-                        level=k,
-                        **stop_kwargs,
+                        bs, zs_sub, c_sub, c_sub.end, dv_sub, level=k, **stop_kwargs,
                     ))
         return out
 
@@ -58,9 +59,14 @@ class Bs2BranchCalculator:
 
     @staticmethod
     def _find_second(c_k: LINE,
-                     sub: List[Tuple[ZS, DivergenceResult, LINE]]
+                     sub: List[Tuple[ZS, DivergenceResult, LINE]],
+                     ld_provider=None, frequency=None
                      ) -> Optional[Tuple[ZS, DivergenceResult, LINE]]:
-        """L_k 一类点 c_k 之后,次级别同向、不破前低/高的第一个(时间最早)一类点。"""
+        """L_k 一类点 c_k 之后,次级别同向、在后的第一个(时间最早)一类点。
+        不破前低/高=强/一般档直接取;**破前低/高仅当对 c_k 构成盘整背驰(is_beichi)才取**
+        =最弱档(L101:23,B4),否则跳过。最弱档需 ld_provider。"""
+        from chanlun.core.beichi_calculator import is_beichi
+
         t_k = c_k.end.k.k_index
         val_k = c_k.end.val
         best: Optional[Tuple[ZS, DivergenceResult, LINE]] = None
@@ -71,10 +77,11 @@ class Bs2BranchCalculator:
             t_sub = c_sub.end.k.k_index
             if t_sub <= t_k:                             # 必须在后
                 continue
-            if c_k._type == "down" and c_sub.end.val < val_k:   # 一买:破前低 → 跳过
-                continue
-            if c_k._type == "up" and c_sub.end.val > val_k:     # 一卖:破前高 → 跳过
-                continue
+            breaks = ((c_k._type == "down" and c_sub.end.val < val_k)
+                      or (c_k._type == "up" and c_sub.end.val > val_k))   # 破前低/高
+            if breaks and not (ld_provider is not None
+                               and is_beichi(c_k, c_sub, ld_provider, frequency)):
+                continue                                 # 破前低/高 且 非盘整背驰 → 跳(非最弱二买)
             if best_t is None or t_sub < best_t:         # 取时间最早
                 best, best_t = (zs_sub, dv_sub, c_sub), t_sub
         return best

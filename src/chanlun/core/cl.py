@@ -565,8 +565,8 @@ class CL(ICL):
                              done_divergence=l0.done_divergence)
         bs = BsBranchCalculator()
         pts = list(bs.calculate(zr0, l0.units))                            # L0 一三类
-        pts += bs.second_class(zr0, l0.units)                              # L0 二类(结构化:一类后回调不破前低/高)
-        pts += Bs2BranchCalculator().calculate(levels)                     # L1+ 二类(跨级·定律一)
+        pts += bs.second_class(zr0, l0.units, ld, self.frequency)          # L0 二类(强/一般档 + B4 最弱档破前低+盘整背驰)
+        pts += Bs2BranchCalculator().calculate(levels, ld, self.frequency)  # L1+ 二类(跨级·定律一 + B4 最弱档)
         pts += [p for p in Bs3BranchCalculator().calculate(levels)
                 if p.level is not None and p.level >= 1]                   # L1+ 扩张三买(不重 L0)
         self._recursive_memo[memo_key] = pts
