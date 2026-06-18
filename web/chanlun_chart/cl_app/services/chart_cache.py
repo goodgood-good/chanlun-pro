@@ -36,6 +36,7 @@ from typing import Dict, Optional
 from cachetools import TTLCache
 
 from chanlun.persistence.file_db import fdb
+from chanlun.tools.cache_version import source_fingerprint
 from chanlun.tools.log_util import LogUtil
 
 # ---------------- 状态 ----------------
@@ -195,10 +196,14 @@ _CHART_CACHE_SCHEMA_VERSION = "v35"
 def _build_cache_key(market: str, code: str, frequency: str, cl_config: dict) -> str:
     """统一构造 chart_data_cache 的 key,确保所有调用方一致。
 
-    key 含 ``_CHART_CACHE_SCHEMA_VERSION`` 前缀——bump 该版本号即可让所有旧
-    磁盘 entry 失效,新版本路径无 stale 字段污染风险。
+    key = 版本号 + **源码指纹** + market/code/freq + cl_config hash:
+    - ``_CHART_CACHE_SCHEMA_VERSION``:手动 schema 版本,输出**字段结构**变化时 bump。
+    - ``source_fingerprint()``:核心计算/渲染源文件内容 md5,**计算逻辑**变化(线段划分算法等,
+      值变但字段不变)时自动变 → 旧缓存自动失效,免手动 bump(原只靠手动版本号、改算法忘 bump
+      会留陈旧线段,实例 R34/A-B-C 修复后 AAPL 仍显示旧交叉线段)。
     """
-    return f"{_CHART_CACHE_SCHEMA_VERSION}_{market}_{code}_{frequency}_{_stable_hash(cl_config)}"
+    return (f"{_CHART_CACHE_SCHEMA_VERSION}_{source_fingerprint()}"
+            f"_{market}_{code}_{frequency}_{_stable_hash(cl_config)}")
 
 
 def _build_chart_cache_entry(cl_chart_data: dict, is_full_snapshot: bool, validated_at: float = None):

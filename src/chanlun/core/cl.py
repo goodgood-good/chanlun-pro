@@ -472,12 +472,13 @@ class CL(ICL):
     def _recursive_l0_min_zs_lines(self) -> int:
         """统一解析递归 L0 中枢成枢线数:所有链路必须经此单点读取。
 
-        fallback=3(原文三段本体口径,第71轮已设为生产默认且 CL_CFG 恒带 3)。
-        此前 cl.py 3 处与 engine.py 1 处 fallback 写死 4(legacy 确认门控),
-        config 缺键的反序列化旧 pickle CL 会在同一对象内口径分裂(与 zs_wzgx
-        分裂同构),2026-06-13 第77轮全文一致性审计修复。
+        fallback=4(用户拍板 2026-06-18,审计 F-A)：L0 线段中枢取「完成的」当下确认门读法
+        (L018:12「前三个走势类型都是完成的」+ 线段需被下一线段破坏确认 + 离开段/连接段
+        确认 定理三R9/R22),与 legacy(ZsCalculator 默认4) 统一,消除「图表(legacy4)≠回测
+        (新核心3)」分裂(审计 F-A)。L≥1 走势类型中枢仍 3(recursive_branch:143 else 3,走势
+        类型已是完成单元)。字面最忠实是 3(L017),4 是当下性稳健侧;所有链路经此单点读取保口径一致。
         """
-        return int(self.config.get('recursive_l0_min_zs_lines', 3) or 3)
+        return int(self.config.get('recursive_l0_min_zs_lines', 4) or 4)
 
     def _recursive_branch_calc(self, use_xd: bool):
         """按塔(use_xd:False=笔/True=段)取持久 RecursiveBranchCalculator(递归层增量化:

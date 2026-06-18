@@ -427,7 +427,7 @@ def cl_data_to_tv_chart(
     # 线段(XD) → 当前周期中枢 → 当前周期走势类型线段 → 高一级中枢。
     xd_zslx_chart_data = []
     xd_zslx_line_chart_data = []
-    if config.get("chart_show_xd_zslx", "1") == "1":
+    if config.get("chart_show_xd_zslx", "0") == "1":   # 默认关,与 chart_config.py 默认一致(原兜底"1"不一致,会误画走势类型)
         for zslx in (cd.get_xd_zslx() or []):
             if not zslx.zss:
                 continue

@@ -24,6 +24,8 @@ from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple
 import pandas as pd
 from cachetools import LRUCache
 
+from chanlun.tools.cache_version import source_fingerprint
+
 if TYPE_CHECKING:
     from chanlun.core.cl import CL  # pragma: no cover
 
@@ -172,7 +174,10 @@ _CHART_DATA_SCHEMA_VERSION = "v5"
 def _build_cache_key(
     market: str, code: str, frequency: str, cl_config: Optional[Dict[str, Any]]
 ) -> str:
-    return f"{_CHART_DATA_SCHEMA_VERSION}|{market}|{code}|{frequency}|{_hash_cl_config(cl_config)}"
+    # source_fingerprint():核心计算源码一改 → 指纹变 → 旧 CL 对象缓存自动失效(免手动 bump);
+    # 原 _CHART_DATA_SCHEMA_VERSION 只在「输出字段结构」变化时手动 bump,管不住「计算逻辑」变化。
+    return (f"{_CHART_DATA_SCHEMA_VERSION}|{source_fingerprint()}"
+            f"|{market}|{code}|{frequency}|{_hash_cl_config(cl_config)}")
 
 
 def get_or_compute_cl(

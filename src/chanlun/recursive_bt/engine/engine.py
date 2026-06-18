@@ -34,8 +34,12 @@ CL_CFG = {
     "chart_show_xd_mmd": "1", "chart_show_bi_bc": "1", "chart_show_xd_bc": "1",
     "zs_bi_type": ["zs_type_bz"], "zs_xd_type": ["zs_type_bz"],
     "idx_macd_fast": 12, "idx_macd_slow": 26, "idx_macd_signal": 9,
-    # 原文中枢本体为三段次级别走势类型重叠；4 段只应作为 legacy 确认门控显式传入。
-    "recursive_l0_min_zs_lines": 3,
+    # L0 线段中枢成枢门槛 = 4（用户拍板 2026-06-18，审计 F-A）：取「前三个走势类型都是
+    # 完成的」(L018:12) + 线段需被下一线段破坏确认完成 + 离开段/连接段确认(定理三 R9/R22)
+    # 的当下性确认门读法，与 legacy(ZsCalculator 默认4) 统一，消除「图表(legacy4)≠回测
+    # (新核心3)」分裂。L≥1 走势类型中枢仍 3（走势类型已是完成单元，3 个次级别走势类型重叠
+    # 即成中枢，见 recursive_branch:143 else 3）。字面最忠实是 3(L017)，4 是当下性稳健侧。
+    "recursive_l0_min_zs_lines": 4,
 }
 
 CACHE_DIR = "D:/chanlun_pro/chart_cache"
