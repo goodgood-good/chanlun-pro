@@ -337,7 +337,9 @@ def cl_data_to_tv_chart(
                             "price": xd.end.val,
                         },
                     ],
-                    "linestyle": "0" if xd.is_done() else "1",
+                    # 虚实口径用 forming（显示）而非 is_done（信号/当下性）：确认级联推迟
+                    # done 的末 2 条已成形确认段仍画实线，只有真正在建的最后一段画虚线。
+                    "linestyle": "1" if getattr(xd, "forming", False) else "0",
                 }
             )
 

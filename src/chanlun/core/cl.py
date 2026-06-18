@@ -110,7 +110,7 @@ class CL(ICL):
             # 运行时兼容标识
             'config_use_type': 'common',
             # K线类型配置
-            'kline_type': Config.KLINE_TYPE_DEFAULT.value,
+            'kline_type': Config.KLINE_TYPE_CHANLUN.value,
             'kline_qk': Config.KLINE_QK_NONE.value,
 
             # 分型配置
@@ -186,6 +186,10 @@ class CL(ICL):
         if not src_klines:
             return self
         self._recursive_memo.clear()   # 新 K 线 → 状态变,递归装配 memo 失效
+        # 线段确认级联重构期间:线段(xds)改为全量重建(对象每轮全新、终点可回溯合并),
+        # 持久 RecursiveBranchCalculator 的 identity 增量前提失效 → 每轮重置为全量重算,
+        # 保递归层 inc==batch。待级联稳定后与线段增量一并重做。
+        self._rbc.clear()
 
         try:
             # 直接引用内部数据，避免 deepcopy

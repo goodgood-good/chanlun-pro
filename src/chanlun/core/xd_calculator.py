@@ -55,14 +55,16 @@ def _merge_two(prev: dict, cur: dict, direction: str) -> dict:
 
 
 def _process_inclusion(elems: List[dict], direction: str) -> List[dict]:
-    """
-    特征序列包含处理（趋势感知版）。
+    """特征序列包含处理 → 标准特征序列（缠论 67 课 R8/R9 + 65 课 R11「顺序原则」）。
 
-    规则:
-      - 当CS元素沿趋势方向持续创新极值时（up段CS的high不断升高/down段CS的low不断降低），
-        不做包含合并，直接追加。
-      - 当极值不再创新（拐点）时，对拐点处的元素与前一个元素做包含合并，
-        合并后向前级联（可能继续与更前面的元素合并）。
+    原文 R11（L65:13）：「先用第 1、2 根 K 线的包含关系确认新的 K 线，然后用新的 K 线
+    去和第三根比，如果有包含关系，继续……如果没有，就按正常 K 线去处理。」即**从左到右
+    逐相邻、每一对都查包含**，有包含按方向合并（R9：up 取高高、down 取低低）后用合并结果
+    继续与下一根比（级联）。
+
+    （原「趋势感知版」只在「极值不再创新（拐点）」处查包含、趋势中直接追加，会漏掉
+    `prev⊆cur` 且 cur 仍创新极值的合并，不实现 R11 顺序原则；审计 audit/xd_faithfulness_audit.md
+    D1 已证其输出在 _try_end 中为死权重、改为忠实版后全 fixture xds 不变，故此处订正为忠实 R11。）
     """
     if len(elems) < 2:
         return list(elems)
@@ -70,27 +72,15 @@ def _process_inclusion(elems: List[dict], direction: str) -> List[dict]:
     result = [elems[0].copy()]
     for i in range(1, len(elems)):
         cur = elems[i]
-        prev = result[-1]
-
-        # 判断是否仍在趋势中（持续创新极值）
-        if direction == 'up':
-            still_trending = cur['high'] > prev['high']
+        # R11：逐相邻查包含；有包含则按方向合并后向前级联（包含不满足传递律，须重查前一对）
+        if _has_inclusion(result[-1], cur):
+            result[-1] = _merge_two(result[-1], cur, direction)
+            while len(result) >= 2 and _has_inclusion(result[-2], result[-1]):
+                merged = _merge_two(result[-2], result[-1], direction)
+                result.pop()
+                result[-1] = merged
         else:
-            still_trending = cur['low'] < prev['low']
-
-        if still_trending:
             result.append(cur.copy())
-        else:
-            # 拐点：检查包含并合并
-            if _has_inclusion(prev, cur):
-                result[-1] = _merge_two(prev, cur, direction)
-                # 级联：合并后可能与更前面的元素产生包含
-                while len(result) >= 2 and _has_inclusion(result[-2], result[-1]):
-                    merged = _merge_two(result[-2], result[-1], direction)
-                    result.pop()
-                    result[-1] = merged
-            else:
-                result.append(cur.copy())
 
     return result
 
@@ -163,9 +153,9 @@ class XdCalculator:
         一次变更只换连续后缀对象、共享前缀对象不动,故 ``new_bis[i] is old_bis[i]``
         在分歧点前恒真、之后恒假(单调),可二分定位边界。
 
-        identity-match ⊆ value-match(同对象必同值),故返回值是「值意义公共前缀」的
-        保守下界:用作增量重启 LCP 时,>= restart_pos 即可安全复用线段前缀,偶有
-        保守降级到全量重建但输出恒等价(见 _incremental_restart)。
+        identity-match ⊆ value-match(同对象必同值)。当前唯一用途=calculate 的 identity 脏检查
+        (返回值==len ⟺ 新旧 bis 列表逐元素同对象 → 直接复用上轮线段;实测 walk-forward 约半数
+        calculate 命中,省一次全量 xd 重建)。
         """
         if old_bis is None:
             return 0
@@ -182,14 +172,15 @@ class XdCalculator:
     # 公共接口
     # ----------------------------------------------------------
     def calculate(self, bis: List[BI]) -> List[XD]:
-        """根据笔列表计算线段(段增量版)。
+        """根据笔列表计算线段（当前=全量重建；段增量已禁用）。
 
-        笔列表恒 append-only(前缀不改写,见 bi_calculator),线段回溯拆分深度实测
-        ≤2(QQQ.US_d L165 / 5m L2240 实测 d=2,5+40 极端样本未见 d≥3),故保留稳定段
-        前缀、删末 2 段(保留前 len-2 段恰好容纳 d≤2、buffer=0)从其起点不 clear 地
-        重算尾部段;签名前缀校验(LCP ≥ 重算起点)失败或段不足 3 则降级全量。
-        (原"线段不做增量"注释已废:增量可行且经对拍网钉死。)
-        等价性见 tests/chan_core/test_incremental_equivalence.py(对拍网含 xds)。
+        ★现状（2026-06-17，确认级联重构后）：级联使已确认段终点可被后续假反弹回溯合并
+        （课78正文 :40051），旧段增量「删末 2 段、复用前缀（依赖 done 段不回改）」的前提
+        不再成立，故 calculate 改为每次全量重建：self.xds.clear() + _find_start + _build_segments。
+        （旧段增量函数 _incremental_restart 已于 2026-06-17 删除——级联使 done 段端点可回溯改写、
+        其"删末 2 段复用前缀"前提不再成立；级联稳定后若重启增量须重新设计。）下方 identity 脏检查
+        （_identity_prefix_len）保留：实测约半数 calculate 命中、省全量 xd 重建。
+        全量重建下，增量喂入 == 批量 由 tests/chan_core/test_incremental_equivalence.py 对拍守护。
         """
         all_bis = bis
         if all_bis is self._last_bis_obj:
@@ -210,47 +201,14 @@ class XdCalculator:
             self._last_bis_obj = all_bis
             return self.xds
 
-        restart = self._incremental_restart(all_bis, ident_lcp)
-        if restart is not None:
-            self._build_segments(all_bis, restart)
-        else:
-            self.xds.clear()
-            self._build_segments(all_bis, self._find_start(all_bis))
+        # 确认级联重构期间禁用段增量(全量重建保 inc==batch)：级联使已确认段终点可被后续
+        # 假反弹回溯合并,旧段增量「删末2段、复用前缀(依赖 done 段不回改)」的前提不再成立。
+        self.xds.clear()
+        start = self._find_start(all_bis)
+        self._build_segments(all_bis, start)
 
         self._last_bis_obj = all_bis
         return self.xds
-
-    def _incremental_restart(self, all_bis: List[BI], ident_lcp: int) -> Optional[int]:
-        """段增量重启点:保留稳定段前缀、返回需重算的起点笔位置;不可增量返回 None。
-
-        回溯拆分深度实测 ≤2 → 删末 2 段(保留前 len-2 段恰好容纳 d≤2、buffer=0)、从倒数第 2 段起点重算。
-        ``ident_lcp`` 为 new/old bis 的 identity 公共前缀长度(_identity_prefix_len),
-        是「值意义公共前缀」的保守下界:>= restart_pos 即证重算起点之前的笔全未变、
-        可安全复用线段前缀;否则(bi 档3 全量降级改了前缀,或保守起见)降级全量。
-        原 O(B) 值-LCP 循环由 O(log B) 二分等价替代(identity ⊆ value,只会更保守)。
-        """
-        if self._last_bis_obj is None or len(self.xds) < 3:
-            return None
-        keep = len(self.xds) - 2
-        # A-HIGH-1 运行时哨兵:删末2段复用前缀 [:keep] 的安全前提=回溯拆分深度 d≤2,
-        # 即倒数第3段 xds[keep-1] 不会被新笔回溯改写。线段终结靠反向特征序列分型
-        # (_try_end),最近若干段的终点是「试探性」的、会随新笔回溯;已 done 段是反向
-        # 段确认终结的、不再改写。故复用前缀末段须已 done;若仍 pending(末尾可变段 >2、
-        # 回溯深度疑 ≥3),len-2 buffer 不足 → 降级全量(恒正确)+ 留痕,把「实测 d≤2」
-        # 从注释承诺升级为运行时保证。实测 5fixture+40合成样本 d 恒≤2、正常零触发。
-        if not self.xds[keep - 1].done:
-            _log.warning(
-                f"[xd增量哨兵] 复用前缀末段 xds[{keep - 1}] 仍 pending、回溯深度疑 ≥3"
-                f"(共 {len(self.xds)} 段),降级全量重建以保 inc==batch"
-            )
-            return None
-        restart_pos = self.xds[keep].start_line.index
-        if restart_pos < 1 or restart_pos >= len(all_bis):
-            return None
-        if ident_lcp < restart_pos:
-            return None
-        del self.xds[keep:]
-        return restart_pos
 
     # ----------------------------------------------------------
     def _find_strict_start(self, all_bis: List[BI]) -> int:
@@ -290,6 +248,10 @@ class XdCalculator:
     def _find_start(self, all_bis: List[BI]) -> int:
         """寻找首段起点 (含 fallback)。
 
+        ★首段=R20 特殊段(课78:40032「除非是新股上市后最开始的一段,否则任何一段都是破坏前一段
+        的」)——无前段可破坏,原文未给精确起点规则;:40036 仅给实务取向「从近期最高/最低点开始」。
+        故 strict/fallback 为工程取舍(test_xd_dangxia_yuanwen 亦豁免 index==0 段的起点极值检查)。
+
         优先策略 (关键笔, 见 ``_find_strict_start``): 段起点恰好是方向极值,
         避免 ``xd.start.val 与 xd.low/high 语义不一致的退化首段``。
 
@@ -309,12 +271,18 @@ class XdCalculator:
     # 主循环
     # ----------------------------------------------------------
     def _build_segments(self, all_bis: List[BI], start: int):
-        """主循环：从 start 笔起逐段构造线段（延伸/吸收/_try_end 判定终结）。"""
+        """主循环：逐段构造线段 + 确认级联（breaks-back 合并 + 推迟 done）。
+
+        原文 R18/L64:484「段必须被段破坏才是确认结束」：线段只有被「合法反向线段」破坏
+        才真正终结。若反向只是假反弹(跌破/涨破转折点 T、违 R27),则未破坏本段 → 本段延伸
+        吞掉假反弹至真极值(_cascade_merge_back)。又因破坏本段的反向段自身需待其反向确认,
+        故最后一条已确认段推迟为 pending(_emit_segments_deferred)。详见审计 §11。
+        """
+        segs: List[tuple] = []      # 已确认线段 (seg_start, real_end, seg_type);done 发射时延迟判
         pos = start
-        reverse_end_hint = None  # 上一段 _try_end 已探明的反向线段终点位置
-        # 记录已被 _emit_segment 处理过的最后一个段终点位置，
-        # 主循环结束后兜底用 _emit_pending 输出最后一段未完成线段。
-        last_emitted_end_idx: int = -1
+        reverse_end_hint = None
+        pending_tail = None         # 内层自然结束的末段未完成线段 (start, type)
+        r34_starts: set = set()     # R34 退化失败反弹的 seg_start 集,供级联 A-B-C 吸收门控
 
         while pos + 2 < len(all_bis):
             # 确定 seg_end 初始值
@@ -392,21 +360,32 @@ class XdCalculator:
                                            seg_cs_bis_cache=seg_cs_bis)
                 if end_result is not None:
                     real_end, next_start, next_end = end_result
-                    self._emit_segment(all_bis, seg_start, real_end, seg_type)
-                    pos = next_start
-                    last_emitted_end_idx = real_end
-                    # 用外层 check 作为反向线段已知终点（check 是反向线段同向笔）
-                    if check >= next_start + 2 and check < len(all_bis):
+                    # 收集为待定段 + 确认级联(假反弹则并入前段、终点回溯到真极值)
+                    segs.append((seg_start, real_end, seg_type))
+                    merged = self._cascade_merge_back(all_bis, segs, r34_starts)
+                    pos = segs[-1][1] + 1   # 从(可能已合并的)最后段终点之后续建
+                    # 反向区间提示:无合并时沿用外层 check(反向段同向笔);合并后作废
+                    if merged:
+                        reverse_end_hint = None
+                    elif check >= next_start + 2 and check < len(all_bis):
                         reverse_end_hint = check
                     break
 
-                # 注：原 Step 2.5「单根反向笔突破段起点即终结原段」已删除。
-                # 理由（缠论 R5/R6 + 章节 8.1）：
-                #   线段只能被反方向"线段"破坏，不能被一根反方向"笔"破坏；
-                #   终结的唯一前提是反向特征序列分型，由 _try_end 全权负责判定。
-                # 一根反向笔突破段起点只是"出现破坏可能"的线索，必须等反向方向
-                # 也形成 ≥3 笔结构并出现 CS 分型后，才能据此回溯终结原段——
-                # 这正是 _try_end 的职责，所以这里不再做任何提前终结。
+                # Step 2.6: R34 反向线段破坏（课71 :37991）—— 补 _try_end 顶/底分型路径**结构性
+                # 漏掉**的「反向单调成段」破坏。旧 Step2.5「单根反向笔破段起点即终结」曾被删（理由
+                # 是裸一笔破坏违 R18）；但删过头了——R34 明文「第一笔破坏前线段→延伸三笔→第三笔
+                # 破第一笔结束位置→新线段一定形成、前线段一定结束」，笔破坏在此恰是原文当下程序的
+                # 判据。_try_end_r34 实现 R18-合规的正确版（须笔破坏 R19 + 反向延伸成段 R34）。
+                # 修复 SZ.301004「更低高点结尾 up 段后单调暴跌→顶分型首元素卡死→段跑飞 446 笔」。
+                r34 = self._try_end_r34(all_bis, seg_start, seg_type, seg_high, seg_low, check)
+                if r34 is not None:
+                    real_end, next_start, next_end = r34
+                    segs.append((seg_start, real_end, seg_type))
+                    r34_starts.add(seg_start)   # 标记 R34 退化失败反弹,供级联 A-B-C 吸收
+                    self._cascade_merge_back(all_bis, segs, r34_starts)
+                    pos = segs[-1][1] + 1
+                    reverse_end_hint = None
+                    break
 
                 # Step 3: 吸收
                 # 吸收吃掉 [check, check+1] 两根笔，其中 check 是 cs 笔。
@@ -416,33 +395,170 @@ class XdCalculator:
                 seg_end = check + 1
                 check += 2
             else:
-                self._emit_pending(all_bis, seg_start, seg_type)
+                pending_tail = (seg_start, seg_type)
                 break
 
-        # 兜底输出最后一段未完成线段：内层 while 的 _emit_pending 只在自然结束时触发，
-        # 段尾被 _try_end 命中或外层 continue 推到末尾时不会触发，末尾反向未完成段会丢失。
-        # 以「最后一个已完成段终点之后」为新段起点再尝试一次 _emit_pending；整轮无
-        # _emit_segment 时用整段起点 + 起点笔方向。_emit_pending 内部已保护候选不足 3 根。
-        if last_emitted_end_idx >= 0:
-            pending_start = last_emitted_end_idx + 1
-            if pending_start < len(all_bis):
-                last_seg_type = all_bis[last_emitted_end_idx].type
-                pending_seg_type = 'down' if last_seg_type == 'up' else 'up'
-                # 已存在 self.xds[-1] 时无需重复产出 pending（_make_xd 不去重）；
-                # 通过判断「最后一段是否已是同方向 pending」避免重复 append。
-                already_pending = bool(self.xds) and (not self.xds[-1].done) \
-                    and self.xds[-1].type == pending_seg_type
-                if not already_pending:
-                    self._emit_pending(all_bis, pending_start, pending_seg_type)
+        self._emit_segments_deferred(all_bis, segs, pending_tail, start)
+
+    @staticmethod
+    def _breaks_back(all_bis, prior, cur) -> bool:
+        """cur(反向段)是否「破了 prior 转折点 T 那一笔的底/顶」→ prior 未结束、继续延续。
+        ★原文依据=缠中说禅课78正文(非回复区):
+          :40051「这个向下的线段,如果破了该向上笔的底,那么,原来的线段B 就是没结束,在继续延续」
+          :40059「如果没破该向上笔的底…线段B 肯定被破坏了」(未破=反向段成立、不合并)
+          :40032 R20「任何一段都是破坏前一段的…违反则划分一定有问题」
+        T=all_bis[pe].end.val=prior 终点笔的底/顶,几何上恰=破坏笔的底/顶(笔首尾相接)。
+        prior=down(T=谷): cur(up)段内最低<T 即跌破; prior=up(T=峰): cur(down)段内最高>T。
+        (旧注释写"未构成线段破坏(R27)"——R27「段内不破起点」是课67回复区网友归纳/标准化后性质、
+        非原始硬规则;真正依据是上述课78正文,已订正。)"""
+        ps, pe, pt = prior
+        cs, ce, _ = cur
+        turn = all_bis[pe].end.val
+        if pt == 'down':
+            return min(all_bis[j].low for j in range(cs, ce + 1)) < turn - 1e-9
+        return max(all_bis[j].high for j in range(cs, ce + 1)) > turn + 1e-9
+
+    @staticmethod
+    def _extreme_idx(all_bis, s, e, seg_type) -> int:
+        """[s,e] 内达 seg_type 方向真极值的笔下标(down→最低 low 谷笔 / up→最高 high 峰笔)。"""
+        bidx = s
+        if seg_type == 'down':
+            best = all_bis[s].low
+            for j in range(s, e + 1):
+                if all_bis[j].low < best:
+                    best, bidx = all_bis[j].low, j
+        else:
+            best = all_bis[s].high
+            for j in range(s, e + 1):
+                if all_bis[j].high > best:
+                    best, bidx = all_bis[j].high, j
+        return bidx
+
+    @staticmethod
+    def _breaks_extreme(all_bis, prior, cur) -> bool:
+        """cur 是否在 prior 方向上突破 prior 转折点极值(prior,cur **同向**,区别于反向的 _breaks_back)。
+        prior=down: cur 段内最低 < prior 终点谷; prior=up: cur 段内最高 > prior 终点峰。"""
+        _ps, pe, pt = prior
+        cs, ce, _ = cur
+        turn = all_bis[pe].end.val
+        if pt == 'down':
+            return min(all_bis[j].low for j in range(cs, ce + 1)) < turn - 1e-9
+        return max(all_bis[j].high for j in range(cs, ce + 1)) > turn + 1e-9
+
+    def _cascade_merge_back(self, all_bis, segs, r34_starts) -> bool:
+        """确认级联：两类合并循环至稳定，返回是否合并过。
+        ① 深度-1 假反弹（_breaks_back）：末段(cur)破前段转折点 → 并入前段，终点取真极值
+           (_extreme_idx)。原文=课78:40051 延续合并 / :40032-33 逆时间传递（均未限深度）。
+        ② A-B-C 吸收（R33 结局2 / 课78:40065「线段A、B、C 加起来只能算是一个线段」）：当
+           B(=segs[-2]) 是 **R34 退化失败反弹**（seg_start ∈ r34_starts）、且 C(=segs[-1]) 与
+           A(=segs[-3]) **同向**并突破 A 的方向极值（_breaks_extreme）→ B 是假反弹未顶住、趋势
+           穿过 A 继续，A、B、C 合并为 A 方向一段。**仅 B 为 R34 退化段才触发**（用 r34_starts 门控），
+           杜绝正常趋势 A(down)-B(真反弹 up,顶分型终结非 R34)-C(down) 被误合并。
+           修复 301004(假上冲被吸收进前下跌段) + QQQ(假回调被吸收进前上涨段,消除过度切碎)。
+        ★合并后终点取极值=课78:40069 标准化口径（详见步骤6.5 注释 + 审计 §11.6/§11.9）。"""
+        merged = False
+        while True:
+            if len(segs) >= 2 and self._breaks_back(all_bis, segs[-2], segs[-1]):
+                ps, _pe, pt = segs[-2]
+                cs, ce, _ = segs[-1]
+                new_end = self._extreme_idx(all_bis, cs, ce, pt)
+                segs[-2] = (ps, new_end, pt)
+                segs.pop()
+                merged = True
+                continue
+            if len(segs) >= 3 and segs[-2][0] in r34_starts:
+                A, B, C = segs[-3], segs[-2], segs[-1]
+                if A[2] == C[2] and self._breaks_extreme(all_bis, A, C):
+                    new_end = self._extreme_idx(all_bis, A[0], C[1], A[2])
+                    segs[-3] = (A[0], new_end, A[2])
+                    r34_starts.discard(B[0])
+                    segs.pop()
+                    segs.pop()
+                    merged = True
+                    continue
+            break
+        return merged
+
+    def _try_end_r34(self, all_bis, seg_start, seg_type, seg_high, seg_low, check):
+        """R34 反向线段破坏（课71 :37991「第一笔破坏前线段→延伸三笔→第三笔破第一笔结束位置
+        →新线段一定形成、前线段一定结束」）—— 补 `_try_end` 顶/底分型路径**结构性漏掉**的
+        「反向单调成段」破坏。
+
+        背景（实例 SZ.301004 4-28 后 446 笔跑飞）：当 up 段以「更低高点」结尾（端点 49.17 <
+        内部峰 49.20）、随后单调暴跌时，特征序列首元素=段内回调笔(高=内部峰 49.20) 恒 ≥ 反向
+        所有元素(单调递减) → 顶分型永不成立 → `_try_end` 恒 None → 段无限延伸跑飞。
+
+        正确判据（区别于被删的裸 Step2.5「单根反向笔破段起点即终结」违 R18）：须
+          ① rb1：check 之后出现破段起点(seg_anchor)的反向笔（R19 笔破坏）；
+          ② rb2：rb1 之后反向方向再创新极值、破 rb1 的结束位置（R34「第三笔破第一笔结束」
+             = 反向方向已确立 ≥3 笔线段，满足 R18「段被段破坏」）。
+        扫描中若同向笔先创段方向新极值 → 是延伸非破坏，放弃（交回主循环 Step1/3）。
+        命中返回 (real_end, next_start, next_end)；终点取段内真峰/谷(≥3 笔最小段约束)。"""
+        cs_bi_type = 'down' if seg_type == 'up' else 'up'
+        seg_anchor = all_bis[seg_start].start.val
+        n = len(all_bis)
+
+        def _same_new_extreme(b) -> bool:
+            return b.type == seg_type and (
+                b.high > seg_high + 1e-9 if seg_type == 'up' else b.low < seg_low - 1e-9)
+
+        def _broke(b, level) -> bool:
+            return (b.low < level - 1e-9) if seg_type == 'up' else (b.high > level + 1e-9)
+
+        rb1 = None
+        for j in range(check, n):
+            b = all_bis[j]
+            if _same_new_extreme(b):
+                return None
+            if b.type == cs_bi_type and _broke(b, seg_anchor):
+                rb1 = j
+                break
+        if rb1 is None:
+            return None
+        rb1_end = all_bis[rb1].low if seg_type == 'up' else all_bis[rb1].high
+        rb2 = None
+        for j in range(rb1 + 1, n):
+            b = all_bis[j]
+            if _same_new_extreme(b):
+                return None
+            if b.type == cs_bi_type and _broke(b, rb1_end):
+                rb2 = j
+                break
+        if rb2 is None:
+            return None
+        peak_idx = self._extreme_idx(all_bis, seg_start, rb1 - 1, seg_type)
+        real_end = max(peak_idx, seg_start + 2)
+        if real_end >= rb1 or all_bis[real_end].type != seg_type:
+            return None
+        return real_end, real_end + 1, rb2
+
+    # 确认级联推迟 done 的深度:一条段被确认(done)须其反向段「锁定不再延伸」——反向段
+    # 自身的反向被确认时才锁定。★原文依据=课78正文 :40060「线段B 已确认线段破坏了他前面的
+    # 线段…如果线段B 对前面线段的破坏都没确认,那就先确认」=确认有递归前提。breaks-back 合并
+    # 可回溯 ≥1 级(反向假反弹的高/低点可越过更前段起点),故末 _DEFER_DONE 条已确认段保持
+    # pending,防止「已 done 段被后续假反弹回溯合并」的当下性违例(实例 SH.000001 1m 起点
+    # 05-18 10:38 的 down 段)。注:原文未限级联深度(:40032/:40051);此处 2 仅末尾 done/pending
+    # 边界的经验值,因 calculate 全量重建、不影响已 done 段端点正确性;若发现需 ≥3 级回溯再调。
+    _DEFER_DONE = 2
+
+    def _emit_segments_deferred(self, all_bis, segs, pending_tail, start):
+        """发射 segs:推迟 done——末 _DEFER_DONE 条已确认段(反向尚未锁定)标 pending、其余
+        done;再补末段未完成线段。R18/L64:484「段必须被段破坏才确认结束」。"""
+        n = len(segs)
+        for i, (s, e, t) in enumerate(segs):
+            self._make_xd(all_bis[s:e + 1], t, done=(i < n - self._DEFER_DONE))
+        if pending_tail is not None:
+            self._emit_pending(all_bis, pending_tail[0], pending_tail[1])
+        elif segs:
+            # 内层被 _try_end 命中直至数据末尾:在最后段之后补末段未完成线段
+            pstart = segs[-1][1] + 1
+            if pstart < len(all_bis):
+                ptype = 'down' if segs[-1][2] == 'up' else 'up'
+                already = bool(self.xds) and (not self.xds[-1].done) and self.xds[-1].type == ptype
+                if not already:
+                    self._emit_pending(all_bis, pstart, ptype)
         elif start < len(all_bis):
-            # 本轮无 _emit_segment(全量整轮 / 增量重算尾部段):以 start 笔方向输出
-            # 未完成段。already_pending 保护:增量保留的前缀末段若已是同向 pending
-            # 则不重复 append(全量时 self.xds 为空,保护自然不触发)。
-            seg_type = all_bis[start].type
-            already_pending = bool(self.xds) and (not self.xds[-1].done) \
-                and self.xds[-1].type == seg_type
-            if not already_pending:
-                self._emit_pending(all_bis, start, seg_type)
+            self._emit_pending(all_bis, start, all_bis[start].type)
 
     # ----------------------------------------------------------
     # _try_end
@@ -591,6 +707,36 @@ class XdCalculator:
         if end_bi_idx - seg_start + 1 < 3:
             _log.debug(lambda:f"    _try_end: 笔数{end_bi_idx - seg_start + 1}<3 → 返回None")
             return None
+
+        # ---- 步骤6.5: 端点校正到段内真峰谷（标准化口径 课78:40069 + 当下性 R30）----
+        # ★原文定位（2026-06-17 重核，详见审计 §11.6）：把端点钉成段内极值是缠中说禅课78
+        #   :40069「标准化」口径——「在任何以线段为基础的分析中…都可以把该线段标准化为最高低点
+        #   都在端点……把线段当成一个没有内部结构的基本部件」，供下游"以线段为基础的分析"（中枢/
+        #   走势类型/买卖点，即本仓 XD 的全部消费方）。它【不是】原始线段端点的划分规则：课78
+        #   :40051 明文「线段的开始点并不是最高点」承认原始（古怪）线段端点可非极值。本仓所有消费方
+        #   均属 :40069 所指分析，故此标准化口径正确；勿据此误以为"原始线段必须端点=极值"。
+        #   （旧注释写"R12 顶分型顶=最高特征元素"把它说成线段划分硬规则，属误述，已订正。）
+        # 此校正同时消除 N1 当下性漂移（真 bug，勿退回到校正前）：_resolve_pivot_bi 给出的是
+        # 「吸收漂移」后的局部顶/底：当反向特征序列分型在段首峰出现前还凑不齐时，主循环 Step3
+        # 吸收会把 seg_end/check 推过真峰，使 _try_end 据此算出的端点落在真峰之后的较低同向笔 →
+        # 该端点随未来 K 的吸收步数漂移，已 done 段端点被未来 K 回改（违 R30；审计 N1，5m 实测 5 例）。
+        # 校正：端点取 [seg_start, end_bi_idx] 内达到段方向极值的同向笔（真峰 seg_high / 真谷
+        # seg_low）。该极值位「当下稳定」——延伸(Step1)已把任何更高/更低同向笔纳入极值，吸收
+        # 只扩大搜索区间、不改变极值所在笔，故无论未来 K 如何，真峰谷恒定，端点不再回改。
+        # 例外（R1 强制）：真峰谷落在段首 2 笔内（end<seg_start+2，无法凑足 ≥3 笔合法线段）时，
+        # 端点非极值是「≥3 笔最小线段」约束强制、非漂移，且其本身当下稳定 → 保留原局部端点。
+        peak_idx, peak_val = end_bi_idx, all_bis[end_bi_idx].end.val
+        for j in range(seg_start, end_bi_idx):
+            bj = all_bis[j]
+            if bj.type != seg_type:
+                continue
+            v = bj.end.val
+            if (v > peak_val) if seg_type == 'up' else (v < peak_val):
+                peak_idx, peak_val = j, v
+        if peak_idx != end_bi_idx and peak_idx >= seg_start + 2:
+            _log.debug(lambda:f"    _try_end: 端点校正 {end_bi_idx}→{peak_idx} "
+                       f"(真峰谷={peak_val:.3f} 原局部={all_bis[end_bi_idx].end.val:.3f})")
+            end_bi_idx = peak_idx
 
         # 方向校验：线段终点必须落在与方向一致的一侧（缠论第七节：向上线段其顶
         # 必大于第一笔的底，反之亦然）。当段内出现巨幅反向笔使净走向反转时，
@@ -835,5 +981,6 @@ class XdCalculator:
             pending_bis = candidates[:valid_idx + 1]
 
         xd = self._make_xd(pending_bis, seg_type, done=False)
+        xd.forming = True   # 显示口径：唯一"正在形成的最后一段"（图表画虚线）；与 done 解耦
         sv, ev = pending_bis[0].start.val, pending_bis[-1].end.val
         _log.debug(lambda:f"[未完成] XD[{xd.index}] {seg_type} {_bi_label(pending_bis[0])}~{_bi_label(pending_bis[-1])} ({len(pending_bis)}笔) {sv:.3f}→{ev:.3f}")

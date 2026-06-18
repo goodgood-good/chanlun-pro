@@ -83,8 +83,9 @@ def query_cl_chart_config(
         # 个人定制配置
         "kline_qk": Config.KLINE_QK_NONE.value,
         "judge_zs_qs_level": "1",
-        # K线配置
-        "kline_type": Config.KLINE_TYPE_DEFAULT.value,
+        # K线配置（图表默认显示包含处理后的缠论K线，便于核对合并/分型；
+        # 改回 KLINE_TYPE_DEFAULT 即恢复原始K线，或在 options 设置页按标的切换）
+        "kline_type": Config.KLINE_TYPE_CHANLUN.value,
         # 分型配置
         "fx_qy": Config.FX_QY_THREE.value,
         "fx_qj": Config.FX_QJ_K.value,

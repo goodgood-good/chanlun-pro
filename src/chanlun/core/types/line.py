@@ -523,7 +523,11 @@ class XD(LINE):
         self.ding_fx: XLFX = ding_fx
         self.di_fx: XLFX = di_fx
         self.tzxls: List[TZXL] = []  # 特征序列列表
-        self.done: bool = False  # 标记线段是否完成
+        self.done: bool = False  # 标记线段是否完成（信号/当下性口径：端点是否已锁定不可回改）
+        # 显示口径：是否为"正在形成的最后一段"。与 done 解耦——确认级联推迟 done 的末
+        # 2 条已成形确认段 done=False 但 forming=False（图表画实线），只有真正在建的末段
+        # forming=True（图表画虚线）。详见 xd_calculator._emit_pending / 审计 §11。
+        self.forming: bool = False
 
         # 是否是拆分后的线段，如果是，这里会写明原因
         self.is_split: str = ""
