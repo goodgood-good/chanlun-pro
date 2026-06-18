@@ -57,6 +57,28 @@ def _ld_area(ld: dict, direction: str) -> float:
     return ld["hist"]["up_sum"] if direction == "up" else ld["hist"]["down_sum"]
 
 
+def _ld_height(ld: dict, direction: str) -> float:
+    """柱子高度（伸长高度/乖离极限，原文第25课力度三要素之3）：up 看最高红柱
+    ``hist.max``，down 看最深绿柱 ``hist.min``。数据由 query_macd_ld 现成提供
+    （``types/interface.py`` 的 ld 字典含 hist.max/min）。"""
+    return ld["hist"]["max"] if direction == "up" else ld["hist"]["min"]
+
+
+def _bar_decays(ld_a: dict, ld_b: dict, direction: str) -> bool:
+    """柱子维度衰竭 = 面积衰竭 **OR** 柱高度不创新高（用户口径：柱子(面积 OR 高度)）。
+
+    原文第25课乖离极限「面积大于前面但柱子高度不破 = 背驰」——故面积与柱高度取 OR，
+    任一弱即柱子力度衰竭（否则"面积增大而柱高度不破"的背驰会被漏判，审计 B1）。
+    up：柱高 ``hist.max`` 后 < 前 = 不创新高 = 衰竭；
+    down：柱深 ``hist.min`` 后 > 前（更接近 0 轴 = 更浅）= 衰竭。
+    """
+    if _ld_area(ld_b, direction) < _ld_area(ld_a, direction):     # 面积衰竭
+        return True
+    if direction == "up":                                          # 柱高度不创新高
+        return _ld_height(ld_b, direction) < _ld_height(ld_a, direction)
+    return _ld_height(ld_b, direction) > _ld_height(ld_a, direction)
+
+
 def _ld_huangbai(ld: dict, direction: str) -> float:
     """黄白线高度：up 看 DIF 最大值（离 0 轴最远），down 看 DIF 最小值。"""
     return ld["dif"]["max"] if direction == "up" else ld["dif"]["min"]
@@ -68,7 +90,8 @@ def _ld_decays(
 ) -> bool:
     """力度是否衰竭（seg_b 在前者 seg_a 之后、同向）。
 
-    步骤2 柱子面积衰竭：seg_b 同向柱子面积 < seg_a。
+    步骤2 柱子衰竭：面积衰竭 **OR** 柱高度不创新高(乖离极限,原文第25课
+    三要素之2、3；见 _bar_decays)。
     步骤3 黄白线衰竭(仅线段及以上,见 _use_huangbai)：DIF 高度回收 +
     DIF 回抽 0 轴(任一条衰竭即判黄白线衰竭——原文细则1未明示二者关系,
     取宽口径)。
@@ -77,8 +100,8 @@ def _ld_decays(
     ld_a = ld_provider(seg_a.start, seg_a.end)
     ld_b = ld_provider(seg_b.start, seg_b.end)
 
-    # 步骤2：柱子面积衰竭
-    if not (_ld_area(ld_b, direction) < _ld_area(ld_a, direction)):
+    # 步骤2：柱子维度衰竭 = 面积衰竭 OR 柱高度不创新高(原文第25课力度三要素 + 乖离极限)
+    if not _bar_decays(ld_a, ld_b, direction):
         return False
 
     # 步骤3：黄白线衰竭——仅线段及以上(笔跳过,见 _use_huangbai)
