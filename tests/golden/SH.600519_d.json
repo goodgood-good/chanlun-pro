@@ -575,7 +575,7 @@
   ],
   "code": "SH.600519",
   "frequency": "d",
-  "kline_num": 359,
+  "kline_num": 272,
   "xd_zss": [
     {
       "dd": 1338.5,
@@ -635,7 +635,7 @@
     },
     {
       "bcs": [],
-      "done": true,
+      "done": false,
       "end": {
         "date": "2024-01-18T15:00:00+08:00",
         "val": 1449.16
@@ -652,7 +652,7 @@
     },
     {
       "bcs": [],
-      "done": true,
+      "done": false,
       "end": {
         "date": "2024-03-12T15:00:00+08:00",
         "val": 1642.71

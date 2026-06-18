@@ -12,21 +12,21 @@ import inspect
 
 
 def test_base_public_symbols():
-    """base 模块对外暴露的 7 个公共符号齐全。"""
+    """base 模块对外暴露的 6 个公共符号齐全（fee_us 空壳已于清理 commit 9f91abb9 删除）。"""
     from chanlun.backtesting import base
 
     for name in ("POSITION", "Operation", "MarketDatas", "Trader", "Strategy",
-                 "fee_a", "fee_us"):
+                 "fee_a"):
         assert hasattr(base, name), f"backtesting.base 缺公共符号 {name}"
 
 
 def test_base_direct_imports_work():
     """~15 调用方都走这条 import 路径,逐字钉死(facade 化后仍须可解析)。"""
     from chanlun.backtesting.base import (  # noqa: F401
-        POSITION, Operation, MarketDatas, Trader, Strategy, fee_a, fee_us,
+        POSITION, Operation, MarketDatas, Trader, Strategy, fee_a,
     )
 
-    assert callable(fee_a) and callable(fee_us)
+    assert callable(fee_a)
 
 
 def test_abc_contracts():
