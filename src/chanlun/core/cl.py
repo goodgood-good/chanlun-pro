@@ -572,6 +572,27 @@ class CL(ICL):
         self._recursive_memo[memo_key] = pts
         return pts
 
+    def get_branch_quasi_first(self, use_xd: bool = False):
+        """新核心:类一买/类一卖(B3,原文 L027 大级别盘整背驰=历史性底部=类买点)。lazy 并存。
+        返回 List[BuySellPoint](bs_type='类1buy'/'类1sell')。
+
+        ★类=quasi(缠明言操作意义弱、需次级别确认):刻意**不入** get_branch_bspoints/回测
+        BUYS 白名单(engine.buy_class 取首字符 int,'类'前缀会崩),作单独 marker 暴露,供图表/
+        分析/可选用,不改默认信号/golden/回测。``use_xd`` 同 get_branch_bspoints。
+        """
+        memo_key = ("quasi_first", bool(use_xd))
+        cached = self._recursive_memo.get(memo_key)
+        if cached is not None:
+            return cached
+        from chanlun.core.bs1_branch import QuasiFirstClassCalculator
+        ld = lambda s, e: query_macd_ld(self, s, e)      # noqa: E731
+        wzgx = self._recursive_wzgx()
+        units = list(self.get_xds()) if use_xd else list(self.get_bis())
+        levels = self._recursive_branch_calc(use_xd).calculate(units, ld, wzgx, self.frequency)
+        out = QuasiFirstClassCalculator().calculate(levels)
+        self._recursive_memo[memo_key] = out
+        return out
+
     def get_branch_bcs(self, use_xd: bool = False):
         """新核心背驰段(各级 done_divergence 里 is_beichi 的离开段),供图表「背驰信号」显示。
         返回 [(date, price, kind)],kind='qs'(趋势背驰)/'pz'(盘整背驰)。``use_xd`` 同
