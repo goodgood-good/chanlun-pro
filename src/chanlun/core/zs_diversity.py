@@ -220,10 +220,30 @@ def _refine_r3(
     return out
 
 
+def _recompute_divergence(zss, ld_provider, frequency):
+    """为精炼后中枢重算 done_divergence（复用 ZsBranchCalculator._divergence_for，
+    a=z.start 进入段 c=z.end 离开段 is_beichi + 趋势/盘整 kind）。ld_provider 为空则全 None。"""
+    from chanlun.core.zs_branch import ZsBranchCalculator
+    if ld_provider is None:
+        return [None] * len(zss)
+    zb = ZsBranchCalculator(ld_provider=ld_provider, frequency=frequency)
+    out = []
+    prev = None
+    for z in zss:
+        try:
+            out.append(zb._divergence_for(z, prev, live=False))
+        except Exception:
+            out.append(None)
+        prev = z
+    return out
+
+
 def refine(
     res: ZsBranchResult,
     units: List[LINE],
     min_lines: int,
+    ld_provider=None,
+    frequency=None,
 ) -> ZsBranchResult:
     """R4 编排入口：对 res.done_zss 施 _refine_r4，返回新 ZsBranchResult。
 
@@ -243,11 +263,11 @@ def refine(
         done_zss=zss,
         live=res.live,
         freeze_idx=res.freeze_idx,
-        done_divergence=[None] * len(zss),
+        done_divergence=_recompute_divergence(zss, ld_provider, frequency),
     )
 
 
-def emit_l1_upgrades(levels, min_lines: int, upgrade_seg: int = 9):
+def emit_l1_upgrades(levels, min_lines: int, upgrade_seg: int = 9, ld_provider=None, frequency=None):
     """L033:17 升级：紧凑横盘 ≥upgrade_seg 段延伸中枢 → 注入同核心的 L1 中枢。
 
     缠论定论：紧凑巨枢（子中枢核心区重叠=延伸，非 is_kuozhan 扩张）是一个合法延伸中枢
@@ -285,8 +305,8 @@ def emit_l1_upgrades(levels, min_lines: int, upgrade_seg: int = 9):
         l1 = new[1]
         merged = sorted(list(l1.zss) + ups, key=lambda z: z.lines[0].start.k.k_index)
         new[1] = dataclasses.replace(l1, zss=merged,
-                                     done_divergence=[None] * len(merged))
+                                     done_divergence=_recompute_divergence(merged, ld_provider, frequency))
     else:
         new.append(LevelResult(level=1, zss=ups, zslxs=[],
-                               done_divergence=[None] * len(ups)))
+                               done_divergence=_recompute_divergence(ups, ld_provider, frequency)))
     return new

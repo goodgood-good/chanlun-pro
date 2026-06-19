@@ -521,7 +521,7 @@ class CL(ICL):
             # L033:17 升级:紧凑横盘 ≥9 段延伸中枢 → 注入同核心 L1 中枢(加法,L0 不动)。
             from chanlun.core import zs_diversity
             result = zs_diversity.emit_l1_upgrades(
-                result, self._recursive_l0_min_zs_lines())
+                result, self._recursive_l0_min_zs_lines(), ld_provider=ld, frequency=self.frequency)
         self._recursive_memo["rbl"] = result
         return result
 
@@ -562,6 +562,7 @@ class CL(ICL):
         units = list(self.get_xds()) if use_xd else list(self.get_bis())
         levels = self._recursive_branch_calc(use_xd).calculate(
             units, ld, wzgx, self.frequency,
+            zs_diversity=bool(self.config.get("recursive_zs_diversity", False)),
         )
         if not levels:
             self._recursive_memo[memo_key] = []

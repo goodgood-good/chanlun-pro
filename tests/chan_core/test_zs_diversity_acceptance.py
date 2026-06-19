@@ -123,3 +123,49 @@ def test_002299_r3_on_giant_zhongshu_broken():
     assert max_span < 1500, (
         f"R3 on 后原 1683 根缓漂巨枢应已断开（最长跨度应 <1500），实际 {max_span}"
     )
+
+
+# ── 买卖点路径测试 ────────────────────────────────────────────────────────────
+
+@pytest.mark.skipif(not FIX.exists(), reason="002299 fixture 不存在")
+def test_bsp_flag_on_vs_off_differ():
+    """flag on 时买卖点用精炼中枢，三类点数 flag on ≠ flag off（证明买卖点接了精炼中枢）。"""
+    from chanlun.core.cl import CL
+    from chanlun.recursive_bt.engine.engine import CL_CFG
+
+    df = _load_df()
+
+    cd_off = CL("SZ.002299", "1m", dict(CL_CFG))
+    cd_off.process_klines(df)
+    pts_off = cd_off.get_branch_bspoints(use_xd=True)
+
+    cfg_on = dict(CL_CFG)
+    cfg_on["recursive_zs_diversity"] = True
+    cd_on = CL("SZ.002299", "1m", cfg_on)
+    cd_on.process_klines(df)
+    pts_on = cd_on.get_branch_bspoints(use_xd=True)
+
+    count_off = len(pts_off)
+    count_on = len(pts_on)
+    assert count_off != count_on, (
+        f"flag on 和 off 的买卖点总数应不同（说明买卖点确实用了精炼中枢）；"
+        f"off={count_off} on={count_on}"
+    )
+
+
+@pytest.mark.skipif(not FIX.exists(), reason="002299 fixture 不存在")
+def test_bsp_flag_on_has_first_class():
+    """flag on 下一类/二类买卖点未全丢（divergence 重算生效）。"""
+    from chanlun.core.cl import CL
+    from chanlun.recursive_bt.engine.engine import CL_CFG
+
+    cfg_on = dict(CL_CFG)
+    cfg_on["recursive_zs_diversity"] = True
+    cd_on = CL("SZ.002299", "1m", cfg_on)
+    cd_on.process_klines(_load_df())
+    pts = cd_on.get_branch_bspoints(use_xd=True)
+    first_or_second = [p for p in pts if getattr(p, 'bs_type', '') in ('1buy', '1sell', '2buy', '2sell')]
+    assert len(first_or_second) >= 1, (
+        f"flag on 下应有一类或二类买卖点（divergence 重算后），实际 0 个；"
+        f"所有类型: {set(getattr(p,'bs_type','') for p in pts)}"
+    )
