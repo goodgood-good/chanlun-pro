@@ -75,3 +75,88 @@ def test_first_third_class_3sell():
         _seg("up", 9.5, 9.8),  # 离开下, 回试9.8≤ZD=10
     ]
     assert _first_third_class(segs, 10.0, 11.0) == 3
+
+
+# ── Task 3: _refine_r4 ─────────────────────────────────────────────────────
+from chanlun.core.zs_diversity import _refine_r4  # noqa: E402
+
+
+def _make_zs(segs, zd, zg):
+    """用 SimpleNamespace 合成一个 ZS 替身（不依赖真实 ZS 构造器）。"""
+    z = NS(
+        lines=list(segs[:3]),   # 核心三段存 lines
+        start=segs[0],
+        end=segs[3] if len(segs) > 3 else None,
+        zd=float(zd),
+        zg=float(zg),
+        done=False,
+    )
+    return z
+
+
+def test_refine_r4_passthrough_no_third_class():
+    """无中间三类点的中枢原样穿透：_refine_r4([z], [], 3) 返回 [z]，本体不变。"""
+    # 构造 3 段核心 + 1 段离开，离开回试均未触发三类条件
+    # segs[3]=离开向上到11.5；但无 segs[4]（回试）→ _first_third_class 找不到对
+    # → i is None → passthrough
+    segs = [
+        _seg("up", 10, 11),
+        _seg("down", 11, 10),
+        _seg("up", 10, 11),   # 核心 3 段
+        _seg("up", 10.8, 11.5),  # 离开（无回试段）
+    ]
+    z = _make_zs(segs, 10.0, 11.0)
+    # 手动把离开段塞进 lines 让 _zs_segs 读取完整序列
+    z.lines = list(segs[:3])
+    z.end = segs[3]
+
+    result = _refine_r4([z], [], min_lines=3)
+
+    assert len(result) == 1
+    assert result[0] is z
+
+
+def test_refine_r4_truncates_at_third_class(monkeypatch):
+    """monkeypatch 强制在下标3切分，ZsCalculator 尾段重扫返回空 → 首个中枢收口到下标3之前。"""
+    # 构造 6 段的合成中枢序列（核心3 + 延伸3）
+    segs = [
+        _seg("up", 10, 11),
+        _seg("down", 11, 10),
+        _seg("up", 10, 11),    # 0-2: 核心
+        _seg("up", 10.8, 11.5),  # 3: 三买离开
+        _seg("down", 11.5, 11.2),  # 4: 回试
+        _seg("up", 11.2, 12.0),    # 5: 延续
+    ]
+    z = NS(
+        lines=list(segs[:3]),
+        start=segs[0],
+        end=segs[3],
+        zd=10.0,
+        zg=11.0,
+        done=False,
+    )
+    # 将所有段存入 lines，end=None（让 _zs_segs 只走 lines 路径）
+    z.lines = list(segs)
+    z.end = None
+
+    # monkeypatch _first_third_class → 强制返回下标 3
+    monkeypatch.setattr(
+        "chanlun.core.zs_diversity._first_third_class",
+        lambda *a, **k: 3,
+    )
+
+    # monkeypatch ZsCalculator → 尾段重扫返回空列表
+    monkeypatch.setattr(
+        "chanlun.core.zs_diversity.ZsCalculator",
+        lambda **k: type("X", (), {"calculate": lambda self, l: []})(),
+    )
+
+    result = _refine_r4([z], [], min_lines=3)
+
+    # 切分后：首个精炼中枢的 lines 只含 segs[:3]（下标 3 之前）
+    assert len(result) >= 1
+    first = result[0]
+    # 本体段数须收口：不能仍有 6 段
+    assert len(first.lines) < len(segs)
+    # 切点段（segs[3]）须被设为 .end
+    assert first.end is segs[3]
