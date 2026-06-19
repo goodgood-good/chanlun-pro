@@ -126,6 +126,7 @@ class RecursiveBranchCalculator:
         wzgx_config: str,
         frequency: Optional[str] = None,
         ld_provider_for_level: Optional[Callable[[int], LdProvider]] = None,
+        zs_diversity: bool = False,
     ) -> List[LevelResult]:
         """把线段递归装配成多级中枢/走势类型层级树。
 

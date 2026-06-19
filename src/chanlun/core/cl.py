@@ -515,6 +515,7 @@ class CL(ICL):
         # (1m 标的线段稀疏→线段中枢少,但缠论正确;丰富的笔中枢另在观察层显示。)
         result = self._recursive_branch_calc(True).calculate(
             list(self.get_xds()), ld, wzgx, self.frequency,
+            zs_diversity=bool(self.config.get("recursive_zs_diversity", False)),
         )
         self._recursive_memo["rbl"] = result
         return result
