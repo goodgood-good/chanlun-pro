@@ -245,3 +245,48 @@ def refine(
         freeze_idx=res.freeze_idx,
         done_divergence=[None] * len(zss),
     )
+
+
+def emit_l1_upgrades(levels, min_lines: int, upgrade_seg: int = 9):
+    """L033:17 升级：紧凑横盘 ≥upgrade_seg 段延伸中枢 → 注入同核心的 L1 中枢。
+
+    缠论定论：紧凑巨枢（子中枢核心区重叠=延伸，非 is_kuozhan 扩张）是一个合法延伸中枢
+    （中心定理一/L017:385），按 L033:17 升级到高一级别（同核心 [ZD,ZG]、level+1），
+    而非在 L0 拆开（拆=制造重叠同级别中枢=§F-B）。故此为**加法**：L0 延伸巨枢保留不动，
+    仅向 L1 注入升级中枢（安全，不改 L0/买卖点/zslx）。与 _refine_r3(running-overlap，
+    管缓漂核心漂移者) 互补：emit_l1_upgrades 管紧凑全重叠者。
+    """
+    if not levels:
+        return levels
+    import dataclasses
+
+    from chanlun.core.recursive_branch import LevelResult
+    from chanlun.core.types import ZS
+
+    l0 = levels[0]
+    ups = []
+    for z in l0.zss:
+        segs = list(z.lines)
+        if len(segs) < upgrade_seg:
+            continue
+        if len(_running_overlap_groups(segs, min_lines)) > 1:
+            continue                                  # 缓漂(R3 v1 已断)，非紧凑延伸
+        u = ZS(zs_type=z.zs_type, start=segs[0], end=segs[-1],
+               zg=z.zg, zd=z.zd, level=z.level)        # 紧凑延伸 → 升级中枢(同核心)
+        u.lines = list(segs)
+        u.done = True
+        u._bounds_dirty = True
+        u.update_boundaries()
+        ups.append(u)
+    if not ups:
+        return levels
+    new = list(levels)
+    if len(new) >= 2:
+        l1 = new[1]
+        merged = sorted(list(l1.zss) + ups, key=lambda z: z.lines[0].start.k.k_index)
+        new[1] = dataclasses.replace(l1, zss=merged,
+                                     done_divergence=[None] * len(merged))
+    else:
+        new.append(LevelResult(level=1, zss=ups, zslxs=[],
+                               done_divergence=[None] * len(ups)))
+    return new
