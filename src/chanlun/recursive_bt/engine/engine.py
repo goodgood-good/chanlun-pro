@@ -1,13 +1,13 @@
-"""scripts/recursive_backtest.py — 缠论多级别买卖点结合策略回测引擎。
+"""缠论多级别买卖点结合策略回测引擎。
 
 数据源: chart_cache pkl(t/o/h/l/c/v 真实 K 线)。信号: cd.get_kuozhan_levels() 多级别买卖点
 (L1=5m 非同级别扩展/扩张, L2=30m 同级别分解)。策略: 大小级别结合——大级别(L2/30m)定方向,
-小级别(L1/5m)精确进场(缠论「大级别看方向、小级别找买卖点」)。市场规则: A股 T+1/无做空/印花税/
+小级别(L1/5m)精确进场(大级别看方向、小级别找买卖点)。市场规则: A股 T+1/无做空/印花税/
 涨跌停; 美股 T+0/可做空。输出: 各标的×策略 收益对比。
 
 回测口径说明: 买卖点取全序列计算(anchor_fx.k.date=确认bar),进场=确认bar的下一bar开盘价
 (规避当bar lookahead)。右边缘买卖点会 repaint,但历史段买卖点稳定 → 一阶近似可接受;后续可升级
-为逐bar增量重算。运行: PYTHONPATH="src;web/chanlun_chart;." python scripts/recursive_backtest.py
+为逐bar增量重算。运行: PYTHONPATH="src;web/chanlun_chart;." python -m chanlun.recursive_bt.engine.engine
 """
 from __future__ import annotations
 
@@ -34,11 +34,8 @@ CL_CFG = {
     "chart_show_xd_mmd": "1", "chart_show_bi_bc": "1", "chart_show_xd_bc": "1",
     "zs_bi_type": ["zs_type_bz"], "zs_xd_type": ["zs_type_bz"],
     "idx_macd_fast": 12, "idx_macd_slow": 26, "idx_macd_signal": 9,
-    # L0 线段中枢成枢门槛 = 4（用户拍板 2026-06-18，审计 F-A）：取「前三个走势类型都是
-    # 完成的」(L018:12) + 线段需被下一线段破坏确认完成 + 离开段/连接段确认(定理三 R9/R22)
-    # 的当下性确认门读法，与 legacy(ZsCalculator 默认4) 统一，消除「图表(legacy4)≠回测
-    # (新核心3)」分裂。L≥1 走势类型中枢仍 3（走势类型已是完成单元，3 个次级别走势类型重叠
-    # 即成中枢，见 recursive_branch:143 else 3）。字面最忠实是 3(L017)，4 是当下性稳健侧。
+    # L0 线段中枢成枢门槛 = 4：与 legacy(ZsCalculator 默认4) 统一，消除「图表≠回测」分裂。
+    # L≥1 走势类型中枢仍 3（走势类型已是完成单元，3 个次级别走势类型重叠即成中枢）。
     "recursive_l0_min_zs_lines": 4,
 }
 
@@ -261,12 +258,11 @@ def collect_signals(cd: CL) -> List[Signal]:
 
 
 def collect_nest_cascade_signals(cd: CL) -> List[Signal]:
-    """R78 区间套介入信号:大级别候选 × 次级别(L0/笔)确认 → 介入事件(3buy_nest)。
+    """区间套介入信号:大级别候选 × 次级别(L0/笔)确认 → 介入事件(3buy_nest)。
 
     候选(get_kuozhan_candidates)=大级别离开腿冲出 ZG、回试腿未走出;在回试窗口内用
     L0/笔级买点(collect_branch_signals)首次可见作为介入触发,免等大级别回试腿钉死的
-    170-519 bar 滞后(6b 设计;原文 H.56 行13922「没必要等回抽走完,在次级别第一类买点
-    介入即可」)。无未来:候选与确认都只用当根可见状态。确认过滤:买向 + 价格域(确认价
+    滞后。无未来:候选与确认都只用当根可见状态。确认过滤:买向 + 价格域(确认价
     ≥ZG,保证回试不破核心) + 时间域(确认晚于候选离开段终点,落在回试窗口内);每候选只
     触发一次(wf fresh 机制按 date 身份去重)。退出走现有结构失效(structural_stop_below=
     cand.invalid_below=ZG)。第一版只产 3buy_nest;1buy_nest 与失效事件留后续。"""
@@ -298,22 +294,16 @@ def collect_nest_cascade_signals(cd: CL) -> List[Signal]:
 
 
 def collect_qs_beichi_candidates(cd: CL) -> List[Signal]:
-    """R78 真闭环:L0 进行中趋势底背驰段(provisional qs)+ 次级别(笔)买点确认 → 介入(1buy_nest)。
+    """L0 进行中趋势底背驰段(provisional qs)+ 次级别(笔)买点确认 → 介入(1buy_nest)。
 
-    用 LevelResult.live_qs_divergence(右边缘 node1=leave 读法的 provisional qs 背驰段),
-    而非 done_divergence——后者在背驰段钉死时才可见、笔级确认已 stale(spec R78 实现关键细节)。
-    背驰段进行中(下跌)时,配对其内首次可见的笔级买点(collect_branch_signals use_xd=False)
-    介入,免等线段级背驰段钉死。退出走结构失效(跌破中枢本体下沿 zs.dd,C5.41 力度证伪)。
-    对齐原文 27/61课区间套:背驰段进行中即下推次级别买点,不等中枢升级。
+    用 LevelResult.live_qs_divergence(右边缘 provisional qs 背驰段),而非 done_divergence——
+    后者在背驰段钉死时才可见、笔级确认已 stale。背驰段进行中(下跌)时,配对其内首次可见的
+    笔级买点(collect_branch_signals use_xd=False)介入,免等线段级背驰段钉死。
+    退出走结构失效(跌破中枢本体下沿 zs.dd)。
 
-    次级别确认口径(R78 实测定档,2026-06-13):原文 H.56「次级别第一类买点介入」严格读法
-    在工程上次优。wf 实测(NVDA 真底前下跌段)显示:笔级 **1buy 是「转折前」趋势背驰点**,
-    在多腿下跌中每条下跌腿都触发一次,全是假底(05-01@198.65 笔级 1buy→价继续跌到 194.51);
-    而笔级 **2buy/3buy 是「转折后」确认**(中枢重夺/回调不破),才标志最小级别真正转上
-    (05-05@197.90 笔级 3buy→反弹到 215,+8.6%)。L0 背驰段(down+is_beichi,创新低+力度衰竭)
-    是「大级别背驰背景」硬门控,段内**首个笔级 2buy/3buy 转折确认**即介入,zs.dd 结构止损兜底。
-    取 2buy/3buy(排除转折前 1buy)而非原文严格 1buy,是低回撤导向的实测定档;早 entry 在
-    protracted 下跌中仍有残留假底(如 05-04 3buy 小幅止损),区间套提前量与假底风险的固有权衡。"""
+    次级别确认口径:取笔级 2buy/3buy(转折后确认:中枢重夺/回调不破),排除转折前 1buy
+    假底。L0 背驰段(down+is_beichi)是硬门控,段内首个笔级 2buy/3buy 转折确认即介入,
+    zs.dd 结构止损兜底。低回撤导向,区间套提前量与假底风险存在固有权衡。"""
     levels = cd.get_recursive_branch_levels()
     l0 = next((lv for lv in levels if getattr(lv, "level", None) == 0), None)
     if l0 is None:
@@ -388,9 +378,9 @@ def wf_dir_series(df: pd.DataFrame, code: str, tf: str,
 
 def wf_seg38_series(df: pd.DataFrame, code: str, tf: str,
                     warmup: int = 30) -> List[Tuple[pd.Timestamp, str]]:
-    """38课同级别分解**机械化操作程式**(原文line24751)的 walk-forward 工程版。
+    """同级别分解机械化操作程式的 walk-forward 工程版。
 
-    原文程式(30m同级别分解):向上段背驰点先卖;向下第二段不跌破前低→重新买入;
+    程式(30m同级别分解):向上段背驰点先卖;向下第二段不跌破前低→重新买入;
     向上第三段不创新高→一定先卖出(创新高+盘整背驰也卖,不背驰持有);循环。
     工程化(实盘可复制,无lookahead):逐根增量喂,当「当下笔方向」翻转时,比较刚完成笔
     与前一同向笔的极值——down→up 翻转:刚完成 down 笔低点 ≥ 前 down 笔低点(不破低)→buy;
@@ -458,8 +448,8 @@ def collect_branch_signals(
         from chanlun.core.recursive_branch import RecursiveBranchCalculator
 
         ld = lambda s, e: query_macd_ld(cd, s, e)
-        # fallback 必须与 CL._recursive_wzgx 一致(原文严格档 GD,定理二)——
-        # 此前写死 ZGD,config 缺键时与 CL 内部口径分裂(2026-06-12 审计修复)。
+        # fallback 必须与 CL._recursive_wzgx 一致(GD 口径)——
+        # 此前写死 ZGD,config 缺键时与 CL 内部口径分裂。
         wzgx = cd.config.get("zs_wzgx", Config.ZS_WZGX_GD.value)
         l0_min = cd._recursive_l0_min_zs_lines()
         units = list(cd.get_xds()) if use_xd else list(cd.get_bis())
@@ -692,7 +682,7 @@ class Simulator:
 # 策略(大小级别结合)
 # ---------------------------------------------------------------------------
 class MTFStrategy:
-    """多周期大小级别结合(原文同级别分解操作:大级别30m定方向开窗,小级别5m窗口内进场)。
+    """多周期大小级别结合策略:大级别30m定方向开窗,小级别5m窗口内精确进场。
 
     decide 在 5m 执行bar 上工作。big_dir_at[i] = 截至第 i 根 5m bar 的 30m 大级别方向
     (30m 信号 +30min 延迟生效,规避未完成 30m bar 的 lookahead)。

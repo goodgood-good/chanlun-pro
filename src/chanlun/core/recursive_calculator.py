@@ -1,10 +1,9 @@
-"""recursive_calculator.py — 缠论递归装配(子项目④)。
+"""recursive_calculator.py — 缠论递归装配。
 
-把 ①ZsCalculator(中枢) / ②beichi_calculator(背驰) / ③ZslxCalculator(走势类型)
+把 ZsCalculator(中枢) / beichi_calculator(背驰) / ZslxCalculator(走势类型)
 交替递归，构建 中枢-L0 → 走势类型-L0 → 中枢-L1 → … 的多级层级树。
 
 并存独立子系统：不动周期多级分析、不动 bs_point_calculator。
-原文依据见 docs/chanlun_core_redesign_4_recursive_design.md §2。
 """
 
 from __future__ import annotations
@@ -51,15 +50,14 @@ def _split_one(zs: ZS) -> List[ZS]:
     """把一个 ≥9 段中枢按 (123)(456)(789)… 拆成 ⌊N/3⌋ 个三段子中枢。
 
     N%3≠0 时余 1~2 段并入最后一组（保证每组 ≥3）。子中枢边界口径与
-    ZsCalculator 初始三段一致：zg/zd 取前三段、gg/dd 由 update_boundaries 全量。
+    ZsCalculator 初始三段一致：zg/zd 取前两段、gg/dd 由 update_boundaries 全量。
 
     子中枢进入段：首组沿用原中枢进入段（可能为 None），其余组取前一组末段
     （紧邻本组核心之前的走势段）——子中枢若构成趋势即可参与趋势背驰。
 
-    所有子中枢标记 ``_split_group_id = id(zs)`` —— ⑤ 扩展识别据此跳过「同源
+    所有子中枢标记 ``_split_group_id = id(zs)`` —— 扩展识别据此跳过「同源
     子中枢之间互相合并」(否则会立即合回原中枢、白拆),仅允许它们与外部独立
-    中枢扩展。这样既保留原文 #2.1 的「9 段拆 → 上层升级」路径,又允许真正的
-    跨中枢扩展(原文 #391)。
+    中枢扩展。
     """
     lines = zs.lines
     n = len(lines)
@@ -77,8 +75,7 @@ def _split_one(zs: ZS) -> List[ZS]:
         sub = ZS(zs_type=zs.zs_type, start=entry)
         sub.lines = group
         sub._bounds_dirty = True
-        # 原文 kobo.125.1：ZG=min(g₁,g₂)、ZD=max(d₁,d₂)——只取前 2 段。
-        # 与 ZsCalculator 初始三段中枢的 zg/zd 口径(同样取前 2 段)保持一致。
+        # ZG=min(g₁,g₂)、ZD=max(d₁,d₂)——只取前 2 段，与 ZsCalculator 初始口径保持一致。
         sub.zg = min(s.zs_high for s in group[:2])
         sub.zd = max(s.zs_low for s in group[:2])
         sub.update_boundaries()
@@ -90,8 +87,8 @@ def _split_one(zs: ZS) -> List[ZS]:
 def _split_oversized(zss: List[ZS]) -> List[ZS]:
     """对中枢列表做 9 段分裂：≥9 段的中枢拆成三段子中枢，其余原样。
 
-    落地缠论段2.1「延伸超9段升级」——单个 ≥9 段中枢经 ③划分只得 1 个盘整、
-    单独无法升级；拆开后子中枢经划分、上一级扫描可聚成高级中枢。
+    单个 ≥9 段中枢经划分只得 1 个盘整、单独无法升级；拆开后子中枢经划分、
+    上一级扫描可聚成高级中枢。
     """
     out: List[ZS] = []
     for zs in zss:
@@ -103,16 +100,12 @@ def _split_oversized(zss: List[ZS]) -> List[ZS]:
 
 
 def _merge_zss(subs: List[ZS]) -> ZS:
-    """把 N(≥2)个子中枢合并为 1 个高级扩展中枢(原文 #391·走势中枢扩展)。
+    """把 N(≥2)个子中枢合并为 1 个高级扩展中枢。
 
     高级中枢的字段口径:
-      - ``gg`` / ``dd`` = 子中枢包络合并(max(sub.gg) / min(sub.dd))——原文
-        定义的「瞬间波动区间」自然合并;
-      - ``zg`` / ``zd`` = 子中枢核心区[ZD,ZG]的**包络**(max(sub.zg) / min(sub.dd
-        →min(sub.zd))。原文(第57课 L57_03 实例「中枢扩展区间取值=三个组合
-        中枢的[ZD,ZG]中的最高和最低」=[4015,4122])即子核心包络,而非交集。
-        旧实现取交集(min sub.zg/max sub.zd),子核心分离时退化为 gg/dd,与原文不符。
-        包络 zd=min(sub.zd)<zg=max(sub.zg) 恒成立,无需空交集兜底。
+      - ``gg`` / ``dd`` = 子中枢包络合并(max(sub.gg) / min(sub.dd));
+      - ``zg`` / ``zd`` = 子中枢核心区[ZD,ZG]的**包络**(max(sub.zg) / min(sub.zd))，
+        取包络而非交集，子核心分离时不退化为 gg/dd;
       - ``lines`` = 子中枢 lines 时序拼接;
       - ``start`` = 首子中枢的 start;``end`` = 末子中枢的 end;``done`` = 全部子完成;
       - ``expanded_with`` = subs(供消费方追溯子结构)。
@@ -143,7 +136,7 @@ def _merge_zss(subs: List[ZS]) -> ZS:
 
 
 def _expand_overlapping(zss: List[ZS]) -> List[ZS]:
-    """合并相邻 GG/DD 包络重叠的同级别中枢(原文 #391·中枢扩展)。
+    """合并相邻 GG/DD 包络重叠的同级别中枢（中枢扩展）。
 
     顺序扫描中枢序列,维护一个 pending 组(初始为单个中枢);每个新中枢:
       - 若与 pending 组的合并中枢 GG/DD 包络重叠 → 加入 pending 组;
@@ -160,7 +153,7 @@ def _expand_overlapping(zss: List[ZS]) -> List[ZS]:
     pending_env_dd = zss[0].dd
     for cur in zss[1:]:
         # 跳过同源(9 段分裂出的子中枢之间)互相扩展——见 _split_one 注释。
-        # pending 与 cur 同属一个 _split_group_id 时,不合并,保留原文 #2.1 升 L1 路径。
+        # pending 与 cur 同属一个 _split_group_id 时,不合并,保留升 L1 路径。
         prev_group = getattr(pending[-1], "_split_group_id", None)
         cur_group = getattr(cur, "_split_group_id", None)
         same_source = (prev_group is not None and prev_group == cur_group)
@@ -208,22 +201,20 @@ class RecursiveCalculator:
         units: List[LINE] = list(xds)
         level = 0
         while level < _MAX_LEVELS:
-            # L0 构成段是线段 → 最小中枢 4 段（项目口径，偏离原文）；
-            # L≥1 构成段是走势类型 → 按原文「3 个次级别走势类型重叠成
-            # 中枢」用 3。与 require_alternation 同为分级参数。
-            # 递归子系统**不封顶延伸**(max_zs_lines 给极大值)：本子系统的升级走
-            # _split_oversized「≥9 段拆为 3 段子中枢」这条路(下一行),需要 ≥9 段中枢
-            # 存在才能触发。主链路(cl.zss_calculator)用默认封顶 8 段得到「显示用的
-            # 合理基础中枢」；递归这里保留原始延伸 + 拆分升级——同一数据两种合理划分
-            # (走势多义性)：主链路看基础中枢、递归看升级层级。
+            # L0 构成段是线段 → 最小中枢 4 段；
+            # L≥1 构成段是走势类型 → 用 3（走势类型已是完成单元）。
+            # 递归子系统不封顶延伸(max_zs_lines 给极大值)：升级经由
+            # _split_oversized「≥9 段拆为 3 段子中枢」触发。
+            # 主链路(cl.zss_calculator)用默认封顶 8 段得到显示用基础中枢；
+            # 递归保留原始延伸 + 拆分升级，呈现多级层级结构。
             zss = ZsCalculator(
                 require_alternation=(level == 0),
                 min_zs_lines=(4 if level == 0 else 3),
                 max_zs_lines=10 ** 9,
             ).calculate(units)
-            # 9 段优先于扩展(spec ⑤ 决策):先把 ≥9 段中枢拆为 3 段子中枢,再做
-            # 扩展识别——子中枢之间的 GG/DD 包络重叠由扩展合并,自然涌现
-            # 「超 9 段中枢升级为高级中枢」的原文 #2.1 语义。
+            # 9 段优先于扩展：先把 ≥9 段中枢拆为 3 段子中枢,再做
+            # 扩展识别——子中枢之间的 GG/DD 包络重叠由扩展合并,自然实现
+            # 超 9 段中枢升级为高级中枢的语义。
             zss = _split_oversized(zss)
             zss = _expand_overlapping(zss)
             if not zss:

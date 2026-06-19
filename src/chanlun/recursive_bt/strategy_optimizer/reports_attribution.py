@@ -1,4 +1,4 @@
-"""strategy_optimizer 买卖点/层级/regime 归因报告 + trade 明细分析 —— 从 _impl 拆出。
+"""strategy_optimizer 买卖点/层级/regime 归因报告 + trade 明细分析。
 
 读交易明细 csv,按买卖点类别/层级/行情分组统计收益与比例指导,产出归因报告
 + markdown。trade 分析 helper(_summarize_trade_group 等)专为本族服务。

@@ -14,6 +14,7 @@ class BiCalculator:
 
     对内采用“已确认笔 + 当前待定笔”的状态机，每次在最新缠论 K 线上重放，
     优先保证结果正确与全量/增量一致性。
+    bi_mode 支持 'strict'（严格笔）或 'new'（新笔）两种成笔模式。
     """
 
     def __init__(self, bi_mode: str = 'strict'):
@@ -49,12 +50,11 @@ class BiCalculator:
     def _check_stroke_validity(self, fx1: FX, fx2: FX) -> bool:
         """检查两个分型是否能构成有效的一笔。
 
-        成笔距离两种模式忠于各自原文定义、且度量在不同坐标空间：
-          strict 老笔(L62/L77)：顶底之间≥1根「独立(包含处理后)缠论K线」
+        成笔距离两种模式度量在不同坐标空间：
+          strict 严格笔：顶底之间间隔足够的「独立(包含处理后)缠论K线」
               ⟺ 合并缠论K线坐标 ``fx.k.index`` 距离 ≥4。
-          new   新笔(L81)：顶峰原始K线与底谷原始K线之间(不含两端)、「不考虑包含
-              关系」≥3根原始K线 ⟺ 原始K线坐标距离 ≥4。
-        见 audit/bi_faithfulness_audit.md F1。
+          new   新笔：顶峰原始K线与底谷原始K线之间(不含两端)、「不考虑包含
+              关系」间隔足够的原始K线 ⟺ 原始K线坐标距离 ≥4。
         """
         if fx1.type == fx2.type:
             return False
@@ -83,12 +83,11 @@ class BiCalculator:
 
     @staticmethod
     def _extreme_src_index(fx: FX) -> int:
-        """新笔(L81)成笔距离用：分型「极值原始K线」的原始坐标 index。
+        """新笔成笔距离用：分型「极值原始K线」的原始坐标 index。
 
         顶分型→峰缠论K线内 h 最大的原始K线 index；底分型→谷缠论K线内 l 最小的
-        原始K线 index。对应原文「顶分型中最高K线 / 底分型的最低K线」，「不考虑
-        包含关系」即落在原始K线坐标系(非合并缠论K线序号)。无原始K线明细时退回
-        ``k_index`` 兜底。
+        原始K线 index。即取顶分型中最高K线 / 底分型的最低K线，落在原始K线坐标系
+        (非合并缠论K线序号)。无原始K线明细时退回 ``k_index`` 兜底。
         """
         srcs = fx.k.klines
         if not srcs:
@@ -178,7 +177,7 @@ class BiCalculator:
         - 情形①同类：与栈顶同类，更极端则取代栈顶，否则丢弃；
         - 情形②异类成笔：与栈顶异类且满足成笔条件 → 入栈；
         - 情形③异类不成笔：栈顶是被新分型与其同类前驱夹击的「多余端点」则弹出，
-          否则（真端点/新分型不够极端/栈不足 3 即 R1 兜底）丢弃新分型。
+          否则（真端点/新分型不够极端/栈不足 3 时兜底）丢弃新分型。
         不变量：stack 始终顶底严格交替（情形③取 stack[-2]/stack[-3] 依赖此）。
         """
         n = self._endpoint_stack_n
@@ -218,12 +217,11 @@ class BiCalculator:
                     break
                 # 情形③：异类不成笔
                 if len(stack) < 3:
-                    break  # R1：栈不足，无法判定，丢弃 fx
+                    break  # 栈不足，无法判定，丢弃 fx
                 prev = stack[-2]
-                # 读法A(77课唯一性 + 成笔距离回溯)：prev→last 满足成笔距离 ⇒ last 是
-                # 「合法距离的反弹/回调端点」,不应被「过路的近距分型 fx」回溯吞并。
-                # 丢弃 fx,待后续达成笔距离的真实端点经情形②自然接出下一笔。
-                # 见 audit/bi_faithfulness_audit.md §12 / 真实案例 301004 笔2628。
+                # prev→last 满足成笔距离 ⇒ last 是「合法距离的反弹/回调端点」,不应被
+                # 「过路的近距分型 fx」回溯吞并。丢弃 fx,待后续达成笔距离的真实端点经
+                # 情形②自然接出下一笔。
                 if self._check_stroke_validity(prev, last):
                     break
                 # 以下原「夹击弹出」回溯分支:因栈内相邻对 (prev, last) 恒满足成笔距离

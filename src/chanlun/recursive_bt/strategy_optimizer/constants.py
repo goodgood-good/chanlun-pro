@@ -1,7 +1,7 @@
 """strategy_optimizer 报告/CLI 共享的回测 summary 路径常量 + regime 顺序。
 
-从 _impl 抽出:被 regime/attribution 报告族 + CLI(make_arg_parser) + 外部
-live_monitor 共享引用;纯数据(硬编码 D:/chanlun_pro/reports/*.json),零依赖。
+被 regime/attribution 报告族、CLI 及外部 live_monitor 共享引用;
+纯数据(硬编码 D:/chanlun_pro/reports/*.json),零依赖。
 """
 
 A_MTF3_SELL3_REBUY_MID3_DEFAULT_SUMMARY = (

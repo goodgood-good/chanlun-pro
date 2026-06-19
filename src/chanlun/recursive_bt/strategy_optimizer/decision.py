@@ -1,4 +1,4 @@
-"""strategy_optimizer 优化报告 + 决策/覆盖 主线 —— 从 _impl 拆出。
+"""strategy_optimizer 优化报告 + 决策/覆盖 主线。
 
 汇总候选/运行时评分为优化报告,推导决策工件/状态与 runtime/买点比例覆盖文件,
 并按 monitor_config 反查候选。供 CLI/外部 live_monitor 调用。依赖 candidates+

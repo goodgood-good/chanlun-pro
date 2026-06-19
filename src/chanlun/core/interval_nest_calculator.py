@@ -1,11 +1,9 @@
-"""interval_nest_calculator.py — 缠论区间套（基于 ④ 递归层级树）。
+"""interval_nest_calculator.py — 缠论区间套（基于递归层级树）。
 
-原文第三章·第六节《区间套》：根据背驰段从高级别向低级别逐级寻找背驰点，
-逐重收缩范围、精确定位转折点。本模块从 ④ 的递归层级树出发，找最高级别趋势
-背驰的末走势类型，沿 zss[-1].lines[-1] 下钻到 L0。
+从递归层级树出发，找最高级别趋势背驰的末走势类型，沿 zss[-1].lines[-1]
+逐级下钻到 L0，逐重收缩范围、精确定位转折点。
 
 并存独立子系统：不动周期分析、不动 bs_point_calculator。
-设计见 docs/chanlun_core_redesign_5_interval_nest_design.md。
 """
 
 from __future__ import annotations

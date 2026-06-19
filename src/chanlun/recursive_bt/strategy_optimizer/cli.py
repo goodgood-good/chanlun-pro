@@ -1,7 +1,6 @@
-"""strategy_optimizer 命令行入口 —— 从 _impl 拆出(原巨文件最后一段)。
+"""strategy_optimizer 命令行入口。
 
-argparse 解析 + main 调度各报告 write_*。原 strategy_optimizer.py 5585 行至此全部
-拆为职责模块(models/candidates/utils/scoring/constants/reports_*/decision/cli)。
+argparse 解析 + main 调度各报告 write_*。
 """
 from __future__ import annotations
 

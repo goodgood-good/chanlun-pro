@@ -1,4 +1,4 @@
-"""strategy_optimizer MTF3 缓存覆盖报告 —— 从 _impl 拆出。
+"""strategy_optimizer MTF3 缓存覆盖报告。
 
 审计 A/US 的 1m5m30m 多周期 K线缓存(chart_cache + bt_data)完整度,产出覆盖
 报告 + markdown + 重建命令建议。自包含(仅 stdlib),供 CLI/外部 live_monitor 调用。

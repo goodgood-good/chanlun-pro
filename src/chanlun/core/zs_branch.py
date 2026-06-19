@@ -1,13 +1,11 @@
-"""zs_branch.py — P1 中枢多假设结构核（子项目①·宪法 §2/§3.5/§4 结构层）。
+"""中枢多假设结构核。
 
 单级别、以确定性线段为输入，产出「冻结的已完成中枢 + 右边缘多假设分支池」。
-本模块**不依赖、也不改动** zs_calculator.py 与任何生产链路（零回归风险）。
+本模块不依赖、也不改动 zs_calculator.py 与任何生产链路（零回归风险）。
 
-口径（宪法 §3.5）：
+口径：
 - 成中枢的重叠用严格 `<`（ZD<ZG 才算非退化重叠）。
 - 延伸/扩张的「触及」用闭区间 `<=`（触边即算）。
-
-不含：背驰（H2a/H2b）、升级/扩张实体化、买卖点、区间套、增量——见后续子项目。
 """
 
 from __future__ import annotations
@@ -23,12 +21,12 @@ from chanlun.core.beichi_calculator import is_beichi, is_qs, LdProvider
 
 
 def core_interval(seg_a: LINE, seg_b: LINE, seg_c: LINE) -> Optional[Tuple[float, float]]:
-    """前三段重叠的核心区间 [ZD, ZG]（第18课严格公式）。
+    """前三段重叠的核心区间 [ZD, ZG]。
 
     ZD=max(三段低), ZG=min(三段高)；严格 ZD<ZG 才算非退化重叠，否则 None。
 
-    primitive：calculate 已委托 ZsCalculator 找中枢、本函数当前未接线，留作
-    下游（P2+ 延伸/扩张判定）复用的缠论几何基元。
+    几何基元：calculate 已委托 ZsCalculator 找中枢、本函数当前未接线，留作
+    下游延伸/扩张判定复用。
     """
     zd = max(seg_a.zs_low, seg_b.zs_low, seg_c.zs_low)
     zg = min(seg_a.zs_high, seg_b.zs_high, seg_c.zs_high)
@@ -38,16 +36,16 @@ def core_interval(seg_a: LINE, seg_b: LINE, seg_c: LINE) -> Optional[Tuple[float
 
 
 def envelope(lines: List[LINE]) -> Tuple[float, float]:
-    """中枢包络 [DD, GG]：DD=min(所有段低), GG=max(所有段高)（第20课瞬间波动区间）。"""
+    """中枢包络 [DD, GG]：DD=min(所有段低), GG=max(所有段高)（含瞬间波动区间）。"""
     dd = min(ln.zs_low for ln in lines)
     gg = max(ln.zs_high for ln in lines)
     return (dd, gg)
 
 
 def touches(seg: LINE, lo: float, hi: float) -> bool:
-    """线段是否触及闭区间 [lo, hi]（延伸/扩张口径：触边即算，对应中心定理二的 ≥/≤）。
+    """线段是否触及闭区间 [lo, hi]（延伸/扩张口径：触边即算，用 ≥/≤）。
 
-    primitive：同 ``core_interval``，当前未接线，留作下游复用。
+    几何基元：同 ``core_interval``，当前未接线，留作下游复用。
     """
     return max(seg.zs_low, lo) <= min(seg.zs_high, hi)
 
@@ -56,8 +54,8 @@ def body_envelope(zs: ZS) -> Tuple[float, float]:
     """中枢本体包络 (DD, GG)：只取前 3 段定义段，剔除延伸/离开段的远摆。
 
     若用完整 gg/dd（含离开段），离开段总朝下一中枢延伸 → 相邻中枢包络恒重叠
-    → 趋势恒判不出（only-3rd-bspoint 根因 / 第33课 a+A+b+B+c）。故节点③ 趋势/
-    扩张判定必须用本体包络。无 lines 时退化用 zs.dd/zs.gg（测试/边界）。
+    → 趋势恒判不出。故趋势/扩张判定必须用本体包络。无 lines 时退化用
+    zs.dd/zs.gg（测试/边界）。
     """
     if not zs.lines:
         return (zs.dd, zs.gg)
@@ -65,10 +63,10 @@ def body_envelope(zs: ZS) -> Tuple[float, float]:
 
 
 def classify_rel(prev: ZS, cur: ZS) -> str:
-    """节点③：相邻中枢关系（中心定理二，**本体包络**口径）。
+    """相邻中枢关系判定（本体包络口径）。
 
     比较两中枢的本体包络（剔除离开段远摆）：后 DD>前GG → "trend_up"；
-    后 GG<前DD → "trend_down"；否则本体相交 → "expand"（升级候选，P4 实体化）。
+    后 GG<前DD → "trend_down"；否则本体相交 → "expand"（升级候选）。
     """
     p_dd, p_gg = body_envelope(prev)
     c_dd, c_gg = body_envelope(cur)
@@ -87,13 +85,13 @@ def _zone_dist(v: float, zd: float, zg: float) -> float:
 
 
 def correct_entry(zs: ZS, min_lines: int = 4) -> ZS:
-    """进入段校正（原文第20课回升/回调形成 + line 21650「别把中枢之前的混进来」）。
+    """进入段校正：剔除被误并入中枢的进入段。
 
     委托的 ZsCalculator 用「第一根与 [ZD,ZG] 几何重叠的段即核心」的口径，会把
-    *方向性升/跌入段* 误当中枢第一段（审图 #3 的病）。原文口径：进入段必须**朝
-    中枢走、升/跌进区间**；若引擎认的进入段 ``zs.start`` **背离**区间（其终点比
-    起点离区间更远），则它不是真进入段——真进入段是 ``zs.lines[0]`` 那根升/跌入
-    段，中枢起点右移到 ``lines[1]``，``zd/zg`` 由新前三段（即原文的 Z 走势段）重算。
+    方向性升/跌入段误当中枢第一段。正确口径：进入段必须朝中枢走、升/跌进区间；
+    若引擎认的进入段 ``zs.start`` 背离区间（其终点比起点离区间更远），则它不是真
+    进入段——真进入段是 ``zs.lines[0]`` 那根升/跌入段，中枢起点右移到 ``lines[1]``，
+    ``zd/zg`` 由新前三段重算。
 
     返回校正后的中枢（背离才动，否则原样返回）。
     """
@@ -118,13 +116,12 @@ def correct_entry(zs: ZS, min_lines: int = 4) -> ZS:
 
 
 def correct_exit(zs: ZS, min_body: int = 3) -> ZS:
-    """离开段剥离（对称于 correct_entry；原文 a+A+b 中 b/离开段是独立次级别段，
-    不属中枢本体）。
+    """离开段剥离（对称于 correct_entry；离开段是独立次级别段，不属中枢本体）。
 
     委托的 ZsCalculator 把离开段计入 ``lines``（为"第4段确认第3段完成"的最小 4 段
     口径），但离开段是确认/出口、不是中枢本体。done 中枢的 ``lines[-1]`` 即离开段
     （定向冲出区间）→ 剥出本体：``lines = lines[:-1]``，离开段记为 ``z.end``；box /
-    gg/dd 用本体。本体保底 ``min_body`` 段（原文中枢最小 = 3 个走势类型重叠）。
+    gg/dd 用本体。本体保底 ``min_body`` 段（中枢最小 = 3 个走势类型重叠）。
     """
     if not zs.done or len(zs.lines) <= min_body:
         return zs                                  # 未完成 / 剥后不足本体 → 不动
@@ -143,12 +140,12 @@ def correct_exit(zs: ZS, min_body: int = 3) -> ZS:
 
 @dataclass
 class DivergenceResult:
-    """一个中枢离开段的背驰判定（H2a=背驰 / H2b=无背驰）。"""
+    """一个中枢离开段的背驰判定结果。"""
 
     is_beichi: bool                   # 是否背驰
     kind: str                         # "qs"(趋势背驰) | "pz"(盘整背驰)
-    compare_seg: LINE                 # 比较段 a/b = 中枢进入段 z.start
-    leave_seg: LINE                   # 离开段 c
+    compare_seg: LINE                 # 比较段 = 中枢进入段 z.start
+    leave_seg: LINE                   # 离开段
     provisional: bool                 # 右边缘未坐实(True) / 已固化(False)
 
 
@@ -157,10 +154,10 @@ class ZsHypothesis:
     """右边缘的一个中枢读法（一个 live 分支）。"""
 
     zs: ZS                            # 该读法下的中枢对象
-    node1: str                        # 节点①: "core"(H1·末段为核心/延伸) | "leave"(H2·末段为离开段/完成)
-    rel_prev: Optional[str] = None    # 节点③: "trend_up"|"trend_down"|"expand"|None(无前中枢)
-    upgrade: bool = False             # 节点②: True=已达 9 段触发升级（本计划只标记，不实体化）
-    divergence: Optional[DivergenceResult] = None   # 节点① H2a: 离开段背驰(H1 恒 None)
+    node1: str                        # "core"(末段为核心/延伸) | "leave"(末段为离开段/完成)
+    rel_prev: Optional[str] = None    # "trend_up"|"trend_down"|"expand"|None(无前中枢)
+    upgrade: bool = False             # True=已达 9 段触发升级（只标记，不实体化）
+    divergence: Optional[DivergenceResult] = None   # 离开段背驰(core 读法恒 None)
 
 
 @dataclass
@@ -177,15 +174,14 @@ class ZsBranchCalculator:
     """单级别多假设中枢引擎（薄 manager）。
 
     「找中枢」委托给已验证的 ``ZsCalculator``——look-ahead 完成判定、进入段提升、
-    扫描定位都在那里解决（避免手搓重蹈覆辙）。本类只在其 pending 中枢上加右边缘
-    H1/H2 分叉 + 节点③ 本体包络分类；已完成中枢即左侧冻结。
+    扫描定位都在那里解决。本类只在其 pending 中枢上加右边缘 core/leave 分叉 +
+    本体包络分类；已完成中枢即左侧冻结。
 
-    本计划（P1）只到结构层：H2 表示「中枢结构完成」，不评背驰、不分 H2a/H2b。
-    C3 段数封顶暂不启用（与 9 段升级标记有交互，留 P4 前小修）：``max_zs_lines``
-    给极大值，让中枢能长到 ≥9 段以触发升级标记。
+    结构层：leave 读法表示「中枢结构完成」。段数封顶暂不启用（与 9 段升级标记有
+    交互）：``max_zs_lines`` 给极大值，让中枢能长到 ≥9 段以触发升级标记。
     """
 
-    _NO_CAP = 10 ** 9     # 暂不封顶（C3 留 P4 前修）
+    _NO_CAP = 10 ** 9     # 暂不封顶
 
     def __init__(
         self,
@@ -194,20 +190,18 @@ class ZsBranchCalculator:
         wzgx: str = Config.ZS_WZGX_GD.value,
         min_zs_lines: int = 4,
     ):
-        """``ld_provider`` 缺省时不判背驰（退化纯结构，保 P1 行为）。
+        """``ld_provider`` 缺省时不判背驰（退化为纯结构）。
 
-        ``wzgx`` 默认 GD（原文走势中枢定理二的 GG/DD 严格口径，与 CL_CFG 默认
-        一致；生产链路均由调用方显式传入，默认值只影响裸构造。此前默认 ZGD
-        与全局默认分裂，2026-06-12 审计修复）。``min_zs_lines`` 最小中枢段数：
-        L0 线段级=4(项目口径)，递归 L≥1 走势类型级=3(原文「3 个次级走势类型重叠」)。
+        ``wzgx`` 默认 GD（GG/DD 严格口径，与 CL_CFG 默认一致；生产链路均由调用方
+        显式传入，默认值只影响裸构造）。``min_zs_lines`` 最小中枢段数：
+        level0 线段级=4(项目口径)，递归 level≥1 走势类型级=3(3 个次级走势类型重叠)。
 
-        中枢段数**不封顶**(_NO_CAP)：2026-06-18 曾按第33课「延伸≤5段、9段升级」试封顶 8
-        (审计 F-B)，但逐标的·逐中枢·逐线段核验(audit/zs_division_audit.py)证伪并**撤回**——
-        封顶会在第 8 段强制收口、把一个长盘整劈成两个**核心区重叠的同级别中枢**，违定理二
-        (相邻同级别中枢核心区不能重叠)与定理三(回抽重回中枢内=未破坏=一个延伸中枢)；实测
-        SH.600519_5m 相邻核心重叠对 1→4、SZ.301004_1m 1→3。故保持不封顶：长盘整=一个延伸
-        中枢(定理三)；延伸超 9 段且内部有结构时由递归层(走势类型→L1)/zs_upgrade._yanshen
-        升级，不在 L0 劈裂。要显式封顶可给内部 ZsCalculator 传 max_zs_lines。
+        中枢段数不封顶(_NO_CAP)：曾试在第 8 段封顶，但逐标的·逐中枢·逐线段核验证伪
+        并撤回——封顶会在第 8 段强制收口、把一个长盘整劈成两个核心区重叠的同级别中枢，
+        与「相邻同级别中枢核心区不能重叠」「回抽重回中枢内=未破坏=一个延伸中枢」冲突。
+        故保持不封顶：长盘整=一个延伸中枢；延伸超 9 段且内部有结构时由递归层(走势类型
+        →level1)/zs_upgrade 升级，不在 level0 劈裂。要显式封顶可给内部 ZsCalculator
+        传 max_zs_lines。
         """
         self.ld_provider = ld_provider
         self.frequency = frequency
@@ -234,14 +228,15 @@ class ZsBranchCalculator:
         if not lines:
             return ZsBranchResult(done_zss=[], live=[], freeze_idx=0, done_divergence=[])
         # 复用持久 ZsCalculator(见 __init__):identity 稳定输入走增量,否则其内部自动
-        # 降级全量(identity-LCP d=0)。require_alternation=True:原文 line7268/24727 中枢=
-        # 3 段方向交替重叠区;L0(线段)天然交替此为 no-op,L≥1(走势类型)构成段不必然交替,
-        # 关掉会把『连续 3 个同向走势类型』价格重合处硬挤成假中枢(301004 假 L1 根因)。
+        # 降级全量(identity-LCP d=0)。require_alternation=True:中枢=3 段方向交替重叠区;
+        # level0(线段)天然交替此为 no-op,level≥1(走势类型)构成段不必然交替,
+        # 关掉会把『连续 3 个同向走势类型』价格重合处硬挤成假中枢。
         zc = self._zc
         zc.calculate(lines)
-        # 进入段/离开段校正（原文口径）：把误当核心的升/跌入段(进入段)、定向冲出的
+        # 进入段/离开段校正：把误当核心的升/跌入段(进入段)、定向冲出的
         # 离开段从中枢本体剥出（进入段 → z.start，离开段 → z.end）
         done: List[ZS] = [self._corrected(z) for z in zc.zss]
+        done = self._merge_overlapping_cores(done, lines)   # 并入核心区重叠的相邻中枢
         pending: Optional[ZS] = zc.pending_zs    # 右边缘进行中中枢（单解，无离开段）
         if pending is not None:
             pending = correct_entry(pending, self.min_zs_lines)
@@ -258,7 +253,7 @@ class ZsBranchCalculator:
         prev = done[-1] if done else None
         live = self._fork_pending(pending, prev)
         for h in live:
-            if h.node1 == "leave":                    # 仅 H2（离开读法）判背驰
+            if h.node1 == "leave":                    # 仅离开读法判背驰
                 h.divergence = self._divergence_for(h.zs, prev, live=True)
         return ZsBranchResult(
             done_zss=done,
@@ -275,9 +270,43 @@ class ZsBranchCalculator:
                 return k
         return len(lines)
 
+    def _merge_overlapping_cores(self, done: List[ZS], lines: List[LINE]) -> List[ZS]:
+        """并入相邻「核心区 [ZD,ZG] 重叠」的同级别中枢。
+
+        中枢破坏当且仅当一次级别走势离开中枢后、其后回抽不重新回到中枢内。引擎
+        `_extend_and_check_complete` 只做了第一步(一段离开核心区即收口+从离开段起找
+        下一中枢)、漏了第二步(回看回抽是否重回)——把「冲出又回抽」切成两个核心区重叠
+        的中枢。两中枢核心区重叠 ⟺ 回抽重回前中枢内 ⟺ 中枢未破坏=应是一个延伸中枢。
+        故在此把核心区重叠的相邻 done 中枢并入前者(保留前者核心区——中枢核心由首三段定、
+        合并不改之)，离开/连接/后中枢段并作其延伸；gg/dd 重算到合并后全段。
+
+        仅合并直接重叠对、最大合并组=2(保留组首核心区→后中枢移开即止、不级联巨型中枢)，
+        合并后相邻核心区重叠对→0。贪心 O(n)、纯函数(inc==batch 在输出层保持)。
+        """
+        if len(done) < 2:
+            return done
+        merged: List[ZS] = [done[0]]
+        for z in done[1:]:
+            head = merged[-1]
+            if (head.zd is not None and z.zd is not None
+                    and max(head.zd, z.zd) < min(head.zg, z.zg)):
+                i0 = self._line_index(head.lines[0], lines)
+                i_last = self._line_index(z.lines[-1], lines) if z.lines else len(lines)
+                if i0 < len(lines) and i_last < len(lines) and i_last >= i0:
+                    m = copy.copy(head)
+                    m.lines = list(lines[i0:i_last + 1])      # 本体延伸到后中枢末体段
+                    m.end = z.end if z.end is not None else z.lines[-1]   # 离开段取后中枢的
+                    m.zd, m.zg = head.zd, head.zg             # 核心区不变(由首三段确定)
+                    m._bounds_dirty = True
+                    m.update_boundaries()                     # gg/dd/line_num 重算到全段
+                    merged[-1] = m
+                    continue
+            merged.append(z)
+        return merged
+
     @staticmethod
     def _leave_seg(zs: ZS, live: bool) -> Optional[LINE]:
-        """中枢离开段 c：live H2 取末段 lines[-1]；done 中枢取剥出的 z.end
+        """中枢离开段：live 分支取末段 lines[-1]；done 中枢取剥出的 z.end
         （correct_exit 已把定向冲出的离开段剥到 z.end），z.end 缺失时退化用末段。"""
         if live:
             return zs.lines[-1] if zs.lines else None
@@ -286,11 +315,11 @@ class ZsBranchCalculator:
         return zs.lines[-1] if zs.lines else None
 
     def _is_trend(self, prev_zs: Optional[ZS], zs: ZS, leave: LINE) -> bool:
-        """Z 与前一中枢是否依次同向构成趋势，且趋势方向 == 离开段方向。
+        """本中枢与前一中枢是否依次同向构成趋势，且趋势方向 == 离开段方向。
 
-        is_qs 的 use_core_envelope 仅在 GD 口径下生效（用前 3 段本体剔离开段远摆，
-        宪法 §3.5）；默认 ZGD/ZGGDD 口径用 zd/zg 核心区间、本就无远摆问题。传 True
-        是为兼容调用方把 wzgx 配成 GD 的情形。无前中枢 → 非趋势（按盘整背驰处理）。
+        is_qs 的 use_core_envelope 仅在 GD 口径下生效（用前 3 段本体剔离开段远摆）；
+        ZGD/ZGGDD 口径用 zd/zg 核心区间、本就无远摆问题。传 True 是为兼容调用方把
+        wzgx 配成 GD 的情形。无前中枢 → 非趋势（按盘整背驰处理）。
         """
         if prev_zs is None:
             return False
@@ -327,10 +356,10 @@ class ZsBranchCalculator:
     def _divergence_for(
         self, zs: ZS, prev_zs: Optional[ZS], live: bool
     ) -> Optional[DivergenceResult]:
-        """对中枢 Z 判离开段背驰（is_beichi 原语直连）。
+        """对中枢判离开段背驰（is_beichi 原语直连）。
 
-        a = 进入段 z.start（趋势时即连接段 b）；c = 离开段。盘整 b:a 与趋势 c:b
-        在每个中枢上计算同一 = is_beichi(z.start, 离开段)，仅 kind 标签不同（宪法 §3）。
+        a = 进入段 z.start（趋势时即连接段）；c = 离开段。盘整与趋势两种情形在每个
+        中枢上计算同一 = is_beichi(z.start, 离开段)，仅 kind 标签不同。
         无 ld_provider / 无进入段 / 进入段与离开段异向 → None。
         """
         if self.ld_provider is None:
@@ -374,12 +403,12 @@ class ZsBranchCalculator:
         return result
 
     def _fork_pending(self, pending: ZS, prev: Optional[ZS]) -> List[ZsHypothesis]:
-        """在 pending 中枢上分叉：H1=中枢仍开(done=False)，H2=末段为离开段(done=True)。
+        """在 pending 中枢上分叉：core=中枢仍开(done=False)，leave=末段为离开段(done=True)。
 
         两分支各自独立拷贝（含独立 lines 容器），互不串台——也不别名委托引擎的
         pending 对象；下游若对某分支实体化/延伸 lines 不会污染另一分支或上游。
         """
-        upgrade = len(pending.lines) >= 9        # 第33课：9 段触发升级（本计划只标记）
+        upgrade = len(pending.lines) >= 9        # 9 段触发升级（只标记）
         rel = classify_rel(prev, pending) if prev is not None else None
         h1 = self._branch_copy(pending, done=False)   # 仍开
         h2 = self._branch_copy(pending, done=True)    # 完成读法

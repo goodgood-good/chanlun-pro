@@ -1,4 +1,4 @@
-"""strategy_optimizer regime/影响评估报告族 —— 从 _impl 拆出。
+"""strategy_optimizer regime/影响评估报告族。
 
 按行情(bull/range/bear)与买卖点比例评估回测 summary:regime ratio/买点比例/卖出
 策略影响、市场压力测试、策略采纳门控等报告 + markdown。依赖 constants+utils+scoring。

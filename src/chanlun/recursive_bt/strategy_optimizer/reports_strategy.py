@@ -1,4 +1,4 @@
-"""strategy_optimizer 策略归因 / 权益曲线报告 —— 从 _impl 拆出。
+"""strategy_optimizer 策略归因 / 权益曲线报告。
 
 按 runtime override 审计事件 + 权益曲线切分市场策略区段,产出策略归因报告
 (总/分段收益、回撤、夏普)+ markdown。供 CLI/外部 live_monitor 调用。

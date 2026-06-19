@@ -397,8 +397,7 @@ def patch_trend(out_dir: str, big_tf: str, start, end):
 
 
 def patch_daily_bsp(out_dir: str):
-    """给主线缓存补**日线买卖点**信号(三级共振选股锚,原文line13507缠亲答:
-    「以日线的第三类买点…30分钟的回抽…5分钟的背驰,必须三个级别共同来」)。
+    """给主线缓存补日线买卖点信号(三级共振选股锚)。
     QMT 日线全历史 → CL → get_branch_bspoints,存 pkl['daily_bsp']=[(date,bs_type)]。
     口径:anchor_fx.k.date=确认bar收盘(15:00),回测端次日生效(无lookahead,与daily段同源)。"""
     import glob

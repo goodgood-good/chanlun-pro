@@ -1,16 +1,15 @@
-"""xiaozhuanda_branch.py — B6 小转大(小背驰-大转折)检测器(块R,只读结构预警)。
+"""小转大(小背驰-大转折)检测器(只读结构预警)。
 
-原文 L044 小背驰-大转折定理:小级别(顶/底)背驰引发大级别(向下/向上)的**必要条件**是
-该级别走势**最后一个次级别中枢出现第三类(卖/买)点**;且「只有必要条件,而没有充分条件」
-——故本检测器只产**候选/预警**,不产定性买卖点。L053:40 小转大 = 小级别背驰致大级别
-中枢 restructure(a+A+b 变为大级别中枢 B 的次级别波动)。
+小级别(顶/底)背驰引发大级别(向下/向上)的必要条件是该级别走势最后一个次级别
+中枢出现第三类(卖/买)点;由于只是必要条件而非充分条件，本检测器只产候选/预警,
+不产定性买卖点。
 
-消费块R recursive_branch 的多级 LevelResult:逐相邻级别(次级别 L_{k-1} / 大级别 L_k),
+消费 recursive_branch 的多级 LevelResult:逐相邻级别(次级别 L_{k-1} / 大级别 L_k),
 查 L_{k-1} 最后一个中枢是否出三类点(复用 BsBranchCalculator._third_class)且 L_{k-1} 有
 同向趋势背驰(底背驰 leave=down ↔ 三买 → 向上;顶背驰 leave=up ↔ 三卖 → 向下)→ 发候选。
-当下:只用 done 中枢 + 当下三类点(三类当下稳定,见审计 B5);无未来函数。
+当下:只用 done 中枢 + 当下三类点(三类当下稳定);无未来函数。
 
-孤立、不改上游、不动 zs_upgrade(块U);消费块R LevelResult → 与 R5(升级统一到块R)前向兼容。
+孤立、不改上游。
 """
 from __future__ import annotations
 
@@ -22,10 +21,10 @@ from chanlun.core.types import FX, ZS
 
 @dataclass
 class XiaoZhuanDaCandidate:
-    """小转大候选(L044 必要条件满足、非充分):大级别 ``level`` 可能向 ``direction`` 转。"""
+    """小转大候选(必要条件满足、非充分):大级别 ``level`` 可能向 ``direction`` 转。"""
     level: int                  # 大级别 L_k(被转的级别)
     direction: str              # 'up'(三买 + 底背驰) / 'down'(三卖 + 顶背驰)
-    necessary_zs: ZS            # L044 必要条件中枢 = 次级别最后一个中枢
+    necessary_zs: ZS            # 必要条件中枢 = 次级别最后一个中枢
     anchor_fx: FX               # 三类点出图锚(回试段终点)
     invalid: float              # 结构失效位:向上 = ZG、向下 = ZD
     sub_level: int              # 次级别 L_{k-1}
@@ -57,7 +56,7 @@ class XiaoZhuanDaCalculator:
             sub_zss = getattr(sub, "zss", None) or []
             if not sub_zss:
                 continue
-            last_zs = sub_zss[-1]                              # L044 必要条件:最后一个次级别中枢
+            last_zs = sub_zss[-1]                              # 必要条件:最后一个次级别中枢
             zr = ZsBranchResult(
                 done_zss=sub_zss, live=[], freeze_idx=0,
                 done_divergence=getattr(sub, "done_divergence", None) or [],

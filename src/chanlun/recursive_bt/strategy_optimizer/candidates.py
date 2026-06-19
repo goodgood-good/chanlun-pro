@@ -1,4 +1,4 @@
-"""strategy_optimizer 策略候选目录 —— 从 _impl 拆出。
+"""strategy_optimizer 策略候选目录。
 
 A/US 实盘策略候选 + 选股系统定义。evidence_summary 为内联快照(硬编码),
 只依赖 models 数据类,不依赖常量/helper。

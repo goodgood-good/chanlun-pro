@@ -1,4 +1,4 @@
-"""strategy_optimizer 评分层 —— 从 _impl 拆出。
+"""strategy_optimizer 评分层。
 
 候选/运行时摘要评分 + 来源发现:score_summary 核心打分,rank_* 排序,
 load_summary/summary_from_paper_ledger 读取,default/discover_*_summary_sources

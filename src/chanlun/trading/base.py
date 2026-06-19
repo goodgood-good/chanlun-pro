@@ -70,7 +70,7 @@ class POSITION:
         self.open_records: List[dict] = []
         # 平仓记录信息
         self.close_records: List[dict] = []
-        # P3.part1: close_uid 集合, 与 close_records 同步维护, O(1) 重复检查
+        # close_uid 集合, 与 close_records 同步维护, O(1) 重复检查
         self._close_uids: set = set()
 
     def __close_records_by_uids(self, uids: List[str] = None):

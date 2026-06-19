@@ -1,11 +1,10 @@
-"""recursive_branch.py — P4b 缠论递归装配（走势类型递归主链 + 独立升级标注）。
+"""recursive_branch.py — 缠论递归装配（走势类型递归主链 + 独立升级标注）。
 
 把 L0 线段自底向上递归装配成多级层级树：units→zs_branch(中枢+内联背驰)→
 zslx_branch(走势类型)→_as_units→units 逐级。升级标注(9段/扩展)是独立旁路、
-不改走势类型边界(原文 line16429：中枢扩展⊥走势转折)。
+不改走势类型边界。
 
 孤立、不接 CL、不动旧 recursive_calculator。
-设计见 docs/chanlun_core_redesign_4b_递归装配_design.md。
 """
 from __future__ import annotations
 
@@ -51,18 +50,17 @@ def _as_units(zslxs: List[ZSLX]) -> List[ZSLX]:
 
 
 def _mark_upgrades(done_zss: List[ZS]) -> List[int]:
-    """本级中枢中「9 段升级 / 中枢扩展候选」的索引（line16429 解耦：仅标注、不改
-    走势类型；实体化与 2/3 类买点留 P5）。
+    """本级中枢中「9 段升级 / 中枢扩展候选」的索引（仅标注、不改走势类型）。
 
     z.lines 元素随级别而异：L0=线段、L≥1=走势类型(ZSLX)，故「9 段」泛指 9 个
-    次级别单元（第33课：9 段=3 个次级别走势类型重合）。
+    次级别单元。
     注：calculate 的 pending 分支传入的 H2 中枢未剥离开段(含末段读法)，9 段阈值
-    在该路径偏松一档——属 MVP 容差(pending 仅供审图标注，精确实体化留 P5)。"""
+    在该路径偏松一档——pending 仅供审图标注。"""
     out: List[int] = []
     for i, z in enumerate(done_zss):
-        if len(z.lines) >= 9:                          # 9 段升级(9 个次级别单元,第33课)
+        if len(z.lines) >= 9:                          # 9 段升级(9 个次级别单元)
             out.append(i)
-        elif i > 0 and classify_rel(done_zss[i - 1], z) == "expand":  # 中枢扩展(中心定理二本体相交)
+        elif i > 0 and classify_rel(done_zss[i - 1], z) == "expand":  # 中枢扩展(相邻中枢本体相交)
             out.append(i)
     return out
 
@@ -131,9 +129,8 @@ class RecursiveBranchCalculator:
         """把线段递归装配成多级中枢/走势类型层级树。
 
         每级：zs_branch(中枢+内联背驰) → zslx_branch(走势类型) → _as_units → 下一级。
-        L0 构成段=线段(min_zs_lines=4=**工程完成确认门**,右边缘当下性 robustness;原文形成口径
-        实为 3 段,见 cl._recursive_l0_min_zs_lines/L054:15,§9#1 拍板保 4)；L≥1 构成段=走势类型
-        (min=3=**原文形成口径**,走势类型已是完成单元)。
+        L0 构成段=线段(min_zs_lines=4，兼顾右边缘鲁棒性)；L≥1 构成段=走势类型
+        (min=3，走势类型已是完成单元)。
         终止：扫不出中枢 / 走势类型 <3 / 触 _MAX_LEVELS。
         """
         if not xds:
@@ -164,10 +161,9 @@ class RecursiveBranchCalculator:
                 from chanlun.core import zs_diversity as _zsd
                 res = _zsd.refine(res, units, min_lines, lp, frequency)
             if not res.done_zss:
-                # 右边缘只剩 pending 高级中枢(未被离开段确认完成)：记录其 H2(leave 读法)
-                # 中枢 + live 背驰再终止——让层级树展示到右边缘「正在形成」的高级中枢
-                # (不上卷:未完成无法切走势类型)。spec §0 MVP「各级只用 done」在此放宽一档:
-                # 右边缘 pending 中枢入树(用户验收决策 2026-05-31)。
+                # 右边缘只剩 pending 高级中枢(未被离开段确认完成)：记录其中枢与 live 背驰
+                # 后再终止——让层级树展示到右边缘正在形成的高级中枢(未完成无法切走势类型，
+                # 不上卷)。此处放宽“仅采用已完成中枢”的默认口径，允许右边缘 pending 中枢入树。
                 pend = [h for h in res.live if h.node1 == "leave"]
                 if pend:
                     results.append(LevelResult(

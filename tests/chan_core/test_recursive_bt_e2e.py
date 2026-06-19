@@ -64,31 +64,31 @@ def test_build_symbol_fingerprint(maotai):
     assert maotai["signal_mode"] == "batch"
     assert len(maotai["dates"]) == _OP_BARS
     assert len(maotai["big_dir_at"]) == _OP_BARS
-    assert len(maotai["signal_events"]) == 18
+    assert len(maotai["signal_events"]) == 16
 
 
 def test_portfolio_backtest_fingerprint(maotai):
     """回测撮合层(基准组 max_pos=1):固定 syms → 固定收益/回撤/夏普/交易指纹。"""
     res = portfolio_backtest(universe=["SH.600519"], syms={"SH.600519": dict(maotai)}, max_pos=1)
-    assert res["n"] == 11
-    assert len(res["trades"]) == 11
+    assert res["n"] == 9
+    assert len(res["trades"]) == 9
     assert len(res["equity"]) == _OP_BARS
     assert len(res["bench"]) == _OP_BARS
-    assert res["total"] == pytest.approx(-0.021846310899998667, rel=1e-6)
+    assert res["total"] == pytest.approx(-0.0041289116999988495, rel=1e-6)
     assert res["bh"] == pytest.approx(-0.021498510004257287, rel=1e-6)
-    assert res["max_dd"] == pytest.approx(0.050988972564171176, rel=1e-6)
+    assert res["max_dd"] == pytest.approx(0.03335141008527942, rel=1e-6)
     assert res["bench_dd"] == pytest.approx(0.07788361373431478, rel=1e-6)
-    assert res["sharpe"] == pytest.approx(-1.675049328190457, rel=1e-6)
-    assert res["wr"] == pytest.approx(2 / 11, rel=1e-6)
+    assert res["sharpe"] == pytest.approx(-0.30746744714939195, rel=1e-6)
+    assert res["wr"] == pytest.approx(2 / 9, rel=1e-6)
 
 
 def test_portfolio_param_variants(maotai):
     """参数分支覆盖:max_pos=2(多仓撮合)与 buy_classes={1}(只一类买点)。"""
     r2 = portfolio_backtest(universe=["SH.600519"], syms={"SH.600519": dict(maotai)}, max_pos=2)
-    assert r2["n"] == 11
-    assert r2["total"] == pytest.approx(-0.008671598599999109, rel=1e-6)
-    assert r2["max_dd"] == pytest.approx(0.02256985692190795, rel=1e-6)
-    assert r2["sharpe"] == pytest.approx(-1.3913605596350296, rel=1e-6)
+    assert r2["n"] == 9
+    assert r2["total"] == pytest.approx(-0.0006258805999994621, rel=1e-6)
+    assert r2["max_dd"] == pytest.approx(0.014536260324960455, rel=1e-6)
+    assert r2["sharpe"] == pytest.approx(-0.08862862503403184, rel=1e-6)
 
     r1 = portfolio_backtest(universe=["SH.600519"], syms={"SH.600519": dict(maotai)},
                             max_pos=1, buy_classes={1})
@@ -106,10 +106,10 @@ def test_portfolio_layered_positions(maotai):
         universe=["SH.600519"], syms={"SH.600519": dict(maotai)},
         max_pos=3, swing_signal_level=1, core_signal_level=2,
     )
-    assert res["n"] == 11
-    assert res["total"] == pytest.approx(-0.006251926899999538, rel=1e-6)
-    assert res["max_dd"] == pytest.approx(0.01601891164297698, rel=1e-6)
-    assert res["sharpe"] == pytest.approx(-1.4995028458632382, rel=1e-6)
+    assert res["n"] == 9
+    assert res["total"] == pytest.approx(-0.0008881148999998478, rel=1e-6)
+    assert res["max_dd"] == pytest.approx(0.010663180578345552, rel=1e-6)
+    assert res["sharpe"] == pytest.approx(-0.21335564264900095, rel=1e-6)
 
 
 def test_qqq_fingerprint(qqq):
@@ -126,11 +126,11 @@ def test_qqq_fingerprint(qqq):
 
 
 @pytest.mark.parametrize("label,kwargs,n,total,sharpe", [
-    ("sell_classes={1}", dict(max_pos=2, sell_classes={1}), 10, -0.011959827499999354, -1.7832797149995105),
+    ("sell_classes={1}", dict(max_pos=2, sell_classes={1}), 8, -0.003914109499999596, -0.597485474653643),
     ("after_3sell_reentry", dict(max_pos=2, after_3sell_reentry_buy_classes={1, 2}), 1, -0.0014125834999999531, -1.8720685744633239),
-    ("require_nest", dict(max_pos=2, require=("tech", "nest")), 10, -0.007259015099999155, -1.1714042363490544),
-    ("slippage=0.001", dict(max_pos=2, slippage=0.001), 11, -0.017310492492998986, -2.7301675630170275),
-    ("init_cash=5e5", dict(max_pos=2, init_cash=500000), 10, -0.004839343399999585, -1.1786133656828492),
+    ("require_nest", dict(max_pos=2, require=("tech", "nest")), 8, 0.0007867029000006021, 0.154637188144245),
+    ("slippage=0.001", dict(max_pos=2, slippage=0.001), 9, -0.007598822162199093, -1.26302781352403),
+    ("init_cash=5e5", dict(max_pos=2, init_cash=500000), 8, 0.0005244686000001053, 0.14840033417844792),
 ])
 def test_portfolio_main_loop_branches(maotai, label, kwargs, n, total, sharpe):
     """主撮合循环分支覆盖:卖点类别过滤 / 3卖后重入 / nest 门控 / 滑点 / 资金约束。

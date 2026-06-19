@@ -1,9 +1,9 @@
-"""scripts/qmt_fundamentals.py — 抓基本面+市值(QMT),供「三个独立系统」之①基本面、②比价。
+"""QMT 基本面+市值数据抓取模块,供「三个独立系统」之①基本面、②比价使用。
 
-缠论原文(line38524-38539):①基本面=行业地位(龙头)+质量(ROE/毛利)+成长(营收/净利增长);
+①基本面=行业地位(龙头)+质量(ROE/毛利)+成长(营收/净利增长);
 ②比价=市值与行业地位关系、低估(PB/PE)。本模块抓 PershareIndex(每股指标,**带 m_anntime 公告日
 → point-in-time 防 lookahead**) + 总股本(市值=总股本×价),缓存到 bt_data_fund/{code}.pkl。
-运行: PYTHONPATH="src;web/chanlun_chart;." python scripts/qmt_fundamentals.py [沪深300]
+运行: PYTHONPATH="src;web/chanlun_chart;." python -m chanlun.recursive_bt.engine.fundamentals [沪深300]
 """
 from __future__ import annotations
 

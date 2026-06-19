@@ -1,15 +1,12 @@
-"""zs_upgrade.py — 30m 同级别分解(tongjibie,原文 38/39 课)。
+"""30m 同级别分解(tongjibie)。
 
-★R5(2026-06-18):kuozhan 升级(非同级别分解·延伸/扩张)已统一到**块R 走势类型递归**
-(见 cl.get_kuozhan_levels / recursive_branch,课17/84 自同构);本文件原 kuozhan 半
-(is_kuozhan/_yanshen_upgrade/_kuozhang_upgrade/kuozhan_zhongshu/kuozhan_level_signals_ex/
-kuozhan_level_candidates/NestCandidate/_swing_alternating_segs)已删。U1(_yanshen n//3
-偏离每3段)随之消失。
+kuozhan 升级(延伸/扩张)已统一到走势类型递归(见 cl.get_kuozhan_levels /
+recursive_branch);本文件原 kuozhan 相关实现已删。
 
-保留 **30m 同级别分解**(line24711-24751):次级别**走势类型** + 结合运算(_jiehe_segments,
-合并相邻同向)成严格交替段,连续 3 段(上下上/下上下)价格重合即 30m 中枢,**恰好 3 段不
-延伸、允许盘整+盘整**(line24727/24736);买卖点/背驰在段粒度(tongjibie_level_signals)。
-由 cl.get_kuozhan_levels 的 tongjibie 级调用,入参 = 块R 走势类型(L_{k-1}.zslxs)。
+保留 30m 同级别分解:次级别走势类型 + 结合运算(_jiehe_segments,合并相邻同向)成
+严格交替段,连续 3 段(上下上/下上下)价格重合即 30m 中枢,恰好 3 段不延伸、允许盘整
+连接盘整;买卖点/背驰在段粒度(tongjibie_level_signals)。由 cl.get_kuozhan_levels
+的 tongjibie 级调用,入参 = 上一级走势类型(L_{k-1}.zslxs)。
 """
 from __future__ import annotations
 
@@ -47,9 +44,8 @@ def _build_kuozhan_zs(run: List[ZS], region: List[LINE], interval: Tuple[float, 
 def _tongjibie_candidate_groups(zslxs) -> List[tuple]:
     """同级别分解审计候选:所有连续 3 段共同重合的三元组。
 
-    原文 36/39 课允许按结合律选择不同当下组合,但一套同级别操作必须维持
-    已确认前缀的唯一分解；因此这些候选只用于解释和审计,不能同时作为交易
-    中枢入选。
+    允许按结合律选择不同当下组合,但一套同级别操作必须维持已确认前缀的唯一分解；
+    因此这些候选只用于解释和审计,不能同时作为交易中枢入选。
     """
     candidates = []
     n = len(zslxs)
@@ -63,9 +59,9 @@ def _tongjibie_candidate_groups(zslxs) -> List[tuple]:
 
 
 def _tongjibie_groups(zslxs) -> List[tuple]:
-    """同级别分解分组:连续 3 段走势类型价格区间重合 → (start,end) 中枢组,**恰好 3 段不延伸**
-    (line24727 三段上下上/下上下重合=中枢 / line24735 不延伸 / line24728 6段=2盘整连接);
-    前 3 段不重合则前移 1 段(连接走势不吞段)。每组用 zs_low/zs_high 取共同重合区间。"""
+    """同级别分解分组:连续 3 段走势类型价格区间重合 → (start,end) 中枢组,恰好 3 段不延伸
+    (三段上下上/下上下重合=中枢,不延伸,6 段=两段盘整连接);前 3 段不重合则前移 1 段
+    (连接走势不吞段)。每组用 zs_low/zs_high 取共同重合区间。"""
     groups = []
     i = 0
     n = len(zslxs)
@@ -82,11 +78,10 @@ def _tongjibie_groups(zslxs) -> List[tuple]:
 
 
 def _zslx_span(zslx) -> tuple:
-    """走势类型**整段价格区间** (低, 高)——原文20课中枢定义:ZG=min(g1,g2)/ZD=max(d1,d2),
-    gn、dn 是次级别走势类型 Zn 的**高、低点**(整段极值,含进入/离开段超出段内中枢的部分)。
+    """走势类型整段价格区间 (低, 高):取整段极值(含进入/离开段超出段内中枢的部分)。
 
-    ⚠ 不能用 zslx.zs_high/zs_low(zslx_branch 喂回字段=段内中枢 gg/dd **包络**):包络口径
-    过严,趋势段两端远超中枢包络 → 三段重合判定饿死(5m图全年 0 个 30m 同级别中枢的根因)。
+    不能用 zslx.zs_high/zs_low(zslx_branch 喂回字段=段内中枢 gg/dd 包络):包络口径
+    过严,趋势段两端远超中枢包络 → 三段重合判定饿死(导致 30m 同级别中枢恒空)。
     极值取 段端点(start/end.val) ∪ 段内中枢 gg/dd;两者皆缺(纯桩)→ fallback 包络字段。"""
     vals = []
     for fx in (getattr(zslx, "start", None), getattr(zslx, "end", None)):
@@ -103,9 +98,9 @@ def _zslx_span(zslx) -> tuple:
 
 
 class _Seg:
-    """**结合运算**后的一段(原文 line25179):由相邻**同方向**走势类型合并而成,使段序列严格交替
-    (上下上下…)。供 _tongjibie_groups 读 zs_low/zs_high(段价格区间 = 段内走势类型**整段区间**
-    _zslx_span 的并,原文20课 gn/dn 口径);zss = 段内所有走势类型的中枢(供 region 定位线段)。"""
+    """结合运算后的一段:由相邻同方向走势类型合并而成,使段序列严格交替(上下上下…)。
+    供 _tongjibie_groups 读 zs_low/zs_high(段价格区间 = 段内走势类型整段区间 _zslx_span
+    的并);zss = 段内所有走势类型的中枢(供 region 定位线段)。"""
 
     __slots__ = ("dir", "zss", "zs_low", "zs_high", "start", "end")
 
@@ -136,13 +131,11 @@ class _SegLine:
 
 
 def _jiehe_segments(zslxs) -> List[_Seg]:
-    """**结合运算**(原文 line25178/25179):把次级别走势类型(zslx)中**相邻同方向**的合并成一段,
-    得到严格交替(上下上下…)的段序列,使同级别分解的「三段上下上/下上下」(line24727)成立。
-    原文:a+A 分解里 Ai 奇数向下、偶数向上(必交替),正是靠结合运算把同向走势并成一个 Ai。
+    """结合运算:把次级别走势类型(zslx)中相邻同方向的合并成一段,得到严格交替(上下上下…)
+    的段序列,使同级别分解的「三段上下上/下上下」成立。
 
-    ★R5(2026-06-18)起 tongjibie 主链直接用本函数(D-③:去掉旧 _swing_alternating_segs
-    中枢→摆动腿合并、直用块R 走势类型 zslxs + 结合运算,更忠实 L038「5m 三段」+ 缓解 D3
-    饿死);走势类型 _type 已由 zslx_branch._finalize 修正净位移口径(旧 V/Λ 标签歧义已解)。"""
+    tongjibie 主链直接用本函数:直接以走势类型 zslxs + 结合运算成段,不经摆动腿合并;
+    走势类型 _type 已由 zslx_branch._finalize 修正为净位移口径。"""
     segs: List[_Seg] = []
     for z in zslxs:
         if segs and segs[-1].dir == z._type:
@@ -156,11 +149,10 @@ def tongjibie_zhongshu_ex(zslxs, xds: List[LINE]):
     """同级别分解(30m)中枢 + 段元数据 meta={'segs','groups','all_groups'},供
     tongjibie_level_signals 在段粒度算 30m 买卖点/背驰。
 
-    ★R5 D-③(2026-06-18):入参 = 块R **走势类型**(L_{k-1}.zslxs,即原文 L038「5m 走势
-    类型」),经结合运算(`_jiehe_segments` 合并相邻同向走势类型,39课 L25179)成交替段、
-    连续 3 段价格重合成 30m 中枢(line24727,不延伸、允许盘整+盘整)。去掉旧
-    `_swing_alternating_segs`(中枢→摆动腿,审计 D3 疑其合并过激致 30m 饿死);走势类型
-    `_type` 已由 zslx_branch._finalize 修正净位移转折点口径(旧 V/Λ 标签歧义已解)。
+    入参 = 上一级走势类型(L_{k-1}.zslxs),经结合运算(`_jiehe_segments` 合并相邻同向
+    走势类型)成交替段、连续 3 段价格重合成 30m 中枢(不延伸、允许盘整连接盘整)。直接
+    以走势类型成段,不经摆动腿合并;走势类型 `_type` 已由 zslx_branch._finalize 修正为
+    净位移转折点口径。
     """
     if not zslxs:
         return [], {"segs": [], "groups": [], "all_groups": []}
@@ -193,10 +185,9 @@ def tongjibie_zhongshu_ex(zslxs, xds: List[LINE]):
 
 def tongjibie_level_signals(zss: List[ZS], meta: dict, ld_provider, wzgx: str,
                             frequency: Optional[str] = None):
-    """同级别分解(30m)买卖点/背驰——**段粒度**(次级别走势类型交替段),非单根线段。
+    """同级别分解(30m)买卖点/背驰——段粒度(次级别走势类型交替段),非单根线段。
 
-    旧 kuozhan_level_signals 用 xds[b0+1]/[b0+2](单根 5m 线段)当离开/回试段,对 30m 级别
-    级别错配(判定窗口太小→信号恒空)。段粒度语义(第20课/38课):
+    用次级别走势类型交替段(而非单根线段)做判定,避免判定窗口太小致信号恒空。段粒度语义:
     - 三类:上下上中枢(末段 up=向上离开),segs[e+1](down)整段即第一次回抽,其终点 ≥ ZG → 3buy
       锚回抽段终点;下上下对称 → 3sell。
     - 背驰/一类:enter=segs[s-1] 与 leave=segs[e+1] 必同向(交替性),is_beichi 比力度

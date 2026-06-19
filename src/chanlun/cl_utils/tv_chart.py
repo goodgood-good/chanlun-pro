@@ -404,7 +404,7 @@ def cl_data_to_tv_chart(
         }
 
     # 笔中枢:新核心 zs_branch(bis) 观察层(get_bi_zhongshu)。前端「笔中枢」按钮(zs_bi)
-    # 控制显示。不再走旧链路 get_bi_zss(清场已弃),也不门控 chart_show_bi_zs(改前端控制)。
+    # 控制显示，由前端独立 toggle，不门控 chart_show_bi_zs。
     bi_zs_chart_data = []
     if config.get("chart_use_branch_core", "0") == "1":
         bi_zs_chart_data = [_zs_to_chart(zs) for zs in cd.get_bi_zhongshu()]
@@ -415,7 +415,7 @@ def cl_data_to_tv_chart(
 
     xd_zs_chart_data = []
     # branch core 开时 L0 段中枢由 recursive_levels[0] 唯一承载,不再叠加 legacy xd_zss
-    # (否则同段区域 legacy + 新核心双框;对齐 mmds/bcs 在 branch core 下不双源的处理,见 line 628)。
+    # (避免同段区域 legacy + 新核心双框)。
     if (config["chart_show_xd_zs"] == "1"
             and config.get("chart_use_branch_core", "0") != "1"):
         for zs_type in config["zs_xd_type"]:
@@ -427,7 +427,7 @@ def cl_data_to_tv_chart(
     # 线段(XD) → 当前周期中枢 → 当前周期走势类型线段 → 高一级中枢。
     xd_zslx_chart_data = []
     xd_zslx_line_chart_data = []
-    if config.get("chart_show_xd_zslx", "0") == "1":   # 默认关,与 chart_config.py 默认一致(原兜底"1"不一致,会误画走势类型)
+    if config.get("chart_show_xd_zslx", "0") == "1":   # 默认关,与 chart_config.py 默认一致
         for zslx in (cd.get_xd_zslx() or []):
             if not zslx.zss:
                 continue
@@ -450,12 +450,11 @@ def cl_data_to_tv_chart(
             if lv.level == 0 and config.get("chart_use_branch_core", "0") != "1":
                 continue   # 旧链路 L0 已在 xd_zss 展示;新核心 L0=线段中枢,需在此画出
             if lv.level >= 1:
-                continue   # P9 止血: 中枢升级按 line4898 重做中,就绪前只画 L0,不画 L1+(旧走势递归产假宽框)
+                continue   # 仅画 L0 中枢,高级别走势递归暂不渲染(旧走势递归产假宽框)
             # 中枢区间用核心区 [ZD,ZG](标准中枢=3段重叠区);GG/DD 是瞬间波动范围、非中枢区间。
             lv_zss = [_zs_to_chart(zs, use_envelope=False) for zs in lv.zss]
             # 右边缘正在形成的未完成中枢(live_zss,done=False)→虚线框(_zs_to_chart 按 done 出
-            # linestyle=1)。让用户看到正在形成的 L0(5min)中枢;只展示、不入买卖点/走势类型
-            # (那些只读 lv.zss=已完成中枢, 见 recursive_branch LevelResult.live_zss 注释)。
+            # linestyle=1)。只展示、不入买卖点/走势类型计算(那些只读 lv.zss=已完成中枢)。
             lv_zss += [_zs_to_chart(zs, use_envelope=False) for zs in getattr(lv, "live_zss", [])]
             lv_zslxs = []
             lv_zslx_lines = []
@@ -470,10 +469,9 @@ def cl_data_to_tv_chart(
                 "zslxs": lv_zslxs,
                 "zslx_lines": lv_zslx_lines,
             })
-        # 中枢升级·扩展(中心定理二 line10029 递归套用): L0 线段中枢 → L1(5m)/L2(30m)/L3(日线)。
+        # 中枢升级·扩展: L0 线段中枢 → L1(5m)/L2(30m)/L3(日线)。
         # cd.get_kuozhan_levels() 递归 kuozhan(上级中枢按运行交集分组,同 xds 定位)+ 各级背驰/买卖点;
-        # 此处取中枢渲染,买卖点(xd_mmds)/背驰(xd_bcs)在下方接入(同源 _kuozhan_levels)。走势类型递归
-        # L1+ 仍 gate 关(item2 证其退化成假宽框);递归 kuozhan 实测给紧致中枢(000001: L1=7/L2=2)。
+        # 此处取中枢渲染,买卖点(xd_mmds)/背驰(xd_bcs)在下方接入(同源 _kuozhan_levels)。
         if config.get("chart_use_branch_core", "0") == "1":
             try:
                 _kuozhan_levels = cd.get_kuozhan_levels()
@@ -589,9 +587,8 @@ def cl_data_to_tv_chart(
     bi_bc_chart_data = []
     xd_bc_chart_data = []
     if config.get("chart_use_branch_core", "0") == "1":
-        # 新核心背驰信号:笔级→bi_bcs、段级(线段)→xd_bcs,与新核心买卖点**同源**(get_branch_bcs)。
-        # 原图表背驰走 legacy line_bcs(极稀疏)、与新核心一类买卖点不一致(用户 2026-06 指出「背驰
-        # 信号没有」);branch core 开时改接新核心背驰(done_divergence 里 is_beichi 的离开段)。
+        # 新核心背驰信号:笔级→bi_bcs、段级(线段)→xd_bcs,与新核心买卖点同源(get_branch_bcs)。
+        # branch core 开时改接新核心背驰(done_divergence 里 is_beichi 的离开段)。
         for _use_xd, _bucket in ((False, bi_bc_chart_data), (True, xd_bc_chart_data)):
             try:
                 for _date, _val, _kind in cd.get_branch_bcs(use_xd=_use_xd):
@@ -633,8 +630,7 @@ def cl_data_to_tv_chart(
     bi_mmd_chart_data = []
     xd_mmd_chart_data = []
     if config.get("chart_use_branch_core", "0") == "1":
-        # 新核心买卖点:**笔级→bi_mmds、段级(线段)→xd_mmds**,各归其位。原先恒用笔级却全塞
-        # xd_mmds(标 level=xd)= 笔买卖点冒充段买卖点(2026-06 用户指出);拆成两级各算。
+        # 新核心买卖点:笔级→bi_mmds、段级(线段)→xd_mmds,各归其位,拆成两级分别计算。
         # branch core 开时不再叠加 legacy line_mmds(避免新核心+旧链路双源混在同一渠道)。
         for _use_xd, _bucket in ((False, bi_mmd_chart_data), (True, xd_mmd_chart_data)):
             try:

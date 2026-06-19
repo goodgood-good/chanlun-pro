@@ -1,11 +1,9 @@
-"""zslx_branch.py — P4a 走势类型划分（基于 zs_branch 内联背驰）。
+"""zslx_branch.py — 走势类型划分（基于 zs_branch 内联背驰）。
 
 把 zs_branch 的 L0 已完成中枢序列(done_zss + done_divergence)切成走势类型(ZSLX)：
 双信号边界——背驰(复用 done_divergence,不重判) + 方向反转(classify_rel,上涨↔下跌)。
-expand(中枢扩张/本体相交)不切——按走势级别延续定理一(原文第20课)延续，升级(L1
-中枢=3 个方向交替的 L0 走势类型)实体化留 P4b。孤立、不接 CL、不依赖 beichi_calculator。
-
-设计见 docs/chanlun_core_redesign_4a_走势类型划分_design.md。
+expand(中枢扩张/本体相交)不切——按走势级别延续；升级(L1 中枢=3 个方向交替的 L0
+走势类型)实体化在其他模块处理。孤立、不接 CL、不依赖 beichi_calculator。
 """
 from __future__ import annotations
 
@@ -21,8 +19,7 @@ def _swing_body(z: ZS) -> tuple:
 
     反转判定原本直接用 zs.dd/zs.gg(全段本体极值)。但 3 段成枢时,若末段是离开段
     (定向冲出核心区、终点比起点更远离 [zd,zg]),其远摆会把 gg/dd 撑爆 → 反向中枢
-    无法「脱离」该极值 → 反转判定永假(R84 摆动腿失明,2026-06-13;SH.600519 5m V 型
-    底中枢 z2 dd=1322 gg=1565,L1 kuozhan 中枢全丢)。correct_exit 因 min_body=3 对
+    无法「脱离」该极值 → 反转判定永假(摆动腿失明)。correct_exit 因 min_body=3 对
     3 段中枢剥不动离开段,故在此为反转判定单独剥:末段确为离开段(终点更远离核心区)
     且剥后≥2 段时,用剩余段的 [min low, max high]。退化(无 lines/不足/末段非离开)→
     用 zs.dd/zs.gg,与旧行为一致(4 段及以上中枢的离开段已由 correct_exit 剥除)。
@@ -45,7 +42,7 @@ def _swing_body(z: ZS) -> tuple:
 class ZslxBranchCalculator:
     """级别无关的走势类型划分（基于 zs_branch 中枢+内联背驰）。
 
-    输出是 done_zss 的**纯函数**(done_divergence v1 不参与边界,见 calculate;且无
+    输出是 done_zss 的**纯函数**(done_divergence 暂不参与边界,见 calculate;且无
     zs.type 等副作用,区别于 legacy ZslxCalculator)。done_zss 已 identity 稳定、
     append-only frozen(进入/离开段校正身份缓存),跨 K 多数不变 → 按值签名 memo
     「边界划分计划」(swing_segments+subsplit+trend_dir,占本调用 ~82% 的 classify_rel
@@ -125,15 +122,15 @@ class ZslxBranchCalculator:
     ) -> ZSLX:
         """把一个中枢列表收尾成 ZSLX：分类、边界(含进入/离开段 a/b)、包络。
 
-        盘整段方向(_type) = **净位移·转折点口径**(进入段起点→离开段起点)：原文 line25179
-        Ai 严格交替按涨跌定向；段端点=转折点(L25128 段起点=前段结束点/L8131 a1=b1 共享
-        端点)，离开段跨越转折属下一段。两类实测病(fix/zhongshu-l0,2026-06-11)：
-        ①继承摆动腿方向 swing_dir——up 腿尾部「高位横盘+暴跌收尾」标 up(SH.000001 5m)；
-        ②净位移用离开段**终点**——600519 5m down 腿 1428→离开段终点1565 翻成 up。
-        净位移缺失/零位移时 fallback swing_dir，再退化内部段净位移——v31 反对的「内部段
-        位移反号」是旧核心段口径的病，fallback 顺位仍保留其教训。
+        盘整段方向(_type) = **净位移·转折点口径**(进入段起点→离开段起点)：段按涨跌定向；
+        段端点=转折点(段起点=前段结束点/相邻段共享端点)，离开段跨越转折属下一段。
+        两类已知陷阱：
+        ①继承摆动腿方向 swing_dir——up 腿尾部「高位横盘+暴跌收尾」会误标 up；
+        ②净位移用离开段**终点**——down 腿净位移会被离开段终点翻成 up。
+        净位移缺失/零位移时 fallback swing_dir，再退化内部段净位移(其本身存在位移反号问题,
+        仅作末位 fallback)。
         """
-        # 走势类型边界 = 第一中枢进入段 a → 末中枢离开段 b（原文 a+A+b），缺则退化用核心段
+        # 走势类型边界 = 第一中枢进入段 a → 末中枢离开段 b，缺则退化用核心段
         first = zss[0].start if zss[0].start is not None else zss[0].lines[0]
         last = zss[-1].end if zss[-1].end is not None else zss[-1].lines[-1]
         if cur_dir in ("trend_up", "trend_down"):
@@ -143,34 +140,32 @@ class ZslxBranchCalculator:
         else:
             # 仅由中枢扩张(expand,本体相交)连接、无趋势方向 → 盘整。
             zslx_type = "盘整"
-            # 净位移终点=**离开段起点**(转折点口径:L25128 段起点=前段结束点/L8131
-            # a1=b1 共享端点):离开段跨越转折、属下一段,用其终点会翻号(600519 down 腿
-            # zslx 1428→离开段终点 1565 错标 up;取离开段起点→down ✓)。无离开段
-            # (fallback lines[-1] 为本体段)时用该段终点。
+            # 净位移终点=**离开段起点**(转折点口径:段起点=前段结束点/相邻段共享端点):
+            # 离开段跨越转折、属下一段,用其终点会翻号(down 腿净位移被离开段终点错标 up;
+            # 取离开段起点→down ✓)。无离开段(fallback lines[-1] 为本体段)时用该段终点。
             s_val = getattr(first.start, "val", None) if first.start is not None else None
             if zss[-1].end is not None:
                 e_val = getattr(last.start, "val", None)
             else:
                 e_val = getattr(last.end, "val", None)
             if s_val is not None and e_val is not None and s_val != e_val:
-                direction = "up" if e_val > s_val else "down"   # 净位移=Ai 涨跌(L25179)
+                direction = "up" if e_val > s_val else "down"   # 净位移涨跌定向
             elif swing_dir in ("up", "down"):
                 direction = swing_dir
             else:
                 first_seg, last_seg = zss[0].lines[0], zss[-1].lines[-1]
                 direction = "up" if last_seg.end.val >= first_seg.start.val else "down"
         zslx = ZSLX(
-            zslx_level=getattr(zss[0], "level", None),   # L0 中枢通常无 level；级别由 P4b 递归时管理
+            zslx_level=getattr(zss[0], "level", None),   # L0 中枢通常无 level；级别由递归时管理
             start=first.start, end=last.end,
             start_line=first, end_line=last,
             _type=direction, index=start_idx, done=done,
         )
         zslx.zss = list(zss)
         zslx.zslx_type = zslx_type
-        # 喂回 zs_branch 当 L1+ 输入段:zs_high/zs_low = 走势类型**整段高低点**(原文20课
-        # gn/dn=Zn 的高、低点,含进入/离开段端点 start/end——趋势段两端远超中枢包络)。
-        # 曾用段内中枢 gg/dd 包络:口径过严,L1+ 三段重合判定偏严(2026-06-10 全链对齐
-        # line10018,与 zs_upgrade._zslx_span/tongjibie 整段口径同源)。
+        # 喂回 zs_branch 当 L1+ 输入段:zs_high/zs_low = 走势类型**整段高低点**(含进入/
+        # 离开段端点 start/end——趋势段两端远超中枢包络)。曾用段内中枢 gg/dd 包络:口径过严,
+        # L1+ 三段重合判定偏严,现与 zs_upgrade._zslx_span/tongjibie 整段口径同源。
         hi = max(zs.gg for zs in zss)
         lo = min(zs.dd for zs in zss)
         for fx in (zslx.start, zslx.end):
@@ -190,9 +185,8 @@ class ZslxBranchCalculator:
         反转确认 = 反向中枢本体『完全脱离』极值中枢本体（下跌→上涨:某中枢 dd > 谷中枢 gg；
         上涨→下跌:某中枢 gg < 峰中枢 dd），边界落在极值中枢。
         为何不用 classify_rel 逐对关系:反转处 L0 中枢常严重重叠 → classify_rel 返回 expand
-        而非 trend_down/up，对真实反转『失明』(000001 顶 z16→z17 全程 expand)。本体极值摆动
-        才看得见反转——这正是原文升级口径(line30931:升级把次级别当线段、高低点=端点;
-        line24727:本体分离=中枢关系;line24736:无背驰时第二段走出来后才分解=本体脱离确认)。
+        而非 trend_down/up，对真实反转『失明』。本体极值摆动才看得见反转——按升级口径(升级把
+        次级别当线段、高低点=端点;本体分离=中枢关系;无背驰时第二段走出来后才分解=本体脱离确认)。
         """
         n = len(zss)
         if n == 0:
@@ -230,8 +224,8 @@ class ZslxBranchCalculator:
         """段内趋势方向:≥2 个本体分离同向中枢 → 'trend_up'|'trend_down';否则 None(盘整)。
 
         摆动方向已由 _swing_segments 定，但『趋势 vs 盘整』须由本体分离判定:纯 expand
-        重叠链(中枢扩展/延伸)= 盘整(line21637:中枢扩展属盘整),≥2 依次同向【本体分离】
-        中枢才是趋势(line8152)。取净本体分离方向(trend_up 计数 vs trend_down 计数)。
+        重叠链(中枢扩展/延伸)= 盘整,≥2 依次同向【本体分离】中枢才是趋势。
+        取净本体分离方向(trend_up 计数 vs trend_down 计数)。
         """
         if len(seg) < 2:
             return None
@@ -249,11 +243,9 @@ class ZslxBranchCalculator:
     def _subsplit(zss: List[ZS], s: int, e: int) -> List[tuple]:
         """本体摆动趋势段[s..e]内按同级别中枢细分 → [(a,b),…]。
 
-        原文 line24735 同级别分解(不延伸、允许盘整+盘整);line24727(5分钟三段重合即构成
-        中枢);line24728(延伸成6段=两个盘整连接);line30927(选最优分解=中枢震荡最清晰)。
-        段内『连续 ≥2 个 expand gap』(=≥3 个本体相交中枢=一个同级别盘整中枢)→ 切成
-        趋势腿|盘整|趋势腿,暴露内部中枢震荡(否则大趋势作单一粗 unit、升级后是假宽框)。
-        无内部盘整则原样 [(s,e)]。
+        同级别分解(不延伸、允许盘整+盘整),选最优分解使中枢震荡最清晰。段内『连续 ≥2 个
+        expand gap』(=≥3 个本体相交中枢=一个同级别盘整中枢)→ 切成趋势腿|盘整|趋势腿,
+        暴露内部中枢震荡(否则大趋势作单一粗 unit、升级后是假宽框)。无内部盘整则原样 [(s,e)]。
         """
         if e - s < 2:
             return [(s, e)]
@@ -265,7 +257,7 @@ class ZslxBranchCalculator:
                 k = j
                 while k < len(gaps) and gaps[k] == "expand":
                     k += 1
-                if k - j >= 2:                             # ≥2 连续 expand=≥3 重叠中枢=盘整(line24727)
+                if k - j >= 2:                             # ≥2 连续 expand=≥3 重叠中枢=盘整
                     for t in range(j, k + 1):
                         is_pz[t] = True
                 j = k
@@ -287,10 +279,10 @@ class ZslxBranchCalculator:
         """把已完成中枢序列切成走势类型（末个 done=False）。
 
         ① 本体摆动分段(_swing_segments):管重叠失明的大反转;② 趋势段内同级别中枢细分
-        (_subsplit):暴露内部盘整震荡(line24735 同级别分解);③ 本体分离分类(_trend_dir):
-        ≥2 本体分离同向=趋势、否则盘整。背驰(done_divergence)v1 不参与边界——几何摆动自洽
-        (line20108:背驰后仍创新极值则趋势延续);早终结的背驰精修留后。done_divergence 保留
-        入参以稳定 recursive_branch 接口、供后续精修。
+        (_subsplit):暴露内部盘整震荡;③ 本体分离分类(_trend_dir):≥2 本体分离同向=趋势、
+        否则盘整。背驰(done_divergence)暂不参与边界——几何摆动自洽(背驰后仍创新极值则趋势
+        延续);早终结的背驰精修留后。done_divergence 保留入参以稳定 recursive_branch 接口、
+        供后续精修。
         """
         if not done_zss:
             return []

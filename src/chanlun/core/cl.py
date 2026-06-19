@@ -63,12 +63,11 @@ class CL(ICL):
         # None 表示不可用（开关关 / 无高周期 / 桶不足），query_macd_ld 回退原生。
         self._htf_macd: Union[dict, None] = None
         self._htf_macd_calculator: Union[HigherMACDCalculator, None] = None
-        # 递归装配 memo:get_recursive_branch_levels / get_branch_bspoints /
+        # 递归装配结果缓存:get_recursive_branch_levels / get_branch_bspoints /
         # get_kuozhan_levels / get_kuozhan_candidates 是无状态全量重算且互相调用,
-        # 一次 walk-forward 信号采集里被多个 collector 重复触发(nest_cascade 尤甚:
-        # upgrade+nest+qs 三流各自重算)。同一 CL 状态下结果恒等 → 按状态缓存,
-        # 新 K 线进来(_process_src_klines)即清空。消除「单次采集内」冗余重算
-        # (TSLA 97k bar nest_cascade O(n²)→实测瓶颈),结果不变、纯加速。
+        # 一次回放信号采集里会被多个采集器重复触发。同一 CL 状态下结果恒等 → 按状态
+        # 缓存,新 K 线进来(_process_src_klines)即清空。消除单次采集内的冗余重算,
+        # 结果不变、纯加速。
         self._recursive_memo: dict = {}
         # 实例化笔计算器
         self.bi_calculator = BiCalculator(bi_mode = 'strict')
@@ -79,7 +78,7 @@ class CL(ICL):
         # 笔层中枢计算器，与 zss_calculator（线段层）独立维护。
         self.bi_zss_calculator = ZsCalculator(allow_tail_noop=True)
 
-        # 走势类型计算器（子项目③）：线段中枢 → 走势类型(ZSLX)，无状态全量重算。
+        # 走势类型计算器：线段中枢 → 走势类型(ZSLX)，无状态全量重算。
         self.zslx_calculator = ZslxCalculator()
         self.xd_zslx: List[ZSLX] = []  # 线段级走势类型列表
 
@@ -93,8 +92,8 @@ class CL(ICL):
         self._last_mmd_sig: Union[tuple, None] = None
 
         # bs_point 买卖点引擎持久实例(bi/xd 两层),跨 process_mmd 复用以承载增量
-        # 状态(① 增量化)。惰性创建(避开 cl<->bs_point 循环 import)。calculate 现为
-        # 无状态全量重算,复用实例与每次 new 行为完全一致(纯分配优化)。
+        # 状态。惰性创建(避开 cl<->bs_point 循环 import)。calculate 现为无状态全量
+        # 重算,复用实例与每次 new 行为完全一致(纯分配优化)。
         self._bi_bsp = None
         self._xd_bsp = None
         # 递归层持久 RecursiveBranchCalculator,按「塔」(use_xd:False=笔/True=段)分实例
@@ -138,23 +137,21 @@ class CL(ICL):
             'zs_xd_type': [Config.ZS_TYPE_BZ.value],
             'zs_qj': Config.ZS_QJ_DD.value,
             'zs_cd': Config.ZS_CD_THREE.value,
-            # 中枢位置关系 / 趋势判定档(§1.4 + §3.7):
-            #   - GD (默认): 原文严格档——趋势中前后中枢「绝对不存在重叠,包括
-            #     围绕中枢的瞬间波动(GG/DD)之间的重叠」(原文行2891/3565/3566/
-            #     7795)。gg/dd 包络无交集才算趋势;ZG/ZD 分离但 GG/DD 重叠 = 中枢
-            #     扩展(高级别中枢)、非趋势。按原文重做,默认取此严格档。
-            #   - ZGD: 仅比中枢核心区间 zd/zg(后 zd>前 zg 即趋势),宽于原文——
-            #     会把原文判为「中枢扩展」的情形误判为趋势,实务信号更多。
+            # 中枢位置关系 / 趋势判定档:
+            #   - GD (默认): 较严格档——要求前后中枢连同其波动包络(GG/DD)完全
+            #     无交集才算趋势;核心区间分离但 GG/DD 重叠视为中枢扩展、非趋势。
+            #   - ZGD: 仅比中枢核心区间 zd/zg(后 zd>前 zg 即趋势),口径较宽——
+            #     会把判为「中枢扩展」的情形也当趋势,实务信号更多。
             #   - ZGGDD: 兼容老用法,zg 与 dd、zd 与 gg 比较,介于两者之间。
             # 注:本配置同时驱动 buy/sell 点链路 (cl.beichi_qs / zss_is_qs)
-            # 与递归链路 (③ ZSLX 划分 / ④ recursive / ⑤ interval_nest),
+            # 与递归链路 (走势类型划分 / recursive / interval_nest),
             # 见 process_klines / get_recursive_levels / get_interval_nest。
             'zs_wzgx': Config.ZS_WZGX_GD.value,
             'cal_last_zs': True,
             'use_macd_ld': True,
-            # 背驰力度判断用高一周期 MACD（线段是最低级别走势类型，度量其
-            # 力度应提高一个级别：1m→5m、5m→30m…）。开关关 / 无高周期 /
-            # 高周期桶不足时 query_macd_ld 自动回退原生 MACD。
+            # 背驰力度判断用高一周期 MACD（在高一级别上度量力度：
+            # 1m→5m、5m→30m…）。开关关 / 无高周期 / 高周期桶不足时
+            # query_macd_ld 自动回退原生 MACD。
             'macd_ld_use_htf': True,
         }
 
@@ -195,7 +192,7 @@ class CL(ICL):
             # 直接引用内部数据，避免 deepcopy
             # 使用MACD计算器更新指标
             self.macd_calculator.process_macd(self.kline_processor.klines)
-            # 高周期 MACD：背驰力度按原文应在高一级别上度量。每轮全量重算。
+            # 高周期 MACD：背驰力度在高一级别上度量。每轮全量重算。
             self._compute_htf_macd()
 
             # 更新缠论K线：process_cl_klines 是内部状态更新器，不依赖返回值。
@@ -217,18 +214,17 @@ class CL(ICL):
             if not skip_legacy_zslx:
                 self.bi_zss_calculator.calculate(self.bi_calculator.bis)
 
-            # 走势类型划分（子项目③）：用线段中枢 + 背驰划出走势类型，并回填
+            # 走势类型划分：用线段中枢 + 背驰划出走势类型，并回填
             # 线段中枢的 zs.type（上涨/下跌中枢 up/down、盘整中枢 zd）。
             xd_zss = list(self.zss_calculator.zss)
             if self.zss_calculator.pending_zs is not None:
                 xd_zss.append(self.zss_calculator.pending_zs)
             ld_provider = lambda s, e: query_macd_ld(self, s, e)
-            # 递归链路（③走势类型 / ④递归 / ⑤区间套）默认走原文严格档 GD：
-            # 趋势判定须按走势中枢中心定理二的 GG/DD 口径（原文「后GG<前DD
-            # → 下跌、后DD>前GG → 上涨」）。默认 config.zs_wzgx 在 §1.4 后即
-            # 为 GD,递归链路、买卖点链路统一读 config(§3.7),保证用户显式
-            # opt-out 到 ZGGDD 等较宽档时所有链路口径一致,避免「买卖点说趋
-            # 势 / ZSLX 说盘整」的双口径冲突。
+            # 递归链路（走势类型 / 递归 / 区间套）默认走较严格档 GD：
+            # 趋势判定按 GG/DD 包络口径（后GG<前DD → 下跌、后DD>前GG → 上涨）。
+            # 递归链路、买卖点链路统一读 config,保证用户显式 opt-out 到 ZGGDD
+            # 等较宽档时所有链路口径一致,避免「买卖点说趋势 / ZSLX 说盘整」
+            # 的双口径冲突。
             recursive_wzgx = self._recursive_wzgx()
             if not skip_legacy_zslx:
                 self.xd_zslx = self.zslx_calculator.calculate(
@@ -238,11 +234,10 @@ class CL(ICL):
             else:
                 self.xd_zslx = []
 
-            # 笔中枢方向回填(§3.6,原 ① 路线图遗留)：用同一套 ③ 走势类型划分
-            # 给笔层中枢回填方向(上涨/下跌中枢 up/down、盘整中枢 zd)。下游
-            # cl_analyse 等用 zs.type 做 up/down 二分逻辑时,笔中枢拿到正确
-            # 方向(此前是 ZsCalculator 内部置的 seg_b.type 占位、与原文不符)。
-            # 仅用副作用(回填),不存储 bi_zslx——bi 层走势类型尚无消费方,YAGNI。
+            # 笔中枢方向回填：用同一套走势类型划分给笔层中枢回填方向(上涨/下跌
+            # 中枢 up/down、盘整中枢 zd)。下游 cl_analyse 等用 zs.type 做 up/down
+            # 二分逻辑时,笔中枢拿到正确方向(此前是 ZsCalculator 内部置的 seg_b.type
+            # 占位)。仅用副作用(回填),不存储 bi_zslx——bi 层走势类型尚无消费方。
             bi_zss = []
             if not skip_legacy_zslx:
                 bi_zss = list(self.bi_zss_calculator.zss)
@@ -331,9 +326,8 @@ class CL(ICL):
     def _compute_htf_macd(self) -> None:
         """计算高周期 MACD，写入 ``self._htf_macd``，供 query_macd_ld 取用。
 
-        背驰力度按原文应在「高一级别」上度量（本项目以线段为最低级别走势
-        类型）。开关 ``macd_ld_use_htf`` 关、无高周期对照、或高周期 K 线桶
-        不足时置 None —— query_macd_ld 据此回退原生 MACD。
+        背驰力度在「高一级别」上度量。开关 ``macd_ld_use_htf`` 关、无高周期
+        对照、或高周期 K 线桶不足时置 None —— query_macd_ld 据此回退原生 MACD。
         """
         flag = self.config.get('macd_ld_use_htf', True)
         # 兼容 bool / 字符串("0"/"1") 两种配置写法
@@ -393,18 +387,18 @@ class CL(ICL):
         return zss
 
     def get_xd_zslx(self) -> List[ZSLX]:
-        """返回线段级走势类型列表（子项目③产出）。"""
+        """返回线段级走势类型列表。"""
         return self.xd_zslx
 
     def get_recursive_levels(self) -> List[LevelResult]:
-        """返回递归装配的多级层级树（子项目④）。
+        """返回递归装配的多级层级树。
 
         并存独立子系统：每次现算（层级单元数逐级收缩、开销可忽略），
         不接入 process_klines、不动周期多级分析与 bs_point_calculator。
         """
         ld_provider = lambda s, e: query_macd_ld(self, s, e)
-        # 递归链路默认原文严格档 GD,允许 config opt-out(§3.7,统一各链路读
-        # config)——理由见 process_klines ③ 接入处注释。
+        # 递归链路默认较严格档 GD,允许 config opt-out(统一各链路读 config)——
+        # 理由见 process_klines 走势类型接入处注释。
         recursive_wzgx = self._recursive_wzgx()
         return RecursiveCalculator().calculate(
             self.xd_calculator.xds, ld_provider, recursive_wzgx, self.frequency,
@@ -416,9 +410,9 @@ class CL(ICL):
         并存独立子系统：每次现算，结果存入各级走势单元的 ``zs_type_mmds['L{level}']``
         独立分桶，**不与 bi/xd 基础买卖点冲突**。返回 ``{level: [(name, k_index, val)…]}``。
 
-        原文依据：中枢升级后，升级级别中枢自身的一二三类买卖点（第54课「升级三卖」等）
-        是更高级别的转折信号。注：升级是否出现取决于数据是否具备更高级别结构——
-        低结构标的（整段一个大盘整/扩展）可能升不出级别，属原文-一致。
+        中枢升级后，升级级别中枢自身的一二三类买卖点是更高级别的转折信号。
+        注：升级是否出现取决于数据是否具备更高级别结构——低结构标的（整段一个
+        大盘整/扩展）可能升不出级别。
         """
         from chanlun.core.bs_point_calculator import BsPointCalculator
         levels = self.get_recursive_levels()
@@ -446,8 +440,8 @@ class CL(ICL):
         并存独立子系统：每次现算，不接入 process_klines、不动下游。
         """
         ld_provider = lambda s, e: query_macd_ld(self, s, e)
-        # 递归链路默认原文严格档 GD,允许 config opt-out(§3.7,统一各链路读
-        # config)——理由见 process_klines ③ 接入处注释。
+        # 递归链路默认较严格档 GD,允许 config opt-out(统一各链路读 config)——
+        # 理由见 process_klines 走势类型接入处注释。
         recursive_wzgx = self._recursive_wzgx()
         return calculate_interval_nest(
             self.get_recursive_levels(),
@@ -457,32 +451,23 @@ class CL(ICL):
             self.frequency,
         )
 
-    # ===== 新核心 8 模块 lazy 接入(并存,不动旧版/process_klines/golden) =====
+    # ===== 新核心模块 lazy 接入(并存,不动旧版/process_klines/golden) =====
     def _recursive_wzgx(self) -> str:
         """统一解析中枢位置关系口径(zs_wzgx):所有链路必须经此单点读取。
 
-        fallback=原文严格档 GD(走势中枢定理二:后DD>前GG=上涨延续、后GG<前DD=
-        下跌延续,比较 GG/DD 包络)。任何方法不得自带 fallback——此前 5 处新核心
-        getter fallback 写死 ZGD、与 process_klines 内部的 GD 形成「同一 CL 对象
-        内口径分裂」(config 缺键时图表与回测对趋势/盘整结论矛盾),2026-06-12
-        原文一致性审计修复。
+        fallback=较严格档 GD(趋势延续按 GG/DD 包络比较:后DD>前GG=上涨延续、
+        后GG<前DD=下跌延续)。任何方法不得自带 fallback——保证同一 CL 对象内
+        所有链路口径一致,避免 config 缺键时图表与回测对趋势/盘整结论矛盾。
         """
         return self.config.get('zs_wzgx', Config.ZS_WZGX_GD.value)
 
     def _recursive_l0_min_zs_lines(self) -> int:
         """统一解析递归 L0 中枢成枢线数:所有链路必须经此单点读取。
 
-        fallback=4(用户拍板 2026-06-18,审计 F-A)：L0 线段中枢取「完成的」当下确认门读法
-        (L018:12「前三个走势类型都是完成的」+ 线段需被下一线段破坏确认 + 离开段/连接段
-        确认 定理三R9/R22),与 legacy(ZsCalculator 默认4) 统一,消除「图表(legacy4)≠回测
-        (新核心3)」分裂(审计 F-A)。L≥1 走势类型中枢仍 3(recursive_branch:143 else 3,走势
-        类型已是完成单元)。
-        ★原文「形成/当下成立」口径 = 3 段(**决定性** L054:15 字母范本:「走到 g1 只两段不成
-        中枢…走到 d2 即第 3 段完成,中枢就形成,区间[d1,g1]」+ R1/R2/L035/L038/L018「前三完成的」
-        在 3 done 段即满足);**4 非原文形成口径,是右边缘当下性 robustness 的工程完成确认门**
-        (多等离开段确认第 3 段已完成/不延伸;原文里离开段是中枢"形成之后"用于三类/破坏定理三,
-        非形成必要条件)。进阶审计 §9#1 拍板(2026-06-18):生产 L0 保持 4 工程档、L≥1=3 原文档。
-        所有链路经此单点读取保口径一致。
+        fallback=4：L0 线段中枢采用工程完成确认门(要求第 3 段被后续确认/不延伸),
+        与 legacy(ZsCalculator 默认4)统一,消除「图表≠回测」的成枢门分裂。
+        L≥1 走势类型中枢用 3(走势类型本身已是完成单元)。所有链路经此单点读取
+        保口径一致。
         """
         return int(self.config.get('recursive_l0_min_zs_lines', 4) or 4)
 
@@ -498,11 +483,11 @@ class CL(ICL):
         return rbc
 
     def get_recursive_branch_levels(self):
-        """新核心:recursive_branch 多级递归(中枢+内联背驰+走势类型,P1-P4)。
+        """新核心:recursive_branch 多级递归(中枢+内联背驰+走势类型)。
 
         与旧 get_recursive_levels(RecursiveCalculator)并存独立——本方法走重做的
         zs_branch/zslx_branch/recursive_branch 链路,wzgx 统一读 config(fallback=
-        原文严格档 GD,定理二,见 _recursive_wzgx)。
+        较严格档 GD,见 _recursive_wzgx)。
         lazy 现算、不接 process_klines。返回 List[recursive_branch.LevelResult]。
         """
         cached = self._recursive_memo.get("rbl")
@@ -510,15 +495,15 @@ class CL(ICL):
             return cached
         ld = lambda s, e: query_macd_ld(self, s, e)
         wzgx = self._recursive_wzgx()
-        # L0 输入用线段(xds):线段中枢是缠论最低正式级别中枢(宪法 L0=线段),升级链由此起。
+        # L0 输入用线段(xds):线段中枢是最低正式级别中枢,升级链由此起。
         # 笔中枢是更小的观察级别、不参与升级,单独走 get_bi_zhongshu。
-        # (1m 标的线段稀疏→线段中枢少,但缠论正确;丰富的笔中枢另在观察层显示。)
+        # (1m 标的线段稀疏→线段中枢少;丰富的笔中枢另在观察层显示。)
         result = self._recursive_branch_calc(True).calculate(
             list(self.get_xds()), ld, wzgx, self.frequency,
             zs_diversity=bool(self.config.get("recursive_zs_diversity", False)),
         )
         if self.config.get("recursive_zs_diversity", False):
-            # L033:17 升级:紧凑横盘 ≥9 段延伸中枢 → 注入同核心 L1 中枢(加法,L0 不动)。
+            # 升级:紧凑横盘 ≥9 段延伸中枢 → 注入同核心 L1 中枢(加法,L0 不动)。
             from chanlun.core import zs_diversity
             result = zs_diversity.emit_l1_upgrades(
                 result, self._recursive_l0_min_zs_lines(), ld_provider=ld, frequency=self.frequency)
@@ -528,7 +513,7 @@ class CL(ICL):
     def get_bi_zhongshu(self):
         """笔中枢:新核心 zs_branch 直接在笔(bis)上找的中枢。
 
-        缠论里笔中枢是比线段中枢更小的「观察级别」,不参与升级链(升级从线段中枢起,
+        笔中枢是比线段中枢更小的「观察级别」,不参与升级链(升级从线段中枢起,
         见 get_recursive_branch_levels L0=线段)。返回 List[ZS]。
         """
         from chanlun.core.zs_branch import ZsBranchCalculator
@@ -540,14 +525,13 @@ class CL(ICL):
         return res.done_zss
 
     def get_branch_bspoints(self, use_xd: bool = False):
-        """新核心:一/二/三类买卖点(全多级,P5a-d)。lazy 并存。返回 List[BuySellPoint]。
+        """新核心:一/二/三类买卖点(全多级)。lazy 并存。返回 List[BuySellPoint]。
 
         L0 一三类(bs_branch 单级)+ 二类(bs2 跨级)+ L1+ 扩张三买(bs3,过滤 L0 去重)。
         一类多级(L1+ 背驰一类)留后。
 
         ``use_xd``:构成段选择——False=**笔**(细粒度,图表「笔买卖点」bi_mmds);
-        True=**线段**(图表「段买卖点」xd_mmds,与线段中枢同级)。原先恒用笔但图表标成「段」
-        =笔买卖点冒充段买卖点(2026-06 用户指出),故拆成两级各算、各归其位。
+        True=**线段**(图表「段买卖点」xd_mmds,与线段中枢同级)。两级各算、各归其位。
         """
         memo_key = ("bsp", bool(use_xd))
         cached = self._recursive_memo.get(memo_key)
@@ -572,18 +556,18 @@ class CL(ICL):
                              done_divergence=l0.done_divergence)
         bs = BsBranchCalculator()
         pts = list(bs.calculate(zr0, l0.units))                            # L0 一三类
-        pts += bs.second_class(zr0, l0.units, ld, self.frequency)          # L0 二类(强/一般档 + B4 最弱档破前低+盘整背驰)
-        pts += Bs2BranchCalculator().calculate(levels, ld, self.frequency)  # L1+ 二类(跨级·定律一 + B4 最弱档)
+        pts += bs.second_class(zr0, l0.units, ld, self.frequency)          # L0 二类(强/一般档 + 最弱档破前低+盘整背驰)
+        pts += Bs2BranchCalculator().calculate(levels, ld, self.frequency)  # L1+ 二类(跨级 + 最弱档)
         pts += [p for p in Bs3BranchCalculator().calculate(levels)
                 if p.level is not None and p.level >= 1]                   # L1+ 扩张三买(不重 L0)
         self._recursive_memo[memo_key] = pts
         return pts
 
     def get_branch_quasi_first(self, use_xd: bool = False):
-        """新核心:类一买/类一卖(B3,原文 L027 大级别盘整背驰=历史性底部=类买点)。lazy 并存。
+        """新核心:类一买/类一卖(大级别盘整背驰=历史性底部=类买点)。lazy 并存。
         返回 List[BuySellPoint](bs_type='类1buy'/'类1sell')。
 
-        ★类=quasi(缠明言操作意义弱、需次级别确认):刻意**不入** get_branch_bspoints/回测
+        ★类=quasi(操作意义弱、需次级别确认):刻意**不入** get_branch_bspoints/回测
         BUYS 白名单(engine.buy_class 取首字符 int,'类'前缀会崩),作单独 marker 暴露,供图表/
         分析/可选用,不改默认信号/golden/回测。``use_xd`` 同 get_branch_bspoints。
         """
@@ -625,25 +609,24 @@ class CL(ICL):
                 out.append((seg.end.k.date, seg.end.val, dv.kind))
         return out
 
-    # 升级链(封顶 30m 操作级,原文 line24735):各 base 频率 → [(目标频率, 方法)]。
-    # <30m=kuozhan(非同级别,延伸/扩展);30m=tongjibie(同级别分解,恰好3段走势类型重合不延伸)。
+    # 升级链(封顶 30m 操作级):各 base 频率 → [(目标频率, 方法)]。
+    # <30m=kuozhan(延伸/扩展);30m=tongjibie(同级别分解,恰好3段走势类型重合不延伸)。
     _UPGRADE_CHAIN = {
         "1m": [("5m", "kuozhan"), ("30m", "tongjibie")],
         "5m": [("30m", "tongjibie")],
     }
 
     def get_kuozhan_levels(self):
-        """递归升级各级中枢 + 背驰 + 买卖点(带 level)。封顶 30m(操作级,line24736)。
+        """递归升级各级中枢 + 背驰 + 买卖点(带 level)。封顶 30m(操作级)。
 
-        ★R5(2026-06-18)统一到块R递归:升级层走 `get_recursive_branch_levels` 的走势类型
-        递归(课17/84 自同构),消除旧块U(kuozhan 延伸/扩张)↔块R 不一致;U1(_yanshen n//3
-        偏离每3段)随 kuozhan 废弃而消失。**保留本接口签名**(tv_chart 调用,D-图表),内部改块R。
-        - **<30m kuozhan 级 = 块R 走势类型递归 L1/L2 中枢** + 买卖点 bs1(L1+一类)/bs2(二类)/
+        升级层走 `get_recursive_branch_levels` 的走势类型递归。**保留本接口签名**
+        (tv_chart 调用),内部走走势类型递归。
+        - **<30m kuozhan 级 = 走势类型递归 L1/L2 中枢** + 买卖点 bs1(L1+一类)/bs2(二类)/
           bs3(扩张三买);背驰段 = 该级 done_divergence。
-        - **30m tongjibie 级 = 同级别分解**(块R 上级走势类型 zslxs,去摆动腿直用走势类型 D-③,
-          恰好 3 段重合、不延伸、允许盘整+盘整,line24727/24736);买卖点 tongjibie_level_signals。
-        - 30m 以上不考虑(line24736)。30m/日线图无升级链 → 返回 []。
-        频率标签(5m/30m)= 块R 递归 depth 的显示名(近似映射,D-①)。返回
+        - **30m tongjibie 级 = 同级别分解**(上级走势类型 zslxs,去摆动腿直用走势类型,
+          恰好 3 段重合、不延伸、允许盘整+盘整);买卖点 tongjibie_level_signals。
+        - 30m 以上不考虑。30m/日线图无升级链 → 返回 []。
+        频率标签(5m/30m)= 递归 depth 的显示名(近似映射)。返回
         List[dict]:[{level, zss, bsp(List[BuySellPoint]), bcs(List[(date,val,kind)]), lower}]。
         """
         from collections import defaultdict
@@ -667,7 +650,7 @@ class CL(ICL):
         xds = list(self.get_xds())
         ld = lambda s, e: query_macd_ld(self, s, e)      # noqa: E731
         wzgx = self._recursive_wzgx()
-        # 块R 多级升级买卖点(bs1 L1+一类 + bs2 二类 + bs3 扩张三买),按块R level 分组
+        # 多级升级买卖点(bs1 L1+一类 + bs2 二类 + bs3 扩张三买),按递归 level 分组
         branch_bsp = (Bs1BranchCalculator().calculate(levels)
                       + Bs2BranchCalculator().calculate(levels)
                       + Bs3BranchCalculator().calculate(levels))
@@ -678,13 +661,13 @@ class CL(ICL):
         import logging
         _log = logging.getLogger(__name__)
         out = []
-        blockr_level = 0                                  # 当前图频率线段中枢所在块R级别
+        blockr_level = 0                                  # 当前图频率线段中枢所在递归级别
         cur_zslxs = list(by_blevel[0].zslxs or [])        # 当前级别走势类型(tongjibie 的次级别单位)
         for lvl, (_target, method) in enumerate(chain, start=1):
             nz, bsp, bcs = [], [], []
             lower = cur_zslxs
             try:
-                if method == "kuozhan":                   # 块R 走势类型递归升一级
+                if method == "kuozhan":                   # 走势类型递归升一级
                     blockr_level += 1
                     lv = by_blevel.get(blockr_level)
                     if lv is not None:
@@ -699,7 +682,7 @@ class CL(ICL):
                         ]
                     else:
                         cur_zslxs = []
-                elif method == "tongjibie":               # 同级别分解(块R 上级走势类型,D-③)
+                elif method == "tongjibie":               # 同级别分解(上级走势类型)
                     nz, meta = tongjibie_zhongshu_ex(cur_zslxs, xds)
                     bsp, bcs = tongjibie_level_signals(nz, meta, ld, wzgx, self.frequency)
                 for p in bsp:
@@ -713,20 +696,19 @@ class CL(ICL):
         return out
 
     def get_kuozhan_candidates(self):
-        """R78 区间套介入候选。★R5(2026-06-18)弃用:区间套介入统一到块R——
-        `engine.collect_qs_beichi_candidates` 用块R `LevelResult.live_qs_divergence`
-        (右边缘进行中趋势背驰段)产 1buy_nest 介入,取代旧块U NestCandidate/
-        kuozhan_level_candidates(块U 升级已废,见 get_kuozhan_levels R5 重写)。
+        """区间套介入候选。已弃用:区间套介入统一走走势类型递归——
+        `engine.collect_qs_beichi_candidates` 用 `LevelResult.live_qs_divergence`
+        (右边缘进行中趋势背驰段)产 1buy_nest 介入。
         保留接口、恒返回 [](nest_cascade 模式现走 collect_qs_beichi)。"""
         return []
 
     def get_xiaozhuanda_candidates(self):
-        """新核心:小转大(小背驰-大转折)候选/预警(B6,只读结构,不接交易信号)。lazy。
+        """新核心:小转大(小背驰-大转折)候选/预警(只读结构,不接交易信号)。lazy。
         返回 List[XiaoZhuanDaCandidate]。
 
-        原文 L044 小背驰-大转折定理:必要条件 = 大级别走势最后一个次级别中枢出现三类点
-        (「只有必要条件,而没有充分条件」)→ 输出候选/预警、非定性买卖点。基于块R 多级
-        LevelResult(与 R5 升级统一到块R 前向兼容)。当下:只用 done 中枢 + 当下三类点。
+        判定:大级别走势最后一个次级别中枢出现三类点为必要(非充分)条件
+        → 输出候选/预警、非定性买卖点。基于多级 LevelResult。
+        当下:只用 done 中枢 + 当下三类点。
         """
         cached = self._recursive_memo.get("xzd_candidates")
         if cached is not None:
@@ -737,7 +719,7 @@ class CL(ICL):
         return out
 
     def get_branch_interval_nest(self):
-        """新核心:区间套可操作性(P6,自顶向下 READ)。lazy 并存。返回 List[NestRead]。"""
+        """新核心:区间套可操作性(自顶向下 READ)。lazy 并存。返回 List[NestRead]。"""
         from chanlun.core.beichi_nest import BeichiNestCalculator
         from chanlun.core.interval_nest import IntervalNestCalculator
         forest = BeichiNestCalculator().calculate(self.get_recursive_branch_levels())
@@ -950,18 +932,18 @@ class CL(ICL):
         共用同一识别引擎，仅输入不同（xd 层用 xds + xd 中枢，bi 层用 bis +
         bi 中枢）。get_bi_zss() / get_xd_zss() 都含 pending_zs，不丢末段买卖点。
 
-        **执行顺序**: bi 层先于 xd 层——原文定律一(kobo.54.1)「任何级别的第二
-        类买卖点都由次级别相应走势的第一类买点构成」要求 xd 层 2 类时能读到
-        bi 层 1 类(BsPointCalculator 据此走定律一路径)。bi 层无更细次级别,
-        2 类走经验法兜底。任一层异常由 process_klines 外层 except 统一清理。
+        **执行顺序**: bi 层先于 xd 层——任何级别的第二类买卖点由次级别相应走势
+        的第一类买点构成,要求 xd 层 2 类时能读到 bi 层 1 类(BsPointCalculator
+        据此走对应路径)。bi 层无更细次级别,2 类走经验法兜底。任一层异常由
+        process_klines 外层 except 统一清理。
         """
-        # bs_point 引擎用持久实例(承载 ① 增量状态);惰性创建避开 cl<->bs_point 循环 import。
+        # bs_point 引擎用持久实例(承载增量状态);惰性创建避开 cl<->bs_point 循环 import。
         if self._bi_bsp is None:
             from chanlun.core.bs_point_calculator import BsPointCalculator
             self._bi_bsp = BsPointCalculator(self, zs_type='bi')
             self._xd_bsp = BsPointCalculator(self, zs_type='xd')
 
-        # --- 笔层(必须先跑,供 xd 层 2 类的定律一路径读取) ---
+        # --- 笔层(必须先跑,供 xd 层 2 类读取笔层 1 类) ---
         bis = self.bi_calculator.bis
         bi_zss = self.get_bi_zss()
         if bis and bi_zss:

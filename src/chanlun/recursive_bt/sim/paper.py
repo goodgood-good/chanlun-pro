@@ -1,8 +1,7 @@
 """chanlun.recursive_bt.sim.paper — 仿实盘实时交易(paper trading)。
 
-实盘同款决策链(与回测定论一致的策略A):每根 5m bar 收盘后增量更新各标的 CL(尾喂,
-与全量重算已验一致),小级别(5m)技术面买点进场 + 大级别(30m)wf 当下笔方向门控
-(not_down 开仓 / down 或小级别卖点退出),1买>2买>3买排序填仓,等权 max_pos。
+每根 5m bar 收盘后增量更新各标的 CL(尾喂),小级别(5m)买点进场 + 大级别(30m)当下笔
+方向门控(not_down 开仓 / down 或小级别卖点退出),按买点类别排序填仓,等权 max_pos。
 A股规则:T+1/印花税/涨跌停粗判。账本持久化 JSON(重启恢复),逐笔与权益落
 D:/chanlun_pro/paper/。挂单下一轮(下一5m bar)以最新开盘价成交,无任何未来信息。
 
@@ -59,7 +58,7 @@ class SymbolState:
         self.last5: Optional[pd.Timestamp] = None
         self.last30: Optional[pd.Timestamp] = None
         self.lastd: Optional[pd.Timestamp] = None
-        self.d3_until: Optional[pd.Timestamp] = None   # 日线3买窗口截止(三级共振排序,line13507)
+        self.d3_until: Optional[pd.Timestamp] = None   # 日线3买窗口截止(三级共振排序用)
         self.last_open: float = 0.0
         self.last_px: float = 0.0
         self.prev_close: float = 0.0
@@ -83,8 +82,8 @@ class SymbolState:
             if len(new30):
                 self.cd30.process_klines(new30.reset_index(drop=True))
                 self.last30 = df30["date"].iloc[-1]
-        # 日线:仅在出现新完整日线 bar 时重算(每日一次),维护日线3买窗口(确认次日起10天,
-        # 三级共振排序信息 line13507;回测实证排序融合 +158.9% vs 基线 +147.6%)
+        # 日线:仅在出现新完整日线 bar 时重算(每日一次),维护日线3买窗口
+        # (买点确认次日起约10天,供三级共振排序使用)
         dfd = self.ex.klines(self.code, "d")
         if dfd is not None and len(dfd) >= 100:
             newd = dfd if self.lastd is None else dfd[dfd["date"] > self.lastd]
@@ -390,8 +389,7 @@ def step(broker: PaperBroker, states: Dict[str, SymbolState], now: str):
                 if bs_type:
                     order["bs"] = bs_type
                 broker.pending.append(order)
-    # 开仓:技术面买点 + 30m not_down,**3买优先**(line23172「牛市里第三类买点的爆发力
-    # 是最强的」;回测实证:牛市+10.5pp/熊市+1.4pp 两段皆优于1买优先)
+    # 开仓:技术面买点 + 30m not_down,3买优先(突破延续口径)
     free = broker.max_pos - len(broker.positions) - sum(1 for o in broker.pending if o["act"] == "buy")
     if free > 0:
         cands = []
@@ -400,8 +398,7 @@ def step(broker: PaperBroker, states: Dict[str, SymbolState], now: str):
                 continue
             buys = [s for s in ss if s.is_buy]
             if buys and states[c].big_dir() != "down":
-                # 排序:3买优先(line23172)。d3共振排序已移除——审计2(master并集)修复后
-                # d3增益翻转为噪声级(交集+11.3pp/并集-7.6pp),按数据定夺中性弃用;
+                # 排序:3买优先。d3 共振排序已弃用(增益翻转为噪声级);
                 # in_d3() 观测能力保留(实盘A/B分析备用)。
                 cls = max(int(s.bs_type[0]) for s in buys)
                 daily_resonance = bool(states[c].in_d3())

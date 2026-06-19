@@ -1,4 +1,4 @@
-"""strategy_optimizer 共享数值/路径 helper —— 从 _impl 拆出。
+"""strategy_optimizer 共享数值/路径 helper。
 
 被 scoring + 各类 reports 共享的纯函数:数值提取(_float_first/_float_values/_avg)、
 路径规范化(_path_key)。自包含,只依赖标准库。

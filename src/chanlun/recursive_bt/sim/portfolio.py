@@ -1,12 +1,12 @@
 """scripts/portfolio_backtest.py — 缠论买点选股 + 组合回测(模拟真实实盘)。
 
-完全基于缠论原文的选股交易:扫描股票池,在每根 5m bar 找出当下处于**买点**(原文一/二/三类
-买点,操作级别确认)的标的 → 大小级别结合(30m方向!=down开窗,5m买点进场,我已验证的最优口径)→
-组合并发持仓(max_pos 个仓位,等权)→ 卖点/大级别反转退出。含 A股 T+1/印花税/涨跌停。
-大盘(上证)30m方向可作择时过滤(原文「大盘不好别乱买」的结构化)。
+基于缠论买点的选股交易:扫描股票池,在每根 5m bar 找出当下处于买点(一/二/三类买点,
+操作级别确认)的标的 → 大小级别结合(30m方向!=down开窗,5m买点进场)→ 组合并发持仓
+(max_pos 个仓位,等权)→ 卖点/大级别反转退出。含 A股 T+1/印花税/涨跌停。
+大盘(上证)30m方向可作择时过滤。
 
-选股优先级(slot 有限时):一类买点(趋势背驰底,最强)>二类>三类(原文18/20/24课)。
-基准:股票池等权买入持有。复用 recursive_backtest 的信号口径(已验 0% repaint)。
+选股优先级(slot 有限时):一类买点>二类>三类。
+基准:股票池等权买入持有。复用 recursive_backtest 的信号口径。
 运行: PYTHONPATH="src;web/chanlun_chart;." python scripts/portfolio_backtest.py
 """
 from __future__ import annotations
@@ -60,7 +60,7 @@ class PTrade:
 
 
 def prep(name: str) -> dict:
-    """跑 CL,得每根 5m bar 的买/卖信号 + 30m 大级别方向(复用已验证口径)。"""
+    """跑 CL,得每根 5m bar 的买/卖信号 + 30m 大级别方向。"""
     prefix, code, rules = SYMBOLS[name]
     df5 = load_klines(prefix, "5m")
     df30 = load_klines(prefix, "30m")
@@ -145,9 +145,8 @@ def _nest_filter_ok(sig) -> bool:
 
 
 def _limit_locked(s: dict, j: int, act: str) -> bool:
-    """A股涨跌停判定:开盘价较**前一交易日收盘**触及限幅,与 paper broker 一致。
-    分钟级 bar 必须用昨日收盘而非前一根 bar 收盘——单根分钟 bar 涨不到 10%,
-    旧口径在涨停板上恒放行,与实盘不一致。"""
+    """A股涨跌停判定:开盘价较前一交易日收盘触及限幅,与 paper broker 一致。
+    分钟级 bar 必须用昨日收盘而非前一根 bar 收盘(单根分钟 bar 涨不到 10%)。"""
     lp = s["rules"].limit_pct
     if lp is None or j <= 0:
         return False
@@ -358,7 +357,7 @@ def load_cached(code: str) -> Optional[dict]:
     d = pickle.load(open(p, "rb"))
     d["name"] = code
     limit = d.get("limit_pct", 0.10)
-    # 主板 ST/*ST ±5%(_st_list.json 名单,fetch st_list 构建);创业/科创 ST 仍 20%
+    # 主板 ST/*ST ±5%(_st_list.json 名单);创业/科创 ST 仍 20%
     from chanlun.recursive_bt.engine.market_runtime import st_limit_codes
     if code in st_limit_codes():
         limit = 0.05
@@ -366,8 +365,8 @@ def load_cached(code: str) -> Optional[dict]:
                              t_plus=1, allow_short=False, lot=100,
                              limit_pct=limit)
     d["d2i"] = {dt: i for i, dt in enumerate(d["dates"])}
-    # 大级别走势方向(walk-forward 当下笔方向,fetch *_trend 补):周线无买卖点时门控的替代。
-    # wf 口径事件=「该bar收盘时可见」→ 次日(下一bar)生效即可;TREND_DELAY 默认 1 天。
+    # 大级别走势方向(walk-forward 当下笔方向):周线无买卖点时门控的替代。
+    # wf 口径事件=该 bar 收盘时可见 → 次日(下一bar)生效即可;TREND_DELAY 默认 1 天。
     ev = d.get("big_trend_events")
     if ev:
         delay = pd.Timedelta(getattr(app_config, "RECURSIVE_BACKTEST_TREND_DELAY", "1D"))
@@ -399,13 +398,11 @@ def _daily_closes(s: dict):
 
 
 def attach_pool_filters(syms: dict, market: dict, ma_win: int = 70, rs_win: int = 20):
-    """海选(第8课)+比价资金流向(第9课)逐bar过滤数组,全部 point-in-time(用截至**前一完整
-    交易日**收盘的序列,当日盘中不用未完成日线,无lookahead)。
+    """海选 + 比价资金流向逐bar过滤数组,全部 point-in-time(用截至前一完整交易日收盘的
+    序列,当日盘中不用未完成日线,无 lookahead)。
 
-    - s['ma_ok'][i]: 前日收盘 > 前日 ma_win 日均线(第8课「250天线突破…资金量不大可改70天线、
-      35天线」→ 取70,数据仅1年,250日不可得)。均线未满窗口 → False(不在「能搞的」分类)。
-    - s['rs_ok'][i]: 个股 rs_win 日收益 > 大盘同窗收益(第9课「比价关系的变动…和市场资金的
-      流向相关」=资金流入)。窗口不足 → False。
+    - s['ma_ok'][i]: 前日收盘 > 前日 ma_win 日均线(取70,数据仅1年)。均线未满窗口 → False。
+    - s['rs_ok'][i]: 个股 rs_win 日收益 > 大盘同窗收益(=资金流入)。窗口不足 → False。
     """
     mkt_daily = _daily_closes(market)
     mkt_idx = {d: k for k, (d, _c, _i) in enumerate(mkt_daily)}
@@ -448,9 +445,9 @@ def attach_pool_filters(syms: dict, market: dict, ma_win: int = 70, rs_win: int 
 
 
 def attach_daily_bsp_window(syms: dict, win_days: int = 10, bs_class: int = 3):
-    """三级共振选股锚(原文line13507缠亲答:日线3买→30m回抽→5m背驰,「必须三个级别共同来」):
+    """三级共振选股锚(日线3买→30m回抽→5m背驰):
     s['d3_ok'][i] = 第 i 根 bar 是否处于「日线 bs_class 类买点窗口」内——日线买点确认bar
-    收盘**次日**起 win_days 个自然日(无lookahead)。需 pkl 含 daily_bsp(fetch daily_bsp 补)。"""
+    收盘次日起 win_days 个自然日(无 lookahead)。需 pkl 含 daily_bsp。"""
     key = f"{bs_class}buy" if bs_class else None     # None=日线任意类买点(宽口径)
     for s in syms.values():
         ev = [d for d, bt in (s.get("daily_bsp") or [])
@@ -468,10 +465,9 @@ def attach_daily_bsp_window(syms: dict, win_days: int = 10, bs_class: int = 3):
         s["d3_ok"] = ok
 
 
-# ---- 以下纯函数（结构止损 / 价格可成交 / bar 访问与失效判定）原为 portfolio_backtest
-# 内嵌闭包，不依赖任何外层状态（仅入参 + 模块级 _order_structural_stop_*），抽到模块级以
-# 缩减 portfolio_backtest 体量、提升可测性与可读性。行为等价：调用点经名字解析自动指向
-# 这些模块级函数（由 tests/chan_core/test_recursive_bt_e2e.py 端到端特征网守护）。
+# ---- 以下纯函数（结构止损 / 价格可成交 / bar 访问与失效判定）不依赖任何外层状态
+# （仅入参 + 模块级 _order_structural_stop_*），抽到模块级以缩减 portfolio_backtest 体量、
+# 提升可测性与可读性。行为等价由 tests/chan_core/test_recursive_bt_e2e.py 端到端特征网守护。
 def _signal_structural_stop_below(sig) -> Optional[float]:
     try:
         value = getattr(sig, "structural_stop_below", None)
@@ -553,9 +549,9 @@ def _position_structural_invalidation(p: dict, s: dict, j: int):
     return ""
 
 
-# ---- 仓位分层(core/swing/scalp/activity)逻辑簇,原为 portfolio_backtest 内嵌闭包。
+# ---- 仓位分层(core/swing/scalp/activity)逻辑簇。
 # 引用的外层配置(swing_signal_level / core_signal_level / big_down_activity_buy_ratio_multiplier)
-# 改为显式入参后即为模块级纯函数,抽出以继续缩减 portfolio_backtest 体量(P1 第二刀)。
+# 改为显式入参后即为模块级纯函数,抽出以继续缩减 portfolio_backtest 体量。
 # 行为等价由 tests/chan_core/test_recursive_bt_e2e.py 端到端特征网守护。
 def _allow_big_down_activity(sig, big_down_activity_buy_ratio_multiplier: float,
                              core_signal_level: int) -> bool:
@@ -619,9 +615,7 @@ def _deplete_activity_layers(p: dict, size: float, layer: str):
 
 
 class _PortfolioSim:
-    """portfolio_backtest 的撮合状态容器(P1 类化进行中)。逐个状态变量迁入为属性、
-    消除闭包 nonlocal;迁齐后把 _execute_pending/_process_exits/_process_entries 等
-    闭包升级为方法、portfolio_backtest 收为薄壳 sim.run()。每刀 147-hash 零漂移守护。"""
+    """portfolio_backtest 的撮合状态容器:状态变量作为属性、消除闭包 nonlocal。"""
 
 
 def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
@@ -658,19 +652,18 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
     """组合回测。syms 已构建则直接用(QMT缓存路径);否则按 universe 名走 chart_cache。
     market_filter=大盘标的名(其30m方向==down时禁止开新仓)。
     buy_classes=入场只认的买点类别集合(如{1}=只一类买点选股;None=全部1/2/3类)。
-    require=缠论三独立系统门控:('tech',)=只技术面;加'fund'=并需①基本面通过(s['fund_ok'][bar]质量+成长);
-    加'value'=并需②比价低估(s['value_ok'][bar]=ROE年化/PB高于全市场中位=优质却便宜)。三者齐=三系统结合(概率原则)。
+    require=三独立系统门控:('tech',)=只技术面;加'fund'=并需基本面通过(s['fund_ok'][bar]质量+成长);
+    加'value'=并需比价低估(s['value_ok'][bar]=ROE年化/PB高于全市场中位=优质却便宜)。三者齐=三系统结合。
     big_gate='bsp'=大级别方向用买卖点事件(big_dir_at,现状);'trend'=用走势方向(trend_dir_at,
     周线笔方向——周线图无买卖点时 bsp 门控恒 neutral 失效,走势方向是结构化替代)。
-    require 另支持(须先 attach_pool_filters):'ma'=海选门槛(第8课,收盘>70日线=「能搞的」分类);
-    'rs'=比价资金流向(第9课,个股20日收益>大盘=资金流入)。
-    buy_priority:'1first'=1买>2买>3买(反转抄底口径);'3first'=3买>2买>1买(line23172
-    「牛市里第三类买点的爆发力是最强的」,突破延续口径)。
-    pool_schedule=原文三层架构(line38515-38544)的①基本面**结构层**:[(生效时刻,{code:权重})]
-    季度池调度(industry.build_pool_schedule:行业龙头70%+成长30%,季度重算=②比价换股语义)。
+    require 另支持(须先 attach_pool_filters):'ma'=海选门槛(收盘>70日线);
+    'rs'=比价资金流向(个股20日收益>大盘=资金流入)。
+    buy_priority:'1first'=1买>2买>3买(反转抄底口径);'3first'=3买>2买>1买(突破延续口径)。
+    pool_schedule=基本面结构层:[(生效时刻,{code:权重})] 季度池调度
+    (industry.build_pool_schedule:行业龙头70%+成长30%,季度重算=比价换股语义)。
     传入后:只买池内标的、买入预算=组合市值×该标权重(非等权slot)、max_pos 失效;
-    技术面(③执行层)仍管时机——池内标的出现买点才进场,卖点/大级别down退出;被剔池持仓
-    不强平(原文「技术面把握好,在较大级别卖点卖掉被超越者」),但不再开新仓。"""
+    技术面(执行层)仍管时机——池内标的出现买点才进场,卖点/大级别down退出;被剔池持仓
+    不强平(在较大级别卖点卖掉被超越者),但不再开新仓。"""
     _dir_key = "trend_dir_at" if big_gate == "trend" else "big_dir_at"
     nest_mode = "filter" if "nest" in require else ("soft" if "nest_soft" in require else "off")
     trend_core_hold_ratio = min(max(float(trend_core_hold_ratio or 0.0), 0.0), 1.0)
@@ -743,10 +736,9 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
             return None
         big_down_activity = False
         if big_dir_now == "down":
-            # R80 衰竭即放行(A2.28,默认关):big_dir==down 但买点是区间套 1buy_nest
+            # 衰竭即放行(默认关):big_dir==down 但买点是区间套 1buy_nest
             # (L0 趋势底背驰=衰竭底,live_qs 已确认力度衰竭)→ 满仓放行,不受
-            # big_down_activity 拦截/减仓。原文「主跌段拦截、衰竭即放行」——live_qs
-            # 趋势底背驰正是衰竭判据;非衰竭的 big-down 买点仍走原拦截逻辑。
+            # big_down_activity 拦截/减仓;非衰竭的 big-down 买点仍走原拦截逻辑。
             if allow_nest_buy_big_down and str(getattr(pick, "bs_type", "")) == "1buy_nest":
                 pass
             elif not _allow_big_down_activity(pick, big_down_activity_buy_ratio_multiplier, core_signal_level):
@@ -840,9 +832,8 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
         med_start = statistics.median(s["dates"][0].value for s in syms.values())
         cutoff = pd.Timestamp(med_start, tz="Asia/Shanghai") + pd.Timedelta("30D")
         syms = {n: s for n, s in syms.items() if s["dates"][0] <= cutoff}
-    # 主时钟 = 全池日期**并集**(审计2修复 2026-06-10:原交集口径下任一票停牌一天→该日整天
-    # 消失,实测bar覆盖率仅67%/信号丢失32%/出现整月空洞)。个股停牌bar:市值冻结最近价、
-    # 不可成交(挂单顺延)、无信号判定。
+    # 主时钟 = 全池日期并集(交集口径下任一票停牌一天→该日整天消失,bar覆盖率/信号会大幅丢失)。
+    # 个股停牌bar:市值冻结最近价、不可成交(挂单顺延)、无信号判定。
     master = sorted(set.union(*[set(s["dates"]) for s in syms.values()]))
     if filt:
         fset = set(filt["d2i"])
@@ -920,7 +911,7 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
     sim.pool_idx = -1
     sim.reentry: Dict[str, str] = {}      # 池模式短差状态:卖点减仓后 'wait_buy'=等买点回补
     def _execute_pending(m, t):
-        # 1) 执行上一bar挂单(本bar开盘价)。原主循环阶段①原样下沉为闭包(P1 第三刀)，
+        # 1) 执行上一bar挂单(本bar开盘价)。
         # 仅 sim.cash/sim.pending 需 nonlocal,其余 sim.positions/sim.trades/reentry_* 为可变容器引用。
         carry = []
         for o in sim.pending:
@@ -1151,7 +1142,7 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
         sim.pending = carry
 
     def _process_exits(m, t, block):
-        # 2) 退出信号(持仓中:大级别down 或 小级别卖点)。原阶段②下沉为闭包(P1 第四刀)：
+        # 2) 退出信号(持仓中:大级别down 或 小级别卖点)。
         # 仅 append sim.pending / 改 sim.positions·sim.reentry(容器引用)、读 block(入参)，无需 nonlocal。
         pend_sell = {o[0] for o in sim.pending if o[1] == "sell"}
         for name in list(sim.positions):
@@ -1255,9 +1246,8 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
                     sim.reentry[name] = "wait_buy"   # 卖点减仓→等买点回补(短差);down→非down即回补
 
     def _process_entries(m, t, block):
-        # 3) 选股开仓 + 收盘盯市记 sim.equity。原阶段③下沉为闭包(P1 第五刀);原 `for m` 的
-        # continue(pool 路径记 sim.equity 后跳过常规开仓)改为 return,故常规路径 sim.equity 记录
-        # 一并纳入函数末尾,两路径各记一次、语义等价。pool_idx 已迁入 sim 状态容器(类化)。
+        # 3) 选股开仓 + 收盘盯市记 sim.equity。pool 路径记 sim.equity 后 return,常规路径在
+        # 函数末尾记一次,两路径各记一次、语义等价。pool_idx 已迁入 sim 状态容器。
         pend_buy = {o[0] for o in sim.pending if o[1] == "buy"}
         pend_sell = {o[0] for o in sim.pending if o[1] == "sell"}
         if not block:
@@ -1311,10 +1301,9 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
                 ))
                 pend_buy.add(name)
         if pool_schedule is not None:
-            # 三层架构:①结构层季度池=**持有为本**(原文38536:70/30配置一直持着,技术面只管
-            # 中枢震荡短差降成本)——非「买点才进场」(那是全池猎手口径,小池会饿死)。
-            # 大级别 not_down 即按权重持有;③技术面短差循环:小级别卖点减仓→**买点回补**,
-            # 大级别 down 退出→非 down 回补。
+            # 三层架构:结构层季度池=持有为本(70/30配置一直持着,技术面只管中枢震荡短差降成本),
+            # 非「买点才进场」(那是全池猎手口径,小池会饿死)。大级别 not_down 即按权重持有;
+            # 技术面短差循环:小级别卖点减仓→买点回补,大级别 down 退出→非 down 回补。
             while (sim.pool_idx + 1 < len(pool_schedule)
                    and pool_schedule[sim.pool_idx + 1][0] <= t):
                 sim.pool_idx += 1
@@ -1540,7 +1529,7 @@ def _load_bt_universe(index="SH.000001"):
 
 
 def main_systems():
-    """缠论三类买点选股系统(一/二/三类)各自 + 三类结合,对比。"""
+    """三类买点选股系统(一/二/三类)各自 + 三类结合,对比。"""
     syms = _load_bt_universe()
     filt = load_cached("SH.000001")
     label = f"{len(syms)}只"

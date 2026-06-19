@@ -48,9 +48,9 @@ DEFAULT_SIGNAL_MODE = "walk_forward"
 DEFAULT_SIGNAL_CACHE_DIR = "D:/chanlun_pro/reports/live_backtest_signal_cache"
 DEFAULT_SIGNAL_SCAN_CHUNK_BARS = 0
 DEFAULT_TREND_DIR_WARMUP_BARS = 200
-DEFAULT_RECURSIVE_L0_MIN_ZS_LINES = 4  # 用户拍板 2026-06-18(审计F-A):L0线段中枢与legacy统一为4(完成确认门),L≥1仍3
+DEFAULT_RECURSIVE_L0_MIN_ZS_LINES = 4  # L0 线段中枢构成线段数取 4(完成确认门),L≥1 仍为 3
 DEFAULT_BS_POINT_RATIO_OVERRIDES = "D:/chanlun_pro/reports/strategy_bs_point_ratio_overrides.json"
-_SIGNAL_CACHE_VERSION = "v12"  # v12(2026-06-18):L0中枢成枢门槛 min 3→4(确认门,审计F-A)致信号变,bump 失效旧 min=3 缓存。注:同期试 max 封顶8(F-B)经逐线段核验证伪(劈裂长盘整成核心区重叠中枢、违定理二/三)已撤回、恢复不封顶 | v11:R78 真闭环 nest_cascade 接线+1buy_nest+笔级触发签名
+_SIGNAL_CACHE_VERSION = "v13"  # 信号缓存版本号:中枢/信号口径变更时递增以失效旧缓存
 _SIGNAL_CHECKPOINT_VERSION = "v1"
 UPGRADE_CHAIN = getattr(
     CL,
@@ -731,13 +731,11 @@ def _collection_state_signature(cd: CL, signal_source: str):
             tail = xds[-3:] if len(xds) >= 3 else xds
             sig = ("upgrade_xd", len(xds), tuple(_line_signature(x) for x in tail))
             if signal_source == "nest_cascade":
-                # R78 漏单根因:区间套介入(1buy_nest/3buy_nest)由**笔级**买点触发
-                # (L0 live_qs 背驰段 / 大级别候选 内首个笔级 buy),而线段(xd)tail 签名对
-                # 笔级变化不敏感——笔级买点出现在某线段中途时 xd 签名不变 → wf 不在该 bar
-                # 重算 collection → 进行中(transient)的 nest 介入信号永不被捕获。故 nest_cascade
-                # 须并入笔级触发。笔级买卖点只在「笔完成」时新增(基于完成的笔/中枢,非进行中笔),
-                # 故只需 len(bis)——新笔完成即触发重算;不并入末笔签名,避免进行中笔每根延伸都
-                # 触发重算(否则每 bar 全量 collect_upgrade_signals 递归装配,回测慢数十倍)。
+                # 区间套介入(1buy_nest/3buy_nest)由笔级买点触发,而线段(xd)tail 签名对
+                # 笔级变化不敏感——笔级买点出现在某线段中途时 xd 签名不变,wf 不在该 bar
+                # 重算 collection,进行中的 nest 介入信号永不被捕获。故 nest_cascade 须并入笔级触发。
+                # 笔级买卖点只在笔完成时新增,故只需 len(bis)——新笔完成即触发重算;不并入末笔
+                # 签名,避免进行中笔每根延伸都触发重算(否则每 bar 全量递归装配,回测显著变慢)。
                 sig = sig + (len(list(cd.get_bis())),)
             return sig
         except Exception:
@@ -764,10 +762,9 @@ def _collect_visible_signals(
             ]
             signals.extend(l0_signals)
         if signal_source == "nest_cascade":
-            # R78 区间套介入:原生 upgrade 流(L1+ CONFIRMED 闭合与门控方向不缺位)
+            # 区间套介入:原生 upgrade 流(L1+ 闭合与门控方向不缺位)
             # + 候选×次级别确认的提前介入事件(3buy_nest)
-            # + L0 进行中趋势底背驰段×次级别买点确认的提前介入(1buy_nest,真闭环,
-            #   R78 实测定档 2026-06-13:NVDA 真底 05-05 提前~24h 于 done 背驰坐实)
+            # + L0 进行中趋势底背驰段×次级别买点确认的提前介入(1buy_nest)
             signals.extend(collect_nest_cascade_signals(cd))
             signals.extend(collect_qs_beichi_candidates(cd))
         signals.sort(key=lambda sig: (getattr(sig, "date", ""), int(getattr(sig, "level", 0) or 0)))
@@ -1323,10 +1320,8 @@ def build_symbol_from_klines(
         mid_dir_at_upgrade = None
         big_initial_dir = "neutral"
         if signal_source in ("upgrade", "nest_cascade"):
-            # R78 真闭环接线:nest_cascade 复用 upgrade 的多级别拆分路径,但传入真实
-            # signal_source(此前硬编码 "upgrade",致 nest_cascade 的介入事件
-            # collect_nest_cascade_signals/collect_qs_beichi_candidates 在 wf 路径
-            # 从不执行——nest_cascade 长期静默回落 branch 的根因,2026-06-13 修)。
+            # nest_cascade 复用 upgrade 的多级别拆分路径,但传入真实 signal_source,
+            # 使 collect_nest_cascade_signals/collect_qs_beichi_candidates 的介入事件在 wf 路径执行。
             upgrade_initial_state: dict = {}
             small_by_bar = _walk_forward_signals_by_main_bar(
                 code,
@@ -2254,8 +2249,8 @@ def make_arg_parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=False,
         help=(
-            "R80 衰竭即放行(默认关):big_dir==down 但买点是区间套 1buy_nest(L0 趋势底背驰"
-            "=衰竭底)时满仓放行,不受 big-down 拦截。原文 A2.28;须 nest_cascade 源 + 全基线验证"
+            "衰竭即放行(默认关):big_dir==down 但买点是区间套 1buy_nest(L0 趋势底背驰"
+            "=衰竭底)时满仓放行,不受 big-down 拦截。"
         ),
     )
     parser.add_argument(

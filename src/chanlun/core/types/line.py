@@ -187,13 +187,13 @@ class BI(LINE):
         default_zs_type: str = 'bi',
     ):
         super().__init__(start, end, _type, index)
-        # 笔(BI)是次级别走势单位,其中枢成立用的高低点等于笔的端点价——
+        # 笔(BI)的中枢重叠用高低点等于笔的端点价——
         # 与 XD 完成段的 ``zs_high/zs_low = max/min(sv, ev)`` 同口径,且
         # 等价于 LINE.update_high_low 设的 high/low。
         # LINE.__init__ 在 ``update_high_low()`` 之后把 ``zs_high/zs_low``
         # 强制重置为 0(为 XD pending 段口径留位),BI 在此显式同步回 high/low。
         # 缺失此步会让 ZsCalculator 在笔层重叠判定全部失败 → 笔中枢识别为 0、
-        # 笔层 1/2/3 类买卖点全部无法识别(进而 §3.2 定律一在 xd 层失效)。
+        # 笔层买卖点全部无法识别(进而线段层买卖点亦失效)。
         self.zs_high = self.high if self.high is not None else 0
         self.zs_low = self.low if self.low is not None else 0
 
@@ -526,7 +526,7 @@ class XD(LINE):
         self.done: bool = False  # 标记线段是否完成（信号/当下性口径：端点是否已锁定不可回改）
         # 显示口径：是否为"正在形成的最后一段"。与 done 解耦——确认级联推迟 done 的末
         # 2 条已成形确认段 done=False 但 forming=False（图表画实线），只有真正在建的末段
-        # forming=True（图表画虚线）。详见 xd_calculator._emit_pending / 审计 §11。
+        # forming=True（图表画虚线）。详见 xd_calculator._emit_pending。
         self.forming: bool = False
 
         # 是否是拆分后的线段，如果是，这里会写明原因

@@ -1,9 +1,8 @@
-"""bs_branch.py — P5a 缠论买卖点（一类 + 三类，单级别 done）。
+"""单级别买卖点（一类 + 三类，已完成中枢）。
 
 从 zs_branch 的 ZsBranchResult(done_zss+done_divergence) + 原始 lines，产已完成
-中枢的一类(趋势背驰,宪法 §6/第18·24课)+三类(离开中枢回试不破 ZG/ZD,节点① H2
-坍缩,第20课)买卖点。孤立、不接 CL、不改上游、不动旧 bs_point_calculator。
-设计见 docs/chanlun_core_redesign_5a_买卖点_design.md。
+中枢的一类(趋势背驰)+三类(离开中枢回试不破 ZG/ZD)买卖点。孤立、不接 CL、不改
+上游、不动旧 bs_point_calculator。
 """
 from __future__ import annotations
 
@@ -22,7 +21,7 @@ class BuySellPoint:
     signal_seg: LINE                          # 信号段(一类=背驰离开段 c;三类=回试段;二类=次级别一买离开段)
     anchor_fx: FX                             # 出图锚点(一类=c 末端;三类=回试段末端;二类=次级别一买末端)
     divergence: Optional[DivergenceResult]    # 一类/二类带背驰本体;三类 None
-    level: Optional[int] = None               # P5b:二类归属级别 L_k;P5a 一三类 None
+    level: Optional[int] = None               # 二类归属级别 L_k;单级一三类为 None
     structural_stop_below: Optional[float] = None  # 买点失效下边界:1/2买前低、3买 ZG
     structural_stop_above: Optional[float] = None  # 卖点失效上边界:1/2卖前高、3卖 ZD
 
@@ -69,9 +68,9 @@ class BsBranchCalculator:
 
     def _third_class(self, zs_result: ZsBranchResult,
                      lines: List[LINE]) -> List[BuySellPoint]:
-        """三类 = 离开中枢、第一次回试不破核心 ZG/ZD(第20课)。
+        """三类 = 离开中枢、第一次回试不破核心 ZG/ZD。
         向上离开 & 回试低点 >= ZG → 3buy;向下离开 & 回试高点 <= ZD → 3sell。
-        注:P5c bs3_branch 跨级复用此方法做多级三类——改签名/口径需同步它。"""
+        注:bs3_branch 跨级复用此方法做多级三类——改签名/口径需同步它。"""
         out: List[BuySellPoint] = []
         index = self._line_index(lines)                            # O(1) 查表,避免 O(n²)
         for z in zs_result.done_zss:
@@ -89,14 +88,14 @@ class BsBranchCalculator:
 
     def second_class(self, zs_result: ZsBranchResult, lines: List[LINE],
                      ld_provider=None, frequency=None) -> List[BuySellPoint]:
-        """二类(结构化,单级别第二类买卖点): 一类点(转折极值)之后、价格反弹、回调 → 二类。
+        """单级别第二类买卖点: 一类点(转折极值)之后、价格反弹、回调 → 二类。
 
-        L101 三情况:① 不破前低/高(强/一般档):1buy 后反弹(up)+回调(down)不破前低=2buy;
-        ② **最弱档(B4,L101:23「第二类买点跌破第一类买点…一般都构成盘整背驰」)**:回调**跌破
-        前低 BUT 对一类背驰段构成盘整背驰**(is_beichi)→ 最弱二买,止损下移到回调新低。
-        最弱档需 ``ld_provider``(力度判定);缺省(旧调用)只产强/一般档(不破前低)。1sell 对称。
+        三档:① 不破前低/高(强/一般档):1buy 后反弹(up)+回调(down)不破前低=2buy;
+        ② 最弱档:回调跌破前低 BUT 对一类背驰段构成盘整背驰(is_beichi)→ 最弱二买,
+        止损下移到回调新低。最弱档需 ``ld_provider``(力度判定);缺省(旧调用)只产
+        强/一般档(不破前低)。1sell 对称。
 
-        与 bs2_branch(跨级「次级别一类点=本级二类」定律一,原文 3562)互补:本结构法补 L0 单级别二类。
+        与 bs2_branch(跨级「次级别一类点=本级二类」)互补:本结构法补 L0 单级别二类。
         """
         from chanlun.core.beichi_calculator import is_beichi
 
@@ -112,7 +111,7 @@ class BsBranchCalculator:
                 if pullback.end.val >= extreme:                   # ① 不破前低 = 强/一般档
                     out.append(BuySellPoint("2buy", bp.zs, pullback, pullback.end,
                                             bp.divergence, structural_stop_below=extreme))
-                elif (ld_provider is not None                     # ② 最弱档:破前低 + 盘整背驰(L101:23)
+                elif (ld_provider is not None                     # ② 最弱档:破前低 + 盘整背驰
                       and is_beichi(bp.signal_seg, pullback, ld_provider, frequency)):
                     out.append(BuySellPoint("2buy", bp.zs, pullback, pullback.end,
                                             bp.divergence, structural_stop_below=pullback.end.val))

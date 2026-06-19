@@ -2,7 +2,7 @@
 """
 三类买卖点识别引擎
 
-按 docs/bs_point_calculator_design.md 落地，识别 1/2/3 类买卖点。
+识别 1/2/3 类买卖点。
 
 复用 ``cl.beichi_pz`` / ``cl.beichi_qs`` / ``cl.zss_is_qs`` 做背驰与趋势判定，
 通过 ``LINE.add_mmd`` / ``LINE.add_bc`` 把识别结果挂到笔/线段上。
@@ -36,7 +36,7 @@ class BsPointCalculator:
     :param zs_type: 中枢类型，``'bi'`` 表示笔层，``'xd'`` 表示线段层。决定结果挂在哪一层。
     :param strict_3_mode: 三买判定模式。
                          ``True`` = 严格定义（反抽必须严格 < ZG）；
-                         ``False`` = 允许 ≤ ZG（默认，与缠论原文图 19-21 实战口径一致）
+                         ``False`` = 允许 ≤ ZG（默认，实战口径）
     :param min_signal_interval: 1 类信号最小间隔（按 xd index 距离）。
                                同方向 + 同对照中枢的 1buy/1sell 相邻两次 xd index 差 < 此值
                                时只保留第一个，避免「一波趋势背驰被密集多次报点」。
@@ -67,7 +67,7 @@ class BsPointCalculator:
         self.strict_3_mode = strict_3_mode
         self.min_signal_interval = min_signal_interval
 
-        # ① 增量化:bi 层(bis 换新列表→identity 前缀)+ xd 层(xds 原地改→长度 buffer
+        # 增量化:bi 层(bis 换新列表→identity 前缀)+ xd 层(xds 原地改→长度 buffer
         # 前缀,见 _bsp_restart_point)持久实例启用;L 层 + fresh 实例无前轮状态恒走全量 P=0。
         # xd 层 legacy 买卖点写 zs_type_mmds['xd']、不被 recursive_branch 消费(后者用独立
         # L 级 BsPointCalculator),故增量安全。3 检测器跨轮累积状态改为实例字段,并按「提交
@@ -98,7 +98,7 @@ class BsPointCalculator:
             self._last_zss_obj = None
             return
 
-        # ① 增量重启点 P(仅 bi 层持久实例可 >0):lines[0:P] 的买卖点/背驰可原样保留
+        # 增量重启点 P(仅 bi 层持久实例可 >0):lines[0:P] 的买卖点/背驰可原样保留
         # (3 检测器 backward-only + 前缀 lines/zss 稳定 + 状态复原到 as-of P)。P=0 即
         # 退化为原「无状态全量重算」。BsPointCalculator 原每轮全清重算、增量结果恒等于
         # 一次性全量;持久化 + 状态复原后改为只重放活跃尾部 [P:],等价不变(对拍网守)。
@@ -216,7 +216,7 @@ class BsPointCalculator:
             # 实测上界2、buffer=0),fall through 做 zss 稳定检查 + off-by-one。bi 层 bis
             # 恒换新列表、不走此支。
             p = max(0, len(lines) - 2)
-            # A-HIGH-1/A-9-1 运行时哨兵(对齐 xd/zs):复用前缀依赖倒数第3段 xd(p-1)已 done;
+            # 运行时哨兵(对齐 xd/zs):复用前缀依赖倒数第3段 xd(p-1)已 done;
             # 若它仍 pending(回溯深度疑≥3),len-2 不足 → return 0 全量重启(恒正确)。
             if p >= 1 and not getattr(lines[p - 1], "done", True):
                 return 0
@@ -266,7 +266,7 @@ class BsPointCalculator:
     def _find_subordinate_1mmd_in_window(
         self, now_line: LINE, target_type: str, end_tolerance: int = 0
     ) -> Optional[LINE]:
-        """xd 层定律一(原文 kobo.54.1)用:在 ``now_line`` 末端查找同向的
+        """xd 层用:在 ``now_line`` 末端查找同向的
         次级别(笔层) 1 类买卖点所挂的笔。
 
         - 仅在 ``self.zs_type == 'xd'`` 时启用——bi 层无更细次级别。
@@ -359,14 +359,14 @@ class BsPointCalculator:
 
     @staticmethod
     def _breaks_last_zs(now_line: LINE, last_zs: ZS) -> bool:
-        """now_line 是否在几何上「跌破/突破最后一个走势中枢」(原文 kobo.48.1 / 49.1)。
+        """now_line 是否在几何上「跌破/突破最后一个走势中枢」。
 
         判据三条全部满足才算「跌破末中枢」：
           1. 末中枢已完成(``last_zs.done is True`` 且 ``last_zs.end`` 非 None)——
              pending 中枢的延伸区间还在变,无法定位「跌破点」;
           2. ``now_line`` 不在末中枢内部段之前——``now_line.index >= last_zs.end.index``
-             涵盖两种合法位置:① now_line 本身就是末中枢的离开段(``last_zs.end``,
-             被子项目① 并入中枢核心)、② now_line 在离开段之后(脱离中枢后的延续段);
+             涵盖两种合法位置:其一 now_line 本身就是末中枢的离开段(``last_zs.end``,
+             已并入中枢核心)、其二 now_line 在离开段之后(脱离中枢后的延续段);
           3. ``now_line`` 的 low/high 突破末中枢延伸区间 dd/gg——
              ``low > last_zs.dd`` (下跌) / ``high < last_zs.gg`` (上涨)表示
              仍在中枢瞬间波动内,非「跌破」。等号(``=``)留给「now_line 自身
@@ -425,7 +425,7 @@ class BsPointCalculator:
         """
         第一类买卖点 = 趋势背驰（直接复用 ``cl.beichi_qs``）
 
-        充要条件（按缠论原文图 39 / 第 61 讲）：
+        判定条件：
             1. 至少 2 个同向中枢，构成 'up' / 'down' 趋势（``cl.zss_is_qs`` 已校验）
             2. 当前线段方向与趋势方向一致（``cl.beichi_qs`` 已校验）
             3. 当前线段相对"进入前一个中枢的同方向线段"力度衰减（``cl.beichi_qs`` 已校验）
@@ -459,10 +459,9 @@ class BsPointCalculator:
             if len(valid_zss) < 2:
                 continue
 
-            # 几何判据(原文 kobo.48.1 / 49.1)：1 类买卖点 = 次级别走势类型「向下
-            # 跌破最后一个走势中枢后形成的背驰点」。仅力度衰减不够,还须确认 now_line
-            # 几何上脱离末中枢：末中枢须已完成、now_line 是末中枢的离开段或在其后、
-            # 且 low/high 突破延伸最低/最高(dd/gg)。
+            # 几何判据：1 类买卖点 = 跌破/突破最后一个走势中枢后形成的背驰点。
+            # 仅力度衰减不够,还须确认 now_line 几何上脱离末中枢：末中枢须已完成、
+            # now_line 是末中枢的离开段或在其后、且 low/high 突破延伸最低/最高(dd/gg)。
             if not self._breaks_last_zs(now_line, valid_zss[-1]):
                 continue
 
@@ -479,8 +478,8 @@ class BsPointCalculator:
             if not is_bc or not compare_lines:
                 continue
 
-            # 趋势背驰必须创新低/高（缠论原文段 482）：beichi_qs 仅做 MACD 力度
-            # 衰减比较，未校验价格几何条件，需补「创新低/高 + 力度衰减」复合条件。
+            # 趋势背驰必须创新低/高：beichi_qs 仅做 MACD 力度衰减比较，未校验价格
+            # 几何条件，需补「创新低/高 + 力度衰减」复合条件。
             base_line = compare_lines[0]
             if now_line.type == 'down' and now_line.low >= base_line.low:
                 continue  # 下跌段未创新低 → 不构成 1buy
@@ -553,12 +552,11 @@ class BsPointCalculator:
         """
         第二类买卖点 = 一类买卖点后的反抽再回调（不创新低/高），或盘整背驰
 
-        **路径 1·定律一(仅 xd 层)**: 原文 kobo.54.1「任何级别的第二类买卖点都
-        由次级别相应走势的第一类买点构成」——xd 层 ``now_line`` 末端若
-        挂有同向次级别(笔层) 1 类信号,直接识别为本级别 2 类。这是原文严格口径,
-        优先于经验法。要求 ``process_mmd`` 先跑 bi 层(已在 cl.py 中保证)。
+        **路径 1(仅 xd 层)**: 本级别第二类买卖点由次级别相应走势的第一类买点
+        构成——xd 层 ``now_line`` 末端若挂有同向次级别(笔层) 1 类信号,直接识别为
+        本级别 2 类。优先于经验法。要求 ``process_mmd`` 先跑 bi 层(已在 cl.py 中保证)。
 
-        **路径 2·经验法兜底**: 充要条件（按缠论原文图 39 / 学员补充第 61 讲）：
+        **路径 2·经验法兜底**: 判定条件：
             1. 当前线段往前能找到同方向的 1buy / 1sell（必须先调 ``_detect_1buy_1sell``）
             2. 一买/一卖与当前段之间至少隔了 1 段反向走势（构成"反抽 → 再回调"）
             3. 满足以下任一条件：
@@ -577,7 +575,7 @@ class BsPointCalculator:
         if not lines:
             return
 
-        # 原文「2 买 = 1 买后**首次**次级别回抽」：每个 1 买锚点只产一次 2 买，
+        # 2 买 = 1 买后首次次级别回抽：每个 1 买锚点只产一次 2 买，
         # 后续不破前低的回抽属中枢震荡，不再重复记 2 买（否则一波震荡里一个 1 买
         # 会刷出十几个 2 买）。key 改 (anchor.type, anchor.index) 业务键(增量跨轮稳定,
         # 不用 id);value = 该锚点 2 买回抽 line.index。复用实例级持久状态(已复原到 as-of start)。
@@ -588,7 +586,7 @@ class BsPointCalculator:
         # 等价性见 tests/chan_core/test_bs_point_1mmd.py。
         _1mmd_pools, _1mmd_keys = self._build_1mmd_pools_inc(lines, start)
 
-        # 路径1·定律一(仅 xd 层):预建「带笔层 1 类的笔」索引一次,消除
+        # 路径1(仅 xd 层):预建「带笔层 1 类的笔」索引一次,消除
         # _find_subordinate_1mmd_in_window per-line 全量笔扫 O(xds×bis)。bi 层无
         # 次级别 → 不建,后续 sub_1bi 恒 None(与 scan 在 bi 层恒返回 None 等价)。
         # bi 此刻已定(bi 层 calculate 先于 xd 层跑完),循环内不变,故可外提。
@@ -603,7 +601,7 @@ class BsPointCalculator:
                 # 二买/二卖至少需要 1 个一买 + 1 段反抽 + 当前段 = 3 段
                 continue
 
-            # ---- 路径 1·定律一(原文 kobo.54.1) ----
+            # ---- 路径 1 ----
             # xd 层时,优先看次级别(笔层) 1 类是否落在 now_line 末端,有则
             # 直接产出本级别 2 类,跳过经验法。(索引版,等价于 scan 见上)
             sub_1bi = (
@@ -624,12 +622,12 @@ class BsPointCalculator:
                             zs=ref_zs_dl1,
                             zs_type=self.zs_type,
                             msg=(
-                                f'定律一(原文 kobo.54.1): 次级别(笔) {sub_1bi.index} '
+                                f'2类买卖点: 次级别(笔) {sub_1bi.index} '
                                 f'挂 1 类 → 本级别 2 类'
                             ),
                         )
                         LogUtil.debug(lambda:
-                            f"[BsPointCalculator] 定律一识别到 {mmd_name_dl1}: "
+                            f"[BsPointCalculator] 识别到 {mmd_name_dl1}: "
                             f"line.index={now_line.index}, sub_bi.index={sub_1bi.index}, "
                             f"zs.index={ref_zs_dl1.index}"
                         )
@@ -799,7 +797,7 @@ class BsPointCalculator:
         return pools, keys
 
     def _sub_index_from_bi_pool(self) -> dict:
-        """xd 层定律一用「带 bi 层 1 类的笔」按 end_k 升序索引。bi 层(process_mmd 中先跑)
+        """xd 层路径1用「带 bi 层 1 类的笔」按 end_k 升序索引。bi 层(process_mmd 中先跑)
         已把这些笔收进 cl._bi_bsp._pool(增量维护),直接复用其稀疏池建 end_k 键(O(signals)),
         取代每轮 self.cl.get_bis() 的 O(bis) 全量重扫(并绕开 get_bis 的 deepcopy)。
         池缺失(bi 层尚无中枢/未启用)时回退原全量 scan。"""
@@ -859,7 +857,7 @@ class BsPointCalculator:
         """
         第三类买卖点 = 中枢形成后，离开中枢的次级别走势 + 反抽不回中枢区间 [ZG, ZD]
 
-        充要条件（按缠论原文图 6 / 图 19-21）：
+        判定条件：
             1. 存在已完成的中枢（``zs.done == True`` 且 ``zs.real == True``）
             2. 当前线段位于中枢离开段之后（``now_line.start.index >= zs.end.end.index``）
             3. 当前线段方向与离开段方向相反（即"反抽"）
@@ -870,13 +868,12 @@ class BsPointCalculator:
         :param lines: 本级别所有线段
         :param zss: 本级别中枢列表
 
-        **重要(原文 kobo.61.1)**:「并不是走势中枢上方的任何回调回抽都是第三类
-        买卖点,必须是第一次。」一个中枢只能产生**一个** 3 买、最多再加一个
-        3 卖(扩展性买卖点),后续不破 ZG 的反抽 **不重复挂**。`first_return_seen` 字典
-        以 (zs.index, mmd_name) 为键确保 first-touch 语义。旧实现对每个不破
-        ZG 的反抽都识别,在密集震荡行情下 3 类信号会指数级爆炸。
+        **重要**:并不是中枢上方的任何回调回抽都是第三类买卖点,必须是第一次。
+        一个中枢只能产生一个 3 买、最多再加一个 3 卖,后续不破 ZG 的反抽不重复挂。
+        `first_return_seen` 字典以 (zs.index, mmd_name) 为键确保 first-touch 语义。
+        旧实现对每个不破 ZG 的反抽都识别,在密集震荡行情下 3 类信号会指数级爆炸。
         """
-        # first-touch 守卫:每个中枢每种 3 类信号只处理第一次回抽/回拉(原文 kobo.61.1)。
+        # first-touch 守卫:每个中枢每种 3 类信号只处理第一次回抽/回拉。
         # key = (zs.index, mmd_name); value = 首次回抽/回拉的 now_line.index。
         # 复用实例级持久状态(已复原到 as-of start);含「失败触碰」项故不可从 mmds 重建。
         first_return_seen = self._st_3buy

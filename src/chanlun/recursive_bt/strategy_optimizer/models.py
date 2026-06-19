@@ -1,4 +1,4 @@
-"""strategy_optimizer 数据类型 —— 从 strategy_optimizer.py 拆出(facade 包化首批)。
+"""strategy_optimizer 数据类型。
 
 6 个不可变数据类:选股系统/策略候选/评分权重/策略评分/运行时摘要源/已评分摘要。
 自包含(仅依赖 dataclasses/typing),被 candidates/scoring/reports 各层引用。

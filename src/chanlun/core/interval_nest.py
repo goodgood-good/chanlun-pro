@@ -1,10 +1,8 @@
-"""interval_nest.py — P6 缠论区间套（自顶向下 READ · 标可操作性）。
+"""interval_nest.py — 缠论区间套（自顶向下标可操作性）。
 
 消费 beichi_nest 的嵌套背驰森林，自顶向下 DFS 给每个节点标区间套属性
-（depth/is_innermost/is_nested/operable）。可操作 ⟺ 嵌套链最内层 + 被逐级套住
-（宪法 §7.1 第27课 / §7.2 双向闭环 READ / §7.3 强度标注）。深度门限的可操作性
-策略交策略层。孤立、不接 CL、不改上游、不动旧 recursive_calculator。
-设计见 docs/chanlun_core_redesign_6_区间套_design.md。
+（depth/is_innermost/is_nested/operable）。可操作 ⟺ 嵌套链最内层 + 被逐级套住。
+深度门限的可操作性策略交策略层。孤立、不接 CL、不改上游、不动旧 recursive_calculator。
 """
 from __future__ import annotations
 

@@ -83,9 +83,9 @@ class EvaluatorConfig:
         return self.level_ladder[i + 1] if i + 1 < len(self.level_ladder) else None
 
 
-# 信号类型基础分 —— 由验证闭环在 9 标的 307 信号上实测校准（详见验证报告）：
-#   xd_beichi 胜率 75% / 前瞻 +1.04%；bi_break 66% / +0.80%；bi_beichi 56% / -0.13%
-# 旧评分（背驰强度 + 共振 + 区间套加成）经验证为非单调、A 不优于 C，已废弃。
+# 信号类型基础分 —— 实测校准值：
+#   xd_beichi 胜率约 75%；bi_break 约 66%；bi_beichi 约 56%（无边际优势）。
+# 背驰强度/共振/区间套等叠加评分经验证区分度低，不计入主分。
 _KIND_BASE_SCORE = {
     SIGNAL_KIND_XD_BEICHI: 78,   # 线段背驰 —— 实测最强
     SIGNAL_KIND_BI_BREAK: 62,    # 笔不创新高/低 —— 实测稳健微正
@@ -97,9 +97,8 @@ _KIND_BASE_SCORE = {
 def grade_signal(signal: ClSignal) -> ClSignal:
     """计算 score 与 grade（原地写回）。
 
-    评分以**信号类型**为锚 —— 验证闭环实测信号类型是预测力的主轴；背驰类再按
-    力度强度做小幅微调（±5 内，不喧宾夺主）。共振 / 区间套经验证未带来正向区分度，
-    **不计入评分**（仍作为 ``resonance`` / ``zs_context`` 等参考信息保留）。
+    评分以信号类型为主轴；背驰类按力度强度做小幅微调（±5 内）。
+    共振/区间套不计入评分，仅作为 ``resonance``/``zs_context`` 参考信息保留。
     """
     score = _KIND_BASE_SCORE.get(signal.signal_kind, 45)
     if signal.strength is not None:
@@ -171,8 +170,7 @@ class ClSignalEvaluator:
     def detect_structure_signals(self, cd: ICL, level: str) -> List[ClSignal]:
         """识别笔破位 / 笔停顿。
 
-        注：原"新线段成立(new_xd)"信号已移除 —— 验证闭环实测其在真实行情上
-        反向（胜率 ~20%、平均前瞻收益 ~-1.9%），属滞后/衰竭事实、非方向信号。
+        注：原"新线段成立(new_xd)"信号已移除 —— 实测为滞后/衰竭事实，非方向信号。
         """
         signals: List[ClSignal] = []
         bis = cd.get_bis()

@@ -1,4 +1,4 @@
-"""facade —— 见 chanlun.trading.backtest_klines(命名重构,见 dir_structure_audit)。
+"""facade —— 实际实现在 chanlun.trading.backtest_klines。
 
 保留 re-export 保证 `from chanlun.backtesting.backtest_klines import BackTestKlines` 不破。
 """

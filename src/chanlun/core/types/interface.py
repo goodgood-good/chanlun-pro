@@ -272,18 +272,17 @@ def compare_ld_beichi(
     """
     比较两个力度，后者小于前者，返回 True
 
-    **口径差异(§3.10)**：本函数仅做柱子面积比较——是原文细则1的子集。原文完整
-    口径(柱子面积 + 级别相关黄白线 + 0 轴回抽 + 创新高前提)见
-    ``chanlun.core.beichi_calculator.is_beichi``,新代码建议直接用该函数。
-    本函数为兼容遗留调用方(``cl_analyse`` / ``signal_monitor`` / 旧 user_custom_mmd)
-    保留,可选 ``dif_check=True`` 启用黄白线高度衰减作渐进升级路径。
+    本函数仅做柱子面积比较。完整的背驰判定（含黄白线高度衰减、0 轴回抽等）
+    见 ``chanlun.core.beichi_calculator.is_beichi``，新代码建议直接用该函数。
+    本函数为兼容遗留调用方（``cl_analyse`` / ``signal_monitor`` / 旧 user_custom_mmd）
+    保留，可选 ``dif_check=True`` 启用黄白线高度衰减作渐进升级路径。
 
-    :param one_ld: 前段力度(query_macd_ld 风格,含 ``macd`` 键)
+    :param one_ld: 前段力度（query_macd_ld 风格，含 ``macd`` 键）
     :param two_ld: 后段力度
     :param line_direction: ``'up'`` / ``'down'`` 决定看红柱/绿柱
-    :param dif_check: 默认 False(向后兼容,仅看柱子面积)。True 时再叠加
-        黄白线高度衰减(``up: dif.max 后 < 前;down: dif.min 后 > 前``),
-        更贴近原文细则1。**未含 0 轴回抽**——需要的话用 ``is_beichi``。
+    :param dif_check: 默认 False（向后兼容，仅看柱子面积）。True 时再叠加
+        黄白线高度衰减（``up: dif.max 后 < 前；down: dif.min 后 > 前``），
+        判定更严格。未含 0 轴回抽——需要的话用 ``is_beichi``。
     """
     hist_key = "sum"
     if line_direction == "up":

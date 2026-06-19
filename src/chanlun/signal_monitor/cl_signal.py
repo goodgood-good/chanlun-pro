@@ -18,9 +18,8 @@ SIGNAL_KIND_BI_BEICHI = "bi_beichi"   # 笔背驰
 SIGNAL_KIND_XD_BEICHI = "xd_beichi"   # 线段背驰
 SIGNAL_KIND_BI_BREAK = "bi_break"     # 笔破/不破前同向极值
 SIGNAL_KIND_BI_PAUSE = "bi_pause"     # 笔停顿
-# 注：原 new_xd（新线段成立）已移除 —— 验证闭环在 SZ.301004 / TSLA 上实测它
-# 反向（胜率 ~20%、平均前瞻收益 ~-1.9%）。新线段是走势走出后才成立的滞后/
-# 衰竭事实，不构成方向信号。详见 docs 验证报告。
+# 注：原 new_xd（新线段成立）信号已移除 —— 实测该信号为滞后/衰竭事实，
+# 不构成有效方向信号。
 
 SIGNAL_KINDS = (
     SIGNAL_KIND_BI_BEICHI,

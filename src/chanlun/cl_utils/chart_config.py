@@ -111,10 +111,7 @@ def query_cl_chart_config(
         "zs_xd_type": [Config.ZS_TYPE_BZ.value],
         "zs_qj": Config.ZS_QJ_DD.value,
         "zs_cd": Config.ZS_CD_THREE.value,
-        # 趋势判定口径：原文「趋势中前后中枢绝对不存在重叠，包括围绕中枢的
-        # 瞬间波动(GG/DD)之间的重叠」(行2891/3565/3566/7795) → 用 GD（gg/dd
-        # 包络不重叠才算趋势）。ZG/ZD 分离但 GG/DD 重叠，原文判为「中枢扩展」、
-        # 非趋势。按原文重做，与 core CL 默认(cl.py)统一取 GD。
+        # 趋势判定口径：用 GD（gg/dd 包络均不重叠才算趋势），与 core CL 默认(cl.py)统一。
         "zs_wzgx": Config.ZS_WZGX_GD.value,
         "zs_optimize": "0",
         # MACD 配置（计算力度背驰）
@@ -153,9 +150,8 @@ def query_cl_chart_config(
         "chart_show_fx": "1",
         "chart_show_bi": "1",
         "chart_show_xd": "1",
-        # 缠论叠加层默认全部关闭——只显示 K线/分型/笔/线段(用户口径 2026-05-25:
-        # 中枢/走势类型/5m 重做前先清场)。后端计算逻辑均保留,改这些 chart_show_*
-        # 即可在图上重新打开;前端也可独立 toggle。
+        # 缠论叠加层默认全部关闭——只显示 K线/分型/笔/线段。后端计算逻辑均保留,
+        # 改这些 chart_show_* 即可在图上重新打开;前端也可独立 toggle。
         "chart_show_bi_zs": "0",
         "chart_show_xd_zs": "0",
         "chart_show_bi_mmd": "0",

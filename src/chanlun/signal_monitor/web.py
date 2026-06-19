@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""手动力度对比的 Flask 蓝图（中枢-free 信号监控 · Phase 2）。
+"""手动力度对比的 Flask 蓝图。
 
   - ``/strength_compare/<market>/<code>`` —— 参考线段（按起止时间定位）与
     当前在走线段做实时力度对比，复用 ``strength_compare`` 内核。

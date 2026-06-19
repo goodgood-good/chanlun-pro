@@ -21,29 +21,24 @@ class ZsCalculator:
     def __init__(self, require_alternation: bool = True, min_zs_lines: int = 4,
                  max_zs_lines: int = 8, allow_tail_noop: bool = False):
         # require_alternation：是否强制核心三段方向交替。
-        # 默认 True——① 主流程线段中枢扫描照旧。④ 递归到 L≥1 时构成段是
+        # 默认 True——主流程线段中枢扫描照旧。递归到 level≥1 时构成段是
         # 走势类型（含无向盘整、不严格交替），传 False 跳过交替检查。
         self.require_alternation: bool = require_alternation
         # 尾部 no-op 优化(末尾不足成新中枢→保留 zss 直接返回)仅对「不被 recursive_branch
         # 消费 pending」的中枢计算器安全:CL 笔层 bi_zss_calculator 仅做方向回填、可开;
-        # 线段层 zss_calculator 的 zss+pending 喂 recursive(走势类型/L0 中枢),必须保守
+        # 线段层 zss_calculator 的 zss+pending 喂 recursive(走势类型/level0 中枢),必须保守
         # 全量(默认 False),否则中途 get_branch_* 触发的重算会与全量分叉。
         self.allow_tail_noop: bool = allow_tail_noop
         # min_zs_lines：构成中枢的最小核心线段数（含离开段）。默认 4——
-        # 这是**原文一致**的，并非偏离：原文要求「前三个次级别走势类型都是
-        # **完成的**才构成中枢」(第18课)，而线段「必须被另一线段破坏才算
-        # 完成」(原文线段定义/线段分解定理)；故第 3 段线段须由第 4 段确认其
-        # 完成，前 3 段方都「完成」、中枢方成立——计入这条确认/离开段，最小即 4。
-        # （勿据「三个线段重合即成中枢」的字面把它改成 3：那忽略了「完成的」
-        # 这一限定，会把第 3 段未确认的形态误判成中枢。）④ 递归到 L≥1 时构成段
-        # 是走势类型——传入的 ZSLX 单元已是完成走势类型，3 个重叠即成中枢，传 3。
+        # 因为线段必须被后一段破坏才算完成，第 3 段线段须由第 4 段确认其完成，
+        # 前 3 段都完成、中枢方成立，计入这条确认/离开段，最小即 4。
+        # 递归到 level≥1 时构成段是走势类型——传入的 ZSLX 单元已是完成走势类型，
+        # 3 个重叠即成中枢，传 3。
         self.min_zs_lines: int = min_zs_lines
         # max_zs_lines：中枢含核心的最大段数（默认 8 = 3 核心 + 5 延伸）。
-        # 原文第33课：「中枢的延伸不能超过 5 段，一旦出现 6 段的延伸，加上形成
-        # 中枢本身那三段（=9 段），就构成更大级别的中枢了」。故单个中枢封顶 8 段；
-        # 达上限仍重叠 → 在此完成（末段为离开/升级边界），后续振荡由下一中枢承接，
-        # 同区间的多个 ≤8 段中枢经扩展（_expand_overlapping）升级为高级别中枢。
-        # 不封顶会把长振荡贪心吸成 30 段巨型中枢（核心被首两段钉死、与走势脱节）。
+        # 故单个中枢封顶 8 段；达上限仍重叠 → 在此完成（末段为离开/升级边界），
+        # 后续振荡由下一中枢承接，同区间的多个 ≤8 段中枢经扩展升级为高级别中枢。
+        # 不封顶会把长振荡贪心吸成巨型中枢（核心被首两段钉死、与走势脱节）。
         self.max_zs_lines: int = max_zs_lines
         self.all_lines: List[LINE] = []
         self.zss: List[ZS] = []
@@ -80,8 +75,8 @@ class ZsCalculator:
             self._last_lines_obj = None
             return []
 
-        # 检查线段数量：中枢最少由 min_zs_lines 段重叠构成（L0 线段中枢
-        # 默认 4，离开段计入核心；④ 的 L≥1 走势类型中枢为 3）。进入段可选，
+        # 检查线段数量：中枢最少由 min_zs_lines 段重叠构成（level0 线段中枢
+        # 默认 4，离开段计入核心；level≥1 走势类型中枢为 3）。进入段可选，
         # 故 min_zs_lines 段即起步、不足则不可能成中枢。
         if len(lines) < self.min_zs_lines:
             # 段数跌回 <min(末段被回撤):必须清空中枢,与「全新实例从同样 <min 的
@@ -390,9 +385,9 @@ class ZsCalculator:
 
         与 _prefix_stable_restart 同构,但原地改时 identity 前缀失效(对象身份未变、
         值已改),改用长度 buffer 定稳定前缀:删末 2 段保留前 ``len-2`` 段。安全条件=
-        保留段⊆未变段=回溯深度 d≤2(实测 QQQ.US_d L165 / 5m L2240 均 d=2,5+40 极端
-        样本未见 d≥3),即 ``len-2`` 恰好容纳 d≤2、无额外余量(buffer=0);若现 d≥3 此处
-        会与全量分叉,需调大 buffer 或加运行时回溯深度哨兵。
+        保留段⊆未变段=回溯深度 d≤2(实测样本均 d=2),即 ``len-2`` 恰好容纳 d≤2、
+        无额外余量(buffer=0);若现 d≥3 此处会与全量分叉,需调大 buffer 或加运行时
+        回溯深度哨兵。
         保留 ``end+1 < safe_prefix`` 的完成中枢(核心段及完成回看的 +1 段全落稳定前缀),
         从最后一个安全中枢的 exit 重扫 pending 区域(有界),替代全量 -1 重扫所有中枢。
         等价性由对拍网 test_incremental_equivalence(全快照逐前缀)守。
@@ -400,7 +395,7 @@ class ZsCalculator:
         if not grow or lines is not self._last_lines_obj or self._last_lines_count < 4:
             return False
         safe_prefix = self._last_lines_count - 2   # 删末2段容纳 xd 回溯 d≤2(实测上界2、buffer=0)
-        # A-HIGH-1/A-9-1 运行时哨兵(对齐 xd_calculator):复用前缀依赖倒数第3段 xd
+        # 运行时哨兵(对齐 xd_calculator):复用前缀依赖倒数第3段 xd
         # (safe_prefix-1)已 done(线段终结靠反向特征序列分型、done 段冻结不回溯;最近段
         # 试探性可回溯)。若它仍 pending(末尾可变段>2、回溯深度疑≥3),len-2 buffer 不足 →
         # 降级全量(恒正确),把「实测 d≤2」从注释承诺升级为运行时保证。
@@ -427,8 +422,8 @@ class ZsCalculator:
         """
         核心函数：扫描并创建中枢
 
-        进入段是可选的：原文中枢定义只讲「3+ 连续次级别走势类型重叠」，
-        不含进入段。``entry_idx == -1`` 表示核心段从序列开头 (index 0) 起，
+        进入段是可选的：中枢由连续次级别走势类型重叠构成，不含进入段。
+        ``entry_idx == -1`` 表示核心段从序列开头 (index 0) 起，
         此时中枢没有进入段（``ZS.start`` 为 None）。
 
         :param start_entry_idx: 扫描起始的进入段下标；-1 表示从无进入段的
@@ -443,18 +438,16 @@ class ZsCalculator:
 
             seg_a, seg_b, seg_c = self.all_lines[core_start_idx:core_start_idx + 3]
 
-            # 检查线段方向是否交替（require_alternation=False 时跳过，供 ④ 的
-            # L≥1 走势类型扫描——走势类型含无向盘整、不严格交替）。
+            # 检查线段方向是否交替（require_alternation=False 时跳过，供
+            # level≥1 走势类型扫描——走势类型含无向盘整、不严格交替）。
             if self.require_alternation and not (
                 seg_a.type != seg_b.type and seg_b.type != seg_c.type
             ):
                 entry_idx += 1
                 continue
 
-            # 原文(行2835·缠回复严格公式)：中枢区间 = (max(a₂,b₂,c₂), min(a₁,b₁,c₁))
-            # ——即 A/B/C **三段共同重叠**;等价于第20课(行3585)同向 Z 段
-            # ZG=min(g₁,g₂)、ZD=max(d₁,d₂)(相邻段共享端点,故两式等价)。
-            # 只取前两段会漏掉 seg_c 的高/低约束、令中枢在趋势侧偏宽(审查 F1)。
+            # 中枢区间 = (max(三段低), min(三段高))，即三段共同重叠区间。
+            # 只取前两段会漏掉 seg_c 的高/低约束、令中枢在趋势侧偏宽。
             zg = min(seg_a.zs_high, seg_b.zs_high, seg_c.zs_high)
             zd = max(seg_a.zs_low, seg_b.zs_low, seg_c.zs_low)
 
@@ -464,9 +457,9 @@ class ZsCalculator:
                 entry_idx += 1
                 continue
 
-            # 进入段不参与中枢成立判定：原文中枢 = 3+ 连续次级别走势类型重叠，
-            # 不要求进入段与中枢区间重叠。旧实现此处的「进入段重叠门槛」属
-            # extra-原文，会漏掉进入段在区间外的合法中枢，已删除。
+            # 进入段不参与中枢成立判定：中枢由连续次级别走势类型重叠构成，
+            # 不要求进入段与中枢区间重叠。旧实现此处的「进入段重叠门槛」
+            # 会漏掉进入段在区间外的合法中枢，已删除。
 
             # seg_a / seg_b / seg_c 三段重叠先给出候选中枢区间 [zd, zg]；
             # 中枢成立还需第 4 段也重叠（由 _extend_and_check_complete 续判），
@@ -475,7 +468,7 @@ class ZsCalculator:
 
             # _type 此处仅置初始占位（中间核心段方向）：线段中枢的真实方向
             # （上涨/下跌中枢 up/down、盘整中枢 zd）由 ZslxCalculator 在走势
-            # 类型划分后回填（子项目③）；笔中枢未接入 ③，沿用此占位。
+            # 类型划分后回填；笔中枢未接入该回填，沿用此占位。
             center = ZS(zs_type='xd', start=entry_seg, _type=seg_b.type)
             center.lines = core_lines
             center._bounds_dirty = True  # 整体赋值 lines 后边界缓存失效
@@ -492,7 +485,7 @@ class ZsCalculator:
             center.update_boundaries()
 
             if is_completed:
-                # 有效中枢须满足：有离开段、核心线段 >= min_zs_lines（L0
+                # 有效中枢须满足：有离开段、核心线段 >= min_zs_lines（level0
                 # 线段中枢默认 4，离开段计入核心故含离开段共 >= 4 段重叠）。
                 # 进入段可为 None（开头中枢无进入段），故不校验 center.start。
                 is_valid_center = (
@@ -521,7 +514,7 @@ class ZsCalculator:
     def _promote_opening_entry_if_needed(self, center: ZS) -> None:
         """开头中枢恰好 5 段重叠时，第一段按进入段处理。
 
-        项目 L0 口径为 4 段重叠成中枢，最后一段为离开段；若从数据开头
+        level0 口径为 4 段重叠成中枢，最后一段为离开段；若从数据开头
         直接看到 5 段连续重叠，则第 1 段不再是核心段，而是进入段，
         中枢核心应从第 2 段开始。
         """
@@ -584,10 +577,10 @@ class ZsCalculator:
                 return True, start_j - 1
             # 下一段也重叠 → 待定末段确认为核心,落入 while 从 start_j 续扫
         while j < len(self.all_lines):
-            # 第33课封顶：中枢含核心达 max_zs_lines 段、仍在延伸（未自然完成）→
+            # 封顶：中枢含核心达 max_zs_lines 段、仍在延伸（未自然完成）→
             # 在此封顶完成。末段(center.lines[-1])作离开/升级边界，当前段 j 起下一
-            # 中枢核心、续接振荡；同区间多个 ≤max 段中枢经扩展(_expand_overlapping)
-            # 升级为高级别中枢。不封顶会把长振荡贪心吸成 30 段巨型中枢、与走势脱节。
+            # 中枢核心、续接振荡；同区间多个 ≤max 段中枢经扩展升级为高级别中枢。
+            # 不封顶会把长振荡贪心吸成巨型中枢、与走势脱节。
             if len(center.lines) >= self.max_zs_lines:
                 center.end = center.lines[-1]
                 center.done = True

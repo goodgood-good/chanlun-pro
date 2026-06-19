@@ -57,9 +57,9 @@ class ZS:
         self.entry: Optional[LINE] = None  # 进入段
         self.exit: Optional[LINE] = None  # 离开段
 
-        # 子项目 ⑤：中枢扩展(原文 #391)。两个或更多相邻同级别中枢的瞬间波动
-        # 区间(GG/DD 包络)有重叠时,合并为高级中枢；本字段记录构成它的子中枢。
-        # 非扩展中枢(独立、未合并)为空列表。
+        # 中枢扩展：两个或更多相邻同级别中枢的波动区间（GG/DD 包络）有重叠时，
+        # 合并为高级中枢；本字段记录构成它的子中枢。
+        # 非扩展中枢（独立、未合并）为空列表。
         self.expanded_with: List['ZS'] = []
 
     @property
@@ -93,7 +93,7 @@ class ZS:
         state.setdefault('_gg_cache', None)
         state.setdefault('_dd_cache', None)
         state.setdefault('_bounds_dirty', True)
-        # 子项目 ⑤ 扩展字段:旧 pickle 缺失时补空列表
+        # 中枢扩展字段:旧 pickle 缺失时补空列表
         state.setdefault('expanded_with', [])
         self.__dict__.update(state)
 
