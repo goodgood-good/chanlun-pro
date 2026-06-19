@@ -160,6 +160,9 @@ class RecursiveBranchCalculator:
                 zb.frequency = frequency
                 zb.wzgx = wzgx_config
             res = zb.calculate(units)
+            if zs_diversity and res.done_zss:
+                from chanlun.core import zs_diversity as _zsd
+                res = _zsd.refine(res, units, min_lines)
             if not res.done_zss:
                 # 右边缘只剩 pending 高级中枢(未被离开段确认完成)：记录其 H2(leave 读法)
                 # 中枢 + live 背驰再终止——让层级树展示到右边缘「正在形成」的高级中枢

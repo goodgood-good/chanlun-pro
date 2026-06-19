@@ -12,6 +12,7 @@ import copy
 from typing import List, Optional
 
 from chanlun.core.types import LINE, ZS
+from chanlun.core.zs_branch import ZsBranchResult
 from chanlun.core.zs_calculator import ZsCalculator
 
 
@@ -85,8 +86,10 @@ def _refine_r4(zss: List[ZS], units: List[LINE], min_lines: int) -> List[ZS]:
     for z in zss:
         segs = _zs_segs(z)
         i = _first_third_class(segs, z.zd, z.zg, core=3)
-        if i is None or i < min_lines:
-            # 无中间三类点，或切后本体不足 min_lines → 原样保留
+        if i is None:
+            # 无中间三类点 → 原样保留
+            # 注：_first_third_class 已保证 i >= core=3，截断后本体至少 3 段（原文合法），
+            # 故不再用 i < min_lines 过滤（L0 min_lines=4 会误杀 i=3 的合法切点）。
             out.append(z)
             continue
         # 收口：中枢截止到下标 i
@@ -97,3 +100,29 @@ def _refine_r4(zss: List[ZS], units: List[LINE], min_lines: int) -> List[ZS]:
             rescanned = ZsCalculator(min_zs_lines=min_lines).calculate(tail)
             out.extend(_refine_r4(rescanned, tail, min_lines))
     return out
+
+
+def refine(
+    res: ZsBranchResult,
+    units: List[LINE],
+    min_lines: int,
+) -> ZsBranchResult:
+    """R4 编排入口：对 res.done_zss 施 _refine_r4，返回新 ZsBranchResult。
+
+    Task 4 接线：recursive_branch 循环里在 zb.calculate(units) 之后、
+    zslx_calc.calculate(...) 之前，当开关 recursive_zs_diversity=True 时调用。
+
+    live / freeze_idx 透传（未完成中枢不精炼）；done_divergence 按精炼后中枢数
+    对齐，切分新增的中枢置 None（下游内联背驰重算）。
+
+    原文锚: L038:215 三类点=延伸结束信号（中枢到三类点即告完成）
+    """
+    if not res.done_zss:
+        return res
+    zss = _refine_r4(res.done_zss, units, min_lines)
+    return ZsBranchResult(
+        done_zss=zss,
+        live=res.live,
+        freeze_idx=res.freeze_idx,
+        done_divergence=[None] * len(zss),
+    )
