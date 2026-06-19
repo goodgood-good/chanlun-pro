@@ -162,6 +162,108 @@ def test_refine_r4_truncates_at_third_class(monkeypatch):
     assert first.end is segs[3]
 
 
+# ── Task R3 v1: _running_overlap_groups / _refine_r3 ──────────────────────
+from types import SimpleNamespace as NS  # noqa: F811 (already imported above)
+
+from chanlun.core.zs_diversity import _running_overlap_groups, _refine_r3  # noqa: E402
+
+
+def _make_seg(lo: float, hi: float, idx: int):
+    """构造带有 zs_low/zs_high/start/end k_index 的段 stub。"""
+    return NS(
+        _type="up" if hi > lo else "down",
+        zs_low=float(lo),
+        zs_high=float(hi),
+        start=NS(val=float(lo), k=NS(k_index=idx * 2)),
+        end=NS(val=float(hi), k=NS(k_index=idx * 2 + 1)),
+    )
+
+
+def test_running_overlap_groups_splits_on_gap():
+    """12 段逐步上漂：前 6 段互相重叠 [10,11]；段 6 起上移到 [11.5,12.5] 与前段重叠破坏。
+    期望：_running_overlap_groups 至少返回 2 组，且每组段数 >= min_seg=3。"""
+    # 前 6 段：区间都在 [10, 11]
+    segs = [_make_seg(10.0, 11.0, i) for i in range(6)]
+    # 后 6 段：上移到 [11.5, 12.5]（与 [10,11] 重叠为空，nhi=11 < nlo=11.5 → 断枢）
+    segs += [_make_seg(11.5, 12.5, i + 6) for i in range(6)]
+
+    groups = _running_overlap_groups(segs, min_seg=3)
+
+    assert len(groups) >= 2, f"预期 >=2 组，实际 {len(groups)}"
+    for g in groups:
+        assert len(g) >= 3, f"每组段数应 >=3，实际 {len(g)}"
+
+
+def test_running_overlap_groups_no_split_when_all_overlap():
+    """6 段全部重叠 → 仅返回 1 组。"""
+    segs = [_make_seg(10.0, 11.0, i) for i in range(6)]
+    groups = _running_overlap_groups(segs, min_seg=3)
+    assert len(groups) == 1
+    assert len(groups[0]) == 6
+
+
+def test_running_overlap_groups_drops_tiny_tail():
+    """前 5 段重叠，最后 2 段断枢但不足 min_seg=3 → 只返回 1 组（尾组丢弃）。"""
+    segs = [_make_seg(10.0, 11.0, i) for i in range(5)]
+    segs += [_make_seg(12.0, 13.0, i + 5) for i in range(2)]
+    groups = _running_overlap_groups(segs, min_seg=3)
+    assert len(groups) == 1
+    assert len(groups[0]) == 5
+
+
+def _build_fake_zs(segs, zd: float, zg: float):
+    """用 SimpleNamespace 构造最小 ZS 替身供 _refine_r3 消费。"""
+    z = NS(
+        lines=list(segs),
+        end=None,
+        zd=float(zd),
+        zg=float(zg),
+        zs_type="xd",
+        level=None,
+        done=True,
+        _bounds_dirty=True,
+    )
+    return z
+
+
+def test_refine_r3_breaks_drifting_zhongshu():
+    """R3 v1：合成 12 段缓漂中枢（upgrade_seg=9 触发断枢），返回 >1 子中枢。
+    每个子中枢段数 >= min_lines；核心区 zd < zg。"""
+    # 前 6 段：[10, 11]；后 6 段：[11.5, 12.5]——running-overlap 在第 7 段断
+    segs = [_make_seg(10.0, 11.0, i) for i in range(6)]
+    segs += [_make_seg(11.5, 12.5, i + 6) for i in range(6)]
+    z = _build_fake_zs(segs, zd=10.0, zg=11.0)
+
+    result = _refine_r3([z], min_lines=3, upgrade_seg=9)
+
+    assert len(result) > 1, f"12 段缓漂中枢应被断为 >1 子中枢，实际 {len(result)}"
+    for sub in result:
+        assert len(sub.lines) >= 3, f"子中枢段数 >=3，实际 {len(sub.lines)}"
+        assert sub.zd < sub.zg, f"子中枢核心区 zd<zg，实际 zd={sub.zd} zg={sub.zg}"
+
+
+def test_refine_r3_passthrough_short_zhongshu():
+    """段数 < upgrade_seg 的中枢不触发 R3，原样透传。"""
+    segs = [_make_seg(10.0, 11.0, i) for i in range(6)]
+    z = _build_fake_zs(segs, zd=10.0, zg=11.0)
+
+    result = _refine_r3([z], min_lines=3, upgrade_seg=9)
+
+    assert len(result) == 1
+    assert result[0] is z
+
+
+def test_refine_r3_passthrough_no_split():
+    """12 段全部重叠（无漂移）→ _running_overlap_groups 返回 1 组 → 原样透传。"""
+    segs = [_make_seg(10.0, 11.0, i) for i in range(12)]
+    z = _build_fake_zs(segs, zd=10.0, zg=11.0)
+
+    result = _refine_r3([z], min_lines=3, upgrade_seg=9)
+
+    assert len(result) == 1
+    assert result[0] is z
+
+
 def test_r4_inc_equals_batch():
     """Task 8: R4(flag on) 增量==批量——逐块喂 K 线的精炼 L0 中枢 == 一次性批量。"""
     from pathlib import Path

@@ -5,6 +5,14 @@
   L038:215 三类点=延伸结束信号
   L033:17  九段升级条件
   L043:57  巨型中枢非法判定
+
+工程补充（R3 v1）：
+  running-overlap 移动核心规则——**偏离中心定理一（固定核心延伸）的工程选择**。
+  原文中心定理一以首三段构成的固定核心区延伸中枢，不随新段滑动。本规则对
+  ≥ upgrade_seg 段的巨型中枢改用「任意两段间的滑动重叠交集」断枢，操作上
+  把缓漂盘整（每段都与紧邻段重叠但首尾不重叠）切断为若干子中枢。这与
+  min_zs_lines=4（原文字面 3 段，项目门槛 4 段）同性质——均为工程口径而非
+  原文字面。适用场景：002299 类 1683 根缓漂巨枢（v1 目标 <1000 根）。
 """
 from __future__ import annotations
 
@@ -12,7 +20,7 @@ import copy
 from typing import List, Optional
 
 from chanlun.core.types import LINE, ZS
-from chanlun.core.zs_branch import ZsBranchResult
+from chanlun.core.zs_branch import ZsBranchResult, core_interval
 from chanlun.core.zs_calculator import ZsCalculator
 
 
@@ -102,6 +110,116 @@ def _refine_r4(zss: List[ZS], units: List[LINE], min_lines: int) -> List[ZS]:
     return out
 
 
+def _running_overlap_groups(segs: List[LINE], min_seg: int) -> List[List[LINE]]:
+    """按移动核心 running-overlap 规则把段序列分组。
+
+    维护一个「所有已入组段的滑动重叠交集」[lo, hi]：
+      - 加入新段后仍 lo < hi（严格非空）→ 归入当前组；
+      - 否则重叠为空 → 当前组若 ≥ min_seg 则成组保留，新段另起新组。
+
+    ⚠ 工程口径（见模块 docstring R3 v1 说明）：偏离原文中心定理一固定核心。
+
+    参数
+    ----
+    segs    : 段序列（按时序）
+    min_seg : 每组最少段数门槛（不足则丢弃）
+
+    返回
+    ----
+    满足 ≥ min_seg 的分组列表（保持时序）。
+    """
+    groups: List[List[LINE]] = []
+    cur: List[LINE] = []
+    lo: Optional[float] = None
+    hi: Optional[float] = None
+    for s in segs:
+        nlo = s.zs_low if lo is None else max(lo, s.zs_low)
+        nhi = s.zs_high if hi is None else min(hi, s.zs_high)
+        if lo is None or nlo < nhi:
+            cur.append(s)
+            lo, hi = nlo, nhi
+        else:
+            if len(cur) >= min_seg:
+                groups.append(cur)
+            cur, lo, hi = [s], s.zs_low, s.zs_high
+    if len(cur) >= min_seg:
+        groups.append(cur)
+    return groups
+
+
+def _build_zs(group: List[LINE], ref_zs: "ZS") -> Optional["ZS"]:
+    """从段组构建子中枢，以 ref_zs 为模板复制 zs_type/level。
+
+    核心区由前三段按 core_interval 计算；None（退化重叠）则跳过该组。
+    子中枢 lines = group，done=True，boundaries 重算。
+
+    ⚠ 工程口径：子中枢核心区由组内前三段确定（仍用原文首三段公式），
+    但「哪三段是首三段」取决于 running-overlap 断枢点，与原文固定核心有差异。
+    """
+    if len(group) < 3:
+        return None
+    iv = core_interval(group[0], group[1], group[2])
+    if iv is None:
+        return None
+    z = ZS(
+        zs_type=ref_zs.zs_type,
+        start=group[0],
+        end=group[-1],
+        zg=iv[1],
+        zd=iv[0],
+        level=ref_zs.level,
+    )
+    z.lines = list(group)
+    z.done = True
+    z._bounds_dirty = True
+    z.update_boundaries()
+    return z
+
+
+def _refine_r3(
+    zss: List["ZS"],
+    min_lines: int,
+    upgrade_seg: int = 9,
+) -> List["ZS"]:
+    """R3 v1 精炼：对 ≥ upgrade_seg 段的巨型中枢用 running-overlap 断枢。
+
+    流程（每个中枢独立处理）：
+      1. 取 segs = z.lines（本体段，忽略 z.end 离开段，纯函数不修改原中枢）。
+      2. 若 len(segs) < upgrade_seg → 原样透传。
+      3. _running_overlap_groups(segs, min_lines) 分组：
+         - 仅 1 组或空组 → 原样透传（无缓漂，不断枢）。
+         - 多组 → 每组调 _build_zs 构建子中枢，过滤 None，替换原中枢。
+
+    ⚠ 工程口径（见模块 docstring R3 v1）。纯函数，不改 done_zss 以外的状态，
+    满足 inc==batch（输入相同段序列得相同结果）。
+
+    参数
+    ----
+    zss         : 待精炼中枢列表
+    min_lines   : 最小构成段数（与 ZsCalculator.min_zs_lines 同口径）
+    upgrade_seg : 触发 R3 的段数门槛（默认 9，即九段升级前兆）
+
+    返回
+    ----
+    精炼后的中枢列表（保持时序，可能比输入更多）。
+    """
+    out: List["ZS"] = []
+    for z in zss:
+        segs = list(z.lines)
+        if len(segs) < upgrade_seg:
+            out.append(z)
+            continue
+        groups = _running_overlap_groups(segs, min_lines)
+        if len(groups) <= 1:
+            out.append(z)
+            continue
+        for g in groups:
+            sub = _build_zs(g, z)
+            if sub is not None:
+                out.append(sub)
+    return out
+
+
 def refine(
     res: ZsBranchResult,
     units: List[LINE],
@@ -120,6 +238,7 @@ def refine(
     if not res.done_zss:
         return res
     zss = _refine_r4(res.done_zss, units, min_lines)
+    zss = _refine_r3(zss, min_lines)
     return ZsBranchResult(
         done_zss=zss,
         live=res.live,

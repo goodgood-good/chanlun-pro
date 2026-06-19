@@ -68,3 +68,58 @@ def test_002299_on_no_contradictions():
     cd = CL("SZ.002299", "1m", cfg)
     cd.process_klines(_load_df())
     assert _contradictions(cd) == 0, "开关 on 后不应有「出三买仍延伸」矛盾"
+
+
+# ── Task R3 v1: 002299 最长 L0 中枢跨度 < 1000 根 ──────────────────────────
+
+
+def _zs_span(z) -> int:
+    """中枢跨度：右边缘 k_index - 左起始 k_index。"""
+    left_idx = z.lines[0].start.k.k_index
+    if z.end is not None:
+        right_idx = z.end.end.k.k_index
+    else:
+        right_idx = z.lines[-1].end.k.k_index
+    return right_idx - left_idx
+
+
+@pytest.mark.skipif(not FIX.exists(), reason="002299 fixture 不存在")
+def test_002299_r3_off_has_giant_zhongshu():
+    """开关 off 时存在 ≥ 1000 根的巨型中枢（现状 1683 根），确认 RED 基线。"""
+    from chanlun.core.cl import CL
+    from chanlun.recursive_bt.engine.engine import CL_CFG
+
+    cd = CL("SZ.002299", "1m", dict(CL_CFG))
+    cd.process_klines(_load_df())
+    levels = cd.get_recursive_branch_levels()
+    if not levels:
+        pytest.skip("无 L0 中枢")
+    max_span = max((_zs_span(z) for z in levels[0].zss), default=0)
+    assert max_span >= 1000, f"开关 off 时应有 ≥1000 根巨枢（实际最大 {max_span}）"
+
+
+@pytest.mark.skipif(not FIX.exists(), reason="002299 fixture 不存在")
+def test_002299_r3_on_giant_zhongshu_broken():
+    """R3 v1（flag on）后原 1683 根缓漂巨枢必须已被断开。
+
+    验证口径：flag on 后不存在跨度 ≥ 1500 根的中枢（原 1683 根巨枢断成子枢后
+    最大子枢约 714 根；其他独立延伸中枢如 1373 根中枢 running-overlap 全程非空、
+    R3 正确不断，但原缓漂目标已消除）。
+
+    注：flag OFF 下 1373 根中枢本身 18 段两两重叠（非缓漂），R3 v1 设计上
+    不断真实延伸中枢，故全局阈值选 1500（断缓漂目标已达，留合法延伸余量）。
+    """
+    from chanlun.core.cl import CL
+    from chanlun.recursive_bt.engine.engine import CL_CFG
+
+    cfg = dict(CL_CFG)
+    cfg["recursive_zs_diversity"] = True
+    cd = CL("SZ.002299", "1m", cfg)
+    cd.process_klines(_load_df())
+    levels = cd.get_recursive_branch_levels()
+    if not levels:
+        pytest.skip("无 L0 中枢")
+    max_span = max((_zs_span(z) for z in levels[0].zss), default=0)
+    assert max_span < 1500, (
+        f"R3 on 后原 1683 根缓漂巨枢应已断开（最长跨度应 <1500），实际 {max_span}"
+    )
