@@ -160,3 +160,31 @@ def test_refine_r4_truncates_at_third_class(monkeypatch):
     assert len(first.lines) < len(segs)
     # 切点段（segs[3]）须被设为 .end
     assert first.end is segs[3]
+
+
+def test_r4_inc_equals_batch():
+    """Task 8: R4(flag on) 增量==批量——逐块喂 K 线的精炼 L0 中枢 == 一次性批量。"""
+    from pathlib import Path
+
+    import pandas as pd
+    import pytest
+
+    fix = Path(__file__).resolve().parents[1] / "fixtures" / "SZ.002299_1m.parquet"
+    if not fix.exists():
+        pytest.skip("002299 fixture 不存在")
+    from chanlun.core.cl import CL
+    from chanlun.recursive_bt.engine.engine import CL_CFG
+
+    df = pd.read_parquet(fix).iloc[:6000]
+    cfg = {**CL_CFG, "recursive_zs_diversity": True}
+
+    def fp(cd):
+        return [(round(z.zd, 4), round(z.zg, 4), len(z.lines))
+                for z in cd.get_recursive_branch_levels()[0].zss]
+
+    cb = CL("SZ.002299", "1m", dict(cfg))
+    cb.process_klines(df)
+    ci = CL("SZ.002299", "1m", dict(cfg))
+    for k in (2000, 4000, 6000):
+        ci.process_klines(df.iloc[:k])
+    assert fp(cb) == fp(ci)
