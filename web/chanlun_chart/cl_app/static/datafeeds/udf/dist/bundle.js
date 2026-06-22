@@ -489,6 +489,30 @@
         unsubscribeBars(listenerGuid) {
             delete this._subscribers[listenerGuid];
         }
+        /**
+         * SSE 推送驱动：把最新 bar 直接喂给匹配的订阅者(绕过轮询/浏览器节流)。
+         * symbolResKey = (ticker||name).toLowerCase() + resolution.toLowerCase()。
+         */
+        feedBar(symbolResKey, bar) {
+            for (const guid in this._subscribers) {
+                const sub = this._subscribers[guid];
+                const si = sub.symbolInfo || {};
+                const key = String(si.ticker || si.name || '').toLowerCase()
+                    + String(sub.resolution).toLowerCase();
+                if (key !== symbolResKey) {
+                    continue;
+                }
+                if (sub.lastBarTime !== null && bar.time < sub.lastBarTime) {
+                    continue;
+                }
+                sub.lastBarTime = bar.time;
+                try {
+                    sub.listener(bar);
+                } catch (e) {
+                    /* ignore listener errors */
+                }
+            }
+        }
         _updateData() {
             if (this._requestsPending > 0) {
                 return;
@@ -541,10 +565,9 @@
             const isNewBar = subscriptionRecord.lastBarTime !== null && lastBar.time > subscriptionRecord.lastBarTime;
             // Pulse updating may miss some trades data (ie, if pulse period = 10 secods and new bar is started 5 seconds later after the last update, the
             // old bar's last 5 seconds trades will be lost). Thus, at fist we should broadcast old bar updates when it's ready.
-            if (isNewBar) {
-                if (bars.length < 2) {
-                    throw new Error('Not enough bars in history for proper pulse update. Need at least 2.');
-                }
+            if (isNewBar && bars.length >= 2) {
+                // 仅当确有前一根时补发它；bars<2(数据源延迟/窗口仅 1 根)时跳过补发、
+                // 不再抛错，避免"数据延迟后新 bar 到达"令 K 线更新整条中断。
                 const previousBar = bars[bars.length - 2];
                 subscriptionRecord.listener(previousBar);
             }
@@ -1060,6 +1083,31 @@
                 onResult(result.bars, result.meta);
             })
                 .catch(onError);
+        }
+        /**
+         * SSE 推送驱动 K 线：从 /tv/history 同构 response 取最新一根 bar，喂给
+         * DataPulseProvider 的订阅者，让 K 线随 SSE 实时刷新(不依赖轮询)。
+         */
+        feedRealtimeBar(symbolResKey, response) {
+            if (!response || !response.t || response.t.length === 0 || !response.c) {
+                return;
+            }
+            const i = response.t.length - 1;
+            const c = response.c[i];
+            if (c === undefined || c === null) {
+                return;
+            }
+            const bar = {
+                time: response.t[i] * 1000,
+                open: response.o ? response.o[i] : c,
+                high: response.h ? response.h[i] : c,
+                low: response.l ? response.l[i] : c,
+                close: c,
+            };
+            if (response.v && response.v[i] !== undefined && response.v[i] !== null) {
+                bar.volume = response.v[i];
+            }
+            this._dataPulseProvider.feedBar(symbolResKey, bar);
         }
         subscribeBars(symbolInfo, resolution, onTick, listenerGuid, _onResetCacheNeededCallback) {
             this._dataPulseProvider.subscribeBars(symbolInfo, resolution, onTick, listenerGuid);

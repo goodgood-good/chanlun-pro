@@ -1959,6 +1959,11 @@ class ChartManager {
                 if (hp && typeof hp.applyChanlunUpdate === 'function') {
                     hp.applyChanlunUpdate(data, { symbol, resolution });
                 }
+                // K线也随 SSE 实时刷新：把推送里的最新 bar 喂给 TV(绕过轮询/节流/bars<2 抛错)。
+                if (this.udf_datafeed && typeof this.udf_datafeed.feedRealtimeBar === 'function') {
+                    const resKey = String(symbol).toLowerCase() + String(resolution).toLowerCase();
+                    this.udf_datafeed.feedRealtimeBar(resKey, data);
+                }
             } catch (e) { console.warn('[SSE] 处理推送失败', e); }
         });
         es.onerror = () => { clog('[SSE] 连接错误, 浏览器将自动重连; 轮询继续兜底'); };
