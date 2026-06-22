@@ -3,9 +3,12 @@
 """
 
 import base64
+import contextlib
 import hashlib
 import hmac
+import io
 import json
+import sys
 import time
 import urllib.parse
 from typing import Dict, Optional, Union
@@ -15,6 +18,21 @@ import requests
 from chanlun import config
 from chanlun.persistence.db import db
 from chanlun.tools.log_util import LogUtil
+
+
+@contextlib.contextmanager
+def suppress_stdout():
+    """临时把 stdout 重定向到内存缓冲，吞掉第三方库(如 pytdx)漏删的调试 print。
+
+    注意：stdout 是进程级全局，此期间其他线程的 print 也会被吞，故只应包住会
+    刷屏的第三方调用、且尽量短。项目自身日志走 logging，不受影响。
+    """
+    _old = sys.stdout
+    sys.stdout = io.StringIO()
+    try:
+        yield
+    finally:
+        sys.stdout = _old
 
 
 def config_get_proxy() -> Dict[str, str]:

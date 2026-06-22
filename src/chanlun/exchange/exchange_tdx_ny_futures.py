@@ -10,6 +10,7 @@ from tenacity import retry, retry_if_result, stop_after_attempt, wait_random
 
 from chanlun import fun
 from chanlun.market import Market
+from chanlun.utils import suppress_stdout
 from chanlun.persistence.db import db
 from chanlun.exchange.exchange import Exchange, Tick
 from chanlun.exchange.kline_precision import normalize_kline_precision
@@ -175,9 +176,11 @@ class ExchangeTDXNYFutures(Exchange):
             "1m": 8,
         }
         market, tdx_code = self.to_tdx_code(code)
-        if market is None or start_date is not None or end_date is not None:
+        if market is None:
             print("不支持的调用参数")
             return None
+        # 通达信不支持按时间区间查询；收到 start_date/end_date 时忽略它们，
+        # 仍按“分页拉最新 + 文件缓存合并”返回（tv_history 后续会按窗口切片）。
 
         try:
             client = TdxExHq_API(raise_exception=True, auto_retry=True)
@@ -313,12 +316,16 @@ class ExchangeTDXNYFutures(Exchange):
                 _quotes = []
                 _req_start = 0
                 while True:
-                    _qs = client.get_instrument_quote_list(
-                        _mc["market"],
-                        _mc["category"],
-                        start=_req_start,
-                        count=_req_start + 80,
-                    )
+                    # pytdx get_instrument_quote_list 在 category=3(期货)解析时会
+                    # print 游标位置(库漏删的调试输出)，用 suppress_stdout 吞掉避免
+                    # 控制台刷屏；count 固定 80(接口单次上限)。
+                    with suppress_stdout():
+                        _qs = client.get_instrument_quote_list(
+                            _mc["market"],
+                            _mc["category"],
+                            start=_req_start,
+                            count=80,
+                        )
                     _quotes.extend(_qs)
                     _req_start += 80
                     if len(_qs) < 80:
