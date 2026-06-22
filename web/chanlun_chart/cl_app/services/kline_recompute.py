@@ -223,6 +223,26 @@ def prepend_klines_and_replace_cache(
     if merged is None or len(merged) == 0:
         return None
 
+    # 数据没变(根数与末根 OHLC 都未变)→ 跳过全量重算, 直接复用缓存。
+    # 收盘/非交易时段的标的仍会被前端轮询/SSE 每隔几秒触发, 若不跳过会反复全量
+    # 重算几千根缠论(实测单次 calc 可达 18s)。多标的并发时严重抢 CPU, 把新标的
+    # 首次加载拖到十几~几十秒。实时只会改末根(同 time 的 OHLC 更新)或追加新根
+    # (根数变), 历史根不变; 故比较"根数 + 末根 OHLC"即可判定数据是否停滞。
+    if cached_entry is not None and len(cached_df) > 0 and len(cached_df) == len(merged):
+        _co = cached_df.iloc[-1]
+        _mo = merged.iloc[-1]
+        try:
+            if (
+                _co["date"] == _mo["date"]
+                and _co["open"] == _mo["open"]
+                and _co["high"] == _mo["high"]
+                and _co["low"] == _mo["low"]
+                and _co["close"] == _mo["close"]
+            ):
+                return cached_entry.get("data")
+        except (KeyError, IndexError):
+            pass
+
     new_chart_data = recompute_chart_data_from_klines(
         market, code, frequency, cl_config, merged, to_frequency=to_frequency,
     )
