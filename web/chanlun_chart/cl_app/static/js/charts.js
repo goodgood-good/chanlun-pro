@@ -571,8 +571,13 @@ class ChartManager {
         }
         const identity = this.getCurrentChartIdentity();
         if (!identity) return;
-        if (detail.symbol && detail.symbol !== identity.symbol.toLowerCase()) {
-            return;
+        // 守卫放宽: detail.symbol(getBars 的 requestParams.symbol=symbolInfo.ticker) 与
+        // identity.symbol(chart.symbol())是 TV 两个不同 API, 搜索切标的后可能差一个 "market:"
+        // 前缀。去前缀等价比较, 避免 ready 事件被误吞导致 draw_chanlun 永不触发(切标的卡死根因之一)。
+        if (detail.symbol) {
+            const _ev = detail.symbol.toLowerCase().replace(/^[a-z]+:/, '');
+            const _id = identity.symbol.toLowerCase().replace(/^[a-z]+:/, '');
+            if (_ev !== _id) return;
         }
         if (detail.resolution && detail.resolution !== identity.interval.toLowerCase()) {
             return;
@@ -589,7 +594,10 @@ class ChartManager {
     }
 
     init() {
-        this.udf_datafeed = new Datafeeds.UDFCompatibleDatafeed("/tv", 3000, undefined, {
+        // SSE 接管实时刷新(applyChanlunUpdate + feedRealtimeBar)后, TV 轮询降到 30s 仅作断线
+        // 兜底, 大幅减少多标的 first=false 轮询撞长桥 6QPS 限流(实测轮询拉 10 根 6-24s)。
+        const _sseOn = (typeof window !== 'undefined' && window.__CHANLUN_SSE_ENABLED === true);
+        this.udf_datafeed = new Datafeeds.UDFCompatibleDatafeed("/tv", _sseOn ? 30000 : 3000, undefined, {
             managerId: this.instanceId,
         });
 
@@ -1369,8 +1377,25 @@ class ChartManager {
     getChartData() {
         const symbolInterval = this.widget.symbolInterval(); if (!symbolInterval) return null;
         const symbolResKey = `${symbolInterval.symbol.toString().toLowerCase()}${symbolInterval.interval.toString().toLowerCase()}`;
-        const barsResult = this.udf_datafeed?._historyProvider?.bars_result?.get(symbolResKey);
+        let barsResult = this.udf_datafeed?._historyProvider?.bars_result?.get(symbolResKey);
 
+        if (!barsResult) {
+            // 容错: 写键(getBars 用 symbolInfo.ticker)与读键(symbolInterval().symbol)可能差一个
+            // "market:" 前缀。剥前缀直查、或在现有键里找"去前缀后唯一相等"项再试一次。
+            const _map = this.udf_datafeed?._historyProvider?.bars_result;
+            if (_map) {
+                const _interval = symbolInterval.interval.toString().toLowerCase();
+                const _bare = symbolResKey.replace(/^[a-z]+:/, '');
+                let _alt = _map.get(_bare);
+                if (!_alt) {
+                    const _cands = Array.from(_map.keys()).filter(k =>
+                        k.toLowerCase().endsWith(_interval) &&
+                        k.toLowerCase().replace(/^[a-z]+:/, '') === _bare);
+                    if (_cands.length === 1) _alt = _map.get(_cands[0]);
+                }
+                if (_alt) barsResult = _alt;
+            }
+        }
         if (!barsResult) {
             const availableKeys = this.udf_datafeed?._historyProvider?.bars_result ? Array.from(this.udf_datafeed._historyProvider.bars_result.keys()) : [];
             console.warn(`[DEBUG-CHARTS] getChartData for ${symbolResKey}: NOT FOUND. Available keys:`, availableKeys);
