@@ -5,26 +5,26 @@
 
     <link
       rel="shortcut icon"
-      href="{{ url_for('static', filename='favicon.ico') }}" />
+      href="{{ url_for('static', filename='favicon.ico') }}?v={{ static_version }}" />
     <link
       rel="stylesheet"
-      href="{{ url_for('static', filename='css/layui.css') }}" />
+      href="{{ url_for('static', filename='css/layui.css') }}?v={{ static_version }}" />
     <link
       rel="stylesheet"
-      href="{{ url_for('static', filename='css/app.css') }}" />
+      href="{{ url_for('static', filename='css/app.css') }}?v={{ static_version }}" />
 
     <script
       type="text/javascript"
-      src="{{ url_for('static', filename='jquery-3.7.0.min.js') }}"></script>
+      src="{{ url_for('static', filename='jquery-3.7.0.min.js') }}?v={{ static_version }}"></script>
     <script
       type="text/javascript"
-      src="{{ url_for('static', filename='layui.js') }}"></script>
+      src="{{ url_for('static', filename='layui.js') }}?v={{ static_version }}"></script>
     <script
       type="text/javascript"
-      src="{{ url_for('static', filename='xm-select.js') }}"></script>
+      src="{{ url_for('static', filename='xm-select.js') }}?v={{ static_version }}"></script>
     <script
       type="text/javascript"
-      src="{{ url_for('static', filename='marked.min.js') }}"></script>
+      src="{{ url_for('static', filename='marked.min.js') }}?v={{ static_version }}"></script>
     <script
       type="text/javascript"
       src="{{ url_for('static', filename='charting_library/charting_library.standalone.js') }}?version=1.0.0"></script>
@@ -582,32 +582,32 @@
       ZiXuan.render_zixuan_opts();
     }
   </script>
-  <script src="{{ url_for('static', filename='js/utils.js') }}"></script>
-  <script src="{{ url_for('static', filename='js/tv_indicators/chart_idx_ama.js') }}"></script>
-  <script src="{{ url_for('static', filename='js/tv_indicators/chart_idx_atr.js') }}"></script>
-  <script src="{{ url_for('static', filename='js/tv_indicators/chart_idx_cdbb.js') }}"></script>
-  <script src="{{ url_for('static', filename='js/tv_indicators/chart_idx_cmcm.js') }}"></script>
-  <script src="{{ url_for('static', filename='js/tv_indicators/chart_idx_demo.js') }}"></script>
-  <script src="{{ url_for('static', filename='js/tv_indicators/chart_idx_fcx.js') }}"></script>
-  <script src="{{ url_for('static', filename='js/tv_indicators/chart_idx_hdly.js') }}"></script>
-  <script src="{{ url_for('static', filename='js/tv_indicators/chart_idx_heima.js') }}"></script>
-  <script src="{{ url_for('static', filename='js/tv_indicators/chart_idx_hlblw.js') }}"></script>
-  <script src="{{ url_for('static', filename='js/tv_indicators/chart_idx_hlftx.js') }}"></script>
-  <script src="{{ url_for('static', filename='js/tv_indicators/chart_idx_kdj.js') }}"></script>
-  <script src="{{ url_for('static', filename='js/tv_indicators/chart_idx_ltqs.js') }}"></script>
-  <script src="{{ url_for('static', filename='js/tv_indicators/chart_idx_ma.js') }}"></script>
-  <script src="{{ url_for('static', filename='js/tv_indicators/chart_idx_macdbl.js') }}"></script>
-  <script src="{{ url_for('static', filename='js/tv_indicators/chart_idx_vegasma.js') }}"></script>
-  <script src="{{ url_for('static', filename='js/tv_indicators/chart_idx_vol.js') }}"></script>
-  <script src="{{ url_for('static', filename='js/tv_indicators/chart_idx_macd_backend.js') }}"></script>
-  <script src="{{ url_for('static', filename='js/tv_indicators/chart_idx_rsx.js') }}"></script>
+  <script src="{{ url_for('static', filename='js/utils.js') }}?v={{ static_version }}"></script>
+  <script src="{{ url_for('static', filename='js/tv_indicators/chart_idx_ama.js') }}?v={{ static_version }}"></script>
+  <script src="{{ url_for('static', filename='js/tv_indicators/chart_idx_atr.js') }}?v={{ static_version }}"></script>
+  <script src="{{ url_for('static', filename='js/tv_indicators/chart_idx_cdbb.js') }}?v={{ static_version }}"></script>
+  <script src="{{ url_for('static', filename='js/tv_indicators/chart_idx_cmcm.js') }}?v={{ static_version }}"></script>
+  <script src="{{ url_for('static', filename='js/tv_indicators/chart_idx_demo.js') }}?v={{ static_version }}"></script>
+  <script src="{{ url_for('static', filename='js/tv_indicators/chart_idx_fcx.js') }}?v={{ static_version }}"></script>
+  <script src="{{ url_for('static', filename='js/tv_indicators/chart_idx_hdly.js') }}?v={{ static_version }}"></script>
+  <script src="{{ url_for('static', filename='js/tv_indicators/chart_idx_heima.js') }}?v={{ static_version }}"></script>
+  <script src="{{ url_for('static', filename='js/tv_indicators/chart_idx_hlblw.js') }}?v={{ static_version }}"></script>
+  <script src="{{ url_for('static', filename='js/tv_indicators/chart_idx_hlftx.js') }}?v={{ static_version }}"></script>
+  <script src="{{ url_for('static', filename='js/tv_indicators/chart_idx_kdj.js') }}?v={{ static_version }}"></script>
+  <script src="{{ url_for('static', filename='js/tv_indicators/chart_idx_ltqs.js') }}?v={{ static_version }}"></script>
+  <script src="{{ url_for('static', filename='js/tv_indicators/chart_idx_ma.js') }}?v={{ static_version }}"></script>
+  <script src="{{ url_for('static', filename='js/tv_indicators/chart_idx_macdbl.js') }}?v={{ static_version }}"></script>
+  <script src="{{ url_for('static', filename='js/tv_indicators/chart_idx_vegasma.js') }}?v={{ static_version }}"></script>
+  <script src="{{ url_for('static', filename='js/tv_indicators/chart_idx_vol.js') }}?v={{ static_version }}"></script>
+  <script src="{{ url_for('static', filename='js/tv_indicators/chart_idx_macd_backend.js') }}?v={{ static_version }}"></script>
+  <script src="{{ url_for('static', filename='js/tv_indicators/chart_idx_rsx.js') }}?v={{ static_version }}"></script>
   <script src="{{ url_for('static', filename='js/charts.js') }}?v={{ static_version }}"></script>
-  <script src="{{ url_for('static', filename='js/macd_stats.js') }}"></script>
-  <script src="{{ url_for('static', filename='js/strength_compare.js') }}"></script>
-  <script src="{{ url_for('static', filename='js/zixuan.js') }}"></script>
-  <script src="{{ url_for('static', filename='js/alert.js') }}"></script>
-  <script src="{{ url_for('static', filename='js/ai.js') }}"></script>
-  <script src="{{ url_for('static', filename='js/bkgn.js') }}"></script>
+  <script src="{{ url_for('static', filename='js/macd_stats.js') }}?v={{ static_version }}"></script>
+  <script src="{{ url_for('static', filename='js/strength_compare.js') }}?v={{ static_version }}"></script>
+  <script src="{{ url_for('static', filename='js/zixuan.js') }}?v={{ static_version }}"></script>
+  <script src="{{ url_for('static', filename='js/alert.js') }}?v={{ static_version }}"></script>
+  <script src="{{ url_for('static', filename='js/ai.js') }}?v={{ static_version }}"></script>
+  <script src="{{ url_for('static', filename='js/bkgn.js') }}?v={{ static_version }}"></script>
   <script>
     // 右栏「标的列表」区块：按市场全量加载标的，本地过滤，点击代码直接切图。
     // 不依赖 layui.table，纯 jQuery + AJAX 渲染，避免折叠面板内表格高度计算问题。

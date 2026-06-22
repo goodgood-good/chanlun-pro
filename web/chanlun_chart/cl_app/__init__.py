@@ -132,13 +132,22 @@ def create_app(test_config=None):
     @app.context_processor
     def inject_static_version():
         import hashlib
-        files = [
-            os.path.join(app.static_folder, "js", "charts.js"),
+        h = hashlib.md5()
+        # 聚合前端 js/css 目录下所有文件 + bundle.js 的 mtime+size：任一前端文件
+        # 改动都会让 static_version 变化，模板里带 ?v={{ static_version }} 的资源
+        # 随之 cache-bust，用户改前端后普通刷新即可生效，无需手动硬刷新。
+        targets = [
             os.path.join(app.static_folder, "datafeeds", "udf", "dist", "bundle.js"),
         ]
-        h = hashlib.md5()
-        for f in files:
+        for sub in ("js", "css"):
+            sub_dir = os.path.join(app.static_folder, sub)
+            for root, _dirs, fnames in os.walk(sub_dir):
+                for fn in fnames:
+                    if fn.endswith((".js", ".css")):
+                        targets.append(os.path.join(root, fn))
+        for f in sorted(targets):
             try:
+                h.update(f.encode())
                 h.update(str(os.path.getmtime(f)).encode())
                 h.update(str(os.path.getsize(f)).encode())
             except OSError:
