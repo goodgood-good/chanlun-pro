@@ -115,11 +115,9 @@ export class DataPulseProvider implements IDataPulseProvider {
 
 		// Pulse updating may miss some trades data (ie, if pulse period = 10 secods and new bar is started 5 seconds later after the last update, the
 		// old bar's last 5 seconds trades will be lost). Thus, at fist we should broadcast old bar updates when it's ready.
-		if (isNewBar) {
-			if (bars.length < 2) {
-				throw new Error('Not enough bars in history for proper pulse update. Need at least 2.');
-			}
-
+		if (isNewBar && bars.length >= 2) {
+			// 仅当确有前一根时补发它；bars<2(数据源延迟/窗口仅 1 根)时跳过补发、
+			// 不再抛错，避免“数据延迟后新 bar 到达”令 K 线更新整条中断。
 			const previousBar = bars[bars.length - 2];
 			subscriptionRecord.listener(previousBar);
 		}
