@@ -10,7 +10,7 @@ import pandas as pd
 import pytz
 from decimal import Decimal
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception
+from tenacity import Retrying, stop_after_attempt, wait_exponential, retry_if_exception
 
 from longbridge.openapi import Config, QuoteContext, TradeContext, Market, Period, \
     AdjustType, OrderSide, OrderType, TimeInForceType, SecurityListCategory, TradeSessions, OpenApiException
@@ -657,49 +657,75 @@ class ExchangeChangQiao(Exchange):
             LogUtil.error(f"now_trading timeout or error: {e}")
             return False
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10),
-           retry=retry_if_exception(is_retryable_exception))
     def _fetch_candlesticks_api(self, symbol, period, adjust_type, count, time_cursor, trade_sessions,
                                 priority="interactive"):
         """
         带限流和重试的 history kline API 调用。
 
+        按优先级分档快/慢失败:
+          - interactive(切标的/首屏/SSE/轮询): 超时 5s、重试 2 次、短退避(1~3s)。长桥 API
+            卡顿时最坏 ~11s 即放弃(原 8s×3次 + 2~10s 退避 可达 20~30s), 避免用户切标的傻等。
+            代价: API 真慢时该标的可能拉不全(由上层缓存/旧数据兜底)。
+          - prewarm/批量: 保留 8s 超时、3 次重试、长退避(2~10s), 后台慢可接受、尽量拉全。
+
         前置短路：当月配额已耗尽且 symbol 不在本月已查过的集合里 → 抛 _PreemptiveQuotaExhausted
         让上层 _fetch_segment_data 走"已知失败"分支，避免无意义的 SDK 调用浪费 retry 预算。
         用内部哨兵异常而非 OpenApiException 是为了避开 SDK 4 参 ABI（kind, code, trace_id, message）。
+        reraise=True: 重试耗尽抛原异常(非 RetryError), 与 _fetch_segment_data 的 err_code 解包一致。
         """
-        tracker = LbQuotaTracker.instance()
-        limit = getattr(config, "LB_QUOTA_MONTHLY_LIMIT", 0)
-        if limit <= 0 and not getattr(self, "_quota_limit_zero_warned", False):
-            LogUtil.warning(
-                "[lb_quota] LB_QUOTA_MONTHLY_LIMIT not configured (=0), preemptive "
-                "short-circuit disabled; only reactive mark_exhausted() will work"
+        if priority == "interactive":
+            retryer = Retrying(
+                stop=stop_after_attempt(2),
+                wait=wait_exponential(multiplier=1, min=1, max=3),
+                retry=retry_if_exception(is_retryable_exception),
+                reraise=True,
             )
-            self._quota_limit_zero_warned = True
-        if tracker.is_exhausted(limit) and not tracker.has_symbol(symbol):
-            LogUtil.debug(
-                f"[lb_quota] preemptive short-circuit symbol={symbol} "
-                f"count={tracker.count()} limit={limit}"
+            call_timeout = 5.0
+        else:
+            retryer = Retrying(
+                stop=stop_after_attempt(3),
+                wait=wait_exponential(multiplier=1, min=2, max=10),
+                retry=retry_if_exception(is_retryable_exception),
+                reraise=True,
             )
-            raise _PreemptiveQuotaExhausted()
+            call_timeout = self._QUOTE_CALL_TIMEOUT
 
-        # prewarm/批量走独立低优先令牌桶，不与交互请求争抢同一个 3~6 QPS 额度
-        limiter = self.prewarm_rate_limiter if priority == "prewarm" else self.rate_limiter
-        limiter.wait()
-        result = self._quote_call(
-            lambda: self._quote_ctx().history_candlesticks_by_offset(
-                symbol=symbol,
-                period=period,
-                adjust_type=adjust_type,
-                forward=False,  # 向前追溯
-                count=count,
-                time=time_cursor,
-                trade_sessions=trade_sessions
+        def _do_call():
+            tracker = LbQuotaTracker.instance()
+            limit = getattr(config, "LB_QUOTA_MONTHLY_LIMIT", 0)
+            if limit <= 0 and not getattr(self, "_quota_limit_zero_warned", False):
+                LogUtil.warning(
+                    "[lb_quota] LB_QUOTA_MONTHLY_LIMIT not configured (=0), preemptive "
+                    "short-circuit disabled; only reactive mark_exhausted() will work"
+                )
+                self._quota_limit_zero_warned = True
+            if tracker.is_exhausted(limit) and not tracker.has_symbol(symbol):
+                LogUtil.debug(
+                    f"[lb_quota] preemptive short-circuit symbol={symbol} "
+                    f"count={tracker.count()} limit={limit}"
+                )
+                raise _PreemptiveQuotaExhausted()
+
+            # prewarm/批量走独立低优先令牌桶，不与交互请求争抢同一个 3~6 QPS 额度
+            limiter = self.prewarm_rate_limiter if priority == "prewarm" else self.rate_limiter
+            limiter.wait()
+            result = self._quote_call(
+                lambda: self._quote_ctx().history_candlesticks_by_offset(
+                    symbol=symbol,
+                    period=period,
+                    adjust_type=adjust_type,
+                    forward=False,  # 向前追溯
+                    count=count,
+                    time=time_cursor,
+                    trade_sessions=trade_sessions
+                ),
+                timeout=call_timeout,
             )
-        )
-        # 记录本次成功的 symbol 进入本月配额集合
-        tracker.add_symbol(symbol)
-        return result
+            # 记录本次成功的 symbol 进入本月配额集合
+            tracker.add_symbol(symbol)
+            return result
+
+        return retryer(_do_call)
 
     def _fetch_segment_data(self, code, period, adjust, end_dt, start_dt_limit, priority="interactive"):
         """
