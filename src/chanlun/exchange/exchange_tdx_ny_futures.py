@@ -10,7 +10,6 @@ from tenacity import retry, retry_if_result, stop_after_attempt, wait_random
 
 from chanlun import fun
 from chanlun.market import Market
-from chanlun.utils import suppress_stdout
 from chanlun.persistence.db import db
 from chanlun.exchange.exchange import Exchange, Tick
 from chanlun.exchange.kline_precision import normalize_kline_precision
@@ -316,16 +315,14 @@ class ExchangeTDXNYFutures(Exchange):
                 _quotes = []
                 _req_start = 0
                 while True:
-                    # pytdx get_instrument_quote_list 在 category=3(期货)解析时会
-                    # print 游标位置(库漏删的调试输出)，用 suppress_stdout 吞掉避免
-                    # 控制台刷屏；count 固定 80(接口单次上限)。
-                    with suppress_stdout():
-                        _qs = client.get_instrument_quote_list(
-                            _mc["market"],
-                            _mc["category"],
-                            start=_req_start,
-                            count=80,
-                        )
+                    # count 固定 80(接口单次上限)。pytdx 解析期货报价时会 print 游标
+                    # 位置(库漏删的调试输出)，由 app 启动时安装的 stdout 噪音过滤吞掉。
+                    _qs = client.get_instrument_quote_list(
+                        _mc["market"],
+                        _mc["category"],
+                        start=_req_start,
+                        count=80,
+                    )
                     _quotes.extend(_qs)
                     _req_start += 80
                     if len(_qs) < 80:

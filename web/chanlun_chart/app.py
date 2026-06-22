@@ -106,6 +106,10 @@ def main() -> None:
     if is_wpf_launcher:
         _wrap_stdio_gbk()
 
+    # 安装 stdout 噪音过滤：吞掉 pytdx 等第三方库漏删的纯数字调试 print，避免刷屏。
+    from chanlun.utils import install_stdout_noise_filter
+    install_stdout_noise_filter()
+
     try:
         app = create_app()
 
