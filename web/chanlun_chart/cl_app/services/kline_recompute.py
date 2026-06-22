@@ -11,10 +11,13 @@
   调用方(tv_history)拿到新 chart_data 后,**整体替换** chart_data_cache,
   不再走 _merge_chart_data 的"shape 起点合并"路径。
 
-无状态:所有函数纯函数,便于单测。
+状态:extract/merge 为纯函数;另有进程级持久 CL 实例池(_cl_pool, LRU)承载增量
+重算状态——recompute_chart_data_from_klines 传 cache_key 时复用持久 CL, 让盘中
+末根刷新/新增根只算增量而非每次全量重建。复用判定见该函数与 _cl_pool 注释。
 """
 import threading
 import time
+from collections import OrderedDict
 from typing import Optional
 
 import pandas as pd
@@ -135,6 +138,34 @@ def merge_klines_df(cached: pd.DataFrame, new: pd.DataFrame) -> pd.DataFrame:
     return combined
 
 
+# ── 持久 CL 实例池(增量重算) ──────────────────────────────────────────
+# CL.process_klines 自带增量(对比 K 线数量+末根状态、各持久 calculator identity-LCP),
+# 但每次"新建空 CL"会丢弃增量状态、退化成全量重算。按 cache_key 复用持久 CL, 让
+# SSE/轮询的末尾刷新只算增量(盘中全量重算 ~1.8s → 末根增量 ~ms, 多标的不再抢爆 CPU)。
+# 复用条件保守: config 一致 + 首根 date 不变 + 根数不减(= 末尾追加/末根更新, 前缀稳定);
+# 向左滚动(首根变早)/config 变/symbol 切换 → 新建全量, 不踩"前缀变"风险。
+# 线程安全: 同 cache_key 由调用方 chart_calc_locks 串行; _cl_pool_lock 仅护池字典本身。
+_CL_POOL_MAX = 64
+_cl_pool: "OrderedDict[str, dict]" = OrderedDict()
+_cl_pool_lock = threading.Lock()
+
+
+def _make_cl_config_key(cl_config: dict, market: str, to_frequency: Optional[str]) -> str:
+    """CL 复用配置指纹: config/market/to_frequency 任一变, 都不可复用同一实例。"""
+    import json
+    try:
+        cfg = json.dumps(cl_config, sort_keys=True, default=str)
+    except (TypeError, ValueError):
+        cfg = repr(sorted(cl_config.items())) if isinstance(cl_config, dict) else repr(cl_config)
+    return f"{market}|{to_frequency}|{cfg}"
+
+
+def reset_cl_pool() -> None:
+    """清空 CL 池(测试隔离 / 手动失效)。"""
+    with _cl_pool_lock:
+        _cl_pool.clear()
+
+
 def recompute_chart_data_from_klines(
     market: str,
     code: str,
@@ -142,6 +173,7 @@ def recompute_chart_data_from_klines(
     cl_config: dict,
     klines: pd.DataFrame,
     to_frequency: Optional[str] = None,
+    cache_key: Optional[str] = None,
 ) -> Optional[dict]:
     """从一份**完整连续**的 K 线 DataFrame 出发,直接构造空 CL → process_klines →
     cl_data_to_tv_chart,返回新鲜的 chart_data dict。
@@ -175,15 +207,51 @@ def recompute_chart_data_from_klines(
     from chanlun.core.cl import CL
     from chanlun.cl_utils import cl_data_to_tv_chart
 
+    config_key = _make_cl_config_key(cl_config, market, to_frequency)
+    first_date = klines.iloc[0]["date"] if len(klines) else None
+    n = len(klines)
+
+    # 取可复用的持久 CL(承载增量状态)或新建空 CL(全量)。
+    cd = None
+    reused = False
+    if cache_key is not None:
+        with _cl_pool_lock:
+            entry = _cl_pool.get(cache_key)
+            if (
+                entry is not None
+                and entry["config_key"] == config_key
+                and entry["first_date"] == first_date
+                and n >= entry["n"]
+            ):
+                cd = entry["cl"]
+                reused = True
+                _cl_pool.move_to_end(cache_key)
+    if cd is None:
+        cd = CL(code, frequency, dict(cl_config), market=market)
+
     _wait_t0 = time.time()
     with _recompute_sem:  # 限并发，防多窗口同时全量重算把 CPU 打满导致雪崩
         _calc_t0 = time.time()
-        cd = CL(code, frequency, dict(cl_config), market=market)
-        cd.process_klines(klines)
+        cd.process_klines(klines)  # 复用→增量(只算末根/新增根), 新建→全量
         result = cl_data_to_tv_chart(cd, cl_config, to_frequency=to_frequency)
     _done = time.time()
+
+    # 回填池: 记录本次实例与"首根 date + 根数", 供下次末尾刷新判定可否增量复用。
+    if cache_key is not None:
+        with _cl_pool_lock:
+            _cl_pool[cache_key] = {
+                "cl": cd,
+                "config_key": config_key,
+                "first_date": first_date,
+                "n": n,
+            }
+            _cl_pool.move_to_end(cache_key)
+            while len(_cl_pool) > _CL_POOL_MAX:
+                _cl_pool.popitem(last=False)  # 淘汰最久未用, 防内存无界增长
+
     LogUtil.info(
-        f"[recompute] {market}:{code} {frequency} klines={len(klines)} "
+        f"[recompute] {market}:{code} {frequency} klines={n} "
+        f"{'inc' if reused else 'full'} "
         f"wait={(_calc_t0 - _wait_t0) * 1000:.0f}ms calc={(_done - _calc_t0) * 1000:.0f}ms"
     )
     return result
@@ -245,6 +313,7 @@ def prepend_klines_and_replace_cache(
 
     new_chart_data = recompute_chart_data_from_klines(
         market, code, frequency, cl_config, merged, to_frequency=to_frequency,
+        cache_key=cache_key,
     )
     if new_chart_data is None:
         return None
