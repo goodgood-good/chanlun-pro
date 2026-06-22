@@ -37,6 +37,12 @@ _load_dotenv()
 # WEB服务访问IP地址，本机部署设置为 127.0.0.1；局域网或外网部署，设置为该机器的IP地址，或者设置 0.0.0.0 则可使用机器所有IP地址进行访问。
 WEB_HOST = '0.0.0.0'
 
+# SSE 实时推送：默认开；关闭则前后端退回纯轮询(现状)。
+ENABLE_SSE_PUSH = True
+# 服务端缠论重算+推送间隔(毫秒)；美股单独放宽以省数据源(长桥)配额。
+SSE_REFRESH_MS = 3000
+SSE_REFRESH_MS_US = 5000
+
 # WEB 登录密码，为空则无需进行登录
 # 推荐写入 werkzeug 生成的哈希值（以 pbkdf2: 开头）；明文也支持但请仅在内网/本机使用。
 # 生成方法：python -c "from werkzeug.security import generate_password_hash;print(generate_password_hash('your_pwd'))"

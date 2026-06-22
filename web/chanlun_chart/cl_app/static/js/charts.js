@@ -347,6 +347,8 @@ class ChartManager {
         this._saveScheduled = false;
         this._saveInFlight = null;
         this._barReadyHandler = null;
+        this._sse = null;  // SSE 实时推送连接(每图表一个; flag 关/不支持时为 null)
+        this._visibilityHandler = null;  // 页面可见性兜底监听句柄
         // reconcile 失败自动重试状态：count 累计失败次数，timer 已排队的句柄（防重复）
         this._reconcileRetry = { count: 0, timer: null };
         // reconcile 创建过的全部 entity id 集合，用于 sweep 时识别孤儿 shape。
@@ -688,6 +690,20 @@ class ChartManager {
 
         this._barReadyHandler = this.handleBarsReadyEvent.bind(this);
         window.addEventListener('chanlun-bars-ready', this._barReadyHandler);
+
+        // K线可见性兜底: 浏览器会节流后台标签的定时器(TV轮询), 切回前台时
+        // K线可能停在旧值; 这里主动 resetData 让图表补刷(连带触发缠论重绘)。
+        // 缠论侧在后台由 SSE 推送(onmessage 不受定时器节流)已保持最新。
+        this._visibilityHandler = () => {
+            if (document.visibilityState !== 'visible') return;
+            try {
+                if (this.widget && typeof this.widget.activeChart === 'function') {
+                    const ch = this.widget.activeChart();
+                    if (ch && typeof ch.resetData === 'function') ch.resetData();
+                }
+            } catch (e) { /* ignore */ }
+        };
+        document.addEventListener('visibilitychange', this._visibilityHandler);
 
         const self = this;
         const client_id = "chanlun_pro_" + Utils.get_market() + "_" + this.id;
@@ -1207,6 +1223,7 @@ class ChartManager {
             this.chart.onVisibleRangeChanged().subscribe(null, () => this.handleVisibleRangeChange());
 
             this.reloadDrawingsForCurrentContext('initial-load');
+            this._openSseStream();
 
             // 注入 MACD 区间统计（工具栏按钮 + 右键菜单 + 侧边面板），依赖 chart/widget 已就绪
             try {
@@ -1240,6 +1257,7 @@ class ChartManager {
         this._latestAppliedBarTime = null;
         this.clear_draw_chanlun();
         this.reloadDrawingsForCurrentContext('symbol-change');
+        this._openSseStream();
         if (typeof ZiXuan.render_zixuan_opts === "function") ZiXuan.render_zixuan_opts();
     }
     handleIntervalChange(interval) {
@@ -1255,6 +1273,7 @@ class ChartManager {
         Utils.set_local_data(`${market}_interval_${this.id}`, interval);
         this.clear_draw_chanlun();
         this.reloadDrawingsForCurrentContext('interval-change');
+        this._openSseStream();
     }
 
     handleDataReady() {
@@ -1908,7 +1927,50 @@ class ChartManager {
         }
     }
 
+    _closeSseStream() {
+        if (this._sse) {
+            try { this._sse.close(); } catch (e) { /* ignore */ }
+            this._sse = null;
+        }
+    }
+
+    _openSseStream() {
+        // feature flag 关闭 → 完全不建连, 退回纯轮询(现状)。
+        if (typeof window !== 'undefined' && window.__CHANLUN_SSE_ENABLED === false) return;
+        if (typeof EventSource === 'undefined' || !this.widget) return;
+        this._closeSseStream();
+        let si = null;
+        try { si = this.widget.symbolInterval(); } catch (e) { si = null; }
+        if (!si || !si.symbol || !si.interval) return;
+        // 与 getChartData 读 bars_result 的 key 同源(widget.symbolInterval())，
+        // 保证 SSE 更新写入的 res_key 与缠论重绘读取的一致。
+        const symbol = si.symbol;
+        const resolution = si.interval;
+        const url = `/tv/stream?symbol=${encodeURIComponent(symbol)}&resolution=${encodeURIComponent(resolution)}`;
+        let es = null;
+        try { es = new EventSource(url); } catch (e) { console.warn('[SSE] 创建失败', e); return; }
+        this._sse = es;
+        es.addEventListener('chanlun', (ev) => {
+            try {
+                const data = JSON.parse(ev.data);
+                const hp = this.udf_datafeed && this.udf_datafeed._historyProvider;
+                // 复用 getBars 同一合并逻辑(applyChanlunUpdate=_processHistoryResponse):
+                // 更新 bars_result + 派发 chanlun-bars-ready → draw_chanlun 重绘缠论。
+                if (hp && typeof hp.applyChanlunUpdate === 'function') {
+                    hp.applyChanlunUpdate(data, { symbol, resolution });
+                }
+            } catch (e) { console.warn('[SSE] 处理推送失败', e); }
+        });
+        es.onerror = () => { clog('[SSE] 连接错误, 浏览器将自动重连; 轮询继续兜底'); };
+        clog(`[SSE] opened symbol=${symbol} res=${resolution}`);
+    }
+
     dispose() {
+        this._closeSseStream();
+        if (this._visibilityHandler) {
+            document.removeEventListener('visibilitychange', this._visibilityHandler);
+            this._visibilityHandler = null;
+        }
         if (this._barReadyHandler) {
             window.removeEventListener('chanlun-bars-ready', this._barReadyHandler);
             this._barReadyHandler = null;

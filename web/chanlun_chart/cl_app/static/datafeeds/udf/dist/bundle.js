@@ -457,6 +457,14 @@
             };
             return result;
         }
+        /**
+         * SSE 推送复用入口: 与 getBars 走同一份 response→bars_result 合并逻辑
+         * (_processHistoryResponse)，保证轮询与推送两条路径行为一致、不漂移。
+         * 入参 response 为 /tv/history 同构对象(含 s/update/t/o/h/l/c/缠论字段)。
+         */
+        applyChanlunUpdate(response, requestParams) {
+            return this._processHistoryResponse(response, requestParams);
+        }
     }
 
     class DataPulseProvider {

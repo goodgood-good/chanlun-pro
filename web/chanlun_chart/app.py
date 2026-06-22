@@ -136,6 +136,10 @@ def main() -> None:
         wsgi_container = WSGIContainer(
             app, executor=ThreadPoolExecutor(http_workers)
         )
+        # SSE 实时推送路由（flag 关时返回空）。重算用独立线程池, 与 WSGI 请求池
+        # 隔离, 避免后台持续重算抢占用户 HTTP 请求的 worker。
+        from cl_app.handlers.sse_stream import build_routes as sse_build_routes
+        sse_pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="SseRefresh")
         tornado_app = Application(
             [
                 (
@@ -148,6 +152,7 @@ def main() -> None:
                     CachedStaticFileHandler,
                     {"path": os.path.join(static_root, "datafeeds")},
                 ),
+                *sse_build_routes(app, pool=sse_pool),
                 (r".*", FallbackHandler, {"fallback": wsgi_container}),
             ]
         )

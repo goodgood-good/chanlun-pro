@@ -192,6 +192,7 @@ def create_app(test_config=None):
             "index.html",
             market_default_codes=market_default_codes,
             market_frequencys=market_frequencys,
+            enable_sse=config.ENABLE_SSE_PUSH,
         )
 
     # 注册蓝图：TradingView 相关接口

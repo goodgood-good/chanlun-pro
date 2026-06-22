@@ -502,6 +502,8 @@
     {% include 'sub_temp.html' %}
   </body>
   <script>
+    // SSE 实时推送开关(后端 config.ENABLE_SSE_PUSH 注入); charts.js 据此决定是否建 EventSource 连接。
+    window.__CHANLUN_SSE_ENABLED = {{ 'true' if enable_sse else 'false' }};
     var interval_get_alert_records;
 
     var market_frequencys = `{{ market_frequencys| tojson }}`;
