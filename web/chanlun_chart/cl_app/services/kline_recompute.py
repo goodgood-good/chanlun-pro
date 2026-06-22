@@ -24,11 +24,11 @@ import pandas as pd
 
 from chanlun.tools.log_util import LogUtil
 
-# 限制并发"全量重算"数量：缠论重算 CPU 密集，多窗口(多标的)同时 prepend 全量重算
-# 会争抢 CPU/GIL 导致耗时雪崩(实测多标的+拉取并发时 full calc 3.7s→52s)。改 1=完全
-# 串行：单个重算独占 CPU 稳定快(无 GIL 争用)，多标的排队但总耗时仍远小于并发争用
-# (3 标的串行 3×3.7s ≪ 2 并发互拖 52s)。
-_RECOMPUTE_MAX_CONCURRENCY = 1
+# 限制并发"全量重算"数量：缠论重算 CPU 密集，多窗口同时全量重算争 CPU/GIL。曾试 1=
+# 完全串行, 但日志证明适得其反——一个慢 full(拉取期 52s)会把后续重算堵在队列上
+# (实测 wait=39969ms)。回 2: 配合 1m lookback 降到 20 天(full 根数减 2/3、单次更快),
+# 2 并发不再互拖。真正治本是减 CPU 负载(lookback/SSE 降频)而非调这个值。
+_RECOMPUTE_MAX_CONCURRENCY = 2
 _recompute_sem = threading.Semaphore(_RECOMPUTE_MAX_CONCURRENCY)
 
 
