@@ -829,7 +829,13 @@ def fetch_klines_and_compute_cl_data(
             # prepend 内部已经写回 cache, 跳过下面的 cl_data_to_tv_chart 路径
             cd = None
         else:
+            import time as _time
+            _cl_t0 = _time.time()
             cd = web_batch_get_cl_datas(market, code, {frequency: klines}, cl_config)[0]
+            LogUtil.info(
+                f"[first_load] {market}:{code} {frequency} cl_calc="
+                f"{(_time.time() - _cl_t0) * 1000:.0f}ms rows={0 if klines is None else len(klines)}"
+            )
 
     # _to < first_kline_date: 用户请求的窗口完全在数据起点之前 → no_data
     if to_ts > 0 and len(klines) > 0 and to_ts < fun.datetime_to_int(klines.iloc[0]["date"]):
@@ -840,8 +846,14 @@ def fetch_klines_and_compute_cl_data(
     # 普通路径: cd 非空 → 跑 cl_data_to_tv_chart 转 chart_data
     cl_chart_data_local = None
     if cd is not None:
+        import time as _time
+        _ex_t0 = _time.time()
         cl_chart_data_local = cl_data_to_tv_chart(
             cd, cl_config, to_frequency=kchart_to_frequency
+        )
+        LogUtil.info(
+            f"[first_load] {market}:{code} {frequency} extract="
+            f"{(_time.time() - _ex_t0) * 1000:.0f}ms"
         )
         if cl_chart_data_local is None:
             with cache_lock:
