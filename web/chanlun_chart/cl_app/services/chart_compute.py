@@ -789,7 +789,14 @@ def fetch_klines_and_compute_cl_data(
         cd = web_batch_get_cl_datas(market, code, {frequency_low: klines}, cl_config)[0]
     else:
         kchart_to_frequency = None
+        import time as _time
+        _kl_t0 = _time.time()
         klines = ex.klines(code, frequency, **kline_args)
+        LogUtil.info(
+            f"[fetch_klines] {market}:{code} {frequency} ex.klines="
+            f"{(_time.time() - _kl_t0) * 1000:.0f}ms rows="
+            f"{0 if klines is None else len(klines)}"
+        )
         if klines is None or len(klines) == 0:
             with cache_lock:
                 _mark_chart_cache_validated(cache_key)

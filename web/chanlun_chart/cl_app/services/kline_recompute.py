@@ -13,11 +13,19 @@
 
 无状态:所有函数纯函数,便于单测。
 """
+import threading
+import time
 from typing import Optional
 
 import pandas as pd
 
 from chanlun.tools.log_util import LogUtil
+
+# 限制并发"全量重算"数量：缠论重算 CPU 密集，多窗口(多标的)同时 prepend 全量重算
+# 会争抢 CPU/GIL 导致耗时雪崩(实测 167ms→2839ms)。用信号量限并发，单次稍慢但不
+# 雪崩，并发请求排队。2 兼顾少量并行与不过载；可按机器核数调整。
+_RECOMPUTE_MAX_CONCURRENCY = 2
+_recompute_sem = threading.Semaphore(_RECOMPUTE_MAX_CONCURRENCY)
 
 
 def extract_klines_df_from_chart_data(chart_data: dict) -> pd.DataFrame:
@@ -167,9 +175,18 @@ def recompute_chart_data_from_klines(
     from chanlun.core.cl import CL
     from chanlun.cl_utils import cl_data_to_tv_chart
 
-    cd = CL(code, frequency, dict(cl_config), market=market)
-    cd.process_klines(klines)
-    return cl_data_to_tv_chart(cd, cl_config, to_frequency=to_frequency)
+    _wait_t0 = time.time()
+    with _recompute_sem:  # 限并发，防多窗口同时全量重算把 CPU 打满导致雪崩
+        _calc_t0 = time.time()
+        cd = CL(code, frequency, dict(cl_config), market=market)
+        cd.process_klines(klines)
+        result = cl_data_to_tv_chart(cd, cl_config, to_frequency=to_frequency)
+    _done = time.time()
+    LogUtil.info(
+        f"[recompute] {market}:{code} {frequency} klines={len(klines)} "
+        f"wait={(_calc_t0 - _wait_t0) * 1000:.0f}ms calc={(_done - _calc_t0) * 1000:.0f}ms"
+    )
+    return result
 
 
 def prepend_klines_and_replace_cache(
