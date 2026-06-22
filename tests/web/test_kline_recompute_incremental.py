@@ -92,6 +92,21 @@ def test_no_reuse_without_cache_key(mock_cl):
     assert len(_FakeCL.instances) == 2
 
 
+def test_store_cl_to_pool_then_reuse(mock_cl):
+    """store_cl_to_pool 存入的实例, 后续 recompute(同 cache_key) 命中增量复用。
+
+    模拟"首次加载 web_batch 算好 CL → 存池 → 第一次轮询走 inc 而非 full(消 52s)"。
+    """
+    ext_cl = _FakeCL()  # 模拟首次加载外部算好的 CL
+    base = _klines_df([1000, 1060], [10, 11])
+    kline_recompute.store_cl_to_pool("a:SYN:1m", ext_cl, base, {}, "a")
+    # 第一次轮询: 末尾追加新根、同 cache_key → 应复用 ext_cl(不新建)
+    nxt = _klines_df([1000, 1060, 1120], [10, 11, 12])
+    r = recompute_chart_data_from_klines("a", "SYN", "1m", {}, nxt, cache_key="a:SYN:1m")
+    assert len(_FakeCL.instances) == 1  # 只有 store 的那个, recompute 未再新建(=走了增量)
+    assert r["id"] == id(ext_cl)
+
+
 # ── 层 2：增量 == 全量(真实 CL + 合成 K 线) ──────────────────────────
 def _synth_klines(n, start_ts=1_600_000_000):
     """确定性合成 K 线(多周期正弦叠加 → 趋势+转折, 产生分型/笔/线段/中枢)。"""

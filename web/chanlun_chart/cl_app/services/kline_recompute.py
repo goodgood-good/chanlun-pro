@@ -25,9 +25,10 @@ import pandas as pd
 from chanlun.tools.log_util import LogUtil
 
 # 限制并发"全量重算"数量：缠论重算 CPU 密集，多窗口(多标的)同时 prepend 全量重算
-# 会争抢 CPU/GIL 导致耗时雪崩(实测 167ms→2839ms)。用信号量限并发，单次稍慢但不
-# 雪崩，并发请求排队。2 兼顾少量并行与不过载；可按机器核数调整。
-_RECOMPUTE_MAX_CONCURRENCY = 2
+# 会争抢 CPU/GIL 导致耗时雪崩(实测多标的+拉取并发时 full calc 3.7s→52s)。改 1=完全
+# 串行：单个重算独占 CPU 稳定快(无 GIL 争用)，多标的排队但总耗时仍远小于并发争用
+# (3 标的串行 3×3.7s ≪ 2 并发互拖 52s)。
+_RECOMPUTE_MAX_CONCURRENCY = 1
 _recompute_sem = threading.Semaphore(_RECOMPUTE_MAX_CONCURRENCY)
 
 
@@ -166,6 +167,29 @@ def reset_cl_pool() -> None:
         _cl_pool.clear()
 
 
+def store_cl_to_pool(cache_key, cl, klines, cl_config, market, to_frequency=None) -> None:
+    """把外部算好的 CL 实例(如首次加载 web_batch_get_cl_datas 的产物)存入池。
+
+    让"首次加载(cache miss, 走 web_batch 全量)后的第一次轮询/SSE"命中增量复用、走 inc
+    而非 full——否则多标的 + 拉取争 CPU 时, 那次 full 全量重算会飙到几十秒(实测 52s)。
+    复用键(首根 date 的 unix 秒 + 根数)与 recompute_chart_data_from_klines 一致。
+    """
+    if cache_key is None or cl is None or klines is None or len(klines) == 0:
+        return
+    config_key = _make_cl_config_key(cl_config, market, to_frequency)
+    first_date = int(klines.iloc[0]["date"].timestamp())
+    with _cl_pool_lock:
+        _cl_pool[cache_key] = {
+            "cl": cl,
+            "config_key": config_key,
+            "first_date": first_date,
+            "n": len(klines),
+        }
+        _cl_pool.move_to_end(cache_key)
+        while len(_cl_pool) > _CL_POOL_MAX:
+            _cl_pool.popitem(last=False)
+
+
 def recompute_chart_data_from_klines(
     market: str,
     code: str,
@@ -208,7 +232,7 @@ def recompute_chart_data_from_klines(
     from chanlun.cl_utils import cl_data_to_tv_chart
 
     config_key = _make_cl_config_key(cl_config, market, to_frequency)
-    first_date = klines.iloc[0]["date"] if len(klines) else None
+    first_date = int(klines.iloc[0]["date"].timestamp()) if len(klines) else None
     n = len(klines)
 
     # 取可复用的持久 CL(承载增量状态)或新建空 CL(全量)。

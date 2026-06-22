@@ -836,6 +836,10 @@ def fetch_klines_and_compute_cl_data(
                 f"[first_load] {market}:{code} {frequency} cl_calc="
                 f"{(_time.time() - _cl_t0) * 1000:.0f}ms rows={0 if klines is None else len(klines)}"
             )
+            # 首次加载(cache miss)的 CL 存入池, 让首次后第一次轮询/SSE 走增量而非 full,
+            # 消除多标的 + 拉取争 CPU 时 full 重算飙到几十秒(实测 52s)的问题。
+            from .kline_recompute import store_cl_to_pool
+            store_cl_to_pool(cache_key, cd, klines, cl_config, market)
 
     # _to < first_kline_date: 用户请求的窗口完全在数据起点之前 → no_data
     if to_ts > 0 and len(klines) > 0 and to_ts < fun.datetime_to_int(klines.iloc[0]["date"]):
