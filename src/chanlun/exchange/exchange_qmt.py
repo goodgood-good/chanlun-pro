@@ -70,13 +70,12 @@ class ExchangeQMT(Exchange):
         }
 
         # ===== QMT 专属回看覆盖（只影响 QMT/A股，不动共享 _lookback.py、不影响美股 alpaca/polygon）=====
-        # 拉长 1m/5m 回看天数，让 1min/5min 图能装出 30m 同级别中枢(需 ≥~1 年 1m 数据才凑得出
-        # 3 段走势类型重合)。**改这里的天数即可调 QMT 各周期的数据范围**。
+        # 5m 拉长到 365 天，让 5min 图能装出 30m 同级别中枢(需更长 5m 历史才凑得出 3 段走势类型重合)。
+        # 1m 不再覆盖：跟随共享 _lookback.py 的 60 天，与美股(alpaca/polygon/长桥)1m 口径一致。
         # 权衡：天数越大 → 30m 结构越多，但 K 线越多→计算/BSON payload 越重、图表加载越慢;
-        #       且 QMT 1m 实际能回看多少由数据源返回为准(指数/主板通常比个股长)。
+        #       且 QMT 实际能回看多少由数据源返回为准(指数/主板通常比个股长)。
         QMT_LOOKBACK_OVERRIDE_DAYS = {
-            "1m": 365,    # 原 90(3个月,30m同级别=0) → 365(1年,30m≈1个)。要更多 30m 可再调大(如 730)
-            "5m": 365,    # 5min 图的 30m 同级别同理需更长 5m 历史
+            "5m": 365,    # 5min 图的 30m 同级别需更长 5m 历史
         }
         for _freq, _days in QMT_LOOKBACK_OVERRIDE_DAYS.items():
             self.DEFAULT_LOOKBACK[_freq] = timedelta(days=_days)

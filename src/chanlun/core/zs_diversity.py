@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import copy
+import statistics
 from typing import List, Optional
 
 from chanlun.core.types import LINE, ZS
@@ -231,6 +232,99 @@ def _recompute_divergence(zss, ld_provider, frequency):
     return out
 
 
+_YW_TOL_FRAC = 0.25     # 「离开核心」容差 = 核心宽 × 此系数，滤分位级噪声(防 1 分钱误判离开)
+_YW_TREND_K = 3.0       # 趋势段判据:百分比涨跌幅 > 此系数 × 中位幅度 → 趋势/离开段(中枢硬边界)
+
+
+def _pct_mag(seg: LINE) -> float:
+    """段的百分比涨跌幅 |end/start − 1|（尺度无关，避开价位高低与核心宽循环依赖）。"""
+    s = seg.start.val
+    return abs(seg.end.val - s) / s if s else 0.0
+
+
+def _trend_flags(units: List[LINE], k: float = _YW_TREND_K) -> List[bool]:
+    """标记趋势段:百分比幅度 > k × 中位幅度。
+
+    用户口径(2026-06-20, TSLA 1m 手标):中枢小而紧凑、趋势裸露。大摆动方向段(暴跌/飙升)的
+    价格区间虽扫过震荡区、会被 core_interval 误当核心三段(区间重叠类判据全证伪),故改按
+    「段移动幅度」剥离:中位数 + 百分比 = 尺度无关，不依赖核心宽(避免循环依赖 + 误杀正常震荡段)。
+    """
+    mags = [_pct_mag(u) for u in units]
+    if not mags:
+        return []
+    scale = statistics.median(mags)
+    if scale <= 0:
+        return [False] * len(units)
+    return [m > k * scale for m in mags]
+
+
+def _zs_in_run(run: List[LINE], min_lines: int) -> List[List[LINE]]:
+    """在一段连续「非趋势段」run 内找中枢（原文 L020 中心定理一 + L054「一个具体走势的分析」口径）。
+
+    - 核心 [ZD,ZG] = 前 3 段 ``core_interval``（前两个 Z 走势段的重叠，宽松、非 4 段裸重叠）。
+    - 延伸看「离开核心后是否回到核心」：某段端点显著离开核心（超容差 _YW_TOL_FRAC×核心宽）
+      且下一段端点不回到核心附近 → 三类点（统一三买/三卖/反向 overshoot）→ 中枢终结，
+      该「离开段」并入本中枢跨度（L054:15）。震荡（离开后回核心）则继续延伸。
+    - 两个同级别中枢之间必留次级别连接（L054:29）：离开段之后另起，连接腿不入任何中枢。
+    - 跨度（含离开段）< ``min_lines`` → 不成枢，首段归方向腿（化解高位假枢）。
+    """
+    groups: List[List[LINE]] = []
+    n = len(run)
+    i = 0
+    while i + 2 < n:
+        iv = core_interval(run[i], run[i + 1], run[i + 2])
+        if iv is None:                       # 前 3 段不重叠 → 方向腿，前移
+            i += 1
+            continue
+        zd, zg = iv
+        tol = _YW_TOL_FRAC * (zg - zd)
+        k = i + 2
+        leave_k: Optional[int] = None
+        while k + 2 < n:
+            le, re = run[k + 1], run[k + 2]
+            le_out = le.end.val > zg + tol or le.end.val < zd - tol       # 端点显著离开核心
+            re_in = (zd - tol) <= re.end.val <= (zg + tol)                # 下一段端点回核心附近
+            if le_out and not re_in:         # 离开 + 不回 → 三类点终结，离开段=run[k+1]
+                leave_k = k + 1
+                break
+            k += 1                           # 震荡(离开后回核心) → 继续延伸
+        hi = leave_k if leave_k is not None else min(k + 1, n - 1)
+        if hi - i + 1 < min_lines:           # 真振荡跨度不足 → 非中枢，首段归方向腿
+            i += 1
+            continue
+        groups.append(list(run[i:hi + 1]))
+        i = hi + 1                           # 离开段后另起(=两中枢间的次级别连接，L054:29)
+    return groups
+
+
+def _yuanwen_groups(units: List[LINE], min_lines: int) -> List[List[LINE]]:
+    """走势感知中枢分组 = 幅度法剥离趋势段 + run 内 L020/L054 中枢构成。
+
+    用户拍板口径(2026-06-20, TSLA 1m 手标范例):中枢小而紧凑、趋势裸露(大摆动方向段不包进
+    中枢)。先用 ``_trend_flags`` 把移动幅度远超中位(>_YW_TREND_K×)的趋势/离开段标出、作中枢
+    硬边界,再在每段连续「非趋势段」run 内按 ``_zs_in_run`` 找中枢；趋势段本身不入任何中枢
+    (=离开/进入/连接腿)。
+
+    纯函数；返回中枢的构成段组列表（按时序）。口径在 002299(巨枢区 6/6)/TSLA/AAPL 三标的
+    对齐(k=3.0:002299 GT 不变、TSLA 大摆动巨枢拆开、AAPL 最大枢 12→8 段)。无趋势段时退化为
+    单一 run = 原走势感知划分(等价历史行为)。
+    """
+    is_trend = _trend_flags(units)
+    groups: List[List[LINE]] = []
+    n = len(units)
+    i = 0
+    while i < n:
+        if is_trend[i]:                      # 趋势段 = 中枢硬边界,不入中枢
+            i += 1
+            continue
+        j = i
+        while j < n and not is_trend[j]:     # 取最大连续非趋势 run
+            j += 1
+        groups.extend(_zs_in_run(units[i:j], min_lines))
+        i = j
+    return groups
+
+
 def refine(
     res: ZsBranchResult,
     units: List[LINE],
@@ -238,18 +332,21 @@ def refine(
     ld_provider=None,
     frequency=None,
 ) -> ZsBranchResult:
-    """精炼编排入口：对 res.done_zss 依次施三类点精炼与巨型中枢断枢，返回新 ZsBranchResult。
+    """走势感知中枢重建入口：用 ``_yuanwen_groups`` 从 units 重建 L0 中枢，化解贪婪巨枢。
 
-    接线：recursive_branch 循环里在 zb.calculate(units) 之后、
-    zslx_calc.calculate(...) 之前，当开关 recursive_zs_diversity=True 时调用。
+    接线：recursive_branch 循环里在 zb.calculate(units) 之后、zslx_calc.calculate(...)
+    之前，当开关 recursive_zs_diversity=True 时调用。替代旧 R4/R3 后处理——后者在贪婪
+    巨枢之上做切分（治标），本版直接按原文从段序列重建中枢（治本）。
 
-    live / freeze_idx 透传（未完成中枢不精炼）；done_divergence 按精炼后中枢数
-    对齐，切分新增的中枢置 None（下游内联背驰重算）。
+    ZS 对象用 ``_build_zs`` 构建（start/end/lines/zd/zg 与 R3 同约定）；zs_type/level 取
+    res.done_zss[0] 为模板。live / freeze_idx 透传；done_divergence 按重建后中枢数对齐重算。
+    旧 _refine_r4 / _refine_r3 保留(暂不删)以便回退对比。
     """
     if not res.done_zss:
         return res
-    zss = _refine_r4(res.done_zss, units, min_lines)
-    zss = _refine_r3(zss, min_lines)
+    ref = res.done_zss[0]
+    zss = [z for g in _yuanwen_groups(units, min_lines)
+           if (z := _build_zs(g, ref)) is not None]
     return ZsBranchResult(
         done_zss=zss,
         live=res.live,
@@ -259,7 +356,12 @@ def refine(
 
 
 def emit_l1_upgrades(levels, min_lines: int, upgrade_seg: int = 9, ld_provider=None, frequency=None):
-    """升级：紧凑横盘 ≥upgrade_seg 段延伸中枢 → 注入同核心的 level1 中枢。
+    """【已弃用·违原文 R7，cl 已停止调用】紧凑横盘 ≥upgrade_seg 段延伸中枢 → 注入同核心 level1 中枢。
+
+    弃用原因（知乎 67-71 课 R7 + 实证）：升级不是把单个 L0 巨枢同核心 relabel 到高一级——单个延伸
+    巨枢只是一个盘整走势类型、不能自成高级别中枢；高级别中枢须 3 个次级别走势类型重叠构成、核心取
+    走势类型重叠、锚定最后一个次级别中枢。这正是 recursive_branch 自然递归（走势类型→L1，每级过
+    refine）已忠实做到。本函数在自然 L1 之上多塞同核心单枢（002299 多 6 个伪升级），保留仅供回退。
 
     紧凑巨枢（子中枢核心区重叠=延伸，非扩张）是一个合法延伸中枢，升级到高一级别
     （同核心 [ZD,ZG]、level+1），而非在 level0 拆开（拆=制造重叠的同级别中枢）。

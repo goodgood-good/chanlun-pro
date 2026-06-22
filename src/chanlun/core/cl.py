@@ -109,7 +109,7 @@ class CL(ICL):
             # 运行时兼容标识
             'config_use_type': 'common',
             # K线类型配置
-            'kline_type': Config.KLINE_TYPE_CHANLUN.value,
+            'kline_type': Config.KLINE_TYPE_DEFAULT.value,
             'kline_qk': Config.KLINE_QK_NONE.value,
 
             # 分型配置
@@ -502,11 +502,11 @@ class CL(ICL):
             list(self.get_xds()), ld, wzgx, self.frequency,
             zs_diversity=bool(self.config.get("recursive_zs_diversity", False)),
         )
-        if self.config.get("recursive_zs_diversity", False):
-            # 升级:紧凑横盘 ≥9 段延伸中枢 → 注入同核心 L1 中枢(加法,L0 不动)。
-            from chanlun.core import zs_diversity
-            result = zs_diversity.emit_l1_upgrades(
-                result, self._recursive_l0_min_zs_lines(), ld_provider=ld, frequency=self.frequency)
+        # 升级由自然递归忠实产出:每级都过 zs_diversity.refine,L1 中枢 = 次级别走势类型重叠
+        # (核心=走势类型重叠、锚定子中枢),对齐原文「新中枢从最后一个次级别中枢起算」。
+        # 旧 emit_l1_upgrades 旁路(把单个 L0 延伸巨枢同核心 relabel 成 L1)违此口径——单个盘整
+        # 巨枢不能自成高级别中枢,须 3 个走势类型重叠才升级——已移除(实证:它在自然 L1 之上
+        # 多塞 6 个同核心单枢,均为伪升级)。
         self._recursive_memo["rbl"] = result
         return result
 
