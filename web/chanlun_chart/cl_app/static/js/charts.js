@@ -1401,18 +1401,21 @@ class ChartManager {
             }
         }
         if (!barsResult) {
+            // 切标的瞬间新标的 getBars 尚未回填 bars_result 属正常过渡态(draw_chanlun 会 retry,
+            // 数据到位后 handleBarsReadyEvent 兜底重绘), 用 clog(debug) 而非 warn, 避免 console 刷屏。
             const availableKeys = this.udf_datafeed?._historyProvider?.bars_result ? Array.from(this.udf_datafeed._historyProvider.bars_result.keys()) : [];
-            console.warn(`[DEBUG-CHARTS] getChartData for ${symbolResKey}: NOT FOUND. Available keys:`, availableKeys);
+            clog(`[DEBUG-CHARTS] getChartData for ${symbolResKey}: NOT FOUND. Available keys:`, availableKeys);
             return null;
         }
 
         if (!this.chart) {
-            console.warn("[DEBUG-CHARTS] getChartData aborted: this.chart is null.");
+            clog("[DEBUG-CHARTS] getChartData aborted: this.chart is null.");
             return null;
         }
         const visibleRange = this.chart.getVisibleRange();
         if (!visibleRange || !visibleRange.from || !visibleRange.to) {
-            console.warn("[DEBUG-CHARTS] getChartData aborted: VisibleRange invalid (chart loading).");
+            // 切标的后 chart 仍在 loading 时 VisibleRange 短暂无效, 同属正常过渡态, 降级为 clog。
+            clog("[DEBUG-CHARTS] getChartData aborted: VisibleRange invalid (chart loading).");
             return null;
         }
 
@@ -1912,12 +1915,16 @@ class ChartManager {
         const chartData = this.getChartData();
         if (!chartData) {
             if (!this._drawRetryCount) this._drawRetryCount = 0;
-            if (this._drawRetryCount < 10) {
+            // 切标的后新标的 getBars 的发起+回填+chart 渲染就绪可能 >5s(多标的并发/长桥 QPS
+            // 排队时尤甚), retry 上限拉长到 30×500ms≈15s 覆盖; 数据到位后 handleBarsReadyEvent
+            // 也会兜底主动重绘。retry 期间「数据未就绪」是切标的的正常过渡态, 用 clog(debug) 而非
+            // console.warn, 避免切标的瞬间 console 被 NOT FOUND/exhausted 刷屏(被误读成功能故障)。
+            if (this._drawRetryCount < 30) {
                 this._drawRetryCount++;
-                clog(`[CHANLUN-TIMING] @${performance.now().toFixed(0)}ms draw_chanlun: chartData=null, retry#${this._drawRetryCount}/10 in 500ms`);
+                clog(`[CHANLUN-TIMING] @${performance.now().toFixed(0)}ms draw_chanlun: chartData=null, retry#${this._drawRetryCount}/30 in 500ms`);
                 setTimeout(() => this.debouncedDrawChanlun(), 500);
             } else {
-                console.warn(`[CHANLUN-TIMING] @${performance.now().toFixed(0)}ms draw_chanlun: chartData=null, retry exhausted`);
+                clog(`[CHANLUN-TIMING] @${performance.now().toFixed(0)}ms draw_chanlun: chartData=null, retry exhausted (handleBarsReadyEvent 仍会在数据到位后兜底重绘)`);
             }
             return;
         }
