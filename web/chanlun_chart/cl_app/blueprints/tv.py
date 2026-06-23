@@ -199,7 +199,9 @@ def _legacy_drawing_storage_name(symbol: str, resolution: str):
 # - HTTP 数据源（cq/polygon/futu）：True，并行可省 3-4 倍时间
 # - native 数据源（xtquant/tdx）：False，因为 native 客户端线程不安全
 # 启动时根据 market 决定，但 prewarm_common_intervals 会针对每次调用动态选。
-_PREWARM_INTERVALS_PARALLEL_MARKETS = {"us", "hk", "fx", "currency", "currency_spot"}
+# fx(tdx 外汇)是 native 源(每次调用新建 TdxExHq_API 连接),并行只会徒增连接压力,
+# 故移出本集合,与 symbols.py 的 _NATIVE_SERIAL_MARKETS({a,futures,ny_futures,fx})对齐。
+_PREWARM_INTERVALS_PARALLEL_MARKETS = {"us", "hk", "currency", "currency_spot"}
 
 def prewarm_common_intervals(market, code, cl_config):
     """
@@ -500,7 +502,16 @@ def tv_symbols():
     # precision 缺失或非法时默认 100（即 2 位小数），避免 TradingView minmov 校验失败
     precision = stocks.get("precision")
     if precision is None:
-        precision = 100
+        # 外汇(tdx_fx)stock_info 不带 precision,回落 100(2位)会严重截断汇率显示
+        # (如 0.87655 → 0.88)。按 kline_precision 的 fx=5 位设 pricescale=10^5,与 K 线
+        # 归一精度对齐(单一真相源)。其余不带 precision 的 market(美股/港股)维持 100:
+        # 主流 2 位,不强改显示惯例。
+        if market == "fx":
+            from chanlun.exchange.kline_precision import resolve_decimals
+            _dec = resolve_decimals("fx", code)
+            precision = 10 ** _dec if _dec else 100
+        else:
+            precision = 100
     else:
         try:
             precision = int(precision)
