@@ -704,7 +704,13 @@ class ChartManager {
         // 缠论侧在后台由 SSE 推送(onmessage 不受定时器节流)已保持最新。
         this._visibilityHandler = () => {
             if (document.visibilityState !== 'visible') return;
+            // SSE 连通(readyState OPEN)时, K线由 feedRealtimeBar、缠论由 applyChanlunUpdate
+            // 经 SSE onmessage 实时喂入(onmessage 不受后台标签定时器节流), 后台期间数据已保持
+            // 最新 → 切回前台无需 resetData。resetData 会整块清空 K线+缠论、重新 getBars 重绘,
+            // 正是"切换页面再切回缠论闪一下"的根因。仅当 SSE 未连通(退回被节流的轮询)时才
+            // resetData 兜底补刷后台停滞的 K线。
             try {
+                if (this._sse && this._sse.readyState === 1) return;  // SSE OPEN → 不补刷, 不闪
                 if (this.widget && typeof this.widget.activeChart === 'function') {
                     const ch = this.widget.activeChart();
                     if (ch && typeof ch.resetData === 'function') ch.resetData();
