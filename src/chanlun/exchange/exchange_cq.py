@@ -915,20 +915,23 @@ class ExchangeChangQiao(Exchange):
         }
 
         if frequency not in period_map:
-            base_start = start_dt.isoformat() if start_dt else None
-            return self.klines(code, "1m", base_start, end_date, args)
+            # cq(长桥)只支持 period_map 内周期(与 support_frequencys 一致)。其余周期(季 q/年 y/
+            # 2m/3m/10m/120m 等)正常 UI 经 supported_resolutions 过滤不会暴露、不会调到此; 仅手构
+            # 请求(绕过前端闸门)可达。历史此处静默递归拉 1m, 但对 q/y 等粗周期 = 把 1m 数据当该
+            # 周期显示(数据语义错配)。改为明确返回空 DataFrame——长桥不支持的周期就如实拒绝, 不降级。
+            LogUtil.warning(f"[cq] 不支持的周期 frequency={frequency} code={code}, 返回空(不降级 1m)")
+            return pd.DataFrame()
 
         period = period_map[frequency]
         adjust = AdjustType.ForwardAdjust
 
         # 5. 并发分片策略
-        # chunk_days 按"每段约装满单次 API 的 count=1000 根"重定,最小化"段边界拉不满
-        # 1000 的令牌浪费"——QPS 受限时令牌(过 6 QPS 桶)是真瓶颈,多切一段 = 多费一个令牌。
-        # chunk_days 让每段尽量装满单次 API 的 count=1000 根,消除"段边界拉不满 1000"的令牌
-        # 浪费(QPS 受限时令牌过 6 QPS 桶是真瓶颈,多切一段 = 多费一个令牌)。按实测根数/日历天反推:
-        #   60m(4.8根/天→200天≈960根/段=4段4令牌;旧60天=13段13令牌,省9) / 30m(8.9根/天→110天=5令牌)
-        #   / 5m(56根/天→15天≈840根/段;超17天会跨1000边界多一次,故维持15) / 1m(数据密→10天/段满3次=6令牌)。
-        # 实测单标的 4 周期(1m/5m/30m/d)合计约 24→19 令牌(省 ~20%),含60m 37→25;墙钟随令牌数同比缩短。
+        # chunk_days 按"每段约装满单次 API 的 count=1000 根"重定,最小化"段边界拉不满 1000"的
+        # 令牌浪费——QPS 受限时令牌(过 6 QPS 桶)是真瓶颈,多切一段=多费一个令牌(段越细令牌越多)。
+        # 实测各周期 chunk 前→后令牌(4 标的 INTC/MSFT/AMZN/GOOGL 交叉验证, 1m lookback=20 天口径):
+        #   60m 13→4(旧 60 天 13 段每段~250 根, 新 200 天 4 段每段~960 根, 省 9, 大头) / 30m 7→5 /
+        #   1m 9→8(数据密, 10 天/段~2535 根翻 3 页, 段少边界省) / 5m 维持 15=7(超 17 天跨 1000 边界反增) / d 1。
+        # 单标的 5 周期 37→25 令牌(省 32%), 墙钟随令牌数同比缩短。⚠数字依赖 1m lookback=20 天, 调整需重核。
         if frequency == '1m':
             chunk_days = 10
         elif frequency == '5m':
