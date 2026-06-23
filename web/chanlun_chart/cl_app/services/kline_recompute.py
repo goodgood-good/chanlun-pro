@@ -258,6 +258,20 @@ def recompute_chart_data_from_klines(
         _calc_t0 = time.time()
         cd.process_klines(klines)  # 复用→增量(只算末根/新增根), 新建→全量
         result = cl_data_to_tv_chart(cd, cl_config, to_frequency=to_frequency)
+        # 与 getBars/prewarm(chart_compute.py:362)路径对齐: SSE 实时重算后也补算跨周期
+        # MACD(higher_macd_*)。否则 SSE 每次推送的 chart_data 缺 higher_macd 字段, 前端
+        # applyChanlunUpdate 合并进 bars_result 后实时更新的那段 higher_macd 退化为 NaN
+        # → MACD_HTF 指标"该显示却不显示"(切标的慢解决后仍存在的真根因)。放 sem 内同受限
+        # 并发; 补算失败只告警不阻断推送(主缠论/K线优先, HTF MACD 缺失可降级)。
+        if result is not None:
+            try:
+                from .chart_compute import apply_higher_macd_to_chart_data
+
+                apply_higher_macd_to_chart_data(result, frequency, market, cl_config)
+            except Exception as _macd_e:
+                LogUtil.warning(
+                    f"[recompute] apply_higher_macd 补算失败 {market}:{code} {frequency}: {_macd_e}"
+                )
     _done = time.time()
 
     # 回填池: 记录本次实例与"首根 date + 根数", 供下次末尾刷新判定可否增量复用。
