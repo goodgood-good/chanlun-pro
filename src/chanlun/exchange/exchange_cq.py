@@ -922,12 +922,23 @@ class ExchangeChangQiao(Exchange):
         adjust = AdjustType.ForwardAdjust
 
         # 5. 并发分片策略
+        # chunk_days 按"每段约装满单次 API 的 count=1000 根"重定,最小化"段边界拉不满
+        # 1000 的令牌浪费"——QPS 受限时令牌(过 6 QPS 桶)是真瓶颈,多切一段 = 多费一个令牌。
+        # chunk_days 让每段尽量装满单次 API 的 count=1000 根,消除"段边界拉不满 1000"的令牌
+        # 浪费(QPS 受限时令牌过 6 QPS 桶是真瓶颈,多切一段 = 多费一个令牌)。按实测根数/日历天反推:
+        #   60m(4.8根/天→200天≈960根/段=4段4令牌;旧60天=13段13令牌,省9) / 30m(8.9根/天→110天=5令牌)
+        #   / 5m(56根/天→15天≈840根/段;超17天会跨1000边界多一次,故维持15) / 1m(数据密→10天/段满3次=6令牌)。
+        # 实测单标的 4 周期(1m/5m/30m/d)合计约 24→19 令牌(省 ~20%),含60m 37→25;墙钟随令牌数同比缩短。
         if frequency == '1m':
-            chunk_days = 5
+            chunk_days = 10
         elif frequency == '5m':
             chunk_days = 15
-        elif frequency in ['15m', '30m', '60m']:
+        elif frequency == '15m':
             chunk_days = 60
+        elif frequency == '30m':
+            chunk_days = 110
+        elif frequency == '60m':
+            chunk_days = 200
         else:
             chunk_days = 3650
 
