@@ -789,6 +789,14 @@ def convert_us_tdx_kline_frequency(klines: pd.DataFrame, to_f: str) -> pd.DataFr
 
     period_klines.dropna(inplace=True)
     period_klines.reset_index(inplace=True)
+    # date 改用 bin 起点(resample 的 date_index = 周期左边界)转回原 tz, 替代 agg "date":"last"。
+    # 原 "last" 取区间最后一根子周期的 date: 历史完整 bar 无碍, 但实时进行中的部分 bar 会随
+    # 子周期推进而漂移(如 10m bar 的 date 从 20:55→21:00), 导致 SSE 每 8s 重算 merge 时同一
+    # bin 的不同 date 不去重 → 累积成一堆假 bar(fx 10m 实测间隔退化成 [5,5,5...])。用 bin 起点
+    # 后同一 bin 的 date 恒定, merge 正确去重; bar 开始时刻也与 1m/5m 原生 K 线口径一致。
+    if len(period_klines) > 0:
+        _orig_tz = klines["date"].dt.tz
+        period_klines["date"] = period_klines["date_index"].dt.tz_convert(_orig_tz)
     period_klines.drop("date_index", axis=1, inplace=True)
 
     return period_klines[["code", "date", "open", "high", "low", "close", "volume"]]
