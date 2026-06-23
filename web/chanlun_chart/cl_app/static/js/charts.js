@@ -1257,8 +1257,12 @@ class ChartManager {
 
     handleSymbolChange(symbol) {
         if (!symbol?.ticker) return;
-        const [market, code] = symbol.ticker.split(":");
-        if (!market || !code) return;
+        const [marketRaw, code] = symbol.ticker.split(":");
+        if (!marketRaw || !code) return;
+        // ⚠ market 必须归一小写: symbol.ticker 来自 TV 是大写(如 "US:QQQ.US"，因 chart.symbol()
+        // 返回大写)，而 Utils.get_market() 存的是小写 "us"。不归一 → "us" !== "US" 恒成立 →
+        // 每次切标的都误判 market 变 → location.reload() 整页刷新 → 多标的切换卡死(浏览器实测复现+补丁验证)。
+        const market = marketRaw.toLowerCase();
         if (Utils.get_market() !== market) { Utils.set_local_data("market", market); location.reload(); return; }
         Utils.set_local_data("market", market); Utils.set_local_data(`${market}_code`, code);
         this._initialLoadDone = false;
