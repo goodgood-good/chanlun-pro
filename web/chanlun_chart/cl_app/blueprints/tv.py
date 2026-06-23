@@ -693,6 +693,17 @@ def tv_history():
         if frequency is None:
             LogUtil.warning(f"[tv_history] Unsupported resolution: {resolution}")
             return {"s": "no_data"}
+        # 后端闸门:frequency 必须在该 market 实际支持的周期内(= 前端 supported_resolutions 的来源)。
+        # 前端已按此过滤, 但手构请求(curl/改 URL)可绕过——传入 market 不支持的周期(如季线 q 对 cq
+        # 美股/港股、qmt A股), 会落到各 exchange 不一致的处理(cq 返回空 / qmt·binance frequency_map
+        # KeyError 抛 500 / tdx 系碰巧 frequency_map 有 q 而拉季线)。统一在此干净拒绝, 后端不依赖前端
+        # 闸门。market_frequencys[market] 为空(exchange 初始化失败)时跳过本检查, 避免误拦正常请求。
+        _supported_freqs = market_frequencys.get(market, [])
+        if _supported_freqs and frequency not in _supported_freqs:
+            LogUtil.warning(
+                f"[tv_history] market={market} 不支持周期 {frequency}(resolution={resolution}), 拒绝"
+            )
+            return {"s": "no_data"}
 
         # 标记用户活跃度，供批量预热（symbols.py）让位 / 优先插队使用。
         # 关键：仅 firstDataRequest=true（用户主动切标的/切周期）才标记活跃；
