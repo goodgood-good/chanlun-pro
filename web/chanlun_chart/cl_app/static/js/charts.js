@@ -1961,6 +1961,24 @@ class ChartManager {
             try { this._sse.close(); } catch (e) { /* ignore */ }
             this._sse = null;
         }
+        this._clearSseFallback();
+    }
+
+    // SSE 被中间层(frp http vhost / nginx)缓冲时的兜底：手动驱动 datafeed 的
+    // DataPulseProvider 轮询(getBars 增量, 拉后端最新 K线+缠论), 频率远快于默认 30s。
+    _startSseFallback() {
+        if (this._sseFallbackInterval) return;
+        const dpp = this.udf_datafeed && this.udf_datafeed._dataPulseProvider;
+        if (!dpp || typeof dpp._updateData !== 'function') return;
+        this._sseFallbackInterval = setInterval(() => {
+            try { dpp._updateData(); } catch (e) { /* ignore */ }
+        }, 6000);
+    }
+
+    // 清理 SSE 健康哨兵 + fallback 快轮询定时器。
+    _clearSseFallback() {
+        if (this._sseHealthTimer) { clearTimeout(this._sseHealthTimer); this._sseHealthTimer = null; }
+        if (this._sseFallbackInterval) { clearInterval(this._sseFallbackInterval); this._sseFallbackInterval = null; }
     }
 
     _openSseStream() {
@@ -1979,7 +1997,14 @@ class ChartManager {
         let es = null;
         try { es = new EventSource(url); } catch (e) { console.warn('[SSE] 创建失败', e); return; }
         this._sse = es;
+        this._sseGotData = false;
         es.addEventListener('chanlun', (ev) => {
+            // 首个数据帧到达 → SSE 通道确实通(未被中间层缓冲) → 取消 fallback 快轮询。
+            if (!this._sseGotData) {
+                this._sseGotData = true;
+                this._clearSseFallback();
+                clog('[SSE] 数据帧到达, 通道健康, 取消 fallback 快轮询');
+            }
             try {
                 const data = JSON.parse(ev.data);
                 const hp = this.udf_datafeed && this.udf_datafeed._historyProvider;
@@ -1996,6 +2021,14 @@ class ChartManager {
             } catch (e) { console.warn('[SSE] 处理推送失败', e); }
         });
         es.onerror = () => { clog('[SSE] 连接错误, 浏览器将自动重连; 轮询继续兜底'); };
+        // SSE 健康哨兵：连上后 12s 仍未收到任何数据帧 → 判定被中间层 vhost 缓冲 →
+        // 启动 6s fallback 快轮询兜底实时；后续收到帧会自动取消(见 addEventListener)。
+        this._sseHealthTimer = setTimeout(() => {
+            if (!this._sseGotData) {
+                clog('[SSE] 12s 未收到数据帧(疑被中间层缓冲), 启动 6s fallback 快轮询');
+                this._startSseFallback();
+            }
+        }, 12000);
         clog(`[SSE] opened symbol=${symbol} res=${resolution}`);
     }
 
