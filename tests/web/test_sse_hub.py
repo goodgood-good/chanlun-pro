@@ -56,11 +56,37 @@ def test_last_unsub_stops_loop():
     assert "k" not in hub.active_keys()
 
 
-def test_max_loops_rejects():
+def test_max_loops_lru_evicts():
+    """达上限时 LRU 淘汰最老循环而非拒绝 503: k2 订阅成功, k1 被淘汰并停止。"""
     hub = SseHub(max_loops=1)
+    loops = {}
 
     def start(k):
-        return FakeLoop()
+        loop = FakeLoop()
+        loops[k] = loop
+        return loop
 
     assert hub.subscribe("k1", "c", start) is True
-    assert hub.subscribe("k2", "c", start) is False
+    assert hub.subscribe("k2", "c", start) is True  # 不再 False; LRU 淘汰 k1
+    assert loops["k1"].stopped is True
+    assert "k1" not in hub.active_keys()
+    assert "k2" in hub.active_keys()
+
+
+def test_active_sub_refreshes_lru():
+    """活跃订阅刷新 LRU 位置, 不被优先淘汰。"""
+    hub = SseHub(max_loops=2)
+    loops = {}
+
+    def start(k):
+        loop = FakeLoop()
+        loops[k] = loop
+        return loop
+
+    hub.subscribe("k1", "c", start)
+    hub.subscribe("k2", "c", start)
+    hub.subscribe("k1", "c2", start)  # k1 再活跃 → 移到 LRU 末尾
+    hub.subscribe("k3", "c", start)   # 达上限 → 淘汰最老 k2(非 k1)
+    assert loops["k2"].stopped is True
+    assert loops["k1"].stopped is False
+    assert set(hub.active_keys()) == {"k1", "k3"}
