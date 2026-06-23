@@ -413,6 +413,14 @@
                     obj_res.higher_zs = response.higher_zs || [];
                     obj_res.interval_nest = response.interval_nest;
                     obj_res.chart_color = response.chart_color;
+                    // ⚠ 增量更新 K线 bars：原 else 分支只更新缠论形态+MACD，漏了 obj_res.bars，
+                    // 导致 SSE 推送(update:true)缠论更新而 K线 lastBar 不动(实测帧到达但 bars 不变)。
+                    // 保留旧 bars 中早于新数据首根的，追加本次 bars，让 K线随 SSE 实时推进。
+                    if (bars.length > 0) {
+                        const newFirstTime = bars[0].time;
+                        const keptBars = (obj_res.bars || []).filter((bar) => bar.time < newFirstTime);
+                        obj_res.bars = keptBars.concat(bars);
+                    }
                     const oldTimes = obj_res.times || [];
                     const difObj = mergeAlignedArrays(oldTimes, obj_res.macd_dif, raw_times, macd_dif);
                     const deaObj = mergeAlignedArrays(oldTimes, obj_res.macd_dea, raw_times, macd_dea);
