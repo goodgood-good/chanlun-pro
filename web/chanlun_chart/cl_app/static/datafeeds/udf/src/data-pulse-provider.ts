@@ -1,4 +1,4 @@
-import { LibrarySymbolInfo, ResolutionString, SubscribeBarsCallback } from '../../../charting_library/datafeed-api';
+import { Bar, LibrarySymbolInfo, ResolutionString, SubscribeBarsCallback } from '../../../charting_library/datafeed-api';
 
 import {
 	getErrorMessage,
@@ -46,6 +46,31 @@ export class DataPulseProvider implements IDataPulseProvider {
 	public unsubscribeBars(listenerGuid: string): void {
 		delete this._subscribers[listenerGuid];
 		logMessage(`DataPulseProvider: unsubscribed for #${listenerGuid}`);
+	}
+
+	/**
+	 * SSE 推送驱动：把最新 bar 直接喂给匹配的订阅者(绕过轮询/浏览器节流)。
+	 * symbolResKey = (ticker||name).toLowerCase() + resolution.toLowerCase()。
+	 */
+	public feedBar(symbolResKey: string, bar: Bar): void {
+		for (const guid in this._subscribers) {
+			const sub = this._subscribers[guid];
+			const si: LibrarySymbolInfo = sub.symbolInfo || {} as LibrarySymbolInfo;
+			const key = String((si as LibrarySymbolInfo & { ticker?: string }).ticker || si.name || '').toLowerCase()
+				+ String(sub.resolution).toLowerCase();
+			if (key !== symbolResKey) {
+				continue;
+			}
+			if (sub.lastBarTime !== null && bar.time < sub.lastBarTime) {
+				continue;
+			}
+			sub.lastBarTime = bar.time;
+			try {
+				sub.listener(bar);
+			} catch (e) {
+				/* ignore listener errors */
+			}
+		}
 	}
 
 	private _updateData(): void {

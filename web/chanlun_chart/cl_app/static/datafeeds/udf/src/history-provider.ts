@@ -351,6 +351,18 @@ export class HistoryProvider {
     }
   }
 
+  /**
+   * SSE 推送复用入口：与 getBars 走同一份 response→bars_result 合并逻辑
+   * (_processHistoryResponse)，保证轮询与推送两条路径行为一致、不漂移。
+   * 入参 response 为 /tv/history 同构对象(含 s/update/t/o/h/l/c/缠论字段)。
+   */
+  public applyChanlunUpdate(
+    response: HistoryResponse | UdfErrorResponse,
+    requestParams: RequestParams
+  ): GetBarsResult {
+    return this._processHistoryResponse(response, requestParams);
+  }
+
   private _processHistoryResponse(
     response: HistoryResponse | UdfErrorResponse,
     requestParams: RequestParams
@@ -618,6 +630,15 @@ export class HistoryProvider {
         obj_res.higher_zs = (response as HistoryFullDataResponse).higher_zs || [];
         obj_res.interval_nest = (response as HistoryFullDataResponse).interval_nest;
         obj_res.chart_color = (response as HistoryFullDataResponse).chart_color;
+
+        // ⚠ 增量更新 K线 bars：原 else 分支只更新缠论形态+MACD，漏了 obj_res.bars，
+        // 导致 SSE 推送(update:true)缠论更新而 K线 lastBar 不动。保留旧 bars 中早于新数据
+        // 首根的，追加本次 bars，让 K线随 SSE 实时推进(与 dist/bundle.js 同步)。
+        if (bars.length > 0) {
+          const newFirstTime = bars[0].time;
+          const keptBars = (obj_res.bars || []).filter((bar) => bar.time < newFirstTime);
+          obj_res.bars = keptBars.concat(bars);
+        }
 
         const oldTimes = obj_res.times || [];
         const difObj = mergeAlignedArrays(oldTimes, obj_res.macd_dif, raw_times, macd_dif);

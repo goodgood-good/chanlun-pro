@@ -3,6 +3,7 @@ import { Bar, HistoryMetadata, LibrarySymbolInfo, PeriodParams, ResolutionString
 export interface IDataPulseProvider {
 	subscribeBars(symbolInfo: LibrarySymbolInfo, resolution: ResolutionString, newDataCallback: SubscribeBarsCallback, listenerGuid: string): void;
 	unsubscribeBars(listenerGuid: string): void;
+	feedBar(symbolResKey: string, bar: Bar): void;
 }
 
 export interface GetBarsResult {

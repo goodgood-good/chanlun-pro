@@ -1,4 +1,5 @@
 import {
+	Bar,
 	DatafeedConfiguration,
 	DatafeedErrorCallback,
 	GetMarksCallback,
@@ -383,6 +384,38 @@ export class UDFCompatibleDatafeedBase implements IExternalDatafeed, IDatafeedQu
 				onResult(result.bars, result.meta);
 			})
 			.catch(onError);
+	}
+
+	/**
+	 * SSE 推送驱动 K 线：从 /tv/history 同构 response 取最新一根 bar，喂给
+	 * DataPulseProvider 的订阅者，让 K 线随 SSE 实时刷新(不依赖轮询)。
+	 */
+	public feedRealtimeBar(symbolResKey: string, response: Record<string, unknown>): void {
+		const t = response.t as number[] | undefined;
+		const c = response.c as number[] | undefined;
+		if (!response || !t || t.length === 0 || !c) {
+			return;
+		}
+		const i = t.length - 1;
+		const closeVal = c[i];
+		if (closeVal === undefined || closeVal === null) {
+			return;
+		}
+		const o = response.o as number[] | undefined;
+		const h = response.h as number[] | undefined;
+		const l = response.l as number[] | undefined;
+		const v = response.v as number[] | undefined;
+		const bar: Bar = {
+			time: t[i] * 1000,
+			open: o ? o[i] : closeVal,
+			high: h ? h[i] : closeVal,
+			low: l ? l[i] : closeVal,
+			close: closeVal,
+		};
+		if (v && v[i] !== undefined && v[i] !== null) {
+			bar.volume = v[i];
+		}
+		this._dataPulseProvider.feedBar(symbolResKey, bar);
 	}
 
 	public subscribeBars(symbolInfo: LibrarySymbolInfo, resolution: ResolutionString, onTick: SubscribeBarsCallback, listenerGuid: string, _onResetCacheNeededCallback: () => void): void {
