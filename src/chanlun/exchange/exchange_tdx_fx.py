@@ -175,7 +175,13 @@ class ExchangeTDXFX(Exchange):
             "1m": 8,
         }
         market, tdx_code = self.to_tdx_code(code)
-        if market is None or start_date is not None or end_date is not None:
+        # start_date/end_date 是上层(web)的范围提示:end_date=now 表示"拉到现在",增量请求会带
+        # start_date 窄窗口。但 tdx_fx 按 pages 从最新往前拉固定根数(本就含 end_date=now 的最新),
+        # 由上层(prepend/getBars)按 from-to 裁剪。故忽略范围参数而非 return None——否则外汇
+        # 5m/30m/60m 在 cache_miss(web 必传 end_date)时全部失败:tdx_fx 返回 None → @retry →
+        # RetryError(实测根因;1m/日线"正常"仅因碰巧 cache hit 绕开 ex.klines)。qmt/cq 支持范围
+        # 参数,tdx_fx 不支持但忽略安全(本方法 line 178 之后从不读取 start_date/end_date)。
+        if market is None:
             print("不支持的调用参数")
             return None
 
