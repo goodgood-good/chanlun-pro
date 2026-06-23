@@ -728,7 +728,7 @@ class ChartManager {
                     .then(res => res.status === 'ok');
             },
             saveChart: function (chartData) {
-                console.log("[DEBUG-CHARTS] saveChart called", chartData);
+                clog("[DEBUG-CHARTS] saveChart called", chartData);
                 return fetch("/tv/1.1/charts?client=" + client_id + "&user=" + user_id + (chartData.id ? "&chart=" + chartData.id : ""), {
                     method: "POST",
                     body: new URLSearchParams({
@@ -740,7 +740,7 @@ class ChartManager {
                 })
                     .then(res => res.json())
                     .then(res => {
-                        console.log("[DEBUG-CHARTS] saveChart response", res);
+                        clog("[DEBUG-CHARTS] saveChart response", res);
                         return res.status === 'ok' ? (res.id || chartData.id || "default") : null;
                     })
                     .catch(err => {
@@ -749,7 +749,7 @@ class ChartManager {
                     });
             },
             getChartContent: function (chartId) {
-                console.log("[DEBUG-CHARTS] getChartContent called", chartId);
+                clog("[DEBUG-CHARTS] getChartContent called", chartId);
                 return fetch("/tv/1.1/charts?client=" + client_id + "&user=" + user_id + "&chart=" + chartId)
                     .then(res => res.json())
                     .then(res => res.status === 'ok' ? res.data.content : null);
@@ -781,10 +781,10 @@ class ChartManager {
                     .then(res => res.status === 'ok' ? res.data.content : null);
             },
             saveLineToolsAndGroups: function (layoutId, chartId, state, options = {}) {
-                console.log("[DEBUG-CHARTS] saveLineToolsAndGroups called", { layoutId, chartId, state, options });
+                clog("[DEBUG-CHARTS] saveLineToolsAndGroups called", { layoutId, chartId, state, options });
                 return new Promise((resolve) => {
                     if (self.shouldSuppressDrawingSave()) {
-                        console.log("[DEBUG-CHARTS] Skip saveLineToolsAndGroups due to active drawing mutation");
+                        clog("[DEBUG-CHARTS] Skip saveLineToolsAndGroups due to active drawing mutation");
                         return resolve();
                     }
                     const rawResolution = self.chart ? self.chart.resolution() : Utils.get_local_data(Utils.get_market() + "_interval_" + self.id);
@@ -812,7 +812,7 @@ class ChartManager {
                         }
                     }
 
-                    console.log("[DEBUG-CHARTS] Saving drawings for", { symbol, resolution, sourcesCount: Object.keys(processedState.sources || {}).length, rawSources: state.sources, reason: options.reason });
+                    clog("[DEBUG-CHARTS] Saving drawings for", { symbol, resolution, sourcesCount: Object.keys(processedState.sources || {}).length, rawSources: state.sources, reason: options.reason });
 
                     fetch("/tv/1.1/drawings?client=" + client_id + "&user=" + user_id + "&chart=" + chartId + "&layout=" + layoutId + "&symbol=" + symbol + "&resolution=" + resolution, {
                         method: "POST",
@@ -821,7 +821,7 @@ class ChartManager {
                         },
                         body: JSON.stringify({ state: processedState })
                     }).then(res => res.json()).then(res => {
-                        console.log("[DEBUG-CHARTS] saveLineToolsAndGroups response", res);
+                        clog("[DEBUG-CHARTS] saveLineToolsAndGroups response", res);
                         if (state && state.sources) {
                             self.setDrawingsCache(cacheKey, state);
                         }
@@ -833,7 +833,7 @@ class ChartManager {
                 });
             },
             loadLineToolsAndGroups: function (layoutId, chartId, requestType, requestContext = {}) {
-                console.log("[DEBUG-CHARTS] loadLineToolsAndGroups called", { layoutId, chartId, requestType, requestContext });
+                clog("[DEBUG-CHARTS] loadLineToolsAndGroups called", { layoutId, chartId, requestType, requestContext });
                 return new Promise((resolve) => {
                     const resolution = requestContext.resolution;
                     const symbol = requestContext.symbol;
@@ -1244,12 +1244,12 @@ class ChartManager {
 
             this.widget.subscribe('drawing_event', (id, eventType) => {
                 if (this.shouldSuppressDrawingSave()) return;
-                console.log("[DEBUG-CHARTS] drawing_event", id, eventType);
+                clog("[DEBUG-CHARTS] drawing_event", id, eventType);
                 this.scheduleDrawingsSave('drawing_event');
             });
             this.widget.subscribe('onAutoSaveNeeded', () => {
                 if (this.shouldSuppressDrawingSave()) return;
-                console.log("[DEBUG-CHARTS] onAutoSaveNeeded");
+                clog("[DEBUG-CHARTS] onAutoSaveNeeded");
                 this.scheduleDrawingsSave('auto_save');
             });
         });
