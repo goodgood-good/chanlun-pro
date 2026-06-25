@@ -36,7 +36,9 @@ from chanlun.recursive_bt.engine.engine import (
     recommended_buy_ratio,
     recommended_sell_ratio,
 )
-from chanlun.recursive_bt.sim.paper import BT_DATA, MAX_POS, PaperBroker, in_session
+from chanlun.recursive_bt.sim.paper import (
+    BT_DATA, MAX_POS, PaperBroker, drop_unclosed_last_bar, in_session,
+)
 from chanlun.recursive_bt.engine.market_runtime import (
     INDEX_BY_MARKET,
     classify_visible_regime,
@@ -293,13 +295,15 @@ class MonitorEvent:
 
     @property
     def identity(self) -> str:
+        # 去重身份只用信号的稳定部分(kind|code|bs_type|signal_time)。
+        # reason 含易变片段(nest depth/比例乘数/regime),纳入会让同一买卖点在
+        # 两轮间因乘数/regime 变化而 identity 漂移→重复发、重复入单。
         return "|".join(
             [
                 self.kind,
                 self.code,
                 self.bs_type or "-",
                 self.signal_time or "-",
-                self.reason or "-",
             ]
         )
 
@@ -491,12 +495,27 @@ def collect_monitor_events(
     names = names or {}
     sigs: dict[str, list] = {}
     log = fun.get_logger()
+    REFRESH_FAIL_ALERT_THRESHOLD = 3
     for code, state in states.items():
         try:
             sigs[code] = state.refresh()
+            if getattr(state, "consecutive_refresh_failures", 0):
+                state.consecutive_refresh_failures = 0   # 恢复即清零
         except Exception as exc:
-            log.warning(f"[live_monitor] refresh failed code={code}: {exc}")
             sigs[code] = []
+            n = getattr(state, "consecutive_refresh_failures", 0) + 1
+            try:
+                state.consecutive_refresh_failures = n
+            except Exception:
+                n = 1
+            # 首次失败 warning;到阈值时升级为一次性醒目告警(避免刷屏:仅在跨过阈值那一刻喊)
+            if n == REFRESH_FAIL_ALERT_THRESHOLD:
+                log.warning(
+                    f"[live_monitor][ALERT] code={code} 已连续 {n} 轮 refresh 失败,"
+                    f"该标的信号可能持续漏发: {exc}"
+                )
+            else:
+                log.warning(f"[live_monitor] refresh failed code={code}: {exc}")
 
     buys: list[MonitorEvent] = []
     others: list[MonitorEvent] = []
@@ -807,9 +826,11 @@ class MonitorSymbolState:
         self.last_px = 0.0
         self.prev_close = 0.0
         self.seen = set()
-        # 新鲜窗口=30个op bar:覆盖买卖点首次可见的滞后确认窗口;超窗信号视为深度回溯修正,不发。
+        self.consecutive_refresh_failures = 0
+        # 新鲜窗口=40个op bar(下限60min):覆盖买卖点右侧确认的滞后窗口(含1m偶发
+        # >30min的深度确认),超窗才视为深度回溯修正不发。1m级别旧30min窗偏紧会吞真新信号。
         op_minutes = int(op_level[:-1]) if str(op_level).endswith("m") else 5
-        self.signal_freshness = pd.Timedelta(minutes=max(op_minutes * 30, 30))
+        self.signal_freshness = pd.Timedelta(minutes=max(op_minutes * 40, 60))
 
     # 首轮 warmup 限窗(天):监控信号只需笔级买点+笔方向,限窗可大幅缩短初始化时间。
     WARMUP_DAYS_BY_FREQ = {"1m": 30, "5m": 120}
@@ -835,7 +856,7 @@ class MonitorSymbolState:
 
     def _process_level(self, cd: CL, frequency: str, last_attr: str, min_bars: int):
         last = getattr(self, last_attr)
-        df = self._fetch_klines(frequency, last)
+        df = drop_unclosed_last_bar(self._fetch_klines(frequency, last), frequency)
         if df is None or len(df) == 0:
             return None
         # min_bars 健全性检查只对首轮全量生效;增量尾窗本来就短,不适用
@@ -1008,6 +1029,11 @@ def current_visible_regime(
             f"[live_monitor] regime source fetch failed code={code}: {exc}"
         )
         return "range"
+    # 滚动清理:只保留「今日」的 regime 缓存(按 date 维度),防止常驻多日无界增长。
+    today_str = str(today)
+    stale = [k for k in _REGIME_CACHE if k[1] != today_str]
+    for k in stale:
+        _REGIME_CACHE.pop(k, None)
     _REGIME_CACHE[key] = regime
     return regime
 
@@ -1018,8 +1044,25 @@ def market_is_open(ex, market: str, now: _dt.datetime) -> bool:
         return in_session(now)
     try:
         return bool(ex.now_trading())
-    except Exception:
-        return False
+    except Exception as exc:
+        # now_trading 异常(如长桥 ctx 自愈期)时,不粗暴判休市致整轮漏扫,
+        # 回退到本地时段近似(宁可多扫一轮空转,也不漏真盘中信号)。
+        fun.get_logger().warning(
+            f"[live_monitor] now_trading failed, fallback to session table: {exc}"
+        )
+        return _us_session_fallback(now)
+
+
+def _us_session_fallback(now: _dt.datetime) -> bool:
+    """美股常规时段的北京时间近似(给 now_trading 异常时兜底)。
+    夏令时 21:30-04:00、冬令时 22:30-05:00,跨午夜;此处取并集放宽
+    (21:30-05:00),宁可多扫空转也不漏。不处理节假日(异常兜底,容忍误开)。"""
+    if now.weekday() >= 5 and not (now.weekday() == 5 and now.hour < 6):
+        # 周六全天与周日(美股周五夜对应北京周六凌晨,放行周六早晨)
+        if now.weekday() == 6:
+            return False
+    hm = now.hour * 100 + now.minute
+    return hm >= 2130 or hm <= 500
 
 
 def refresh_optimization_report(
@@ -1635,9 +1678,14 @@ def run_once(args, states: Dict[str, object], notifier, deduper, names=None, bro
                 f" opt_rratio_review={ratio_status.get('review_regime_ratio', 0)}"
                 f" opt_rratio_watch={watch_total}"
             )
+    failing = sum(
+        1 for s in states.values()
+        if getattr(s, "consecutive_refresh_failures", 0) >= 3
+    )
     print(
         f"[{_dt.datetime.now():%Y-%m-%d %H:%M:%S}] "
         f"scan={len(states)} holdings={len(holdings)} events={len(events)} sent={sent}"
+        f"{' refresh_failing=' + str(failing) if failing else ''}"
         f"{paper_status}{optimization_status}"
     )
     return sent
@@ -2295,7 +2343,14 @@ def main(argv: Optional[list[str]] = None) -> int:
         f"{'+' + args.mid_level if args.mid_level else ''}+{args.op_level} "
         f"symbols={len(states)} state={args.state_file}"
     )
-    initial_codes = set(codes)
+    # 永久保留集只含手工自选(holdings 由 rescan 动态并入),不含 selection 选出的池——
+    # selection 候选应可被每日 rescan 淘汰,避免启动时大池全集常驻数月。
+    if selector is not None:
+        # selection 模式:仅显式 --codes 与持仓永久保留,selector 选出的可淘汰
+        initial_codes = set(explicit_codes or ())
+    else:
+        # 非 selection 模式(显式 codes / load_universe):codes 即用户指定,全部保留
+        initial_codes = set(codes)
     last_rescan_date = _dt.date.today()  # 启动时已选过一轮
     while True:
         now = _dt.datetime.now()

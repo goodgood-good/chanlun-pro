@@ -684,11 +684,31 @@ class DynamicRecursiveMonitor:
 def register_recursive_monitor_jobs(scheduler) -> dict[str, DynamicRecursiveMonitor]:
     """Register A-share and US recursive live monitor jobs in the web scheduler."""
     root_config = _recursive_monitor_config()
-    if not _config_bool(root_config.get("enabled"), True):
+    # 默认改为 opt-in:避免与常驻 CLI live_monitor 双跑同一 ledger/state 互相覆盖写。
+    # 需双跑请显式在 config 设 RECURSIVE_MONITOR_CONFIG['enabled']=True。
+    if not _config_bool(root_config.get("enabled"), False):   # 默认 True→False
+        fun.get_logger().info(
+            "[recursive_app_monitor] disabled by default (set enabled=True to opt in; "
+            "ensure it does not share ledger/state with a standalone live_monitor)"
+        )
         return {}
 
     monitors: dict[str, DynamicRecursiveMonitor] = {}
     now = _dt.datetime.now()
+    # 专用线程池:缠论重算 CPU 密集,放 IOLoop 会卡 web。两市场串行(max_workers=1)
+    # 即可,既隔离阻塞又不与图表请求争 CPU 过度。
+    executor_alias = "recursive_monitor"
+    try:
+        from apscheduler.executors.pool import ThreadPoolExecutor as _APThreadPool
+        if "recursive_monitor" not in getattr(scheduler, "_executors", {}):
+            scheduler.add_executor(_APThreadPool(max_workers=1), alias="recursive_monitor")
+    except Exception as exc:
+        fun.get_logger().warning(
+            f"[recursive_app_monitor] dedicated executor unavailable, "
+            f"falling back to default: {exc}"
+        )
+        # 回退:不指定 executor(下面 add_job 不传 executor 参数,用默认 executor)。
+        executor_alias = None
     markets = _config_tuple(root_config.get("markets"), default=("a", "us"))
     for idx, market in enumerate(markets):
         market = normalize_market(market)
@@ -697,6 +717,9 @@ def register_recursive_monitor_jobs(scheduler) -> dict[str, DynamicRecursiveMoni
             continue
         cfg = DynamicMonitorConfig.from_config(market)
         monitor = DynamicRecursiveMonitor(cfg)
+        job_kwargs = {}
+        if executor_alias is not None:
+            job_kwargs["executor"] = executor_alias   # 专用线程池,避免阻塞 Tornado IOLoop
         scheduler.add_job(
             func=monitor.run_once,
             trigger=IntervalTrigger(seconds=max(cfg.interval_seconds, 30)),
@@ -706,6 +729,7 @@ def register_recursive_monitor_jobs(scheduler) -> dict[str, DynamicRecursiveMoni
             coalesce=True,
             replace_existing=True,
             next_run_time=now + _dt.timedelta(seconds=cfg.start_delay_seconds + idx * 5),
+            **job_kwargs,
         )
         monitors[market] = monitor
 

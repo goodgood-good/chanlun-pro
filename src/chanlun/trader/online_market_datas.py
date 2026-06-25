@@ -34,17 +34,31 @@ class OnlineMarketDatas(MarketDatas):
 
         self.use_cache = use_cache
 
-        # key 为 "{code}_{frequency}"，循环结束需显式清除
+        # key 为 "{_round_seq}_{code}_{frequency}"，循环结束需显式清除或调 begin_round
         self.cache_klines: Dict[str, pd.DataFrame] = {}
+
+        # L2: 轮次序号; begin_round() 每轮自增使上轮 K 线缓存键自动失效, 免依赖 clear_cache
+        self._round_seq = 0
 
     def clear_cache(self):
         """每次实盘循环结束后调用，清空 K 线缓存以便下次取到最新行情。"""
         self.cache_klines = {}
         return True
 
+    def begin_round(self):
+        """每轮循环开始调用, 推进轮次序号使上轮 K 线缓存自动失效 (L2)。
+
+        与 clear_cache 等价 (都清缓存), 但把清理从"轮末易漏"挪到"轮首必调";
+        缓存键含 _round_seq 是双保险。驱动每轮 for code 前调用本方法替代轮末 clear_cache
+        (clear_cache 保留兼容)。
+        """
+        self._round_seq += 1
+        self.cache_klines = {}
+        return True
+
     def klines(self, code, frequency) -> pd.DataFrame:
         """获取 K 线数据；use_cache=True 时循环内复用缓存，避免重复请求。"""
-        key = f"{code}_{frequency}"
+        key = f"{self._round_seq}_{code}_{frequency}"
         if self.use_cache and key in self.cache_klines.keys():
             return self.cache_klines[key]
         klines = self.ex.klines(code, frequency)

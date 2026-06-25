@@ -452,6 +452,10 @@ class ExchangeTq(Exchange):
                         return False
 
         order = None
+        # H4: 累计真实成交量与成交额, 返回实际成交而非原始请求量。
+        filled_total = 0.0          # 累计成交手数
+        turnover_total = 0.0        # 累计成交额 (用于算加权均价)
+        last_order_id = None
 
         amount_left = amount
         while amount_left > 0:
@@ -468,24 +472,44 @@ class ExchangeTq(Exchange):
                 limit_price=price,
             )
             api.wait_update(time.time() + 5)
+            last_order_id = order.order_id
+
+            # 本轮成交量 = 本轮委托量 - 剩余未成交量
+            this_filled = max(0, int(order.volume_orign) - int(order.volume_left))
+            if this_filled > 0:
+                filled_total += this_filled
+                # 优先用本轮成交均价 trade_price; 缺失时回退挂单价
+                fill_price = order.trade_price if order.trade_price else price
+                turnover_total += this_filled * fill_price
 
             if order.status == "FINISHED":
                 if order.is_error:
                     print(f"下单失败，原因：{order.last_msg}")
-                    return False
+                    # 已有部分成交时不能返回 False (会丢已成交记录), 跳出按实际成交返回
+                    if filled_total <= 0:
+                        return False
+                    break
+                # FINISHED 且无错: 可能全成, 也可能券商终止剩余 → 用 volume_left 判
+                if int(order.volume_left) > 0:
+                    # 仍有未成交且订单已 FINISHED (非续挂场景), 继续下一轮补单
+                    amount_left = int(order.volume_left)
+                    continue
                 break
             else:
                 # 超时未完全成交：撤单，用 volume_left 继续挂新单
                 self.cancel_order(order)
                 if order.is_error:
                     print(f"下单失败，原因：{order.last_msg}")
-                    return False
-                amount_left = order.volume_left
+                    if filled_total <= 0:
+                        return False
+                    break
+                amount_left = int(order.volume_left)
 
-        if order is None:
+        if order is None or filled_total <= 0:
             return False
 
-        return {"id": order.order_id, "price": order.trade_price, "amount": amount}
+        avg_price = turnover_total / filled_total if filled_total > 0 else order.trade_price
+        return {"id": last_order_id, "price": avg_price, "amount": filled_total}
 
     def all_orders(self):
         """

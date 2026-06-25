@@ -46,6 +46,46 @@ def limit_pct(code: str, market: str = "a") -> Optional[float]:
     return market_rules_for_code(market, code).limit_pct
 
 
+def _freq_to_minutes(frequency: str) -> Optional[int]:
+    """把级别字符串转成分钟数;非分钟级(如 'd'/'w')返回 None=不裁剪。"""
+    f = str(frequency).strip().lower()
+    if f.endswith("m"):
+        try:
+            return max(int(f[:-1]), 1)
+        except ValueError:
+            return None
+    return None
+
+
+def drop_unclosed_last_bar(df: "pd.DataFrame", frequency: str) -> "pd.DataFrame":
+    """丢弃 df 末尾仍在进行(未收盘)的那一根 bar,使 live 口径与回测一致。
+
+    判定方式自包含、不依赖外部 now(tz 不可知):用倒数第二根与最后一根的
+    时间差推断 bar 间隔,再用与最后一根**同 tz** 的当前时刻判断「最后一根
+    所属周期是否已结束」。无法判定(非分钟级/不足两根/间隔异常)时原样返回,
+    绝不误删历史收盘 bar。
+    """
+    minutes = _freq_to_minutes(frequency)
+    if minutes is None or df is None or len(df) < 2:
+        return df
+    try:
+        last_ts = pd.Timestamp(df["date"].iloc[-1])
+        prev_ts = pd.Timestamp(df["date"].iloc[-2])
+    except Exception:
+        return df
+    step = pd.Timedelta(minutes=minutes)
+    # 数据自身间隔与名义间隔不一致(节假日跳空/缺口)时,只在「正好等于名义间隔」
+    # 时才启用裁剪,避免把历史正常 bar 误判为进行中。
+    if (last_ts - prev_ts) != step:
+        return df
+    # 用与 last_ts 同 tz 的当前时刻(naive→naive, aware→对应 tz)
+    now = pd.Timestamp.now(tz=last_ts.tz) if last_ts.tz is not None else pd.Timestamp.now()
+    # bar 收盘时刻 = bar 起点 + 一个周期。now 还没到收盘时刻=这根还在进行中。
+    if now < last_ts + step:
+        return df.iloc[:-1]
+    return df
+
+
 class SymbolState:
     """常驻一只标的的 5m/30m/日线 CL 与最新信号状态(增量尾喂)。"""
 
@@ -63,14 +103,15 @@ class SymbolState:
         self.last_px: float = 0.0
         self.prev_close: float = 0.0
         self.seen = set()          # 已消费的(信号date,bs_type)
-        # 新鲜窗口=30个5m bar:买卖点首次可见滞后确认bar中位9bar/p90=20bar,
-        # 旧判定 s.date==last5 要求零滞后,真实新信号被静默吞掉
-        self.signal_freshness = pd.Timedelta(minutes=150)
+        self.consecutive_refresh_failures = 0
+        # 新鲜窗口=40个5m bar(=200min):买卖点首次可见滞后确认bar中位9/p90=20,
+        # 留足右侧深度确认余量;旧150min偏紧偶尔吞真新信号。
+        self.signal_freshness = pd.Timedelta(minutes=200)
 
     def refresh(self) -> List:
         """拉最新K线,尾喂新完整bar;返回**新增**的5m买卖点信号。"""
-        df5 = self.ex.klines(self.code, "5m")
-        df30 = self.ex.klines(self.code, "30m")
+        df5 = drop_unclosed_last_bar(self.ex.klines(self.code, "5m"), "5m")
+        df30 = drop_unclosed_last_bar(self.ex.klines(self.code, "30m"), "30m")
         if df5 is None or len(df5) < 100:
             return []
         new5 = df5 if self.last5 is None else df5[df5["date"] > self.last5]
@@ -140,23 +181,46 @@ class PaperBroker:
         self.trades: List[dict] = []
         self.equity_curve: List[dict] = []
         if os.path.exists(path):
-            d = json.load(open(path, encoding="utf-8"))
-            self.cash = d["cash"]
-            self.positions = d["positions"]
-            self.pending = d.get("pending", [])
-            self.trades = d.get("trades", [])
-            self.equity_curve = d.get("equity_curve", [])
+            try:
+                with open(path, encoding="utf-8") as fp:
+                    d = json.load(fp)
+                if not isinstance(d, dict):
+                    raise ValueError("ledger root is not an object")
+                # cash/positions 用 .get 兜底:损坏/旧 schema 时以空账本起而非崩溃。
+                self.cash = float(d.get("cash", INIT_CASH))
+                self.positions = d.get("positions") or {}
+                self.pending = d.get("pending") or []
+                self.trades = d.get("trades") or []
+                self.equity_curve = d.get("equity_curve") or []
+            except Exception as exc:
+                # 损坏(截断/JSONDecodeError/类型错)时告警并以空账本起,保证监控能启动。
+                import shutil
+                from chanlun import fun
+                fun.get_logger().warning(
+                    f"[paper] ledger load failed, starting fresh: path={path} err={exc}"
+                )
+                try:
+                    shutil.copy2(path, path + ".corrupt")   # 保留损坏现场供排查
+                except Exception:
+                    pass
 
     def save(self):
         directory = os.path.dirname(self.path)
         if directory:
             os.makedirs(directory, exist_ok=True)
-        json.dump({"cash": self.cash, "positions": self.positions,
-                   "pending": self.pending, "trades": self.trades,
-                   "equity_curve": self.equity_curve,
-                   "summary": self.performance_summary()},
-                  open(self.path, "w", encoding="utf-8"),
-                  ensure_ascii=False, indent=1, default=str)
+        payload = json.dumps(
+            {"cash": self.cash, "positions": self.positions,
+             "pending": self.pending, "trades": self.trades,
+             "equity_curve": self.equity_curve,
+             "summary": self.performance_summary()},
+            ensure_ascii=False, indent=1, default=str,
+        )
+        # 原子写:先写 .tmp 再 os.replace,避免写一半被 kill(崩溃/自愈重启)截断 ledger
+        # (与 live_monitor.JsonDeduper.save 同写法)。
+        tmp = self.path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fp:
+            fp.write(payload)
+        os.replace(tmp, self.path)
 
     def equity(self, px: Dict[str, float]) -> float:
         return self.cash + sum(p["shares"] * px.get(c, p["entry_px"])
@@ -191,7 +255,43 @@ class PaperBroker:
             "trades": len(self.trades),
         }
         self.equity_curve.append(snapshot)
+        self._trim_equity_curve()
         return snapshot
+
+    EQUITY_CURVE_MAXLEN = 20000   # ~A股一年12000轮,留足两年余量;超过则滚动归档
+
+    def _trim_equity_curve(self) -> None:
+        """滚动保留近 EQUITY_CURVE_MAXLEN 条;裁剪时把被丢弃段的起点与峰值折叠成
+        一个 anchor 保留在头部,使 performance_summary 的 total_return/max_drawdown
+        仍基于完整历史的 start 与 peak,不因裁剪失真。"""
+        n = len(self.equity_curve)
+        if n <= self.EQUITY_CURVE_MAXLEN:
+            return
+        drop_to = n - self.EQUITY_CURVE_MAXLEN
+        dropped = self.equity_curve[:drop_to]
+        eqs = [float(p.get("equity") or 0.0) for p in dropped if float(p.get("equity") or 0.0) > 0]
+        if eqs:
+            # 折叠段峰值=本段 equity 与「段内旧 anchor 已携带的 peak_equity」之并集的
+            # 最大值——逐轮滚动裁剪时旧 anchor 会被再次挤出,必须把它记录的历史峰值
+            # 传递给新 anchor,否则早期峰值会在多轮裁剪后丢失致 max_drawdown 失真。
+            peak_equity = max(
+                eqs + [float(p.get("peak_equity") or 0.0)
+                       for p in dropped if p.get("anchor")]
+            )
+            anchor = {
+                "time": dropped[0].get("time"),
+                "equity": eqs[0],            # 折叠段起点=总起点,守住 total_return 的分母
+                "peak_equity": peak_equity,  # 折叠段峰值(含旧 anchor 链式传递),供 summary 取全局 peak
+                "cash": dropped[0].get("cash"),
+                "positions": dropped[0].get("positions", 0),
+                "pending": dropped[0].get("pending", 0),
+                "trades": dropped[0].get("trades", 0),
+                "anchor": True,
+                "reason": "equity_curve_trim_anchor",
+            }
+            self.equity_curve = [anchor] + self.equity_curve[drop_to:]
+        else:
+            self.equity_curve = self.equity_curve[drop_to:]
 
     def ensure_baseline_snapshot(self, now: str) -> Optional[dict]:
         """Create one neutral equity anchor when a ledger has no curve yet."""
@@ -219,7 +319,12 @@ class PaperBroker:
         if curve:
             start = curve[0]
             latest = curve[-1]
-            peak = curve[0]
+            # 若曾裁剪,头部 anchor 携带折叠段峰值,纳入初始 peak 防回撤被低估
+            anchor_peak = 0.0
+            for point in self.equity_curve:
+                if point.get("anchor"):
+                    anchor_peak = max(anchor_peak, float(point.get("peak_equity") or 0.0))
+            peak = max(curve[0], anchor_peak)
             max_dd = 0.0
             for value in curve:
                 peak = max(peak, value)
@@ -268,6 +373,7 @@ class PaperBroker:
                     "target_weight": ratio,
                     "reason": getattr(event, "reason", ""),
                     "event_id": getattr(event, "identity", ""),
+                    "queued_signal_time": getattr(event, "signal_time", ""),
                 })
                 pending_buy.add(code)
                 buy_slots -= 1
@@ -285,6 +391,7 @@ class PaperBroker:
                     "sell_ratio": ratio,
                     "reason": getattr(event, "reason", ""),
                     "event_id": getattr(event, "identity", ""),
+                    "queued_signal_time": getattr(event, "signal_time", ""),
                 }
                 bs_type = getattr(event, "bs_type", "")
                 if bs_type:
@@ -321,6 +428,15 @@ class PaperBroker:
                     self.cash -= size * px * (1 + rules.commission)
                     self.positions[c] = {"shares": size, "entry_px": px,
                                          "entry_date": now, "bs": o.get("bs", "")}
+                    # 漏跑检测:排单锚与当前 bar 差距过大→成交价非「下一根」,仅记录不改价
+                    qs = o.get("queued_signal_time")
+                    if qs:
+                        self.positions[c]["fill_stale"] = bool(
+                            st.last5 is not None
+                            and str(qs) != ""
+                            and (pd.Timestamp(st.last5) - pd.Timestamp(qs))
+                            > pd.Timedelta(minutes=10)
+                        )
             elif o["act"] == "sell" and c in self.positions:
                 p = self.positions[c]
                 if rules.t_plus > 0 and str(p["entry_date"])[:10] >= now[:10]:    # T+1
@@ -368,7 +484,12 @@ def step(broker: PaperBroker, states: Dict[str, SymbolState], now: str):
     for c in list(broker.positions):
         if c in pend_codes:
             continue
-        st = states[c]
+        st = states.get(c)
+        if st is None:
+            # 持仓标的不在当前池(ledger 持仓数 > 池 / 未入选)→ 无 CL 状态无法评估退出,
+            # 跳过本轮(与上方 fill_pending 的 states.get 兜底一致),避免裸下标 KeyError
+            # 整个 step 崩溃(预存 bug,replay 小池+满 ledger 实测命中)。池管理正常时持仓本应在 states 内。
+            continue
         if st.big_dir() == "down":
             broker.pending.append({
                 "code": c,

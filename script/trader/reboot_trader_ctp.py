@@ -8,6 +8,7 @@ from chanlun.exchange.exchange_ctp import MarketCTP
 from chanlun.strategy.strategy_demo import StrategyDemo
 from chanlun.trader.online_market_datas import OnlineMarketDatas
 from chanlun.trader.trader_ctp import CTPTrader
+from chanlun.trading.base import Operation
 
 logger = fun.get_logger("trader_ctp.log")
 
@@ -66,20 +67,35 @@ try:
                     TR.run(code)
                 except Exception:
                     logger.error(f"{code} 策略运行异常: {traceback.format_exc()}")
+                finally:
+                    # H3-a: 每个 code 处理后立即落盘, 把"已下单未持久化"崩溃窗口
+                    # 从整轮缩到单 code; 落盘失败不应中断后续 code 处理。
+                    try:
+                        TR.save_to_pkl(p_strategy_key)
+                    except Exception:
+                        logger.error(f"{code} 落盘失败: {traceback.format_exc()}")
 
             Data.clear_cache()
-            TR.save_to_pkl(p_strategy_key)
+            TR.save_to_pkl(p_strategy_key)  # 轮末再保险落一次
 
             # 风控检查：止损 + 持仓时间超限强平
-            if seconds % (60 * 5) == 0:
-                positions = TR.get_positions()
-                for pos in positions:
-                    # 检查止损
-                    if TR.check_stop_loss(pos):
-                        TR.force_close(pos.code, pos, "触发止损")
-                    # 检查持仓时间
-                    if TR.check_position_time(pos):
-                        TR.force_close(pos.code, pos, "持仓时间过长")
+            # 注: force_close 第三参须为 Operation (内部读 opt.msg), 不能传裸 str
+            positions = TR.get_positions()
+            for pos in positions:
+                # 检查止损
+                if TR.check_stop_loss(pos):
+                    TR.force_close(
+                        pos.code,
+                        pos,
+                        Operation(pos.code, "close", "risk", msg="触发止损"),
+                    )
+                # 检查持仓时间 (与止损 if/elif: 同一仓已强平就别再因时间重复发第二笔平单)
+                elif TR.check_position_time(pos):
+                    TR.force_close(
+                        pos.code,
+                        pos,
+                        Operation(pos.code, "close", "risk", msg="持仓时间过长"),
+                    )
 
         except Exception:
             logger.error(f"主循环异常: {traceback.format_exc()}")

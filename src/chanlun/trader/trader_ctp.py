@@ -29,6 +29,9 @@ from openctp_ctp.thosttraderapi import (
     THOST_FTDC_OF_Close,  # 平仓
     THOST_FTDC_OF_Open,  # 开仓 (B2 follow-up: ApiStruct 迁移)
     THOST_FTDC_OPT_LimitPrice,  # 限价单
+    THOST_FTDC_OST_AllTraded,  # 全部成交 (M3)
+    THOST_FTDC_OST_Canceled,  # 已撤单 (M4 cancel_order 确认)
+    THOST_FTDC_OST_PartTradedQueueing,  # 部分成交仍在队列 (M3)
 )
 
 # 报单/查询的回报等待超时 (秒). 取代原 time.sleep(1) 硬编码:
@@ -54,6 +57,29 @@ def _precheck_ctp_order(amount, price) -> bool:
         return bool(amount == amount and amount > 0 and price == price and price > 0)
     except TypeError:
         return False
+
+
+def _ctp_order_filled_amount(order) -> float:
+    """从 OnRtnOrder 回报判定实际成交量 (M3)。
+
+    返回 >0 表示已成交的手数 (AllTraded 全成 / PartTradedQueueing 部分成交);
+    返回 0 表示未成交 / 被拒 / 已撤 → 调用方须 return False 不记本地持仓。
+
+    VolumeTraded 是 CThostFtdcOrderField 的累计成交量字段; OrderStatus 仅做门控:
+    只有 AllTraded / PartTradedQueueing 才承认成交, 其余 (NoTrade/Canceled/废单) 一律 0。
+
+    注: 若柜台 "先回 NoTradeQueueing(Volume=0) 后回 AllTraded", wait_for_order 只等到
+    第一个回报就返回, 这里可能取到 VolumeTraded=0 误判未成交。投产前须按设计 M3 灰度第 1 步
+    在仿真确认时序, 若有此问题应升级为 OnRtnTrade 累计方案。
+    """
+    status = getattr(order, "OrderStatus", None)
+    if status not in (THOST_FTDC_OST_AllTraded, THOST_FTDC_OST_PartTradedQueueing):
+        return 0
+    traded = getattr(order, "VolumeTraded", 0) or 0
+    try:
+        return traded if traded > 0 else 0
+    except TypeError:
+        return 0
 
 
 class MyTraderCallback(CThostFtdcTraderApi):
@@ -148,6 +174,9 @@ class CTPTrader(BackTestTrader):
         # 最大持仓数量
         self.max_pos = 3
 
+        # 单笔持仓最长持有天数 (自然日); 超过则风控强平 (H1)。None 表示不启用时间止损。
+        self.max_hold_days = 5
+
         # 创建临时目录
         self.temp_path = os.path.expanduser("~/.ctp/ctp")
         os.makedirs(self.temp_path, exist_ok=True)
@@ -210,6 +239,20 @@ class CTPTrader(BackTestTrader):
         if not _precheck_ctp_order(amount or 1, tick[code].last):
             LogUtil.warning(f"CTP open_buy 拒单:异常 amount={amount}、price={tick[code].last}")
             return False
+        # M5: 开仓前统一风控 (默认阈值 None → 恒通过, 行为不变)
+        _amt = amount or 1
+        _ok, _reason = self.risk_precheck(
+            code, opt, tick[code].last, _amt, tick[code].last * _amt
+        )
+        if not _ok:
+            LogUtil.warning(f"CTP open_buy 风控拦截 code={code}: {_reason}")
+            utils.send_fs_msg(
+                "futures_trader", "期货交易提醒", [f"开多风控拦截 {code}: {_reason}"]
+            )
+            return False
+        # M4: 开仓前清理本标的存活挂单, 避免重启/上轮残留挂单导致重复建仓
+        for _ref, _o in self.trader_api.state.get_alive_orders(code):
+            self.cancel_order(_ref)
         # 下单
         order_ref = self.trader_api.state.next_order_ref()
         self.trader_api.state.register_order_wait(order_ref)
@@ -233,29 +276,47 @@ class CTPTrader(BackTestTrader):
 
         # 等待订单回报 (B2 follow-up: Event 取代 time.sleep)
         if not self.trader_api.state.wait_for_order(order_ref, _CTP_CALLBACK_TIMEOUT):
+            # 超时未收到回报: 可能在途, 主动撤单兜底避免幽灵挂单 (见 M4), 记为失败
+            self.cancel_order(order_ref)
+            LogUtil.warning(f"CTP open_buy 回报超时, 已发撤单 ref={order_ref} code={code}")
             return False
         order = self.trader_api.state.get_order(order_ref)
         if not order:
             return False
 
-        # 记录订单
+        # M3: 仅 OrderStatus 为 AllTraded/PartTradedQueueing 且有实际成交量才算成功;
+        # 被拒/废单/未成交一律 return False, 不记本地持仓 (否则持仓与柜台失同步)
+        filled = _ctp_order_filled_amount(order)
+        if filled <= 0:
+            status = getattr(order, "OrderStatus", "?")
+            status_msg = getattr(order, "StatusMsg", "")
+            LogUtil.warning(
+                f"CTP open_buy 未成交 code={code} ref={order_ref} "
+                f"OrderStatus={status} msg={status_msg}"
+            )
+            utils.send_fs_msg(
+                "futures_trader",
+                "期货交易提醒",
+                [f"开多未成交/被拒 {code} 状态={status} {status_msg}"],
+            )
+            return False
+
+        # 记录订单 (用实际成交量 filled, 非请求量)
         db.order_save(
             "futures",
             code,
             code,
             "buy",
             tick[code].last,
-            amount or 1,
+            filled,
             opt.msg,
             datetime.now(),
         )
 
-        msg = (
-            f"期货开多 {code} 价格 {tick[code].last} 数量 {amount or 1} 原因 {opt.msg}"
-        )
+        msg = f"期货开多 {code} 价格 {tick[code].last} 数量 {filled} 原因 {opt.msg}"
         utils.send_fs_msg("futures_trader", "期货交易提醒", [msg])
 
-        return {"price": tick[code].last, "amount": amount or 1}
+        return {"price": tick[code].last, "amount": filled}
 
     def open_sell(self, code, opt: Operation, amount: float = None):
         """开空仓"""
@@ -282,6 +343,20 @@ class CTPTrader(BackTestTrader):
         if not _precheck_ctp_order(amount or 1, tick[code].last):
             LogUtil.warning(f"CTP open_sell 拒单:异常 amount={amount}、price={tick[code].last}")
             return False
+        # M5: 开仓前统一风控 (默认阈值 None → 恒通过, 行为不变)
+        _amt = amount or 1
+        _ok, _reason = self.risk_precheck(
+            code, opt, tick[code].last, _amt, tick[code].last * _amt
+        )
+        if not _ok:
+            LogUtil.warning(f"CTP open_sell 风控拦截 code={code}: {_reason}")
+            utils.send_fs_msg(
+                "futures_trader", "期货交易提醒", [f"开空风控拦截 {code}: {_reason}"]
+            )
+            return False
+        # M4: 开仓前清理本标的存活挂单, 避免重启/上轮残留挂单导致重复建仓
+        for _ref, _o in self.trader_api.state.get_alive_orders(code):
+            self.cancel_order(_ref)
         # 下单
         order_ref = self.trader_api.state.next_order_ref()
         self.trader_api.state.register_order_wait(order_ref)
@@ -304,9 +379,28 @@ class CTPTrader(BackTestTrader):
             return False
 
         if not self.trader_api.state.wait_for_order(order_ref, _CTP_CALLBACK_TIMEOUT):
+            # 超时未收到回报: 可能在途, 主动撤单兜底避免幽灵挂单 (见 M4), 记为失败
+            self.cancel_order(order_ref)
+            LogUtil.warning(f"CTP open_sell 回报超时, 已发撤单 ref={order_ref} code={code}")
             return False
         order = self.trader_api.state.get_order(order_ref)
         if not order:
+            return False
+
+        # M3: 仅成交才算成功; 被拒/废单/未成交一律 return False, 不记本地持仓
+        filled = _ctp_order_filled_amount(order)
+        if filled <= 0:
+            status = getattr(order, "OrderStatus", "?")
+            status_msg = getattr(order, "StatusMsg", "")
+            LogUtil.warning(
+                f"CTP open_sell 未成交 code={code} ref={order_ref} "
+                f"OrderStatus={status} msg={status_msg}"
+            )
+            utils.send_fs_msg(
+                "futures_trader",
+                "期货交易提醒",
+                [f"开空未成交/被拒 {code} 状态={status} {status_msg}"],
+            )
             return False
 
         db.order_save(
@@ -315,17 +409,15 @@ class CTPTrader(BackTestTrader):
             code,
             "sell",
             tick[code].last,
-            amount or 1,
+            filled,
             opt.msg,
             datetime.now(),
         )
 
-        msg = (
-            f"期货开空 {code} 价格 {tick[code].last} 数量 {amount or 1} 原因 {opt.msg}"
-        )
+        msg = f"期货开空 {code} 价格 {tick[code].last} 数量 {filled} 原因 {opt.msg}"
         utils.send_fs_msg("futures_trader", "期货交易提醒", [msg])
 
-        return {"price": tick[code].last, "amount": amount or 1}
+        return {"price": tick[code].last, "amount": filled}
 
     def close_buy(self, code, pos: POSITION, opt):
         """平多仓"""
@@ -358,9 +450,29 @@ class CTPTrader(BackTestTrader):
             return False
 
         if not self.trader_api.state.wait_for_order(order_ref, _CTP_CALLBACK_TIMEOUT):
+            # 平仓回报超时: 撤单兜底, 记为失败 (execute 不会清本地仓, 下轮重试)
+            self.cancel_order(order_ref)
+            LogUtil.warning(f"CTP close_buy 回报超时, 已发撤单 ref={order_ref} code={code}")
             return False
         order = self.trader_api.state.get_order(order_ref)
         if not order:
+            return False
+
+        # M3: 平仓必须真成交才算成功; 未成交/被拒时告警 (该平没平掉是高危) 且 return False,
+        # 让 execute 不把本地仓清零 (避免裸持失管)
+        filled = _ctp_order_filled_amount(order)
+        if filled <= 0:
+            status = getattr(order, "OrderStatus", "?")
+            status_msg = getattr(order, "StatusMsg", "")
+            LogUtil.warning(
+                f"CTP close_buy 未成交(平多失败) code={code} ref={order_ref} "
+                f"OrderStatus={status} msg={status_msg}"
+            )
+            utils.send_fs_msg(
+                "futures_trader",
+                "期货交易提醒",
+                [f"平多未成交/被拒(持仓未平!) {code} 状态={status} {status_msg}"],
+            )
             return False
 
         db.order_save(
@@ -369,15 +481,15 @@ class CTPTrader(BackTestTrader):
             code,
             "sell",
             tick[code].last,
-            pos.amount,
+            filled,
             opt.msg,
             datetime.now(),
         )
 
-        msg = f"期货平多 {code} 价格 {tick[code].last} 数量 {pos.amount} 原因 {opt.msg}"
+        msg = f"期货平多 {code} 价格 {tick[code].last} 数量 {filled} 原因 {opt.msg}"
         utils.send_fs_msg("futures_trader", "期货交易提醒", [msg])
 
-        return {"price": tick[code].last, "amount": pos.amount}
+        return {"price": tick[code].last, "amount": filled}
 
     def close_sell(self, code, pos: POSITION, opt):
         """平空仓"""
@@ -410,9 +522,28 @@ class CTPTrader(BackTestTrader):
             return False
 
         if not self.trader_api.state.wait_for_order(order_ref, _CTP_CALLBACK_TIMEOUT):
+            # 平仓回报超时: 撤单兜底, 记为失败 (execute 不会清本地仓, 下轮重试)
+            self.cancel_order(order_ref)
+            LogUtil.warning(f"CTP close_sell 回报超时, 已发撤单 ref={order_ref} code={code}")
             return False
         order = self.trader_api.state.get_order(order_ref)
         if not order:
+            return False
+
+        # M3: 平仓必须真成交才算成功; 未成交/被拒时告警 (该平没平掉是高危) 且 return False
+        filled = _ctp_order_filled_amount(order)
+        if filled <= 0:
+            status = getattr(order, "OrderStatus", "?")
+            status_msg = getattr(order, "StatusMsg", "")
+            LogUtil.warning(
+                f"CTP close_sell 未成交(平空失败) code={code} ref={order_ref} "
+                f"OrderStatus={status} msg={status_msg}"
+            )
+            utils.send_fs_msg(
+                "futures_trader",
+                "期货交易提醒",
+                [f"平空未成交/被拒(持仓未平!) {code} 状态={status} {status_msg}"],
+            )
             return False
 
         db.order_save(
@@ -421,15 +552,15 @@ class CTPTrader(BackTestTrader):
             code,
             "buy",
             tick[code].last,
-            pos.amount,
+            filled,
             opt.msg,
             datetime.now(),
         )
 
-        msg = f"期货平空 {code} 价格 {tick[code].last} 数量 {pos.amount} 原因 {opt.msg}"
+        msg = f"期货平空 {code} 价格 {tick[code].last} 数量 {filled} 原因 {opt.msg}"
         utils.send_fs_msg("futures_trader", "期货交易提醒", [msg])
 
-        return {"price": tick[code].last, "amount": pos.amount}
+        return {"price": tick[code].last, "amount": filled}
 
     def lock_position(self, code: str, pos: POSITION, opt: Operation):
         """锁仓操作
@@ -457,7 +588,9 @@ class CTPTrader(BackTestTrader):
         req = CThostFtdcInputOrderField()
         req.InstrumentID = code
         req.OrderPriceType = THOST_FTDC_OPT_LimitPrice
-        if pos.direction == "buy":
+        # H2: POSITION 无 direction 字段, 方向经 mmd 子串判 ("buy" in mmd / "sell" in mmd),
+        # 与 force_close 判向口径一致
+        if "buy" in pos.mmd:
             # 持有多仓，开空仓锁仓
             req.Direction = THOST_FTDC_D_Sell  # 开空仓
             direction = "sell"
@@ -513,7 +646,8 @@ class CTPTrader(BackTestTrader):
         self.trader_api.state.register_order_wait(order_ref)
 
         # 根据持仓方向决定平仓方向和价格
-        if pos.direction == "buy":
+        # H2: POSITION 无 direction 字段, 方向经 mmd 子串判 ("buy" in mmd / "sell" in mmd)
+        if "buy" in pos.mmd:
             # 平多仓，用卖一价
             direction = THOST_FTDC_D_Sell
             price = tick[code].sell1
@@ -593,8 +727,14 @@ class CTPTrader(BackTestTrader):
             direction = "buy" if pos_info.PosiDirection == "2" else "sell"
             amount = pos_info.Position
 
+            # H2: POSITION 无 direction 字段; 方向经 mmd 子串传递 ("buy" in mmd / "sell" in mmd),
+            # 与 force_close / lock_position 判向口径一致; type 仅用于日志可读性
             pos = POSITION(
-                code=code, direction=direction, price=pos_info.OpenPrice, amount=amount
+                code=code,
+                mmd=direction,
+                type="做多" if direction == "buy" else "做空",
+                price=pos_info.OpenPrice,
+                amount=amount,
             )
 
             result = self.force_close(code, pos, opt)
@@ -619,7 +759,7 @@ class CTPTrader(BackTestTrader):
         self.trader_api.ReqQryInstrument(req, self.trader_api.state.next_request_id())
 
     def cancel_order(self, order_ref: str):
-        """撤单"""
+        """撤单 (M4: 发出后短等待 OnRtnOrder 把状态刷成 Canceled 以确认撤单结果)。"""
         order = self.trader_api.state.get_order(order_ref)
         if order is None:
             return False
@@ -632,7 +772,21 @@ class CTPTrader(BackTestTrader):
         req.BrokerID = self.ex.broker_id
         req.InvestorID = self.ex.user_id
 
-        return self.trader_api.ReqOrderAction(req, self.trader_api.state.next_request_id()) == 0
+        sent = (
+            self.trader_api.ReqOrderAction(
+                req, self.trader_api.state.next_request_id()
+            )
+            == 0
+        )
+        if not sent:
+            return False
+        # M4: 短等待撤单回报 (OnRtnOrder 会把 OrderStatus 刷成 Canceled)
+        for _ in range(int(_CTP_CALLBACK_TIMEOUT * 10)):
+            o = self.trader_api.state.get_order(order_ref)
+            if o is not None and getattr(o, "OrderStatus", None) == THOST_FTDC_OST_Canceled:
+                return True
+            time.sleep(0.1)
+        return sent  # 超时仍返回发送成功 (撤单请求已发, 状态未及确认)
 
     def OnRspSettlementInfoConfirm(
         self, pSettlementInfoConfirm, pRspInfo, nRequestID, bIsLast
@@ -735,6 +889,90 @@ class CTPTrader(BackTestTrader):
                 "profit": pos.PositionProfit,
             }
         return positions
+
+    def save_to_pkl(self, key: str):
+        """落盘前快照当前 order_ref, 供重启恢复 (H3-c)。"""
+        self._ctp_order_ref_snapshot = self.trader_api.state.order_ref
+        return super().save_to_pkl(key)
+
+    def load_from_pkl(self, key: str, save_infos: dict = None):
+        """恢复持仓后, 把 order_ref 推到持久化值 + 安全余量, 避免与历史 ref 撞号 (H3-c)。"""
+        ok = super().load_from_pkl(key, save_infos)
+        ref = getattr(self, "_ctp_order_ref_snapshot", None)
+        # 恢复 order_ref, 并预留安全余量, 避免与本会话柜台已用 ref 撞号
+        if ref:
+            self.trader_api.state.restore_order_ref(int(ref) + 1000)
+        return ok
+
+    def get_positions(self) -> list:
+        """以券商实时持仓为准, 组装 POSITION 列表供风控循环使用 (H1).
+
+        方向经 mmd 子串传递 ("buy"/"sell"), 与 force_close/lock_position 判向一致。
+        open_datetime/loss_price 券商不提供, 优先用本地 self.positions 同 code 回填,
+        以便 check_position_time / check_stop_loss 可用。
+        """
+        # 先查询券商最新持仓
+        qry_req = CThostFtdcQryInvestorPositionField()
+        qry_req.BrokerID = self.ex.broker_id
+        qry_req.InvestorID = self.ex.user_id
+        self.trader_api.state.prepare_position_query()
+        self.trader_api.ReqQryInvestorPosition(
+            qry_req, self.trader_api.state.next_request_id()
+        )
+        if not self.trader_api.state.wait_for_position_query(_CTP_CALLBACK_TIMEOUT):
+            # 查询失败: 不臆造空列表 (会让风控误判无仓), 退回本地持仓快照
+            return [p for p in self.positions.values() if p.amount != 0]
+
+        # 建本地 code→pos 索引, 用于回填 open_datetime / loss_price
+        local_by_code = {}
+        for _p in self.positions.values():
+            if _p.amount != 0:
+                local_by_code.setdefault(_p.code, _p)
+
+        result = []
+        for key, pos_info in self.trader_api.state.get_positions_snapshot().items():
+            if pos_info.Position == 0:
+                continue
+            code = pos_info.InstrumentID
+            direction = "buy" if pos_info.PosiDirection == "2" else "sell"
+            local = local_by_code.get(code)
+            pos = POSITION(
+                code=code,
+                mmd=direction,
+                type="做多" if direction == "buy" else "做空",
+                price=pos_info.OpenPrice,
+                amount=pos_info.Position,
+                loss_price=(local.loss_price if local else None),
+                open_datetime=(local.open_datetime if local else None),
+            )
+            result.append(pos)
+        return result
+
+    def check_stop_loss(self, pos: POSITION) -> bool:
+        """固定价止损: 多头价跌破 loss_price / 空头价涨破 loss_price 返回 True (H1)。
+
+        loss_price 为 None/0 (券商查询无本地回填) 时不触发, 交由策略级 ATR 止损处理。
+        """
+        if pos.loss_price is None or pos.loss_price == 0:
+            return False
+        tick = self.ex.ticks([pos.code])
+        if pos.code not in tick:
+            return False
+        price = tick[pos.code].last
+        if not (price == price and price > 0):  # NaN/非正价不判
+            return False
+        if "buy" in pos.mmd:
+            return price < pos.loss_price
+        if "sell" in pos.mmd:
+            return price > pos.loss_price
+        return False
+
+    def check_position_time(self, pos: POSITION) -> bool:
+        """持仓时间超 max_hold_days 返回 True (H1)。open_datetime 缺失时不触发。"""
+        if self.max_hold_days is None or pos.open_datetime is None:
+            return False
+        delta = datetime.now() - pos.open_datetime
+        return delta.days >= self.max_hold_days
 
 
 if __name__ == "__main__":

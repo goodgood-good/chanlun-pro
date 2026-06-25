@@ -103,10 +103,18 @@ class TraderFutures(BackTestTrader):
             return False
 
     def close_buy(self, code, pos: POSITION, opt: Operation):
-        """平多仓；无多头持仓时视为已平，直接返回原始价/量。"""
+        """平多仓；券商确认无多头持仓时视为已平，查询失败则不平 (M1)。"""
         try:
-            hold_position = self.ex.positions(code)
+            # M1: 区分"确认已平"(查询成功且空) 与"查询失败"(不得据此清本地仓)
+            status, hold_position = self.query_broker_position(code)
+            if status == "fail":
+                # 查询失败 ≠ 已平仓; 返回 False 让 execute 不清本地仓, 下轮重试
+                self._safe_alert(
+                    "futures", "期货交易提醒", f"{code} 平多前持仓查询失败, 暂不平仓"
+                )
+                return False
             if len(hold_position) == 0 or hold_position[code].pos_long == 0:
+                # 确认券商无多仓: 真已平, 允许 execute 清本地
                 return {"price": pos.price, "amount": pos.amount}
             hold_position = hold_position[code]
 
@@ -133,15 +141,25 @@ class TraderFutures(BackTestTrader):
 
             return {"price": res["price"], "amount": res["amount"]}
         except Exception as e:
-            utils.send_fs_msg(
-                "futures", "期货交易提醒", f"{code} close buy 异常: {str(e)}"
+            # M2: 平仓失败是高危 (该止损没止住), 升级告警 + 落地日志, 不掩盖原异常
+            self._safe_alert(
+                "futures",
+                "期货交易提醒[平仓失败-高危]",
+                f"{code} close buy 异常, 持仓未平! 需人工介入: {str(e)}",
+                exc=e,
             )
             return False
 
     def close_sell(self, code, pos: POSITION, opt: Operation):
-        """平空仓；无空头持仓时视为已平，直接返回原始价/量。"""
+        """平空仓；券商确认无空头持仓时视为已平，查询失败则不平 (M1)。"""
         try:
-            hold_position = self.ex.positions(code)
+            # M1: 区分"确认已平"(查询成功且空) 与"查询失败"(不得据此清本地仓)
+            status, hold_position = self.query_broker_position(code)
+            if status == "fail":
+                self._safe_alert(
+                    "futures", "期货交易提醒", f"{code} 平空前持仓查询失败, 暂不平仓"
+                )
+                return False
             if len(hold_position) == 0 or hold_position[code].pos_short == 0:
                 return {"price": pos.price, "amount": pos.amount}
             hold_position = hold_position[code]
@@ -169,7 +187,11 @@ class TraderFutures(BackTestTrader):
 
             return {"price": res["price"], "amount": res["amount"]}
         except Exception as e:
-            utils.send_fs_msg(
-                "futures", "期货交易提醒", f"{code} close sell 异常: {str(e)}"
+            # M2: 平仓失败是高危 (该止损没止住), 升级告警 + 落地日志, 不掩盖原异常
+            self._safe_alert(
+                "futures",
+                "期货交易提醒[平仓失败-高危]",
+                f"{code} close sell 异常, 持仓未平! 需人工介入: {str(e)}",
+                exc=e,
             )
             return False

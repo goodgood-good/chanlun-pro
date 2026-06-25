@@ -47,6 +47,15 @@ class CTPState:
             self.order_ref += 1
             return str(self.order_ref)
 
+    def restore_order_ref(self, value: int) -> None:
+        """进程重启后恢复 order_ref 到持久化值 (H3), 避免从 0 重来撞历史 ref。
+
+        仅在 value 大于当前 order_ref 时推进, 保证单调不回退。
+        """
+        with self._lock:
+            if value > self.order_ref:
+                self.order_ref = value
+
     # ---------- request_id (查询/撤单) ----------
     def next_request_id(self) -> int:
         """独立于 order_ref 的请求 ID 计数器, 用于 nRequestID."""
@@ -111,6 +120,30 @@ class CTPState:
     def set_position(self, key: str, position: Any) -> None:
         with self._lock:
             self.positions[key] = position
+
+    # ---------- alive orders (M4 挂单台账) ----------
+    def get_alive_orders(self, code: str = None) -> list:
+        """返回未终结的挂单 (NoTradeQueueing/PartTradedQueueing) (M4)。
+
+        延迟 import openctp 常量, 使本模块在未装 openctp_ctp 时仍可 import (供单测)。
+        返回 [(ref, order), ...]; code 非空时仅返回该合约。
+        """
+        from openctp_ctp.thosttraderapi import (
+            THOST_FTDC_OST_NoTradeQueueing,
+            THOST_FTDC_OST_PartTradedQueueing,
+        )
+
+        alive = []
+        with self._lock:
+            for ref, o in self.orders.items():
+                status = getattr(o, "OrderStatus", None)
+                if status in (
+                    THOST_FTDC_OST_NoTradeQueueing,
+                    THOST_FTDC_OST_PartTradedQueueing,
+                ):
+                    if code is None or getattr(o, "InstrumentID", None) == code:
+                        alive.append((ref, o))
+        return alive
 
     def prepare_position_query(self) -> threading.Event:
         """在调 ReqQryInvestorPosition 之前清空完成 Event, 返回 Event 供后续 wait。

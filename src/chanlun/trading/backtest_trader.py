@@ -4,6 +4,7 @@ import time
 from typing import Dict, List, Tuple
 
 from chanlun import fun
+from chanlun import utils
 from chanlun.trading import futures_contracts
 from chanlun.trading.base import POSITION, MarketDatas, Operation, Strategy, Trader
 from chanlun.persistence.db import db
@@ -68,6 +69,12 @@ class BackTestTrader(Trader):
 
         # 单次仓位最大占用资金，避免资金成指数基本扩展，后续市场深度无法提供大资金买入
         self.max_single_pos_balance = None
+
+        # ---- M5 风控上限 (online 生效, None=不限, 默认与现状完全一致) ----
+        self.max_single_notional = None   # 单笔最大名义金额
+        self.max_total_notional = None    # 组合总名义上限
+        self.min_order_notional = None    # 最小下单名义额 (防超小单被拒)
+        self.daily_max_loss = None        # 当日最大亏损 (达到则停止开仓), 预留, 暂未接入
 
         # 是否打印日志
         self.log = log
@@ -226,8 +233,12 @@ class BackTestTrader(Trader):
             "balance_history": self.balance_history,
             "orders": self.orders,
             "results": self.results,
+            # H3-c: CTP order_ref 持久化, 重启后恢复避免撞号 (非 CTP trader 为 None)
+            "ctp_order_ref": getattr(self, "_ctp_order_ref_snapshot", None),
         }
         if key is not None:
+            # H3-b: 记录主 pkl key, 供 WAL 文件名派生
+            self._pkl_key = key
             fdb.cache_pkl_to_file(key, save_infos)
         return save_infos
 
@@ -235,6 +246,8 @@ class BackTestTrader(Trader):
         """
         从 pkl 文件 中恢复之前的数据
         """
+        # H3-b: 记录主 pkl key, 供 WAL 文件名派生 (即使本次无快照也要记, 以便后续落盘/WAL)
+        self._pkl_key = key
         if save_infos is None:
             save_infos = fdb.cache_pkl_from_file(key)
             if save_infos is None:
@@ -264,7 +277,123 @@ class BackTestTrader(Trader):
         self.balance_history = save_infos["balance_history"]
         self.orders = save_infos["orders"]
 
+        # H3-c: 恢复 CTP order_ref 快照 (旧 pkl 无此键时为 None), 供 CTP 子类 load 覆写读取
+        self._ctp_order_ref_snapshot = save_infos.get("ctp_order_ref", None)
+
         return True
+
+    # ---------- H3-b: 下单意图 WAL (幂等键) ----------
+    # 用途: 下单"前"先持久化开仓/平仓意图, 成交并落盘后清除。崩溃恢复时 WAL 残留的意图
+    #   即"可能已成交但未落盘"的窗口, 启动对账 (reconcile_positions / H3-d) 据此向券商核对。
+    # ⚠️ 调用点 (在 execute 的 open_buy 前 wal_write_intent / 落盘后 wal_clear_intent) 侵入
+    #   交易热路径, 设计标注需谨慎; 本类仅提供基础设施, 具体接入点 (execute 内细粒度 vs
+    #   驱动 TR.run 外粗粒度) 由投产前灰度决策, 见 audit/_round3_fix_design_exec.md H3-b。
+    def _wal_key(self):
+        """WAL 文件名 (与主 pkl 同 key 派生)。无 _pkl_key 时返回 None (不启用 WAL)。"""
+        key = getattr(self, "_pkl_key", None)
+        return f"{key}__wal" if key else None
+
+    def wal_write_intent(self, code, opt, order_ref=None):
+        """下单前持久化开仓/平仓意图 (H3-b)。崩溃恢复时据此向券商对账。
+
+        仅 online 模式生效 (signal 回测不落 WAL); 写入失败不阻断下单
+        (退化为现状, 不更危险)。
+        """
+        if self.mode == "signal" or self._wal_key() is None:
+            return
+        try:
+            wal = fdb.cache_pkl_from_file(self._wal_key()) or {}
+            wal[f"{code}:{opt.open_uid}:{opt.key}"] = {
+                "code": code,
+                "open_uid": opt.open_uid,
+                "key": opt.key,
+                "mmd": opt.mmd,
+                "opt": opt.opt,
+                "order_ref": order_ref,
+                "datetime": self.get_now_datetime().isoformat(),
+            }
+            fdb.cache_pkl_to_file(self._wal_key(), wal)
+        except Exception:
+            pass  # WAL 失败退化为现状, 不抛断下单
+
+    def wal_clear_intent(self, code, opt):
+        """成交并落盘后清除意图 (H3-b)。"""
+        if self.mode == "signal" or self._wal_key() is None:
+            return
+        try:
+            wal = fdb.cache_pkl_from_file(self._wal_key()) or {}
+            wal.pop(f"{code}:{opt.open_uid}:{opt.key}", None)
+            fdb.cache_pkl_to_file(self._wal_key(), wal)
+        except Exception:
+            pass
+
+    # ---------- M1: 券商持仓对账 ----------
+    def query_broker_position(self, code):
+        """查询券商持仓, 返回三态 (M1):
+
+            ("ok", positions_obj)   查询成功 (空 dict/list 表示确认无仓)
+            ("fail", None)          查询失败/异常 (不得据此清本地仓)
+
+        子类按各自 ex.positions 语义实现; 默认 online 用 self.ex.positions。
+        关键: 把"确认已平"(查询成功且空) 与"查询失败"(网络/超时/抛错) 区分开,
+        后者绝不允许据此清本地持仓 (会导致裸持失管)。
+        """
+        try:
+            return ("ok", self.ex.positions(code))
+        except Exception as e:
+            if self.log:
+                self.log(f"{code} 持仓查询失败(不清本地): {e}")
+            return ("fail", None)
+
+    def reconcile_positions(self, codes: list):
+        """以券商持仓为准, 校正本地 self.positions (M1 + H3-d)。
+
+        - 券商有仓 / 本地无: 告警 (可能是 WAL 残留的已成交未落盘)
+        - 券商无仓 / 本地有: 告警 (可能误持)
+        - 查询失败: 跳过该 code, 绝不据失败清本地
+        保守起见仅告警 + 落地日志, 不自动建仓/平仓 (自动改仓都有误操作风险, 交人工据告警处理)。
+        这是"对账层"的最小安全形态。
+        """
+        for code in codes:
+            status, broker_pos = self.query_broker_position(code)
+            if status == "fail":
+                continue
+            # 本地该 code 的非空持仓
+            local_has = any(
+                _p.code == code and _p.amount != 0 for _p in self.positions.values()
+            )
+            # 券商是否有该 code 持仓 (broker_pos 为 dict/list, 空即无仓)
+            broker_has = bool(broker_pos)
+            if broker_has and not local_has:
+                msg = f"{code} 对账差异: 券商有仓但本地无 (疑已成交未落盘), 请人工核对"
+                self._safe_alert(self.market, "持仓对账", msg)
+                self._print_log(f"[对账] {msg}")
+            elif local_has and not broker_has:
+                msg = f"{code} 对账差异: 本地有仓但券商无 (疑误持/已被平), 请人工核对"
+                self._safe_alert(self.market, "持仓对账", msg)
+                self._print_log(f"[对账] {msg}")
+
+    # ---------- M5: 开仓前统一风控前置层 ----------
+    def risk_precheck(self, code, opt, est_price, est_amount, est_notional):
+        """开仓前统一风控 (M5)。返回 (ok: bool, reason: str)。各 open_* 真实下单前调用。
+
+        各上限阈值默认 None → 不启用 → 返回值恒 (True, "") → 行为与现状完全一致;
+        逐 trader 灰度时按需设置 max_single_notional / max_total_notional / min_order_notional。
+        价格/数量非法 (NaN/非正/<=0) 始终拦截 (与阈值无关)。
+        """
+        if est_price is None or not (est_price == est_price and est_price > 0):
+            return False, "价格非法(NaN/非正)"
+        if est_amount is None or est_amount <= 0:
+            return False, "数量<=0"
+        if self.min_order_notional is not None and est_notional < self.min_order_notional:
+            return False, f"低于最小下单额 {self.min_order_notional}"
+        if self.max_single_notional is not None and est_notional > self.max_single_notional:
+            return False, f"超单笔上限 {self.max_single_notional}"
+        if self.max_total_notional is not None:
+            cur = sum(p.balance for p in self.hold_positions())
+            if cur + est_notional > self.max_total_notional:
+                return False, f"超组合总上限 {self.max_total_notional}"
+        return True, ""
 
     def get_price(self, code):
         """
@@ -647,6 +776,9 @@ class BackTestTrader(Trader):
             price = self.get_price(code)["close"]
 
         # 分仓平仓：按当前持仓比例折算本次应平数量
+        # L1 防御性判零: execute 已有 now_pos_rate==0 前置守护, 此处兜底防直接调用 ZeroDivision
+        if pos.now_pos_rate == 0:
+            return {"price": price, "amount": 0}
         amount = pos.amount / pos.now_pos_rate * opt.pos_rate
 
         if self.mode == "signal":
@@ -670,6 +802,9 @@ class BackTestTrader(Trader):
         else:
             price = self.get_price(code)["close"]
 
+        # L1 防御性判零: execute 已有 now_pos_rate==0 前置守护, 此处兜底防直接调用 ZeroDivision
+        if pos.now_pos_rate == 0:
+            return {"price": price, "amount": 0}
         amount = pos.amount / pos.now_pos_rate * opt.pos_rate
 
         if self.mode == "signal":
@@ -731,6 +866,21 @@ class BackTestTrader(Trader):
         if self.log:
             self.log(msg)
         return
+
+    def _safe_alert(self, channel, title, msg, exc=None):
+        """发告警, 通道失败时落地日志且不掩盖原异常 (M2)。
+
+        告警通道 (飞书等) 自身网络异常时, 把失败落到本地日志, 避免静默漏单;
+        若调用方传入原始异常 exc, 同样落地日志, 不被告警发送过程掩盖。
+        """
+        try:
+            utils.send_fs_msg(channel, title, msg if isinstance(msg, list) else [msg])
+        except Exception as alert_exc:
+            # 告警通道失败必须落地日志, 否则静默漏单
+            if self.log:
+                self.log(f"[告警发送失败] {title}: {msg} | 通道异常: {alert_exc}")
+        if exc is not None and self.log:
+            self.log(f"[原始异常] {title}: {exc}")
 
     def execute(self, code, opt: Operation, pos: POSITION = None):
         """执行单笔开仓或平仓操作，更新持仓、资金和订单记录。"""

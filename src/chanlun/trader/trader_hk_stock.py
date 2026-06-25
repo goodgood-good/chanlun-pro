@@ -108,8 +108,12 @@ class TraderHKStock(BackTestTrader):
         return {"price": order["dealt_avg_price"], "amount": order["dealt_amount"]}
 
     def close_buy(self, code, pos: POSITION, opt: Operation):
-        """平多仓；无持仓时视为已平，直接返回原始价/量。"""
-        positions = self.ex.positions(code)
+        """平多仓；券商确认无持仓时视为已平，查询失败则不平 (M1)。"""
+        # M1: 区分"确认已平"(查询成功且空) 与"查询失败"(不得据此清本地仓)
+        status, positions = self.query_broker_position(code)
+        if status == "fail":
+            self._safe_alert("hk", "港股交易提醒", f"{code} 平多前持仓查询失败, 暂不平仓")
+            return False
         if len(positions) == 0:
             return {"price": pos.price, "amount": pos.amount}
 
@@ -119,8 +123,11 @@ class TraderHKStock(BackTestTrader):
 
         order = self.ex.order(code, "sell", pos.amount)
         if order is False:
-            utils.send_fs_msg(
-                "hk", "港股交易提醒", f"{code} 下单失败 平仓卖出 {pos.amount}"
+            # M2: 平仓失败是高危 (该止损没止住), 升级告警 + 通道失败不掩盖
+            self._safe_alert(
+                "hk",
+                "港股交易提醒[平仓失败-高危]",
+                f"{code} 平仓卖出失败, 持仓未平! 需人工介入 数量 {pos.amount}",
             )
             return False
         msg = "股票卖出 %s-%s 价格 %s 数量 %s 盈亏 %s (%.2f%%) 原因 %s" % (
@@ -150,8 +157,12 @@ class TraderHKStock(BackTestTrader):
         return {"price": order["dealt_avg_price"], "amount": order["dealt_amount"]}
 
     def close_sell(self, code, pos: POSITION, opt: Operation):
-        """平空仓（买入回补）；无持仓时视为已平，直接返回原始价/量。"""
-        positions = self.ex.positions(code)
+        """平空仓（买入回补）；券商确认无持仓时视为已平，查询失败则不平 (M1)。"""
+        # M1: 区分"确认已平"(查询成功且空) 与"查询失败"(不得据此清本地仓)
+        status, positions = self.query_broker_position(code)
+        if status == "fail":
+            self._safe_alert("hk", "港股交易提醒", f"{code} 平空前持仓查询失败, 暂不平仓")
+            return False
         if len(positions) == 0:
             return {"price": pos.price, "amount": pos.amount}
 
@@ -161,8 +172,11 @@ class TraderHKStock(BackTestTrader):
 
         order = self.ex.order(code, "buy", pos.amount)
         if order is False:
-            utils.send_fs_msg(
-                "hk", "港股交易提醒", f"{code} 下单失败 平仓买入 {pos.amount}"
+            # M2: 平仓失败是高危 (该止损没止住), 升级告警 + 通道失败不掩盖
+            self._safe_alert(
+                "hk",
+                "港股交易提醒[平仓失败-高危]",
+                f"{code} 平空买入失败, 持仓未平! 需人工介入 数量 {pos.amount}",
             )
             return False
         msg = "股票平空 %s-%s 价格 %s 数量 %s 盈亏 %s (%.2f%%) 原因 %s" % (
