@@ -174,6 +174,14 @@ class KlineDataProcessor:
         """
         klines = []
         has_volume = 'volume' in df.columns
+        # §2.1 根因防护:OHLC 列若含 NaN(数据源坏行经 to_numeric coerce)会经 float() 进 Kline
+        # 并污染下游(MACD 增量永久 NaN 中毒 / 笔段比较异常);原仅 volume 有兜底,OHLC 无。NaN 为
+        # 坏数据,前向填充(取上一根有效值 + bfill 兜首根,避免填 0 造假跳变);仅在确含 NaN 时
+        # copy+ffill,干净数据零开销零改变(golden 路径不受影响)。
+        _ohlc_cols = [c for c in ("open", "high", "low", "close") if c in df.columns]
+        if _ohlc_cols and bool(df[_ohlc_cols].isna().to_numpy().any()):
+            df = df.copy()
+            df[_ohlc_cols] = df[_ohlc_cols].ffill().bfill()
         for row in df.itertuples(index=False):
             # volume 可能不存在 / 为 None / 经 to_numeric coerce 成 NaN。
             # NaN 是 truthy，不能用 `or 0.0` 兜底（nan or 0.0 求值为 nan），

@@ -4,6 +4,7 @@
 
 支持增量更新（Tick 级更新最后一根、Bar 级新增 K 线），避免每次全量重算。
 """
+import math
 from typing import List, Dict
 import pandas as pd
 from chanlun.core.types import Kline
@@ -132,12 +133,25 @@ class MACD:
                 self._ema_slow_val_prev = self._ema_slow_val
                 self._dea_val_prev = self._dea_val
 
+            # §2.1: 记录最后一根有限 close,供增量路径遇 NaN/Inf 坏 bar 顶替(防 EMA 中毒)。
+            self._last_finite_close = next(
+                (k.c for k in reversed(klines) if math.isfinite(k.c)), None
+            )
+
         self.hist_area = []
         self._calculate_hist_area_incremental(self.hist, start_index=0)
 
     def _incremental_calculation(self, kline: Kline, is_update_last: bool = False):
         """增量单根计算 (手动实现 EMA 公式)"""
         close = kline.c
+        # §2.1: 增量路径原无 NaN 防护(全量路径有 fillna)。close=NaN/Inf 会让 new_ema 全 NaN 并
+        # 污染 _ema_*_val 基准 → 之后每根 hist/dif/dea 永久 NaN → query_macd_ld 全 NaN → 背驰恒
+        # 判不出 → 1/2 类买卖点静默消失(E2E 实证)。坏 bar 用最近有限 close 顶替(不填 0 免假跳变)。
+        if not math.isfinite(close):
+            _fb = getattr(self, "_last_finite_close", None)
+            close = _fb if (_fb is not None and math.isfinite(_fb)) else self._ema_fast_val_prev
+        else:
+            self._last_finite_close = close
 
         # 基准统一用 _prev：Tick 更新基准是 N-1；新增 Bar 时 process_macd
         # 循环已把 N 滚成 prev，故两种模式都以 _prev 为基准。
