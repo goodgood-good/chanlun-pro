@@ -111,16 +111,25 @@ def chart_prefix_to_code(market: str, prefix: str) -> str:
 
 
 _ST_LIST_CACHE: Optional[dict] = None
+_ST_LIST_CACHE_MTIME: Optional[float] = None
 
 
 def st_limit_codes(path: Optional[str] = None) -> dict:
     """主板 ST/*ST 名单({code: name},±5% 涨跌停),来自 `_st_list.json`
     (`fetch.py st_list` 用 QMT 名称构建)。文件缺失返回空=不覆盖。
     名单按当前名称近似:戴帽/摘帽时点未追溯,回测一年窗口内偏差有限。"""
-    global _ST_LIST_CACHE
-    if _ST_LIST_CACHE is not None and path is None:
-        return _ST_LIST_CACHE
+    global _ST_LIST_CACHE, _ST_LIST_CACHE_MTIME
     target = Path(path) if path else Path(BT_DATA_DIR) / "_st_list.json"
+    # F-MID-4: 按文件 mtime 失效。常驻 live 进程下原缓存(path is None)永不重读,fetch
+    # 更新 _st_list.json(新戴/摘 ST 帽)后,涨跌停判定仍用陈旧 ±10%/±5% 名单。mtime 未变
+    # 用缓存(stat 极廉价),变了或文件新出现则重载。
+    if _ST_LIST_CACHE is not None and path is None:
+        try:
+            cur_mtime = target.stat().st_mtime
+        except OSError:
+            cur_mtime = None
+        if cur_mtime == _ST_LIST_CACHE_MTIME:
+            return _ST_LIST_CACHE
     try:
         data = json.loads(target.read_text(encoding="utf-8"))
         out = {str(k): str(v) for k, v in (data or {}).items()}
@@ -128,6 +137,10 @@ def st_limit_codes(path: Optional[str] = None) -> dict:
         out = {}
     if path is None:
         _ST_LIST_CACHE = out
+        try:
+            _ST_LIST_CACHE_MTIME = target.stat().st_mtime
+        except OSError:
+            _ST_LIST_CACHE_MTIME = None
     return out
 
 

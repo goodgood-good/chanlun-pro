@@ -185,6 +185,13 @@ def _slice(df, start, end):
 
 def _sig(code, ex, tf, start, end, min_bars=30, annotate_nest=False):
     df = _slice(ex.klines(code, tf, start_date=start), start, end)
+    # F-HIGH-2: 丢弃未收盘在制 bar,与 live(MonitorSymbolState._process_level)口径统一。
+    # 盘中跑 fetch 构建 pkl 时,末根在制 bar 会让 small_by_bar/big_dir_at 基于会变的 bar
+    # 计算、随后被 selector 当"已收盘事实"读,构成构建期前视(同 round-3 F-HIGH-1)。
+    # pre-market 跑则末根已收盘,本调用 no-op(now 已过收盘),无害。local import 避循环依赖。
+    from chanlun.recursive_bt.sim.paper import drop_unclosed_last_bar
+
+    df = drop_unclosed_last_bar(df, tf)
     if df is None or len(df) < min_bars:
         return df, []
     cd = CL(code, tf, dict(CL_CFG))
