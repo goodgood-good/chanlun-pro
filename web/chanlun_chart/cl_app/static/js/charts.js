@@ -1793,7 +1793,13 @@ class ChartManager {
         // 签名守卫：newKeys+from 都未变时直接 return，省掉 O(N+M) 容器遍历
         // 必须在 newKeys 计算完成后、容器遍历之前执行
         const sortedKeys = [...newKeys].sort();
-        const signature = `${newKeys.size}|${from}|${sortedKeys.join(',').slice(0, 256)}`;
+        // 签名纳入「未完成(pending)项的 key 集合」:makeKey 不含 linestyle,纯 pending→done 翻转
+        // (端点不变)不改 keys → 原签名不变 → 守卫 skip 整个 reconcile → 笔已变完成笔但页面仍显
+        // 未完成(用户报)。把 unfinished key 集折进签名,翻转即改签名 → 不再被 skip。
+        const unfinishedSig = itemsToProcess
+            .filter(p => p.item.linestyle == '1' || p.item.linestyle == 1)
+            .map(p => p.key).sort().join(',').slice(0, 256);
+        const signature = `${newKeys.size}|${from}|${sortedKeys.join(',').slice(0, 256)}|U${unfinishedSig}`;
         const guardKey = `${symbolKey}__${type}`;
         if (this._reconcileGuard[guardKey] === signature) {
             if (window.__chanlunDebug) {
@@ -1807,11 +1813,31 @@ class ChartManager {
 
         // makeKey 不含 linestyle，pending→done 翻转（虚→实）不触发重建，避免端点漂移
         const beforeContainerLen = container.length;
+        // key→新 item 映射,供 toKeep 检测 pending↔done 翻转(makeKey 不含 linestyle,翻转命中同 key)
+        const keyToNewItem = new Map();
+        itemsToProcess.forEach(p => keyToNewItem.set(p.key, p.item));
         const toKeep = [];
         let removedCount = 0;
         for (const existing of container) {
             const existingTail = existing.tailTime ?? existing.time;
             if (newKeys.has(existing.key) && existingTail >= from) {
+                // 端点不变但 linestyle 翻转(笔/线段 pending↔done):同 key 命中 toKeep,但旧 TV shape
+                // 仍是旧样式(用户报:笔已完成页面仍显未完成虚线)。就地 setProperties 刷新 linestyle
+                // (不重建=无闪烁/无端点漂移),同步 entry.isUnfinished。单点形态(无 linestyle)
+                // isUnfinished 恒 false 不触发,天然只作用于笔/线段/走势类型线。
+                const newItem = keyToNewItem.get(existing.key);
+                if (newItem) {
+                    const newUnfinished = (newItem.linestyle == '1' || newItem.linestyle == 1);
+                    if (newUnfinished !== existing.isUnfinished && existing.id != null) {
+                        try {
+                            const sh = this.chart.getShapeById(existing.id);
+                            if (sh && sh.setProperties) {
+                                sh.setProperties({ linestyle: parseInt(newItem.linestyle) || 0 });
+                            }
+                        } catch (e) {}
+                        existing.isUnfinished = newUnfinished;
+                    }
+                }
                 toKeep.push(existing);
             } else {
                 this.safeRemove(existing.id);
