@@ -49,15 +49,25 @@ def _fmt_date(date: Any) -> str:
 
 
 def build_line_stable_key(line: LINE) -> str:
-    """线段的稳定标识：起点分型 K 线时间 + 线方向。
+    """线段的稳定标识：起点分型 K 线时间 + 线方向 + 完成状态。
 
-    增量计算会重排 ``line.index``，但起点分型的 K 线日期 + 方向是稳定的，
-    适合做跨轮次去重键的一部分。
+    增量计算会重排 ``line.index``，起点分型的 K 线日期 + 方向**仅对已完成
+    (done)段稳定**；当下正在形成(forming)的最后一笔/线段，其起点分型在新
+    bar 到来时可能被改写(成笔前左右横跳/末段被重划)。S1(done-gating): 把
+    ``done``/``forming`` 纳入身份——「形成中」与「已确认」是两个 identity，
+    forming 段起点漂移时仍可能多发 forming 信号，但一旦该段 done，identity
+    切到稳定的 done 版，不再随后续 K 漂移重发。配合 S4(只喂收盘 bar)后
+    forming 段已大幅减少，二者叠加根治重复推送。
+
+    ``is_done()`` 经 getattr 兜底:实际调用方(evaluator)传入的是 BI/XD
+    对象(均有真实 ``is_done()``);异常对象退化为 ``forming``，不致崩溃。
     """
     start = getattr(line, "start", None)
     k = getattr(start, "k", None)
     date = getattr(k, "date", None)
-    return f"{_fmt_date(date)}|{line.type}"
+    is_done_fn = getattr(line, "is_done", None)
+    done = bool(is_done_fn()) if callable(is_done_fn) else False
+    return f"{_fmt_date(date)}|{line.type}|{'done' if done else 'forming'}"
 
 
 def make_identity(

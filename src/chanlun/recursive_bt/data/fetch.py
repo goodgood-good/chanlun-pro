@@ -225,6 +225,49 @@ def _freq_delay(tf: str):
     return pd.Timedelta(tf)
 
 
+def _daily_bsp_and_d3(code, ex, dates, win_days: int = 10, bs_class: int = 3):
+    """F-HIGH-3(audit/_round6_select_data.md):在 build 内算日线买卖点 + 日线N买共振窗口。
+
+    selector 的 `_daily_resonance` 读 pkl['d3_ok'];旧 build() 不产该字段,而它**只**由
+    回测侧 portfolio.attach_daily_bsp_window 写入 → live 缓存恒无 d3_ok → 日线3买共振优先级
+    在实盘是死特性(排序退化为只按买点类别),与回测口径系统性不一致。这里把
+    patch_daily_bsp(日线 CL→get_branch_bspoints)+ attach_daily_bsp_window(确认bar收盘
+    次日起 win_days 自然日窗口)的等价逻辑并入 build,使 live 缓存带 d3_ok。
+    口径与 portfolio.attach_daily_bsp_window 一致:win_days=10、bs_class=3、anchor +1D 次日生效
+    (无 lookahead)。⚠这会改变 live 选股排序——日线3买共振票会被顶到前面(与回测对齐)。
+
+    返回 (daily_bsp, d3_ok):daily_bsp=[(date, bs_type)];d3_ok=np.bool 数组(长度=len(dates))。
+    日线取数失败/不足时返回 ([], 全 False) 以保证字段恒存在(语义=无日线共振,非缺字段)。
+    """
+    import numpy as np
+
+    from chanlun.recursive_bt.sim.paper import drop_unclosed_last_bar
+
+    n = len(dates)
+    d3_ok = np.zeros(n, bool)
+    daily_bsp: list[tuple] = []
+    try:
+        df = drop_unclosed_last_bar(ex.klines(code, "d"), "d")
+        if df is not None and len(df) >= 100:
+            cd = CL(code, "d", dict(CL_CFG))
+            cd.process_klines(df)
+            daily_bsp = [(s.date, s.bs_type) for s in collect_branch_signals(cd, use_xd=False)]
+    except Exception:
+        return [], d3_ok
+
+    key = f"{bs_class}buy" if bs_class else None     # None=日线任意类买点(宽口径)
+    ev = [d for d, bt in daily_bsp if (bt == key if key else str(bt).endswith("buy"))]
+    if ev:
+        ei = 0
+        active_until = None
+        for i, t in enumerate(dates):
+            while ei < len(ev) and ev[ei] + pd.Timedelta("1D") <= t:
+                active_until = ev[ei] + pd.Timedelta(days=1 + win_days)
+                ei += 1
+            d3_ok[i] = active_until is not None and t <= active_until
+    return daily_bsp, d3_ok
+
+
 def build(code, ex, small_tf="5m", big_tf="30m", start=None, end=None,
           big_delay=None, min_small=200, mid_tf=None, mid_delay=None) -> dict | None:
     dfs, small = _sig(code, ex, small_tf, start, end, min_small, annotate_nest=True)
@@ -233,12 +276,15 @@ def build(code, ex, small_tf="5m", big_tf="30m", start=None, end=None,
     _, big = _sig(code, ex, big_tf, start, end)
     dates = list(dfs["date"])
     strat = MTFStrategy(small, big, dates, "5m+30m", gate="not_down", big_delay=big_delay)
+    daily_bsp, d3_ok = _daily_bsp_and_d3(code, ex, dates)
     out = {
         "code": code, "dates": dates,
         "open": dfs["open"].to_numpy(), "close": dfs["close"].to_numpy(),
         "small_by_bar": strat.small_by_bar, "big_dir_at": strat.big_dir_at,
         "limit_pct": limit_pct(code), "n_small": len(small), "n_big": len(big),
         "signal_schema": dict(SIGNAL_SCHEMA),
+        # F-HIGH-3:日线3买共振窗口,使 live selector._daily_resonance 真正生效(口径同回测)。
+        "daily_bsp": daily_bsp, "d3_ok": d3_ok,
     }
     if mid_tf:                       # 三级联立:中级别(如5m)方向门控(1m入场+5m中+30m大)
         _, mid = _sig(code, ex, mid_tf, start, end)
@@ -255,6 +301,25 @@ def build(code, ex, small_tf="5m", big_tf="30m", start=None, end=None,
 
 def _now_iso() -> str:
     return _dt.datetime.now().isoformat(timespec="seconds")
+
+
+def _is_pkl_fresh(path: str) -> bool:
+    """F-HIGH-1(audit/_round6_select_data.md):判断已有 pkl 是否「今日已构建」(新鲜)。
+
+    旧逻辑 `os.path.exists(p) → skip` 致已有标的的缓存**永不刷新**,selector 每天读的
+    是构建那一刻(可能 N 天前)的 dates[-1]/small_by_bar[last_idx],选股池随 live 进程
+    运行与盘面脱节。改为按新鲜度增量刷新:pkl 缺失或文件 mtime 早于今日 0 点(说明不是
+    今天重建的)→ 重建;今天已构建过 → 跳过。这样 pre-market cron 每日重跑 fetch 能刷新
+    陈旧 pkl,又不在同一天内重复全量重拉。简化口径(mtime 跨天)无交易日历依赖、确定、
+    与「pre-market cron 每日刷新一次」运维意图精确对齐。"""
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        return False
+    today_start = _dt.datetime.now().replace(
+        hour=0, minute=0, second=0, microsecond=0
+    ).timestamp()
+    return mtime >= today_start
 
 
 def _manifest_path(out_dir: str, manifest_path: str | None = None) -> str:
@@ -315,10 +380,15 @@ def run(codes, out_dir, small_tf, big_tf, start, end, big_delay, min_small=200,
     print(f"取数 {len(codes)}只 {lv} {start}~{end} → {out_dir}")
     for i, code in enumerate(codes):
         p = f"{out_dir}/{code}.pkl"
-        if os.path.exists(p):
+        # F-HIGH-1:按新鲜度增量刷新(详见 _is_pkl_fresh)。今日已构建的 pkl 跳过,
+        # 陈旧/缺失则重建。⚠运维项:本逻辑只在「fetch 被重跑」时才生效——要让 selector
+        # 读到当日数据,需把本模块的 run()(+ patch_trend/patch_daily_bsp)挂进每日
+        # pre-market cron(类似 ops 里的 QMT 每日重启)。代码侧已支持增量刷新,但不会
+        # 自动盘中重跑;不配 cron 则缓存仍停在最后一次手动 fetch 的那天。
+        if _is_pkl_fresh(p):
             skip += 1
             manifest["entries"].append(
-                _manifest_entry(code, "skip", p, reason="exists")
+                _manifest_entry(code, "skip", p, reason="fresh_today")
             )
             manifest["counts"] = {"ok": ok, "skip": skip, "fail": fail}
             continue

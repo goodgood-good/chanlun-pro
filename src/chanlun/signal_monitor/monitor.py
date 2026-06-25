@@ -10,6 +10,7 @@ from __future__ import annotations
 from chanlun import fun
 from chanlun.cl_utils import web_batch_get_cl_datas
 from chanlun.exchange import Market, get_exchange
+from chanlun.recursive_bt.sim.paper import drop_unclosed_last_bar
 from chanlun.signal_monitor import repository
 from chanlun.signal_monitor.evaluator import ClSignalEvaluator, EvaluatorConfig
 from chanlun.utils import send_fs_msg
@@ -54,6 +55,11 @@ def monitoring_signal_code(
         for f in config.level_ladder:
             try:
                 klines = ex.klines(code, f)
+                # S4(done-gating): 丢弃末尾未收盘(在制)bar,使喂 CL 的口径与
+                # 交易层 live 一致——否则评估作用在 forming bar 上,背驰面积/笔破位
+                # 判据随实时行情漂移=未来函数/重画。drop_unclosed_last_bar 对日线等
+                # 非分钟级、不足两根、间隔异常一律 no-op,tz 安全,绝不误删历史 bar。
+                klines = drop_unclosed_last_bar(klines, f)
                 cds = web_batch_get_cl_datas(market, code, {f: klines}, cl_config)
                 if cds:
                     cds_by_level[f] = cds[0]

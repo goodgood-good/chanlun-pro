@@ -24,6 +24,9 @@ INDEX_CODE = "SH.000001"
 DEFAULT_BUY_CLASSES = (3, 2, 1)
 DEFAULT_FUND_DATA = "D:/chanlun_pro/bt_data_fund_all_a"
 DEFAULT_ROE_ANN_MIN = 8.0
+# F-MID-1:比价 median 门的最小样本数。有效 value_score 样本不足此值时
+# 关闭比价门(中位数在小样本下不稳、池规模变动会致选股抖动)。
+MIN_COMPARISON_SAMPLES = 20
 
 
 def _clean_buy_classes(values: Iterable[int | str]) -> tuple[int, ...]:
@@ -118,10 +121,18 @@ class OriginalChanlunASelector:
             if candidate is not None:
                 rows.append((candidate, snapshot))
 
+        # F-MID-1(audit/_round6_select_data.md):比价门用本次扫描全 universe 的截面
+        # median,池规模小/变动时中位数翻转会致同一只票今天入选明天落选(与该票自身
+        # 数据无关)。加最小样本门稳定化:样本 < MIN_COMPARISON_SAMPLES 时不启用比价门
+        # (该批所有候选 comparison_ok=True),样本足够才用 value_score > median 判定。
+        enable_comparison = len(value_scores) >= MIN_COMPARISON_SAMPLES
         threshold = float(np.median(value_scores)) if value_scores else 0.0
         candidates: list[SelectionCandidate] = []
         for candidate, snapshot in rows:
-            comparison_ok = threshold > 0 and snapshot.value_score > threshold
+            if not enable_comparison:
+                comparison_ok = True
+            else:
+                comparison_ok = threshold > 0 and snapshot.value_score > threshold
             if self.config.require_three_systems and not (snapshot.fund_ok and comparison_ok):
                 continue
             candidates.append(
