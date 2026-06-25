@@ -168,6 +168,9 @@ def _get_key_lock(key: str) -> threading.RLock:
 # v4(2026-05-20):3 类买卖点 first-touch 限定(原文 kobo.61.1「必须是第一次」),
 #                同一中枢同一类型只挂最早一次 → 3B/3S 数量大幅减少。
 # v5(2026-05-22):买卖点层签名纳入未完成笔/段端点,并新增走势类型线段输出。
+# ⚠ source_fingerprint() 只覆盖 chanlun/core/* + types + tv_chart/chart_config + _lookback,
+#   **不含本文件**(审查 F-4/F-9 已核实)。故改 _compute_kline_signature 的"签名计算逻辑"
+#   或本 key 的"输出结构"时,必须手动 bump 此版本号——否则旧 CL 对象不失效、留陈旧结果。
 _CHART_DATA_SCHEMA_VERSION = "v5"
 
 

@@ -148,6 +148,36 @@ def signal_record_save(
     return True
 
 
+def signal_record_update(
+    record_id: int, grade: str, score: int, alert_msg: str,
+    signal_dt: datetime.datetime = None,
+) -> bool:
+    """S2: 升级既有信号记录(grade/score/alert_msg/signal_dt + 刷新 alert_dt)。
+    供 monitoring_signal_code 的"分级升级"路径调用,取代 add 新行——避免
+    cl_signal_record 随"信号数 × 升级次数"无界膨胀(审查 S2)。按主键 id 原子 update。"""
+    _ensure_tables()
+    with db.Session() as session:
+        try:
+            if signal_dt is not None and getattr(signal_dt, "tzinfo", None) is not None:
+                signal_dt = signal_dt.replace(tzinfo=None)
+            session.query(TableBySignalRecord).filter(
+                TableBySignalRecord.id == record_id
+            ).update(
+                {
+                    "grade": grade,
+                    "score": score,
+                    "alert_msg": alert_msg,
+                    "signal_dt": signal_dt,
+                    "alert_dt": datetime.datetime.now(),
+                }
+            )
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+    return True
+
+
 def signal_record_query_by_identity(
     market: str, identity: str
 ) -> Optional[TableBySignalRecord]:

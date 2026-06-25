@@ -57,6 +57,7 @@ interface HistoryFullDataResponse extends UdfOkResponse {
   higher_zs?: unknown[];
   interval_nest?: unknown;
   update: boolean;
+  full_snapshot?: boolean;
   chart_color?: Map<string, string>;
 }
 
@@ -553,9 +554,21 @@ export class HistoryProvider {
             return `${head.time}_${head.price}`;
           };
 
+          // 新响应是否带来"未完成段"(linestyle=1)。SSE 全量快照含当前唯一的未完成段;
+          // 向左滚动的历史区间响应则不含。
+          const newHasPending = newSegments.some(
+            (s) => s.points && s.points.length > 0 && Number(s.linestyle) === 1
+          );
+
           const merged = new Map<string, LineSegment>();
           for (const segment of existingSegments) {
-            if (segment.points.length > 0) {
+            // 当新响应已带来当前未完成段时,丢弃所有旧的未完成段:未完成段的起点(head=合并key)
+            // 会随重算漂移、或被价格回撤作废,旧 head key 不会被新版本覆盖 → 否则累积"多个未完成
+            // 的笔/线段"(SSE 高频推送下尤甚)。新响应不含未完成段(如向左滚动历史)时,旧的不动。
+            if (
+              segment.points.length > 0 &&
+              !(newHasPending && Number(segment.linestyle) === 1)
+            ) {
               merged.set(segmentKey(segment), segment);
             }
           }
@@ -626,6 +639,25 @@ export class HistoryProvider {
           obj_res.xd_zslx_lines || [],
           (response as HistoryFullDataResponse).xd_zslx_lines || []
         );
+        // SSE 全量快照(prepend 产出完整 chart_data):形态列表直接整体替换,绕过上面为"部分响应
+        // (向左滚动)"设计的 updateXxx 合并 → 从根上杜绝任何形态(笔/线段/中枢/走势类型/分型/
+        // 买卖点/背驰)的"只增不删"陈旧累积(如多个未完成笔)。K线 bars/MACD 仍走下面增量合并
+        // 保持视图不重置、随末根推进。scroll 等部分响应不带 full_snapshot, 仍走上面的合并(兜底)。
+        if ((response as HistoryFullDataResponse).full_snapshot) {
+          obj_res.fxs = (response as HistoryFullDataResponse).fxs || [];
+          obj_res.bis = (response as HistoryFullDataResponse).bis || [];
+          obj_res.xds = (response as HistoryFullDataResponse).xds || [];
+          obj_res.bi_zss = (response as HistoryFullDataResponse).bi_zss || [];
+          obj_res.xd_zss = (response as HistoryFullDataResponse).xd_zss || [];
+          obj_res.bcs = (response as HistoryFullDataResponse).bcs || [];
+          obj_res.mmds = (response as HistoryFullDataResponse).mmds || [];
+          obj_res.bi_mmds = (response as HistoryFullDataResponse).bi_mmds || [];
+          obj_res.xd_mmds = (response as HistoryFullDataResponse).xd_mmds || [];
+          obj_res.bi_bcs = (response as HistoryFullDataResponse).bi_bcs || [];
+          obj_res.xd_bcs = (response as HistoryFullDataResponse).xd_bcs || [];
+          obj_res.xd_zslx = (response as HistoryFullDataResponse).xd_zslx || [];
+          obj_res.xd_zslx_lines = (response as HistoryFullDataResponse).xd_zslx_lines || [];
+        }
         obj_res.recursive_levels = (response as HistoryFullDataResponse).recursive_levels || [];
         obj_res.higher_zs = (response as HistoryFullDataResponse).higher_zs || [];
         obj_res.interval_nest = (response as HistoryFullDataResponse).interval_nest;

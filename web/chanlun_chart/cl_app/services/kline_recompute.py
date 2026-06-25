@@ -15,6 +15,7 @@
 重算状态——recompute_chart_data_from_klines 传 cache_key 时复用持久 CL, 让盘中
 末根刷新/新增根只算增量而非每次全量重建。复用判定见该函数与 _cl_pool 注释。
 """
+import hashlib
 import threading
 import time
 from collections import OrderedDict
@@ -167,6 +168,25 @@ def reset_cl_pool() -> None:
         _cl_pool.clear()
 
 
+def _klines_prefix_fp(klines, upto: int) -> str:
+    """对 klines 前 ``upto`` 根的 OHLC 取指纹,用于检测"末根之前的历史根被回填/订正"。
+
+    持久 CL 增量摄入假设"历史(末根之前)K 线永不变",一旦数据源订正中间某根,增量会
+    丢弃该变更 → 增量 != 全量(审计 H1,已由 test_..._mid_bar_revision 实证)。复用前用
+    本指纹比对"不可变前缀",变了就放弃复用、重建全量;只追加新根 / 末根更新则前缀不变、
+    指纹一致, 照常增量(不伤性能)。upto<=0 表示无历史前缀需校验, 返回固定值。
+    取指纹失败 → 返回 "" (不会等于任何真实 md5), 触发保守重建。
+    """
+    if upto <= 0:
+        return "0"
+    try:
+        cols = [c for c in ("open", "high", "low", "close") if c in klines.columns]
+        arr = klines.iloc[:upto][cols].to_numpy(dtype="float64")
+        return hashlib.md5(arr.tobytes()).hexdigest()
+    except Exception:
+        return ""
+
+
 def store_cl_to_pool(cache_key, cl, klines, cl_config, market, to_frequency=None) -> None:
     """把外部算好的 CL 实例(如首次加载 web_batch_get_cl_datas 的产物)存入池。
 
@@ -184,6 +204,7 @@ def store_cl_to_pool(cache_key, cl, klines, cl_config, market, to_frequency=None
             "config_key": config_key,
             "first_date": first_date,
             "n": len(klines),
+            "prefix_fp": _klines_prefix_fp(klines, len(klines) - 1),
         }
         _cl_pool.move_to_end(cache_key)
         while len(_cl_pool) > _CL_POOL_MAX:
@@ -246,6 +267,9 @@ def recompute_chart_data_from_klines(
                 and entry["config_key"] == config_key
                 and entry["first_date"] == first_date
                 and n >= entry["n"]
+                # 不可变前缀(末根之前)指纹一致才复用:防数据源回填/订正中间根时增量丢变更
+                # → 增量 != 全量(审计 H1)。只追加/末根更新→前缀不变→指纹一致→照常增量。
+                and _klines_prefix_fp(klines, entry["n"] - 1) == entry.get("prefix_fp")
             ):
                 cd = entry["cl"]
                 reused = True
@@ -282,6 +306,7 @@ def recompute_chart_data_from_klines(
                 "config_key": config_key,
                 "first_date": first_date,
                 "n": n,
+                "prefix_fp": _klines_prefix_fp(klines, n - 1),
             }
             _cl_pool.move_to_end(cache_key)
             while len(_cl_pool) > _CL_POOL_MAX:
@@ -344,6 +369,10 @@ def prepend_klines_and_replace_cache(
                 and _co["high"] == _mo["high"]
                 and _co["low"] == _mo["low"]
                 and _co["close"] == _mo["close"]
+                # 末根相同还不够:中间根可能被回填/订正(审计 M1,同 H1 根因)。比对不可变前缀
+                # 指纹,前缀也一致才是真"数据没变"可跳过;否则继续重算以纳入中间根变更。
+                and _klines_prefix_fp(cached_df, len(merged) - 1)
+                == _klines_prefix_fp(merged, len(merged) - 1)
             ):
                 return cached_entry.get("data")
         except (KeyError, IndexError):

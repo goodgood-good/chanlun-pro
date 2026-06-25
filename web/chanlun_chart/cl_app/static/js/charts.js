@@ -121,6 +121,9 @@ const CHART_CONFIG = {
         "mmd_labels", "bi_mmd_labels", "xd_mmd_labels",
         // 新核心递归层级中枢:recursive_levels 各级 zss 扁平化为单容器
         "recursive_zss",
+        // 新核心递归层级走势类型「线段」线条:recursive_levels 各级 zslx_lines 扁平化为单容器;
+        // 各级按绝对级别取链色(与该级中枢同色、形状区分线/框),各级独立 toggle(xd_L0/xd_L1…)。
+        "recursive_zslx_lines",
         // 新核心各级(5m/30m…)买卖点/背驰:recursive_levels[].mmds/bcs(箭头/标签/背驰各独立容器)。
         // ⚠必须注册:reconcile 取 obj_charts[symbolKey][type],未注册→undefined→container.length 抛错→
         // 5m/30m 买卖点/背驰永不渲染(中枢 recursive_zss 已注册故能显示,买卖点不显示=此遗漏所致)。
@@ -153,33 +156,77 @@ const DEFAULT_COLORS = {
     bi_zss: CHART_CONFIG.COLORS.BI_ZSS, xd_zss: CHART_CONFIG.COLORS.XD_ZSS,
 };
 
-// 新核心递归层级中枢按级别配色(L0 笔中枢→L1→L2…);级别越高框越粗(见 drawChartElements)。
-// 与旧 bi_zss/xd_zss(灰/蓝)区分,用暖色系突出"重做后的多级中枢"。超出长度按取模循环。
-const RECURSIVE_LEVEL_COLORS = ["#26A69A", "#EF5350", "#AB47BC", "#FF9800", "#42A5F5", "#EC407A"];
+// ─────────────────────────────────────────────────────────────────────────
+// 缠论研习院「学院缠图递归颜色」规范(chanlunschool.com/学院缠图递归颜色)。
+// 绝对递归级别链:每个绝对级别一个固定颜色,**同一绝对级别在任何周期图上恒同色**——
+// 这正是「递归颜色」的本质,便于跨周期一致辨认。颜色像素级提取自官方「画图级别颜色标准」
+// 图(canvas 逐格扫描),详见 audit/recursive_colors_spec.md。
+//   index: 0=15秒(白) 1=1FB橙 2=1FC黄 3=1F青 4=5F红 5=30F绿 6=日蓝 7=周粉 8=月橄榄 9=季棕
+const LEVEL_COLOR_CHAIN = [
+    "#FFFFFF", // 0  15秒(占位,基本不作基础色)
+    "#FF8C00", // 1  1FB  橙(深橙 darkorange,从网站#FFC000琥珀加深:与线段的黄#FFFF00拉开色相+明度,更易分辨) —— 1分钟笔
+    "#F2C94C", // 2  1FC  黄(柔和黄,从刺眼纯黄#FFFF00改柔,护眼+与笔的橙更分;同步柔化笔中枢/5m笔) —— 1分钟线段
+    "#07C9E9", // 3  1F   青(cyan)
+    "#FF0000", // 4  5F   红(red)
+    "#66FF66", // 5  30F  绿(green)
+    "#5B9BD5", // 6  日线 蓝(blue)
+    "#FF99FF", // 7  周线 粉(pink)
+    "#70AD46", // 8  月线 橄榄绿(olive)
+    "#C35811", // 9  季线 棕(brown)
+];
+// 按链索引取色:溢出(深递归 > 9)在 [1..9] 区间循环,既不 undefined 又仍可辨。
+function chainColor(idx) {
+    if (idx <= 0) return LEVEL_COLOR_CHAIN[0];
+    if (idx < LEVEL_COLOR_CHAIN.length) return LEVEL_COLOR_CHAIN[idx];
+    const span = LEVEL_COLOR_CHAIN.length - 1; // 9
+    return LEVEL_COLOR_CHAIN[1 + ((idx - 1) % span)];
+}
 
-// 多周期叠加中枢按"第几个高周期"配色(5min级别→[0]、30min级别→[1]…),冷色系区分递归中枢。
-const HIGHER_ZS_COLORS = ["#5C6BC0", "#00897B", "#7E57C2", "#3949AB"];
+// 图周期 → 该图「笔」在链上的索引 p。由 FREQ_CHAIN 反推得自洽(令日线恒落 index 6=蓝、
+// 周线恒 7=粉…),故 15m/60m 等非标准周期也对齐到与标准周期相同的颜色锚点。
+const CHART_BI_INDEX = { "1": 1, "5": 2, "15": 2, "30": 3, "60": 3, "1D": 4, "1W": 5, "1M": 6 };
+function chartBiIndex(interval) {
+    const p = CHART_BI_INDEX[interval];
+    return (typeof p === "number") ? p : 1;
+}
 
-// 着色规则(按「中枢的构成单元在当前周期的颜色」着色,直观区分笔/段):
-//   bis    = 当前周期笔色;
-//   xds    = 当前周期线段色 = **下一级周期的 bis 色**(原文「线段 = 高一级笔」);
-//   bi_zss = 当前周期笔中枢 = **当前周期 bis 色**(笔中枢由笔构成 → 同笔色);
-//   xd_zss = 当前周期线段中枢 = **当前周期 xds 色**(线段中枢由线段构成 → 同线段色)。
-const DYNAMIC_CHART_COLORS = {
-    "1": { ...DEFAULT_COLORS, bis: "#DF8344", xds: "#9C27B0", bi_zss: "#DF8344", xd_zss: "#9C27B0" },
-    "5": { ...DEFAULT_COLORS, bis: "#9C27B0", xds: "#4FADEA", bi_zss: "#9C27B0", xd_zss: "#4FADEA" },
-    "30": { ...DEFAULT_COLORS, bis: "#4FADEA", xds: "#EA3323", bi_zss: "#4FADEA", xd_zss: "#EA3323" },
-    "1D": { ...DEFAULT_COLORS, bis: "#EA3323", xds: "#9FCE63", bi_zss: "#EA3323", xd_zss: "#9FCE63" },
-    "1W": { ...DEFAULT_COLORS, bis: "#9FCE63", xds: "#4274B1", bi_zss: "#9FCE63", xd_zss: "#4274B1" },
-    "1M": { ...DEFAULT_COLORS, bis: "#4274B1", xds: "#C638DD", bi_zss: "#4274B1", xd_zss: "#C638DD" },
+// 当前周期 → 各递归级别(L0/L1/L2/L3)的周期标签链。模块级:菜单与左侧级别快捷开关浮条共用。
+const FREQ_CHAIN = {
+    "1": ["1m", "5m", "30m", "日线"],
+    "5": ["5m", "30m", "日线", "周线"],
+    "15": ["15m", "60m", "日线", "周线"],
+    "30": ["30m", "日线", "周线", "月线"],
+    "60": ["60m", "日线", "周线", "月线"],
+    "1D": ["日线", "周线", "月线", "年线"],
+    "1W": ["周线", "月线", "年线", "10年"],
+    "1M": ["月线", "年线", "10年", "30年"],
 };
 
+// 元素 → 相对「笔」的链偏移(见 spec §4):
+//   笔 bis = +0、线段 xds = +1、笔中枢 bi_zss = +1(中枢色 = 构件级别 +1,笔中枢由笔构成)、
+//   线段中枢 xd_zss / 递归 L0 = +2。
+const ELEMENT_CHAIN_OFFSET = { bis: 0, xds: 1, bi_zss: 1, xd_zss: 2 };
+
+// 基础元素(笔/线段/笔中枢/线段中枢)按当前周期取链色。替代旧 DYNAMIC_CHART_COLORS。
 function getDynamicColor(interval, elementType) {
-    if (DYNAMIC_CHART_COLORS[interval] && DYNAMIC_CHART_COLORS[interval][elementType]) {
-        return DYNAMIC_CHART_COLORS[interval][elementType];
-    }
+    const off = ELEMENT_CHAIN_OFFSET[elementType];
+    if (typeof off === "number") return chainColor(chartBiIndex(interval) + off);
     return DEFAULT_COLORS[elementType] || "#FFFFFF";
 }
+
+// 递归层级中枢 Lk(L0 = 本周期线段中枢) → 链色 C[p+2+k]。
+// 1m 图: L0=青(1F)/L1=红(5F)/L2=绿(30F)/L3=蓝(日线)…
+function getRecursiveLevelColor(interval, level) {
+    return chainColor(chartBiIndex(interval) + 2 + (level || 0));
+}
+
+// 递归层级走势类型「线段」线条与本级中枢同绝对级别 → 同色,直接复用 getRecursiveLevelColor:
+//   recursive_levels[k].zslx_lines = 分支级 k 走势类型 = 构成第 k+1 周期中枢的构件,
+//   按链 = C[p+2+k]。1m 图: L0线条=青(=5分钟线段)/L1线条=红(=30分钟线段)/L2线条=绿(=日线线段),
+//   严格对齐网站「5分钟线段=青、30分钟线段=红…」。形状(线 vs 框)区分走势类型与中枢。
+
+// 多周期叠加中枢(P7,已停用)残留路径的占位色;新核心高级别中枢走 getRecursiveLevelColor。
+const HIGHER_ZS_COLORS = ["#5C6BC0", "#00897B", "#7E57C2", "#3949AB"];
 
 function debounce(func, wait) {
     let timeout;
@@ -505,6 +552,9 @@ class ChartManager {
             // 下次 reconcile 旧 key 命中 toKeep 分支不重建，导致图上空白只剩最新一段。
             // 同步置空 obj_charts，强制 reconcile 走全量重建路径。
             this.obj_charts = {};
+            // removeAllShapes 已清掉所有用户图形 → 同步清空"已染色图形 id"集合,否则切标的/切周期
+            // 长期累积陈旧 id(轻量内存泄漏,见审查 L2)。仅在用户图形确实被整块清除时清。
+            if (this._coloredDrawings) this._coloredDrawings.clear();
             this._resetReconcileRetry();
             if (!this.isTokenCurrent(token)) {
                 return false;
@@ -995,16 +1045,7 @@ class ChartManager {
                 //   当前周期走势类型再作为高一级中枢的构件。
                 let _curInterval = "?";
                 try { _curInterval = self.widget.symbolInterval().interval; } catch (e) {}
-                const FREQ_CHAIN = {
-                    "1": ["1m", "5m", "30m", "日线"],
-                    "5": ["5m", "30m", "日线", "周线"],
-                    "15": ["15m", "60m", "日线", "周线"],
-                    "30": ["30m", "日线", "周线", "月线"],
-                    "60": ["60m", "日线", "周线", "月线"],
-                    "1D": ["日线", "周线", "月线", "年线"],
-                    "1W": ["周线", "月线", "年线", "10年"],
-                    "1M": ["月线", "年线", "10年", "30年"],
-                };
+                // FREQ_CHAIN 已提升为模块级常量(菜单与左侧级别快捷开关浮条共用)
                 const _chain = FREQ_CHAIN[_curInterval] || [_curInterval, "高一级", "高二级", "高三级"];
                 const _lbl = (i) => _chain[i] || `L+${i}`;
 
@@ -1026,12 +1067,21 @@ class ChartManager {
                     _mmdLevels.push({ label: _lab, key: 'mmd_L' + i });
                     _bcLevels.push({ label: _lab, key: 'bc_L' + i });
                 }
+                // 各级走势类型「线段」线条(与中枢平行,key=xd_L0/xd_L1…):在低周期图上叠加
+                // 显示 5m/30m… 各级线段。**默认关**(高级别线条会增加视觉密度,按需开启);
+                // 颜色与该级中枢同(同绝对级别),形状用线条区分。
+                const _zslxLevels = [];
+                for (let i = 0; i <= _recMaxLevel; i++) {
+                    _zslxLevels.push({ label: (_chain[i] || ('L' + i)) + '级别', key: 'xd_L' + i });
+                }
 
                 // 重组后的菜单:按「功能分组」组织 + 顶部级别映射默认折叠 +
                 // 底部「全选/全清」一键操作。比起原始扁平 14 项更易扫读,
                 // 减少新用户「原文化新增」等晦涩术语的认知负担。
                 const _cbRow = (k, label, indent) => `<label style="display:block; cursor:pointer; ${indent ? 'padding-left:14px; font-size:12px;' : ''}"><input type="checkbox" id="${cbId(k)}" ${cfg[k] ? 'checked' : ''} style="margin-right:6px; vertical-align:middle;">${label}</label>`;
                 const _grpTitle = (t) => `<div style="font-size:11px; color:#4a90e2; padding:5px 0 1px; font-weight:bold;">${t}</div>`;
+                // 级别色块:让「按周期级别」的选项自带颜色图例,直观对应图上各级线段/中枢的网站递归色。
+                const _sw = (c) => `<span style="display:inline-block;width:9px;height:9px;border-radius:2px;background:${c};margin-right:3px;vertical-align:middle;border:1px solid rgba(0,0,0,0.25);"></span>`;
 
                 let html = `
                     <div id="${menuId}" style="position: absolute; z-index: 99999999; background: #fff; border: 1px solid #ccc; box-shadow: 0 2px 10px rgba(0,0,0,0.2); border-radius: 4px; padding: 10px; line-height: 22px; font-size: 13px; color: #333; min-width: 220px;">
@@ -1047,14 +1097,21 @@ class ChartManager {
                         ${_grpTitle('基础')}
                         <div style="display:flex; gap:14px; font-size:12px;">
                             <label style="cursor:pointer;"><input type="checkbox" id="${cbId('fx')}" ${cfg.fx ? 'checked' : ''} style="margin-right:4px; vertical-align:middle;">分型</label>
-                            <label style="cursor:pointer;"><input type="checkbox" id="${cbId('bi')}" ${cfg.bi ? 'checked' : ''} style="margin-right:4px; vertical-align:middle;">笔</label>
-                            <label style="cursor:pointer;"><input type="checkbox" id="${cbId('xd')}" ${cfg.xd ? 'checked' : ''} style="margin-right:4px; vertical-align:middle;">线段</label>
+                            <label style="cursor:pointer;"><input type="checkbox" id="${cbId('bi')}" ${cfg.bi ? 'checked' : ''} style="margin-right:4px; vertical-align:middle;">${_sw(getDynamicColor(_curInterval, 'bis'))}笔</label>
+                            <label style="cursor:pointer;"><input type="checkbox" id="${cbId('xd')}" ${cfg.xd ? 'checked' : ''} style="margin-right:4px; vertical-align:middle;">${_sw(getDynamicColor(_curInterval, 'xds'))}线段</label>
                         </div>
 
                         ${_grpTitle('中枢 (按周期级别)')}
-                        <div style="display:flex; gap:12px; font-size:12px; flex-wrap:wrap;">
-                            <label style="cursor:pointer;"><input type="checkbox" id="${cbId('zs_bi')}" ${cfg.zs_bi ? 'checked' : ''} style="margin-right:4px; vertical-align:middle;">笔中枢</label>
-                            ${_zsLevels.map((L) => `<label style="cursor:pointer;"><input type="checkbox" id="${cbId(L.key)}" ${cfg[L.key] !== false ? 'checked' : ''} style="margin-right:4px; vertical-align:middle;">${L.label}</label>`).join('')}
+                        <label style="display:block; cursor:pointer; font-size:12px;"><input type="checkbox" id="${cbId('zs_all')}" ${cfg.zs_all !== false ? 'checked' : ''} style="margin-right:6px; vertical-align:middle;">总开关</label>
+                        <div style="padding-left:14px; display:flex; gap:12px; font-size:12px; flex-wrap:wrap;">
+                            <label style="cursor:pointer;"><input type="checkbox" id="${cbId('zs_bi')}" ${(cfg.zs_all !== false && cfg.zs_bi) ? 'checked' : ''} style="margin-right:4px; vertical-align:middle;">${_sw(getDynamicColor(_curInterval, 'bi_zss'))}笔中枢</label>
+                            ${_zsLevels.map((L, ai) => `<label style="cursor:pointer;"><input type="checkbox" id="${cbId(L.key)}" ${(cfg.zs_all !== false && cfg[L.key] !== false) ? 'checked' : ''} style="margin-right:4px; vertical-align:middle;">${_sw(getRecursiveLevelColor(_curInterval, ai))}${L.label}</label>`).join('')}
+                        </div>
+
+                        ${_grpTitle('走势类型线段 (按周期级别)')}
+                        ${_cbRow('zslx_all', '总开关', false)}
+                        <div style="padding-left:14px; display:flex; gap:12px; font-size:12px; flex-wrap:wrap;">
+                            ${_zslxLevels.map((L, ai) => `<label style="cursor:pointer;"><input type="checkbox" id="${cbId(L.key)}" ${(cfg.zslx_all === true && cfg[L.key] !== false) ? 'checked' : ''} style="margin-right:4px; vertical-align:middle;">${_sw(getRecursiveLevelColor(_curInterval, ai))}${L.label}</label>`).join('')}
                         </div>
 
                         ${_grpTitle('买卖点 (按周期级别)')}
@@ -1140,10 +1197,14 @@ class ChartManager {
 
                 const keys = [
                     'fx', 'bi', 'xd', 'bc', 'mmd',
+                    // 中枢总开关 zs_all(默认开) / 走势类型线段总开关 zslx_all(默认关);新key避开遗留 zs/xd_zslx
+                    'zs_all', 'zslx_all',
                     // 买卖点/背驰 笔段独立开关 + 笔中枢(观察)
                     'zs_bi', 'mmd_bi', 'mmd_xd', 'bc_bi', 'bc_xd',
                     // 中枢按周期级别:zs_xd(L0本周期线段中枢) + zs_L1/zs_L2/zs_L3(P8扩展高级别),随数据动态
                     ..._zsLevels.map((L) => L.key),
+                    // 各级走势类型线段:xd_L0/xd_L1/…(默认关),同样需 handler 才能保存配置+触发重绘
+                    ..._zslxLevels.map((L) => L.key),
                     // Recursive higher-level signal toggles are generated dynamically.
                     // Without these handlers, mmd_L*/bc_L* checkboxes render but do
                     // not save config or trigger a redraw.
@@ -1238,6 +1299,14 @@ class ChartManager {
 
             this.reloadDrawingsForCurrentContext('initial-load');
             this._openSseStream();
+            this.updateDrawPalette();   // 画图调色板:优先原生注入 TV 工具栏,失败回退浮层
+            // TV 左侧工具栏异步渲染:重试注入(成功即停,最多 ~4.2s)
+            if (this._lvlbtnTimer) clearInterval(this._lvlbtnTimer);
+            this._lvlbtnTries = 0;
+            this._lvlbtnTimer = setInterval(() => {
+                this._lvlbtnTries++;
+                if (this.injectDrawPaletteIntoTVToolbar() || this._lvlbtnTries >= 12) { clearInterval(this._lvlbtnTimer); this._lvlbtnTimer = null; }
+            }, 350);
 
             // 注入 MACD 区间统计（工具栏按钮 + 右键菜单 + 侧边面板），依赖 chart/widget 已就绪
             try {
@@ -1249,6 +1318,27 @@ class ChartManager {
             }
 
             this.widget.subscribe('drawing_event', (id, eventType) => {
+                // 手画线段/矩形:首次出现(任意事件类型,排除 remove)且当前选了画图色 → 套该色。
+                // (实测 chart.applyOverrides 的 linetool 默认色对手画不生效,故用此事件兜底上色。)
+                // 记录已上色 id,避免覆盖用户之后手动改的色;add 在 setProperties 前,防 properties_changed 自触发循环。
+                if (!this._coloredDrawings) this._coloredDrawings = new Set();
+                // ⚠ 只给「用户手画」图形上色,排除缠论自动图形(在 _reconcileOwnedIds 中)——缠论的笔/线段
+                // 也是 trend_line,点击会触发 click 事件,否则被误染成当前画图色(用户报:一点就变红)。
+                const _isChanlunShape = !!(this._reconcileOwnedIds && this._reconcileOwnedIds.has(id));
+                if (this._drawColor && eventType !== 'remove' && !_isChanlunShape && !this._coloredDrawings.has(id)) {
+                    try {
+                        const sh = this.chart.getShapeById(id);
+                        if (sh && sh.setProperties) {
+                            const p = sh.getProperties() || {};
+                            const ov = {};
+                            if ('linecolor' in p) ov.linecolor = this._drawColor;
+                            if ('color' in p) ov.color = this._drawColor;
+                            if ('backgroundColor' in p) ov.backgroundColor = this._drawColor;
+                            if (Object.keys(ov).length) { this._coloredDrawings.add(id); sh.setProperties(ov); }
+                        }
+                    } catch (e) {}
+                }
+                if (eventType === 'remove' && this._coloredDrawings) this._coloredDrawings.delete(id);
                 if (this.shouldSuppressDrawingSave()) return;
                 clog("[DEBUG-CHARTS] drawing_event", id, eventType);
                 this.scheduleDrawingsSave('drawing_event');
@@ -1259,6 +1349,172 @@ class ChartManager {
                 this.scheduleDrawingsSave('auto_save');
             });
         });
+    }
+
+    // ===== 按级别颜色「手动画线段 / 矩形」调色板 =====
+    // 需求:用 TV 画线/矩形工具在图上手动作图,可挑各级别(笔/段/1m/5m/30m/日…)颜色来画。
+    // 机制:点色块 → setDrawColor 设 TV 趋势线/矩形工具默认色;点「线/框」激活对应工具;
+    //       手画完成时 drawing_event=create 再兜底套色。位置优先注入 TV 左侧工具栏,失败回退浮层。
+
+    // 设当前「画图颜色」:applyOverrides 设趋势线/矩形默认色,之后手画的线段/矩形即此色。
+    setDrawColor(color) {
+        this._drawColor = color;
+        try {
+            this.chart.applyOverrides({
+                "linetooltrendline.linecolor": color,
+                "linetooltrendline.linewidth": 2,
+                "linetoolrectangle.color": color,
+                "linetoolrectangle.backgroundColor": color,
+                "linetoolrectangle.linecolor": color,
+                "linetoolrectangle.transparency": 80,
+            });
+        } catch (e) { /* override 失败不致命,create 事件仍会兜底套色 */ }
+        try {
+            for (const f of document.querySelectorAll('iframe')) {
+                let dd; try { dd = f.contentDocument; } catch (e) { continue; }
+                const g = dd && dd.getElementById('cl_tv_drawpal_' + this.id);
+                if (g) this._paintDrawPalette(g);
+            }
+            const ov = document.getElementById('cl_drawpal_' + this.id);
+            if (ov) this._paintDrawPalette(ov);
+        } catch (e) {}
+    }
+
+    // 高亮调色板中当前画图色对应的色块。
+    _paintDrawPalette(grp) {
+        try {
+            grp.querySelectorAll('.cl-drawcol').forEach(b => {
+                const c = b.getAttribute('data-color') || '';
+                const active = this._drawColor && c.toUpperCase() === this._drawColor.toUpperCase();
+                b.style.background = active ? c : 'transparent';
+                b.style.color = active ? '#fff' : c;
+                b.style.boxShadow = active ? '0 0 0 1.5px #333' : 'none';
+            });
+        } catch (e) {}
+    }
+
+    // 往容器 grp 构建调色板内容:标题 + 各级色块(点=设画图色) + 线段/矩形工具按钮(点=激活工具)。
+    _buildDrawPaletteInto(grp, doc, interval) {
+        const { items } = this._levelBarItems(interval);
+        const hd = doc.createElement('div');
+        hd.textContent = '一键画';
+        hd.title = '点对应级别的「线/框」即可直接画(已含选色+激活工具)';
+        hd.style.cssText = 'font-size:10px; color:#999; user-select:none; text-align:center;';
+        grp.appendChild(hd);
+        // 列头:左=线段、右=矩形
+        const colhd = doc.createElement('div');
+        colhd.style.cssText = 'display:flex; gap:2px; font-size:9px; color:#aaa; user-select:none;';
+        ['线', '框'].forEach(t => { const c = doc.createElement('div'); c.textContent = t; c.style.cssText = 'width:23px; text-align:center;'; colhd.appendChild(c); });
+        grp.appendChild(colhd);
+        // 每级一行:左「线段」按钮(下划线样式) + 右「矩形」按钮(方框样式),均为该级颜色。
+        // 点一下 = 设画图色 + 激活对应工具,直接画(用户要的「一键直画」)。
+        items.forEach((it) => {
+            const row = doc.createElement('div');
+            row.style.cssText = 'display:flex; gap:2px;';
+            const mk = (tool, isBox) => {
+                const b = doc.createElement('div');
+                b.className = 'cl-drawbtn';
+                b.textContent = it.label;
+                b.title = '画 ' + it.label + ' 级别' + (isBox ? '矩形' : '线段') + '(一键:选色+激活工具)';
+                b.style.cssText = 'width:23px; height:17px; line-height:14px; text-align:center; font-size:9.5px; font-weight:700; cursor:pointer; box-sizing:border-box; color:' + it.color + '; '
+                    + (isBox
+                        ? 'border:1.5px solid ' + it.color + '; border-radius:3px;'
+                        : 'border-bottom:2.5px solid ' + it.color + ';');
+                b.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    this.setDrawColor(it.color);
+                    try { this.widget.selectLineTool(tool); } catch (err) {}
+                });
+                return b;
+            };
+            row.appendChild(mk('trend_line', false));
+            row.appendChild(mk('rectangle', true));
+            grp.appendChild(row);
+        });
+    }
+
+    // 回退:把调色板做成左侧浮层(TV 工具栏注入失败时)。
+    renderDrawPaletteOverlay() {
+        try {
+            const container = document.getElementById("tv_chart_container_" + this.id);
+            if (!container) return;
+            if (getComputedStyle(container).position === 'static') container.style.position = 'relative';
+            let interval = '?';
+            try { interval = this.widget.symbolInterval().interval; } catch (e) {}
+            const { sig } = this._levelBarItems(interval);
+            const barId = 'cl_drawpal_' + this.id;
+            let bar = document.getElementById(barId);
+            if (bar && bar.getAttribute('data-sig') === sig) { this._paintDrawPalette(bar); bar.style.display = 'flex'; return; }
+            if (bar) bar.remove();
+            bar = document.createElement('div');
+            bar.id = barId;
+            bar.setAttribute('data-sig', sig);
+            bar.style.cssText = 'position:absolute; left:6px; top:64px; z-index:42; display:flex; flex-direction:column; align-items:center; gap:3px; background:rgba(255,255,255,0.85); padding:4px 3px; border-radius:6px; box-shadow:0 1px 4px rgba(0,0,0,0.18);';
+            this._buildDrawPaletteInto(bar, document, interval);
+            container.appendChild(bar);
+        } catch (e) {
+            console.warn('[CHARTS] renderDrawPaletteOverlay failed', e);
+        }
+    }
+
+    // 当前周期 → 调色板级别颜色项(只各递归级别 1m/5m/30m/日线…,label + 链色;不含笔/段基础)。
+    _levelBarItems(interval) {
+        const chain = FREQ_CHAIN[interval] || [interval, '高一级', '高二级', '高三级'];
+        const maxLevel = Math.max(this._recMaxLevel || 0, Math.min(chain.length - 1, 3));
+        const items = [];
+        for (let k = 0; k <= maxLevel; k++) {
+            items.push({ label: (chain[k] || ('L' + k)), color: getRecursiveLevelColor(interval, k) });
+        }
+        return { items, sig: interval + '|' + maxLevel };
+    }
+
+    // 把「画图调色板」原生注入 TV 左侧画线工具栏列顶部。锚点用几何探测(窄<70+高>400+最左+含多个 group 子)
+    // 而非哈希类名,较抗 TV 升级;找不到工具栏返回 false → 调用方回退浮层 renderDrawPaletteOverlay。
+    injectDrawPaletteIntoTVToolbar() {
+        try {
+            let doc = null, inner = null;
+            for (const f of document.querySelectorAll('iframe')) {
+                let dd; try { dd = f.contentDocument; } catch (e) { continue; }
+                if (!dd) continue;
+                let cand = null;
+                dd.querySelectorAll('div').forEach(el => {
+                    const r = el.getBoundingClientRect();
+                    if (r.width < 70 && r.height > 400 && r.left < 12 && el.children.length >= 3) {
+                        if (!cand || r.height > cand.getBoundingClientRect().height) cand = el;
+                    }
+                });
+                if (cand) { doc = dd; inner = cand; break; }
+            }
+            if (!doc || !inner) return false;
+            let interval = '?';
+            try { interval = this.widget.symbolInterval().interval; } catch (e) {}
+            const { sig } = this._levelBarItems(interval);
+            const hideOverlay = () => { const ov = document.getElementById('cl_drawpal_' + this.id); if (ov) ov.style.display = 'none'; };
+            const grpId = 'cl_tv_drawpal_' + this.id;
+            let grp = doc.getElementById(grpId);
+            if (grp && grp.isConnected && grp.getAttribute('data-sig') === sig) {
+                this._paintDrawPalette(grp);
+                hideOverlay();
+                return true;
+            }
+            if (grp) grp.remove();
+            grp = doc.createElement('div');
+            grp.id = grpId;
+            grp.setAttribute('data-sig', sig);
+            grp.style.cssText = 'display:flex; flex-direction:column; align-items:center; gap:3px; padding:6px 0 5px; width:52px; border-bottom:1px solid rgba(120,120,120,0.3);';
+            this._buildDrawPaletteInto(grp, doc, interval);
+            inner.insertBefore(grp, inner.firstChild);
+            hideOverlay();
+            return true;
+        } catch (e) {
+            console.warn('[CHARTS] injectDrawPaletteIntoTVToolbar failed', e);
+            return false;
+        }
+    }
+
+    // 画图调色板统一入口:优先原生注入 TV 工具栏;失败回退左侧浮层。
+    updateDrawPalette() {
+        if (!this.injectDrawPaletteIntoTVToolbar()) this.renderDrawPaletteOverlay();
     }
 
     handleSymbolChange(symbol) {
@@ -1277,6 +1533,7 @@ class ChartManager {
         this.reloadDrawingsForCurrentContext('symbol-change');
         this._openSseStream();
         if (typeof ZiXuan.render_zixuan_opts === "function") ZiXuan.render_zixuan_opts();
+        setTimeout(() => this._maybeWidenDefaultView(), 400);   // 同市场切标的:缓存命中时 handleDataReady 不来,这里兜底拉宽默认视窗
     }
     handleIntervalChange(interval) {
         if (!interval) return;
@@ -1292,12 +1549,51 @@ class ChartManager {
         this.clear_draw_chanlun();
         this.reloadDrawingsForCurrentContext('interval-change');
         this._openSseStream();
+        setTimeout(() => this._maybeWidenDefaultView(), 400);   // 切周期:缓存命中时 handleDataReady 不来,这里兜底拉宽默认视窗
     }
 
     handleDataReady() {
         clog(`[CHANLUN-TIMING] @${performance.now().toFixed(0)}ms handleDataReady fired [_initialLoadDone=true]`);
         this._initialLoadDone = true;
+        this._maybeWidenDefaultView();
         this.debouncedDrawChanlun();
+    }
+
+    // 首次加载某 标的+周期 时,若默认可视窗过窄(实测外汇默认仅 ~4h/~43根 → 只见 1 笔,而数据有 438 笔),
+    // 按周期拉宽到一个合理跨度,让图表一打开就显示更多历史与缠论。仅首次、且仅当过窄时设,
+    // 不夺已够宽的图(A股默认已宽则跳过)或用户后续缩放。设更宽视窗会触发 TV 按需加载更早的 K 线。
+    _maybeWidenDefaultView() {
+        try {
+            const si = this.widget && this.widget.symbolInterval ? this.widget.symbolInterval() : null;
+            if (!si || !si.symbol || !si.interval) return;
+            const key = si.symbol + '|' + si.interval;
+            if (this._viewSetFor === key) return;
+            // 当前 标的+周期 的 K 线必须已加载,否则数据/视窗未就绪 → 不设标记,等下次(handleDataReady/切换)再试。
+            const resKey = String(si.symbol).toLowerCase() + String(si.interval).toLowerCase();
+            const hp = this.udf_datafeed && this.udf_datafeed._historyProvider;
+            const br = hp && hp.bars_result && hp.bars_result.get(resKey);
+            if (!br || !br.bars || br.bars.length < 2) return;
+            const vr = this.chart && this.chart.getVisibleRange ? this.chart.getVisibleRange() : null;
+            if (!vr || !vr.from || !vr.to || vr.to <= vr.from) return;   // 数据/视窗未就绪,下次再试
+            this._viewSetFor = key;
+            // 各周期默认视窗跨度(日历天);跨度按天数,外汇 24h 连续→根数多,A股有夜盘缺口→根数少,均显示充足缠论。
+            // 白名单只列分钟~月线;未列出的周期(秒线10S/30S、季线3M、年线12M等)直接跳过不拉宽——
+            // 否则 6 天 fallback 对秒线会触发拉数万根、对季/年线又过窄;且这些周期 TV 默认视窗本就够宽。
+            const SPAN_DAYS = { '1': 2, '2': 3, '3': 3, '5': 6, '10': 8, '15': 12, '30': 45, '60': 90, '120': 120, '180': 150, '240': 200, '1D': 400, '2D': 700, '1W': 1825, '1M': 5475 };
+            const days = SPAN_DAYS[si.interval];
+            if (!days) return;   // 周期不在白名单(秒/季/年等)→保持 TV 默认视窗
+            const span = days * 86400;
+            if ((vr.to - vr.from) >= span * 0.7) return;   // 当前已够宽(如A股默认)→不动
+            setTimeout(() => {
+                try {
+                    // 竞态防护:延时期间用户若已切到别的标的/周期,放弃,避免把视窗设成上一周期的范围。
+                    const si2 = this.widget && this.widget.symbolInterval ? this.widget.symbolInterval() : null;
+                    if (!si2 || (si2.symbol + '|' + si2.interval) !== key) return;
+                    const v = this.chart.getVisibleRange();
+                    if (v && v.to) this.chart.setVisibleRange({ from: v.to - span, to: v.to });
+                } catch (e) {}
+            }, 150);
+        } catch (e) { /* 视窗调整失败不影响主流程 */ }
     }
     handleTick() {
         const identity = this.getCurrentChartIdentity();
@@ -1689,7 +1985,8 @@ class ChartManager {
         // 使用本图表实例独立的显示配置，多图布局下互不影响
         const cfg = this.cl_show_config;
         this.reconcile('fxs', cfg.fx ? barsResult.fxs : [], from, symbolKey, (item) => safeCreate(ChartUtils.createFxShape(this.chart, item), 'fx'), false);
-        this.reconcile('bis', cfg.bi ? barsResult.bis : [], from, symbolKey, (item) => safeCreate(ChartUtils.createLineShape(this.chart, item, { color: getDynamicColor(currentInterval, "bis"), linewidth: 2 }), 'bi'));
+        // 笔细(1)、线段粗(2):缠论惯例,笔数量多取细线、线段更高级取粗线;粗细差再叠加颜色差,提升可辨识。
+        this.reconcile('bis', cfg.bi ? barsResult.bis : [], from, symbolKey, (item) => safeCreate(ChartUtils.createLineShape(this.chart, item, { color: getDynamicColor(currentInterval, "bis"), linewidth: 1 }), 'bi'));
         this.reconcile('xds', cfg.xd ? barsResult.xds : [], from, symbolKey, (item) => safeCreate(ChartUtils.createLineShape(this.chart, item, { color: getDynamicColor(currentInterval, "xds"), linewidth: 2 }), 'xd'));
         const wrapZs = (lvlColor, linewidth) => (item) => {
             return ChartUtils.createZhongshuShape(this.chart, item, {
@@ -1701,8 +1998,9 @@ class ChartManager {
         // 去重用的:它把所有 linestyle=1 的项压成 1 个,但 zss 阵列中**多个**
         // pending 中枢正常并存,被压成 1 个会让大部分中枢消失。useUnique=false。
         // 笔中枢 / 线段中枢现按独立开关(zs_bi / zs_xd)分别控制显隐。
-        this.reconcile('bi_zss', cfg.zs_bi ? barsResult.bi_zss : [], from, symbolKey, (item) => safeCreate(wrapZs(getDynamicColor(currentInterval, "bi_zss"), 1)(item), 'bi_zs'), false);
-        this.reconcile('xd_zss', cfg.zs_xd ? barsResult.xd_zss : [], from, symbolKey, (item) => safeCreate(wrapZs(getDynamicColor(currentInterval, "xd_zss"), 2)(item), 'xd_zs'), false);
+        const _zsOn = cfg.zs_all !== false;   // 中枢总开关(默认开,新key避开遗留 zs):门控 笔中枢/线段中枢/各级递归中枢
+        this.reconcile('bi_zss', (_zsOn && cfg.zs_bi) ? barsResult.bi_zss : [], from, symbolKey, (item) => safeCreate(wrapZs(getDynamicColor(currentInterval, "bi_zss"), 1)(item), 'bi_zs'), false);
+        this.reconcile('xd_zss', (_zsOn && cfg.zs_xd) ? barsResult.xd_zss : [], from, symbolKey, (item) => safeCreate(wrapZs(getDynamicColor(currentInterval, "xd_zss"), 2)(item), 'xd_zs'), false);
         // 新核心递归层级中枢(recursive_levels, P8):后端按级别给 [{level, zss, zslxs, ...}]。
         // L0=本周期线段中枢(开关 zs_xd), L1/L2/L3=扩展高级别中枢(开关 zs_L1/zs_L2/zs_L3)。
         // 各级 zss 扁平化(附 _level)后用单 reconcile;按级别选色/线宽。
@@ -1711,7 +2009,7 @@ class ChartManager {
             if (!lvObj || !Array.isArray(lvObj.zss)) continue;
             const lvl = lvObj.level || 0;
             const toggleKey = lvl === 0 ? 'zs_xd' : 'zs_L' + lvl;
-            if (cfg[toggleKey] === false) continue;
+            if (cfg.zs_all === false || cfg[toggleKey] === false) continue;   // 中枢总开关 + 各级
             for (const zs of lvObj.zss) recZss.push({ ...zs, _level: lvl });
         }
         // includeOverlaps=true + 左沿 clamp:高级别(5m/30m)中枢框跨度数周~数月,其左沿
@@ -1732,8 +2030,25 @@ class ChartManager {
         };
         this.reconcile('recursive_zss', recZss, from, symbolKey, (item) => {
             const lvl = item._level || 0;
-            const color = RECURSIVE_LEVEL_COLORS[lvl % RECURSIVE_LEVEL_COLORS.length];
+            // 递归中枢按绝对级别取网站链色:1m图 L0青/L1红/L2绿/L3蓝… 级别越高框越粗。
+            const color = getRecursiveLevelColor(currentInterval, lvl);
             return safeCreate(wrapZs(color, lvl === 0 ? 1 : 2)(clampHeadToFrom(item)), 'rec_zs');
+        }, false, true);
+        // 新核心递归层级走势类型「线段」线条:各级 zslx_lines 扁平化(附 _level),用于在低周期图上
+        // 叠加显示 5m/30m… 各级线段。每级独立开关 xd_L{level},**默认关**(cfg 未显式 true 不渲染);
+        // 颜色与该级中枢同(getRecursiveLevelColor,同绝对级别),用线条与中枢框区分。
+        const recLines = [];
+        for (const lvObj of (barsResult.recursive_levels || [])) {
+            if (!lvObj || !Array.isArray(lvObj.zslx_lines)) continue;
+            const lvl = lvObj.level || 0;
+            // 走势类型总开关 zslx_all(默认关,新key避开遗留 xd_zslx);开后各级默认显示、可单独关。
+            if (!(cfg.zslx_all === true && cfg['xd_L' + lvl] !== false)) continue;
+            for (const ln of lvObj.zslx_lines) recLines.push({ ...ln, _level: lvl });
+        }
+        this.reconcile('recursive_zslx_lines', recLines, from, symbolKey, (item) => {
+            const lvl = item._level || 0;
+            const color = getRecursiveLevelColor(currentInterval, lvl);
+            return safeCreate(ChartUtils.createLineShape(this.chart, clampHeadToFrom(item), { color, linewidth: 2 }), 'rec_xdl');
         }, false, true);
         // P7 higher_zs 已停用(后端不再产出)。保留空路径防旧 cache 残留数据报错;
         // 内存缓存可能短暂命中旧 higher_zs(此时已无 per-period 开关可关),重启服务/清缓存后消失。
@@ -1799,6 +2114,9 @@ class ChartManager {
         this.reconcile('recursive_mmds', recMmds, from, symbolKey, (item) => safeCreate(ChartUtils.createMmdShape(this.chart, item, mmdOpt), 'rec_mmd'), false);
         this.reconcile('recursive_mmd_labels', recMmds, from, symbolKey, (item) => safeCreate(ChartUtils.createMmdLabelShape(this.chart, item, mmdOpt), 'rec_mmd_label'), false);
         this.reconcile('recursive_bcs', recBcs, from, symbolKey, (item) => safeCreate(ChartUtils.createBcShape(this.chart, item), 'rec_bc'), false);
+
+        // 刷新画图调色板(周期/数据变化后级别颜色更新;优先 TV 工具栏注入,失败回退浮层)。
+        this.updateDrawPalette();
 
         // 一轮 reconcile 完后扫一次孤儿,清理 race 残留(safeRemove 静默失败 / container 提前清零)。
         // 因为 reconcile 内 create 是异步的,延后到下一帧执行,等所有 promise resolve 后再扫。
@@ -2047,6 +2365,9 @@ class ChartManager {
 
     dispose() {
         this._closeSseStream();
+        // 工具栏注入重试定时器:正常 ≤4.2s 自停,但实例若在窗口内被 dispose 需显式清,
+        // 避免定时器多跑几拍对已 dispose 实例操作(与 _sweepOrphanTimer 等清理对齐,审查 L-3)。
+        if (this._lvlbtnTimer) { clearInterval(this._lvlbtnTimer); this._lvlbtnTimer = null; }
         if (this._visibilityHandler) {
             document.removeEventListener('visibilitychange', this._visibilityHandler);
             this._visibilityHandler = null;

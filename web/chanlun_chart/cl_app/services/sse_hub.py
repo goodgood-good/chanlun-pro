@@ -25,15 +25,35 @@ class SseHub:
         sub = self._subs.get(cache_key)
         if sub is None:
             while len(self._subs) >= self.max_loops:
-                old_key, old_sub = self._subs.popitem(last=False)
+                # 优先淘汰"无活跃 client"的循环(异常路径残留);避免砍掉仍有在线用户的循环 →
+                # 否则该用户 SSE 静默失效(连心跳都停)+半僵尸长连接卡在 _closed.wait()(审查 M3)。
+                evict_key = next(
+                    (k for k, s in self._subs.items() if not s.get("clients")), None
+                )
+                if evict_key is not None:
+                    old_key = evict_key
+                    old_sub = self._subs.pop(old_key)
+                    forced = False
+                else:
+                    # 全部都有活跃 client = 真过载:淘汰最旧的,但把它的 client 也干净关闭
+                    # (_unsub → set _closed → 前端 onerror 重连/退回轮询),不留半僵尸连接。
+                    old_key, old_sub = self._subs.popitem(last=False)
+                    forced = True
                 old_loop = old_sub.get("loop")
                 if old_loop is not None:
                     try:
                         old_loop.stop()
                     except Exception as e:
                         LogUtil.warning(f"[sse_hub] LRU 淘汰停止循环 {old_key} 失败: {e}")
+                if forced:
+                    for c in list(old_sub.get("clients") or ()):
+                        try:
+                            c._unsub()
+                        except Exception:
+                            pass
                 LogUtil.warning(
-                    f"[sse_hub] 达上限 {self.max_loops}，LRU 淘汰最久未活跃循环 {old_key}"
+                    f"[sse_hub] 达上限 {self.max_loops}，LRU 淘汰循环 {old_key}"
+                    + ("(强制:已关闭其在线client令其重连)" if forced else "(空闲)")
                 )
             loop = start_loop_fn(cache_key)
             self._subs[cache_key] = {"clients": {client}, "loop": loop}

@@ -50,6 +50,11 @@ class AlertTasks(object):
 
     def alert_run(self, alert_id):
         alert_config = self.alert_get(alert_id)
+        if alert_config is None:
+            # 任务被并发删除(alert_del→task_delete)后,本轮已被 default 池调度的触发仍会进来,
+            # alert_get 返回 None → 原 Market(None.market) 抛 AttributeError(审查 F1)。
+            # 视为"任务已删除"静默跳过,不刷无意义的 AttributeError 噪音。
+            return True
         ex = get_exchange(Market(alert_config.market))
         if ex.now_trading() is False:
             return True

@@ -197,9 +197,14 @@ class XuanguTasks(object):
         # 目标分组下并发跑会被误判成"上一次任务还没结束"而被拒绝。
         freqs_part = "-".join(freqs) if freqs else "nofreq"
         task_id = f"{market}_{xuangu_task_name}_{freqs_part}_{target_zx_group}"
+        # 仅当任务确实"活跃/待运行"时才拒绝重发;原判据 `state != "已完成"` 会把终态
+        # "执行异常"(job 抛异常)/"未执行"(missed)/"删除作业"(date job 跑完自动移除,该事件可能
+        # 在 JOB_EXECUTED 之后最后落定)也误判成"未结束"→ 任务永久锁死直到重启 web(审查 F2)。
+        # 改为只拒绝真正占用中的状态(运行中/等待运行/已添加),终态/异常/已删一律放行重跑。
+        _ACTIVE_XG_STATES = {"运行中", "等待运行", "已添加"}
         if (
             task_id in self.scheduler.my_task_list.keys()
-            and self.scheduler.my_task_list[task_id]["state"] != "已完成"
+            and self.scheduler.my_task_list[task_id]["state"] in _ACTIVE_XG_STATES
         ):
             return False
 

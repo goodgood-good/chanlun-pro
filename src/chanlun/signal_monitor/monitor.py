@@ -88,13 +88,21 @@ def monitoring_signal_code(
             continue
         new_signals.append(sig)
         try:
-            _repo.signal_record_save(
-                market=market, task_name=task_name, stock_code=code,
-                stock_name=name, operation_level=sig.operation_level,
-                signal_kind=sig.signal_kind, direction=sig.direction,
-                identity=sig.identity, grade=sig.grade, score=sig.score,
-                alert_msg=sig.msg, signal_dt=sig.k_date,
-            )
+            if exists is not None:
+                # S2: 分级升级路径 update 既有行,不再 add 新行——否则 cl_signal_record 随
+                # "信号数 × 升级次数"无界膨胀。去重仍按最近一条比 grade,推送行为不变。
+                _repo.signal_record_update(
+                    exists.id, grade=sig.grade, score=sig.score,
+                    alert_msg=sig.msg, signal_dt=sig.k_date,
+                )
+            else:
+                _repo.signal_record_save(
+                    market=market, task_name=task_name, stock_code=code,
+                    stock_name=name, operation_level=sig.operation_level,
+                    signal_kind=sig.signal_kind, direction=sig.direction,
+                    identity=sig.identity, grade=sig.grade, score=sig.score,
+                    alert_msg=sig.msg, signal_dt=sig.k_date,
+                )
         except Exception as e:
             _log.warning(f"[monitoring_signal_code] record save failed: {e}")
 

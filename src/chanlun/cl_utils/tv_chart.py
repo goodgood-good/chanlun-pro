@@ -348,8 +348,17 @@ def cl_data_to_tv_chart(
 
     def _zslx_line_points(zslx) -> list:
         """走势类型的折线端点:用其真实起止分型,而不是中枢矩形边界。"""
-        start = zslx.start or zslx.zss[0].lines[0].start
-        end = zslx.end or zslx.zss[-1].lines[-1].end
+        # zss[0].lines 正常核心产出恒非空(中枢≥3段),但递归层/kuozhan 在边缘实时数据上可能
+        # 产出 lines=[] 的退化 zs → 裸 lines[0] 抛 IndexError 冒泡(调用点无 try)使整周期
+        # no_data(审查 F-5)。start/end 推不出时返回空线条(该 zslx 跳过渲染),不拖垮整张图。
+        start = zslx.start or (
+            zslx.zss[0].lines[0].start if (zslx.zss and zslx.zss[0].lines) else None
+        )
+        end = zslx.end or (
+            zslx.zss[-1].lines[-1].end if (zslx.zss and zslx.zss[-1].lines) else None
+        )
+        if start is None or end is None:
+            return []
         return [
             {"time": fun.datetime_to_int(start.k.date), "price": start.val},
             {"time": fun.datetime_to_int(end.k.date), "price": end.val},
@@ -480,13 +489,29 @@ def cl_data_to_tv_chart(
                 logging.getLogger(__name__).warning(
                     "get_kuozhan_levels 顶层失败 → 无 5m/30m 中枢/买卖点/背驰", exc_info=True)
                 _kuozhan_levels = []
+            # 高级别走势类型「线段」线条:取同级分支(get_recursive_branch_levels)的 zslxs。
+            # 分支级 L 的 zslxs 即该级走势类型(=高一周期的「线段」,递归颜色与本级中枢同绝对级别),
+            # 用于在低周期图上画出 5m/30m… 各级线段线条。只画线条(_zslx_to_line_chart),
+            # 不画区间矩形(band 在高级别会塌成假宽框,见上「高级别走势递归暂不渲染」)。
+            # 注:kuozhan 级 lvl 与分支级 index 对齐(<30m kuozhan 走 blockr_level 递增);
+            # tongjibie 级或分支递归未达该深度时 → 无对应分支级 → 空线条(中枢框仍照常显示)。
+            _by_blevel = {lv.level: lv for lv in levels}
             for _kl in _kuozhan_levels:
+                # kuozhan 级语义为 L1→L2→L3(级别升级链),必 ≥1;若意外含 level==0 会与上方 L0
+                # 主循环重复 append 同级条目、前端 _by_level 扁平化叠加(审查 session L-2)。硬跳过兜底。
+                if _kl["level"] == 0:
+                    continue
                 _flbl = _kuozhan_freq_label(cd.frequency, _kl["level"])
+                _blv = _by_blevel.get(_kl["level"])
+                _lv_lines = (
+                    [_zslx_to_line_chart(z, level=_kl["level"]) for z in _blv.zslxs if z.zss]
+                    if _blv is not None else []
+                )
                 recursive_levels_chart_data.append({
                     "level": _kl["level"],
                     "zss": [_zs_to_chart(z, use_envelope=False) for z in _kl["zss"]],
                     "zslxs": [],
-                    "zslx_lines": [],
+                    "zslx_lines": _lv_lines,
                     # 该级买卖点(一三类)/背驰,带 freq 级别标(5m/30m…);前端与该级中枢同 toggle(zs_L1/zs_L2)
                     "mmds": [{"points": {"time": fun.datetime_to_int(_p.anchor_fx.k.date),
                                          "price": _p.anchor_fx.val},

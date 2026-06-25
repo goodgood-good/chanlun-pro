@@ -746,6 +746,11 @@ def tv_history():
             and _to > 0
             and _to >= _from
         )
+        if firstDataRequest == "false" and not is_range_request:
+            # false 本意是 polling/向左滚动,但 from/to 缺失或非法(畸形请求或 resolution 切换瞬间)
+            # 会退化进非 range 分支、可能回吐整条全量(审查 M-3,触发面窄)。记 debug 便于线上定位,
+            # 不改行为(非 range 分支自带 stale 兜底)。
+            LogUtil.debug(f"[tv_history] false 但非 range from={_from} to={_to} {code} {frequency}")
 
         # 注意：必须先 get 出 RLock 对象再 with，确保整个临界区内引用持续存在
         # （_SafeLockRegistry 用 WeakValueDictionary 存储锁，无强引用会被 GC）
@@ -772,8 +777,9 @@ def tv_history():
                     and cache_entry.get("min_time") is not None
                     and _to <= cache_entry["min_time"]
                 ):
-                    with cache_lock:
-                        _mark_chart_cache_validated(cache_key)
+                    # 此处不 mark validated:"请求窗口早于缓存最早时间"只证明这个窄窗口无数据,
+                    # 不证明整条 entry 末端新鲜。进程重启后命中过期磁盘 entry 时若误标 fresh,
+                    # 随后的 tail_gap polling 会命中缺停机期 K 线的旧数据、绕过 stale 兜底(审查 H-2)。
                     return {"s": "no_data"}
 
                 LogUtil.debug(f"[tv_history] Cache miss ({cache_miss_reason}) req={req_tag}")
@@ -811,7 +817,7 @@ def tv_history():
                 cd = _fetch_result["cd"]
 
                 # 跨周期 MACD (P5 third step)
-                apply_higher_macd_to_chart_data(cl_chart_data, frequency, market, cl_config)
+                _htf_applied = apply_higher_macd_to_chart_data(cl_chart_data, frequency, market, cl_config)
                 # P8 取代 P7：停用真实多周期叠加，高级别中枢改由 recursive_levels 产出
                 # apply_higher_zs_to_chart_data(cl_chart_data, market, code, frequency, cl_config)
 
@@ -827,16 +833,22 @@ def tv_history():
                             cl_chart_data,
                             # cache_empty 已按全量回看拉取(见上方 kline_args 分支),
                             # 与非范围请求同样是完整快照,标 is_full_snapshot=True。
+                            # ⚠ 不再继承 existing_entry 的 is_full_snapshot:range-miss 是窄窗口结果,
+                            # 继承会把"窄范围 merge 进旧全量"误标成完整快照,令 firstDataRequest 命中
+                            # 只有几根 K 线的假全量(审查 H-1,目前仅靠 tail_gap 改道 prepend 侥幸不触发)。
                             is_full_snapshot=(
                                 (not is_range_request)
                                 or cache_miss_reason == "cache_empty"
-                                or (existing_entry or {}).get("is_full_snapshot", False)
                             ),
                         )
 
                 # prepend 路径在补完 higher_macd 后,需要把 cl_chart_data 重新写回 cache,
                 # 否则下次相同范围请求 hit 时拿到的还是无 higher_macd 的版本。
-                if cd is None and cl_chart_data is not None:
+                # M-2: 仅当 higher_macd 真被应用(_htf_applied=True)才回写——此回写纯为把新补的
+                # higher_macd 落盘(prepend 自身已落基础数据:changed 走 _set、unchanged 不变)。
+                # 无高周期倍率的周期(15m/60m/d/w/m 等)apply 返回 False → 跳过这次对未变数据的重复
+                # deepcopy+异步写盘(纯 IO);有倍率周期 apply 每次重算返 True 仍照常回写,无害不丢数据。
+                if cd is None and cl_chart_data is not None and _htf_applied:
                     with cache_lock:
                         _set_chart_cache_entry(cache_key, cl_chart_data, is_full_snapshot=True)
 
@@ -922,6 +934,19 @@ def tv_history():
             f"[tv_history] {symbol} {resolution} bars={len(_resp_t)} "
             f"first={firstDataRequest} elapsed={_elapsed_ms:.0f}ms"
         )
+
+        # OHLCV 列必须与 t 等长:前端按 index 取 c/o/h/l/v[i](上界=t.length),任一列短于 t 会在
+        # 越界处取到 undefined → 静默 NaN bar(无异常无日志,最难排查,审查 F-1)。正常计算路径恒等
+        # 长,但跨版本/半态磁盘冷层 entry 经 slice 后可能错位 → 兜底截断/右 pad 到 len(t)。
+        _t_col = cl_chart_data.get("t", []) or []
+        _n_bars = len(_t_col)
+        for _col_k in ("c", "o", "h", "l", "v"):
+            _col = cl_chart_data.get(_col_k) or []
+            if _col and len(_col) != _n_bars:
+                LogUtil.warning(
+                    f"[tv_history] 列 {_col_k} 长 {len(_col)} != t {_n_bars}, 已对齐 {symbol} {resolution}"
+                )
+                cl_chart_data[_col_k] = list(_col[:_n_bars]) + [None] * max(0, _n_bars - len(_col))
 
         return {
             "s": "ok",

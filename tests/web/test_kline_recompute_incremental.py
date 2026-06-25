@@ -152,6 +152,35 @@ def test_incremental_equals_full_end_to_end():
         kline_recompute.reset_cl_pool()
 
 
+def test_incremental_equals_full_on_mid_bar_revision():
+    """中间根被修订(非末根, 根数不变)→ 复用增量 应 == 新建全量。
+
+    审计 H1 指出:增量路径(持久 CL 池)复用判据只看 config/首根/根数,不校验中间根;
+    持久 CL 的 process_klines 会把 date<末根 的传入帧裁掉 → 若数据源回填/订正中间某根,
+    增量会丢弃该变更, 而全量(新建空 CL)会用修订后序列重算。本用例实证这一分歧是否真实。
+    """
+    kline_recompute.reset_cl_pool()
+    klines = _synth_klines(200)
+    cfg = _cl_config()
+    ck = "a:SYNMID:1m"
+    try:
+        base = klines.iloc[:200].copy()
+        recompute_chart_data_from_klines("a", "SYNMID", "1m", cfg, base.copy(), cache_key=ck)  # 建基线入池
+        # 修订中间某根(index 100)OHLC, 根数与末根都不变
+        rev = base.copy()
+        ic = rev.columns.get_loc("close")
+        ih = rev.columns.get_loc("high")
+        il = rev.columns.get_loc("low")
+        rev.iloc[100, ic] = rev.iloc[100, ic] + 5.0
+        rev.iloc[100, ih] = rev.iloc[100, ih] + 5.0
+        rev.iloc[100, il] = rev.iloc[100, il] - 5.0
+        full = recompute_chart_data_from_klines("a", "SYNMID", "1m", cfg, rev.copy())
+        inc = recompute_chart_data_from_klines("a", "SYNMID", "1m", cfg, rev.copy(), cache_key=ck)
+        assert inc == full, "中间根修订: 增量 != 全量(坐实审计 H1:复用判据漏判中间根)"
+    finally:
+        kline_recompute.reset_cl_pool()
+
+
 def test_incremental_equals_full_on_last_bar_update():
     """末根 OHLC 更新(盘中同根刷新, 根数不变)→ 复用增量 == 新建全量。
 

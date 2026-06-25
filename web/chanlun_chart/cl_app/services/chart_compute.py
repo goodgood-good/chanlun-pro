@@ -249,9 +249,8 @@ def _merge_chart_data(existing_data: dict, new_data: dict):
     aligned_keys = [
         "c", "o", "h", "l", "v",
         "macd_dif", "macd_dea", "macd_hist", "macd_area",
-        "higher_macd_dif", "higher_macd_dea", "higher_macd_hist",
     ]
-    # time->index 映射只建一次跨 12 个字段复用；重复时间戳 dict comprehension 后者覆盖前者。
+    # time->index 映射只建一次跨字段复用；重复时间戳 dict comprehension 后者覆盖前者。
     existing_idx = {bar_time: i for i, bar_time in enumerate(existing_times)}
     new_idx = {bar_time: i for i, bar_time in enumerate(new_times)}
     for key in aligned_keys:
@@ -269,10 +268,34 @@ def _merge_chart_data(existing_data: dict, new_data: dict):
             ni = new_idx.get(bar_time)
             if ni is not None and ni < len(new_values):
                 new_val = new_values[ni]
-                # 仅当新值有效时覆盖；None 不覆盖已有有效值
+                # 仅当新值有效时覆盖；None 不覆盖已有有效值(OHLCV:新窗口没覆盖的旧 bar 应保留)
                 if new_val is not None or val is None:
                     val = new_val
             merged_col.append(val)
+        merged[key] = merged_col
+
+    # HTF(跨周期)MACD 三列单独合并:高周期插值产物,首个有效高周期桶之前的 bar 恒 None。
+    # 不能套上面"None 不覆盖旧值"的逐 bar 规则(那是为 OHLC 保留历史设计)——否则新计算在某 bar
+    # 算出 None、而旧 entry 同 bar 是旧非 None 值时会保留旧值,造成 HTF 边界"旧算法残留点"(审查
+    # M-1)。规则:new 覆盖到的 bar 一律以 new 为准(含 None);new 未覆盖的 bar 才保留旧值。
+    for key in ("higher_macd_dif", "higher_macd_dea", "higher_macd_hist"):
+        existing_values = existing_data.get(key, [])
+        new_values = new_data.get(key, [])
+        if not existing_values and not new_values:
+            merged[key] = []
+            continue
+        merged_col = []
+        for bar_time in all_times:
+            ni = new_idx.get(bar_time)
+            if ni is not None and ni < len(new_values):
+                merged_col.append(new_values[ni])
+            else:
+                ei = existing_idx.get(bar_time)
+                merged_col.append(
+                    existing_values[ei]
+                    if (ei is not None and ei < len(existing_values))
+                    else None
+                )
         merged[key] = merged_col
 
     for key in [
@@ -453,11 +476,26 @@ def slice_chart_data_to_window(chart_data: dict, from_ts: int, to_ts: int) -> di
         sliced[field] = filter_shapes_in_window(
             chart_data.get(field, []) or [], from_ts, to_ts
         )
-    # 递归层级树 / 区间套是嵌套结构(不在 SHAPE_FIELDS,不按窗口裁切),整体透传。
-    # 高级中枢和区间套属「全局视角」,跨窗口仍应可见。
-    for field in ("recursive_levels", "interval_nest", "higher_zs"):
+    # 区间套 / 高级中枢是嵌套结构(不在 SHAPE_FIELDS),属「全局视角」跨窗口仍应可见,整体透传。
+    for field in ("interval_nest", "higher_zs"):
         if field in chart_data:
             sliced[field] = chart_data[field]
+    # recursive_levels:中枢框/走势类型线(zss/zslx_lines)全局可见整体透传,但每级嵌套的买卖点
+    # mmds / 背驰 bcs 是单点形态,必须与顶层 mmds/bcs 同口径按窗口裁切——否则窄窗口滚动请求会把
+    # 全量各级买卖点泄漏到该窄历史窗(响应体虚增 + 语义错位:滚到很早的窗却收到当下买卖点 + 前端
+    # 双绘,审查 F-2)。
+    if "recursive_levels" in chart_data:
+        _rl = []
+        for _lv in (chart_data.get("recursive_levels") or []):
+            if not isinstance(_lv, dict):
+                _rl.append(_lv)
+                continue
+            _lv2 = dict(_lv)
+            for _k in ("mmds", "bcs"):
+                if _k in _lv2:
+                    _lv2[_k] = filter_shapes_in_window(_lv2[_k] or [], from_ts, to_ts)
+            _rl.append(_lv2)
+        sliced["recursive_levels"] = _rl
     return sliced
 
 

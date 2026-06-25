@@ -1,5 +1,6 @@
 import datetime
 import logging
+import threading
 import time
 from functools import wraps
 
@@ -44,13 +45,18 @@ def get_logger(filename=None, level=logging.INFO) -> logging.Logger:
 
 
 def singleton(cls):
-    """类装饰器：保证每个类只实例化一次（进程级单例）。"""
+    """类装饰器：保证每个类只实例化一次（进程级单例，线程安全 DCL）。"""
     instance = {}
+    lock = threading.Lock()
 
     @wraps(cls)
     def wrapper(*args, **kwargs):
+        # 无锁快路径 + 锁内 double-check:防止启动期多线程并发首次实例化同一类时各自构建
+        # 一份(如 ExchangeChangQiao 双建会泄漏 16-32 worker 线程池,审查 B-1)。
         if cls not in instance:
-            instance[cls] = cls(*args, **kwargs)
+            with lock:
+                if cls not in instance:
+                    instance[cls] = cls(*args, **kwargs)
         return instance[cls]
 
     return wrapper

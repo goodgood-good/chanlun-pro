@@ -163,6 +163,19 @@ def main() -> None:
         s = HTTPServer(tornado_app)
         s.bind(9900, config.WEB_HOST)
 
+        # 安全告警:免密(LOGIN_PWD 空)时任何能访问端口者都是已登录用户。绑定到非本机地址
+        # (空=全部接口 / 0.0.0.0 / 公网)且未设密码 = 零鉴权暴露(审查 安全 F1)。醒目提示设密码。
+        _web_host = str(getattr(config, "WEB_HOST", "") or "")
+        _login_pwd = str(getattr(config, "LOGIN_PWD", "") or "")
+        if _web_host not in ("127.0.0.1", "localhost", "::1") and not _login_pwd:
+            _sec_banner = (
+                f"[安全告警] WEB_HOST={_web_host or '(空=全部接口)'} 绑定非本机且 LOGIN_PWD 为空 → "
+                "任何能访问 9900 端口者都将以已登录身份访问(读自选/持仓、改配置、触发 AI 烧 token)。"
+                "公网/不可信网络部署请设置环境变量 CHANLUN_LOGIN_PWD。"
+            )
+            LogUtil.warning(_sec_banner)
+            print("\n" + "=" * 80 + "\n" + _sec_banner + "\n" + "=" * 80 + "\n", flush=True)
+
         # 先启动 symbol 预加载后台线程：daemon 线程，不阻塞主流程，
         # 让其与 HTTP 服务启动并行，争取在用户首次发起请求前完成首轮缓存填充。
         start_symbol_preload_thread()

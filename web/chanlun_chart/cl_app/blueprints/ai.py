@@ -37,9 +37,15 @@ def ai_analyse():
 @ai_bp.route("/ai/analyse_records/<market>", methods=["GET"])
 @login_required
 def ai_analyse_records(market: str = "a"):
-    # 获取分页参数
-    page = request.args.get("page", 1, type=int)
-    limit = request.args.get("limit", 10, type=int)
+    # market 走白名单(与 /ai/analyse 一致),否则非法 market 进 Market() 裸 500。
+    market = (market or "").strip().lower()
+    if market not in market_types:
+        return {"code": 1, "msg": f"未知市场: {market!r}", "count": 0, "data": []}, 400
+
+    # 分页参数 clamp:无上界时超大 limit 会拉全表+序列化=自我 DoS、负 page 产生负 offset
+    # (审查 F2)。type=int 解析失败返回 None,用 `or` 兜底默认值。
+    page = max(1, request.args.get("page", 1, type=int) or 1)
+    limit = min(max(1, request.args.get("limit", 10, type=int) or 10), 200)
 
     # 调用分页查询
     ai_analyse_records, total = AIAnalyse(market=market).analyse_records(

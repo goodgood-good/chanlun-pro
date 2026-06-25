@@ -901,7 +901,10 @@ class ExchangeChangQiao(Exchange):
         )
         if not allow_long_history:
             max_lookback = get_lookback_timedelta(frequency, default=timedelta(days=30))
-            earliest_allowed = now_dt - max_lookback
+            # 裁剪基准用 end_dt(查询窗口的结束)而非 now_dt:历史区间查询(end_date 在过去)用
+            # now_dt 会把 start 裁到"现在回看窗口"、导致 start>=end 直接返空(审查 H2)。改 end_dt
+            # 后语义为"从 end_dt 往前最多 lookback",窗口宽度仍受限(不超拉),历史查询也成立。
+            earliest_allowed = end_dt - max_lookback
             if start_dt < earliest_allowed:
                 start_dt = earliest_allowed
         if start_dt >= end_dt:
@@ -980,7 +983,16 @@ class ExchangeChangQiao(Exchange):
 
         # *** 7. 向量化构建 DataFrame (核心修复) ***
         try:
-            unique_candles = {c.timestamp: c for c in all_candles}.values()
+            # 同 timestamp 去重:实时进行中 bar 可能被多个分段各拉到一次(OHLC/volume 不同),
+            # as_completed 完成顺序不确定 → 原 {ts:c} 字典推导保留"最后 extend 进来"的那个 = 末根
+            # bar 非确定(审查 M3)。改为同 ts 取 volume 最大者:进行中 bar volume 单调增,最大 = 最新
+            # 快照,结果确定。历史 bar 各 ts 唯一,行为不变。
+            _by_ts = {}
+            for c in all_candles:
+                _prev = _by_ts.get(c.timestamp)
+                if _prev is None or float(c.volume) >= float(_prev.volume):
+                    _by_ts[c.timestamp] = c
+            unique_candles = _by_ts.values()
             if not unique_candles:
                 return pd.DataFrame()
 

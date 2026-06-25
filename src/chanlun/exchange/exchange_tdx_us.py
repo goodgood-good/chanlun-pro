@@ -261,13 +261,15 @@ class ExchangeTDXUS(Exchange):
                         volume=_quote["zongliang"],
                         open=_quote["open"],
                         rate=(
+                            # 涨跌幅 =(现价-昨收)/昨收;原分母用现价 price 是错的(涨 10% 会显示
+                            # 成 ~9.09%),改除以 pre_close 与 cq/QMT 口径一致(审查 L2)。
                             round(
                                 (_quote["price"] - _quote["pre_close"])
-                                / _quote["price"]
+                                / _quote["pre_close"]
                                 * 100,
                                 2,
                             )
-                            if _quote["pre_close"] > 0 and _quote["price"] > 0
+                            if _quote["pre_close"] > 0
                             else 0
                         ),
                     )

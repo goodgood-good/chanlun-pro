@@ -53,3 +53,6 @@ class SseFlowTest(tornado.testing.AsyncHTTPTestCase):
         body = b"".join(chunks).decode("utf-8", "ignore")
         assert "event: chanlun" in body
         assert "\"bis\"" in body
+        # SSE 帧必须带 full_snapshot 标记:前端据此整体替换形态列表,杜绝"多个未完成笔"等
+        # 累积。缺了它前端会退回"只增不删"合并 → 累积复发,故钉死此契约。
+        assert "full_snapshot" in body

@@ -238,10 +238,15 @@ class ExchangeTDXFX(Exchange):
                             break
 
             klines = klines.drop_duplicates(["date"], keep="last").sort_values("date")
+            # ⚠ frequency=="10m" 时这里 save 的 klines 内容实为 5 分钟原始 K 线(10m 的 resample
+            # 在下方对 result 做、不回写缓存)。缓存键虽写 "10m" 但语义是 5min,严禁哪天"优化"成命中
+            # 缓存直接 return 跳过 resample——会产出 5min 当 10m 的脏数据(审查 H3)。
             self.fdb.save_tdx_klines(Market.FX.value, code, frequency, klines)
 
             klines.loc[:, "code"] = code
             klines.loc[:, "volume"] = klines["trade"]
+            # date 从原始 datetime 列(pytdx 返回 naive 字符串)重建再 localize,故恒 naive、localize
+            # 安全;Asia/Shanghai 无 DST 也不产生 ambiguous/nonexistent(审查 L3 已核安全)。
             klines.loc[:, "date"] = pd.to_datetime(klines["datetime"]).dt.tz_localize(
                 self.tz
             )
@@ -249,9 +254,11 @@ class ExchangeTDXFX(Exchange):
             klines[["volume"]] = klines[["volume"]].astype(float)
 
             result = klines[["code", "date", "open", "close", "high", "low", "volume"]]
-            # 通达信扩展行情无原生 10 分钟周期(frequency_map['10m']=category 0=5分钟),拿到的
-            # 是 5 分钟 K 线,需 resample 合成真 10 分钟(与 exchange_tdx_us.py:203 同口径,共用
-            # convert_us_tdx_kline_frequency:外汇与美股 tdx 时间戳同为 UTC+8 存储,resample 通用)。
+            # 通达信扩展行情无原生 10 分钟周期(frequency_map['10m']=category 0=5分钟),拿到的是
+            # 5 分钟 K 线,需 resample 合成真 10 分钟(与 exchange_tdx_us.py 共用 convert_us_tdx_
+            # kline_frequency)。共用前提是"date 列已带 tz":本函数上方已 localize 到 +8;us 经
+            # _convert_dt 已转美东 tz(非 UTC+8——原注释"同为 UTC+8 存储"对 us 不准,审查 M4)。
+            # convert 内部统一 tz_convert(UTC) 后按 UTC 整 10 分切 bin,故两源通用。
             if frequency == "10m":
                 result = convert_us_tdx_kline_frequency(result, "10m")
             result = normalize_kline_precision(result, "fx", code)
@@ -301,13 +308,15 @@ class ExchangeTDXFX(Exchange):
                         volume=_quote["zongliang"],
                         open=_quote["open"],
                         rate=(
+                            # 涨跌幅 =(现价-昨收)/昨收;原分母用现价 price 是错的(涨 10% 会显示
+                            # 成 ~9.09%),改除以 pre_close 与 cq/QMT 口径一致(审查 L2)。
                             round(
                                 (_quote["price"] - _quote["pre_close"])
-                                / _quote["price"]
+                                / _quote["pre_close"]
                                 * 100,
                                 2,
                             )
-                            if _quote["price"] > 0
+                            if _quote["pre_close"] > 0
                             else 0
                         ),
                     )

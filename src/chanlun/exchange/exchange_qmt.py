@@ -71,10 +71,12 @@ class ExchangeQMT(Exchange):
 
         # ===== QMT 专属回看覆盖（只影响 QMT/A股，不动共享 _lookback.py、不影响美股 alpaca/polygon）=====
         # 5m 拉长到 365 天，让 5min 图能装出 30m 同级别中枢(需更长 5m 历史才凑得出 3 段走势类型重合)。
-        # 1m 不再覆盖：跟随共享 _lookback.py 的 60 天，与美股(alpaca/polygon/长桥)1m 口径一致。
-        # 权衡：天数越大 → 30m 结构越多，但 K 线越多→计算/BSON payload 越重、图表加载越慢;
-        #       且 QMT 实际能回看多少由数据源返回为准(指数/主板通常比个股长)。
+        # 1m 覆盖到 60 天(2026-06-25 用户反馈"1m 周期还是太短"):QMT 本地源切标的快、可承受更长
+        # 1m;只覆盖 A股,不动共享 _lookback.py → 美股(长桥)1m 仍 30 天(拉 60 天会切标的卡 20-31s)。
+        # 权衡：天数越大 → 1m/递归层级越多，但 K 线越多→计算/BSON payload 越重、首屏越慢;
+        #       且 QMT 实际能回看多少由数据源返回为准(指数/主板通常比个股长,部分个股可能不足 60 天)。
         QMT_LOOKBACK_OVERRIDE_DAYS = {
+            "1m": 60,     # A股 1m 拉长(本地源快;US 不动以保切标的速度)
             "5m": 365,    # 5min 图的 30m 同级别需更长 5m 历史
         }
         for _freq, _days in QMT_LOOKBACK_OVERRIDE_DAYS.items():
@@ -199,6 +201,14 @@ class ExchangeQMT(Exchange):
     ) -> pd.DataFrame:
         empty_df = pd.DataFrame(columns=['code', 'date', 'open', 'high', 'low', 'close', 'volume'])
 
+        # QMT 可服务周期 = 原生(frequency_map) + convert 合成(2m/10m resample, 120m 分段)。
+        # 其余(q/y/3m/6m 等)convert 不支持:历史会 fallback 读 1m 再 convert 抛异常,被外层
+        # @retry 吞 3 次 → RetryError(审查 M5)。与 cq 一致在入口如实拒绝,不降级、不进 retry。
+        QMT_SUPPORTED_FREQS = {"1m", "2m", "5m", "10m", "15m", "30m", "60m", "120m", "d", "w", "m"}
+        if frequency not in QMT_SUPPORTED_FREQS:
+            LogUtil.warning(f"[ExchangeQMT.klines] 不支持的周期 {frequency} code={code}, 返回空(不降级)")
+            return empty_df
+
         qmt_read_period = self.frequency_map.get(frequency, "1m")
         qmt_code = self.code_to_qmt(code)
 
@@ -293,7 +303,9 @@ class ExchangeQMT(Exchange):
             klines_df["date"] = pd.to_datetime(klines_df["date"], unit="ms", utc=True)
             klines_df["date"] = klines_df["date"].dt.tz_convert(self.tz)
 
-            if frequency in ["d", "w", "m", "y"]:
+            if frequency in ["d", "w", "m"]:
+                # "y" 已删:frequency_map 无 y(年线触发 BSON 崩溃已移除)、M5 白名单入口亦拒 y,
+                # 原 ["d","w","m","y"] 的 y 分支是到不了的死代码(审查 L1)。
                 klines_df["date"] = klines_df["date"].dt.normalize() + pd.Timedelta(hours=15)
         except Exception as e:
             LogUtil.warning(
@@ -310,6 +322,23 @@ class ExchangeQMT(Exchange):
         # 非原生周期（如 2m/10m）通过 convert_stock_kline_frequency 从 1m 合成
         if frequency not in self.frequency_map:
             klines_df = convert_stock_kline_frequency(klines_df, frequency)
+
+        # end_date 历史区间裁剪:本函数原忽略 end_date(只用 start 算 query_start、拉到最新),
+        # 历史回放/区间查询会返回超出 end_date 的未来数据(审查 M2)。仅对"过去日历日"的历史查询
+        # 裁剪;实时(end_date 为今日/未来)跳过——否则 d/w/m 规整到当日 15:00 的在制 bar(date 晚于
+        # intraday 的 now)会被裸 `date<=now` 误删。
+        if end_date:
+            try:
+                _end_dt = pd.to_datetime(end_date)
+                _end_dt = (
+                    _end_dt.tz_localize(self.tz)
+                    if _end_dt.tzinfo is None
+                    else _end_dt.tz_convert(self.tz)
+                )
+                if _end_dt.date() < datetime.datetime.now(self.tz).date():
+                    klines_df = klines_df[klines_df["date"] <= _end_dt]
+            except Exception as _e:
+                LogUtil.warning(f"[exchange_qmt] end_date 裁剪跳过 code={code} end={end_date}: {_e}")
 
         # 按调用方声明的 req_counts 截断，避免返回超过需要的数据
         if args and "req_counts" in args:

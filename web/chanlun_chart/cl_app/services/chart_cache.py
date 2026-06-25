@@ -190,7 +190,10 @@ def _stable_hash(obj) -> str:
 #   次级别=下级中枢摆动腿(topic2 C2.10:对 5m 中枢,3买回试=「1m 走势类型」,非单根线段;旧
 #   xds[b0+1]/[b0+2] 单线段口径与 30m 修复前同质的级别错配)。影响 1m 图 recursive_levels
 #   L1(5m) 的 bsp/bcs(中枢序列不变);5m/30m 图升级链走 tongjibie 不受影响。强制旧缓存失效。
-_CHART_CACHE_SCHEMA_VERSION = "v35"
+# - v36 (2026-06-24) ── 递归配色:kuozhan 高级别(5m/30m…)补 ``zslx_lines``(取同级分支 zslxs),
+#   供前端在低周期图上画各级走势类型「线段」线条(原仅 L0 有线条、高级别空)。字段已存在、
+#   现在被填充;source_fingerprint 已随 tv_chart 改动变化,显式 bump 求稳。
+_CHART_CACHE_SCHEMA_VERSION = "v36"
 
 
 def _build_cache_key(market: str, code: str, frequency: str, cl_config: dict) -> str:
@@ -229,7 +232,11 @@ def _normalize_cache_entry(cached) -> Optional[dict]:
     if isinstance(cached, dict) and "data" in cached and "validated_at" in cached:
         return cached
     if isinstance(cached, dict):
-        return _build_chart_cache_entry(cached, is_full_snapshot=True, validated_at=time.time())
+        # 老格式(无 validated_at 的裸 chart_data)补 validated_at 设 0 而非 now():设 now() 会把
+        # 一条实际很旧的磁盘老格式 entry 误标"刚验证过",绕过新鲜度兜底(审查 L-2)。设 0 →
+        # _entry_freshness 判 stale → firstDataRequest 强制重算,安全。(v36+source_fingerprint
+        # 已使绝大多数老格式 key 自然 miss,此为防御性收口。)
+        return _build_chart_cache_entry(cached, is_full_snapshot=True, validated_at=0)
     return None
 
 

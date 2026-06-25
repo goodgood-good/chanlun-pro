@@ -296,31 +296,33 @@ class DB(object):
         with self.Session() as session:
             table = self.klines_tables(market, code)
 
-            # SQLite 分支：逐行 upsert，必须有 try/except + rollback，
-            # 否则一条记录失败会让前面已 add 的数据状态不一致。
+            # SQLite 也用方言级原子 upsert(on_conflict_do_update),与下方 MySQL 分支对齐:
+            # 原"逐行 query→add/update"在多 worker(default 池 10 线程)并发写同一 (code,dt,f)
+            # 时,两线程都 query 到 None → 都 add → 第二个 commit 撞 UniqueConstraint → 整批
+            # 回滚失败(审查 F4)。on_conflict 按唯一键 (code,dt,f) 原子"插入或更新",无竞态。
             if config.DB_TYPE == "sqlite":
+                from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+
+                batch_size = self.KLINES_INSERT_BATCH_SIZE
                 try:
-                    for _in_k in data_to_insert:
-                        db_k = (
-                            session.query(table)
-                            .filter(
-                                table.code == code,
-                                table.f == frequency,
-                                table.dt == _in_k["dt"],
-                            )
-                            .first()
+                    for i in range(0, len(data_to_insert), batch_size):
+                        batch = data_to_insert[i : i + batch_size]
+                        insert_stmt = sqlite_insert(table).values(batch)
+                        # 主键/唯一键列不参与 update(与 MySQL 分支同口径)
+                        update_columns = {
+                            x.name: x
+                            for x in insert_stmt.excluded
+                            if x.name not in ("code", "dt", "f")
+                        }
+                        upsert_stmt = insert_stmt.on_conflict_do_update(
+                            index_elements=["code", "dt", "f"],
+                            set_=update_columns,
                         )
-                        if db_k is None:
-                            session.add(table(**_in_k))
-                        else:
-                            session.query(table).filter(
-                                table.code == code,
-                                table.f == frequency,
-                                table.dt == _in_k["dt"],
-                            ).update(_in_k)
+                        session.execute(upsert_stmt)
                     session.commit()
-                except Exception:
+                except Exception as e:
                     session.rollback()
+                    LogUtil.error(f"SQLite Batch Upsert Error: {e}")
                     raise
                 return True
 
@@ -1253,11 +1255,26 @@ class DB(object):
         return None
 
     def cache_set(self, key: str, val: dict, expire: int = 0):
+        # 原子 upsert(按主键 k)取代"delete+insert":后者两线程并发同 key 会
+        # delete-delete-insert-insert 撞主键 → 一方 rollback+raise 冒泡到调用方(审查 F5)。
+        # 与 klines_save 同口径按 DB_TYPE 选方言级 upsert。
+        payload = {"k": key, "v": json.dumps(val), "expire": expire}
         with self.Session() as session:
             try:
-                session.query(TableByCache).filter(TableByCache.k == key).delete()
-                cache = TableByCache(k=key, v=json.dumps(val), expire=expire)
-                session.add(cache)
+                if config.DB_TYPE == "sqlite":
+                    from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+
+                    stmt = sqlite_insert(TableByCache).values(**payload)
+                    stmt = stmt.on_conflict_do_update(
+                        index_elements=["k"],
+                        set_={"v": stmt.excluded.v, "expire": stmt.excluded.expire},
+                    )
+                else:
+                    stmt = insert(TableByCache).values(**payload)
+                    stmt = stmt.on_duplicate_key_update(
+                        v=stmt.inserted.v, expire=stmt.inserted.expire
+                    )
+                session.execute(stmt)
                 session.commit()
             except Exception:
                 session.rollback()

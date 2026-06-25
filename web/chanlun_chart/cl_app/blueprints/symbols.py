@@ -1001,13 +1001,15 @@ class PrewarmManager:
                         try:
                             fut = executor.submit(_process_one, item)
                         except RuntimeError as e:
-                            # executor 已 shutdown 等异常：把当前 item 放回 pending 队首
-                            # 不要把 c 加进 processed，否则后续轮次的 hot_codes 重排会跳过它，
-                            # 该标的会被静默漏算。
-                            LogUtil.warning(
-                                f"[prewarm] submit failed market={market} code={c}: {e}"
+                            # executor 已 shutdown(异常态)无法再 submit。executor 是 per-task 单例
+                            # (with 在 while 外),一旦死透不可恢复:原 break 只跳出本批 for,外层 while
+                            # 会逐批 RuntimeError→break 把剩余标的静默漏算、进度永卡在 total 之下;rewind
+                            # cursor 重试则因 executor 仍死而死循环(审查 B-2)。故直接抛出,让外层 try 把
+                            # 任务标 error(可见失败),不静默卡死、不死循环。
+                            LogUtil.error(
+                                f"[prewarm] executor submit failed, abort task market={market} code={c}: {e}"
                             )
-                            break
+                            raise
                         futures[fut] = c
                         if c:
                             # 仅在 submit 成功之后才标记为已处理，与 hot_codes 重排逻辑保持一致。

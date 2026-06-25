@@ -34,13 +34,16 @@ def record_user_request(market: str, code: str, frequency: str) -> None:
     global _last_record
     key = (market, code, frequency)
     now = time.time()
-    if (
-        _last_record is not None
-        and _last_record[0] == key
-        and now - _last_record[1] < _DEBOUNCE_SECONDS
-    ):
-        return
-    _last_record = (key, now)
+    # 防抖判断 + _last_record 更新纳入 _LOCK:原在锁外读写,并发(多 tab/切周期)下两线程
+    # 同读旧值都判定"需写"→防抖失效 + lost-update(审查 B-3)。锁内 check-then-set 杜绝。
+    with _LOCK:
+        if (
+            _last_record is not None
+            and _last_record[0] == key
+            and now - _last_record[1] < _DEBOUNCE_SECONDS
+        ):
+            return
+        _last_record = (key, now)
 
     payload = {
         "version": _VERSION,

@@ -1,3 +1,5 @@
+import threading
+
 from chanlun import config
 from chanlun.market import Market
 from chanlun.exchange.exchange import Exchange
@@ -5,14 +7,27 @@ from chanlun.exchange.exchange_cq import ExchangeChangQiao
 
 # 进程级单例缓存，避免每次调用重新初始化（TDX/QMT 初始化耗时且有状态）
 g_exchange_obj = {}
+# 构造期互斥锁:防止启动期多线程并发首访同一 market 各自构建实例(审查 B-1)
+_get_exchange_lock = threading.Lock()
 
 
 def get_exchange(market: Market) -> Exchange:
-    """根据 config 配置返回指定市场的交易所适配器单例。"""
+    """根据 config 配置返回指定市场的交易所适配器单例（线程安全 DCL）。"""
     global g_exchange_obj
     if market.value in g_exchange_obj.keys():
         return g_exchange_obj[market.value]
+    # g_exchange_obj 是裸 dict,无锁 check-then-act 在启动期多线程并发首访同一 market 时会各自
+    # 构建实例(重复 native 连接 / cq 双建泄漏 16-32 worker 线程池)+ 覆盖 cq 共享单例的
+    # default_market(审查 B-1)。构造期加进程锁 + double-check,已构建则直接返回。
+    with _get_exchange_lock:
+        if market.value in g_exchange_obj.keys():
+            return g_exchange_obj[market.value]
+        _build_exchange(market)
+        return g_exchange_obj[market.value]
 
+
+def _build_exchange(market: Market) -> None:
+    """实际构建交易所适配器并写入 g_exchange_obj。必须在 _get_exchange_lock 持锁下调用。"""
     if market == Market.A:
         if config.EXCHANGE_A == "tdx":
             from chanlun.exchange.exchange_tdx import ExchangeTDX
