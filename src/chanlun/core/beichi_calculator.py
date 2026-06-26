@@ -58,16 +58,16 @@ def _ld_height(ld: dict, direction: str) -> float:
 
 
 def _bar_decays(ld_a: dict, ld_b: dict, direction: str) -> bool:
-    """柱子维度衰竭 = 面积衰竭 **OR** 柱高度不创新高。
+    """柱子维度衰竭 = 面积衰竭 **AND** 柱高度不创新高(用户口径 2026-06-26: 收紧, 原为 OR)。
 
-    面积与柱高度取 OR，任一弱即柱子力度衰竭（覆盖"面积增大而柱高度不破"
-    的衰竭情形）。
+    面积与柱高度取 AND，两者都弱才算柱子力度衰竭(收紧背驰; 原 OR 任一弱即判, 偏松,
+    审计 E-MED-2)。
     up：柱高 ``hist.max`` 后 < 前 = 不创新高 = 衰竭；
-    down：柱深 ``hist.min`` 后 > 前（更接近 0 轴 = 更浅）= 衰竭。
+    down：柱深 ``hist.min`` 后 > 前(更接近 0 轴 = 更浅)= 衰竭。
     """
-    if _ld_area(ld_b, direction) < _ld_area(ld_a, direction):     # 面积衰竭
-        return True
-    if direction == "up":                                          # 柱高度不创新高
+    if _ld_area(ld_b, direction) >= _ld_area(ld_a, direction):    # 面积未衰 → 柱子不算衰竭
+        return False
+    if direction == "up":                                          # 面积衰 且 柱高度不创新高
         return _ld_height(ld_b, direction) < _ld_height(ld_a, direction)
     return _ld_height(ld_b, direction) > _ld_height(ld_a, direction)
 
@@ -83,9 +83,9 @@ def _ld_decays(
 ) -> bool:
     """力度是否衰竭（seg_b 在前者 seg_a 之后、同向）。
 
-    步骤2 柱子衰竭：面积衰竭 **OR** 柱高度不创新高(乖离极限;见 _bar_decays)。
-    步骤3 黄白线衰竭(仅线段及以上,见 _use_huangbai)：DIF 高度回收 +
-    DIF 回抽 0 轴(任一条衰竭即判黄白线衰竭，取宽口径)。
+    步骤2 柱子衰竭：面积衰竭 **AND** 柱高度不创新高(用户口径收紧, 见 _bar_decays)。
+    步骤3 黄白线衰竭(仅线段及以上,见 _use_huangbai)：只看 DIF 高度衰减
+    (用户口径 2026-06-26 删"DIF 回抽 0 轴"宽口径, 见 _huangbai_decays)。
     """
     direction = seg_b.type
     ld_a = ld_provider(seg_a.start, seg_a.end)
@@ -103,27 +103,17 @@ def _ld_decays(
 
 
 def _huangbai_decays(ld_a: dict, ld_b: dict, direction: str) -> bool:
-    """黄白线是否衰竭。
+    """黄白线是否衰竭(用户口径 2026-06-26: 收紧——删"DIF 回抽 0 轴"宽口径, 只看 DIF 高度衰减)。
 
-    两条互补判据,任一成立即视为黄白线衰竭：
-      1. DIF 高度衰减——up: seg_b DIF.max < seg_a DIF.max;down: seg_b
-         DIF.min > seg_a DIF.min。
-      2. DIF 回抽 0 轴——up: seg_b DIF 触及/穿越 0(min≤0);down: seg_b
-         DIF 触及/穿越 0(max≥0)。
-    DIF 高度没回落多少但中途已回抽过 0 轴的情形，亦视为力度衰竭。
+    DIF 高度衰减——up: seg_b DIF.max < seg_a DIF.max;down: seg_b DIF.min > seg_a DIF.min。
+    (原"DIF 回抽 0 轴(min≤0 / max≥0)"宽口径在多数真实段近乎恒真、旁路黄白线腿致 is_beichi
+    退化为单看柱子, 审计 E-HIGH-1 证偏松——按用户口径删除该分支。)
     """
     hb_a = _ld_huangbai(ld_a, direction)
     hb_b = _ld_huangbai(ld_b, direction)
     if direction == "up":
-        # 高度衰减
-        if hb_b < hb_a:
-            return True
-        # DIF 回抽 0 轴(seg_b 任一根 K 线的 DIF 触及/穿越 0)
-        return ld_b["dif"]["min"] <= 0
-    # down
-    if hb_b > hb_a:
-        return True
-    return ld_b["dif"]["max"] >= 0
+        return hb_b < hb_a
+    return hb_b > hb_a
 
 
 def is_beichi(
