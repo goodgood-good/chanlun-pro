@@ -2045,8 +2045,26 @@ class ChartManager {
         // pending 中枢正常并存,被压成 1 个会让大部分中枢消失。useUnique=false。
         // 笔中枢 / 线段中枢现按独立开关(zs_bi / zs_xd)分别控制显隐。
         const _zsOn = cfg.zs_all !== false;   // 中枢总开关(默认开,新key避开遗留 zs):门控 笔中枢/线段中枢/各级递归中枢
-        this.reconcile('bi_zss', (_zsOn && cfg.zs_bi) ? barsResult.bi_zss : [], from, symbolKey, (item) => safeCreate(wrapZs(getDynamicColor(currentInterval, "bi_zss"), 1)(item), 'bi_zs'), false);
-        this.reconcile('xd_zss', (_zsOn && cfg.zs_xd) ? barsResult.xd_zss : [], from, symbolKey, (item) => safeCreate(wrapZs(getDynamicColor(currentInterval, "xd_zss"), 2)(item), 'xd_zs'), false);
+        // includeOverlaps=true + 左沿 clamp:中枢是跨时间矩形,缩放/向左滚动时其左沿(head)常落在
+        // 可视窗 from 之前。原 bi_zss/xd_zss 用默认 includeOverlaps=false(headTime>=from)→ 左沿出窗的
+        // 中枢框被整个滤掉(用户报:缩放时中枢框消失,只有重新加载[窗口复位变宽]才正常)。改与
+        // recursive_zss/higher_zss 同口径:includeOverlaps=true(tailTime>=from 即渲染)+ 渲染前把窗外
+        // 左沿 clamp 到 from(避免 TV createMultipointShape 把未加载角点 snap 到边缘致框塌方/错位);
+        // makeKey 基于**原始** item(key 稳定),滚动使真实左沿入窗后 from 变→签名失效→重建恢复。
+        const clampHeadToFrom = (item) => {
+            if (!Array.isArray(item.points)) return item;
+            let needClamp = false;
+            const pts = item.points.map(p => {
+                if (p && p.time < from) { needClamp = true; return { ...p, time: from }; }
+                return p;
+            });
+            return needClamp ? { ...item, points: pts } : item;
+        };
+        // 中枢矩形不走 getUniqueRenderList(那是给 bi/xd 末段 pending 闪烁去重用的:把所有
+        // linestyle=1 压成 1 个,但 zss 阵列中**多个** pending 中枢正常并存,压成 1 会让大部分中枢
+        // 消失)。useUnique=false。笔中枢/线段中枢按独立开关 zs_bi / zs_xd 分别控制显隐。
+        this.reconcile('bi_zss', (_zsOn && cfg.zs_bi) ? barsResult.bi_zss : [], from, symbolKey, (item) => safeCreate(wrapZs(getDynamicColor(currentInterval, "bi_zss"), 1)(clampHeadToFrom(item)), 'bi_zs'), false, true);
+        this.reconcile('xd_zss', (_zsOn && cfg.zs_xd) ? barsResult.xd_zss : [], from, symbolKey, (item) => safeCreate(wrapZs(getDynamicColor(currentInterval, "xd_zss"), 2)(clampHeadToFrom(item)), 'xd_zs'), false, true);
         // 新核心递归层级中枢(recursive_levels, P8):后端按级别给 [{level, zss, zslxs, ...}]。
         // L0=本周期线段中枢(开关 zs_xd), L1/L2/L3=扩展高级别中枢(开关 zs_L1/zs_L2/zs_L3)。
         // 各级 zss 扁平化(附 _level)后用单 reconcile;按级别选色/线宽。
@@ -2058,22 +2076,8 @@ class ChartManager {
             if (cfg.zs_all === false || cfg[toggleKey] === false) continue;   // 中枢总开关 + 各级
             for (const zs of lvObj.zss) recZss.push({ ...zs, _level: lvl });
         }
-        // includeOverlaps=true + 左沿 clamp:高级别(5m/30m)中枢框跨度数周~数月,其左沿
-        // 几乎恒在可视窗之前——曾用 false(只渲染左沿入窗的框)导致大级别中枢**永不显示**
-        // (2026-06-11 浏览器实测 recursive_zss 容器恒 0,「图上看不到 30m 中枢」前端真凶)。
-        // 历史教训(为何当初改 false):TV createMultipointShape 把**未加载范围外**的角点
-        // snap 到边缘 → 框塌成方块/错位。两全:渲染前把窗外左沿 clamp 到 from(已加载窗口
-        // 左缘,必已加载)→ 框显示右段、角点不 snap 不错位;滚动使真实左沿入窗后自动恢复
-        // (from 变化 → 签名守卫失效 → 重建,makeKey 基于原始 item、key 稳定)。
-        const clampHeadToFrom = (item) => {
-            if (!Array.isArray(item.points)) return item;
-            let needClamp = false;
-            const pts = item.points.map(p => {
-                if (p && p.time < from) { needClamp = true; return { ...p, time: from }; }
-                return p;
-            });
-            return needClamp ? { ...item, points: pts } : item;
-        };
+        // recursive_zss 同口径(高级别中枢框跨度数周~数月,左沿几乎恒在窗前;2026-06-11 实测若用
+        // false 则大级别中枢永不显示)。
         this.reconcile('recursive_zss', recZss, from, symbolKey, (item) => {
             const lvl = item._level || 0;
             // 递归中枢按绝对级别取网站链色:1m图 L0青/L1红/L2绿/L3蓝… 级别越高框越粗。
