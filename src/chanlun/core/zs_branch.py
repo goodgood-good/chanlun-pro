@@ -351,7 +351,10 @@ class ZsBranchCalculator:
                 return None
             return (s.type, s.start.k.k_index, s.end.k.k_index, s.start.val, s.end.val)
         pz = None if prev_zs is None else (seg(prev_zs.end), prev_zs.zd, prev_zs.zg)
-        return (seg(zs.start), seg(c), zs.zd, zs.zg, pz)
+        # E-LOW-4: 补 lines[:3] 本体包络——zd/zg(核心区)相同但本体几何不同的中枢理论上可碰撞
+        #          致缓存陈旧 kind(fuzz 实测 0 分叉、不可达, 防御性加精);body 冻结不破稳定中枢命中。
+        body = tuple(seg(l) for l in (zs.lines or [])[:3])
+        return (seg(zs.start), seg(c), zs.zd, zs.zg, body, pz)
 
     def _divergence_for(
         self, zs: ZS, prev_zs: Optional[ZS], live: bool

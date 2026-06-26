@@ -54,8 +54,9 @@ class BsBranchCalculator:
             return self._fc_cache
         out: List[BuySellPoint] = []
         for i, dv in enumerate(zs_result.done_divergence):
-            if dv is None or not dv.is_beichi or dv.kind != "qs":   # 仅趋势背驰
-                continue
+            if (dv is None or not dv.is_beichi or dv.kind != "qs"
+                    or getattr(dv, "provisional", False)):          # 仅坐实趋势背驰
+                continue                                            # E-LOW-3: 补 provisional 过滤, 与 bs1/bs2 一致
             c = dv.leave_seg
             z = zs_result.done_zss[i]
             if c._type == "down":
