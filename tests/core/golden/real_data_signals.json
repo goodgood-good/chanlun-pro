@@ -1,0 +1,38 @@
+{
+  "SH.600519_5m": {
+    "bis": 951,
+    "xds": 117,
+    "bi_zss": 135,
+    "xd_zss": 16,
+    "bsp_bi": 123,
+    "bsp_xd": 12,
+    "hash": "43408bcc8ece748a"
+  },
+  "QQQ.US_30m": {
+    "bis": 59,
+    "xds": 4,
+    "bi_zss": 9,
+    "xd_zss": 0,
+    "bsp_bi": 9,
+    "bsp_xd": 0,
+    "hash": "65f532162580e49b"
+  },
+  "SZ.002299_1m": {
+    "bis": 933,
+    "xds": 116,
+    "bi_zss": 139,
+    "xd_zss": 15,
+    "bsp_bi": 148,
+    "bsp_xd": 10,
+    "hash": "8ce64f2cdc019e15"
+  },
+  "SYN_strong_5m": {
+    "bis": 7,
+    "xds": 1,
+    "bi_zss": 1,
+    "xd_zss": 0,
+    "bsp_bi": 0,
+    "bsp_xd": 0,
+    "hash": "d901ab94450dc90d"
+  }
+}
