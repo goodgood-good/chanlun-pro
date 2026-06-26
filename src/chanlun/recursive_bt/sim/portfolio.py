@@ -1415,6 +1415,9 @@ def _report(label, master, equity, trades, syms, flabel, ml=None, bench=None):
     print(f"\n=== 组合回测{tag} | 池={label} 期={master[0].date()}~{master[-1].date()} ===")
     print(f"  组合收益={total:+.1%}  等权基准={bh:+.1%}  超额={total - bh:+.1%}  "
           f"回撤={max_dd:.1%}(基准{bench_dd:.1%})  夏普={sharpe:.2f}  胜率={wr:.0%}  交易={len(trades)}")
+    # 审计 D3-CRIT-2: batch 路径 signal 由全序列 CL 一次取出(MTFStrategy 小级别零确认延迟),含
+    # 确定性未来函数(D3-CRIT-1, 真实数据实测信号早 1-6 bar)→ 上述收益是【乐观上界·非实盘可达】。
+    print("  ⚠ [乐观上界·含未来函数·非实盘可达] 实盘可达收益请用 live_backtest.py(walk_forward)")
     return {"total": total, "bh": bh, "max_dd": max_dd, "bench_dd": bench_dd,
             "sharpe": sharpe, "wr": wr, "n": len(trades), "trades": trades,
             "equity": equity, "bench": bench, "master": master}
