@@ -43,6 +43,12 @@ try:
 
     TR = TraderCurrency("Currency", log=logger.info)
     TR.load_from_pkl(p_redis_key)
+    # 审计 D1-HIGH-4: 启动对账——以券商持仓为准核对本地, 不一致仅告警(疑已成交未落盘/误持),
+    # 不自动改仓。修复 reconcile_positions 此前为死代码(从未被调用)。
+    try:
+        TR.reconcile_positions(list(set(run_codes + TR.position_codes())))
+    except Exception:
+        logger.error(f"启动对账异常: {traceback.format_exc()}")
     Data = OnlineMarketDatas("currency", frequencys, ex, cl_config)
     STR = StrategyDemo()
     TR.set_strategy(STR)

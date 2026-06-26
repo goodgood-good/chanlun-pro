@@ -45,6 +45,13 @@ try:
     TR = TraderFutures("futures", log=logger.info)
     # 进程重启后从 pkl 恢复持仓与交易状态
     TR.load_from_pkl(p_redis_key)
+    # 审计 D1-HIGH-4: 启动对账——以券商持仓为准核对本地持仓, 不一致仅告警(疑已成交未落盘/误持),
+    # 不自动改仓。修复 reconcile_positions 此前为死代码。注: run_codes 在循环内由选股动态产生,
+    # 启动仅对账本地已持仓 code(broker-has-local-none 由循环内每轮 run 自然覆盖)。
+    try:
+        TR.reconcile_positions(TR.position_codes())
+    except Exception:
+        logger.error(f"启动对账异常: {traceback.format_exc()}")
     Data = OnlineMarketDatas("futures", frequencys, ex, cl_config)
     STR = strategy_demo.StrategyDemo()
 
