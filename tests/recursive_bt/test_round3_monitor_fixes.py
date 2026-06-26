@@ -425,13 +425,23 @@ class TestRegimeCacheCrossDayCleanup:
     def test_stale_day_key_cleared(self):
         ex = _RegimeEx([10.0] * 60)
         today = _dt.date(2026, 6, 25)
-        # 注入昨日 key
-        yest_key = ("SH.600000", str(_dt.date(2026, 6, 24)), 20)
+        # 注入昨日 key(D4-ARCH-1 新格式: (market, code, date, lookback))
+        yest_key = ("a", "SH.600000", str(_dt.date(2026, 6, 24)), 20)
         _REGIME_CACHE[yest_key] = "bull"
-        current_visible_regime(ex, "SH.600000", lookback_days=20, today=today)
+        current_visible_regime(ex, "SH.600000", lookback_days=20, today=today, market="a")
         # 昨日 key 被清,今日 key 在
         assert yest_key not in _REGIME_CACHE
-        assert ("SH.600000", str(today), 20) in _REGIME_CACHE
+        assert ("a", "SH.600000", str(today), 20) in _REGIME_CACHE
+
+    def test_cross_market_same_code_no_alias(self):
+        """审计 D4-ARCH-1: 不同市场同 code 字符串不共享 regime 缓存条目(key 含 market)。"""
+        _REGIME_CACHE.clear()
+        today = _dt.date(2026, 6, 25)
+        ex = _RegimeEx([10.0] * 60)
+        current_visible_regime(ex, "600000", lookback_days=20, today=today, market="a")
+        current_visible_regime(ex, "600000", lookback_days=20, today=today, market="hk")
+        assert ("a", "600000", str(today), 20) in _REGIME_CACHE
+        assert ("hk", "600000", str(today), 20) in _REGIME_CACHE  # 独立条目, 不被 "a" 覆盖
 
     def test_same_day_cache_hit(self):
         ex = _RegimeEx([10.0] * 60)

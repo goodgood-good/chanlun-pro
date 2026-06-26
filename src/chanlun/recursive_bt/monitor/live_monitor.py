@@ -1053,12 +1053,15 @@ def current_visible_regime(
     code: str,
     lookback_days: int = 20,
     today: Optional[_dt.date] = None,
+    market: str = "",
 ) -> str:
     """实盘点时行情状态:用截至前一交易日收盘的日线判定 bull/range/bear。
     当日未完成日线必须丢弃(盘中收盘不可见);取数失败或数据不足返回 range,
-    即不调整买入比例。同一 (code, 日期) 当天只取一次数。"""
+    即不调整买入比例。同一 (market, code, 日期) 当天只取一次数。"""
     today = today or _dt.date.today()
-    key = (str(code), str(today), int(lookback_days))
+    # 审计 D4-ARCH-1: key 含 market 维度, 防 A股/港股等跨市场同 code 字符串共享 regime 缓存条目
+    # 致错 regime(monitor 当前单 worker 无并发竞争, 但跨市场 aliasing 是潜伏正确性隐患)。
+    key = (str(market), str(code), str(today), int(lookback_days))
     cached = _REGIME_CACHE.get(key)
     if cached:
         return cached
@@ -1076,7 +1079,7 @@ def current_visible_regime(
         return "range"
     # 滚动清理:只保留「今日」的 regime 缓存(按 date 维度),防止常驻多日无界增长。
     today_str = str(today)
-    stale = [k for k in _REGIME_CACHE if k[1] != today_str]
+    stale = [k for k in _REGIME_CACHE if k[2] != today_str]  # D4-ARCH-1: date 现为 key[2](market 前置)
     for k in stale:
         _REGIME_CACHE.pop(k, None)
     _REGIME_CACHE[key] = regime
@@ -1582,6 +1585,7 @@ def run_once(args, states: Dict[str, object], notifier, deduper, names=None, bro
             exchange,
             getattr(args, "regime_source_code", "") or INDEX_BY_MARKET.get(args.market, ""),
             int(getattr(args, "regime_lookback_days", 20) or 20),
+            market=args.market,
         )
     events = collect_monitor_events(
         states,
