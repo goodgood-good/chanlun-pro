@@ -1569,8 +1569,11 @@ def run_once(args, states: Dict[str, object], notifier, deduper, names=None, bro
             states,
             now,
         )
-        if sent > 0:
-            paper_queued = broker.queue_events(fresh)
+        # 审计 D1b-HIGH-1: 下单与通知解耦——queue_events(核心交易动作, 含止损/退出卖单)无条件
+        # 执行;通知失败(钉钉限流/超时)只在 send_events 内记 warning, 绝不阻断下单/平仓。
+        # queue_events 自带 pending/positions 幂等(同 code 不重复入单), 通知失败下轮重发通知
+        # 时不会重复下单。
+        paper_queued = broker.queue_events(fresh)
         paper_snapshot = broker.record_snapshot(states, now)
         paper_summary = broker.performance_summary()
         broker.save()

@@ -487,6 +487,26 @@ class TestNowTradingFallback:
 
 
 # ==========================================================================
+# D1b-HIGH-1: 下单与通知解耦的安全前提 — queue_events 幂等
+# ==========================================================================
+def test_queue_events_idempotent_guards_decouple(tmp_path):
+    """D1b-HIGH-1: run_once 已把下单(queue_events)与通知(send_events)解耦——通知失败不再
+    阻断下单。其安全前提是 queue_events 幂等:通知持续失败、下轮同一 fresh 事件重现时,
+    不得重复入单。此测试钉死该幂等性(若被破坏则解耦会致重复下单)。"""
+    from types import SimpleNamespace
+    from chanlun.recursive_bt.sim.paper import PaperBroker
+
+    b = PaperBroker(str(tmp_path / "ledger.json"), "a", 5)
+    ev = SimpleNamespace(
+        code="SH.600000", side="buy", buy_ratio=0.2, sell_ratio=1.0,
+        bs_type="1buy", reason="x", identity="id1", signal_time="t1",
+    )
+    assert b.queue_events([ev]) == 1  # 首次入单
+    assert b.queue_events([ev]) == 0  # 同 code 已在 pending → 幂等跳过
+    assert sum(1 for o in b.pending if o["act"] == "buy") == 1
+
+
+# ==========================================================================
 # F-LOW-6: initial_codes selection 可淘汰
 # ==========================================================================
 class _StubSelector:

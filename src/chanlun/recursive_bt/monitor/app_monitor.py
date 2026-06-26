@@ -624,8 +624,9 @@ class DynamicRecursiveMonitor:
                     self.states,
                     now,
                 )
-                if sent > 0:
-                    paper_queued = broker.queue_events(fresh)
+                # 审计 D1b-HIGH-1: 下单与通知解耦——queue_events 无条件执行(含止损/退出卖单),
+                # 通知失败只记 warning 不阻断下单;queue_events 自带 pending/positions 幂等。
+                paper_queued = broker.queue_events(fresh)
                 paper_snapshot = broker.record_snapshot(self.states, now)
                 paper_summary = broker.performance_summary()
                 broker.save()
