@@ -1,4 +1,14 @@
 
+/* macOS 触控板两指横向滑动会触发浏览器后退/前进手势:在图表上想左右平移却跳转到上/下一页
+   (用户反馈)。overscroll-behavior-x: none 禁用横向 overscroll 触发的导航(Chrome/Safari16+)——
+   TV 图表在 iframe 内,但后退手势由顶层文档的 overscroll-behavior 把关,横向 swipe 上抛到顶层即
+   被本页吞掉、不再触发浏览器导航。-y: none 顺带禁掉下拉刷新(垂直 overscroll)。不改 overflow,
+   不影响右栏菜单等内部滚动容器。 */
+html,
+body {
+  overscroll-behavior: none;
+}
+
 /* 自选组工具栏固定在折叠面板顶部时与深色主题的背景保持区分 */
 .zixuan-form-bg {
   background-color: #ffffff;

@@ -1300,11 +1300,13 @@ class ChartManager {
             this.reloadDrawingsForCurrentContext('initial-load');
             this._openSseStream();
             this.updateDrawPalette();   // 画图调色板:优先原生注入 TV 工具栏,失败回退浮层
+            this.applyOverscrollGuard();   // 给 TV iframe 注入 overscroll-behavior:none(防 macOS 横滑后退)
             // TV 左侧工具栏异步渲染:重试注入(成功即停,最多 ~4.2s)
             if (this._lvlbtnTimer) clearInterval(this._lvlbtnTimer);
             this._lvlbtnTries = 0;
             this._lvlbtnTimer = setInterval(() => {
                 this._lvlbtnTries++;
+                this.applyOverscrollGuard();   // iframe 异步加载,随重试一并注入(幂等)
                 if (this.injectDrawPaletteIntoTVToolbar() || this._lvlbtnTries >= 12) { clearInterval(this._lvlbtnTimer); this._lvlbtnTimer = null; }
             }, 350);
 
@@ -1510,6 +1512,24 @@ class ChartManager {
             console.warn('[CHARTS] injectDrawPaletteIntoTVToolbar failed', e);
             return false;
         }
+    }
+
+    // macOS 触控板两指横向 swipe 会触发浏览器后退/前进:在图表上想左右平移却跳转到上/下一页。
+    // 顶层 app.css 已设 overscroll-behavior:none,但 TV 图表在 iframe 内、iframe 是独立文档,横向
+    // overscroll 可能在 iframe 层就被浏览器当成导航手势。这里给同源 TV iframe 的 html/body 也注入
+    // overscroll-behavior:none(双保险)。跨源 iframe(contentDocument 抛错)跳过;幂等,可随
+    // onChartReady / _lvlbtnTimer 重试多次调用(iframe 异步加载)。
+    applyOverscrollGuard() {
+        try {
+            for (const f of document.querySelectorAll('iframe')) {
+                let dd; try { dd = f.contentDocument; } catch (e) { continue; }
+                if (!dd) continue;
+                try {
+                    if (dd.documentElement) dd.documentElement.style.overscrollBehavior = 'none';
+                    if (dd.body) dd.body.style.overscrollBehavior = 'none';
+                } catch (e) { /* 同源但访问受限,跳过 */ }
+            }
+        } catch (e) { /* querySelectorAll 失败极罕见,静默 */ }
     }
 
     // 画图调色板统一入口:优先原生注入 TV 工具栏;失败回退左侧浮层。
