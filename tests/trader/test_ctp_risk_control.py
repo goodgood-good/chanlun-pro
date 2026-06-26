@@ -119,6 +119,9 @@ def test_get_positions_query_fail_falls_back_to_local(ctp):
         def prepare_position_query(self):
             pass
 
+        def begin_position_query(self, scope_code=None):  # 审计 D1-HIGH-1: get_positions 改用 begin
+            pass
+
         def next_request_id(self):
             return 1
 
@@ -150,6 +153,9 @@ def test_get_positions_backfills_open_datetime_from_local(ctp):
 
     class _State:
         def prepare_position_query(self):
+            pass
+
+        def begin_position_query(self, scope_code=None):  # 审计 D1-HIGH-1: get_positions 改用 begin
             pass
 
         def next_request_id(self):

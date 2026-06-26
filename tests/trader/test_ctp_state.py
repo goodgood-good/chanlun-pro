@@ -77,3 +77,39 @@ def test_get_position_count_zero_when_all_flat():
     st.set_position("rb2405_2", FakePosInfo("rb2405", "2", 0))
     st.set_position("au2406_3", FakePosInfo("au2406", "3", 0))
     assert st.get_position_count() == 0
+
+
+# ---------- D1-HIGH-1 幽灵仓: begin_position_query epoch reconciliation ----------
+def test_begin_position_query_prunes_stale_full_scope():
+    """全量查询后,券商未返回的陈旧 Position!=0 键被剔除(幽灵仓修复)。"""
+    st = CTPState()
+    st.set_position("rb2405_2", FakePosInfo("rb2405", "2", 3))  # 上一轮持仓
+    st.set_position("au2406_2", FakePosInfo("au2406", "2", 2))  # 上一轮持仓
+    # 本轮全量查询:券商只返回 rb(au 已全平 → 券商不再返回该行)
+    st.begin_position_query()  # 全量 scope=None
+    st.set_position("rb2405_2", FakePosInfo("rb2405", "2", 3))
+    st.mark_position_query_done()
+    snap = st.get_positions_snapshot()
+    assert "rb2405_2" in snap
+    assert "au2406_2" not in snap, "券商已不返回的幽灵仓未被剔除(原永不清空会残留)"
+
+
+def test_begin_position_query_scoped_only_prunes_that_code():
+    """单 code scope 查询只剔除该 code 的未见键,其它 code 不动。"""
+    st = CTPState()
+    st.set_position("rb2405_2", FakePosInfo("rb2405", "2", 3))
+    st.set_position("au2406_2", FakePosInfo("au2406", "2", 2))
+    st.begin_position_query(scope_code="rb2405")  # 只查 rb,rb 已平无返回
+    st.mark_position_query_done()
+    snap = st.get_positions_snapshot()
+    assert "rb2405_2" not in snap  # scope 内未见 → 剔除
+    assert "au2406_2" in snap  # 不在 scope → 保留
+
+
+def test_prepare_position_query_does_not_prune():
+    """prepare(open 单 code 路径)不开启 reconciliation,向后兼容不剔除陈旧键。"""
+    st = CTPState()
+    st.set_position("rb2405_2", FakePosInfo("rb2405", "2", 3))
+    st.prepare_position_query()
+    st.mark_position_query_done()
+    assert "rb2405_2" in st.get_positions_snapshot()

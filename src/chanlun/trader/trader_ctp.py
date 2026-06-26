@@ -920,7 +920,9 @@ class CTPTrader(BackTestTrader):
         qry_req = CThostFtdcQryInvestorPositionField()
         qry_req.BrokerID = self.ex.broker_id
         qry_req.InvestorID = self.ex.user_id
-        self.trader_api.state.prepare_position_query()
+        # 审计 D1-HIGH-1: 风控读路径用 begin(全量 epoch reconciliation), 剔除券商已不返回的
+        # 陈旧持仓键, 避免券商全平后残留的幽灵仓被喂给止损/超时强平。
+        self.trader_api.state.begin_position_query()
         self.trader_api.ReqQryInvestorPosition(
             qry_req, self.trader_api.state.next_request_id()
         )

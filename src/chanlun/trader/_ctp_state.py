@@ -39,6 +39,10 @@ class CTPState:
         self._order_events: Dict[str, threading.Event] = {}
         # 持仓查询完成 Event (OnRspQryInvestorPosition 的 bIsLast 触发)
         self._position_query_event = threading.Event()
+        # epoch reconciliation (审计 D1-HIGH-1 幽灵仓): begin_position_query 开启时记本次查询
+        # 返回的键, mark_position_query_done 据此剔除范围内未返回的陈旧键。None=未开启(open 单 code 路径)
+        self._position_query_seen: Optional[set] = None
+        self._position_query_scope: Optional[str] = None
 
     # ---------- order_ref ----------
     def next_order_ref(self) -> str:
@@ -125,6 +129,8 @@ class CTPState:
     def set_position(self, key: str, position: Any) -> None:
         with self._lock:
             self.positions[key] = position
+            if self._position_query_seen is not None:
+                self._position_query_seen.add(key)  # 审计 D1-HIGH-1: 记本次查询见到的键
 
     # ---------- alive orders (M4 挂单台账) ----------
     def get_alive_orders(self, code: str = None) -> list:
@@ -153,13 +159,44 @@ class CTPState:
     def prepare_position_query(self) -> threading.Event:
         """在调 ReqQryInvestorPosition 之前清空完成 Event, 返回 Event 供后续 wait。
 
-        注意: 不会清空 ``positions`` dict (历史累积语义保留, 由调用方按需 clear)。
+        注意: 不开启 epoch reconciliation(不剔除陈旧键), 供 open 单 code 等不需对账的查询用。
+        需"权威对账"(全量风控读)请改用 begin_position_query。
         """
         self._position_query_event.clear()
         return self._position_query_event
 
+    def begin_position_query(self, scope_code: Optional[str] = None) -> threading.Event:
+        """开始一次"权威"持仓查询并开启 epoch reconciliation(审计 D1-HIGH-1 幽灵仓)。
+
+        记录本次查询券商返回的键; mark_position_query_done(bIsLast) 时剔除范围内未被返回的
+        陈旧持仓键——券商全平后不再返回该合约行, 否则陈旧 Position!=0 键残留会被 get_positions
+        当幽灵仓喂给止损/超时强平。scope_code=None 表示全量查询(剔除所有未见键); 否则仅剔除
+        该 code(``{code}_*`` 键)的未见键。
+        """
+        with self._lock:
+            self._position_query_seen = set()
+            self._position_query_scope = scope_code
+        self._position_query_event.clear()
+        return self._position_query_event
+
     def mark_position_query_done(self) -> None:
-        """OnRspQryInvestorPosition 的 ``bIsLast=True`` 时调用, 唤醒等待线程."""
+        """OnRspQryInvestorPosition 的 ``bIsLast=True`` 时调用, 唤醒等待线程。
+
+        若本次查询经 begin_position_query 开启了 epoch reconciliation(seen 非 None), 则剔除
+        查询范围内未被券商返回的陈旧持仓键(幽灵仓修复, 审计 D1-HIGH-1)。
+        """
+        with self._lock:
+            seen = self._position_query_seen
+            if seen is not None:
+                scope = self._position_query_scope
+                prefix = f"{scope}_" if scope is not None else None
+                for k in list(self.positions.keys()):
+                    if k in seen:
+                        continue
+                    if prefix is None or k.startswith(prefix):
+                        del self.positions[k]
+                self._position_query_seen = None
+                self._position_query_scope = None
         self._position_query_event.set()
 
     def wait_for_position_query(self, timeout: float) -> bool:
