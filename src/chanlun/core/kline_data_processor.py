@@ -1,4 +1,5 @@
 import datetime
+import math
 from typing import List
 import pandas as pd
 from chanlun.core.types import Kline
@@ -85,13 +86,39 @@ class KlineDataProcessor:
             if ts < start_ts:
                 return []
         vol = 0.0 if volume is None or pd.isna(volume) else float(volume)
+        # 审计 D4-HIGH-2: OHLC NaN/Inf 兜底,与 _convert(:177-184)的 ffill 根因防护对齐。
+        # 本快路径是 live/walk-forward 主入口(cl.py:177 / live_backtest:980),原仅 volume 有
+        # pd.isna 兜底, OHLC 裸 float() → 坏 bar 把 NaN 灌进 klines → bi/xd `.val` 比较静默失效
+        # (nan>x 与 nan<x 皆 False)+ MACD inc≠batch。坏值前向填充上一根(无前根则用本 bar 任一
+        # 有限 OHLC bfill,全非有限则丢弃该 bar,免填 0 造假跳变)。干净数据零改变。
+        o_, h_, l_, c_ = float(open_), float(high), float(low), float(close)
+        if not (math.isfinite(o_) and math.isfinite(h_)
+                and math.isfinite(l_) and math.isfinite(c_)):
+            prev = self.klines[-1] if self.klines else None
+
+            def _fill(v, prev_v):
+                if math.isfinite(v):
+                    return v
+                if prev_v is not None and math.isfinite(prev_v):
+                    return prev_v
+                for cand in (c_, o_, h_, l_):
+                    if math.isfinite(cand):
+                        return cand
+                return None
+
+            o_ = _fill(o_, prev.o if prev else None)
+            c_ = _fill(c_, prev.c if prev else None)
+            h_ = _fill(h_, prev.h if prev else None)
+            l_ = _fill(l_, prev.l if prev else None)
+            if None in (o_, h_, l_, c_):
+                return []  # 全非有限且无前根可顶 → 丢弃该 bar, 不灌 NaN
         kline = Kline(
             index=0,
             date=ts,
-            h=float(high),
-            l=float(low),
-            o=float(open_),
-            c=float(close),
+            h=h_,
+            l=l_,
+            o=o_,
+            c=c_,
             a=vol,
         )
         return self._update_internal_klines([kline])
