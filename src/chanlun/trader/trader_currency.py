@@ -142,6 +142,9 @@ class TraderCurrency(BackTestTrader):
                     "currency", "数字货币交易提醒", f"{code} 平多前持仓查询失败, 暂不平仓"
                 )
                 return False
+            # 审计 D1-LOW-2: 按 side 过滤多仓(ccxt positions 的 side="long"), 防同 code 同时
+            # 持多空时误取到空仓 dict 而对不存在的多仓下 close_long(取首元素不校验 side)。
+            hold_position = [p for p in hold_position if p.get("side") == "long"]
             if len(hold_position) == 0:
                 return {"price": pos.price, "amount": pos.amount}
             hold_position = hold_position[0]
@@ -194,6 +197,8 @@ class TraderCurrency(BackTestTrader):
                     "currency", "数字货币交易提醒", f"{code} 平空前持仓查询失败, 暂不平仓"
                 )
                 return False
+            # 审计 D1-LOW-2: 按 side 过滤空仓(ccxt positions 的 side="short")
+            hold_position = [p for p in hold_position if p.get("side") == "short"]
             if len(hold_position) == 0:
                 return {"price": pos.price, "amount": pos.amount}
             hold_position = hold_position[0]
