@@ -496,6 +496,7 @@ def collect_monitor_events(
     sigs: dict[str, list] = {}
     log = fun.get_logger()
     REFRESH_FAIL_ALERT_THRESHOLD = 3
+    REFRESH_FAIL_REALERT_INTERVAL = 12  # 审计 D1b-LOW-1: 超阈后每 N 轮再提醒一次, 防永久失败静默
     for code, state in states.items():
         try:
             sigs[code] = state.refresh()
@@ -508,8 +509,12 @@ def collect_monitor_events(
                 state.consecutive_refresh_failures = n
             except Exception:
                 n = 1
-            # 首次失败 warning;到阈值时升级为一次性醒目告警(避免刷屏:仅在跨过阈值那一刻喊)
-            if n == REFRESH_FAIL_ALERT_THRESHOLD:
+            # 审计 D1b-LOW-1: 到阈值首次醒目告警, 之后每 REFRESH_FAIL_REALERT_INTERVAL 轮再提醒一次
+            # (原 `n == THRESHOLD` 只喊一次, 永久失败后静默淹没在刷屏里 → 漏信号无人知)。
+            if n == REFRESH_FAIL_ALERT_THRESHOLD or (
+                n > REFRESH_FAIL_ALERT_THRESHOLD
+                and n % REFRESH_FAIL_REALERT_INTERVAL == 0
+            ):
                 log.warning(
                     f"[live_monitor][ALERT] code={code} 已连续 {n} 轮 refresh 失败,"
                     f"该标的信号可能持续漏发: {exc}"

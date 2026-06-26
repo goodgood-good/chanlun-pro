@@ -786,7 +786,12 @@ class CTPTrader(BackTestTrader):
             if o is not None and getattr(o, "OrderStatus", None) == THOST_FTDC_OST_Canceled:
                 return True
             time.sleep(0.1)
-        return sent  # 超时仍返回发送成功 (撤单请求已发, 状态未及确认)
+        # 审计 D1-LOW-1: 超时未确认 Canceled 返回 False(原 return True 让调用方误判已撤);
+        # 升级告警让上层知晓撤单未确认(下轮 get_alive_orders 仍会再撤兜底)。
+        LogUtil.warning(
+            f"CTP 撤单未在超时内确认 Canceled, ref={order_ref} (请求已发, 状态未确认)"
+        )
+        return False
 
     def OnRspSettlementInfoConfirm(
         self, pSettlementInfoConfirm, pRspInfo, nRequestID, bIsLast
