@@ -249,13 +249,18 @@ def _trend_flags(units: List[LINE], k: float = _YW_TREND_K) -> List[bool]:
     价格区间虽扫过震荡区、会被 core_interval 误当核心三段(区间重叠类判据全证伪),故改按
     「段移动幅度」剥离:中位数 + 百分比 = 尺度无关，不依赖核心宽(避免循环依赖 + 误杀正常震荡段)。
     """
+    # 审计 D2-HIGH-3(用户口径 2026-06-26): 原用全量 median 作 scale → 追加段改 median →
+    # 已结算前缀段 trend 标记翻转(inc≠batch 非确定性、未来函数式污染)。改用【因果前缀中位数】
+    # scale_i = median(mags[0:i+1]): 段 i 分类只依赖到 i 为止的段, 追加未来段不改其分类 →
+    # inc==batch 确定性。段 0 无"典型"可超 → 恒非趋势(median=自身, m>k*m 对 k≥1 恒 False)。
     mags = [_pct_mag(u) for u in units]
     if not mags:
         return []
-    scale = statistics.median(mags)
-    if scale <= 0:
-        return [False] * len(units)
-    return [m > k * scale for m in mags]
+    flags: List[bool] = []
+    for i in range(len(mags)):
+        scale = statistics.median(mags[: i + 1])
+        flags.append(scale > 0 and mags[i] > k * scale)
+    return flags
 
 
 def _zs_in_run(run: List[LINE], min_lines: int) -> List[List[LINE]]:
