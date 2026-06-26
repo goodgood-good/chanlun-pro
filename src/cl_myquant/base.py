@@ -20,7 +20,7 @@ from gm.api import (
 
 from chanlun.trading.backtest_trader import BackTestTrader
 from chanlun.trading.base import POSITION, MarketDatas, Operation
-from chanlun.cl_interface import ICL
+from chanlun.core.types.interface import ICL  # 审计 D4-LOW-1: 顶层 chanlun.cl_interface 已不存在(拆分到 core/),ICL 在 core.types.interface
 
 
 class MyQuantData(MarketDatas):

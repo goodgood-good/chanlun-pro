@@ -132,7 +132,7 @@ class TraderFutures(BackTestTrader):
                 "futures",
                 code,
                 code,
-                "open_long",
+                "close_long",  # 审计 D1-MED-4: 平多台账应记 close_long(原误标 open_long), 真实券商单(:121)本就正确
                 res["price"],
                 res["amount"],
                 opt.msg,
