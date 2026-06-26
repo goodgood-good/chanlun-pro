@@ -209,7 +209,7 @@ class RecursiveCalculator:
             # 递归保留原始延伸 + 拆分升级，呈现多级层级结构。
             zss = ZsCalculator(
                 require_alternation=(level == 0),
-                min_zs_lines=(5 if level == 0 else 3),  # 用户口径: L0 中枢=进入+核心+离开≥5
+                min_zs_lines=5,  # 用户口径 2026-06-26: 全级别中枢=进入+核心+离开≥5(L0+L≥1)
                 max_zs_lines=10 ** 9,
             ).calculate(units)
             # 9 段优先于扩展：先把 ≥9 段中枢拆为 3 段子中枢,再做

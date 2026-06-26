@@ -50,7 +50,7 @@ DEFAULT_SIGNAL_SCAN_CHUNK_BARS = 0
 DEFAULT_TREND_DIR_WARMUP_BARS = 200
 DEFAULT_RECURSIVE_L0_MIN_ZS_LINES = 4  # L0 线段中枢构成线段数取 4(完成确认门),L≥1 仍为 3
 DEFAULT_BS_POINT_RATIO_OVERRIDES = "D:/chanlun_pro/reports/strategy_bs_point_ratio_overrides.json"
-_SIGNAL_CACHE_VERSION = "v14"  # 信号缓存版本号:中枢/信号口径变更时递增以失效旧缓存(v14: L0 成枢门 4→5 进入+核心+离开)
+_SIGNAL_CACHE_VERSION = "v15"  # 信号缓存版本号:中枢/信号口径变更时递增以失效旧缓存(v15: L≥1 升级中枢门 3→5 全级别统一)
 _SIGNAL_CHECKPOINT_VERSION = "v1"
 UPGRADE_CHAIN = getattr(
     CL,

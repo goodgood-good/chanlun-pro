@@ -129,8 +129,8 @@ class RecursiveBranchCalculator:
         """把线段递归装配成多级中枢/走势类型层级树。
 
         每级：zs_branch(中枢+内联背驰) → zslx_branch(走势类型) → _as_units → 下一级。
-        L0 构成段=线段(min_zs_lines=4，兼顾右边缘鲁棒性)；L≥1 构成段=走势类型
-        (min=3，走势类型已是完成单元)。
+        L0 构成段=线段、L≥1 构成段=走势类型;成枢门全级别统一 = l0_min(用户口径 2026-06-26:
+        进入段+核心重叠+离开段 ≥5, L≥1 升级中枢也用 5)。
         终止：扫不出中枢 / 走势类型 <3 / 触 _MAX_LEVELS。
         """
         if not xds:
@@ -140,11 +140,11 @@ class RecursiveBranchCalculator:
         zslx_calc = self._zslx_calc    # 持久复用(见 __init__)
         level = 0
         while level < _MAX_LEVELS:
-            min_lines = self.l0_min_zs_lines if level == 0 else 3
+            min_lines = self.l0_min_zs_lines  # 用户口径 2026-06-26: 全级别统一(L0 与 L≥1 升级中枢都用 l0_min=5)
             # 换周期 MACD:各级用对应级别 ld_provider(L0→5m/L1→30m…);无 factory 退化用单一
             lp = ld_provider_for_level(level) if ld_provider_for_level is not None else ld_provider
             # 复用本级持久 ZsBranchCalculator(其持久 ZsCalculator 承载增量状态);ld/freq/wzgx
-            # 每轮可变(同 CL 内实际稳定),更新即可;min_zs_lines 按级固定(L0=l0_min/L≥1=3)。
+            # 每轮可变(同 CL 内实际稳定),更新即可;min_zs_lines 全级别统一=l0_min(用户口径)。
             zb = self._zs_branch_by_level.get(level)
             if zb is None:
                 zb = ZsBranchCalculator(
