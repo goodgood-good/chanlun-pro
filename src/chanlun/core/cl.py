@@ -464,12 +464,13 @@ class CL(ICL):
     def _recursive_l0_min_zs_lines(self) -> int:
         """统一解析递归 L0 中枢成枢线数:所有链路必须经此单点读取。
 
-        fallback=4：L0 线段中枢采用工程完成确认门(要求第 3 段被后续确认/不延伸),
-        与 legacy(ZsCalculator 默认4)统一,消除「图表≠回测」的成枢门分裂。
-        L≥1 走势类型中枢用 3(走势类型本身已是完成单元)。所有链路经此单点读取
-        保口径一致。
+        fallback=5(用户口径 2026-06-26):L0 线段中枢 = 进入段 + 核心重叠 + 离开段 ≥ 5 段
+        (center.lines 含进入/核心/离开段;原 4 = 核心3+离开1, 提到 5 含进入段)。legacy bi_zss
+        路径(本文件 get_bi_zss 处 min_zs_lines)同步为 5 保口径一致。L≥1 走势类型中枢仍用 3
+        (走势类型本身已是完成单元、非线段)。所有链路经此单点读取保口径一致。
+        ⚠ 改成枢门 → 信号/买卖点变 → 真实 golden 已重生成 + 信号缓存版本 +1 + 回测基线须重跑。
         """
-        return int(self.config.get('recursive_l0_min_zs_lines', 4) or 4)
+        return int(self.config.get('recursive_l0_min_zs_lines', 5) or 5)
 
     def _recursive_branch_calc(self, use_xd: bool):
         """按塔(use_xd:False=笔/True=段)取持久 RecursiveBranchCalculator(递归层增量化:
@@ -520,7 +521,7 @@ class CL(ICL):
         ld = lambda s, e: query_macd_ld(self, s, e)
         wzgx = self._recursive_wzgx()
         res = ZsBranchCalculator(
-            ld_provider=ld, frequency=self.frequency, wzgx=wzgx, min_zs_lines=4,
+            ld_provider=ld, frequency=self.frequency, wzgx=wzgx, min_zs_lines=5,  # 用户口径: 进入+核心+离开≥5
         ).calculate(list(self.get_bis()))
         return res.done_zss
 

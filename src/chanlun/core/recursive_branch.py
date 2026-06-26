@@ -68,8 +68,8 @@ def _mark_upgrades(done_zss: List[ZS]) -> List[int]:
 class RecursiveBranchCalculator:
     """递归装配计算器。无状态，每次 calculate 全量重算。"""
 
-    def __init__(self, l0_min_zs_lines: int = 4):
-        self.l0_min_zs_lines = int(l0_min_zs_lines or 4)
+    def __init__(self, l0_min_zs_lines: int = 5):  # 用户口径 2026-06-26: L0 中枢=进入+核心+离开≥5
+        self.l0_min_zs_lines = int(l0_min_zs_lines or 5)
         # 递归层增量化:持久化各级 ZsBranchCalculator(内含持久 ZsCalculator)+ ZslxBranch,
         # 跨 calculate(跨 K)复用 → 各级 calculator 增量状态保留。L0 输入(units=xds/bis 浅
         # 拷贝)identity 稳定 → L0 增量立即生效;L1+ 输入(_as_units 每次 copy.copy)暂不稳定、
