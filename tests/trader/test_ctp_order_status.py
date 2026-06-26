@@ -50,3 +50,19 @@ def test_status_none_returns_zero():
 def test_volume_none_returns_zero():
     # VolumeTraded 为 None 时 (or 0) 不崩, 返回 0
     assert _filled("0", None) == 0
+
+
+# ---------- D1-HIGH-3: 部分成交立即撤剩余未成挂单 ----------
+def test_settle_part_traded_cancels_remaining_for_part_traded():
+    """PartTradedQueueing → 撤剩余未成挂单(防续成致券商持仓>本地); AllTraded/Canceled → no-op。"""
+    from chanlun.trader.trader_ctp import CTPTrader
+
+    tr = CTPTrader.__new__(CTPTrader)  # 绕过 __init__(不连 CTP 柜台)
+    cancelled = []
+    tr.cancel_order = lambda ref: cancelled.append(ref)
+
+    tr._settle_part_traded(FakeOrder(OrderStatus="1"), "r1", "rb2405")  # 部分成交 → 撤剩余
+    assert cancelled == ["r1"]
+    tr._settle_part_traded(FakeOrder(OrderStatus="0"), "r2", "rb2405")  # 全成 → 不撤
+    tr._settle_part_traded(FakeOrder(OrderStatus="5"), "r3", "rb2405")  # 已撤 → 不撤
+    assert cancelled == ["r1"]

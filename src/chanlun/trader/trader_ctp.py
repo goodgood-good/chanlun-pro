@@ -287,6 +287,8 @@ class CTPTrader(BackTestTrader):
         # M3: 仅 OrderStatus 为 AllTraded/PartTradedQueueing 且有实际成交量才算成功;
         # 被拒/废单/未成交一律 return False, 不记本地持仓 (否则持仓与柜台失同步)
         filled = _ctp_order_filled_amount(order)
+        # 审计 D1-HIGH-3: 部分成交立即撤剩余未成挂单, 防其稍后续成致券商持仓>本地账本
+        self._settle_part_traded(order, order_ref, code)
         if filled <= 0:
             status = getattr(order, "OrderStatus", "?")
             status_msg = getattr(order, "StatusMsg", "")
@@ -389,6 +391,8 @@ class CTPTrader(BackTestTrader):
 
         # M3: 仅成交才算成功; 被拒/废单/未成交一律 return False, 不记本地持仓
         filled = _ctp_order_filled_amount(order)
+        # 审计 D1-HIGH-3: 部分成交立即撤剩余未成挂单, 防其稍后续成致券商持仓>本地账本
+        self._settle_part_traded(order, order_ref, code)
         if filled <= 0:
             status = getattr(order, "OrderStatus", "?")
             status_msg = getattr(order, "StatusMsg", "")
@@ -461,6 +465,8 @@ class CTPTrader(BackTestTrader):
         # M3: 平仓必须真成交才算成功; 未成交/被拒时告警 (该平没平掉是高危) 且 return False,
         # 让 execute 不把本地仓清零 (避免裸持失管)
         filled = _ctp_order_filled_amount(order)
+        # 审计 D1-HIGH-3: 部分成交立即撤剩余未成挂单, 防其稍后续成致券商持仓>本地账本
+        self._settle_part_traded(order, order_ref, code)
         if filled <= 0:
             status = getattr(order, "OrderStatus", "?")
             status_msg = getattr(order, "StatusMsg", "")
@@ -532,6 +538,8 @@ class CTPTrader(BackTestTrader):
 
         # M3: 平仓必须真成交才算成功; 未成交/被拒时告警 (该平没平掉是高危) 且 return False
         filled = _ctp_order_filled_amount(order)
+        # 审计 D1-HIGH-3: 部分成交立即撤剩余未成挂单, 防其稍后续成致券商持仓>本地账本
+        self._settle_part_traded(order, order_ref, code)
         if filled <= 0:
             status = getattr(order, "OrderStatus", "?")
             status_msg = getattr(order, "StatusMsg", "")
@@ -757,6 +765,17 @@ class CTPTrader(BackTestTrader):
         if code:
             req.InstrumentID = code
         self.trader_api.ReqQryInstrument(req, self.trader_api.state.next_request_id())
+
+    def _settle_part_traded(self, order, order_ref, code) -> None:
+        """审计 D1-HIGH-3: 部分成交(PartTradedQueueing)时剩余仍是活动 GFD 挂单, 稍后续成会致
+        券商持仓 > 本地账本(本地只记了首次部分量)。开/平单只认已成量, 立即撤剩余未成挂单
+        (不留活动单)。非部分成交(AllTraded/拒单/已撤)为 no-op。
+        """
+        if getattr(order, "OrderStatus", None) == THOST_FTDC_OST_PartTradedQueueing:
+            self.cancel_order(order_ref)
+            LogUtil.warning(
+                f"CTP 部分成交 code={code} ref={order_ref}, 已撤剩余未成挂单(只认已成量)"
+            )
 
     def cancel_order(self, order_ref: str):
         """撤单 (M4: 发出后短等待 OnRtnOrder 把状态刷成 Canceled 以确认撤单结果)。"""
