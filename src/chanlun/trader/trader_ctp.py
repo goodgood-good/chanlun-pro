@@ -26,7 +26,8 @@ from openctp_ctp.thosttraderapi import (
     THOST_FTDC_D_Buy,  # 买入
     THOST_FTDC_D_Sell,  # 卖出
     THOST_FTDC_HF_Speculation,  # 投机
-    THOST_FTDC_OF_Close,  # 平仓
+    THOST_FTDC_OF_Close,  # 平仓 (平昨 / 不分今昨的交易所)
+    THOST_FTDC_OF_CloseToday,  # 平今 (D1-HIGH-2: SHFE/INE 当日仓必须平今)
     THOST_FTDC_OF_Open,  # 开仓 (B2 follow-up: ApiStruct 迁移)
     THOST_FTDC_OPT_LimitPrice,  # 限价单
     THOST_FTDC_OST_AllTraded,  # 全部成交 (M3)
@@ -80,6 +81,37 @@ def _ctp_order_filled_amount(order) -> float:
         return traded if traded > 0 else 0
     except TypeError:
         return 0
+
+
+def _plan_close_offsets(exchange_id, amount, position, yd_position):
+    """规划 CTP 平仓 offset, 返回 [(offset_flag, qty), ...](qty 之和 == amount)。审计 D1-HIGH-2。
+
+    SHFE(上期所)/INE(能源中心)强制区分平今/平昨: 当日仓必须 CloseToday、昨仓 Close,
+    用错 offset 柜台直接拒单 → H1 止损/强平对上期所当日仓失效。其它交易所(中金 CFFEX /
+    大商 DCE / 郑商 CZCE)平仓不分今昨, 单 Close。
+
+    today = position - yd_position(当日新开仓); 优先平今(日内策略当日仓为主)。position 信息
+    缺失/为 0(快照取不到)时保守退回单 Close(不漏平, 与原 OF_Close 行为一致)。
+    """
+    amount = int(amount)
+    if amount <= 0:
+        return []
+    if exchange_id not in ("SHFE", "INE") or not position:
+        return [(THOST_FTDC_OF_Close, amount)]
+    yd = max(0, int(yd_position or 0))
+    today = max(0, int(position) - yd)
+    plan = []
+    close_today = min(amount, today)
+    if close_today > 0:
+        plan.append((THOST_FTDC_OF_CloseToday, close_today))
+    rem = amount - close_today
+    close_yd = min(rem, yd)
+    if close_yd > 0:
+        plan.append((THOST_FTDC_OF_Close, close_yd))
+    rem -= close_yd
+    if rem > 0:  # 兜底: position 与 amount 不符, 剩余用 Close(保守, 不漏平)
+        plan.append((THOST_FTDC_OF_Close, rem))
+    return plan
 
 
 class MyTraderCallback(CThostFtdcTraderApi):
@@ -423,79 +455,94 @@ class CTPTrader(BackTestTrader):
 
         return {"price": tick[code].last, "amount": filled}
 
-    def close_buy(self, code, pos: POSITION, opt):
-        """平多仓"""
-        tick = self.ex.ticks([code])
-        if code not in tick:
-            return False
+    def _ctp_pos_meta(self, code, posi_direction):
+        """从持仓快照取 (exchange_id, position, yd_position) 供平今平昨规划(审计 D1-HIGH-2)。
 
-        # 下单前防御:挡 NaN/负持仓量、非正价格穿透到券商(pos.amount 异常=数据问题)
-        if not _precheck_ctp_order(pos.amount, tick[code].last):
-            LogUtil.warning(f"CTP close_buy 拒单:异常 pos.amount={pos.amount}、price={tick[code].last}")
-            return False
+        取不到返回 ("",0,0) → _plan_close_offsets 退回单 Close(与原 OF_Close 行为一致)。
+        posi_direction: 多仓 "2" / 空仓 "3"(CThostFtdcInvestorPositionField.PosiDirection)。
+        注: 风控强平路径(reboot 先调 get_positions 全量查询)快照新鲜, SHFE 拆腿可靠;
+        信号驱动平仓若快照陈旧则退回单 Close(不更差)。
+        """
+        try:
+            snap = self.trader_api.state.get_positions_snapshot()
+            info = snap.get(f"{code}_{posi_direction}")
+        except Exception:
+            info = None
+        if info is None:
+            return ("", 0, 0)
+        return (
+            str(getattr(info, "ExchangeID", "") or ""),
+            int(getattr(info, "Position", 0) or 0),
+            int(getattr(info, "YdPosition", 0) or 0),
+        )
+
+    def _send_close_leg(self, code, direction_flag, qty, offset_flag, price):
+        """发一笔平仓腿(指定 offset+qty), 返回实际成交量(0=失败)。封装 precheck/register/
+        build/insert/wait/settle_part_traded/M3 成交判定。供平今平昨计划循环调用(审计 D1-HIGH-2)。"""
+        if qty <= 0:
+            return 0
+        if not _precheck_ctp_order(qty, price):
+            LogUtil.warning(f"CTP 平仓腿拒单: 异常 qty={qty} price={price} code={code}")
+            return 0
         order_ref = self.trader_api.state.next_order_ref()
         self.trader_api.state.register_order_wait(order_ref)
         req = CThostFtdcInputOrderField()
         req.InstrumentID = code
         req.OrderPriceType = THOST_FTDC_OPT_LimitPrice
-        req.Direction = THOST_FTDC_D_Sell
-        req.CombOffsetFlag = THOST_FTDC_OF_Close
+        req.Direction = direction_flag
+        req.CombOffsetFlag = offset_flag
         req.CombHedgeFlag = THOST_FTDC_HF_Speculation
-        req.LimitPrice = tick[code].last
-        req.VolumeTotalOriginal = pos.amount
+        req.LimitPrice = price
+        req.VolumeTotalOriginal = qty
         req.TimeCondition = THOST_FTDC_TC_GFD
         req.VolumeCondition = THOST_FTDC_VC_AV
         req.MinVolume = 1
         req.ContingentCondition = THOST_FTDC_CC_Immediately
         req.OrderRef = order_ref
-
-        result = self.trader_api.ReqOrderInsert(req, 0)
-        if result != 0:
-            return False
-
+        if self.trader_api.ReqOrderInsert(req, 0) != 0:
+            return 0
         if not self.trader_api.state.wait_for_order(order_ref, _CTP_CALLBACK_TIMEOUT):
-            # 平仓回报超时: 撤单兜底, 记为失败 (execute 不会清本地仓, 下轮重试)
+            # 回报超时: 撤单兜底, 记 0(execute 不清本地仓, 下轮重试)
             self.cancel_order(order_ref)
-            LogUtil.warning(f"CTP close_buy 回报超时, 已发撤单 ref={order_ref} code={code}")
-            return False
+            LogUtil.warning(
+                f"CTP 平仓腿回报超时, 已撤 ref={order_ref} code={code} offset={offset_flag}"
+            )
+            return 0
         order = self.trader_api.state.get_order(order_ref)
         if not order:
-            return False
-
-        # M3: 平仓必须真成交才算成功; 未成交/被拒时告警 (该平没平掉是高危) 且 return False,
-        # 让 execute 不把本地仓清零 (避免裸持失管)
+            return 0
         filled = _ctp_order_filled_amount(order)
-        # 审计 D1-HIGH-3: 部分成交立即撤剩余未成挂单, 防其稍后续成致券商持仓>本地账本
+        # 审计 D1-HIGH-3: 部分成交立即撤剩余未成挂单
         self._settle_part_traded(order, order_ref, code)
-        if filled <= 0:
-            status = getattr(order, "OrderStatus", "?")
-            status_msg = getattr(order, "StatusMsg", "")
-            LogUtil.warning(
-                f"CTP close_buy 未成交(平多失败) code={code} ref={order_ref} "
-                f"OrderStatus={status} msg={status_msg}"
-            )
+        return filled
+
+    def close_buy(self, code, pos: POSITION, opt):
+        """平多仓(D1-HIGH-2: SHFE/INE 按平今平昨拆腿; 其它交易所单 Close)。"""
+        tick = self.ex.ticks([code])
+        if code not in tick:
+            return False
+        price = tick[code].last
+        # 下单前防御:挡 NaN/负持仓量、非正价格穿透到券商
+        if not _precheck_ctp_order(pos.amount, price):
+            LogUtil.warning(f"CTP close_buy 拒单:异常 pos.amount={pos.amount}、price={price}")
+            return False
+        exch, position, yd = self._ctp_pos_meta(code, "2")  # 多仓 PosiDirection=2
+        total = 0
+        for offset_flag, qty in _plan_close_offsets(exch, pos.amount, position, yd):
+            total += self._send_close_leg(code, THOST_FTDC_D_Sell, qty, offset_flag, price)
+        if total <= 0:
+            # M3: 该平没平掉是高危, 告警 + return False 让 execute 不清本地仓(避免裸持失管)
+            LogUtil.warning(f"CTP close_buy 未成交(平多失败) code={code}")
             utils.send_fs_msg(
-                "futures_trader",
-                "期货交易提醒",
-                [f"平多未成交/被拒(持仓未平!) {code} 状态={status} {status_msg}"],
+                "futures_trader", "期货交易提醒", [f"平多未成交/被拒(持仓未平!) {code}"]
             )
             return False
-
-        db.order_save(
-            "futures",
-            code,
-            code,
-            "sell",
-            tick[code].last,
-            filled,
-            opt.msg,
-            datetime.now(),
+        db.order_save("futures", code, code, "sell", price, total, opt.msg, datetime.now())
+        utils.send_fs_msg(
+            "futures_trader", "期货交易提醒",
+            [f"期货平多 {code} 价格 {price} 数量 {total} 原因 {opt.msg}"],
         )
-
-        msg = f"期货平多 {code} 价格 {tick[code].last} 数量 {filled} 原因 {opt.msg}"
-        utils.send_fs_msg("futures_trader", "期货交易提醒", [msg])
-
-        return {"price": tick[code].last, "amount": filled}
+        return {"price": price, "amount": total}
 
     def close_sell(self, code, pos: POSITION, opt):
         """平空仓"""
@@ -507,68 +554,24 @@ class CTPTrader(BackTestTrader):
         if not _precheck_ctp_order(pos.amount, tick[code].last):
             LogUtil.warning(f"CTP close_sell 拒单:异常 pos.amount={pos.amount}、price={tick[code].last}")
             return False
-        order_ref = self.trader_api.state.next_order_ref()
-        self.trader_api.state.register_order_wait(order_ref)
-        req = CThostFtdcInputOrderField()
-        req.InstrumentID = code
-        req.OrderPriceType = THOST_FTDC_OPT_LimitPrice
-        req.Direction = THOST_FTDC_D_Buy  # 买入平仓
-        req.CombOffsetFlag = THOST_FTDC_OF_Close  # 平仓
-        req.CombHedgeFlag = THOST_FTDC_HF_Speculation
-        req.LimitPrice = tick[code].last
-        req.VolumeTotalOriginal = pos.amount
-        req.TimeCondition = THOST_FTDC_TC_GFD
-        req.VolumeCondition = THOST_FTDC_VC_AV
-        req.MinVolume = 1
-        req.ContingentCondition = THOST_FTDC_CC_Immediately
-        req.OrderRef = order_ref
-
-        result = self.trader_api.ReqOrderInsert(req, 0)
-        if result != 0:
-            return False
-
-        if not self.trader_api.state.wait_for_order(order_ref, _CTP_CALLBACK_TIMEOUT):
-            # 平仓回报超时: 撤单兜底, 记为失败 (execute 不会清本地仓, 下轮重试)
-            self.cancel_order(order_ref)
-            LogUtil.warning(f"CTP close_sell 回报超时, 已发撤单 ref={order_ref} code={code}")
-            return False
-        order = self.trader_api.state.get_order(order_ref)
-        if not order:
-            return False
-
-        # M3: 平仓必须真成交才算成功; 未成交/被拒时告警 (该平没平掉是高危) 且 return False
-        filled = _ctp_order_filled_amount(order)
-        # 审计 D1-HIGH-3: 部分成交立即撤剩余未成挂单, 防其稍后续成致券商持仓>本地账本
-        self._settle_part_traded(order, order_ref, code)
-        if filled <= 0:
-            status = getattr(order, "OrderStatus", "?")
-            status_msg = getattr(order, "StatusMsg", "")
-            LogUtil.warning(
-                f"CTP close_sell 未成交(平空失败) code={code} ref={order_ref} "
-                f"OrderStatus={status} msg={status_msg}"
-            )
+        price = tick[code].last
+        exch, position, yd = self._ctp_pos_meta(code, "3")  # 空仓 PosiDirection=3
+        total = 0
+        for offset_flag, qty in _plan_close_offsets(exch, pos.amount, position, yd):
+            total += self._send_close_leg(code, THOST_FTDC_D_Buy, qty, offset_flag, price)
+        if total <= 0:
+            # M3: 该平没平掉是高危, 告警 + return False 让 execute 不清本地仓
+            LogUtil.warning(f"CTP close_sell 未成交(平空失败) code={code}")
             utils.send_fs_msg(
-                "futures_trader",
-                "期货交易提醒",
-                [f"平空未成交/被拒(持仓未平!) {code} 状态={status} {status_msg}"],
+                "futures_trader", "期货交易提醒", [f"平空未成交/被拒(持仓未平!) {code}"]
             )
             return False
-
-        db.order_save(
-            "futures",
-            code,
-            code,
-            "buy",
-            tick[code].last,
-            filled,
-            opt.msg,
-            datetime.now(),
+        db.order_save("futures", code, code, "buy", price, total, opt.msg, datetime.now())
+        utils.send_fs_msg(
+            "futures_trader", "期货交易提醒",
+            [f"期货平空 {code} 价格 {price} 数量 {total} 原因 {opt.msg}"],
         )
-
-        msg = f"期货平空 {code} 价格 {tick[code].last} 数量 {filled} 原因 {opt.msg}"
-        utils.send_fs_msg("futures_trader", "期货交易提醒", [msg])
-
-        return {"price": tick[code].last, "amount": filled}
+        return {"price": price, "amount": total}
 
     def lock_position(self, code: str, pos: POSITION, opt: Operation):
         """锁仓操作
@@ -650,60 +653,41 @@ class CTPTrader(BackTestTrader):
         if code not in tick:
             return False
 
-        order_ref = self.trader_api.state.next_order_ref()
-        self.trader_api.state.register_order_wait(order_ref)
-
-        # 根据持仓方向决定平仓方向和价格
+        # 根据持仓方向决定平仓方向和对手价
         # H2: POSITION 无 direction 字段, 方向经 mmd 子串判 ("buy" in mmd / "sell" in mmd)
         if "buy" in pos.mmd:
-            # 平多仓，用卖一价
-            direction = THOST_FTDC_D_Sell
+            direction = THOST_FTDC_D_Sell  # 平多仓, 用卖一价
             price = tick[code].sell1
+            posi_direction = "2"  # 多仓
         else:
-            # 平空仓，用买一价
-            direction = THOST_FTDC_D_Buy
+            direction = THOST_FTDC_D_Buy  # 平空仓, 用买一价
             price = tick[code].buy1
+            posi_direction = "3"  # 空仓
 
-        req = CThostFtdcInputOrderField()
-        req.InstrumentID = code
-        req.OrderPriceType = THOST_FTDC_OPT_LimitPrice
-        req.Direction = direction
-        req.CombOffsetFlag = THOST_FTDC_OF_Close
-        req.CombHedgeFlag = THOST_FTDC_HF_Speculation
-        req.LimitPrice = price
-        req.VolumeTotalOriginal = pos.amount
-        req.TimeCondition = THOST_FTDC_TC_GFD
-        req.VolumeCondition = THOST_FTDC_VC_AV
-        req.MinVolume = 1
-        req.ContingentCondition = THOST_FTDC_CC_Immediately
-        req.OrderRef = order_ref
-
-        result = self.trader_api.ReqOrderInsert(req, 0)
-        if result != 0:
-            return False
-
-        if not self.trader_api.state.wait_for_order(order_ref, _CTP_CALLBACK_TIMEOUT):
-            return False
-        order = self.trader_api.state.get_order(order_ref)
-        if not order:
-            return False
-
+        # D1-HIGH-2: SHFE/INE 风控强平按平今平昨拆腿(原单 OF_Close 对上期所当日仓被柜台拒
+        # → H1 止损/超时强平对上期所失效)。其它交易所单 Close。
+        exch, position, yd = self._ctp_pos_meta(code, posi_direction)
         direction_str = "sell" if direction == THOST_FTDC_D_Sell else "buy"
+        total = 0
+        for offset_flag, qty in _plan_close_offsets(exch, pos.amount, position, yd):
+            total += self._send_close_leg(code, direction, qty, offset_flag, price)
+        if total <= 0:
+            # 强平失败=该砍的仓没砍掉, 高危: 告警(原实现不查成交直接返回成功, 是潜在 bug)
+            LogUtil.warning(f"CTP force_close 未成交(强平失败!) code={code} 方向={direction_str}")
+            utils.send_fs_msg(
+                "futures_trader", "期货交易提醒",
+                [f"强平未成交/被拒(持仓未平!) {code} {direction_str}"],
+            )
+            return False
         db.order_save(
-            "futures",
-            code,
-            code,
-            direction_str,
-            price,
-            pos.amount,
-            f"强平:{opt.msg}",
-            datetime.now(),
+            "futures", code, code, direction_str, price, total,
+            f"强平:{opt.msg}", datetime.now(),
         )
-
-        msg = f"期货强平 {code} 方向:{direction_str} 价格:{price} 数量:{pos.amount} 原因:{opt.msg}"
-        utils.send_fs_msg("futures_trader", "期货交易提醒", [msg])
-
-        return {"price": price, "amount": pos.amount}
+        utils.send_fs_msg(
+            "futures_trader", "期货交易提醒",
+            [f"期货强平 {code} 方向:{direction_str} 价格:{price} 数量:{total} 原因:{opt.msg}"],
+        )
+        return {"price": price, "amount": total}
 
     def force_close_all(self, opt: Operation):
         """

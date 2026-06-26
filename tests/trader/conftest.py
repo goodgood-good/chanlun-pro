@@ -61,6 +61,7 @@ def _install_openctp_stub():
         "THOST_FTDC_D_Sell",
         "THOST_FTDC_HF_Speculation",
         "THOST_FTDC_OF_Close",
+        "THOST_FTDC_OF_CloseToday",
         "THOST_FTDC_OF_Open",
         "THOST_FTDC_OPT_LimitPrice",
     ]:
