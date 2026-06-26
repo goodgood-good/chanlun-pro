@@ -109,8 +109,13 @@ class CTPState:
 
     # ---------- positions ----------
     def get_position_count(self) -> int:
+        # 审计 D1-HIGH-1: 只计 Position!=0 的真实持仓。原 len(self.positions) 把已平仓的
+        # 陈旧 0 仓键 / 历史交易过的合约键也计入 → max_pos 门控随交易过的合约数单调膨胀 →
+        # 进程跑一段后 get_position_count>=max_pos 恒成立 → 永久拒绝一切新开仓(策略静默瘫痪)。
         with self._lock:
-            return len(self.positions)
+            return sum(
+                1 for p in self.positions.values() if getattr(p, "Position", 0) != 0
+            )
 
     def get_positions_snapshot(self) -> Dict[str, Any]:
         """返回 positions 浅拷贝, 调用方迭代时不受 callback 写入影响。"""
