@@ -507,6 +507,25 @@ def test_queue_events_idempotent_guards_decouple(tmp_path):
 
 
 # ==========================================================================
+# F-CRIT-2: runtime override 加风险方向不自动应用(降风险/中性自动生效)
+# ==========================================================================
+def test_runtime_override_risk_increasing_gate():
+    from chanlun.recursive_bt.monitor.live_monitor import _is_risk_increasing_override as f
+
+    assert f("max_pos", 50, 30) is True  # 放大持仓上限 = 加杠杆/集中度
+    assert f("max_pos", 20, 30) is False  # 缩小 = 降风险, 自动生效
+    assert f("max_pos", 30, 30) is False  # 不变
+    assert f("max_pos", 50, None) is False  # 无当前值 → 不判加风险
+    assert f("selection_max_codes", 100, 50) is True
+    assert f("trend_3boost", True, False) is True  # 关→开 boost = 加风险
+    assert f("trend_3boost", False, True) is False  # 开→关 = 降风险
+    assert f("enable_selection_pool", True, False) is True
+    assert f("op_level", "1m", "5m") is False  # 级别等非风险敞口键 → 允许
+    assert f("regime_mode", "x", "y") is False
+    assert f("max_pos", "abc", 30) is False  # 非法值不崩
+
+
+# ==========================================================================
 # F-LOW-6: initial_codes selection 可淘汰
 # ==========================================================================
 class _StubSelector:

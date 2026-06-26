@@ -113,6 +113,24 @@ def _monitor_market_config(
     return _apply_runtime_overrides(settings, market)
 
 
+def _is_risk_increasing_override(key, new_value, cur_value) -> bool:
+    """审计 F-CRIT-2: 判断单个 runtime override 是否朝【加风险】方向。
+
+    加风险方向(放大仓位/杠杆/集中度/激进度)不自动应用、须人工确认;降风险/中性方向自动生效
+    ——防 in-sample 过拟合寻优挑出的"加风险"参数经 N 次自动确认就把实盘调激进。
+    max_pos/选股池上限放大 = 加杠杆/集中度;trend_3boost 开/选股池开 = 更激进。
+    其它键(级别 op/mid/big、gate、regime_mode/source、sell_scope 等非风险敞口)默认允许。
+    """
+    try:
+        if key in ("max_pos", "selection_max_codes"):
+            return cur_value is not None and int(new_value) > int(cur_value)
+        if key in ("trend_3boost", "enable_selection_pool"):
+            return bool(new_value) and not bool(cur_value)
+    except (TypeError, ValueError):
+        return False
+    return False
+
+
 def _apply_runtime_overrides(settings: dict, market: str) -> dict:
     out = dict(settings)
     if not _config_bool(settings.get("runtime_overrides_enabled"), True):
@@ -133,9 +151,17 @@ def _apply_runtime_overrides(settings: dict, market: str) -> dict:
         return _apply_bs_point_ratio_overrides(out, market)
     applied_config = {}
     for key, value in override.items():
-        if key in RUNTIME_OVERRIDE_KEYS:
-            out[key] = value
-            applied_config[key] = value
+        if key not in RUNTIME_OVERRIDE_KEYS:
+            continue
+        # 审计 F-CRIT-2: 加风险方向的 override 不自动应用, 须人工确认;降风险/中性方向自动生效。
+        if _is_risk_increasing_override(key, value, settings.get(key)):
+            fun.get_logger().warning(
+                f"[live_monitor][F-CRIT-2] 跳过加风险 runtime override {key}={value} "
+                f"(当前 {settings.get(key)});加风险方向须人工确认, 不自动应用"
+            )
+            continue
+        out[key] = value
+        applied_config[key] = value
     out["_runtime_override_path"] = path
     event = record_runtime_override_application(
         settings,
@@ -162,7 +188,21 @@ def _apply_bs_point_ratio_overrides(settings: dict, market: str) -> dict:
         )
         multipliers = bs_point_ratio_multipliers_for_market(ratio_path, normalize_market(market))
         if multipliers:
-            out["bs_point_ratio_multipliers"] = multipliers
+            # 审计 F-CRIT-2: 只自动应用降风险乘数(<=1.0=减仓);加风险乘数(>1.0=加仓, 如 bear3×1.40)
+            # 须人工确认, 不自动进实盘(防 in-sample 选出的加仓乘数自动放大下注)。
+            safe, skipped = {}, {}
+            for k, m in multipliers.items():
+                try:
+                    risk_up = float(m) > 1.0
+                except (TypeError, ValueError):
+                    risk_up = False
+                (skipped if risk_up else safe)[k] = m
+            if skipped:
+                fun.get_logger().warning(
+                    f"[live_monitor][F-CRIT-2] 跳过加风险 bs_point 乘数(>1.0)须人工确认: {skipped}"
+                )
+            if safe:
+                out["bs_point_ratio_multipliers"] = safe
     except Exception as exc:
         fun.get_logger().warning(f"[live_monitor] load bs point ratio overrides failed: {exc}")
     return out
