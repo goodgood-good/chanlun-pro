@@ -33,9 +33,11 @@ test('computeStats: 面积×2 与黄白线极值', () => {
 
 test('bucketKeyOf: 分钟级与后端整除一致', () => {
   const { bucketKeyOf } = MacdStats._internal;
-  assert.equal(bucketKeyOf(1800, '5m', 8), 6);      // floor(1800/300)
-  assert.equal(bucketKeyOf(3600, '30m', 8), 2);     // floor(3600/1800)
-  assert.equal(bucketKeyOf(1800000, '5m', 8), 6);   // 毫秒归一到秒
+  assert.equal(bucketKeyOf(1800, '5m', 8), 6);      // 1800s → floor(1800/300)
+  assert.equal(bucketKeyOf(3600, '30m', 8), 2);     // 3600s → floor(3600/1800)
+  // 毫秒归一:真实量级毫秒(≥1e10)先 /1000 再整除,与对应秒级同桶
+  assert.equal(bucketKeyOf(1700001000000, '5m', 8), 5666670); // 1.7e12 ms → 1.7e9 s
+  assert.equal(bucketKeyOf(1700001000, '5m', 8), 5666670);    // 同值(秒级)
 });
 
 test('reduceToBuckets: 每桶取桶末根真值', () => {

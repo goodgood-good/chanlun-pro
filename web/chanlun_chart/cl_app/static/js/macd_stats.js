@@ -200,7 +200,7 @@ var MacdStats = (function () {
     // 日级以上用通用偏移近似(offset 默认 8h)。
     function bucketKeyOf(t, higherFreq, marketOffsetH) {
         if (t === undefined || t === null || isNaN(t)) return null;
-        const ts = t < 1e6 ? Math.floor(t) : Math.floor(t / 1000); // 归一到秒
+        const ts = t < 1e10 ? Math.floor(t) : Math.floor(t / 1000); // 归一到秒
         if (higherFreq === '5m') return Math.floor(ts / 300);
         if (higherFreq === '30m') return Math.floor(ts / 1800);
         const offset = (marketOffsetH == null ? DEFAULT_MARKET_OFFSET_H : marketOffsetH) * 3600;
