@@ -12,6 +12,10 @@ var MacdStats = (function () {
     const COLOR_NEG = '#26a69a'; // 绿柱
     const COLOR_RANGE_BG = '#FFD54F';
 
+    // 复刻后端 HIGHER_FREQ_MAP(chart_compute.py:85);仅取本工具会用到的层级。
+    const HIGHER_FREQ_MAP = { '1m': '5m', '5m': '30m', '30m': 'd', 'd': 'w', 'w': 'm', 'm': 'y' };
+    const DEFAULT_MARKET_OFFSET_H = 8; // 日级以上分桶的通用偏移(近似)
+
     // 复制自 chart_idx_macd_backend.js 的 smartSearch，避免跨文件耦合
     function smartSearch(times, target, intervalStr) {
         if (target === undefined || target === null || isNaN(target)) return -1;
@@ -189,6 +193,90 @@ var MacdStats = (function () {
         result.negAreaX2 = result.negArea * 2;
         result.netAreaX2 = result.netArea * 2;
         result.segmentCount = result.posSegments.length + result.negSegments.length;
+        return result;
+    }
+
+    // 单根时间戳 → 高一级周期的桶 key。分钟级与后端 _higher_bucket_keys 逐字一致;
+    // 日级以上用通用偏移近似(offset 默认 8h)。
+    function bucketKeyOf(t, higherFreq, marketOffsetH) {
+        if (t === undefined || t === null || isNaN(t)) return null;
+        const ts = t < 1e6 ? Math.floor(t) : Math.floor(t / 1000); // 归一到秒
+        if (higherFreq === '5m') return Math.floor(ts / 300);
+        if (higherFreq === '30m') return Math.floor(ts / 1800);
+        const offset = (marketOffsetH == null ? DEFAULT_MARKET_OFFSET_H : marketOffsetH) * 3600;
+        const days = Math.floor((ts + offset) / 86400);
+        if (higherFreq === 'd') return days;
+        if (higherFreq === 'w') return Math.floor((days + 3) / 7); // 1970-01-01 是周四
+        const d = new Date(ts * 1000);
+        if (higherFreq === 'm') return d.getUTCFullYear() * 12 + d.getUTCMonth();
+        if (higherFreq === 'y') return d.getUTCFullYear();
+        return null;
+    }
+
+    // 把 [startIdx,endIdx] 的插值序列按桶 key 归并,每桶取桶末根(同 key 最后一根)的真值。
+    function reduceToBuckets(times, arr, startIdx, endIdx, higherFreq, marketOffsetH) {
+        const out = [];
+        if (!times || !arr) return out;
+        let curKey = null, lastIdx = -1;
+        for (let i = startIdx; i <= endIdx; i++) {
+            const k = bucketKeyOf(times[i], higherFreq, marketOffsetH);
+            if (k === null) continue;
+            if (curKey === null) { curKey = k; lastIdx = i; continue; }
+            if (k !== curKey) {
+                out.push({ idx: lastIdx, value: Number(arr[lastIdx]) });
+                curKey = k;
+            }
+            lastIdx = i;
+        }
+        if (lastIdx >= 0) out.push({ idx: lastIdx, value: Number(arr[lastIdx]) });
+        return out;
+    }
+
+    // HTF 逐桶统计:先把 hist/dif/dea 还原回高周期桶末真值,再在桶粒度上算面积/柱高/黄白线。
+    function computeStatsHTF(times, hHist, hDif, hDea, startIdx, endIdx, higherFreq, marketOffsetH, opts) {
+        opts = opts || {};
+        const result = {
+            bucketCount: 0,
+            posArea: 0, negArea: 0, netArea: 0,
+            posAreaX2: 0, negAreaX2: 0, netAreaX2: 0,
+            posMax: 0, posMaxIdx: -1, negMin: 0, negMinIdx: -1,
+            difMax: null, difMin: null, deaMax: null, deaMin: null,
+            excludedLast: false,
+        };
+        if (!times || !hHist) return result;
+        if (endIdx >= times.length) endIdx = times.length - 1;
+
+        let histBuckets = reduceToBuckets(times, hHist, startIdx, endIdx, higherFreq, marketOffsetH);
+        const difBuckets = hDif ? reduceToBuckets(times, hDif, startIdx, endIdx, higherFreq, marketOffsetH) : [];
+        const deaBuckets = hDea ? reduceToBuckets(times, hDea, startIdx, endIdx, higherFreq, marketOffsetH) : [];
+
+        // 排除末桶(未收盘)
+        let cut = histBuckets.length;
+        if (opts.excludeLast && histBuckets.length > 1) { cut = histBuckets.length - 1; result.excludedLast = true; }
+
+        for (let b = 0; b < cut; b++) {
+            const v = histBuckets[b].value;
+            if (!isFinite(v)) continue;
+            result.bucketCount++;
+            if (v > 0) { result.posArea += v; if (v > result.posMax) { result.posMax = v; result.posMaxIdx = histBuckets[b].idx; } }
+            else if (v < 0) { result.negArea += Math.abs(v); if (v < result.negMin) { result.negMin = v; result.negMinIdx = histBuckets[b].idx; } }
+        }
+        for (let b = 0; b < Math.min(cut, difBuckets.length); b++) {
+            const dv = difBuckets[b].value;
+            if (!isFinite(dv)) continue;
+            if (result.difMax === null || dv > result.difMax) result.difMax = dv;
+            if (result.difMin === null || dv < result.difMin) result.difMin = dv;
+        }
+        for (let b = 0; b < Math.min(cut, deaBuckets.length); b++) {
+            const ev = deaBuckets[b].value;
+            if (!isFinite(ev)) continue;
+            if (result.deaMax === null || ev > result.deaMax) result.deaMax = ev;
+            if (result.deaMin === null || ev < result.deaMin) result.deaMin = ev;
+        }
+        result.netArea = result.posArea - result.negArea;
+        result.posAreaX2 = result.posArea * 2;
+        result.negAreaX2 = result.negArea * 2;
+        result.netAreaX2 = result.netArea * 2;
         return result;
     }
 
@@ -732,7 +820,7 @@ var MacdStats = (function () {
             return ctrl;
         },
         // 便于调试
-        _internal: { computeStats, smartSearch, findBarsResult },
+        _internal: { computeStats, smartSearch, findBarsResult, bucketKeyOf, reduceToBuckets, computeStatsHTF },
     };
 })();
 
