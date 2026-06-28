@@ -714,4 +714,10 @@ var MacdStats = (function () {
     };
 })();
 
-window.MacdStats = MacdStats;
+if (typeof window !== 'undefined') {
+    window.MacdStats = MacdStats;
+}
+// Node 单测入口(浏览器下 module 未定义,守卫跳过)
+if (typeof module !== 'undefined' && module.exports) {
+    module.exports = MacdStats;
+}
