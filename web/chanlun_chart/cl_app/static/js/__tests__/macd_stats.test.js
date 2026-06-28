@@ -69,3 +69,20 @@ test('computeStatsHTF: 按桶末真值统计,不被 bar 数放大', () => {
   assert.equal(r.difMax, 0.8);
   assert.equal(r.deaMin, -0.2);
 });
+
+test('computeSegmentSlopes: 上行>0 下行<0 且按区间裁剪', () => {
+  const { computeSegmentSlopes } = MacdStats._internal;
+  const times = [];
+  for (let i = 0; i < 20; i++) times.push(i * 300);
+  const xds = [
+    { points: [{ price: 10, time: 0 },    { price: 14, time: 300 * 4 }] },  // 上行 idx0→4, slope=(14-10)/4=1
+    { points: [{ price: 14, time: 300 * 4 }, { price: 8, time: 300 * 10 }] }, // 下行 idx4→10, slope=(8-14)/6=-1
+    { points: [{ price: 8, time: 300 * 16 }, { price: 9, time: 300 * 19 }] }, // 区间外(>endIdx=12)
+  ];
+  const r = computeSegmentSlopes(times, xds, 0, 12);
+  assert.equal(r.length, 2);              // 第三根在区间外被裁掉
+  assert.equal(r[0].slope, 1);
+  assert.equal(r[0].dir, 'up');
+  assert.equal(r[1].slope, -1);
+  assert.equal(r[1].dir, 'down');
+});

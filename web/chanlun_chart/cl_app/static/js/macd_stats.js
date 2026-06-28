@@ -280,6 +280,30 @@ var MacdStats = (function () {
         return result;
     }
 
+    // 区间内每根缠论线段(xds)的斜率。time 经 smartSearch 对齐到 bar 索引,
+    // 斜率 =(终点price−起点price)/(终点idx−起点idx)。只返回与 [startIdx,endIdx] 重叠的线段。
+    function computeSegmentSlopes(times, xds, startIdx, endIdx) {
+        const out = [];
+        if (!times || !Array.isArray(xds)) return out;
+        for (const seg of xds) {
+            const pts = seg && seg.points;
+            if (!pts || pts.length < 2) continue;
+            const sIdx = smartSearch(times, pts[0].time, '');
+            const eIdx = smartSearch(times, pts[1].time, '');
+            if (sIdx < 0 || eIdx < 0 || eIdx === sIdx) continue;
+            const lo = Math.min(sIdx, eIdx), hi = Math.max(sIdx, eIdx);
+            if (hi < startIdx || lo > endIdx) continue; // 与区间无重叠
+            const slope = (pts[1].price - pts[0].price) / (eIdx - sIdx);
+            out.push({
+                startTime: pts[0].time, endTime: pts[1].time,
+                startPrice: pts[0].price, endPrice: pts[1].price,
+                startIdx: sIdx, endIdx: eIdx,
+                slope, dir: slope >= 0 ? 'up' : 'down',
+            });
+        }
+        return out;
+    }
+
     /**
      * 对比当前段与上一同色段，给出简单的背驰提示
      */
@@ -820,7 +844,7 @@ var MacdStats = (function () {
             return ctrl;
         },
         // 便于调试
-        _internal: { computeStats, smartSearch, findBarsResult, bucketKeyOf, reduceToBuckets, computeStatsHTF },
+        _internal: { computeStats, smartSearch, findBarsResult, bucketKeyOf, reduceToBuckets, computeStatsHTF, computeSegmentSlopes },
     };
 })();
 
