@@ -83,10 +83,14 @@ var MacdStats = (function () {
      */
     function computeStats(times, hist, startIdx, endIdx, opts) {
         opts = opts || {};
+        const difArr = opts.difArr || null;
+        const deaArr = opts.deaArr || null;
         const result = {
             startIdx, endIdx,
             barCount: 0,
             posArea: 0, negArea: 0, netArea: 0,
+            posAreaX2: 0, negAreaX2: 0, netAreaX2: 0,
+            difMax: null, difMin: null, deaMax: null, deaMin: null,
             posMax: 0, posMaxTime: null, posMaxIdx: -1,
             negMin: 0, negMinTime: null, negMinIdx: -1,
             segmentCount: 0,
@@ -118,6 +122,21 @@ var MacdStats = (function () {
         for (let i = startIdx; i <= realEnd; i++) {
             const v = Number(hist[i]);
             if (!isFinite(v)) continue;
+
+            if (difArr) {
+                const dv = Number(difArr[i]);
+                if (isFinite(dv)) {
+                    if (result.difMax === null || dv > result.difMax) result.difMax = dv;
+                    if (result.difMin === null || dv < result.difMin) result.difMin = dv;
+                }
+            }
+            if (deaArr) {
+                const ev = Number(deaArr[i]);
+                if (isFinite(ev)) {
+                    if (result.deaMax === null || ev > result.deaMax) result.deaMax = ev;
+                    if (result.deaMin === null || ev < result.deaMin) result.deaMin = ev;
+                }
+            }
 
             // HTF 模式：值未变化则跳过累加
             const isDup = opts.htfDedup && prevHistVal !== null && v === prevHistVal;
@@ -166,6 +185,9 @@ var MacdStats = (function () {
         flushSeg();
 
         result.netArea = result.posArea - result.negArea;
+        result.posAreaX2 = result.posArea * 2;
+        result.negAreaX2 = result.negArea * 2;
+        result.netAreaX2 = result.netArea * 2;
         result.segmentCount = result.posSegments.length + result.negSegments.length;
         return result;
     }
