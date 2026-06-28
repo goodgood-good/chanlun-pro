@@ -304,30 +304,6 @@ var MacdStats = (function () {
         return out;
     }
 
-    /**
-     * 对比当前段与上一同色段，给出简单的背驰提示
-     */
-    function buildDivergenceHint(stats, source) {
-        const lastPos = stats.posSegments[stats.posSegments.length - 1];
-        const prevPos = stats.posSegments[stats.posSegments.length - 2];
-        const lastNeg = stats.negSegments[stats.negSegments.length - 1];
-        const prevNeg = stats.negSegments[stats.negSegments.length - 2];
-
-        const hints = [];
-        if (lastPos && prevPos) {
-            const peakDown = lastPos.peak < prevPos.peak;
-            const areaDown = lastPos.area < prevPos.area;
-            if (peakDown && areaDown) hints.push(`红柱顶背驰倾向（峰值 ${prevPos.peak.toFixed(4)} → ${lastPos.peak.toFixed(4)}，面积 ${prevPos.area.toFixed(4)} → ${lastPos.area.toFixed(4)}）`);
-        }
-        if (lastNeg && prevNeg) {
-            const peakUp = lastNeg.peak > prevNeg.peak; // peak 是负值，绝对值变小即"上升"
-            const areaDown = lastNeg.area < prevNeg.area;
-            if (peakUp && areaDown) hints.push(`绿柱底背驰倾向（谷值 ${prevNeg.peak.toFixed(4)} → ${lastNeg.peak.toFixed(4)}，面积 ${prevNeg.area.toFixed(4)} → ${lastNeg.area.toFixed(4)}）`);
-        }
-        if (hints.length === 0) hints.push(`无明显背驰信号（基于 ${source}）`);
-        return hints;
-    }
-
     // 每个 ChartManager 实例独立持有一个控制器
     class MacdStatsController {
         constructor(chartManager) {
@@ -578,13 +554,25 @@ var MacdStats = (function () {
                 && barsResult.higher_macd_hist.length > 0
                 && !barsResult.higher_macd_hist.every(v => isNaN(v) || v === null);
 
-            // 同时计算 MACD 与 MACD_HTF
+            const higherFreq = HIGHER_FREQ_MAP[interval] || null;
+
+            // 本周期:逐根,带黄白线极值
             const statsLocal = computeStats(times, barsResult.macd_hist || [], startIdx, endIdx, {
-                htfDedup: false, excludeLast: true,
+                excludeLast: true,
+                difArr: barsResult.macd_dif || null,
+                deaArr: barsResult.macd_dea || null,
             });
-            const statsHtf = hasHigher ? computeStats(times, barsResult.higher_macd_hist, startIdx, endIdx, {
-                htfDedup: true, excludeLast: true,
-            }) : null;
+            // 跨周期:还原高周期桶取真值(取代失效的 htfDedup)
+            const statsHtf = (hasHigher && higherFreq) ? computeStatsHTF(
+                times,
+                barsResult.higher_macd_hist,
+                barsResult.higher_macd_dif || null,
+                barsResult.higher_macd_dea || null,
+                startIdx, endIdx, higherFreq, DEFAULT_MARKET_OFFSET_H,
+                { excludeLast: true },
+            ) : null;
+            // 区间内缠论线段斜率
+            const slopes = computeSegmentSlopes(times, barsResult.xds || [], startIdx, endIdx);
 
             // 绘制区间背景
             this.cm.markDrawingMutationStart('macd-stats');
@@ -599,7 +587,7 @@ var MacdStats = (function () {
                 code, interval,
                 startTime: times[startIdx], endTime: times[endIdx],
                 barCount: endIdx - startIdx + 1,
-                statsLocal, statsHtf, hasHigher,
+                statsLocal, statsHtf, hasHigher, slopes, higherFreq,
             });
         }
 
@@ -722,19 +710,33 @@ var MacdStats = (function () {
             panel.style.display = 'block';
 
             const fmt = (n) => (n === null || n === undefined || isNaN(n)) ? '-' : Number(n).toFixed(4);
-            const renderBlock = (title, s, source) => {
+            const fmtPeak = (mx, mn) => {
+                // 同向峰值绝对值:取 |max| 与 |min| 中较大者
+                const a = (mx === null || isNaN(mx)) ? 0 : Math.abs(mx);
+                const b = (mn === null || isNaN(mn)) ? 0 : Math.abs(mn);
+                return fmt(Math.max(a, b));
+            };
+            const renderBlock = (title, s, note) => {
                 if (!s) return `<div style="opacity:.6;margin:6px 0;">[${title}] 无数据</div>`;
-                const hints = buildDivergenceHint(s, source);
+                const cnt = (s.bucketCount !== undefined) ? `桶数 ${s.bucketCount}` : `柱数 ${s.barCount}`;
                 return `
                 <div style="margin:8px 0;padding:8px;background:#262b3a;border-radius:4px;">
-                  <div style="font-weight:bold;color:#FFD54F;margin-bottom:6px;">${title}</div>
-                  <div>📊 柱数: <b>${s.barCount}</b> ${s.excludedLast ? '<span style="color:#888">(已排除末根)</span>' : ''}</div>
-                  <div style="color:${COLOR_POS}">🔴 红柱面积: <b>${fmt(s.posArea)}</b> | 峰值: <b>${fmt(s.posMax)}</b> @ ${this._fmtTime(s.posMaxTime)}</div>
-                  <div style="color:${COLOR_NEG}">🟢 绿柱面积: <b>${fmt(s.negArea)}</b> | 谷值: <b>${fmt(s.negMin)}</b> @ ${this._fmtTime(s.negMinTime)}</div>
-                  <div>⚖️ 净面积(红-绿): <b style="color:${s.netArea >= 0 ? COLOR_POS : COLOR_NEG}">${fmt(s.netArea)}</b></div>
-                  <div>🔁 段数: 红 ${s.posSegments.length} / 绿 ${s.negSegments.length}</div>
-                  <div style="margin-top:6px;font-size:11px;color:#9aa3b8;">${hints.map(h => '· ' + h).join('<br>')}</div>
+                  <div style="font-weight:bold;color:#FFD54F;margin-bottom:6px;">${title}<span style="font-weight:normal;color:#9aa3b8;font-size:11px;"> ${note || ''}</span></div>
+                  <div>📊 ${cnt} ${s.excludedLast ? '<span style="color:#888">(已排除末根)</span>' : ''}</div>
+                  <div style="color:${COLOR_POS}">🔴 红柱面积 <b>${fmt(s.posArea)}</b> (×2 <b>${fmt(s.posAreaX2)}</b>) | 峰 <b>${fmt(s.posMax)}</b></div>
+                  <div style="color:${COLOR_NEG}">🟢 绿柱面积 <b>${fmt(s.negArea)}</b> (×2 <b>${fmt(s.negAreaX2)}</b>) | 谷 <b>${fmt(s.negMin)}</b></div>
+                  <div>⚖️ 净面积 <b style="color:${s.netArea >= 0 ? COLOR_POS : COLOR_NEG}">${fmt(s.netArea)}</b> (×2 <b>${fmt(s.netAreaX2)}</b>)</div>
+                  <div>📈 黄白线 DIF峰 <b>${fmtPeak(s.difMax, s.difMin)}</b> | DEA峰 <b>${fmtPeak(s.deaMax, s.deaMin)}</b></div>
                 </div>`;
+            };
+            const renderSlopes = (slopes) => {
+                if (!slopes || slopes.length === 0) return '<div style="opacity:.5;font-size:11px;">区间内无完整线段</div>';
+                const rows = slopes.map(sl => `
+                  <div style="color:${sl.dir === 'up' ? COLOR_POS : COLOR_NEG};font-size:11px;">
+                    ${sl.dir === 'up' ? '↑' : '↓'} ${this._fmtTime(sl.startTime)} → ${this._fmtTime(sl.endTime)} 斜率 <b>${fmt(sl.slope)}</b>
+                  </div>`).join('');
+                return `<div style="margin:8px 0;padding:8px;background:#262b3a;border-radius:4px;">
+                  <div style="font-weight:bold;color:#FFD54F;margin-bottom:6px;">线段斜率 (xds)</div>${rows}</div>`;
             };
 
             panel.innerHTML = `
@@ -749,8 +751,9 @@ var MacdStats = (function () {
                 ${payload.code} · ${payload.interval} · ${payload.barCount} 根 K 线<br>
                 ${this._fmtTime(payload.startTime)} → ${this._fmtTime(payload.endTime)}
               </div>
-              ${renderBlock('MACD (本周期)', payload.statsLocal, '本周期')}
-              ${payload.hasHigher ? renderBlock('MACD_HTF (跨周期)', payload.statsHtf, '跨周期') : '<div style="opacity:.5;font-size:11px;">未启用 MACD_HTF 跨周期数据</div>'}
+              ${renderBlock('MACD (本周期)', payload.statsLocal, '×2 口径')}
+              ${payload.hasHigher ? renderBlock('MACD_HTF (跨周期)', payload.statsHtf, (payload.higherFreq && (payload.higherFreq === '5m' || payload.higherFreq === '30m')) ? '×1 口径 · 桶粒度' : '×1 口径 · 桶粒度(日级近似)') : '<div style="opacity:.5;font-size:11px;">未启用 MACD_HTF 跨周期数据</div>'}
+              ${renderSlopes(payload.slopes)}
               ${this._renderSnapshots()}
             `;
 
