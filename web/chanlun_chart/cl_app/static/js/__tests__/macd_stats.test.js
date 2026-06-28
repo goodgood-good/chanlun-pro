@@ -86,3 +86,27 @@ test('computeSegmentSlopes: 上行>0 下行<0 且按区间裁剪', () => {
   assert.equal(r[1].slope, -1);
   assert.equal(r[1].dir, 'down');
 });
+
+test('resolveHigherFreq: TV resolution → 高周期 frequency(生产场景)', () => {
+  const { resolveHigherFreq } = MacdStats._internal;
+  assert.equal(resolveHigherFreq('1'), '5m');    // 1m 图 → HTF 5m
+  assert.equal(resolveHigherFreq('5'), '30m');   // 5m → 30m
+  assert.equal(resolveHigherFreq('30'), 'd');    // 30m → 日
+  assert.equal(resolveHigherFreq('1D'), 'w');    // 日 → 周
+  assert.equal(resolveHigherFreq('1M'), 'y');    // 月 → 年(不与分钟 '1' 混淆)
+  assert.equal(resolveHigherFreq('15'), null);   // 15m 无高周期
+  assert.equal(resolveHigherFreq('60'), null);   // 60m 无高周期
+});
+
+test('computeSegmentSlopes: 生产单位 times(毫秒) vs xds(秒) 仍对齐', () => {
+  const { computeSegmentSlopes } = MacdStats._internal;
+  const times = [];
+  for (let i = 0; i < 20; i++) times.push((1700000000 + i * 300) * 1000); // 毫秒
+  const xds = [
+    { points: [{ price: 10, time: 1700000000 }, { price: 14, time: 1700000000 + 300 * 4 }] }, // 秒
+  ];
+  const r = computeSegmentSlopes(times, xds, 0, 12);
+  assert.equal(r.length, 1);
+  assert.equal(r[0].slope, 1);   // (14-10)/4
+  assert.equal(r[0].dir, 'up');
+});

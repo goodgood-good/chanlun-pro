@@ -16,6 +16,14 @@ var MacdStats = (function () {
     const HIGHER_FREQ_MAP = { '1m': '5m', '5m': '30m', '30m': 'd', 'd': 'w', 'w': 'm', 'm': 'y' };
     const DEFAULT_MARKET_OFFSET_H = 8; // 日级以上分桶的通用偏移(近似)
 
+    // TV resolution → 项目 frequency(复刻 constants.py resolution_maps,大小写敏感)
+    const RES_TO_FREQ = {
+        '10S': '10s', '30S': '30s', '1': '1m', '2': '2m', '3': '3m', '5': '5m',
+        '10': '10m', '15': '15m', '30': '30m', '60': '60m', '120': '120m',
+        '180': '3h', '240': '4h', '1D': 'd', '2D': '2d', '1W': 'w', '1M': 'm',
+        '3M': 'q', '12M': 'y',
+    };
+
     // 复制自 chart_idx_macd_backend.js 的 smartSearch，避免跨文件耦合
     function smartSearch(times, target, intervalStr) {
         if (target === undefined || target === null || isNaN(target)) return -1;
@@ -196,6 +204,14 @@ var MacdStats = (function () {
         return result;
     }
 
+    // 由 TV resolution(或已是 frequency)解析「高一级周期」frequency,无对照返回 null。
+    // 先 RES_TO_FREQ 把 resolution 转 frequency(大小写敏感),再查 HIGHER_FREQ_MAP。
+    function resolveHigherFreq(rawInterval) {
+        const r = String(rawInterval || '');
+        const freq = RES_TO_FREQ[r] || r; // 已是 frequency 时原样
+        return HIGHER_FREQ_MAP[freq] || null;
+    }
+
     // 单根时间戳 → 高一级周期的桶 key。分钟级与后端 _higher_bucket_keys 逐字一致;
     // 日级以上用通用偏移近似(offset 默认 8h)。
     function bucketKeyOf(t, higherFreq, marketOffsetH) {
@@ -288,8 +304,10 @@ var MacdStats = (function () {
         for (const seg of xds) {
             const pts = seg && seg.points;
             if (!pts || pts.length < 2) continue;
-            const sIdx = smartSearch(times, pts[0].time, '');
-            const eIdx = smartSearch(times, pts[1].time, '');
+            const inSec = times.length > 0 && times[times.length - 1] < 1e10;
+            const norm = (t) => inSec ? (t > 1e10 ? Math.floor(t / 1000) : t) : (t < 1e10 ? t * 1000 : t);
+            const sIdx = smartSearch(times, norm(pts[0].time), '');
+            const eIdx = smartSearch(times, norm(pts[1].time), '');
             if (sIdx < 0 || eIdx < 0 || eIdx === sIdx) continue;
             const lo = Math.min(sIdx, eIdx), hi = Math.max(sIdx, eIdx);
             if (hi < startIdx || lo > endIdx) continue; // 与区间无重叠
@@ -554,7 +572,8 @@ var MacdStats = (function () {
                 && barsResult.higher_macd_hist.length > 0
                 && !barsResult.higher_macd_hist.every(v => isNaN(v) || v === null);
 
-            const higherFreq = HIGHER_FREQ_MAP[interval] || null;
+            const rawInterval = String(symbolInterval.interval || ''); // 不 lowercase,保 1D/1W/1M
+            const higherFreq = resolveHigherFreq(rawInterval);
 
             // 本周期:逐根,带黄白线极值
             const statsLocal = computeStats(times, barsResult.macd_hist || [], startIdx, endIdx, {
@@ -848,7 +867,7 @@ var MacdStats = (function () {
             return ctrl;
         },
         // 便于调试
-        _internal: { computeStats, smartSearch, findBarsResult, bucketKeyOf, reduceToBuckets, computeStatsHTF, computeSegmentSlopes },
+        _internal: { computeStats, smartSearch, findBarsResult, bucketKeyOf, reduceToBuckets, computeStatsHTF, computeSegmentSlopes, resolveHigherFreq },
     };
 })();
 
