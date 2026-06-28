@@ -711,10 +711,11 @@ var MacdStats = (function () {
 
             const fmt = (n) => (n === null || n === undefined || isNaN(n)) ? '-' : Number(n).toFixed(4);
             const fmtPeak = (mx, mn) => {
-                // 同向峰值绝对值:取 |max| 与 |min| 中较大者
-                const a = (mx === null || isNaN(mx)) ? 0 : Math.abs(mx);
-                const b = (mn === null || isNaN(mn)) ? 0 : Math.abs(mn);
-                return fmt(Math.max(a, b));
+                // 同向峰值绝对值:取 |max| 与 |min| 中较大者;两者皆无数据时显示 "-"
+                const a = (mx === null || mx === undefined || isNaN(mx)) ? null : Math.abs(mx);
+                const b = (mn === null || mn === undefined || isNaN(mn)) ? null : Math.abs(mn);
+                if (a === null && b === null) return fmt(null); // 无数据 → "-"
+                return fmt(Math.max(a === null ? 0 : a, b === null ? 0 : b));
             };
             const renderBlock = (title, s, note) => {
                 if (!s) return `<div style="opacity:.6;margin:6px 0;">[${title}] 无数据</div>`;
@@ -752,7 +753,7 @@ var MacdStats = (function () {
                 ${this._fmtTime(payload.startTime)} → ${this._fmtTime(payload.endTime)}
               </div>
               ${renderBlock('MACD (本周期)', payload.statsLocal, '×2 口径')}
-              ${payload.hasHigher ? renderBlock('MACD_HTF (跨周期)', payload.statsHtf, (payload.higherFreq && (payload.higherFreq === '5m' || payload.higherFreq === '30m')) ? '×1 口径 · 桶粒度' : '×1 口径 · 桶粒度(日级近似)') : '<div style="opacity:.5;font-size:11px;">未启用 MACD_HTF 跨周期数据</div>'}
+              ${(payload.hasHigher && payload.higherFreq) ? renderBlock('MACD_HTF (跨周期)', payload.statsHtf, (payload.higherFreq && (payload.higherFreq === '5m' || payload.higherFreq === '30m')) ? '×1 口径 · 桶粒度' : '×1 口径 · 桶粒度(日级近似)') : '<div style="opacity:.5;font-size:11px;">未启用 MACD_HTF 跨周期数据</div>'}
               ${renderSlopes(payload.slopes)}
               ${this._renderSnapshots()}
             `;
