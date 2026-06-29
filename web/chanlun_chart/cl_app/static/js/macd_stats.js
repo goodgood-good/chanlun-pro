@@ -89,7 +89,6 @@ var MacdStats = (function () {
      * @param {number} startIdx - 区间起始索引（含）
      * @param {number} endIdx   - 区间结束索引（含）
      * @param {object} opts
-     *   - htfDedup: boolean，true 时按 hist 值变化分段，每段只算一次（用于 MACD_HTF）
      *   - excludeLast: boolean，true 时排除区间末尾未收盘的最后一根
      * @returns {object} 统计结果
      */
@@ -120,8 +119,7 @@ var MacdStats = (function () {
             result.endIdx = realEnd;
         }
 
-        // HTF 模式按 hist 值变化分段，重复值跳过；普通 MACD 每根独立累加
-        let prevHistVal = null;
+        // 每根 hist 独立累加面积；同号连续柱归并为段(posSegments/negSegments)
         let curSeg = null; // {startIdx, endIdx, area, peak, peakIdx, sign}
 
         const flushSeg = () => {
@@ -150,10 +148,6 @@ var MacdStats = (function () {
                 }
             }
 
-            // HTF 模式：值未变化则跳过累加
-            const isDup = opts.htfDedup && prevHistVal !== null && v === prevHistVal;
-            prevHistVal = v;
-
             const sign = v > 0 ? 1 : (v < 0 ? -1 : 0);
 
             // 段切换检测
@@ -169,29 +163,27 @@ var MacdStats = (function () {
                 curSeg.endIdx = i;
             }
 
-            if (!isDup) {
-                result.barCount++;
-                if (v > 0) {
-                    result.posArea += v;
-                    if (v > result.posMax) {
-                        result.posMax = v;
-                        result.posMaxTime = times[i];
-                        result.posMaxIdx = i;
-                    }
-                } else if (v < 0) {
-                    result.negArea += Math.abs(v);
-                    if (v < result.negMin) {
-                        result.negMin = v;
-                        result.negMinTime = times[i];
-                        result.negMinIdx = i;
-                    }
+            result.barCount++;
+            if (v > 0) {
+                result.posArea += v;
+                if (v > result.posMax) {
+                    result.posMax = v;
+                    result.posMaxTime = times[i];
+                    result.posMaxIdx = i;
                 }
+            } else if (v < 0) {
+                result.negArea += Math.abs(v);
+                if (v < result.negMin) {
+                    result.negMin = v;
+                    result.negMinTime = times[i];
+                    result.negMinIdx = i;
+                }
+            }
 
-                if (curSeg) {
-                    curSeg.area += Math.abs(v);
-                    if (sign > 0 && v > curSeg.peak) { curSeg.peak = v; curSeg.peakIdx = i; }
-                    if (sign < 0 && v < curSeg.peak) { curSeg.peak = v; curSeg.peakIdx = i; }
-                }
+            if (curSeg) {
+                curSeg.area += Math.abs(v);
+                if (sign > 0 && v > curSeg.peak) { curSeg.peak = v; curSeg.peakIdx = i; }
+                if (sign < 0 && v < curSeg.peak) { curSeg.peak = v; curSeg.peakIdx = i; }
             }
         }
         flushSeg();
