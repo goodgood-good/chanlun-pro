@@ -196,6 +196,14 @@ var MacdStats = (function () {
         return result;
     }
 
+    // 同向峰值绝对值:|max| 与 |min| 取较大者;两者皆无数据返回 null。
+    function peakAbs(mx, mn) {
+        const a = (mx === null || mx === undefined || isNaN(mx)) ? null : Math.abs(mx);
+        const b = (mn === null || mn === undefined || isNaN(mn)) ? null : Math.abs(mn);
+        if (a === null && b === null) return null;
+        return Math.max(a === null ? 0 : a, b === null ? 0 : b);
+    }
+
     // 由 TV resolution(或已是 frequency)解析「高一级周期」frequency,无对照返回 null。
     // 先 RES_TO_FREQ 把 resolution 转 frequency(大小写敏感),再查 HIGHER_FREQ_MAP。
     function resolveHigherFreq(rawInterval) {
@@ -721,13 +729,7 @@ var MacdStats = (function () {
             panel.style.display = 'block';
 
             const fmt = (n) => (n === null || n === undefined || isNaN(n)) ? '-' : Number(n).toFixed(4);
-            const fmtPeak = (mx, mn) => {
-                // 同向峰值绝对值:取 |max| 与 |min| 中较大者;两者皆无数据时显示 "-"
-                const a = (mx === null || mx === undefined || isNaN(mx)) ? null : Math.abs(mx);
-                const b = (mn === null || mn === undefined || isNaN(mn)) ? null : Math.abs(mn);
-                if (a === null && b === null) return fmt(null); // 无数据 → "-"
-                return fmt(Math.max(a === null ? 0 : a, b === null ? 0 : b));
-            };
+            const fmtPeak = (mx, mn) => fmt(peakAbs(mx, mn)); // 同向峰值绝对值,无数据 → "-"
             const renderBlock = (title, s, note) => {
                 if (!s) return `<div style="opacity:.6;margin:6px 0;">[${title}] 无数据</div>`;
                 const cnt = (s.bucketCount !== undefined) ? `桶数 ${s.bucketCount}` : `柱数 ${s.barCount}`;
@@ -771,11 +773,16 @@ var MacdStats = (function () {
 
             panel.querySelector('[data-act="close"]').addEventListener('click', () => this.clearRange());
             panel.querySelector('[data-act="snapshot"]').addEventListener('click', () => {
+                // 快照保留本级别+高级别的面积/柱高/黄白线极值,供跨区间对比
+                const pick = (s) => s ? {
+                    posArea: s.posArea, negArea: s.negArea, netArea: s.netArea,
+                    posMax: s.posMax, negMin: s.negMin,
+                    difMax: s.difMax, difMin: s.difMin, deaMax: s.deaMax, deaMin: s.deaMin,
+                } : null;
                 this._snapshots.unshift({
                     label: `${payload.interval} ${this._fmtTime(payload.startTime)} ~ ${this._fmtTime(payload.endTime)}`,
-                    posArea: payload.statsLocal.posArea,
-                    negArea: payload.statsLocal.negArea,
-                    netArea: payload.statsLocal.netArea,
+                    local: pick(payload.statsLocal),
+                    htf: (payload.hasHigher && payload.higherFreq) ? pick(payload.statsHtf) : null,
                 });
                 if (this._snapshots.length > 5) this._snapshots.length = 5;
                 this._renderPanel(payload);
@@ -784,23 +791,31 @@ var MacdStats = (function () {
 
         _renderSnapshots() {
             if (!this._snapshots || this._snapshots.length === 0) return '';
-            const fmt = (n) => Number(n).toFixed(4);
-            const rows = this._snapshots.map((s, i) => `
-              <tr>
-                <td style="padding:2px 4px;">${i + 1}</td>
-                <td style="padding:2px 4px;">${s.label}</td>
-                <td style="padding:2px 4px;color:${COLOR_POS}">${fmt(s.posArea)}</td>
-                <td style="padding:2px 4px;color:${COLOR_NEG}">${fmt(s.negArea)}</td>
-                <td style="padding:2px 4px;color:${s.netArea >= 0 ? COLOR_POS : COLOR_NEG}">${fmt(s.netArea)}</td>
-              </tr>
+            const fmt = (n) => (n === null || n === undefined || isNaN(n)) ? '-' : Number(n).toFixed(4);
+            // 一行展示某级别(本级/高级)的 面积红/绿/净 · 柱高红/绿 · 黄白线DIF/DEA
+            const line = (tag, st) => {
+                if (!st) return `<div style="opacity:.5;">${tag}: 无数据</div>`;
+                const net = st.netArea >= 0 ? COLOR_POS : COLOR_NEG;
+                return `<div>${tag} 面积 `
+                    + `<span style="color:${COLOR_POS}">${fmt(st.posArea)}</span>/`
+                    + `<span style="color:${COLOR_NEG}">${fmt(st.negArea)}</span>/`
+                    + `<span style="color:${net}">${fmt(st.netArea)}</span>`
+                    + ` · 柱 <span style="color:${COLOR_POS}">${fmt(st.posMax)}</span>/`
+                    + `<span style="color:${COLOR_NEG}">${fmt(st.negMin)}</span>`
+                    + ` · 线 ${fmt(peakAbs(st.difMax, st.difMin))}/${fmt(peakAbs(st.deaMax, st.deaMin))}</div>`;
+            };
+            const blocks = this._snapshots.map((s, i) => `
+              <div style="margin:4px 0;padding:6px;background:#2a2f3e;border-radius:4px;font-size:11px;">
+                <div style="color:#9aa3b8;margin-bottom:3px;"><b>#${i + 1}</b> ${s.label}</div>
+                ${line('本级', s.local)}
+                ${line('高级', s.htf)}
+              </div>
             `).join('');
             return `
               <div style="margin-top:10px;">
-                <div style="font-weight:bold;color:#FFD54F;margin-bottom:4px;">历史快照 (本周期)</div>
-                <table style="width:100%;border-collapse:collapse;font-size:11px;">
-                  <thead><tr style="opacity:.6;"><th>#</th><th>区间</th><th>红</th><th>绿</th><th>净</th></tr></thead>
-                  <tbody>${rows}</tbody>
-                </table>
+                <div style="font-weight:bold;color:#FFD54F;margin-bottom:4px;">历史快照</div>
+                <div style="font-size:10px;color:#9aa3b8;margin-bottom:4px;">每条:面积 红/绿/净 · 柱高 红/绿 · 黄白线 DIF/DEA</div>
+                ${blocks}
               </div>`;
         }
 
@@ -859,7 +874,7 @@ var MacdStats = (function () {
             return ctrl;
         },
         // 便于调试
-        _internal: { computeStats, smartSearch, findBarsResult, bucketKeyOf, reduceToBuckets, computeStatsHTF, computeSegmentSlopes, resolveHigherFreq },
+        _internal: { computeStats, smartSearch, findBarsResult, bucketKeyOf, reduceToBuckets, computeStatsHTF, computeSegmentSlopes, resolveHigherFreq, peakAbs },
     };
 })();
 

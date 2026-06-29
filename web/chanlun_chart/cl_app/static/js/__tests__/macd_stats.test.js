@@ -110,3 +110,12 @@ test('computeSegmentSlopes: 生产单位 times(毫秒) vs xds(秒) 仍对齐', (
   assert.equal(r[0].slope, 1);   // (14-10)/4
   assert.equal(r[0].dir, 'up');
 });
+
+test('peakAbs: 同向峰值绝对值,无数据返回 null', () => {
+  const { peakAbs } = MacdStats._internal;
+  assert.equal(peakAbs(0.9, -0.2), 0.9);   // |0.9| > |−0.2|
+  assert.equal(peakAbs(0.2, -0.7), 0.7);   // |−0.7| > |0.2|
+  assert.equal(peakAbs(0.5, null), 0.5);   // 只一侧有数据
+  assert.equal(peakAbs(null, -0.3), 0.3);
+  assert.strictEqual(peakAbs(null, null), null); // 两侧皆无 → null(面板显示 "-")
+});
