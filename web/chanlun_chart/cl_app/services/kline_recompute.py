@@ -370,6 +370,15 @@ def prepend_klines_and_replace_cache(
     if merged is None or len(merged) == 0:
         return None
 
+    # H2 纵深防御闸门:merge_klines_df 是并集,正常追加/末根更新 len(merged) >= len(cached) 恒成立。
+    # 若 merged 反而比 cached 缩水,只可能来自带洞数据覆盖(cq 漏网 / 未来其它源回归) → 拒绝替换,
+    # 保留旧完整缓存,绝不让好缓存被带洞结果覆盖(主修已由 C1 源级完整性闸门覆盖,此为纵深防御)。
+    if len(cached_df) > 0 and len(merged) < len(cached_df):
+        LogUtil.warning(
+            f"[prepend] 合并后根数缩水 {len(cached_df)}->{len(merged)}, 拒绝覆盖 {cache_key}"
+        )
+        return cached_entry.get("data") if cached_entry is not None else None
+
     # 数据没变(根数与末根 OHLC 都未变)→ 跳过全量重算, 直接复用缓存。
     # 收盘/非交易时段的标的仍会被前端轮询/SSE 每隔几秒触发, 若不跳过会反复全量
     # 重算几千根缠论(实测单次 calc 可达 18s)。多标的并发时严重抢 CPU, 把新标的
