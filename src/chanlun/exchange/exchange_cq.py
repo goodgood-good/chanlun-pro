@@ -734,6 +734,9 @@ class ExchangeChangQiao(Exchange):
         """
         segment_candles = []
         current_cursor = end_dt
+        # 三态:complete=正常结束/空返回(数据耗尽); reached_origin=301600 合法到历史起点;
+        # failed=真失败(API 异常/超时/配额/时间解析错误)→该段不可信,可能带洞(C1)。
+        status = "complete"
 
         # 确保 limit 是带时区的
         tz = pytz.timezone("Asia/Shanghai")
@@ -764,6 +767,7 @@ class ExchangeChangQiao(Exchange):
                 err_code = getattr(inner, 'code', None)
                 if isinstance(inner, OpenApiException) and err_code == 301600:
                     LogUtil.warning(f"Data limit reached (301600) for {code}, stopping segment.")
+                    status = "reached_origin"   # 合法到该 symbol 历史起点,非洞
                 elif (isinstance(inner, _PreemptiveQuotaExhausted) or
                       (isinstance(inner, OpenApiException) and err_code == 301607)):
                     # 月度 symbol 配额耗尽：标记 exhausted 让后续调用立刻短路
@@ -773,6 +777,7 @@ class ExchangeChangQiao(Exchange):
                         f"{getattr(inner, 'message', None) or str(inner)[:200]}. "
                         f"{_quota_exhausted_advice(code)}"
                     )
+                    status = "failed"           # 配额耗尽→该段不可信
                 else:
                     LogUtil.error(
                         f"API Retry failed segment={end_dt} code={code} period={period} "
@@ -780,6 +785,7 @@ class ExchangeChangQiao(Exchange):
                         f"err_msg={getattr(inner, 'message', None) or str(inner)[:200]} "
                         f"outer={type(e).__name__}"
                     )
+                    status = "failed"           # 真失败→该段不可信,可能带洞
                 break
 
             if not candlesticks:
@@ -805,6 +811,7 @@ class ExchangeChangQiao(Exchange):
                         oldest_dt = oldest_dt.astimezone(tz)
             except Exception as e:
                 LogUtil.error(f"Time parse error in segment fetch: {e}")
+                status = "failed"
                 break
             # -------------------------------------------
 
@@ -819,7 +826,7 @@ class ExchangeChangQiao(Exchange):
             if oldest_dt < start_dt_limit:
                 break
 
-        return segment_candles
+        return segment_candles, status
 
     def _should_use_alpaca(self, symbol: str) -> bool:
         """美股 + config 配置 alpaca 时走 alpaca fallback。"""
@@ -952,6 +959,7 @@ class ExchangeChangQiao(Exchange):
         # 让 _fetch_candlesticks_api 选对应限流桶；分段跑在别的 worker 线程上拿不到 threadlocal，
         # 必须显式随 submit 传参。
         priority = getattr(_lb_call_priority, "value", "interactive")
+        # tasks 携带每段窗口 (future, seg_start, seg_end),供失败段串行补拉与完整性闸门定位(C1)。
         tasks = []
         curr_end = api_cursor_dt  # 使用带 Buffer 的游标
 
@@ -960,23 +968,50 @@ class ExchangeChangQiao(Exchange):
             if curr_start < start_dt:
                 curr_start = start_dt
 
-            tasks.append(self.executor.submit(
+            fut = self.executor.submit(
                 self._fetch_segment_data,
                 lb_symbol, period, adjust, curr_end, curr_start, priority
-            ))
+            )
+            tasks.append((fut, curr_start, curr_end))
             curr_end = curr_start
             if curr_end <= start_dt:
                 break
 
-        # 6. 收集结果
+        # 6. 收集结果 + 源级完整性闸门(C1)
         all_candles = []
-        for future in as_completed(tasks):
+        failed = []  # [(seg_start, seg_end)] 真失败段(该段可能带洞)
+        win = {f: (s, e) for f, s, e in tasks}
+        for future in as_completed(win):
+            s, e = win[future]
             try:
-                res = future.result()
+                res, seg_status = future.result()
                 if res:
                     all_candles.extend(res)
-            except Exception as e:
-                LogUtil.error(f"Kline segment fetch error: {e}")
+                if seg_status == "failed":
+                    failed.append((s, e))
+            except Exception as ex:
+                LogUtil.error(f"Kline segment fetch error win=[{s},{e}]: {ex}")
+                failed.append((s, e))
+
+        # 失败段串行补拉一次:恢复瞬间往往只是某段超时,二次多半成功。
+        for (s, e) in list(failed):
+            try:
+                res, seg_status = self._fetch_segment_data(lb_symbol, period, adjust, e, s, priority)
+                if seg_status != "failed":
+                    if res:
+                        all_candles.extend(res)
+                    failed.remove((s, e))
+            except Exception:
+                pass
+
+        # 完整性闸门:仍有失败段 → 本次拉取带洞不可信,返回空 DataFrame 且标 attrs['fetch_incomplete'],
+        # 绝不把带洞结果当权威落盘(C1)。attrs 让 web 层区分「异常空→短退避 30s 自愈」与「真空→5min
+        # 负缓存」(见 chart_compute/sse_refresh);回测/monitor 忽略 attrs → 视同现状"拉取失败返空",契约不变。
+        if failed:
+            LogUtil.error(f"[cq] {code} {frequency} 拉取不完整 failed={failed}, 拒绝返回带洞数据")
+            _incomplete = pd.DataFrame()
+            _incomplete.attrs["fetch_incomplete"] = True
+            return _incomplete
 
         if not all_candles:
             return pd.DataFrame()
