@@ -15,6 +15,7 @@
 重算状态——recompute_chart_data_from_klines 传 cache_key 时复用持久 CL, 让盘中
 末根刷新/新增根只算增量而非每次全量重建。复用判定见该函数与 _cl_pool 注释。
 """
+import copy
 import hashlib
 import threading
 import time
@@ -198,9 +199,24 @@ def store_cl_to_pool(cache_key, cl, klines, cl_config, market, to_frequency=None
         return
     config_key = _make_cl_config_key(cl_config, market, to_frequency)
     first_date = int(klines.iloc[0]["date"].timestamp())
+    # T0-1: 存独立副本(deepcopy)而非传入实例的引用。传入的 cl 往往是 cl_object_cache 的
+    # 共享实例(web_batch_get_cl_datas 产物);若按引用存池, _cl_pool 路径(锁 chart_calc_locks)
+    # 与 cl_object_cache 路径(锁 _key_locks)会在两套不相交锁下并发 mutate 同一 CL → 增量
+    # 状态机撕裂 → 静默错误缠论/买卖点。CL 是纯计算对象图(无锁/句柄/连接)可安全深拷;
+    # deepcopy 放 _cl_pool_lock 之外做, 不拉长持锁时间。
+    # ⚠ chart_calc_locks 只串行本函数自身(同 cache_key 不并发进来), 但**不保护 deepcopy 对抗
+    # 并发渲染**:同一共享实例可被不持 chart_calc_locks 的 prewarm/revalidate(compute_and_cache
+    # → cl_data_to_tv_chart)并发写 _recursive_memo, deepcopy 迭代期可能撞 "dictionary changed
+    # size during iteration"。故包 try/except 降级:深拷失败就跳过入池(下次 recompute 走 full,
+    # 仅慢一次), 绝不让异常冒泡拖垮调用方(firstload 的用户首屏请求)。
+    try:
+        cl_copy = copy.deepcopy(cl)
+    except Exception as e:
+        LogUtil.warning(f"[cl_pool] store deepcopy 失败, 跳过入池(下次走 full) {cache_key}: {e}")
+        return
     with _cl_pool_lock:
         _cl_pool[cache_key] = {
-            "cl": cl,
+            "cl": cl_copy,
             "config_key": config_key,
             "first_date": first_date,
             "n": len(klines),

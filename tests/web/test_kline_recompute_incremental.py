@@ -104,7 +104,67 @@ def test_store_cl_to_pool_then_reuse(mock_cl):
     nxt = _klines_df([1000, 1060, 1120], [10, 11, 12])
     r = recompute_chart_data_from_klines("a", "SYN", "1m", {}, nxt, cache_key="a:SYN:1m")
     assert len(_FakeCL.instances) == 1  # 只有 store 的那个, recompute 未再新建(=走了增量)
-    assert r["id"] == id(ext_cl)
+    # T0-1: 池存独立副本(deepcopy)斩断别名 → 复用的是副本而非 ext_cl 本身;
+    # 功能等价由"未新建 + n 正确(副本走增量处理了 3 根)"保证, 不再断言 id 相同(那是别名 bug)。
+    assert r["n"] == 3
+
+
+def test_store_cl_to_pool_breaks_alias(mock_cl):
+    """T0-1: store_cl_to_pool 存入池的必须是独立副本(deepcopy), 不与传入实例共享引用。
+
+    传入的 cl 可能是 cl_object_cache 的共享实例;若按引用存池, _cl_pool 路径(chart_calc_locks)
+    与 cl_object_cache 路径(_key_locks)会在两套不相交锁下并发 mutate 同一 CL → 增量状态机
+    撕裂 → 错误缠论/买卖点。存独立副本斩断别名。
+    """
+    ext_cl = _FakeCL()
+    base = _klines_df([1000, 1060], [10, 11])
+    kline_recompute.store_cl_to_pool("a:SYN:1m", ext_cl, base, {}, "a")
+    pooled = kline_recompute._cl_pool["a:SYN:1m"]["cl"]
+    assert pooled is not ext_cl, "池里必须是独立副本, 不能是传入实例的别名(T0-1)"
+
+
+def test_store_real_cl_deepcopy_preserves_increment():
+    """T0-1 修复正确性(真实 CL): store_cl_to_pool 对真实 CL 深拷后, 副本继续增量重算
+    应与全量新建完全一致——验证 deepcopy 不抛、保真(增量状态完整)、斩断别名后功能不变。
+    """
+    from chanlun.core.cl import CL
+    kline_recompute.reset_cl_pool()
+    cfg = _cl_config()
+    klines = _synth_klines(200)
+    base = klines.iloc[:180].copy()
+    ext = klines.iloc[:186].copy()  # 末尾追加 6 根, 前 180 根与 base 一致(前缀稳定)
+    ck = "a:SYNSTORE:1m"
+    try:
+        # 模拟 firstload: 真实 CL 算好 base(180 根)
+        cl = CL("SYNSTORE", "1m", dict(cfg), market="a")
+        cl.process_klines(base.copy())
+        # store: 触发对真实 CL 的 deepcopy(不应抛); 池里是独立副本
+        kline_recompute.store_cl_to_pool(ck, cl, base, cfg, "a")
+        assert kline_recompute._cl_pool[ck]["cl"] is not cl, "真实 CL 也须存独立副本"
+        # recompute 复用池副本走增量(180→186)
+        inc = recompute_chart_data_from_klines("a", "SYNSTORE", "1m", cfg, ext.copy(), cache_key=ck)
+        # 全量对照(无 cache_key, 新建空 CL 全量算 186)
+        full = recompute_chart_data_from_klines("a", "SYNSTORE", "1m", cfg, ext.copy())
+        assert inc == full, "deepcopy 副本增量重算结果 != 全量"
+    finally:
+        kline_recompute.reset_cl_pool()
+
+
+def test_store_cl_to_pool_deepcopy_failure_degrades():
+    """T0-1 修复健壮性: deepcopy 若抛(并发渲染改共享 O1 致 dict size change), store 应降级——
+    跳过入池(不抛、不入池), 由下次 recompute 走 full, 而非把异常冒泡拖垮用户首屏请求。
+    """
+    kline_recompute.reset_cl_pool()
+
+    class _BoomCL:
+        def __deepcopy__(self, memo):
+            raise RuntimeError("dictionary changed size during iteration")
+
+    base = _klines_df([1000, 1060], [10, 11])
+    # 不应抛(降级吞掉 deepcopy 异常); 用 __deepcopy__ 抛, 只影响本对象不误伤 pandas
+    kline_recompute.store_cl_to_pool("a:SYN:1m", _BoomCL(), base, {}, "a")
+    # 未入池 → 下次 recompute 走 full(正确, 仅慢一次)
+    assert "a:SYN:1m" not in kline_recompute._cl_pool
 
 
 # ── 层 2：增量 == 全量(真实 CL + 合成 K 线) ──────────────────────────

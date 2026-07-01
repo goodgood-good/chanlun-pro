@@ -132,7 +132,6 @@ from ..services.chart_compute import (  # noqa: E402
     MARKET_30M_TO_D_RATIO,
     MARKET_D_TO_W_RATIO,
     _SafeLockRegistry,
-    _merge_chart_data,
     _merge_shape_lists,
     _shape_time,
     apply_higher_macd_to_chart_data,
@@ -140,6 +139,7 @@ from ..services.chart_compute import (  # noqa: E402
     chart_calc_locks,
     compute_and_cache_chart_data,
     fetch_klines_and_compute_cl_data,
+    market_now_trading,
     should_lazy_apply_higher_macd,
     slice_chart_data_to_window,
     trim_future_bars,
@@ -147,6 +147,7 @@ from ..services.chart_compute import (  # noqa: E402
 from ..services.kline_recompute import (  # noqa: E402
     prepend_klines_and_replace_cache,
 )
+from ..services.chart_revalidate import submit_revalidation  # noqa: E402
 
 
 def _safe_int(value, default=0):
@@ -547,6 +548,78 @@ def tv_symbols():
     return info
 
 
+# /tv/quotes 单次请求标的数上限(自选组通常 < 100, 防超大列表打爆数据源)。
+_MAX_QUOTE_SYMBOLS = 500
+
+
+@tv_bp.route("/tv/quotes")
+@login_required
+def tv_quotes():
+    """TradingView UDF 行情接口 —— 自选组(watchlist)实时报价来源。
+
+    前端 datafeed 的 ``QuotesPulseProvider`` 按 Fast/General 定时器调 ``getQuotes``
+    打 ``/tv/quotes?symbols=a:SH.513100,a:SZ.000001``, 据此周期性刷新自选列表的
+    现价/涨跌幅。**缺此端点时前端每次请求 404 → 自选组行情不自动更新**(本次修复)。
+
+    复用 ``ex.ticks()``(与 ``/ticks`` 同一取数口径), 按 market 分组批量取, 返回
+    UDF 标准格式 ``{s:"ok", d:[{s:"ok", n:symbol, v:{lp,ch,chp,...}}]}``。Tick 不带
+    昨收, 由现价 + 涨跌幅% 反推昨收与绝对涨跌额。单个 market 取数失败仅该组标记
+    error, 不拖垮整批(自选常含多市场)。
+    """
+    symbols_raw = request.args.get("symbols", "")
+    symbols = [s.strip() for s in symbols_raw.split(",") if s.strip()]
+    if not symbols:
+        return {"s": "ok", "d": []}
+    symbols = symbols[:_MAX_QUOTE_SYMBOLS]
+
+    # 按 market 分组: market -> {code: 原始 symbol}(返回的 n 字段须与请求字面一致,
+    # 否则 TradingView 匹配不上不更新)。
+    by_market: dict = {}
+    data = []
+    for sym in symbols:
+        market, code = _parse_tv_symbol(sym)
+        if market is None or code is None:
+            data.append({"s": "error", "n": sym, "v": {}})
+            continue
+        by_market.setdefault(market, {})[code] = sym
+
+    for market, code_map in by_market.items():
+        try:
+            ex = get_exchange(Market(market))
+            stock_ticks = ex.ticks(list(code_map.keys()))
+        except Exception:
+            LogUtil.exception(
+                f"[tv_quotes] ticks failed market={market} n={len(code_map)}"
+            )
+            for sym in code_map.values():
+                data.append({"s": "error", "n": sym, "v": {}})
+            continue
+        for code, sym in code_map.items():
+            t = stock_ticks.get(code)
+            if t is None or t.last is None:
+                data.append({"s": "error", "n": sym, "v": {}})
+                continue
+            last = float(t.last)
+            rate = float(t.rate or 0)
+            # rate 为涨跌幅百分比(Tick 文档口径)→ 反推昨收: prev = last/(1+rate/100)。
+            prev_close = last / (1 + rate / 100) if rate != -100 else last
+            data.append({
+                "s": "ok",
+                "n": sym,
+                "v": {
+                    "lp": last,
+                    "ch": round(last - prev_close, 4),
+                    "chp": round(rate, 2),
+                    "open_price": float(t.open) if t.open is not None else last,
+                    "high_price": float(t.high) if t.high is not None else last,
+                    "low_price": float(t.low) if t.low is not None else last,
+                    "prev_close_price": round(prev_close, 4),
+                    "volume": float(t.volume) if t.volume is not None else 0,
+                },
+            })
+    return {"s": "ok", "d": data}
+
+
 @tv_bp.route("/tv/search")
 @login_required
 def tv_search():
@@ -754,12 +827,19 @@ def tv_history():
 
         # 注意：必须先 get 出 RLock 对象再 with，确保整个临界区内引用持续存在
         # （_SafeLockRegistry 用 WeakValueDictionary 存储锁，无强引用会被 GC）
+        # 方向2: 交易时段决定 serve-stale 的过期阈值(盘中短/收盘长)。在锁外算
+        # (带 30s TTL 缓存), 不占用 cache_lock 临界区。
+        _market_trading = market_now_trading(market)
+        _needs_refresh = False
         _calc_lock = chart_calc_locks.get(cache_key)
         with _calc_lock:
             with cache_lock:
                 cache_entry = _get_chart_cache_entry(cache_key)
-                is_cache_hit, cl_chart_data, miss_reason = evaluate_cache_for_tv_history(
-                    cache_entry, _from, _to, is_range_request
+                is_cache_hit, cl_chart_data, miss_reason, _needs_refresh = (
+                    evaluate_cache_for_tv_history(
+                        cache_entry, _from, _to, is_range_request,
+                        market_is_trading=_market_trading,
+                    )
                 )
                 if not is_cache_hit:
                     cache_miss_reason = miss_reason
@@ -822,12 +902,14 @@ def tv_history():
                 # apply_higher_zs_to_chart_data(cl_chart_data, market, code, frequency, cl_config)
 
                 if cd is not None:
+                    # 2026-07 修复(幽灵形态): 不再与 existing_entry 做 _merge_chart_data 合并。
+                    # 这里走到的都是 MISS 全量重算(cache_empty/cache_partial_snapshot/
+                    # cache_stale_snapshot 等), cl_chart_data 本身就是基于完整回看窗口的
+                    # 全量权威结果。existing_entry 可能是几分钟到几天前的陈旧快照——
+                    # too_stale(cache_stale_snapshot)分支存在的目的就是防止把陈旧未完成
+                    # 笔/线段/中枢泄漏给用户, 若仍用"起点身份并集"合并, 陈旧快照里起点
+                    # 已被新行情证伪的形态会被原样保留、和新数据一起返回, 安全网形同虚设。
                     with cache_lock:
-                        existing_entry = _get_chart_cache_entry(cache_key)
-                        if existing_entry is not None:
-                            cl_chart_data = _merge_chart_data(
-                                existing_entry.get("data", {}), cl_chart_data
-                            )
                         _set_chart_cache_entry(
                             cache_key,
                             cl_chart_data,
@@ -875,16 +957,30 @@ def tv_history():
                         f"[tv_history] cache hit but HTF missing/short, "
                         f"lazy-applying {symbol} {resolution}"
                     )
+                    # T0-2: 不原地给共享 cache dict 加 higher_macd_* 键。lazy 补算虽在 cache_lock
+                    # 内, 但响应路径 trim_future_bars(锁外 dict(chart_data) 整体迭代)与 SSE {**data}
+                    # 在锁外读同一共享 dict; 锁内加键 vs 锁外迭代 → "dictionary changed size during
+                    # iteration"(请求兜成 no_data + SSE 丢帧)。改为算到浅拷副本(dict() 顶层拷, apply
+                    # 只整列替换/新增顶层 higher_macd_* 键、不改嵌套)再整体替换 entry; 共享 dict 永不
+                    # 被加键, 锁外迭代恒安全。
+                    _patched = dict(cl_chart_data)
                     # 仅当 apply 真正写入了 higher_macd_*（有倍率且 bar 数足够）
                     # 才回写缓存——否则 bar 数不足的周期每次 polling 都冗余写盘。
                     if apply_higher_macd_to_chart_data(
-                        cl_chart_data, frequency, market, cl_config
+                        _patched, frequency, market, cl_config
                     ):
                         _existing = _get_chart_cache_entry(cache_key)
                         _is_full = (_existing or {}).get("is_full_snapshot", False)
                         _set_chart_cache_entry(
-                            cache_key, cl_chart_data, is_full_snapshot=_is_full,
+                            cache_key, _patched, is_full_snapshot=_is_full,
                         )
+                        cl_chart_data = _patched  # 后续 slice/trim/return 用副本, 不碰共享 dict
+
+        # 方向1 (stale-while-revalidate): firstDataRequest 命中"过期全量快照"已即时
+        # 返回旧快照(秒显), 这里派去重的后台重验证拉全新数据写回缓存, 经现有
+        # SSE 推送 / TV polling 自愈到前端。submit 非阻塞, 不影响本次响应延迟。
+        if is_cache_hit and _needs_refresh:
+            submit_revalidation(market, code, frequency, cl_config, cache_key)
 
         if cl_chart_data is None:
             return {"s": "no_data"}

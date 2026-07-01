@@ -57,6 +57,38 @@ _CACHE_REVALIDATION_INTERVAL = 30  # 秒，缓存在此时间内被验证过则�
 _SNAPSHOT_STALE_AFTER = 3600  # 秒
 
 
+def _cfg_int(name: str, default: int) -> int:
+    """从 chanlun.config 读 int 配置, 缺失/异常回退 default(不让坏 config 炸 import)。"""
+    try:
+        from chanlun import config
+        return int(getattr(config, name, default))
+    except Exception:
+        return default
+
+
+# 方向2: firstDataRequest 全量快照的过期阈值, 按交易时段区分。
+# - 盘中 (market_now_trading=True): 数据每根 K 线在变, 用短阈值 → 尽快后台刷新到最新
+#   (serve-stale 已先秒显, 刷新在后台; 短阈值只是让缓存更快追平实时)。
+# - 收盘/非交易时段: 数据静止, 用长阈值 → 避免对不变数据反复重算 (省 QMT/CPU)。
+# 两个阈值都只决定"是否派后台刷新", 任一情况都先返回旧快照秒显, 绝不阻塞用户 (方向1)。
+_SNAPSHOT_STALE_AFTER_TRADING = _cfg_int("CHART_SNAPSHOT_STALE_AFTER_TRADING", 300)
+_SNAPSHOT_STALE_AFTER_CLOSED = _cfg_int("CHART_SNAPSHOT_STALE_AFTER_CLOSED", 3600)
+
+# serve-stale 过期"上限": 超过此幅度的重度过期不再 serve-stale, 回退旧版 MISS-阻塞重算。
+# 根因(2026-06-29): 上面两个阈值只决定"是否 serve-stale", serve-stale 本身**无上限**——
+# 非活跃周期的缓存(1m 隔午休/隔夜、30m 隔日)会停更几小时~几天, firstDataRequest 仍把那份
+# 旧快照原样返回, 其"未完成笔"是几小时/几天前的(用户报"未完成笔滞后/该实仍虚")。
+# serve-stale 只在"只差几根 bar"时有意义(秒显近似正确、悄悄自愈); 差到几小时/几天时
+# 必须回退阻塞重算保证新鲜。窗口语义:
+#   age < STALE_AFTER          → fresh    (直接返回, 不刷新)
+#   STALE_AFTER ≤ age < MAX    → serve_stale (秒显旧 + 后台刷新)
+#   age ≥ MAX (或 validated_at 未知) → too_stale (MISS → 阻塞重算, 必新鲜)
+# 盘中 MAX 取 30min: 既保留"差几~30min"的 serve-stale 秒显, 又拦住隔午休/隔夜的重度过期;
+# 收盘 MAX 取 1 天: 收盘数据静止、serve-stale 无滞后, 仅拦"隔多日缺整段交易日"的缓存。
+_SNAPSHOT_SERVE_STALE_MAX_TRADING = _cfg_int("CHART_SERVE_STALE_MAX_TRADING", 1800)
+_SNAPSHOT_SERVE_STALE_MAX_CLOSED = _cfg_int("CHART_SERVE_STALE_MAX_CLOSED", 86400)
+
+
 # ---------------- 工具函数 ----------------
 
 def _stable_hash(obj) -> str:
@@ -253,32 +285,50 @@ def _get_chart_cache_entry(cache_key: str):
     （也可重复）持锁——既保护直接调用方，也保护经 kline_recompute / symbols
     等不持锁路径进来的访问。
     """
+    # RAM 命中(锁内快查, 不含磁盘 IO)
     with cache_lock:
         entry = _normalize_cache_entry(chart_data_cache.get(cache_key))
         if entry is not None:
             return entry
 
-        # RAM miss → 尝试磁盘冷层
-        try:
-            disk_entry = fdb.get_chart_cache(cache_key)
-        except Exception as e:
-            LogUtil.warning(f"[chart_cache] disk read failed key={cache_key} err={e}")
-            disk_entry = None
-        entry = _normalize_cache_entry(disk_entry)
-        if entry is None:
-            return None
+    # HIGH-2: RAM miss → 磁盘读移出 cache_lock。pickle-load(数百KB~MB)绝不在全局锁内做,
+    # 否则一次冷读把 cache_lock 持有到 IO 结束 → 串行化所有 tv_history/写/SSE, 且 IOLoop
+    # 线程会被磁盘 IO 卡住整个 Tornado。注意: 若调用方自己已持 cache_lock(如 tv_history
+    # 主路径), RLock 重入下本段仍在其锁内(无 perf 收益但功能正确); 不持锁的调用方
+    # (prepend 等)则真正锁外读盘。IOLoop 路径改用 _get_chart_cache_entry_ram_only(只读 RAM)。
+    try:
+        disk_entry = fdb.get_chart_cache(cache_key)
+    except Exception as e:
+        LogUtil.warning(f"[chart_cache] disk read failed key={cache_key} err={e}")
+        disk_entry = None
+    entry = _normalize_cache_entry(disk_entry)
+    if entry is None:
+        return None
 
-        # 回填 RAM；不再异步写盘（来源就是磁盘）。
+    # 回填 RAM(CAS): 锁外读盘期间别的线程可能已写入更新值(SSE recompute / 用户重算),
+    # 优先用已有的, 不用旧磁盘值覆盖更新的内存值。
+    with cache_lock:
+        existing = _normalize_cache_entry(chart_data_cache.get(cache_key))
+        if existing is not None:
+            return existing
         chart_data_cache[cache_key] = entry
 
-        # 机会型清理：极低概率触发，避免 chart_cache 目录膨胀。
-        if random.randint(0, 2000) <= 1:
-            try:
-                fdb.maybe_cleanup_chart_cache()
-            except Exception:
-                pass
+    # 机会型清理(磁盘 IO)也移出锁。
+    if random.randint(0, 2000) <= 1:
+        try:
+            fdb.maybe_cleanup_chart_cache()
+        except Exception:
+            pass
 
-        return entry
+    return entry
+
+
+def _get_chart_cache_entry_ram_only(cache_key: str):
+    """只读 RAM 热层(绝不触磁盘)。供 IOLoop 线程(SSE _send_current_snapshot)调用——
+    IOLoop 线程同步 pickle-load 磁盘会卡住整个 Tornado(所有 SSE 客户端, HIGH-2)。
+    RAM miss 返回 None(调用方跳过补发, 由 firstDataRequest / 轮询兜底)。"""
+    with cache_lock:
+        return _normalize_cache_entry(chart_data_cache.get(cache_key))
 
 
 def _entry_freshness(cache_entry: dict, mode: str) -> str:
@@ -323,11 +373,53 @@ def _full_snapshot_is_stale(cache_entry: dict) -> bool:
     return _entry_freshness(cache_entry, mode="first_request") != "fresh"
 
 
+def _first_request_freshness(
+    cache_entry: dict, market_is_trading: bool, now: float = None
+) -> str:
+    """firstDataRequest 路径: 全量快照的新鲜度分档。
+
+    返回三态之一(见上方常量块的窗口语义):
+    - ``"fresh"``: 足够新鲜, 直接返回, 不必后台刷新;
+    - ``"serve_stale"``: 小幅过期, 秒显旧快照 + 派后台重验证(方向1);
+    - ``"too_stale"``: 重度过期(超 ``_SNAPSHOT_SERVE_STALE_MAX_*`` 上限, 或
+      validated_at 缺失/<=0 的老格式未知时效), 不能 serve-stale(会把几小时/几天前
+      的旧未完成笔发给前端), 交由调用方走 MISS-阻塞重算保证新鲜。
+
+    阈值按交易时段区分(方向2): 盘中短/收盘长。重度过期上限同样按时段区分:
+    盘中拦截隔午休/隔夜, 收盘拦截隔多日缺整段交易日。
+
+    Args:
+        cache_entry: chart_data_cache 条目(含 ``validated_at``)。
+        market_is_trading: 当前该 market 是否处交易时段(由调用方算好传入,
+            保持本函数纯净可测)。
+        now: 当前时间戳(秒); None 时取 ``time.time()``(单测可注入固定时钟)。
+    """
+    validated_at = cache_entry.get("validated_at")
+    if not isinstance(validated_at, (int, float)) or validated_at <= 0:
+        # 老格式/未知时效: 无法判断有多旧, 保守走阻塞重算(等价旧 _full_snapshot_is_stale
+        # 的 MISS), 一次重算后写入真实 validated_at, 后续即可正常分档。
+        return "too_stale"
+    now = time.time() if now is None else now
+    age = now - validated_at
+    if market_is_trading:
+        soft, hard = _SNAPSHOT_STALE_AFTER_TRADING, _SNAPSHOT_SERVE_STALE_MAX_TRADING
+    else:
+        soft, hard = _SNAPSHOT_STALE_AFTER_CLOSED, _SNAPSHOT_SERVE_STALE_MAX_CLOSED
+    if age < soft:
+        return "fresh"
+    if age < hard:
+        return "serve_stale"
+    return "too_stale"
+
+
 def evaluate_cache_for_tv_history(
     cache_entry: Optional[dict],
     from_ts: int,
     to_ts: int,
     is_range_request: bool,
+    *,
+    market_is_trading: bool = True,
+    now: float = None,
 ) -> tuple:
     """评估 chart_data_cache entry 是否能满足 tv_history 当前请求。
 
@@ -335,42 +427,61 @@ def evaluate_cache_for_tv_history(
     成 module-level 纯函数。原内嵌实现依赖 ``_from``/``_to``/``is_range_request``
     三个 outer var; 提取后通过参数显式传递, 不再隐式依赖 closure 状态, 单测可独立。
 
+    2026-06-27 (方向1+2): firstDataRequest 全量快照小幅过期不再 MISS-阻塞重算, 改为
+    serve-stale(立即返回旧快照秒显)+ ``needs_refresh=True`` 让调用方派后台重验证。
+    过期阈值按交易时段区分(``market_is_trading``)。range(polling)路径不变。
+
+    2026-06-29 (过期上限): serve-stale 加幅度上限。重度过期(超
+    ``_SNAPSHOT_SERVE_STALE_MAX_*``, 或 validated_at 未知)回退 MISS-阻塞重算 ——
+    否则非活跃周期停更几小时/几天的旧快照会被原样返回, 其"未完成笔"是几小时/几天前的
+    (用户报"未完成笔滞后/该实仍虚")。见 ``_first_request_freshness`` 三态语义。
+
     Args:
         cache_entry: chart_data_cache 中的 entry (None 表示 cache miss)
         from_ts: 请求 from 时间戳 (unix 秒, 0/负数表示未指定)
         to_ts: 请求 to 时间戳 (unix 秒)
         is_range_request: 是否窄范围请求 (firstDataRequest=false 且 from/to 都 >0)
+        market_is_trading: 当前该 market 是否处交易时段(决定 serve-stale 的过期阈值)。
+        now: 当前时间戳(秒); None 取 ``time.time()`` (单测可注入)。仅作用于
+            firstDataRequest 过期判定; range 路径的 recently_validated 仍用真实时钟。
 
     Returns:
-        (is_hit, cached_data, miss_reason):
-        - is_hit=True: cache 命中, cached_data 为 chart_data dict
+        (is_hit, cached_data, miss_reason, needs_refresh):
+        - is_hit=True: 命中, cached_data 为 chart_data dict 可直接返回前端;
+          needs_refresh=True 表示这是"过期快照即时返回", 调用方应派后台重验证。
         - is_hit=False: cache miss, miss_reason 是字符串原因 ("cache_empty" /
-          "cache_partial_snapshot" / "cache_stale_snapshot" / "cache_no_coverage" /
-          "cache_head_gap" / "cache_tail_gap")
+          "cache_partial_snapshot" / "cache_stale_snapshot"(重度过期回退阻塞重算)/
+          "cache_no_coverage" / "cache_head_gap" / "cache_tail_gap"); needs_refresh 恒 False。
     """
     if cache_entry is None:
-        return False, None, "cache_empty"
+        return False, None, "cache_empty", False
     cached_data = cache_entry.get("data", {})
     cache_min_time = cache_entry.get("min_time")
     cache_max_time = cache_entry.get("max_time")
     if not is_range_request:
         if not cache_entry.get("is_full_snapshot", False):
-            return False, None, "cache_partial_snapshot"
-        # 即便 is_full_snapshot=True, 也要校验时效; 否则程序停机数天后第一个
-        # firstDataRequest=true 请求会直接命中过期 snapshot (磁盘冷层),
-        # 用户看到的图表缺停机期间产生的 K 线。
-        if _full_snapshot_is_stale(cache_entry):
-            return False, None, "cache_stale_snapshot"
-        return True, cached_data, None
+            # 部分快照(可能只有几根 K 线)不能冒充全量返回, 仍走同步 MISS 重算。
+            return False, None, "cache_partial_snapshot", False
+        # 方向1+2 + 上限(2026-06-29): 按新鲜度三档处理。
+        # - serve_stale(小幅过期): 秒显旧图 + 后台重验证, ≤数秒自愈, 不阻塞。
+        # - too_stale(重度过期/老格式未知时效): 回退旧版 MISS-阻塞重算 —— serve-stale 无上限
+        #   会把几小时/几天前的旧未完成笔发给前端(用户报"未完成笔滞后/该实仍虚"), 重度过期
+        #   下必须重算保证新鲜(冷加载阻塞 0.5-2s 可接受, 远胜显示明显错误的旧笔)。
+        freshness = _first_request_freshness(cache_entry, market_is_trading, now)
+        if freshness == "too_stale":
+            return False, None, "cache_stale_snapshot", False
+        if freshness == "serve_stale":
+            return True, cached_data, None, True
+        return True, cached_data, None, False
     if cache_min_time is None or cache_max_time is None:
-        return False, None, "cache_no_coverage"
+        return False, None, "cache_no_coverage", False
     if from_ts < cache_min_time:
-        return False, None, "cache_head_gap"
+        return False, None, "cache_head_gap", False
     if to_ts > cache_max_time:
         if _cache_entry_recently_validated(cache_entry):
-            return True, cached_data, None
-        return False, None, "cache_tail_gap"
-    return True, cached_data, None
+            return True, cached_data, None, False
+        return False, None, "cache_tail_gap", False
+    return True, cached_data, None, False
 
 
 # ---------------- 写入：RAM + 异步落盘 ----------------

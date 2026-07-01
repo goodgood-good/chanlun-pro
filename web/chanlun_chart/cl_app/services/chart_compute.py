@@ -18,6 +18,7 @@ Tier 4 P3 重构：从 blueprints/tv.py 抽出 ``compute_and_cache_chart_data`` 
 import bisect
 import datetime
 import threading
+import time
 import weakref
 from threading import RLock
 
@@ -39,7 +40,6 @@ from chanlun.tools.log_util import LogUtil
 
 from .chart_cache import (
     _build_cache_key,
-    _get_chart_cache_entry,
     _is_negatively_cached,
     _mark_chart_cache_validated,
     _mark_negative_cache,
@@ -172,6 +172,40 @@ class _SafeLockRegistry:
 chart_calc_locks = _SafeLockRegistry()
 
 
+# ---------------- 交易时段状态 (TTL 缓存) ----------------
+
+# market → (is_trading, sampled_at)。tv_history 每请求判一次交易时段(方向2),
+# 用短 TTL 缓存避免反复构造 exchange / 调 now_trading。
+_trading_state_cache: dict = {}
+_trading_state_lock = threading.Lock()
+_TRADING_STATE_TTL = 30.0  # 秒
+
+
+def market_now_trading(market: str, now: float = None) -> bool:
+    """返回该 market 当前是否处于交易时段(带 30s TTL 缓存)。
+
+    供 chart_cache serve-stale 阈值选择(方向2): 盘中短阈值更快后台刷新, 收盘
+    长阈值少折腾静态数据。exchange 构造 / now_trading 异常时保守按"交易中"
+    (True)返回 → 走短阈值、更倾向刷新到最新, 不让一次异常把图表钉死在旧快照。
+
+    Args:
+        market: 市场代码(a/us/hk/...)。
+        now: 当前时间戳(秒); None 取 time.time()(单测可注入以验证 TTL)。
+    """
+    now = time.time() if now is None else now
+    with _trading_state_lock:
+        cached = _trading_state_cache.get(market)
+        if cached is not None and (now - cached[1]) < _TRADING_STATE_TTL:
+            return cached[0]
+    try:
+        trading = bool(get_exchange(Market(market)).now_trading())
+    except Exception:
+        trading = True  # 保守: 不确定 → 当作交易中(短阈值, 更勤刷新)
+    with _trading_state_lock:
+        _trading_state_cache[market] = (trading, now)
+    return trading
+
+
 # ---------------- chart data 合并（纯函数）----------------
 
 def _shape_time(shape):
@@ -230,9 +264,12 @@ def _merge_shape_lists(existing_shapes, new_shapes):
 
 
 def _merge_chart_data(existing_data: dict, new_data: dict):
-    # 范围请求（向左滚动）已迁移到 kline_recompute.prepend_klines_and_replace_cache
-    # 做全量重算整体替换。此函数仅用于首屏 cache_tail_gap / firstDataRequest 路径——
-    # 这些路径只补未来 K 线 + shape，合并语义安全，不会触发 XD 起点跳变。
+    # 2026-07: 原有的两个生产调用点(compute_and_cache_chart_data / tv.py MISS 分支)
+    # 已改为整体替换,不再调用本函数——"起点身份并集"的 shape 合并语义在"陈旧快照 +
+    # 全新全量重算"场景下会让已被新行情证伪的旧未完成形态残留(幽灵笔/线段/中枢),
+    # 详见 tests/web/test_ghost_shape_no_merge.py。当前仅 tests/web/test_chart_compute_merge.py
+    # 作为纯函数单测使用,生产代码零调用;保留供未来若有真正"只追加、起点不变"的合并
+    # 场景时参考,新增调用前请先确认不会重现上述幽灵形态问题。
     if not existing_data:
         return new_data
     if not new_data:
@@ -318,7 +355,9 @@ def _merge_chart_data(existing_data: dict, new_data: dict):
 
 # ---------------- 主计算路径 ----------------
 
-def compute_and_cache_chart_data(market: str, code: str, frequency: str, cl_config: dict) -> bool:
+def compute_and_cache_chart_data(
+    market: str, code: str, frequency: str, cl_config: dict, skip_download: bool = False
+) -> bool:
     """完整复刻 ``tv_history`` 中 cache miss 后的计算路径，把结果写入 ``chart_data_cache``。
 
     返回 True 表示成功写入缓存（数据非空），False 表示中途无数据
@@ -349,6 +388,10 @@ def compute_and_cache_chart_data(market: str, code: str, frequency: str, cl_conf
     kline_args = {
         "end_date": datetime.datetime.now(tz_sh).strftime("%Y-%m-%d %H:%M:%S")
     }
+    # 预热批量预下载后, 让 ex.klines 跳过逐只 download(数据已在本地库)。仅 A股/QMT 的
+    # klines 识别 args["skip_download"]; 其他交易所不传此 args, 行为不变。
+    if skip_download:
+        kline_args["args"] = {"skip_download": True}
 
     if (
         cl_config.get("enable_kchart_low_to_high") == "1"
@@ -386,12 +429,14 @@ def compute_and_cache_chart_data(market: str, code: str, frequency: str, cl_conf
     # P8 取代 P7：停用真实多周期叠加，高级别中枢改由 recursive_levels 产出
     # apply_higher_zs_to_chart_data(cl_chart_data, market, code, frequency, cl_config)
 
+    # 2026-07 修复(幽灵形态): 不再与 existing_entry 做 _merge_chart_data 合并。
+    # cl_chart_data 本身就是基于完整回看窗口的全量权威计算结果(is_full_snapshot=True)；
+    # existing_entry 可能是几分钟到几天前的陈旧快照。_merge_chart_data 对 bis/xds/
+    # bi_zss/mmds 等形态字段用"起点身份并集"语义——若陈旧快照里某个未完成形态的起点
+    # 在新计算里已不存在(正在形成的笔被新行情证伪、从别处重新起笔)，旧版本会被原样
+    # 保留、与新版本一起返回，前端出现幽灵/重复形态。整体替换才是正确语义，与
+    # kline_recompute.prepend_klines_and_replace_cache 的"整体替换"一致。
     with cache_lock:
-        existing_entry = _get_chart_cache_entry(cache_key)
-        if existing_entry is not None:
-            cl_chart_data = _merge_chart_data(
-                existing_entry.get("data", {}), cl_chart_data
-            )
         _set_chart_cache_entry(cache_key, cl_chart_data, is_full_snapshot=True)
     return True
 

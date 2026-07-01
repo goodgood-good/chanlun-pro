@@ -92,3 +92,15 @@ jobs:
         run: |
           pip install ruff
           ruff check --output-format=github src/ web/ tests/
+
+  js-test:
+    name: Test (node:test, 前端 charts.js/SSE/macd_stats)
+    # 零第三方依赖，只用 Node 内置 node:test/assert/vm，无需 npm install
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Run node:test
+        run: node --test web/chanlun_chart/cl_app/static/js/__tests__/*.test.js

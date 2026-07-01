@@ -63,7 +63,7 @@ from ..services.chart_cache import (
     cache_lock,
     chart_data_cache,
 )
-from ..services.chart_compute import compute_and_cache_chart_data
+from ..services.chart_compute import compute_and_cache_chart_data, market_now_trading
 from ..services.constants import market_types, resolution_maps
 from ..services.prewarm_status import mark_batch_prewarm_active
 from ..services.stock_list import get_cached_processed_stocks
@@ -329,8 +329,13 @@ def symbols_list():
 
 # 预热使用的常用周期（TV interval 表示法），通过 resolution_maps 转成项目内部 freq：
 # "1D" -> d, "30" -> 30m, "5" -> 5m, "1" -> 1m
-# 顺序仍然按用户最常看的优先（虽然现在并行计算，但失败时按顺序记录日志看起来更直观）。
-PREWARM_INTERVALS = ["1D", "30", "5", "1"]
+# 默认只预热 30m/5m/1m(去掉日线): 减少每只标的的取数+计算量,加速全量预热;日线首次看时
+# 按需算(~1.3s,之后缓存秒开)。env PREWARM_INTERVALS 逗号分隔可调,例如:
+#   "5,1"      仅 1m+5m(更快,~再减一档)
+#   "1D,30,5,1" 恢复全部 4 周期
+PREWARM_INTERVALS = [
+    s.strip() for s in os.environ.get("PREWARM_INTERVALS", "30,5,1").split(",") if s.strip()
+]
 
 # 单标的内并发计算的周期数（每个周期一个线程）。
 # 实测全市场预热同时打 8 个并发请求时（2 标的 × 4 周期），长桥 HTTP 连接池被占满，
@@ -338,6 +343,13 @@ PREWARM_INTERVALS = ["1D", "30", "5", "1"]
 # 维持 2，让总在飞请求数 ≤ INFLIGHT_LIMIT，避免 4 周期同时抢信号量。
 # env PREWARM_FREQ_PARALLELISM 可覆盖
 PREWARM_FREQ_PARALLELISM = _env_int("PREWARM_FREQ_PARALLELISM", 2)
+
+# QMT 批量预下载加速: A股预热前先用 download_history_data2 批量拉基础周期(1m/5m/1d)数据到
+# 本地库, 之后逐只计算传 skip_download=True 跳过逐只 download —— 把成千上万次 QMT 往返合并成
+# 少量批量调用。env PREWARM_QMT_BATCH=0 可一键关闭回退到逐只 download(若批量下载异常)。
+# env PREWARM_QMT_BATCH_CHUNK 控制单批标的数(默认 100, 调小更稳防 BSON payload 过大)。
+PREWARM_QMT_BATCH = _env_int("PREWARM_QMT_BATCH", 0)
+PREWARM_QMT_BATCH_CHUNK = _env_int("PREWARM_QMT_BATCH_CHUNK", 100)
 
 # native 数据源（xtquant / tdx 系列）客户端线程不安全，单标的内多周期计算必须串行。
 # 按 config.EXCHANGE_<MARKET> 实际数据源归类：a→qmt(xtquant)、futures→tdx_futures、
@@ -890,6 +902,10 @@ class PrewarmManager:
         # done 文件路径预先解析一次（None 时降级为不写）
         done_file_path = self._done_file_path(market)
 
+        # 批量预下载是否成功(QMT 专属);成功后逐只 compute 跳过 download。_process_one 闭包读取,
+        # 在下方批量下载完成后被重新赋值(读取发生在 executor 调度之后, 取到的是最终值)。
+        batch_predownloaded = False
+
         def _process_one(item: dict) -> None:
             if task.cancel_event.is_set():
                 return
@@ -925,6 +941,7 @@ class PrewarmManager:
                     code=code,
                     cl_config=cl_config,
                     cancel_event=task.cancel_event,
+                    skip_download=batch_predownloaded,
                 )
             except Exception as e:
                 LogUtil.error(f"[prewarm] _prewarm_one_code crashed {market}/{code}: {e}")
@@ -963,6 +980,48 @@ class PrewarmManager:
         # 注册批量预热活动状态：tv.prewarm_common_intervals 看到此标记会让位，
         # 避免逐标的旧版 prewarm 与本任务双倍争抢 chart_calc_locks / 上游 HTTP 配额。
         mark_batch_prewarm_active(market, True)
+
+        # QMT 批量预下载(加速): 逐只计算前先把所有标的的基础周期数据批量拉到本地库,
+        # 之后逐只 compute 传 skip_download=True 跳过逐只 download。仅 A股/QMT(交易所暴露
+        # prewarm_batch_download)生效; 任何异常都降级(batch_predownloaded=False, 逐只仍 download)。
+        # 交易时段跳过批量预下载: prewarm_batch_download 同步持 _XTDATA_NATIVE_LOCK(与用户
+        # 实时 klines() 同锁),盘中触发会长时间卡住所有看盘/SSE 刷新的用户。预热本就该盘前/盘后
+        # 热身,交易时段直接跳过、保持 batch_predownloaded=False 走原有逐只 download 路径
+        # (不影响正确性,仅无批量加速)。
+        if PREWARM_QMT_BATCH and market_now_trading(market):
+            LogUtil.info(
+                f"[prewarm] 交易时段跳过批量预下载 market={market}, 走逐只 download"
+            )
+        elif PREWARM_QMT_BATCH:
+            try:
+                from chanlun.exchange import get_exchange
+                from chanlun.market import Market
+                _ex = get_exchange(Market(market))
+                if hasattr(_ex, "prewarm_batch_download"):
+                    _freqs = [resolution_maps.get(iv, iv) for iv in PREWARM_INTERVALS]
+                    _t0 = time.time()
+                    LogUtil.info(
+                        f"[prewarm] 批量预下载开始 market={market} 标的={len(codes)} "
+                        f"周期={_freqs} chunk={PREWARM_QMT_BATCH_CHUNK}"
+                    )
+                    _ex.prewarm_batch_download(
+                        [c.get("code", "") for c in codes if c.get("code")],
+                        _freqs,
+                        cancel_check=lambda: task.cancel_event.is_set(),
+                        progress_callback=lambda base, done, total: setattr(
+                            task, "current", ("批量预下载", f"{base} {done}/{total}")
+                        ),
+                        chunk_size=PREWARM_QMT_BATCH_CHUNK,
+                    )
+                    batch_predownloaded = not task.cancel_event.is_set()
+                    LogUtil.info(
+                        f"[prewarm] 批量预下载完成 market={market} "
+                        f"耗时={time.time() - _t0:.1f}s skip_download={batch_predownloaded}"
+                    )
+            except Exception as e:
+                LogUtil.warning(f"[prewarm] 批量预下载失败, 降级逐只 download: {e}")
+                batch_predownloaded = False
+
         try:
             with ThreadPoolExecutor(
                 max_workers=code_parallelism,
@@ -1146,6 +1205,7 @@ class PrewarmManager:
         code: str,
         cl_config: dict,
         cancel_event: threading.Event,
+        skip_download: bool = False,
     ) -> bool:
         """预热单个标的的 4 个常用周期，**4 个周期并行计算**。返回是否至少有 1 个成功。
 
@@ -1212,8 +1272,12 @@ class PrewarmManager:
                 # 重试前检查 cancel_event，避免取消后还跑一遍。
                 last_err: Optional[BaseException] = None
                 for attempt in range(2):
+                    # 第二次重试强制真正 download: 批量某 chunk 失败时,受影响标的本地库可能缺数据,
+                    # 首次 skip_download=True 会读到空/不完整数据而失败;兜底让 attempt==1 老老实实
+                    # 单独下载,不被批量加速的 skip_download 卡死。attempt==0 仍遵循外层入参。
+                    attempt_skip = skip_download if attempt == 0 else False
                     try:
-                        if compute_and_cache_chart_data(market, code, freq, cl_config):
+                        if compute_and_cache_chart_data(market, code, freq, cl_config, skip_download=attempt_skip):
                             if attempt > 0:
                                 LogUtil.info(
                                     f"[prewarm] compute retry succeeded "

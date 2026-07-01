@@ -157,8 +157,11 @@ class SseStreamHandler(tornado.web.RequestHandler):
         """给"后加入既有循环"的 client 补发一次当前缓存的权威数据(H1)。只读缓存不重算;
         缓存为空(循环刚起还没算过)则跳过——此时它自己的 /tv/history firstDataRequest 已兜底。"""
         try:
-            from cl_app.services.chart_cache import _get_chart_cache_entry
-            entry = _get_chart_cache_entry(self._cache_key)
+            # HIGH-2: IOLoop 线程只读 RAM, 绝不同步 pickle-load 磁盘(会把整个 Tornado IOLoop /
+            # 所有 SSE 客户端卡在磁盘 IO 上)。RAM miss 则跳过补发, 由该 client 自己的
+            # firstDataRequest 兜底(注释已述"缓存为空则跳过")。
+            from cl_app.services.chart_cache import _get_chart_cache_entry_ram_only
+            entry = _get_chart_cache_entry_ram_only(self._cache_key)
             chart_data = entry.get("data") if isinstance(entry, dict) else None
             if chart_data:
                 # 带 full_snapshot:与周期推送口径一致,前端整体替换形态(不走合并),

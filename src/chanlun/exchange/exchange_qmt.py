@@ -187,6 +187,60 @@ class ExchangeQMT(Exchange):
         start_date = now - delta
         return start_date.strftime("%Y%m%d")
 
+    def prewarm_batch_download(self, codes, frequencies, cancel_check=None,
+                               progress_callback=None, chunk_size: int = 100):
+        """批量预下载多只标的的基础周期数据到本地 QMT 库,供预热逐只计算时跳过 download。
+
+        加速原理:把"逐只 N 周期"的成千上万次 download_history_data 往返,合并成
+        每个基础周期(1m/5m/1d)分块的少量 download_history_data2 批量调用;之后逐只
+        klines 传 skip_download=True 只读本地库,不再各自往返。
+
+        安全:
+        - xtquant 线程不安全 → 全程持 _XTDATA_NATIVE_LOCK 串行(与 klines 同锁)。
+        - 分块 chunk_size + incrementally=True 控制单次 payload,降低 BSON 0xC0000409 风险。
+        - download_history_data2 阻塞至下完才返回,故返回后 get_market_data 可直接读到。
+        - 单块异常吞掉(warning):该块标的逐只 download 仍能兜底(不传 skip_download 时)。
+        - cancel_check() 返回 True 尽快中止。
+        """
+        # 基础下载周期 → 该周期需覆盖的最早 start(用到它的各 freq 取最长回看)
+        base_starts: dict = {}
+        for freq in frequencies:
+            base = self.download_frequency_map.get(freq)
+            if base is None:
+                base = "1m" if freq in ("1m", "5m", "15m", "30m", "60m") else "1d"
+            start = self.get_start_date_by_frequency(freq)
+            if base not in base_starts or start < base_starts[base]:
+                base_starts[base] = start
+        if not base_starts:
+            return
+        qmt_codes = [self.code_to_qmt(c) for c in codes if c]
+        total = len(qmt_codes)
+        for base, start in base_starts.items():
+            done = 0
+            for i in range(0, total, chunk_size):
+                if cancel_check and cancel_check():
+                    LogUtil.info(f"[ExchangeQMT.batch_download] 取消 base={base} {done}/{total}")
+                    return
+                chunk = qmt_codes[i:i + chunk_size]
+                with _XTDATA_NATIVE_LOCK:
+                    try:
+                        xtdata.download_history_data2(
+                            chunk, base, start_time=start, end_time="", incrementally=True,
+                        )
+                    except Exception as e:
+                        LogUtil.warning(
+                            f"[ExchangeQMT.batch_download] chunk 失败 base={base} i={i}: {e}"
+                        )
+                done += len(chunk)
+                if progress_callback:
+                    try:
+                        progress_callback(base, done, total)
+                    except Exception:
+                        pass
+            LogUtil.info(
+                f"[ExchangeQMT.batch_download] base={base} 完成 {done}/{total} start={start}"
+            )
+
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_random(min=0.1, max=1)
@@ -232,15 +286,19 @@ class ExchangeQMT(Exchange):
         # download + get_market_data 一起持锁，防止其他线程在两次调用之间插入导致状态错乱
         # incrementally=True 避免全量下载，减小 BSON payload，降低 `u < 1000000` 断言触发概率
         field_list = ["time", "open", "high", "low", "close", "volume"]
+        # 预热批量预下载后, 逐只可跳过 download(数据已在本地库), 只读取——省下逐只 QMT 往返。
+        # 仅预热路径经 args 显式传入 skip_download=True; 用户实时请求不传, 行为不变。
+        _skip_dl = bool(args.get("skip_download")) if isinstance(args, dict) else False
         with _XTDATA_NATIVE_LOCK:
             try:
-                xtdata.download_history_data(
-                    stock_code=qmt_code,
-                    period=qmt_download_period,
-                    start_time=query_start,
-                    end_time="",
-                    incrementally=True,
-                )
+                if not _skip_dl:
+                    xtdata.download_history_data(
+                        stock_code=qmt_code,
+                        period=qmt_download_period,
+                        start_time=query_start,
+                        end_time="",
+                        incrementally=True,
+                    )
                 raw_data = xtdata.get_market_data(
                     field_list=field_list,
                     stock_list=[qmt_code],
@@ -378,7 +436,11 @@ class ExchangeQMT(Exchange):
                 low=_t["low"],
                 open=_t["open"],
                 volume=_t["volume"],
-                rate=(_t["lastPrice"] - _t["lastClose"]) / _t["lastClose"] * 100,
+                rate=(
+                    (_t["lastPrice"] - _t["lastClose"]) / _t["lastClose"] * 100
+                    if _t["lastClose"] != 0
+                    else 0
+                ),
             )
 
         return ticks

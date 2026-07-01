@@ -293,6 +293,11 @@ const ChartUtils = {
         }
         return cnt > 0 ? sum / cnt : 0;
     },
+    // 买卖点是否为"买":统一口径(小写含 b),供偏移/颜色/箭头三处共用,杜绝大小写漂移。
+    // bs_type 变体(1buy/2buy/3buy/类1buy/大写 1B…)均含 b;sell/S 不含 b。
+    _mmdIsBuy(mmd) {
+        return ((mmd && mmd.text) || "").toLowerCase().includes("b");
+    },
     // 偏移点:优先用 ATR 基准(offsetBase × atrRatio);基准不可用时回退价格百分比。
     mmdOffsetPoint(mmd, atrRatio, priceRatioFallback, offsetBase = 0, fromPoint = null) {
         const src = fromPoint || mmd.points || {};
@@ -301,7 +306,9 @@ const ChartUtils = {
         const off = offsetBase > 0
             ? offsetBase * atrRatio
             : Math.abs(base.price) * priceRatioFallback;
-        return { ...src, price: mmd.text.includes("B") ? src.price - off : src.price + off };
+        // 买点下移(price-off)、卖点上移(price+off)。判定与颜色/箭头同口径(_mmdIsBuy):
+        // 修历史 bug——此处曾用大写 includes("B"),而默认 branch_core 文本是小写 buy → 买点被误画到上方。
+        return { ...src, price: this._mmdIsBuy(mmd) ? src.price - off : src.price + off };
     },
     // 买卖点箭头锚点:买点放到 K 线下方、卖点放到 K 线上方,避免和 high/low 重叠。
     mmdIconPoint(mmd, offsetBase = 0) {
@@ -317,7 +324,7 @@ const ChartUtils = {
     // 使用绘制层偏移点,避免箭头贴住或覆盖 K 线;原始 mmd.points 仍保留真实买卖点位置。
     createMmdShape(chart, mmd, options = {}) {
         const { offsetBase = 0, ...rest } = options;
-        const isBuy = mmd.text.toLowerCase().includes("b");   // buy/1B/3buy… 含 b;sell/S 不含
+        const isBuy = this._mmdIsBuy(mmd);   // 统一口径(小写含 b):buy/1B/3buy… 含 b;sell/S 不含
         const color = isBuy ? CHART_CONFIG.COLORS.MMD_UP : CHART_CONFIG.COLORS.MMD_DOWN;
         const isSplit = !!mmd.level;
         const isXd = isSplit && mmd.level === "xd";
@@ -335,7 +342,7 @@ const ChartUtils = {
     // 标签单独纵向偏移;text 有横向宽度会向右展开,定位以箭头为准,标签仅作说明。
     createMmdLabelShape(chart, mmd, options = {}) {
         const { offsetBase = 0, ...rest } = options;
-        const isBuy = mmd.text.toLowerCase().includes("b");
+        const isBuy = this._mmdIsBuy(mmd);   // 统一口径, 与偏移/箭头一致
         const color = isBuy ? CHART_CONFIG.COLORS.MMD_UP : CHART_CONFIG.COLORS.MMD_DOWN;
         const isSplit = !!mmd.level;
         const isXd = isSplit && mmd.level === "xd";
@@ -396,6 +403,11 @@ class ChartManager {
         this._barReadyHandler = null;
         this._sse = null;  // SSE 实时推送连接(每图表一个; flag 关/不支持时为 null)
         this._visibilityHandler = null;  // 页面可见性兜底监听句柄
+        this._onlineHandler = null;      // 网络恢复(online)监听句柄: 断网后立即重连 SSE 补断档
+        this._needResetOnNextData = false; // reconnect 后置位: 下一 SSE 帧无条件全量补齐(治轮询竞态/服务端重启)
+        this._watchdogTimer = null;      // 墙钟新鲜度看门狗定时器(SSE 帧驱动检测的失速兜底)
+        this._resetState = {};           // per-resKey reset 记账: {lastResetSec, backoffLevel, lastViewLatestSec}
+        this._disconnectedSinceMs = null; // es.onerror 记录的断开时刻(ms); onmessage 按断流时长判真断档(M-3)
         // reconcile 失败自动重试状态：count 累计失败次数，timer 已排队的句柄（防重复）
         this._reconcileRetry = { count: 0, timer: null };
         // reconcile 创建过的全部 entity id 集合，用于 sweep 时识别孤儿 shape。
@@ -768,6 +780,41 @@ class ChartManager {
             } catch (e) { /* ignore */ }
         };
         document.addEventListener('visibilitychange', this._visibilityHandler);
+
+        // 网络恢复兜底: 断网期间 EventSource 进入重连退避(可能数秒~数十秒才自动重连),
+        // 'online' 事件一触发就立即重连 SSE, 缩短"恢复 → 补齐"延迟。重连后服务端推的首帧
+        // (完整快照)会经上面 onmessage 的断档检测触发 resetData, 整段补齐断网期间缺失的 K线+缠论。
+        this._onlineHandler = () => {
+            clog('[SSE] 网络恢复(online), 标记重连后补齐 + 主动重连 SSE');
+            this._needResetOnNextData = true;
+            try { this._openSseStream(); } catch (e) { /* ignore */ }
+        };
+        if (typeof window !== 'undefined') {
+            window.addEventListener('online', this._onlineHandler);
+        }
+
+        // 墙钟新鲜度看门狗: 独立于 SSE 帧, 每 20s 自查"画布末根 vs 当下"是否在交易时段内严重失速
+        // (覆盖 SSE 半开静默/被中间层缓冲转 fallback/不推帧等帧驱动检测的盲区)。失速则触发一次
+        // resetData(带防抖退避 + 交易时段门控, 收盘/周末不误闪)。
+        this._watchdogTimer = setInterval(() => {
+            try {
+                if (typeof window === 'undefined' || !window.SseGap || !this.widget) return;
+                let si = null;
+                try { si = this.widget.symbolInterval(); } catch (e) { return; }
+                if (!si || !si.symbol || !si.interval) return;
+                const resKey = String(si.symbol).toLowerCase() + String(si.interval).toLowerCase();
+                const sym = String(si.symbol || '');
+                const market = (sym.indexOf(':') >= 0)
+                    ? sym.split(':')[0].toLowerCase()
+                    : ((typeof Utils !== 'undefined' && Utils.get_market) ? Utils.get_market() : '');
+                const viewLatestSec = this._getViewLatestSec(resKey, si.interval);
+                const nowSec = Math.floor(Date.now() / 1000);
+                const periodSec = window.SseGap._internal.resolutionToPeriodSeconds(si.interval);
+                if (window.SseGap.computeWatchdogReset(market, viewLatestSec, nowSec, periodSec)) {
+                    this._doReset(resKey, 'watchdog', viewLatestSec);
+                }
+            } catch (e) { /* ignore */ }
+        }, 20000);
 
         const self = this;
         const client_id = "chanlun_pro_" + Utils.get_market() + "_" + this.id;
@@ -2362,6 +2409,55 @@ class ChartManager {
         if (this._sseFallbackInterval) { clearInterval(this._sseFallbackInterval); this._sseFallbackInterval = null; }
     }
 
+    // 取 TV 画布当前渲染到的末根秒数(从 bars_result 末根, 与 onmessage/看门狗同源)。
+    // 用于断档/看门狗判定的"画布末根"参照, 以及退避"上次 reset 是否生效"判定。无数据返回 null。
+    _getViewLatestSec(resKey, interval) {
+        try {
+            const map = this.udf_datafeed && this.udf_datafeed._historyProvider && this.udf_datafeed._historyProvider.bars_result;
+            if (!map) return null;
+            let prev = map.get(resKey);
+            if (!prev) {
+                // 与 getChartData 同口径(M-1): 写键(getBars 用 symbolInfo.ticker)与读键
+                // (symbolInterval().symbol)可能差一个 "market:" 前缀。剥前缀直查 / 去前缀唯一匹配再试。
+                // 否则 G3(SSE 半开从无帧, 只有轮询写的 ticker 键)下看门狗 plain get 命中不到 → 静默失效。
+                const bare = String(resKey).replace(/^[a-z]+:/, '');
+                prev = map.get(bare);
+                if (!prev && interval) {
+                    const iv = String(interval).toLowerCase();
+                    const cands = Array.from(map.keys()).filter(k =>
+                        k.toLowerCase().endsWith(iv) &&
+                        k.toLowerCase().replace(/^[a-z]+:/, '') === bare);
+                    if (cands.length === 1) prev = map.get(cands[0]);
+                }
+            }
+            const bars = prev && prev.bars;
+            const lastBar = (bars && bars.length) ? bars[bars.length - 1] : null;
+            return (lastBar && lastBar.time) ? Math.round(lastBar.time / 1000) : null;
+        } catch (e) { return null; }
+    }
+
+    // 统一 resetData 入口: 防抖 + 指数退避(避免冷缓存/数据源停滞下每 8s reset 风暴) +
+    // resetCache()(TV 文档契约, 清内部 datafeed 缓存/合并基准, 与重载按钮一致) + 退避记账。
+    // 返回是否真的执行了 reset(false=被防抖跳过或无图表, 调用方据此决定是否继续走增量)。
+    _doReset(resKey, reason, viewLatestSec) {
+        try {
+            if (typeof window === 'undefined' || !window.SseGap) return false;
+            const nowSec = Math.floor(Date.now() / 1000);
+            // 防抖+退避决策走纯函数(M-2): 被拒不消耗退避, 放行才基于"画布较上次 reset 是否前进"更新退避。
+            const gate = window.SseGap.computeResetGate(this._resetState[resKey], nowSec, viewLatestSec, 30);
+            if (!gate.allow) return false;
+            const ch = (this.widget && typeof this.widget.activeChart === 'function') ? this.widget.activeChart() : null;
+            // 无图表: 不持久化 gate.state(等同未 reset, 下次重新判), 避免空记账污染退避。
+            if (!ch || typeof ch.resetData !== 'function') return false;
+            // 契约: resetData 前先 resetCache(TV 文档要求)。容错: 老版无 resetCache 时降级裸 resetData。
+            try { if (this.widget && typeof this.widget.resetCache === 'function') this.widget.resetCache(); } catch (e) { /* ignore */ }
+            ch.resetData();
+            this._resetState[resKey] = gate.state;  // 仅真执行 reset 后落记账
+            clog(`[SSE] resetData 全量补齐 reason=${reason} resKey=${resKey} backoff=${gate.state.backoffLevel}`);
+            return true;
+        } catch (e) { clog('[SSE] _doReset 异常', e); return false; }
+    }
+
     _openSseStream() {
         // feature flag 关闭 → 完全不建连, 退回纯轮询(现状)。
         if (typeof window !== 'undefined' && window.__CHANLUN_SSE_ENABLED === false) return;
@@ -2387,8 +2483,36 @@ class ChartManager {
                 clog('[SSE] 数据帧到达, 通道健康, 取消 fallback 快轮询');
             }
             try {
+                // 断流时长门槛(M-3): es.onerror 记录的断开若 ≥30s 视为真断档 → 置位重连补齐;
+                // 弱网瞬断秒回则忽略, 避免频繁无条件 resetData 闪烁。navigator 'online' 另路直接置位。
+                if (this._disconnectedSinceMs != null) {
+                    const _downMs = Date.now() - this._disconnectedSinceMs;
+                    this._disconnectedSinceMs = null;
+                    if (_downMs >= 30000) this._needResetOnNextData = true;
+                }
                 const data = JSON.parse(ev.data);
+                const resKey = String(symbol).toLowerCase() + String(resolution).toLowerCase();
                 const hp = this.udf_datafeed && this.udf_datafeed._historyProvider;
+
+                // reconnect 后首帧: 无条件全量补齐, 不去猜中间缺几根。只要发生过真断档重连(online 事件
+                // 或 es.onerror 断流≥30s 置位 _needResetOnNextData), 这一帧就整段重拉——治"30s 轮询抢在
+                // SSE 首帧前推进 bars_result、污染断档参照系致漏判"的竞态, 以及服务端重启后的整段补齐。
+                if (this._needResetOnNextData) {
+                    this._needResetOnNextData = false;
+                    if (this._doReset(resKey, 'reconnect', this._getViewLatestSec(resKey, resolution))) return;
+                }
+
+                // 常规断档检测(SSE 持续连通但数据跳变/长时间无更新恢复): data.t 完整快照里
+                // (画布末根, SSE 末根) 之间真有缺根才补。_doReset 内含防抖+退避+resetCache。
+                try {
+                    if (hp && hp.bars_result && typeof window !== 'undefined' && window.SseGap) {
+                        const _tvLatestSec = this._getViewLatestSec(resKey, resolution);
+                        if (window.SseGap.shouldResetForGap(data.t, _tvLatestSec, resolution)) {
+                            if (this._doReset(resKey, 'gap-detect', _tvLatestSec)) return;
+                        }
+                    }
+                } catch (_gapErr) { /* gap 检测失败不阻断正常推送 */ }
+
                 // 复用 getBars 同一合并逻辑(applyChanlunUpdate=_processHistoryResponse):
                 // 更新 bars_result + 派发 chanlun-bars-ready → draw_chanlun 重绘缠论。
                 if (hp && typeof hp.applyChanlunUpdate === 'function') {
@@ -2396,12 +2520,17 @@ class ChartManager {
                 }
                 // K线也随 SSE 实时刷新：把推送里的最新 bar 喂给 TV(绕过轮询/节流/bars<2 抛错)。
                 if (this.udf_datafeed && typeof this.udf_datafeed.feedRealtimeBar === 'function') {
-                    const resKey = String(symbol).toLowerCase() + String(resolution).toLowerCase();
                     this.udf_datafeed.feedRealtimeBar(resKey, data);
                 }
             } catch (e) { console.warn('[SSE] 处理推送失败', e); }
         });
-        es.onerror = () => { clog('[SSE] 连接错误, 浏览器将自动重连; 轮询继续兜底'); };
+        es.onerror = () => {
+            // 记录首次断开时刻(不重复刷新)。下一帧到达时按"断开时长"决定是否需要全量补齐(M-3):
+            // 弱网瞬断秒回(<阈值)忽略, 避免频繁无条件 resetData 闪烁; 真断档(≥阈值)才置位 reconnect-reset。
+            // navigator 'online'(可靠的真断网恢复信号)另路直接置位, 不受此门槛限制。
+            if (this._disconnectedSinceMs == null) this._disconnectedSinceMs = Date.now();
+            clog('[SSE] 连接错误, 浏览器将自动重连');
+        };
         // SSE 健康哨兵：连上后 12s 仍未收到任何数据帧 → 判定被中间层 vhost 缓冲 →
         // 启动 6s fallback 快轮询兜底实时；后续收到帧会自动取消(见 addEventListener)。
         this._sseHealthTimer = setTimeout(() => {
@@ -2418,9 +2547,14 @@ class ChartManager {
         // 工具栏注入重试定时器:正常 ≤4.2s 自停,但实例若在窗口内被 dispose 需显式清,
         // 避免定时器多跑几拍对已 dispose 实例操作(与 _sweepOrphanTimer 等清理对齐,审查 L-3)。
         if (this._lvlbtnTimer) { clearInterval(this._lvlbtnTimer); this._lvlbtnTimer = null; }
+        if (this._watchdogTimer) { clearInterval(this._watchdogTimer); this._watchdogTimer = null; }
         if (this._visibilityHandler) {
             document.removeEventListener('visibilitychange', this._visibilityHandler);
             this._visibilityHandler = null;
+        }
+        if (this._onlineHandler) {
+            if (typeof window !== 'undefined') window.removeEventListener('online', this._onlineHandler);
+            this._onlineHandler = null;
         }
         if (this._barReadyHandler) {
             window.removeEventListener('chanlun-bars-ready', this._barReadyHandler);
