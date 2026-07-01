@@ -598,3 +598,13 @@ def _mark_negative_cache(cache_key: str, ttl: float = _NEGATIVE_CACHE_TTL_SECOND
             stale = [k for k, (t, tt) in _negative_cache.items() if now - t > tt]
             for k in stale:
                 _negative_cache.pop(k, None)
+
+
+def _klines_fetch_incomplete(klines) -> bool:
+    """cq 源级完整性闸门信号：拉取带洞时返回空 DataFrame 且 attrs['fetch_incomplete']=True(C1)。
+
+    web 层据此走短退避(_TRANSIENT_NEGATIVE_TTL_SECONDS)而非真空 5min 负缓存,避免数据源暂时失败
+    被当真空抑制 5min 不自愈(M3)。回测/monitor 不查此标记,klines 契约不变。
+    """
+    attrs = getattr(klines, "attrs", None)
+    return bool(attrs) and attrs.get("fetch_incomplete") is True

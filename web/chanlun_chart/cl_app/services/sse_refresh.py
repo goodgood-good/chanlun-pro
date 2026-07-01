@@ -23,7 +23,12 @@ def recompute_chart_data(market, code, frequency, cl_config, cache_key):
     from .chart_compute import chart_calc_locks
     from .kline_recompute import prepend_klines_and_replace_cache
     from chanlun.cl_utils import kcharts_frequency_h_l_map
-    from .chart_cache import _is_negatively_cached, _mark_negative_cache
+    from .chart_cache import (
+        _TRANSIENT_NEGATIVE_TTL_SECONDS,
+        _is_negatively_cached,
+        _klines_fetch_incomplete,
+        _mark_negative_cache,
+    )
     try:
         # low-to-high 合成标的:SSE 增量 prepend 从"已合成的缓存"无法反推低周期源,只能用高周期
         # 重算缠论 → 与 tv_history(在低周期算缠论、再合成显示)口径分歧、会闪。故这类标的 SSE 不推,
@@ -37,6 +42,10 @@ def recompute_chart_data(market, code, frequency, cl_config, cache_key):
             return None
         ex = get_exchange(Market(market))
         klines = ex.klines(code, frequency)
+        if _klines_fetch_incomplete(klines):
+            # 拉取带洞:短退避保留旧缓存,≤30s 自愈,不被真空 5min 负缓存抑制(C1+M3)。
+            _mark_negative_cache(cache_key, ttl=_TRANSIENT_NEGATIVE_TTL_SECONDS)
+            return None
         if klines is None or len(klines) == 0:
             _mark_negative_cache(cache_key)
             return None

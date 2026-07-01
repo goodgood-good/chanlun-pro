@@ -39,8 +39,10 @@ from chanlun.exchange import get_exchange
 from chanlun.tools.log_util import LogUtil
 
 from .chart_cache import (
+    _TRANSIENT_NEGATIVE_TTL_SECONDS,
     _build_cache_key,
     _is_negatively_cached,
+    _klines_fetch_incomplete,
     _mark_chart_cache_validated,
     _mark_negative_cache,
     _set_chart_cache_entry,
@@ -400,6 +402,11 @@ def compute_and_cache_chart_data(
     ):
         with lb_low_priority():
             klines = ex.klines(code, frequency_low, **kline_args)
+        if _klines_fetch_incomplete(klines):
+            # 拉取带洞(数据源暂时不可用):短退避保留旧完整缓存、不标 validated,≤30s 自愈(C1+M3)。
+            LogUtil.warning(f"[compute] {market}:{code}:{frequency} 拉取不完整,短退避保留旧缓存")
+            _mark_negative_cache(cache_key, ttl=_TRANSIENT_NEGATIVE_TTL_SECONDS)
+            return False
         if klines is None or len(klines) == 0:
             _mark_negative_cache(cache_key)
             with cache_lock:
@@ -410,6 +417,11 @@ def compute_and_cache_chart_data(
         kchart_to_frequency = None
         with lb_low_priority():
             klines = ex.klines(code, frequency, **kline_args)
+        if _klines_fetch_incomplete(klines):
+            # 拉取带洞(数据源暂时不可用):短退避保留旧完整缓存、不标 validated,≤30s 自愈(C1+M3)。
+            LogUtil.warning(f"[compute] {market}:{code}:{frequency} 拉取不完整,短退避保留旧缓存")
+            _mark_negative_cache(cache_key, ttl=_TRANSIENT_NEGATIVE_TTL_SECONDS)
+            return False
         if klines is None or len(klines) == 0:
             _mark_negative_cache(cache_key)
             with cache_lock:
