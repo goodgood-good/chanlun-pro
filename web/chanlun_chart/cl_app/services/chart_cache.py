@@ -561,31 +561,40 @@ def _mark_chart_cache_validated(cache_key: str):
 # 5 分钟内同 cache_key 再来直接 return，不再调 ex.klines()。
 # 5 分钟是权衡：太短退化成无效，太长会让"上市新股第一次有 1m 数据"延迟感知。
 _NEGATIVE_CACHE_TTL_SECONDS = 300.0
-_negative_cache: Dict[str, float] = {}
+# 异常空(数据源暂时不可用,如 cq 分段拉取失败返回 attrs['fetch_incomplete'])用短退避,与
+# "真空(新股/退市,真没数据)"的 300s 区分:真空 5min 抑制防无限重拉;异常空 30s 快速自愈,不被
+# 5min 抑制卡住恢复(C1+M3 协同,审查 M3)。
+_TRANSIENT_NEGATIVE_TTL_SECONDS = 30.0
+# value = (mark_ts, ttl)：每项按各自 ttl 独立失效,支持真空/异常空并存于同一表。
+_negative_cache: Dict[str, tuple] = {}
 _negative_cache_lock = threading.Lock()
 
 
 def _is_negatively_cached(cache_key: str) -> bool:
-    """检查 cache_key 是否在负缓存中（最近 5 分钟内被确认无数据）。"""
+    """检查 cache_key 是否在负缓存中（未超各自 ttl 内被确认无数据/暂不可用）。"""
     now = time.time()
     with _negative_cache_lock:
-        ts = _negative_cache.get(cache_key)
-        if ts is None:
+        item = _negative_cache.get(cache_key)
+        if item is None:
             return False
-        if now - ts > _NEGATIVE_CACHE_TTL_SECONDS:
+        mark_ts, ttl = item
+        if now - mark_ts > ttl:
             _negative_cache.pop(cache_key, None)
             return False
         return True
 
 
-def _mark_negative_cache(cache_key: str) -> None:
-    """标记 cache_key 为"无数据"，5 分钟内不再尝试拉取。"""
+def _mark_negative_cache(cache_key: str, ttl: float = _NEGATIVE_CACHE_TTL_SECONDS) -> None:
+    """标记 cache_key 为"无数据"，ttl 秒内不再尝试拉取。
+
+    ttl 默认 300s（真空：新股/退市，防无限重拉，所有既有调用点行为不变）；异常空（数据源暂时
+    不可用）应传 _TRANSIENT_NEGATIVE_TTL_SECONDS（30s）短退避，≤30s 自愈，不被 5min 抑制卡住。
+    """
     now = time.time()
     with _negative_cache_lock:
-        _negative_cache[cache_key] = now
-        # 顺便清理过期项（懒清理，避免长期运行时无限增长）
+        _negative_cache[cache_key] = (now, ttl)
+        # 顺便清理过期项（懒清理，避免长期运行时无限增长），按各项自身 ttl 判过期。
         if len(_negative_cache) > 500:
-            cutoff = now - _NEGATIVE_CACHE_TTL_SECONDS
-            stale = [k for k, t in _negative_cache.items() if t < cutoff]
+            stale = [k for k, (t, tt) in _negative_cache.items() if now - t > tt]
             for k in stale:
                 _negative_cache.pop(k, None)
