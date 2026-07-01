@@ -207,6 +207,14 @@
                 }
             }
         }
+        /**
+         * SSE 推送复用入口：与 getBars 走同一份 response→bars_result 合并逻辑
+         * (_processHistoryResponse)，保证轮询与推送两条路径行为一致、不漂移。
+         * 入参 response 为 /tv/history 同构对象(含 s/update/t/o/h/l/c/缠论字段)。
+         */
+        applyChanlunUpdate(response, requestParams) {
+            return this._processHistoryResponse(response, requestParams);
+        }
         _processHistoryResponse(response, requestParams) {
             if (response.s !== "ok" && response.s !== "no_data") {
                 throw new Error(response.errmsg);
@@ -245,6 +253,35 @@
                     requestParams["resolution"].toString().toLowerCase();
                 // 保存数据
                 let obj_res = this.bars_result.get(res_key);
+                // 2026-07 修复(前端幽灵形态)：判断本次响应是否为"右侧最新窗口"的权威回答。
+                // TradingView 对同一 res_key 的非首次请求(update!=false)只有两种来源：
+                //   - 30s 轮询(data-pulse-provider 请求 to≈now，覆盖最新窗口)；
+                //   - 向左滚动(backward 请求 to 早于已知最旧/最新K线，补更早历史)。
+                // 用请求的 to 是否达到"已知最新K线时间"区分二者——只有前者才能安全地对
+                // [from,to] 窗口内、新响应未再提及的已完成形态做"权威删除"(它们已被后端证伪)；
+                // 后者若同样删除，会把仍然正确、只是这次响应没提到的右侧现有形态误删。
+                //
+                // 独立代码审查复核发现两处需要显式收口的边界(均属"信息不足时默认不删"更保守)：
+                // ① requestParams.from/to 并非所有调用方都提供——生产唯一的 applyChanlunUpdate
+                //    调用点(charts.js 的 SSE onmessage)只传 { symbol, resolution }，from/to 缺失时
+                //    Number(undefined)=NaN。若仅用 `=== undefined` 判空，NaN 会绕过短路检查、让
+                //    后续比较"恰好"因 NaN 比较恒假而意外安全——这是脆弱的隐式行为，显式用
+                //    Number.isFinite 收口，让"信息不足→不删"成为明确意图而非侥幸。
+                // ② obj_res 存在但 bars 为空(理论上不应出现的退化态，如异常写入)时，旧逻辑默认
+                //    当作权威窗口处理；没有K线证据时更保守的默认是不做窗口删除。
+                const existingMaxBarMs = obj_res && obj_res.bars && obj_res.bars.length > 0
+                    ? obj_res.bars[obj_res.bars.length - 1].time
+                    : undefined;
+                const requestTo = Number(requestParams.to);
+                const requestFrom = Number(requestParams.from);
+                const isRecentWindowAuthoritative = Number.isFinite(requestTo) &&
+                    Number.isFinite(requestFrom) &&
+                    existingMaxBarMs !== undefined &&
+                    requestTo * 1000 >= existingMaxBarMs;
+                // 形态的 points[].time 与 requestParams.from/to 同为"秒"单位(后端 fun.datetime_to_int
+                // 与 UDF from/to 一致)，此处窗口边界无需 *1000。
+                const windowFrom = isRecentWindowAuthoritative ? requestFrom : undefined;
+                const windowTo = isRecentWindowAuthoritative ? requestTo : undefined;
                 const raw_times = (response.t || []).map((t) => t * 1000);
                 const macd_dif = response.macd_dif || [];
                 const macd_dea = response.macd_dea || [];
@@ -324,11 +361,10 @@
                     // 最后按时间排序；
                     // 1. 更新其他数据结构（如分型、笔、线段等）
                     // 处理TextPoint类型数据（fxs, bcs, mmds）
+                    // 2026-07 修复(前端幽灵形态，对称补 updateLineSegments 同款窗口删除): 新响应为空
+                    // 时原逻辑无条件保留全部旧点位——权威窗口内被证伪撤销的买卖点/背驰/分型会同样
+                    // "幽灵"残留(与线段类型此前的漏洞同源)。windowFrom/windowTo 权威时按窗口过滤。
                     const updateTextPoints = (existingPoints, newPoints) => {
-                        if (!newPoints || newPoints.length === 0)
-                            return existingPoints || [];
-                        if (!existingPoints || existingPoints.length === 0)
-                            return newPoints;
                         // 获取点位时间的辅助函数，处理points可能是对象或数组的情况
                         const getPointTime = (point) => {
                             if (Array.isArray(point.points)) {
@@ -340,6 +376,18 @@
                                 return point.points.time;
                             }
                         };
+                        if (!newPoints || newPoints.length === 0) {
+                            if (!existingPoints || existingPoints.length === 0)
+                                return [];
+                            if (windowFrom === undefined || windowTo === undefined)
+                                return existingPoints;
+                            return existingPoints.filter((p) => {
+                                const t = getPointTime(p);
+                                return !(typeof t === 'number' && t >= windowFrom && t <= windowTo);
+                            });
+                        }
+                        if (!existingPoints || existingPoints.length === 0)
+                            return newPoints;
                         const minResponseTime = Math.min(...newPoints.map(getPointTime));
                         const updatedPoints = [];
                         // 保留小于最小时间点的数据
@@ -359,9 +407,40 @@
                     // 用 key 合并去重：避免按 minResponseTime 切割导致「起点在窗口内、
                     // 终点在窗口外」的跨界线段在 backward 历史响应处理中被永久丢弃。
                     // 未完成线段（linestyle=1）以 起点+linestyle 为 key，让新版本覆盖旧版本。
+                    //
+                    // 2026-07 修复(前端幽灵形态)：仅靠 key upsert 只增不删——已完成段一旦起点
+                    // 被新行情证伪、新响应里不再提及，旧版本会永久残留(后端刚修的同类 bug，
+                    // 只是从后端搬到前端)。windowFrom/windowTo 非 undefined 时(右侧最新窗口的
+                    // 权威响应，见调用处 isRecentWindowAuthoritative)，落在该窗口内的已有段一律
+                    // 先剔除，只有仍被新响应提及(同 key)才会重新加入——真正体现"这段窗口内，
+                    // 新响应就是权威真相"。向左滚动(windowFrom/To 为 undefined)时不做此剔除，
+                    // 保留原有"只增不删"以免误删右侧现有形态。
+                    //
+                    // 已知残留风险(独立代码审查复核，概率极低未特意处理): "权威窗口内的响应即真相"
+                    // 这一假设要求响应确为基于完整历史的权威重算。后端 tv.py 对绝大多数轮询缺失
+                    // (cache_head_gap/cache_tail_gap)都改走 prepend_klines_and_replace_cache 的
+                    // 全量重算(见 chart_compute.py 对应注释)，满足此假设；仅当缓存条目存在但完全
+                    // 无覆盖(cache_no_coverage，需要一条先前写入的"零K线"退化 entry 才可能出现)时，
+                    // 才会退化到窄窗口独立计算，理论上可能因缺少足够上下文而漏掉一根仍然有效的
+                    // 已完成形态、被本逻辑误判为已作废并删除。触发条件本身就是不该出现的后端退化态，
+                    // 且 SSE 全量快照会在下个周期内自愈，暂不针对性处理。
+                    // windowFrom/windowTo 取自外层闭包(同一 else 分支顶部算好的 const，见上方注释)，
+                    // 无需作为参数重复传递——6 处调用点共享同一对值。
                     const updateLineSegments = (existingSegments, newSegments) => {
-                        if (!newSegments || newSegments.length === 0)
-                            return existingSegments || [];
+                        const isInAuthoritativeWindow = (s) => {
+                            if (windowFrom === undefined || windowTo === undefined)
+                                return false;
+                            const t = s.points[0] && s.points[0].time;
+                            return typeof t === 'number' && t >= windowFrom && t <= windowTo;
+                        };
+                        if (!newSegments || newSegments.length === 0) {
+                            if (!existingSegments || existingSegments.length === 0)
+                                return [];
+                            if (windowFrom === undefined || windowTo === undefined)
+                                return existingSegments;
+                            // 权威窗口内、新响应却一根都没提——该窗口内已有段全部作废。
+                            return existingSegments.filter((s) => !isInAuthoritativeWindow(s));
+                        }
                         if (!existingSegments || existingSegments.length === 0)
                             return newSegments;
                         // 身份 key：仅用起点 (head.time, head.price)。
@@ -374,14 +453,19 @@
                             const head = s.points[0];
                             return `${head.time}_${head.price}`;
                         };
-                        // 新响应是否带来"未完成段"(linestyle=1)。SSE 全量快照含当前唯一未完成段;
-                        // 向左滚动历史区间响应则不含。
+                        // 新响应是否带来"未完成段"(linestyle=1)。SSE 全量快照含当前唯一的未完成段;
+                        // 向左滚动的历史区间响应则不含。
                         const newHasPending = newSegments.some((s) => s.points && s.points.length > 0 && Number(s.linestyle) === 1);
                         const merged = new Map();
                         for (const segment of existingSegments) {
-                            // 新响应已带来当前未完成段时,丢弃所有旧的未完成段:其起点(head=合并key)随重算
-                            // 漂移/被价格回撤作废,旧 key 不被新版本覆盖 → 否则累积"多个未完成的笔/线段"。
-                            if (segment.points.length > 0 && !(newHasPending && Number(segment.linestyle) === 1)) {
+                            // 丢弃条件(任一成立即丢，交由下面 newSegments 决定是否以新版本重新加入)：
+                            // ① 新响应带来当前未完成段时，旧的未完成段一律丢——未完成段起点会随重算
+                            //    漂移，旧 head key 不会被新版本覆盖，否则累积"多个未完成笔"；
+                            // ② 该段起点落在本次权威窗口内——右侧最新窗口的响应即权威真相，窗口内
+                            //    未被新响应提及的已完成段已被证伪，不能只增不删地累积幽灵形态。
+                            if (segment.points.length > 0 &&
+                                !(newHasPending && Number(segment.linestyle) === 1) &&
+                                !isInAuthoritativeWindow(segment)) {
                                 merged.set(segmentKey(segment), segment);
                             }
                         }
@@ -414,10 +498,10 @@
                     obj_res.xd_bcs = updateTextPoints(obj_res.xd_bcs || [], response.xd_bcs || []);
                     obj_res.xd_zslx = updateLineSegments(obj_res.xd_zslx || [], response.xd_zslx || []);
                     obj_res.xd_zslx_lines = updateLineSegments(obj_res.xd_zslx_lines || [], response.xd_zslx_lines || []);
-                    // SSE 全量快照(prepend 产出完整 chart_data):形态列表直接整体替换,绕过上面为
-                    // "部分响应(向左滚动)"设计的合并 → 杜绝任何形态(笔/线段/中枢/走势类型/分型/买卖点/
-                    // 背驰)的"只增不删"陈旧累积(如多个未完成笔)。K线/MACD 仍走增量合并保持视图。
-                    // scroll 等部分响应不带 full_snapshot, 仍走上面合并(兜底)。
+                    // SSE 全量快照(prepend 产出完整 chart_data):形态列表直接整体替换,绕过上面为"部分响应
+                    // (向左滚动)"设计的 updateXxx 合并 → 从根上杜绝任何形态(笔/线段/中枢/走势类型/分型/
+                    // 买卖点/背驰)的"只增不删"陈旧累积(如多个未完成笔)。K线 bars/MACD 仍走下面增量合并
+                    // 保持视图不重置、随末根推进。scroll 等部分响应不带 full_snapshot, 仍走上面的合并(兜底)。
                     if (response.full_snapshot) {
                         obj_res.fxs = response.fxs || [];
                         obj_res.bis = response.bis || [];
@@ -438,8 +522,8 @@
                     obj_res.interval_nest = response.interval_nest;
                     obj_res.chart_color = response.chart_color;
                     // ⚠ 增量更新 K线 bars：原 else 分支只更新缠论形态+MACD，漏了 obj_res.bars，
-                    // 导致 SSE 推送(update:true)缠论更新而 K线 lastBar 不动(实测帧到达但 bars 不变)。
-                    // 保留旧 bars 中早于新数据首根的，追加本次 bars，让 K线随 SSE 实时推进。
+                    // 导致 SSE 推送(update:true)缠论更新而 K线 lastBar 不动。保留旧 bars 中早于新数据
+                    // 首根的，追加本次 bars，让 K线随 SSE 实时推进(与 dist/bundle.js 同步)。
                     if (bars.length > 0) {
                         const newFirstTime = bars[0].time;
                         const keptBars = (obj_res.bars || []).filter((bar) => bar.time < newFirstTime);
@@ -489,14 +573,6 @@
             };
             return result;
         }
-        /**
-         * SSE 推送复用入口: 与 getBars 走同一份 response→bars_result 合并逻辑
-         * (_processHistoryResponse)，保证轮询与推送两条路径行为一致、不漂移。
-         * 入参 response 为 /tv/history 同构对象(含 s/update/t/o/h/l/c/缠论字段)。
-         */
-        applyChanlunUpdate(response, requestParams) {
-            return this._processHistoryResponse(response, requestParams);
-        }
     }
 
     class DataPulseProvider {
@@ -540,7 +616,8 @@
                 sub.lastBarTime = bar.time;
                 try {
                     sub.listener(bar);
-                } catch (e) {
+                }
+                catch (e) {
                     /* ignore listener errors */
                 }
             }
@@ -599,7 +676,7 @@
             // old bar's last 5 seconds trades will be lost). Thus, at fist we should broadcast old bar updates when it's ready.
             if (isNewBar && bars.length >= 2) {
                 // 仅当确有前一根时补发它；bars<2(数据源延迟/窗口仅 1 根)时跳过补发、
-                // 不再抛错，避免"数据延迟后新 bar 到达"令 K 线更新整条中断。
+                // 不再抛错，避免“数据延迟后新 bar 到达”令 K 线更新整条中断。
                 const previousBar = bars[bars.length - 2];
                 subscriptionRecord.listener(previousBar);
             }
@@ -1121,23 +1198,29 @@
          * DataPulseProvider 的订阅者，让 K 线随 SSE 实时刷新(不依赖轮询)。
          */
         feedRealtimeBar(symbolResKey, response) {
-            if (!response || !response.t || response.t.length === 0 || !response.c) {
+            const t = response.t;
+            const c = response.c;
+            if (!response || !t || t.length === 0 || !c) {
                 return;
             }
-            const i = response.t.length - 1;
-            const c = response.c[i];
-            if (c === undefined || c === null) {
+            const i = t.length - 1;
+            const closeVal = c[i];
+            if (closeVal === undefined || closeVal === null) {
                 return;
             }
+            const o = response.o;
+            const h = response.h;
+            const l = response.l;
+            const v = response.v;
             const bar = {
-                time: response.t[i] * 1000,
-                open: response.o ? response.o[i] : c,
-                high: response.h ? response.h[i] : c,
-                low: response.l ? response.l[i] : c,
-                close: c,
+                time: t[i] * 1000,
+                open: o ? o[i] : closeVal,
+                high: h ? h[i] : closeVal,
+                low: l ? l[i] : closeVal,
+                close: closeVal,
             };
-            if (response.v && response.v[i] !== undefined && response.v[i] !== null) {
-                bar.volume = response.v[i];
+            if (v && v[i] !== undefined && v[i] !== null) {
+                bar.volume = v[i];
             }
             this._dataPulseProvider.feedBar(symbolResKey, bar);
         }

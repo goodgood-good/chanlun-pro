@@ -6,6 +6,7 @@ TradingView 相关接口蓝图。
 """
 import pytz
 import json
+import math
 import datetime
 import time
 import threading
@@ -599,10 +600,31 @@ def tv_quotes():
             if t is None or t.last is None:
                 data.append({"s": "error", "n": sym, "v": {}})
                 continue
-            last = float(t.last)
-            rate = float(t.rate or 0)
-            # rate 为涨跌幅百分比(Tick 文档口径)→ 反推昨收: prev = last/(1+rate/100)。
-            prev_close = last / (1 + rate / 100) if rate != -100 else last
+            try:
+                last = float(t.last)
+                rate = float(t.rate or 0)
+                # rate 为涨跌幅百分比(Tick 文档口径)→ 反推昨收: prev = last/(1+rate/100)。
+                prev_close = last / (1 + rate / 100) if rate != -100 else last
+                open_p = float(t.open) if t.open is not None else last
+                high_p = float(t.high) if t.high is not None else last
+                low_p = float(t.low) if t.low is not None else last
+                volume = float(t.volume) if t.volume is not None else 0.0
+            except Exception:
+                # 单个标的字段转换异常仅标记该标的 error, 不拖垮同批其它标的。
+                LogUtil.exception(
+                    f"[tv_quotes] tick convert failed market={market} code={code}"
+                )
+                data.append({"s": "error", "n": sym, "v": {}})
+                continue
+            # NaN/Infinity 不是合法 JSON: Flask(allow_nan=True) 会原样输出裸 NaN token,
+            # 打断前端 JSON.parse → 整批(含健康标的)报价更新失败。命中即降级该标的,
+            # 决不让非有限值进入最终 JSON(NaN 与任何数比较均为 False, rate!=-100 拦不住)。
+            if not all(
+                math.isfinite(x)
+                for x in (last, rate, prev_close, open_p, high_p, low_p, volume)
+            ):
+                data.append({"s": "error", "n": sym, "v": {}})
+                continue
             data.append({
                 "s": "ok",
                 "n": sym,
@@ -610,11 +632,11 @@ def tv_quotes():
                     "lp": last,
                     "ch": round(last - prev_close, 4),
                     "chp": round(rate, 2),
-                    "open_price": float(t.open) if t.open is not None else last,
-                    "high_price": float(t.high) if t.high is not None else last,
-                    "low_price": float(t.low) if t.low is not None else last,
+                    "open_price": open_p,
+                    "high_price": high_p,
+                    "low_price": low_p,
                     "prev_close_price": round(prev_close, 4),
-                    "volume": float(t.volume) if t.volume is not None else 0,
+                    "volume": volume,
                 },
             })
     return {"s": "ok", "d": data}
