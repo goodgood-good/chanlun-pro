@@ -88,6 +88,36 @@ _prewarm_semaphore = Semaphore(_PREWARM_MAX_CONCURRENT)
 _prewarm_latest_target = {"key": None}
 _prewarm_target_lock = threading.Lock()
 
+
+# ---------------------------------------------------------------------------
+# tv_history 响应列对齐（按 bar index 的数值列必须与 t 等长）
+# ---------------------------------------------------------------------------
+# 前端按 index 取 c/o/h/l/v[i] 与 macd_*[i]/higher_macd_*[i]（上界 = t.length），任一列短于 t →
+# 越界处取到 undefined → 静默 NaN（K 线缺口 / MACD 面板空洞，无异常无日志，最难排查）。正常计算路径
+# 恒等长，但跨版本 / 半态磁盘冷层 entry 经 slice / 合并后可能错位（审查 F-1/MED-3）。形态对象数组
+# （fxs/bis/mmds/...）长度本就 != bar 数，不在此列。
+_TV_VALUE_COLUMNS = (
+    "c", "o", "h", "l", "v",
+    "macd_dif", "macd_dea", "macd_hist", "macd_area",
+    "higher_macd_dif", "higher_macd_dea", "higher_macd_hist",
+)
+
+
+def _align_value_columns_to_t(cl_chart_data, symbol="", resolution=""):
+    """把所有按 bar index 的数值列原地对齐到 len(t)：过长截断、过短右 pad None。
+
+    仅当列非空且长度 != len(t) 时才动（空 / 缺列保持"无数据"语义，与既有 OHLCV 守卫一致）。
+    """
+    _t_col = cl_chart_data.get("t", []) or []
+    _n_bars = len(_t_col)
+    for _col_k in _TV_VALUE_COLUMNS:
+        _col = cl_chart_data.get(_col_k) or []
+        if _col and len(_col) != _n_bars:
+            LogUtil.warning(
+                f"[tv_history] 列 {_col_k} 长 {len(_col)} != t {_n_bars}, 已对齐 {symbol} {resolution}"
+            )
+            cl_chart_data[_col_k] = list(_col[:_n_bars]) + [None] * max(0, _n_bars - len(_col))
+
 # 2026-04 修复：prewarm 入口去重（dedupe）。
 # 问题：用户界面上 4 个面板看同一标的不同周期时，4 个 first=true 几乎同时进来，
 # 每个 first=true 都会触发一次 prewarm_common_intervals → 启动 4 个预热线程；
@@ -1053,18 +1083,9 @@ def tv_history():
             f"first={firstDataRequest} elapsed={_elapsed_ms:.0f}ms"
         )
 
-        # OHLCV 列必须与 t 等长:前端按 index 取 c/o/h/l/v[i](上界=t.length),任一列短于 t 会在
-        # 越界处取到 undefined → 静默 NaN bar(无异常无日志,最难排查,审查 F-1)。正常计算路径恒等
-        # 长,但跨版本/半态磁盘冷层 entry 经 slice 后可能错位 → 兜底截断/右 pad 到 len(t)。
-        _t_col = cl_chart_data.get("t", []) or []
-        _n_bars = len(_t_col)
-        for _col_k in ("c", "o", "h", "l", "v"):
-            _col = cl_chart_data.get(_col_k) or []
-            if _col and len(_col) != _n_bars:
-                LogUtil.warning(
-                    f"[tv_history] 列 {_col_k} 长 {len(_col)} != t {_n_bars}, 已对齐 {symbol} {resolution}"
-                )
-                cl_chart_data[_col_k] = list(_col[:_n_bars]) + [None] * max(0, _n_bars - len(_col))
+        # 按 bar index 的数值列（OHLCV + macd_* + higher_macd_*）必须与 t 等长，否则前端越界取
+        # undefined → 静默 NaN（无异常无日志，最难排查，审查 F-1/MED-3）。统一对齐见 _align_value_columns_to_t。
+        _align_value_columns_to_t(cl_chart_data, symbol, resolution)
 
         return {
             "s": "ok",
