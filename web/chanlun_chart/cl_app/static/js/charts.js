@@ -53,28 +53,29 @@ function _migrateZsToggle(merged, parsed) {
     return merged;
 }
 
-function loadClShowConfig(chartId) {
+// resolution 归一为存储 key 后缀:去空白转小写(1D/1d 同一份),空/未知回退哨兵 '_'。
+function _resolutionKey(resolution) {
+    const r = (resolution === null || resolution === undefined) ? '' : String(resolution).trim();
+    return r ? r.toLowerCase() : '_';
+}
+
+function loadClShowConfig(chartId, resolution) {
     try {
-        const raw = localStorage.getItem('cl_show_config_' + chartId);
+        const raw = localStorage.getItem('cl_show_config_' + chartId + '_' + _resolutionKey(resolution));
         if (raw) {
             const parsed = JSON.parse(raw);
-            return _migrateZsToggle(Object.assign({}, CL_SHOW_DEFAULT, parsed), parsed);
-        }
-        // 兼容旧版全局 key 作为首次默认值，不写回旧 key
-        const legacy = localStorage.getItem('cl_show_config');
-        if (legacy) {
-            const parsed = JSON.parse(legacy);
             return _migrateZsToggle(Object.assign({}, CL_SHOW_DEFAULT, parsed), parsed);
         }
     } catch (e) {
         console.warn('[CHARTS] loadClShowConfig parse failed', e);
     }
-    return Object.assign({}, CL_SHOW_DEFAULT);
+    // 该周期从未配置 → null 哨兵,由 resolveClConfigForResolution 决定继承/迁移。
+    return null;
 }
 
-function saveClShowConfig(chartId, cfg) {
+function saveClShowConfig(chartId, resolution, cfg) {
     try {
-        localStorage.setItem('cl_show_config_' + chartId, JSON.stringify(cfg));
+        localStorage.setItem('cl_show_config_' + chartId + '_' + _resolutionKey(resolution), JSON.stringify(cfg));
     } catch (e) {
         console.warn('[CHARTS] saveClShowConfig failed', e);
     }
