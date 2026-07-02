@@ -312,3 +312,25 @@ test('mmdOffsetPoint: 卖点全变体(1sell/2sell/3sell/类1sell/大写1S/3S)都
     assert.ok(pt.price > 100, `卖点 ${t} 应上移(>100), 实际 ${pt.price}`);
   }
 });
+
+// ── H1 force_refresh(阶段E): _doReset 置一次性标志,datafeed 下次 firstDataRequest 绕过缓存重算 ──
+test('_doReset: 置一次性 force_refresh 标志(H1) 且 resetData 仍同步(不破坏时序)', () => {
+  const { ChartManager } = loadChartManager();
+  const { widget, calls } = spyWidget();
+  const cm = makeManager(ChartManager, widget);
+  cm.udf_datafeed = { _historyProvider: { bars_result: new Map() } };
+  const did = cm._doReset('k', 'reconnect', 5000);
+  assert.equal(did, 1);
+  assert.equal(calls.resetData, 1, 'resetData 仍同步调用(时序不变,不破坏现有 _doReset 测试)');
+  assert.equal(cm.udf_datafeed._historyProvider._forceRefreshOnce, true, '置一次性 force_refresh 标志');
+});
+
+test('_doReset: 无 udf_datafeed 时置标志不抛错(容错)', () => {
+  const { ChartManager } = loadChartManager();
+  const { widget, calls } = spyWidget();
+  const cm = makeManager(ChartManager, widget);
+  cm.udf_datafeed = null;   // 极早期 reset,datafeed 未挂
+  const did = cm._doReset('k', 'reconnect', 5000);
+  assert.equal(did, 1, '仍正常 reset');
+  assert.equal(calls.resetData, 1);
+});

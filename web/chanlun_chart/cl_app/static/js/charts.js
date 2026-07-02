@@ -2510,6 +2510,12 @@ class ChartManager {
             if (!ch || typeof ch.resetData !== 'function') return false;
             // 契约: resetData 前先 resetCache(TV 文档要求)。容错: 老版无 resetCache 时降级裸 resetData。
             try { if (this.widget && typeof this.widget.resetCache === 'function') this.widget.resetCache(); } catch (e) { /* ignore */ }
+            // H1(阶段E): 置一次性 force_refresh 标志 → 下次 firstDataRequest(即将由 resetData 触发)绕过后端
+            // 缓存重算,补齐断档(datafeed getBars 读此标志注入 force_refresh=1,用后即清)。同步置位,不改时序。
+            try {
+                const _hp = this.udf_datafeed && this.udf_datafeed._historyProvider;
+                if (_hp) _hp._forceRefreshOnce = true;
+            } catch (e) { /* ignore */ }
             ch.resetData();
             this._resetState[resKey] = gate.state;  // 仅真执行 reset 后落记账
             clog(`[SSE] resetData 全量补齐 reason=${reason} resKey=${resKey} backoff=${gate.state.backoffLevel}`);
