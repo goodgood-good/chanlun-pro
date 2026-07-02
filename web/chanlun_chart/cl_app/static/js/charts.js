@@ -416,7 +416,18 @@ class ChartManager {
         this.debouncedDrawChanlun = debounce(() => this.draw_chanlun(), 300);
         this.macdStudyId = null;
         // 每个图表面板独立维护缠论显示配置与独立周期画线开关
-        this.cl_show_config = loadClShowConfig(this.id);
+        // 初始 resolution:优先本地已记录(切过周期即有),回退 "1";据此载入该周期显示配置,
+        // 未配过则用迁移基准(不丢老用户旧配置)。this._curResolution 供切周期/ toggle 保存复用。
+        let _initRes = '1';
+        try {
+            const _mkt = (typeof Utils !== 'undefined' && Utils.get_market) ? Utils.get_market() : '';
+            const _saved = (_mkt && Utils.get_local_data) ? Utils.get_local_data(`${_mkt}_interval_${this.id}`) : null;
+            if (_saved) _initRes = _saved;
+        } catch (e) { /* 回退默认 '1' */ }
+        this._curResolution = _initRes;
+        const _r0 = resolveClConfigForResolution(this.id, _initRes, null);
+        this.cl_show_config = _r0.cfg;
+        if (_r0.persist) saveClShowConfig(this.id, _initRes, _r0.cfg);
         this.cl_independent_drawings = loadClIndependentDrawings(this.id);
         this._initialLoadDone = false; // 首次数据就绪前屏蔽 visibleRangeChange 重绘
         this._intervalVersion = 0;
@@ -1294,7 +1305,7 @@ class ChartManager {
                     $('#' + cbId(k)).change(function () {
                         const checked = $(this).is(':checked');
                         self.cl_show_config[k] = checked;
-                        saveClShowConfig(self.id, self.cl_show_config);
+                        saveClShowConfig(self.id, self._curResolution, self.cl_show_config);
                         console.log(`[cl_show_config] toggle ${k}=${checked}`);
                         self.debouncedDrawChanlun();
                     });
@@ -1660,6 +1671,7 @@ class ChartManager {
         this._intervalVersion++;
         clog(`[CHANLUN-TIMING] @${performance.now().toFixed(0)}ms handleIntervalChange → ${interval} (seq=${currentSeq}, ver=${this._intervalVersion}) [_initialLoadDone reset to false]`);
         Utils.set_local_data(`${market}_interval_${this.id}`, interval);
+        this._applyResolutionConfig(interval);   // 切周期:存旧周期配置、载入本周期配置(未配过继承当前)
         this.clear_draw_chanlun();
         this.reloadDrawingsForCurrentContext('interval-change');
         this._openSseStream();
