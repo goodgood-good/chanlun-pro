@@ -456,10 +456,12 @@ def evaluate_cache_for_tv_history(
     """
     # H1(阶段E): 前端断档 gap-reset 主动要求绕过缓存重算 —— 无条件 MISS,让调用方重拉+重算。
     # 绕过而非删除缓存:重算失败时旧 entry 仍在(下次正常请求仍可 serve),符合 C1"绝不丢好缓存"。
-    if force_refresh:
-        return False, None, "cache_force_refresh", False
     if cache_entry is None:
         return False, None, "cache_empty", False
+    # H1(阶段E,F-2):force_refresh 无条件 MISS,放在 cache_entry is None 之后——空缓存仍报
+    # cache_empty(语义更准),有缓存才报 cache_force_refresh。绕过而非删缓存(符合 C1"绝不丢好缓存")。
+    if force_refresh:
+        return False, None, "cache_force_refresh", False
     cached_data = cache_entry.get("data", {})
     cache_min_time = cache_entry.get("min_time")
     cache_max_time = cache_entry.get("max_time")

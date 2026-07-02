@@ -189,3 +189,14 @@ def test_force_refresh_default_false_preserves_hit():
         entry, 0, 0, is_range_request=False, market_is_trading=True, now=now,
     )
     assert is_hit is True
+
+
+def test_force_refresh_with_none_entry_reports_empty_not_force():
+    # F-2 语义修正:force_refresh 但缓存本就为空(None) 应报 cache_empty(而非 cache_force_refresh),
+    # 语义更准(没缓存时 force_refresh 无意义);行为仍是 MISS。有 entry 才报 cache_force_refresh。
+    is_hit, data, reason, needs_refresh = evaluate_cache_for_tv_history(
+        None, 0, 0, is_range_request=False, market_is_trading=True,
+        force_refresh=True,
+    )
+    assert is_hit is False
+    assert reason == "cache_empty"
