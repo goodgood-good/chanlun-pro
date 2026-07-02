@@ -789,6 +789,9 @@ def tv_history():
         firstDataRequest = request.args.get("firstDataRequest", "false")
         _from = _normalize_unix_ts(request.args.get("from", "0"))
         _to = _normalize_unix_ts(request.args.get("to", "0"))
+        # H1(阶段E): 前端断档 gap-reset 主动带 force_refresh=1 → 绕过缓存强制重算,补齐断档。
+        # 绕过而非删缓存:走既有 MISS→重算路径,重算失败旧 entry 仍在(符合 C1"绝不丢好缓存")。
+        force_refresh = request.args.get("force_refresh") == "1"
         tz_sh = pytz.timezone("Asia/Shanghai")
 
         def _fmt_ts(ts: int) -> str:
@@ -891,6 +894,7 @@ def tv_history():
                     evaluate_cache_for_tv_history(
                         cache_entry, _from, _to, is_range_request,
                         market_is_trading=_market_trading,
+                        force_refresh=force_refresh,
                     )
                 )
                 if not is_cache_hit:

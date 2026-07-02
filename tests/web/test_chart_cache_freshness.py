@@ -152,3 +152,40 @@ def test_range_request_tail_gap_still_miss_no_refresh():
     assert is_hit is False
     assert reason == "cache_tail_gap"
     assert needs_refresh is False
+
+
+# ── H1 force_refresh：前端断档 gap-reset 主动要求绕过缓存重算(阶段 E) ──
+
+def test_force_refresh_bypasses_fresh_snapshot():
+    # force_refresh=True: 即使快照绝对新鲜也判 MISS,强制重算(前端断档 gap-reset 主动要求刷新)。
+    now = 10_000.0
+    entry = _full_entry(validated_at=now - 10)  # 绝对新鲜,正常会 HIT
+    is_hit, data, reason, needs_refresh = evaluate_cache_for_tv_history(
+        entry, 0, 0, is_range_request=False, market_is_trading=True, now=now,
+        force_refresh=True,
+    )
+    assert is_hit is False
+    assert data is None
+    assert reason == "cache_force_refresh"
+    assert needs_refresh is False
+
+
+def test_force_refresh_bypasses_range_coverage():
+    # force_refresh 对 range 请求同样短路(即使覆盖完整也 MISS)。
+    entry = _full_entry(validated_at=5_000.0, min_t=1000, max_t=5000)
+    is_hit, _data, reason, _refresh = evaluate_cache_for_tv_history(
+        entry, 1500, 4000, is_range_request=True, market_is_trading=True,
+        force_refresh=True,
+    )
+    assert is_hit is False
+    assert reason == "cache_force_refresh"
+
+
+def test_force_refresh_default_false_preserves_hit():
+    # 不传 force_refresh(默认 False): 新鲜快照仍 HIT,现有行为不回归。
+    now = 10_000.0
+    entry = _full_entry(validated_at=now - 10)
+    is_hit, _data, _reason, _refresh = evaluate_cache_for_tv_history(
+        entry, 0, 0, is_range_request=False, market_is_trading=True, now=now,
+    )
+    assert is_hit is True

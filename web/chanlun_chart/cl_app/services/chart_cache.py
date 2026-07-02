@@ -420,6 +420,7 @@ def evaluate_cache_for_tv_history(
     *,
     market_is_trading: bool = True,
     now: float = None,
+    force_refresh: bool = False,
 ) -> tuple:
     """评估 chart_data_cache entry 是否能满足 tv_history 当前请求。
 
@@ -453,6 +454,10 @@ def evaluate_cache_for_tv_history(
           "cache_partial_snapshot" / "cache_stale_snapshot"(重度过期回退阻塞重算)/
           "cache_no_coverage" / "cache_head_gap" / "cache_tail_gap"); needs_refresh 恒 False。
     """
+    # H1(阶段E): 前端断档 gap-reset 主动要求绕过缓存重算 —— 无条件 MISS,让调用方重拉+重算。
+    # 绕过而非删除缓存:重算失败时旧 entry 仍在(下次正常请求仍可 serve),符合 C1"绝不丢好缓存"。
+    if force_refresh:
+        return False, None, "cache_force_refresh", False
     if cache_entry is None:
         return False, None, "cache_empty", False
     cached_data = cache_entry.get("data", {})
