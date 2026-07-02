@@ -334,3 +334,44 @@ test('_doReset: 无 udf_datafeed 时置标志不抛错(容错)', () => {
   assert.equal(did, 1, '仍正常 reset');
   assert.equal(calls.resetData, 1);
 });
+
+
+// Finding 1(审计 MED): chart-ready 后按真实周期校正 _curResolution。构造函数的
+// _curResolution 是猜测(localStorage 或 '1'),可能与 TV 实际显示周期(load_last_chart
+// 存档 / TV 默认日线)不符;chart 就绪后须以 chart.resolution() 为准,否则首次加载 toggle
+// 会把显示配置存到错误周期 key。
+test('_alignResolutionOnReady: resolution() 与 _curResolution 不符 → 校正到真实周期', () => {
+  const { ChartManager } = loadChartManager();
+  const cm = makeManager(ChartManager, null);
+  cm.id = '1';
+  cm._curResolution = '1';               // 构造猜测值
+  cm.cl_show_config = { fx: true, bi: true };
+  cm.chart = { resolution: () => 'D' };   // TV 实际显示日线
+  let appliedRes = null;
+  cm._applyResolutionConfig = (r) => { appliedRes = r; cm._curResolution = r; };
+  cm._alignResolutionOnReady();
+  assert.equal(appliedRes, 'D', '应按真实周期 D 校正');
+  assert.equal(cm._curResolution, 'D');
+});
+
+test('_alignResolutionOnReady: resolution() 与 _curResolution 相同 → 不重入', () => {
+  const { ChartManager } = loadChartManager();
+  const cm = makeManager(ChartManager, null);
+  cm._curResolution = '5';
+  cm.chart = { resolution: () => '5' };
+  let called = 0;
+  cm._applyResolutionConfig = () => { called++; };
+  cm._alignResolutionOnReady();
+  assert.equal(called, 0, '同周期不应重入(避免无谓覆盖)');
+});
+
+test('_alignResolutionOnReady: resolution() 抛错 → 吞掉不影响首绘(防御)', () => {
+  const { ChartManager } = loadChartManager();
+  const cm = makeManager(ChartManager, null);
+  cm._curResolution = '1';
+  cm.chart = { resolution: () => { throw new Error('boom'); } };
+  let called = 0;
+  cm._applyResolutionConfig = () => { called++; };
+  assert.doesNotThrow(() => cm._alignResolutionOnReady());
+  assert.equal(called, 0);
+});

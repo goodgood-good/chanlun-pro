@@ -1372,6 +1372,7 @@ class ChartManager {
             if (sk) sk.remove();
             this.chart = this.widget.activeChart();
             if (!this.chart) return;
+            this._alignResolutionOnReady();   // 按真实周期校正显示配置(构造 _curResolution 仅为猜测)
             this.chart.applyOverrides({ "mainSeriesProperties.candleStyle.upColor": "#ef5350", "mainSeriesProperties.candleStyle.downColor": "#26a69a" });
             const registry = getTVRegistry();
             registry.widgets.set(this.instanceId, this.widget);
@@ -1658,6 +1659,18 @@ class ChartManager {
             saveClShowConfig(this.id, newResolution, r.cfg);
         }
         this._curResolution = newResolution;
+    }
+
+    // Finding 1(审计 MED):chart 就绪后按真实周期校正 _curResolution。构造函数的 _curResolution 是猜测
+    // (localStorage 或 '1'),可能与 TV 实际显示周期(load_last_chart 存档 / TV 默认日线)不符;就绪后以
+    // chart.resolution() 为准,否则首次加载 toggle 会把显示配置存到错误周期 key。
+    _alignResolutionOnReady() {
+        try {
+            const realRes = (this.chart && this.chart.resolution) ? this.chart.resolution() : null;
+            if (realRes && realRes !== this._curResolution) {
+                this._applyResolutionConfig(realRes);
+            }
+        } catch (e) { /* resolution() 异常不影响首绘 */ }
     }
 
     handleIntervalChange(interval) {
