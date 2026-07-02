@@ -1634,6 +1634,21 @@ class ChartManager {
         if (typeof ZiXuan.render_zixuan_opts === "function") ZiXuan.render_zixuan_opts();
         setTimeout(() => this._maybeWidenDefaultView(), 400);   // 同市场切标的:缓存命中时 handleDataReady 不来,这里兜底拉宽默认视窗
     }
+    // 切周期时的显示配置编排:把当前配置存回旧周期 key,解析并应用新周期配置(未配过则继承当前并固化),
+    // 更新 _curResolution。纯前端 localStorage,不触发缠论重算;重绘由既有 handleDataReady→重绘链路负责。
+    _applyResolutionConfig(newResolution) {
+        const oldRes = this._curResolution;
+        if (oldRes && oldRes !== newResolution && this.cl_show_config) {
+            saveClShowConfig(this.id, oldRes, this.cl_show_config);
+        }
+        const r = resolveClConfigForResolution(this.id, newResolution, this.cl_show_config);
+        this.cl_show_config = r.cfg;
+        if (r.persist) {
+            saveClShowConfig(this.id, newResolution, r.cfg);
+        }
+        this._curResolution = newResolution;
+    }
+
     handleIntervalChange(interval) {
         if (!interval) return;
         const market = Utils.get_market(); if (!market) return;

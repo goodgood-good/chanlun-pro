@@ -140,3 +140,56 @@ test('resolveClConfigForResolution 未配置且 currentCfg=null → 用 baseline
   assert.equal(r.cfg.fx, false, '迁移旧无周期配置');
   assert.equal(r.persist, true);
 });
+
+// ───────────────────────── Task 3: _applyResolutionConfig 切周期编排 ─────────────────────────
+
+function makeCm(ChartManager, id) {
+  const cm = Object.create(ChartManager.prototype);
+  cm.id = id;
+  cm._curResolution = null;
+  cm.cl_show_config = null;
+  return cm;
+}
+
+test('_applyResolutionConfig 切走时把当前配置存回旧周期 key', () => {
+  const { api } = loadClConfigApi();
+  const cm = makeCm(api.ChartManager, 'cm1');
+  cm.cl_show_config = Object.assign({}, api.DEFAULT, { bi: false });
+  cm._curResolution = '5';
+  cm._applyResolutionConfig('30');
+  assert.equal(api.load('cm1', '5').bi, false, '旧周期 5 的配置被存回');
+  assert.equal(cm._curResolution, '30');
+});
+
+test('_applyResolutionConfig 切到未配置周期 → 继承当前配置', () => {
+  const { api } = loadClConfigApi();
+  const cm = makeCm(api.ChartManager, 'cm1');
+  cm.cl_show_config = Object.assign({}, api.DEFAULT, { fx: false });
+  cm._curResolution = '5';
+  cm._applyResolutionConfig('30');
+  assert.equal(cm.cl_show_config.fx, false, '30 未配过 → 继承 5 的 fx:false');
+  assert.equal(api.load('cm1', '30').fx, false, '并固化到 30 的 key');
+});
+
+test('_applyResolutionConfig 切换 A→B→A：隔离且各自恢复', () => {
+  const { api } = loadClConfigApi();
+  const cm = makeCm(api.ChartManager, 'cm1');
+  cm.cl_show_config = Object.assign({}, api.DEFAULT, { fx: false });
+  cm._curResolution = '5';
+  cm._applyResolutionConfig('30');
+  cm.cl_show_config.fx = true;
+  cm._applyResolutionConfig('5');
+  assert.equal(cm.cl_show_config.fx, false, '切回 5 恢复其独立配置');
+  cm._applyResolutionConfig('30');
+  assert.equal(cm.cl_show_config.fx, true, '30 保留自己改过的 fx:true');
+});
+
+test('_applyResolutionConfig 相同周期重入不误存(oldRes===newRes)', () => {
+  const { api } = loadClConfigApi();
+  const cm = makeCm(api.ChartManager, 'cm1');
+  cm.cl_show_config = Object.assign({}, api.DEFAULT);
+  cm._curResolution = '5';
+  cm._applyResolutionConfig('5');
+  assert.equal(cm._curResolution, '5');
+  assert.ok(cm.cl_show_config, '配置仍在');
+});
