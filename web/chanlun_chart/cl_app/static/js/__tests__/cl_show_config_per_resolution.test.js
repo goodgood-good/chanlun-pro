@@ -91,3 +91,52 @@ test('resolutionKey 归一:1D 与 1d 命中同一存储', () => {
   api.save('cm1', '1D', { fx: false });
   assert.equal(api.load('cm1', '1d').fx, false);
 });
+
+// ───────────────────────── Task 2: 迁移基准 + 按周期解析 ─────────────────────────
+
+test('_clShowConfigBaseline 回退链:旧无周期 key 优先于全局旧 key', () => {
+  const { api, store } = loadClConfigApi();
+  store.set('cl_show_config_cm1', JSON.stringify({ fx: false }));
+  store.set('cl_show_config', JSON.stringify({ bi: false }));
+  const base = api.baseline('cm1');
+  assert.equal(base.fx, false, '应取旧无周期 key');
+  assert.equal(base.bi, api.DEFAULT.bi, '无周期 key 命中即不再取全局旧 key');
+});
+
+test('_clShowConfigBaseline 无周期 key 缺失时用全局旧 key', () => {
+  const { api, store } = loadClConfigApi();
+  store.set('cl_show_config', JSON.stringify({ bi: false }));
+  assert.equal(api.baseline('cm1').bi, false);
+});
+
+test('_clShowConfigBaseline 全空 → CL_SHOW_DEFAULT 副本(非同一引用)', () => {
+  const { api } = loadClConfigApi();
+  const base = api.baseline('cm1');
+  assert.deepEqual(base, api.DEFAULT);
+  assert.notEqual(base, api.DEFAULT);
+});
+
+test('resolveClConfigForResolution 已配置周期 → 加载存储值,persist=false', () => {
+  const { api } = loadClConfigApi();
+  api.save('cm1', '5', { fx: false });
+  const r = api.resolve('cm1', '5', { fx: true, bi: true });
+  assert.equal(r.cfg.fx, false, '用存储值,非 currentCfg');
+  assert.equal(r.persist, false);
+});
+
+test('resolveClConfigForResolution 未配置周期 → 继承 currentCfg 副本,persist=true', () => {
+  const { api } = loadClConfigApi();
+  const current = { fx: false, bi: true };
+  const r = api.resolve('cm1', '30', current);
+  assert.equal(r.cfg.fx, false);
+  assert.equal(r.persist, true);
+  assert.notEqual(r.cfg, current, '返回副本,不共享引用');
+});
+
+test('resolveClConfigForResolution 未配置且 currentCfg=null → 用 baseline 迁移', () => {
+  const { api, store } = loadClConfigApi();
+  store.set('cl_show_config_cm1', JSON.stringify({ fx: false }));
+  const r = api.resolve('cm1', '5', null);
+  assert.equal(r.cfg.fx, false, '迁移旧无周期配置');
+  assert.equal(r.persist, true);
+});

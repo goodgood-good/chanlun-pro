@@ -81,6 +81,37 @@ function saveClShowConfig(chartId, resolution, cfg) {
     }
 }
 
+// 迁移回退:老用户此前按 chartId(无周期)存的配置,或更早的全局旧 key,作为"从未配过任何周期"时的初始基准,
+// 保证升级后首个周期不丢现有设置。均 merge CL_SHOW_DEFAULT 补齐新增开关。
+function _clShowConfigBaseline(chartId) {
+    try {
+        const raw = localStorage.getItem('cl_show_config_' + chartId);
+        if (raw) {
+            const parsed = JSON.parse(raw);
+            return _migrateZsToggle(Object.assign({}, CL_SHOW_DEFAULT, parsed), parsed);
+        }
+        const legacy = localStorage.getItem('cl_show_config');
+        if (legacy) {
+            const parsed = JSON.parse(legacy);
+            return _migrateZsToggle(Object.assign({}, CL_SHOW_DEFAULT, parsed), parsed);
+        }
+    } catch (e) {
+        console.warn('[CHARTS] _clShowConfigBaseline parse failed', e);
+    }
+    return Object.assign({}, CL_SHOW_DEFAULT);
+}
+
+// 按周期解析应用配置:该周期已配过 → 用存储值(persist=false);未配过 → 继承切换前当前配置的副本,
+// 无当前配置(首次构造 currentCfg=null)则用迁移基准;persist=true 表示需固化到该周期 key。
+function resolveClConfigForResolution(chartId, resolution, currentCfg) {
+    const loaded = loadClShowConfig(chartId, resolution);
+    if (loaded !== null) {
+        return { cfg: loaded, persist: false };
+    }
+    const base = currentCfg ? Object.assign({}, currentCfg) : _clShowConfigBaseline(chartId);
+    return { cfg: base, persist: true };
+}
+
 function loadClIndependentDrawings(chartId) {
     try {
         const raw = localStorage.getItem('cl_independent_drawings_' + chartId);
