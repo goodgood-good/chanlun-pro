@@ -73,6 +73,9 @@
 
     class HistoryProvider {
         constructor(datafeedUrl, requester, limitedServerResponse, options = {}) {
+            // H1(阶段E): charts.js 断档 gap-reset 前置此一次性标志; getBars(firstDataRequest) 读到即注入
+            // force_refresh=1(用后即清),让后端绕过缓存重算补齐断档。public 供 charts.js 外部置位。
+            this._forceRefreshOnce = false;
             this._datafeedUrl = datafeedUrl;
             this._requester = requester;
             this._limitedServerResponse = limitedServerResponse;
@@ -127,6 +130,12 @@
             }
             if (periodParams.firstDataRequest !== undefined) {
                 requestParams.firstDataRequest = periodParams.firstDataRequest;
+            }
+            // H1(阶段E): charts.js 断档 gap-reset 前置 _forceRefreshOnce, 这里(仅 firstDataRequest)注入
+            // force_refresh=1 让后端绕过缓存重算补齐断档; 一次性,用后即清。
+            if (periodParams.firstDataRequest && this._forceRefreshOnce) {
+                requestParams.force_refresh = 1;
+                this._forceRefreshOnce = false;
             }
             if (symbolInfo.currency_code !== undefined) {
                 requestParams.currencyCode = symbolInfo.currency_code;

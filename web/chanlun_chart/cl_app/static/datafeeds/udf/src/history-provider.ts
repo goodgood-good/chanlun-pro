@@ -164,6 +164,9 @@ export class HistoryProvider {
   private readonly _options: HistoryProviderOptions;
   private readonly _barsResultMaxSize: number;
   public bars_result: Map<string, GetBarsResult>;
+  // H1(阶段E): charts.js 断档 gap-reset 前置此一次性标志; getBars(firstDataRequest) 读到即注入
+  // force_refresh=1(用后即清),让后端绕过缓存重算补齐断档。public 供 charts.js 外部置位。
+  public _forceRefreshOnce: boolean = false;
 
   public constructor(
     datafeedUrl: string,
@@ -233,6 +236,13 @@ export class HistoryProvider {
 
     if (periodParams.firstDataRequest !== undefined) {
       requestParams.firstDataRequest = periodParams.firstDataRequest;
+    }
+
+    // H1(阶段E): charts.js 断档 gap-reset 前置 _forceRefreshOnce, 这里(仅 firstDataRequest)注入
+    // force_refresh=1 让后端绕过缓存重算补齐断档; 一次性,用后即清。
+    if (periodParams.firstDataRequest && this._forceRefreshOnce) {
+      requestParams.force_refresh = 1;
+      this._forceRefreshOnce = false;
     }
 
     if (symbolInfo.currency_code !== undefined) {
