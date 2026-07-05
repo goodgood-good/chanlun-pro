@@ -127,8 +127,9 @@ def _forming_dedup(forming: List[ZS], existing: List[ZS]) -> List[ZS]:
 class RecursiveBranchCalculator:
     """递归装配计算器。无状态，每次 calculate 全量重算。"""
 
-    def __init__(self, l0_min_zs_lines: int = 5):  # 用户口径 2026-06-26(4→5);语义=lines(不含进入段)≥5,详见 cl._recursive_l0_min_zs_lines
+    def __init__(self, l0_min_zs_lines: int = 5, pending_min_lines=None):  # 用户口径 2026-06-26(4→5);语义=lines(不含进入段)≥5,详见 cl._recursive_l0_min_zs_lines
         self.l0_min_zs_lines = int(l0_min_zs_lines or 5)
+        self.pending_min_lines = pending_min_lines   # O2:pending 披露门(None=沿用成枢门)
         # 递归层增量化:持久化各级 ZsBranchCalculator(内含持久 ZsCalculator)+ ZslxBranch,
         # 跨 calculate(跨 K)复用 → 各级 calculator 增量状态保留。L0 输入(units=xds/bis 浅
         # 拷贝)identity 稳定 → L0 增量立即生效;L1+ 输入(_as_units 每次 copy.copy)暂不稳定、
@@ -210,6 +211,7 @@ class RecursiveBranchCalculator:
                 zb = ZsBranchCalculator(
                     ld_provider=lp, frequency=frequency,
                     wzgx=wzgx_config, min_zs_lines=min_lines,
+                    pending_min_lines=self.pending_min_lines,   # O2 披露门(None=零行为)
                 )
                 self._zs_branch_by_level[level] = zb
             else:

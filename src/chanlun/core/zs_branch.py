@@ -209,6 +209,7 @@ class ZsBranchCalculator:
         frequency: Optional[str] = None,
         wzgx: str = Config.ZS_WZGX_GD.value,
         min_zs_lines: int = 4,
+        pending_min_lines=None,
     ):
         """``ld_provider`` 缺省时不判背驰（退化为纯结构）。
 
@@ -236,6 +237,7 @@ class ZsBranchCalculator:
             require_alternation=True,
             min_zs_lines=min_zs_lines,
             max_zs_lines=self._NO_CAP,
+            pending_min_lines=pending_min_lines,   # O2 披露门透传(None=零行为)
         )
         # done 中枢离开段背驰缓存(值签名 key):稳定中枢的 a/c 段+prev 不变 → is_beichi
         # (含 query_macd_ld)结果冻结、跨 K 复用,免对所有中枢每 K 重判背驰。见 _divergence_for。

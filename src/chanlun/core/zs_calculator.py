@@ -19,7 +19,8 @@ class ZsCalculator:
     """
 
     def __init__(self, require_alternation: bool = True, min_zs_lines: int = 4,
-                 max_zs_lines: int = 8, allow_tail_noop: bool = False):
+                 max_zs_lines: int = 8, allow_tail_noop: bool = False,
+                 pending_min_lines=None):
         # require_alternation：是否强制核心三段方向交替。
         # 默认 True——主流程线段中枢扫描照旧。递归到 level≥1 时构成段是
         # 走势类型（含无向盘整、不严格交替），传 False 跳过交替检查。
@@ -35,6 +36,10 @@ class ZsCalculator:
         # 递归/新核心链路现**全级别传 5**(用户口径 2026-06-26,经
         # cl._recursive_l0_min_zs_lines 单点解析;「level≥1 传 3」为已废历史口径)。
         self.min_zs_lines: int = min_zs_lines
+        # pending 披露门(O2,原文 L018:8/L020:2「前三个重叠部分确定」):pending(已产生未
+        # 完成)可比 done 确认门更早披露;缺省 None=沿用 min_zs_lines(零行为变化),显式 3=
+        # 原文披露口径。只影响 pending_zs 输出,done 判定(_resume/_create 的 is_valid)不变。
+        self.pending_min_lines: int = int(pending_min_lines) if pending_min_lines else int(min_zs_lines)
         # max_zs_lines：中枢含核心的最大段数（默认 8 = 3 核心 + 5 延伸）。
         # 故单个中枢封顶 8 段；达上限仍重叠 → 在此完成（末段为离开/升级边界），
         # 后续振荡由下一中枢承接，同区间的多个 ≤8 段中枢经扩展升级为高级别中枢。
@@ -78,7 +83,7 @@ class ZsCalculator:
         # 检查线段数量：中枢最少由 min_zs_lines 段重叠构成（level0 线段中枢
         # 默认 4，离开段计入核心；level≥1 走势类型中枢为 3）。进入段可选，
         # 故 min_zs_lines 段即起步、不足则不可能成中枢。
-        if len(lines) < self.min_zs_lines:
+        if len(lines) < min(self.min_zs_lines, self.pending_min_lines):
             # 段数跌回 <min(末段被回撤):必须清空中枢,与「全新实例从同样 <min 的
             # lines 起算 = 0 中枢」一致。否则只更新 _last_* 而残留上一轮 zss/pending_zs,
             # 在段数从 ≥min 跌回 <min 时遗留陈旧中枢(get_bi_zss 直读 zss+pending_zs、
@@ -506,7 +511,7 @@ class ZsCalculator:
             else:
                 # 未完成说明已走到线段末尾，这是最后一个可能的中枢；
                 # 同样须 >= min_zs_lines 段重叠才作为 pending 中枢输出。
-                if len(center.lines) >= self.min_zs_lines:
+                if len(center.lines) >= self.pending_min_lines:   # 披露门(O2),非 done 确认门
                     self.pending_zs = center
                 self._last_entry_idx = entry_idx
                 break

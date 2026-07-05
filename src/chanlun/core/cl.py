@@ -426,7 +426,10 @@ class CL(ICL):
         rbc = self._rbc.get(use_xd)
         if rbc is None:
             from chanlun.core.recursive_branch import RecursiveBranchCalculator
-            rbc = RecursiveBranchCalculator(l0_min_zs_lines=self._recursive_l0_min_zs_lines())
+            rbc = RecursiveBranchCalculator(
+                l0_min_zs_lines=self._recursive_l0_min_zs_lines(),
+                pending_min_lines=self.config.get("recursive_pending_min_lines"),  # O2:None=零行为,3=原文披露口径(仅影响 live/pending/nest 介入,done 链不变)
+            )
             self._rbc[use_xd] = rbc
         return rbc
 
