@@ -200,7 +200,10 @@ def list_chart_cache_codes(
     cache_dir = str(cache_dir)
     pattern = f"{cache_dir}/v*_{market}_*_{frequency}_*.pkl"
     prefixes = set()
-    rx = re.compile(rf"^v\d+_({market}_.+)_{re.escape(frequency)}_[^.]+\.pkl$")
+    # 缓存文件名两代格式:v{N}_{market}_... (旧) 与 v{N}_{source_fingerprint}_{market}_...
+    # (现行,含 8 位 hex 源码指纹段)。指纹段设为可选,两代通吃;漏掉指纹段曾致池枚举
+    # 恒空 → bt-pool-mode all/selector 全部 no symbols loaded(回归,2026-07-07 修)。
+    rx = re.compile(rf"^v\d+_(?:[0-9a-f]{{6,}}_)?({market}_.+)_{re.escape(frequency)}_[^.]+\.pkl$")
     for file in glob.glob(pattern):
         m = rx.match(os.path.basename(file))
         if m:
