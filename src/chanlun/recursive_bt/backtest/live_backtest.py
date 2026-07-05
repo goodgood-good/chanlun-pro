@@ -48,7 +48,7 @@ DEFAULT_SIGNAL_MODE = "walk_forward"
 DEFAULT_SIGNAL_CACHE_DIR = "D:/chanlun_pro/reports/live_backtest_signal_cache"
 DEFAULT_SIGNAL_SCAN_CHUNK_BARS = 0
 DEFAULT_TREND_DIR_WARMUP_BARS = 200
-DEFAULT_RECURSIVE_L0_MIN_ZS_LINES = 4  # L0 线段中枢构成线段数取 4(完成确认门),L≥1 仍为 3
+DEFAULT_RECURSIVE_L0_MIN_ZS_LINES = 5  # 成枢门=5(2026-06-26 拍板,2026-07-06 补落实回测侧;全级别统一,「L≥1 仍 3」已废)
 DEFAULT_BS_POINT_RATIO_OVERRIDES = "D:/chanlun_pro/reports/strategy_bs_point_ratio_overrides.json"
 _SIGNAL_CACHE_VERSION = "v17"  # 信号缓存版本号:中枢/信号口径变更时递增以失效旧缓存(v17: 审计修复——盘整背驰进入vs离开+zslx背驰精修切分+成枢门legacy统一5;v16: 背驰收紧 柱子OR→AND + 黄白线删0轴宽口径)
 _SIGNAL_CHECKPOINT_VERSION = "v1"
@@ -1294,7 +1294,7 @@ def build_symbol_from_klines(
     recursive_l0_min_zs_lines = int(
         recursive_l0_min_zs_lines or DEFAULT_RECURSIVE_L0_MIN_ZS_LINES
     )
-    if recursive_l0_min_zs_lines not in {3, 4}:
+    if recursive_l0_min_zs_lines not in {3, 4, 5}:  # 3/4 保留供历史 A/B;5=现行拍板口径
         raise ValueError(
             f"unsupported recursive_l0_min_zs_lines: {recursive_l0_min_zs_lines!r}"
         )
@@ -2025,7 +2025,7 @@ def run_backtest(args) -> tuple[dict, dict]:
         getattr(args, "recursive_l0_min_zs_lines", DEFAULT_RECURSIVE_L0_MIN_ZS_LINES)
         or DEFAULT_RECURSIVE_L0_MIN_ZS_LINES
     )
-    if args.recursive_l0_min_zs_lines not in {3, 4}:
+    if args.recursive_l0_min_zs_lines not in {3, 4, 5}:  # 3/4 保留供历史 A/B;5=现行拍板口径
         raise ValueError(
             f"unsupported recursive_l0_min_zs_lines: {args.recursive_l0_min_zs_lines!r}"
         )
@@ -2309,9 +2309,9 @@ def make_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--recursive-l0-min-zs-lines",
         type=int,
-        choices=(3, 4),
+        choices=(3, 4, 5),
         default=DEFAULT_RECURSIVE_L0_MIN_ZS_LINES,
-        help="L0 center construction lines for recursive branch: 3 follows original definition, 4 keeps legacy confirmation gate",
+        help="L0 center construction lines: 5=current fiat(2026-06-26, all-level unified), 3/4 kept for historical A/B",
     )
     parser.add_argument(
         "--signal-warmup-bars",
