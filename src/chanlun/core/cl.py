@@ -14,8 +14,6 @@ from chanlun.core.macd import MACD
 from chanlun.core.macd_htf import HigherMACDCalculator
 from chanlun.core.xd_calculator import XdCalculator
 from chanlun.core.zs_calculator import ZsCalculator
-from chanlun.core.recursive_calculator import RecursiveCalculator, LevelResult
-from chanlun.core.interval_nest_calculator import calculate_interval_nest, IntervalNest
 from chanlun.tools.log_util import LogUtil
 
 
@@ -74,9 +72,14 @@ class CL(ICL):
         # 实例化线段计算器
         self.xd_calculator = XdCalculator(self.config)
 
-        self.zss_calculator = ZsCalculator(allow_tail_noop=True)
+        # 成枢门统一(P1a, 2026-07-06):legacy 两层与递归链同用单点解析(现=5)——落实并
+        # 扩展 7c231295 拍板意图(曾同步笔层=5、被 3737497a 重构无声回退;本次线段层一并
+        # 统一,消除同一 lines 两套中枢)。封顶 max=8 维持 legacy 显示口径不变(递归链不封顶
+        # 的理由见 zs_branch;此处 8 段封顶只影响观察层/legacy mmd,不入递归)。
+        _l0_min = self._recursive_l0_min_zs_lines()
+        self.zss_calculator = ZsCalculator(allow_tail_noop=True, min_zs_lines=_l0_min)
         # 笔层中枢计算器，与 zss_calculator（线段层）独立维护。
-        self.bi_zss_calculator = ZsCalculator(allow_tail_noop=True)
+        self.bi_zss_calculator = ZsCalculator(allow_tail_noop=True, min_zs_lines=_l0_min)
 
         # 走势类型计算器：线段中枢 → 走势类型(ZSLX)，无状态全量重算。
         self.zslx_calculator = ZslxCalculator()
@@ -145,7 +148,7 @@ class CL(ICL):
             #   - ZGGDD: 兼容老用法,zg 与 dd、zd 与 gg 比较,介于两者之间。
             # 注:本配置同时驱动 buy/sell 点链路 (cl.beichi_qs / zss_is_qs)
             # 与递归链路 (走势类型划分 / recursive / interval_nest),
-            # 见 process_klines / get_recursive_levels / get_interval_nest。
+            # 见 process_klines / get_recursive_branch_levels / get_branch_interval_nest。
             'zs_wzgx': Config.ZS_WZGX_GD.value,
             'cal_last_zs': True,
             'use_macd_ld': True,
@@ -390,67 +393,6 @@ class CL(ICL):
         """返回线段级走势类型列表。"""
         return self.xd_zslx
 
-    def get_recursive_levels(self) -> List[LevelResult]:
-        """返回递归装配的多级层级树。
-
-        并存独立子系统：每次现算（层级单元数逐级收缩、开销可忽略），
-        不接入 process_klines、不动周期多级分析与 bs_point_calculator。
-        """
-        ld_provider = lambda s, e: query_macd_ld(self, s, e)
-        # 递归链路默认较严格档 GD,允许 config opt-out(统一各链路读 config)——
-        # 理由见 process_klines 走势类型接入处注释。
-        recursive_wzgx = self._recursive_wzgx()
-        return RecursiveCalculator().calculate(
-            self.xd_calculator.xds, ld_provider, recursive_wzgx, self.frequency,
-        )
-
-    def get_recursive_mmds(self) -> dict:
-        """在递归各「升级」级别上识别买卖点（中枢升级买卖点）。
-
-        并存独立子系统：每次现算，结果存入各级走势单元的 ``zs_type_mmds['L{level}']``
-        独立分桶，**不与 bi/xd 基础买卖点冲突**。返回 ``{level: [(name, k_index, val)…]}``。
-
-        中枢升级后，升级级别中枢自身的一二三类买卖点是更高级别的转折信号。
-        注：升级是否出现取决于数据是否具备更高级别结构——低结构标的（整段一个
-        大盘整/扩展）可能升不出级别。
-        """
-        from chanlun.core.bs_point_calculator import BsPointCalculator
-        levels = self.get_recursive_levels()
-        if not levels:
-            return {}
-        result: dict = {}
-        xds = list(self.xd_calculator.xds)
-        for lv in levels:
-            units = xds if lv.level == 0 else levels[lv.level - 1].zslxs
-            zt = f'L{lv.level}'
-            BsPointCalculator(self, zs_type=zt).calculate(units, lv.zss)
-            pts = []
-            for u in units:
-                for m in u.zs_type_mmds.get(zt, []):
-                    try:
-                        pts.append((m.name, u.end.k.k_index, round(u.end.val, 3)))
-                    except Exception:
-                        pass
-            result[lv.level] = pts
-        return result
-
-    def get_interval_nest(self) -> Optional[IntervalNest]:
-        """返回「当下」区间套——从最高级别趋势背驰逐级下钻定位转折点（区间套）。
-
-        并存独立子系统：每次现算，不接入 process_klines、不动下游。
-        """
-        ld_provider = lambda s, e: query_macd_ld(self, s, e)
-        # 递归链路默认较严格档 GD,允许 config opt-out(统一各链路读 config)——
-        # 理由见 process_klines 走势类型接入处注释。
-        recursive_wzgx = self._recursive_wzgx()
-        return calculate_interval_nest(
-            self.get_recursive_levels(),
-            self.xd_calculator.xds,
-            ld_provider,
-            recursive_wzgx,
-            self.frequency,
-        )
-
     # ===== 新核心模块 lazy 接入(并存,不动旧版/process_klines/golden) =====
     def _recursive_wzgx(self) -> str:
         """统一解析中枢位置关系口径(zs_wzgx):所有链路必须经此单点读取。
@@ -464,11 +406,16 @@ class CL(ICL):
     def _recursive_l0_min_zs_lines(self) -> int:
         """统一解析递归 L0 中枢成枢线数:所有链路必须经此单点读取。
 
-        fallback=5(用户口径 2026-06-26):L0 线段中枢 = 进入段 + 核心重叠 + 离开段 ≥ 5 段
-        (center.lines 含进入/核心/离开段;原 4 = 核心3+离开1, 提到 5 含进入段)。legacy bi_zss
-        路径(本文件 get_bi_zss 处 min_zs_lines)同步为 5 保口径一致。L≥1 走势类型中枢仍用 3
-        (走势类型本身已是完成单元、非线段)。所有链路经此单点读取保口径一致。
-        ⚠ 改成枢门 → 信号/买卖点变 → 真实 golden 已重生成 + 信号缓存版本 +1 + 回测基线须重跑。
+        fallback=5(用户口径 2026-06-26 拍板 4→5, commit 7c231295)。精确语义:ZsCalculator 的
+        min_zs_lines = center.lines 长度下限,而 lines **不含进入段**(进入段在 zs.start)——
+        故 5 = 与核心区重叠的段数(含离开段)≥5,比 7c231295 注释宣称的「进入+核心+离开=5」
+        实际严一段;golden/回测基线均已固化在该行为上,若要按字面意图放宽须另行拍板并联动重跑。
+        递归链(recursive_branch/recursive_calculator)**全级别统一**用本值——L≥1 走势类型
+        中枢同为 5(历史曾用 3,旧注释勿信)。
+        ⚠ 口径分裂现状:legacy 线段/笔中枢(zss_calculator/bi_zss_calculator, 见 __init__)
+        仍为 ZsCalculator 默认 min=4+封顶 8——7c231295 曾把笔层同步为 5,后被 3737497a 重构
+        无声回退;是否统一待拍板(见 audit/zhihu_lizhengli_audit.md F1)。
+        ⚠ 改成枢门 → 信号/买卖点变 → golden 须重生成 + 信号缓存版本 +1 + 回测基线须重跑。
         """
         return int(self.config.get('recursive_l0_min_zs_lines', 5) or 5)
 
@@ -486,7 +433,7 @@ class CL(ICL):
     def get_recursive_branch_levels(self):
         """新核心:recursive_branch 多级递归(中枢+内联背驰+走势类型)。
 
-        与旧 get_recursive_levels(RecursiveCalculator)并存独立——本方法走重做的
+        旧链(get_recursive_levels/RecursiveCalculator)已下线(审计 P1b);本方法走重做的
         zs_branch/zslx_branch/recursive_branch 链路,wzgx 统一读 config(fallback=
         较严格档 GD,见 _recursive_wzgx)。
         lazy 现算、不接 process_klines。返回 List[recursive_branch.LevelResult]。
@@ -765,9 +712,14 @@ class CL(ICL):
         return self._last_xd_zs
 
     def beichi_pz(self, zs: ZS, now_line: LINE) -> Tuple[bool, Union[LINE, None]]:
-        """判断中枢与指定线是否构成盘整背驰（薄壳，逻辑见 beichi_calculator）。"""
+        """判断中枢与指定线是否构成盘整背驰(进入段 vs 离开段;薄壳,见 beichi_calculator)。"""
         ld_provider = lambda s, e: query_macd_ld(self, s, e)
         return bc.beichi_pz(zs, now_line, ld_provider, self.frequency)
+
+    def beichi_zs_oscillation(self, zs: ZS, now_line: LINE) -> Tuple[bool, Union[LINE, None]]:
+        """中枢震荡力度比较(当下段 vs 中枢内最近同向段;原 beichi_pz 旧语义薄壳)。"""
+        ld_provider = lambda s, e: query_macd_ld(self, s, e)
+        return bc.beichi_zs_oscillation(zs, now_line, ld_provider, self.frequency)
 
     def beichi_qs(
             self, lines: List[LINE], zss: List[ZS], now_line: LINE
@@ -801,7 +753,7 @@ class CL(ICL):
         """
         if not lines:
             return []
-        tmp_calc = ZsCalculator()
+        tmp_calc = ZsCalculator(min_zs_lines=self._recursive_l0_min_zs_lines())  # 成枢门单点统一(P1a)
         return tmp_calc.calculate(lines)
 
     # --- 兼容属性与方法 ---

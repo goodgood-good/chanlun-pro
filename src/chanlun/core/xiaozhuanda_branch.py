@@ -5,8 +5,9 @@
 不产定性买卖点。
 
 消费 recursive_branch 的多级 LevelResult:逐相邻级别(次级别 L_{k-1} / 大级别 L_k),
-查 L_{k-1} 最后一个中枢是否出三类点(复用 BsBranchCalculator._third_class)且 L_{k-1} 有
-同向趋势背驰(底背驰 leave=down ↔ 三买 → 向上;顶背驰 leave=up ↔ 三卖 → 向下)→ 发候选。
+查 L_{k-1} 最后一个中枢是否出三类点(复用 BsBranchCalculator._third_class)且 L_{k-1} **最近
+一次坐实**趋势背驰同向、其终点不晚于三类点锚(底背驰 leave=down ↔ 三买 → 向上;顶背驰
+leave=up ↔ 三卖 → 向下)→ 发候选。
 当下:只用 done 中枢 + 当下三类点(三类当下稳定);无未来函数。
 
 孤立、不改上游。
@@ -30,16 +31,25 @@ class XiaoZhuanDaCandidate:
     sub_level: int              # 次级别 L_{k-1}
 
 
-def _beichi_leave_dirs(level) -> set:
-    """该级别已坐实趋势背驰(qs & is_beichi)的离开段方向集合。底背驰 leave='down'
-    (跌势衰竭 → 转上)、顶背驰 leave='up'。供小转大「小级别背驰」触发的同向匹配。"""
-    dirs = set()
+def _last_settled_beichi(level):
+    """该级别时序最后一个坐实趋势背驰(qs & is_beichi):返回 (离开方向, 背驰段终点 k_index),
+    无则 (None, None)。小转大的「小级别背驰」须是引发当下转折的那次背驰——全历史方向集合
+    会让陈年背驰给此后所有三类点配对(审计 F5),故只认最近一次;其终点须不晚于三类点锚
+    (由调用方校验)。底背驰 leave=down(跌势衰竭 → 转上)、顶背驰 leave=up。"""
+    best_dir = None
+    best_k = None
     for dv in (getattr(level, "done_divergence", None) or []):
-        if (dv is not None and getattr(dv, "is_beichi", False)
-                and getattr(dv, "kind", None) == "qs"
-                and getattr(dv, "leave_seg", None) is not None):
-            dirs.add(dv.leave_seg._type)
-    return dirs
+        if (dv is None or not getattr(dv, "is_beichi", False)
+                or getattr(dv, "kind", None) != "qs"):
+            continue
+        seg = getattr(dv, "leave_seg", None)
+        end = getattr(seg, "end", None) if seg is not None else None
+        k = getattr(getattr(end, "k", None), "k_index", None) if end is not None else None
+        if k is None:
+            continue
+        if best_k is None or k >= best_k:
+            best_dir, best_k = seg._type, k
+    return best_dir, best_k
 
 
 class XiaoZhuanDaCalculator:
@@ -65,13 +75,19 @@ class XiaoZhuanDaCalculator:
                       if p.zs is last_zs]                      # 仅最后中枢的三类点
             if not thirds:
                 continue
-            bdirs = _beichi_leave_dirs(sub)                    # 次级别趋势背驰离开方向
+            bdir, bdir_k = _last_settled_beichi(sub)       # 最近一次坐实趋势背驰(方向,终点)
+            if bdir is None:
+                continue
             for p in thirds:
-                if p.bs_type == "3buy" and "down" in bdirs:    # 三买 + 底背驰 → 向上小转大
+                anchor_k = getattr(getattr(p.anchor_fx, "k", None), "k_index", None)
+                if (anchor_k is not None and bdir_k is not None
+                        and bdir_k > anchor_k):
+                    continue                               # 背驰晚于三类点 → 非本次转折诱因
+                if p.bs_type == "3buy" and bdir == "down":   # 三买 + 最近为底背驰 → 向上小转大
                     out.append(XiaoZhuanDaCandidate(
                         level=k, direction="up", necessary_zs=last_zs,
                         anchor_fx=p.anchor_fx, invalid=last_zs.zg, sub_level=k - 1))
-                elif p.bs_type == "3sell" and "up" in bdirs:   # 三卖 + 顶背驰 → 向下小转大
+                elif p.bs_type == "3sell" and bdir == "up":  # 三卖 + 最近为顶背驰 → 向下小转大
                     out.append(XiaoZhuanDaCandidate(
                         level=k, direction="down", necessary_zs=last_zs,
                         anchor_fx=p.anchor_fx, invalid=last_zs.zd, sub_level=k - 1))

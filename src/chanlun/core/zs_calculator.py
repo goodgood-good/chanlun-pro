@@ -29,11 +29,11 @@ class ZsCalculator:
         # 线段层 zss_calculator 的 zss+pending 喂 recursive(走势类型/level0 中枢),必须保守
         # 全量(默认 False),否则中途 get_branch_* 触发的重算会与全量分叉。
         self.allow_tail_noop: bool = allow_tail_noop
-        # min_zs_lines：构成中枢的最小核心线段数（含离开段）。默认 4——
-        # 因为线段必须被后一段破坏才算完成，第 3 段线段须由第 4 段确认其完成，
-        # 前 3 段都完成、中枢方成立，计入这条确认/离开段，最小即 4。
-        # 递归到 level≥1 时构成段是走势类型——传入的 ZSLX 单元已是完成走势类型，
-        # 3 个重叠即成中枢，传 3。
+        # min_zs_lines：center.lines 长度下限(核心+延伸+离开段;lines **不含进入段**,
+        # 进入段在 zs.start)。默认 4 = 核心3+离开1(第 3 段须由第 4 段确认完成),
+        # legacy 线段/笔中枢(cl.zss_calculator/bi_zss_calculator)仍用此默认。
+        # 递归/新核心链路现**全级别传 5**(用户口径 2026-06-26,经
+        # cl._recursive_l0_min_zs_lines 单点解析;「level≥1 传 3」为已废历史口径)。
         self.min_zs_lines: int = min_zs_lines
         # max_zs_lines：中枢含核心的最大段数（默认 8 = 3 核心 + 5 延伸）。
         # 故单个中枢封顶 8 段；达上限仍重叠 → 在此完成（末段为离开/升级边界），

@@ -451,8 +451,9 @@ def cl_data_to_tv_chart(
         try:
             if config.get("chart_use_branch_core", "0") == "1":
                 levels = cd.get_recursive_branch_levels() or []   # 新核心 8 模块
-            else:
-                levels = cd.get_recursive_levels() or []          # 旧链路(默认)
+            # 旧递归装配链(get_recursive_levels/RecursiveCalculator)已下线(审计 P1b):
+            # 旧模式(chart_use_branch_core=0)下 levels 恒空——先前也仅白算(下方循环对旧链
+            # 全 continue、零输出),行为等价。
         except Exception:
             levels = []
         for lv in levels:
@@ -520,41 +521,10 @@ def cl_data_to_tv_chart(
                              "text": str(_k).upper(), "level": _flbl} for _d, _v, _k in _kl["bcs"]],
                 })
 
-    # 区间套 (interval_nest):从最高级别趋势背驰逐级下钻到 L0 的链 + 精确转折点。
+    # 区间套:旧链 get_interval_nest 已下线(审计 P1b)。响应字段保留恒 None(前端 datafeed
+    # 仅透传、charts.js 不消费);新核心区间套 = get_branch_interval_nest(嵌套森林 READ)
+    # 与 LevelResult.live_qs_divergence(回测介入),暂无图表渲染。
     interval_nest_chart_data = None
-    # 默认 fallback 对齐 chart_config DEFAULT("0"):区间套链前端尚无渲染(charts.js 不消费),
-    # 默认不算/不传,避免任何缺 key 路径意外触发 get_interval_nest 白算。需要时显式置 "1"。
-    if config.get("chart_show_interval_nest", "0") == "1":
-        try:
-            inest = cd.get_interval_nest()
-        except Exception:
-            inest = None
-        if inest is not None and inest.links:
-            links_chart = []
-            for link in inest.links:
-                seg = link.beichi_seg
-                try:
-                    end_date = seg.end.k.date
-                    end_val = seg.end.val
-                except AttributeError:
-                    continue
-                links_chart.append({
-                    "level": link.level,
-                    "time": fun.datetime_to_int(end_date),
-                    "price": end_val,
-                    "is_beichi": bool(link.is_beichi),
-                    "direction": seg.type,
-                })
-            if links_chart:
-                tp = inest.turning_point
-                interval_nest_chart_data = {
-                    "links": links_chart,
-                    "turning_point": {
-                        "time": fun.datetime_to_int(tp.k.date),
-                        "price": tp.val,
-                    },
-                    "direction": inest.direction,
-                }
 
     bc_infos = {}
     mmd_infos = {}
@@ -695,29 +665,10 @@ def cl_data_to_tv_chart(
                     "points": {"time": ts, "price": mmd["price"]},
                     "text": mmd_text,
                 })
-        # 中枢升级买卖点(旧链路):各升级级别走势单元上跑买卖点、合并进 xd_mmds、文本加「升」前缀。
-        if config.get("chart_show_recursive_levels", "1") == "1" and levels:
-            from chanlun.core.bs_point_calculator import BsPointCalculator
-            for _lv in levels:
-                _units = list(cd.get_xds()) if _lv.level == 0 else levels[_lv.level - 1].zslxs
-                _zt = f"L{_lv.level}"
-                try:
-                    BsPointCalculator(cd, zs_type=_zt).calculate(_units, _lv.zss)
-                except Exception:
-                    continue
-                for _u in _units:
-                    for _m in _u.zs_type_mmds.get(_zt, []):
-                        try:
-                            xd_mmd_chart_data.append({
-                                "points": {
-                                    "time": fun.datetime_to_int(_u.end.k.date),
-                                    "price": _u.end.val,
-                                },
-                                "text": "升" + mmd_type_map.get(_m.name, _m.name),
-                                "level": "xd",
-                            })
-                        except Exception:
-                            continue
+        # 「升」类升级买卖点段已删除(审计 P1c 修订):该段嵌在 chart_use_branch_core=0 的
+        # else 分支内、仅旧模式执行(此前 F6 注释误判为新核心双源,已更正);旧链下线后
+        # levels 在旧模式恒空、该段为死代码,连同 cl.get_recursive_mmds 一并移除。
+        # 升级买卖点唯一来源 = kuozhan mmds(bs1/bs2/bs3, recursive_levels_chart_data[].mmds)。
 
     fx_data.sort(key=lambda v: v["points"][0]["time"], reverse=False)
     bi_chart_data.sort(key=lambda v: v["points"][0]["time"], reverse=False)

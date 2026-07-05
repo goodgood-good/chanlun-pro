@@ -162,9 +162,9 @@ def query_cl_chart_config(
         "chart_show_zs_expanded": "0",       # 扩展中枢加粗框
         "chart_show_xd_zslx": "0",           # 当前级别走势类型线段/区间
         "chart_show_recursive_levels": "1",  # 递归层级中枢与走势类型(重做完成,默认开显示新核心)
-        "chart_use_branch_core": "1",        # 1=递归层级/买卖点用新核心(8模块,默认);0=旧链路
+        "chart_use_branch_core": "1",        # 1=新核心(默认);0=legacy 显示链(笔中枢/买卖点/背驰旧源;旧递归装配已下线,0 不再画递归层)
         "chart_show_higher_zs": "1",         # 低周期图叠加高周期线段中枢(混合多级别,默认开)
-        "chart_show_interval_nest": "0",     # 区间套链 + 精确转折点
+        "chart_show_interval_nest": "0",     # 【废弃】旧链区间套已下线(P1b),tv_chart 不再读本键;保留防存量配置合并
         "chart_show_ma": "0",
         "chart_show_boll": "0",
         "chart_show_futu": "macd",

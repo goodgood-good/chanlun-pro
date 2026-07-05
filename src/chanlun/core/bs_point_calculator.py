@@ -4,7 +4,7 @@
 
 识别 1/2/3 类买卖点。
 
-复用 ``cl.beichi_pz`` / ``cl.beichi_qs`` / ``cl.zss_is_qs`` 做背驰与趋势判定，
+复用 ``cl.beichi_zs_oscillation`` / ``cl.beichi_qs`` / ``cl.zss_is_qs`` 做背驰与趋势判定，
 通过 ``LINE.add_mmd`` / ``LINE.add_bc`` 把识别结果挂到笔/线段上。
 """
 from __future__ import annotations
@@ -32,7 +32,7 @@ class BsPointCalculator:
         xd_calc = BsPointCalculator(self, zs_type='xd')
         xd_calc.calculate(self.xd_calculator.xds, self.zss_calculator.zss)
 
-    :param cl: ``CL`` 主类引用，用于复用 ``beichi_pz`` / ``beichi_qs`` / ``zss_is_qs``
+    :param cl: ``CL`` 主类引用，用于复用 ``beichi_zs_oscillation`` / ``beichi_qs`` / ``zss_is_qs``
     :param zs_type: 中枢类型，``'bi'`` 表示笔层，``'xd'`` 表示线段层。决定结果挂在哪一层。
     :param strict_3_mode: 三买判定模式。
                          ``True`` = 严格定义（反抽必须严格 < ZG）；
@@ -562,7 +562,7 @@ class BsPointCalculator:
             3. 满足以下任一条件：
                - **条件 A（强）**：当前段的低/高未突破一买的低/高 → 标准二买
                - **条件 B（弱）**：当前段虽创新低/高，但与一买所在段构成盘整背驰
-                 （复用 ``cl.beichi_pz``）
+                 （复用 ``cl.beichi_zs_oscillation``,中枢震荡口径）
 
         命名规则：
             - 下跌段（一买后再下跌）未破前低 / 盘整背驰 → ``2buy``
@@ -643,7 +643,7 @@ class BsPointCalculator:
                 continue
 
             # 准备 valid_zss（条件 B 用，提到外面避免每个 prev 重复计算）。
-            # 防未来函数：cl.beichi_pz 用 zss[-1] 做盘整对照，必须按 now_line
+            # 防未来函数：cl.beichi_zs_oscillation 用 zss[-1] 做震荡对照，必须按 now_line
             # 时间位置切片 zss，避免历史 xd 用未来中枢做对照。
             now_end_k = now_line.end.k.k_index
             valid_zss_2 = self._filter_valid_zss_by_now_end_k(
@@ -683,10 +683,10 @@ class BsPointCalculator:
                         candidates_zs.append(valid_zss_2[-2])
                     for ref_zs_for_pz in candidates_zs:
                         try:
-                            is_pz_bc, _ = self.cl.beichi_pz(ref_zs_for_pz, now_line)
+                            is_pz_bc, _ = self.cl.beichi_zs_oscillation(ref_zs_for_pz, now_line)  # 中枢震荡口径(原 beichi_pz 旧语义, 审计 F4 拆分后 legacy 行为保持不变)
                         except Exception as e:
                             LogUtil.warning(
-                                f"[BsPointCalculator] beichi_pz 异常: "
+                                f"[BsPointCalculator] beichi_zs_oscillation 异常: "
                                 f"line.index={now_line.index}, zs.index={ref_zs_for_pz.index}, err={e}"
                             )
                             is_pz_bc = False

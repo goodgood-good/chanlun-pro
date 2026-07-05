@@ -68,7 +68,7 @@ def _mark_upgrades(done_zss: List[ZS]) -> List[int]:
 class RecursiveBranchCalculator:
     """递归装配计算器。无状态，每次 calculate 全量重算。"""
 
-    def __init__(self, l0_min_zs_lines: int = 5):  # 用户口径 2026-06-26: L0 中枢=进入+核心+离开≥5
+    def __init__(self, l0_min_zs_lines: int = 5):  # 用户口径 2026-06-26(4→5);语义=lines(不含进入段)≥5,详见 cl._recursive_l0_min_zs_lines
         self.l0_min_zs_lines = int(l0_min_zs_lines or 5)
         # 递归层增量化:持久化各级 ZsBranchCalculator(内含持久 ZsCalculator)+ ZslxBranch,
         # 跨 calculate(跨 K)复用 → 各级 calculator 增量状态保留。L0 输入(units=xds/bis 浅
@@ -130,7 +130,7 @@ class RecursiveBranchCalculator:
 
         每级：zs_branch(中枢+内联背驰) → zslx_branch(走势类型) → _as_units → 下一级。
         L0 构成段=线段、L≥1 构成段=走势类型;成枢门全级别统一 = l0_min(用户口径 2026-06-26:
-        进入段+核心重叠+离开段 ≥5, L≥1 升级中枢也用 5)。
+        与核心区重叠段数·含离开段·不含进入段 ≥5;L≥1 升级中枢也用 5)。
         终止：扫不出中枢 / 走势类型 <3 / 触 _MAX_LEVELS。
         """
         if not xds:

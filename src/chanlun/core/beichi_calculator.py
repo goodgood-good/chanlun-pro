@@ -200,16 +200,36 @@ def beichi_pz(
     zs: ZS, now_seg: LINE, ld_provider: LdProvider,
     frequency: Optional[str] = None,
 ) -> Tuple[bool, Optional[LINE]]:
-    """盘整背驰：1 个中枢的盘整中，离开段相对中枢内前一同向段是否力度衰竭。
+    """盘整背驰：1 个中枢的盘整中，离开段相对**进入段**是否力度衰竭。
 
-    盘整背驰 = 盘整中当下笔/线段比前一同向笔/线段力度弱。
+    比较对象 = 中枢进入段 ``zs.start``(围绕中枢的前后两段同向次级别走势比较,
+    与 zs_branch._divergence_for 同口径;审计 F4——原「中枢内最近同向段」在中枢
+    延伸后比较对象漂移为延伸段,非盘整背驰本义,该语义拆到
+    ``beichi_zs_oscillation`` 供中枢震荡力度比较)。
+    无进入段(开头中枢)/进入段与离开段异向/端点缺失 → 不判(False, None)。
     ``frequency`` 透传到 ``is_beichi`` 决定黄白线口径。
+    返回 (是否背驰, 比较的走势段=进入段)。
+    """
+    a = getattr(zs, "start", None)
+    if (a is None or getattr(a, "type", None) != now_seg.type
+            or a.start is None or a.end is None):
+        return False, None
+    return is_beichi(a, now_seg, ld_provider, frequency), a
+
+
+def beichi_zs_oscillation(
+    zs: ZS, now_seg: LINE, ld_provider: LdProvider,
+    frequency: Optional[str] = None,
+) -> Tuple[bool, Optional[LINE]]:
+    """中枢震荡力度比较：当下段相对中枢内(除末段外)最近同向段是否衰竭。
+
+    即原 beichi_pz 的「最近同向段」语义——不是盘整背驰(那是进入 vs 离开,见
+    ``beichi_pz``),而是中枢震荡内部前后两次同向摆动的力度对比;legacy 2 类
+    经验法条件 B(bs_point_calculator)用它判「创新低/高但对震荡构成背驰」。
     返回 (是否背驰, 比较的走势段)。
     """
     if len(zs.lines) < 2:
         return False, None
-
-    # 中枢内（除末段外）最近的同向段作比较对象
     compare_line = None
     for line in reversed(zs.lines[:-1]):
         if line.type == now_seg.type:
@@ -217,7 +237,6 @@ def beichi_pz(
             break
     if compare_line is None:
         return False, None
-
     return is_beichi(compare_line, now_seg, ld_provider, frequency), compare_line
 
 

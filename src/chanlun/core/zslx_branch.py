@@ -1,9 +1,11 @@
-"""zslx_branch.py — 走势类型划分（基于 zs_branch 内联背驰）。
+"""zslx_branch.py — 走势类型划分（纯几何摆动分段）。
 
-把 zs_branch 的 L0 已完成中枢序列(done_zss + done_divergence)切成走势类型(ZSLX)：
-双信号边界——背驰(复用 done_divergence,不重判) + 方向反转(classify_rel,上涨↔下跌)。
-expand(中枢扩张/本体相交)不切——按走势级别延续；升级(L1 中枢=3 个方向交替的 L0
-走势类型)实体化在其他模块处理。孤立、不接 CL、不依赖 beichi_calculator。
+把 zs_branch 的 L0 已完成中枢序列(done_zss)切成走势类型(ZSLX)：本体摆动反转 +
+本体摆动反转 + 同级别中枢细分 + **背驰精修**(_beichi_split:坐实同向趋势背驰=切点,
+原文口径「走势结束点=背驰点」,审计 F3 已落地;盘整背驰/provisional 不切) +
+本体分离分类(见 calculate)。expand(中枢扩张/本体相交)
+不切——按走势级别延续；升级(L1 中枢=次级别走势类型重叠,成枢门见
+cl._recursive_l0_min_zs_lines)实体化在其他模块处理。
 """
 from __future__ import annotations
 
@@ -42,7 +44,7 @@ def _swing_body(z: ZS) -> tuple:
 class ZslxBranchCalculator:
     """级别无关的走势类型划分（基于 zs_branch 中枢+内联背驰）。
 
-    输出是 done_zss 的**纯函数**(done_divergence 暂不参与边界,见 calculate;且无
+    输出是 (done_zss, done_divergence) 的**纯函数**(背驰参与切分边界,见 _beichi_split;且无
     zs.type 等副作用,区别于 legacy ZslxCalculator)。done_zss 已 identity 稳定、
     append-only frozen(进入/离开段校正身份缓存),跨 K 多数不变 → 按值签名 memo
     「边界划分计划」(swing_segments+subsplit+trend_dir,占本调用 ~82% 的 classify_rel
@@ -271,6 +273,35 @@ class ZslxBranchCalculator:
                 a = i + 1
         return out
 
+    @staticmethod
+    def _beichi_split(zss: List[ZS], divs, a: int, b: int):
+        """背驰精修切分(审计 F3):段[a..b]内、非段末中枢的已坐实同向趋势背驰 → 切点。
+
+        原文口径:盘背/趋背是走势分段依据、走势结束点=背驰点。落地范围:
+        - 只切 kind==qs(趋势背驰)且非 provisional(坐实)——与一类买卖点同强度信号;
+        - 盘整背驰(pz)不切:弱信号(类一买定位,需次级别确认),切了会把走势类型碎片化;
+        - 转折型背驰(dv.leave_seg is zs.start,背驰段=进入段)不切:其切点语义属前段;
+        - 段末中枢(j==b)的背驰=段自然终点,不产生内部切点。
+        切开后背驰点之后再创新极值的部分成为独立走势类型(「背了又背对应不同走势」);
+        子段方向由调用方重算 _trend_dir、swing_dir 沿摆动腿继承。
+        """
+        if not divs:
+            return [(a, b)]
+        out = []
+        s = a
+        for j in range(a, b):
+            dv = divs[j] if j < len(divs) else None
+            if (dv is None or not getattr(dv, "is_beichi", False)
+                    or getattr(dv, "kind", None) != "qs"
+                    or getattr(dv, "provisional", False)):
+                continue
+            if getattr(dv, "leave_seg", None) is getattr(zss[j], "start", None):
+                continue
+            out.append((s, j))
+            s = j + 1
+        out.append((s, b))
+        return out
+
     def calculate(
         self,
         done_zss: List[ZS],
@@ -280,22 +311,26 @@ class ZslxBranchCalculator:
 
         ① 本体摆动分段(_swing_segments):管重叠失明的大反转;② 趋势段内同级别中枢细分
         (_subsplit):暴露内部盘整震荡;③ 本体分离分类(_trend_dir):≥2 本体分离同向=趋势、
-        否则盘整。背驰(done_divergence)暂不参与边界——几何摆动自洽(背驰后仍创新极值则趋势
-        延续);早终结的背驰精修留后。done_divergence 保留入参以稳定 recursive_branch 接口、
-        供后续精修。
+        否则盘整;插在②③之间的背驰精修(_beichi_split,审计 F3):坐实同向趋势背驰的中枢=
+        切点(走势结束点=背驰点,背驰后再创新极值者另起为新走势类型,「背了又背对应不同
+        走势」);盘整背驰(pz)/provisional/转折型不切。
         """
         if not done_zss:
             return []
         # 边界划分计划(swing_segments+subsplit+trend_dir)是 done_zss 纯函数、占本调用
         # ~82%(classify_rel 密集);按值签名 memo,跨 K 不变即命中跳过全部重扫。trend_dir
         # 并入计划(亦 classify_rel),命中时连同 a/b/swing_dir 一并复用。
-        sig = self._signature(done_zss)
+        sig = (self._signature(done_zss), tuple(
+            None if dv is None else (bool(dv.is_beichi), dv.kind, bool(dv.provisional))
+            for dv in (done_divergence or [])
+        ))   # 背驰参与边界(F3)后计划缓存键须含背驰摘要,防 divergence 变化命中陈旧计划
         plan = self._plan_cache.get(sig)
         if plan is None:
             plan = []
             for s, e, sdir in self._swing_segments(done_zss):
                 for a, b in self._subsplit(done_zss, s, e):   # 子段继承摆动腿方向
-                    plan.append((a, b, sdir, self._trend_dir(done_zss[a:b + 1])))
+                    for a2, b2 in self._beichi_split(done_zss, done_divergence, a, b):
+                        plan.append((a2, b2, sdir, self._trend_dir(done_zss[a2:b2 + 1])))
             if len(self._plan_cache) > 64:                    # 多级共用一实例,留余量(见 __init__)
                 self._plan_cache.clear()
             self._plan_cache[sig] = plan
