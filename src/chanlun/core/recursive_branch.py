@@ -65,6 +65,65 @@ def _mark_upgrades(done_zss: List[ZS]) -> List[int]:
     return out
 
 
+def _dingli2_upgrade_forming(done_zss: List[ZS]) -> List[ZS]:
+    """定理二升级预告(L020:39):相邻 done 中枢「核心区[ZD,ZG]分离 + 波动区间[DD,GG]
+    重叠」⟺ 更大级别中枢正在形成。
+
+    按**进行式**语义(L043 缠答:两中枢区间重合「必然扩展成」更大级别中枢,进行式非完成式)
+    产 forming 中枢:done=False、核心区候选=波动重叠带 [max(DD),min(GG)],供注入下一级
+    live_zss 作虚线预告;**不入 done 链**——完成确认仍走自然递归(3 个次级别走势类型重叠)。
+    无未来函数:仅读已完成中枢的当下几何。趋势对(波动分离)与延伸族(核心重叠)不产。
+    """
+    # 只看**末对**(done_zss[-2], done_zss[-1]):进行式语义=当下正在形成;历史升级对已被
+    # 走势演化消化(自然递归 L1 / 走势类型分段),不作预告——否则全历史升级对灌 live 层,
+    # 图表满屏虚线(600519 笔塔实测 26 个)且违「正在形成」语义。每级至多 1 个预告。
+    out: List[ZS] = []
+    for i in range(max(1, len(done_zss) - 1), len(done_zss)):
+        a, b = done_zss[i - 1], done_zss[i]
+        vals = (a.zd, a.zg, b.zd, b.zg,
+                getattr(a, "dd", None), getattr(a, "gg", None),
+                getattr(b, "dd", None), getattr(b, "gg", None))
+        if any(v is None for v in vals):
+            continue
+        if not (b.zd > a.zg or b.zg < a.zd):      # 核心区未分离 → 延伸族
+            continue
+        lo, hi = max(a.dd, b.dd), min(a.gg, b.gg)
+        if lo >= hi:                              # 波动区间分离 → 趋势
+            continue
+        z = ZS(zs_type=getattr(a, "zs_type", "xd"),
+               start=(a.lines[0] if a.lines else None),
+               end=(b.lines[-1] if b.lines else None),
+               zg=hi, zd=lo, gg=max(a.gg, b.gg), dd=min(a.dd, b.dd))
+        z.lines = list(a.lines or []) + list(b.lines or [])
+        z.line_num = len(z.lines)
+        z.done = False
+        z._dingli2_upgrade = True
+        z._gg_cache, z._dd_cache, z._bounds_dirty = z.gg, z.dd, False
+        out.append(z)
+    return out
+
+
+def _forming_dedup(forming: List[ZS], existing: List[ZS]) -> List[ZS]:
+    """升级预告与本级已有(done/live)中枢时间范围重叠者丢弃——自然递归已捕获,避免双框。"""
+
+    def span(z):
+        ls = getattr(z, "lines", None) or []
+        if not ls or ls[0].start is None or ls[-1].end is None:
+            return None
+        return (ls[0].start.k.k_index, ls[-1].end.k.k_index)
+
+    spans = [s for s in (span(z) for z in existing) if s is not None]
+    out = []
+    for f in (forming or []):
+        fs = span(f)
+        if fs is None:
+            continue
+        if any(not (fs[1] < s[0] or fs[0] > s[1]) for s in spans):
+            continue
+        out.append(f)
+    return out
+
+
 class RecursiveBranchCalculator:
     """递归装配计算器。无状态，每次 calculate 全量重算。"""
 
@@ -136,6 +195,7 @@ class RecursiveBranchCalculator:
         if not xds:
             return []
         results: List[LevelResult] = []
+        carry_forming: List[ZS] = []   # 上一级的定理二升级预告,注入本级 live_zss(O3b-lite)
         units: List[LINE] = list(xds)
         zslx_calc = self._zslx_calc    # 持久复用(见 __init__)
         level = 0
@@ -165,12 +225,14 @@ class RecursiveBranchCalculator:
                 # 后再终止——让层级树展示到右边缘正在形成的高级中枢(未完成无法切走势类型，
                 # 不上卷)。此处放宽“仅采用已完成中枢”的默认口径，允许右边缘 pending 中枢入树。
                 pend = [h for h in res.live if h.node1 == "leave"]
-                if pend:
+                inject = _forming_dedup(carry_forming, [h.zs for h in pend])
+                carry_forming = []
+                if pend or inject:
                     results.append(LevelResult(
                         level=level, zss=[h.zs for h in pend],
                         done_divergence=[h.divergence for h in pend],
                         zslxs=[], upgrade_idx=_mark_upgrades([h.zs for h in pend]),
-                        units=list(units),
+                        units=list(units), live_zss=inject,
                     ))
                 break
             zslxs = zslx_calc.calculate(res.done_zss, res.done_divergence)
@@ -187,10 +249,20 @@ class RecursiveBranchCalculator:
             results.append(LevelResult(
                 level=level, zss=res.done_zss, done_divergence=res.done_divergence,
                 zslxs=zslxs, upgrade_idx=_mark_upgrades(res.done_zss), units=list(units),
-                live_zss=forming, live_qs_divergence=live_qs,
+                live_zss=forming + _forming_dedup(carry_forming, res.done_zss + forming),
+                live_qs_divergence=live_qs,
             ))
+            carry_forming = _dingli2_upgrade_forming(res.done_zss)   # 本级升级对 → 下一级预告
             if len(zslxs) < 3:
                 break
             units = self._as_units_cached(zslxs, level)
             level += 1
+        if carry_forming:
+            # 递归止于 L_k 而定理二升级预告属于 L_{k+1}(自然递归尚够不到的高级别正在形成
+            # ——预告最有价值的场景):追加仅含 live_zss 的层,图表画虚线框。
+            nxt = (results[-1].level + 1) if results else 0
+            results.append(LevelResult(
+                level=nxt, zss=[], done_divergence=[], zslxs=[],
+                live_zss=list(carry_forming),
+            ))
         return results

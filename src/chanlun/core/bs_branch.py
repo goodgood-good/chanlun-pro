@@ -24,6 +24,8 @@ class BuySellPoint:
     level: Optional[int] = None               # 二类归属级别 L_k;单级一三类为 None
     structural_stop_below: Optional[float] = None  # 买点失效下边界:1/2买前低、3买 ZG
     structural_stop_above: Optional[float] = None  # 卖点失效上边界:1/2卖前高、3卖 ZD
+    rebound_target: Optional[float] = None    # 一类点最弱反弹目标(L029:14 反弹必触及末中枢
+    # DD/GG):1buy=zs.dd、1sell=zs.gg;反弹不触及=分解有误信号,亦供策略最小出场目标
 
 
 class BsBranchCalculator:
@@ -60,9 +62,11 @@ class BsBranchCalculator:
             c = dv.leave_seg
             z = zs_result.done_zss[i]
             if c._type == "down":
-                out.append(BuySellPoint("1buy", z, c, c.end, dv))
+                out.append(BuySellPoint("1buy", z, c, c.end, dv,
+                                        rebound_target=getattr(z, "dd", None)))
             elif c._type == "up":
-                out.append(BuySellPoint("1sell", z, c, c.end, dv))
+                out.append(BuySellPoint("1sell", z, c, c.end, dv,
+                                        rebound_target=getattr(z, "gg", None)))
         self._fc_zr = zs_result
         self._fc_cache = out
         return out

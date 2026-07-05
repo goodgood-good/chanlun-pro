@@ -33,9 +33,11 @@ class Bs1BranchCalculator:
                     continue
                 z = zss[i]
                 if c._type == "down":                                 # 跌势衰竭 → 一类买
-                    out.append(BuySellPoint("1buy", z, c, c.end, dv, level=lr.level))
+                    out.append(BuySellPoint("1buy", z, c, c.end, dv, level=lr.level,
+                                            rebound_target=getattr(z, "dd", None)))
                 elif c._type == "up":
-                    out.append(BuySellPoint("1sell", z, c, c.end, dv, level=lr.level))
+                    out.append(BuySellPoint("1sell", z, c, c.end, dv, level=lr.level,
+                                            rebound_target=getattr(z, "gg", None)))
         return out
 
 

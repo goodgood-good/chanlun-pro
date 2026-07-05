@@ -29,6 +29,29 @@ class XiaoZhuanDaCandidate:
     anchor_fx: FX               # 三类点出图锚(回试段终点)
     invalid: float              # 结构失效位:向上 = ZG、向下 = ZD
     sub_level: int              # 次级别 L_{k-1}
+    sub_trend_zs_count: int = 1  # 次级别末尾连续同向中枢数(L043:20 小转大高发于趋势
+    # 冲顶/赶底:≥2=真趋势背驰所在,越深越接近冲顶/赶底,供候选质量分级)
+
+
+def _tail_trend_depth(zss) -> int:
+    """末尾连续「依次同向」中枢数(classify_rel 趋势关系链长+1);无趋势关系=1。
+
+    L043:20:小转大最值得注意的出现在趋势的冲顶/赶底中——深度≥2 表示背驰发生在
+    真趋势末端,越深越接近冲顶/赶底。仅读已完成中枢当下几何,无未来函数。"""
+    from chanlun.core.zs_branch import classify_rel
+
+    if len(zss) < 2:
+        return len(zss)
+    rel0 = classify_rel(zss[-2], zss[-1])
+    if rel0 not in ("trend_up", "trend_down"):
+        return 1
+    n = 2
+    for i in range(len(zss) - 2, 0, -1):
+        if classify_rel(zss[i - 1], zss[i]) == rel0:
+            n += 1
+        else:
+            break
+    return n
 
 
 def _last_settled_beichi(level):
@@ -86,9 +109,11 @@ class XiaoZhuanDaCalculator:
                 if p.bs_type == "3buy" and bdir == "down":   # 三买 + 最近为底背驰 → 向上小转大
                     out.append(XiaoZhuanDaCandidate(
                         level=k, direction="up", necessary_zs=last_zs,
-                        anchor_fx=p.anchor_fx, invalid=last_zs.zg, sub_level=k - 1))
+                        anchor_fx=p.anchor_fx, invalid=last_zs.zg, sub_level=k - 1,
+                        sub_trend_zs_count=_tail_trend_depth(sub_zss)))
                 elif p.bs_type == "3sell" and bdir == "up":  # 三卖 + 最近为顶背驰 → 向下小转大
                     out.append(XiaoZhuanDaCandidate(
                         level=k, direction="down", necessary_zs=last_zs,
-                        anchor_fx=p.anchor_fx, invalid=last_zs.zd, sub_level=k - 1))
+                        anchor_fx=p.anchor_fx, invalid=last_zs.zd, sub_level=k - 1,
+                        sub_trend_zs_count=_tail_trend_depth(sub_zss)))
         return out
