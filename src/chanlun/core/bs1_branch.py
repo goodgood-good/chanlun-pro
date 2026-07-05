@@ -43,7 +43,10 @@ class QuasiFirstClassCalculator:
     """类一买/类一卖(大级别盘整背驰视为类买卖点)。
 
     done_divergence 含盘整背驰条目;盘整背驰且 is_beichi 的离开段 → 类一类(离开向下
-    =类1buy/向上=类1sell)。「类」表示操作意义偏弱、需次级别确认,故:① bs_type
+    =类1buy/向上=类1sell)。原文定位(L027:5-6):盘整背驰构成的多是**二三类买点**而非
+    一买(围绕中枢波动、无三卖,无法确定一买)——「类一买」命名偏原文,其正式用途已由
+    2 类最弱档(盘背确认)承担,本 marker 仅供观察。「类」表示操作意义偏弱、需次级别
+    确认,故:① bs_type
     用 '类1buy'/'类1sell' 区别于严格一类;② 不入默认 get_branch_bspoints / 回测
     BUYS 白名单(engine.buy_class 取首字符 int,'类'会崩),作单独 marker
     (cd.get_branch_quasi_first)暴露,供图表/分析/可选用,不改默认信号/回测。全级别。

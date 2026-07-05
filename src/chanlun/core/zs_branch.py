@@ -62,14 +62,34 @@ def body_envelope(zs: ZS) -> Tuple[float, float]:
     return envelope(zs.lines[:3])
 
 
-def classify_rel(prev: ZS, cur: ZS) -> str:
-    """相邻中枢关系判定（本体包络口径）。
+def _wave_envelope(zs: ZS) -> Tuple[float, float]:
+    """波动区间 [DD, GG] = 全部本体段包络(离开段已由 correct_exit 剥出)。
 
-    比较两中枢的本体包络（剔除离开段远摆）：后 DD>前GG → "trend_up"；
-    后 GG<前DD → "trend_down"；否则本体相交 → "expand"（升级候选）。
+    原文中心定理(L020):GG=max(gn)/DD=min(dn),n 遍历中枢内**所有** Z 段(含延伸段)。
+    done+校正后中枢的 zs.gg/zs.dd 正是该口径;gg/dd 缺失(裸桩/测试)退化 body_envelope。
     """
-    p_dd, p_gg = body_envelope(prev)
-    c_dd, c_gg = body_envelope(cur)
+    dd = getattr(zs, "dd", None)
+    gg = getattr(zs, "gg", None)
+    if dd is None or gg is None:
+        return body_envelope(zs)
+    return (dd, gg)
+
+
+def classify_rel(prev: ZS, cur: ZS) -> str:
+    """相邻中枢关系三分类——对齐原文中心定理二(L020:39)。
+
+    「后 GG<前 DD ⟺ 下跌及其延续;后 DD>前 GG ⟺ 上涨及其延续;后 ZG<前 ZD 且
+    后 GG≥前 DD(或对称) ⟺ 形成高级别的走势中枢」。
+    - 波动区间 GG/DD 完全分离 → "trend_up"/"trend_down";
+    - 否则 → "expand":核心区[ZD,ZG]分离而波动重叠=定理二升级情形(高级别中枢),
+      核心区重叠=延伸族(上游 _merge_overlapping_cores 已并、残余同归)。当前消费方
+      (zslx 分段/升级标注)对两种非趋势情形同策,故不再细分;升级实体化时再按
+      ZG/ZD 细分(audit O3b)。
+    旧实现用「前 3 段本体包络」——延伸段波动被错误剔除(原文 GG 遍历含延伸段),
+    升级情形会被误判为趋势,已按定理二字面订正(audit O3a, 2026-07-06)。
+    """
+    p_dd, p_gg = _wave_envelope(prev)
+    c_dd, c_gg = _wave_envelope(cur)
     if c_dd > p_gg:
         return "trend_up"
     if c_gg < p_dd:
@@ -241,6 +261,9 @@ class ZsBranchCalculator:
         pending: Optional[ZS] = zc.pending_zs    # 右边缘进行中中枢（单解，无离开段）
         if pending is not None:
             pending = correct_entry(pending, self.min_zs_lines)
+        # 不变量(原文 L018:9「前三个…都是完成的才构成中枢」):done 中枢不含未完成构成段。
+        # 由扫描结构隐含保证——未完成段只能是序列末段,它要么进 pending、要么作为
+        # 「下一段不重叠」的触发者被排除在 done 中枢外(2026-07-06 探针实证双塔全级零违反)。
         for z in done:                           # 合法性不变量（防回归）：本体最小 3 段
             assert len(z.lines) >= 3 and z.zd < z.zg
         done_div: List[Optional[DivergenceResult]] = [
