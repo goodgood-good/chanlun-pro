@@ -86,10 +86,14 @@ def test_new_cl_when_config_changes(mock_cl):
 
 
 def test_no_reuse_without_cache_key(mock_cl):
-    """无 cache_key → 每次新建(不入池), 向后兼容全量行为。"""
-    recompute_chart_data_from_klines("a", "SYN", "1m", {}, _klines_df([1000, 1060], [10, 11]))
-    recompute_chart_data_from_klines("a", "SYN", "1m", {}, _klines_df([1000, 1060], [10, 11]))
-    assert len(_FakeCL.instances) == 2
+    """无 cache_key → 每次新建(不入池), 向后兼容全量行为。
+
+    断言用两次返回的实例 id 不同(各自新建),不数全局 _FakeCL.instances——patch 窗口内
+    前序测试残留的后台线程(prewarm/SSE 重算)构造 CL 会污染全局计数,曾致 ~1/7 间歇失败。
+    """
+    r1 = recompute_chart_data_from_klines("a", "SYN", "1m", {}, _klines_df([1000, 1060], [10, 11]))
+    r2 = recompute_chart_data_from_klines("a", "SYN", "1m", {}, _klines_df([1000, 1060], [10, 11]))
+    assert r1["id"] != r2["id"]  # 各自新建、不共享实例
 
 
 def test_store_cl_to_pool_then_reuse(mock_cl):
