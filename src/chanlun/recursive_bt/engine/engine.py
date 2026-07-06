@@ -497,6 +497,22 @@ def collect_branch_signals(
             nest_depth=nest_depth,
             **_structural_signal_fields(p),
         ))
+    # 升级中枢三类点(升级实体化二期,独立 bs_type=3buy_dingli2/3sell_dingli2):事件流
+    # 可见、**不入 BUYS/SELLS 白名单=零交易行为**;绩效接入由白名单对照实验裁决(audit
+    # yuanwen_deep_analysis §十一)。getattr 防御:mock/旧 CL 无此方法时静默跳过。
+    _dl2 = getattr(cd, "get_branch_dingli2_bspoints", None)
+    if _dl2 is not None:
+        try:
+            for p in _dl2(use_xd=use_xd):
+                fx = p.anchor_fx
+                if fx is None or fx.k is None:
+                    continue
+                out.append(Signal(
+                    fx.k.date, p.level or 0, f"{p.bs_type}_dingli2", fx.val,
+                    **_structural_signal_fields(p),
+                ))
+        except Exception:
+            pass
     out.sort(key=lambda s: s.date)
     return out
 
