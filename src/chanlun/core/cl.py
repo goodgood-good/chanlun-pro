@@ -672,6 +672,10 @@ class CL(ICL):
                     lv = by_blevel.get(blockr_level)
                     if lv is not None:
                         nz = list(lv.zss)
+                        # dingli2 升级中枢·语境标注(audit §十三定位:图表语境、非交易
+                        # 触发):done 升级带并入本级中枢显示(生成时已与自然递归中枢时间
+                        # 去重 D3);买卖点刻意**不并入** bsp——画交易标记违背该裁决。
+                        nz += list(getattr(lv, "upgrade_zss", None) or [])
                         cur_zslxs = list(lv.zslxs or [])
                         bsp = list(bsp_by_blevel.get(blockr_level, []))
                         bcs = [
