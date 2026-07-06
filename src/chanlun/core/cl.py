@@ -533,6 +533,36 @@ class CL(ICL):
         self._recursive_memo[memo_key] = out
         return out
 
+    def get_branch_dingli2_bspoints(self, use_xd: bool = False):
+        """升级中枢三类买卖点(升级实体化二期第一步,独立通道)。lazy 并存。
+
+        返回 List[BuySellPoint](p.level=升级中枢所在级,p.zs._dingli2_upgrade=True)。
+        不入默认信号白名单;绩效接入待 engine 采集层对照。units 用升级中枢构成段
+        所在层(L_{k-1})的段序列。
+        """
+        memo_key = ("dingli2_bsp", bool(use_xd))
+        cached = self._recursive_memo.get(memo_key)
+        if cached is not None:
+            return cached
+        from chanlun.core.recursive_branch import dingli2_third_class
+        ld = lambda s, e: query_macd_ld(self, s, e)      # noqa: E731
+        wzgx = self._recursive_wzgx()
+        units0 = list(self.get_xds()) if use_xd else list(self.get_bis())
+        levels = self._recursive_branch_calc(use_xd).calculate(units0, ld, wzgx, self.frequency)
+        by_level = {lv.level: lv for lv in levels}
+        out = []
+        for lv in levels:
+            ups = getattr(lv, "upgrade_zss", None) or []
+            if not ups:
+                continue
+            base = by_level.get(lv.level - 1)
+            lines = list(base.units) if base is not None else units0
+            for pt in dingli2_third_class(ups, lines):
+                pt.level = lv.level
+                out.append(pt)
+        self._recursive_memo[memo_key] = out
+        return out
+
     def get_branch_quasi_first(self, use_xd: bool = False):
         """新核心:类一买/类一卖(大级别盘整背驰=历史性底部=类买点)。lazy 并存。
         返回 List[BuySellPoint](bs_type='类1buy'/'类1sell')。

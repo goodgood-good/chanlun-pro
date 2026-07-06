@@ -86,9 +86,11 @@ def _dingli2_pair(a: ZS, b: ZS):
 
 def _dingli2_build(a: ZS, b: ZS, lo: float, hi: float, done: bool) -> ZS:
     """由升级对构造升级中枢:核心区候选=波动重叠带,lines=两中枢构成段拼接(供定位)。"""
+    # end=升级中枢的离开段:优先 b 的真离开段 b.end(correct_exit 已剥出、定向冲出者),
+    # 退化用末核心段——三类点判定(_next_seg 找回试)依赖它的方向与在 units 中的位置。
     z = ZS(zs_type=getattr(a, "zs_type", "xd"),
            start=(a.lines[0] if a.lines else None),
-           end=(b.lines[-1] if b.lines else None),
+           end=(getattr(b, "end", None) or (b.lines[-1] if b.lines else None)),
            zg=hi, zd=lo, gg=max(a.gg, b.gg), dd=min(a.dd, b.dd))
     z.lines = list(a.lines or []) + list(b.lines or [])
     z.line_num = len(z.lines)
@@ -120,6 +122,25 @@ def _dingli2_upgrade_zss(done_zss: List[ZS]) -> List[ZS]:
             continue                          # 后续与带重叠/缺字段 → 未确认
         out.append(_dingli2_build(done_zss[i - 1], done_zss[i], lo, hi, done=True))
     return out
+
+
+def dingli2_third_class(upgrade_zss: List[ZS], units: List[LINE]):
+    """升级中枢三类买卖点(升级实体化二期第一步,独立通道)。
+
+    复用 bs_branch._third_class 几何口径——升级中枢 zd/zg=升级带、end=离开段,
+    「向上离开+首次回试不破 ZG」⟺ 大级别三买(L020 定理二注解图4:跌破 GG 形成三买
+    后两中枢重叠升级——升级中枢的三类点即更大级别转折信号)。信号挂升级中枢
+    (zs._dingli2_upgrade=True 可溯),**不入默认信号白名单**——绩效接入待 engine
+    采集层对照(二期后续)。units=升级中枢构成段所在层(L_k)的段序列。
+    """
+    from chanlun.core.bs_branch import BsBranchCalculator
+    from chanlun.core.zs_branch import ZsBranchResult
+
+    if not upgrade_zss:
+        return []
+    zr = ZsBranchResult(done_zss=list(upgrade_zss), live=[], freeze_idx=0,
+                        done_divergence=[])
+    return BsBranchCalculator()._third_class(zr, units)
 
 
 def _dingli2_upgrade_forming(done_zss: List[ZS]) -> List[ZS]:

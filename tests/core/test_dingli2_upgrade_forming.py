@@ -104,3 +104,41 @@ def test_upgrade_pair_next_overlapping_not_confirmed():
     b = _ZS(zd=19, zg=24, dd=15, gg=26, i0=200)   # 带=[15,22]
     c = _ZS(zd=17, zg=23, dd=16, gg=25, i0=300)   # dd(16)<hi(22) 与带重叠
     assert _dingli2_upgrade_zss([a, b, c]) == []
+
+
+# ---- 二期第一步:升级中枢三类买卖点(独立通道) ----
+from chanlun.core.recursive_branch import dingli2_third_class
+
+
+def test_dingli2_upgrade_zs_third_class():
+    """升级中枢(带=[15,22])向上离开后回试不破 ZG(22) → 大级别三买(几何口径与
+    bs_branch._third_class 一致,复用之;信号挂升级中枢,独立通道不入白名单)。"""
+    a = _ZS(zd=12, zg=18, dd=10, gg=22, i0=100)
+    b = _ZS(zd=19, zg=24, dd=15, gg=26, i0=200)
+    c = _ZS(zd=40, zg=48, dd=38, gg=50, i0=300)   # 离开确认(dd>hi)
+    ups = _dingli2_upgrade_zss([a, b, c])
+    assert len(ups) == 1
+    z = ups[0]
+    # units 序列:升级中枢构成段 + 离开段(向上冲出带) + 回试段(终点 23 ≥ ZG=22)
+    leave = z.lines[-1]
+    retest = _Line("down", 240, 30.0, 250, 23.0)
+    units = list(z.lines) + [retest]
+    pts = dingli2_third_class([z], units)
+    assert len(pts) == 1 and pts[0].bs_type == "3buy"
+    assert pts[0].zs is z and getattr(pts[0].zs, "_dingli2_upgrade", False)
+
+
+def test_dingli2_third_class_with_stripped_leave_seg():
+    """生产形态:b.end 是被 correct_exit 剥出的独立离开段(≠lines[-1])——升级中枢的
+    end 必须取真离开段,三类点回试从它之后找(修复前用末核心段致 600519 全零)。"""
+    a = _ZS(zd=12, zg=18, dd=10, gg=22, i0=100)
+    b = _ZS(zd=19, zg=24, dd=15, gg=26, i0=200)
+    b.end = _Line("up", 230, 19.0, 240, 30.0)     # 独立离开段(向上冲出带 hi=22)
+    c = _ZS(zd=40, zg=48, dd=38, gg=50, i0=300)
+    ups = _dingli2_upgrade_zss([a, b, c])
+    z = ups[0]
+    assert z.end is b.end and z.end is not b.lines[-1]
+    retest = _Line("down", 240, 30.0, 250, 23.0)  # 回试 23 >= ZG(22) → 3buy
+    units = list(z.lines) + [z.end, retest]
+    pts = dingli2_third_class([z], units)
+    assert [p.bs_type for p in pts] == ["3buy"]
