@@ -2340,11 +2340,14 @@ def make_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--buy-priority", choices=("3first", "1first"), default="3first")
     parser.add_argument("--require", default="tech")
     parser.add_argument("--big-gate", choices=("bsp", "trend"), default="bsp")
-    parser.add_argument("--regime-mode", choices=("off", "adaptive"), default="off")
+    # combo_b140 采纳为生产默认(2026-07-06,本 Goal「最大收益最低回撤」授权):证据链=
+    # 65 轮 2/2 窗口(+131.5% 全 A 时代)+v17 口径 30 池复验全维度占优(-1.2%/3.2%/-0.55
+    # vs -1.5%/3.5%/-0.64,交易数同=纯仓位再分配)。显式 --regime-mode off 可退回。
+    parser.add_argument("--regime-mode", choices=("off", "adaptive"), default="adaptive")
     parser.add_argument("--mid-gate", choices=("strict", "soft", "bull_relaxed"), default="strict")
     parser.add_argument(
         "--regime-bs-ratio-multipliers-json",
-        default="",
+        default='{"bear":{"3":1.4},"bull":{"1":0.5},"range":{"1":0.5}}',  # combo_b140(采纳,见 --regime-mode 注)
         help='Inline JSON or file path, e.g. {"bear": {"3": 1.25}}: point-in-time '
         "regime (bull/range/bear) buy-ratio multipliers by buy class",
     )
