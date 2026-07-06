@@ -2162,6 +2162,15 @@ def run_backtest(args) -> tuple[dict, dict]:
         getattr(args, "after_3sell_reentry_scope", "all") or "all"
     )
 
+    # require 含 ma/rs 时补挂海选(收盘>70日线)/比价(20日强于大盘)过滤数组——
+    # systems.py 同款 attach_pool_filters,point-in-time 前日收盘无未来函数;
+    # 原文锚=选股「强于大盘」取向;归因证据=阴跌型标的 3 买质量差(audit §十七)。
+    if any(r in ("ma", "rs") for r in args.require):
+        _mkt_pool = regime_source_sym or portfolio_mod.load_cached("SH.000001")
+        if _mkt_pool is None:
+            raise SystemExit("require=ma/rs 需要大盘缓存(SH.000001)构建过滤数组")
+        portfolio_mod.attach_pool_filters(syms, _mkt_pool)
+
     t_start = _coerce_window_ts(args.start, syms)
     t_end = _coerce_window_ts(args.end, syms)
     label = f"{args.market}-{len(syms)}只-live-parity"
