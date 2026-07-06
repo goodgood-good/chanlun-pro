@@ -218,7 +218,6 @@ def create_app(test_config=None):
     from .blueprints.other import other_bp
     from .blueprints.options import options_bp
     from .blueprints.symbols import symbols_bp
-    from chanlun.signal_monitor.web import signal_compare_bp
 
     app.register_blueprint(zixuan_bp)
     app.register_blueprint(alert_bp)
@@ -229,7 +228,6 @@ def create_app(test_config=None):
     app.register_blueprint(other_bp)
     app.register_blueprint(options_bp)
     app.register_blueprint(symbols_bp)
-    app.register_blueprint(signal_compare_bp)
 
     # 共享对象存入 app.extensions，供蓝图访问
     app.extensions = getattr(app, "extensions", {})
