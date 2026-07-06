@@ -74,3 +74,33 @@ def test_historical_upgrade_pair_not_previewed():
     c = _ZS(zd=40, zg=48, dd=38, gg=50, i0=300)   # 但其后已有趋势离开的新中枢
     out = _dingli2_upgrade_forming([a, b, c])
     assert out == []                              # b-c 是趋势对、a-b 已成历史
+
+
+# ---- 立项第一期(方案 b):独立 done 通道 ----
+from chanlun.core.recursive_branch import _dingli2_upgrade_zss
+
+
+def test_upgrade_pair_confirmed_by_departing_zs():
+    """升级对(a,b)之后的中枢 c 波动与升级带分离 → done 升级中枢(离开确认,L043 一般划分)。"""
+    a = _ZS(zd=12, zg=18, dd=10, gg=22, i0=100)
+    b = _ZS(zd=19, zg=24, dd=15, gg=26, i0=200)   # 带=[15,22]
+    c = _ZS(zd=40, zg=48, dd=38, gg=50, i0=300)   # dd(38)>hi(22) 分离=离开确认
+    out = _dingli2_upgrade_zss([a, b, c])
+    assert len(out) == 1 and out[0].done is True
+    assert out[0].zd == 15.0 and out[0].zg == 22.0
+    assert getattr(out[0], "_dingli2_upgrade", False) is True
+
+
+def test_upgrade_pair_tail_not_confirmed():
+    """末对无后续中枢 → 不产 done(forming 语义归 live 预告通道)。"""
+    a = _ZS(zd=12, zg=18, dd=10, gg=22, i0=100)
+    b = _ZS(zd=19, zg=24, dd=15, gg=26, i0=200)
+    assert _dingli2_upgrade_zss([a, b]) == []
+
+
+def test_upgrade_pair_next_overlapping_not_confirmed():
+    """后续中枢与升级带重叠 → 震荡未离开,保守不产 done(带延伸合并留二期 D5)。"""
+    a = _ZS(zd=12, zg=18, dd=10, gg=22, i0=100)
+    b = _ZS(zd=19, zg=24, dd=15, gg=26, i0=200)   # 带=[15,22]
+    c = _ZS(zd=17, zg=23, dd=16, gg=25, i0=300)   # dd(16)<hi(22) 与带重叠
+    assert _dingli2_upgrade_zss([a, b, c]) == []

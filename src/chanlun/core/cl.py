@@ -514,6 +514,25 @@ class CL(ICL):
         self._recursive_memo[memo_key] = pts
         return pts
 
+    def get_branch_dingli2_upgrades(self, use_xd: bool = False):
+        """定理二升级中枢·独立 done 通道(升级实体化立项第一期,方案 b)。lazy 并存。
+
+        返回 List[(level, ZS)]:各级已确认(离开确认)的升级中枢,zs._dingli2_upgrade=True。
+        不入 zss/递归上行/默认信号白名单——图表独立显示与二期回测对照用(设计文档
+        docs/superpowers/specs/2026-07-06-upgrade-materialization-design.md)。
+        """
+        memo_key = ("dingli2_up", bool(use_xd))
+        cached = self._recursive_memo.get(memo_key)
+        if cached is not None:
+            return cached
+        ld = lambda s, e: query_macd_ld(self, s, e)      # noqa: E731
+        wzgx = self._recursive_wzgx()
+        units = list(self.get_xds()) if use_xd else list(self.get_bis())
+        levels = self._recursive_branch_calc(use_xd).calculate(units, ld, wzgx, self.frequency)
+        out = [(lv.level, z) for lv in levels for z in getattr(lv, "upgrade_zss", []) or []]
+        self._recursive_memo[memo_key] = out
+        return out
+
     def get_branch_quasi_first(self, use_xd: bool = False):
         """新核心:类一买/类一卖(大级别盘整背驰=历史性底部=类买点)。lazy 并存。
         返回 List[BuySellPoint](bs_type='类1buy'/'类1sell')。
