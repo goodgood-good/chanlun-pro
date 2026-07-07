@@ -16,7 +16,7 @@ logger.info("期货自动化交易程序")
 
 try:
     zx = zixuan.ZiXuan("futures")
-    ex = ExchangeTq(use_account=True)
+    ex = ExchangeTq(use_simulate_account=True)
     frequencys = ["10s"]
     cl_config = {
         # 分型默认配置
