@@ -14,6 +14,7 @@ HTF 增量)的注释都声称"等价性由 test_incremental_equivalence 守护",
 合成数据非真实 parquet 浮点边界(~4e-16,fixture 已删),真实浮点对拍待恢复真 parquet 后补
 (D4-CRIT-1 修复建议:`git checkout master -- tests/core/` 取回并适配 HEAD 优化版签名)。
 """
+import copy
 import numpy as np
 import pandas as pd
 import pytest
@@ -106,6 +107,51 @@ def test_cl_incremental_equals_batch_per_prefix(seed):
         for key in inc_sigs:
             assert inc_sigs[key] == bat_sigs[key], (
                 f"inc != batch @ seed={seed} L={L} key={key}\n"
+                f"  only_inc={set(inc_sigs[key]) - set(bat_sigs[key])}\n"
+                f"  only_bat={set(bat_sigs[key]) - set(inc_sigs[key])}"
+            )
+
+
+def _gen_zss_klines(n, seed):
+    """多频强震荡, 产生线段中枢(xd_zss>=1), 使 zslx.calculate 走 _wt_restart 而非空 zss 早退。"""
+    rng = np.random.RandomState(seed)
+    idx = np.arange(n)
+    prices = 100 + 3 * np.sin(idx / 13.0) + 2 * np.sin(idx / 5.0) + 1 * np.sin(idx / 2.3) + rng.randn(n) * 0.2
+    t0 = pd.Timestamp("2024-01-01 09:30:00")
+    rows = []
+    for i in range(n):
+        p = float(prices[i])
+        rows.append({"date": t0 + pd.Timedelta(minutes=i), "high": p + 0.25, "low": p - 0.25, "open": p, "close": p, "volume": 1000.0})
+    return pd.DataFrame(rows)
+
+
+@pytest.mark.parametrize("seed", [7, 29])
+def test_cl_deepcopy_then_incremental_equals_batch(seed):
+    """持久 CL 池 store_cl_to_pool 的 copy.deepcopy(cl) 复用回归网。
+
+    预热 CL(线段中枢非空) -> deepcopy(模拟入池, 触发 __getstate__/__setstate__) ->
+    池副本继续增量 process_klines。必须 (a) 不抛异常 (b) 逐前缀 inc==batch。
+
+    修复前:ZslxCalculator.__setstate__ 漏恢复 _wt_state, _wt_restart 首行直接访问
+    self._wt_state -> AttributeError: object has no attribute '_wt_state'。
+    xd_zss 非空守卫确保真的走 _wt_restart(空 zss 会 early-return 重建属性而绕过 bug)。
+    """
+    n, warm_L = 480, 450
+    df = _gen_zss_klines(n, seed)
+    base = CL("TST", _FREQ, dict(_CFG))
+    base.process_klines(df.iloc[:warm_L].reset_index(drop=True))
+    assert len(base.get_xd_zss()) >= 1, "预热须产生线段中枢, 否则绕过 _wt_restart"
+    pooled = copy.deepcopy(base)          # 模拟 store_cl_to_pool: copy.deepcopy(cl)
+    for L in range(warm_L + 1, n + 1):
+        sub = df.iloc[:L].reset_index(drop=True)
+        pooled.process_klines(sub)        # 修复前首步即抛 _wt_state AttributeError
+        inc_sigs = _all_sigs(pooled)
+        fresh = CL("TST", _FREQ, dict(_CFG))
+        fresh.process_klines(sub)
+        bat_sigs = _all_sigs(fresh)
+        for key in inc_sigs:
+            assert inc_sigs[key] == bat_sigs[key], (
+                f"deepcopy-inc != batch @ seed={seed} L={L} key={key}\n"
                 f"  only_inc={set(inc_sigs[key]) - set(bat_sigs[key])}\n"
                 f"  only_bat={set(bat_sigs[key]) - set(inc_sigs[key])}"
             )

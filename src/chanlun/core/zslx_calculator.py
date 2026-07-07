@@ -106,6 +106,13 @@ class ZslxCalculator:
         self.__dict__.update(state)
         if "_zs_sig_cache" not in self.__dict__:
             self._zs_sig_cache = WeakKeyDictionary()
+        # __getstate__ 丢弃的另两个瞬态属性同样补默认(对称 _zs_sig_cache): _wt_state 的读取方
+        # _wt_restart 用直接属性访问(非 getattr), 反序列化后缺失即 AttributeError
+        # (持久 CL 池 store_cl_to_pool 的 copy.deepcopy 复用路径会触发)。语义=回到 __init__ 后空瞬态。
+        if "_backfill_cache" not in self.__dict__:
+            self._backfill_cache = None
+        if "_wt_state" not in self.__dict__:
+            self._wt_state = None
 
     @staticmethod
     def _line_sig(line: LINE) -> tuple:
@@ -197,7 +204,7 @@ class ZslxCalculator:
         安全判据:完成走势类型覆盖的中枢全落在 zss 身份公共前缀内、留 2 中枢 buffer(防末
         中枢背驰回看 + 边界判定)。zss 由 ZsCalculator copy + 尾部 no-op→对象身份保留,可
         二分前缀。首次/前缀过短→全量(返回 [],1,[zss[0]],None)。"""
-        state = self._wt_state
+        state = getattr(self, "_wt_state", None)  # 容错: 反序列化实例可能缺此属性(同 _backfill_cache 读取)
         if state is None:
             return [], 1, [zss[0]], None
         last_zss, last_done_wts = state

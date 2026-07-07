@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 import datetime
-from typing import Union, List, Tuple, Any, Optional
+from typing import Union, List, Tuple, Any
 import pandas as pd
 
 from chanlun.core.bi_calculator import BiCalculator
@@ -412,17 +412,18 @@ class CL(ICL):
         实际严一段;golden/回测基线均已固化在该行为上,若要按字面意图放宽须另行拍板并联动重跑。
         递归链(recursive_branch/recursive_calculator)**全级别统一**用本值——L≥1 走势类型
         中枢同为 5(历史曾用 3,旧注释勿信)。
-        ⚠ 口径分裂现状:legacy 线段/笔中枢(zss_calculator/bi_zss_calculator, 见 __init__)
-        仍为 ZsCalculator 默认 min=4+封顶 8——7c231295 曾把笔层同步为 5,后被 3737497a 重构
-        无声回退;是否统一待拍板(见 audit/zhihu_lizhengli_audit.md F1)。
+        成枢门已统一(P1a):legacy 线段/笔中枢(zss_calculator/bi_zss_calculator, 见 __init__:80,82)
+        与递归链同用本单点值 min=5+封顶 8——落实 7c231295 拍板意图(曾同步笔层=5、被 3737497a
+        重构无声回退,现已一并统一;audit/zhihu_lizhengli_audit.md F1 的口径分裂已收敛)。
         ⚠ 改成枢门 → 信号/买卖点变 → golden 须重生成 + 信号缓存版本 +1 + 回测基线须重跑。
         """
         return int(self.config.get('recursive_l0_min_zs_lines', 5) or 5)
 
     def _recursive_branch_calc(self, use_xd: bool):
-        """按塔(use_xd:False=笔/True=段)取持久 RecursiveBranchCalculator(递归层增量化:
-        跨 K 复用其各级持久子 calculator 的增量状态;memo 仍每 K clear 缓存结果,实例与
-        增量状态跨 K 保留)。各塔输入不同 → 各自 identity 稳定、不互相抖动。"""
+        """按塔(use_xd:False=笔/True=段)取 RecursiveBranchCalculator。设计上支持递归层增量(各级持久子
+        calculator 跨 K 复用增量状态),但当前 _process_src_klines 每 K 调 self._rbc.clear()(见 :192,
+        线段级联重构期临时措施、保 inc==batch)→ 实例与增量状态实际每 K 重置为全量重算、不跨 K
+        保留,待线段增量稳定后恢复。各塔输入不同 → 各自 identity 稳定、不互相抖动。"""
         rbc = self._rbc.get(use_xd)
         if rbc is None:
             from chanlun.core.recursive_branch import RecursiveBranchCalculator

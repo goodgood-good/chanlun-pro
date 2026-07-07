@@ -63,6 +63,23 @@ def _ref_bar_index(n: int) -> int:
     return min(_REF_BAR_MAX_IDX, max(0, n // 4))
 
 
+def _hist_fp(klines, upto: int) -> str:
+    """除末根外前 upto 根 OHLC 的 md5 指纹, 检测中途历史根被订正/回填。
+
+    与 kline_recompute._klines_prefix_fp 同口径(同类 H1 防护): 采样单根 ref 会漏检
+    非采样位置的局部订正, 靠本前缀指纹兜住。upto<=0 返回 "0"; 取指纹失败返回 ""
+    (不等于任何真实 md5, 触发保守全量重建)。
+    """
+    if upto <= 0:
+        return "0"
+    try:
+        cols = [c for c in ("open", "high", "low", "close") if c in klines.columns]
+        arr = klines.iloc[:upto][cols].to_numpy(dtype="float64")
+        return hashlib.md5(arr.tobytes()).hexdigest()
+    except Exception:
+        return ""
+
+
 def _compute_kline_signature(klines: pd.DataFrame) -> Tuple[Any, ...]:
     """K 线序列的轻量 signature (F1 版: ref 用绝对位置)。
 
@@ -78,12 +95,13 @@ def _compute_kline_signature(klines: pd.DataFrame) -> Tuple[Any, ...]:
     - 序列缩短时 ref_idx 变小可能指向不同根 K 线 → 多半失配 → 全量重建 (安全)
     """
     if klines is None or klines.empty:
-        return (0, "", 0.0, "", 0.0, 0.0, 0.0, 0.0)
+        return (0, "", 0.0, "", 0.0, 0.0, 0.0, 0.0, "0")
 
     n = len(klines)
     last_row = klines.iloc[-1]
     last_date = last_row.get("date")
     last_close = float(last_row.get("close", 0.0))
+    hist_fp = _hist_fp(klines, n - 1)
 
     if n >= 12:
         ref_idx = _ref_bar_index(n)
@@ -98,11 +116,12 @@ def _compute_kline_signature(klines: pd.DataFrame) -> Tuple[Any, ...]:
             float(ref_row.get("high", 0.0)),
             float(ref_row.get("low", 0.0)),
             float(ref_row.get("close", 0.0)),
+            hist_fp,
         )
-    return (n, str(last_date) if last_date is not None else "", last_close, "", 0.0, 0.0, 0.0, 0.0)
+    return (n, str(last_date) if last_date is not None else "", last_close, "", 0.0, 0.0, 0.0, 0.0, hist_fp)
 
 
-def _is_extending_signature(old_sig: Tuple[Any, ...], new_sig: Tuple[Any, ...]) -> bool:
+def _is_extending_signature(old_sig: Tuple[Any, ...], new_sig: Tuple[Any, ...], new_klines) -> bool:
     """判断 new_sig 是否是 old_sig 的"末段追加"。
 
     条件 (全部满足才算 extending):
@@ -112,7 +131,7 @@ def _is_extending_signature(old_sig: Tuple[Any, ...], new_sig: Tuple[Any, ...]) 
 
     满足 extending → 真增量喂入安全 (历史段不变, 只追加新数据)。
     """
-    if len(old_sig) < 8 or len(new_sig) < 8:
+    if len(old_sig) < 9 or len(new_sig) < 9:
         return False
     old_n, old_last_date, _old_last_close = old_sig[0], old_sig[1], old_sig[2]
     new_n, new_last_date, _new_last_close = new_sig[0], new_sig[1], new_sig[2]
@@ -123,7 +142,10 @@ def _is_extending_signature(old_sig: Tuple[Any, ...], new_sig: Tuple[Any, ...]) 
     if not old_last_date or not new_last_date or new_last_date <= old_last_date:
         return False
     # ref-bar 5 元组必须完全一致 (位置 3-7)
-    return old_sig[3:8] == new_sig[3:8]
+    if old_sig[3:8] != new_sig[3:8]:
+        return False
+    # 全前缀指纹一致: old 除末根历史前缀 == new 在 old 长度处重算的前缀(检测中途订正)
+    return old_sig[8] == _hist_fp(new_klines, old_sig[0] - 1)
 
 
 @dataclass
@@ -171,7 +193,7 @@ def _get_key_lock(key: str) -> threading.RLock:
 # ⚠ source_fingerprint() 只覆盖 chanlun/core/* + types + tv_chart/chart_config + _lookback,
 #   **不含本文件**(审查 F-4/F-9 已核实)。故改 _compute_kline_signature 的"签名计算逻辑"
 #   或本 key 的"输出结构"时,必须手动 bump 此版本号——否则旧 CL 对象不失效、留陈旧结果。
-_CHART_DATA_SCHEMA_VERSION = "v5"
+_CHART_DATA_SCHEMA_VERSION = "v6"
 
 
 def _build_cache_key(
@@ -228,7 +250,7 @@ def get_or_compute_cl(
         _stats["misses"] += 1
 
         # ----- 路径 2: extending signature → 复用旧 cd, 内部增量 -----
-        if entry is not None and _is_extending_signature(entry.signature, sig):
+        if entry is not None and _is_extending_signature(entry.signature, sig, klines):
             cd = entry.cd
             try:
                 cd.process_klines(klines)

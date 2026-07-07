@@ -221,11 +221,13 @@ class ExchangeTDXUS(Exchange):
     def _convert_dt(self, _dt: datetime.datetime):
         """将通达信 CST 时间戳转换为美东时区；日线 15:00 特殊对齐为当日 16:00 收盘。"""
         if _dt.hour == 15 and _dt.minute == 0:
-            # 日线及以上周期收盘时刻
-            _dt = _dt.replace(hour=16, minute=0, tzinfo=self.tz)
-            return _dt
+            # 日线及以上周期收盘时刻:16:00 美东。用 self.tz.localize() 而非
+            # replace(tzinfo=self.tz)——pytz DstTzInfo 直接塞 tzinfo 取历史 LMT(-4:56)非 EST/EDT。
+            return self.tz.localize(_dt.replace(hour=16, minute=0))
 
-        _dt = _dt.replace(tzinfo=pytz.timezone("Asia/Shanghai"))
+        # 通达信返回北京时间 naive 时间戳;用 localize 得正确 +8:00
+        # (replace(tzinfo=pytz.timezone(...)) 会误取 LMT +8:06,致换算早 6 分钟)。
+        _dt = pytz.timezone("Asia/Shanghai").localize(_dt)
 
         if _dt.hour in [0, 1, 2, 3, 4, 5]:
             _dt = _dt + datetime.timedelta(days=1)

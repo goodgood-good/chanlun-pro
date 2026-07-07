@@ -31,8 +31,9 @@ class ZsCalculator:
         # 全量(默认 False),否则中途 get_branch_* 触发的重算会与全量分叉。
         self.allow_tail_noop: bool = allow_tail_noop
         # min_zs_lines：center.lines 长度下限(核心+延伸+离开段;lines **不含进入段**,
-        # 进入段在 zs.start)。默认 4 = 核心3+离开1(第 3 段须由第 4 段确认完成),
-        # legacy 线段/笔中枢(cl.zss_calculator/bi_zss_calculator)仍用此默认。
+        # 进入段在 zs.start)。本参数默认 4 = 核心3+离开1(第 3 段须由第 4 段确认完成),
+        # 但 legacy 线段/笔中枢现由 cl._recursive_l0_min_zs_lines 单点显式传 5(见 cl.__init__:80,82,
+        # P1a 已与递归链统一),不再用此默认值。
         # 递归/新核心链路现**全级别传 5**(用户口径 2026-06-26,经
         # cl._recursive_l0_min_zs_lines 单点解析;「level≥1 传 3」为已废历史口径)。
         self.min_zs_lines: int = min_zs_lines
@@ -522,6 +523,10 @@ class ZsCalculator:
         level0 口径为 4 段重叠成中枢，最后一段为离开段；若从数据开头
         直接看到 5 段连续重叠，则第 1 段不再是核心段，而是进入段，
         中枢核心应从第 2 段开始。
+
+        ⚠ 当前恒 no-op:守卫要求 min_zs_lines == 4,而生产全路径经
+        cl._recursive_l0_min_zs_lines 传 5(P1a),故本方法在生产口径下从不触发
+        (min=5 语义本就不含进入段)。保留待成枢门口径再变动时复用。
         """
         if (
             self.min_zs_lines != 4

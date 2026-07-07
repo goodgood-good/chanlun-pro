@@ -120,7 +120,6 @@ def test_dingli2_upgrade_zs_third_class():
     assert len(ups) == 1
     z = ups[0]
     # units 序列:升级中枢构成段 + 离开段(向上冲出带) + 回试段(终点 23 ≥ ZG=22)
-    leave = z.lines[-1]
     retest = _Line("down", 240, 30.0, 250, 23.0)
     units = list(z.lines) + [retest]
     pts = dingli2_third_class([z], units)

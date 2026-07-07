@@ -87,3 +87,4 @@ def test_recompute_when_new_bar_appended(monkeypatch, spy_recompute):
         "a", "X", "1m", {}, new, "a:X:1m",
     )
     assert spy_recompute == [1]  # recompute 被调用
+    assert result == {"t": [], "recomputed": True}
