@@ -15,6 +15,7 @@ HTF 增量)的注释都声称"等价性由 test_incremental_equivalence 守护",
 (D4-CRIT-1 修复建议:`git checkout master -- tests/core/` 取回并适配 HEAD 优化版签名)。
 """
 import copy
+import pathlib
 import numpy as np
 import pandas as pd
 import pytest
@@ -67,7 +68,7 @@ def _sig_zss(zss):
             ki1 = zs.lines[-1].end.k.k_index
         else:
             ki0 = ki1 = None
-        out.append((ki0, ki1, _r(zs.zd), _r(zs.zg), len(zs.lines), bool(zs.done)))
+        out.append((ki0, ki1, _r(zs.zd), _r(zs.zg), len(zs.lines), bool(zs.done), getattr(zs, "type", None)))
     return tuple(out)
 
 
@@ -154,4 +155,33 @@ def test_cl_deepcopy_then_incremental_equals_batch(seed):
                 f"deepcopy-inc != batch @ seed={seed} L={L} key={key}\n"
                 f"  only_inc={set(inc_sigs[key]) - set(bat_sigs[key])}\n"
                 f"  only_bat={set(bat_sigs[key]) - set(inc_sigs[key])}"
+            )
+
+
+_FIX = pathlib.Path(__file__).resolve().parents[1] / "fixtures"
+
+
+@pytest.mark.skipif(not _FIX.exists(), reason="tests/fixtures 缺失(parquet 未恢复)")
+@pytest.mark.parametrize("rel,code,freq,lo,hi", [
+    ("SH.600519_5m.parquet", "SH.600519", "5m", 420, 500),
+    ("SZ.002299_1m.parquet", "SZ.002299", "1m", 520, 600),
+])
+def test_cl_incremental_equals_batch_real_parquet(rel, code, freq, lo, hi):
+    """真实 parquet 逐前缀 inc==batch(真实浮点边界 ~4e-16, 合成数据不覆盖; 补 D1-F1 盲区)。"""
+    df = pd.read_parquet(_FIX / rel)
+    df = df[["date", "open", "high", "low", "close", "volume"]].reset_index(drop=True)
+    hi = min(hi, len(df))
+    inc = CL(code, freq, dict(_CFG))
+    for L in range(lo, hi + 1):
+        sub = df.iloc[:L].reset_index(drop=True)
+        inc.process_klines(sub)
+        inc_sigs = _all_sigs(inc)
+        fresh = CL(code, freq, dict(_CFG))
+        fresh.process_klines(sub)
+        bat_sigs = _all_sigs(fresh)
+        for key in inc_sigs:
+            assert inc_sigs[key] == bat_sigs[key], (
+                f"real inc != batch @ {code} L={L} key={key} only_inc="
+                f"{set(inc_sigs[key]) - set(bat_sigs[key])} only_bat="
+                f"{set(bat_sigs[key]) - set(inc_sigs[key])}"
             )
