@@ -877,6 +877,10 @@ def fetch_klines_and_compute_cl_data(
         and frequency_low is not None
     ):
         klines = ex.klines(code, frequency_low, **kline_args)
+        if _klines_fetch_incomplete(klines):
+            # D3-M2: 带洞(数据源瞬时失败)不等于确认无数据; 不标 validated, 保留旧 validated_at 让
+            # stale 判定继续生效、约 30s 自愈(C1/M3), 否则陈旧/带洞缠论会被当 fresh 下发。
+            return None
         if klines is None or len(klines) == 0:
             with cache_lock:
                 _mark_chart_cache_validated(cache_key)
@@ -892,6 +896,10 @@ def fetch_klines_and_compute_cl_data(
             f"{(_time.time() - _kl_t0) * 1000:.0f}ms rows="
             f"{0 if klines is None else len(klines)}"
         )
+        if _klines_fetch_incomplete(klines):
+            # D3-M2: 带洞(数据源瞬时失败)不等于确认无数据; 不标 validated, 保留旧 validated_at 让
+            # stale 判定继续生效、约 30s 自愈(C1/M3), 否则陈旧/带洞缠论会被当 fresh 下发。
+            return None
         if klines is None or len(klines) == 0:
             with cache_lock:
                 _mark_chart_cache_validated(cache_key)
