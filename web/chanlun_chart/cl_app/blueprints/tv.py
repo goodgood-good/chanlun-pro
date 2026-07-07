@@ -173,6 +173,7 @@ from ..services.chart_compute import (  # noqa: E402
     market_now_trading,
     should_lazy_apply_higher_macd,
     slice_chart_data_to_window,
+    _decide_full_snapshot,
     trim_future_bars,
 )
 from ..services.kline_recompute import (  # noqa: E402
@@ -1042,6 +1043,19 @@ def tv_history():
             return {"s": "no_data"}
 
         bar_times = cl_chart_data.get("t", [])
+        # D4-F1: 纯轮询/SSE 降级下 /tv/history 轮询响应原按窄窗口 slice 形态且不带 full_snapshot,
+        # 前端窗口外"只增不删" -> 起点早于窄窗口的被撤销形态幽灵残留(SSE 正常 ~8s 自愈, 纯轮询/
+        # low2high 不自愈)。仅"最近窗口权威 + 源全量快照"时带全量形态 + full_snapshot=True, 前端
+        # 已有整体替换分支清幽灵、bars/MACD 仍走增量不缩图; 向左滚动/窄窗口不置(防丢窗外合法形态)。
+        _src_entry = _get_chart_cache_entry(cache_key)
+        _src_is_full = bool(_src_entry and _src_entry.get("is_full_snapshot", False))
+        _emit_full_snapshot = _decide_full_snapshot(firstDataRequest, _to, bar_times, _src_is_full)
+        _full_shape_snapshot = None
+        if _emit_full_snapshot:
+            _shape_keys = ("fxs", "bis", "xds", "bi_zss", "xd_zss", "bcs", "mmds",
+                           "bi_mmds", "xd_mmds", "bi_bcs", "xd_bcs", "xd_zslx",
+                           "xd_zslx_lines", "recursive_levels", "higher_zs", "interval_nest")
+            _full_shape_snapshot = {_k: cl_chart_data.get(_k) for _k in _shape_keys}
         if not is_cache_hit:
             _fxs_cnt = len(cl_chart_data.get("fxs", []))
             _bis_cnt = len(cl_chart_data.get("bis", []))
@@ -1064,6 +1078,11 @@ def tv_history():
 
         _resp_times = cl_chart_data.get("t", []) or []
         cl_chart_data = trim_future_bars(cl_chart_data, _to)
+        if _full_shape_snapshot is not None:
+            # D4-F1: slice 已把形态切窄, 换回全量供前端整体替换清幽灵(bars 保持窗口化不缩图)。
+            for _k, _v in _full_shape_snapshot.items():
+                if _v is not None:
+                    cl_chart_data[_k] = _v
         _resp_t = cl_chart_data.get("t", []) or []
         if len(_resp_t) < len(_resp_times):
             LogUtil.warning(
@@ -1125,6 +1144,7 @@ def tv_history():
             "higher_zs": cl_chart_data.get("higher_zs", []),
             "interval_nest": cl_chart_data.get("interval_nest"),
             "update": False if firstDataRequest == "true" else True,
+            "full_snapshot": _emit_full_snapshot,
         }
     except Exception as e:
         req_qs = request.query_string.decode("utf-8", errors="ignore")

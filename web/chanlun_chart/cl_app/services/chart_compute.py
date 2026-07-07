@@ -471,6 +471,18 @@ _CHART_SHAPE_FIELDS = (
 )
 
 
+def _decide_full_snapshot(first_data_request, to_ts: int, bar_times, source_is_full: bool) -> bool:
+    """D4-F1: /tv/history 轮询响应是否置 full_snapshot=True(前端整体替换形态清幽灵)。
+
+    仅当 (1)非首帧(update 路径, first_data_request=='false') (2)请求覆盖最近窗口(to_ts>=末根 bar,
+    非向左滚动历史) (3)源为全量快照(source_is_full) 时返回 True。向左滚动/窄窗口 range-miss 结果
+    返回 False——否则前端 full_snapshot 整体替换会丢弃窗口外的合法形态(比幽灵更糟)。
+    """
+    if first_data_request != "false" or not bar_times or not source_is_full:
+        return False
+    return to_ts == 0 or to_ts >= bar_times[-1]
+
+
 def filter_shapes_in_window(shapes, from_ts: int, to_ts: int) -> list:
     """按 [from_ts, to_ts) 窗口过滤形态 (笔/段/中枢/分型/背驰/买卖点)。
 
