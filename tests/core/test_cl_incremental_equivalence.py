@@ -81,6 +81,16 @@ def _sig_bsp(cd, use_xd):
     return tuple(sorted(out, key=lambda x: (x[0], x[1] if x[1] is not None else -1, x[2] or 0)))
 
 
+def _sig_zslx(zslxs):
+    # 走势类型段(ZSLX): start/end k_index 位置锚(整数浮点免疫) + LINE 方向 + 盘整/趋势 + 含中枢数 + done
+    out = []
+    for z in zslxs:
+        ki0 = z.start.k.k_index if z.start is not None else None
+        ki1 = z.end.k.k_index if z.end is not None else None
+        out.append((ki0, ki1, z.type, getattr(z, "zslx_type", None), len(z.zss or []), bool(z.is_done())))
+    return tuple(out)
+
+
 def _all_sigs(cd):
     return {
         "bis": _sig_lines(cd.get_bis()),
@@ -89,6 +99,7 @@ def _all_sigs(cd):
         "xd_zss": _sig_zss(cd.get_xd_zss()),
         "bsp_bi": _sig_bsp(cd, use_xd=False),
         "bsp_xd": _sig_bsp(cd, use_xd=True),
+        "xd_zslx": _sig_zslx(cd.get_xd_zslx()),
     }
 
 
