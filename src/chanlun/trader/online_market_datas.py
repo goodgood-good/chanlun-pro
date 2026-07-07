@@ -126,7 +126,10 @@ class OnlineMarketDatas(MarketDatas):
         klines = self.klines(code, frequency)
 
         # D2-F4: 实盘缠论信号只认已收盘 bar(丢弃进行中末根), 与回测/paper/monitor 口径一致,
-        # 避免在未收盘 bar 上算出买卖点过早真实下单; last_k_info(当前价/止损)保持实时不在此丢。
+        # 避免在未收盘 bar 上算出买卖点过早真实下单。⚠ 止损口径同步变更: strategy.close 止损经
+        # get_cl_data 读价(get_klines()[-1].c), 故止损也降到已收盘 bar 粒度(与 backtest 一致,
+        # 最多滞后 1 根周期); last_k_info 保持实时末根但仅用于盈亏统计, 不参与止损触发。
+        # 波及全部 OnlineMarketDatas 消费方(a/hk/currency 实盘 + 期货 tq/ctp + 选股 xuangu)。
         klines = _drop_unclosed_last_bar(klines, frequency)
         cd = self.fdb.get_web_cl_data(self.market, code, frequency, cl_config, klines)
         return cd
