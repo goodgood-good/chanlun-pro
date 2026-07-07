@@ -901,6 +901,10 @@ def tv_history():
                 if not is_cache_hit:
                     cache_miss_reason = miss_reason
 
+            # D4-F1/F2: 用与 cl_chart_data 同源的 is_full(cache-hit 取本次 entry), 避免 1050 行锁外
+            # 重取 entry 产生 TOCTOU(窄 local + 并发全量写 entry → gate 误判 → 前端整体替换丢窗外形态)。
+            _src_is_full = bool(cache_entry and cache_entry.get("is_full_snapshot", False))
+
             if not is_cache_hit:
                 # 早返: 请求范围完全早于(或刚好接到)缓存最早时间 -> 必无数据.
                 # TradingView UDF 翻页时下一次请求的 _to 正好等于上次的 cache_min_time,
@@ -952,6 +956,8 @@ def tv_history():
                     return {"s": "no_data"}
                 cl_chart_data = _fetch_result["cl_chart_data"]
                 cd = _fetch_result["cd"]
+                # D4-F1/F2: MISS 全量性与下方 is_full_snapshot 写入(range-miss 窄→False)同口径。
+                _src_is_full = (not is_range_request) or (cache_miss_reason == "cache_empty")
 
                 # 跨周期 MACD (P5 third step)
                 _htf_applied = apply_higher_macd_to_chart_data(cl_chart_data, frequency, market, cl_config)
@@ -1047,8 +1053,7 @@ def tv_history():
         # 前端窗口外"只增不删" -> 起点早于窄窗口的被撤销形态幽灵残留(SSE 正常 ~8s 自愈, 纯轮询/
         # low2high 不自愈)。仅"最近窗口权威 + 源全量快照"时带全量形态 + full_snapshot=True, 前端
         # 已有整体替换分支清幽灵、bars/MACD 仍走增量不缩图; 向左滚动/窄窗口不置(防丢窗外合法形态)。
-        _src_entry = _get_chart_cache_entry(cache_key)
-        _src_is_full = bool(_src_entry and _src_entry.get("is_full_snapshot", False))
+        # D4-F1/F2: _src_is_full 已在 _calc_lock 内与 cl_chart_data 同源捕获(消 TOCTOU), 此处不重取 entry。
         _emit_full_snapshot = _decide_full_snapshot(firstDataRequest, _to, bar_times, _src_is_full)
         _full_shape_snapshot = None
         if _emit_full_snapshot:
