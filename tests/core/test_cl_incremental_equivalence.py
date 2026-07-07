@@ -175,7 +175,7 @@ _FIX = pathlib.Path(__file__).resolve().parents[1] / "fixtures"
 @pytest.mark.skipif(not _FIX.exists(), reason="tests/fixtures 缺失(parquet 未恢复)")
 @pytest.mark.parametrize("rel,code,freq,lo,hi", [
     ("SH.600519_5m.parquet", "SH.600519", "5m", 420, 500),
-    ("SZ.002299_1m.parquet", "SZ.002299", "1m", 520, 600),
+    ("SZ.002299_1m.parquet", "SZ.002299", "1m", 780, 880),
 ])
 def test_cl_incremental_equals_batch_real_parquet(rel, code, freq, lo, hi):
     """真实 parquet 逐前缀 inc==batch(真实浮点边界 ~4e-16, 合成数据不覆盖; 补 D1-F1 盲区)。"""
