@@ -174,6 +174,7 @@ from ..services.chart_compute import (  # noqa: E402
     should_lazy_apply_higher_macd,
     slice_chart_data_to_window,
     _decide_full_snapshot,
+    _miss_source_is_full,
     trim_future_bars,
 )
 from ..services.kline_recompute import (  # noqa: E402
@@ -956,8 +957,8 @@ def tv_history():
                     return {"s": "no_data"}
                 cl_chart_data = _fetch_result["cl_chart_data"]
                 cd = _fetch_result["cd"]
-                # D4-F1/F2: MISS 全量性与下方 is_full_snapshot 写入(range-miss 窄→False)同口径。
-                _src_is_full = (not is_range_request) or (cache_miss_reason == "cache_empty")
+                # D4-F1/F2: MISS 全量性与 entry 写入 is_full_snapshot 同口径(非range/cache_empty/prepend cd None→全量)。
+                _src_is_full = _miss_source_is_full(is_range_request, cache_miss_reason, cd is None)
 
                 # 跨周期 MACD (P5 third step)
                 _htf_applied = apply_higher_macd_to_chart_data(cl_chart_data, frequency, market, cl_config)

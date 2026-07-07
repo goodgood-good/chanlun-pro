@@ -483,6 +483,16 @@ def _decide_full_snapshot(first_data_request, to_ts: int, bar_times, source_is_f
     return to_ts == 0 or to_ts >= bar_times[-1]
 
 
+def _miss_source_is_full(is_range_request, cache_miss_reason, cd_is_none) -> bool:
+    """D4-F1/F2: MISS 分支产出的 cl_chart_data 是否全量快照(决定能否发 full_snapshot)。
+
+    与 tv.py 对 entry 写入 is_full_snapshot 的口径一致: 非 range 请求 / cache_empty(均按全量
+    回看拉取)/ prepend(cd is None: head/tail gap 整体重算全量)→ 全量; range-miss(窄 kline_args
+    独立计算)→ 窄。F2-R1: 漏 cd_is_none 会使 tail_gap 轮询误判为窄 → 纯轮询下幽灵不清。
+    """
+    return (not is_range_request) or (cache_miss_reason == "cache_empty") or bool(cd_is_none)
+
+
 def filter_shapes_in_window(shapes, from_ts: int, to_ts: int) -> list:
     """按 [from_ts, to_ts) 窗口过滤形态 (笔/段/中枢/分型/背驰/买卖点)。
 
