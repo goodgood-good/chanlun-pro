@@ -56,6 +56,10 @@ class ExchangeQMT(Exchange):
             "15m": "5m",
             "30m": "5m",
             "60m": "5m",
+            # D3-M1: 2m/10m/120m 读 1m + convert 合成, 下载基础须 1m(原 fallback 误落 1d 致冷标的返空)
+            "2m": "1m",
+            "10m": "1m",
+            "120m": "1m",
             "d": "1d",
             "w": "1d",
             "m": "1d",
