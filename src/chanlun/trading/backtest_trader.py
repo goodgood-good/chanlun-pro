@@ -345,6 +345,16 @@ class BackTestTrader(Trader):
                 self.log(f"{code} 持仓查询失败(不清本地): {e}")
             return ("fail", None)
 
+    def _broker_already_holds(self, code) -> bool:
+        """F1/H3 同 code 去重: 券商已持有该 code 返 True(open_* 据此跳过重复开仓)。
+
+        仅查询成功且券商持仓非空时返 True; 查询失败返 False——不新增拦截、不因 flaky broker
+        查询阻塞开仓(与 reconcile 的 fail 处理一致)。防崩溃(券商已成交、本地未落盘)重启后
+        self.positions 为空但券商有仓时, 策略下一 tick 对同 code 二次开真单。
+        """
+        status, broker_pos = self.query_broker_position(code)
+        return status == "ok" and bool(broker_pos)
+
     def reconcile_positions(self, codes: list):
         """以券商持仓为准, 校正本地 self.positions (M1 + H3-d)。
 

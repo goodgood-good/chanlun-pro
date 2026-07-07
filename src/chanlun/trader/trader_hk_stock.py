@@ -30,6 +30,9 @@ class TraderHKStock(BackTestTrader):
         positions = self.ex.positions()
         if len(positions) >= self.b_space:
             return False
+        if self._broker_already_holds(code):
+            self._safe_alert("hk", "港股交易提醒", f"{code} 券商已持仓, 跳过重复开仓")
+            return False
         stock_info = self.ex.stock_info(code)
         if stock_info is None:
             return False
@@ -71,6 +74,9 @@ class TraderHKStock(BackTestTrader):
         """卖空开空；使用 max_margin_short 计算可用融券额度，同样对齐 lot_size。"""
         positions = self.ex.positions()
         if len(positions) >= self.b_space:
+            return False
+        if self._broker_already_holds(code):
+            self._safe_alert("hk", "港股交易提醒", f"{code} 券商已持仓, 跳过重复开仓")
             return False
         stock_info = self.ex.stock_info(code)
         if stock_info is None:

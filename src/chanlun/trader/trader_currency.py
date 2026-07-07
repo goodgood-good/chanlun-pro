@@ -30,6 +30,9 @@ class TraderCurrency(BackTestTrader):
     def open_buy(self, code, opt: Operation, amount: float = None):
         """开多仓：按可用余额均分资金（留 2% 缓冲）并乘以杠杆倍数计算开仓量。"""
         try:
+            if self._broker_already_holds(code):
+                self._safe_alert("currency", "数字货币交易提醒", f"{code} 券商已持仓, 跳过重复开仓")
+                return False
             positions = self.ex.positions()
             if len(positions) >= self.poss_max:
                 utils.send_fs_msg(
@@ -83,6 +86,9 @@ class TraderCurrency(BackTestTrader):
     def open_sell(self, code, opt: Operation, amount: float = None):
         """开空仓：逻辑与 open_buy 对称，使用 open_short 方向。"""
         try:
+            if self._broker_already_holds(code):
+                self._safe_alert("currency", "数字货币交易提醒", f"{code} 券商已持仓, 跳过重复开仓")
+                return False
             positions = self.ex.positions()
             if len(positions) >= self.poss_max:
                 utils.send_fs_msg(
