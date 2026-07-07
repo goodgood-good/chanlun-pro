@@ -12,6 +12,41 @@ from chanlun.exchange.exchange import Exchange
 from chanlun.persistence.file_db import FileCacheDB
 
 
+def _freq_minutes(frequency: str):
+    """级别字符串 -> 分钟数; 非分钟级(d/w/m)返回 None=不裁剪。"""
+    f = str(frequency).strip().lower()
+    if f.endswith("m"):
+        try:
+            return max(int(f[:-1]), 1)
+        except ValueError:
+            return None
+    return None
+
+
+def _drop_unclosed_last_bar(df: pd.DataFrame, frequency: str) -> pd.DataFrame:
+    """丢弃仍在进行(未收盘)的末根 bar, 使实盘缠论信号口径与回测/paper 一致(D2-F4)。
+
+    口径同 recursive_bt.sim.paper.drop_unclosed_last_bar(此处内联避免 trader->recursive_bt
+    跨层依赖): 自包含不依赖外部 now, 用末两根推断间隔, 再用与末根同 tz 的当前时刻判断末根
+    周期是否已结束。非分钟级/不足两根/间隔异常时原样返回, 绝不误删历史收盘 bar。
+    """
+    minutes = _freq_minutes(frequency)
+    if minutes is None or df is None or len(df) < 2:
+        return df
+    try:
+        last_ts = pd.Timestamp(df["date"].iloc[-1])
+        prev_ts = pd.Timestamp(df["date"].iloc[-2])
+    except Exception:
+        return df
+    step = pd.Timedelta(minutes=minutes)
+    if (last_ts - prev_ts) != step:
+        return df
+    now = pd.Timestamp.now(tz=last_ts.tz) if last_ts.tz is not None else pd.Timestamp.now()
+    if now < last_ts + step:
+        return df.iloc[:-1]
+    return df
+
+
 class OnlineMarketDatas(MarketDatas):
     """实盘行情数据适配器，封装交易所接口并提供单次循环内的 K 线缓存。"""
 
@@ -90,5 +125,8 @@ class OnlineMarketDatas(MarketDatas):
 
         klines = self.klines(code, frequency)
 
+        # D2-F4: 实盘缠论信号只认已收盘 bar(丢弃进行中末根), 与回测/paper/monitor 口径一致,
+        # 避免在未收盘 bar 上算出买卖点过早真实下单; last_k_info(当前价/止损)保持实时不在此丢。
+        klines = _drop_unclosed_last_bar(klines, frequency)
         cd = self.fdb.get_web_cl_data(self.market, code, frequency, cl_config, klines)
         return cd
