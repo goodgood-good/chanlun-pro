@@ -135,7 +135,9 @@ class ExchangeTDXUS(Exchange):
             "1m": 8,
         }
         market, tdx_code = self.to_tdx_code(code)
-        if market is None or start_date is not None or end_date is not None:
+        # 忽略 start_date/end_date 范围提示: tdx 按 pages 拉最新、由上层裁剪; 否则 web 主加载必传
+        # end_date 时 klines 返 None -> @retry -> RetryError -> 美股/港股图表恒空(与 tdx_fx d25ce69e 同修)。
+        if market is None:
             print("不支持的调用参数")
             return None
 
