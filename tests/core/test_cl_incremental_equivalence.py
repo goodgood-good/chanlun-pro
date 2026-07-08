@@ -208,3 +208,34 @@ def test_cl_incremental_equals_batch_real_parquet(rel, code, freq, lo, hi):
                 f"{set(inc_sigs[key]) - set(bat_sigs[key])} only_bat="
                 f"{set(bat_sigs[key]) - set(inc_sigs[key])}"
             )
+
+def test_cl_incremental_equals_batch_real_xd_layer():
+    """R1-C11: 合成 160 根 seeds 在 xd_zss/bsp_xd/xd_zslx 三个签名 key 恒空对比,
+    线段层增量守护实际空转(此前仅 002299 单组前缀 101 + deepcopy 组独木)。
+    真实 600519_5m 前 2500 根三 key 全非空(反空转断言, 探针: xd_zss=3/bsp_xd=1/
+    xd_zslx=3), 抽样前缀 inc==batch 全签名严格相等。"""
+    import pathlib
+    fix = pathlib.Path(__file__).resolve().parents[1] / "fixtures" / "SH.600519_5m.parquet"
+    if not fix.exists():
+        pytest.skip("tests/fixtures parquet 缺失")
+    df = pd.read_parquet(fix)[["date", "open", "high", "low", "close", "volume"]].head(2500).reset_index(drop=True)
+    inc = CL("SH.600519", "5m", dict(_CFG))
+    prefixes = list(range(1200, 2501, 13))
+    if prefixes[-1] != 2500:
+        prefixes.append(2500)
+    for L in prefixes:
+        sub = df.iloc[:L].reset_index(drop=True)
+        inc.process_klines(sub)
+        inc_sigs = _all_sigs(inc)
+        fresh = CL("SH.600519", "5m", dict(_CFG))
+        fresh.process_klines(sub)
+        bat_sigs = _all_sigs(fresh)
+        for key in inc_sigs:
+            assert inc_sigs[key] == bat_sigs[key], (
+                f"inc != batch @ real L={L} key={key}\n"
+                f"  only_inc={set(inc_sigs[key]) - set(bat_sigs[key])}\n"
+                f"  only_bat={set(bat_sigs[key]) - set(inc_sigs[key])}"
+            )
+    final = _all_sigs(inc)
+    for key in ("xd_zss", "bsp_xd", "xd_zslx"):
+        assert final[key], f"真实组 {key} 为空 = 线段层守护网空转"
