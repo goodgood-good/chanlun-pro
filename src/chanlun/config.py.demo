@@ -76,14 +76,14 @@ REDIS_PORT = 6379
 # 各个市场的交易所设置（只适用于WEB页面的行情展示）
 # db 表示读取数据库中的行情，适用于在国外或其他原因，tdx 无法正常使用的情况
 
-# A股市场支持：tdx / baostock /qmt / db
-# 港股市场支持：tdx_hk / futu / db
+# A股市场支持：tdx / futu / baostock / qmt / cq / db
+# 港股市场支持：tdx_hk / futu / cq / db
 # 期货市场支持：tq / tdx_futures / db
 # 纽约期货市场支持：tdx_ny_futures / db
-# 外汇市场支持 tdx_fx / db
-# 数字货币（合约）支持： binance / zb / db
+# 外汇市场支持 tdx_fx / cq / db
+# 数字货币（合约）支持： binance / db
 # 数字货币（现货）支持：binance_spot / db
-# 美股市场支持： alpaca / polygon / ib / tdx_us / db
+# 美股市场支持： alpaca / polygon / ib / tdx_us / cq / db
 EXCHANGE_A = "tdx"  # 沪深A股市场
 EXCHANGE_HK = "tdx_hk"  # 港股市场
 EXCHANGE_FUTURES = "tdx_futures"  # 期货市场

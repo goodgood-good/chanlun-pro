@@ -155,6 +155,9 @@ src/Kronos
 /pm2
 /pm2/log/
 data
+# 裸 data 命中任意层级同名目录; recursive_bt/data 是源码包必须豁免,
+# 否则该包新增 .py 被 git 静默忽略不入库(R1-C16)。
+!src/chanlun/recursive_bt/data/
 predict
 **/.pytest_cache
 .vscode
