@@ -47,7 +47,6 @@ def test_add_position_uses_weighted_average_price():
 
 def test_add_position_mark_to_market_profit_correct():
     t = _trader_two_tranches()
-    pos = t.positions["X:1buy"]
     # 盯市价=20: 真浮盈 = 20*200 - (100*10+100*20) = 4000-3000 = 1000
     t.datas._px = {"open": 20.0, "close": 20.0, "high": 20.0, "low": 20.0}
     t.update_position_record()
