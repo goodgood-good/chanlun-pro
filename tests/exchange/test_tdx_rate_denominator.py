@@ -4,7 +4,6 @@ rate=(price-pre_close)/price 分母用现价: 涨10%显示9.09%, 跌10%显示-11
 涨得越多低估越狠。已修参照=tdx_fx/tdx_us(审查 L2 注释), 本测试钉死三处兄弟
 (hk ticks / ny_futures ticks / ny_futures all_ticks)的分母与零守卫。
 """
-import pytest
 
 import chanlun.exchange.exchange_tdx_hk as hk_mod
 import chanlun.exchange.exchange_tdx_ny_futures as ny_mod
