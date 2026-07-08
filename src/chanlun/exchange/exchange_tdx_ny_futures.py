@@ -298,13 +298,15 @@ class ExchangeTDXNYFutures(Exchange):
                         volume=_quote["zongliang"],
                         open=_quote["open"],
                         rate=(
+                            # 涨跌幅=(现价-昨收)/昨收;原分母用现价是错的(涨10%显示~9.09%),
+                            # 与 tdx_fx/tdx_us 的审查 L2 修复口径一致。
                             round(
                                 (_quote["price"] - _quote["pre_close"])
-                                / _quote["price"]
+                                / _quote["pre_close"]
                                 * 100,
                                 2,
                             )
-                            if _quote["price"] > 0
+                            if _quote["pre_close"] > 0
                             else 0
                         ),
                     )
@@ -344,13 +346,15 @@ class ExchangeTDXNYFutures(Exchange):
                         volume=_quote["ZongLiang"],
                         open=_quote["JinKai"],
                         rate=(
+                            # 涨跌幅=(现价-昨结)/昨结;原分母用现价 MaiChu 是错的,
+                            # 与 tdx_fx/tdx_us 的审查 L2 修复口径一致。
                             round(
                                 (_quote["MaiChu"] - _quote["ZuoJie"])
-                                / _quote["MaiChu"]
+                                / _quote["ZuoJie"]
                                 * 100,
                                 2,
                             )
-                            if _quote["MaiChu"] > 0
+                            if _quote["ZuoJie"] > 0
                             else 0
                         ),
                     )
