@@ -6,11 +6,9 @@ import csv
 import hashlib
 import html
 import mimetypes
-import os
 import re
 import shutil
 import subprocess
-import sys
 import uuid
 import zipfile
 from dataclasses import dataclass

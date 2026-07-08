@@ -21,8 +21,8 @@ def check_env():
 
     # 检查 环境变量是否设置正确
     try:
-        from chanlun.core import cl_interface
-    except:
+        from chanlun.core import cl_interface  # noqa: F401
+    except Exception:
         print("无法导入 chanlun 模块，环境变量未设置或设置错误")
         print(f"当前的环境变量如下：{sys.path}")
         print(f"需要当 PYTHONPATH 环境变量设置为 {os.getcwd()}\src 目录")
@@ -31,7 +31,7 @@ def check_env():
     # 检查 环境变量是否设置正确
     try:
         from chanlun import config
-    except:
+    except Exception:
         print(
             "无法导入 config , 请在 src/chanlun 目录， 复制 config.py.demo 文件粘贴为 config.py"
         )
@@ -41,7 +41,7 @@ def check_env():
     if config.PROXY_HOST != "":
         try:
             telnetlib.Telnet(config.PROXY_HOST, config.PROXY_PORT)
-        except:
+        except Exception:
             print("当前设置的 VPN 代理不可用，如不使用数字货币行情，可忽略")
 
     # 检查 Redis
@@ -51,7 +51,7 @@ def check_env():
                 host=config.REDIS_HOST, port=config.REDIS_PORT, decode_responses=True
             )
             R.get("check")
-    except:
+    except Exception:
         print("Redis 连接失败，请检查是否有安装并启动 Redis 服务端，并且配置正确")
         print("Redis 不是必须的，不使用可以忽略")
     # 检查 MySQL
@@ -64,7 +64,7 @@ def check_env():
                 password=config.DB_PWD,
                 database=config.DB_DATABASE,
             )
-    except:
+    except Exception:
         print(
             "MySQL 连接失败，请检查是否安装并运行 MySQL，并且检查配置的 ip、端口、用户名、密码、数据库 是否正确"
         )

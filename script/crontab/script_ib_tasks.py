@@ -14,7 +14,6 @@ from multiprocessing import get_context
 
 import ib_insync
 import pandas as pd
-import pytz
 
 from chanlun import config, fun, rd
 from chanlun.market import Market
@@ -33,7 +32,6 @@ def run_tasks(client_id: int):
 
     fdb = FileCacheDB()  # K 线本地缓存，用于增量更新
 
-    tz = pytz.timezone("US/Eastern")
 
     def get_ib() -> ib_insync.IB:
         if ib.isConnected():

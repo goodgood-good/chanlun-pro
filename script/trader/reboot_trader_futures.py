@@ -79,7 +79,7 @@ try:
             for code in run_codes:
                 try:
                     TR.run(code)
-                except Exception as e:
+                except Exception:
                     logger.error(traceback.format_exc())
 
             # 清空之前获取的k线缓存，避免后续无法获取最新数据
@@ -87,10 +87,10 @@ try:
             # 保存交易数据到 Redis 中
             TR.save_to_pkl(p_redis_key)
 
-        except Exception as e:
+        except Exception:
             logger.error(traceback.format_exc())
 
-except Exception as e:
+except Exception:
     logger.error(traceback.format_exc())
 finally:
     logger.info("Done")

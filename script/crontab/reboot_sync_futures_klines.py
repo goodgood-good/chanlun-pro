@@ -111,7 +111,7 @@ for code in run_codes:
             )
             print("Run code %s frequency %s klines len %s" % (code, f, len(klines)))
             db_ex.insert_klines(code, f, klines)
-        except Exception as e:
+        except Exception:
             print("执行 %s 同步K线异常" % code)
             print(traceback.format_exc())
             time.sleep(10)

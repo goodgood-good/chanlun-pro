@@ -231,7 +231,7 @@ class HistoryXuangu(object):
                     f"{code} - {cd.get_src_klines()[-1].date} 符合选股 笔结束 {bi_end_success} 笔后涨幅超过zd {up_zd_success}"
                 )
 
-            except Exception as e:
+            except Exception:
                 print(f"{code} 选股异常")
                 print(traceback.format_exc())
 

@@ -16,7 +16,6 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "src"))
@@ -104,12 +103,12 @@ def main():
     new_ms = (time.perf_counter() - t0) * 1000 / args.repeats
 
     print(f"\n=== P7 valid_zss 切片 bench (N={args.n_lines} M={args.n_zss}, {args.repeats} reps) ===\n")
-    print(f"| 实现        |  耗时 ms | 相对旧 |")
-    print(f"|-------------|---------:|-------:|")
+    print("| 实现        |  耗时 ms | 相对旧 |")
+    print("|-------------|---------:|-------:|")
     print(f"| 旧 list comp | {old_ms:7.2f} | 1.00x  |")
     print(f"| 新 bisect    | {new_ms:7.2f} | {new_ms/old_ms:.3f}x |")
     print(f"\n加速比: {old_ms/new_ms:.1f}x faster")
-    print(f"  (单次 calculate() 总收益还要乘以 3 — 1buy/2buy/3buy 都用同样 valid_zss 切片)")
+    print("  (单次 calculate() 总收益还要乘以 3 — 1buy/2buy/3buy 都用同样 valid_zss 切片)")
 
 
 if __name__ == "__main__":

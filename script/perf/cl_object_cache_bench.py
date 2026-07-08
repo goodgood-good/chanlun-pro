@@ -106,13 +106,13 @@ def main():
 
     # === 输出 ===
     print(f"\n=== V3 cl_object_cache 三路径耗时 (n={args.n}, repeats={args.repeats}) ===\n")
-    print(f"| Path               | Avg ms   | Min ms   | vs full_rebuild |")
-    print(f"|--------------------|---------:|---------:|----------------:|")
+    print("| Path               | Avg ms   | Min ms   | vs full_rebuild |")
+    print("|--------------------|---------:|---------:|----------------:|")
     print(f"| full_rebuild       | {avg_full:8.2f} | {min_full:8.2f} | 1.00x baseline  |")
     print(f"| incremental_extend | {avg_inc:8.2f} | {min_inc:8.2f} | {avg_inc/avg_full:6.2f}x         |")
     print(f"| cache_hit          | {avg_hit:8.4f} | {min_hit:8.4f} | {avg_hit/avg_full:6.4f}x       |")
 
-    print(f"\n--- Summary ---")
+    print("\n--- Summary ---")
     if avg_inc < avg_full * 0.5:
         print(f"[PASS] incremental_extend < 50% full_rebuild ({avg_inc/avg_full*100:.0f}%)")
     else:

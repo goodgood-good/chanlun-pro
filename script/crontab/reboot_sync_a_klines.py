@@ -3,7 +3,6 @@
 import time
 from tqdm.auto import tqdm
 
-from chanlun.exchange.exchange_baostock import ExchangeBaostock
 from chanlun.exchange.exchange_db import ExchangeDB
 from chanlun.exchange.exchange_qmt import ExchangeQMT
 

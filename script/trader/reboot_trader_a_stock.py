@@ -660,7 +660,7 @@ try:
             for code in run_codes:
                 try:
                     TR.run(code)
-                except Exception as e:
+                except Exception:
                     logger.error(traceback.format_exc())
 
             # 每轮结束后清空 K 线缓存，确保下轮能拉到最新数据
@@ -668,10 +668,10 @@ try:
 
             TR.save_to_pkl(p_redis_key)
 
-        except Exception as e:
+        except Exception:
             logger.error(traceback.format_exc())
 
-except Exception as e:
+except Exception:
     logger.error(traceback.format_exc())
 finally:
     logger.info("Done")

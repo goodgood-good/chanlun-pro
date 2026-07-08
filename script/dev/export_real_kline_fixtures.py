@@ -166,8 +166,8 @@ def main() -> int:
     print(f"\n[OK] 导出 {len(exported)} 个 fixture, 跳过 {len(skipped)} 个")
     print(f"     CSV → {fixtures_dir}")
     print(f"     baseline md5 → {baselines_local_path}")
-    print(f"\n下一步:")
-    print(f"  pytest tests/core/test_baseline_regression.py -v")
+    print("\n下一步:")
+    print("  pytest tests/core/test_baseline_regression.py -v")
     return 0
 
 

@@ -58,7 +58,7 @@ if __name__ == "__main__":
                         exchange.insert_klines(code, f, klines)
                         if len(klines) <= 1:
                             break
-                    except Exception as e:
+                    except Exception:
                         tqdm.write("执行 %s 同步K线异常" % code)
                         tqdm.write(traceback.format_exc())
                         break

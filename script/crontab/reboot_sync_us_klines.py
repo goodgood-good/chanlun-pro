@@ -9,7 +9,6 @@ import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 
-from tqdm.auto import tqdm
 
 from chanlun.exchange.exchange_db import ExchangeDB
 from chanlun.exchange.exchange_ib import ExchangeIB

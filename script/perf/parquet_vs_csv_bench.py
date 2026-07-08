@@ -117,7 +117,7 @@ def main():
     args = p.parse_args()
     sizes = [int(s.strip()) for s in args.sizes.split(",") if s.strip()]
 
-    print(f"\n=== V2 parquet vs CSV 体积/速度基准 (synthetic seed=42) ===\n")
+    print("\n=== V2 parquet vs CSV 体积/速度基准 (synthetic seed=42) ===\n")
     print("| n_klines | parquet_kb |  csv_kb | parquet/csv | parquet_write_ms | csv_write_ms | parquet_read_ms | csv_read_ms |")
     print("|---------:|-----------:|--------:|------------:|-----------------:|-------------:|----------------:|------------:|")
 
@@ -132,7 +132,7 @@ def main():
     avg_read_speedup = sum(r["read_speedup"] for r in results) / len(results)
     avg_write_speedup = sum(r["write_speedup"] for r in results) / len(results)
 
-    print(f"\n--- 总结 ---")
+    print("\n--- 总结 ---")
     print(f"平均 parquet/csv 体积比:  {avg_size_ratio*100:.1f}% (越小越好, 预期 ≤ 40%)")
     print(f"平均 parquet 读取加速:    {avg_read_speedup:.2f}× (预期 ≥ 3×)")
     print(f"平均 parquet 写入加速:    {avg_write_speedup:.2f}× (CSV 通常更快, 此项 < 1× 正常)")
@@ -141,7 +141,7 @@ def main():
     if avg_size_ratio < 0.4:
         print(f"\n[PASS] 体积压缩满足退出条件 (体积比 {avg_size_ratio*100:.1f}% < 40%)")
     else:
-        print(f"\n[WARN] 体积压缩未达 60%+ 减小, 检查 zstd 压缩级别 / 数据特征")
+        print("\n[WARN] 体积压缩未达 60%+ 减小, 检查 zstd 压缩级别 / 数据特征")
 
 
 if __name__ == "__main__":
