@@ -120,7 +120,9 @@ def query_cl_chart_config(
         "idx_macd_signal": 9,
         # 背驰力度判断用高一周期 MACD（线段是最低级别走势类型，力度应提高
         # 一级度量：1m→5m、5m→30m…）。"1" 开 / "0" 关；关或无高周期对照时
-        # 自动回退原生 MACD。纳入图表配置 → 进 cache_key，改它即触发重算。
+        # 自动回退原生 MACD。注：当前无 UI 可改(不在 web options)、恒为默认, 故未纳入 file_db.py
+        # config_keys(值不变则缓存无须在此轴失效)；若日后设为用户可改, 必须同步加入 config_keys,
+        # 否则切换不触发 _config_md5 变化 → 命中旧 pkl 沿用旧 flag → 背驰/买卖点持续陈旧。
         "macd_ld_use_htf": "1",
         # 买卖点配置
         # 两中枢及以上趋势背驰，产生一类买卖点
