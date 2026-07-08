@@ -979,11 +979,10 @@ class BackTestTrader(Trader):
                     self.balance -= hold_balance
 
                 pos.loss_price = opt.loss_price
-                pos.open_date = (
-                    self.get_now_datetime().strftime("%Y-%m-%d")
-                    if pos.open_date is None
-                    else pos.open_date
-                )
+                # BUG-2(Round8): open_date 仅用于 T+1 判定, 取"最近一次建仓/加仓日期"。旧代码
+                # 冻结首笔 -> 多日加仓后当日加仓的股当天可平 -> 绕过 T+1 高估收益。默认 pos_rate=1
+                # 单笔满仓不加仓 -> 仍=首笔日, 零行为变更。
+                pos.open_date = self.get_now_datetime().strftime("%Y-%m-%d")
                 pos.open_datetime = (
                     self.get_now_datetime()
                     if pos.open_datetime is None
@@ -1065,11 +1064,10 @@ class BackTestTrader(Trader):
                     self.balance -= hold_balance
 
                 pos.loss_price = opt.loss_price
-                pos.open_date = (
-                    self.get_now_datetime().strftime("%Y-%m-%d")
-                    if pos.open_date is None
-                    else pos.open_date
-                )
+                # BUG-2(Round8): open_date 仅用于 T+1 判定, 取"最近一次建仓/加仓日期"。旧代码
+                # 冻结首笔 -> 多日加仓后当日加仓的股当天可平 -> 绕过 T+1 高估收益。默认 pos_rate=1
+                # 单笔满仓不加仓 -> 仍=首笔日, 零行为变更。
+                pos.open_date = self.get_now_datetime().strftime("%Y-%m-%d")
                 pos.open_datetime = (
                     self.get_now_datetime()
                     if pos.open_datetime is None
