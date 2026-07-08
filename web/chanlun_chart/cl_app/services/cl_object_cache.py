@@ -289,9 +289,9 @@ def invalidate(
         if cl_config is not None:
             key = _build_cache_key(market, code, frequency, cl_config)
             return 1 if _cl_object_cache.pop(key, None) is not None else 0
-        # 注意:cache key 是 ``f"{_CHART_DATA_SCHEMA_VERSION}|{market}|{code}|..."``,
-        # prefix 必须带 schema version——否则永远匹配不到任何 key、invalidate 退化为无操作。
-        prefix = f"{_CHART_DATA_SCHEMA_VERSION}|{market}|{code}|{frequency}|"
+        # web-B3: cache key = f"{VER}|{source_fingerprint()}|{market}|{code}|{freq}|{hash}",
+        # prefix 必须带 VER + source_fingerprint 两段——否则 startswith 恒不匹配、退化为 no-op。
+        prefix = f"{_CHART_DATA_SCHEMA_VERSION}|{source_fingerprint()}|{market}|{code}|{frequency}|"
         keys_to_drop = [k for k in list(_cl_object_cache.keys()) if k.startswith(prefix)]
         for k in keys_to_drop:
             _cl_object_cache.pop(k, None)

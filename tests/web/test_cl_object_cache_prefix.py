@@ -73,3 +73,23 @@ def test_pure_append_still_incremental(mock_cl):
 
     s = stats()
     assert s["incremental_extends"] == 1, f"纯追加应走增量复用: {s}"
+
+
+def test_invalidate_prefix_includes_source_fingerprint():
+    """web-B3: invalidate(cl_config=None) 前缀须含 source_fingerprint 段, 否则与真实 key
+    (VER|fingerprint|market|code|freq|hash)的 startswith 恒不匹配 -> 退化为死 no-op。"""
+    from cl_app.services.cl_object_cache import (
+        _build_cache_key,
+        _cl_object_cache,
+        invalidate,
+    )
+
+    clear_all()
+    key = _build_cache_key("us", "AAPL.US", "30m", {"a": 1})
+    _cl_object_cache[key] = object()
+    try:
+        dropped = invalidate("us", "AAPL.US", "30m", cl_config=None)
+        assert dropped == 1, "前缀不匹配 -> invalidate 没清掉任何 entry(死 no-op)"
+        assert key not in _cl_object_cache
+    finally:
+        clear_all()
