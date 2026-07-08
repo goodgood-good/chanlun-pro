@@ -451,7 +451,9 @@ class PaperBroker:
                 if rules.lot > 1:
                     size = int(size / rules.lot) * rules.lot
                 if size <= 0:
-                    carry.append(o)
+                    # LOW-1(Round12, 同 portfolio HIGH-1 根): sub-lot 部分卖取整为0股无法成交且持仓不
+                    # 增长故未来仍0; 原 carry 永久滞留、该标退出被卡。改 drop(all_out 恒不触发, 防未来
+                    # 分层退出接入 sell_ratio 时踩)。
                     continue
                 self.cash += size * px * (1 - rules.commission - rules.stamp_duty)
                 self.trades.append({"code": c, "entry_date": p["entry_date"],
