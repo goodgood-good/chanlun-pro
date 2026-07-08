@@ -83,9 +83,10 @@ def _hist_fp(klines, upto: int) -> str:
 def _compute_kline_signature(klines: pd.DataFrame) -> Tuple[Any, ...]:
     """K 线序列的轻量 signature (F1 版: ref 用绝对位置)。
 
-    8 元组结构:
+    12 元组结构:
       (len, last_date, last_close,
-       ref_date, ref_o, ref_h, ref_l, ref_c)
+       ref_date, ref_o, ref_h, ref_l, ref_c, hist_fp,
+       last_open, last_high, last_low)   # 末根O/H/L(终检MEDIUM-2补:close/date/n不变而末根高低变须失配)
 
     与 F1 前版 (mid 用末段相对偏移) 的语义差异:
     - F1 后 ref 是 ``_ref_bar_index(n)`` 的绝对位置 K 线
@@ -95,12 +96,15 @@ def _compute_kline_signature(klines: pd.DataFrame) -> Tuple[Any, ...]:
     - 序列缩短时 ref_idx 变小可能指向不同根 K 线 → 多半失配 → 全量重建 (安全)
     """
     if klines is None or klines.empty:
-        return (0, "", 0.0, "", 0.0, 0.0, 0.0, 0.0, "0")
+        return (0, "", 0.0, "", 0.0, 0.0, 0.0, 0.0, "0", 0.0, 0.0, 0.0)
 
     n = len(klines)
     last_row = klines.iloc[-1]
     last_date = last_row.get("date")
     last_close = float(last_row.get("close", 0.0))
+    last_open = float(last_row.get("open", 0.0))
+    last_high = float(last_row.get("high", 0.0))
+    last_low = float(last_row.get("low", 0.0))
     hist_fp = _hist_fp(klines, n - 1)
 
     if n >= 12:
@@ -117,8 +121,11 @@ def _compute_kline_signature(klines: pd.DataFrame) -> Tuple[Any, ...]:
             float(ref_row.get("low", 0.0)),
             float(ref_row.get("close", 0.0)),
             hist_fp,
+            last_open,
+            last_high,
+            last_low,
         )
-    return (n, str(last_date) if last_date is not None else "", last_close, "", 0.0, 0.0, 0.0, 0.0, hist_fp)
+    return (n, str(last_date) if last_date is not None else "", last_close, "", 0.0, 0.0, 0.0, 0.0, hist_fp, last_open, last_high, last_low)
 
 
 def _is_extending_signature(old_sig: Tuple[Any, ...], new_sig: Tuple[Any, ...], new_klines) -> bool:
@@ -190,10 +197,11 @@ def _get_key_lock(key: str) -> threading.RLock:
 # v4(2026-05-20):3 类买卖点 first-touch 限定(原文 kobo.61.1「必须是第一次」),
 #                同一中枢同一类型只挂最早一次 → 3B/3S 数量大幅减少。
 # v5(2026-05-22):买卖点层签名纳入未完成笔/段端点,并新增走势类型线段输出。
+# v7(2026-07-08):_compute_kline_signature 末根追加 open/high/low(终检MEDIUM-2:末根 high/low 变而 close/date/根数不变时原 signature 相同→path-1 下发陈旧缠论)。
 # ⚠ source_fingerprint() 只覆盖 chanlun/core/* + types + tv_chart/chart_config + _lookback,
 #   **不含本文件**(审查 F-4/F-9 已核实)。故改 _compute_kline_signature 的"签名计算逻辑"
 #   或本 key 的"输出结构"时,必须手动 bump 此版本号——否则旧 CL 对象不失效、留陈旧结果。
-_CHART_DATA_SCHEMA_VERSION = "v6"
+_CHART_DATA_SCHEMA_VERSION = "v7"
 
 
 def _build_cache_key(
