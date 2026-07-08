@@ -939,7 +939,16 @@ class BackTestTrader(Trader):
                     return False
 
                 pos.type = "做多"
-                pos.price = res["price"]
+                # BUG-1(Round8): 加仓按持仓量加权更新均价, 不覆盖为最后一笔成交价
+                # (否则 position_record now_profit=(close-pos.price)*总amount 失真,
+                #  污染 max_profit_rate/max_loss_rate → 移动止损/保本触发时机)。
+                # 首笔 amount==0 退化为本笔成交价。做多/做空同口径(价按量加权)。
+                if pos.amount == 0:
+                    pos.price = res["price"]
+                else:
+                    pos.price = (
+                        pos.price * pos.amount + res["price"] * res["amount"]
+                    ) / (pos.amount + res["amount"])
                 pos.amount += res["amount"]
 
                 hold_balance = 0
@@ -1016,7 +1025,16 @@ class BackTestTrader(Trader):
                 if res is False:
                     return False
                 pos.type = "做空"
-                pos.price = res["price"]
+                # BUG-1(Round8): 加仓按持仓量加权更新均价, 不覆盖为最后一笔成交价
+                # (否则 position_record now_profit=(close-pos.price)*总amount 失真,
+                #  污染 max_profit_rate/max_loss_rate → 移动止损/保本触发时机)。
+                # 首笔 amount==0 退化为本笔成交价。做多/做空同口径(价按量加权)。
+                if pos.amount == 0:
+                    pos.price = res["price"]
+                else:
+                    pos.price = (
+                        pos.price * pos.amount + res["price"] * res["amount"]
+                    ) / (pos.amount + res["amount"])
                 pos.amount += res["amount"]
 
                 hold_balance = 0
