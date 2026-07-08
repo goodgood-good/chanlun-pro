@@ -217,8 +217,8 @@ class ExchangeDB(Exchange):
         kline_pd = pd.DataFrame(kline_pd)
         kline_pd["code"] = code
         kline_pd["date"] = pd.to_datetime(kline_pd["date"]).dt.tz_localize(
-            self.tz, ambiguous=True
-        )  # .map(lambda d: d.to_pydatetime())
+            self.tz, ambiguous=True, nonexistent="shift_forward"
+        )  # nonexistent: 货币7x24在DST服务器上春令时不存在墙钟(如US/Eastern 02:00-03:00)前移防崩
         kline_pd["date"] = kline_pd["date"].apply(self.__convert_date)
         kline_pd.sort_values(by="date", inplace=True)
         kline_pd = kline_pd.reset_index(drop=True)
