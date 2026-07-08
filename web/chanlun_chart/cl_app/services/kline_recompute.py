@@ -336,6 +336,29 @@ def recompute_chart_data_from_klines(
     return result
 
 
+_VALUE_COLUMNS_FOR_ALIGN = (
+    "c", "o", "h", "l", "v",
+    "macd_dif", "macd_dea", "macd_hist", "macd_area",
+    "higher_macd_dif", "higher_macd_dea", "higher_macd_hist",
+)  # 保持与 tv._TV_VALUE_COLUMNS 同步
+
+
+def _align_value_columns_to_t(chart_data: dict) -> None:
+    """把所有按 bar index 的数值列原地对齐到 len(t):过长截断、过短右 pad None。
+
+    仅列非空且长度 != len(t) 时才动(空/缺列保持"无数据"语义)。与 tv._align_value_columns_to_t
+    同款, 搬到源头(prepend)对齐 → SSE 推送/缓存/tv_history tail_gap 全下游拿到等长值列,
+    杜绝前端 feedRealtimeBar/建bars 越界取 undefined → NaN 蜡烛(前端 BUG3)。
+    """
+    _t = chart_data.get("t", []) or []
+    _n = len(_t)
+    for _k in _VALUE_COLUMNS_FOR_ALIGN:
+        _col = chart_data.get(_k) or []
+        if _col and len(_col) != _n:
+            LogUtil.warning(f"[prepend] 值列 {_k} 长 {len(_col)} != t {_n}, 已对齐")
+            chart_data[_k] = list(_col[:_n]) + [None] * max(0, _n - len(_col))
+
+
 def prepend_klines_and_replace_cache(
     market: str,
     code: str,
@@ -424,6 +447,10 @@ def prepend_klines_and_replace_cache(
     )
     if new_chart_data is None:
         return None
+
+    # 前端 BUG3: 值列长度 != len(t) 时前端越界取 undefined → NaN 蜡烛。源头对齐,
+    # 缓存/SSE 推送/tv_history 全下游安全(tv._align 为读端二道防御)。
+    _align_value_columns_to_t(new_chart_data)
 
     _chart_cache._set_chart_cache_entry(cache_key, new_chart_data, is_full_snapshot=True)
     return new_chart_data
