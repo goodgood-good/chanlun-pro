@@ -107,7 +107,7 @@ def cal_macd_bis_is_bc(bis: List[BI], cd: ICL) -> Tuple[bool, bool]:
     ):
         return False, False
     if direction == "down" and (
-        bis_macd_infos.dif_down_cross_num == 0 or bis_macd_infos.dif_down_cross_num == 0
+        bis_macd_infos.dea_down_cross_num == 0 or bis_macd_infos.dif_down_cross_num == 0
     ):
         return False, False
 
@@ -214,7 +214,11 @@ def cal_macd_bis_is_bc(bis: List[BI], cd: ICL) -> Tuple[bool, bool]:
         compare_max_dea,
         compare_hist_dumps,
     ) = get_macd_dump_info(compare_start_fx, compare_end_fx)
-    compare_max_sum_hist = max([sum(_hists) for _hists in compare_hist_dumps])
+    # 空 compare_hist_dumps(对比段无驼峰)→ max([]) 会 ValueError; 用 -inf 默认使 L221 的
+    # `last_bi_sum_hist < compare_max_sum_hist` 恒 False = 无对比基准则不成 hist 背驰(保守不误报)
+    compare_max_sum_hist = max(
+        [sum(_hists) for _hists in compare_hist_dumps], default=float("-inf")
+    )
 
     hist_bc = False
     deadif_bc = False
