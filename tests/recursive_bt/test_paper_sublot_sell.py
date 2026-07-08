@@ -1,8 +1,6 @@
 """Round12 LOW-1(同 portfolio HIGH-1 根): paper broker sub-lot 部分卖取整为0股 → 原 carry 永久
 滞留、该标退出被卡。当前生产 all_out 恒 sell_ratio=1.0 不触发, 属防未来分层退出接入的一致性修复。"""
 
-import os
-import tempfile
 import types
 
 import pandas as pd
