@@ -103,3 +103,23 @@ def test_corrupt_entry_rejects_narrow_overwrite(monkeypatch, spy_recompute):
     )
     assert spy_recompute == []  # 未走窄数据重算+写全量
     assert result is None  # 拒绝覆盖, 本次 no_data
+
+
+def test_volume_only_change_refreshes_without_recompute(monkeypatch, spy_recompute):
+    """web-B1: OHLC 未变但末根成交量累积(涨跌停/平价 tick 段)-> 不重算缠论(省 CPU),
+    但就地刷新缓存末根成交量, 避免成交量柱在图上冻结。"""
+    cached = _chart_data([1000, 1060], [10, 11])  # v=[10, 10]
+    monkeypatch.setattr(chart_cache, "_get_chart_cache_entry", lambda k: {"data": cached})
+    new = pd.DataFrame(
+        {
+            "date": pd.to_datetime([1000, 1060], unit="s", utc=True),
+            "open": [10, 11],
+            "high": [10, 11],
+            "low": [10, 11],
+            "close": [10, 11],
+            "volume": [10, 999],  # 同 OHLC, 末根 volume 10 -> 999
+        }
+    )
+    result = kline_recompute.prepend_klines_and_replace_cache("a", "X", "1m", {}, new, "a:X:1m")
+    assert spy_recompute == []  # OHLC 未变 -> 不重算
+    assert result["v"][-1] == 999  # 但成交量已就地刷新(非冻结在 10)
