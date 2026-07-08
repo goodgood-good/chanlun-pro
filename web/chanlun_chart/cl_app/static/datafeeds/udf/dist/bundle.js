@@ -537,7 +537,36 @@
                         obj_res.xd_zslx = response.xd_zslx || [];
                         obj_res.xd_zslx_lines = response.xd_zslx_lines || [];
                     }
-                    obj_res.recursive_levels = response.recursive_levels || [];
+                    // R1-C7: recursive_levels 的嵌套 mmds/bcs 与顶层同为「按窗口裁切的单点形态」,
+                    // 无条件整体替换会让 backward(向左滚动)响应用老窗口(通常为空)clobber 右侧
+                    // 最新高级别买卖点/背驰(R11 BUG2 只修顶层 mmds/bcs 的兄弟盲区)。full_snapshot
+                    // 仍整体替换; 非快照按 level 键对齐, 嵌套 mmds/bcs 走 updateTextPoints 同口径
+                    // 合并(backward 只增不删/右侧权威窗内被证伪剔除), zss/zslx_lines 等后端全局
+                    // 透传字段以新响应为准。
+                    {
+                        const newLevels = response.recursive_levels || [];
+                        if (response.full_snapshot) {
+                            obj_res.recursive_levels = newLevels;
+                        }
+                        else {
+                            const oldByLevel = new Map();
+                            (obj_res.recursive_levels || []).forEach((lv, i) => {
+                                oldByLevel.set(lv && lv.level !== undefined ? lv.level : i, lv);
+                            });
+                            obj_res.recursive_levels = newLevels.map((lv, i) => {
+                                if (!lv || typeof lv !== 'object')
+                                    return lv;
+                                const key = lv.level !== undefined ? lv.level : i;
+                                const old = oldByLevel.get(key);
+                                if (!old || typeof old !== 'object')
+                                    return lv;
+                                const merged = Object.assign({}, lv);
+                                merged.mmds = updateTextPoints(old.mmds || [], lv.mmds || []);
+                                merged.bcs = updateTextPoints(old.bcs || [], lv.bcs || []);
+                                return merged;
+                            });
+                        }
+                    }
                     obj_res.higher_zs = response.higher_zs || [];
                     obj_res.interval_nest = response.interval_nest;
                     obj_res.chart_color = response.chart_color;
