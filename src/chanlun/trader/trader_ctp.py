@@ -246,6 +246,36 @@ class CTPTrader(BackTestTrader):
         if self.trader_api:
             self.trader_api.Release()
 
+    def query_broker_position(self, code):
+        """N2: CTP 覆写基类(基类走 self.ex.positions, 对 MarketCTP=raise → reconcile 恒 no-op)。
+
+        走 trader_api 真查询该 code 持仓, 返回 ("ok", [Position!=0 持仓]) 或查询失败 ("fail", None),
+        使 reconcile_positions / _broker_already_holds 对 CTP 生效。
+        """
+        try:
+            qry_req = CThostFtdcQryInvestorPositionField()
+            qry_req.BrokerID = self.ex.broker_id
+            qry_req.InvestorID = self.ex.user_id
+            qry_req.InstrumentID = code
+            self.trader_api.state.prepare_position_query()
+            self.trader_api.ReqQryInvestorPosition(
+                qry_req, self.trader_api.state.next_request_id()
+            )
+            if not self.trader_api.state.wait_for_position_query(_CTP_CALLBACK_TIMEOUT):
+                return ("fail", None)
+            snap = self.trader_api.state.get_positions_snapshot()
+            held = [
+                _p
+                for _p in snap.values()
+                if getattr(_p, "InstrumentID", None) == code
+                and getattr(_p, "Position", 0) != 0
+            ]
+            return ("ok", held)
+        except Exception as e:
+            if self.log:
+                self.log(f"{code} CTP 持仓查询失败: {e}")
+            return ("fail", None)
+
     def open_buy(self, code, opt: Operation, amount: float = None):
         """开多仓"""
         tick = self.ex.ticks([code])
@@ -265,6 +295,14 @@ class CTPTrader(BackTestTrader):
             return False
 
         if self.trader_api.state.get_position_count() >= self.max_pos:
+            return False
+
+        # N1: 同 code 券商已持仓则不重复开(与 HK/currency/futures 对齐), 复用上面已查持仓快照。
+        # 防崩溃/丢盘重启后 self.positions 空但券商有仓时, 下一 tick 对同合约二次真单致持仓翻倍。
+        if any(
+            getattr(_p, "InstrumentID", None) == code and getattr(_p, "Position", 0) != 0
+            for _p in self.trader_api.state.get_positions_snapshot().values()
+        ):
             return False
 
         # 下单前防御:挡 NaN/负数量、非正价格穿透到券商(amount=None/0 仍走 `or 1` 兜底1手)
@@ -371,6 +409,14 @@ class CTPTrader(BackTestTrader):
             return False
 
         if self.trader_api.state.get_position_count() >= self.max_pos:
+            return False
+
+        # N1: 同 code 券商已持仓则不重复开(与 HK/currency/futures 对齐), 复用上面已查持仓快照。
+        # 防崩溃/丢盘重启后 self.positions 空但券商有仓时, 下一 tick 对同合约二次真单致持仓翻倍。
+        if any(
+            getattr(_p, "InstrumentID", None) == code and getattr(_p, "Position", 0) != 0
+            for _p in self.trader_api.state.get_positions_snapshot().values()
+        ):
             return False
 
         # 下单前防御:挡 NaN/负数量、非正价格穿透到券商(amount=None/0 仍走 `or 1` 兜底1手)
