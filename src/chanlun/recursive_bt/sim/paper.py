@@ -381,7 +381,9 @@ class PaperBroker:
             elif side in {"sell", "exit"}:
                 if code not in self.positions or code in pending_sell:
                     continue
-                ratio = float(getattr(event, "sell_ratio", 1.0) or 1.0)
+                _sr = getattr(event, "sell_ratio", 1.0)
+                # 保留显式 0.0(=不卖, 交下方 ratio<=0 guard 跳过), 仅 None 兜底 1.0(不能用 or 1.0 吞 0.0)
+                ratio = 1.0 if _sr is None else float(_sr)
                 ratio = min(max(ratio, 0.0), 1.0)
                 if ratio <= 0:
                     continue
@@ -445,7 +447,9 @@ class PaperBroker:
                 if lp is not None and chg <= -lp * 0.995:     # 跌停卖不出
                     carry.append(o)
                     continue
-                sell_ratio = float(o.get("sell_ratio") or 1.0)
+                _sr = o.get("sell_ratio")
+                # 保留显式 0.0(=不卖, 交下方 size<=0 drop 跳过), 仅缺失/None 兜底 1.0(不能用 or 1.0 吞 0.0)
+                sell_ratio = 1.0 if _sr is None else float(_sr)
                 sell_ratio = min(max(sell_ratio, 0.0), 1.0)
                 size = p["shares"] if sell_ratio >= 0.999 else p["shares"] * sell_ratio
                 if rules.lot > 1:
