@@ -136,7 +136,9 @@ class ExchangeBinanceSpot(Exchange):
                 return online_klines
             else:
                 # 取倒数第二条作为增量起点，让最后一根未收盘 bar 也能被覆盖更新
-                last_datetime = db_klines.iloc[-2]["date"].strftime("%Y-%m-%d %H:%M:%S")
+                # 库中恰1根时退用末根: iloc[-2]会IndexError被except吞->重试3次->永久RetryError
+                _inc_from = db_klines.iloc[-2] if len(db_klines) >= 2 else db_klines.iloc[-1]
+                last_datetime = _inc_from["date"].strftime("%Y-%m-%d %H:%M:%S")
                 online_klines = self.increment_klines_by_online(
                     code, frequency, start_date=last_datetime
                 )
