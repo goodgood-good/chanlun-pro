@@ -428,13 +428,26 @@ class ExchangeBinance(Exchange):
         }
         if "open" in o_type:
             self.exchange.set_leverage(args["leverage"], symbol=code)
-        return self.exchange.create_order(
+        res = self.exchange.create_order(
             symbol=code,
             type="MARKET",
             side=trade_maps[o_type]["side"],
             amount=amount,
             params={"positionSide": trade_maps[o_type]["positionSide"]},
         )
+        # N5: 市价单 ccxt price 常为 None(成交均价在 average)、amount=请求量(成交量在 filled)。
+        # 规范化为真实成交口径, 防 trader_currency 记 None 价污染账本 + 平仓 res['price']*res['amount']
+        # None 算术 TypeError(仿 tqsdk H4 的 filled 口径)。
+        if isinstance(res, dict):
+            _price = res.get("average")
+            if _price is None:
+                _price = res.get("price")
+            res["price"] = _price if _price is not None else 0
+            _filled = res.get("filled")
+            if _filled is None:
+                _filled = res.get("amount", amount)
+            res["amount"] = _filled
+        return res
 
     def stock_owner_plate(self, code: str):
         raise Exception("交易所不支持")
