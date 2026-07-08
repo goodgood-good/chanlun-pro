@@ -239,7 +239,9 @@ class BackTestTrader(Trader):
         if key is not None:
             # H3-b: 记录主 pkl key, 供 WAL 文件名派生
             self._pkl_key = key
-            fdb.cache_pkl_to_file(key, save_infos)
+            # N3: 深拷贝快照后再交异步落盘线程池, 防后台 pickle 迭代 positions/历史集合时
+            # 主线程 execute 改这些容器致 `dict changed size during iteration` 被吞成 warning=账本静默丢盘。
+            fdb.cache_pkl_to_file(key, copy.deepcopy(save_infos))
         return save_infos
 
     def load_from_pkl(self, key: str, save_infos: dict = None):
