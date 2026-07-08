@@ -231,7 +231,10 @@ class ExchangeTDXFX(Exchange):
                         _ks.loc[:, "date"] = pd.to_datetime(_ks["datetime"])
                         _ks.sort_values("date", inplace=True)
                         new_start_dt = _ks.iloc[0]["date"]
-                        cache_end_dt = klines.iloc[-1]["date"] if i == 1 else cache_end_dt  # B1(Round8): 仅首轮拼接前捕获缓存真实末尾, 防每轮重算致陈旧>1400根中间段留洞
+                        # B1(Round8): 仅首轮(i==1, 尚为纯缓存)捕获缓存真实末尾定值; 防每轮从已
+                        # 拼接的 DataFrame 重算致 i>=2 变上页末尾(约now)、陈旧>1400根时中间段留洞。
+                        if i == 1:
+                            cache_end_dt = klines.iloc[-1]["date"]
                         klines = pd.concat([klines, _ks], ignore_index=True)
                         # 新页起始时间已被缓存覆盖，说明数据已衔接，停止拉取
                         if cache_end_dt >= new_start_dt:

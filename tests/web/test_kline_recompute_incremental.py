@@ -59,8 +59,9 @@ def test_reuse_when_prefix_stable(mock_cl):
     r2 = recompute_chart_data_from_klines(
         "a", "SYN", "1m", {}, _klines_df([1000, 1060, 1120], [10, 11, 12]), cache_key="a:SYN:1m"
     )
-    assert len(_FakeCL.instances) == 1  # 只构造一次
-    assert r1["id"] == r2["id"]  # 同一 CL 实例
+    # 不数全局 _FakeCL.instances(前序测试残留的 prewarm/SSE 后台线程会在 patch 窗口内构造
+    # CL 污染计数, 曾致约 1/7 间歇失败, 同 test_no_reuse_without_cache_key)。id 相同已证复用。
+    assert r1["id"] == r2["id"]  # 同一 CL 实例(增量复用)
 
 
 def test_new_cl_when_first_date_changes(mock_cl):
