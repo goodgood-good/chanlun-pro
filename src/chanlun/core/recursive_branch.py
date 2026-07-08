@@ -79,7 +79,7 @@ def _dingli2_pair(a: ZS, b: ZS):
     if not (b.zd > a.zg or b.zg < a.zd):      # 核心区未分离 → 延伸族
         return None
     lo, hi = max(a.dd, b.dd), min(a.gg, b.gg)
-    if lo >= hi:                              # 波动区间分离 → 趋势
+    if lo > hi:                               # 波动区间分离 → 趋势(触及含等号=升级, L020:65 后GG>=前DD, R1-C15)
         return None
     return (lo, hi)
 

@@ -25,7 +25,7 @@ class BuySellPoint:
     structural_stop_below: Optional[float] = None  # 买点失效下边界:1/2买前低、3买 ZG
     structural_stop_above: Optional[float] = None  # 卖点失效上边界:1/2卖前高、3卖 ZD
     rebound_target: Optional[float] = None    # 一类点最弱反弹目标(L029:14 反弹必触及末中枢
-    # DD/GG):1buy=zs.dd、1sell=zs.gg;反弹不触及=分解有误信号,亦供策略最小出场目标
+    # DD/GG):同向=本中枢 dd/gg;转折型=前一中枢 dd/gg(R1-C13);反弹不触及=分解有误信号,亦供策略最小出场目标
 
 
 class BsBranchCalculator:
@@ -61,12 +61,18 @@ class BsBranchCalculator:
                 continue                                            # E-LOW-3: 补 provisional 过滤, 与 bs1/bs2 一致
             c = dv.leave_seg
             z = zs_result.done_zss[i]
+            # R1-C13(L029:12): 转折型(leave_seg=本中枢进入段)的反弹目标应取转折前
+            # 趋势最后一个中枢(前一 done 中枢)的 DD/GG——本中枢是背驰后新生的,
+            # 其 dd/gg 就在买点极值附近致目标恒真退化; 无前中枢时 None 不给恒真值。
+            target_zs = z
+            if c is getattr(z, "start", None):
+                target_zs = zs_result.done_zss[i - 1] if i >= 1 else None
             if c._type == "down":
                 out.append(BuySellPoint("1buy", z, c, c.end, dv,
-                                        rebound_target=getattr(z, "dd", None)))
+                                        rebound_target=getattr(target_zs, "dd", None)))
             elif c._type == "up":
                 out.append(BuySellPoint("1sell", z, c, c.end, dv,
-                                        rebound_target=getattr(z, "gg", None)))
+                                        rebound_target=getattr(target_zs, "gg", None)))
         self._fc_zr = zs_result
         self._fc_cache = out
         return out

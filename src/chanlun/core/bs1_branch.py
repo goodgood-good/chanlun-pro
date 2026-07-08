@@ -32,12 +32,17 @@ class Bs1BranchCalculator:
                 if c is None:
                     continue
                 z = zss[i]
+                # R1-C13: 转折型(leave_seg=本中枢进入段)取前一中枢 DD/GG,
+                # 口径同 bs_branch._first_class。
+                target_zs = z
+                if c is getattr(z, "start", None):
+                    target_zs = zss[i - 1] if i >= 1 else None
                 if c._type == "down":                                 # 跌势衰竭 → 一类买
                     out.append(BuySellPoint("1buy", z, c, c.end, dv, level=lr.level,
-                                            rebound_target=getattr(z, "dd", None)))
+                                            rebound_target=getattr(target_zs, "dd", None)))
                 elif c._type == "up":
                     out.append(BuySellPoint("1sell", z, c, c.end, dv, level=lr.level,
-                                            rebound_target=getattr(z, "gg", None)))
+                                            rebound_target=getattr(target_zs, "gg", None)))
         return out
 
 
