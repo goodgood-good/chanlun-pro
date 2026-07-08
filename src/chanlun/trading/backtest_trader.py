@@ -1122,6 +1122,10 @@ class BackTestTrader(Trader):
                 res = self.close_sell(code, pos, opt)
                 if res is False:
                     return False
+                # Round11 N4: 实际成交量<=0(券商拒单/未成交, 如富途市价单被拒)视为平仓失败,
+                # 不记录/不减仓, 防 clear 分支 now_pos_rate 归0而 amount 仍满 → execute 守卫永久跳过平仓(裸持失管)。
+                if res.get("amount", 0) <= 0:
+                    return False
 
                 release_balance = 0
                 fee = 0
@@ -1248,6 +1252,10 @@ class BackTestTrader(Trader):
 
                 res = self.close_buy(code, pos, opt)
                 if res is False:
+                    return False
+                # Round11 N4: 实际成交量<=0(券商拒单/未成交, 如富途市价单被拒)视为平仓失败,
+                # 不记录/不减仓, 防 clear 分支 now_pos_rate 归0而 amount 仍满 → execute 守卫永久跳过平仓(裸持失管)。
+                if res.get("amount", 0) <= 0:
                     return False
 
                 release_balance = 0
