@@ -228,10 +228,10 @@ class ExchangeTDXNYFutures(Exchange):
                         )
                         _ks.sort_values("date", inplace=True)
                         new_start_dt = _ks.iloc[0]["date"]
-                        old_end_dt = klines.iloc[-1]["date"]
+                        cache_end_dt = klines.iloc[-1]["date"] if i == 1 else cache_end_dt  # B1(Round8): 仅首轮拼接前捕获缓存真实末尾, 防每轮重算致陈旧>1400根中间段留洞
                         klines = pd.concat([klines, _ks], ignore_index=True)
                         # 新一页起始时间早于缓存末尾，说明已覆盖，无需继续
-                        if old_end_dt >= new_start_dt:
+                        if cache_end_dt >= new_start_dt:
                             break
 
             # 去重：分页重叠时保留最新一条

@@ -257,10 +257,10 @@ class ExchangeTDX(Exchange):
                         _ks.loc[:, "date"] = pd.to_datetime(_ks["datetime"])
                         _ks.sort_values("date", inplace=True)
                         new_start_dt = _ks.iloc[0]["date"]
-                        old_end_dt = ks.iloc[-1]["date"]
+                        cache_end_dt = ks.iloc[-1]["date"] if i == 1 else cache_end_dt  # B1(Round8): 仅首轮拼接前捕获缓存真实末尾, 防每轮重算致陈旧>1400根中间段留洞
                         ks = pd.concat([ks, _ks], ignore_index=True)
                         # 如果请求的第一个时间大于缓存的最后一个时间，退出
-                        if old_end_dt >= new_start_dt:
+                        if cache_end_dt >= new_start_dt:
                             break
             # 通达信分钟线午休结束后的第一根 bar 时间戳为 13:00，实际应归属上午 11:30（最后一根）
             if len(frequency) >= 2 and frequency.endswith("m"):
