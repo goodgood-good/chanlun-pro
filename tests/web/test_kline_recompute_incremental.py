@@ -66,24 +66,26 @@ def test_reuse_when_prefix_stable(mock_cl):
 
 def test_new_cl_when_first_date_changes(mock_cl):
     """首根 date 变早(向左滚动)→ 新建 CL(全量)。"""
-    recompute_chart_data_from_klines(
+    r1 = recompute_chart_data_from_klines(
         "a", "SYN", "1m", {}, _klines_df([1000, 1060], [10, 11]), cache_key="a:SYN:1m"
     )
-    recompute_chart_data_from_klines(
+    r2 = recompute_chart_data_from_klines(
         "a", "SYN", "1m", {}, _klines_df([940, 1000, 1060], [9, 10, 11]), cache_key="a:SYN:1m"
     )
-    assert len(_FakeCL.instances) == 2  # 向左滚动新建
+    # 不数全局 instances(后台线程污染): 首根变早→新建, 两次实例 id 不同
+    assert r1["id"] != r2["id"]  # 向左滚动新建(非复用)
 
 
 def test_new_cl_when_config_changes(mock_cl):
     """cl_config 变 → 不可复用, 新建 CL。"""
-    recompute_chart_data_from_klines(
+    r1 = recompute_chart_data_from_klines(
         "a", "SYN", "1m", {"fx_bh": "yes"}, _klines_df([1000, 1060], [10, 11]), cache_key="a:SYN:1m"
     )
-    recompute_chart_data_from_klines(
+    r2 = recompute_chart_data_from_klines(
         "a", "SYN", "1m", {"fx_bh": "no"}, _klines_df([1000, 1060, 1120], [10, 11, 12]), cache_key="a:SYN:1m"
     )
-    assert len(_FakeCL.instances) == 2
+    # 不数全局 instances(后台线程污染): cl_config 变→不可复用新建, 两次 id 不同
+    assert r1["id"] != r2["id"]
 
 
 def test_no_reuse_without_cache_key(mock_cl):
@@ -105,10 +107,13 @@ def test_store_cl_to_pool_then_reuse(mock_cl):
     ext_cl = _FakeCL()  # 模拟首次加载外部算好的 CL
     base = _klines_df([1000, 1060], [10, 11])
     kline_recompute.store_cl_to_pool("a:SYN:1m", ext_cl, base, {}, "a")
-    # 第一次轮询: 末尾追加新根、同 cache_key → 应复用 ext_cl(不新建)
+    pooled = kline_recompute._cl_pool["a:SYN:1m"]["cl"]  # 池存独立副本(deepcopy)
+    # 第一次轮询: 末尾追加新根、同 cache_key → 应复用池副本(不新建)
     nxt = _klines_df([1000, 1060, 1120], [10, 11, 12])
     r = recompute_chart_data_from_klines("a", "SYN", "1m", {}, nxt, cache_key="a:SYN:1m")
-    assert len(_FakeCL.instances) == 1  # 只有 store 的那个, recompute 未再新建(=走了增量)
+    # 不数全局 _FakeCL.instances(前序测试后台 prewarm/SSE 线程在 patch 窗口内构造 CL 污染计数,
+    # 曾致 ~1/7 间歇失败, 同 test_reuse_when_prefix_stable)。改断言复用的正是池中副本(id 相同)。
+    assert r["id"] == id(pooled)  # recompute 复用池副本(未新建)
     # T0-1: 池存独立副本(deepcopy)斩断别名 → 复用的是副本而非 ext_cl 本身;
     # 功能等价由"未新建 + n 正确(副本走增量处理了 3 根)"保证, 不再断言 id 相同(那是别名 bug)。
     assert r["n"] == 3
