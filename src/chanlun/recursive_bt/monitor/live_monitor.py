@@ -1927,7 +1927,7 @@ def make_arg_parser() -> argparse.ArgumentParser:
         "regime buy-ratio multipliers (uses previous-day index close)",
     )
     parser.add_argument("--regime-source-code", default="")
-    parser.add_argument("--regime-lookback-days", type=int, default=20)
+    parser.add_argument("--regime-lookback-days", type=int, default=None)
     parser.add_argument("--sell3-rebuy-mid3-impact-json")
     parser.add_argument("--sell3-rebuy-mid3-impact-markdown")
     parser.add_argument("--a-5m-sell3-rebuy3-impact-json")
@@ -2156,10 +2156,10 @@ def main(argv: Optional[list[str]] = None) -> int:
         or market_config.get("regime_source_code")
         or INDEX_BY_MARKET.get(args.market, "")
     )
-    args.regime_lookback_days = int(
-        getattr(args, "regime_lookback_days", 0)
-        or market_config.get("regime_lookback_days")
-        or 20
+    args.regime_lookback_days = (
+        args.regime_lookback_days
+        if getattr(args, "regime_lookback_days", None) is not None
+        else _config_int(market_config.get("regime_lookback_days"), 20)
     )
     args.optimization_report_min_interval = float(
         getattr(args, "optimization_report_min_interval", None)
