@@ -62,6 +62,48 @@ def _sig_bsp(cd, use_xd):
     return tuple(sorted(out, key=lambda x: (x[0], x[1] if x[1] is not None else -1, x[2] or 0)))
 
 
+def _sig_bsp_pts(pts):
+    out = []
+    for p in (pts or []):
+        af = getattr(p, "anchor_fx", None)
+        ki = af.k.k_index if af is not None and getattr(af, "k", None) is not None else None
+        out.append((str(getattr(p, "bs_type", "")), ki, getattr(p, "level", None)))
+    return tuple(sorted(out, key=lambda x: (x[0], x[1] if x[1] is not None else -1, x[2] or 0)))
+
+
+def _sig_lvl_zss(items):
+    # get_branch_dingli2_upgrades 返回 [(level, ZS)]: 解包后复用 _sig_zss 并前置 level
+    out = []
+    for it in (items or []):
+        lvl, zs = (it if isinstance(it, tuple) else (None, it))
+        sig = _sig_zss([zs])
+        out.append((lvl,) + (sig[0] if sig else ()))
+    return tuple(out)
+
+
+def _sig_bcs(bcs):
+    return tuple(sorted((str(d), _r(v), str(kind)) for (d, v, kind) in (bcs or [])))
+
+
+def _sig_generic(items):
+    # 防御性通用签名(小转大候选/区间套 NestRead 等结构体): 类名+常见标量字段+信号段位置锚
+    out = []
+    for it in (items or []):
+        row = [type(it).__name__]
+        for fld in ("level", "bs_type", "kind", "direction"):
+            row.append(str(getattr(it, fld, "")))
+        seg_anchor = None
+        for segf in ("signal_seg", "seg", "leave_seg"):
+            seg = getattr(it, segf, None)
+            if (seg is not None and getattr(seg, "start", None) is not None
+                    and getattr(seg, "end", None) is not None):
+                seg_anchor = (seg.start.k.k_index, seg.end.k.k_index)
+                break
+        row.append(seg_anchor)
+        out.append(tuple(row))
+    return tuple(sorted(out, key=repr))
+
+
 def _fingerprint(cd):
     parts = {
         "bis": _sig_lines(cd.get_bis()),
@@ -74,6 +116,30 @@ def _fingerprint(cd):
     fp = {k: len(v) for k, v in parts.items()}
     fp["hash"] = hashlib.sha256(
         repr({k: parts[k] for k in sorted(parts)}).encode("utf-8")
+    ).hexdigest()[:16]
+    # R1-C9: 生产信号面扩展指纹——kuozhan升级级/定理二升级+三类点/类一类/背驰bcs/
+    # 小转大/区间套此前零 golden 钉扎, 改坏全网恒绿。独立 hash_ext, 不动原 hash,
+    # 扩面时可逐字节证明既有 6 面信号零变更。
+    kuozhan = cd.get_kuozhan_levels() or []
+    parts_ext = {
+        "dingli2_upg_bi": _sig_lvl_zss(cd.get_branch_dingli2_upgrades(use_xd=False)),
+        "dingli2_upg_xd": _sig_lvl_zss(cd.get_branch_dingli2_upgrades(use_xd=True)),
+        "dingli2_bsp_bi": _sig_bsp_pts(cd.get_branch_dingli2_bspoints(use_xd=False)),
+        "dingli2_bsp_xd": _sig_bsp_pts(cd.get_branch_dingli2_bspoints(use_xd=True)),
+        "quasi_first_bi": _sig_bsp_pts(cd.get_branch_quasi_first(use_xd=False)),
+        "quasi_first_xd": _sig_bsp_pts(cd.get_branch_quasi_first(use_xd=True)),
+        "branch_bcs_bi": _sig_bcs(cd.get_branch_bcs(use_xd=False)),
+        "branch_bcs_xd": _sig_bcs(cd.get_branch_bcs(use_xd=True)),
+        "xiaozhuanda": _sig_generic(cd.get_xiaozhuanda_candidates()),
+        "interval_nest": _sig_generic(cd.get_branch_interval_nest()),
+        "kuozhan_zss": tuple(_sig_zss(l.get("zss") or []) for l in kuozhan),
+        "kuozhan_bsp": tuple(_sig_bsp_pts(l.get("bsp") or []) for l in kuozhan),
+        "kuozhan_bcs": tuple(_sig_bcs(l.get("bcs") or []) for l in kuozhan),
+    }
+    for k, v in parts_ext.items():
+        fp[k] = sum(len(x) for x in v) if k.startswith("kuozhan_") else len(v)
+    fp["hash_ext"] = hashlib.sha256(
+        repr({k: parts_ext[k] for k in sorted(parts_ext)}).encode("utf-8")
     ).hexdigest()[:16]
     return fp
 
@@ -93,11 +159,16 @@ def _all():
 @pytest.mark.skipif(not _FIX.exists(), reason="tests/fixtures 缺失(parquet 未恢复)")
 def test_real_data_signals_match_golden():
     computed = _all()
-    if os.environ.get("GEN_GOLDEN") == "1" or not _GOLDEN.exists():
+    if os.environ.get("GEN_GOLDEN") == "1":
         _GOLDEN.parent.mkdir(parents=True, exist_ok=True)
         _GOLDEN.write_text(json.dumps(computed, indent=2, ensure_ascii=False), encoding="utf-8")
-        if not _GOLDEN.exists():  # 仅 GEN 模式跳过断言;正常缺失时也已生成
-            pytest.skip("golden 基线已生成, 重跑以断言")
+        pytest.skip("golden 基线已生成(GEN_GOLDEN=1), 去掉环境变量重跑以断言")
+    # R12: 基线缺失必须显式失败——旧逻辑静默自再生+自比较=恒PASS假绿且污染基线,
+    # 回归网在最需要它的时刻(基线丢失/新环境)失效。
+    assert _GOLDEN.exists(), (
+        "golden 基线缺失(tests/core/golden/real_data_signals.json): 显式失败而非静默自再生;"
+        " 确认信号变更有意后用 GEN_GOLDEN=1 重生成并提交"
+    )
     golden = json.loads(_GOLDEN.read_text(encoding="utf-8"))
     for key in computed:
         assert key in golden, f"golden 缺 {key}(需重生成基线)"
