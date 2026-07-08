@@ -842,6 +842,13 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
         master = [t for t in master if t >= t_start]
     if t_end is not None:
         master = [t for t in master if t <= t_end]
+    if not master:
+        # MEDIUM-1(Round12): t_start 晚于全部数据 / t_end<t_start / filt 与窗口无交集 → master 空 →
+        # 后续收尾强平 t=master[-1] 及 _report 的 equity[-1]/[0] 越界 IndexError。改前置抛清晰错误。
+        raise ValueError(
+            f"回测窗口未覆盖任何交易 bar(t_start={t_start}, t_end={t_end}); "
+            f"请检查 start/end 是否写反或超出数据范围。"
+        )
     # 每只票: master索引 → (精确bar索引 exact, 最近≤t bar索引 last)。exact=-1 即停牌。
     mx: Dict[str, np.ndarray] = {}
     ml: Dict[str, np.ndarray] = {}
