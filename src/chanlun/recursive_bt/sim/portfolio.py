@@ -1067,10 +1067,11 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
                             and _sellable_layer_shares(p, exit_layer, before_shares, swing_signal_level) <= 1e-9
                         ):
                             continue
-                        # HIGH-1(Round12): size 取整为 0 股(sub-lot 部分卖 shares*ratio<lot 或 sub-lot
-                        # 残仓)无法成交且持仓不增长故未来仍 0; 原 carry 该卖单 → 永久滞留 + 经 _process_exits
-                        # 的 pend_sell 屏蔽该标一切后续退出(大级别down强平/结构止损/更高级别卖点全失效)=
-                        # 错回测(退出时点/持仓期失真)。改 drop(不 carry), sub-lot 残仓由收尾 final_close 清理。
+                        # HIGH-1(Round12): size 取整为 0 股(sub-lot 部分卖 shares*ratio<lot 或 sub-lot 残仓)
+                        # 无法成交。原 carry 该卖单 → 经 pend_sell 既被 _process_exits 屏蔽该标一切后续退出
+                        # (大级别down强平/结构止损/更高级别卖点全失效)、又被 _process_entries 屏蔽 refill 加仓
+                        # → 持仓冻结 → sub-lot 比例恒 <lot → 该卖单永不可成交(自屏蔽死锁)= 错回测(退出时点/
+                        # 持仓期失真)。改 drop(不 carry), sub-lot 残仓由收尾 final_close(无视 lot 清全部)清理。
                         continue
                     actual_sell_ratio = min(max(size / before_shares, 0.0), 1.0)
                     exit_bs_type = order_bs_type or str(p.get("exit_bs_type", ""))
