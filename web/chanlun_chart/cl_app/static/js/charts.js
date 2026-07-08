@@ -1236,15 +1236,16 @@ class ChartManager {
                     else { $d.show(); $a.text('▾'); }
                 });
                 // 全选/全清:trigger change 让现有 toggle handler 走完整 cfg 保存 + redraw 流程
+                // 排除「独立周期画线」(indCbId): 它是画线存储模式切换非显示项, 误触会切数据源(R1-C8)。
                 $('#' + menuId + '_all').on('click', function (e) {
                     e.stopPropagation();
-                    $('#' + menuId + ' input[type="checkbox"]').each(function () {
+                    $('#' + menuId + ' input[type="checkbox"]').not('#' + indCbId).each(function () {
                         if (!this.checked) { this.checked = true; $(this).trigger('change'); }
                     });
                 });
                 $('#' + menuId + '_none').on('click', function (e) {
                     e.stopPropagation();
-                    $('#' + menuId + ' input[type="checkbox"]').each(function () {
+                    $('#' + menuId + ' input[type="checkbox"]').not('#' + indCbId).each(function () {
                         if (this.checked) { this.checked = false; $(this).trigger('change'); }
                     });
                 });
