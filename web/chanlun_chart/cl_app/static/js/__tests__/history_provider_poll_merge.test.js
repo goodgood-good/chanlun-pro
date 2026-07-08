@@ -234,3 +234,55 @@ test('向左滚动时新响应为空不应误删右侧现有买卖点', () => {
   assert.strictEqual(mmds.length, 1, `向左滚动不应误删右侧现有买卖点,实际 mmds=${JSON.stringify(mmds)}`);
   assert.strictEqual(mmds[0].points.time, 5000);
 });
+
+test('向左滚动的历史响应不应 clobber 掉右侧现有 K线 bars(Round11 BUG1 回归)', () => {
+  const df = makeDatafeed();
+  const hp = df._historyProvider;
+  const symbol = 'a:sh.513100';
+  const resolution = '5';
+  const base = { symbol, resolution };
+
+  hp.applyChanlunUpdate(
+    fullResponse([4000, 5000, 5500], [18, 20, 22], []),
+    Object.assign({}, base, { from: 0, to: 5500, firstDataRequest: 'true' })
+  );
+  // 向左滚动: to=3000 < 最新K线时间 5500, 响应是更旧窗口 [500,900,1000]
+  hp.applyChanlunUpdate(
+    pollResponse([500, 900, 1000], [9, 10, 10], []),
+    Object.assign({}, base, { from: 0, to: 3000, firstDataRequest: 'false' })
+  );
+
+  const resKey = symbol.toLowerCase() + resolution.toLowerCase();
+  const bars = hp.bars_result.get(resKey).bars;
+  const times = bars.map((b) => b.time);
+  // BUG1: keptBars=filter(time<500)=空 → bars 被截成 [500,900,1000], 最近 5500 丢失 → 误判gap弹回
+  assert.ok(times.includes(5500 * 1000), `最近K线 5500 不应被向左滚动 clobber, times=${JSON.stringify(times)}`);
+  assert.ok(times.includes(500 * 1000), '更旧K线 500 应被并入');
+});
+
+test('向左滚动且旧窗口自带非空买卖点时不应丢弃右侧最近买卖点(Round11 BUG2 回归)', () => {
+  const df = makeDatafeed();
+  const hp = df._historyProvider;
+  const symbol = 'a:sh.513100';
+  const resolution = '5';
+  const base = { symbol, resolution };
+
+  const recentMmd = mmd(5000, 20, 'sell');
+  hp.applyChanlunUpdate(
+    fullResponse([4000, 5000, 5500], [18, 20, 22], [], [recentMmd]),
+    Object.assign({}, base, { from: 0, to: 5500, firstDataRequest: 'true' })
+  );
+  // 向左滚动: to=3000 < 最新 5500, 旧窗口本身带一个买点 mmd(800)(非空, 不同于既有"新响应为空"用例)
+  const olderMmd = mmd(800, 9, 'buy');
+  hp.applyChanlunUpdate(
+    pollResponse([500, 900, 1000], [9, 10, 10], [], [olderMmd]),
+    Object.assign({}, base, { from: 0, to: 3000, firstDataRequest: 'false' })
+  );
+
+  const resKey = symbol.toLowerCase() + resolution.toLowerCase();
+  const mmds = hp.bars_result.get(resKey).mmds;
+  const times = mmds.map((m) => m.points.time);
+  // BUG2: minResponseTime=800 → 最近 5000 不 < 800 → 被丢弃(非对称于已硬化的线段路径)
+  assert.ok(times.includes(5000), `向左滚动不应丢弃最近买卖点 5000, times=${JSON.stringify(times)}`);
+  assert.ok(times.includes(800), '更旧买卖点 800 应被并入');
+});

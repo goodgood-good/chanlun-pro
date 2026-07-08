@@ -564,20 +564,30 @@ export class HistoryProvider {
           }
           if (!existingPoints || existingPoints.length === 0) return newPoints;
 
-          const minResponseTime = Math.min(...newPoints.map(getPointTime));
-          const updatedPoints: TextPoint[] = [];
-          // 保留小于最小时间点的数据
+          // Round11 BUG2 修复(对称 updateLineSegments 的 key-upsert): 原按 minResponseTime 时间切割只保留
+          // 早于新响应最早点的旧点——向左滚动时新响应是更旧窗口(min 小), 右侧最近的分型/买卖点/背驰
+          // (time 大)全不 < min → 被丢弃(与已硬化线段不对称)。改 time+price+text 身份 upsert:
+          // 权威窗口内(右侧最新窗)未被新响应提及的旧点剔除(去幽灵), 向左滚动(window undefined)只增不删。
+          const isTextInAuthWindow = (p: TextPoint): boolean => {
+            if (windowFrom === undefined || windowTo === undefined) return false;
+            const tt = getPointTime(p);
+            return typeof tt === 'number' && tt >= windowFrom && tt <= windowTo;
+          };
+          const textPointKey = (p: TextPoint): string => {
+            const tt = getPointTime(p);
+            const pp = Array.isArray(p.points) ? p.points[0].price : p.points.price;
+            return `${tt}_${pp}_${p.text || ''}`;
+          };
+          const mergedTextByKey = new Map<string, TextPoint>();
           for (const point of existingPoints) {
-            if (getPointTime(point) < minResponseTime) {
-              updatedPoints.push(point);
+            if (!isTextInAuthWindow(point)) {
+              mergedTextByKey.set(textPointKey(point), point);
             }
           }
-          // 添加返回数据中剩余的新点位
           for (const point of newPoints) {
-            updatedPoints.push(point);
+            mergedTextByKey.set(textPointKey(point), point);
           }
-          // 按时间排序，使用getPointTime辅助函数获取时间
-          return updatedPoints.sort(
+          return Array.from(mergedTextByKey.values()).sort(
             (a, b) => getPointTime(a) - getPointTime(b)
           );
         };
@@ -751,9 +761,13 @@ export class HistoryProvider {
         // 导致 SSE 推送(update:true)缠论更新而 K线 lastBar 不动。保留旧 bars 中早于新数据
         // 首根的，追加本次 bars，让 K线随 SSE 实时推进(与 dist/bundle.js 同步)。
         if (bars.length > 0) {
-          const newFirstTime = bars[0].time;
-          const keptBars = (obj_res.bars || []).filter((bar) => bar.time < newFirstTime);
-          obj_res.bars = keptBars.concat(bars);
+          // Round11 BUG1 修复: 原"保留早于新首根的旧bars + concat"假设新bars恒为最近后缀; 向左滚动时新bars
+          // 是更旧窗口(newFirstTime小)→ keptBars空 → 最近K线被clobber → _getViewLatestSec读到陈旧末根
+          // → 下一SSE帧/看门狗误判巨隙 → resetData视图弹回最新, 毁盘中回看。改按 time 并集(新覆盖同time)。
+          const barByTime = new Map<number, Bar>();
+          for (const bar of (obj_res.bars || [])) barByTime.set(bar.time, bar);
+          for (const bar of bars) barByTime.set(bar.time, bar);
+          obj_res.bars = Array.from(barByTime.values()).sort((a, b) => a.time - b.time);
         }
 
         const oldTimes = obj_res.times || [];
