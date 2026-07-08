@@ -262,7 +262,7 @@ class ExchangeAlpaca(Exchange):
                 low=_t.daily_bar.low,
                 open=_t.daily_bar.open,
                 volume=_t.daily_bar.volume,
-                rate=round(
+                rate=0 if not (_t.previous_daily_bar and _t.previous_daily_bar.close) else round(  # B4(Round8): prev None/0 守零防整批崩
                     (_t.daily_bar.close - _t.previous_daily_bar.close)
                     / _t.previous_daily_bar.close
                     * 100,

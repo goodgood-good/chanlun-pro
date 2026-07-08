@@ -135,7 +135,7 @@ class ExchangePolygon(Exchange):
                     frequency, default=dt.timedelta(days=30)
                 )
             else:
-                if len(end_date) == 10:
+                if len(start_date) == 10:  # B2(Round8): 修 typo(此处 end_date 已转 datetime), 应判 start_date
                     start_date = fun.str_to_datetime(start_date, "%Y-%m-%d")
                 else:
                     start_date = fun.str_to_datetime(start_date)

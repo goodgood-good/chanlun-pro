@@ -206,7 +206,7 @@ class ExchangeFutu(Exchange):
                     volume=_d[1]["volume"],
                     buy1=_d[1]["bid_price"],
                     sell1=_d[1]["ask_price"],
-                    rate=round(
+                    rate=0 if not _d[1]["prev_close_price"] else round(  # B3(Round8): prev_close==0(上市首日/停牌复牌首笔)守零防整批 ticks 崩
                         (_d[1]["last_price"] - _d[1]["prev_close_price"])
                         / _d[1]["prev_close_price"]
                         * 100,
