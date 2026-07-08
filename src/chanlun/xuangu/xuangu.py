@@ -291,10 +291,10 @@ def xg_single_bi_1mmd(code: str, mk_datas: MarketDatas, opt_type: list = []):
         return None
     for _zs_type, _mmds in bi.zs_type_mmds.items():
         for _m in _mmds:
-            if _m.name == "1buy" and _m.zs.line_num < 9:
+            if _m.name in ("1buy", "1sell") and _m.name in opt_mmd and _m.zs.line_num < 9:
                 return {
                     "code": cd.get_code(),
-                    "msg": f"{cd.get_frequency()} 出现本级别笔一买",
+                    "msg": f"{cd.get_frequency()} 出现本级别笔一类买卖点({_m.name})",
                 }
 
     return None
@@ -316,10 +316,10 @@ def xg_single_bi_2mmd(code: str, mk_datas: MarketDatas, opt_type: list = []):
         return None
     for _zs_type, _mmds in bi.zs_type_mmds.items():
         for _m in _mmds:
-            if _m.name == "2buy" and _m.zs.line_num < 9:
+            if _m.name in ("2buy", "2sell") and _m.name in opt_mmd and _m.zs.line_num < 9:
                 return {
                     "code": cd.get_code(),
-                    "msg": f"{cd.get_frequency()} 出现本级别笔二买",
+                    "msg": f"{cd.get_frequency()} 出现本级别笔二类买卖点({_m.name})",
                 }
 
     return None
@@ -341,10 +341,10 @@ def xg_single_bi_3mmd(code: str, mk_datas: MarketDatas, opt_type: list = []):
         return None
     for _zs_type, _mmds in bi.zs_type_mmds.items():
         for _m in _mmds:
-            if _m.name == "3buy" and _m.zs.line_num < 9:
+            if _m.name in ("3buy", "3sell") and _m.name in opt_mmd and _m.zs.line_num < 9:
                 return {
                     "code": cd.get_code(),
-                    "msg": f"{cd.get_frequency()} 出现本级别笔三买",
+                    "msg": f"{cd.get_frequency()} 出现本级别笔三类买卖点({_m.name})",
                 }
 
     return None
