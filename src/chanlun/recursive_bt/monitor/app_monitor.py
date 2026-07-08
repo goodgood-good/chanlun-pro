@@ -134,7 +134,7 @@ class DynamicMonitorConfig:
     include_a_selection_pool: bool = False
     a_selection_scan_limit: int = 0
     a_selection_max_codes: int = MAX_POS * 5
-    a_selection_lookback_bars: int = 3
+    a_selection_lookback_bars: int = 48  # Round11 B2: 曾为3致盘后漏选
     a_selection_buy_classes: tuple[int, ...] = (3, 2, 1)
     a_selection_require_three_systems: bool = True
     a_selection_fund_data: str = "D:/chanlun_pro/bt_data_fund_all_a"

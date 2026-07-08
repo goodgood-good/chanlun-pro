@@ -2304,7 +2304,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                 bt_data=args.bt_data,
                 fund_data=str(market_config.get("fund_data") or "D:/chanlun_pro/bt_data_fund_all_a"),
                 max_codes=args.pool_size,
-                lookback_bars=_config_int(market_config.get("selection_lookback_bars"), 3),
+                lookback_bars=_config_int(market_config.get("selection_lookback_bars"), 48),
                 buy_classes=_config_buy_classes(market_config.get("selection_buy_classes")),
                 require_three_systems=_config_bool(
                     market_config.get("selection_require_three_systems"),

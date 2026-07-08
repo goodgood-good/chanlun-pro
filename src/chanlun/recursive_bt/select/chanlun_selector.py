@@ -47,7 +47,7 @@ class ASelectionConfig:
     fund_data: str = DEFAULT_FUND_DATA
     scan_limit: int = 0
     max_codes: int = 50
-    lookback_bars: int = 3
+    lookback_bars: int = 48  # Round11 B2: 曾为3(15min)致盘后启动永远选不出候选
     buy_classes: tuple[int, ...] = DEFAULT_BUY_CLASSES
     require_three_systems: bool = True
     fundamental_roe_ann_min: float = DEFAULT_ROE_ANN_MIN
