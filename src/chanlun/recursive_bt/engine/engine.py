@@ -688,8 +688,16 @@ class Simulator:
         peak = np.maximum.accumulate(equity)
         max_dd = float(np.max((peak - equity) / peak)) if len(equity) else 0.0
         rets = np.diff(equity) / equity[:-1]
-        # 1m bar → 年化: A股 ~240bar/日 × 244日; 美股 ~390×252。粗用 sqrt(年bar数)。
-        ann = np.sqrt(244 * 240)
+        # BUG-4(Round8): 年化因子按实际 bar 频率自适应。旧代码硬编码 sqrt(244*240)(1m 口径)
+        # 但 Simulator 实际喂 5m(df5)-> 夏普高估约 2.24x。用 self.dates 真实跨度算 bar/年密度:
+        # ann = sqrt(bar数/年数), 与 portfolio._report 同口径, 对任意周期(1m/5m/30m/日)正确。
+        _span_days = (
+            (self.dates[-1] - self.dates[0]).total_seconds() / 86400.0
+            if len(self.dates) > 1
+            else 0.0
+        )
+        _years = _span_days / 365.25
+        ann = np.sqrt(len(rets) / _years) if _years > 0 and len(rets) > 0 else 0.0
         sharpe = float(np.mean(rets) / (np.std(rets) + 1e-12) * ann) if len(rets) else 0.0
         wins = sum(1 for t in trades if t.ret > 0)
         wr = wins / len(trades) if trades else 0.0
