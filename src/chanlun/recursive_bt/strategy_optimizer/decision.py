@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import json
+import os
 from dataclasses import asdict
 from pathlib import Path
 from typing import Iterable, Mapping, Optional
@@ -29,6 +30,18 @@ from chanlun.recursive_bt.strategy_optimizer.scoring import (
 from chanlun.recursive_bt.strategy_optimizer.utils import (
     _float_first,
 )
+
+
+def _atomic_write_json(path: Path, obj) -> None:
+    """原子写 JSON: 先写 .tmp 再 os.replace, 防写一半被 kill 截断(与 ledger/dedup/manifest 原子写一致)。
+
+    Round11 B3: 决策/覆盖状态文件原用直接 write_text(与 ledger 等的 tmp+os.replace 不一致),
+    中途被 kill 会留截断文件。读端 json.loads 套 try/except 回落 {} 虽 fail-safe(降风险 override
+    被静默丢), 但与全仓原子写纪律对齐更稳健。
+    """
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
 
 
 def build_candidate_report(market: Optional[str] = None) -> dict:
@@ -547,7 +560,7 @@ def update_decision_state_file(
         now=now,
     )
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    _atomic_write_json(path, state)
     return state
 
 
@@ -590,7 +603,7 @@ def write_runtime_overrides_file(
     overrides = build_runtime_overrides(decision_state)
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(overrides, ensure_ascii=False, indent=2), encoding="utf-8")
+    _atomic_write_json(path, overrides)
     return overrides
 
 
@@ -691,7 +704,7 @@ def update_bs_point_ratio_state_file(
         now=now,
     )
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    _atomic_write_json(path, state)
     return state
 
 
@@ -745,7 +758,7 @@ def write_bs_point_ratio_overrides_file(
     overrides = build_bs_point_ratio_overrides(ratio_state)
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(overrides, ensure_ascii=False, indent=2), encoding="utf-8")
+    _atomic_write_json(path, overrides)
     return overrides
 
 
