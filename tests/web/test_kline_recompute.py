@@ -88,3 +88,18 @@ def test_recompute_when_new_bar_appended(monkeypatch, spy_recompute):
     )
     assert spy_recompute == [1]  # recompute 被调用
     assert result == {"t": [], "recomputed": True}
+
+
+def test_corrupt_entry_rejects_narrow_overwrite(monkeypatch, spy_recompute):
+    """web-B2: cached entry 有 bar 但列长不一致(半坏)-> extract 返空 -> 不得用窄 new_klines
+    merge 出窄结果并以 is_full_snapshot=True 写入(污染后续 firstDataRequest 只返回几根 K 线)。
+    extract 声明回退全量, prepend 须拒绝: 返 None、不重算、不覆盖。"""
+    corrupt = {"t": [1000, 1060, 1120], "o": [10], "h": [10], "l": [10], "c": [10], "v": [10]}
+    monkeypatch.setattr(chart_cache, "_get_chart_cache_entry", lambda k: {"data": corrupt})
+    new = _klines_df([1120, 1180], [12, 13])  # 窄 new_klines
+
+    result = kline_recompute.prepend_klines_and_replace_cache(
+        "a", "X", "1m", {}, new, "a:X:1m",
+    )
+    assert spy_recompute == []  # 未走窄数据重算+写全量
+    assert result is None  # 拒绝覆盖, 本次 no_data

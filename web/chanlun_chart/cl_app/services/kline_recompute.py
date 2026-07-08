@@ -364,7 +364,17 @@ def prepend_klines_and_replace_cache(
     cached_df = pd.DataFrame()
     cached_entry = _chart_cache._get_chart_cache_entry(cache_key)
     if cached_entry is not None:
-        cached_df = extract_klines_df_from_chart_data(cached_entry.get("data") or {})
+        _cached_data = cached_entry.get("data") or {}
+        cached_df = extract_klines_df_from_chart_data(_cached_data)
+        # web-B2: entry 有 bar(t 非空)但反构建得空(列长不一致的半坏 entry)-> 拿不到全量缓存。
+        # 若继续: 窄 new_klines merge 出窄结果并以 is_full_snapshot=True 写入 -> 污染后续
+        # firstDataRequest(命中"假全量"只返回几根 K 线)。extract 声明"回退全量", 故拒绝用窄
+        # 数据覆盖: 返回 None(本次 no_data, 前端保持现状), 坏 entry 交下次 miss/freshness 全量重拉。
+        if _cached_data.get("t") and len(cached_df) == 0:
+            LogUtil.warning(
+                f"[prepend] cached entry 反构建失败(疑列长不一致半坏), 拒绝窄数据覆盖 {cache_key}"
+            )
+            return None
 
     merged = merge_klines_df(cached_df, new_klines)
     if merged is None or len(merged) == 0:
