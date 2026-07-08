@@ -123,3 +123,28 @@ def test_volume_only_change_refreshes_without_recompute(monkeypatch, spy_recompu
     result = kline_recompute.prepend_klines_and_replace_cache("a", "X", "1m", {}, new, "a:X:1m")
     assert spy_recompute == []  # OHLC 未变 -> 不重算
     assert result["v"][-1] == 999  # 但成交量已就地刷新(非冻结在 10)
+
+
+def test_volume_refresh_is_native_python_json_serializable(monkeypatch, spy_recompute):
+    """web-B1 回归(Round9 问题1): 刷新的 volume 须原生 python(非 numpy 标量), 否则 int64
+    源 volume 会让 json.dumps 崩(Flask HTTP + SSE 均 stdlib json), 且污染共享缓存 dict。"""
+    import json
+
+    import numpy as np
+
+    cached = _chart_data([1000, 1060], [10, 11])
+    monkeypatch.setattr(chart_cache, "_get_chart_cache_entry", lambda k: {"data": cached})
+    new = pd.DataFrame(
+        {
+            "date": pd.to_datetime([1000, 1060], unit="s", utc=True),
+            "open": [10, 11],
+            "high": [10, 11],
+            "low": [10, 11],
+            "close": [10, 11],
+            "volume": np.array([10, 999], dtype=np.int64),  # int64 源(futu/自定义)
+        }
+    )
+    result = kline_recompute.prepend_klines_and_replace_cache("a", "X", "1m", {}, new, "a:X:1m")
+    assert result["v"][-1] == 999
+    assert not isinstance(result["v"][-1], np.generic)  # 非 numpy 标量
+    json.dumps(result["v"])  # stdlib json 不抛 TypeError

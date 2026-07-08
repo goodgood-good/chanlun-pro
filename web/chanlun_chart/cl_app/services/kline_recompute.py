@@ -413,7 +413,7 @@ def prepend_klines_and_replace_cache(
                 # web-B1: OHLC 未变但末根成交量在累积(涨跌停/平价 tick 段)-> 缠论结构只依赖
                 # OHLC 故不重算(省 CPU), 但就地 O(1) 刷新缓存末根成交量, 避免成交量柱冻结。
                 if _data and _data.get("v") and _co["volume"] != _mo["volume"]:
-                    _data["v"][-1] = _mo["volume"]
+                    _data["v"][-1] = float(_mo["volume"])  # 原生 python(非 numpy 标量), 防 int64 源 json.dumps 崩
                 return _data
         except (KeyError, IndexError):
             pass
