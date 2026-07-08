@@ -752,7 +752,7 @@ def convert_us_kline_frequency(klines: pd.DataFrame, to_f: str) -> pd.DataFrame:
 
 
 def convert_us_tdx_kline_frequency(klines: pd.DataFrame, to_f: str) -> pd.DataFrame:
-    """将美股 K 线（通达信口径）合成到指定周期，时间戳后对齐（bar 结束时刻）。
+    """将美股 K 线（通达信口径）合成到指定周期，时间戳前对齐（bar 开始时刻，= resample bin 左边界；86024fa8 起改用 bin 起点修实时漂移）。
 
     通达信美股行情时间为 UTC+8 存储，resample 前需先转 UTC 才能按自然小时对齐。
     """

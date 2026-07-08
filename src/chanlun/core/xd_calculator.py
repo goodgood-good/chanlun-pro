@@ -107,7 +107,9 @@ def _resolve_pivot_bi(elem: dict, seg_type: str):
 
 # _try_end 中"反向 CS 元素扫描上限"：防止反向 CS 一直被包含合并、
 # second_elems 凑不齐 2 个，导致单次扫到数组末尾造成 O(n²) 退化。
-# 默认 50，可用环境变量 CHANLUN_XD_LOOKAHEAD 或 config 实例级覆盖（config 优先）。
+# 默认 50，可用环境变量 CHANLUN_XD_LOOKAHEAD 覆盖(import 时读一次的模块全局 SAFETY_LOOKAHEAD,改后须重启)。
+# 注：无 config 实例级覆盖(_try_end 直读模块全局 SAFETY_LOOKAHEAD, 非 self.config); 且该值不进 cl_config/
+# source_fingerprint/kline signature 任何缓存指纹 → 改 env 后磁盘 chart_data 旧条目不自动失效(需重启+靠新鲜度窗口)。
 import os as _os
 
 def _get_default_safety_lookahead() -> int:
