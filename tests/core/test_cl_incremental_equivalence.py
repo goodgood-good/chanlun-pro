@@ -72,12 +72,24 @@ def _sig_zss(zss):
     return tuple(out)
 
 
+def _round6(x):
+    # float 用 round(6) 免 ~1e-16 包含处理噪声在 == 对拍下误报分裂(非 float 原样透传)
+    return round(x, 6) if isinstance(x, float) else x
+
+
 def _sig_bsp(cd, use_xd):
     out = []
     for p in cd.get_branch_bspoints(use_xd=use_xd):
         af = getattr(p, "anchor_fx", None)
         ki = af.k.k_index if af is not None and af.k is not None else None
-        out.append((str(p.bs_type), ki, p.level))
+        # 终检盲区补: structural_stop_below/above + rebound_target 驱动 portfolio 结构止损/最小出场目标,
+        # 须纳入 inc==batch 对拍(原只比 bs_type/k_index/level, 这些字段漂移抓不到)。
+        out.append((
+            str(p.bs_type), ki, p.level,
+            _round6(getattr(p, "structural_stop_below", None)),
+            _round6(getattr(p, "structural_stop_above", None)),
+            _round6(getattr(p, "rebound_target", None)),
+        ))
     return tuple(sorted(out, key=lambda x: (x[0], x[1] if x[1] is not None else -1, x[2] or 0)))
 
 
