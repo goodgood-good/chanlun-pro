@@ -34,8 +34,9 @@ def test_drop_daily_kept():
 
 
 def test_drop_irregular_interval_kept():
-    # 间隔 != 名义 5m(节假日跳空)-> 不裁剪, 防误删历史 bar
-    assert len(_drop_unclosed_last_bar(_df(["2099-01-01 09:30:00", "2099-01-01 09:50:00"]), "5m")) == 2
+    # 间隔 != 名义 5m(节假日跳空)且末根标签在过去(已收盘)-> 不裁剪, 防误删历史 bar。
+    # 末根标签在未来(session 首根进行中)的裁剪见 test_drop_unclosed_session_first_bar.py。
+    assert len(_drop_unclosed_last_bar(_df(["2020-01-01 09:30:00", "2020-01-01 09:50:00"]), "5m")) == 2
 
 
 def test_drop_short_kept():

@@ -62,8 +62,8 @@ def drop_unclosed_last_bar(df: "pd.DataFrame", frequency: str) -> "pd.DataFrame"
 
     判定方式自包含、不依赖外部 now(tz 不可知):用倒数第二根与最后一根的
     时间差推断 bar 间隔,再用与最后一根**同 tz** 的当前时刻判断「最后一根
-    所属周期是否已结束」。无法判定(非分钟级/不足两根/间隔异常)时原样返回,
-    绝不误删历史收盘 bar。
+    所属周期是否已结束」。非分钟级/不足两根时原样返回;间隔异常(session 首根
+    等)仅裁「标签在未来」的末根,绝不误删历史收盘 bar。
     """
     minutes = _freq_to_minutes(frequency)
     if minutes is None or df is None or len(df) < 2:
@@ -74,9 +74,14 @@ def drop_unclosed_last_bar(df: "pd.DataFrame", frequency: str) -> "pd.DataFrame"
     except Exception:
         return df
     step = pd.Timedelta(minutes=minutes)
-    # 数据自身间隔与名义间隔不一致(节假日跳空/缺口)时,只在「正好等于名义间隔」
-    # 时才启用裁剪,避免把历史正常 bar 误判为进行中。
+    # 数据自身间隔与名义间隔不一致(节假日跳空/午休/隔夜 session 首根)时,无法用
+    # 前一根推断周期边界:仅裁「标签在未来」的末根——已收盘 bar 的标签无论起点/
+    # 终点约定必然 <= now,标签 > now 只可能是进行中 bar(QMT 端点标签的 session
+    # 首根即此形态),故绝不误删历史收盘 bar;起点标签源此分支行为不变(保守)。
     if (last_ts - prev_ts) != step:
+        now = pd.Timestamp.now(tz=last_ts.tz) if last_ts.tz is not None else pd.Timestamp.now()
+        if now < last_ts:
+            return df.iloc[:-1]
         return df
     # 用与 last_ts 同 tz 的当前时刻(naive→naive, aware→对应 tz)
     now = pd.Timestamp.now(tz=last_ts.tz) if last_ts.tz is not None else pd.Timestamp.now()

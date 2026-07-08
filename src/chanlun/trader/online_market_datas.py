@@ -28,7 +28,8 @@ def _drop_unclosed_last_bar(df: pd.DataFrame, frequency: str) -> pd.DataFrame:
 
     口径同 recursive_bt.sim.paper.drop_unclosed_last_bar(此处内联避免 trader->recursive_bt
     跨层依赖): 自包含不依赖外部 now, 用末两根推断间隔, 再用与末根同 tz 的当前时刻判断末根
-    周期是否已结束。非分钟级/不足两根/间隔异常时原样返回, 绝不误删历史收盘 bar。
+    周期是否已结束。非分钟级/不足两根时原样返回; 间隔异常(session 首根等)仅裁
+    「标签在未来」的末根, 绝不误删历史收盘 bar。
     """
     minutes = _freq_minutes(frequency)
     if minutes is None or df is None or len(df) < 2:
@@ -40,6 +41,11 @@ def _drop_unclosed_last_bar(df: pd.DataFrame, frequency: str) -> pd.DataFrame:
         return df
     step = pd.Timedelta(minutes=minutes)
     if (last_ts - prev_ts) != step:
+        # 间隔异常(session 首根/跳空): 仅裁「标签在未来」的末根(必为进行中bar),
+        # 已收盘 bar 标签必然 <= now, 绝不误删历史收盘 bar。口径同 paper 副本。
+        now = pd.Timestamp.now(tz=last_ts.tz) if last_ts.tz is not None else pd.Timestamp.now()
+        if now < last_ts:
+            return df.iloc[:-1]
         return df
     now = pd.Timestamp.now(tz=last_ts.tz) if last_ts.tz is not None else pd.Timestamp.now()
     if now < last_ts + step:
