@@ -125,8 +125,11 @@ def process_xuangu_task(
         ex = get_exchange(Market(market))
         run_codes = []
         if src_zx_group == "all":
-            # 获取交易所下的股票代码
-            run_codes = [_s["code"] for _s in ex.all_stocks()]
+            # 获取交易所下的股票代码。cq singleton 的 default_market 会被后初始化
+            # 市场覆盖, 必须显式传 market(统一入口 _safe_all_stocks, 历史实测复现)。
+            from .services.stock_list import _safe_all_stocks
+
+            run_codes = [_s["code"] for _s in _safe_all_stocks(ex, market)]
             if market == "a":
                 run_codes = [
                     _c

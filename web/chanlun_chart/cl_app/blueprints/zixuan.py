@@ -132,8 +132,12 @@ def opt_zixuan_import():
     zx = ZiXuan(market)
     ex = get_exchange(Market(market))
     import_nums = 0
+    # cq singleton 的 default_market 会被后初始化市场覆盖, 必须显式传 market
+    # (统一入口 _safe_all_stocks, 历史实测复现), 否则用错市场代码全集校验导入。
+    from ..services.stock_list import _safe_all_stocks
+
     try:
-        market_all_stocks = ex.all_stocks()
+        market_all_stocks = _safe_all_stocks(ex, market)
         market_all_codes = [s["code"] for s in market_all_stocks]
         with open(import_file, "r", encoding="utf-8") as fp:
             for line in fp:
