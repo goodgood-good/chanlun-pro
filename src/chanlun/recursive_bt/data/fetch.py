@@ -303,6 +303,31 @@ def _now_iso() -> str:
     return _dt.datetime.now().isoformat(timespec="seconds")
 
 
+def _atomic_pickle_dump(obj, path: str) -> None:
+    """原子写 pickle:先写 {path}.tmp 再 os.replace, 避免中断留下半写/截断文件。
+
+    原 `pickle.dump(d, open(p,"wb"))` 打开即截断原文件, 进程中断(本机 QMT 多天劣化
+    0xC0000409 崩溃为常态)会留下半写 pkl; 且 _is_pkl_fresh 只看 mtime 把坏文件判为
+    今日新鲜跳过重建, load 处崩溃传导全批。原子替换后中断只留 .tmp, 最终文件永不半写。
+    (第2轮C2, 与 _write_manifest 同口径)"""
+    tmp = f"{path}.tmp"
+    with open(tmp, "wb") as fp:
+        pickle.dump(obj, fp)
+    os.replace(tmp, path)
+
+
+def _load_pkl_or_none(path: str):
+    """读 pkl, 损坏/截断(EOFError/UnpicklingError/OSError 等)返回 None 而非抛出。
+
+    patch_* 批处理原本 pickle.load 在 try 块外, 扫到任一坏文件即整批崩死; 改为逐文件
+    容错跳过(调用方据 None 计 fail 并 continue), 坏文件由下次全量重建自愈。(第2轮C2)"""
+    try:
+        with open(path, "rb") as fp:
+            return pickle.load(fp)
+    except Exception:
+        return None
+
+
 def _is_pkl_fresh(path: str) -> bool:
     """F-HIGH-1(audit/_round6_select_data.md):判断已有 pkl 是否「今日已构建」(新鲜)。
 
@@ -396,7 +421,7 @@ def run(codes, out_dir, small_tf, big_tf, start, end, big_delay, min_small=200,
             d = build(code, ex, small_tf, big_tf, start, end, big_delay, min_small,
                       mid_tf=mid_tf, mid_delay=mid_delay)
             if d:
-                pickle.dump(d, open(p, "wb"))
+                _atomic_pickle_dump(d, p)
                 ok += 1
                 manifest["entries"].append(
                     _manifest_entry(
@@ -452,7 +477,10 @@ def patch_trend(out_dir: str, big_tf: str, start, end):
     t0 = time.time()
     print(f"补走势方向(walk-forward) {len(files)}只 {big_tf} → {out_dir}")
     for i, p in enumerate(files):
-        d = pickle.load(open(p, "rb"))
+        d = _load_pkl_or_none(p)
+        if d is None:
+            fail += 1
+            continue
         if d.get("trend_mode") == "wf":
             skip += 1
             continue
@@ -463,7 +491,7 @@ def patch_trend(out_dir: str, big_tf: str, start, end):
                 ev = wf_dir_series(df, d["code"], big_tf)
             d["big_trend_events"] = ev
             d["trend_mode"] = "wf"
-            pickle.dump(d, open(p, "wb"))
+            _atomic_pickle_dump(d, p)
             ok += 1
         except Exception as e:
             fail += 1
@@ -485,7 +513,10 @@ def patch_daily_bsp(out_dir: str):
     t0 = time.time()
     print(f"补日线买卖点 {len(files)}只 → {out_dir}")
     for i, p in enumerate(files):
-        d = pickle.load(open(p, "rb"))
+        d = _load_pkl_or_none(p)
+        if d is None:
+            fail += 1
+            continue
         if "daily_bsp" in d:
             skip += 1
             continue
@@ -497,7 +528,7 @@ def patch_daily_bsp(out_dir: str):
                 cd.process_klines(df)
                 ev = [(s.date, s.bs_type) for s in collect_branch_signals(cd, use_xd=False)]
             d["daily_bsp"] = ev
-            pickle.dump(d, open(p, "wb"))
+            _atomic_pickle_dump(d, p)
             ok += 1
         except Exception as e:
             fail += 1
@@ -535,7 +566,10 @@ def patch_nest_annotations(
         "mid_by_bar", "limit_pct", "n_small", "n_big", "n_mid", "code", "signal_schema",
     }
     for i, p in enumerate(files):
-        d = pickle.load(open(p, "rb"))
+        d = _load_pkl_or_none(p)
+        if d is None:
+            fail += 1
+            continue
         schema = d.get("signal_schema") or {}
         if schema.get("nest_operable") and int(schema.get("nest_key") or 0) >= SIGNAL_SCHEMA["nest_key"]:
             skip += 1
@@ -551,7 +585,7 @@ def patch_nest_annotations(
             for k, v in d.items():
                 if k not in technical_keys:
                     rebuilt[k] = v
-            pickle.dump(rebuilt, open(p, "wb"))
+            _atomic_pickle_dump(rebuilt, p)
             ok += 1
             if limit is not None and ok >= limit:
                 break
