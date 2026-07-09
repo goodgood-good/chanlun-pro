@@ -267,7 +267,7 @@ class ExchangeTDXFutures(Exchange):
             # 多页数据合并后去重，保留最新一条
             klines = klines.drop_duplicates(["date"], keep="last").sort_values("date")
             self.fdb.save_tdx_klines(
-                Market.FUTURES.value, f"v1_{code}", frequency, klines
+                Market.FUTURES.value, code, frequency, klines  # C3:写key与读一致(去v1_前缀)
             )
 
             klines.loc[:, "code"] = code
@@ -360,11 +360,11 @@ class ExchangeTDXFutures(Exchange):
                         rate=(
                             round(
                                 (_quote["price"] - _quote["pre_close"])
-                                / _quote["price"]
+                                / _quote["pre_close"]  # C2:涨跌幅分母=昨收非现价
                                 * 100,
                                 2,
                             )
-                            if _quote["price"] > 0
+                            if _quote["pre_close"] > 0
                             else 0
                         ),
                     )
@@ -411,11 +411,11 @@ class ExchangeTDXFutures(Exchange):
                         rate=(
                             round(
                                 (_quote["MaiChu"] - _quote["ZuoJie"])
-                                / _quote["MaiChu"]
+                                / _quote["ZuoJie"]  # C2:涨跌幅分母=昨结非现价
                                 * 100,
                                 2,
                             )
-                            if _quote["MaiChu"] > 0
+                            if _quote["ZuoJie"] > 0
                             else 0
                         ),
                     )
