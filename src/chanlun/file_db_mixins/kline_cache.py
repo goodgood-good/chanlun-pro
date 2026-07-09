@@ -96,6 +96,14 @@ class _KlineCacheMixin:
                 file_pathname.unlink(missing_ok=True)
                 return None
 
+        # date 列统一为 datetime:parquet 原样保留 dtype, 若源 df 的 date 为 str(如 IB
+        # 缓存)读回即 str, 下游 datetime 运算(script_ib_tasks 增量 diff_days /
+        # sort_values 混合列比较)会 TypeError。CSV 路径已 parse_dates, 此处补齐 parquet
+        # 路径, 使所有消费方拿到 datetime。(第2轮C4)
+        if _klines is not None and len(_klines) > 0 and "date" in _klines.columns:
+            if not pd.api.types.is_datetime64_any_dtype(_klines["date"]):
+                _klines["date"] = pd.to_datetime(_klines["date"], errors="coerce")
+
         if len(_klines) > 0:
             if _klines["date"].isnull().any():
                 return None
