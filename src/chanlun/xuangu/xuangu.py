@@ -160,9 +160,7 @@ def xg_single_xd_bi_23_overlapped(
     if (
         xd.type == "up"
         and xd.start.index == bi_zs.lines[0].start.index
-        and overlapped_23_bi
-        or overlapped_23_bi_2
-        or overlapped_23_bi_3
+        and (overlapped_23_bi or overlapped_23_bi_2 or overlapped_23_bi_3)
     ):
         return {
             "code": cd.get_code(),
