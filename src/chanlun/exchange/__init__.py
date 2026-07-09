@@ -107,6 +107,8 @@ def _build_exchange(market: Market) -> None:
             from chanlun.exchange.exchange_db import ExchangeDB
 
             g_exchange_obj[market.value] = ExchangeDB(Market.NY_FUTURES.value)
+        else:
+            raise Exception(f"不支持的纽约期货交易所 {config.EXCHANGE_NY_FUTURES}")
     elif market == Market.FX:
         if config.EXCHANGE_FX == "tdx_fx":
             from chanlun.exchange.exchange_tdx_fx import ExchangeTDXFX
