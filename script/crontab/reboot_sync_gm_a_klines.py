@@ -139,12 +139,12 @@ def convert_code(code):
                     gm_klines = tdx_ex.klines_fq(gm_klines, xdxr, "qfq")
                     _ks = convert_stock_kline_frequency(gm_klines, f)
                     # 末根收盘价一致说明复权因子未变，可增量追加
-                    if (
-                        _ks[_ks["date"] == last_klines.iloc[-1]["date"]].iloc[0][
-                            "close"
-                        ]
-                        == last_klines.iloc[-1]["close"]
-                    ):
+                    _new_close = _ks[_ks["date"] == last_klines.iloc[-1]["date"]].iloc[0]["close"]
+                    _old_close = last_klines.iloc[-1]["close"]
+                    # C5: 复权因子未变则末根收盘价一致→可增量追加。原用浮点 == 精确比较,
+                    # MySQL Float 单精度读回必失真→恒 False→每次对全市场走全删全写。改容差比较
+                    # (阈值 5e-3 远小于最小报价变动 0.01、远大于单精度存储噪声)。
+                    if abs(float(_new_close) - float(_old_close)) < 5e-3:
                         tqdm.write(f"{code} {f} 增量更新数据：{len(_ks)}")
                         db_ex.insert_klines(db_code, f, _ks)
                         continue
@@ -155,7 +155,9 @@ def convert_code(code):
                     print(f"{code} {f} 数据对比异常：{str(e)}，进行全量更新")
 
             # 全量更新：短周期数据量大，按周期设置不同起始时间以控制存储量
-            db_ex.del_klines_by_code_freq(db_code, f)
+            # C5: 先取数+复权+合成, 成功且非空才 del+insert。原写法先 del_klines_by_code_freq
+            # 再取数, 中间任一步(DB断连/gm源异常/复权除零)抛异常或进程被杀→外层 except 仅 print,
+            # 该股日线清空到下次 cron 全量自愈, 期间历史选股/回测读空表。
             if f == "5m":
                 start_dt = "2021-01-01 00:00:00"
             elif f == "15m":
@@ -175,8 +177,12 @@ def convert_code(code):
             gm_klines["volume"] = gm_klines["volume"] / 100  # 掘金成交量单位为手，换算为股
             gm_klines = tdx_ex.klines_fq(gm_klines, xdxr, "qfq")
             _ks = convert_stock_kline_frequency(gm_klines, f)
-            tqdm.write(f"{code} {f} 全量更新数据：{len(_ks)}")
-            db_ex.insert_klines(db_code, f, _ks)
+            if _ks is not None and len(_ks) > 0:
+                db_ex.del_klines_by_code_freq(db_code, f)
+                db_ex.insert_klines(db_code, f, _ks)
+                tqdm.write(f"{code} {f} 全量更新数据：{len(_ks)}")
+            else:
+                tqdm.write(f"{code} {f} 全量数据为空, 跳过删除保留原库存")
 
     except Exception as e:
         print(f"Convert {code} error : {str(e)[0:200]}")
