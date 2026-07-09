@@ -283,7 +283,7 @@ class MarketCTP(Exchange):
 
     def now_trading(self):
         """当前是否是交易时间"""
-        now = datetime.datetime.now()
+        now = datetime.now()
         if now.weekday() in [5, 6]:  # 周六日不交易
             return False
 
