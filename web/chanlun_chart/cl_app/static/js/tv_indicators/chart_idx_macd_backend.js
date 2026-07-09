@@ -223,13 +223,14 @@ var TvIdxMACDBackend = (function () {
 
                     if (!k.includes(targetCode)) continue;
 
+                    // C14: key = ticker + resolution 无分隔, 原 endsWith 会让 5m 图("...5")
+                    // 命中 15m 条目("...15".endsWith("5")=true). 改为提取 targetCode 之后的
+                    // resolution 段做全等比较(全等失败宁可 miss 也不错配错周期)。
                     let intervalMatch = false;
-                    // 严格后缀
-                    if (k.endsWith(targetInterval)) intervalMatch = true;
-                    // 映射后缀
-                    else if (mappings[targetInterval] && k.endsWith(mappings[targetInterval])) intervalMatch = true;
-                    // 补m后缀 (仅当目标是纯数字时)
-                    else if (/^\d+$/.test(targetInterval) && k.endsWith(targetInterval + 'm')) intervalMatch = true;
+                    const suffix = k.slice(k.indexOf(targetCode) + targetCode.length);
+                    if (suffix === targetInterval) intervalMatch = true;
+                    else if (mappings[targetInterval] && suffix === mappings[targetInterval]) intervalMatch = true;
+                    else if (/^\d+$/.test(targetInterval) && suffix === targetInterval + 'm') intervalMatch = true;
 
                     if (intervalMatch) {
                       barsResult = barsMap.get(k);

@@ -55,6 +55,20 @@ var MacdStats = (function () {
         return bestIdx;
     }
 
+    function intervalKeyMatch(k, code, itv, mappings) {
+        // C14: bars_result key = ticker + resolution 无分隔。原 endsWith 会让 5m 图
+        // ("...5") 命中 15m 条目("...15".endsWith("5")=true), 显示错周期 MACD。改为提取
+        // ticker(code) 之后的 resolution 段做全等比较(全等失败宁可 miss 也不错配)。
+        const kl = String(k).toLowerCase();
+        const idx = kl.indexOf(code);
+        if (idx < 0) return false;
+        const suffix = kl.slice(idx + code.length);
+        if (suffix === itv) return true;
+        if (mappings[itv] && suffix === mappings[itv]) return true;
+        if (/^\d+$/.test(itv) && suffix === itv + 'm') return true;
+        return false;
+    }
+
     function findBarsResult(targetCode, targetInterval) {
         const datafeeds = [];
         if (window.GlobalTVDatafeeds && window.GlobalTVDatafeeds.length > 0) {
@@ -72,11 +86,7 @@ var MacdStats = (function () {
             for (const key of barsMap.keys()) {
                 const k = String(key);
                 if (!k.toLowerCase().includes(code)) continue;
-                let match = false;
-                if (k.endsWith(itv)) match = true;
-                else if (mappings[itv] && k.endsWith(mappings[itv])) match = true;
-                else if (/^\d+$/.test(itv) && k.endsWith(itv + 'm')) match = true;
-                if (match) return barsMap.get(key);
+                if (intervalKeyMatch(k, code, itv, mappings)) return barsMap.get(key);
             }
         }
         return null;
@@ -874,7 +884,7 @@ var MacdStats = (function () {
             return ctrl;
         },
         // 便于调试
-        _internal: { computeStats, smartSearch, findBarsResult, bucketKeyOf, reduceToBuckets, computeStatsHTF, computeSegmentSlopes, resolveHigherFreq, peakAbs },
+        _internal: { computeStats, smartSearch, findBarsResult, intervalKeyMatch, bucketKeyOf, reduceToBuckets, computeStatsHTF, computeSegmentSlopes, resolveHigherFreq, peakAbs },
     };
 })();
 
