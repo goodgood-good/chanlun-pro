@@ -9,23 +9,13 @@
 """
 import importlib.util
 import pathlib
-import sys
-import types
 
 
 def _load_real_ctp():
-    if "openctp_ctp" not in sys.modules:
-        pkg = types.ModuleType("openctp_ctp")
-        md = types.ModuleType("openctp_ctp.thostmduserapi")
-        for n in [
-            "CThostFtdcDepthMarketDataField", "CThostFtdcMdApi",
-            "CThostFtdcReqAuthenticateField", "CThostFtdcReqUserLoginField",
-            "CThostFtdcRspInfoField", "CThostFtdcRspUserLoginField",
-        ]:
-            setattr(md, n, type(n, (), {"__init__": lambda self, *a, **k: None}))
-        pkg.thostmduserapi = md
-        sys.modules["openctp_ctp"] = pkg
-        sys.modules["openctp_ctp.thostmduserapi"] = md
+    from tests.trader.conftest import _install_openctp_stub
+    # 复用 tests/trader 的单一完整 openctp_ctp stub(含 md + trader 符号), 顺序无关,
+    # 避免部分 stub 抢注致全量跑 tests/trader CTP 用例 ImportError。
+    _install_openctp_stub()
     src = (
         pathlib.Path(__file__).resolve().parents[2]
         / "src" / "chanlun" / "exchange" / "exchange_ctp.py"

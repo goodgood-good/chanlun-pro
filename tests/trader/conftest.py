@@ -93,6 +93,18 @@ def _install_openctp_stub():
         "CThostFtdcInputOrderActionField"
     )
     md_mod.THOST_FTDC_AF_Delete = "THOST_FTDC_AF_Delete"
+    # exchange_ctp(行情)所需 md 符号:C17 的 tests/exchange 用例复用本 stub, 保证
+    # openctp_ctp 单一完整 stub, 避免其部分 stub 抢先注册与本 conftest 的 guard 冲突
+    # (曾致全量跑 tests/trader CTP 用例 ImportError)。
+    for _mcls in [
+        "CThostFtdcDepthMarketDataField",
+        "CThostFtdcMdApi",
+        "CThostFtdcReqAuthenticateField",
+        "CThostFtdcReqUserLoginField",
+        "CThostFtdcRspInfoField",
+        "CThostFtdcRspUserLoginField",
+    ]:
+        setattr(md_mod, _mcls, _make_field_class(_mcls))
 
     pkg.thosttraderapi = trader_mod
     pkg.thostmduserapi = md_mod
