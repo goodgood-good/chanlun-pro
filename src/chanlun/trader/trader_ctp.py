@@ -702,12 +702,16 @@ class CTPTrader(BackTestTrader):
         # 根据持仓方向决定平仓方向和对手价
         # H2: POSITION 无 direction 字段, 方向经 mmd 子串判 ("buy" in mmd / "sell" in mmd)
         if "buy" in pos.mmd:
-            direction = THOST_FTDC_D_Sell  # 平多仓, 用卖一价
-            price = tick[code].sell1
+            direction = THOST_FTDC_D_Sell  # 平多仓=卖出
+            # C18: 对手价=买一 buy1(bid1)。卖出限价单须<=对方买价才即时成交; 止损场景价
+            # 逆行(下跌), 挂卖一 sell1 会排在卖方队列永不成交(强平失败裸奔)。对手价=买一。
+            price = tick[code].buy1
             posi_direction = "2"  # 多仓
         else:
-            direction = THOST_FTDC_D_Buy  # 平空仓, 用买一价
-            price = tick[code].buy1
+            direction = THOST_FTDC_D_Buy  # 平空仓=买入
+            # C18: 对手价=卖一 sell1(ask1)。买入限价单须>=对方卖价才即时成交; 止损场景价
+            # 逆行(上涨), 挂买一 buy1 会排在买方队列永不成交。对手价=卖一。
+            price = tick[code].sell1
             posi_direction = "3"  # 空仓
 
         # D1-HIGH-2: SHFE/INE 风控强平按平今平昨拆腿(原单 OF_Close 对上期所当日仓被柜台拒

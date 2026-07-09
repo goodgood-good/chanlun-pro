@@ -89,7 +89,7 @@ def ctp(monkeypatch):
 
 
 def test_force_close_long_uses_sell_direction(ctp):
-    """多头 (mmd 含 buy) → 用 THOST_FTDC_D_Sell 卖平 + sell1 价。"""
+    """多头 (mmd 含 buy) → 用 THOST_FTDC_D_Sell 卖平 + 对手价买一 buy1(C18)。"""
     from chanlun.trader import trader_ctp as mod
 
     pos = POSITION(code="rb2405", mmd="1buy", type="做多", amount=1)
@@ -98,11 +98,11 @@ def test_force_close_long_uses_sell_direction(ctp):
     assert res is not False
     last = ctp._recorded["orders"][-1]
     assert last["Direction"] == mod.THOST_FTDC_D_Sell
-    assert last["LimitPrice"] == 100.5  # sell1
+    assert last["LimitPrice"] == 99.5  # C18 对手价=买一 buy1(卖出平多即时成交)
 
 
 def test_force_close_short_uses_buy_direction(ctp):
-    """空头 (mmd 含 sell) → 用 THOST_FTDC_D_Buy 买平 + buy1 价。"""
+    """空头 (mmd 含 sell) → 用 THOST_FTDC_D_Buy 买平 + 对手价卖一 sell1(C18)。"""
     from chanlun.trader import trader_ctp as mod
 
     pos = POSITION(code="rb2405", mmd="1sell", type="做空", amount=1)
@@ -111,7 +111,7 @@ def test_force_close_short_uses_buy_direction(ctp):
     assert res is not False
     last = ctp._recorded["orders"][-1]
     assert last["Direction"] == mod.THOST_FTDC_D_Buy
-    assert last["LimitPrice"] == 99.5  # buy1
+    assert last["LimitPrice"] == 100.5  # C18 对手价=卖一 sell1(买入平空即时成交)
 
 
 def test_force_close_bc_buy_mmd_treated_as_long(ctp):
