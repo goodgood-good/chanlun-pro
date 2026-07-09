@@ -25,8 +25,14 @@ FUND_DIR = "D:/chanlun_pro/bt_data_fund"
 def build_industry_map(pool: List[str]) -> Dict[str, str]:
     """code('SH.600519') → GICS1 一级行业名(动态取 QMT 板块表,11个)。缓存;QMT 不可用时读缓存。"""
     if os.path.exists(IND_MAP):
-        m = pickle.load(open(IND_MAP, "rb"))
-        if set(pool) & set(m):
+        try:
+            with open(IND_MAP, "rb") as _fh:
+                m = pickle.load(_fh)
+        except Exception as _e:
+            # 缓存腐坏/半写(如上次写盘被 QMT 日重启中断)当作缺失并重建
+            print(f"[build_industry_map] 跳过腐坏 industry_map.pkl: {_e}")
+            m = None
+        if m and set(pool) & set(m):
             return m
     from xtquant import xtdata
     xtdata.download_sector_data()
@@ -41,7 +47,10 @@ def build_industry_map(pool: List[str]) -> Dict[str, str]:
                 continue
             m[f"{mkt}.{num}"] = g
     m = {c: g for c, g in m.items() if c in set(pool)}
-    pickle.dump(m, open(IND_MAP, "wb"))
+    _tmp = f"{IND_MAP}.tmp"
+    with open(_tmp, "wb") as _fh:
+        pickle.dump(m, _fh)
+    os.replace(_tmp, IND_MAP)
     return m
 
 
