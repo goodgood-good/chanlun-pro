@@ -240,6 +240,9 @@ def monitoring_code(
                 )
 
     send_msgs = []
+    # R6-#4: 延迟落库到推送成功后(防哑火)。循环内先收集待落库项, 推送成功或非发送模式才写入。
+    pending_alert_saves = []
+    pending_marks = []
     for jh in jh_cl_msgs:
         line_type = "bi"
         if "bi" in jh.keys():
@@ -266,28 +269,32 @@ def monitoring_code(
             fx_ld = f" FX:{jh['fx_ld']}" if "fx_ld" in jh.keys() else ""
             msg = f"触发 {jh['type']} ({is_done} - {is_td}{fx_ld})"
             send_msgs.append(f"【{name} - {jh['frequency']}】{msg}")
-            db.alert_record_save(
-                market,
-                task_name,
-                code,
-                name,
-                jh["frequency"],
-                msg,
-                is_done,
-                is_td,
-                dedup_type,
-                jh["line_dt"],
+            pending_alert_saves.append(
+                (
+                    market,
+                    task_name,
+                    code,
+                    name,
+                    jh["frequency"],
+                    msg,
+                    is_done,
+                    is_td,
+                    dedup_type,
+                    jh["line_dt"],
+                )
             )
-            db.marks_add_by_price(
-                market,
-                code,
-                name,
-                jh["frequency"],
-                fun.datetime_to_int(jh["k_date"]),
-                "A",
-                msg,
-                "green" if jh["line_type"] == "down" else "red",
-                "red" if jh["line_type"] == "down" else "green",
+            pending_marks.append(
+                (
+                    market,
+                    code,
+                    name,
+                    jh["frequency"],
+                    fun.datetime_to_int(jh["k_date"]),
+                    "A",
+                    msg,
+                    "green" if jh["line_type"] == "down" else "red",
+                    "red" if jh["line_type"] == "down" else "green",
+                )
             )
     for jh in jh_idx_msgs:
         is_exists = db.alert_record_query_by_code(
@@ -296,17 +303,19 @@ def monitoring_code(
         if is_exists is None:
             msg = f"触发 {jh['msg']}"
             send_msgs.append(f"【{name} - {jh['frequency']}】{msg}")
-            db.alert_record_save(
-                market,
-                task_name,
-                code,
-                name,
-                jh["frequency"],
-                msg,
-                "--",
-                "--",
-                jh["type"],
-                jh["k_date"],
+            pending_alert_saves.append(
+                (
+                    market,
+                    task_name,
+                    code,
+                    name,
+                    jh["frequency"],
+                    msg,
+                    "--",
+                    "--",
+                    jh["type"],
+                    jh["k_date"],
+                )
             )
 
     # 沪深A股，增加行业概念信息
@@ -323,15 +332,24 @@ def monitoring_code(
             image_key = kchart_to_png(market, title, cd, cl_config)
             if image_key != "":
                 send_msgs.append(image_key)
+    push_ok = True
     if is_send_msg and len(send_msgs) > 0:
-        ok = send_fs_msg(market, f"{task_name} 监控提醒", send_msgs)
+        push_ok = send_fs_msg(market, f"{task_name} 监控提醒", send_msgs)
         # send_fs_msg 内部已 catch 各种异常并以 False 表达失败，但调用方原本完全不消费返回值，
         # 飞书静默丢消息会让运维以为"今天没信号"。这里 log 一条 warning 让失败可观测。
-        if not ok:
+        if not push_ok:
             fun.get_logger().warning(
                 f"[monitoring_code] send_fs_msg failed market={market} "
                 f"task_name={task_name} code={code} msg_count={len(send_msgs)}"
             )
+
+    # R6-#4: 仅推送成功(或非发送模式)才落库/打点。否则不写 alert_record(不 dedup), 下轮重发,
+    # 防飞书瞬时限流/网络失败→已落库→dedup 永久抑制→静默哑火(镜像 signal_monitor C6)。
+    if (not is_send_msg) or push_ok:
+        for _args in pending_alert_saves:
+            db.alert_record_save(*_args)
+        for _args in pending_marks:
+            db.marks_add_by_price(*_args)
 
     return jh_cl_msgs
 
