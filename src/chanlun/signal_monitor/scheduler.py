@@ -29,6 +29,10 @@ def signal_alert_run(signal_task_id) -> bool:
     if not configs:
         return True
     task = configs[0]
+    if task.is_run != 1:
+        # 任务已停用(SQL 置 is_run=0)但 job 仍注册在 APScheduler(仅 create_app 时按
+        # 当时 is_run 过滤注册, scheduler.py 内),不加此判会持续执行到 web 重启才停(C8)。
+        return True
 
     ex = get_exchange(Market(task.market))
     if ex.now_trading() is False:
