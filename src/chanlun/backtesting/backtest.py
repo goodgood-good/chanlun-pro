@@ -54,6 +54,19 @@ def _annual_trading_days(market: str) -> int:
     return 240 if market in ("a", "us", "hk", "futures") else 365
 
 
+def _sharpe_ratio(daily_return, return_std, risk_free, annual_days):
+    """Sharpe Ratio(vnpy 口径)。
+
+    daily_return / return_std 已 x100(百分点), 故日无风险利率 daily_risk_free 也须 x100
+    同量纲; 否则 risk_free 项(0.03/sqrt(days)~0.0019)被约 100x 稀释近乎失效、Sharpe 被
+    高估至接近毛值(vnpy 默认 risk_free=0 掩盖此量纲错, 本项目硬编码 0.03 会显形, R4-C7)。
+    """
+    if not return_std:
+        return 0
+    daily_risk_free = risk_free / np.sqrt(annual_days) * 100
+    return (daily_return - daily_risk_free) / return_std * np.sqrt(annual_days)
+
+
 class BackTest:
     """
     回测类
@@ -663,13 +676,7 @@ class BackTest:
             daily_return = df["return"].mean() * 100
             return_std = df["return"].std() * 100
 
-            if return_std:
-                daily_risk_free = risk_free / np.sqrt(annual_days)
-                sharpe_ratio = (
-                    (daily_return - daily_risk_free) / return_std * np.sqrt(annual_days)
-                )
-            else:
-                sharpe_ratio = 0
+            sharpe_ratio = _sharpe_ratio(daily_return, return_std, risk_free, annual_days)
 
             return_drawdown_ratio = -total_return / max_ddpercent
 
