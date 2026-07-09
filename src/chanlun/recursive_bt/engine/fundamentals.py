@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import datetime as _dt
 import glob
 import os
 import pickle
@@ -50,6 +51,15 @@ def to_qmt(code: str) -> str:        # 'SH.600519' → '600519.SH'
     return f"{num}.{mkt}"
 
 
+def _fund_end_date() -> str:
+    """报告期过滤上界=当前日期(YYYYMMDD),动态取以纳入最新季报。
+
+    勿硬编码近过去日: report_type="report_time" 下 end 按报告期(m_timetag)过滤,
+    end 早于某季报报告期则该季报永不返回,fund_ok/成长门长期用陈旧季报放行。
+    """
+    return _dt.datetime.now().strftime("%Y%m%d")
+
+
 def fetch(codes, out_dir=OUT):
     from xtquant import xtdata
     os.makedirs(out_dir, exist_ok=True)
@@ -66,7 +76,7 @@ def fetch(codes, out_dir=OUT):
             continue
         try:
             fd = xtdata.get_financial_data([qc], ["PershareIndex"],
-                                           "20210101", "20260601", report_type="report_time")
+                                           "20210101", _fund_end_date(), report_type="report_time")
             pi = fd.get(qc, {}).get("PershareIndex")
             det = xtdata.get_instrument_detail(qc)
             reports = []
@@ -127,7 +137,7 @@ def fetch_batched(codes, out_dir=OUT, batch_size=50):
             try:
                 fd = xtdata.get_financial_data(
                     [qc], ["PershareIndex"],
-                    "20210101", "20260601", report_type="report_time",
+                    "20210101", _fund_end_date(), report_type="report_time",
                 )
                 pi = fd.get(qc, {}).get("PershareIndex")
                 det = xtdata.get_instrument_detail(qc)
