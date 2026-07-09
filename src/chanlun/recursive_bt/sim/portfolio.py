@@ -964,6 +964,12 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
                             old_shares * old_entry_px + size * px
                         ) / new_shares
                         p["shares"] = new_shares
+                        # C1: refill 加仓推进 last_buy_date 到本次买入时间, 否则 A股 T+1 被绕过——
+                        # 当日 refill 买入的股份若沿用最初 entry_date 过 T+1 检查会判为可卖, 允许实盘
+                        # 做不到的当日回转。用独立 last_buy_date 做 T+1 时钟(取最新买入日=保守正确,
+                        # 最多多锁老仓一日绝不放行当日新仓), entry_date 保持最初开仓(供成交记录/持仓
+                        # 期口径不被 refill 污染)。
+                        p["last_buy_date"] = t
                         core_shares = float(p.get("core_shares") or 0.0)
                         p["activity_shares"] = float(max(new_shares - core_shares, 0.0))
                         refill_level = _order_signal_level(o)
@@ -1023,7 +1029,7 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
                             swing_shares = 0.0
                             scalp_shares = 0.0
                         sim.cash -= size * px * (1 + r.commission)
-                        sim.positions[name] = {"shares": size, "entry_date": t,
+                        sim.positions[name] = {"shares": size, "entry_date": t, "last_buy_date": t,
                                            "entry_px": px, "bs": act,
                                            "bs_type": order_bs_type,
                                            "buy_ratio": float(w or 0.0),
@@ -1045,7 +1051,7 @@ def portfolio_backtest(universe: Optional[List[str]] = None, max_pos: int = 2,
                         sim.reentry_mid_confirmed.discard(name)
             elif act == "sell" and name in sim.positions:
                 p = sim.positions[name]
-                if r.t_plus == 0 or t.date() > p["entry_date"].date():
+                if r.t_plus == 0 or t.date() > p.get("last_buy_date", p["entry_date"]).date():
                     sell_ratio = (
                         float(o[2])
                         if len(o) > 2 and isinstance(o[2], (int, float, np.number))
