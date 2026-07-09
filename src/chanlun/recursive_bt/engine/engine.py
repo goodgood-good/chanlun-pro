@@ -179,7 +179,14 @@ def load_klines(prefix: str, tf: str = "1m") -> Optional[pd.DataFrame]:
     fs = glob.glob(f"{CACHE_DIR}/v*_{prefix}_{tf}_*.pkl")
     if not fs:
         return None
-    d = pickle.load(open(max(fs, key=_ver), "rb"))["data"]
+    p = max(fs, key=_ver)
+    try:
+        with open(p, "rb") as fp:
+            d = pickle.load(fp)["data"]
+    except Exception as e:
+        # 腐坏/版本不兼容 chart_cache pkl 当作 miss(与 fdb.get_chart_cache 一致),上层据 None 重算
+        print(f"[load_klines] 跳过腐坏 chart_cache pkl {p}: {e}")
+        return None
     return pd.DataFrame({
         "date": pd.to_datetime(d["t"], unit="s", utc=True),
         "open": np.asarray(d["o"], float), "high": np.asarray(d["h"], float),

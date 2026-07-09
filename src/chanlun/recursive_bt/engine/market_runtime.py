@@ -238,7 +238,13 @@ def load_chart_cache_klines(
     path = latest_chart_cache_file(market, code, frequency, cache_dir)
     if path is None:
         return None
-    data = pickle.load(open(path, "rb")).get("data", {})
+    try:
+        with open(path, "rb") as fp:
+            data = pickle.load(fp).get("data", {})
+    except Exception as e:
+        # 腐坏/版本不兼容 chart_cache pkl 当作 miss(与 fdb.get_chart_cache 一致),上层据 None 重算
+        print(f"[load_chart_cache_klines] 跳过腐坏 chart_cache pkl {path}: {e}")
+        return None
     required = ("t", "o", "h", "l", "c", "v")
     if not all(k in data for k in required):
         return None

@@ -354,7 +354,13 @@ def load_cached(code: str) -> Optional[dict]:
     p = f"{BT_DATA}/{code}.pkl"
     if not os.path.exists(p):
         return None
-    d = pickle.load(open(p, "rb"))
+    try:
+        with open(p, "rb") as fp:
+            d = pickle.load(fp)
+    except Exception as e:
+        # 腐坏/版本不兼容 bt_data pkl 当作缺失(与 not exists 同路径),单只坏文件不拖垮整批 universe 载入
+        print(f"[load_cached] 跳过腐坏 bt_data pkl {p}: {e}")
+        return None
     d["name"] = code
     limit = d.get("limit_pct", 0.10)
     # 主板 ST/*ST ±5%(_st_list.json 名单);创业/科创 ST 仍 20%
