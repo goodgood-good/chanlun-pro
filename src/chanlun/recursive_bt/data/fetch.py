@@ -225,7 +225,7 @@ def _freq_delay(tf: str):
     return pd.Timedelta(tf)
 
 
-def _daily_bsp_and_d3(code, ex, dates, win_days: int = 10, bs_class: int = 3):
+def _daily_bsp_and_d3(code, ex, dates, win_days: int = 10, bs_class: int = 3, start=None, end=None):
     """F-HIGH-3(audit/_round6_select_data.md):在 build 内算日线买卖点 + 日线N买共振窗口。
 
     selector 的 `_daily_resonance` 读 pkl['d3_ok'];旧 build() 不产该字段,而它**只**由
@@ -247,7 +247,7 @@ def _daily_bsp_and_d3(code, ex, dates, win_days: int = 10, bs_class: int = 3):
     d3_ok = np.zeros(n, bool)
     daily_bsp: list[tuple] = []
     try:
-        df = drop_unclosed_last_bar(ex.klines(code, "d"), "d")
+        df = drop_unclosed_last_bar(ex.klines(code, "d", start_date=start, end_date=end), "d")
         if df is not None and len(df) >= 100:
             cd = CL(code, "d", dict(CL_CFG))
             cd.process_klines(df)
@@ -276,7 +276,7 @@ def build(code, ex, small_tf="5m", big_tf="30m", start=None, end=None,
     _, big = _sig(code, ex, big_tf, start, end)
     dates = list(dfs["date"])
     strat = MTFStrategy(small, big, dates, "5m+30m", gate="not_down", big_delay=big_delay)
-    daily_bsp, d3_ok = _daily_bsp_and_d3(code, ex, dates)
+    daily_bsp, d3_ok = _daily_bsp_and_d3(code, ex, dates, start=start, end=end)
     out = {
         "code": code, "dates": dates,
         "open": dfs["open"].to_numpy(), "close": dfs["close"].to_numpy(),
