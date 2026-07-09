@@ -250,8 +250,12 @@ def monitoring_code(
             is_td = ""
             line_type = "xd"
 
+        # C9: 同一笔的背驰与买卖点(及不同 mmd/bc)原共享 (line_type='bi', line_dt) 判重键,
+        # 循环里后到的信号命中前一条记录且 is_done/is_td 相同 → 被静默吞没永不发送。
+        # 把信号 type 并入去重键(与 idx 分支存 jh["type"] 到 line_type 列同口径)。
+        dedup_type = f"{line_type}|{jh['type']}"
         is_exists = db.alert_record_query_by_code(
-            market, code, jh["frequency"], line_type, jh["line_dt"]
+            market, code, jh["frequency"], dedup_type, jh["line_dt"]
         )
 
         if (
@@ -271,7 +275,7 @@ def monitoring_code(
                 msg,
                 is_done,
                 is_td,
-                line_type,
+                dedup_type,
                 jh["line_dt"],
             )
             db.marks_add_by_price(
