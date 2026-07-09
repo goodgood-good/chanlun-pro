@@ -60,7 +60,7 @@ class TraderCurrency(BackTestTrader):
                     "currency", "数字货币交易提醒", f"{code} open buy 下单失败"
                 )
                 return False
-            msg = f"开多仓 {code} 价格 {res['price']} 数量 {open_usdt} 原因 {opt.msg}"
+            msg = f"开多仓 {code} 价格 {res['price']} 数量 {res['amount']} 原因 {opt.msg}"
             utils.send_fs_msg("currency", "数字货币交易提醒", msg)
 
             self.zx.add_stock("我的持仓", code, code)
@@ -116,7 +116,7 @@ class TraderCurrency(BackTestTrader):
                     "currency", "数字货币交易提醒", f"{code} open sell 下单失败"
                 )
                 return False
-            msg = f"开空仓 {code} 价格 {res['price']} 数量 {open_usdt} 原因 {opt.msg}"
+            msg = f"开空仓 {code} 价格 {res['price']} 数量 {res['amount']} 原因 {opt.msg}"
             utils.send_fs_msg("currency", "数字货币交易提醒", msg)
             self.zx.add_stock("我的持仓", code, code)
 
