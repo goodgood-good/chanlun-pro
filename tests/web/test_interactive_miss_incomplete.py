@@ -38,7 +38,11 @@ def test_incomplete_does_not_mark_validated(monkeypatch):
     assert calls == [], f"带洞(fetch_incomplete)被误标 validated, 污染新鲜度: {calls}"
 
 
-def test_true_empty_still_marks_validated(monkeypatch):
+def test_true_empty_does_not_mark_validated(monkeypatch):
+    # R5-#4 supersedes D3-M2 的"真空标 validated": _mark_chart_cache_validated 仅在 entry
+    # 存在时生效, 空拉取标记只会命中"重置既存陈旧快照 validated_at→旧缠论当 fresh"这一有害情形
+    # (非cq源如 qmt 瞬时劣化返[]无 fetch_incomplete 标记)。新股/退市无 entry 时本就是 no-op,
+    # 不标不影响;有 entry 时不标才能让 too_stale 判定继续生效自愈。
     res, calls = _call(monkeypatch, pd.DataFrame(), "k_empty")
     assert res is None
-    assert calls == ["k_empty"], f"真空(普通空)应标 validated 确认无数据: {calls}"
+    assert calls == [], f"空拉取不得标 validated(会重置既存陈旧快照): {calls}"
