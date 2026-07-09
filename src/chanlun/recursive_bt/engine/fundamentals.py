@@ -11,7 +11,26 @@ import glob
 import os
 import pickle
 import sys
+import tempfile
 import time
+
+
+def _atomic_dump(obj, path):
+    """原子写 pickle: 写临时文件后 os.replace, 防进程中断留半写/截断文件(R5)。"""
+    _d = os.path.dirname(path) or "."
+    os.makedirs(_d, exist_ok=True)
+    _fd, _tmp = tempfile.mkstemp(dir=_d, suffix=".tmp")
+    try:
+        with os.fdopen(_fd, "wb") as _fh:
+            pickle.dump(obj, _fh)
+        os.replace(_tmp, path)
+    except Exception:
+        try:
+            os.unlink(_tmp)
+        except OSError:
+            pass
+        raise
+
 
 OUT = "D:/chanlun_pro/bt_data_fund"
 OUT_ALL_A = "D:/chanlun_pro/bt_data_fund_all_a"
@@ -69,7 +88,7 @@ def fetch(codes, out_dir=OUT):
             reports.sort(key=lambda x: x["anntime"])
             d = {"code": code, "reports": reports,
                  "total_share": _f(det.get("TotalVolume")) if det else None}
-            pickle.dump(d, open(p, "wb"))
+            _atomic_dump(d, p)
             ok += 1
         except Exception as e:
             fail += 1
@@ -134,7 +153,7 @@ def fetch_batched(codes, out_dir=OUT, batch_size=50):
                     "reports": reports,
                     "total_share": _f(det.get("TotalVolume")) if det else None,
                 }
-                pickle.dump(d, open(p, "wb"))
+                _atomic_dump(d, p)
                 ok += 1
             except Exception as exc:
                 fail += 1

@@ -49,9 +49,14 @@ def attach_scores(syms: dict, market: dict, rs_win: int = RS_WIN):
         total_share = None
         fp = f"{FUND_DIR}/{code}.pkl"
         if os.path.exists(fp):
-            fd = pickle.load(open(fp, "rb"))
-            reports = fd.get("reports", [])
-            total_share = fd.get("total_share")
+            try:
+                with open(fp, "rb") as _fh:
+                    fd = pickle.load(_fh)
+                reports = fd.get("reports", [])
+                total_share = fd.get("total_share")
+            except Exception as _e:
+                # R5: 单只截断/腐坏 pkl 不得拖垮整批回测;跳过该只(当作缺失)并告警
+                print(f"[attach_scores] 跳过腐坏 fund pkl {code}: {_e}")
         # 公告日 → 可用时点(公告次日,防当日盘中 lookahead)
         rep_av = [pd.Timestamp(r["anntime"], tz="Asia/Shanghai") + pd.Timedelta("1D")
                   for r in reports]

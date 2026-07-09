@@ -49,7 +49,13 @@ def _load_fund(code: str):
     p = f"{FUND_DIR}/{code}.pkl"
     if not os.path.exists(p):
         return [], None
-    d = pickle.load(open(p, "rb"))
+    try:
+        with open(p, "rb") as _fh:
+            d = pickle.load(_fh)
+    except Exception as _e:
+        # R5: 单只截断/腐坏 pkl 不得拖垮季度池调度;当作缺失并告警
+        print(f"[_load_fund] 跳过腐坏 fund pkl {code}: {_e}")
+        return [], None
     return d.get("reports", []), d.get("total_share")
 
 
