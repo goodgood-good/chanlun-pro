@@ -80,7 +80,7 @@ def build_strategy_attribution_report(
                 "audit_path": str(audit_path),
                 "audit_events": len(events),
                 "segments": segments,
-                "summary": _summarize_segments(segments),
+                "summary": _summarize_segments(segments, curve),
             }
         )
     return {
@@ -299,7 +299,7 @@ def _segment_from_points(
     }
 
 
-def _summarize_segments(segments: list[dict]) -> dict:
+def _summarize_segments(segments: list[dict], curve: list[dict]) -> dict:
     if not segments:
         return {
             "segment_count": 0,
@@ -313,7 +313,12 @@ def _summarize_segments(segments: list[dict]) -> dict:
     return {
         "segment_count": len(segments),
         "total_return": end / start - 1 if start > 0 else 0.0,
-        "max_drawdown": max(float(segment.get("max_drawdown") or 0.0) for segment in segments),
+        # C1(R3): 全曲线口径最大回撤。原取各段自身 dd 的 max, 会漏掉跨段回撤(峰在
+        # 前段、谷在后段, 每段各自把 peak 重置为本段首值)→系统性低估。curve 即全部段
+        # 点按时序拼接, 一次性算全局最大回撤。
+        "max_drawdown": _max_drawdown(
+            [float(point.get("equity") or 0.0) for point in curve]
+        ),
         "snapshots": sum(int(segment.get("snapshots") or 0) for segment in segments),
         "trade_count_delta": sum(int(segment.get("trade_count_delta") or 0) for segment in segments),
     }
