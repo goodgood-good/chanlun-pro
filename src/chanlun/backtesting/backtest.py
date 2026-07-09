@@ -44,6 +44,16 @@ from chanlun.exchange.exchange import (
 )
 
 
+def _annual_trading_days(market: str) -> int:
+    """年化交易日数:股票/期货类按 240 交易日,数字货币按 365 自然日。
+
+    历史上市场列表写作 ["a", "us", "hk" "futures"]——"hk" 与 "futures" 之间漏逗号被
+    Python 隐式字符串拼接成 "hkfutures", 致 hk / futures 两个市场都落入 else 分支错用
+    365, 年化收益/夏普被放大 365/240≈1.52 倍(第2轮C10)。抽成纯函数便于回归钉死。
+    """
+    return 240 if market in ("a", "us", "hk", "futures") else 365
+
+
 class BackTest:
     """
     回测类
@@ -611,7 +621,7 @@ class BackTest:
             base_close = float(base_klines.iloc[-1]["close"])
 
             # A股/美股/港股/期货按 240 交易日年化，数字货币 365 日
-            annual_days = 240 if self.market in ["a", "us", "hk" "futures"] else 365
+            annual_days = _annual_trading_days(self.market)
             risk_free = 0.03  # 无风险利率，用于计算 Sharpe Ratio
 
             # 将 balance_history 聚合到日级别，同一天取最后一条
