@@ -147,7 +147,7 @@ class ExchangeTDXUS(Exchange):
                 klines_df: pd.DataFrame = self.fdb.get_tdx_klines(
                     Market.US.value, code, frequency
                 )
-                if klines_df is None:
+                if klines_df is None or len(klines_df) == 0:  # R4-C:空df(1根缓存丢末根)也走全拉
                     klines_df = pd.concat(
                         [
                             client.to_df(
@@ -164,6 +164,8 @@ class ExchangeTDXUS(Exchange):
                         axis=0,
                         sort=False,
                     )
+                    if len(klines_df) == 0:  # R4-C:无效/退市代码全拉为空→干净返回勿崩
+                        return pd.DataFrame([])
                     klines_df.loc[:, "date"] = pd.to_datetime(klines_df["datetime"])
                     klines_df.sort_values("date", inplace=True)
                 else:

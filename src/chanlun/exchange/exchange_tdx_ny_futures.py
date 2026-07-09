@@ -187,7 +187,7 @@ class ExchangeTDXNYFutures(Exchange):
                 klines: pd.DataFrame = self.fdb.get_tdx_klines(
                     Market.NY_FUTURES.value, code, frequency
                 )
-                if klines is None:
+                if klines is None or len(klines) == 0:  # R4-C:空df(1根缓存丢末根)也走全拉
                     klines = pd.concat(
                         [
                             client.to_df(
