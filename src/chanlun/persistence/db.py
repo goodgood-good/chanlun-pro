@@ -89,6 +89,8 @@ class DB(object):
         # 使用一个独立的锁保护 _last_dt_cache 的所有读写。
         self._last_dt_cache: dict = {}
         self._last_dt_cache_lock = threading.Lock()
+        # R6-#2: 保护 __cache_tables 的 check-then-act + 动态建 ORM 表类(同 get_exchange 审查 B-1)
+        self._cache_tables_lock = threading.Lock()
 
     def _get_last_dt_cache(self, market: str, code: str, frequency: str):
         """加锁读 _last_dt_cache。"""
@@ -133,31 +135,38 @@ class DB(object):
         if table_name in self.__cache_tables:
             return self.__cache_tables[table_name]
 
-        class TableByKlines(Base):
-            __tablename__ = table_name
-            __table_args__ = (
-                UniqueConstraint("code", "dt", "f", name="table_code_dt_f_unique"),
-                # 频繁的 (code,f,dt) 查询与排序，建立复合索引
-                Index("idx_code_f_dt", "code", "f", "dt"),
-                {"mysql_collate": "utf8mb4_general_ci"},
-            )
-            code = Column(String(20), primary_key=True, comment="标的代码")
-            dt = Column(DateTime, primary_key=True, comment="日期")
-            f = Column(String(5), primary_key=True, comment="周期")
-            o = Column(Float)
-            c = Column(Float)
-            h = Column(Float)
-            l = Column(Float)
-            v = Column(Float)
-            # 注意：__table_args__ 已在上方统一声明，避免覆盖
+        # R6-#2: 无锁 check-then-act 下多线程首访同一冷表会各自执行下方 class TableByKlines
+        # (向共享 Base.metadata 注册同名 Table), 第2+个线程撞 InvalidRequestError。进程锁
+        # + double-check 串行化建表(镜像 exchange.get_exchange 审查 B-1)。
+        with self._cache_tables_lock:
+            if table_name in self.__cache_tables:
+                return self.__cache_tables[table_name]
 
-        if market == Market.FUTURES.value:
-            # 期货市场，添加持仓列
-            TableByKlines.p = Column(Float, comment="持仓量")
+            class TableByKlines(Base):
+                __tablename__ = table_name
+                __table_args__ = (
+                    UniqueConstraint("code", "dt", "f", name="table_code_dt_f_unique"),
+                    # 频繁的 (code,f,dt) 查询与排序，建立复合索引
+                    Index("idx_code_f_dt", "code", "f", "dt"),
+                    {"mysql_collate": "utf8mb4_general_ci"},
+                )
+                code = Column(String(20), primary_key=True, comment="标的代码")
+                dt = Column(DateTime, primary_key=True, comment="日期")
+                f = Column(String(5), primary_key=True, comment="周期")
+                o = Column(Float)
+                c = Column(Float)
+                h = Column(Float)
+                l = Column(Float)
+                v = Column(Float)
+                # 注意：__table_args__ 已在上方统一声明，避免覆盖
 
-        self.__cache_tables[table_name] = TableByKlines
-        Base.metadata.create_all(self.engine)
-        return TableByKlines
+            if market == Market.FUTURES.value:
+                # 期货市场，添加持仓列
+                TableByKlines.p = Column(Float, comment="持仓量")
+
+            self.__cache_tables[table_name] = TableByKlines
+            Base.metadata.create_all(self.engine)
+            return TableByKlines
 
     def klines_query(
         self,
