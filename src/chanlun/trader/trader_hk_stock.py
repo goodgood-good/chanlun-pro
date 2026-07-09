@@ -51,6 +51,15 @@ class TraderHKStock(BackTestTrader):
                 "hk", "港股交易提醒", f"{code} 下单失败 买入数量 {max_amount}"
             )
             return False
+        if order.get("dealt_amount", 0) <= 0:
+            # D9-#1: 券商受理但未成交(dealt_amount=0, 富途市价单挂单/被拒仍 ret==RET_OK):
+            # 不记本地仓, 否则 execute 记 now_pos_rate>0 而 amount=0 的幽灵仓 -> run 跳过
+            # amount==0 仓 -> 券商后续成交=裸持无止损。镜像平仓侧 N4。请人工核查挂单待撤。
+            self._safe_alert(
+                "hk", "港股交易提醒[开仓未成交]",
+                f"{code} 开多下单成交量为0(可能挂单未成交), 已放弃本地记仓, 请人工核查挂单",
+            )
+            return False
         msg = f"股票买入 {code}-{stock_info['name']} 价格 {order['dealt_avg_price']} 数量 {order['dealt_amount']} 原因 {opt.msg}"
 
         utils.send_fs_msg("hk", "港股交易提醒", msg)
@@ -92,6 +101,14 @@ class TraderHKStock(BackTestTrader):
         if order is False:
             utils.send_fs_msg(
                 "hk", "港股交易提醒", f"{code} 下单失败 卖出数量 {max_amount}"
+            )
+            return False
+        if order.get("dealt_amount", 0) <= 0:
+            # D9-#1: 券商受理但未成交(dealt_amount=0): 不记本地仓, 防 now_pos_rate>0/amount=0
+            # 幽灵仓 -> 券商后续成交=裸持无止损。镜像平仓侧 N4。请人工核查挂单待撤。
+            self._safe_alert(
+                "hk", "港股交易提醒[开仓未成交]",
+                f"{code} 开空下单成交量为0(可能挂单未成交), 已放弃本地记仓, 请人工核查挂单",
             )
             return False
         msg = f"股票卖空 {code}-{stock_info['name']} 价格 {order['dealt_avg_price']} 数量 {order['dealt_amount']} 原因 {opt.msg}"
