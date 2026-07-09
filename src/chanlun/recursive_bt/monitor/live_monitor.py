@@ -611,7 +611,7 @@ def collect_monitor_events(
                     big_dir=big_dir,
                     daily_resonance=daily_resonance,
                     regime_mode=regime_mode,
-                    mid_dir=mid_dir if mid_relaxed else "",
+                    mid_dir=mid_dir or "",  # R5-#7: 与回测 portfolio.py:783 一致(原 if mid_relaxed else "" 致 adaptive+soft+mid_down 漏内层0.5=买2倍回测值)
                     nest_mode=nest_mode,
                     nest_operable=getattr(sig, "nest_operable", None),
                     nest_depth=int(getattr(sig, "nest_depth", 0) or 0),
