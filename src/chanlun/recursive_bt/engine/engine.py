@@ -489,6 +489,11 @@ def collect_branch_signals(
             read = nest_by_divergence.get(id(p.divergence))
             if read is None:
                 read = nest_by_key.get(_div_key(level, p.divergence))
+            if read is None:
+                # C12: bs2 跨级二类点的 divergence 注册于次级别(node.level=level-1), 用 p.level
+                # 查 nest_by_key 恒 miss → nest_operable 恒 False, nest 门控下 L1+ 二类信号被恒
+                # 过滤。补 level-1 回退查询(一类点已在上面按 p.level 命中, 不受影响)。
+                read = nest_by_key.get(_div_key(level - 1, p.divergence))
             nest_operable = bool(getattr(read, "operable", False)) if read else False
             nest_depth = int(getattr(read, "depth", 0) or 0) if read else 0
         out.append(Signal(
