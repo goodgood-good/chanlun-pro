@@ -1249,13 +1249,13 @@ def sync_code(_code):
                 last_dt = db_ex.query_last_datetime(_code, f)
                 if last_dt is None:
                     klines = line_ex.klines(
-                        _code, f, start_date=f_start_datetime[f], args={"fq": "hfq"}
+                        _code, f, start_date=f_start_datetime[f], args={"dividend_type": "back"}
                     )
                     if len(klines) == 0:
-                        klines = line_ex.klines(_code, f, args={"fq": "hfq"})
+                        klines = line_ex.klines(_code, f, args={"dividend_type": "back"})
                 else:
                     klines = line_ex.klines(
-                        _code, f, start_date=last_dt, args={"fq": "hfq"}
+                        _code, f, start_date=last_dt, args={"dividend_type": "back"}
                     )
 
                 tqdm.write(
