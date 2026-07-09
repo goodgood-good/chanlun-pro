@@ -252,6 +252,8 @@ class ExchangeTDXFutures(Exchange):
                         _ks["fix_datetime"] = _ks["datetime"].apply(
                             lambda _dt: self.fix_yp_date(code, _dt)
                         )
+                        if len(_ks) == 0:
+                            break
                         _ks.loc[:, "date"] = pd.to_datetime(_ks["fix_datetime"])
                         _ks.sort_values("date", inplace=True)
                         new_start_dt = _ks.iloc[0]["date"]

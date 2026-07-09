@@ -228,6 +228,8 @@ class ExchangeTDXFX(Exchange):
                                 700,
                             )
                         )
+                        if len(_ks) == 0:
+                            break
                         _ks.loc[:, "date"] = pd.to_datetime(_ks["datetime"])
                         _ks.sort_values("date", inplace=True)
                         new_start_dt = _ks.iloc[0]["date"]

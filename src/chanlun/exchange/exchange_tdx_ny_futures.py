@@ -222,6 +222,8 @@ class ExchangeTDXNYFutures(Exchange):
                                 700,
                             )
                         )
+                        if len(_ks) == 0:
+                            break
                         _ks.loc[:, "date"] = pd.to_datetime(_ks["datetime"])
                         _ks["date"] = _ks.apply(
                             lambda x: self.fix_yp_date(code, x["date"]), axis=1
