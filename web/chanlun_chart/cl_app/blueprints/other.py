@@ -49,10 +49,22 @@ def ticks():
         ex = get_exchange(Market(market))
         stock_ticks = ex.ticks(codes)
         now_trading = ex.now_trading()
-        res_ticks = [
-            {"code": _c, "price": _t.last, "rate": round(float(_t.rate), 2)}
-            for _c, _t in stock_ticks.items()
-        ]
+        # R4-C6: rate 可为 None(ib 透传 redis / binance ccxt percentage 缺省), 原列表推导内
+        # float(None) 抛 TypeError 被外层 except 吞→整批(含健康标的)清空且 now_trading=False
+        # 停掉前端轮询。改逐标的隔离 + `or 0` 守零, 镜像 /tv/quotes(tv.py:637)。
+        res_ticks = []
+        for _c, _t in stock_ticks.items():
+            if _t is None or _t.last is None:
+                continue
+            try:
+                res_ticks.append(
+                    {"code": _c, "price": _t.last, "rate": round(float(_t.rate or 0), 2)}
+                )
+            except Exception:
+                LogUtil.exception(
+                    f"/ticks tick convert failed market={market} code={_c}"
+                )
+                continue
         return {"now_trading": now_trading, "ticks": res_ticks}
     except Exception:
         # 完整堆栈仅写日志，避免直接暴露给前端调用方。
