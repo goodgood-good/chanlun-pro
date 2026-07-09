@@ -363,7 +363,7 @@ def compute_and_cache_chart_data(
     """完整复刻 ``tv_history`` 中 cache miss 后的计算路径，把结果写入 ``chart_data_cache``。
 
     返回 True 表示成功写入缓存（数据非空），False 表示中途无数据
-    （已直接 _mark_chart_cache_validated）。
+    （空拉取只写负缓存、不再标 validated：R5-#4，避免重置陈旧快照 validated_at）。
 
     设计目的：让 ``symbols.py`` 的批量预热与用户实际打开图表时走完全相同的计算逻辑，
     避免预热结果"少算"了 higher_macd 等指标，导致用户切换时仍然 cache miss。
@@ -408,9 +408,8 @@ def compute_and_cache_chart_data(
             _mark_negative_cache(cache_key, ttl=_TRANSIENT_NEGATIVE_TTL_SECONDS)
             return False
         if klines is None or len(klines) == 0:
+            # R5-#4: 负缓存防重拉即可; 不标 validated(空拉取会重置既存陈旧快照 validated_at→当 fresh)。
             _mark_negative_cache(cache_key)
-            with cache_lock:
-                _mark_chart_cache_validated(cache_key)
             return False
         cd = web_batch_get_cl_datas(market, code, {frequency_low: klines}, cl_config)[0]
     else:
@@ -423,9 +422,8 @@ def compute_and_cache_chart_data(
             _mark_negative_cache(cache_key, ttl=_TRANSIENT_NEGATIVE_TTL_SECONDS)
             return False
         if klines is None or len(klines) == 0:
+            # R5-#4: 负缓存防重拉即可; 不标 validated(空拉取会重置既存陈旧快照 validated_at→当 fresh)。
             _mark_negative_cache(cache_key)
-            with cache_lock:
-                _mark_chart_cache_validated(cache_key)
             return False
         cd = web_batch_get_cl_datas(market, code, {frequency: klines}, cl_config)[0]
 
@@ -904,8 +902,9 @@ def fetch_klines_and_compute_cl_data(
             # stale 判定继续生效、约 30s 自愈(C1/M3), 否则陈旧/带洞缠论会被当 fresh 下发。
             return None
         if klines is None or len(klines) == 0:
-            with cache_lock:
-                _mark_chart_cache_validated(cache_key)
+            # R5-#4: 空拉取(非cq源瞬时劣化返[]无fetch_incomplete标记)不得标 validated——那会把
+            # 既存 too_stale 全量快照的 validated_at 重置为 now→数小时前旧缠论(含悬空未完成笔)被
+            # 当 fresh 下发。保留旧 validated_at 让 stale 判定继续生效并自愈(同上方 fetch_incomplete)。
             return None
         cd = web_batch_get_cl_datas(market, code, {frequency_low: klines}, cl_config)[0]
     else:
@@ -923,8 +922,9 @@ def fetch_klines_and_compute_cl_data(
             # stale 判定继续生效、约 30s 自愈(C1/M3), 否则陈旧/带洞缠论会被当 fresh 下发。
             return None
         if klines is None or len(klines) == 0:
-            with cache_lock:
-                _mark_chart_cache_validated(cache_key)
+            # R5-#4: 空拉取(非cq源瞬时劣化返[]无fetch_incomplete标记)不得标 validated——那会把
+            # 既存 too_stale 全量快照的 validated_at 重置为 now→数小时前旧缠论(含悬空未完成笔)被
+            # 当 fresh 下发。保留旧 validated_at 让 stale 判定继续生效并自愈(同上方 fetch_incomplete)。
             return None
 
         # 方案 A: 范围请求走分层缓存 — 把新 K 线合并进 L1, 基于完整 K 线集
