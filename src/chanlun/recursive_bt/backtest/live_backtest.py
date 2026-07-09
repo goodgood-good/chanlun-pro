@@ -1291,6 +1291,14 @@ def build_symbol_from_klines(
     signal_source = str(signal_source or "branch").strip().lower()
     if signal_source not in {"branch", "upgrade", "nest_cascade"}:
         raise ValueError(f"unsupported signal_source: {signal_source!r}")
+    if signal_mode == "batch" and signal_source == "nest_cascade":
+        # R4-C2: batch 路径(下方 else)只特判 upgrade, nest_cascade 会静默落到 collect_branch_
+        # signals 却仍标 signal_source=nest_cascade→分支信号冒名 nest_cascade 污染对拍。介入
+        # 事件仅在 walk_forward 路径实现, 故显式拒绝该组合而非静默产错。
+        raise ValueError(
+            "signal_source=nest_cascade requires signal_mode=walk_forward "
+            "(batch mode does not implement nest-cascade interval-intervention signals)"
+        )
     recursive_l0_min_zs_lines = int(
         recursive_l0_min_zs_lines or DEFAULT_RECURSIVE_L0_MIN_ZS_LINES
     )
