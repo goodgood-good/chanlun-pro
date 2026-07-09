@@ -154,7 +154,7 @@ def market_rules_for_code(market: str, code: str, name: str = "") -> MarketRules
     num = norm.split(".")[-1]
     if num.startswith("8") or num.startswith("920"):
         return A_BJ
-    if num[:3] in ("688", "300", "301"):
+    if num[:3] in ("688", "689", "300", "301"):
         return A_GEM
     # 主板 ST ±5%:显式名称优先,其次 _st_list.json 名单
     if "ST" in (name or "").upper() or norm in st_limit_codes():
@@ -167,7 +167,7 @@ def ashare_board(code: str) -> str:
     num = norm.split(".")[-1]
     if norm.startswith("BJ.") or num.startswith("8") or num.startswith("920"):
         return "bj"
-    if num.startswith("688"):
+    if num.startswith(("688", "689")):
         return "star"
     if num.startswith(("300", "301")):
         return "gem"

@@ -1,7 +1,7 @@
 """chanlun.recursive_bt.data.fetch — 用 QMT 拉前复权 K线 + 预计算缠论信号,缓存本地。
 
 CL 重计算(慢)只在此做一次,缓存 {dates,open,close,small_by_bar,big_dir_at,limit_pct} 到 out_dir/{code}.pkl。
-可断点续传(已存在跳过)。涨跌停按板块:科创688/创业300/301=20%,主板=10%。
+可断点续传(已存在跳过)。涨跌停按板块:科创688/689/创业300/301=20%,主板=10%。
 - 默认(近1年)5m小级别+30m大级别 → bt_data:   python -m chanlun.recursive_bt.data.fetch 沪深300
 - 日线级(2022~2024,熊市验证)1d小+1w大 → bt_data_daily: python -m chanlun.recursive_bt.data.fetch daily
 """
@@ -85,7 +85,7 @@ def ashare_board(code: str) -> str:
     num = code.split(".")[1]
     if num.startswith("8") or num.startswith("920"):
         return "bj"
-    if num.startswith("688"):
+    if num.startswith(("688", "689")):
         return "star"
     if num.startswith(("300", "301")):
         return "gem"

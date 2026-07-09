@@ -208,7 +208,7 @@ def ashare_board(code: str) -> str:
     num = code.split(".")[1]
     if num.startswith("8") or num.startswith("920"):
         return "bj"
-    if num.startswith("688"):
+    if num.startswith(("688", "689")):
         return "star"
     if num.startswith(("300", "301")):
         return "gem"
