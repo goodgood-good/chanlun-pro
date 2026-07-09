@@ -179,20 +179,22 @@ def signal_record_update(
 
 
 def signal_record_query_by_identity(
-    market: str, identity: str
+    market: str, identity: str, task_name: str = None
 ) -> Optional[TableBySignalRecord]:
-    """按 identity 查最近一条信号记录，用于跨轮次去重判断。"""
+    """按 identity 查最近一条信号记录，用于跨轮次去重判断。
+
+    task_name 非空时一并过滤(C7):去重键不含 task_name 会让同市场多任务重叠标的时,
+    后跑任务的推送与记录被先跑任务静默吞掉。按任务隔离去重后各任务独立提醒。
+    """
     _ensure_tables()
     with db.Session() as session:
-        return (
-            session.query(TableBySignalRecord)
-            .filter(
-                TableBySignalRecord.market == market,
-                TableBySignalRecord.identity == identity,
-            )
-            .order_by(TableBySignalRecord.alert_dt.desc())
-            .first()
+        q = session.query(TableBySignalRecord).filter(
+            TableBySignalRecord.market == market,
+            TableBySignalRecord.identity == identity,
         )
+        if task_name is not None:
+            q = q.filter(TableBySignalRecord.task_name == task_name)
+        return q.order_by(TableBySignalRecord.alert_dt.desc()).first()
 
 
 def signal_record_query(

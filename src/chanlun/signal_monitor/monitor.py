@@ -83,36 +83,27 @@ def monitoring_signal_code(
         return []
 
     # 3. 去重：identity 无记录、或分级升级，才算需要提醒的新信号
+    #    去重按 (market, identity, task_name) 隔离(C7):不含 task_name 会让同市场多任务
+    #    重叠标的时,后跑任务的推送与记录被先跑任务静默吞掉。
     new_signals = []
+    pending_saves = []  # (sig, exists):推送成功(或纯记录任务)后再落库
     for sig in signals:
         try:
-            exists = _repo.signal_record_query_by_identity(market, sig.identity)
+            exists = _repo.signal_record_query_by_identity(
+                market, sig.identity, task_name
+            )
         except Exception as e:
             _log.warning(f"[monitoring_signal_code] dedup query failed: {e}")
             exists = None
         if exists is not None and not _grade_upgraded(exists.grade, sig.grade):
             continue
         new_signals.append(sig)
-        try:
-            if exists is not None:
-                # S2: 分级升级路径 update 既有行,不再 add 新行——否则 cl_signal_record 随
-                # "信号数 × 升级次数"无界膨胀。去重仍按最近一条比 grade,推送行为不变。
-                _repo.signal_record_update(
-                    exists.id, grade=sig.grade, score=sig.score,
-                    alert_msg=sig.msg, signal_dt=sig.k_date,
-                )
-            else:
-                _repo.signal_record_save(
-                    market=market, task_name=task_name, stock_code=code,
-                    stock_name=name, operation_level=sig.operation_level,
-                    signal_kind=sig.signal_kind, direction=sig.direction,
-                    identity=sig.identity, grade=sig.grade, score=sig.score,
-                    alert_msg=sig.msg, signal_dt=sig.k_date,
-                )
-        except Exception as e:
-            _log.warning(f"[monitoring_signal_code] record save failed: {e}")
+        pending_saves.append((sig, exists))
 
-    # 4. 推送
+    # 4. 推送(先于落库):推送任务只有推送成功才落库(见步骤5)。否则本轮不"消费"
+    #    这些信号——下一轮同 identity 仍未落库会重新尝试推送,避免单次推送失败
+    #    (飞书瞬时故障/限流)使该信号因永久去重而静默漏发(C6)。
+    push_ok = True
     if is_send_msg and new_signals:
         msgs = [f"【{name} - {task_name}】缠论信号 {len(new_signals)} 条"]
         for sig in new_signals:
@@ -122,11 +113,36 @@ def monitoring_signal_code(
             )
         try:
             ok = _send(market, f"{task_name} 信号监控提醒", msgs)
-            if ok is False:
+            push_ok = ok is not False
+            if not push_ok:
                 _log.warning(
                     f"[monitoring_signal_code] send failed market={market} code={code}"
                 )
         except Exception as e:
+            push_ok = False
             _log.warning(f"[monitoring_signal_code] send exception: {e}")
+
+    # 5. 落库:纯记录任务(不推送)始终落库;推送任务仅在推送成功后落库,
+    #    使推送失败的信号下一轮可重试(C6)。
+    if (not is_send_msg) or push_ok:
+        for sig, exists in pending_saves:
+            try:
+                if exists is not None:
+                    # S2: 分级升级路径 update 既有行,不再 add 新行——否则 cl_signal_record
+                    # 随"信号数 × 升级次数"无界膨胀。去重仍按最近一条比 grade。
+                    _repo.signal_record_update(
+                        exists.id, grade=sig.grade, score=sig.score,
+                        alert_msg=sig.msg, signal_dt=sig.k_date,
+                    )
+                else:
+                    _repo.signal_record_save(
+                        market=market, task_name=task_name, stock_code=code,
+                        stock_name=name, operation_level=sig.operation_level,
+                        signal_kind=sig.signal_kind, direction=sig.direction,
+                        identity=sig.identity, grade=sig.grade, score=sig.score,
+                        alert_msg=sig.msg, signal_dt=sig.k_date,
+                    )
+            except Exception as e:
+                _log.warning(f"[monitoring_signal_code] record save failed: {e}")
 
     return new_signals
