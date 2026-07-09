@@ -62,6 +62,21 @@ def _sig_bsp(cd, use_xd):
     return tuple(sorted(out, key=lambda x: (x[0], x[1] if x[1] is not None else -1, x[2] or 0)))
 
 
+def _sig_bsp_risk(cd, use_xd):
+    # R3-C5: 结构止损/反弹目标风险位签名(structural_stop_below/above、rebound_target)
+    out = []
+    for p in cd.get_branch_bspoints(use_xd=use_xd):
+        af = getattr(p, "anchor_fx", None)
+        ki = af.k.k_index if af is not None and af.k is not None else None
+        out.append((
+            str(p.bs_type), ki, p.level,
+            _r(getattr(p, "structural_stop_below", None)),
+            _r(getattr(p, "structural_stop_above", None)),
+            _r(getattr(p, "rebound_target", None)),
+        ))
+    return tuple(sorted(out, key=lambda x: (x[0], x[1] if x[1] is not None else -1, x[2] or 0)))
+
+
 def _sig_bsp_pts(pts):
     out = []
     for p in (pts or []):
@@ -140,6 +155,16 @@ def _fingerprint(cd):
         fp[k] = sum(len(x) for x in v) if k.startswith("kuozhan_") else len(v)
     fp["hash_ext"] = hashlib.sha256(
         repr({k: parts_ext[k] for k in sorted(parts_ext)}).encode("utf-8")
+    ).hexdigest()[:16]
+    # R3-C5: 买卖点结构止损/反弹目标此前零 golden 钉扎, perf 重构或止损逻辑改动改坏这些
+    # 风险位而 bs_type/k_index/level 不变时, 原 hash/hash_ext 恒绿漏网。独立 hash_stop,
+    # 不动原两 hash, 重生成时可逐字节证既有 6+13 面信号零变更。
+    parts_stop = {
+        "bsp_risk_bi": _sig_bsp_risk(cd, use_xd=False),
+        "bsp_risk_xd": _sig_bsp_risk(cd, use_xd=True),
+    }
+    fp["hash_stop"] = hashlib.sha256(
+        repr({k: parts_stop[k] for k in sorted(parts_stop)}).encode("utf-8")
     ).hexdigest()[:16]
     return fp
 

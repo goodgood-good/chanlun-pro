@@ -20,7 +20,8 @@
     "kuozhan_zss": 0,
     "kuozhan_bsp": 0,
     "kuozhan_bcs": 0,
-    "hash_ext": "a5ad9a4b45b5ed82"
+    "hash_ext": "a5ad9a4b45b5ed82",
+    "hash_stop": "dd8527eb8c5ec16d"
   },
   "QQQ.US_30m": {
     "bis": 59,
@@ -43,7 +44,8 @@
     "kuozhan_zss": 0,
     "kuozhan_bsp": 0,
     "kuozhan_bcs": 0,
-    "hash_ext": "a079130487c23595"
+    "hash_ext": "a079130487c23595",
+    "hash_stop": "b96abe598fdd2f19"
   },
   "SZ.002299_1m": {
     "bis": 933,
@@ -66,7 +68,8 @@
     "kuozhan_zss": 0,
     "kuozhan_bsp": 0,
     "kuozhan_bcs": 0,
-    "hash_ext": "4b79effcef6c178a"
+    "hash_ext": "4b79effcef6c178a",
+    "hash_stop": "9944b6a7e80152c4"
   },
   "SYN_strong_5m": {
     "bis": 7,
@@ -89,6 +92,7 @@
     "kuozhan_zss": 0,
     "kuozhan_bsp": 0,
     "kuozhan_bcs": 0,
-    "hash_ext": "60fb8c255685f43c"
+    "hash_ext": "60fb8c255685f43c",
+    "hash_stop": "f3d783bf63489a26"
   }
 }
