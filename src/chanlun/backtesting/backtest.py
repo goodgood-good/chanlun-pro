@@ -1273,17 +1273,6 @@ class BackTest:
         return pd.DataFrame(order_objs)
 
     @staticmethod
-    def __orders_pd(trades: List[BackTestTrader]):
-        """
-        持仓历史转换成 pandas 数据，便于做分析
-        """
-        order_objs = []
-        for td in trades:
-            for code, orders in td.orders.items():
-                order_objs.extend(iter(orders))
-        return pd.DataFrame(order_objs)
-
-    @staticmethod
     def __create_backtest_charts(
         base_prices, balance_history: dict, hold_profit_history: dict
     ):

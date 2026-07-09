@@ -282,11 +282,6 @@ class BiCalculator:
             fx.val,
         )
 
-    def _same_fxs(self, left: List[FX], right: List[FX]) -> bool:
-        if len(left) != len(right):
-            return False
-        return all(self._fx_sig(a) == self._fx_sig(b) for a, b in zip(left, right))
-
     def _snapshot_matches(self, cl_klines: List[CLKline]) -> bool:
         if not self._last_kline_snapshot or not cl_klines:
             return False

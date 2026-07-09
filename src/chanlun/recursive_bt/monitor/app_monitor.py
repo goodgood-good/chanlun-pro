@@ -40,6 +40,8 @@ from chanlun.recursive_bt.monitor.live_monitor import (
     send_events,
     send_runtime_override_notice,
     _apply_runtime_overrides,
+    _config_bool,
+    _config_int,
 )
 from chanlun.recursive_bt.engine.market_runtime import (
     CHART_CACHE_DIR,
@@ -56,25 +58,6 @@ from chanlun.zixuan import ZiXuan
 WATCH_GROUP = "\u6211\u7684\u5173\u6ce8"
 AUTO_SELECT_GROUP = "\u81ea\u52a8\u9009\u80a1"
 INDEX_CODE = "SH.000001"
-
-
-def _config_bool(value, default: bool = False) -> bool:
-    if value is None:
-        return default
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return bool(value)
-    return str(value).strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _config_int(value, default: int) -> int:
-    if value is None or str(value).strip() == "":
-        return default
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return default
 
 
 def _config_tuple(value, default: Iterable[str] = ()) -> tuple[str, ...]:
