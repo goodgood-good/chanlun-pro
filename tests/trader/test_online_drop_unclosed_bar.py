@@ -90,3 +90,25 @@ def test_last_k_info_keeps_live_bar():
     om = _make_om(df)
     info = om.last_k_info("X")
     assert pd.Timestamp(info["date"]) == pd.Timestamp("2099-01-01 09:40:00")
+
+def test_drop_forming_last_bar_dropped_seconds():
+    # D9-#2: 秒级(10s)末根在未来 -> 仍在进行 -> 丢弃 (_freq_minutes 曾对秒级返 None 不裁剪,
+    # 期货实盘 frequencys=["10s"] 会在未收盘 bar 上算缠论 -> 过早下单, D2-F4 被击穿)。
+    out = _drop_unclosed_last_bar(_df(["2099-01-01 09:30:00", "2099-01-01 09:30:10"]), "10s")
+    assert len(out) == 1
+    assert pd.Timestamp(out["date"].iloc[-1]) == pd.Timestamp("2099-01-01 09:30:00")
+
+
+def test_drop_closed_last_bar_kept_seconds():
+    # 秒级(30s)已收盘末根(过去)保留, 不误删。
+    assert len(_drop_unclosed_last_bar(_df(["2020-01-01 09:30:00", "2020-01-01 09:30:30"]), "30s")) == 2
+
+
+def test_freq_minutes_parses_seconds():
+    # 秒级须解析为分数分钟(step 精确), 分钟级不变, 日/周级仍 None。
+    from chanlun.trader.online_market_datas import _freq_minutes
+    assert _freq_minutes("10s") == 10 / 60.0
+    assert _freq_minutes("30s") == 0.5
+    assert _freq_minutes("300s") == 5.0
+    assert _freq_minutes("5m") == 5
+    assert _freq_minutes("d") is None

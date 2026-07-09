@@ -13,8 +13,13 @@ from chanlun.persistence.file_db import FileCacheDB
 
 
 def _freq_minutes(frequency: str):
-    """级别字符串 -> 分钟数; 非分钟级(d/w/m)返回 None=不裁剪。"""
+    """级别字符串 -> 周期分钟数(秒级返回分数分钟, 如 "10s"->1/6); 非(秒/分)级(d/w/月)返回 None=不裁剪。"""
     f = str(frequency).strip().lower()
+    if f.endswith("s"):
+        try:
+            return max(int(f[:-1]), 1) / 60.0
+        except ValueError:
+            return None
     if f.endswith("m"):
         try:
             return max(int(f[:-1]), 1)
