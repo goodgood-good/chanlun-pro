@@ -652,8 +652,10 @@ class CL(ICL):
         ld = lambda s, e: query_macd_ld(self, s, e)      # noqa: E731
         wzgx = self._recursive_wzgx()
         # 多级升级买卖点(bs1 L1+一类 + bs2 二类 + bs3 扩张三买),按递归 level 分组
+        # C13: bs2 传 ld/frequency 才产最弱档二类(破前低+盘整背驰), 与信号链
+        # get_branch_bspoints 口径一致——否则升级级图层缺最弱档, 与实际成交信号点分裂。
         branch_bsp = (Bs1BranchCalculator().calculate(levels)
-                      + Bs2BranchCalculator().calculate(levels)
+                      + Bs2BranchCalculator().calculate(levels, ld, self.frequency)
                       + Bs3BranchCalculator().calculate(levels))
         bsp_by_blevel = defaultdict(list)
         for p in branch_bsp:
