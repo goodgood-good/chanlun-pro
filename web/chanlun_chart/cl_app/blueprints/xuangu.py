@@ -60,7 +60,7 @@ def xuangu_task_add():
     target_zx_group = request.form["target_zx_group"]
     opt_type = request.form["opt_type"]
 
-    frequencys = frequencys.split(",")
+    frequencys = [frequency.strip() for frequency in frequencys.split(",")]
     opt_type = opt_type.split(",")
 
     # R6-#6: 服务端校验 opt_type, 非法值(空串/拼写错)会经 get_opt_types 的 direction_types[x]
@@ -68,6 +68,8 @@ def xuangu_task_add():
     # 清空目标自选组(静默数据丢失)。仅接受 long/short, 非法直接拒绝不进 run_xuangu。
     if not opt_type or any(o not in ("long", "short") for o in opt_type):
         return {"ok": False, "msg": "选股方向(opt_type)非法，仅支持 long/short"}
+    if any(not frequency for frequency in frequencys):
+        return {"ok": False, "msg": "选股周期不能为空"}
 
     if task_name not in _xuangu_tasks.xuangu_task_config_list().keys():
         return {"ok": False, "msg": "选股任务不存在"}
@@ -80,6 +82,13 @@ def xuangu_task_add():
             "ok": False,
             "msg": f"选股周期错误，该任务可选周期数量 : {allow_freq_num}",
         }
+
+    try:
+        supported_frequencys = get_exchange(Market(market)).support_frequencys()
+    except Exception:
+        return {"ok": False, "msg": "市场或行情源不可用，无法校验选股周期"}
+    if any(frequency not in supported_frequencys for frequency in frequencys):
+        return {"ok": False, "msg": "选股周期不受当前市场支持"}
 
     run_res = _xuangu_tasks.run_xuangu(
         market, task_name, frequencys, opt_type, src_zx_group, target_zx_group
