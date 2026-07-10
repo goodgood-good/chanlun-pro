@@ -613,21 +613,30 @@ class ExchangeChangQiao(Exchange):
                 return self._fallback_all_stocks(market_key)
             return []
 
-    def now_trading(self):
+    def now_trading(self, market="us"):
         """
-        判断当前是否交易时间
+        判断该 market 当前是否交易时间。
+
+        cq(@fun.singleton)被 us/hk 共享同一实例, 原实现硬编码 Market.US → 港股(默认
+        EXCHANGE_HK=cq)盘中恒被判成美股时段。按 market 选对应 trading_session + 本地时区判定。
         """
         if pytz is None:
             return False
 
+        _market_map = {
+            "us": (Market.US, "America/New_York"),
+            "hk": (Market.HK, "Asia/Hong_Kong"),
+        }
+        lb_market, tz_name = _market_map.get(market, (Market.US, "America/New_York"))
+
         def _do_check():
             try:
-                et_timezone = pytz.timezone('America/New_York')
-                now_et = datetime.now(et_timezone).time()
+                local_tz = pytz.timezone(tz_name)
+                now_local = datetime.now(local_tz).time()
                 sessions = self._quote_ctx().trading_session()
 
                 for session in sessions:
-                    if session.market == Market.US:
+                    if session.market == lb_market:
                         for trade_info in session.trade_sessions:
                             try:
                                 start_time = trade_info.begin_time
@@ -637,10 +646,10 @@ class ExchangeChangQiao(Exchange):
                                     continue
 
                                 if start_time > end_time:
-                                    if now_et >= start_time or now_et < end_time:
+                                    if now_local >= start_time or now_local < end_time:
                                         return True
                                 else:
-                                    if start_time <= now_et and now_et < end_time:
+                                    if start_time <= now_local and now_local < end_time:
                                         return True
                             except AttributeError:
                                 continue

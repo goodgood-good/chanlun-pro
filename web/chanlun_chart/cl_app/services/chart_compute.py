@@ -200,7 +200,12 @@ def market_now_trading(market: str, now: float = None) -> bool:
         if cached is not None and (now - cached[1]) < _TRADING_STATE_TTL:
             return cached[0]
     try:
-        trading = bool(get_exchange(Market(market)).now_trading())
+        ex = get_exchange(Market(market))
+        try:
+            trading = bool(ex.now_trading(market))
+        except TypeError:
+            # 仅 cq 单例(us/hk 共享)的 now_trading 接受 market 消歧; 其余单市场交易所无此形参, 回退无参
+            trading = bool(ex.now_trading())
     except Exception:
         trading = True  # 保守: 不确定 → 当作交易中(短阈值, 更勤刷新)
     with _trading_state_lock:
