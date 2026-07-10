@@ -64,14 +64,26 @@ class BeichiNestCalculator:
                     nodes.append(NestedDivergence(level=lr.level, zs_index=zi, divergence=dv))
             per_level.append(nodes)
 
-        # 2. 自底向上:相邻级别 (k → k+1),把 L_k 节点挂到 严格包含+同向 的 L_{k+1} 节点
+        # 2. 自底向上:相邻级别 (k → k+1),把 L_k 节点挂到 严格包含+同向 的 L_{k+1} 节点。
+        #    同一父下多个同向兄弟只保留「末端」一个(leave_seg 结束 k_index 最大=最接近
+        #    离开段转折点=区间套收敛确认点),其余不挂→落森林根(depth=1→非 operable→
+        #    ratio 走 0.75 分支)。忠实缠论区间套「收敛到单一转折点」:中途同向已坐实背驰
+        #    非套内确认点(终检 R12-2)。
         attached: Set[int] = set()
         for k in range(len(per_level) - 1):
+            best_child: dict[int, NestedDivergence] = {}   # parent id → 末端子
+            parents: dict[int, NestedDivergence] = {}
             for lo in per_level[k]:
                 parent = self._find_parent(lo, per_level[k + 1])
-                if parent is not None:
-                    parent.children.append(lo)
-                    attached.add(id(lo))
+                if parent is None:
+                    continue
+                parents[id(parent)] = parent
+                cur = best_child.get(id(parent))
+                if cur is None or self._span(lo.divergence)[1] > self._span(cur.divergence)[1]:
+                    best_child[id(parent)] = lo
+            for pid, child in best_child.items():
+                parents[pid].children.append(child)
+                attached.add(id(child))
 
         # 3. 顶层森林 = 所有未被挂载的节点(最高级别 + 断链的低级别各成树根)
         return [n for nodes in per_level for n in nodes if id(n) not in attached]
