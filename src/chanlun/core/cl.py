@@ -40,13 +40,18 @@ class CL(ICL):
             config: 配置参数字典
             start_datetime: 开始分析时间
             market: 市场标识（可选）。仅高周期 MACD 的日级及以上分桶用于时区
-                偏移；1m→5m、5m→30m 纯按时间戳重采样，不依赖此值。
+                偏移；1m→5m、5m→30m 纯按时间戳重采样，不依赖此值。未显式传时
+                按代码后缀推断（.US→us，其余→a），使非 web 路径也得正确时区。
         """
         self.code = code
         self.frequency = frequency
         self.config = config if config else {}
         self.start_datetime = start_datetime
-        self.market = market
+        # market 未显式传时按代码后缀推断(仅高周期 MACD 日级分桶时区用):美股 .US→us
+        # (offset -5),其余→a(+8,与历史 market=None 默认一致零回归);web 显式传不受影响。
+        self.market = market if market is not None else (
+            "us" if str(code or "").upper().endswith(".US") else "a"
+        )
 
         # 设置默认配置
         self._init_default_config()

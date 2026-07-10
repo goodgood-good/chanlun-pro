@@ -239,3 +239,39 @@ def test_cl_incremental_equals_batch_real_xd_layer():
     final = _all_sigs(inc)
     for key in ("xd_zss", "bsp_xd", "xd_zslx"):
         assert final[key], f"真实组 {key} 为空 = 线段层守护网空转"
+
+
+def test_cl_incremental_us_htf_day_offset():
+    """R12-1 硬化:美股 30m→d 日级分桶用 -5 时区偏移(market='us'),此前 inc==batch
+    真实网只有 A股 5m/1m(不走日级 offset 分桶),HigherMACDCalculator 的 US 偏移
+    _key_for/_bucket_keys 路径零对拍覆盖(critic 点名 coverage-by-luck 盲区)。
+
+    用 QQQ.US_30m 真实 parquet 显式 market='us' 触发 -5 分桶,逐前缀增量 == 全量;
+    并断言 htf 已激活 + us(-5) 与 a(+8) 的 htf 实际不同(反空转,证 offset 真生效)。"""
+    fix = _FIX / "QQQ.US_30m.parquet"
+    if not fix.exists():
+        pytest.skip("tests/fixtures/QQQ.US_30m.parquet 缺失")
+    df = pd.read_parquet(fix)[["date", "open", "high", "low", "close", "volume"]].reset_index(drop=True)
+    n = len(df)
+    hi = min(n, 600)
+    lo = max(60, hi - 80)
+    inc = CL("QQQ.US", "30m", dict(_CFG), market="us")
+    for L in range(lo, hi + 1):
+        sub = df.iloc[:L].reset_index(drop=True)
+        inc.process_klines(sub)
+        inc_sigs = _all_sigs(inc)
+        fresh = CL("QQQ.US", "30m", dict(_CFG), market="us")
+        fresh.process_klines(sub)
+        bat_sigs = _all_sigs(fresh)
+        for key in inc_sigs:
+            assert inc_sigs[key] == bat_sigs[key], (
+                f"US htf inc != batch @ L={L} key={key}\n"
+                f"  only_inc={set(inc_sigs[key]) - set(bat_sigs[key])}\n"
+                f"  only_bat={set(bat_sigs[key]) - set(inc_sigs[key])}"
+            )
+    assert inc._htf_macd is not None, "末前缀 htf 未激活 = 未覆盖 30m→d offset 分桶路径"
+    other = CL("QQQ.US", "30m", dict(_CFG), market="a")
+    other.process_klines(df.iloc[:hi].reset_index(drop=True))
+    du = np.asarray(inc._htf_macd["hist"])
+    da = np.asarray(other._htf_macd["hist"])
+    assert (np.abs(du - da) > 1e-9).any(), "us(-5)==a(+8) htf = offset 未生效, 测试空转"
