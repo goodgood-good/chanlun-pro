@@ -24,7 +24,12 @@ class ZiXuan(object):
     def get_zx_groups(self):
         zx_groups = db.zx_get_groups(self.market_type)
         if len(zx_groups) == 0:
-            db.zx_add_group(self.market_type, "我的关注")
+            try:
+                db.zx_add_group(self.market_type, "我的关注")
+            except IntegrityError:
+                # 并发下另一 ZiXuan 构造已抢先建默认组(复合主键 market+zx_group 冲突);重读即可
+                # 拿到该组, 不上抛致 view 500(R4-G1-1 姊妹:__init__ 每次构造都走此 check-then-insert)
+                pass
             zx_groups = db.zx_get_groups(self.market_type)
         return [{"name": _g.zx_group} for _g in zx_groups]
 

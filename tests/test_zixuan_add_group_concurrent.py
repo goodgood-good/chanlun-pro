@@ -44,3 +44,29 @@ def test_existing_name_returns_false_no_db(monkeypatch):
 def test_reserved_name_returns_false():
     z = _mk_zixuan([])
     assert z.add_zx_group("我的关注") is False
+
+def test_get_zx_groups_concurrent_default_group_no_raise(monkeypatch):
+    """R5-H3-1(R4-G1-1 姊妹): get_zx_groups 空组时自动建默认组"我的关注"同样是无 try 的
+    check-then-insert, 由 __init__ 每次构造 ZiXuan 都走。冷启/清库后两并发构造→都读 len==0→
+    都 INSERT→复合主键冲突→输家 IntegrityError 逃逸 view→500。修复=catch 后重读拿到组。"""
+    z = object.__new__(ZiXuan)
+    z.market_type = "a"
+    calls = {"get": 0}
+
+    class _G:
+        def __init__(self, name):
+            self.zx_group = name
+
+    def _get(market):
+        calls["get"] += 1
+        return [] if calls["get"] == 1 else [_G("我的关注")]
+
+    def _add_raise(*a, **k):
+        raise IntegrityError("INSERT INTO cl_zixuan_groups ...", None, Exception("dup"))
+
+    monkeypatch.setattr(zx_mod.db, "zx_get_groups", _get)
+    monkeypatch.setattr(zx_mod.db, "zx_add_group", _add_raise)
+    # 修复前 IntegrityError 上抛; 修复后 catch→重读
+    groups = z.get_zx_groups()
+    assert groups == [{"name": "我的关注"}]
+    assert calls["get"] == 2
