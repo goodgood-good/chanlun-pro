@@ -1562,6 +1562,19 @@ def send_runtime_override_notice(notifier, title: str, event: dict | None) -> bo
     return bool(notifier.send(f"{title} 策略覆盖", runtime_override_notice_lines(event)))
 
 
+def warn_if_notifier_unavailable(notifier, dry_run: bool, log=None) -> bool:
+    """通知通道不可用(未配 dingtalk_webhook 且未发现 Claude Notification hook → command/webhook
+    均空)时告警一次:available 属性历来零消费, 监控会静默运行=用户误以为被实时提醒(paper 照常
+    下单)。返回是否告警。"""
+    if dry_run or getattr(notifier, "available", False):
+        return False
+    (log or fun.get_logger()).warning(
+        "[monitor][ALERT] 通知通道不可用(未配置 dingtalk_webhook 且未发现 Claude Notification "
+        "hook)——买卖点提醒不会送达, 监控静默运行(paper 交易照常), 请检查通知配置。"
+    )
+    return True
+
+
 _LAST_OPT_REFRESH_TS: float = 0.0
 
 
@@ -2367,6 +2380,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             cwd=os.getcwd(),
             dry_run=args.dry_run,
         )
+    warn_if_notifier_unavailable(notifier, args.dry_run)
     send_runtime_override_notice(
         notifier,
         args.title,

@@ -39,6 +39,7 @@ from chanlun.recursive_bt.monitor.live_monitor import (
     refresh_optimization_report,
     send_events,
     send_runtime_override_notice,
+    warn_if_notifier_unavailable,
     _apply_runtime_overrides,
     _config_bool,
     _config_int,
@@ -386,6 +387,7 @@ class DynamicRecursiveMonitor:
             )
         self.deduper = deduper or JsonDeduper(config.state_file)
         self.log = fun.get_logger()
+        warn_if_notifier_unavailable(self.notifier, config.dry_run, self.log)
 
     def _exchange(self):
         if self._ex is None:
