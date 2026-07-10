@@ -130,11 +130,25 @@ class _CLObjectCacheMixin:
         try:
             cd.process_klines(klines)
         except Exception as e:
-            # process_klines 抛错时 cd 处于半 applied 状态，返回空白 CL 让调用方下次自然重算
+            # 复用的旧 cd 增量 process_klines 抛错(schema 漂移/增量特有 bug):驱逐磁盘坏 pkl
+            # (与上方 pickle.load 异常分支同语义,否则下次仍 load 到它复现同一异常直到 15 天 TTL),
+            # 再用全新 CL 全量重算,让"下次自然重算"名副其实、当次也返回真实缠论而非静默 0 信号。
             logger.error(
-                f"{log_id} 执行缠论计算 process_klines 失败: {str(e)}", exc_info=True
+                f"{log_id} 执行缠论计算 process_klines 失败,驱逐坏缓存并全量重算: {str(e)}",
+                exc_info=True,
             )
-            return cl.CL(code, frequency, cl_config)
+            try:
+                file_pathname.unlink(missing_ok=True)
+            except Exception as un_e:
+                logger.error(f"{log_id} 驱逐坏缓存失败: {str(un_e)}")
+            cd = cl.CL(code, frequency, cl_config)
+            try:
+                cd.process_klines(klines)
+            except Exception as e2:
+                logger.error(
+                    f"{log_id} 全量重算仍失败,返回空白 CL: {str(e2)}", exc_info=True
+                )
+                return cl.CL(code, frequency, cl_config)
 
         try:
             self._atomic_write_pickle(file_pathname, cd)
