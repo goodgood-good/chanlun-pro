@@ -126,7 +126,23 @@ class AlertTasks(object):
         """
         if alert_config["id"] == "":
             del alert_config["id"]
-            db.task_save(**alert_config)
+            # (market, task_name) 去重: cl_alert_task 的 UniqueConstraint 在
+            # db_models/alert_task.py:36 被二次 __table_args__ 覆盖成死代码(既有部署的表无该
+            # 约束), 应用层 query-first 更新已存在同名任务而非插入重复→防重复调度 job/推送/
+            # alert_records(顺序重复,现实用户流)。并发同名新建 race 属罕见残留。
+            existing = next(
+                (
+                    t
+                    for t in db.task_query(market=alert_config["market"])
+                    if t.task_name == alert_config["task_name"]
+                ),
+                None,
+            )
+            if existing is not None:
+                alert_config["id"] = existing.id
+                db.task_update(**alert_config)
+            else:
+                db.task_save(**alert_config)
         else:
             alert_config["id"] = int(alert_config["id"])
             db.task_update(**alert_config)
