@@ -135,3 +135,73 @@ def test_force_close_all_does_not_crash(ctp):
     results = ctp.force_close_all(opt)
     # 两仓都触发 force_close 且返回结果 (无 TypeError)
     assert len(results) == 2
+
+
+# ============================================================================
+# 终检R13-#1 (CRIT): force_close 成交后同步本地 self.positions 账本
+# force_close 只发柜台单+db.order_save, 从不碰 self.positions → 残留僵尸条目
+# (amount!=0/now_pos_rate>=1) 永久拉黑 execute() 同 open_uid 重开 + 污染同 code
+# 新仓 loss_price/open_datetime。修复=成交后按 code+方向清零匹配条目+归档+落盘。
+# ============================================================================
+
+
+def test_force_close_syncs_local_ledger(ctp):
+    """强平成交后必须清零 self.positions 匹配条目 + 归档, 否则 execute() 守卫
+    (amount!=0) 永久拦截同 open_uid 重开。"""
+    from chanlun.trading.base import POSITION, Operation
+
+    zombie = POSITION(code="rb2405", mmd="1buy", type="做多", amount=1, loss_price=90.0)
+    zombie.now_pos_rate = 1.0
+    ctp.positions = {"rb2405:1buy": zombie}
+    ctp.positions_history = {}
+    ctp._pkl_key = None  # 不触发真实落盘(仅验证内存账本清零)
+
+    # get_positions() 造的 broker POSITION(mmd 字面 "buy")
+    pos = POSITION(code="rb2405", mmd="buy", type="做多", amount=1)
+    opt = Operation("rb2405", "close", "risk", msg="超时强平")
+    res = ctp.force_close("rb2405", pos, opt)
+    assert res is not False  # 强平成交
+
+    assert ctp.positions["rb2405:1buy"].amount == 0
+    assert ctp.positions["rb2405:1buy"].now_pos_rate == 0
+    assert len(ctp.positions_history.get("rb2405", [])) == 1  # 归档保留轨迹
+
+
+def test_force_close_failure_keeps_local_ledger(ctp):
+    """强平未成交(total<=0)时不得清零本地账本(仓位仍在, 清零=丢失裸持轨迹)。"""
+    from chanlun.trading.base import POSITION, Operation
+
+    ctp._send_close_leg = lambda *a, **k: 0  # 每腿 0 成交 → total<=0 → 返回 False
+
+    live = POSITION(code="rb2405", mmd="1buy", type="做多", amount=1, loss_price=90.0)
+    live.now_pos_rate = 1.0
+    ctp.positions = {"rb2405:1buy": live}
+    ctp.positions_history = {}
+    ctp._pkl_key = None
+
+    pos = POSITION(code="rb2405", mmd="buy", type="做多", amount=1)
+    opt = Operation("rb2405", "close", "risk", msg="超时强平")
+    res = ctp.force_close("rb2405", pos, opt)
+    assert res is False
+    assert ctp.positions["rb2405:1buy"].amount == 1  # 原样保留
+    assert ctp.positions_history == {}
+
+
+def test_force_close_long_leaves_short_ledger_intact(ctp):
+    """平多仓只清零同 code 多头条目, 同 code 空头账本不受影响(方向选择性)。"""
+    from chanlun.trading.base import POSITION, Operation
+
+    long_z = POSITION(code="rb2405", mmd="1buy", type="做多", amount=1)
+    long_z.now_pos_rate = 1.0
+    short_p = POSITION(code="rb2405", mmd="1sell", type="做空", amount=2)
+    short_p.now_pos_rate = 1.0
+    ctp.positions = {"rb2405:1buy": long_z, "rb2405:1sell": short_p}
+    ctp.positions_history = {}
+    ctp._pkl_key = None
+
+    pos = POSITION(code="rb2405", mmd="buy", type="做多", amount=1)  # 平多
+    opt = Operation("rb2405", "close", "risk", msg="超时强平")
+    ctp.force_close("rb2405", pos, opt)
+
+    assert ctp.positions["rb2405:1buy"].amount == 0   # 多仓清零
+    assert ctp.positions["rb2405:1sell"].amount == 2  # 空仓不动

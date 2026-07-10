@@ -1,3 +1,4 @@
+import copy
 import os
 import time
 from datetime import datetime
@@ -691,6 +692,40 @@ class CTPTrader(BackTestTrader):
 
         return {"price": tick[code].last, "amount": pos.amount}
 
+    def _sync_positions_after_force_close(self, code: str, pos: POSITION):
+        """force_close 成交后同步本地 self.positions 账本(终检R13-#1)。
+
+        force_close 只向柜台发平仓单 + db.order_save, 从不碰 self.positions;而
+        execute() 开仓守卫(backtest_trader.py:917-923)读 self.positions[open_uid]
+        的 amount/now_pos_rate 判是否已满仓而静默 return True。强平后旧条目残留
+        amount!=0/now_pos_rate>=1 会永久拉黑同 code+方向重开, 且 get_positions()
+        按 code 回填(:988-990 amount!=0 过滤)会拿僵尸 loss_price/open_datetime
+        污染同 code 新仓。此处按 code+方向(pos.mmd 含 buy/sell)把匹配且 amount!=0
+        的条目清零并归档 positions_history, 立即落盘防重启读回(僵尸 amount=0 后
+        亦被 get_positions 的 amount!=0 过滤, 一并消除同 code 污染)。
+        """
+        want = "buy" if "buy" in pos.mmd else "sell"
+        changed = False
+        for _uid, _p in list(getattr(self, "positions", {}).items()):
+            if _p.code != code or _p.amount == 0 or want not in _p.mmd:
+                continue
+            _p.close_msg = f"风控强平账本同步:{code}"
+            _p.close_datetime = datetime.now()
+            _p.amount = 0
+            _p.now_pos_rate = 0
+            if _p.code not in self.positions_history:
+                self.positions_history[_p.code] = []
+            self.positions_history[_p.code].append(copy.deepcopy(_p))
+            changed = True
+        if changed:
+            _key = getattr(self, "_pkl_key", None)
+            if _key:
+                try:
+                    self.save_to_pkl(_key)
+                except Exception as _e:
+                    LogUtil.warning(f"force_close 账本同步落盘失败 code={code}: {_e}")
+        return changed
+
     def force_close(self, code: str, pos: POSITION, opt: Operation):
         """强制平仓
         使用对手价强平，提高成交概率
@@ -733,6 +768,9 @@ class CTPTrader(BackTestTrader):
             "futures", code, code, direction_str, price, total,
             f"强平:{opt.msg}", datetime.now(),
         )
+        # 终检R13-#1: 强平成交后同步本地 self.positions 账本(清零+归档+落盘),
+        # 否则残留僵尸条目永久拉黑同 code+方向重开并污染同 code 新仓判据。
+        self._sync_positions_after_force_close(code, pos)
         utils.send_fs_msg(
             "futures_trader", "期货交易提醒",
             [f"期货强平 {code} 方向:{direction_str} 价格:{price} 数量:{total} 原因:{opt.msg}"],
