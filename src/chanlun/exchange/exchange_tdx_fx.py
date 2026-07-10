@@ -218,6 +218,9 @@ class ExchangeTDXFX(Exchange):
                     klines.sort_values("date", inplace=True)
                 else:
                     # 有缓存：逐页向前增量拉取，直到与缓存末尾衔接
+                    cache_end_dt = klines.iloc[-1]["date"]
+                    _fresh_pages = []
+                    _bridged = False
                     for i in range(1, args["pages"] + 1):
                         _ks = client.to_df(
                             client.get_instrument_bars(
@@ -233,14 +236,24 @@ class ExchangeTDXFX(Exchange):
                         _ks.loc[:, "date"] = pd.to_datetime(_ks["datetime"])
                         _ks.sort_values("date", inplace=True)
                         new_start_dt = _ks.iloc[0]["date"]
-                        # B1(Round8): 仅首轮(i==1, 尚为纯缓存)捕获缓存真实末尾定值; 防每轮从已
-                        # 拼接的 DataFrame 重算致 i>=2 变上页末尾(约now)、陈旧>1400根时中间段留洞。
-                        if i == 1:
-                            cache_end_dt = klines.iloc[-1]["date"]
-                        klines = pd.concat([klines, _ks], ignore_index=True)
+                        _fresh_pages.append(_ks)
                         # 新页起始时间已被缓存覆盖，说明数据已衔接，停止拉取
                         if cache_end_dt >= new_start_dt:
+                            _bridged = True
                             break
+                    if _fresh_pages:
+                        if _bridged:
+                            # 衔接成功: 缓存 + 新页合并(与原逻辑等价, happy-path 字节不变)
+                            klines = pd.concat([klines] + _fresh_pages, ignore_index=True)
+                        else:
+                            # pages 耗尽仍未衔接(缓存陈旧超 pages*700 根可达范围): concat(缓存+新页)
+                            # 中间 (cache_end, 最旧新页) 必留洞, save 落盘则永久污染缓存、增量只衔接
+                            # 新端洞永不修复。故弃陈旧缓存, 仅保留本次连续新页(等价冷启动全拉近段)。
+                            print(
+                                f"⚠ tdx_fx 增量分页耗尽未衔接缓存(cache_end={cache_end_dt} < "
+                                f"最旧新页={new_start_dt}), 弃陈旧缓存防留洞: {code} {frequency}"
+                            )
+                            klines = pd.concat(_fresh_pages, ignore_index=True)
 
             klines = klines.drop_duplicates(["date"], keep="last").sort_values("date")
             # ⚠ frequency=="10m" 时这里 save 的 klines 内容实为 5 分钟原始 K 线(10m 的 resample
