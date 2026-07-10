@@ -659,7 +659,6 @@ def render_bs_point_attribution_markdown(report: Mapping[str, object]) -> str:
     ]
     for market_report in report.get("markets", []) or []:
         market = market_report.get("market", "")
-        trade_count = int(market_report.get("trade_count") or 0)
         guidance_by_class = {
             str(item.get("bs_class") or ""): item
             for item in market_report.get("ratio_guidance", []) or []
@@ -670,7 +669,7 @@ def render_bs_point_attribution_markdown(report: Mapping[str, object]) -> str:
             lines.append(
                 "| {market} | {trades} | {cls} | {win:.1%} | {avg:.2%} | {comp:.2%} | {dd:.2%} | {hold:.1f} | {action} {mult:.2f} |".format(
                     market=market,
-                    trades=trade_count,
+                    trades=int(group.get("trade_count") or 0),  # R1-F2-3 组内计数
                     cls=bs_class,
                     win=float(group.get("win_rate") or 0.0),
                     avg=float(group.get("avg_return") or 0.0),
@@ -692,7 +691,6 @@ def render_bs_point_attribution_markdown(report: Mapping[str, object]) -> str:
     )
     for market_report in report.get("markets", []) or []:
         market = market_report.get("market", "")
-        trade_count = int(market_report.get("trade_count") or 0)
         guidance_by_class = {
             str(item.get("bs_class") or ""): item
             for item in market_report.get("sell_ratio_guidance", []) or []
@@ -703,7 +701,7 @@ def render_bs_point_attribution_markdown(report: Mapping[str, object]) -> str:
             lines.append(
                 "| {market} | {trades} | {cls} | {win:.1%} | {avg:.2%} | {post20:.2%} | {mfe20:.2%} | {mae20:.2%} | {dd:.2%} | {action} {ratio:.2f} |".format(
                     market=market,
-                    trades=trade_count,
+                    trades=int(group.get("trade_count") or 0),  # R1-F2-3 组内计数
                     cls=bs_class,
                     win=float(group.get("win_rate") or 0.0),
                     avg=float(group.get("avg_return") or 0.0),
@@ -939,11 +937,17 @@ def _summarize_trade_group(
     wins = sum(1 for value in returns if value > 0)
     hold_hours = [_trade_hold_hours(row) for row in rows]
     hold_hours = [value for value in hold_hours if value >= 0]
-    post5 = _float_values(rows, "post_exit_ret_5")
-    post20 = _float_values(rows, "post_exit_ret_20")
-    post60 = _float_values(rows, "post_exit_ret_60")
-    mfe20 = _float_values(rows, "post_exit_mfe_20")
-    mae20 = _float_values(rows, "post_exit_mae_20")
+    # R1-F2-2: post_exit_ret_* 的 0.0 是"无后窗"占位(写入端 post_exit_bars<horizon
+    # 时保持 dataclass 默认;final 强平/窗口末退出必占位),按写入端专门记录的
+    # post_exit_bars 甄别真实观测,防样本数虚报+均值被占位 0 稀释。
+    rows5 = [r for r in rows if _float_first(r, "post_exit_bars") >= 5]
+    rows20 = [r for r in rows if _float_first(r, "post_exit_bars") >= 20]
+    rows60 = [r for r in rows if _float_first(r, "post_exit_bars") >= 60]
+    post5 = _float_values(rows5, "post_exit_ret_5")
+    post20 = _float_values(rows20, "post_exit_ret_20")
+    post60 = _float_values(rows60, "post_exit_ret_60")
+    mfe20 = _float_values(rows20, "post_exit_mfe_20")
+    mae20 = _float_values(rows20, "post_exit_mae_20")
     return {
         "bs_class": bs_class,
         "trade_count": len(rows),
