@@ -26,6 +26,28 @@ def get_cl_config(market, code: str):
     return render_template("options.html", **cl_config)
 
 
+def _build_cl_config(form, keys):
+    """从表单构建缠论显示配置。
+
+    用 form.get 兜底缺键(避免裸 request.form[k] 对缺键抛 werkzeug BadRequestKeyError->HTTP 400:
+    前端 save_cl_config 的 jQuery $.each 校验 return false 只中断迭代不退出函数, 取消勾选全部
+    中枢类型时仍会 POST 一份缺键表单)。中枢类型 zs_bi_type/zs_xd_type 全空时返回错误, 由调用方
+    干净拒绝, 保持"必须选择一个"语义、不落库退化配置。返回 (cl_config | None, error_msg | None)。
+    """
+    cl_config = {}
+    for _k in keys:
+        _v = form.get(_k, "")
+        if _k in ["zs_bi_type", "zs_xd_type"]:
+            _v = [x for x in _v.split(",") if x != ""]
+            if len(_v) == 0:
+                label = "笔中枢类型" if _k == "zs_bi_type" else "线段中枢类型"
+                return None, f"{label} 必须选择一个"
+        elif _v == "":
+            _v = "0"
+        cl_config[_k] = _v
+    return cl_config, None
+
+
 @options_bp.route("/set_cl_config", methods=["POST"])
 @login_required
 def set_cl_config():
@@ -96,14 +118,9 @@ def set_cl_config():
         "chart_show_bi_bc",
         "chart_show_xd_bc",
     ]
-    cl_config = {}
-    for _k in keys:
-        cl_config[_k] = request.form[_k]
-        if _k in ["zs_bi_type", "zs_xd_type"]:
-            cl_config[_k] = cl_config[_k].split(",")
-        if cl_config[_k] == "":
-            cl_config[_k] = "0"
-
+    cl_config, err = _build_cl_config(request.form, keys)
+    if err is not None:
+        return {"ok": False, "msg": err}
     res = set_cl_chart_config(market, code, cl_config)
     return {"ok": res}
 
