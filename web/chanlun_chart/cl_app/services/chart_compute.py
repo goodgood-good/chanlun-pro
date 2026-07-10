@@ -365,6 +365,27 @@ def _merge_chart_data(existing_data: dict, new_data: dict):
 def compute_and_cache_chart_data(
     market: str, code: str, frequency: str, cl_config: dict, skip_download: bool = False
 ) -> bool:
+    """全量计算前先取 per-key chart_calc_locks(与 tv_history/_do_revalidate 同锁域), 消除
+    prewarm 的 cl_data_to_tv_chart 读共享 CL 与用户 path-2 process_klines 改写的并发撕裂几何
+    (R8-C2: M5 "cache_lock 保证正确性" 只护 dict 写入, 漏了共享 CL 的并发读/改)。RLock 可重入:
+    _do_revalidate 已持锁的嵌套调用即成功、行为不变; 裸 prewarm(symbols.py)取新锁→与用户互斥。
+    非阻塞: 他方正持锁算同 key 时让位(其结果会入缓存, 保 M5 "prewarm 让位用户" 语义、不加用户
+    延迟), 跳过视为已覆盖返回 True。"""
+    cache_key = _build_cache_key(market, code, frequency, cl_config)
+    _calc_lock = chart_calc_locks.get(cache_key)
+    if not _calc_lock.acquire(blocking=False):
+        return True
+    try:
+        return _compute_and_cache_chart_data_impl(
+            market, code, frequency, cl_config, skip_download
+        )
+    finally:
+        _calc_lock.release()
+
+
+def _compute_and_cache_chart_data_impl(
+    market: str, code: str, frequency: str, cl_config: dict, skip_download: bool = False
+) -> bool:
     """完整复刻 ``tv_history`` 中 cache miss 后的计算路径，把结果写入 ``chart_data_cache``。
 
     返回 True 表示成功写入缓存（数据非空），False 表示中途无数据

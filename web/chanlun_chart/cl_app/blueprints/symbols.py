@@ -1218,9 +1218,11 @@ class PrewarmManager:
         - 4 个周期之间没有数据依赖（higher_macd 是从当前周期 closes 算的，不依赖其他周期）；
         - cache_lock 是写缓存的细粒度锁，多个 cache_key 同时写不会冲突。
 
-        注意（M5 修正）：compute_and_cache_chart_data 并不获取 chart_calc_locks，
-        故批量预热与用户 tv_history 对同一 cache_key 可能各算一遍（结果一致，
-        仅多一次计算）；cache_lock 保证两边写入不冲突，正确性不受影响。
+        注意（M5 → R8-C2 修正）：compute_and_cache_chart_data 现以非阻塞方式获取
+        chart_calc_locks（与 tv_history/_do_revalidate 同锁域）。用户正持锁计算同一
+        cache_key 时预热让位跳过（返回 True，用户结果会入缓存），既去重复计算、又消除
+        预热读共享 CL 与用户 path-2 增量改写的并发撕裂（原 M5 "cache_lock 保正确性" 仅护
+        dict 写入，漏了共享 CL 的并发读/改）。
         单标的内的周期并行度由 _resolve_freq_parallelism(market) 决定：native
         市场（a/futures/ny_futures）强制串行 1。
         """
