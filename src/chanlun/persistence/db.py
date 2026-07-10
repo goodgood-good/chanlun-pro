@@ -893,7 +893,7 @@ class DB(object):
             query = query.filter(TableByAlertRecord.market == market)
             if task_name:
                 query = query.filter(TableByAlertRecord.task_name == task_name)
-            return query.order_by(TableByAlertRecord.alert_dt.desc()).limit(100)
+            return query.order_by(TableByAlertRecord.alert_dt.desc()).limit(100).all()
 
     def marks_add(
         self,
