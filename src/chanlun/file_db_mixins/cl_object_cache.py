@@ -11,6 +11,7 @@ import pickle
 import random
 from decimal import Decimal
 
+import numpy as np
 import pandas as pd
 
 from chanlun import fun
@@ -114,6 +115,25 @@ class _CLObjectCacheMixin:
                                 f"(缓存量 {len(cached_klines)}), 全量重算"
                             )
                             need_recompute = True
+
+                    # 5. 全前缀 OHLC 指纹校验: check2 仅采样单根 ref(len>400 时恒倒数第 100 根)、
+                    #    check1/3 只看首尾/最近 100 根 → 倒数第 100 根之前的中段订正/补洞全盲。
+                    #    按日期窗口对齐(防左扩错位)比对缓存与输入重叠前缀 OHLC(排除末根 forming bar),
+                    #    与 web 版 _hist_fp 同口径; 不一致即全量重算。
+                    if not need_recompute and len(cached_klines) >= 12 and len(klines) >= 12:
+                        _m = len(cached_klines) - 1  # 排除末根(实时 forming bar 可微调)
+                        _first_d = cached_klines[0].date
+                        _last_d = cached_klines[_m - 1].date
+                        _src_win = klines[(klines["date"] >= _first_d) & (klines["date"] <= _last_d)]
+                        if len(_src_win) != _m:
+                            logger.warning(f"{log_id} 历史前缀根数不符 [Cache:{_m} vs Src:{len(_src_win)}] (中段补洞/缺失), 全量重算")
+                            need_recompute = True
+                        else:
+                            _cached_arr = np.array([(float(k.o), float(k.h), float(k.l), float(k.c)) for k in cached_klines[:_m]], dtype="float64")
+                            _src_arr = _src_win[["open", "high", "low", "close"]].to_numpy(dtype="float64")
+                            if not np.array_equal(_cached_arr, _src_arr):
+                                logger.warning(f"{log_id} 历史前缀 OHLC 指纹不一致 (中段订正/复权), 全量重算")
+                                need_recompute = True
 
                 if need_recompute:
                     cd = cl.CL(code, frequency, cl_config)
