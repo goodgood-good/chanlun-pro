@@ -111,6 +111,19 @@ class CL(ICL):
         # 兼容运行时期望字段
         self.debug: bool = False
 
+    def __setstate__(self, state: dict):
+        """unpickle/deepcopy 还原钩子(R1-F1-2)。
+
+        修复(.US 后缀推断)只在 __init__,而 cl_object_cache 的 pkl 续算谱系绕过
+        __init__:修复前落盘的美股 CL(market=None)将无限期用 +8 日级分桶(应 -5),
+        且 get_web_cl_data 每请求重写 pkl 刷新 mtime,15 天清理永不触发。此处按同
+        规则补推断治愈遗留对象;A股 None→"a" 与历史默认等价零回归;显式 market 原样。
+        治愈后首个 process_klines 因 calc.market != self.market 自动重建 HTF 计算器。"""
+        self.__dict__.update(state)
+        if self.__dict__.get("market") is None:
+            code = self.__dict__.get("code")
+            self.market = "us" if str(code or "").upper().endswith(".US") else "a"
+
     def _init_default_config(self):
         """初始化默认配置参数"""
         default_config = {
