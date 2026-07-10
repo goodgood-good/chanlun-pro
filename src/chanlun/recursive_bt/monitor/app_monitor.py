@@ -495,6 +495,8 @@ class DynamicRecursiveMonitor:
             code = normalize_code(self.market, candidate.code)
             if code in holdings:
                 continue
+            if free is not None and len(events) >= free:
+                break
             buy_ratio = recommended_buy_ratio(
                 candidate.bs_type,
                 max_pos=self.config.max_pos,
@@ -524,8 +526,6 @@ class DynamicRecursiveMonitor:
                     buy_ratio=buy_ratio,
                 )
             )
-            if free is not None and len(events) >= free:
-                break
         return events
 
     def _sync_states(self, codes: list[str], names: dict[str, str]) -> None:
