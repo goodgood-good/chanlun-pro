@@ -66,3 +66,32 @@ def test_opposite_direction_not_merged():
     ops = _operable([l0, l1])
     assert len(ops) == 1
     assert ops[0].node.divergence.leave_seg.end.k.k_index == 40
+
+
+def test_three_level_midway_sibling_subtree_not_operable():
+    """R1-F1-1: ≥3 层链上中途兄弟的整棵子树都不得 operable。
+
+    L2 P ⊃ {L1 中途 A(带 L0 子 a0), L1 末端 B(带 L0 子 b0)}:A 落败后若只"不挂 A"
+    而不摘 a0,a0 仍 depth=2+innermost+nested → operable → 同一 P 离开段内 2 个
+    operable,破「收敛单点」不变量(中途买点继续吃 ratio*1.0)。修复后恰 1 个=b0。"""
+    a0 = _dv(10, 30, "down")
+    b0 = _dv(70, 95, "down")
+    l0 = _level(0, [a0, b0])
+    l1 = _level(1, [_dv(5, 40, "down"), _dv(60, 98, "down")])   # A 中途 / B 末端
+    l2 = _level(2, [_dv(0, 100, "down")])                        # P
+    ops = _operable([l0, l1, l2])
+    assert len(ops) == 1, f"应恰 1 个 operable(P 段收敛单点), 实得 {len(ops)}"
+    assert ops[0].node.divergence.leave_seg.end.k.k_index == 95   # b0(P→B→b0 链最内)
+
+
+def test_two_parents_each_keep_own_tail_operable():
+    """R1-F4-1 钉扎: 去重按父隔离(id(parent) 分组),不同父各自保留自己的末端子。
+
+    mutant(按 level-pair 全局取末端、无视父分组)会让早父的末端子丢 operable,
+    此前 4 用例全单父钉不住该语义。两父场景: 两个末端子必须都 operable。"""
+    l0 = _level(0, [_dv(10, 40, "down"), _dv(60, 95, "down"),
+                    _dv(210, 240, "down"), _dv(260, 290, "down")])
+    l1 = _level(1, [_dv(0, 100, "down"), _dv(200, 300, "down")])
+    ops = _operable([l0, l1])
+    ends = sorted(r.node.divergence.leave_seg.end.k.k_index for r in ops)
+    assert ends == [95, 290], f"两父各留己末端子 operable, 实得 {ends}"

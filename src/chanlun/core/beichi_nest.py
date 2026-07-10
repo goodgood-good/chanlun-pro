@@ -49,6 +49,15 @@ class BeichiNestCalculator:
                     best, best_w = hi, w
         return best
 
+    def _detach_subtree(self, node: "NestedDivergence", attached: Set[int]) -> None:
+        """中途落败兄弟的整棵子树解除挂载(R1-F1-1):其内部嵌套链不是外层离开段的
+        收敛确认点,全部降为森林根(depth=1→非 operable→ratio 走 0.75 分支)。
+        真断链根(无更高父存在)不经此路径,原语义不受影响。"""
+        for ch in node.children:
+            attached.discard(id(ch))
+            self._detach_subtree(ch, attached)
+        node.children = []
+
     def calculate(self, levels: List[LevelResult]) -> List[NestedDivergence]:
         """各级 done 背驰段自底向上 BUILD 成嵌套森林。返回顶层森林(所有未被更高
         级别包含的背驰节点;最高级 + 断链低级各成树根)。"""
@@ -71,19 +80,24 @@ class BeichiNestCalculator:
         #    非套内确认点(终检 R12-2)。
         attached: Set[int] = set()
         for k in range(len(per_level) - 1):
-            best_child: dict[int, NestedDivergence] = {}   # parent id → 末端子
+            by_parent: dict[int, List[NestedDivergence]] = {}   # parent id → 同父候选兄弟
             parents: dict[int, NestedDivergence] = {}
             for lo in per_level[k]:
                 parent = self._find_parent(lo, per_level[k + 1])
                 if parent is None:
                     continue
                 parents[id(parent)] = parent
-                cur = best_child.get(id(parent))
-                if cur is None or self._span(lo.divergence)[1] > self._span(cur.divergence)[1]:
-                    best_child[id(parent)] = lo
-            for pid, child in best_child.items():
-                parents[pid].children.append(child)
-                attached.add(id(child))
+                by_parent.setdefault(id(parent), []).append(lo)
+            for pid, cands in by_parent.items():
+                # 末端子=leave_seg 结束 k_index 最大;并列取先出现者(与旧严格>一致)
+                best = max(cands, key=lambda n: self._span(n.divergence)[1])
+                parents[pid].children.append(best)
+                attached.add(id(best))
+                # R1-F1-1: 落败兄弟整棵子树解除挂载,否则其早轮已挂的子仍
+                # depth>=2 operable → 同一离开段两个 operable 破「收敛单点」不变量
+                for loser in cands:
+                    if loser is not best:
+                        self._detach_subtree(loser, attached)
 
         # 3. 顶层森林 = 所有未被挂载的节点(最高级别 + 断链的低级别各成树根)
         return [n for nodes in per_level for n in nodes if id(n) not in attached]
