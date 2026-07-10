@@ -150,6 +150,17 @@ def alert_edit(market, id):
     )
 
 
+def _parse_interval_minutes(value, default=60):
+    """interval_minutes 前端 layui number 校验基于 isNaN 放行 '5.5'/'1e3'(小数/科学计数),
+    原始字符串到后端裸 int() 会 ValueError→alert_save 无 try→Flask 500(前端 ajax 无 error 回调
+    故静默保存失败)。稳健解析为整数分钟并 clamp 到 1-1380(与前端范围一致)。"""
+    try:
+        minutes = int(float(str(value).strip()))
+    except (TypeError, ValueError):
+        return default
+    return max(1, min(minutes, 1380))
+
+
 @alert_bp.route("/alert_save", methods=["POST"])
 @login_required
 def alert_save():
@@ -206,7 +217,7 @@ def alert_save():
         "id": request.form["id"],
         "market": request.form["market"],
         "task_name": request.form["task_name"],
-        "interval_minutes": int(request.form["interval_minutes"]),
+        "interval_minutes": _parse_interval_minutes(request.form.get("interval_minutes")),
         "zx_group": request.form["zx_group"],
         "frequency": request.form["frequency"],
         "check_bi_type": request.form["check_bi_type"],
