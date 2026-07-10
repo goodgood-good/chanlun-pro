@@ -15,6 +15,8 @@ import chanlun.exchange.exchange_tdx_ny_futures as ny_mod
 from chanlun.exchange.exchange_tdx_us import ExchangeTDXUS
 from chanlun.exchange.exchange_tdx_fx import ExchangeTDXFX
 from chanlun.exchange.exchange_tdx_ny_futures import ExchangeTDXNYFutures
+import chanlun.exchange.exchange_tdx_hk as hk_mod
+from chanlun.exchange.exchange_tdx_hk import ExchangeTDXHK
 
 
 class _EmptyConn:
@@ -79,4 +81,12 @@ def test_tdx_ny_futures_empty_cache_returns_empty_not_crash(monkeypatch):
     ex = _mk(ExchangeTDXNYFutures, ny_mod, monkeypatch)
     r = ex.klines("CL.NYF", "5m", args={"pages": 1})
     assert r is not None
+    assert isinstance(r, pd.DataFrame) and len(r) == 0
+
+
+def test_tdx_hk_empty_cache_returns_empty_not_crash(monkeypatch):
+    """R1-F3-2: hk 是六兄弟中唯一漏 R4-C 守卫的(仅判 is None)。"""
+    ex = _mk(ExchangeTDXHK, hk_mod, monkeypatch)
+    r = ex.klines("HK.00700", "5m", args={"pages": 1})
+    assert r is not None  # 旧代码: 空df过 is None→增量分支 iloc[-1] IndexError→None→RetryError
     assert isinstance(r, pd.DataFrame) and len(r) == 0

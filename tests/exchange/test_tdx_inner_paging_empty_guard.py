@@ -101,3 +101,36 @@ def test_all_five_tdx_incremental_branches_have_empty_guard():
         assert re.search(r"if len\(_ks\) == 0:\s*\n\s*break", src), (
             name + " 缺内层空页守卫(镜像 exchange_tdx.py:255)"
         )
+
+
+import chanlun.exchange.exchange_tdx_futures as fut_mod
+from chanlun.exchange.exchange_tdx_futures import ExchangeTDXFutures
+
+
+def _futures_cache():
+    dts = ["2026-01-05 09:30:00", "2026-01-05 09:35:00"]
+    return pd.DataFrame(
+        {
+            "datetime": dts,
+            "date": pd.to_datetime(dts),
+            "open": [550.0, 551.0],
+            "high": [552.0, 553.0],
+            "low": [549.0, 550.0],
+            "close": [551.0, 552.0],
+            "trade": [100.0, 200.0],
+        }
+    )
+
+
+def test_tdx_futures_empty_page_guard_before_column_access(monkeypatch):
+    """R1-F3-3: futures 守卫(R10)插在 fix_datetime 取列之后 → 空页先 KeyError,守卫不可达。"""
+    monkeypatch.setattr(fut_mod, "TdxExHq_API", _EmptyPagePullApi)
+    ex = object.__new__(_real_cls(ExchangeTDXFutures))
+    ex.connect_info = {"ip": "127.0.0.1", "port": 7727}
+    ex.to_tdx_code = lambda code: (30, "TESTFUT")
+    ex.tz = pytz.timezone("Asia/Shanghai")
+    ex.fdb = _NonEmptyCacheFdb(_futures_cache())
+    r = ex.klines("SHFE.AU2412", "5m", args={"pages": 3})
+    assert r is not None  # 旧代码: 空页 _ks["datetime"] KeyError→None→@retry→RetryError
+    assert isinstance(r, pd.DataFrame)
+    assert len(r) == 2

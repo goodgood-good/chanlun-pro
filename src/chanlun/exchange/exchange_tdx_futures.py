@@ -249,11 +249,12 @@ class ExchangeTDXFutures(Exchange):
                                 700,
                             )
                         )
+                        if len(_ks) == 0:
+                            break
+                        # R1-F3-3: 守卫必须先于取列(空页 0 列 df 取 "datetime" 即 KeyError)
                         _ks["fix_datetime"] = _ks["datetime"].apply(
                             lambda _dt: self.fix_yp_date(code, _dt)
                         )
-                        if len(_ks) == 0:
-                            break
                         _ks.loc[:, "date"] = pd.to_datetime(_ks["fix_datetime"])
                         _ks.sort_values("date", inplace=True)
                         new_start_dt = _ks.iloc[0]["date"]
