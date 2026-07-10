@@ -91,3 +91,37 @@ def test_prewarm_retry_forces_download_on_second_attempt(monkeypatch):
 
     # 第一次遵循外层 skip_download=True,第二次强制 False(退化为真正 download)。
     assert seen_skip == [True, False]
+
+
+def test_cancelled_inflight_code_is_not_written_to_done(tmp_path, monkeypatch):
+    """取消中的标的不是坏标的，resume 时必须重新处理。"""
+    mgr = symbols.PrewarmManager()
+    done_path = tmp_path / "a_done.txt"
+
+    monkeypatch.setattr(symbols, "PREWARM_QMT_BATCH", 0)
+    monkeypatch.setattr(symbols, "query_cl_chart_config", lambda _market, _code: {})
+    monkeypatch.setattr(symbols, "_get_user_recent_codes", lambda _market: [])
+    monkeypatch.setattr(
+        symbols.PrewarmManager,
+        "_done_file_path",
+        lambda _self, _market: str(done_path),
+    )
+    monkeypatch.setattr(symbols.PrewarmManager, "_persist_task", lambda _self, _task: None)
+
+    def cancel_while_running(
+        _self, market, code, cl_config, cancel_event, skip_download=False
+    ):
+        cancel_event.set()
+        return False
+
+    monkeypatch.setattr(
+        symbols.PrewarmManager,
+        "_prewarm_one_code",
+        cancel_while_running,
+    )
+
+    task = symbols.PrewarmTask(market="a", total=1)
+    mgr._run_task(task, [{"code": "SH.600000", "name": "浦发银行"}])
+
+    assert task.status == "cancelled"
+    assert not done_path.exists() or done_path.read_text(encoding="utf-8") == ""

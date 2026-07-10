@@ -956,9 +956,9 @@ class PrewarmManager:
                 done_now = task.done
 
             # 把已处理 code（无论成功/失败）追加到 done.txt 以支持续跑。
-            # 失败也写：避免下次续跑死循环重试坏 code；需重做时手动删 done.txt。
+            # 失败也写：避免下次续跑死循环重试坏 code；取消不写，确保未完成标的下次重试。
             # Windows + NTFS 上 'a' mode 不原子，用模块级写锁串行 append。
-            if code and done_file_path is not None:
+            if code and done_file_path is not None and not task.cancel_event.is_set():
                 try:
                     with _done_file_write_lock:
                         with open(done_file_path, "a", encoding="utf-8") as fdone:
