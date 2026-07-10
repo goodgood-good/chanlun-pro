@@ -557,7 +557,7 @@ def convert_tdx_futures_kline_frequency(
                 period_klines["date"]
             ).dt.tz_localize(__tz)
 
-        if to_f in ["2m", "5m", "6m", "10m", "15m"]:
+        if to_f in ["2m", "3m", "5m", "6m", "10m", "15m"]:
             period_klines.loc[:, "date"] = period_klines.index
             period_klines["date"] = period_klines["date"] + pd.to_timedelta(
                 period_maps[to_f]
