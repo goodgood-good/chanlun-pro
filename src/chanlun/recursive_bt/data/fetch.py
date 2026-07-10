@@ -280,6 +280,7 @@ def build(code, ex, small_tf="5m", big_tf="30m", start=None, end=None,
     out = {
         "code": code, "dates": dates,
         "open": dfs["open"].to_numpy(), "close": dfs["close"].to_numpy(),
+        "high": dfs["high"].to_numpy(), "low": dfs["low"].to_numpy(),
         "small_by_bar": strat.small_by_bar, "big_dir_at": strat.big_dir_at,
         "limit_pct": limit_pct(code), "n_small": len(small), "n_big": len(big),
         "signal_schema": dict(SIGNAL_SCHEMA),
