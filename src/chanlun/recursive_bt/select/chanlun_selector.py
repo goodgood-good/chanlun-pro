@@ -259,7 +259,13 @@ class OriginalChanlunASelector:
         close = data.get("close")
         if dates is None or close is None or len(dates) == 0 or len(close) == 0:
             return FundamentalSnapshot()
-        asof = _as_shanghai(pd.Timestamp(list(dates)[-1]))
+        try:
+            asof = _as_shanghai(pd.Timestamp(list(dates)[-1]))
+        except Exception:
+            # dates[-1] 不可解析(半写/旧格式/腐坏缓存)时按"基本面不可用"降级(与上方
+            # dates/close 为空的早退同语义),而非裸 DateParseError 冒泡崩掉整个 select()
+            # →live_monitor 启动路径(无 try/except)进程崩溃且重启在同一坏文件上复崩。
+            return FundamentalSnapshot()
         try:
             last_close = float(close[-1])
         except Exception:
