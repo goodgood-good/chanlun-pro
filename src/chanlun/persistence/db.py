@@ -995,11 +995,11 @@ class DB(object):
         with self.Session() as session:
             try:
                 # 同 (market, code, mark_time, mark_label) 只保留一条，先删后插
-                session.query(TableByTVMarks).filter(
-                    TableByTVMarks.market == market,
-                    TableByTVMarks.stock_code == stock_code,
-                    TableByTVMarks.mark_time == mark_time,
-                    TableByTVMarks.mark_label == mark_label,
+                session.query(TableByTVMarksPrice).filter(
+                    TableByTVMarksPrice.market == market,
+                    TableByTVMarksPrice.stock_code == stock_code,
+                    TableByTVMarksPrice.mark_time == mark_time,
+                    TableByTVMarksPrice.mark_label == mark_label,
                 ).delete()
 
                 mark = TableByTVMarksPrice(
