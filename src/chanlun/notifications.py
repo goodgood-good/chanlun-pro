@@ -15,9 +15,22 @@ from chanlun import fun
 
 
 def _iter_hook_commands(settings: dict, event_name: str) -> Iterable[str]:
-    hooks = settings.get("hooks", {}).get(event_name, [])
+    # 结构防御: ~/.claude/settings.json 允许 hooks/Notification 为 null 或非预期类型
+    # (合法 JSON 但畸形结构), 裸 .get/迭代会抛 AttributeError/TypeError 逃逸 discover →
+    # ClaudeHookNotifier.__init__ → 监控进程构造崩(F1-NOTIF-4)。任意畸形降级为空。
+    root = settings.get("hooks") if isinstance(settings, dict) else None
+    hooks = root.get(event_name) if isinstance(root, dict) else None
+    if not isinstance(hooks, list):
+        return
     for group in hooks:
-        for hook in group.get("hooks", []):
+        if not isinstance(group, dict):
+            continue
+        inner = group.get("hooks")
+        if not isinstance(inner, list):
+            continue
+        for hook in inner:
+            if not isinstance(hook, dict):
+                continue
             command = hook.get("command")
             if hook.get("type") == "command" and command:
                 yield command
