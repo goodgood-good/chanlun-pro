@@ -396,26 +396,43 @@ export class UDFCompatibleDatafeedBase implements IExternalDatafeed, IDatafeedQu
 		if (!response || !t || t.length === 0 || !c) {
 			return;
 		}
-		const i = t.length - 1;
-		const closeVal = c[i];
-		if (closeVal === undefined || closeVal === null) {
-			return;
-		}
 		const o = response.o as number[] | undefined;
 		const h = response.h as number[] | undefined;
 		const l = response.l as number[] | undefined;
 		const v = response.v as number[] | undefined;
-		const bar: Bar = {
-			time: t[i] * 1000,
-			open: o ? o[i] : closeVal,
-			high: h ? h[i] : closeVal,
-			low: l ? l[i] : closeVal,
-			close: closeVal,
+		const makeBar = (idx: number): Bar | null => {
+			const closeVal = c[idx];
+			if (closeVal === undefined || closeVal === null) {
+				return null;
+			}
+			const bar: Bar = {
+				time: t[idx] * 1000,
+				open: o ? o[idx] : closeVal,
+				high: h ? h[idx] : closeVal,
+				low: l ? l[idx] : closeVal,
+				close: closeVal,
+			};
+			if (v && v[idx] !== undefined && v[idx] !== null) {
+				bar.volume = v[idx];
+			}
+			return bar;
 		};
-		if (v && v[i] !== undefined && v[i] !== null) {
-			bar.volume = v[i];
+		const i = t.length - 1;
+		// 新根出现先补喂倒数第二根(刚收盘那根)最终 OHLC, 再喂末根: 复刻 DataPulseProvider
+		// 轮询的 previousBar 补发。否则该根蜡烛永久停在收盘前 <=8s 旧值(SSE 已把 sub.lastBarTime
+		// 推进到末根, 废掉轮询里 isNewBar 的 previousBar 分支)。feedBar 的 bar.time<lastBarTime
+		// 校验令稳态逐帧重复喂前一根无副作用; t.length<2 时保持单根容错。
+		if (t.length >= 2) {
+			const prevBar = makeBar(i - 1);
+			if (prevBar !== null) {
+				this._dataPulseProvider.feedBar(symbolResKey, prevBar);
+			}
 		}
-		this._dataPulseProvider.feedBar(symbolResKey, bar);
+		const lastBar = makeBar(i);
+		if (lastBar === null) {
+			return;
+		}
+		this._dataPulseProvider.feedBar(symbolResKey, lastBar);
 	}
 
 	public subscribeBars(symbolInfo: LibrarySymbolInfo, resolution: ResolutionString, onTick: SubscribeBarsCallback, listenerGuid: string, _onResetCacheNeededCallback: () => void): void {
