@@ -1188,11 +1188,20 @@ class BackTestTrader(Trader):
 
                 # close_uid 非 clear 时只记录快照，不实际减仓；仅 clear 才执行真正平仓
                 if opt.close_uid == "clear":
+                    _full_shares = (
+                        pos.amount / pos.now_pos_rate if pos.now_pos_rate > 0 else 0
+                    )
                     pos.now_pos_rate -= opt.pos_rate
                     pos.close_keys[opt.key] = opt.pos_rate
                     pos.close_msg = opt.msg
                     pos.close_datetime = self.get_now_datetime()
                     pos.amount -= res["amount"]
+                    # N4 部分成交兄弟: 券商部分成交(0<实际<意图量, 仅实盘真单可现; 回测/paper
+                    # 恒全额→此兜底为死代码, 回测逐字节不变)致 amount 残留而 now_pos_rate 按完整
+                    # 意图扣到0 → execute 入口守卫(now_pos_rate==0)永久跳过 → 残仓裸持失管。按残量
+                    # 占满仓比例反推兜住 now_pos_rate 下限, 使下轮 execute 放行继续平残仓。
+                    if pos.amount > 0 and pos.now_pos_rate <= 1e-9 and _full_shares > 0:
+                        pos.now_pos_rate = pos.amount / _full_shares
 
                     pos.release_balance += release_balance
                     pos.fee += fee
@@ -1325,11 +1334,20 @@ class BackTestTrader(Trader):
 
                 # close_uid 非 clear 时只记录快照，不实际减仓；仅 clear 才执行真正平仓
                 if opt.close_uid == "clear":
+                    _full_shares = (
+                        pos.amount / pos.now_pos_rate if pos.now_pos_rate > 0 else 0
+                    )
                     pos.now_pos_rate -= opt.pos_rate
                     pos.close_keys[opt.key] = opt.pos_rate
                     pos.close_msg = opt.msg
                     pos.close_datetime = self.get_now_datetime()
                     pos.amount -= res["amount"]
+                    # N4 部分成交兄弟: 券商部分成交(0<实际<意图量, 仅实盘真单可现; 回测/paper
+                    # 恒全额→此兜底为死代码, 回测逐字节不变)致 amount 残留而 now_pos_rate 按完整
+                    # 意图扣到0 → execute 入口守卫(now_pos_rate==0)永久跳过 → 残仓裸持失管。按残量
+                    # 占满仓比例反推兜住 now_pos_rate 下限, 使下轮 execute 放行继续平残仓。
+                    if pos.amount > 0 and pos.now_pos_rate <= 1e-9 and _full_shares > 0:
+                        pos.now_pos_rate = pos.amount / _full_shares
 
                     pos.release_balance += release_balance
                     pos.fee += fee
