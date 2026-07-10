@@ -134,7 +134,7 @@ def _is_extending_signature(old_sig: Tuple[Any, ...], new_sig: Tuple[Any, ...], 
     条件 (全部满足才算 extending):
     - len 严格增大 (new_sig[0] > old_sig[0])
     - last_date 严格变大 (字符串字典序比较, ISO 格式日期天然单调)
-    - ref-bar 5 元组完全相同 (ref_date + 4 个 OHLC 都没变)
+    - hist_fp 一致(整段历史前缀 OHLC 未订正; ref-bar 冗余校验已移除, 见下文 R10-cl_obj_cache63)
 
     满足 extending → 真增量喂入安全 (历史段不变, 只追加新数据)。
     """
@@ -148,9 +148,9 @@ def _is_extending_signature(old_sig: Tuple[Any, ...], new_sig: Tuple[Any, ...], 
         return False
     if not old_last_date or not new_last_date or new_last_date <= old_last_date:
         return False
-    # ref-bar 5 元组必须完全一致 (位置 3-7)
-    if old_sig[3:8] != new_sig[3:8]:
-        return False
+    # ref-bar 5 元组(位置 3-7)校验已移除: _ref_bar_index(n)=min(50,n//4) 随 n 漂移(R10-cl_obj_cache63),
+    # 小根数标的追加 K 线跨 n//4 边界时 old/new 采样不同根→假失配退化全量重建; hist_fp(位置8)已完整
+    # 覆盖 [0,old_n-1) 历史前缀订正检测(冗余且更健壮), 单靠 len↑+last_date↑+hist_fp 判 extending 即安全。
     # 全前缀指纹一致: old 除末根历史前缀 == new 在 old 长度处重算的前缀(检测中途订正)
     return old_sig[8] == _hist_fp(new_klines, old_sig[0] - 1)
 
