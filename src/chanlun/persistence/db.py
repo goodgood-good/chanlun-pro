@@ -1089,7 +1089,7 @@ class DB(object):
         """保存图表布局，返回记录 id；drawing/study_template 类型按名称做覆盖更新。"""
         with self.Session() as session:
             # drawing/study_template 按名称覆盖，避免同名模板重复堆积
-            if chart_type in ["drawing", "study_template"]:
+            if chart_type in ["drawing", "study_template", "template"]:
                 chart = (
                     session.query(TableByTVCharts)
                     .filter(
