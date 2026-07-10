@@ -222,6 +222,8 @@ class ExchangeFutu(Exchange):
     def stock_info(self, code: str) -> [Dict, None]:
         ret, data = CTX().get_stock_basicinfo(None, SecurityType.STOCK, [code])
         if ret == RET_OK:
+            if data is None or len(data) == 0:
+                return None
             return {
                 "code": data.iloc[0]["code"],
                 "name": data.iloc[0]["name"],
