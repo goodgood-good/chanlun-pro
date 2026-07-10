@@ -170,9 +170,10 @@ class DynamicMonitorConfig:
     title: Optional[str] = None
 
     @classmethod
-    def from_config(cls, market: str) -> "DynamicMonitorConfig":
+    def from_config(cls, market: str, settings: Optional[dict] = None) -> "DynamicMonitorConfig":
         market = normalize_market(market)
-        settings = _market_settings(market)
+        if settings is None:
+            settings = _market_settings(market)
         zx_groups = _config_tuple(settings.get("zx_groups"), default=(WATCH_GROUP,))
         selection_groups = _config_tuple(
             settings.get("selection_groups"),
@@ -699,7 +700,7 @@ def register_recursive_monitor_jobs(scheduler) -> dict[str, DynamicRecursiveMoni
         settings = _market_settings(market)
         if not _config_bool(settings.get("enabled"), True):
             continue
-        cfg = DynamicMonitorConfig.from_config(market)
+        cfg = DynamicMonitorConfig.from_config(market, settings)
         monitor = DynamicRecursiveMonitor(cfg)
         job_kwargs = {}
         if executor_alias is not None:
