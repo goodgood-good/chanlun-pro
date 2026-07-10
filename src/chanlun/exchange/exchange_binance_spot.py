@@ -131,6 +131,10 @@ class ExchangeBinanceSpot(Exchange):
                 online_klines = self.increment_klines_by_online(
                     code, frequency, start_date=None
                 )
+                # 退市/下架/全新无数据交易对: 在线零 bar 返回 None, 不能喂 insert_klines
+                # (None.empty AttributeError→except吞→RetryError), 如实返回空(对齐 tdx 家族)
+                if online_klines is None or len(online_klines) == 0:
+                    return pd.DataFrame()
                 self.db_exchange.insert_klines(code, frequency, online_klines)
                 online_klines = normalize_kline_precision(online_klines, "currency_spot", code)
                 return online_klines
@@ -142,7 +146,11 @@ class ExchangeBinanceSpot(Exchange):
                 online_klines = self.increment_klines_by_online(
                     code, frequency, start_date=last_datetime
                 )
-                self.db_exchange.insert_klines(code, frequency, online_klines)
+                # 退市/下架: 增量零 bar 返回 None, 用库中现有数据兜底, 不喂 None 给 insert
+                if online_klines is None or len(online_klines) == 0:
+                    online_klines = pd.DataFrame(columns=db_klines.columns)
+                else:
+                    self.db_exchange.insert_klines(code, frequency, online_klines)
             klines = pd.concat([db_klines, online_klines], ignore_index=True)
             klines.drop_duplicates(subset=["date"], keep="last", inplace=True)
             klines = klines.sort_values(by="date", ascending=True)
