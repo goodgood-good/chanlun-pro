@@ -426,7 +426,11 @@ class ExchangeTq(Exchange):
             raise Exception("账户链接失败，暂时不可用，请稍后尝试")
 
         if offset == "CLOSE":
-            pos = self.positions(code)[code]
+            _pos_map = self.positions(code)
+            if code not in _pos_map:
+                # 无持仓(已平/竞态/重复平仓): 优雅返回而非 {}[code] KeyError 崩溃
+                return False
+            pos = _pos_map[code]
             if direction == "BUY":  # 平空
                 if pos.pos_short < amount:
                     amount = pos.pos_short  # 修正为实际空仓数量
