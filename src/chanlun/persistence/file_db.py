@@ -140,8 +140,11 @@ class FileCacheDB(_GenericPklCacheMixin, _ChartDataCacheMixin, _KlineCacheMixin,
         self.cl_update_date = "2025-06-15"
         cache_cl_update_date = db.cache_get("__cl_update_date")
         if cache_cl_update_date != self.cl_update_date:
-            db.cache_set("__cl_update_date", self.cl_update_date)
+            # 先清缓存再写版本标记: 若 clear_all_cl_data 被 kill/断电/单文件 unlink 失败中断
+            # 而版本已先写, 下次启动版本匹配→跳过清理→旧算法 pkl 被新代码增量续算(静默错缠论)。
+            # 反序后中断则版本保持旧值, 下次启动重试清理(恒安全)。
             self.clear_all_cl_data()
+            db.cache_set("__cl_update_date", self.cl_update_date)
 
     def _config_md5(self, cl_config: dict) -> str:
         """
