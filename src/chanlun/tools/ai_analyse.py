@@ -24,6 +24,19 @@ except Exception as _e:
     LogUtil.warning(f"[ai_analyse] ensure table cl_ai_analyses failed: {_e}")
 
 
+def _zs_dates(zs):
+    """ZS 端点日期(R2-F1-1 同款): 核心重做后 ZS.start/end 是 LINE(BI/XD)无 .k,优先从
+    zs.lines 取端点 FX 日期(与 golden/_zs_k_index_range 同口径),空 lines 回退旧式 FX 型
+    start/end,均不可用返回 (None, None)。"""
+    lines = getattr(zs, "lines", None) or []
+    if lines:
+        return lines[0].start.k.date, lines[-1].end.k.date
+    s, e = getattr(zs, "start", None), getattr(zs, "end", None)
+    if s is not None and e is not None and hasattr(s, "k") and hasattr(e, "k"):
+        return s.k.date, e.k.date
+    return None, None
+
+
 class AIAnalyse:
     """缠论 AI 分析器：将缠论数据（笔/线段/中枢）组装为 Markdown prompt 并调用大模型分析。"""
 
@@ -189,7 +202,10 @@ class AIAnalyse:
                 prompt += "| 起始时间 | 结束时间 | 方向 | 最高值 | 最低值 | 高点 | 低点 | 级别 |\n"
                 prompt += "|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|\n"
                 for zs in zss[-2:]:
-                    prompt += f"| {fun.datetime_to_str(zs.start.k.date)} | {fun.datetime_to_str(zs.end.k.date)} | {self.map_zs_type[zs.type]} | {round(zs.gg, precision)} | {round(zs.dd, precision)} | {round(zs.zg, precision)} | {round(zs.zd, precision)} | {zs.level} |\n"
+                    _zs_sd, _zs_ed = _zs_dates(zs)
+                    _zs_sd_str = fun.datetime_to_str(_zs_sd) if _zs_sd is not None else ""
+                    _zs_ed_str = fun.datetime_to_str(_zs_ed) if _zs_ed is not None else ""
+                    prompt += f"| {_zs_sd_str} | {_zs_ed_str} | {self.map_zs_type[zs.type]} | {round(zs.gg, precision)} | {round(zs.dd, precision)} | {round(zs.zg, precision)} | {round(zs.zd, precision)} | {zs.level} |\n"
                 prompt += "\n"
 
         prompt += "> **数据说明**：中枢级别的意思，1表示是本级别，根据中枢内的线段数量计算，小于等于9表示本级别，大于1表示中枢内的线段大于9，中枢级别升级 (计算公式: `round(max([1, zs.line_num / 9]), 2)`)\n\n"
