@@ -67,6 +67,16 @@ def _sharpe_ratio(daily_return, return_std, risk_free, annual_days):
     return (daily_return - daily_risk_free) / return_std * np.sqrt(annual_days)
 
 
+def _default_dt_align_type(market: str) -> str:
+    """R2-F2-1: K线合成时间对齐方式的按市场默认。
+
+    本仓 DB 分钟线除 currency/currency_spot(前对齐 bob)外均为 eob 打点(bar 结束
+    时刻,tdx A股 1m 首根 09:31 / convert_stock/futures session map 皆然)。eob 源
+    bar 时间戳 T 覆盖 (T-1m,T],若用 bob(closed="left")会把它分进 [T,T+Nm) 箱 →
+    合成K线逐根错位一根源 bar,其上缠论全失真。"""
+    return "bob" if market in ("currency", "currency_spot") else "eob"
+
+
 class BackTest:
     """
     回测类
@@ -538,7 +548,7 @@ class BackTest:
         frequency,
         merge_kline_freq: str = None,
         to_minutes: int = None,
-        to_dt_align_type: str = "bob",
+        to_dt_align_type: str = None,
         to_frequency: str = None,
         change_cl_config=None,
         chart_config=None,
@@ -550,7 +560,7 @@ class BackTest:
         @param frequency: 要展示的数据周期
         @param merge_kline_freq: 使用 exchange.py 中的周期转换，转换成指定市场的周期，例如 a:30m  futures:60m
         @param to_minutes: 使用 K线合成的方法，合成分钟基本的K线
-        @param to_dt_align_type: 使用K线合成的方法，时间对其方式  bob 前对其 eob后对其
+        @param to_dt_align_type: 使用K线合成的方法，时间对齐方式 bob 前对齐 / eob 后对齐;缺省 None=按市场自动(currency→bob,其余→eob,见 _default_dt_align_type)
         @param to_frequency: 展示图表时，可以将低周期转换成高周期数据
         @param change_cl_config: 覆盖回测的缠论配置项
         @param chart_config: 覆盖画图配置项
@@ -590,6 +600,9 @@ class BackTest:
         klines = bk.all_klines["%s-%s" % (code, frequency)]
         title = "%s - %s" % (code, frequency)
         if to_minutes is not None:
+            if to_dt_align_type is None:
+                # R2-F2-1: 旧默认 "bob" 对非 currency 市场把 eob 源 bar 分错箱
+                to_dt_align_type = _default_dt_align_type(self.market)
             kg = KlinesGenerator(to_minutes, show_cl_config, to_dt_align_type)
             cd: ICL = kg.update_klines(klines)
             title = "%s - (%s to %s)" % (code, frequency, to_minutes)
