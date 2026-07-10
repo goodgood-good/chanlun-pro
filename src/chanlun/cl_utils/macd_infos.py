@@ -230,17 +230,30 @@ def cal_macd_bis_is_bc(bis: List[BI], cd: ICL) -> Tuple[bool, bool]:
     return hist_bc, deadif_bc
 
 
+def _zs_k_index_range(zs: ZS):
+    """ZS 的 K 线序号范围(R2-F1-1)。核心重做后 ZS.start/end 语义是 LINE(BI/XD,
+    end 可为 None),LINE 无 .k;旧式 ZS 的 start/end 是 FX。统一优先从 zs.lines 取
+    (与 golden _sig_zss 同口径),空 lines 回退 FX 式 start/end,均不可用返回 None。"""
+    lines = getattr(zs, "lines", None) or []
+    if lines:
+        return lines[0].start.k.k_index, lines[-1].end.k.k_index
+    s, e = getattr(zs, "start", None), getattr(zs, "end", None)
+    if s is not None and e is not None and hasattr(s, "k") and hasattr(e, "k"):
+        return s.k.k_index, e.k.k_index
+    return None
+
+
 def cal_zs_macd_infos(zs: ZS, cd: ICL) -> MACD_INFOS:
     """
     计算中枢的macd信息
     """
     infos = MACD_INFOS()
-    dea = np.array(
-        cd.get_idx()["macd"]["dea"][zs.start.k.k_index : zs.end.k.k_index + 1]
-    )
-    dif = np.array(
-        cd.get_idx()["macd"]["dif"][zs.start.k.k_index : zs.end.k.k_index + 1]
-    )
+    k_range = _zs_k_index_range(zs)
+    if k_range is None:
+        return infos
+    _ks, _ke = k_range
+    dea = np.array(cd.get_idx()["macd"]["dea"][_ks : _ke + 1])
+    dif = np.array(cd.get_idx()["macd"]["dif"][_ks : _ke + 1])
     if len(dea) < 2 or len(dif) < 2:
         return infos
     zero = np.zeros(len(dea))

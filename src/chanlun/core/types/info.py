@@ -47,14 +47,16 @@ class LOW_LEVEL_QS:
 @dataclass
 class MACD_INFOS:
     # 记录中枢内，macd 的变化情况
-    dif_up_cross_num = 0  # dif 线上穿零轴的次数
-    dea_up_cross_num = 0  # dea 线上穿零轴的次数
-    dif_down_cross_num = 0  # dif 线下穿零轴的次数
-    dea_down_cross_num = 0  # dea 线下穿零轴的次数
-    gold_cross_num = 0  # 金叉次数
-    die_cross_num = 0  # 死叉次数
-    last_dif = 0
-    last_dea = 0
+    # R2-F1-2: 必须带类型注解才构成 dataclass field(无注解=普通类属性,
+    # fields()==0/to_dict() 恒 {}/值不同的实例 __eq__ 恒 True)
+    dif_up_cross_num: int = 0  # dif 线上穿零轴的次数
+    dea_up_cross_num: int = 0  # dea 线上穿零轴的次数
+    dif_down_cross_num: int = 0  # dif 线下穿零轴的次数
+    dea_down_cross_num: int = 0  # dea 线下穿零轴的次数
+    gold_cross_num: int = 0  # 金叉次数
+    die_cross_num: int = 0  # 死叉次数
+    last_dif: float = 0.0
+    last_dea: float = 0.0
 
     def to_dict(self):
         """将MACD_INFOS对象转换为字典"""
