@@ -357,7 +357,8 @@ class ExchangeTq(Exchange):
         hour = int(time.strftime("%H"))
         minute = int(time.strftime("%M"))
         if (
-            hour in {9, 10, 11, 14, 21, 22, 23, 0, 1}
+            hour in {9, 10, 14, 21, 22, 23, 0, 1}
+            or (hour == 11 and minute < 30)
             or (hour == 13 and minute >= 30)
             or (hour == 2 and minute <= 30)
         ):
