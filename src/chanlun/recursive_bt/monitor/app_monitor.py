@@ -466,7 +466,10 @@ class DynamicRecursiveMonitor:
             return list(selector.select())
         except Exception as exc:
             self.log.warning(f"[recursive_app_monitor] A selector failed: {exc}")
-            return []
+            # 扫描失败(非"今日零候选")复用上一轮候选池,避免瞬时 IO/解析抖动经
+            # _sync_states 把非持仓选股池全量剔除(丢增量缠论状态 + warmup 期漏信号);
+            # 真正成功返回的 [] 仍允许清空。
+            return list(getattr(self, "last_selection_candidates", []) or [])
 
     def current_universe(self) -> tuple[list[str], dict[str, str]]:
         codes = list(self.config.static_codes)
