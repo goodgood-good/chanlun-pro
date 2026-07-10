@@ -200,7 +200,7 @@ class DynamicMonitorConfig:
             ),
             a_selection_lookback_bars=_config_int(
                 settings.get("selection_lookback_bars"),
-                3,
+                48,
             ),
             a_selection_buy_classes=_buy_classes(
                 settings.get("selection_buy_classes"),
