@@ -683,8 +683,10 @@ def cl_data_to_tv_chart(
     xd_mmd_chart_data.sort(key=lambda v: v["points"]["time"], reverse=False)
     xd_zslx_chart_data.sort(key=lambda v: v["points"][0]["time"], reverse=False)
     xd_zslx_line_chart_data.sort(key=lambda v: v["points"][0]["time"], reverse=False)
-    # 获取 MACD 数据
-    if to_frequency is not None:
+    # 获取 MACD 数据。展示K线与 src 不等长(kline_chanlun 合并缠论K线 M<N / to_frequency 重采样)
+    # 时, cd.get_idx() 的 MACD 恒 src 长度→按下标与 t/o/h/l/c 错配, 须在展示K线上重算对齐;
+    # 默认模式(klines==src 且 to_frequency=None)沿用 cd.get_idx() 保持 chart_data 逐字节不变。
+    if to_frequency is not None or len(klines) != len(cd.get_src_klines()):
         macd = MACD(
             fast_period=int(config.get("idx_macd_fast", 12)),
             slow_period=int(config.get("idx_macd_slow", 26)),
