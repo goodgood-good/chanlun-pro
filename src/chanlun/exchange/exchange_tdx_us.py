@@ -169,6 +169,9 @@ class ExchangeTDXUS(Exchange):
                     klines_df.loc[:, "date"] = pd.to_datetime(klines_df["datetime"])
                     klines_df.sort_values("date", inplace=True)
                 else:
+                    cache_end_dt = klines_df.iloc[-1]["date"]
+                    _fresh_pages = []
+                    _bridged = False
                     for i in range(1, args["pages"] + 1):
                         _ks = client.to_df(
                             client.get_instrument_bars(
@@ -184,14 +187,21 @@ class ExchangeTDXUS(Exchange):
                         _ks.loc[:, "date"] = pd.to_datetime(_ks["datetime"])
                         _ks.sort_values("date", inplace=True)
                         new_start_dt = _ks.iloc[0]["date"]
-                        # B1(Round8): 仅首轮(i==1, 尚为纯缓存)捕获缓存真实末尾定值; 防每轮从已
-                        # 拼接的 DataFrame 重算致 i>=2 变上页末尾(约now)、陈旧>1400根时中间段留洞。
-                        if i == 1:
-                            cache_end_dt = klines_df.iloc[-1]["date"]
-                        klines_df = pd.concat([klines_df, _ks], ignore_index=True)
+                        _fresh_pages.append(_ks)
                         # 新一页起始时间早于缓存末尾，说明已覆盖，无需继续
                         if cache_end_dt >= new_start_dt:
+                            _bridged = True
                             break
+                    if _fresh_pages:
+                        if _bridged:
+                            klines_df = pd.concat([klines_df] + _fresh_pages, ignore_index=True)
+                        else:
+                            # pages 耗尽仍未衔接: 弃陈旧缓存仅留连续新页, 防中间留洞永久落盘
+                            print(
+                                f"⚠ tdx_us 增量分页耗尽未衔接缓存(cache_end={cache_end_dt} < "
+                                f"最旧新页={new_start_dt}), 弃陈旧缓存防留洞: {code} {frequency}"
+                            )
+                            klines_df = pd.concat(_fresh_pages, ignore_index=True)
 
             klines_df["date"] = pd.to_datetime(klines_df["datetime"])
             # 去重：分页重叠时保留最新一条

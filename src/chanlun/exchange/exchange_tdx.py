@@ -242,6 +242,9 @@ class ExchangeTDX(Exchange):
                     ks.loc[:, "date"] = pd.to_datetime(ks["datetime"])
                     ks.sort_values("date", inplace=True)
                 else:
+                    cache_end_dt = ks.iloc[-1]["date"]
+                    _fresh_pages = []
+                    _bridged = False
                     for i in range(1, args["pages"] + 1):
                         _ks = client.to_df(
                             get_bars(
@@ -257,14 +260,21 @@ class ExchangeTDX(Exchange):
                         _ks.loc[:, "date"] = pd.to_datetime(_ks["datetime"])
                         _ks.sort_values("date", inplace=True)
                         new_start_dt = _ks.iloc[0]["date"]
-                        # B1(Round8): 仅首轮(i==1, 尚为纯缓存)捕获缓存真实末尾定值; 防每轮从已
-                        # 拼接的 DataFrame 重算致 i>=2 变上页末尾(约now)、陈旧>1400根时中间段留洞。
-                        if i == 1:
-                            cache_end_dt = ks.iloc[-1]["date"]
-                        ks = pd.concat([ks, _ks], ignore_index=True)
+                        _fresh_pages.append(_ks)
                         # 如果请求的第一个时间大于缓存的最后一个时间，退出
                         if cache_end_dt >= new_start_dt:
+                            _bridged = True
                             break
+                    if _fresh_pages:
+                        if _bridged:
+                            ks = pd.concat([ks] + _fresh_pages, ignore_index=True)
+                        else:
+                            # pages 耗尽仍未衔接: 弃陈旧缓存仅留连续新页, 防中间留洞永久落盘
+                            print(
+                                f"⚠ tdx 增量分页耗尽未衔接缓存(cache_end={cache_end_dt} < "
+                                f"最旧新页={new_start_dt}), 弃陈旧缓存防留洞: {code} {frequency}"
+                            )
+                            ks = pd.concat(_fresh_pages, ignore_index=True)
             # 通达信分钟线午休结束后的第一根 bar 时间戳为 13:00，实际应归属上午 11:30（最后一根）
             if len(frequency) >= 2 and frequency.endswith("m"):
                 def dt_1300_to_1130(_d: datetime.datetime):
