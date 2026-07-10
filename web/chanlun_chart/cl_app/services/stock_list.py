@@ -37,7 +37,7 @@ _stock_cache_lock = threading.Lock()
 
 # 落盘缓存格式版本：未来若 schema 变更（如新增字段、改 raw 为 processed），递增此值，
 # 旧文件会被忽略并被新版本覆盖，避免反序列化时 KeyError。
-_STOCKS_CACHE_VERSION = 1
+_STOCKS_CACHE_VERSION = 2
 
 # 全部支持的市场（用于校验配置项）
 _ALL_PRELOAD_EXCHANGES = [
@@ -138,9 +138,9 @@ def _load_stocks_from_disk(exchange: str):
 def _save_stocks_to_disk(exchange: str, raw_stocks) -> None:
     """原子写 raw stocks 到落盘文件。空列表跳过（避免覆盖已有的好缓存）。
 
-    只持久化 ``code`` / ``name`` 两个原始字段——``code_lower`` / ``pinyin_initials``
-    等 processed 字段会在恢复时由 ``_process_stock_list`` 重新计算，避免文件膨胀
-    和未来 processed schema 变更带来的兼容性坑。
+    只持久化 ``code`` / ``name`` / ``type`` 三个原始字段——A 股列表过滤依赖
+    ``type``，而 ``code_lower`` / ``pinyin_initials`` 等 processed 字段会在恢复时由
+    ``_process_stock_list`` 重新计算，避免文件膨胀和未来 processed schema 变更带来的兼容性坑。
     """
     if not raw_stocks:
         return
@@ -151,7 +151,11 @@ def _save_stocks_to_disk(exchange: str, raw_stocks) -> None:
         "updated_at": int(time.time()),
         "count": len(raw_stocks),
         "stocks": [
-            {"code": s.get("code", ""), "name": s.get("name", "")}
+            {
+                "code": s.get("code", ""),
+                "name": s.get("name", ""),
+                "type": s.get("type", "unknown"),
+            }
             for s in raw_stocks
         ],
     }
