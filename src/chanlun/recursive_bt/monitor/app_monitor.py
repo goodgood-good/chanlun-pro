@@ -42,6 +42,7 @@ from chanlun.recursive_bt.monitor.live_monitor import (
     warn_if_notifier_unavailable,
     _apply_runtime_overrides,
     _config_bool,
+    _config_float,
     _config_int,
 )
 from chanlun.recursive_bt.engine.market_runtime import (
@@ -215,8 +216,8 @@ class DynamicMonitorConfig:
             a_selection_fund_data=str(
                 settings.get("fund_data") or "D:/chanlun_pro/bt_data_fund_all_a"
             ),
-            a_selection_fundamental_roe_ann_min=float(
-                settings.get("fundamental_roe_ann_min") or 8.0
+            a_selection_fundamental_roe_ann_min=_config_float(
+                settings.get("fundamental_roe_ann_min"), 8.0
             ),
             bt_data=str(settings.get("bt_data") or BT_DATA),
             chart_cache_dir=str(settings.get("chart_cache_dir") or CHART_CACHE_DIR),

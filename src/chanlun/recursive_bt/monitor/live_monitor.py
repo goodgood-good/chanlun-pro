@@ -283,6 +283,15 @@ def _config_int(value, default: int) -> int:
         return default
 
 
+def _config_float(value, default: float) -> float:
+    if value is None or str(value).strip() == "":
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def _config_bool(value, default: bool = False) -> bool:
     if value is None:
         return default
@@ -2324,8 +2333,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                     market_config.get("selection_require_three_systems"),
                     True,
                 ),
-                fundamental_roe_ann_min=float(
-                    market_config.get("fundamental_roe_ann_min") or 8.0
+                fundamental_roe_ann_min=_config_float(
+                    market_config.get("fundamental_roe_ann_min"), 8.0
                 ),
             )
         )
