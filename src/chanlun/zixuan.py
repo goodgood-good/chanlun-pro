@@ -3,6 +3,7 @@ from typing import List, Dict
 from chanlun import fun
 from chanlun.market import Market
 from chanlun.persistence.db import db
+from sqlalchemy.exc import IntegrityError
 
 from chanlun.exchange import get_exchange
 
@@ -32,7 +33,12 @@ class ZiXuan(object):
             return False
         if zx_group_name in [_z["name"] for _z in self.zixuan_list]:
             return False
-        db.zx_add_group(self.market_type, zx_group_name)
+        try:
+            db.zx_add_group(self.market_type, zx_group_name)
+        except IntegrityError:
+            # 并发下另一线程抢先建同名组(复合主键 market+zx_group 冲突);check-then-insert 非
+            # 原子, 幂等视为已存在返回 False(与上方存在性检查同义), 不上抛致 view opt_zixuan_group 500
+            return False
         self.zixuan_list = self.get_zx_groups()
         self.zx_names = [_zx["name"] for _zx in self.zixuan_list]
         return True
