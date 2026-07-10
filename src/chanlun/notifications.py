@@ -92,18 +92,19 @@ class DingTalkWebhookNotifier:
         payload = json.dumps(
             {"msgtype": "text", "text": {"content": message}}, ensure_ascii=False
         ).encode("utf-8")
-        req = urllib.request.Request(
-            self.webhook,
-            data=payload,
-            headers={"Content-Type": "application/json; charset=utf-8"},
-        )
         try:
+            req = urllib.request.Request(
+                self.webhook,
+                data=payload,
+                headers={"Content-Type": "application/json; charset=utf-8"},
+            )
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
+            errcode = int(data.get("errcode", -1))
         except Exception as exc:
             fun.get_logger().warning(f"[notify] DingTalk webhook failed: {exc}")
             return False
-        if int(data.get("errcode", -1)) != 0:
+        if errcode != 0:
             fun.get_logger().warning(
                 f"[notify] DingTalk webhook rejected: {data.get('errcode')} {data.get('errmsg')}"
             )
