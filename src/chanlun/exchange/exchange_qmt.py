@@ -415,6 +415,8 @@ class ExchangeQMT(Exchange):
         qmt_code = self.code_to_qmt(code)
         with _XTDATA_NATIVE_LOCK:
             stock_detail = xtdata.get_instrument_detail(qmt_code, False)
+        if not stock_detail:
+            return None
         return {
             "code": code,
             "name": stock_detail["InstrumentName"],
