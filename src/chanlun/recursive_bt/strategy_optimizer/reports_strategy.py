@@ -221,6 +221,16 @@ def _load_equity_curve(path: Path) -> tuple[list[dict], str]:
     return curve, "" if curve else "empty_equity_curve"
 
 
+def _norm_ts(value) -> str:
+    """isoformat 时间归一(R1-F2-1): 审计事件默认 'T' 分隔、权益快照空格分隔,
+    裸字符串比较时 'T'(0x54)>' '(0x20) 使同日事件恒大于同日快照 → 分段边界滑到
+    次日。位置 10 精确替换 'T'→空格,两种格式归一后字典序==时间序。"""
+    s = str(value or "")
+    if len(s) > 10 and s[10] == "T":
+        return s[:10] + " " + s[11:]
+    return s
+
+
 def _build_market_strategy_segments(
     market: str,
     curve: list[dict],
@@ -239,7 +249,7 @@ def _build_market_strategy_segments(
         }
     ] + [
         {
-            "time": str(event.get("time") or ""),
+            "time": _norm_ts(event.get("time")),  # R1-F2-1 归一
             "action": str(event.get("action") or ""),
             "risk_state": str(event.get("risk_state") or ""),
             "target_candidate": str(event.get("target_candidate") or ""),
@@ -255,7 +265,7 @@ def _build_market_strategy_segments(
     current_points: list[dict] = []
     event_idx = 1
     for point in curve:
-        point_time = str(point.get("time") or "")
+        point_time = _norm_ts(point.get("time"))  # R1-F2-1 归一
         while event_idx < len(stage_events) and stage_events[event_idx]["time"] <= point_time:
             if current_points:
                 segments.append(_segment_from_points(market, current_stage, current_points))
