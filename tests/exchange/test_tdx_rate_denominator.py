@@ -105,3 +105,61 @@ def test_ny_all_ticks_rate_zero_guard_on_zuojie(monkeypatch):
     _FakeExHqApi.quotes_list = [_ny_list_quote(mai_chu=110.0, zuo_jie=0.0)]
     t = _ny_ex().all_ticks()["NYF.CL2508"]
     assert t.rate == 0  # 旧实现算出 100.0
+
+
+# --- R18: A股 exchange_tdx.py 漏网(全家族唯一护卫字段≠除数字段→真 ZeroDivisionError) ---
+import chanlun.exchange.exchange_tdx as tdx_mod  # noqa: E402
+from chanlun.exchange.exchange_tdx import ExchangeTDX  # noqa: E402
+
+
+class _FakeTdxConn:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+class _FakeTdxHqApi:
+    quotes = []
+
+    def __init__(self, *a, **kw):
+        pass
+
+    def connect(self, ip, port):
+        return _FakeTdxConn()
+
+    def get_security_quotes(self, stocks):
+        return [dict(q) for q in type(self).quotes]
+
+
+def _a_quote(price, last_close, code="600000", market=1):
+    return {
+        "market": market, "code": code, "price": price, "last_close": last_close,
+        "open": price, "high": price, "low": price, "vol": 1000,
+        "bid1": price, "ask1": price,
+    }
+
+
+def _a_ex():
+    ex = object.__new__(_real_cls(ExchangeTDX))
+    ex.connect_info = {"ip": "127.0.0.1", "port": 7709}
+    ex.to_tdx_code = lambda code: (1, code[-6:], "stock_cn")
+    return ex
+
+
+def test_a_ticks_rate_zero_guard_on_last_close(monkeypatch):
+    """R18: A股 ticks() 涨跌幅护卫须查真正除数 last_close(非 price)。新股首日/停牌复牌
+    last_close=0 而 price!=0 时旧码(护卫 price)ZeroDivisionError 崩溃吞掉实盘信号通知。"""
+    monkeypatch.setattr(tdx_mod, "TdxHq_API", _FakeTdxHqApi)
+    _FakeTdxHqApi.quotes = [_a_quote(price=10.0, last_close=0.0)]
+    t = _a_ex().ticks(["SH.600000"])["SH.600000"]  # 修复前 ZeroDivisionError
+    assert t.rate == 0
+
+
+def test_a_ticks_rate_normal_denominator(monkeypatch):
+    """回归: last_close 正常时涨跌幅按昨收算, 护卫不误伤。"""
+    monkeypatch.setattr(tdx_mod, "TdxHq_API", _FakeTdxHqApi)
+    _FakeTdxHqApi.quotes = [_a_quote(price=110.0, last_close=100.0)]
+    t = _a_ex().ticks(["SH.600000"])["SH.600000"]
+    assert t.rate == 10.0

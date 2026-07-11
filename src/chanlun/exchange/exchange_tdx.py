@@ -428,7 +428,9 @@ class ExchangeTDX(Exchange):
                         round(
                             (_q["price"] - _q["last_close"]) / _q["last_close"] * 100, 2
                         )
-                        if _q["price"] != 0
+                        # R18: 护卫真正的除数 last_close(非 price), 否则新股首日/停牌复牌
+                        # last_close=0 而 price!=0 时上一行除零崩溃吞掉 A股实盘信号通知。
+                        if _q["last_close"] != 0
                         else 0
                     ),
                 )
