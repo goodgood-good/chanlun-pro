@@ -68,3 +68,18 @@ def test_analyse_stock_ok_still_works(monkeypatch):
     res = obj.analyse("SH.600519", "5m")
     assert res["ok"] is True
     assert res["msg"] == "分析结果"
+
+def test_analyse_llm_failure_not_faked_as_success(monkeypatch):
+    """R17: req_llm_ai_model 返回 ok=False(未配 key/网络失败)→ analyse 出口须回传真实
+    ok=False, 不得硬编码 ok=True 让前端(ai.js:122)误报『分析成功』并丢弃真实错因。"""
+    obj = _make({"name": "贵州茅台", "code": "SH.600519"})
+    _patch_downstream(monkeypatch, obj)
+    # 覆盖 _patch_downstream 里恒 True 的桩, 模拟 LLM 调用失败(默认 AI_TOKEN="" 即此路径)
+    monkeypatch.setattr(
+        obj,
+        "req_llm_ai_model",
+        lambda p: {"ok": False, "model": "", "msg": "未正确配置大模型的 API key 和模型名称"},
+    )
+    res = obj.analyse("SH.600519", "5m")
+    assert res["ok"] is False, "LLM 失败不得被吞成 ok=True"
+    assert res["msg"] == "未正确配置大模型的 API key 和模型名称", "真实错因须回传"

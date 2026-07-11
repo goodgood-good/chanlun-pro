@@ -111,7 +111,9 @@ class AIAnalyse:
                 session.add(record)
                 session.commit()
 
-        return {"ok": True, "msg": analyse_res["msg"]}
+        # R17: 回传真实 ok(不硬编码 True), 否则 LLM 失败被吞成"成功"、前端(ai.js:122)误报
+        # "分析成功"且丢弃真实错因, DB 又因 :98 判假而未落库 → 用户见"成功"却无新记录。
+        return {"ok": analyse_res["ok"], "msg": analyse_res["msg"]}
 
     def analyse_records(self, page: int = 1, limit: int = 20):
         """返回当前市场的历史 AI 分析记录（按时间倒序分页）。
