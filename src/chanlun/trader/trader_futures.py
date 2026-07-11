@@ -115,6 +115,8 @@ class TraderFutures(BackTestTrader):
                 return False
             if len(hold_position) == 0 or hold_position[code].pos_long == 0:
                 # 确认券商无多仓: 真已平, 允许 execute 清本地
+                # R19: 快速返回路径同样须清"我的持仓"自选(正常平仓路径有 zx.del), 否则幽灵标的永久滞留
+                self.zx.del_stock("我的持仓", code)
                 return {"price": pos.price, "amount": pos.amount}
             hold_position = hold_position[code]
 
@@ -161,6 +163,8 @@ class TraderFutures(BackTestTrader):
                 )
                 return False
             if len(hold_position) == 0 or hold_position[code].pos_short == 0:
+                # R19: 同 close_buy, 快速返回也须清自选防幽灵标的滞留
+                self.zx.del_stock("我的持仓", code)
                 return {"price": pos.price, "amount": pos.amount}
             hold_position = hold_position[code]
 

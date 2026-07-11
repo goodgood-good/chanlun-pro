@@ -43,6 +43,16 @@ class TraderAStock(BackTestTrader):
         # A股最小交易单位 100 股，向下取整
         amount = amount - amount % 100
 
+        # R19: 固定 5万预算对高价股(如茅台 price>500)整手取整必得 0 股, 不得照发买入通知+
+        # 加自选(zx.add_stock)+落库(伪造持仓), 提前返 False。
+        if amount <= 0:
+            utils.send_fs_msg(
+                "a",
+                "沪深交易提醒",
+                [f"股票买入 {code}-{stock['name']} 5万预算不足 1 手(price {price}), 跳过"],
+            )
+            return False
+
         msg = (
             f"股票买入 {code}-{stock['name']} 价格 {price} 数量 {amount} 原因 {opt.msg}"
         )
