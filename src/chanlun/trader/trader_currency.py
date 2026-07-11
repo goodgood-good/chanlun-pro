@@ -60,6 +60,13 @@ class TraderCurrency(BackTestTrader):
                     "currency", "数字货币交易提醒", f"{code} open buy 下单失败"
                 )
                 return False
+            # R19: Binance 受理但零成交(order() 归一化后 amount<=0)不得当开仓成功, 否则
+            # 伪造通知+自选加股+账本(共享层守卫在 open_buy 返回后才判, 太晚, 副作用已发)。
+            if res.get("amount", 0) <= 0:
+                utils.send_fs_msg(
+                    "currency", "数字货币交易提醒", f"{code} open buy 零成交(amount=0), 视为未开仓"
+                )
+                return False
             msg = f"开多仓 {code} 价格 {res['price']} 数量 {res['amount']} 原因 {opt.msg}"
             utils.send_fs_msg("currency", "数字货币交易提醒", msg)
 
@@ -114,6 +121,12 @@ class TraderCurrency(BackTestTrader):
             if res is False:
                 utils.send_fs_msg(
                     "currency", "数字货币交易提醒", f"{code} open sell 下单失败"
+                )
+                return False
+            # R19: Binance 零成交不得当开仓成功(同 open_buy)。
+            if res.get("amount", 0) <= 0:
+                utils.send_fs_msg(
+                    "currency", "数字货币交易提醒", f"{code} open sell 零成交(amount=0), 视为未开仓"
                 )
                 return False
             msg = f"开空仓 {code} 价格 {res['price']} 数量 {res['amount']} 原因 {opt.msg}"

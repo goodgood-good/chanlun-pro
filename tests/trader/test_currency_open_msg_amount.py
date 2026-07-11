@@ -72,3 +72,48 @@ def test_open_sell_msg_uses_coin_amount_not_usdt(monkeypatch):
     assert len(captured) == 1
     assert "数量 0.5" in captured[0]
     assert "980" not in captured[0]
+
+# --- R19: Binance 零成交(交易所受理但 executedQty=0)不得当开仓成功 ---
+class _FakeBnExZeroFill(_FakeBnEx):
+    def order(self, code, o_type, amount, args=None):
+        return {"price": 100.0, "amount": 0.0}  # 受理但零成交
+
+
+class _RecZx:
+    def __init__(self):
+        self.added = []
+
+    def add_stock(self, *a, **k):
+        self.added.append(a)
+
+
+def test_open_buy_zero_fill_no_false_position(monkeypatch):
+    """R19: Binance 零成交(amount=0)→ open_buy 返 False, 不发开仓通知/不加自选/不落库。"""
+    captured = []
+    t = _mk(monkeypatch, captured)
+    t.ex = _FakeBnExZeroFill()
+    zx = _RecZx()
+    t.zx = zx
+    db_saves = []
+    monkeypatch.setattr(trader_currency.db, "order_save", lambda *a, **k: db_saves.append(a))
+    res = t.open_buy("BTC/USDT", Operation("BTC/USDT", "buy", "1buy", key="k1"))
+    assert res is False, "零成交必须返 False"
+    assert zx.added == [], "零成交不得加自选"
+    assert db_saves == [], "零成交不得落库"
+    assert any("零成交" in m for m in captured), "应发零成交提醒而非开仓成功"
+
+
+def test_open_sell_zero_fill_no_false_position(monkeypatch):
+    """R19: 做空零成交同样不得伪造持仓。"""
+    captured = []
+    t = _mk(monkeypatch, captured)
+    t.ex = _FakeBnExZeroFill()
+    zx = _RecZx()
+    t.zx = zx
+    db_saves = []
+    monkeypatch.setattr(trader_currency.db, "order_save", lambda *a, **k: db_saves.append(a))
+    res = t.open_sell("BTC/USDT", Operation("BTC/USDT", "buy", "1sell", key="k1"))
+    assert res is False
+    assert zx.added == []
+    assert db_saves == []
+    assert any("零成交" in m for m in captured)

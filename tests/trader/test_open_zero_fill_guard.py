@@ -76,3 +76,19 @@ def test_signal_mode_zero_amount_not_rejected():
     assert result is not False, "signal 模式不得因 amount=0 拒绝(维持既有基线相位)"
     pos = t.positions["X:1buy"]
     assert pos.now_pos_rate == 1.0, "signal 原口径: now_pos_rate 照增"
+
+
+def test_online_mode_zero_fill_rejected():
+    """★R19 修正: 真实 trader 全用 mode="online"(非 trade), 守卫须覆盖 online 才对真金生效。
+
+    原 R16-C1 限 mode=="trade" 对真金路径从未生效(所有 reboot_trader_* 用 online)。
+    放宽为 mode in (trade, online) 后, online 零成交必须同样被拒。
+    """
+    t = BackTestTrader("t", mode="online", market="currency", init_balance=100000, fee_rate=0.0)
+    t.datas = _FakeDatas()
+    t.open_buy = lambda code, opt: {"price": 10.0, "amount": 0.0}
+    result = t.execute("X", Operation("X", "buy", "1buy", pos_rate=1.0, key="ok5"), None)
+    assert result is False, "online 零成交必须被基类守卫拒绝"
+    pos = t.positions["X:1buy"]
+    assert pos.now_pos_rate == 0.0
+    assert pos.amount == 0.0
