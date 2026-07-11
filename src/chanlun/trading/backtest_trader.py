@@ -940,6 +940,11 @@ class BackTestTrader(Trader):
                 if res is False:
                     return False
 
+                # R16-C1: 实盘(trade)零成交(Binance/富途 executedQty=0)不得当开仓成功,
+                # 否则伪造持仓+账本+成交记录+自选加股。限 trade 模式:
+                # signal 回测的 amount=0(高价股整手取整)是既有口径, 不改以保基线字节不变。
+                if self.mode == "trade" and res.get("amount", 0) <= 0:
+                    return False
                 pos.type = "做多"
                 # BUG-1(Round8): 加仓按持仓量加权更新均价, 不覆盖为最后一笔成交价
                 # (否则 position_record now_profit=(close-pos.price)*总amount 失真,
@@ -1024,6 +1029,9 @@ class BackTestTrader(Trader):
 
                 res = self.open_sell(code, opt)
                 if res is False:
+                    return False
+                # R16-C1: 实盘(trade)零成交不得当开仓成功(同 buy, 限 trade 保回测基线)。
+                if self.mode == "trade" and res.get("amount", 0) <= 0:
                     return False
                 pos.type = "做空"
                 # BUG-1(Round8): 加仓按持仓量加权更新均价, 不覆盖为最后一笔成交价
