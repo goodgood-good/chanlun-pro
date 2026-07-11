@@ -780,6 +780,35 @@ def tv_search():
         )
     return infos
 
+def _lazy_writeback_htf(
+    cache_key, cl_chart_data, frequency, market, cl_config, symbol="", resolution=""
+):
+    """Cache-hit 但 chart_data 缺 higher_macd_* 时懒补算 HTF MACD 并回写缓存, 返回补算后的
+    chart_data(供本次响应用), 未补算返回原 cl_chart_data。
+
+    并发安全(M2/T0-2): 补算+回写在 cache_lock 内; apply 只对浅拷副本(dict())加顶层
+    higher_macd_* 键/整列替换, 不原地改共享 dict, 锁外 trim/SSE 迭代恒安全。
+    """
+    with cache_lock:
+        if not should_lazy_apply_higher_macd(cl_chart_data, frequency, market):
+            return cl_chart_data
+        LogUtil.debug(
+            f"[tv_history] cache hit but HTF missing/short, lazy-applying {symbol} {resolution}"
+        )
+        # R15-C1: 基于缓存 entry 当前 data 补算(而非请求入口 T0 读到的 cl_chart_data 陈旧快照),
+        # 否则并发写者(SSE/revalidate 持 chart_calc_locks 完成的全量重算)在 T0 后写入的新缠论
+        # 会被这里的回写整体覆盖(TOCTOU 数据丢失)。缓存缺 entry 时回退用传入快照。
+        _existing = _get_chart_cache_entry(cache_key)
+        _base = (_existing or {}).get("data")
+        if _base is None:
+            _base = cl_chart_data
+        _patched = dict(_base)
+        if apply_higher_macd_to_chart_data(_patched, frequency, market, cl_config):
+            _is_full = (_existing or {}).get("is_full_snapshot", False)
+            _set_chart_cache_entry(cache_key, _patched, is_full_snapshot=_is_full)
+            return _patched
+        return cl_chart_data
+
 @tv_bp.route("/tv/history")
 @login_required
 def tv_history():
@@ -1015,30 +1044,9 @@ def tv_history():
         #     chart_data 的 in-place 修改，必须与 _persist_chart_cache_async 的
         #     deepcopy 互斥；should_lazy 在锁内复查，并发请求只有一个真正补算。
         if is_cache_hit and cl_chart_data is not None:
-            with cache_lock:
-                if should_lazy_apply_higher_macd(cl_chart_data, frequency, market):
-                    LogUtil.debug(
-                        f"[tv_history] cache hit but HTF missing/short, "
-                        f"lazy-applying {symbol} {resolution}"
-                    )
-                    # T0-2: 不原地给共享 cache dict 加 higher_macd_* 键。lazy 补算虽在 cache_lock
-                    # 内, 但响应路径 trim_future_bars(锁外 dict(chart_data) 整体迭代)与 SSE {**data}
-                    # 在锁外读同一共享 dict; 锁内加键 vs 锁外迭代 → "dictionary changed size during
-                    # iteration"(请求兜成 no_data + SSE 丢帧)。改为算到浅拷副本(dict() 顶层拷, apply
-                    # 只整列替换/新增顶层 higher_macd_* 键、不改嵌套)再整体替换 entry; 共享 dict 永不
-                    # 被加键, 锁外迭代恒安全。
-                    _patched = dict(cl_chart_data)
-                    # 仅当 apply 真正写入了 higher_macd_*（有倍率且 bar 数足够）
-                    # 才回写缓存——否则 bar 数不足的周期每次 polling 都冗余写盘。
-                    if apply_higher_macd_to_chart_data(
-                        _patched, frequency, market, cl_config
-                    ):
-                        _existing = _get_chart_cache_entry(cache_key)
-                        _is_full = (_existing or {}).get("is_full_snapshot", False)
-                        _set_chart_cache_entry(
-                            cache_key, _patched, is_full_snapshot=_is_full,
-                        )
-                        cl_chart_data = _patched  # 后续 slice/trim/return 用副本, 不碰共享 dict
+            cl_chart_data = _lazy_writeback_htf(
+                cache_key, cl_chart_data, frequency, market, cl_config, symbol, resolution
+            )
 
         # 方向1 (stale-while-revalidate): firstDataRequest 命中"过期全量快照"已即时
         # 返回旧快照(秒显), 这里派去重的后台重验证拉全新数据写回缓存, 经现有
