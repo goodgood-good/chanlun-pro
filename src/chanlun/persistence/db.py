@@ -578,7 +578,8 @@ class DB(object):
                 session.query(TableByZixuan).filter(TableByZixuan.market == market).filter(
                     TableByZixuan.zx_group == zx_group
                 ).filter(TableByZixuan.stock_code == stock_code).update(
-                    {"position": max_position + 1}, synchronize_session=False
+                    {"position": (max_position or 0) + 1},  # R15-C3: 空组 MAX=None 守零
+                    synchronize_session=False,
                 )
                 session.commit()
             except Exception:
