@@ -5,6 +5,7 @@
 """
 
 import json
+import math
 
 from flask import Blueprint, request
 from flask_login import login_required
@@ -57,9 +58,13 @@ def ticks():
             if _t is None or _t.last is None:
                 continue
             try:
-                res_ticks.append(
-                    {"code": _c, "price": _t.last, "rate": round(float(_t.rate or 0), 2)}
-                )
+                _price = _t.last
+                _rate = round(float(_t.rate or 0), 2)
+                # R14-C1: NaN/Inf 不是合法 JSON(Flask allow_nan=True 输出裸 NaN token
+                # 打断前端严格 JSON.parse → 整批含健康标的全失败), 镜像 /tv/quotes(tv.py:654)降级跳过。
+                if not math.isfinite(_price) or not math.isfinite(_rate):
+                    continue
+                res_ticks.append({"code": _c, "price": _price, "rate": _rate})
             except Exception:
                 LogUtil.exception(
                     f"/ticks tick convert failed market={market} code={_c}"

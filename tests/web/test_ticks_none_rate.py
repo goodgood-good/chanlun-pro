@@ -76,3 +76,42 @@ def test_ticks_healthy_batch_unaffected(client, monkeypatch):
     j = resp.get_json()
     assert "errmsg" not in j
     assert j["ticks"][0]["rate"] == 2.5
+
+# ============================================================================
+# 终检R14-C1 (MED): /ticks 对 Tick.last/rate 缺 math.isfinite 校验, NaN 使整批响应
+# 变非法 JSON(裸 NaN token 打断前端严格 JSON.parse → 含健康标的全批刷新失败)。
+# 与已修的 /tv/quotes(tv.py:654)同款, /ticks 是漏补兄弟。R4-C6 只覆盖 rate=None。
+# 注: Python json.loads 默认接受 NaN, 故 RED 断言查原始响应体是否含裸 NaN token。
+# ============================================================================
+
+
+def test_ticks_nan_rate_does_not_produce_invalid_json(client, monkeypatch):
+    ticks_map = {
+        "SH.513100": _tick("SH.513100", 2.0, float("nan")),  # rate=NaN
+        "SZ.000001": _tick("SZ.000001", 2.0, 1.5),           # 健康
+    }
+    monkeypatch.setattr(other_mod, "get_exchange", lambda m: _FakeEx(ticks_map))
+    resp = client.post(
+        "/ticks", data={"market": "a", "codes": json.dumps(["SH.513100", "SZ.000001"])}
+    )
+    body = resp.get_data(as_text=True)
+    assert "NaN" not in body, f"响应体含非法 NaN token(打断前端 JSON.parse): {body}"
+    j = json.loads(body)
+    out = {t["code"]: t for t in j["ticks"]}
+    assert "SZ.000001" in out and out["SZ.000001"]["rate"] == 1.5  # 健康标的不受坏 tick 污染
+
+
+def test_ticks_nan_last_does_not_produce_invalid_json(client, monkeypatch):
+    ticks_map = {
+        "SH.513100": _tick("SH.513100", float("nan"), 1.0),  # last=NaN
+        "SZ.000001": _tick("SZ.000001", 2.0, 1.5),
+    }
+    monkeypatch.setattr(other_mod, "get_exchange", lambda m: _FakeEx(ticks_map))
+    resp = client.post(
+        "/ticks", data={"market": "a", "codes": json.dumps(["SH.513100", "SZ.000001"])}
+    )
+    body = resp.get_data(as_text=True)
+    assert "NaN" not in body, f"响应体含非法 NaN token(打断前端 JSON.parse): {body}"
+    j = json.loads(body)
+    out = {t["code"]: t for t in j["ticks"]}
+    assert "SZ.000001" in out and out["SZ.000001"]["price"] == 2.0
