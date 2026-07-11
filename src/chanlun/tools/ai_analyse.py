@@ -81,6 +81,10 @@ class AIAnalyse:
 
         cl_config = query_cl_chart_config(self.market, code)
         stock = self.ex.stock_info(code)
+        if stock is None:
+            # R14-C2: stock_info 瞬时失败返回 None 时早返回, 否则后续 stock["name"](:100)
+            # 抛 TypeError → /ai/analyse 路由裸 500(prompt 内第二次调用即便恢复也救不了外层)。
+            return {"ok": False, "msg": f"获取标的信息失败(stock_info 返回空): {code}"}
         klines = self.ex.klines(code, frequency)
         cds = web_batch_get_cl_datas(self.market, code, {frequency: klines}, cl_config)
         cd = cds[0]
