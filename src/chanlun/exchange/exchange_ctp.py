@@ -202,7 +202,7 @@ class MarketCTP(Exchange):
                             pDepthMarketData, f"AskVolume{i}"
                         )
 
-                tick = Tick(**tick_data)
+                tick = self.market._tick_from_data(tick_data)
                 self.market.ticks_cache[code] = tick
 
                 if code in self.market.tick_callbacks:
@@ -268,6 +268,24 @@ class MarketCTP(Exchange):
     ) -> Union[pd.DataFrame, None]:
         """获取 K 线数据（CTP 不提供历史行情，需对接其他数据源，暂未实现）"""
         pass
+
+    @staticmethod
+    def _tick_from_data(tick_data: dict) -> Tick:
+        """R19-CRIT: 只用 Tick 已声明的 9 个字段显式构造。OnRtnDepthMarketData 的
+        tick_data 是超集(含 time/amount/buy{i}/buy{i}_volume/sell{i}/... 等非 Tick 键),
+        旧码 Tick(**tick_data) 必抛 TypeError → ticks_cache 恒空 → CTP 全交易静默失效。
+        扩展档位/成交额如需保留另存, 不得传入 Tick(**...)。"""
+        return Tick(
+            code=tick_data["code"],
+            last=tick_data["last"],
+            buy1=tick_data.get("buy1", 0),
+            sell1=tick_data.get("sell1", 0),
+            high=tick_data["high"],
+            low=tick_data["low"],
+            open=tick_data["open"],
+            volume=tick_data["volume"],
+            rate=tick_data.get("rate", 0),
+        )
 
     def ticks(self, codes: List[str]) -> Dict[str, Tick]:
         """获取实时行情"""
