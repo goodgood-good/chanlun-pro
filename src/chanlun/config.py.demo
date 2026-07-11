@@ -6,7 +6,7 @@ import pathlib
 """
 
 
-def _load_dotenv() -> None:
+def _load_dotenv(env_path=None) -> None:
     """极简 .env 加载器：从项目根 .env 读 KEY=VALUE 注入到 os.environ。
 
     - 不覆盖进程已存在的真实 env（优先级：真实 env > .env 文件 > 代码默认 ''）。
@@ -16,10 +16,19 @@ def _load_dotenv() -> None:
     """
     try:
         # config.py 位于 src/chanlun/，项目根是 parents[2]
-        env_file = pathlib.Path(__file__).resolve().parents[2] / '.env'
+        env_file = (
+            env_path if env_path is not None
+            else pathlib.Path(__file__).resolve().parents[2] / '.env'
+        )
         if not env_file.is_file():
             return
-        for line in env_file.read_text(encoding='utf-8').splitlines():
+        try:
+            # utf-8-sig 自动剥 BOM(C4: 带 BOM 时首行 KEY 被污染成 ﻿KEY 致该项静默失效)
+            content = env_file.read_text(encoding='utf-8-sig')
+        except UnicodeDecodeError:
+            # C3: .env 含非 UTF-8 字节(Windows 记事本 ANSI/GBK 存中文)不得升级为应用启动崩溃
+            content = env_file.read_text(encoding='gbk', errors='replace')
+        for line in content.splitlines():
             line = line.strip()
             if not line or line.startswith('#') or '=' not in line:
                 continue
