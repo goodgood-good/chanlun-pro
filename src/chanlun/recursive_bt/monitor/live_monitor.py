@@ -1994,6 +1994,34 @@ def make_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _safe_scan_cycle(
+    now, selector, states, names, ex, args, notifier, deduper, broker,
+    initial_codes, last_rescan_date,
+):
+    """常驻监控单轮扫描: 按日 rescan + 开盘时 run_once。捕获所有异常仅记日志并续跑,
+    保证任意深层未捕获异常不终结整个常驻进程(C3: main while True 裸调 run_once 的自愈)。
+    返回(可能更新的) last_rescan_date。
+    """
+    try:
+        if (
+            selector is not None
+            and now.date() != last_rescan_date
+            and now.time() >= _dt.time(9, 0)
+        ):
+            # 每日开盘前重选(静态缓存日级口径): 新候选入池 warmup, 旧候选淘汰
+            rescan_selection_pool(
+                selector, states, names, ex, args, initial_codes=initial_codes
+            )
+            last_rescan_date = now.date()
+        if args.force or market_is_open(ex, args.market, now):
+            run_once(args, states, notifier, deduper, names, broker, exchange=ex)
+    except Exception as exc:
+        fun.get_logger().error(
+            f"[live_monitor] scan cycle crashed, continuing next tick: {exc}",
+            exc_info=True,
+        )
+    return last_rescan_date
+
 def main(argv: Optional[list[str]] = None) -> int:
     args = make_arg_parser().parse_args(argv)
     args.market = normalize_market(args.market)
@@ -2430,18 +2458,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     last_rescan_date = _dt.date.today()  # 启动时已选过一轮
     while True:
         now = _dt.datetime.now()
-        if (
-            selector is not None
-            and now.date() != last_rescan_date
-            and now.time() >= _dt.time(9, 0)
-        ):
-            # 每日开盘前重选(静态缓存日级口径):新候选入池 warmup,旧候选淘汰
-            rescan_selection_pool(
-                selector, states, names, ex, args, initial_codes=initial_codes
-            )
-            last_rescan_date = now.date()
-        if args.force or market_is_open(ex, args.market, now):
-            run_once(args, states, notifier, deduper, names, broker, exchange=ex)
+        last_rescan_date = _safe_scan_cycle(
+            now, selector, states, names, ex, args, notifier, deduper, broker,
+            initial_codes, last_rescan_date,
+        )
         time.sleep(_next_level_seconds(now, args.op_level))
 
 
