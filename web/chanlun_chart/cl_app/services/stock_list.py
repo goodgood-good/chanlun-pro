@@ -9,7 +9,7 @@
   - allow_sync_fallback=True: 同步调一次（适合用户搜索，宁可慢也不能 500）
 
 API：
-- ``stock_cache``: TTLCache(100, 7200)，市场 → 处理后的 symbols 列表
+- ``stock_cache``: LRUCache(100)，市场 → 最后一次成功处理的 symbols 列表
 - ``preload_symbols`` / ``start_symbol_preload_thread``: 后台预加载入口
 - ``get_cached_processed_stocks(exchange, allow_sync_fallback=False)``: 读取入口
 - ``_trigger_async_refresh(exchange)``: 单例化的异步刷新触发器
@@ -19,9 +19,8 @@ import os
 import tempfile
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
 
-from cachetools import TTLCache
+from cachetools import LRUCache
 import pinyin
 
 from chanlun import config
@@ -30,7 +29,8 @@ from chanlun.exchange import get_exchange
 from chanlun.tools.log_util import LogUtil
 
 # 基础数据缓存（市场 → processed symbols list）
-stock_cache: TTLCache = TTLCache(maxsize=100, ttl=7200)
+# Last-known-good values must survive refresh failures; refresh cadence tracks freshness.
+stock_cache: LRUCache = LRUCache(maxsize=100)
 # stock_cache 专用锁（M3）。曾与 chart_cache.cache_lock 共用一把锁，导致一次
 # chart 缓存的磁盘读会阻塞 symbol 列表读写；此处独立成锁，两个无关缓存互不干扰。
 _stock_cache_lock = threading.Lock()
@@ -79,10 +79,67 @@ PRELOAD_PARALLEL_WORKERS = min(8, max(1, len(PRELOAD_EXCHANGES))) if PRELOAD_EXC
 
 # 单市场单次刷新的最大耗时阈值，仅用于日志告警，不会强制 kill 任务。
 _PRELOAD_SLOW_WARN_SECONDS = 10
+PRELOAD_ATTEMPT_TIMEOUT_SECONDS = max(
+    0.1, float(getattr(config, "PRELOAD_ATTEMPT_TIMEOUT_SECONDS", 15.0))
+)
 
 # 正在异步刷新的市场集合，防止同一市场被并发触发多次刷新而堆积慢请求。
 _async_refresh_in_flight: set = set()
 _async_refresh_lock = threading.Lock()
+# Per-market refresh state. It shares the cache lock so cache contents and the
+# readiness snapshot are observed atomically.
+_symbol_states = {}
+_preload_attempts = {}
+_preload_attempts_lock = threading.Lock()
+_preload_handle_lock = threading.Lock()
+_preload_handle = None
+_symbol_runtime_closed = False
+
+
+def _mark_symbol_ready(exchange: str) -> None:
+    with _stock_cache_lock:
+        _symbol_states[exchange] = {"status": "ready", "last_error": None}
+
+
+def _mark_symbol_degraded(exchange: str, error: str) -> None:
+    with _stock_cache_lock:
+        _symbol_states[exchange] = {"status": "degraded", "last_error": error}
+
+
+def _cached_symbols_or_empty(exchange: str):
+    with _stock_cache_lock:
+        return stock_cache.get(exchange) or []
+
+
+def get_symbol_readiness(exchange: str):
+    """Return an in-memory snapshot without triggering a refresh or external I/O."""
+    with _stock_cache_lock:
+        cached = stock_cache.get(exchange)
+        state = _symbol_states.get(exchange)
+        if exchange not in PRELOAD_EXCHANGES and not cached:
+            return {
+                "market": exchange,
+                "ready": True,
+                "status": "disabled",
+                "count": 0,
+                "last_error": None,
+            }
+        ready = bool(cached)
+        if state is None:
+            status = "ready" if ready else "not_ready"
+            last_error = None
+        else:
+            status = state["status"]
+            last_error = state["last_error"]
+            if status == "ready" and not ready:
+                status = "not_ready"
+        return {
+            "market": exchange,
+            "ready": ready,
+            "status": status,
+            "count": len(cached) if cached else 0,
+            "last_error": last_error,
+        }
 
 
 def _stocks_cache_dir() -> str:
@@ -201,14 +258,19 @@ def _warm_cache_from_disk() -> None:
             continue
         try:
             processed = _process_stock_list(raw_stocks)
+            if not processed:
+                _mark_symbol_degraded(exchange, "empty symbol list")
+                continue
             with _stock_cache_lock:
                 # 防御：极端情况下 preload 已经先把缓存填了，则不覆盖；磁盘数据可能更陈旧。
-                if exchange not in stock_cache:
+                if not stock_cache.get(exchange):
                     stock_cache[exchange] = processed
+                _symbol_states[exchange] = {"status": "ready", "last_error": None}
             LogUtil.info(
                 f"[stocks_cache] 从磁盘恢复 {exchange} stocks，共 {len(processed)} 条"
             )
         except Exception as e:
+            _mark_symbol_degraded(exchange, str(e) or type(e).__name__)
             LogUtil.warning(f"[stocks_cache] 恢复 {exchange} 失败: {e}")
 
 
@@ -256,6 +318,7 @@ def _preload_single_exchange(exchange: str, skip_if_disk_warm: bool = False) -> 
         with _stock_cache_lock:
             cached = stock_cache.get(exchange)
         if cached:
+            _mark_symbol_ready(exchange)
             LogUtil.info(
                 f"市场 {exchange} 已由磁盘恢复 {len(cached)} 条，跳过本轮预加载，"
                 f"下一轮按 PRELOAD_INTERVAL_SECONDS 定时刷新"
@@ -267,12 +330,21 @@ def _preload_single_exchange(exchange: str, skip_if_disk_warm: bool = False) -> 
         # 短路：如果交易所实例标记了 init_failed（例如通达信连接超时），
         # 直接跳过 all_stocks 调用，避免再次 30s 阻塞。
         if getattr(ex, "init_failed", False):
+            _mark_symbol_degraded(exchange, "exchange init failed")
             LogUtil.warning(f"市场 {exchange} 交易所初始化失败，跳过本次预加载")
             return
         all_stocks = _safe_all_stocks(ex, exchange)
+        if not all_stocks:
+            _mark_symbol_degraded(exchange, "empty symbol list")
+            LogUtil.warning(f"市场 {exchange} symbols 刷新返回空列表，保留现有缓存")
+            return
         processed_stocks = _process_stock_list(all_stocks)
+        if not processed_stocks:
+            _mark_symbol_degraded(exchange, "empty symbol list")
+            return
         with _stock_cache_lock:
             stock_cache[exchange] = processed_stocks
+            _symbol_states[exchange] = {"status": "ready", "last_error": None}
         # 写盘：让下次冷启动直接秒读文件，不再等 28s 通达信。
         # 失败仅 warn 不影响主流程；空 all_stocks 会被 _save_stocks_to_disk 内部短路。
         _save_stocks_to_disk(exchange, all_stocks)
@@ -282,86 +354,186 @@ def _preload_single_exchange(exchange: str, skip_if_disk_warm: bool = False) -> 
             f"市场 {exchange} symbols 预加载完成，共 {len(processed_stocks)} 条，耗时 {elapsed:.2f}s"
         )
     except Exception as e:
+        _mark_symbol_degraded(exchange, str(e) or type(e).__name__)
         LogUtil.error(f"预加载市场 {exchange} symbols 失败: {e}")
 
 
-def preload_symbols():
-    """常驻线程入口：并行预加载配置中的市场 symbols，并周期性刷新。
+class SymbolPreloadHandle:
+    """Stoppable singleton handle for the periodic symbol preload loop."""
 
-    设计要点：
-    1. 启动后先静默 PRELOAD_STARTUP_DELAY_SECONDS 秒再开始第一轮，让启动初期日志干净、
-       不和用户首次访问页面争抢资源。
-    2. 每轮使用 ThreadPoolExecutor 并行触发，单轮总耗时由最慢的市场决定。
-    3. 单个市场失败不会影响其他市场。
-    4. 该函数本身运行在 daemon 线程中，不阻塞主进程。
-    5. 如果 PRELOAD_EXCHANGES 为空，直接退出线程，不再周期性刷新。
-    """
+    def __init__(self, stop_event, thread):
+        self._stop_event = stop_event
+        self._thread = thread
+
+    def stop(self):
+        self._stop_event.set()
+
+    def join(self, timeout=None):
+        self._thread.join(timeout)
+
+    def is_alive(self):
+        return self._thread.is_alive()
+
+    @property
+    def name(self):
+        return self._thread.name
+
+
+def _start_preload_attempt(exchange: str):
+    """Start at most one daemon refresh attempt for a market."""
+    with _preload_attempts_lock:
+        existing = _preload_attempts.get(exchange)
+        if existing is not None:
+            return existing
+        if _symbol_runtime_closed:
+            return None
+
+        done = threading.Event()
+        attempt = {
+            "done": done,
+            "thread": None,
+            "started_at": time.monotonic(),
+            "timed_out": False,
+        }
+
+        def _worker():
+            try:
+                _preload_single_exchange(exchange)
+            finally:
+                done.set()
+                with _preload_attempts_lock:
+                    if _preload_attempts.get(exchange) is attempt:
+                        _preload_attempts.pop(exchange, None)
+                with _async_refresh_lock:
+                    _async_refresh_in_flight.discard(exchange)
+
+        thread = threading.Thread(
+            target=_worker,
+            daemon=True,
+            name=f"SymbolRefresh-{exchange}",
+        )
+        attempt["thread"] = thread
+        _preload_attempts[exchange] = attempt
+        with _async_refresh_lock:
+            _async_refresh_in_flight.add(exchange)
+        thread.start()
+        return attempt
+
+
+def _mark_preload_timeout(exchange: str, attempt) -> None:
+    with _preload_attempts_lock:
+        if attempt.get("timed_out"):
+            return
+        attempt["timed_out"] = True
+    seconds = max(0.1, float(PRELOAD_ATTEMPT_TIMEOUT_SECONDS))
+    _mark_symbol_degraded(exchange, f"refresh timeout after {seconds:g}s")
+    LogUtil.warning(f"市场 {exchange} symbols 刷新超过 {seconds:g}s，保留现有缓存")
+
+
+def _run_preload_round(stop_event=None) -> bool:
+    attempts = []
+    for exchange in PRELOAD_EXCHANGES:
+        attempt = _start_preload_attempt(exchange)
+        if attempt is not None:
+            attempts.append((exchange, attempt))
+
+    timeout = max(0.1, float(PRELOAD_ATTEMPT_TIMEOUT_SECONDS))
+    for exchange, attempt in attempts:
+        deadline = attempt["started_at"] + timeout
+        while not attempt["done"].is_set():
+            if stop_event is not None and stop_event.is_set():
+                return False
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                _mark_preload_timeout(exchange, attempt)
+                break
+            attempt["done"].wait(min(0.05, remaining))
+    return stop_event is None or not stop_event.is_set()
+
+
+def preload_symbols(stop_event=None):
+    """Periodically refresh configured markets without waiting forever on one market."""
     if not PRELOAD_EXCHANGES:
         LogUtil.info("config.PRELOAD_MARKETS 为空，跳过 symbols 预加载线程")
         return
 
-    # 启动延迟：让 web 服务先静默就绪
     if PRELOAD_STARTUP_DELAY_SECONDS > 0:
-        time.sleep(PRELOAD_STARTUP_DELAY_SECONDS)
+        if stop_event is None:
+            time.sleep(PRELOAD_STARTUP_DELAY_SECONDS)
+        elif stop_event.wait(PRELOAD_STARTUP_DELAY_SECONDS):
+            return
 
-    # 首轮特殊处理：磁盘恢复命中的市场跳过本次抓取，等下一轮 PRELOAD_INTERVAL_SECONDS
-    # 到点再正常全量刷新。避免启动后立刻和 _warm_cache_from_disk 重复工作。
-    first_round = True
-    while True:
-        LogUtil.info("开始预加载并更新所有市场的 symbols（并行）...")
+    while stop_event is None or not stop_event.is_set():
+        LogUtil.info("开始预加载并更新所有市场的 symbols（有界并行）...")
         round_start = time.time()
-        try:
-            with ThreadPoolExecutor(
-                max_workers=PRELOAD_PARALLEL_WORKERS,
-                thread_name_prefix="SymbolPreloadWorker",
-            ) as pool:
-                # 提交后等待所有 future 结束（_preload_single_exchange 已自行吞异常）
-                if first_round:
-                    list(pool.map(
-                        lambda ex: _preload_single_exchange(ex, skip_if_disk_warm=True),
-                        PRELOAD_EXCHANGES,
-                    ))
-                else:
-                    list(pool.map(_preload_single_exchange, PRELOAD_EXCHANGES))
-        except Exception as e:
-            LogUtil.error(f"symbols 预加载轮次异常: {e}")
-        LogUtil.info(f"本轮 symbols 预加载完成，总耗时 {time.time() - round_start:.2f}s")
-
-        first_round = False
-        time.sleep(PRELOAD_INTERVAL_SECONDS)
+        _run_preload_round(stop_event)
+        LogUtil.info(
+            f"本轮 symbols 预加载调度完成，总耗时 {time.time() - round_start:.2f}s"
+        )
+        if stop_event is None:
+            time.sleep(PRELOAD_INTERVAL_SECONDS)
+        elif stop_event.wait(PRELOAD_INTERVAL_SECONDS):
+            return
 
 
 def start_symbol_preload_thread():
-    """启动后台 symbol 预加载线程。线程为 daemon，不会阻塞进程退出，也不会阻塞调用方。
+    """Start the periodic preload once and return a stoppable shared handle."""
+    global _preload_handle, _symbol_runtime_closed
+    with _preload_handle_lock:
+        if _preload_handle is not None and _preload_handle.is_alive():
+            return _preload_handle
+        _symbol_runtime_closed = False
+        _warm_cache_from_disk()
+        stop_event = threading.Event()
+        thread = threading.Thread(
+            target=preload_symbols,
+            args=(stop_event,),
+            daemon=True,
+            name="SymbolPreloadThread",
+        )
+        handle = SymbolPreloadHandle(stop_event, thread)
+        _preload_handle = handle
+        thread.start()
+        return handle
 
-    在起线程前先 **同步** 从落盘文件恢复一次 stocks 缓存——文件命中时首请求秒返回，
-    后台线程仍然会跑一遍把缓存刷成最新。文件不存在时按原路径走，等预加载完成。
-    """
-    _warm_cache_from_disk()
-    t = threading.Thread(target=preload_symbols, daemon=True, name="SymbolPreloadThread")
-    t.start()
-    return t
 
+def shutdown_symbol_preload(timeout=1.0):
+    """Stop periodic scheduling; hung exchange calls remain bounded daemon attempts."""
+    global _preload_handle, _symbol_runtime_closed
+    with _preload_handle_lock:
+        _symbol_runtime_closed = True
+        handle = _preload_handle
+    if handle is None:
+        return True
+    handle.stop()
+    handle.join(max(0.0, float(timeout)))
+    stopped = not handle.is_alive()
+    if stopped:
+        with _preload_handle_lock:
+            if _preload_handle is handle:
+                _preload_handle = None
+    return stopped
 
 def _trigger_async_refresh(exchange: str) -> None:
-    """触发后台线程异步刷新该市场的 symbols，不阻塞调用方。
-    使用 _async_refresh_in_flight 集合做单例化，避免同一市场并发刷新堆积。
-    """
-    with _async_refresh_lock:
-        if exchange in _async_refresh_in_flight:
+    """Start a single bounded, observable refresh attempt for one market."""
+    attempt = _start_preload_attempt(exchange)
+    if attempt is None:
+        return
+    with _preload_attempts_lock:
+        if attempt.get("watchdog_started"):
             return
-        _async_refresh_in_flight.add(exchange)
+        attempt["watchdog_started"] = True
 
-    def _worker():
-        try:
-            _preload_single_exchange(exchange)
-        finally:
-            with _async_refresh_lock:
-                _async_refresh_in_flight.discard(exchange)
+    def _watchdog():
+        timeout = max(0.1, float(PRELOAD_ATTEMPT_TIMEOUT_SECONDS))
+        if not attempt["done"].wait(timeout):
+            _mark_preload_timeout(exchange, attempt)
 
-    t = threading.Thread(target=_worker, daemon=True, name=f"SymbolAsyncRefresh-{exchange}")
-    t.start()
-
+    threading.Thread(
+        target=_watchdog,
+        daemon=True,
+        name=f"SymbolRefreshWatchdog-{exchange}",
+    ).start()
 
 def get_cached_processed_stocks(exchange, allow_sync_fallback: bool = False):
     """获取指定市场已缓存的 symbols 列表。
@@ -377,7 +549,7 @@ def get_cached_processed_stocks(exchange, allow_sync_fallback: bool = False):
     """
     with _stock_cache_lock:
         cached = stock_cache.get(exchange)
-    if cached is not None:
+    if cached:
         return cached
 
     if not allow_sync_fallback:
@@ -386,26 +558,12 @@ def get_cached_processed_stocks(exchange, allow_sync_fallback: bool = False):
             f"市场 {exchange} symbols 尚未就绪（后台正在加载，请稍后重试）"
         )
 
-    # 同步兜底路径：直接构建一次。即使较慢（a/hk/us 通常 1~5s），也比让用户看到 500 好。
-    try:
-        ex = get_exchange(Market(exchange))
-        if getattr(ex, "init_failed", False):
-            LogUtil.warning(
-                f"[get_cached_processed_stocks] {exchange} 交易所初始化失败，同步兜底返回空列表"
-            )
-            return []
-        all_stocks = _safe_all_stocks(ex, exchange) or []
-        processed = _process_stock_list(all_stocks)
-        with _stock_cache_lock:
-            stock_cache[exchange] = processed
-        # 同步兜底成功后也写盘：下次冷启动可直接秒读，跟 preload 路径保持一致。
-        _save_stocks_to_disk(exchange, all_stocks)
-        LogUtil.info(
-            f"[get_cached_processed_stocks] {exchange} 同步兜底加载完成，共 {len(processed)} 条"
-        )
-        return processed
-    except Exception as e:
-        LogUtil.error(
-            f"[get_cached_processed_stocks] {exchange} 同步兜底加载失败: {e}"
-        )
-        return []
+    # 同步兜底也只等待一个明确期限；底层挂起 attempt 保持单例并在 daemon 中完成。
+    attempt = _start_preload_attempt(exchange)
+    if attempt is None:
+        return _cached_symbols_or_empty(exchange)
+    timeout = max(0.1, float(PRELOAD_ATTEMPT_TIMEOUT_SECONDS))
+    if not attempt["done"].wait(timeout):
+        _mark_preload_timeout(exchange, attempt)
+        return _cached_symbols_or_empty(exchange)
+    return _cached_symbols_or_empty(exchange)

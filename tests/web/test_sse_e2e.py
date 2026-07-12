@@ -4,6 +4,7 @@
 验证 Tornado SSE 运行时: async get 保持长连接、首次立即推、SSE 帧格式。
 """
 import unittest.mock as mock
+import os
 
 import tornado.testing
 import tornado.web
@@ -19,6 +20,17 @@ FAKE_CD = {
 
 
 class SseFlowTest(tornado.testing.AsyncHTTPTestCase):
+    def setUp(self):
+        self._login_env = mock.patch.dict(os.environ, {"CHANLUN_LOGIN_PWD": ""})
+        self._login_env.start()
+        super().setUp()
+
+    def tearDown(self):
+        try:
+            super().tearDown()
+        finally:
+            self._login_env.stop()
+
     def get_app(self):
         from chanlun import config
         config.LOGIN_PWD = ""  # 免密模式(本地默认即空)

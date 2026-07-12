@@ -90,9 +90,17 @@ def xuangu_task_add():
     if any(frequency not in supported_frequencys for frequency in frequencys):
         return {"ok": False, "msg": "选股周期不受当前市场支持"}
 
-    run_res = _xuangu_tasks.run_xuangu(
-        market, task_name, frequencys, opt_type, src_zx_group, target_zx_group
-    )
+    try:
+        run_res = _xuangu_tasks.run_xuangu(
+            market, task_name, frequencys, opt_type, src_zx_group, target_zx_group
+        )
+    except RuntimeError as exc:
+        if str(exc) != "scheduler is not running":
+            raise
+        return {
+            "ok": False,
+            "msg": "任务调度器未运行，请使用正式启动入口。",
+        }, 503
 
     return {
         "ok": run_res,

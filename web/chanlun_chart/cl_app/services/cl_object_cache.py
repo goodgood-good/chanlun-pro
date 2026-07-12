@@ -18,6 +18,7 @@ from __future__ import annotations
 import hashlib
 import json
 import threading
+import weakref
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple
 
@@ -167,7 +168,7 @@ _cache_lock = threading.RLock()
 
 # per-key 锁，串行化同 key 的 cd 增量喂入/重建。
 # 不复用 _cache_lock：process_klines 可能耗时几百 ms，会阻塞所有其他 key 的读路径。
-_key_locks: Dict[str, threading.RLock] = {}
+_key_locks = weakref.WeakValueDictionary()
 _key_locks_meta_lock = threading.Lock()
 
 _stats = {
@@ -179,7 +180,7 @@ _stats = {
 
 
 def _get_key_lock(key: str) -> threading.RLock:
-    """获取 per-key 锁 (惰性创建)。"""
+    """获取 per-key 锁；无人持有后由弱引用注册表自动回收。"""
     with _key_locks_meta_lock:
         lk = _key_locks.get(key)
         if lk is None:

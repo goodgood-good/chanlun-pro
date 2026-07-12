@@ -343,9 +343,7 @@ class ExchangeFutu(Exchange):
                 if _p[1]["qty"] != 0.0
             ]
 
-        else:
-            print("Position Error : ", poss)
-        return []
+        raise RuntimeError(f"Futu position query failed: {poss}")
 
     @staticmethod
     def can_trade_val(code):

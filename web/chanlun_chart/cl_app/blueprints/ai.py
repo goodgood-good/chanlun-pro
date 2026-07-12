@@ -8,8 +8,6 @@ AI 分析相关接口蓝图。
 from flask import Blueprint, request
 from flask_login import login_required
 
-from chanlun.tools.ai_analyse import AIAnalyse
-
 from ..services.constants import market_types
 
 
@@ -19,6 +17,14 @@ ai_bp = Blueprint("ai", __name__)
 @ai_bp.route("/ai/analyse", methods=["POST"])
 @login_required
 def ai_analyse():
+    # openai is an optional extra. Import only when the AI endpoint is used so
+    # a core Web installation can still start and serve non-AI features.
+    try:
+        from chanlun.tools.ai_analyse import AIAnalyse
+    except ModuleNotFoundError as exc:
+        if exc.name != "openai":
+            raise
+        return {"ok": False, "msg": "AI 功能未安装，请安装 ai 可选依赖"}, 503
     # 输入校验：market 走白名单，code/frequency 必填，避免 KeyError 500 与未知 market
     # 透传到下游引发更难诊断的异常。
     market = (request.form.get("market") or "").strip().lower()
@@ -37,6 +43,12 @@ def ai_analyse():
 @ai_bp.route("/ai/analyse_records/<market>", methods=["GET"])
 @login_required
 def ai_analyse_records(market: str = "a"):
+    try:
+        from chanlun.tools.ai_analyse import AIAnalyse
+    except ModuleNotFoundError as exc:
+        if exc.name != "openai":
+            raise
+        return {"code": 1, "msg": "AI 功能未安装", "count": 0, "data": []}, 503
     # market 走白名单(与 /ai/analyse 一致),否则非法 market 进 Market() 裸 500。
     market = (market or "").strip().lower()
     if market not in market_types:

@@ -6,6 +6,7 @@ var AI = (function () {
     get_ai_analyse_records: function () {
       // 剥离 AI 回复中可能包裹的 markdown 代码块标记（支持只有开头无结尾的情况）
       function stripMarkdownCodeBlock(md) {
+        md = String(md == null ? "" : md);
         const startMatch = md.match(/^```(?:markdown)?\s*/i);
         const endMatch = md.match(/\s*```\s*$/);
         if (startMatch && endMatch) {
@@ -55,7 +56,7 @@ var AI = (function () {
         isTableRendered = true;
         table.on("row(table_ai_analysis)", function (obj) {
           let data = obj.data;
-          var title =
+          var title = SafeHtml.escapeText(
             "AI分析 " +
             data.stock_code +
             " " +
@@ -64,15 +65,15 @@ var AI = (function () {
             data.frequency +
             data.dt +
             " 模型 " +
-            data.model;
-          // 注意：marked v15 不消毒 HTML，data.prompt/data.msg 为 AI 生成内容会原样直通。
-          // 本机单用户 + 登录受限，XSS 风险可接受；若对外暴露需引入 DOMPurify 消毒。
+            data.model
+          );
+          // AI 内容必须经过本地 DOMPurify 严格白名单后才能进入富文本容器。
           var show_html =
             '<div class="layui-collapse ai-analyse-div" lay-filter="collapse-ais"><div class="layui-colla-item"><div class="layui-colla-title">缠论状态提示词</div><div class="layui-colla-content">' +
-            marked.parse(stripMarkdownCodeBlock(data.prompt)) +
+            SafeHtml.renderMarkdown(stripMarkdownCodeBlock(data.prompt)) +
             "</div></div>" +
             '<div class="layui-colla-item"><div class="layui-colla-title">AI分析结果</div><div class="layui-colla-content layui-show">' +
-            marked.parse(stripMarkdownCodeBlock(data.msg)) +
+            SafeHtml.renderMarkdown(stripMarkdownCodeBlock(data.msg)) +
             "</div></div></div>";
           layer.open({
             type: 1,
@@ -91,11 +92,11 @@ var AI = (function () {
     },
     init_ai_opts: function () {
       let ai_frequencys = $("#ai_frequencys");
-      $(ai_frequencys).html();
+      ai_frequencys.empty();
       layui.each(market_frequencys[Utils.get_market()], function (i, f) {
-        $(ai_frequencys).append("<option value='" + f + "'>" + f + "</option>");
+        ai_frequencys.append($("<option>", { value: f, text: f }));
       });
-      layui.form.render($(ai_frequencys));
+      layui.form.render(ai_frequencys);
       $(ai_frequencys)
         .siblings("div.layui-form-select")
         .find("dl")
@@ -109,7 +110,7 @@ var AI = (function () {
           .addClass("layui-btn-disabled")
           .attr("disabled", true);
         $("#ai_analyse_btn").html("分析中...");
-        $.ajax({
+        AppRequest.ajax({
           type: "POST",
           url: "/ai/analyse",
           data: {
@@ -118,20 +119,24 @@ var AI = (function () {
             frequency: $("#ai_frequencys").val(),
           },
           dataType: "json",
+          timeout: 120000,
           success: function (res) {
             if (res["ok"] === true) {
               layer.msg("分析成功");
               AI.get_ai_analyse_records();
             } else {
-              layer.msg(res["msg"]);
+              layer.msg(res["msg"] || "分析失败");
             }
-            $("#ai_analyse_btn")
-              .removeClass("layui-btn-disabled")
-              .attr("disabled", false);
-            $("#ai_analyse_btn").html("分析");
           },
-          error: function (res) {
-            layer.msg("分析失败，查看控制台，查找错误问题");
+          error: function (xhr, status, error) {
+            var message = "分析失败，请稍后重试";
+            if (xhr && xhr.responseJSON && xhr.responseJSON.msg) {
+              message = xhr.responseJSON.msg;
+            }
+            console.error("[AI] analyse request failed", status, error);
+            layer.msg(message);
+          },
+          complete: function () {
             $("#ai_analyse_btn")
               .removeClass("layui-btn-disabled")
               .attr("disabled", false);

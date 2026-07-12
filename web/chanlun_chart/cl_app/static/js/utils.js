@@ -1,4 +1,19 @@
 var Utils = (function () {
+  function get_selected_items() {
+    try {
+      let raw = localStorage.getItem(Utils.get_market() + "_selectedItems");
+      if (!raw) return [];
+      let parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) return [];
+      return parsed.filter(function (item) {
+        return item && typeof item.name === "string" &&
+          typeof item.value === "string" && item.value.length > 0;
+      });
+    } catch (e) {
+      return [];
+    }
+  }
+
   return {
     get_local_data: function (key) {
       if (layui.data("tv_chart")) {
@@ -16,11 +31,9 @@ var Utils = (function () {
         value: val,
       });
     },
+    get_selected_items: get_selected_items,
     add_to_cache: function (data) {
-      let selectedItems =
-        JSON.parse(
-          localStorage.getItem(Utils.get_market() + "_selectedItems")
-        ) || [];
+      let selectedItems = get_selected_items();
 
       selectedItems.unshift({
         name: data.arr[0].name,

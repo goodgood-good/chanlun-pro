@@ -1,1 +1,3 @@
 *.ipynb linguist-language=python
+web/chanlun_chart/cl_app/__init__.py whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+web/chanlun_chart/cl_app/templates/index.html whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol

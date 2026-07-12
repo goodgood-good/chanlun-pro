@@ -102,7 +102,7 @@ cp src/chanlun/config.py.demo src/chanlun/config.py   # Windows: copy
 编辑 `src/chanlun/config.py`（或在项目根 `.env` 中以 `KEY=VALUE` 覆盖敏感项）：
 
 - **数据源**：按市场设置 `EXCHANGE_A` / `EXCHANGE_US` / … 及对应 API（通达信目录、长桥、富途、天勤、Alpaca、Polygon、盈透、币安等）。
-- **Web**：`WEB_HOST`（默认 `0.0.0.0`）、`LOGIN_PWD`（公网部署务必设置）、`PRELOAD_MARKETS`（启动预加载的市场，默认 `a/hk/us`）。
+- **Web**：`WEB_HOST`（示例配置默认 `127.0.0.1`）、`LOGIN_PWD`、`PRELOAD_MARKETS`（启动预加载的市场，默认 `a/hk/us`）。非回环监听另见下方安全部署要求。
 - **存储**：`DB_TYPE`（`sqlite`/`mysql`）、`DATA_PATH`（默认 `~/.chanlun_pro`）、`REDIS_HOST`（可选）。
 - **实时推送**：`ENABLE_SSE_PUSH`、`SSE_REFRESH_MS`（服务端重算+推送间隔，默认 8000ms）。
 - **AI / 通知**：`AI_TOKEN` / `OPENROUTER_AI_KEYS`、`FEISHU_KEYS`（可按市场配置不同机器人）。
@@ -118,11 +118,32 @@ windows_run.bat
 **手动启动**：
 
 ```bash
-# 必须把 src 加入 PYTHONPATH
-PYTHONPATH=src poetry run python web/chanlun_chart/app.py
+# app.py 会在导入项目模块前初始化本地源码路径
+poetry run python web/chanlun_chart/app.py
 ```
 
-启动后访问 **http://127.0.0.1:9900**（默认自动打开浏览器；`nobrowser` 参数或环境变量 `CHANLUN_NO_AUTO_OPEN=1` 可关闭）。
+启动后默认访问 **http://127.0.0.1:9900**；可用 `CHANLUN_WEB_PORT` 改端口，`nobrowser` 参数或环境变量 `CHANLUN_NO_AUTO_OPEN=1` 可关闭自动打开浏览器。
+
+#### Web 安全部署模式
+
+- 本机使用：保持 `WEB_HOST=127.0.0.1`。此模式允许 HTTP，也允许不设置登录密码；`windows_run.bat` 和每日重启脚本在未显式设置环境变量时会采用该安全默认值。
+- 非回环监听：应用仅在同时满足以下条件时启动：`CHANLUN_HTTPS=1`、`LOGIN_PWD`/`CHANLUN_LOGIN_PWD` 使用 Werkzeug 的 `scrypt:` 或 `pbkdf2:` 哈希、会话 Cookie 启用 `Secure`。
+- `CHANLUN_HTTPS=1` 表示 TLS 已由可信反向代理终止；代理必须覆盖 `X-Forwarded-For`/`X-Real-IP`，并通过防火墙禁止客户端直连后端 9900 端口。
+
+生成密码哈希：
+
+```bash
+python -c "from werkzeug.security import generate_password_hash; print(generate_password_hash('替换为强密码'))"
+```
+
+PowerShell 启动示例（将哈希替换为上一步完整输出）：
+
+```powershell
+$env:CHANLUN_WEB_HOST = '0.0.0.0'
+$env:CHANLUN_LOGIN_PWD = 'scrypt:...'
+$env:CHANLUN_HTTPS = '1'
+poetry run python web/chanlun_chart/app.py nobrowser
+```
 
 ---
 
@@ -147,7 +168,7 @@ chanlun-pro/
 │  ├─ xtquant/                  # 迅投 QMT SDK（vendored）
 │  └─ cl_myquant / cl_vnpy / cl_wtpy   # 掘金 / vnpy / WonderTrader 适配
 ├─ web/chanlun_chart/
-│  ├─ app.py                    # Web 入口（Flask + Tornado，端口 9900）
+│  ├─ app.py                    # Web 入口（Flask + Tornado，默认端口 9900）
 │  └─ cl_app/
 │     ├─ blueprints/            # 路由：tv(图表)/zixuan(自选)/xuangu(选股)/bkgn(板块)/alert(预警)/ai/setting/…
 │     ├─ services/、handlers/   # 图表缓存、SSE 推送、静态资源等
@@ -210,7 +231,7 @@ CI 见 `.github/workflows/`（`ci.yml` 跑 Poetry 安装 + pytest，`codeql.yml`
 ## 注意事项
 
 - **单进程架构**：Web 服务以 `s.start(1)` 单进程运行是**刻意设计**——所有图表缓存、per-key 锁、数据源单例都是进程内内存，多进程会让缓存与锁全部失效。扩容请用反向代理 + 多端口，或先把缓存迁到 Redis。
-- **访问鉴权**：`WEB_HOST` 绑定到非本机地址且 `LOGIN_PWD` 为空时，任何能访问 9900 端口者都以已登录身份操作。**公网/不可信网络部署务必设置登录密码。**
+- **访问鉴权**：本机模式使用回环监听；非回环模式必须通过 HTTPS 反向代理访问，并配置 Werkzeug 密码哈希。任一条件缺失时应用会拒绝启动。
 - **数据源配额**：长桥（cq）按订阅级别限制每月可查询的历史 K 线 symbol 数量，相关防御见 `LB_QUOTA_MONTHLY_LIMIT` / `US_HISTORY_KLINE_SOURCE` / `US_PREWARM_ZIXUAN_ONLY`。
 - **实盘风险**：实盘交易涉及真实资金，务必先用模拟/纸上盘充分验证并做好风控。**本项目不对任何交易结果负责。**
 

@@ -735,6 +735,7 @@ var MacdStats = (function () {
         }
 
         _renderPanel(payload) {
+            const esc = (value) => SafeHtml.escapeText(value);
             const panel = this._ensurePanel();
             panel.style.display = 'block';
 
@@ -742,10 +743,12 @@ var MacdStats = (function () {
             const fmtPeak = (mx, mn) => fmt(peakAbs(mx, mn)); // 同向峰值绝对值,无数据 → "-"
             const renderBlock = (title, s, note) => {
                 if (!s) return `<div style="opacity:.6;margin:6px 0;">[${title}] 无数据</div>`;
-                const cnt = (s.bucketCount !== undefined) ? `桶数 ${s.bucketCount}` : `柱数 ${s.barCount}`;
+                const rawCount = Number(s.bucketCount !== undefined ? s.bucketCount : s.barCount);
+                const safeCount = Number.isFinite(rawCount) ? Math.max(0, Math.trunc(rawCount)) : 0;
+                const cnt = (s.bucketCount !== undefined) ? `桶数 ${safeCount}` : `柱数 ${safeCount}`;
                 return `
                 <div style="margin:8px 0;padding:8px;background:#262b3a;border-radius:4px;">
-                  <div style="font-weight:bold;color:#FFD54F;margin-bottom:6px;">${title}<span style="font-weight:normal;color:#9aa3b8;font-size:11px;"> ${note || ''}</span></div>
+                  <div style="font-weight:bold;color:#FFD54F;margin-bottom:6px;">${esc(title)}<span style="font-weight:normal;color:#9aa3b8;font-size:11px;"> ${esc(note || '')}</span></div>
                   <div>📊 ${cnt} ${s.excludedLast ? '<span style="color:#888">(已排除末根)</span>' : ''}</div>
                   <div style="color:${COLOR_POS}">🔴 红柱面积 <b>${fmt(s.posArea)}</b> (×2 <b>${fmt(s.posAreaX2)}</b>) | 峰 <b>${fmt(s.posMax)}</b></div>
                   <div style="color:${COLOR_NEG}">🟢 绿柱面积 <b>${fmt(s.negArea)}</b> (×2 <b>${fmt(s.negAreaX2)}</b>) | 谷 <b>${fmt(s.negMin)}</b></div>
@@ -757,7 +760,7 @@ var MacdStats = (function () {
                 if (!slopes || slopes.length === 0) return '<div style="opacity:.5;font-size:11px;">区间内无完整线段</div>';
                 const rows = slopes.map(sl => `
                   <div style="color:${sl.dir === 'up' ? COLOR_POS : COLOR_NEG};font-size:11px;">
-                    ${sl.dir === 'up' ? '↑' : '↓'} ${this._fmtTime(sl.startTime)} → ${this._fmtTime(sl.endTime)} 斜率 <b>${fmt(sl.slope)}</b>
+                    ${sl.dir === 'up' ? '↑' : '↓'} ${esc(this._fmtTime(sl.startTime))} → ${esc(this._fmtTime(sl.endTime))} 斜率 <b>${fmt(sl.slope)}</b>
                   </div>`).join('');
                 return `<div style="margin:8px 0;padding:8px;background:#262b3a;border-radius:4px;">
                   <div style="font-weight:bold;color:#FFD54F;margin-bottom:6px;">线段斜率 (xds)</div>${rows}</div>`;
@@ -772,8 +775,8 @@ var MacdStats = (function () {
                 </div>
               </div>
               <div style="font-size:11px;color:#9aa3b8;margin-bottom:6px;">
-                ${payload.code} · ${payload.interval} · ${payload.barCount} 根 K 线<br>
-                ${this._fmtTime(payload.startTime)} → ${this._fmtTime(payload.endTime)}
+                ${esc(payload.code)} · ${esc(payload.interval)} · ${esc(payload.barCount)} 根 K 线<br>
+                ${esc(this._fmtTime(payload.startTime))} → ${esc(this._fmtTime(payload.endTime))}
               </div>
               ${renderBlock('MACD (本周期)', payload.statsLocal, '×2 口径')}
               ${(payload.hasHigher && payload.higherFreq) ? renderBlock('MACD_HTF (跨周期)', payload.statsHtf, (payload.higherFreq && (payload.higherFreq === '5m' || payload.higherFreq === '30m')) ? '×1 口径 · 桶粒度' : '×1 口径 · 桶粒度(日级近似)') : '<div style="opacity:.5;font-size:11px;">未启用 MACD_HTF 跨周期数据</div>'}
@@ -816,7 +819,7 @@ var MacdStats = (function () {
             };
             const blocks = this._snapshots.map((s, i) => `
               <div style="margin:4px 0;padding:6px;background:#2a2f3e;border-radius:4px;font-size:11px;">
-                <div style="color:#9aa3b8;margin-bottom:3px;"><b>#${i + 1}</b> ${s.label}</div>
+                <div style="color:#9aa3b8;margin-bottom:3px;"><b>#${i + 1}</b> ${SafeHtml.escapeText(s.label)}</div>
                 ${line('本级', s.local)}
                 ${line('高级', s.htf)}
               </div>

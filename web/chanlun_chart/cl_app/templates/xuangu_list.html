@@ -108,14 +108,14 @@
 
     <blockquote class="layui-elem-quote">
         <p>第一次执行选股，获取数据并计算会比较耗时，后续在次执行，在有计算缓存的基础上，时间会快很多</p>
-        <p>选股前，目标自选组会被清空</p>
+        <p>仅当全部标的计算成功后才会原子替换目标自选组；失败时保留原组</p>
         <p>沪深选股：运行代码为 SZ.00, SZ.30, SH.60, SH.68 开头的股票代码</p>
         <p>期货选股：运行代码为 L8 结尾的主连代码</p>
     </blockquote>
 
 
     <!-- 选股任务提交脚本：收集表单参数后 POST 到后端，任务异步运行，结果写入目标自选组 -->
-    <script>
+    <script nonce="{{ csp_nonce }}">
 
         $(function () {
 
@@ -128,14 +128,14 @@
                 form.on('select(task_name)', function (d) {
                     let task_name = d.value;
                     if (task_infos[task_name] !== undefined) {
-                        $('.task_memo').html(task_infos[task_name]['task_memo']);
-                        $('.frequency_memo').html(task_infos[task_name]['frequency_memo']);
+                        $('.task_memo').text(task_infos[task_name]['task_memo']);
+                        $('.frequency_memo').text(task_infos[task_name]['frequency_memo']);
                     }
                 });
                 let task_name = form.val('task_config')['task_name'];
                 if (task_infos[task_name] !== undefined) {
-                    $('.task_memo').html(task_infos[task_name]['task_memo']);
-                    $('.frequency_memo').html(task_infos[task_name]['frequency_memo']);
+                    $('.task_memo').text(task_infos[task_name]['task_memo']);
+                    $('.frequency_memo').text(task_infos[task_name]['frequency_memo']);
                 }
 
                 form.on('submit(run_xuangu)', function (data) {

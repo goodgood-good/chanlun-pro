@@ -14,6 +14,7 @@ class TableByAlertTask(Base):
     __tablename__ = "cl_alert_task"
     __table_args__ = (
         UniqueConstraint("market", "task_name", name="table_market_task_name_unique"),
+        {"mysql_collate": "utf8mb4_general_ci"},
     )
     id = Column(Integer, primary_key=True, autoincrement=True)
     market = Column(String(20), comment="市场")
@@ -32,5 +33,3 @@ class TableByAlertTask(Base):
     is_run = Column(Integer, comment="是否运行")
     is_send_msg = Column(Integer, comment="是否发送消息")
     dt = Column(DateTime, comment="任务添加、修改时间")
-    # __table_args__ 仅保留此处的 mysql_collate；上方 UniqueConstraint 版本在运行时被此行覆盖（已有行为，不改逻辑）
-    __table_args__ = {"mysql_collate": "utf8mb4_general_ci"}

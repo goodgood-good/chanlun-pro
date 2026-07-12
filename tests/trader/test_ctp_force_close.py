@@ -34,12 +34,16 @@ def ctp(monkeypatch):
         def __init__(self):
             self._ref = 0
             self._snapshot = {}
+            self._order = FakeOrder(OrderStatus="0", VolumeTraded=1)
 
         def next_order_ref(self):
             self._ref += 1
             return str(self._ref)
 
-        def register_order_wait(self, ref):
+        def register_order_wait(self, ref, instrument_id=None):
+            return None
+
+        def mark_order_submitted(self, ref):
             return None
 
         def wait_for_order(self, ref, timeout):
@@ -47,9 +51,12 @@ def ctp(monkeypatch):
 
         def get_order(self, ref):
             # 返回全成订单, 使 M3 判定通过
-            return FakeOrder(OrderStatus="0", VolumeTraded=1)
+            return self._order
 
         def prepare_position_query(self):
+            return None
+
+        def begin_position_query(self, scope_code=None, request_id=None):
             return None
 
         def next_request_id(self):
@@ -60,6 +67,9 @@ def ctp(monkeypatch):
 
         def get_positions_snapshot(self):
             return self._snapshot
+
+        def get_alive_orders(self, code=None):
+            return []
 
     class _Api:
         def __init__(self):
@@ -124,6 +134,51 @@ def test_force_close_bc_buy_mmd_treated_as_long(ctp):
     assert ctp._recorded["orders"][-1]["Direction"] == mod.THOST_FTDC_D_Sell
 
 
+def test_lock_position_no_trade_terminal_does_not_record_success(ctp):
+    """NoTradeNotQueueing 是零成交终态，锁仓不能按请求量伪记成功。"""
+    ctp.trader_api.state._order = FakeOrder(
+        OrderStatus="4", VolumeTraded=0, InstrumentID="rb2405"
+    )
+    pos = POSITION(code="rb2405", mmd="1buy", type="做多", amount=2)
+    opt = Operation("rb2405", "lock", "risk", msg="测试")
+
+    assert ctp.lock_position("rb2405", pos, opt) is False
+
+
+def test_lock_position_stops_when_existing_order_cancel_is_unconfirmed(ctp):
+    """旧活动单撤单未确认时不得再发锁仓单。"""
+    ctp.trader_api.state.get_alive_orders = lambda code: [("old-lock", None)]
+    ctp.cancel_order = lambda ref: False
+    pos = POSITION(code="rb2405", mmd="1buy", type="做多", amount=2)
+    opt = Operation("rb2405", "lock", "risk", msg="测试")
+
+    assert ctp.lock_position("rb2405", pos, opt) is False
+    assert ctp._recorded["orders"] == []
+
+
+def test_close_buy_stops_remaining_legs_while_first_leg_is_still_alive(ctp):
+    """上期所首腿部分成交未终结时，不得继续发第二条平昨腿。"""
+    info = FakePosInfo("rb2405", "2", 2)
+    info.ExchangeID = "SHFE"
+    info.YdPosition = 1
+    ctp.trader_api.state._snapshot = {"rb2405_2": info}
+    leg_calls = []
+
+    def first_leg_only(*args):
+        leg_calls.append(args)
+        return 1
+
+    ctp._send_close_leg = first_leg_only
+    ctp.trader_api.state.get_alive_orders = lambda code: [("pending-leg", None)]
+    pos = POSITION(code="rb2405", mmd="1buy", type="做多", amount=2)
+    opt = Operation("rb2405", "close", "risk", msg="测试")
+
+    result = ctp.close_buy("rb2405", pos, opt)
+
+    assert result["amount"] == 1
+    assert len(leg_calls) == 1
+
+
 def test_force_close_all_does_not_crash(ctp):
     """force_close_all 伪造 POSITION(mmd=...) 不再 TypeError, 多+空各 1 仓都平。"""
     # 注入券商持仓快照: 一多 (PosiDirection='2') 一空
@@ -165,6 +220,28 @@ def test_force_close_syncs_local_ledger(ctp):
     assert ctp.positions["rb2405:1buy"].amount == 0
     assert ctp.positions["rb2405:1buy"].now_pos_rate == 0
     assert len(ctp.positions_history.get("rb2405", [])) == 1  # 归档保留轨迹
+
+
+def test_force_close_partial_fill_only_reduces_local_ledger(ctp):
+    """强平只成交 1/2 手时，本地只扣实际量且未清仓不得提前归档。"""
+    live = POSITION(
+        code="rb2405", mmd="1buy", type="做多", amount=2, balance=2000, loss_price=90.0
+    )
+    live.now_pos_rate = 1.0
+    ctp.positions = {"rb2405:1buy": live}
+    ctp.positions_history = {}
+    ctp._pkl_key = None
+    ctp.trader_api.state._order = FakeOrder(OrderStatus="0", VolumeTraded=1)
+    pos = POSITION(code="rb2405", mmd="buy", type="做多", amount=2)
+    opt = Operation("rb2405", "close", "risk", msg="部分强平")
+
+    result = ctp.force_close("rb2405", pos, opt)
+
+    assert result["amount"] == 1
+    assert ctp.positions["rb2405:1buy"].amount == 1
+    assert ctp.positions["rb2405:1buy"].balance == 1000
+    assert ctp.positions["rb2405:1buy"].now_pos_rate == 0.5
+    assert ctp.positions_history == {}
 
 
 def test_force_close_failure_keeps_local_ledger(ctp):

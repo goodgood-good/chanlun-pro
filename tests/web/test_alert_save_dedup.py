@@ -6,6 +6,7 @@
 
 from cl_app import alert_tasks as at_mod
 from cl_app.alert_tasks import AlertTasks
+from types import SimpleNamespace
 
 
 class _T:
@@ -16,6 +17,7 @@ class _T:
 
 def _mk_at(monkeypatch, existing, saved, updated):
     at = object.__new__(AlertTasks)  # 绕 __init__(需 scheduler)
+    at.scheduler = SimpleNamespace(running=True)
     monkeypatch.setattr(at, "run", lambda: None)
     monkeypatch.setattr(at_mod.db, "task_query", lambda market=None, id=None: list(existing))
     monkeypatch.setattr(at_mod.db, "task_save", lambda **kw: saved.append(kw))

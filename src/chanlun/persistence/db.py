@@ -1,5 +1,7 @@
 import datetime
 import json
+import os
+import pathlib
 import threading
 import time
 import warnings
@@ -15,8 +17,11 @@ from sqlalchemy import (
     Index,
     create_engine,
     func,
+    inspect,
+    text,
 )
 from sqlalchemy.dialects.mysql import insert
+from sqlalchemy.engine import URL
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import QueuePool
 
@@ -39,9 +44,48 @@ from chanlun.db_models.tv_marks import TableByTVMarks
 from chanlun.db_models.tv_marks_price import TableByTVMarksPrice
 from chanlun.db_models.zixuan import TableByZixuan
 from chanlun.db_models.zixuan_group import TableByZxGroup
+
+
+def _build_mysql_database_url(user, password, host, port, database) -> URL:
+    """Build a MySQL URL without reparsing reserved credential characters."""
+    return URL.create(
+        "mysql+pymysql",
+        username=user,
+        password=password,
+        host=host,
+        port=int(port),
+        database=database,
+        query={"charset": "utf8mb4"},
+    )
+
+
+def _assert_safe_test_database_config() -> None:
+    if os.environ.get("CHANLUN_TESTING") != "1":
+        return
+
+    expected_raw = os.environ.get("CHANLUN_TEST_DATA_PATH")
+    configured_path = pathlib.Path(config.DATA_PATH).expanduser()
+    if str(config.DATA_PATH).startswith("."):
+        configured_path = pathlib.Path.home() / configured_path
+    configured_path = configured_path.resolve()
+    expected_path = pathlib.Path(expected_raw).resolve() if expected_raw else None
+
+    if config.DB_TYPE != "sqlite" or expected_path is None or configured_path != expected_path:
+        raise RuntimeError(
+            "Tests require an isolated SQLite database under CHANLUN_TEST_DATA_PATH"
+        )
+
+
 @fun.singleton
 class DB(object):
     """SQLAlchemy ORM 封装的数据库访问单例，支持 MySQL 和 SQLite。"""
+
+    def __new__(cls, *args, **kwargs):
+        _assert_safe_test_database_config()
+        return super().__new__(cls)
+
+    ALERT_TASK_UNIQUE_SCHEMA_KEY = "__schema_alert_task_unique_v1"
+    ALERT_TASK_UNIQUE_INDEX = "uq_cl_alert_task_market_task_name_v1"
 
     def __init__(self) -> None:
         if config.DB_TYPE == "sqlite":
@@ -59,7 +103,13 @@ class DB(object):
             )
         elif config.DB_TYPE == "mysql":
             self.engine = create_engine(
-                f"mysql+pymysql://{config.DB_USER}:{config.DB_PWD}@{config.DB_HOST}:{config.DB_PORT}/{config.DB_DATABASE}?charset=utf8mb4",
+                _build_mysql_database_url(
+                    config.DB_USER,
+                    config.DB_PWD,
+                    config.DB_HOST,
+                    config.DB_PORT,
+                    config.DB_DATABASE,
+                ),
                 echo=False,
                 poolclass=QueuePool,
                 pool_recycle=1800,
@@ -82,15 +132,105 @@ class DB(object):
         self.Session = sessionmaker(bind=self.engine, expire_on_commit=False)
 
         Base.metadata.create_all(self.engine)
+        self._migrate_alert_task_unique_constraint()
 
         self.__cache_tables = {}
         # 轻量级缓存：最后一根K线时间，降低重复查询成本。
         # 为避免多线程并发读写出现可见性问题（写入新 K 线时缓存与 DB 不一致），
         # 使用一个独立的锁保护 _last_dt_cache 的所有读写。
         self._last_dt_cache: dict = {}
+        self._last_dt_cache_generation: dict = {}
         self._last_dt_cache_lock = threading.Lock()
         # R6-#2: 保护 __cache_tables 的 check-then-act + 动态建 ORM 表类(同 get_exchange 审查 B-1)
         self._cache_tables_lock = threading.Lock()
+
+    def _alert_task_has_unique_constraint(self) -> bool:
+        """检查是否已有覆盖 (market, task_name) 的唯一约束或唯一索引。"""
+        inspector = inspect(self.engine)
+        if "cl_alert_task" not in inspector.get_table_names():
+            return False
+        target = ("market", "task_name")
+        constraints = inspector.get_unique_constraints("cl_alert_task")
+        if any(
+            tuple(item.get("column_names") or ()) == target
+            for item in constraints
+        ):
+            return True
+        return any(
+            item.get("unique")
+            and tuple(item.get("column_names") or ()) == target
+            for item in inspector.get_indexes("cl_alert_task")
+        )
+
+    def _migrate_alert_task_unique_constraint(self) -> None:
+        """幂等升级旧库：去重后为告警任务建立真实唯一索引。"""
+        marker = self.cache_get(self.ALERT_TASK_UNIQUE_SCHEMA_KEY)
+        if marker == {"version": 1} and self._alert_task_has_unique_constraint():
+            return
+
+        advisory_connection = None
+        deduplicated_rows = 0
+        try:
+            if config.DB_TYPE == "mysql":
+                advisory_connection = self.engine.connect()
+                acquired = advisory_connection.execute(
+                    text("SELECT GET_LOCK(:name, :timeout)"),
+                    {"name": self.ALERT_TASK_UNIQUE_INDEX, "timeout": 30},
+                ).scalar()
+                if acquired != 1:
+                    raise RuntimeError("获取 AlertTask schema migration lock 超时")
+
+            if not self._alert_task_has_unique_constraint():
+                try:
+                    with self.engine.begin() as connection:
+                        # 旧表可能已被并发 query-first 写出重复任务。保留最大 id（最后插入）
+                        # 的配置；SQLite 中 DELETE + CREATE INDEX 同事务，MySQL DDL 会隐式
+                        # commit，但命名 advisory lock 可确保应用实例间串行且可幂等重试。
+                        delete_result = connection.execute(
+                            text(
+                                """
+                                DELETE FROM cl_alert_task
+                                WHERE id NOT IN (
+                                    SELECT keep_id FROM (
+                                        SELECT MAX(id) AS keep_id
+                                        FROM cl_alert_task
+                                        GROUP BY market, task_name
+                                    ) AS alert_task_keep_rows
+                                )
+                                """
+                            )
+                        )
+                        if delete_result.rowcount and delete_result.rowcount > 0:
+                            deduplicated_rows = delete_result.rowcount
+                        connection.execute(
+                            text(
+                                f"CREATE UNIQUE INDEX {self.ALERT_TASK_UNIQUE_INDEX} "
+                                "ON cl_alert_task (market, task_name)"
+                            )
+                        )
+                except Exception:
+                    # 外部迁移或并发启动可能已先建好索引；重新检查，只有真实缺失才失败。
+                    if not self._alert_task_has_unique_constraint():
+                        raise
+
+            if deduplicated_rows:
+                LogUtil.warning(
+                    f"[schema migration] cl_alert_task 去重 {deduplicated_rows} 行，"
+                    "每组保留最大 id"
+                )
+
+            # marker 不是唯一真相：每次仍核验物理索引。索引已成功但 marker 写失败时，
+            # 下次启动只需补 marker，不会再次删除数据或重复建索引。
+            self.cache_set(self.ALERT_TASK_UNIQUE_SCHEMA_KEY, {"version": 1})
+        finally:
+            if advisory_connection is not None:
+                try:
+                    advisory_connection.execute(
+                        text("SELECT RELEASE_LOCK(:name)"),
+                        {"name": self.ALERT_TASK_UNIQUE_INDEX},
+                    )
+                finally:
+                    advisory_connection.close()
 
     def _get_last_dt_cache(self, market: str, code: str, frequency: str):
         """加锁读 _last_dt_cache。"""
@@ -100,12 +240,66 @@ class DB(object):
     def _set_last_dt_cache(self, market: str, code: str, frequency: str, value):
         """加锁写 _last_dt_cache。"""
         with self._last_dt_cache_lock:
-            self._last_dt_cache[(market, code, frequency)] = value
+            key = (market, code, frequency)
+            self._last_dt_cache_generation.setdefault(key, 0)
+            self._last_dt_cache[key] = value
 
-    def _invalidate_last_dt_cache(self, market: str, code: str, frequency: str):
-        """加锁失效 _last_dt_cache 中指定 key。"""
+    def _get_last_dt_cache_snapshot(self, market: str, code: str, frequency: str):
+        """原子读取缓存值和 generation，并登记可能在途的查询 key。"""
         with self._last_dt_cache_lock:
-            self._last_dt_cache.pop((market, code, frequency), None)
+            key = (market, code, frequency)
+            generation = self._last_dt_cache_generation.setdefault(key, 0)
+            return self._last_dt_cache.get(key), generation
+
+    def _set_last_dt_cache_if_generation(
+        self,
+        market: str,
+        code: str,
+        frequency: str,
+        expected_generation: int,
+        value,
+    ) -> bool:
+        """仅当查询期间没有提交写入时缓存结果。"""
+        with self._last_dt_cache_lock:
+            key = (market, code, frequency)
+            if self._last_dt_cache_generation.get(key, 0) != expected_generation:
+                return False
+            self._last_dt_cache[key] = value
+            return True
+
+    def _last_dt_cache_generation_is_current(
+        self, market: str, code: str, frequency: str, expected_generation: int
+    ) -> bool:
+        with self._last_dt_cache_lock:
+            return (
+                self._last_dt_cache_generation.get((market, code, frequency), 0)
+                == expected_generation
+            )
+
+    def _invalidate_last_dt_cache(
+        self, market: str, code: str, frequency: str = None
+    ):
+        """加锁失效指定周期；frequency 为空时清除此标的全部周期。"""
+        with self._last_dt_cache_lock:
+            if frequency is not None:
+                key = (market, code, frequency)
+                self._last_dt_cache.pop(key, None)
+                self._last_dt_cache_generation[key] = (
+                    self._last_dt_cache_generation.get(key, 0) + 1
+                )
+                return
+            stale_keys = {
+                key
+                for key in (
+                    set(self._last_dt_cache) | set(self._last_dt_cache_generation)
+                )
+                if key[0] == market and key[1] == code
+            }
+            for key in stale_keys:
+                self._last_dt_cache.pop(key, None)
+                self._last_dt_cache_generation[key] = (
+                    self._last_dt_cache_generation.get(key, 0) + 1
+                )
 
     def klines_tables(self, market: str, stock_code: str):
         stock_code = (
@@ -221,30 +415,37 @@ class DB(object):
 
     def klines_last_datetime(self, market, code, frequency):
         """查询指定标的 K 线表中最新一条记录的日期字符串，无数据时返回 None。"""
-        # 命中轻量级缓存（加锁），减少数据库查询
-        cached = self._get_last_dt_cache(market, code, frequency)
-        if cached is not None:
-            return cached
-
-        with self.Session() as session:
-            table = self.klines_tables(market, code)
-            last_date = (
-                session.query(table.dt)
-                .filter(table.code == code)
-                .filter(table.f == frequency)
-                .order_by(table.dt.desc())
-                .first()
+        while True:
+            cached, generation = self._get_last_dt_cache_snapshot(
+                market, code, frequency
             )
-            if last_date is None:
-                return None
-            if market == "a":
-                _res = last_date[0].strftime("%Y-%m-%d")
-            else:
-                _res = last_date[0].strftime("%Y-%m-%d %H:%M:%S")
+            if cached is not None:
+                return cached
 
-        # 加锁写缓存
-        self._set_last_dt_cache(market, code, frequency, _res)
-        return _res
+            with self.Session() as session:
+                table = self.klines_tables(market, code)
+                last_date = (
+                    session.query(table.dt)
+                    .filter(table.code == code)
+                    .filter(table.f == frequency)
+                    .order_by(table.dt.desc())
+                    .first()
+                )
+                if last_date is None:
+                    if self._last_dt_cache_generation_is_current(
+                        market, code, frequency, generation
+                    ):
+                        return None
+                    continue
+                if market == "a":
+                    result = last_date[0].strftime("%Y-%m-%d")
+                else:
+                    result = last_date[0].strftime("%Y-%m-%d %H:%M:%S")
+
+            if self._set_last_dt_cache_if_generation(
+                market, code, frequency, generation, result
+            ):
+                return result
 
     # MySQL upsert 的批大小：默认 1000，受 max_allowed_packet 限制建议 500~5000。
     # 之前直接调到 20000 在大列宽 K 线表上很容易触发 "MySQL server has gone away"。
@@ -299,9 +500,6 @@ class DB(object):
         final_columns = [col for col in db_columns if col in df.columns]
         data_to_insert = df[final_columns].to_dict(orient="records")
 
-        # 写入前先失效缓存（保证读侧不会拿到过期 last_dt）
-        self._invalidate_last_dt_cache(market, code, frequency)
-
         with self.Session() as session:
             table = self.klines_tables(market, code)
 
@@ -329,6 +527,8 @@ class DB(object):
                         )
                         session.execute(upsert_stmt)
                     session.commit()
+                    # 必须在 commit 返回后失效；否则并发读可在提交窗口把旧值重新写回缓存。
+                    self._invalidate_last_dt_cache(market, code, frequency)
                 except Exception as e:
                     session.rollback()
                     LogUtil.error(f"SQLite Batch Upsert Error: {e}")
@@ -355,6 +555,8 @@ class DB(object):
                 LogUtil.error(f"Batch Insert Error: {e}")
                 raise
 
+        # MySQL 分支同样只在提交成功后失效；失败回滚时保留原缓存仍与数据库一致。
+        self._invalidate_last_dt_cache(market, code, frequency)
         return True
 
     def klines_delete(
@@ -365,9 +567,6 @@ class DB(object):
         dt: datetime.datetime = None,
     ):
         """删除 K 线记录；frequency/dt 为空时删除该标的全部数据。"""
-        # 删除前先失效缓存（无论后续是否成功），避免读到过期值。
-        if frequency is not None:
-            self._invalidate_last_dt_cache(market, code, frequency)
         with self.Session() as session:
             try:
                 table = self.klines_tables(market, code)
@@ -382,6 +581,8 @@ class DB(object):
                 session.rollback()
                 raise
 
+        # commit 成功后再失效；frequency=None 表示本标的全部周期。
+        self._invalidate_last_dt_cache(market, code, frequency)
         return True
 
     def zx_get_groups(self, market: str) -> List[TableByZxGroup]:
@@ -467,6 +668,7 @@ class DB(object):
                 if location == "top":
                     # 自选组的股票位置+1
                     session.query(TableByZixuan).filter(
+                        TableByZixuan.market == market,
                         TableByZixuan.zx_group == zx_group
                     ).update(
                         {TableByZixuan.position: TableByZixuan.position + 1},
@@ -599,6 +801,37 @@ class DB(object):
                 session.rollback()
                 raise
 
+        return True
+
+    def zx_replace_group_stocks(
+        self, market: str, zx_group: str, stocks: List[dict]
+    ) -> bool:
+        """在单个事务中用完整快照替换自选组内容。"""
+        with self.Session() as session:
+            try:
+                session.query(TableByZixuan).filter(
+                    TableByZixuan.market == market,
+                    TableByZixuan.zx_group == zx_group,
+                ).delete(synchronize_session=False)
+                now = datetime.datetime.now()
+                for position, stock in enumerate(stocks):
+                    code = stock["code"]
+                    session.add(
+                        TableByZixuan(
+                            market=market,
+                            zx_group=zx_group,
+                            stock_code=code,
+                            stock_name=stock.get("name") or code,
+                            position=position,
+                            add_datetime=now,
+                            stock_color=stock.get("color", ""),
+                            stock_memo=stock.get("memo", ""),
+                        )
+                    )
+                session.commit()
+            except Exception:
+                session.rollback()
+                raise
         return True
 
     def zx_query_group_by_code(self, market: str, stock_code: str) -> List[str]:
@@ -1264,23 +1497,29 @@ class DB(object):
                 return None
         return None
 
-    def cache_set(self, key: str, val: dict, expire: int = 0):
-        # 原子 upsert(按主键 k)取代"delete+insert":后者两线程并发同 key 会
-        # delete-delete-insert-insert 撞主键 → 一方 rollback+raise 冒泡到调用方(审查 F5)。
-        # 与 klines_save 同口径按 DB_TYPE 选方言级 upsert。
-        payload = {"k": key, "v": json.dumps(val), "expire": expire}
+    def cache_set_many(self, values: dict, expire: int = 0):
+        """Atomically upsert multiple cache keys in a single transaction."""
+        if not values:
+            return True
+
+        # Serialize every value before opening the transaction. A malformed value
+        # must not leave an earlier key committed while a later key fails.
+        payloads = [
+            {"k": key, "v": json.dumps(val), "expire": expire}
+            for key, val in values.items()
+        ]
         with self.Session() as session:
             try:
                 if config.DB_TYPE == "sqlite":
                     from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
-                    stmt = sqlite_insert(TableByCache).values(**payload)
+                    stmt = sqlite_insert(TableByCache).values(payloads)
                     stmt = stmt.on_conflict_do_update(
                         index_elements=["k"],
                         set_={"v": stmt.excluded.v, "expire": stmt.excluded.expire},
                     )
                 else:
-                    stmt = insert(TableByCache).values(**payload)
+                    stmt = insert(TableByCache).values(payloads)
                     stmt = stmt.on_duplicate_key_update(
                         v=stmt.inserted.v, expire=stmt.inserted.expire
                     )
@@ -1291,6 +1530,11 @@ class DB(object):
                 raise
 
         return True
+
+    def cache_set(self, key: str, val: dict, expire: int = 0):
+        # Keep single-key writes on the same dialect-specific upsert path as
+        # multi-key settings writes so their transaction behavior cannot drift.
+        return self.cache_set_many({key: val}, expire=expire)
 
     def cache_del(self, key: str):
         with self.Session() as session:
@@ -1304,7 +1548,38 @@ class DB(object):
         return True
 
 
-db: DB = DB()
+class _LazyDB:
+    """Thread-safe proxy that defers database creation until first real use."""
+
+    def __init__(self) -> None:
+        object.__setattr__(self, "_instance", None)
+        object.__setattr__(self, "_lock", threading.Lock())
+
+    def is_initialized(self) -> bool:
+        return object.__getattribute__(self, "_instance") is not None
+
+    def _get_instance(self):
+        instance = object.__getattribute__(self, "_instance")
+        if instance is None:
+            lock = object.__getattribute__(self, "_lock")
+            with lock:
+                instance = object.__getattribute__(self, "_instance")
+                if instance is None:
+                    instance = DB()
+                    object.__setattr__(self, "_instance", instance)
+        return instance
+
+    def __getattr__(self, name):
+        return getattr(self._get_instance(), name)
+
+    def __setattr__(self, name, value) -> None:
+        if name in {"_instance", "_lock"}:
+            object.__setattr__(self, name, value)
+            return
+        setattr(self._get_instance(), name, value)
+
+
+db = _LazyDB()
 
 if __name__ == "__main__":
     db = DB()

@@ -29,13 +29,13 @@ import json
 import random
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
 from threading import RLock
 from typing import Dict, Optional
 
 from cachetools import TTLCache
 
 from chanlun.persistence.file_db import fdb
+from chanlun.tools.daemon_executor import DaemonExecutor
 from chanlun.tools.cache_version import source_fingerprint
 from chanlun.tools.log_util import LogUtil
 
@@ -499,38 +499,108 @@ def evaluate_cache_for_tv_history(
 # tv_history 请求等磁盘 fsync。失败仅记录 error 级日志，不影响 RAM 命中链路。
 # 4 worker 足够撑住批量预热（symbols.py 全局 inflight 也才 2-4）+ 用户实时写入。
 _CHART_CACHE_DISK_WORKERS = 4
-_chart_cache_disk_executor = ThreadPoolExecutor(
-    max_workers=_CHART_CACHE_DISK_WORKERS,
-    thread_name_prefix="ChartCacheDisk",
-)
+_CHART_CACHE_MAX_PENDING_WRITES = 64
+_chart_cache_disk_lock = threading.Lock()
+_chart_cache_disk_closed = True
+_chart_cache_accepting_writes = True
+_chart_cache_disk_futures = set()
+_chart_cache_disk_slots = threading.BoundedSemaphore(_CHART_CACHE_MAX_PENDING_WRITES)
+_chart_cache_disk_executor = None
 
 
 def _persist_chart_cache_async(cache_key: str, entry: dict) -> None:
-    """提交一次磁盘写入；调用方不阻塞。
-
-    deepcopy entry 后再提交, 避免与主线程并发 in-place 修改 ``entry["data"]``
-    (例如 tv_history cache hit 路径 lazy 补算 ``apply_higher_macd_to_chart_data``、
-    或 ``_merge_chart_data`` 之后某些 prepend 后续操作) 产生
-    ``RuntimeError: dictionary changed size during iteration`` 写盘失败。
-
-    调用方(``_set_chart_cache_entry``)在 cache_lock 内调本函数, 此处 deepcopy
-    在 cache_lock 保护下做, 期间没有其他线程能改 entry, 拿到的 snapshot 安全。
-    成本: chart_data 通常 1KB~几十 KB, deepcopy < 1ms, 主线程同步代价可接受。
-    """
+    """Submit a best-effort write with a strict pending-task capacity."""
     snapshot = copy.deepcopy(entry)
-    try:
-        _chart_cache_disk_executor.submit(fdb.set_chart_cache, cache_key, snapshot)
-    except Exception as e:
-        # executor 已关闭 / 队列满等极端场景：直接同步 fallback 写一次，
-        # 写失败也只是丢这条，下次预热会重新算。
-        LogUtil.warning(
-            f"[chart_cache] async submit failed, fallback sync write key={cache_key} err={e}"
-        )
+    with _chart_cache_disk_lock:
+        global _chart_cache_disk_closed, _chart_cache_disk_executor
+        if _chart_cache_disk_closed:
+            if not _chart_cache_accepting_writes:
+                return
+            _chart_cache_disk_executor = DaemonExecutor(
+                max_workers=_CHART_CACHE_DISK_WORKERS,
+                thread_name_prefix="ChartCacheDisk",
+            )
+            _chart_cache_disk_closed = False
+        if _chart_cache_disk_closed:
+            return
+        executor = _chart_cache_disk_executor
+        slots = _chart_cache_disk_slots
+        if not slots.acquire(blocking=False):
+            LogUtil.warning(
+                f"[chart_cache] pending write limit reached, skip key={cache_key}"
+            )
+            return
         try:
-            fdb.set_chart_cache(cache_key, snapshot)
-        except Exception as e2:
-            LogUtil.error(f"[chart_cache] fallback sync write failed key={cache_key} err={e2}")
+            future = executor.submit(fdb.set_chart_cache, cache_key, snapshot)
+        except Exception as exc:
+            slots.release()
+            LogUtil.warning(
+                f"[chart_cache] async submit failed key={cache_key} err={exc}"
+            )
+            return
+        _chart_cache_disk_futures.add(future)
 
+    def _completed(done_future):
+        try:
+            error = None if done_future.cancelled() else done_future.exception()
+            if error is not None:
+                LogUtil.error(
+                    f"[chart_cache] async write failed key={cache_key} err={error}"
+                )
+        except Exception as exc:
+            LogUtil.warning(
+                f"[chart_cache] async write completion failed key={cache_key} err={exc}"
+            )
+        finally:
+            with _chart_cache_disk_lock:
+                _chart_cache_disk_futures.discard(done_future)
+            slots.release()
+
+    future.add_done_callback(_completed)
+
+
+def start_chart_cache_runtime():
+    global _chart_cache_disk_closed, _chart_cache_disk_executor
+    global _chart_cache_accepting_writes, _chart_cache_disk_slots
+    with _chart_cache_disk_lock:
+        if not _chart_cache_disk_closed:
+            return
+        if _chart_cache_disk_futures:
+            raise RuntimeError("cannot restart chart cache writer with active writes")
+        _chart_cache_disk_executor = DaemonExecutor(
+            max_workers=_CHART_CACHE_DISK_WORKERS,
+            thread_name_prefix="ChartCacheDisk",
+        )
+        _chart_cache_disk_slots = threading.BoundedSemaphore(
+            _CHART_CACHE_MAX_PENDING_WRITES
+        )
+        _chart_cache_accepting_writes = True
+        _chart_cache_disk_closed = False
+
+
+def allow_lazy_chart_cache_writes():
+    """Allow a newly created application to open the writer on first use."""
+    global _chart_cache_accepting_writes
+    with _chart_cache_disk_lock:
+        if _chart_cache_disk_closed and not _chart_cache_disk_futures:
+            _chart_cache_accepting_writes = True
+
+
+def shutdown_chart_cache_runtime(wait=False):
+    """Reject new writes and cancel queued disk-cache work."""
+    global _chart_cache_accepting_writes, _chart_cache_disk_closed
+    global _chart_cache_disk_executor
+    with _chart_cache_disk_lock:
+        _chart_cache_accepting_writes = False
+        if _chart_cache_disk_closed:
+            return not _chart_cache_disk_futures
+        _chart_cache_disk_closed = True
+        executor = _chart_cache_disk_executor
+        _chart_cache_disk_executor = None
+    if executor is not None:
+        executor.shutdown(wait=bool(wait), cancel_futures=True)
+    with _chart_cache_disk_lock:
+        return not _chart_cache_disk_futures
 
 def _set_chart_cache_entry(cache_key: str, cl_chart_data: dict, is_full_snapshot: bool):
     """两层缓存写入：RAM 立即可见，磁盘异步持久化。
@@ -573,6 +643,7 @@ _NEGATIVE_CACHE_TTL_SECONDS = 300.0
 # 5min 抑制卡住恢复(C1+M3 协同,审查 M3)。
 _TRANSIENT_NEGATIVE_TTL_SECONDS = 30.0
 # value = (mark_ts, ttl)：每项按各自 ttl 独立失效,支持真空/异常空并存于同一表。
+_NEGATIVE_CACHE_MAX_SIZE = 500
 _negative_cache: Dict[str, tuple] = {}
 _negative_cache_lock = threading.Lock()
 
@@ -592,20 +663,23 @@ def _is_negatively_cached(cache_key: str) -> bool:
 
 
 def _mark_negative_cache(cache_key: str, ttl: float = _NEGATIVE_CACHE_TTL_SECONDS) -> None:
-    """标记 cache_key 为"无数据"，ttl 秒内不再尝试拉取。
-
-    ttl 默认 300s（真空：新股/退市，防无限重拉，所有既有调用点行为不变）；异常空（数据源暂时
-    不可用）应传 _TRANSIENT_NEGATIVE_TTL_SECONDS（30s）短退避，≤30s 自愈，不被 5min 抑制卡住。
-    """
+    """Record a negative result while enforcing a strict oldest-first capacity."""
     now = time.time()
     with _negative_cache_lock:
+        # Reinsert existing keys so dict insertion order reflects the latest mark.
+        _negative_cache.pop(cache_key, None)
         _negative_cache[cache_key] = (now, ttl)
-        # 顺便清理过期项（懒清理，避免长期运行时无限增长），按各项自身 ttl 判过期。
-        if len(_negative_cache) > 500:
-            stale = [k for k, (t, tt) in _negative_cache.items() if now - t > tt]
-            for k in stale:
-                _negative_cache.pop(k, None)
-
+        stale = [
+            key
+            for key, (marked_at, item_ttl) in _negative_cache.items()
+            if now - marked_at > item_ttl
+        ]
+        for key in stale:
+            _negative_cache.pop(key, None)
+        limit = max(1, int(_NEGATIVE_CACHE_MAX_SIZE))
+        while len(_negative_cache) > limit:
+            oldest = next(iter(_negative_cache))
+            _negative_cache.pop(oldest, None)
 
 def _klines_fetch_incomplete(klines) -> bool:
     """cq 源级完整性闸门信号：拉取带洞时返回空 DataFrame 且 attrs['fetch_incomplete']=True(C1)。

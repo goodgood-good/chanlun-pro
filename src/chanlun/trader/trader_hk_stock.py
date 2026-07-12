@@ -25,13 +25,32 @@ class TraderHKStock(BackTestTrader):
 
         self.zx = zixuan.ZiXuan("hk")
 
+    def _query_positions_before_open(self, code):
+        """开仓前全量持仓查询；未知状态必须安全熔断本轮。"""
+        try:
+            return self.ex.positions()
+        except Exception as exc:
+            self._safe_alert(
+                "hk",
+                "港股交易提醒[持仓查询失败]",
+                f"{code} 开仓前持仓查询失败，已取消本轮下单",
+                exc=exc,
+            )
+            return None
+
     def open_buy(self, code, opt: Operation, amount: float = None):
         """买入开多；按剩余仓位均分可用保证金，并对齐港股 lot_size（最小交易单位）。"""
-        positions = self.ex.positions()
+        positions = self._query_positions_before_open(code)
+        if positions is None:
+            return False
         if len(positions) >= self.b_space:
             return False
-        if self._broker_already_holds(code):
-            self._safe_alert("hk", "港股交易提醒", f"{code} 券商已持仓, 跳过重复开仓")
+        if any(p.get("code") == code for p in positions) or self._broker_already_holds(
+            code, fail_closed=True
+        ):
+            self._safe_alert(
+                "hk", "港股交易提醒", f"{code} 券商已持仓或状态未知, 跳过重复开仓"
+            )
             return False
         stock_info = self.ex.stock_info(code)
         if stock_info is None:
@@ -81,11 +100,17 @@ class TraderHKStock(BackTestTrader):
 
     def open_sell(self, code, opt: Operation, amount: float = None):
         """卖空开空；使用 max_margin_short 计算可用融券额度，同样对齐 lot_size。"""
-        positions = self.ex.positions()
+        positions = self._query_positions_before_open(code)
+        if positions is None:
+            return False
         if len(positions) >= self.b_space:
             return False
-        if self._broker_already_holds(code):
-            self._safe_alert("hk", "港股交易提醒", f"{code} 券商已持仓, 跳过重复开仓")
+        if any(p.get("code") == code for p in positions) or self._broker_already_holds(
+            code, fail_closed=True
+        ):
+            self._safe_alert(
+                "hk", "港股交易提醒", f"{code} 券商已持仓或状态未知, 跳过重复开仓"
+            )
             return False
         stock_info = self.ex.stock_info(code)
         if stock_info is None:

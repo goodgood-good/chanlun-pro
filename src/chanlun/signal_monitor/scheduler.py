@@ -14,7 +14,7 @@ from tqdm.auto import tqdm
 
 from chanlun import fun
 from chanlun.cl_utils import query_cl_chart_config
-from chanlun.exchange import Market, get_exchange
+from chanlun.exchange import Market, get_exchange, market_now_trading
 from chanlun.signal_monitor import monitor as sm_monitor
 from chanlun.signal_monitor import repository
 from chanlun.signal_monitor.evaluator import EvaluatorConfig
@@ -35,7 +35,7 @@ def signal_alert_run(signal_task_id) -> bool:
         return True
 
     ex = get_exchange(Market(task.market))
-    if ex.now_trading() is False:
+    if market_now_trading(ex, task.market) is False:
         return True
 
     ladder = [s.strip() for s in (task.level_ladder or "").split(",") if s.strip()]

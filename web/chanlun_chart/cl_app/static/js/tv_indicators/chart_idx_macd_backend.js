@@ -7,7 +7,7 @@ var TvIdxMACDBackend = (function () {
     return window.ChanlunTVRegistry || null;
   }
 
-  function getPreferredChartContext(rawTicker) {
+  function getPreferredChartContext(rawTicker, rawInterval) {
     const registry = getTVRegistry();
     const preferredDatafeeds = [];
     let preferredWidget = null;
@@ -15,17 +15,23 @@ var TvIdxMACDBackend = (function () {
 
     if (registry) {
       if (normalizedTicker && registry.widgets instanceof Map) {
+        // 收集所有「同标的」widget; 多级别下同标的会有多个不同周期 widget。
+        const tickerMatches = [];
         for (const widget of registry.widgets.values()) {
           try {
             if (widget && widget.symbolInterval) {
               const symbolInterval = widget.symbolInterval();
               if (symbolInterval && String(symbolInterval.symbol || '').toLowerCase() === normalizedTicker) {
-                preferredWidget = widget;
-                break;
+                tickerMatches.push({ widget: widget, interval: String(symbolInterval.interval == null ? '' : symbolInterval.interval) });
               }
             }
           } catch (e) { }
         }
+        // 多级别: 按周期等价挑出本指标 study 自己的那个 widget(选不出/单图→首个,
+        // 保持旧行为与 V31 对 context 数字周期的修正); 避免误用别周期 widget 覆盖 interval。
+        const ownIdx = pickPreferredWidgetIndex(
+          tickerMatches.map(function (m) { return m.interval; }), rawInterval);
+        if (ownIdx >= 0) preferredWidget = tickerMatches[ownIdx].widget;
       }
 
       if (!preferredWidget && registry.activeManagerId && registry.widgets instanceof Map) {
@@ -109,7 +115,38 @@ var TvIdxMACDBackend = (function () {
     return bestIdx;
   }
 
+  // 判断两个 TV resolution 是否指同一周期(用于多级别下识别本指标自己的 widget)。
+  function _resEquiv(a, b) {
+    a = String(a == null ? '' : a).toLowerCase();
+    b = String(b == null ? '' : b).toLowerCase();
+    if (a === b) return true;
+    const GROUPS = [
+      ['1d', 'd', '1440'],
+      ['1w', 'w'],
+      ['1m', 'm'],
+      ['3m', 'q'],
+      ['12m', 'y'],
+      ['240', '4h'],
+    ];
+    for (let g = 0; g < GROUPS.length; g++) {
+      if (GROUPS[g].indexOf(a) !== -1 && GROUPS[g].indexOf(b) !== -1) return true;
+    }
+    return false;
+  }
+
+  // 从「同标的的多个 widget 周期」里挑出本指标 study 自己那个的下标。
+  // 单图/选不出→首个(index 0, 与旧逻辑一致); 空→ -1。
+  function pickPreferredWidgetIndex(intervals, rawInterval) {
+    if (!intervals || intervals.length === 0) return -1;
+    if (intervals.length === 1) return 0;
+    for (let i = 0; i < intervals.length; i++) {
+      if (_resEquiv(intervals[i], rawInterval)) return i;
+    }
+    return 0;
+  }
+
   return {
+    _internal: { pickPreferredWidgetIndex: pickPreferredWidgetIndex, _resEquiv: _resEquiv },
     idx: function (PineJS) {
       return {
         name: "MACD_HTF",
@@ -180,7 +217,7 @@ var TvIdxMACDBackend = (function () {
               let rawTicker = String(context.symbol.ticker || "").toLowerCase();
               let rawInterval = String(context.symbol.interval || "").toLowerCase();
 
-              const preferredContext = getPreferredChartContext(rawTicker);
+              const preferredContext = getPreferredChartContext(rawTicker, rawInterval);
               const preferredWidget = preferredContext.widget;
 
               // TV 自定义指标拿到的 interval 有时是数字字符串，需从 widget.symbolInterval() 修正
@@ -285,3 +322,8 @@ var TvIdxMACDBackend = (function () {
     },
   };
 })();
+
+// Node 单测入口(浏览器下 module 未定义,守卫跳过)
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = TvIdxMACDBackend;
+}

@@ -1,6 +1,7 @@
 import datetime
 import math
 from typing import List
+import numpy as np
 import pandas as pd
 from chanlun.core.types import Kline
 from chanlun.tools.log_util import LogUtil
@@ -21,6 +22,22 @@ class KlineDataProcessor:
         """
         self.klines: List[Kline] = []
         self.start_datetime = start_datetime
+
+    @staticmethod
+    def _normalize_ohlc_geometry(open_, high, low, close):
+        """保持 OHLC 蜡烛几何约束，输入必须已是有限浮点数。"""
+        normalized_high = max(high, open_, close, low)
+        normalized_low = min(low, open_, close, high)
+        return open_, normalized_high, normalized_low, close
+
+    @staticmethod
+    def _finite_volume(volume) -> float:
+        """成交量缺失、非法或非有限时归零，避免污染后续合并与指标。"""
+        try:
+            value = float(volume)
+        except (TypeError, ValueError):
+            return 0.0
+        return value if math.isfinite(value) else 0.0
 
     def process_kline(self, klines_df: pd.DataFrame) -> List[Kline]:
         """
@@ -85,13 +102,19 @@ class KlineDataProcessor:
                 ts = ts.tz_localize(start_ts.tzinfo)
             if ts < start_ts:
                 return []
-        vol = 0.0 if volume is None or pd.isna(volume) else float(volume)
+        vol = self._finite_volume(volume)
         # 审计 D4-HIGH-2: OHLC NaN/Inf 兜底,与 _convert(:177-184)的 ffill 根因防护对齐。
         # 本快路径是 live/walk-forward 主入口(cl.py:177 / live_backtest:980),原仅 volume 有
         # pd.isna 兜底, OHLC 裸 float() → 坏 bar 把 NaN 灌进 klines → bi/xd `.val` 比较静默失效
         # (nan>x 与 nan<x 皆 False)+ MACD inc≠batch。坏值前向填充上一根(无前根则用本 bar 任一
         # 有限 OHLC bfill,全非有限则丢弃该 bar,免填 0 造假跳变)。干净数据零改变。
-        o_, h_, l_, c_ = float(open_), float(high), float(low), float(close)
+        def _to_float(value):
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return float("nan")
+
+        o_, h_, l_, c_ = map(_to_float, (open_, high, low, close))
         if not (math.isfinite(o_) and math.isfinite(h_)
                 and math.isfinite(l_) and math.isfinite(c_)):
             prev = self.klines[-1] if self.klines else None
@@ -102,7 +125,7 @@ class KlineDataProcessor:
                 if prev_v is not None and math.isfinite(prev_v):
                     return prev_v
                 for cand in (c_, o_, h_, l_):
-                    if math.isfinite(cand):
+                    if cand is not None and math.isfinite(cand):
                         return cand
                 return None
 
@@ -112,6 +135,7 @@ class KlineDataProcessor:
             l_ = _fill(l_, prev.l if prev else None)
             if None in (o_, h_, l_, c_):
                 return []  # 全非有限且无前根可顶 → 丢弃该 bar, 不灌 NaN
+        o_, h_, l_, c_ = self._normalize_ohlc_geometry(o_, h_, l_, c_)
         kline = Kline(
             index=0,
             date=ts,
@@ -201,27 +225,75 @@ class KlineDataProcessor:
         """
         klines = []
         has_volume = 'volume' in df.columns
-        # §2.1 根因防护:OHLC 列若含 NaN(数据源坏行经 to_numeric coerce)会经 float() 进 Kline
-        # 并污染下游(MACD 增量永久 NaN 中毒 / 笔段比较异常);原仅 volume 有兜底,OHLC 无。NaN 为
-        # 坏数据,前向填充(取上一根有效值 + bfill 兜首根,避免填 0 造假跳变);仅在确含 NaN 时
-        # copy+ffill,干净数据零开销零改变(golden 路径不受影响)。
+        # §2.1 根因防护:OHLC 列若含 NaN/Inf 会经 float() 进 Kline 并污染下游
+        # (MACD 增量永久 NaN 中毒 / 笔段比较异常)。仅在确有非有限值时 copy:
+        # 先把 Inf 统一视为缺失,仅按同列上一有效值填充；仍缺失时用本 bar 任一有限
+        # OHLC 兜底。最终仍无法补齐的全坏行直接丢弃；干净数据只做向量有限性检查。
         _ohlc_cols = [c for c in ("open", "high", "low", "close") if c in df.columns]
-        if _ohlc_cols and bool(df[_ohlc_cols].isna().to_numpy().any()):
+        numeric_ohlc = df[_ohlc_cols]
+        if any(
+            not pd.api.types.is_numeric_dtype(numeric_ohlc[col])
+            for col in _ohlc_cols
+        ):
+            numeric_ohlc = numeric_ohlc.apply(pd.to_numeric, errors="coerce")
+        has_nonfinite = _ohlc_cols and not bool(
+            np.isfinite(
+                numeric_ohlc.to_numpy(
+                    dtype=float, copy=False, na_value=float("nan")
+                )
+            ).all()
+        )
+        if has_nonfinite:
             df = df.copy()
-            df[_ohlc_cols] = df[_ohlc_cols].ffill().bfill()
+            sanitized = numeric_ohlc.replace(
+                [float("inf"), float("-inf")], float("nan")
+            )
+            # 禁止沿时间轴 bfill：首根坏数据若从未来价格反填，会造成回测前视偏差，
+            # 且与逐根 process_kline_values 的“无前根则丢弃”语义不一致。
+            sanitized = sanitized.ffill()
+            if self.klines:
+                prev = self.klines[-1]
+                sanitized = sanitized.fillna(
+                    {
+                        "open": prev.o,
+                        "high": prev.h,
+                        "low": prev.l,
+                        "close": prev.c,
+                    }
+                )
+            priority = [c for c in ("close", "open", "high", "low") if c in sanitized]
+            row_fallback = sanitized[priority].bfill(axis=1).iloc[:, 0]
+            for col in _ohlc_cols:
+                sanitized[col] = sanitized[col].fillna(row_fallback)
+            valid_rows = sanitized.notna().all(axis=1)
+            if not bool(valid_rows.all()):
+                LogUtil.warning(
+                    f"KlineProcessor: 丢弃 {int((~valid_rows).sum())} 条 OHLC 全非有限数据"
+                )
+                df = df.loc[valid_rows].copy()
+                sanitized = sanitized.loc[valid_rows]
+            if df.empty:
+                return []
+            df[_ohlc_cols] = sanitized
         for row in df.itertuples(index=False):
             # volume 可能不存在 / 为 None / 经 to_numeric coerce 成 NaN。
             # NaN 是 truthy，不能用 `or 0.0` 兜底（nan or 0.0 求值为 nan），
             # 否则 NaN 会进入 Kline.a 并经 cl_kline 合并 a=k1.a+k2.a 扩散。
             _vol = getattr(row, 'volume', None) if has_volume else None
-            vol = 0.0 if _vol is None or pd.isna(_vol) else float(_vol)
+            vol = self._finite_volume(_vol)
+            open_, high, low, close = self._normalize_ohlc_geometry(
+                float(row.open),
+                float(row.high),
+                float(row.low),
+                float(row.close),
+            )
             kline = Kline(
                 index=0,  # 占位符，将在 _update_internal_klines 中被修正
                 date=row.date,
-                h=float(row.high),
-                l=float(row.low),
-                o=float(row.open),
-                c=float(row.close),
+                h=high,
+                l=low,
+                o=open_,
+                c=close,
                 a=vol,
             )
             klines.append(kline)

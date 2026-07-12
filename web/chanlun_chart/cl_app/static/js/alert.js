@@ -1,4 +1,40 @@
 var Alert = (function () {
+  function textTemplate(value) {
+    var span = document.createElement("span");
+    span.textContent = String(value == null ? "" : value);
+    return span.outerHTML;
+  }
+
+  function alertRecordTemplate(d) {
+    var row = document.createElement("div");
+    row.className = "alert-record-row";
+    var heading = document.createElement("div");
+    heading.style.cssText = "font-weight:bold;font-size:14px";
+    heading.appendChild(document.createTextNode(String(d.name || "") + " "));
+    [[d.code, "#888"], [d.frequency, "#16baaa"], [d.line_type, "#b37feb"]]
+      .forEach(function (item) {
+        var span = document.createElement("span");
+        span.style.color = item[1];
+        span.textContent = String(item[0] || "");
+        heading.appendChild(span);
+        heading.appendChild(document.createTextNode(" "));
+      });
+    var message = document.createElement("div");
+    message.style.fontSize = "16px";
+    message.textContent = String(d.msg || "");
+    var footer = document.createElement("div");
+    footer.style.cssText = "color:#888;font-size:12px";
+    footer.appendChild(document.createTextNode(String(d.datetime_str || "")));
+    var task = document.createElement("span");
+    task.style.cssText = "margin-left:10px;color:rgb(203,243,183)";
+    task.textContent = String(d.task_name || "");
+    footer.appendChild(task);
+    row.appendChild(heading);
+    row.appendChild(message);
+    row.appendChild(footer);
+    return row.outerHTML;
+  }
+
   return {
     init: function () {
       layui.use(["table", "form"], function () {
@@ -11,7 +47,7 @@ var Alert = (function () {
             task_name_select.append("<option value=''>全部</option>");
             $.each(res.data, function (index, item) {
               task_name_select.append(
-                `<option value='${item.task_name}'>${item.task_name}</option>`
+                $("<option>", { value: item.task_name, text: item.task_name })
               );
             });
             form.render("select");
@@ -35,7 +71,7 @@ var Alert = (function () {
             "/alert_records/" +
             Utils.get_market() +
             "?task_name=" +
-            $("#task_name_select").val(),
+            encodeURIComponent($("#task_name_select").val() || ""),
           page: false,
           className: "layui-font-12",
           size: "sm",
@@ -47,27 +83,7 @@ var Alert = (function () {
                 field: "custom",
                 title: "",
                 templet: function (d) {
-                  return `
-                    <div class="alert-record-row">
-                      <div style="font-weight: bold; font-size: 14px;">
-                        ${d.name || ""} <span style="color: #888;">${
-                    d.code || ""
-                  }</span> <span style="color: #16baaa;">${
-                    d.frequency || ""
-                  }</span> <span style="color: #b37feb;">${
-                    d.line_type || ""
-                  }</span>
-                      </div>
-                      <div style="font-size: 16px;">${d.msg || ""}</div>
-                      <div style="color: #888; font-size: 12px;">
-                        ${
-                          d.datetime_str || ""
-                        } <span style="margin-left: 10px; color:rgb(203, 243, 183);">${
-                    d.task_name || ""
-                  }</span>
-                      </div>
-                    </div>
-                  `;
+                  return alertRecordTemplate(d);
                 },
               },
             ],
@@ -93,19 +109,19 @@ var Alert = (function () {
           size: "sm",
           cols: [
             [
-              { field: "task_name", title: "监控名称" },
+              { field: "task_name", title: "监控名称", templet: function (d) { return textTemplate(d.task_name); } },
               {
                 field: "zx_group",
                 title: "自选组",
                 templet: function (d) {
-                  return d.zx_group;
+                  return textTemplate(d.zx_group);
                 },
               },
               {
                 field: "frequency",
                 title: "周期",
                 templet: function (d) {
-                  return d.frequency;
+                  return textTemplate(d.frequency);
                 },
               },
               {
@@ -113,49 +129,49 @@ var Alert = (function () {
                 title: "运行间隔(分钟)",
                 sort: true,
                 templet: function (d) {
-                  return d.interval_minutes;
+                  return textTemplate(d.interval_minutes);
                 },
               },
               {
                 field: "check_bi_type",
                 title: "笔方向",
                 templet: function (d) {
-                  return d.check_bi_type;
+                  return textTemplate(d.check_bi_type);
                 },
               },
               {
                 field: "check_bi_beichi",
                 title: "笔背驰",
                 templet: function (d) {
-                  return d.check_bi_beichi;
+                  return textTemplate(d.check_bi_beichi);
                 },
               },
               {
                 field: "check_bi_mmd",
                 title: "笔买卖点",
                 templet: function (d) {
-                  return d.check_bi_mmd;
+                  return textTemplate(d.check_bi_mmd);
                 },
               },
               {
                 field: "check_xd_type",
                 title: "线段方向",
                 templet: function (d) {
-                  return d.check_xd_type;
+                  return textTemplate(d.check_xd_type);
                 },
               },
               {
                 field: "check_xd_beichi",
                 title: "线段背驰",
                 templet: function (d) {
-                  return d.check_xd_beichi;
+                  return textTemplate(d.check_xd_beichi);
                 },
               },
               {
                 field: "check_xd_mmd",
                 title: "线段买卖点",
                 templet: function (d) {
-                  return d.check_xd_mmd;
+                  return textTemplate(d.check_xd_mmd);
                 },
               },
               {
@@ -205,8 +221,8 @@ var Alert = (function () {
             data: [{ title: "删除", id: "del" }],
             click: function (menuData, othis) {
               if (menuData["id"] === "del") {
-                $.ajax({
-                  type: "GET",
+                AppRequest.ajax({
+                  type: "POST",
                   url: "/alert_del/" + data.id,
                   dataType: "json",
                   success: function (res) {

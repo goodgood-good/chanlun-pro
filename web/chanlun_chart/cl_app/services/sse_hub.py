@@ -10,55 +10,70 @@ from chanlun.tools.log_util import LogUtil
 
 
 class SseHub:
-    def __init__(self, max_loops: int = 100):
-        self.max_loops = max_loops
+    def __init__(
+        self,
+        max_loops: int = 100,
+        max_clients_per_key: int = 16,
+        max_connections_per_client: int = 8,
+    ):
+        self.max_loops = max(1, int(max_loops))
+        self.max_clients_per_key = max(1, int(max_clients_per_key))
+        self.max_connections_per_client = max(1, int(max_connections_per_client))
         # cache_key -> {"clients": set, "loop": handle}; OrderedDict 维护 LRU 顺序
         self._subs: "OrderedDict" = OrderedDict()
 
-    def subscribe(self, cache_key, client, start_loop_fn) -> bool:
+    def subscribe(self, cache_key, client, start_loop_fn, client_id=None) -> bool:
         """订阅。首个订阅者触发 start_loop_fn 启动循环。
 
-        达上限时不再拒绝(原返回 False → 前端 503 → 该标的永久拿不到实时)，而是 LRU
-        淘汰最久未活跃的循环、释放槽位再订阅。多标的频繁切换/异常断连残留的旧循环
-        不会把新标的挡在 503 外(切标的卡死期曾因频繁 reload 残留累积到上限触发 503)。
+        满载时只清理没有 client 的异常残留；若所有循环都活跃则拒绝新 key，绝不
+        驱逐在线用户。另按 key 和客户端身份限制连接数，避免单个会话耗尽资源。
         """
+        identity = client_id if client_id is not None else id(client)
+        identity_count = sum(
+            1
+            for existing in self._subs.values()
+            for value in existing.get("client_ids", {}).values()
+            if value == identity
+        )
+        if identity_count >= self.max_connections_per_client:
+            LogUtil.warning("[sse_hub] client connection limit reached")
+            return False
+
         sub = self._subs.get(cache_key)
         if sub is None:
             while len(self._subs) >= self.max_loops:
-                # 优先淘汰"无活跃 client"的循环(异常路径残留);避免砍掉仍有在线用户的循环 →
-                # 否则该用户 SSE 静默失效(连心跳都停)+半僵尸长连接卡在 _closed.wait()(审查 M3)。
+                # 仅清理异常路径遗留的空循环；活跃循环不可淘汰。
                 evict_key = next(
                     (k for k, s in self._subs.items() if not s.get("clients")), None
                 )
-                if evict_key is not None:
-                    old_key = evict_key
-                    old_sub = self._subs.pop(old_key)
-                    forced = False
-                else:
-                    # 全部都有活跃 client = 真过载:淘汰最旧的,但把它的 client 也干净关闭
-                    # (_unsub → set _closed → 前端 onerror 重连/退回轮询),不留半僵尸连接。
-                    old_key, old_sub = self._subs.popitem(last=False)
-                    forced = True
+                if evict_key is None:
+                    LogUtil.warning(
+                        f"[sse_hub] active loop limit reached ({self.max_loops})"
+                    )
+                    return False
+                old_key = evict_key
+                old_sub = self._subs.pop(old_key)
                 old_loop = old_sub.get("loop")
                 if old_loop is not None:
                     try:
                         old_loop.stop()
                     except Exception as e:
-                        LogUtil.warning(f"[sse_hub] LRU 淘汰停止循环 {old_key} 失败: {e}")
-                if forced:
-                    for c in list(old_sub.get("clients") or ()):
-                        try:
-                            c._unsub()
-                        except Exception:
-                            pass
-                LogUtil.warning(
-                    f"[sse_hub] 达上限 {self.max_loops}，LRU 淘汰循环 {old_key}"
-                    + ("(强制:已关闭其在线client令其重连)" if forced else "(空闲)")
-                )
+                        LogUtil.warning(f"[sse_hub] stop stale loop {old_key} failed: {e}")
+                LogUtil.warning(f"[sse_hub] removed stale empty loop {old_key}")
             loop = start_loop_fn(cache_key)
-            self._subs[cache_key] = {"clients": {client}, "loop": loop}
+            self._subs[cache_key] = {
+                "clients": {client},
+                "client_ids": {client: identity},
+                "loop": loop,
+            }
             return True
+        if client in sub["clients"]:
+            return True
+        if len(sub["clients"]) >= self.max_clients_per_key:
+            LogUtil.warning("[sse_hub] per-key client limit reached")
+            return False
         sub["clients"].add(client)
+        sub.setdefault("client_ids", {})[client] = identity
         self._subs.move_to_end(cache_key)  # 活跃 → 刷新 LRU 位置
         return True
 
@@ -68,6 +83,7 @@ class SseHub:
         if not sub:
             return
         sub["clients"].discard(client)
+        sub.setdefault("client_ids", {}).pop(client, None)
         if not sub["clients"]:
             loop = sub.get("loop")
             if loop is not None:

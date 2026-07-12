@@ -72,7 +72,7 @@
     </div>
 
     <!-- 标的列表页脚本：按市场分页展示所有标的，支持关键词搜索，点击代码跳转缠论图表 -->
-    <script>
+    <script nonce="{{ csp_nonce }}">
         $(function () {
             layui.use(['form', 'table', 'layer'], function () {
                 const form = layui.form;
@@ -109,12 +109,17 @@
                         },
                         cols: [[
                             {
-                                field: 'code', title: '代码', width: 220, templet: function (d) {
-                                    const url = '/?market=' + encodeURIComponent(state.market)
-                                        + '&code=' + encodeURIComponent(d.code);
-                                    return '<a class="symbol-code-link" href="' + url
-                                        + '" target="_blank" rel="noopener">' + d.code + '</a>';
-                                }
+                                 field: 'code', title: '代码', width: 220, templet: function (d) {
+                                     const url = '/?market=' + encodeURIComponent(state.market)
+                                         + '&code=' + encodeURIComponent(d.code);
+                                     const link = document.createElement('a');
+                                     link.className = 'symbol-code-link';
+                                     link.href = url;
+                                     link.target = '_blank';
+                                     link.rel = 'noopener';
+                                     link.textContent = String(d.code == null ? '' : d.code);
+                                     return link.outerHTML;
+                                 }
                             },
                             { field: 'name', title: '名称', minWidth: 200 },
                             { field: 'pinyin', title: '拼音首字母', width: 180 },

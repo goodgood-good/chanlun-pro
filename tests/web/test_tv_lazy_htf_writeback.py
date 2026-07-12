@@ -18,7 +18,9 @@ def test_lazy_writeback_bases_on_current_entry_not_stale(monkeypatch):
     written = {}
     monkeypatch.setattr(tv, "should_lazy_apply_higher_macd", lambda d, f, m: True)
     monkeypatch.setattr(
-        tv, "_get_chart_cache_entry", lambda k: {"data": FRESH, "is_full_snapshot": True}
+        tv,
+        "_get_chart_cache_entry_ram_only",
+        lambda k: {"data": FRESH, "is_full_snapshot": True},
     )
 
     def _apply(patched, f, m, cfg):
@@ -45,7 +47,7 @@ def test_lazy_writeback_falls_back_when_no_entry(monkeypatch):
     LOCAL = {"bars": ["b0"], "tag": "local"}
     written = {}
     monkeypatch.setattr(tv, "should_lazy_apply_higher_macd", lambda d, f, m: True)
-    monkeypatch.setattr(tv, "_get_chart_cache_entry", lambda k: None)
+    monkeypatch.setattr(tv, "_get_chart_cache_entry_ram_only", lambda k: None)
     monkeypatch.setattr(
         tv, "apply_higher_macd_to_chart_data",
         lambda patched, f, m, cfg: patched.__setitem__("higher_macd_hist", [9]) or True,

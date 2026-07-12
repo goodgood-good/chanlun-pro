@@ -11,15 +11,11 @@
   - `/set_stock_zixuan`
 """
 
-import os
-import uuid
-
 from flask import Blueprint, Response, render_template, request
 from flask_login import login_required
 from werkzeug.utils import secure_filename
 
 from chanlun.market import Market
-from chanlun.config import get_data_path
 from chanlun.exchange import get_exchange
 from chanlun.tools.log_util import LogUtil
 from chanlun.zixuan import ZiXuan
@@ -29,6 +25,63 @@ zixuan_bp = Blueprint("zixuan", __name__)
 
 # 自选导入文件大小上限 1 MiB；自选条目通常 < 1 万行（每行约 30 字节），1 MiB 已远超合理上限。
 _MAX_IMPORT_FILE_BYTES = 1 * 1024 * 1024
+_MAX_IMPORT_REQUEST_BYTES = _MAX_IMPORT_FILE_BYTES + 64 * 1024
+_MAX_GROUP_NAME_LENGTH = 64
+_VALID_MARKETS = frozenset(market.value for market in Market)
+
+
+def _normalize_group_name(value):
+    if not isinstance(value, str):
+        return None
+    name = value.strip()
+    if not name or len(name) > _MAX_GROUP_NAME_LENGTH:
+        return None
+    if any(ord(char) < 32 or char in "/\\" for char in name):
+        return None
+    return name
+
+
+def _build_stock_lookups(stocks):
+    exact = {}
+    aliases = {}
+    for stock in stocks:
+        if not isinstance(stock, dict):
+            continue
+        code = str(stock.get("code") or "").strip()
+        if not code:
+            continue
+        item = {"code": code, "name": str(stock.get("name") or code)}
+        exact[code] = item
+        alias = code.rsplit(".", 1)[-1]
+        previous = aliases.get(alias)
+        if previous is None and alias not in aliases:
+            aliases[alias] = item
+        elif previous is not None and previous["code"] != code:
+            aliases[alias] = None
+    return exact, aliases
+
+
+def _resolve_import_stock(raw_code, market, exact, aliases):
+    code = raw_code.strip()
+    if market == "a":
+        code = code.replace("SHSE.", "SH.").replace("SZSE.", "SZ.")
+    return exact.get(code) or aliases.get(code)
+
+
+@zixuan_bp.before_request
+def _reject_invalid_market():
+    if (
+        request.endpoint == "zixuan.opt_zixuan_import"
+        and request.content_length is not None
+        and request.content_length > _MAX_IMPORT_REQUEST_BYTES
+    ):
+        return {"ok": False, "msg": "文件过大（>1MB）"}, 413
+    market = (request.view_args or {}).get("market")
+    if market is None:
+        market = request.values.get("market")
+    if market not in _VALID_MARKETS:
+        return {"ok": False, "msg": "无效的市场"}, 400
+    return None
 
 
 @zixuan_bp.route("/get_zixuan_groups/<market>")
@@ -42,6 +95,9 @@ def get_zixuan_groups(market):
 @zixuan_bp.route("/get_zixuan_stocks/<market>/<group_name>")
 @login_required
 def get_zixuan_stocks(market, group_name):
+    group_name = _normalize_group_name(group_name)
+    if group_name is None:
+        return {"ok": False, "msg": "无效的自选组名"}, 400
     zx = ZiXuan(market)
     stock_list = zx.zx_stocks(group_name)
     return {"code": 0, "msg": "", "count": len(stock_list), "data": stock_list}
@@ -70,13 +126,16 @@ def opt_zixuan_group(market):
     """
     操作自选组
     """
-    opt = request.form["opt"]
-    zx_group = request.form["zx_group"]
+    opt = request.form.get("opt", "")
+    zx_group = _normalize_group_name(request.form.get("zx_group"))
+    if zx_group is None:
+        return {"ok": False, "msg": "无效的自选组名"}, 400
+    if opt not in {"ADD", "DEL"}:
+        return {"ok": False, "msg": "无效的操作"}, 400
     zx = ZiXuan(market)
     if opt == "DEL":
         return {"ok": zx.del_zx_group(zx_group)}
-    else:
-        return {"ok": zx.add_zx_group(zx_group)}
+    return {"ok": zx.add_zx_group(zx_group)}
 
 
 @zixuan_bp.route("/zixuan_opt_export", methods=["GET"])
@@ -86,7 +145,9 @@ def opt_zixuan_export():
     导出自选组
     """
     market = request.args.get("market")
-    zx_group = request.args.get("zx_group")
+    zx_group = _normalize_group_name(request.args.get("zx_group"))
+    if zx_group is None:
+        return {"ok": False, "msg": "无效的自选组名"}, 400
     zx = ZiXuan(market)
     stock_list = zx.zx_stocks(zx_group)
     output = "".join(f"{s['code']},{s['name']}\n" for s in stock_list)
@@ -108,70 +169,58 @@ def opt_zixuan_import():
     导入自选
     """
     market = request.form.get("market", "")
-    zx_group = request.form.get("zx_group", "")
-    if market not in {m.value for m in Market}:
+    zx_group = _normalize_group_name(request.form.get("zx_group"))
+    if market not in _VALID_MARKETS:
         return {"ok": False, "msg": "无效的市场"}
-    if not zx_group:
-        return {"ok": False, "msg": "缺少自选组名"}
+    if zx_group is None:
+        return {"ok": False, "msg": "无效的自选组名"}, 400
 
     file = request.files.get("file")
     if file is None or not file.filename:
         return {"ok": False, "msg": "未上传文件"}
 
-    # 文件大小预检：先 seek 到末尾测大小，再 seek 回 0。
-    file.stream.seek(0, os.SEEK_END)
-    size = file.stream.tell()
-    file.stream.seek(0)
-    if size > _MAX_IMPORT_FILE_BYTES:
-        return {"ok": False, "msg": "文件过大（>1MB）"}
-
-    # 文件名经 secure_filename 处理 + uuid 去重，落到固定数据目录下，杜绝路径穿越。
-    import_file = get_data_path() / f"zx_import_{uuid.uuid4().hex}.txt"
-    file.save(import_file)
+    payload = file.stream.read(_MAX_IMPORT_FILE_BYTES + 1)
+    if len(payload) > _MAX_IMPORT_FILE_BYTES:
+        return {"ok": False, "msg": "文件过大（>1MB）"}, 413
+    try:
+        content = payload.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return {"ok": False, "msg": "文件必须使用 UTF-8 编码"}, 400
 
     zx = ZiXuan(market)
+    if zx_group not in {group["name"] for group in zx.zixuan_list}:
+        return {"ok": False, "msg": "自选组不存在"}, 400
     ex = get_exchange(Market(market))
-    import_nums = 0
-    # cq singleton 的 default_market 会被后初始化市场覆盖, 必须显式传 market
-    # (统一入口 _safe_all_stocks, 历史实测复现), 否则用错市场代码全集校验导入。
+    # cq singleton 的 default_market 会被后初始化市场覆盖, 必须显式传 market。
     from ..services.stock_list import _safe_all_stocks
 
-    try:
-        market_all_stocks = _safe_all_stocks(ex, market)
-        market_all_codes = [s["code"] for s in market_all_stocks]
-        with open(import_file, "r", encoding="utf-8") as fp:
-            for line in fp:
-                try:
-                    import_infos = line.strip().split(",")
-                    if len(import_infos) >= 2:
-                        code = import_infos[0].strip()
-                        name = import_infos[1].strip()
-                    else:
-                        code = import_infos[0].strip()
-                        name = None
-
-                    # 股票代码兼容性处理
-                    if market == "a":
-                        code = code.replace("SHSE.", "SH.").replace("SZSE.", "SZ.")
-
-                    if code not in market_all_codes:
-                        same_codes = [_c for _c in market_all_codes if code in _c]
-                        if len(same_codes) == 1:
-                            code = same_codes[0]
-                        else:
-                            continue
-
-                    zx.add_stock(zx_group, code, name)
-                    import_nums += 1
-                except Exception:
-                    LogUtil.warning(f"zixuan import skip line: {line.strip()!r}")
-    finally:
+    exact, aliases = _build_stock_lookups(_safe_all_stocks(ex, market))
+    imported = {}
+    for line in content.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
         try:
-            os.remove(import_file)
-        except OSError:
-            pass
+            import_infos = stripped.split(",", 1)
+            resolved = _resolve_import_stock(import_infos[0], market, exact, aliases)
+            if resolved is None:
+                continue
+            code = resolved["code"]
+            name = import_infos[1].strip() if len(import_infos) == 2 else ""
+            if code in imported:
+                del imported[code]
+            imported[code] = {"code": code, "name": name or resolved["name"]}
+        except (KeyError, TypeError, ValueError):
+            LogUtil.warning(f"zixuan import skip line: {stripped!r}")
 
-    return {"ok": True, "msg": f"成功导入 {import_nums} 条记录"}
+    if imported:
+        existing = [
+            stock for stock in zx.zx_stocks(zx_group) if stock["code"] not in imported
+        ]
+        if not zx.replace_zx_stocks(zx_group, existing + list(imported.values())):
+            return {"ok": False, "msg": "导入失败"}, 409
+
+    return {"ok": True, "msg": f"成功导入 {len(imported)} 条记录"}
 
 
 @zixuan_bp.route("/set_stock_zixuan", methods=["POST"])
@@ -179,7 +228,9 @@ def opt_zixuan_import():
 def set_stock_zixuan():
     market = request.form["market"]
     opt = request.form["opt"]
-    group_name = request.form["group_name"]
+    group_name = _normalize_group_name(request.form.get("group_name"))
+    if group_name is None:
+        return {"ok": False, "msg": "无效的自选组名"}, 400
     code = request.form["code"]
     zx = ZiXuan(market)
     if opt == "DEL":

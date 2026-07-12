@@ -13,18 +13,20 @@ CPU/QMT 争抢(正是要解决的问题)。
 图表的计算/缓存口径完全一致, 不会"少算" higher_macd 等字段。
 """
 import threading
-from concurrent.futures import ThreadPoolExecutor
+import time
 
 from chanlun.tools.log_util import LogUtil
 
-# 后台重验证线程池。worker 数克制: 重验证是 CPU 密集(缠论纯 Python, GIL 串行),
-# 开太多并不能并行加速, 只会与用户请求抢 GIL; 4 个够吸收突发切标的, 又不喧宾夺主。
-_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="ChartRevalidate")
-
-# 在飞 cache_key 集合 + 锁(去重)。
+# A blocking compute cannot be safely killed in CPython. Run each attempt in a
+# daemon thread, cap the number of underlying attempts, and quarantine timed-out
+# keys until their original call really returns.
+_MAX_ACTIVE_REVALIDATIONS = 4
+_REVALIDATION_TIMEOUT_SECONDS = 30.0
 _inflight: set = set()
+_active_attempts = {}
+_timed_out: set = set()
 _lock = threading.Lock()
-
+_closed = False
 
 def _do_revalidate(
     market: str, code: str, frequency: str, cl_config: dict, cache_key: str
@@ -55,15 +57,17 @@ def _do_revalidate(
 def submit_revalidation(
     market: str, code: str, frequency: str, cl_config: dict, cache_key: str
 ) -> bool:
-    """把一次后台重验证排进线程池(去重)。
-
-    Returns:
-        True  — 已排队(本次成为该 cache_key 的在飞任务);
-        False — 该 cache_key 已有在飞任务, 跳过(去重)/ 或线程池提交失败。
-    """
+    """Start one bounded background attempt for a cache key."""
     with _lock:
-        if cache_key in _inflight:
+        if _closed or cache_key in _active_attempts:
             return False
+        if len(_active_attempts) >= max(1, int(_MAX_ACTIVE_REVALIDATIONS)):
+            LogUtil.warning("[chart_revalidate] active attempt limit reached")
+            return False
+
+        done = threading.Event()
+        attempt = {"done": done, "thread": None}
+        _active_attempts[cache_key] = attempt
         _inflight.add(cache_key)
 
     def _task() -> None:
@@ -74,16 +78,92 @@ def submit_revalidation(
                 f"[chart_revalidate] 重验证失败 {market}:{code}:{frequency}: {e}"
             )
         finally:
-            # 无论成功/异常都必须清出 inflight, 否则一次失败永久阻塞该 key 后续刷新。
+            done.set()
             with _lock:
+                if _active_attempts.get(cache_key) is attempt:
+                    _active_attempts.pop(cache_key, None)
                 _inflight.discard(cache_key)
+                _timed_out.discard(cache_key)
 
+    def _watchdog() -> None:
+        timeout = max(0.0, float(_REVALIDATION_TIMEOUT_SECONDS))
+        if done.wait(timeout):
+            return
+        with _lock:
+            if _active_attempts.get(cache_key) is not attempt:
+                return
+            _inflight.discard(cache_key)
+            _timed_out.add(cache_key)
+        LogUtil.warning(
+            f"[chart_revalidate] attempt timed out "
+            f"{market}:{code}:{frequency} after {timeout:g}s"
+        )
+
+    thread = threading.Thread(
+        target=_task,
+        daemon=True,
+        name=f"ChartRevalidate-{cache_key[:32]}",
+    )
+    attempt["thread"] = thread
     try:
-        _pool.submit(_task)
+        thread.start()
+        threading.Thread(
+            target=_watchdog,
+            daemon=True,
+            name=f"ChartRevalidateWatchdog-{cache_key[:32]}",
+        ).start()
         return True
     except Exception as e:
-        # 线程池已关闭 / 队列异常: 回滚 inflight, 让下次能重试。
         with _lock:
+            if _active_attempts.get(cache_key) is attempt:
+                _active_attempts.pop(cache_key, None)
             _inflight.discard(cache_key)
+            _timed_out.discard(cache_key)
         LogUtil.warning(f"[chart_revalidate] 提交后台重验证失败 {cache_key}: {e}")
         return False
+
+
+def revalidation_status():
+    with _lock:
+        return {
+            "active": len(_active_attempts),
+            "inflight": len(_inflight),
+            "timed_out": len(_timed_out),
+            "closed": _closed,
+        }
+
+
+def start_revalidation_runtime():
+    global _closed
+    with _lock:
+        _closed = False
+
+
+def shutdown_revalidation(wait=False, timeout=1.0):
+    """Reject new attempts and optionally join active daemon attempts briefly."""
+    global _closed
+    with _lock:
+        _closed = True
+        threads = [
+            attempt["thread"]
+            for attempt in _active_attempts.values()
+            if attempt.get("thread") is not None
+        ]
+    if wait:
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        for thread in threads:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            thread.join(remaining)
+    return not any(thread.is_alive() for thread in threads)
+
+
+def _reset_revalidation_state_for_tests():
+    global _closed
+    with _lock:
+        if _active_attempts:
+            raise RuntimeError("cannot reset revalidation state while attempts are active")
+        _inflight.clear()
+        _timed_out.clear()
+        _closed = False

@@ -7,6 +7,7 @@ and makes it easier to test and evolve supported markets and resolutions.
 """
 
 import threading
+import time
 
 from tzlocal import get_localzone
 
@@ -55,82 +56,259 @@ _ALL_MARKETS = [
 
 
 class _LazyMarketDict(dict):
-    """在首次访问时才初始化交易所对象，避免阻塞启动。"""
+    """Load and cache market metadata independently for each market."""
 
-    def __init__(self, builder):
+    def __init__(
+        self,
+        builder,
+        *,
+        markets=None,
+        fallback_factory=list,
+        retry_seconds=30.0,
+        load_wait_seconds=0.1,
+        load_timeout_seconds=5.0,
+        clock=time.monotonic,
+    ):
         super().__init__()
         self._builder = builder
-        self._loaded = False
-        self._lock = threading.Lock()
+        self._markets = dict(_ALL_MARKETS if markets is None else markets)
+        self._fallback_factory = fallback_factory
+        self._retry_seconds = retry_seconds
+        self._load_wait_seconds = max(0.0, float(load_wait_seconds))
+        self._load_timeout_seconds = max(0.0, float(load_timeout_seconds))
+        self._clock = clock
+        self._states = {key: "unloaded" for key in self._markets}
+        self._failed_at = {}
+        self._market_locks = {key: threading.Lock() for key in self._markets}
+        self._state_lock = threading.Lock()
+        self._attempts = {}
+        self._closed = False
 
-    def _ensure_loaded(self):
-        if self._loaded:
-            return
-        with self._lock:
-            if self._loaded:
-                return
-            self.update(self._builder())
-            self._loaded = True
+        # Keep all known keys in the underlying dict for Jinja/JSON compatibility.
+        for key in self._markets:
+            dict.__setitem__(self, key, self._fallback_factory())
+
+    def _cached_value_if_available(self, key):
+        with self._state_lock:
+            state = self._states[key]
+            if state == "loaded":
+                return True, dict.__getitem__(self, key)
+            if state == "failed":
+                failed_at = self._failed_at[key]
+                if self._clock() - failed_at < self._retry_seconds:
+                    return True, dict.__getitem__(self, key)
+            return False, None
+
+    def _record_failure(self, key, reason, attempt=None):
+        fallback = self._fallback_factory()
+        failed_at = self._clock()
+        with self._state_lock:
+            if attempt is not None and self._attempts.get(key) is not attempt:
+                return dict.__getitem__(self, key)
+            dict.__setitem__(self, key, fallback)
+            self._failed_at[key] = failed_at
+            self._states[key] = "failed"
+        LogUtil.warning(
+            f"获取 {key} 市场元数据失败，将在 {self._retry_seconds:g} 秒后重试: {reason}"
+        )
+        return fallback
+
+    def _run_builder_attempt(self, key, attempt):
+        try:
+            value = self._builder(key, self._markets[key])
+            if not value:
+                raise ValueError("metadata builder returned an empty value")
+        except Exception as exc:
+            with self._state_lock:
+                active = self._attempts.get(key) is attempt and not self._closed
+            if active:
+                self._record_failure(key, exc)
+        else:
+            with self._state_lock:
+                if self._attempts.get(key) is attempt and not self._closed:
+                    dict.__setitem__(self, key, value)
+                    self._failed_at.pop(key, None)
+                    self._states[key] = "loaded"
+        finally:
+            with self._state_lock:
+                if self._attempts.get(key) is attempt:
+                    self._attempts.pop(key, None)
+            attempt["done"].set()
+
+    def _start_builder_attempt(self, key):
+        done = threading.Event()
+        attempt = {"done": done, "thread": None}
+        thread = threading.Thread(
+            target=self._run_builder_attempt,
+            args=(key, attempt),
+            daemon=True,
+            name=f"MarketMetadata-{key}",
+        )
+        attempt["thread"] = thread
+        with self._state_lock:
+            if self._closed:
+                return None
+            existing = self._attempts.get(key)
+            if existing is not None:
+                return existing
+            self._states[key] = "loading"
+            self._attempts[key] = attempt
+        thread.start()
+        return attempt
+
+    def _load_key(self, key):
+        if key not in self._markets:
+            raise KeyError(key)
+
+        available, value = self._cached_value_if_available(key)
+        if available:
+            return value
+
+        market_lock = self._market_locks[key]
+        if not market_lock.acquire(timeout=self._load_wait_seconds):
+            with self._state_lock:
+                return dict.__getitem__(self, key)
+
+        try:
+            available, value = self._cached_value_if_available(key)
+            if available:
+                return value
+
+            with self._state_lock:
+                if self._closed:
+                    return dict.__getitem__(self, key)
+                attempt = self._attempts.get(key)
+
+            if attempt is not None:
+                with self._state_lock:
+                    return dict.__getitem__(self, key)
+
+            attempt = self._start_builder_attempt(key)
+            if attempt is None:
+                with self._state_lock:
+                    return dict.__getitem__(self, key)
+
+            if not attempt["done"].wait(self._load_timeout_seconds):
+                return self._record_failure(
+                    key,
+                    f"timeout after {self._load_timeout_seconds:g}s",
+                    attempt=attempt,
+                )
+
+            with self._state_lock:
+                return dict.__getitem__(self, key)
+        finally:
+            market_lock.release()
+
+    def _load_all(self):
+        for key in self._markets:
+            self._load_key(key)
+
+    def start(self):
+        """Allow loads again after a prior lifecycle shutdown."""
+        with self._state_lock:
+            self._closed = False
+
+    def shutdown(self, timeout=0.0):
+        """Stop accepting loads and wait only briefly for active attempts."""
+        with self._state_lock:
+            self._closed = True
+            threads = [
+                attempt["thread"]
+                for attempt in self._attempts.values()
+                if attempt.get("thread") is not None
+            ]
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        for thread in threads:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            thread.join(remaining)
+        return not any(thread.is_alive() for thread in threads)
+
+    def cached_snapshot(self, keys=None):
+        """Return cached or fallback values without invoking any builder."""
+        selected_keys = tuple(self._markets if keys is None else keys)
+        with self._state_lock:
+            return {key: dict.__getitem__(self, key) for key in selected_keys}
+    def snapshot(self, keys=None):
+        """Load selected markets and return their values as a plain dict."""
+        selected_keys = tuple(self._markets if keys is None else keys)
+        for key in selected_keys:
+            self._load_key(key)
+        with self._state_lock:
+            return {key: dict.__getitem__(self, key) for key in selected_keys}
+
+    def status(self, key):
+        """Return cache state without starting or waiting for a metadata load."""
+        if key not in self._markets:
+            raise KeyError(key)
+        with self._state_lock:
+            state = self._states[key]
+            ready = state == "loaded" and bool(dict.__getitem__(self, key))
+        return {"state": state, "ready": ready}
 
     def __getitem__(self, key):
-        self._ensure_loaded()
-        return super().__getitem__(key)
+        return self._load_key(key)
 
     def __contains__(self, key):
-        self._ensure_loaded()
-        return super().__contains__(key)
+        return key in self._markets
 
     def get(self, key, default=None):
-        self._ensure_loaded()
-        return super().get(key, default)
+        if key not in self._markets:
+            return default
+        return self._load_key(key)
 
     def keys(self):
-        self._ensure_loaded()
-        return super().keys()
+        return dict.keys(self)
 
     def values(self):
-        self._ensure_loaded()
-        return super().values()
+        self._load_all()
+        return dict.values(self)
 
     def items(self):
-        self._ensure_loaded()
-        return super().items()
+        self._load_all()
+        return dict.items(self)
 
     def __iter__(self):
-        self._ensure_loaded()
-        return super().__iter__()
+        return dict.__iter__(self)
 
     def __len__(self):
-        self._ensure_loaded()
-        return super().__len__()
+        return dict.__len__(self)
 
 
-def _build_market_frequencys():
-    result = {}
-    for key, market in _ALL_MARKETS:
-        try:
-            result[key] = list(get_exchange(market).support_frequencys().keys())
-        except Exception as e:
-            LogUtil.warning(f"获取 {key} 支持周期失败: {e}")
-            result[key] = []
-    return result
+def _build_market_frequencys(_key, market):
+    return list(get_exchange(market).support_frequencys().keys())
 
 
-def _build_market_default_codes():
-    result = {}
-    for key, market in _ALL_MARKETS:
-        try:
-            result[key] = get_exchange(market).default_code()
-        except Exception as e:
-            LogUtil.warning(f"获取 {key} 默认代码失败: {e}")
-            result[key] = ""
-    return result
+def _build_market_default_codes(_key, market):
+    return get_exchange(market).default_code()
 
 
-# 懒加载：首次访问时才创建交易所对象，不阻塞启动
-market_frequencys = _LazyMarketDict(_build_market_frequencys)
-market_default_codes = _LazyMarketDict(_build_market_default_codes)
+# 懒加载：每个市场独立缓存；失败值保留 30 秒后重试
+market_frequencys = _LazyMarketDict(
+    _build_market_frequencys,
+    fallback_factory=list,
+)
+market_default_codes = _LazyMarketDict(
+    _build_market_default_codes,
+    fallback_factory=lambda: "",
+)
 
+
+def start_market_metadata_loaders():
+    for loader in (market_frequencys, market_default_codes):
+        loader.start()
+
+def shutdown_market_metadata_loaders(timeout=0.0):
+    """Stop global metadata loaders without waiting indefinitely."""
+    loaders = (market_frequencys, market_default_codes)
+    deadline = time.monotonic() + max(0.0, float(timeout))
+    stopped = True
+    for loader in loaders:
+        remaining = max(0.0, deadline - time.monotonic())
+        stopped = loader.shutdown(remaining) and stopped
+    return stopped
 
 # 各个市场的交易时间
 market_session = {
@@ -179,4 +357,6 @@ __all__ = [
     "market_session",
     "market_timezone",
     "market_types",
+    "start_market_metadata_loaders",
+    "shutdown_market_metadata_loaders",
 ]

@@ -19,11 +19,13 @@ interface DataSubscribers {
 
 export class DataPulseProvider implements IDataPulseProvider {
 	private readonly _subscribers: DataSubscribers = {};
-	private _requestsPending: number = 0;
+	private readonly _requestsPending: Set<string> = new Set();
+	private readonly _requestTimeoutMs: number;
 	private readonly _historyProvider: IHistoryProvider;
 
 	public constructor(historyProvider: IHistoryProvider, updateFrequency: number) {
 		this._historyProvider = historyProvider;
+		this._requestTimeoutMs = Math.max(10_000, Number.isFinite(updateFrequency) ? updateFrequency * 2 : 10_000);
 		setInterval(this._updateData.bind(this), updateFrequency);
 	}
 
@@ -74,24 +76,40 @@ export class DataPulseProvider implements IDataPulseProvider {
 	}
 
 	private _updateData(): void {
-		if (this._requestsPending > 0) {
-			return;
-		}
-
-		this._requestsPending = 0;
+		// A stalled symbol must not block refreshes for every other subscriber.
 		// eslint-disable-next-line guard-for-in
 		for (const listenerGuid in this._subscribers) {
-			this._requestsPending += 1;
-			this._updateDataForSubscriber(listenerGuid)
+			if (this._requestsPending.has(listenerGuid)) {
+				continue;
+			}
+
+			this._requestsPending.add(listenerGuid);
+			this._withTimeout(Promise.resolve().then(() => this._updateDataForSubscriber(listenerGuid)), listenerGuid)
 				.then(() => {
-					this._requestsPending -= 1;
-					logMessage(`DataPulseProvider: data for #${listenerGuid} updated successfully, pending=${this._requestsPending}`);
+					logMessage(`DataPulseProvider: data for #${listenerGuid} updated successfully`);
 				})
 				.catch((reason?: string | Error) => {
-					this._requestsPending -= 1;
-					logMessage(`DataPulseProvider: data for #${listenerGuid} updated with error=${getErrorMessage(reason)}, pending=${this._requestsPending}`);
+					logMessage(`DataPulseProvider: data for #${listenerGuid} updated with error=${getErrorMessage(reason)}`);
+				})
+				.finally(() => {
+					this._requestsPending.delete(listenerGuid);
 				});
 		}
+	}
+
+	private _withTimeout<T>(request: Promise<T>, listenerGuid: string): Promise<T> {
+		let timeoutId: ReturnType<typeof setTimeout> | undefined;
+		const timeout = new Promise<T>((_resolve, reject) => {
+			timeoutId = setTimeout(() => {
+				reject(new Error(`Data refresh timed out for #${listenerGuid}`));
+			}, this._requestTimeoutMs);
+		});
+
+		return Promise.race([request, timeout]).finally(() => {
+			if (timeoutId !== undefined) {
+				clearTimeout(timeoutId);
+			}
+		});
 	}
 
 	private _updateDataForSubscriber(listenerGuid: string): Promise<void> {

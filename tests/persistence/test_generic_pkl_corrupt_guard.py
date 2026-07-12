@@ -11,6 +11,8 @@
 """
 import pickle
 
+import pytest
+
 from chanlun.file_db_mixins.generic_pkl import _GenericPklCacheMixin
 
 
@@ -23,6 +25,12 @@ def test_corrupt_pkl_returns_none(tmp_path):
     """腐坏/截断 pkl → 返回 None(按 miss 处理)而非 UnpicklingError 冒泡。"""
     (tmp_path / "bad.pkl").write_bytes(b"\x80\x04broken-truncated")
     assert _H(tmp_path).cache_pkl_from_file("bad.pkl") is None
+
+
+def test_corrupt_critical_pkl_raises_in_strict_mode(tmp_path):
+    (tmp_path / "bad.pkl").write_bytes(b"\x80\x04broken-truncated")
+    with pytest.raises(Exception):
+        _H(tmp_path).cache_pkl_from_file("bad.pkl", strict=True)
 
 
 def test_missing_pkl_returns_none(tmp_path):

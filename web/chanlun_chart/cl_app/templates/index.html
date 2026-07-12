@@ -27,7 +27,13 @@
       src="{{ url_for('static', filename='marked.min.js') }}?v={{ static_version }}"></script>
     <script
       type="text/javascript"
-      src="{{ url_for('static', filename='charting_library/charting_library.standalone.js') }}?version=1.0.0"></script>
+      src="{{ url_for('static', filename='vendor/dompurify-3.4.11.min.js') }}?v={{ static_version }}"></script>
+    <script
+      type="text/javascript"
+      src="{{ url_for('static', filename='js/safe_html.js') }}?v={{ static_version }}"></script>
+    <script
+      type="text/javascript"
+      src="{{ url_for('static', filename='charting_library/charting_library.standalone.js') }}?v={{ static_version }}"></script>
     <script
       type="text/javascript"
       src="{{ url_for('static', filename='datafeeds/udf/dist/bundle.js') }}?v={{ static_version }}"></script>
@@ -35,6 +41,9 @@
   </head>
 
   <body>
+    <form id="logout-form" method="post" action="/logout" style="display: none">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+    </form>
     <div class="layui-fluid" style="padding: 0">
       <div class="layui-row">
         <div
@@ -84,9 +93,13 @@
           收起按钮：仅在右栏「收起」状态下显示（贴屏幕右侧边缘，提示用户点击展开）
           展开状态下不需要它——展开状态有右栏顶部内置的收起按钮 #chart_menu_inline_collapse
         #}
-        <div
+        <button
+          type="button"
           id="chart_menu_toggle"
-          title="展开缠论解盘"
+          aria-controls="chart_menu"
+          aria-expanded="true"
+          aria-label="收起缠论解盘"
+          title="收起缠论解盘"
           style="
             position: fixed;
             top: 50%;
@@ -96,7 +109,9 @@
             height: 48px;
             background: rgba(30, 159, 255, 0.85);
             color: #fff;
+            border: 0;
             border-radius: 4px 0 0 4px;
+            padding: 0;
             cursor: pointer;
             z-index: 10000;
             display: none;
@@ -108,7 +123,7 @@
             transition: background 0.15s;
           ">
           <i class="layui-icon layui-icon-left"></i>
-        </div>
+        </button>
         <style>
           /* 分隔条 hover/拖拽时显示一条蓝色线，提供视觉反馈 */
           #chart_resize_handle:hover,
@@ -117,6 +132,13 @@
           }
           #chart_menu_toggle:hover {
             background: rgba(30, 159, 255, 1) !important;
+          }
+          #chart_menu_toggle:focus-visible,
+          #toggle-menu:focus-visible,
+          #symbols_list_wrap:focus-visible,
+          #bkgn_stock_wrap:focus-visible {
+            outline: 2px solid #1e9fff;
+            outline-offset: 2px;
           }
           /* 拖拽进行中：禁用全局选中和指针事件，避免文本选中和 iframe 抢夺鼠标 */
           body.chart-resizing {
@@ -150,13 +172,16 @@
           <div style="padding: 10px">
             <div class="layui-inline" style="width: 100%">
               <h2 style="float: left; margin-top: 9px">缠论解盘</h2>
-              <div
+              <button
+                type="button"
                 id="toggle-menu"
-                style="float: right; margin-top: 10px; cursor: pointer">
-                <div>
-                  <i class="layui-icon layui-icon-shrink-right"></i>
-                </div>
-              </div>
+                aria-controls="chart_menu"
+                aria-expanded="true"
+                aria-haspopup="menu"
+                aria-label="收起缠论解盘菜单"
+                style="float: right; margin-top: 10px; padding: 0; border: 0; background: transparent; color: inherit; cursor: pointer; font: inherit">
+                <i class="layui-icon layui-icon-shrink-right"></i>
+              </button>
             </div>
             <hr class="layui-border-red" />
             <form
@@ -252,7 +277,7 @@
               {# 标的列表：按市场浏览全部标的，点击代码列在新窗口打开图表 #}
               <div class="layui-colla-title" data-ca-title="标的列表">标的列表</div>
               <div class="layui-colla-content" style="padding: 8px;">
-                <form class="layui-form" onsubmit="return false;">
+                <form class="layui-form" id="symbols_filter_form">
                   <div class="layui-form-item" style="margin-bottom: 6px;">
                     <div class="layui-input-block" style="margin-left: 0;">
                       <select id="symbols_market_select" lay-filter="symbols_market_select">
@@ -310,7 +335,7 @@
                   }
                 </style>
                 <div id="symbols_list_wrap" tabindex="0"
-                  style="max-height: 360px; overflow-y: auto; border: 1px solid #eee; outline: none;">
+                  style="max-height: 360px; overflow-y: auto; border: 1px solid #eee;">
                   <table class="layui-table" lay-size="sm" style="margin: 0;">
                     <colgroup>
                       <col style="width: 45%;" />
@@ -435,11 +460,13 @@
                       <i class="layui-icon layui-icon-refresh"></i> 重置
                     </button>
                   </div>
-                  <table
-                    class="layui-hide"
-                    id="bkgn_stock_table"
-                    lay-filter="bkgn_stock_table"
-                    style="width: 100%;"></table>
+                  <div id="bkgn_stock_wrap" tabindex="0">
+                    <table
+                      class="layui-hide"
+                      id="bkgn_stock_table"
+                      lay-filter="bkgn_stock_table"
+                      style="width: 100%;"></table>
+                  </div>
                 </div>
                 <hr class="layui-border-red" />
               </div>
@@ -501,11 +528,12 @@
     </div>
     {% include 'sub_temp.html' %}
   </body>
-  <script>
+  <script nonce="{{ csp_nonce }}">
     // SSE 实时推送开关(后端 config.ENABLE_SSE_PUSH 注入); charts.js 据此决定是否建 EventSource 连接。
     window.__CHANLUN_SSE_ENABLED = {{ 'true' if enable_sse else 'false' }};
     var interval_get_alert_records;
 
+    var initial_market = {{ initial_market|tojson }};
     var market_frequencys = `{{ market_frequencys| tojson }}`;
     var market_frequencys = JSON.parse(market_frequencys);
 
@@ -542,7 +570,7 @@
 
     var default_vals = {
       theme: "Light",
-      market: "a",
+      market: initial_market,
       a_interval_1: "1D",
       a_interval_2: "1D",
       hk_interval_1: "1D",
@@ -608,11 +636,17 @@
   <script src="{{ url_for('static', filename='js/alert.js') }}?v={{ static_version }}"></script>
   <script src="{{ url_for('static', filename='js/ai.js') }}?v={{ static_version }}"></script>
   <script src="{{ url_for('static', filename='js/bkgn.js') }}?v={{ static_version }}"></script>
-  <script>
+  <script nonce="{{ csp_nonce }}">
     // 右栏「标的列表」区块：按市场全量加载标的，本地过滤，点击代码直接切图。
     // 不依赖 layui.table，纯 jQuery + AJAX 渲染，避免折叠面板内表格高度计算问题。
     layui.use(['form'], function () {
         var lform = layui.form;
+        var symbolsFilterForm = document.getElementById('symbols_filter_form');
+        if (symbolsFilterForm) {
+          symbolsFilterForm.addEventListener('submit', function (event) {
+            event.preventDefault();
+          });
+        }
 
         var SymbolsPanel = {
           state: {
@@ -778,11 +812,12 @@
             self.state.selectedIndex = -1;
 
             var seq = ++self.state.loadSeq;
-            $.ajax({
+            AppRequest.ajax({
               url: '/symbols/list',
               method: 'GET',
               data: { market: self.state.market, all: 1 },
-              dataType: 'json'
+              dataType: 'json',
+              timeout: 10000
             }).done(function (res) {
               // 旧请求覆盖新结果保护：用户在加载期间又切了市场，丢弃旧响应
               if (seq !== self.state.loadSeq) return;
@@ -829,7 +864,7 @@
             this.renderRows();
           },
 
-          // 把 visibleRows 渲染成表格 HTML（使用拼接字符串避免大量 jQuery 操作）
+          // 服务端标的代码/名称按文本节点渲染，避免持久化数据进入 HTML sink。
           renderRows: function () {
             var $tbody = $('#symbols_list_tbody');
             var rows = this.state.visibleRows;
@@ -839,18 +874,25 @@
               $('#symbols_total_tip').text('共 0 条');
               return;
             }
-            var html = '';
+            var fragment = document.createDocumentFragment();
             for (var i = 0; i < rows.length; i++) {
               var it = rows[i];
-              html += '<tr class="symbols-row" '
-                + 'data-market="' + market + '" '
-                + 'data-code="' + (it.code || '').replace(/"/g, '&quot;') + '" '
-                + 'style="cursor:pointer;">'
-                + '<td style="color:#1e9fff;">' + (it.code || '') + '</td>'
-                + '<td>' + (it.name || '') + '</td>'
-                + '</tr>';
+              var tr = document.createElement('tr');
+              tr.className = 'symbols-row';
+              tr.dataset.market = String(market || '');
+              tr.dataset.code = String(it.code || '');
+              tr.style.cursor = 'pointer';
+              var codeCell = document.createElement('td');
+              codeCell.style.color = '#1e9fff';
+              codeCell.textContent = String(it.code || '');
+              var nameCell = document.createElement('td');
+              nameCell.textContent = String(it.name || '');
+              tr.appendChild(codeCell);
+              tr.appendChild(nameCell);
+              fragment.appendChild(tr);
             }
-            $tbody.html(html);
+            $tbody.empty();
+            $tbody[0].appendChild(fragment);
             // 列表更新后回滚到顶部，避免上一次滚动位置错乱
             var wrap = document.getElementById('symbols_list_wrap');
             if (wrap) wrap.scrollTop = 0;
@@ -870,6 +912,11 @@
         var PrewarmController = {
           symbolsPanel: null,
           pollTimer: null,
+          pollGeneration: 0,
+          pollInFlight: false,
+          pollingActive: false,
+          actionGeneration: 0,
+          pendingCancel: false,
           POLL_INTERVAL_MS: 1500,
           // 当前 UI 显示的状态：'idle' | 'starting' | 'running' | 'done'
           uiState: 'idle',
@@ -879,6 +926,7 @@
             self.symbolsPanel = panel;
 
             $('#symbols_prewarm_btn').on('click', function () {
+              if (self.uiState === 'cancelling') return;
               if (self.uiState === 'running' || self.uiState === 'starting') {
                 self.cancel();
               } else {
@@ -892,105 +940,190 @@
 
           // 切换市场后：停止旧轮询，立即查询新市场的状态
           refreshOnMarketChange: function () {
+            this.actionGeneration += 1;
+            this.pendingCancel = false;
             this.stopPolling();
             this.applyTaskToUI(null);
             this.fetchStatusOnce();
           },
-
           start: function () {
             var self = this;
             var market = self.symbolsPanel.state.market;
+            var actionGeneration = ++self.actionGeneration;
+            self.pendingCancel = false;
             self.uiState = 'starting';
             self.setBtnText('启动中...', true);
 
-            $.ajax({
+            AppRequest.ajax({
               url: '/symbols/prewarm',
               method: 'POST',
               data: { market: market },
-              dataType: 'json'
+              dataType: 'json',
+              timeout: 10000
             }).done(function (res) {
+              if (actionGeneration !== self.actionGeneration
+                  || market !== self.symbolsPanel.state.market) return;
               if (res && res.ok) {
                 if (window.layer) layer.msg(res.msg || '预热已启动', { icon: 1, time: 1500 });
                 self.applyTaskToUI(res.task);
-                self.startPolling();
+                if (self.pendingCancel) {
+                  self.pendingCancel = false;
+                  self.uiState = 'running';
+                  self.cancel();
+                } else {
+                  self.startPolling();
+                }
               } else {
                 if (window.layer) layer.msg((res && res.msg) || '启动失败', { icon: 2, time: 2500 });
+                self.pendingCancel = false;
                 self.uiState = 'idle';
                 self.setBtnText('预热全部', false);
               }
             }).fail(function (xhr) {
+              if (actionGeneration !== self.actionGeneration
+                  || market !== self.symbolsPanel.state.market) return;
               var msg = '请求失败';
               try { msg = (xhr.responseJSON && xhr.responseJSON.msg) || msg; } catch (_) {}
               if (window.layer) layer.msg(msg, { icon: 2, time: 2500 });
+              self.pendingCancel = false;
               self.uiState = 'idle';
-              self.setBtnText('预热全部', false);
+              self.setBtnText('预热全部', false);              self.fetchStatusOnce();
+
             });
           },
-
           cancel: function () {
             var self = this;
+            if (self.uiState === 'starting') {
+              self.pendingCancel = true;
+              self.setBtnText('取消中...', true);
+              return;
+            }
+            if (self.uiState === 'cancelling') return;
+
             var market = self.symbolsPanel.state.market;
-            $.ajax({
+            var actionGeneration = ++self.actionGeneration;
+            self.uiState = 'cancelling';
+            self.setBtnText('取消中...', true);
+            AppRequest.ajax({
               url: '/symbols/prewarm/cancel',
               method: 'POST',
               data: { market: market },
-              dataType: 'json'
+              dataType: 'json',
+              timeout: 10000
             }).done(function (res) {
+              if (actionGeneration !== self.actionGeneration
+                  || market !== self.symbolsPanel.state.market) return;
               if (window.layer) {
                 layer.msg((res && res.msg) || '已请求取消', { icon: res && res.ok ? 1 : 2, time: 2000 });
               }
-              // 不立即停轮询，让任务在 worker 自然收敛后状态变 cancelled
+              self.uiState = 'running';
+              self.setBtnText('停止预热', true);
+              if (!self.pollingActive) self.startPolling();
+            }).fail(function () {
+              if (actionGeneration !== self.actionGeneration
+                  || market !== self.symbolsPanel.state.market) return;
+              if (window.layer) layer.msg('取消请求失败', { icon: 2, time: 2500 });
+              self.uiState = 'running';
+              self.setBtnText('停止预热', true);              if (!self.pollingActive) self.startPolling();
+
             });
           },
-
           fetchStatusOnce: function () {
             var self = this;
             var market = self.symbolsPanel.state.market;
-            $.ajax({
+            var generation = self.pollGeneration;
+            AppRequest.ajax({
               url: '/symbols/prewarm/status',
               method: 'GET',
               data: { market: market },
-              dataType: 'json'
+              dataType: 'json',
+              timeout: 8000
             }).done(function (res) {
+              if (generation !== self.pollGeneration
+                  || market !== self.symbolsPanel.state.market) return;
               if (res && res.ok) {
                 self.applyTaskToUI(res.task);
                 if (res.task && res.task.status === 'running') {
                   self.startPolling();
                 }
               }
+            }).fail(function () {
+              if (generation !== self.pollGeneration
+                  || market !== self.symbolsPanel.state.market) return;
+              if (window.layer) layer.msg('预热状态获取失败', { icon: 2, time: 2000 });
             });
           },
-
           startPolling: function () {
             var self = this;
             self.stopPolling();
-            self.pollTimer = setInterval(function () { self.poll(); }, self.POLL_INTERVAL_MS);
+            self.pollingActive = true;
+            self.schedulePoll(self.POLL_INTERVAL_MS, self.pollGeneration);
           },
 
           stopPolling: function () {
             if (this.pollTimer) {
-              clearInterval(this.pollTimer);
+              clearTimeout(this.pollTimer);
               this.pollTimer = null;
             }
+            this.pollingActive = false;
+            this.pollGeneration += 1;
           },
 
-          poll: function () {
+          schedulePoll: function (delay, generation) {
             var self = this;
+            if (!self.pollingActive || generation !== self.pollGeneration) return;
+            if (self.pollTimer) clearTimeout(self.pollTimer);
+            self.pollTimer = setTimeout(function () {
+              self.pollTimer = null;
+              self.poll(generation);
+            }, delay);
+          },
+
+          poll: function (generation) {
+            var self = this;
+            var requestGeneration = typeof generation === 'number'
+              ? generation : self.pollGeneration;
+            if (!self.pollingActive || requestGeneration !== self.pollGeneration) return false;
+            if (self.pollInFlight) return false;
             var market = self.symbolsPanel.state.market;
-            $.ajax({
+            var keepPolling = true;
+            self.pollInFlight = true;
+            AppRequest.ajax({
               url: '/symbols/prewarm/status',
               method: 'GET',
               data: { market: market },
-              dataType: 'json'
-            }).done(function (res) {
-              if (!res || !res.ok) return;
-              self.applyTaskToUI(res.task);
-              if (!res.task || res.task.status !== 'running') {
-                self.stopPolling();
+              dataType: 'json',
+              timeout: 8000,
+              success: function (res) {
+                if (requestGeneration !== self.pollGeneration
+                    || market !== self.symbolsPanel.state.market) return;
+                if (!res || !res.ok) return;
+                self.applyTaskToUI(res.task);
+                if (!res.task || res.task.status !== 'running') {
+                  keepPolling = false;
+                  self.stopPolling();
+                }
+              },
+              error: function () {
+                if (requestGeneration === self.pollGeneration && window.layer) {
+                  layer.msg('预热状态请求超时，正在重试', { icon: 0, time: 1500 });
+                }
+              },
+              complete: function () {
+                self.pollInFlight = false;
+                if (requestGeneration !== self.pollGeneration) {
+                  if (self.pollingActive && !self.pollTimer) {
+                    self.schedulePoll(0, self.pollGeneration);
+                  }
+                  return;
+                }
+                if (keepPolling && self.pollingActive) {
+                  self.schedulePoll(self.POLL_INTERVAL_MS, requestGeneration);
+                }
               }
             });
+            return true;
           },
-
           // 把后端任务对象映射到 UI（按钮文本、进度条、当前标的提示）
           applyTaskToUI: function (task) {
             var $progress = $('#symbols_prewarm_progress');
@@ -1065,7 +1198,7 @@
         SymbolsPanel.init();
       });
   </script>
-  <script>
+  <script nonce="{{ csp_nonce }}">
     $(function () {
       // 缠论配置项更改
       layui.use(function () {
@@ -1154,9 +1287,18 @@
                 '<div><i class="layui-icon layui-icon-engine"></i> <span>切换主题</span></div>',
               id: 8,
             },
+            { type: "-" },
+            {
+              title: "退出登录",
+              templet:
+                '<div><i class="layui-icon layui-icon-logout"></i> <span>退出登录</span></div>',
+              id: "logout",
+            },
           ],
           click: function (item) {
-            if (item.title === "收起缠论解盘") {
+            if (item.id === "logout") {
+              document.getElementById("logout-form").submit();
+            } else if (item.title === "收起缠论解盘") {
               // 由 ChartMenuResize 模块挂载到 window 上的接口（在底部 IIFE 中暴露）
               if (window.ChartMenuResize && typeof window.ChartMenuResize.collapse === 'function') {
                 window.ChartMenuResize.collapse();
@@ -1250,8 +1392,10 @@
           let is_open = data.show;
           let ca_title = $(data.title).attr("data-ca-title");
 
-          // 自选组行情刷新定时器由 zixuan.js 的 render_zixuan_stocks 自行管理
-          // （3s 轮询 + 非交易时段自停），此处不再重复启动。
+          if (ca_title === "自选组") {
+            ZiXuan.set_rate_polling_active(is_open);
+          }
+
           if (ca_title === "监控提醒") {
             if (is_open) {
               Alert.init();
@@ -1278,7 +1422,7 @@
         form.on("select(select_market)", function (data) {
           var market = data.value;
           Utils.set_local_data("market", market);
-          location.reload();
+          location.assign("/?market=" + encodeURIComponent(market));
         });
 
         AI.init_ai_opts();
@@ -1286,6 +1430,19 @@
       });
 
       function init_web() {
+        var stored_market = Utils.get_market();
+        var explicit_market = (
+          new URLSearchParams(window.location.search || "").get("market") || ""
+        ).trim().toLowerCase();
+        if (explicit_market) {
+          if (stored_market !== initial_market) {
+            Utils.set_local_data("market", initial_market);
+          }
+        } else if (stored_market && stored_market !== initial_market) {
+          location.replace("/?market=" + encodeURIComponent(stored_market));
+          return;
+        }
+
         // 非 A 股市场隐藏板块概念面板（仅 A 股有板块数据）
         if (Utils.get_market() !== "a") {
           $("#collapse-bkgn").hide();
@@ -1399,7 +1556,7 @@
     });
   </script>
 
-  <script>
+  <script nonce="{{ csp_nonce }}">
     /**
      * 右栏「缠论解盘」可拖拽宽度调整
      *
@@ -1443,12 +1600,29 @@
         if (px > max) px = max;
         return px;
       }
+      function syncAccessibleState(collapsed) {
+        var expanded = String(!collapsed);
+        var expandBtn = document.getElementById('chart_menu_toggle');
+        var menuBtn = document.getElementById('toggle-menu');
+        if (expandBtn) {
+          var expandLabel = collapsed ? '展开缠论解盘' : '收起缠论解盘';
+          expandBtn.setAttribute('aria-expanded', expanded);
+          expandBtn.setAttribute('aria-label', expandLabel);
+          expandBtn.title = expandLabel;
+        }
+        if (menuBtn) {
+          var menuLabel = collapsed ? '展开缠论解盘菜单' : '收起缠论解盘菜单';
+          menuBtn.setAttribute('aria-expanded', expanded);
+          menuBtn.setAttribute('aria-label', menuLabel);
+        }
+      }
       // 应用宽度到 DOM。collapsed=true 时右栏隐藏；展开状态由右栏内嵌的按钮控制收起，
       // 收起后由屏幕右侧贴边的 #chart_menu_toggle 控制展开。
       function applyWidth(px, collapsed) {
         var menu = document.getElementById('chart_menu');
         var container = document.getElementById('chart_container');
         var handle = document.getElementById('chart_resize_handle');
+        syncAccessibleState(collapsed);
         if (!menu || !container || !handle) return;
 
         if (collapsed) {

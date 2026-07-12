@@ -5,23 +5,160 @@
 鉴权复用 Flask-Login(见 sse_auth)。同一 cache_key 多个 client 共享一个刷新循环。
 """
 import asyncio
+import hashlib
 import json
+import threading
 
 import tornado.web
 from tornado.ioloop import IOLoop, PeriodicCallback
+from flask_login.utils import decode_cookie
+from werkzeug.http import parse_cookie
 
 from chanlun import config
 from chanlun.cl_utils import query_cl_chart_config
+from chanlun.tools.log_util import LogUtil
 from cl_app.services.sse_auth import is_request_authenticated
 from cl_app.services.sse_hub import SseHub
 from cl_app.services.sse_refresh import decide_push, recompute_chart_data
 
 _hub = SseHub()
+_SEND_TIMEOUT_SECONDS = 5.0
+_RECOMPUTE_TIMEOUT_SECONDS = max(
+    0.1, float(getattr(config, "SSE_RECOMPUTE_TIMEOUT_SECONDS", 20.0))
+)
+_RECOMPUTE_MAX_PENDING = max(
+    1, int(getattr(config, "SSE_MAX_PENDING_RECOMPUTES", 8))
+)
+_runtime_lock = threading.Lock()
+_recompute_slots = threading.BoundedSemaphore(_RECOMPUTE_MAX_PENDING)
+_runtime_inflight = set()
+_runtime_timed_out = set()
+_runtime_closed = False
 
 
 def get_hub() -> SseHub:
     return _hub
 
+
+async def _run_recompute_bounded(pool, ctx, args):
+    """Run one recompute with a deadline and a strict global submission cap."""
+    existing = ctx.get("future")
+    if existing is not None:
+        if not existing.done():
+            return False, None
+        ctx.pop("future", None)
+
+    with _runtime_lock:
+        if _runtime_closed:
+            return False, None
+    if not _recompute_slots.acquire(blocking=False):
+        return False, None
+
+    try:
+        future = IOLoop.current().run_in_executor(
+            pool,
+            recompute_chart_data,
+            *args,
+        )
+    except Exception as exc:
+        _recompute_slots.release()
+        LogUtil.warning(f"[sse] recompute submit failed: {exc}")
+        return False, None
+
+    ctx["future"] = future
+    with _runtime_lock:
+        _runtime_inflight.add(future)
+
+    def _finished(done_future):
+        try:
+            if not done_future.cancelled():
+                done_future.exception()
+        except (asyncio.CancelledError, Exception):
+            pass
+        with _runtime_lock:
+            _runtime_inflight.discard(done_future)
+            _runtime_timed_out.discard(done_future)
+        try:
+            _recompute_slots.release()
+        except ValueError:
+            LogUtil.warning("[sse] recompute slot released more than once")
+
+    future.add_done_callback(_finished)
+    try:
+        value = await asyncio.wait_for(
+            asyncio.shield(future),
+            timeout=max(0.1, float(_RECOMPUTE_TIMEOUT_SECONDS)),
+        )
+        ctx.pop("future", None)
+        return True, value
+    except asyncio.TimeoutError:
+        with _runtime_lock:
+            if future in _runtime_inflight:
+                _runtime_timed_out.add(future)
+        LogUtil.warning(
+            f"[sse] recompute timed out after "
+            f"{max(0.1, float(_RECOMPUTE_TIMEOUT_SECONDS)):g}s"
+        )
+        return False, None
+    except asyncio.CancelledError:
+        future.cancel()
+        raise
+    except Exception as exc:
+        ctx.pop("future", None)
+        LogUtil.warning(f"[sse] recompute failed: {exc}")
+        return True, None
+
+
+def sse_runtime_status():
+    with _runtime_lock:
+        return {
+            "inflight": len(_runtime_inflight),
+            "timed_out": len(_runtime_timed_out),
+            "closed": _runtime_closed,
+        }
+
+
+def start_sse_runtime():
+    global _runtime_closed
+    with _runtime_lock:
+        if _runtime_inflight:
+            raise RuntimeError("cannot restart SSE runtime with active recomputes")
+        _runtime_closed = False
+
+
+def shutdown_sse_runtime():
+    """Stop loops, reject submissions, and cancel queued recomputes best-effort."""
+    global _runtime_closed
+    with _runtime_lock:
+        _runtime_closed = True
+        futures = list(_runtime_inflight)
+    for future in futures:
+        future.cancel()
+    subscriptions = list(getattr(_hub, "_subs", {}).values())
+    for sub in subscriptions:
+        loop = sub.get("loop")
+        if loop is not None:
+            try:
+                loop.stop()
+            except Exception:
+                pass
+        for client in list(sub.get("clients", ())):
+            closed = getattr(client, "_closed", None)
+            if closed is not None and not closed.is_set():
+                closed.set()
+    getattr(_hub, "_subs", {}).clear()
+    return not any(not future.done() for future in futures)
+
+
+def _reset_sse_runtime_for_tests(max_pending=8):
+    global _runtime_closed, _recompute_slots, _RECOMPUTE_MAX_PENDING
+    with _runtime_lock:
+        if _runtime_inflight:
+            raise RuntimeError("cannot reset SSE runtime with active recomputes")
+        _runtime_timed_out.clear()
+        _RECOMPUTE_MAX_PENDING = max(1, int(max_pending))
+        _recompute_slots = threading.BoundedSemaphore(_RECOMPUTE_MAX_PENDING)
+        _runtime_closed = False
 
 def _refresh_interval_ms(market: str) -> int:
     # 默认值与 config 实际值(均 8000)对齐:getattr 默认仅在 config 缺该属性时生效,
@@ -29,6 +166,46 @@ def _refresh_interval_ms(market: str) -> int:
     if market == "us":
         return int(getattr(config, "SSE_REFRESH_MS_US", 8000))
     return int(getattr(config, "SSE_REFRESH_MS", 8000))
+
+
+def _client_identity(flask_app, cookie_header, remote_ip) -> str:
+    cookies = parse_cookie(cookie_header or "")
+    session_name = flask_app.config.get("SESSION_COOKIE_NAME", "session") or "session"
+    session_value = cookies.get(session_name)
+    serializer = flask_app.session_interface.get_signing_serializer(flask_app)
+    if session_value and serializer is not None:
+        try:
+            session_data = serializer.loads(
+                session_value,
+                max_age=flask_app.permanent_session_lifetime.total_seconds(),
+            )
+        except Exception:
+            session_data = None
+        if isinstance(session_data, dict) and session_data.get("_user_id"):
+            source = (
+                f"session:{session_data['_user_id']}:"
+                f"{session_data.get('_id', '')}"
+            )
+            return hashlib.sha256(source.encode("utf-8")).hexdigest()
+
+    remember_name = (
+        flask_app.config.get("REMEMBER_COOKIE_NAME", "remember_token")
+        or "remember_token"
+    )
+    remember_value = cookies.get(remember_name)
+    try:
+        remember_user = (
+            decode_cookie(remember_value, key=flask_app.secret_key)
+            if remember_value
+            else None
+        )
+    except Exception:
+        remember_user = None
+    if remember_user:
+        source = f"remember:{remember_user}:{remote_ip or 'unknown'}"
+    else:
+        source = f"ip:{remote_ip or 'unknown'}"
+    return hashlib.sha256(source.encode("utf-8")).hexdigest()
 
 
 class SseStreamHandler(tornado.web.RequestHandler):
@@ -46,9 +223,8 @@ class SseStreamHandler(tornado.web.RequestHandler):
         symbol = self.get_argument("symbol", "")
         resolution = self.get_argument("resolution", "")
 
-        if not is_request_authenticated(
-            self._flask_app, self.request.headers.get("Cookie")
-        ):
+        cookie_header = self.request.headers.get("Cookie")
+        if not is_request_authenticated(self._flask_app, cookie_header):
             self.set_status(401)
             self.finish()
             return
@@ -75,7 +251,12 @@ class SseStreamHandler(tornado.web.RequestHandler):
         # H1: 若该 key 刷新循环已存在,我是"后加入者"。循环只在指纹变化时推,数据停滞期
         # (收盘/盘整)后加入者可能一帧都收不到 → 记下,订阅成功后给自己补发一次当前快照。
         joining_existing = self._cache_key in _hub.active_keys()
-        if not _hub.subscribe(self._cache_key, self, start_loop):
+        client_id = _client_identity(
+            self._flask_app, cookie_header, self.request.remote_ip
+        )
+        if not _hub.subscribe(
+            self._cache_key, self, start_loop, client_id=client_id
+        ):
             self.set_status(503)
             self.finish()
             return
@@ -109,9 +290,10 @@ class SseStreamHandler(tornado.web.RequestHandler):
                 ctx["running"] = True
                 try:
                     # 阻塞的拉数据+重算丢线程池, 不阻塞 IOLoop。
-                    chart_data = await IOLoop.current().run_in_executor(
-                        pool, recompute_chart_data,
-                        market, code, frequency, cl_config, cache_key,
+                    _completed, chart_data = await _run_recompute_bounded(
+                        pool,
+                        ctx,
+                        (market, code, frequency, cl_config, cache_key),
                     )
                     should = False
                     if chart_data is not None:
@@ -130,8 +312,11 @@ class SseStreamHandler(tornado.web.RequestHandler):
                             {"s": "ok", "update": True, "full_snapshot": True, **chart_data}
                         )
                     # list() 快照: _send 失败会注销 client(改 hub), 避免迭代中修改。
-                    for client in list(_hub.clients_of(cache_key)):
-                        await client._send(data_str)
+                    clients = list(_hub.clients_of(cache_key))
+                    if clients:
+                        await asyncio.gather(
+                            *(client._send(data_str) for client in clients)
+                        )
                 finally:
                     ctx["running"] = False
 
@@ -149,7 +334,7 @@ class SseStreamHandler(tornado.web.RequestHandler):
                 self.write("event: chanlun\ndata: " + data_str + "\n\n")
             else:
                 self.write(": ping\n\n")
-            await self.flush()
+            await asyncio.wait_for(self.flush(), timeout=_SEND_TIMEOUT_SECONDS)
         except Exception:
             self._unsub()
 

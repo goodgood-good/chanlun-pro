@@ -13,11 +13,14 @@ def test_save_to_pkl_snapshots_positions_for_async_write(monkeypatch):
     import chanlun.trading.backtest_trader as mod
 
     monkeypatch.setattr(
-        mod.fdb, "cache_pkl_to_file", lambda key, infos: captured.update(infos=infos)
+        mod.fdb,
+        "cache_pkl_to_file",
+        lambda key, infos, *, wait=False: captured.update(infos=infos, wait=wait),
     )
     tr.save_to_pkl("testkey")
     # 深拷贝快照: 与活引用不是同一对象
     assert captured["infos"]["positions"] is not tr.positions
+    assert captured["wait"] is True
     # 隔离性: 落盘后主线程再改 self.positions(模拟后台 pickle 期间的并发改)不影响已提交快照
     tr.positions["Y:1buy"] = POSITION(code="Y", mmd="1buy", amount=50)
     assert "Y:1buy" not in captured["infos"]["positions"]

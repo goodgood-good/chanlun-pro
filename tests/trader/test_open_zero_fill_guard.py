@@ -86,9 +86,42 @@ def test_online_mode_zero_fill_rejected():
     """
     t = BackTestTrader("t", mode="online", market="currency", init_balance=100000, fee_rate=0.0)
     t.datas = _FakeDatas()
+    # 本用例只验证明确零成交守卫；WAL 顺序/fail-closed 由 test_persist_recovery 覆盖。
+    t.wal_write_intent = lambda code, opt: True
+    t.wal_clear_intent = lambda code, opt: True
     t.open_buy = lambda code, opt: {"price": 10.0, "amount": 0.0}
     result = t.execute("X", Operation("X", "buy", "1buy", pos_rate=1.0, key="ok5"), None)
     assert result is False, "online 零成交必须被基类守卫拒绝"
     pos = t.positions["X:1buy"]
     assert pos.now_pos_rate == 0.0
     assert pos.amount == 0.0
+
+
+def test_open_partial_fill_same_key_retries_without_mutating_operation():
+    t = _trader("us")
+    requested_rates = []
+    fills = iter(((20.0, 50.0), (30.0, 30.0)))
+
+    def partial_open(code, opt):
+        requested_rates.append(opt.pos_rate)
+        amount, requested_amount = next(fills)
+        return {
+            "price": 10.0,
+            "amount": amount,
+            "requested_amount": requested_amount,
+        }
+
+    t.open_buy = partial_open
+    operation = Operation("X", "buy", "1buy", pos_rate=0.5, key="partial")
+
+    assert t.execute("X", operation) is True
+    assert t.execute("X", operation) is True
+    assert t.execute("X", operation) is False
+
+    pos = t.positions["X:1buy"]
+    assert requested_rates == [0.5, 0.3]
+    assert operation.pos_rate == 0.5
+    assert pos.open_keys["partial"] == 0.5
+    assert pos.now_pos_rate == 0.5
+    assert pos.amount == 50.0
+    assert [record["pos_rate"] for record in pos.open_records] == [0.2, 0.3]

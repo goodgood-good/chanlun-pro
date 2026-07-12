@@ -27,8 +27,8 @@ from chanlun.persistence.db import db
 from chanlun.exchange import get_exchange
 from chanlun.exchange.lb_priority import lb_low_priority
 from chanlun.tools.log_util import LogUtil
+from chanlun.tools.daemon_executor import DaemonExecutor
 
-from ..csrf import csrf
 from ..services.constants import (
     frequency_maps,
     resolution_maps,
@@ -51,6 +51,7 @@ from ..services.chart_cache import (  # noqa: E402
     _chart_cache_disk_executor,
     _full_snapshot_is_stale,
     _get_chart_cache_entry,
+    _get_chart_cache_entry_ram_only,
     _is_negatively_cached,
     _mark_chart_cache_validated,
     _mark_negative_cache,
@@ -236,6 +237,37 @@ def _legacy_drawing_storage_name(symbol: str, resolution: str):
 # fx(tdx 外汇)是 native 源(每次调用新建 TdxExHq_API 连接),并行只会徒增连接压力,
 # 故移出本集合,与 symbols.py 的 _NATIVE_SERIAL_MARKETS({a,futures,ny_futures,fx})对齐。
 _PREWARM_INTERVALS_PARALLEL_MARKETS = {"us", "hk", "currency", "currency_spot"}
+_PREWARM_PARALLEL_TIMEOUT_SECONDS = 60.0
+
+
+def _run_parallel_prewarm(intervals, compute, should_abort):
+    """Run one bounded parallel batch without joining hung dependency calls."""
+    interval_list = list(intervals)
+    if not interval_list:
+        return True
+    executor = DaemonExecutor(
+        max_workers=len(interval_list),
+        thread_name_prefix="PrewarmInterval",
+        max_pending=len(interval_list),
+    )
+    futures = []
+    deadline = time.monotonic() + max(
+        0.01, float(_PREWARM_PARALLEL_TIMEOUT_SECONDS)
+    )
+    try:
+        futures = [executor.submit(compute, interval) for interval in interval_list]
+        for future in futures:
+            try:
+                future.result(timeout=max(0.0, deadline - time.monotonic()))
+            except Exception as exc:
+                LogUtil.error(f"[tv_history] prewarm future error: {exc}")
+            if should_abort():
+                return False
+        return True
+    finally:
+        for future in futures:
+            future.cancel()
+        executor.shutdown(wait=False, cancel_futures=True)
 
 def prewarm_common_intervals(market, code, cl_config):
     """
@@ -391,30 +423,18 @@ def prewarm_common_intervals(market, code, cl_config):
 
             use_parallel = market in _PREWARM_INTERVALS_PARALLEL_MARKETS
             if use_parallel:
-                # HTTP 市场：4 周期并行，总耗时 ≈ max(各周期)；局部 import 避免顶层依赖扩散
-                from concurrent.futures import ThreadPoolExecutor
-                with ThreadPoolExecutor(
-                    max_workers=len(COMMON_INTERVALS),
-                    thread_name_prefix="PrewarmInterval",
-                ) as executor:
-                    futures = [
-                        executor.submit(_compute_one_interval, interval, ex, tz_sh)
-                        for interval in COMMON_INTERVALS
-                    ]
-                    for fut in futures:
-                        try:
-                            fut.result(timeout=60)
-                        except Exception as e:
-                            LogUtil.error(f"[tv_history] prewarm future error: {e}")
-                        # 每个周期完成后检查一次让位
-                        if _user_acted_after_prewarm_start() or not _is_still_latest():
-                            # 取消剩余 futures（已开始的会跑完，未开始的会被跳过 _compute_one_interval 内部检查）
-                            for f in futures:
-                                f.cancel()
-                            LogUtil.warning(
-                                f"[tv_history] Prewarm aborted (user acted) for {market}:{code}"
-                            )
-                            break
+                completed = _run_parallel_prewarm(
+                    COMMON_INTERVALS,
+                    lambda interval: _compute_one_interval(interval, ex, tz_sh),
+                    lambda: (
+                        _user_acted_after_prewarm_start()
+                        or not _is_still_latest()
+                    ),
+                )
+                if not completed:
+                    LogUtil.warning(
+                        f"[tv_history] Prewarm aborted (user acted) for {market}:{code}"
+                    )
             else:
                 # native 市场（a 股等）：保持串行避免线程安全问题
                 for interval in COMMON_INTERVALS:
@@ -438,16 +458,7 @@ def prewarm_common_intervals(market, code, cl_config):
 @tv_bp.route("/tv/config")
 @login_required
 def tv_config():
-    frequencys = list(
-        set(market_frequencys["a"])
-        | set(market_frequencys["hk"])
-        | set(market_frequencys["fx"])
-        | set(market_frequencys["us"])
-        | set(market_frequencys["futures"])
-        | set(market_frequencys["currency"])
-        | set(market_frequencys["currency_spot"])
-    )
-    supportedResolutions = [v for k, v in frequency_maps.items() if k in frequencys]
+    supportedResolutions = list(frequency_maps.values())
     return {
         "supports_search": True,
         "supports_group_request": False,
@@ -627,6 +638,12 @@ def tv_quotes():
             for sym in code_map.values():
                 data.append({"s": "error", "n": sym, "v": {}})
             continue
+        if not isinstance(stock_ticks, dict):
+            LogUtil.warning(
+                f"[tv_quotes] ticks returned invalid payload market={market} "
+                f"type={type(stock_ticks).__name__}"
+            )
+            stock_ticks = {}
         for code, sym in code_map.items():
             t = stock_ticks.get(code)
             if t is None or t.last is None:
@@ -798,7 +815,7 @@ def _lazy_writeback_htf(
         # R15-C1: 基于缓存 entry 当前 data 补算(而非请求入口 T0 读到的 cl_chart_data 陈旧快照),
         # 否则并发写者(SSE/revalidate 持 chart_calc_locks 完成的全量重算)在 T0 后写入的新缠论
         # 会被这里的回写整体覆盖(TOCTOU 数据丢失)。缓存缺 entry 时回退用传入快照。
-        _existing = _get_chart_cache_entry(cache_key)
+        _existing = _get_chart_cache_entry_ram_only(cache_key)
         _base = (_existing or {}).get("data")
         if _base is None:
             _base = cl_chart_data
@@ -857,7 +874,9 @@ def tv_history():
         # 美股/港股、qmt A股), 会落到各 exchange 不一致的处理(cq 返回空 / qmt·binance frequency_map
         # KeyError 抛 500 / tdx 系碰巧 frequency_map 有 q 而拉季线)。统一在此干净拒绝, 后端不依赖前端
         # 闸门。market_frequencys[market] 为空(exchange 初始化失败)时跳过本检查, 避免误拦正常请求。
-        _supported_freqs = market_frequencys.get(market, [])
+        _supported_freqs = market_frequencys.cached_snapshot((market,)).get(
+            market, []
+        )
         if _supported_freqs and frequency not in _supported_freqs:
             LogUtil.warning(
                 f"[tv_history] market={market} 不支持周期 {frequency}(resolution={resolution}), 拒绝"
@@ -919,8 +938,10 @@ def tv_history():
         _needs_refresh = False
         _calc_lock = chart_calc_locks.get(cache_key)
         with _calc_lock:
+            # RAM miss may synchronously read a pickle. Keep that I/O outside the
+            # process-wide cache lock; the per-key calc lock still serializes writes.
+            cache_entry = _get_chart_cache_entry(cache_key)
             with cache_lock:
-                cache_entry = _get_chart_cache_entry(cache_key)
                 is_cache_hit, cl_chart_data, miss_reason, _needs_refresh = (
                     evaluate_cache_for_tv_history(
                         cache_entry, _from, _to, is_range_request,
@@ -1043,7 +1064,7 @@ def tv_history():
         # M2: 补算 + 回写整体放进 cache_lock。apply_higher_macd 是对 cache 内共享
         #     chart_data 的 in-place 修改，必须与 _persist_chart_cache_async 的
         #     deepcopy 互斥；should_lazy 在锁内复查，并发请求只有一个真正补算。
-        if is_cache_hit and cl_chart_data is not None:
+        if is_cache_hit and cl_chart_data is not None and not _needs_refresh:
             cl_chart_data = _lazy_writeback_htf(
                 cache_key, cl_chart_data, frequency, market, cl_config, symbol, resolution
             )
@@ -1163,7 +1184,10 @@ def tv_history():
     except Exception as e:
         req_qs = request.query_string.decode("utf-8", errors="ignore")
         LogUtil.error(f"[tv_history] unhandled error query={req_qs} err={e}", exc_info=True)
-        return {"s": "no_data"}
+        return {
+            "s": "error",
+            "errmsg": "History service is temporarily unavailable.",
+        }, 503
 
 
 @tv_bp.route("/tv/timescale_marks")
@@ -1275,7 +1299,6 @@ def tv_marks():
 # TradingView charting_library 是第三方 JS 库，无法注入 CSRF token，
 # 这些路由通过 @login_required 保证只有登录用户可访问，CSRF 风险可控。
 @tv_bp.route("/tv/del_marks", methods=["POST"])
-@csrf.exempt
 @login_required
 def tv_del_marks():
     symbol = request.form["symbol"]
@@ -1295,7 +1318,6 @@ def tv_time():
 
 
 @tv_bp.route("/tv/<version>/charts", methods=["GET", "POST", "DELETE"])
-@csrf.exempt
 @login_required
 def tv_charts(version):
     client_id = str(request.args.get("client"))
@@ -1369,7 +1391,6 @@ def tv_charts(version):
 
 
 @tv_bp.route("/tv/<version>/study_templates", methods=["GET", "POST", "DELETE"])
-@csrf.exempt
 @login_required
 def tv_study_templates(version):
     client_id = str(request.args.get("client"))
@@ -1408,7 +1429,6 @@ def tv_study_templates(version):
 
 
 @tv_bp.route("/tv/<version>/drawings", methods=["GET", "POST"])
-@csrf.exempt
 @login_required
 def tv_drawings(version):
     client_id = str(request.args.get("client"))
@@ -1422,8 +1442,19 @@ def tv_drawings(version):
     legacy_drawing_name = _legacy_drawing_storage_name(symbol, resolution)
 
     if request.method == "POST":
-        payload = request.get_json(silent=True) or {}
-        content = payload.get("state", {})
+        payload = request.get_json(silent=True)
+        if request.is_json and not isinstance(payload, dict):
+            return {
+                "status": "error",
+                "message": "JSON body must be an object.",
+            }, 400
+        payload = payload or {}
+        content = payload.get("state")
+        if not isinstance(content, dict):
+            return {
+                "status": "error",
+                "message": "state must be a JSON object.",
+            }, 400
         db.tv_chart_save(
             "drawing",
             client_id,
