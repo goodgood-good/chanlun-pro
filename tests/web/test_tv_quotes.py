@@ -79,6 +79,22 @@ def test_tv_quotes_ticks_failure_degrades_per_market(client, monkeypatch):
     assert j["d"][0]["n"] == "a:SH.513100"
 
 
+def test_tv_quotes_none_ticks_degrades_without_500(client, monkeypatch):
+    class _NoneExchange:
+        def ticks(self, _codes):
+            return None
+
+    monkeypatch.setattr(tv_mod, "get_exchange", lambda _market: _NoneExchange())
+
+    response = client.get("/tv/quotes?symbols=a:SH.513100")
+
+    assert response.status_code == 200
+    assert response.get_json() == {
+        "s": "ok",
+        "d": [{"s": "error", "n": "a:SH.513100", "v": {}}],
+    }
+
+
 def test_tv_quotes_empty_symbols(client):
     j = client.get("/tv/quotes?symbols=").get_json()
     assert j == {"s": "ok", "d": []}

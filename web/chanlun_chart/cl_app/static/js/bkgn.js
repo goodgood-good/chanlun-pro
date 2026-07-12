@@ -7,11 +7,19 @@ var BKGN = (function () {
   var currentStockData = [];    // 下层完整数据，前端过滤的源
   var visibleStocks = [];       // 当前下层 table 渲染中的数据（搜索过滤后）
   var currentStockIndex = -1;   // 键盘导航当前选中行（基于 visibleStocks）
+  var stockRequestGeneration = 0;
   var bkgnRowClickBound = false;
   var stockRowClickBound = false;
   var searchHandlersBound = false;
   var SEARCH_DEBOUNCE_MS = 200;
   var TABLE_HEIGHT = 280;
+  function appAjax(options) {
+    var requestOptions = Object.assign({ timeout: 10000 }, options || {});
+    if (window.AppRequest && typeof window.AppRequest.ajax === "function") {
+      return window.AppRequest.ajax(requestOptions);
+    }
+    return $.ajax(requestOptions);
+  }
 
   function init_bkgn_opts() {
     bind_search_handlers();
@@ -32,13 +40,19 @@ var BKGN = (function () {
       render_bkgn_table(allBkgnList);
       return;
     }
-    $.get("/a/bkgn_list", function (res) {
+    appAjax({
+      url: "/a/bkgn_list",
+      type: "GET",
+      dataType: "json",
+    }).done(function (res) {
       if (res && res.code === 0) {
         allBkgnList = res.data || [];
         render_bkgn_table(allBkgnList);
       } else {
         layer.msg("获取板块概念失败");
       }
+    }).fail(function () {
+      layer.msg("获取板块概念失败");
     });
   }
 
@@ -91,25 +105,36 @@ var BKGN = (function () {
 
   function load_bkgn_codes(type, code) {
     var key = type + "|" + code;
+    var requestGeneration = ++stockRequestGeneration;
     if (stocksCache.has(key)) {
-      render_bkgn_stock_table(stocksCache.get(key));
+      if (key === currentBkgnKey) {
+        render_bkgn_stock_table(stocksCache.get(key));
+      }
       return;
     }
-    layer.load(1);
-    $.post(
-      "/a/bkgn_codes",
-      { bkgn_type: type, bkgn_code: code },
-      function (res) {
-        layer.closeAll("loading");
-        if (res && res.code === 0) {
-          var stocks = res.data || {};
-          stocksCache.set(key, stocks);
+    var loadingIndex = layer.load(1);
+    appAjax({
+      url: "/a/bkgn_codes",
+      type: "POST",
+      data: { bkgn_type: type, bkgn_code: code },
+      dataType: "json",
+    }).done(function (res) {
+      if (res && res.code === 0) {
+        var stocks = res.data || {};
+        stocksCache.set(key, stocks);
+        if (requestGeneration === stockRequestGeneration && key === currentBkgnKey) {
           render_bkgn_stock_table(stocks);
-        } else {
-          layer.msg("获取股票列表失败");
         }
+      } else if (requestGeneration === stockRequestGeneration) {
+        layer.msg("获取股票列表失败");
       }
-    );
+    }).fail(function () {
+      if (requestGeneration === stockRequestGeneration) {
+        layer.msg("获取股票列表失败");
+      }
+    }).always(function () {
+      layer.close(loadingIndex);
+    });
   }
 
   function stocks_to_list(stocks) {
@@ -122,13 +147,21 @@ var BKGN = (function () {
     return list;
   }
 
+  function stock_code_template(code) {
+    var span = document.createElement("span");
+    span.className = "symbol-code-link";
+    span.textContent = String(code == null ? "" : code);
+    return span.outerHTML;
+  }
+
   function render_bkgn_stock_table(stocks) {
     currentStockData = stocks_to_list(stocks);
     $("#bkgn_stock_search").val(""); // 切换板块时清空下层搜索
-    do_render_stock_table(currentStockData);
+    do_render_stock_table(currentStockData, { focus: true });
   }
 
-  function do_render_stock_table(data) {
+  function do_render_stock_table(data, opts) {
+    opts = opts || {};
     visibleStocks = data;
     currentStockIndex = -1;
     layui.table.render({
@@ -140,7 +173,7 @@ var BKGN = (function () {
           title: "代码",
           width: "48%",
           templet: function (d) {
-            return '<span class="symbol-code-link">' + d.code + "</span>";
+            return stock_code_template(d.code);
           },
         },
         { field: "name", title: "名称", width: "48%" },
@@ -153,6 +186,8 @@ var BKGN = (function () {
       done: function () {
         $("#bkgn_stock_total_tip").text("共 " + data.length + " 个股票");
         bind_stock_table_keyboard();
+        // 打开某板块后自动聚焦 wrapper, 让 ↑/↓ 立即可用(搜索过滤重渲染不抢焦点)。
+        if (opts.focus) $("#bkgn_stock_wrap").focus();
       },
     });
     if (!stockRowClickBound) {
@@ -168,17 +203,18 @@ var BKGN = (function () {
     $("#ai_code").val(data.code);
     layui.table.setRowChecked("bkgn_stock_table", { index: "all", checked: false });
     layui.table.setRowChecked("bkgn_stock_table", { index: obj.index });
-    // 让 table 容器获得焦点，点完后可直接 ↑/↓ 继续浏览
-    $('.layui-table-view[lay-id="bkgn_stock_table"]').focus();
+    // 让 wrapper 获得焦点，点完后可直接 ↑/↓ 继续浏览
+    $("#bkgn_stock_wrap").focus();
   }
 
   // 键盘导航：在 layui table 渲染出的容器上监听 ↑/↓/Home/End/Enter
   // 切到目标行时立即调 change_chart_ticker，主图表跟着翻
   function bind_stock_table_keyboard() {
-    var $view = $('.layui-table-view[lay-id="bkgn_stock_table"]');
-    if (!$view.length) return;
-    if (!$view.attr("tabindex")) $view.attr("tabindex", "-1");
-    $view.off("keydown.bkgn").on("keydown.bkgn", function (e) {
+    // 键盘监听绑在稳定的外层 wrapper(#bkgn_stock_wrap)上, 而非 layui 每次渲染都重建的
+    // .layui-table-view; keydown 从内层 view 冒泡到 wrapper, 内层重渲染不丢绑定。
+    var $wrap = $("#bkgn_stock_wrap");
+    if (!$wrap.length) return;
+    $wrap.off("keydown.bkgn").on("keydown.bkgn", function (e) {
       var n = visibleStocks.length;
       if (!n) return;
       var key = e.key || "";
@@ -209,7 +245,7 @@ var BKGN = (function () {
     var item = visibleStocks[idx];
     layui.table.setRowChecked("bkgn_stock_table", { index: "all", checked: false });
     layui.table.setRowChecked("bkgn_stock_table", { index: idx });
-    var $row = $('.layui-table-view[lay-id="bkgn_stock_table"] .layui-table-body tr[data-index="' + idx + '"]');
+    var $row = $('#bkgn_stock_wrap .layui-table-body tr[data-index="' + idx + '"]');
     if ($row.length && $row[0].scrollIntoView) {
       $row[0].scrollIntoView({ block: "nearest" });
     }

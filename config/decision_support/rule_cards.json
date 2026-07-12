@@ -1,0 +1,300 @@
+{
+  "schema_version": 1,
+  "cards": [
+    {
+      "rule_id": "chanlun.trend.third_buy",
+      "version": 1,
+      "track": "trend_continuation",
+      "applicable_levels": [1],
+      "algorithm_version": "chanlun-core/recursive-branch-v1",
+      "concepts": [
+        "central_zone_retest",
+        "first_retest",
+        "third_buy"
+      ],
+      "evidence": [
+        {
+          "evidence_id": "evidence:963d729baaef59f9c7f323e0c6e0e3542dea8e6e0c40ee42737f05ba16088aca",
+          "lesson": 20,
+          "pdf_pages": [434],
+          "lesson_chart_ids": [
+            "image:59dfb11ac388f67af4fe1069f74581f38556dde9c8c7eec23ec0e3bbee7364e9"
+          ]
+        }
+      ],
+      "counterevidence": [
+        {
+          "evidence_id": "evidence:2485515b890360943094c719484776ad3e770914ca40907cd7090af711adbc73",
+          "lesson": 20,
+          "pdf_pages": [434],
+          "lesson_chart_ids": []
+        }
+      ],
+      "project_fields": [
+        "levels.1.completed_bar_count",
+        "levels.1.latest_bar_closed",
+        "market.is_tradeable",
+        "risk.stop_breached",
+        "signal.bs_type",
+        "signal.level"
+      ],
+      "data_requirements": {
+        "required_fields": [
+          "levels.1.completed_bar_count",
+          "levels.1.latest_bar_closed",
+          "market.is_tradeable",
+          "risk.stop_breached",
+          "signal.bs_type",
+          "signal.level"
+        ],
+        "required_levels": [1]
+      },
+      "completed_bar_requirements": [
+        {
+          "level": 1,
+          "minimum_count": 2,
+          "require_latest_closed": true
+        }
+      ],
+      "candidate_predicates": [
+        {
+          "predicate_id": "candidate.third_buy_signal",
+          "mode": "machine",
+          "field": "signal.bs_type",
+          "operator": "in",
+          "expected": ["3buy", "3buy_nest"],
+          "evidence_ids": [
+            "evidence:963d729baaef59f9c7f323e0c6e0e3542dea8e6e0c40ee42737f05ba16088aca"
+          ]
+        }
+      ],
+      "confirmation_predicates": [
+        {
+          "predicate_id": "confirmation.first_retest_chart",
+          "mode": "manual",
+          "manual_check_id": "chart.third_buy_first_retest_confirmed",
+          "prompt": "人工核对原文图示：次级别向上离开中枢后的第一次回试低点未跌破 ZG。",
+          "evidence_ids": [
+            "evidence:963d729baaef59f9c7f323e0c6e0e3542dea8e6e0c40ee42737f05ba16088aca"
+          ]
+        }
+      ],
+      "invalidation_predicates": [
+        {
+          "predicate_id": "invalidation.structural_stop_breached",
+          "mode": "machine",
+          "field": "risk.stop_breached",
+          "operator": "is_true",
+          "evidence_ids": [
+            "evidence:2485515b890360943094c719484776ad3e770914ca40907cd7090af711adbc73"
+          ]
+        }
+      ],
+      "conflict_predicates": [
+        {
+          "predicate_id": "conflict.market_not_tradeable",
+          "mode": "machine",
+          "field": "market.is_tradeable",
+          "operator": "is_false",
+          "evidence_ids": [
+            "evidence:2485515b890360943094c719484776ad3e770914ca40907cd7090af711adbc73"
+          ]
+        }
+      ],
+      "automation_boundary": {
+        "machine_predicate_ids": [
+          "candidate.third_buy_signal",
+          "conflict.market_not_tradeable",
+          "invalidation.structural_stop_breached"
+        ],
+        "manual_check_ids": [
+          "chart.third_buy_first_retest_confirmed"
+        ]
+      }
+    },
+    {
+      "rule_id": "chanlun.bottom_reversal.interval_nest",
+      "version": 1,
+      "track": "bottom_reversal",
+      "applicable_levels": [1],
+      "algorithm_version": "chanlun-core/interval-nest-v1",
+      "concepts": [
+        "first_buy",
+        "interval_nesting",
+        "trend_divergence"
+      ],
+      "evidence": [
+        {
+          "evidence_id": "evidence:732d6314ae21572e7911f638de88abbd2e133feb68e12fdbaa1ce0b0f79cc4ac",
+          "lesson": 24,
+          "pdf_pages": [603],
+          "lesson_chart_ids": []
+        },
+        {
+          "evidence_id": "evidence:a9e53f371bfc0c13d8f61657b6a09594a31de1c9bd168f813d7d434eba377077",
+          "lesson": 27,
+          "pdf_pages": [769],
+          "lesson_chart_ids": []
+        },
+        {
+          "evidence_id": "evidence:777fb5942be903342ed7523cd7277d2144d6ca9e3336dacf4003008682153357",
+          "lesson": 53,
+          "pdf_pages": [1582],
+          "lesson_chart_ids": []
+        }
+      ],
+      "counterevidence": [
+        {
+          "evidence_id": "evidence:6d3ec2b9ac4214a347cc789ab8d75d8da02f76f671166a088b7cb64cc2ee7322",
+          "lesson": 44,
+          "pdf_pages": [1312],
+          "lesson_chart_ids": []
+        }
+      ],
+      "project_fields": [
+        "levels.1.completed_bar_count",
+        "levels.1.latest_bar_closed",
+        "market.is_tradeable",
+        "risk.stop_breached",
+        "signal.bs_type",
+        "signal.confirmation_bs_type",
+        "signal.divergence_kind",
+        "signal.level",
+        "signal.live_divergence",
+        "signal.nest_depth",
+        "signal.nest_operable"
+      ],
+      "data_requirements": {
+        "required_fields": [
+          "levels.1.completed_bar_count",
+          "levels.1.latest_bar_closed",
+          "market.is_tradeable",
+          "risk.stop_breached",
+          "signal.bs_type",
+          "signal.confirmation_bs_type",
+          "signal.divergence_kind",
+          "signal.level",
+          "signal.live_divergence",
+          "signal.nest_depth",
+          "signal.nest_operable"
+        ],
+        "required_levels": [1]
+      },
+      "completed_bar_requirements": [
+        {
+          "level": 1,
+          "minimum_count": 2,
+          "require_latest_closed": true
+        }
+      ],
+      "candidate_predicates": [
+        {
+          "predicate_id": "candidate.first_buy_nested",
+          "mode": "machine",
+          "field": "signal.bs_type",
+          "operator": "eq",
+          "expected": "1buy_nest",
+          "evidence_ids": [
+            "evidence:a9e53f371bfc0c13d8f61657b6a09594a31de1c9bd168f813d7d434eba377077"
+          ]
+        },
+        {
+          "predicate_id": "candidate.nest_depth_present",
+          "mode": "machine",
+          "field": "signal.nest_depth",
+          "operator": "gte",
+          "expected": 1,
+          "evidence_ids": [
+            "evidence:a9e53f371bfc0c13d8f61657b6a09594a31de1c9bd168f813d7d434eba377077"
+          ]
+        },
+        {
+          "predicate_id": "candidate.nest_operable",
+          "mode": "machine",
+          "field": "signal.nest_operable",
+          "operator": "is_true",
+          "evidence_ids": [
+            "evidence:a9e53f371bfc0c13d8f61657b6a09594a31de1c9bd168f813d7d434eba377077"
+          ]
+        }
+      ],
+      "confirmation_predicates": [
+        {
+          "predicate_id": "confirmation.second_or_third_buy",
+          "mode": "machine",
+          "field": "signal.confirmation_bs_type",
+          "operator": "in",
+          "expected": ["2buy", "3buy"],
+          "evidence_ids": [
+            "evidence:777fb5942be903342ed7523cd7277d2144d6ca9e3336dacf4003008682153357"
+          ]
+        },
+        {
+          "predicate_id": "confirmation.trend_divergence",
+          "mode": "machine",
+          "field": "signal.divergence_kind",
+          "operator": "eq",
+          "expected": "qs",
+          "evidence_ids": [
+            "evidence:732d6314ae21572e7911f638de88abbd2e133feb68e12fdbaa1ce0b0f79cc4ac"
+          ]
+        },
+        {
+          "predicate_id": "confirmation.live_divergence",
+          "mode": "machine",
+          "field": "signal.live_divergence",
+          "operator": "is_true",
+          "evidence_ids": [
+            "evidence:732d6314ae21572e7911f638de88abbd2e133feb68e12fdbaa1ce0b0f79cc4ac"
+          ]
+        },
+        {
+          "predicate_id": "confirmation.interval_nest_chart",
+          "mode": "manual",
+          "manual_check_id": "chart.interval_nest_confirmed",
+          "prompt": "人工核对多级别图表：大级别背驰段被逐级包含，定位链没有跨级跳跃。",
+          "evidence_ids": [
+            "evidence:a9e53f371bfc0c13d8f61657b6a09594a31de1c9bd168f813d7d434eba377077"
+          ]
+        }
+      ],
+      "invalidation_predicates": [
+        {
+          "predicate_id": "invalidation.structural_stop_breached",
+          "mode": "machine",
+          "field": "risk.stop_breached",
+          "operator": "is_true",
+          "evidence_ids": [
+            "evidence:6d3ec2b9ac4214a347cc789ab8d75d8da02f76f671166a088b7cb64cc2ee7322"
+          ]
+        }
+      ],
+      "conflict_predicates": [
+        {
+          "predicate_id": "conflict.market_not_tradeable",
+          "mode": "machine",
+          "field": "market.is_tradeable",
+          "operator": "is_false",
+          "evidence_ids": [
+            "evidence:6d3ec2b9ac4214a347cc789ab8d75d8da02f76f671166a088b7cb64cc2ee7322"
+          ]
+        }
+      ],
+      "automation_boundary": {
+        "machine_predicate_ids": [
+          "candidate.first_buy_nested",
+          "candidate.nest_depth_present",
+          "candidate.nest_operable",
+          "conflict.market_not_tradeable",
+          "confirmation.live_divergence",
+          "confirmation.second_or_third_buy",
+          "confirmation.trend_divergence",
+          "invalidation.structural_stop_breached"
+        ],
+        "manual_check_ids": [
+          "chart.interval_nest_confirmed"
+        ]
+      }
+    }
+  ]
+}

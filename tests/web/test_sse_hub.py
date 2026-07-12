@@ -56,8 +56,8 @@ def test_last_unsub_stops_loop():
     assert "k" not in hub.active_keys()
 
 
-def test_max_loops_lru_evicts():
-    """达上限时 LRU 淘汰最老循环而非拒绝 503: k2 订阅成功, k1 被淘汰并停止。"""
+def test_max_loops_rejects_new_key_without_evicting_active_stream():
+    """满载时拒绝新 key，已连接用户的流不能被驱逐。"""
     hub = SseHub(max_loops=1)
     loops = {}
 
@@ -67,14 +67,13 @@ def test_max_loops_lru_evicts():
         return loop
 
     assert hub.subscribe("k1", "c", start) is True
-    assert hub.subscribe("k2", "c", start) is True  # 不再 False; LRU 淘汰 k1
-    assert loops["k1"].stopped is True
-    assert "k1" not in hub.active_keys()
-    assert "k2" in hub.active_keys()
+    assert hub.subscribe("k2", "c2", start) is False
+    assert loops["k1"].stopped is False
+    assert "k1" in hub.active_keys()
+    assert "k2" not in hub.active_keys()
 
 
-def test_active_sub_refreshes_lru():
-    """活跃订阅刷新 LRU 位置, 不被优先淘汰。"""
+def test_existing_key_can_add_client_without_consuming_loop_slot():
     hub = SseHub(max_loops=2)
     loops = {}
 
@@ -85,11 +84,11 @@ def test_active_sub_refreshes_lru():
 
     hub.subscribe("k1", "c", start)
     hub.subscribe("k2", "c", start)
-    hub.subscribe("k1", "c2", start)  # k1 再活跃 → 移到 LRU 末尾
-    hub.subscribe("k3", "c", start)   # 达上限 → 淘汰最老 k2(非 k1)
-    assert loops["k2"].stopped is True
+    assert hub.subscribe("k1", "c2", start) is True
+    assert hub.subscribe("k3", "c3", start) is False
+    assert loops["k2"].stopped is False
     assert loops["k1"].stopped is False
-    assert set(hub.active_keys()) == {"k1", "k3"}
+    assert set(hub.active_keys()) == {"k1", "k2"}
 
 
 class FakeClient:
@@ -101,9 +100,7 @@ class FakeClient:
         self.unsubbed = True
 
 
-def test_lru_force_evict_unsubs_active_clients():
-    """M3: 满载且全部有活跃 client 时,强制淘汰最老循环并 _unsub 其 client(令前端重连),
-    而非留半僵尸连接(循环停了但 client 卡在 _closed.wait、连心跳都收不到)。"""
+def test_full_hub_never_unsubscribes_active_clients():
     hub = SseHub(max_loops=2)
     loops = {}
 
@@ -115,11 +112,11 @@ def test_lru_force_evict_unsubs_active_clients():
     a, b, c = FakeClient("a"), FakeClient("b"), FakeClient("c")
     hub.subscribe("k1", a, start)
     hub.subscribe("k2", b, start)
-    hub.subscribe("k3", c, start)  # 满载,k1/k2 都有 client → 强制淘汰最老 k1
-    assert loops["k1"].stopped is True
-    assert a.unsubbed is True       # 被淘汰循环的 client 已 _unsub(干净关闭)
-    assert b.unsubbed is False      # 未被淘汰的不动
-    assert set(hub.active_keys()) == {"k2", "k3"}
+    assert hub.subscribe("k3", c, start) is False
+    assert loops["k1"].stopped is False
+    assert a.unsubbed is False
+    assert b.unsubbed is False
+    assert set(hub.active_keys()) == {"k1", "k2"}
 
 
 def test_lru_prefers_empty_sub_over_active():
@@ -140,3 +137,26 @@ def test_lru_prefers_empty_sub_over_active():
     assert "kx" not in hub.active_keys()
     assert "ky" in hub.active_keys()
     assert y.unsubbed is False           # 非强制路径,ky 的 client 不被 unsub
+
+
+def test_connection_limit_applies_per_client_identity():
+    hub = SseHub(max_loops=10, max_connections_per_client=2)
+
+    def start(_key):
+        return FakeLoop()
+
+    assert hub.subscribe("k1", FakeClient("a"), start, client_id="session-a") is True
+    assert hub.subscribe("k2", FakeClient("b"), start, client_id="session-a") is True
+    assert hub.subscribe("k3", FakeClient("c"), start, client_id="session-a") is False
+    assert hub.subscribe("k3", FakeClient("d"), start, client_id="session-b") is True
+
+
+def test_connection_limit_applies_per_key():
+    hub = SseHub(max_clients_per_key=2)
+
+    def start(_key):
+        return FakeLoop()
+
+    assert hub.subscribe("k", FakeClient("a"), start, client_id="a") is True
+    assert hub.subscribe("k", FakeClient("b"), start, client_id="b") is True
+    assert hub.subscribe("k", FakeClient("c"), start, client_id="c") is False

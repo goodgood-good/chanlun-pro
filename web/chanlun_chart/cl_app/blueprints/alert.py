@@ -161,85 +161,114 @@ def _parse_interval_minutes(value, default=60):
     return max(1, min(minutes, 1380))
 
 
+def _binary_form_value(name, required=False):
+    value = request.form.get(name)
+    if value in {None, ""} and not required:
+        return 0
+    if value not in {"0", "1"}:
+        raise ValueError(f"{name} must be 0 or 1")
+    return int(value)
+
+
+def _integer_form_value(name, default=0, minimum=0, maximum=10000):
+    value = request.form.get(name)
+    if value in {None, ""}:
+        return default
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be an integer") from exc
+    if not minimum <= parsed <= maximum:
+        raise ValueError(f"{name} is out of range")
+    return parsed
+
+
+def _required_form_text(name, maximum=128):
+    value = str(request.form.get(name) or "").strip()
+    if not value or len(value) > maximum:
+        raise ValueError(f"{name} is required")
+    return value
+
+
 @alert_bp.route("/alert_save", methods=["POST"])
 @login_required
 def alert_save():
     _alert_tasks = current_app.extensions.get("alert_tasks")
-    check_idx_ma_infos = json.dumps(
-        {
-            "enable": (
-                int(request.form["check_idx_ma_info_enable"])
-                if request.form["check_idx_ma_info_enable"]
-                else 0
+    try:
+        alert_id = str(request.form.get("id") or "").strip()
+        if alert_id:
+            if not alert_id.isdigit() or int(alert_id) < 1:
+                raise ValueError("id must be a positive integer")
+        market = _required_form_text("market", maximum=32)
+        if market not in {item.value for item in Market}:
+            raise ValueError("market is invalid")
+        check_idx_ma_infos = json.dumps(
+            {
+                "enable": _binary_form_value("check_idx_ma_info_enable"),
+                "slow": _integer_form_value("check_idx_ma_info_slow"),
+                "fast": _integer_form_value("check_idx_ma_info_fast"),
+                "cross_up": _binary_form_value("check_idx_ma_info_cross_up"),
+                "cross_down": _binary_form_value("check_idx_ma_info_cross_down"),
+            }
+        )
+        check_idx_macd_infos = json.dumps(
+            {
+                "enable": _binary_form_value("check_idx_macd_info_enable"),
+                "cross_up": _binary_form_value("check_idx_macd_info_cross_up"),
+                "cross_down": _binary_form_value("check_idx_macd_info_cross_down"),
+            }
+        )
+        alert_config = {
+            "id": alert_id,
+            "market": market,
+            "task_name": _required_form_text("task_name"),
+            "interval_minutes": _parse_interval_minutes(
+                request.form.get("interval_minutes")
             ),
-            "slow": (
-                int(request.form["check_idx_ma_info_slow"])
-                if request.form["check_idx_ma_info_slow"]
-                else 0
-            ),
-            "fast": (
-                int(request.form["check_idx_ma_info_fast"])
-                if request.form["check_idx_ma_info_fast"]
-                else 0
-            ),
-            "cross_up": (
-                int(request.form["check_idx_ma_info_cross_up"])
-                if request.form["check_idx_ma_info_cross_up"]
-                else 0
-            ),
-            "cross_down": (
-                int(request.form["check_idx_ma_info_cross_down"])
-                if request.form["check_idx_ma_info_cross_down"]
-                else 0
-            ),
+            "zx_group": _required_form_text("zx_group"),
+            "frequency": _required_form_text("frequency", maximum=32),
+            "check_bi_type": request.form.get("check_bi_type", ""),
+            "check_bi_beichi": request.form.get("check_bi_beichi", ""),
+            "check_bi_mmd": request.form.get("check_bi_mmd", ""),
+            "check_xd_type": request.form.get("check_xd_type", ""),
+            "check_xd_beichi": request.form.get("check_xd_beichi", ""),
+            "check_xd_mmd": request.form.get("check_xd_mmd", ""),
+            "check_idx_ma_info": check_idx_ma_infos,
+            "check_idx_macd_info": check_idx_macd_infos,
+            "is_send_msg": _binary_form_value("is_send_msg", required=True),
+            "is_run": _binary_form_value("is_run", required=True),
         }
-    )
-    check_idx_macd_infos = json.dumps(
-        {
-            "enable": (
-                int(request.form["check_idx_macd_info_enable"])
-                if request.form["check_idx_macd_info_enable"]
-                else 0
-            ),
-            "cross_up": (
-                int(request.form["check_idx_macd_info_cross_up"])
-                if request.form["check_idx_macd_info_cross_up"]
-                else 0
-            ),
-            "cross_down": (
-                int(request.form["check_idx_macd_info_cross_down"])
-                if request.form["check_idx_macd_info_cross_down"]
-                else 0
-            ),
-        }
-    )
-    alert_config = {
-        "id": request.form["id"],
-        "market": request.form["market"],
-        "task_name": request.form["task_name"],
-        "interval_minutes": _parse_interval_minutes(request.form.get("interval_minutes")),
-        "zx_group": request.form["zx_group"],
-        "frequency": request.form["frequency"],
-        "check_bi_type": request.form["check_bi_type"],
-        "check_bi_beichi": request.form["check_bi_beichi"],
-        "check_bi_mmd": request.form["check_bi_mmd"],
-        "check_xd_type": request.form["check_xd_type"],
-        "check_xd_beichi": request.form["check_xd_beichi"],
-        "check_xd_mmd": request.form["check_xd_mmd"],
-        "check_idx_ma_info": check_idx_ma_infos,
-        "check_idx_macd_info": check_idx_macd_infos,
-        "is_send_msg": int(request.form["is_send_msg"]),
-        "is_run": int(request.form["is_run"]),
-    }
-    _alert_tasks.alert_save(alert_config)
+    except ValueError as exc:
+        return {
+            "ok": False,
+            "code": "invalid_request",
+            "msg": str(exc),
+        }, 400
+    try:
+        _alert_tasks.alert_save(alert_config)
+    except RuntimeError as exc:
+        if str(exc) != "scheduler is not running":
+            raise
+        return {
+            "ok": False,
+            "msg": "任务调度器未运行，请使用正式启动入口。",
+        }, 503
     return {"ok": True}
 
 
-@alert_bp.route("/alert_del/<id>")
+@alert_bp.route("/alert_del/<id>", methods=["POST"])
 @login_required
 def alert_del(id):
     _alert_tasks = current_app.extensions.get("alert_tasks")
-    res = _alert_tasks.alert_del(id)
+    try:
+        res = _alert_tasks.alert_del(id)
+    except RuntimeError as exc:
+        if str(exc) != "scheduler is not running":
+            raise
+        return {
+            "ok": False,
+            "msg": "任务调度器未运行，请使用正式启动入口。",
+        }, 503
     return {"ok": res}
 
 
@@ -274,4 +303,7 @@ def alert_records(market):
 @login_required
 def jobs():
     scheduler = current_app.extensions.get("scheduler")
-    return render_template("jobs.html", jobs=list(scheduler.my_task_list.values()))
+    from cl_app import _scheduler_task_snapshot
+
+    jobs_snapshot = _scheduler_task_snapshot(scheduler)
+    return render_template("jobs.html", jobs=jobs_snapshot)

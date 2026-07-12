@@ -7,11 +7,11 @@
 import json
 import math
 
-from flask import Blueprint, request
+from flask import Blueprint, current_app, request
 from flask_login import login_required
 
 from chanlun.market import Market
-from chanlun.exchange import get_exchange
+from chanlun.exchange import get_exchange, market_now_trading
 from chanlun.tools.log_util import LogUtil
 
 
@@ -24,6 +24,32 @@ _MAX_TICK_CODES = 500
 _VALID_MARKETS = {m.value for m in Market}
 
 
+def _error_response(code: str, message: str, status_code: int):
+    return {
+        "ok": False,
+        "market_state": "unknown",
+        "now_trading": None,
+        "ticks": [],
+        "error": {"code": code, "message": message},
+    }, status_code
+
+
+def _success_response(now_trading, ticks):
+    if now_trading is None:
+        normalized_now_trading = None
+        market_state = "unknown"
+    else:
+        normalized_now_trading = bool(now_trading)
+        market_state = "open" if normalized_now_trading else "closed"
+    return {
+        "ok": True,
+        "market_state": market_state,
+        "now_trading": normalized_now_trading,
+        "ticks": ticks,
+        "error": None,
+    }
+
+
 @other_bp.route("/ticks", methods=["POST"])
 @login_required
 def ticks():
@@ -31,25 +57,33 @@ def ticks():
     codes_raw = request.form.get("codes", "")
 
     if market not in _VALID_MARKETS:
-        return {"now_trading": False, "ticks": [], "errmsg": "invalid_market"}
+        return _error_response("invalid_market", "Unsupported market.", 400)
 
     try:
         codes = json.loads(codes_raw)
     except (json.JSONDecodeError, TypeError):
-        return {"now_trading": False, "ticks": [], "errmsg": "invalid_codes_json"}
+        return _error_response("invalid_codes_json", "codes must be valid JSON.", 400)
 
     if not isinstance(codes, list):
-        return {"now_trading": False, "ticks": [], "errmsg": "codes_not_list"}
+        return _error_response("codes_not_list", "codes must be a JSON list.", 400)
     if len(codes) > _MAX_TICK_CODES:
-        return {"now_trading": False, "ticks": [], "errmsg": "too_many_codes"}
+        return _error_response("too_many_codes", "codes exceeds the maximum size.", 400)
     # 元素必须是字符串，避免下游交易所 SDK 收到非法类型崩溃。
     if not all(isinstance(c, str) for c in codes):
-        return {"now_trading": False, "ticks": [], "errmsg": "code_must_be_string"}
+        return _error_response("code_must_be_string", "each code must be a string.", 400)
 
     try:
         ex = get_exchange(Market(market))
         stock_ticks = ex.ticks(codes)
-        now_trading = ex.now_trading()
+        try:
+            now_trading = market_now_trading(ex, market)
+        except Exception as exc:
+            # Market-hours metadata is advisory. Preserve successfully fetched
+            # prices and expose an unknown state instead of discarding the batch.
+            LogUtil.warning(
+                f"/ticks market state unavailable market={market} err={exc}"
+            )
+            now_trading = None
         # R4-C6: rate 可为 None(ib 透传 redis / binance ccxt percentage 缺省), 原列表推导内
         # float(None) 抛 TypeError 被外层 except 吞→整批(含健康标的)清空且 now_trading=False
         # 停掉前端轮询。改逐标的隔离 + `or 0` 守零, 镜像 /tv/quotes(tv.py:637)。
@@ -58,7 +92,7 @@ def ticks():
             if _t is None or _t.last is None:
                 continue
             try:
-                _price = _t.last
+                _price = float(_t.last)
                 _rate = round(float(_t.rate or 0), 2)
                 # R14-C1: NaN/Inf 不是合法 JSON(Flask allow_nan=True 输出裸 NaN token
                 # 打断前端严格 JSON.parse → 整批含健康标的全失败), 镜像 /tv/quotes(tv.py:654)降级跳过。
@@ -70,8 +104,32 @@ def ticks():
                     f"/ticks tick convert failed market={market} code={_c}"
                 )
                 continue
-        return {"now_trading": now_trading, "ticks": res_ticks}
+        readiness = current_app.extensions.get("readiness")
+        market_closed = now_trading is not None and not bool(now_trading)
+        if readiness is not None:
+            if res_ticks or (codes and market_closed):
+                readiness.record_ticks_success(market)
+            elif codes:
+                readiness.record_ticks_failure(
+                    market,
+                    "empty_result",
+                    "Tick service returned no usable data.",
+                )
+        if codes and not res_ticks and not market_closed:
+            return _error_response(
+                "empty_result",
+                "Tick service returned no usable data.",
+                503,
+            )
+        return _success_response(now_trading, res_ticks)
     except Exception:
         # 完整堆栈仅写日志，避免直接暴露给前端调用方。
+        readiness = current_app.extensions.get("readiness")
+        if readiness is not None:
+            readiness.record_ticks_failure(
+                market,
+                "service_unavailable",
+                "Tick service is temporarily unavailable.",
+            )
         LogUtil.exception(f"/ticks failed market={market} codes_len={len(codes)}")
-        return {"now_trading": False, "ticks": [], "errmsg": "internal_error"}
+        return _error_response("service_unavailable", "Tick service is temporarily unavailable.", 503)

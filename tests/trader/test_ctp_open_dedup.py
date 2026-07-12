@@ -12,7 +12,7 @@ OnRspQryInvestorPosition 填充快照口径与本测试 mock 一致。
 
 import pytest
 
-from chanlun.trading.base import Operation
+from chanlun.trading.base import POSITION, Operation
 from tests.trader.conftest import FakeOrder, FakePosInfo, FakeTick
 
 
@@ -45,7 +45,10 @@ def ctp(monkeypatch):
             self._ref += 1
             return str(self._ref)
 
-        def register_order_wait(self, ref):
+        def register_order_wait(self, ref, instrument_id=None):
+            return None
+
+        def mark_order_submitted(self, ref):
             return None
 
         def wait_for_order(self, ref, timeout):
@@ -55,6 +58,9 @@ def ctp(monkeypatch):
             return FakeOrder(OrderStatus="0", VolumeTraded=1)
 
         def prepare_position_query(self):
+            return None
+
+        def begin_position_query(self, scope_code=None, request_id=None):
             return None
 
         def next_request_id(self):
@@ -108,7 +114,56 @@ def test_open_buy_proceeds_when_no_same_code(ctp):
     ctp.trader_api.state._snapshot = {}
     res = ctp.open_buy("rb2405", Operation("rb2405", "buy", "1buy", msg="t"))
     assert res is not False
+    assert res["requested_amount"] == 1
     assert len(ctp._recorded["orders"]) == 1
+
+
+def test_open_buy_allows_partial_fill_retry_when_broker_matches_local(ctp):
+    ctp.trader_api.state._snapshot = {
+        "rb2405_2": FakePosInfo("rb2405", "2", 1)
+    }
+    ctp.positions = {
+        "rb2405:1buy": POSITION(code="rb2405", mmd="1buy", amount=1)
+    }
+
+    res = ctp.open_buy(
+        "rb2405", Operation("rb2405", "buy", "1buy", key="partial", msg="t")
+    )
+
+    assert res is not False
+    assert res["requested_amount"] == 1
+    assert len(ctp._recorded["orders"]) == 1
+
+
+def test_open_buy_stops_when_existing_order_cancel_is_unconfirmed(ctp):
+    """旧活动单撤单未确认时不得继续开多，避免旧新两单随后双成。"""
+    ctp.trader_api.state._snapshot = {}
+    ctp.trader_api.state.get_alive_orders = lambda code: [("old-buy", None)]
+    ctp.cancel_order = lambda ref: False
+
+    res = ctp.open_buy("rb2405", Operation("rb2405", "buy", "1buy", msg="t"))
+
+    assert res is False
+    assert ctp._recorded["orders"] == []
+
+
+def test_open_buy_stops_when_canceled_old_order_has_fill(ctp):
+    """持仓查询后旧挂单又成交并撤余量时，必须停止新单等待下轮重新对账。"""
+    ctp.trader_api.state._snapshot = {}
+    ctp.trader_api.state.get_alive_orders = lambda code: [("old-filled", None)]
+
+    def cancel_with_fill(ref):
+        ctp.trader_api.state._order = FakeOrder(
+            OrderStatus="5", VolumeTraded=1, InstrumentID="rb2405"
+        )
+        return True
+
+    ctp.cancel_order = cancel_with_fill
+
+    res = ctp.open_buy("rb2405", Operation("rb2405", "buy", "1buy", msg="t"))
+
+    assert res is False
+    assert ctp._recorded["orders"] == []
 
 
 def test_open_sell_blocked_when_same_code_held(ctp):
@@ -117,6 +172,18 @@ def test_open_sell_blocked_when_same_code_held(ctp):
     res = ctp.open_sell("rb2405", Operation("rb2405", "sell", "1sell", msg="t"))
     assert res is False
     assert len(ctp._recorded["orders"]) == 0
+
+
+def test_open_sell_stops_when_existing_order_cancel_is_unconfirmed(ctp):
+    """旧活动单撤单未确认时不得继续开空。"""
+    ctp.trader_api.state._snapshot = {}
+    ctp.trader_api.state.get_alive_orders = lambda code: [("old-sell", None)]
+    ctp.cancel_order = lambda ref: False
+
+    res = ctp.open_sell("rb2405", Operation("rb2405", "sell", "1sell", msg="t"))
+
+    assert res is False
+    assert ctp._recorded["orders"] == []
 
 
 def test_query_broker_position_reports_held(ctp):

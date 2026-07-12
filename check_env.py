@@ -3,74 +3,123 @@
 """
 
 import os
+import importlib
+import socket
 import sys
-import telnetlib
-
-import pymysql
-import redis
 
 
-def check_env():
+def check_env(
+    *,
+    version_info=None,
+    importer=None,
+    connection_factory=None,
+    output=print,
+):
+    version_info = version_info or sys.version_info
+    importer = importer or importlib.import_module
+    connection_factory = connection_factory or socket.create_connection
+
     # 检查 Python 版本
-    version = f"{sys.version_info[0]}.{sys.version_info[1]}"
-    print(f"当前Python版本：{version}")
+    version = f"{version_info[0]}.{version_info[1]}"
+    output(f"当前Python版本：{version}")
     allow_version = ["3.10", "3.11", "3.12", "3.13"]
     if version not in allow_version:
-        print(f"当前Python不在支持的列表中：{allow_version}")
-        return
+        output(f"当前Python不在支持的列表中：{allow_version}")
+        return False
+
+    try:
+        pymysql = importer("pymysql")
+        redis = importer("redis")
+    except Exception as exc:
+        output(f"依赖导入失败：{exc}")
+        return False
 
     # 检查 环境变量是否设置正确
     try:
-        from chanlun.core import cl_interface  # noqa: F401
+        importer("chanlun.core.cl_interface")
     except Exception:
-        print("无法导入 chanlun 模块，环境变量未设置或设置错误")
-        print(f"当前的环境变量如下：{sys.path}")
-        print(f"需要当 PYTHONPATH 环境变量设置为 {os.getcwd()}\src 目录")
-        return
+        output("无法导入 chanlun 模块，环境变量未设置或设置错误")
+        output(f"当前的环境变量如下：{sys.path}")
+        output(
+            f"需要将 PYTHONPATH 环境变量设置为 {os.path.join(os.getcwd(), 'src')} 目录"
+        )
+        return False
 
-    # 检查 环境变量是否设置正确
+    # 检查配置文件
     try:
-        from chanlun import config
+        config = importer("chanlun.config")
     except Exception:
-        print(
+        output(
             "无法导入 config , 请在 src/chanlun 目录， 复制 config.py.demo 文件粘贴为 config.py"
         )
-        return
+        return False
 
     # 检查代理是否设置
-    if config.PROXY_HOST != "":
+    if getattr(config, "PROXY_HOST", "") != "":
+        proxy_connection = None
         try:
-            telnetlib.Telnet(config.PROXY_HOST, config.PROXY_PORT)
+            proxy_connection = connection_factory(
+                (config.PROXY_HOST, config.PROXY_PORT), timeout=3.0
+            )
         except Exception:
-            print("当前设置的 VPN 代理不可用，如不使用数字货币行情，可忽略")
+            output("当前设置的 VPN 代理不可用，如不使用数字货币行情，可忽略")
+        finally:
+            if proxy_connection is not None:
+                try:
+                    proxy_connection.close()
+                except Exception:
+                    pass
 
     # 检查 Redis
     try:
-        if config.REDIS_HOST != "":
+        if getattr(config, "REDIS_HOST", "") != "":
             R = redis.Redis(
-                host=config.REDIS_HOST, port=config.REDIS_PORT, decode_responses=True
+                host=config.REDIS_HOST,
+                port=config.REDIS_PORT,
+                decode_responses=True,
+                socket_connect_timeout=3,
+                socket_timeout=3,
             )
             R.get("check")
     except Exception:
-        print("Redis 连接失败，请检查是否有安装并启动 Redis 服务端，并且配置正确")
-        print("Redis 不是必须的，不使用可以忽略")
+        output("Redis 连接失败，请检查是否有安装并启动 Redis 服务端，并且配置正确")
+        output("Redis 不是必须的，不使用可以忽略")
+
     # 检查 MySQL
+    db_connection = None
     try:
-        if config.DB_TYPE == "mysql":
-            pymysql.connect(
+        db_type = config.DB_TYPE
+        if db_type == "mysql":
+            db_connection = pymysql.connect(
                 host=config.DB_HOST,
                 port=config.DB_PORT,
                 user=config.DB_USER,
                 password=config.DB_PWD,
                 database=config.DB_DATABASE,
+                connect_timeout=5,
             )
+        elif db_type != "sqlite":
+            output(f"不支持的数据库类型：{db_type}")
+            return False
     except Exception:
-        print(
+        output(
             "MySQL 连接失败，请检查是否安装并运行 MySQL，并且检查配置的 ip、端口、用户名、密码、数据库 是否正确"
         )
+        return False
+    finally:
+        if db_connection is not None:
+            try:
+                db_connection.close()
+            except Exception:
+                pass
 
-    print("环境OK")
+    output("环境OK")
+    return True
+
+
+def main():
+    return 0 if check_env() else 1
 
 
 if __name__ == "__main__":
-    check_env()
+    raise SystemExit(main())

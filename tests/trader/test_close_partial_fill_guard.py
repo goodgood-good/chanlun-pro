@@ -31,6 +31,14 @@ def _long_pos():
     return pos
 
 
+def _short_pos():
+    pos = POSITION(code="X", mmd="1sell", amount=10.0, price=10.0)
+    pos.now_pos_rate = 1.0
+    pos.balance = 100.0
+    pos.type = "做空"
+    return pos
+
+
 def test_close_partial_fill_keeps_rate_amount_consistent():
     # 请求平100实成60 → now_pos_rate 不归0, 与残量40保持一致(40/100=0.4)
     t = _long_trader()
@@ -49,8 +57,32 @@ def test_close_partial_fill_then_close_remnant_still_works():
     t.close_buy = lambda code, position, opt: {"price": 10.0, "amount": 60.0}
     t.execute("X", Operation("X", "sell", "1buy", pos_rate=1.0, key="ck1"), pos)
     t.close_buy = lambda code, position, opt: {"price": 10.0, "amount": 40.0}
-    t.execute("X", Operation("X", "sell", "1buy", pos_rate=1.0, key="ck2"), pos)
+    t.execute("X", Operation("X", "sell", "1buy", pos_rate=1.0, key="ck1"), pos)
     assert pos.amount == 0.0  # 修复前: 恒 40(守卫永久跳过)
+
+
+def test_close_partial_fill_same_key_only_retries_unfilled_target_rate():
+    t = _long_trader()
+    pos = _long_pos()
+    requested_rates = []
+    fills = iter((20.0, 30.0))
+
+    def partial_close(code, position, opt):
+        requested_rates.append(opt.pos_rate)
+        return {"price": 10.0, "amount": next(fills)}
+
+    t.close_buy = partial_close
+    close = Operation("X", "sell", "1buy", pos_rate=0.5, key="ck1")
+
+    assert t.execute("X", close, pos) is True
+    assert t.execute("X", close, pos) is True
+    assert t.execute("X", close, pos) is False
+
+    assert requested_rates == [0.5, 0.3]
+    assert close.pos_rate == 0.5
+    assert pos.close_keys["ck1"] == 0.5
+    assert pos.amount == 50.0
+    assert pos.now_pos_rate == 0.5
 
 
 def test_close_full_fill_unchanged():
@@ -59,5 +91,30 @@ def test_close_full_fill_unchanged():
     pos = _long_pos()
     t.close_buy = lambda code, position, opt: {"price": 10.0, "amount": 100.0}
     t.execute("X", Operation("X", "sell", "1buy", pos_rate=1.0, key="ck1"), pos)
+    assert pos.amount == 0.0
+    assert pos.now_pos_rate == 0.0
+
+
+def test_short_close_partial_fill_same_key_retries_remnant():
+    t = BackTestTrader(
+        "t", mode="trade", market="currency", init_balance=100000, fee_rate=0.0
+    )
+    t.datas = _FakeDatas()
+    pos = _short_pos()
+    requested_rates = []
+    fills = iter((6.0, 4.0))
+
+    def partial_close(code, position, opt):
+        requested_rates.append(opt.pos_rate)
+        return {"price": 10.0, "amount": next(fills)}
+
+    t.close_sell = partial_close
+    operation = Operation("X", "sell", "1sell", pos_rate=1.0, key="short-key")
+
+    assert t.execute("X", operation, pos) is True
+    assert t.execute("X", operation, pos) is True
+    assert t.execute("X", operation, pos) is True
+    assert requested_rates == [1.0, 0.4]
+    assert operation.pos_rate == 1.0
     assert pos.amount == 0.0
     assert pos.now_pos_rate == 0.0

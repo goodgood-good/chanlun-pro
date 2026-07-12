@@ -59,6 +59,20 @@ def test_stale_snapshot_serves_stale_and_revalidates(client, monkeypatch):
     monkeypatch.setattr(tv_mod, "market_now_trading", lambda m: False)
     called = []
     monkeypatch.setattr(tv_mod, "submit_revalidation", lambda *a, **k: called.append(a))
+    monkeypatch.setattr(
+        tv_mod,
+        "_lazy_writeback_htf",
+        lambda *_args, **_kwargs: pytest.fail(
+            "stale snapshots must not perform synchronous HTF enrichment"
+        ),
+    )
+    monkeypatch.setattr(
+        tv_mod.market_frequencys,
+        "get",
+        lambda *_args, **_kwargs: pytest.fail(
+            "cache hits must not synchronously load market metadata"
+        ),
+    )
     _seed_entry(validated_at=time.time() - 9999)  # 过期(>收盘阈值 3600)
 
     t0 = time.time()
@@ -87,6 +101,29 @@ def test_fresh_snapshot_hits_without_revalidate(client, monkeypatch):
     assert j["s"] == "ok"
     assert len(j["t"]) == 50
     assert len(called) == 0             # 新鲜 → 不触发后台刷新
+
+
+def test_endpoint_reads_disk_cache_outside_global_cache_lock(client, monkeypatch):
+    monkeypatch.setattr(tv_mod, "market_now_trading", lambda _market: False)
+    monkeypatch.setattr(tv_mod, "submit_revalidation", lambda *_a, **_k: None)
+    entry = chart_cache._build_chart_cache_entry(
+        _make_full_chart_data(10), is_full_snapshot=True, validated_at=time.time()
+    )
+    observed = []
+
+    def _read_entry(_cache_key):
+        is_owned = getattr(chart_cache.cache_lock, "_is_owned", lambda: False)()
+        observed.append(is_owned)
+        assert is_owned is False, "disk-capable cache read ran inside global cache_lock"
+        return entry
+
+    monkeypatch.setattr(tv_mod, "_get_chart_cache_entry", _read_entry)
+
+    response = client.get(_url())
+
+    assert response.status_code == 200
+    assert response.get_json()["s"] == "ok"
+    assert observed == [False]
 
 
 def test_lazy_htf_does_not_mutate_shared_cache_dict(client, monkeypatch):

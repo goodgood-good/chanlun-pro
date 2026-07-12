@@ -1,5 +1,6 @@
 import copy
 import datetime
+import threading
 import time
 from typing import Dict, List, Tuple
 
@@ -79,6 +80,8 @@ class BackTestTrader(Trader):
         # 是否打印日志
         self.log = log
         self.log_history = []
+        # WAL 是读-改-写文件；同一 trader 不同 code 并发时也必须串行，避免互相覆盖。
+        self._wal_lock = threading.RLock()
 
         # 时间统计
         self.use_times = {
@@ -235,13 +238,15 @@ class BackTestTrader(Trader):
             "results": self.results,
             # H3-c: CTP order_ref 持久化, 重启后恢复避免撞号 (非 CTP trader 为 None)
             "ctp_order_ref": getattr(self, "_ctp_order_ref_snapshot", None),
+            # CTP SDK 对象已由子类转换为纯字段快照，避免 pickle C++ 扩展对象。
+            "ctp_state": getattr(self, "_ctp_state_snapshot", None),
         }
         if key is not None:
             # H3-b: 记录主 pkl key, 供 WAL 文件名派生
             self._pkl_key = key
             # N3: 深拷贝快照后再交异步落盘线程池, 防后台 pickle 迭代 positions/历史集合时
             # 主线程 execute 改这些容器致 `dict changed size during iteration` 被吞成 warning=账本静默丢盘。
-            fdb.cache_pkl_to_file(key, copy.deepcopy(save_infos))
+            fdb.cache_pkl_to_file(key, copy.deepcopy(save_infos), wait=True)
         return save_infos
 
     def load_from_pkl(self, key: str, save_infos: dict = None):
@@ -281,30 +286,35 @@ class BackTestTrader(Trader):
 
         # H3-c: 恢复 CTP order_ref 快照 (旧 pkl 无此键时为 None), 供 CTP 子类 load 覆写读取
         self._ctp_order_ref_snapshot = save_infos.get("ctp_order_ref", None)
+        self._ctp_state_snapshot = save_infos.get("ctp_state", None)
 
         return True
 
     # ---------- H3-b: 下单意图 WAL (幂等键) ----------
     # 用途: 下单"前"先持久化开仓/平仓意图, 成交并落盘后清除。崩溃恢复时 WAL 残留的意图
     #   即"可能已成交但未落盘"的窗口, 启动对账 (reconcile_positions / H3-d) 据此向券商核对。
-    # ⚠️ 调用点 (在 execute 的 open_buy 前 wal_write_intent / 落盘后 wal_clear_intent) 侵入
-    #   交易热路径, 设计标注需谨慎; 本类仅提供基础设施, 具体接入点 (execute 内细粒度 vs
-    #   驱动 TR.run 外粗粒度) 由投产前灰度决策, 见 audit/_round3_fix_design_exec.md H3-b。
+    # execute 的四条下单路径均按“同步 durable 写意图 → 券商调用 → 同步账本快照 →
+    # 同步清意图”执行；明确零成交会清 WAL，异常/超时等未知结果保留供启动权威对账。
     def _wal_key(self):
-        """WAL 文件名 (与主 pkl 同 key 派生)。无 _pkl_key 时返回 None (不启用 WAL)。"""
+        """WAL 文件名 (与主 pkl 同 key 派生)；online 无 key 时由写入端 fail-closed。"""
         key = getattr(self, "_pkl_key", None)
         return f"{key}__wal" if key else None
 
     def wal_write_intent(self, code, opt, order_ref=None):
         """下单前持久化开仓/平仓意图 (H3-b)。崩溃恢复时据此向券商对账。
 
-        仅 online 模式生效 (signal 回测不落 WAL); 写入失败不阻断下单
-        (退化为现状, 不更危险)。
+        仅 online 模式生效 (signal 回测不落 WAL)。写入是同步且失败可见的：
+        未持久化恢复意图时禁止继续下单。
         """
-        if self.mode == "signal" or self._wal_key() is None:
-            return
-        try:
-            wal = fdb.cache_pkl_from_file(self._wal_key()) or {}
+        if self.mode == "signal":
+            return False
+        wal_key = self._wal_key()
+        if wal_key is None:
+            if self.mode == "online":
+                raise RuntimeError("online trader 未配置持久化 key，禁止无 WAL 下单")
+            return False
+        with self._wal_lock:
+            wal = fdb.cache_pkl_from_file(wal_key, strict=True) or {}
             wal[f"{code}:{opt.open_uid}:{opt.key}"] = {
                 "code": code,
                 "open_uid": opt.open_uid,
@@ -314,20 +324,23 @@ class BackTestTrader(Trader):
                 "order_ref": order_ref,
                 "datetime": self.get_now_datetime().isoformat(),
             }
-            fdb.cache_pkl_to_file(self._wal_key(), wal)
-        except Exception:
-            pass  # WAL 失败退化为现状, 不抛断下单
+            fdb.cache_pkl_to_file(wal_key, wal, wait=True)
+        return True
 
     def wal_clear_intent(self, code, opt):
         """成交并落盘后清除意图 (H3-b)。"""
-        if self.mode == "signal" or self._wal_key() is None:
-            return
-        try:
-            wal = fdb.cache_pkl_from_file(self._wal_key()) or {}
+        if self.mode == "signal":
+            return False
+        wal_key = self._wal_key()
+        if wal_key is None:
+            if self.mode == "online":
+                raise RuntimeError("online trader 未配置持久化 key，无法清除 WAL")
+            return False
+        with self._wal_lock:
+            wal = fdb.cache_pkl_from_file(wal_key, strict=True) or {}
             wal.pop(f"{code}:{opt.open_uid}:{opt.key}", None)
-            fdb.cache_pkl_to_file(self._wal_key(), wal)
-        except Exception:
-            pass
+            fdb.cache_pkl_to_file(wal_key, wal, wait=True)
+        return True
 
     # ---------- M1: 券商持仓对账 ----------
     def query_broker_position(self, code):
@@ -347,15 +360,18 @@ class BackTestTrader(Trader):
                 self.log(f"{code} 持仓查询失败(不清本地): {e}")
             return ("fail", None)
 
-    def _broker_already_holds(self, code) -> bool:
+    def _broker_already_holds(self, code, *, fail_closed: bool = False) -> bool:
         """F1/H3 同 code 去重: 券商已持有该 code 返 True(open_* 据此跳过重复开仓)。
 
-        仅查询成功且券商持仓非空时返 True; 查询失败返 False——不新增拦截、不因 flaky broker
-        查询阻塞开仓(与 reconcile 的 fail 处理一致)。防崩溃(券商已成交、本地未落盘)重启后
-        self.positions 为空但券商有仓时, 策略下一 tick 对同 code 二次开真单。
+        默认仅查询成功且券商持仓非空时返 True，保持既有调用方语义。资金安全优先的
+        调用方可传 ``fail_closed=True``，让查询失败也返 True、阻止未知状态下开仓。
+        防崩溃(券商已成交、本地未落盘)重启后 self.positions 为空但券商有仓时，
+        策略下一 tick 对同 code 二次开真单。
         """
         status, broker_pos = self.query_broker_position(code)
-        return status == "ok" and bool(broker_pos)
+        if status == "fail":
+            return fail_closed
+        return bool(broker_pos)
 
     def reconcile_positions(self, codes: list):
         """以券商持仓为准, 校正本地 self.positions (M1 + H3-d)。
@@ -927,16 +943,22 @@ class BackTestTrader(Trader):
 
             res = None
             order_type = None
+            _wal_intent_written = False
 
             # 买点开多
             if "buy" in opt_mmd and opt.opt == "buy":
-                # 同一位置（key）不重复开仓，防止信号重复触发
-                if opt.key in pos.open_keys.keys():
+                _target_open_rate = opt.pos_rate
+                _completed_open_rate = float(pos.open_keys.get(opt.key, 0) or 0)
+                _remaining_open_rate = _target_open_rate - _completed_open_rate
+                if _remaining_open_rate <= 1e-9:
                     return False
-                # 修正开仓比例，确保累计仓位不超过 1.0
-                opt.pos_rate = min(1.0 - pos.now_pos_rate, opt.pos_rate)
+                _broker_opt = copy.copy(opt)
+                _broker_opt.pos_rate = min(
+                    1.0 - pos.now_pos_rate, _remaining_open_rate
+                )
 
-                res = self.open_buy(code, opt)
+                _wal_intent_written = self.wal_write_intent(code, opt)
+                res = self.open_buy(code, _broker_opt)
                 if res is False:
                     return False
 
@@ -945,7 +967,15 @@ class BackTestTrader(Trader):
                 # (非 "trade"), 原 mode=="trade" 守卫对真金路径从未生效; 放宽为 trade+online。
                 # signal 回测 amount=0(高价股整手取整)是既有口径, signal 不在集合故基线不变。
                 if self.mode in ("trade", "online") and res.get("amount", 0) <= 0:
+                    if _wal_intent_written:
+                        self.wal_clear_intent(code, opt)
                     return False
+                _actual_open_rate = _broker_opt.pos_rate
+                _requested_amount = res.get("requested_amount")
+                if _requested_amount is not None and _requested_amount > 0:
+                    _actual_open_rate *= min(
+                        1.0, max(0.0, res["amount"] / _requested_amount)
+                    )
                 pos.type = "做多"
                 # BUG-1(Round8): 加仓按持仓量加权更新均价, 不覆盖为最后一笔成交价
                 # (否则 position_record now_profit=(close-pos.price)*总amount 失真,
@@ -998,8 +1028,11 @@ class BackTestTrader(Trader):
                 )
                 pos.open_msg = opt.msg
                 pos.info = opt.info
-                pos.now_pos_rate += min(1.0, opt.pos_rate)
-                pos.open_keys[opt.key] = opt.pos_rate
+                pos.now_pos_rate += min(1.0, _actual_open_rate)
+                pos.open_keys[opt.key] = min(
+                    _target_open_rate,
+                    _completed_open_rate + _actual_open_rate,
+                )
 
                 # 本次开仓的记录
                 pos.open_records.append(
@@ -1012,7 +1045,7 @@ class BackTestTrader(Trader):
                         "open_msg": opt.msg,
                         "open_key": opt.key,
                         "open_uid": opt.open_uid,
-                        "pos_rate": opt.pos_rate,
+                        "pos_rate": _actual_open_rate,
                     }
                 )
 
@@ -1024,16 +1057,31 @@ class BackTestTrader(Trader):
 
             # 卖点开空（仅期货/数字货币等支持做空的市场）
             if self.can_short and "sell" in opt_mmd and opt.opt == "buy":
-                if opt.key in pos.open_keys.keys():
+                _target_open_rate = opt.pos_rate
+                _completed_open_rate = float(pos.open_keys.get(opt.key, 0) or 0)
+                _remaining_open_rate = _target_open_rate - _completed_open_rate
+                if _remaining_open_rate <= 1e-9:
                     return False
-                opt.pos_rate = min(1.0 - pos.now_pos_rate, opt.pos_rate)
+                _broker_opt = copy.copy(opt)
+                _broker_opt.pos_rate = min(
+                    1.0 - pos.now_pos_rate, _remaining_open_rate
+                )
 
-                res = self.open_sell(code, opt)
+                _wal_intent_written = self.wal_write_intent(code, opt)
+                res = self.open_sell(code, _broker_opt)
                 if res is False:
                     return False
                 # R16-C1/R19: 实盘零成交不得当开仓成功(同 buy, trade+online 保 signal 基线不变)。
                 if self.mode in ("trade", "online") and res.get("amount", 0) <= 0:
+                    if _wal_intent_written:
+                        self.wal_clear_intent(code, opt)
                     return False
+                _actual_open_rate = _broker_opt.pos_rate
+                _requested_amount = res.get("requested_amount")
+                if _requested_amount is not None and _requested_amount > 0:
+                    _actual_open_rate *= min(
+                        1.0, max(0.0, res["amount"] / _requested_amount)
+                    )
                 pos.type = "做空"
                 # BUG-1(Round8): 加仓按持仓量加权更新均价, 不覆盖为最后一笔成交价
                 # (否则 position_record now_profit=(close-pos.price)*总amount 失真,
@@ -1086,8 +1134,11 @@ class BackTestTrader(Trader):
                 )
                 pos.open_msg = opt.msg
                 pos.info = opt.info
-                pos.now_pos_rate += min(1.0, opt.pos_rate)
-                pos.open_keys[opt.key] = opt.pos_rate
+                pos.now_pos_rate += min(1.0, _actual_open_rate)
+                pos.open_keys[opt.key] = min(
+                    _target_open_rate,
+                    _completed_open_rate + _actual_open_rate,
+                )
 
                 pos.open_records.append(
                     {
@@ -1099,7 +1150,7 @@ class BackTestTrader(Trader):
                         "open_msg": opt.msg,
                         "open_key": opt.key,
                         "open_uid": opt.open_uid,
-                        "pos_rate": opt.pos_rate,
+                        "pos_rate": _actual_open_rate,
                     }
                 )
 
@@ -1111,16 +1162,20 @@ class BackTestTrader(Trader):
 
             # 卖点平空（期货做空平仓）
             if self.can_short and "sell" in opt_mmd and opt.opt == "sell":
-                if opt.key in pos.close_keys.keys():
+                _target_close_rate = opt.pos_rate
+                _completed_close_rate = float(pos.close_keys.get(opt.key, 0) or 0)
+                _remaining_close_rate = _target_close_rate - _completed_close_rate
+                if _remaining_close_rate <= 1e-9:
                     return False
                 # close_uid 非 clear 时做幂等检查，防止同一信号重复平仓
                 if opt.close_uid != "clear" and opt.close_uid in pos._close_uids:
                     return False
                 # 修正平仓比例，不超过当前持仓比例
-                opt.pos_rate = (
+                _broker_opt = copy.copy(opt)
+                _broker_opt.pos_rate = (
                     pos.now_pos_rate
-                    if pos.now_pos_rate < opt.pos_rate
-                    else opt.pos_rate
+                    if pos.now_pos_rate < _remaining_close_rate
+                    else _remaining_close_rate
                 )
 
                 if (
@@ -1130,13 +1185,25 @@ class BackTestTrader(Trader):
                     # A 股 T+1 规则：当日开仓不可当日平仓
                     return False
 
-                res = self.close_sell(code, pos, opt)
+                _wal_intent_written = self.wal_write_intent(code, opt)
+                res = self.close_sell(code, pos, _broker_opt)
                 if res is False:
                     return False
                 # Round11 N4: 实际成交量<=0(券商拒单/未成交, 如富途市价单被拒)视为平仓失败,
                 # 不记录/不减仓, 防 clear 分支 now_pos_rate 归0而 amount 仍满 → execute 守卫永久跳过平仓(裸持失管)。
                 if res.get("amount", 0) <= 0:
+                    if _wal_intent_written:
+                        self.wal_clear_intent(code, opt)
                     return False
+
+                _full_shares = (
+                    pos.amount / pos.now_pos_rate if pos.now_pos_rate > 0 else 0
+                )
+                _actual_close_rate = _broker_opt.pos_rate
+                if opt.close_uid == "clear" and _full_shares > 0:
+                    _actual_close_rate = min(
+                        pos.now_pos_rate, res["amount"] / _full_shares
+                    )
 
                 release_balance = 0
                 fee = 0
@@ -1190,27 +1257,23 @@ class BackTestTrader(Trader):
                         "close_msg": opt.msg,
                         "close_key": opt.key,
                         "close_uid": opt.close_uid,
-                        "pos_rate": opt.pos_rate,
+                        "pos_rate": _actual_close_rate,
                     }
                 )
                 pos._close_uids.add(opt.close_uid)
 
                 # close_uid 非 clear 时只记录快照，不实际减仓；仅 clear 才执行真正平仓
                 if opt.close_uid == "clear":
-                    _full_shares = (
-                        pos.amount / pos.now_pos_rate if pos.now_pos_rate > 0 else 0
+                    pos.close_keys[opt.key] = min(
+                        _target_close_rate,
+                        _completed_close_rate + _actual_close_rate,
                     )
-                    pos.now_pos_rate -= opt.pos_rate
-                    pos.close_keys[opt.key] = opt.pos_rate
                     pos.close_msg = opt.msg
                     pos.close_datetime = self.get_now_datetime()
-                    pos.amount -= res["amount"]
-                    # N4 部分成交兄弟: 券商部分成交(0<实际<意图量, 仅实盘真单可现; 回测/paper
-                    # 恒全额→此兜底为死代码, 回测逐字节不变)致 amount 残留而 now_pos_rate 按完整
-                    # 意图扣到0 → execute 入口守卫(now_pos_rate==0)永久跳过 → 残仓裸持失管。按残量
-                    # 占满仓比例反推兜住 now_pos_rate 下限, 使下轮 execute 放行继续平残仓。
-                    if pos.amount > 0 and pos.now_pos_rate <= 1e-9 and _full_shares > 0:
-                        pos.now_pos_rate = pos.amount / _full_shares
+                    pos.amount = max(0, pos.amount - res["amount"])
+                    pos.now_pos_rate = (
+                        pos.amount / _full_shares if _full_shares > 0 else 0
+                    )
 
                     pos.release_balance += release_balance
                     pos.fee += fee
@@ -1253,14 +1316,18 @@ class BackTestTrader(Trader):
 
             # 买点平多
             if "buy" in opt_mmd and opt.opt == "sell":
-                if opt.key in pos.close_keys.keys():
+                _target_close_rate = opt.pos_rate
+                _completed_close_rate = float(pos.close_keys.get(opt.key, 0) or 0)
+                _remaining_close_rate = _target_close_rate - _completed_close_rate
+                if _remaining_close_rate <= 1e-9:
                     return False
                 if opt.close_uid != "clear" and opt.close_uid in pos._close_uids:
                     return False
-                opt.pos_rate = (
+                _broker_opt = copy.copy(opt)
+                _broker_opt.pos_rate = (
                     pos.now_pos_rate
-                    if pos.now_pos_rate < opt.pos_rate
-                    else opt.pos_rate
+                    if pos.now_pos_rate < _remaining_close_rate
+                    else _remaining_close_rate
                 )
 
                 if (
@@ -1270,13 +1337,25 @@ class BackTestTrader(Trader):
                     # A 股 T+1 规则：当日开仓不可当日平仓
                     return False
 
-                res = self.close_buy(code, pos, opt)
+                _wal_intent_written = self.wal_write_intent(code, opt)
+                res = self.close_buy(code, pos, _broker_opt)
                 if res is False:
                     return False
                 # Round11 N4: 实际成交量<=0(券商拒单/未成交, 如富途市价单被拒)视为平仓失败,
                 # 不记录/不减仓, 防 clear 分支 now_pos_rate 归0而 amount 仍满 → execute 守卫永久跳过平仓(裸持失管)。
                 if res.get("amount", 0) <= 0:
+                    if _wal_intent_written:
+                        self.wal_clear_intent(code, opt)
                     return False
+
+                _full_shares = (
+                    pos.amount / pos.now_pos_rate if pos.now_pos_rate > 0 else 0
+                )
+                _actual_close_rate = _broker_opt.pos_rate
+                if opt.close_uid == "clear" and _full_shares > 0:
+                    _actual_close_rate = min(
+                        pos.now_pos_rate, res["amount"] / _full_shares
+                    )
 
                 release_balance = 0
                 fee = 0
@@ -1336,27 +1415,23 @@ class BackTestTrader(Trader):
                         "close_msg": opt.msg,
                         "close_key": opt.key,
                         "close_uid": opt.close_uid,
-                        "pos_rate": opt.pos_rate,
+                        "pos_rate": _actual_close_rate,
                     }
                 )
                 pos._close_uids.add(opt.close_uid)
 
                 # close_uid 非 clear 时只记录快照，不实际减仓；仅 clear 才执行真正平仓
                 if opt.close_uid == "clear":
-                    _full_shares = (
-                        pos.amount / pos.now_pos_rate if pos.now_pos_rate > 0 else 0
+                    pos.close_keys[opt.key] = min(
+                        _target_close_rate,
+                        _completed_close_rate + _actual_close_rate,
                     )
-                    pos.now_pos_rate -= opt.pos_rate
-                    pos.close_keys[opt.key] = opt.pos_rate
                     pos.close_msg = opt.msg
                     pos.close_datetime = self.get_now_datetime()
-                    pos.amount -= res["amount"]
-                    # N4 部分成交兄弟: 券商部分成交(0<实际<意图量, 仅实盘真单可现; 回测/paper
-                    # 恒全额→此兜底为死代码, 回测逐字节不变)致 amount 残留而 now_pos_rate 按完整
-                    # 意图扣到0 → execute 入口守卫(now_pos_rate==0)永久跳过 → 残仓裸持失管。按残量
-                    # 占满仓比例反推兜住 now_pos_rate 下限, 使下轮 execute 放行继续平残仓。
-                    if pos.amount > 0 and pos.now_pos_rate <= 1e-9 and _full_shares > 0:
-                        pos.now_pos_rate = pos.amount / _full_shares
+                    pos.amount = max(0, pos.amount - res["amount"])
+                    pos.now_pos_rate = (
+                        pos.amount / _full_shares if _full_shares > 0 else 0
+                    )
 
                     pos.release_balance += release_balance
                     pos.fee += fee
@@ -1412,6 +1487,9 @@ class BackTestTrader(Trader):
                         "close_uid": opt.close_uid,
                     }
                 )
+                if _wal_intent_written:
+                    self.save_to_pkl(self._pkl_key)
+                    self.wal_clear_intent(code, opt)
                 return True
 
             return False

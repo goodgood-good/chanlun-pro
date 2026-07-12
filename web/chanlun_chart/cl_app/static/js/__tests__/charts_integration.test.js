@@ -56,8 +56,9 @@ function loadChartManager() {
   let src = fs.readFileSync(path.join(__dirname, '..', 'charts.js'), 'utf8');
   src += '\n;var __CM_EXPORT = (typeof ChartManager !== "undefined") ? ChartManager : null;';
   src += '\n;var __CU_EXPORT = (typeof ChartUtils !== "undefined") ? ChartUtils : null;';
+  src += '\n;var __CDF_EXPORT = (typeof CHART_DISABLED_FEATURES !== "undefined") ? CHART_DISABLED_FEATURES : null;';
   vm.runInContext(src, sb, { filename: 'charts.js' });
-  return { ChartManager: sb.__CM_EXPORT, ChartUtils: sb.__CU_EXPORT, sb };
+  return { ChartManager: sb.__CM_EXPORT, ChartUtils: sb.__CU_EXPORT, disabledFeatures: sb.__CDF_EXPORT, sb };
 }
 
 // 裸实例(绕过依赖重的构造函数/init)，手动注入治本相关字段。
@@ -85,6 +86,12 @@ test('vm 能加载真实 charts.js 并取出 ChartManager', () => {
   assert.ok(ChartManager, 'ChartManager 应被加载');
   assert.equal(typeof ChartManager.prototype._doReset, 'function');
   assert.equal(typeof ChartManager.prototype._getViewLatestSec, 'function');
+});
+
+test('CSP 模式禁用 blob iframe 并使用同源 TradingView 启动页', () => {
+  const { disabledFeatures } = loadChartManager();
+  assert.ok(Array.isArray(disabledFeatures));
+  assert.ok(disabledFeatures.includes('use_blob_for_iframe_loading'));
 });
 
 test('_getViewLatestSec: 直接命中键 → 末根秒数(ms 归一)', () => {
@@ -374,4 +381,41 @@ test('_alignResolutionOnReady: resolution() 抛错 → 吞掉不影响首绘(防
   cm._applyResolutionConfig = () => { called++; };
   assert.doesNotThrow(() => cm._alignResolutionOnReady());
   assert.equal(called, 0);
+});
+test('drawing saves are serialized and pending calls collapse to the latest state', async () => {
+  const { ChartManager } = loadChartManager();
+  const cm = makeManager(ChartManager, null);
+  const started = [];
+  let finishFirst;
+  let finishLatest;
+
+  const first = cm.enqueueLatestDrawingSave(() => new Promise((resolve) => {
+    started.push('first');
+    finishFirst = resolve;
+  }));
+  const superseded = cm.enqueueLatestDrawingSave(() => {
+    started.push('superseded');
+    return Promise.resolve();
+  });
+  const latest = cm.enqueueLatestDrawingSave(() => new Promise((resolve) => {
+    started.push('latest');
+    finishLatest = resolve;
+  }));
+
+  assert.deepEqual(started, ['first']);
+  finishFirst();
+  await first;
+  assert.deepEqual(started, ['first', 'latest']);
+  finishLatest();
+  await Promise.all([superseded, latest]);
+});
+
+test('drawing save failures reject the adapter promise', async () => {
+  const { ChartManager } = loadChartManager();
+  const cm = makeManager(ChartManager, null);
+
+  await assert.rejects(
+    cm.enqueueLatestDrawingSave(() => Promise.reject(new Error('write failed'))),
+    /write failed/,
+  );
 });

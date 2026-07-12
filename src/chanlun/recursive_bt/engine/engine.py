@@ -207,6 +207,9 @@ class Signal:
     structural_stop_above: Optional[float] = None
     zs_zd: Optional[float] = None
     zs_zg: Optional[float] = None
+    divergence_kind: Optional[str] = None
+    live_divergence: bool = False
+    confirmation_bs_type: Optional[str] = None
 
     @property
     def is_buy(self) -> bool:
@@ -323,23 +326,39 @@ def collect_qs_beichi_candidates(cd: CL) -> List[Signal]:
     sub = collect_branch_signals(cd, use_xd=False, annotate_nest=False)
     out: List[Signal] = []
     for zs, dv in live_qs:
+        if (
+            getattr(dv, "kind", None) != "qs"
+            or getattr(dv, "is_beichi", None) is not True
+            or getattr(dv, "provisional", None) is not True
+        ):
+            continue
         seg = getattr(dv, "leave_seg", None)
-        if seg is None or seg.start is None:
+        if seg is None or seg.start is None or seg.end is None:
             continue
         seg_down = (getattr(seg, "type", None) == "down") or (getattr(seg, "dir", None) == "down")
         if not seg_down:
             continue
-        start_date = seg.start.k.date if getattr(seg.start, "k", None) is not None else None
+        start_k = getattr(seg.start, "k", None)
+        end_k = getattr(seg.end, "k", None)
+        if start_k is None or end_k is None:
+            continue
+        start_date = getattr(start_k, "date", None)
+        end_date = getattr(end_k, "date", None)
+        if start_date is None or end_date is None or end_date < start_date:
+            continue
         for s in sub:
             if s.bs_type not in ("2buy", "3buy"):
                 continue  # 转折后确认(中枢重夺/回调不破),排除转折前 1buy 假底(见 docstring)
-            if start_date is not None and s.date < start_date:
+            if s.date < start_date or s.date > end_date:
                 continue  # 确认须落在背驰段内(段起点之后)
             out.append(Signal(
                 s.date, int(getattr(l0, "level", 0) or 0), "1buy_nest", s.price,
                 structural_stop_below=float(zs.dd) if zs.dd is not None else None,
                 zs_zd=float(zs.zd) if zs.zd is not None else None,
                 zs_zg=float(zs.zg) if zs.zg is not None else None,
+                divergence_kind="qs",
+                live_divergence=True,
+                confirmation_bs_type=s.bs_type,
             ))
             break
     out.sort(key=lambda s: s.date)

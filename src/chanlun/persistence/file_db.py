@@ -1,4 +1,6 @@
 import atexit
+from collections import deque
+from collections.abc import Callable
 import datetime
 import os
 import hashlib
@@ -8,7 +10,7 @@ import random
 import threading
 import time
 import uuid
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future
 from decimal import Decimal
 from typing import Optional, Union
 
@@ -21,22 +23,133 @@ from chanlun.market import Market
 from chanlun.core.types import ICL
 from chanlun.config import get_data_path
 from chanlun.persistence.db import db
+from chanlun.tools.daemon_executor import DaemonExecutor
 from chanlun.tools.log_util import LogUtil
 
 
-# pickle 异步落盘线程池：Windows 文件锁重试约 450ms，挪到独立 ThreadPoolExecutor
+class _PickleWriteQueue:
+    """同一路径 pickle 写入的短生命周期 FIFO 队列。"""
+
+    def __init__(self) -> None:
+        self.items: deque[tuple[Callable[[], None], Future, bool]] = deque()
+
+
+# pickle 异步落盘线程池：Windows 文件锁重试约 450ms，挪到独立 daemon executor
 # 后调用方立即返回 Future，web 线程不再阻塞。写盘失败仅 warning，不崩调用栈。
 _PICKLE_WRITE_WORKERS = 4
-_PICKLE_WRITE_EXECUTOR = ThreadPoolExecutor(
-    max_workers=_PICKLE_WRITE_WORKERS,
-    thread_name_prefix="FileDbPickleWriter",
-)
+_PICKLE_WRITE_MAX_PATHS = 256
+_PICKLE_WRITE_MAX_PENDING_PER_PATH = 8
+_PICKLE_WRITE_EXECUTOR = None
+_PICKLE_WRITE_QUEUE_LOCK = threading.Lock()
+_PICKLE_WRITES_CLOSED = True
+_PICKLE_WRITES_ACCEPTING = True
+_PICKLE_WRITE_QUEUES: dict[str, _PickleWriteQueue] = {}
+
+
+def _complete_pickle_write(
+    operation, result_future: Future, suppress_errors: bool, path_key: str
+) -> None:
+    if not result_future.set_running_or_notify_cancel():
+        return
+    try:
+        operation()
+    except Exception as exc:
+        if suppress_errors:
+            try:
+                LogUtil.warning(
+                    f"[FileCacheDB._atomic_write_pickle] async write failed "
+                    f"path={path_key} err={exc}"
+                )
+            except BaseException as log_exc:
+                result_future.set_exception(log_exc)
+            else:
+                result_future.set_result(None)
+        else:
+            result_future.set_exception(exc)
+    except BaseException as exc:
+        result_future.set_exception(exc)
+    else:
+        result_future.set_result(None)
+
+
+def _drain_pickle_write_queue(path_key: str) -> None:
+    """Serially execute one path queue and release its registry entry."""
+    while True:
+        with _PICKLE_WRITE_QUEUE_LOCK:
+            state = _PICKLE_WRITE_QUEUES.get(path_key)
+            if state is None:
+                return
+            if not state.items:
+                del _PICKLE_WRITE_QUEUES[path_key]
+                return
+            operation, result_future, suppress_errors = state.items.popleft()
+        _complete_pickle_write(
+            operation,
+            result_future,
+            suppress_errors,
+            path_key,
+        )
+
+def pickle_write_queue_status():
+    with _PICKLE_WRITE_QUEUE_LOCK:
+        return {
+            "paths": len(_PICKLE_WRITE_QUEUES),
+            "pending": sum(len(state.items) for state in _PICKLE_WRITE_QUEUES.values()),
+        }
+
+
+def start_pickle_writes():
+    """Recreate the writer after an application lifecycle restart."""
+    global _PICKLE_WRITE_EXECUTOR, _PICKLE_WRITES_ACCEPTING, _PICKLE_WRITES_CLOSED
+    with _PICKLE_WRITE_QUEUE_LOCK:
+        if not _PICKLE_WRITES_CLOSED:
+            return
+        if _PICKLE_WRITE_QUEUES:
+            raise RuntimeError("cannot restart pickle writer with active path queues")
+        _PICKLE_WRITE_EXECUTOR = DaemonExecutor(
+            max_workers=_PICKLE_WRITE_WORKERS,
+            thread_name_prefix="FileDbPickleWriter",
+        )
+        _PICKLE_WRITES_ACCEPTING = True
+        _PICKLE_WRITES_CLOSED = False
+
+
+def allow_lazy_pickle_writes():
+    """Allow a newly created application to start the writer on first use."""
+    global _PICKLE_WRITES_ACCEPTING
+    with _PICKLE_WRITE_QUEUE_LOCK:
+        if _PICKLE_WRITES_CLOSED and not _PICKLE_WRITE_QUEUES:
+            _PICKLE_WRITES_ACCEPTING = True
+
+def shutdown_pickle_writes(wait=False, cancel_pending=False):
+    """Stop the writer; optionally cancel queued work without waiting forever."""
+    global _PICKLE_WRITE_EXECUTOR, _PICKLE_WRITES_ACCEPTING, _PICKLE_WRITES_CLOSED
+    with _PICKLE_WRITE_QUEUE_LOCK:
+        _PICKLE_WRITES_ACCEPTING = False
+        _PICKLE_WRITES_CLOSED = True
+        executor = _PICKLE_WRITE_EXECUTOR
+        _PICKLE_WRITE_EXECUTOR = None
+    if cancel_pending:
+        with _PICKLE_WRITE_QUEUE_LOCK:
+            queued = [
+                future
+                for state in _PICKLE_WRITE_QUEUES.values()
+                for _, future, _ in state.items
+            ]
+            for state in _PICKLE_WRITE_QUEUES.values():
+                state.items.clear()
+        for future in queued:
+            future.cancel()
+    if executor is not None:
+        executor.shutdown(
+            wait=bool(wait),
+            cancel_futures=bool(cancel_pending),
+        )
+    return pickle_write_queue_status()
 
 
 def _shutdown_pickle_write_executor() -> None:
-    # 进程退出时优雅关闭, 等所有 pending 写盘完成 (避免最后一次落盘丢)。
-    _PICKLE_WRITE_EXECUTOR.shutdown(wait=True)
-
+    shutdown_pickle_writes(wait=False, cancel_pending=True)
 
 atexit.register(_shutdown_pickle_write_executor)
 
@@ -180,7 +293,27 @@ class FileCacheDB(_GenericPklCacheMixin, _ChartDataCacheMixin, _KlineCacheMixin,
         )
         return path.with_suffix(path.suffix + suffix)
 
-    def _atomic_write_pickle_blocking(self, path: pathlib.Path, obj: object):
+    @staticmethod
+    def _fsync_parent_directory(path: pathlib.Path) -> None:
+        """尽可能持久化目录项；Windows 不支持目录 fsync 时安全降级。"""
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        try:
+            directory_fd = os.open(path, flags)
+        except OSError:
+            if os.name == "nt":
+                return
+            raise
+        try:
+            os.fsync(directory_fd)
+        except OSError:
+            if os.name != "nt":
+                raise
+        finally:
+            os.close(directory_fd)
+
+    def _atomic_write_pickle_blocking(
+        self, path: pathlib.Path, obj: object, *, durable: bool = False
+    ):
         """
         原子化写入 pickle (同步阻塞)，避免并发读到半写入文件。
 
@@ -193,6 +326,9 @@ class FileCacheDB(_GenericPklCacheMixin, _ChartDataCacheMixin, _KlineCacheMixin,
         try:
             with open(tmp, "wb") as fp:
                 pickle.dump(obj, fp, protocol=self._PICKLE_PROTOCOL)
+                if durable:
+                    fp.flush()
+                    os.fsync(fp.fileno())
             # Windows 文件锁兜底重试：4 次共约 30+60+120+240 = 450ms 退避。
             # 现在跑在 _PICKLE_WRITE_EXECUTOR 的 worker 上, 不再卡 web 线程。
             _delays_ms = (30, 60, 120, 240)
@@ -206,6 +342,8 @@ class FileCacheDB(_GenericPklCacheMixin, _ChartDataCacheMixin, _KlineCacheMixin,
                     if _attempt == len(_delays_ms):
                         raise  # 重试用完仍失败，让外层捕获 + 清理 tmp
                     continue
+            if durable:
+                self._fsync_parent_directory(path.parent)
         except Exception:
             # os.replace 失败 / pickle dump 失败 / 磁盘满 等场景，清掉残留 tmp。
             try:
@@ -219,40 +357,127 @@ class FileCacheDB(_GenericPklCacheMixin, _ChartDataCacheMixin, _KlineCacheMixin,
                 )
             raise
 
-    def _atomic_write_pickle(self, path: pathlib.Path, obj: object) -> Future:
+    def _atomic_write_pickle(
+        self,
+        path: pathlib.Path,
+        obj: object,
+        *,
+        suppress_errors: bool = True,
+        durable: bool = False,
+    ) -> Future:
         """异步 fire-and-forget 写入 pickle，立刻返回 Future，web 线程不阻塞。
 
+        同一路径严格按提交顺序写入，不同路径仍可在线程池中并行。
         写盘失败仅记 warning，不抛到调用栈（下次重算即可）。
         如有强一致性需求可显式 await：``fut.result()``。
-        executor 已关闭时 fallback 为同步调用，保证不丢写。
+        executor 提交竞态失败时 fallback 为同步调用；显式关闭后拒绝新写入。
         """
-        def _worker():
-            try:
-                self._atomic_write_pickle_blocking(path, obj)
-            except Exception as e:
-                LogUtil.warning(
-                    f"[FileCacheDB._atomic_write_pickle] async write failed "
-                    f"path={path} err={e}"
-                )
+        global _PICKLE_WRITE_EXECUTOR, _PICKLE_WRITES_ACCEPTING, _PICKLE_WRITES_CLOSED
+        absolute_path = pathlib.Path(os.path.abspath(os.fspath(path)))
+        path_key = os.path.normcase(os.fspath(absolute_path))
+        result_future: Future = Future()
 
-        try:
-            return _PICKLE_WRITE_EXECUTOR.submit(_worker)
-        except RuntimeError as e:
-            # executor 已 shutdown (atexit 后) — fallback 同步, 至少不丢写
-            # 进程正在 finalize 时降级到 debug, 避免 stderr 已关闭后再写的噪音
-            import sys as _sys
-            _log_fn = LogUtil.debug if _sys.is_finalizing() else LogUtil.warning
-            _log_fn(
-                f"[FileCacheDB._atomic_write_pickle] executor shutdown, "
-                f"fallback sync write path={path} err={e}"
-            )
-            fut: Future = Future()
+        def _write() -> None:
+            if durable:
+                self._atomic_write_pickle_blocking(
+                    absolute_path, obj, durable=True
+                )
+            else:
+                self._atomic_write_pickle_blocking(absolute_path, obj)
+
+        run_synchronously = False
+        capacity_rejected = False
+        shutdown_error: RuntimeError | None = None
+        with _PICKLE_WRITE_QUEUE_LOCK:
+            if _PICKLE_WRITES_CLOSED or _PICKLE_WRITE_EXECUTOR is None:
+                if not _PICKLE_WRITES_ACCEPTING:
+                    if suppress_errors:
+                        result_future.set_result(None)
+                    else:
+                        result_future.set_exception(
+                            RuntimeError("pickle writer is shut down")
+                        )
+                    return result_future
+                start_executor = DaemonExecutor(
+                    max_workers=_PICKLE_WRITE_WORKERS,
+                    thread_name_prefix="FileDbPickleWriter",
+                )
+                _PICKLE_WRITE_EXECUTOR = start_executor
+                _PICKLE_WRITES_CLOSED = False
+            state = _PICKLE_WRITE_QUEUES.get(path_key)
+            if state is None:
+                if len(_PICKLE_WRITE_QUEUES) >= max(1, int(_PICKLE_WRITE_MAX_PATHS)):
+                    capacity_rejected = True
+                    if suppress_errors:
+                        result_future.set_result(None)
+                    else:
+                        result_future.set_exception(
+                            BufferError(
+                                f"pickle active path limit reached path={path_key}"
+                            )
+                        )
+                else:
+                    state = _PickleWriteQueue()
+                    _PICKLE_WRITE_QUEUES[path_key] = state
+                    state.items.append((_write, result_future, suppress_errors))
+                    try:
+                        _PICKLE_WRITE_EXECUTOR.submit(
+                            _drain_pickle_write_queue, path_key
+                        )
+                    except RuntimeError as exc:
+                        run_synchronously = True
+                        shutdown_error = exc
+            else:
+                limit = max(1, int(_PICKLE_WRITE_MAX_PENDING_PER_PATH))
+                if len(state.items) >= limit:
+                    drop_index = next(
+                        (
+                            index
+                            for index, (_, _, queued_suppresses) in enumerate(state.items)
+                            if queued_suppresses
+                        ),
+                        None,
+                    )
+                    if drop_index is None:
+                        if suppress_errors:
+                            result_future.set_result(None)
+                        else:
+                            result_future.set_exception(
+                                BufferError(
+                                    f"pickle write queue full for path={path_key}"
+                                )
+                            )
+                        return result_future
+                    _, dropped_future, _ = state.items[drop_index]
+                    del state.items[drop_index]
+                    if not dropped_future.done():
+                        dropped_future.set_result(None)
+                state.items.append((_write, result_future, suppress_errors))
+
+        if capacity_rejected:
             try:
-                self._atomic_write_pickle_blocking(path, obj)
-                fut.set_result(None)
-            except Exception as inner:
-                fut.set_exception(inner)
-            return fut
+                LogUtil.warning(
+                    f"[FileCacheDB._atomic_write_pickle] active path limit reached, "
+                    f"reject path={path_key}"
+                )
+            except Exception:
+                pass
+            return result_future
+        if run_synchronously:
+            import sys as _sys
+
+            _log_fn = LogUtil.debug if _sys.is_finalizing() else LogUtil.warning
+            try:
+                _log_fn(
+                    f"[FileCacheDB._atomic_write_pickle] executor shutdown, "
+                    f"fallback sync write path={path} err={shutdown_error}"
+                )
+            except Exception:
+                pass
+            finally:
+                _drain_pickle_write_queue(path_key)
+
+        return result_future
 
     def _atomic_write_csv(self, path: pathlib.Path, df: pd.DataFrame):
         """

@@ -1,7 +1,9 @@
 import datetime
+import threading
 import traceback
 from typing import Dict, List
 
+from apscheduler.jobstores.base import ConflictingIdError
 from apscheduler.schedulers.background import BackgroundScheduler
 from chanlun import zixuan
 from chanlun import fun
@@ -81,6 +83,10 @@ xuangu_task_configs: Dict[str, Dict[str, object]] = {
     },
 }
 
+# ``None`` 是选股函数的正常“未命中”结果，不能再同时表示代码评估异常；否则当
+# 所有代码都异常时，任务会把“全失败”误当成“合法 0 命中”并清空目标自选组。
+_CODE_EVALUATION_FAILED = object()
+
 
 def process_xuangu_by_code(args):
     try:
@@ -105,7 +111,7 @@ def process_xuangu_by_code(args):
             f"process_xuangu_by_code failed market={market} code={code} "
             f"freqs={frequencys} task={task_name} err={e}",
         )
-        return None
+        return _CODE_EVALUATION_FAILED
 
 
 def process_xuangu_task(
@@ -139,6 +145,12 @@ def process_xuangu_task(
             if market == "futures":
                 run_codes = [_c for _c in run_codes if _c[-2:] == "L8"]
         else:
+            if src_zx_group not in zx.zx_names:
+                log.warning(
+                    f"process_xuangu_task unknown source group market={market} "
+                    f"group={src_zx_group}"
+                )
+                return False
             run_codes = zx.zx_stocks(src_zx_group)
             run_codes = [_s["code"] for _s in run_codes]
 
@@ -146,21 +158,36 @@ def process_xuangu_task(
         # 先把命中结果写到中间 list，全部跑完后再 clear + 一次性写入，
         # 避免中途崩溃导致目标自选组被清空。
         xg_results = []
+        failed_codes = 0
 
         for _code in tqdm(run_codes, desc="选股进度"):
             _xg_res = process_xuangu_by_code(
                 (_code, market, freqs, task_name, opt_types)
             )
+            if _xg_res is _CODE_EVALUATION_FAILED:
+                failed_codes += 1
+                continue
             if _xg_res is not None:
                 tqdm.write(
                     f"{market} {task_name} 选择 {_xg_res['code']} : {_xg_res['msg']}"
                 )
                 xg_results.append(_xg_res)
 
-        # 选股全部完成后再清空 + 写入，避免中途崩溃导致目标组被清空。
-        zx.clear_zx_stocks(target_zx_group)
-        for _xg_res in xg_results:
-            zx.add_stock(target_zx_group, _xg_res["code"], None)
+        if failed_codes > 0:
+            log.error(
+                f"process_xuangu_task code evaluation failed market={market} "
+                f"task={task_name} failed={failed_codes} total={len(run_codes)}; "
+                "keep target group unchanged"
+            )
+            return False
+
+        # 所有代码均正常完成后才以单事务发布完整快照；部分失败或写入异常时旧结果保持不变。
+        if zx.replace_zx_stocks(target_zx_group, xg_results) is False:
+            log.error(
+                f"process_xuangu_task target group missing market={market} "
+                f"task={task_name} group={target_zx_group}"
+            )
+            return False
 
         xg_stocks = zx.zx_stocks(target_zx_group)
         utils.send_fs_msg(
@@ -171,12 +198,28 @@ def process_xuangu_task(
 
     except Exception as e:
         tqdm.write(f"{market} {task_name} 异常 ：{e}")
+        log.exception(
+            f"process_xuangu_task failed market={market} task={task_name}"
+        )
+        return False
+    return True
+
+
+def process_xuangu_job(*args) -> bool:
+    """APScheduler 入口：业务失败必须抛出，才能产生 EVENT_JOB_ERROR。"""
+    if process_xuangu_task(*args) is False:
+        raise RuntimeError("xuangu task failed")
     return True
 
 
 class XuanguTasks(object):
     def __init__(self, scheduler: BackgroundScheduler):
         self.scheduler = scheduler
+        if scheduler is not None:
+            if not hasattr(scheduler, "my_task_list"):
+                scheduler.my_task_list = {}
+            if not hasattr(scheduler, "my_task_lock"):
+                scheduler.my_task_lock = threading.RLock()
 
     def xuangu_task_config_list(self) -> dict:
         return xuangu_task_configs
@@ -195,6 +238,8 @@ class XuanguTasks(object):
         """
         if xuangu_task_name not in xuangu_task_configs.keys():
             return False
+        if self.scheduler is None or not bool(getattr(self.scheduler, "running", False)):
+            raise RuntimeError("scheduler is not running")
 
         # task_id 必须包含 freqs 与目标自选组，否则同一个选股任务在不同周期 / 不同
         # 目标分组下并发跑会被误判成"上一次任务还没结束"而被拒绝。
@@ -205,31 +250,51 @@ class XuanguTasks(object):
         # 在 JOB_EXECUTED 之后最后落定)也误判成"未结束"→ 任务永久锁死直到重启 web(审查 F2)。
         # 改为只拒绝真正占用中的状态(运行中/等待运行/已添加),终态/异常/已删一律放行重跑。
         _ACTIVE_XG_STATES = {"运行中", "等待运行", "已添加"}
-        if (
-            task_id in self.scheduler.my_task_list.keys()
-            and self.scheduler.my_task_list[task_id]["state"] in _ACTIVE_XG_STATES
-        ):
-            return False
-
         task_name = f"{market}:{xuangu_task_configs[xuangu_task_name]['name']} {freqs} -> 【{target_zx_group}】"
+        task_lock = self.scheduler.my_task_lock
 
-        self.scheduler.add_job(
-            func=process_xuangu_task,
-            args=(
-                market,
-                xuangu_task_name,
-                freqs,
-                opt_type,
-                src_zx_group,
-                target_zx_group,
-            ),
-            trigger="date",
-            next_run_time=datetime.datetime.now(),
-            id=task_id,
-            name=task_name,
-        )
+        with task_lock:
+            current = self.scheduler.my_task_list.get(task_id)
+            if current and current.get("state") in _ACTIVE_XG_STATES:
+                return False
+
+            previous = current
+            self.scheduler.my_task_list[task_id] = {
+                "id": task_id,
+                "name": task_name,
+                "update_dt": fun.datetime_to_str(datetime.datetime.now()),
+                "next_run_dt": "--",
+                "state": "等待运行",
+            }
+            try:
+                self.scheduler.add_job(
+                    func=process_xuangu_job,
+                    args=(
+                        market,
+                        xuangu_task_name,
+                        freqs,
+                        opt_type,
+                        src_zx_group,
+                        target_zx_group,
+                    ),
+                    trigger="date",
+                    next_run_time=datetime.datetime.now(),
+                    id=task_id,
+                    name=task_name,
+                )
+            except ConflictingIdError:
+                if previous is None:
+                    self.scheduler.my_task_list.pop(task_id, None)
+                else:
+                    self.scheduler.my_task_list[task_id] = previous
+                return False
+            except Exception:
+                if previous is None:
+                    self.scheduler.my_task_list.pop(task_id, None)
+                else:
+                    self.scheduler.my_task_list[task_id] = previous
+                raise
         return True
-
 
 if __name__ == "__main__":
     xt = XuanguTasks(None)

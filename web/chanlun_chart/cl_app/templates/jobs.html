@@ -14,7 +14,7 @@
 <body class="layui-fluid">
   <table class="layui-hide" id="table-jobs"></table>
 
-  <script>
+  <script nonce="{{ csp_nonce }}">
     $(function () {
       layui.use('table', function () {
         var table = layui.table;

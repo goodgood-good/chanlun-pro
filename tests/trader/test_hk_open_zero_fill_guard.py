@@ -51,7 +51,7 @@ def _mk(dealt_amount, monkeypatch):
     t.b_space = 3
     t.zx = _FakeZx()
     t.log = None
-    t._broker_already_holds = lambda code: False
+    t._broker_already_holds = lambda code, **kwargs: False
     t._safe_alert = lambda *a, **k: None
     monkeypatch.setattr(trader_hk_stock.utils, "send_fs_msg", lambda *a, **k: None)
     monkeypatch.setattr(trader_hk_stock.db, "order_save", lambda *a, **k: None)

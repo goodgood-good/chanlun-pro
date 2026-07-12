@@ -1,30 +1,127 @@
 var ZiXuan = (function () {
   var zx_group = "我的关注";
-  var interval_update_rates = null;
+  var timeout_update_rates = null;
+  var update_request_in_flight = false;
+  var update_retry_index = 0;
+  var update_poll_generation = 0;
+  var rate_polling_active = true;
+  var UPDATE_NORMAL_DELAY_MS = 3000;
+  var UPDATE_CLOSED_DELAY_MS = 300000;
+  var UPDATE_RETRY_DELAYS_MS = [6000, 12000, 24000, 30000];
+  var zixuanOptsRequestGeneration = 0;
+  var stockListRequestGeneration = 0;
+  var groupsRequestGeneration = 0;
+  var searchRequestGeneration = 0;
+  var stockTableHandlersBound = false;
 
-  // 停止行情轮询定时器（切换分组/重新渲染前调用，防止多个定时器并存）
-  function stop_timer() {
-    if (interval_update_rates) {
-      clearInterval(interval_update_rates);
-      interval_update_rates = null;
+  function appAjax(options) {
+    var requestOptions = Object.assign({ timeout: 10000 }, options || {});
+    if (typeof requestOptions.error !== "function") {
+      requestOptions.error = function () {
+        if (window.layer) layer.msg("请求失败，请稍后重试");
+      };
     }
+    if (window.AppRequest && typeof window.AppRequest.ajax === "function") {
+      return window.AppRequest.ajax(requestOptions);
+    }
+    return $.ajax(requestOptions);
+  }
+
+  function pathSegment(value) {
+    return encodeURIComponent(String(value == null ? "" : value));
+  }
+
+  // Stop the active polling generation before a group or table is replaced.
+  function stop_timer() {
+    if (timeout_update_rates !== null) {
+      clearTimeout(timeout_update_rates);
+      timeout_update_rates = null;
+    }
+    update_poll_generation += 1;
+    update_retry_index = 0;
+  }
+
+  function schedule_rate_update(delay, generation) {
+    if (!rate_polling_active) return;
+    if (generation !== update_poll_generation) return;
+    if (timeout_update_rates !== null) clearTimeout(timeout_update_rates);
+    timeout_update_rates = setTimeout(function () {
+      timeout_update_rates = null;
+      ZiXuan.stocks_update_rate(generation);
+    }, delay);
+  }
+
+  function schedule_rate_retry(generation) {
+    var delay = UPDATE_RETRY_DELAYS_MS[
+      Math.min(update_retry_index, UPDATE_RETRY_DELAYS_MS.length - 1)
+    ];
+    update_retry_index = Math.min(
+      update_retry_index + 1,
+      UPDATE_RETRY_DELAYS_MS.length - 1
+    );
+    schedule_rate_update(delay, generation);
+  }
+
+  function checkboxTemplate(name, checked) {
+    var span = document.createElement("span");
+    var input = document.createElement("input");
+    input.type = "checkbox";
+    input.checked = checked === true;
+    input.defaultChecked = checked === true;
+    span.appendChild(input);
+    span.appendChild(document.createTextNode(" " + String(name || "")));
+    return span.outerHTML;
+  }
+
+  function rateNode(code, price, rate, color) {
+    var root = document.createElement("div");
+    root.className = "code_rate";
+    root.dataset.code = String(code || "");
+    if (color) root.style.color = color;
+    var rateLine = document.createElement("div");
+    rateLine.className = "layui-font-14";
+    if (color) rateLine.style.color = color;
+    rateLine.textContent = rate == null ? "- %" : String(rate) + "%";
+    var priceLine = document.createElement("div");
+    priceLine.className = "layui-font-12";
+    priceLine.textContent = price == null ? "-" : String(price);
+    root.appendChild(rateLine);
+    root.appendChild(priceLine);
+    return root;
+  }
+
+  function stockNode(name, code, color) {
+    var root = document.createElement("div");
+    var nameLine = document.createElement("div");
+    nameLine.className = "layui-font-14";
+    if (color) nameLine.style.color = color;
+    nameLine.textContent = String(name || "");
+    var codeLine = document.createElement("div");
+    codeLine.className = "layui-font-12 layui-font-gray";
+    codeLine.textContent = String(code || "");
+    root.appendChild(nameLine);
+    root.appendChild(codeLine);
+    return root;
   }
 
   return {
+    zx_group: zx_group,
     render_zixuan_opts: function () {
-      $.ajax({
+      var market = Utils.get_market();
+      var code = String(Utils.get_code() || "").replace(/\//g, "__");
+      var generation = ++zixuanOptsRequestGeneration;
+      appAjax({
         type: "GET",
-        url: "/get_stock_zixuan/" + Utils.get_market() + "/" + Utils.get_code().replace("/", "__"),
+        url: "/get_stock_zixuan/" + pathSegment(market) + "/" + pathSegment(code),
         dataType: "json",
+        timeout: 10000,
         success: function (res) {
+          if (generation !== zixuanOptsRequestGeneration
+              || market !== Utils.get_market()
+              || code !== String(Utils.get_code() || "").replace(/\//g, "__")) return;
           let data = [];
-          layui.each(res, function (i, e) {
-            let templet = "";
-            if (e["exists"] === 0) {
-              templet = '<span><input type="checkbox" /> ' + e["zx_name"] + "</span>";
-            } else {
-              templet = '<span><input type="checkbox" checked /> ' + e["zx_name"] + "</span>";
-            }
+          layui.each(Array.isArray(res) ? res : [], function (i, e) {
+            let templet = checkboxTemplate(e["zx_name"], e["exists"] !== 0);
             data.push({
               title: e["zx_name"],
               id: i,
@@ -35,127 +132,179 @@ var ZiXuan = (function () {
           });
 
           $("#zixuan_groups").change();
-          layui.dropdown.reloadData("add_zixuan", {
-            data: data,
-          });
+          layui.dropdown.reloadData("add_zixuan", { data: data });
+        },
+        error: function () {
+          if (generation === zixuanOptsRequestGeneration && window.layer) {
+            layer.msg("获取自选分组状态失败");
+          }
         },
       });
     },
+    set_rate_polling_active: function (is_active) {
+      var next_active = is_active === true;
+      if (next_active === rate_polling_active) return;
+
+      rate_polling_active = next_active;
+      if (!next_active) {
+        stop_timer();
+        return;
+      }
+
+      update_retry_index = 0;
+      ZiXuan.stocks_update_rate(update_poll_generation);
+    },
 
     // 批量请求当前列表中所有股票的实时涨跌幅并刷新 DOM
-    stocks_update_rate: function () {
+    stocks_update_rate: function (generation) {
+      if (!rate_polling_active) return false;
+      var request_generation =
+        typeof generation === "number" ? generation : update_poll_generation;
+      if (request_generation !== update_poll_generation) return false;
+      if (update_request_in_flight) return false;
+
       let codes = [];
       $(".code_rate").each(function () {
         codes.push($(this).data("code"));
       });
+      if (codes.length === 0) return true;
 
-      if (codes.length === 0) {
-        return true;
-      }
+      update_request_in_flight = true;
+      var completion_state = "retry";
+      appAjax({
+        type: "POST",
+        url: "/ticks",
+        data: { market: Utils.get_market(), codes: JSON.stringify(codes) },
+        dataType: "json",
+        timeout: 8000,
+        success: function (response) {
+          if (request_generation !== update_poll_generation) return;
+          if (
+            !response ||
+            response.ok !== true ||
+            (response.market_state !== "open" &&
+              response.market_state !== "closed" &&
+              response.market_state !== "unknown") ||
+            !Array.isArray(response.ticks)
+          ) {
+            return;
+          }
 
-      layui.use(["laytpl"], function () {
-        var laytpl = layui.laytpl;
-        var rate_show_tpl =
-          "<div style='color:{{= d.color }}' class='code_rate' data-code='{{= d.code }}'>" +
-          "<div style='color:{{= d.color }}' class='layui-font-14'>{{= d.rate }}%</div>" +
-          "<div class='layui-font-12'>{{= d.price }}</div>" +
-          "<div>";
+          for (let i = 0; i < response.ticks.length; i++) {
+            let tick = response.ticks[i];
+            if (!tick || typeof tick !== "object") continue;
+            let rate = Number(tick.rate);
+            let price = Number(tick.price);
+            if (!Number.isFinite(rate)) continue;
+            let color = "#1e9fff"; // flat
+            if (rate > 0) color = "#ff5722";
+            else if (rate < 0) color = "#16baaa";
 
-        $.ajax({
-          type: "POST",
-          url: "/ticks",
-          data: { market: Utils.get_market(), codes: JSON.stringify(codes) },
-          dataType: "json",
-          success: function (ticks) {
-            for (let i = 0; i < ticks["ticks"].length; i++) {
-              let tick = ticks["ticks"][i];
-              let color = "#1e9fff"; // 平盘
-              if (tick["rate"] > 0) color = "#ff5722"; // 涨
-              else if (tick["rate"] < 0) color = "#16baaa"; // 跌
+            let obj_span_rate = $(".code_rate").filter(function () {
+              return String($(this).data("code")) === String(tick.code);
+            });
+            var next = rateNode(
+              tick.code,
+              Number.isFinite(price) ? price : null,
+              rate,
+              color
+            );
+            obj_span_rate.replaceWith(next);
+          }
+          completion_state = response.market_state;
+        },
+        error: function () {
+          completion_state = "retry";
+        },
+        complete: function () {
+          update_request_in_flight = false;
 
-              let obj_span_rate = $('.code_rate[data-code="' + tick["code"] + '"]');
-
-              laytpl(rate_show_tpl).render({
-                code: tick["code"],
-                price: tick["price"],
-                rate: tick["rate"],
-                color: color,
-              }, function(html){
-                  obj_span_rate.html(html);
-              });
+          if (request_generation !== update_poll_generation) {
+            if (rate_polling_active) {
+              schedule_rate_update(0, update_poll_generation);
             }
-
-            // 后端返回非交易时间标志时停止轮询，节省资源
-            let now_trading = ticks["now_trading"];
-            if (now_trading !== true) {
-              console.log("非交易时间，停止自动刷新");
-              stop_timer();
-            }
-          },
-        });
+            return;
+          }
+          if (completion_state === "closed") {
+            update_retry_index = 0;
+            schedule_rate_update(UPDATE_CLOSED_DELAY_MS, request_generation);
+            return;
+          }
+          if (completion_state === "open" || completion_state === "unknown") {
+            update_retry_index = 0;
+            schedule_rate_update(UPDATE_NORMAL_DELAY_MS, request_generation);
+            return;
+          }
+          schedule_rate_retry(request_generation);
+        },
       });
     },
 
     render_zixuan_stocks: function () {
       stop_timer();
 
-      layui.use(["table", "dropdown", "util", "laytpl"], function () {
-        var laytpl = layui.laytpl;
+      layui.use(["table", "dropdown", "util"], function () {
         let table = layui.table;
         let dropdown = layui.dropdown;
 
-        var code_show_tpl = laytpl(
-          "<div style='color:{{= d.color }}' class='layui-font-14'>{{= d.name }}</div><div class='layui-font-12 layui-font-gray'>{{= d.code }}</div>"
-        );
-        var rate_show_tpl = laytpl(
-          "<div class='code_rate' data-code='{{= d.code }}'><div class='layui-font-14'>- %</div><div class='layui-font-12'>-</div><div>"
-        );
-
-        table.render({
-          elem: "#table_zixuan_list",
-          defaultContextmenu: false,
-          url: "/get_zixuan_stocks/" + Utils.get_market() + "/" + ZiXuan.zx_group,
-          page: false,
-          className: "layui-font-12",
-          size: "sm",
-          lineStyle: "height: 52px;",
-          loading: true,
-          cols: [
-            [
-              {
-                field: "code",
-                title: "标的",
-                sort: false,
-                templet: function (d) {
-                  return code_show_tpl.render({
-                    color: d.color,
-                    name: d.name,
-                    code: d.code,
-                  });
+        var market = Utils.get_market();
+        var group = ZiXuan.zx_group;
+        var requestGeneration = ++stockListRequestGeneration;
+        appAjax({
+          type: "GET",
+          url: "/get_zixuan_stocks/" + pathSegment(market) + "/" + pathSegment(group),
+          dataType: "json",
+          timeout: 10000,
+          success: function (response) {
+            if (requestGeneration !== stockListRequestGeneration
+                || market !== Utils.get_market()
+                || group !== ZiXuan.zx_group) return;
+            var rows = Array.isArray(response)
+              ? response
+              : (response && Array.isArray(response.data) ? response.data : []);
+            table.render({
+              elem: "#table_zixuan_list",
+              defaultContextmenu: false,
+              data: rows,
+              page: false,
+              className: "layui-font-12",
+              size: "sm",
+              lineStyle: "height: 52px;",
+              loading: false,
+              cols: [[
+                {
+                  field: "code",
+                  title: "标的",
+                  sort: false,
+                  templet: function (d) {
+                    return stockNode(d.name, d.code, d.color).outerHTML;
+                  },
                 },
-              },
-              {
-                field: "zf",
-                title: "涨跌幅",
-                sort: false,
-                width: 70,
-                templet: function (d) {
-                  return rate_show_tpl.render({
-                    code: d.code,
-                  });
+                {
+                  field: "zf",
+                  title: "涨跌幅",
+                  sort: false,
+                  width: 70,
+                  templet: function (d) {
+                    return rateNode(d.code, null, null, null).outerHTML;
+                  },
                 },
+              ]],
+              done: function () {
+                if (requestGeneration === stockListRequestGeneration) {
+                  ZiXuan.stocks_update_rate();
+                }
               },
-            ],
-          ],
-          done: function () {
-            ZiXuan.stocks_update_rate();
-            // 赋值给模块级变量，便于 stop_timer 取消
-            interval_update_rates = setInterval(function() {
-                ZiXuan.stocks_update_rate();
-            }, 3000);
+            });
+          },
+          error: function () {
+            if (requestGeneration === stockListRequestGeneration && window.layer) {
+              layer.msg("获取自选列表失败");
+            }
           },
         });
-
+        if (!stockTableHandlersBound) {
+          stockTableHandlersBound = true;
         table.on("row(table_zixuan_list)", function (obj) {
           const data = obj.data;
           const code = data.code;
@@ -224,7 +373,7 @@ var ZiXuan = (function () {
             data: menu_data,
             click: function (menuData, othis) {
               if (menuData["id"] === "del") {
-                $.ajax({
+                appAjax({
                   type: "POST",
                   url: "/set_stock_zixuan",
                   data: {
@@ -246,7 +395,7 @@ var ZiXuan = (function () {
                   },
                 });
               } else if (menuData["title"] === "色彩") {
-                 $.ajax({
+                 appAjax({
                     type: "POST",
                     url: "/set_stock_zixuan",
                     data: {
@@ -259,14 +408,18 @@ var ZiXuan = (function () {
                     },
                     dataType: "json",
                     success: function (res) {
-                      obj.update({ color: menuData["color"] }, true);
+                      if (res && res.ok) {
+                        obj.update({ color: menuData["color"] }, true);
+                      } else {
+                        layer.msg("颜色更新失败");
+                      }
                     },
                   });
               } else if (
                 menuData["id"] === "sort_1" ||
                 menuData["id"] === "sort_2"
               ) {
-                $.ajax({
+                appAjax({
                     type: "POST",
                     url: "/set_stock_zixuan",
                     data: {
@@ -279,18 +432,23 @@ var ZiXuan = (function () {
                     },
                     dataType: "json",
                     success: function (res) {
-                      ZiXuan.render_zixuan_stocks();
+                      if (res && res.ok) {
+                        ZiXuan.render_zixuan_stocks();
+                      } else {
+                        layer.msg("排序更新失败");
+                      }
                     },
                   });
               } else if (menuData["id"] === "dfcf") {
                 window.open(
                   "https://emweb.securities.eastmoney.com/pc_hsf10/pages/index.html?type=web&code=" +
-                    data.code.replace(".", "")
+                    encodeURIComponent(data.code.replace(".", ""))
                 );
               }
             },
           });
         });
+        }
       });
     },
 
@@ -300,24 +458,38 @@ var ZiXuan = (function () {
            var dropdown = layui.dropdown;
            var form = layui.form;
 
-           $.ajax({
+           var groupsMarket = Utils.get_market();
+           var groupsGeneration = ++groupsRequestGeneration;
+           appAjax({
              type: "GET",
-             url: "/get_zixuan_groups/" + Utils.get_market(),
+             url: "/get_zixuan_groups/" + pathSegment(groupsMarket),
              dataType: "json",
+             timeout: 10000,
              success: function (res) {
+               if (groupsGeneration !== groupsRequestGeneration
+                   || groupsMarket !== Utils.get_market()) return;
                let zixuan_groups = $("#zixuan_groups");
-               $(zixuan_groups).html();
-               layui.each(res, function (i, r) {
-                 $(zixuan_groups).append(
-                   "<option value='" + r.name + "'>" + r.name + "</option>"
+               zixuan_groups.empty();
+               layui.each(Array.isArray(res) ? res : [], function (i, r) {
+                 zixuan_groups.append(
+                   $("<option>", { value: r.name, text: r.name })
                  );
                });
-               layui.form.render($(zixuan_groups));
-               // 自动选中第一个分组，触发 render_zixuan_stocks 加载列表
-               $(zixuan_groups).siblings("div.layui-form-select").find("dl").find("dd")[0].click();
+               layui.form.render(zixuan_groups);
+               var firstOption = $(zixuan_groups)
+                 .siblings("div.layui-form-select").find("dl").find("dd")[0];
+               if (firstOption && typeof firstOption.click === "function") {
+                 firstOption.click();
+               } else if (!res || res.length === 0) {
+                 layer.msg("暂无自选分组");
+               }
+             },
+             error: function () {
+               if (groupsGeneration === groupsRequestGeneration) {
+                 layer.msg("获取自选分组失败");
+               }
              },
            });
-
             dropdown.render({
                 elem: "#add_zixuan",
                 data: [],
@@ -326,7 +498,7 @@ var ZiXuan = (function () {
                     if (data["exists"] === 1) {
                         opt = "DEL";
                     }
-                    $.ajax({
+                    appAjax({
                         type: "POST",
                         url: "/set_stock_zixuan",
                         data: {
@@ -339,6 +511,10 @@ var ZiXuan = (function () {
                         },
                         dataType: "json",
                         success: function (res) {
+                            if (!res || !res.ok) {
+                                layer.msg("自选更新失败");
+                                return;
+                            }
                             if (data["title"] == ZiXuan.zx_group) {
                                 ZiXuan.render_zixuan_opts();
                                 ZiXuan.render_zixuan_stocks();
@@ -369,14 +545,25 @@ var ZiXuan = (function () {
                 theme: { color: "#e54d42" },
                 delay: 1000,
                 remoteMethod: function (val, cb, show) {
+                    var requestGeneration = ++searchRequestGeneration;
                     if (val) {
-                        $.ajax({
+                        var searchMarket = Utils.get_market();
+                        appAjax({
                             type: "GET",
-                            url: "/tv/search?limit=30&type=&query=" + encodeURIComponent(val) + "&exchange=" + Utils.get_market(),
+                            url: "/tv/search",
+                            data: {
+                                limit: 30,
+                                type: "",
+                                query: val,
+                                exchange: searchMarket,
+                            },
                             dataType: "json",
+                            timeout: 10000,
                             success: function (res) {
+                                if (requestGeneration !== searchRequestGeneration
+                                    || searchMarket !== Utils.get_market()) return;
                                 let lst = [];
-                                layui.each(res, function (i, r) {
+                                layui.each(Array.isArray(res) ? res : [], function (i, r) {
                                     lst.push({
                                         name: r["symbol"] + ":" + r["description"],
                                         value: r["symbol"],
@@ -384,15 +571,17 @@ var ZiXuan = (function () {
                                 });
                                 cb(lst);
                             },
+                            error: function () {
+                                if (requestGeneration === searchRequestGeneration) cb([]);
+                            },
                         });
                     } else {
-                        let storedItems = JSON.parse(localStorage.getItem(Utils.get_market() + "_selectedItems")) || [];
+                        let storedItems = Utils.get_selected_items();
                         cb(storedItems);
                     }
-                },
-                show: function () {
-                    let storedItems = JSON.parse(localStorage.getItem(Utils.get_market() + "_selectedItems")) || [];
-                    searchSelect.update({ data: storedItems });
+                },                    show: function () {
+                        let storedItems = Utils.get_selected_items();
+                        searchSelect.update({ data: storedItems });
                 },
                 on: function (data) {
                     if (data.arr.length > 0) {

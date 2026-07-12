@@ -19,3 +19,270 @@ body {
   border: #5f5f5f 1px solid;
 }
 
+/* 右栏决策支持工作台。全部选择器保持 ds- 作用域，避免影响既有图表与 Layui 面板。 */
+.ds-workbench {
+  box-sizing: border-box;
+  container: ds-workbench / inline-size;
+  min-width: 0;
+  padding: 8px;
+}
+
+.ds-panel {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  color: inherit;
+}
+
+.ds-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+  margin-bottom: 8px;
+}
+
+.ds-title {
+  min-width: 0;
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+.ds-status {
+  min-width: 0;
+  color: #777;
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  text-align: right;
+}
+
+.ds-track-toggle {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px;
+  min-width: 0;
+  margin-bottom: 8px;
+}
+
+.ds-track-button,
+.ds-tab-button {
+  box-sizing: border-box;
+  min-width: 0;
+  border: 1px solid #d8d8d8;
+  border-radius: 3px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.ds-track-button {
+  min-height: 34px;
+  padding: 5px 7px;
+  font-size: 12px;
+}
+
+.ds-track-button[aria-pressed="true"],
+.ds-tab-button[aria-selected="true"] {
+  border-color: #1e9fff;
+  background-color: rgba(30, 159, 255, 0.1);
+  color: #1677b8;
+}
+
+.ds-tab-list {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 3px;
+  min-width: 0;
+  margin-bottom: 8px;
+}
+
+.ds-tab-button {
+  min-height: 32px;
+  padding: 4px 3px;
+  font-size: 12px;
+}
+
+.ds-track-button:focus-visible,
+.ds-tab-button:focus-visible,
+.ds-candidate-button:focus-visible,
+.ds-view:focus-visible {
+  outline: 2px solid #1e9fff;
+  outline-offset: 2px;
+}
+
+.ds-view {
+  box-sizing: border-box;
+  min-width: 0;
+  max-width: 100%;
+  max-height: min(42vh, 440px);
+  padding: 4px 2px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overflow-wrap: anywhere;
+}
+
+.ds-view[hidden] {
+  display: none;
+}
+
+.ds-candidate-list {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.ds-candidate-button {
+  box-sizing: border-box;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 4px 8px;
+  width: 100%;
+  min-width: 0;
+  min-height: 48px;
+  padding: 7px 8px;
+  border: 1px solid #e4e4e4;
+  border-radius: 3px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  overflow-wrap: anywhere;
+  text-align: left;
+}
+
+.ds-candidate-code,
+.ds-candidate-name,
+.ds-candidate-reason {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.ds-candidate-code {
+  font-variant-numeric: tabular-nums;
+}
+
+.ds-candidate-reason {
+  grid-column: 1 / -1;
+  color: #777;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.ds-empty,
+.ds-disclaimer {
+  min-width: 0;
+  margin: 4px 0;
+  color: #888;
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.ds-facts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 5px 8px;
+  min-width: 0;
+  margin: 0 0 8px;
+}
+
+.ds-fact-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 6px;
+  min-width: 0;
+  padding: 4px 6px;
+  border: 1px solid rgba(127, 127, 127, 0.28);
+  border-radius: 3px;
+}
+
+.ds-fact-row dt,
+.ds-fact-row dd {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.ds-fact-row dt {
+  color: #888;
+  font-size: 12px;
+}
+
+.ds-fact-row dd {
+  margin: 0;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.ds-subtitle {
+  margin: 10px 0 5px;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.ds-fact-list {
+  margin: 4px 0 8px;
+  padding-left: 20px;
+  font-size: 12px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.ds-paper-readonly {
+  margin: 4px 0 8px;
+  padding: 6px 8px;
+  border: 1px solid rgba(30, 159, 255, 0.45);
+  border-radius: 3px;
+  background: rgba(30, 159, 255, 0.08);
+  color: inherit;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.ds-paper-position + .ds-paper-position {
+  margin-top: 5px;
+}
+
+.ds-disclaimer {
+  margin-top: 8px;
+  padding-top: 7px;
+  border-top: 1px solid #ececec;
+}
+
+@container ds-workbench (max-width: 360px) {
+  .ds-header {
+    display: block;
+  }
+
+  .ds-status {
+    display: block;
+    margin-top: 2px;
+    text-align: left;
+  }
+
+  .ds-tab-list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .ds-facts {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .ds-candidate-button {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .ds-candidate-reason {
+    grid-column: auto;
+  }
+}
+

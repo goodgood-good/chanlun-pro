@@ -1209,7 +1209,7 @@ class ExchangeChangQiao(Exchange):
             return positions
         except Exception as e:
             LogUtil.error(f"Error in positions: {e}")
-            return []
+            raise RuntimeError("Longbridge position query failed") from e
 
     def order(self, code: str, o_type: str, amount: float, args=None):
         """
@@ -1238,3 +1238,30 @@ class ExchangeChangQiao(Exchange):
         except Exception as e:
             LogUtil.error(f"Error in order: {e}")
             return None
+
+
+class ExchangeChangQiaoMarketView:
+    """把共享长桥连接绑定到不可变市场，避免 HK/US 互相覆盖默认市场。"""
+
+    __slots__ = ("_backend", "_market")
+
+    def __init__(self, backend, market: str):
+        self._backend = backend
+        self._market = str(market).lower()
+
+    @property
+    def market(self) -> str:
+        return self._market
+
+    @property
+    def default_market(self) -> str:
+        return self.market
+
+    def all_stocks(self, market: str = None):
+        return self._backend.all_stocks(market or self.market)
+
+    def now_trading(self, market: str = None):
+        return self._backend.now_trading(market or self.market)
+
+    def __getattr__(self, name):
+        return getattr(self._backend, name)

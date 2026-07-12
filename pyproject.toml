@@ -65,6 +65,11 @@ backtest = [
     "matplotlib>=3.10.3",
 ]
 monitor = ["playwright>=1.53.0"]
+corpus = [
+    "pdfplumber>=0.11.8,<0.12",
+    "pypdf>=6.6,<7",
+    "pillow>=12,<13",
+]
 all = [
     "alpaca-py>=0.40.1",
     "polygon-api-client>=1.14.6",
@@ -79,6 +84,9 @@ all = [
     "pyecharts==2.1.0",
     "matplotlib>=3.10.3",
     "playwright>=1.53.0",
+    "pdfplumber>=0.11.8,<0.12",
+    "pypdf>=6.6,<7",
+    "pillow>=12,<13",
 ]
 
 [tool.ruff]
@@ -113,7 +121,7 @@ python_files = ["test_*.py"]
 # 让 `poetry run pytest`(console script 不把 cwd 加入 sys.path)也能 import tests.* 包,
 # 否则 tests/trader/test_ctp_*.py 的 `from tests.trader.conftest import ...` 在 poetry 口径下
 # 报 ModuleNotFoundError: No module named 'tests'(4 个 CTP 资金安全测试静默不收集)。审计 D4-MED-2。
-pythonpath = ["."]
+pythonpath = [".", "src", "web/chanlun_chart"]
 
 [tool.poetry]
 # package-mode=false: 本项目不发布到 PyPI，Poetry 仅管理依赖，不需要打包配置

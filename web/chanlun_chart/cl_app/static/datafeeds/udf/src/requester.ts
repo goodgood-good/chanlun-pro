@@ -3,11 +3,13 @@ import { IRequester } from './irequester';
 
 export class Requester implements IRequester {
 	private _headers: HeadersInit | undefined;
+	private readonly _timeoutMs: number;
 
-	public constructor(headers?: HeadersInit) {
+	public constructor(headers?: HeadersInit, timeoutMs: number = 15_000) {
 		if (headers) {
 			this._headers = headers;
 		}
+		this._timeoutMs = Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : 15_000;
 	}
 
 	public sendRequest<T extends UdfResponse>(datafeedUrl: string, urlPath: string, params?: RequestParams): Promise<T | UdfErrorResponse>;
@@ -27,15 +29,35 @@ export class Requester implements IRequester {
 		logMessage('New request: ' + urlPath);
 
 		// Send user cookies if the URL is on the same origin as the calling script.
+		const controller = typeof AbortController === 'undefined' ? undefined : new AbortController();
 		const options: RequestInit = { credentials: 'same-origin' };
+		if (controller !== undefined) {
+			options.signal = controller.signal;
+		}
+		let timeoutId: ReturnType<typeof setTimeout>;
+		const timeout = new Promise<never>((_resolve, reject) => {
+			timeoutId = setTimeout(() => {
+				controller?.abort();
+				reject(new Error(`Request timed out after ${this._timeoutMs}ms`));
+			}, this._timeoutMs);
+		});
 
 		if (this._headers !== undefined) {
 			options.headers = this._headers;
 		}
 
 		// eslint-disable-next-line no-restricted-globals
-		return fetch(`${datafeedUrl}/${urlPath}`, options)
-			.then((response: Response) => response.text())
-			.then((responseTest: string) => JSON.parse(responseTest));
+		return Promise.race([
+			fetch(`${datafeedUrl}/${urlPath}`, options)
+			.then((response: Response) => {
+				if (response.ok === false) {
+					throw new Error(`Request failed with HTTP ${response.status}`);
+				}
+				return response.text();
+			})
+			.then((responseText: string) => JSON.parse(responseText)),
+			timeout,
+		])
+			.finally(() => clearTimeout(timeoutId));
 	}
 }

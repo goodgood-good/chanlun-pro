@@ -1337,7 +1337,12 @@ def symbols_prewarm():
     market = (request.values.get("market") or "").strip().lower()
     if not market:
         # 兼容 JSON body
-        body = request.get_json(silent=True) or {}
+        body = request.get_json(silent=True)
+        if request.is_json and not isinstance(body, dict):
+            return jsonify(
+                {"ok": False, "msg": "JSON body must be an object."}
+            ), 400
+        body = body or {}
         market = (body.get("market") or "").strip().lower()
     if market not in market_types:
         return jsonify({"ok": False, "msg": f"未知市场: {market!r}"}), 400
@@ -1387,7 +1392,12 @@ def symbols_prewarm_cancel():
     """取消某市场正在运行的预热任务。"""
     market = (request.values.get("market") or "").strip().lower()
     if not market:
-        body = request.get_json(silent=True) or {}
+        body = request.get_json(silent=True)
+        if request.is_json and not isinstance(body, dict):
+            return jsonify(
+                {"ok": False, "msg": "JSON body must be an object."}
+            ), 400
+        body = body or {}
         market = (body.get("market") or "").strip().lower()
     if market not in market_types:
         return jsonify({"ok": False, "msg": f"未知市场: {market!r}"}), 400

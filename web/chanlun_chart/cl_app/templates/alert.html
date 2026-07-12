@@ -230,7 +230,7 @@
         </div>
     </form>
 
-    <script>
+    <script nonce="{{ csp_nonce }}">
         $(function () {
             function save_alert() {
                 let alert_config = {}
@@ -267,7 +267,7 @@
                 }
 
                 console.log(alert_config);
-                $.ajax({
+                AppRequest.ajax({
                     type: "POST",
                     url: "/alert_save",
                     data: alert_config,

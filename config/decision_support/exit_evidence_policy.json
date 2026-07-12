@@ -1,0 +1,81 @@
+{
+  "schema_version": 1,
+  "policy_id": "chanlun.original_exit_evidence",
+  "version": 1,
+  "corpus_manifest_sha256": "b90e5d757209c0f9ed14226d405d59559ac557eecd127df38f83623be3d29a0a",
+  "source_pdf_sha256": "867b1262af2d3430b98421df4c5372748eb75a4eb7600cd967ecdc374817429e",
+  "bindings": [
+    {
+      "trigger": "hard_risk",
+      "references": [
+        {
+          "evidence_id": "evidence:9aa2f3cd87aaab49c481e371482876b4d7f4710b7a811cdb0c20feacbc8c6111",
+          "lesson": 12,
+          "pdf_page": 161,
+          "source_role": "lesson_body",
+          "evidence_sha256": "dc5b1250445511d7b11f0f44f4ff6af5a1c97649c2ed06fcc0a4787b589e793a"
+        },
+        {
+          "evidence_id": "evidence:89abab495fa799bf95ce78d059cfd814ca90a99d1f0361296e2ba55c5d465ce6",
+          "lesson": 22,
+          "pdf_page": 524,
+          "source_role": "chan_reply",
+          "evidence_sha256": "1caf9fd057cbb770ea48bc8945546466d101d30625954f92ccea00c7bfc1aab1"
+        }
+      ],
+      "boundary_tags": ["project_risk_latch"]
+    },
+    {
+      "trigger": "structural_invalidation",
+      "references": [
+        {
+          "evidence_id": "evidence:bd431175ca56751c5cac6548cda9fc8e8cf8757a4e9e51fc50060bad7a0150bb",
+          "lesson": 33,
+          "pdf_page": 1074,
+          "source_role": "lesson_body",
+          "evidence_sha256": "cedc6c386233b4e33d12666a3b05c9049fc42792571db99128d6fad6e38b898e"
+        }
+      ],
+      "boundary_tags": []
+    },
+    {
+      "trigger": "control_level_down",
+      "references": [
+        {
+          "evidence_id": "evidence:6e8ff461fc6a949316f4629c688a058778305cb6a6cb65dfc1d3f1ea40fe2761",
+          "lesson": 35,
+          "pdf_page": 1126,
+          "source_role": "lesson_body",
+          "evidence_sha256": "63d01f36563b22846b5831fded76d24074fb22e78908075bf8c1bd70b20a5130"
+        }
+      ],
+      "boundary_tags": []
+    },
+    {
+      "trigger": "control_level_sell",
+      "references": [
+        {
+          "evidence_id": "evidence:30e2d634264e696059ba2e4b2f80e4cb672a32091fb8e2cb5849f1a7ef2107c1",
+          "lesson": 45,
+          "pdf_page": 1333,
+          "source_role": "lesson_body",
+          "evidence_sha256": "7256480a7f990c1c9ba21e70ce06c4606ffd68f9556b74d81a647299272b8a0c"
+        }
+      ],
+      "boundary_tags": []
+    },
+    {
+      "trigger": "operation_level_sell",
+      "references": [
+        {
+          "evidence_id": "evidence:66303428ca684bbb24ea1f8432501c8b79dd2cd6d2a3150bafcf787e7dc64a72",
+          "lesson": 14,
+          "pdf_page": 184,
+          "source_role": "lesson_body",
+          "evidence_sha256": "f74d2197a54e488ef465fdb77c7f9e1a401a0be71ecd89ba1f602d1654c318e7"
+        }
+      ],
+      "boundary_tags": []
+    }
+  ]
+}

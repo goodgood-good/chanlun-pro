@@ -91,7 +91,7 @@
 
 
     <!-- 自选组管理脚本：新增/删除自选组，以及按组导入（txt 文件）/导出标的列表 -->
-    <script>
+    <script nonce="{{ csp_nonce }}">
 
         $(function () {
             const market = '{{ market }}';
@@ -116,7 +116,7 @@
                         layer.msg("默认自选组不允许删除");
                         return false;
                     }
-                    $.ajax({
+                    AppRequest.ajax({
                         type: "POST",
                         url: "/opt_zixuan_group/" + market,
                         data: { opt: opt, zx_group: zx_group },

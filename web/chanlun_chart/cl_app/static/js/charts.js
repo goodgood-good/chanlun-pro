@@ -23,6 +23,13 @@ const MARKET_TIMEZONE = {
     futures: "Asia/Shanghai",
     ny_futures: "Asia/Shanghai",
 };
+// Blob documents inherit the parent CSP, which blocks Charting Library's
+// bootstrap inline scripts. The bundled sameorigin.html is served without
+// that page CSP and is explicitly enabled in the widget options below.
+const CHART_DISABLED_FEATURES = Object.freeze([
+    "go_to_date",
+    "use_blob_for_iframe_loading",
+]);
 function _browserLocalTz() {
     try {
         return (Intl.DateTimeFormat().resolvedOptions().timeZone) || "Asia/Shanghai";
@@ -443,6 +450,8 @@ class ChartManager {
         this._pendingSaveState = null;
         this._saveScheduled = false;
         this._saveInFlight = null;
+        this._drawingSaveInFlight = false;
+        this._drawingSavePending = null;
         this._barReadyHandler = null;
         this._sse = null;  // SSE 实时推送连接(每图表一个; flag 关/不支持时为 null)
         this._visibilityHandler = null;  // 页面可见性兜底监听句柄
@@ -468,6 +477,43 @@ class ChartManager {
         this._verifyingUntil = null;  // performance.now() 时间戳，在此之前的 reconcile 属于 verify 内部
     }
 
+    enqueueLatestDrawingSave(taskFactory) {
+        if (typeof taskFactory !== "function") {
+            return Promise.reject(new TypeError("drawing save task must be a function"));
+        }
+
+        return new Promise((resolve, reject) => {
+            if (!this._drawingSavePending) {
+                this._drawingSavePending = { taskFactory, waiters: [] };
+            } else {
+                // Requests waiting behind the active write all observe the latest state.
+                this._drawingSavePending.taskFactory = taskFactory;
+            }
+            this._drawingSavePending.waiters.push({ resolve, reject });
+            this._drainDrawingSaveQueue();
+        });
+    }
+
+    async _drainDrawingSaveQueue() {
+        if (this._drawingSaveInFlight || !this._drawingSavePending) return;
+        const job = this._drawingSavePending;
+        this._drawingSavePending = null;
+        this._drawingSaveInFlight = true;
+        try {
+            await job.taskFactory();
+            job.waiters.forEach((waiter) => waiter.resolve());
+        } catch (error) {
+            if (typeof layer !== "undefined" && layer && typeof layer.msg === "function") {
+                layer.msg("画线保存失败，请检查网络后重试");
+            }
+            job.waiters.forEach((waiter) => waiter.reject(error));
+        } finally {
+            this._drawingSaveInFlight = false;
+            if (this._drawingSavePending) {
+                this._drainDrawingSaveQueue();
+            }
+        }
+    }
     getDrawingsCacheKey(symbol, interval) {
         const mode = this.cl_independent_drawings ? "ind" : "shared";
         const resolutionKey = this.cl_independent_drawings ? interval : "all";
@@ -928,57 +974,88 @@ class ChartManager {
             },
             saveLineToolsAndGroups: function (layoutId, chartId, state, options = {}) {
                 clog("[DEBUG-CHARTS] saveLineToolsAndGroups called", { layoutId, chartId, state, options });
-                return new Promise((resolve) => {
-                    if (self.shouldSuppressDrawingSave()) {
-                        clog("[DEBUG-CHARTS] Skip saveLineToolsAndGroups due to active drawing mutation");
-                        return resolve();
+                if (self.shouldSuppressDrawingSave()) {
+                    clog("[DEBUG-CHARTS] Skip saveLineToolsAndGroups due to active drawing mutation");
+                    return Promise.resolve();
+                }
+                if (!state || typeof state !== "object") {
+                    const error = new TypeError("drawing state must be an object");
+                    if (typeof layer !== "undefined" && layer && typeof layer.msg === "function") {
+                        layer.msg("画线状态无效，已取消保存");
                     }
-                    const rawResolution = self.chart ? self.chart.resolution() : Utils.get_local_data(Utils.get_market() + "_interval_" + self.id);
-                    const resolution = self.cl_independent_drawings ? rawResolution : 'all';
-                    const symbol = self.chart ? self.chart.symbol() : Utils.get_market() + ":" + Utils.get_code();
-                    const cacheKey = self.getDrawingsCacheKey(symbol, rawResolution);
+                    return Promise.reject(error);
+                }                const rawResolution = self.chart ? self.chart.resolution() : Utils.get_local_data(Utils.get_market() + "_interval_" + self.id);
+                const resolution = self.cl_independent_drawings ? rawResolution : 'all';
+                const symbol = self.chart ? self.chart.symbol() : Utils.get_market() + ":" + Utils.get_code();
+                const cacheKey = self.getDrawingsCacheKey(symbol, rawResolution);
 
-                    let processedState = { ...state };
-                    if (state.sources) {
-                        if (state.sources instanceof Map || typeof state.sources.entries === 'function') {
-                            try {
-                                processedState.sources = Object.fromEntries(state.sources);
-                            } catch (e) {
-                                processedState.sources = {};
-                                for (let [k, v] of state.sources.entries()) {
-                                    processedState.sources[k] = v;
-                                }
-                            }
-                        } else if (typeof state.sources === 'object') {
-                            try {
-                                processedState.sources = JSON.parse(JSON.stringify(state.sources));
-                            } catch (e) {
-                                processedState.sources = state.sources;
+                let processedState = { ...state };
+                if (state && state.sources) {
+                    if (state.sources instanceof Map || typeof state.sources.entries === 'function') {
+                        try {
+                            processedState.sources = Object.fromEntries(state.sources);
+                        } catch (e) {
+                            processedState.sources = {};
+                            for (let [k, v] of state.sources.entries()) {
+                                processedState.sources[k] = v;
                             }
                         }
+                    } else if (typeof state.sources === 'object') {
+                        try {
+                            processedState.sources = JSON.parse(JSON.stringify(state.sources));
+                        } catch (e) {
+                            processedState.sources = state.sources;
+                        }
                     }
+                }
 
-                    clog("[DEBUG-CHARTS] Saving drawings for", { symbol, resolution, sourcesCount: Object.keys(processedState.sources || {}).length, rawSources: state.sources, reason: options.reason });
-
-                    fetch("/tv/1.1/drawings?client=" + client_id + "&user=" + user_id + "&chart=" + chartId + "&layout=" + layoutId + "&symbol=" + symbol + "&resolution=" + resolution, {
+                if (state && state.groups) {
+                    if (state.groups instanceof Map || typeof state.groups.entries === 'function') {
+                        try {
+                            processedState.groups = Object.fromEntries(state.groups);
+                        } catch (e) {
+                            processedState.groups = {};
+                            for (let [k, v] of state.groups.entries()) {
+                                processedState.groups[k] = v;
+                            }
+                        }
+                    } else if (typeof state.groups === 'object') {
+                        try {
+                            processedState.groups = JSON.parse(JSON.stringify(state.groups));
+                        } catch (e) {
+                            processedState.groups = state.groups;
+                        }
+                    }
+                }
+                clog("[DEBUG-CHARTS] Queuing drawings save", { symbol, resolution, reason: options.reason });
+                const query = new URLSearchParams({
+                    client: client_id,
+                    user: user_id,
+                    chart: String(chartId),
+                    layout: String(layoutId),
+                    symbol: String(symbol),
+                    resolution: String(resolution),
+                });
+                return self.enqueueLatestDrawingSave(function () {
+                    return fetch("/tv/1.1/drawings?" + query.toString(), {
                         method: "POST",
-                        headers: {
-                            'Content-Type': 'application/json'
-                        },
+                        headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ state: processedState })
-                    }).then(res => res.json()).then(res => {
-                        clog("[DEBUG-CHARTS] saveLineToolsAndGroups response", res);
+                    }).then(function (response) {
+                        if (!response.ok) {
+                            throw new Error("Drawing save failed with HTTP " + response.status);
+                        }
+                        return response.json();
+                    }).then(function (payload) {
+                        if (!payload || payload.status !== 'ok') {
+                            throw new Error((payload && (payload.message || payload.error)) || "Drawing save was rejected");
+                        }
                         if (state && state.sources) {
                             self.setDrawingsCache(cacheKey, state);
                         }
-                        resolve();
-                    }).catch(err => {
-                        console.error("[DEBUG-CHARTS] saveLineToolsAndGroups error", err);
-                        resolve();
                     });
                 });
-            },
-            loadLineToolsAndGroups: function (layoutId, chartId, requestType, requestContext = {}) {
+            },            loadLineToolsAndGroups: function (layoutId, chartId, requestType, requestContext = {}) {
                 clog("[DEBUG-CHARTS] loadLineToolsAndGroups called", { layoutId, chartId, requestType, requestContext });
                 return new Promise((resolve) => {
                     const resolution = requestContext.resolution;
@@ -1051,8 +1128,8 @@ class ChartManager {
             numeric_formatting: { decimal_sign: "." },
             time_frames: [], timezone: getMarketTimezone(Utils.get_market()), locale: "zh",
             symbol_search_request_delay: 100, auto_save_delay: 5, study_count_limit: 100,
-            disabled_features: ["go_to_date"],
-            enabled_features: ["study_templates", "seconds_resolution", "saveload_separate_drawings_storage"],
+            disabled_features: CHART_DISABLED_FEATURES,
+            enabled_features: ["study_templates", "seconds_resolution", "saveload_separate_drawings_storage", "iframe_loading_same_origin"],
             saved_data_meta_info: { uid: 1, name: "default", description: "default" },
             save_load_adapter: save_load_adapter,
             client_id: "chanlun_pro_" + Utils.get_market() + "_" + this.id,
@@ -1363,7 +1440,7 @@ class ChartManager {
             buttonDeleteMark.textContent = "删除标记";
             buttonDeleteMark.addEventListener("click", function () {
                 let symbol = global_widget.symbolInterval();
-                $.post({ type: "POST", url: "/tv/del_marks", dataType: "json", data: { symbol: symbol.symbol }, success: function (res) { if (res.status == "ok") { global_widget.activeChart().clearMarks(); layer.msg("删除标记成功"); } } });
+                AppRequest.ajax({ type: "POST", url: "/tv/del_marks", dataType: "json", data: { symbol: symbol.symbol }, success: function (res) { if (res.status == "ok") { global_widget.activeChart().clearMarks(); layer.msg("删除标记成功"); } } });
             });
 
         });
@@ -1637,7 +1714,7 @@ class ChartManager {
         // 返回大写)，而 Utils.get_market() 存的是小写 "us"。不归一 → "us" !== "US" 恒成立 →
         // 每次切标的都误判 market 变 → location.reload() 整页刷新 → 多标的切换卡死(浏览器实测复现+补丁验证)。
         const market = marketRaw.toLowerCase();
-        if (Utils.get_market() !== market) { Utils.set_local_data("market", market); location.reload(); return; }
+        if (Utils.get_market() !== market) { Utils.set_local_data("market", market); location.assign("/?market=" + encodeURIComponent(market)); return; }
         Utils.set_local_data("market", market); Utils.set_local_data(`${market}_code`, code);
         this._initialLoadDone = false;
         this._latestAppliedBarTime = null;

@@ -44,10 +44,11 @@
     }
 
     class Requester {
-        constructor(headers) {
+        constructor(headers, timeoutMs = 15_000) {
             if (headers) {
                 this._headers = headers;
             }
+            this._timeoutMs = Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : 15_000;
         }
         sendRequest(datafeedUrl, urlPath, params) {
             if (params !== undefined) {
@@ -60,14 +61,34 @@
                 }).join('&');
             }
             // Send user cookies if the URL is on the same origin as the calling script.
+            const controller = typeof AbortController === 'undefined' ? undefined : new AbortController();
             const options = { credentials: 'same-origin' };
+            if (controller !== undefined) {
+                options.signal = controller.signal;
+            }
+            let timeoutId;
+            const timeout = new Promise((_resolve, reject) => {
+                timeoutId = setTimeout(() => {
+                    controller?.abort();
+                    reject(new Error(`Request timed out after ${this._timeoutMs}ms`));
+                }, this._timeoutMs);
+            });
             if (this._headers !== undefined) {
                 options.headers = this._headers;
             }
             // eslint-disable-next-line no-restricted-globals
-            return fetch(`${datafeedUrl}/${urlPath}`, options)
-                .then((response) => response.text())
-                .then((responseTest) => JSON.parse(responseTest));
+            return Promise.race([
+                fetch(`${datafeedUrl}/${urlPath}`, options)
+                    .then((response) => {
+                    if (response.ok === false) {
+                        throw new Error(`Request failed with HTTP ${response.status}`);
+                    }
+                    return response.text();
+                })
+                    .then((responseText) => JSON.parse(responseText)),
+                timeout,
+            ])
+                .finally(() => clearTimeout(timeoutId));
         }
     }
 
@@ -633,8 +654,9 @@
     class DataPulseProvider {
         constructor(historyProvider, updateFrequency) {
             this._subscribers = {};
-            this._requestsPending = 0;
+            this._requestsPending = new Set();
             this._historyProvider = historyProvider;
+            this._requestTimeoutMs = Math.max(10_000, Number.isFinite(updateFrequency) ? updateFrequency * 2 : 10_000);
             setInterval(this._updateData.bind(this), updateFrequency);
         }
         subscribeBars(symbolInfo, resolution, newDataCallback, listenerGuid) {
@@ -678,23 +700,36 @@
             }
         }
         _updateData() {
-            if (this._requestsPending > 0) {
-                return;
-            }
-            this._requestsPending = 0;
+            // A stalled symbol must not block refreshes for every other subscriber.
             // eslint-disable-next-line guard-for-in
             for (const listenerGuid in this._subscribers) {
-                this._requestsPending += 1;
-                this._updateDataForSubscriber(listenerGuid)
+                if (this._requestsPending.has(listenerGuid)) {
+                    continue;
+                }
+                this._requestsPending.add(listenerGuid);
+                this._withTimeout(Promise.resolve().then(() => this._updateDataForSubscriber(listenerGuid)), listenerGuid)
                     .then(() => {
-                    this._requestsPending -= 1;
-                    logMessage(`DataPulseProvider: data for #${listenerGuid} updated successfully, pending=${this._requestsPending}`);
                 })
                     .catch((reason) => {
-                    this._requestsPending -= 1;
-                    logMessage(`DataPulseProvider: data for #${listenerGuid} updated with error=${getErrorMessage(reason)}, pending=${this._requestsPending}`);
+                    logMessage(`DataPulseProvider: data for #${listenerGuid} updated with error=${getErrorMessage(reason)}`);
+                })
+                    .finally(() => {
+                    this._requestsPending.delete(listenerGuid);
                 });
             }
+        }
+        _withTimeout(request, listenerGuid) {
+            let timeoutId;
+            const timeout = new Promise((_resolve, reject) => {
+                timeoutId = setTimeout(() => {
+                    reject(new Error(`Data refresh timed out for #${listenerGuid}`));
+                }, this._requestTimeoutMs);
+            });
+            return Promise.race([request, timeout]).finally(() => {
+                if (timeoutId !== undefined) {
+                    clearTimeout(timeoutId);
+                }
+            });
         }
         _updateDataForSubscriber(listenerGuid) {
             const subscriptionRecord = this._subscribers[listenerGuid];

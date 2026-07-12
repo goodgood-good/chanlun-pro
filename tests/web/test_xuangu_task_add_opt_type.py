@@ -92,3 +92,22 @@ def test_task_add_rejects_unsupported_frequency(app_fake):
     j = _post(app, "long", frequencys="bad").get_json()
     assert j["ok"] is False
     assert fake.run_called is False
+
+
+def test_task_add_reports_stopped_scheduler(app_fake, monkeypatch):
+    app, fake = app_fake
+    monkeypatch.setattr(
+        fake,
+        "run_xuangu",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("scheduler is not running")
+        ),
+    )
+
+    response = _post(app, "long")
+
+    assert response.status_code == 503
+    assert response.get_json() == {
+        "ok": False,
+        "msg": "任务调度器未运行，请使用正式启动入口。",
+    }

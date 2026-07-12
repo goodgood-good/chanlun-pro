@@ -31,7 +31,8 @@ def precompress_directory(root: str) -> tuple[int, int, float]:
     t0 = time.time()
     compressed = 0
     skipped = 0
-    for dirpath, _dirs, files in os.walk(root):
+    for dirpath, dirs, files in os.walk(root):
+        dirs[:] = [name for name in dirs if name != "bundles_unused"]
         for fn in files:
             if fn.endswith(".gz"):
                 continue

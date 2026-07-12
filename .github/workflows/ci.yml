@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [master]
+    branches: [master, pre]
   pull_request:
-    branches: [master]
+    branches: [master, pre]
 
 # 同 ref 的 workflow 连续触发时取消旧的 run，避免连续 push 浪费 minutes
 concurrency:
@@ -45,11 +45,14 @@ jobs:
           poetry self add poetry-plugin-export
       - name: Export poetry.lock to requirements
         # 从 poetry.lock 导出 pip 兼容格式（不带 hash 让 pip-audit 不要求严格匹配）
-        run: poetry export -f requirements.txt --without-hashes -o /tmp/req.txt
+        run: |
+          poetry export -f requirements.txt --without-hashes --all-extras -o /tmp/req-all.txt
+          # Local Windows wheels are repository artifacts, not registry packages and
+          # cannot be resolved by pip-audit on Linux. Audit every registry dependency.
+          grep -v -E '(@ file:|package/.*\.whl)' /tmp/req-all.txt > /tmp/req.txt
       - name: Audit dependencies (CVE scan)
-        # --no-deps 仅扫描列出的顶层包，加快速度；首版不 strict 避免新发布 CVE 即时红
+        # 审计 Web/AI/通知/回测/监控部署画像；发现漏洞时阻断，不再假通过。
         run: pip-audit -r /tmp/req.txt --no-deps
-        continue-on-error: true
 
   test:
     name: Test (pytest)
@@ -67,8 +70,14 @@ jobs:
         shell: bash
       - name: Install poetry
         run: pip install poetry
-      - name: Install dependencies (core + monitor extra)
-        run: poetry install --extras monitor
+      - name: Install core dependencies
+        run: poetry install
+      - name: Smoke test fresh core Web import
+        env:
+          PYTHONPATH: src;web/chanlun_chart
+        run: poetry run python -c "from cl_app import create_app; app=create_app({'TESTING': True}); assert not app.extensions['scheduler'].running"
+      - name: Install test profile dependencies
+        run: poetry install --extras monitor --extras backtest --extras ai
       - name: Install Playwright browser
         run: poetry run playwright install chromium
       - name: Run tests
@@ -103,4 +112,16 @@ jobs:
         with:
           node-version: '20'
       - name: Run node:test
-        run: node --test web/chanlun_chart/cl_app/static/js/__tests__/*.test.js
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $files = Get-ChildItem -LiteralPath 'web/chanlun_chart/cl_app/static/js/__tests__' -Filter '*.test.js' | Sort-Object Name
+          foreach ($file in $files) {
+            $out = & node --test --test-reporter=tap $file.FullName 2>&1
+            $out | Write-Output
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            $summary = ($out | Select-String -Pattern '^# pass (\d+)$').Matches
+            if ($summary.Count -ne 1 -or [int]$summary[0].Groups[1].Value -lt 1) {
+              Write-Error "TAP pass summary missing for $($file.Name)"
+            }
+          }

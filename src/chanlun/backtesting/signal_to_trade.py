@@ -121,6 +121,13 @@ class SignalToTrade(BackTestTrader):
         """返回当前回放时刻（由外部驱动循环更新）。"""
         return self.now_datetime
 
+    def _apply_trade_date_overrides(self, backtest) -> None:
+        """分别应用交易回放起止日期，未设置的一侧保持原回测范围。"""
+        if self.trade_start_date is not None:
+            backtest.start_datetime = self.trade_start_date
+        if self.trade_end_date is not None:
+            backtest.end_datetime = self.trade_end_date
+
     def run_bt(self, bt_file: str):
         """加载信号回测 pkl 文件，以交易模式按时间轴重放所有开平仓信号，返回填充后的 BackTest 对象。"""
         BT = BackTest()
@@ -142,10 +149,7 @@ class SignalToTrade(BackTestTrader):
             BT.base_code = self.base_code
         if self.trade_max_pos is not None:
             self.max_pos = self.trade_max_pos
-        if self.trade_end_date is not None:
-            BT.start_datetime = self.trade_start_date
-        if self.trade_end_date is not None:
-            BT.end_datetime = self.trade_end_date
+        self._apply_trade_date_overrides(BT)
         if self.trade_strategy is not None:
             BT.strategy = self.trade_strategy
 

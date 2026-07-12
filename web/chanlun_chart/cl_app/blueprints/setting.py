@@ -41,9 +41,36 @@ def setting():
 @setting_bp.route("/setting/save", methods=["POST"])
 @login_required
 def setting_save():
+    required_fields = (
+        "proxy_host",
+        "proxy_port",
+        "fs_app_id",
+        "fs_app_secret",
+        "fs_user_id",
+    )
+    missing_fields = [name for name in required_fields if name not in request.form]
+    if missing_fields:
+        return {
+            "ok": False,
+            "msg": "缺少表单字段",
+            "fields": missing_fields,
+        }, 400
+
+    proxy_host = request.form["proxy_host"].strip()
+    proxy_port = request.form["proxy_port"].strip()
+    if bool(proxy_host) != bool(proxy_port):
+        return {"ok": False, "msg": "代理 Host 和 Port 必须同时填写或同时留空"}, 400
+    if proxy_port:
+        try:
+            parsed_proxy_port = int(proxy_port)
+        except ValueError:
+            parsed_proxy_port = 0
+        if not 1 <= parsed_proxy_port <= 65535:
+            return {"ok": False, "msg": "代理 Port 必须是 1 到 65535 的整数"}, 400
+
     proxy = {
-        "host": request.form["proxy_host"],
-        "port": request.form["proxy_port"],
+        "host": proxy_host,
+        "port": proxy_port,
     }
 
     submitted_secret = request.form.get("fs_app_secret", "")
@@ -56,11 +83,10 @@ def setting_save():
         encrypted_secret = encrypt_str(submitted_secret)
 
     fs_keys = {
-        "fs_app_id": request.form["fs_app_id"],
+        "fs_app_id": request.form["fs_app_id"].strip(),
         "fs_app_secret": encrypted_secret,
-        "fs_user_id": request.form["fs_user_id"],
+        "fs_user_id": request.form["fs_user_id"].strip(),
     }
-    db.cache_set("req_proxy", proxy)
-    db.cache_set("fs_keys", fs_keys)
+    db.cache_set_many({"req_proxy": proxy, "fs_keys": fs_keys})
 
     return {"ok": True}

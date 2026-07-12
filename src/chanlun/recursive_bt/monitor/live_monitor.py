@@ -25,7 +25,7 @@ from chanlun.market import Market
 from chanlun import config as app_config
 from chanlun import fun
 from chanlun.core.cl import CL
-from chanlun.exchange import get_exchange
+from chanlun.exchange import get_exchange, market_now_trading
 from chanlun.notifications import ClaudeHookNotifier, DingTalkWebhookNotifier
 from chanlun.recursive_bt.select.chanlun_selector import ASelectionConfig, OriginalChanlunASelector
 from chanlun.recursive_bt.engine.engine import (
@@ -1101,7 +1101,7 @@ def market_is_open(ex, market: str, now: _dt.datetime) -> bool:
     if market == "a":
         return in_session(now)
     try:
-        return bool(ex.now_trading())
+        return bool(market_now_trading(ex, market))
     except Exception as exc:
         # now_trading 异常(如长桥 ctx 自愈期)时,不粗暴判休市致整轮漏扫,
         # 回退到本地时段近似(宁可多扫一轮空转,也不漏真盘中信号)。

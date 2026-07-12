@@ -13,6 +13,7 @@ _root = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_root / "src"))
 sys.path.insert(0, str(_root / "web" / "chanlun_chart"))
 
+import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 
 from cl_app import create_app  # noqa: E402
@@ -115,3 +116,134 @@ def test_ticks_nan_last_does_not_produce_invalid_json(client, monkeypatch):
     j = json.loads(body)
     out = {t["code"]: t for t in j["ticks"]}
     assert "SZ.000001" in out and out["SZ.000001"]["price"] == 2.0
+
+def _assert_ticks_error(resp, status_code, error_code):
+    assert resp.status_code == status_code
+    payload = resp.get_json()
+    assert payload["ok"] is False
+    assert payload["market_state"] == "unknown"
+    assert payload["now_trading"] is None
+    assert payload["ticks"] == []
+    assert payload["error"]["code"] == error_code
+    assert isinstance(payload["error"]["message"], str)
+    assert payload["error"]["message"]
+    assert set(payload) == {"ok", "market_state", "now_trading", "ticks", "error"}
+
+
+def _raise_runtime_error(*_args, **_kwargs):
+    raise RuntimeError("dependency unavailable")
+
+
+@pytest.mark.parametrize(
+    ("raw_state", "expected_now_trading", "expected_market_state"),
+    [
+        (np.bool_(True), True, "open"),
+        (np.bool_(False), False, "closed"),
+        (None, None, "unknown"),
+    ],
+    ids=["numpy-open", "numpy-closed", "unknown"],
+)
+def test_ticks_success_normalizes_market_state(
+    client, monkeypatch, raw_state, expected_now_trading, expected_market_state
+):
+    ticks_map = {"SZ.000001": _tick("SZ.000001", 3.0, 2.5)}
+    monkeypatch.setattr(other_mod, "get_exchange", lambda _market: _FakeEx(ticks_map))
+    monkeypatch.setattr(other_mod, "market_now_trading", lambda _ex, _market: raw_state)
+
+    resp = client.post(
+        "/ticks", data={"market": "a", "codes": json.dumps(["SZ.000001"])}
+    )
+
+    assert resp.status_code == 200
+    payload = resp.get_json()
+    assert payload == {
+        "ok": True,
+        "market_state": expected_market_state,
+        "now_trading": expected_now_trading,
+        "ticks": [{"code": "SZ.000001", "price": 3.0, "rate": 2.5}],
+        "error": None,
+    }
+
+
+def test_ticks_serializes_numpy_float32_as_native_float(client, monkeypatch):
+    ticks_map = {
+        "SZ.000001": _tick(
+            "SZ.000001", np.float32(3.25), np.float32(1.75)
+        )
+    }
+    monkeypatch.setattr(other_mod, "get_exchange", lambda _market: _FakeEx(ticks_map))
+    monkeypatch.setattr(other_mod, "market_now_trading", lambda _ex, _market: True)
+
+    resp = client.post(
+        "/ticks", data={"market": "a", "codes": json.dumps(["SZ.000001"])}
+    )
+
+    assert resp.status_code == 200
+    payload = resp.get_json()
+    assert payload["ticks"] == [
+        {"code": "SZ.000001", "price": 3.25, "rate": 1.75}
+    ]
+    assert type(payload["ticks"][0]["price"]) is float
+    assert type(payload["ticks"][0]["rate"]) is float
+
+
+def test_ticks_rejects_invalid_market_with_400(client):
+    resp = client.post(
+        "/ticks", data={"market": "invalid", "codes": json.dumps([])}
+    )
+    _assert_ticks_error(resp, 400, "invalid_market")
+
+
+def test_ticks_rejects_invalid_codes_json_with_400(client):
+    resp = client.post("/ticks", data={"market": "a", "codes": "not-json"})
+    _assert_ticks_error(resp, 400, "invalid_codes_json")
+
+
+def test_ticks_rejects_non_list_codes_with_400(client):
+    resp = client.post(
+        "/ticks", data={"market": "a", "codes": json.dumps({"code": "SZ.000001"})}
+    )
+    _assert_ticks_error(resp, 400, "codes_not_list")
+
+
+def test_ticks_rejects_too_many_codes_with_400(client):
+    resp = client.post(
+        "/ticks", data={"market": "a", "codes": json.dumps(["X"] * 501)}
+    )
+    _assert_ticks_error(resp, 400, "too_many_codes")
+
+
+def test_ticks_rejects_non_string_code_with_400(client):
+    resp = client.post(
+        "/ticks", data={"market": "a", "codes": json.dumps(["SZ.000001", 1])}
+    )
+    _assert_ticks_error(resp, 400, "code_must_be_string")
+
+
+def test_ticks_returns_503_when_exchange_fails(client, monkeypatch):
+    monkeypatch.setattr(other_mod, "get_exchange", _raise_runtime_error)
+
+    resp = client.post(
+        "/ticks", data={"market": "a", "codes": json.dumps(["SZ.000001"])}
+    )
+
+    _assert_ticks_error(resp, 503, "service_unavailable")
+
+
+def test_ticks_keeps_prices_when_market_state_probe_fails(client, monkeypatch):
+    ticks_map = {"SZ.000001": _tick("SZ.000001", 3.0, 2.5)}
+    monkeypatch.setattr(other_mod, "get_exchange", lambda _market: _FakeEx(ticks_map))
+    monkeypatch.setattr(other_mod, "market_now_trading", _raise_runtime_error)
+
+    resp = client.post(
+        "/ticks", data={"market": "a", "codes": json.dumps(["SZ.000001"])}
+    )
+
+    assert resp.status_code == 200
+    assert resp.get_json() == {
+        "ok": True,
+        "market_state": "unknown",
+        "now_trading": None,
+        "ticks": [{"code": "SZ.000001", "price": 3.0, "rate": 2.5}],
+        "error": None,
+    }

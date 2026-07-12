@@ -154,11 +154,42 @@ class ZiXuan(object):
         return True
 
     def clear_zx_stocks(self, zx_group):
-        """
-        清空自选组内的股票
-        """
+        """清空自选组内的股票。"""
         db.zx_clear_by_group(self.market_type, zx_group)
         return True
+
+    def replace_zx_stocks(self, zx_group: str, stocks: List[Dict[str, str]]) -> bool:
+        """解析标的名称后，以单事务完整替换目标自选组。"""
+        if zx_group not in self.zx_names:
+            return False
+
+        normalized = []
+        ex = None
+        for stock in stocks:
+            code = stock["code"]
+            name = stock.get("name")
+            if not name:
+                try:
+                    if ex is None:
+                        ex = get_exchange(Market(self.market_type))
+                    stock_info = ex.stock_info(code)
+                    name = stock_info["name"] if stock_info else code
+                except Exception as exc:
+                    _log.warning(
+                        f"[ZiXuan.replace_zx_stocks] fetch stock_info failed, "
+                        f"market={self.market_type} code={code}, fallback name=code, err={exc}"
+                    )
+                    name = code
+            normalized.append(
+                {
+                    "code": code,
+                    "name": name,
+                    "color": stock.get("color", ""),
+                    "memo": stock.get("memo", ""),
+                }
+            )
+
+        return db.zx_replace_group_stocks(self.market_type, zx_group, normalized)
 
     def query_code_zx_names(self, code):
         """

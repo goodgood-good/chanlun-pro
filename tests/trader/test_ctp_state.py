@@ -1,5 +1,7 @@
 """H3-c: CTPState.restore_order_ref 单调恢复; M4: get_alive_orders 过滤未终结挂单。"""
 
+from types import SimpleNamespace
+
 from chanlun.trader._ctp_state import CTPState
 from tests.trader.conftest import FakeOrder, FakePosInfo
 
@@ -113,3 +115,74 @@ def test_prepare_position_query_does_not_prune():
     st.prepare_position_query()
     st.mark_position_query_done()
     assert "rb2405_2" in st.get_positions_snapshot()
+
+
+def test_ctp_state_snapshot_round_trip_preserves_orders_trades_and_quarantine():
+    st = CTPState()
+    st.restore_order_ref(88)
+    order = SimpleNamespace(
+        OrderRef="88",
+        InstrumentID="rb2405",
+        OrderStatus="3",
+        VolumeTraded=1,
+        ExchangeID="SHFE",
+        OrderSysID="sys-88",
+        FrontID=7,
+        SessionID=9,
+    )
+    trade = SimpleNamespace(
+        TradeID="trade-1",
+        ExchangeID="SHFE",
+        OrderRef="88",
+        InstrumentID="rb2405",
+        Price=3500.0,
+        Volume=1,
+    )
+    st.set_order("88", order)
+    assert st.set_trade(trade) is True
+    assert st.set_trade(trade) is False
+    st.mark_order_reconciliation_required("rb2405", "88", 1)
+
+    snapshot = st.export_snapshot()
+    assert isinstance(snapshot["orders"]["88"], dict)
+    assert snapshot["trades"]["SHFE:trade-1"]["Price"] == 3500.0
+
+    restored = CTPState()
+    assert restored.import_snapshot(snapshot) is True
+    assert restored.order_ref == 88
+    assert restored.get_order("88").OrderSysID == "sys-88"
+    assert len(restored.get_trades_snapshot()) == 1
+    assert restored.get_order_reconciliation_required("rb2405") == {"88": 1}
+    assert restored.is_reconciliation_ready() is False
+
+
+def test_reconciliation_barrier_requires_explicit_completion():
+    st = CTPState()
+    assert st.is_reconciliation_ready() is True
+    st.require_reconciliation("front disconnected")
+    assert st.is_reconciliation_ready() is False
+    assert "disconnected" in st.get_reconciliation_reason()
+    st.complete_reconciliation()
+    assert st.is_reconciliation_ready() is True
+
+
+def test_order_query_prunes_only_baseline_not_new_live_callback():
+    st = CTPState()
+    st.set_order("old", FakeOrder(OrderStatus="3", InstrumentID="rb2405"))
+    st.begin_order_query(11)
+    st.set_order("live", FakeOrder(OrderStatus="3", InstrumentID="rb2405"))
+    st.mark_order_query_done(11)
+
+    assert st.get_order("old") is None
+    assert st.get_order("live") is not None
+
+
+def test_scoped_order_query_does_not_prune_other_code():
+    st = CTPState()
+    st.set_order("rb", FakeOrder(OrderStatus="3", InstrumentID="rb2405"))
+    st.set_order("au", FakeOrder(OrderStatus="3", InstrumentID="au2406"))
+    st.begin_order_query(12, scope_code="rb2405")
+    st.mark_order_query_done(12)
+
+    assert st.get_order("rb") is None
+    assert st.get_order("au") is not None

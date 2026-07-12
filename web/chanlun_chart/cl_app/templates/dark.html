@@ -1,20 +1,284 @@
 <meta name="csrf-token" content="{{ csrf_token() }}">
-<script type="text/javascript">
-    // CSRF：所有非幂等 ajax 请求自动注入 X-CSRFToken header；
-    // 同源 GET/HEAD/OPTIONS/TRACE 默认豁免；跨域请求由 jQuery 的 crossDomain 标记跳过。
+<script type="text/javascript" nonce="{{ csp_nonce }}">
+    // 同源请求统一处理 CSRF 生命周期和认证失效。CSRF 失败只在响应明确
+    // 指向 token 问题时重试一次，普通业务 400 不会被重放。
     (function () {
-        if (typeof window.jQuery === 'undefined') { return; }
         var meta = document.querySelector('meta[name="csrf-token"]');
-        if (!meta || !meta.content) { return; }
-        window.jQuery.ajaxSetup({
-            beforeSend: function (xhr, settings) {
-                if (settings.crossDomain) { return; }
-                if (/^(GET|HEAD|OPTIONS|TRACE)$/i.test(settings.type)) { return; }
-                xhr.setRequestHeader('X-CSRFToken', meta.content);
-            }
-        });
-    })();
+        var originalFetch = typeof window.fetch === 'function' ? window.fetch : null;
+        var refreshPromise = null;
+        var redirectingToLogin = false;
+        var tokenUpdatedAt = Date.now();
+        var TOKEN_REFRESH_AGE_MS = 10 * 60 * 60 * 1000;
 
+        function currentToken() {
+            return meta && meta.content ? meta.content : '';
+        }
+        function updateToken(token) {
+            if (!token) { return; }
+            if (meta) { meta.content = token; }
+            tokenUpdatedAt = Date.now();
+            if (typeof document.querySelectorAll === 'function') {
+                var fields = document.querySelectorAll('input[name="csrf_token"]');
+                for (var i = 0; i < fields.length; i += 1) { fields[i].value = token; }
+            }
+        }        function unsafe(method) {
+            return !/^(GET|HEAD|OPTIONS|TRACE)$/i.test(method || 'GET');
+        }
+        function sameOrigin(url) {
+            try { return new URL(url, window.location.href).origin === window.location.origin; }
+            catch (_) { return false; }
+        }
+        function loginRedirectUrl() {
+            var next = (window.location.pathname || '/') + (window.location.search || '');
+            return '/login?next=' + encodeURIComponent(next);
+        }
+        function responseUrl(value) {
+            return String((value && (value.responseURL || value.url)) || '');
+        }
+        function isLoginResponse(value) {
+            if (!value) { return false; }
+            if (value.status === 401) { return true; }
+            try {
+                var path = new URL(responseUrl(value), window.location.href).pathname;
+                return path === '/login' && window.location.pathname !== '/login';
+            } catch (_) { return false; }
+        }        function handleAuthenticationFailure(value) {
+            if (!isLoginResponse(value) || redirectingToLogin) { return false; }
+            redirectingToLogin = true;
+            if (window.location.pathname !== '/login') {
+                window.location.assign(loginRedirectUrl());
+            }
+            return true;
+        }
+        function isCsrfFailureText(text) {
+            var body = String(text || '');
+            return /csrf/i.test(body);
+        }
+        function isCsrfFailureResponse(response) {
+            if (!response || response.status !== 400 || typeof response.clone !== 'function') {
+                return Promise.resolve(false);
+            }
+            return response.clone().text().then(isCsrfFailureText).catch(function () { return false; });
+        }
+        function fetchWithTimeout(input, init) {
+            var requestInit = Object.assign({}, init || {});
+            if (requestInit.signal || typeof AbortController === 'undefined') {
+                return originalFetch.call(window, input, requestInit);
+            }
+            var controller = new AbortController();
+            requestInit.signal = controller.signal;
+            var timeoutId = setTimeout(function () { controller.abort(); }, 30000);
+            return originalFetch.call(window, input, requestInit).finally(function () {
+                clearTimeout(timeoutId);
+            });
+        }        function refreshCsrfToken() {
+            if (refreshPromise) { return refreshPromise; }
+            if (!originalFetch) { return Promise.reject(new Error('fetch is unavailable')); }
+            refreshPromise = fetchWithTimeout('/api/session', {
+                method: 'GET',
+                credentials: 'same-origin',
+                cache: 'no-store',
+                headers: { 'Accept': 'application/json' }
+            }).then(function (response) {
+                if (handleAuthenticationFailure(response)) {
+                    throw new Error('authentication required');
+                }
+                if (!response.ok) {
+                    throw new Error('CSRF refresh failed with HTTP ' + response.status);
+                }
+                return response.json();
+            }).then(function (data) {
+                var token = data && data.csrf_token;
+                if (!token) { throw new Error('CSRF refresh returned no token'); }
+                updateToken(token);
+                return token;
+            }).finally(function () {
+                refreshPromise = null;
+            });
+            return refreshPromise;
+        }
+        function requestMethod(input, init) {
+            return (init && init.method) || (input && input.method) || 'GET';
+        }
+        function requestUrl(input) {
+            return typeof input === 'string' ? input : (input && input.url) || String(input || '');
+        }
+        function prepareFetchInit(input, init) {
+            var requestInit = Object.assign({}, init || {});
+            var method = requestMethod(input, requestInit);
+            var url = requestUrl(input);
+            if (unsafe(method) && sameOrigin(url)) {
+                var headers = new Headers(requestInit.headers || (input && input.headers) || {});
+                headers.set('X-CSRFToken', currentToken());
+                requestInit.headers = headers;
+            }
+            requestInit.credentials = requestInit.credentials || 'same-origin';
+            return requestInit;
+        }
+        function guardedFetch(input, init, retried) {
+            var requestInit = prepareFetchInit(input, init);
+            var method = requestMethod(input, requestInit);
+            var url = requestUrl(input);
+            return fetchWithTimeout(input, requestInit).then(function (response) {
+                handleAuthenticationFailure(response);
+                if (retried || !unsafe(method) || !sameOrigin(url)) { return response; }
+                return isCsrfFailureResponse(response).then(function (isCsrfFailure) {
+                    if (!isCsrfFailure) { return response; }
+                    return refreshCsrfToken().then(function () {
+                        return guardedFetch(input, init, true);
+                    });
+                });
+            });
+        }
+
+        if (originalFetch) {
+            window.fetch = function (input, init) {
+                return guardedFetch(input, init, false);
+            };
+        }
+
+        var jq = window.jQuery;
+        var nativeAjax = jq && jq.ajax;
+        if (jq) {
+            jq.ajaxSetup({
+                beforeSend: function (xhr, settings) {
+                    if (settings.crossDomain || !unsafe(settings.type)) { return; }
+                    xhr.setRequestHeader('X-CSRFToken', currentToken());
+                }
+            });
+        }
+
+        function isCsrfXhr(xhr) {
+            return !!xhr && xhr.status === 400 && isCsrfFailureText(xhr.responseText);
+        }
+        function appAjax(options) {
+            if (!nativeAjax || !jq.Deferred) { return nativeAjax.call(jq, options); }
+            var settings = Object.assign({}, options || {});
+            var deferred = jq.Deferred();
+            var activeRequest = null;
+            var aborted = false;
+            var retried = false;
+            var settled = false;
+            var context = settings.context || settings;
+
+            function complete(args) {
+                if (typeof settings.complete !== 'function') { return; }
+                try { settings.complete.apply(context, args); }
+                catch (error) { console.error('[AppRequest] complete callback failed', error); }
+            }
+            function reject(args) {
+                if (settled) { return; }
+                settled = true;
+                handleAuthenticationFailure(args[0]);
+                if (typeof settings.error === 'function') {
+                    try { settings.error.apply(context, args); }
+                    catch (error) { console.error('[AppRequest] error callback failed', error); }
+                }
+                try { deferred.rejectWith(context, args); }
+                catch (error) { console.error('[AppRequest] fail handler failed', error); }
+                finally { complete([args[0], args[1]]); }
+            }
+            function issue() {
+                if (aborted) { return; }
+                var attemptOptions = Object.assign({}, settings);
+                delete attemptOptions.success;
+                delete attemptOptions.error;
+                delete attemptOptions.complete;
+                activeRequest = nativeAjax.call(jq, attemptOptions);
+                activeRequest.done(function () {
+                    var args = Array.prototype.slice.call(arguments);
+                    if (settled) { return; }
+                    if (handleAuthenticationFailure(args[2])) {
+                        reject([args[2], 'authentication_required', new Error('authentication required')]);
+                        return;
+                    }
+                    settled = true;
+                    if (typeof settings.success === 'function') {
+                        try { settings.success.apply(context, args); }
+                        catch (error) { console.error('[AppRequest] success callback failed', error); }
+                    }
+                    try { deferred.resolveWith(context, args); }
+                    catch (error) { console.error('[AppRequest] done handler failed', error); }
+                    finally { complete([args[2], args[1]]); }
+                });                activeRequest.fail(function () {
+                    var args = Array.prototype.slice.call(arguments);
+                    var xhr = args[0];
+                    if (!retried && isCsrfXhr(xhr)) {
+                        retried = true;
+                        refreshCsrfToken().then(issue).catch(function () { reject(args); });
+                        return;
+                    }
+                    reject(args);
+                });
+            }
+
+            var promise = deferred.promise();
+            promise.abort = function () {
+                if (aborted || settled) { return promise; }
+                aborted = true;
+                if (activeRequest && typeof activeRequest.abort === 'function') {
+                    activeRequest.abort();
+                }
+                if (!settled) {
+                    reject([activeRequest, 'abort', new Error('request aborted')]);
+                }
+                return promise;
+            };
+            issue();
+            return promise;
+        }
+
+        // 原生 XHR（包括第三方控件）也动态注入最新 token，并识别认证失效。
+        if (window.XMLHttpRequest && window.XMLHttpRequest.prototype) {
+            var originalOpen = window.XMLHttpRequest.prototype.open;
+            var originalSend = window.XMLHttpRequest.prototype.send;
+            var originalSetRequestHeader = window.XMLHttpRequest.prototype.setRequestHeader;
+            window.XMLHttpRequest.prototype.open = function (method, url) {
+                this.__clCsrfMethod = method;
+                this.__clCsrfUrl = url;
+                this.__clRequestHeaders = {};
+                return originalOpen.apply(this, arguments);
+            };
+            window.XMLHttpRequest.prototype.setRequestHeader = function (name, value) {
+                this.__clRequestHeaders = this.__clRequestHeaders || {};
+                this.__clRequestHeaders[String(name).toLowerCase()] = true;
+                return originalSetRequestHeader.call(this, name, value);
+            };
+            window.XMLHttpRequest.prototype.send = function () {
+                var hasToken = this.__clRequestHeaders && this.__clRequestHeaders['x-csrftoken'];
+                if (!hasToken && unsafe(this.__clCsrfMethod) && sameOrigin(this.__clCsrfUrl)) {
+                    this.setRequestHeader('X-CSRFToken', currentToken());
+                }
+                if (typeof this.addEventListener === 'function') {
+                    this.addEventListener('loadend', function () {
+                        handleAuthenticationFailure(this);
+                        if (isCsrfXhr(this)) { refreshCsrfToken().catch(function () {}); }
+                    }, { once: true });
+                }
+                return originalSend.apply(this, arguments);
+            };
+        }
+
+        if (typeof document.addEventListener === 'function') {
+            document.addEventListener('submit', function (event) {
+                var form = event.target;
+                if (!form || Date.now() - tokenUpdatedAt < TOKEN_REFRESH_AGE_MS) { return; }
+                var method = String(form.method || 'GET').toUpperCase();
+                var action = form.action || window.location.href;
+                if (!unsafe(method) || !sameOrigin(action)) { return; }
+                event.preventDefault();
+                refreshCsrfToken().then(function () {
+                    if (typeof form.submit === 'function') { form.submit(); }
+                }).catch(function () {});
+            });
+        }
+        window.AppRequest = {
+            ajax: appAjax,
+            fetch: window.fetch,
+            refreshCsrfToken: refreshCsrfToken,
+            handleAuthenticationFailure: handleAuthenticationFailure
+        };
+    })();
     (function () {
         if (window.JSON && window.JSON.parse) {
             var c = document.getElementsByTagName("head");
