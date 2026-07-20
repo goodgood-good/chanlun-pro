@@ -21,13 +21,24 @@ class RestartableDaemonPoolExecutor(BasePoolExecutor):
         super().__init__(None)
 
     def start(self, scheduler, alias):
+        created = None
         if self._pool is None:
-            self._pool = DaemonExecutor(
+            created = DaemonExecutor(
                 max_workers=self._max_workers,
                 thread_name_prefix=f"Scheduler-{alias}",
                 max_pending=self._max_pending,
             )
-        super().start(scheduler, alias)
+            self._pool = created
+        try:
+            super().start(scheduler, alias)
+        except BaseException as start_error:
+            if created is not None and self._pool is created:
+                self._pool = None
+                try:
+                    created.shutdown(wait=True, cancel_futures=True)
+                except BaseException as cleanup_error:
+                    raise start_error from cleanup_error
+            raise
 
     def _do_submit_job(self, job, run_times):
         def callback(future):

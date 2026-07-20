@@ -2,6 +2,7 @@ import atexit
 import datetime
 import hashlib
 import hmac
+import json
 import os
 import threading
 import pathlib
@@ -9,7 +10,8 @@ import pytz
 import secrets
 import subprocess
 from collections.abc import Mapping
-from decimal import Decimal
+from contextlib import closing
+from types import MappingProxyType
 from apscheduler.events import (
     EVENT_ALL,
     EVENT_EXECUTOR_ADDED,
@@ -97,27 +99,6 @@ def create_app(test_config=None, start_scheduler=False):
         MAX_FORM_PARTS=500,
         WTF_CSRF_TIME_LIMIT=12 * 60 * 60,
         READINESS_MARKETS=os.environ.get("CHANLUN_READINESS_MARKETS", "a"),
-        DECISION_SUPPORT_ENABLED=False,
-        DECISION_SUPPORT_ACCOUNT_PROVIDER=None,
-        DECISION_SUPPORT_DYNAMIC_MONITOR=None,
-        DECISION_SUPPORT_LLM_PROVIDER=None,
-        DECISION_SUPPORT_MONITOR_CONFIG=None,
-        DECISION_SUPPORT_MANUAL_CHECK_DIR=None,
-        DECISION_SUPPORT_PAPER_INITIAL_CASH=None,
-        DECISION_SUPPORT_PAPER_FEE_SCHEDULE=None,
-        DECISION_SUPPORT_PAPER_CALENDAR_PROVIDER=None,
-        DECISION_SUPPORT_PAPER_LEDGER_PATH=None,
-        DECISION_SUPPORT_TRUSTED_BAR_STORE_PATH=None,
-        DECISION_SUPPORT_PAPER_RISK_STATE_PATH=None,
-        DECISION_SUPPORT_EXIT_EVALUATION_STORE_PATH=None,
-        DECISION_SUPPORT_EXIT_EVIDENCE_POLICY_PATH=None,
-        DECISION_SUPPORT_PAPER_STRATEGY_REGISTRY_PATH=None,
-        DECISION_SUPPORT_PAPER_STRATEGY_EPOCH=None,
-        DECISION_SUPPORT_PAPER_STRATEGY_ENGINE_BUILD_FINGERPRINT=None,
-        DECISION_SUPPORT_PAPER_SCANNER_ALGORITHM_FINGERPRINT=None,
-        DECISION_SUPPORT_PAPER_STRUCTURE_ALGORITHM_FINGERPRINT=None,
-        DECISION_SUPPORT_PAPER_ACCOUNT_ALGORITHM_FINGERPRINT=None,
-        DECISION_SUPPORT_PAPER_BAR_PROVIDER_FINGERPRINT=None,
     )
     if test_config:
         app.config.update(test_config)
@@ -145,6 +126,28 @@ def create_app(test_config=None, start_scheduler=False):
     )
     scheduler.my_task_list = {}
     scheduler.my_task_lock = threading.RLock()
+    from .services.research_runtime_attestation import (
+        build_scheduler_attestation,
+    )
+
+    app.extensions["research_required_job_executors"] = MappingProxyType({})
+
+    def research_scheduler_attestation():
+        required_job_executors = app.extensions[
+            "research_required_job_executors"
+        ]
+        if type(required_job_executors) is not MappingProxyType:
+            raise RuntimeError(
+                "research required-job mapping must be immutable"
+            )
+        return build_scheduler_attestation(
+            scheduler,
+            required_job_executors,
+        )
+
+    app.extensions[
+        "research_scheduler_attestation"
+    ] = research_scheduler_attestation
 
     def run_tasks_listener(event):
         state_map = {
@@ -219,9 +222,6 @@ def create_app(test_config=None, start_scheduler=False):
     _alert_tasks = AlertTasks(scheduler)
     _xuangu_tasks = XuanguTasks(scheduler)
     _recursive_monitors = []
-    _decision_support_composition = None
-    _decision_support_jobs = {}
-    _decision_support_runtime_error = None
 
     # _other_tasks = OtherTasks(scheduler)
 
@@ -694,6 +694,7 @@ def create_app(test_config=None, start_scheduler=False):
         "generation": 0,
         "stop_event": threading.Event(),
         "scheduler_enabled": None,
+        "scheduler_start_attempted": False,
         "metadata": None,
         "ticks": None,
         "symbols": None,
@@ -788,23 +789,31 @@ def create_app(test_config=None, start_scheduler=False):
             _ensure_start_is_current()
 
             if enable_scheduler:
-                scheduler.start()
                 _alert_tasks.run()
 
                 from chanlun.signal_monitor.scheduler import register_signal_jobs
                 register_signal_jobs(scheduler)
 
-                from chanlun.recursive_bt.monitor.app_monitor import (
-                    register_recursive_monitor_jobs,
-                )
-                monitors = register_recursive_monitor_jobs(scheduler)
+                recursive_root = getattr(config, "RECURSIVE_MONITOR_CONFIG", {})
+                if (
+                    type(recursive_root) is dict
+                    and recursive_root.get("enabled") is True
+                ):
+                    from chanlun.recursive_bt.monitor.app_monitor import (
+                        register_recursive_monitor_jobs,
+                    )
+
+                    monitors = register_recursive_monitor_jobs(scheduler)
+                else:
+                    monitors = {}
                 _recursive_monitors.clear()
                 if isinstance(monitors, dict):
                     _recursive_monitors.extend(monitors.values())
                 elif monitors:
                     _recursive_monitors.extend(monitors)
-                if app.config.get("DECISION_SUPPORT_ENABLED", False):
-                    install_decision_support_runtime(monitors)
+                with runtime_lock:
+                    runtime_state["scheduler_start_attempted"] = True
+                scheduler.start()
 
             _ensure_start_is_current()
             app.extensions["metadata_warmup_thread"] = metadata_warmup_thread
@@ -816,7 +825,7 @@ def create_app(test_config=None, start_scheduler=False):
                 ):
                     raise RuntimeError("runtime services are stopping")
                 runtime_state["status"] = "running"
-        except Exception as exc:
+        except BaseException as exc:
             with runtime_lock:
                 runtime_state["error"] = str(exc)[:200]
             shutdown_runtime_services()
@@ -848,8 +857,34 @@ def create_app(test_config=None, start_scheduler=False):
                     cleanup_errors.append(f"{label}: {exc}")
                     app.logger.exception("runtime cleanup failed: %s", label)
 
-            if scheduler.running:
-                _cleanup("scheduler", lambda: scheduler.shutdown(wait=False))
+            def _shutdown_scheduler_resources():
+                try:
+                    if scheduler.running:
+                        scheduler.shutdown(wait=False)
+                    elif runtime_state.get("scheduler_start_attempted"):
+                        resource_errors = []
+                        for alias, executor in tuple(
+                            getattr(scheduler, "_executors", {}).items()
+                        ):
+                            try:
+                                executor.shutdown(wait=True)
+                            except Exception as exc:
+                                resource_errors.append(f"executor {alias}: {exc}")
+                        for alias, jobstore in tuple(
+                            getattr(scheduler, "_jobstores", {}).items()
+                        ):
+                            try:
+                                jobstore.shutdown()
+                            except Exception as exc:
+                                resource_errors.append(f"jobstore {alias}: {exc}")
+                        if resource_errors:
+                            raise RuntimeError("; ".join(resource_errors))
+                    with runtime_lock:
+                        runtime_state["scheduler_start_attempted"] = False
+                except Exception:
+                    raise
+
+            _cleanup("scheduler", _shutdown_scheduler_resources)
 
             def _handles_for(key):
                 value = runtime_state.get(key)
@@ -892,18 +927,15 @@ def create_app(test_config=None, start_scheduler=False):
             )
             _cleanup(
                 "metadata-loaders",
-                lambda: constants_service.shutdown_market_metadata_loaders(
-                    timeout=0.1
-                ),
+                lambda: constants_service.shutdown_market_metadata_loaders(timeout=0.1),
             )
-
             with runtime_lock:
                 runtime_state.update(
                     {
                         "started": False,
                         "stopping": False,
                         "status": "stopped",
-                        "shutdown_complete": True,
+                        "shutdown_complete": not cleanup_errors,
                         "scheduler_enabled": None,
                         "error": (
                             "; ".join(cleanup_errors)[:200]
@@ -928,462 +960,169 @@ def create_app(test_config=None, start_scheduler=False):
     def shutdown_scheduler():
         shutdown_runtime_services()
 
-    from chanlun.decision_support.event_store import DecisionEventStore
-    from chanlun.decision_support.certified_runtime import (
-        CertifiedCorpusRuntime,
-    )
-    from chanlun.persistence.db import db as persistence_db
-    from .services.decision_support import (
-        build_persistent_decision_support_facade,
-    )
+    def _trading_screening_clock():
+        configured = app.config.get("TRADING_SCREENING_CLOCK") or app.config.get(
+            "EARLY_SCREENING_CLOCK"
+        )
+        if callable(configured):
+            return configured()
+        return datetime.datetime.now(pytz.timezone("Asia/Shanghai"))
 
-    certified_corpus_runtime = CertifiedCorpusRuntime(
-        pathlib.Path(__file__).resolve().parents[3]
-        / "audit"
-        / "chanlun_lesson_corpus_v3"
-    )
-    decision_support_store = DecisionEventStore(lambda: persistence_db.Session())
-    decision_support_facade = build_persistent_decision_support_facade(
-        decision_support_store,
-        certified_corpus_runtime=certified_corpus_runtime,
-    )
+    from chanlun.decision_support.scanner import TradingEngine
+    from chanlun.notifications import DingTalkWebhookNotifier
 
-    def decision_support_runtime_status():
-        return {
-            "enabled": bool(app.config.get("DECISION_SUPPORT_ENABLED", False)),
-            "installed": _decision_support_composition is not None,
-            "jobs": tuple(sorted(_decision_support_jobs)),
-            "error": _decision_support_runtime_error,
+    from .services.research_audit import (
+        ResearchAuditUnavailable,
+        build_research_audit_snapshot,
+    )
+    from .services.trading_notifications import SignalNotificationDispatcher
+    from .services.trading_screening import (
+        TradingScreeningConfig,
+        TradingScreeningService,
+    )
+    from .services.trading_screening_gateway import NativeTradingDataGateway
+
+    def _trading_screening_exchange():
+        from chanlun.exchange import Market, get_exchange
+
+        return get_exchange(Market.A)
+
+    def _trading_screening_universe(exchange):
+        from .services.stock_list import _safe_all_stocks
+
+        return _safe_all_stocks(exchange, "a")
+
+    def _trading_screening_sectors():
+        from chanlun.decision_support.tdx_industry_sectors import (
+            build_tdx_industry_sector_catalog,
+        )
+        from chanlun.exchange.stocks_bkgn import StocksBKGN
+
+        return build_tdx_industry_sector_catalog(StocksBKGN().file_bkgns())
+
+    def _trading_screening_sector_exchange():
+        from chanlun.exchange.exchange_tdx import ExchangeTDX
+
+        return ExchangeTDX()
+
+    def _trading_screening_watchlist():
+        from chanlun.persistence.db import db
+
+        values = []
+        for group in db.zx_get_groups("a"):
+            group_name = group.zx_group
+            for stock in db.zx_get_group_stocks("a", group_name):
+                values.append(
+                    {
+                        "code": stock.stock_code,
+                        "name": stock.stock_name,
+                        "group": group_name,
+                    }
+                )
+        return values
+
+    def _trading_screening_holdings():
+        configured = app.config.get("TRADING_SCREENING_HOLDINGS_PROVIDER")
+        return configured() if callable(configured) else ()
+
+    recursive_monitor_config = getattr(config, "RECURSIVE_MONITOR_CONFIG", {})
+    recursive_common = (
+        recursive_monitor_config.get("common", {})
+        if isinstance(recursive_monitor_config, Mapping)
+        else {}
+    )
+    if not isinstance(recursive_common, Mapping):
+        recursive_common = {}
+    trading_screening_dingtalk_webhook = str(
+        app.config.get("TRADING_SCREENING_DINGTALK_WEBHOOK")
+        or app.config.get("EARLY_SCREENING_DINGTALK_WEBHOOK")
+        or os.environ.get("CHANLUN_DINGTALK_WEBHOOK")
+        or recursive_common.get("dingtalk_webhook")
+        or ""
+    ).strip()
+    trading_screening_dingtalk_keyword = str(
+        app.config.get("TRADING_SCREENING_DINGTALK_KEYWORD")
+        or app.config.get("EARLY_SCREENING_DINGTALK_KEYWORD")
+        or os.environ.get("CHANLUN_DINGTALK_KEYWORD")
+        or "买卖通知"
+    ).strip()
+    dry_run_value = app.config.get(
+        "TRADING_SCREENING_NOTIFICATION_DRY_RUN",
+        os.environ.get("CHANLUN_NOTIFICATION_DRY_RUN", ""),
+    )
+    trading_screening_dry_run = (
+        dry_run_value
+        if type(dry_run_value) is bool
+        else str(dry_run_value).strip().lower() in {"1", "true", "yes", "on"}
+    )
+    raw_trading_notifier = (
+        DingTalkWebhookNotifier(
+            webhook=trading_screening_dingtalk_webhook,
+            keyword=trading_screening_dingtalk_keyword,
+            dry_run=trading_screening_dry_run,
+        )
+        if trading_screening_dingtalk_webhook or trading_screening_dry_run
+        else None
+    )
+    trading_notification_dispatcher = (
+        SignalNotificationDispatcher(
+            raw_trading_notifier,
+            state_path=(
+                config.get_data_path()
+                / "decision_support"
+                / "trading_notification_state.json"
+            ),
+        )
+        if raw_trading_notifier is not None
+        else None
+    )
+    trading_gateway = app.config.get("TRADING_SCREENING_GATEWAY")
+    if trading_gateway is None:
+        trading_gateway = NativeTradingDataGateway(
+            exchange_provider=_trading_screening_exchange,
+            sector_exchange_provider=_trading_screening_sector_exchange,
+            universe_provider=_trading_screening_universe,
+            sector_provider=_trading_screening_sectors,
+            watchlist_provider=_trading_screening_watchlist,
+            holdings_provider=_trading_screening_holdings,
+        )
+    audit_root = app.config.get(
+        "RESEARCH_AUDIT_ROOT",
+        pathlib.Path(__file__).resolve().parents[3],
+    )
+    try:
+        audit_snapshot = build_research_audit_snapshot(audit_root)
+        backtest_verdict = {
+            **audit_snapshot["verdict"],
+            "evidence_grade": audit_snapshot["data_evidence"]["grade"],
         }
-
-    def install_decision_support_runtime(monitors=None):
-        nonlocal decision_support_facade
-        nonlocal _decision_support_composition
-        nonlocal _decision_support_runtime_error
-        if not app.config.get("DECISION_SUPPORT_ENABLED", False):
-            return None
-        if _decision_support_composition is not None:
-            return _decision_support_composition
-
-        account_provider = app.config.get(
-            "DECISION_SUPPORT_ACCOUNT_PROVIDER"
-        )
-        if not callable(account_provider):
-            _decision_support_runtime_error = "account_provider_unavailable"
-            raise RuntimeError(
-                "DECISION_SUPPORT_ACCOUNT_PROVIDER account_provider is required"
-            )
-
-        dynamic_monitor = app.config.get("DECISION_SUPPORT_DYNAMIC_MONITOR")
-        if dynamic_monitor is None and isinstance(monitors, Mapping):
-            dynamic_monitor = monitors.get("a")
-        if dynamic_monitor is None:
-            _decision_support_runtime_error = "a_share_monitor_unavailable"
-            raise RuntimeError(
-                "an explicit A-share dynamic monitor is required"
-            )
-
-        from chanlun.decision_support.llm_provider import ConfiguredProvider
-        from chanlun.decision_support.monitor import (
-            MonitorConfig,
-            register_decision_support_jobs,
-        )
-        from chanlun.decision_support.paper_adapter import PaperFeeSchedule
-        from chanlun.decision_support.paper_runtime import (
-            register_paper_research_jobs,
-        )
-        from chanlun.decision_support.paper_read_model import (
-            PaperResearchReadModel,
-        )
-        from chanlun.decision_support.manual_check_workflow import (
-            FileManualCheckStore,
-        )
-        from chanlun.decision_support.production import (
-            build_production_decision_support,
-        )
-        from chanlun.decision_support.strategy_run import (
-            STRATEGY_RUN_MUTATION_LEASE_PROTOCOL,
-            STRATEGY_RUN_SWITCH_CAPABILITY,
-        )
-
-        llm_provider = app.config.get("DECISION_SUPPORT_LLM_PROVIDER")
-        if llm_provider is None:
-            llm_provider = ConfiguredProvider.from_config()
-        raw_monitor_config = app.config.get(
-            "DECISION_SUPPORT_MONITOR_CONFIG"
-        )
-        if raw_monitor_config is None:
-            monitor_config = MonitorConfig(enabled=True)
-        elif type(raw_monitor_config) is MonitorConfig:
-            monitor_config = raw_monitor_config
-        else:
-            monitor_config = MonitorConfig.from_mapping(raw_monitor_config)
-        if not monitor_config.enabled:
-            _decision_support_runtime_error = "monitor_config_disabled"
-            raise RuntimeError(
-                "decision-support monitor_config must be enabled"
-            )
-
-        project_root = pathlib.Path(__file__).resolve().parents[3]
-        paper_initial_cash = None
-        paper_fee_schedule = None
-        paper_calendar_provider = None
-        paper_paths: dict[str, object] = {}
-        paper_strategy_config: dict[str, object] = {}
-        if monitor_config.paper_enabled:
-            paper_initial_cash = app.config.get(
-                "DECISION_SUPPORT_PAPER_INITIAL_CASH"
-            )
-            if (
-                not isinstance(paper_initial_cash, Decimal)
-                or not paper_initial_cash.is_finite()
-                or paper_initial_cash <= 0
-            ):
-                _decision_support_runtime_error = (
-                    "paper_initial_cash_unavailable"
-                )
-                raise RuntimeError(
-                    "DECISION_SUPPORT_PAPER_INITIAL_CASH must be a positive "
-                    "finite Decimal"
-                )
-            paper_fee_schedule = app.config.get(
-                "DECISION_SUPPORT_PAPER_FEE_SCHEDULE"
-            )
-            if not isinstance(paper_fee_schedule, PaperFeeSchedule):
-                _decision_support_runtime_error = (
-                    "paper_fee_schedule_unavailable"
-                )
-                raise RuntimeError(
-                    "DECISION_SUPPORT_PAPER_FEE_SCHEDULE is required"
-                )
-            paper_calendar_provider = app.config.get(
-                "DECISION_SUPPORT_PAPER_CALENDAR_PROVIDER"
-            )
-            paper_strategy_epoch = app.config.get(
-                "DECISION_SUPPORT_PAPER_STRATEGY_EPOCH"
-            )
-            if (
-                isinstance(paper_strategy_epoch, bool)
-                or not isinstance(paper_strategy_epoch, int)
-                or paper_strategy_epoch <= 0
-            ):
-                _decision_support_runtime_error = (
-                    "paper_strategy_epoch_unavailable"
-                )
-                raise RuntimeError(
-                    "DECISION_SUPPORT_PAPER_STRATEGY_EPOCH must be a positive "
-                    "integer"
-                )
-            paper_strategy_registry_path = app.config.get(
-                "DECISION_SUPPORT_PAPER_STRATEGY_REGISTRY_PATH"
-            )
-            if (
-                not isinstance(paper_strategy_registry_path, (str, pathlib.Path))
-                or (
-                    isinstance(paper_strategy_registry_path, str)
-                    and not paper_strategy_registry_path.strip()
-                )
-            ):
-                _decision_support_runtime_error = (
-                    "paper_strategy_registry_unavailable"
-                )
-                raise RuntimeError(
-                    "DECISION_SUPPORT_PAPER_STRATEGY_REGISTRY_PATH is required"
-                )
-            strategy_fingerprint_keys = {
-                "paper_strategy_engine_build_fingerprint": (
-                    "DECISION_SUPPORT_PAPER_STRATEGY_ENGINE_BUILD_FINGERPRINT"
-                ),
-                "paper_scanner_algorithm_fingerprint": (
-                    "DECISION_SUPPORT_PAPER_SCANNER_ALGORITHM_FINGERPRINT"
-                ),
-                "paper_structure_algorithm_fingerprint": (
-                    "DECISION_SUPPORT_PAPER_STRUCTURE_ALGORITHM_FINGERPRINT"
-                ),
-                "paper_account_algorithm_fingerprint": (
-                    "DECISION_SUPPORT_PAPER_ACCOUNT_ALGORITHM_FINGERPRINT"
-                ),
-                "paper_bar_provider_fingerprint": (
-                    "DECISION_SUPPORT_PAPER_BAR_PROVIDER_FINGERPRINT"
-                ),
-            }
-            strategy_fingerprints: dict[str, str] = {}
-            for argument_name, config_name in strategy_fingerprint_keys.items():
-                fingerprint = app.config.get(config_name)
-                if (
-                    not isinstance(fingerprint, str)
-                    or len(fingerprint) != 71
-                    or not fingerprint.startswith("sha256:")
-                    or any(
-                        character not in "0123456789abcdef"
-                        for character in fingerprint[7:]
-                    )
-                ):
-                    _decision_support_runtime_error = (
-                        "paper_strategy_fingerprint_unavailable"
-                    )
-                    raise RuntimeError(
-                        config_name + " must use sha256:<64 lowercase hex>"
-                    )
-                strategy_fingerprints[argument_name] = fingerprint
-            paper_strategy_config = {
-                "paper_strategy_registry_path": (
-                    paper_strategy_registry_path
-                ),
-                "paper_strategy_epoch": paper_strategy_epoch,
-                **strategy_fingerprints,
-            }
-            paper_paths = {
-                "paper_ledger_path": app.config.get(
-                    "DECISION_SUPPORT_PAPER_LEDGER_PATH"
-                )
-                or project_root
-                / "audit"
-                / "decision_support_paper_ledger.sqlite3",
-                "trusted_bar_store_path": app.config.get(
-                    "DECISION_SUPPORT_TRUSTED_BAR_STORE_PATH"
-                )
-                or project_root
-                / "audit"
-                / "decision_support_trusted_bars.sqlite3",
-                "paper_risk_state_path": app.config.get(
-                    "DECISION_SUPPORT_PAPER_RISK_STATE_PATH"
-                )
-                or project_root
-                / "audit"
-                / "decision_support_paper_risk.sqlite3",
-                "exit_evaluation_store_path": app.config.get(
-                    "DECISION_SUPPORT_EXIT_EVALUATION_STORE_PATH"
-                )
-                or project_root
-                / "audit"
-                / "decision_support_exit_evaluations.sqlite3",
-                "exit_evidence_policy_path": app.config.get(
-                    "DECISION_SUPPORT_EXIT_EVIDENCE_POLICY_PATH"
-                )
-                or project_root
-                / "config"
-                / "decision_support"
-                / "exit_evidence_policy.json",
-            }
-
-        rule_set_path = app.config.get("DECISION_SUPPORT_RULE_SET_PATH")
-        if rule_set_path is None:
-            rule_set_path = (
-                project_root
-                / "config"
-                / "decision_support"
-                / "rule_cards.json"
-            )
-        composition_factory = app.config.get(
-            "DECISION_SUPPORT_COMPOSITION_FACTORY"
-        ) or build_production_decision_support
-        job_registrar = app.config.get("DECISION_SUPPORT_JOB_REGISTRAR")
-        if job_registrar is None:
-            job_registrar = (
-                register_paper_research_jobs
-                if monitor_config.paper_enabled
-                else register_decision_support_jobs
-            )
-        manual_check_dir = app.config.get(
-            "DECISION_SUPPORT_MANUAL_CHECK_DIR"
-        )
-        if manual_check_dir is None:
-            manual_check_dir = (
-                project_root
-                / "audit"
-                / "decision_support_manual_checks"
-            )
-
-        try:
-            manual_check_store = FileManualCheckStore(manual_check_dir)
-            composition = composition_factory(
-                dynamic_monitor=dynamic_monitor,
-                corpus_runtime=certified_corpus_runtime,
-                rule_set_path=rule_set_path,
-                store=decision_support_store,
-                account_provider=account_provider,
-                llm_provider=llm_provider,
-                monitor_config=monitor_config,
-                clock=app.config.get("DECISION_SUPPORT_CLOCK"),
-                manual_check_store=manual_check_store,
-                paper_initial_cash=paper_initial_cash,
-                paper_fee_schedule=paper_fee_schedule,
-                paper_calendar_provider=paper_calendar_provider,
-                **paper_paths,
-                **paper_strategy_config,
-            )
-            if monitor_config.paper_enabled:
-                paper_runtime = getattr(composition, "paper_runtime", None)
-                if paper_runtime is None:
-                    raise RuntimeError(
-                        "paper-enabled composition has no paper runtime"
-                    )
-                strategy_run = getattr(composition, "strategy_run", None)
-                strategy_status_provider = getattr(
-                    strategy_run,
-                    "status_payload",
-                    None,
-                )
-                mutation_lease_provider = getattr(
-                    strategy_run,
-                    "mutation_lease",
-                    None,
-                )
-                strategy_status = (
-                    strategy_status_provider()
-                    if callable(strategy_status_provider)
-                    else None
-                )
-                if (
-                    not isinstance(strategy_status, Mapping)
-                    or not isinstance(strategy_status.get("run_id"), str)
-                    or not strategy_status.get("run_id")
-                    or not isinstance(strategy_status.get("fingerprint"), str)
-                    or len(strategy_status.get("fingerprint", "")) != 71
-                    or not strategy_status.get("fingerprint", "").startswith(
-                        "sha256:"
-                    )
-                    or any(
-                        character not in "0123456789abcdef"
-                        for character in strategy_status.get(
-                            "fingerprint",
-                            "",
-                        )[7:]
-                    )
-                    or strategy_status.get("state") != "active"
-                    or strategy_status.get("epoch")
-                    != paper_strategy_config["paper_strategy_epoch"]
-                    or strategy_status.get("evidence_scope")
-                    != "current_epoch_only"
-                    or strategy_status.get("store_bindings_complete") is not True
-                    or strategy_status.get("switch_capability")
-                    != STRATEGY_RUN_SWITCH_CAPABILITY
-                    or strategy_status.get("rolling_switch_supported") is not False
-                    or strategy_status.get("mutation_lease_protocol")
-                    != STRATEGY_RUN_MUTATION_LEASE_PROTOCOL
-                    or strategy_status.get("inflight_mutation_count") != 0
-                    or isinstance(
-                        strategy_status.get("inflight_mutation_count"),
-                        bool,
-                    )
-                    or strategy_status.get("mutations_drained") is not True
-                    or not callable(mutation_lease_provider)
-                ):
-                    raise RuntimeError(
-                        "paper strategy-run store bindings are unavailable"
-                    )
-                jobs = job_registrar(
-                    scheduler,
-                    paper_runtime,
-                    composition.runtime,
-                    strategy_run=strategy_run,
-                )
-                required_jobs = {"bar", "review", "admission"}
-                paper_read_model = PaperResearchReadModel(
-                    getattr(composition, "paper_ledger", None),
-                    exit_store=getattr(
-                        composition,
-                        "exit_evaluation_store",
-                        None,
-                    ),
-                    runtime=paper_runtime,
-                    policy_provider=getattr(
-                        composition,
-                        "paper_gateway",
-                        None,
-                    ),
-                    strategy_run=strategy_run,
-                )
-            else:
-                jobs = job_registrar(scheduler, composition.runtime)
-                required_jobs = {"scan", "review"}
-                paper_read_model = None
-            if not isinstance(jobs, Mapping) or not required_jobs.issubset(jobs):
-                raise RuntimeError(
-                    "required decision-support jobs were not registered"
-                )
-            facade = build_persistent_decision_support_facade(
-                decision_support_store,
-                certified_corpus_runtime=certified_corpus_runtime,
-                review_provider=composition.review_provider,
-                promotion_provider=composition.promotion_provider,
-                rule_evidence_resolver=composition.rule_evidence_resolver,
-                clock=app.config.get("DECISION_SUPPORT_CLOCK"),
-                strategy_run=getattr(composition, "strategy_run", None),
-            )
-        except Exception:
-            for job_id in (
-                "decision_support_scan",
-                "decision_support_bar_cycle",
-                "decision_support_review",
-                "decision_support_paper_admission",
-            ):
-                try:
-                    scheduler.remove_job(job_id)
-                except Exception:
-                    pass
-            if _decision_support_runtime_error is None:
-                _decision_support_runtime_error = "composition_failed"
-            raise
-
-        _decision_support_composition = composition
-        _decision_support_jobs.clear()
-        _decision_support_jobs.update(jobs)
-        _decision_support_runtime_error = None
-        decision_support_facade = facade
-        app.extensions.update(
-            {
-                "decision_support_composition": composition,
-                "decision_support_jobs": _decision_support_jobs,
-                "decision_support_facade": facade,
-                "decision_support_manual_check_workflow": (
-                    composition.manual_check_workflow
-                ),
-                "decision_support_paper_runtime": getattr(
-                    composition,
-                    "paper_runtime",
-                    None,
-                ),
-                "decision_support_paper_ledger": getattr(
-                    composition,
-                    "paper_ledger",
-                    None,
-                ),
-                "decision_support_trusted_bar_store": getattr(
-                    composition,
-                    "trusted_bar_store",
-                    None,
-                ),
-                "decision_support_paper_gateway": getattr(
-                    composition,
-                    "paper_gateway",
-                    None,
-                ),
-                "decision_support_paper_risk_state": getattr(
-                    composition,
-                    "paper_risk_state",
-                    None,
-                ),
-                "decision_support_exit_evaluation_store": getattr(
-                    composition,
-                    "exit_evaluation_store",
-                    None,
-                ),
-                "decision_support_exit_evaluation_service": getattr(
-                    composition,
-                    "exit_evaluation_service",
-                    None,
-                ),
-                "decision_support_paper_exit_cycle": getattr(
-                    composition,
-                    "paper_exit_cycle",
-                    None,
-                ),
-                "decision_support_paper_read_model": paper_read_model,
-            }
-        )
-        return composition
+    except ResearchAuditUnavailable:
+        backtest_verdict = {
+            "live_ready": False,
+            "status": "evidence_unavailable",
+            "evidence_grade": "invalid",
+        }
+    decision_support_trading_screening = TradingScreeningService(
+        market_data=trading_gateway,
+        sector_catalog=trading_gateway,
+        engine=TradingEngine(),
+        cache_path=(
+            config.get_data_path()
+            / "decision_support"
+            / "trading_screening_snapshot.json"
+        ),
+        clock=_trading_screening_clock,
+        notifier=trading_notification_dispatcher,
+        config=TradingScreeningConfig(
+            refresh_interval_seconds=int(
+                app.config.get("TRADING_SCREENING_REFRESH_SECONDS", 60)
+            ),
+            max_structure_age_seconds=int(
+                app.config.get("TRADING_SCREENING_MAX_STRUCTURE_AGE_SECONDS", 864000)
+            ),
+        ),
+        backtest_verdict=backtest_verdict,
+    )
 
     app.extensions.update(
         {
@@ -1399,23 +1138,9 @@ def create_app(test_config=None, start_scheduler=False):
             "start_runtime_services": start_runtime_services,
             "shutdown_runtime_services": shutdown_runtime_services,
             "shutdown_scheduler": shutdown_scheduler,
-            "decision_support_facade": decision_support_facade,
-            "decision_support_store": decision_support_store,
-            "decision_support_composition": _decision_support_composition,
-            "decision_support_jobs": _decision_support_jobs,
-            "decision_support_manual_check_workflow": None,
-            "decision_support_paper_runtime": None,
-            "decision_support_paper_ledger": None,
-            "decision_support_trusted_bar_store": None,
-            "decision_support_paper_gateway": None,
-            "decision_support_paper_risk_state": None,
-            "decision_support_exit_evaluation_store": None,
-            "decision_support_exit_evaluation_service": None,
-            "decision_support_paper_exit_cycle": None,
-            "decision_support_paper_read_model": None,
-            "decision_support_runtime_status": decision_support_runtime_status,
-            "install_decision_support_runtime": install_decision_support_runtime,
-            "certified_corpus_runtime": certified_corpus_runtime,
+            "decision_support_trading_screening": (
+                decision_support_trading_screening
+            ),
         }
     )
     if scheduler_enabled:

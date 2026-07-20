@@ -87,6 +87,37 @@ class LLMProvider(Protocol):
     ) -> ProviderResponse: ...
 
 
+class OfflineAbstainProvider:
+    provider = "offline"
+    model = "offline-abstain-v1"
+    capabilities = ModelCapabilities(
+        supports_images=False,
+        supports_json_schema=False,
+    )
+
+    @property
+    def external_request_count(self) -> int:
+        return 0
+
+    def complete(
+        self,
+        messages: Sequence[Mapping[str, object]],
+        images: Sequence[ProviderImage],
+        timeout: tuple[float, float],
+    ) -> ProviderResponse:
+        return ProviderResponse(
+            ok=False,
+            provider=self.provider,
+            model=self.model,
+            content=None,
+            raw_response="",
+            error_code="offline_review_mode",
+            error_message="external review is disabled",
+            retryable=False,
+            latency_ms=0,
+        )
+
+
 def _redacted_text(value: object, *secrets: str) -> str:
     text_value = str(value)
     for secret in secrets:

@@ -49,10 +49,10 @@ var BKGN = (function () {
         allBkgnList = res.data || [];
         render_bkgn_table(allBkgnList);
       } else {
-        layer.msg("获取板块概念失败");
+        layer.msg("板块数据加载失败，请稍后重试");
       }
     }).fail(function () {
-      layer.msg("获取板块概念失败");
+      layer.msg("板块数据加载失败，请稍后重试");
     });
   }
 
@@ -67,7 +67,8 @@ var BKGN = (function () {
     layui.table.render({
       elem: "#bkgn_table",
       data: tableData,
-      cols: [[{ field: "bkgn_name", title: "板块名" }]],
+      cols: [[{ field: "bkgn_name", title: "板块名称" }]],
+      text: { none: "没有匹配的板块" },
       page: false,
       size: "sm",
       skin: "row",
@@ -126,11 +127,11 @@ var BKGN = (function () {
           render_bkgn_stock_table(stocks);
         }
       } else if (requestGeneration === stockRequestGeneration) {
-        layer.msg("获取股票列表失败");
+        layer.msg("成分股加载失败，请稍后重试");
       }
     }).fail(function () {
       if (requestGeneration === stockRequestGeneration) {
-        layer.msg("获取股票列表失败");
+        layer.msg("成分股加载失败，请稍后重试");
       }
     }).always(function () {
       layer.close(loadingIndex);
@@ -170,21 +171,22 @@ var BKGN = (function () {
       cols: [[
         {
           field: "code",
-          title: "代码",
+          title: "证券代码",
           width: "48%",
           templet: function (d) {
             return stock_code_template(d.code);
           },
         },
-        { field: "name", title: "名称", width: "48%" },
+        { field: "name", title: "标的名称", width: "48%" },
       ]],
+      text: { none: "没有匹配的成分股" },
       page: false,
       size: "sm",
       skin: "row",
       even: true,
       height: TABLE_HEIGHT,
       done: function () {
-        $("#bkgn_stock_total_tip").text("共 " + data.length + " 个股票");
+        $("#bkgn_stock_total_tip").text("共 " + data.length + " 只成分股");
         bind_stock_table_keyboard();
         // 打开某板块后自动聚焦 wrapper, 让 ↑/↓ 立即可用(搜索过滤重渲染不抢焦点)。
         if (opts.focus) $("#bkgn_stock_wrap").focus();
@@ -200,7 +202,6 @@ var BKGN = (function () {
     currentStockIndex = obj.index;
     var data = obj.data;
     change_chart_ticker(Utils.get_market(), data.code);
-    $("#ai_code").val(data.code);
     layui.table.setRowChecked("bkgn_stock_table", { index: "all", checked: false });
     layui.table.setRowChecked("bkgn_stock_table", { index: obj.index });
     // 让 wrapper 获得焦点，点完后可直接 ↑/↓ 继续浏览
@@ -250,7 +251,6 @@ var BKGN = (function () {
       $row[0].scrollIntoView({ block: "nearest" });
     }
     change_chart_ticker(Utils.get_market(), item.code);
-    $("#ai_code").val(item.code);
   }
 
   // 搜索框绑定：keyup 防抖 + Enter 即时触发、查询按钮、重置按钮三件套

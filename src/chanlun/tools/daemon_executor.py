@@ -16,14 +16,23 @@ class DaemonExecutor(Executor):
         self._lock = threading.Lock()
         self._closed = False
         self._threads = []
-        for index in range(workers):
-            thread = threading.Thread(
-                target=self._worker,
-                daemon=True,
-                name=f"{thread_name_prefix}-{index}",
-            )
-            self._threads.append(thread)
-            thread.start()
+        try:
+            for index in range(workers):
+                thread = threading.Thread(
+                    target=self._worker,
+                    daemon=True,
+                    name=f"{thread_name_prefix}-{index}",
+                )
+                self._threads.append(thread)
+                thread.start()
+        except BaseException:
+            self._closed = True
+            live_threads = [thread for thread in self._threads if thread.is_alive()]
+            for _ in live_threads:
+                self._queue.put(None)
+            for thread in live_threads:
+                thread.join()
+            raise
 
     def _worker(self):
         while True:

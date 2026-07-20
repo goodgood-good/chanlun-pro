@@ -47,6 +47,25 @@ class TrustedPaperBarIntegrityError(RuntimeError):
     """A persisted canonical bar or its sequence failed closed."""
 
 
+class PaperResearchBarJobError(RuntimeError):
+    """One or more serialized research bar-job phases failed."""
+
+    def __init__(self, failures: Mapping[str, Exception]) -> None:
+        ordered = {
+            phase: failures[phase]
+            for phase in ("observer", "paper", "coordinator")
+            if phase in failures
+        }
+        if not ordered or set(ordered) != set(failures):
+            raise ValueError("bar-job failures contain invalid phase names")
+        if not all(isinstance(error, Exception) for error in ordered.values()):
+            raise TypeError("bar-job failures must contain Exception values")
+        self.failures = MappingProxyType(ordered)
+        super().__init__(
+            "paper research bar job failed: " + ",".join(ordered)
+        )
+
+
 def _valid_sha256_fingerprint(value: object) -> bool:
     return (
         isinstance(value, str)
@@ -316,6 +335,7 @@ class TrustedPaperBarStoreHealth:
     last_attempt_failure: str | None = None
     calendar_preflight_failure_at: datetime | None = None
     calendar_preflight_failure: str | None = None
+    verified_trading_dates: tuple[date, ...] = ()
 
 
 _SIGNAL_OBSERVATION_STATES = frozenset(
@@ -452,6 +472,7 @@ class PaperAdmissionCycleResult:
 @dataclass(frozen=True, slots=True)
 class PaperResearchHealth:
     mode: str
+    read_only: bool
     auto_order_enabled: bool
     live_order_capability: bool
     bar_store: TrustedPaperBarStoreHealth
@@ -4455,6 +4476,49 @@ class SQLiteTrustedPaperBarStore:
             )
         return parsed_observed_at
 
+    def _append_calendar_preflight_resolutions(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        observed_at: datetime,
+        resolved_by_bar_closed_at: datetime,
+    ) -> int:
+        unresolved = connection.execute(
+            """
+            SELECT f.failure_id, f.payload_sha256
+            FROM trusted_paper_bar_calendar_preflight AS f
+            LEFT JOIN trusted_paper_bar_calendar_preflight_resolution AS r
+              ON r.failure_id = f.failure_id
+            WHERE r.failure_id IS NULL AND f.failed_at <= ?
+            ORDER BY f.failure_id
+            """,
+            (observed_at.isoformat(),),
+        ).fetchall()
+        for failure_id, failure_payload_sha256 in unresolved:
+            resolution_payload = self._calendar_preflight_resolution_payload(
+                failure_id=failure_id,
+                failure_payload_sha256=failure_payload_sha256,
+                resolved_at=observed_at.isoformat(),
+                resolved_by_bar_closed_at=(
+                    resolved_by_bar_closed_at.isoformat()
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO trusted_paper_bar_calendar_preflight_resolution (
+                    failure_id, resolved_at,
+                    resolved_by_bar_closed_at, payload_sha256
+                ) VALUES (?, ?, ?, ?)
+                """,
+                (
+                    failure_id,
+                    observed_at.isoformat(),
+                    resolved_by_bar_closed_at.isoformat(),
+                    self._payload_checksum(resolution_payload),
+                ),
+            )
+        return len(unresolved)
+
     def _validate_calendar_preflight_log(
         self,
         connection: sqlite3.Connection,
@@ -4560,13 +4624,13 @@ class SQLiteTrustedPaperBarStore:
                 closed_at=parsed_closed_at,
             )
 
-    def _validated_observed_trading_days(
+    def _validated_observed_trading_dates(
         self,
         connection: sqlite3.Connection,
         *,
         attested_v2_cycle_checksums: Mapping[str, str],
-    ) -> int:
-        completed_slots: dict[tuple[str, str], list[int]] = {}
+    ) -> tuple[date, ...]:
+        completed_slots: dict[tuple[date, str], list[int]] = {}
         cycle_rows = connection.execute(
             """
             SELECT closed_at, trading_day, slot_index,
@@ -4653,16 +4717,46 @@ class SQLiteTrustedPaperBarStore:
                 )
                 continue
             if bool(completed) and payload["persisted_codes"]:
+                try:
+                    trading_day = date.fromisoformat(payload["trading_day"])
+                except (TypeError, ValueError):
+                    self._mark_degraded(
+                        connection,
+                        "paper_bar_cycle_integrity_failure",
+                        datetime.now(_CN),
+                    )
+                    continue
+                if trading_day.isoformat() != payload["trading_day"]:
+                    self._mark_degraded(
+                        connection,
+                        "paper_bar_cycle_integrity_failure",
+                        datetime.now(_CN),
+                    )
+                    continue
                 key = (
-                    payload["trading_day"],
+                    trading_day,
                     payload["calendar_fingerprint"],
                 )
                 completed_slots.setdefault(key, []).append(payload["slot_index"])
         expected_slots = tuple(range(48))
-        return sum(
-            1
-            for slots in completed_slots.values()
+        verified_dates = {
+            trading_day
+            for (trading_day, _calendar_fingerprint), slots in completed_slots.items()
             if tuple(sorted(slots)) == expected_slots
+        }
+        return tuple(sorted(verified_dates))
+
+    def _validated_observed_trading_days(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        attested_v2_cycle_checksums: Mapping[str, str],
+    ) -> int:
+        return len(
+            self._validated_observed_trading_dates(
+                connection,
+                attested_v2_cycle_checksums=attested_v2_cycle_checksums,
+            )
         )
 
     @mutation_fenced(
@@ -5234,7 +5328,22 @@ class SQLiteTrustedPaperBarStore:
                             closed_at=closed_at,
                         )
                     )
-                    connection.rollback()
+                    resolution_count = 0
+                    if (
+                        observed_at is not None
+                        and committed_watermark is not None
+                    ):
+                        resolution_count = (
+                            self._append_calendar_preflight_resolutions(
+                                connection,
+                                observed_at=observed_at,
+                                resolved_by_bar_closed_at=closed_at,
+                            )
+                        )
+                    if resolution_count:
+                        connection.commit()
+                    else:
+                        connection.rollback()
                     if (
                         observed_at is not None
                         and committed_watermark is not None
@@ -5279,7 +5388,22 @@ class SQLiteTrustedPaperBarStore:
                             closed_at=closed_at,
                         )
                     )
-                    connection.rollback()
+                    resolution_count = 0
+                    if (
+                        observed_at is not None
+                        and committed_watermark is not None
+                    ):
+                        resolution_count = (
+                            self._append_calendar_preflight_resolutions(
+                                connection,
+                                observed_at=observed_at,
+                                resolved_by_bar_closed_at=closed_at,
+                            )
+                        )
+                    if resolution_count:
+                        connection.commit()
+                    else:
+                        connection.rollback()
                     if (
                         observed_at is not None
                         and committed_watermark is not None
@@ -5692,41 +5816,11 @@ class SQLiteTrustedPaperBarStore:
                 (datetime.now(_CN).isoformat(), closed_at.isoformat()),
             )
             if observed_at is not None:
-                unresolved = connection.execute(
-                    """
-                    SELECT f.failure_id, f.payload_sha256
-                    FROM trusted_paper_bar_calendar_preflight AS f
-                    LEFT JOIN trusted_paper_bar_calendar_preflight_resolution AS r
-                      ON r.failure_id = f.failure_id
-                    WHERE r.failure_id IS NULL AND f.failed_at <= ?
-                    ORDER BY f.failure_id
-                    """,
-                    (observed_at.isoformat(),),
-                ).fetchall()
-                for failure_id, failure_payload_sha256 in unresolved:
-                    resolution_payload = (
-                        self._calendar_preflight_resolution_payload(
-                            failure_id=failure_id,
-                            failure_payload_sha256=failure_payload_sha256,
-                            resolved_at=observed_at.isoformat(),
-                            resolved_by_bar_closed_at=closed_at.isoformat(),
-                        )
-                    )
-                    connection.execute(
-                        """
-                        INSERT INTO
-                        trusted_paper_bar_calendar_preflight_resolution (
-                            failure_id, resolved_at,
-                            resolved_by_bar_closed_at, payload_sha256
-                        ) VALUES (?, ?, ?, ?)
-                        """,
-                        (
-                            failure_id,
-                            observed_at.isoformat(),
-                            closed_at.isoformat(),
-                            self._payload_checksum(resolution_payload),
-                        ),
-                    )
+                self._append_calendar_preflight_resolutions(
+                    connection,
+                    observed_at=observed_at,
+                    resolved_by_bar_closed_at=closed_at,
+                )
             if signal_observation_batch is not None:
                 self._write_signal_observation_anchor(
                     observation_sequence=observation_sequence,
@@ -6182,13 +6276,10 @@ class SQLiteTrustedPaperBarStore:
                 attested_v2_cycle_checksums = (
                     self._validate_exit_manifest_log(connection)
                 )
+                exit_manifest_validation_error = None
             except TrustedPaperBarIntegrityError as exc:
                 attested_v2_cycle_checksums = {}
-                self._mark_degraded(
-                    connection,
-                    str(exc),
-                    datetime.now(_CN),
-                )
+                exit_manifest_validation_error = exc
             if self._has_unbound_bars(connection):
                 self._mark_degraded(
                     connection,
@@ -6201,10 +6292,17 @@ class SQLiteTrustedPaperBarStore:
                 FROM trusted_paper_bar
                 """
             ).fetchone()
-            days = self._validated_observed_trading_days(
+            verified_trading_dates = self._validated_observed_trading_dates(
                 connection,
                 attested_v2_cycle_checksums=attested_v2_cycle_checksums,
             )
+            days = len(verified_trading_dates)
+            if exit_manifest_validation_error is not None:
+                self._mark_degraded(
+                    connection,
+                    str(exit_manifest_validation_error),
+                    datetime.now(_CN),
+                )
             degraded, reason = connection.execute(
                 """
                 SELECT degraded, degraded_reason
@@ -6277,6 +6375,7 @@ class SQLiteTrustedPaperBarStore:
                 if effective_preflight is None
                 else effective_preflight[1]
             ),
+            verified_trading_dates=verified_trading_dates,
         )
 
 
@@ -7741,6 +7840,7 @@ class PaperResearchRuntime:
                 )
         return PaperResearchHealth(
             mode="research_paper",
+            read_only=True,
             auto_order_enabled=False,
             live_order_capability=False,
             bar_store=bar_store_health,
@@ -7833,6 +7933,8 @@ def register_paper_research_jobs(
     analysis_runtime: object,
     *,
     strategy_run: object,
+    opportunity_runtime: object | None = None,
+    research_trigger_coordinator: object | None = None,
 ) -> dict[str, object]:
     """Register one serialized bar coordinator plus review/admission consumers."""
 
@@ -7853,6 +7955,32 @@ def register_paper_research_jobs(
         raise TypeError("strategy_run must provide mutation_lease")
     if getattr(config, "enabled", None) is not True:
         return {}
+    opportunity_observer = (
+        None
+        if opportunity_runtime is None
+        else getattr(opportunity_runtime, "observe", None)
+    )
+    trigger_reconciler = (
+        None
+        if research_trigger_coordinator is None
+        else getattr(research_trigger_coordinator, "reconcile", None)
+    )
+    if opportunity_runtime is not None and not callable(opportunity_observer):
+        raise TypeError("opportunity_runtime must provide callable observe")
+    if research_trigger_coordinator is not None and not callable(
+        trigger_reconciler
+    ):
+        raise TypeError(
+            "research_trigger_coordinator must provide callable reconcile"
+        )
+    health = paper_runtime.health()
+    if (
+        getattr(health, "mode", None) != "research_paper"
+        or getattr(health, "read_only", None) is not True
+        or getattr(health, "auto_order_enabled", None) is not False
+        or getattr(health, "live_order_capability", None) is not False
+    ):
+        raise RuntimeError("paper runtime health must be read-only")
     interval = getattr(config, "scan_interval_seconds", None)
     if isinstance(interval, bool) or not isinstance(interval, int) or interval <= 0:
         raise ValueError("scan_interval_seconds must be positive")
@@ -7870,7 +7998,26 @@ def register_paper_research_jobs(
     def bar_job() -> PaperBarCycleResult:
         with strategy_mutation_lease("paper_scheduler.bar_job"):
             require_active_strategy_run()
-            return paper_runtime.bar_cycle(datetime.now(_CN))
+            as_of = datetime.now(_CN)
+            failures: dict[str, Exception] = {}
+            if opportunity_observer is not None:
+                try:
+                    opportunity_observer(as_of)
+                except Exception as exc:
+                    failures["observer"] = exc
+            paper_result: PaperBarCycleResult | None = None
+            try:
+                paper_result = paper_runtime.bar_cycle(as_of)
+            except Exception as exc:
+                failures["paper"] = exc
+            if trigger_reconciler is not None:
+                try:
+                    trigger_reconciler(as_of)
+                except Exception as exc:
+                    failures["coordinator"] = exc
+            if failures:
+                raise PaperResearchBarJobError(failures)
+            return paper_result
 
     def admission_job() -> PaperAdmissionCycleResult:
         with strategy_mutation_lease("paper_scheduler.admission_job"):
@@ -7892,22 +8039,29 @@ def register_paper_research_jobs(
     bar = add_job(
         bar_job,
         id="decision_support_bar_cycle",
+        executor="default",
         seconds=interval,
         **common,
     )
     review = add_job(
         review_job,
         id="decision_support_review",
+        executor="default",
         seconds=max(1, min(5, interval)),
         **common,
     )
     admission = add_job(
         admission_job,
         id="decision_support_paper_admission",
+        executor="default",
         seconds=max(1, min(5, interval)),
         **common,
     )
-    return {"bar": bar, "review": review, "admission": admission}
+    return {
+        "decision_support_bar_cycle": bar,
+        "decision_support_review": review,
+        "decision_support_paper_admission": admission,
+    }
 
 
 __all__ = (
@@ -7921,6 +8075,7 @@ __all__ = (
     "PaperExitCycleResult",
     "PaperRiskMark",
     "PaperResearchHealth",
+    "PaperResearchBarJobError",
     "PaperResearchRuntime",
     "PaperTradingSession",
     "SQLitePaperRiskState",

@@ -134,8 +134,18 @@ def opt_zixuan_group(market):
         return {"ok": False, "msg": "无效的操作"}, 400
     zx = ZiXuan(market)
     if opt == "DEL":
-        return {"ok": zx.del_zx_group(zx_group)}
-    return {"ok": zx.add_zx_group(zx_group)}
+        deleted = zx.del_zx_group(zx_group)
+        return {
+            "ok": deleted,
+            "group": zx_group,
+            "msg": "自选分组已删除" if deleted else "默认分组不可删除或分组不存在",
+        }
+    created = zx.add_zx_group(zx_group)
+    return {
+        "ok": created,
+        "group": zx_group,
+        "msg": "自选分组已创建" if created else "分组已存在或名称不可用",
+    }
 
 
 @zixuan_bp.route("/zixuan_opt_export", methods=["GET"])

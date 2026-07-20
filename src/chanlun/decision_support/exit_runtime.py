@@ -30,7 +30,10 @@ from .exits import (
 from .fingerprints import normalize_datetime, sha256_json, to_jsonable
 from .models import DecisionEvent, LevelSnapshot, StrategyTrack
 from .risk import HoldingSnapshot, RiskContext
-from .scanner import SIGNAL_OBSERVATION_STATES, SymbolStructureSnapshot
+from .structure_snapshot import (
+    SIGNAL_OBSERVATION_STATES,
+    SymbolStructureSnapshot,
+)
 
 
 _FINGERPRINT_RE = re.compile(r"sha256:[0-9a-f]{64}")

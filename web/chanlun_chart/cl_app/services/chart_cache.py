@@ -225,7 +225,9 @@ def _stable_hash(obj) -> str:
 # - v36 (2026-06-24) ── 递归配色:kuozhan 高级别(5m/30m…)补 ``zslx_lines``(取同级分支 zslxs),
 #   供前端在低周期图上画各级走势类型「线段」线条(原仅 L0 有线条、高级别空)。字段已存在、
 #   现在被填充;source_fingerprint 已随 tv_chart 改动变化,显式 bump 求稳。
-_CHART_CACHE_SCHEMA_VERSION = "v36"
+# - v37 (2026-07-20) ── 中枢图形补充 tower/recursive_level/ZD/ZG/done、进入段、离开段与
+#   关联买卖点元数据，供右栏双塔审计详情直接展示。输出字段结构变化，显式失效旧磁盘缓存。
+_CHART_CACHE_SCHEMA_VERSION = "v37"
 
 
 def _build_cache_key(market: str, code: str, frequency: str, cl_config: dict) -> str:

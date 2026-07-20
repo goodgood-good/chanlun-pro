@@ -13,12 +13,14 @@ var ZiXuan = (function () {
   var groupsRequestGeneration = 0;
   var searchRequestGeneration = 0;
   var stockTableHandlersBound = false;
+  var groupUiBound = false;
+  var createGroupRequestInFlight = false;
 
   function appAjax(options) {
     var requestOptions = Object.assign({ timeout: 10000 }, options || {});
     if (typeof requestOptions.error !== "function") {
       requestOptions.error = function () {
-        if (window.layer) layer.msg("请求失败，请稍后重试");
+        if (window.layer) layer.msg("数据请求失败，请稍后重试");
       };
     }
     if (window.AppRequest && typeof window.AppRequest.ajax === "function") {
@@ -104,8 +106,218 @@ var ZiXuan = (function () {
     return root;
   }
 
+  function validateGroupName(value) {
+    if (typeof value !== "string") {
+      return { ok: false, name: "", message: "分组名称不能为空" };
+    }
+    var name = value.trim();
+    if (!name) {
+      return { ok: false, name: "", message: "分组名称不能为空" };
+    }
+    if (name.length > 64) {
+      return { ok: false, name: name, message: "分组名称不能超过 64 个字符" };
+    }
+    if (/[\/\\\u0000-\u001f]/.test(name)) {
+      return { ok: false, name: name, message: "分组名称不能包含斜杠或控制字符" };
+    }
+    return { ok: true, name: name, message: "" };
+  }
+
+  function setWatchStatus(message, state) {
+    var status = $("#zixuan_watch_status");
+    status.text(String(message || ""));
+    status.attr("data-state", state || "idle");
+  }
+
+  function setCurrentGroupLabel(group) {
+    $("#zixuan_current_group").text(group || "未选择分组");
+  }
+
+  function setGroupError(message) {
+    var error = $("#zixuan_group_error");
+    error.text(String(message || ""));
+    error.prop("hidden", !message);
+  }
+
+  function setCreateGroupBusy(busy) {
+    var submit = $("#zixuan_group_submit");
+    submit.prop("disabled", busy === true);
+    submit.toggleClass("is-busy", busy === true);
+    submit.text(busy === true ? "创建中…" : "创建分组");
+  }
+
+  function setGroupCreatorOpen(open) {
+    var isOpen = open === true;
+    var creator = $("#zixuan_group_creator");
+    creator.prop("hidden", !isOpen);
+    creator.attr("aria-hidden", String(!isOpen));
+    $("#create_zixuan_group").attr("aria-expanded", String(isOpen));
+    if (isOpen) {
+      setGroupError("");
+      $("#zixuan_group_name").focus();
+    }
+  }
+
+  function responseMessage(xhr, fallback) {
+    if (xhr && xhr.responseJSON && xhr.responseJSON.msg) {
+      return String(xhr.responseJSON.msg);
+    }
+    return fallback;
+  }
+
+  function bindGroupControls(layer) {
+    if (groupUiBound) return;
+    if (!document.getElementById || !document.getElementById("zixuan_watch_panel")) {
+      return;
+    }
+    groupUiBound = true;
+
+    $("#create_zixuan_group")
+      .off("click.zixuanGroup")
+      .on("click.zixuanGroup", function () {
+        var open = $(this).attr("aria-expanded") !== "true";
+        setGroupCreatorOpen(open);
+      });
+    $("#zixuan_group_cancel")
+      .off("click.zixuanGroup")
+      .on("click.zixuanGroup", function () {
+        setGroupCreatorOpen(false);
+      });
+    $("#zixuan_group_creator")
+      .off("submit.zixuanGroup")
+      .on("submit.zixuanGroup", function (event) {
+        event.preventDefault();
+        ZiXuan.create_group($("#zixuan_group_name").val());
+      });
+    $("#manage_zixuan_groups")
+      .off("click.zixuanGroup")
+      .on("click.zixuanGroup", function () {
+        var viewportWidth = Number(window.innerWidth) || 960;
+        var modalWidth = Math.max(320, Math.min(760, viewportWidth - 32));
+        layer.open({
+          type: 2,
+          title: "管理自选分组",
+          area: [modalWidth + "px", "82vh"],
+          content: "/zixuan_group/" + pathSegment(Utils.get_market()),
+          fixed: true,
+          shadeClose: true,
+          end: function () {
+            ZiXuan.load_groups(ZiXuan.zx_group);
+            ZiXuan.render_zixuan_opts();
+          },
+        });
+      });
+  }
+
   return {
     zx_group: zx_group,
+    set_group_creator_open: setGroupCreatorOpen,
+    create_group: function (rawName) {
+      if (createGroupRequestInFlight) return false;
+      var validation = validateGroupName(
+        typeof rawName === "string" ? rawName : $("#zixuan_group_name").val()
+      );
+      if (!validation.ok) {
+        setGroupError(validation.message);
+        return false;
+      }
+
+      var market = Utils.get_market();
+      setGroupError("");
+      setCreateGroupBusy(true);
+      createGroupRequestInFlight = true;
+      appAjax({
+        type: "POST",
+        url: "/opt_zixuan_group/" + pathSegment(market),
+        data: { opt: "ADD", zx_group: validation.name },
+        dataType: "json",
+        timeout: 10000,
+        success: function (response) {
+          if (!response || response.ok !== true) {
+            var failedMessage = response && response.msg
+              ? String(response.msg)
+              : "分组创建失败";
+            setGroupError(failedMessage);
+            if (window.layer) layer.msg(failedMessage);
+            return;
+          }
+          var createdGroup = String(response.group || validation.name);
+          $("#zixuan_group_name").val("");
+          setGroupCreatorOpen(false);
+          if (window.layer) layer.msg(response.msg || "自选分组已创建");
+          ZiXuan.load_groups(createdGroup, function () {
+            ZiXuan.render_zixuan_opts();
+          });
+        },
+        error: function (xhr) {
+          var message = responseMessage(xhr, "分组创建失败，请稍后重试");
+          setGroupError(message);
+          if (window.layer) layer.msg(message);
+        },
+        complete: function () {
+          createGroupRequestInFlight = false;
+          setCreateGroupBusy(false);
+        },
+      });
+      return true;
+    },
+    load_groups: function (preferredGroup, onLoaded) {
+      var market = Utils.get_market();
+      var requested = validateGroupName(preferredGroup || "");
+      var preferred = requested.ok ? requested.name : "";
+      var generation = ++groupsRequestGeneration;
+      setWatchStatus("正在读取自选分组…", "loading");
+
+      appAjax({
+        type: "GET",
+        url: "/get_zixuan_groups/" + pathSegment(market),
+        dataType: "json",
+        timeout: 10000,
+        success: function (response) {
+          if (generation !== groupsRequestGeneration || market !== Utils.get_market()) {
+            return;
+          }
+          var groups = (Array.isArray(response) ? response : []).filter(function (item) {
+            return item && validateGroupName(item.name).ok;
+          });
+          var names = groups.map(function (item) { return String(item.name).trim(); });
+          var selected = "";
+          if (preferred && names.indexOf(preferred) !== -1) selected = preferred;
+          else if (names.indexOf(ZiXuan.zx_group) !== -1) selected = ZiXuan.zx_group;
+          else if (names.length > 0) selected = names[0];
+
+          var groupSelect = $("#zixuan_groups");
+          groupSelect.empty();
+          layui.each(groups, function (_index, item) {
+            groupSelect.append($("<option>", {
+              value: String(item.name).trim(),
+              text: String(item.name).trim(),
+            }));
+          });
+          var canSelectValue = typeof groupSelect.val === "function";
+          if (canSelectValue && selected) groupSelect.val(selected);
+          layui.form.render("select");
+
+          $("#zixuan_group_count").text(String(groups.length));
+          if (!selected) {
+            $("#zixuan_stock_count").text("0");
+            setCurrentGroupLabel("未创建分组");
+            setWatchStatus("尚未创建自选分组", "empty");
+          } else {
+            ZiXuan.zx_group = selected;
+            setCurrentGroupLabel(selected);
+            if (canSelectValue) ZiXuan.render_zixuan_stocks();
+          }
+          if (typeof onLoaded === "function") onLoaded(groups, selected);
+        },
+        error: function () {
+          if (generation === groupsRequestGeneration) {
+            setWatchStatus("自选分组加载失败", "error");
+            if (window.layer) layer.msg("自选分组加载失败，请稍后重试");
+          }
+        },
+      });
+    },
     render_zixuan_opts: function () {
       var market = Utils.get_market();
       var code = String(Utils.get_code() || "").replace(/\//g, "__");
@@ -136,7 +348,7 @@ var ZiXuan = (function () {
         },
         error: function () {
           if (generation === zixuanOptsRequestGeneration && window.layer) {
-            layer.msg("获取自选分组状态失败");
+            layer.msg("自选分组状态加载失败");
           }
         },
       });
@@ -167,7 +379,10 @@ var ZiXuan = (function () {
       $(".code_rate").each(function () {
         codes.push($(this).data("code"));
       });
-      if (codes.length === 0) return true;
+      if (codes.length === 0) {
+        setWatchStatus("当前分组暂无标的", "empty");
+        return true;
+      }
 
       update_request_in_flight = true;
       var completion_state = "retry";
@@ -212,9 +427,14 @@ var ZiXuan = (function () {
             obj_span_rate.replaceWith(next);
           }
           completion_state = response.market_state;
+          setWatchStatus(
+            response.market_state === "closed" ? "休市 · 低频检查" : "实时行情更新中",
+            response.market_state === "closed" ? "closed" : "live"
+          );
         },
         error: function () {
           completion_state = "retry";
+          setWatchStatus("行情连接中断，准备重试", "error");
         },
         complete: function () {
           update_request_in_flight = false;
@@ -242,6 +462,9 @@ var ZiXuan = (function () {
 
     render_zixuan_stocks: function () {
       stop_timer();
+      $("#zixuan_stock_count").text("—");
+      setCurrentGroupLabel(ZiXuan.zx_group);
+      setWatchStatus("正在加载分组标的…", "loading");
 
       layui.use(["table", "dropdown", "util"], function () {
         let table = layui.table;
@@ -262,6 +485,12 @@ var ZiXuan = (function () {
             var rows = Array.isArray(response)
               ? response
               : (response && Array.isArray(response.data) ? response.data : []);
+            $("#zixuan_stock_count").text(String(rows.length));
+            setCurrentGroupLabel(group);
+            setWatchStatus(
+              rows.length > 0 ? "标的已加载，连接实时行情…" : "当前分组暂无标的",
+              rows.length > 0 ? "loading" : "empty"
+            );
             table.render({
               elem: "#table_zixuan_list",
               defaultContextmenu: false,
@@ -274,7 +503,7 @@ var ZiXuan = (function () {
               cols: [[
                 {
                   field: "code",
-                  title: "标的",
+                  title: "关注标的",
                   sort: false,
                   templet: function (d) {
                     return stockNode(d.name, d.code, d.color).outerHTML;
@@ -282,7 +511,7 @@ var ZiXuan = (function () {
                 },
                 {
                   field: "zf",
-                  title: "涨跌幅",
+                  title: "涨跌 / 现价",
                   sort: false,
                   width: 70,
                   templet: function (d) {
@@ -290,6 +519,7 @@ var ZiXuan = (function () {
                   },
                 },
               ]],
+              text: { none: "当前分组暂无标的" },
               done: function () {
                 if (requestGeneration === stockListRequestGeneration) {
                   ZiXuan.stocks_update_rate();
@@ -299,7 +529,8 @@ var ZiXuan = (function () {
           },
           error: function () {
             if (requestGeneration === stockListRequestGeneration && window.layer) {
-              layer.msg("获取自选列表失败");
+              setWatchStatus("自选标的加载失败", "error");
+              layer.msg("自选标的加载失败，请稍后重试");
             }
           },
         });
@@ -309,7 +540,6 @@ var ZiXuan = (function () {
           const data = obj.data;
           const code = data.code;
           change_chart_ticker(Utils.get_market(), code);
-          $("#ai_code").val(code);
           table.setRowChecked("table_zixuan_list", {
             index: "all",
             checked: false,
@@ -322,49 +552,49 @@ var ZiXuan = (function () {
         table.on("rowContextmenu(table_zixuan_list)", function (obj) {
           let data = obj.data;
           let menu_data = [
-            { title: "删除", id: "del" },
-            { title: "置顶", id: "sort_1", direction: "top" },
-            { title: "置底", id: "sort_2", direction: "bottom" },
+            { title: "从当前分组移除", id: "del" },
+            { title: "移至顶部", id: "sort_1", direction: "top" },
+            { title: "移至底部", id: "sort_2", direction: "bottom" },
             {
-                title: "色彩",
+                title: "标记颜色",
                 id: "color_1",
                 color: "#ff5722",
-                templet: function () { return '<div class="layui-bg-red">红色</div>'; },
+                templet: function () { return '<div class="layui-bg-red">红色标记</div>'; },
             },
             {
-                title: "色彩",
+                title: "标记颜色",
                 id: "color_2",
                 color: "#ffb800",
-                templet: function () { return '<div class="layui-bg-orange">橙色</div>'; },
+                templet: function () { return '<div class="layui-bg-orange">橙色标记</div>'; },
             },
             {
-                title: "色彩",
+                title: "标记颜色",
                 id: "color_3",
                 color: "#16baaa",
-                templet: function () { return '<div class="layui-bg-green">绿色</div>'; },
+                templet: function () { return '<div class="layui-bg-green">绿色标记</div>'; },
             },
             {
-                title: "色彩",
+                title: "标记颜色",
                 id: "color_4",
                 color: "#1e9fff",
-                templet: function () { return '<div class="layui-bg-blue">蓝色</div>'; },
+                templet: function () { return '<div class="layui-bg-blue">蓝色标记</div>'; },
             },
             {
-                title: "色彩",
+                title: "标记颜色",
                 id: "color_5",
                 color: "#a233c6",
-                templet: function () { return '<div class="layui-bg-purple">紫色</div>'; },
+                templet: function () { return '<div class="layui-bg-purple">紫色标记</div>'; },
             },
             {
-                title: "色彩",
+                title: "标记颜色",
                 id: "color_6",
                 color: "",
-                templet: function () { return '<div class="layui-bg-gray">清除颜色</div>'; },
+                templet: function () { return '<div class="layui-bg-gray">清除标记</div>'; },
             },
           ];
 
           if (Utils.get_market() === "a") {
-            menu_data.splice(3, 0, { title: "操盘必读", id: "dfcf" });
+            menu_data.splice(3, 0, { title: "查看公司资料", id: "dfcf" });
           }
 
           dropdown.render({
@@ -387,14 +617,14 @@ var ZiXuan = (function () {
                   dataType: "json",
                   success: function (res) {
                     if (res["ok"]) {
-                      layer.msg("删除成功");
+                      layer.msg("已从当前自选分组移除");
                       obj.del();
                     } else {
-                      layer.msg("删除失败");
+                      layer.msg("移出自选分组失败");
                     }
                   },
                 });
-              } else if (menuData["title"] === "色彩") {
+              } else if (String(menuData["id"] || "").indexOf("color_") === 0) {
                  appAjax({
                     type: "POST",
                     url: "/set_stock_zixuan",
@@ -411,7 +641,7 @@ var ZiXuan = (function () {
                       if (res && res.ok) {
                         obj.update({ color: menuData["color"] }, true);
                       } else {
-                        layer.msg("颜色更新失败");
+                        layer.msg("标记颜色更新失败");
                       }
                     },
                   });
@@ -435,7 +665,7 @@ var ZiXuan = (function () {
                       if (res && res.ok) {
                         ZiXuan.render_zixuan_stocks();
                       } else {
-                        layer.msg("排序更新失败");
+                        layer.msg("自选排序更新失败");
                       }
                     },
                   });
@@ -457,39 +687,8 @@ var ZiXuan = (function () {
            var layer = layui.layer;
            var dropdown = layui.dropdown;
            var form = layui.form;
-
-           var groupsMarket = Utils.get_market();
-           var groupsGeneration = ++groupsRequestGeneration;
-           appAjax({
-             type: "GET",
-             url: "/get_zixuan_groups/" + pathSegment(groupsMarket),
-             dataType: "json",
-             timeout: 10000,
-             success: function (res) {
-               if (groupsGeneration !== groupsRequestGeneration
-                   || groupsMarket !== Utils.get_market()) return;
-               let zixuan_groups = $("#zixuan_groups");
-               zixuan_groups.empty();
-               layui.each(Array.isArray(res) ? res : [], function (i, r) {
-                 zixuan_groups.append(
-                   $("<option>", { value: r.name, text: r.name })
-                 );
-               });
-               layui.form.render(zixuan_groups);
-               var firstOption = $(zixuan_groups)
-                 .siblings("div.layui-form-select").find("dl").find("dd")[0];
-               if (firstOption && typeof firstOption.click === "function") {
-                 firstOption.click();
-               } else if (!res || res.length === 0) {
-                 layer.msg("暂无自选分组");
-               }
-             },
-             error: function () {
-               if (groupsGeneration === groupsRequestGeneration) {
-                 layer.msg("获取自选分组失败");
-               }
-             },
-           });
+           bindGroupControls(layer);
+           ZiXuan.load_groups(ZiXuan.zx_group);
             dropdown.render({
                 elem: "#add_zixuan",
                 data: [],
@@ -512,7 +711,7 @@ var ZiXuan = (function () {
                         dataType: "json",
                         success: function (res) {
                             if (!res || !res.ok) {
-                                layer.msg("自选更新失败");
+                                layer.msg("自选分组更新失败");
                                 return;
                             }
                             if (data["title"] == ZiXuan.zx_group) {
@@ -527,10 +726,12 @@ var ZiXuan = (function () {
 
             form.on("select(select_zx_group)", function (data) {
                 ZiXuan.zx_group = data.value;
+                setCurrentGroupLabel(data.value);
                 ZiXuan.render_zixuan_stocks();
             });
 
             $("#refresh_zixuan").click(function () {
+                setWatchStatus("正在手动刷新…", "loading");
                 ZiXuan.render_zixuan_stocks();
             });
 
@@ -540,8 +741,8 @@ var ZiXuan = (function () {
                 remoteSearch: true,
                 radio: true,
                 clickClose: true,
-                tips: "商品代码搜索",
-                empty: "没有搜索商品",
+                tips: "输入代码、名称或拼音",
+                empty: "未找到匹配标的",
                 theme: { color: "#e54d42" },
                 delay: 1000,
                 remoteMethod: function (val, cb, show) {

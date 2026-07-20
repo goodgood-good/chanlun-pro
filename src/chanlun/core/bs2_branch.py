@@ -45,6 +45,7 @@ class Bs2BranchCalculator:
                                    else {"structural_stop_above": stop_val})
                     out.append(BuySellPoint(
                         bs, zs_sub, c_sub, c_sub.end, dv_sub, level=k, **stop_kwargs,
+                        definition_variant=("weak_divergence" if breaks else "strict"),
                     ))
         return out
 

@@ -1072,6 +1072,123 @@ def _card_evidence_ids(card: RuleCard) -> tuple[str, ...]:
     )
 
 
+def _evaluate_predicate_groups(
+    card: RuleCard,
+    resolved: Mapping[str, FieldResolution],
+    manual_snapshots: Mapping[str, object],
+    invalid_manual_check_ids: set[str],
+    *,
+    include_manual: bool,
+) -> tuple[
+    dict[str, bool],
+    tuple[EvaluationReason, ...],
+    dict[str, tuple[tuple[str, bool | None], ...]],
+]:
+    """Evaluate one canonical predicate loop for full and machine-only callers."""
+    if type(include_manual) is not bool:
+        raise TypeError("include_manual must be boolean")
+    group_states: dict[str, bool] = {
+        "candidate": True,
+        "confirmation": True,
+        "invalidation": False,
+        "conflict": False,
+    }
+    group_results: dict[str, list[tuple[str, bool | None]]] = {
+        "candidate": [],
+        "confirmation": [],
+        "invalidation": [],
+        "conflict": [],
+    }
+    reasons: list[EvaluationReason] = []
+    predicate_groups = (
+        ("candidate", card.candidate_predicates, False),
+        ("confirmation", card.confirmation_predicates, False),
+        ("invalidation", card.invalidation_predicates, True),
+        ("conflict", card.conflict_predicates, True),
+    )
+    for phase, predicates, critical in predicate_groups:
+        for predicate in predicates:
+            if predicate.mode is PredicateMode.MANUAL and not include_manual:
+                continue
+            predicate_value: bool | None = None
+            detail = ""
+            if predicate.mode is PredicateMode.MANUAL:
+                snapshot = manual_snapshots.get(predicate.manual_check_id)
+                if predicate.manual_check_id in invalid_manual_check_ids:
+                    detail = "manual check evidence binding is invalid"
+                elif snapshot is None:
+                    detail = "audited manual check is missing"
+                else:
+                    predicate_value = snapshot.value
+            else:
+                resolution = resolved[predicate.field]
+                if resolution.status is FieldResolutionStatus.VALUE:
+                    try:
+                        predicate_value = _operator_result(
+                            predicate, resolution.value
+                        )
+                    except (TypeError, ValueError, ArithmeticError) as exc:
+                        detail = (
+                            "operator evaluation failed: "
+                            f"{type(exc).__name__}"
+                        )
+                else:
+                    detail = resolution.detail or resolution.status.value
+
+            group_results[phase].append(
+                (predicate.predicate_id, predicate_value)
+            )
+            if predicate_value is None:
+                if not critical:
+                    group_states[phase] = False
+                reasons.append(
+                    EvaluationReason(
+                        code=f"{phase}_indeterminate",
+                        phase=phase,
+                        verdict=(
+                            EvaluationVerdict.REJECT
+                            if critical
+                            else EvaluationVerdict.WATCH
+                        ),
+                        evidence_ids=predicate.evidence_ids,
+                        predicate_id=predicate.predicate_id,
+                        field=predicate.field,
+                        detail=detail,
+                    )
+                )
+                continue
+            if critical:
+                if predicate_value:
+                    group_states[phase] = True
+                    reasons.append(
+                        EvaluationReason(
+                            code=f"{phase}_triggered",
+                            phase=phase,
+                            verdict=EvaluationVerdict.REJECT,
+                            evidence_ids=predicate.evidence_ids,
+                            predicate_id=predicate.predicate_id,
+                            field=predicate.field,
+                        )
+                    )
+            elif not predicate_value:
+                group_states[phase] = False
+                reasons.append(
+                    EvaluationReason(
+                        code=f"{phase}_not_satisfied",
+                        phase=phase,
+                        verdict=EvaluationVerdict.WATCH,
+                        evidence_ids=predicate.evidence_ids,
+                        predicate_id=predicate.predicate_id,
+                        field=predicate.field,
+                    )
+                )
+    return (
+        group_states,
+        tuple(reasons),
+        {phase: tuple(values) for phase, values in group_results.items()},
+    )
+
+
 def _evaluation_input_fingerprint(context: object) -> str:
     if type(context) is RuleEvaluationContext:
         try:
@@ -1429,86 +1546,14 @@ def evaluate_rule_card(
                     )
                 )
 
-    group_states: dict[str, bool] = {
-        "candidate": True,
-        "confirmation": True,
-        "invalidation": False,
-        "conflict": False,
-    }
-    predicate_groups = (
-        ("candidate", card.candidate_predicates, False),
-        ("confirmation", card.confirmation_predicates, False),
-        ("invalidation", card.invalidation_predicates, True),
-        ("conflict", card.conflict_predicates, True),
+    group_states, predicate_reasons, _ = _evaluate_predicate_groups(
+        card,
+        resolved,
+        manual_snapshots,
+        invalid_manual_check_ids,
+        include_manual=True,
     )
-    for phase, predicates, critical in predicate_groups:
-        for predicate in predicates:
-            predicate_value: bool | None = None
-            detail = ""
-            if predicate.mode is PredicateMode.MANUAL:
-                snapshot = manual_snapshots.get(predicate.manual_check_id)
-                if predicate.manual_check_id in invalid_manual_check_ids:
-                    detail = "manual check evidence binding is invalid"
-                elif snapshot is None:
-                    detail = "audited manual check is missing"
-                else:
-                    predicate_value = snapshot.value
-            else:
-                resolution = resolved[predicate.field]
-                if resolution.status is FieldResolutionStatus.VALUE:
-                    try:
-                        predicate_value = _operator_result(
-                            predicate, resolution.value
-                        )
-                    except (TypeError, ValueError, ArithmeticError) as exc:
-                        detail = f"operator evaluation failed: {type(exc).__name__}"
-                else:
-                    detail = resolution.detail or resolution.status.value
-
-            if predicate_value is None:
-                if not critical:
-                    group_states[phase] = False
-                reasons.append(
-                    EvaluationReason(
-                        code=f"{phase}_indeterminate",
-                        phase=phase,
-                        verdict=(
-                            EvaluationVerdict.REJECT
-                            if critical
-                            else EvaluationVerdict.WATCH
-                        ),
-                        evidence_ids=predicate.evidence_ids,
-                        predicate_id=predicate.predicate_id,
-                        field=predicate.field,
-                        detail=detail,
-                    )
-                )
-                continue
-            if critical:
-                if predicate_value:
-                    group_states[phase] = True
-                    reasons.append(
-                        EvaluationReason(
-                            code=f"{phase}_triggered",
-                            phase=phase,
-                            verdict=EvaluationVerdict.REJECT,
-                            evidence_ids=predicate.evidence_ids,
-                            predicate_id=predicate.predicate_id,
-                            field=predicate.field,
-                        )
-                    )
-            elif not predicate_value:
-                group_states[phase] = False
-                reasons.append(
-                    EvaluationReason(
-                        code=f"{phase}_not_satisfied",
-                        phase=phase,
-                        verdict=EvaluationVerdict.WATCH,
-                        evidence_ids=predicate.evidence_ids,
-                        predicate_id=predicate.predicate_id,
-                        field=predicate.field,
-                    )
-                )
+    reasons.extend(predicate_reasons)
 
     return _build_evaluation(
         card,

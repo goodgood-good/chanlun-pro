@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="robots" content="noindex,nofollow" />
+    <title>缠论提前选股 · 实时盯盘与个股分析</title>
+    <link rel="shortcut icon" href="{{ url_for('static', filename='favicon.ico') }}?v={{ static_version|default('') }}" />
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/ui-system.css') }}?v={{ static_version|default('') }}" />
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/early_screening.css') }}?v={{ static_version|default('') }}" />
+    <script defer src="{{ url_for('static', filename='js/early_screening_ui.js') }}?v={{ static_version|default('') }}"></script>
+    <script defer src="{{ url_for('static', filename='js/early_screening.js') }}?v={{ static_version|default('') }}"></script>
+  </head>
+  <body class="cp-ui cp-immersive">
+    <a class="cp-skip-link" href="#es-dashboard">跳到实时筛选结果</a>
+
+    <header class="es-topbar cp-product-nav">
+      <div class="es-shell es-topbar__inner">
+        <a class="es-brand" href="/" aria-label="返回缠论行情工作台">CL</a>
+        <nav class="es-nav" aria-label="研究导航">
+          <a href="/">行情与画图</a>
+          <a href="{{ url_for('decision_support.research_audit') }}">历史研究/审计成果</a>
+          <span>只读研究 · 无订单能力</span>
+        </nav>
+      </div>
+    </header>
+
+    <main
+      id="es-dashboard"
+      class="es-shell es-dashboard"
+      data-schema="chanlun-trading-screening/v1"
+      data-endpoint="{{ url_for('decision_support.early_signals') }}"
+    >
+      <section class="es-hero" aria-labelledby="es-title">
+        <div>
+          <p class="es-eyebrow">SECTOR FIRST · STRUCTURE ONLY · READ ONLY</p>
+          <h1 id="es-title">缠论提前选股 · 实时盯盘与个股分析</h1>
+          <p class="es-hero__intro">
+            先读取原生行业板块 K 线做缠论结构排序，再筛板块内个股。30m 判断大级别买卖点环境，
+            5m 定位可操作结构，1m 用笔、线段、中枢与递归完成最精细确认；六类买卖点始终独立分析。
+          </p>
+        </div>
+        <aside class="es-boundary-card" aria-label="系统边界">
+          <strong>研究边界</strong>
+          <span>不连接券商委托</span>
+          <span>不承诺收益或胜率</span>
+          <a href="{{ url_for('decision_support.research_audit') }}">查看可复核证据</a>
+        </aside>
+      </section>
+
+      <section class="es-statusbar" aria-live="polite">
+        <div class="es-live-state">
+          <span id="es-status-dot" class="es-status-dot is-loading" aria-hidden="true"></span>
+          <div>
+            <strong id="es-status">正在读取最新快照</strong>
+            <small id="es-status-detail">等待已闭合 30m / 5m / 1m 结构数据</small>
+          </div>
+        </div>
+        <dl class="es-status-facts">
+          <div><dt>快照时间</dt><dd id="es-generated">尚未发布</dd></div>
+          <div><dt>批次 / 覆盖</dt><dd id="es-completion">—</dd></div>
+          <div><dt>数据质量</dt><dd id="es-quality">待检查</dd></div>
+        </dl>
+        <button id="es-refresh-now" class="es-button" type="button">立即刷新</button>
+      </section>
+
+      <section class="es-pipeline" aria-label="三级别筛选链">
+        <article>
+          <span>01 · 大级别</span>
+          <strong>30m 大级别筛选</strong>
+          <p>计算线段、中枢和一二三类买卖点，不用“只看向上”代替结构判断。</p>
+        </article>
+        <i aria-hidden="true">→</i>
+        <article>
+          <span>02 · 可操作级别</span>
+          <strong>5m 可操作级别筛选</strong>
+          <p>定位真实买卖点、未完成结构、结构失效边界；三买只取第一中枢。</p>
+        </article>
+        <i aria-hidden="true">→</i>
+        <article>
+          <span>03 · 最精细操作</span>
+          <strong>1m 精确操作确认</strong>
+          <p>在 5m 窗口内递归核对同向触发，卖点风险优先，不用预测概率代替证据。</p>
+        </article>
+      </section>
+
+      <section class="es-summary" aria-label="实时快照摘要">
+        <article><span>入选板块</span><strong id="es-sector-count">0</strong><small>按原生板块结构排序</small></article>
+        <article><span>全部信号</span><strong id="es-signal-count">0</strong><small>六类买卖点独立计数</small></article>
+        <article class="is-watch"><span>即将确认</span><strong id="es-approaching-count">0</strong><small>5m 未完成结构，仅供提前观察</small></article>
+        <article class="is-watch"><span>已入观察池</span><strong id="es-armed-count">0</strong><small>已经接近但尚未触发</small></article>
+        <article class="is-trigger"><span>已触发</span><strong id="es-triggered-count">0</strong><small>1m 已给出结构触发</small></article>
+        <article class="is-action"><span>可执行复核</span><strong id="es-executable-count">0</strong><small>仍需遵守止损与风控</small></article>
+        <article class="is-risk"><span>失效/结束</span><strong id="es-closed-count">0</strong><small>保留生命周期证据</small></article>
+      </section>
+
+      <section class="es-workspaces" aria-label="提前选股工作台">
+        <aside class="es-workspace es-sector-workspace" data-workspace="sector" aria-labelledby="es-sector-title">
+          <header class="es-workspace__header">
+            <div>
+              <p class="es-eyebrow">NATIVE SECTOR STRUCTURE</p>
+              <h2 id="es-sector-title">板块结构雷达</h2>
+            </div>
+          </header>
+          <p class="es-workspace__help">不看板块当日涨跌，不合成行业 K 线；直接使用已有板块行情的缠论结构。</p>
+          <div id="es-sector-list" class="es-sector-list" role="group" aria-label="按板块筛选"></div>
+        </aside>
+
+        <section class="es-workspace es-signal-workspace" data-workspace="signals" aria-labelledby="es-signal-title">
+          <header class="es-workspace__header">
+            <div>
+              <p class="es-eyebrow">ACTIONABLE QUEUE</p>
+              <h2 id="es-signal-title">买卖点队列</h2>
+            </div>
+            <strong id="es-visible-count" class="es-visible-count">0 / 0</strong>
+          </header>
+
+          <label class="es-search">
+            <span>搜索</span>
+            <input id="es-signal-search" type="search" autocomplete="off" placeholder="股票代码、名称或板块" />
+          </label>
+
+          <fieldset class="es-filter-group">
+            <legend>生命周期</legend>
+            <div id="es-lifecycle-filters" class="es-filter-buttons">
+              <button class="is-active" type="button" data-lifecycle="all" aria-pressed="true">全部</button>
+              <button type="button" data-lifecycle="observed" aria-pressed="false">结构观察</button>
+              <button type="button" data-lifecycle="approaching" aria-pressed="false">即将确认</button>
+              <button type="button" data-lifecycle="armed" aria-pressed="false">已入观察池</button>
+              <button type="button" data-lifecycle="triggered" aria-pressed="false">已触发</button>
+              <button type="button" data-lifecycle="executable" aria-pressed="false">可执行复核</button>
+              <button type="button" data-lifecycle="active" aria-pressed="false">持有跟踪</button>
+              <button type="button" data-lifecycle="invalidated" aria-pressed="false">已失效</button>
+              <button type="button" data-lifecycle="closed" aria-pressed="false">已结束</button>
+            </div>
+          </fieldset>
+
+          <fieldset class="es-filter-group">
+            <legend>一二三类买卖点独立通道</legend>
+            <div id="es-point-filters" class="es-filter-buttons es-point-filters">
+              <button class="is-active" type="button" data-point-type="all" aria-pressed="true">全部</button>
+              <button type="button" data-point-type="1buy" aria-pressed="false">一买</button>
+              <button type="button" data-point-type="2buy" aria-pressed="false">二买</button>
+              <button type="button" data-point-type="3buy" aria-pressed="false">三买</button>
+              <button type="button" data-point-type="1sell" aria-pressed="false">一卖</button>
+              <button type="button" data-point-type="2sell" aria-pressed="false">二卖</button>
+              <button type="button" data-point-type="3sell" aria-pressed="false">三卖</button>
+            </div>
+          </fieldset>
+
+          <div id="es-empty" class="es-empty" hidden>
+            <strong>当前条件下没有可展示的结构信号</strong>
+            <p>这表示当前快照没有匹配项，不等于扫描成功率或未来收益判断。</p>
+          </div>
+          <div id="es-signal-list" class="es-signal-list" role="list" aria-live="polite"></div>
+        </section>
+
+        <section
+          id="es-chart-workspace"
+          class="es-workspace es-chart-workspace"
+          data-workspace="charts"
+          data-current-layout="single"
+          aria-labelledby="es-chart-title"
+        >
+          <header class="es-workspace__header es-chart-header">
+            <div>
+              <p class="es-eyebrow">MARKET · CHANLUN · DRAWING</p>
+              <h2 id="es-chart-title">多周期行情与结构证据</h2>
+            </div>
+            <a data-chart-workbench class="es-button es-button--link" href="/" target="_blank" rel="noopener">打开完整画图工作台</a>
+          </header>
+
+          <nav class="es-layout-switch" aria-label="图表布局">
+            <span>布局</span>
+            <button class="is-active" type="button" data-layout="single" aria-pressed="true">单图</button>
+            <button type="button" data-layout="split" aria-pressed="false">双图</button>
+            <button type="button" data-layout="quad" aria-pressed="false">四宫格</button>
+          </nav>
+
+          <div data-chart-placeholder class="es-chart-placeholder">
+            <strong>从买卖点队列选择一只股票</strong>
+            <p>这里会同时给出 30m 环境、5m 设置、1m 触发和结构失效边界。</p>
+          </div>
+
+          <div data-chart-content class="es-chart-content" hidden>
+            <section class="es-selected-signal" aria-label="当前股票">
+              <div><span data-selected-code>—</span><h3 data-selected-name>—</h3></div>
+              <div class="es-selected-tags">
+                <b data-selected-point>—</b>
+                <span data-selected-stage>—</span>
+                <span data-selected-tower>—</span>
+              </div>
+              <dl>
+                <div><dt>结构止损</dt><dd data-selected-stop>—</dd></div>
+                <div><dt>风险乘数</dt><dd data-selected-risk>—</dd></div>
+              </dl>
+            </section>
+
+            <div class="es-chart-grid">
+              <article class="es-chart-card is-30m" data-frequency="30m">
+                <header><strong>30m 大级别环境</strong><a data-chart-link="30m" href="/" target="_blank" rel="noopener">独立打开</a></header>
+                <iframe data-chart-frame="30m" title="30分钟行情与缠论图" loading="lazy" src="about:blank"></iframe>
+              </article>
+              <article class="es-chart-card is-5m" data-frequency="5m">
+                <header><strong>5m 可操作结构</strong><a data-chart-link="5m" href="/" target="_blank" rel="noopener">独立打开</a></header>
+                <iframe data-chart-frame="5m" title="5分钟行情与缠论图" loading="lazy" src="about:blank"></iframe>
+              </article>
+              <article class="es-chart-card is-1m" data-frequency="1m">
+                <header><strong>1m 精确触发</strong><a data-chart-link="1m" href="/" target="_blank" rel="noopener">独立打开</a></header>
+                <iframe data-chart-frame="1m" title="1分钟行情与缠论图" loading="lazy" src="about:blank"></iframe>
+              </article>
+              <article class="es-chart-card es-evidence-card" data-frequency="evidence">
+                <header><strong>结构证据与风险</strong></header>
+                <div class="es-evidence-columns">
+                  <section><h4>30m</h4><ul data-evidence-30m></ul></section>
+                  <section><h4>5m</h4><ul data-evidence-5m></ul></section>
+                  <section><h4>1m</h4><ul data-evidence-1m></ul></section>
+                  <section class="is-risk"><h4>决策/失效原因</h4><ul data-decision-reasons></ul></section>
+                </div>
+              </article>
+            </div>
+          </div>
+        </section>
+      </section>
+
+      <details class="es-methodology">
+        <summary>查看筛选口径与研究边界</summary>
+        <div>
+          <article><strong>板块先行</strong><p>板块和个股都按缠论结构计算；涨跌幅、上涨家数不参与方向判断。</p></article>
+          <article><strong>六类点独立</strong><p>一买看背驰反转，二买看首次回试确认，三买看离开中枢后的延续；卖点按对称规则独立处理。</p></article>
+          <article><strong>第一中枢约束</strong><p>三买仅保留当前上涨结构的第一中枢，序号未知或后续中枢一律关闭。</p></article>
+          <article><strong>因果边界</strong><p>只使用当时已经闭合的数据；未完成笔只能进入观察，不冒充已确认买卖点。</p></article>
+          <article><strong>当前性窗口</strong><p>5m 已确认设置只保留最近 4 个自然日内、各买卖点/结构塔/递归级别的最新事件；临近点必须来自当前未完成结构。</p></article>
+        </div>
+      </details>
+    </main>
+  </body>
+</html>

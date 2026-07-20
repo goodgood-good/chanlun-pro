@@ -1,188 +1,236 @@
-<!DOCTYPE HTML>
-<html lang="zh">
-
-<head>
-    <title>选股策略列表与操作</title>
-    <meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,minimum-scale=1.0">
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>传统选股任务 · Chanlun Pro</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='css/layui.css') }}" />
     <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}" />
-    <script type="text/javascript" src="{{ url_for('static', filename='layui.js') }}"></script>
-    <script type="text/javascript" src="{{ url_for('static', filename='jquery-3.7.0.min.js') }}"></script>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/ui-system.css') }}?v={{ static_version|default('') }}" />
+    <script src="{{ url_for('static', filename='layui.js') }}"></script>
+    <script src="{{ url_for('static', filename='jquery-3.7.0.min.js') }}"></script>
     {% include 'dark.html' %}
-</head>
+  </head>
 
-<body class="layui-fluid">
+  <body class="cp-ui">
+    <a class="cp-skip-link" href="#main-content">跳到选股任务</a>
+    <main id="main-content" class="cp-page cp-page--compact cp-page-stack">
+      <header class="cp-page-header">
+        <div class="cp-page-header-copy">
+          <span class="cp-eyebrow">LEGACY SCREENER TASK</span>
+          <h1>传统选股任务</h1>
+          <p>运行已有策略任务并把结果写入指定自选组。实时提前选股请使用“缠论提前选股”工作台。</p>
+        </div>
+        <div class="cp-page-header-actions">
+          <div class="cp-context-card">
+            <span>当前市场</span>
+            <strong>{{ market|upper }}</strong>
+          </div>
+        </div>
+      </header>
 
-    <form class="layui-form layui-row run_xuangu" role="form" style="padding: 20px;" lay-filter="task_config">
-
-        <div class="layui-form-item">
-            <label class="layui-form-label">市场</label>
-            <div class="layui-input-block" title="当前市场">
-                <label for="kline_type">
-                    <select type="select" class="form-control" name="market" lay-filter="market" disabled>
-                        <option value="a" {% if market=='a' %} selected {% endif %}>沪深A股</option>
-                        <option value="hk" {% if market=='hk' %} selected {% endif %}>港股</option>
-                        <option value="futures" {% if market=='futures' %} selected {% endif %}>国内期货</option>
-                        <option value="ny_futures" {% if market=='ny_futures' %} selected {% endif %}>纽约期货</option>
-                        <option value="fx" {% if market=='fx' %} selected {% endif %}>外汇</option>
-
-                        <option value="us" {% if market=='us' %} selected {% endif %}>美股</option>
-                        <option value="currency" {% if market=='currency' %} selected {% endif %}>数字货币(合约)</option>
-                        <option value="currency_spot" {% if market=='currency_spot' %} selected {% endif %}>数字货币(现货)
-                        </option>
-                    </select>
-                </label>
+      <form class="layui-form run_xuangu cp-page-stack" role="form" lay-filter="task_config">
+        <section class="cp-section-card" aria-labelledby="task-direction-title">
+          <div class="cp-section-heading">
+            <div class="cp-heading-with-index">
+              <span class="cp-section-index">01</span>
+              <div>
+                <h2 id="task-direction-title">任务与方向</h2>
+                <p>选择传统策略及其允许的多空方向。</p>
+              </div>
             </div>
-        </div>
-        <div class="layui-form-item">
-            <label class="layui-form-label">选股策略</label>
-            <div class="layui-input-block">
-                <label for="task_name">
-                    <select type="select" class="form-control" name="task_name" lay-filter="task_name">
-                        {% for _task_name, _task_config in tasks.items() %}
-                        <option value="{{ _task_name }}">{{ _task_config['name'] }}</option>
-                        {% endfor %}
-                    </select>
-                </label>
-                <div>
-                    <blockquote class="layui-elem-quote layui-quote-nm layui-text">
-                        <p>备注：<span class="task_memo"></span></p>
-                        <p>周期：<span class="frequency_memo"></span></p>
-                    </blockquote>
-                </div>
+          </div>
+          <div class="cp-form-grid">
+            <div class="layui-form-item">
+              <label class="layui-form-label">市场</label>
+              <div class="layui-input-block">
+                <select class="form-control" name="market" lay-filter="market" disabled>
+                  <option value="a" {% if market=='a' %}selected{% endif %}>沪深 A 股</option>
+                  <option value="hk" {% if market=='hk' %}selected{% endif %}>港股</option>
+                  <option value="futures" {% if market=='futures' %}selected{% endif %}>国内期货</option>
+                  <option value="ny_futures" {% if market=='ny_futures' %}selected{% endif %}>纽约期货</option>
+                  <option value="fx" {% if market=='fx' %}selected{% endif %}>外汇</option>
+                  <option value="us" {% if market=='us' %}selected{% endif %}>美股</option>
+                  <option value="currency" {% if market=='currency' %}selected{% endif %}>数字货币（合约）</option>
+                  <option value="currency_spot" {% if market=='currency_spot' %}selected{% endif %}>数字货币（现货）</option>
+                </select>
+              </div>
             </div>
-        </div>
-        <div class="layui-form-item">
-            <label class="layui-form-label">选股方向</label>
-            <div class="layui-input-block" title="选股方向">
-                <label for="opt_type">
-                    <input type="checkbox" class="form-control" name="opt_type" value="long" title="做多"
-                        checked="checked" lay-filter="opt_type" />
-                    <input type="checkbox" class="form-control" name="opt_type" value="short" title="做空"
-                        lay-filter="opt_type" />
-                </label>
+            <div class="layui-form-item">
+              <label class="layui-form-label">选股策略</label>
+              <div class="layui-input-block">
+                <select class="form-control" name="task_name" lay-filter="task_name">
+                  {% for _task_name, _task_config in tasks.items() %}
+                  <option value="{{ _task_name }}">{{ _task_config['name'] }}</option>
+                  {% endfor %}
+                </select>
+              </div>
             </div>
-        </div>
-        <div class="layui-form-item">
-            <label class="layui-form-label">行情周期</label>
-            <div class="layui-input-block" title="行情周期">
-                <label for="frequency">
-                    {% for f, v in frequencys.items() %}
-                    <input type="checkbox" class="form-control" name="frequencys" value="{{ f }}" title="{{ v }}"
-                        lay-filter="frequencys" />
-                    {% endfor %}
-                </label>
+            <div class="layui-form-item cp-field--span-2">
+              <label class="layui-form-label">策略说明</label>
+              <div class="cp-note">
+                <span aria-hidden="true">i</span>
+                <div><strong class="task_memo">等待策略信息</strong><br /><span class="frequency_memo"></span></div>
+              </div>
             </div>
-        </div>
-        <div class="layui-form-item">
-            <label class="layui-form-label">选股源</label>
-            <div class="layui-input-block" title="选股源">
-                <label for="zx_group">
-                    <select type="select" class="form-control" name="src_zx_group" lay-filter="src_zx_group">
-                        <option value="all">默认所有标的</option>
-                        {% for zg in zixuan_groups %}
-                        <option value="{{ zg['name'] }}">自选组 : {{ zg['name'] }}</option>
-                        {% endfor %}
-                    </select>
-                </label>
+            <div class="layui-form-item cp-field--span-2">
+              <label class="layui-form-label">选股方向</label>
+              <div class="layui-input-block cp-choice-group">
+                <input type="checkbox" class="form-control" name="opt_type" value="long" title="做多"
+                  checked lay-filter="opt_type" />
+                <input type="checkbox" class="form-control" name="opt_type" value="short" title="做空"
+                  lay-filter="opt_type" />
+              </div>
             </div>
-        </div>
-        <div class="layui-form-item">
-            <label class="layui-form-label">目标自选组</label>
-            <div class="layui-input-block" title="目标自选组">
-                <label for="zx_group">
-                    <select type="select" class="form-control" name="target_zx_group" lay-filter="target_zx_group">
-                        {% for zg in zixuan_groups %}
-                        <option value="{{ zg['name'] }}">{{ zg['name'] }}</option>
-                        {% endfor %}
-                    </select>
-                </label>
-            </div>
-        </div>
+          </div>
+        </section>
 
-        <div class="layui-form-item">
-            <button class="layui-btn layui-btn-fluid layui-bg-red" lay-submit lay-filter="run_xuangu">执行选股</button>
+        <section class="cp-section-card" aria-labelledby="data-scope-title">
+          <div class="cp-section-heading">
+            <div class="cp-heading-with-index">
+              <span class="cp-section-index">02</span>
+              <div>
+                <h2 id="data-scope-title">数据范围</h2>
+                <p>选择参与计算的行情周期与标的来源。</p>
+              </div>
+            </div>
+          </div>
+          <div class="cp-form-grid">
+            <div class="layui-form-item cp-field--span-2">
+              <label class="layui-form-label">行情周期</label>
+              <div class="layui-input-block cp-choice-group">
+                {% for f, v in frequencys.items() %}
+                <input type="checkbox" class="form-control" name="frequencys" value="{{ f }}"
+                  title="{{ v }}" lay-filter="frequencys" />
+                {% endfor %}
+              </div>
+            </div>
+            <div class="layui-form-item cp-field--span-2">
+              <label class="layui-form-label">选股源</label>
+              <div class="layui-input-block">
+                <select class="form-control" name="src_zx_group" lay-filter="src_zx_group">
+                  <option value="all">默认所有标的</option>
+                  {% for zg in zixuan_groups %}
+                  <option value="{{ zg['name'] }}">自选组 · {{ zg['name'] }}</option>
+                  {% endfor %}
+                </select>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="cp-section-card" aria-labelledby="result-write-title">
+          <div class="cp-section-heading">
+            <div class="cp-heading-with-index">
+              <span class="cp-section-index">03</span>
+              <div>
+                <h2 id="result-write-title">结果写入</h2>
+                <p>任务成功后，目标自选组会被本次完整结果原子替换。</p>
+              </div>
+            </div>
+          </div>
+          <div class="cp-form-grid">
+            <div class="layui-form-item cp-field--span-2">
+              <label class="layui-form-label">目标自选组</label>
+              <div class="layui-input-block">
+                <select class="form-control" name="target_zx_group" lay-filter="target_zx_group">
+                  {% for zg in zixuan_groups %}
+                  <option value="{{ zg['name'] }}">{{ zg['name'] }}</option>
+                  {% endfor %}
+                </select>
+              </div>
+            </div>
+            <div class="cp-note cp-note--warning cp-field--span-2">
+              <span aria-hidden="true">!</span>
+              <div><strong>写入边界</strong><br />只有全部标的计算成功才会替换目标组；失败时保留原组内容。</div>
+            </div>
+          </div>
+        </section>
+
+        <div class="cp-actions cp-actions--sticky">
+          <button id="run_xuangu_submit" class="layui-btn cp-button" type="submit"
+            lay-submit lay-filter="run_xuangu">提交选股任务</button>
+          <span class="cp-help-text">首次执行需要下载并计算数据，耗时通常长于后续缓存运行。</span>
         </div>
-    </form>
-    <hr class="layui-border-red" />
+      </form>
 
-    <blockquote class="layui-elem-quote">
-        <p>第一次执行选股，获取数据并计算会比较耗时，后续在次执行，在有计算缓存的基础上，时间会快很多</p>
-        <p>仅当全部标的计算成功后才会原子替换目标自选组；失败时保留原组</p>
-        <p>沪深选股：运行代码为 SZ.00, SZ.30, SH.60, SH.68 开头的股票代码</p>
-        <p>期货选股：运行代码为 L8 结尾的主连代码</p>
-    </blockquote>
+      <section class="cp-section-card" aria-labelledby="task-boundary-title">
+        <div class="cp-section-heading">
+          <div class="cp-heading-with-index">
+            <span class="cp-section-index">04</span>
+            <div>
+              <h2 id="task-boundary-title">运行边界</h2>
+              <p>传统任务的标的代码范围说明。</p>
+            </div>
+          </div>
+        </div>
+        <div class="cp-note">
+          <span aria-hidden="true">i</span>
+          <div>沪深市场处理 <code>SZ.00</code>、<code>SZ.30</code>、<code>SH.60</code>、<code>SH.68</code> 开头的股票；期货处理以 <code>L8</code> 结尾的主连代码。</div>
+        </div>
+      </section>
+    </main>
 
-
-    <!-- 选股任务提交脚本：收集表单参数后 POST 到后端，任务异步运行，结果写入目标自选组 -->
     <script nonce="{{ csp_nonce }}">
+      $(function () {
+        layui.use(function () {
+          const form = layui.form;
+          const layer = layui.layer;
+          const task_infos = {{ task_infos | tojson }};
 
-        $(function () {
+          form.on('select(task_name)', function (data) {
+            if (!task_infos[data.value]) return;
+            $('.task_memo').text(task_infos[data.value].task_memo || '暂无备注');
+            $('.frequency_memo').text(task_infos[data.value].frequency_memo || '未说明周期要求');
+          });
 
-            layui.use(function () {
-                const form = layui.form;
-                const layer = layui.layer;
+          var initialTaskName = form.val('task_config').task_name;
+          if (task_infos[initialTaskName]) {
+            $('.task_memo').text(task_infos[initialTaskName].task_memo || '暂无备注');
+            $('.frequency_memo').text(task_infos[initialTaskName].frequency_memo || '未说明周期要求');
+          }
 
-                const task_infos = {{ task_infos | tojson }};
-
-                form.on('select(task_name)', function (d) {
-                    let task_name = d.value;
-                    if (task_infos[task_name] !== undefined) {
-                        $('.task_memo').text(task_infos[task_name]['task_memo']);
-                        $('.frequency_memo').text(task_infos[task_name]['frequency_memo']);
-                    }
-                });
-                let task_name = form.val('task_config')['task_name'];
-                if (task_infos[task_name] !== undefined) {
-                    $('.task_memo').text(task_infos[task_name]['task_memo']);
-                    $('.frequency_memo').text(task_infos[task_name]['frequency_memo']);
-                }
-
-                form.on('submit(run_xuangu)', function (data) {
-                    let run_config = {}
-                    $.each($('[class="form-control"]'), function (i, obj) {
-                        let _name = $(obj).attr('name');
-                        let _type = $(obj).attr('type');
-                        let _val = $(this).val();
-                        if (_type === 'checkbox') {
-                            _val = $('input[name="' + _name + '"]:checked').map(function () {
-                                return this.value;
-                            }).get().join(",");
-                        }
-                        run_config[_name] = _val
-                    });
-                    if (run_config['frequencys'] === '') {
-                        layer.msg('运行周期必须选择一个');
-                        return false;
-                    }
-                    if (run_config['opt_type'] === '') {
-                        layer.msg('选股方向必须选择一个');
-                        return false;
-                    }
-
-                    console.log(run_config);
-                    $.ajax({
-                        type: "POST",
-                        url: "/xuangu/task_add",
-                        data: run_config,
-                        dataType: 'json',
-                        traditional: true,
-                        success: function (result) {
-                            if (result['ok'] === true) {
-                                let index = parent.layer.getFrameIndex(window.name);
-                                parent.layer.msg('选股任务提交，正在运行，请运行结束后在自选列表中查看结果');
-                                parent.layer.close(index);
-                            } else {
-                                layer.msg(result['msg']);
-                            }
-                        }
-                    });
-                    return false; // 阻止默认 form 跳转
-                });
+          form.on('submit(run_xuangu)', function (data) {
+            var runConfig = {};
+            $('.form-control').each(function () {
+              var name = $(this).attr('name');
+              var type = $(this).attr('type');
+              var value = $(this).val();
+              if (type === 'checkbox') {
+                value = $('input[name="' + name + '"]:checked').map(function () {
+                  return this.value;
+                }).get().join(',');
+              }
+              runConfig[name] = value;
             });
+            if (!runConfig.frequencys) { layer.msg('至少选择一个运行周期'); return false; }
+            if (!runConfig.opt_type) { layer.msg('至少选择一个选股方向'); return false; }
+
+            var $submit = $('#run_xuangu_submit');
+            $submit.prop('disabled', true).addClass('layui-btn-disabled').text('提交中…');
+            AppRequest.ajax({
+              type: 'POST',
+              url: '/xuangu/task_add',
+              data: runConfig,
+              dataType: 'json',
+              traditional: true,
+              timeout: 15000,
+              success: function (result) {
+                if (result && result.ok === true) {
+                  var index = parent.layer.getFrameIndex(window.name);
+                  parent.layer.msg('选股任务已提交；运行结束后可在目标自选组查看结果');
+                  parent.layer.close(index);
+                } else layer.msg((result && result.msg) || '任务提交失败');
+              },
+              error: function () { layer.msg('任务提交失败，请稍后重试'); },
+              complete: function () {
+                $submit.prop('disabled', false).removeClass('layui-btn-disabled').text('提交选股任务');
+              }
+            });
+            return false;
+          });
         });
-
+      });
     </script>
-</body>
-
+  </body>
 </html>

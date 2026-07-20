@@ -11,6 +11,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from threading import Lock
+from typing import Literal
 
 from .fingerprints import normalize_datetime
 from .mutation_fence import MutationLeaseGuard, mutation_fenced
@@ -24,6 +25,7 @@ _CONFIG_FIELDS = frozenset(
         "review_workers",
         "review_queue_limit",
         "max_llm_reviews_per_day",
+        "review_mode",
         "paper_enabled",
         "auto_order_enabled",
     }
@@ -44,6 +46,7 @@ class MonitorConfig:
     review_workers: int = 1
     review_queue_limit: int = 20
     max_llm_reviews_per_day: int = 20
+    review_mode: Literal["external_review", "offline_abstain"] = "external_review"
     paper_enabled: bool = True
     auto_order_enabled: bool = False
 
@@ -71,6 +74,12 @@ class MonitorConfig:
             self.max_llm_reviews_per_day,
             "max_llm_reviews_per_day",
         )
+        if type(self.review_mode) is not str:
+            raise TypeError("review_mode must be an exact string")
+        if self.review_mode not in {"external_review", "offline_abstain"}:
+            raise ValueError(
+                "review_mode must be external_review or offline_abstain"
+            )
         if self.auto_order_enabled:
             raise ValueError("auto_order_enabled must remain false")
 
@@ -83,6 +92,14 @@ class MonitorConfig:
         if set(value) - _CONFIG_FIELDS:
             raise ValueError("monitor config contains unknown fields")
         payload = dict(value)
+        if "review_mode" in payload:
+            review_mode = payload["review_mode"]
+            if type(review_mode) is not str:
+                raise TypeError("review_mode must be an exact string")
+            if review_mode not in {"external_review", "offline_abstain"}:
+                raise ValueError(
+                    "review_mode must be external_review or offline_abstain"
+                )
         if "markets" in payload:
             markets = payload["markets"]
             if isinstance(markets, (str, bytes)) or not isinstance(
@@ -224,7 +241,10 @@ class DecisionSupportRuntime:
         if bar_closed_at is None:
             return RuntimeCycleResult("bar_not_closed", occurred_at)
         try:
-            result = self._scanner.scan_closed_bar(bar_closed_at)
+            result = self._scanner.scan_closed_bar(
+                bar_closed_at,
+                observed_at=occurred_at,
+            )
             scan_code = getattr(result, "code", None)
             failures = getattr(result, "failures", None)
             if not isinstance(scan_code, str) or not scan_code:

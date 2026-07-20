@@ -10,13 +10,10 @@ import glob
 import os
 import pickle
 from dataclasses import dataclass
-from typing import Callable, Iterable, Optional
+from typing import Iterable, Optional
 
 import numpy as np
 import pandas as pd
-
-from chanlun.decision_support import strategies as decision_strategies
-from chanlun.decision_support.models import DecisionEvent, StrategyTrack
 
 # Importing engine also registers the legacy ``recursive_backtest`` pickle
 # module alias used by older cached Signal objects.
@@ -103,29 +100,11 @@ class OriginalChanlunASelector:
       with higher levels not down.  Daily third-buy resonance is a priority boost.
     """
 
-    def __init__(
-        self,
-        config: ASelectionConfig,
-        *,
-        trend_event_adapter: Callable[
-            [SelectionCandidate, dict, object], DecisionEvent
-        ]
-        | None = None,
-    ):
-        if trend_event_adapter is not None and not callable(trend_event_adapter):
-            raise TypeError("trend_event_adapter must be callable")
+    def __init__(self, config: ASelectionConfig):
         self.config = config
-        self.trend_event_adapter = trend_event_adapter
 
     def select(self) -> list[SelectionCandidate]:
-        rows: list[
-            tuple[
-                SelectionCandidate,
-                FundamentalSnapshot,
-                dict | None,
-                object | None,
-            ]
-        ] = []
+        rows: list[tuple[SelectionCandidate, FundamentalSnapshot]] = []
         value_scores: list[float] = []
         files = self._cache_files()
         for file in files:
@@ -141,14 +120,7 @@ class OriginalChanlunASelector:
             selection = self._candidate_with_signal_from_symbol(code, data)
             if selection is not None:
                 candidate, signal = selection
-                rows.append(
-                    (
-                        candidate,
-                        snapshot,
-                        data if self.trend_event_adapter is not None else None,
-                        signal if self.trend_event_adapter is not None else None,
-                    )
-                )
+                rows.append((candidate, snapshot))
 
         # F-MID-1(audit/_round6_select_data.md):比价门用本次扫描全 universe 的截面
         # median,池规模小/变动时中位数翻转会致同一只票今天入选明天落选(与该票自身
@@ -157,30 +129,13 @@ class OriginalChanlunASelector:
         enable_comparison = len(value_scores) >= MIN_COMPARISON_SAMPLES
         threshold = float(np.median(value_scores)) if value_scores else 0.0
         candidates: list[SelectionCandidate] = []
-        for candidate, snapshot, data, signal in rows:
+        for candidate, snapshot in rows:
             if not enable_comparison:
                 comparison_ok = True
             else:
                 comparison_ok = threshold > 0 and snapshot.value_score > threshold
             if self.config.require_three_systems and not (snapshot.fund_ok and comparison_ok):
                 continue
-            if self.trend_event_adapter is not None:
-                if data is None or signal is None:
-                    raise AssertionError("delegated selector row lost source facts")
-                if not self._delegated_trend_accepted(
-                    candidate,
-                    data,
-                    signal,
-                    fund_ok=(
-                        snapshot.fund_ok
-                        if self.config.require_three_systems
-                        else True
-                    ),
-                    comparison_ok=(
-                        comparison_ok if self.config.require_three_systems else True
-                    ),
-                ):
-                    continue
             candidates.append(
                 SelectionCandidate(
                     code=candidate.code,
@@ -279,75 +234,6 @@ class OriginalChanlunASelector:
             daily_resonance=_daily_resonance(data, idx),
         )
         return candidate, sig
-
-    def _delegated_trend_accepted(
-        self,
-        candidate: SelectionCandidate,
-        data: dict,
-        signal: object,
-        *,
-        fund_ok: bool,
-        comparison_ok: bool,
-    ) -> bool:
-        if self.trend_event_adapter is None:
-            raise RuntimeError("trend event adapter is not configured")
-        expected_code = candidate.code
-        expected_bs_type = candidate.bs_type
-        expected_price = candidate.price
-        expected_signal_at = _as_shanghai(
-            pd.Timestamp(candidate.signal_time)
-        ).to_pydatetime()
-        last_idx = len(data["dates"]) - 1
-        expected_bar_closed_at = _cache_bar_closed_at(data)
-        expected_big_dir = _required_dir_at(data, "big_dir_at", last_idx)
-        expected_mid_dir = _required_dir_at(data, "mid_dir_at", last_idx)
-        expected_level = int(getattr(signal, "level", 0) or 0)
-        expected_stop_below = getattr(signal, "structural_stop_below", None)
-        expected_stop_above = getattr(signal, "structural_stop_above", None)
-        event = self.trend_event_adapter(candidate, data, signal)
-        ordered_levels = (
-            sorted(
-                event.levels,
-                key=lambda level: (level.level, level.frequency),
-                reverse=True,
-            )
-            if isinstance(event, DecisionEvent)
-            else ()
-        )
-        event_big_dir = ordered_levels[0].direction if ordered_levels else None
-        event_mid_dir = (
-            ordered_levels[1].direction
-            if len(ordered_levels) > 1
-            else event_big_dir
-        )
-        if (
-            not isinstance(event, DecisionEvent)
-            or event.strategy_track is not StrategyTrack.TREND_CONTINUATION
-            or event.code != expected_code
-            or event.observed_at != expected_bar_closed_at
-            or event.bar_closed_at != expected_bar_closed_at
-            or event.signal.bs_type != expected_bs_type
-            or event.signal.signal_at != expected_signal_at
-            or event.signal.level != expected_level
-            or event.signal.price != expected_price
-            or event.signal.structural_stop_below != expected_stop_below
-            or event.signal.structural_stop_above != expected_stop_above
-            or event_big_dir != expected_big_dir
-            or event_mid_dir != expected_mid_dir
-        ):
-            raise TypeError("trend event adapter returned malformed event")
-        decision = decision_strategies.evaluate_trend_continuation(
-            event,
-            fund_ok=fund_ok,
-            comparison_ok=comparison_ok,
-        )
-        if (
-            not isinstance(decision, decision_strategies.CandidateDecision)
-            or decision.track is not StrategyTrack.TREND_CONTINUATION
-            or decision.event != event
-        ):
-            raise TypeError("trend evaluator returned malformed decision")
-        return decision.accepted
 
     def _direction_ok(self, data: dict, signal_idx: int, last_idx: int) -> bool:
         if self.config.require_big_not_down:

@@ -446,6 +446,31 @@ def test_monitor_and_universe_fingerprints_bind_runtime_limits() -> None:
         )
 
 
+def test_review_mode_changes_strategy_config_fingerprint() -> None:
+    external_config = MonitorConfig(review_mode="external_review")
+    offline_config = replace(external_config, review_mode="offline_abstain")
+    kwargs = {
+        "max_completed_bars": 2_000,
+        "max_market_age_seconds": 300,
+        "processed_bar_limit": 2_048,
+        "universe_policy_fingerprint": build_universe_policy_fingerprint(
+            UniversePolicy.a_share_short_term()
+        ),
+    }
+
+    external = build_monitor_policy_fingerprint(
+        config=external_config,
+        **kwargs,
+    )
+    offline = build_monitor_policy_fingerprint(
+        config=offline_config,
+        **kwargs,
+    )
+
+    assert replace(offline_config, review_mode="external_review") == external_config
+    assert external != offline
+
+
 def test_empty_stores_bind_once_and_same_fingerprint_restart_resumes_epoch(
     tmp_path: Path,
 ) -> None:

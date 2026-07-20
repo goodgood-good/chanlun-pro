@@ -234,8 +234,19 @@ def snapshot_levels(
                 zs_zg=_as_float(zs_zg, "zs_zg"),
                 mmds=_level_labels(value, "mmds"),
                 divergences=_level_labels(value, "divergences"),
-                source_frequency=source_frequency,
-                source_bar_closed_at=source_bar_closed_at,
+                trade_gate_direction=getattr(
+                    value,
+                    "trade_gate_direction",
+                    None,
+                ),
+                source_frequency=(
+                    getattr(value, "source_frequency", None)
+                    or source_frequency
+                ),
+                source_bar_closed_at=(
+                    getattr(value, "source_bar_closed_at", None)
+                    or source_bar_closed_at
+                ),
             )
         )
     return tuple(snapshots)
@@ -505,6 +516,23 @@ def event_from_signal(
         source_frequency=str(getattr(cd, "frequency", "")),
         source_bar_closed_at=bar_closed_at,
     )
+    physical_signal_source = str(getattr(cd, "frequency", ""))
+    if physical_signal_source and levels and all(
+        level.source_frequency is not None for level in levels
+    ):
+        source_signal_levels = tuple(
+            level
+            for level in levels
+            if level.source_frequency == physical_signal_source
+            and level.level == frozen_signal.level
+        )
+        if len(source_signal_levels) != 1:
+            raise ValueError("signal physical source level must be unique")
+        if (
+            source_signal_levels[0].frequency.casefold()
+            != frequency.casefold()
+        ):
+            return None
     data_fingerprint = sha256_json(
         {
             "market": market,

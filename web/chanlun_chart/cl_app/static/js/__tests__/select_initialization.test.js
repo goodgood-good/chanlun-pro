@@ -39,6 +39,7 @@ function genericCollection() {
     removeClass() { return this; },
     attr() { return this; },
     html() { return this; },
+    text() { return this; },
   };
 }
 

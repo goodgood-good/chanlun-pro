@@ -34,7 +34,7 @@ function loadChartManager() {
       this.close = () => {};
       sb.__lastES = this; // 暴露最近创建的 ES 供测试驱动 'chanlun' 帧
     },
-    Utils: { get_market: () => 'a' },
+    Utils: { get_market: () => 'a', get_local_data: () => '5' },
     getTVRegistry: () => ({ chartManagers: new Map(), datafeeds: new Map(), widgets: new Map(), activeManagerId: null }),
     Datafeeds: { UDFCompatibleDatafeed: function () {} },
     TradingView: { widget: function () {} },
@@ -57,8 +57,17 @@ function loadChartManager() {
   src += '\n;var __CM_EXPORT = (typeof ChartManager !== "undefined") ? ChartManager : null;';
   src += '\n;var __CU_EXPORT = (typeof ChartUtils !== "undefined") ? ChartUtils : null;';
   src += '\n;var __CDF_EXPORT = (typeof CHART_DISABLED_FEATURES !== "undefined") ? CHART_DISABLED_FEATURES : null;';
+  src += '\n;var __ICI_EXPORT = (typeof getInitialChartInterval !== "undefined") ? getInitialChartInterval : null;';
+  src += '\n;var __SLLC_EXPORT = (typeof shouldLoadLastChart !== "undefined") ? shouldLoadLastChart : null;';
   vm.runInContext(src, sb, { filename: 'charts.js' });
-  return { ChartManager: sb.__CM_EXPORT, ChartUtils: sb.__CU_EXPORT, disabledFeatures: sb.__CDF_EXPORT, sb };
+  return {
+    ChartManager: sb.__CM_EXPORT,
+    ChartUtils: sb.__CU_EXPORT,
+    disabledFeatures: sb.__CDF_EXPORT,
+    initialChartInterval: sb.__ICI_EXPORT,
+    shouldLoadLastChart: sb.__SLLC_EXPORT,
+    sb,
+  };
 }
 
 // 裸实例(绕过依赖重的构造函数/init)，手动注入治本相关字段。
@@ -92,6 +101,26 @@ test('CSP 模式禁用 blob iframe 并使用同源 TradingView 启动页', () =>
   const { disabledFeatures } = loadChartManager();
   assert.ok(Array.isArray(disabledFeatures));
   assert.ok(disabledFeatures.includes('use_blob_for_iframe_loading'));
+});
+
+test('URL 启动周期覆盖共享 localStorage，避免多 iframe 周期互相污染', () => {
+  const { initialChartInterval, shouldLoadLastChart, sb } = loadChartManager();
+  assert.equal(typeof initialChartInterval, 'function');
+  assert.equal(typeof shouldLoadLastChart, 'function');
+  assert.equal(shouldLoadLastChart(), true);
+  sb.__chanlunUrlBootstrap = { intervals: ['30'] };
+  assert.equal(initialChartInterval('1'), '30');
+  assert.equal(initialChartInterval('2'), '5');
+  assert.equal(shouldLoadLastChart(), false);
+});
+
+test('行情页把 URL 周期保留为当前 iframe 的内存启动配置', () => {
+  const template = fs.readFileSync(
+    path.join(__dirname, '..', '..', '..', 'templates', 'index.html'),
+    'utf8',
+  );
+  assert.match(template, /window\.__chanlunUrlBootstrap\s*=/);
+  assert.match(template, /intervals:\s*selectedIntervals\.slice\(\)/);
 });
 
 test('_getViewLatestSec: 直接命中键 → 末根秒数(ms 归一)', () => {

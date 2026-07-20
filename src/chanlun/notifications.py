@@ -9,7 +9,7 @@ import json
 import os
 import subprocess
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Callable, Iterable, Optional
 
 from chanlun import fun
 
@@ -79,11 +79,19 @@ class DingTalkWebhookNotifier:
         keyword: str = "",
         timeout: int = 10,
         dry_run: bool = False,
+        dry_run_collector: Callable[[str], None] | None = None,
     ) -> None:
+        if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0:
+            raise ValueError("timeout must be positive")
+        if type(dry_run) is not bool:
+            raise TypeError("dry_run must be boolean")
+        if dry_run_collector is not None and not callable(dry_run_collector):
+            raise TypeError("dry_run_collector must be callable")
         self.webhook = str(webhook or "")
         self.keyword = str(keyword or "")
         self.timeout = timeout
         self.dry_run = dry_run
+        self._dry_run_collector = dry_run_collector
 
     @property
     def available(self) -> bool:
@@ -95,7 +103,8 @@ class DingTalkWebhookNotifier:
         if self.keyword and self.keyword not in message:
             message = f"[{self.keyword}] {message}"
         if self.dry_run:
-            print(message)
+            if self._dry_run_collector is not None:
+                self._dry_run_collector(message)
             return True
         if not self.webhook:
             fun.get_logger().warning("[notify] DingTalk webhook not configured")
@@ -115,11 +124,13 @@ class DingTalkWebhookNotifier:
                 data = json.loads(resp.read().decode("utf-8"))
             errcode = int(data.get("errcode", -1))
         except Exception as exc:
-            fun.get_logger().warning(f"[notify] DingTalk webhook failed: {exc}")
+            fun.get_logger().warning(
+                f"[notify] DingTalk webhook failed: {type(exc).__name__}"
+            )
             return False
         if errcode != 0:
             fun.get_logger().warning(
-                f"[notify] DingTalk webhook rejected: {data.get('errcode')} {data.get('errmsg')}"
+                f"[notify] DingTalk webhook rejected: errcode={data.get('errcode')}"
             )
             return False
         return True

@@ -412,6 +412,31 @@ const ChartUtils = {
     },
 };
 
+function getInitialChartInterval(chartId) {
+    try {
+        const bootstrap = window.__chanlunUrlBootstrap;
+        const index = Number.parseInt(String(chartId), 10) - 1;
+        if (bootstrap && Array.isArray(bootstrap.intervals) && index >= 0) {
+            const interval = bootstrap.intervals[index];
+            if (typeof interval === "string" && interval) return interval;
+        }
+    } catch (e) { /* 回退到当前用户保存的周期 */ }
+    try {
+        const market = Utils.get_market();
+        return Utils.get_local_data(`${market}_interval_${chartId}`) || "1";
+    } catch (e) {
+        return "1";
+    }
+}
+
+function shouldLoadLastChart() {
+    try {
+        return !window.__chanlunUrlBootstrap;
+    } catch (e) {
+        return true;
+    }
+}
+
 class ChartManager {
     constructor(id) {
         this.id = id;
@@ -427,8 +452,7 @@ class ChartManager {
         // 未配过则用迁移基准(不丢老用户旧配置)。this._curResolution 供切周期/ toggle 保存复用。
         let _initRes = '1';
         try {
-            const _mkt = (typeof Utils !== 'undefined' && Utils.get_market) ? Utils.get_market() : '';
-            const _saved = (_mkt && Utils.get_local_data) ? Utils.get_local_data(`${_mkt}_interval_${this.id}`) : null;
+            const _saved = getInitialChartInterval(this.id);
             if (_saved) _initRes = _saved;
         } catch (e) { /* 回退默认 '1' */ }
         this._curResolution = _initRes;
@@ -1121,7 +1145,7 @@ class ChartManager {
             debug: false, autosize: true, fullscreen: false,
             container: "tv_chart_container_" + this.id,
             symbol: Utils.get_market() + ":" + Utils.get_code(),
-            interval: Utils.get_local_data(Utils.get_market() + "_interval_" + this.id),
+            interval: getInitialChartInterval(this.id),
             datafeed: this.udf_datafeed,
             library_path: "static/charting_library/",
             theme: Utils.get_local_data("theme"),
@@ -1133,7 +1157,7 @@ class ChartManager {
             saved_data_meta_info: { uid: 1, name: "default", description: "default" },
             save_load_adapter: save_load_adapter,
             client_id: "chanlun_pro_" + Utils.get_market() + "_" + this.id,
-            user_id: "999", load_last_chart: true,
+            user_id: "999", load_last_chart: shouldLoadLastChart(),
             custom_indicators_getter: this.getCustomIndicators,
             time_scale: { min_bar_spacing: 0.05, max_bar_spacing: 800 },
         });

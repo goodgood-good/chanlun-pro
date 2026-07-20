@@ -84,7 +84,11 @@ def test_real_rule_card_evidence_binding_resolves_certified_text_and_chart(
     card = next(
         item for item in rules.cards if item.rule_id == "chanlun.trend.third_buy"
     )
-    event = make_decision_event(track=StrategyTrack.TREND_CONTINUATION)
+    event = make_decision_event(
+        level=0,
+        track=StrategyTrack.TREND_CONTINUATION,
+    )
+    assert event.signal.level in card.applicable_levels
     support_ids = tuple(sorted(item.evidence_id for item in card.evidence))
     counter_ids = tuple(sorted(item.evidence_id for item in card.counterevidence))
     evaluation = RuleEvaluation(

@@ -43,10 +43,15 @@ class _ScanResult:
 class _Scanner:
     def __init__(self, results: list[object] | None = None) -> None:
         self.results = list(results or [_ScanResult()])
-        self.calls: list[datetime] = []
+        self.calls: list[tuple[datetime, datetime | None]] = []
 
-    def scan_closed_bar(self, bar_closed_at: datetime):
-        self.calls.append(bar_closed_at)
+    def scan_closed_bar(
+        self,
+        bar_closed_at: datetime,
+        *,
+        observed_at: datetime | None = None,
+    ):
+        self.calls.append((bar_closed_at, observed_at))
         result = self.results.pop(0)
         if isinstance(result, BaseException):
             raise result
@@ -102,6 +107,20 @@ def test_monitor_is_disabled_by_default_and_rejects_auto_order() -> None:
         )
 
 
+def test_monitor_config_accepts_only_external_or_offline_review_mode() -> None:
+    assert (
+        MonitorConfig.from_mapping({"review_mode": "external_review"}).review_mode
+        == "external_review"
+    )
+    assert (
+        MonitorConfig.from_mapping({"review_mode": "offline_abstain"}).review_mode
+        == "offline_abstain"
+    )
+    for invalid in ("unknown", b"external_review", True, None):
+        with pytest.raises((TypeError, ValueError), match="review_mode"):
+            MonitorConfig.from_mapping({"review_mode": invalid})
+
+
 def test_demo_config_explicitly_disables_orders() -> None:
     path = Path("src/chanlun/config.py.demo")
     tree = ast.parse(path.read_text(encoding="utf-8"))
@@ -119,6 +138,7 @@ def test_demo_config_explicitly_disables_orders() -> None:
     assert config["paper_enabled"] is True
     assert config["auto_order_enabled"] is False
     assert config["markets"] == ["a"]
+    assert config["review_mode"] == "offline_abstain"
 
 
 def test_scan_cycle_requires_closed_bar_and_recovers_after_exception() -> None:
@@ -140,8 +160,14 @@ def test_scan_cycle_requires_closed_bar_and_recovers_after_exception() -> None:
     assert recovered.code == "scan_complete"
     assert recovered.bar_closed_at == ts("2026-07-13T10:35:00+08:00")
     assert scanner.calls == [
-        ts("2026-07-13T10:35:00+08:00"),
-        ts("2026-07-13T10:35:00+08:00"),
+        (
+            ts("2026-07-13T10:35:00+08:00"),
+            ts("2026-07-13T10:35:30+08:00"),
+        ),
+        (
+            ts("2026-07-13T10:35:00+08:00"),
+            ts("2026-07-13T10:35:40+08:00"),
+        ),
     ]
     assert runtime.health().scan_failures == 1
 

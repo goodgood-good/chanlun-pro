@@ -1,0 +1,319 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="robots" content="noindex,nofollow" />
+    <title>历史研究 / 审计成果 · 缠论低回撤体系</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/ui-system.css') }}?v={{ static_version|default('') }}" />
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/research_audit.css') }}?v={{ static_version|default('') }}" />
+  </head>
+  <body class="cp-ui cp-immersive">
+    <a class="cp-skip-link" href="#main-content">跳到审计成果</a>
+    <header class="ra-topbar cp-product-nav">
+      <div class="ra-shell ra-topbar-inner cp-product-links">
+        <a class="ra-back-link" href="/">← 行情与画图</a>
+        <a class="ra-back-link" href="{{ url_for('decision_support.early_screening') }}">实时提前选股 →</a>
+      </div>
+    </header>
+
+    <main id="main-content" class="ra-shell">
+      <section class="ra-hero" aria-labelledby="ra-page-title">
+        <div class="ra-hero-copy">
+          <p class="ra-eyebrow">HISTORICAL RESEARCH · IMMUTABLE AUDIT</p>
+          <div class="ra-title-row">
+            <h1 id="ra-page-title">历史研究 / 审计成果</h1>
+            <span class="ra-readonly-badge">只读</span>
+          </div>
+          <p class="ra-lead">
+            这里只展示新交易体系在当时可见数据上的因果回放。页面不修改参数、不发送交易指令，
+            也不具备下单能力；报告完整性校验失败时整页拒绝展示。
+          </p>
+        </div>
+        <aside class="ra-boundary" role="note">
+          <span class="ra-boundary-icon" aria-hidden="true">1</span>
+          <div>
+            <strong>活动交易体系固定为 1</strong>
+            <span>仅保留 chanlun_original_low_drawdown_v1；旧体系只能作为不可执行历史成果。</span>
+          </div>
+        </aside>
+      </section>
+
+      {% if audit %}
+        {% set evidence_labels = {'certified': '已认证', 'research_only': '仅研究', 'invalid': '无效'} %}
+        {% set verdict_labels = {
+          'live_ready': '达到全部研究验收门槛',
+          'evidence_insufficient': '数据证据不足',
+          'sample_inadequate': '交易样本不足',
+          'methodology_incomplete': '方法学证据不完整',
+          'concentration_failed': '集中度门槛未通过',
+          'performance_gate_failed': '收益或回撤门槛未通过',
+          'data_invalid': '数据无效'
+        } %}
+
+        <section
+          class="ra-verdict-panel {{ 'is-ready' if audit.verdict.live_ready else 'is-blocked' }}"
+          data-live-ready="{{ 'true' if audit.verdict.live_ready else 'false' }}"
+          aria-labelledby="ra-verdict-title"
+        >
+          <header>
+            <div>
+              <p class="ra-section-index">00 · VERDICT FIRST</p>
+              <h2 id="ra-verdict-title">是否达到实盘标准</h2>
+            </div>
+            <strong class="ra-verdict-state">
+              {{ "达到全部研究验收门槛" if audit.verdict.live_ready else "未达到实盘标准" }}
+            </strong>
+          </header>
+          <div class="ra-verdict-grid">
+            <article>
+              <span>数据证据等级</span>
+              <strong>{{ evidence_labels.get(audit.data_evidence.grade, audit.data_evidence.grade) }}</strong>
+              <small><code>{{ audit.data_evidence.grade }}</code></small>
+            </article>
+            <article>
+              <span>样本充分性</span>
+              <strong>{{ "已达门槛" if audit.sample_adequacy.passed else "未达门槛" }}</strong>
+              <small>{{ audit.sample_adequacy.closed_trade_count }} / {{ audit.sample_adequacy.required_closed_trade_count }} 笔已平仓</small>
+            </article>
+            <article>
+              <span>样本外净收益</span>
+              <strong>{{ "%+.2f%%"|format((audit.aggregate_out_of_sample.net_return|float) * 100) }}</strong>
+              <small>扣除报告内费用与滑点</small>
+            </article>
+            <article>
+              <span>样本外最大回撤</span>
+              <strong>{{ "%.2f%%"|format((audit.aggregate_out_of_sample.max_drawdown|float) * 100) }}</strong>
+              <small>验收上限 10%</small>
+            </article>
+            <article>
+              <span>样本外 Calmar</span>
+              <strong>{% if audit.aggregate_out_of_sample.calmar is not none %}{{ "%.3f"|format(audit.aggregate_out_of_sample.calmar|float) }}{% else %}N/A{% endif %}</strong>
+              <small>验收下限 1.0；不足一年不计算</small>
+            </article>
+          </div>
+          <div class="ra-verdict-reasons">
+            <strong>审计结论：{{ verdict_labels.get(audit.verdict.status, audit.verdict.status) }}</strong>
+            {% if audit.verdict.failed_conditions %}
+              <span>阻断条件：{{ audit.verdict.failed_conditions|join('、') }}</span>
+            {% else %}
+              <span>报告未记录阻断条件。</span>
+            {% endif %}
+          </div>
+        </section>
+
+        {% if audit.data_evidence.grade != 'certified' %}
+          <section class="ra-notice ra-notice-warning" role="alert">
+            <strong>证据不足，结果仅可用于研究</strong>
+            <span>
+              {% if audit.data_evidence.failures %}证据失败项：{{ audit.data_evidence.failures|join('、') }}。{% endif %}
+              当前收益数字不能描述为可靠、可复现的实盘收益。
+            </span>
+          </section>
+        {% endif %}
+
+        <section class="ra-section" aria-labelledby="ra-sample-title">
+          <div class="ra-section-heading">
+            <div>
+              <p class="ra-section-index">01 · SAMPLE ADEQUACY</p>
+              <h2 id="ra-sample-title">样本充分性与样本门槛</h2>
+              <p>总样本与每个已启用买点类别必须分别达标；样本不足时不展示可靠性结论。</p>
+            </div>
+            <span class="ra-status {{ 'ra-status-ok' if audit.sample_adequacy.passed else 'ra-status-blocked' }}">
+              {{ "已达门槛" if audit.sample_adequacy.passed else "未达门槛" }}
+            </span>
+          </div>
+          <div class="ra-fact-grid">
+            <div class="ra-fact"><span>已平仓总样本</span><strong>{{ audit.sample_adequacy.closed_trade_count }} / {{ audit.sample_adequacy.required_closed_trade_count }}</strong></div>
+            {% for point_type in ['1buy', '2buy', '3buy'] %}
+              <div class="ra-fact">
+                <span>{{ point_type }} 已平仓</span>
+                <strong>{{ audit.sample_adequacy.point_counts.get(point_type, 0) }} / {{ audit.sample_adequacy.required_per_enabled_buy_class }}</strong>
+              </div>
+            {% endfor %}
+          </div>
+          {% if audit.sample_adequacy.failures %}
+            <ul class="ra-blocker-list ra-blocker-list--compact">
+              {% for failure in audit.sample_adequacy.failures %}<li>{{ failure }}</li>{% endfor %}
+            </ul>
+          {% endif %}
+        </section>
+
+        <section class="ra-section" aria-labelledby="ra-oos-title">
+          <div class="ra-section-heading">
+            <div>
+              <p class="ra-section-index">02 · OUT OF SAMPLE</p>
+              <h2 id="ra-oos-title">样本外收益、回撤与风险</h2>
+              <p>只汇总测试窗口；训练与验证阶段不混入样本外结果。</p>
+            </div>
+          </div>
+          <div class="ra-metric-grid">
+            <article class="ra-metric-card"><span>净收益</span><strong>{{ "%+.2f%%"|format((audit.aggregate_out_of_sample.net_return|float) * 100) }}</strong><small>已扣报告成本</small></article>
+            <article class="ra-metric-card"><span>最大回撤</span><strong>{{ "%.2f%%"|format((audit.aggregate_out_of_sample.max_drawdown|float) * 100) }}</strong><small>最长 {{ audit.aggregate_out_of_sample.max_drawdown_duration_bars }} 根 K 线</small></article>
+            <article class="ra-metric-card"><span>Calmar</span><strong>{{ "%.3f"|format(audit.aggregate_out_of_sample.calmar|float) if audit.aggregate_out_of_sample.calmar is not none else 'N/A' }}</strong><small>收益 / 回撤</small></article>
+            <article class="ra-metric-card"><span>交易总成本</span><strong>{{ audit.aggregate_out_of_sample.total_cost }}</strong><small>成本 / 毛盈利：{{ audit.aggregate_out_of_sample.cost_to_gross_profit or 'N/A' }}</small></article>
+            <article class="ra-metric-card"><span>暴露比例</span><strong>{{ "%.2f%%"|format((audit.aggregate_out_of_sample.exposure_ratio|float) * 100) }}</strong><small>资金处于持仓状态的比例</small></article>
+            {% if audit.aggregate_out_of_sample.annualized_return is not none %}
+              <article class="ra-metric-card"><span>年化收益</span><strong>{{ "%+.2f%%"|format((audit.aggregate_out_of_sample.annualized_return|float) * 100) }}</strong><small>自然跨度不少于 365 日才展示</small></article>
+            {% endif %}
+          </div>
+          {% if audit.bootstrap_intervals %}
+            <div class="ra-bootstrap-grid">
+              <div><span>净收益 95% 区间</span><strong>{{ audit.bootstrap_intervals.net_return.lower }} ～ {{ audit.bootstrap_intervals.net_return.upper }}</strong></div>
+              <div><span>单笔期望 95% 区间</span><strong>{{ audit.bootstrap_intervals.expectancy.lower }} ～ {{ audit.bootstrap_intervals.expectancy.upper }}</strong></div>
+              <div><span>最大回撤 95% 区间</span><strong>{{ audit.bootstrap_intervals.max_drawdown.lower }} ～ {{ audit.bootstrap_intervals.max_drawdown.upper }}</strong></div>
+              <div><span>重复 / 聚类</span><strong>{{ audit.bootstrap_intervals.repetitions }} / {{ audit.bootstrap_intervals.cluster_count }}</strong></div>
+            </div>
+          {% else %}
+            <p class="ra-subtext">没有已平仓交易，无法计算聚类 Bootstrap 不确定性区间。</p>
+          {% endif %}
+        </section>
+
+        <section class="ra-section" aria-labelledby="ra-contract-title">
+          <div class="ra-section-heading">
+            <div>
+              <p class="ra-section-index">03 · EXECUTION CONTRACT</p>
+              <h2 id="ra-contract-title">唯一交易契约</h2>
+              <p>高级别给结构背景，最终成交必须等待细级别确认和下一根可交易分钟线。</p>
+            </div>
+          </div>
+          <div class="ra-fact-grid">
+            <div class="ra-fact"><span>30m 大级别结构</span><strong>独立计算一、二、三类买卖点与递归中枢</strong></div>
+            <div class="ra-fact"><span>5m 可操作级别</span><strong>确认候选结构，不替代精细触发</strong></div>
+            <div class="ra-fact"><span>1m 精细触发</span><strong>同向确认后，最早下一根可交易 1m 成交</strong></div>
+            <div class="ra-fact"><span>买卖点通道</span><strong>一、二、三类买卖点独立，不折叠为三买</strong></div>
+            <div class="ra-fact"><span>第一中枢三买</span><strong>{{ "强制" if audit.execution_contract.first_center_three_buy_only else "当前滚动窗口未强制" }}</strong><small>{{ audit.execution_contract.first_center_three_buy_mode }}</small></div>
+            <div class="ra-fact"><span>板块行情</span><strong>通达信 880 原生行业指数，不用成分股合成</strong></div>
+            <div class="ra-fact"><span>板块涨跌幅</span><strong>{{ "不参与筛选" if not audit.execution_contract.sector_price_change_gate else "参与" }}</strong></div>
+            <div class="ra-fact"><span>T+1</span><strong>{{ "严格执行" if audit.execution_contract.t_plus_one else "未启用" }}</strong></div>
+            <div class="ra-fact"><span>盘中结构止损</span><strong>{{ "按未复权 low/high 检查" if audit.execution_contract.intraday_structural_stop else "未启用" }}</strong></div>
+            <div class="ra-fact"><span>成交可实现性</span><strong>涨跌停、停牌、整手、参与率、历史费率与滑点</strong></div>
+          </div>
+        </section>
+
+        <section class="ra-section" aria-labelledby="ra-points-title">
+          <div class="ra-section-heading">
+            <div><p class="ra-section-index">04 · POINT ATTRIBUTION</p><h2 id="ra-points-title">一、二、三类买点独立归因</h2><p>每类点单独披露样本、净收益、胜率和期望，不让三买覆盖其他通道。</p></div>
+          </div>
+          <div class="ra-point-grid">
+            {% for point_type in ['1buy', '2buy', '3buy'] %}
+              {% set row = audit.point_type_metrics.get(point_type) %}
+              <article>
+                <span>{{ point_type }}</span>
+                {% if row %}
+                  <strong>{{ row.trade_count }} 笔 · {{ "%+.2f%%"|format((row.net_return|float) * 100) }}</strong>
+                  <small>胜率 {{ "%.2f%%"|format((row.win_rate|float) * 100) if row.win_rate is not none else 'N/A' }} · 期望 {{ row.expectancy if row.expectancy is not none else 'N/A' }}</small>
+                {% else %}
+                  <strong>无已平仓样本</strong><small>当前不能评估该类买点</small>
+                {% endif %}
+              </article>
+            {% endfor %}
+          </div>
+        </section>
+
+        <section class="ra-section" aria-labelledby="ra-window-title">
+          <div class="ra-section-heading">
+            <div><p class="ra-section-index">05 · WALK FORWARD</p><h2 id="ra-window-title">滚动样本外窗口</h2><p>36 个月训练、6 个月验证、6 个月测试；每个测试窗口应独立执行并汇总。</p></div>
+          </div>
+          {% if audit.walk_forward_windows %}
+            <div class="ra-table-wrap">
+              <table class="ra-source-table">
+                <thead><tr><th>窗口</th><th>训练</th><th>验证</th><th>测试</th><th>测试交易</th><th>净收益</th><th>最大回撤</th><th>Calmar</th></tr></thead>
+                <tbody>
+                  {% for row in audit.walk_forward_windows %}
+                    <tr><td>{{ row.window_id }}</td><td>{{ row.train|join(' → ') }}</td><td>{{ row.validation|join(' → ') }}</td><td>{{ row.test|join(' → ') }}</td><td>{{ row.closed_trade_count }}</td><td>{{ row.test_metrics.net_return }}</td><td>{{ row.test_metrics.max_drawdown }}</td><td>{{ row.test_metrics.calmar or 'N/A' }}</td></tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </div>
+          {% else %}
+            <p class="ra-empty-evidence">尚无独立滚动窗口证据；方法学完整性因此未达门槛。</p>
+          {% endif %}
+        </section>
+
+        <section class="ra-section" aria-labelledby="ra-ablation-title">
+          <div class="ra-section-heading">
+            <div><p class="ra-section-index">06 · ABLATION</p><h2 id="ra-ablation-title">过滤器消融与样本代价</h2><p>每项过滤同时披露质量变化和样本减少，不能只展示收益改善。</p></div>
+          </div>
+          {% if audit.ablations %}
+            <div class="ra-table-wrap">
+              <table class="ra-source-table">
+                <thead><tr><th>阶段</th><th>完成</th><th>数据等级</th><th>交易数</th><th>样本减少</th><th>净收益</th><th>回撤</th><th>Calmar</th><th>质量变化</th></tr></thead>
+                <tbody>{% for row in audit.ablations %}<tr><td>{{ row.label }}</td><td>{{ "是" if row.completed else "否" }}</td><td>{{ row.data_grade }}</td><td>{{ row.trade_count }}</td><td>{{ "%.2f%%"|format((row.sample_reduction|float) * 100) }}</td><td>{{ "%+.2f%%"|format((row.net_return|float) * 100) }}</td><td>{{ "%.2f%%"|format((row.max_drawdown|float) * 100) }}</td><td>{{ row.calmar or 'N/A' }}</td><td>{{ row.quality_change }}</td></tr>{% endfor %}</tbody>
+              </table>
+            </div>
+          {% else %}
+            <p class="ra-empty-evidence">消融尚未完成；不能判断哪些过滤器真正贡献收益或回撤改善。</p>
+          {% endif %}
+        </section>
+
+        <section class="ra-section" aria-labelledby="ra-robustness-title">
+          <div class="ra-section-heading">
+            <div><p class="ra-section-index">07 · PARAMETER ROBUSTNESS</p><h2 id="ra-robustness-title">参数稳健性</h2><p>只接受邻近参数区域的稳定表现，不用单一最优点证明体系可靠。</p></div>
+          </div>
+          {% if audit.parameter_robustness %}
+            <div class="ra-fact-grid">{% for name, value in audit.parameter_robustness.items() %}<div class="ra-fact"><span>{{ name }}</span><strong>{{ value }}</strong></div>{% endfor %}</div>
+          {% else %}
+            <p class="ra-empty-evidence">尚无参数邻域稳健性结果。</p>
+          {% endif %}
+        </section>
+
+        <section class="ra-section" aria-labelledby="ra-benchmark-title">
+          <div class="ra-section-heading">
+            <div><p class="ra-section-index">08 · BENCHMARKS</p><h2 id="ra-benchmark-title">基线与市场参照</h2><p>与旧成果、沪深 300、中证 500 和可投资股票池等权基线分别比较。</p></div>
+          </div>
+          {% if audit.benchmarks %}
+            <div class="ra-table-wrap"><table class="ra-source-table"><thead><tr><th>基线</th><th>数据等级</th><th>净收益</th><th>最大回撤</th></tr></thead><tbody>{% for row in audit.benchmarks %}<tr><td>{{ row.label }}</td><td>{{ row.data_grade }}</td><td>{{ row.net_return or 'N/A' }}</td><td>{{ row.max_drawdown or 'N/A' }}</td></tr>{% endfor %}</tbody></table></div>
+          {% else %}
+            <p class="ra-empty-evidence">基线证据尚未齐全，不能判断超额收益。</p>
+          {% endif %}
+        </section>
+
+        <section class="ra-section" aria-labelledby="ra-limit-title">
+          <div class="ra-section-heading">
+            <div><p class="ra-section-index">09 · CONCENTRATION & LIMITATIONS</p><h2 id="ra-limit-title">集中度与限制</h2><p>少数股票或行业贡献过高时，即使总收益为正也不能视为稳健。</p></div>
+            <span class="ra-status {{ 'ra-status-ok' if audit.concentration.passed else 'ra-status-blocked' }}">{{ "已达门槛" if audit.concentration.passed else "未达门槛" }}</span>
+          </div>
+          <div class="ra-fact-grid">
+            <div class="ra-fact"><span>最大单股交易占比</span><strong>{{ "%.2f%%"|format((audit.concentration.max_symbol_trade_fraction|float) * 100) }}</strong></div>
+            <div class="ra-fact"><span>最大行业交易占比</span><strong>{{ "%.2f%%"|format((audit.concentration.max_sector_trade_fraction|float) * 100) }}</strong></div>
+            <div class="ra-fact"><span>集中度上限</span><strong>{{ "%.2f%%"|format((audit.concentration.limit|float) * 100) }}</strong></div>
+          </div>
+          <ul class="ra-blocker-list">
+            {% if audit.limitations %}{% for limitation in audit.limitations %}<li>{{ limitation }}</li>{% endfor %}{% else %}<li>报告未列出额外限制。</li>{% endif %}
+          </ul>
+        </section>
+
+        <section class="ra-section" aria-labelledby="ra-integrity-title">
+          <div class="ra-section-heading">
+            <div><p class="ra-section-index">10 · TRADES & HASHES</p><h2 id="ra-integrity-title">交易样本与算法源文件哈希</h2><p>报告展示聚合交易样本和完整算法清单；哈希不一致时服务端拒绝渲染。</p></div>
+          </div>
+          <div class="ra-integrity-summary">
+            <div><span>已平仓交易</span><strong>{{ audit.sample_adequacy.closed_trade_count }}</strong></div>
+            <div><span>算法文件</span><strong>{{ audit.algorithm_hashes|length }}</strong></div>
+            <div><span>成果完整性</span><strong>{{ "已验证" if audit.artifact.integrity_verified else "未验证" }}</strong></div>
+          </div>
+          {% if audit.algorithm_hashes %}
+            <div class="ra-table-wrap">
+              <table class="ra-hash-table"><thead><tr><th>算法源文件</th><th>SHA-256</th></tr></thead><tbody>{% for row in audit.algorithm_hashes %}<tr><td><code>{{ row.source }}</code></td><td><code>{{ row.sha256 }}</code></td></tr>{% endfor %}</tbody></table>
+            </div>
+          {% else %}
+            <p class="ra-empty-evidence">当前测试报告未附算法源文件哈希，完整性证据不足。</p>
+          {% endif %}
+        </section>
+
+        <footer class="ra-footer">
+          <span>成果：<code>{{ audit.artifact.relative_path }}</code></span>
+          <span>内容哈希：<code>{{ audit.content_sha256 }}</code></span>
+          <span>文件哈希：<code>{{ audit.artifact.file_sha256 }}</code></span>
+          <span>生成：{{ audit.generated_at }}</span>
+        </footer>
+      {% else %}
+        <section class="ra-error" role="alert">
+          <h2>审计成果暂不可展示</h2>
+          <p>新体系报告不存在、格式无效或完整性校验失败：<code>{{ audit_error_code }}</code></p>
+        </section>
+      {% endif %}
+    </main>
+  </body>
+</html>

@@ -57,7 +57,12 @@ def _freq_to_minutes(frequency: str) -> Optional[int]:
     return None
 
 
-def drop_unclosed_last_bar(df: "pd.DataFrame", frequency: str) -> "pd.DataFrame":
+def drop_unclosed_last_bar(
+    df: "pd.DataFrame",
+    frequency: str,
+    *,
+    time_label: str = "start",
+) -> "pd.DataFrame":
     """丢弃 df 末尾仍在进行(未收盘)的那一根 bar,使 live 口径与回测一致。
 
     判定方式自包含、不依赖外部 now(tz 不可知):用倒数第二根与最后一根的
@@ -65,11 +70,25 @@ def drop_unclosed_last_bar(df: "pd.DataFrame", frequency: str) -> "pd.DataFrame"
     所属周期是否已结束」。非分钟级/不足两根时原样返回;间隔异常(session 首根
     等)仅裁「标签在未来」的末根,绝不误删历史收盘 bar。
     """
+    if time_label not in {"start", "end"}:
+        raise ValueError("time_label must be start or end")
     minutes = _freq_to_minutes(frequency)
-    if minutes is None or df is None or len(df) < 2:
+    if minutes is None or df is None or len(df) == 0:
         return df
     try:
         last_ts = pd.Timestamp(df["date"].iloc[-1])
+    except Exception:
+        return df
+    now = (
+        pd.Timestamp.now(tz=last_ts.tz)
+        if last_ts.tz is not None
+        else pd.Timestamp.now()
+    )
+    if time_label == "end":
+        return df.iloc[:-1] if now < last_ts else df
+    if len(df) < 2:
+        return df
+    try:
         prev_ts = pd.Timestamp(df["date"].iloc[-2])
     except Exception:
         return df
@@ -79,12 +98,10 @@ def drop_unclosed_last_bar(df: "pd.DataFrame", frequency: str) -> "pd.DataFrame"
     # 终点约定必然 <= now,标签 > now 只可能是进行中 bar(QMT 端点标签的 session
     # 首根即此形态),故绝不误删历史收盘 bar;起点标签源此分支行为不变(保守)。
     if (last_ts - prev_ts) != step:
-        now = pd.Timestamp.now(tz=last_ts.tz) if last_ts.tz is not None else pd.Timestamp.now()
         if now < last_ts:
             return df.iloc[:-1]
         return df
     # 用与 last_ts 同 tz 的当前时刻(naive→naive, aware→对应 tz)
-    now = pd.Timestamp.now(tz=last_ts.tz) if last_ts.tz is not None else pd.Timestamp.now()
     # bar 收盘时刻 = bar 起点 + 一个周期。now 还没到收盘时刻=这根还在进行中。
     if now < last_ts + step:
         return df.iloc[:-1]

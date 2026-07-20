@@ -1,31 +1,50 @@
-<!DOCTYPE HTML>
-<html lang="zh">
+<!doctype html>
+<html lang="zh-CN">
 
 <head>
-    <title>缠论配置项</title>
-    <meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,minimum-scale=1.0">
+    <meta charset="utf-8" />
+    <title>缠论参数配置 · Chanlun Pro</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <link rel="stylesheet" href="{{ url_for('static', filename='css/layui.css') }}" />
     <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}" />
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/ui-system.css') }}?v={{ static_version|default('') }}" />
     <script type="text/javascript" src="{{ url_for('static', filename='layui.js') }}"></script>
     <script type="text/javascript" src="{{ url_for('static', filename='jquery-3.7.0.min.js') }}"></script>
     {% include 'dark.html' %}
 </head>
 
-<body class="layui-fluid">
-    <blockquote class="layui-elem-quote">
+<body class="cp-ui">
+    <a class="cp-skip-link" href="#main-content">跳到缠论参数</a>
+    <main id="main-content" class="cp-page cp-page-stack">
+      <header class="cp-page-header">
+        <div class="cp-page-header-copy">
+          <span class="cp-eyebrow">CHANLUN ENGINE CONFIG</span>
+          <h1>缠论参数配置</h1>
+          <p>按配置范围、结构算法和图表呈现分区调整。每个字段保留原有悬浮说明。</p>
+        </div>
+        <div class="cp-page-header-actions">
+          <div class="cp-context-card"><span>当前标的</span><strong>{{ code }}</strong></div>
+        </div>
+      </header>
+
+    <div class="cp-note">
+        <span aria-hidden="true">i</span>
+        <div>
         <p class="layui-font-red">
             <i class="layui-icon layui-icon-tips"></i>
             鼠标放在输入框上，会有针对于该设置的详细说明
         </p>
         <p>详细设置文档：<a
                 href="https://chanlun-pro.readthedocs.io/%E7%BC%A0%E8%AE%BA%E9%85%8D%E7%BD%AE%E9%A1%B9%E8%AF%B4%E6%98%8E/"
-                class="layui-font-blue" target="_blank">缠论配置项说明</a>
+                class="layui-font-blue" target="_blank" rel="noopener">缠论配置项说明</a>
         </p>
-    </blockquote>
+        </div>
+    </div>
 
-    <form class="layui-form layui-row layui-form-pane cl_config_setting" role="form">
+    <form class="layui-form layui-form-pane cl_config_setting cp-section-card cp-config-form" role="form">
 
         <input type="hidden" name="code" value="{{ code }}" lay-filter="cl_config" />
+        <div class="cp-config-section-title">配置范围</div>
 
         <div class="layui-form-item" title="当前市场">
             <label class="layui-form-label">市场</label>
@@ -45,7 +64,7 @@
                 </label>
             </div>
         </div>
-        <hr class="layui-border-red">
+        <hr>
         <p class="layui-padding-1 layui-font-blue"><i
                 class="layui-edge layui-edge-right"></i>通用配置是针对于市场下所有标的起作用；独立配置是只针对于当前标的起作用。</p>
 
@@ -76,7 +95,8 @@
                 </label>
             </div>
         </div>
-        <hr class="layui-border-red">
+        <hr>
+        <div class="cp-config-section-title">分型算法</div>
         <div class="layui-form-item">
             <div class="layui-inline" title="分型高低区域">
                 <label class="layui-form-label">分型区域</label>
@@ -131,7 +151,8 @@
                 </div>
             </div>
         </div>
-        <hr class="layui-border-red">
+        <hr>
+        <div class="cp-config-section-title">结构算法</div>
         <div class="layui-form-item">
             <div class="layui-inline" title="成笔条件，老笔顶底至少5跟缠论K线；新笔顶底至少4跟缠论K线，5跟原始K线；简单笔3跟原始K线即可成笔；顶底成笔，只要有分型即可成笔">
                 <label class="layui-form-label">笔类型</label>
@@ -227,7 +248,8 @@
             </div>
         </div>
 
-        <hr class="layui-border-red">
+        <hr>
+        <div class="cp-config-section-title">线段算法</div>
         <div class="layui-form-item">
             <div class="layui-inline" title="线段区间计算依据，影响线段的特征序列计算">
                 <label class="layui-form-label">线段区间</label>
@@ -244,7 +266,8 @@
                 </div>
             </div>
         </div>
-        <hr class="layui-border-red">
+        <hr>
+        <div class="cp-config-section-title">线段递归修正</div>
         <p class="layui-padding-1 layui-font-blue">
             <i class="layui-edge layui-edge-right"></i>
             线段划分采用特征序列进行处理，会有个别情况划分不理想，以下设置可针对于所描述的情况进行特殊处理。
@@ -345,7 +368,8 @@
                 </div>
             </div>
         </div>
-        <hr class="layui-border-red">
+        <hr>
+        <div class="cp-config-section-title">中枢算法</div>
         <p class="layui-padding-1 layui-font-blue">
             <i class="layui-edge layui-edge-right"></i>
             中枢设置，可以选择多种类型的中枢；买卖点根据中枢计算，不同的中枢也会生成不同的买卖点
@@ -430,7 +454,8 @@
             </div>
         </div>
 
-        <hr class="layui-border-red">
+        <hr>
+        <div class="cp-config-section-title">指标参数</div>
         <p class="layui-padding-1 layui-font-blue">
             <i class="layui-edge layui-edge-right"></i>
             MACD参数设置，用于缠论内部计算力度来判定是否背驰，与Web页面展示MACD图表无关。
@@ -473,7 +498,8 @@
             </div>
         </div>
 
-        <hr class="layui-border-red">
+        <hr>
+        <div class="cp-config-section-title">买卖点规则</div>
         <p class="layui-padding-1 layui-font-blue">
             <i class="layui-edge layui-edge-right"></i>
             买卖点配置，是否计算描述的买卖点
@@ -530,7 +556,8 @@
         </div>
 
 
-        <hr class="layui-border-red">
+        <hr>
+        <div class="cp-config-section-title">图表呈现</div>
         <p class="layui-padding-1 layui-font-blue">
             <i class="layui-edge layui-edge-right"></i>
             画图配置，是否在图表中显示，选择显示，取消不显示
@@ -581,7 +608,8 @@
             </div>
         </div>
 
-        <hr class="layui-border-red">
+        <hr>
+        <div class="cp-config-section-title">高级定制</div>
         <p class="layui-padding-1 layui-font-blue">
             <i class="layui-edge layui-edge-right"></i>
             个人定制，不特殊说明，不明白使用默认配置即可
@@ -610,32 +638,18 @@
                     </label>
                 </div>
             </div>
-            <div class="layui-form-item">
-                <div class="layui-row layui-col-space10">
-                    <div class="layui-col-xs6">
-                        <button class="layui-btn layui-btn-fluid layui-bg-red" lay-submit
-                            lay-filter="save_cl_config">保存配置</button>
-                    </div>
-                    <div class="layui-col-xs6">
-                        <button type="button" class="layui-btn layui-btn-fluid layui-btn-primary"
-                            id="reset_cl_config_btn">重置配置</button>
-                    </div>
-                </div>
-                <div class="layui-row layui-col-space10" style="margin-top: 10px;">
-                    <div class="layui-col-xs6">
-                        <button type="button" class="layui-btn layui-btn-fluid" id="export_cl_config_btn">导出配置</button>
-                    </div>
-                    <div class="layui-col-xs6">
-                        <button type="button" class="layui-btn layui-btn-fluid layui-btn-normal"
-                            id="import_cl_config_btn">导入配置</button>
-                        <input type="file" id="import_cl_config_file" accept="application/json"
-                            style="display: none;" />
-                    </div>
-                </div>
-            </div>
+        </div>
+
+        <div class="cp-actions cp-actions--sticky">
+            <button class="layui-btn cp-button" type="submit" lay-submit lay-filter="save_cl_config">保存配置</button>
+            <button type="button" class="layui-btn cp-button cp-button--secondary" id="reset_cl_config_btn">重置配置</button>
+            <button type="button" class="layui-btn cp-button cp-button--secondary" id="export_cl_config_btn">导出配置</button>
+            <button type="button" class="layui-btn cp-button cp-button--secondary" id="import_cl_config_btn">导入配置</button>
+            <input type="file" id="import_cl_config_file" accept="application/json" hidden />
         </div>
 
     </form>
+    </main>
 
     <script nonce="{{ csp_nonce }}">
 

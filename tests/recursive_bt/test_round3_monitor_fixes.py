@@ -109,6 +109,24 @@ class TestDropUnclosedLastBar:
         assert len(out) == len(df)
         assert out["date"].iloc[-1] == last
 
+    def test_endpoint_labeled_closed_last_bar_kept_at_its_endpoint(self):
+        step = pd.Timedelta(minutes=5)
+        endpoint = pd.Timestamp.now().floor("5min")
+        df = _df_from_starts([endpoint - step * 2, endpoint - step, endpoint])
+
+        out = drop_unclosed_last_bar(df, "5m", time_label="end")
+
+        assert len(out) == len(df)
+        assert out["date"].iloc[-1] == endpoint
+
+    def test_endpoint_labeled_future_bar_trimmed_even_when_it_is_only_row(self):
+        future_endpoint = pd.Timestamp.now() + pd.Timedelta(minutes=5)
+        df = _df_from_starts([future_endpoint])
+
+        out = drop_unclosed_last_bar(df, "5m", time_label="end")
+
+        assert len(out) == 0
+
     def test_daily_never_trimmed(self):
         """日线非分钟级 → helper no-op,绝不裁(即便末根是今天)。"""
         today = pd.Timestamp(_dt.date.today())
@@ -239,9 +257,88 @@ class TestLedgerAtomicAndTolerantLoad:
 
 
 # ==========================================================================
+# DecisionSupport: 日线只允许前一日及更早的已完成 Bar
+# ==========================================================================
+def test_monitor_daily_window_excludes_current_session_bar():
+    today = pd.Timestamp.now().normalize() + pd.Timedelta(hours=15)
+    prior = today - pd.Timedelta(days=1)
+    before_prior = prior - pd.Timedelta(days=1)
+
+    class _DailyExchange:
+        def klines(self, code, frequency, **kwargs):
+            return pd.DataFrame(
+                {
+                    "date": [prior, today],
+                    "open": [10.0, 11.0],
+                    "high": [10.5, 11.5],
+                    "low": [9.5, 10.5],
+                    "close": [10.2, 11.2],
+                    "volume": [1000.0, 1000.0],
+                }
+            )
+
+    processed = []
+    state = MonitorSymbolState("SH.600000", _DailyExchange())
+    state.lastd = before_prior
+    state.cdd = type(
+        "_DailyCL",
+        (),
+        {
+            "process_klines": lambda self, frame: processed.append(frame.copy()),
+            "get_branch_bspoints": lambda self, **kwargs: (),
+        },
+    )()
+
+    state._refresh_daily_window()
+
+    assert len(processed) == 1
+    assert list(processed[0]["date"]) == [prior]
+    assert state.lastd == prior
+
+
+# ==========================================================================
 # F-MED-1: freshness 按 op 级别
 # ==========================================================================
 class TestFreshnessWindow:
+    def test_monitor_carries_exchange_kline_time_label(self):
+        class _EndpointExchange:
+            kline_time_label = "end"
+
+        state = MonitorSymbolState("SH.600000", _EndpointExchange())
+
+        assert state.kline_time_label == "end"
+
+    def test_monitor_passes_endpoint_label_to_unclosed_bar_filter(
+        self,
+        monkeypatch,
+    ):
+        frame = _df_from_starts(
+            [pd.Timestamp("2026-07-16 10:30:00"), pd.Timestamp("2026-07-16 10:35:00")]
+        )
+
+        class _EndpointExchange:
+            kline_time_label = "end"
+
+            def klines(self, *args, **kwargs):
+                return frame
+
+        observed = []
+
+        def spy(value, frequency, *, time_label):
+            observed.append((frequency, time_label))
+            return value
+
+        monkeypatch.setattr(lm, "drop_unclosed_last_bar", spy)
+        state = MonitorSymbolState("SH.600000", _EndpointExchange())
+        state._process_level(
+            type("_CL", (), {"process_klines": lambda self, value: None})(),
+            "5m",
+            "last_op",
+            1,
+        )
+
+        assert observed == [("5m", "end")]
+
     def test_monitor_1m_floor_60min(self):
         s = MonitorSymbolState("SH.600000", None, op_level="1m")
         assert s.signal_freshness == pd.Timedelta(minutes=60)

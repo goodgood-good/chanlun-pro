@@ -2,6 +2,7 @@ import json
 from types import SimpleNamespace
 
 import pytest
+from apscheduler.schedulers.background import BackgroundScheduler
 
 from cl_app.alert_tasks import AlertTasks
 from cl_app import create_app
@@ -54,6 +55,18 @@ def test_reconcile_uses_replace_existing_for_idempotent_updates(monkeypatch):
 
     assert scheduler.added[0]["replace_existing"] is True
     assert tasks.task_ids == ["1"]
+
+
+def test_reconcile_can_register_jobs_before_scheduler_start(monkeypatch):
+    scheduler = BackgroundScheduler()
+    tasks = AlertTasks(scheduler)
+    monkeypatch.setattr(tasks, "task_list", lambda: [_task(1)])
+
+    assert scheduler.running is False
+    assert tasks.run() is True
+
+    assert scheduler.running is False
+    assert scheduler.get_job("1") is not None
 
 
 def test_alert_endpoint_reports_stopped_scheduler():

@@ -60,6 +60,36 @@ body {
   text-align: right;
 }
 
+.ds-audit-entry {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+  margin-bottom: 8px;
+  padding: 7px 9px;
+  border: 1px solid rgba(190, 137, 47, 0.42);
+  border-radius: 4px;
+  color: #a06d16;
+  background: rgba(218, 166, 76, 0.08);
+  font-size: 12px;
+  line-height: 1.35;
+  text-decoration: none;
+}
+
+.ds-audit-entry:hover,
+.ds-audit-entry:focus-visible {
+  border-color: rgba(190, 137, 47, 0.72);
+  color: #7f530d;
+  background: rgba(218, 166, 76, 0.16);
+}
+
+.ds-audit-entry small {
+  flex: 0 0 auto;
+  color: inherit;
+  font-size: 10px;
+}
+
 .ds-track-toggle {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -237,6 +267,210 @@ body {
   overflow-wrap: anywhere;
 }
 
+.ds-evidence-list {
+  margin: 4px 0 8px;
+  padding-left: 20px;
+  font-size: 12px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.ds-evidence-meta {
+  color: #777;
+  font-size: 11px;
+}
+
+.ds-secondary-status {
+  margin: 10px 0;
+  padding: 8px;
+  border: 1px solid rgba(213, 156, 45, 0.55);
+  border-radius: 4px;
+  background: rgba(213, 156, 45, 0.08);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.ds-secondary-status .ds-facts {
+  margin-top: 6px;
+}
+
+.ds-evidence-gallery {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.ds-evidence-figure {
+  min-width: 0;
+  margin: 0;
+  padding: 5px;
+  border: 1px solid rgba(127, 127, 127, 0.28);
+  border-radius: 4px;
+}
+
+.ds-evidence-figure img {
+  display: block;
+  width: 100%;
+  max-height: 320px;
+  object-fit: contain;
+}
+
+.ds-evidence-figure figcaption {
+  margin-top: 4px;
+  color: #777;
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.ds-opportunity-view {
+  box-sizing: border-box;
+  max-height: min(48vh, 520px);
+  margin-bottom: 6px;
+  padding: 2px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  border-bottom: 1px solid rgba(127, 127, 127, 0.24);
+}
+
+.ds-opportunity-view[hidden] {
+  display: none;
+}
+
+.ds-opportunity-summary,
+.ds-sector-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.ds-opportunity-summary .ds-subtitle {
+  margin-top: 4px;
+}
+
+.ds-opportunity-freshness,
+.ds-sector-heading span,
+.ds-opportunity-action {
+  color: #777;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.ds-sector-opportunities,
+.ds-opportunity-cards {
+  display: grid;
+  gap: 6px;
+}
+
+.ds-sector-opportunity {
+  min-width: 0;
+  padding: 7px;
+  border: 1px solid rgba(127, 127, 127, 0.3);
+  border-radius: 3px;
+}
+
+.ds-sector-scores {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 4px;
+  margin: 6px 0;
+}
+
+.ds-sector-scores div {
+  display: flex;
+  justify-content: space-between;
+  gap: 3px;
+  padding: 3px 4px;
+  background: rgba(127, 127, 127, 0.08);
+  font-size: 11px;
+}
+
+.ds-sector-scores dd {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.ds-sector-codes,
+.ds-sector-preferences {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 5px;
+}
+
+.ds-opportunity-code,
+.ds-preference-button {
+  min-height: 32px;
+  border: 1px solid rgba(127, 127, 127, 0.34);
+  border-radius: 3px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+}
+
+.ds-opportunity-code {
+  display: grid;
+  min-width: 92px;
+  padding: 4px 6px;
+  text-align: left;
+}
+
+.ds-opportunity-code small {
+  color: #777;
+  overflow-wrap: anywhere;
+}
+
+.ds-preference-button {
+  padding: 4px 7px;
+  font-size: 11px;
+}
+
+.ds-preference-button[aria-pressed="true"] {
+  border-color: #1e9fff;
+  background: rgba(30, 159, 255, 0.1);
+}
+
+.ds-preference-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.ds-opportunity-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 3px 7px;
+  width: 100%;
+  min-height: 44px;
+  padding: 6px 7px;
+  border: 1px solid rgba(127, 127, 127, 0.3);
+  border-radius: 3px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+.ds-opportunity-card .ds-candidate-reason {
+  grid-column: 1 / -1;
+}
+
+.ds-opportunity-gates {
+  grid-column: 1 / -1;
+  color: #666;
+  font-size: 11px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.ds-opportunity-code:focus-visible,
+.ds-preference-button:focus-visible,
+.ds-opportunity-card:focus-visible {
+  outline: 2px solid #1e9fff;
+  outline-offset: 2px;
+}
+
 .ds-paper-readonly {
   margin: 4px 0 8px;
   padding: 6px 8px;
@@ -274,6 +508,10 @@ body {
   }
 
   .ds-facts {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .ds-evidence-gallery {
     grid-template-columns: minmax(0, 1fr);
   }
 

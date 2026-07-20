@@ -166,7 +166,7 @@ test('board member request failure closes its loading overlay', () => {
   h.postRequests[0].reject();
 
   assert.deepEqual(h.closedLoads, [1]);
-  assert.deepEqual(h.messages, ['获取股票列表失败']);
+  assert.deepEqual(h.messages, ['成分股加载失败，请稍后重试']);
 });
 
 test('late board response cannot overwrite the current selection', () => {
@@ -205,5 +205,5 @@ test('board list request has a deadline and exposes load failure', () => {
   assert.equal(h.getRequests[0].options.timeout, 10000);
   h.getRequests[0].reject();
 
-  assert.deepEqual(h.messages, ['获取板块概念失败']);
+  assert.deepEqual(h.messages, ['板块数据加载失败，请稍后重试']);
 });

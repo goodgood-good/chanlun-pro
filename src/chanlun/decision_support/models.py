@@ -17,8 +17,7 @@ from .fingerprints import (
 
 
 class StrategyTrack(str, Enum):
-    TREND_CONTINUATION = "trend_continuation"
-    BOTTOM_REVERSAL = "bottom_reversal"
+    CHANLUN_ORIGINAL_LOW_DRAWDOWN = "chanlun_original_low_drawdown_v1"
 
 
 class EventState(str, Enum):
@@ -209,6 +208,10 @@ class LevelSnapshot:
     zs_zg: float | None
     mmds: tuple[str, ...] = ()
     divergences: tuple[str, ...] = ()
+    trade_gate_direction: str | None = field(
+        default=None,
+        metadata={"canonical_omit_if_none": True},
+    )
     source_frequency: str | None = field(
         default=None,
         metadata={"canonical_omit_if_none": True},
@@ -229,6 +232,15 @@ class LevelSnapshot:
             raise ValueError("direction must be up, down, or neutral")
         _require_non_negative_int(self.level, "level")
         _require_bool(self.completed, "completed")
+        if self.trade_gate_direction is not None:
+            _require_non_empty_string(
+                self.trade_gate_direction,
+                "trade_gate_direction",
+            )
+            if self.trade_gate_direction not in {"up", "down", "neutral"}:
+                raise ValueError(
+                    "trade_gate_direction must be up, down, or neutral"
+                )
         source_values = (self.source_frequency, self.source_bar_closed_at)
         if any(value is not None for value in source_values) and not all(
             value is not None for value in source_values
@@ -246,6 +258,10 @@ class LevelSnapshot:
                     self.source_bar_closed_at,
                     "source_bar_closed_at",
                 ),
+            )
+        elif self.trade_gate_direction is not None:
+            raise ValueError(
+                "trade_gate_direction requires a physical source binding"
             )
         for field_name in ("segment_start", "segment_end", "zs_zd", "zs_zg"):
             object.__setattr__(
@@ -487,13 +503,21 @@ class DecisionEvent:
             sha256_json(self.signal),
             self.provenance_fingerprint,
         )
-        if sum(
-            level.frequency == frequency and level.level == self.signal.level
+        signal_levels = tuple(
+            level
             for level in self.levels
-        ) != 1:
+            if level.frequency == frequency
+            and level.level == self.signal.level
+        )
+        if len(signal_levels) != 1:
             raise ValueError(
                 "event_id frequency and level must match event levels"
             )
+        if (
+            signal_levels[0].source_bar_closed_at is not None
+            and signal_levels[0].source_bar_closed_at != self.bar_closed_at
+        ):
+            raise ValueError("signal source bar must match event bar")
         if self.market_constraints.quote_time > self.observed_at:
             raise ValueError("quote_time cannot be after observed_at")
 
@@ -612,16 +636,24 @@ class DecisionEvent:
         source_level_fields = frozenset(
             {"source_frequency", "source_bar_closed_at"}
         )
-        legacy_level_fields = level_fields - source_level_fields
+        gate_level_fields = frozenset({"trade_gate_direction"})
+        legacy_level_fields = (
+            level_fields - source_level_fields - gate_level_fields
+        )
+        source_without_gate_fields = level_fields - gate_level_fields
         level_mappings: list[Mapping[str, object]] = []
         for item in levels_value:
             if not isinstance(item, Mapping):
                 raise ValueError("levels must contain mappings")
             item_fields = frozenset(item)
-            if item_fields not in {legacy_level_fields, level_fields}:
+            if item_fields not in {
+                legacy_level_fields,
+                source_without_gate_fields,
+                level_fields,
+            }:
                 raise ValueError("level fields mismatch")
             parsed_level = dict(item)
-            if item_fields == level_fields:
+            if source_level_fields.issubset(item_fields):
                 parsed_level["source_bar_closed_at"] = _parse_datetime(
                     parsed_level["source_bar_closed_at"],
                     "source_bar_closed_at",

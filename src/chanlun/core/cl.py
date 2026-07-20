@@ -480,6 +480,30 @@ class CL(ICL):
         self._recursive_memo["rbl"] = result
         return result
 
+    def get_recursive_branch_levels_for_tower(self, *, use_xd: bool):
+        """Return recursive levels for the exact stroke/segment signal tower."""
+
+        if type(use_xd) is not bool:
+            raise TypeError("use_xd must be an exact bool")
+        if use_xd:
+            return self.get_recursive_branch_levels()
+        memo_key = ("rbl_tower", False)
+        cached = self._recursive_memo.get(memo_key)
+        if cached is not None:
+            return cached
+        ld = lambda s, e: query_macd_ld(self, s, e)
+        result = self._recursive_branch_calc(False).calculate(
+            list(self.get_bis()),
+            ld,
+            self._recursive_wzgx(),
+            self.frequency,
+            zs_diversity=bool(
+                self.config.get("recursive_zs_diversity", False)
+            ),
+        )
+        self._recursive_memo[memo_key] = result
+        return result
+
     def get_bi_zhongshu(self):
         """笔中枢:新核心 zs_branch 直接在笔(bis)上找的中枢。
 
@@ -497,8 +521,8 @@ class CL(ICL):
     def get_branch_bspoints(self, use_xd: bool = False):
         """新核心:一/二/三类买卖点(全多级)。lazy 并存。返回 List[BuySellPoint]。
 
-        L0 一三类(bs_branch 单级)+ 二类(bs2 跨级)+ L1+ 扩张三买(bs3,过滤 L0 去重)。
-        一类多级(L1+ 背驰一类)留后。
+        L0 一三类(bs_branch 单级)+ L1+ 一类(bs1)+ 二类(bs2 跨级)+
+        L1+ 扩张三买(bs3,过滤 L0 去重)。
 
         ``use_xd``:构成段选择——False=**笔**(细粒度,图表「笔买卖点」bi_mmds);
         True=**线段**(图表「段买卖点」xd_mmds,与线段中枢同级)。两级各算、各归其位。
@@ -509,15 +533,11 @@ class CL(ICL):
             return cached
         from chanlun.core.zs_branch import ZsBranchResult
         from chanlun.core.bs_branch import BsBranchCalculator
+        from chanlun.core.bs1_branch import Bs1BranchCalculator
         from chanlun.core.bs2_branch import Bs2BranchCalculator
         from chanlun.core.bs3_branch import Bs3BranchCalculator
         ld = lambda s, e: query_macd_ld(self, s, e)
-        wzgx = self._recursive_wzgx()
-        units = list(self.get_xds()) if use_xd else list(self.get_bis())
-        levels = self._recursive_branch_calc(use_xd).calculate(
-            units, ld, wzgx, self.frequency,
-            zs_diversity=bool(self.config.get("recursive_zs_diversity", False)),
-        )
+        levels = self.get_recursive_branch_levels_for_tower(use_xd=use_xd)
         if not levels:
             self._recursive_memo[memo_key] = []
             return []
@@ -527,9 +547,15 @@ class CL(ICL):
         bs = BsBranchCalculator()
         pts = list(bs.calculate(zr0, l0.units))                            # L0 一三类
         pts += bs.second_class(zr0, l0.units, ld, self.frequency)          # L0 二类(强/一般档 + 最弱档破前低+盘整背驰)
+        pts += Bs1BranchCalculator().calculate(levels)                      # L1+ 一类(高级别趋势背驰)
         pts += Bs2BranchCalculator().calculate(levels, ld, self.frequency)  # L1+ 二类(跨级 + 最弱档)
         pts += [p for p in Bs3BranchCalculator().calculate(levels)
                 if p.level is not None and p.level >= 1]                   # L1+ 扩张三买(不重 L0)
+        pts.sort(key=lambda p: (
+            getattr(getattr(getattr(p, "anchor_fx", None), "k", None), "k_index", -1),
+            0 if p.level is None else p.level,
+            p.bs_type,
+        ))
         self._recursive_memo[memo_key] = pts
         return pts
 

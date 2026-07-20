@@ -4,7 +4,6 @@
   - `/alert_edit/<market>/<id>`
   - `/alert_save`
   - `/alert_del/<id>`
-  - `/alert_records/<market>`
   - `/jobs` （任务列表视图）
 """
 
@@ -14,8 +13,6 @@ from flask import Blueprint, render_template, request, current_app
 from flask_login import login_required
 
 from chanlun.market import Market
-from chanlun import fun
-from chanlun.persistence.db import db
 from chanlun.exchange import get_exchange
 from chanlun.tools.log_util import LogUtil
 from chanlun.zixuan import ZiXuan
@@ -270,33 +267,6 @@ def alert_del(id):
             "msg": "任务调度器未运行，请使用正式启动入口。",
         }, 503
     return {"ok": res}
-
-
-@alert_bp.route("/alert_records/<market>")
-@login_required
-def alert_records(market):
-    task_name = request.args.get("task_name")
-    records = db.alert_record_query(market, task_name)
-    rls = [
-        {
-            "code": _r.stock_code,
-            "name": _r.stock_name,
-            "frequency": _r.frequency,
-            "line_type": _r.line_type,
-            "msg": _r.alert_msg,
-            "is_done": _r.bi_is_done,
-            "is_td": _r.bi_is_td,
-            "task_name": _r.task_name,
-            "datetime_str": fun.datetime_to_str(_r.alert_dt),
-        }
-        for _r in records
-    ]
-    return {
-        "code": 0,
-        "msg": "",
-        "count": len(rls),
-        "data": rls,
-    }
 
 
 @alert_bp.route("/jobs")

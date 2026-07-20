@@ -198,7 +198,54 @@ def prices_jiaodu(prices):
     return j if prices[-1] > prices[0] else -j
 
 
-def zs_to_chart_dict(zs, use_envelope: bool = False) -> dict:
+def _line_to_chart_metadata(line) -> dict | None:
+    """Serialize one center entering/leaving line without exposing core objects."""
+    if line is None:
+        return None
+    start = getattr(line, "start", None)
+    end = getattr(line, "end", None)
+    start_k = getattr(start, "k", None)
+    end_k = getattr(end, "k", None)
+    start_date = getattr(start_k, "date", None)
+    end_date = getattr(end_k, "date", None)
+    return {
+        "direction": getattr(line, "type", None),
+        "start_time": (
+            None if start_date is None else fun.datetime_to_int(start_date)
+        ),
+        "start_price": getattr(start, "val", None),
+        "end_time": None if end_date is None else fun.datetime_to_int(end_date),
+        "end_price": getattr(end, "val", None),
+    }
+
+
+def _center_associated_points(zs) -> list[str]:
+    """Return point types explicitly attached to the center's leaving line."""
+    seen: set[str] = set()
+    result: list[str] = []
+    for line in (getattr(zs, "exit", None), getattr(zs, "end", None)):
+        getter = getattr(line, "line_mmds", None)
+        if not callable(getter):
+            continue
+        try:
+            values = getter("|")
+        except TypeError:
+            values = getter()
+        for value in values or ():
+            point_type = str(value)
+            if point_type and point_type not in seen:
+                seen.add(point_type)
+                result.append(point_type)
+        if result:
+            break
+    return result
+
+
+def zs_to_chart_dict(
+    zs,
+    use_envelope: bool = False,
+    recursive_level: int | None = None,
+) -> dict:
     """把 ZS 中枢序列化为前端图表 dict(core/web 共享,多周期叠加复用)。
 
     - points: 默认中枢核心区 [ZD,ZG]; use_envelope=True 用 [DD,GG] 包络
@@ -208,6 +255,10 @@ def zs_to_chart_dict(zs, use_envelope: bool = False) -> dict:
     """
     hi = zs.gg if use_envelope else zs.zg
     lo = zs.dd if use_envelope else zs.zd
+    entering = getattr(zs, "entry", None) or getattr(zs, "start", None)
+    leaving = getattr(zs, "exit", None) or getattr(zs, "end", None)
+    if recursive_level is None:
+        recursive_level = getattr(zs, "recursive_level", None)
     return {
         "points": [
             {
@@ -223,6 +274,15 @@ def zs_to_chart_dict(zs, use_envelope: bool = False) -> dict:
         "type": zs.type,
         "is_expanded": bool(getattr(zs, "expanded_with", [])),
         "sub_count": len(getattr(zs, "expanded_with", []) or []),
+        "tower": getattr(zs, "zs_type", None),
+        "recursive_level": recursive_level,
+        "zd": getattr(zs, "zd", None),
+        "zg": getattr(zs, "zg", None),
+        "done": bool(getattr(zs, "done", False)),
+        "line_count": len(getattr(zs, "lines", []) or []),
+        "entering_segment": _line_to_chart_metadata(entering),
+        "leaving_segment": _line_to_chart_metadata(leaving),
+        "associated_points": _center_associated_points(zs),
     }
 
 
@@ -343,8 +403,12 @@ def cl_data_to_tv_chart(
                 }
             )
 
-    def _zs_to_chart(zs, use_envelope: bool = False) -> dict:
-        return zs_to_chart_dict(zs, use_envelope)
+    def _zs_to_chart(
+        zs,
+        use_envelope: bool = False,
+        recursive_level: int | None = None,
+    ) -> dict:
+        return zs_to_chart_dict(zs, use_envelope, recursive_level)
 
     def _zslx_line_points(zslx) -> list:
         """走势类型的折线端点:用其真实起止分型,而不是中枢矩形边界。"""
@@ -462,10 +526,16 @@ def cl_data_to_tv_chart(
             if lv.level >= 1:
                 continue   # 仅画 L0 中枢,高级别走势递归暂不渲染(旧走势递归产假宽框)
             # 中枢区间用核心区 [ZD,ZG](标准中枢=3段重叠区);GG/DD 是瞬间波动范围、非中枢区间。
-            lv_zss = [_zs_to_chart(zs, use_envelope=False) for zs in lv.zss]
+            lv_zss = [
+                _zs_to_chart(zs, use_envelope=False, recursive_level=lv.level)
+                for zs in lv.zss
+            ]
             # 右边缘正在形成的未完成中枢(live_zss,done=False)→虚线框(_zs_to_chart 按 done 出
             # linestyle=1)。只展示、不入买卖点/走势类型计算(那些只读 lv.zss=已完成中枢)。
-            lv_zss += [_zs_to_chart(zs, use_envelope=False) for zs in getattr(lv, "live_zss", [])]
+            lv_zss += [
+                _zs_to_chart(zs, use_envelope=False, recursive_level=lv.level)
+                for zs in getattr(lv, "live_zss", [])
+            ]
             lv_zslxs = []
             lv_zslx_lines = []
             for zslx in lv.zslxs:
@@ -510,7 +580,14 @@ def cl_data_to_tv_chart(
                 )
                 recursive_levels_chart_data.append({
                     "level": _kl["level"],
-                    "zss": [_zs_to_chart(z, use_envelope=False) for z in _kl["zss"]],
+                    "zss": [
+                        _zs_to_chart(
+                            z,
+                            use_envelope=False,
+                            recursive_level=_kl["level"],
+                        )
+                        for z in _kl["zss"]
+                    ],
                     "zslxs": [],
                     "zslx_lines": _lv_lines,
                     # 该级买卖点(一三类)/背驰,带 freq 级别标(5m/30m…);前端与该级中枢同 toggle(zs_L1/zs_L2)

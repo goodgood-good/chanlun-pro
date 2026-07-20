@@ -30,6 +30,9 @@ test('feedRealtimeBar 新根出现时先 finalize 前一根(不丢刚收盘最�
   const key = symbolInfo.ticker.toLowerCase() + '5';
   // 帧1: T1(5500)成形中, close=22
   df.feedRealtimeBar(key, { t: [4000, 5000, 5500], o: [18, 20, 21], h: [18, 20, 23], l: [18, 20, 20], c: [18, 20, 22], v: [1, 1, 1] });
+  // 初次推送时 TV 已可能通过 getBars 渲染到 T1；不能补发更早的 T0，
+  // 否则会触发 putToCacheNewBar time violation。
+  assert.deepEqual(received.map((bar) => bar.time), [5500 * 1000]);
   // 帧2: 新根 T2(6000)出现, 同帧含 T1 最终值(close 22→25, high 23→25)
   df.feedRealtimeBar(key, { t: [4000, 5000, 5500, 6000], o: [18, 20, 21, 25], h: [18, 20, 25, 26], l: [18, 20, 20, 24], c: [18, 20, 25, 25], v: [1, 1, 5, 1] });
   // 断言: T1(5500)被 finalize 到最终 close=25/high=25, 而非停在帧1的 22/23

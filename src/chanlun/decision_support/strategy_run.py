@@ -334,6 +334,7 @@ def build_monitor_policy_fingerprint(
                 "review_workers": config.review_workers,
                 "review_queue_limit": config.review_queue_limit,
                 "max_llm_reviews_per_day": config.max_llm_reviews_per_day,
+                "review_mode": config.review_mode,
                 "paper_enabled": config.paper_enabled,
                 "auto_order_enabled": config.auto_order_enabled,
             },

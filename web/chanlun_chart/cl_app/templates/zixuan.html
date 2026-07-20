@@ -1,163 +1,266 @@
-<!DOCTYPE HTML>
-<html lang="zh">
-
-<head>
-    <title>选股策略列表与操作</title>
-    <meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,minimum-scale=1.0">
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/layui.css') }}" />
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}" />
-    <script type="text/javascript" src="{{ url_for('static', filename='layui.js') }}"></script>
-    <script type="text/javascript" src="{{ url_for('static', filename='jquery-3.7.0.min.js') }}"></script>
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>管理自选分组 - Chanlun Pro</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/layui.css') }}?v={{ static_version }}" />
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}?v={{ static_version }}" />
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/ui-system.css') }}?v={{ static_version|default('') }}" />
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/zixuan.css') }}?v={{ static_version }}" />
+    <script src="{{ url_for('static', filename='jquery-3.7.0.min.js') }}?v={{ static_version }}"></script>
+    <script src="{{ url_for('static', filename='layui.js') }}?v={{ static_version }}"></script>
     {% include 'dark.html' %}
-</head>
+  </head>
+  <body class="cp-ui zx-manager-page">
+    <a class="cp-skip-link" href="#main-content">跳到自选分组管理</a>
+    <main id="main-content" class="zx-manager-shell">
+      <header class="zx-manager-hero">
+        <div>
+          <span class="zx-manager-eyebrow">WATCHLIST WORKSPACE</span>
+          <h1>管理自选分组</h1>
+          <p>按交易目的拆分观察池。新建、删除与文件迁移互不混用，降低误操作。</p>
+        </div>
+        <div class="zx-manager-count" aria-label="当前分组数量">
+          <strong>{{ zx_groups | length }}</strong>
+          <small>个分组</small>
+        </div>
+      </header>
 
-<body class="layui-fluid">
+      <div class="zx-manager-grid">
+        <section class="zx-manager-card" aria-labelledby="zx-manager-add-title">
+          <div class="zx-manager-card-header">
+            <h2 id="zx-manager-add-title">新建分组</h2>
+            <p>建议按策略或阶段命名，例如“一买观察”“持仓管理”。</p>
+          </div>
+          <form id="zixuan_manager_add_form" novalidate>
+            <label class="zx-field-label" for="zixuan_manager_group_name">分组名称</label>
+            <div class="zx-manager-add-row">
+              <input
+                id="zixuan_manager_group_name"
+                class="layui-input"
+                type="text"
+                maxlength="64"
+                autocomplete="off"
+                placeholder="输入新的分组名称" />
+              <button id="zixuan_manager_add_submit" class="zx-primary-button" type="submit">创建分组</button>
+            </div>
+            <p id="zixuan_manager_error" class="zx-field-error" role="alert" hidden></p>
+          </form>
+        </section>
 
-    <form class="layui-form" id="zixuan_opt_form" style="padding: 20px;">
-        <div class="layui-form-item">
-            <label class="layui-form-label">操作类型</label>
-            <div class="layui-input-block">
-                <label>
-                    <select name="zixuan_opt">
-                        <option value="ADD">添加自选组</option>
-                        <option value="DEL">删除自选组</option>
-                    </select>
-                </label>
-            </div>
-        </div>
-        <div class="layui-form-item">
-            <label class="layui-form-label">自选组名称</label>
-            <div class="layui-input-block">
-                <label>
-                    <input type="text" name="zixuan_name" value="" placeholder="请输入要操作的自选组名称" class="layui-input"
-                        lay-verify="required" />
-                </label>
-            </div>
-        </div>
-        <div class="layui-form-item">
-            <div class="layui-input-block">
-                <button type="button" class="layui-btn layui-bg-red" id="zixuan_opt_submit">操作</button>
-            </div>
-        </div>
-    </form>
-    <hr class="layui-border-red">
-    <form class="layui-form layui-row layui-col-space16" id="zixuan_opt_export">
-        <div class="layui-col-sm4">
-            <label class="layui-form-label">自选组</label>
-            <div class="layui-input-block" title="自选组">
-                <label for="zx_group">
-                    <select type="select" class="form-control" name="zx_group" id="export_zx_group">
-                        {% for zg in zx_groups %}
-                        <option value="{{ zg['name'] }}" {% if zg['name']==zx_group %} selected {% endif %}>{{
-                            zg['name'] }}</option>
-                        {% endfor %}
-                    </select>
-                </label>
-            </div>
-        </div>
-        <div class="layui-col-sm4">
-            <div class="layui-input-block" title="导入文件">
-                <button type="button" class="layui-btn layui-bg-red" id="zixuan_opt_import_file"
-                    lay-options="{accept: 'file', exts: 'txt'}">
-                    <i class="layui-icon layui-icon-upload"></i>
-                    导入文件
+        <section class="zx-manager-card" aria-labelledby="zx-manager-list-title">
+          <div class="zx-manager-card-header">
+            <h2 id="zx-manager-list-title">已有分组</h2>
+            <p>删除分组会同时移除其中的自选关系，不会删除任何行情或研究数据。</p>
+          </div>
+          <div class="zx-manager-group-list" id="zixuan_manager_group_list">
+            {% for group in zx_groups %}
+              <div class="zx-manager-group-row" data-group-name="{{ group['name'] }}">
+                <span class="zx-manager-group-avatar" aria-hidden="true">{{ group['name'][:1] }}</span>
+                <span class="zx-manager-group-copy">
+                  <strong>{{ group['name'] }}</strong>
+                  <small>{% if group['name'] == '我的关注' %}系统默认分组{% else %}自定义观察分组{% endif %}</small>
+                </span>
+                {% if group['name'] == '我的关注' %}
+                  <span class="zx-manager-protected">不可删除</span>
+                {% else %}
+                  <button
+                    type="button"
+                    class="zx-manager-delete"
+                    data-group-name="{{ group['name'] }}"
+                    aria-label="删除分组 {{ group['name'] }}">
+                    删除
+                  </button>
+                {% endif %}
+              </div>
+            {% else %}
+              <p class="zx-manager-protected">当前市场还没有自选分组。</p>
+            {% endfor %}
+          </div>
+        </section>
+
+        <section class="zx-manager-card zx-manager-card--wide" aria-labelledby="zx-manager-transfer-title">
+          <div class="zx-manager-card-header">
+            <h2 id="zx-manager-transfer-title">导入 / 导出标的</h2>
+            <p>先选目标分组。TXT 每行使用“代码,名称”；名称可以省略，代码会按当前市场校验。</p>
+          </div>
+          <form class="layui-form" id="zixuan_transfer_form">
+            <div class="zx-manager-transfer-row">
+              <div class="zx-manager-transfer-select">
+                <label class="zx-field-label" for="export_zx_group">目标分组</label>
+                <select id="export_zx_group" name="zx_group" aria-label="选择导入导出的目标分组">
+                  {% for group in zx_groups %}
+                    <option value="{{ group['name'] }}">{{ group['name'] }}</option>
+                  {% endfor %}
+                </select>
+              </div>
+              <div class="zx-manager-transfer-actions">
+                <button
+                  type="button"
+                  class="zx-secondary-button"
+                  id="zixuan_opt_import_file"
+                  lay-options="{accept: 'file', exts: 'txt'}">
+                  <i class="layui-icon layui-icon-upload" aria-hidden="true"></i>
+                  导入 TXT
                 </button>
+                <button type="submit" class="zx-secondary-button" id="zixuan_opt_export_submit">
+                  <i class="layui-icon layui-icon-download-circle" aria-hidden="true"></i>
+                  导出当前组
+                </button>
+              </div>
             </div>
-        </div>
-        <div class="layui-btn-container layui-col-sm4">
-            <button class="layui-btn layui-bg-red" id="zixuan_opt_export_submit">导出</button>
-        </div>
-    </form>
+          </form>
+        </section>
 
-    <hr class="layui-border-red" />
+        <aside class="zx-manager-notes" aria-label="分组使用说明">
+          <p><strong>使用建议：</strong>分组表达观察目的，不表达结论。买卖点仍由 30 分钟定位、5 分钟操作级别和 1 分钟递归结构共同确认。</p>
+          <p><strong>A 股代码示例：</strong>600519、SH.600519、SHSE.600519 均可在导入时识别。</p>
+        </aside>
+      </div>
+    </main>
 
-    <blockquote class="layui-elem-quote layui-quote-nm">
-        <h3>使用说明：</h3>
-        <p>添加自选组，在相同市场不允许有相同名称的自选组</p>
-        <p>删除自选组，默认自选组 “我的关注” 是不允许删除的</p>
-        <p>导入/导出操作，先选择要进行导入或导出到的 <b>自选组</b>，然后在点击对应的操作</p>
-        <p>导入导出的格式，每一行包括代码与名称，用逗号分隔</p>
-        <p>沪深市场的代码格式支持：600519 / SH.600519 / SHSE.600519 格式</p>
-    </blockquote>
-
-    <fieldset class="layui-elem-field">
-        <legend>导入/导出示例</legend>
-        <div class="layui-field-box">
-            <p>SZ.000001,平安银行</p>
-            <p>SZ.000002,万科A</p>
-            <p>SZ.000004,国华网安</p>
-        </div>
-    </fieldset>
-
-
-    <!-- 自选组管理脚本：新增/删除自选组，以及按组导入（txt 文件）/导出标的列表 -->
     <script nonce="{{ csp_nonce }}">
+      $(function () {
+        var market = {{ market | tojson }};
 
-        $(function () {
-            const market = '{{ market }}';
+        function validateGroupName(value) {
+          var name = typeof value === "string" ? value.trim() : "";
+          if (!name) return { ok: false, name: "", message: "分组名称不能为空" };
+          if (name.length > 64) return { ok: false, name: name, message: "分组名称不能超过 64 个字符" };
+          if (/[\/\\\u0000-\u001f]/.test(name)) {
+            return { ok: false, name: name, message: "分组名称不能包含斜杠或控制字符" };
+          }
+          return { ok: true, name: name, message: "" };
+        }
 
-            layui.use(function () {
-                var upload = layui.upload;
-                const form = layui.form;
-                const layer = layui.layer;
-                // 自选新增/删除操作
-                $('#zixuan_opt_submit').click(function () {
-                    let opt = $(
-                        '#zixuan_opt_form select[name="zixuan_opt"]'
-                    ).val();
-                    let zx_group = $(
-                        '#zixuan_opt_form input[name="zixuan_name"]'
-                    ).val();
-                    if (zx_group === "") {
-                        layer.msg("自选组不能为空");
-                        return false;
-                    }
-                    if (opt === "DEL" && zx_group === "我的关注") {
-                        layer.msg("默认自选组不允许删除");
-                        return false;
-                    }
-                    AppRequest.ajax({
-                        type: "POST",
-                        url: "/opt_zixuan_group/" + market,
-                        data: { opt: opt, zx_group: zx_group },
-                        dataType: "json",
-                        success: function (res) {
-                            if (res["ok"]) {
-                                layer.msg("自选组操作成功，需要刷新页面进行更新");
-                            } else {
-                                layer.msg("自选组操作失败");
-                            }
-                        },
-                    });
-                    return false;
-                });
+        function setError(message) {
+          $("#zixuan_manager_error").text(message || "").prop("hidden", !message);
+        }
 
-                // 自选导出操作
-                $('#zixuan_opt_export_submit').click(function () {
-                    let zx_group = $('#export_zx_group').val();
-                    window.open("/zixuan_opt_export?market=" + market + "&zx_group=" + zx_group)
-                });
+        function setAddBusy(busy) {
+          $("#zixuan_manager_add_submit")
+            .prop("disabled", busy)
+            .toggleClass("is-busy", busy)
+            .text(busy ? "创建中…" : "创建分组");
+        }
 
-                // 自选导入操作
-                upload.render({
-                    elem: '#zixuan_opt_import_file', // 绑定多个元素
-                    url: '/zixuan_opt_import',
-                    field: 'file', // 文件域的字段名
-                    accept: 'file', // 普通文件
-                    exts: 'txt',
-                    data: { market: market, 'zx_group': function () { return $('#export_zx_group').val(); } },
-                    done: function (res) {
-                        if (res.ok) {
-                            layer.msg(res.msg);
-                        } else {
-                            layer.msg('导入失败，请在控制台查看失败原因')
-                        }
-                    }
-                });
+        function notifyParent(preferredGroup) {
+          try {
+            if (window.parent && window.parent !== window && window.parent.ZiXuan) {
+              window.parent.ZiXuan.load_groups(preferredGroup || "我的关注");
+              window.parent.ZiXuan.render_zixuan_opts();
+            }
+          } catch (_error) {
+            // 同源弹层正常可访问；若部署为跨源嵌入，则由关闭弹层后的刷新兜底。
+          }
+        }
 
+        function mutateGroup(opt, groupName, done, completed) {
+          AppRequest.ajax({
+            type: "POST",
+            url: "/opt_zixuan_group/" + encodeURIComponent(market),
+            data: { opt: opt, zx_group: groupName },
+            dataType: "json",
+            timeout: 10000,
+            success: function (response) {
+              if (!response || response.ok !== true) {
+                var message = response && response.msg ? response.msg : "分组操作失败";
+                setError(message);
+                layui.layer.msg(message);
+                return;
+              }
+              layui.layer.msg(response.msg || "分组操作成功");
+              notifyParent(opt === "ADD" ? groupName : "我的关注");
+              if (typeof done === "function") done(response);
+            },
+            error: function (xhr) {
+              var message = xhr && xhr.responseJSON && xhr.responseJSON.msg
+                ? xhr.responseJSON.msg
+                : "分组操作失败，请稍后重试";
+              setError(message);
+              layui.layer.msg(message);
+            },
+            complete: function () {
+              if (typeof completed === "function") completed();
+            },
+          });
+        }
+
+        layui.use(["form", "upload", "layer"], function () {
+          var form = layui.form;
+          var upload = layui.upload;
+          var layer = layui.layer;
+          form.render();
+
+          $("#zixuan_manager_add_form").on("submit", function (event) {
+            event.preventDefault();
+            var validation = validateGroupName($("#zixuan_manager_group_name").val());
+            if (!validation.ok) {
+              setError(validation.message);
+              return false;
+            }
+            setError("");
+            setAddBusy(true);
+            mutateGroup("ADD", validation.name, function () {
+              window.location.reload();
+            }, function () {
+              setAddBusy(false);
             });
-        });
-    </script>
-</body>
+            return false;
+          });
 
+          $("#zixuan_manager_group_list").on("click", ".zx-manager-delete", function () {
+            var groupName = String($(this).data("group-name") || "");
+            var confirmMessage = document.createElement("span");
+            confirmMessage.textContent = "删除“" + groupName + "”后，其中的自选关系也会移除。确认继续？";
+            layer.confirm(
+              confirmMessage.outerHTML,
+              { title: "确认删除分组", btn: ["删除", "取消"] },
+              function (index) {
+                layer.close(index);
+                mutateGroup("DEL", groupName, function () {
+                  window.location.reload();
+                });
+              }
+            );
+          });
+
+          $("#zixuan_opt_export_submit").on("click", function (event) {
+            event.preventDefault();
+            var groupName = $("#export_zx_group").val();
+            window.open(
+              "/zixuan_opt_export?market=" + encodeURIComponent(market)
+                + "&zx_group=" + encodeURIComponent(groupName),
+              "_blank",
+              "noopener"
+            );
+          });
+
+          upload.render({
+            elem: "#zixuan_opt_import_file",
+            url: "/zixuan_opt_import",
+            field: "file",
+            accept: "file",
+            exts: "txt",
+            data: {
+              market: market,
+              zx_group: function () { return $("#export_zx_group").val(); },
+            },
+            done: function (response) {
+              if (response && response.ok) {
+                layer.msg(response.msg || "导入完成");
+                notifyParent($("#export_zx_group").val());
+              } else {
+                layer.msg(response && response.msg ? response.msg : "导入失败");
+              }
+            },
+            error: function () {
+              layer.msg("导入失败，请检查文件后重试");
+            },
+          });
+        });
+      });
+    </script>
+  </body>
 </html>

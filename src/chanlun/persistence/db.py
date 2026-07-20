@@ -11,6 +11,7 @@ from typing import List, Union
 import pandas as pd
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     Column,
     DateTime,
     Float,
@@ -49,9 +50,15 @@ from chanlun.db_models.decision_support import (
     TableByDecisionEvent,
     TableByDecisionReview,
     TableByDecisionTransition,
+    TableByExitAttentionObservation,
+    TableByPhysicalOneMinuteCheckpoint,
     TableByPaperAdmissionAuthorization,
     TableByRiskLatchAudit,
     TableByRiskSnapshot,
+    TableBySectorPreferenceRevision,
+    TableBySectorSelection,
+    TableByTriggerEventLink,
+    TableByTriggerObservation,
     TableByUserDecision,
     TableByLLMReview,
     TableByLLMReviewAttempt,
@@ -79,6 +86,12 @@ _REGISTERED_DECISION_SUPPORT_MODELS = (
     TableByLLMReview,
     TableByLLMReviewAttempt,
     TableByLLMReviewClaim,
+    TableBySectorSelection,
+    TableByTriggerObservation,
+    TableByExitAttentionObservation,
+    TableByPhysicalOneMinuteCheckpoint,
+    TableByTriggerEventLink,
+    TableBySectorPreferenceRevision,
 )
 
 _SQLITE_BUSY_TIMEOUT_MS = 5_000
@@ -209,6 +222,20 @@ class DB(object):
     MYSQL_SCHEMA_LOCK_TIMEOUT = 30
     MYSQL_DDL_TIMEOUT = 180
     SQLITE_BUSY_TIMEOUT_MS = _SQLITE_BUSY_TIMEOUT_MS
+    SQLITE_LEGACY_PREFERENCE_V0_MISSING_COLUMNS = frozenset(
+        {"request_fingerprint", "payload_fingerprint", "payload_json"}
+    )
+    OPPORTUNITY_TABLE_MODELS = {
+        table.__tablename__: table
+        for table in (
+            TableBySectorSelection,
+            TableByTriggerObservation,
+            TableByExitAttentionObservation,
+            TableByPhysicalOneMinuteCheckpoint,
+            TableByTriggerEventLink,
+            TableBySectorPreferenceRevision,
+        )
+    }
     SQLITE_DECISION_SUPPORT_REQUIRED_COLUMNS = {
         table.__tablename__: frozenset(table.__table__.columns.keys())
         for table in _REGISTERED_DECISION_SUPPORT_MODELS
@@ -221,7 +248,67 @@ class DB(object):
     )
     SQLITE_DECISION_SUPPORT_REQUIRED_INDEXES = {
         "cl_decision_event": frozenset({DECISION_EVENT_STRATEGY_RUN_INDEX}),
+        "cl_decision_sector_selection": frozenset(
+            {
+                (
+                    "market",
+                    "scope",
+                    "status",
+                    "bar_closed_at",
+                    "observed_at",
+                    "id",
+                ),
+            }
+        ),
+        "cl_decision_trigger_observation": frozenset(
+            {
+                ("selection_id", "bar_closed_at", "observed_at", "id"),
+                (
+                    "selection_id",
+                    "market",
+                    "code",
+                    "sector_id",
+                    "strategy_run_id",
+                    "strategy_run_epoch",
+                ),
+            }
+        ),
+        "cl_decision_exit_attention_observation": frozenset(
+            {
+                ("market", "code", "bar_closed_at", "observed_at", "id"),
+            }
+        ),
+        "cl_decision_physical_one_minute_checkpoint": frozenset(
+            {
+                ("market", "code", "updated_at", "id"),
+            }
+        ),
+        "cl_decision_trigger_event_link": frozenset(
+            {
+                ("linked_at", "id"),
+            }
+        ),
+        "cl_decision_sector_preference_revision": frozenset(
+            {
+                ("sector_id", "revision", "id"),
+            }
+        ),
     }
+    DECISION_SUPPORT_NULLABLE_DATETIME_COLUMNS = frozenset(
+        {
+            ("cl_decision_sector_preference_revision", "pinned_at"),
+        }
+    )
+    OPPORTUNITY_DATETIME_TABLES = frozenset(
+        {
+            "cl_decision_sector_selection",
+            "cl_decision_trigger_observation",
+            "cl_decision_exit_attention_observation",
+            "cl_decision_physical_one_minute_checkpoint",
+            "cl_decision_trigger_event_link",
+            "cl_decision_sector_preference_revision",
+        }
+    )
     DECISION_SUPPORT_DATETIME_COLUMNS = (
         ("cl_decision_event", "observed_at"),
         ("cl_decision_transition", "occurred_at"),
@@ -238,6 +325,31 @@ class DB(object):
         ("cl_decision_llm_review_attempt", "started_at"),
         ("cl_decision_llm_review_attempt", "completed_at"),
         ("cl_decision_llm_review", "created_at"),
+        ("cl_decision_sector_selection", "observed_at"),
+        ("cl_decision_sector_selection", "bar_closed_at"),
+        ("cl_decision_trigger_observation", "bar_opened_at"),
+        ("cl_decision_trigger_observation", "bar_closed_at"),
+        ("cl_decision_trigger_observation", "observed_at"),
+        ("cl_decision_trigger_observation", "physical_5m_closed_at"),
+        ("cl_decision_exit_attention_observation", "bar_opened_at"),
+        ("cl_decision_exit_attention_observation", "bar_closed_at"),
+        ("cl_decision_exit_attention_observation", "observed_at"),
+        (
+            "cl_decision_physical_one_minute_checkpoint",
+            "analysis_first_bar_closed_at",
+        ),
+        (
+            "cl_decision_physical_one_minute_checkpoint",
+            "bootstrap_closed_at",
+        ),
+        (
+            "cl_decision_physical_one_minute_checkpoint",
+            "last_bar_closed_at",
+        ),
+        ("cl_decision_physical_one_minute_checkpoint", "updated_at"),
+        ("cl_decision_trigger_event_link", "linked_at"),
+        ("cl_decision_sector_preference_revision", "changed_at"),
+        ("cl_decision_sector_preference_revision", "pinned_at"),
     )
     LLM_REVIEW_UNIQUE_CONSTRAINTS = {
         "cl_decision_llm_review_claim": frozenset(
@@ -344,6 +456,7 @@ class DB(object):
         self.Session = sessionmaker(bind=self.engine, expire_on_commit=False)
 
         Base.metadata.create_all(self.engine)
+        self._migrate_sqlite_opportunity_schema()
         self._validate_sqlite_decision_support_schema()
         self._migrate_decision_event_strategy_run_schema()
         self._validate_decision_event_strategy_run_schema()
@@ -361,6 +474,476 @@ class DB(object):
         self._last_dt_cache_lock = threading.Lock()
         # R6-#2: 保护 __cache_tables 的 check-then-act + 动态建 ORM 表类(同 get_exchange 审查 B-1)
         self._cache_tables_lock = threading.Lock()
+
+    @staticmethod
+    def _sqlite_column_type_name(column_type, dialect) -> str:
+        return " ".join(
+            str(column_type.compile(dialect=dialect)).upper().split()
+        )
+
+    @staticmethod
+    def _sqlite_default_name(default) -> str | None:
+        if default is None:
+            return None
+        value = getattr(default, "arg", default)
+        return " ".join(str(value).strip().split())
+
+    @staticmethod
+    def _sqlite_declared_columns(connection, table_name: str) -> tuple:
+        quoted_table_name = table_name.replace('"', '""')
+        return tuple(
+            connection.exec_driver_sql(
+                f'PRAGMA table_xinfo("{quoted_table_name}")'
+            ).mappings()
+        )
+
+    def _sqlite_columns_match(
+        self,
+        expected_columns,
+        actual_columns,
+        dialect,
+        declared_columns=None,
+    ) -> bool:
+        if tuple(column.name for column in expected_columns) != tuple(
+            str(column.get("name")) for column in actual_columns
+        ):
+            return False
+        if declared_columns is not None and tuple(
+            str(column.get("name")) for column in declared_columns
+        ) != tuple(column.name for column in expected_columns):
+            return False
+        for position, (expected, actual) in enumerate(
+            zip(expected_columns, actual_columns)
+        ):
+            expected_type_name = self._sqlite_column_type_name(
+                expected.type,
+                dialect,
+            )
+            actual_type = actual.get("type")
+            if actual_type is None or expected_type_name != (
+                self._sqlite_column_type_name(actual_type, dialect)
+            ):
+                return False
+            actual_nullable = actual.get("nullable")
+            if (
+                type(actual_nullable) is not bool
+                or actual_nullable is not expected.nullable
+            ):
+                return False
+            if self._sqlite_default_name(
+                expected.server_default
+            ) != self._sqlite_default_name(actual.get("default")):
+                return False
+            if declared_columns is not None:
+                declared = declared_columns[position]
+                declared_type_name = " ".join(
+                    str(declared.get("type") or "").upper().split()
+                )
+                if declared_type_name != expected_type_name:
+                    return False
+                expected_not_null = 0 if expected.nullable else 1
+                if declared.get("notnull") != expected_not_null:
+                    return False
+                if self._sqlite_default_name(
+                    expected.server_default
+                ) != self._sqlite_default_name(declared.get("dflt_value")):
+                    return False
+                if declared.get("hidden") not in (None, 0):
+                    return False
+        return True
+
+    @staticmethod
+    def _sqlite_expected_uniques(table) -> tuple:
+        return tuple(
+            sorted(
+                (
+                    tuple(column.name for column in constraint.columns)
+                    for constraint in table.constraints
+                    if isinstance(constraint, UniqueConstraint)
+                ),
+                key=repr,
+            )
+        )
+
+    @staticmethod
+    def _sqlite_actual_uniques(inspector, table_name: str) -> tuple:
+        return tuple(
+            sorted(
+                (
+                    tuple(item.get("column_names") or ())
+                    for item in inspector.get_unique_constraints(table_name)
+                ),
+                key=repr,
+            )
+        )
+
+    @staticmethod
+    def _sqlite_expected_checks(table) -> tuple[str, ...]:
+        return tuple(
+            sorted(
+                " ".join(str(constraint.sqltext).split())
+                for constraint in table.constraints
+                if isinstance(constraint, CheckConstraint)
+            )
+        )
+
+    @staticmethod
+    def _sqlite_actual_checks(inspector, table_name: str) -> tuple[str, ...]:
+        return tuple(
+            sorted(
+                " ".join(str(item.get("sqltext") or "").split())
+                for item in inspector.get_check_constraints(table_name)
+            )
+        )
+
+    @staticmethod
+    def _sqlite_expected_indexes(table) -> tuple:
+        return tuple(
+            sorted(
+                (
+                    (
+                        str(index.name or ""),
+                        tuple(column.name for column in index.columns),
+                        bool(index.unique),
+                        None,
+                    )
+                    for index in table.indexes
+                ),
+                key=repr,
+            )
+        )
+
+    @staticmethod
+    def _sqlite_actual_indexes(inspector, table_name: str) -> tuple:
+        return tuple(
+            sorted(
+                (
+                    (
+                        str(item.get("name") or ""),
+                        tuple(item.get("column_names") or ()),
+                        bool(item.get("unique")),
+                        (
+                            None
+                            if (item.get("dialect_options") or {}).get(
+                                "sqlite_where"
+                            ) is None
+                            else " ".join(
+                                str(
+                                    (item.get("dialect_options") or {})[
+                                        "sqlite_where"
+                                    ]
+                                ).split()
+                            )
+                        ),
+                    )
+                    for item in inspector.get_indexes(table_name)
+                ),
+                key=repr,
+            )
+        )
+
+    @staticmethod
+    def _sqlite_expected_explicit_index_names(table) -> tuple[str, ...]:
+        return tuple(sorted(str(index.name) for index in table.indexes))
+
+    @staticmethod
+    def _sqlite_actual_explicit_index_names(
+        connection,
+        table_name: str,
+    ) -> tuple[str, ...]:
+        return tuple(
+            connection.execute(
+                text(
+                    "SELECT name FROM sqlite_master "
+                    "WHERE type = 'index' AND tbl_name = :table_name "
+                    "AND sql IS NOT NULL ORDER BY name"
+                ),
+                {"table_name": table_name},
+            ).scalars()
+        )
+
+    @staticmethod
+    def _sqlite_expected_foreign_keys(table) -> tuple:
+        signatures = []
+        for constraint in table.foreign_key_constraints:
+            elements = tuple(constraint.elements)
+            referred_tables = {element.column.table.name for element in elements}
+            if len(referred_tables) != 1:
+                raise RuntimeError(
+                    "opportunity model foreign key spans multiple tables"
+                )
+            signatures.append(
+                (
+                    tuple(element.parent.name for element in elements),
+                    None,
+                    referred_tables.pop(),
+                    tuple(element.column.name for element in elements),
+                    str(constraint.ondelete or "").upper(),
+                )
+            )
+        return tuple(sorted(signatures, key=repr))
+
+    @staticmethod
+    def _sqlite_actual_foreign_keys(inspector, table_name: str) -> tuple:
+        signatures = []
+        for item in inspector.get_foreign_keys(table_name):
+            options = item.get("options") or {}
+            signatures.append(
+                (
+                    tuple(item.get("constrained_columns") or ()),
+                    item.get("referred_schema"),
+                    item.get("referred_table"),
+                    tuple(item.get("referred_columns") or ()),
+                    str(options.get("ondelete") or "").upper(),
+                )
+            )
+        return tuple(sorted(signatures, key=repr))
+
+    @staticmethod
+    def _sqlite_trigger_names(connection, table_name: str) -> tuple[str, ...]:
+        return tuple(
+            connection.execute(
+                text(
+                    "SELECT name FROM sqlite_master "
+                    "WHERE type = 'trigger' AND tbl_name = :table_name "
+                    "ORDER BY name"
+                ),
+                {"table_name": table_name},
+            ).scalars()
+        )
+
+    def _sqlite_legacy_preference_is_allowlisted(
+        self,
+        inspector,
+        connection,
+    ) -> bool:
+        table = TableBySectorPreferenceRevision.__table__
+        table_name = table.name
+        expected_columns = tuple(
+            column
+            for column in table.columns
+            if column.name
+            not in self.SQLITE_LEGACY_PREFERENCE_V0_MISSING_COLUMNS
+        )
+        actual_columns = tuple(inspector.get_columns(table_name))
+        declared_columns = self._sqlite_declared_columns(
+            connection,
+            table_name,
+        )
+        primary_key = tuple(
+            inspector.get_pk_constraint(table_name).get(
+                "constrained_columns",
+                (),
+            )
+            or ()
+        )
+        return (
+            self._sqlite_columns_match(
+                expected_columns,
+                actual_columns,
+                connection.dialect,
+                declared_columns,
+            )
+            and primary_key == ("id",)
+            and self._sqlite_actual_uniques(inspector, table_name)
+            == self._sqlite_expected_uniques(table)
+            and self._sqlite_actual_checks(inspector, table_name)
+            == self._sqlite_expected_checks(table)
+            and self._sqlite_actual_indexes(inspector, table_name)
+            == self._sqlite_expected_indexes(table)
+            and self._sqlite_actual_explicit_index_names(
+                connection,
+                table_name,
+            )
+            == self._sqlite_expected_explicit_index_names(table)
+            and self._sqlite_actual_foreign_keys(inspector, table_name)
+            == self._sqlite_expected_foreign_keys(table)
+            and not self._sqlite_trigger_names(connection, table_name)
+        )
+
+    def _migrate_sqlite_opportunity_schema(self) -> None:
+        if config.DB_TYPE != "sqlite":
+            return
+
+        table = TableBySectorPreferenceRevision.__table__
+        table_name = table.name
+        inspector = inspect(self.engine)
+        if table_name not in set(inspector.get_table_names()):
+            return
+        actual_columns = {
+            str(column["name"]) for column in inspector.get_columns(table_name)
+        }
+        current_columns = frozenset(table.columns.keys())
+        legacy_columns = (
+            current_columns - self.SQLITE_LEGACY_PREFERENCE_V0_MISSING_COLUMNS
+        )
+        if actual_columns == current_columns:
+            return
+        if actual_columns != legacy_columns:
+            return
+
+        with self.engine.connect() as connection:
+            connection.exec_driver_sql("BEGIN IMMEDIATE")
+            try:
+                locked_inspector = inspect(connection)
+                if not self._sqlite_legacy_preference_is_allowlisted(
+                    locked_inspector,
+                    connection,
+                ):
+                    raise RuntimeError(
+                        "opportunity legacy schema is not allowlisted"
+                    )
+                row_count = connection.exec_driver_sql(
+                    f'SELECT COUNT(*) FROM "{table_name}"'
+                ).scalar_one()
+                if row_count != 0:
+                    raise RuntimeError(
+                        "opportunity schema migration requires an empty "
+                        "known legacy table"
+                    )
+                connection.exec_driver_sql(f'DROP TABLE "{table_name}"')
+                table.create(connection)
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+
+    def _validate_sqlite_opportunity_table(
+        self,
+        inspector,
+        connection,
+        table_name: str,
+    ) -> None:
+        table = self.OPPORTUNITY_TABLE_MODELS[table_name].__table__
+        triggers = self._sqlite_trigger_names(connection, table_name)
+        if triggers:
+            raise RuntimeError(
+                "SQLite opportunity schema trigger is not allowlisted: "
+                + table_name
+                + " "
+                + ", ".join(triggers)
+            )
+
+        expected_columns = tuple(table.columns)
+        actual_columns = tuple(inspector.get_columns(table_name))
+        declared_columns = self._sqlite_declared_columns(
+            connection,
+            table_name,
+        )
+        if tuple(column.name for column in expected_columns) != tuple(
+            str(column.get("name")) for column in actual_columns
+        ):
+            raise RuntimeError(
+                "SQLite opportunity schema column set mismatch: " + table_name
+            )
+        if not self._sqlite_columns_match(
+            expected_columns,
+            actual_columns,
+            connection.dialect,
+            declared_columns,
+        ):
+            raise RuntimeError(
+                "SQLite opportunity schema column metadata mismatch: "
+                + table_name
+            )
+
+        primary_key = tuple(
+            inspector.get_pk_constraint(table_name).get(
+                "constrained_columns",
+                (),
+            )
+            or ()
+        )
+        if primary_key != ("id",):
+            raise RuntimeError(
+                "SQLite opportunity schema primary key must be id: "
+                + table_name
+            )
+
+        expected_uniques = self._sqlite_expected_uniques(table)
+        actual_uniques = self._sqlite_actual_uniques(inspector, table_name)
+        missing_uniques = tuple(
+            item for item in expected_uniques if item not in actual_uniques
+        )
+        if missing_uniques:
+            raise RuntimeError(
+                "SQLite opportunity schema unique constraint is missing: "
+                + table_name
+            )
+        if actual_uniques != expected_uniques:
+            raise RuntimeError(
+                "SQLite opportunity schema unique constraint is not allowlisted: "
+                + table_name
+            )
+
+        expected_checks = self._sqlite_expected_checks(table)
+        actual_checks = self._sqlite_actual_checks(inspector, table_name)
+        missing_checks = tuple(
+            item for item in expected_checks if item not in actual_checks
+        )
+        if missing_checks:
+            raise RuntimeError(
+                "SQLite opportunity schema check constraint is missing: "
+                + table_name
+            )
+        if actual_checks != expected_checks:
+            raise RuntimeError(
+                "SQLite opportunity schema check constraint is not allowlisted: "
+                + table_name
+            )
+
+        expected_foreign_keys = self._sqlite_expected_foreign_keys(table)
+        actual_foreign_keys = self._sqlite_actual_foreign_keys(
+            inspector,
+            table_name,
+        )
+        expected_fk_targets = {
+            signature[:4] for signature in expected_foreign_keys
+        }
+        actual_fk_targets = {
+            signature[:4] for signature in actual_foreign_keys
+        }
+        if expected_fk_targets - actual_fk_targets:
+            raise RuntimeError(
+                "SQLite opportunity schema foreign key is missing: "
+                + table_name
+            )
+        if any(
+            signature[:4] in expected_fk_targets and signature[4] != "RESTRICT"
+            for signature in actual_foreign_keys
+        ):
+            raise RuntimeError(
+                "SQLite opportunity schema foreign key must use RESTRICT: "
+                + table_name
+            )
+        if actual_foreign_keys != expected_foreign_keys:
+            raise RuntimeError(
+                "SQLite opportunity schema foreign key is not allowlisted: "
+                + table_name
+            )
+
+        expected_indexes = self._sqlite_expected_indexes(table)
+        actual_indexes = self._sqlite_actual_indexes(inspector, table_name)
+        missing_indexes = tuple(
+            item for item in expected_indexes if item not in actual_indexes
+        )
+        if missing_indexes:
+            raise RuntimeError(
+                "SQLite opportunity schema index is missing: " + table_name
+            )
+        if actual_indexes != expected_indexes:
+            raise RuntimeError(
+                "SQLite opportunity schema index is not allowlisted: "
+                + table_name
+            )
+        if self._sqlite_actual_explicit_index_names(
+            connection,
+            table_name,
+        ) != self._sqlite_expected_explicit_index_names(table):
+            raise RuntimeError(
+                "SQLite opportunity schema index is not allowlisted: "
+                + table_name
+            )
 
     def _validate_sqlite_decision_support_schema(self) -> None:
         if config.DB_TYPE != "sqlite":
@@ -392,6 +975,15 @@ class DB(object):
                     + table_name
                     + " "
                     + ", ".join(sorted(missing_columns))
+                )
+
+        with self.engine.connect() as connection:
+            locked_inspector = inspect(connection)
+            for table_name in sorted(self.OPPORTUNITY_TABLE_MODELS):
+                self._validate_sqlite_opportunity_table(
+                    locked_inspector,
+                    connection,
+                    table_name,
                 )
 
         for (
@@ -926,8 +1518,41 @@ class DB(object):
             return ()
         inspector = inspect(self.engine)
         tables = set(inspector.get_table_names())
+        opportunity_tables_present = self.OPPORTUNITY_DATETIME_TABLES & tables
+        if opportunity_tables_present and (
+            opportunity_tables_present != self.OPPORTUNITY_DATETIME_TABLES
+        ):
+            missing_tables = self.OPPORTUNITY_DATETIME_TABLES - tables
+            raise RuntimeError(
+                "decision-support datetime table is missing: "
+                + ", ".join(sorted(missing_tables))
+            )
+        if opportunity_tables_present:
+            for table_name in sorted(self.OPPORTUNITY_TABLE_MODELS):
+                actual_columns = {
+                    str(item.get("name"))
+                    for item in inspector.get_columns(table_name)
+                }
+                expected_columns = frozenset(
+                    self.OPPORTUNITY_TABLE_MODELS[
+                        table_name
+                    ].__table__.columns.keys()
+                )
+                missing_columns = expected_columns - actual_columns
+                if missing_columns:
+                    raise RuntimeError(
+                        "decision-support opportunity column is missing: "
+                        + table_name
+                        + " "
+                        + ", ".join(sorted(missing_columns))
+                    )
         gaps = []
         for table_name, column_name in self.DECISION_SUPPORT_DATETIME_COLUMNS:
+            if (
+                not opportunity_tables_present
+                and table_name in self.OPPORTUNITY_DATETIME_TABLES
+            ):
+                continue
             if table_name not in tables:
                 raise RuntimeError(
                     "decision-support datetime table is missing: " + table_name
@@ -949,8 +1574,14 @@ class DB(object):
                     "decision-support datetime has unexpected type; "
                     f"manual migration required: {target}"
                 )
+            expected_nullable = (
+                table_name,
+                column_name,
+            ) in self.DECISION_SUPPORT_NULLABLE_DATETIME_COLUMNS
+            actual_nullable = column.get("nullable")
             unsafe_attributes = (
-                column.get("nullable") is not False
+                type(actual_nullable) is not bool
+                or actual_nullable is not expected_nullable
                 or column.get("default") is not None
                 or column.get("comment") not in (None, "")
                 or column.get("computed") is not None
@@ -992,10 +1623,16 @@ class DB(object):
             if not gaps:
                 return
             for table_name, column_name in gaps:
+                nullability = (
+                    "NULL"
+                    if (table_name, column_name)
+                    in self.DECISION_SUPPORT_NULLABLE_DATETIME_COLUMNS
+                    else "NOT NULL"
+                )
                 connection.execute(
                     text(
                         f"ALTER TABLE `{table_name}` MODIFY `{column_name}` "
-                        "DATETIME(6) NOT NULL"
+                        f"DATETIME(6) {nullability}"
                     )
                 )
 

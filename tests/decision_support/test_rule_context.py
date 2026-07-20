@@ -76,6 +76,48 @@ def test_context_missing_runtime_fact_remains_indeterminate(
     ).status is FieldResolutionStatus.NULL
 
 
+def test_context_projects_only_the_recursive_tree_that_produced_the_signal(
+    make_decision_event,
+) -> None:
+    event = make_decision_event()
+    recursive = tuple(
+        replace(
+            level,
+            source_frequency="1m",
+            source_bar_closed_at=event.bar_closed_at,
+        )
+        for level in event.levels
+    )
+    native_5m = LevelSnapshot(
+        "5m",
+        0,
+        "down",
+        True,
+        9.0,
+        10.0,
+        9.2,
+        9.8,
+        source_frequency="5m",
+        source_bar_closed_at=event.bar_closed_at,
+    )
+    native_30m = replace(
+        native_5m,
+        frequency="30m",
+        source_frequency="30m",
+        direction="up",
+    )
+    multitimeframe = replace(
+        event,
+        levels=(*recursive, native_5m, native_30m),
+    )
+
+    context = build_rule_evaluation_context(multitimeframe, _facts())
+
+    assert set(context["levels"]) == {"1", "2"}
+    assert context["levels"]["1"]["direction"] == recursive[1].direction
+    assert context["levels"]["2"]["direction"] == recursive[0].direction
+
+
 def test_context_rejects_ambiguous_numeric_level(make_decision_event) -> None:
     event = make_decision_event()
     duplicate_numeric_level = LevelSnapshot(

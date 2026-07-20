@@ -175,6 +175,37 @@ def test_schema_v2_rejects_unknown_level_direction(make_decision_event) -> None:
         DecisionEvent.from_dict(payload)
 
 
+def test_level_snapshot_rejects_unknown_trade_gate_direction(
+    make_decision_event,
+) -> None:
+    event = make_decision_event()
+
+    with pytest.raises(ValueError, match="trade_gate_direction"):
+        replace(event.levels[0], trade_gate_direction="sideways")
+
+
+def test_event_round_trip_preserves_trade_gate_direction(
+    make_decision_event,
+) -> None:
+    event = make_decision_event()
+    levels = tuple(
+        replace(
+            level,
+            source_frequency="1m",
+            source_bar_closed_at=event.bar_closed_at,
+            trade_gate_direction="down" if index == 0 else None,
+        )
+        for index, level in enumerate(event.levels)
+    )
+    source_bound = replace(event, levels=levels)
+
+    payload = source_bound.to_dict()
+    restored = DecisionEvent.from_dict(payload)
+
+    assert payload["levels"][0]["trade_gate_direction"] == "down"
+    assert restored == source_bound
+
+
 def test_build_event_id_requires_signal_fingerprint() -> None:
     observed_at = datetime.fromisoformat("2026-07-13T10:35:00+08:00")
 
@@ -481,6 +512,27 @@ def test_event_rejects_inconsistent_watermarks_for_one_physical_source(
         match="one physical source must use one bar watermark",
     ):
         replace(event, levels=(first, second))
+
+
+def test_event_rejects_stale_signal_source_watermark(
+    make_decision_event,
+) -> None:
+    event = make_decision_event()
+    stale_at = event.bar_closed_at - timedelta(minutes=1)
+    levels = tuple(
+        replace(
+            level,
+            source_frequency="1m",
+            source_bar_closed_at=stale_at,
+        )
+        for level in event.levels
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="signal source bar must match event bar",
+    ):
+        replace(event, levels=levels)
 
 
 def test_canonical_json_rejects_non_finite_float() -> None:

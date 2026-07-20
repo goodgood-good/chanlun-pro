@@ -1,7 +1,9 @@
 <!DOCTYPE html>
 <html lang="zh">
   <head>
-    <title>缠论解盘 - TradingView Chart</title>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>缠论结构解盘 - Chanlun Pro</title>
 
     <link
       rel="shortcut icon"
@@ -12,6 +14,15 @@
     <link
       rel="stylesheet"
       href="{{ url_for('static', filename='css/app.css') }}?v={{ static_version }}" />
+    <link
+      rel="stylesheet"
+      href="{{ url_for('static', filename='css/ui-system.css') }}?v={{ static_version|default('') }}" />
+    <link
+      rel="stylesheet"
+      href="{{ url_for('static', filename='css/chart_analysis.css') }}?v={{ static_version }}" />
+    <link
+      rel="stylesheet"
+      href="{{ url_for('static', filename='css/zixuan.css') }}?v={{ static_version }}" />
 
     <script
       type="text/javascript"
@@ -24,12 +35,6 @@
       src="{{ url_for('static', filename='xm-select.js') }}?v={{ static_version }}"></script>
     <script
       type="text/javascript"
-      src="{{ url_for('static', filename='marked.min.js') }}?v={{ static_version }}"></script>
-    <script
-      type="text/javascript"
-      src="{{ url_for('static', filename='vendor/dompurify-3.4.11.min.js') }}?v={{ static_version }}"></script>
-    <script
-      type="text/javascript"
       src="{{ url_for('static', filename='js/safe_html.js') }}?v={{ static_version }}"></script>
     <script
       type="text/javascript"
@@ -40,14 +45,16 @@
     {% include 'dark.html' %}
   </head>
 
-  <body>
+  <body class="cp-ui cp-workbench">
+    <a class="cp-skip-link" href="#chart_menu">跳到结构解盘侧栏</a>
     <form id="logout-form" method="post" action="/logout" style="display: none">
       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
     </form>
-    <div class="layui-fluid" style="padding: 0">
+    <main id="main-content" class="layui-fluid cp-workbench-shell" style="padding: 0">
+      <h1 class="cp-sr-only">行情与结构工作台</h1>
       <div class="layui-row">
         <div
-          class="layui-col-xs10 layui-col-sm10 layui-col-md10"
+          class="layui-col-xs10 layui-col-sm10 layui-col-md10 cp-chart-stage"
           id="chart_container"
           style="display: flex; flex-direction: column; height: 100vh">
           {# 图表内容 #}
@@ -59,14 +66,12 @@
               display: flex;
               flex-direction: column;
             ">
-            <div
-              id="tv_charts_skeleton"
-              style="
-                display: flex; align-items: center; justify-content: center;
-                height: 100%; color: #888; font-size: 14px;
-                font-family: -apple-system, sans-serif;
-              ">
-              图表加载中...
+            <div id="tv_charts_skeleton" class="cp-chart-loading">
+              <div class="cp-chart-loading-card" role="status" aria-live="polite">
+                <span class="cp-chart-loading-mark" aria-hidden="true">CL</span>
+                <strong>正在建立行情与结构工作区</strong>
+                <small>载入 K 线、笔、线段、中枢与递归结构数据…</small>
+              </div>
             </div>
           </div>
         </div>
@@ -78,7 +83,7 @@
         #}
         <div
           id="chart_resize_handle"
-          title="拖动调整宽度，双击重置"
+          title="拖动调整解盘栏宽度，双击恢复默认"
           style="
             position: fixed;
             top: 0;
@@ -98,8 +103,8 @@
           id="chart_menu_toggle"
           aria-controls="chart_menu"
           aria-expanded="true"
-          aria-label="收起缠论解盘"
-          title="收起缠论解盘"
+          aria-label="收起结构解盘侧栏"
+          title="收起结构解盘侧栏"
           style="
             position: fixed;
             top: 50%;
@@ -134,6 +139,7 @@
             background: rgba(30, 159, 255, 1) !important;
           }
           #chart_menu_toggle:focus-visible,
+          #chart_menu_inline_collapse:focus-visible,
           #toggle-menu:focus-visible,
           #symbols_list_wrap:focus-visible,
           #bkgn_stock_wrap:focus-visible {
@@ -169,36 +175,55 @@
             padding: 0;
             margin: 0;
           ">
-          <div style="padding: 10px">
-            <div class="layui-inline" style="width: 100%">
-              <h2 style="float: left; margin-top: 9px">缠论解盘</h2>
-              <button
-                type="button"
-                id="toggle-menu"
-                aria-controls="chart_menu"
-                aria-expanded="true"
-                aria-haspopup="menu"
-                aria-label="收起缠论解盘菜单"
-                style="float: right; margin-top: 10px; padding: 0; border: 0; background: transparent; color: inherit; cursor: pointer; font: inherit">
-                <i class="layui-icon layui-icon-shrink-right"></i>
-              </button>
-            </div>
-            <hr class="layui-border-red" />
+          <div class="ca-sidebar-top">
+            <header class="ca-sidebar-header">
+              <div class="ca-sidebar-title-wrap">
+                <span class="ca-sidebar-eyebrow">STRUCTURE WORKBENCH</span>
+                <h2 class="ca-sidebar-title">缠论结构解盘</h2>
+                <p class="ca-sidebar-subtitle">同周期事实 · 双中枢定位 · 条件验证</p>
+              </div>
+              <div class="ca-sidebar-actions">
+                <button
+                  type="button"
+                  id="chart_menu_inline_collapse"
+                  class="ca-sidebar-collapse"
+                  aria-controls="chart_menu"
+                  aria-expanded="true"
+                  aria-label="收起结构解盘侧栏"
+                  title="收起结构解盘侧栏">
+                  <i class="layui-icon layui-icon-shrink-right" aria-hidden="true"></i>
+                </button>
+                <button
+                  type="button"
+                  id="toggle-menu"
+                  class="ca-sidebar-menu"
+                  aria-haspopup="menu"
+                  aria-expanded="false"
+                  aria-label="打开结构解盘工具菜单"
+                  title="结构解盘工具菜单">
+                  <i class="layui-icon layui-icon-more-vertical" aria-hidden="true"></i>
+                </button>
+              </div>
+            </header>
             <form
-              class="layui-form layui-form-pane"
+              class="layui-form layui-form-pane ca-symbol-picker"
               lay-filter="select_market_form">
+              <div class="ca-symbol-picker-label">
+                <span>分析标的</span>
+                <strong>市场 · 代码</strong>
+              </div>
               <div class="layui-form-item">
                 <div class="layui-input-block" style="margin: 0; padding: 0">
                   <label>
-                    <select name="market" lay-filter="select_market">
-                      <option value="a">沪深A股</option>
+                    <select name="market" lay-filter="select_market" aria-label="选择交易市场">
+                      <option value="a">沪深 A 股</option>
                       <option value="hk">港股</option>
                       <option value="futures">国内期货</option>
                       <option value="ny_futures">纽约期货</option>
                       <option value="fx">外汇</option>
                       <option value="us">美股</option>
-                      <option value="currency">数字货币(合约)</option>
-                      <option value="currency_spot">数字货币(现货)</option>
+                      <option value="currency">数字货币（合约）</option>
+                      <option value="currency_spot">数字货币（现货）</option>
                     </select>
                   </label>
                 </div>
@@ -208,248 +233,385 @@
               </div>
             </form>
           </div>
+
+          <section
+            id="ca-overview"
+            class="ca-overview"
+            data-ready="false"
+            aria-labelledby="ca-current-name">
+            <header class="ca-overview-head">
+              <div style="min-width: 0">
+                <h3 id="ca-current-name" class="ca-symbol-name">等待标的数据</h3>
+                <span id="ca-current-symbol" class="ca-symbol-code">--</span>
+              </div>
+              <div class="ca-overview-badges" aria-label="周期与数据状态">
+                <span id="ca-current-interval" class="ca-badge">--</span>
+                <span id="ca-data-state" class="ca-badge" data-tone="loading">数据加载中</span>
+                <button
+                  type="button"
+                  id="ca-overview-toggle"
+                  class="ca-overview-toggle"
+                  aria-controls="ca-overview-body"
+                  aria-expanded="true"
+                  aria-label="收起当前结构判读"
+                  title="收起当前结构判读">
+                  <i class="layui-icon layui-icon-up" aria-hidden="true"></i>
+                </button>
+              </div>
+            </header>
+
+            <div id="ca-overview-body" class="ca-overview-body">
+              <div class="ca-price-row">
+                <div class="ca-price-block">
+                  <span class="ca-price-label">当前价</span>
+                  <strong id="ca-current-price" class="ca-current-price">--</strong>
+                </div>
+                <div class="ca-time-block">
+                  <span>K 线时间</span>
+                  <strong id="ca-bar-time" class="ca-bar-time">等待K线数据</strong>
+                </div>
+              </div>
+
+              <div class="ca-verdict">
+                <span class="ca-section-kicker">结构判读</span>
+                <strong id="ca-structure-verdict" aria-live="polite">等待结构数据</strong>
+                <p id="ca-structure-detail">加载图表后按当前周期计算笔、线段与双中枢位置。</p>
+              </div>
+
+              <section class="ca-layer-panel" aria-labelledby="ca-layer-title">
+                <header>
+                  <div>
+                    <span class="ca-section-kicker">图层控制</span>
+                    <h3 id="ca-layer-title">当前图表结构图层</h3>
+                  </div>
+                  <small>各层独立显示</small>
+                </header>
+                <div class="ca-layer-buttons" role="group" aria-label="缠论结构图层开关">
+                  <button type="button" data-chart-layer="bi" aria-pressed="true">笔</button>
+                  <button type="button" data-chart-layer="xd" aria-pressed="true">线段</button>
+                  <button type="button" data-chart-layer="bi_zs" aria-pressed="true">笔中枢</button>
+                  <button type="button" data-chart-layer="xd_zs" aria-pressed="true">线段中枢</button>
+                  <button type="button" data-chart-layer="bi_mmd" aria-pressed="true">笔买卖点</button>
+                  <button type="button" data-chart-layer="xd_mmd" aria-pressed="true">线段买卖点</button>
+                  <button type="button" data-chart-layer="recursive" aria-pressed="true">递归级别</button>
+                </div>
+                <p id="ca-layer-status">等待当前图表初始化。</p>
+              </section>
+
+              <section class="ca-analysis-group" aria-labelledby="ca-trend-title">
+                <header class="ca-analysis-group-head">
+                  <div class="ca-analysis-group-heading">
+                    <span class="ca-group-index">01</span>
+                    <h3 id="ca-trend-title">走势状态</h3>
+                  </div>
+                  <small>方向 · 端点 · 闭合状态</small>
+                </header>
+                <div class="ca-structure-grid" aria-label="当前笔与当前线段状态">
+                  <article class="ca-structure-card">
+                    <span>当前笔</span>
+                    <strong id="ca-bi-state">尚未形成</strong>
+                    <small id="ca-bi-meta">等待至少两个有效端点</small>
+                  </article>
+                  <article class="ca-structure-card">
+                    <span>当前线段</span>
+                    <strong id="ca-xd-state">尚未形成</strong>
+                    <small id="ca-xd-meta">等待至少两个有效端点</small>
+                  </article>
+                </div>
+              </section>
+
+              <section class="ca-analysis-group" aria-labelledby="ca-zone-title">
+                <header class="ca-analysis-group-head">
+                  <div class="ca-analysis-group-heading">
+                    <span class="ca-group-index">02</span>
+                    <h3 id="ca-zone-title">双中枢定位</h3>
+                  </div>
+                  <small>区间 · 状态 · 现价距离</small>
+                </header>
+                <div class="ca-zone-grid" aria-label="笔中枢与线段中枢位置">
+                  <article id="ca-bi-zone-row" class="ca-zone-card" data-tone="neutral">
+                    <div class="ca-zone-card-head">
+                      <span>笔中枢</span>
+                      <small>由笔构成</small>
+                    </div>
+                    <strong id="ca-bi-zone-state">尚无笔中枢</strong>
+                    <small id="ca-bi-zone-meta">等待出现可计算的重叠区间</small>
+                  </article>
+                  <article id="ca-xd-zone-row" class="ca-zone-card" data-tone="neutral">
+                    <div class="ca-zone-card-head">
+                      <span>线段中枢</span>
+                      <small>由线段构成</small>
+                    </div>
+                    <strong id="ca-xd-zone-state">尚无线段中枢</strong>
+                    <small id="ca-xd-zone-meta">等待出现可计算的重叠区间</small>
+                  </article>
+                </div>
+                <div class="ca-zone-audit-grid" aria-label="双塔中枢可审计详情">
+                  <article>
+                    <header><strong>笔中枢详情</strong><span id="ca-bi-zone-completion">尚未形成</span></header>
+                    <dl>
+                      <div><dt>塔层</dt><dd id="ca-bi-zone-tower">笔</dd></div>
+                      <div><dt>递归级别</dt><dd id="ca-bi-zone-level">观察层</dd></div>
+                      <div><dt>ZD / ZG</dt><dd id="ca-bi-zone-bounds">ZD -- / ZG --</dd></div>
+                      <div><dt>进入段</dt><dd id="ca-bi-zone-entry">未提供进入段</dd></div>
+                      <div><dt>离开段</dt><dd id="ca-bi-zone-exit">未提供离开段</dd></div>
+                      <div><dt>关联买卖点</dt><dd id="ca-bi-zone-point">暂无关联买卖点</dd></div>
+                    </dl>
+                  </article>
+                  <article>
+                    <header><strong>线段中枢详情</strong><span id="ca-xd-zone-completion">尚未形成</span></header>
+                    <dl>
+                      <div><dt>塔层</dt><dd id="ca-xd-zone-tower">线段</dd></div>
+                      <div><dt>递归级别</dt><dd id="ca-xd-zone-level">L0</dd></div>
+                      <div><dt>ZD / ZG</dt><dd id="ca-xd-zone-bounds">ZD -- / ZG --</dd></div>
+                      <div><dt>进入段</dt><dd id="ca-xd-zone-entry">未提供进入段</dd></div>
+                      <div><dt>离开段</dt><dd id="ca-xd-zone-exit">未提供离开段</dd></div>
+                      <div><dt>关联买卖点</dt><dd id="ca-xd-zone-point">暂无关联买卖点</dd></div>
+                    </dl>
+                  </article>
+                </div>
+              </section>
+
+              <section class="ca-analysis-group" aria-labelledby="ca-signal-title">
+                <header class="ca-analysis-group-head">
+                  <div class="ca-analysis-group-heading">
+                    <span class="ca-group-index">03</span>
+                    <h3 id="ca-signal-title">最近结构证据</h3>
+                  </div>
+                  <small>层级 · 距当前 K 线 · 价格偏离</small>
+                </header>
+                <div class="ca-signal-grid" aria-label="最近买卖点与背驰记录">
+                  <article id="ca-mmd-row" class="ca-signal-card" data-tone="neutral">
+                    <span>最近买卖点记录</span>
+                    <strong id="ca-mmd-state">暂无买卖点</strong>
+                    <small id="ca-mmd-meta">当前已加载数据中未发现记录</small>
+                  </article>
+                  <article id="ca-bc-row" class="ca-signal-card" data-tone="neutral">
+                    <span>最近背驰记录</span>
+                    <strong id="ca-bc-state">暂无背驰</strong>
+                    <small id="ca-bc-meta">当前已加载数据中未发现记录</small>
+                  </article>
+                </div>
+              </section>
+
+              <section class="ca-plan" aria-labelledby="ca-plan-title">
+                <header class="ca-analysis-group-head ca-plan-head">
+                  <div class="ca-analysis-group-heading">
+                    <span class="ca-group-index">04</span>
+                    <h3 id="ca-plan-title">验证清单</h3>
+                  </div>
+                  <small>事实 · 条件 · 重评</small>
+                </header>
+                <div class="ca-plan-row">
+                  <span class="ca-plan-index">01</span>
+                  <div class="ca-plan-copy">
+                    <span>当前事实</span>
+                    <p id="ca-plan-now">加载后仅陈述已经计算出的结构事实。</p>
+                  </div>
+                </div>
+                <div class="ca-plan-row">
+                  <span class="ca-plan-index">02</span>
+                  <div class="ca-plan-copy">
+                    <span>下一步确认</span>
+                    <p id="ca-plan-wait">等待至少一笔形成并闭合，再检查线段与中枢。</p>
+                  </div>
+                </div>
+                <div class="ca-plan-row">
+                  <span class="ca-plan-index">03</span>
+                  <div class="ca-plan-copy">
+                    <span>何时重评</span>
+                    <p id="ca-plan-boundary">结构端点或中枢不足时，不预设交易边界。</p>
+                  </div>
+                </div>
+              </section>
+
+              <nav class="ca-analysis-actions" aria-label="结构判读后续入口">
+                <a
+                  id="ca-screening-link"
+                  class="ca-action ca-action--primary"
+                  href="{{ url_for('decision_support.early_screening') }}">打开缠论提前选股</a>
+                <button type="button" id="ca-refresh-analysis" class="ca-action">重新计算</button>
+                <a
+                  id="ca-audit-link"
+                  class="ca-action"
+                  href="{{ url_for('decision_support.research_audit') }}">查看研究审计</a>
+              </nav>
+
+              <p class="ca-disclaimer">
+                <strong>阅读口径：</strong>本页只呈现当前图表周期已经计算出的结构，不预测下一根 K 线；未闭合结构、历史信号和价格边界均不能直接视为交易指令。
+                <span id="ca-analysis-updated" class="ca-updated">等待结构计算</span>
+              </p>
+            </div>
+          </section>
+
+          <header class="ca-tools-head" aria-labelledby="ca-tools-title">
+            <div>
+              <span class="ca-tools-eyebrow">AUXILIARY TOOLS</span>
+              <h3 id="ca-tools-title">盯盘与研究入口</h3>
+            </div>
+            <span class="ca-tools-count">5 个入口</span>
+          </header>
           <div class="layui-collapse lay-accordion" lay-filter="collapse-opts">
             <div class="layui-colla-item">
               <div
                 class="layui-colla-title"
                 id="ds_panel_heading"
                 data-ca-title="决策支持">
-                决策支持
+                    <span class="ca-menu-title-main">缠论提前选股与审计</span>
+                <small class="ca-menu-title-meta">板块优先</small>
               </div>
               <div class="layui-colla-content ds-workbench">
-                <section
-                  id="decision_support_panel"
-                  class="ds-panel"
-                  aria-labelledby="ds_panel_heading">
+                <section class="ds-panel" aria-labelledby="ds_panel_heading">
                   <div class="ds-header">
-                    <h3 class="ds-title">缠论决策工作台</h3>
-                    <span
-                      id="ds_status"
-                      class="ds-status"
-                      role="status"
-                      aria-live="polite"
-                      aria-atomic="true">
-                      等待加载
-                    </span>
+                    <h3 class="ds-title">板块优先候选流程</h3>
+                    <span class="ds-status">当前活动体系</span>
                   </div>
 
-                  <div
-                    id="ds_track_toggle"
-                    class="ds-track-toggle"
-                    role="group"
-                    aria-label="候选策略轨道">
-                    <button
-                      type="button"
-                      class="ds-track-button"
-                      data-ds-track="trend"
-                      aria-pressed="true">
-                      趋势延续
-                    </button>
-                    <button
-                      type="button"
-                      class="ds-track-button"
-                      data-ds-track="reversal"
-                      aria-pressed="false">
-                      底部反转
-                    </button>
-                  </div>
+                  <p class="ds-disclaimer">
+                    流程：行业强势门槛 → 板块内个股 → 5 分钟候选信号 → 30 分钟方向复核。
+                    “形成中”只进入观察队列；已确认候选仍需人工核对执行条件与风险边界。
+                  </p>
 
-                  <div class="ds-tab-list" role="tablist" aria-label="决策支持内容">
-                    <button
-                      type="button"
-                      id="ds_candidate_tab"
-                      class="ds-tab-button ds-is-active"
-                      role="tab"
-                      aria-selected="true"
-                      aria-controls="ds_candidate_list">
-                      候选
-                    </button>
-                    <button
-                      type="button"
-                      id="ds_plan_tab"
-                      class="ds-tab-button"
-                      role="tab"
-                      aria-selected="false"
-                      aria-controls="ds_plan_view"
-                      tabindex="-1">
-                      计划
-                    </button>
-                    <button
-                      type="button"
-                      id="ds_evidence_tab"
-                      class="ds-tab-button"
-                      role="tab"
-                      aria-selected="false"
-                      aria-controls="ds_evidence_view"
-                      tabindex="-1">
-                      证据
-                    </button>
-                    <button
-                      type="button"
-                      id="ds_risk_tab"
-                      class="ds-tab-button"
-                      role="tab"
-                      aria-selected="false"
-                      aria-controls="ds_risk_view"
-                      tabindex="-1">
-                      风控
-                    </button>
-                    <button
-                      type="button"
-                      id="ds_paper_tab"
-                      class="ds-tab-button"
-                      role="tab"
-                      aria-selected="false"
-                      aria-controls="ds_paper_view"
-                      tabindex="-1">
-                      模拟盘
-                    </button>
-                  </div>
+                  <a
+                    class="ds-audit-entry"
+                    href="{{ url_for('decision_support.early_screening') }}">
+                    <span>打开缠论提前选股</span>
+                    <small>查看已确认与接近触发的候选 →</small>
+                  </a>
 
-                  <div
-                    id="ds_candidate_list"
-                    class="ds-view ds-candidate-list"
-                    role="tabpanel"
-                    aria-labelledby="ds_candidate_tab"
-                    tabindex="0">
-                    <p class="ds-empty">暂无候选，等待扫描结果。</p>
-                  </div>
-                  <div
-                    id="ds_plan_view"
-                    class="ds-view"
-                    role="tabpanel"
-                    aria-labelledby="ds_plan_tab"
-                    tabindex="0"
-                    hidden>
-                    <p class="ds-empty">选择候选后查看交易计划。</p>
-                  </div>
-                  <div
-                    id="ds_evidence_view"
-                    class="ds-view"
-                    role="tabpanel"
-                    aria-labelledby="ds_evidence_tab"
-                    tabindex="0"
-                    hidden>
-                    <p class="ds-empty">选择候选后查看原文证据。</p>
-                  </div>
-                  <div
-                    id="ds_risk_view"
-                    class="ds-view"
-                    role="tabpanel"
-                    aria-labelledby="ds_risk_tab"
-                    tabindex="0"
-                    hidden>
-                    <p class="ds-empty">风控状态尚未加载。</p>
-                  </div>
-                  <div
-                    id="ds_paper_view"
-                    class="ds-view"
-                    role="tabpanel"
-                    aria-labelledby="ds_paper_tab"
-                    tabindex="0"
-                    hidden>
-                    <p class="ds-empty">研究模拟盘尚未加载。</p>
-                  </div>
-                  <section class="ds-manual-check-panel" aria-labelledby="ds_manual_check_heading">
-                    <h4 id="ds_manual_check_heading" class="ds-subtitle">图形核验</h4>
-                    <div
-                      id="ds_manual_check_view"
-                      data-operator-id="{{ current_user.get_id() if current_user.is_authenticated else '' }}">
-                      <p class="ds-empty">选择候选后完成人工图形核验。</p>
-                    </div>
-                  </section>
-
-                  <p class="ds-disclaimer">仅供人工决策参考，不连接券商交易。</p>
+                  <a
+                    class="ds-audit-entry"
+                    href="{{ url_for('decision_support.research_audit') }}">
+                    <span>历史研究 / 审计成果</span>
+                    <small>核对回测口径、样本与限制 →</small>
+                  </a>
                 </section>
               </div>
             </div>
             <div class="layui-colla-item">
               {# 自选内容 #}
-              <div class="layui-colla-title" data-ca-title="自选组">自选组</div>
-              <div
-                class="layui-colla-content layui-show"
-                style="padding: 0; position: relative; height: 100%">
-                <form
-                  class="layui-form zixuan-form-bg"
-                  style="
-                    width: 100%;
-                    position: sticky;
-                    top: 0;
-                    z-index: 10;
-                    padding: 5px 0;
-                  ">
-                  <div class="layui-form-item">
-                    <div class="layui-inline">
-                      <div
-                        class="layui-input-inline layui-input-wrap"
-                        style="width: 60%; float: left">
-                        <label for="zixuan_groups">
-                          <select
-                            id="zixuan_groups"
-                            name="zixuan_groups"
-                            lay-filter="select_zx_group"></select>
-                        </label>
-                      </div>
-                      <div
-                        class="layui-form-mid"
-                        style="padding: 4px 0 !important; float: left">
-                        <button
-                          type="button"
-                          id="add_zixuan"
-                          class="layui-btn layui-btn-primary layui-border-red layui-btn-sm">
-                          <i class="layui-icon layui-icon-add-1"></i> 自选
-                        </button>
-                      </div>
-                      <div
-                        class="layui-form-mid"
-                        style="padding: 4px 0 !important; float: left">
-                        <button
-                          type="button"
-                          id="refresh_zixuan"
-                          class="layui-btn layui-btn-primary layui-border-red layui-btn-sm">
-                          <i class="layui-icon layui-icon-refresh"></i>
-                        </button>
+              <div class="layui-colla-title" data-ca-title="自选组"><span class="ca-menu-title-main">自选盯盘</span><small class="ca-menu-title-meta">分组 · 实时涨跌</small></div>
+              <div class="layui-colla-content layui-show zx-watch-content">
+                <section class="zx-watch-panel" id="zixuan_watch_panel" aria-label="自选盯盘工作区">
+                  <header class="zx-watch-header">
+                    <div class="zx-watch-heading">
+                      <span class="zx-status-dot" aria-hidden="true"></span>
+                      <div>
+                        <strong id="zixuan_current_group">正在读取分组</strong>
+                        <span id="zixuan_watch_status" aria-live="polite" data-state="loading">正在连接行情…</span>
                       </div>
                     </div>
+                    <button
+                      type="button"
+                      class="zx-icon-button"
+                      id="manage_zixuan_groups"
+                      aria-label="管理全部自选分组"
+                      title="管理分组、导入与导出">
+                      <i class="layui-icon layui-icon-set" aria-hidden="true"></i>
+                    </button>
+                  </header>
+
+                  <div class="zx-watch-metrics" aria-label="自选盯盘统计">
+                    <div><span id="zixuan_group_count">—</span><small>分组</small></div>
+                    <div><span id="zixuan_stock_count">—</span><small>当前标的</small></div>
+                    <div><span>3 秒</span><small>盘中刷新</small></div>
                   </div>
-                </form>
-                <div
-                  style="
-                    overflow-y: auto;
-                    height: calc(100% - 50px);
-                    margin-top: 5px;
-                  ">
-                  <table
-                    class="layui-hide"
-                    id="table_zixuan_list"
-                    style="width: 100%"></table>
-                </div>
-                <hr class="layui-border-red" />
+
+                  <form class="layui-form zx-watch-toolbar" aria-label="切换与管理自选分组">
+                    <label class="zx-field-label" for="zixuan_groups">盯盘分组</label>
+                    <div class="zx-group-picker">
+                      <div class="zx-group-select">
+                        <select
+                          id="zixuan_groups"
+                          name="zixuan_groups"
+                          aria-label="选择自选分组"
+                          lay-filter="select_zx_group"></select>
+                      </div>
+                      <button
+                        type="button"
+                        id="create_zixuan_group"
+                        class="zx-secondary-button"
+                        aria-expanded="false"
+                        aria-controls="zixuan_group_creator">
+                        <i class="layui-icon layui-icon-add-1" aria-hidden="true"></i>
+                        新建
+                      </button>
+                    </div>
+                  </form>
+
+                  <form
+                    id="zixuan_group_creator"
+                    class="zx-group-creator"
+                    aria-label="新建自选分组"
+                    aria-hidden="true"
+                    hidden>
+                    <label for="zixuan_group_name">新分组名称</label>
+                    <div class="zx-group-creator-row">
+                      <input
+                        type="text"
+                        id="zixuan_group_name"
+                        class="layui-input"
+                        maxlength="64"
+                        autocomplete="off"
+                        placeholder="例如：一买观察、持仓管理" />
+                      <button type="submit" id="zixuan_group_submit" class="zx-primary-button">创建分组</button>
+                      <button type="button" id="zixuan_group_cancel" class="zx-text-button">取消</button>
+                    </div>
+                    <p id="zixuan_group_error" class="zx-field-error" role="alert" hidden></p>
+                  </form>
+
+                  <div class="zx-watch-actions">
+                    <button
+                      type="button"
+                      id="add_zixuan"
+                      class="zx-primary-button"
+                      aria-label="设置当前图表标的所属自选分组"
+                      title="将当前图表标的加入或移出分组">
+                      <i class="layui-icon layui-icon-star" aria-hidden="true"></i>
+                      管理当前标的
+                    </button>
+                    <button
+                      type="button"
+                      id="refresh_zixuan"
+                      class="zx-icon-button"
+                      aria-label="立即刷新自选行情"
+                      title="立即刷新">
+                      <i class="layui-icon layui-icon-refresh" aria-hidden="true"></i>
+                    </button>
+                  </div>
+
+                  <div class="zx-watch-table" aria-label="当前分组标的列表">
+                    <table class="layui-hide" id="table_zixuan_list"></table>
+                  </div>
+                  <p class="zx-watch-hint">点击行切换主图，右键可排序、标色或移出分组。</p>
+                </section>
               </div>
             </div>
             <div class="layui-colla-item">
               {# 标的列表：按市场浏览全部标的，点击代码列在新窗口打开图表 #}
-              <div class="layui-colla-title" data-ca-title="标的列表">标的列表</div>
+              <div class="layui-colla-title" data-ca-title="标的列表"><span class="ca-menu-title-main">全市场检索</span><small class="ca-menu-title-meta">搜索 · 快速切图</small></div>
               <div class="layui-colla-content" style="padding: 8px;">
+                <p class="ca-tool-intro ca-tool-intro--flush">输入代码、名称或拼音，点击结果立即切换主图；键盘可用 ↑ / ↓ 浏览。</p>
                 <form class="layui-form" id="symbols_filter_form">
                   <div class="layui-form-item" style="margin-bottom: 6px;">
                     <div class="layui-input-block" style="margin-left: 0;">
-                      <select id="symbols_market_select" lay-filter="symbols_market_select">
-                        <option value="a">沪深A股</option>
+                      <select id="symbols_market_select" lay-filter="symbols_market_select" aria-label="选择检索市场">
+                        <option value="a">沪深 A 股</option>
                         <option value="hk">港股</option>
                         <option value="futures">国内期货</option>
                         <option value="ny_futures">纽约期货</option>
                         <option value="fx">外汇</option>
                         <option value="us">美股</option>
-                        <option value="currency">数字货币(合约)</option>
-                        <option value="currency_spot">数字货币(现货)</option>
+                        <option value="currency">数字货币（合约）</option>
+                        <option value="currency_spot">数字货币（现货）</option>
                       </select>
                     </div>
                   </div>
                   <div class="layui-form-item" style="margin-bottom: 6px;">
                     <div style="display: flex; gap: 6px; align-items: center;">
                       <input type="text" id="symbols_search_input" autocomplete="off"
-                        placeholder="代码 / 名称 / 拼音（实时过滤）"
+                        placeholder="搜索代码、名称或拼音"
+                        aria-label="搜索全市场标的"
                         class="layui-input layui-input-sm"
                         style="flex: 1; min-width: 0; height: 30px;" />
                     </div>
@@ -460,16 +622,16 @@
                   {# 预热当前市场全部标的的缠论数据，避免后续切换时等待 #}
                   <button type="button" id="symbols_prewarm_btn"
                     class="layui-btn layui-btn-xs layui-btn-primary layui-border-blue"
-                    title="预热当前市场全部标的的常用周期(1m/5m/30m/日线)缠论数据，后续切换时秒开"
+                    title="为当前市场缓存 1 分钟、5 分钟、30 分钟与日线结构数据，减少后续切图等待"
                     style="height: 22px; line-height: 20px; padding: 0 8px;">
                     <i class="layui-icon layui-icon-fire" style="font-size: 12px;"></i>
-                    <span id="symbols_prewarm_btn_text">预热全部</span>
+                    <span id="symbols_prewarm_btn_text">缓存常用周期</span>
                   </button>
                 </div>
                 {# 预热进度条：默认隐藏，启动后展示 #}
                 <div id="symbols_prewarm_progress" style="display: none; margin-bottom: 6px; font-size: 12px;">
                   <div style="display: flex; justify-content: space-between; color: #555; margin-bottom: 2px;">
-                    <span id="symbols_prewarm_label">准备中...</span>
+                    <span id="symbols_prewarm_label">准备缓存…</span>
                     <span id="symbols_prewarm_count" style="color: #888;">0/0</span>
                   </div>
                   <div style="height: 4px; background: #eee; border-radius: 2px; overflow: hidden;">
@@ -497,51 +659,25 @@
                     </colgroup>
                     <thead>
                       <tr>
-                        <th>代码</th>
-                        <th>名称</th>
+                        <th>证券代码</th>
+                        <th>标的名称</th>
                       </tr>
                     </thead>
                     <tbody id="symbols_list_tbody">
-                      <tr><td colspan="2" style="text-align:center; color:#aaa;">加载中…</td></tr>
+                      <tr><td colspan="2" style="text-align:center; color:#aaa;">正在加载标的…</td></tr>
                     </tbody>
                   </table>
                 </div>
                 <hr class="layui-border-red" />
               </div>
             </div>
-            <div class="layui-colla-item">
-              <div class="layui-colla-title" data-ca-title="监控提醒">
-                监控提醒
-              </div>
-              <div class="layui-colla-content" style="padding: 0">
-                <form
-                  class="layui-form"
-                  lay-filter="alert_records_form"
-                  style="padding: 10px 10px 0 10px">
-                  <div class="layui-form-item">
-                    <label class="layui-form-label">任务名称</label>
-                    <div class="layui-input-block">
-                      <select
-                        name="task_name_select"
-                        id="task_name_select"
-                        lay-filter="task_name_select">
-                        <option value="">全部</option>
-                      </select>
-                    </div>
-                  </div>
-                </form>
-                <table
-                  class="layui-hide"
-                  id="table_alert_reocrds"
-                  lay-filter="table_alert_reocrds"></table>
-                <hr class="layui-border-red" />
-              </div>
-            </div>
             <div class="layui-colla-item" id="collapse-bkgn">
               <div class="layui-colla-title" data-ca-title="板块概念">
-                板块概念
+                <span class="ca-menu-title-main">板块联动</span>
+                <small class="ca-menu-title-meta">板块 → 成分股</small>
               </div>
               <div class="layui-colla-content" style="padding: 0">
+                <p class="ca-tool-intro">先选板块，再从成分股中切换主图；支持 ↑ / ↓ 连续浏览。仅 A 股市场提供板块数据。</p>
                 <style>
                   .symbol-code-link { color: #1e9fff; cursor: pointer; font-weight: 500; }
                   .bkgn-total-tip { color: #888; font-size: 12px; }
@@ -561,7 +697,7 @@
                 </style>
                 <div id="bkgn_layer" style="padding: 6px 10px 0 10px;">
                   <div class="bkgn-layer-header" id="bkgn_layer_toggle">
-                    <span><i class="layui-icon layui-icon-triangle-d caret"></i> 选择板块</span>
+                    <span><i class="layui-icon layui-icon-triangle-d caret"></i> 板块列表</span>
                     <span id="bkgn_total_tip" class="bkgn-total-tip"></span>
                   </div>
                   <div id="bkgn_layer_body" style="padding-top: 6px;">
@@ -570,17 +706,18 @@
                         type="text"
                         id="bkgn_search"
                         class="layui-input"
-                        placeholder="代码 / 名称 / 拼音首字母"
+                        placeholder="搜索板块名称"
+                        aria-label="搜索板块名称"
                         autocomplete="off" />
                     </div>
                     <div class="bkgn-action-row">
                       <button type="button" id="bkgn_search_btn"
                         class="layui-btn layui-bg-red layui-btn-sm">
-                        <i class="layui-icon layui-icon-search"></i> 查询
+                        <i class="layui-icon layui-icon-search"></i> 筛选
                       </button>
                       <button type="button" id="bkgn_reset_btn"
                         class="layui-btn layui-btn-primary layui-border-red layui-btn-sm">
-                        <i class="layui-icon layui-icon-refresh"></i> 重置
+                        <i class="layui-icon layui-icon-refresh"></i> 清空
                       </button>
                     </div>
                     <table
@@ -593,7 +730,7 @@
                 <hr style="margin: 8px 0;" />
                 <div style="padding: 0 10px 10px 10px;">
                   <div class="bkgn-layer-header" style="cursor: default; background: transparent; padding: 0 0 6px 0;">
-                    <span>个股票</span>
+                    <span>成分股</span>
                     <span id="bkgn_stock_total_tip" class="bkgn-total-tip"></span>
                   </div>
                   <div class="bkgn-search-row">
@@ -601,17 +738,18 @@
                       type="text"
                       id="bkgn_stock_search"
                       class="layui-input"
-                      placeholder="代码 / 名称"
+                      placeholder="搜索代码或名称"
+                      aria-label="搜索成分股"
                       autocomplete="off" />
                   </div>
                   <div class="bkgn-action-row">
                     <button type="button" id="bkgn_stock_search_btn"
                       class="layui-btn layui-bg-red layui-btn-sm">
-                      <i class="layui-icon layui-icon-search"></i> 查询
+                      <i class="layui-icon layui-icon-search"></i> 筛选
                     </button>
                     <button type="button" id="bkgn_stock_reset_btn"
                       class="layui-btn layui-btn-primary layui-border-red layui-btn-sm">
-                      <i class="layui-icon layui-icon-refresh"></i> 重置
+                      <i class="layui-icon layui-icon-refresh"></i> 清空
                     </button>
                   </div>
                   <div id="bkgn_stock_wrap" tabindex="0">
@@ -625,98 +763,90 @@
                 <hr class="layui-border-red" />
               </div>
             </div>
-            <div class="layui-colla-item">
-              <div class="layui-colla-title" data-ca-title="AI分析助手">
-                AI分析助手
-              </div>
-              <div class="layui-colla-content" style="padding: 0">
-                <form class="layui-form" style="width: 100%">
-                  <div class="layui-form-item">
-                    <div class="layui-inline">
-                      <div
-                        class="layui-input-inline layui-input-wrap"
-                        style="width: 40%; float: left">
-                        <label for="ai_code">
-                          <input
-                            type="text"
-                            name="ai_code"
-                            id="ai_code"
-                            autocomplete="off"
-                            readonly="readonly"
-                            class="layui-input" />
-                        </label>
-                      </div>
-                      <div
-                        class="layui-form-mid"
-                        style="width: 30%; padding: 0 !important; float: left">
-                        <label>
-                          <select
-                            name="ai_frequencys"
-                            id="ai_frequencys"></select>
-                        </label>
-                      </div>
-                      <div
-                        class="layui-form-mid"
-                        style="padding: 4px 0 !important; float: left">
-                        <button
-                          type="button"
-                          id="ai_analyse_btn"
-                          class="layui-btn layui-btn-primary layui-border-red layui-btn-sm">
-                          分析
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-                </form>
-                <table
-                  class="layui-hide"
-                  id="table_ai_analysis"
-                  lay-filter="table_ai_analysis"></table>
-
-                <hr class="layui-border-red" />
-              </div>
-            </div>
           </div>
         </div>
       </div>
-    </div>
+    </main>
     {% include 'sub_temp.html' %}
   </body>
   <script nonce="{{ csp_nonce }}">
     // SSE 实时推送开关(后端 config.ENABLE_SSE_PUSH 注入); charts.js 据此决定是否建 EventSource 连接。
     window.__CHANLUN_SSE_ENABLED = {{ 'true' if enable_sse else 'false' }};
-    var interval_get_alert_records;
-
     var initial_market = {{ initial_market|tojson }};
     var market_frequencys = `{{ market_frequencys| tojson }}`;
     var market_frequencys = JSON.parse(market_frequencys);
 
     // 支持通过 URL 参数 ?market=&code= 直接定位到指定标的（来自 /symbols 列表页跳转）。
-    // 解析后写入 localStorage，让下方 default_vals 与现有初始化逻辑无缝识别，无需改动其它 JS。
+    // 除兼容写入 localStorage 外，还保留当前页面自己的启动配置；同源多 iframe
+    // 并行加载时必须优先用内存值，不能让共享 localStorage 把 30m/5m/1m 互相覆盖。
+    window.__chanlunUrlBootstrap = null;
     (function applyUrlSymbolParams() {
       try {
         var params = new URLSearchParams(window.location.search || "");
         var urlMarket = (params.get("market") || "").trim().toLowerCase();
         var urlCode = (params.get("code") || "").trim();
+        var urlLayout = (params.get("layout") || "").trim();
+        var urlIntervals = (params.get("intervals") || "")
+          .split(",")
+          .map(function (value) { return value.trim(); })
+          .filter(Boolean);
         var allowedMarkets = [
           "a", "hk", "futures", "ny_futures",
           "fx", "us", "currency", "currency_spot"
         ];
-        if (urlMarket && allowedMarkets.indexOf(urlMarket) !== -1) {
-          // 与 change_chart_ticker 内部使用的 key 完全一致，确保被后续渲染读取。
+        var allowedLayouts = [
+          "single", "horizontal-2", "horizontal-7-3",
+          "vertical-2", "three", "four"
+        ];
+        var layoutChartCounts = {
+          "single": 1,
+          "horizontal-2": 2,
+          "horizontal-7-3": 2,
+          "vertical-2": 2,
+          "three": 3,
+          "four": 4
+        };
+        var allowedIntervals = [
+          "1", "2", "3", "5", "10", "15", "30", "60",
+          "120", "180", "240", "1D", "1W", "1M"
+        ];
+        urlIntervals = urlIntervals.map(function (value) {
+          return value === "D" ? "1D" : value === "W" ? "1W" : value === "M" ? "1M" : value;
+        });
+        var selectedMarket = allowedMarkets.indexOf(urlMarket) !== -1
+          ? urlMarket
+          : initial_market;
+        var setLocalValue = function (key, value) {
           if (window.Utils && typeof Utils.set_local_data === "function") {
-            Utils.set_local_data("market", urlMarket);
-            if (urlCode) {
-              Utils.set_local_data(urlMarket + "_code", urlCode);
-            }
+            Utils.set_local_data(key, value);
+          } else if (window.layui && typeof layui.data === "function") {
+            layui.data("tv_chart", { key: key, value: value });
           } else {
-            // Utils 尚未加载时退化到原生 localStorage，key 与 utils.js 的实现保持一致。
-            try {
-              localStorage.setItem("market", urlMarket);
-              if (urlCode) {
-                localStorage.setItem(urlMarket + "_code", urlCode);
-              }
-            } catch (_) { /* localStorage 不可用时直接忽略，不影响默认渲染 */ }
+            try { localStorage.setItem(key, value); } catch (_) { /* 极端环境下不阻塞初始化 */ }
+          }
+        };
+        if (urlMarket && allowedMarkets.indexOf(urlMarket) !== -1) {
+          setLocalValue("market", urlMarket);
+          if (urlCode) setLocalValue(urlMarket + "_code", urlCode);
+        }
+        if (allowedLayouts.indexOf(urlLayout) !== -1) {
+          var requiredCount = layoutChartCounts[urlLayout];
+          var selectedIntervals = urlIntervals.slice(0, requiredCount);
+          if (
+            selectedIntervals.length === requiredCount
+            && selectedIntervals.every(function (value) {
+              return allowedIntervals.indexOf(value) !== -1;
+            })
+          ) {
+            window.__chanlunUrlBootstrap = {
+              market: selectedMarket,
+              layout: urlLayout,
+              intervals: selectedIntervals.slice(),
+            };
+            setLocalValue("chart_layout_type", urlLayout);
+            selectedIntervals.forEach(function (interval, index) {
+              setLocalValue(selectedMarket + "_interval_" + (index + 1), interval);
+            });
           }
         }
       } catch (_) { /* URL 解析失败回退到默认行为，不阻塞图表初始化 */ }
@@ -785,12 +915,11 @@
   <script src="{{ url_for('static', filename='js/tv_indicators/chart_idx_rsx.js') }}?v={{ static_version }}"></script>
   <script src="{{ url_for('static', filename='js/sse_gap.js') }}?v={{ static_version }}"></script>
   <script src="{{ url_for('static', filename='js/charts.js') }}?v={{ static_version }}"></script>
+  <script src="{{ url_for('static', filename='js/chart_analysis.js') }}?v={{ static_version }}"></script>
   <script src="{{ url_for('static', filename='js/macd_stats.js') }}?v={{ static_version }}"></script>
   <script src="{{ url_for('static', filename='js/zixuan.js') }}?v={{ static_version }}"></script>
   <script src="{{ url_for('static', filename='js/alert.js') }}?v={{ static_version }}"></script>
-  <script src="{{ url_for('static', filename='js/ai.js') }}?v={{ static_version }}"></script>
   <script src="{{ url_for('static', filename='js/bkgn.js') }}?v={{ static_version }}"></script>
-  <script src="{{ url_for('static', filename='js/decision_support.js') }}?v={{ static_version }}"></script>
   <script nonce="{{ csp_nonce }}">
     // 右栏「标的列表」区块：按市场全量加载标的，本地过滤，点击代码直接切图。
     // 不依赖 layui.table，纯 jQuery + AJAX 渲染，避免折叠面板内表格高度计算问题。
@@ -961,7 +1090,7 @@
           load: function () {
             var self = this;
             var $tbody = $('#symbols_list_tbody');
-            $tbody.html('<tr><td colspan="2" style="text-align:center; color:#aaa;">加载中…</td></tr>');
+            $tbody.html('<tr><td colspan="2" style="text-align:center; color:#aaa;">正在加载标的…</td></tr>');
             self.state.allRows = [];
             self.state.visibleRows = [];
             self.state.selectedIndex = -1;
@@ -977,7 +1106,7 @@
               // 旧请求覆盖新结果保护：用户在加载期间又切了市场，丢弃旧响应
               if (seq !== self.state.loadSeq) return;
               if (!res || res.ok !== true) {
-                $tbody.html('<tr><td colspan="2" style="text-align:center; color:#c00;">加载失败</td></tr>');
+                $tbody.html('<tr><td colspan="2" style="text-align:center; color:#c00;">标的加载失败，请重试</td></tr>');
                 return;
               }
               var items = res.items || [];
@@ -992,7 +1121,7 @@
               self.applyFilter();
             }).fail(function () {
               if (seq !== self.state.loadSeq) return;
-              $tbody.html('<tr><td colspan="2" style="text-align:center; color:#c00;">网络错误</td></tr>');
+              $tbody.html('<tr><td colspan="2" style="text-align:center; color:#c00;">网络异常，暂时无法加载标的</td></tr>');
             });
           },
 
@@ -1025,8 +1154,8 @@
             var rows = this.state.visibleRows;
             var market = this.state.market;
             if (rows.length === 0) {
-              $tbody.html('<tr><td colspan="2" style="text-align:center; color:#aaa;">无数据</td></tr>');
-              $('#symbols_total_tip').text('共 0 条');
+              $tbody.html('<tr><td colspan="2" style="text-align:center; color:#aaa;">没有匹配的标的</td></tr>');
+              $('#symbols_total_tip').text('共 0 个标的');
               return;
             }
             var fragment = document.createDocumentFragment();
@@ -1054,9 +1183,9 @@
             // 顶部计数提示：搜索时显示 "命中/总"，否则只显示总数
             var total = this.state.allRows.length;
             if (this.state.q) {
-              $('#symbols_total_tip').text('命中 ' + rows.length + ' / 共 ' + total + ' 条');
+              $('#symbols_total_tip').text('匹配 ' + rows.length + ' / ' + total + ' 个标的');
             } else {
-              $('#symbols_total_tip').text('共 ' + total + ' 条');
+              $('#symbols_total_tip').text('共 ' + total + ' 个标的');
             }
           }
         };
@@ -1107,7 +1236,7 @@
             var actionGeneration = ++self.actionGeneration;
             self.pendingCancel = false;
             self.uiState = 'starting';
-            self.setBtnText('启动中...', true);
+            self.setBtnText('正在启动缓存…', true);
 
             AppRequest.ajax({
               url: '/symbols/prewarm',
@@ -1119,7 +1248,7 @@
               if (actionGeneration !== self.actionGeneration
                   || market !== self.symbolsPanel.state.market) return;
               if (res && res.ok) {
-                if (window.layer) layer.msg(res.msg || '预热已启动', { icon: 1, time: 1500 });
+                if (window.layer) layer.msg(res.msg || '常用周期缓存已启动', { icon: 1, time: 1500 });
                 self.applyTaskToUI(res.task);
                 if (self.pendingCancel) {
                   self.pendingCancel = false;
@@ -1129,20 +1258,20 @@
                   self.startPolling();
                 }
               } else {
-                if (window.layer) layer.msg((res && res.msg) || '启动失败', { icon: 2, time: 2500 });
+                if (window.layer) layer.msg((res && res.msg) || '缓存启动失败', { icon: 2, time: 2500 });
                 self.pendingCancel = false;
                 self.uiState = 'idle';
-                self.setBtnText('预热全部', false);
+                self.setBtnText('缓存常用周期', false);
               }
             }).fail(function (xhr) {
               if (actionGeneration !== self.actionGeneration
                   || market !== self.symbolsPanel.state.market) return;
-              var msg = '请求失败';
+              var msg = '缓存请求失败';
               try { msg = (xhr.responseJSON && xhr.responseJSON.msg) || msg; } catch (_) {}
               if (window.layer) layer.msg(msg, { icon: 2, time: 2500 });
               self.pendingCancel = false;
               self.uiState = 'idle';
-              self.setBtnText('预热全部', false);              self.fetchStatusOnce();
+              self.setBtnText('缓存常用周期', false);              self.fetchStatusOnce();
 
             });
           },
@@ -1150,7 +1279,7 @@
             var self = this;
             if (self.uiState === 'starting') {
               self.pendingCancel = true;
-              self.setBtnText('取消中...', true);
+              self.setBtnText('正在停止…', true);
               return;
             }
             if (self.uiState === 'cancelling') return;
@@ -1158,7 +1287,7 @@
             var market = self.symbolsPanel.state.market;
             var actionGeneration = ++self.actionGeneration;
             self.uiState = 'cancelling';
-            self.setBtnText('取消中...', true);
+            self.setBtnText('正在停止…', true);
             AppRequest.ajax({
               url: '/symbols/prewarm/cancel',
               method: 'POST',
@@ -1169,17 +1298,17 @@
               if (actionGeneration !== self.actionGeneration
                   || market !== self.symbolsPanel.state.market) return;
               if (window.layer) {
-                layer.msg((res && res.msg) || '已请求取消', { icon: res && res.ok ? 1 : 2, time: 2000 });
+                layer.msg((res && res.msg) || '已请求停止缓存', { icon: res && res.ok ? 1 : 2, time: 2000 });
               }
               self.uiState = 'running';
-              self.setBtnText('停止预热', true);
+              self.setBtnText('停止缓存', true);
               if (!self.pollingActive) self.startPolling();
             }).fail(function () {
               if (actionGeneration !== self.actionGeneration
                   || market !== self.symbolsPanel.state.market) return;
-              if (window.layer) layer.msg('取消请求失败', { icon: 2, time: 2500 });
+              if (window.layer) layer.msg('停止缓存请求失败', { icon: 2, time: 2500 });
               self.uiState = 'running';
-              self.setBtnText('停止预热', true);              if (!self.pollingActive) self.startPolling();
+              self.setBtnText('停止缓存', true);              if (!self.pollingActive) self.startPolling();
 
             });
           },
@@ -1205,7 +1334,7 @@
             }).fail(function () {
               if (generation !== self.pollGeneration
                   || market !== self.symbolsPanel.state.market) return;
-              if (window.layer) layer.msg('预热状态获取失败', { icon: 2, time: 2000 });
+              if (window.layer) layer.msg('缓存状态获取失败', { icon: 2, time: 2000 });
             });
           },
           startPolling: function () {
@@ -1261,7 +1390,7 @@
               },
               error: function () {
                 if (requestGeneration === self.pollGeneration && window.layer) {
-                  layer.msg('预热状态请求超时，正在重试', { icon: 0, time: 1500 });
+                  layer.msg('缓存状态请求超时，正在重试', { icon: 0, time: 1500 });
                 }
               },
               complete: function () {
@@ -1285,7 +1414,7 @@
             if (!task) {
               $progress.hide();
               this.uiState = 'idle';
-              this.setBtnText('预热全部', false);
+              this.setBtnText('缓存常用周期', false);
               return;
             }
 
@@ -1295,23 +1424,23 @@
 
             if (status === 'running') {
               this.uiState = 'running';
-              this.setBtnText('停止预热', true);
-              label = '预热中';
+              this.setBtnText('停止缓存', true);
+              label = '正在缓存常用周期';
               barColor = '#1e9fff';
             } else if (status === 'finished') {
               this.uiState = 'done';
-              this.setBtnText('预热全部', false);
-              label = '完成';
+              this.setBtnText('缓存常用周期', false);
+              label = '缓存完成';
               barColor = '#5fb878';
             } else if (status === 'cancelled') {
               this.uiState = 'done';
-              this.setBtnText('预热全部', false);
-              label = '已取消';
+              this.setBtnText('缓存常用周期', false);
+              label = '已停止缓存';
               barColor = '#ffb800';
             } else if (status === 'error') {
               this.uiState = 'done';
-              this.setBtnText('预热全部', false);
-              label = '出错: ' + (task.error_msg || '未知');
+              this.setBtnText('缓存常用周期', false);
+              label = '缓存失败：' + (task.error_msg || '原因未知');
               barColor = '#ff5722';
             } else {
               label = status || '';
@@ -1328,10 +1457,10 @@
 
             if (status === 'running' && task.current_code) {
               var cur = task.current_code + (task.current_name ? ' - ' + task.current_name : '');
-              $('#symbols_prewarm_current').text('当前: ' + cur).show();
+              $('#symbols_prewarm_current').text('当前标的：' + cur).show();
             } else if (status === 'finished' || status === 'cancelled') {
-              var elapsed = task.elapsed ? Math.round(task.elapsed) + 's' : '';
-              $('#symbols_prewarm_current').text(elapsed ? '总耗时 ' + elapsed : '').show();
+              var elapsed = task.elapsed ? Math.round(task.elapsed) + ' 秒' : '';
+              $('#symbols_prewarm_current').text(elapsed ? '总耗时：' + elapsed : '').show();
             } else {
               $('#symbols_prewarm_current').text('').hide();
             }
@@ -1368,40 +1497,40 @@
           elem: "#toggle-menu",
           data: [
             {
-              title: "收起缠论解盘",
+              title: "收起结构解盘侧栏",
               templet:
-                '<div><i class="layui-icon layui-icon-shrink-right"></i> <span>收起缠论解盘</span></div>',
+                '<div><i class="layui-icon layui-icon-shrink-right"></i> <span>收起结构解盘侧栏</span></div>',
               id: "collapse_menu",
             },
             { type: "-" },
             {
-              title: "缠论配置项",
+              title: "结构显示设置",
               templet:
-                '<div><i class="layui-icon layui-icon-set"></i> <span>缠论配置项</span></div>',
+                '<div><i class="layui-icon layui-icon-set"></i> <span>结构显示设置</span></div>',
               id: 1,
             },
             {
-              title: "自选组管理",
+              title: "管理自选分组",
               templet:
-                '<div><i class="layui-icon layui-icon-templeate-1"></i> <span>自选组管理</span></div>',
+                '<div><i class="layui-icon layui-icon-templeate-1"></i> <span>管理自选分组</span></div>',
               id: 2,
             },
             {
-              title: "监控列表",
+              title: "管理预警任务",
               templet:
-                '<div><i class="layui-icon layui-icon-list"></i> <span>监控列表</span></div>',
+                '<div><i class="layui-icon layui-icon-list"></i> <span>管理预警任务</span></div>',
               id: 3,
             },
             {
-              title: "新增监控",
+              title: "新增预警任务",
               templet:
-                '<div><i class="layui-icon layui-icon-speaker"></i> <span>新增监控</span></div>',
+                '<div><i class="layui-icon layui-icon-speaker"></i> <span>新增预警任务</span></div>',
               id: 4,
             },
             {
-              title: "当前任务",
+              title: "查看后台任务",
               templet:
-                '<div><i class="layui-icon layui-icon-senior"></i> <span>当前任务</span></div>',
+                '<div><i class="layui-icon layui-icon-senior"></i> <span>查看后台任务</span></div>',
               id: 6,
             },
             {
@@ -1411,35 +1540,35 @@
               id: 7,
               child: [
                 {
-                  title: "布局-单图",
+                  title: "单图",
                   id: "single",
                 },
                 {
-                  title: "布局-横向双图",
+                  title: "上下双图",
                   id: "horizontal-2",
                 },
                 {
-                  title: "布局-横向7/3",
+                  title: "上下双图（7:3）",
                   id: "horizontal-7-3",
                 },
                 {
-                  title: "布局-纵向双图",
+                  title: "左右双图",
                   id: "vertical-2",
                 },
                 {
-                  title: "布局-三图",
+                  title: "三图",
                   id: "three",
                 },
                 {
-                  title: "布局-四图",
+                  title: "四图",
                   id: "four",
                 },
               ],
             },
             {
-              title: "切换主题",
+              title: "切换深浅主题",
               templet:
-                '<div><i class="layui-icon layui-icon-engine"></i> <span>切换主题</span></div>',
+                '<div><i class="layui-icon layui-icon-engine"></i> <span>切换深浅主题</span></div>',
               id: 8,
             },
             { type: "-" },
@@ -1453,15 +1582,15 @@
           click: function (item) {
             if (item.id === "logout") {
               document.getElementById("logout-form").submit();
-            } else if (item.title === "收起缠论解盘") {
+            } else if (item.id === "collapse_menu") {
               // 由 ChartMenuResize 模块挂载到 window 上的接口（在底部 IIFE 中暴露）
               if (window.ChartMenuResize && typeof window.ChartMenuResize.collapse === 'function') {
                 window.ChartMenuResize.collapse();
               }
-            } else if (item.title === "缠论配置项") {
+            } else if (item.id === 1) {
               layer.open({
                 type: 2,
-                title: "缠论配置项变更",
+                title: "结构显示设置",
                 area: ["1100px", "90vh"],
                 content:
                   "/get_cl_config/" +
@@ -1472,26 +1601,26 @@
                 fixed: true,
                 shadeClose: true,
               });
-            } else if (item.title === "自选组管理") {
+            } else if (item.id === 2) {
               layer.open({
                 type: 2,
-                title: "自选组管理",
+                title: "管理自选分组",
                 area: ["800px", "50vh"],
                 content: "/zixuan_group/" + Utils.get_market(),
                 anim: 1,
                 fixed: true,
                 shadeClose: true,
               });
-            } else if (item.title === "监控列表") {
+            } else if (item.id === 3) {
               layer.open({
                 type: 1,
-                title: "监控列表",
+                title: "管理预警任务",
                 area: ["1000px", "50vh"],
                 content: $("#layer-wrapper-alert-task-list"),
                 anim: 1,
                 fixed: true,
                 shadeClose: true,
-                btn: ["刷新"],
+                btn: ["重新加载"],
                 btn1: function (index, layero, that) {
                   Alert.refresh_alerts_table();
                 },
@@ -1505,30 +1634,30 @@
                   $("#layer-wrapper-alert-task-list").hide();
                 },
               });
-            } else if (item.title === "新增监控") {
+            } else if (item.id === 4) {
               layer.open({
                 type: 2,
-                title: "新增监控提醒",
+                title: "新增预警任务",
                 area: ["1000px", "90vh"],
                 content: "/alert_edit/" + Utils.get_market() + "/0",
                 anim: 1,
                 fixed: true,
                 shadeClose: true,
               });
-            } else if (item.title === "当前任务") {
+            } else if (item.id === 6) {
               layer.open({
                 type: 2,
-                title: "当前任务",
+                title: "后台任务",
                 area: ["1000px", "50vh"],
                 content: "/jobs",
                 anim: 1,
                 fixed: true,
                 shadeClose: true,
               });
-            } else if (item.title.startsWith("布局-")) {
+            } else if (["single", "horizontal-2", "horizontal-7-3", "vertical-2", "three", "four"].indexOf(item.id) !== -1) {
               Utils.set_local_data("chart_layout_type", item.id);
               location.reload();
-            } else if (item.title === "切换主题") {
+            } else if (item.id === 8) {
               let theme = Utils.get_local_data("theme");
               if (theme === "Light") {
                 Utils.set_local_data("theme", "dark");
@@ -1551,19 +1680,6 @@
             ZiXuan.set_rate_polling_active(is_open);
           }
 
-          if (ca_title === "监控提醒") {
-            if (is_open) {
-              Alert.init();
-              Alert.get_alert_records();
-              interval_get_alert_records = setInterval(
-                Alert.get_alert_records,
-                60000
-              );
-            } else {
-              clearInterval(interval_get_alert_records);
-            }
-          }
-
           if (ca_title === "板块概念") {
             if (is_open) {
               BKGN.init_bkgn_opts();
@@ -1580,8 +1696,6 @@
           location.assign("/?market=" + encodeURIComponent(market));
         });
 
-        AI.init_ai_opts();
-        AI.get_ai_analyse_records();
       });
 
       function init_web() {
@@ -1603,7 +1717,9 @@
           $("#collapse-bkgn").hide();
         }
 
+        var url_bootstrap = window.__chanlunUrlBootstrap;
         let chart_layout_type =
+          (url_bootstrap && url_bootstrap.layout) ||
           Utils.get_local_data("chart_layout_type") || "single";
         let charts_area = $("#tv_charts_area");
         charts_area.empty();
@@ -1729,10 +1845,12 @@
     (function () {
       var STORAGE_KEY = 'chart_menu_width';
       var COLLAPSE_KEY = 'chart_menu_collapsed';  // '1' = 收起, 其它 = 展开
-      var DEFAULT_WIDTH = 320;   // 默认右栏宽度（px），略宽于原 col-md2 ≈ 17%
-      var MIN_WIDTH = 240;       // 最小宽度（拖拽时），避免拖没了又看不到收起按钮
+      var DEFAULT_WIDTH = 390;   // 默认右栏宽度（px），保证结构详情与图层开关可读
+      var MIN_WIDTH = 300;       // 最小宽度（拖拽时），避免核心文字被压成单字列
       var MAX_RATIO = 0.6;       // 最大占视口比例（防止把图表拖没）
       var ABS_MAX_WIDTH = 900;   // 绝对上限
+      var MOBILE_BREAKPOINT = 760;
+      var MOBILE_MAX_WIDTH = 420; // 手机端使用覆盖式侧栏，保留图表完整工作区
 
       function readStoredWidth() {
         try {
@@ -1753,6 +1871,9 @@
         try { window.localStorage.setItem(COLLAPSE_KEY, v ? '1' : '0'); } catch (_) {}
       }
       function clampWidth(px) {
+        if (window.innerWidth <= MOBILE_BREAKPOINT) {
+          return Math.min(window.innerWidth, MOBILE_MAX_WIDTH);
+        }
         var max = Math.min(ABS_MAX_WIDTH, Math.floor(window.innerWidth * MAX_RATIO));
         if (px < MIN_WIDTH) px = MIN_WIDTH;
         if (px > max) px = max;
@@ -1761,20 +1882,20 @@
       function syncAccessibleState(collapsed) {
         var expanded = String(!collapsed);
         var expandBtn = document.getElementById('chart_menu_toggle');
-        var menuBtn = document.getElementById('toggle-menu');
+        var collapseBtn = document.getElementById('chart_menu_inline_collapse');
         if (expandBtn) {
-          var expandLabel = collapsed ? '展开缠论解盘' : '收起缠论解盘';
+              var expandLabel = collapsed ? '展开结构解盘侧栏' : '收起结构解盘侧栏';
           expandBtn.setAttribute('aria-expanded', expanded);
           expandBtn.setAttribute('aria-label', expandLabel);
           expandBtn.title = expandLabel;
         }
-        if (menuBtn) {
-          var menuLabel = collapsed ? '展开缠论解盘菜单' : '收起缠论解盘菜单';
-          menuBtn.setAttribute('aria-expanded', expanded);
-          menuBtn.setAttribute('aria-label', menuLabel);
+        if (collapseBtn) {
+              var collapseLabel = collapsed ? '展开结构解盘侧栏' : '收起结构解盘侧栏';
+          collapseBtn.setAttribute('aria-expanded', expanded);
+          collapseBtn.setAttribute('aria-label', collapseLabel);
+          collapseBtn.title = collapseLabel;
         }
-      }
-      // 应用宽度到 DOM。collapsed=true 时右栏隐藏；展开状态由右栏内嵌的按钮控制收起，
+      }      // 应用宽度到 DOM。collapsed=true 时右栏隐藏；展开状态由右栏内嵌的按钮控制收起，
       // 收起后由屏幕右侧贴边的 #chart_menu_toggle 控制展开。
       function applyWidth(px, collapsed) {
         var menu = document.getElementById('chart_menu');
@@ -1790,17 +1911,28 @@
           container.style.width = '100%';
           container.style.maxWidth = '100%';
           document.body.classList.add('chart-menu-collapsed');
+          document.body.classList.remove('chart-menu-overlay');
         } else {
-          menu.style.width = px + 'px';
-          menu.style.maxWidth = px + 'px';
-          menu.style.overflow = 'scroll';
-          container.style.width = 'calc(100% - ' + px + 'px)';
-          container.style.maxWidth = 'calc(100% - ' + px + 'px)';
-          handle.style.right = (px - 3) + 'px';
+          var mobileOverlay = window.innerWidth <= MOBILE_BREAKPOINT;
+          var appliedWidth = mobileOverlay
+            ? Math.min(window.innerWidth, MOBILE_MAX_WIDTH)
+            : px;
+          menu.style.width = appliedWidth + 'px';
+          menu.style.maxWidth = appliedWidth + 'px';
+          menu.style.overflow = 'auto';
+          handle.style.right = (appliedWidth - 3) + 'px';
           document.body.classList.remove('chart-menu-collapsed');
+          if (mobileOverlay) {
+            container.style.width = '100%';
+            container.style.maxWidth = '100%';
+            document.body.classList.add('chart-menu-overlay');
+          } else {
+            container.style.width = 'calc(100% - ' + appliedWidth + 'px)';
+            container.style.maxWidth = 'calc(100% - ' + appliedWidth + 'px)';
+            document.body.classList.remove('chart-menu-overlay');
+          }
         }
-      }
-      // 通知 TV 图表自适应：触发 window resize（多数 widget 会监听）
+      }      // 通知 TV 图表自适应：触发 window resize（多数 widget 会监听）
       // 同时如果项目里暴露了 chart_widgets，调用其 resize
       function notifyResize() {
         try { window.dispatchEvent(new Event('resize')); } catch (_) {}
@@ -1872,10 +2004,12 @@
 
         var handle = document.getElementById('chart_resize_handle');
         var expandBtn = document.getElementById('chart_menu_toggle');
+        var collapseBtn = document.getElementById('chart_menu_inline_collapse');
         if (!handle) return;
         handle.addEventListener('mousedown', onMouseDown);
         handle.addEventListener('dblclick', onDblClick);
         if (expandBtn) expandBtn.addEventListener('click', onExpand);
+        if (collapseBtn) collapseBtn.addEventListener('click', onCollapse);
         document.addEventListener('mousemove', onMouseMove);
         document.addEventListener('mouseup', onMouseUp);
 

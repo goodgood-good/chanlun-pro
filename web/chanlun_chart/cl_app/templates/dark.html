@@ -289,6 +289,7 @@
                 b = {};
             }
             if ("dark" === b.theme) {
+                document.documentElement.classList.add("cl-theme-dark");
                 var a = document.createElement("link");
                 a.href = "{{ url_for('static', filename='css/layui-theme-dark.css') }}";
                 a.rel = "stylesheet";
@@ -308,7 +309,7 @@
 </script>
 <style>
     .layui-card-body p,
-    li {
+    .layui-card-body li {
         color: #999;
     }
 </style>

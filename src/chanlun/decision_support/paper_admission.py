@@ -20,7 +20,6 @@ from .event_store import (
 )
 from .evidence import EvidencePacket
 from .fingerprints import normalize_datetime, sha256_json
-from .manual_check_workflow import FileManualCheckStore
 from .models import DecisionEvent, EventState
 from .mutation_fence import MutationLeaseGuard, mutation_fenced
 from .paper_adapter import (
@@ -69,6 +68,13 @@ class TrustedPaperBarSource(Protocol):
         *,
         allow_current_started: bool = False,
     ) -> PaperBar | None: ...
+
+
+@runtime_checkable
+class ManualCheckStore(Protocol):
+    """Minimal read-only audit binding required by paper admission."""
+
+    def get_for_event(self, event_id: str) -> object | None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -2021,7 +2027,7 @@ class TrustedPaperAdmission:
         ],
         fee_schedule: PaperFeeSchedule,
         bar_source: TrustedPaperBarSource,
-        manual_check_store: FileManualCheckStore | None = None,
+        manual_check_store: ManualCheckStore | None = None,
         risk_authority_provider: object,
         clock: Callable[[], datetime] | None = None,
         buying_power_buffer_rate: Decimal = Decimal("0.01"),
@@ -2040,9 +2046,9 @@ class TrustedPaperAdmission:
             raise TypeError("bar_source must implement TrustedPaperBarSource")
         if manual_check_store is not None and not isinstance(
             manual_check_store,
-            FileManualCheckStore,
+            ManualCheckStore,
         ):
-            raise TypeError("manual_check_store must be FileManualCheckStore")
+            raise TypeError("manual_check_store must provide get_for_event")
         if not callable(
             getattr(risk_authority_provider, "admission_guard", None)
         ):

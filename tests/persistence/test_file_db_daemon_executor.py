@@ -51,15 +51,44 @@ def test_daemon_executor_rejects_when_pending_capacity_is_full():
         assert second.result(timeout=2) is None
         executor.shutdown(wait=True, cancel_futures=True)
 
-def test_pickle_executor_workers_are_daemon_threads():
-    completed = threading.Event()
-    future = file_db_module._PICKLE_WRITE_EXECUTOR.submit(completed.set)
 
-    assert future.result(timeout=1) is None
-    assert completed.is_set()
-    threads = list(file_db_module._PICKLE_WRITE_EXECUTOR._threads)
-    assert threads
-    assert all(thread.daemon for thread in threads)
+def test_daemon_executor_constructor_cleans_started_workers_on_partial_failure(
+    monkeypatch,
+):
+    from chanlun.tools.daemon_executor import DaemonExecutor
+
+    prefix = "PartialDaemonExecutor"
+    original_start = threading.Thread.start
+
+    def fail_third_worker(thread):
+        if thread.name == f"{prefix}-2":
+            original_start(thread)
+            raise RuntimeError("injected post-start failure")
+        return original_start(thread)
+
+    monkeypatch.setattr(threading.Thread, "start", fail_third_worker)
+
+    with pytest.raises(RuntimeError, match="post-start failure"):
+        DaemonExecutor(max_workers=4, thread_name_prefix=prefix)
+
+    assert not any(
+        thread.name.startswith(prefix) and thread.is_alive()
+        for thread in threading.enumerate()
+    )
+
+def test_pickle_executor_workers_are_daemon_threads():
+    file_db_module.start_pickle_writes()
+    try:
+        completed = threading.Event()
+        future = file_db_module._PICKLE_WRITE_EXECUTOR.submit(completed.set)
+
+        assert future.result(timeout=1) is None
+        assert completed.is_set()
+        threads = list(file_db_module._PICKLE_WRITE_EXECUTOR._threads)
+        assert threads
+        assert all(thread.daemon for thread in threads)
+    finally:
+        file_db_module.shutdown_pickle_writes(wait=True, cancel_pending=True)
 
 def test_hung_pickle_write_does_not_block_interpreter_exit():
     root = pathlib.Path(__file__).resolve().parents[2]
@@ -80,6 +109,7 @@ def test_hung_pickle_write_does_not_block_interpreter_exit():
         config.DB_USER = ""
         config.DB_PWD = ""
         from chanlun.persistence import file_db
+        file_db.start_pickle_writes()
 
         started = threading.Event()
         release = threading.Event()

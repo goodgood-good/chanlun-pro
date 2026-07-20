@@ -30,6 +30,12 @@ function loadZiXuan() {
       change() {
         return this;
       },
+      text() {
+        return this;
+      },
+      attr() {
+        return this;
+      },
       replaceWith() {
         replacements += items.length;
         return this;

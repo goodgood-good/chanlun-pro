@@ -1,14 +1,17 @@
-"""R7-C1: kline_type=kline_chanlun 时 native MACD 与展示K线错位。get_klines() 返回合并缠论K线
+"""图表 K 线、指标和可审计缠论结构元数据的对齐契约。get_klines() 返回合并缠论K线
 (M根, 经包含处理 M<N), 而 else 分支 macd=cd.get_idx()['macd'] 恒 src 长度(N) → chart_data 里
 t(M)与 macd_*(N)不等长, 前端按下标配对 macd[i]↔bar[i] 使 MACD 画在错误 bar 下、尾部错切。
 修复: 展示K线与 src 不等长时在展示K线上重算 MACD 对齐(默认模式 klines==src 沿用 get_idx 不变)。
 用强包含合成数据(cl_klines 显著少于 src)才能触发错位。"""
 
+from datetime import datetime, timedelta
+from types import SimpleNamespace
+
 import numpy as np
 import pandas as pd
 
 from chanlun.core.cl import CL
-from chanlun.cl_utils import cl_data_to_tv_chart
+from chanlun.cl_utils import cl_data_to_tv_chart, zs_to_chart_dict
 
 
 def _inclusive_klines(groups=40):
@@ -63,3 +66,64 @@ def test_kline_default_macd_unchanged_byte_identical():
     assert len(data["macd_dif"]) == len(data["t"])
     expect = np.round(cd.get_idx()["macd"]["dif"], 6).tolist()
     assert data["macd_dif"] == expect
+
+
+def test_center_chart_payload_preserves_auditable_structure_metadata():
+    base = datetime(2026, 7, 20, 9, 30)
+
+    def endpoint(minutes: int, value: float):
+        return SimpleNamespace(
+            k=SimpleNamespace(date=base + timedelta(minutes=minutes)),
+            val=value,
+        )
+
+    entering = SimpleNamespace(
+        type="down",
+        start=endpoint(0, 11.2),
+        end=endpoint(5, 10.0),
+        line_mmds=lambda _kind: (),
+    )
+    leaving = SimpleNamespace(
+        type="up",
+        start=endpoint(10, 10.1),
+        end=endpoint(15, 10.8),
+        line_mmds=lambda _kind: ("3buy",),
+    )
+    center = SimpleNamespace(
+        zs_type="bi",
+        start=entering,
+        end=leaving,
+        entry=entering,
+        exit=leaving,
+        lines=[entering, leaving],
+        zd=10.0,
+        zg=10.6,
+        gg=11.2,
+        dd=10.0,
+        done=True,
+        type="up",
+        expanded_with=[],
+    )
+
+    payload = zs_to_chart_dict(center)
+
+    assert payload["tower"] == "bi"
+    assert payload["recursive_level"] is None
+    assert payload["zd"] == 10.0
+    assert payload["zg"] == 10.6
+    assert payload["done"] is True
+    assert payload["entering_segment"] == {
+        "direction": "down",
+        "start_time": int(base.timestamp()),
+        "start_price": 11.2,
+        "end_time": int((base + timedelta(minutes=5)).timestamp()),
+        "end_price": 10.0,
+    }
+    assert payload["leaving_segment"]["direction"] == "up"
+    assert payload["associated_points"] == ["3buy"]
+
+
+def test_center_metadata_schema_bumps_chart_cache_version():
+    from cl_app.services import chart_cache
+
+    assert chart_cache._CHART_CACHE_SCHEMA_VERSION == "v37"

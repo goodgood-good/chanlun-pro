@@ -25,10 +25,8 @@ class AlertTasks(object):
         self.log = fun.get_logger()
 
     def run(self):
-        if self.scheduler is None or not bool(
-            getattr(self.scheduler, "running", False)
-        ):
-            raise RuntimeError("scheduler is not running")
+        if self.scheduler is None:
+            raise RuntimeError("scheduler is not configured")
         with self._run_lock:
             previous_ids = list(self.task_ids)
             desired_ids = []

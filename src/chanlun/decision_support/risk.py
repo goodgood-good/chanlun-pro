@@ -8,7 +8,7 @@ from chanlun.recursive_bt.engine.engine import BUYS, recommended_buy_ratio
 
 from .fingerprints import normalize_datetime
 from .market_rules import a_share_board, a_share_limit_pct
-from .models import DecisionEvent, StrategyTrack
+from .models import DecisionEvent
 
 
 def _require_decimal(value: object, field_name: str) -> Decimal:
@@ -326,7 +326,8 @@ def _quote_reasons(
 
 
 def _target_weight(event: DecisionEvent, policy: RiskPolicy) -> Decimal:
-    highest_level = max(event.levels, key=lambda level: level.level)
+    big_direction: str
+    mid_direction: str
     signal_levels = [
         level
         for level in event.levels
@@ -335,17 +336,49 @@ def _target_weight(event: DecisionEvent, policy: RiskPolicy) -> Decimal:
     ]
     if len(signal_levels) != 1:
         raise ValueError("signal level snapshot must be unique")
+    if event.levels and all(
+        level.source_frequency is not None for level in event.levels
+    ):
+        native = {
+            level.source_frequency.casefold(): level
+            for level in event.levels
+            if level.level == 0
+            and level.frequency.casefold()
+            == level.source_frequency.casefold()
+            and level.source_frequency.casefold() in {"5m", "30m"}
+        }
+        if set(native) == {"5m", "30m"}:
+            big_direction = (
+                native["30m"].trade_gate_direction
+                or native["30m"].direction
+            )
+            mid_direction = (
+                native["5m"].trade_gate_direction
+                or native["5m"].direction
+            )
+        else:
+            signal_source = signal_levels[0].source_frequency
+            source_tree = tuple(
+                level
+                for level in event.levels
+                if level.source_frequency == signal_source
+            )
+            highest_level = max(source_tree, key=lambda level: level.level)
+            big_direction = highest_level.direction
+            mid_direction = ""
+    else:
+        highest_level = max(event.levels, key=lambda level: level.level)
+        big_direction = highest_level.direction
+        mid_direction = ""
     ratio = recommended_buy_ratio(
         event.signal.bs_type,
         policy.max_positions,
-        big_dir=highest_level.direction,
-        mid_dir=signal_levels[0].direction,
+        big_dir=big_direction,
+        mid_dir=mid_direction or signal_levels[0].direction,
         nest_operable=event.signal.nest_operable,
         nest_depth=event.signal.nest_depth,
     )
     weight = Decimal(str(ratio))
-    if event.strategy_track is StrategyTrack.BOTTOM_REVERSAL:
-        weight *= Decimal("0.5")
     return weight
 
 

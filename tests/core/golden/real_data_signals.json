@@ -52,9 +52,9 @@
     "xds": 116,
     "bi_zss": 114,
     "xd_zss": 14,
-    "bsp_bi": 129,
+    "bsp_bi": 130,
     "bsp_xd": 7,
-    "hash": "d54846d6a89c6003",
+    "hash": "adf372a9bbab7516",
     "dingli2_upg_bi": 22,
     "dingli2_upg_xd": 1,
     "dingli2_bsp_bi": 19,
@@ -69,7 +69,7 @@
     "kuozhan_bsp": 0,
     "kuozhan_bcs": 0,
     "hash_ext": "4b79effcef6c178a",
-    "hash_stop": "9944b6a7e80152c4"
+    "hash_stop": "9381b6b02a66f748"
   },
   "SYN_strong_5m": {
     "bis": 7,

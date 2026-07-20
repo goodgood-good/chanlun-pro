@@ -44,7 +44,11 @@ from chanlun.decision_support.event_store import (
     LLMReviewClaimLostError,
 )
 from chanlun.decision_support.fingerprints import sha256_json
-from chanlun.decision_support.llm_provider import ProviderResponse
+from chanlun.decision_support.llm_provider import (
+    LLMProvider,
+    OfflineAbstainProvider,
+    ProviderResponse,
+)
 from chanlun.decision_support.models import EventState
 from chanlun.decision_support.review_prompt import PROMPT_VERSION
 from chanlun.decision_support.review_schema import parse_review
@@ -355,7 +359,7 @@ _DEFAULT_RULE_EVIDENCE_RESOLVER = object()
 
 def _service(
     bundle: _Bundle,
-    provider: _FakeProvider,
+    provider: LLMProvider,
     *,
     index: CorpusIndex | None = None,
     clock=None,
@@ -723,6 +727,25 @@ def test_provider_failure_is_persisted_and_event_not_confirmed(review_bundle) ->
     assert review_bundle.event_service.get(review.event_id).state is EventState.ABSTAINED
 
 
+def test_offline_review_persists_abstain_without_confirm_transition(
+    review_bundle,
+) -> None:
+    review = _service(
+        review_bundle,
+        OfflineAbstainProvider(),
+    ).review_event(review_bundle.event.event_id)
+
+    assert review.status == "provider_failed"
+    assert review.verdict == "ABSTAIN"
+    assert review.error_code == "offline_review_mode"
+    assert review.attempt_count == 1
+    assert review_bundle.store.count_llm_review_attempts(review.review_id) == 1
+    assert (
+        review_bundle.event_service.get(review.event_id).state
+        is EventState.ABSTAINED
+    )
+
+
 def test_retryable_provider_failure_retries_only_once(review_bundle) -> None:
     empty_provider = _FakeProvider(())
     packet = _packet(review_bundle, empty_provider)
@@ -833,11 +856,17 @@ def test_image_hash_mismatch_abstains_before_provider_call(
         supports_images=True,
         supports_json_schema=True,
     )
+    binding = replace(
+        _rule_evidence_binding(review_bundle),
+        supporting_evidence_ids=(support.evidence_id,),
+        image_ids=(image.image_id,),
+    )
 
     review = _service(
         review_bundle,
         provider,
         index=index,
+        rule_evidence_resolver=lambda event: binding,
     ).review_event(review_bundle.event.event_id)
 
     assert provider.call_count == 0
@@ -917,7 +946,11 @@ def test_slow_provider_crossing_freshness_boundary_cannot_confirm(
     review_bundle,
 ) -> None:
     empty_provider = _FakeProvider(())
-    packet = _packet(review_bundle, empty_provider)
+    snapshot = replace(
+        review_bundle.risk_snapshot,
+        expires_at=review_bundle.event.observed_at + timedelta(minutes=30),
+    )
+    packet = _packet(review_bundle, empty_provider, snapshot=snapshot)
     current = [review_bundle.reviewed_at]
     review_bundle.bar_clock.closed_at = tuple(
         review_bundle.event.observed_at + timedelta(minutes=minutes)
@@ -936,6 +969,7 @@ def test_slow_provider_crossing_freshness_boundary_cannot_confirm(
         review_bundle,
         provider,
         clock=lambda: current[0],
+        snapshot=snapshot,
     ).review_event(review_bundle.event.event_id)
 
     assert review.status == "validated"

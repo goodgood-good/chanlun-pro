@@ -291,7 +291,7 @@ def build_runtime_observations(
             continue
         market = str(source.get("market") or "").strip().lower()
         source_id = str(source.get("id") or "")
-        if source_id != f"{market}_live_parity_backtest":
+        if source_id != f"{market}_recursive_backtest":
             continue
         candidate = top_candidate_by_market.get(market)
         if not candidate:
@@ -322,7 +322,7 @@ def build_runtime_observations(
                 "market": market,
                 "source_id": source_id,
                 "severity": "watch",
-                "observation": "live_parity_runtime_lag",
+                "observation": "recursive_backtest_runtime_lag",
                 "target_candidate": str(candidate.get("id") or ""),
                 "runtime_return": runtime_return,
                 "candidate_return": candidate_return,

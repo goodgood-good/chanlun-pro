@@ -9,10 +9,44 @@ import requests
 from chanlun.decision_support.corpus_retrieval import CorpusIndex
 from chanlun.decision_support.corpus_types import EvidenceUnit, SourceTier
 from chanlun.decision_support.evidence import ModelCapabilities, build_evidence_packet
-from chanlun.decision_support.llm_provider import ConfiguredProvider, ProviderResponse
+from chanlun.decision_support.llm_provider import (
+    ConfiguredProvider,
+    OfflineAbstainProvider,
+    ProviderResponse,
+)
 from chanlun.decision_support.review_prompt import PROMPT_VERSION, build_messages
 from chanlun.decision_support.risk import RiskDecision
 from tests.decision_support.conftest import ts
+
+
+def test_offline_abstain_provider_is_deterministic_and_never_calls_network(
+    monkeypatch,
+) -> None:
+    network = []
+    monkeypatch.setattr(
+        "requests.sessions.Session.request",
+        lambda *args, **kwargs: network.append((args, kwargs)),
+    )
+    provider = OfflineAbstainProvider()
+
+    first = provider.complete((), (), (10, 180))
+    second = provider.complete((), (), (10, 180))
+
+    assert first == second
+    assert first.ok is False
+    assert first.error_code == "offline_review_mode"
+    assert first.retryable is False
+    assert network == []
+
+
+def test_offline_provider_external_request_count_stays_zero() -> None:
+    provider = OfflineAbstainProvider()
+
+    provider.complete((), (), (10, 180))
+    provider.complete((), (), (10, 180))
+
+    assert type(provider.external_request_count) is int
+    assert provider.external_request_count == 0
 
 
 @pytest.fixture

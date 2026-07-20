@@ -194,6 +194,7 @@ class PaperResearchReadModel:
         health = self._runtime.health()
         if (
             getattr(health, "mode", None) != "research_paper"
+            or getattr(health, "read_only", None) is not True
             or getattr(health, "auto_order_enabled", None) is not False
             or getattr(health, "live_order_capability", None) is not False
         ):

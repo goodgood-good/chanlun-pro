@@ -1690,6 +1690,68 @@ def test_signal_observation_committed_batch_replay_is_idempotent_after_restart(
         restarted.complete_cycle(closed_at, signal_observation_batch=forged)
 
 
+def test_signal_observation_completed_replay_resolves_later_preflight_failure(
+    tmp_path,
+) -> None:
+    calendar = _Calendar((date(2026, 7, 14),))
+    path = tmp_path / "signal-observation-preflight-resolution.sqlite3"
+    closed_at = datetime(2026, 7, 14, 10, 35, tzinfo=CN)
+    committed_observed_at = closed_at + timedelta(seconds=30)
+    failed_at = closed_at + timedelta(seconds=40)
+    replay_observed_at = closed_at + timedelta(seconds=50)
+    store = SQLiteTrustedPaperBarStore(
+        path,
+        calendar_fingerprint=calendar.fingerprint,
+    )
+    store.bind_signal_observation_strategy_run(
+        _signal_observation_strategy_run(store)
+    )
+    prepared = _record_signal_observation_cycle(
+        store,
+        calendar,
+        closed_at,
+        (),
+    )
+    store.complete_cycle(
+        closed_at,
+        calendar_observed_at=committed_observed_at,
+        signal_observation_batch=prepared,
+    )
+    store.record_calendar_preflight_failure(
+        failed_at=failed_at,
+        reason="calendar_backend_unavailable",
+    )
+
+    store.complete_cycle(
+        closed_at,
+        calendar_observed_at=replay_observed_at,
+        signal_observation_batch=prepared,
+    )
+
+    assert store.health().calendar_preflight_failure_at is None
+    with sqlite3.connect(path) as connection:
+        failure_row = connection.execute(
+            """
+            SELECT failed_at, resolved_at, resolved_by_bar_closed_at,
+                   payload_sha256
+            FROM trusted_paper_bar_calendar_preflight
+            """
+        ).fetchone()
+        resolution_row = connection.execute(
+            """
+            SELECT resolved_at, resolved_by_bar_closed_at, payload_sha256
+            FROM trusted_paper_bar_calendar_preflight_resolution
+            """
+        ).fetchone()
+    assert failure_row[:3] == (failed_at.isoformat(), None, None)
+    assert failure_row[3].startswith("sha256:")
+    assert resolution_row[:2] == (
+        replay_observed_at.isoformat(),
+        closed_at.isoformat(),
+    )
+    assert resolution_row[2].startswith("sha256:")
+
+
 def test_signal_observation_completed_replay_clears_only_committed_preflight_watermark(
     tmp_path,
     monkeypatch,
@@ -3368,7 +3430,9 @@ def test_observed_day_requires_all_exact_calendar_slots(tmp_path) -> None:
             optional_failures={},
         )
         incomplete.complete_cycle(closed_at)
-    assert incomplete.health().observed_trading_days == 0
+    incomplete_health = incomplete.health()
+    assert incomplete_health.observed_trading_days == 0
+    assert incomplete_health.verified_trading_dates == ()
 
     complete = SQLiteTrustedPaperBarStore(
         tmp_path / "complete-slots.sqlite3",
@@ -3384,7 +3448,9 @@ def test_observed_day_requires_all_exact_calendar_slots(tmp_path) -> None:
             optional_failures={},
         )
         complete.complete_cycle(closed_at)
-    assert complete.health().observed_trading_days == 1
+    complete_health = complete.health()
+    assert complete_health.observed_trading_days == 1
+    assert complete_health.verified_trading_dates == (trading_day,)
 
 
 def test_paper_runtime_ignores_non_session_boundaries_without_failure(
@@ -5145,14 +5211,208 @@ def test_paper_scheduler_registers_single_bar_review_and_admission_jobs(
         ),
     )
 
-    assert set(registered) == {"bar", "review", "admission"}
+    assert set(registered) == {
+        "decision_support_bar_cycle",
+        "decision_support_review",
+        "decision_support_paper_admission",
+    }
     assert {job["id"] for job in jobs} == {
         "decision_support_bar_cycle",
         "decision_support_review",
         "decision_support_paper_admission",
     }
     assert all(job["max_instances"] == 1 for job in jobs)
+    assert all(job["executor"] == "default" for job in jobs)
     assert "decision_support_scan" not in {job["id"] for job in jobs}
+
+
+def test_paper_scheduler_bar_job_orders_observer_paper_and_reconcile(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    jobs: list[dict[str, object]] = []
+    calls: list[tuple[str, datetime]] = []
+    paper_result = object()
+
+    class Scheduler:
+        def add_job(self, func, **kwargs):
+            row = {"func": func, **kwargs}
+            jobs.append(row)
+            return row
+
+    paper_runtime = PaperResearchRuntime(
+        data_provider=SimpleNamespace(),
+        analysis_runtime=SimpleNamespace(),
+        bar_store=SQLiteTrustedPaperBarStore(tmp_path / "ordered-jobs.sqlite3"),
+        paper_gateway=SimpleNamespace(),
+        event_store=SimpleNamespace(),
+        trading_calendar=_Calendar((date(2026, 7, 14),)),
+    )
+
+    def observe(as_of):
+        calls.append(("observe", as_of))
+
+    def bar_cycle(as_of):
+        calls.append(("paper", as_of))
+        return paper_result
+
+    def reconcile(as_of):
+        calls.append(("reconcile", as_of))
+        return ()
+
+    monkeypatch.setattr(paper_runtime, "bar_cycle", bar_cycle)
+    registered = register_paper_research_jobs(
+        Scheduler(),
+        paper_runtime,
+        SimpleNamespace(
+            config=SimpleNamespace(enabled=True, scan_interval_seconds=30),
+            review_cycle=lambda: None,
+        ),
+        strategy_run=SimpleNamespace(
+            status_payload=lambda: {
+                "state": "active",
+                "evidence_scope": "current_epoch_only",
+                "store_bindings_complete": True,
+            },
+            mutation_lease=lambda _operation: nullcontext(),
+        ),
+        opportunity_runtime=SimpleNamespace(observe=observe),
+        research_trigger_coordinator=SimpleNamespace(reconcile=reconcile),
+    )
+
+    result = registered["decision_support_bar_cycle"]["func"]()
+
+    assert result is paper_result
+    assert tuple(name for name, _ in calls) == (
+        "observe",
+        "paper",
+        "reconcile",
+    )
+    assert len({as_of for _, as_of in calls}) == 1
+
+
+def test_paper_scheduler_records_all_bar_phase_failures_without_skipping(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    jobs: list[dict[str, object]] = []
+    calls: list[str] = []
+
+    class Scheduler:
+        def add_job(self, func, **kwargs):
+            row = {"func": func, **kwargs}
+            jobs.append(row)
+            return row
+
+    paper_runtime = PaperResearchRuntime(
+        data_provider=SimpleNamespace(),
+        analysis_runtime=SimpleNamespace(),
+        bar_store=SQLiteTrustedPaperBarStore(tmp_path / "failed-jobs.sqlite3"),
+        paper_gateway=SimpleNamespace(),
+        event_store=SimpleNamespace(),
+        trading_calendar=_Calendar((date(2026, 7, 14),)),
+    )
+
+    def fail(phase):
+        def invoke(_as_of):
+            calls.append(phase)
+            raise RuntimeError(f"{phase}-failed")
+
+        return invoke
+
+    monkeypatch.setattr(paper_runtime, "bar_cycle", fail("paper"))
+    registered = register_paper_research_jobs(
+        Scheduler(),
+        paper_runtime,
+        SimpleNamespace(
+            config=SimpleNamespace(enabled=True, scan_interval_seconds=30),
+            review_cycle=lambda: None,
+        ),
+        strategy_run=SimpleNamespace(
+            status_payload=lambda: {
+                "state": "active",
+                "evidence_scope": "current_epoch_only",
+                "store_bindings_complete": True,
+            },
+            mutation_lease=lambda _operation: nullcontext(),
+        ),
+        opportunity_runtime=SimpleNamespace(observe=fail("observer")),
+        research_trigger_coordinator=SimpleNamespace(
+            reconcile=fail("coordinator")
+        ),
+    )
+
+    with pytest.raises(
+        paper_runtime_module.PaperResearchBarJobError
+    ) as captured:
+        registered["decision_support_bar_cycle"]["func"]()
+
+    assert calls == ["observer", "paper", "coordinator"]
+    assert tuple(captured.value.failures) == (
+        "observer",
+        "paper",
+        "coordinator",
+    )
+    assert {
+        phase: str(error)
+        for phase, error in captured.value.failures.items()
+    } == {
+        "observer": "observer-failed",
+        "paper": "paper-failed",
+        "coordinator": "coordinator-failed",
+    }
+
+
+def test_paper_health_rejects_non_read_only_before_job_registration(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    jobs: list[dict[str, object]] = []
+
+    class Scheduler:
+        def add_job(self, func, **kwargs):
+            row = {"func": func, **kwargs}
+            jobs.append(row)
+            return row
+
+    paper_runtime = PaperResearchRuntime(
+        data_provider=SimpleNamespace(),
+        analysis_runtime=SimpleNamespace(),
+        bar_store=SQLiteTrustedPaperBarStore(tmp_path / "unsafe-health.sqlite3"),
+        paper_gateway=SimpleNamespace(),
+        event_store=SimpleNamespace(),
+        trading_calendar=_Calendar((date(2026, 7, 14),)),
+    )
+    monkeypatch.setattr(
+        paper_runtime,
+        "health",
+        lambda: SimpleNamespace(
+            mode="research_paper",
+            read_only=False,
+            auto_order_enabled=False,
+            live_order_capability=False,
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="read-only"):
+        register_paper_research_jobs(
+            Scheduler(),
+            paper_runtime,
+            SimpleNamespace(
+                config=SimpleNamespace(enabled=True, scan_interval_seconds=30),
+                review_cycle=lambda: None,
+            ),
+            strategy_run=SimpleNamespace(
+                status_payload=lambda: {
+                    "state": "active",
+                    "evidence_scope": "current_epoch_only",
+                    "store_bindings_complete": True,
+                },
+                mutation_lease=lambda _operation: nullcontext(),
+            ),
+        )
+
+    assert jobs == []
 
 
 def test_paper_scheduler_revalidates_strategy_run_before_every_job(

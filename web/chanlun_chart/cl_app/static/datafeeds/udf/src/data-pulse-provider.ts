@@ -54,13 +54,16 @@ export class DataPulseProvider implements IDataPulseProvider {
 	 * SSE 推送驱动：把最新 bar 直接喂给匹配的订阅者(绕过轮询/浏览器节流)。
 	 * symbolResKey = (ticker||name).toLowerCase() + resolution.toLowerCase()。
 	 */
-	public feedBar(symbolResKey: string, bar: Bar): void {
+	public feedBar(symbolResKey: string, bar: Bar, requireInitialized = false): void {
 		for (const guid in this._subscribers) {
 			const sub = this._subscribers[guid];
 			const si: LibrarySymbolInfo = sub.symbolInfo || {} as LibrarySymbolInfo;
 			const key = String((si as LibrarySymbolInfo & { ticker?: string }).ticker || si.name || '').toLowerCase()
 				+ String(sub.resolution).toLowerCase();
 			if (key !== symbolResKey) {
+				continue;
+			}
+			if (requireInitialized && sub.lastBarTime === null) {
 				continue;
 			}
 			if (sub.lastBarTime !== null && bar.time < sub.lastBarTime) {

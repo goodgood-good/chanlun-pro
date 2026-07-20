@@ -31,6 +31,7 @@ def make_decision_event():
     def factory(
         *,
         price: float = 10.0,
+        level: int = 1,
         stop_below: float | None = 9.0,
         bs_type: str = "3buy",
         big_dir: str = "neutral",
@@ -38,7 +39,7 @@ def make_decision_event():
         live_divergence: bool = False,
         divergence_kind: str | None = None,
         confirmation_bs_type: str | None = None,
-        track: StrategyTrack = StrategyTrack.TREND_CONTINUATION,
+        track: StrategyTrack = StrategyTrack.CHANLUN_ORIGINAL_LOW_DRAWDOWN,
         market: str = "a",
         code: str = "SH.600519",
         name: str = "贵州茅台",
@@ -54,7 +55,7 @@ def make_decision_event():
         signal = SignalSnapshot(
             bs_type=bs_type,
             signal_at=signal_at or observed_at,
-            level=1,
+            level=level,
             price=price,
             first_visible_bar=21,
             structural_stop_below=stop_below,
@@ -82,7 +83,7 @@ def make_decision_event():
         )
         levels = (
             LevelSnapshot("30m", 2, big_dir, True, 8.0, 10.0, 8.8, 9.5),
-            LevelSnapshot("5m", 1, mid_dir, True, 9.0, 10.0, 9.2, 9.8),
+            LevelSnapshot("5m", level, mid_dir, True, 9.0, 10.0, 9.2, 9.8),
         )
         return DecisionEvent(
             event_id=build_event_id(
@@ -90,7 +91,7 @@ def make_decision_event():
                 code,
                 "5m",
                 observed_at,
-                1,
+                level,
                 signal.bs_type,
                 sha256_json(signal),
             ),

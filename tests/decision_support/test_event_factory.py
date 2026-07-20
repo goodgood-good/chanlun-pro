@@ -17,6 +17,7 @@ from chanlun.decision_support.event_factory import (
 from chanlun.decision_support.fingerprints import sha256_json
 from chanlun.decision_support.models import (
     DecisionEvent,
+    LevelSnapshot,
     MarketConstraints,
     StrategyTrack,
 )
@@ -448,6 +449,72 @@ def test_event_keeps_physical_source_separate_from_recursive_display_frequency(
     assert event.levels[0].source_frequency == "1m"
     assert event.levels[0].source_bar_closed_at == data["bar_closed_at"]
     assert DecisionEvent.from_dict(event.to_dict()) == event
+
+
+def test_snapshot_levels_preserves_existing_physical_source_binding() -> None:
+    source_closed_at = ts("2026-07-13T10:30:00+08:00")
+    snapshot_at = ts("2026-07-13T10:35:00+08:00")
+    bound = LevelSnapshot(
+        "30m",
+        0,
+        "neutral",
+        True,
+        9.0,
+        10.0,
+        9.2,
+        9.8,
+        trade_gate_direction="down",
+        source_frequency="30m",
+        source_bar_closed_at=source_closed_at,
+    )
+    cd = SimpleNamespace(
+        frequency="1m",
+        get_recursive_branch_levels=lambda: (bound,),
+    )
+
+    [restored] = snapshot_levels(
+        cd,
+        source_frequency="1m",
+        source_bar_closed_at=snapshot_at,
+    )
+
+    assert restored.source_frequency == "30m"
+    assert restored.source_bar_closed_at == source_closed_at
+    assert restored.trade_gate_direction == "down"
+
+
+def test_one_minute_level_zero_signal_cannot_bind_native_5m_snapshot(
+    make_factory_input,
+) -> None:
+    data = make_factory_input()
+    closed_at = data["bar_closed_at"]
+    data["signal"] = replace(data["signal"], level=0)
+    source_1m = LevelSnapshot(
+        "1m",
+        0,
+        "up",
+        True,
+        9.0,
+        10.0,
+        9.2,
+        9.8,
+        source_frequency="1m",
+        source_bar_closed_at=closed_at,
+    )
+    native_5m = replace(
+        source_1m,
+        frequency="5m",
+        source_frequency="5m",
+        trade_gate_direction="up",
+    )
+    data["cd"] = SimpleNamespace(
+        frequency="1m",
+        get_recursive_branch_levels=lambda: (source_1m, native_5m),
+    )
+
+    event = event_from_signal(**data)
+
+    assert event is None
 
 
 def test_snapshot_levels_copies_labels_and_structure() -> None:

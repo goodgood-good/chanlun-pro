@@ -226,9 +226,70 @@ DECISION_SUPPORT = {
     "review_workers": 1,
     "review_queue_limit": 20,
     "max_llm_reviews_per_day": 20,
+    "review_mode": "offline_abstain",
     "paper_enabled": True,
     "auto_order_enabled": False,
 }
+
+DECISION_SUPPORT_A_SELECTION = {
+    "bt_data": "D:/chanlun_pro/bt_data_all_a",
+    "fund_data": "D:/chanlun_pro/bt_data_fund_all_a",
+    "scan_limit": 0,
+    "max_codes": 90,
+    "lookback_bars": 48,
+    "buy_classes": [3, 2, 1],
+    "require_three_systems": True,
+    "fundamental_roe_ann_min": 8.0,
+    "require_big_not_down": True,
+    "require_mid_not_down": True,
+    "min_bars": 100,
+}
+RECURSIVE_MONITOR_CONFIG = {"enabled": False}
+
+# 仅在 DECISION_SUPPORT.enabled=True 时读取。字段必须完整，不能加入 broker、
+# order 或任何自动下单对象；五个可写 SQLite 路径只能是相对文件名，并解析到
+# DATA_PATH/decision_support 受信任状态目录。engine-build 指纹绑定除本地 config.py
+# 外的完整 src/chanlun Python 源码清单，其余指纹分别绑定 scanner/structure/
+# paper-account/bar-provider 源文件。相关实现变化时，必须更新对应指纹并显式提升
+# paper_strategy_epoch，旧 epoch 不会被静默复用。
+DECISION_SUPPORT_PAPER_BOOTSTRAP = {
+    "paper_initial_cash": "1000000",
+    "paper_fee_schedule": {
+        "commission_rate": "0.0003",
+        "minimum_commission": "5",
+        "sell_stamp_duty_rate": "0.0005",
+        "transfer_fee_rate": "0.00001",
+        "regulatory_fee_rate": "0.0000541",
+        "slippage_rate": "0.001",
+        "price_quantum": "0.01",
+        "money_quantum": "0.01",
+    },
+    "paper_calendar_provider": (
+        "audit/paper_trading_calendar_2026/a_share_trading_calendar_2026.json"
+    ),
+    "paper_ledger_path": "paper_ledger.sqlite3",
+    "trusted_bar_store_path": "trusted_bars.sqlite3",
+    "paper_risk_state_path": "paper_risk.sqlite3",
+    "exit_evaluation_store_path": "exit_evaluations.sqlite3",
+    "paper_strategy_registry_path": "strategy_runs.sqlite3",
+    "paper_strategy_epoch": 7,
+    "paper_strategy_engine_build_fingerprint": (
+        "sha256:338b504f3f7e8e818a952a1cd197ded2c8fe7f916ae4898d8f617777822197f9"
+    ),
+    "paper_scanner_algorithm_fingerprint": (
+        "sha256:42d2af3e42232827edb8f984ea9611f41e548bd1ee84b3b1eb4caaf08bb8c613"
+    ),
+    "paper_structure_algorithm_fingerprint": (
+        "sha256:e466652dc5656078581e2953bcf56fba8d09c50404d17b12331319eed3a26afb"
+    ),
+    "paper_account_algorithm_fingerprint": (
+        "sha256:a8f72d3e4d59186de0572b724ff3886a628990b68e0cf4badc6c02a82fe0893e"
+    ),
+    "paper_bar_provider_fingerprint": (
+        "sha256:53cb639d3ed5efd5ce1849e5d8930d7dd8046d7c68ec89a4c443e06be02a728b"
+    ),
+}
+
 
 def get_data_path():
     # 获取项目数据的目录

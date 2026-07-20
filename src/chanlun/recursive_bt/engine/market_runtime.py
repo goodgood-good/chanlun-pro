@@ -187,7 +187,7 @@ def default_monitor_state_path(market: str) -> str:
 
 def default_backtest_report_paths(market: str) -> tuple[str, str]:
     market = normalize_market(market)
-    base = f"D:/chanlun_pro/reports/{market}_live_parity_backtest"
+    base = f"D:/chanlun_pro/reports/{market}_recursive_backtest"
     return f"{base}_summary.json", f"{base}_trades.csv"
 
 

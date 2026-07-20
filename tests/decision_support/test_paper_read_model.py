@@ -129,6 +129,31 @@ def test_projection_rejects_runtime_without_bulk_exit_attestation(tmp_path) -> N
         )
 
 
+def test_paper_read_model_rejects_non_read_only_health(tmp_path) -> None:
+    runtime = SimpleNamespace(
+        health=lambda: SimpleNamespace(
+            mode="research_paper",
+            read_only=False,
+            auto_order_enabled=False,
+            live_order_capability=False,
+        ),
+        attest_exit_snapshots=lambda snapshots: (False,) * len(snapshots),
+    )
+    model = PaperResearchReadModel(
+        SQLitePaperLedger(
+            tmp_path / "non-read-only-ledger.sqlite3",
+            initial_cash=Decimal("100000"),
+        ),
+        exit_store=SQLiteExitEvaluationStore(
+            tmp_path / "non-read-only-exits.sqlite3"
+        ),
+        runtime=runtime,
+    )
+
+    with pytest.raises(TypeError, match="health mode"):
+        model.status()
+
+
 class _LedgerStub:
     def __init__(self, state: PaperLedgerState) -> None:
         self.state = state
@@ -384,6 +409,7 @@ def test_status_exposes_persisted_observation_gates_and_policy_identity(
         attest_exit_snapshots=lambda snapshots: (True,) * len(snapshots),
         health=lambda: SimpleNamespace(
             mode="research_paper",
+            read_only=True,
             auto_order_enabled=False,
             live_order_capability=False,
             bar_store=SimpleNamespace(
@@ -514,6 +540,7 @@ def test_runtime_gate_fails_closed_when_strategy_run_is_unavailable(tmp_path) ->
         attest_exit_snapshots=lambda snapshots: (True,) * len(snapshots),
         health=lambda: SimpleNamespace(
             mode="research_paper",
+            read_only=True,
             auto_order_enabled=False,
             live_order_capability=False,
             bar_store=SimpleNamespace(
@@ -981,6 +1008,7 @@ def _runtime_health(store: SQLiteTrustedPaperBarStore) -> SimpleNamespace:
         bar_health = store.health()
         return SimpleNamespace(
             mode="research_paper",
+            read_only=True,
             auto_order_enabled=False,
             live_order_capability=False,
             bar_store=bar_health,

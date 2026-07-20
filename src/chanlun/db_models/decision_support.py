@@ -5,6 +5,7 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     Column,
     DateTime,
     ForeignKey,
@@ -519,3 +520,276 @@ class TableByLLMReview(Base):
     error_message_sha256 = Column(String(71), nullable=True)
     error_message_truncated = Column(Boolean, nullable=False)
     created_at = Column(_UTCDateTime(), nullable=False)
+
+
+class TableBySectorSelection(Base):
+    __tablename__ = "cl_decision_sector_selection"
+    __table_args__ = (
+        UniqueConstraint(
+            "selection_id",
+            name="uq_cl_decision_sector_selection_id",
+        ),
+        Index(
+            "ix_cl_decision_sector_selection_latest",
+            "market",
+            "scope",
+            "status",
+            "bar_closed_at",
+            "observed_at",
+            "id",
+        ),
+        CheckConstraint(
+            "stale IN (0, 1)",
+            name="ck_cl_decision_sector_selection_stale_bool",
+        ),
+        {"mysql_collate": "utf8mb4_general_ci"},
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    selection_id = Column(_identity_string(255), nullable=False)
+    market = Column(_identity_string(20), nullable=False)
+    scope = Column(_identity_string(40), nullable=False)
+    observed_at = Column(_UTCDateTime(), nullable=False)
+    bar_closed_at = Column(_UTCDateTime(), nullable=False)
+    membership_fingerprint = Column(_identity_string(71), nullable=False)
+    policy_fingerprint = Column(_identity_string(71), nullable=False)
+    payload_fingerprint = Column(_identity_string(71), nullable=False)
+    envelope_fingerprint = Column(_identity_string(71), nullable=False)
+    status = Column(_identity_string(20), nullable=False)
+    stale = Column(Boolean, nullable=False)
+    payload_json = Column(_audit_text(), nullable=False)
+
+
+class TableByTriggerObservation(Base):
+    __tablename__ = "cl_decision_trigger_observation"
+    __table_args__ = (
+        UniqueConstraint(
+            "trigger_id",
+            name="uq_cl_decision_trigger_observation_id",
+        ),
+        Index(
+            "ix_cl_decision_trigger_selection_bar",
+            "selection_id",
+            "bar_closed_at",
+            "observed_at",
+            "id",
+        ),
+        Index(
+            "ix_cl_decision_trigger_event_match",
+            "selection_id",
+            "market",
+            "code",
+            "sector_id",
+            "strategy_run_id",
+            "strategy_run_epoch",
+        ),
+        {"mysql_collate": "utf8mb4_general_ci"},
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    trigger_id = Column(_identity_string(255), nullable=False)
+    trigger_fingerprint = Column(_identity_string(71), nullable=False)
+    market = Column(_identity_string(20), nullable=False)
+    code = Column(_identity_string(32), nullable=False)
+    sector_id = Column(_identity_string(255), nullable=False)
+    selection_id = Column(
+        _identity_string(255),
+        ForeignKey(
+            "cl_decision_sector_selection.selection_id",
+            ondelete="RESTRICT",
+        ),
+        nullable=False,
+    )
+    selection_fingerprint = Column(_identity_string(71), nullable=False)
+    bar_opened_at = Column(_UTCDateTime(), nullable=False)
+    bar_closed_at = Column(_UTCDateTime(), nullable=False)
+    observed_at = Column(_UTCDateTime(), nullable=False)
+    source_frequency = Column(_identity_string(20), nullable=False)
+    source_bar_fingerprint = Column(_identity_string(71), nullable=False)
+    source_state_fingerprint = Column(_identity_string(71), nullable=False)
+    direction = Column(_identity_string(20), nullable=False)
+    bs_type = Column(_identity_string(40), nullable=False)
+    signal_key = Column(_identity_string(71), nullable=False)
+    signal_fingerprint = Column(_identity_string(71), nullable=False)
+    physical_5m_closed_at = Column(_UTCDateTime(), nullable=False)
+    related_5m_observation_id = Column(_identity_string(255), nullable=False)
+    five_minute_signal_fingerprint = Column(_identity_string(71), nullable=False)
+    gate_fingerprint = Column(_identity_string(71), nullable=False)
+    rule_id = Column(_identity_string(191), nullable=False)
+    rule_card_version = Column(Integer, nullable=False)
+    predicate_result_fingerprint = Column(_identity_string(71), nullable=False)
+    rule_binding_fingerprint = Column(_identity_string(71), nullable=False)
+    strategy_run_id = Column(_identity_string(80), nullable=False)
+    strategy_run_epoch = Column(Integer, nullable=False)
+    strategy_run_fingerprint = Column(_identity_string(71), nullable=False)
+    research_only = Column(Boolean, nullable=False)
+    payload_json = Column(_audit_text(), nullable=False)
+
+
+class TableByExitAttentionObservation(Base):
+    __tablename__ = "cl_decision_exit_attention_observation"
+    __table_args__ = (
+        UniqueConstraint(
+            "exit_attention_id",
+            name="uq_cl_decision_exit_attention_id",
+        ),
+        Index(
+            "ix_cl_decision_exit_attention_code_bar",
+            "market",
+            "code",
+            "bar_closed_at",
+            "observed_at",
+            "id",
+        ),
+        {"mysql_collate": "utf8mb4_general_ci"},
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    exit_attention_id = Column(_identity_string(255), nullable=False)
+    market = Column(_identity_string(20), nullable=False)
+    code = Column(_identity_string(32), nullable=False)
+    sector_id = Column(_identity_string(255), nullable=True)
+    bar_opened_at = Column(_UTCDateTime(), nullable=False)
+    bar_closed_at = Column(_UTCDateTime(), nullable=False)
+    observed_at = Column(_UTCDateTime(), nullable=False)
+    source_frequency = Column(_identity_string(20), nullable=False)
+    source_bar_fingerprint = Column(_identity_string(71), nullable=False)
+    source_state_fingerprint = Column(_identity_string(71), nullable=False)
+    signal_key = Column(_identity_string(71), nullable=False)
+    signal_fingerprint = Column(_identity_string(71), nullable=False)
+    visibility_state = Column(_identity_string(40), nullable=False)
+    required_epoch = Column(Integer, nullable=False)
+    required_set_fingerprint = Column(_identity_string(71), nullable=False)
+    strategy_run_id = Column(_identity_string(80), nullable=False)
+    strategy_run_epoch = Column(Integer, nullable=False)
+    strategy_run_fingerprint = Column(_identity_string(71), nullable=False)
+    payload_fingerprint = Column(_identity_string(71), nullable=False)
+    payload_json = Column(_audit_text(), nullable=False)
+
+
+class TableByPhysicalOneMinuteCheckpoint(Base):
+    __tablename__ = "cl_decision_physical_one_minute_checkpoint"
+    __table_args__ = (
+        UniqueConstraint(
+            "checkpoint_id",
+            name="uq_cl_decision_physical_1m_checkpoint_id",
+        ),
+        UniqueConstraint(
+            "market",
+            "code",
+            "engine_policy_fingerprint",
+            "strategy_run_id",
+            "strategy_run_epoch",
+            "strategy_run_fingerprint",
+            name="uq_cl_decision_physical_1m_checkpoint_identity",
+        ),
+        Index(
+            "ix_cl_decision_physical_1m_checkpoint_updated",
+            "market",
+            "code",
+            "updated_at",
+            "id",
+        ),
+        {"mysql_collate": "utf8mb4_general_ci"},
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    checkpoint_id = Column(_identity_string(255), nullable=False)
+    market = Column(_identity_string(20), nullable=False)
+    code = Column(_identity_string(32), nullable=False)
+    engine_policy_fingerprint = Column(_identity_string(71), nullable=False)
+    strategy_run_id = Column(_identity_string(80), nullable=False)
+    strategy_run_epoch = Column(Integer, nullable=False)
+    strategy_run_fingerprint = Column(_identity_string(71), nullable=False)
+    analysis_first_bar_closed_at = Column(_UTCDateTime(), nullable=False)
+    bootstrap_closed_at = Column(_UTCDateTime(), nullable=False)
+    last_bar_closed_at = Column(_UTCDateTime(), nullable=False)
+    processed_bar_count = Column(Integer, nullable=False)
+    last_source_bar_fingerprint = Column(_identity_string(71), nullable=False)
+    source_chain_fingerprint = Column(_identity_string(71), nullable=False)
+    seen_signal_keys_json = Column(_audit_text(), nullable=False)
+    current_signal_keys_json = Column(_audit_text(), nullable=False)
+    current_sell_signal_keys_json = Column(_audit_text(), nullable=False)
+    entry_active = Column(Boolean, nullable=False)
+    entry_epoch = Column(Integer, nullable=False)
+    required_active = Column(Boolean, nullable=False)
+    required_epoch = Column(Integer, nullable=False)
+    exit_alerted_signal_keys_json = Column(_audit_text(), nullable=False)
+    payload_fingerprint = Column(_identity_string(71), nullable=False)
+    payload_json = Column(_audit_text(), nullable=False)
+    cycle_fingerprint = Column(_identity_string(71), nullable=False)
+    cycle_json = Column(_audit_text(), nullable=False)
+    updated_at = Column(_UTCDateTime(), nullable=False)
+
+
+class TableByTriggerEventLink(Base):
+    __tablename__ = "cl_decision_trigger_event_link"
+    __table_args__ = (
+        UniqueConstraint(
+            "trigger_id",
+            name="uq_cl_decision_trigger_event_link_trigger",
+        ),
+        UniqueConstraint(
+            "event_id",
+            name="uq_cl_decision_trigger_event_link_event",
+        ),
+        Index(
+            "ix_cl_decision_trigger_event_link_linked",
+            "linked_at",
+            "id",
+        ),
+        {"mysql_collate": "utf8mb4_general_ci"},
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    trigger_id = Column(
+        _identity_string(255),
+        ForeignKey(
+            "cl_decision_trigger_observation.trigger_id",
+            ondelete="RESTRICT",
+        ),
+        nullable=False,
+    )
+    event_id = Column(
+        String(255),
+        ForeignKey("cl_decision_event.event_id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    linked_at = Column(_UTCDateTime(), nullable=False)
+
+
+class TableBySectorPreferenceRevision(Base):
+    __tablename__ = "cl_decision_sector_preference_revision"
+    __table_args__ = (
+        UniqueConstraint(
+            "sector_id",
+            "revision",
+            name="uq_cl_decision_sector_preference_revision",
+        ),
+        UniqueConstraint(
+            "sector_id",
+            "idempotency_key",
+            name="uq_cl_decision_sector_preference_idempotency",
+        ),
+        Index(
+            "ix_cl_decision_sector_preference_latest",
+            "sector_id",
+            "revision",
+            "id",
+        ),
+        {"mysql_collate": "utf8mb4_general_ci"},
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    sector_id = Column(_identity_string(255), nullable=False)
+    action = Column(_identity_string(20), nullable=False)
+    revision = Column(Integer, nullable=False)
+    expected_revision = Column(Integer, nullable=False)
+    idempotency_key = Column(_identity_string(128), nullable=False)
+    operator_id = Column(_identity_string(191), nullable=False)
+    reason = Column(_audit_text(), nullable=False)
+    changed_at = Column(_UTCDateTime(), nullable=False)
+    pinned_at = Column(_UTCDateTime(), nullable=True)
+    request_fingerprint = Column(_identity_string(71), nullable=False)
+    payload_fingerprint = Column(_identity_string(71), nullable=False)
+    payload_json = Column(_audit_text(), nullable=False)

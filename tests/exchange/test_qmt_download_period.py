@@ -9,6 +9,10 @@ get_market_data(1m) 返空 -> klines 返 empty; 或取到陈旧本地 1m 残留�
 from chanlun.exchange.exchange_qmt import ExchangeQMT
 
 
+def test_qmt_declares_endpoint_labeled_klines():
+    assert ExchangeQMT.kline_time_label == "end"
+
+
 def test_qmt_synth_freqs_download_base_is_1m():
     ex = ExchangeQMT()
     for f in ("2m", "10m", "120m"):

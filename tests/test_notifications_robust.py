@@ -25,6 +25,44 @@ def test_dry_run_returns_true_no_network():
     n = DingTalkWebhookNotifier(webhook="oapi.dingtalk.com/x", dry_run=True)
     assert n.send("t", ["x"]) is True
 
+
+def test_dry_run_injects_required_buy_sell_keyword():
+    collected = []
+    n = DingTalkWebhookNotifier(
+        webhook="https://oapi.dingtalk.com/robot/send?access_token=redacted",
+        keyword="买卖通知",
+        dry_run=True,
+        dry_run_collector=collected.append,
+    )
+
+    assert n.send("三类买点", ["SH.600000"]) is True
+
+    assert "买卖通知" in collected[0]
+
+
+def test_network_failure_log_never_exposes_webhook_token(monkeypatch):
+    import urllib.request
+
+    warnings = []
+    webhook = (
+        "https://oapi.dingtalk.com/robot/send?access_token="
+        "never-log-this-sensitive-token"
+    )
+
+    def fail(_request, timeout):
+        del timeout
+        raise RuntimeError(f"request failed for {webhook}")
+
+    monkeypatch.setattr(urllib.request, "urlopen", fail)
+    monkeypatch.setattr(
+        "chanlun.notifications.fun.get_logger",
+        lambda: type("Logger", (), {"warning": warnings.append})(),
+    )
+
+    assert DingTalkWebhookNotifier(webhook=webhook).send("t", ["x"]) is False
+    assert warnings
+    assert "never-log-this-sensitive-token" not in warnings[0]
+
 def test_iter_hook_commands_malformed_degrades_empty():
     """F1-NOTIF-4: settings.json 合法 JSON 但畸形结构(hooks/Notification=null 或非预期类型)
     必须降级空, 不得抛 AttributeError/TypeError 逃逸 discover→ClaudeHookNotifier.__init__→监控崩。"""

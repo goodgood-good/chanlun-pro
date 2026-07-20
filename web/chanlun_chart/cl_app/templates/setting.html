@@ -1,157 +1,164 @@
-<!DOCTYPE HTML>
-<html lang="zh">
-
-<head>
-    <title>系统设置</title>
-    <meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,minimum-scale=1.0">
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>系统设置 · Chanlun Pro</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='css/layui.css') }}" />
     <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}" />
-    <script type="text/javascript" src="{{ url_for('static', filename='layui.js') }}"></script>
-    <script type="text/javascript" src="{{ url_for('static', filename='jquery-3.7.0.min.js') }}"></script>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/ui-system.css') }}?v={{ static_version|default('') }}" />
+    <script src="{{ url_for('static', filename='layui.js') }}"></script>
+    <script src="{{ url_for('static', filename='jquery-3.7.0.min.js') }}"></script>
     {% include 'dark.html' %}
-</head>
+  </head>
 
-<body class="layui-fluid">
+  <body class="cp-ui">
+    <a class="cp-skip-link" href="#main-content">跳到系统设置</a>
+    <main id="main-content" class="cp-page cp-page--compact cp-page-stack">
+      <header class="cp-page-header">
+        <div class="cp-page-header-copy">
+          <span class="cp-eyebrow">SYSTEM INTEGRATION</span>
+          <h1>系统设置</h1>
+          <p>集中管理消息通知与网络代理。密钥字段不会在页面中回显明文。</p>
+        </div>
+        <div class="cp-page-header-actions">
+          <div class="cp-context-card">
+            <span>配置范围</span>
+            <strong>当前服务</strong>
+          </div>
+        </div>
+      </header>
 
-    <form class="layui-form layui-row setting_form" lay-filter="setting_form" role="form" style="padding: 20px;">
-
-        <div class="layui-form-item">
-            <label class="layui-form-label">飞书 App ID</label>
-            <div class="layui-input-block" title="飞书 App ID">
-                <div class="layui-input-block">
-                    <input type="text" name="fs_app_id" value="{{ fs_app_id }}" placeholder="请输入 飞书 App ID"
-                        autocomplete="off" class="layui-input">
-                </div>
+      <form class="layui-form setting_form cp-section-grid" lay-filter="setting_form" role="form">
+        <section class="cp-section-card" aria-labelledby="notification-title">
+          <div class="cp-section-heading">
+            <div class="cp-heading-with-index">
+              <span class="cp-section-index">01</span>
+              <div>
+                <h2 id="notification-title">消息通知</h2>
+                <p>配置飞书自建应用，用于发送行情监控和预警消息。</p>
+              </div>
             </div>
-        </div>
-        <div class="layui-form-item">
-            <label class="layui-form-label">飞书 App Secret</label>
-            <div class="layui-input-block" title="飞书 App Secret">
-                <div class="layui-input-block">
-                    <input type="text" name="fs_app_secret"
-                        value="{% if fs_app_secret_set %}{{ fs_app_secret_placeholder }}{% endif %}"
-                        placeholder="{% if fs_app_secret_set %}已配置（{{ fs_app_secret_mask }}），如需修改请直接覆盖{% else %}请输入 飞书 App Secret{% endif %}"
-                        autocomplete="off" class="layui-input">
-                </div>
+          </div>
+          <div class="cp-form-grid cp-form-grid--single">
+            <div class="layui-form-item">
+              <label class="layui-form-label" for="fs_app_id">飞书 App ID</label>
+              <div class="layui-input-block">
+                <input id="fs_app_id" type="text" name="fs_app_id" value="{{ fs_app_id }}"
+                  placeholder="请输入飞书 App ID" autocomplete="off" class="layui-input" />
+              </div>
             </div>
-        </div>
-        <div class="layui-form-item">
-            <label class="layui-form-label">飞书 User ID</label>
-            <div class="layui-input-block" title="飞书 User ID">
-                <div class="layui-input-block">
-                    <input type="text" name="fs_user_id" value="{{ fs_user_id }}" placeholder="请输入 飞书 User ID"
-                        autocomplete="off" class="layui-input">
-                </div>
+            <div class="layui-form-item">
+              <label class="layui-form-label" for="fs_app_secret">飞书 App Secret</label>
+              <div class="layui-input-block">
+                <input id="fs_app_secret" type="password" name="fs_app_secret"
+                  value="{% if fs_app_secret_set %}{{ fs_app_secret_placeholder }}{% endif %}"
+                  placeholder="{% if fs_app_secret_set %}已配置（{{ fs_app_secret_mask }}），如需修改请直接覆盖{% else %}请输入飞书 App Secret{% endif %}"
+                  autocomplete="new-password" class="layui-input" />
+              </div>
             </div>
-        </div>
-
-        <div class="layui-form-item">
-            <label class="layui-form-label">代理 Host</label>
-            <div class="layui-input-block" title="代理 Host">
-                <div class="layui-input-block">
-                    <input type="text" name="proxy_host" value="{{ proxy_host }}" placeholder="请输入 代理 Host"
-                        autocomplete="off" class="layui-input">
-                </div>
+            <div class="layui-form-item">
+              <label class="layui-form-label" for="fs_user_id">飞书 User ID</label>
+              <div class="layui-input-block">
+                <input id="fs_user_id" type="text" name="fs_user_id" value="{{ fs_user_id }}"
+                  placeholder="请输入飞书 User ID" autocomplete="off" class="layui-input" />
+              </div>
             </div>
-        </div>
+          </div>
+        </section>
 
-        <div class="layui-form-item">
-            <label class="layui-form-label">代理 Port</label>
-            <div class="layui-input-block" title="代理 Port">
-                <div class="layui-input-block">
-                    <input type="text" name="proxy_port" value="{{ proxy_port }}" placeholder="请输入 代理 Port"
-                        autocomplete="off" class="layui-input">
-                </div>
+        <section class="cp-section-card" aria-labelledby="proxy-title">
+          <div class="cp-section-heading">
+            <div class="cp-heading-with-index">
+              <span class="cp-section-index">02</span>
+              <div>
+                <h2 id="proxy-title">网络代理</h2>
+                <p>仅在数据源需要代理访问时填写，留空表示直连。</p>
+              </div>
             </div>
-        </div>
+          </div>
+          <div class="cp-form-grid cp-form-grid--single">
+            <div class="layui-form-item">
+              <label class="layui-form-label" for="proxy_host">代理 Host</label>
+              <div class="layui-input-block">
+                <input id="proxy_host" type="text" name="proxy_host" value="{{ proxy_host }}"
+                  placeholder="例如 127.0.0.1" autocomplete="off" class="layui-input" />
+              </div>
+            </div>
+            <div class="layui-form-item">
+              <label class="layui-form-label" for="proxy_port">代理 Port</label>
+              <div class="layui-input-block">
+                <input id="proxy_port" type="text" name="proxy_port" value="{{ proxy_port }}"
+                  inputmode="numeric" placeholder="例如 7890" autocomplete="off" class="layui-input" />
+              </div>
+            </div>
+            <div class="cp-note">
+              <span aria-hidden="true">i</span>
+              <div><strong>使用提示</strong><br />查看数字货币行情时通常无需单独配置代理。</div>
+            </div>
+          </div>
+        </section>
 
-
-        <div class="layui-form-item">
-            <button class="layui-btn layui-btn-fluid layui-bg-red" lay-submit lay-filter="setting_save">保存</button>
+        <div class="cp-actions cp-actions--sticky cp-section-card--span-2">
+          <button class="layui-btn cp-button" lay-submit lay-filter="setting_save" type="submit">
+            保存系统配置
+          </button>
+          <span class="cp-help-text">保存后对后续通知与数据请求生效。</span>
         </div>
-    </form>
+      </form>
 
-    <blockquote class="layui-elem-quote layui-quote-nm">
-        <h3>设置说明：</h3>
-        <p>行情监控任务，如有警报，并且进行了飞书的配置，则会发送飞书消息；</p>
-        <p>代理服务器，如果看数字货币行情，则无需进行设置；</p>
-        <h3>飞书配置获取方式：</h3>
-        <div>
-            <ol>
-                <li>
-                    打开飞书开放平台：https://open.feishu.cn/，并进行注册登录；
-                </li>
-                <li>
-                    进入开发者后台：https://open.feishu.cn/app?lang=zh-CN，点击“创建企业自建应用”，输入自定义的名称和描述，选择自己喜欢的图标，进行“创建”；
-                </li>
-                <li>
-                    “添加应用能力”，选择“机器人”进行添加；
-                </li>
-                <li>
-                    “权限管理”，<br />
-                    搜索 “contact:user.employee_id” ，开通权限 “获取用户 userID”；<br />
-                    搜索 “im:message” ，开通权限 “获取与发送单聊、群组消息”；
-                </li>
-                <li>
-                    版本管理与发布，选择“创建新版本”，输入版本号（例如：1.0.0），点击“发布”，“申请线上发布”；
-                </li>
-                <li>
-                    “凭证与基础信息” 页面，复制 App ID 与 App Secret 到对应的设置框；
-                </li>
-                <li>
-                    获取 UserId
-                    字段方法，打开API调试台：https://open.feishu.cn/api-explorer/cli_a503a353effd100b?apiName=batch_get_id&from=op_doc_tab&project=contact&resource=user&version=v3
-                </li>
-                <li>
-                    官方帮助文档：https://open.feishu.cn/document/faq/trouble-shooting/how-to-obtain-user-id
-                </li>
-                <li>
-                    点击 API 调试台左侧「查看鉴权凭证」中 tenant_access_token 中的「点击获取」（如果之前已经获取过，则可以点击刷新按钮刷新鉴权凭证。<br />
-                    点击右侧参数列表，将查询参数 Tab 中的 user_id_type 参数设置为 user_id。<br />
-                    切换至请求体 Tab，将请求体中的 ID 删除，并修改 mobiles 参数，设为你自己的手机号。<br />
-                    点击右侧「开始调试」，调用接口。调用成功后，在下方响应体中即可拿到你自己的 User ID。<br />
-                    将 user_id 复制并填入项目的 user_id 字段中。
-                </li>
-            </ol>
+      <section class="cp-section-card" aria-labelledby="guide-title">
+        <div class="cp-section-heading">
+          <div class="cp-heading-with-index">
+            <span class="cp-section-index">03</span>
+            <div>
+              <h2 id="guide-title">配置指南</h2>
+              <p>完成飞书机器人授权并取得应用凭证。</p>
+            </div>
+          </div>
         </div>
-    </blockquote>
+        <ol class="cp-guide">
+          <li>打开<a href="https://open.feishu.cn/" target="_blank" rel="noopener">飞书开放平台</a>并登录。</li>
+          <li>在开发者后台创建“企业自建应用”，添加机器人能力。</li>
+          <li>在权限管理中开通 <code>contact:user.employee_id</code> 与 <code>im:message</code>。</li>
+          <li>创建版本并发布应用，然后从“凭证与基础信息”复制 App ID 与 App Secret。</li>
+          <li>通过飞书 API 调试台按手机号查询 User ID，并填入上方字段。</li>
+        </ol>
+        <div class="cp-note cp-note--warning">
+          <span aria-hidden="true">!</span>
+          <div><strong>消息发送条件</strong><br />只有监控任务产生警报且飞书配置完整时，系统才会发送消息。</div>
+        </div>
+      </section>
+    </main>
 
     <script nonce="{{ csp_nonce }}">
-        $(function () {
-            layui.use(function () {
-                const form = layui.form;
-                const layer = layui.layer;
-                form.on('submit(setting_save)', function (data) {
-                    var $submit = $(data.elem);
-                    $submit.prop("disabled", true).addClass("layui-btn-disabled");
-                    AppRequest.ajax({
-                        type: "POST",
-                        url: "/setting/save",
-                        data: data.field,
-                        dataType: 'json',
-                        traditional: true,
-                        timeout: 15000,
-                        success: function (result) {
-                            if (result['ok'] === true) {
-                                layer.msg('配置保存成功');
-                            } else {
-                                layer.msg((result && result.msg) || '配置保存失败');
-                            }
-                        },
-                        error: function () {
-                            layer.msg('配置保存失败，请稍后重试');
-                        },
-                        complete: function () {
-                            $submit.prop("disabled", false).removeClass("layui-btn-disabled");
-                        }
-                    });
-                    return false; // 阻止默认 form 跳转
-                });
+      $(function () {
+        layui.use(function () {
+          const form = layui.form;
+          const layer = layui.layer;
+          form.on('submit(setting_save)', function (data) {
+            var $submit = $(data.elem);
+            $submit.prop('disabled', true).addClass('layui-btn-disabled').text('保存中…');
+            AppRequest.ajax({
+              type: 'POST',
+              url: '/setting/save',
+              data: data.field,
+              dataType: 'json',
+              traditional: true,
+              timeout: 15000,
+              success: function (result) {
+                if (result && result.ok === true) layer.msg('配置保存成功');
+                else layer.msg((result && result.msg) || '配置保存失败');
+              },
+              error: function () { layer.msg('配置保存失败，请稍后重试'); },
+              complete: function () {
+                $submit.prop('disabled', false).removeClass('layui-btn-disabled').text('保存系统配置');
+              }
             });
+            return false;
+          });
         });
-
-
+      });
     </script>
-</body>
-
+  </body>
 </html>

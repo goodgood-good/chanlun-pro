@@ -100,9 +100,25 @@ def build_rule_evaluation_context(
     if type(runtime_facts) is not RuleRuntimeFacts:
         raise TypeError("runtime_facts must be RuleRuntimeFacts")
 
+    relevant_levels = event.levels
+    if event.levels and all(
+        snapshot.source_frequency is not None for snapshot in event.levels
+    ):
+        signal_snapshot = next(
+            snapshot
+            for snapshot in event.levels
+            if snapshot.frequency == event.signal_frequency
+            and snapshot.level == event.signal.level
+        )
+        relevant_levels = tuple(
+            snapshot
+            for snapshot in event.levels
+            if snapshot.source_frequency == signal_snapshot.source_frequency
+        )
+
     event_levels: dict[int, object] = {}
     event_keys: set[tuple[str, int]] = set()
-    for snapshot in event.levels:
+    for snapshot in relevant_levels:
         if snapshot.level in event_levels:
             raise ValueError(f"ambiguous numeric level: {snapshot.level}")
         event_levels[snapshot.level] = snapshot

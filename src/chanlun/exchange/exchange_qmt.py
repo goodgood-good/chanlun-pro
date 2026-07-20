@@ -1,7 +1,13 @@
 import datetime
+import re
 import threading
+from collections.abc import Mapping
+from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
+from numbers import Integral
 from typing import Dict, List, Union
 from datetime import timedelta
+from zoneinfo import ZoneInfo
 import pandas as pd
 import pytz
 from tenacity import retry, stop_after_attempt, wait_random
@@ -22,9 +28,120 @@ from xtquant import xtdata
 # 串行化，作为防御性兜底，避免多线程并发触发崩溃。
 _XTDATA_NATIVE_LOCK = threading.RLock()
 
+_RESEARCH_CODE_PATTERN = re.compile(r"^(?:SH|SZ|BJ)\.\d{6}$")
+_RESEARCH_TIMEZONE = ZoneInfo("Asia/Shanghai")
+_UNIX_EPOCH_UTC = datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)
+
+
+def _validated_research_codes(codes: object) -> tuple[str, ...]:
+    if type(codes) is not tuple:
+        raise TypeError("codes must be an exact tuple")
+    if any(
+        type(code) is not str or _RESEARCH_CODE_PATTERN.fullmatch(code) is None
+        for code in codes
+    ):
+        raise ValueError("codes must contain exact normalized A-share codes")
+    if len(set(codes)) != len(codes):
+        raise ValueError("codes must not contain duplicates")
+    return codes
+
+
+def _research_decimal(value: object, field_name: str) -> Decimal:
+    if isinstance(value, bool):
+        raise ValueError(f"{field_name} must be a finite native numeric value")
+    try:
+        converted = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError) as error:
+        raise ValueError(
+            f"{field_name} must be a finite native numeric value"
+        ) from error
+    if not converted.is_finite():
+        raise ValueError(f"{field_name} must be a finite native numeric value")
+    return converted
+
+
+def _research_integer(value: object, field_name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, Integral):
+        raise ValueError(f"{field_name} must be a native integer")
+    converted = int(value)
+    if field_name == "native_time_ms" and converted < 0:
+        raise ValueError("native_time_ms must be non-negative")
+    return converted
+
+
+def _datetime_from_native_ms(native_time_ms: int) -> datetime.datetime:
+    return (
+        _UNIX_EPOCH_UTC + datetime.timedelta(milliseconds=native_time_ms)
+    ).astimezone(_RESEARCH_TIMEZONE)
+
+
+@dataclass(frozen=True, slots=True)
+class QmtResearchTick:
+    code: str
+    native_time_ms: int
+    last_price: Decimal
+    last_close: Decimal
+    volume: Decimal
+    stock_status: int
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.code) is not str
+            or _RESEARCH_CODE_PATTERN.fullmatch(self.code) is None
+        ):
+            raise ValueError("code must be an exact normalized A-share code")
+        if (
+            type(self.native_time_ms) is not int
+            or isinstance(self.native_time_ms, bool)
+            or self.native_time_ms < 0
+        ):
+            raise ValueError("native_time_ms must be an exact non-negative int")
+        for field_name in ("last_price", "last_close", "volume"):
+            value = getattr(self, field_name)
+            if type(value) is not Decimal or not value.is_finite():
+                raise ValueError(f"{field_name} must be a finite Decimal")
+        if type(self.stock_status) is not int or isinstance(self.stock_status, bool):
+            raise ValueError("stock_status must be an exact int")
+
+
+@dataclass(frozen=True, slots=True)
+class QmtDailyAmount:
+    code: str
+    source_timestamp: datetime.datetime
+    session: datetime.date
+    amount: Decimal
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.code) is not str
+            or _RESEARCH_CODE_PATTERN.fullmatch(self.code) is None
+        ):
+            raise ValueError("code must be an exact normalized A-share code")
+        if not isinstance(self.source_timestamp, datetime.datetime):
+            raise ValueError("source_timestamp must be a timezone-aware datetime")
+        if (
+            self.source_timestamp.tzinfo is None
+            or self.source_timestamp.utcoffset() is None
+        ):
+            raise ValueError("source_timestamp must be timezone-aware")
+        normalized_timestamp = self.source_timestamp.astimezone(_RESEARCH_TIMEZONE)
+        object.__setattr__(self, "source_timestamp", normalized_timestamp)
+        if type(self.session) is not datetime.date:
+            raise ValueError("session must be an exact date")
+        if self.session != normalized_timestamp.date():
+            raise ValueError("session must equal source_timestamp Shanghai date")
+        if (
+            type(self.amount) is not Decimal
+            or not self.amount.is_finite()
+            or self.amount <= 0
+        ):
+            raise ValueError("amount must be a positive finite Decimal")
+
 
 class ExchangeQMT(Exchange):
     """QMT（xtquant）沪深 A 股行情适配器。"""
+
+    kline_time_label = "end"
 
     def __init__(self):
         xtdata.enable_hello = False
@@ -178,12 +295,33 @@ class ExchangeQMT(Exchange):
         # 当调用方指定了请求 K 线数量时，按周期估算一个紧凑的窗口（带 3 倍冗余）。
         # 这样典型场景（300 根 1m）只需要 ~3 天历史，而不是 30 天。
         if req_counts is not None and req_counts > 0:
-            minutes_per_bar = {
-                "1m": 1, "5m": 5, "15m": 15, "30m": 30, "60m": 60,
-                "d": 60 * 24, "w": 60 * 24 * 7, "m": 60 * 24 * 30,
+            intraday_minutes_per_bar = {
+                "1m": 1,
+                "2m": 2,
+                "5m": 5,
+                "10m": 10,
+                "15m": 15,
+                "30m": 30,
+                "60m": 60,
+                "120m": 120,
             }
-            est_minutes = minutes_per_bar.get(frequency, 60) * req_counts * 3
-            est_delta = timedelta(minutes=est_minutes)
+            if frequency in intraday_minutes_per_bar:
+                # A 股每天仅有约 240 个交易分钟。按 24 小时连续市场折算会把
+                # 1,200 根 1m 的窗口压缩成约 3 天，周末后实际不足 600 根。
+                required_minutes = (
+                    intraday_minutes_per_bar[frequency] * req_counts * 3
+                )
+                trading_days = (required_minutes + 239) // 240
+                calendar_days = (trading_days * 7 + 4) // 5
+                est_delta = timedelta(days=calendar_days)
+            else:
+                minutes_per_bar = {
+                    "d": 60 * 24,
+                    "w": 60 * 24 * 7,
+                    "m": 60 * 24 * 30,
+                }
+                est_minutes = minutes_per_bar.get(frequency, 60) * req_counts * 3
+                est_delta = timedelta(minutes=est_minutes)
             # 取估算窗口和默认窗口中较小的
             if est_delta < delta:
                 delta = est_delta
@@ -191,13 +329,18 @@ class ExchangeQMT(Exchange):
         start_date = now - delta
         return start_date.strftime("%Y%m%d")
 
-    def prewarm_batch_download(self, codes, frequencies, cancel_check=None,
-                               progress_callback=None, chunk_size: int = 100):
+    def prewarm_batch_download(
+            self, codes, frequencies, cancel_check=None,
+            progress_callback=None, chunk_size: int = 100,
+            req_counts_by_frequency=None):
         """批量预下载多只标的的基础周期数据到本地 QMT 库,供预热逐只计算时跳过 download。
 
         加速原理:把"逐只 N 周期"的成千上万次 download_history_data 往返,合并成
         每个基础周期(1m/5m/1d)分块的少量 download_history_data2 批量调用;之后逐只
         klines 传 skip_download=True 只读本地库,不再各自往返。
+
+        ``req_counts_by_frequency`` 可把批量下载限制到调用方实际需要的K线根数，
+        避免30m预热默认拉取整年1m基础数据。
 
         安全:
         - xtquant 线程不安全 → 全程持 _XTDATA_NATIVE_LOCK 串行(与 klines 同锁)。
@@ -206,13 +349,31 @@ class ExchangeQMT(Exchange):
         - 单块异常吞掉(warning):该块标的逐只 download 仍能兜底(不传 skip_download 时)。
         - cancel_check() 返回 True 尽快中止。
         """
+        if req_counts_by_frequency is None:
+            req_counts_by_frequency = {}
+        if not isinstance(req_counts_by_frequency, Mapping):
+            raise TypeError("req_counts_by_frequency must be a mapping")
+        unknown_frequencies = set(req_counts_by_frequency) - set(frequencies)
+        if unknown_frequencies:
+            raise ValueError(
+                "req_counts_by_frequency contains an unrequested frequency"
+            )
+        for frequency, req_counts in req_counts_by_frequency.items():
+            if type(frequency) is not str or not frequency:
+                raise ValueError("request-count frequency must be a non-empty string")
+            if type(req_counts) is not int or req_counts <= 0:
+                raise ValueError("request counts must be positive ints")
+
         # 基础下载周期 → 该周期需覆盖的最早 start(用到它的各 freq 取最长回看)
         base_starts: dict = {}
         for freq in frequencies:
             base = self.download_frequency_map.get(freq)
             if base is None:
                 base = "1m" if freq in ("1m", "5m", "15m", "30m", "60m") else "1d"
-            start = self.get_start_date_by_frequency(freq)
+            start = self.get_start_date_by_frequency(
+                freq,
+                req_counts=req_counts_by_frequency.get(freq),
+            )
             if base not in base_starts or start < base_starts[base]:
                 base_starts[base] = start
         if not base_starts:
@@ -284,6 +445,22 @@ class ExchangeQMT(Exchange):
             query_start = start_date.replace("-", "").replace(" ", "").replace(":", "")
         else:
             query_start = self.get_start_date_by_frequency(frequency, req_counts=req_counts)
+        if (
+            isinstance(args, dict)
+            and "research_exact_end" in args
+            and type(args["research_exact_end"]) is not bool
+        ):
+            raise ValueError("research_exact_end must be an exact bool")
+        research_exact_end = (
+            isinstance(args, dict) and args.get("research_exact_end") is True
+        )
+        if research_exact_end and not end_date:
+            raise ValueError("research_exact_end requires end_date")
+        query_end = (
+            end_date.replace("-", "").replace(" ", "").replace(":", "")
+            if research_exact_end
+            else ""
+        )
 
         dividend_type = args.get("dividend_type", "front") if args else "front"
 
@@ -300,7 +477,7 @@ class ExchangeQMT(Exchange):
                         stock_code=qmt_code,
                         period=qmt_download_period,
                         start_time=query_start,
-                        end_time="",
+                        end_time=query_end,
                         incrementally=True,
                     )
                 raw_data = xtdata.get_market_data(
@@ -308,7 +485,7 @@ class ExchangeQMT(Exchange):
                     stock_list=[qmt_code],
                     period=qmt_read_period,
                     start_time=query_start,
-                    end_time="",
+                    end_time=query_end,
                     count=-1,
                     dividend_type=dividend_type,
                     fill_data=False,
@@ -397,7 +574,10 @@ class ExchangeQMT(Exchange):
                     if _end_dt.tzinfo is None
                     else _end_dt.tz_convert(self.tz)
                 )
-                if _end_dt.date() < datetime.datetime.now(self.tz).date():
+                if (
+                    research_exact_end
+                    or _end_dt.date() < datetime.datetime.now(self.tz).date()
+                ):
                     klines_df = klines_df[klines_df["date"] <= _end_dt]
             except Exception as _e:
                 LogUtil.warning(f"[exchange_qmt] end_date 裁剪跳过 code={code} end={end_date}: {_e}")
@@ -422,6 +602,189 @@ class ExchangeQMT(Exchange):
             "name": stock_detail["InstrumentName"],
             "precision": fun.reverse_decimal_to_power_of_ten(stock_detail["PriceTick"]),
         }
+
+    def research_tick_snapshots(
+        self,
+        codes: tuple[str, ...],
+    ) -> Mapping[str, QmtResearchTick]:
+        """Read one native QMT tick batch without synthesizing research facts."""
+
+        normalized_codes = _validated_research_codes(codes)
+        if not normalized_codes:
+            return {}
+        native_codes = tuple(self.code_to_qmt(code) for code in normalized_codes)
+        requested_by_native = dict(zip(native_codes, normalized_codes))
+        with _XTDATA_NATIVE_LOCK:
+            native_result = xtdata.get_full_tick(list(native_codes))
+        if not isinstance(native_result, Mapping):
+            return {}
+        unknown_codes = [
+            code for code in native_result if code not in requested_by_native
+        ]
+        if unknown_codes:
+            raise RuntimeError(
+                f"QMT returned unknown native code: {unknown_codes[0]!r}"
+            )
+
+        snapshots: dict[str, QmtResearchTick] = {}
+        required_fields = (
+            "time",
+            "lastPrice",
+            "lastClose",
+            "volume",
+            "stockStatus",
+        )
+        for native_code, code in zip(native_codes, normalized_codes):
+            native_tick = native_result.get(native_code)
+            if not isinstance(native_tick, Mapping) or any(
+                field not in native_tick for field in required_fields
+            ):
+                continue
+            try:
+                snapshot = QmtResearchTick(
+                    code=code,
+                    native_time_ms=_research_integer(
+                        native_tick["time"], "native_time_ms"
+                    ),
+                    last_price=_research_decimal(
+                        native_tick["lastPrice"], "lastPrice"
+                    ),
+                    last_close=_research_decimal(
+                        native_tick["lastClose"], "lastClose"
+                    ),
+                    volume=_research_decimal(native_tick["volume"], "volume"),
+                    stock_status=_research_integer(
+                        native_tick["stockStatus"], "stockStatus"
+                    ),
+                )
+            except (TypeError, ValueError):
+                continue
+            snapshots[code] = snapshot
+        return snapshots
+
+    def research_daily_amounts(
+        self,
+        codes: tuple[str, ...],
+        *,
+        start_session: datetime.date,
+        end_session: datetime.date,
+    ) -> Mapping[str, tuple[QmtDailyAmount, ...]]:
+        """Read native daily ``time`` and ``amount`` facts for a bounded window."""
+
+        normalized_codes = _validated_research_codes(codes)
+        if type(start_session) is not datetime.date:
+            raise TypeError("start_session must be an exact date")
+        if type(end_session) is not datetime.date:
+            raise TypeError("end_session must be an exact date")
+        if start_session > end_session:
+            raise ValueError("start_session must not be after end_session")
+        empty_result = {code: () for code in normalized_codes}
+        if not normalized_codes:
+            return empty_result
+
+        native_codes = tuple(self.code_to_qmt(code) for code in normalized_codes)
+        requested_by_native = dict(zip(native_codes, normalized_codes))
+        start_text = start_session.strftime("%Y%m%d")
+        end_text = end_session.strftime("%Y%m%d")
+        with _XTDATA_NATIVE_LOCK:
+            xtdata.download_history_data2(
+                list(native_codes),
+                "1d",
+                start_time=start_text,
+                end_time=end_text,
+                incrementally=True,
+            )
+            native_result = xtdata.get_market_data(
+                field_list=["time", "amount"],
+                stock_list=list(native_codes),
+                period="1d",
+                start_time=start_text,
+                end_time=end_text,
+                count=-1,
+                dividend_type="none",
+                fill_data=False,
+            )
+        if not isinstance(native_result, Mapping):
+            return empty_result
+
+        time_frame = native_result.get("time")
+        amount_frame = native_result.get("amount")
+        for frame in (time_frame, amount_frame):
+            if isinstance(frame, pd.DataFrame):
+                for native_code in frame.index:
+                    if native_code not in requested_by_native:
+                        raise RuntimeError(
+                            f"QMT returned unknown native code: {native_code!r}"
+                        )
+        if not isinstance(time_frame, pd.DataFrame) or not isinstance(
+            amount_frame, pd.DataFrame
+        ):
+            return empty_result
+        if (
+            not time_frame.columns.equals(amount_frame.columns)
+            or time_frame.columns.has_duplicates
+            or amount_frame.columns.has_duplicates
+        ):
+            return empty_result
+
+        result: dict[str, tuple[QmtDailyAmount, ...]] = {}
+        for native_code, code in zip(native_codes, normalized_codes):
+            if native_code not in time_frame.index or native_code not in amount_frame.index:
+                result[code] = ()
+                continue
+            native_times = time_frame.loc[native_code]
+            native_amounts = amount_frame.loc[native_code]
+            if not isinstance(native_times, pd.Series) or not isinstance(
+                native_amounts, pd.Series
+            ):
+                result[code] = ()
+                continue
+            time_values = tuple(native_times.tolist())
+            amount_values = tuple(native_amounts.tolist())
+            if len(time_values) != len(amount_values):
+                result[code] = ()
+                continue
+
+            rows: list[QmtDailyAmount] = []
+            invalid = False
+            previous_timestamp: datetime.datetime | None = None
+            previous_session: datetime.date | None = None
+            for native_time, native_amount in zip(time_values, amount_values):
+                try:
+                    native_time_ms = _research_integer(
+                        native_time, "native_time_ms"
+                    )
+                    source_timestamp = _datetime_from_native_ms(native_time_ms)
+                except (TypeError, ValueError, OverflowError):
+                    invalid = True
+                    break
+                session = source_timestamp.date()
+                if session < start_session or session > end_session:
+                    continue
+                try:
+                    amount = _research_decimal(native_amount, "amount")
+                    row = QmtDailyAmount(
+                        code=code,
+                        source_timestamp=source_timestamp,
+                        session=session,
+                        amount=amount,
+                    )
+                except (TypeError, ValueError):
+                    invalid = True
+                    break
+                if (
+                    previous_timestamp is not None
+                    and source_timestamp <= previous_timestamp
+                ) or (
+                    previous_session is not None and session <= previous_session
+                ):
+                    invalid = True
+                    break
+                rows.append(row)
+                previous_timestamp = source_timestamp
+                previous_session = session
+            result[code] = () if invalid else tuple(rows)
+        return result
 
     def ticks(self, codes: List[str]) -> Dict[str, Tick]:
         """

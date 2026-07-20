@@ -177,7 +177,7 @@ def default_runtime_summary_sources(
         summary_path, _trades_path = default_backtest_report_paths(market)
         sources.append(
             RuntimeSummarySource(
-                id=f"{market}_live_parity_backtest",
+                id=f"{market}_recursive_backtest",
                 market=market,
                 kind="backtest_summary",
                 path=summary_path,

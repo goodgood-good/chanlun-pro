@@ -6,7 +6,7 @@ from decimal import Decimal
 
 import pytest
 
-from chanlun.decision_support.models import StrategyTrack
+from chanlun.decision_support.models import LevelSnapshot, StrategyTrack
 from chanlun.decision_support.risk import (
     HoldingSnapshot,
     PendingExitSnapshot,
@@ -52,6 +52,107 @@ def test_risk_sizing_never_exceeds_half_percent(
     assert decision.planned_risk_cash <= Decimal("500")
     assert decision.target_weight == Decimal("0.2")
     assert decision.reasons == ()
+
+
+def test_risk_weight_uses_native_30m_direction_not_recursive_display_label(
+    make_decision_event,
+    make_risk_context,
+) -> None:
+    event = make_decision_event(
+        bs_type="2buy",
+        big_dir="down",
+        mid_dir="up",
+    )
+    recursive = tuple(
+        replace(
+            level,
+            source_frequency="1m",
+            source_bar_closed_at=event.bar_closed_at,
+        )
+        for level in event.levels
+    )
+    native_5m = LevelSnapshot(
+        "5m",
+        0,
+        "up",
+        True,
+        9.0,
+        10.0,
+        9.2,
+        9.8,
+        source_frequency="5m",
+        source_bar_closed_at=event.bar_closed_at,
+    )
+    native_30m = replace(
+        native_5m,
+        frequency="30m",
+        source_frequency="30m",
+        direction="up",
+    )
+    multitimeframe = replace(
+        event,
+        levels=(*recursive, native_5m, native_30m),
+    )
+    context = make_risk_context(asof=event.observed_at)
+
+    decision = evaluate_entry(
+        multitimeframe,
+        context,
+        RiskPolicy.conservative(),
+    )
+
+    assert decision.target_weight == Decimal("0.18")
+
+
+def test_risk_weight_uses_native_trade_gate_direction(
+    make_decision_event,
+    make_risk_context,
+) -> None:
+    event = make_decision_event(
+        bs_type="2buy",
+        big_dir="up",
+        mid_dir="up",
+    )
+    recursive = tuple(
+        replace(
+            level,
+            source_frequency="1m",
+            source_bar_closed_at=event.bar_closed_at,
+        )
+        for level in event.levels
+    )
+    native_5m = LevelSnapshot(
+        "5m",
+        0,
+        "up",
+        True,
+        9.0,
+        10.0,
+        9.2,
+        9.8,
+        trade_gate_direction="up",
+        source_frequency="5m",
+        source_bar_closed_at=event.bar_closed_at,
+    )
+    native_30m = replace(
+        native_5m,
+        frequency="30m",
+        source_frequency="30m",
+        trade_gate_direction="down",
+    )
+    multitimeframe = replace(
+        event,
+        levels=(*recursive, native_5m, native_30m),
+    )
+    context = make_risk_context(asof=event.observed_at)
+
+    decision = evaluate_entry(
+        multitimeframe,
+        context,
+        RiskPolicy.conservative(),
+    )
+
+    assert decision.target_weight == Decimal("0.15")
 
 
 def test_daily_one_percent_loss_locks_new_entries(

@@ -36,6 +36,58 @@ def test_blank_group_name_is_rejected_before_zixuan_is_created(monkeypatch):
     assert created == []
 
 
+def test_add_group_returns_actionable_success_contract(monkeypatch):
+    calls = []
+
+    class _ZiXuan:
+        def __init__(self, market):
+            calls.append(("init", market))
+
+        def add_zx_group(self, name):
+            calls.append(("add", name))
+            return True
+
+    monkeypatch.setattr(zixuan_blueprint, "ZiXuan", _ZiXuan)
+    app = _app()
+
+    response = app.test_client().post(
+        "/opt_zixuan_group/a",
+        data={"opt": "ADD", "zx_group": "  趋势启动  "},
+    )
+
+    assert response.status_code == 200
+    assert response.get_json() == {
+        "ok": True,
+        "group": "趋势启动",
+        "msg": "自选分组已创建",
+    }
+    assert calls == [("init", "a"), ("add", "趋势启动")]
+
+
+def test_duplicate_group_returns_actionable_failure_contract(monkeypatch):
+    class _ZiXuan:
+        def __init__(self, _market):
+            pass
+
+        def add_zx_group(self, _name):
+            return False
+
+    monkeypatch.setattr(zixuan_blueprint, "ZiXuan", _ZiXuan)
+    app = _app()
+
+    response = app.test_client().post(
+        "/opt_zixuan_group/a",
+        data={"opt": "ADD", "zx_group": "趋势启动"},
+    )
+
+    assert response.status_code == 200
+    assert response.get_json() == {
+        "ok": False,
+        "group": "趋势启动",
+        "msg": "分组已存在或名称不可用",
+    }
+
+
 def test_import_resolves_codes_once_and_replaces_group_atomically(monkeypatch):
     replaced = []
 

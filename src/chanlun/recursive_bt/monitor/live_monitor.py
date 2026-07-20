@@ -863,6 +863,9 @@ class MonitorSymbolState:
     ) -> None:
         self.code = code
         self.ex = ex
+        self.kline_time_label = getattr(ex, "kline_time_label", "start")
+        if self.kline_time_label not in {"start", "end"}:
+            raise ValueError("exchange kline_time_label must be start or end")
         self.op_level = op_level
         self.big_level = big_level
         self.mid_level = mid_level or ""
@@ -911,7 +914,11 @@ class MonitorSymbolState:
 
     def _process_level(self, cd: CL, frequency: str, last_attr: str, min_bars: int):
         last = getattr(self, last_attr)
-        df = drop_unclosed_last_bar(self._fetch_klines(frequency, last), frequency)
+        df = drop_unclosed_last_bar(
+            self._fetch_klines(frequency, last),
+            frequency,
+            time_label=self.kline_time_label,
+        )
         if df is None or len(df) == 0:
             return None
         # min_bars 健全性检查只对首轮全量生效;增量尾窗本来就短,不适用
@@ -958,6 +965,13 @@ class MonitorSymbolState:
     def _refresh_daily_window(self) -> None:
         df = self._fetch_klines("d", self.lastd)
         if df is None or len(df) == 0:
+            return
+        today = pd.Timestamp.now(tz="Asia/Shanghai").date()
+        completed_mask = [
+            pd.Timestamp(value).date() < today for value in df["date"]
+        ]
+        df = df.loc[completed_mask].copy()
+        if len(df) == 0:
             return
         if self.lastd is None and len(df) < 100:
             return

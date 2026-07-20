@@ -7,10 +7,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List, Literal, Optional
 
 from chanlun.core.types import LINE, FX, ZS
 from chanlun.core.zs_branch import ZsBranchResult, DivergenceResult
+
+
+PointDefinitionVariant = Literal[
+    "standard",
+    "strict",
+    "weak_divergence",
+    "boundary_touch",
+]
 
 
 @dataclass
@@ -26,6 +34,7 @@ class BuySellPoint:
     structural_stop_above: Optional[float] = None  # 卖点失效上边界:1/2卖前高、3卖 ZD
     rebound_target: Optional[float] = None    # 一类点最弱反弹目标(L029:14 反弹必触及末中枢
     # DD/GG):同向=本中枢 dd/gg;转折型=前一中枢 dd/gg(R1-C13);反弹不触及=分解有误信号,亦供策略最小出场目标
+    definition_variant: PointDefinitionVariant = "standard"
 
 
 class BsBranchCalculator:
@@ -91,10 +100,20 @@ class BsBranchCalculator:
             retest = self._next_seg(leave, lines, index)           # 紧邻下一段 = 第一次回试
             if retest is None:                                     # 离开到右边缘、无回试 → 不产
                 continue
+            if not self._line_is_done(retest):                      # 未完成回试仅是候选,非三类确认点
+                continue
             if leave._type == "up" and retest.end.val >= z.zg:     # 回试低点不破 ZG
-                out.append(BuySellPoint("3buy", z, retest, retest.end, None))
+                variant = "boundary_touch" if retest.end.val == z.zg else "standard"
+                out.append(BuySellPoint(
+                    "3buy", z, retest, retest.end, None,
+                    definition_variant=variant,
+                ))
             elif leave._type == "down" and retest.end.val <= z.zd:  # 回试高点不破 ZD
-                out.append(BuySellPoint("3sell", z, retest, retest.end, None))
+                variant = "boundary_touch" if retest.end.val == z.zd else "standard"
+                out.append(BuySellPoint(
+                    "3sell", z, retest, retest.end, None,
+                    definition_variant=variant,
+                ))
         return out
 
     def second_class(self, zs_result: ZsBranchResult, lines: List[LINE],
@@ -117,23 +136,29 @@ class BsBranchCalculator:
             pullback = self._next_seg(rebound, lines, index) if rebound is not None else None
             if rebound is None or pullback is None:
                 continue
+            if not self._line_is_done(rebound) or not self._line_is_done(pullback):
+                continue                                           # 未完成段只进候选层,不产确认二类点
             extreme = bp.anchor_fx.val                            # 一类点极值(前低/前高)
             if bp.bs_type == "1buy" and rebound._type == "up" and pullback._type == "down":
                 if pullback.end.val >= extreme:                   # ① 不破前低 = 强/一般档
                     out.append(BuySellPoint("2buy", bp.zs, pullback, pullback.end,
-                                            bp.divergence, structural_stop_below=extreme))
+                                            bp.divergence, structural_stop_below=extreme,
+                                            definition_variant="strict"))
                 elif (ld_provider is not None                     # ② 最弱档:破前低 + 盘整背驰
                       and is_beichi(bp.signal_seg, pullback, ld_provider, frequency)):
                     out.append(BuySellPoint("2buy", bp.zs, pullback, pullback.end,
-                                            bp.divergence, structural_stop_below=pullback.end.val))
+                                            bp.divergence, structural_stop_below=pullback.end.val,
+                                            definition_variant="weak_divergence"))
             elif bp.bs_type == "1sell" and rebound._type == "down" and pullback._type == "up":
                 if pullback.end.val <= extreme:
                     out.append(BuySellPoint("2sell", bp.zs, pullback, pullback.end,
-                                            bp.divergence, structural_stop_above=extreme))
+                                            bp.divergence, structural_stop_above=extreme,
+                                            definition_variant="strict"))
                 elif (ld_provider is not None
                       and is_beichi(bp.signal_seg, pullback, ld_provider, frequency)):
                     out.append(BuySellPoint("2sell", bp.zs, pullback, pullback.end,
-                                            bp.divergence, structural_stop_above=pullback.end.val))
+                                            bp.divergence, structural_stop_above=pullback.end.val,
+                                            definition_variant="weak_divergence"))
         return out
 
     def _line_index(self, lines: List[LINE]) -> dict:
@@ -152,6 +177,14 @@ class BsBranchCalculator:
         self._index_lines = lines
         self._index_cache = index
         return index
+
+    @staticmethod
+    def _line_is_done(line: LINE) -> bool:
+        checker = getattr(line, "is_done", None)
+        if callable(checker):
+            return checker() is True
+        marker = getattr(getattr(line, "end", None), "done", None)
+        return True if marker is None else marker is True
 
     @staticmethod
     def _next_seg(leave: LINE, lines: List[LINE],

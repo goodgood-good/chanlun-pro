@@ -1,0 +1,47 @@
+from datetime import timedelta
+
+from chanlun.decision_support.trading_system.context import classify_context
+from tests.trading_system.helpers import AS_OF, confirmed_point
+
+
+def test_neutral_thirty_minute_without_fresh_point_is_not_rejected() -> None:
+    context = classify_context(
+        frequency="30m",
+        current_direction="neutral",
+        points=(),
+        as_of=AS_OF,
+    )
+
+    assert context.disposition == "neutral"
+    assert context.hard_block is False
+    assert context.reason_codes == ("no_active_directional_point",)
+
+
+def test_confirmed_higher_level_sell_in_down_structure_is_hostile() -> None:
+    context = classify_context(
+        frequency="30m",
+        current_direction="down",
+        points=(confirmed_point("1sell", tower="xd", level=1),),
+        as_of=AS_OF,
+    )
+
+    assert context.disposition == "hostile"
+    assert context.hard_block is True
+    assert context.dominant_point_type == "1sell"
+
+
+def test_future_point_is_rejected() -> None:
+    future = confirmed_point(
+        "1buy",
+        minutes_after=int((AS_OF + timedelta(minutes=1) - AS_OF.replace(hour=10)).total_seconds() / 60),
+    )
+
+    context = classify_context(
+        frequency="30m",
+        current_direction="up",
+        points=(future,),
+        as_of=AS_OF,
+    )
+
+    assert context.dominant_point_id is None
+    assert context.reason_codes == ("no_active_directional_point",)

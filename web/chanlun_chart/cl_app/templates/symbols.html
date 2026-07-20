@@ -1,163 +1,165 @@
-<!DOCTYPE HTML>
-<html lang="zh">
-
-<head>
-    <title>多市场标的列表</title>
-    <meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,minimum-scale=1.0">
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>标的中心 · Chanlun Pro</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='css/layui.css') }}" />
     <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}" />
-    <script type="text/javascript" src="{{ url_for('static', filename='layui.js') }}"></script>
-    <script type="text/javascript" src="{{ url_for('static', filename='jquery-3.7.0.min.js') }}"></script>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/ui-system.css') }}?v={{ static_version|default('') }}" />
+    <script src="{{ url_for('static', filename='layui.js') }}"></script>
+    <script src="{{ url_for('static', filename='jquery-3.7.0.min.js') }}"></script>
     {% include 'dark.html' %}
-    <style>
-        .symbols-toolbar {
-            padding: 16px 20px 4px 20px;
-        }
+  </head>
 
-        .symbols-tip {
-            margin: 0 20px 10px 20px;
-        }
-
-        #symbols_table_wrap {
-            padding: 0 20px 20px 20px;
-        }
-
-        .symbol-code-link {
-            color: #1e9fff;
-            cursor: pointer;
-            font-weight: 500;
-        }
-    </style>
-</head>
-
-<body class="layui-fluid">
-
-    <form class="layui-form symbols-toolbar" lay-filter="symbols_form">
-        <div class="layui-form-item">
-            <div class="layui-inline">
-                <label class="layui-form-label">市场</label>
-                <div class="layui-input-inline" style="width: 180px;">
-                    <select name="market" lay-filter="market_select" id="market_select">
-                        {% for m_key, m_label in markets %}
-                        <option value="{{ m_key }}" {% if m_key==default_market %}selected{% endif %}>{{ m_label }}</option>
-                        {% endfor %}
-                    </select>
-                </div>
-            </div>
-            <div class="layui-inline">
-                <label class="layui-form-label">搜索</label>
-                <div class="layui-input-inline" style="width: 240px;">
-                    <input type="text" id="search_input" placeholder="代码 / 名称 / 拼音首字母" autocomplete="off"
-                        class="layui-input" />
-                </div>
-            </div>
-            <div class="layui-inline">
-                <button type="button" id="btn_search" class="layui-btn layui-bg-red">
-                    <i class="layui-icon layui-icon-search"></i> 查询
-                </button>
-                <button type="button" id="btn_reset" class="layui-btn layui-btn-primary layui-border-red">
-                    <i class="layui-icon layui-icon-refresh"></i> 重置
-                </button>
-                <span id="total_tip" style="margin-left: 12px; color: #888;"></span>
-            </div>
+  <body class="cp-ui">
+    <a class="cp-skip-link" href="#main-content">跳到标的列表</a>
+    <main id="main-content" class="cp-page cp-page-stack">
+      <header class="cp-page-header">
+        <div class="cp-page-header-copy">
+          <span class="cp-eyebrow">MARKET UNIVERSE</span>
+          <h1>标的中心</h1>
+          <p>按市场、代码、名称或拼音首字母定位标的；点击代码可在新窗口打开结构解盘。</p>
         </div>
-    </form>
+        <div class="cp-page-header-actions">
+          <div class="cp-context-card">
+            <span>当前市场标的</span>
+            <strong id="header_total_tip">加载中</strong>
+          </div>
+        </div>
+      </header>
 
-    <blockquote class="layui-elem-quote layui-quote-nm symbols-tip">
-        切换上方市场即可加载对应标的列表；点击"代码"列将以新窗口打开缠论图表。
-    </blockquote>
+      <section class="cp-section-card" aria-labelledby="filter-title">
+        <div class="cp-section-heading">
+          <div class="cp-heading-with-index">
+            <span class="cp-section-index">01</span>
+            <div>
+              <h2 id="filter-title">筛选标的</h2>
+              <p>切换市场会清空关键词并重新载入对应标的池。</p>
+            </div>
+          </div>
+        </div>
+        <form class="layui-form cp-filter-bar" lay-filter="symbols_form" role="search">
+          <div class="cp-field">
+            <label class="cp-field-label" for="market_select">市场</label>
+            <select name="market" lay-filter="market_select" id="market_select" aria-label="选择市场">
+              {% for m_key, m_label in markets %}
+              <option value="{{ m_key }}" {% if m_key==default_market %}selected{% endif %}>{{ m_label }}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div class="cp-field">
+            <label class="cp-field-label" for="search_input">代码、名称或拼音</label>
+            <input type="search" id="search_input" placeholder="例如 SH.600519、贵州茅台、gzmt"
+              autocomplete="off" class="layui-input" />
+          </div>
+          <div class="cp-filter-actions">
+            <button type="button" id="btn_search" class="layui-btn cp-button">
+              <i class="layui-icon layui-icon-search" aria-hidden="true"></i>查询
+            </button>
+            <button type="button" id="btn_reset" class="layui-btn cp-button cp-button--secondary">
+              <i class="layui-icon layui-icon-refresh" aria-hidden="true"></i>重置
+            </button>
+          </div>
+        </form>
+      </section>
 
-    <div id="symbols_table_wrap">
-        <table class="layui-hide" id="symbols_table" lay-filter="symbols_table"></table>
-    </div>
+      <section class="cp-data-shell" aria-labelledby="symbols-list-title">
+        <header class="cp-data-shell-header">
+          <div>
+            <h2 id="symbols-list-title">标的列表</h2>
+            <p>代码链接会保留当前市场，并在独立标签页打开行情工作台。</p>
+          </div>
+          <span id="total_tip" class="cp-status-pill" aria-live="polite">正在加载…</span>
+        </header>
+        <div id="symbols_table_wrap" class="cp-data-shell-body">
+          <table class="layui-hide" id="symbols_table" lay-filter="symbols_table"></table>
+        </div>
+      </section>
+    </main>
 
-    <!-- 标的列表页脚本：按市场分页展示所有标的，支持关键词搜索，点击代码跳转缠论图表 -->
     <script nonce="{{ csp_nonce }}">
-        $(function () {
-            layui.use(['form', 'table', 'layer'], function () {
-                const form = layui.form;
-                const table = layui.table;
-                const layer = layui.layer;
+      $(function () {
+        layui.use(['form', 'table', 'layer'], function () {
+          const form = layui.form;
+          const table = layui.table;
+          const state = { market: $('#market_select').val(), q: '' };
 
-                // 当前查询参数（市场 + 关键词），分页时复用
-                const state = {
-                    market: $('#market_select').val(),
-                    q: ''
-                };
+          function updateCount(total) {
+            var copy = '共 ' + total + ' 条';
+            $('#total_tip').text(copy);
+            $('#header_total_tip').text(total + ' 条');
+          }
 
-                function renderTable() {
-                    table.render({
-                        elem: '#symbols_table',
-                        url: '/symbols/list',
-                        method: 'get',
-                        where: { market: state.market, q: state.q },
-                        request: { pageName: 'page', limitName: 'page_size' },
-                        response: {
-                            statusName: 'ok',
-                            statusCode: true,
-                            countName: 'total',
-                            dataName: 'items'
-                        },
-                        page: {
-                            layout: ['count', 'prev', 'page', 'next', 'limit', 'skip'],
-                            limits: [50, 100, 200, 500],
-                            limit: 50
-                        },
-                        done: function (res) {
-                            const total = (res && res.total) || 0;
-                            $('#total_tip').text('共 ' + total + ' 条');
-                        },
-                        cols: [[
-                            {
-                                 field: 'code', title: '代码', width: 220, templet: function (d) {
-                                     const url = '/?market=' + encodeURIComponent(state.market)
-                                         + '&code=' + encodeURIComponent(d.code);
-                                     const link = document.createElement('a');
-                                     link.className = 'symbol-code-link';
-                                     link.href = url;
-                                     link.target = '_blank';
-                                     link.rel = 'noopener';
-                                     link.textContent = String(d.code == null ? '' : d.code);
-                                     return link.outerHTML;
-                                 }
-                            },
-                            { field: 'name', title: '名称', minWidth: 200 },
-                            { field: 'pinyin', title: '拼音首字母', width: 180 },
-                            { field: 'type', title: '类型', width: 120 }
-                        ]]
-                    });
-                }
-
-                // 市场切换：重置关键词并重新渲染
-                form.on('select(market_select)', function (data) {
-                    state.market = data.value;
-                    state.q = '';
-                    $('#search_input').val('');
-                    renderTable();
-                });
-
-                $('#btn_search').click(function () {
-                    state.q = ($('#search_input').val() || '').trim();
-                    renderTable();
-                });
-
-                $('#search_input').keydown(function (e) {
-                    if (e.keyCode === 13) {
-                        e.preventDefault();
-                        $('#btn_search').click();
-                    }
-                });
-
-                $('#btn_reset').click(function () {
-                    state.q = '';
-                    $('#search_input').val('');
-                    renderTable();
-                });
-
-                renderTable();
+          function renderTable() {
+            $('#total_tip').text('正在加载…');
+            table.render({
+              elem: '#symbols_table',
+              url: '/symbols/list',
+              method: 'get',
+              where: { market: state.market, q: state.q },
+              request: { pageName: 'page', limitName: 'page_size' },
+              response: {
+                statusName: 'ok',
+                statusCode: true,
+                countName: 'total',
+                dataName: 'items'
+              },
+              page: {
+                layout: ['count', 'prev', 'page', 'next', 'limit', 'skip'],
+                limits: [50, 100, 200, 500],
+                limit: 50
+              },
+              done: function (res) { updateCount((res && res.total) || 0); },
+              cols: [[
+                {
+                  field: 'code', title: '代码', width: 220, templet: function (d) {
+                    const url = '/?market=' + encodeURIComponent(state.market)
+                      + '&code=' + encodeURIComponent(d.code);
+                    const link = document.createElement('a');
+                    link.className = 'symbol-code-link';
+                    link.href = url;
+                    link.target = '_blank';
+                    link.rel = 'noopener';
+                    link.textContent = String(d.code == null ? '' : d.code);
+                    return link.outerHTML;
+                  }
+                },
+                { field: 'name', title: '名称', minWidth: 200 },
+                { field: 'pinyin', title: '拼音首字母', width: 180 },
+                { field: 'type', title: '类型', width: 120 }
+              ]]
             });
-        });
-    </script>
-</body>
+          }
 
+          form.on('select(market_select)', function (data) {
+            state.market = data.value;
+            state.q = '';
+            $('#search_input').val('');
+            renderTable();
+          });
+
+          $('#btn_search').click(function () {
+            state.q = ($('#search_input').val() || '').trim();
+            renderTable();
+          });
+
+          $('#search_input').keydown(function (event) {
+            if (event.key === 'Enter') {
+              event.preventDefault();
+              $('#btn_search').trigger('click');
+            }
+          });
+
+          $('#btn_reset').click(function () {
+            state.q = '';
+            $('#search_input').val('').trigger('focus');
+            renderTable();
+          });
+
+          renderTable();
+        });
+      });
+    </script>
+  </body>
 </html>

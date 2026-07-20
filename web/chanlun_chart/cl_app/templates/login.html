@@ -1,48 +1,64 @@
-<!DOCTYPE html>
-<html>
-
-<head>
-    <meta charset="utf-8">
-    <title>登入</title>
-    <meta name="renderer" content="webkit">
-    <meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="renderer" content="webkit" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>登录 · Chanlun Pro</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='css/layui.css') }}" />
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/admin.css') }}" />
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/login.css') }}" />
-    <script type="text/javascript" src="{{ url_for('static', filename='layui.js') }}"></script>
-</head>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/ui-system.css') }}?v={{ static_version|default('') }}" />
+  </head>
 
-<body>
-    <div class="layadmin-user-login layadmin-user-display-show" id="LAY-user-login" style="display: none;">
-        <div class="layadmin-user-login-main">
-            <div class="layadmin-user-login-box layadmin-user-login-header">
-                <h2>登入</h2>
-                <p> </p>
-            </div>
-            <form action="/login" method="post">
-                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-
-                <div class="layadmin-user-login-box layadmin-user-login-body layui-form">
-                    <div class="layui-form-item">
-                        <label class="layadmin-user-login-icon layui-icon layui-icon-password"
-                            for="LAY-user-login-password"></label>
-                        <input type="password" name="password" id="LAY-user-login-password" lay-verify="required"
-                            placeholder="密码" class="layui-input">
-                    </div>
-
-                    <div class="layui-form-item">
-                        <button class="layui-btn layui-btn-fluid" lay-submit lay-filter="LAY-user-login-submit"
-                            type="submit">登 入</button>
-                    </div>
-                    <div class="layui-trans layui-form-item layadmin-user-login-other">
-                        <p> {{ emsg }} </p>
-                    </div>
-                </div>
-            </form>
+  <body class="cp-ui">
+    <a class="cp-skip-link" href="#main-content">跳到登录区域</a>
+    <main id="main-content" class="cp-login-page">
+      <section class="cp-login-visual" aria-labelledby="product-title">
+        <div class="cp-login-brand">
+          <span class="cp-product-mark" aria-hidden="true">CL</span>
+          <span>CHANLUN PRO</span>
         </div>
-    </div>
 
-</body>
+        <div class="cp-login-story">
+          <span class="cp-eyebrow">STRUCTURE RESEARCH WORKSPACE</span>
+          <h1 id="product-title">行情结构研究工作台</h1>
+          <p>把实时行情、缠论结构解盘、提前选股与历史审计放在同一个研究流程中。</p>
+          <div class="cp-login-points" aria-label="工作台能力">
+            <span>实时盯盘</span>
+            <span>笔与线段中枢</span>
+            <span>一二三类买卖点</span>
+            <span>研究审计</span>
+          </div>
+        </div>
 
+        <p class="cp-login-footnote">研究工具 · 不替代独立判断 · 不承诺未来收益</p>
+      </section>
+
+      <section class="cp-login-panel" aria-labelledby="login-title">
+        <div class="cp-login-card">
+          <span class="cp-eyebrow">SECURE WORKSPACE</span>
+          <h2 id="login-title">进入工作台</h2>
+          <p>请输入访问密码，继续查看本地行情与研究数据。</p>
+
+          <form class="layui-form" action="/login" method="post">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+            <div class="layui-form-item">
+              <label class="cp-field-label" for="LAY-user-login-password">访问密码</label>
+              <input
+                type="password"
+                name="password"
+                id="LAY-user-login-password"
+                autocomplete="current-password"
+                required
+                autofocus
+                placeholder="请输入访问密码"
+                class="layui-input" />
+            </div>
+            <button class="cp-button layui-btn-fluid" type="submit">进入 Chanlun Pro</button>
+            {% if emsg %}<p class="cp-login-error" role="alert">{{ emsg }}</p>{% endif %}
+          </form>
+        </div>
+      </section>
+    </main>
+  </body>
 </html>

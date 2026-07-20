@@ -1,37 +1,78 @@
-<!DOCTYPE html>
-<html lang="zh">
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>任务运行状态 · Chanlun Pro</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/layui.css') }}" />
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}" />
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/ui-system.css') }}?v={{ static_version|default('') }}" />
+    <script src="{{ url_for('static', filename='layui.js') }}"></script>
+    <script src="{{ url_for('static', filename='jquery-3.7.0.min.js') }}"></script>
+    {% include 'dark.html' %}
+  </head>
 
-<head>
-  <title>当前任务</title>
-  <meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,minimum-scale=1.0" />
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/layui.css') }}" />
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}" />
-  <script type="text/javascript" src="{{ url_for('static', filename='layui.js') }}"></script>
-  <script type="text/javascript" src="{{ url_for('static', filename='jquery-3.7.0.min.js') }}"></script>
-  {% include 'dark.html' %}
-</head>
+  <body class="cp-ui">
+    <a class="cp-skip-link" href="#main-content">跳到任务状态</a>
+    <main id="main-content" class="cp-page cp-page--compact cp-page-stack">
+      <header class="cp-page-header">
+        <div class="cp-page-header-copy">
+          <span class="cp-eyebrow">SCHEDULER STATUS</span>
+          <h1>任务运行状态</h1>
+          <p>查看后台调度任务的当前状态、最近执行时间与下一次计划时间。</p>
+        </div>
+        <div class="cp-page-header-actions">
+          <div class="cp-context-card">
+            <span>调度任务</span>
+            <strong>{{ jobs|length }} 项</strong>
+          </div>
+        </div>
+      </header>
 
-<body class="layui-fluid">
-  <table class="layui-hide" id="table-jobs"></table>
+      <section class="cp-section-card cp-section-card--accent" aria-labelledby="scheduler-note-title">
+        <div class="cp-section-heading">
+          <div class="cp-heading-with-index">
+            <span class="cp-section-index">01</span>
+            <div>
+              <h2 id="scheduler-note-title">调度任务</h2>
+              <p>本页为运行快照；任务配置与预警条件请在对应管理入口调整。</p>
+            </div>
+          </div>
+          <span class="cp-status-pill" data-tone="success">自动刷新页面后更新</span>
+        </div>
+      </section>
 
-  <script nonce="{{ csp_nonce }}">
-    $(function () {
-      layui.use('table', function () {
-        var table = layui.table;
-        table.render({
-          elem: '#table-jobs',
-          cols: [[
-            { field: 'name', title: '任务名称', width: 300 },
-            { field: 'state', title: '状态', width: 100 },
-            { field: 'update_dt', title: '上次执行时间', width: 160 },
-            { field: 'next_run_dt', title: '下次执行时间', width: 160 },
-          ]],
-          data: {{ jobs | tojson }},
-      page: false,
-              });
+      <section class="cp-data-shell" aria-labelledby="jobs-table-title">
+        <header class="cp-data-shell-header">
+          <div>
+            <h2 id="jobs-table-title">任务明细</h2>
+            <p>时间均采用当前服务时区。</p>
+          </div>
+          <span class="cp-status-pill">{{ jobs|length }} 项任务</span>
+        </header>
+        <div class="cp-data-shell-body">
+          <table class="layui-hide" id="table-jobs" aria-label="后台调度任务列表"></table>
+        </div>
+      </section>
+    </main>
+
+    <script nonce="{{ csp_nonce }}">
+      $(function () {
+        layui.use('table', function () {
+          layui.table.render({
+            elem: '#table-jobs',
+            cols: [[
+              { field: 'name', title: '任务名称', minWidth: 260 },
+              { field: 'state', title: '状态', width: 120 },
+              { field: 'update_dt', title: '最近执行', minWidth: 180 },
+              { field: 'next_run_dt', title: '下次执行', minWidth: 180 }
+            ]],
+            data: {{ jobs | tojson }},
+            page: false,
+            text: { none: '当前没有已注册的调度任务' }
           });
+        });
       });
-  </script>
-</body>
-
+    </script>
+  </body>
 </html>

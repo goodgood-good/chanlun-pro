@@ -1,20 +1,43 @@
-<!DOCTYPE HTML>
-<html lang="zh">
+<!doctype html>
+<html lang="zh-CN">
 
 <head>
-    <title>提醒配置</title>
-    <meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,minimum-scale=1.0">
+    <meta charset="utf-8" />
+    <title>预警配置 · Chanlun Pro</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <link rel="stylesheet" href="{{ url_for('static', filename='css/layui.css') }}" />
     <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}" />
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/ui-system.css') }}?v={{ static_version|default('') }}" />
     <script type="text/javascript" src="{{ url_for('static', filename='layui.js') }}"></script>
     <script type="text/javascript" src="{{ url_for('static', filename='jquery-3.7.0.min.js') }}"></script>
     {% include 'dark.html' %}
 </head>
 
-<body class="layui-fluid">
+<body class="cp-ui">
+    <a class="cp-skip-link" href="#main-content">跳到预警配置</a>
+    <main id="main-content" class="cp-page cp-page--compact cp-page-stack">
+      <header class="cp-page-header">
+        <div class="cp-page-header-copy">
+          <span class="cp-eyebrow">STRUCTURE ALERT</span>
+          <h1>预警配置</h1>
+          <p>分别配置笔、线段与技术指标条件；只有已选择的结构通道会参与监控。</p>
+        </div>
+        <div class="cp-page-header-actions">
+          <div class="cp-context-card"><span>配置模式</span><strong>{% if id %}编辑{% else %}新建{% endif %}</strong></div>
+        </div>
+      </header>
 
-    <form class="layui-form layui-row alert_add" role="form" style="padding: 20px;">
+    <form class="layui-form alert_add cp-page-stack" role="form">
         <input type="hidden" name="id" value="{{ id }}" lay-filter="alert_config" />
+
+        <section class="cp-section-card" aria-labelledby="alert-basic-title">
+          <div class="cp-section-heading">
+            <div class="cp-heading-with-index"><span class="cp-section-index">01</span><div>
+              <h2 id="alert-basic-title">基础任务</h2>
+              <p>定义监控范围、运行频率与结果来源。</p>
+            </div></div>
+          </div>
+          <div class="cp-form-grid">
 
         <div class="layui-form-item">
             <label class="layui-form-label">市场</label>
@@ -81,6 +104,17 @@
                     </select>
             </div>
         </div>
+          </div>
+        </section>
+
+        <section class="cp-section-card" aria-labelledby="alert-bi-title">
+          <div class="cp-section-heading">
+            <div class="cp-heading-with-index"><span class="cp-section-index">02</span><div>
+              <h2 id="alert-bi-title">笔级别条件</h2>
+              <p>买卖点与背驰按笔级别独立选择。</p>
+            </div></div>
+          </div>
+          <div class="cp-form-grid">
         <div class="layui-form-item">
             <label class="layui-form-label">笔方向</label>
             <div class="layui-input-block" title="笔方向">
@@ -132,6 +166,17 @@
                 
             </div>
         </div>
+          </div>
+        </section>
+
+        <section class="cp-section-card" aria-labelledby="alert-xd-title">
+          <div class="cp-section-heading">
+            <div class="cp-heading-with-index"><span class="cp-section-index">03</span><div>
+              <h2 id="alert-xd-title">线段级别条件</h2>
+              <p>线段结构与笔结构互不替代，可同时监控。</p>
+            </div></div>
+          </div>
+          <div class="cp-form-grid">
         <div class="layui-form-item">
             <label class="layui-form-label">线段方向</label>
             <div class="layui-input-block" title="笔方向">
@@ -183,10 +228,21 @@
                 
             </div>
         </div>
+          </div>
+        </section>
+
+        <section class="cp-section-card" aria-labelledby="alert-indicator-title">
+          <div class="cp-section-heading">
+            <div class="cp-heading-with-index"><span class="cp-section-index">04</span><div>
+              <h2 id="alert-indicator-title">技术指标条件</h2>
+              <p>指标交叉仅作为独立预警条件，不替代缠论结构判断。</p>
+            </div></div>
+          </div>
+          <div class="cp-form-grid">
         <!-- 均线指标报警设置 -->
         <div class="layui-form-item">
             <label class="layui-form-label">均线报警</label>
-            <div class="layui-input-block" style="display: flex; align-items: center; gap: 10px;">
+            <div class="layui-input-block cp-choice-group">
                 <input type="checkbox" name="check_idx_ma_info_enable" value="1" title="启用" lay-filter="alert_config" {% if check_idx_ma_info_enable==1 %}checked{% endif %} />
                 <span>快线</span>
                 <input type="number" name="check_idx_ma_info_fast" value="{{ check_idx_ma_info_fast }}" class="layui-input" style="width: 60px; display: inline-block;" lay-filter="alert_config" min="1" />
@@ -199,12 +255,23 @@
         <!-- MACD指标报警设置 -->
         <div class="layui-form-item">
             <label class="layui-form-label">MACD报警</label>
-            <div class="layui-input-block" style="display: flex; align-items: center; gap: 10px;">
+            <div class="layui-input-block cp-choice-group">
                 <input type="checkbox" name="check_idx_macd_info_enable" value="1" title="启用" lay-filter="alert_config" {% if check_idx_macd_info_enable==1 %}checked{% endif %} />
                 <input type="checkbox" name="check_idx_macd_info_cross_up" value="1" title="上穿报警" lay-filter="alert_config" {% if check_idx_macd_info_cross_up==1 %}checked{% endif %} />
                 <input type="checkbox" name="check_idx_macd_info_cross_down" value="1" title="下穿报警" lay-filter="alert_config" {% if check_idx_macd_info_cross_down==1 %}checked{% endif %} />
             </div>
         </div>
+          </div>
+        </section>
+
+        <section class="cp-section-card" aria-labelledby="alert-runtime-title">
+          <div class="cp-section-heading">
+            <div class="cp-heading-with-index"><span class="cp-section-index">05</span><div>
+              <h2 id="alert-runtime-title">通知与运行</h2>
+              <p>控制消息投递和任务启用状态。</p>
+            </div></div>
+          </div>
+          <div class="cp-form-grid">
         <div class="layui-form-item">
             <label class="layui-form-label">发送消息</label>
             <div class="layui-input-block" title="启用">
@@ -225,72 +292,85 @@
                 
             </div>
         </div>
-        <div class="layui-form-item">
-            <button class="layui-btn layui-btn-fluid layui-bg-red" lay-submit lay-filter="save_alert">添加监控配置</button>
+          </div>
+        </section>
+        <div class="cp-actions cp-actions--sticky">
+            <button id="save_alert_submit" class="layui-btn cp-button" type="submit" lay-submit lay-filter="save_alert">保存预警配置</button>
+            <span class="cp-help-text">至少选择一个结构监控项目和一个笔或线段方向。</span>
         </div>
     </form>
+    </main>
 
     <script nonce="{{ csp_nonce }}">
         $(function () {
-            function save_alert() {
-                let alert_config = {}
-                $.each($('[lay-filter="alert_config"]'), function (i, obj) {
-                    let _name = $(obj).attr('name');
-                    let _type = $(obj).attr('type');
-                    let _val = $(this).val();
-                    if (_type === 'checkbox') {
-                        _val = $('input[name="' + _name + '"]:checked').map(function () {
-                            return this.value;
-                        }).get().join(",");
-                    }
-                    if (_type === 'radio') {
-                        _val = $('input[name="' + _name + '"]:checked').val();
-                    }
-                    alert_config[_name] = _val
-                });
-                let interval = parseInt(alert_config['interval_minutes']);
-                if (isNaN(interval) || interval < 1 || interval > 1380) {
-                    layer.msg('运行间隔必须在1-1380分钟之间');
-                    return false;
-                }
-                if (interval >= 60 && interval % 60 !== 0) {
-                    layer.msg('运行间隔60分钟以上必须是60的整数倍（表示小时数）');
-                    return false;
-                }
-                if (alert_config['check_bi_beichi'] === '' && alert_config['check_bi_mmd'] === '' && alert_config['check_xd_beichi'] === '' && alert_config['check_xd_mmd'] === '') {
-                    layer.msg('监控项目必须至少选择一项');
-                    return false;
-                }
-                if (alert_config['check_bi_type'] === '' && alert_config['check_xd_type'] === '') {
-                    layer.msg('监控项目笔、段方向必须至少选择一项');
-                    return false;
-                }
-
-                console.log(alert_config);
-                AppRequest.ajax({
-                    type: "POST",
-                    url: "/alert_save",
-                    data: alert_config,
-                    dataType: 'json',
-                    traditional: true,
-                    success: function (result) {
-                        if (result['ok'] === true) {
-                            let index = parent.layer.getFrameIndex(window.name);
-                            parent.layer.msg('监控设置 增加/修改 成功');
-                            parent.layer.close(index);
-                        } else {
-                            layer.msg('监控设置 增加/修改 失败');
-                        }
-                    }
-                });
-            }
-
             layui.use(function () {
                 const form = layui.form;
                 const layer = layui.layer;
-                form.on('submit(save_alert)', function (data) {
-                    save_alert();
-                    return false; // 阻止默认 form 跳转
+
+                function saveAlert() {
+                    const alertConfig = {};
+                    $('[lay-filter="alert_config"]').each(function () {
+                        const name = $(this).attr('name');
+                        const type = $(this).attr('type');
+                        let value = $(this).val();
+                        if (type === 'checkbox') {
+                            value = $('input[name="' + name + '"]:checked').map(function () {
+                                return this.value;
+                            }).get().join(',');
+                        } else if (type === 'radio') {
+                            value = $('input[name="' + name + '"]:checked').val();
+                        }
+                        alertConfig[name] = value;
+                    });
+
+                    const interval = parseInt(alertConfig.interval_minutes, 10);
+                    if (isNaN(interval) || interval < 1 || interval > 1380) {
+                        layer.msg('运行间隔必须在 1–1380 分钟之间');
+                        return false;
+                    }
+                    if (interval >= 60 && interval % 60 !== 0) {
+                        layer.msg('60 分钟以上的间隔必须是 60 的整数倍');
+                        return false;
+                    }
+                    if (!alertConfig.check_bi_beichi && !alertConfig.check_bi_mmd
+                        && !alertConfig.check_xd_beichi && !alertConfig.check_xd_mmd) {
+                        layer.msg('至少选择一个结构监控项目');
+                        return false;
+                    }
+                    if (!alertConfig.check_bi_type && !alertConfig.check_xd_type) {
+                        layer.msg('至少选择一个笔或线段方向');
+                        return false;
+                    }
+
+                    const $submit = $('#save_alert_submit');
+                    $submit.prop('disabled', true).addClass('layui-btn-disabled').text('保存中…');
+                    AppRequest.ajax({
+                        type: 'POST',
+                        url: '/alert_save',
+                        data: alertConfig,
+                        dataType: 'json',
+                        traditional: true,
+                        timeout: 15000,
+                        success: function (result) {
+                            if (result && result.ok === true) {
+                                const index = parent.layer.getFrameIndex(window.name);
+                                parent.layer.msg('预警配置已保存');
+                                parent.layer.close(index);
+                            } else {
+                                layer.msg((result && result.msg) || '预警配置保存失败');
+                            }
+                        },
+                        error: function () { layer.msg('预警配置保存失败，请稍后重试'); },
+                        complete: function () {
+                            $submit.prop('disabled', false).removeClass('layui-btn-disabled').text('保存预警配置');
+                        }
+                    });
+                    return true;
+                }
+
+                form.on('submit(save_alert)', function () {
+                    saveAlert();
+                    return false;
                 });
             });
         });

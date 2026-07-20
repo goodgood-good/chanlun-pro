@@ -678,13 +678,16 @@
          * SSE 推送驱动：把最新 bar 直接喂给匹配的订阅者(绕过轮询/浏览器节流)。
          * symbolResKey = (ticker||name).toLowerCase() + resolution.toLowerCase()。
          */
-        feedBar(symbolResKey, bar) {
+        feedBar(symbolResKey, bar, requireInitialized = false) {
             for (const guid in this._subscribers) {
                 const sub = this._subscribers[guid];
                 const si = sub.symbolInfo || {};
                 const key = String(si.ticker || si.name || '').toLowerCase()
                     + String(sub.resolution).toLowerCase();
                 if (key !== symbolResKey) {
+                    continue;
+                }
+                if (requireInitialized && sub.lastBarTime === null) {
                     continue;
                 }
                 if (sub.lastBarTime !== null && bar.time < sub.lastBarTime) {
@@ -1318,11 +1321,13 @@
             // 新根出现先补喂倒数第二根(刚收盘那根)最终 OHLC, 再喂末根: 复刻 DataPulseProvider
             // 轮询的 previousBar 补发。否则该根蜡烛永久停在收盘前 <=8s 旧值(SSE 已把 sub.lastBarTime
             // 推进到末根, 废掉轮询里 isNewBar 的 previousBar 分支)。feedBar 的 bar.time<lastBarTime
-            // 校验令稳态逐帧重复喂前一根无副作用; t.length<2 时保持单根容错。
+            // 校验令稳态逐帧重复喂前一根无副作用；订阅尚未收到首根实时 bar 时跳过
+            // 前一根，避免 TV 已从 getBars 渲染末根后收到更早时间而触发 time violation。
+            // t.length<2 时保持单根容错。
             if (t.length >= 2) {
                 const prevBar = makeBar(i - 1);
                 if (prevBar !== null) {
-                    this._dataPulseProvider.feedBar(symbolResKey, prevBar);
+                    this._dataPulseProvider.feedBar(symbolResKey, prevBar, true);
                 }
             }
             const lastBar = makeBar(i);
