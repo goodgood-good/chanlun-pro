@@ -15,7 +15,7 @@ from typing import Protocol, cast
 import pandas as pd
 
 from chanlun.core.cl import CL
-from chanlun.core.strict_structure.incremental import PrefixStabilityViolation
+from chanlun.core.strict_structure.errors import StrictStructureContractError
 from chanlun.core.strict_structure.models import StrictEvidenceResult
 from chanlun.decision_support.fingerprints import normalize_datetime
 from chanlun.decision_support.trading_system.context import classify_context
@@ -274,36 +274,36 @@ def analyze_native_frame(
         raise ValueError("unsupported trading frequency")
     closed_at = normalize_datetime(as_of, "as_of")
     metadata = strict_snapshot_price_metadata(frame)
+    cd = CL(
+        code,
+        frequency,
+        strict_cl_config(
+            structure_price_quantum=metadata.structure_price_quantum,
+            price_basis_revision=metadata.price_basis_revision,
+        ),
+        market="a",
+    )
+    cd.process_klines(frame)
     try:
-        cd = CL(
-            code,
-            frequency,
-            strict_cl_config(
-                structure_price_quantum=metadata.structure_price_quantum,
-                price_basis_revision=metadata.price_basis_revision,
-            ),
-            market="a",
-        )
-        cd.process_klines(frame)
         evidence = cd.get_strict_evidence()
-        return FrameStructureAnalysis(
-            closed_at=closed_at,
-            direction=_strict_direction(evidence),
-            confirmed_points=extract_confirmed_points(
-                evidence,
-                code=code,
-                source_frequency=frequency,
-                as_of=closed_at,
-            ),
-            provisional_points=extract_provisional_candidates(
-                evidence,
-                code=code,
-                source_frequency=frequency,
-                as_of=closed_at,
-            ),
-        )
-    except (ValueError, TypeError, PrefixStabilityViolation) as exc:
+    except StrictStructureContractError as exc:
         raise StrictStructureAnalysisError(str(exc)) from exc
+    return FrameStructureAnalysis(
+        closed_at=closed_at,
+        direction=_strict_direction(evidence),
+        confirmed_points=extract_confirmed_points(
+            evidence,
+            code=code,
+            source_frequency=frequency,
+            as_of=closed_at,
+        ),
+        provisional_points=extract_provisional_candidates(
+            evidence,
+            code=code,
+            source_frequency=frequency,
+            as_of=closed_at,
+        ),
+    )
 
 
 def _strict_direction(evidence: StrictEvidenceResult) -> ContextDirection:

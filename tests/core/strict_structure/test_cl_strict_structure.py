@@ -136,3 +136,21 @@ def test_price_quantum_cannot_change_within_one_cl_lifecycle(sample_frame):
 
     with pytest.raises(ValueError, match="price quantum changed within CL lifecycle"):
         cd.get_strict_structure_levels()
+
+
+def test_strict_evidence_wraps_internal_contract_errors(sample_frame, monkeypatch):
+    from chanlun.core.strict_structure.errors import StrictStructureContractError
+
+    cd = CL("SH.600519", "5m", strict_config())
+    cd.process_klines(sample_frame.head(400))
+
+    def invalid_structure():
+        raise ValueError("unit directions must alternate")
+
+    monkeypatch.setattr(cd, "get_strict_structure_levels", invalid_structure)
+
+    with pytest.raises(
+        StrictStructureContractError,
+        match="unit directions must alternate",
+    ):
+        cd.get_strict_evidence()

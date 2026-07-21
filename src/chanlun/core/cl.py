@@ -16,6 +16,7 @@ from chanlun.core.macd import MACD
 from chanlun.core.macd_htf import HigherMACDCalculator
 from chanlun.core.xd_calculator import XdCalculator
 from chanlun.core.zs_calculator import ZsCalculator
+from chanlun.core.strict_structure.errors import StrictStructureContractError
 from chanlun.tools.log_util import LogUtil
 
 
@@ -28,6 +29,21 @@ def _strict_runtime_locked(method):
             self._strict_evidence_lock = lock
         with lock:
             return method(self, *args, **kwargs)
+
+    return wrapper
+
+
+def _strict_contract_boundary(method):
+    """Translate generic invariants only inside strict evidence construction."""
+
+    @wraps(method)
+    def wrapper(self, *args, **kwargs):
+        try:
+            return method(self, *args, **kwargs)
+        except StrictStructureContractError:
+            raise
+        except (ValueError, TypeError) as exc:
+            raise StrictStructureContractError(str(exc)) from exc
 
     return wrapper
 
@@ -626,6 +642,7 @@ class CL(ICL):
         return result
 
     @_strict_runtime_locked
+    @_strict_contract_boundary
     def get_strict_evidence(self):
         from chanlun.core.strict_structure.base_profile import (
             strict_base_config_revision,

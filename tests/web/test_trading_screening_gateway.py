@@ -126,7 +126,12 @@ def test_analyzer_rejects_snapshot_without_price_basis_metadata(monkeypatch) -> 
 def test_analyzer_wraps_known_strict_structure_contract_errors(monkeypatch) -> None:
     class InvalidStrictState:
         def process_klines(self, _frame) -> None:
-            raise ValueError("unit directions must alternate")
+            return None
+
+        def get_strict_evidence(self):
+            raise gateway_module.StrictStructureContractError(
+                "unit directions must alternate"
+            )
 
     monkeypatch.setattr(
         gateway_module,
@@ -138,6 +143,21 @@ def test_analyzer_wraps_known_strict_structure_contract_errors(monkeypatch) -> N
         gateway_module.StrictStructureAnalysisError,
         match="unit directions must alternate",
     ):
+        analyze_native_frame(
+            code="SH.880471",
+            frequency="5m",
+            frame=_frame(),
+            as_of=datetime.fromisoformat("2026-07-20T10:01:00+08:00"),
+        )
+
+
+def test_analyzer_does_not_wrap_unrelated_type_error(monkeypatch) -> None:
+    def invalid_factory(*_args, **_kwargs):
+        raise TypeError("unrelated decoder failure")
+
+    monkeypatch.setattr(gateway_module, "CL", invalid_factory)
+
+    with pytest.raises(TypeError, match="unrelated decoder failure"):
         analyze_native_frame(
             code="SH.880471",
             frequency="5m",

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from chanlun.core.strict_structure.center_machine import calculate_centers
+from chanlun.core.strict_structure.errors import StrictStructureContractError
 from chanlun.core.strict_structure.models import (
     CenterLevelResult,
     ConstituentUnit,
@@ -8,7 +9,7 @@ from chanlun.core.strict_structure.models import (
 )
 
 
-class PrefixStabilityViolation(RuntimeError):
+class PrefixStabilityViolation(StrictStructureContractError):
     """Raised when evidence that was already locked is later rewritten."""
 
 

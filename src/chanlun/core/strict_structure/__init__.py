@@ -23,6 +23,7 @@ from chanlun.core.strict_structure.models import (
     TrendType,
     build_strict_point_id,
 )
+from chanlun.core.strict_structure.errors import StrictStructureContractError
 from chanlun.core.strict_structure.recursive_engine import StrictRecursiveEngine
 from chanlun.core.strict_structure.divergence import collect_strict_divergences
 from chanlun.core.strict_structure.identity import build_strict_evidence_revision
@@ -55,6 +56,7 @@ __all__ = [
     "StrictRecursiveEngine",
     "StrictSignalEngine",
     "StrictStructureResult",
+    "StrictStructureContractError",
     "StrengthSnapshot",
     "TrendAssemblyResult",
     "TrendCenter",
