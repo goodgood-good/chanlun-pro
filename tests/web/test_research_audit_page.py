@@ -146,7 +146,7 @@ def test_snapshot_exposes_only_new_read_only_strategy(audit_root: Path) -> None:
     snapshot = build_research_audit_snapshot(audit_root)
 
     assert snapshot["schema_version"] == "research-audit-page-v11"
-    assert snapshot["strategy_id"] == "chanlun_original_low_drawdown_v1"
+    assert snapshot["strategy_id"] == "chanlun_source_faithful_v2"
     assert snapshot["active_strategy_count"] == 1
     assert snapshot["read_only"] is True
     assert snapshot["historical"] is True
