@@ -1,61 +1,77 @@
-from datetime import datetime
-from zoneinfo import ZoneInfo
+from datetime import timedelta
 
+import pytest
+
+from chanlun.core.strict_structure.models import StrictPointStatus
 from chanlun.decision_support.trading_system.provisional import (
     extract_provisional_candidates,
 )
-from tests.trading_system.helpers import fake_cd_with_unfinished_down_line
+from tests.trading_system.strict_helpers import (
+    DEFAULT_CLOSED_AT,
+    strict_evidence_result,
+    strict_point,
+)
 
 
-AS_OF = datetime(2026, 7, 20, 15, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
-
-
-def test_unfinished_line_never_becomes_confirmed_point() -> None:
-    cd = fake_cd_with_unfinished_down_line(
-        mmds=("2buy",),
-        divergences=("qs",),
-    )
-
+def test_provisional_adapter_reads_only_strict_approaching_points() -> None:
+    raw = strict_point("2buy", status=StrictPointStatus.APPROACHING)
     candidates = extract_provisional_candidates(
-        cd,
+        strict_evidence_result(approaching_points=(raw,)),
         code="SZ.000001",
         source_frequency="5m",
-        as_of=AS_OF,
+        as_of=DEFAULT_CLOSED_AT,
     )
 
     assert len(candidates) == 1
-    assert candidates[0].status == "provisional"
-    assert candidates[0].point_type == "2buy"
-    assert candidates[0].missing_conditions == (
-        "bottom_fractal_confirmed",
-        "terminal_line_confirmed",
-    )
-    assert all(candidate.actionable is False for candidate in candidates)
+    assert candidates[0].candidate_id == raw.point_id
+    assert candidates[0].tower == "formal"
+    assert candidates[0].observed_at == raw.available_at
+    assert candidates[0].missing_conditions == raw.missing_conditions
+    assert candidates[0].evidence_codes == raw.evidence_codes
+    assert candidates[0].actionable is False
 
 
-def test_consolidation_divergence_is_not_first_point_candidate() -> None:
-    cd = fake_cd_with_unfinished_down_line(mmds=(), divergences=("pz",))
-
-    candidates = extract_provisional_candidates(
-        cd,
-        code="SZ.000001",
-        source_frequency="5m",
-        as_of=AS_OF,
+def test_provisional_adapter_rejects_future_visibility() -> None:
+    raw = strict_point("1buy", status=StrictPointStatus.APPROACHING)
+    evidence = strict_evidence_result(approaching_points=(raw,))
+    object.__setattr__(
+        raw,
+        "available_at",
+        DEFAULT_CLOSED_AT + timedelta(minutes=1),
     )
 
-    assert candidates == ()
+    with pytest.raises(ValueError, match="available after as_of"):
+        extract_provisional_candidates(
+            evidence,
+            code="SZ.000001",
+            source_frequency="5m",
+            as_of=DEFAULT_CLOSED_AT,
+        )
 
 
 def test_candidate_has_no_probability_score() -> None:
-    cd = fake_cd_with_unfinished_down_line(mmds=("2buy",), divergences=())
-
+    raw = strict_point("3sell", status=StrictPointStatus.APPROACHING)
     candidate = extract_provisional_candidates(
-        cd,
+        strict_evidence_result(approaching_points=(raw,)),
         code="SZ.000001",
         source_frequency="5m",
-        as_of=AS_OF,
+        as_of=DEFAULT_CLOSED_AT,
     )[0]
 
     assert not hasattr(candidate, "progress")
     assert not hasattr(candidate, "probability")
     assert not hasattr(candidate, "score")
+
+
+def test_provisional_adapter_rejects_non_approaching_endpoint() -> None:
+    raw = strict_point("2buy", status=StrictPointStatus.APPROACHING)
+    evidence = strict_evidence_result(approaching_points=(raw,))
+    object.__setattr__(raw, "status", StrictPointStatus.CONFIRMED)
+
+    with pytest.raises(ValueError, match="non-approaching point"):
+        extract_provisional_candidates(
+            evidence,
+            code="SZ.000001",
+            source_frequency="5m",
+            as_of=DEFAULT_CLOSED_AT,
+        )
