@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 
+from chanlun.core.strict_structure.models import StrictEvidenceResult
 from chanlun.decision_support.fingerprints import normalize_datetime
 from chanlun.decision_support.trading_system.backtest.models import (
     BacktestDataset,
@@ -26,7 +27,15 @@ from chanlun.decision_support.trading_system.models import (
     SectorAssessment,
     StructuralPoint,
 )
+from chanlun.decision_support.trading_system.provisional import (
+    ProvisionalCandidate,
+    extract_provisional_candidates,
+)
 from chanlun.decision_support.trading_system.sector_policy import assess_sector
+from chanlun.decision_support.trading_system.runtime_config import (
+    strict_cl_config,
+    strict_snapshot_price_metadata,
+)
 from chanlun.decision_support.trading_system.structure_adapter import (
     extract_confirmed_points,
 )
@@ -661,26 +670,47 @@ def load_point_in_time_dataset(config: BacktestDataConfig) -> BacktestDataset:
 class ReplayCL(Protocol):
     def process_klines(self, frame: pd.DataFrame) -> object: ...
 
+    def get_strict_evidence(self) -> StrictEvidenceResult: ...
+
 
 BundleFactory = Callable[..., object]
 
 
-def _default_cl_factory(code: str, frequency: str) -> ReplayCL:
+def _default_cl_factory(
+    code: str,
+    frequency: str,
+    snapshot: pd.DataFrame,
+) -> ReplayCL:
     from chanlun.core.cl import CL
-    from chanlun.recursive_bt.engine.engine import CL_CFG
 
-    return CL(code, frequency, dict(CL_CFG))
+    metadata = strict_snapshot_price_metadata(snapshot)
+    return CL(
+        code,
+        frequency,
+        strict_cl_config(
+            structure_price_quantum=metadata.structure_price_quantum,
+            price_basis_revision=metadata.price_basis_revision,
+        ),
+        market="a",
+    )
 
 
-def _direction(state: object) -> ContextDirection:
-    getter = getattr(state, "get_bis", None)
-    if not callable(getter):
+def _strict_direction(evidence: StrictEvidenceResult) -> ContextDirection:
+    structure = evidence.structure
+    if not structure.levels:
         return "neutral"
-    lines = tuple(getter())
-    if not lines:
-        return "neutral"
-    direction = getattr(lines[-1], "type", getattr(lines[-1], "_type", None))
-    return "up" if direction == "up" else "down" if direction == "down" else "neutral"
+    level = structure.levels[-1]
+    if level.trend_types:
+        return cast(ContextDirection, level.trend_types[-1].direction)
+    locked = tuple(unit for unit in level.units if unit.locked)
+    return "neutral" if not locked else cast(ContextDirection, locked[-1].direction)
+
+
+@dataclass(frozen=True, slots=True)
+class _ReplayFrameAnalysis:
+    direction: ContextDirection
+    confirmed_points: tuple[StructuralPoint, ...]
+    provisional_points: tuple[ProvisionalCandidate, ...]
 
 
 class CausalStructureReplay:
@@ -688,7 +718,7 @@ class CausalStructureReplay:
         self,
         *,
         frames: Mapping[tuple[str, str], pd.DataFrame],
-        cl_factory: Callable[[str, str], ReplayCL] = _default_cl_factory,
+        cl_factory: Callable[[str, str, pd.DataFrame], ReplayCL] = _default_cl_factory,
         bundle_factory: BundleFactory | None = None,
         sector_names: Mapping[str, str] | None = None,
         sector_index_codes: Mapping[str, str] | None = None,
@@ -703,6 +733,9 @@ class CausalStructureReplay:
         self._states: dict[tuple[str, str], ReplayCL] = {}
         self._row_cursors: dict[tuple[str, str], pd.Timestamp] = {}
         self._request_cursors: dict[str, datetime] = {}
+        self._analysis_cache: dict[
+            tuple[str, str], tuple[pd.Timestamp, _ReplayFrameAnalysis]
+        ] = {}
 
     @staticmethod
     def _validated_frame(frame: pd.DataFrame) -> pd.DataFrame:
@@ -711,12 +744,15 @@ class CausalStructureReplay:
         required = {"date", "open", "high", "low", "close", "volume"}
         if not required.issubset(frame.columns):
             raise ValueError("replay frame is missing OHLCV columns")
+        snapshot_attrs = dict(frame.attrs)
         result = frame[list(required)].copy()
         result["date"] = result["date"].map(_normalize_frame_date)
         result = result.sort_values("date", kind="stable").reset_index(drop=True)
         if result["date"].duplicated().any():
             raise ValueError("replay frame dates must be unique")
-        return result[["date", "open", "high", "low", "close", "volume"]]
+        result = result[["date", "open", "high", "low", "close", "volume"]]
+        result.attrs = snapshot_attrs
+        return result
 
     def advance_until(
         self,
@@ -732,11 +768,13 @@ class CausalStructureReplay:
         output: dict[str, ReplayCL] = {}
         for frequency in ("1m", "5m", "30m"):
             key = (code, frequency)
+            frame = self._frames.get(key)
             state = self._states.get(key)
             if state is None:
-                state = self._cl_factory(code, frequency)
+                if frame is None:
+                    raise ValueError("replay frame is unavailable")
+                state = self._cl_factory(code, frequency, frame)
                 self._states[key] = state
-            frame = self._frames.get(key)
             if frame is not None:
                 eligible = frame.loc[frame["date"] <= pd.Timestamp(cutoff)]
                 row_cursor = self._row_cursors.get(key)
@@ -765,20 +803,50 @@ class CausalStructureReplay:
         )
         return matches[0] if matches else None
 
-    def _points(
+    def _analysis(
         self,
         state: ReplayCL,
         *,
         code: str,
         frequency: str,
-        closed_at: datetime,
-    ) -> tuple[StructuralPoint, ...]:
-        return extract_confirmed_points(
-            state,
+        decision_at: datetime,
+    ) -> _ReplayFrameAnalysis:
+        key = (code, frequency)
+        snapshot_cursor = self._row_cursors.get(key)
+        if snapshot_cursor is None:
+            return _ReplayFrameAnalysis("neutral", (), ())
+        cached = self._analysis_cache.get(key)
+        if cached is not None and cached[0] == snapshot_cursor:
+            return cached[1]
+        evidence = state.get_strict_evidence()
+        snapshot_closed_at = normalize_datetime(
+            snapshot_cursor.to_pydatetime(),
+            "snapshot_closed_at",
+        )
+        if normalize_datetime(
+            evidence.source_closed_at,
+            "evidence.source_closed_at",
+        ) != snapshot_closed_at:
+            raise ValueError("strict evidence snapshot does not match replay frame")
+        confirmed = extract_confirmed_points(
+            evidence,
             code=code,
             source_frequency=frequency,
-            as_of=closed_at,
+            as_of=decision_at,
         )
+        provisional = extract_provisional_candidates(
+            evidence,
+            code=code,
+            source_frequency=frequency,
+            as_of=decision_at,
+        )
+        analysis = _ReplayFrameAnalysis(
+            direction=_strict_direction(evidence),
+            confirmed_points=confirmed,
+            provisional_points=provisional,
+        )
+        self._analysis_cache[key] = (snapshot_cursor, analysis)
+        return analysis
 
     def _default_bundle(
         self,
@@ -788,24 +856,27 @@ class CausalStructureReplay:
         closed_at: datetime,
         states: Mapping[str, ReplayCL],
     ) -> SymbolStructureBundle:
-        thirty = self._points(
+        thirty_analysis = self._analysis(
             states["30m"],
             code=code,
             frequency="30m",
-            closed_at=closed_at,
+            decision_at=closed_at,
         )
-        five = self._points(
+        five_analysis = self._analysis(
             states["5m"],
             code=code,
             frequency="5m",
-            closed_at=closed_at,
+            decision_at=closed_at,
         )
-        one = self._points(
+        one_analysis = self._analysis(
             states["1m"],
             code=code,
             frequency="1m",
-            closed_at=closed_at,
+            decision_at=closed_at,
         )
+        thirty = thirty_analysis.confirmed_points
+        five = five_analysis.confirmed_points
+        one = one_analysis.confirmed_points
         sector_id = self._membership_at(dataset, code, closed_at)
         index_code = None if sector_id is None else self._sector_index_codes.get(sector_id)
         if sector_id is None or index_code is None:
@@ -823,17 +894,17 @@ class CausalStructureReplay:
             contexts = {}
             complete = True
             for frequency in ("1m", "5m", "30m"):
-                sector_points = self._points(
+                sector_analysis = self._analysis(
                     sector_states[frequency],
                     code=index_code,
                     frequency=frequency,
-                    closed_at=closed_at,
+                    decision_at=closed_at,
                 )
                 complete = complete and bool(self._frames.get((index_code, frequency)) is not None)
                 contexts[frequency] = classify_context(
                     frequency=frequency,
-                    current_direction=_direction(sector_states[frequency]),
-                    points=sector_points,
+                    current_direction=sector_analysis.direction,
+                    points=sector_analysis.confirmed_points,
                     as_of=closed_at,
                 )
             sector = assess_sector(
@@ -849,9 +920,9 @@ class CausalStructureReplay:
             code=code,
             as_of=closed_at,
             sector=sector,
-            thirty_direction=_direction(states["30m"]),
+            thirty_direction=thirty_analysis.direction,
             thirty_points=thirty,
-            five_points=five,
+            five_points=(*five, *five_analysis.provisional_points),
             one_points=one,
             opposite_points=tuple(point for point in five if point.side == "sell"),
         )

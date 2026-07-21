@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
+from chanlun.core.strict_structure.models import StrictPointStatus
 from chanlun.decision_support.trading_system.backtest import data_source
 from chanlun.decision_support.trading_system.backtest.data_audit import (
     audit_dataset,
@@ -17,6 +18,7 @@ from chanlun.decision_support.trading_system.backtest.data_source import (
     BacktestDataConfig,
     CausalStructureReplay,
     MembershipLoad,
+    _default_cl_factory,
     load_point_in_time_dataset,
 )
 from chanlun.decision_support.trading_system.backtest.report import (
@@ -28,6 +30,11 @@ from tests.trading_system.backtest.helpers import (
     CN,
     dataset,
     minute_bar,
+)
+from tests.trading_system.strict_helpers import (
+    StrictOnlyCL,
+    strict_evidence_result,
+    strict_point,
 )
 
 
@@ -265,12 +272,128 @@ def test_data_source_does_not_read_webhook_or_notification_configuration() -> No
     assert "chanlun.notifications" not in source
 
 
+def test_default_replay_cl_factory_requires_snapshot_price_metadata() -> None:
+    frame = pd.DataFrame(
+        {
+            "date": [BAR_AT],
+            "open": [10.0],
+            "high": [10.2],
+            "low": [9.9],
+            "close": [10.1],
+            "volume": [1000.0],
+        }
+    )
+    frame.attrs["structure_price_quantum"] = "0.001"
+    frame.attrs["price_basis_revision"] = "causal-adjustment-ledger-v1"
+
+    state = _default_cl_factory("SZ.000001", "1m", frame)
+
+    config = state.get_config()
+    assert config["structure_price_quantum"] == "0.001"
+    assert config["price_basis_revision"] == "causal-adjustment-ledger-v1"
+    assert config["strict_config_revision"].startswith("sha256:")
+    frame.attrs.clear()
+    with pytest.raises(ValueError, match="structure_price_quantum metadata"):
+        _default_cl_factory("SZ.000001", "1m", frame)
+
+
 class RecordingCL:
     def __init__(self) -> None:
         self.seen: list[datetime] = []
 
     def process_klines(self, frame: pd.DataFrame) -> None:
         self.seen.extend(pd.Timestamp(value).to_pydatetime() for value in frame["date"])
+
+
+def _strict_replay_states(*, future_five: bool = False):
+    states: dict[str, StrictOnlyCL] = {}
+
+    def factory(code: str, frequency: str, _snapshot: pd.DataFrame) -> StrictOnlyCL:
+        confirmed = strict_point("1buy", available_at=BAR_AT)
+        approaching = strict_point(
+            "2buy",
+            status=StrictPointStatus.APPROACHING,
+            available_at=BAR_AT,
+        )
+        evidence = strict_evidence_result(
+            code=code,
+            source_frequency=frequency,
+            source_closed_at=BAR_AT,
+            confirmed_points=(confirmed,),
+            approaching_points=((approaching,) if frequency == "5m" else ()),
+        )
+        if future_five and frequency == "5m":
+            object.__setattr__(confirmed, "available_at", BAR_AT + timedelta(minutes=1))
+        state = StrictOnlyCL(evidence)
+        states[frequency] = state
+        return state
+
+    return states, factory
+
+
+def test_replay_reads_each_atomic_evidence_snapshot_once() -> None:
+    frame = pd.DataFrame(
+        {
+            "date": [BAR_AT],
+            "open": [10.0],
+            "high": [10.2],
+            "low": [9.9],
+            "close": [10.1],
+            "volume": [1000.0],
+        }
+    )
+    states, factory = _strict_replay_states()
+    replay = CausalStructureReplay(
+        frames={
+            ("SZ.000001", frequency): frame.copy()
+            for frequency in ("1m", "5m", "30m")
+        },
+        cl_factory=factory,
+    )
+
+    bundle = replay.bundle_at(
+        dataset=dataset(),
+        closed_at=BAR_AT,
+        code="SZ.000001",
+    )
+
+    assert {frequency: state.evidence_calls for frequency, state in states.items()} == {
+        "1m": 1,
+        "5m": 1,
+        "30m": 1,
+    }
+    assert tuple(point.status for point in bundle.five_points) == (
+        "confirmed",
+        "provisional",
+    )
+
+
+def test_replay_rejects_point_available_after_cursor() -> None:
+    frame = pd.DataFrame(
+        {
+            "date": [BAR_AT],
+            "open": [10.0],
+            "high": [10.2],
+            "low": [9.9],
+            "close": [10.1],
+            "volume": [1000.0],
+        }
+    )
+    _states, factory = _strict_replay_states(future_five=True)
+    replay = CausalStructureReplay(
+        frames={
+            ("SZ.000001", frequency): frame.copy()
+            for frequency in ("1m", "5m", "30m")
+        },
+        cl_factory=factory,
+    )
+
+    with pytest.raises(ValueError, match="available after as_of"):
+        replay.bundle_at(
+            dataset=dataset(),
+            closed_at=BAR_AT,
+            code="SZ.000001",
+        )
 
 
 def test_causal_replay_is_incremental_and_rejects_cursor_rewind() -> None:
@@ -287,7 +410,11 @@ def test_causal_replay_is_incremental_and_rejects_cursor_rewind() -> None:
     )
     states: list[RecordingCL] = []
 
-    def cl_factory(_code: str, _frequency: str) -> RecordingCL:
+    def cl_factory(
+        _code: str,
+        _frequency: str,
+        _snapshot: pd.DataFrame,
+    ) -> RecordingCL:
         state = RecordingCL()
         states.append(state)
         return state
