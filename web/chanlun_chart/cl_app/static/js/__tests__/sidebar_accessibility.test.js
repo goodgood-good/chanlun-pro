@@ -41,7 +41,7 @@ function createElement() {
   };
 }
 
-function loadResizeModule(initialCollapsed = false, viewportWidth = 1200) {
+function loadResizeModule(initialCollapsed = false, viewportWidth = 1200, search = '') {
   const template = readTemplate();
   const marker = template.indexOf("var STORAGE_KEY = 'chart_menu_width';");
   const start = template.lastIndexOf('(function () {', marker);
@@ -74,6 +74,7 @@ function loadResizeModule(initialCollapsed = false, viewportWidth = 1200) {
       setItem(key, value) { storage.set(key, String(value)); },
     },
     innerWidth: viewportWidth,
+    location: { search },
     chart_widgets: [],
     addEventListener() {},
     dispatchEvent() {},
@@ -142,6 +143,22 @@ test('sidebar collapse and expand synchronize accessible state', () => {
   assert.match(expand.getAttribute('aria-label'), /收起/);
   assert.match(collapse.getAttribute('aria-label'), /收起/);
 });
+
+test('embedded chart starts with the analysis sidebar collapsed and still permits manual expansion', () => {
+  const { elements, body } = loadResizeModule(
+    false,
+    1200,
+    '?market=a&code=SZ.000001&layout=single&intervals=5&chart_sidebar=collapsed',
+  );
+
+  assert.equal(body.classList.contains('chart-menu-collapsed'), true);
+  assert.equal(elements.chart_menu_toggle.getAttribute('aria-expanded'), 'false');
+
+  elements.chart_menu_toggle.dispatch('click');
+  assert.equal(body.classList.contains('chart-menu-collapsed'), false);
+  assert.equal(elements.chart_menu_toggle.getAttribute('aria-expanded'), 'true');
+});
+
 test('mobile sidebar overlays the chart instead of squeezing its working area', () => {
   const { sandbox, elements, body } = loadResizeModule(false, 390);
 

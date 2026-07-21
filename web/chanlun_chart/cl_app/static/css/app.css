@@ -524,3 +524,25 @@ body {
   }
 }
 
+.strict-structure-status {
+    position: absolute;
+    top: 48px;
+    right: 14px;
+    z-index: 30;
+    max-width: min(420px, calc(100% - 28px));
+    padding: 8px 12px;
+    border: 1px solid rgba(191, 64, 64, 0.36);
+    border-radius: 6px;
+    background: rgba(255, 246, 246, 0.96);
+    color: #9b2c2c;
+    box-shadow: 0 4px 16px rgba(31, 41, 55, 0.14);
+    font-size: 14px;
+    line-height: 1.45;
+    pointer-events: none;
+}
+
+.strict-structure-status[data-state="waiting"] {
+    border-color: rgba(37, 99, 166, 0.3);
+    background: rgba(244, 249, 255, 0.96);
+    color: #255f98;
+}

@@ -23,6 +23,7 @@ function loadChartManager() {
   const sb = {
     console, Math, JSON, Intl, Array, Object, String, Number, Boolean, RegExp,
     parseInt, parseFloat, isFinite, isNaN, Set, Map, WeakMap, WeakSet, Symbol, Promise, Error,
+    URLSearchParams,
     Date: MockDate,
     setInterval: () => 0, clearInterval: () => {}, setTimeout: () => 0, clearTimeout: () => {},
     performance: { now: () => 0 },
@@ -40,7 +41,7 @@ function loadChartManager() {
     TradingView: { widget: function () {} },
     requestAnimationFrame: () => 0, cancelAnimationFrame: () => {},
     navigator: { onLine: true },
-    location: { reload: () => {} },
+    location: { search: '', reload: () => {} },
   };
   sb.window = sb; sb.self = sb; sb.globalThis = sb;
   sb.window.SseGap = sseGap;
@@ -59,6 +60,7 @@ function loadChartManager() {
   src += '\n;var __CDF_EXPORT = (typeof CHART_DISABLED_FEATURES !== "undefined") ? CHART_DISABLED_FEATURES : null;';
   src += '\n;var __ICI_EXPORT = (typeof getInitialChartInterval !== "undefined") ? getInitialChartInterval : null;';
   src += '\n;var __SLLC_EXPORT = (typeof shouldLoadLastChart !== "undefined") ? shouldLoadLastChart : null;';
+  src += '\n;var __RDS_EXPORT = (typeof requestedDefaultStudies !== "undefined") ? requestedDefaultStudies : null;';
   vm.runInContext(src, sb, { filename: 'charts.js' });
   return {
     ChartManager: sb.__CM_EXPORT,
@@ -66,6 +68,7 @@ function loadChartManager() {
     disabledFeatures: sb.__CDF_EXPORT,
     initialChartInterval: sb.__ICI_EXPORT,
     shouldLoadLastChart: sb.__SLLC_EXPORT,
+    requestedDefaultStudies: sb.__RDS_EXPORT,
     sb,
   };
 }
@@ -89,6 +92,204 @@ function spyWidget() {
   };
   return { widget, calls };
 }
+
+function makeReconcileManager(ChartManager) {
+  const cm = Object.create(ChartManager.prototype);
+  const calls = { create: 0, remove: 0, setProperties: [] };
+  let nextId = 1;
+  cm.obj_charts = { S: { bi_zss: [] } };
+  cm._reconcileGuard = {};
+  cm._reconcileOwnedIds = new Set();
+  cm._reconcileRetry = { count: 0, timer: null };
+  cm.chart = {
+    removeEntity() { calls.remove++; },
+    getShapeById() {
+      return { setProperties(props) { calls.setProperties.push(props); } };
+    },
+  };
+  const create = () => {
+    calls.create++;
+    return nextId++;
+  };
+  return { cm, calls, create };
+}
+
+function zone(index, delta = 0, linestyle = '0') {
+  const time = 1700000000 + index * 1000;
+  return {
+    linestyle,
+    points: [
+      { time, price: 10 + index },
+      { time: time + 900, price: 11 + index + delta },
+      { time: time + 1800, price: 9 + index },
+      { time: time + 2700, price: 10 + index },
+    ],
+  };
+}
+
+function makeDataReadyManager(ChartManager) {
+  const cm = Object.create(ChartManager.prototype);
+  let ready = false;
+  let readyCallback = null;
+  let symbol = 'A:SH.600000';
+  let resolution = '5';
+  const calls = { draw: 0, debounced: 0, widen: 0 };
+  cm.instanceId = 'chart-manager-1';
+  cm._dataContextVersion = 0;
+  cm._tvDataReadyVersion = -1;
+  cm._tvDataReadyIdentity = null;
+  cm._pendingChanlunDrawVersion = null;
+  cm._pendingChanlunDrawIdentity = null;
+  cm._dataReadyProbeVersion = null;
+  cm._dataReadyProbeIdentity = null;
+  cm._initialLoadDone = false;
+  cm.chart = {
+    symbol: () => symbol,
+    resolution: () => resolution,
+    dataReady(callback) {
+      if (callback) readyCallback = callback;
+      return ready;
+    },
+  };
+  cm.getCurrentChartIdentity = () => ({ symbol, interval: resolution });
+  cm.draw_chanlun = () => { calls.draw++; };
+  cm.debouncedDrawChanlun = () => { calls.debounced++; };
+  cm._maybeWidenDefaultView = () => { calls.widen++; };
+  return {
+    cm,
+    calls,
+    setReady(value) { ready = value; },
+    setIdentity(nextSymbol, nextResolution) {
+      symbol = nextSymbol;
+      resolution = nextResolution;
+    },
+    fireReady() { if (readyCallback) readyCallback(); },
+  };
+}
+
+function barsReadyEvent() {
+  return {
+    detail: {
+      managerId: 'chart-manager-1',
+      symbol: 'a:sh.600000',
+      resolution: '5',
+    },
+  };
+}
+
+test('reconcile: 列表尾部中枢边界变化且数量/from 不变时仍替换 shape', () => {
+  const { ChartManager } = loadChartManager();
+  const { cm, calls, create } = makeReconcileManager(ChartManager);
+  const initial = Array.from({ length: 8 }, (_, index) => zone(index));
+  cm.reconcile('bi_zss', initial, 1600000000, 'S', create, false, true);
+  assert.equal(calls.create, 8);
+
+  const corrected = Array.from(
+    { length: 8 },
+    (_, index) => zone(index, index === 7 ? 0.5 : 0),
+  );
+  cm.reconcile('bi_zss', corrected, 1600000000, 'S', create, false, true);
+
+  assert.equal(calls.remove, 1, '旧的最后一个中枢必须删除');
+  assert.equal(calls.create, 9, '修正后的最后一个中枢必须重建');
+});
+
+test('reconcile: 完全相同的中枢状态重复进入时保持零操作', () => {
+  const { ChartManager } = loadChartManager();
+  const { cm, calls, create } = makeReconcileManager(ChartManager);
+  const zones = Array.from({ length: 8 }, (_, index) => zone(index));
+  cm.reconcile('bi_zss', zones, 1600000000, 'S', create, false, true);
+  const before = { ...calls };
+  cm.reconcile('bi_zss', zones, 1600000000, 'S', create, false, true);
+  assert.equal(calls.create, before.create);
+  assert.equal(calls.remove, before.remove);
+});
+
+test('reconcile: 截断范围后的未完成状态变化必须刷新样式', () => {
+  const { ChartManager } = loadChartManager();
+  const { cm, calls, create } = makeReconcileManager(ChartManager);
+  const pending = Array.from({ length: 8 }, (_, index) => zone(index, 0, '1'));
+  cm.reconcile('bi_zss', pending, 1600000000, 'S', create, false, true);
+  const corrected = Array.from(
+    { length: 8 },
+    (_, index) => zone(index, 0, index === 7 ? '0' : '1'),
+  );
+  cm.reconcile('bi_zss', corrected, 1600000000, 'S', create, false, true);
+  assert.equal(calls.setProperties.at(-1)?.linestyle, 0);
+});
+
+test('首次 bars-ready 早于 TradingView dataReady 时不得创建缠论 shape', () => {
+  const { ChartManager } = loadChartManager();
+  const fx = makeDataReadyManager(ChartManager);
+  fx.cm.handleBarsReadyEvent(barsReadyEvent());
+  assert.equal(fx.calls.draw, 0);
+  assert.equal(fx.calls.debounced, 0);
+  assert.equal(fx.cm._initialLoadDone, false);
+});
+
+test('draw_chanlun 旁路调用在 dataReady 前只登记待绘制，不读取图表数据', async () => {
+  const { ChartManager, sb } = loadChartManager();
+  const fx = makeDataReadyManager(ChartManager);
+  sb.setTimeout = (callback) => { callback(); return 0; };
+  fx.cm._intervalVersion = 0;
+  fx.cm._intervalSwitchSeq = 0;
+  fx.cm.getChartData = () => {
+    throw new Error('未就绪时不应读取图表数据');
+  };
+  fx.cm.draw_chanlun = ChartManager.prototype.draw_chanlun.bind(fx.cm);
+
+  await fx.cm.draw_chanlun();
+
+  assert.equal(fx.cm._pendingChanlunDrawVersion, 0);
+  assert.equal(fx.cm._initialLoadDone, false);
+});
+
+test('当前代际 dataReady 后只消费一次首次待绘制请求', () => {
+  const { ChartManager } = loadChartManager();
+  const fx = makeDataReadyManager(ChartManager);
+  fx.cm.handleBarsReadyEvent(barsReadyEvent());
+  fx.setReady(true);
+  fx.fireReady();
+  fx.fireReady();
+  assert.equal(fx.calls.draw, 1);
+  assert.equal(fx.calls.debounced, 0);
+  assert.equal(fx.cm._initialLoadDone, true);
+});
+
+test('周期切换后旧 dataReady 回调不得绘制到新代际', () => {
+  const { ChartManager } = loadChartManager();
+  const fx = makeDataReadyManager(ChartManager);
+  fx.cm.handleBarsReadyEvent(barsReadyEvent());
+  const oldVersion = fx.cm._dataContextVersion;
+  fx.cm._resetDataReadyContext();
+  fx.setReady(true);
+  fx.cm.handleDataReady(oldVersion);
+  assert.equal(fx.calls.draw, 0);
+  assert.equal(fx.calls.debounced, 0);
+});
+
+test('同代际旧标的 dataReady 回调不得通过身份校验', () => {
+  const { ChartManager } = loadChartManager();
+  const fx = makeDataReadyManager(ChartManager);
+  fx.cm.handleBarsReadyEvent(barsReadyEvent());
+  const version = fx.cm._dataContextVersion;
+  fx.setIdentity('A:SH.600001', '5');
+  fx.setReady(true);
+  fx.cm.handleDataReady(version, 'a:sh.600000|5');
+  assert.equal(fx.calls.draw, 0);
+  assert.equal(fx.calls.debounced, 0);
+});
+
+test('当前代际已就绪时后续 bars-ready 继续合并为防抖重绘', () => {
+  const { ChartManager } = loadChartManager();
+  const fx = makeDataReadyManager(ChartManager);
+  fx.setReady(true);
+  fx.cm.handleBarsReadyEvent(barsReadyEvent());
+  assert.equal(fx.calls.draw, 1, '首次就绪绘制直接执行');
+  fx.cm.handleBarsReadyEvent(barsReadyEvent());
+  assert.equal(fx.calls.draw, 1);
+  assert.equal(fx.calls.debounced, 1, '后续更新使用现有防抖入口');
+});
 
 test('vm 能加载真实 charts.js 并取出 ChartManager', () => {
   const { ChartManager } = loadChartManager();
@@ -121,6 +322,109 @@ test('行情页把 URL 周期保留为当前 iframe 的内存启动配置', () =
   );
   assert.match(template, /window\.__chanlunUrlBootstrap\s*=/);
   assert.match(template, /intervals:\s*selectedIntervals\.slice\(\)/);
+});
+
+test('MACD_HTF 是每张新图默认指标且 URL 只接受白名单并去重', () => {
+  const { requestedDefaultStudies } = loadChartManager();
+  assert.equal(typeof requestedDefaultStudies, 'function');
+  assert.deepEqual(Array.from(requestedDefaultStudies('')), ['MACD_HTF']);
+  assert.deepEqual(Array.from(requestedDefaultStudies('?default_study=unknown')), ['MACD_HTF']);
+  assert.deepEqual(
+    Array.from(requestedDefaultStudies(
+      '?default_study=MACD_HTF&default_study=unknown&default_study=MACD_HTF',
+    )),
+    ['MACD_HTF'],
+  );
+});
+
+test('ensureRequestedDefaultStudies 复用已有 MACD_HTF，不重复创建', async () => {
+  const { ChartManager, sb } = loadChartManager();
+  const cm = makeManager(ChartManager, null);
+  let createCalls = 0;
+  sb.location.search = '?default_study=MACD_HTF';
+  cm.chart = {
+    getAllStudies: () => [{ id: 'existing-macd', name: 'MACD_HTF' }],
+    createStudy: async () => { createCalls++; return 'unexpected'; },
+  };
+
+  const ids = await cm.ensureRequestedDefaultStudies();
+
+  assert.deepEqual(Array.from(ids), ['existing-macd']);
+  assert.equal(createCalls, 0);
+  assert.equal(cm.macdStudyId, 'existing-macd');
+});
+
+test('ensureRequestedDefaultStudies 缺失时只创建一次并共享初始化 Promise', async () => {
+  const { ChartManager, sb } = loadChartManager();
+  const cm = makeManager(ChartManager, null);
+  const calls = [];
+  sb.location.search = '?default_study=MACD_HTF';
+  cm.chart = {
+    getAllStudies: () => [],
+    createStudy: async (...args) => { calls.push(args); return 'created-macd'; },
+  };
+
+  const first = cm.ensureRequestedDefaultStudies();
+  const second = cm.ensureRequestedDefaultStudies();
+  assert.equal(first, second, '同一实例只运行一轮默认指标初始化');
+  assert.deepEqual(Array.from(await first), ['created-macd']);
+  assert.deepEqual(calls, [['MACD_HTF', false, false]]);
+  assert.equal(cm.macdStudyId, 'created-macd');
+});
+
+test('ensureRequestedDefaultStudies 创建失败后允许下一次 data-ready 重试', async () => {
+  const { ChartManager, sb } = loadChartManager();
+  const cm = makeManager(ChartManager, null);
+  let calls = 0;
+  let warnings = 0;
+  sb.location.search = '?default_study=MACD_HTF';
+  sb.console = { ...console, warn: () => { warnings++; } };
+  cm.chart = {
+    getAllStudies: () => [],
+    createStudy: async () => {
+      calls++;
+      if (calls === 1) throw new Error('study unavailable');
+      return 'retry-created-macd';
+    },
+  };
+
+  assert.deepEqual(Array.from(await cm.ensureRequestedDefaultStudies()), []);
+  assert.deepEqual(Array.from(await cm.ensureRequestedDefaultStudies()), ['retry-created-macd']);
+  assert.equal(calls, 2);
+  assert.equal(warnings, 1);
+});
+
+test('两张图的 MACD_HTF pending guard 按实例隔离', async () => {
+  const { ChartManager } = loadChartManager();
+  const first = makeManager(ChartManager, null);
+  const second = makeManager(ChartManager, null);
+  let finishFirst;
+  const calls = [];
+  first.chart = {
+    getAllStudies: () => [],
+    createStudy: () => new Promise((resolve) => {
+      calls.push('first');
+      finishFirst = resolve;
+    }),
+  };
+  second.chart = {
+    getAllStudies: () => [],
+    createStudy: async () => { calls.push('second'); return 'second-macd'; },
+  };
+
+  const pendingFirst = first.ensureRequestedDefaultStudies();
+  assert.deepEqual(Array.from(await second.ensureRequestedDefaultStudies()), ['second-macd']);
+  assert.deepEqual(calls, ['first', 'second']);
+  finishFirst('first-macd');
+  assert.deepEqual(Array.from(await pendingFirst), ['first-macd']);
+});
+
+test('chart-ready 接线会触发默认指标初始化但不阻塞后续流程', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'charts.js'), 'utf8');
+  assert.match(
+    source,
+    /this\.chart\s*=\s*this\.widget\.activeChart\(\);[\s\S]*this\.ensureRequestedDefaultStudies\(\)\.catch\(/,
+  );
 });
 
 test('_getViewLatestSec: 直接命中键 → 末根秒数(ms 归一)', () => {
