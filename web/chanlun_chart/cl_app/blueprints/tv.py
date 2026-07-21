@@ -18,7 +18,6 @@ from flask_login import login_required
 from chanlun import fun
 from chanlun.market import Market
 from chanlun.cl_utils import (
-    cl_data_to_tv_chart,
     kcharts_frequency_h_l_map,
     query_cl_chart_config,
     web_batch_get_cl_datas,
@@ -164,6 +163,7 @@ from ..services.chart_compute import (  # noqa: E402
     MARKET_30M_TO_D_RATIO,
     MARKET_D_TO_W_RATIO,
     _SafeLockRegistry,
+    _build_display_frequency_cl,
     _merge_shape_lists,
     _shape_time,
     apply_higher_macd_to_chart_data,
@@ -173,7 +173,9 @@ from ..services.chart_compute import (  # noqa: E402
     fetch_klines_and_compute_cl_data,
     market_now_trading,
     should_lazy_apply_higher_macd,
+    serialize_chart_data_with_strict_runtime,
     slice_chart_data_to_window,
+    strict_structure_history_fields,
     _decide_full_snapshot,
     _miss_source_is_full,
     trim_future_bars,
@@ -379,18 +381,34 @@ def prewarm_common_intervals(market, code, cl_config):
                     if frequency_low is not None and to_frequency is not None:
                         with lb_low_priority():
                             klines = ex.klines(code, frequency_low, **kline_args)
-                        cd = web_batch_get_cl_datas(market, code, {frequency_low: klines}, cl_config)[0]
+                        cd, display_klines = _build_display_frequency_cl(
+                            market=market,
+                            code=code,
+                            fetched_klines=klines,
+                            fetched_frequency=frequency_low,
+                            display_frequency=freq,
+                            cl_config=cl_config,
+                        )
                     else:
                         with lb_low_priority():
                             klines = ex.klines(code, freq, **kline_args)
                         cd = web_batch_get_cl_datas(market, code, {freq: klines}, cl_config)[0]
+                        display_klines = klines
                         to_frequency = None
                 else:
                     with lb_low_priority():
                         klines = ex.klines(code, freq, **kline_args)
                     cd = web_batch_get_cl_datas(market, code, {freq: klines}, cl_config)[0]
+                    display_klines = klines
 
-                cl_chart_data = cl_data_to_tv_chart(cd, cl_config, to_frequency=to_frequency)
+                cl_chart_data = serialize_chart_data_with_strict_runtime(
+                    market=market,
+                    code=code,
+                    display_frequency=freq,
+                    display_klines=display_klines,
+                    legacy_cd=cd,
+                    legacy_config=cl_config,
+                )
                 if cl_chart_data is None:
                     # 2026-04 修复：cl_chart_data 为空说明这个 cache_key 没数据，打负缓存防止反复重算
                     _mark_negative_cache(cache_key)
@@ -1085,6 +1103,12 @@ def tv_history():
         # 已有整体替换分支清幽灵、bars/MACD 仍走增量不缩图; 向左滚动/窄窗口不置(防丢窗外合法形态)。
         # D4-F1/F2: _src_is_full 已在 _calc_lock 内与 cl_chart_data 同源捕获(消 TOCTOU), 此处不重取 entry。
         _emit_full_snapshot = _decide_full_snapshot(firstDataRequest, _to, bar_times, _src_is_full)
+        _strict_history_fields = strict_structure_history_fields(
+            cl_chart_data,
+            authoritative=(
+                firstDataRequest == "true" or _emit_full_snapshot
+            ),
+        )
         _full_shape_snapshot = None
         if _emit_full_snapshot:
             _shape_keys = ("fxs", "bis", "xds", "bi_zss", "xd_zss", "bcs", "mmds",
@@ -1180,6 +1204,7 @@ def tv_history():
             "interval_nest": cl_chart_data.get("interval_nest"),
             "update": False if firstDataRequest == "true" else True,
             "full_snapshot": _emit_full_snapshot,
+            **_strict_history_fields,
         }
     except Exception as e:
         req_qs = request.query_string.decode("utf-8", errors="ignore")
@@ -1496,177 +1521,3 @@ def tv_drawings(version):
             "status": "ok",
             "data": {},
         }
-
-# ---------------------------------------------------------------------------
-# 多周期叠加 (overlay):在当前周期图上叠加高级别周期的中枢/走势类型
-# ---------------------------------------------------------------------------
-
-# 当前 TV interval → 自动叠加哪些高级别 frequency(内部名)
-# 设计原则:每次默认叠加 2-3 个高一档,既能看清"多级别联立"又控制性能。
-_AUTO_OVERLAY_FREQS = {
-    "1":   ["5m", "30m", "d"],
-    "3":   ["15m", "60m", "d"],
-    "5":   ["30m", "d", "w"],
-    "10":  ["60m", "d", "w"],
-    "15":  ["60m", "d", "w"],
-    "30":  ["d", "w"],
-    "60":  ["d", "w"],
-    "1D":  ["w", "m"],
-    "1W":  ["m"],
-}
-# overlay 合法 freq 白名单——用户从 query 传入 ``overlays=`` 参数时,
-# 必须落在这个集合里才会被喂给 ``ex.klines``。防御不可信输入,即便
-# exchange 实现对未知 freq 已 return [],也避免对内部接口的隐性依赖。
-_OVERLAY_ALLOWED_FREQS = frozenset(
-    f for freqs in _AUTO_OVERLAY_FREQS.values() for f in freqs
-)
-
-
-def _serialize_overlay_zss(cd) -> list:
-    """从一个 overlay CL 对象提取 xd_zss 序列化为 chart 用 dict。"""
-    out = []
-    try:
-        zss = cd.get_xd_zss()
-    except Exception:
-        return out
-    for zs in zss:
-        try:
-            start_date = zs.start.end.k.date if zs.start else zs.lines[0].start.k.date
-            end_date = zs.end.start.k.date if zs.end else zs.lines[-1].end.k.date
-            out.append({
-                "points": [
-                    {"time": fun.datetime_to_int(start_date), "price": zs.zg},
-                    {"time": fun.datetime_to_int(end_date), "price": zs.zd},
-                ],
-                "linestyle": "0" if zs.done else "1",
-                "type": zs.type,
-                "is_expanded": bool(getattr(zs, "expanded_with", [])),
-                "sub_count": len(getattr(zs, "expanded_with", []) or []),
-            })
-        except Exception:
-            continue
-    return out
-
-
-def _serialize_overlay_zslx(cd) -> list:
-    out = []
-    try:
-        zslxs = cd.get_xd_zslx() or []
-    except Exception:
-        return out
-    for zslx in zslxs:
-        try:
-            if not zslx.zss:
-                continue
-            first_zs, last_zs = zslx.zss[0], zslx.zss[-1]
-            start_date = first_zs.start.end.k.date if first_zs.start else first_zs.lines[0].start.k.date
-            end_date = last_zs.end.start.k.date if last_zs.end else last_zs.lines[-1].end.k.date
-            out.append({
-                "points": [
-                    {"time": fun.datetime_to_int(start_date),
-                     "price": max(z.gg for z in zslx.zss)},
-                    {"time": fun.datetime_to_int(end_date),
-                     "price": min(z.dd for z in zslx.zss)},
-                ],
-                "zslx_type": zslx.zslx_type,
-                "direction": zslx.type,
-                "done": bool(zslx.done),
-                "zss_count": len(zslx.zss),
-            })
-        except Exception:
-            continue
-    return out
-
-
-def _serialize_overlay_zslx_lines(cd) -> list:
-    out = []
-    try:
-        zslxs = cd.get_xd_zslx() or []
-    except Exception:
-        return out
-    for zslx in zslxs:
-        try:
-            if not zslx.zss:
-                continue
-            start = zslx.start or zslx.zss[0].lines[0].start
-            end = zslx.end or zslx.zss[-1].lines[-1].end
-            out.append({
-                "points": [
-                    {"time": fun.datetime_to_int(start.k.date), "price": start.val},
-                    {"time": fun.datetime_to_int(end.k.date), "price": end.val},
-                ],
-                "linestyle": "0" if zslx.done else "1",
-                "zslx_type": zslx.zslx_type,
-                "direction": zslx.type,
-                "done": bool(zslx.done),
-                "zss_count": len(zslx.zss),
-            })
-        except Exception:
-            continue
-    return out
-
-
-@tv_bp.route("/tv/overlays")
-@login_required
-def tv_overlays():
-    """多周期叠加 endpoint:在当前 interval 图表上,返回若干高级别周期的
-    中枢与走势类型(序列化为 TV chart shape 数据)。
-
-    Query params:
-        symbol:   TV symbol(如 ``a:SH.000001``)
-        interval: 当前 TV interval(``1``/``5``/``30``/``1D``...)
-        overlays: 可选,逗号分隔的目标 frequency(内部名,如 ``5m,30m,d``);
-                  缺省走 ``_AUTO_OVERLAY_FREQS`` 映射。
-
-    Response:
-        ``{"overlays": {"5m": {"xd_zss": [...], "xd_zslx": [...]},
-                        "30m": {...}, ...}, "current_interval": "1"}``
-        失败/无数据时对应 freq 缺失或为空数组。
-    """
-    symbol = request.args.get("symbol", "")
-    interval = request.args.get("interval", "")
-    overlays_param = (request.args.get("overlays", "") or "").strip()
-
-    market, code = _parse_tv_symbol(symbol)
-    if market is None or code is None:
-        return {"overlays": {}, "current_interval": interval, "error": "invalid_symbol"}
-
-    # 解析目标 overlay frequencies——用户传 ``overlays=`` 时必须落在白名单内
-    if overlays_param:
-        overlay_freqs = [
-            f.strip() for f in overlays_param.split(",")
-            if f.strip() and f.strip() in _OVERLAY_ALLOWED_FREQS
-        ]
-    else:
-        overlay_freqs = list(_AUTO_OVERLAY_FREQS.get(interval, []))
-
-    if not overlay_freqs:
-        return {"overlays": {}, "current_interval": interval}
-
-    cl_config = query_cl_chart_config(market, code)
-
-    try:
-        ex = get_exchange(Market(market))
-    except Exception as e:
-        return {"overlays": {}, "current_interval": interval, "error": f"exchange_init: {e}"}
-
-    out = {}
-    for freq in overlay_freqs:
-        try:
-            klines = ex.klines(code, freq)
-            if klines is None or len(klines) == 0:
-                continue
-            cds = web_batch_get_cl_datas(market, code, {freq: klines}, cl_config)
-            if not cds:
-                continue
-            cd = cds[0]
-            out[freq] = {
-                "xd_zss": _serialize_overlay_zss(cd),
-                "xd_zslx": _serialize_overlay_zslx(cd),
-                "xd_zslx_lines": _serialize_overlay_zslx_lines(cd),
-            }
-        except Exception as e:
-            LogUtil.warning(f"[tv_overlays] symbol={symbol} freq={freq} err={e}")
-            continue
-
-    return {"overlays": out, "current_interval": interval}
