@@ -273,7 +273,7 @@ def test_research_audit_styles_keep_dense_content_readable(app: Flask) -> None:
     client = app.test_client()
 
     response = client.get("/static/css/research_audit.css")
-    css = response.get_data(as_text=True)
+    css = response.get_data(as_text=True).replace("\r\n", "\n")
 
     assert response.status_code == 200
     assert "font-size: 16px;" in css
