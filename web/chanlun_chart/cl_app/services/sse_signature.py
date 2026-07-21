@@ -37,4 +37,18 @@ def compute_signature(chart_data: dict) -> str:
     for f in _SHAPE_FIELDS:
         arr = chart_data.get(f) or []
         parts.append(f"{f}:{len(arr)}:{_last_time(arr[-1]) if arr else ''}")
+    strict_mode = chart_data.get("strict_structure_mode")
+    parts.append(f"strict_mode:{strict_mode or ''}")
+    if strict_mode == "replace":
+        strict = chart_data.get("strict_structure") or {}
+        parts.extend(
+            (
+                f"strict_structure:{strict.get('structure_revision', '')}",
+                f"strict_snapshot:{strict.get('snapshot_revision', '')}",
+                f"strict_render:{strict.get('render_revision', '')}",
+            )
+        )
+    elif strict_mode == "unavailable":
+        error = chart_data.get("strict_structure_error") or {}
+        parts.append(f"strict_error:{error.get('code', '')}")
     return "|".join(parts)

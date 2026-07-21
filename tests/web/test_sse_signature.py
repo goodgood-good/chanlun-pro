@@ -49,3 +49,39 @@ def test_no_ohlc_keys_still_stable():
     # 缺 o/h/l/c 键时(老数据/异常)仍稳定可比,不抛错。
     a = {"t": [1, 2, 3], "bis": []}
     assert compute_signature(a) == compute_signature(dict(a))
+
+
+def test_center_body_revision_changes_sse_signature():
+    before = {
+        "t": [1, 2],
+        "strict_structure_mode": "replace",
+        "strict_structure": {
+            "structure_revision": "sha256:formal",
+            "snapshot_revision": "sha256:snapshot",
+            "render_revision": "sha256:render-body-1",
+        },
+    }
+    after = {
+        **before,
+        "strict_structure": {
+            **before["strict_structure"],
+            "render_revision": "sha256:render-body-2",
+        },
+    }
+
+    assert compute_signature(before) != compute_signature(after)
+
+
+def test_visible_only_metadata_does_not_change_structure_signature():
+    payload = {
+        "t": [1, 2],
+        "strict_structure_mode": "replace",
+        "strict_structure": {
+            "structure_revision": "sha256:formal",
+            "snapshot_revision": "sha256:snapshot",
+            "render_revision": "sha256:render",
+        },
+    }
+    changed = {**payload, "request_debug": {"visible_from": 123}}
+
+    assert compute_signature(payload) == compute_signature(changed)

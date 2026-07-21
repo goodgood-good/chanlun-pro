@@ -17,3 +17,14 @@ def test_source_fingerprint_covers_exchange_dataoutput_files():
         assert f in names, (
             f"{f} 未纳入 source_fingerprint 指纹 -> 数据源口径(时区/周期/精度)修复不失效图表缓存"
         )
+
+
+def test_source_fingerprint_covers_strict_structure_sources():
+    paths = {
+        path.as_posix()
+        for path in _fingerprint_files()
+    }
+    assert any(path.endswith("core/strict_structure/models.py") for path in paths)
+    assert any(path.endswith("core/strict_structure/signals.py") for path in paths)
+    assert any(path.endswith("cl_utils/strict_chart.py") for path in paths)
+    assert any(path.endswith("cl_utils/strict_chart_runtime.py") for path in paths)

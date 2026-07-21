@@ -18,15 +18,20 @@ def _fingerprint_files():
     """参与内容指纹的源文件列表:core 计算 + core/types + 图表渲染 + exchange 数据产出。
 
     覆盖:`chanlun/core/*.py`(笔/线段/中枢/走势类型/买卖点/递归/cl) + `core/types/*.py`
-    + `cl_utils/{tv_chart,chart_config}.py`(渲染/配置) + `exchange/*.py`(含 _lookback 与各
+    + `cl_utils/{tv_chart,strict_chart,strict_chart_runtime,chart_config}.py`(渲染/严格运行时/配置)
+    + `exchange/*.py`(含 _lookback 与各
     数据源 klines)。D3-M3:exchange 层对原始数据的解释(时区/周期合成/精度归一/去重)一改会
     改变图表 date/OHLC 值,但原指纹只含 _lookback → 这类修复不失效旧图表缓存;纳入整个 exchange
     目录后,数据产出口径一改 → 指纹变 → chart_data/cl_object 缓存自动失效。
     """
     pkg = pathlib.Path(__file__).resolve().parents[1]   # .../chanlun
-    files = sorted((pkg / "core").glob("*.py"))
-    files += sorted((pkg / "core" / "types").glob("*.py"))
-    files += [pkg / "cl_utils" / "tv_chart.py", pkg / "cl_utils" / "chart_config.py"]
+    files = sorted((pkg / "core").rglob("*.py"))
+    files += [
+        pkg / "cl_utils" / "tv_chart.py",
+        pkg / "cl_utils" / "strict_chart.py",
+        pkg / "cl_utils" / "strict_chart_runtime.py",
+        pkg / "cl_utils" / "chart_config.py",
+    ]
     files += sorted((pkg / "exchange").glob("*.py"))
     return files
 
