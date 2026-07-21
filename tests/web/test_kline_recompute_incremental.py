@@ -9,7 +9,7 @@ import math
 import pandas as pd
 import pytest
 
-from cl_app.services import kline_recompute
+from cl_app.services import chart_compute, kline_recompute
 from cl_app.services.kline_recompute import recompute_chart_data_from_klines
 
 
@@ -43,8 +43,12 @@ def mock_cl(monkeypatch):
     _FakeCL.instances = []
     monkeypatch.setattr("chanlun.core.cl.CL", _FakeCL)
     monkeypatch.setattr(
-        "chanlun.cl_utils.cl_data_to_tv_chart",
-        lambda cd, cfg, to_frequency=None: {"n": cd.n, "id": id(cd)},
+        chart_compute,
+        "serialize_chart_data_with_strict_runtime",
+        lambda **kwargs: {
+            "n": kwargs["legacy_cd"].n,
+            "id": id(kwargs["legacy_cd"]),
+        },
     )
     kline_recompute.reset_cl_pool()
     yield

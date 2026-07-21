@@ -24,6 +24,11 @@ from typing import Optional
 
 import pandas as pd
 
+from chanlun.exchange.price_basis import (
+    PriceBasisMismatchError,
+    copy_price_basis_metadata,
+    merge_price_basis_metadata,
+)
 from chanlun.tools.log_util import LogUtil
 
 # 限制并发"全量重算"数量：缠论重算 CPU 密集，多窗口同时全量重算争 CPU/GIL。曾试 1=
@@ -66,7 +71,7 @@ def extract_klines_df_from_chart_data(chart_data: dict) -> pd.DataFrame:
             f"t={n} o={len(o)} h={len(h)} l={len(low_arr)} c={len(c)} v={len(v)}"
         )
         return pd.DataFrame()
-    return pd.DataFrame({
+    frame = pd.DataFrame({
         "date": pd.to_datetime(ts, unit="s", utc=True),
         "open": o,
         "high": h,
@@ -74,6 +79,16 @@ def extract_klines_df_from_chart_data(chart_data: dict) -> pd.DataFrame:
         "close": c,
         "volume": v,
     })
+    strict_structure = chart_data.get("strict_structure")
+    if (
+        chart_data.get("strict_structure_mode") == "replace"
+        and isinstance(strict_structure, dict)
+    ):
+        for name in ("structure_price_quantum", "price_basis_revision"):
+            value = strict_structure.get(name)
+            if value is not None:
+                frame.attrs[name] = value
+    return frame
 
 
 def _ensure_tz_aware(df: pd.DataFrame) -> pd.DataFrame:
@@ -125,9 +140,11 @@ def merge_klines_df(cached: pd.DataFrame, new: pd.DataFrame) -> pd.DataFrame:
     if cached is None or len(cached) == 0:
         if new is None or len(new) == 0:
             return pd.DataFrame()
-        return _ensure_tz_aware(new).sort_values("date").reset_index(drop=True)
+        target = _ensure_tz_aware(new).sort_values("date").reset_index(drop=True)
+        return copy_price_basis_metadata(new, target)
     if new is None or len(new) == 0:
-        return _ensure_tz_aware(cached).sort_values("date").reset_index(drop=True)
+        target = _ensure_tz_aware(cached).sort_values("date").reset_index(drop=True)
+        return copy_price_basis_metadata(cached, target)
 
     # 两边 tz 状态对齐(各自 naive 则补 UTC 标签),否则 sort_values 会抛
     # "Cannot compare tz-naive and tz-aware timestamps"。
@@ -138,7 +155,7 @@ def merge_klines_df(cached: pd.DataFrame, new: pd.DataFrame) -> pd.DataFrame:
     combined = pd.concat([cached, new], ignore_index=True)
     combined = combined.drop_duplicates(subset=["date"], keep="last")
     combined = combined.sort_values("date").reset_index(drop=True)
-    return combined
+    return merge_price_basis_metadata(cached, new, combined)
 
 
 # ── 持久 CL 实例池(增量重算) ──────────────────────────────────────────
@@ -266,7 +283,7 @@ def recompute_chart_data_from_klines(
     # 局部 import,避免顶层 import 循环(chanlun.cl_utils 反向依赖 chart_compute 几率小,
     # 但 cl.CL 的初始化栈较深,放到调用时 import 更稳)。
     from chanlun.core.cl import CL
-    from chanlun.cl_utils import cl_data_to_tv_chart
+    from . import chart_compute as _chart_compute
 
     config_key = _make_cl_config_key(cl_config, market, to_frequency)
     first_date = int(klines.iloc[0]["date"].timestamp()) if len(klines) else None
@@ -297,7 +314,28 @@ def recompute_chart_data_from_klines(
     with _recompute_sem:  # 限并发，防多窗口同时全量重算把 CPU 打满导致雪崩
         _calc_t0 = time.time()
         cd.process_klines(klines)  # 复用→增量(只算末根/新增根), 新建→全量
-        result = cl_data_to_tv_chart(cd, cl_config, to_frequency=to_frequency)
+        if to_frequency is None:
+            display_frequency = frequency
+            display_klines = klines
+            display_cd = cd
+        else:
+            display_frequency = to_frequency
+            display_cd, display_klines = _chart_compute._build_display_frequency_cl(
+                market=market,
+                code=code,
+                fetched_klines=klines,
+                fetched_frequency=frequency,
+                display_frequency=display_frequency,
+                cl_config=cl_config,
+            )
+        result = _chart_compute.serialize_chart_data_with_strict_runtime(
+            market=market,
+            code=code,
+            display_frequency=display_frequency,
+            display_klines=display_klines,
+            legacy_cd=display_cd,
+            legacy_config=cl_config,
+        )
         # 与 getBars/prewarm(chart_compute.py:362)路径对齐: SSE 实时重算后也补算跨周期
         # MACD(higher_macd_*)。否则 SSE 每次推送的 chart_data 缺 higher_macd 字段, 前端
         # applyChanlunUpdate 合并进 bars_result 后实时更新的那段 higher_macd 退化为 NaN
@@ -305,9 +343,12 @@ def recompute_chart_data_from_klines(
         # 并发; 补算失败只告警不阻断推送(主缠论/K线优先, HTF MACD 缺失可降级)。
         if result is not None:
             try:
-                from .chart_compute import apply_higher_macd_to_chart_data
-
-                apply_higher_macd_to_chart_data(result, frequency, market, cl_config)
+                _chart_compute.apply_higher_macd_to_chart_data(
+                    result,
+                    display_frequency,
+                    market,
+                    cl_config,
+                )
             except Exception as _macd_e:
                 LogUtil.warning(
                     f"[recompute] apply_higher_macd 补算失败 {market}:{code} {frequency}: {_macd_e}"
@@ -399,7 +440,18 @@ def prepend_klines_and_replace_cache(
             )
             return None
 
-    merged = merge_klines_df(cached_df, new_klines)
+    try:
+        merged = merge_klines_df(cached_df, new_klines)
+    except PriceBasisMismatchError as exc:
+        LogUtil.warning(
+            f"[prepend] price basis mismatch; invalidate cache "
+            f"market={market} code={code} frequency={frequency} "
+            f"cache_key={cache_key} error={type(exc).__name__}: {exc}"
+        )
+        _chart_cache._delete_chart_cache_entry(cache_key)
+        with _cl_pool_lock:
+            _cl_pool.pop(cache_key, None)
+        return None
     if merged is None or len(merged) == 0:
         return None
 
