@@ -9,6 +9,7 @@ docs/superpowers/specs/2026-05-18-kline-precision-normalization-design.md
 """
 
 from decimal import ROUND_HALF_UP, Decimal
+import re
 from typing import Optional
 
 import pandas as pd
@@ -28,6 +29,17 @@ _MARKET_DECIMALS = {
 
 _A_STOCK_DECIMALS = 2  # A股 股票
 _A_FUND_DECIMALS = 3   # A股 ETF/基金/可转债
+_TDX_INDUSTRY_INDEX = re.compile(r"^SH\.880\d{3}$")
+
+
+def resolve_tdx_industry_index_quantum(code: str) -> Optional[Decimal]:
+    """Return the native two-decimal tick for a TDX 880 industry index."""
+
+    return (
+        Decimal("0.01")
+        if _TDX_INDUSTRY_INDEX.fullmatch(str(code))
+        else None
+    )
 
 
 def _a_share_decimals(code: str) -> int:
@@ -50,6 +62,17 @@ def resolve_decimals(market: Optional[str], code: str) -> Optional[int]:
     if market == "a":
         return _a_share_decimals(code)
     return _MARKET_DECIMALS.get(market)
+
+
+def resolve_structure_price_quantum(
+    market: Optional[str], code: str
+) -> Optional[Decimal]:
+    """返回 OHLC 归一化规则对应的严格结构价格量子。"""
+
+    decimals = resolve_decimals(market, code)
+    if decimals is None:
+        return None
+    return Decimal(1).scaleb(-decimals)
 
 
 def _round_half_up(value: Optional[float], decimals: int) -> Optional[float]:

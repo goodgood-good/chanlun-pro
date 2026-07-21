@@ -22,8 +22,9 @@ class _TradingScreeningService:
 
     def snapshot(self) -> dict[str, object]:
         return {
-            "schema_version": "chanlun-trading-screening/v1",
+            "schema_version": "chanlun-trading-screening/v2",
             "algorithm_version": "chanlun-original-low-drawdown/v1",
+            "structure_version": "v2",
             "available": True,
             "scan_state": "complete",
             "generated_at": "2026-07-20T15:00:00+08:00",
@@ -44,7 +45,12 @@ class _TradingScreeningService:
             "sectors": [],
             "signals": [],
             "risk_limits": {},
-            "scan_audit": {},
+            "scan_audit": {
+                "sector_discovered_count": 10,
+                "sector_completed_count": 9,
+                "sector_failed_count": 1,
+                "sector_completion_ratio": "0.9",
+            },
             "data_quality": {"complete": True, "stale": False},
             "backtest_verdict": {
                 "live_ready": False,
@@ -99,7 +105,8 @@ def test_early_signals_requires_new_schema(app: Flask, logged_in_client) -> None
     assert response.status_code == 200
     assert response.headers["Cache-Control"] == "private, no-store"
     assert payload["ok"] is True
-    assert payload["data"]["schema_version"] == "chanlun-trading-screening/v1"
+    assert payload["data"]["schema_version"] == "chanlun-trading-screening/v2"
+    assert payload["data"]["structure_version"] == "v2"
     service = app.extensions["decision_support_trading_screening"]
     assert service.refresh_requests == 1
 
@@ -118,7 +125,9 @@ def test_screening_page_uses_new_three_workspace_contract(
 
     assert response.status_code == 200
     assert response.headers["Cache-Control"] == "private, no-store"
-    assert 'data-schema="chanlun-trading-screening/v1"' in html
+    assert 'data-schema="chanlun-trading-screening/v2"' in html
+    assert 'id="es-sector-completion"' in html
+    assert "板块质量" in html
     assert html.count("data-workspace=") == 3
     assert 'data-workspace="sector"' in html
     assert 'data-workspace="signals"' in html

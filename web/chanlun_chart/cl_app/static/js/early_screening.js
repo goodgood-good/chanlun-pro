@@ -73,8 +73,10 @@
         : {};
       const quality = snapshot.data_quality;
       const completion = Ui.scanCoverageText(audit);
+      const sectorCompletion = Ui.sectorCoverageText(audit);
       const pending = Math.max(0, Number(audit.pending_symbol_count) || 0);
       const errorCount = Array.isArray(snapshot.errors) ? snapshot.errors.length : 0;
+      const failureCodes = Array.isArray(quality.failure_codes) ? quality.failure_codes : [];
 
       if (snapshot.scan_state === "complete" && !quality.stale) {
         setStatus(
@@ -85,7 +87,15 @@
             : `当前结构队列已覆盖${errorCount ? `；${errorCount} 只标的需复核` : ""}`,
         );
       } else if (snapshot.scan_state === "incomplete_not_published") {
-        setStatus("warning", "本轮扫描未达到发布门槛", "继续显示上一份可验证快照，不发布不完整结果");
+        if (failureCodes.includes("sector_scan_completion_below_threshold")) {
+          setStatus(
+            "warning",
+            "本轮板块结构质量不足，保留上一快照",
+            `${sectorCompletion}；未达到发布门槛，不发布本轮不完整结果`,
+          );
+        } else {
+          setStatus("warning", "本轮扫描未达到发布门槛", "继续显示上一份可验证快照，不发布不完整结果");
+        }
       } else if (!snapshot.available) {
         setStatus("loading", "等待首次有效扫描", "后台正在准备原生板块与多周期结构数据");
       } else {
@@ -93,6 +103,7 @@
       }
 
       setText("es-generated", Ui.timeText(snapshot.generated_at));
+      setText("es-sector-completion", sectorCompletion);
       setText("es-completion", completion);
       setText("es-quality", quality.stale ? "已过期" : quality.complete ? "完整" : "部分完整");
       setText("es-sector-count", Ui.selectedSectorCount(snapshot));

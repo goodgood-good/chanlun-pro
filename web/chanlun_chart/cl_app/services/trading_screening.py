@@ -32,10 +32,17 @@ from chanlun.decision_support.trading_system.models import (
 )
 from chanlun.decision_support.trading_system.portfolio_risk import RiskLimits
 from chanlun.decision_support.trading_system.provisional import ProvisionalCandidate
+from chanlun.decision_support.trading_system.runtime_config import (
+    STRICT_STRATEGY_ID,
+)
 from chanlun.decision_support.trading_system.sector_policy import rank_sectors
+from cl_app.services.trading_screening_gateway import (
+    SectorAssessmentBatch,
+    _sector_failure_document,
+)
 
 
-SCHEMA_VERSION = "chanlun-trading-screening/v1"
+SCHEMA_VERSION = "chanlun-trading-screening/v2"
 POINT_TYPES = ("1buy", "2buy", "3buy", "1sell", "2sell", "3sell")
 
 
@@ -74,7 +81,7 @@ class SectorCatalogGateway(Protocol):
         self,
         *,
         as_of: datetime,
-    ) -> tuple[SectorAssessment, ...]: ...
+    ) -> SectorAssessmentBatch: ...
 
     def members(self) -> Mapping[str, tuple[str, ...]]: ...
 
@@ -96,8 +103,8 @@ class TradingScreeningConfig:
     max_monitor_symbols_per_refresh: int = 64
     min_scan_completion_ratio: Decimal = Decimal("0.80")
     max_structure_age_seconds: int = 3600
-    algorithm_version: str = "chanlun-original-low-drawdown/v1"
-    structure_version: str = "v1"
+    algorithm_version: str = STRICT_STRATEGY_ID
+    structure_version: str = "v2"
     parameter_version: str = "v1"
 
     def __post_init__(self) -> None:
@@ -139,6 +146,11 @@ def _initial_snapshot(config: TradingScreeningConfig) -> dict[str, object]:
         "signals": [],
         "risk_limits": _risk_limits_document(RiskLimits()),
         "scan_audit": {
+            "sector_discovered_count": 0,
+            "sector_completed_count": 0,
+            "sector_failed_count": 0,
+            "sector_completion_ratio": "0",
+            "sector_failure_counts": {},
             "planned_symbol_count": 0,
             "completed_symbol_count": 0,
             "completion_ratio": "0",
@@ -230,6 +242,8 @@ def _point_document(
             "recursive_level": point.recursive_level,
             "anchor_at": point.observed_at.isoformat(),
             "confirmed_at": None,
+            "available_at": point.observed_at.isoformat(),
+            "price_basis_revision": None,
             "anchor_price": point.anchor_price,
             "invalidation_price": None,
             "center_id": None,
@@ -253,8 +267,10 @@ def _point_document(
         "confirmed_at": (
             None if point.confirmed_at is None else point.confirmed_at.isoformat()
         ),
-        "anchor_price": point.anchor_price,
-        "invalidation_price": point.invalidation_price,
+        "available_at": point.available_at.isoformat(),
+        "price_basis_revision": point.price_basis_revision,
+        "anchor_price": point.structure_anchor_price,
+        "invalidation_price": point.structure_invalidation_price,
         "center_id": point.center_id,
         "center_zd": point.center_zd,
         "center_zg": point.center_zg,
@@ -544,7 +560,43 @@ class TradingScreeningService:
         previous: Mapping[str, object],
     ) -> dict[str, object]:
         as_of = normalize_datetime(self._clock(), "clock")
-        assessments = self._sector_catalog.native_sector_assessments(as_of=as_of)
+        sector_batch = self._sector_catalog.native_sector_assessments(as_of=as_of)
+        sector_ratio = sector_batch.completion_ratio
+        sector_audit: dict[str, object] = {
+            "sector_discovered_count": sector_batch.discovered_count,
+            "sector_completed_count": sector_batch.completed_count,
+            "sector_failed_count": (
+                sector_batch.discovered_count - sector_batch.completed_count
+            ),
+            "sector_completion_ratio": str(sector_ratio),
+            "sector_failure_counts": dict(sector_batch.failure_counts),
+        }
+        sector_errors = [
+            _sector_failure_document(item) for item in sector_batch.errors
+        ]
+        if sector_ratio < self._config.min_scan_completion_ratio:
+            failed = copy.deepcopy(dict(previous))
+            failed["scan_state"] = "incomplete_not_published"
+            previous_audit = failed.get("scan_audit")
+            scan_audit = (
+                dict(previous_audit) if isinstance(previous_audit, Mapping) else {}
+            )
+            scan_audit.update(sector_audit)
+            failed["scan_audit"] = scan_audit
+            failed["data_quality"] = {
+                "complete": False,
+                "stale": True,
+                "failure_codes": ["sector_scan_completion_below_threshold"],
+            }
+            failed["errors"] = sector_errors
+            return failed
+
+        failed_sector_ids = {item.sector_id for item in sector_batch.errors}
+        assessments = tuple(
+            assessment
+            for assessment in sector_batch.assessments
+            if assessment.sector_id not in failed_sector_ids
+        )
         ranked = rank_sectors(assessments)
         selected = ranked[: self._config.max_selected_sectors]
         selected_by_id = {
@@ -591,7 +643,7 @@ class TradingScreeningService:
             if isinstance(row, Mapping) and isinstance(row.get("signal_id"), str)
         }
         signals: list[dict[str, object]] = []
-        errors: list[dict[str, str]] = []
+        errors: list[dict[str, str]] = list(sector_errors)
         completed = 0
         completed_codes: set[str] = set()
         sector_by_code: dict[str, SectorAssessment] = {}
@@ -676,6 +728,19 @@ class TradingScreeningService:
             failed = copy.deepcopy(dict(previous))
             failed["scan_state"] = "incomplete_not_published"
             failed["errors"] = errors
+            previous_audit = failed.get("scan_audit")
+            scan_audit = (
+                dict(previous_audit) if isinstance(previous_audit, Mapping) else {}
+            )
+            scan_audit.update(sector_audit)
+            scan_audit.update(
+                {
+                    "planned_symbol_count": planned_count,
+                    "completed_symbol_count": completed,
+                    "completion_ratio": str(completion),
+                }
+            )
+            failed["scan_audit"] = scan_audit
             failed["data_quality"] = {
                 "complete": False,
                 "stale": True,
@@ -736,7 +801,7 @@ class TradingScreeningService:
                     ordinal=ranked_ordinals.get(assessment.sector_id),
                 )
                 for assessment in sorted(
-                    assessments,
+                    sector_batch.assessments,
                     key=lambda row: (
                         ranked_ordinals.get(row.sector_id, 10**9),
                         row.sector_id,
@@ -746,6 +811,7 @@ class TradingScreeningService:
             "signals": signals,
             "risk_limits": _risk_limits_document(self._risk_limits),
             "scan_audit": {
+                **sector_audit,
                 "planned_symbol_count": planned_count,
                 "discovered_symbol_count": len(plan.symbols),
                 "completed_symbol_count": completed,
@@ -764,7 +830,9 @@ class TradingScreeningService:
             "data_quality": {
                 "complete": not errors,
                 "stale": False,
-                "failure_codes": [],
+                "failure_codes": (
+                    ["sector_scan_partial"] if sector_batch.errors else []
+                ),
             },
             "backtest_verdict": copy.deepcopy(self._backtest_verdict),
             "errors": errors,

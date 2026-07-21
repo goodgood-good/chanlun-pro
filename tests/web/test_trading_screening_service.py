@@ -21,6 +21,10 @@ from cl_app.services.trading_screening import (
     TradingScreeningConfig,
     TradingScreeningService,
 )
+from cl_app.services.trading_screening_gateway import (
+    SectorAnalysisFailure,
+    SectorAssessmentBatch,
+)
 
 
 class RecordingMarketData:
@@ -63,9 +67,18 @@ class RecordingMarketData:
 
 
 class RecordingSectorCatalog:
+    def __init__(self, batch: SectorAssessmentBatch | None = None) -> None:
+        self.batch = batch or SectorAssessmentBatch(
+            assessments=(eligible_sector(),),
+            discovered_count=1,
+            completed_count=1,
+            failure_counts=(),
+            errors=(),
+        )
+
     def native_sector_assessments(self, *, as_of: datetime):
         del as_of
-        return (eligible_sector(),)
+        return self.batch
 
     def members(self):
         return {eligible_sector().sector_id: ("SZ.000001",)}
@@ -134,7 +147,8 @@ def test_service_uses_incremental_scan_plan_and_new_engine(tmp_path: Path) -> No
 
     payload = service.refresh_now()
 
-    assert payload["schema_version"] == "chanlun-trading-screening/v1"
+    assert payload["schema_version"] == "chanlun-trading-screening/v2"
+    assert payload["structure_version"] == "v2"
     assert payload["sector_first"] is True
     assert payload["read_only"] is True
     assert payload["no_order_execution"] is True
@@ -148,6 +162,89 @@ def test_service_uses_incremental_scan_plan_and_new_engine(tmp_path: Path) -> No
     assert planner.calls == 1
     assert market.bundle_codes == ["SZ.000001"]
     assert engine.codes == ["SZ.000001"]
+
+
+def test_sector_infrastructure_failures_below_gate_keep_previous_snapshot(
+    tmp_path: Path,
+) -> None:
+    catalog = RecordingSectorCatalog()
+    service = TradingScreeningService(
+        market_data=RecordingMarketData(),
+        sector_catalog=catalog,
+        engine=RecordingEngine(),
+        scan_planner=RecordingPlanner(),
+        cache_path=tmp_path / "snapshot.json",
+        clock=lambda: AS_OF,
+        notifier=None,
+    )
+    previous = service.refresh_now()
+    successful = tuple(
+        replace(eligible_sector(), sector_id=f"TDX.88030{index}")
+        for index in range(7)
+    )
+    failures = tuple(
+        SectorAnalysisFailure(
+            sector_id=f"TDX.88039{index}",
+            code=f"SH.88039{index}",
+            error_type="sector_price_basis_unavailable",
+            reason="industry index price basis unavailable",
+        )
+        for index in range(3)
+    )
+    catalog.batch = SectorAssessmentBatch(
+        assessments=successful,
+        discovered_count=10,
+        completed_count=7,
+        failure_counts=(("sector_price_basis_unavailable", 3),),
+        errors=failures,
+    )
+
+    payload = service.refresh_now()
+
+    assert payload["scan_state"] == "incomplete_not_published"
+    assert payload["sectors"] == previous["sectors"]
+    assert payload["signals"] == previous["signals"]
+    assert payload["scan_audit"]["sector_completion_ratio"] == "0.7"
+    assert payload["data_quality"]["failure_codes"] == [
+        "sector_scan_completion_below_threshold"
+    ]
+
+
+def test_business_ineligible_sectors_count_as_completed_and_can_publish_empty(
+    tmp_path: Path,
+) -> None:
+    batch = SectorAssessmentBatch(
+        assessments=(hostile_sector(),),
+        discovered_count=1,
+        completed_count=1,
+        failure_counts=(),
+        errors=(),
+    )
+
+    def empty_plan(**_kwargs) -> ScanPlan:
+        return ScanPlan(
+            sectors=(),
+            symbols=(),
+            symbol_frequencies=(),
+            full_market_history_scan=False,
+            background_full_refresh_required=False,
+        )
+
+    service = TradingScreeningService(
+        market_data=RecordingMarketData(),
+        sector_catalog=RecordingSectorCatalog(batch),
+        engine=RecordingEngine(),
+        scan_planner=empty_plan,
+        cache_path=tmp_path / "snapshot.json",
+        clock=lambda: AS_OF,
+        notifier=None,
+    )
+
+    payload = service.refresh_now()
+
+    assert payload["scan_state"] == "complete"
+    assert payload["scan_audit"]["sector_completion_ratio"] == "1"
+    assert payload["scan_audit"]["selected_sector_count"] == 0
 
 
 def test_cache_with_another_schema_is_rejected(tmp_path: Path) -> None:
@@ -178,7 +275,8 @@ def test_cache_with_another_schema_is_rejected(tmp_path: Path) -> None:
     )
 
     snapshot = service.snapshot()
-    assert snapshot["schema_version"] == "chanlun-trading-screening/v1"
+    assert snapshot["schema_version"] == "chanlun-trading-screening/v2"
+    assert snapshot["structure_version"] == "v2"
     assert snapshot["scan_state"] == "not_started"
     assert snapshot["signals"] == []
 
@@ -442,6 +540,31 @@ def test_signal_identity_survives_service_restart(tmp_path: Path) -> None:
     }
 
 
+def test_confirmed_signal_serializes_causal_and_price_basis_evidence(
+    tmp_path: Path,
+) -> None:
+    service = TradingScreeningService(
+        market_data=ActionableMarketData(),
+        sector_catalog=RecordingSectorCatalog(),
+        engine=TradingEngine(),
+        scan_planner=RecordingPlanner(),
+        cache_path=tmp_path / "snapshot.json",
+        clock=lambda: AS_OF,
+        notifier=None,
+    )
+
+    [signal] = service.refresh_now()["signals"]
+
+    assert signal["setup_5m"]["available_at"] == confirmed_point(
+        "2buy"
+    ).available_at.isoformat()
+    assert signal["setup_5m"]["price_basis_revision"] == "test-raw-v1"
+    assert signal["setup_5m"]["tower"] == "formal"
+    assert signal["trigger_1m"]["available_at"] == confirmed_point(
+        "1buy", frequency="1m", minutes_after=1
+    ).available_at.isoformat()
+
+
 class PersistenceAssertingNotifier:
     def __init__(self, cache_path: Path) -> None:
         self.cache_path = cache_path
@@ -558,7 +681,13 @@ class MixedSectorCatalog:
 
     def native_sector_assessments(self, *, as_of: datetime):
         del as_of
-        return eligible_sector(), self.blocked
+        return SectorAssessmentBatch(
+            assessments=(eligible_sector(), self.blocked),
+            discovered_count=2,
+            completed_count=2,
+            failure_counts=(),
+            errors=(),
+        )
 
     def members(self):
         return {

@@ -5,7 +5,7 @@
   if (typeof module === "object" && module.exports) module.exports = api;
   if (root) root.TradingScreeningUi = api;
 })(typeof globalThis === "object" ? globalThis : this, function createTradingScreeningUi() {
-  const SCHEMA_VERSION = "chanlun-trading-screening/v1";
+  const SCHEMA_VERSION = "chanlun-trading-screening/v2";
   const POINT_TYPES = ["1buy", "2buy", "3buy", "1sell", "2sell", "3sell"];
   const LAYOUTS = new Set(["single", "split", "quad"]);
   const POINT_LABELS = {
@@ -57,6 +57,25 @@
     return pending > 0
       ? `本批 ${completed}/${planned} · 待扫 ${pending}`
       : `本批 ${completed}/${planned} · 队列已覆盖`;
+  }
+
+  function sectorCoverageText(audit) {
+    const safeAudit = isRecord(audit) ? audit : {};
+    const discovered = Math.max(0, Number(safeAudit.sector_discovered_count) || 0);
+    const completed = Math.max(0, Number(safeAudit.sector_completed_count) || 0);
+    const failed = Math.max(
+      0,
+      Number(safeAudit.sector_failed_count) || Math.max(0, discovered - completed),
+    );
+    const providedRatio = Number(safeAudit.sector_completion_ratio);
+    const ratio = Number.isFinite(providedRatio)
+      ? Math.min(1, Math.max(0, providedRatio))
+      : discovered > 0 ? Math.min(1, completed / discovered) : 0;
+    const percentage = new Intl.NumberFormat("zh-CN", {
+      style: "percent",
+      maximumFractionDigits: 1,
+    }).format(ratio);
+    return `发现 ${discovered} · 完成 ${completed} · 失败 ${failed} · 成功率 ${percentage}`;
   }
 
   function selectedSectorCount(snapshot) {
@@ -349,6 +368,7 @@
     renderSectorWorkspace,
     renderSignalWorkspace,
     scanCoverageText,
+    sectorCoverageText,
     sectorEvidenceText,
     selectedSectorCount,
     setChartLayout,

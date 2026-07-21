@@ -28,7 +28,7 @@
     <main
       id="es-dashboard"
       class="es-shell es-dashboard"
-      data-schema="chanlun-trading-screening/v1"
+      data-schema="chanlun-trading-screening/v2"
       data-endpoint="{{ url_for('decision_support.early_signals') }}"
     >
       <section class="es-hero" aria-labelledby="es-title">
@@ -58,6 +58,7 @@
         </div>
         <dl class="es-status-facts">
           <div><dt>快照时间</dt><dd id="es-generated">尚未发布</dd></div>
+          <div><dt>板块质量</dt><dd id="es-sector-completion">—</dd></div>
           <div><dt>批次 / 覆盖</dt><dd id="es-completion">—</dd></div>
           <div><dt>数据质量</dt><dd id="es-quality">待检查</dd></div>
         </dl>

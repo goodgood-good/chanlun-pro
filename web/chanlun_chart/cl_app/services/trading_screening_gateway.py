@@ -2,17 +2,20 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
+from decimal import Decimal
 import math
 import re
 from threading import RLock
-from typing import Protocol
+from typing import Protocol, cast
 
 import pandas as pd
 
 from chanlun.core.cl import CL
+from chanlun.core.strict_structure.models import StrictEvidenceResult
 from chanlun.decision_support.fingerprints import normalize_datetime
 from chanlun.decision_support.trading_system.context import classify_context
 from chanlun.decision_support.trading_system.engine import SymbolStructureBundle
@@ -28,11 +31,22 @@ from chanlun.decision_support.trading_system.provisional import (
     ProvisionalCandidate,
     extract_provisional_candidates,
 )
+from chanlun.decision_support.trading_system.runtime_config import (
+    strict_cl_config,
+    strict_snapshot_price_metadata,
+)
 from chanlun.decision_support.trading_system.sector_policy import assess_sector
 from chanlun.decision_support.trading_system.structure_adapter import (
     extract_confirmed_points,
 )
-from chanlun.recursive_bt.engine.engine import CL_CFG
+from chanlun.exchange.kline_precision import (
+    resolve_tdx_industry_index_quantum,
+)
+from chanlun.exchange.price_basis import (
+    attach_price_basis_metadata,
+    build_tdx_industry_price_basis_metadata,
+)
+from chanlun.tools.log_util import LogUtil
 
 
 _FREQUENCIES = ("30m", "5m", "1m")
@@ -55,6 +69,80 @@ class FrameStructureAnalysis:
         )
         if self.direction not in {"up", "down", "neutral"}:
             raise ValueError("invalid structure direction")
+
+
+class SectorAnalysisUnavailable(RuntimeError):
+    def __init__(self, code: str, reason: str) -> None:
+        super().__init__(reason)
+        if not code:
+            raise ValueError("sector analysis error code is required")
+        self.code = code
+
+
+@dataclass(frozen=True, slots=True)
+class SectorAnalysisFailure:
+    sector_id: str
+    code: str
+    error_type: str
+    reason: str
+
+    def __post_init__(self) -> None:
+        for field_name in ("sector_id", "code", "error_type", "reason"):
+            value = getattr(self, field_name)
+            if not isinstance(value, str) or not value:
+                raise ValueError(f"{field_name} is required")
+
+
+@dataclass(frozen=True, slots=True)
+class SectorAssessmentBatch:
+    assessments: tuple[SectorAssessment, ...]
+    discovered_count: int
+    completed_count: int
+    failure_counts: tuple[tuple[str, int], ...]
+    errors: tuple[SectorAnalysisFailure, ...]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "assessments", tuple(self.assessments))
+        object.__setattr__(self, "failure_counts", tuple(self.failure_counts))
+        object.__setattr__(self, "errors", tuple(self.errors))
+        if (
+            type(self.discovered_count) is not int
+            or type(self.completed_count) is not int
+            or not 0 <= self.completed_count <= self.discovered_count
+        ):
+            raise ValueError("sector completion counts are invalid")
+        if len({item.sector_id for item in self.errors}) != len(self.errors):
+            raise ValueError("sector analysis errors must have unique sector ids")
+        normalized_counts = tuple(sorted(self.failure_counts))
+        if normalized_counts != self.failure_counts:
+            raise ValueError("sector failure counts must be sorted by code")
+        if any(
+            not code or type(count) is not int or count <= 0
+            for code, count in self.failure_counts
+        ):
+            raise ValueError("sector failure counts are invalid")
+        if sum(count for _code, count in self.failure_counts) != len(self.errors):
+            raise ValueError("sector failure counts do not match errors")
+        actual_counts = tuple(
+            sorted(Counter(item.error_type for item in self.errors).items())
+        )
+        if actual_counts != self.failure_counts:
+            raise ValueError("sector failure codes do not match errors")
+
+    @property
+    def completion_ratio(self) -> Decimal:
+        if self.discovered_count == 0:
+            return Decimal("0")
+        return Decimal(self.completed_count) / Decimal(self.discovered_count)
+
+
+def _sector_failure_document(item: SectorAnalysisFailure) -> dict[str, str]:
+    return {
+        "sector_id": item.sector_id,
+        "code": item.code,
+        "error_type": item.error_type,
+        "reason": item.reason[:160],
+    }
 
 
 class StructureAnalyzer(Protocol):
@@ -137,6 +225,7 @@ def _closed_frame(
     required = ("date", "open", "high", "low", "close", "volume")
     if any(column not in value.columns for column in required):
         raise ValueError("kline frame is missing required columns")
+    snapshot_attrs = dict(value.attrs)
     result = value.loc[:, list(required)].copy()
     dates = tuple(_market_datetime(item, "kline.date") for item in result["date"])
     if any(right <= left for left, right in zip(dates, dates[1:])):
@@ -165,6 +254,7 @@ def _closed_frame(
     if len(result) < minimum_bars:
         raise ValueError("kline frame does not meet minimum history")
     result.loc[:, list(numeric_columns)] = numeric
+    result.attrs = snapshot_attrs
     return result
 
 
@@ -178,31 +268,45 @@ def analyze_native_frame(
     if frequency not in _FREQUENCIES:
         raise ValueError("unsupported trading frequency")
     closed_at = normalize_datetime(as_of, "as_of")
-    cd = CL(code, frequency, dict(CL_CFG), market="a")
-    cd.process_klines(frame)
-    xds = tuple(cd.get_xds())
-    bis = tuple(cd.get_bis())
-    current = xds[-1] if xds else bis[-1] if bis else None
-    raw_direction = getattr(current, "type", None)
-    direction: ContextDirection = (
-        raw_direction if raw_direction in {"up", "down"} else "neutral"
+    metadata = strict_snapshot_price_metadata(frame)
+    cd = CL(
+        code,
+        frequency,
+        strict_cl_config(
+            structure_price_quantum=metadata.structure_price_quantum,
+            price_basis_revision=metadata.price_basis_revision,
+        ),
+        market="a",
     )
+    cd.process_klines(frame)
+    evidence = cd.get_strict_evidence()
     return FrameStructureAnalysis(
         closed_at=closed_at,
-        direction=direction,
+        direction=_strict_direction(evidence),
         confirmed_points=extract_confirmed_points(
-            cd,
+            evidence,
             code=code,
             source_frequency=frequency,
             as_of=closed_at,
         ),
         provisional_points=extract_provisional_candidates(
-            cd,
+            evidence,
             code=code,
             source_frequency=frequency,
             as_of=closed_at,
         ),
     )
+
+
+def _strict_direction(evidence: StrictEvidenceResult) -> ContextDirection:
+    structure = evidence.structure
+    if not structure.levels:
+        return "neutral"
+    level = structure.levels[-1]
+    if level.trend_types:
+        return cast(ContextDirection, level.trend_types[-1].direction)
+    locked = tuple(unit for unit in level.units if unit.locked)
+    return "neutral" if not locked else cast(ContextDirection, locked[-1].direction)
 
 
 def _stock_codes(raw: object) -> tuple[str, ...]:
@@ -286,31 +390,117 @@ class NativeTradingDataGateway:
         analysis_code: str,
         frequency: str,
         as_of: datetime,
+        native_sector_index: bool = False,
     ) -> FrameStructureAnalysis:
         loader = getattr(exchange, "klines", None)
         if not callable(loader):
+            if native_sector_index:
+                raise SectorAnalysisUnavailable(
+                    "sector_adapter_error",
+                    "exchange must expose klines",
+                )
             raise TypeError("exchange must expose klines")
-        frame = _closed_frame(
-            loader(
+        args: dict[str, object] = {
+            "req_counts": self._config.request_bars(frequency)
+        }
+        sector_metadata = None
+        if native_sector_index:
+            quantum = resolve_tdx_industry_index_quantum(code)
+            if quantum is None:
+                raise SectorAnalysisUnavailable(
+                    "sector_price_basis_unavailable",
+                    f"unsupported TDX industry index code: {code}",
+                )
+            sector_metadata = build_tdx_industry_price_basis_metadata(
                 code,
-                frequency,
-                args={"req_counts": self._config.request_bars(frequency)},
-            ),
-            not_after=as_of,
-            minimum_bars=self._config.minimum_bars(frequency),
-        )
+                quantum,
+            )
+            args["fq"] = "none"
+        try:
+            raw_frame = loader(code, frequency, args=args)
+        except SectorAnalysisUnavailable:
+            raise
+        except Exception as exc:
+            if native_sector_index:
+                raise SectorAnalysisUnavailable(
+                    "sector_adapter_error",
+                    str(exc),
+                ) from exc
+            raise
+        if native_sector_index:
+            if not isinstance(raw_frame, pd.DataFrame):
+                raise SectorAnalysisUnavailable(
+                    "sector_kline_unavailable",
+                    "kline frame is unavailable",
+                )
+            try:
+                attach_price_basis_metadata(raw_frame, sector_metadata)
+                expected_attrs = {
+                    "structure_price_quantum": "0.01",
+                    "price_basis_revision": sector_metadata.price_basis_revision,
+                    "price_basis_provider": "tdx-industry-index",
+                    "price_basis_adjustment": "none",
+                }
+                if any(
+                    raw_frame.attrs.get(name) != value
+                    for name, value in expected_attrs.items()
+                ):
+                    raise ValueError("TDX industry price basis attrs are incomplete")
+                strict_snapshot_price_metadata(raw_frame)
+            except Exception as exc:
+                raise SectorAnalysisUnavailable(
+                    "sector_price_basis_unavailable",
+                    str(exc),
+                ) from exc
+        try:
+            frame = _closed_frame(
+                raw_frame,
+                not_after=as_of,
+                minimum_bars=self._config.minimum_bars(frequency),
+            )
+        except Exception as exc:
+            if native_sector_index:
+                raise SectorAnalysisUnavailable(
+                    "sector_kline_unavailable",
+                    str(exc),
+                ) from exc
+            raise
+        if native_sector_index:
+            try:
+                strict_snapshot_price_metadata(frame)
+                if (
+                    frame.attrs.get("price_basis_provider")
+                    != "tdx-industry-index"
+                    or frame.attrs.get("price_basis_adjustment") != "none"
+                ):
+                    raise ValueError(
+                        "closed TDX industry frame lost price basis attrs"
+                    )
+            except Exception as exc:
+                raise SectorAnalysisUnavailable(
+                    "sector_price_basis_unavailable",
+                    str(exc),
+                ) from exc
         closed_at = _market_datetime(frame["date"].iloc[-1], "bar close")
         cache_key = (analysis_code, frequency)
         with self._lock:
             cached = self._analysis_cache.get(cache_key)
         if cached is not None and cached.closed_at == closed_at:
             return cached
-        analysis = self._analyzer(
-            code=analysis_code,
-            frequency=frequency,
-            frame=frame,
-            as_of=closed_at,
-        )
+        try:
+            analysis = self._analyzer(
+                code=analysis_code,
+                frequency=frequency,
+                frame=frame,
+                as_of=closed_at,
+            )
+        except Exception as exc:
+            if native_sector_index:
+                raise SectorAnalysisUnavailable(
+                    "sector_structure_invalid",
+                    str(exc),
+                ) from exc
+            raise
         with self._lock:
             self._analysis_cache[cache_key] = analysis
         return analysis
@@ -324,7 +514,7 @@ class NativeTradingDataGateway:
             (
                 point.observed_at
                 if isinstance(point, ProvisionalCandidate)
-                else point.confirmed_at or point.anchor_at
+                else point.available_at
             ).timestamp()
             >= cutoff
             for point in (
@@ -345,7 +535,7 @@ class NativeTradingDataGateway:
         self,
         *,
         as_of: datetime,
-    ) -> tuple[SectorAssessment, ...]:
+    ) -> SectorAssessmentBatch:
         observed_at = normalize_datetime(as_of, "as_of")
         raw = self._sector_provider()
         if not isinstance(raw, Mapping) or raw.get("source") != "tdx_880_industry_index":
@@ -359,6 +549,9 @@ class NativeTradingDataGateway:
         )
         sector_exchange = self._sector_exchange_provider()
         assessments: list[SectorAssessment] = []
+        errors: list[SectorAnalysisFailure] = []
+        discovered_count = 0
+        completed_count = 0
         members_by_sector: dict[str, tuple[str, ...]] = {}
         latest_bars: dict[tuple[str, str], datetime] = {}
         seen: set[str] = set()
@@ -376,7 +569,6 @@ class NativeTradingDataGateway:
                 or not isinstance(sector_name, str)
                 or not sector_name.strip()
                 or not isinstance(kline_code, str)
-                or re.fullmatch(r"SH\.880\d{3}", kline_code) is None
                 or isinstance(raw_members, (str, bytes))
                 or not isinstance(raw_members, Sequence)
             ):
@@ -393,18 +585,21 @@ class NativeTradingDataGateway:
             if len(members) < self._config.minimum_sector_members:
                 continue
             seen.add(sector_id)
+            discovered_count += 1
             members_by_sector[sector_id] = members
+            current_frequency = "unknown"
             try:
-                analyses = {
-                    frequency: self._load_analysis(
+                analyses: dict[str, FrameStructureAnalysis] = {}
+                for frequency in _SECTOR_FREQUENCIES:
+                    current_frequency = frequency
+                    analyses[frequency] = self._load_analysis(
                         exchange=sector_exchange,
                         code=kline_code,
                         analysis_code=sector_id,
                         frequency=frequency,
                         as_of=observed_at,
+                        native_sector_index=True,
                     )
-                    for frequency in _SECTOR_FREQUENCIES
-                }
                 contexts = {
                     frequency: classify_context(
                         frequency=frequency,
@@ -440,7 +635,21 @@ class NativeTradingDataGateway:
                 )
                 for frequency, analysis in analyses.items():
                     latest_bars[(sector_id, frequency)] = analysis.closed_at
-            except Exception:
+                completed_count += 1
+            except SectorAnalysisUnavailable as exc:
+                failure = SectorAnalysisFailure(
+                    sector_id=sector_id,
+                    code=kline_code,
+                    error_type=exc.code,
+                    reason=str(exc),
+                )
+                errors.append(failure)
+                LogUtil.error(
+                    "[trading_screening.sector] "
+                    f"sector={sector_id} frequency={current_frequency} "
+                    "provider=tdx-industry-index adjustment=none "
+                    f"error_type={failure.error_type} reason={failure.reason}"
+                )
                 assessments.append(
                     SectorAssessment(
                         sector_id=sector_id,
@@ -449,14 +658,51 @@ class NativeTradingDataGateway:
                         hard_block=True,
                         regime="hostile",
                         rank_components=(),
-                        reason_codes=("sector_structure_unavailable",),
+                        reason_codes=(failure.error_type,),
+                    )
+                )
+            except Exception as exc:
+                failure = SectorAnalysisFailure(
+                    sector_id=sector_id,
+                    code=kline_code,
+                    error_type="sector_adapter_error",
+                    reason=str(exc),
+                )
+                errors.append(failure)
+                LogUtil.error(
+                    "[trading_screening.sector] "
+                    f"sector={sector_id} frequency={current_frequency} "
+                    "provider=tdx-industry-index adjustment=none "
+                    f"error_type={failure.error_type} reason={failure.reason}"
+                )
+                assessments.append(
+                    SectorAssessment(
+                        sector_id=sector_id,
+                        sector_name=sector_name.strip(),
+                        eligible=False,
+                        hard_block=True,
+                        regime="hostile",
+                        rank_components=(),
+                        reason_codes=(failure.error_type,),
                     )
                 )
         with self._lock:
             self._members = members_by_sector
             self._symbol_names = symbol_names
             self._latest_sector_bars = latest_bars
-        return tuple(sorted(assessments, key=lambda item: item.sector_id))
+        ordered_errors = tuple(sorted(errors, key=lambda item: item.sector_id))
+        failure_counts = tuple(
+            sorted(Counter(item.error_type for item in ordered_errors).items())
+        )
+        return SectorAssessmentBatch(
+            assessments=tuple(
+                sorted(assessments, key=lambda item: item.sector_id)
+            ),
+            discovered_count=discovered_count,
+            completed_count=completed_count,
+            failure_counts=failure_counts,
+            errors=ordered_errors,
+        )
 
     def members(self) -> Mapping[str, tuple[str, ...]]:
         with self._lock:
@@ -556,5 +802,9 @@ __all__ = (
     "FrameStructureAnalysis",
     "NativeTradingDataGateway",
     "NativeTradingGatewayConfig",
+    "SectorAnalysisFailure",
+    "SectorAnalysisUnavailable",
+    "SectorAssessmentBatch",
+    "_sector_failure_document",
     "analyze_native_frame",
 )

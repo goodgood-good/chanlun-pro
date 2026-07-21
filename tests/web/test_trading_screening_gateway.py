@@ -1,23 +1,130 @@
 from __future__ import annotations
 
 from datetime import datetime
+from decimal import Decimal
 
 import pandas as pd
 import pytest
 
+from chanlun.core.strict_structure.models import StrictPointStatus
+from chanlun.decision_support.trading_system.runtime_config import strict_cl_config
 from tests.trading_system.helpers import provisional_point
+from tests.trading_system.strict_helpers import (
+    StrictOnlyCL,
+    strict_evidence_result,
+    strict_point,
+)
+from cl_app.services import trading_screening_gateway as gateway_module
 from cl_app.services.trading_screening_gateway import (
     FrameStructureAnalysis,
     NativeTradingDataGateway,
     NativeTradingGatewayConfig,
+    analyze_native_frame,
 )
 
 
 NOW = datetime.fromisoformat("2026-07-20T10:02:00+08:00")
 
 
-def _frame() -> pd.DataFrame:
-    return pd.DataFrame(
+def test_analyzer_never_reads_legacy_structure_methods(monkeypatch) -> None:
+    closed_at = datetime.fromisoformat("2026-07-20T10:01:00+08:00")
+    confirmed = strict_point("1buy", available_at=closed_at)
+    approaching = strict_point(
+        "2buy",
+        status=StrictPointStatus.APPROACHING,
+        available_at=closed_at,
+    )
+    state = StrictOnlyCL(
+        strict_evidence_result(
+            code="SZ.000001",
+            source_frequency="5m",
+            source_closed_at=closed_at,
+            confirmed_points=(confirmed,),
+            approaching_points=(approaching,),
+        )
+    )
+    monkeypatch.setattr(gateway_module, "CL", lambda *_args, **_kwargs: state)
+
+    analysis = analyze_native_frame(
+        code="SZ.000001",
+        frequency="5m",
+        frame=_frame(),
+        as_of=closed_at,
+    )
+
+    assert state.evidence_calls == 1
+    assert state.process_calls == 1
+    assert analysis.direction == "neutral"
+    assert tuple(point.point_type for point in analysis.confirmed_points) == (
+        "1buy",
+    )
+    assert tuple(point.point_type for point in analysis.provisional_points) == (
+        "2buy",
+    )
+
+
+def test_analyzer_builds_strict_cl_from_snapshot_metadata(monkeypatch) -> None:
+    closed_at = datetime.fromisoformat("2026-07-20T10:01:00+08:00")
+    state = StrictOnlyCL(
+        strict_evidence_result(
+            code="SZ.000001",
+            source_frequency="5m",
+            source_closed_at=closed_at,
+        )
+    )
+    captured = {}
+
+    def factory(code, frequency, config, *, market):
+        captured.update(
+            code=code,
+            frequency=frequency,
+            config=config,
+            market=market,
+        )
+        return state
+
+    monkeypatch.setattr(gateway_module, "CL", factory)
+
+    analyze_native_frame(
+        code="SZ.000001",
+        frequency="5m",
+        frame=_frame(),
+        as_of=closed_at,
+    )
+
+    assert captured == {
+        "code": "SZ.000001",
+        "frequency": "5m",
+        "config": strict_cl_config(
+            structure_price_quantum=Decimal("0.01"),
+            price_basis_revision="test-raw-v1",
+        ),
+        "market": "a",
+    }
+
+
+def test_analyzer_rejects_snapshot_without_price_basis_metadata(monkeypatch) -> None:
+    frame = _frame()
+    frame.attrs.clear()
+    monkeypatch.setattr(
+        gateway_module,
+        "CL",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("CL must not be created without metadata")
+        ),
+    )
+
+    with pytest.raises(ValueError, match="structure_price_quantum metadata"):
+        analyze_native_frame(
+            code="SZ.000001",
+            frequency="5m",
+            frame=frame,
+            as_of=datetime.fromisoformat("2026-07-20T10:01:00+08:00"),
+        )
+
+
+def _frame(*, with_metadata: bool = True) -> pd.DataFrame:
+    frame = pd.DataFrame(
         {
             "date": pd.to_datetime(
                 ["2026-07-20T10:00:00+08:00", "2026-07-20T10:01:00+08:00"]
@@ -29,24 +136,31 @@ def _frame() -> pd.DataFrame:
             "volume": [1000, 1200],
         }
     )
+    if with_metadata:
+        frame.attrs["structure_price_quantum"] = "0.01"
+        frame.attrs["price_basis_revision"] = "test-raw-v1"
+    return frame
 
 
 class RecordingExchange:
-    def __init__(self) -> None:
-        self.calls: list[tuple[str, str]] = []
+    def __init__(self, frame: pd.DataFrame | None = None) -> None:
+        self.frame = _frame() if frame is None else frame
+        self.calls: list[tuple[str, str, dict[str, object]]] = []
 
     def klines(self, code: str, frequency: str, *, args: dict[str, object]):
         assert args["req_counts"] == 4
-        self.calls.append((code, frequency))
-        return _frame()
+        self.calls.append((code, frequency, dict(args)))
+        return self.frame.copy(deep=True)
 
 
 class RecordingAnalyzer:
     def __init__(self) -> None:
         self.calls: list[tuple[str, str]] = []
+        self.frames: list[pd.DataFrame] = []
 
     def __call__(self, *, code, frequency, frame, as_of):
         self.calls.append((code, frequency))
+        self.frames.append(frame.copy(deep=True))
         approaching = (
             (provisional_point("2buy"),)
             if code == "SZ.000001" and frequency == "5m"
@@ -60,10 +174,15 @@ class RecordingAnalyzer:
         )
 
 
-def _gateway() -> tuple[NativeTradingDataGateway, RecordingAnalyzer]:
+def _gateway(
+    *,
+    sector_frame: pd.DataFrame | None = None,
+    analyzer: RecordingAnalyzer | None = None,
+    sector_code: str = "SH.880471",
+) -> tuple[NativeTradingDataGateway, RecordingAnalyzer, RecordingExchange]:
     stock_exchange = RecordingExchange()
-    sector_exchange = RecordingExchange()
-    analyzer = RecordingAnalyzer()
+    sector_exchange = RecordingExchange(sector_frame)
+    analyzer = analyzer if analyzer is not None else RecordingAnalyzer()
     gateway = NativeTradingDataGateway(
         exchange_provider=lambda: stock_exchange,
         sector_exchange_provider=lambda: sector_exchange,
@@ -75,9 +194,9 @@ def _gateway() -> tuple[NativeTradingDataGateway, RecordingAnalyzer]:
             "source": "tdx_880_industry_index",
             "sectors": [
                 {
-                    "sector_id": "tdx-industry:SH.880471",
+                    "sector_id": f"tdx-industry:{sector_code}",
                     "name": "银行",
-                    "kline_code": "SH.880471",
+                    "kline_code": sector_code,
                     "member_codes": ["000001", "600000"],
                 }
             ],
@@ -91,15 +210,17 @@ def _gateway() -> tuple[NativeTradingDataGateway, RecordingAnalyzer]:
             minimum_sector_members=1,
         ),
     )
-    return gateway, analyzer
+    return gateway, analyzer, sector_exchange
 
 
 def test_native_gateway_ranks_real_sector_bars_and_emits_only_changed_keys() -> None:
-    gateway, analyzer = _gateway()
+    gateway, analyzer, _sector_exchange = _gateway()
 
-    assessments = gateway.native_sector_assessments(as_of=NOW)
+    batch = gateway.native_sector_assessments(as_of=NOW)
+    assessments = batch.assessments
 
     assert len(assessments) == 1
+    assert batch.completed_count == batch.discovered_count == 1
     assert assessments[0].sector_id == "tdx-industry:SH.880471"
     assert assessments[0].eligible is True
     assert gateway.members() == {
@@ -116,8 +237,43 @@ def test_native_gateway_ranks_real_sector_bars_and_emits_only_changed_keys() -> 
     ]
 
 
+def test_native_sector_loader_forces_none_and_attaches_metadata_before_analysis() -> None:
+    analyzer = RecordingAnalyzer()
+    gateway, analyzer, exchange = _gateway(
+        sector_frame=_frame(with_metadata=False),
+        analyzer=analyzer,
+    )
+
+    batch = gateway.native_sector_assessments(as_of=NOW)
+
+    assert exchange.calls
+    assert {call[2]["fq"] for call in exchange.calls} == {"none"}
+    assert analyzer.frames[0].attrs["price_basis_provider"] == (
+        "tdx-industry-index"
+    )
+    assert analyzer.frames[0].attrs["price_basis_adjustment"] == "none"
+    assert analyzer.frames[0].attrs["structure_price_quantum"] == "0.01"
+    assert batch.completed_count == batch.discovered_count == 1
+
+
+def test_unknown_sector_code_fails_closed_before_strict_analysis() -> None:
+    gateway, analyzer, _exchange = _gateway(
+        sector_frame=_frame(with_metadata=False),
+        sector_code="SZ.880471",
+    )
+
+    batch = gateway.native_sector_assessments(as_of=NOW)
+
+    assert batch.discovered_count == 1
+    assert batch.completed_count == 0
+    assert batch.failure_counts == (
+        ("sector_price_basis_unavailable", 1),
+    )
+    assert analyzer.calls == []
+
+
 def test_native_gateway_reuses_sector_analysis_when_closed_bar_is_unchanged() -> None:
-    gateway, analyzer = _gateway()
+    gateway, analyzer, _sector_exchange = _gateway()
 
     first = gateway.native_sector_assessments(as_of=NOW)
     second = gateway.native_sector_assessments(as_of=NOW)
@@ -130,8 +286,8 @@ def test_native_gateway_reuses_sector_analysis_when_closed_bar_is_unchanged() ->
 
 
 def test_native_gateway_builds_three_level_bundle_and_keeps_watch_scopes() -> None:
-    gateway, _analyzer = _gateway()
-    sector = gateway.native_sector_assessments(as_of=NOW)[0]
+    gateway, _analyzer, _sector_exchange = _gateway()
+    sector = gateway.native_sector_assessments(as_of=NOW).assessments[0]
 
     bundle = gateway.structure_bundle("SZ.000001", as_of=NOW, sector=sector)
 
@@ -145,8 +301,8 @@ def test_native_gateway_builds_three_level_bundle_and_keeps_watch_scopes() -> No
 
 
 def test_native_gateway_one_minute_refresh_reuses_cached_higher_frames() -> None:
-    gateway, _analyzer = _gateway()
-    sector = gateway.native_sector_assessments(as_of=NOW)[0]
+    gateway, _analyzer, _sector_exchange = _gateway()
+    sector = gateway.native_sector_assessments(as_of=NOW).assessments[0]
     gateway.structure_bundle("SZ.000001", as_of=NOW, sector=sector)
     stock_exchange = gateway._exchange_provider()
     stock_exchange.calls.clear()
@@ -158,11 +314,13 @@ def test_native_gateway_one_minute_refresh_reuses_cached_higher_frames() -> None
         frequencies=("1m",),
     )
 
-    assert stock_exchange.calls == [("SZ.000001", "1m")]
+    assert stock_exchange.calls == [
+        ("SZ.000001", "1m", {"req_counts": 4})
+    ]
 
 
 def test_native_gateway_skips_stock_one_minute_analysis_without_current_setup() -> None:
-    gateway, analyzer = _gateway()
+    gateway, analyzer, _sector_exchange = _gateway()
     original = gateway._analyzer
 
     def without_setup(*, code, frequency, frame, as_of):
@@ -175,7 +333,7 @@ def test_native_gateway_skips_stock_one_minute_analysis_without_current_setup() 
         )
 
     gateway._analyzer = without_setup
-    sector = gateway.native_sector_assessments(as_of=NOW)[0]
+    sector = gateway.native_sector_assessments(as_of=NOW).assessments[0]
     bundle = gateway.structure_bundle("SZ.000001", as_of=NOW, sector=sector)
 
     assert bundle.one_points == ()
@@ -183,7 +341,7 @@ def test_native_gateway_skips_stock_one_minute_analysis_without_current_setup() 
 
 
 def test_native_gateway_rejects_synthetic_sector_catalog() -> None:
-    gateway, _analyzer = _gateway()
+    gateway, _analyzer, _sector_exchange = _gateway()
     gateway._sector_provider = lambda: {"source": "synthetic", "sectors": []}
 
     with pytest.raises(ValueError, match="native TDX"):

@@ -10,6 +10,7 @@ const template = fs.readFileSync(
   path.resolve(__dirname, "../../../templates/early_screening.html"),
   "utf8",
 );
+const controllerSource = fs.readFileSync(path.resolve(__dirname, "../early_screening.js"), "utf8");
 
 function loadUi() {
   delete require.cache[require.resolve(uiPath)];
@@ -17,7 +18,8 @@ function loadUi() {
 }
 
 const snapshot = {
-  schema_version: "chanlun-trading-screening/v1",
+  schema_version: "chanlun-trading-screening/v2",
+  structure_version: "v2",
   available: true,
   scan_state: "complete",
   generated_at: "2026-07-20T15:00:00+08:00",
@@ -102,14 +104,21 @@ const snapshot = {
     },
   ],
   risk_limits: {},
-  scan_audit: { completion_ratio: "1" },
+  scan_audit: {
+    completion_ratio: "1",
+    sector_discovered_count: 10,
+    sector_completed_count: 9,
+    sector_failed_count: 1,
+    sector_completion_ratio: "0.9",
+  },
   data_quality: { complete: true, stale: false, failure_codes: [] },
   backtest_verdict: { live_ready: false, status: "evidence_insufficient" },
   errors: [],
 };
 
 test("dashboard exposes sector signal and chart workspaces", () => {
-  assert.match(template, /data-schema="chanlun-trading-screening\/v1"/);
+  assert.match(template, /data-schema="chanlun-trading-screening\/v2"/);
+  assert.match(template, /id="es-sector-completion"/);
   assert.match(template, /data-workspace="sector"/);
   assert.match(template, /data-workspace="signals"/);
   assert.match(template, /data-workspace="charts"/);
@@ -129,7 +138,7 @@ test("normalizeSnapshot accepts only the new read-only schema", () => {
   const Ui = loadUi();
   const normalized = Ui.normalizeSnapshot(snapshot);
 
-  assert.equal(normalized.schema_version, "chanlun-trading-screening/v1");
+  assert.equal(normalized.schema_version, "chanlun-trading-screening/v2");
   assert.equal(normalized.signals.length, 2);
   assert.throws(
     () => Ui.normalizeSnapshot({ ...snapshot, schema_version: "chanlun-early-screening/v13" }),
@@ -230,6 +239,15 @@ test("dashboard exposes approaching signals and honest batch coverage", () => {
     "等待首批扫描",
   );
   assert.equal(
+    Ui.sectorCoverageText({
+      sector_discovered_count: 10,
+      sector_completed_count: 7,
+      sector_failed_count: 3,
+      sector_completion_ratio: "0.7",
+    }),
+    "发现 10 · 完成 7 · 失败 3 · 成功率 70%",
+  );
+  assert.equal(
     Ui.selectedSectorCount({
       scan_audit: { selected_sector_count: 8 },
       sectors: Array.from({ length: 36 }, () => ({ eligible: true })),
@@ -240,4 +258,6 @@ test("dashboard exposes approaching signals and honest batch coverage", () => {
     Ui.sectorEvidenceText(snapshot.sectors[0]),
     "30m 向上/支撑/一买 · 5m 震荡/中性/无主导点",
   );
+  assert.match(controllerSource, /Ui\.sectorCoverageText\(audit\)/);
+  assert.match(controllerSource, /本轮板块结构质量不足，保留上一快照/);
 });
