@@ -14,7 +14,14 @@ from tenacity import retry, stop_after_attempt, wait_random
 
 from chanlun import fun
 from chanlun.exchange.exchange import Exchange, Tick, convert_stock_kline_frequency
-from chanlun.exchange.kline_precision import normalize_kline_precision
+from chanlun.exchange.kline_precision import (
+    normalize_kline_precision,
+    resolve_structure_price_quantum,
+)
+from chanlun.exchange.price_basis import (
+    attach_price_basis_metadata,
+    build_qmt_price_basis_metadata,
+)
 from chanlun.tools.log_util import LogUtil
 from xtquant import xtdata
 
@@ -521,6 +528,21 @@ class ExchangeQMT(Exchange):
             )
             return empty_df
 
+        price_basis_factors = None
+        price_basis_error = None
+        if dividend_type != "none":
+            try:
+                with _XTDATA_NATIVE_LOCK:
+                    price_basis_factors = xtdata.get_divid_factors(qmt_code)
+            except Exception as exc:
+                price_basis_error = exc
+                LogUtil.warning(
+                    "[ExchangeQMT.price_basis] factor read failed "
+                    f"code={code} frequency={frequency} "
+                    f"adjustment={dividend_type} "
+                    f"error={type(exc).__name__}: {exc}"
+                )
+
         try:
             data_dict = {
                 "date": raw_data["time"].values[0],
@@ -589,6 +611,38 @@ class ExchangeQMT(Exchange):
                 klines_df = klines_df.iloc[-req_counts:]
 
         klines_df = normalize_kline_precision(klines_df, "a", code)
+        if price_basis_error is not None:
+            klines_df.attrs["price_basis_provider"] = "qmt"
+            klines_df.attrs["price_basis_adjustment"] = dividend_type
+            klines_df.attrs["price_basis_error_code"] = "qmt_factor_read_failed"
+        else:
+            try:
+                quantum = resolve_structure_price_quantum("a", code)
+                if quantum is None:
+                    raise ValueError(
+                        "A-share structure price quantum is unavailable"
+                    )
+                metadata = build_qmt_price_basis_metadata(
+                    code=code,
+                    adjustment=dividend_type,
+                    structure_price_quantum=quantum,
+                    factors=price_basis_factors,
+                )
+                attach_price_basis_metadata(klines_df, metadata)
+            except Exception as exc:
+                klines_df.attrs.pop("structure_price_quantum", None)
+                klines_df.attrs.pop("price_basis_revision", None)
+                klines_df.attrs["price_basis_provider"] = "qmt"
+                klines_df.attrs["price_basis_adjustment"] = dividend_type
+                klines_df.attrs["price_basis_error_code"] = (
+                    "qmt_price_basis_invalid"
+                )
+                LogUtil.warning(
+                    "[ExchangeQMT.price_basis] metadata build failed "
+                    f"code={code} frequency={frequency} "
+                    f"adjustment={dividend_type} "
+                    f"error={type(exc).__name__}: {exc}"
+                )
         return klines_df
 
     def stock_info(self, code: str) -> Union[Dict, None]:
