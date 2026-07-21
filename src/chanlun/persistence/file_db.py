@@ -17,6 +17,11 @@ from typing import Optional, Union
 import pandas as pd
 import pytz
 
+from chanlun.cl_utils.chart_config import (
+    CL_CHART_CONFIG_PERSIST_KEYS,
+    CL_COMPUTE_CACHE_CONFIG_KEYS,
+)
+
 from chanlun import fun
 from chanlun.core import cl
 from chanlun.market import Market
@@ -205,48 +210,10 @@ class FileCacheDB(_GenericPklCacheMixin, _ChartDataCacheMixin, _KlineCacheMixin,
         self.tz = pytz.timezone("Asia/Shanghai")
         # self.us_tz = pytz.timezone('US/Eastern')
 
-        # 这些 key 的组合决定 _config_md5，任何一项变化都会导致缠论缓存失效并重算
-        self.config_keys = [
-            "kline_type",
-            "kline_qk",
-            "judge_zs_qs_level",
-            "fx_qy",
-            "fx_qj",
-            "fx_bh",
-            "bi_type",
-            "bi_bzh",
-            "bi_qj",
-            "bi_fx_cgd",
-            "bi_split_k_cross_nums",
-            "fx_check_k_nums",
-            "allow_bi_fx_strict",
-            "xd_qj",
-            "xd_allow_bi_pohuai",
-            "xd_allow_split_no_highlow",
-            "xd_allow_split_zs_kz",
-            "xd_allow_split_zs_more_line",
-            "xd_allow_split_zs_no_direction",
-            "xd_zs_max_lines_split",
-            "zs_bi_type",
-            "zs_xd_type",
-            "zs_qj",
-            "zs_cd",
-            "zs_wzgx",
-            "zs_optimize",
-            "cl_mmd_cal_qs_1mmd",
-            "cl_mmd_cal_not_qs_3mmd_1mmd",
-            "cl_mmd_cal_qs_3mmd_1mmd",
-            "cl_mmd_cal_qs_not_lh_2mmd",
-            "cl_mmd_cal_qs_bc_2mmd",
-            "cl_mmd_cal_3mmd_not_lh_bc_2mmd",
-            "cl_mmd_cal_1mmd_not_lh_2mmd",
-            "cl_mmd_cal_3mmd_xgxd_not_bc_2mmd",
-            "cl_mmd_cal_not_in_zs_3mmd",
-            "cl_mmd_cal_not_in_zs_gt_9_3mmd",
-            "idx_macd_fast",
-            "idx_macd_slow",
-            "idx_macd_signal",
-        ]
+        # 持久化白名单与 options 使用同一常量源；计算缓存轴是其严格子集，
+        # 不含任何纯显示键，切换图层不会让 CL 对象缓存失效。
+        self.persisted_config_keys = list(CL_CHART_CONFIG_PERSIST_KEYS)
+        self.config_keys = list(CL_COMPUTE_CACHE_CONFIG_KEYS)
 
         # 缠论算法版本号；与 DB 中存储值不一致时触发全量清缓存，强制重算。
         # 每次修改核心算法逻辑后需更新此日期。
