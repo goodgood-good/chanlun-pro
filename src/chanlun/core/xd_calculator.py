@@ -11,6 +11,12 @@ from chanlun.tools.log_util import LogUtil
 _log = LogUtil
 
 
+_GAP_CONFIRMATION_PENDING = object()
+_TYPE2_CONFIRMED = "confirmed"
+_TYPE2_PENDING = "pending"
+_TYPE2_INVALIDATED = "invalidated"
+
+
 def _bi_label(bi: BI) -> str:
     return f"bi[{bi.index}]{bi.type}({bi.start.val:.3f}→{bi.end.val:.3f})"
 
@@ -34,6 +40,15 @@ def _overlap(a, b) -> bool:
     h1, l1 = (a['high'], a['low']) if isinstance(a, dict) else (a.high, a.low)
     h2, l2 = (b['high'], b['low']) if isinstance(b, dict) else (b.high, b.low)
     return max(l1, l2) <= min(h1, h2)
+
+
+def _elem_farthest_bi_index(elem: dict) -> int:
+    """Return the farthest physical BI represented by a feature element."""
+
+    merged = elem.get('merged_bis')
+    if merged:
+        return max(bi.index for bi in merged)
+    return elem['bi'].index
 
 
 def _has_inclusion(a: dict, b: dict) -> bool:
@@ -269,7 +284,10 @@ class XdCalculator:
         则未破坏本段 → 本段延伸吞掉假反弹至真极值(_cascade_merge_back)。又因破坏本段的
         反向段自身需待其反向确认,故最后一条已确认段推迟为 pending(_emit_segments_deferred)。
         """
-        segs: List[tuple] = []      # 已确认线段 (seg_start, real_end, seg_type);done 发射时延迟判
+        # 候选段携带本分支真正使用到的因果见证时间；只有后续确认级联跨过
+        # deferred 边界后，才会把该见证写成 XD.locked_at。
+        segs: List[tuple] = []      # (seg_start, real_end, seg_type, formed_at)
+        locked_candidates = {}      # (start, end, type) -> first causal lock time
         pos = start
         reverse_end_hint = None
         pending_tail = None         # 内层自然结束的末段未完成线段 (start, type)
@@ -349,11 +367,31 @@ class XdCalculator:
                 end_result = self._try_end(all_bis, seg_start, seg_end, seg_type,
                                            seg_high, seg_low, check,
                                            seg_cs_bis_cache=seg_cs_bis)
+                if end_result is _GAP_CONFIRMATION_PENDING:
+                    # 原文第二种情况一旦出现缺口，就必须等待第二特征序列
+                    # 分型完成。不能继续吸收后把同一破坏改判成“无缺口”，
+                    # 否则历史前缀会过早锁定并在未来回写 locked_at。
+                    pending_tail = (seg_start, seg_type)
+                    pos = len(all_bis)
+                    break
                 if end_result is not None:
-                    real_end, next_start, next_end = end_result
+                    real_end, next_start, next_end, formed_at = end_result
+                    if segs:
+                        previous_formed_at = segs[-1][3]
+                        formed_at = (
+                            max(previous_formed_at, formed_at)
+                            if previous_formed_at is not None and formed_at is not None
+                            else None
+                        )
                     # 收集为待定段 + 确认级联(假反弹则并入前段、终点回溯到真极值)
-                    segs.append((seg_start, real_end, seg_type))
-                    merged = self._cascade_merge_back(all_bis, segs, r34_starts)
+                    segs.append((seg_start, real_end, seg_type, formed_at))
+                    merged = self._cascade_merge_back(
+                        all_bis,
+                        segs,
+                        r34_starts,
+                        locked_candidates,
+                    )
+                    self._freeze_confirmed_candidate(segs, locked_candidates)
                     pos = segs[-1][1] + 1   # 从(可能已合并的)最后段终点之后续建
                     # 反向区间提示:无合并时沿用外层 check(反向段同向笔);合并后作废
                     if merged:
@@ -368,10 +406,23 @@ class XdCalculator:
                 # 修复「更低高点结尾 up 段后单调暴跌→顶分型首元素卡死→段跑飞」的退化场景。
                 r34 = self._try_end_r34(all_bis, seg_start, seg_type, seg_high, seg_low, check)
                 if r34 is not None:
-                    real_end, next_start, next_end = r34
-                    segs.append((seg_start, real_end, seg_type))
+                    real_end, next_start, next_end, formed_at = r34
+                    if segs:
+                        previous_formed_at = segs[-1][3]
+                        formed_at = (
+                            max(previous_formed_at, formed_at)
+                            if previous_formed_at is not None and formed_at is not None
+                            else None
+                        )
+                    segs.append((seg_start, real_end, seg_type, formed_at))
                     r34_starts.add(seg_start)   # 标记反向单调成段(退化失败反弹),供级联 A-B-C 吸收
-                    self._cascade_merge_back(all_bis, segs, r34_starts)
+                    self._cascade_merge_back(
+                        all_bis,
+                        segs,
+                        r34_starts,
+                        locked_candidates,
+                    )
+                    self._freeze_confirmed_candidate(segs, locked_candidates)
                     pos = segs[-1][1] + 1
                     reverse_end_hint = None
                     break
@@ -387,7 +438,13 @@ class XdCalculator:
                 pending_tail = (seg_start, seg_type)
                 break
 
-        self._emit_segments_deferred(all_bis, segs, pending_tail, start)
+        self._emit_segments_deferred(
+            all_bis,
+            segs,
+            pending_tail,
+            start,
+            locked_candidates,
+        )
 
     @staticmethod
     def _breaks_back(all_bis, prior, cur) -> bool:
@@ -395,8 +452,8 @@ class XdCalculator:
         即:反向段破了该笔的底/顶则原线段未结束、继续延续;未破则原线段被破坏(反向段成立、不合并)。
         T=all_bis[pe].end.val=prior 终点笔的底/顶,几何上恰=破坏笔的底/顶(笔首尾相接)。
         prior=down(T=谷): cur(up)段内最低<T 即跌破; prior=up(T=峰): cur(down)段内最高>T。"""
-        ps, pe, pt = prior
-        cs, ce, _ = cur
+        ps, pe, pt = prior[:3]
+        cs, ce, _ = cur[:3]
         turn = all_bis[pe].end.val
         if pt == 'down':
             return min(all_bis[j].low for j in range(cs, ce + 1)) < turn - 1e-9
@@ -422,14 +479,24 @@ class XdCalculator:
     def _breaks_extreme(all_bis, prior, cur) -> bool:
         """cur 是否在 prior 方向上突破 prior 转折点极值(prior,cur **同向**,区别于反向的 _breaks_back)。
         prior=down: cur 段内最低 < prior 终点谷; prior=up: cur 段内最高 > prior 终点峰。"""
-        _ps, pe, pt = prior
-        cs, ce, _ = cur
+        _ps, pe, pt = prior[:3]
+        cs, ce, _ = cur[:3]
         turn = all_bis[pe].end.val
         if pt == 'down':
             return min(all_bis[j].low for j in range(cs, ce + 1)) < turn - 1e-9
         return max(all_bis[j].high for j in range(cs, ce + 1)) > turn + 1e-9
 
-    def _cascade_merge_back(self, all_bis, segs, r34_starts) -> bool:
+    @staticmethod
+    def _candidate_key(candidate) -> tuple:
+        return candidate[0], candidate[1], candidate[2]
+
+    def _cascade_merge_back(
+        self,
+        all_bis,
+        segs,
+        r34_starts,
+        locked_candidates,
+    ) -> bool:
         """确认级联：两类合并循环至稳定，返回是否合并过。
         ① 深度-1 假反弹（_breaks_back）：末段(cur)破前段转折点 → 并入前段，终点取真极值
            (_extreme_idx)。
@@ -441,19 +508,34 @@ class XdCalculator:
         合并后终点取段内真极值（详见步骤6.5 注释）。"""
         merged = False
         while True:
-            if len(segs) >= 2 and self._breaks_back(all_bis, segs[-2], segs[-1]):
-                ps, _pe, pt = segs[-2]
-                cs, ce, _ = segs[-1]
+            if (
+                len(segs) >= 2
+                and self._breaks_back(all_bis, segs[-2], segs[-1])
+                and self._candidate_key(segs[-2]) not in locked_candidates
+            ):
+                ps, _pe, pt, prior_formed_at = segs[-2]
+                cs, ce, _, current_formed_at = segs[-1]
                 new_end = self._extreme_idx(all_bis, cs, ce, pt)
-                segs[-2] = (ps, new_end, pt)
+                formed_at = (
+                    max(prior_formed_at, current_formed_at)
+                    if prior_formed_at is not None and current_formed_at is not None
+                    else None
+                )
+                segs[-2] = (ps, new_end, pt, formed_at)
                 segs.pop()
                 merged = True
                 continue
             if len(segs) >= 3 and segs[-2][0] in r34_starts:
                 A, B, C = segs[-3], segs[-2], segs[-1]
-                if A[2] == C[2] and self._breaks_extreme(all_bis, A, C):
+                if (
+                    A[2] == C[2]
+                    and self._breaks_extreme(all_bis, A, C)
+                    and self._candidate_key(A) not in locked_candidates
+                ):
                     new_end = self._extreme_idx(all_bis, A[0], C[1], A[2])
-                    segs[-3] = (A[0], new_end, A[2])
+                    witnesses = (A[3], B[3], C[3])
+                    formed_at = max(witnesses) if all(w is not None for w in witnesses) else None
+                    segs[-3] = (A[0], new_end, A[2], formed_at)
                     r34_starts.discard(B[0])
                     segs.pop()
                     segs.pop()
@@ -475,7 +557,8 @@ class XdCalculator:
           ② rb2：rb1 之后反向方向再创新极值、破 rb1 的结束位置（反向方向已确立 ≥3 笔线段，
              满足「段被段破坏」）。
         扫描中若同向笔先创段方向新极值 → 是延伸非破坏，放弃（交回主循环 Step1/3）。
-        命中返回 (real_end, next_start, next_end)；终点取段内真峰/谷(≥3 笔最小段约束)。"""
+        命中返回 (real_end, next_start, next_end, formed_at)；终点取段内真峰/谷
+        (≥3 笔最小段约束)，formed_at 来自 rb2 这根实际确认见证笔。"""
         cs_bi_type = 'down' if seg_type == 'up' else 'up'
         seg_anchor = all_bis[seg_start].start.val
         n = len(all_bis)
@@ -512,7 +595,7 @@ class XdCalculator:
         real_end = max(peak_idx, seg_start + 2)
         if real_end >= rb1 or all_bis[real_end].type != seg_type:
             return None
-        return real_end, real_end + 1, rb2
+        return real_end, real_end + 1, rb2, all_bis[rb2].locked_at
 
     # 确认级联推迟 done 的深度:一条段被确认(done)须其反向段「锁定不再延伸」——反向段
     # 自身的反向被确认时才锁定(确认有递归前提)。breaks-back 合并可回溯 ≥1 级(反向假反弹的
@@ -521,12 +604,38 @@ class XdCalculator:
     # 全量重建、不影响已 done 段端点正确性;若发现需 ≥3 级回溯再调。
     _DEFER_DONE = 2
 
-    def _emit_segments_deferred(self, all_bis, segs, pending_tail, start):
+    def _freeze_confirmed_candidate(self, segs, locked_candidates) -> None:
+        """Freeze geometry and the first witness once two successors exist."""
+        if len(segs) <= self._DEFER_DONE:
+            return
+        index = len(segs) - self._DEFER_DONE - 1
+        candidate = segs[index]
+        boundary = segs[index + self._DEFER_DONE]
+        formed_at = candidate[3]
+        boundary_witness = boundary[3]
+        if formed_at is None or boundary_witness is None:
+            return
+        key = self._candidate_key(candidate)
+        locked_candidates.setdefault(key, max(formed_at, boundary_witness))
+
+    def _emit_segments_deferred(
+        self,
+        all_bis,
+        segs,
+        pending_tail,
+        start,
+        locked_candidates,
+    ):
         """发射 segs:推迟 done——末 _DEFER_DONE 条已确认段(反向尚未锁定)标 pending、其余
         done;再补末段未完成线段。"""
-        n = len(segs)
-        for i, (s, e, t) in enumerate(segs):
-            self._make_xd(all_bis[s:e + 1], t, done=(i < n - self._DEFER_DONE))
+        for s, e, t, _formed_at in segs:
+            locked_at = locked_candidates.get((s, e, t))
+            self._make_xd(
+                all_bis[s:e + 1],
+                t,
+                done=locked_at is not None,
+                locked_at=locked_at,
+            )
         if pending_tail is not None:
             self._emit_pending(all_bis, pending_tail[0], pending_tail[1])
         elif segs:
@@ -664,10 +773,20 @@ class XdCalculator:
         mid_elem = combined[frac_idx]
         if has_gap:
             _log.debug(lambda:"    _try_end: 第二种情况,进入_check_type2验证...")
-            if not self._check_type2(all_bis, mid_elem, seg_type):
-                _log.debug(lambda:"    _try_end: _check_type2失败 → 返回None")
+            type2_status, type2_witness_idx = self._check_type2(
+                all_bis,
+                mid_elem,
+                seg_type,
+            )
+            if type2_status == _TYPE2_PENDING:
+                _log.debug(lambda:"    _try_end: 第二特征序列尚未完成 → 保持pending")
+                return _GAP_CONFIRMATION_PENDING
+            if type2_status == _TYPE2_INVALIDATED:
+                _log.debug(lambda:"    _try_end: 第二特征序列被原段新极值否定 → 返回None")
                 return None
             _log.debug(lambda:"    _try_end: _check_type2成功")
+        else:
+            type2_witness_idx = None
 
         # ---- 步骤6: 定位当前线段结束位置 + 反向线段范围 ----
         target_bi = _resolve_pivot_bi(mid_elem, seg_type)
@@ -738,19 +857,36 @@ class XdCalculator:
 
         _log.debug(lambda:f"    _try_end: ✓ 线段结束于{_bi_label(all_bis[end_bi_idx])}, "
                    f"反向线段 bi[{all_bis[next_start].index}]~bi[{all_bis[min(next_end, len(all_bis)-1)].index}]")
-        return end_bi_idx, next_start, next_end
+        # 无缺口分支以特征序列分型右肩为见证；有缺口分支还必须纳入第二
+        # 特征序列分型实际检查到的最远笔。主循环在调用本函数前还读取了
+        # check_pos + 1 这根同向笔以排除“继续创新高/低而只是延伸”，因此它也
+        # 是不可省略的因果见证。若该笔尚未锁定，几何可以投影，但不得把更早
+        # 的历史时间回填成 XD.locked_at。
+        witness_idx = _elem_farthest_bi_index(right)
+        if type2_witness_idx is not None:
+            witness_idx = max(witness_idx, type2_witness_idx)
+        witness_times = (
+            all_bis[witness_idx].locked_at,
+            all_bis[check_pos + 1].locked_at,
+        )
+        formed_at = (
+            None
+            if any(value is None for value in witness_times)
+            else max(witness_times)
+        )
+        return end_bi_idx, next_start, next_end, formed_at
 
     # ----------------------------------------------------------
     # _check_type2
     # ----------------------------------------------------------
-    def _check_type2(self, all_bis, mid_elem, seg_type) -> bool:
-        """第二种情况（特征序列有缺口）的额外校验：确认反向段已形成所需分型。"""
+    def _check_type2(self, all_bis, mid_elem, seg_type) -> tuple[str, Optional[int]]:
+        """Return type-2 status and the farthest causal witness BI index."""
         target_bi = _resolve_pivot_bi(mid_elem, seg_type)
 
         start_pos = target_bi.index + 1
         if start_pos >= len(all_bis):
             _log.debug(lambda:f"      _check_type2: start_pos={start_pos}越界 → False")
-            return False
+            return _TYPE2_PENDING, None
 
         cs2_type = 'up' if seg_type == 'up' else 'down'
         cs2_dir = 'down' if seg_type == 'up' else 'up'
@@ -776,6 +912,8 @@ class XdCalculator:
         i = start_pos
         while i < len(all_bis):
             bi = all_bis[i]
+            if getattr(bi, 'locked_at', None) is None:
+                break
 
             # 原线段严格创新高/低检查（> / <，等价不算创新极值）。
             # 直接 return False 会让"等价新高 + 跨段后续创新高"误判为段延伸，
@@ -798,18 +936,21 @@ class XdCalculator:
                 # 每次添加/合并后立即检查分型（仅看尾部三元素，O(1)）
                 if _is_tail_fractal(cs2_elems):
                     _log.debug(lambda:f"      _check_type2: 尾部三元素构成{frac2_name} → True")
-                    return True
+                    return (
+                        _TYPE2_CONFIRMED,
+                        _elem_farthest_bi_index(cs2_elems[-1]),
+                    )
 
                 # 收完后才判断"严格创新极值停止"：
                 # 此根 cs 笔创了原段方向的新极值，后续走势不可能再形成本段的反向段，
                 # 必须立即停止扫描；反向段是否成立由已收集的 cs2_elems 决定。
                 if is_strict_new_extreme:
                     _log.debug(lambda:f"      _check_type2: {_bi_label(bi)} 创新极值且已收进 cs2_elems → 停止扫描")
-                    break
+                    return _TYPE2_INVALIDATED, None
             elif is_strict_new_extreme:
                 # 非 cs2 笔但创了新极值（兜底）：原段延伸，反向段不成立
                 _log.debug(lambda:f"      _check_type2: {_bi_label(bi)} 非CS笔但创新极值 → 原线段延伸,False")
-                return False
+                return _TYPE2_INVALIDATED, None
             # 注：原此处对每根非 cs2 笔重复 find_frac2(cs2_elems) 的 elif 分支已删除——
             # 分型只可能在新元素加入/合并时产生新结构，非 cs2 笔不会改变 cs2_elems，
             # 重复检查纯属冗余且产生大量噪音日志。
@@ -817,18 +958,26 @@ class XdCalculator:
 
         if len(cs2_elems) < 3:
             _log.debug(lambda:f"      _check_type2: cs2_elems仅{len(cs2_elems)}个<3 → False")
-            return False
+            return _TYPE2_PENDING, None
         # 走到这里说明扫描结束（要么 i 越界，要么遇到 strict_new_extreme break）
         # 由于循环内每次追加/合并后都已经检查过尾部分型，此处只需对最终状态做一次兜底检查。
         result = _is_tail_fractal(cs2_elems)
         elems_str = " ".join(_elem_label(e) for e in cs2_elems)
         _log.debug(lambda:f"      _check_type2: 最终[{elems_str}] → {frac2_name}{'成立' if result else '不成立'} → {result}")
-        return result
+        if result:
+            return _TYPE2_CONFIRMED, _elem_farthest_bi_index(cs2_elems[-1])
+        return _TYPE2_PENDING, None
 
     # ----------------------------------------------------------
     # 输出线段
     # ----------------------------------------------------------
-    def _make_xd(self, seg_bis: List[BI], seg_type: str, done: bool) -> XD:
+    def _make_xd(
+        self,
+        seg_bis: List[BI],
+        seg_type: str,
+        done: bool,
+        locked_at=None,
+    ) -> XD:
         """构造并追加 XD 对象（_emit_segment 与 _emit_pending 的公共逻辑）。
 
         Args:
@@ -852,18 +1001,24 @@ class XdCalculator:
         )
         xd.high = max(bi.high for bi in seg_bis)
         xd.low = min(bi.low for bi in seg_bis)
+        done = bool(
+            done
+            and locked_at is not None
+            and all(getattr(bi, 'locked_at', None) is not None for bi in seg_bis)
+        )
         if done:
             sv, ev = seg_bis[0].start.val, seg_bis[-1].end.val
             xd.zs_high, xd.zs_low = (max(sv, ev), min(sv, ev))
         else:
             xd.zs_high, xd.zs_low = xd.high, xd.low
         xd.done = done
+        xd.locked_at = locked_at if done else None
         self.xds.append(xd)
         return xd
 
-    def _emit_segment(self, all_bis, start, end, seg_type):
+    def _emit_segment(self, all_bis, start, end, seg_type, locked_at):
         seg_bis = all_bis[start: end + 1]
-        xd = self._make_xd(seg_bis, seg_type, done=True)
+        xd = self._make_xd(seg_bis, seg_type, done=True, locked_at=locked_at)
         sv, ev = seg_bis[0].start.val, seg_bis[-1].end.val
         _log.debug(lambda:f"[完成] XD[{xd.index}] {seg_type} {_bi_label(seg_bis[0])}~{_bi_label(seg_bis[-1])} ({len(seg_bis)}笔) {sv:.3f}→{ev:.3f}")
 

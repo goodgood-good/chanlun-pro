@@ -50,7 +50,13 @@ def _gen_klines(n: int, seed: int) -> pd.DataFrame:
 
 def _sig_lines(lines):
     return tuple(
-        (ln.start.k.k_index, ln.end.k.k_index, ln.type, bool(ln.is_done()))
+        (
+            ln.start.k.k_index,
+            ln.end.k.k_index,
+            ln.type,
+            bool(ln.is_done()),
+            ln.locked_at.isoformat() if ln.locked_at is not None else None,
+        )
         for ln in lines
     )
 

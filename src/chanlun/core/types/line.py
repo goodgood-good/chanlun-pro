@@ -25,6 +25,9 @@ class LINE:
         self._end: FX = end  # 线的结束位置，以分型来记录
         self._type: str = _type  # 线的方向类型 （up 上涨  down 下跌）
         self.index: int = index  # 线的索引，后续查找方便
+        # Causal structure lock time.  A locked line may only use evidence
+        # already present at this timestamp; unfinished lines keep None.
+        self.locked_at = None
 
         # 根据缠论配置（笔/段区间），得来的高低点
         self.high: float = 0
@@ -166,6 +169,7 @@ class LINE:
             'zs_low': self.zs_low,
             'type': self.type,
             'index': self.index,
+            'locked_at': self.locked_at.isoformat() if self.locked_at is not None else None,
         }
 
     def __str__(self):
@@ -234,7 +238,7 @@ class BI(LINE):
         """
         返回笔是否完成
         """
-        return self.end.done
+        return self.locked_at is not None
 
     def fx_num(self) -> int:
         """
@@ -561,7 +565,7 @@ class XD(LINE):
         return self.ding_fx.is_line_bad if self.type == "up" else self.di_fx.is_line_bad
 
     def is_done(self) -> bool:
-        return self.done
+        return self.locked_at is not None
 
     def get_mmds(self, zs_type: str = None) -> List[MMD]:
         # 需要检查买点的中枢是否有效

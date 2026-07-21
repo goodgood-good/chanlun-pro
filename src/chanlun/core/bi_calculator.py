@@ -4,6 +4,57 @@ from typing import List, Optional
 from chanlun.core.types import FX, BI, CLKline
 
 
+def _fractal_lock_witness(fx: FX):
+    """Return the first physical prefix that already confirms ``fx``.
+
+    The right shoulder can remain the active inclusion-merged CL K after the
+    fractal first became visible.  A cold batch therefore must replay that
+    shoulder's source-K prefixes; taking the final merged shoulder's last date
+    would leak later bars and disagree with bar-by-bar calculation.
+    """
+
+    cl_klines = [cl_kline for cl_kline in fx.klines if cl_kline is not None]
+    if len(cl_klines) < 3:
+        return None
+    left, middle, right = cl_klines[-3:]
+    sources = list(right.klines)
+    if not sources:
+        return None
+
+    direction = right.up_qs
+    for end in range(1, len(sources) + 1):
+        prefix = sources[:end]
+        if direction == 'up':
+            right_high = max(source.h for source in prefix)
+            right_low = max(source.l for source in prefix)
+        elif direction == 'down':
+            right_high = min(source.h for source in prefix)
+            right_low = min(source.l for source in prefix)
+        else:
+            # A non-merged shoulder has one source K.  For defensive legacy
+            # data with missing direction, replay the latest source snapshot.
+            right_high = prefix[-1].h
+            right_low = prefix[-1].l
+
+        if fx.type == 'ding':
+            confirmed = (
+                middle.h > left.h
+                and middle.h > right_high
+                and middle.l > left.l
+                and middle.l > right_low
+            )
+        else:
+            confirmed = (
+                middle.l < left.l
+                and middle.l < right_low
+                and middle.h < left.h
+                and middle.h < right_high
+            )
+        if confirmed:
+            return prefix[-1].date
+    return None
+
+
 class BiCalculator:
     """
     笔计算器。
@@ -126,8 +177,52 @@ class BiCalculator:
     def _create_bi(self, start_fx: FX, end_fx: FX, index: int, done: bool) -> BI:
         bi_type = 'up' if start_fx.type == 'di' else 'down'
         bi = BI(start=start_fx, end=end_fx, _type=bi_type, index=index)
-        bi.end.done = done
+        self._set_bi_completion(bi, done)
         return bi
+
+    @staticmethod
+    def _set_bi_completion(
+        bi: BI,
+        done: bool,
+        lock_witness=None,
+    ) -> None:
+        """Set BI completion and the next-endpoint witness together.
+
+        A stroke remains the active pending stroke even after its own end fractal
+        becomes visible: a later, opposite endpoint can still replace that tail.
+        It is immutable only once the following stroke endpoint exists.  Using
+        ``bi.end`` alone backdates the lock to a prefix where the stroke was still
+        pending.
+        """
+
+        bi._end.done = done
+        if not done:
+            bi.locked_at = None
+            return
+
+        witness = lock_witness
+        if witness is None:
+            witness = _fractal_lock_witness(bi._end)
+        if witness is None:
+            raise ValueError("completed BI requires physical end-fractal evidence")
+        if bi.locked_at is not None and bi.locked_at != witness:
+            raise RuntimeError("completed BI lock witness must not move")
+        bi.locked_at = witness
+
+    def _first_following_endpoint_witness(self, bi: BI):
+        """Replay the first later fractal that makes the following stroke valid."""
+
+        for candidate in self.fxs:
+            if candidate.k.index <= bi._end.k.index:
+                continue
+            if candidate.type == bi._end.type:
+                continue
+            if not self._check_stroke_validity(bi._end, candidate):
+                continue
+            witness = _fractal_lock_witness(candidate)
+            if witness is not None:
+                return witness
+        raise ValueError("completed BI requires a following endpoint witness")
 
     def _reindex_bis(self, stable_from: int = 0):
         """重置笔的 index/done(增量版)。
@@ -148,11 +243,15 @@ class BiCalculator:
         for i in range(start, nconf):
             bi = self.confirmed_bis[i]
             bi.index = i
-            bi._end.done = True
+            self._set_bi_completion(
+                bi,
+                True,
+                lock_witness=self._first_following_endpoint_witness(bi),
+            )
 
         if self.pending_bi is not None:
             self.pending_bi.index = nconf
-            self.pending_bi._end.done = False
+            self._set_bi_completion(self.pending_bi, False)
             self._prev_pending_pos = nconf
         else:
             self._prev_pending_pos = -1
