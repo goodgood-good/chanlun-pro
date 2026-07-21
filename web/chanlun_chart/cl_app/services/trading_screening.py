@@ -713,7 +713,7 @@ class TradingScreeningService:
                 errors.append(
                     {
                         "code": code,
-                        "error": type(exc).__name__,
+                        "error_type": "stock_analysis_error",
                         "reason": str(exc)[:160],
                     }
                 )
@@ -750,6 +750,11 @@ class TradingScreeningService:
 
         failed_codes = tuple(code for code in symbols if code not in completed_codes)
         self._requeue_symbols(failed_codes, batch_frequencies)
+        failure_codes = []
+        if sector_batch.errors:
+            failure_codes.append("sector_scan_partial")
+        if failed_codes:
+            failure_codes.append("stock_scan_partial")
         retained_scope = {
             member for members in sector_members.values() for member in members
         }.union(watchlist, holdings)
@@ -830,9 +835,7 @@ class TradingScreeningService:
             "data_quality": {
                 "complete": not errors,
                 "stale": False,
-                "failure_codes": (
-                    ["sector_scan_partial"] if sector_batch.errors else []
-                ),
+                "failure_codes": failure_codes,
             },
             "backtest_verdict": copy.deepcopy(self._backtest_verdict),
             "errors": errors,

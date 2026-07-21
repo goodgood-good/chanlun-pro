@@ -345,6 +345,45 @@ def test_incomplete_scan_does_not_publish_partial_signals(tmp_path: Path) -> Non
     assert payload["errors"][0]["code"] == "SZ.000002"
 
 
+def test_published_partial_stock_scan_has_stable_failure_protocol(
+    tmp_path: Path,
+) -> None:
+    service = TradingScreeningService(
+        market_data=PartiallyFailingMarketData(),
+        sector_catalog=RecordingSectorCatalog(),
+        engine=RecordingEngine(),
+        scan_planner=RecordingPlanner(
+            (
+                "SZ.000001",
+                "SZ.000002",
+                "SZ.000003",
+                "SZ.000004",
+                "SZ.000005",
+            )
+        ),
+        cache_path=tmp_path / "snapshot.json",
+        clock=lambda: AS_OF,
+        notifier=None,
+    )
+
+    payload = service.refresh_now()
+
+    assert payload["scan_state"] == "complete"
+    assert payload["scan_audit"]["completion_ratio"] == "0.8"
+    assert payload["data_quality"] == {
+        "complete": False,
+        "stale": False,
+        "failure_codes": ["stock_scan_partial"],
+    }
+    assert payload["errors"] == [
+        {
+            "code": "SZ.000002",
+            "error_type": "stock_analysis_error",
+            "reason": "fixture failure",
+        }
+    ]
+
+
 class FailingSectorCatalog(RecordingSectorCatalog):
     def native_sector_assessments(self, *, as_of: datetime):
         del as_of
