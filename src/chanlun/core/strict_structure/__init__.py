@@ -24,10 +24,12 @@ from chanlun.core.strict_structure.models import (
     build_strict_point_id,
 )
 from chanlun.core.strict_structure.recursive_engine import StrictRecursiveEngine
+from chanlun.core.strict_structure.divergence import collect_strict_divergences
 from chanlun.core.strict_structure.identity import build_strict_evidence_revision
 from chanlun.core.strict_structure.level_catalog import recursive_level_labels
 from chanlun.core.strict_structure.signals import StrictSignalEngine, center_ordinals
 from chanlun.core.strict_structure.strength import (
+    MacdStrengthUnavailable,
     MacdStrengthProvider,
     StrengthSnapshot,
     compare_divergence,
@@ -62,7 +64,9 @@ __all__ = [
     "build_strict_point_id",
     "build_strict_evidence_revision",
     "center_ordinals",
+    "collect_strict_divergences",
     "compare_divergence",
+    "MacdStrengthUnavailable",
     "MacdStrengthProvider",
     "recursive_level_labels",
 ]

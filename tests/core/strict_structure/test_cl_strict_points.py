@@ -105,6 +105,7 @@ def test_atomic_strict_evidence_uses_one_cl_generation(sample_frame):
     assert evidence.stroke_center_observations is cd.get_stroke_observation_centers()
     assert evidence.confirmed_points is cd.get_strict_points()
     assert evidence.approaching_points is cd.get_strict_approaching_points()
+    assert evidence.divergences is cd.get_strict_divergences()
     assert evidence.price_basis_revision == evidence.structure.price_basis_revision
     assert evidence.structure_price_quantum == Decimal(
         str(cd.get_config()["structure_price_quantum"])
@@ -116,5 +117,6 @@ def test_atomic_strict_evidence_uses_one_cl_generation(sample_frame):
         strict_config_revision=evidence.strict_config_revision,
         structure=evidence.structure,
         confirmed_points=evidence.confirmed_points,
+        divergences=evidence.divergences,
     )
     assert evidence.source_closed_at == cd.get_src_klines()[-1].date

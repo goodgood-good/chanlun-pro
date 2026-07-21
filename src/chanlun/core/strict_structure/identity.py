@@ -131,6 +131,7 @@ def build_strict_evidence_revision(
     strict_config_revision: str,
     structure,
     confirmed_points,
+    divergences=(),
 ) -> str:
     """Hash only formal, executable evidence; projections stay outside."""
 
@@ -153,6 +154,21 @@ def build_strict_evidence_revision(
         raise ValueError("formal evidence accepts confirmed points only")
     if any(point.price_basis_revision != price_basis_revision for point in points):
         raise ValueError("strict evidence point price basis mismatch")
+    divergence_items = tuple(divergences)
+    _require_unique_ids(divergence_items, "divergence_id", "divergence")
+    if any(
+        item.price_basis_revision != price_basis_revision
+        for item in divergence_items
+    ):
+        raise ValueError("strict evidence divergence price basis mismatch")
+    structure_levels = {
+        level.structural_level for level in structure.levels
+    }
+    if any(
+        item.structural_level not in structure_levels
+        for item in divergence_items
+    ):
+        raise ValueError("strict evidence divergence level is unavailable")
     payload = _canonical_revision_value(
         {
             "schema": "chanlun-strict-evidence/v3",
@@ -162,6 +178,7 @@ def build_strict_evidence_revision(
             "strict_config_revision": strict_config_revision,
             "structure": _formal_structure_payload(structure),
             "confirmed_points": points,
+            "divergences": divergence_items,
         }
     )
     encoded = json.dumps(

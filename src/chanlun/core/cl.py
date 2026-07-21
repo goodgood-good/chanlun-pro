@@ -609,6 +609,23 @@ class CL(ICL):
         return result
 
     @_strict_runtime_locked
+    def get_strict_divergences(self):
+        from chanlun.core.strict_structure.divergence import (
+            collect_strict_divergences,
+        )
+        from chanlun.core.strict_structure.strength import MacdStrengthProvider
+
+        cached = self._strict_structure_memo.get("divergences")
+        if cached is not None:
+            return cached
+        result = collect_strict_divergences(
+            self.get_strict_structure_levels(),
+            MacdStrengthProvider(self),
+        )
+        self._strict_structure_memo["divergences"] = result
+        return result
+
+    @_strict_runtime_locked
     def get_strict_evidence(self):
         from chanlun.core.strict_structure.base_profile import (
             strict_base_config_revision,
@@ -625,6 +642,7 @@ class CL(ICL):
         stroke_observations = self.get_stroke_observation_centers()
         confirmed_points = self.get_strict_points()
         approaching_points = self.get_strict_approaching_points()
+        divergences = self.get_strict_divergences()
         price_basis_revision = self._strict_price_basis_revision()
         strict_config_revision = (
             "chanlun-strict-signals/v3+" + strict_base_config_revision()
@@ -636,6 +654,7 @@ class CL(ICL):
             strict_config_revision=strict_config_revision,
             structure=structure,
             confirmed_points=confirmed_points,
+            divergences=divergences,
         )
         result = StrictEvidenceResult(
             symbol=self.get_code(),
@@ -649,6 +668,7 @@ class CL(ICL):
             stroke_center_observations=stroke_observations,
             confirmed_points=confirmed_points,
             approaching_points=approaching_points,
+            divergences=divergences,
         )
         self._strict_structure_memo["evidence"] = result
         return result

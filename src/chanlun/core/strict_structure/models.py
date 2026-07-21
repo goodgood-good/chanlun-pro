@@ -743,10 +743,12 @@ class StrictEvidenceResult:
     stroke_center_observations: CenterLevelResult
     confirmed_points: tuple[StrictPointEvidence, ...]
     approaching_points: tuple[StrictPointEvidence, ...]
+    divergences: tuple[DivergenceEvidence, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "confirmed_points", tuple(self.confirmed_points))
         object.__setattr__(self, "approaching_points", tuple(self.approaching_points))
+        object.__setattr__(self, "divergences", tuple(self.divergences))
         for value, label in (
             (self.symbol, "symbol"),
             (self.source_frequency, "source_frequency"),
@@ -800,6 +802,34 @@ class StrictEvidenceResult:
             self.approaching_points
         ):
             raise ValueError("approaching point ids must be unique")
+        if len({item.divergence_id for item in self.divergences}) != len(
+            self.divergences
+        ):
+            raise ValueError("divergence ids must be unique")
+        structure_levels = {
+            level.structural_level for level in self.structure.levels
+        }
+        if any(
+            item.price_basis_revision != self.price_basis_revision
+            for item in self.divergences
+        ):
+            raise ValueError("strict evidence divergence price basis mismatch")
+        if any(
+            item.structural_level not in structure_levels
+            for item in self.divergences
+        ):
+            raise ValueError("strict evidence divergence level is unavailable")
+        if any(
+            item.source_kind is SourceKind.STROKE_OBSERVATION
+            for item in self.divergences
+        ):
+            raise ValueError("stroke observations cannot produce formal divergence")
+        if any(
+            item.confirmed_at > self.source_closed_at
+            or item.available_at > self.source_closed_at
+            for item in self.divergences
+        ):
+            raise ValueError("strict evidence contains future-visible divergence")
 
         completed_keys = [
             (
@@ -849,6 +879,7 @@ class StrictEvidenceResult:
             "strict_config_revision": self.strict_config_revision,
             "structure": self.structure,
             "confirmed_points": self.confirmed_points,
+            "divergences": self.divergences,
         }
 
 
@@ -884,18 +915,32 @@ def build_strict_point_id(
 
 @dataclass(frozen=True, slots=True)
 class DivergenceEvidence:
+    divergence_id: str
+    structural_level: int
+    source_kind: SourceKind
+    price_basis_revision: str
     kind: Literal["trend", "consolidation"]
     direction: Direction
     compare_unit_id: str
     signal_unit_id: str
+    anchor_at: datetime
+    anchor_tick: int
+    confirmed_at: datetime
+    available_at: datetime
     price_extreme_confirmed: bool
     histogram_area_decayed: bool
     histogram_peak_decayed: bool
     dif_extreme_decayed: bool
     strength_source: Literal["macd_htf", "macd_native"]
-    available_at: datetime
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "source_kind", SourceKind(self.source_kind))
+        if not self.divergence_id:
+            raise ValueError("divergence_id is required")
+        if type(self.structural_level) is not int or self.structural_level < 0:
+            raise ValueError("structural_level must be non-negative")
+        if not self.price_basis_revision or not self.price_basis_revision.strip():
+            raise ValueError("price_basis_revision is required")
         if self.kind not in ("trend", "consolidation"):
             raise ValueError("divergence kind must be trend or consolidation")
         if self.direction not in ("up", "down"):
@@ -904,6 +949,19 @@ class DivergenceEvidence:
             raise ValueError("divergence unit ids are required")
         if self.compare_unit_id == self.signal_unit_id:
             raise ValueError("divergence units must be distinct")
+        if type(self.anchor_tick) is not int:
+            raise TypeError("divergence anchor_tick must be an integer")
+        for value in (self.anchor_at, self.confirmed_at, self.available_at):
+            if (
+                not isinstance(value, datetime)
+                or value.tzinfo is None
+                or value.utcoffset() is None
+            ):
+                raise ValueError("divergence timestamps must be timezone-aware")
+        if not self.anchor_at <= self.confirmed_at <= self.available_at:
+            raise ValueError(
+                "divergence timestamps must satisfy anchor <= confirmed <= available"
+            )
         flags = (
             self.price_extreme_confirmed,
             self.histogram_area_decayed,
@@ -914,6 +972,18 @@ class DivergenceEvidence:
             raise TypeError("divergence conditions must be booleans")
         if self.strength_source not in ("macd_htf", "macd_native"):
             raise ValueError("unsupported divergence strength source")
+        expected_id = stable_structure_id(
+            "chanlun-strict-divergence/v3",
+            self.price_basis_revision,
+            self.structural_level,
+            self.source_kind.value,
+            self.kind,
+            self.direction,
+            self.compare_unit_id,
+            self.signal_unit_id,
+        )
+        if self.divergence_id != expected_id:
+            raise ValueError("divergence_id does not match formal evidence")
 
     @property
     def is_divergent(self) -> bool:

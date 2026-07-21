@@ -97,6 +97,7 @@ def evidence_bundle(
     stroke_observations=None,
     confirmed_points=(),
     approaching_points=(),
+    divergences=(),
 ):
     formal = structure or empty_structure()
     revision = build_strict_evidence_revision(
@@ -106,6 +107,7 @@ def evidence_bundle(
         strict_config_revision="strict-config-v1",
         structure=formal,
         confirmed_points=confirmed_points,
+        divergences=divergences,
     )
     return StrictEvidenceResult(
         symbol="SZ.000001",
@@ -119,6 +121,7 @@ def evidence_bundle(
         stroke_center_observations=stroke_observations or observation_result(),
         confirmed_points=confirmed_points,
         approaching_points=approaching_points,
+        divergences=divergences,
     )
 
 
@@ -135,6 +138,20 @@ def test_evidence_revision_excludes_approaching_only_changes():
     after = evidence_bundle(approaching_points=(approaching_point(2),))
     assert build_strict_evidence_revision(**before.formal_inputs) == (
         build_strict_evidence_revision(**after.formal_inputs)
+    )
+
+
+def test_evidence_revision_and_atomic_bundle_include_independent_divergences():
+    divergence = aware_confirmed_point("1buy").divergence
+    assert divergence is not None
+    base = evidence_bundle(structure=empty_structure(with_level=True))
+    changed = evidence_bundle(
+        structure=empty_structure(with_level=True),
+        divergences=(divergence,),
+    )
+    assert changed.divergences == (divergence,)
+    assert build_strict_evidence_revision(**base.formal_inputs) != (
+        build_strict_evidence_revision(**changed.formal_inputs)
     )
 
 
@@ -172,7 +189,15 @@ def test_evidence_revision_rejects_duplicate_ids_and_naive_datetimes():
     with pytest.raises(ValueError, match="duplicate confirmed point id"):
         build_strict_evidence_revision(**duplicate_inputs)
     naive_inputs = dict(evidence_bundle().formal_inputs)
-    naive_inputs["confirmed_points"] = (confirmed_point(point_type="1buy"),)
+    aware = confirmed_point(point_type="3buy")
+    naive_inputs["confirmed_points"] = (
+        replace(
+            aware,
+            anchor_at=aware.anchor_at.replace(tzinfo=None),
+            confirmed_at=aware.confirmed_at.replace(tzinfo=None),
+            available_at=aware.available_at.replace(tzinfo=None),
+        ),
+    )
     with pytest.raises(ValueError, match="timezone-aware"):
         build_strict_evidence_revision(**naive_inputs)
 
