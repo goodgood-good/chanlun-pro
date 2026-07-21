@@ -103,7 +103,7 @@ def test_compute_and_cache_chart_data_does_not_resurrect_ghost_shape(
     fresh = _fresh_chart_data()
     monkeypatch.setattr(
         chart_compute, "cl_data_to_tv_chart",
-        lambda cd, cl_config, to_frequency=None: dict(fresh),
+        lambda cd, cl_config, *, strict_runtime=None: dict(fresh),
     )
     monkeypatch.setattr(chart_compute, "apply_higher_macd_to_chart_data", lambda *a, **k: False)
 
@@ -177,7 +177,7 @@ def test_tv_history_too_stale_path_does_not_resurrect_ghost_shape(monkeypatch, c
     )
     monkeypatch.setattr(
         chart_compute, "cl_data_to_tv_chart",
-        lambda cd, cl_config, to_frequency=None: dict(fresh),
+        lambda cd, cl_config, *, strict_runtime=None: dict(fresh),
     )
     monkeypatch.setattr(chart_compute, "apply_higher_macd_to_chart_data", lambda *a, **k: False)
 
