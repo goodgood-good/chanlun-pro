@@ -714,7 +714,7 @@ class StrictStructureResult:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "levels", tuple(self.levels))
-        if self.schema_version != "chanlun-structure/v2":
+        if self.schema_version != "chanlun-structure/v3":
             raise ValueError("unsupported strict structure schema")
         if not self.price_basis_revision:
             raise ValueError("price_basis_revision is required")
@@ -800,6 +800,45 @@ class StrictEvidenceResult:
             self.approaching_points
         ):
             raise ValueError("approaching point ids must be unique")
+
+        completed_keys = [
+            (
+                center.structural_level,
+                center.center_id,
+                center.source_kind,
+                center.completion_direction,
+                center.completion_return_unit.unit_id,
+                center.completed_at,
+                center.zd_tick,
+                center.zg_tick,
+            )
+            for level in self.structure.levels
+            for center in level.center_result.centers
+            if center.state is CenterState.COMPLETED
+            and center.source_kind is not SourceKind.STROKE_OBSERVATION
+        ]
+        third_keys = [
+            (
+                point.structural_level,
+                point.center_id,
+                point.source_kind,
+                "up" if point.point_type == "3buy" else "down",
+                point.anchor_unit_id,
+                point.confirmed_at,
+                point.center_zd_tick,
+                point.center_zg_tick,
+            )
+            for point in self.confirmed_points
+            if point.point_type in ("3buy", "3sell")
+        ]
+        if len(third_keys) != len(set(third_keys)):
+            raise ValueError(
+                "each completed center must have exactly one third-class point"
+            )
+        if set(completed_keys) != set(third_keys):
+            raise ValueError(
+                "completed centers and third-class points must match"
+            )
 
     @property
     def formal_inputs(self) -> dict:

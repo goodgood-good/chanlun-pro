@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 
 from chanlun.core.strict_structure.center_machine import (
     advance_center,
@@ -9,9 +10,12 @@ from chanlun.core.strict_structure.center_machine import (
 )
 from chanlun.core.strict_structure.models import (
     CenterEventKind,
+    CenterLevelResult,
     CenterState,
     ConstituentUnit,
     SourceKind,
+    StrictLevelResult,
+    StrictStructureResult,
     TrendCenter,
 )
 
@@ -248,3 +252,88 @@ def destroyed_down_center(unit_offset: int = 0, **changes) -> TrendCenter:
     changes.pop("dd_tick", None)
     changes.pop("gg_tick", None)
     return completed_down_center(unit_offset, **changes)
+
+
+def structure_for(*centers, completed_trends=()) -> StrictStructureResult:
+    center_values = tuple(centers)
+    trend_values = tuple(completed_trends)
+    levels_seen = {
+        item.structural_level for item in center_values + trend_values
+    }
+    max_level = max(levels_seen, default=-1)
+    levels = []
+    for structural_level in range(max_level + 1):
+        level_centers = tuple(
+            item
+            for item in center_values
+            if item.structural_level == structural_level
+        )
+        level_trends = tuple(
+            item
+            for item in trend_values
+            if item.structural_level == structural_level
+        )
+        by_id = {}
+        for trend in level_trends:
+            for item in trend.constituent_units:
+                by_id.setdefault(item.unit_id, item)
+        for center_value in level_centers:
+            for item in center_value.body_units:
+                by_id.setdefault(item.unit_id, item)
+            ret = center_value.completion_return_unit
+            if ret is not None:
+                by_id.setdefault(ret.unit_id, ret)
+        units = tuple(
+            sorted(
+                by_id.values(),
+                key=lambda item: (item.market_start, item.unit_id),
+            )
+        )
+        if any(
+            current.market_start < previous.market_start
+            for previous, current in zip(units, units[1:])
+        ):
+            raise ValueError("structure helper unit time moved backward")
+        center_result = CenterLevelResult(
+            structural_level=structural_level,
+            price_basis_revision=(
+                units[0].price_basis_revision if units else TEST_PRICE_BASIS
+            ),
+            centers=level_centers,
+            previews=(),
+            events=(),
+            locked_unit_count=sum(1 for item in units if item.locked),
+            replay_from=0,
+        )
+        levels.append(
+            StrictLevelResult(
+                structural_level=structural_level,
+                units=units,
+                center_result=center_result,
+                trend_types=level_trends,
+                completed_trends=level_trends,
+            )
+        )
+    return StrictStructureResult(
+        schema_version="chanlun-structure/v3",
+        price_basis_revision=TEST_PRICE_BASIS,
+        levels=tuple(levels),
+    )
+
+
+def engine_for(*centers, completed_trends=()):
+    from chanlun.core.strict_structure.signals import StrictSignalEngine
+
+    return StrictSignalEngine(
+        structure=structure_for(
+            *centers,
+            completed_trends=completed_trends,
+        ),
+        price_quantum=Decimal("0.01"),
+    )
+
+
+def only_point(points):
+    values = tuple(points)
+    assert len(values) == 1
+    return values[0]

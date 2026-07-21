@@ -84,6 +84,36 @@ def test_scan_emits_establish_extend_watch_complete_events_in_order():
     assert result.centers[0].state is CenterState.COMPLETED
 
 
+def test_scan_preserves_ongoing_center_when_later_geometry_cannot_extend():
+    values = valid_five_up_exit() + (
+        unit(5, "down", 130, 95),
+        unit(6, "up", 95, 100),
+    )
+    result = calculate_centers(values, 0, SourceKind.SEGMENT)
+    assert len(result.centers) == 1
+    assert result.centers[0].state is CenterState.ONGOING
+    assert result.centers[0].extension_units == (values[5],)
+    assert values[6] not in result.centers[0].body_units
+
+
+def test_scan_can_find_new_center_after_an_abandoned_ongoing_center():
+    values = valid_five_up_exit() + (
+        unit(5, "down", 130, 95),
+        unit(6, "up", 95, 100),
+        unit(7, "down", 100, 96),
+        unit(8, "up", 96, 99),
+        unit(9, "down", 99, 97),
+        unit(10, "up", 97, 105),
+        unit(11, "down", 105, 101),
+    )
+    result = calculate_centers(values, 0, SourceKind.SEGMENT)
+    assert [item.state for item in result.centers] == [
+        CenterState.ONGOING,
+        CenterState.COMPLETED,
+    ]
+    assert result.centers[1].entry_unit is values[6]
+
+
 def test_zero_width_middle_core_is_touch_only_not_formal_center():
     values = (
         unit(0, "up", 90, 120),

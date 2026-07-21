@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 import datetime
+import threading
+from functools import wraps
 from typing import Union, List, Tuple, Any
 import pandas as pd
 
@@ -15,6 +17,19 @@ from chanlun.core.macd_htf import HigherMACDCalculator
 from chanlun.core.xd_calculator import XdCalculator
 from chanlun.core.zs_calculator import ZsCalculator
 from chanlun.tools.log_util import LogUtil
+
+
+def _strict_runtime_locked(method):
+    @wraps(method)
+    def wrapper(self, *args, **kwargs):
+        lock = getattr(self, "_strict_evidence_lock", None)
+        if lock is None:
+            lock = threading.RLock()
+            self._strict_evidence_lock = lock
+        with lock:
+            return method(self, *args, **kwargs)
+
+    return wrapper
 
 
 class CL(ICL):
@@ -72,8 +87,17 @@ class CL(ICL):
         # 缓存,新 K 线进来(_process_src_klines)即清空。消除单次采集内的冗余重算,
         # 结果不变、纯加速。
         self._recursive_memo: dict = {}
+        # 新严格结构在迁移期只读接入。memo 随 K 线失效；锁定 registry
+        # 必须跨增量更新保留，才能拒绝任何已确认构件的历史改写。
+        self._strict_structure_memo: dict = {}
+        self._strict_unit_registry = None
+        self._strict_price_quantum_value = None
+        self._strict_evidence_lock = threading.RLock()
+        self._strict_generation = 0
         # 实例化笔计算器
-        self.bi_calculator = BiCalculator(bi_mode = 'strict')
+        # The active base profile fixes the production stroke definition.  Do
+        # not hide a second algorithm switch behind the CL constructor.
+        self.bi_calculator = BiCalculator(bi_mode=self.config.get('bi_mode', 'new'))
         # 实例化线段计算器
         self.xd_calculator = XdCalculator(self.config)
 
@@ -111,6 +135,11 @@ class CL(ICL):
         # 兼容运行时期望字段
         self.debug: bool = False
 
+    def __getstate__(self):
+        state = dict(self.__dict__)
+        state.pop("_strict_evidence_lock", None)
+        return state
+
     def __setstate__(self, state: dict):
         """unpickle/deepcopy 还原钩子(R1-F1-2)。
 
@@ -120,6 +149,11 @@ class CL(ICL):
         规则补推断治愈遗留对象;A股 None→"a" 与历史默认等价零回归;显式 market 原样。
         治愈后首个 process_klines 因 calc.market != self.market 自动重建 HTF 计算器。"""
         self.__dict__.update(state)
+        self._strict_evidence_lock = threading.RLock()
+        self.__dict__.setdefault("_strict_generation", 0)
+        self.__dict__.setdefault("_strict_structure_memo", {})
+        self.__dict__.setdefault("_strict_unit_registry", None)
+        self.__dict__.setdefault("_strict_price_quantum_value", None)
         if self.__dict__.get("market") is None:
             code = self.__dict__.get("code")
             self.market = "us" if str(code or "").upper().endswith(".US") else "a"
@@ -180,6 +214,7 @@ class CL(ICL):
             if key not in self.config:
                 self.config[key] = value
 
+    @_strict_runtime_locked
     def process_klines(self, klines: pd.DataFrame):
         """
         处理K线数据，计算缠论分析结果
@@ -191,19 +226,27 @@ class CL(ICL):
         """
         # 返回增量更新或新增的K线数据列表
         src_klines: List[Kline] = self.kline_processor.process_kline(klines)
-        return self._process_src_klines(src_klines)
+        result = self._process_src_klines(src_klines)
+        if src_klines:
+            self._strict_generation += 1
+        return result
 
+    @_strict_runtime_locked
     def process_kline_values(self, date, open_, high, low, close, volume=0.0):
         """Process one normalized bar without constructing a DataFrame."""
         src_klines: List[Kline] = self.kline_processor.process_kline_values(
             date, open_, high, low, close, volume
         )
-        return self._process_src_klines(src_klines)
+        result = self._process_src_klines(src_klines)
+        if src_klines:
+            self._strict_generation += 1
+        return result
 
     def _process_src_klines(self, src_klines: List[Kline]):
         if not src_klines:
             return self
         self._recursive_memo.clear()   # 新 K 线 → 状态变,递归装配 memo 失效
+        self._strict_structure_memo.clear()
         # 线段确认级联重构期间:线段(xds)改为全量重建(对象每轮全新、终点可回溯合并),
         # 持久 RecursiveBranchCalculator 的 identity 增量前提失效 → 每轮重置为全量重算,
         # 保递归层 inc==batch。待级联稳定后与线段增量一并重做。
@@ -273,6 +316,7 @@ class CL(ICL):
             # 每次处理后重置缓存，确保下次访问时重新计算
             self._last_bi_zs = None
             self._last_xd_zs = None
+            self._strict_structure_memo.clear()
 
             # 自动连带跑 process_mmd，避免 web 路径漏调用导致前端看不到买卖点。
             # process_mmd 内部已做去重，增量调用幂等。
@@ -375,7 +419,15 @@ class CL(ICL):
                 signal=signal,
             )
             self._htf_macd_calculator = calc
-        self._htf_macd = calc.update(self.kline_processor.klines)
+        htf_macd = calc.update(self.kline_processor.klines)
+        self._htf_macd = (
+            None
+            if htf_macd is None
+            else {
+                **htf_macd,
+                "dates": tuple(kline.date for kline in self.kline_processor.klines),
+            }
+        )
 
     def get_fxs(self) -> List[FX]:
         """返回分型列表（浅拷贝）"""
@@ -388,6 +440,218 @@ class CL(ICL):
     def get_xds(self) -> List[XD]:
         """返回线段列表（浅拷贝）"""
         return list(self.xd_calculator.xds)
+
+    def _strict_as_of(self):
+        values = self.get_src_klines()
+        if not values:
+            raise ValueError("strict structure requires source klines")
+        return values[-1].date
+
+    def _strict_price_quantum(self):
+        from decimal import Decimal, DecimalException
+
+        raw = self.config.get("structure_price_quantum")
+        if raw is None:
+            raise ValueError(
+                "strict structure requires price-basis quantum metadata"
+            )
+        try:
+            price_quantum = Decimal(str(raw))
+        except (DecimalException, ValueError) as exc:
+            raise ValueError(
+                "strict structure requires positive finite price quantum"
+            ) from exc
+        if not price_quantum.is_finite() or price_quantum <= 0:
+            raise ValueError(
+                "strict structure requires positive finite price quantum"
+            )
+        if self._strict_price_quantum_value is None:
+            self._strict_price_quantum_value = price_quantum
+        elif self._strict_price_quantum_value != price_quantum:
+            raise ValueError("price quantum changed within CL lifecycle")
+        return price_quantum
+
+    def _strict_price_basis_revision(self):
+        value = self.config.get("price_basis_revision")
+        if (
+            not isinstance(value, str)
+            or not value.strip()
+            or value != value.strip()
+        ):
+            raise ValueError("strict structure requires price_basis_revision")
+        return value
+
+    def _strict_registry(self):
+        from chanlun.core.strict_structure.unit_adapter import UnitLockRegistry
+
+        price_basis_revision = self._strict_price_basis_revision()
+        if self._strict_unit_registry is None:
+            self._strict_unit_registry = UnitLockRegistry(price_basis_revision)
+        elif (
+            self._strict_unit_registry.price_basis_revision
+            != price_basis_revision
+        ):
+            raise ValueError("price basis changed within CL lifecycle")
+        return self._strict_unit_registry
+
+    @_strict_runtime_locked
+    def get_strict_structure_levels(self):
+        from chanlun.core.strict_structure.models import SourceKind
+        from chanlun.core.strict_structure.level_catalog import recursive_level_labels
+        from chanlun.core.strict_structure.recursive_engine import (
+            StrictRecursiveEngine,
+        )
+        from chanlun.core.strict_structure.unit_adapter import adapt_lines
+
+        price_basis_revision = self._strict_price_basis_revision()
+        price_quantum = self._strict_price_quantum()
+        registry = self._strict_registry()
+        as_of = self._strict_as_of()
+        cached = self._strict_structure_memo.get("formal")
+        if cached is not None:
+            return cached
+        units = adapt_lines(
+            self.get_xds(),
+            0,
+            SourceKind.SEGMENT,
+            price_quantum,
+            as_of,
+            registry,
+        )
+        labels = recursive_level_labels(self.get_frequency())
+        result = StrictRecursiveEngine(max_levels=len(labels)).calculate(
+            units,
+            price_basis_revision=price_basis_revision,
+        )
+        self._strict_structure_memo["formal"] = result
+        return result
+
+    @_strict_runtime_locked
+    def get_stroke_observation_centers(self):
+        from chanlun.core.strict_structure.center_machine import calculate_centers
+        from chanlun.core.strict_structure.models import SourceKind
+        from chanlun.core.strict_structure.unit_adapter import adapt_lines
+
+        self._strict_price_basis_revision()
+        price_quantum = self._strict_price_quantum()
+        registry = self._strict_registry()
+        as_of = self._strict_as_of()
+        cached = self._strict_structure_memo.get("stroke_observation")
+        if cached is not None:
+            return cached
+        units = adapt_lines(
+            self.get_bis(),
+            0,
+            SourceKind.STROKE_OBSERVATION,
+            price_quantum,
+            as_of,
+            registry,
+        )
+        result = calculate_centers(
+            units,
+            0,
+            SourceKind.STROKE_OBSERVATION,
+        )
+        self._strict_structure_memo["stroke_observation"] = result
+        return result
+
+    @_strict_runtime_locked
+    def get_strict_points(self):
+        from chanlun.core.strict_structure.signals import StrictSignalEngine
+        from chanlun.core.strict_structure.strength import MacdStrengthProvider
+
+        cached = self._strict_structure_memo.get("confirmed_points")
+        if cached is not None:
+            return cached
+        engine = StrictSignalEngine(
+            structure=self.get_strict_structure_levels(),
+            strength=MacdStrengthProvider(self),
+            price_quantum=self._strict_price_quantum(),
+        )
+        first = engine.first_class_points()
+        second = engine.second_class_points(first)
+        third = engine.third_class_points()
+        by_id = {}
+        for point in first + second + third:
+            previous = by_id.get(point.point_id)
+            if previous is not None and previous != point:
+                raise ValueError("strict point id maps to conflicting evidence")
+            by_id[point.point_id] = point
+        result = tuple(
+            sorted(
+                by_id.values(),
+                key=lambda point: (
+                    point.available_at,
+                    point.structural_level,
+                    point.point_type,
+                    point.point_id,
+                ),
+            )
+        )
+        self._strict_structure_memo["confirmed_points"] = result
+        return result
+
+    @_strict_runtime_locked
+    def get_strict_approaching_points(self):
+        from chanlun.core.strict_structure.signals import StrictSignalEngine
+        from chanlun.core.strict_structure.strength import MacdStrengthProvider
+
+        cached = self._strict_structure_memo.get("approaching_points")
+        if cached is not None:
+            return cached
+        engine = StrictSignalEngine(
+            structure=self.get_strict_structure_levels(),
+            strength=MacdStrengthProvider(self),
+            price_quantum=self._strict_price_quantum(),
+        )
+        result = engine.approaching_points(self._strict_as_of())
+        self._strict_structure_memo["approaching_points"] = result
+        return result
+
+    @_strict_runtime_locked
+    def get_strict_evidence(self):
+        from chanlun.core.strict_structure.base_profile import (
+            strict_base_config_revision,
+        )
+        from chanlun.core.strict_structure.identity import (
+            build_strict_evidence_revision,
+        )
+        from chanlun.core.strict_structure.models import StrictEvidenceResult
+
+        cached = self._strict_structure_memo.get("evidence")
+        if cached is not None:
+            return cached
+        structure = self.get_strict_structure_levels()
+        stroke_observations = self.get_stroke_observation_centers()
+        confirmed_points = self.get_strict_points()
+        approaching_points = self.get_strict_approaching_points()
+        price_basis_revision = self._strict_price_basis_revision()
+        strict_config_revision = (
+            "chanlun-strict-signals/v3+" + strict_base_config_revision()
+        )
+        structure_revision = build_strict_evidence_revision(
+            symbol=self.get_code(),
+            source_frequency=self.get_frequency(),
+            price_basis_revision=price_basis_revision,
+            strict_config_revision=strict_config_revision,
+            structure=structure,
+            confirmed_points=confirmed_points,
+        )
+        result = StrictEvidenceResult(
+            symbol=self.get_code(),
+            source_frequency=self.get_frequency(),
+            source_closed_at=self._strict_as_of(),
+            price_basis_revision=price_basis_revision,
+            structure_price_quantum=self._strict_price_quantum(),
+            strict_config_revision=strict_config_revision,
+            structure_revision=structure_revision,
+            structure=structure,
+            stroke_center_observations=stroke_observations,
+            confirmed_points=confirmed_points,
+            approaching_points=approaching_points,
+        )
+        self._strict_structure_memo["evidence"] = result
+        return result
 
     def get_bi_zss(self, zs_type: str = None) -> List[ZS]:
         """返回笔中枢列表

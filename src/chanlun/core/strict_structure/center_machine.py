@@ -445,14 +445,27 @@ def calculate_centers(
             )
         )
         j = i + 5
+        geometry_stopped = False
         while j < len(formal):
-            center, event = advance_center(center, formal[j])
+            try:
+                center, event = advance_center(center, formal[j])
+            except ValueError as exc:
+                if str(exc) not in {
+                    "ongoing center unit must re-enter the core",
+                    "return geometry is neither extension nor third-class completion",
+                }:
+                    raise
+                geometry_stopped = True
+                break
             events.append(event)
             if center.state is CenterState.COMPLETED:
                 break
             j += 1
         centers.append(center)
         replay_from = i
+        if geometry_stopped:
+            i = j
+            continue
         if center.state is CenterState.COMPLETED:
             i = j
             continue
