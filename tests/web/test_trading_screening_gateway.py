@@ -123,6 +123,29 @@ def test_analyzer_rejects_snapshot_without_price_basis_metadata(monkeypatch) -> 
         )
 
 
+def test_analyzer_wraps_known_strict_structure_contract_errors(monkeypatch) -> None:
+    class InvalidStrictState:
+        def process_klines(self, _frame) -> None:
+            raise ValueError("unit directions must alternate")
+
+    monkeypatch.setattr(
+        gateway_module,
+        "CL",
+        lambda *_args, **_kwargs: InvalidStrictState(),
+    )
+
+    with pytest.raises(
+        gateway_module.StrictStructureAnalysisError,
+        match="unit directions must alternate",
+    ):
+        analyze_native_frame(
+            code="SH.880471",
+            frequency="5m",
+            frame=_frame(),
+            as_of=datetime.fromisoformat("2026-07-20T10:01:00+08:00"),
+        )
+
+
 def _frame(*, with_metadata: bool = True) -> pd.DataFrame:
     frame = pd.DataFrame(
         {
@@ -172,6 +195,17 @@ class RecordingAnalyzer:
             confirmed_points=(),
             provisional_points=approaching,
         )
+
+
+class FailingAnalyzer(RecordingAnalyzer):
+    def __init__(self, exc: Exception) -> None:
+        super().__init__()
+        self.exc = exc
+
+    def __call__(self, *, code, frequency, frame, as_of):
+        self.calls.append((code, frequency))
+        self.frames.append(frame.copy(deep=True))
+        raise self.exc
 
 
 def _gateway(
@@ -270,6 +304,30 @@ def test_unknown_sector_code_fails_closed_before_strict_analysis() -> None:
         ("sector_price_basis_unavailable", 1),
     )
     assert analyzer.calls == []
+
+
+def test_native_gateway_maps_explicit_strict_error_to_structure_invalid() -> None:
+    analyzer = FailingAnalyzer(
+        gateway_module.StrictStructureAnalysisError(
+            "unit directions must alternate"
+        )
+    )
+    gateway, _analyzer, _exchange = _gateway(analyzer=analyzer)
+
+    batch = gateway.native_sector_assessments(as_of=NOW)
+
+    assert batch.failure_counts == (("sector_structure_invalid", 1),)
+    assert batch.errors[0].error_type == "sector_structure_invalid"
+
+
+def test_native_gateway_maps_unknown_analyzer_error_to_adapter_error() -> None:
+    analyzer = FailingAnalyzer(RuntimeError("analyzer transport failed"))
+    gateway, _analyzer, _exchange = _gateway(analyzer=analyzer)
+
+    batch = gateway.native_sector_assessments(as_of=NOW)
+
+    assert batch.failure_counts == (("sector_adapter_error", 1),)
+    assert batch.errors[0].error_type == "sector_adapter_error"
 
 
 def test_native_gateway_reuses_sector_analysis_when_closed_bar_is_unchanged() -> None:
