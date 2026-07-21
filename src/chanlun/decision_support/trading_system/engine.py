@@ -62,7 +62,7 @@ class EvaluatedSignal:
 def _point_time(point: StructuralPoint | ProvisionalCandidate) -> datetime:
     if isinstance(point, ProvisionalCandidate):
         return point.observed_at
-    return point.confirmed_at or point.anchor_at
+    return point.available_at
 
 
 def _current_five_minute_points(
@@ -127,7 +127,7 @@ class TradingEngine:
             ),
             key=lambda point: (
                 (
-                    point.confirmed_at or point.anchor_at
+                    point.available_at
                     if isinstance(point, StructuralPoint)
                     else point.observed_at
                 ),

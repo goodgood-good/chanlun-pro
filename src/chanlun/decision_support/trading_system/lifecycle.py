@@ -35,8 +35,11 @@ def build_setup(
     if point.source_frequency != "5m":
         raise ValueError("trade setup requires a 5m point")
     if isinstance(point, StructuralPoint):
-        started_at = point.confirmed_at or point.anchor_at
-        prices = [point.invalidation_price, point.anchor_price]
+        started_at = point.available_at
+        prices = [
+            point.structure_invalidation_price,
+            point.structure_anchor_price,
+        ]
         boundary = point.center_zg if point.side == "buy" else point.center_zd
         if boundary is not None:
             prices.append(boundary)
@@ -80,13 +83,13 @@ def match_one_minute_trigger(
         and point.side == setup.point.side
         and point.point_id != setup.point.point_id
         and point.confirmed_at is not None
-        and setup.started_at <= point.confirmed_at <= closed_at
-        and setup.price_low <= point.anchor_price <= setup.price_high
+        and setup.started_at <= point.available_at <= closed_at
+        and setup.price_low <= point.structure_anchor_price <= setup.price_high
     )
     return min(
         matches,
         key=lambda point: (
-            point.confirmed_at,
+            point.available_at,
             point.recursive_level,
             point.tower,
             point.point_id,

@@ -19,8 +19,7 @@ def resolve_conflict(
         for candidate in opposite_points
         if candidate.confirmed
         and candidate.side != point.side
-        and candidate.confirmed_at is not None
-        and candidate.confirmed_at <= setup.context.observed_at
+        and candidate.available_at <= setup.context.observed_at
     )
     blockers = tuple(
         sorted(

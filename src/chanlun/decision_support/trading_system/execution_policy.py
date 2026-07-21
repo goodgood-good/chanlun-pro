@@ -63,7 +63,8 @@ def evaluate_entry_policy(
         clearance = (
             None
             if point.center_zg is None
-            else Decimal(str(point.anchor_price)) - Decimal(str(point.center_zg))
+            else Decimal(str(point.structure_anchor_price))
+            - Decimal(str(point.center_zg))
         )
         if (
             point.variant == "boundary_touch"
@@ -80,7 +81,7 @@ def evaluate_entry_policy(
         Decimal("0"),
     )
     structural_stop = (
-        Decimal(str(point.invalidation_price))
+        Decimal(str(point.structure_invalidation_price))
         if isinstance(point, StructuralPoint)
         else None
     )
