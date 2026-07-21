@@ -387,7 +387,7 @@ class NativeTradingDataGateway:
         self._latest_sector_bars: dict[tuple[str, str], datetime] = {}
         self._emitted_sector_bars: dict[tuple[str, str], datetime] = {}
         self._analysis_cache: dict[
-            tuple[str, str], FrameStructureAnalysis
+            tuple[str, str], tuple[str, FrameStructureAnalysis]
         ] = {}
 
     def _load_analysis(
@@ -473,9 +473,9 @@ class NativeTradingDataGateway:
                     str(exc),
                 ) from exc
             raise
-        if native_sector_index:
-            try:
-                strict_snapshot_price_metadata(frame)
+        try:
+            metadata = strict_snapshot_price_metadata(frame)
+            if native_sector_index:
                 if (
                     frame.attrs.get("price_basis_provider")
                     != "tdx-industry-index"
@@ -484,17 +484,23 @@ class NativeTradingDataGateway:
                     raise ValueError(
                         "closed TDX industry frame lost price basis attrs"
                     )
-            except Exception as exc:
+        except Exception as exc:
+            if native_sector_index:
                 raise SectorAnalysisUnavailable(
                     "sector_price_basis_unavailable",
                     str(exc),
                 ) from exc
+            raise
         closed_at = _market_datetime(frame["date"].iloc[-1], "bar close")
         cache_key = (analysis_code, frequency)
         with self._lock:
             cached = self._analysis_cache.get(cache_key)
-        if cached is not None and cached.closed_at == closed_at:
-            return cached
+        if (
+            cached is not None
+            and cached[0] == metadata.price_basis_revision
+            and cached[1].closed_at == closed_at
+        ):
+            return cached[1]
         try:
             analysis = self._analyzer(
                 code=analysis_code,
@@ -517,7 +523,10 @@ class NativeTradingDataGateway:
                 ) from exc
             raise
         with self._lock:
-            self._analysis_cache[cache_key] = analysis
+            self._analysis_cache[cache_key] = (
+                metadata.price_basis_revision,
+                analysis,
+            )
         return analysis
 
     def _has_current_five_minute_setup(
@@ -544,7 +553,8 @@ class NativeTradingDataGateway:
         frequency: str,
     ) -> FrameStructureAnalysis | None:
         with self._lock:
-            return self._analysis_cache.get((code, frequency))
+            cached = self._analysis_cache.get((code, frequency))
+        return None if cached is None else cached[1]
 
     def native_sector_assessments(
         self,

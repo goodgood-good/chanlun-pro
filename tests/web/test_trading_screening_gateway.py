@@ -343,6 +343,35 @@ def test_native_gateway_reuses_sector_analysis_when_closed_bar_is_unchanged() ->
     ]
 
 
+def test_analysis_cache_invalidates_when_price_basis_revision_changes() -> None:
+    gateway, analyzer, _sector_exchange = _gateway()
+    stock_exchange = gateway._exchange_provider()
+
+    gateway._load_analysis(
+        exchange=stock_exchange,
+        code="SZ.000001",
+        analysis_code="SZ.000001",
+        frequency="5m",
+        as_of=NOW,
+    )
+    stock_exchange.frame.attrs["price_basis_revision"] = "test-raw-v2"
+    gateway._load_analysis(
+        exchange=stock_exchange,
+        code="SZ.000001",
+        analysis_code="SZ.000001",
+        frequency="5m",
+        as_of=NOW,
+    )
+
+    assert analyzer.calls == [
+        ("SZ.000001", "5m"),
+        ("SZ.000001", "5m"),
+    ]
+    assert [
+        frame.attrs["price_basis_revision"] for frame in analyzer.frames
+    ] == ["test-raw-v1", "test-raw-v2"]
+
+
 def test_native_gateway_builds_three_level_bundle_and_keeps_watch_scopes() -> None:
     gateway, _analyzer, _sector_exchange = _gateway()
     sector = gateway.native_sector_assessments(as_of=NOW).assessments[0]
