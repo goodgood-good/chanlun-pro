@@ -22,10 +22,13 @@ from chanlun.decision_support.trading_system.models import (
     MAX_FIVE_MINUTE_SETUP_AGE_SECONDS,
     PointType,
 )
+from chanlun.decision_support.trading_system.runtime_config import (
+    STRICT_STRATEGY_ID,
+)
 
 
 SCHEMA_VERSION = "chanlun-low-drawdown-backtest/v1"
-STRATEGY_ID = "chanlun_original_low_drawdown_v1"
+STRATEGY_ID = STRICT_STRATEGY_ID
 REQUIRED_ABLATION_IDS = (
     "original_definitions_only",
     "plus_sector_ranking",

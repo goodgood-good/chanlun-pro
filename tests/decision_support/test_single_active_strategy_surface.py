@@ -4,19 +4,39 @@ import importlib
 from pathlib import Path
 
 from chanlun.decision_support import scanner
+from chanlun.decision_support.trading_system.backtest.report import (
+    STRATEGY_ID as BACKTEST_STRATEGY_ID,
+)
+from chanlun.decision_support.trading_system.runtime_config import (
+    STRICT_STRATEGY_ID,
+)
 from cl_app import create_app
-from cl_app.services.trading_notifications import SignalNotificationDispatcher
+from cl_app.services.trading_notifications import (
+    STRATEGY_ID as NOTIFICATION_STRATEGY_ID,
+    SignalNotificationDispatcher,
+)
+from cl_app.services.trading_screening import TradingScreeningConfig
 
 
 ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_only_new_trading_system_is_importable() -> None:
-    assert scanner.ACTIVE_STRATEGY_ID == "chanlun_original_low_drawdown_v1"
+    assert scanner.ACTIVE_STRATEGY_ID == "chanlun_source_faithful_v2"
     assert hasattr(scanner, "TradingEngine")
     assert not hasattr(scanner, "classify_early_signal")
     assert not hasattr(scanner, "classify_" + "early_signals")
     assert not hasattr(scanner, "classify_" + "sector_level")
+
+
+def test_backtest_scan_and_notification_share_one_strategy_id() -> None:
+    assert {
+        STRICT_STRATEGY_ID,
+        scanner.ACTIVE_STRATEGY_ID,
+        BACKTEST_STRATEGY_ID,
+        NOTIFICATION_STRATEGY_ID,
+        TradingScreeningConfig().algorithm_version,
+    } == {"chanlun_source_faithful_v2"}
 
 
 def test_web_surface_has_only_read_only_new_strategy_routes() -> None:

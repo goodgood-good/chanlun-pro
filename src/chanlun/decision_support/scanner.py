@@ -6,9 +6,12 @@ from chanlun.decision_support.trading_system.engine import (
     TradingEngine,
     evaluate_symbol,
 )
+from chanlun.decision_support.trading_system.runtime_config import (
+    STRICT_STRATEGY_ID,
+)
 
 
-ACTIVE_STRATEGY_ID = "chanlun_original_low_drawdown_v1"
+ACTIVE_STRATEGY_ID = STRICT_STRATEGY_ID
 
 
 __all__ = (

@@ -7,8 +7,13 @@ import hashlib
 import json
 from pathlib import Path
 
+from chanlun.decision_support.trading_system.runtime_config import (
+    STRICT_STRATEGY_ID,
+)
+
 
 SCHEMA_VERSION = "chanlun-signal-notifications/v1"
+STRATEGY_ID = STRICT_STRATEGY_ID
 _NOTIFIABLE_TRANSITIONS = {
     (None, "triggered"),
     (None, "executable"),
@@ -203,6 +208,7 @@ class SignalNotificationDispatcher:
 
 __all__ = [
     "SCHEMA_VERSION",
+    "STRATEGY_ID",
     "SignalNotificationDispatcher",
     "format_notification",
     "notification_event_id",
