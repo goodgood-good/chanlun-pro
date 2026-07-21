@@ -8,6 +8,89 @@ from chanlun.persistence.db import db
 from chanlun.tools.log_util import LogUtil
 
 
+# 唯一允许由 options 表单持久化的配置契约。严格结构图层偏好由浏览器
+# 图表菜单按周期独立保存；旧中枢算法与旧笔/段信号显示键不在此列表中。
+CL_CHART_CONFIG_PERSIST_KEYS = (
+    "config_use_type",
+    "kline_qk",
+    "judge_zs_qs_level",
+    "kline_type",
+    "fx_qy",
+    "fx_qj",
+    "fx_bh",
+    "bi_type",
+    "bi_bzh",
+    "bi_qj",
+    "bi_fx_cgd",
+    "bi_split_k_cross_nums",
+    "fx_check_k_nums",
+    "allow_bi_fx_strict",
+    "xd_qj",
+    "xd_zs_max_lines_split",
+    "xd_allow_bi_pohuai",
+    "xd_allow_split_no_highlow",
+    "xd_allow_split_zs_kz",
+    "xd_allow_split_zs_more_line",
+    "xd_allow_split_zs_no_direction",
+    "idx_macd_fast",
+    "idx_macd_slow",
+    "idx_macd_signal",
+    "cl_mmd_cal_qs_1mmd",
+    "cl_mmd_cal_not_qs_3mmd_1mmd",
+    "cl_mmd_cal_qs_3mmd_1mmd",
+    "cl_mmd_cal_qs_not_lh_2mmd",
+    "cl_mmd_cal_qs_bc_2mmd",
+    "cl_mmd_cal_3mmd_not_lh_bc_2mmd",
+    "cl_mmd_cal_1mmd_not_lh_2mmd",
+    "cl_mmd_cal_3mmd_xgxd_not_bc_2mmd",
+    "cl_mmd_cal_not_in_zs_3mmd",
+    "cl_mmd_cal_not_in_zs_gt_9_3mmd",
+    "enable_kchart_low_to_high",
+    "chart_show_fx",
+    "chart_show_bi",
+    "chart_show_xd",
+)
+
+# 文件 CL 对象的计算缓存轴。浏览器图层偏好不进入缓存身份，勾选/取消图层
+# 不得触发结构重算；旧中枢配置也已从新体系缓存身份中删除。
+CL_COMPUTE_CACHE_CONFIG_KEYS = (
+    "kline_type",
+    "kline_qk",
+    "judge_zs_qs_level",
+    "fx_qy",
+    "fx_qj",
+    "fx_bh",
+    "bi_type",
+    "bi_bzh",
+    "bi_qj",
+    "bi_fx_cgd",
+    "bi_split_k_cross_nums",
+    "fx_check_k_nums",
+    "allow_bi_fx_strict",
+    "xd_qj",
+    "xd_allow_bi_pohuai",
+    "xd_allow_split_no_highlow",
+    "xd_allow_split_zs_kz",
+    "xd_allow_split_zs_more_line",
+    "xd_allow_split_zs_no_direction",
+    "xd_zs_max_lines_split",
+    "zs_optimize",
+    "cl_mmd_cal_qs_1mmd",
+    "cl_mmd_cal_not_qs_3mmd_1mmd",
+    "cl_mmd_cal_qs_3mmd_1mmd",
+    "cl_mmd_cal_qs_not_lh_2mmd",
+    "cl_mmd_cal_qs_bc_2mmd",
+    "cl_mmd_cal_3mmd_not_lh_bc_2mmd",
+    "cl_mmd_cal_1mmd_not_lh_2mmd",
+    "cl_mmd_cal_3mmd_xgxd_not_bc_2mmd",
+    "cl_mmd_cal_not_in_zs_3mmd",
+    "cl_mmd_cal_not_in_zs_gt_9_3mmd",
+    "idx_macd_fast",
+    "idx_macd_slow",
+    "idx_macd_signal",
+)
+
+
 _cl_config_cache = {}
 _cl_config_cache_lock = RLock()
 _cl_config_cache_ttl = 300
@@ -106,13 +189,6 @@ def query_cl_chart_config(
         "xd_allow_split_zs_kz": "0",
         "xd_allow_split_zs_more_line": "1",
         "xd_allow_split_zs_no_direction": "1",
-        # 中枢配置
-        "zs_bi_type": [Config.ZS_TYPE_BZ.value],
-        "zs_xd_type": [Config.ZS_TYPE_BZ.value],
-        "zs_qj": Config.ZS_QJ_DD.value,
-        "zs_cd": Config.ZS_CD_THREE.value,
-        # 趋势判定口径：用 GD（gg/dd 包络均不重叠才算趋势），与 core CL 默认(cl.py)统一。
-        "zs_wzgx": Config.ZS_WZGX_GD.value,
         "zs_optimize": "0",
         # MACD 配置（计算力度背驰）
         "idx_macd_fast": 12,
@@ -152,21 +228,6 @@ def query_cl_chart_config(
         "chart_show_fx": "1",
         "chart_show_bi": "1",
         "chart_show_xd": "1",
-        # 缠论叠加层默认全部关闭——只显示 K线/分型/笔/线段。后端计算逻辑均保留,
-        # 改这些 chart_show_* 即可在图上重新打开;前端也可独立 toggle。
-        "chart_show_bi_zs": "0",
-        "chart_show_xd_zs": "0",
-        "chart_show_bi_mmd": "0",
-        "chart_show_xd_mmd": "0",
-        "chart_show_bi_bc": "0",
-        "chart_show_xd_bc": "0",
-        "chart_show_zs_direction": "0",      # 中枢方向着色(up/down/zd)
-        "chart_show_zs_expanded": "0",       # 扩展中枢加粗框
-        "chart_show_xd_zslx": "0",           # 当前级别走势类型线段/区间
-        "chart_show_recursive_levels": "1",  # 递归层级中枢与走势类型(重做完成,默认开显示新核心)
-        "chart_use_branch_core": "1",        # 1=新核心(默认);0=legacy 显示链(笔中枢/买卖点/背驰旧源;旧递归装配已下线,0 不再画递归层)
-        "chart_show_higher_zs": "1",         # 低周期图叠加高周期线段中枢(混合多级别,默认开)
-        "chart_show_interval_nest": "0",     # 【废弃】旧链区间套已下线(P1b),tv_chart 不再读本键;保留防存量配置合并
         "chart_show_ma": "0",
         "chart_show_boll": "0",
         "chart_show_futu": "macd",
@@ -211,8 +272,10 @@ def query_cl_chart_config(
 
     result_config = copy.deepcopy(default_config)
     if isinstance(config, dict):
+        allowed = set(CL_CHART_CONFIG_PERSIST_KEYS)
         for _key, _val in config.items():
-            result_config[_key] = _val
+            if _key in allowed:
+                result_config[_key] = _val
 
     # 只有成功读过 DB 才写本地缓存（M8）。退避期跳过 / 读失败时返回的是
     # "默认配置兜底"，若也缓存，一次 DB 抖动会把默认配置钉住
@@ -233,6 +296,12 @@ def set_cl_chart_config(
     if market == "futures":
         code = code.upper().replace("KQ.M@", "")
         code = "".join([i for i in code if not i.isdigit()])
+
+    unknown = set(config) - set(CL_CHART_CONFIG_PERSIST_KEYS)
+    if unknown:
+        raise ValueError(
+            "unsupported chart config keys: " + ",".join(sorted(unknown))
+        )
 
     # 读取已有配置后做增量覆盖，避免遗漏未传入的字段
     old_config = query_cl_chart_config(market, code, suffix)

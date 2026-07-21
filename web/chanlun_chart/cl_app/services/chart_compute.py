@@ -29,6 +29,7 @@ import talib
 from chanlun import fun
 from chanlun.exchange.lb_priority import lb_low_priority
 from chanlun.cl_utils import (
+    build_strict_chart_cd,
     cl_data_to_tv_chart,
     kcharts_frequency_h_l_map,
     web_batch_get_cl_datas,
@@ -36,6 +37,11 @@ from chanlun.cl_utils import (
 )
 from chanlun.market import Market
 from chanlun.exchange import get_exchange
+from chanlun.exchange.exchange import (
+    convert_currency_kline_frequency,
+    convert_futures_kline_frequency,
+    convert_stock_kline_frequency,
+)
 from chanlun.tools.log_util import LogUtil
 
 from .chart_cache import (
@@ -357,10 +363,122 @@ def _merge_chart_data(existing_data: dict, new_data: dict):
         elif key in existing_data:
             merged[key] = existing_data[key]
 
+    strict_mode = new_data.get("strict_structure_mode")
+    if strict_mode == "replace":
+        if not isinstance(new_data.get("strict_structure"), dict):
+            raise ValueError("replace mode requires an atomic strict_structure")
+        merged["strict_structure_mode"] = "replace"
+        merged["strict_structure"] = new_data["strict_structure"]
+        merged.pop("strict_structure_error", None)
+    elif strict_mode == "unchanged":
+        if "strict_structure" in existing_data:
+            merged["strict_structure"] = existing_data["strict_structure"]
+        else:
+            merged.pop("strict_structure", None)
+        if "strict_structure_mode" in existing_data:
+            merged["strict_structure_mode"] = existing_data[
+                "strict_structure_mode"
+            ]
+        else:
+            merged.pop("strict_structure_mode", None)
+        if "strict_structure_error" in existing_data:
+            merged["strict_structure_error"] = existing_data[
+                "strict_structure_error"
+            ]
+        else:
+            merged.pop("strict_structure_error", None)
+    elif strict_mode == "unavailable":
+        merged["strict_structure_mode"] = "unavailable"
+        merged.pop("strict_structure", None)
+        merged["strict_structure_error"] = new_data.get(
+            "strict_structure_error",
+            {"code": "strict_evidence_invalid"},
+        )
+    elif strict_mode is not None:
+        raise ValueError("unsupported strict_structure_mode")
+
     return merged
 
 
 # ---------------- 主计算路径 ----------------
+
+
+def _convert_chart_frequency(market, klines, display_frequency):
+    """Aggregate fetched bars with the market's exact close-label contract."""
+
+    converters = {
+        "a": convert_stock_kline_frequency,
+        "currency": convert_currency_kline_frequency,
+        "currency_spot": convert_currency_kline_frequency,
+        "futures": convert_futures_kline_frequency,
+        "ny_futures": convert_futures_kline_frequency,
+    }
+    converter = converters.get(market)
+    if converter is None:
+        raise ValueError(f"unsupported chart conversion market: {market}")
+    return converter(klines, display_frequency)
+
+
+def _build_display_frequency_cl(
+    *,
+    market,
+    code,
+    fetched_klines,
+    fetched_frequency,
+    display_frequency,
+    cl_config,
+):
+    """Build CL from the exact bars shown, never from a lower-frequency CD."""
+
+    if fetched_klines is None or not hasattr(fetched_klines, "attrs"):
+        raise TypeError("fetched_klines must be a pandas DataFrame")
+    source_attrs = dict(fetched_klines.attrs)
+    if fetched_frequency == display_frequency:
+        display_klines = fetched_klines.copy(deep=True)
+    else:
+        display_klines = _convert_chart_frequency(
+            market,
+            fetched_klines,
+            display_frequency,
+        ).copy(deep=True)
+    display_klines.attrs.clear()
+    display_klines.attrs.update(source_attrs)
+    if len(display_klines) == 0:
+        raise ValueError("display-frequency aggregation produced no closed bars")
+    cds = web_batch_get_cl_datas(
+        market,
+        code,
+        {display_frequency: display_klines},
+        cl_config,
+    )
+    if len(cds) != 1:
+        raise ValueError("display-frequency CL factory must return exactly one object")
+    return cds[0], display_klines
+
+
+def serialize_chart_data_with_strict_runtime(
+    *,
+    market,
+    code,
+    display_frequency,
+    display_klines,
+    legacy_cd,
+    legacy_config,
+):
+    """Serialize one chart with strict structure derived from its displayed bars."""
+
+    strict_runtime = build_strict_chart_cd(
+        market=market,
+        code=code,
+        frequency=display_frequency,
+        frame=display_klines,
+    )
+    return cl_data_to_tv_chart(
+        legacy_cd,
+        legacy_config,
+        strict_runtime=strict_runtime,
+    )
+
 
 def compute_and_cache_chart_data(
     market: str, code: str, frequency: str, cl_config: dict, skip_download: bool = False
@@ -437,7 +555,15 @@ def _compute_and_cache_chart_data_impl(
             # R5-#4: 负缓存防重拉即可; 不标 validated(空拉取会重置既存陈旧快照 validated_at→当 fresh)。
             _mark_negative_cache(cache_key)
             return False
-        cd = web_batch_get_cl_datas(market, code, {frequency_low: klines}, cl_config)[0]
+        cd, display_klines = _build_display_frequency_cl(
+            market=market,
+            code=code,
+            fetched_klines=klines,
+            fetched_frequency=frequency_low,
+            display_frequency=frequency,
+            cl_config=cl_config,
+        )
+        kchart_to_frequency = None
     else:
         kchart_to_frequency = None
         with lb_low_priority():
@@ -452,8 +578,16 @@ def _compute_and_cache_chart_data_impl(
             _mark_negative_cache(cache_key)
             return False
         cd = web_batch_get_cl_datas(market, code, {frequency: klines}, cl_config)[0]
+        display_klines = klines
 
-    cl_chart_data = cl_data_to_tv_chart(cd, cl_config, to_frequency=kchart_to_frequency)
+    cl_chart_data = serialize_chart_data_with_strict_runtime(
+        market=market,
+        code=code,
+        display_frequency=frequency,
+        display_klines=display_klines,
+        legacy_cd=cd,
+        legacy_config=cl_config,
+    )
     if cl_chart_data is None:
         _mark_negative_cache(cache_key)
         with cache_lock:
@@ -505,6 +639,41 @@ def _decide_full_snapshot(first_data_request, to_ts: int, bar_times, source_is_f
     if first_data_request != "false" or not bar_times or not source_is_full:
         return False
     return to_ts == 0 or to_ts >= bar_times[-1]
+
+
+def strict_structure_history_fields(
+    chart_data: dict,
+    *,
+    authoritative: bool,
+) -> dict:
+    """Return the three-state atomic strict-structure history contract."""
+
+    if not authoritative:
+        return {"strict_structure_mode": "unchanged"}
+    mode = chart_data.get("strict_structure_mode")
+    if mode == "replace":
+        strict = chart_data.get("strict_structure")
+        if (
+            not isinstance(strict, dict)
+            or strict.get("schema") != "chanlun-chart-structure/v4"
+        ):
+            raise ValueError("replace mode requires strict chart schema v4")
+        return {
+            "strict_structure_mode": "replace",
+            "strict_structure": strict,
+        }
+    if mode == "unavailable":
+        error = chart_data.get("strict_structure_error")
+        if not isinstance(error, dict) or not error.get("code"):
+            error = {"code": "strict_evidence_invalid"}
+        return {
+            "strict_structure_mode": "unavailable",
+            "strict_structure_error": error,
+        }
+    return {
+        "strict_structure_mode": "unavailable",
+        "strict_structure_error": {"code": "strict_evidence_missing"},
+    }
 
 
 def _miss_source_is_full(is_range_request, cache_miss_reason, cd_is_none) -> bool:
@@ -932,7 +1101,15 @@ def fetch_klines_and_compute_cl_data(
             # 既存 too_stale 全量快照的 validated_at 重置为 now→数小时前旧缠论(含悬空未完成笔)被
             # 当 fresh 下发。保留旧 validated_at 让 stale 判定继续生效并自愈(同上方 fetch_incomplete)。
             return None
-        cd = web_batch_get_cl_datas(market, code, {frequency_low: klines}, cl_config)[0]
+        cd, display_klines = _build_display_frequency_cl(
+            market=market,
+            code=code,
+            fetched_klines=klines,
+            fetched_frequency=frequency_low,
+            display_frequency=frequency,
+            cl_config=cl_config,
+        )
+        kchart_to_frequency = None
     else:
         kchart_to_frequency = None
         import time as _time
@@ -952,6 +1129,7 @@ def fetch_klines_and_compute_cl_data(
             # 既存 too_stale 全量快照的 validated_at 重置为 now→数小时前旧缠论(含悬空未完成笔)被
             # 当 fresh 下发。保留旧 validated_at 让 stale 判定继续生效并自愈(同上方 fetch_incomplete)。
             return None
+        display_klines = klines
 
         # 方案 A: 范围请求走分层缓存 — 把新 K 线合并进 L1, 基于完整 K 线集
         # 全量重算, 整体替换 L2。不再走 web_batch_get_cl_datas + _merge_chart_data,
@@ -1003,8 +1181,13 @@ def fetch_klines_and_compute_cl_data(
     if cd is not None:
         import time as _time
         _ex_t0 = _time.time()
-        cl_chart_data_local = cl_data_to_tv_chart(
-            cd, cl_config, to_frequency=kchart_to_frequency
+        cl_chart_data_local = serialize_chart_data_with_strict_runtime(
+            market=market,
+            code=code,
+            display_frequency=frequency,
+            display_klines=display_klines,
+            legacy_cd=cd,
+            legacy_config=cl_config,
         )
         LogUtil.info(
             f"[first_load] {market}:{code} {frequency} extract="

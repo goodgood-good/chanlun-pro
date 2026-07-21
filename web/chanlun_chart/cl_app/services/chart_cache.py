@@ -227,7 +227,9 @@ def _stable_hash(obj) -> str:
 #   现在被填充;source_fingerprint 已随 tv_chart 改动变化,显式 bump 求稳。
 # - v37 (2026-07-20) ── 中枢图形补充 tower/recursive_level/ZD/ZG/done、进入段、离开段与
 #   关联买卖点元数据，供右栏双塔审计详情直接展示。输出字段结构变化，显式失效旧磁盘缓存。
-_CHART_CACHE_SCHEMA_VERSION = "v37"
+# - v39 (2026-07-21) ── 严格结构快照携带可还原的价格基准元数据；旧缓存无法证明复权
+#   历史与当前 QMT 数据同属一个价格纪元，必须失效后用当前因子账本重建。
+_CHART_CACHE_SCHEMA_VERSION = "v40"
 
 
 def _build_cache_key(market: str, code: str, frequency: str, cl_config: dict) -> str:
@@ -506,6 +508,7 @@ _chart_cache_disk_lock = threading.Lock()
 _chart_cache_disk_closed = True
 _chart_cache_accepting_writes = True
 _chart_cache_disk_futures = set()
+_chart_cache_disk_future_keys = {}
 _chart_cache_disk_slots = threading.BoundedSemaphore(_CHART_CACHE_MAX_PENDING_WRITES)
 _chart_cache_disk_executor = None
 
@@ -541,6 +544,7 @@ def _persist_chart_cache_async(cache_key: str, entry: dict) -> None:
             )
             return
         _chart_cache_disk_futures.add(future)
+        _chart_cache_disk_future_keys[future] = cache_key
 
     def _completed(done_future):
         try:
@@ -556,6 +560,7 @@ def _persist_chart_cache_async(cache_key: str, entry: dict) -> None:
         finally:
             with _chart_cache_disk_lock:
                 _chart_cache_disk_futures.discard(done_future)
+                _chart_cache_disk_future_keys.pop(done_future, None)
             slots.release()
 
     future.add_done_callback(_completed)
@@ -615,6 +620,38 @@ def _set_chart_cache_entry(cache_key: str, cl_chart_data: dict, is_full_snapshot
         chart_data_cache[cache_key] = entry
         _persist_chart_cache_async(cache_key, entry)
     return entry
+
+
+def _delete_chart_cache_entry(cache_key: str) -> None:
+    """Invalidate one RAM/disk entry after its price basis becomes unsafe."""
+
+    with cache_lock:
+        chart_data_cache.pop(cache_key, None)
+
+    # A previous _set may still be writing this key asynchronously. Wait only
+    # for those rare same-key writes before deleting, otherwise a late writer
+    # could resurrect the unsafe snapshot after the unlink.
+    with _chart_cache_disk_lock:
+        pending = [
+            future
+            for future in _chart_cache_disk_futures
+            if _chart_cache_disk_future_keys.get(future) == cache_key
+        ]
+    for future in pending:
+        try:
+            future.result()
+        except Exception as exc:
+            LogUtil.warning(
+                f"[chart_cache] pending write failed before delete "
+                f"key={cache_key} error={type(exc).__name__}: {exc}"
+            )
+    try:
+        fdb.delete_chart_cache(cache_key)
+    except Exception as exc:
+        LogUtil.warning(
+            f"[chart_cache] disk delete failed key={cache_key} "
+            f"error={type(exc).__name__}: {exc}"
+        )
 
 
 def _mark_chart_cache_validated(cache_key: str):

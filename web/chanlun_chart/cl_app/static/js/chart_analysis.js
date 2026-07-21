@@ -32,6 +32,8 @@
   const BC_LABELS = Object.freeze({
     pz: '盘整背驰',
     qs: '趋势背驰',
+    consolidation: '盘整背驰',
+    trend: '趋势背驰',
     bi: '笔背驰',
     xd: '线段背驰',
   });
@@ -54,10 +56,6 @@
   const LAYER_CONFIG_KEYS = Object.freeze({
     bi: { key: 'bi' },
     xd: { key: 'xd' },
-    bi_zs: { key: 'zs_bi', parent: 'zs_all' },
-    xd_zs: { key: 'zs_xd', parent: 'zs_all' },
-    bi_mmd: { key: 'mmd_bi', parent: 'mmd' },
-    xd_mmd: { key: 'mmd_xd', parent: 'mmd' },
   });
 
   function numeric(value) {
@@ -351,10 +349,13 @@
 
     const rawText = String(latest.text || '').trim();
     const normalizedText = rawText.toLowerCase();
+    const explicitLevelLabel = String(latest.level_label || '').trim();
     const normalizedLevel = String(latest.level || '').trim().toLowerCase();
-    const levelLabel = normalizedLevel.indexOf('xd') >= 0 || normalizedLevel.indexOf('segment') >= 0
-      ? '线段'
-      : (normalizedLevel.indexOf('bi') >= 0 || normalizedLevel.indexOf('pen') >= 0 ? '笔' : '结构');
+    const levelLabel = explicitLevelLabel || (
+      normalizedLevel.indexOf('xd') >= 0 || normalizedLevel.indexOf('segment') >= 0
+        ? '线段'
+        : (normalizedLevel.indexOf('bi') >= 0 || normalizedLevel.indexOf('pen') >= 0 ? '笔' : '结构')
+    );
 
     let label = rawText || (kind === 'mmd' ? '买卖点' : '背驰');
     let isBuy = false;
@@ -497,7 +498,7 @@
     if (recursiveZones.length) return recursiveZones;
     return Array.isArray(source && source.xd_zss) ? source.xd_zss : [];
   }
-  function summarizeChartData(data, context) {
+  function summarizeLegacyChartData(data, context) {
     const source = data || {};
     const options = context || {};
     const bars = Array.isArray(source.bars) ? source.bars : [];
@@ -547,6 +548,412 @@
       verdictDetail: narrative.detail,
       plan,
     };
+  }
+
+  const STRICT_POINT_TYPES = Object.freeze([
+    '1buy', '2buy', '3buy', '1sell', '2sell', '3sell',
+  ]);
+
+  function strictFrequencyFromResolution(value) {
+    const resolution = String(value == null ? '' : value).trim().toUpperCase();
+    const fixed = {
+      '10S': '10s', '30S': '30s',
+      '1D': 'd', '2D': '2d', '1W': 'w', '1M': 'm',
+      '3M': 'q', '12M': 'y',
+    };
+    if (fixed[resolution]) return fixed[resolution];
+    if (/^[1-9][0-9]*$/.test(resolution)) return `${resolution}m`;
+    return resolution.toLowerCase();
+  }
+
+  function normalizeStrictSymbol(value) {
+    return String(value == null ? '' : value)
+      .replace(/^[^:]+:/, '')
+      .trim()
+      .toUpperCase();
+  }
+
+  function emptyStrictPointCounts() {
+    const counts = {};
+    STRICT_POINT_TYPES.forEach((pointType) => {
+      counts[pointType] = { confirmed: 0, approaching: 0 };
+    });
+    return counts;
+  }
+
+  function strictEmptySummary(source, options, state, detail) {
+    const base = summarizeLegacyChartData({ bars: source.bars }, options);
+    const unavailable = state === 'unavailable';
+    return {
+      ...base,
+      state,
+      statusDetail: detail,
+      sourceClosedAt: null,
+      structureRevision: null,
+      snapshotRevision: null,
+      renderRevision: null,
+      priceBasisRevision: null,
+      structurePriceQuantum: null,
+      trends: [],
+      completedTrends: [],
+      formalCenters: [],
+      centerProjections: [],
+      observations: [],
+      confirmedPoints: [],
+      approachingPoints: [],
+      divergences: [],
+      pointCounts: emptyStrictPointCounts(),
+      verdict: unavailable ? '严格缠论结构暂不可用' : '正在同步严格缠论结构',
+      verdictDetail: detail,
+      plan: {
+        now: unavailable ? '严格结构数据不可用，未采用旧结构降级。' : '严格结构与当前图表尚未完成同步。',
+        wait: '等待同一标的、周期和末根闭合时间的权威严格快照。',
+        boundary: '同步完成前不生成结构边界或交易判断。',
+      },
+    };
+  }
+
+  function validateStrictSnapshot(snapshot, source, options) {
+    if (!snapshot || snapshot.schema !== 'chanlun-chart-structure/v4') {
+      throw new Error('严格结构数据契约不匹配');
+    }
+    const requiredStrings = [
+      'symbol', 'source_frequency', 'display_frequency',
+      'price_basis_revision', 'structure_price_quantum',
+      'strict_config_revision', 'structure_revision',
+      'snapshot_revision', 'render_revision',
+    ];
+    requiredStrings.forEach((field) => {
+      if (typeof snapshot[field] !== 'string' || snapshot[field].length === 0) {
+        throw new Error(`严格结构字段缺失：${field}`);
+      }
+    });
+    if (!Number.isInteger(snapshot.source_closed_at)) {
+      throw new Error('严格结构末根时间不是秒级整数');
+    }
+    if (!Number.isFinite(Number(snapshot.structure_price_quantum))
+      || Number(snapshot.structure_price_quantum) <= 0) {
+      throw new Error('严格结构价格量子无效');
+    }
+    if (!Array.isArray(snapshot.stroke_center_observations) || !Array.isArray(snapshot.levels)) {
+      throw new Error('严格结构集合无效');
+    }
+
+    const expectedFrequency = strictFrequencyFromResolution(options.resolution);
+    if (snapshot.display_frequency !== expectedFrequency
+      || snapshot.source_frequency !== expectedFrequency) {
+      throw new Error('严格结构周期与当前图表周期不一致');
+    }
+    const expectedSymbol = normalizeStrictSymbol(options.symbol);
+    if (expectedSymbol && normalizeStrictSymbol(snapshot.symbol) !== expectedSymbol) {
+      throw new Error('严格结构标的与当前图表标的不一致');
+    }
+    const bars = Array.isArray(source.bars) ? source.bars : [];
+    if (!bars.length) throw new Error('严格结构缺少当前图表 K 线');
+    const loadedClose = toSeconds(bars[bars.length - 1] && bars[bars.length - 1].time);
+    if (loadedClose !== snapshot.source_closed_at) {
+      throw new Error('严格结构末根闭合时间与当前图表不一致');
+    }
+    snapshot.levels.forEach((level) => {
+      if (!level || !Number.isInteger(level.structural_level)
+        || typeof level.label !== 'string' || level.label.length === 0
+        || level.origin !== 'current_chart_recursive') {
+        throw new Error('严格结构级别无效');
+      }
+      [
+        'centers', 'center_projections', 'current_trends',
+        'completed_trend_snapshots', 'confirmed_points', 'approaching_points', 'divergences',
+      ].forEach((field) => {
+        if (!Array.isArray(level[field])) throw new Error(`严格结构级别集合无效：${field}`);
+      });
+    });
+    return snapshot;
+  }
+
+  function summarizeStrictCenter(item, qualification) {
+    const core = item && item.core && typeof item.core === 'object' ? item.core : {};
+    return {
+      centerId: item.center_id,
+      renderId: item.render_id,
+      bodyRevision: item.body_revision,
+      structuralLevel: item.structural_level,
+      sourceKind: item.source_kind,
+      state: item.state,
+      tradable: item.tradable === true,
+      qualification,
+      zd: numeric(core.zd_price),
+      zg: numeric(core.zg_price),
+      establishedAt: toSeconds(item.established_at),
+      availableAt: toSeconds(item.available_at),
+      completedAt: toSeconds(item.completed_at),
+      entryUnitId: item.entry_unit_id || null,
+      coreUnitIds: Array.isArray(item.core_unit_ids) ? item.core_unit_ids.slice() : [],
+      initialExitUnitId: item.initial_exit_unit_id || null,
+      initialUnitIds: Array.isArray(item.initial_unit_ids) ? item.initial_unit_ids.slice() : [],
+      bodyUnitIds: Array.isArray(item.body_unit_ids) ? item.body_unit_ids.slice() : [],
+      extensionUnitIds: Array.isArray(item.extension_unit_ids) ? item.extension_unit_ids.slice() : [],
+      pendingLeaveUnitId: item.pending_leave_unit_id || null,
+      completionLeaveUnitId: item.completion_leave_unit_id || null,
+      completionReturnUnitId: item.completion_return_unit_id || null,
+      completionDirection: item.completion_direction || null,
+    };
+  }
+
+  function summarizeStrictTrend(item) {
+    const direction = String(item.direction || '').toLowerCase();
+    return {
+      trendId: item.trend_id,
+      renderId: item.render_id,
+      structuralLevel: item.structural_level,
+      sourceKind: item.source_kind,
+      state: item.state,
+      kind: item.kind,
+      direction,
+      directionLabel: DIRECTION_LABELS[direction] || '方向待定',
+      tradable: item.tradable === true,
+      centerIds: Array.isArray(item.center_ids) ? item.center_ids.slice() : [],
+      confirmedAt: toSeconds(item.confirmed_at),
+      availableAt: toSeconds(item.available_at),
+    };
+  }
+
+  function strictEvidenceText(item) {
+    const values = [];
+    const divergence = item && item.divergence;
+    if (divergence && typeof divergence === 'object') {
+      const source = String(divergence.strength_source || '').toUpperCase();
+      const kind = String(divergence.kind || 'divergence');
+      values.push(`${source || '结构'} ${kind} 背驰证据`);
+    }
+    if (Array.isArray(item && item.evidence_codes) && item.evidence_codes.length) {
+      values.push(item.evidence_codes.join('、'));
+    }
+    return values.length ? values.join(' · ') : '严格结构证据已记录';
+  }
+
+  function summarizeStrictPoint(item) {
+    const rawType = String(item.point_type || '').toLowerCase();
+    const pointType = MMD_ALIASES[rawType] || rawType;
+    return {
+      pointId: item.point_id,
+      renderId: item.render_id,
+      pointType,
+      pointLabel: MMD_LABELS[pointType] || pointType,
+      side: item.side,
+      status: item.status,
+      variant: item.variant,
+      structuralLevel: item.structural_level,
+      sourceKind: item.source_kind,
+      priceBasisRevision: item.price_basis_revision,
+      anchorAt: toSeconds(item.anchor_at),
+      confirmedAt: toSeconds(item.confirmed_at),
+      availableAt: toSeconds(item.available_at),
+      anchorPrice: numeric(item.anchor_price),
+      invalidationPrice: numeric(item.invalidation_price),
+      centerId: item.center_id || null,
+      centerOrdinal: numeric(item.center_ordinal),
+      parentPointId: item.parent_point_id || null,
+      relatedPointIds: Array.isArray(item.related_point_ids) ? item.related_point_ids.slice() : [],
+      missingConditions: Array.isArray(item.missing_conditions) ? item.missing_conditions.slice() : [],
+      evidenceCodes: Array.isArray(item.evidence_codes) ? item.evidence_codes.slice() : [],
+      evidenceText: strictEvidenceText(item),
+      tradable: item.tradable === true,
+    };
+  }
+
+  function summarizeStrictDivergence(item, levelLabel) {
+    const kind = String(item.kind || '').toLowerCase();
+    const direction = String(item.direction || '').toLowerCase();
+    const metrics = item && item.metrics && typeof item.metrics === 'object' ? item.metrics : {};
+    return {
+      divergenceId: item.divergence_id,
+      renderId: item.render_id,
+      kind,
+      label: BC_LABELS[kind] || kind,
+      direction,
+      directionLabel: DIRECTION_LABELS[direction] || '方向待定',
+      structuralLevel: item.structural_level,
+      levelLabel,
+      sourceKind: item.source_kind,
+      priceBasisRevision: item.price_basis_revision,
+      compareUnitId: item.compare_unit_id,
+      signalUnitId: item.signal_unit_id,
+      anchorAt: toSeconds(item.anchor_at),
+      anchorPrice: numeric(item.anchor_price),
+      confirmedAt: toSeconds(item.confirmed_at),
+      availableAt: toSeconds(item.available_at),
+      strengthSource: metrics.strength_source || null,
+      tradable: item.tradable === true,
+    };
+  }
+
+  function strictLegacySignal(points, bars, timeZone, latestClose, kind) {
+    const legacyItems = points.map((item) => ({
+      ...item,
+      text: kind === 'mmd'
+        ? item.point_type
+        : (item.kind || (item.divergence && item.divergence.kind)),
+      level: item.level_label || `L${item.structural_level}`,
+    }));
+    return latestSignal([legacyItems], bars, kind, timeZone, latestClose);
+  }
+
+  function summarizeStrictChartData(source, options, snapshot) {
+    const base = summarizeLegacyChartData({ bars: source.bars }, options);
+    const bars = Array.isArray(source.bars) ? source.bars : [];
+    const latestBar = bars.length ? bars[bars.length - 1] : null;
+    const latestClose = numeric(latestBar && latestBar.close);
+    const formalCenters = [];
+    const centerProjections = [];
+    const trends = [];
+    const completedTrends = [];
+    const rawConfirmedPoints = [];
+    const rawApproachingPoints = [];
+    const rawDivergences = [];
+    const pointCounts = emptyStrictPointCounts();
+
+    snapshot.levels.forEach((level) => {
+      level.centers.forEach((item) => {
+        formalCenters.push(summarizeStrictCenter(item, '正式严格中枢'));
+      });
+      level.center_projections.forEach((item) => {
+        centerProjections.push(summarizeStrictCenter(item, '未确认投影，不可直接交易'));
+      });
+      level.current_trends.forEach((item) => trends.push(summarizeStrictTrend(item)));
+      level.completed_trend_snapshots.forEach((item) => completedTrends.push(summarizeStrictTrend(item)));
+      level.confirmed_points.forEach((item) => {
+        rawConfirmedPoints.push(item);
+        const pointType = MMD_ALIASES[String(item.point_type || '').toLowerCase()]
+          || String(item.point_type || '').toLowerCase();
+        if (pointCounts[pointType]) pointCounts[pointType].confirmed += 1;
+      });
+      level.approaching_points.forEach((item) => {
+        rawApproachingPoints.push(item);
+        const pointType = MMD_ALIASES[String(item.point_type || '').toLowerCase()]
+          || String(item.point_type || '').toLowerCase();
+        if (pointCounts[pointType]) pointCounts[pointType].approaching += 1;
+      });
+      level.divergences.forEach((item) => {
+        rawDivergences.push({ ...item, level_label: level.label });
+      });
+    });
+
+    const observations = snapshot.stroke_center_observations.map((item) => (
+      summarizeStrictCenter(item, '观察证据，不可直接交易')
+    ));
+    const confirmedPoints = rawConfirmedPoints.map(summarizeStrictPoint);
+    const approachingPoints = rawApproachingPoints.map(summarizeStrictPoint);
+    const divergences = rawDivergences.map((item) => (
+      summarizeStrictDivergence(item, item.level_label)
+    ));
+    const l0Trends = snapshot.levels
+      .filter((level) => level.structural_level === 0)
+      .flatMap((level) => level.current_trends)
+      .map((item) => ({
+        ...item,
+        linestyle: item.state === 'forming' ? '1' : '0',
+      }));
+    const l0Centers = snapshot.levels
+      .filter((level) => level.structural_level === 0)
+      .flatMap((level) => level.centers)
+      .map((item) => ({
+        ...item,
+        zd: item.core && item.core.zd_price,
+        zg: item.core && item.core.zg_price,
+        done: item.state === 'completed',
+        recursive_level: 0,
+      }));
+    const bi = summarizeLine([]);
+    const xd = summarizeLine(l0Trends);
+    const biZone = summarizeZone([], latestClose, '笔观察中枢', {
+      tower: 'bi',
+      recursiveLevel: null,
+    });
+    const xdZone = summarizeZone(l0Centers, latestClose, '正式中枢', {
+      tower: 'xd',
+      recursiveLevel: 0,
+    });
+    const mmd = strictLegacySignal(
+      rawConfirmedPoints.concat(rawApproachingPoints),
+      bars,
+      options.timeZone,
+      latestClose,
+      'mmd',
+    );
+    const bc = strictLegacySignal(
+      rawDivergences,
+      bars,
+      options.timeZone,
+      latestClose,
+      'bc',
+    );
+    const narrative = structureNarrative(bi, xd, biZone, xdZone);
+    const plan = buildPlan(bi, xd, biZone, xdZone);
+
+    return {
+      ...base,
+      state: 'ready',
+      statusDetail: `严格结构已同步 · ${snapshot.structure_revision.slice(0, 18)}`,
+      sourceClosedAt: snapshot.source_closed_at,
+      structureRevision: snapshot.structure_revision,
+      snapshotRevision: snapshot.snapshot_revision,
+      renderRevision: snapshot.render_revision,
+      priceBasisRevision: snapshot.price_basis_revision,
+      structurePriceQuantum: snapshot.structure_price_quantum,
+      trends,
+      completedTrends,
+      formalCenters,
+      centerProjections,
+      observations,
+      confirmedPoints,
+      approachingPoints,
+      divergences,
+      pointCounts,
+      bi,
+      xd,
+      biZone,
+      xdZone,
+      mmd,
+      bc,
+      verdict: narrative.headline,
+      verdictDetail: narrative.detail,
+      plan,
+    };
+  }
+
+  function summarizeChartData(data, context) {
+    const source = data || {};
+    const options = context || {};
+    if (!Object.prototype.hasOwnProperty.call(source, 'strict_structure_mode')) {
+      return summarizeLegacyChartData(source, options);
+    }
+    const mode = source.strict_structure_mode;
+    if (mode === 'unavailable') {
+      const code = source.strict_structure_error && source.strict_structure_error.code
+        ? source.strict_structure_error.code
+        : 'strict_evidence_invalid';
+      return strictEmptySummary(source, options, 'unavailable', `严格结构不可用：${code}`);
+    }
+    let snapshot = null;
+    if (mode === 'replace') snapshot = source.strict_structure;
+    else if (mode === 'unchanged') snapshot = options.cachedStrictSnapshot;
+    else {
+      return strictEmptySummary(source, options, 'syncing', '严格结构传输状态无效');
+    }
+    if (!snapshot) {
+      return strictEmptySummary(source, options, 'syncing', '严格结构权威快照缺失');
+    }
+    try {
+      validateStrictSnapshot(snapshot, source, options);
+      return summarizeStrictChartData(source, options, snapshot);
+    } catch (error) {
+      return strictEmptySummary(
+        source,
+        options,
+        'syncing',
+        error && error.message ? error.message : '严格结构上下文不匹配',
+      );
+    }
   }
 
   const browserState = {
@@ -676,14 +1083,6 @@
   function layerIsVisible(manager, layer) {
     const config = manager && manager.cl_show_config;
     if (!config || typeof config !== 'object') return false;
-    if (layer === 'recursive') {
-      if (config.recursive_layers === false) return false;
-      const maxLevel = Math.max(0, Number(manager._recMaxLevel) || 0);
-      for (let level = 1; level <= maxLevel; level += 1) {
-        if (config[`zs_L${level}`] === false) return false;
-      }
-      return true;
-    }
     const definition = LAYER_CONFIG_KEYS[layer];
     return Boolean(definition && config[definition.key] !== false);
   }
@@ -703,19 +1102,9 @@
     if (!manager || !manager.cl_show_config || typeof manager.cl_show_config !== 'object') return false;
     const config = manager.cl_show_config;
     const enabled = Boolean(visible);
-    if (layer === 'recursive') {
-      const maxLevel = Math.max(0, Number(manager._recMaxLevel) || 0);
-      config.recursive_layers = enabled;
-      for (let level = 1; level <= maxLevel; level += 1) {
-        for (const prefix of ['zs', 'xd', 'mmd', 'bc']) config[`${prefix}_L${level}`] = enabled;
-      }
-      if (enabled) config.zs_all = true;
-    } else {
-      const definition = LAYER_CONFIG_KEYS[layer];
-      if (!definition) return false;
-      config[definition.key] = enabled;
-      if (enabled && definition.parent) config[definition.parent] = true;
-    }
+    const definition = LAYER_CONFIG_KEYS[layer];
+    if (!definition) return false;
+    config[definition.key] = enabled;
     persistLayerConfig(manager);
     if (typeof manager.debouncedDrawChanlun === 'function') manager.debouncedDrawChanlun();
     return true;
@@ -746,6 +1135,7 @@
         if (token === browserState.renderToken && info) {
           const timeZone = info.timezone || options.timeZone;
           renderSummary(summarizeChartData(data, {
+            ...options,
             resolution: identity.interval,
             timeZone,
           }), identity, info);
@@ -776,6 +1166,8 @@
     const options = {
       resolution: identity.interval,
       timeZone: MARKET_TIMEZONES[parsed.market],
+      symbol: identity.symbol,
+      cachedStrictSnapshot: manager._strictStructureSnapshot || null,
     };
     const token = ++browserState.renderToken;
     const symbolCacheKey = `${identity.symbol}|${identity.interval}`;

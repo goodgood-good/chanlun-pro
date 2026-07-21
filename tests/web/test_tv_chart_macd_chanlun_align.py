@@ -126,4 +126,4 @@ def test_center_chart_payload_preserves_auditable_structure_metadata():
 def test_center_metadata_schema_bumps_chart_cache_version():
     from cl_app.services import chart_cache
 
-    assert chart_cache._CHART_CACHE_SCHEMA_VERSION == "v37"
+    assert chart_cache._CHART_CACHE_SCHEMA_VERSION == "v40"

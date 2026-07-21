@@ -20,7 +20,7 @@
         <div class="cp-page-header-copy">
           <span class="cp-eyebrow">CHANLUN ENGINE CONFIG</span>
           <h1>缠论参数配置</h1>
-          <p>按配置范围、结构算法和图表呈现分区调整。每个字段保留原有悬浮说明。</p>
+          <p>按基础结构参数分区调整；递归中枢、走势、买卖点和背驰请在图表显示菜单中设置。</p>
         </div>
         <div class="cp-page-header-actions">
           <div class="cp-context-card"><span>当前标的</span><strong>{{ code }}</strong></div>
@@ -369,92 +369,6 @@
             </div>
         </div>
         <hr>
-        <div class="cp-config-section-title">中枢算法</div>
-        <p class="layui-padding-1 layui-font-blue">
-            <i class="layui-edge layui-edge-right"></i>
-            中枢设置，可以选择多种类型的中枢；买卖点根据中枢计算，不同的中枢也会生成不同的买卖点
-        </p>
-        <div class="layui-form-item">
-            <div class="layui-inline" title="标准中枢，中枢维持，直到出现三类买卖点结束；段内中枢，只计算线段内出现的中枢；方向中枢，严格按照中枢方向生成中枢">
-                <label class="layui-form-label">笔中枢类型</label>
-                <div class="layui-input-inline">
-                        <input type="checkbox" name="zs_bi_type" value="zs_type_bz" title="标准中枢" lay-filter="cl_config"
-                            {% if "zs_type_bz" in zs_bi_type %} checked {% endif %} />
-                        <input type="checkbox" name="zs_bi_type" value="zs_type_dn" title="段内中枢" lay-filter="cl_config"
-                            {% if "zs_type_dn" in zs_bi_type %} checked {% endif %} />
-                        <input type="checkbox" name="zs_bi_type" value="zs_type_fx" title="方向中枢" lay-filter="cl_config"
-                            {% if "zs_type_fx" in zs_bi_type %} checked {% endif %} />
-                        <input type="checkbox" name="zs_bi_type" value="zs_type_fl" title="分类中枢" lay-filter="cl_config"
-                            {% if "zs_type_fl" in zs_bi_type %} checked {% endif %} />
-                    
-                </div>
-            </div>
-            <div class="layui-inline" title="标准中枢，中枢维持，直到出现三类买卖点结束；段内中枢，只计算线段内出现的中枢；方向中枢，严格按照中枢方向生成中枢">
-                <label class="layui-form-label">线段中枢类型</label>
-                <div class="layui-input-inline">
-                        <input type="checkbox" name="zs_xd_type" value="zs_type_bz" title="标准中枢" lay-filter="cl_config"
-                            {% if "zs_type_bz" in zs_xd_type %} checked {% endif %} />
-                        <input type="checkbox" name="zs_xd_type" value="zs_type_dn" title="段内中枢" lay-filter="cl_config"
-                            {% if "zs_type_dn" in zs_xd_type %} checked {% endif %} />
-                        <input type="checkbox" name="zs_xd_type" value="zs_type_fx" title="方向中枢" lay-filter="cl_config"
-                            {% if "zs_type_fx" in zs_xd_type %} checked {% endif %} />
-                        <input type="checkbox" name="zs_xd_type" value="zs_type_fl" title="分类中枢" lay-filter="cl_config"
-                            {% if "zs_type_fl" in zs_xd_type %} checked {% endif %} />
-                    
-                </div>
-            </div>
-        </div>
-
-        <div class="layui-form-item">
-            <div class="layui-inline" title="中枢区间，用来计算 高高、低低、中枢高点、中枢低点的依据">
-                <label class="layui-form-label">中枢区间</label>
-                <div class="layui-input-inline">
-                    <label for="zs_qj">
-                        <select type="select" class="form-control" name="zs_qj" lay-filter="cl_config">
-                            <option value="zs_qj_dd" {% if zs_qj=='zs_qj_dd' %} selected {% endif %}>中枢元素的顶底端点
-                            </option>
-                            <option value="zs_qj_ck" {% if zs_qj=='zs_qj_ck' %} selected {% endif %}>中枢元素的缠论K线高低点
-                            </option>
-                            <option value="zs_qj_k" {% if zs_qj=='zs_qj_k' %} selected {% endif %}>中枢元素的原始K线高低点
-                            </option>
-                        </select>
-                    </label>
-                </div>
-            </div>
-            <div class="layui-inline" title="中枢重叠，用来计算中枢重叠区间的依据">
-                <label class="layui-form-label">中枢重叠</label>
-                <div class="layui-input-inline">
-                    <label for="zs_cd">
-                        <select type="select" class="form-control" name="zs_cd" lay-filter="cl_config">
-                            <option value="zs_cd_three" {% if zs_cd=='zs_cd_three' %} selected {% endif %}>前三段
-                            </option>
-                            <option value="zs_cd_more" {% if zs_cd=='zs_cd_more' %} selected {% endif %}>所有段
-                            </option>
-                        </select>
-                    </label>
-                </div>
-            </div>
-            <div class="layui-inline" title="计算两个中枢的位置关系，来判断是上涨还是下跌趋势">
-                <label class="layui-form-label">中枢位置</label>
-                <div class="layui-input-inline">
-                    <label for="zs_wzgx">
-                        <select type="select" class="form-control" name="zs_wzgx" lay-filter="cl_config">
-                            <option value="zs_wzgx_zgd" {% if zs_wzgx=='zs_wzgx_zgd' %} selected {% endif %}>
-                                宽松比较(zg/zd)
-                            </option>
-                            <option value="zs_wzgx_zggdd" {% if zs_wzgx=='zs_wzgx_zggdd' %} selected {% endif %}>
-                                较为宽松(zg/dd zd/gg)
-                            </option>
-                            <option value="zs_wzgx_gd" {% if zs_wzgx=='zs_wzgx_gd' %} selected {% endif %}>
-                                严格比较(gg/dd)
-                            </option>
-                        </select>
-                    </label>
-                </div>
-            </div>
-        </div>
-
-        <hr>
         <div class="cp-config-section-title">指标参数</div>
         <p class="layui-padding-1 layui-font-blue">
             <i class="layui-edge layui-edge-right"></i>
@@ -557,53 +471,27 @@
 
 
         <hr>
-        <div class="cp-config-section-title">图表呈现</div>
+        <div class="cp-config-section-title">基础结构呈现</div>
         <p class="layui-padding-1 layui-font-blue">
             <i class="layui-edge layui-edge-right"></i>
-            画图配置，是否在图表中显示，选择显示，取消不显示
+            这里只保留传统基础画线；递归结构的分级显示偏好由图表菜单按周期独立保存。
         </p>
-        <div class="layui-form-item">
+        <div class="layui-form-item cp-base-display-options">
             <div class="layui-row">
-                <div class="layui-col-xs3">
-                    <input type="checkbox" value="1" lay-filter="cl_config" {% if chart_show_bi=='1' %} checked {% endif
-                        %} name="chart_show_bi" title="笔" />
+                <div class="layui-col-xs4">
+                    <input type="checkbox" value="1" lay-filter="cl_config"
+                        {% if chart_show_fx=='1' %} checked {% endif %}
+                        name="chart_show_fx" title="分型" />
                 </div>
-
-                <div class="layui-col-xs3">
-                    <input type="checkbox" value="1" lay-filter="cl_config" {% if chart_show_xd=='1' %} checked {% endif
-                        %} name="chart_show_xd" title="线段" />
+                <div class="layui-col-xs4">
+                    <input type="checkbox" value="1" lay-filter="cl_config"
+                        {% if chart_show_bi=='1' %} checked {% endif %}
+                        name="chart_show_bi" title="笔" />
                 </div>
-
-                <div class="layui-col-xs3">
-                    <input type="checkbox" value="1" lay-filter="cl_config" {% if chart_show_bi_zs=='1' %} checked {%
-                        endif %} name="chart_show_bi_zs" title="笔中枢" />
-                </div>
-
-                <div class="layui-col-xs3">
-                    <input type="checkbox" value="1" lay-filter="cl_config" {% if chart_show_xd_zs=='1' %} checked {%
-                        endif %} name="chart_show_xd_zs" title="线段中枢" />
-                </div>
-
-                <div class="layui-col-xs3">
-                    <input type="checkbox" value="1" lay-filter="cl_config" {% if chart_show_bi_mmd=='1' %} checked {%
-                        endif %} name="chart_show_bi_mmd" title="笔买卖点" />
-                </div>
-                <div class="layui-col-xs3">
-                    <input type="checkbox" value="1" lay-filter="cl_config" {% if chart_show_xd_mmd=='1' %} checked {%
-                        endif %} name="chart_show_xd_mmd" title="线段买卖点" />
-                </div>
-
-                <div class="layui-col-xs3">
-                    <input type="checkbox" value="1" lay-filter="cl_config" {% if chart_show_bi_bc=='1' %} checked {%
-                        endif %} name="chart_show_bi_bc" title="笔背驰" />
-                </div>
-                <div class="layui-col-xs3">
-                    <input type="checkbox" value="1" lay-filter="cl_config" {% if chart_show_xd_bc=='1' %} checked {%
-                        endif %} name="chart_show_xd_bc" title="线段背驰" />
-                </div>
-                <div class="layui-col-xs3">
-                    <input type="checkbox" value="1" lay-filter="cl_config" {% if chart_show_fx=='1' %} checked {% endif
-                        %} name="chart_show_fx" title="分型" />
+                <div class="layui-col-xs4">
+                    <input type="checkbox" value="1" lay-filter="cl_config"
+                        {% if chart_show_xd=='1' %} checked {% endif %}
+                        name="chart_show_xd" title="线段" />
                 </div>
             </div>
         </div>
@@ -664,14 +552,6 @@
                         _val = $('input[name="' + _name + '"]:checked').map(function () {
                             return this.value;
                         }).get().join(",");
-                    }
-                    if (_name === 'zs_bi_type' && _val === '') {
-                        layer.msg('笔中枢类型 必须选择一个');
-                        return false;
-                    }
-                    if (_name === 'zs_xd_type' && _val === '') {
-                        layer.msg('线段中枢类型 必须选择一个');
-                        return false;
                     }
                     cl_config[_name] = _val
                 });
@@ -823,11 +703,6 @@
                                 "xd_allow_split_zs_kz",
                                 "xd_allow_split_zs_more_line",
                                 "xd_allow_split_zs_no_direction",
-                                "zs_bi_type",
-                                "zs_xd_type",
-                                "zs_qj",
-                                "zs_cd",
-                                "zs_wzgx",
                                 "idx_macd_fast",
                                 "idx_macd_slow",
                                 "idx_macd_signal",
@@ -844,13 +719,7 @@
                                 "enable_kchart_low_to_high",
                                 "chart_show_fx",
                                 "chart_show_bi",
-                                "chart_show_xd",
-                                "chart_show_bi_zs",
-                                "chart_show_xd_zs",
-                                "chart_show_bi_mmd",
-                                "chart_show_xd_mmd",
-                                "chart_show_bi_bc",
-                                "chart_show_xd_bc"
+                                "chart_show_xd"
                             ];
                             var postData = {
                                 'market': '{{ market }}',

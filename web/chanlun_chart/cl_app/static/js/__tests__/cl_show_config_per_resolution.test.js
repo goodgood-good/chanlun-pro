@@ -44,6 +44,10 @@ function loadClConfigApi() {
   save: (typeof saveClShowConfig !== 'undefined') ? saveClShowConfig : null,
   baseline: (typeof _clShowConfigBaseline !== 'undefined') ? _clShowConfigBaseline : null,
   resolve: (typeof resolveClConfigForResolution !== 'undefined') ? resolveClConfigForResolution : null,
+  migrate: (typeof _migrateStrictDisplayConfig !== 'undefined') ? _migrateStrictDisplayConfig : null,
+  levels: (typeof recursiveDisplayLevels !== 'undefined') ? recursiveDisplayLevels : null,
+  normalize: (typeof normalizeClShowConfig !== 'undefined') ? normalizeClShowConfig : null,
+  enabled: (typeof strictItemEnabled !== 'undefined') ? strictItemEnabled : null,
   ChartManager: (typeof ChartManager !== 'undefined') ? ChartManager : null,
   DEFAULT: (typeof CL_SHOW_DEFAULT !== 'undefined') ? CL_SHOW_DEFAULT : null,
 };`;
@@ -98,7 +102,7 @@ test('_clShowConfigBaseline 回退链:旧无周期 key 优先于全局旧 key', 
   const { api, store } = loadClConfigApi();
   store.set('cl_show_config_cm1', JSON.stringify({ fx: false }));
   store.set('cl_show_config', JSON.stringify({ bi: false }));
-  const base = api.baseline('cm1');
+  const base = api.baseline('cm1', '5');
   assert.equal(base.fx, false, '应取旧无周期 key');
   assert.equal(base.bi, api.DEFAULT.bi, '无周期 key 命中即不再取全局旧 key');
 });
@@ -106,14 +110,54 @@ test('_clShowConfigBaseline 回退链:旧无周期 key 优先于全局旧 key', 
 test('_clShowConfigBaseline 无周期 key 缺失时用全局旧 key', () => {
   const { api, store } = loadClConfigApi();
   store.set('cl_show_config', JSON.stringify({ bi: false }));
-  assert.equal(api.baseline('cm1').bi, false);
+  assert.equal(api.baseline('cm1', '5').bi, false);
 });
 
-test('_clShowConfigBaseline 全空 → CL_SHOW_DEFAULT 副本(非同一引用)', () => {
+test('_clShowConfigBaseline 全空 → 当前周期的 schema v2 默认副本', () => {
   const { api } = loadClConfigApi();
-  const base = api.baseline('cm1');
-  assert.deepEqual(base, api.DEFAULT);
+  const base = api.baseline('cm1', '5');
+  assert.equal(base.schema_version, 2);
+  assert.equal(base.fx, api.DEFAULT.fx);
+  assert.equal(base.center_L0, true);
+  assert.equal(base.center_L2, true);
   assert.notEqual(base, api.DEFAULT);
+});
+
+test('旧中枢开关一次性迁移到严格观察/正式分级键且不保留旧键', () => {
+  const { api, store } = loadClConfigApi();
+  store.set('cl_show_config_cm1', JSON.stringify({
+    zs_bi: false,
+    zs_xd: true,
+    zs_L1: false,
+    mmd: false,
+    point_1buy: false,
+  }));
+
+  const migrated = api.baseline('cm1', '5');
+
+  assert.equal(migrated.center_observation, false);
+  assert.equal(migrated.center_L0, true);
+  assert.equal(migrated.center_L1, false);
+  assert.equal(migrated.point_all, false);
+  assert.equal(migrated.point_1buy, false, '旧总开关不得重启已关闭的一买子开关');
+  for (const oldKey of ['zs_bi', 'zs_xd', 'zs_L1', 'mmd']) {
+    assert.equal(Object.hasOwn(migrated, oldKey), false, `迁移后不得保留 ${oldKey}`);
+  }
+});
+
+test('显式严格键优先于旧键迁移且六类买卖点默认全部开启', () => {
+  const { api } = loadClConfigApi();
+  const migrated = api.normalize(
+    { zs_bi: true, center_observation: false },
+    '5',
+  );
+
+  assert.equal(migrated.center_observation, false);
+  for (const pointType of ['1buy', '2buy', '3buy', '1sell', '2sell', '3sell']) {
+    assert.equal(api.DEFAULT[`point_${pointType}`], true, `${pointType} 默认应开启`);
+  }
+  assert.equal(api.DEFAULT.point_all, true);
+  assert.equal(Object.hasOwn(api.DEFAULT, 'point_approaching'), false);
 });
 
 test('resolveClConfigForResolution 已配置周期 → 加载存储值,persist=false', () => {
@@ -192,4 +236,53 @@ test('_applyResolutionConfig 相同周期重入不误存(oldRes===newRes)', () =
   cm._applyResolutionConfig('5');
   assert.equal(cm._curResolution, '5');
   assert.ok(cm.cl_show_config, '配置仍在');
+});
+
+test('四种图表周期只展示已确认的递归级别', () => {
+  const { api } = loadClConfigApi();
+  assert.deepEqual(Array.from(api.levels('1')).map((x) => x.label), ['1m', '5m', '30m', '日线']);
+  assert.deepEqual(Array.from(api.levels('5')).map((x) => x.label), ['5m', '30m', '日线']);
+  assert.deepEqual(Array.from(api.levels('30')).map((x) => x.label), ['30m', '日线']);
+  assert.deepEqual(Array.from(api.levels('1D')).map((x) => x.label), ['日线']);
+  assert.deepEqual(Array.from(api.levels('15')).map((x) => x.label), ['15m']);
+});
+
+test('总开关只 gate 不改写子项偏好', () => {
+  const { api } = loadClConfigApi();
+  const cfg = { ...api.DEFAULT, center_all: false, center_L1: true };
+  assert.equal(api.enabled(cfg, { render_kind: 'formal_center', structural_level: 1 }), false);
+  assert.equal(cfg.center_L1, true);
+  cfg.center_all = true;
+  assert.equal(api.enabled(cfg, { render_kind: 'formal_center', structural_level: 1 }), true);
+});
+
+test('盘整背驰和趋势背驰按级别独立 gate', () => {
+  const { api } = loadClConfigApi();
+  const cfg = { ...api.DEFAULT, divergence_consolidation_L2: false, divergence_trend_L2: true };
+  assert.equal(api.enabled(cfg, { render_kind: 'strict_divergence', structural_level: 2, kind: 'consolidation' }), false);
+  assert.equal(api.enabled(cfg, { render_kind: 'strict_divergence', structural_level: 2, kind: 'trend' }), true);
+});
+
+test('v1 显示偏好迁移幂等且不复活旧 key', () => {
+  const { api } = loadClConfigApi();
+  const legacy = {
+    point_confirmed: false,
+    center_L1: false,
+    trend_L1: true,
+    zs_all: true,
+    bc_L1: false,
+    point_approaching: true,
+    recursive_layers: true,
+  };
+  const once = api.normalize(legacy, '1');
+  const twice = api.normalize(once, '1');
+  assert.deepEqual(twice, once);
+  assert.equal(once.schema_version, 2);
+  assert.equal(once.point_all, false);
+  assert.equal(once.center_L1, false);
+  assert.equal(once.trend_L1, true);
+  assert.equal(once.trend_all, true);
+  for (const oldKey of ['zs_all', 'bc_L1', 'point_approaching', 'recursive_layers']) {
+    assert.equal(Object.hasOwn(once, oldKey), false);
+  }
 });

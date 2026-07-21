@@ -289,11 +289,6 @@
                 <div class="ca-layer-buttons" role="group" aria-label="缠论结构图层开关">
                   <button type="button" data-chart-layer="bi" aria-pressed="true">笔</button>
                   <button type="button" data-chart-layer="xd" aria-pressed="true">线段</button>
-                  <button type="button" data-chart-layer="bi_zs" aria-pressed="true">笔中枢</button>
-                  <button type="button" data-chart-layer="xd_zs" aria-pressed="true">线段中枢</button>
-                  <button type="button" data-chart-layer="bi_mmd" aria-pressed="true">笔买卖点</button>
-                  <button type="button" data-chart-layer="xd_mmd" aria-pressed="true">线段买卖点</button>
-                  <button type="button" data-chart-layer="recursive" aria-pressed="true">递归级别</button>
                 </div>
                 <p id="ca-layer-status">等待当前图表初始化。</p>
               </section>
@@ -914,6 +909,7 @@
   <script src="{{ url_for('static', filename='js/tv_indicators/chart_idx_macd_backend.js') }}?v={{ static_version }}"></script>
   <script src="{{ url_for('static', filename='js/tv_indicators/chart_idx_rsx.js') }}?v={{ static_version }}"></script>
   <script src="{{ url_for('static', filename='js/sse_gap.js') }}?v={{ static_version }}"></script>
+  <script src="{{ url_for('static', filename='js/chart_structure_reconcile.js') }}?v={{ static_version }}"></script>
   <script src="{{ url_for('static', filename='js/charts.js') }}?v={{ static_version }}"></script>
   <script src="{{ url_for('static', filename='js/chart_analysis.js') }}?v={{ static_version }}"></script>
   <script src="{{ url_for('static', filename='js/macd_stats.js') }}?v={{ static_version }}"></script>
@@ -1867,6 +1863,13 @@
         try { return window.localStorage.getItem(COLLAPSE_KEY) === '1'; }
         catch (_) { return false; }
       }
+      function requestsInitialCollapse() {
+        try {
+          return /(?:^|[?&])chart_sidebar=collapsed(?:&|$)/.test(window.location.search || '');
+        } catch (_) {
+          return false;
+        }
+      }
       function writeCollapsed(v) {
         try { window.localStorage.setItem(COLLAPSE_KEY, v ? '1' : '0'); } catch (_) {}
       }
@@ -1999,7 +2002,7 @@
         // 初始宽度：localStorage > 默认；初始收起状态：localStorage
         var stored = readStoredWidth();
         var initial = clampWidth(stored || DEFAULT_WIDTH);
-        var collapsed = readCollapsed();
+        var collapsed = requestsInitialCollapse() || readCollapsed();
         applyWidth(initial, collapsed);
 
         var handle = document.getElementById('chart_resize_handle');

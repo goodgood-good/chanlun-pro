@@ -22,6 +22,15 @@ from chanlun.exchange import Exchange
 from chanlun.tools.log_util import LogUtil
 
 
+CL_OBJECT_SCHEMA_VERSION = "strict-v3"
+
+
+def _versioned_config_key(config_md5: str) -> str:
+    if not isinstance(config_md5, str) or not config_md5:
+        raise ValueError("config_md5 must be a non-empty string")
+    return f"{CL_OBJECT_SCHEMA_VERSION}_{config_md5}"
+
+
 class _CLObjectCacheMixin:
     """缠论对象 .pkl 缓存方法，含 4 重一致性校验（连续性/OHLC/密度/数据量）。"""
 
@@ -35,7 +44,7 @@ class _CLObjectCacheMixin:
     ) -> 'ICL':
         """获取 web 缓存的缠论数据对象。"""
         logger = LogUtil.get_logger()
-        key = self._config_md5(cl_config)
+        key = _versioned_config_key(self._config_md5(cl_config))
         log_id = f"[{market}-{code}-{frequency}-{key}]"
 
         file_pathname = (
@@ -239,7 +248,7 @@ class _CLObjectCacheMixin:
 
         建议定时频繁读取保持更新, 避免太多时间不读取造成数据缺失。
         """
-        key = self._config_md5(cl_config)
+        key = _versioned_config_key(self._config_md5(cl_config))
         # 与 get_web_cl_data 一致：落到 cl_data_path/<market>/ 子目录。
         # 否则 clear_old_web_cl_data 只 glob <market> 子目录，清不到平铺在
         # cl_data_path 根目录的文件 → 这些 .pkl 永不被清理（M7 磁盘泄漏）。

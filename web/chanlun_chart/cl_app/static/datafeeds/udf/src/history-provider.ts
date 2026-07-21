@@ -15,6 +15,12 @@ import {
 
 import { IRequester } from "./irequester";
 
+type StrictStructureMode = "replace" | "unchanged" | "unavailable";
+
+interface StrictStructureError {
+  code: string;
+}
+
 // tslint:disable: no-any
 interface HistoryPartialDataResponse extends UdfOkResponse {
   t: number[];
@@ -58,6 +64,9 @@ interface HistoryFullDataResponse extends UdfOkResponse {
   interval_nest?: unknown;
   update: boolean;
   full_snapshot?: boolean;
+  strict_structure_mode?: StrictStructureMode;
+  strict_structure?: Record<string, unknown>;
+  strict_structure_error?: StrictStructureError;
   chart_color?: Map<string, string>;
 }
 
@@ -122,6 +131,9 @@ export interface GetBarsResult {
   recursive_levels?: unknown[];
   higher_zs?: unknown[];
   interval_nest?: unknown;
+  strict_structure_mode?: StrictStructureMode;
+  strict_structure?: Record<string, unknown>;
+  strict_structure_error?: StrictStructureError;
   chart_color?: Map<string, string>;
 }
 
@@ -523,6 +535,9 @@ export class HistoryProvider {
           recursive_levels: (response as HistoryFullDataResponse).recursive_levels || [],
           higher_zs: (response as HistoryFullDataResponse).higher_zs || [],
           interval_nest: (response as HistoryFullDataResponse).interval_nest,
+          strict_structure_mode: (response as HistoryFullDataResponse).strict_structure_mode,
+          strict_structure: (response as HistoryFullDataResponse).strict_structure,
+          strict_structure_error: (response as HistoryFullDataResponse).strict_structure_error,
           chart_color: (response as HistoryFullDataResponse).chart_color,
         });
         this._pruneBarsResult();
@@ -815,6 +830,38 @@ export class HistoryProvider {
         obj_res.higher_macd_dea = hDeaObj.values;
         obj_res.higher_macd_hist = hHistObj.values;
 
+        const strictMode = (response as HistoryFullDataResponse).strict_structure_mode;
+        if (strictMode === "replace") {
+          const strictStructure = (response as HistoryFullDataResponse).strict_structure;
+          if (
+            strictStructure &&
+            strictStructure.schema === "chanlun-chart-structure/v4"
+          ) {
+            obj_res.strict_structure_mode = "replace";
+            obj_res.strict_structure = strictStructure;
+            delete obj_res.strict_structure_error;
+          } else {
+            obj_res.strict_structure_mode = "unavailable";
+            delete obj_res.strict_structure;
+            obj_res.strict_structure_error = {
+              code: "strict_transport_invalid",
+            };
+          }
+        } else if (strictMode === "unavailable") {
+          obj_res.strict_structure_mode = "unavailable";
+          delete obj_res.strict_structure;
+          obj_res.strict_structure_error =
+            (response as HistoryFullDataResponse).strict_structure_error || {
+              code: "strict_evidence_invalid",
+            };
+        } else if (strictMode !== "unchanged" && strictMode !== undefined) {
+          obj_res.strict_structure_mode = "unavailable";
+          delete obj_res.strict_structure;
+          obj_res.strict_structure_error = {
+            code: "strict_transport_invalid",
+          };
+        }
+
         this.bars_result.set(res_key, obj_res);
         this._pruneBarsResult();
         this._emitBarsReady(res_key, requestParams);
@@ -840,6 +887,9 @@ export class HistoryProvider {
       recursive_levels: (response as HistoryFullDataResponse).recursive_levels || [],
       higher_zs: (response as HistoryFullDataResponse).higher_zs || [],
       interval_nest: (response as HistoryFullDataResponse).interval_nest,
+      strict_structure_mode: (response as HistoryFullDataResponse).strict_structure_mode,
+      strict_structure: (response as HistoryFullDataResponse).strict_structure,
+      strict_structure_error: (response as HistoryFullDataResponse).strict_structure_error,
       chart_color: (response as HistoryFullDataResponse).chart_color,
     };
 

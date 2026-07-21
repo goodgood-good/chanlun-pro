@@ -218,19 +218,17 @@ test('zone summary exposes auditable tower level bounds segments and point metad
   assert.equal(summary.xdZone.associatedPoint, '暂无关联买卖点');
 });
 
-test('analysis exposes independent dual-tower chart layer controls without removed copy', () => {
+test('analysis exposes only base line controls and never duplicates strict display controls', () => {
   const template = fs.readFileSync(templatePath, 'utf8');
 
   for (const [key, label] of [
     ['bi', '笔'],
     ['xd', '线段'],
-    ['bi_zs', '笔中枢'],
-    ['xd_zs', '线段中枢'],
-    ['bi_mmd', '笔买卖点'],
-    ['xd_mmd', '线段买卖点'],
-    ['recursive', '递归级别'],
   ]) {
     assert.match(template, new RegExp(`data-chart-layer=["']${key}["'][^>]*>${label}<`));
+  }
+  for (const key of ['bi_zs', 'xd_zs', 'bi_mmd', 'xd_mmd', 'recursive']) {
+    assert.doesNotMatch(template, new RegExp(`data-chart-layer=["']${key}["']`));
   }
   for (const id of [
     'ca-bi-zone-tower', 'ca-bi-zone-level', 'ca-bi-zone-bounds',
@@ -247,29 +245,26 @@ test('analysis exposes independent dual-tower chart layer controls without remov
   assert.doesNotMatch(template, /原文课次与结构标签/);
 });
 
-test('layer controls mutate drawing visibility only and redraw the active chart', () => {
+test('analysis layer controls mutate only base line visibility', () => {
   let redraws = 0;
   const manager = {
     cl_show_config: {
-      bi: true, xd: true, zs_all: true, zs_bi: true, zs_xd: true,
-      mmd: true, mmd_bi: true, mmd_xd: true,
-      zs_L1: true, zs_L2: true, xd_L1: true, xd_L2: true,
-      mmd_L1: true, mmd_L2: true, bc_L1: true, bc_L2: true,
+      bi: true,
+      xd: true,
+      center_all: true,
+      center_L1: true,
+      divergence_all: true,
+      divergence_trend_L1: true,
     },
-    _recMaxLevel: 2,
     debouncedDrawChanlun() { redraws += 1; },
   };
 
-  assert.equal(Analysis.setLayerVisibility(manager, 'bi_zs', false), true);
-  assert.equal(manager.cl_show_config.zs_bi, false);
-  assert.equal(Analysis.setLayerVisibility(manager, 'recursive', false), true);
-  for (const prefix of ['zs', 'xd', 'mmd', 'bc']) {
-    assert.equal(manager.cl_show_config[`${prefix}_L1`], false);
-    assert.equal(manager.cl_show_config[`${prefix}_L2`], false);
-  }
-  assert.equal(redraws, 2);
-  assert.equal(Analysis.setLayerVisibility(manager, 'unknown', true), false);
-  assert.equal(redraws, 2);
+  assert.equal(Analysis.setLayerVisibility(manager, 'bi', false), true);
+  assert.equal(manager.cl_show_config.bi, false);
+  assert.equal(Analysis.setLayerVisibility(manager, 'recursive', false), false);
+  assert.equal(manager.cl_show_config.center_L1, true);
+  assert.equal(manager.cl_show_config.divergence_trend_L1, true);
+  assert.equal(redraws, 1);
 });
 
 test('index page exposes a real current-chart analysis region and its assets', () => {

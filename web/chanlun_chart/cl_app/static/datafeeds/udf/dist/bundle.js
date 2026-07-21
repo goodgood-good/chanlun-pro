@@ -378,6 +378,9 @@
                         recursive_levels: response.recursive_levels || [],
                         higher_zs: response.higher_zs || [],
                         interval_nest: response.interval_nest,
+                        strict_structure_mode: response.strict_structure_mode,
+                        strict_structure: response.strict_structure,
+                        strict_structure_error: response.strict_structure_error,
                         chart_color: response.chart_color,
                     });
                     this._pruneBarsResult();
@@ -621,6 +624,38 @@
                     obj_res.higher_macd_dif = hDifObj.values;
                     obj_res.higher_macd_dea = hDeaObj.values;
                     obj_res.higher_macd_hist = hHistObj.values;
+                    const strictMode = response.strict_structure_mode;
+                    if (strictMode === "replace") {
+                        const strictStructure = response.strict_structure;
+                        if (strictStructure &&
+                            strictStructure.schema === "chanlun-chart-structure/v4") {
+                            obj_res.strict_structure_mode = "replace";
+                            obj_res.strict_structure = strictStructure;
+                            delete obj_res.strict_structure_error;
+                        }
+                        else {
+                            obj_res.strict_structure_mode = "unavailable";
+                            delete obj_res.strict_structure;
+                            obj_res.strict_structure_error = {
+                                code: "strict_transport_invalid",
+                            };
+                        }
+                    }
+                    else if (strictMode === "unavailable") {
+                        obj_res.strict_structure_mode = "unavailable";
+                        delete obj_res.strict_structure;
+                        obj_res.strict_structure_error =
+                            response.strict_structure_error || {
+                                code: "strict_evidence_invalid",
+                            };
+                    }
+                    else if (strictMode !== "unchanged" && strictMode !== undefined) {
+                        obj_res.strict_structure_mode = "unavailable";
+                        delete obj_res.strict_structure;
+                        obj_res.strict_structure_error = {
+                            code: "strict_transport_invalid",
+                        };
+                    }
                     this.bars_result.set(res_key, obj_res);
                     this._pruneBarsResult();
                     this._emitBarsReady(res_key, requestParams);
@@ -645,6 +680,9 @@
                 recursive_levels: response.recursive_levels || [],
                 higher_zs: response.higher_zs || [],
                 interval_nest: response.interval_nest,
+                strict_structure_mode: response.strict_structure_mode,
+                strict_structure: response.strict_structure,
+                strict_structure_error: response.strict_structure_error,
                 chart_color: response.chart_color,
             };
             return result;
