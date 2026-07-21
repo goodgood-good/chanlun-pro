@@ -102,7 +102,7 @@ def test_forming_five_minute_is_never_executable() -> None:
 
 
 def test_sell_exit_is_not_blocked_by_sector_state() -> None:
-    five_sell = confirmed_point("2sell", frequency="5m", tower="xd", level=1)
+    five_sell = confirmed_point("2sell", frequency="5m", tower="formal", level=1)
     setup = build_setup(five_sell, supportive_context("30m"), hostile_sector())
     one_sell = confirmed_point("1sell", frequency="1m", minutes_after=1)
     lifecycle = advance_lifecycle(None, setup, one_sell, as_of=AS_OF)
@@ -111,7 +111,7 @@ def test_sell_exit_is_not_blocked_by_sector_state() -> None:
         lifecycle,
         setup,
         one_sell,
-        held_tower="xd",
+        held_tower="formal",
         held_level=1,
     )
 
@@ -120,14 +120,14 @@ def test_sell_exit_is_not_blocked_by_sector_state() -> None:
 
 
 def test_sell_exit_requires_confirmed_one_minute_trigger() -> None:
-    five_sell = confirmed_point("2sell", frequency="5m", tower="xd", level=1)
+    five_sell = confirmed_point("2sell", frequency="5m", tower="formal", level=1)
     setup = build_setup(five_sell, supportive_context("30m"), hostile_sector())
     armed = advance_lifecycle(None, setup, None, as_of=AS_OF)
     rejected = evaluate_exit_policy(
         armed,
         setup,
         None,
-        held_tower="xd",
+        held_tower="formal",
         held_level=1,
     )
     one_sell = confirmed_point("1sell", frequency="1m", minutes_after=1)
@@ -136,7 +136,7 @@ def test_sell_exit_requires_confirmed_one_minute_trigger() -> None:
         triggered,
         setup,
         one_sell,
-        held_tower="xd",
+        held_tower="formal",
         held_level=1,
     )
 
@@ -174,7 +174,7 @@ def test_ablation_policy_can_disable_entry_layers_without_changing_defaults() ->
 
 
 def test_one_minute_exit_filter_can_be_disabled_only_for_ablation() -> None:
-    five_sell = confirmed_point("2sell", frequency="5m", tower="xd", level=1)
+    five_sell = confirmed_point("2sell", frequency="5m", tower="formal", level=1)
     setup = build_setup(five_sell, supportive_context("30m"), hostile_sector())
     armed = advance_lifecycle(None, setup, None, as_of=AS_OF)
 
@@ -182,7 +182,7 @@ def test_one_minute_exit_filter_can_be_disabled_only_for_ablation() -> None:
         armed,
         setup,
         None,
-        held_tower="xd",
+        held_tower="formal",
         held_level=1,
         policy=TradingPolicy(require_confirmed_one_minute=False),
     )

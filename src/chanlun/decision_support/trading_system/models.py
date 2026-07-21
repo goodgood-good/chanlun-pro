@@ -18,7 +18,7 @@ PointType = Literal["1buy", "2buy", "3buy", "1sell", "2sell", "3sell"]
 PointSide = Literal["buy", "sell"]
 PointStatus = Literal["provisional", "confirmed", "invalidated"]
 PointVariant = Literal["standard", "strict", "weak_divergence", "boundary_touch"]
-StructureTower = Literal["bi", "xd"]
+StructureTower = Literal["formal"]
 ContextDirection = Literal["up", "down", "neutral"]
 ContextDisposition = Literal["supportive", "neutral", "hostile"]
 LifecycleStage = Literal[
@@ -37,6 +37,7 @@ MAX_FIVE_MINUTE_SETUP_AGE_SECONDS = 4 * 24 * 60 * 60
 def build_point_id(
     *,
     code: str,
+    price_basis_revision: str,
     point_type: PointType,
     source_frequency: str,
     tower: StructureTower,
@@ -45,10 +46,15 @@ def build_point_id(
     center_id: str | None,
     parent_point_id: str | None,
 ) -> str:
+    if not price_basis_revision or not price_basis_revision.strip():
+        raise ValueError("price_basis_revision is required")
+    if tower != "formal" or type(recursive_level) is not int or recursive_level < 0:
+        raise ValueError("invalid structure identity")
     return sha256_json(
         {
-            "schema": "chanlun-structural-point/v1",
+            "schema": "chanlun-structural-point/v2",
             "code": code,
+            "price_basis_revision": price_basis_revision,
             "point_type": point_type,
             "source_frequency": source_frequency,
             "tower": tower,
@@ -69,12 +75,14 @@ class StructuralPoint:
     status: PointStatus
     variant: PointVariant
     source_frequency: str
+    price_basis_revision: str
     tower: StructureTower
     recursive_level: int
     anchor_at: datetime
     confirmed_at: datetime | None
-    anchor_price: float
-    invalidation_price: float
+    available_at: datetime
+    structure_anchor_price: float
+    structure_invalidation_price: float
     center_id: str | None
     center_zd: float | None
     center_zg: float | None
@@ -87,24 +95,41 @@ class StructuralPoint:
         expected_side = "buy" if self.point_type.endswith("buy") else "sell"
         if self.side != expected_side:
             raise ValueError("point_type and side disagree")
-        if self.tower not in {"bi", "xd"} or self.recursive_level < 0:
+        if self.tower != "formal" or self.recursive_level < 0:
             raise ValueError("invalid structure identity")
+        if not self.price_basis_revision or not self.price_basis_revision.strip():
+            raise ValueError("price_basis_revision is required")
         anchor_at = normalize_datetime(self.anchor_at, "anchor_at")
         object.__setattr__(self, "anchor_at", anchor_at)
+        available_at = normalize_datetime(self.available_at, "available_at")
+        if available_at < anchor_at:
+            raise ValueError("available_at cannot precede anchor_at")
+        object.__setattr__(self, "available_at", available_at)
         if self.confirmed_at is not None:
             confirmed_at = normalize_datetime(self.confirmed_at, "confirmed_at")
             if confirmed_at < anchor_at:
                 raise ValueError("confirmed_at cannot precede anchor_at")
+            if available_at < confirmed_at:
+                raise ValueError("available_at cannot precede confirmed_at")
             object.__setattr__(self, "confirmed_at", confirmed_at)
         if self.status == "confirmed" and self.confirmed_at is None:
             raise ValueError("confirmed point requires confirmed_at")
         if self.status != "confirmed" and self.confirmed_at is not None:
             raise ValueError("non-confirmed point cannot carry confirmed_at")
-        if self.anchor_price <= 0 or self.invalidation_price <= 0:
+        if (
+            self.structure_anchor_price <= 0
+            or self.structure_invalidation_price <= 0
+        ):
             raise ValueError("prices must be positive")
-        if self.side == "buy" and self.invalidation_price > self.anchor_price:
+        if (
+            self.side == "buy"
+            and self.structure_invalidation_price > self.structure_anchor_price
+        ):
             raise ValueError("buy invalidation cannot be above point anchor")
-        if self.side == "sell" and self.invalidation_price < self.anchor_price:
+        if (
+            self.side == "sell"
+            and self.structure_invalidation_price < self.structure_anchor_price
+        ):
             raise ValueError("sell invalidation cannot be below point anchor")
         if self.center_ordinal is not None and self.center_ordinal <= 0:
             raise ValueError("center_ordinal must be positive")

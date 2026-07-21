@@ -23,14 +23,14 @@ def classify_context(
         for point in points
         if point.confirmed
         and point.confirmed_at is not None
-        and point.confirmed_at <= observed_at
+        and point.available_at <= observed_at
     )
     dominant = max(
         active,
         key=lambda point: (
             point.recursive_level,
-            point.confirmed_at,
-            point.tower == "xd",
+            point.available_at,
+            point.point_id,
         ),
         default=None,
     )

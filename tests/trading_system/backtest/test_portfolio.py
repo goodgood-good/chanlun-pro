@@ -46,7 +46,7 @@ class FakeBundle:
 @dataclass(frozen=True, slots=True)
 class FakePoint:
     point_type: PointType
-    tower: StructureTower = "bi"
+    tower: StructureTower = "formal"
     recursive_level: int = 0
 
 
@@ -534,24 +534,24 @@ def test_position_structure_is_injected_into_same_level_sell_evaluation() -> Non
         "SZ.000001",
         datetime(2026, 7, 20, 10, 6, tzinfo=CN),
     )
-    buy = confirmed_point("2buy", tower="xd", level=1)
+    buy = confirmed_point("2buy", tower="formal", level=1)
     buy_trigger = confirmed_point(
         "2buy",
         frequency="1m",
-        tower="bi",
+        tower="formal",
         level=0,
         minutes_after=1,
     )
     sell = confirmed_point(
         "2sell",
-        tower="xd",
+        tower="formal",
         level=1,
         minutes_after=2,
     )
     sell_trigger = confirmed_point(
         "2sell",
         frequency="1m",
-        tower="bi",
+        tower="formal",
         level=0,
         minutes_after=3,
     )

@@ -88,11 +88,11 @@ def test_hostile_sector_blocks_new_entry() -> None:
 def test_lower_level_sell_is_risk_not_global_veto() -> None:
     evaluated = TradingEngine().evaluate_symbol(
         symbol_bundle(
-            five_points=(confirmed_point("2buy", tower="xd", level=1),),
+            five_points=(confirmed_point("2buy", tower="formal", level=1),),
             one_points=(
                 confirmed_point("1buy", frequency="1m", minutes_after=1),
             ),
-            opposite_points=(confirmed_point("1sell", tower="xd", level=0),),
+            opposite_points=(confirmed_point("1sell", tower="formal", level=0),),
         )
     )
 
@@ -142,6 +142,7 @@ def test_engine_keeps_only_recent_terminal_point_per_independent_lane() -> None:
         confirmed_point("3buy", center_ordinal=1),
         anchor_at=stale_at,
         confirmed_at=stale_at,
+        available_at=stale_at,
     )
     older_one_buy = confirmed_point("1buy")
     latest_one_buy = confirmed_point("1buy", minutes_after=5)

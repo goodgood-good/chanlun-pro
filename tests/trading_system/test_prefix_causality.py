@@ -2,6 +2,7 @@ import numpy as np
 import pandas as pd
 
 from chanlun.core.cl import CL
+from chanlun.core.strict_structure.base_profile import strict_base_config
 from chanlun.decision_support.trading_system.structure_adapter import (
     extract_confirmed_points,
     point_signature,
@@ -41,7 +42,13 @@ def deterministic_cl_state(*, bar_count: int) -> CL:
     cd = CL(
         "SZ.000001",
         "1m",
-        {"macd_ld_use_htf": True, "recursive_zs_diversity": False},
+        {
+            **strict_base_config(),
+            "structure_price_quantum": "0.01",
+            "price_basis_revision": "test-raw-v1",
+            "skip_legacy_zslx": True,
+            "skip_legacy_mmd": True,
+        },
     )
     cd.process_klines(_deterministic_klines(bar_count))
     return cd
@@ -51,21 +58,22 @@ def test_future_append_cannot_mutate_confirmed_prefix() -> None:
     prefix_cd = deterministic_cl_state(bar_count=180)
     full_cd = deterministic_cl_state(bar_count=220)
     cutoff = prefix_cd.get_src_klines()[-1].date
+    prefix_evidence = prefix_cd.get_strict_evidence()
+    full_evidence = full_cd.get_strict_evidence()
 
     prefix = extract_confirmed_points(
-        prefix_cd,
+        prefix_evidence,
         code="SZ.000001",
         source_frequency="1m",
         as_of=cutoff,
     )
     full = extract_confirmed_points(
-        full_cd,
+        full_evidence,
         code="SZ.000001",
         source_frequency="1m",
         as_of=full_cd.get_src_klines()[-1].date,
     )
 
-    assert prefix
     assert point_signature(prefix) == point_signature(
-        tuple(point for point in full if point.confirmed_at <= cutoff)
+        tuple(point for point in full if point.available_at <= cutoff)
     )

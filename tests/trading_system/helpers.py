@@ -213,7 +213,7 @@ def confirmed_point(
     point_type: str,
     *,
     frequency: str = "5m",
-    tower: str = "bi",
+    tower: str = "formal",
     level: int = 0,
     anchor: float = 10.0,
     stop: float | None = None,
@@ -223,6 +223,8 @@ def confirmed_point(
     center_ordinal: int | None = 1,
     variant: str = "standard",
     minutes_after: int = 0,
+    available_minutes_after: int = 0,
+    price_basis_revision: str = "test-raw-v1",
 ) -> StructuralPoint:
     typed_point = cast(PointType, point_type)
     typed_tower = cast(StructureTower, tower)
@@ -238,6 +240,7 @@ def confirmed_point(
     )
     point_id = build_point_id(
         code="SZ.000001",
+        price_basis_revision=price_basis_revision,
         point_type=typed_point,
         source_frequency=frequency,
         tower=typed_tower,
@@ -254,12 +257,14 @@ def confirmed_point(
         status="confirmed",
         variant=typed_variant,
         source_frequency=frequency,
+        price_basis_revision=price_basis_revision,
         tower=typed_tower,
         recursive_level=level,
         anchor_at=anchor_at,
         confirmed_at=anchor_at,
-        anchor_price=anchor,
-        invalidation_price=invalidation,
+        available_at=anchor_at + timedelta(minutes=available_minutes_after),
+        structure_anchor_price=anchor,
+        structure_invalidation_price=invalidation,
         center_id=center_id,
         center_zd=center_zd,
         center_zg=center_zg,
@@ -339,7 +344,7 @@ def provisional_point(
     point_type: str,
     *,
     frequency: str = "5m",
-    tower: str = "bi",
+    tower: str = "formal",
     level: int = 0,
     anchor: float = 10.0,
 ) -> ProvisionalCandidate:

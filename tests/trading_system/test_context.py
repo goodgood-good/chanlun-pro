@@ -21,7 +21,7 @@ def test_confirmed_higher_level_sell_in_down_structure_is_hostile() -> None:
     context = classify_context(
         frequency="30m",
         current_direction="down",
-        points=(confirmed_point("1sell", tower="xd", level=1),),
+        points=(confirmed_point("1sell", tower="formal", level=1),),
         as_of=AS_OF,
     )
 
@@ -30,10 +30,13 @@ def test_confirmed_higher_level_sell_in_down_structure_is_hostile() -> None:
     assert context.dominant_point_type == "1sell"
 
 
-def test_future_point_is_rejected() -> None:
+def test_point_is_hidden_until_its_available_at() -> None:
     future = confirmed_point(
         "1buy",
-        minutes_after=int((AS_OF + timedelta(minutes=1) - AS_OF.replace(hour=10)).total_seconds() / 60),
+        available_minutes_after=int(
+            (AS_OF + timedelta(minutes=1) - AS_OF.replace(hour=10)).total_seconds()
+            / 60
+        ),
     )
 
     context = classify_context(
