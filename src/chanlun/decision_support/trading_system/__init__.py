@@ -45,14 +45,19 @@ from chanlun.decision_support.trading_system.incremental_scan import (
     build_scan_plan,
 )
 from chanlun.decision_support.trading_system.structure_adapter import (
-    center_id,
-    center_ordinal,
     extract_confirmed_points,
     point_signature,
 )
 from chanlun.decision_support.trading_system.provisional import (
     ProvisionalCandidate,
     extract_provisional_candidates,
+)
+from chanlun.decision_support.trading_system.runtime_config import (
+    STRICT_STRATEGY_ID,
+    StrictSnapshotPriceMetadata,
+    strict_cl_config,
+    strict_runtime_config_revision,
+    strict_snapshot_price_metadata,
 )
 
 
@@ -89,10 +94,13 @@ __all__ = [
     "ScanCursor",
     "ScanPlan",
     "build_scan_plan",
-    "center_id",
-    "center_ordinal",
     "extract_confirmed_points",
     "point_signature",
     "ProvisionalCandidate",
     "extract_provisional_candidates",
+    "STRICT_STRATEGY_ID",
+    "StrictSnapshotPriceMetadata",
+    "strict_cl_config",
+    "strict_runtime_config_revision",
+    "strict_snapshot_price_metadata",
 ]
