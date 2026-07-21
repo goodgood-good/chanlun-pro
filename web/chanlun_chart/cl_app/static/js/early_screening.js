@@ -6,8 +6,9 @@
 
   function boot() {
     const Ui = globalThis.TradingScreeningUi;
+    const Resize = globalThis.TradingScreeningChartResize;
     const root = document.getElementById("es-dashboard");
-    if (!Ui || !root || root.dataset.initialized === "true") return;
+    if (!Ui || !Resize || !root || root.dataset.initialized === "true") return;
     root.dataset.initialized = "true";
 
     const byId = (id) => document.getElementById(id);
@@ -22,10 +23,25 @@
       lifecycle: saved.lifecycle || "all",
       sectorId: "all",
       query: "",
-      layout: Ui.setChartLayout(chartWorkspace, saved.layout || "single"),
+      layout: Ui.setChartLayout(chartWorkspace, saved.layout || "focus"),
+      chartSizing: Resize.normalizeSizing(saved.chartSizing),
+      focusState: Ui.resolveFocusState(null, null),
+      evidenceOpen: false,
+      theaterMode: false,
       loading: false,
       pollTimer: null,
     };
+
+    const resizeController = Resize.createController(chartWorkspace, state.chartSizing, {
+      onChange(nextSizing) {
+        state.chartSizing = nextSizing;
+        saveView();
+      },
+    });
+
+    const evidenceToggle = chartWorkspace && chartWorkspace.querySelector("[data-evidence-toggle]");
+    const evidenceClose = chartWorkspace && chartWorkspace.querySelector("[data-evidence-close]");
+    const theaterToggle = chartWorkspace && chartWorkspace.querySelector("[data-theater-toggle]");
 
     function readView() {
       try {
@@ -42,6 +58,7 @@
           pointType: state.pointType,
           lifecycle: state.lifecycle,
           layout: state.layout,
+          chartSizing: state.chartSizing,
         }));
       } catch (_error) {
         // Storage is optional; the live snapshot remains the source of truth.
@@ -133,6 +150,7 @@
         const active = button.dataset[dataKey] === selected;
         button.classList.toggle("is-active", active);
         button.setAttribute("aria-pressed", active ? "true" : "false");
+        if (dataKey === "layout") button.setAttribute("aria-checked", active ? "true" : "false");
       });
     }
 
@@ -159,15 +177,30 @@
       renderWorkspaces();
     }
 
+    function showEvidence(open, restoreFocus = false) {
+      const requested = Boolean(open && evidenceToggle && !evidenceToggle.disabled);
+      state.evidenceOpen = Ui.setEvidencePanelOpen(chartWorkspace, requested);
+      if (state.evidenceOpen && evidenceClose) evidenceClose.focus();
+      else if (restoreFocus && evidenceToggle) evidenceToggle.focus();
+    }
+
+    function showTheater(active) {
+      const requested = Boolean(active && theaterToggle && !theaterToggle.disabled);
+      state.theaterMode = Ui.setTheaterMode(chartWorkspace, document.body, requested);
+    }
+
     function renderWorkspaces() {
       if (!state.snapshot) return;
       const filtered = currentSignals();
-      if (!filtered.some((row) => Ui.text(row.signal_id, "") === state.selectedSignalId)) {
-        state.selectedSignalId = filtered.length ? Ui.text(filtered[0].signal_id, "") : null;
-      }
+      state.selectedSignalId = Ui.resolveSelectedSignalId(
+        state.selectedSignalId,
+        filtered,
+        state.snapshot.signals,
+      );
       const selected = state.snapshot.signals.find(
         (row) => Ui.text(row.signal_id, "") === state.selectedSignalId,
       ) || null;
+      state.focusState = Ui.resolveFocusState(state.focusState, selected);
 
       Ui.renderSectorWorkspace(
         sectorList,
@@ -179,14 +212,20 @@
         },
       );
       Ui.renderSignalWorkspace(signalList, filtered, state.selectedSignalId, selectSignal);
-      Ui.renderChartWorkspace(chartWorkspace, selected);
+      Ui.renderChartWorkspace(chartWorkspace, selected, {
+        frequency: state.focusState.frequency,
+      });
+      if (!selected) {
+        if (state.evidenceOpen) showEvidence(false);
+        if (state.theaterMode) showTheater(false);
+      }
 
       setText("es-visible-count", `${filtered.length} / ${state.snapshot.signals.length}`);
       const empty = byId("es-empty");
       if (empty) empty.hidden = filtered.length !== 0;
       syncButtons("[data-point-type]", "pointType", state.pointType);
       syncButtons("[data-lifecycle]", "lifecycle", state.lifecycle);
-      syncButtons("[data-layout]", "layout", state.layout);
+      syncButtons(".es-layout-switch [data-layout]", "layout", state.layout);
       syncFilterCounts();
     }
 
@@ -249,12 +288,38 @@
         renderWorkspaces();
       });
     });
-    document.querySelectorAll("[data-layout]").forEach((button) => {
+    document.querySelectorAll(".es-layout-switch [data-layout]").forEach((button) => {
       button.addEventListener("click", () => {
         state.layout = Ui.setChartLayout(chartWorkspace, button.dataset.layout);
+        resizeController.setLayout(state.layout);
         saveView();
-        syncButtons("[data-layout]", "layout", state.layout);
+        syncButtons(".es-layout-switch [data-layout]", "layout", state.layout);
       });
+    });
+    document.querySelectorAll("[data-focus-frequency], [data-period-node]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const frequency = button.dataset.focusFrequency || button.dataset.periodNode;
+        state.focusState = Ui.manualFocusState(
+          state.focusState,
+          state.selectedSignalId,
+          frequency,
+        );
+        renderWorkspaces();
+      });
+    });
+    if (evidenceToggle) evidenceToggle.addEventListener("click", () => {
+      showEvidence(!state.evidenceOpen);
+    });
+    if (evidenceClose) evidenceClose.addEventListener("click", () => {
+      showEvidence(false, true);
+    });
+    if (theaterToggle) theaterToggle.addEventListener("click", () => {
+      showTheater(!state.theaterMode);
+    });
+    document.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape") return;
+      if (state.evidenceOpen) showEvidence(false, true);
+      else if (state.theaterMode) showTheater(false);
     });
     const search = byId("es-signal-search");
     if (search) search.addEventListener("input", () => {

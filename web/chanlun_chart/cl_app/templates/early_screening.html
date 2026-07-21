@@ -9,6 +9,7 @@
     <link rel="stylesheet" href="{{ url_for('static', filename='css/ui-system.css') }}?v={{ static_version|default('') }}" />
     <link rel="stylesheet" href="{{ url_for('static', filename='css/early_screening.css') }}?v={{ static_version|default('') }}" />
     <script defer src="{{ url_for('static', filename='js/early_screening_ui.js') }}?v={{ static_version|default('') }}"></script>
+    <script defer src="{{ url_for('static', filename='js/early_screening_chart_resize.js') }}?v={{ static_version|default('') }}"></script>
     <script defer src="{{ url_for('static', filename='js/early_screening.js') }}?v={{ static_version|default('') }}"></script>
   </head>
   <body class="cp-ui cp-immersive">
@@ -160,7 +161,9 @@
           id="es-chart-workspace"
           class="es-workspace es-chart-workspace"
           data-workspace="charts"
-          data-current-layout="single"
+          data-current-layout="focus"
+          data-layout="focus"
+          data-focused-frequency="5m"
           aria-labelledby="es-chart-title"
         >
           <header class="es-workspace__header es-chart-header">
@@ -171,55 +174,114 @@
             <a data-chart-workbench class="es-button es-button--link" href="/" target="_blank" rel="noopener">打开完整画图工作台</a>
           </header>
 
-          <nav class="es-layout-switch" aria-label="图表布局">
-            <span>布局</span>
-            <button class="is-active" type="button" data-layout="single" aria-pressed="true">单图</button>
-            <button type="button" data-layout="split" aria-pressed="false">双图</button>
-            <button type="button" data-layout="quad" aria-pressed="false">四宫格</button>
-          </nav>
-
-          <div data-chart-placeholder class="es-chart-placeholder">
-            <strong>从买卖点队列选择一只股票</strong>
-            <p>这里会同时给出 30m 环境、5m 设置、1m 触发和结构失效边界。</p>
-          </div>
-
-          <div data-chart-content class="es-chart-content" hidden>
-            <section class="es-selected-signal" aria-label="当前股票">
-              <div><span data-selected-code>—</span><h3 data-selected-name>—</h3></div>
-              <div class="es-selected-tags">
-                <b data-selected-point>—</b>
-                <span data-selected-stage>—</span>
-                <span data-selected-tower>—</span>
+          <div data-chart-content class="es-chart-content">
+            <div class="es-chart-toolbar">
+              <div class="es-focus-switch" role="group" aria-label="主图周期">
+                <span>主图</span>
+                <button type="button" data-focus-frequency="30m" aria-pressed="false">30分钟</button>
+                <button class="is-active" type="button" data-focus-frequency="5m" aria-pressed="true">5分钟</button>
+                <button type="button" data-focus-frequency="1m" aria-pressed="false">1分钟</button>
               </div>
-              <dl>
+              <div class="es-layout-switch" role="radiogroup" aria-label="图表布局">
+                <span>对照</span>
+                <button class="is-active" type="button" role="radio" data-layout="focus" aria-checked="true" aria-pressed="true">聚焦</button>
+                <button type="button" role="radio" data-layout="dual" aria-checked="false" aria-pressed="false">双周期</button>
+                <button type="button" role="radio" data-layout="triple" aria-checked="false" aria-pressed="false">三周期</button>
+              </div>
+              <div class="es-chart-actions">
+                <button type="button" data-chart-size-reset title="恢复当前工作台的响应式默认尺寸">重置尺寸</button>
+                <button type="button" data-evidence-toggle aria-controls="es-structure-evidence" aria-expanded="false" disabled>
+                  结构证据 <span data-evidence-count>0</span>
+                </button>
+                <button type="button" data-theater-toggle aria-controls="es-chart-workspace" aria-pressed="false" disabled>
+                  <span data-theater-label>影院模式</span>
+                </button>
+              </div>
+            </div>
+
+            <div class="es-analysis-grid">
+              <div class="es-chart-stage">
+                <div class="es-chart-grid" data-chart-grid>
+                  <article class="es-chart-card is-30m" data-frequency="30m">
+                    <header><strong>30m 大级别环境</strong><a data-chart-link="30m" href="/" target="_blank" rel="noopener">独立打开</a></header>
+                    <iframe data-chart-frame="30m" title="30分钟行情与缠论图" loading="lazy" src="about:blank"></iframe>
+                  </article>
+                  <article class="es-chart-card is-5m" data-frequency="5m">
+                    <header><strong>5m 可操作结构</strong><a data-chart-link="5m" href="/" target="_blank" rel="noopener">独立打开</a></header>
+                    <iframe data-chart-frame="5m" title="5分钟行情与缠论图" loading="lazy" src="about:blank"></iframe>
+                  </article>
+                  <article class="es-chart-card is-1m" data-frequency="1m">
+                    <header><strong>1m 精确触发</strong><a data-chart-link="1m" href="/" target="_blank" rel="noopener">独立打开</a></header>
+                    <iframe data-chart-frame="1m" title="1分钟行情与缠论图" loading="lazy" src="about:blank"></iframe>
+                  </article>
+                  <div class="es-chart-resizer is-columns" data-chart-resizer="columns" role="separator" tabindex="0" aria-orientation="vertical" aria-label="调整图表左右比例" title="拖动调节左右比例，双击恢复默认"></div>
+                  <div class="es-chart-resizer is-rows" data-chart-resizer="rows" role="separator" tabindex="0" aria-orientation="horizontal" aria-label="调整辅助图上下比例" title="拖动调节上下比例，双击恢复默认"></div>
+                </div>
+                <div class="es-chart-resizer is-height" data-chart-resizer="height" role="separator" tabindex="0" aria-orientation="horizontal" aria-label="调整图表区高度" title="拖动调节图表高度，双击恢复默认"><span aria-hidden="true">拖动调节高度</span></div>
+                <p class="es-sr-only" data-chart-resize-status aria-live="polite"></p>
+              </div>
+
+              <aside id="es-structure-evidence" class="es-evidence-panel" data-evidence-panel aria-label="结构证据与风险" aria-hidden="true">
+                <header>
+                  <div><span>DECISION EVIDENCE</span><strong>结构证据与风险</strong><small>成立 · 缺失 · 否决 · 重评</small></div>
+                  <button type="button" data-evidence-close aria-label="关闭结构证据">关闭</button>
+                </header>
+                <section class="is-established"><h4>成立证据</h4><ul data-evidence-group="established"></ul></section>
+                <section class="is-missing"><h4>尚缺条件</h4><ul data-evidence-group="missing"></ul></section>
+                <section class="is-blocking"><h4>否决 / 冲突</h4><ul data-evidence-group="blocking"></ul></section>
+                <section class="is-next"><h4>下一确认条件</h4><ul data-evidence-group="next"></ul></section>
+                <section class="is-risk"><h4>风险边界</h4><ul data-evidence-group="risk"></ul></section>
+                <details>
+                  <summary>查看原始证据代码</summary>
+                  <ul data-raw-evidence></ul>
+                </details>
+              </aside>
+            </div>
+
+            <section class="es-decision-deck" aria-label="当前信号决策驾驶舱">
+              <div class="es-decision-identity">
+                <span data-selected-code>—</span>
+                <h3 data-selected-name>—</h3>
+                <div class="es-selected-tags">
+                  <b data-selected-point>—</b>
+                  <span data-selected-stage>—</span>
+                  <span data-selected-tower>—</span>
+                </div>
+              </div>
+              <div class="es-decision-verdict" data-decision-card data-tone="unknown">
+                <span>当前结论</span>
+                <strong data-decision-title aria-live="polite">数据未知</strong>
+                <p data-decision-detail>等待结构事实</p>
+              </div>
+              <dl class="es-decision-risk">
                 <div><dt>结构止损</dt><dd data-selected-stop>—</dd></div>
+                <div><dt>5m 失效价</dt><dd data-decision-invalidation>—</dd></div>
                 <div><dt>风险乘数</dt><dd data-selected-risk>—</dd></div>
               </dl>
             </section>
 
-            <div class="es-chart-grid">
-              <article class="es-chart-card is-30m" data-frequency="30m">
-                <header><strong>30m 大级别环境</strong><a data-chart-link="30m" href="/" target="_blank" rel="noopener">独立打开</a></header>
-                <iframe data-chart-frame="30m" title="30分钟行情与缠论图" loading="lazy" src="about:blank"></iframe>
-              </article>
-              <article class="es-chart-card is-5m" data-frequency="5m">
-                <header><strong>5m 可操作结构</strong><a data-chart-link="5m" href="/" target="_blank" rel="noopener">独立打开</a></header>
-                <iframe data-chart-frame="5m" title="5分钟行情与缠论图" loading="lazy" src="about:blank"></iframe>
-              </article>
-              <article class="es-chart-card is-1m" data-frequency="1m">
-                <header><strong>1m 精确触发</strong><a data-chart-link="1m" href="/" target="_blank" rel="noopener">独立打开</a></header>
-                <iframe data-chart-frame="1m" title="1分钟行情与缠论图" loading="lazy" src="about:blank"></iframe>
-              </article>
-              <article class="es-chart-card es-evidence-card" data-frequency="evidence">
-                <header><strong>结构证据与风险</strong></header>
-                <div class="es-evidence-columns">
-                  <section><h4>30m</h4><ul data-evidence-30m></ul></section>
-                  <section><h4>5m</h4><ul data-evidence-5m></ul></section>
-                  <section><h4>1m</h4><ul data-evidence-1m></ul></section>
-                  <section class="is-risk"><h4>决策/失效原因</h4><ul data-decision-reasons></ul></section>
-                </div>
-              </article>
-            </div>
+            <nav class="es-period-path" aria-label="30分钟到1分钟结构推演链">
+              <button type="button" data-period-node="30m" data-tone="unknown" aria-pressed="false">
+                <span><b>01</b>30m 环境</span>
+                <strong data-period-state="30m">未知</strong>
+                <small data-period-summary="30m">等待大级别环境证据</small>
+                <em data-period-boundary="30m">环境边界未提供</em>
+              </button>
+              <i aria-hidden="true">→</i>
+              <button type="button" data-period-node="5m" data-tone="unknown" aria-pressed="true">
+                <span><b>02</b>5m 设置</span>
+                <strong data-period-state="5m">未知</strong>
+                <small data-period-summary="5m">等待操作级别设置</small>
+                <em data-period-boundary="5m">失效价未提供</em>
+              </button>
+              <i aria-hidden="true">→</i>
+              <button type="button" data-period-node="1m" data-tone="unknown" aria-pressed="false">
+                <span><b>03</b>1m 触发</span>
+                <strong data-period-state="1m">等待</strong>
+                <small data-period-summary="1m">尚未取得同向精确触发</small>
+                <em data-period-boundary="1m">结构止损未提供</em>
+              </button>
+            </nav>
           </div>
         </section>
       </section>

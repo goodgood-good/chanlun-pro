@@ -23,7 +23,7 @@ class _TradingScreeningService:
     def snapshot(self) -> dict[str, object]:
         return {
             "schema_version": "chanlun-trading-screening/v2",
-            "algorithm_version": "chanlun-original-low-drawdown/v1",
+            "algorithm_version": "chanlun_source_faithful_v2",
             "structure_version": "v2",
             "available": True,
             "scan_state": "complete",
@@ -132,6 +132,14 @@ def test_screening_page_uses_new_three_workspace_contract(
     assert 'data-workspace="sector"' in html
     assert 'data-workspace="signals"' in html
     assert 'data-workspace="charts"' in html
+    assert 'data-evidence-toggle' in html
+    assert 'data-evidence-count' in html
+    assert 'data-theater-toggle' in html
+    assert 'aria-controls="es-structure-evidence"' in html
+    assert 'aria-controls="es-chart-workspace"' in html
+    assert 'id="es-structure-evidence"' in html
+    assert 'data-evidence-panel' in html
+    assert 'data-evidence-close' in html
     assert "30m 大级别筛选" in html
     assert "5m 可操作级别筛选" in html
     assert "1m 精确操作确认" in html
@@ -142,3 +150,18 @@ def test_screening_page_uses_new_three_workspace_contract(
         assert f'data-point-type="{point_type}"' in html
     assert "AI 深度解读" not in html
     assert "原文课次与结构标签" not in html
+
+
+def test_screening_page_exposes_resizable_chart_controls(logged_in_client) -> None:
+    response = logged_in_client.get("/decision-support/early-screening")
+    html = response.get_data(as_text=True)
+
+    assert response.status_code == 200
+    assert "early_screening_chart_resize.js" in html
+    assert html.index("early_screening_chart_resize.js") < html.index("early_screening.js")
+    assert 'data-chart-grid' in html
+    for resize_type in ("columns", "rows", "height"):
+        assert f'data-chart-resizer="{resize_type}"' in html
+    assert html.count('role="separator"') == 3
+    assert 'data-chart-size-reset' in html
+    assert 'data-chart-resize-status' in html
