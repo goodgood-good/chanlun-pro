@@ -2113,6 +2113,16 @@ class ChartManager {
             if (!br || !br.bars || br.bars.length < 2) return;
             const vr = this.chart && this.chart.getVisibleRange ? this.chart.getVisibleRange() : null;
             if (!vr || !vr.from || !vr.to || vr.to <= vr.from) return;   // 数据/视窗未就绪,下次再试
+            const toEpochSeconds = (value) => {
+                const numeric = Number(value);
+                return Number.isFinite(numeric) && Math.abs(numeric) >= 100000000000
+                    ? numeric / 1000
+                    : numeric;
+            };
+            const firstBarSec = toEpochSeconds(br.bars[0]?.time);
+            const lastBarSec = toEpochSeconds(br.bars[br.bars.length - 1]?.time);
+            if (!Number.isFinite(firstBarSec) || !Number.isFinite(lastBarSec) || firstBarSec > lastBarSec) return;
+            const visibleOutsideLoadedBars = vr.to < firstBarSec || vr.from > lastBarSec;
             this._viewSetFor = key;
             // 各周期默认视窗跨度(日历天);跨度按天数,外汇 24h 连续→根数多,A股有夜盘缺口→根数少,均显示充足缠论。
             // 白名单只列分钟~月线;未列出的周期(秒线10S/30S、季线3M、年线12M等)直接跳过不拉宽——
@@ -2121,14 +2131,21 @@ class ChartManager {
             const days = SPAN_DAYS[si.interval];
             if (!days) return;   // 周期不在白名单(秒/季/年等)→保持 TV 默认视窗
             const span = days * 86400;
-            if ((vr.to - vr.from) >= span * 0.7) return;   // 当前已够宽(如A股默认)→不动
+            if (!visibleOutsideLoadedBars && (vr.to - vr.from) >= span * 0.7) return;   // 当前已够宽且与行情相交→不动
             setTimeout(() => {
                 try {
                     // 竞态防护:延时期间用户若已切到别的标的/周期,放弃,避免把视窗设成上一周期的范围。
                     const si2 = this.widget && this.widget.symbolInterval ? this.widget.symbolInterval() : null;
                     if (!si2 || (si2.symbol + '|' + si2.interval) !== key) return;
                     const v = this.chart.getVisibleRange();
-                    if (v && v.to) this.chart.setVisibleRange({ from: v.to - span, to: v.to });
+                    const targetTo = visibleOutsideLoadedBars ? lastBarSec : v?.to;
+                    if (!targetTo) return;
+                    this.chart.setVisibleRange({
+                        from: visibleOutsideLoadedBars
+                            ? Math.max(firstBarSec, targetTo - span)
+                            : targetTo - span,
+                        to: targetTo,
+                    });
                 } catch (e) {}
             }, 150);
         } catch (e) { /* 视窗调整失败不影响主流程 */ }

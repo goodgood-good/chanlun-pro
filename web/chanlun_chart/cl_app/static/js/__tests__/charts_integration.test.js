@@ -450,6 +450,36 @@ test('_getViewLatestSec: 无命中 → null(安全退化)', () => {
   assert.equal(cm._getViewLatestSec('a:none5', '5'), null);
 });
 
+test('_maybeWidenDefaultView: 旧视窗完全落在已加载历史外时回到最新行情', () => {
+  const { ChartManager, sb } = loadChartManager();
+  const latest = 1_784_691_000;
+  const earliest = latest - 86_400;
+  const bars = [
+    { time: earliest * 1000 },
+    { time: latest * 1000 },
+  ];
+  const map = new Map([['a:sh.5131005', { bars }]]);
+  const cm = makeManager(ChartManager, null, map);
+  const applied = [];
+  cm._viewSetFor = null;
+  cm.widget = {
+    symbolInterval: () => ({ symbol: 'a:SH.513100', interval: '5' }),
+  };
+  cm.chart = {
+    getVisibleRange: () => ({
+      from: earliest - 31 * 86_400,
+      to: earliest - 30 * 86_400,
+    }),
+    setVisibleRange: (range) => { applied.push(range); },
+  };
+  sb.setTimeout = (callback) => { callback(); return 0; };
+
+  cm._maybeWidenDefaultView();
+
+  assert.equal(applied.length, 1);
+  assert.deepEqual(applied[0], { from: earliest, to: latest });
+});
+
 test('_doReset: 首次 → 调 resetCache+resetData, 记账 backoff=0', () => {
   const { ChartManager, sb } = loadChartManager();
   const { widget, calls } = spyWidget();
