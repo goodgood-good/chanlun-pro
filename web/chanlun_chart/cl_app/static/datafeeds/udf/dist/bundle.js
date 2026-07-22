@@ -689,6 +689,7 @@
         }
     }
 
+    const REALTIME_QUERY_FUTURE_TOLERANCE_SECONDS = 60;
     class DataPulseProvider {
         constructor(historyProvider, updateFrequency) {
             this._subscribers = {};
@@ -774,7 +775,8 @@
         }
         _updateDataForSubscriber(listenerGuid) {
             const subscriptionRecord = this._subscribers[listenerGuid];
-            const rangeEndTime = parseInt((Date.now() / 1000).toString());
+            const rangeEndTime = parseInt((Date.now() / 1000).toString())
+                + REALTIME_QUERY_FUTURE_TOLERANCE_SECONDS;
             // BEWARE: please note we really need 2 bars, not the only last one
             // see the explanation below. `10` is the `large enough` value to work around holidays
             const rangeStartTime = rangeEndTime - periodLengthSeconds(subscriptionRecord.resolution, 10);

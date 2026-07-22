@@ -17,6 +17,8 @@ interface DataSubscribers {
 	[guid: string]: DataSubscriber;
 }
 
+const REALTIME_QUERY_FUTURE_TOLERANCE_SECONDS = 60;
+
 export class DataPulseProvider implements IDataPulseProvider {
 	private readonly _subscribers: DataSubscribers = {};
 	private readonly _requestsPending: Set<string> = new Set();
@@ -118,7 +120,8 @@ export class DataPulseProvider implements IDataPulseProvider {
 	private _updateDataForSubscriber(listenerGuid: string): Promise<void> {
 		const subscriptionRecord = this._subscribers[listenerGuid];
 
-		const rangeEndTime = parseInt((Date.now() / 1000).toString());
+		const rangeEndTime = parseInt((Date.now() / 1000).toString())
+			+ REALTIME_QUERY_FUTURE_TOLERANCE_SECONDS;
 
 		// BEWARE: please note we really need 2 bars, not the only last one
 		// see the explanation below. `10` is the `large enough` value to work around holidays
