@@ -2313,6 +2313,19 @@ class ChartManager {
         return { from, to };
     }
 
+    _strictSourceClosedAt(barsResult) {
+        const source = barsResult || {};
+        if (Object.prototype.hasOwnProperty.call(source, 'times')) {
+            if (!Array.isArray(source.times) || source.times.length === 0) {
+                throw new Error('strict structure raw source close is invalid');
+            }
+            return this._strictApi().barTimeMsToEpochSeconds(
+                source.times[source.times.length - 1],
+            );
+        }
+        return this._strictLoadedRange(source.bars).to;
+    }
+
     _validateStrictStructureSnapshot(snapshot, chartData, currentInterval) {
         if (!snapshot || snapshot.schema !== 'chanlun-chart-structure/v4') {
             throw new Error('strict structure schema mismatch');
@@ -2351,7 +2364,8 @@ class ChartManager {
         }
 
         const loadedRange = this._strictLoadedRange(chartData.barsResult?.bars);
-        if (snapshot.source_closed_at !== loadedRange.to) {
+        const sourceClosedAt = this._strictSourceClosedAt(chartData.barsResult);
+        if (snapshot.source_closed_at !== sourceClosedAt) {
             throw new Error('strict structure source close does not match loaded bars');
         }
         const rawVisible = chartData.visibleRange || { from: chartData.from, to: loadedRange.to };

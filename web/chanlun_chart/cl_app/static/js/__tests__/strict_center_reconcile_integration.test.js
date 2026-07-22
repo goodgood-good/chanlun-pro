@@ -8,6 +8,8 @@ const vm = require('vm');
 const Reconcile = require('../chart_structure_reconcile.js');
 
 const BASE = 1700000000;
+const DAILY_BAR_AT = 1784649600;
+const DAILY_CLOSE_AT = 1784703600;
 
 function loadChartManager() {
   const sandbox = {
@@ -157,6 +159,24 @@ function chartData(mode = 'replace', strict = snapshot(), bars = null) {
   };
 }
 
+function dailyChartData(rawCloseAt = DAILY_CLOSE_AT) {
+  const data = chartData('replace', snapshot({
+    symbol: 'SH.513100',
+    source_frequency: 'd',
+    display_frequency: 'd',
+    source_closed_at: DAILY_CLOSE_AT,
+    levels: [],
+  }), [
+    { time: DAILY_BAR_AT * 1000, high: 1.5, low: 1.4 },
+  ]);
+  data.symbolKey = 'a:SH.513100_1D';
+  data.chartSymbol = 'a:SH.513100';
+  data.barsResult.times = [rawCloseAt * 1000];
+  data.from = DAILY_BAR_AT;
+  data.visibleRange = { from: DAILY_BAR_AT, to: DAILY_BAR_AT };
+  return data;
+}
+
 function manager(instanceId = 'chart-manager-1') {
   const { ChartManager } = loadChartManager();
   const cm = Object.create(ChartManager.prototype);
@@ -279,6 +299,29 @@ test('two chart instances own identical center ids independently', () => {
   assert.equal(first.calls.remove.length, 1);
   assert.equal(second.calls.remove.length, 0);
   assert.equal(second.cm._reconcileOwnedIds.size, 1);
+});
+
+test('daily snapshot uses raw history close for identity and normalized bar time for coordinates', () => {
+  const { cm } = manager('chart-manager-daily');
+  const data = dailyChartData();
+
+  const validated = cm._validateStrictStructureSnapshot(
+    data.barsResult.strict_structure,
+    data,
+    '1D',
+  );
+
+  assert.equal(validated.loadedRange.to, DAILY_BAR_AT);
+});
+
+test('daily snapshot rejects a stale raw history close even when chart bar time is unchanged', () => {
+  const { cm } = manager('chart-manager-daily-stale');
+  const data = dailyChartData(DAILY_CLOSE_AT - 86400);
+
+  assert.throws(
+    () => cm._validateStrictStructureSnapshot(data.barsResult.strict_structure, data, '1D'),
+    /source close does not match loaded bars/,
+  );
 });
 
 test('strict unavailable clears every strict entity and exposes an error state', () => {
