@@ -327,6 +327,18 @@ class TrendCenter:
         return self.initial_units[1:4]
 
     @property
+    def core_body_start_market_time(self) -> datetime:
+        return self.core_units[0].market_start
+
+    @property
+    def core_body_end_market_time(self) -> datetime:
+        if self.completion_leave_unit is not None:
+            return self.completion_leave_unit.market_start
+        if self.pending_leave_unit is not None:
+            return self.pending_leave_unit.market_start
+        return self.body_units[-1].market_end
+
+    @property
     def initial_exit_unit(self) -> ConstituentUnit:
         return self.initial_units[4]
 

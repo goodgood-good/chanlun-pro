@@ -5,6 +5,7 @@ from datetime import timedelta
 
 import pytest
 
+from chanlun.core.strict_structure.center_machine import advance_center
 from chanlun.core.strict_structure.identity import stable_structure_id
 from chanlun.core.strict_structure.models import (
     CenterEvidence,
@@ -194,6 +195,49 @@ def test_center_rejects_forged_core_or_envelope_fields():
         replace(value, zg_tick=value.zg_tick + 1)
     with pytest.raises(ValueError, match="body envelope"):
         replace(value, gg_tick=value.gg_tick + 1)
+
+
+def test_center_core_body_time_excludes_entry_and_leaving_units():
+    ongoing = ongoing_center()
+    completed = completed_up_center()
+
+    assert (
+        ongoing.core_body_start_market_time
+        == ongoing.core_units[0].market_start
+    )
+    assert (
+        ongoing.core_body_end_market_time
+        == ongoing.initial_exit_unit.market_start
+    )
+    assert (
+        completed.core_body_end_market_time
+        == completed.completion_leave_unit.market_start
+    )
+
+
+def test_center_core_body_end_advances_only_after_an_accepted_reentry():
+    initial = ongoing_center()
+    reentry = unit(
+        5,
+        "down",
+        initial.initial_exit_unit.end_tick,
+        initial.zd_tick + 5,
+    )
+    extended, _event = advance_center(initial, reentry)
+
+    assert extended.pending_leave_unit is None
+    assert extended.core_body_end_market_time == reentry.market_end
+
+    next_leave = unit(
+        6,
+        "up",
+        reentry.end_tick,
+        initial.zg_tick + 15,
+    )
+    leaving, _event = advance_center(extended, next_leave)
+
+    assert leaving.pending_leave_unit is next_leave
+    assert leaving.core_body_end_market_time == next_leave.market_start
 
 
 def test_center_evidence_preserves_v3_roles_and_excludes_completion_return():
