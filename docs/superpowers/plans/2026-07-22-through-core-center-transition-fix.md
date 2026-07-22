@@ -152,15 +152,19 @@ Rename the recursive test to `test_direction_flip_completion_keeps_all_centers_i
         center.state is CenterState.COMPLETED
         for center in level.center_result.centers
     )
-    assert len(level.trend_types) == 1
-    assert level.trend_types[0].centers == level.center_result.centers
+    owned_centers = tuple(
+        center for trend in level.trend_types for center in trend.centers
+    )
+    assert owned_centers == level.center_result.centers
 ```
 
-Add `CenterState` to the existing model import.
+Add `CenterState` to the existing model import. Do not assert a single trend group:
+the assembler may place spatially separate completed centers in separate trends; the
+invariant is that every formal completed center is owned exactly once and in order.
 
 - [ ] **Step 4: Independently read the edited test anchors**
 
-Use `Select-String` with the three new test names, `_direction_flip_then_later_center`, `BREAKOUT_WATCH_DOWN`, and `level.trend_types[0].centers`. Expected: every anchor occurs exactly once, except direction-specific event names that may already exist in older tests.
+Use `Select-String` with the three new test names, `_direction_flip_then_later_center`, `BREAKOUT_WATCH_DOWN`, and `owned_centers == level.center_result.centers`. Expected: every anchor occurs exactly once, except direction-specific event names that may already exist in older tests.
 
 - [ ] **Step 5: Run exact RED tests one process at a time**
 
