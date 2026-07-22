@@ -251,7 +251,12 @@ def _append_extension_return(
     center: TrendCenter,
     item: ConstituentUnit,
 ) -> tuple[TrendCenter, CenterEvent]:
-    return _append_body_unit(center, item, pending_leave=None)
+    pending_leave = (
+        item
+        if _outside_in_direction(item, center.zd_tick, center.zg_tick)
+        else None
+    )
+    return _append_body_unit(center, item, pending_leave=pending_leave)
 
 
 def _complete_center(

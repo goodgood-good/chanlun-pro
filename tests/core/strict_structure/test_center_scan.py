@@ -28,6 +28,18 @@ def _two_completed_centers():
     )
 
 
+def _direction_flip_then_later_center():
+    return valid_five_up_exit() + (
+        unit(5, "down", 130, 95),
+        unit(6, "up", 95, 100),
+        unit(7, "down", 100, 96),
+        unit(8, "up", 96, 99),
+        unit(9, "down", 99, 97),
+        unit(10, "up", 97, 105),
+        unit(11, "down", 105, 101),
+    )
+
+
 def test_scan_with_four_locked_units_has_no_formal_center():
     result = calculate_centers(
         valid_five_up_exit()[:4],
@@ -84,34 +96,44 @@ def test_scan_emits_establish_extend_watch_complete_events_in_order():
     assert result.centers[0].state is CenterState.COMPLETED
 
 
-def test_scan_preserves_ongoing_center_when_later_geometry_cannot_extend():
+def test_scan_completes_after_through_core_direction_flip():
     values = valid_five_up_exit() + (
         unit(5, "down", 130, 95),
         unit(6, "up", 95, 100),
     )
     result = calculate_centers(values, 0, SourceKind.SEGMENT)
     assert len(result.centers) == 1
-    assert result.centers[0].state is CenterState.ONGOING
-    assert result.centers[0].extension_units == (values[5],)
-    assert values[6] not in result.centers[0].body_units
+    center = result.centers[0]
+    assert center.state is CenterState.COMPLETED
+    assert center.completion_direction == "down"
+    assert center.completion_leave_unit is values[5]
+    assert center.completion_return_unit is values[6]
 
 
-def test_scan_can_find_new_center_after_an_abandoned_ongoing_center():
-    values = valid_five_up_exit() + (
-        unit(5, "down", 130, 95),
-        unit(6, "up", 95, 100),
-        unit(7, "down", 100, 96),
-        unit(8, "up", 96, 99),
-        unit(9, "down", 99, 97),
-        unit(10, "up", 97, 105),
-        unit(11, "down", 105, 101),
-    )
+def test_scan_reuses_direction_flip_completion_return_for_next_center():
+    values = _direction_flip_then_later_center()
     result = calculate_centers(values, 0, SourceKind.SEGMENT)
     assert [item.state for item in result.centers] == [
-        CenterState.ONGOING,
+        CenterState.COMPLETED,
         CenterState.COMPLETED,
     ]
+    assert result.centers[0].completion_return_unit is values[6]
     assert result.centers[1].entry_unit is values[6]
+
+
+@pytest.mark.parametrize(
+    "values",
+    (valid_five_up_exit(), _direction_flip_then_later_center()),
+)
+def test_scan_has_at_most_one_ongoing_center_and_only_at_locked_tail(values):
+    result = calculate_centers(values, 0, SourceKind.SEGMENT)
+    ongoing = [
+        center for center in result.centers if center.state is CenterState.ONGOING
+    ]
+    assert len(ongoing) <= 1
+    if ongoing:
+        assert ongoing[0] is result.centers[-1]
+        assert ongoing[0].body_units[-1] is values[result.locked_unit_count - 1]
 
 
 def test_zero_width_middle_core_is_touch_only_not_formal_center():

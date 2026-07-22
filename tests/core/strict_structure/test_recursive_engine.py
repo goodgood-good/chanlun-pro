@@ -2,7 +2,7 @@ from dataclasses import replace
 
 import pytest
 
-from chanlun.core.strict_structure.models import SourceKind
+from chanlun.core.strict_structure.models import CenterState, SourceKind
 from chanlun.core.strict_structure.recursive_engine import StrictRecursiveEngine
 from tests.core.strict_structure.helpers import valid_five_up_exit
 from tests.core.strict_structure.helpers import unit
@@ -62,7 +62,7 @@ def test_max_levels_is_a_hard_structural_depth_cap():
     assert len(result.levels) == 1
 
 
-def test_abandoned_ongoing_center_does_not_block_later_completed_trend():
+def test_direction_flip_completion_keeps_all_centers_in_trends():
     values = valid_five_up_exit() + (
         unit(5, "down", 130, 95),
         unit(6, "up", 95, 100),
@@ -75,5 +75,11 @@ def test_abandoned_ongoing_center_does_not_block_later_completed_trend():
     result = StrictRecursiveEngine(max_levels=1).calculate(values)
     level = result.levels[0]
     assert len(level.center_result.centers) == 2
-    assert len(level.trend_types) == 1
-    assert level.trend_types[0].centers == (level.center_result.centers[1],)
+    assert all(
+        center.state is CenterState.COMPLETED
+        for center in level.center_result.centers
+    )
+    owned_centers = tuple(
+        center for trend in level.trend_types for center in trend.centers
+    )
+    assert owned_centers == level.center_result.centers
