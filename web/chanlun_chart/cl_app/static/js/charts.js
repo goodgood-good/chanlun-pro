@@ -2436,10 +2436,13 @@ class ChartManager {
             });
         }
         if (item.render_kind === 'center_observation') {
-            return ChartUtils.createZhongshuShape(this.chart, { ...item, linestyle: CHART_CONFIG.LINE_STYLES.DASHED }, {
+            const linestyle = item.state === 'ongoing'
+                ? CHART_CONFIG.LINE_STYLES.DASHED
+                : CHART_CONFIG.LINE_STYLES.SOLID;
+            return ChartUtils.createZhongshuShape(this.chart, { ...item, linestyle }, {
                 color: getDynamicColor(currentInterval, 'bi_zss'),
                 linewidth: 1,
-                overrides: { transparency: 98, linestyle: CHART_CONFIG.LINE_STYLES.DASHED },
+                overrides: { transparency: 98, linestyle },
             });
         }
         if (item.render_kind === 'center_projection') {

@@ -338,6 +338,30 @@ test('ongoing center is dashed and third-point completed center is solid', () =>
   assert.equal(completed.calls.create[0].options.overrides.linestyle, 0);
 });
 
+test('stroke observation is dashed only while ongoing and solid when completed', () => {
+  const observation = (state) => center(1, {
+    render_kind: 'center_observation',
+    source_kind: 'stroke_observation',
+    state,
+    tradable: false,
+    render_id: `stroke-center-1@1@${state}`,
+  });
+
+  const ongoing = manager('chart-manager-observation-ongoing');
+  ongoing.cm._drawStrictStructure(chartData('replace', snapshot({
+    stroke_center_observations: [observation('ongoing')],
+    levels: [],
+  })), '5');
+  assert.equal(ongoing.calls.create[0].options.overrides.linestyle, 2);
+
+  const completed = manager('chart-manager-observation-completed');
+  completed.cm._drawStrictStructure(chartData('replace', snapshot({
+    stroke_center_observations: [observation('completed')],
+    levels: [],
+  })), '5');
+  assert.equal(completed.calls.create[0].options.overrides.linestyle, 0);
+});
+
 test('level-scoped consolidation and trend divergences render with explicit labels', () => {
   const { cm, calls } = manager('chart-manager-divergence');
   const strict = snapshot();
