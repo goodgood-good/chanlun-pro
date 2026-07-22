@@ -613,6 +613,20 @@
     };
   }
 
+  function strictSourceClosedAt(source, bars) {
+    if (Object.prototype.hasOwnProperty.call(source, 'times')) {
+      if (!Array.isArray(source.times) || source.times.length === 0) {
+        throw new Error('严格结构原始末根时间无效');
+      }
+      const sourceClose = toSeconds(source.times[source.times.length - 1]);
+      if (!Number.isInteger(sourceClose)) {
+        throw new Error('严格结构原始末根时间无效');
+      }
+      return sourceClose;
+    }
+    return toSeconds(bars[bars.length - 1] && bars[bars.length - 1].time);
+  }
+
   function validateStrictSnapshot(snapshot, source, options) {
     if (!snapshot || snapshot.schema !== 'chanlun-chart-structure/v4') {
       throw new Error('严格结构数据契约不匹配');
@@ -650,7 +664,7 @@
     }
     const bars = Array.isArray(source.bars) ? source.bars : [];
     if (!bars.length) throw new Error('严格结构缺少当前图表 K 线');
-    const loadedClose = toSeconds(bars[bars.length - 1] && bars[bars.length - 1].time);
+    const loadedClose = strictSourceClosedAt(source, bars);
     if (loadedClose !== snapshot.source_closed_at) {
       throw new Error('严格结构末根闭合时间与当前图表不一致');
     }

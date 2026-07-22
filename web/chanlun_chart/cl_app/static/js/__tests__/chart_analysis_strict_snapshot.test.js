@@ -6,6 +6,8 @@ const assert = require('node:assert/strict');
 const Analysis = require('../chart_analysis.js');
 
 const CLOSED_AT = 1700000600;
+const DAILY_BAR_AT = 1784649600;
+const DAILY_CLOSE_AT = 1784703600;
 
 function center(overrides = {}) {
   return {
@@ -269,6 +271,36 @@ test('unavailable or context-mismatched strict data reports synchronization fail
   assert.equal(mismatch.state, 'syncing');
   assert.equal(mismatch.formalCenters.length, 0);
   assert.match(mismatch.statusDetail, /周期/);
+});
+
+test('daily summary validates strict source close against raw transport time', () => {
+  const strict = snapshot({
+    source_frequency: 'd',
+    display_frequency: 'd',
+    source_closed_at: DAILY_CLOSE_AT,
+  });
+  const summary = Analysis.summarizeChartData(barsResult(strict, {
+    times: [DAILY_CLOSE_AT * 1000],
+    bars: [{ time: DAILY_BAR_AT * 1000, close: 11, isBarClosed: false }],
+  }), { ...context, resolution: '1D' });
+
+  assert.equal(summary.state, 'ready');
+  assert.equal(summary.sourceClosedAt, DAILY_CLOSE_AT);
+});
+
+test('daily summary still rejects a genuinely stale raw transport time', () => {
+  const strict = snapshot({
+    source_frequency: 'd',
+    display_frequency: 'd',
+    source_closed_at: DAILY_CLOSE_AT,
+  });
+  const summary = Analysis.summarizeChartData(barsResult(strict, {
+    times: [(DAILY_CLOSE_AT - 86400) * 1000],
+    bars: [{ time: DAILY_BAR_AT * 1000, close: 11, isBarClosed: false }],
+  }), { ...context, resolution: '1D' });
+
+  assert.equal(summary.state, 'syncing');
+  assert.match(summary.statusDetail, /\u672b\u6839/);
 });
 
 test('unchanged transport may reuse only the manager-provided strict snapshot', () => {
