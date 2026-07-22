@@ -473,14 +473,19 @@ def build_strict_structure_snapshot(
             (strict_center_to_chart_dict(center) for center in centers),
             "center_id",
         )
+        active_center = (
+            centers[-1]
+            if centers and centers[-1].state in _ACTIVE_CENTER_STATES
+            else None
+        )
         projections = _sorted_payloads(
-            (
+            ()
+            if active_center is None
+            else (
                 active_center_projection_to_chart_dict(
-                    center,
+                    active_center,
                     evidence.source_closed_at,
-                )
-                for center in centers
-                if center.state in _ACTIVE_CENTER_STATES
+                ),
             ),
             "center_id",
         )

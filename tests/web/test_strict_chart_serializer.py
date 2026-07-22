@@ -37,7 +37,11 @@ from chanlun.core.strict_structure.models import (
     TrendState,
     TrendType,
 )
-from tests.core.strict_structure.helpers import completed_up_center
+from tests.core.strict_structure.helpers import (
+    completed_up_center,
+    engine_for,
+    ongoing_center,
+)
 from tests.trading_system.strict_helpers import strict_point
 
 
@@ -129,6 +133,7 @@ def _trend(center: TrendCenter) -> TrendType:
 def _evidence(
     *,
     observation: TrendCenter | None = None,
+    formal_centers: tuple[TrendCenter, ...] | None = None,
     confirmed_points=(),
     approaching_points=(),
     divergences=(),
@@ -140,7 +145,7 @@ def _evidence(
     center_result = CenterLevelResult(
         structural_level=0,
         price_basis_revision=PRICE_BASIS,
-        centers=(formal_center,),
+        centers=(formal_center,) if formal_centers is None else formal_centers,
         previews=(),
         events=(),
         locked_unit_count=len(formal_center.body_units),
@@ -295,6 +300,38 @@ def test_active_projection_is_separate_non_tradable_overlay() -> None:
     assert projection["tradable"] is False
     assert projection["points"][1]["time"] == int(source_closed_at.timestamp())
     assert projection["core"] == body["core"]
+
+
+def test_snapshot_projects_only_the_latest_ongoing_center() -> None:
+    stale_ongoing = ongoing_center(20, center_id="stale-ongoing")
+    latest_completed = completed_up_center(
+        40,
+        center_id="latest-completed",
+    )
+    completion_points = engine_for(latest_completed).third_class_points()
+    completed_snapshot = build_strict_structure_snapshot(
+        _evidence(
+            formal_centers=(stale_ongoing, latest_completed),
+            confirmed_points=completion_points,
+        ),
+        interval="5m",
+    )
+
+    assert completed_snapshot["levels"][0]["center_projections"] == []
+
+    latest_ongoing = ongoing_center(60, center_id="latest-ongoing")
+    ongoing_snapshot = build_strict_structure_snapshot(
+        _evidence(
+            formal_centers=(latest_completed, latest_ongoing),
+            confirmed_points=completion_points,
+        ),
+        interval="5m",
+    )
+
+    assert [
+        item["center_id"]
+        for item in ongoing_snapshot["levels"][0]["center_projections"]
+    ] == ["latest-ongoing"]
 
 
 def test_trend_and_point_serializers_preserve_strict_identity() -> None:
