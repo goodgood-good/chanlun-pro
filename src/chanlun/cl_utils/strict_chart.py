@@ -66,13 +66,13 @@ def _center_payload(
         "points": [
             {
                 "time": aware_datetime_to_epoch_seconds(
-                    center.body_start_market_time
+                    center.core_body_start_market_time
                 ),
                 "price_tick": center.zg_tick,
             },
             {
                 "time": aware_datetime_to_epoch_seconds(
-                    center.last_touch_market_time
+                    center.core_body_end_market_time
                 ),
                 "price_tick": center.zd_tick,
             },
@@ -151,9 +151,11 @@ def active_center_projection_to_chart_dict(
     if center.state not in _ACTIVE_CENTER_STATES:
         raise ValueError("center projection requires an active center")
     closed_epoch = aware_datetime_to_epoch_seconds(source_closed_at)
-    touched_epoch = aware_datetime_to_epoch_seconds(center.last_touch_market_time)
+    touched_epoch = aware_datetime_to_epoch_seconds(
+        center.core_body_end_market_time
+    )
     if closed_epoch < touched_epoch:
-        raise ValueError("source close cannot precede center last touch")
+        raise ValueError("source close cannot precede center core body end")
     return {
         "schema": CHART_CENTER_SCHEMA,
         "render_kind": "center_projection",
@@ -566,7 +568,7 @@ def build_strict_structure_snapshot(
         ],
     }
     render_revision = _revision(
-        "chanlun-chart-render/v4",
+        "chanlun-chart-render/v5",
         snapshot_revision,
         render_extras,
     )

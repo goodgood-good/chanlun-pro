@@ -254,13 +254,15 @@ def test_center_render_id_changes_on_body_revision_or_state_only() -> None:
 
 
 def test_stroke_observation_is_explicitly_non_tradable() -> None:
-    payload = center_observation_to_chart_dict(
-        _center(source_kind=SourceKind.STROKE_OBSERVATION)
-    )
+    center = _center(source_kind=SourceKind.STROKE_OBSERVATION)
+    payload = center_observation_to_chart_dict(center)
 
     assert payload["source_kind"] == "stroke_observation"
     assert payload["tradable"] is False
     assert payload["render_kind"] == "center_observation"
+    assert payload["points"][0]["time"] == int(
+        center.core_body_start_market_time.timestamp()
+    )
 
 
 def test_formal_serializer_rejects_stroke_observation() -> None:
@@ -275,16 +277,19 @@ def test_chart_times_are_utc_epoch_seconds_and_reject_naive_datetime() -> None:
     payload = strict_center_to_chart_dict(center)
 
     assert payload["points"][0]["time"] == int(
-        center.body_start_market_time.timestamp()
+        center.core_units[0].market_start.timestamp()
+    )
+    assert payload["points"][1]["time"] == int(
+        center.initial_exit_unit.market_start.timestamp()
     )
     with pytest.raises(ValueError, match="timezone-aware"):
         aware_datetime_to_epoch_seconds(
-            center.body_start_market_time.replace(tzinfo=None)
+            center.core_body_start_market_time.replace(tzinfo=None)
         )
 
 
-def test_active_projection_is_separate_non_tradable_overlay() -> None:
-    center = _center(extension=True)
+def test_active_projection_starts_at_core_body_end() -> None:
+    center = _center()
     source_closed_at = BASE + timedelta(hours=6)
 
     body = strict_center_to_chart_dict(center)
@@ -294,12 +299,28 @@ def test_active_projection_is_separate_non_tradable_overlay() -> None:
     )
 
     assert body["points"][1]["time"] == int(
-        center.last_touch_market_time.timestamp()
+        center.initial_exit_unit.market_start.timestamp()
     )
     assert projection["render_kind"] == "center_projection"
     assert projection["tradable"] is False
+    assert projection["points"][0]["time"] == int(
+        center.initial_exit_unit.market_start.timestamp()
+    )
     assert projection["points"][1]["time"] == int(source_closed_at.timestamp())
     assert projection["core"] == body["core"]
+
+
+def test_completed_center_body_stops_before_leave_and_completion_return() -> None:
+    center = completed_up_center()
+    payload = strict_center_to_chart_dict(center)
+
+    assert payload["points"][1]["time"] == int(
+        center.completion_leave_unit.market_start.timestamp()
+    )
+    assert payload["points"][1]["time"] < int(
+        center.completion_return_unit.market_end.timestamp()
+    )
+    assert payload["completed_at"] == int(center.completed_at.timestamp())
 
 
 def test_snapshot_projects_only_the_latest_ongoing_center() -> None:
