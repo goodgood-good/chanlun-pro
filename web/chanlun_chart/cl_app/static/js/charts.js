@@ -404,10 +404,11 @@ const ChartUtils = {
         return this.createShape(chart, line.points, { shape: "trend_line", overrides: { linestyle: parseInt(line.linestyle) || 0, linewidth: options.linewidth || 1, linecolor: options.color || CHART_CONFIG.COLORS.BI, ...options.overrides }, ...options });
     },
     createZhongshuShape(chart, zs, options = {}) {
-        const color = options.color || CHART_CONFIG.COLORS.BI;
-        const linewidth = options.linewidth || 1;
+        const { overrides = {}, ...shapeOptions } = options;
+        const color = shapeOptions.color || CHART_CONFIG.COLORS.BI;
+        const linewidth = shapeOptions.linewidth || 1;
         const transparency = 95;
-        return this.createShape(chart, zs.points, { shape: "rectangle", overrides: { linestyle: parseInt(zs.linestyle) || 0, linewidth, linecolor: color, backgroundColor: color, transparency, color, "trendline.linecolor": color, fillBackground: true, filled: true, ...options.overrides }, ...options });
+        return this.createShape(chart, zs.points, { shape: "rectangle", ...shapeOptions, overrides: { linestyle: parseInt(zs.linestyle) || 0, linewidth, linecolor: color, backgroundColor: color, transparency, color, "trendline.linecolor": color, fillBackground: true, filled: true, ...overrides } });
     },
     // 买卖点偏移基准:近 N 根 K 线平均振幅(high-low)。波动越大基准越大,
     // 跨标的 / 周期 / 缩放自适应。无有效 K 线时返回 0,调用方回退到价格百分比。

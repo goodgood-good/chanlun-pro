@@ -298,6 +298,40 @@ test('vm 能加载真实 charts.js 并取出 ChartManager', () => {
   assert.equal(typeof ChartManager.prototype._getViewLatestSec, 'function');
 });
 
+test('中枢矩形的局部样式覆盖不得丢失级别颜色和线宽', () => {
+  const { ChartUtils } = loadChartManager();
+  const calls = [];
+  const chart = {
+    createMultipointShape(points, options) {
+      calls.push({ points, options });
+      return 'center-shape';
+    },
+  };
+  const points = [
+    { time: 1_700_000_000, price: 12 },
+    { time: 1_700_000_300, price: 10 },
+  ];
+
+  const id = ChartUtils.createZhongshuShape(
+    chart,
+    { points, linestyle: 2 },
+    {
+      color: '#FF0000',
+      linewidth: 3,
+      overrides: { transparency: 100, linestyle: 0 },
+    },
+  );
+
+  assert.equal(id, 'center-shape');
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].options.overrides.color, '#FF0000');
+  assert.equal(calls[0].options.overrides.linecolor, '#FF0000');
+  assert.equal(calls[0].options.overrides.backgroundColor, '#FF0000');
+  assert.equal(calls[0].options.overrides.linewidth, 3);
+  assert.equal(calls[0].options.overrides.transparency, 100);
+  assert.equal(calls[0].options.overrides.linestyle, 0);
+});
+
 test('CSP 模式禁用 blob iframe 并使用同源 TradingView 启动页', () => {
   const { disabledFeatures } = loadChartManager();
   assert.ok(Array.isArray(disabledFeatures));
