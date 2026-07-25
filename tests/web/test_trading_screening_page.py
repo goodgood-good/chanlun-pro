@@ -22,9 +22,9 @@ class _TradingScreeningService:
 
     def snapshot(self) -> dict[str, object]:
         return {
-            "schema_version": "chanlun-trading-screening/v2",
+            "schema_version": "chanlun-trading-screening/v3",
             "algorithm_version": "chanlun_source_faithful_v2",
-            "structure_version": "v2",
+            "structure_version": "v3",
             "available": True,
             "scan_state": "complete",
             "generated_at": "2026-07-20T15:00:00+08:00",
@@ -105,8 +105,8 @@ def test_early_signals_requires_new_schema(app: Flask, logged_in_client) -> None
     assert response.status_code == 200
     assert response.headers["Cache-Control"] == "private, no-store"
     assert payload["ok"] is True
-    assert payload["data"]["schema_version"] == "chanlun-trading-screening/v2"
-    assert payload["data"]["structure_version"] == "v2"
+    assert payload["data"]["schema_version"] == "chanlun-trading-screening/v3"
+    assert payload["data"]["structure_version"] == "v3"
     service = app.extensions["decision_support_trading_screening"]
     assert service.refresh_requests == 1
 
@@ -125,7 +125,7 @@ def test_screening_page_uses_new_three_workspace_contract(
 
     assert response.status_code == 200
     assert response.headers["Cache-Control"] == "private, no-store"
-    assert 'data-schema="chanlun-trading-screening/v2"' in html
+    assert 'data-schema="chanlun-trading-screening/v3"' in html
     assert 'id="es-sector-completion"' in html
     assert "板块质量" in html
     assert html.count("data-workspace=") == 3

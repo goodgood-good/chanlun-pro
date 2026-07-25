@@ -1,0 +1,48 @@
+{
+  "code": "SZ.002299",
+  "dataset": "tests/fixtures/SZ.002299_1m.parquet",
+  "frequency": "1m",
+  "points": [
+    {
+      "anchor_at": "2025-07-02T03:04:00+00:00",
+      "available_at": "2025-07-04T06:43:00+00:00",
+      "center_id": "c5174def9f76d7f406f465438f1611dd293140734b9248ff095f1dddc5c3335d",
+      "center_ordinal": 1,
+      "confirmed_at": "2025-07-04T06:43:00+00:00",
+      "level": 0,
+      "point_id": "c2f7cdca89a4bbdf084f635aaf9232c8f8031c071b2694993f9e4b6eefc32831",
+      "point_type": "3buy",
+      "strength_source": null,
+      "variant": "standard"
+    },
+    {
+      "anchor_at": "2025-07-04T02:40:00+00:00",
+      "available_at": "2025-07-08T05:22:00+00:00",
+      "center_id": "48d29343c376088d6480d7b95b0dffc51d3f56a7215372ec2d3f9f6962cbb4cf",
+      "center_ordinal": null,
+      "confirmed_at": "2025-07-08T05:22:00+00:00",
+      "level": 0,
+      "point_id": "98338aeee3e462cdd6d99bc28d5c54944a31662ba8a1f6c2a96faa068eb1f4a6",
+      "point_type": "1sell",
+      "strength_source": "macd_htf",
+      "variant": "standard"
+    },
+    {
+      "anchor_at": "2025-07-07T01:34:00+00:00",
+      "available_at": "2025-07-08T05:22:00+00:00",
+      "center_id": "48d29343c376088d6480d7b95b0dffc51d3f56a7215372ec2d3f9f6962cbb4cf",
+      "center_ordinal": 2,
+      "confirmed_at": "2025-07-08T05:22:00+00:00",
+      "level": 0,
+      "point_id": "a993a6362a0f9aa0f4a6d51a131662fdb55f794d842f73706b09bc152c6574c0",
+      "point_type": "3buy",
+      "strength_source": null,
+      "variant": "standard"
+    }
+  ],
+  "price_basis_revision": "test-raw-v1",
+  "rows": 1100,
+  "schema_version": "chanlun-strict-points-golden/v2",
+  "source_closed_at": "2025-07-10T06:57:00+00:00",
+  "structure_price_quantum": "0.01"
+}

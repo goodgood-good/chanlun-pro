@@ -26,6 +26,7 @@ def _validate_center_references(centers, units, structural_level):
 
     previous_start = -1
     previous_return_index = None
+    previous_leave_index = None
     for center in centers:
         if (
             center.structural_level != structural_level
@@ -48,7 +49,10 @@ def _validate_center_references(centers, units, structural_level):
         if start <= previous_start:
             raise ValueError("centers must be strictly ordered in the unit stream")
         if previous_return_index is not None and start < previous_return_index:
-            raise ValueError("next center cannot start before previous completion return")
+            if start != previous_leave_index:
+                raise ValueError(
+                    "next center can only reuse the previous completion leave"
+                )
 
         return_index = None
         if center.state is CenterState.COMPLETED:
@@ -74,6 +78,9 @@ def _validate_center_references(centers, units, structural_level):
 
         previous_start = start
         previous_return_index = return_index
+        previous_leave_index = (
+            None if return_index is None else return_index - 1
+        )
     return index
 
 
@@ -224,6 +231,31 @@ def assemble_trend_types(centers, units, structural_level) -> TrendAssemblyResul
             constituent_units,
         )
         record_complete(group, group_start)
+        if current.state is not CenterState.COMPLETED:
+            # A live center can still be replaced by a later five-unit window.
+            # It may start a forming boundary, but it cannot irreversibly lock
+            # the preceding trend until its own center identity is completed.
+            output.append(
+                _build(
+                    group,
+                    constituent_units,
+                    structural_level,
+                    TrendState.COMPLETE,
+                    complete_confirmed_at,
+                    complete_available_at,
+                )
+            )
+            terminal_return = group[-1].completion_return_unit
+            if terminal_return is None:
+                raise ValueError("complete trend requires terminal return")
+            # A center may reuse the prior center's completion leave as its
+            # entry evidence.  The shared segment belongs to the preceding
+            # trend type; start the next trend at the completion return so
+            # recursive trend units remain adjacent instead of overlapping.
+            group_start = index[terminal_return.unit_id]
+            group = [current]
+            group_relation = None
+            continue
         boundary_confirmed_at = max(
             complete_confirmed_at,
             current.established_at,

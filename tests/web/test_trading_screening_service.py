@@ -2,8 +2,11 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import datetime, timedelta
+from decimal import Decimal
 import json
 from pathlib import Path
+import threading
+import time
 
 from chanlun.decision_support.trading_system.engine import (
     SymbolStructureBundle,
@@ -68,6 +71,8 @@ class RecordingMarketData:
 
 class RecordingSectorCatalog:
     def __init__(self, batch: SectorAssessmentBatch | None = None) -> None:
+        self.assessment_calls: list[datetime] = []
+        self.member_calls = 0
         self.batch = batch or SectorAssessmentBatch(
             assessments=(eligible_sector(),),
             discovered_count=1,
@@ -77,10 +82,13 @@ class RecordingSectorCatalog:
         )
 
     def native_sector_assessments(self, *, as_of: datetime):
-        del as_of
+        calls = getattr(self, "assessment_calls", None)
+        if calls is not None:
+            calls.append(as_of)
         return self.batch
 
     def members(self):
+        self.member_calls += 1
         return {eligible_sector().sector_id: ("SZ.000001",)}
 
 
@@ -147,14 +155,19 @@ def test_service_uses_incremental_scan_plan_and_new_engine(tmp_path: Path) -> No
 
     payload = service.refresh_now()
 
-    assert payload["schema_version"] == "chanlun-trading-screening/v2"
-    assert payload["structure_version"] == "v2"
+    assert payload["schema_version"] == "chanlun-trading-screening/v3"
+    assert payload["structure_version"] == "v3"
     assert payload["sector_first"] is True
     assert payload["read_only"] is True
     assert payload["no_order_execution"] is True
     assert payload["screening_policy"] == {
         "latest_per_independent_lane": True,
         "max_five_minute_setup_age_seconds": 345600,
+        "sector_catalog_source": "qmt_gics3_components",
+        "sector_price_source": "qmt_gics3_component_composite",
+        "sector_composite_member_limit": 24,
+        "sector_scope": "all_eligible",
+        "stock_scope": "all_members_of_all_eligible_sectors",
         "sector_frequencies": ["30m", "5m"],
         "stock_trigger_frequency": "1m",
     }
@@ -247,6 +260,68 @@ def test_business_ineligible_sectors_count_as_completed_and_can_publish_empty(
     assert payload["scan_audit"]["selected_sector_count"] == 0
 
 
+def test_service_scans_every_eligible_sector_without_a_top_n_cutoff(
+    tmp_path: Path,
+) -> None:
+    assessments = tuple(
+        replace(
+            eligible_sector(),
+            sector_id=f"qmt-gics3:{index:02d}",
+            sector_name=f"QMT 行业 {index:02d}",
+        )
+        for index in range(12)
+    )
+
+    class AllEligibleCatalog(RecordingSectorCatalog):
+        def __init__(self) -> None:
+            self.batch = SectorAssessmentBatch(
+                assessments=assessments,
+                discovered_count=len(assessments),
+                completed_count=len(assessments),
+                failure_counts=(),
+                errors=(),
+            )
+
+        def members(self):
+            return {
+                assessment.sector_id: (f"SH.60{index:04d}",)
+                for index, assessment in enumerate(assessments)
+            }
+
+    captured: dict[str, object] = {}
+
+    def empty_plan(**kwargs) -> ScanPlan:
+        captured.update(kwargs)
+        return ScanPlan(
+            sectors=(),
+            symbols=(),
+            symbol_frequencies=(),
+            full_market_history_scan=False,
+            background_full_refresh_required=False,
+        )
+
+    service = TradingScreeningService(
+        market_data=RecordingMarketData(),
+        sector_catalog=AllEligibleCatalog(),
+        engine=RecordingEngine(),
+        scan_planner=empty_plan,
+        cache_path=tmp_path / "snapshot.json",
+        clock=lambda: AS_OF,
+        notifier=None,
+    )
+
+    payload = service.refresh_now()
+
+    assert payload["scan_audit"]["selected_sector_count"] == 12
+    assert len(captured["sector_members"]) == 12
+    assert set(captured["known_sector_ids"]) == {
+        assessment.sector_id for assessment in assessments
+    }
+    assert [sector["rank"] for sector in payload["sectors"]] == list(
+        range(1, 13)
+    )
+
+
 def test_cache_with_another_schema_is_rejected(tmp_path: Path) -> None:
     cache_path = tmp_path / "snapshot.json"
     cache_path.write_text(
@@ -275,8 +350,8 @@ def test_cache_with_another_schema_is_rejected(tmp_path: Path) -> None:
     )
 
     snapshot = service.snapshot()
-    assert snapshot["schema_version"] == "chanlun-trading-screening/v2"
-    assert snapshot["structure_version"] == "v2"
+    assert snapshot["schema_version"] == "chanlun-trading-screening/v3"
+    assert snapshot["structure_version"] == "v3"
     assert snapshot["scan_state"] == "not_started"
     assert snapshot["signals"] == []
 
@@ -658,6 +733,126 @@ def test_service_batches_discovered_symbols_without_losing_pending_scope(
     assert first["scan_audit"]["discovered_symbol_count"] == 3
     assert first["scan_audit"]["pending_symbol_count"] == 1
     assert second["scan_audit"]["pending_symbol_count"] == 0
+
+
+def test_pending_cycle_is_drained_without_replanning_active_symbols(
+    tmp_path: Path,
+) -> None:
+    market = RecordingMarketData()
+    market.active_watchlist = lambda: ("SZ.000001",)
+    sectors = RecordingSectorCatalog()
+    planner = RecordingPlanner(
+        ("SZ.000001", "SZ.000002", "SZ.000003")
+    )
+    service = TradingScreeningService(
+        market_data=market,
+        sector_catalog=sectors,
+        engine=RecordingEngine(),
+        scan_planner=planner,
+        cache_path=tmp_path / "snapshot.json",
+        clock=lambda: AS_OF,
+        notifier=None,
+        config=TradingScreeningConfig(
+            max_symbols_per_refresh=1,
+            max_monitor_symbols_per_refresh=1,
+        ),
+    )
+
+    first = service.refresh_now()
+    second = service.refresh_now()
+
+    assert planner.calls == 1
+    assert sectors.assessment_calls == [AS_OF]
+    assert sectors.member_calls == 1
+    assert market.bundle_codes == ["SZ.000001", "SZ.000002", "SZ.000003"]
+    assert first["scan_audit"]["pending_symbol_count"] == 1
+    assert second["scan_audit"]["pending_symbol_count"] == 0
+    assert second["scan_audit"]["coverage_cycle_complete"] is True
+    assert second["scan_audit"]["coverage_cycle_batch_count"] == 2
+
+
+def test_failed_symbol_is_deferred_instead_of_spinning_current_cycle(
+    tmp_path: Path,
+) -> None:
+    market = RecordingMarketData()
+    original = market.structure_bundle
+
+    def structure_bundle(code, **kwargs):
+        if code == "SZ.000002":
+            market.bundle_codes.append(code)
+            raise ValueError("permanent structure failure")
+        return original(code, **kwargs)
+
+    market.structure_bundle = structure_bundle
+    service = TradingScreeningService(
+        market_data=market,
+        sector_catalog=RecordingSectorCatalog(),
+        engine=RecordingEngine(),
+        scan_planner=RecordingPlanner(("SZ.000001", "SZ.000002")),
+        cache_path=tmp_path / "snapshot.json",
+        clock=lambda: AS_OF,
+        notifier=None,
+        config=TradingScreeningConfig(min_scan_completion_ratio=Decimal("0.5")),
+    )
+
+    payload = service.refresh_now()
+
+    assert payload["scan_state"] == "complete"
+    assert payload["scan_audit"]["pending_symbol_count"] == 0
+    assert payload["scan_audit"]["retry_symbol_count"] == 1
+    assert payload["scan_audit"]["coverage_cycle_complete"] is True
+    assert payload["scan_audit"]["coverage_cycle_failed_symbol_count"] == 1
+    assert payload["data_quality"]["failure_codes"] == ["stock_scan_partial"]
+    assert payload["scan_audit"]["batch_duration_ms"] >= 0
+    assert payload["scan_audit"]["coverage_cycle_elapsed_ms"] >= 0
+
+
+def test_background_worker_drains_pending_without_page_requests(
+    tmp_path: Path,
+) -> None:
+    market = RecordingMarketData()
+    all_symbols_visited = threading.Event()
+    original_structure_bundle = market.structure_bundle
+
+    def recording_structure_bundle(*args, **kwargs):
+        bundle = original_structure_bundle(*args, **kwargs)
+        if len(market.bundle_codes) >= 3:
+            all_symbols_visited.set()
+        return bundle
+
+    market.structure_bundle = recording_structure_bundle
+    service = TradingScreeningService(
+        market_data=market,
+        sector_catalog=RecordingSectorCatalog(),
+        engine=RecordingEngine(),
+        scan_planner=SequencedPlanner(
+            (("SZ.000001", "SZ.000002", "SZ.000003"), (), ())
+        ),
+        cache_path=tmp_path / "snapshot.json",
+        clock=lambda: AS_OF,
+        notifier=None,
+        config=TradingScreeningConfig(
+            refresh_interval_seconds=3600,
+            max_symbols_per_refresh=1,
+        ),
+    )
+
+    worker = service.start_background()
+    try:
+        assert all_symbols_visited.wait(timeout=1.0)
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline:
+            if service.snapshot()["scan_audit"]["pending_symbol_count"] == 0:
+                break
+            time.sleep(0.01)
+
+        assert market.bundle_codes == ["SZ.000001", "SZ.000002", "SZ.000003"]
+        assert service.snapshot()["scan_audit"]["pending_symbol_count"] == 0
+        assert service.snapshot()["scan_audit"]["coverage_cycle_complete"] is True
+        assert service.start_background() is worker
+    finally:
+        assert service.shutdown_background(wait=True, timeout=1.0) is True
+    assert worker.is_alive() is False
 
 
 def test_incremental_refresh_preserves_current_signals_for_unscanned_symbols(

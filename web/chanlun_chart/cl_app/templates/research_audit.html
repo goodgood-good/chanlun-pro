@@ -26,15 +26,16 @@
             <span class="ra-readonly-badge">只读</span>
           </div>
           <p class="ra-lead">
-            这里只展示新交易体系在当时可见数据上的因果回放。页面不修改参数、不发送交易指令，
-            也不具备下单能力；报告完整性校验失败时整页拒绝展示。
+            这里只展示当前固定交易策略在近一年 QMT 数据上的因果回放，不训练、不调参。
+            股票行业按历史生效日期归属到申万一级板块，复权与公司行动只在其生效日后可见。
+            页面不发送交易指令，也不具备下单能力；报告完整性校验失败时整页拒绝展示。
           </p>
         </div>
         <aside class="ra-boundary" role="note">
           <span class="ra-boundary-icon" aria-hidden="true">1</span>
           <div>
             <strong>活动交易体系固定为 1</strong>
-            <span>仅保留 chanlun_original_low_drawdown_v1；旧体系只能作为不可执行历史成果。</span>
+            <span>仅展示当前唯一策略的已校验成果；旧策略报告不会加载，也不会作为回退数据。</span>
           </div>
         </aside>
       </section>
@@ -44,8 +45,9 @@
         {% set verdict_labels = {
           'live_ready': '达到全部研究验收门槛',
           'evidence_insufficient': '数据证据不足',
-          'sample_inadequate': '交易样本不足',
-          'methodology_incomplete': '方法学证据不完整',
+           'sample_inadequate': '交易样本不足',
+           'analysis_incomplete': '消融与基准证据未完成',
+           'methodology_incomplete': '方法学证据不完整',
           'concentration_failed': '集中度门槛未通过',
           'performance_gate_failed': '收益或回撤门槛未通过',
           'data_invalid': '数据无效'
@@ -77,17 +79,17 @@
               <small>{{ audit.sample_adequacy.closed_trade_count }} / {{ audit.sample_adequacy.required_closed_trade_count }} 笔已平仓</small>
             </article>
             <article>
-              <span>样本外净收益</span>
+              <span>回测净收益</span>
               <strong>{{ "%+.2f%%"|format((audit.aggregate_out_of_sample.net_return|float) * 100) }}</strong>
               <small>扣除报告内费用与滑点</small>
             </article>
             <article>
-              <span>样本外最大回撤</span>
+              <span>回测最大回撤</span>
               <strong>{{ "%.2f%%"|format((audit.aggregate_out_of_sample.max_drawdown|float) * 100) }}</strong>
               <small>验收上限 10%</small>
             </article>
             <article>
-              <span>样本外 Calmar</span>
+              <span>回测 Calmar</span>
               <strong>{% if audit.aggregate_out_of_sample.calmar is not none %}{{ "%.3f"|format(audit.aggregate_out_of_sample.calmar|float) }}{% else %}N/A{% endif %}</strong>
               <small>验收下限 1.0；不足一年不计算</small>
             </article>
@@ -112,10 +114,38 @@
           </section>
         {% endif %}
 
+        {% if audit.terminal_positions_marked_to_market %}
+          <section class="ra-notice ra-notice-warning" role="alert">
+            <strong>总收益包含期末未平仓持仓的盯市损益</strong>
+            <span>
+              已平仓交易合计净损益为 {{ audit.closed_trade_net_pnl }} 元；期末持仓没有为了回测展示而在同一根 K 线上强制卖出。
+              因此页面顶部的总净收益不是已经全部落袋的收益，必须结合已平仓样本和 Bootstrap 区间判断。
+            </span>
+          </section>
+        {% endif %}
+
+        <section class="ra-section" aria-labelledby="ra-scope-title">
+          <div class="ra-section-heading">
+            <div>
+              <p class="ra-section-index">01 · FIXED POLICY SCOPE</p>
+              <h2 id="ra-scope-title">近一年固定策略回测范围</h2>
+              <p>使用当前唯一生产策略；不以历史区间训练参数，也不筛选最优参数组合。</p>
+            </div>
+          </div>
+          <div class="ra-fact-grid">
+            <div class="ra-fact"><span>请求区间</span><strong>{{ audit.requested_range.start }} → {{ audit.requested_range.end }}</strong></div>
+            <div class="ra-fact"><span>统一可交易区间</span><strong>{{ audit.effective_range.start }} → {{ audit.effective_range.end }}</strong></div>
+            <div class="ra-fact"><span>板块范围</span><strong>申万一级全部 {{ audit.universe.eligible_sector_count }} 个板块</strong><small>按每个历史时点的全部有效成分构造板块结构，不使用当前成分回填历史</small></div>
+            <div class="ra-fact"><span>股票范围</span><strong>{{ audit.universe.selected_symbol_count }} / {{ audit.universe.archived_intersecting_symbol_count }} 个历史标的纳入</strong><small>缺少可认证历史行业归属而排除：{{ audit.universe.unclassified_excluded_symbol_count }}</small></div>
+            <div class="ra-fact"><span>公司行动记录</span><strong>{{ audit.universe.corporate_action_count }}</strong><small>除权、现金分红与送转只从生效日开始进入价格和账户核算</small></div>
+            <div class="ra-fact"><span>因果评估时点</span><strong>{{ audit.universe.causal_evaluation_count }}</strong></div>
+          </div>
+        </section>
+
         <section class="ra-section" aria-labelledby="ra-sample-title">
           <div class="ra-section-heading">
             <div>
-              <p class="ra-section-index">01 · SAMPLE ADEQUACY</p>
+              <p class="ra-section-index">02 · SAMPLE ADEQUACY</p>
               <h2 id="ra-sample-title">样本充分性与样本门槛</h2>
               <p>总样本与每个已启用买点类别必须分别达标；样本不足时不展示可靠性结论。</p>
             </div>
@@ -142,9 +172,9 @@
         <section class="ra-section" aria-labelledby="ra-oos-title">
           <div class="ra-section-heading">
             <div>
-              <p class="ra-section-index">02 · OUT OF SAMPLE</p>
-              <h2 id="ra-oos-title">样本外收益、回撤与风险</h2>
-              <p>只汇总测试窗口；训练与验证阶段不混入样本外结果。</p>
+              <p class="ra-section-index">03 · FIXED POLICY REPLAY</p>
+              <h2 id="ra-oos-title">固定策略收益、回撤与风险</h2>
+              <p>汇总统一可交易区间内的实际可成交回放；本方案不存在训练集或参数选择阶段。</p>
             </div>
           </div>
           <div class="ra-metric-grid">
@@ -183,7 +213,7 @@
             <div class="ra-fact"><span>1m 精细触发</span><strong>同向确认后，最早下一根可交易 1m 成交</strong></div>
             <div class="ra-fact"><span>买卖点通道</span><strong>一、二、三类买卖点独立，不折叠为三买</strong></div>
             <div class="ra-fact"><span>第一中枢三买</span><strong>{{ "强制" if audit.execution_contract.first_center_three_buy_only else "当前滚动窗口未强制" }}</strong><small>{{ audit.execution_contract.first_center_three_buy_mode }}</small></div>
-            <div class="ra-fact"><span>板块行情</span><strong>通达信 880 原生行业指数，不用成分股合成</strong></div>
+            <div class="ra-fact"><span>板块行情</span><strong>历史时点申万一级有效成分合成板块结构</strong></div>
             <div class="ra-fact"><span>板块涨跌幅</span><strong>{{ "不参与筛选" if not audit.execution_contract.sector_price_change_gate else "参与" }}</strong></div>
             <div class="ra-fact"><span>T+1</span><strong>{{ "严格执行" if audit.execution_contract.t_plus_one else "未启用" }}</strong></div>
             <div class="ra-fact"><span>盘中结构止损</span><strong>{{ "按未复权 low/high 检查" if audit.execution_contract.intraday_structural_stop else "未启用" }}</strong></div>
@@ -213,22 +243,14 @@
 
         <section class="ra-section" aria-labelledby="ra-window-title">
           <div class="ra-section-heading">
-            <div><p class="ra-section-index">05 · WALK FORWARD</p><h2 id="ra-window-title">滚动样本外窗口</h2><p>36 个月训练、6 个月验证、6 个月测试；每个测试窗口应独立执行并汇总。</p></div>
+            <div><p class="ra-section-index">05 · METHODOLOGY</p><h2 id="ra-window-title">固定策略，不做历史调参</h2><p>本轮直接回放当前策略参数，不采用旧的训练、验证、测试滚动窗口，也不根据结果反向选择参数。</p></div>
           </div>
-          {% if audit.walk_forward_windows %}
-            <div class="ra-table-wrap">
-              <table class="ra-source-table">
-                <thead><tr><th>窗口</th><th>训练</th><th>验证</th><th>测试</th><th>测试交易</th><th>净收益</th><th>最大回撤</th><th>Calmar</th></tr></thead>
-                <tbody>
-                  {% for row in audit.walk_forward_windows %}
-                    <tr><td>{{ row.window_id }}</td><td>{{ row.train|join(' → ') }}</td><td>{{ row.validation|join(' → ') }}</td><td>{{ row.test|join(' → ') }}</td><td>{{ row.closed_trade_count }}</td><td>{{ row.test_metrics.net_return }}</td><td>{{ row.test_metrics.max_drawdown }}</td><td>{{ row.test_metrics.calmar or 'N/A' }}</td></tr>
-                  {% endfor %}
-                </tbody>
-              </table>
-            </div>
-          {% else %}
-            <p class="ra-empty-evidence">尚无独立滚动窗口证据；方法学完整性因此未达门槛。</p>
-          {% endif %}
+          <div class="ra-fact-grid">
+            <div class="ra-fact"><span>评估模式</span><strong>fixed_policy_one_year</strong></div>
+            <div class="ra-fact"><span>参数训练</span><strong>无</strong></div>
+            <div class="ra-fact"><span>参数搜索</span><strong>无</strong></div>
+            <div class="ra-fact"><span>数据读取</span><strong>QMT 本地历史行情 + CNINFO 生效日期行业档案</strong></div>
+          </div>
         </section>
 
         <section class="ra-section" aria-labelledby="ra-ablation-title">
@@ -260,7 +282,7 @@
 
         <section class="ra-section" aria-labelledby="ra-benchmark-title">
           <div class="ra-section-heading">
-            <div><p class="ra-section-index">08 · BENCHMARKS</p><h2 id="ra-benchmark-title">基线与市场参照</h2><p>与旧成果、沪深 300、中证 500 和可投资股票池等权基线分别比较。</p></div>
+            <div><p class="ra-section-index">08 · BENCHMARKS</p><h2 id="ra-benchmark-title">基线与市场参照</h2><p>与沪深 300、中证 500 和当前可投资股票池等权基线分别比较。</p></div>
           </div>
           {% if audit.benchmarks %}
             <div class="ra-table-wrap"><table class="ra-source-table"><thead><tr><th>基线</th><th>数据等级</th><th>净收益</th><th>最大回撤</th></tr></thead><tbody>{% for row in audit.benchmarks %}<tr><td>{{ row.label }}</td><td>{{ row.data_grade }}</td><td>{{ row.net_return or 'N/A' }}</td><td>{{ row.max_drawdown or 'N/A' }}</td></tr>{% endfor %}</tbody></table></div>
@@ -303,6 +325,7 @@
         </section>
 
         <footer class="ra-footer">
+          <span>策略：<code>{{ audit.strategy_id }}</code></span>
           <span>成果：<code>{{ audit.artifact.relative_path }}</code></span>
           <span>内容哈希：<code>{{ audit.content_sha256 }}</code></span>
           <span>文件哈希：<code>{{ audit.artifact.file_sha256 }}</code></span>
@@ -310,8 +333,19 @@
         </footer>
       {% else %}
         <section class="ra-error" role="alert">
-          <h2>审计成果暂不可展示</h2>
-          <p>新体系报告不存在、格式无效或完整性校验失败：<code>{{ audit_error_code }}</code></p>
+          {% if audit_error_code == 'causality_gate_blocked' and audit_error_details %}
+            <h2>未生成正式回测收益</h2>
+            <p>完整无未来函数审计未通过，系统已在计算收益前停止。旧回测收益不会继续展示，也不能作为当前策略结论。</p>
+            <p>已校验 {{ audit_error_details.validated_symbol_fact_count }} 个标的事实、{{ audit_error_details.validated_decision_count }} 个决策时点；门禁时间：{{ audit_error_details.checked_at }}</p>
+            <ul class="ra-blocker-list">
+              {% for failure in audit_error_details.failures %}
+                <li><strong>{{ failure.code }}</strong><br />现有证据：{{ failure.evidence }}<br />仍需证据：{{ failure.required }}</li>
+              {% endfor %}
+            </ul>
+          {% else %}
+            <h2>审计成果暂不可展示</h2>
+            <p>新体系报告不存在、格式无效或完整性校验失败：<code>{{ audit_error_code }}</code></p>
+          {% endif %}
         </section>
       {% endif %}
     </main>

@@ -9,7 +9,8 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 import json
 from pathlib import Path
-from threading import Lock, RLock, Thread
+from threading import Event, Lock, RLock, Thread, current_thread
+import time
 from typing import Protocol
 
 from chanlun.decision_support.fingerprints import normalize_datetime
@@ -36,13 +37,16 @@ from chanlun.decision_support.trading_system.runtime_config import (
     STRICT_STRATEGY_ID,
 )
 from chanlun.decision_support.trading_system.sector_policy import rank_sectors
+from chanlun.exchange.qmt_screening_sector_source import (
+    QMT_GICS3_COMPOSITE_MEMBER_LIMIT,
+)
 from cl_app.services.trading_screening_gateway import (
     SectorAssessmentBatch,
     _sector_failure_document,
 )
 
 
-SCHEMA_VERSION = "chanlun-trading-screening/v2"
+SCHEMA_VERSION = "chanlun-trading-screening/v3"
 POINT_TYPES = ("1buy", "2buy", "3buy", "1sell", "2sell", "3sell")
 
 
@@ -52,6 +56,11 @@ def _screening_policy_document() -> dict[str, object]:
         "max_five_minute_setup_age_seconds": (
             MAX_FIVE_MINUTE_SETUP_AGE_SECONDS
         ),
+        "sector_catalog_source": "qmt_gics3_components",
+        "sector_price_source": "qmt_gics3_component_composite",
+        "sector_composite_member_limit": QMT_GICS3_COMPOSITE_MEMBER_LIMIT,
+        "sector_scope": "all_eligible",
+        "stock_scope": "all_members_of_all_eligible_sectors",
         "sector_frequencies": ["30m", "5m"],
         "stock_trigger_frequency": "1m",
     }
@@ -97,22 +106,20 @@ class NotificationDispatcher(Protocol):
 @dataclass(frozen=True, slots=True)
 class TradingScreeningConfig:
     refresh_interval_seconds: int = 60
-    max_selected_sectors: int = 8
     max_visible_symbols: int = 500
     max_symbols_per_refresh: int = 32
     max_monitor_symbols_per_refresh: int = 64
     min_scan_completion_ratio: Decimal = Decimal("0.80")
     max_structure_age_seconds: int = 3600
     algorithm_version: str = STRICT_STRATEGY_ID
-    structure_version: str = "v2"
-    parameter_version: str = "v1"
+    structure_version: str = "v3"
+    parameter_version: str = "v2"
 
     def __post_init__(self) -> None:
         if self.refresh_interval_seconds <= 0:
             raise ValueError("refresh_interval_seconds must be positive")
         if (
-            self.max_selected_sectors <= 0
-            or self.max_visible_symbols <= 0
+            self.max_visible_symbols <= 0
             or self.max_symbols_per_refresh <= 0
             or self.max_monitor_symbols_per_refresh <= 0
         ):
@@ -156,6 +163,12 @@ def _initial_snapshot(config: TradingScreeningConfig) -> dict[str, object]:
             "completion_ratio": "0",
             "full_market_history_scan": False,
             "background_full_refresh_required": True,
+            "batch_duration_ms": 0,
+            "sector_scan_duration_ms": 0,
+            "stock_scan_duration_ms": 0,
+            "coverage_cycle_elapsed_ms": 0,
+            "coverage_cycle_batch_count": 0,
+            "coverage_cycle_started_at": None,
         },
         "data_quality": {
             "complete": False,
@@ -407,8 +420,24 @@ class TradingScreeningService:
         )
         self._state_lock = RLock()
         self._scan_lock = Lock()
+        self._background_lock = Lock()
+        self._background_stop = Event()
+        self._background_wake = Event()
+        self._background_thread: Thread | None = None
         self._pending_frequencies: dict[str, set[str]] = {}
+        self._deferred_frequencies: dict[str, set[str]] = {}
         self._monitor_offset = 0
+        self._coverage_cycle_started_at: datetime | None = None
+        self._coverage_cycle_started_perf: float | None = None
+        self._coverage_cycle_batch_count = 0
+        self._coverage_cycle_discovered_codes: set[str] = set()
+        self._coverage_cycle_completed_codes: set[str] = set()
+        self._coverage_cycle_failed_codes: set[str] = set()
+        self._coverage_cycle_errors: dict[str, dict[str, str]] = {}
+        self._coverage_cycle_full_market_history_scan = False
+        self._coverage_cycle_background_refresh_required = False
+        self._coverage_cycle_sector_batch: SectorAssessmentBatch | None = None
+        self._coverage_cycle_sector_members: dict[str, tuple[str, ...]] | None = None
         self._snapshot = self._load_valid_cache() or _initial_snapshot(config)
         self._last_as_of = self._cached_as_of(self._snapshot)
         self._cursor = (
@@ -442,16 +471,123 @@ class TradingScreeningService:
             return copy.deepcopy(self._snapshot)
 
     def _needs_refresh(self) -> bool:
-        generated = self._cached_as_of(self._snapshot)
+        generated = self._cached_as_of(self.snapshot())
         if generated is None:
             return True
         return normalize_datetime(self._clock(), "clock") - generated >= timedelta(
             seconds=self._config.refresh_interval_seconds
         )
 
+    @staticmethod
+    def _pending_symbol_count(snapshot: Mapping[str, object]) -> int:
+        audit = snapshot.get("scan_audit")
+        if not isinstance(audit, Mapping):
+            return 0
+        try:
+            return max(0, int(audit.get("pending_symbol_count", 0)))
+        except (TypeError, ValueError):
+            return 0
+
+    def _background_loop(self, stop: Event, wake: Event) -> None:
+        try:
+            while not stop.is_set():
+                # Clear the event before inspecting state so a concurrent wake-up
+                # between this point and ``wait`` cannot be lost.
+                wake.clear()
+                if stop.is_set():
+                    break
+                snapshot = self.snapshot()
+                has_pending = self._pending_symbol_count(snapshot) > 0
+                if has_pending or self._needs_refresh():
+                    if self._scan_lock.locked():
+                        wake.wait(timeout=1.0)
+                        continue
+                    try:
+                        refreshed = self.refresh_now()
+                    except Exception:
+                        # Persistence and notification failures live outside the
+                        # refresh error snapshot. Keep the worker alive, but avoid
+                        # a tight retry loop.
+                        wake.wait(
+                            timeout=float(self._config.refresh_interval_seconds)
+                        )
+                        continue
+                    if (
+                        refreshed.get("scan_state") == "complete"
+                        and self._pending_symbol_count(refreshed) > 0
+                    ):
+                        # Drain the discovery queue batch by batch. This is what
+                        # makes progress independent of page polling.
+                        continue
+
+                # Once a coverage cycle is complete (or a batch failed), pace the
+                # next attempt from completion time instead of immediately looping
+                # when a slow batch took longer than the nominal refresh interval.
+                wake.wait(timeout=float(self._config.refresh_interval_seconds))
+        finally:
+            with self._background_lock:
+                if self._background_thread is current_thread():
+                    self._background_thread = None
+
+    def start_background(self) -> Thread:
+        """Start the page-independent incremental scanner, idempotently."""
+
+        with self._background_lock:
+            existing = self._background_thread
+            if existing is not None and existing.is_alive():
+                return existing
+            self._background_stop = Event()
+            self._background_wake = Event()
+            worker = Thread(
+                target=self._background_loop,
+                args=(self._background_stop, self._background_wake),
+                daemon=True,
+                name="trading-screening-background",
+            )
+            self._background_thread = worker
+            worker.start()
+            return worker
+
+    def shutdown_background(
+        self,
+        *,
+        wait: bool = True,
+        timeout: float | None = 1.0,
+    ) -> bool:
+        """Signal the background scanner and report whether it has stopped."""
+
+        with self._background_lock:
+            worker = self._background_thread
+            stop = self._background_stop
+            wake = self._background_wake
+        if worker is None:
+            return True
+        stop.set()
+        wake.set()
+        if wait and worker is not current_thread():
+            worker.join(timeout=timeout)
+        stopped = not worker.is_alive()
+        if stopped:
+            with self._background_lock:
+                if self._background_thread is worker:
+                    self._background_thread = None
+        return stopped
+
     def ensure_refresh(self) -> bool:
-        if not self._needs_refresh() or self._scan_lock.locked():
+        snapshot = self.snapshot()
+        if (
+            not self._needs_refresh()
+            and self._pending_symbol_count(snapshot) == 0
+        ) or self._scan_lock.locked():
             return False
+        with self._background_lock:
+            background_running = (
+                self._background_thread is not None
+                and self._background_thread.is_alive()
+            )
+            if background_running:
+                self._background_wake.set()
+                return True
         Thread(target=self.refresh_now, daemon=True, name="trading-screening").start()
         return True
 
@@ -518,6 +654,44 @@ class TradingScreeningService:
                 frequencies.get(code, ())
             )
 
+    def _defer_symbols_to_next_cycle(
+        self,
+        symbols: tuple[str, ...],
+        frequencies: Mapping[str, tuple[str, ...]],
+    ) -> None:
+        for code in symbols:
+            self._deferred_frequencies.setdefault(code, set()).update(
+                frequencies.get(code, ())
+            )
+
+    @staticmethod
+    def _error_identity(error: Mapping[str, object]) -> str:
+        subject = error.get("code") or error.get("sector_id") or "unknown"
+        return f"{error.get('error_type', 'error')}:{subject}"
+
+    def _begin_coverage_cycle(self, *, as_of: datetime, started_perf: float) -> None:
+        self._coverage_cycle_started_at = as_of
+        self._coverage_cycle_started_perf = started_perf
+        self._coverage_cycle_batch_count = 0
+        self._coverage_cycle_discovered_codes.clear()
+        self._coverage_cycle_completed_codes.clear()
+        self._coverage_cycle_failed_codes.clear()
+        self._coverage_cycle_errors.clear()
+        self._coverage_cycle_full_market_history_scan = False
+        self._coverage_cycle_background_refresh_required = False
+
+    def _record_cycle_errors(
+        self,
+        errors: tuple[Mapping[str, object], ...] | list[Mapping[str, object]],
+    ) -> None:
+        for error in errors:
+            normalized = {
+                str(key): str(value)
+                for key, value in error.items()
+                if value is not None
+            }
+            self._coverage_cycle_errors[self._error_identity(error)] = normalized
+
     def refresh_now(self) -> dict[str, object]:
         if not self._scan_lock.acquire(blocking=False):
             return self.snapshot()
@@ -559,8 +733,33 @@ class TradingScreeningService:
         self,
         previous: Mapping[str, object],
     ) -> dict[str, object]:
-        as_of = normalize_datetime(self._clock(), "clock")
-        sector_batch = self._sector_catalog.native_sector_assessments(as_of=as_of)
+        batch_started_perf = time.perf_counter()
+        cycle_started = not self._pending_frequencies
+        cached_sector_batch = self._coverage_cycle_sector_batch
+        cached_sector_members = self._coverage_cycle_sector_members
+        reuse_cycle_sectors = (
+            not cycle_started
+            and self._coverage_cycle_started_at is not None
+            and cached_sector_batch is not None
+            and cached_sector_members is not None
+        )
+        if reuse_cycle_sectors:
+            # A coverage cycle is one market-data snapshot. Re-reading all sector
+            # composites for every stock batch both wasted tens of seconds and
+            # allowed later batches to use a different sector state/as-of time.
+            as_of = self._coverage_cycle_started_at
+            sector_batch = cached_sector_batch
+            sector_scan_duration_ms = 0
+        else:
+            as_of = normalize_datetime(self._clock(), "clock")
+            sector_started_perf = time.perf_counter()
+            sector_batch = self._sector_catalog.native_sector_assessments(
+                as_of=as_of
+            )
+            sector_scan_duration_ms = round(
+                (time.perf_counter() - sector_started_perf) * 1000,
+                2,
+            )
         sector_ratio = sector_batch.completion_ratio
         sector_audit: dict[str, object] = {
             "sector_discovered_count": sector_batch.discovered_count,
@@ -582,6 +781,16 @@ class TradingScreeningService:
                 dict(previous_audit) if isinstance(previous_audit, Mapping) else {}
             )
             scan_audit.update(sector_audit)
+            scan_audit.update(
+                {
+                    "batch_duration_ms": round(
+                        (time.perf_counter() - batch_started_perf) * 1000,
+                        2,
+                    ),
+                    "sector_scan_duration_ms": sector_scan_duration_ms,
+                    "stock_scan_duration_ms": 0,
+                }
+            )
             failed["scan_audit"] = scan_audit
             failed["data_quality"] = {
                 "complete": False,
@@ -598,11 +807,17 @@ class TradingScreeningService:
             if assessment.sector_id not in failed_sector_ids
         )
         ranked = rank_sectors(assessments)
-        selected = ranked[: self._config.max_selected_sectors]
+        # Every structurally eligible QMT sector contributes its members. Ranking
+        # remains an explanation/order field; it is not a top-N cutoff.
+        selected = ranked
         selected_by_id = {
             row.assessment.sector_id: row.assessment for row in selected
         }
-        all_members = self._sector_catalog.members()
+        all_members = (
+            dict(cached_sector_members)
+            if reuse_cycle_sectors and cached_sector_members is not None
+            else dict(self._sector_catalog.members())
+        )
         sector_members = {
             sector_id: tuple(all_members.get(sector_id, ()))
             for sector_id in selected_by_id
@@ -624,15 +839,55 @@ class TradingScreeningService:
         priority_codes = tuple(
             sorted(set((*watchlist, *holdings, *previous_active_codes)))
         )
-        plan = self._scan_planner(
-            changed_bars=self._market_data.changed_bars(self._last_as_of),
-            sector_members=sector_members,
-            active_watchlist=priority_codes,
-            holdings=holdings,
-            previous=self._cursor,
-            structure_version=self._config.structure_version,
-            parameter_version=self._config.parameter_version,
-        )
+        if cycle_started:
+            self._begin_coverage_cycle(
+                as_of=as_of,
+                started_perf=batch_started_perf,
+            )
+            self._coverage_cycle_sector_batch = sector_batch
+            self._coverage_cycle_sector_members = dict(all_members)
+            plan = self._scan_planner(
+                changed_bars=self._market_data.changed_bars(self._last_as_of),
+                sector_members=sector_members,
+                known_sector_ids=tuple(
+                    sorted(assessment.sector_id for assessment in assessments)
+                ),
+                active_watchlist=priority_codes,
+                holdings=holdings,
+                previous=self._cursor,
+                structure_version=self._config.structure_version,
+                parameter_version=self._config.parameter_version,
+            )
+            deferred = self._deferred_frequencies
+            self._deferred_frequencies = {}
+            for code, frequencies in deferred.items():
+                self._pending_frequencies.setdefault(code, set()).update(
+                    frequencies
+                )
+            self._coverage_cycle_discovered_codes.update(plan.symbols)
+            self._coverage_cycle_discovered_codes.update(deferred)
+            self._coverage_cycle_full_market_history_scan = (
+                plan.full_market_history_scan
+            )
+            self._coverage_cycle_background_refresh_required = (
+                plan.background_full_refresh_required
+            )
+        else:
+            # A coverage plan is immutable while its pending queue drains. Replanning
+            # every batch re-added the active watchlist and made a cycle impossible
+            # to finish whenever monitored symbols existed.
+            plan = ScanPlan(
+                sectors=(),
+                symbols=(),
+                symbol_frequencies=(),
+                full_market_history_scan=(
+                    self._coverage_cycle_full_market_history_scan
+                ),
+                background_full_refresh_required=(
+                    self._coverage_cycle_background_refresh_required
+                ),
+            )
+        self._record_cycle_errors(sector_errors)
         symbols, batch_frequencies = self._take_scan_batch(
             plan,
             priority_codes=priority_codes,
@@ -646,6 +901,7 @@ class TradingScreeningService:
         errors: list[dict[str, str]] = list(sector_errors)
         completed = 0
         completed_codes: set[str] = set()
+        stock_started_perf = time.perf_counter()
         sector_by_code: dict[str, SectorAssessment] = {}
         selected_assessments = tuple(row.assessment for row in selected)
         selected_ids = {assessment.sector_id for assessment in selected_assessments}
@@ -671,7 +927,7 @@ class TradingScreeningService:
                 code,
                 SectorAssessment(
                     sector_id="unclassified",
-                    sector_name="未匹配原生行业",
+                    sector_name="未匹配 QMT GICS3 行业",
                     eligible=False,
                     hard_block=True,
                     regime="hostile",
@@ -717,6 +973,22 @@ class TradingScreeningService:
                         "reason": str(exc)[:160],
                     }
                 )
+        stock_scan_duration_ms = round(
+            (time.perf_counter() - stock_started_perf) * 1000,
+            2,
+        )
+        failed_codes = tuple(code for code in symbols if code not in completed_codes)
+        self._coverage_cycle_batch_count += 1
+        self._coverage_cycle_completed_codes.update(completed_codes)
+        self._coverage_cycle_failed_codes.update(failed_codes)
+        for code in completed_codes:
+            self._coverage_cycle_failed_codes.discard(code)
+            self._coverage_cycle_errors.pop(
+                f"stock_analysis_error:{code}",
+                None,
+            )
+        self._record_cycle_errors(errors[len(sector_errors) :])
+        cycle_errors = list(self._coverage_cycle_errors.values())
         planned_count = len(symbols)
         completion = (
             Decimal("1")
@@ -727,7 +999,7 @@ class TradingScreeningService:
             self._requeue_symbols(symbols, batch_frequencies)
             failed = copy.deepcopy(dict(previous))
             failed["scan_state"] = "incomplete_not_published"
-            failed["errors"] = errors
+            failed["errors"] = cycle_errors
             previous_audit = failed.get("scan_audit")
             scan_audit = (
                 dict(previous_audit) if isinstance(previous_audit, Mapping) else {}
@@ -738,6 +1010,17 @@ class TradingScreeningService:
                     "planned_symbol_count": planned_count,
                     "completed_symbol_count": completed,
                     "completion_ratio": str(completion),
+                    "pending_symbol_count": len(self._pending_frequencies),
+                    "coverage_cycle_complete": False,
+                    "batch_duration_ms": round(
+                        (time.perf_counter() - batch_started_perf) * 1000,
+                        2,
+                    ),
+                    "sector_scan_duration_ms": sector_scan_duration_ms,
+                    "stock_scan_duration_ms": stock_scan_duration_ms,
+                    "coverage_cycle_batch_count": (
+                        self._coverage_cycle_batch_count
+                    ),
                 }
             )
             failed["scan_audit"] = scan_audit
@@ -748,12 +1031,14 @@ class TradingScreeningService:
             }
             return failed
 
-        failed_codes = tuple(code for code in symbols if code not in completed_codes)
-        self._requeue_symbols(failed_codes, batch_frequencies)
+        # A failed symbol is audited in this coverage cycle and retried in the
+        # next paced cycle. Immediate requeue caused a permanent failure to keep
+        # the background worker in a no-delay loop forever.
+        self._defer_symbols_to_next_cycle(failed_codes, batch_frequencies)
         failure_codes = []
-        if sector_batch.errors:
+        if any("sector_id" in error for error in cycle_errors):
             failure_codes.append("sector_scan_partial")
-        if failed_codes:
+        if self._coverage_cycle_failed_codes:
             failure_codes.append("stock_scan_partial")
         retained_scope = {
             member for members in sector_members.values() for member in members
@@ -784,6 +1069,18 @@ class TradingScreeningService:
         ranked_ordinals = {
             row.assessment.sector_id: row.ordinal for row in ranked
         }
+        coverage_cycle_complete = not self._pending_frequencies
+        batch_duration_ms = round(
+            (time.perf_counter() - batch_started_perf) * 1000,
+            2,
+        )
+        coverage_started_perf = self._coverage_cycle_started_perf
+        coverage_cycle_elapsed_ms = round(
+            0
+            if coverage_started_perf is None
+            else (time.perf_counter() - coverage_started_perf) * 1000,
+            2,
+        )
         payload = {
             "schema_version": SCHEMA_VERSION,
             "algorithm_version": self._config.algorithm_version,
@@ -818,33 +1115,59 @@ class TradingScreeningService:
             "scan_audit": {
                 **sector_audit,
                 "planned_symbol_count": planned_count,
-                "discovered_symbol_count": len(plan.symbols),
+                "discovered_symbol_count": len(
+                    self._coverage_cycle_discovered_codes
+                ),
                 "completed_symbol_count": completed,
                 "pending_symbol_count": len(self._pending_frequencies),
-                "coverage_cycle_complete": not self._pending_frequencies,
+                "retry_symbol_count": len(self._deferred_frequencies),
+                "coverage_cycle_complete": coverage_cycle_complete,
                 "completion_ratio": str(completion),
-                "full_market_history_scan": plan.full_market_history_scan,
+                "full_market_history_scan": (
+                    self._coverage_cycle_full_market_history_scan
+                ),
                 "background_full_refresh_required": (
-                    plan.background_full_refresh_required
+                    self._coverage_cycle_background_refresh_required
                 ),
                 "selected_sector_count": len(selected),
+                "batch_duration_ms": batch_duration_ms,
+                "sector_scan_duration_ms": sector_scan_duration_ms,
+                "stock_scan_duration_ms": stock_scan_duration_ms,
+                "coverage_cycle_elapsed_ms": coverage_cycle_elapsed_ms,
+                "coverage_cycle_batch_count": self._coverage_cycle_batch_count,
+                "coverage_cycle_started_at": (
+                    None
+                    if self._coverage_cycle_started_at is None
+                    else self._coverage_cycle_started_at.isoformat()
+                ),
+                "coverage_cycle_attempted_symbol_count": len(
+                    self._coverage_cycle_completed_codes
+                    | self._coverage_cycle_failed_codes
+                ),
+                "coverage_cycle_completed_symbol_count": len(
+                    self._coverage_cycle_completed_codes
+                ),
+                "coverage_cycle_failed_symbol_count": len(
+                    self._coverage_cycle_failed_codes
+                ),
                 "planned_frequencies": {
                     code: list(batch_frequencies.get(code, ())) for code in symbols
                 },
             },
             "data_quality": {
-                "complete": not errors,
+                "complete": not cycle_errors,
                 "stale": False,
                 "failure_codes": failure_codes,
             },
             "backtest_verdict": copy.deepcopy(self._backtest_verdict),
-            "errors": errors,
+            "errors": cycle_errors,
         }
-        self._last_as_of = as_of
-        self._cursor = ScanCursor.current(
-            structure_version=self._config.structure_version,
-            parameter_version=self._config.parameter_version,
-        )
+        if coverage_cycle_complete:
+            self._last_as_of = as_of
+            self._cursor = ScanCursor.current(
+                structure_version=self._config.structure_version,
+                parameter_version=self._config.parameter_version,
+            )
         return payload
 
 

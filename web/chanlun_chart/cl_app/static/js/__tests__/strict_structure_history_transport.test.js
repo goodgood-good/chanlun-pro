@@ -71,10 +71,10 @@ const PARAMS = {
 };
 const KEY = 'a:sh.6005195';
 
-test('history unchanged preserves the current atomic strict snapshot', () => {
+test('history unchanged preserves the snapshot without replaying replace mode', () => {
   const hp = makeHistoryProvider();
   const first = {
-    schema: 'chanlun-chart-structure/v4',
+    schema: 'chanlun-chart-structure/v5',
     render_revision: 'sha256:render-1',
   };
   hp.applyChanlunUpdate(response('replace', first), PARAMS);
@@ -84,7 +84,7 @@ test('history unchanged preserves the current atomic strict snapshot', () => {
   );
 
   const stored = hp.bars_result.get(KEY);
-  assert.equal(stored.strict_structure_mode, 'replace');
+  assert.equal(stored.strict_structure_mode, 'unchanged');
   assert.equal(stored.strict_structure.render_revision, 'sha256:render-1');
 });
 
@@ -92,14 +92,14 @@ test('replace swaps the whole strict object and unavailable clears it', () => {
   const hp = makeHistoryProvider();
   hp.applyChanlunUpdate(
     response('replace', {
-      schema: 'chanlun-chart-structure/v4',
+      schema: 'chanlun-chart-structure/v5',
       render_revision: 'sha256:render-1',
     }),
     PARAMS,
   );
   hp.applyChanlunUpdate(
     response('replace', {
-      schema: 'chanlun-chart-structure/v4',
+      schema: 'chanlun-chart-structure/v5',
       render_revision: 'sha256:render-2',
     }, true),
     { ...PARAMS, firstDataRequest: 'false' },

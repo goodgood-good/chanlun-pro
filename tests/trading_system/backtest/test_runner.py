@@ -36,9 +36,7 @@ from tests.trading_system.backtest.helpers import (
 
 
 def _minute(index: int):
-    opened_at = datetime(2026, 7, 20, 9, 30, tzinfo=CN) + timedelta(
-        minutes=index
-    )
+    opened_at = datetime(2026, 7, 20, 9, 30, tzinfo=CN) + timedelta(minutes=index)
     opened = Decimal("5.00") + Decimal(index) / Decimal("10")
     closed = opened + Decimal("0.05")
     return minute_bar(
@@ -66,10 +64,54 @@ def test_replay_frames_use_analysis_prices_and_only_complete_aggregates() -> Non
     assert five.iloc[0]["date"].to_pydatetime() == bars[4].closed_at
     assert five.iloc[0]["open"] == 5.0
     assert five.iloc[0]["close"] == 5.45
-    assert five.iloc[0]["volume"] == sum(
-        float(bar.volume) for bar in bars[:5]
-    )
+    assert five.iloc[0]["volume"] == sum(float(bar.volume) for bar in bars[:5])
     assert thirty.empty
+
+
+def test_qmt_close_labels_include_auction_in_first_native_five_minutes() -> None:
+    auction_close = datetime(2026, 7, 20, 9, 30, tzinfo=CN)
+    bars = tuple(
+        minute_bar(
+            opened_at=auction_close + timedelta(minutes=index - 1),
+            analysis_open=Decimal("5.00") + Decimal(index) / Decimal("10"),
+            analysis_high=Decimal("5.15") + Decimal(index) / Decimal("10"),
+            analysis_low=Decimal("4.95") + Decimal(index) / Decimal("10"),
+            analysis_close=Decimal("5.10") + Decimal(index) / Decimal("10"),
+        )
+        for index in range(6)
+    )
+
+    frames = build_replay_frames(dataset(bars=bars), ())
+
+    five = frames[("SZ.000001", "5m")]
+    assert len(five) == 1
+    assert five.iloc[0]["date"].to_pydatetime() == datetime(
+        2026,
+        7,
+        20,
+        9,
+        35,
+        tzinfo=CN,
+    )
+    assert five.iloc[0]["open"] == 5.0
+    assert five.iloc[0]["close"] == 5.6
+
+
+def test_aggregated_frames_keep_morning_before_afternoon() -> None:
+    morning = datetime(2026, 7, 20, 9, 30, tzinfo=CN)
+    afternoon = datetime(2026, 7, 20, 13, 0, tzinfo=CN)
+    bars = tuple(
+        minute_bar(opened_at=start + timedelta(minutes=index))
+        for start in (morning, afternoon)
+        for index in range(5)
+    )
+
+    five = build_replay_frames(dataset(bars=bars), ())[("SZ.000001", "5m")]
+
+    assert [value.to_pydatetime() for value in five["date"]] == [
+        datetime(2026, 7, 20, 9, 35, tzinfo=CN),
+        datetime(2026, 7, 20, 13, 5, tzinfo=CN),
+    ]
 
 
 def test_replay_frames_include_native_tdx_sector_frequency_without_synthesis() -> None:
@@ -101,9 +143,7 @@ def _sparse_walk_forward_dataset() -> BacktestDataset:
         minute_bar(opened_at=validation_at),
         minute_bar(opened_at=test_at),
     )
-    statuses = tuple(
-        normal_status(session=bar.opened_at.date()) for bar in bars
-    )
+    statuses = tuple(normal_status(session=bar.opened_at.date()) for bar in bars)
     memberships = tuple(
         SectorMembershipAt(
             session=bar.opened_at.date(),
@@ -213,9 +253,7 @@ def test_short_span_returns_explicit_empty_evaluation() -> None:
     )
 
     assert research.evaluation == direct
-    assert research.limitations == (
-        "insufficient_calendar_span_for_walk_forward",
-    )
+    assert research.limitations == ("insufficient_calendar_span_for_walk_forward",)
 
 
 def test_causal_period_runner_applies_selected_policy_and_risk(

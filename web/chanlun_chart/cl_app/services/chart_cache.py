@@ -26,6 +26,7 @@ L1 Phase 2 + Tier 4 P1 重构：把 tv.py 里 chart cache 相关的状态 + 函�
 import copy
 import hashlib
 import json
+import os
 import random
 import threading
 import time
@@ -43,9 +44,104 @@ from chanlun.tools.log_util import LogUtil
 
 # 图表数据计算结果缓存（RAM 热层）。
 # RAM 仅做热点加速，持久化由 fdb.set/get_chart_cache 兜底（RAM 淘汰后磁盘仍可命中）。
-chart_data_cache: TTLCache = TTLCache(maxsize=512, ttl=3600)
+#
+# 单条 1m 图表的 JSON 往往超过 1MB，而 Python 容器实际占用更高。只按 512 个
+# key 限制会让热层轻易膨胀到数 GB，因此这里同时用“估算字节权重”和“最小条目
+# 权重”约束总内存与最大条目数。淘汰只影响 RAM，磁盘冷层仍可恢复。
+
+
+def _positive_env_int(name: str, default: int) -> int:
+    try:
+        return max(1, int(os.environ.get(name, default)))
+    except (TypeError, ValueError):
+        return default
+
+
+_CHART_CACHE_MAX_BYTES = max(
+    16 * 1024 * 1024,
+    _positive_env_int("CHANLUN_CHART_CACHE_MAX_BYTES", 256 * 1024 * 1024),
+)
+_CHART_CACHE_MAX_ENTRIES = _positive_env_int(
+    "CHANLUN_CHART_CACHE_MAX_ENTRIES",
+    512,
+)
+_CHART_CACHE_MEMORY_FACTOR = _positive_env_int(
+    "CHANLUN_CHART_CACHE_MEMORY_FACTOR",
+    3,
+)
+_CHART_CACHE_MIN_ENTRY_WEIGHT = max(
+    1,
+    _CHART_CACHE_MAX_BYTES // _CHART_CACHE_MAX_ENTRIES,
+)
+
+
+def _chart_cache_entry_weight(value: object) -> int:
+    """Estimate resident weight from compact UTF-8 JSON, conservatively scaled."""
+
+    try:
+        serialized_bytes = len(
+            json.dumps(
+                value,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                default=str,
+            ).encode("utf-8")
+        )
+    except Exception:
+        serialized_bytes = len(repr(value).encode("utf-8", errors="replace"))
+    return max(
+        _CHART_CACHE_MIN_ENTRY_WEIGHT,
+        serialized_bytes * _CHART_CACHE_MEMORY_FACTOR,
+    )
+
+
+class _WeightedTTLCache(TTLCache):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.capacity_evictions = 0
+
+    def popitem(self):
+        item = super().popitem()
+        self.capacity_evictions += 1
+        return item
+
+
+chart_data_cache: TTLCache = _WeightedTTLCache(
+    maxsize=_CHART_CACHE_MAX_BYTES,
+    ttl=3600,
+    getsizeof=_chart_cache_entry_weight,
+)
 
 cache_lock: RLock = RLock()
+
+
+def chart_cache_metrics() -> dict[str, int]:
+    """Return bounded RAM-cache capacity metrics without exposing payloads."""
+
+    with cache_lock:
+        entry_count = len(chart_data_cache)
+        return {
+            "entries": entry_count,
+            "estimated_bytes": int(chart_data_cache.currsize),
+            "max_bytes": int(chart_data_cache.maxsize),
+            "max_entries": _CHART_CACHE_MAX_ENTRIES,
+            "capacity_evictions": int(
+                getattr(chart_data_cache, "capacity_evictions", 0)
+            ),
+        }
+
+
+def _put_chart_cache_ram(cache_key: str, entry: dict) -> bool:
+    """Best-effort RAM insert; oversized entries remain available on disk."""
+
+    try:
+        chart_data_cache[cache_key] = entry
+        return True
+    except ValueError:
+        LogUtil.warning(
+            f"[chart_cache] RAM entry exceeds byte budget, skip key={cache_key}"
+        )
+        return False
 
 # 缓存数据最近验证时间戳（防止非交易时段 DataPulse 反复 cache miss）
 # H4: 验证时间戳直接放在 chart_data_cache 的 entry["validated_at"] 中，
@@ -229,7 +325,9 @@ def _stable_hash(obj) -> str:
 #   关联买卖点元数据，供右栏双塔审计详情直接展示。输出字段结构变化，显式失效旧磁盘缓存。
 # - v39 (2026-07-21) ── 严格结构快照携带可还原的价格基准元数据；旧缓存无法证明复权
 #   历史与当前 QMT 数据同属一个价格纪元，必须失效后用当前因子账本重建。
-_CHART_CACHE_SCHEMA_VERSION = "v40"
+# - v41 (2026-07-22) ── 严格结构快照 v5 新增 ``levels[*].center_previews``，把末条
+#   未完成线段参与形成的不可交易中枢候选送入图表；旧缓存缺少该字段，必须失效重算。
+_CHART_CACHE_SCHEMA_VERSION = "v41"
 
 
 def _build_cache_key(market: str, code: str, frequency: str, cl_config: dict) -> str:
@@ -315,7 +413,7 @@ def _get_chart_cache_entry(cache_key: str):
         existing = _normalize_cache_entry(chart_data_cache.get(cache_key))
         if existing is not None:
             return existing
-        chart_data_cache[cache_key] = entry
+        _put_chart_cache_ram(cache_key, entry)
 
     # 机会型清理(磁盘 IO)也移出锁。
     if random.randint(0, 2000) <= 1:
@@ -617,7 +715,7 @@ def _set_chart_cache_entry(cache_key: str, cl_chart_data: dict, is_full_snapshot
     """
     entry = _build_chart_cache_entry(cl_chart_data, is_full_snapshot=is_full_snapshot)
     with cache_lock:
-        chart_data_cache[cache_key] = entry
+        _put_chart_cache_ram(cache_key, entry)
         _persist_chart_cache_async(cache_key, entry)
     return entry
 
@@ -663,7 +761,7 @@ def _mark_chart_cache_validated(cache_key: str):
         if entry is None:
             return
         entry["validated_at"] = time.time()
-        chart_data_cache[cache_key] = entry
+        _put_chart_cache_ram(cache_key, entry)
 
 
 # ---------------- 负缓存（空数据短期记忆）----------------

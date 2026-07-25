@@ -172,6 +172,41 @@ def build_qmt_price_basis_metadata(
     )
 
 
+def build_provider_price_basis_metadata(
+    *,
+    provider: str,
+    market: str,
+    code: str,
+    adjustment: str,
+    structure_price_quantum: Decimal,
+) -> PriceBasisMetadata:
+    """Build stable metadata for a provider with a declared price method."""
+
+    values = {
+        "provider": provider,
+        "market": market,
+        "code": code,
+        "adjustment": adjustment,
+    }
+    if any(not isinstance(value, str) or not value.strip() for value in values.values()):
+        raise ValueError("provider price basis fields must be non-empty strings")
+    revision = _build_price_basis_revision(
+        schema="chanlun-price-basis/provider-v1",
+        provider=provider,
+        market=market,
+        code=code,
+        adjustment=adjustment,
+        structure_price_quantum=structure_price_quantum,
+        adjustment_ledger=(),
+    )
+    return PriceBasisMetadata(
+        structure_price_quantum=structure_price_quantum,
+        price_basis_revision=revision,
+        provider=provider,
+        adjustment=adjustment,
+    )
+
+
 def build_tdx_industry_price_basis_metadata(
     code: str,
     structure_price_quantum: Decimal,
@@ -248,6 +283,7 @@ __all__ = (
     "PriceBasisMismatchError",
     "attach_price_basis_metadata",
     "build_price_basis_revision",
+    "build_provider_price_basis_metadata",
     "build_qmt_price_basis_metadata",
     "build_tdx_industry_price_basis_metadata",
     "copy_price_basis_metadata",

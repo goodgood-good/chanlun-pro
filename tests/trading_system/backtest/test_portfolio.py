@@ -206,6 +206,25 @@ def allowed_entry(
     )
 
 
+def allowed_exit(
+    *,
+    signal_id: str,
+    point_type: str = "2sell",
+    sector_id: str = "TDX.880301",
+) -> FakeEvaluation:
+    typed_point = cast(PointType, point_type)
+    return FakeEvaluation(
+        setup=FakeSetup(FakePoint(typed_point), FakeSector(sector_id)),
+        entry=None,
+        exit=ExitDecision(
+            allowed=True,
+            signal_id=signal_id,
+            action="exit_full",
+            reason_codes=(),
+        ),
+    )
+
+
 def run_fixture(
     bars: tuple[MinuteBar, ...],
     schedule: dict[tuple[datetime, str], tuple[FakeEvaluation, ...]],
@@ -233,9 +252,12 @@ def run_fixture(
 
 def test_intraday_low_crossing_structural_stop_creates_exit() -> None:
     first = market_bar("SZ.000001", datetime(2026, 7, 20, 10, 30, tzinfo=CN))
+    entry_bar = market_bar(
+        "SZ.000001", datetime(2026, 7, 20, 10, 31, tzinfo=CN)
+    )
     stop_bar = market_bar(
         "SZ.000001",
-        datetime(2026, 7, 20, 10, 31, tzinfo=CN),
+        datetime(2026, 7, 20, 10, 32, tzinfo=CN),
         high="10.05",
         low="9.70",
         closed="9.95",
@@ -246,7 +268,7 @@ def test_intraday_low_crossing_structural_stop_creates_exit() -> None:
         )
     }
 
-    run = run_fixture((first, stop_bar), schedule, t_plus_days=0)
+    run = run_fixture((first, entry_bar, stop_bar), schedule, t_plus_days=0)
 
     assert run.trades[0].exit_reason == "structural_stop"
     assert run.trades[0].exit_trigger_price == Decimal("9.80")
@@ -255,9 +277,12 @@ def test_intraday_low_crossing_structural_stop_creates_exit() -> None:
 
 def test_same_day_stop_respects_t_plus_one() -> None:
     first = market_bar("SZ.000001", datetime(2026, 7, 20, 10, 30, tzinfo=CN))
+    entry_bar = market_bar(
+        "SZ.000001", datetime(2026, 7, 20, 10, 31, tzinfo=CN)
+    )
     stop_bar = market_bar(
         "SZ.000001",
-        datetime(2026, 7, 20, 10, 31, tzinfo=CN),
+        datetime(2026, 7, 20, 10, 32, tzinfo=CN),
         low="9.70",
         closed="9.95",
     )
@@ -267,7 +292,7 @@ def test_same_day_stop_respects_t_plus_one() -> None:
         )
     }
 
-    run = run_fixture((first, stop_bar), schedule, t_plus_days=1)
+    run = run_fixture((first, entry_bar, stop_bar), schedule, t_plus_days=1)
 
     assert run.pending_exits[0].reason == "t_plus_one_locked"
     assert run.trades == ()
@@ -311,7 +336,98 @@ def test_entry_fills_on_next_bar_not_signal_bar() -> None:
 
     accepted = tuple(fill for fill in run.fills if fill.filled)
     assert len(accepted) == 1
-    assert accepted[0].filled_at == second.opened_at
+    assert accepted[0].filled_at == second.closed_at
+
+
+def test_entry_is_resized_to_next_bar_volume_capacity() -> None:
+    first = market_bar("SZ.000001", datetime(2026, 7, 20, 10, 30, tzinfo=CN))
+    second = market_bar(
+        "SZ.000001",
+        datetime(2026, 7, 20, 10, 31, tzinfo=CN),
+        volume="1000",
+    )
+    schedule = {
+        (first.closed_at, first.code): (
+            allowed_entry(signal_id="entry-a", stop="9.80"),
+        )
+    }
+
+    run = run_fixture((first, second), schedule)
+
+    accepted = tuple(fill for fill in run.fills if fill.filled)
+    assert len(accepted) == 1
+    assert accepted[0].shares == 100
+    assert run.open_positions[0].shares == 100
+
+
+def test_entry_expires_with_the_production_risk_snapshot() -> None:
+    opened = datetime(2026, 7, 20, 10, 30, tzinfo=CN)
+    first = market_bar("SZ.000001", opened)
+    blocked = tuple(
+        market_bar(
+            "SZ.000001",
+            opened + timedelta(minutes=offset),
+            opened="11.00",
+            high="11.00",
+            low="11.00",
+            closed="11.00",
+            previous="10.00",
+        )
+        for offset in range(1, 6)
+    )
+    schedule = {
+        (first.closed_at, first.code): (
+            allowed_entry(signal_id="entry-a", stop="9.80"),
+        )
+    }
+
+    run = run_fixture((first, *blocked), schedule)
+
+    assert run.open_positions == ()
+    assert run.fills[-1].reason == "risk_snapshot_expired"
+    assert sum(fill.reason == "limit_up_locked" for fill in run.fills) == 4
+
+
+def test_exit_partials_are_aggregated_into_one_trade() -> None:
+    opened = datetime(2026, 7, 20, 10, 30, tzinfo=CN)
+    signal = market_bar("SZ.000001", opened)
+    entry_fill = market_bar("SZ.000001", opened + timedelta(minutes=1))
+    exit_signal = market_bar("SZ.000001", opened + timedelta(minutes=2))
+    exit_fill_a = market_bar(
+        "SZ.000001",
+        opened + timedelta(minutes=3),
+        volume="5000",
+    )
+    exit_fill_b = market_bar(
+        "SZ.000001",
+        opened + timedelta(minutes=4),
+        volume="5000",
+    )
+    schedule = {
+        (signal.closed_at, signal.code): (
+            allowed_entry(signal_id="entry-a", stop="9.80"),
+        ),
+        (exit_signal.closed_at, exit_signal.code): (
+            allowed_exit(signal_id="exit-a"),
+        ),
+    }
+
+    run = run_fixture(
+        (signal, entry_fill, exit_signal, exit_fill_a, exit_fill_b),
+        schedule,
+        t_plus_days=0,
+    )
+
+    sell_fills = tuple(
+        fill
+        for fill in run.fills
+        if fill.filled and fill.order_id.startswith("exit:")
+    )
+    assert tuple(fill.shares for fill in sell_fills) == (500, 400)
+    assert len(run.trades) == 1
+    assert run.trades[0].shares == 900
+    assert run.trades[0].exit_reason == "signal_exit_full"
+    assert run.open_positions == ()
 
 
 def test_entry_uses_shared_risk_sizing() -> None:

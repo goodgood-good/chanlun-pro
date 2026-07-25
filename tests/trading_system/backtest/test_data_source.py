@@ -121,9 +121,7 @@ def test_sector_loader_returns_only_native_tdx_880_bars(monkeypatch) -> None:
         max_pages=2,
     )
 
-    assert captured["sector_indices"] == {
-        "tdx-industry:SH.880301": "SH.880301"
-    }
+    assert captured["sector_indices"] == {"tdx-industry:SH.880301": "SH.880301"}
     assert len(bars) == 1
     assert bars[0].sector_id == "tdx-industry:SH.880301"
     assert bars[0].index_code == "SH.880301"
@@ -150,9 +148,7 @@ def test_current_membership_fallback_is_explicitly_non_historical() -> None:
 
     assert loaded.as_of_each_session is False
     assert len(loaded.records) == 2
-    assert loaded.sector_index_codes == (
-        ("tdx-industry:SH.880301", "SH.880301"),
-    )
+    assert loaded.sector_index_codes == (("tdx-industry:SH.880301", "SH.880301"),)
 
 
 def test_qmt_raw_bar_has_causal_adjustment_known_at(monkeypatch) -> None:
@@ -180,6 +176,8 @@ def test_qmt_raw_bar_has_causal_adjustment_known_at(monkeypatch) -> None:
     )
 
     assert len(bars) == 1
+    assert bars[0].closed_at == BAR_OPEN
+    assert bars[0].opened_at == BAR_OPEN - timedelta(minutes=1)
     assert bars[0].adjustment_known_at == bars[0].closed_at
     assert bars[0].raw_close == bars[0].analysis_close
 
@@ -217,9 +215,7 @@ def test_tdx_midday_boundary_label_is_restored_to_1130(monkeypatch) -> None:
     monkeypatch.setattr(
         data_source,
         "_read_native_sector_frames",
-        lambda **_kwargs: {
-            "tdx-industry:SH.880301": {"30m": frame}
-        },
+        lambda **_kwargs: {"tdx-industry:SH.880301": {"30m": frame}},
     )
 
     bars = data_source.load_tdx_native_sector_bars(
@@ -345,8 +341,7 @@ def test_replay_reads_each_atomic_evidence_snapshot_once() -> None:
     states, factory = _strict_replay_states()
     replay = CausalStructureReplay(
         frames={
-            ("SZ.000001", frequency): frame.copy()
-            for frequency in ("1m", "5m", "30m")
+            ("SZ.000001", frequency): frame.copy() for frequency in ("1m", "5m", "30m")
         },
         cl_factory=factory,
     )
@@ -382,8 +377,7 @@ def test_replay_rejects_point_available_after_cursor() -> None:
     _states, factory = _strict_replay_states(future_five=True)
     replay = CausalStructureReplay(
         frames={
-            ("SZ.000001", frequency): frame.copy()
-            for frequency in ("1m", "5m", "30m")
+            ("SZ.000001", frequency): frame.copy() for frequency in ("1m", "5m", "30m")
         },
         cl_factory=factory,
     )
@@ -421,8 +415,7 @@ def test_causal_replay_is_incremental_and_rejects_cursor_rewind() -> None:
 
     replay = CausalStructureReplay(
         frames={
-            ("SZ.000001", frequency): frame.copy()
-            for frequency in ("1m", "5m", "30m")
+            ("SZ.000001", frequency): frame.copy() for frequency in ("1m", "5m", "30m")
         },
         cl_factory=cl_factory,
         bundle_factory=lambda **kwargs: SimpleNamespace(
@@ -456,7 +449,9 @@ def test_causal_replay_is_incremental_and_rejects_cursor_rewind() -> None:
     ("grade", "expected"),
     (("certified", 0), ("research_only", 2), ("invalid", 3)),
 )
-def test_cli_returns_evidence_exit_codes(monkeypatch, tmp_path, grade, expected) -> None:
+def test_cli_returns_evidence_exit_codes(
+    monkeypatch, tmp_path, grade, expected
+) -> None:
     from tools import backtest_chanlun_trading_system as cli
 
     monkeypatch.setattr(cli, "MAX_NATIVE_SECTOR_PAGES", 10_000)
@@ -544,12 +539,17 @@ def test_short_cli_writes_formal_hashed_report(monkeypatch, tmp_path) -> None:
     assert payload["aggregate_out_of_sample"]["net_return"] == "0"
     assert payload["walk_forward_windows"] == []
     assert payload["data_evidence"]["grade"] == "research_only"
-    assert "insufficient_calendar_span_for_walk_forward" in payload[
-        "data_evidence"
-    ]["failures"]
+    assert (
+        "insufficient_calendar_span_for_walk_forward"
+        in payload["data_evidence"]["failures"]
+    )
     assert len(payload["ablations"]) == 6
     assert all(row["completed"] is False for row in payload["ablations"])
-    assert len(payload["benchmarks"]) == 4
+    assert tuple(row["benchmark_id"] for row in payload["benchmarks"]) == (
+        "csi_300",
+        "csi_500",
+        "eligible_universe_equal_weight",
+    )
     assert all(row["data_grade"] == "invalid" for row in payload["benchmarks"])
     assert payload["verdict"]["live_ready"] is False
     assert verify_report_hash(payload) is True
@@ -584,31 +584,40 @@ def test_long_cli_skips_stock_loader_when_native_sector_capacity_is_insufficient
 
     assert result == 2
     assert payload["data_evidence"]["grade"] == "research_only"
-    assert "native_sector_history_capacity_insufficient" in payload[
-        "data_evidence"
-    ]["failures"]
-    assert "stock_loading_skipped_by_sector_evidence_preflight" in payload[
-        "data_evidence"
-    ]["warnings"]
+    assert (
+        "native_sector_history_capacity_insufficient"
+        in payload["data_evidence"]["failures"]
+    )
+    assert (
+        "stock_loading_skipped_by_sector_evidence_preflight"
+        in payload["data_evidence"]["warnings"]
+    )
     assert verify_report_hash(payload) is True
 
 
 def test_algorithm_hash_manifest_covers_every_strategy_python_source() -> None:
     from tools import backtest_chanlun_trading_system as cli
 
-    package_root = (
-        cli.PROJECT_ROOT / "src/chanlun/decision_support/trading_system"
-    )
     expected = {
         path.relative_to(cli.PROJECT_ROOT).as_posix()
+        for package_root in (
+            cli.PROJECT_ROOT / "src/chanlun/decision_support/trading_system",
+            cli.PROJECT_ROOT / "src/chanlun/core",
+        )
         for path in package_root.rglob("*.py")
     }
     expected.update(
         {
-            "src/chanlun/core/bs_branch.py",
-            "src/chanlun/core/bs2_branch.py",
-            "src/chanlun/core/cl.py",
+            "src/chanlun/decision_support/fingerprints.py",
+            "src/chanlun/exchange/kline_precision.py",
+            "src/chanlun/exchange/price_basis.py",
+            "src/chanlun/exchange/qmt_screening_sector_source.py",
             "tools/backtest_chanlun_trading_system.py",
+            "tools/backtest_qmt_fixed_year.py",
+            "tools/finalize_qmt_fixed_year.py",
+            "tools/finalize_qmt_pit_fixed_year.py",
+            "tools/snapshot_qmt_pit_metadata.py",
+            "tools/audit_qmt_prefix_invariance.py",
         }
     )
 

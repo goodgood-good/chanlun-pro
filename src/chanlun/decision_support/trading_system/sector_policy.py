@@ -17,7 +17,13 @@ def assess_sector(
     one: TimeframeContext,
     data_complete: bool,
 ) -> SectorAssessment:
-    if market_data_source != "tdx_native_880_index":
+    if market_data_source not in {
+        "qmt_gics3_component_composite",
+        "qmt-sw1-pit-composite",
+        # Retained for historical backtest replay only. Production screening is
+        # wired to the QMT source above.
+        "tdx_native_880_index",
+    }:
         return SectorAssessment(
             sector_id,
             sector_name,

@@ -110,42 +110,34 @@ def test_return_extension_then_new_leave_keeps_core_and_emits_watch():
     assert completion.kind is CenterEventKind.COMPLETED_UP
 
 
-def test_return_crossing_core_becomes_opposite_down_leave_then_completes():
+def test_return_crossing_core_is_not_an_opposite_down_leave():
     value = _ongoing_up_center()
     crossed = unit(5, "down", 130, 95)
-    pending, watch = advance_center(value, crossed)
+    pending, event = advance_center(value, crossed)
 
     assert pending.state is CenterState.ONGOING
-    assert pending.pending_leave_unit is crossed
+    assert pending.pending_leave_unit is None
     assert pending.extension_units == (crossed,)
-    assert watch.kind is CenterEventKind.BREAKOUT_WATCH_DOWN
+    assert event.kind is CenterEventKind.EXTENDED
 
     ret = unit(6, "up", 95, 100)
-    completed, completion = advance_center(pending, ret)
-    assert completed.state is CenterState.COMPLETED
-    assert completed.completion_direction == "down"
-    assert completed.completion_leave_unit is crossed
-    assert completed.completion_return_unit is ret
-    assert completion.kind is CenterEventKind.COMPLETED_DOWN
+    with pytest.raises(ValueError, match="ongoing center unit must re-enter"):
+        advance_center(pending, ret)
 
 
-def test_return_crossing_core_becomes_opposite_up_leave_then_completes():
+def test_return_crossing_core_is_not_an_opposite_up_leave():
     value = _ongoing_down_center()
     crossed = unit(5, "up", 80, 115)
-    pending, watch = advance_center(value, crossed)
+    pending, event = advance_center(value, crossed)
 
     assert pending.state is CenterState.ONGOING
-    assert pending.pending_leave_unit is crossed
+    assert pending.pending_leave_unit is None
     assert pending.extension_units == (crossed,)
-    assert watch.kind is CenterEventKind.BREAKOUT_WATCH_UP
+    assert event.kind is CenterEventKind.EXTENDED
 
     ret = unit(6, "down", 115, 110)
-    completed, completion = advance_center(pending, ret)
-    assert completed.state is CenterState.COMPLETED
-    assert completed.completion_direction == "up"
-    assert completed.completion_leave_unit is crossed
-    assert completed.completion_return_unit is ret
-    assert completion.kind is CenterEventKind.COMPLETED_UP
+    with pytest.raises(ValueError, match="ongoing center unit must re-enter"):
+        advance_center(pending, ret)
 
 
 def test_transition_rejects_unlocked_cross_context_and_duplicate_evidence():

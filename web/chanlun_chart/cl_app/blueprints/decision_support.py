@@ -118,11 +118,13 @@ def research_audit():
             status=503,
             audit=None,
             audit_error_code=exc.code,
+            audit_error_details=exc.details,
         )
     return _no_store_html(
         "research_audit.html",
         audit=audit,
         audit_error_code=None,
+        audit_error_details=None,
     )
 
 

@@ -92,6 +92,381 @@ function clog(...args) {
     if (window.__chanlunDebug) console.log(...args);
 }
 
+// 菜单在主文档中，TradingView 的可交互区域在同源 iframe 中；递归收集这些
+// document，才能让任意层级的图表空白处都参与菜单的 outside-dismiss。
+function _collectSameOriginDocuments(rootDocument) {
+    const documents = [];
+    const visited = new Set();
+    const visit = (doc) => {
+        if (!doc || visited.has(doc)) return;
+        visited.add(doc);
+        documents.push(doc);
+
+        let frames = [];
+        try {
+            frames = typeof doc.querySelectorAll === 'function'
+                ? Array.from(doc.querySelectorAll('iframe'))
+                : [];
+        } catch (e) {
+            return;
+        }
+        frames.forEach((frame) => {
+            try {
+                if (frame.contentDocument) visit(frame.contentDocument);
+            } catch (e) { /* 跨源 iframe 无法绑定，安全跳过 */ }
+        });
+    };
+    visit(rootDocument);
+    return documents;
+}
+
+function bindClDisplayMenuOutsideDismiss(rootDocument, menuElement, triggerElement, dismiss) {
+    const documents = _collectSameOriginDocuments(rootDocument);
+    const eventTypes = ['pointerdown', 'click', 'keydown'];
+    let active = true;
+
+    const cleanup = () => {
+        if (!active) return;
+        active = false;
+        documents.forEach((doc) => {
+            eventTypes.forEach((type) => doc.removeEventListener(type, closeHandler, true));
+        });
+    };
+    const contains = (element, target) => {
+        if (!element || !target) return false;
+        try {
+            return element === target
+                || (typeof element.contains === 'function' && element.contains(target));
+        } catch (e) {
+            return false;
+        }
+    };
+    const closeHandler = (event) => {
+        if (!active) return;
+        if (event && event.type === 'keydown') {
+            if (event.key !== 'Escape') return;
+            if (typeof event.preventDefault === 'function') event.preventDefault();
+            if (typeof event.stopPropagation === 'function') event.stopPropagation();
+            cleanup();
+            if (typeof dismiss === 'function') dismiss(event);
+            else if (menuElement && typeof menuElement.remove === 'function') menuElement.remove();
+            return;
+        }
+        const target = event && event.target;
+        if (contains(menuElement, target) || contains(triggerElement, target)) return;
+        cleanup();
+        if (typeof dismiss === 'function') dismiss(event);
+        else if (menuElement && typeof menuElement.remove === 'function') menuElement.remove();
+    };
+
+    documents.forEach((doc) => {
+        eventTypes.forEach((type) => doc.addEventListener(type, closeHandler, true));
+    });
+    return cleanup;
+}
+
+function bindClDisplayButtonAccessibility(buttonElement) {
+    if (!buttonElement || typeof buttonElement.setAttribute !== 'function') return () => {};
+    const ownerWindow = buttonElement.ownerDocument
+        && buttonElement.ownerDocument.defaultView;
+    const apply = () => {
+        if (buttonElement.getAttribute('role') !== 'button') {
+            buttonElement.setAttribute('role', 'button');
+        }
+        if (buttonElement.getAttribute('tabindex') !== '0') {
+            buttonElement.setAttribute('tabindex', '0');
+        }
+        if (buttonElement.getAttribute('aria-disabled') !== 'false') {
+            buttonElement.setAttribute('aria-disabled', 'false');
+        }
+    };
+    apply();
+
+    const timers = [];
+    if (ownerWindow && typeof ownerWindow.setTimeout === 'function') {
+        timers.push(ownerWindow.setTimeout(apply, 0));
+        timers.push(ownerWindow.setTimeout(apply, 250));
+    }
+    const Observer = ownerWindow && ownerWindow.MutationObserver;
+    const observer = typeof Observer === 'function'
+        ? new Observer(apply)
+        : null;
+    if (observer) {
+        observer.observe(buttonElement, {
+            attributes: true,
+            attributeFilter: ['role', 'tabindex', 'aria-disabled'],
+        });
+    }
+    return () => {
+        if (observer) observer.disconnect();
+        if (ownerWindow && typeof ownerWindow.clearTimeout === 'function') {
+            timers.forEach((timer) => ownerWindow.clearTimeout(timer));
+        }
+    };
+}
+
+function _topWindowOffset(sourceWindow, topWindow) {
+    let left = 0;
+    let top = 0;
+    let current = sourceWindow;
+    while (current && current !== topWindow) {
+        try {
+            const frameElement = current.frameElement;
+            if (!frameElement) break;
+            const frameRect = frameElement.getBoundingClientRect();
+            left += frameRect.left;
+            top += frameRect.top;
+            current = frameElement.ownerDocument
+                && frameElement.ownerDocument.defaultView;
+        } catch (e) {
+            break;
+        }
+    }
+    return { left, top };
+}
+
+function _elementRectInTopWindow(element, topWindow) {
+    const rect = element.getBoundingClientRect();
+    const ownerWindow = element.ownerDocument
+        && element.ownerDocument.defaultView;
+    const offset = _topWindowOffset(ownerWindow, topWindow);
+    return {
+        top: rect.top + offset.top,
+        left: rect.left + offset.left,
+        bottom: rect.bottom + offset.top,
+        right: rect.right + offset.left,
+    };
+}
+
+function positionClDisplayMenuNearPointer(menuElement, event, triggerElement, topWindow) {
+    const targetWindow = topWindow || window.top || window;
+    const targetDocument = targetWindow.document;
+    const triggerRect = _elementRectInTopWindow(triggerElement, targetWindow);
+    const eventWindow = (event && event.view)
+        || (event && event.target && event.target.ownerDocument
+            && event.target.ownerDocument.defaultView)
+        || (triggerElement.ownerDocument && triggerElement.ownerDocument.defaultView);
+    const offset = _topWindowOffset(eventWindow, targetWindow);
+    const keyboardLikeClick = event
+        && event.type === 'click'
+        && Number(event.detail) === 0
+        && Number(event.clientX) === 0
+        && Number(event.clientY) === 0;
+    const hasPointer = event
+        && Number.isFinite(event.clientX)
+        && Number.isFinite(event.clientY)
+        && !keyboardLikeClick;
+    const pointer = hasPointer
+        ? { left: event.clientX + offset.left, top: event.clientY + offset.top }
+        : { left: triggerRect.left, top: triggerRect.bottom };
+    const menuRect = menuElement.getBoundingClientRect();
+    const viewportWidth = targetWindow.innerWidth
+        || targetDocument.documentElement.clientWidth;
+    const viewportHeight = targetWindow.innerHeight
+        || targetDocument.documentElement.clientHeight;
+    const scrollLeft = targetWindow.scrollX || targetWindow.pageXOffset || 0;
+    const scrollTop = targetWindow.scrollY || targetWindow.pageYOffset || 0;
+    const margin = 8;
+    const gap = 12;
+    const maxLeft = Math.max(margin, viewportWidth - menuRect.width - margin);
+    const maxTop = Math.max(margin, viewportHeight - menuRect.height - margin);
+    let clientLeft = pointer.left + gap;
+    let clientTop = pointer.top + gap;
+    if (clientLeft + menuRect.width > viewportWidth - margin) {
+        clientLeft = pointer.left - menuRect.width - gap;
+    }
+    if (clientTop + menuRect.height > viewportHeight - margin) {
+        clientTop = pointer.top - menuRect.height - gap;
+    }
+    clientLeft = Math.min(maxLeft, Math.max(margin, clientLeft));
+    clientTop = Math.min(maxTop, Math.max(margin, clientTop));
+    menuElement.style.left = (clientLeft + scrollLeft) + 'px';
+    menuElement.style.top = (clientTop + scrollTop) + 'px';
+    return {
+        left: clientLeft + scrollLeft,
+        top: clientTop + scrollTop,
+        anchor: hasPointer ? 'pointer' : 'trigger',
+    };
+}
+
+function clampClDisplayMenuToViewport(menuElement, topWindow) {
+    if (!menuElement) return null;
+    const targetWindow = topWindow || window.top || window;
+    const targetDocument = targetWindow.document;
+    const menuRect = menuElement.getBoundingClientRect();
+    const viewportWidth = targetWindow.innerWidth
+        || targetDocument.documentElement.clientWidth;
+    const viewportHeight = targetWindow.innerHeight
+        || targetDocument.documentElement.clientHeight;
+    const scrollLeft = targetWindow.scrollX || targetWindow.pageXOffset || 0;
+    const scrollTop = targetWindow.scrollY || targetWindow.pageYOffset || 0;
+    const margin = 8;
+    const maxLeft = Math.max(margin, viewportWidth - menuRect.width - margin);
+    const maxTop = Math.max(margin, viewportHeight - menuRect.height - margin);
+    const clientLeft = Math.min(maxLeft, Math.max(margin, menuRect.left));
+    const clientTop = Math.min(maxTop, Math.max(margin, menuRect.top));
+    menuElement.style.left = (clientLeft + scrollLeft) + 'px';
+    menuElement.style.top = (clientTop + scrollTop) + 'px';
+    return { left: clientLeft + scrollLeft, top: clientTop + scrollTop };
+}
+
+function bindClDisplayMenuViewportGuard(menuElement, topWindow) {
+    if (!menuElement) return () => {};
+    const targetWindow = topWindow || window.top || window;
+    if (!targetWindow || typeof targetWindow.addEventListener !== 'function') return () => {};
+    const clamp = () => clampClDisplayMenuToViewport(menuElement, targetWindow);
+    targetWindow.addEventListener('resize', clamp);
+    targetWindow.addEventListener('orientationchange', clamp);
+    return () => {
+        targetWindow.removeEventListener('resize', clamp);
+        targetWindow.removeEventListener('orientationchange', clamp);
+    };
+}
+
+function bindClDisplayMenuDrag(menuElement, handleElement, topWindow) {
+    if (!menuElement || !handleElement) return () => {};
+    const targetWindow = topWindow || window.top || window;
+    const targetDocument = targetWindow.document;
+    let dragState = null;
+
+    const clamp = (value, minimum, maximum) => (
+        Math.min(Math.max(minimum, value), Math.max(minimum, maximum))
+    );
+    const move = (event) => {
+        if (!dragState) return;
+        if (
+            Number.isFinite(dragState.pointerId)
+            && Number.isFinite(event.pointerId)
+            && event.pointerId !== dragState.pointerId
+        ) return;
+        const viewportWidth = targetWindow.innerWidth
+            || targetDocument.documentElement.clientWidth;
+        const viewportHeight = targetWindow.innerHeight
+            || targetDocument.documentElement.clientHeight;
+        const scrollLeft = targetWindow.scrollX || targetWindow.pageXOffset || 0;
+        const scrollTop = targetWindow.scrollY || targetWindow.pageYOffset || 0;
+        const margin = 8;
+        const left = clamp(
+            dragState.menuLeft + event.clientX - dragState.clientX,
+            margin,
+            viewportWidth - dragState.width - margin,
+        );
+        const top = clamp(
+            dragState.menuTop + event.clientY - dragState.clientY,
+            margin,
+            viewportHeight - dragState.height - margin,
+        );
+        menuElement.style.left = (left + scrollLeft) + 'px';
+        menuElement.style.top = (top + scrollTop) + 'px';
+        if (typeof event.preventDefault === 'function') event.preventDefault();
+    };
+    const restoreSelection = (state) => {
+        if (!state || !state.selectionStyle) return;
+        const rootStyle = targetDocument.documentElement.style;
+        const previous = state.selectionStyle;
+        if (previous.value) {
+            rootStyle.setProperty('user-select', previous.value, previous.priority || '');
+        } else {
+            rootStyle.removeProperty('user-select');
+        }
+    };
+    const finish = (event) => {
+        if (!dragState) return;
+        if (
+            event
+            && Number.isFinite(dragState.pointerId)
+            && Number.isFinite(event.pointerId)
+            && event.pointerId !== dragState.pointerId
+        ) return;
+        const completedState = dragState;
+        dragState = null;
+        const pointerId = event && Number.isFinite(event.pointerId)
+            ? event.pointerId
+            : completedState.pointerId;
+        try {
+            if (
+                Number.isFinite(pointerId)
+                && typeof handleElement.releasePointerCapture === 'function'
+            ) handleElement.releasePointerCapture(pointerId);
+        } catch (e) { /* pointer capture may already be released */ }
+        handleElement.style.cursor = 'grab';
+        restoreSelection(completedState);
+    };
+    const start = (event) => {
+        if (event.button !== undefined && event.button !== 0) return;
+        if (dragState) return;
+        const rect = menuElement.getBoundingClientRect();
+        const rootStyle = targetDocument.documentElement.style;
+        dragState = {
+            pointerId: event.pointerId,
+            clientX: event.clientX,
+            clientY: event.clientY,
+            menuLeft: rect.left,
+            menuTop: rect.top,
+            width: rect.width,
+            height: rect.height,
+            selectionStyle: {
+                value: typeof rootStyle.getPropertyValue === 'function'
+                    ? rootStyle.getPropertyValue('user-select')
+                    : '',
+                priority: typeof rootStyle.getPropertyPriority === 'function'
+                    ? rootStyle.getPropertyPriority('user-select')
+                    : '',
+            },
+        };
+        handleElement.style.cursor = 'grabbing';
+        rootStyle.setProperty('user-select', 'none');
+        try {
+            if (
+                Number.isFinite(event.pointerId)
+                && typeof handleElement.setPointerCapture === 'function'
+            ) handleElement.setPointerCapture(event.pointerId);
+        } catch (e) { /* pointer capture is an enhancement, not a requirement */ }
+        if (typeof event.preventDefault === 'function') event.preventDefault();
+    };
+    const moveWithKeyboard = (event) => {
+        const step = event && event.shiftKey ? 40 : 10;
+        const deltas = {
+            ArrowLeft: [-step, 0],
+            ArrowRight: [step, 0],
+            ArrowUp: [0, -step],
+            ArrowDown: [0, step],
+        };
+        const delta = event && deltas[event.key];
+        if (!delta) return;
+        const rect = menuElement.getBoundingClientRect();
+        const scrollLeft = targetWindow.scrollX || targetWindow.pageXOffset || 0;
+        const scrollTop = targetWindow.scrollY || targetWindow.pageYOffset || 0;
+        menuElement.style.left = (rect.left + delta[0] + scrollLeft) + 'px';
+        menuElement.style.top = (rect.top + delta[1] + scrollTop) + 'px';
+        clampClDisplayMenuToViewport(menuElement, targetWindow);
+        if (typeof event.preventDefault === 'function') event.preventDefault();
+        if (typeof event.stopPropagation === 'function') event.stopPropagation();
+    };
+
+    handleElement.addEventListener('pointerdown', start);
+    handleElement.addEventListener('keydown', moveWithKeyboard);
+    handleElement.addEventListener('lostpointercapture', finish);
+    targetDocument.addEventListener('pointermove', move, true);
+    targetDocument.addEventListener('pointerup', finish, true);
+    targetDocument.addEventListener('pointercancel', finish, true);
+    if (typeof targetWindow.addEventListener === 'function') {
+        targetWindow.addEventListener('blur', finish);
+    }
+    return () => {
+        finish();
+        handleElement.removeEventListener('pointerdown', start);
+        handleElement.removeEventListener('keydown', moveWithKeyboard);
+        handleElement.removeEventListener('lostpointercapture', finish);
+        targetDocument.removeEventListener('pointermove', move, true);
+        targetDocument.removeEventListener('pointerup', finish, true);
+        targetDocument.removeEventListener('pointercancel', finish, true);
+        if (typeof targetWindow.removeEventListener === 'function') {
+            targetWindow.removeEventListener('blur', finish);
+        }
+    };
+}
+
 // 旧配置只作为一次性迁移输入；返回值严格限定为当前周期的 schema v2。
 // 总开关只 gate，不改写任何子项偏好。
 function normalizeClShowConfig(config, interval) {
@@ -147,7 +522,11 @@ function strictItemEnabled(cfg, item) {
     const config = cfg || {};
     const level = item.structural_level;
     if (item.render_kind === 'center_observation') return config.center_observation !== false;
-    if (item.render_kind === 'formal_center' || item.render_kind === 'center_projection') {
+    if (
+        item.render_kind === 'formal_center'
+        || item.render_kind === 'center_preview'
+        || item.render_kind === 'center_projection'
+    ) {
         return config.center_all !== false && config[`center_L${level}`] !== false;
     }
     if (item.render_kind === 'strict_trend') {
@@ -589,11 +968,16 @@ class ChartManager {
         this._disconnectedSinceMs = null; // es.onerror 记录的断开时刻(ms); onmessage 按断流时长判真断档(M-3)
         // reconcile 失败自动重试状态：count 累计失败次数，timer 已排队的句柄（防重复）
         this._reconcileRetry = { count: 0, timer: null };
+        this._disposed = false;
+        this._sweepOrphanTimer = null;
         // reconcile 创建过的全部 entity id 集合，用于 sweep 时识别孤儿 shape。
         // safeRemove 静默失败或同一 key 两次 create 时 container 与 TV 会脱钩，
         // 孤儿 shape 残留为长斜线；sweep 强制 removeEntity 清除。
         // 用户手画的 shape 从未进入此 set，不会被误删。
         this._reconcileOwnedIds = new Set();
+        // removeEntity 可能不抛错却没有真正删除。删除确认前继续保留自动图形
+        // 的所有权，避免它掉出追踪后被误当成用户手动画线永久残留。
+        this._pendingRemovalIds = new Set();
         // reconcile 精确状态守卫：{ 'symbolKey__type': { from, keys, unfinishedKeys } }
         // 完整几何 key、可视区起点和未完成状态都相同才跳过；不截断，避免最新中枢
         // 边界修正被误判成无变化。Set 比较复用 reconcile 已生成的 newKeys，无需额外排序。
@@ -606,6 +990,7 @@ class ChartManager {
         this._strictContainers = new Map();
         this._strictScopes = new Set();
         this._strictDesiredByScope = new Map();
+        this._strictDesiredItemsByScope = new Map();
         this._strictPendingCreates = new Map();
         this._strictReconcileEpoch = null;
         this._strictStructureSnapshot = null;
@@ -784,6 +1169,13 @@ class ChartManager {
         this.isApplyingDrawingState = true;
         this.markDrawingMutationStart('apply-user-drawings');
         try {
+            // A saved drawing state is applied asynchronously by TradingView.
+            // Invalidate every tracked automatic entity on both sides of that
+            // await: bars-ready can redraw Chanlun entities while the DTO is
+            // still being applied, and the late DTO commit may otherwise leave
+            // the ownership containers referring to entities whose geometry
+            // was replaced underneath them.
+            this._clearAllStrictScopes('apply-user-drawings-start');
             this.chart.removeAllShapes();
             // removeAllShapes 清空画面后 obj_charts 仍保留旧 entity 记录，
             // 下次 reconcile 旧 key 命中 toKeep 分支不重建，导致图上空白只剩最新一段。
@@ -796,12 +1188,13 @@ class ChartManager {
             if (!this.isTokenCurrent(token)) {
                 return false;
             }
-            this.chart.applyLineToolsState(state);
-            if (cacheKey) {
+            await this.chart.applyLineToolsState(state);
+            this._clearAllStrictScopes('apply-user-drawings-settled');
+            if (cacheKey && this.isTokenCurrent(token)) {
                 this.setDrawingsCache(cacheKey, state);
             }
             this.debouncedDrawChanlun();
-            return true;
+            return this.isTokenCurrent(token);
         } finally {
             this.isApplyingDrawingState = false;
             this.markDrawingMutationEnd('apply-user-drawings');
@@ -949,6 +1342,12 @@ class ChartManager {
             this._tvDataReadyIdentity !== this._currentDataIdentityKey()
         );
         clog(`[CHANLUN-TIMING] @${performance.now().toFixed(0)}ms handleBarsReadyEvent ✓ symbol=${detail.symbol} res=${detail.resolution} bars=${detail.bars || '?'} fxs=${detail.fxs || '?'} bis=${detail.bis || '?'} xds=${detail.xds || '?'} wasInitialLoad=${wasInitialLoad}`);
+        // A fresh transport response is a new opportunity to place shapes.
+        // Do not let failures from the previous canvas state consume its retry
+        // budget before TradingView has installed the new history.
+        if ((this._reconcileRetry?.count || 0) > 0) {
+            this._clearReconcileRetryBudget();
+        }
         // bars-ready 只表示 bars_result 已写入，TradingView 此时可能尚未接收 K 线。
         // 首次绘图必须等当前标的/周期 dataReady 后再执行；后续更新仍复用防抖入口。
         this._requestChanlunDrawWhenReady();
@@ -1460,15 +1859,32 @@ class ChartManager {
         this.widget.headerReady().then(function () {
             var btnDisplay = global_widget.createButton();
             btnDisplay.textContent = "缠论显示设置 ▾";
-            btnDisplay.addEventListener("click", function () {
+            btnDisplay.setAttribute('role', 'button');
+            btnDisplay.setAttribute('tabindex', '0');
+            btnDisplay.setAttribute('aria-disabled', 'false');
+            btnDisplay.setAttribute('aria-label', '打开缠论显示设置');
+            btnDisplay.setAttribute('aria-haspopup', 'dialog');
+            btnDisplay.setAttribute('aria-expanded', 'false');
+            btnDisplay.setAttribute('aria-controls', 'cl_display_menu_' + self.id);
+            if (self._clDisplayButtonA11yCleanup) self._clDisplayButtonA11yCleanup();
+            self._clDisplayButtonA11yCleanup = bindClDisplayButtonAccessibility(btnDisplay);
+            btnDisplay.addEventListener("click", function (event) {
                 // 每个图表面板独立一套菜单 DOM，防止多图布局下互相干扰
                 const menuId = 'cl_display_menu_' + self.id;
                 const backdropId = 'cl_menu_backdrop_' + self.id;
+                const cleanupOutsideDismiss = () => {
+                    const cleanup = self._clDisplayMenuOutsideCleanup;
+                    self._clDisplayMenuOutsideCleanup = null;
+                    if (typeof cleanup === 'function') cleanup();
+                };
                 if ($('#' + menuId).length > 0) {
+                    cleanupOutsideDismiss();
                     $('#' + menuId).remove();
                     $('#' + backdropId).remove();   // 兼容旧版残留 backdrop
+                    btnDisplay.setAttribute('aria-expanded', 'false');
                     return;
                 }
+                cleanupOutsideDismiss();
                 // 兼容旧版可能遗留的 backdrop(刷新前的旧 charts.js 创建过)
                 $('#' + backdropId).remove();
 
@@ -1522,9 +1938,21 @@ class ChartManager {
                         margin-right:4px;vertical-align:middle;border:1px solid rgba(0,0,0,0.25);"></span>`;
 
                 let html = `
-                    <div id="${menuId}" style="position:absolute;z-index:99999999;background:#fff;border:1px solid #cfd6df;
+                    <div id="${menuId}" role="dialog" aria-modal="false" aria-labelledby="${menuId}_title" tabindex="-1"
+                        style="position:absolute;z-index:99999999;background:#fff;border:1px solid #cfd6df;box-sizing:border-box;
                         box-shadow:0 8px 28px rgba(0,0,0,0.2);border-radius:8px;padding:12px 14px;line-height:24px;
-                        font-size:14px;color:#26313d;min-width:340px;max-width:440px;">
+                        font-size:14px;color:#26313d;width:min(440px,calc(100vw - 16px));min-width:0;
+                        max-width:calc(100vw - 16px);max-height:min(72vh,680px);overflow:auto;">
+                        <div id="${menuId}_drag_handle" role="group" tabindex="0"
+                            aria-label="拖动缠论显示设置；方向键移动" aria-roledescription="可拖动弹窗标题栏"
+                            title="按住拖动弹窗，或使用方向键移动"
+                            style="display:flex;align-items:center;justify-content:space-between;gap:12px;
+                            margin:-12px -14px 8px;padding:9px 14px;border-bottom:1px solid #e3e8ef;
+                            border-radius:8px 8px 0 0;background:#f7f9fc;cursor:grab;touch-action:none;
+                            user-select:none;font-weight:700;color:#26313d;">
+                            <span id="${menuId}_title">缠论显示设置</span>
+                            <span style="font-size:12px;font-weight:400;color:#7a8797;">拖动移动</span>
+                        </div>
                         <div id="${menuId}_lvl_toggle" style="cursor:pointer;font-size:14px;color:#596779;padding:2px 0;user-select:none;">
                             <span id="${menuId}_lvl_arrow">▸</span> 当前周期 <b>${_curInterval}</b> · 严格结构级别
                         </div>
@@ -1569,7 +1997,7 @@ class ChartManager {
 
                         ${_grpTitle('背驰', '由当前 K 线递归产生')}
                         ${_cbRow('divergence_all', '背驰总开关')}
-                        <div style="padding-left:14px;display:grid;grid-template-columns:repeat(2,minmax(120px,1fr));gap:4px 10px;font-size:14px;">
+                        <div style="padding-left:14px;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px 10px;font-size:14px;">
                             ${_divergenceLevels.map((item) => `
                                 <label style="cursor:pointer;"><input type="checkbox" id="${cbId(item.key)}"
                                     ${_checked(item.key) ? 'checked' : ''}>
@@ -1590,6 +2018,23 @@ class ChartManager {
                     </div>
                 `;
                 $('body').append(html);
+                const menuElement = document.getElementById(menuId);
+                let menuPlacement = null;
+                // The toolbar button lives inside TradingView's same-origin
+                // iframe, while the menu is mounted in this ChartManager
+                // document.  On embedded pages (for example early screening)
+                // ``window.top`` is a *different* coordinate space.  Always
+                // position and drag against the menu's actual owner window.
+                const menuWindow = menuElement?.ownerDocument?.defaultView || window;
+                if (menuElement) {
+                    menuPlacement = positionClDisplayMenuNearPointer(
+                        menuElement,
+                        event,
+                        btnDisplay,
+                        menuWindow,
+                    );
+                    btnDisplay.setAttribute('aria-expanded', 'true');
+                }
 
                 // 级别映射 折叠/展开
                 $('#' + menuId + '_lvl_toggle').on('click', function () {
@@ -1611,42 +2056,6 @@ class ChartManager {
                     $('#' + menuId + ' input[type="checkbox"]').not('#' + indCbId).each(function () {
                         if (this.checked) { this.checked = false; $(this).trigger('change'); }
                     });
-                });
-
-                // TV createButton() 创建的按钮在 widget 内部 iframe 里，
-                // getBoundingClientRect() 返回 iframe 内部坐标，需逐层累加 iframe 偏移
-                // 才能正确定位到主文档坐标系（多图表场景下尤其关键）。
-                function getElementRectInTopWindow(el) {
-                    const rect = el.getBoundingClientRect();
-                    let top = rect.top;
-                    let left = rect.left;
-                    let bottom = rect.bottom;
-                    let right = rect.right;
-                    let win = el.ownerDocument && el.ownerDocument.defaultView;
-                    while (win && win !== window.top) {
-                        try {
-                            const frameEl = win.frameElement;
-                            if (!frameEl) break;
-                            const fr = frameEl.getBoundingClientRect();
-                            top += fr.top;
-                            left += fr.left;
-                            bottom += fr.top;
-                            right += fr.left;
-                            win = frameEl.ownerDocument && frameEl.ownerDocument.defaultView;
-                        } catch (e) {
-                            // 跨域 iframe 无法访问 frameElement，使用已累加的偏移
-                            break;
-                        }
-                    }
-                    return { top, left, bottom, right };
-                }
-
-                const btnRect = getElementRectInTopWindow(btnDisplay);
-
-                // 已转换到主文档坐标，补上滚动偏移后定位到按钮正下方
-                $('#' + menuId).css({
-                    top: (btnRect.bottom + window.scrollY + 5) + 'px',
-                    left: (btnRect.left + window.scrollX) + 'px'
                 });
 
                 const keys = [
@@ -1678,33 +2087,55 @@ class ChartManager {
                     layer.msg(self.cl_independent_drawings ? '已切换为独立周期画线' : '已切换为共享画线', { time: 1000 });
                 });
 
-                // **不要用全屏 backdrop**——TV 按钮在 iframe 内,full-screen backdrop
-                // 在 main page 高 z-index 上,会**拦截 iframe 区域所有点击**(包括
-                // 「缠论显示设置」按钮再点击),造成用户菜单一旦打开就无法用按钮
-                // 关闭、TV 工具栏其它按钮也点不动。
-                //
-                // 改用 document-level click handler:监听 capture phase,任何 click
-                // 落在菜单外都关菜单,**不阻塞 iframe 内交互**。延迟一帧绑定避开
-                // 触发本次打开的同一次点击事件。
-                setTimeout(() => {
-                    // 菜单 append 在主文档,但图表/工具栏在 TV iframe 内——点击图表「空白区」
-                    // 的 click 落在 iframe document、不冒泡到主文档,故只绑主文档时收不到、
-                    // 菜单关不掉。这里同时给主文档 + 所有同源 iframe 文档绑 capture click,
-                    // 点菜单外任意处(含图表空白)即关。跨源 iframe 访问 contentDocument 会抛错,跳过。
-                    const docs = [document];
-                    document.querySelectorAll('iframe').forEach((f) => {
-                        try { if (f.contentDocument) docs.push(f.contentDocument); } catch (e) { /* 跨源 iframe 跳过 */ }
-                    });
-                    const closeHandler = (ev) => {
-                        const menuEl = document.getElementById(menuId);
-                        const cleanup = () => docs.forEach((d) => d.removeEventListener('click', closeHandler, true));
-                        if (!menuEl) { cleanup(); return; }
-                        if (menuEl.contains(ev.target)) return;     // 菜单内点击不关(ev.target 在主文档菜单内)
-                        menuEl.remove();
-                        cleanup();
+                // 不使用全屏 backdrop，避免挡住 TV iframe。capture 阶段同时监听 pointerdown
+                // 与 click：按下图表空白处即关闭，也兼容键盘触发的 click；递归覆盖嵌套 iframe。
+                if (menuElement) {
+                    const dragHandle = document.getElementById(menuId + '_drag_handle');
+                    const dragCleanup = bindClDisplayMenuDrag(
+                        menuElement,
+                        dragHandle,
+                        menuWindow,
+                    );
+                    const viewportCleanup = bindClDisplayMenuViewportGuard(
+                        menuElement,
+                        menuWindow,
+                    );
+                    let combinedCleanup = null;
+                    const outsideCleanup = bindClDisplayMenuOutsideDismiss(
+                        document,
+                        menuElement,
+                        btnDisplay,
+                        (dismissEvent) => {
+                            if (typeof combinedCleanup === 'function') combinedCleanup();
+                            menuElement.remove();
+                            btnDisplay.setAttribute('aria-expanded', 'false');
+                            if (dismissEvent && dismissEvent.type === 'keydown') {
+                                try { btnDisplay.focus({ preventScroll: true }); }
+                                catch (e) { btnDisplay.focus(); }
+                            }
+                            if (self._clDisplayMenuOutsideCleanup === combinedCleanup) {
+                                self._clDisplayMenuOutsideCleanup = null;
+                            }
+                        },
+                    );
+                    combinedCleanup = () => {
+                        outsideCleanup();
+                        dragCleanup();
+                        viewportCleanup();
                     };
-                    docs.forEach((d) => d.addEventListener('click', closeHandler, true));
-                }, 0);
+                    self._clDisplayMenuOutsideCleanup = combinedCleanup;
+                    if (menuPlacement && menuPlacement.anchor === 'trigger') {
+                        try { menuElement.focus({ preventScroll: true }); }
+                        catch (e) { menuElement.focus(); }
+                    }
+                }
+            });
+            btnDisplay.addEventListener('keydown', function (event) {
+                if (!event || (event.key !== 'Enter' && event.key !== ' ' && event.key !== 'Spacebar')) return;
+                if (event.repeat) return;
+                event.preventDefault();
+                event.stopPropagation();
+                btnDisplay.click();
             });
 
             var buttonReload = global_widget.createButton();
@@ -2081,6 +2512,8 @@ class ChartManager {
             this._pendingChanlunDrawVersion === contextVersion &&
             this._pendingChanlunDrawIdentity === currentIdentity
         );
+        const hadReconcileFailures = (this._reconcileRetry?.count || 0) > 0;
+        if (hadReconcileFailures) this._resetReconcileRetry();
         this._tvDataReadyVersion = contextVersion;
         this._tvDataReadyIdentity = currentIdentity;
         this._dataReadyProbeVersion = null;
@@ -2091,7 +2524,7 @@ class ChartManager {
         clog(`[CHANLUN-TIMING] @${performance.now().toFixed(0)}ms handleDataReady ✓ context=${contextVersion} initial=${wasInitialLoad} pending=${hasPendingDraw}`);
         this._maybeWidenDefaultView();
 
-        if (hasPendingDraw || wasInitialLoad) {
+        if (hasPendingDraw || wasInitialLoad || hadReconcileFailures) {
             if (wasInitialLoad) this.draw_chanlun();
             else this.debouncedDrawChanlun();
         }
@@ -2170,6 +2603,11 @@ class ChartManager {
     }
     handleVisibleRangeChange() {
         if (this._initialLoadDone) {
+            // Loading an earlier/later visible range can make previously
+            // rejected anchors available on the TradingView canvas.
+            if ((this._reconcileRetry?.count || 0) > 0) {
+                this._clearReconcileRetryBudget();
+            }
             clog(`[CHANLUN-TIMING] @${performance.now().toFixed(0)}ms handleVisibleRangeChange → debouncedDrawChanlun (will fire 300ms later)`);
             this.debouncedDrawChanlun();
         } else {
@@ -2177,28 +2615,73 @@ class ChartManager {
         }
     }
 
-    safeRemove(entityId) {
-        if (!entityId) return Promise.resolve();
-        if (typeof entityId.then === 'function') {
-            return entityId.then(id => {
-                if (id) {
-                    let ok = false;
-                    try { this.chart.removeEntity(id); ok = true; }
-                    catch (e) { console.warn(`[CHANLUN-DIAG][safeRemove] removeEntity 抛错 id=${id}`, e); }
-                    if (this._reconcileOwnedIds) this._reconcileOwnedIds.delete(id);
-                    if (!ok) console.warn(`[CHANLUN-DIAG][safeRemove] async path 静默失败,id=${id} 可能成为孤儿`);
-                }
-            }).catch(e => {
-                console.warn('[CHANLUN-DIAG][safeRemove] async path promise rejected', e);
-            });
-        } else {
-            let ok = false;
-            try { this.chart.removeEntity(entityId); ok = true; }
-            catch (e) { console.warn(`[CHANLUN-DIAG][safeRemove] removeEntity 抛错 id=${entityId}`, e); }
-            if (this._reconcileOwnedIds) this._reconcileOwnedIds.delete(entityId);
-            if (!ok) console.warn(`[CHANLUN-DIAG][safeRemove] sync path 静默失败,id=${entityId} 可能成为孤儿`);
-            return Promise.resolve();
+    _autoEntityPresence(entityId) {
+        if (!this.chart || typeof this.chart.getAllShapes !== 'function') return null;
+        try {
+            const shapes = this.chart.getAllShapes();
+            if (!Array.isArray(shapes)) return undefined;
+            return shapes.some((shape) => shape && shape.id === entityId);
+        } catch (error) {
+            console.warn(`[CHANLUN-DIAG][safeRemove] getAllShapes 抛错 id=${entityId}`, error);
+            return undefined;
         }
+    }
+
+    _finishAutoEntityRemoval(entityId) {
+        const presence = this._autoEntityPresence(entityId);
+        // 旧版/测试图表没有 getAllShapes 时，只能沿用 removeEntity 的成功返回；
+        // 能检查时必须等到实体确实消失，检查本身失败则继续保留追踪。
+        if (presence === false || presence === null) {
+            this._reconcileOwnedIds?.delete(entityId);
+            this._pendingRemovalIds?.delete(entityId);
+            return true;
+        }
+        if (presence === true) {
+            console.warn(`[CHANLUN-DIAG][safeRemove] entity 仍存在，保留追踪等待重试 id=${entityId}`);
+        }
+        return false;
+    }
+
+    _removeAutoEntityId(entityId) {
+        if (!entityId) return Promise.resolve(false);
+        if (!(this._reconcileOwnedIds instanceof Set)) this._reconcileOwnedIds = new Set();
+        if (!(this._pendingRemovalIds instanceof Set)) this._pendingRemovalIds = new Set();
+        // late async create 可能尚未进入 container；先登记所有权，删除静默失败时
+        // sweep 仍能识别它是自动图形。
+        this._reconcileOwnedIds.add(entityId);
+        this._pendingRemovalIds.add(entityId);
+
+        let removalResult;
+        try {
+            removalResult = this.chart.removeEntity(entityId);
+        } catch (error) {
+            console.warn(`[CHANLUN-DIAG][safeRemove] removeEntity 抛错 id=${entityId}`, error);
+            return Promise.resolve(false);
+        }
+        if (removalResult != null && typeof removalResult.then === 'function') {
+            return Promise.resolve(removalResult).then(
+                () => this._finishAutoEntityRemoval(entityId),
+                (error) => {
+                    console.warn(`[CHANLUN-DIAG][safeRemove] removeEntity promise rejected id=${entityId}`, error);
+                    return false;
+                },
+            );
+        }
+        return Promise.resolve(this._finishAutoEntityRemoval(entityId));
+    }
+
+    safeRemove(entityId) {
+        if (!entityId) return Promise.resolve(false);
+        if (typeof entityId.then === 'function') {
+            return Promise.resolve(entityId).then(
+                (resolvedId) => this._removeAutoEntityId(resolvedId),
+                (error) => {
+                    console.warn('[CHANLUN-DIAG][safeRemove] entity promise rejected', error);
+                    return false;
+                },
+            );
+        }
+        return this._removeAutoEntityId(entityId);
     }
 
     clear_draw_chanlun(clear_type) {
@@ -2236,6 +2719,7 @@ class ChartManager {
         }
         Promise.allSettled(removePromises).then(() => {
             this.markDrawingMutationEnd('chanlun-clear');
+            this.sweepOrphanShapes();
         });
     }
 
@@ -2251,8 +2735,10 @@ class ChartManager {
         if (!(this._strictContainers instanceof Map)) this._strictContainers = new Map();
         if (!(this._strictScopes instanceof Set)) this._strictScopes = new Set();
         if (!(this._strictDesiredByScope instanceof Map)) this._strictDesiredByScope = new Map();
+        if (!(this._strictDesiredItemsByScope instanceof Map)) this._strictDesiredItemsByScope = new Map();
         if (!(this._strictPendingCreates instanceof Map)) this._strictPendingCreates = new Map();
         if (!(this._reconcileOwnedIds instanceof Set)) this._reconcileOwnedIds = new Set();
+        if (!(this._pendingRemovalIds instanceof Set)) this._pendingRemovalIds = new Set();
         if (!this._strictReconcileEpoch) {
             this._strictReconcileEpoch = new (this._strictApi().ReconcileEpoch)();
         }
@@ -2298,7 +2784,9 @@ class ChartManager {
             status.dataset.state = state;
             status.textContent = state === 'unavailable'
                 ? `严格缠论结构暂不可用（${code || 'unknown'}）`
-                : '正在同步严格缠论结构…';
+                : state === 'stale'
+                    ? `严格缠论结构正在同步，暂沿用最近有效结果（${code || 'unknown'}）`
+                    : '正在同步严格缠论结构…';
         } catch (e) { /* 状态提示失败不能阻断 K 线和严格实体清理 */ }
     }
 
@@ -2307,10 +2795,16 @@ class ChartManager {
             throw new Error('strict chart requires loaded bars');
         }
         const api = this._strictApi();
-        const from = api.barTimeMsToEpochSeconds(bars[0].time);
-        const to = api.barTimeMsToEpochSeconds(bars[bars.length - 1].time);
+        const barTimes = bars.map((bar) => api.barTimeMsToEpochSeconds(bar.time));
+        const from = barTimes[0];
+        const to = barTimes[barTimes.length - 1];
         if (from > to) throw new Error('loaded bars must be ordered');
-        return { from, to };
+        for (let index = 1; index < barTimes.length; index += 1) {
+            if (barTimes[index] < barTimes[index - 1]) {
+                throw new Error('loaded bars must be ordered');
+            }
+        }
+        return { from, to, barTimes };
     }
 
     _strictSourceClosedAt(barsResult) {
@@ -2327,7 +2821,7 @@ class ChartManager {
     }
 
     _validateStrictStructureSnapshot(snapshot, chartData, currentInterval) {
-        if (!snapshot || snapshot.schema !== 'chanlun-chart-structure/v4') {
+        if (!snapshot || snapshot.schema !== 'chanlun-chart-structure/v5') {
             throw new Error('strict structure schema mismatch');
         }
         const requiredStrings = [
@@ -2399,19 +2893,47 @@ class ChartManager {
         return strictItemEnabled(this.cl_show_config || {}, item);
     }
 
+    _strictPreviewSupersedesCenter(center, preview) {
+        const centerUnitIds = Array.isArray(center?.body_unit_ids)
+            ? center.body_unit_ids
+            : center?.initial_unit_ids;
+        const previewUnitIds = Array.isArray(preview?.body_unit_ids)
+            ? preview.body_unit_ids
+            : preview?.initial_unit_ids;
+        if (!Array.isArray(centerUnitIds) || !Array.isArray(previewUnitIds)) return false;
+
+        const previewUnits = new Set(previewUnitIds.filter(Boolean));
+        const sharedUnitIds = centerUnitIds.filter((unitId) => previewUnits.has(unitId));
+        if (!sharedUnitIds.length) return false;
+
+        // 相邻中枢允许以前一中枢的最后一段作为后一中枢的进入段；这只是
+        // 首尾衔接，不是两个候选争夺同一段中枢主体。只有共享了额外构成段
+        // 时，才由更晚的形成中预览取得唯一显示权。
+        const sharedBoundaryOnly = (
+            sharedUnitIds.length === 1
+            && sharedUnitIds[0] === centerUnitIds[centerUnitIds.length - 1]
+            && sharedUnitIds[0] === preview?.entry_unit_id
+        );
+        return !sharedBoundaryOnly;
+    }
+
     _strictRenderGroups(snapshot, context) {
         const api = this._strictApi();
         const groups = new Map();
         const add = (values, levelLabel = null) => {
             for (const rawItem of values || []) {
-                const item = (
+                const labeledItem = (
                     levelLabel && rawItem?.render_kind === 'strict_divergence'
                         ? { ...rawItem, level_label: levelLabel }
                         : rawItem
                 );
-                if (!item || !Number.isInteger(item.structural_level) || !Array.isArray(item.points)) {
+                if (!labeledItem || !Number.isInteger(labeledItem.structural_level) || !Array.isArray(labeledItem.points)) {
                     throw new Error('strict render item is invalid');
                 }
+                // Strict evidence keeps exact market-close instants for audit
+                // identity.  Rendering uses the same UTC period anchors as the
+                // calendar Bars handed to TradingView.
+                const item = api.itemToChartCoordinates(labeledItem, context.interval);
                 if (!this._strictItemEnabled(item)) continue;
                 const scope = api.scopeKey(context, item);
                 if (!groups.has(scope)) groups.set(scope, []);
@@ -2425,8 +2947,32 @@ class ChartManager {
                 || typeof level.label !== 'string' || !level.label
                 || level.origin !== 'current_chart_recursive'
             ) throw new Error('strict level is invalid');
-            add(level.centers);
-            add(level.center_projections);
+            const requiredCollections = [
+                'centers', 'center_previews', 'center_projections',
+                'current_trends', 'completed_trend_snapshots',
+                'confirmed_points', 'approaching_points', 'divergences',
+            ];
+            if (requiredCollections.some((field) => !Array.isArray(level[field]))) {
+                throw new Error('strict level collections are invalid');
+            }
+            const hasPreview = level.center_previews.length > 0;
+            const projectedCenterIds = new Set(
+                level.center_projections.map((item) => item?.center_id).filter(Boolean),
+            );
+            add(level.centers.filter((item) => !(
+                item?.state === 'ongoing'
+                && (
+                    // 共享一个首尾衔接段的相邻中枢可以同时显示；形成中预览
+                    // 复用了更多活动中枢主体时，才选择更晚的预览作为唯一显示框。
+                    level.center_previews.some(
+                        (preview) => this._strictPreviewSupersedesCenter(item, preview),
+                    )
+                    // 没有预览时，开放投影替代同一活动中枢较短的正式框。
+                    || (!hasPreview && projectedCenterIds.has(item.center_id))
+                )
+            )));
+            add(level.center_previews);
+            if (!hasPreview) add(level.center_projections);
             add(level.current_trends);
             // completed_trend_snapshots 是只读审计证据，不创建默认图形。
             add(level.confirmed_points);
@@ -2446,6 +2992,23 @@ class ChartManager {
                     linestyle: item.state === 'ongoing'
                         ? CHART_CONFIG.LINE_STYLES.DASHED
                         : CHART_CONFIG.LINE_STYLES.SOLID,
+                },
+            });
+        }
+        if (item.render_kind === 'center_preview') {
+            const completed = item.state === 'completed';
+            const linestyle = completed
+                ? CHART_CONFIG.LINE_STYLES.SOLID
+                : CHART_CONFIG.LINE_STYLES.DASHED;
+            return ChartUtils.createZhongshuShape(this.chart, {
+                ...item,
+                linestyle,
+            }, {
+                color: levelColor,
+                linewidth: completed ? 2 : 1,
+                overrides: {
+                    transparency: completed ? 82 : 90,
+                    linestyle,
                 },
             });
         }
@@ -2509,6 +3072,38 @@ class ChartManager {
         throw new Error(`unsupported strict render kind: ${item.render_kind}`);
     }
 
+    _strictCreatedGeometryMatches(item, realId) {
+        if (!this.chart || typeof this.chart.getShapeById !== 'function') return true;
+        try {
+            const shape = this.chart.getShapeById(realId);
+            if (!shape || typeof shape.getPoints !== 'function') return false;
+            const actualPoints = shape.getPoints();
+            const expectedPoints = item?.points;
+            if (!Array.isArray(actualPoints) || !Array.isArray(expectedPoints)) return false;
+            if (actualPoints.length !== expectedPoints.length) return false;
+            const quantum = Number(this._strictStructureSnapshot?.structure_price_quantum);
+            return expectedPoints.every((point, index) => {
+                const actual = actualPoints[index];
+                const expectedPrice = Number(point?.price);
+                const actualPrice = Number(actual?.price);
+                if (
+                    Number(actual?.time) !== Number(point?.time)
+                    || !Number.isFinite(expectedPrice)
+                    || !Number.isFinite(actualPrice)
+                ) return false;
+                const tolerance = Number.isFinite(quantum) && quantum > 0
+                    ? Math.max(quantum * 1e-6, Math.abs(expectedPrice) * Number.EPSILON * 16)
+                    : Math.max(1e-12, Math.abs(expectedPrice) * Number.EPSILON * 16);
+                return Math.abs(actualPrice - expectedPrice) <= tolerance;
+            });
+        } catch (error) {
+            // A shape can be unreadable during the same tick in which it was
+            // created.  Treat that as not-yet-verified and retry; accepting it
+            // here would make a silently snapped rectangle permanent.
+            return false;
+        }
+    }
+
     _acceptStrictEntity(scope, generation, contextToken, item, realId) {
         const api = this._strictApi();
         const desired = this._strictDesiredByScope.get(scope);
@@ -2523,6 +3118,18 @@ class ChartManager {
             if (realId != null) this.safeRemove(realId);
             return false;
         }
+        if (!this._strictCreatedGeometryMatches(item, realId)) {
+            // TV 在目标历史 K 线尚未装入画布时会把多点图形静默吸附到当前
+            // 最左/最右 K 线。不能把这个错误坐标记进容器，否则源快照不变时
+            // 后续历史加载也不会触发替换，只能靠人工“重新加载数据”恢复。
+            console.warn('[STRICT-CHART] rejected snapped strict entity', {
+                logicalKey: item.logicalKey,
+                expected: item.points,
+            });
+            this.safeRemove(realId);
+            this._scheduleReconcileRetry('strict-create-snapped');
+            return false;
+        }
         container.push({
             id: realId,
             logicalKey: item.logicalKey,
@@ -2532,6 +3139,12 @@ class ChartManager {
             tailTime: item.points[item.points.length - 1]?.time,
         });
         this._reconcileOwnedIds.add(realId);
+        this._pendingRemovalIds?.delete(realId);
+        // Creation can initially report the requested points and then be
+        // re-anchored by TradingView when its time scale finishes loading.
+        // Verify once more on the stable canvas.  _isVerifyingNow prevents a
+        // repair performed by the verification pass from scheduling a loop.
+        if (!this._isVerifyingNow()) this._scheduleVerifyRebuild();
         return true;
     }
 
@@ -2543,7 +3156,36 @@ class ChartManager {
         const container = this._strictContainers.get(scope);
         const plan = api.planReconcile(container, incoming, loadedRange, visibleRange);
         const generation = this._strictReconcileEpoch.next(scope);
+        const desiredItems = new Map(
+            (plan.desiredItems || []).map((item) => [item.logicalKey, item]),
+        );
         const removeIds = new Set(plan.removeIds.filter((id) => id != null));
+        const createItemsByKey = new Map(
+            plan.createItems.map((item) => [item.logicalKey, item]),
+        );
+
+        // Fingerprints only describe what was requested when the entity was
+        // created.  They do not prove that the live TradingView line tool still
+        // has those points: history pagination and time-scale relayout can
+        // silently snap an existing rectangle to another candle afterwards.
+        // Revalidate every retained entity and turn drift/missing entities into
+        // an ordinary remove+create delta.
+        for (const entry of container) {
+            const desiredItem = desiredItems.get(entry.logicalKey);
+            if (
+                desiredItem
+                && entry.renderKey === desiredItem.renderKey
+                && entry.geometryFingerprint === desiredItem.geometryFingerprint
+                && !this._strictCreatedGeometryMatches(desiredItem, entry.id)
+            ) {
+                if (entry.id != null) removeIds.add(entry.id);
+                createItemsByKey.set(desiredItem.logicalKey, desiredItem);
+                console.warn('[STRICT-CHART] repairing drifted strict entity', {
+                    logicalKey: entry.logicalKey,
+                    expected: desiredItem.points,
+                });
+            }
+        }
         if (removeIds.size) {
             for (const id of removeIds) this.safeRemove(id);
             const retained = container.filter((entry) => !removeIds.has(entry.id));
@@ -2553,10 +3195,11 @@ class ChartManager {
 
         const desired = new Map();
         for (const entry of container) desired.set(entry.logicalKey, entry.renderKey);
-        for (const item of plan.createItems) desired.set(item.logicalKey, item.renderKey);
+        for (const item of createItemsByKey.values()) desired.set(item.logicalKey, item.renderKey);
         this._strictDesiredByScope.set(scope, desired);
+        this._strictDesiredItemsByScope.set(scope, desiredItems);
 
-        for (const item of plan.createItems) {
+        for (const item of createItemsByKey.values()) {
             let result;
             try { result = createFunc(item); }
             catch (error) {
@@ -2581,12 +3224,45 @@ class ChartManager {
                     if (this._strictPendingCreates.get(pendingKey)?.promise === promise) {
                         this._strictPendingCreates.delete(pendingKey);
                     }
+                    this._settleReconcileRetryIfComplete();
                 });
             } else if (result != null) {
                 this._acceptStrictEntity(scope, generation, contextToken, item, result);
             } else {
                 this._scheduleReconcileRetry('strict-create-null');
             }
+        }
+    }
+
+    _strictReconcileComplete() {
+        if ((this._strictPendingCreates?.size || 0) > 0) return false;
+        if (!(this._strictDesiredByScope instanceof Map)) return true;
+        for (const [scope, desired] of this._strictDesiredByScope.entries()) {
+            const container = this._strictContainers?.get(scope) || [];
+            if (container.length !== desired.size) return false;
+            const actual = new Map(
+                container.map(
+                    (entry) => [entry.logicalKey, entry.renderKey],
+                ),
+            );
+            if (actual.size !== desired.size) return false;
+            for (const [logicalKey, renderKey] of desired.entries()) {
+                if (actual.get(logicalKey) !== renderKey) return false;
+            }
+            const desiredItems = this._strictDesiredItemsByScope?.get(scope);
+            if (desiredItems instanceof Map) {
+                for (const entry of container) {
+                    const item = desiredItems.get(entry.logicalKey);
+                    if (!item || !this._strictCreatedGeometryMatches(item, entry.id)) return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    _settleReconcileRetryIfComplete() {
+        if (this._strictReconcileComplete()) {
+            this._clearReconcileRetryBudget();
         }
     }
 
@@ -2600,6 +3276,7 @@ class ChartManager {
         this._strictContainers.delete(scope);
         this._strictScopes?.delete(scope);
         this._strictDesiredByScope?.delete(scope);
+        this._strictDesiredItemsByScope?.delete(scope);
         clog(`[STRICT-CHART] cleared scope reason=${reason} scope=${scope}`);
     }
 
@@ -2613,35 +3290,88 @@ class ChartManager {
         scopes.forEach((scope) => this._clearStrictScope(scope, reason));
     }
 
-    _strictUnavailable(code) {
+    _canRetainStrictSnapshot(chartData, currentInterval) {
+        const snapshot = this._strictStructureSnapshot;
+        if (!snapshot || !this._strictStructureContextToken) return false;
+        const displayFrequency = this._strictFrequencyFromResolution(currentInterval);
+        const chartSymbol = this._strictNormalizeSymbol(
+            chartData?.chartSymbol || this.widget?.symbolInterval?.()?.symbol,
+        );
+        if (
+            !chartSymbol
+            || this._strictNormalizeSymbol(snapshot.symbol) !== chartSymbol
+            || snapshot.display_frequency !== displayFrequency
+            || snapshot.source_frequency !== displayFrequency
+        ) return false;
+        try {
+            // 只允许沿用比当前行情旧的同上下文快照；若缓存反而来自未来，说明
+            // 正在切换数据上下文，必须清空，不能把旧标的图形带过来。
+            const currentSourceClosedAt = this._strictSourceClosedAt(chartData?.barsResult);
+            const lagSeconds = currentSourceClosedAt - snapshot.source_closed_at;
+            let maxLagSeconds;
+            if (/^[1-9][0-9]*m$/.test(displayFrequency)) {
+                maxLagSeconds = Number.parseInt(displayFrequency, 10) * 60 * 8;
+            } else {
+                maxLagSeconds = {
+                    '10s': 80,
+                    '30s': 240,
+                    d: 4 * 86400,
+                    '2d': 8 * 86400,
+                    w: 14 * 86400,
+                    m: 62 * 86400,
+                    q: 190 * 86400,
+                    y: 740 * 86400,
+                }[displayFrequency] || 0;
+            }
+            return lagSeconds >= 0 && lagSeconds <= maxLagSeconds;
+        } catch (error) {
+            return false;
+        }
+    }
+
+    _strictUnavailable(code, chartData = null, currentInterval = null) {
+        const errorCode = code || 'strict_evidence_invalid';
+        if (this._canRetainStrictSnapshot(chartData, currentInterval)) {
+            this._setStrictStructureStatus('stale', errorCode);
+            clog(`[STRICT-CHART] retained last good snapshot code=${errorCode}`);
+            return true;
+        }
         this._clearAllStrictScopes(code || 'unavailable');
         this._strictStructureSnapshot = null;
         this._strictStructureContextToken = null;
-        this._setStrictStructureStatus('unavailable', code || 'strict_evidence_invalid');
+        this._setStrictStructureStatus('unavailable', errorCode);
+        return false;
     }
 
     _drawStrictStructure(chartData, currentInterval) {
         const barsResult = chartData?.barsResult;
         const mode = barsResult?.strict_structure_mode;
         if (mode === 'unavailable') {
-            this._strictUnavailable(barsResult.strict_structure_error?.code);
+            this._strictUnavailable(
+                barsResult.strict_structure_error?.code,
+                chartData,
+                currentInterval,
+            );
             return;
         }
         let snapshot;
         if (mode === 'replace') snapshot = barsResult.strict_structure;
         else if (mode === 'unchanged') snapshot = this._strictStructureSnapshot;
         else {
-            this._strictUnavailable('strict_transport_missing');
+            this._strictUnavailable('strict_transport_missing', chartData, currentInterval);
             return;
         }
         if (!snapshot) {
-            this._strictUnavailable('strict_snapshot_missing');
+            this._strictUnavailable('strict_snapshot_missing', chartData, currentInterval);
             return;
         }
 
         try {
             const validated = this._validateStrictStructureSnapshot(snapshot, chartData, currentInterval);
             const groups = this._strictRenderGroups(snapshot, validated.context);
+            if (this._strictStructureContextToken !== validated.contextToken) {
+                this._clearReconcileRetryBudget();
+            }
             this._strictStructureSnapshot = snapshot;
             this._strictStructureContextToken = validated.contextToken;
             this._recMaxLevel = Math.max(
@@ -2664,10 +3394,11 @@ class ChartManager {
             for (const scope of priorScopes) {
                 if (!nextScopes.has(scope)) this._clearStrictScope(scope, 'snapshot-replace');
             }
+            this._settleReconcileRetryIfComplete();
             this._setStrictStructureStatus('ready');
         } catch (error) {
             console.warn('[STRICT-CHART] rejected strict snapshot', error);
-            this._strictUnavailable('strict_context_mismatch');
+            this._strictUnavailable('strict_context_mismatch', chartData, currentInterval);
         }
     }
 
@@ -2925,6 +3656,7 @@ class ChartManager {
     // 首屏数据就绪但布局未完成时极易丢失 shape，导致线段不连续；
     // 通过指数退避并限制次数，避免重试风暴。
     _scheduleReconcileRetry(reason) {
+        if (this._disposed) return;
         if (!this._reconcileRetry) {
             this._reconcileRetry = { count: 0, timer: null };
         }
@@ -2935,6 +3667,7 @@ class ChartManager {
         state.count += 1;
         state.timer = setTimeout(() => {
             state.timer = null;
+            if (this._disposed) return;
             clog(`[CHANLUN-TIMING] reconcile retry #${state.count} (${reason}) after ${delayMs}ms`);
             // 绕过防抖直接调用：持续缩放时 visibleRangeChange 会不停 reset 300ms 防抖，
             // retry 经 debounced 路径会被无限期延后
@@ -2942,11 +3675,15 @@ class ChartManager {
         }, delayMs);
     }
 
-    _resetReconcileRetry() {
-        if (this._reconcileRetry && this._reconcileRetry.timer) {
+    _clearReconcileRetryBudget() {
+        if (this._reconcileRetry?.timer) {
             clearTimeout(this._reconcileRetry.timer);
         }
         this._reconcileRetry = { count: 0, timer: null };
+    }
+
+    _resetReconcileRetry() {
+        this._clearReconcileRetryBudget();
         // 同步清掉守卫缓存，否则下次源数据相同时会被 W1 guard 误 skip
         this._reconcileGuard = {};
         if (this._verifyRebuildTimer) {
@@ -2960,11 +3697,13 @@ class ChartManager {
     // 守门用 timestamp（_verifyingUntil）而非微任务标志：draw_chanlun 是 async，
     // microtask 重置会在首个 await 之前跑掉，导致 verify 自身又排队 → 500ms 自循环。
     _scheduleVerifyRebuild() {
+        if (this._disposed) return;
         if (this._verifyRebuildTimer) {
             clearTimeout(this._verifyRebuildTimer);
         }
         this._verifyRebuildTimer = setTimeout(() => {
             this._verifyRebuildTimer = null;
+            if (this._disposed) return;
             this._verifyingUntil = performance.now() + 1500;
             // 清掉守卫缓存，确保 reconcile 走全量 rebuild 路径，基于稳定布局重新落位 shape
             this._reconcileGuard = {};
@@ -3029,6 +3768,7 @@ class ChartManager {
         if (this._sweepOrphanTimer) clearTimeout(this._sweepOrphanTimer);
         this._sweepOrphanTimer = setTimeout(() => {
             this._sweepOrphanTimer = null;
+            if (this._disposed) return;
             this.sweepOrphanShapes();
         }, 100);
         return;
@@ -3071,8 +3811,11 @@ class ChartManager {
             });
         }
         let tvShapes = [];
-        try { tvShapes = this.chart.getAllShapes() || []; }
-        catch (e) { console.warn('[CHANLUN-DIAG][sweep] getAllShapes 抛错', e); }
+        let canInspectShapes = false;
+        try {
+            tvShapes = this.chart.getAllShapes() || [];
+            canInspectShapes = Array.isArray(tvShapes);
+        } catch (e) { console.warn('[CHANLUN-DIAG][sweep] getAllShapes 抛错', e); }
         const tvIds = new Set(tvShapes.map(s => s.id));
 
         // ownedOrphans：owned 有但 container 已无引用 → 应删除的孤儿
@@ -3082,7 +3825,9 @@ class ChartManager {
         });
 
         // trulyForeign：TV 里有但 owned/inUse 都无记录 → 理论上是用户手画，race 时可能漏 add
-        const trulyForeign = tvShapes.filter(s => !inUseIds.has(s.id) && !this._reconcileOwnedIds.has(s.id));
+        const trulyForeign = canInspectShapes
+            ? tvShapes.filter(s => !inUseIds.has(s.id) && !this._reconcileOwnedIds.has(s.id))
+            : [];
 
         // sweep 总结仅在 window.__chanlunDebug 时输出，避免生产 console 刷屏
         if (window.__chanlunDebug) {
@@ -3111,18 +3856,23 @@ class ChartManager {
         }
 
         if (ownedOrphans.length > 0) {
-            let removed = 0;
+            let confirmedGone = 0;
+            let retried = 0;
             ownedOrphans.forEach(id => {
-                try {
-                    this.chart.removeEntity(id);
-                    removed += 1;
-                } catch (e) {
-                    console.warn(`[CHANLUN-DIAG][sweep] removeEntity 抛错 id=${id}`, e);
+                if (canInspectShapes && !tvIds.has(id)) {
+                    this._reconcileOwnedIds.delete(id);
+                    this._pendingRemovalIds?.delete(id);
+                    confirmedGone += 1;
+                    return;
                 }
-                this._reconcileOwnedIds.delete(id);
+                retried += 1;
+                this.safeRemove(id);
             });
             if (window.__chanlunDebug) {
-                console.log(`[CHANLUN-DIAG][sweep] orphan removed=${removed} owned-after=${this._reconcileOwnedIds.size}`);
+                console.log(
+                    `[CHANLUN-DIAG][sweep] confirmed-gone=${confirmedGone} ` +
+                    `retried=${retried} owned-after=${this._reconcileOwnedIds.size}`
+                );
             }
         }
 
@@ -3131,6 +3881,7 @@ class ChartManager {
     }
 
     async draw_chanlun() {
+        if (this._disposed) return;
         const currentVersion = this._intervalVersion;
         const capturedSeq = this._intervalSwitchSeq;
 
@@ -3354,7 +4105,7 @@ class ChartManager {
                 }
                 // K线也随 SSE 实时刷新：把推送里的最新 bar 喂给 TV(绕过轮询/节流/bars<2 抛错)。
                 if (this.udf_datafeed && typeof this.udf_datafeed.feedRealtimeBar === 'function') {
-                    this.udf_datafeed.feedRealtimeBar(resKey, data);
+                    this.udf_datafeed.feedRealtimeBar(resKey, data, resolution);
                 }
             } catch (e) { console.warn('[SSE] 处理推送失败', e); }
         });
@@ -3377,9 +4128,30 @@ class ChartManager {
     }
 
     dispose() {
+        if (this._disposed) return;
+        this._disposed = true;
+        this._resetReconcileRetry();
+        if (this._sweepOrphanTimer) {
+            clearTimeout(this._sweepOrphanTimer);
+            this._sweepOrphanTimer = null;
+        }
         this._clearAllStrictScopes('dispose');
         this._strictStructureSnapshot = null;
         this._strictStructureContextToken = null;
+        if (this._clDisplayButtonA11yCleanup) {
+            const cleanup = this._clDisplayButtonA11yCleanup;
+            this._clDisplayButtonA11yCleanup = null;
+            try { cleanup(); } catch (e) { /* already disposed */ }
+        }
+        if (this._clDisplayMenuOutsideCleanup) {
+            const cleanup = this._clDisplayMenuOutsideCleanup;
+            this._clDisplayMenuOutsideCleanup = null;
+            try { cleanup(); } catch (e) { /* already disposed */ }
+        }
+        const displayMenu = document.getElementById('cl_display_menu_' + this.id);
+        if (displayMenu) displayMenu.remove();
+        const legacyBackdrop = document.getElementById('cl_menu_backdrop_' + this.id);
+        if (legacyBackdrop) legacyBackdrop.remove();
         if (this._strictReconcileEpoch) {
             try { this._strictReconcileEpoch.dispose(); } catch (e) { /* already disposed */ }
             this._strictReconcileEpoch = null;

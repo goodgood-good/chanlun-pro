@@ -9,7 +9,10 @@ from typing import Iterable
 from chanlun.core.strict_structure.identity import stable_structure_id
 from chanlun.core.strict_structure.level_catalog import recursive_level_labels
 from chanlun.core.strict_structure.models import (
+    CenterPreview,
+    CenterPreviewState,
     CenterState,
+    ConstituentUnit,
     DivergenceEvidence,
     SourceKind,
     StrictEvidenceResult,
@@ -20,8 +23,8 @@ from chanlun.core.strict_structure.models import (
 )
 
 
-CHART_STRUCTURE_SCHEMA = "chanlun-chart-structure/v4"
-CHART_CENTER_SCHEMA = "chanlun-chart-center/v4"
+CHART_STRUCTURE_SCHEMA = "chanlun-chart-structure/v5"
+CHART_CENTER_SCHEMA = "chanlun-chart-center/v5"
 _ACTIVE_CENTER_STATES = frozenset({CenterState.ONGOING})
 
 
@@ -41,6 +44,24 @@ def _optional_epoch(value: datetime | None) -> int | None:
     return None if value is None else aware_datetime_to_epoch_seconds(value)
 
 
+def _unit_audit_payload(unit: ConstituentUnit) -> dict[str, object]:
+    """Serialize one strict unit for center entry/leave audit display."""
+
+    if not isinstance(unit, ConstituentUnit):
+        raise TypeError("center audit unit must be a ConstituentUnit")
+    return {
+        "unit_id": unit.unit_id,
+        "direction": unit.direction,
+        "start_time": aware_datetime_to_epoch_seconds(unit.market_start),
+        "end_time": aware_datetime_to_epoch_seconds(unit.market_end),
+        "start_tick": unit.start_tick,
+        "end_tick": unit.end_tick,
+        "low_tick": unit.low_tick,
+        "high_tick": unit.high_tick,
+        "locked": unit.locked,
+    }
+
+
 def _center_payload(
     center: TrendCenter,
     *,
@@ -51,6 +72,11 @@ def _center_payload(
         raise TypeError("center must be a TrendCenter")
     if center.zd_tick >= center.zg_tick:
         raise ValueError("formal chart center requires positive core")
+    leaving_unit = (
+        center.completion_leave_unit
+        or center.pending_leave_unit
+        or center.initial_exit_unit
+    )
     return {
         "schema": CHART_CENTER_SCHEMA,
         "render_kind": render_kind,
@@ -103,6 +129,8 @@ def _center_payload(
             else center.completion_return_unit.unit_id
         ),
         "completion_direction": center.completion_direction,
+        "entering_segment": _unit_audit_payload(center.entry_unit),
+        "leaving_segment": _unit_audit_payload(leaving_unit),
         "established_market_time": aware_datetime_to_epoch_seconds(
             center.established_market_time
         ),
@@ -144,18 +172,22 @@ def active_center_projection_to_chart_dict(
     center: TrendCenter,
     source_closed_at: datetime,
 ) -> dict[str, object]:
-    """Build a non-tradable rendering projection for an active center core."""
+    """Build the single display box for an active center through source close."""
 
     if center.source_kind is SourceKind.STROKE_OBSERVATION:
         raise ValueError("formal center projection rejects stroke observation")
     if center.state not in _ACTIVE_CENTER_STATES:
         raise ValueError("center projection requires an active center")
     closed_epoch = aware_datetime_to_epoch_seconds(source_closed_at)
-    touched_epoch = aware_datetime_to_epoch_seconds(
+    body_end_epoch = aware_datetime_to_epoch_seconds(
         center.core_body_end_market_time
     )
-    if closed_epoch < touched_epoch:
+    if closed_epoch < body_end_epoch:
         raise ValueError("source close cannot precede center core body end")
+    core_start_epoch = aware_datetime_to_epoch_seconds(
+        center.core_body_start_market_time
+    )
+    leaving_unit = center.pending_leave_unit or center.initial_exit_unit
     return {
         "schema": CHART_CENTER_SCHEMA,
         "render_kind": "center_projection",
@@ -170,14 +202,195 @@ def active_center_projection_to_chart_dict(
         "state": center.state.value,
         "tradable": False,
         "points": [
-            {"time": touched_epoch, "price_tick": center.zg_tick},
+            {"time": core_start_epoch, "price_tick": center.zg_tick},
             {"time": closed_epoch, "price_tick": center.zd_tick},
         ],
         "core": {"zd_tick": center.zd_tick, "zg_tick": center.zg_tick},
+        "entering_segment": _unit_audit_payload(center.entry_unit),
+        "leaving_segment": _unit_audit_payload(leaving_unit),
         "source_center_render_id": (
             f"{center.center_id}@{center.body_revision}@{center.state.value}"
         ),
         "available_at": aware_datetime_to_epoch_seconds(center.available_at),
+    }
+
+
+def strict_center_preview_to_chart_dict(
+    preview: CenterPreview,
+    units: tuple[ConstituentUnit, ...],
+    source_closed_at: datetime,
+) -> dict[str, object]:
+    """Serialize one non-tradable provisional center lifecycle."""
+
+    if not isinstance(preview, CenterPreview):
+        raise TypeError("preview must be a CenterPreview")
+    if (
+        preview.state not in (
+            CenterPreviewState.FORMING,
+            CenterPreviewState.COMPLETED,
+        )
+        or len(preview.unit_ids) < 5
+        or preview.zd_tick is None
+        or preview.zg_tick is None
+        or preview.zd_tick >= preview.zg_tick
+    ):
+        raise ValueError("chart center preview requires a positive center core")
+
+    values = tuple(units)
+    by_id = {item.unit_id: item for item in values}
+    if len(by_id) != len(values):
+        raise ValueError("chart center preview units require unique ids")
+    try:
+        body = tuple(by_id[item_id] for item_id in preview.unit_ids)
+        completion_return = (
+            None
+            if preview.completion_return_unit_id is None
+            else by_id[preview.completion_return_unit_id]
+        )
+    except KeyError as exc:
+        raise ValueError("chart center preview unit is absent from level") from exc
+    initial = body[:5]
+    if any(
+        item.structural_level != preview.structural_level
+        or item.source_kind is not preview.source_kind
+        or item.price_basis_revision != preview.price_basis_revision
+        for item in body + (() if completion_return is None else (completion_return,))
+    ):
+        raise ValueError("chart center preview unit context mismatch")
+    unlocked_seen = False
+    lifecycle_units = body + (() if completion_return is None else (completion_return,))
+    for item in lifecycle_units:
+        if not item.locked:
+            unlocked_seen = True
+        elif unlocked_seen:
+            raise ValueError("chart center preview units must have a locked prefix")
+    if not unlocked_seen:
+        raise ValueError("chart center preview requires provisional units")
+    for previous, current in zip(lifecycle_units, lifecycle_units[1:]):
+        if (
+            previous.direction == current.direction
+            or previous.end_tick != current.start_tick
+            or current.market_start < previous.market_end
+        ):
+            raise ValueError("chart center preview lifecycle is disconnected")
+    expected_zd = max(item.low_tick for item in initial[1:4])
+    expected_zg = min(item.high_tick for item in initial[1:4])
+    if (preview.zd_tick, preview.zg_tick) != (expected_zd, expected_zg):
+        raise ValueError("chart center preview core does not match its seed")
+    # A trend-linked live candidate may reuse the preceding active center's
+    # penultimate unit as external boundary evidence.  Only that first unit is
+    # allowed to miss the new core; the middle-three seed, initial exit and
+    # every extension/leave must still overlap it positively.
+    if any(
+        max(item.low_tick, preview.zd_tick)
+        >= min(item.high_tick, preview.zg_tick)
+        for item in body[1:]
+    ):
+        raise ValueError("chart center preview body must overlap its core")
+    if source_closed_at < lifecycle_units[-1].market_end:
+        raise ValueError("source close cannot precede center preview tail")
+    if preview.state is CenterPreviewState.COMPLETED:
+        if completion_return is None:
+            raise ValueError("completed chart preview requires a return unit")
+        completion_leave = body[-1]
+        if (
+            completion_leave.direction != initial[0].direction
+            or (
+                completion_leave.end_tick <= preview.zg_tick
+                if completion_leave.direction == "up"
+                else completion_leave.end_tick >= preview.zd_tick
+            )
+        ):
+            raise ValueError("completed chart preview leave geometry is invalid")
+        return_stays_outside = (
+            completion_return.low_tick >= preview.zg_tick
+            if completion_leave.direction == "up"
+            else completion_return.high_tick <= preview.zd_tick
+        )
+        if not return_stays_outside:
+            raise ValueError("completed chart preview return must stay outside its core")
+    elif completion_return is not None:
+        raise ValueError("forming chart preview cannot retain a return unit")
+
+    preview_id = stable_structure_id(
+        "chanlun-center-preview/v1",
+        preview.price_basis_revision,
+        preview.structural_level,
+        preview.source_kind.value,
+        preview.unit_ids[:5],
+        preview.zd_tick,
+        preview.zg_tick,
+    )
+    closed_epoch = aware_datetime_to_epoch_seconds(source_closed_at)
+    initial_unit_ids = [item.unit_id for item in initial]
+    completed = preview.state is CenterPreviewState.COMPLETED
+    leaving_unit = body[-1]
+    end_epoch = (
+        aware_datetime_to_epoch_seconds(leaving_unit.market_start)
+        if completed
+        else closed_epoch
+    )
+    return {
+        "schema": CHART_CENTER_SCHEMA,
+        "render_kind": "center_preview",
+        "center_id": preview_id,
+        "preview_id": preview_id,
+        "render_id": (
+            f"{preview_id}@{preview.state.value}@{len(body) - 5}"
+            f"@{preview.completion_return_unit_id or closed_epoch}"
+        ),
+        "body_revision": len(body) - 5,
+        "structural_level": preview.structural_level,
+        "source_kind": preview.source_kind.value,
+        "state": preview.state.value,
+        "tradable": False,
+        "points": [
+            {
+                "time": aware_datetime_to_epoch_seconds(initial[1].market_start),
+                "price_tick": preview.zg_tick,
+            },
+            {"time": end_epoch, "price_tick": preview.zd_tick},
+        ],
+        "core": {"zd_tick": preview.zd_tick, "zg_tick": preview.zg_tick},
+        "envelope": {
+            "dd_tick": min(item.low_tick for item in body),
+            "gg_tick": max(item.high_tick for item in body),
+        },
+        "entry_unit_id": initial[0].unit_id,
+        "core_unit_ids": [item.unit_id for item in initial[1:4]],
+        "initial_exit_unit_id": initial[4].unit_id,
+        "initial_unit_ids": initial_unit_ids,
+        "body_unit_ids": [item.unit_id for item in body],
+        "extension_unit_ids": [item.unit_id for item in body[5:]],
+        "pending_leave_unit_id": (
+            leaving_unit.unit_id
+            if (
+                not completed
+                and leaving_unit.direction == initial[0].direction
+                and (
+                    leaving_unit.end_tick > preview.zg_tick
+                    if leaving_unit.direction == "up"
+                    else leaving_unit.end_tick < preview.zd_tick
+                )
+            )
+            else None
+        ),
+        "completion_leave_unit_id": leaving_unit.unit_id if completed else None,
+        "completion_return_unit_id": (
+            None if completion_return is None else completion_return.unit_id
+        ),
+        "completion_direction": leaving_unit.direction if completed else None,
+        "entering_segment": _unit_audit_payload(initial[0]),
+        "leaving_segment": _unit_audit_payload(leaving_unit),
+        "established_market_time": aware_datetime_to_epoch_seconds(
+            initial[4].market_end
+        ),
+        "established_at": _optional_epoch(initial[4].confirmed_at),
+        # Geometry is complete, but an unlocked return has no formal
+        # confirmation timestamp.  Keep this null so consumers cannot mistake
+        # a provisional third-class shape for a confirmed trading signal.
+        "completed_at": None,
+        "available_at": aware_datetime_to_epoch_seconds(preview.available_at),
     }
 
 
@@ -377,6 +590,8 @@ def _with_prices(value: object, quantum: Decimal) -> object:
         "gg_tick": "gg_price",
         "low_tick": "low_price",
         "high_tick": "high_price",
+        "start_tick": "start_price",
+        "end_tick": "end_price",
     }
     for tick_name, price_name in tick_price_names.items():
         tick = value.get(tick_name)
@@ -463,6 +678,21 @@ def build_strict_structure_snapshot(
             level.center_result.centers,
             evidence.source_closed_at,
         )
+        center_previews = tuple(
+            preview
+            for preview in _visible(
+                level.center_result.previews,
+                evidence.source_closed_at,
+            )
+            if preview.state in (
+                CenterPreviewState.FORMING,
+                CenterPreviewState.COMPLETED,
+            )
+            and len(preview.unit_ids) >= 5
+            and preview.zd_tick is not None
+            and preview.zg_tick is not None
+            and preview.zd_tick < preview.zg_tick
+        )
         current_trends = _visible(
             level.trend_types,
             evidence.source_closed_at,
@@ -475,6 +705,17 @@ def build_strict_structure_snapshot(
             (strict_center_to_chart_dict(center) for center in centers),
             "center_id",
         )
+        preview_payloads = _sorted_payloads(
+            (
+                strict_center_preview_to_chart_dict(
+                    preview,
+                    level.units,
+                    evidence.source_closed_at,
+                )
+                for preview in center_previews
+            ),
+            "center_id",
+        )
         active_center = (
             centers[-1]
             if centers and centers[-1].state in _ACTIVE_CENTER_STATES
@@ -482,7 +723,7 @@ def build_strict_structure_snapshot(
         )
         projections = _sorted_payloads(
             ()
-            if active_center is None
+            if active_center is None or preview_payloads
             else (
                 active_center_projection_to_chart_dict(
                     active_center,
@@ -533,6 +774,7 @@ def build_strict_structure_snapshot(
                 "origin": "current_chart_recursive",
                 "centers": center_payloads,
                 "center_projections": projections,
+                "center_previews": preview_payloads,
                 "current_trends": current_payloads,
                 "completed_trend_snapshots": completed_payloads,
                 "confirmed_points": confirmed_payloads,
@@ -552,7 +794,7 @@ def build_strict_structure_snapshot(
         "center_id",
     )
     snapshot_revision = _revision(
-        "chanlun-chart-snapshot/v4",
+        "chanlun-chart-snapshot/v5",
         evidence.structure_revision,
         source_closed_epoch,
     )
@@ -562,13 +804,14 @@ def build_strict_structure_snapshot(
             {
                 "structural_level": level["structural_level"],
                 "center_projections": level["center_projections"],
+                "center_previews": level["center_previews"],
                 "approaching_points": level["approaching_points"],
             }
             for level in levels
         ],
     }
     render_revision = _revision(
-        "chanlun-chart-render/v5",
+        "chanlun-chart-render/v7",
         snapshot_revision,
         render_extras,
     )
@@ -597,6 +840,7 @@ __all__ = [
     "aware_datetime_to_epoch_seconds",
     "build_strict_structure_snapshot",
     "center_observation_to_chart_dict",
+    "strict_center_preview_to_chart_dict",
     "strict_center_to_chart_dict",
     "strict_divergence_to_chart_dict",
     "strict_point_to_chart_dict",

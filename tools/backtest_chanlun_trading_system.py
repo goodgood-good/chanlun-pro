@@ -140,7 +140,6 @@ def _run_walk_forward(
     benchmarks = build_required_benchmarks(
         dataset,
         data_grade=data_grade,
-        frozen_artifact_root=PROJECT_ROOT / "audit/early_screening_backtest",
     )
     sector_indices: dict[str, str] = {}
     for membership in dataset.memberships:
@@ -177,9 +176,7 @@ def _run_walk_forward(
                 bootstrap_repetitions=args.bootstrap_repetitions,
             ),
             selected_parameters=(),
-            limitations=(
-                "native_sector_history_insufficient_for_walk_forward",
-            ),
+            limitations=("native_sector_history_insufficient_for_walk_forward",),
             benchmarks=benchmarks,
         )
     research = run_walk_forward_evaluation(
@@ -207,17 +204,25 @@ def _run_walk_forward(
 
 
 def _algorithm_hashes() -> tuple[tuple[str, str], ...]:
-    package_root = SOURCE_ROOT / "chanlun/decision_support/trading_system"
+    strategy_root = SOURCE_ROOT / "chanlun/decision_support/trading_system"
+    core_root = SOURCE_ROOT / "chanlun/core"
     relative_paths = {
         path.relative_to(PROJECT_ROOT).as_posix()
+        for package_root in (strategy_root, core_root)
         for path in package_root.rglob("*.py")
     }
     relative_paths.update(
         {
-            "src/chanlun/core/bs_branch.py",
-            "src/chanlun/core/bs2_branch.py",
-            "src/chanlun/core/cl.py",
+            "src/chanlun/decision_support/fingerprints.py",
+            "src/chanlun/exchange/kline_precision.py",
+            "src/chanlun/exchange/price_basis.py",
+            "src/chanlun/exchange/qmt_screening_sector_source.py",
             "tools/backtest_chanlun_trading_system.py",
+            "tools/backtest_qmt_fixed_year.py",
+            "tools/audit_qmt_prefix_invariance.py",
+            "tools/finalize_qmt_fixed_year.py",
+            "tools/finalize_qmt_pit_fixed_year.py",
+            "tools/snapshot_qmt_pit_metadata.py",
         }
     )
     output: list[tuple[str, str]] = []
@@ -293,9 +298,7 @@ def _build_report(
     else:
         evaluation = result.evaluation
         limitations = result.limitations
-    unavailable_reason = (
-        limitations[0] if limitations else "analysis_not_executed"
-    )
+    unavailable_reason = limitations[0] if limitations else "analysis_not_executed"
     return build_report(
         evidence=evidence,
         result=evaluation,
@@ -333,13 +336,16 @@ def write_report_atomic(path: Path, report: object) -> None:
     target = path.resolve()
     target.parent.mkdir(parents=True, exist_ok=True)
     temporary = target.with_suffix(target.suffix + ".tmp")
-    payload = json.dumps(
-        report,
-        ensure_ascii=False,
-        sort_keys=True,
-        indent=2,
-        default=_json_default,
-    ) + "\n"
+    payload = (
+        json.dumps(
+            report,
+            ensure_ascii=False,
+            sort_keys=True,
+            indent=2,
+            default=_json_default,
+        )
+        + "\n"
+    )
     with temporary.open("w", encoding="utf-8", newline="\n") as handle:
         handle.write(payload)
         handle.flush()
@@ -409,7 +415,6 @@ def _native_sector_capacity_preflight(
     benchmarks = build_required_benchmarks(
         dataset,
         data_grade="invalid",
-        frozen_artifact_root=PROJECT_ROOT / "audit/early_screening_backtest",
     )
     research = WalkForwardResearch(
         evaluation=empty_evaluation(

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta
 from decimal import Decimal
-import json
 
 from chanlun.decision_support.trading_system.backtest.benchmarks import (
     build_required_benchmarks,
@@ -72,11 +71,10 @@ def _benchmark_dataset() -> BacktestDataset:
     )
 
 
-def test_required_benchmarks_compute_point_in_time_equal_weight(tmp_path) -> None:
+def test_required_benchmarks_compute_point_in_time_equal_weight() -> None:
     rows = build_required_benchmarks(
         _benchmark_dataset(),
         data_grade="certified",
-        frozen_artifact_root=tmp_path,
     )
 
     assert tuple(row.benchmark_id for row in rows) == REQUIRED_BENCHMARK_IDS
@@ -84,33 +82,5 @@ def test_required_benchmarks_compute_point_in_time_equal_weight(tmp_path) -> Non
     assert equal_weight.data_grade == "certified"
     assert equal_weight.net_return == Decimal("0.05")
     assert equal_weight.max_drawdown == Decimal("0")
-    assert rows[1].data_grade == rows[2].data_grade == "invalid"
-
-
-def test_frozen_old_artifact_is_read_only_research_baseline(tmp_path) -> None:
-    artifact = tmp_path / "old.json"
-    artifact.write_text(
-        json.dumps(
-            {
-                "schema_version": "chanlun-early-screening-backtest/v10",
-                "result": {
-                    "metrics": {
-                        "total_return": "0.12",
-                        "max_drawdown": "0.08",
-                    }
-                },
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    rows = build_required_benchmarks(
-        _benchmark_dataset(),
-        data_grade="research_only",
-        frozen_artifact_root=tmp_path,
-    )
-
-    old = rows[0]
-    assert old.net_return == Decimal("0.12")
-    assert old.max_drawdown == Decimal("0.08")
-    assert old.data_grade == "research_only"
+    assert rows[0].data_grade == rows[1].data_grade == "invalid"
+    assert all("old" not in row.benchmark_id for row in rows)

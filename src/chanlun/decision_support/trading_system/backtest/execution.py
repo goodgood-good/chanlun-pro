@@ -66,6 +66,8 @@ class ExecutionPolicy:
     volatility_slippage_bps: Decimal = Decimal("20")
     minimum_commission: Decimal = Decimal("5")
     price_tick: Decimal = Decimal("0.01")
+    entry_risk_ttl_seconds: int = 300
+    require_observed_price_range: bool = False
     fee_schedule: tuple[FeeRateAt, ...] = DEFAULT_FEE_SCHEDULE
 
     def __post_init__(self) -> None:
@@ -82,6 +84,13 @@ class ExecutionPolicy:
             raise ValueError("execution costs cannot be negative")
         if self.price_tick <= 0:
             raise ValueError("price_tick must be positive")
+        if (
+            type(self.entry_risk_ttl_seconds) is not int
+            or self.entry_risk_ttl_seconds <= 0
+        ):
+            raise ValueError("entry_risk_ttl_seconds must be a positive integer")
+        if type(self.require_observed_price_range) is not bool:
+            raise ValueError("require_observed_price_range must be boolean")
         if not self.fee_schedule:
             raise ValueError("fee_schedule cannot be empty")
         effective_dates = tuple(row.effective_from for row in self.fee_schedule)
@@ -151,7 +160,10 @@ class FillDecision:
             order_id=order.order_id,
             filled=True,
             reason="filled",
-            filled_at=bar.opened_at,
+            # ``try_fill`` uses this minute's complete OHLCV for tradability,
+            # capacity and slippage.  That information is first available at
+            # the close, so the fill must never be timestamped at the open.
+            filled_at=bar.closed_at,
             execution_price=price,
             shares=order.shares,
             fees=fees,
@@ -238,9 +250,14 @@ def try_fill(
         return FillDecision.rejected(order, "status_session_mismatch")
     if not status.listed:
         return FillDecision.rejected(order, "not_listed")
-    if order.shares % status.lot_size != 0:
+    # A-share buys use board lots.  An existing odd-lot remainder may be sold
+    # in one order after a corporate action, so the buy constraint must not be
+    # copied to exits.
+    if order.side == "buy" and order.shares % status.lot_size != 0:
         return FillDecision.rejected(order, "lot_size_mismatch")
-    if bar.opened_at <= order.created_at:
+    # Signals are created at the source bar's close.  This execution model
+    # waits for a later bar to close before using that bar's OHLCV.
+    if bar.closed_at <= order.created_at:
         return FillDecision.rejected(order, "bar_not_after_trigger")
     if status.suspended or bar.volume <= 0:
         return FillDecision.rejected(order, "not_tradable")
@@ -250,15 +267,20 @@ def try_fill(
         return FillDecision.rejected(order, "limit_up_locked")
     if order.side == "sell" and bar.raw_high <= limit_down:
         return FillDecision.rejected(order, "limit_down_locked")
+    # The certified replay does not invent historical ST limit percentages.
+    # If the complete next minute only traded at one price, queue priority is
+    # unknowable and a fill is therefore forbidden regardless of the label.
+    if policy.require_observed_price_range and bar.raw_high == bar.raw_low:
+        return FillDecision.rejected(order, "one_price_bar_unfillable")
     if Decimal(order.shares) > bar.volume * policy.max_volume_participation:
         return FillDecision.rejected(order, "volume_capacity_exceeded")
 
     slippage = liquidity_slippage(order, bar, policy)
     if order.side == "buy":
-        adverse_price = bar.raw_open * (_ONE + slippage)
+        adverse_price = bar.raw_close * (_ONE + slippage)
         execution_price = min(adverse_price, bar.raw_high, limit_up)
     else:
-        adverse_price = bar.raw_open * (_ONE - slippage)
+        adverse_price = bar.raw_close * (_ONE - slippage)
         execution_price = max(adverse_price, bar.raw_low, limit_down)
     execution_price = _rounded_price(execution_price, policy.price_tick)
     try:

@@ -291,6 +291,69 @@ def test_native_gateway_ranks_real_sector_bars_and_emits_only_changed_keys() -> 
     ]
 
 
+def test_gateway_uses_qmt_gics3_component_frames_for_sector_assessment() -> None:
+    stock_exchange = RecordingExchange()
+    analyzer = RecordingAnalyzer()
+    frame_calls: list[dict[str, object]] = []
+
+    def qmt_sector_frame(**kwargs):
+        frame_calls.append(dict(kwargs))
+        frame = _frame(with_metadata=False)
+        frame.attrs.update(
+            structure_price_quantum="0.000001",
+            price_basis_revision="qmt-gics3-composite-v1",
+            price_basis_provider="qmt-gics3-composite",
+            price_basis_adjustment="none-stable-24-member-median-v2",
+        )
+        return frame
+
+    gateway = NativeTradingDataGateway(
+        exchange_provider=lambda: stock_exchange,
+        sector_exchange_provider=lambda: (_ for _ in ()).throw(
+            AssertionError("QMT sectors must not read TDX industry indexes")
+        ),
+        sector_frame_provider=qmt_sector_frame,
+        universe_provider=lambda _exchange: (
+            {"type": "stock_cn", "code": "SZ.000001", "name": "平安银行"},
+            {"type": "stock_cn", "code": "SH.600000", "name": "浦发银行"},
+        ),
+        sector_provider=lambda: {
+            "source": "qmt_gics3_components",
+            "sectors": [
+                {
+                    "sector_id": "qmt-gics3:bank",
+                    "name": "商业银行",
+                    "source_key": "GICS3商业银行",
+                    "member_codes": ["SZ.000001", "SH.600000"],
+                }
+            ],
+        },
+        analyzer=analyzer,
+        config=NativeTradingGatewayConfig(
+            request_bars_by_frequency=(("30m", 4), ("5m", 4), ("1m", 4)),
+            minimum_bars_by_frequency=(("30m", 2), ("5m", 2), ("1m", 2)),
+            minimum_sector_members=1,
+        ),
+    )
+
+    batch = gateway.native_sector_assessments(as_of=NOW)
+
+    assert batch.completed_count == batch.discovered_count == 1
+    assert batch.assessments[0].sector_id == "qmt-gics3:bank"
+    assert batch.assessments[0].eligible is True
+    assert gateway.members() == {
+        "qmt-gics3:bank": ("SH.600000", "SZ.000001")
+    }
+    assert [call["frequency"] for call in frame_calls] == ["30m", "5m"]
+    assert all(
+        call["members"] == ("SH.600000", "SZ.000001")
+        for call in frame_calls
+    )
+    assert {frame.attrs["price_basis_provider"] for frame in analyzer.frames} == {
+        "qmt-gics3-composite"
+    }
+
+
 def test_native_sector_loader_forces_none_and_attaches_metadata_before_analysis() -> None:
     analyzer = RecordingAnalyzer()
     gateway, analyzer, exchange = _gateway(
@@ -451,5 +514,5 @@ def test_native_gateway_rejects_synthetic_sector_catalog() -> None:
     gateway, _analyzer, _sector_exchange = _gateway()
     gateway._sector_provider = lambda: {"source": "synthetic", "sectors": []}
 
-    with pytest.raises(ValueError, match="native TDX"):
+    with pytest.raises(ValueError, match="QMT GICS3"):
         gateway.native_sector_assessments(as_of=NOW)

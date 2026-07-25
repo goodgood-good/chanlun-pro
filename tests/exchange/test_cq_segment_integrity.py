@@ -22,6 +22,7 @@ import pytz  # noqa: E402
 from longbridge.openapi import OpenApiException, Period, AdjustType  # noqa: E402
 
 from chanlun.exchange.exchange_cq import ExchangeChangQiao  # noqa: E402
+from chanlun.cl_utils.strict_chart_runtime import build_strict_chart_cd  # noqa: E402
 
 _TZ = pytz.timezone("Asia/Shanghai")
 
@@ -147,3 +148,33 @@ def test_klines_reached_origin_not_treated_as_hole(monkeypatch):
     ex = _klines_ex(monkeypatch, _seg)
     df = ex.klines("SH.600519", "5m", start_date="2023-11-01 00:00:00", end_date="2023-11-15 00:00:00")
     assert not df.attrs.get("fetch_incomplete")
+
+
+def test_us_klines_attach_strict_price_basis_metadata(monkeypatch):
+    def _seg(code, period, adjust, e, s, priority="interactive"):
+        return ([_candle(int(e.timestamp()))], "complete")
+
+    ex = _klines_ex(monkeypatch, _seg)
+    monkeypatch.setattr(ex, "_market_of_code", lambda code: "us")
+
+    df = ex.klines(
+        "TSLA.US",
+        "5m",
+        start_date="2023-11-01 00:00:00",
+        end_date="2023-11-15 00:00:00",
+    )
+
+    assert not df.empty
+    assert df.attrs["structure_price_quantum"] == "0.001"
+    assert df.attrs["price_basis_revision"].startswith("sha256:")
+    assert df.attrs["price_basis_provider"] == "longbridge"
+    assert df.attrs["price_basis_adjustment"] == "forward"
+
+    runtime = build_strict_chart_cd(
+        market="us",
+        code="TSLA.US",
+        frequency="5m",
+        frame=df,
+    )
+    assert runtime.error_code is None
+    assert runtime.cd is not None

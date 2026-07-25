@@ -21,6 +21,12 @@ class _FakeExchange:
 
 @pytest.fixture(autouse=True)
 def _reset_symbol_state():
+    # ``test_runtime_boundedness`` intentionally closes the process-wide symbol
+    # runtime.  These unit tests exercise the refresh primitives directly, so
+    # they must not inherit that lifecycle state from an earlier test module.
+    with stock_list._preload_handle_lock:
+        previous_runtime_closed = stock_list._symbol_runtime_closed
+        stock_list._symbol_runtime_closed = False
     with stock_list._stock_cache_lock:
         stock_list.stock_cache.clear()
         getattr(stock_list, "_symbol_states", {}).clear()
@@ -28,6 +34,8 @@ def _reset_symbol_state():
     with stock_list._stock_cache_lock:
         stock_list.stock_cache.clear()
         getattr(stock_list, "_symbol_states", {}).clear()
+    with stock_list._preload_handle_lock:
+        stock_list._symbol_runtime_closed = previous_runtime_closed
 
 
 def test_empty_preload_refresh_preserves_lkg_and_marks_degraded(monkeypatch):

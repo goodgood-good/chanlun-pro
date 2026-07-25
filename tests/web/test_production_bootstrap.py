@@ -9,7 +9,9 @@ from cl_app.services import stock_list
 from cl_app.services import chart_revalidate
 from cl_app.services import chart_cache
 from cl_app.services import constants
+from cl_app.services import trading_screening
 from cl_app.handlers import sse_stream
+from chanlun import config as chanlun_config
 from chanlun.persistence import file_db
 from chanlun.signal_monitor import scheduler as signal_scheduler
 from chanlun.recursive_bt.monitor import app_monitor
@@ -17,6 +19,11 @@ from chanlun.recursive_bt.monitor import app_monitor
 
 def test_scheduler_enabled_factory_runs_the_production_lifecycle(monkeypatch):
     calls = []
+    monkeypatch.setattr(
+        chanlun_config,
+        "RECURSIVE_MONITOR_CONFIG",
+        {"enabled": True},
+    )
 
     class _Handle:
         def __init__(self, name):
@@ -102,6 +109,16 @@ def test_scheduler_enabled_factory_runs_the_production_lifecycle(monkeypatch):
     )
     monkeypatch.setattr(stock_list, "shutdown_symbol_preload", lambda **_kwargs: None)
     monkeypatch.setattr(
+        trading_screening.TradingScreeningService,
+        "start_background",
+        lambda _self: calls.append(("trading-screening", None)),
+    )
+    monkeypatch.setattr(
+        trading_screening.TradingScreeningService,
+        "shutdown_background",
+        lambda _self, **_kwargs: calls.append(("stop-trading-screening", None)),
+    )
+    monkeypatch.setattr(
         alert_tasks.AlertTasks,
         "run",
         lambda _self: calls.append(("alerts", None)) or True,
@@ -123,6 +140,7 @@ def test_scheduler_enabled_factory_runs_the_production_lifecycle(monkeypatch):
             "TESTING": True,
             "VALIDATE_WEB_SECURITY": False,
             "WTF_CSRF_ENABLED": False,
+            "TRADING_SCREENING_BACKGROUND_ENABLED": True,
         },
     )
     try:
@@ -137,6 +155,7 @@ def test_scheduler_enabled_factory_runs_the_production_lifecycle(monkeypatch):
             ("ticks", "a"),
             ("revalidation", None),
             ("sse", None),
+            ("trading-screening", None),
             ("alerts", None),
             ("signals", None),
             ("recursive", None),
@@ -148,6 +167,7 @@ def test_scheduler_enabled_factory_runs_the_production_lifecycle(monkeypatch):
     assert ("stop-metadata", None) in calls
     assert ("stop-ticks", None) in calls
     assert ("stop-sse", None) in calls
+    assert ("stop-trading-screening", None) in calls
     assert ("stop-revalidation", None) in calls
     assert ("stop-chart-cache", None) in calls
     assert ("stop-pickle-writes", None) in calls
@@ -157,6 +177,53 @@ def test_scheduler_enabled_factory_runs_the_production_lifecycle(monkeypatch):
     before = list(calls)
     app.extensions["shutdown_runtime_services"]()
     assert calls == before
+
+
+def test_inactive_app_shutdown_does_not_stop_process_shared_services(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        constants,
+        "shutdown_market_metadata_loaders",
+        lambda **_kwargs: calls.append("metadata"),
+    )
+    monkeypatch.setattr(
+        chart_cache,
+        "shutdown_chart_cache_runtime",
+        lambda **_kwargs: calls.append("chart-cache"),
+    )
+    monkeypatch.setattr(
+        file_db,
+        "shutdown_pickle_writes",
+        lambda **_kwargs: calls.append("pickle"),
+    )
+    monkeypatch.setattr(
+        stock_list,
+        "shutdown_symbol_preload",
+        lambda **_kwargs: calls.append("symbols"),
+    )
+    monkeypatch.setattr(
+        chart_revalidate,
+        "shutdown_revalidation",
+        lambda **_kwargs: calls.append("revalidation"),
+    )
+    monkeypatch.setattr(
+        sse_stream,
+        "shutdown_sse_runtime",
+        lambda: calls.append("sse"),
+    )
+
+    app = create_app(
+        test_config={
+            "TESTING": True,
+            "VALIDATE_WEB_SECURITY": False,
+            "WTF_CSRF_ENABLED": False,
+            "SCHEDULER_ENABLED": False,
+        }
+    )
+    app.extensions["shutdown_runtime_services"]()
+
+    assert calls == []
+    assert app.extensions["runtime_status"]()["status"] == "stopped"
 
 
 def test_runtime_cleanup_continues_after_one_component_fails(monkeypatch):

@@ -3,6 +3,7 @@
 线段计算模块 v2
 基于笔列表识别线段，逻辑简洁清晰。
 """
+from dataclasses import dataclass
 from typing import List, Optional
 
 from chanlun.core.types import BI, XD
@@ -15,6 +16,19 @@ _GAP_CONFIRMATION_PENDING = object()
 _TYPE2_CONFIRMED = "confirmed"
 _TYPE2_PENDING = "pending"
 _TYPE2_INVALIDATED = "invalidated"
+
+
+@dataclass(frozen=True)
+class _GapConfirmationInvalidated:
+    """A pending type-2 gap was invalidated by a later locked BI.
+
+    The invalidating BI is causal evidence even when the segment is
+    subsequently recognised through the ordinary no-gap branch.  Dropping
+    this timestamp used to let a later prefix create an XD whose ``locked_at``
+    was back-dated to before that XD was observable.
+    """
+
+    witnessed_at: object
 
 
 def _bi_label(bi: BI) -> str:
@@ -301,6 +315,15 @@ class XdCalculator:
                 reverse_end_hint = None
             else:
                 if not _overlap(all_bis[pos], all_bis[pos + 2]):
+                    # Once at least one segment has been assembled, ``pos`` is
+                    # the first stroke after the preceding segment endpoint.
+                    # A missing three-stroke overlap means that the opposite
+                    # segment is still forming; it does not permit skipping
+                    # ahead to a later stroke.  Skipping used to produce a
+                    # disconnected, same-direction provisional tail.
+                    if segs:
+                        pending_tail = (pos, all_bis[pos].type)
+                        break
                     pos += 1
                     continue
                 seg_end = pos + 2
@@ -308,6 +331,12 @@ class XdCalculator:
             seg_type = all_bis[pos].type
             seg_start = pos
             check = seg_end + 1
+            # Every BI read while choosing between extension, absorption and
+            # termination is part of the causal witness.  Keep the latest
+            # such lock time so a later branch resolution can never be
+            # back-dated to an earlier geometric witness.
+            decision_floor = None
+            decision_is_formal = True
 
             # 计算 seg_high/seg_low 的初始值
             # 注意：一个段确定方向后，"反方向"那一边是固定值（段起点价），
@@ -343,6 +372,15 @@ class XdCalculator:
                 # high/low 恒落在 seg_anchor 一侧，用它判延伸将永不成立（死分支）。
                 # while 条件已保证 check+1 < len(all_bis)，无需再越界检查。
                 next_same = all_bis[check + 1]
+                next_same_locked_at = getattr(next_same, "locked_at", None)
+                if next_same_locked_at is None:
+                    decision_is_formal = False
+                else:
+                    decision_floor = (
+                        next_same_locked_at
+                        if decision_floor is None
+                        else max(decision_floor, next_same_locked_at)
+                    )
 
                 # Step 1: 延伸
                 # 延伸吃掉 [check, check+1] 两根笔，其中 check 是反向笔(cs)、check+1 是同向笔。
@@ -367,6 +405,13 @@ class XdCalculator:
                 end_result = self._try_end(all_bis, seg_start, seg_end, seg_type,
                                            seg_high, seg_low, check,
                                            seg_cs_bis_cache=seg_cs_bis)
+                if isinstance(end_result, _GapConfirmationInvalidated):
+                    decision_floor = (
+                        end_result.witnessed_at
+                        if decision_floor is None
+                        else max(decision_floor, end_result.witnessed_at)
+                    )
+                    end_result = None
                 if end_result is _GAP_CONFIRMATION_PENDING:
                     # 原文第二种情况一旦出现缺口，就必须等待第二特征序列
                     # 分型完成。不能继续吸收后把同一破坏改判成“无缺口”，
@@ -376,6 +421,10 @@ class XdCalculator:
                     break
                 if end_result is not None:
                     real_end, next_start, next_end, formed_at = end_result
+                    if not decision_is_formal:
+                        formed_at = None
+                    elif formed_at is not None and decision_floor is not None:
+                        formed_at = max(formed_at, decision_floor)
                     if segs:
                         previous_formed_at = segs[-1][3]
                         formed_at = (
@@ -407,6 +456,10 @@ class XdCalculator:
                 r34 = self._try_end_r34(all_bis, seg_start, seg_type, seg_high, seg_low, check)
                 if r34 is not None:
                     real_end, next_start, next_end, formed_at = r34
+                    if not decision_is_formal:
+                        formed_at = None
+                    elif formed_at is not None and decision_floor is not None:
+                        formed_at = max(formed_at, decision_floor)
                     if segs:
                         previous_formed_at = segs[-1][3]
                         formed_at = (
@@ -637,6 +690,15 @@ class XdCalculator:
                 locked_at=locked_at,
             )
         if pending_tail is not None:
+            if segs:
+                # Provisional units still participate in strict structure
+                # previews, so they must preserve the same continuity and
+                # alternating-direction contract as locked units.  Keep this
+                # normalization as a defensive boundary for every producer of
+                # ``pending_tail``.
+                expected_start = segs[-1][1] + 1
+                expected_type = "down" if segs[-1][2] == "up" else "up"
+                pending_tail = (expected_start, expected_type)
             self._emit_pending(all_bis, pending_tail[0], pending_tail[1])
         elif segs:
             # 内层被 _try_end 命中直至数据末尾:在最后段之后补末段未完成线段
@@ -783,7 +845,12 @@ class XdCalculator:
                 return _GAP_CONFIRMATION_PENDING
             if type2_status == _TYPE2_INVALIDATED:
                 _log.debug(lambda:"    _try_end: 第二特征序列被原段新极值否定 → 返回None")
-                return None
+                if type2_witness_idx is None:
+                    raise ValueError("type-2 invalidation requires a causal witness")
+                witnessed_at = all_bis[type2_witness_idx].locked_at
+                if witnessed_at is None:
+                    raise ValueError("type-2 invalidation witness must be locked")
+                return _GapConfirmationInvalidated(witnessed_at)
             _log.debug(lambda:"    _try_end: _check_type2成功")
         else:
             type2_witness_idx = None
@@ -946,11 +1013,11 @@ class XdCalculator:
                 # 必须立即停止扫描；反向段是否成立由已收集的 cs2_elems 决定。
                 if is_strict_new_extreme:
                     _log.debug(lambda:f"      _check_type2: {_bi_label(bi)} 创新极值且已收进 cs2_elems → 停止扫描")
-                    return _TYPE2_INVALIDATED, None
+                    return _TYPE2_INVALIDATED, i
             elif is_strict_new_extreme:
                 # 非 cs2 笔但创了新极值（兜底）：原段延伸，反向段不成立
                 _log.debug(lambda:f"      _check_type2: {_bi_label(bi)} 非CS笔但创新极值 → 原线段延伸,False")
-                return _TYPE2_INVALIDATED, None
+                return _TYPE2_INVALIDATED, i
             # 注：原此处对每根非 cs2 笔重复 find_frac2(cs2_elems) 的 elif 分支已删除——
             # 分型只可能在新元素加入/合并时产生新结构，非 cs2 笔不会改变 cs2_elems，
             # 重复检查纯属冗余且产生大量噪音日志。

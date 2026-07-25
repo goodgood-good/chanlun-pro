@@ -24,7 +24,14 @@ from chanlun.fun import str_to_datetime
 from chanlun.tools.log_util import LogUtil
 from chanlun.exchange.lb_quota_tracker import LbQuotaTracker
 from chanlun.exchange.lb_priority import lb_low_priority, _lb_call_priority  # noqa: F401  (lb_low_priority 供 web 层 prewarm 标记)
-from chanlun.exchange.kline_precision import normalize_kline_precision
+from chanlun.exchange.kline_precision import (
+    normalize_kline_precision,
+    resolve_structure_price_quantum,
+)
+from chanlun.exchange.price_basis import (
+    attach_price_basis_metadata,
+    build_provider_price_basis_metadata,
+)
 
 # 统一时区设置
 __tz = pytz.timezone("Asia/Shanghai")
@@ -1082,7 +1089,18 @@ class ExchangeChangQiao(Exchange):
             df = df.sort_values(by="date").reset_index(drop=True)
 
             df = df[["date", "frequency", "code", "open", "high", "low", "close", "volume"]]
-            df = normalize_kline_precision(df, self._market_of_code(code), code)
+            market = self._market_of_code(code)
+            df = normalize_kline_precision(df, market, code)
+            quantum = resolve_structure_price_quantum(market, code)
+            if quantum is not None:
+                metadata = build_provider_price_basis_metadata(
+                    provider="longbridge",
+                    market=market,
+                    code=code,
+                    adjustment="forward",
+                    structure_price_quantum=quantum,
+                )
+                df = attach_price_basis_metadata(df, metadata)
             return df
 
         except Exception as e:

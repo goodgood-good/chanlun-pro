@@ -68,6 +68,7 @@ def build_scan_plan(
     *,
     changed_bars: tuple[BarKey, ...],
     sector_members: Mapping[str, tuple[str, ...]],
+    known_sector_ids: tuple[str, ...] = (),
     active_watchlist: tuple[str, ...],
     previous: ScanCursor,
     holdings: tuple[str, ...] = (),
@@ -76,6 +77,7 @@ def build_scan_plan(
 ) -> ScanPlan:
     sectors: set[str] = set()
     scheduled: dict[str, set[str]] = {}
+    sector_ids = set(known_sector_ids).union(sector_members)
 
     def schedule(code: str, frequencies: tuple[str, ...]) -> None:
         scheduled.setdefault(code, set()).update(frequencies)
@@ -84,7 +86,7 @@ def build_scan_plan(
         set(changed_bars),
         key=lambda item: (item.closed_at, item.code, item.frequency),
     ):
-        if bar.code in sector_members or bar.code.startswith("TDX.88"):
+        if bar.code in sector_ids or bar.code.startswith("TDX.88"):
             sectors.add(bar.code)
             for member in sector_members.get(bar.code, ()):
                 schedule(member, ("1m", "5m", "30m"))

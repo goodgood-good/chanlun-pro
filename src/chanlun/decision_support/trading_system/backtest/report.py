@@ -38,7 +38,6 @@ REQUIRED_ABLATION_IDS = (
     "plus_portfolio_risk",
 )
 REQUIRED_BENCHMARK_IDS = (
-    "frozen_old_artifact",
     "csi_300",
     "csi_500",
     "eligible_universe_equal_weight",
@@ -179,9 +178,7 @@ def _metrics_document(metrics: PerformanceMetrics) -> dict[str, object]:
         "worst_week": _optional_decimal(metrics.worst_week),
         "worst_month": _optional_decimal(metrics.worst_month),
         "value_at_risk_95": _optional_decimal(metrics.value_at_risk_95),
-        "expected_shortfall_95": _optional_decimal(
-            metrics.expected_shortfall_95
-        ),
+        "expected_shortfall_95": _optional_decimal(metrics.expected_shortfall_95),
         "win_rate": _optional_decimal(metrics.win_rate),
         "payoff_ratio": _optional_decimal(metrics.payoff_ratio),
         "profit_factor": _optional_decimal(metrics.profit_factor),
@@ -189,9 +186,7 @@ def _metrics_document(metrics: PerformanceMetrics) -> dict[str, object]:
         "exposure_ratio": _decimal(metrics.exposure_ratio),
         "turnover": _decimal(metrics.turnover),
         "total_cost": _decimal(metrics.total_cost),
-        "cost_to_gross_profit": _optional_decimal(
-            metrics.cost_to_gross_profit
-        ),
+        "cost_to_gross_profit": _optional_decimal(metrics.cost_to_gross_profit),
         "annualized_return": _optional_decimal(metrics.annualized_return),
         "sharpe": _optional_decimal(metrics.sharpe),
         "sortino": _optional_decimal(metrics.sortino),
@@ -288,23 +283,31 @@ def build_report(
     algorithm_hashes: tuple[tuple[str, str], ...] = (),
     limitations: tuple[str, ...] = (),
     requested_range: tuple[date, date] | None = None,
+    effective_range: tuple[date, date] | None = None,
+    evaluation_mode: str = "walk_forward",
+    sector_price_source: str = "tdx_native_880_index",
+    universe_summary: dict[str, object] | None = None,
     data_source_hashes: tuple[tuple[str, str], ...] = (),
 ) -> dict[str, object]:
     generated = normalize_datetime(generated_at, "generated_at")
     hash_names = tuple(name for name, _digest in algorithm_hashes)
     if len(hash_names) != len(set(hash_names)) or any(
-        _HASH_RE.fullmatch(digest) is None
-        for _name, digest in algorithm_hashes
+        _HASH_RE.fullmatch(digest) is None for _name, digest in algorithm_hashes
     ):
         raise ValueError("algorithm hashes must be unique sha256 values")
     data_hash_names = tuple(name for name, _digest in data_source_hashes)
     if len(data_hash_names) != len(set(data_hash_names)) or any(
-        _HASH_RE.fullmatch(digest) is None
-        for _name, digest in data_source_hashes
+        _HASH_RE.fullmatch(digest) is None for _name, digest in data_source_hashes
     ):
         raise ValueError("data source hashes must be unique sha256 values")
     if requested_range is not None and requested_range[0] > requested_range[1]:
         raise ValueError("requested range start cannot follow end")
+    if effective_range is not None and effective_range[0] > effective_range[1]:
+        raise ValueError("effective range start cannot follow end")
+    if evaluation_mode not in {"walk_forward", "fixed_policy_one_year"}:
+        raise ValueError("unsupported evaluation mode")
+    if not isinstance(sector_price_source, str) or not sector_price_source.strip():
+        raise ValueError("sector price source is required")
     metrics = calculate_metrics(result.aggregate_run)
     adequacy = sample_adequacy(
         result.aggregate_run,
@@ -336,14 +339,12 @@ def build_report(
         if row_id in benchmark_by_id
     )
     analyses_complete = (
-        tuple(row.ablation_id for row in ordered_ablations)
-        == REQUIRED_ABLATION_IDS
+        tuple(row.ablation_id for row in ordered_ablations) == REQUIRED_ABLATION_IDS
         and tuple(row.benchmark_id for row in ordered_benchmarks)
         == REQUIRED_BENCHMARK_IDS
     )
     ablation_evidence_available = all(
-        row.completed and row.data_grade != "invalid"
-        for row in ordered_ablations
+        row.completed and row.data_grade != "invalid" for row in ordered_ablations
     )
     benchmark_evidence_available = all(
         row.data_grade != "invalid" for row in ordered_benchmarks
@@ -351,9 +352,7 @@ def build_report(
     selected_first_center_values: list[bool] = []
     selected_parameter_contract_complete = True
     for window in result.walk_forward_windows:
-        selected = dict(window.selected_parameters).get(
-            "first_center_three_buy_only"
-        )
+        selected = dict(window.selected_parameters).get("first_center_three_buy_only")
         if not isinstance(selected, bool):
             selected_parameter_contract_complete = False
             continue
@@ -368,10 +367,9 @@ def build_report(
         for limitation in limitations
         if limitation in LIVE_READY_BLOCKING_LIMITATIONS
     )
-    concentration_passed = (
-        metrics.max_symbol_trade_concentration <= Decimal("0.20")
-        and metrics.max_sector_trade_concentration <= Decimal("0.20")
-    )
+    concentration_passed = metrics.max_symbol_trade_concentration <= Decimal(
+        "0.20"
+    ) and metrics.max_sector_trade_concentration <= Decimal("0.20")
     failed_conditions: list[str] = []
     if evidence.grade != "certified":
         failed_conditions.append("data_evidence")
@@ -391,7 +389,7 @@ def build_report(
         failed_conditions.append("ablation_evidence")
     if analyses_complete and not benchmark_evidence_available:
         failed_conditions.append("benchmark_evidence")
-    if not result.walk_forward_windows:
+    if evaluation_mode == "walk_forward" and not result.walk_forward_windows:
         failed_conditions.append("walk_forward_evidence")
     if blocking_limitations:
         failed_conditions.append("execution_continuity")
@@ -445,6 +443,7 @@ def build_report(
         "read_only": True,
         "historical": True,
         "no_order_execution": True,
+        "evaluation_mode": evaluation_mode,
         "algorithm_hashes": [
             {"source": name, "sha256": digest}
             for name, digest in sorted(algorithm_hashes)
@@ -457,23 +456,28 @@ def build_report(
                 "end": requested_range[1].isoformat(),
             }
         ),
+        "effective_range": (
+            None
+            if effective_range is None
+            else {
+                "start": effective_range[0].isoformat(),
+                "end": effective_range[1].isoformat(),
+            }
+        ),
+        "universe": dict(universe_summary or {}),
         "data_source_hashes": dict(sorted(data_source_hashes)),
         "data_evidence": {
             "grade": evidence.grade,
             "failures": list(evidence.failures),
             "warnings": list(evidence.warnings),
-            "coverage": {
-                name: _decimal(value) for name, value in evidence.coverage
-            },
+            "coverage": {name: _decimal(value) for name, value in evidence.coverage},
         },
         "execution_contract": {
             "context_frequency": "30m",
             "setup_frequency": "5m",
             "trigger_frequency": "1m",
             "point_classes_analyzed_independently": True,
-            "max_five_minute_setup_age_seconds": (
-                MAX_FIVE_MINUTE_SETUP_AGE_SECONDS
-            ),
+            "max_five_minute_setup_age_seconds": (MAX_FIVE_MINUTE_SETUP_AGE_SECONDS),
             "first_center_three_buy_only": first_center_three_buy_only,
             "first_center_three_buy_mode": (
                 "walk_forward_selected"
@@ -481,9 +485,14 @@ def build_report(
                 else "policy_default"
             ),
             "first_center_three_buy_selected_values": selected_first_center_values,
-            "sector_price_source": "tdx_native_880_index",
+            "sector_price_source": sector_price_source,
             "sector_price_change_gate": False,
             "next_tradable_minute_fill": True,
+            "entry_risk_ttl_seconds": 300,
+            "entry_liquidity_resize": "one_shot_to_10pct_minute_volume",
+            "exit_liquidity_execution": (
+                "partial_up_to_10pct_minute_volume_until_complete"
+            ),
             "t_plus_one": True,
             "intraday_structural_stop": True,
         },

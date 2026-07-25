@@ -629,7 +629,79 @@ _CHART_SHAPE_FIELDS = (
 )
 
 
-def _decide_full_snapshot(first_data_request, to_ts: int, bar_times, source_is_full: bool) -> bool:
+_CALENDAR_FREQUENCY_ALIASES = {
+    "D": "d",
+    "1D": "d",
+    "2D": "2d",
+    "W": "w",
+    "1W": "w",
+    "M": "m",
+    "1M": "m",
+    "3M": "q",
+    "12M": "y",
+}
+
+
+def _calendar_frequency(frequency) -> str:
+    value = str(frequency or "")
+    if value in _CALENDAR_FREQUENCY_ALIASES:
+        return _CALENDAR_FREQUENCY_ALIASES[value]
+    if value in {"d", "2d", "w", "m", "q", "y"}:
+        return value
+    return ""
+
+
+def chart_bar_time_coordinate(timestamp: int, frequency: str) -> int:
+    """Map a raw market-close timestamp to TradingView's calendar coordinate.
+
+    Intraday timestamps retain their exact source instant.  Calendar bars use
+    UTC period anchors for chart geometry, while the raw close remains the
+    authoritative identity timestamp carried by ``bars_result.times``.
+    """
+
+    source_ts = int(timestamp)
+    calendar_frequency = _calendar_frequency(frequency)
+    if not calendar_frequency:
+        return source_ts
+
+    source_dt = datetime.datetime.fromtimestamp(
+        source_ts,
+        tz=datetime.timezone.utc,
+    )
+    year = source_dt.year
+    month = source_dt.month
+    day = source_dt.day
+    if calendar_frequency == "w":
+        source_dt -= datetime.timedelta(days=source_dt.weekday())
+        year, month, day = source_dt.year, source_dt.month, source_dt.day
+    elif calendar_frequency == "m":
+        day = 1
+    elif calendar_frequency == "q":
+        month = ((month - 1) // 3) * 3 + 1
+        day = 1
+    elif calendar_frequency == "y":
+        month = 1
+        day = 1
+
+    return int(datetime.datetime(
+        year,
+        month,
+        day,
+        tzinfo=datetime.timezone.utc,
+    ).timestamp())
+
+
+def chart_bar_time_coordinates(bar_times, frequency: str) -> list[int]:
+    return [chart_bar_time_coordinate(ts, frequency) for ts in (bar_times or [])]
+
+
+def _decide_full_snapshot(
+    first_data_request,
+    to_ts: int,
+    bar_times,
+    source_is_full: bool,
+    frequency: str | None = None,
+) -> bool:
     """D4-F1: /tv/history 轮询响应是否置 full_snapshot=True(前端整体替换形态清幽灵)。
 
     仅当 (1)非首帧(update 路径, first_data_request=='false') (2)请求覆盖最近窗口(to_ts>=末根 bar,
@@ -638,13 +710,15 @@ def _decide_full_snapshot(first_data_request, to_ts: int, bar_times, source_is_f
     """
     if first_data_request != "false" or not bar_times or not source_is_full:
         return False
-    return to_ts == 0 or to_ts >= bar_times[-1]
+    latest_coordinate = chart_bar_time_coordinate(bar_times[-1], frequency or "")
+    return to_ts == 0 or to_ts >= latest_coordinate
 
 
 def strict_structure_history_fields(
     chart_data: dict,
     *,
     authoritative: bool,
+    expected_source_closed_at: int | None = None,
 ) -> dict:
     """Return the three-state atomic strict-structure history contract."""
 
@@ -655,9 +729,17 @@ def strict_structure_history_fields(
         strict = chart_data.get("strict_structure")
         if (
             not isinstance(strict, dict)
-            or strict.get("schema") != "chanlun-chart-structure/v4"
+            or strict.get("schema") != "chanlun-chart-structure/v5"
         ):
-            raise ValueError("replace mode requires strict chart schema v4")
+            raise ValueError("replace mode requires strict chart schema v5")
+        if (
+            expected_source_closed_at is not None
+            and strict.get("source_closed_at") != expected_source_closed_at
+        ):
+            return {
+                "strict_structure_mode": "unavailable",
+                "strict_structure_error": {"code": "strict_context_mismatch"},
+            }
         return {
             "strict_structure_mode": "replace",
             "strict_structure": strict,
@@ -686,7 +768,12 @@ def _miss_source_is_full(is_range_request, cache_miss_reason, cd_is_none) -> boo
     return (not is_range_request) or (cache_miss_reason == "cache_empty") or bool(cd_is_none)
 
 
-def filter_shapes_in_window(shapes, from_ts: int, to_ts: int) -> list:
+def filter_shapes_in_window(
+    shapes,
+    from_ts: int,
+    to_ts: int,
+    frequency: str | None = None,
+) -> list:
     """按 [from_ts, to_ts) 窗口过滤形态 (笔/段/中枢/分型/背驰/买卖点)。
 
     多点形态 (笔/段/中枢): 与 [from_ts, to_ts) 有重叠即保留 (起点早于 to_ts 且
@@ -707,18 +794,29 @@ def filter_shapes_in_window(shapes, from_ts: int, to_ts: int) -> list:
             continue
         pts = shape["points"]
         if isinstance(pts, list) and len(pts) > 0:
-            t_start = pts[0].get("time", 0)
-            t_end = pts[-1].get("time", 0)
+            t_start = chart_bar_time_coordinate(
+                pts[0].get("time", 0), frequency or ""
+            )
+            t_end = chart_bar_time_coordinate(
+                pts[-1].get("time", 0), frequency or ""
+            )
             if t_end >= from_ts and (to_ts == 0 or t_start < to_ts):
                 res.append(shape)
         elif isinstance(pts, dict):
-            t = pts.get("time", 0)
+            t = chart_bar_time_coordinate(
+                pts.get("time", 0), frequency or ""
+            )
             if t >= from_ts and (to_ts == 0 or t < to_ts):
                 res.append(shape)
     return res
 
 
-def slice_chart_data_to_window(chart_data: dict, from_ts: int, to_ts: int) -> dict:
+def slice_chart_data_to_window(
+    chart_data: dict,
+    from_ts: int,
+    to_ts: int,
+    frequency: str | None = None,
+) -> dict:
     """把 chart_data 按 [from_ts, to_ts) 切窗口 (P5 second step, 抽自 tv_history)。
 
     bar_times 用 ``bisect_left`` 找 start_idx/end_idx (左闭右开, 与 TV UDF 一致);
@@ -736,9 +834,14 @@ def slice_chart_data_to_window(chart_data: dict, from_ts: int, to_ts: int) -> di
     if not bar_times:
         return dict(chart_data)
 
-    start_idx = bisect.bisect_left(bar_times, from_ts)
+    comparison_times = chart_bar_time_coordinates(bar_times, frequency or "")
+    start_idx = bisect.bisect_left(comparison_times, from_ts)
     # bisect_left 让 to_ts 排他上界, 避免向左滚动返回相同 K 线
-    end_idx = bisect.bisect_left(bar_times, to_ts) if to_ts > 0 else len(bar_times)
+    end_idx = (
+        bisect.bisect_left(comparison_times, to_ts)
+        if to_ts > 0
+        else len(bar_times)
+    )
 
     sliced: dict = {}
     for field in _CHART_ARRAY_FIELDS:
@@ -746,7 +849,7 @@ def slice_chart_data_to_window(chart_data: dict, from_ts: int, to_ts: int) -> di
         sliced[field] = arr[start_idx:end_idx] if arr else []
     for field in _CHART_SHAPE_FIELDS:
         sliced[field] = filter_shapes_in_window(
-            chart_data.get(field, []) or [], from_ts, to_ts
+            chart_data.get(field, []) or [], from_ts, to_ts, frequency
         )
     # 区间套 / 高级中枢是嵌套结构(不在 SHAPE_FIELDS),属「全局视角」跨窗口仍应可见,整体透传。
     for field in ("interval_nest", "higher_zs"):
@@ -765,13 +868,19 @@ def slice_chart_data_to_window(chart_data: dict, from_ts: int, to_ts: int) -> di
             _lv2 = dict(_lv)
             for _k in ("mmds", "bcs"):
                 if _k in _lv2:
-                    _lv2[_k] = filter_shapes_in_window(_lv2[_k] or [], from_ts, to_ts)
+                    _lv2[_k] = filter_shapes_in_window(
+                        _lv2[_k] or [], from_ts, to_ts, frequency
+                    )
             _rl.append(_lv2)
         sliced["recursive_levels"] = _rl
     return sliced
 
 
-def trim_future_bars(chart_data: dict, to_ts: int) -> dict:
+def trim_future_bars(
+    chart_data: dict,
+    to_ts: int,
+    frequency: str | None = None,
+) -> dict:
     """裁剪 chart_data 中时间戳 > to_ts 的"未来" bar (P5 second step)。
 
     交易所偶尔返回尚未完成的下一根 K 线 (timestamp > 当前时间), TradingView
@@ -789,9 +898,10 @@ def trim_future_bars(chart_data: dict, to_ts: int) -> dict:
     if to_ts <= 0:
         return dict(chart_data)
     times = chart_data.get("t") or []
-    if not times or times[-1] <= to_ts:
+    comparison_times = chart_bar_time_coordinates(times, frequency or "")
+    if not times or comparison_times[-1] <= to_ts:
         return dict(chart_data)
-    resp_end = bisect.bisect_right(times, to_ts)
+    resp_end = bisect.bisect_right(comparison_times, to_ts)
     if resp_end >= len(times):
         return dict(chart_data)
 

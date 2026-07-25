@@ -1102,12 +1102,13 @@ def tv_history():
         # low2high 不自愈)。仅"最近窗口权威 + 源全量快照"时带全量形态 + full_snapshot=True, 前端
         # 已有整体替换分支清幽灵、bars/MACD 仍走增量不缩图; 向左滚动/窄窗口不置(防丢窗外合法形态)。
         # D4-F1/F2: _src_is_full 已在 _calc_lock 内与 cl_chart_data 同源捕获(消 TOCTOU), 此处不重取 entry。
-        _emit_full_snapshot = _decide_full_snapshot(firstDataRequest, _to, bar_times, _src_is_full)
-        _strict_history_fields = strict_structure_history_fields(
-            cl_chart_data,
-            authoritative=(
-                firstDataRequest == "true" or _emit_full_snapshot
-            ),
+        _strict_source_data = cl_chart_data
+        _emit_full_snapshot = _decide_full_snapshot(
+            firstDataRequest,
+            _to,
+            bar_times,
+            _src_is_full,
+            frequency=frequency,
         )
         _full_shape_snapshot = None
         if _emit_full_snapshot:
@@ -1127,7 +1128,12 @@ def tv_history():
 
         if firstDataRequest == "false" and len(bar_times) > 0:
             try:
-                cl_chart_data = slice_chart_data_to_window(cl_chart_data, _from, _to)
+                cl_chart_data = slice_chart_data_to_window(
+                    cl_chart_data,
+                    _from,
+                    _to,
+                    frequency=frequency,
+                )
             except Exception as e:
                 LogUtil.error(f"[tv_history] Slice data failed: {e}")
 
@@ -1136,7 +1142,11 @@ def tv_history():
             return {"s": "no_data"}
 
         _resp_times = cl_chart_data.get("t", []) or []
-        cl_chart_data = trim_future_bars(cl_chart_data, _to)
+        cl_chart_data = trim_future_bars(
+            cl_chart_data,
+            _to,
+            frequency=frequency,
+        )
         if _full_shape_snapshot is not None:
             # D4-F1: slice 已把形态切窄, 换回全量供前端整体替换清幽灵(bars 保持窗口化不缩图)。
             for _k, _v in _full_shape_snapshot.items():
@@ -1147,6 +1157,19 @@ def tv_history():
             LogUtil.warning(
                 f"[tv_history] Trimmed {len(_resp_times) - len(_resp_t)} future bar(s) beyond to={_to}"
             )
+        if not _resp_t:
+            return {"s": "no_data"}
+
+        # 严格快照按原始收盘时刻做身份校验；日/周/月仅在裁剪与图表坐标层
+        # 使用周期锚点。把协议字段放到最终窗口确定之后，避免响应 t 已裁短而
+        # strict_structure.source_closed_at 仍指向被裁掉的末根。
+        _strict_history_fields = strict_structure_history_fields(
+            _strict_source_data,
+            authoritative=(
+                firstDataRequest == "true" or _emit_full_snapshot
+            ),
+            expected_source_closed_at=_resp_t[-1],
+        )
 
         LogUtil.debug(
             f"[DataVerify][Backend] symbol={symbol} resolution={resolution} "

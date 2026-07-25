@@ -190,6 +190,7 @@ button:focus-visible, input:focus-visible, a:focus-visible, summary:focus-visibl
   background: transparent;
 }
 .es-sector-row:hover { background: rgba(255, 255, 255, 0.025); }
+.es-sector-row.is-shortlisted:not(.is-active) { background: rgba(34, 197, 94, 0.055); box-shadow: inset 3px 0 rgba(34, 197, 94, 0.6); }
 .es-sector-row.is-active { background: linear-gradient(90deg, var(--es-green-soft), transparent); box-shadow: inset 3px 0 var(--es-green); }
 .es-sector-row.is-blocked { box-shadow: inset 3px 0 var(--es-red); }
 .es-sector-row__heading { display: flex; min-width: 0; align-items: baseline; justify-content: space-between; gap: 8px; }

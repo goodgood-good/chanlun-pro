@@ -51,14 +51,15 @@ def order(
 
 
 def test_signal_fills_only_on_a_later_bar() -> None:
+    signal_bar = minute_bar(opened_at=BAR_OPEN)
     same = try_fill(
-        order(triggered_at=BAR_OPEN),
-        minute_bar(opened_at=BAR_OPEN),
+        order(triggered_at=signal_bar.closed_at),
+        signal_bar,
         normal_status(),
         policy(),
     )
     later = try_fill(
-        order(triggered_at=BAR_OPEN),
+        order(triggered_at=signal_bar.closed_at),
         minute_bar(opened_at=BAR_AT),
         normal_status(),
         policy(),
@@ -67,7 +68,7 @@ def test_signal_fills_only_on_a_later_bar() -> None:
     assert same.filled is False
     assert same.reason == "bar_not_after_trigger"
     assert later.filled is True
-    assert later.filled_at == BAR_AT
+    assert later.filled_at == BAR_AT + timedelta(minutes=1)
 
 
 def test_suspension_and_zero_volume_are_not_tradable() -> None:
@@ -143,8 +144,8 @@ def test_slippage_is_adverse_for_both_sides() -> None:
 
     assert buy.execution_price is not None
     assert sell.execution_price is not None
-    assert buy.execution_price > bar.raw_open
-    assert sell.execution_price < bar.raw_open
+    assert buy.execution_price > bar.raw_close
+    assert sell.execution_price < bar.raw_close
 
 
 def test_fee_schedule_uses_historical_effective_date() -> None:

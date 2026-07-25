@@ -11,7 +11,7 @@ const DAILY_CLOSE_AT = 1784703600;
 
 function center(overrides = {}) {
   return {
-    schema: 'chanlun-chart-center/v4',
+    schema: 'chanlun-chart-center/v5',
     render_kind: 'formal_center',
     center_id: 'center-l0-1',
     render_id: 'center-l0-1@r1@ongoing',
@@ -36,12 +36,35 @@ function center(overrides = {}) {
     completion_leave_unit_id: null,
     completion_return_unit_id: null,
     completion_direction: null,
+    entering_segment: {
+      unit_id: 'u1', direction: 'up', start_time: 1699996400, end_time: 1699997000,
+      start_tick: 980, end_tick: 1080, start_price: 9.8, end_price: 10.8,
+    },
+    leaving_segment: {
+      unit_id: 'u5', direction: 'up', start_time: 1699999700, end_time: 1700000300,
+      start_tick: 1000, end_tick: 1090, start_price: 10.0, end_price: 10.9,
+    },
     established_market_time: 1699999000,
     established_at: 1699999300,
     completed_at: null,
     available_at: 1700000300,
     ...overrides,
   };
+}
+
+function centerPreview(overrides = {}) {
+  return center({
+    render_kind: 'center_preview',
+    center_id: 'preview-l0-1',
+    preview_id: 'preview-l0-1',
+    render_id: 'preview-l0-1@forming@1700000600',
+    body_revision: 0,
+    state: 'forming',
+    tradable: false,
+    established_at: null,
+    completed_at: null,
+    ...overrides,
+  });
 }
 
 function divergence(kind, structuralLevel = 0, overrides = {}) {
@@ -130,7 +153,7 @@ function point(pointType, status, overrides = {}) {
 
 function snapshot(overrides = {}) {
   return {
-    schema: 'chanlun-chart-structure/v4',
+    schema: 'chanlun-chart-structure/v5',
     symbol: 'SZ.000001',
     source_frequency: '5m',
     display_frequency: '5m',
@@ -154,6 +177,14 @@ function snapshot(overrides = {}) {
       label: '5m',
       origin: 'current_chart_recursive',
       centers: [center()],
+      center_previews: [centerPreview({
+        points: [
+          { time: 1700000400, price_tick: 1280, price: 12.8 },
+          { time: CLOSED_AT, price_tick: 1200, price: 12.0 },
+        ],
+        core: { zd_tick: 1200, zg_tick: 1280, zd_price: 12.0, zg_price: 12.8 },
+        envelope: { dd_tick: 1180, gg_tick: 1300, dd_price: 11.8, gg_price: 13.0 },
+      })],
       center_projections: [],
       current_trends: [{
         schema: 'chanlun-chart-trend/v3',
@@ -211,7 +242,7 @@ const context = {
   timeZone: 'Asia/Shanghai',
 };
 
-test('summary consumes only the authoritative strict snapshot and ignores contradictory legacy arrays', () => {
+test('summary consumes the authoritative strict snapshot for centers and signals', () => {
   const strictOnly = Analysis.summarizeChartData(barsResult(), context);
   const poisoned = Analysis.summarizeChartData(barsResult(snapshot(), {
     bi_zss: [{ zd: -999, zg: 999 }],
@@ -219,18 +250,83 @@ test('summary consumes only the authoritative strict snapshot and ignores contra
     recursive_levels: [{ level: 0, zss: [{ zd: -777, zg: 777 }] }],
     mmds: [{ text: 'legacy-only-buy' }],
     bcs: [{ text: 'legacy-only-divergence' }],
-    bis: [{ points: [{ price: -1 }, { price: -2 }] }],
-    xds: [{ points: [{ price: 1 }, { price: 2 }] }],
   }), context);
 
   assert.deepEqual(poisoned, strictOnly);
   assert.equal(strictOnly.state, 'ready');
   assert.equal(strictOnly.trends[0].directionLabel, '向上');
   assert.equal(strictOnly.formalCenters[0].tradable, true);
+  assert.equal(strictOnly.formalCenters[0].enteringSegment.direction, 'up');
+  assert.equal(strictOnly.formalCenters[0].leavingSegment.direction, 'up');
+  assert.equal(strictOnly.centerPreviews[0].tradable, false);
+  assert.equal(strictOnly.centerPreviews[0].qualification, '形成中预览，不可直接交易');
   assert.equal(strictOnly.observations[0].tradable, false);
   assert.equal(strictOnly.observations[0].qualification, '观察证据，不可直接交易');
+  assert.equal(strictOnly.biZone.low, 10.0);
+  assert.equal(strictOnly.biZone.high, 10.6);
+  assert.equal(strictOnly.biZone.status, '\u5f62\u6210\u4e2d');
+  assert.match(strictOnly.biZone.meta, /\u4e0d\u53ef\u76f4\u63a5\u4ea4\u6613/);
+  assert.equal(strictOnly.xdZone.low, 12.0);
+  assert.equal(strictOnly.xdZone.high, 12.8);
+  assert.equal(strictOnly.xdZone.status, '\u5f62\u6210\u4e2d');
+  assert.equal(strictOnly.xdZone.levelLabel, '\u7ebf\u6bb5\u4e2d\u67a2\u9884\u89c8');
+  assert.match(strictOnly.xdZone.meta, /\u4e0d\u53ef\u76f4\u63a5\u4ea4\u6613/);
+  assert.equal(strictOnly.xdZone.enteringSegment, '向上 · 9.80 → 10.80');
+  assert.equal(strictOnly.xdZone.leavingSegment, '向上 · 10.00 → 10.90');
   assert.deepEqual(strictOnly.divergences.map((item) => item.label).sort(), ['盘整背驰', '趋势背驰']);
   assert.equal(strictOnly.divergences.every((item) => item.levelLabel === '5m'), true);
+});
+
+test('provisional third-class completion is reported as complete but non-tradable', () => {
+  const base = snapshot();
+  const completedPreview = centerPreview({
+    state: 'completed',
+    render_id: 'preview-l0-1@completed@u6',
+    completion_leave_unit_id: 'u5',
+    completion_return_unit_id: 'u6',
+    completion_direction: 'down',
+  });
+  const strict = snapshot({
+    levels: [{
+      ...base.levels[0],
+      centers: [],
+      center_previews: [completedPreview],
+    }],
+  });
+
+  const summary = Analysis.summarizeChartData(barsResult(strict), context);
+
+  assert.equal(summary.centerPreviews[0].state, 'completed');
+  assert.equal(summary.centerPreviews[0].tradable, false);
+  assert.equal(
+    summary.centerPreviews[0].qualification,
+    '几何已完成，等待线段锁定，不可直接交易',
+  );
+  assert.equal(summary.xdZone.status, '已完成');
+  assert.equal(summary.xdZone.tone, 'complete');
+});
+
+test('current stroke and segment status use base geometry from the same response', () => {
+  const summary = Analysis.summarizeChartData(barsResult(snapshot(), {
+    bis: [{
+      linestyle: '1',
+      points: [
+        { time: CLOSED_AT - 120, price: 10.2 },
+        { time: CLOSED_AT, price: 10.8 },
+      ],
+    }],
+    xds: [{
+      linestyle: '0',
+      points: [
+        { time: CLOSED_AT - 300, price: 11.4 },
+        { time: CLOSED_AT, price: 10.1 },
+      ],
+    }],
+  }), context);
+
+  assert.equal(summary.bi.text, '向上 · 形成中');
+  assert.equal(summary.xd.text, '向下 · 已完成');
+  assert.equal(summary.trends[0].directionLabel, '向上');
 });
 
 test('all six buy and sell point classes stay independent across confirmed and approaching evidence', () => {
@@ -261,6 +357,7 @@ test('unavailable or context-mismatched strict data reports synchronization fail
   }, context);
   assert.equal(unavailable.state, 'unavailable');
   assert.equal(unavailable.formalCenters.length, 0);
+  assert.equal(unavailable.centerPreviews.length, 0);
   assert.equal(unavailable.confirmedPoints.length, 0);
   assert.match(unavailable.statusDetail, /strict_evidence_invalid/);
 
@@ -271,6 +368,34 @@ test('unavailable or context-mismatched strict data reports synchronization fail
   assert.equal(mismatch.state, 'syncing');
   assert.equal(mismatch.formalCenters.length, 0);
   assert.match(mismatch.statusDetail, /周期/);
+});
+
+test('same-context unavailable reuses only the manager last-good snapshot as stale evidence', () => {
+  const unavailable = Analysis.summarizeChartData({
+    bars: [
+      { time: CLOSED_AT * 1000, close: 11 },
+      { time: (CLOSED_AT + 300) * 1000, close: 11.1 },
+    ],
+    strict_structure_mode: 'unavailable',
+    strict_structure_error: { code: 'strict_price_metadata_unavailable' },
+  }, { ...context, cachedStrictSnapshot: snapshot() });
+
+  assert.equal(unavailable.state, 'stale');
+  assert.equal(unavailable.formalCenters.length, 1);
+  assert.equal(unavailable.centerPreviews.length, 1);
+  assert.match(unavailable.statusDetail, /strict_price_metadata_unavailable/);
+
+  const wrongSymbol = Analysis.summarizeChartData({
+    bars: [{ time: CLOSED_AT * 1000, close: 11 }],
+    strict_structure_mode: 'unavailable',
+    strict_structure_error: { code: 'strict_evidence_invalid' },
+  }, {
+    ...context,
+    symbol: 'A:SH.600519',
+    cachedStrictSnapshot: snapshot(),
+  });
+  assert.equal(wrongSymbol.state, 'unavailable');
+  assert.equal(wrongSymbol.formalCenters.length, 0);
 });
 
 test('daily summary validates strict source close against raw transport time', () => {

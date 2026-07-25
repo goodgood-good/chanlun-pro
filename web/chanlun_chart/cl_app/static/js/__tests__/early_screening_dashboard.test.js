@@ -86,8 +86,8 @@ function fakeChartRoot() {
 }
 
 const snapshot = {
-  schema_version: "chanlun-trading-screening/v2",
-  structure_version: "v2",
+  schema_version: "chanlun-trading-screening/v3",
+  structure_version: "v3",
   available: true,
   scan_state: "complete",
   generated_at: "2026-07-20T15:00:00+08:00",
@@ -185,8 +185,9 @@ const snapshot = {
 };
 
 test("dashboard exposes sector signal and chart workspaces", () => {
-  assert.match(template, /data-schema="chanlun-trading-screening\/v2"/);
+  assert.match(template, /data-schema="chanlun-trading-screening\/v3"/);
   assert.match(template, /id="es-sector-completion"/);
+  assert.match(template, /id="es-scan-timing"/);
   assert.match(template, /data-workspace="sector"/);
   assert.match(template, /data-workspace="signals"/);
   assert.match(template, /data-workspace="charts"/);
@@ -261,7 +262,7 @@ test("normalizeSnapshot accepts only the new read-only schema", () => {
   const Ui = loadUi();
   const normalized = Ui.normalizeSnapshot(snapshot);
 
-  assert.equal(normalized.schema_version, "chanlun-trading-screening/v2");
+  assert.equal(normalized.schema_version, "chanlun-trading-screening/v3");
   assert.equal(normalized.signals.length, 2);
   assert.throws(
     () => Ui.normalizeSnapshot({ ...snapshot, schema_version: "chanlun-early-screening/v13" }),
@@ -500,7 +501,7 @@ test("dashboard exposes approaching signals and honest batch coverage", () => {
       completed_symbol_count: 32,
       pending_symbol_count: 68,
     }),
-    "本批 32/32 · 待扫 68",
+    "本批 32/32 · 待分析 68",
   );
   assert.equal(
     Ui.scanCoverageText({
@@ -508,7 +509,7 @@ test("dashboard exposes approaching signals and honest batch coverage", () => {
       completed_symbol_count: 7,
       pending_symbol_count: 0,
     }),
-    "本批 7/7 · 队列已覆盖",
+    "本批 7/7 · 全周期已覆盖",
   );
   assert.equal(
     Ui.scanCoverageText({
@@ -536,11 +537,69 @@ test("dashboard exposes approaching signals and honest batch coverage", () => {
     8,
   );
   assert.equal(
+    Ui.selectedSectorCount({
+      scan_audit: {},
+      sectors: [{ rank: 1 }, { rank: null }, { rank: undefined }],
+    }),
+    1,
+  );
+  assert.equal(
+    Ui.scanQualityText({
+      available: true,
+      scan_audit: { pending_symbol_count: 68, coverage_cycle_complete: false },
+      data_quality: { complete: true, stale: false },
+    }),
+    "本批完整 · 全周期扫描中",
+  );
+  assert.equal(
+    Ui.scanQualityText({
+      available: true,
+      scan_audit: { pending_symbol_count: 0, coverage_cycle_complete: true },
+      data_quality: { complete: true, stale: false },
+    }),
+    "全周期完整",
+  );
+  assert.equal(
+    Ui.scanTimingText({
+      batch_duration_ms: 22400,
+      coverage_cycle_elapsed_ms: 65700,
+      coverage_cycle_batch_count: 3,
+      coverage_cycle_complete: true,
+    }),
+    "本批 22.4秒 · 全周期 65.7秒 / 3批",
+  );
+  assert.equal(
     Ui.sectorEvidenceText(snapshot.sectors[0]),
     "30m 向上/支撑/一买 · 5m 震荡/中性/无主导点",
   );
   assert.match(controllerSource, /Ui\.sectorCoverageText\(audit\)/);
+  assert.match(controllerSource, /Ui\.scanQualityText\(snapshot\)/);
+  assert.match(controllerSource, /Ui\.scanTimingText\(audit\)/);
+  assert.match(controllerSource, /后台正连续分析剩余/);
   assert.match(controllerSource, /本轮板块结构质量不足，保留上一快照/);
+});
+
+test("sector workspace puts every eligible sector first and labels scan scope", () => {
+  const Ui = loadUi();
+  const workspace = fakeChartRoot();
+  Ui.renderSectorWorkspace(workspace.root, {
+    scan_audit: { selected_sector_count: 1 },
+    signals: [],
+    sectors: [
+      { sector_id: "unselected", sector_name: "未通过板块", rank: null },
+      { sector_id: "selected", sector_name: "合格板块", rank: 1 },
+    ],
+  });
+
+  assert.deepEqual(
+    workspace.root.children.map((row) => row.dataset.sectorId),
+    ["all", "selected", "unselected"],
+  );
+  assert.equal(workspace.root.children[1].dataset.shortlisted, "true");
+  assert.match(workspace.root.children[1].children[1].textContent, /符合要求并进入扫描/);
+  assert.equal(workspace.root.children[2].dataset.shortlisted, "false");
+  assert.match(workspace.root.children[2].children[1].textContent, /未通过结构门槛/);
+  assert.match(dashboardCss, /\.es-sector-row\.is-shortlisted/);
 });
 
 test("signal lifecycle selects the analysis-first default chart and honest decision", () => {

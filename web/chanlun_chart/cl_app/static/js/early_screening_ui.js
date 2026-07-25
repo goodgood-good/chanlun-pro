@@ -5,7 +5,7 @@
   if (typeof module === "object" && module.exports) module.exports = api;
   if (root) root.TradingScreeningUi = api;
 })(typeof globalThis === "object" ? globalThis : this, function createTradingScreeningUi() {
-  const SCHEMA_VERSION = "chanlun-trading-screening/v2";
+  const SCHEMA_VERSION = "chanlun-trading-screening/v3";
   const POINT_TYPES = ["1buy", "2buy", "3buy", "1sell", "2sell", "3sell"];
   const FREQUENCIES = new Set(["30m", "5m", "1m"]);
   const LAYOUTS = new Set(["focus", "dual", "triple"]);
@@ -55,7 +55,7 @@
     no_active_position: "当前没有活动持仓",
     unfinished_trend_divergence: "趋势背驰结构尚未闭合",
     three_buy_lacks_tick_clearance: "三买回抽未留出最小价格间隔",
-    sector_membership_missing: "未匹配原生行业板块",
+    sector_membership_missing: "未匹配 QMT GICS3 板块",
     higher_structure_sell_risk: "更高结构存在卖点风险",
     sector_hostile: "行业结构构成阻断",
   };
@@ -95,8 +95,48 @@
       && pending === 0
     ) return "等待首批扫描";
     return pending > 0
-      ? `本批 ${completed}/${planned} · 待扫 ${pending}`
-      : `本批 ${completed}/${planned} · 队列已覆盖`;
+      ? `本批 ${completed}/${planned} · 待分析 ${pending}`
+      : safeAudit.coverage_cycle_complete === false
+        ? `本批 ${completed}/${planned} · 等待续扫`
+        : `本批 ${completed}/${planned} · 全周期已覆盖`;
+  }
+
+  function scanQualityText(snapshot) {
+    const safeSnapshot = isRecord(snapshot) ? snapshot : {};
+    const audit = isRecord(safeSnapshot.scan_audit) ? safeSnapshot.scan_audit : {};
+    const quality = isRecord(safeSnapshot.data_quality) ? safeSnapshot.data_quality : {};
+    const pending = Math.max(0, Number(audit.pending_symbol_count) || 0);
+    if (safeSnapshot.available !== true) return "等待首批";
+    if (quality.stale === true) return "已过期";
+    const cycleComplete = pending === 0 && audit.coverage_cycle_complete !== false;
+    if (!cycleComplete) {
+      return quality.complete === true
+        ? "本批完整 · 全周期扫描中"
+        : "本批部分完整 · 全周期扫描中";
+    }
+    return quality.complete === true ? "全周期完整" : "全周期部分完整";
+  }
+
+  function scanTimingText(audit) {
+    const safeAudit = isRecord(audit) ? audit : {};
+    const batchMs = Number(safeAudit.batch_duration_ms);
+    const cycleMs = Number(safeAudit.coverage_cycle_elapsed_ms);
+    const batches = Math.max(0, Number(safeAudit.coverage_cycle_batch_count) || 0);
+    const duration = (milliseconds) => {
+      if (!Number.isFinite(milliseconds) || milliseconds < 0) return null;
+      if (milliseconds < 1000) return `${Math.round(milliseconds)}毫秒`;
+      return `${(milliseconds / 1000).toFixed(1)}秒`;
+    };
+    const batchText = duration(batchMs);
+    const cycleText = duration(cycleMs);
+    if (!batchText && !cycleText) return "待统计";
+    const values = [];
+    if (batchText) values.push(`本批 ${batchText}`);
+    if (cycleText) {
+      const state = safeAudit.coverage_cycle_complete === true ? "全周期" : "全周期已运行";
+      values.push(`${state} ${cycleText}${batches ? ` / ${batches}批` : ""}`);
+    }
+    return values.join(" · ");
   }
 
   function sectorCoverageText(audit) {
@@ -124,8 +164,14 @@
     const explicit = Number(audit.selected_sector_count);
     if (Number.isFinite(explicit) && explicit >= 0) return Math.floor(explicit);
     return (Array.isArray(safeSnapshot.sectors) ? safeSnapshot.sectors : [])
-      .filter((sector) => isRecord(sector) && Number.isFinite(Number(sector.rank)))
+      .filter((sector) => isRecord(sector) && sectorRank(sector.rank) !== null)
       .length;
+  }
+
+  function sectorRank(value) {
+    if (value === null || value === undefined || value === "") return null;
+    const rank = Number(value);
+    return Number.isFinite(rank) && rank > 0 ? rank : null;
   }
 
   function sectorEvidenceText(sector) {
@@ -561,9 +607,10 @@
     if (!container || !container.ownerDocument) return;
     const documentRef = container.ownerDocument;
     const grouped = groupSignalsBySector(snapshot.signals);
+    const shortlistSize = selectedSectorCount(snapshot);
     const sectorRows = snapshot.sectors.slice().sort((left, right) => {
-      const leftRank = Number.isFinite(Number(left.rank)) ? Number(left.rank) : Number.MAX_SAFE_INTEGER;
-      const rightRank = Number.isFinite(Number(right.rank)) ? Number(right.rank) : Number.MAX_SAFE_INTEGER;
+      const leftRank = sectorRank(left.rank) ?? Number.MAX_SAFE_INTEGER;
+      const rightRank = sectorRank(right.rank) ?? Number.MAX_SAFE_INTEGER;
       return leftRank - rightRank || text(left.sector_id).localeCompare(text(right.sector_id), "zh-CN");
     });
     const rows = [{ sector_id: "all", sector_name: "全部板块", rank: null }, ...sectorRows];
@@ -576,18 +623,19 @@
       button.dataset.sectorId = sectorId;
       button.classList.toggle("is-active", sectorId === selectedSectorId);
       button.setAttribute("aria-pressed", sectorId === selectedSectorId ? "true" : "false");
+      const rank = sectorRank(sector.rank);
+      const shortlisted = sectorId !== "all" && rank !== null && rank <= shortlistSize;
+      button.dataset.shortlisted = shortlisted ? "true" : "false";
+      button.classList.toggle("is-shortlisted", shortlisted);
       const heading = element(documentRef, "span", "es-sector-row__heading");
       heading.append(
         element(documentRef, "strong", "", sectorId === "all" ? "全部板块" : text(sector.sector_name, sectorId)),
         element(documentRef, "b", "", numberText(count)),
       );
       const reasonCodes = Array.isArray(sector.reason_codes) ? sector.reason_codes : [];
-      const rank = sector.rank === null || sector.rank === undefined
-        ? "未入选"
-        : `#${numberText(sector.rank)}`;
       const facts = sectorId === "all"
-        ? `共 ${numberText(snapshot.sectors.length)} 个原生行业板块`
-        : `结构排序 ${rank} · ${sectorEvidenceText(sector)}`;
+        ? `共 ${numberText(snapshot.sectors.length)} 个 QMT GICS3 板块`
+        : `${shortlisted ? "符合要求并进入扫描" : "未通过结构门槛"} · ${rank === null ? "无有效排序" : `结构排序 #${numberText(rank)}`} · ${sectorEvidenceText(sector)}`;
       const gate = sectorId === "all"
         ? "仅按结构筛选，不使用板块涨跌幅"
         : sector.hard_block === true
@@ -851,6 +899,8 @@
     periodPathForSignal,
     reasonLabel,
     scanCoverageText,
+    scanQualityText,
+    scanTimingText,
     sectorCoverageText,
     sectorEvidenceText,
     selectedSectorCount,

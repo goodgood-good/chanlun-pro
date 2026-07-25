@@ -44,6 +44,43 @@ test('bar milliseconds are converted exactly once to epoch seconds', () => {
   );
 });
 
+test('calendar evidence times map to deterministic TradingView coordinates', () => {
+  const dailyClose = Date.UTC(2025, 11, 16, 7) / 1000;
+  const weeklyClose = Date.UTC(2017, 2, 5, 7) / 1000;
+  const monthlyClose = Date.UTC(2026, 6, 31, 7) / 1000;
+
+  assert.equal(
+    Reconcile.chartTimeCoordinate(dailyClose, 'd'),
+    Date.UTC(2025, 11, 16) / 1000,
+  );
+  assert.equal(
+    Reconcile.chartTimeCoordinate(weeklyClose, 'w'),
+    Date.UTC(2017, 1, 27) / 1000,
+  );
+  assert.equal(
+    Reconcile.chartTimeCoordinate(monthlyClose, 'm'),
+    Date.UTC(2026, 6, 1) / 1000,
+  );
+});
+
+test('render-coordinate conversion never mutates strict audit evidence', () => {
+  const rawClose = Date.UTC(2026, 6, 31, 7) / 1000;
+  const item = strictCenter({
+    points: [
+      { time: rawClose, price: 11 },
+      { time: rawClose, price: 10 },
+    ],
+  });
+
+  const rendered = Reconcile.itemToChartCoordinates(item, 'm');
+
+  assert.deepEqual(
+    rendered.points.map((point) => point.time),
+    [Date.UTC(2026, 6, 1) / 1000, Date.UTC(2026, 6, 1) / 1000],
+  );
+  assert.deepEqual(item.points.map((point) => point.time), [rawClose, rawClose]);
+});
+
 test('visible range shrink never changes center source geometry', () => {
   const item = strictCenter();
   assert.deepEqual(
@@ -53,6 +90,22 @@ test('visible range shrink never changes center source geometry', () => {
   assert.deepEqual(
     Reconcile.clipToLoadedRange(item, { from: 200, to: 600 }).points.map((point) => point.time),
     [200, 500],
+  );
+  assert.deepEqual(item.points.map((point) => point.time), [100, 500]);
+});
+
+test('render planning clips crossing centers to actual visible bar coordinates', () => {
+  const item = strictCenter();
+  const plan = Reconcile.planReconcile(
+    [],
+    [item],
+    { from: 50, to: 600, barTimes: [50, 100, 200, 300, 400, 500, 600] },
+    { from: 175, to: 450 },
+  );
+
+  assert.deepEqual(
+    plan.createItems[0].points.map((point) => point.time),
+    [200, 400],
   );
   assert.deepEqual(item.points.map((point) => point.time), [100, 500]);
 });
@@ -78,6 +131,34 @@ test('body revision replaces exactly one prior entity', () => {
   );
   assert.deepEqual(plan.removeIds, ['old']);
   assert.equal(plan.createItems.length, 1);
+  assert.equal(plan.desiredItems.length, 1);
+});
+
+test('duplicate retained entities are removed and rebuilt as one logical shape', () => {
+  const item = strictCenter();
+  const plan = Reconcile.planReconcile(
+    [
+      {
+        logicalKey: 'formal_center:c1',
+        renderKey: item.render_id,
+        geometryFingerprint: Reconcile.geometryFingerprint(item),
+        id: 'duplicate-a',
+      },
+      {
+        logicalKey: 'formal_center:c1',
+        renderKey: item.render_id,
+        geometryFingerprint: Reconcile.geometryFingerprint(item),
+        id: 'duplicate-b',
+      },
+    ],
+    [item],
+    { from: 0, to: 1000 },
+    { from: 0, to: 1000 },
+  );
+
+  assert.deepEqual(plan.removeIds, ['duplicate-a', 'duplicate-b']);
+  assert.equal(plan.createItems.length, 1);
+  assert.equal(plan.createItems[0].logicalKey, 'formal_center:c1');
 });
 
 test('same ids in two chart instances never share ownership scope', () => {
@@ -103,5 +184,16 @@ test('divergence identity uses its stable divergence id', () => {
   assert.equal(
     Reconcile.logicalKey({ render_kind: 'strict_divergence', divergence_id: 'divergence-1' }),
     'strict_divergence:divergence-1',
+  );
+});
+
+test('forming center preview identity uses its stable preview id', () => {
+  assert.equal(
+    Reconcile.logicalKey({
+      render_kind: 'center_preview',
+      center_id: 'preview-1',
+      preview_id: 'preview-1',
+    }),
+    'center_preview:preview-1',
   );
 });

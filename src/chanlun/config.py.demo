@@ -86,14 +86,14 @@ REDIS_PORT = 6379
 # 各个市场的交易所设置（只适用于WEB页面的行情展示）
 # db 表示读取数据库中的行情，适用于在国外或其他原因，tdx 无法正常使用的情况
 
-# A股市场支持：tdx / futu / baostock / qmt / cq / db
-# 港股市场支持：tdx_hk / futu / cq / db
+# A股市场支持：tdx / futu / baostock / qmt / cq / usmart / db
+# 港股市场支持：tdx_hk / futu / cq / usmart / db
 # 期货市场支持：tq / tdx_futures / db
 # 纽约期货市场支持：tdx_ny_futures / db
 # 外汇市场支持 tdx_fx / cq / db
 # 数字货币（合约）支持： binance / db
 # 数字货币（现货）支持：binance_spot / db
-# 美股市场支持： alpaca / polygon / ib / tdx_us / cq / db
+# 美股市场支持： alpaca / polygon / ib / tdx_us / cq / usmart / db
 EXCHANGE_A = "tdx"  # 沪深A股市场
 EXCHANGE_HK = "tdx_hk"  # 港股市场
 EXCHANGE_FUTURES = "tdx_futures"  # 期货市场
@@ -115,6 +115,27 @@ GM_TOKEN = '******'
 FUTU_HOST = ''
 FUTU_PORT = 11111
 FUTU_UNLOCK_PWD = ''
+
+# uSMART 盈立证券 Open API（A 股 / 港股 / 美股行情）
+# 凭证只从环境变量或项目根 .env 读取；USMART_TOKEN 与“手机号 + 登录密码自动登录”
+# 二选一。官网单行 base64 DER 公私钥可直接填写。
+USMART_CHANNEL = os.environ.get('USMART_CHANNEL', '')
+USMART_PUBLIC_KEY = os.environ.get('USMART_PUBLIC_KEY', '')
+USMART_PRIVATE_KEY = os.environ.get('USMART_PRIVATE_KEY', '')
+USMART_TOKEN = os.environ.get('USMART_TOKEN', '')
+USMART_PHONE = os.environ.get('USMART_PHONE', '')
+USMART_LOGIN_PASSWORD = os.environ.get('USMART_LOGIN_PASSWORD', '')
+USMART_AREA_CODE = os.environ.get('USMART_AREA_CODE', '86')
+USMART_LANGUAGE = os.environ.get('USMART_LANGUAGE', '1')
+USMART_QUOTE_HOST = os.environ.get(
+    'USMART_QUOTE_HOST', 'https://open-hz.usmartsg.com:8443'
+)
+USMART_TRADE_HOST = os.environ.get(
+    'USMART_TRADE_HOST', 'https://open-jy.usmartsg.com'
+)
+USMART_TIMEOUT = os.environ.get('USMART_TIMEOUT', '8')
+USMART_KLINE_PAGE_SIZE = os.environ.get('USMART_KLINE_PAGE_SIZE', '1000')
+USMART_KLINE_MAX_PAGES = os.environ.get('USMART_KLINE_MAX_PAGES', '10')
 
 # 天勤账号配置
 TQ_USER = ''

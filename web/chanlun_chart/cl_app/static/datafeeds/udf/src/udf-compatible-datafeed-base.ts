@@ -38,6 +38,7 @@ import {
 } from './history-provider';
 
 import { DataPulseProvider } from './data-pulse-provider';
+import { chartBarTimeSeconds } from './bar-time';
 import { IQuotesProvider } from './iquotes-provider';
 import { IRequester } from './irequester';
 import { QuotesPulseProvider } from './quotes-pulse-provider';
@@ -390,7 +391,11 @@ export class UDFCompatibleDatafeedBase implements IExternalDatafeed, IDatafeedQu
 	 * SSE 推送驱动 K 线：从 /tv/history 同构 response 取最新一根 bar，喂给
 	 * DataPulseProvider 的订阅者，让 K 线随 SSE 实时刷新(不依赖轮询)。
 	 */
-	public feedRealtimeBar(symbolResKey: string, response: Record<string, unknown>): void {
+	public feedRealtimeBar(
+		symbolResKey: string,
+		response: Record<string, unknown>,
+		resolution: string = '',
+	): void {
 		const t = response.t as number[] | undefined;
 		const c = response.c as number[] | undefined;
 		if (!response || !t || t.length === 0 || !c) {
@@ -406,7 +411,7 @@ export class UDFCompatibleDatafeedBase implements IExternalDatafeed, IDatafeedQu
 				return null;
 			}
 			const bar: Bar = {
-				time: t[idx] * 1000,
+				time: chartBarTimeSeconds(t[idx], resolution) * 1000,
 				open: o ? o[idx] : closeVal,
 				high: h ? h[idx] : closeVal,
 				low: l ? l[idx] : closeVal,

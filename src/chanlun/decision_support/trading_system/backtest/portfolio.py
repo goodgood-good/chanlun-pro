@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from itertools import groupby
 from operator import attrgetter
@@ -41,6 +41,12 @@ from chanlun.decision_support.trading_system.portfolio_risk import (
 
 _ZERO = Decimal("0")
 _ONE = Decimal("1")
+
+
+def _analysis_price_to_raw(value: Decimal, bar: MinuteBar) -> Decimal:
+    """Map a structural price into the execution epoch of this raw bar."""
+
+    return value * bar.raw_close / bar.analysis_close
 
 
 class StructureReplay(Protocol):
@@ -187,6 +193,12 @@ class _PendingOrder:
     reference_price: Decimal
     reason: str
     exit_trigger_price: Decimal | None = None
+    last_rejection_reason: str | None = None
+    exit_filled_shares: int = 0
+    exit_value: Decimal = _ZERO
+    exit_fees: Decimal = _ZERO
+    exit_entry_fees: Decimal = _ZERO
+    exit_last_filled_at: datetime | None = None
 
 
 @dataclass(slots=True)
@@ -225,18 +237,62 @@ class _PortfolioState:
             position = self.positions_by_code.get(action.code)
             if position is None:
                 continue
-            if action.cash_per_share:
-                self.cash += action.cash_per_share * Decimal(position.shares)
+            old_shares = position.shares
+            cash_delta = (
+                action.cash_per_share - action.subscription_cost_per_share
+            ) * Decimal(old_shares)
+            if cash_delta:
+                self.cash += cash_delta
+                if self.cash < 0:
+                    raise ValueError("corporate action subscription exceeds cash")
             if action.share_multiplier != _ONE:
                 new_shares = int(
-                    Decimal(position.shares) * action.share_multiplier
+                    Decimal(old_shares) * action.share_multiplier
                 )
                 if new_shares <= 0:
                     raise ValueError("corporate action removed all position shares")
                 position.shares = new_shares
                 position.entry_price /= action.share_multiplier
-                position.structural_stop /= action.share_multiplier
-                position.last_price /= action.share_multiplier
+            position.structural_stop /= action.raw_price_divisor
+            position.last_price /= action.raw_price_divisor
+            self.last_prices[action.code] = position.last_price
+            for pending in self.pending_orders:
+                if pending.intent.code != action.code:
+                    continue
+                shares = pending.intent.shares
+                if pending.intent.side == "sell":
+                    shares = min(
+                        position.shares,
+                        max(
+                            1,
+                            int(Decimal(shares) * action.share_multiplier),
+                        ),
+                    )
+                stop = pending.intent.structural_stop
+                pending.intent = replace(
+                    pending.intent,
+                    shares=shares,
+                    structural_stop=(
+                        None
+                        if stop is None
+                        else stop / action.raw_price_divisor
+                    ),
+                )
+                pending.reference_price /= action.raw_price_divisor
+                if pending.exit_trigger_price is not None:
+                    pending.exit_trigger_price /= action.raw_price_divisor
+                if pending.candidate is not None:
+                    pending.candidate = replace(
+                        pending.candidate,
+                        entry_price=(
+                            pending.candidate.entry_price
+                            / action.raw_price_divisor
+                        ),
+                        stop_price=(
+                            pending.candidate.stop_price
+                            / action.raw_price_divisor
+                        ),
+                    )
 
     def _has_pending(self, code: str, side: str) -> bool:
         return any(
@@ -334,11 +390,12 @@ class _PortfolioState:
         tower = evaluated.setup.point.tower
         recursive_level = evaluated.setup.point.recursive_level
         sector_id = evaluated.setup.sector.sector_id
+        raw_stop = _analysis_price_to_raw(entry.structural_stop, bar)
         candidate = RiskCandidate(
             signal_id=entry.signal_id,
             sector_id=sector_id,
             entry_price=bar.raw_close,
-            stop_price=entry.structural_stop,
+            stop_price=raw_stop,
             risk_multiplier=entry.risk_multiplier,
         )
         intent = OrderIntent(
@@ -348,7 +405,7 @@ class _PortfolioState:
             side="buy",
             shares=sized.shares,
             created_at=created_at,
-            structural_stop=entry.structural_stop,
+            structural_stop=raw_stop,
         )
         self.pending_orders.append(
             _PendingOrder(
@@ -373,6 +430,7 @@ class _PortfolioState:
         created_at: datetime,
         reason: str,
         trigger_price: Decimal,
+        last_rejection_reason: str | None = None,
     ) -> None:
         if shares <= 0 or self._has_pending(position.code, "sell"):
             return
@@ -397,6 +455,7 @@ class _PortfolioState:
                 reference_price=position.last_price,
                 reason=reason,
                 exit_trigger_price=trigger_price,
+                last_rejection_reason=last_rejection_reason,
             )
         )
 
@@ -438,6 +497,7 @@ class _PortfolioState:
         *,
         exit_reason: str,
         exit_trigger_price: Decimal,
+        finalize: bool = True,
     ) -> None:
         position = self.positions_by_code[pending.intent.code]
         if fill.execution_price is None or fill.filled_at is None:
@@ -446,28 +506,42 @@ class _PortfolioState:
         entry_fee_share = (
             position.entry_fees * Decimal(shares) / Decimal(position.shares)
         )
-        entry_value = position.entry_price * Decimal(shares)
         exit_value = fill.execution_price * Decimal(shares)
-        net_pnl = exit_value - fill.fees - entry_value - entry_fee_share
-        entry_cost = entry_value + entry_fee_share
         self.cash += exit_value - fill.fees
-        self.trades.append(
-            BacktestTrade(
-                code=position.code,
-                sector_id=position.sector_id,
-                point_type=position.point_type,
-                entry_at=position.opened_at,
-                exit_at=fill.filled_at,
-                shares=shares,
-                entry_price=position.entry_price,
-                exit_price=fill.execution_price,
-                exit_trigger_price=exit_trigger_price,
-                exit_reason=exit_reason,
-                net_pnl=net_pnl,
-                net_return=net_pnl / entry_cost,
-                total_cost=entry_fee_share + fill.fees,
+        pending.exit_filled_shares += shares
+        pending.exit_value += exit_value
+        pending.exit_fees += fill.fees
+        pending.exit_entry_fees += entry_fee_share
+        pending.exit_last_filled_at = fill.filled_at
+        if finalize:
+            total_shares = pending.exit_filled_shares
+            entry_value = position.entry_price * Decimal(total_shares)
+            entry_cost = entry_value + pending.exit_entry_fees
+            net_pnl = (
+                pending.exit_value
+                - pending.exit_fees
+                - entry_value
+                - pending.exit_entry_fees
             )
-        )
+            if pending.exit_last_filled_at is None:
+                raise ValueError("completed exit has no fill timestamp")
+            self.trades.append(
+                BacktestTrade(
+                    code=position.code,
+                    sector_id=position.sector_id,
+                    point_type=position.point_type,
+                    entry_at=position.opened_at,
+                    exit_at=pending.exit_last_filled_at,
+                    shares=total_shares,
+                    entry_price=position.entry_price,
+                    exit_price=pending.exit_value / Decimal(total_shares),
+                    exit_trigger_price=exit_trigger_price,
+                    exit_reason=exit_reason,
+                    net_pnl=net_pnl,
+                    net_return=net_pnl / entry_cost,
+                    total_cost=pending.exit_entry_fees + pending.exit_fees,
+                )
+            )
         if shares == position.shares:
             del self.positions_by_code[position.code]
         else:
@@ -482,6 +556,8 @@ class _PortfolioState:
         risk_limits: RiskLimits,
         bar: MinuteBar,
         execution_policy: ExecutionPolicy,
+        *,
+        maximum_shares: int,
     ) -> tuple[OrderIntent, FillDecision] | None:
         if decision.execution_price is None or pending.candidate is None:
             raise ValueError("entry fill lacks candidate or price")
@@ -494,7 +570,7 @@ class _PortfolioState:
             candidate=candidate,
             limits=risk_limits,
         )
-        shares = min(pending.intent.shares, sized.shares)
+        shares = min(pending.intent.shares, sized.shares, maximum_shares)
         shares = shares // status.lot_size * status.lot_size
         while shares > 0:
             intent = replace(pending.intent, shares=shares)
@@ -517,20 +593,53 @@ class _PortfolioState:
         for pending in tuple(self.pending_orders):
             if pending.intent.code != bar.code:
                 continue
+            if (
+                pending.intent.side == "buy"
+                and bar.closed_at
+                >= pending.intent.created_at
+                + timedelta(seconds=execution_policy.entry_risk_ttl_seconds)
+            ):
+                self.fills.append(
+                    FillDecision.rejected(
+                        pending.intent,
+                        "risk_snapshot_expired",
+                    )
+                )
+                self.pending_orders.remove(pending)
+                continue
             if pending.intent.side == "sell":
                 position = self.positions_by_code.get(bar.code)
                 if position is None:
                     self.pending_orders.remove(pending)
                     continue
                 if not self._is_sellable(position, status):
-                    pending.reason = "t_plus_one_locked"
+                    pending.last_rejection_reason = "t_plus_one_locked"
                     self.fills.append(
-                        FillDecision.rejected(pending.intent, pending.reason)
+                        FillDecision.rejected(
+                            pending.intent,
+                            pending.last_rejection_reason,
+                        )
                     )
                     continue
-            decision = try_fill(pending.intent, bar, status, execution_policy)
+            attempted_intent = pending.intent
+            if bar.volume > 0:
+                capacity = int(
+                    bar.volume * execution_policy.max_volume_participation
+                )
+                capacity = capacity // status.lot_size * status.lot_size
+                if 0 < capacity < pending.intent.shares:
+                    attempted_intent = replace(
+                        pending.intent,
+                        shares=capacity,
+                    )
+            decision = try_fill(
+                attempted_intent,
+                bar,
+                status,
+                execution_policy,
+            )
             if not decision.filled:
-                pending.reason = decision.reason
+                pending.last_rejection_reason = decision.reason
                 self.fills.append(decision)
                 if decision.reason in {
                     "security_mismatch",
@@ -549,6 +658,7 @@ class _PortfolioState:
                     risk_limits,
                     bar,
                     execution_policy,
+                    maximum_shares=attempted_intent.shares,
                 )
                 if resized is None:
                     self.fills.append(
@@ -587,12 +697,21 @@ class _PortfolioState:
                     decision.execution_price or pending.reference_price
                 )
                 self.fills.append(decision)
+                complete = decision.shares >= pending.intent.shares
                 self._close_position(
                     pending,
                     decision,
                     exit_reason=pending.reason,
                     exit_trigger_price=trigger,
+                    finalize=complete,
                 )
+                if not complete:
+                    pending.intent = replace(
+                        pending.intent,
+                        shares=pending.intent.shares - decision.shares,
+                    )
+                    pending.last_rejection_reason = None
+                    continue
             self.pending_orders.remove(pending)
 
     def mark_to_market(self, bar: MinuteBar) -> None:
@@ -625,6 +744,9 @@ class _PortfolioState:
         position = self.positions_by_code.get(bar.code)
         if (
             position is None
+            # A close-timestamped entry cannot be stopped by a low that may
+            # have occurred earlier in that same minute.
+            or position.opened_at >= bar.closed_at
             or bar.raw_low > position.structural_stop
             or self._has_pending(bar.code, "sell")
         ):
@@ -636,8 +758,9 @@ class _PortfolioState:
                 shares=position.shares,
                 signal_id=stop_order.signal_id,
                 created_at=bar.closed_at,
-                reason="t_plus_one_locked",
+                reason="structural_stop",
                 trigger_price=position.structural_stop,
+                last_rejection_reason="t_plus_one_locked",
             )
             self.fills.append(
                 FillDecision.rejected(stop_order, "t_plus_one_locked")
@@ -651,6 +774,11 @@ class _PortfolioState:
             reason = "not_tradable"
         elif bar.raw_high <= limit_down:
             reason = "limit_down_locked"
+        elif (
+            execution_policy.require_observed_price_range
+            and bar.raw_high == bar.raw_low
+        ):
+            reason = "one_price_bar_unfillable"
         elif Decimal(position.shares) > (
             bar.volume * execution_policy.max_volume_participation
         ):
@@ -663,8 +791,9 @@ class _PortfolioState:
                 shares=position.shares,
                 signal_id=stop_order.signal_id,
                 created_at=bar.closed_at,
-                reason=reason,
+                reason="structural_stop",
                 trigger_price=position.structural_stop,
+                last_rejection_reason=reason,
             )
             self.fills.append(FillDecision.rejected(stop_order, reason))
             return
@@ -807,6 +936,58 @@ class _PortfolioState:
                 exit_trigger_price=bar.raw_close,
             )
 
+    def write_off_position(
+        self,
+        *,
+        code: str,
+        closed_at: datetime,
+        reason: str,
+    ) -> None:
+        """Remove an expired security without inventing a stale-price sale."""
+
+        position = self.positions_by_code[code]
+        order = OrderIntent(
+            order_id=f"writeoff:{code}:{closed_at.isoformat()}",
+            signal_id=f"writeoff:{code}",
+            code=code,
+            side="sell",
+            shares=position.shares,
+            created_at=closed_at,
+            structural_stop=position.structural_stop,
+        )
+        fill = FillDecision(
+            order_id=order.order_id,
+            filled=True,
+            reason=reason,
+            filled_at=closed_at,
+            execution_price=_ZERO,
+            shares=position.shares,
+            fees=_ZERO,
+        )
+        pending = _PendingOrder(
+            intent=order,
+            sector_id=position.sector_id,
+            point_type=position.point_type,
+            tower=position.tower,
+            recursive_level=position.recursive_level,
+            candidate=None,
+            planned_risk_cash=_ZERO,
+            reference_price=position.last_price,
+            reason=reason,
+            exit_trigger_price=_ZERO,
+        )
+        self.pending_orders = [
+            row for row in self.pending_orders if row.intent.code != code
+        ]
+        self.last_prices[code] = _ZERO
+        self.fills.append(fill)
+        self._close_position(
+            pending,
+            fill,
+            exit_reason=reason,
+            exit_trigger_price=_ZERO,
+        )
+
     def finish(self) -> BacktestRun:
         open_positions = tuple(
             self.positions_by_code[code].public()
@@ -817,7 +998,7 @@ class _PortfolioState:
                 code=row.intent.code,
                 created_at=row.intent.created_at,
                 shares=row.intent.shares,
-                reason=row.reason,
+                reason=row.last_rejection_reason or row.reason,
             )
             for row in sorted(
                 (
@@ -853,7 +1034,7 @@ def risk_candidate_from(
         signal_id=entry.signal_id,
         sector_id=evaluated.setup.sector.sector_id,
         entry_price=bar.raw_close,
-        stop_price=entry.structural_stop,
+        stop_price=_analysis_price_to_raw(entry.structural_stop, bar),
         risk_multiplier=entry.risk_multiplier,
     )
 

@@ -72,6 +72,11 @@ def _frame(rows: list[dict[str, object]]) -> pd.DataFrame:
 
 
 def _session_minute(bar: MinuteBar) -> tuple[str, int] | None:
+    closed = bar.closed_at.timetz().replace(tzinfo=None)
+    if closed == time(9, 30):
+        # QMT publishes the opening auction as its own 09:30 observation, but
+        # also includes it in the first native morning 5m/30m aggregate.
+        return "morning", -1
     observed = bar.opened_at.timetz().replace(tzinfo=None)
     if time(9, 30) <= observed < time(11, 30):
         return "morning", (observed.hour * 60 + observed.minute) - (9 * 60 + 30)
@@ -106,16 +111,22 @@ def _aggregate_rows(
         if position is None:
             continue
         segment, minute_index = position
-        grouped[(bar.opened_at.date(), segment, minute_index // minutes)].append(
-            (minute_index, bar)
+        bucket = (
+            0
+            if segment == "morning" and minute_index == -1
+            else minute_index // minutes
         )
+        grouped[(bar.closed_at.date(), segment, bucket)].append((minute_index, bar))
     output: list[dict[str, object]] = []
     for key in sorted(grouped):
         rows = sorted(grouped[key], key=lambda item: item[0])
         expected_start = key[2] * minutes
-        if [index for index, _bar in rows] != list(
-            range(expected_start, expected_start + minutes)
-        ):
+        observed_indices = [index for index, _bar in rows]
+        expected_indices = list(range(expected_start, expected_start + minutes))
+        auction_indices = (
+            [-1, *expected_indices] if key[1] == "morning" and key[2] == 0 else []
+        )
+        if observed_indices not in (expected_indices, auction_indices):
             continue
         ordered = tuple(bar for _index, bar in rows)
         output.append(
@@ -128,6 +139,10 @@ def _aggregate_rows(
                 "volume": sum(float(bar.volume) for bar in ordered),
             }
         )
+    # The textual segment names sort as ``afternoon`` before ``morning``.
+    # Always restore exchange-time order before the frames enter the causal
+    # structure replay; otherwise every session is replayed out of order.
+    output.sort(key=lambda row: row["date"])
     return output
 
 
@@ -182,9 +197,7 @@ def build_causal_period_runner(
         previous = sector_index_codes.setdefault(bar.sector_id, bar.index_code)
         if previous != bar.index_code:
             raise ValueError("sector maps to multiple native index codes")
-    sector_names = {
-        row.sector_id: row.sector_id for row in dataset.memberships
-    }
+    sector_names = {row.sector_id: row.sector_id for row in dataset.memberships}
 
     def run_period(
         period: BacktestDataset,
@@ -244,14 +257,8 @@ def slice_dataset(
     if start > end:
         raise ValueError("start cannot follow end")
     return BacktestDataset(
-        bars=tuple(
-            bar
-            for bar in dataset.bars
-            if start <= bar.opened_at.date() <= end
-        ),
-        statuses=tuple(
-            row for row in dataset.statuses if start <= row.session <= end
-        ),
+        bars=tuple(bar for bar in dataset.bars if start <= bar.opened_at.date() <= end),
+        statuses=tuple(row for row in dataset.statuses if start <= row.session <= end),
         memberships=tuple(
             row for row in dataset.memberships if start <= row.session <= end
         ),
@@ -263,9 +270,7 @@ def slice_dataset(
         membership_as_of_each_session=dataset.membership_as_of_each_session,
         point_in_time_adjustment=dataset.point_in_time_adjustment,
         source_hashes=dataset.source_hashes,
-        security_status_as_of_each_session=(
-            dataset.security_status_as_of_each_session
-        ),
+        security_status_as_of_each_session=(dataset.security_status_as_of_each_session),
     )
 
 
@@ -410,9 +415,7 @@ def run_required_ablations(
             )
             runs.append(run)
             capital = run.equity_curve[-1].equity
-        metrics_by_id[ablation_id] = calculate_metrics(
-            _combine_test_runs(tuple(runs))
-        )
+        metrics_by_id[ablation_id] = calculate_metrics(_combine_test_runs(tuple(runs)))
 
     output: list[AblationResult] = []
     previous_trade_count: int | None = None
@@ -420,8 +423,7 @@ def run_required_ablations(
     for ablation_id in REQUIRED_ABLATION_IDS:
         metrics = metrics_by_id[ablation_id]
         trade_count = sum(
-            summary.trade_count
-            for _point_type, summary in metrics.per_point_type
+            summary.trade_count for _point_type, summary in metrics.per_point_type
         )
         if previous_trade_count in (None, 0):
             sample_reduction = Decimal("0")
@@ -537,12 +539,8 @@ def run_walk_forward_evaluation(
                 closed_trade_count=len(test_run.trades),
             )
         )
-    validation_net_returns = tuple(
-        row.net_return for row in all_validation_results
-    )
-    validation_drawdowns = tuple(
-        row.max_drawdown for row in all_validation_results
-    )
+    validation_net_returns = tuple(row.net_return for row in all_validation_results)
+    validation_drawdowns = tuple(row.max_drawdown for row in all_validation_results)
     evaluation = BacktestEvaluationResult(
         aggregate_run=_combine_test_runs(tuple(test_runs)),
         walk_forward_windows=tuple(window_results),

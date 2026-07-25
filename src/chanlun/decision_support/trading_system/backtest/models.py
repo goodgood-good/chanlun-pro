@@ -115,13 +115,20 @@ class CorporateActionAt:
     action_type: Literal["cash_dividend", "split", "rights"]
     cash_per_share: Decimal = Decimal("0")
     share_multiplier: Decimal = Decimal("1")
+    subscription_cost_per_share: Decimal = Decimal("0")
+    raw_price_divisor: Decimal = Decimal("1")
 
     def __post_init__(self) -> None:
         effective_at = normalize_datetime(self.effective_at, "effective_at")
         known_at = normalize_datetime(self.known_at, "known_at")
         if known_at > effective_at:
             raise ValueError("corporate action cannot be known after effective_at")
-        if self.cash_per_share < 0 or self.share_multiplier <= 0:
+        if (
+            self.cash_per_share < 0
+            or self.share_multiplier <= 0
+            or self.subscription_cost_per_share < 0
+            or self.raw_price_divisor <= 0
+        ):
             raise ValueError("invalid corporate action economics")
         object.__setattr__(self, "effective_at", effective_at)
         object.__setattr__(self, "known_at", known_at)

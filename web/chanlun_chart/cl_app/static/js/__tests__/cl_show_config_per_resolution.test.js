@@ -251,9 +251,11 @@ test('总开关只 gate 不改写子项偏好', () => {
   const { api } = loadClConfigApi();
   const cfg = { ...api.DEFAULT, center_all: false, center_L1: true };
   assert.equal(api.enabled(cfg, { render_kind: 'formal_center', structural_level: 1 }), false);
+  assert.equal(api.enabled(cfg, { render_kind: 'center_preview', structural_level: 1 }), false);
   assert.equal(cfg.center_L1, true);
   cfg.center_all = true;
   assert.equal(api.enabled(cfg, { render_kind: 'formal_center', structural_level: 1 }), true);
+  assert.equal(api.enabled(cfg, { render_kind: 'center_preview', structural_level: 1 }), true);
 });
 
 test('盘整背驰和趋势背驰按级别独立 gate', () => {

@@ -29,7 +29,7 @@
     <main
       id="es-dashboard"
       class="es-shell es-dashboard"
-      data-schema="chanlun-trading-screening/v2"
+      data-schema="chanlun-trading-screening/v3"
       data-endpoint="{{ url_for('decision_support.early_signals') }}"
     >
       <section class="es-hero" aria-labelledby="es-title">
@@ -37,7 +37,7 @@
           <p class="es-eyebrow">SECTOR FIRST · STRUCTURE ONLY · READ ONLY</p>
           <h1 id="es-title">缠论提前选股 · 实时盯盘与个股分析</h1>
           <p class="es-hero__intro">
-            先读取原生行业板块 K 线做缠论结构排序，再筛板块内个股。30m 判断大级别买卖点环境，
+            先读取 QMT GICS3 板块及其全部 A 股成分；板块结构由 QMT 成分行情的稳定代表样本构造，所有通过门槛的板块内全部股票都会进入扫描。30m 判断大级别买卖点环境，
             5m 定位可操作结构，1m 用笔、线段、中枢与递归完成最精细确认；六类买卖点始终独立分析。
           </p>
         </div>
@@ -61,6 +61,7 @@
           <div><dt>快照时间</dt><dd id="es-generated">尚未发布</dd></div>
           <div><dt>板块质量</dt><dd id="es-sector-completion">—</dd></div>
           <div><dt>批次 / 覆盖</dt><dd id="es-completion">—</dd></div>
+          <div><dt>扫描耗时</dt><dd id="es-scan-timing">待统计</dd></div>
           <div><dt>数据质量</dt><dd id="es-quality">待检查</dd></div>
         </dl>
         <button id="es-refresh-now" class="es-button" type="button">立即刷新</button>
@@ -87,7 +88,7 @@
       </section>
 
       <section class="es-summary" aria-label="实时快照摘要">
-        <article><span>入选板块</span><strong id="es-sector-count">0</strong><small>按原生板块结构排序</small></article>
+        <article><span>合格板块</span><strong id="es-sector-count">0</strong><small>全部进入股票扫描</small></article>
         <article><span>全部信号</span><strong id="es-signal-count">0</strong><small>六类买卖点独立计数</small></article>
         <article class="is-watch"><span>即将确认</span><strong id="es-approaching-count">0</strong><small>5m 未完成结构，仅供提前观察</small></article>
         <article class="is-watch"><span>已入观察池</span><strong id="es-armed-count">0</strong><small>已经接近但尚未触发</small></article>
@@ -100,11 +101,11 @@
         <aside class="es-workspace es-sector-workspace" data-workspace="sector" aria-labelledby="es-sector-title">
           <header class="es-workspace__header">
             <div>
-              <p class="es-eyebrow">NATIVE SECTOR STRUCTURE</p>
+              <p class="es-eyebrow">QMT GICS3 SECTOR STRUCTURE</p>
               <h2 id="es-sector-title">板块结构雷达</h2>
             </div>
           </header>
-          <p class="es-workspace__help">不看板块当日涨跌，不合成行业 K 线；直接使用已有板块行情的缠论结构。</p>
+          <p class="es-workspace__help">不按板块当日涨跌选强弱；读取 QMT GICS3 成分及 QMT 行情，用稳定代表样本构造板块结构序列。</p>
           <div id="es-sector-list" class="es-sector-list" role="group" aria-label="按板块筛选"></div>
         </aside>
 

@@ -114,7 +114,7 @@ def test_chart_payload_reads_only_strict_structure_sources() -> None:
 
     assert cd.evidence_calls == 1
     assert payload["strict_structure_mode"] == "replace"
-    assert payload["strict_structure"]["schema"] == "chanlun-chart-structure/v4"
+    assert payload["strict_structure"]["schema"] == "chanlun-chart-structure/v5"
     assert payload["strict_structure"]["source_closed_at"] == payload["t"][-1]
     for legacy_field in (
         "bi_zss",

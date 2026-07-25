@@ -18,6 +18,7 @@ if _TEST_DATA_PATH.parent != _TEMP_ROOT:
 
 os.environ["CHANLUN_TESTING"] = "1"
 os.environ["CHANLUN_TEST_DATA_PATH"] = str(_TEST_DATA_PATH)
+os.environ["CHANLUN_LOG_DIR"] = str(_TEST_DATA_PATH / "logs")
 
 from chanlun import config as _config
 

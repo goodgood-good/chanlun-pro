@@ -37,6 +37,21 @@ def test_sector_price_return_is_not_an_input() -> None:
     assert "return_pct" not in parameters
 
 
+def test_certified_qmt_sw1_pit_composite_is_an_allowed_sector_source() -> None:
+    assessment = assess_sector(
+        sector_id="qmt-sw1:S27",
+        sector_name="electronics",
+        market_data_source="qmt-sw1-pit-composite",
+        thirty=neutral_context("30m"),
+        five=neutral_context("5m"),
+        one=neutral_context("1m"),
+        data_complete=True,
+    )
+
+    assert assessment.eligible is True
+    assert "non_native_sector_kline" not in assessment.reason_codes
+
+
 def test_higher_level_hostile_sector_is_blocked() -> None:
     assessment = assess_sector(
         sector_id="TDX.880301",

@@ -236,55 +236,71 @@
 
           <section
             id="ca-overview"
-            class="ca-overview"
+            class="ca-overview is-collapsed"
             data-ready="false"
-            aria-labelledby="ca-current-name">
+            aria-labelledby="ca-overview-title">
             <header class="ca-overview-head">
-              <div style="min-width: 0">
-                <h3 id="ca-current-name" class="ca-symbol-name">等待标的数据</h3>
-                <span id="ca-current-symbol" class="ca-symbol-code">--</span>
+              <div class="ca-overview-identity">
+                <span id="ca-overview-title" class="ca-overview-eyebrow">当前结构解读</span>
+                <div class="ca-symbol-line">
+                  <h3 id="ca-current-name" class="ca-symbol-name">等待标的数据</h3>
+                  <span id="ca-current-symbol" class="ca-symbol-code">--</span>
+                </div>
               </div>
-              <div class="ca-overview-badges" aria-label="周期与数据状态">
-                <span id="ca-current-interval" class="ca-badge">--</span>
-                <span id="ca-data-state" class="ca-badge" data-tone="loading">数据加载中</span>
-                <button
-                  type="button"
-                  id="ca-overview-toggle"
-                  class="ca-overview-toggle"
-                  aria-controls="ca-overview-body"
-                  aria-expanded="true"
-                  aria-label="收起当前结构判读"
-                  title="收起当前结构判读">
-                  <i class="layui-icon layui-icon-up" aria-hidden="true"></i>
-                </button>
-              </div>
+              <button
+                type="button"
+                id="ca-overview-toggle"
+                class="ca-overview-toggle"
+                aria-controls="ca-overview-body"
+                aria-expanded="false"
+                aria-label="展开当前结构解读"
+                title="展开当前结构解读">
+                <span id="ca-overview-toggle-label">展开</span>
+                <i class="layui-icon layui-icon-up" aria-hidden="true"></i>
+              </button>
             </header>
 
-            <div id="ca-overview-body" class="ca-overview-body">
-              <div class="ca-price-row">
-                <div class="ca-price-block">
-                  <span class="ca-price-label">当前价</span>
-                  <strong id="ca-current-price" class="ca-current-price">--</strong>
-                </div>
-                <div class="ca-time-block">
-                  <span>K 线时间</span>
-                  <strong id="ca-bar-time" class="ca-bar-time">等待K线数据</strong>
-                </div>
-              </div>
-
-              <div class="ca-verdict">
-                <span class="ca-section-kicker">结构判读</span>
+            <div id="ca-overview-summary" class="ca-overview-summary">
+              <div class="ca-summary-verdict">
+                <span>本周期结构</span>
                 <strong id="ca-structure-verdict" aria-live="polite">等待结构数据</strong>
-                <p id="ca-structure-detail">加载图表后按当前周期计算笔、线段与双中枢位置。</p>
               </div>
+              <div class="ca-summary-facts" aria-label="当前价格、周期与数据状态">
+                <div>
+                  <span>现价</span>
+                  <strong id="ca-current-price">--</strong>
+                </div>
+                <div>
+                  <span>周期</span>
+                  <strong id="ca-current-interval">--</strong>
+                </div>
+                <div>
+                  <span>数据</span>
+                  <strong id="ca-data-state" data-tone="loading">同步中</strong>
+                </div>
+              </div>
+              <div class="ca-summary-time">
+                <span>K 线</span>
+                <strong id="ca-bar-time">等待K线数据</strong>
+              </div>
+            </div>
+
+            <div id="ca-overview-body" class="ca-overview-body" hidden>
+              <section class="ca-context-panel" aria-labelledby="ca-context-title">
+                <div class="ca-context-head">
+                  <span id="ca-context-title" class="ca-section-kicker">结论依据</span>
+                  <span id="ca-analysis-updated" class="ca-updated">等待结构计算</span>
+                </div>
+                <p id="ca-structure-detail">加载图表后按当前周期计算笔、线段与双中枢位置。</p>
+              </section>
 
               <section class="ca-layer-panel" aria-labelledby="ca-layer-title">
                 <header>
                   <div>
-                    <span class="ca-section-kicker">图层控制</span>
-                    <h3 id="ca-layer-title">当前图表结构图层</h3>
+                    <span class="ca-section-kicker">图表显示</span>
+                    <h3 id="ca-layer-title">结构图层</h3>
                   </div>
-                  <small>各层独立显示</small>
+                  <small>只影响当前图表</small>
                 </header>
                 <div class="ca-layer-buttons" role="group" aria-label="缠论结构图层开关">
                   <button type="button" data-chart-layer="bi" aria-pressed="true">笔</button>
@@ -297,9 +313,9 @@
                 <header class="ca-analysis-group-head">
                   <div class="ca-analysis-group-heading">
                     <span class="ca-group-index">01</span>
-                    <h3 id="ca-trend-title">走势状态</h3>
+                    <h3 id="ca-trend-title">结构主线</h3>
                   </div>
-                  <small>方向 · 端点 · 闭合状态</small>
+                  <small>方向 · 状态 · 端点</small>
                 </header>
                 <div class="ca-structure-grid" aria-label="当前笔与当前线段状态">
                   <article class="ca-structure-card">
@@ -319,9 +335,9 @@
                 <header class="ca-analysis-group-head">
                   <div class="ca-analysis-group-heading">
                     <span class="ca-group-index">02</span>
-                    <h3 id="ca-zone-title">双中枢定位</h3>
+                    <h3 id="ca-zone-title">中枢位置</h3>
                   </div>
-                  <small>区间 · 状态 · 现价距离</small>
+                  <small>区间 · 完成度 · 现价</small>
                 </header>
                 <div class="ca-zone-grid" aria-label="笔中枢与线段中枢位置">
                   <article id="ca-bi-zone-row" class="ca-zone-card" data-tone="neutral">
@@ -341,39 +357,45 @@
                     <small id="ca-xd-zone-meta">等待出现可计算的重叠区间</small>
                   </article>
                 </div>
-                <div class="ca-zone-audit-grid" aria-label="双塔中枢可审计详情">
-                  <article>
-                    <header><strong>笔中枢详情</strong><span id="ca-bi-zone-completion">尚未形成</span></header>
-                    <dl>
-                      <div><dt>塔层</dt><dd id="ca-bi-zone-tower">笔</dd></div>
-                      <div><dt>递归级别</dt><dd id="ca-bi-zone-level">观察层</dd></div>
-                      <div><dt>ZD / ZG</dt><dd id="ca-bi-zone-bounds">ZD -- / ZG --</dd></div>
-                      <div><dt>进入段</dt><dd id="ca-bi-zone-entry">未提供进入段</dd></div>
-                      <div><dt>离开段</dt><dd id="ca-bi-zone-exit">未提供离开段</dd></div>
-                      <div><dt>关联买卖点</dt><dd id="ca-bi-zone-point">暂无关联买卖点</dd></div>
-                    </dl>
-                  </article>
-                  <article>
-                    <header><strong>线段中枢详情</strong><span id="ca-xd-zone-completion">尚未形成</span></header>
-                    <dl>
-                      <div><dt>塔层</dt><dd id="ca-xd-zone-tower">线段</dd></div>
-                      <div><dt>递归级别</dt><dd id="ca-xd-zone-level">L0</dd></div>
-                      <div><dt>ZD / ZG</dt><dd id="ca-xd-zone-bounds">ZD -- / ZG --</dd></div>
-                      <div><dt>进入段</dt><dd id="ca-xd-zone-entry">未提供进入段</dd></div>
-                      <div><dt>离开段</dt><dd id="ca-xd-zone-exit">未提供离开段</dd></div>
-                      <div><dt>关联买卖点</dt><dd id="ca-xd-zone-point">暂无关联买卖点</dd></div>
-                    </dl>
-                  </article>
-                </div>
+                <details class="ca-evidence-details">
+                  <summary>
+                    <span>查看中枢构成证据</span>
+                    <small>级别、边界、进入段与离开段</small>
+                  </summary>
+                  <div class="ca-zone-audit-grid" aria-label="双塔中枢可审计详情">
+                    <article>
+                      <header><strong>笔中枢</strong><span id="ca-bi-zone-completion">尚未形成</span></header>
+                      <dl>
+                        <div><dt>塔层</dt><dd id="ca-bi-zone-tower">笔</dd></div>
+                        <div><dt>递归级别</dt><dd id="ca-bi-zone-level">观察层</dd></div>
+                        <div><dt>ZD / ZG</dt><dd id="ca-bi-zone-bounds">ZD -- / ZG --</dd></div>
+                        <div><dt>进入段</dt><dd id="ca-bi-zone-entry">未提供进入段</dd></div>
+                        <div><dt>离开段</dt><dd id="ca-bi-zone-exit">未提供离开段</dd></div>
+                        <div><dt>关联买卖点</dt><dd id="ca-bi-zone-point">暂无关联买卖点</dd></div>
+                      </dl>
+                    </article>
+                    <article>
+                      <header><strong>线段中枢</strong><span id="ca-xd-zone-completion">尚未形成</span></header>
+                      <dl>
+                        <div><dt>塔层</dt><dd id="ca-xd-zone-tower">线段</dd></div>
+                        <div><dt>递归级别</dt><dd id="ca-xd-zone-level">L0</dd></div>
+                        <div><dt>ZD / ZG</dt><dd id="ca-xd-zone-bounds">ZD -- / ZG --</dd></div>
+                        <div><dt>进入段</dt><dd id="ca-xd-zone-entry">未提供进入段</dd></div>
+                        <div><dt>离开段</dt><dd id="ca-xd-zone-exit">未提供离开段</dd></div>
+                        <div><dt>关联买卖点</dt><dd id="ca-xd-zone-point">暂无关联买卖点</dd></div>
+                      </dl>
+                    </article>
+                  </div>
+                </details>
               </section>
 
               <section class="ca-analysis-group" aria-labelledby="ca-signal-title">
                 <header class="ca-analysis-group-head">
                   <div class="ca-analysis-group-heading">
                     <span class="ca-group-index">03</span>
-                    <h3 id="ca-signal-title">最近结构证据</h3>
+                    <h3 id="ca-signal-title">最近信号</h3>
                   </div>
-                  <small>层级 · 距当前 K 线 · 价格偏离</small>
+                  <small>类型 · 时间距离 · 价格偏离</small>
                 </header>
                 <div class="ca-signal-grid" aria-label="最近买卖点与背驰记录">
                   <article id="ca-mmd-row" class="ca-signal-card" data-tone="neutral">
@@ -393,48 +415,47 @@
                 <header class="ca-analysis-group-head ca-plan-head">
                   <div class="ca-analysis-group-heading">
                     <span class="ca-group-index">04</span>
-                    <h3 id="ca-plan-title">验证清单</h3>
+                    <h3 id="ca-plan-title">后续验证条件</h3>
                   </div>
-                  <small>事实 · 条件 · 重评</small>
+                  <small>确认 · 重评 · 已知事实</small>
                 </header>
                 <div class="ca-plan-row">
                   <span class="ca-plan-index">01</span>
-                  <div class="ca-plan-copy">
-                    <span>当前事实</span>
-                    <p id="ca-plan-now">加载后仅陈述已经计算出的结构事实。</p>
-                  </div>
-                </div>
-                <div class="ca-plan-row">
-                  <span class="ca-plan-index">02</span>
                   <div class="ca-plan-copy">
                     <span>下一步确认</span>
                     <p id="ca-plan-wait">等待至少一笔形成并闭合，再检查线段与中枢。</p>
                   </div>
                 </div>
                 <div class="ca-plan-row">
-                  <span class="ca-plan-index">03</span>
+                  <span class="ca-plan-index">02</span>
                   <div class="ca-plan-copy">
                     <span>何时重评</span>
                     <p id="ca-plan-boundary">结构端点或中枢不足时，不预设交易边界。</p>
                   </div>
                 </div>
+                <div class="ca-plan-row">
+                  <span class="ca-plan-index">03</span>
+                  <div class="ca-plan-copy">
+                    <span>当前事实</span>
+                    <p id="ca-plan-now">加载后仅陈述已经计算出的结构事实。</p>
+                  </div>
+                </div>
               </section>
 
               <nav class="ca-analysis-actions" aria-label="结构判读后续入口">
+                <button type="button" id="ca-refresh-analysis" class="ca-action ca-action--primary">刷新当前解读</button>
                 <a
                   id="ca-screening-link"
-                  class="ca-action ca-action--primary"
-                  href="{{ url_for('decision_support.early_screening') }}">打开缠论提前选股</a>
-                <button type="button" id="ca-refresh-analysis" class="ca-action">重新计算</button>
+                  class="ca-action"
+                  href="{{ url_for('decision_support.early_screening') }}">提前选股</a>
                 <a
                   id="ca-audit-link"
                   class="ca-action"
-                  href="{{ url_for('decision_support.research_audit') }}">查看研究审计</a>
+                  href="{{ url_for('decision_support.research_audit') }}">研究审计</a>
               </nav>
 
               <p class="ca-disclaimer">
-                <strong>阅读口径：</strong>本页只呈现当前图表周期已经计算出的结构，不预测下一根 K 线；未闭合结构、历史信号和价格边界均不能直接视为交易指令。
-                <span id="ca-analysis-updated" class="ca-updated">等待结构计算</span>
+                <strong>阅读口径：</strong>只呈现当前周期已计算的事实，不预测下一根 K 线；未闭合结构、历史信号和价格边界不能直接视为交易指令。
               </p>
             </div>
           </section>

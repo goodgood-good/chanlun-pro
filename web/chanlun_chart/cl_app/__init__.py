@@ -45,6 +45,8 @@ __all__ = ["create_app"]
 
 _TASK_HISTORY_LIMIT = 500
 _TASK_TERMINAL_STATES = {"已完成", "执行异常", "未执行", "删除作业"}
+_SHARED_RUNTIME_OWNER_LOCK = threading.RLock()
+_SHARED_RUNTIME_OWNER: object | None = None
 
 
 def _trim_task_history(task_map, limit: int = _TASK_HISTORY_LIMIT) -> None:
@@ -99,9 +101,17 @@ def create_app(test_config=None, start_scheduler=False):
         MAX_FORM_PARTS=500,
         WTF_CSRF_TIME_LIMIT=12 * 60 * 60,
         READINESS_MARKETS=os.environ.get("CHANLUN_READINESS_MARKETS", "a"),
+        TRADING_SCREENING_BACKGROUND_ENABLED=True,
     )
     if test_config:
         app.config.update(test_config)
+    if app.testing and (
+        not test_config
+        or "TRADING_SCREENING_BACKGROUND_ENABLED" not in test_config
+    ):
+        # Runtime tests opt in explicitly. This keeps the default app factory
+        # side-effect free and prevents real market scans in unrelated tests.
+        app.config["TRADING_SCREENING_BACKGROUND_ENABLED"] = False
     if https_enabled:
         app.config["SESSION_COOKIE_SECURE"] = True
         app.config["REMEMBER_COOKIE_SECURE"] = True
@@ -684,13 +694,15 @@ def create_app(test_config=None, start_scheduler=False):
 
     runtime_lock = threading.RLock()
     runtime_cleanup_lock = threading.Lock()
+    runtime_owner_token = object()
     runtime_state = {
         "started": False,
         "stopping": False,
         "status": "stopped",
         "error": None,
         "active_starts": 0,
-        "shutdown_complete": False,
+        "shutdown_complete": True,
+        "owns_shared_runtime": False,
         "generation": 0,
         "stop_event": threading.Event(),
         "scheduler_enabled": None,
@@ -726,6 +738,7 @@ def create_app(test_config=None, start_scheduler=False):
         return {}
 
     def start_runtime_services(enable_scheduler=True):
+        global _SHARED_RUNTIME_OWNER
         nonlocal metadata_warmup_thread
         with runtime_lock:
             if runtime_state["status"] == "running":
@@ -738,6 +751,16 @@ def create_app(test_config=None, start_scheduler=False):
                 raise RuntimeError("runtime services are starting")
             if runtime_state["stopping"] or runtime_state["active_starts"]:
                 raise RuntimeError("runtime services are stopping")
+            with _SHARED_RUNTIME_OWNER_LOCK:
+                if (
+                    _SHARED_RUNTIME_OWNER is not None
+                    and _SHARED_RUNTIME_OWNER is not runtime_owner_token
+                ):
+                    raise RuntimeError(
+                        "runtime services are owned by another app instance"
+                    )
+                _SHARED_RUNTIME_OWNER = runtime_owner_token
+                runtime_state["owns_shared_runtime"] = True
             runtime_state["generation"] += 1
             start_generation = runtime_state["generation"]
             start_stop_event = threading.Event()
@@ -787,6 +810,9 @@ def create_app(test_config=None, start_scheduler=False):
             _ensure_start_is_current()
             sse_stream_service.start_sse_runtime()
             _ensure_start_is_current()
+            if app.config.get("TRADING_SCREENING_BACKGROUND_ENABLED", True):
+                decision_support_trading_screening.start_background()
+                _ensure_start_is_current()
 
             if enable_scheduler:
                 _alert_tasks.run()
@@ -833,18 +859,33 @@ def create_app(test_config=None, start_scheduler=False):
         finally:
             with runtime_lock:
                 runtime_state["active_starts"] -= 1
+                if (
+                    runtime_state["active_starts"] == 0
+                    and runtime_state["status"] == "stopped"
+                    and runtime_state["owns_shared_runtime"]
+                ):
+                    with _SHARED_RUNTIME_OWNER_LOCK:
+                        if _SHARED_RUNTIME_OWNER is runtime_owner_token:
+                            _SHARED_RUNTIME_OWNER = None
+                    runtime_state["owns_shared_runtime"] = False
 
     def shutdown_runtime_services():
+        global _SHARED_RUNTIME_OWNER
         with runtime_cleanup_lock:
             with runtime_lock:
-                runtime_state["stop_event"].set()
                 if (
                     not runtime_state["started"]
-                    and runtime_state["active_starts"] == 0
                     and runtime_state["status"] == "stopped"
                     and runtime_state["shutdown_complete"]
                 ):
                     return
+                if not runtime_state["owns_shared_runtime"]:
+                    # App factories are side-effect free by default. An app that
+                    # never claimed the process-wide services must not stop the
+                    # owner app's SSE, cache, metadata, or revalidation workers.
+                    runtime_state["shutdown_complete"] = True
+                    return
+                runtime_state["stop_event"].set()
                 runtime_state["stopping"] = True
                 runtime_state["status"] = "stopping"
 
@@ -885,6 +926,12 @@ def create_app(test_config=None, start_scheduler=False):
                     raise
 
             _cleanup("scheduler", _shutdown_scheduler_resources)
+            _cleanup(
+                "trading-screening",
+                lambda: decision_support_trading_screening.shutdown_background(
+                    wait=True, timeout=1.0
+                ),
+            )
 
             def _handles_for(key):
                 value = runtime_state.get(key)
@@ -947,6 +994,11 @@ def create_app(test_config=None, start_scheduler=False):
                         "symbols": None,
                     }
                 )
+                if runtime_state["active_starts"] == 0:
+                    with _SHARED_RUNTIME_OWNER_LOCK:
+                        if _SHARED_RUNTIME_OWNER is runtime_owner_token:
+                            _SHARED_RUNTIME_OWNER = None
+                    runtime_state["owns_shared_runtime"] = False
 
     def runtime_status():
         with runtime_lock:
@@ -981,6 +1033,10 @@ def create_app(test_config=None, start_scheduler=False):
         TradingScreeningService,
     )
     from .services.trading_screening_gateway import NativeTradingDataGateway
+    from chanlun.exchange.qmt_screening_sector_source import (
+        QmtSectorCompositeSource,
+        build_qmt_gics3_sector_catalog,
+    )
 
     def _trading_screening_exchange():
         from chanlun.exchange import Market, get_exchange
@@ -993,17 +1049,14 @@ def create_app(test_config=None, start_scheduler=False):
         return _safe_all_stocks(exchange, "a")
 
     def _trading_screening_sectors():
-        from chanlun.decision_support.tdx_industry_sectors import (
-            build_tdx_industry_sector_catalog,
-        )
-        from chanlun.exchange.stocks_bkgn import StocksBKGN
-
-        return build_tdx_industry_sector_catalog(StocksBKGN().file_bkgns())
+        return build_qmt_gics3_sector_catalog()
 
     def _trading_screening_sector_exchange():
-        from chanlun.exchange.exchange_tdx import ExchangeTDX
+        # QMT component frames are supplied separately below. Retaining this
+        # provider keeps the gateway's stock/legacy adapter boundary explicit.
+        return _trading_screening_exchange()
 
-        return ExchangeTDX()
+    trading_screening_sector_frames = QmtSectorCompositeSource()
 
     def _trading_screening_watchlist():
         from chanlun.persistence.db import db
@@ -1083,6 +1136,7 @@ def create_app(test_config=None, start_scheduler=False):
             sector_exchange_provider=_trading_screening_sector_exchange,
             universe_provider=_trading_screening_universe,
             sector_provider=_trading_screening_sectors,
+            sector_frame_provider=trading_screening_sector_frames.frame,
             watchlist_provider=_trading_screening_watchlist,
             holdings_provider=_trading_screening_holdings,
         )

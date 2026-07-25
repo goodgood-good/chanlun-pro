@@ -17,7 +17,7 @@ from .fingerprints import (
 
 
 class StrategyTrack(str, Enum):
-    CHANLUN_ORIGINAL_LOW_DRAWDOWN = "chanlun_original_low_drawdown_v1"
+    CHANLUN_SOURCE_FAITHFUL = "chanlun_source_faithful_v2"
 
 
 class EventState(str, Enum):

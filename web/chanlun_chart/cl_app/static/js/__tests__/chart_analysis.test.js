@@ -272,7 +272,10 @@ test('index page exposes a real current-chart analysis region and its assets', (
 
   for (const id of [
     'ca-overview',
+    'ca-overview-title',
+    'ca-overview-summary',
     'ca-overview-toggle',
+    'ca-overview-toggle-label',
     'ca-overview-body',
     'ca-current-symbol',
     'ca-current-interval',
@@ -298,6 +301,10 @@ test('index page exposes a real current-chart analysis region and its assets', (
   }
 
   assert.match(template, /id=["']ca-overview-toggle["'][^>]*aria-controls=["']ca-overview-body["']/);
+  assert.match(template, /id=["']ca-overview["'][^>]*class=["'][^"']*\bis-collapsed\b/);
+  assert.match(template, /id=["']ca-overview-toggle["'][^>]*aria-expanded=["']false["']/);
+  assert.match(template, /id=["']ca-overview-body["'][^>]*\bhidden\b/);
+  assert.match(template, /<details\s+class=["']ca-evidence-details["']/);
   assert.match(template, /css\/chart_analysis\.css/);
   assert.match(template, /js\/chart_analysis\.js/);
   assert.match(template, /<meta\s+charset=["']utf-8["']\s*\/?>/i);
@@ -311,11 +318,13 @@ test('index page exposes a real current-chart analysis region and its assets', (
     'STRUCTURE WORKBENCH',
     '缠论结构解盘',
     '分析标的',
-    '结构判读',
-    '走势状态',
-    '双中枢定位',
-    '最近结构证据',
-    '验证清单',
+    '当前结构解读',
+    '本周期结构',
+    '结构主线',
+    '中枢位置',
+    '查看中枢构成证据',
+    '最近信号',
+    '后续验证条件',
     '盯盘与研究入口',
     '提前选股与审计',
     '自选盯盘',
@@ -339,6 +348,20 @@ test('index page exposes a real current-chart analysis region and its assets', (
     const escaped = removedAiSurface.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     assert.doesNotMatch(template, new RegExp(escaped));
   }
+});
+
+test('current structure interpretation defaults closed and remembers only the redesigned preference', () => {
+  const template = fs.readFileSync(templatePath, 'utf8');
+  const source = fs.readFileSync(path.join(staticJsPath, 'chart_analysis.js'), 'utf8');
+  const waitAt = template.indexOf('id="ca-plan-wait"');
+  const boundaryAt = template.indexOf('id="ca-plan-boundary"');
+  const factAt = template.indexOf('id="ca-plan-now"');
+
+  assert.match(source, /OVERVIEW_COLLAPSE_STORAGE_KEY\s*=\s*['"]chart_analysis_overview_collapsed_v2['"]/);
+  assert.match(source, /stored\s*===\s*null\s*\?\s*true/);
+  assert.doesNotMatch(source, /getItem\(['"]chart_analysis_overview_collapsed['"]\)/);
+  assert.ok(waitAt > 0 && waitAt < boundaryAt && boundaryAt < factAt);
+  assert.match(template, /id="ca-refresh-analysis"[^>]*class="ca-action ca-action--primary"/);
 });
 
 test('every chart-sidebar tool uses explicit purpose, action and empty-state copy', () => {

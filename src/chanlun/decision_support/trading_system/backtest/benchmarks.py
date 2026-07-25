@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from collections import defaultdict
 from decimal import Decimal
-import json
-from pathlib import Path
 from typing import Literal
 
 from chanlun.decision_support.trading_system.backtest.models import (
@@ -16,45 +14,6 @@ from chanlun.decision_support.trading_system.backtest.report import (
 
 
 EvidenceGrade = Literal["certified", "research_only", "invalid"]
-
-
-def _decimal(value: object) -> Decimal:
-    converted = Decimal(str(value))
-    if not converted.is_finite():
-        raise ValueError("benchmark decimal must be finite")
-    return converted
-
-
-def _frozen_old_artifact(root: Path) -> BenchmarkResult:
-    candidates = sorted(
-        root.glob("*.json"),
-        key=lambda path: (path.stat().st_mtime_ns, path.name),
-        reverse=True,
-    )
-    for path in candidates:
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-            if not str(payload.get("schema_version", "")).startswith(
-                "chanlun-early-screening-backtest/"
-            ):
-                continue
-            metrics = payload["result"]["metrics"]
-            return BenchmarkResult(
-                benchmark_id="frozen_old_artifact",
-                label="frozen_old_artifact",
-                net_return=_decimal(metrics["total_return"]),
-                max_drawdown=_decimal(metrics["max_drawdown"]),
-                data_grade="research_only",
-            )
-        except (KeyError, TypeError, ValueError, json.JSONDecodeError, OSError):
-            continue
-    return BenchmarkResult(
-        benchmark_id="frozen_old_artifact",
-        label="frozen_old_artifact",
-        net_return=None,
-        max_drawdown=None,
-        data_grade="invalid",
-    )
 
 
 def _eligible_equal_weight(
@@ -114,10 +73,8 @@ def build_required_benchmarks(
     dataset: BacktestDataset,
     *,
     data_grade: EvidenceGrade,
-    frozen_artifact_root: Path,
 ) -> tuple[BenchmarkResult, ...]:
     rows = {
-        "frozen_old_artifact": _frozen_old_artifact(frozen_artifact_root),
         "csi_300": BenchmarkResult(
             benchmark_id="csi_300",
             label="csi_300",

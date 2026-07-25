@@ -364,8 +364,15 @@ def load_qmt_minute_bars(
             first_open = _decimal(ordered.iloc[0]["open"])
             limit_reference = previous_session_close or first_open
             for row in ordered.itertuples(index=False):
-                opened_at = _normalize_frame_date(row.date).to_pydatetime()
-                closed_at = opened_at + timedelta(minutes=1)
+                # QMT labels native minute bars by their closed endpoint.  In
+                # particular, continuous-session rows are 09:31..11:30 and
+                # 13:01..15:00; 09:30 is the opening-auction observation.
+                # Treating this label as an opening time shifts every decision
+                # and fill one minute into the future.  The aggregator handles
+                # the auction row specially because QMT includes it in the
+                # first native morning 5m/30m bar.
+                closed_at = _normalize_frame_date(row.date).to_pydatetime()
+                opened_at = closed_at - timedelta(minutes=1)
                 opened = _decimal(row.open)
                 high = _decimal(row.high)
                 low = _decimal(row.low)

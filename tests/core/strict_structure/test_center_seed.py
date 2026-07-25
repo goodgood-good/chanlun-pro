@@ -2,7 +2,9 @@ from dataclasses import replace
 
 import pytest
 
+from chanlun.core.strict_structure import center_machine
 from chanlun.core.strict_structure.center_machine import (
+    calculate_centers,
     establish_center,
     forming_preview,
 )
@@ -41,7 +43,7 @@ def invalid_initial_five(mutation):
             replace(unit(3, "up", 90, 95), high_tick=110),
             unit(4, "down", 95, 80),
         ),
-        "exit_endpoint_not_outside": (
+        "exit_endpoint_inside_core": (
             unit(0, "up", 90, 120),
             unit(1, "down", 120, 100),
             unit(2, "up", 100, 115),
@@ -80,7 +82,6 @@ def test_three_or_four_locked_units_never_establish_formal_center():
         "middle_has_no_positive_core",
         "entry_has_no_positive_overlap",
         "exit_has_no_positive_overlap",
-        "exit_endpoint_not_outside",
     ),
 )
 def test_initial_five_reject_each_geometric_violation(mutation):
@@ -92,6 +93,19 @@ def test_initial_five_reject_each_geometric_violation(mutation):
         )
         is None
     )
+
+
+def test_five_locked_overlapping_units_establish_before_exit_moves_outside():
+    values = invalid_initial_five("exit_endpoint_inside_core")
+
+    center = establish_center(values, 0, SourceKind.SEGMENT)
+
+    assert center is not None
+    assert center.state is CenterState.ONGOING
+    assert center.entry_unit.direction == center.initial_exit_unit.direction == "up"
+    assert center.pending_leave_unit is None
+    assert (center.zd_tick, center.zg_tick) == (105, 115)
+    assert center.core_body_end_market_time == values[4].market_start
 
 
 def test_entry_touching_core_boundary_has_no_positive_overlap():
@@ -116,17 +130,44 @@ def test_initial_exit_touching_core_boundary_has_no_positive_overlap():
     assert establish_center(values, 0, SourceKind.SEGMENT) is None
 
 
-def test_unlocked_initial_exit_is_preview_only():
+def test_unlocked_initial_exit_establishes_forming_preview_only():
     initial = valid_five_up_exit()
     active = initial[:-1] + (
         replace(initial[-1], locked=False, confirmed_at=None),
     )
     assert establish_center(active, 0, SourceKind.SEGMENT) is None
-    preview = forming_preview(active, 0, SourceKind.SEGMENT)
+    preview_builder = getattr(center_machine, "establish_center_preview", None)
+    assert callable(preview_builder), "establish_center_preview is required"
+    preview = preview_builder(active, 0, SourceKind.SEGMENT)
     assert preview is not None
     assert preview.state is CenterPreviewState.FORMING
     assert preview.price_basis_revision == TEST_PRICE_BASIS
+    assert preview.unit_ids == tuple(item.unit_id for item in active)
+    assert (preview.zd_tick, preview.zg_tick) == (105, 115)
     assert not hasattr(preview, "center_id")
+    result = calculate_centers(active, 0, SourceKind.SEGMENT)
+    assert result.centers == ()
+    assert result.previews == (preview,)
+
+
+def test_unlocked_fifth_unit_inside_core_is_forming_center_preview():
+    initial = valid_five_up_exit()
+    inside = replace(
+        initial[-1],
+        end_tick=110,
+        high_tick=115,
+        locked=False,
+        confirmed_at=None,
+    )
+    values = initial[:-1] + (inside,)
+    preview_builder = getattr(center_machine, "establish_center_preview", None)
+    assert callable(preview_builder), "establish_center_preview is required"
+    preview = preview_builder(values, 0, SourceKind.SEGMENT)
+    assert preview is not None
+    assert preview.state is CenterPreviewState.FORMING
+    assert preview.unit_ids == tuple(item.unit_id for item in values)
+    assert (preview.zd_tick, preview.zg_tick) == (105, 115)
+    assert calculate_centers(values, 0, SourceKind.SEGMENT).previews == (preview,)
 
 
 def test_zero_width_middle_intersection_is_touch_only_observation():

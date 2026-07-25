@@ -47,12 +47,20 @@ from chanlun.exchange.price_basis import (
     attach_price_basis_metadata,
     build_tdx_industry_price_basis_metadata,
 )
+from chanlun.exchange.qmt_screening_sector_source import (
+    QMT_GICS3_CATALOG_SOURCE,
+    QMT_GICS3_COMPOSITE_ADJUSTMENT,
+    QMT_GICS3_COMPOSITE_PROVIDER,
+)
 from chanlun.tools.log_util import LogUtil
 
 
 _FREQUENCIES = ("30m", "5m", "1m")
 _SECTOR_FREQUENCIES = ("30m", "5m")
 _A_STOCK_CODE = re.compile(r"^(?:SH|SZ|BJ)\.\d{6}$")
+_TDX_SECTOR_SOURCE = "tdx_880_industry_index"
+_TDX_SECTOR_PRICE_SOURCE = "tdx_native_880_index"
+_FRAME_UNSET = object()
 
 
 @dataclass(frozen=True, slots=True)
@@ -348,7 +356,7 @@ def _universe_metadata(
 
 
 class NativeTradingDataGateway:
-    """Read native TDX sector bars, then build stock 30m/5m/1m structures."""
+    """Read QMT sector/member facts, then build stock 30m/5m/1m structures."""
 
     def __init__(
         self,
@@ -357,6 +365,7 @@ class NativeTradingDataGateway:
         sector_exchange_provider: Callable[[], object],
         universe_provider: Callable[[object], object],
         sector_provider: Callable[[], object],
+        sector_frame_provider: Callable[..., object] | None = None,
         watchlist_provider: Callable[[], object] = lambda: (),
         holdings_provider: Callable[[], object] = lambda: (),
         analyzer: StructureAnalyzer = analyze_native_frame,
@@ -373,10 +382,15 @@ class NativeTradingDataGateway:
         )
         if any(not callable(provider) for provider in providers):
             raise TypeError("trading gateway providers must be callable")
+        if sector_frame_provider is not None and not callable(
+            sector_frame_provider
+        ):
+            raise TypeError("sector_frame_provider must be callable")
         self._exchange_provider = exchange_provider
         self._sector_exchange_provider = sector_exchange_provider
         self._universe_provider = universe_provider
         self._sector_provider = sector_provider
+        self._sector_frame_provider = sector_frame_provider
         self._watchlist_provider = watchlist_provider
         self._holdings_provider = holdings_provider
         self._analyzer = analyzer
@@ -393,26 +407,34 @@ class NativeTradingDataGateway:
     def _load_analysis(
         self,
         *,
-        exchange: object,
+        exchange: object | None,
         code: str,
         analysis_code: str,
         frequency: str,
         as_of: datetime,
-        native_sector_index: bool = False,
+        sector_source: str | None = None,
+        frame_override: object = _FRAME_UNSET,
     ) -> FrameStructureAnalysis:
+        if sector_source not in {
+            None,
+            _TDX_SECTOR_SOURCE,
+            QMT_GICS3_CATALOG_SOURCE,
+        }:
+            raise ValueError("unsupported sector source")
+        is_sector = sector_source is not None
         loader = getattr(exchange, "klines", None)
-        if not callable(loader):
-            if native_sector_index:
+        if frame_override is _FRAME_UNSET and not callable(loader):
+            if is_sector:
                 raise SectorAnalysisUnavailable(
                     "sector_adapter_error",
-                    "exchange must expose klines",
+                    "sector frame source is unavailable",
                 )
             raise TypeError("exchange must expose klines")
         args: dict[str, object] = {
             "req_counts": self._config.request_bars(frequency)
         }
         sector_metadata = None
-        if native_sector_index:
+        if sector_source == _TDX_SECTOR_SOURCE:
             quantum = resolve_tdx_industry_index_quantum(code)
             if quantum is None:
                 raise SectorAnalysisUnavailable(
@@ -424,36 +446,45 @@ class NativeTradingDataGateway:
                 quantum,
             )
             args["fq"] = "none"
-        try:
-            raw_frame = loader(code, frequency, args=args)
-        except SectorAnalysisUnavailable:
-            raise
-        except Exception as exc:
-            if native_sector_index:
-                raise SectorAnalysisUnavailable(
-                    "sector_adapter_error",
-                    str(exc),
-                ) from exc
-            raise
-        if native_sector_index:
+        if frame_override is _FRAME_UNSET:
+            try:
+                raw_frame = loader(code, frequency, args=args)
+            except SectorAnalysisUnavailable:
+                raise
+            except Exception as exc:
+                if is_sector:
+                    raise SectorAnalysisUnavailable(
+                        "sector_adapter_error",
+                        str(exc),
+                    ) from exc
+                raise
+        else:
+            raw_frame = frame_override
+        if is_sector:
             if not isinstance(raw_frame, pd.DataFrame):
                 raise SectorAnalysisUnavailable(
                     "sector_kline_unavailable",
                     "kline frame is unavailable",
                 )
             try:
-                attach_price_basis_metadata(raw_frame, sector_metadata)
-                expected_attrs = {
-                    "structure_price_quantum": "0.01",
-                    "price_basis_revision": sector_metadata.price_basis_revision,
-                    "price_basis_provider": "tdx-industry-index",
-                    "price_basis_adjustment": "none",
-                }
+                if sector_source == _TDX_SECTOR_SOURCE:
+                    attach_price_basis_metadata(raw_frame, sector_metadata)
+                    expected_attrs = {
+                        "structure_price_quantum": "0.01",
+                        "price_basis_revision": sector_metadata.price_basis_revision,
+                        "price_basis_provider": "tdx-industry-index",
+                        "price_basis_adjustment": "none",
+                    }
+                else:
+                    expected_attrs = {
+                        "price_basis_provider": QMT_GICS3_COMPOSITE_PROVIDER,
+                        "price_basis_adjustment": QMT_GICS3_COMPOSITE_ADJUSTMENT,
+                    }
                 if any(
                     raw_frame.attrs.get(name) != value
                     for name, value in expected_attrs.items()
                 ):
-                    raise ValueError("TDX industry price basis attrs are incomplete")
+                    raise ValueError("sector price basis attrs are incomplete")
                 strict_snapshot_price_metadata(raw_frame)
             except Exception as exc:
                 raise SectorAnalysisUnavailable(
@@ -467,7 +498,7 @@ class NativeTradingDataGateway:
                 minimum_bars=self._config.minimum_bars(frequency),
             )
         except Exception as exc:
-            if native_sector_index:
+            if is_sector:
                 raise SectorAnalysisUnavailable(
                     "sector_kline_unavailable",
                     str(exc),
@@ -475,17 +506,22 @@ class NativeTradingDataGateway:
             raise
         try:
             metadata = strict_snapshot_price_metadata(frame)
-            if native_sector_index:
-                if (
-                    frame.attrs.get("price_basis_provider")
-                    != "tdx-industry-index"
-                    or frame.attrs.get("price_basis_adjustment") != "none"
-                ):
-                    raise ValueError(
-                        "closed TDX industry frame lost price basis attrs"
-                    )
+            if sector_source == _TDX_SECTOR_SOURCE:
+                expected_provider = "tdx-industry-index"
+                expected_adjustment = "none"
+            elif sector_source == QMT_GICS3_CATALOG_SOURCE:
+                expected_provider = QMT_GICS3_COMPOSITE_PROVIDER
+                expected_adjustment = QMT_GICS3_COMPOSITE_ADJUSTMENT
+            else:
+                expected_provider = expected_adjustment = None
+            if is_sector and (
+                frame.attrs.get("price_basis_provider") != expected_provider
+                or frame.attrs.get("price_basis_adjustment")
+                != expected_adjustment
+            ):
+                raise ValueError("closed sector frame lost price basis attrs")
         except Exception as exc:
-            if native_sector_index:
+            if is_sector:
                 raise SectorAnalysisUnavailable(
                     "sector_price_basis_unavailable",
                     str(exc),
@@ -509,14 +545,14 @@ class NativeTradingDataGateway:
                 as_of=closed_at,
             )
         except StrictStructureAnalysisError as exc:
-            if native_sector_index:
+            if is_sector:
                 raise SectorAnalysisUnavailable(
                     "sector_structure_invalid",
                     str(exc),
                 ) from exc
             raise
         except Exception as exc:
-            if native_sector_index:
+            if is_sector:
                 raise SectorAnalysisUnavailable(
                     "sector_adapter_error",
                     str(exc),
@@ -563,8 +599,14 @@ class NativeTradingDataGateway:
     ) -> SectorAssessmentBatch:
         observed_at = normalize_datetime(as_of, "as_of")
         raw = self._sector_provider()
-        if not isinstance(raw, Mapping) or raw.get("source") != "tdx_880_industry_index":
-            raise ValueError("sector catalog must expose native TDX 880 bars")
+        if not isinstance(raw, Mapping):
+            raise TypeError("sector catalog must be a mapping")
+        catalog_source = raw.get("source")
+        if catalog_source not in {
+            _TDX_SECTOR_SOURCE,
+            QMT_GICS3_CATALOG_SOURCE,
+        }:
+            raise ValueError("sector catalog must expose QMT GICS3 components")
         rows = raw.get("sectors")
         if isinstance(rows, (str, bytes)) or not isinstance(rows, Sequence):
             raise TypeError("sector catalog must expose a sectors sequence")
@@ -572,7 +614,12 @@ class NativeTradingDataGateway:
         digits, symbol_names = _universe_metadata(
             self._universe_provider(stock_exchange)
         )
-        sector_exchange = self._sector_exchange_provider()
+        universe_codes = set(digits.values())
+        sector_exchange = (
+            self._sector_exchange_provider()
+            if catalog_source == _TDX_SECTOR_SOURCE
+            else None
+        )
         assessments: list[SectorAssessment] = []
         errors: list[SectorAnalysisFailure] = []
         discovered_count = 0
@@ -586,14 +633,29 @@ class NativeTradingDataGateway:
             sector_id = row.get("sector_id")
             sector_name = row.get("name")
             kline_code = row.get("kline_code")
+            source_key = row.get("source_key")
             raw_members = row.get("member_codes")
+            valid_identity = (
+                isinstance(sector_id, str)
+                and (
+                    (
+                        catalog_source == _TDX_SECTOR_SOURCE
+                        and sector_id.startswith("tdx-industry:")
+                        and isinstance(kline_code, str)
+                    )
+                    or (
+                        catalog_source == QMT_GICS3_CATALOG_SOURCE
+                        and sector_id.startswith("qmt-gics3:")
+                        and isinstance(source_key, str)
+                        and source_key.startswith("GICS3")
+                    )
+                )
+            )
             if (
-                not isinstance(sector_id, str)
-                or not sector_id.startswith("tdx-industry:")
+                not valid_identity
                 or sector_id in seen
                 or not isinstance(sector_name, str)
                 or not sector_name.strip()
-                or not isinstance(kline_code, str)
                 or isinstance(raw_members, (str, bytes))
                 or not isinstance(raw_members, Sequence)
             ):
@@ -601,9 +663,14 @@ class NativeTradingDataGateway:
             members = tuple(
                 sorted(
                     {
-                        digits[value]
+                        (
+                            value
+                            if value in universe_codes
+                            else digits[value]
+                        )
                         for value in raw_members
-                        if isinstance(value, str) and value in digits
+                        if isinstance(value, str)
+                        and (value in universe_codes or value in digits)
                     }
                 )
             )
@@ -617,13 +684,34 @@ class NativeTradingDataGateway:
                 analyses: dict[str, FrameStructureAnalysis] = {}
                 for frequency in _SECTOR_FREQUENCIES:
                     current_frequency = frequency
+                    if catalog_source == QMT_GICS3_CATALOG_SOURCE:
+                        if self._sector_frame_provider is None:
+                            raise SectorAnalysisUnavailable(
+                                "sector_adapter_error",
+                                "QMT sector frame provider is unavailable",
+                            )
+                        raw_sector_frame = self._sector_frame_provider(
+                            sector_id=sector_id,
+                            sector_name=sector_name.strip(),
+                            members=members,
+                            frequency=frequency,
+                            as_of=observed_at,
+                            request_bars=self._config.request_bars(frequency),
+                        )
+                    else:
+                        raw_sector_frame = _FRAME_UNSET
                     analyses[frequency] = self._load_analysis(
                         exchange=sector_exchange,
-                        code=kline_code,
+                        code=(
+                            sector_id
+                            if catalog_source == QMT_GICS3_CATALOG_SOURCE
+                            else cast(str, kline_code)
+                        ),
                         analysis_code=sector_id,
                         frequency=frequency,
                         as_of=observed_at,
-                        native_sector_index=True,
+                        sector_source=cast(str, catalog_source),
+                        frame_override=raw_sector_frame,
                     )
                 contexts = {
                     frequency: classify_context(
@@ -651,7 +739,11 @@ class NativeTradingDataGateway:
                     assess_sector(
                         sector_id=sector_id,
                         sector_name=sector_name.strip(),
-                        market_data_source="tdx_native_880_index",
+                        market_data_source=(
+                            "qmt_gics3_component_composite"
+                            if catalog_source == QMT_GICS3_CATALOG_SOURCE
+                            else _TDX_SECTOR_PRICE_SOURCE
+                        ),
                         thirty=contexts["30m"],
                         five=contexts["5m"],
                         one=one,
@@ -664,7 +756,12 @@ class NativeTradingDataGateway:
             except SectorAnalysisUnavailable as exc:
                 failure = SectorAnalysisFailure(
                     sector_id=sector_id,
-                    code=kline_code,
+                    code=cast(
+                        str,
+                        source_key
+                        if catalog_source == QMT_GICS3_CATALOG_SOURCE
+                        else kline_code,
+                    ),
                     error_type=exc.code,
                     reason=str(exc),
                 )
@@ -672,7 +769,7 @@ class NativeTradingDataGateway:
                 LogUtil.error(
                     "[trading_screening.sector] "
                     f"sector={sector_id} frequency={current_frequency} "
-                    "provider=tdx-industry-index adjustment=none "
+                    f"provider={'qmt-gics3-composite' if catalog_source == QMT_GICS3_CATALOG_SOURCE else 'tdx-industry-index'} "
                     f"error_type={failure.error_type} reason={failure.reason}"
                 )
                 assessments.append(
@@ -689,7 +786,12 @@ class NativeTradingDataGateway:
             except Exception as exc:
                 failure = SectorAnalysisFailure(
                     sector_id=sector_id,
-                    code=kline_code,
+                    code=cast(
+                        str,
+                        source_key
+                        if catalog_source == QMT_GICS3_CATALOG_SOURCE
+                        else kline_code,
+                    ),
                     error_type="sector_adapter_error",
                     reason=str(exc),
                 )
@@ -697,7 +799,7 @@ class NativeTradingDataGateway:
                 LogUtil.error(
                     "[trading_screening.sector] "
                     f"sector={sector_id} frequency={current_frequency} "
-                    "provider=tdx-industry-index adjustment=none "
+                    f"provider={'qmt-gics3-composite' if catalog_source == QMT_GICS3_CATALOG_SOURCE else 'tdx-industry-index'} "
                     f"error_type={failure.error_type} reason={failure.reason}"
                 )
                 assessments.append(

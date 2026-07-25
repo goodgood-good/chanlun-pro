@@ -35,6 +35,21 @@ def test_one_changed_stock_only_schedules_that_stock() -> None:
     assert plan.frequencies_for("SH.600000") == ("1m", "5m")
 
 
+def test_ineligible_sector_change_is_not_misclassified_as_a_stock() -> None:
+    blocked_sector = "qmt-gics3:blocked"
+
+    plan = build_scan_plan(
+        changed_bars=(BarKey(blocked_sector, "5m", CLOSED_AT),),
+        sector_members={"qmt-gics3:eligible": ("SH.600000",)},
+        known_sector_ids=(blocked_sector, "qmt-gics3:eligible"),
+        active_watchlist=(),
+        previous=ScanCursor.current(),
+    )
+
+    assert plan.sectors == (blocked_sector,)
+    assert plan.symbols == ()
+
+
 def test_watchlist_and_holdings_remain_in_sell_risk_scope() -> None:
     plan = build_scan_plan(
         changed_bars=(),

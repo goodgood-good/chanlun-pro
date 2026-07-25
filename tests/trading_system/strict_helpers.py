@@ -16,6 +16,11 @@ from chanlun.core.strict_structure.models import (
 from tests.core.strict_structure.signal_helpers import (
     confirmed_point as base_confirmed_point,
 )
+from tests.core.strict_structure.helpers import (
+    completed_down_center,
+    completed_up_center,
+    structure_for,
+)
 
 
 CN = ZoneInfo("Asia/Shanghai")
@@ -76,10 +81,56 @@ def strict_evidence_result(
     confirmed_points=(),
     approaching_points=(),
 ) -> StrictEvidenceResult:
-    structure = StrictStructureResult(
-        schema_version="chanlun-structure/v3",
-        price_basis_revision=PRICE_BASIS,
-        levels=(),
+    normalized_confirmed = []
+    completed_centers = []
+    for ordinal, point in enumerate(tuple(confirmed_points)):
+        if point.point_type not in {"3buy", "3sell"}:
+            normalized_confirmed.append(point)
+            continue
+        center_id = f"test-center:{source_frequency}:{ordinal}:{point.point_type}"
+        center_factory = (
+            completed_up_center
+            if point.point_type == "3buy"
+            else completed_down_center
+        )
+        center = center_factory(
+            ordinal * 10,
+            structural_level=point.structural_level,
+            zd_tick=point.center_zd_tick,
+            zg_tick=point.center_zg_tick,
+            center_id=center_id,
+        )
+        return_unit = center.completion_return_unit
+        assert return_unit is not None
+        completed_centers.append(center)
+        normalized_confirmed.append(
+            replace(
+                point,
+                point_id=build_strict_point_id(
+                    price_basis_revision=point.price_basis_revision,
+                    point_type=point.point_type,
+                    structural_level=point.structural_level,
+                    anchor_unit_id=return_unit.unit_id,
+                    center_id=center_id,
+                    parent_point_id=point.parent_point_id,
+                ),
+                anchor_unit_id=return_unit.unit_id,
+                anchor_at=return_unit.market_end,
+                confirmed_at=center.completed_at,
+                center_id=center_id,
+                center_zd_tick=center.zd_tick,
+                center_zg_tick=center.zg_tick,
+            )
+        )
+    confirmed_points = tuple(normalized_confirmed)
+    structure = (
+        structure_for(*completed_centers)
+        if completed_centers
+        else StrictStructureResult(
+            schema_version="chanlun-structure/v3",
+            price_basis_revision=PRICE_BASIS,
+            levels=(),
+        )
     )
     observations = CenterLevelResult(
         structural_level=0,

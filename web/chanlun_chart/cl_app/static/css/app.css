@@ -546,3 +546,9 @@ body {
     background: rgba(244, 249, 255, 0.96);
     color: #255f98;
 }
+
+.strict-structure-status[data-state="stale"] {
+    border-color: rgba(180, 120, 20, 0.34);
+    background: rgba(255, 250, 235, 0.96);
+    color: #8a5a12;
+}

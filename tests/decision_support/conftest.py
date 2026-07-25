@@ -39,7 +39,7 @@ def make_decision_event():
         live_divergence: bool = False,
         divergence_kind: str | None = None,
         confirmation_bs_type: str | None = None,
-        track: StrategyTrack = StrategyTrack.CHANLUN_ORIGINAL_LOW_DRAWDOWN,
+        track: StrategyTrack = StrategyTrack.CHANLUN_SOURCE_FAITHFUL,
         market: str = "a",
         code: str = "SH.600519",
         name: str = "贵州茅台",

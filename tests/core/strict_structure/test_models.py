@@ -9,6 +9,7 @@ from chanlun.core.strict_structure.center_machine import advance_center
 from chanlun.core.strict_structure.identity import stable_structure_id
 from chanlun.core.strict_structure.models import (
     CenterEvidence,
+    CenterState,
     ConstituentUnit,
     SourceKind,
 )
@@ -133,6 +134,26 @@ def test_ongoing_center_pending_leave_must_be_final_body_unit():
     value = ongoing_center()
     with pytest.raises(ValueError, match="pending leave must be the final body unit"):
         replace(value, pending_leave_unit=value.entry_unit)
+
+
+def test_center_leave_direction_must_match_entry_direction():
+    value = ongoing_center()
+    crossed = unit(5, "down", value.initial_exit_unit.end_tick, 95)
+    extended, _event = advance_center(value, crossed)
+
+    with pytest.raises(ValueError, match="pending leave direction must match"):
+        replace(extended, pending_leave_unit=crossed)
+
+    ret = unit(6, "up", 95, 100)
+    with pytest.raises(ValueError, match="completion leave direction must match"):
+        replace(
+            extended,
+            state=CenterState.COMPLETED,
+            completion_leave_unit=crossed,
+            completion_return_unit=ret,
+            completed_at=ret.confirmed_at,
+            available_at=max(extended.available_at, ret.available_at),
+        )
 
 
 def test_completed_center_requires_atomic_locked_leave_return_and_timestamp():

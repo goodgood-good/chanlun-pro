@@ -81,6 +81,10 @@ def _build_exchange(market: Market) -> None:
             g_exchange_obj[market.value] = ExchangeQMT()
         elif config.EXCHANGE_A == "cq":
             g_exchange_obj[market.value] = _changqiao_market_view(market)
+        elif config.EXCHANGE_A == "usmart":
+            from chanlun.exchange.exchange_usmart import ExchangeUSmart
+
+            g_exchange_obj[market.value] = ExchangeUSmart(Market.A.value)
         else:
             raise Exception(f"不支持的沪深交易所 {config.EXCHANGE_A}")
 
@@ -99,6 +103,10 @@ def _build_exchange(market: Market) -> None:
             g_exchange_obj[market.value] = ExchangeDB(Market.HK.value)
         elif config.EXCHANGE_HK == "cq":
             g_exchange_obj[market.value] = _changqiao_market_view(market)
+        elif config.EXCHANGE_HK == "usmart":
+            from chanlun.exchange.exchange_usmart import ExchangeUSmart
+
+            g_exchange_obj[market.value] = ExchangeUSmart(Market.HK.value)
         else:
             raise Exception(f"不支持的香港交易所 {config.EXCHANGE_HK}")
 
@@ -187,6 +195,10 @@ def _build_exchange(market: Market) -> None:
             g_exchange_obj[market.value] = ExchangeDB(Market.US.value)
         elif config.EXCHANGE_US == "cq":
             g_exchange_obj[market.value] = _changqiao_market_view(market)
+        elif config.EXCHANGE_US == "usmart":
+            from chanlun.exchange.exchange_usmart import ExchangeUSmart
+
+            g_exchange_obj[market.value] = ExchangeUSmart(Market.US.value)
         else:
             raise Exception(f"不支持的美股交易所 {config.EXCHANGE_US}")
 

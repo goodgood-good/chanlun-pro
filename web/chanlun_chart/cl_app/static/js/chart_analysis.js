@@ -261,6 +261,15 @@
     const status = typeof latest.done === 'boolean'
       ? (latest.done ? '已完成' : '形成中')
       : (String(latest.linestyle) === '1' ? '形成中' : '已完成');
+    const renderKind = String(latest.render_kind || '');
+    const effectiveLevelLabel = renderKind === 'center_preview'
+      ? '线段中枢预览'
+      : levelLabel;
+    const qualification = renderKind === 'center_preview'
+      ? (String(latest.state) === 'completed'
+        ? '几何已完成，等待线段锁定，不可直接交易'
+        : '形成中预览，不可直接交易')
+      : (renderKind === 'center_observation' ? '观察证据，不可直接交易' : '');
     // The collection itself is authoritative.  Old cached payloads could carry
     // a stale ``tower`` value and must not relabel a bi center as an xd center.
     const tower = String(settings.tower || latest.tower || '').toLowerCase();
@@ -290,8 +299,9 @@
     return {
       exists: true,
       text: `${formatPrice(low)}–${formatPrice(high)}`,
-      meta: `${status} · ${positionMeta}`,
-      levelLabel,
+      meta: `${qualification ? `${qualification} · ` : ''}${status} · ${positionMeta}`,
+      levelLabel: effectiveLevelLabel,
+      qualification,
       status,
       position,
       low,
@@ -597,6 +607,7 @@
       trends: [],
       completedTrends: [],
       formalCenters: [],
+      centerPreviews: [],
       centerProjections: [],
       observations: [],
       confirmedPoints: [],
@@ -627,8 +638,9 @@
     return toSeconds(bars[bars.length - 1] && bars[bars.length - 1].time);
   }
 
-  function validateStrictSnapshot(snapshot, source, options) {
-    if (!snapshot || snapshot.schema !== 'chanlun-chart-structure/v4') {
+  function validateStrictSnapshot(snapshot, source, options, validationOptions) {
+    const validation = validationOptions || {};
+    if (!snapshot || snapshot.schema !== 'chanlun-chart-structure/v5') {
       throw new Error('严格结构数据契约不匹配');
     }
     const requiredStrings = [
@@ -665,7 +677,13 @@
     const bars = Array.isArray(source.bars) ? source.bars : [];
     if (!bars.length) throw new Error('严格结构缺少当前图表 K 线');
     const loadedClose = strictSourceClosedAt(source, bars);
-    if (loadedClose !== snapshot.source_closed_at) {
+    if (
+      loadedClose !== snapshot.source_closed_at
+      && !(
+        validation.allowOlderSourceClose === true
+        && snapshot.source_closed_at < loadedClose
+      )
+    ) {
       throw new Error('严格结构末根闭合时间与当前图表不一致');
     }
     snapshot.levels.forEach((level) => {
@@ -675,7 +693,7 @@
         throw new Error('严格结构级别无效');
       }
       [
-        'centers', 'center_projections', 'current_trends',
+        'centers', 'center_previews', 'center_projections', 'current_trends',
         'completed_trend_snapshots', 'confirmed_points', 'approaching_points', 'divergences',
       ].forEach((field) => {
         if (!Array.isArray(level[field])) throw new Error(`严格结构级别集合无效：${field}`);
@@ -710,6 +728,8 @@
       completionLeaveUnitId: item.completion_leave_unit_id || null,
       completionReturnUnitId: item.completion_return_unit_id || null,
       completionDirection: item.completion_direction || null,
+      enteringSegment: item.entering_segment || null,
+      leavingSegment: item.leaving_segment || null,
     };
   }
 
@@ -818,6 +838,7 @@
     const latestBar = bars.length ? bars[bars.length - 1] : null;
     const latestClose = numeric(latestBar && latestBar.close);
     const formalCenters = [];
+    const centerPreviews = [];
     const centerProjections = [];
     const trends = [];
     const completedTrends = [];
@@ -829,6 +850,14 @@
     snapshot.levels.forEach((level) => {
       level.centers.forEach((item) => {
         formalCenters.push(summarizeStrictCenter(item, '正式严格中枢'));
+      });
+      level.center_previews.forEach((item) => {
+        centerPreviews.push(summarizeStrictCenter(
+          item,
+          item.state === 'completed'
+            ? '几何已完成，等待线段锁定，不可直接交易'
+            : '形成中预览，不可直接交易',
+        ));
       });
       level.center_projections.forEach((item) => {
         centerProjections.push(summarizeStrictCenter(item, '未确认投影，不可直接交易'));
@@ -860,13 +889,6 @@
     const divergences = rawDivergences.map((item) => (
       summarizeStrictDivergence(item, item.level_label)
     ));
-    const l0Trends = snapshot.levels
-      .filter((level) => level.structural_level === 0)
-      .flatMap((level) => level.current_trends)
-      .map((item) => ({
-        ...item,
-        linestyle: item.state === 'forming' ? '1' : '0',
-      }));
     const l0Centers = snapshot.levels
       .filter((level) => level.structural_level === 0)
       .flatMap((level) => level.centers)
@@ -877,16 +899,43 @@
         done: item.state === 'completed',
         recursive_level: 0,
       }));
-    const bi = summarizeLine([]);
-    const xd = summarizeLine(l0Trends);
-    const biZone = summarizeZone([], latestClose, '笔观察中枢', {
+    const l0CenterPreviews = snapshot.levels
+      .filter((level) => level.structural_level === 0)
+      .flatMap((level) => level.center_previews)
+      .map((item) => ({
+        ...item,
+        zd: item.core && item.core.zd_price,
+        zg: item.core && item.core.zg_price,
+        done: item.state === 'completed',
+        recursive_level: 0,
+      }));
+    const strokeObservationZones = snapshot.stroke_center_observations
+      .map((item) => ({
+        ...item,
+        zd: item.core && item.core.zd_price,
+        zg: item.core && item.core.zg_price,
+        done: item.state === 'completed',
+        recursive_level: null,
+      }));
+    // The strict snapshot is authoritative for centers, trends and signals.
+    // Current stroke/segment status, however, must describe the actual base
+    // geometry carried in the same bars response rather than relabeling an L0
+    // trend type as a segment.
+    const bi = summarizeLine(source.bis);
+    const xd = summarizeLine(source.xds);
+    const biZone = summarizeZone(strokeObservationZones, latestClose, '笔观察中枢', {
       tower: 'bi',
       recursiveLevel: null,
     });
-    const xdZone = summarizeZone(l0Centers, latestClose, '正式中枢', {
-      tower: 'xd',
-      recursiveLevel: 0,
-    });
+    const xdZone = summarizeZone(
+      l0Centers.concat(l0CenterPreviews),
+      latestClose,
+      '正式中枢',
+      {
+        tower: 'xd',
+        recursiveLevel: 0,
+      },
+    );
     const mmd = strictLegacySignal(
       rawConfirmedPoints.concat(rawApproachingPoints),
       bars,
@@ -917,6 +966,7 @@
       trends,
       completedTrends,
       formalCenters,
+      centerPreviews,
       centerProjections,
       observations,
       confirmedPoints,
@@ -946,6 +996,29 @@
       const code = source.strict_structure_error && source.strict_structure_error.code
         ? source.strict_structure_error.code
         : 'strict_evidence_invalid';
+      const cachedSnapshot = options.cachedStrictSnapshot;
+      if (cachedSnapshot) {
+        try {
+          validateStrictSnapshot(
+            cachedSnapshot,
+            source,
+            options,
+            { allowOlderSourceClose: true },
+          );
+          const cachedSummary = summarizeStrictChartData(source, options, cachedSnapshot);
+          return {
+            ...cachedSummary,
+            state: 'stale',
+            statusDetail: `严格结构暂时重算失败，沿用最近一次有效结果：${code}`,
+            verdictDetail: `当前为最近一次有效严格结构（${code}），等待后端恢复后自动更新。${cachedSummary.verdictDetail}`,
+            plan: {
+              ...cachedSummary.plan,
+              now: '保留同标的同周期最近一次有效严格结构，不据瞬时失败清空判断。',
+              wait: '等待下一份同上下文权威严格快照自动替换。',
+            },
+          };
+        } catch (_) { /* 缓存属于其他标的、周期或未来数据时不得复用 */ }
+      }
       return strictEmptySummary(source, options, 'unavailable', `严格结构不可用：${code}`);
     }
     let snapshot = null;
@@ -977,6 +1050,7 @@
     symbolInfoCache: new Map(),
     timer: null,
   };
+  const OVERVIEW_COLLAPSE_STORAGE_KEY = 'chart_analysis_overview_collapsed_v2';
 
   function element(id) {
     return root && root.document ? root.document.getElementById(id) : null;
@@ -1194,9 +1268,10 @@
 
   function readOverviewCollapsed() {
     try {
-      return root.localStorage.getItem('chart_analysis_overview_collapsed') === '1';
+      const stored = root.localStorage.getItem(OVERVIEW_COLLAPSE_STORAGE_KEY);
+      return stored === null ? true : stored !== '0';
     } catch (_) {
-      return false;
+      return true;
     }
   }
 
@@ -1208,11 +1283,12 @@
     overview.classList.toggle('is-collapsed', Boolean(collapsed));
     body.hidden = Boolean(collapsed);
     button.setAttribute('aria-expanded', String(!collapsed));
-    button.setAttribute('aria-label', collapsed ? '展开当前结构判读' : '收起当前结构判读');
-    button.title = collapsed ? '展开当前结构判读' : '收起当前结构判读';
+    button.setAttribute('aria-label', collapsed ? '展开当前结构解读' : '收起当前结构解读');
+    button.title = collapsed ? '展开当前结构解读' : '收起当前结构解读';
+    setText('ca-overview-toggle-label', collapsed ? '展开' : '收起');
     if (persist) {
       try {
-        root.localStorage.setItem('chart_analysis_overview_collapsed', collapsed ? '1' : '0');
+        root.localStorage.setItem(OVERVIEW_COLLAPSE_STORAGE_KEY, collapsed ? '1' : '0');
       } catch (_) { /* storage may be unavailable */ }
     }
   }

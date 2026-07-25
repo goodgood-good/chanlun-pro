@@ -27,6 +27,7 @@ class CenterState(str, Enum):
 class CenterPreviewState(str, Enum):
     TOUCH_ONLY = "touch_only"
     FORMING = "forming"
+    COMPLETED = "completed"
 
 
 class CenterEventKind(str, Enum):
@@ -207,8 +208,6 @@ class TrendCenter:
             raise ValueError("entry unit must positively overlap center core")
         if not self._positive_overlap(self.initial_exit_unit):
             raise ValueError("initial exit unit must positively overlap center core")
-        if not self._outside_in_direction(self.initial_exit_unit):
-            raise ValueError("initial exit endpoint must be outside center core")
 
         if len({item.unit_id for item in self.body_units}) != len(self.body_units):
             raise ValueError("center body unit ids must be unique")
@@ -268,6 +267,8 @@ class TrendCenter:
                     raise ValueError("pending leave must positively overlap center core")
                 if not self._outside_in_direction(self.pending_leave_unit):
                     raise ValueError("pending leave endpoint must be outside center core")
+                if self.pending_leave_unit.direction != self.entry_unit.direction:
+                    raise ValueError("pending leave direction must match center entry")
         else:
             if self.pending_leave_unit is not None:
                 raise ValueError("completed center cannot retain pending leave")
@@ -285,6 +286,8 @@ class TrendCenter:
                 leave_unit
             ):
                 raise ValueError("completion leave geometry is invalid")
+            if leave_unit.direction != self.entry_unit.direction:
+                raise ValueError("completion leave direction must match center entry")
             if leave_unit.direction == return_unit.direction:
                 raise ValueError("completion return must alternate with leave")
             if leave_unit.end_tick != return_unit.start_tick:
@@ -336,7 +339,9 @@ class TrendCenter:
             return self.completion_leave_unit.market_start
         if self.pending_leave_unit is not None:
             return self.pending_leave_unit.market_start
-        return self.body_units[-1].market_end
+        if self.extension_units:
+            return self.body_units[-1].market_end
+        return self.initial_exit_unit.market_start
 
     @property
     def initial_exit_unit(self) -> ConstituentUnit:
@@ -363,6 +368,7 @@ class CenterPreview:
     zd_tick: int | None
     zg_tick: int | None
     available_at: datetime
+    completion_return_unit_id: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "source_kind", SourceKind(self.source_kind))
@@ -372,8 +378,8 @@ class CenterPreview:
             raise ValueError("structural_level must be >= 0")
         if not self.price_basis_revision or not self.price_basis_revision.strip():
             raise ValueError("price_basis_revision is required")
-        if not 1 <= len(self.unit_ids) <= 5:
-            raise ValueError("preview must reference one to five units")
+        if not self.unit_ids:
+            raise ValueError("preview must reference at least one body unit")
         if len(set(self.unit_ids)) != len(self.unit_ids):
             raise ValueError("preview unit ids must be unique")
         if (self.zd_tick is None) != (self.zg_tick is None):
@@ -388,6 +394,21 @@ class CenterPreview:
             and self.zd_tick >= self.zg_tick
         ):
             raise ValueError("forming preview core must have positive width")
+        if self.state is CenterPreviewState.COMPLETED:
+            if (
+                len(self.unit_ids) < 5
+                or self.zd_tick is None
+                or self.zg_tick is None
+                or self.zd_tick >= self.zg_tick
+            ):
+                raise ValueError("completed preview requires a positive five-unit core")
+            if (
+                not self.completion_return_unit_id
+                or self.completion_return_unit_id in self.unit_ids
+            ):
+                raise ValueError("completed preview requires a distinct return unit")
+        elif self.completion_return_unit_id is not None:
+            raise ValueError("non-completed preview cannot retain a return unit")
 
 
 @dataclass(frozen=True, slots=True)
@@ -589,9 +610,25 @@ class TrendType:
             raise ValueError("completed trend requires locked constituent units")
 
         constituent_ids = {item.unit_id for item in self.constituent_units}
-        for center in self.centers:
-            if any(item.unit_id not in constituent_ids for item in center.body_units):
-                raise ValueError("trend must contain every center body unit")
+        for center_index, center in enumerate(self.centers):
+            missing = tuple(
+                item for item in center.body_units
+                if item.unit_id not in constituent_ids
+            )
+            if not missing:
+                continue
+            shared_entry_is_external_boundary = (
+                center_index == 0
+                and missing == (center.entry_unit,)
+                and len(center.initial_units) >= 2
+                and self.constituent_units[0] is center.initial_units[1]
+                and center.entry_unit.market_end
+                == self.constituent_units[0].market_start
+            )
+            if not shared_entry_is_external_boundary:
+                raise ValueError(
+                    "trend must contain every center body unit except its shared entry boundary"
+                )
         for center in self.centers[:-1]:
             if (
                 center.completion_return_unit is not None

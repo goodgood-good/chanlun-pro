@@ -32,6 +32,7 @@
     let identifier;
     if (
       kind === "formal_center" ||
+      kind === "center_preview" ||
       kind === "center_projection" ||
       kind === "center_observation"
     ) {
@@ -84,6 +85,50 @@
     return barTime / 1000;
   }
 
+  function chartTimeCoordinate(epochSeconds, frequency) {
+    if (!Number.isInteger(epochSeconds)) {
+      throw new Error("chart source time must be epoch seconds");
+    }
+    const calendar = String(frequency || "");
+    if (!["d", "2d", "w", "m", "q", "y"].includes(calendar)) {
+      return epochSeconds;
+    }
+
+    const source = new Date(epochSeconds * 1000);
+    let year = source.getUTCFullYear();
+    let month = source.getUTCMonth();
+    let day = source.getUTCDate();
+    if (calendar === "w") {
+      day -= (source.getUTCDay() + 6) % 7;
+    } else if (calendar === "m") {
+      day = 1;
+    } else if (calendar === "q") {
+      month = Math.floor(month / 3) * 3;
+      day = 1;
+    } else if (calendar === "y") {
+      month = 0;
+      day = 1;
+    }
+    const coordinate = Date.UTC(year, month, day) / 1000;
+    if (!Number.isInteger(coordinate)) {
+      throw new Error("calendar chart coordinate is invalid");
+    }
+    return coordinate;
+  }
+
+  function itemToChartCoordinates(item, frequency) {
+    if (!item || !Array.isArray(item.points)) {
+      throw new Error("strict render item requires points");
+    }
+    return {
+      ...item,
+      points: item.points.map((point) => ({
+        ...point,
+        time: chartTimeCoordinate(point && point.time, frequency),
+      })),
+    };
+  }
+
   function sourceBounds(item) {
     if (!item || !Array.isArray(item.points) || item.points.length === 0) {
       throw new Error("strict render item requires points");
@@ -120,6 +165,41 @@
       if (points[0].time > points[points.length - 1].time) return null;
     }
     return { ...item, points };
+  }
+
+  function lowerBound(values, target) {
+    let low = 0;
+    let high = values.length;
+    while (low < high) {
+      const middle = low + Math.floor((high - low) / 2);
+      if (values[middle] < target) low = middle + 1;
+      else high = middle;
+    }
+    return low;
+  }
+
+  function drawableRange(loadedRange, visibleRange) {
+    const loaded = requireRange(loadedRange, "loadedRange");
+    const visible = requireRange(visibleRange, "visibleRange");
+    const left = Math.max(loaded.from, visible.from);
+    const right = Math.min(loaded.to, visible.to);
+    if (left > right) return null;
+
+    // Visible-range edges may lie in a market break or weekend.  Anchoring a
+    // line tool at that arbitrary timestamp makes TradingView silently snap it
+    // to another candle, so use actual loaded bar coordinates when available.
+    const barTimes = Array.isArray(loaded.barTimes)
+      ? loaded.barTimes
+      : null;
+    if (!barTimes || barTimes.length === 0) return { from: left, to: right };
+
+    const firstIndex = lowerBound(barTimes, left);
+    const afterLastIndex = lowerBound(barTimes, right + 1);
+    if (firstIndex >= barTimes.length || afterLastIndex <= firstIndex) return null;
+    const from = barTimes[firstIndex];
+    const to = barTimes[afterLastIndex - 1];
+    if (from > right || to < left || from > to) return null;
+    return { from, to };
   }
 
   function canonical(value) {
@@ -159,10 +239,17 @@
   function planReconcile(existing, incoming, loadedRange, visibleRange) {
     const loaded = requireRange(loadedRange, "loadedRange");
     const visible = requireRange(visibleRange, "visibleRange");
+    const drawable = drawableRange(loaded, visible);
     const previous = new Map();
+    const duplicatePrevious = new Map();
     for (const entity of existing || []) {
       const key = requireString(entity.logicalKey, "existing logicalKey");
-      if (previous.has(key)) throw new Error(`duplicate existing key: ${key}`);
+      if (previous.has(key)) {
+        const duplicates = duplicatePrevious.get(key) || [previous.get(key)];
+        duplicates.push(entity);
+        duplicatePrevious.set(key, duplicates);
+        continue;
+      }
       previous.set(key, entity);
     }
 
@@ -171,7 +258,11 @@
       const key = logicalKey(sourceItem);
       if (planned.has(key)) throw new Error(`duplicate incoming key: ${key}`);
       if (!intersects(sourceItem, visible)) continue;
-      const renderItem = clipToLoadedRange(sourceItem, loaded);
+      if (drawable === null) continue;
+      // Keep immutable strict evidence untouched, but clip the TradingView
+      // render copy to real bars currently on screen.  Off-screen anchors are
+      // otherwise snapped after creation and can never pass exact verification.
+      const renderItem = clipToLoadedRange(sourceItem, drawable);
       if (renderItem === null) continue;
       planned.set(key, {
         ...renderItem,
@@ -185,6 +276,20 @@
     const createItems = [];
     for (const [key, entity] of previous.entries()) {
       const next = planned.get(key);
+      const duplicates = duplicatePrevious.get(key);
+      if (duplicates) {
+        // A late asynchronous callback must never be able to make two live
+        // entities own one logical structure.  Rebuild the key from scratch;
+        // this also heals corrupted containers instead of rejecting the whole
+        // strict snapshot and leaving overlapping boxes on screen.
+        for (const duplicate of duplicates) {
+          if (duplicate.id != null && !removeIds.includes(duplicate.id)) {
+            removeIds.push(duplicate.id);
+          }
+        }
+        if (next) createItems.push(next);
+        continue;
+      }
       if (
         !next ||
         entity.renderKey !== next.renderKey ||
@@ -203,7 +308,16 @@
         createItems.push(next);
       }
     }
-    return { removeIds, createItems };
+    // Expose the complete desired render set as well as the delta.  TradingView
+    // can move an already-created line tool later while loading history or
+    // changing the visible range.  The caller therefore has to compare
+    // retained entities with their current desired geometry, not only compare
+    // the immutable bookkeeping fingerprints stored at creation time.
+    return {
+      removeIds,
+      createItems,
+      desiredItems: Array.from(planned.values()),
+    };
   }
 
   class ReconcileEpoch {
@@ -232,9 +346,12 @@
   return {
     ReconcileEpoch,
     barTimeMsToEpochSeconds,
+    chartTimeCoordinate,
     clipToLoadedRange,
+    drawableRange,
     geometryFingerprint,
     logicalKey,
+    itemToChartCoordinates,
     planReconcile,
     renderKey,
     scopeKey,

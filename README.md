@@ -39,9 +39,9 @@ chanlun-pro 是一套以**缠论**为核心的行情分析与量化交易系统�
 
 | 市场 | 配置项 | 可选数据源 |
 | --- | --- | --- |
-| 沪深 A 股 | `EXCHANGE_A` | `tdx`（通达信）/ `qmt`（迅投）/ `baostock` / `futu`（富途）/ `cq`（长桥）/ `db` |
-| 港股 | `EXCHANGE_HK` | `tdx_hk` / `futu` / `cq` / `db` |
-| 美股 | `EXCHANGE_US` | `tdx_us` / `alpaca` / `polygon` / `ib`（盈透）/ `cq`（长桥）/ `db` |
+| 沪深 A 股 | `EXCHANGE_A` | `tdx`（通达信）/ `qmt`（迅投）/ `baostock` / `futu`（富途）/ `cq`（长桥）/ `usmart`（盈立）/ `db` |
+| 港股 | `EXCHANGE_HK` | `tdx_hk` / `futu` / `cq` / `usmart` / `db` |
+| 美股 | `EXCHANGE_US` | `tdx_us` / `alpaca` / `polygon` / `ib`（盈透）/ `cq`（长桥）/ `usmart` / `db` |
 | 国内期货 | `EXCHANGE_FUTURES` | `tq`（天勤）/ `tdx_futures` / `db` |
 | 外盘期货 | `EXCHANGE_NY_FUTURES` | `tdx_ny_futures` / `db` |
 | 外汇 | `EXCHANGE_FX` | `tdx_fx` / `cq` / `db` |
@@ -60,7 +60,7 @@ chanlun-pro 是一套以**缠论**为核心的行情分析与量化交易系统�
 | 数据计算 | pandas、numpy、pyarrow、scipy、TA-Lib、MyTT |
 | Web / 图表 | Flask + Tornado（单进程 WSGI）、TradingView Charting Library、SSE |
 | 存储 | file_db（Parquet 本地列存）、SQLAlchemy + SQLite/MySQL、Redis（可选） |
-| 行情/交易 SDK | akshare、longbridge（长桥）、pytdx、ccxt、alpaca-py、polygon、ib-insync、futu-api、baostock、tqsdk（天勤）、openctp-ctp |
+| 行情/交易 SDK | akshare、longbridge（长桥）、uSMART Open API、pytdx、ccxt、alpaca-py、polygon、ib-insync、futu-api、baostock、tqsdk（天勤）、openctp-ctp |
 | 通知 / AI | lark-oapi（飞书）、openai（DeepSeek/Gemini） |
 | 券商框架适配 | 迅投 QMT（vendored `xtquant`）、掘金（`cl_myquant`）、vnpy（`cl_vnpy`）、WonderTrader（`cl_wtpy`） |
 
@@ -89,8 +89,9 @@ windows_install.bat
 pip install poetry
 poetry install                       # 仅核心依赖
 # 按需安装可选市场/功能（extras）：
-#   us / hk / cn-extra / futures / ai / notify / backtest / monitor / charts
+#   us / hk / usmart / cn-extra / futures / ai / notify / backtest / monitor / charts
 poetry install --extras us --extras hk
+poetry install --extras usmart          # 盈立 Open API 的 RSA 签名依赖
 poetry install --all-extras          # 一次装齐
 
 # 生成配置文件
@@ -106,6 +107,30 @@ cp src/chanlun/config.py.demo src/chanlun/config.py   # Windows: copy
 - **存储**：`DB_TYPE`（`sqlite`/`mysql`）、`DATA_PATH`（默认 `~/.chanlun_pro`）、`REDIS_HOST`（可选）。
 - **实时推送**：`ENABLE_SSE_PUSH`、`SSE_REFRESH_MS`（服务端重算+推送间隔，默认 8000ms）。
 - **AI / 通知**：`AI_TOKEN` / `OPENROUTER_AI_KEYS`、`FEISHU_KEYS`（可按市场配置不同机器人）。
+
+#### uSMART（盈立）行情源
+
+先安装 `usmart` extra，再把需要使用盈立的市场配置为 `usmart`，例如
+`EXCHANGE_HK = "usmart"`、`EXCHANGE_US = "usmart"`；A 股同理使用
+`EXCHANGE_A = "usmart"`。凭证放在项目根 `.env`，不要写入源码：
+
+```dotenv
+USMART_CHANNEL=你的对接编号
+USMART_PUBLIC_KEY=官网公钥（单行 base64 DER）
+USMART_PRIVATE_KEY=官网私钥（单行 base64 DER）
+
+# 二选一：直接提供仍有效的登录 token
+USMART_TOKEN=
+
+# 或让适配器自动登录获取 token
+USMART_AREA_CODE=86
+USMART_PHONE=你的手机号
+USMART_LOGIN_PASSWORD=你的盈立登录密码
+```
+
+适配器提供证券列表、K 线、实时快照和市场状态，不开放交易下单。官方基础行情接口
+对实时行情/K 线限制为每分钟 120 次、基础信息每分钟 20 次；历史 K 线还受账户近
+30 天标的额度约束，详见 [uSMART Open API 文档](https://api-doc.usmart.sg/zh-cn/quote-base.html)。
 
 ### 运行
 

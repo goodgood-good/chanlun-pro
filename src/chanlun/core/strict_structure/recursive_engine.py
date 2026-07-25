@@ -48,12 +48,10 @@ class StrictRecursiveEngine:
                 else SourceKind.TREND_TYPE
             )
             validate_unit_sequence(units, level, source_kind)
-            locked_count = 0
-            for item in units:
-                if not item.locked:
-                    break
-                locked_count += 1
-            if locked_count < 5:
+            # The fifth constituent may still be provisional.  It cannot
+            # establish a formal center, but it is valid evidence for the
+            # forming-center preview returned by ``calculate_centers``.
+            if len(units) < 5:
                 break
 
             center_result = calculate_centers(units, level, source_kind)

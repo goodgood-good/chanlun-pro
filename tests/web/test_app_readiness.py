@@ -184,6 +184,7 @@ def test_health_snapshot_extension_matches_flask_readiness_contract(app):
 
 
 def test_readyz_reports_metadata_not_ready(app, monkeypatch):
+    app.extensions["readiness"].record_ticks_success("a")
     monkeypatch.setattr(
         constants_service.market_default_codes,
         "status",
@@ -200,6 +201,7 @@ def test_readyz_reports_metadata_not_ready(app, monkeypatch):
 
 
 def test_readyz_reports_symbols_not_ready(app, monkeypatch):
+    app.extensions["readiness"].record_ticks_success("a")
     monkeypatch.setattr(
         stock_list_service,
         "get_symbol_readiness",

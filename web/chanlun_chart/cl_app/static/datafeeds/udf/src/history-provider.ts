@@ -14,6 +14,7 @@ import {
 } from "./helpers";
 
 import { IRequester } from "./irequester";
+import { chartBarTimeSeconds } from "./bar-time";
 
 type StrictStructureMode = "replace" | "unchanged" | "unavailable";
 
@@ -175,6 +176,8 @@ export class HistoryProvider {
   private readonly _limitedServerResponse?: LimitedResponseConfiguration;
   private readonly _options: HistoryProviderOptions;
   private readonly _barsResultMaxSize: number;
+  private _fullRequestSerial: number = 0;
+  private readonly _latestFullRequestByKey: Map<string, number> = new Map();
   public bars_result: Map<string, GetBarsResult>;
   // H1(阶段E): charts.js 断档 gap-reset 前置此一次性标志; getBars(firstDataRequest) 读到即注入
   // force_refresh=1(用后即清),让后端绕过缓存重算补齐断档。public 供 charts.js 外部置位。
@@ -202,7 +205,62 @@ export class HistoryProvider {
         break;
       }
       this.bars_result.delete(oldestKey);
+      this._latestFullRequestByKey.delete(oldestKey);
     }
+  }
+
+  private _resultKey(symbol: unknown, resolution: unknown): string {
+    return String(symbol || "").toLowerCase() + String(resolution || "").toLowerCase();
+  }
+
+  private _beginFullRequest(requestParams: RequestParams): number {
+    const resKey = this._resultKey(
+      requestParams["symbol"],
+      requestParams["resolution"]
+    );
+    const requestSerial = ++this._fullRequestSerial;
+    this._latestFullRequestByKey.set(resKey, requestSerial);
+    return requestSerial;
+  }
+
+  private _fullRequestIsCurrent(
+    requestParams: RequestParams,
+    requestGeneration?: number
+  ): boolean {
+    if (requestGeneration === undefined) {
+      return true;
+    }
+    const resKey = this._resultKey(
+      requestParams["symbol"],
+      requestParams["resolution"]
+    );
+    return this._latestFullRequestByKey.get(resKey) === requestGeneration;
+  }
+
+  private _resultForCompletedRequest(
+    result: GetBarsResult,
+    requestParams: RequestParams,
+    requestGeneration?: number
+  ): GetBarsResult {
+    if (this._fullRequestIsCurrent(requestParams, requestGeneration)) {
+      return result;
+    }
+    const resKey = this._resultKey(
+      requestParams["symbol"],
+      requestParams["resolution"]
+    );
+    const current = this.bars_result.get(resKey);
+    if (current === undefined) {
+      return result;
+    }
+    // A later first request already won.  Return its Bar snapshot to the
+    // stale callback too, otherwise TradingView itself can regress even though
+    // bars_result was protected from the old response.
+    return {
+      ...current,
+      bars: current.bars.map((bar) => ({ ...bar })),
+      meta: { ...current.meta },
+    };
   }
 
   /**
@@ -213,8 +271,11 @@ export class HistoryProvider {
     if (!symbol || !resolution) {
       return;
     }
-    const resKey = String(symbol).toLowerCase() + String(resolution).toLowerCase();
+    const resKey = this._resultKey(symbol, resolution);
     this.bars_result.delete(resKey);
+    // Deleting the generation invalidates every response that was already in
+    // flight.  A later request receives a globally unique serial.
+    this._latestFullRequestByKey.delete(resKey);
   }
 
   /** 通知前端：bars_result[resKey] 已就绪，可以读出来画缠论了。 */
@@ -265,6 +326,10 @@ export class HistoryProvider {
       requestParams.unitId = symbolInfo.unit_id;
     }
 
+    const requestGeneration = periodParams.firstDataRequest
+      ? this._beginFullRequest(requestParams)
+      : undefined;
+
     return new Promise(
       async (
         resolve: (result: GetBarsResult) => void,
@@ -279,13 +344,25 @@ export class HistoryProvider {
             );
           const result = this._processHistoryResponse(
             initialResponse,
-            requestParams
+            requestParams,
+            requestGeneration
           );
 
-          if (this._limitedServerResponse) {
-            await this._processTruncatedResponse(result, requestParams);
+          if (
+            this._limitedServerResponse &&
+            this._fullRequestIsCurrent(requestParams, requestGeneration)
+          ) {
+            await this._processTruncatedResponse(
+              result,
+              requestParams,
+              requestGeneration
+            );
           }
-          resolve(result);
+          resolve(this._resultForCompletedRequest(
+            result,
+            requestParams,
+            requestGeneration
+          ));
         } catch (e: unknown) {
           if (e instanceof Error || typeof e === "string") {
             const reasonString = getErrorMessage(e);
@@ -302,7 +379,8 @@ export class HistoryProvider {
 
   private async _processTruncatedResponse(
     result: GetBarsResult,
-    requestParams: RequestParams
+    requestParams: RequestParams,
+    requestGeneration?: number
   ) {
     let lastResultLength = result.bars.length;
     try {
@@ -333,7 +411,8 @@ export class HistoryProvider {
           );
         const followupResult = this._processHistoryResponse(
           followupResponse,
-          requestParams
+          requestParams,
+          requestGeneration
         );
         lastResultLength = followupResult.bars.length;
         // merge result with results collected so far
@@ -388,7 +467,8 @@ export class HistoryProvider {
 
   private _processHistoryResponse(
     response: HistoryResponse | UdfErrorResponse,
-    requestParams: RequestParams
+    requestParams: RequestParams,
+    requestGeneration?: number
   ) {
     if (response.s !== "ok" && response.s !== "no_data") {
       throw new Error(response.errmsg);
@@ -405,10 +485,11 @@ export class HistoryProvider {
     } else {
       const volumePresent = response.v !== undefined;
       const ohlPresent = response.o !== undefined;
+      const resolution = String(requestParams["resolution"] || "");
 
       for (let i = 0; i < response.t.length; ++i) {
         const barValue: Bar = {
-          time: response.t[i] * 1000,
+          time: chartBarTimeSeconds(response.t[i], resolution) * 1000,
           close: response.c[i],
           open: response.c[i],
           high: response.c[i],
@@ -429,9 +510,10 @@ export class HistoryProvider {
       }
 
       // 设置保存的key
-      const res_key: string =
-        requestParams["symbol"].toString().toLowerCase() +
-        requestParams["resolution"].toString().toLowerCase();
+      const res_key = this._resultKey(
+        requestParams["symbol"],
+        requestParams["resolution"]
+      );
 
       // 保存数据
       let obj_res = this.bars_result.get(res_key);
@@ -467,6 +549,15 @@ export class HistoryProvider {
       // 与 UDF from/to 一致)，此处窗口边界无需 *1000。
       const windowFrom: number | undefined = isRecentWindowAuthoritative ? requestFrom : undefined;
       const windowTo: number | undefined = isRecentWindowAuthoritative ? requestTo : undefined;
+      const isSourceTimeInAuthoritativeWindow = (sourceTime: unknown): boolean => {
+        if (
+          windowFrom === undefined ||
+          windowTo === undefined ||
+          !Number.isInteger(sourceTime)
+        ) return false;
+        const chartTime = chartBarTimeSeconds(sourceTime as number, resolution);
+        return chartTime >= windowFrom && chartTime <= windowTo;
+      };
 
       const raw_times = (response.t || []).map((t: number) => t * 1000);
       const macd_dif = (response as HistoryFullDataResponse).macd_dif || [];
@@ -499,7 +590,24 @@ export class HistoryProvider {
           };
       };
 
-      if (response.update == false || obj_res == undefined) {
+      const generationIsCurrent =
+        requestGeneration === undefined ||
+        this._latestFullRequestByKey.get(res_key) === requestGeneration;
+      const incomingLastRawMs = raw_times.length > 0
+        ? raw_times[raw_times.length - 1]
+        : undefined;
+      const existingRawTimes = obj_res?.times || [];
+      const existingLastRawMs = existingRawTimes.length > 0
+        ? existingRawTimes[existingRawTimes.length - 1]
+        : undefined;
+      const isRegressiveFullSnapshot =
+        response.update === false &&
+        incomingLastRawMs !== undefined &&
+        existingLastRawMs !== undefined &&
+        incomingLastRawMs < existingLastRawMs;
+      const canWriteCache = generationIsCurrent && !isRegressiveFullSnapshot;
+
+      if (canWriteCache && (response.update == false || obj_res == undefined)) {
         const difObj = mergeAlignedArrays([], [], raw_times, macd_dif);
         const deaObj = mergeAlignedArrays([], [], raw_times, macd_dea);
         const histObj = mergeAlignedArrays([], [], raw_times, macd_hist);
@@ -509,7 +617,10 @@ export class HistoryProvider {
         const hHistObj = mergeAlignedArrays([], [], raw_times, higher_macd_hist);
 
         this.bars_result.set(res_key, {
-          bars: bars,
+          // TradingView mutates calendar Bar objects after getBars returns.
+          // Keep an independent cache graph so chart-only normalization cannot
+          // corrupt merge keys or strict loaded-range coordinates.
+          bars: bars.map((bar) => ({ ...bar })),
           meta: meta,
           times: difObj.times,
           macd_dif: difObj.values,
@@ -542,7 +653,7 @@ export class HistoryProvider {
         });
         this._pruneBarsResult();
         this._emitBarsReady(res_key, requestParams);
-      } else {
+      } else if (canWriteCache && obj_res !== undefined) {
         // 更新存在的数据
         // 更新逻辑，找到大于等于返回的第一个时间的所有数据；
         // 保留小于返回的第一个时间的所有数据；
@@ -574,7 +685,7 @@ export class HistoryProvider {
             if (windowFrom === undefined || windowTo === undefined) return existingPoints;
             return existingPoints.filter((p) => {
               const t = getPointTime(p);
-              return !(typeof t === 'number' && t >= windowFrom && t <= windowTo);
+              return !isSourceTimeInAuthoritativeWindow(t);
             });
           }
           if (!existingPoints || existingPoints.length === 0) return newPoints;
@@ -586,7 +697,7 @@ export class HistoryProvider {
           const isTextInAuthWindow = (p: TextPoint): boolean => {
             if (windowFrom === undefined || windowTo === undefined) return false;
             const tt = getPointTime(p);
-            return typeof tt === 'number' && tt >= windowFrom && tt <= windowTo;
+            return isSourceTimeInAuthoritativeWindow(tt);
           };
           const textPointKey = (p: TextPoint): string => {
             const tt = getPointTime(p);
@@ -637,7 +748,7 @@ export class HistoryProvider {
           const isInAuthoritativeWindow = (s: LineSegment): boolean => {
             if (windowFrom === undefined || windowTo === undefined) return false;
             const t = s.points[0] && s.points[0].time;
-            return typeof t === 'number' && t >= windowFrom && t <= windowTo;
+            return isSourceTimeInAuthoritativeWindow(t);
           };
 
           if (!newSegments || newSegments.length === 0) {
@@ -808,7 +919,7 @@ export class HistoryProvider {
           // → 下一SSE帧/看门狗误判巨隙 → resetData视图弹回最新, 毁盘中回看。改按 time 并集(新覆盖同time)。
           const barByTime = new Map<number, Bar>();
           for (const bar of (obj_res.bars || [])) barByTime.set(bar.time, bar);
-          for (const bar of bars) barByTime.set(bar.time, bar);
+          for (const bar of bars) barByTime.set(bar.time, { ...bar });
           obj_res.bars = Array.from(barByTime.values()).sort((a, b) => a.time - b.time);
         }
 
@@ -835,7 +946,7 @@ export class HistoryProvider {
           const strictStructure = (response as HistoryFullDataResponse).strict_structure;
           if (
             strictStructure &&
-            strictStructure.schema === "chanlun-chart-structure/v4"
+            strictStructure.schema === "chanlun-chart-structure/v5"
           ) {
             obj_res.strict_structure_mode = "replace";
             obj_res.strict_structure = strictStructure;
@@ -854,6 +965,12 @@ export class HistoryProvider {
             (response as HistoryFullDataResponse).strict_structure_error || {
               code: "strict_evidence_invalid",
             };
+        } else if (strictMode === "unchanged") {
+          // Preserve the last atomic snapshot as cached evidence, but expose
+          // the transport mode verbatim.  Leaving the old "replace" mode in
+          // place makes pagination/realtime merges re-validate a stale payload
+          // as though it arrived with the newly merged bars.
+          obj_res.strict_structure_mode = "unchanged";
         } else if (strictMode !== "unchanged" && strictMode !== undefined) {
           obj_res.strict_structure_mode = "unavailable";
           delete obj_res.strict_structure;

@@ -67,7 +67,7 @@ test('legacy form pages are reorganized into explicit task-oriented sections', (
     'setting.html': ['系统设置', '消息通知', '网络代理', '配置指南'],
     'symbols.html': ['标的中心', '筛选标的', '标的列表'],
     'jobs.html': ['任务运行状态', '调度任务'],
-    'options.html': ['缠论参数配置', '配置范围', '结构算法', '图表呈现'],
+    'options.html': ['缠论参数配置', '配置范围', '结构算法', '基础结构呈现'],
     'alert.html': ['预警配置', '基础任务', '笔级别条件', '线段级别条件', '通知与运行'],
     'xuangu_list.html': ['传统选股任务', '任务与方向', '数据范围', '结果写入'],
   };

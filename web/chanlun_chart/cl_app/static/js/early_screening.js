@@ -92,17 +92,24 @@
       const completion = Ui.scanCoverageText(audit);
       const sectorCompletion = Ui.sectorCoverageText(audit);
       const pending = Math.max(0, Number(audit.pending_symbol_count) || 0);
+      const cycleInProgress = pending > 0 || audit.coverage_cycle_complete === false;
       const errorCount = Array.isArray(snapshot.errors) ? snapshot.errors.length : 0;
       const failureCodes = Array.isArray(quality.failure_codes) ? quality.failure_codes : [];
 
       if (snapshot.scan_state === "complete" && !quality.stale) {
-        setStatus(
-          quality.complete ? "ready" : "warning",
-          quality.complete ? "最新结构快照可用" : "快照可用，部分标的缺少数据",
-          pending > 0
-            ? `本批结果已发布；后台按结构队列继续覆盖，剩余 ${pending} 只${errorCount ? `；${errorCount} 只标的需复核` : ""}`
-            : `当前结构队列已覆盖${errorCount ? `；${errorCount} 只标的需复核` : ""}`,
-        );
+        if (cycleInProgress) {
+          setStatus(
+            quality.complete ? "loading" : "warning",
+            "全周期扫描进行中",
+            `本批结果已发布；后台正连续分析剩余 ${pending} 只，无需保持页面打开${errorCount ? `；${errorCount} 只标的需复核` : ""}`,
+          );
+        } else {
+          setStatus(
+            quality.complete ? "ready" : "warning",
+            quality.complete ? "最新结构快照可用" : "快照可用，部分标的缺少数据",
+            `当前结构队列已覆盖${errorCount ? `；${errorCount} 只标的需复核` : ""}`,
+          );
+        }
       } else if (snapshot.scan_state === "incomplete_not_published") {
         if (failureCodes.includes("sector_scan_completion_below_threshold")) {
           setStatus(
@@ -122,7 +129,8 @@
       setText("es-generated", Ui.timeText(snapshot.generated_at));
       setText("es-sector-completion", sectorCompletion);
       setText("es-completion", completion);
-      setText("es-quality", quality.stale ? "已过期" : quality.complete ? "完整" : "部分完整");
+      setText("es-scan-timing", Ui.scanTimingText(audit));
+      setText("es-quality", Ui.scanQualityText(snapshot));
       setText("es-sector-count", Ui.selectedSectorCount(snapshot));
       setText("es-signal-count", snapshot.signals.length);
       setText("es-approaching-count", countStage("approaching"));

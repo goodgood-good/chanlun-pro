@@ -9,6 +9,7 @@ from chanlun.exchange.kline_precision import resolve_structure_price_quantum
 from chanlun.exchange.price_basis import (
     PriceBasisMismatchError,
     attach_price_basis_metadata,
+    build_provider_price_basis_metadata,
     build_qmt_price_basis_metadata,
     merge_price_basis_metadata,
 )
@@ -99,6 +100,35 @@ def test_empty_qmt_factor_ledger_has_stable_revision() -> None:
         factors=pd.DataFrame(),
     )
     assert first == second
+
+
+def test_provider_basis_revision_is_stable_and_method_specific() -> None:
+    first = build_provider_price_basis_metadata(
+        provider="longbridge",
+        market="us",
+        code="TSLA.US",
+        adjustment="forward",
+        structure_price_quantum=Decimal("0.001"),
+    )
+    same = build_provider_price_basis_metadata(
+        provider="longbridge",
+        market="us",
+        code="TSLA.US",
+        adjustment="forward",
+        structure_price_quantum=Decimal("0.001"),
+    )
+    raw = build_provider_price_basis_metadata(
+        provider="longbridge",
+        market="us",
+        code="TSLA.US",
+        adjustment="none",
+        structure_price_quantum=Decimal("0.001"),
+    )
+
+    assert first == same
+    assert first.price_basis_revision != raw.price_basis_revision
+    assert first.provider == "longbridge"
+    assert first.adjustment == "forward"
 
 
 def test_qmt_factor_contract_rejects_missing_or_non_finite_facts() -> None:

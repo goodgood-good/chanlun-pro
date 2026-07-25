@@ -9,21 +9,23 @@ from cl_app.services.chart_compute import (
 
 def _strict_payload(revision: str = "sha256:one") -> dict[str, object]:
     return {
-        "schema": "chanlun-chart-structure/v4",
+        "schema": "chanlun-chart-structure/v5",
         "structure_revision": revision,
         "snapshot_revision": revision + "-snapshot",
         "render_revision": revision + "-render",
     }
 
 
-def test_v39_cache_is_rejected_after_strict_schema_cutover() -> None:
-    assert chart_cache._CHART_CACHE_SCHEMA_VERSION == "v40"
-    assert not chart_cache._build_cache_key(
+def test_v40_cache_is_rejected_after_center_preview_schema_cutover() -> None:
+    assert chart_cache._CHART_CACHE_SCHEMA_VERSION == "v41"
+    key = chart_cache._build_cache_key(
         "a",
         "SH.600519",
         "5m",
         {},
-    ).startswith("v37_")
+    )
+    assert key.startswith("v41_")
+    assert not key.startswith("v40_")
 
 
 def test_historical_pagination_omits_structure_instead_of_replacing_it() -> None:
