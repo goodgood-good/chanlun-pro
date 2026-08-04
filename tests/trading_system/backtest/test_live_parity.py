@@ -43,6 +43,7 @@ def deterministic_bundle() -> SymbolStructureBundle:
             confirmed_point("1buy", frequency="1m", minutes_after=1),
         ),
         opposite_points=(),
+        selection_sources=("QMT_SECTOR_TRIGGER",),
     )
 
 
@@ -130,6 +131,16 @@ def test_live_and_replay_share_strict_point_ids_and_availability(monkeypatch) ->
         "CL",
         lambda *_args, **_kwargs: live_state,
     )
+    monkeypatch.setattr(
+        gateway_module,
+        "build_screening_evidence",
+        lambda *_args, **_kwargs: live_evidence,
+    )
+    monkeypatch.setattr(
+        gateway_module,
+        "unfinished_segment_candidates",
+        lambda *_args, **_kwargs: (),
+    )
     frame = pd.DataFrame(
         {
             "date": [AS_OF],
@@ -196,5 +207,5 @@ def test_live_and_replay_share_strict_point_ids_and_availability(monkeypatch) ->
         live.provisional_points[0].candidate_id,
         live.provisional_points[0].observed_at,
     ) == (replay_approaching.candidate_id, replay_approaching.observed_at)
-    assert live_state.evidence_calls == 1
+    assert live_state.evidence_calls == 0
     assert all(state.evidence_calls == 1 for state in replay_states.values())

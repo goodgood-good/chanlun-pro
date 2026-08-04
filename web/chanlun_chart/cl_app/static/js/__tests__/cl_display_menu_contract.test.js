@@ -92,7 +92,7 @@ function fakeDocument(frames = []) {
 }
 
 test('缠论显示菜单使用固定分组顺序和正式名称', () => {
-  const titles = ['基础结构', '中枢', '走势类型', '买卖点', '背驰', '画线设置'];
+  const titles = ['基础结构', '中枢控制', '走势类型', '买卖点', '背驰', '画线设置'];
   const indexes = titles.map((title) => source.indexOf(`_grpTitle('${title}'`));
   assert.ok(indexes.every((index) => index >= 0), `missing titles: ${indexes}`);
   assert.deepEqual([...indexes].sort((a, b) => a - b), indexes);
@@ -109,6 +109,17 @@ test('缠论显示菜单使用固定分组顺序和正式名称', () => {
   ]) {
     assert.ok(source.includes(label), `missing menu label: ${label}`);
   }
+  for (const contract of [
+    "period: '1m', label: '1m 中枢', key: 'center_1m'",
+    "period: '5m', label: '5m 中枢', key: 'center_5m'",
+    "period: '30m', label: '30m 中枢', key: 'center_30m'",
+    "period: 'd', label: '日线 中枢', key: 'center_d'",
+  ]) {
+    assert.ok(source.includes(contract), `missing center control: ${contract}`);
+  }
+  assert.equal(source.includes('key: `center_L${item.level}`'), false);
+  assert.equal(source.includes('严格递归中枢总开关'), false);
+  assert.ok(source.includes("_cbRow('center_control_all', '中枢总开关')"));
 });
 
 test('菜单不暴露接近触发或中枢投影复选框', () => {

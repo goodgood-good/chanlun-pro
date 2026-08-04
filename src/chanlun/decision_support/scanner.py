@@ -9,6 +9,7 @@ from chanlun.decision_support.trading_system.engine import (
 from chanlun.decision_support.trading_system.runtime_config import (
     STRICT_STRATEGY_ID,
 )
+from chanlun.decision_support.structure_snapshot import SymbolStructureSnapshot
 
 
 ACTIVE_STRATEGY_ID = STRICT_STRATEGY_ID
@@ -19,5 +20,6 @@ __all__ = (
     "EvaluatedSignal",
     "SymbolStructureBundle",
     "TradingEngine",
+    "SymbolStructureSnapshot",
     "evaluate_symbol",
 )

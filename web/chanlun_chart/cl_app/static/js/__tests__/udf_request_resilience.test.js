@@ -4,6 +4,7 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const vm = require('node:vm');
 
 const udfRoot = path.join(__dirname, '..', '..', 'datafeeds', 'udf', 'src');
 
@@ -25,4 +26,63 @@ test('DataPulseProvider isolates pending work per subscriber and bounds every re
   assert.match(source, /_requestsPending\.has\(listenerGuid\)/);
   assert.match(source, /Promise\.race/);
   assert.match(source, /clearTimeout/);
+});
+
+test('cold history gets a 45s deadline while incremental polling stays at 15s', async () => {
+  const delays = [];
+  const sandbox = {
+    console, Math, JSON, Array, Object, String, Number, Boolean, Promise, Error, Map, Set,
+    fetch: (url) => {
+      const body = String(url).includes('/config')
+        ? {
+            supports_search: true,
+            supports_group_request: false,
+            supported_resolutions: ['1', '5', '30', '1D'],
+            supports_marks: false,
+            supports_timescale_marks: false,
+          }
+        : {
+            s: 'ok', update: false,
+            t: [1000], o: [1], h: [1], l: [1], c: [1], v: [1],
+            fxs: [], bis: [], xds: [], bi_zss: [], xd_zss: [], bcs: [], mmds: [],
+          };
+      return Promise.resolve({
+        ok: true,
+        text: () => Promise.resolve(JSON.stringify(body)),
+      });
+    },
+    setTimeout: (_callback, delay) => {
+      delays.push(delay);
+      return delays.length;
+    },
+    clearTimeout: () => {},
+    setInterval: () => 0,
+    clearInterval: () => {},
+  };
+  sandbox.globalThis = sandbox;
+  sandbox.self = sandbox;
+  sandbox.window = sandbox;
+  vm.createContext(sandbox);
+  const bundlePath = path.join(
+    __dirname, '..', '..', 'datafeeds', 'udf', 'dist', 'bundle.js'
+  );
+  vm.runInContext(fs.readFileSync(bundlePath, 'utf8'), sandbox, { filename: 'bundle.js' });
+
+  const datafeed = new sandbox.Datafeeds.UDFCompatibleDatafeed('http://test');
+  const history = datafeed._historyProvider;
+  delays.length = 0;
+  await history.getBars(
+    { ticker: 'us:TSLA.US' },
+    '1',
+    { from: 1000, to: 2000, firstDataRequest: true },
+  );
+  assert.equal(delays.at(-1), 45_000);
+
+  delays.length = 0;
+  await history.getBars(
+    { ticker: 'us:TSLA.US' },
+    '1',
+    { from: 1900, to: 2000, firstDataRequest: false },
+  );
+  assert.equal(delays.at(-1), 15_000);
 });

@@ -37,6 +37,7 @@ class _StrictOnlyCD:
         self.evidence = evidence or strict_evidence_result()
         self.error = error
         self.evidence_calls = 0
+        self.base_center_calls = {"bi": 0, "xd": 0}
         closed_at = self.evidence.source_closed_at
         self._bars = [
             SimpleNamespace(
@@ -75,6 +76,14 @@ class _StrictOnlyCD:
     def get_xds(self):
         return []
 
+    def get_bi_zss(self):
+        self.base_center_calls["bi"] += 1
+        return []
+
+    def get_xd_zss(self):
+        self.base_center_calls["xd"] += 1
+        return []
+
     def get_idx(self):
         values = np.array([0.0, 0.1])
         return {
@@ -97,8 +106,6 @@ class _StrictOnlyCD:
     def _legacy(self, *_args, **_kwargs):
         raise AssertionError("legacy chart structure source must not be read")
 
-    get_bi_zss = _legacy
-    get_xd_zss = _legacy
     get_bi_zhongshu = _legacy
     get_xd_zslx = _legacy
     get_recursive_branch_levels = _legacy
@@ -107,18 +114,19 @@ class _StrictOnlyCD:
     get_branch_bcs = _legacy
 
 
-def test_chart_payload_reads_only_strict_structure_sources() -> None:
+def test_chart_payload_keeps_base_centers_separate_from_strict_sources() -> None:
     cd = _StrictOnlyCD()
 
     payload = cl_data_to_tv_chart(cd, _config())
 
     assert cd.evidence_calls == 1
+    assert cd.base_center_calls == {"bi": 1, "xd": 0}
     assert payload["strict_structure_mode"] == "replace"
     assert payload["strict_structure"]["schema"] == "chanlun-chart-structure/v5"
     assert payload["strict_structure"]["source_closed_at"] == payload["t"][-1]
+    assert payload["bi_zss"] == []
+    assert payload["xd_zss"] == []
     for legacy_field in (
-        "bi_zss",
-        "xd_zss",
         "bcs",
         "mmds",
         "recursive_levels",

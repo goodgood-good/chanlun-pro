@@ -49,7 +49,7 @@ class IncrementalCenterEngine:
         self.source_kind = SourceKind(source_kind)
         self._locked_signature: tuple[tuple, ...] = ()
 
-    def update(self, units) -> CenterLevelResult:
+    def update(self, units, oscillatory_ids=frozenset()) -> CenterLevelResult:
         values = tuple(units)
         signature = _locked_signature(values)
         old = self._locked_signature
@@ -60,6 +60,7 @@ class IncrementalCenterEngine:
             values,
             self.structural_level,
             self.source_kind,
+            oscillatory_ids,
         )
         self._locked_signature = signature
         return result

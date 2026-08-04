@@ -27,6 +27,7 @@ from chanlun.cl_utils.tv_chart import (
     cl_qstd,
     prices_jiaodu,
     zs_to_chart_dict,
+    xd_segment_centers_to_chart_dicts,
     cl_data_to_tv_chart,
 )
 from chanlun.cl_utils.data import (
@@ -49,6 +50,7 @@ from chanlun.cl_utils.strict_chart import (
     aware_datetime_to_epoch_seconds,
     build_strict_structure_snapshot,
     center_observation_to_chart_dict,
+    display_segment_center_observations_to_chart_dicts,
     strict_center_to_chart_dict,
     strict_divergence_to_chart_dict,
     strict_point_to_chart_dict,
@@ -71,6 +73,7 @@ __all__ = [
     "cl_qstd",
     "prices_jiaodu",
     "zs_to_chart_dict",
+    "xd_segment_centers_to_chart_dicts",
     "cl_data_to_tv_chart",
     # data
     "web_batch_get_cl_datas",
@@ -89,6 +92,7 @@ __all__ = [
     "aware_datetime_to_epoch_seconds",
     "build_strict_structure_snapshot",
     "center_observation_to_chart_dict",
+    "display_segment_center_observations_to_chart_dicts",
     "strict_center_to_chart_dict",
     "strict_divergence_to_chart_dict",
     "strict_point_to_chart_dict",

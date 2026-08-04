@@ -33,7 +33,7 @@ from chanlun.cl_utils import (
     cl_data_to_tv_chart,
     kcharts_frequency_h_l_map,
     web_batch_get_cl_datas,
-    zs_to_chart_dict,
+    xd_segment_centers_to_chart_dicts,
 )
 from chanlun.market import Market
 from chanlun.exchange import get_exchange
@@ -98,37 +98,32 @@ HIGHER_FREQ_MAP = {
     "m": "y",
 }
 
-# ---------------- 多周期中枢叠加(P7) ----------------
+# ---------------- 独立周期中枢控制 ----------------
 
-# 叠加目标周期(MVP 各市场统一;自定义阶梯/目标留扩展)+ 周期→级别展示名
-HIGHER_ZS_TARGET = "30m"
+# 每个中枢都由对应周期自己的线段计算，绝不使用低周期结构递归冒充高周期。
+# 该集合是固定的“中枢控制”，不随主图周期改变。
+CENTER_CONTROL_PERIODS = ("1m", "5m", "30m", "d")
 _PERIOD_LEVEL_NAME = {
-    "5m": "5min级别", "30m": "30min级别", "d": "日线级别", "w": "周线级别",
+    "1m": "1m 中枢",
+    "5m": "5m 中枢",
+    "15m": "15m 中枢",
+    "30m": "30m 中枢",
+    "60m": "60m 中枢",
+    "d": "日线 中枢",
 }
 
 
 def _zs_level_name(period: str) -> str:
-    return _PERIOD_LEVEL_NAME.get(period, f"{period}级别")
+    return _PERIOD_LEVEL_NAME.get(period, f"{period} 中枢")
 
 
 def higher_zs_periods(frequency: str):
-    """返回当前周期之上、沿阶梯到 HIGHER_ZS_TARGET(含)途经的 [(周期, 级别名)]。
-
-    当前周期 >= 目标(从它沿 HIGHER_FREQ_MAP 走不到 target) → 返回 []。
-    例: '1m'→[('5m','5min级别'),('30m','30min级别')]; '5m'→[('30m','30min级别')];
-        '30m'/'d'→[]。
-    """
-    out = []
-    cur = frequency
-    seen = set()
-    while cur in HIGHER_FREQ_MAP and cur not in seen:
-        seen.add(cur)
-        nxt = HIGHER_FREQ_MAP[cur]
-        out.append((nxt, _zs_level_name(nxt)))
-        if nxt == HIGHER_ZS_TARGET:
-            return out
-        cur = nxt
-    return []
+    """返回固定的四个真实周期中枢；参数仅为向后兼容。"""
+    del frequency
+    return [
+        (period, _zs_level_name(period))
+        for period in CENTER_CONTROL_PERIODS
+    ]
 
 # 跨 UTC 日界的市场，日级分桶需按本地时区小时偏移修正（其余默认 +8）。
 MARKET_DAY_OFFSET_H = {
@@ -596,8 +591,14 @@ def _compute_and_cache_chart_data_impl(
 
     # P5 third step: 跨周期 MACD 抽到 apply_higher_macd_to_chart_data 共享 helper
     apply_higher_macd_to_chart_data(cl_chart_data, frequency, market, cl_config)
-    # P8 取代 P7：停用真实多周期叠加，高级别中枢改由 recursive_levels 产出
-    # apply_higher_zs_to_chart_data(cl_chart_data, market, code, frequency, cl_config)
+    # 中枢控制消费各周期独立 CL 的线段中枢，不使用单周期递归结构。
+    apply_higher_zs_to_chart_data(
+        cl_chart_data,
+        market,
+        code,
+        frequency,
+        cl_config,
+    )
 
     # 2026-07 修复(幽灵形态): 不再与 existing_entry 做 _merge_chart_data 合并。
     # cl_chart_data 本身就是基于完整回看窗口的全量权威计算结果(is_full_snapshot=True)；
@@ -1082,9 +1083,9 @@ def apply_higher_macd_to_chart_data(
 
 
 def _higher_zs_for_period(market: str, code: str, hf: str, cl_config: dict) -> list:
-    """取 hf 周期 K 线→新核心→L1 线段中枢→zs_to_chart_dict 列表。
+    """取 hf 周期 K 线→当前配置 CL→五段线段中枢→图表列表。
 
-    异常/无数据/无 L1 → 返回 [](优雅降级,不阻断主图)。
+    异常或无数据时返回空列表，不阻断其他周期。
     """
     try:
         ex = get_exchange(Market(market))
@@ -1092,14 +1093,7 @@ def _higher_zs_for_period(market: str, code: str, hf: str, cl_config: dict) -> l
         if klines is None or len(klines) == 0:
             return []
         cd = web_batch_get_cl_datas(market, code, {hf: klines}, cl_config)[0]
-        levels = cd.get_recursive_branch_levels() or []
-        # 取 L0=线段中枢(新核心 L0=线段构建,是该周期最低正式级别中枢)。
-        # "5min 级别"= 5m 数据的线段中枢、"30min 级别"= 30m 的线段中枢。
-        l0 = next((lv for lv in levels if lv.level == 0), None)
-        if l0 is None:
-            return []
-        # 中枢区间用核心区 [ZD,ZG](标准中枢);GG/DD 是瞬间波动范围、非中枢区间。
-        return [zs_to_chart_dict(zs, use_envelope=False) for zs in l0.zss]
+        return xd_segment_centers_to_chart_dicts(cd.get_xds())
     except Exception as e:
         LogUtil.error(f"[apply_higher_zs] period={hf} code={code} failed: {e}")
         return []
@@ -1108,15 +1102,11 @@ def _higher_zs_for_period(market: str, code: str, hf: str, cl_config: dict) -> l
 def apply_higher_zs_to_chart_data(
     chart_data: dict, market: str, code: str, frequency: str, cl_config: dict
 ) -> bool:
-    """低周期图叠加更高真实周期的 L1 线段中枢,in-place 写 chart_data['higher_zs']。
+    """写入各真实周期独立计算的线段中枢 ``higher_zs``。
 
-    返回是否写入(高周期图/配置关→False)。单级取数失败该级为空,不阻断其他级。
-
-    P8 取代 P7：单周期递归扩展已产出高级别中枢(recursive_levels)，此真实多周期叠加停用；保留实现可逆。
+    当前周期复用主图已计算的 ``xd_zss``，更高周期分别取自己的 K 线和 CL。
+    单周期取数失败只令该项为空，不阻断其余周期。
     """
-    return False  # P8 取代 P7：单周期递归扩展已产出高级别中枢(recursive_levels)，此真实多周期叠加停用；保留实现可逆
-    if cl_config.get("chart_show_higher_zs", "1") != "1":
-        return False
     periods = higher_zs_periods(frequency)
     if not periods:
         return False
@@ -1125,7 +1115,11 @@ def apply_higher_zs_to_chart_data(
         result.append({
             "period": hf,
             "level_name": level_name,
-            "zss": _higher_zs_for_period(market, code, hf, cl_config),
+            "zss": (
+                list(chart_data.get("xd_zss") or [])
+                if hf == frequency
+                else _higher_zs_for_period(market, code, hf, cl_config)
+            ),
         })
     chart_data["higher_zs"] = result
     return True

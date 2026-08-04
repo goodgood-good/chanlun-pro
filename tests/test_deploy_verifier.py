@@ -89,6 +89,42 @@ def test_deploy_verifier_exit_code_tracks_revision_match():
 
 
 @pytest.mark.skipif(os.name != "nt", reason="deployment script targets Windows")
+def test_deploy_verifier_resolves_default_project_root_after_file_binding():
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _HealthHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    uri = f"http://127.0.0.1:{server.server_port}/readyz?market=a"
+
+    try:
+        result = subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(SCRIPT),
+                "-HealthUri",
+                uri,
+                "-ExpectedRevision",
+                "expected-revision",
+                "-SkipProcessCheck",
+                "-SkipFreshnessCheck",
+                "-SkipSourceCheck",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "DEPLOY-OK" in result.stdout
+
+
+@pytest.mark.skipif(os.name != "nt", reason="deployment script targets Windows")
 def test_deploy_verifier_rejects_not_ready_status():
     server = ThreadingHTTPServer(("127.0.0.1", 0), _HealthHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -198,7 +234,8 @@ def test_operations_default_to_readiness_probe():
     assert "Get-NetTCPConnection" in verifier
     assert "http://127.0.0.1:9900/readyz?market=a" in legacy
     assert '$healthUri = "http://${probeHost}:$webPort/readyz?market=a"' in restart
-    assert "AddSeconds(120)" in restart
+    assert "[int]$WebReadinessTimeoutSeconds = 1800" in restart
+    assert "AddSeconds($WebReadinessTimeoutSeconds)" in restart
     assert "$env:CHANLUN_WEB_HOST = '127.0.0.1'" in restart
     assert "$env:CHANLUN_BUILD_REVISION = $deploymentRevision" in restart
     assert "$health.revision -eq $deploymentRevision" in restart
@@ -266,14 +303,49 @@ def test_legacy_verifier_is_only_a_compatibility_wrapper():
 def test_restart_attests_dirty_source_and_verifier_rechecks_it():
     restart = (ROOT / "ops" / "restart_qmt_daily.ps1").read_text(encoding="utf-8")
     verifier = SCRIPT.read_text(encoding="utf-8")
+    helper = (ROOT / "ops" / "deploy_common.ps1").read_text(encoding="utf-8")
 
     for source in (restart, verifier):
         assert "Get-ApplicationSourceRevision" in source
-        assert "ls-files --cached --others --exclude-standard" in source
-        assert "hash-object --no-filters --stdin-paths" in source
+        assert "deploy_common.ps1" in source
+    assert "function Get-ApplicationSourceRevision" in helper
+    assert "ls-files --cached --others --exclude-standard" in helper
+    assert "hash-object --no-filters --stdin-paths" in helper
     assert "$env:CHANLUN_BUILD_REVISION = $deploymentRevision" in restart
     assert "-ExpectedSourceRevision $sourceRevision" in restart
     assert "current source revision" in verifier
+
+
+def test_restart_source_manifest_uses_real_tab_delimiters():
+    helper = (ROOT / "ops" / "deploy_common.ps1").read_text(
+        encoding="utf-8"
+    )
+
+    assert '$manifest.Add(("{0}`t{1}" -f $path, $hash))' in helper
+    assert "$manifest.Add(('{0}`t{1}' -f $path, $hash))" not in helper
+    assert "[Array]::Sort($paths, [StringComparer]::Ordinal)" in helper
+
+
+@pytest.mark.skipif(os.name != "nt", reason="deployment script targets Windows")
+def test_restart_and_forward_runner_compute_the_same_source_revision():
+    from tools.run_v3_forward_paper import _application_source_revision
+
+    helper = str(ROOT / "ops" / "deploy_common.ps1").replace("'", "''")
+    root = str(ROOT).replace("'", "''")
+    command = (
+        f". '{helper}';"
+        f"Get-ApplicationSourceRevision -Root '{root}'"
+    )
+    completed = subprocess.run(
+        ["powershell", "-NoProfile", "-Command", command],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    output = tuple(line.strip() for line in completed.stdout.splitlines() if line.strip())
+    assert output[-1] == _application_source_revision(ROOT)
 
 
 def test_restart_has_a_bounded_scheduled_catch_up_window():

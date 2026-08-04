@@ -439,6 +439,11 @@ def _float_value(value: Any) -> float:
 class ExchangeUSmart(Exchange):
     """uSMART A/HK/US 三市场基础行情适配器。"""
 
+    # ``latestTime`` is the completed interval endpoint.  The regular US
+    # minute series ends at 16:00 (rather than a start-labelled 15:59), and
+    # calendar bars are normalized to the local market close below.
+    kline_time_label = "end"
+
     def __init__(self, market: str, client: USmartClient | None = None):
         market_key = str(market).lower()
         if market_key not in _MARKET_API_CODES:

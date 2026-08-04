@@ -2128,6 +2128,82 @@ class DB(object):
                 .all()
             )
 
+    def zx_get_global_groups(self) -> List[TableByZxGroup]:
+        """Return one definition for every watchlist group, across markets.
+
+        Watchlist groups used to be partitioned by ``market``.  The database
+        layout is intentionally kept for backwards compatibility, but the
+        product now treats a group name as a global identity.  Existing
+        same-named groups are therefore merged without rewriting or deleting
+        any user data.
+        """
+
+        with self.Session() as session:
+            rows = (
+                session.query(TableByZxGroup)
+                .order_by(TableByZxGroup.add_dt.asc(), TableByZxGroup.market.asc())
+                .all()
+            )
+            result: List[TableByZxGroup] = []
+            seen: set[str] = set()
+            for row in rows:
+                if row.zx_group in seen:
+                    continue
+                seen.add(row.zx_group)
+                result.append(row)
+            return result
+
+    def zx_add_global_group(self, zx_group: str) -> bool:
+        """Create a market-independent group definition.
+
+        New definitions use a reserved storage namespace.  Member rows keep
+        their real market because that fact is required to route charts and
+        quotes; it is not part of the group's identity.
+        """
+
+        with self.Session() as session:
+            try:
+                exists = (
+                    session.query(TableByZxGroup)
+                    .filter(TableByZxGroup.zx_group == zx_group)
+                    .first()
+                )
+                if exists is not None:
+                    return False
+                session.add(
+                    TableByZxGroup(
+                        market="__global__",
+                        zx_group=zx_group,
+                        add_dt=datetime.datetime.now(),
+                    )
+                )
+                session.commit()
+            except Exception:
+                session.rollback()
+                raise
+        return True
+
+    def zx_del_global_group(self, zx_group: str) -> bool:
+        """Delete one global group and all of its cross-market members."""
+
+        with self.Session() as session:
+            try:
+                member_count = (
+                    session.query(TableByZixuan)
+                    .filter(TableByZixuan.zx_group == zx_group)
+                    .delete(synchronize_session=False)
+                )
+                group_count = (
+                    session.query(TableByZxGroup)
+                    .filter(TableByZxGroup.zx_group == zx_group)
+                    .delete(synchronize_session=False)
+                )
+                session.commit()
+            except Exception:
+                session.rollback()
+                raise
+        return bool(member_count or group_count)
+
     def zx_add_group(self, market: str, zx_group: str) -> bool:
         """
         添加自选分组
@@ -2175,6 +2251,22 @@ class DB(object):
                 .all()
             )
         return stocks
+
+    def zx_get_global_group_stocks(self, zx_group: str) -> List[TableByZixuan]:
+        """Return all members of a group while preserving each member market."""
+
+        with self.Session() as session:
+            return (
+                session.query(TableByZixuan)
+                .filter(TableByZixuan.zx_group == zx_group)
+                .order_by(
+                    TableByZixuan.position.asc(),
+                    TableByZixuan.add_datetime.asc(),
+                    TableByZixuan.market.asc(),
+                    TableByZixuan.stock_code.asc(),
+                )
+                .all()
+            )
 
     def zx_add_group_stock(
         self,

@@ -99,7 +99,7 @@ def test_sha256_json_is_independent_of_mapping_order() -> None:
 
 
 def test_decision_event_is_frozen(make_decision_event) -> None:
-    event = make_decision_event(track=StrategyTrack.TREND_CONTINUATION)
+    event = make_decision_event(track=StrategyTrack.CHANLUN_SOURCE_FAITHFUL)
 
     with pytest.raises(dataclasses.FrozenInstanceError):
         event.code = "SZ.000001"

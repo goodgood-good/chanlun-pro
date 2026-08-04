@@ -277,8 +277,16 @@ class _LazyMarketDict(dict):
         return dict.__len__(self)
 
 
-def _build_market_frequencys(_key, market):
-    return list(get_exchange(market).support_frequencys().keys())
+def _build_market_frequencys(key, market):
+    frequencies = list(get_exchange(market).support_frequencys().keys())
+    # ``q`` was added to the shared TradingView map solely for the TDX FX
+    # adapter.  Some configurable providers advertise a synthetic quarterly
+    # frequency even though the corresponding routed market cannot honour the
+    # same contract.  Keep the web/API capability boundary deterministic and
+    # fail closed for a hand-crafted 3M request outside FX.
+    if key != "fx":
+        frequencies = [value for value in frequencies if value != "q"]
+    return frequencies
 
 
 def _build_market_default_codes(_key, market):

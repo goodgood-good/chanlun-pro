@@ -468,6 +468,26 @@ class ExchangeQMT(Exchange):
             if research_exact_end
             else ""
         )
+        # ``xtdata.download_history_data`` treats ``end_time`` as an exclusive
+        # transport boundary, while ``get_market_data`` reads the same boundary
+        # inclusively.  Passing the frozen decision time to both calls therefore
+        # leaves the bar whose completion timestamp is exactly ``end_date`` out
+        # of the local store.  The mismatch is observable after the close: QMT's
+        # native daily row is present, but the 1m-derived daily prefix stops one
+        # session earlier and the higher-timeframe gate correctly fails closed.
+        #
+        # Move *only the download boundary* one second forward.  The read stays
+        # pinned to ``query_end`` and the explicit dataframe filter below still
+        # enforces ``date <= end_date``.  Thus the transport can fetch the bar at
+        # the decision timestamp without making any later bar visible.
+        download_query_end = query_end
+        if research_exact_end:
+            exact_end = pd.Timestamp(end_date)
+            if exact_end.tzinfo is not None:
+                exact_end = exact_end.tz_convert(self.tz).tz_localize(None)
+            download_query_end = (exact_end + pd.Timedelta(seconds=1)).strftime(
+                "%Y%m%d%H%M%S"
+            )
 
         dividend_type = args.get("dividend_type", "front") if args else "front"
 
@@ -477,6 +497,8 @@ class ExchangeQMT(Exchange):
         # 预热批量预下载后, 逐只可跳过 download(数据已在本地库), 只读取——省下逐只 QMT 往返。
         # 仅预热路径经 args 显式传入 skip_download=True; 用户实时请求不传, 行为不变。
         _skip_dl = bool(args.get("skip_download")) if isinstance(args, dict) else False
+        price_basis_factors = None
+        price_basis_error = None
         with _XTDATA_NATIVE_LOCK:
             try:
                 if not _skip_dl:
@@ -484,7 +506,7 @@ class ExchangeQMT(Exchange):
                         stock_code=qmt_code,
                         period=qmt_download_period,
                         start_time=query_start,
-                        end_time=query_end,
+                        end_time=download_query_end,
                         incrementally=True,
                     )
                 raw_data = xtdata.get_market_data(
@@ -497,6 +519,17 @@ class ExchangeQMT(Exchange):
                     dividend_type=dividend_type,
                     fill_data=False,
                 )
+                if dividend_type != "none":
+                    try:
+                        price_basis_factors = xtdata.get_divid_factors(qmt_code)
+                    except Exception as exc:
+                        price_basis_error = exc
+                        LogUtil.warning(
+                            "[ExchangeQMT.price_basis] factor read failed "
+                            f"code={code} frequency={frequency} "
+                            f"adjustment={dividend_type} "
+                            f"error={type(exc).__name__}: {exc}"
+                        )
             except Exception as e:
                 # native 层抛出的普通异常仍然走外层 retry；
                 # 注意：BSON 断言导致的 0xC0000409 进程崩溃 Python 无法捕获，
@@ -527,21 +560,6 @@ class ExchangeQMT(Exchange):
                 f"[exchange_qmt._build_empty_df] check time_col failed code={code} freq={frequency}: {e}"
             )
             return empty_df
-
-        price_basis_factors = None
-        price_basis_error = None
-        if dividend_type != "none":
-            try:
-                with _XTDATA_NATIVE_LOCK:
-                    price_basis_factors = xtdata.get_divid_factors(qmt_code)
-            except Exception as exc:
-                price_basis_error = exc
-                LogUtil.warning(
-                    "[ExchangeQMT.price_basis] factor read failed "
-                    f"code={code} frequency={frequency} "
-                    f"adjustment={dividend_type} "
-                    f"error={type(exc).__name__}: {exc}"
-                )
 
         try:
             data_dict = {
@@ -656,6 +674,39 @@ class ExchangeQMT(Exchange):
             "name": stock_detail["InstrumentName"],
             "precision": fun.reverse_decimal_to_power_of_ten(stock_detail["PriceTick"]),
         }
+
+    def screening_instrument_types(
+        self,
+        codes: tuple[str, ...],
+    ) -> Mapping[str, str]:
+        """Return native QMT security kinds for the read-only screening scope.
+
+        Code shape alone cannot distinguish ``SH.000001`` (an index) from an
+        A-share stock, and names are not a stable decision fact.  The native
+        QMT type service is therefore the sole authority for watchlist,
+        virtual-holding, and previous-signal monitor supplements.  Unknown or
+        unsupported responses remain explicit and fail closed downstream.
+        """
+
+        normalized = _validated_research_codes(codes)
+        result: dict[str, str] = {}
+        with _XTDATA_NATIVE_LOCK:
+            for code in normalized:
+                raw = xtdata.get_instrument_type(self.code_to_qmt(code))
+                if not isinstance(raw, Mapping) or not raw:
+                    kind = "unresolved_cn"
+                elif raw.get("stock") is True:
+                    kind = "stock_cn"
+                elif raw.get("etf") is True:
+                    kind = "etf_cn"
+                elif raw.get("index") is True:
+                    kind = "index_cn"
+                elif raw.get("fund") is True:
+                    kind = "fund_cn"
+                else:
+                    kind = "unsupported_cn"
+                result[code] = kind
+        return result
 
     def research_tick_snapshots(
         self,

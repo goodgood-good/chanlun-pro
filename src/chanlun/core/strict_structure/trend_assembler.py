@@ -13,11 +13,13 @@ from chanlun.core.strict_structure.models import (
 )
 
 
-def _validate_center_references(centers, units, structural_level):
+def _validate_center_references(
+    centers, units, structural_level, oscillatory_ids=frozenset()
+):
     if not units:
         raise ValueError("center references require source units")
     source_kind = centers[0].source_kind
-    validate_unit_sequence(units, structural_level, source_kind)
+    validate_unit_sequence(units, structural_level, source_kind, oscillatory_ids)
     index = {item.unit_id: offset for offset, item in enumerate(units)}
     if len(index) != len(units):
         raise ValueError("unit ids must be unique")
@@ -167,12 +169,16 @@ def _build(
     )
 
 
-def assemble_trend_types(centers, units, structural_level) -> TrendAssemblyResult:
+def assemble_trend_types(
+    centers, units, structural_level, oscillatory_ids=frozenset()
+) -> TrendAssemblyResult:
     values = tuple(centers)
     source_units = tuple(units)
     if not values:
         return TrendAssemblyResult(current_trends=(), completed_trends=())
-    index = _validate_center_references(values, source_units, structural_level)
+    index = _validate_center_references(
+        values, source_units, structural_level, oscillatory_ids
+    )
     output = []
     completed = {}
     group = [values[0]]

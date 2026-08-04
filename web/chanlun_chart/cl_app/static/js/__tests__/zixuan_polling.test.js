@@ -6,14 +6,20 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 
-function loadZiXuan() {
+function loadZiXuan(customNodes) {
   const ajaxCalls = [];
   const timers = [];
   const intervalCalls = [];
-  const nodes = [{ code: 'sh.000001' }, { code: 'sz.000002' }];
+  const nodes = customNodes || [{ code: 'sh.000001' }, { code: 'sz.000002' }];
   let replacements = 0;
   let currentMarket = 'a';
   let currentCode = 'sh.000001';
+  let nowMs = 1_000_000;
+  const watchStatus = { text: '', state: '' };
+
+  class FakeDate extends Date {
+    static now() { return nowMs; }
+  }
 
   function collection(items) {
     return {
@@ -25,7 +31,7 @@ function loadZiXuan() {
         return collection(items.filter((item, index) => callback.call(item, index, item)));
       },
       data(key) {
-        return key === 'code' && items[0] ? items[0].code : undefined;
+        return items[0] ? items[0][key] : undefined;
       },
       change() {
         return this;
@@ -45,6 +51,19 @@ function loadZiXuan() {
 
   function $(value) {
     if (value === '.code_rate') return collection(nodes);
+    if (value === '#zixuan_watch_status') {
+      return {
+        text(next) {
+          if (arguments.length === 0) return watchStatus.text;
+          watchStatus.text = String(next);
+          return this;
+        },
+        attr(name, next) {
+          if (name === 'data-state') watchStatus.state = String(next);
+          return this;
+        },
+      };
+    }
     if (value && typeof value === 'object' && Object.hasOwn(value, 'code')) {
       return collection([value]);
     }
@@ -134,6 +153,7 @@ function loadZiXuan() {
     String,
     Array,
     Object,
+    Date: FakeDate,
   };
   sandbox.window = sandbox;
   sandbox.globalThis = sandbox;
@@ -150,11 +170,13 @@ function loadZiXuan() {
     intervalCalls,
     replacements: () => replacements,
     dropdownData: () => dropdownData,
+    watchStatus: () => ({ ...watchStatus }),
     setIdentity(market, code) { currentMarket = market; currentCode = code; },
     fireLatestTimer() {
       const timer = [...timers].reverse().find((item) => !item.cleared && !item.fired);
       assert.ok(timer, 'expected an active timeout');
       timer.fired = true;
+      nowMs += timer.delay;
       timer.callback();
       return timer;
     },
@@ -226,6 +248,115 @@ test('does not overlap requests while one is in flight', () => {
   assert.equal(h.ajaxCalls.length, 1);
   failRequest(h.ajaxCalls[0]);
   assert.deepEqual(h.timers.map((timer) => timer.delay), [6000]);
+});
+
+test('one global group batches quotes by each member market', () => {
+  const h = loadZiXuan([
+    { market: 'a', code: 'SH.600000' },
+    { market: 'hk', code: '00700' },
+    { market: 'a', code: 'SZ.000001' },
+  ]);
+
+  h.ZiXuan.stocks_update_rate();
+
+  assert.equal(h.ajaxCalls.length, 2);
+  assert.deepEqual(
+    h.ajaxCalls.map((call) => call.data.market).sort(),
+    ['a', 'hk'],
+  );
+  assert.deepEqual(
+    JSON.parse(h.ajaxCalls.find((call) => call.data.market === 'a').data.codes),
+    ['SH.600000', 'SZ.000001'],
+  );
+  completeSuccess(h.ajaxCalls[0], { ok: true, market_state: 'open', ticks: [] });
+  assert.equal(h.timers.length, 0, 'wait for every market batch');
+  completeSuccess(h.ajaxCalls[1], { ok: true, market_state: 'closed', ticks: [] });
+  assert.deepEqual(h.timers.map((timer) => timer.delay), [3000]);
+});
+
+test('US quote batches allow the backend fallback window without slowing other markets', () => {
+  const h = loadZiXuan([
+    { market: 'a', code: 'SH.600000' },
+    { market: 'us', code: 'AAPL.US' },
+  ]);
+
+  h.ZiXuan.stocks_update_rate();
+
+  assert.equal(
+    h.ajaxCalls.find((call) => call.data.market === 'a').timeout,
+    8000,
+  );
+  assert.equal(
+    h.ajaxCalls.find((call) => call.data.market === 'us').timeout,
+    12000,
+  );
+});
+
+test('manual quote refresh preserves rendered prices and skips table reconstruction', () => {
+  const h = loadZiXuan([{ market: 'a', code: 'SH.600000' }]);
+  h.ZiXuan.stocks_update_rate();
+  completeSuccess(h.ajaxCalls[0], {
+    ok: true,
+    market_state: 'open',
+    ticks: [{ code: 'SH.600000', price: 10.5, rate: 1.2 }],
+  });
+  assert.equal(h.replacements(), 1);
+  assert.equal(h.timers[0].delay, 3000);
+
+  h.ZiXuan.refresh_rates();
+
+  assert.equal(h.timers[0].cleared, true);
+  assert.equal(h.ajaxCalls.length, 2, 'manual refresh starts quotes immediately');
+  assert.equal(h.replacements(), 1, 'the last rendered quote remains visible');
+  assert.deepEqual(h.watchStatus(), { text: '正在刷新行情…', state: 'loading' });
+});
+
+test('manual refresh during an active request does not create a duplicate batch', () => {
+  const h = loadZiXuan([{ market: 'us', code: 'TSLA.US' }]);
+  h.ZiXuan.stocks_update_rate();
+
+  assert.equal(h.ZiXuan.refresh_rates(), true);
+  assert.equal(h.ajaxCalls.length, 1);
+  completeSuccess(h.ajaxCalls[0], {
+    ok: true,
+    market_state: 'closed',
+    ticks: [{ code: 'TSLA.US', price: 320.5, rate: -0.4 }],
+  });
+  assert.equal(h.replacements(), 1);
+});
+
+test('one unavailable market backs off independently while healthy markets keep refreshing', () => {
+  const nodes = [
+    { market: 'a', code: 'SH.600000' },
+    { market: 'currency_spot', code: 'BTC/USDT' },
+  ];
+  const h = loadZiXuan(nodes);
+
+  h.ZiXuan.stocks_update_rate();
+  const aCall = h.ajaxCalls.find((call) => call.data.market === 'a');
+  const cryptoCall = h.ajaxCalls.find((call) => call.data.market === 'currency_spot');
+  completeSuccess(aCall, { ok: true, market_state: 'open', ticks: [] });
+  failRequest(cryptoCall);
+
+  assert.deepEqual(h.watchStatus(), {
+    text: '数字货币现货暂不可用；其余 1 个市场继续更新',
+    state: 'warning',
+  });
+  assert.equal(nodes[1].quoteState, 'unavailable');
+  assert.equal(h.timers[0].delay, 3000);
+
+  h.fireLatestTimer();
+  assert.equal(h.ajaxCalls.length, 3, 'crypto remains in backoff after three seconds');
+  assert.equal(h.ajaxCalls[2].data.market, 'a');
+  completeSuccess(h.ajaxCalls[2], { ok: true, market_state: 'open', ticks: [] });
+
+  h.fireLatestTimer();
+  const newCalls = h.ajaxCalls.slice(3);
+  assert.deepEqual(
+    newCalls.map((call) => call.data.market).sort(),
+    ['a', 'currency_spot'],
+    'crypto retries at six seconds without pausing A-share quotes',
+  );
 });
 
 test('schedules the normal poll only after a valid open response completes', () => {

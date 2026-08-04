@@ -177,6 +177,178 @@ function barsReadyEvent() {
   };
 }
 
+test('drawChartElements 独立绘制笔中枢和四个真实周期中枢且不读取递归级别', () => {
+  const { ChartManager } = loadChartManager();
+  const cm = Object.create(ChartManager.prototype);
+  const calls = [];
+  const center = (id, index) => ({ ...zone(index), id });
+  const penCenter = center('pen-center', 0);
+  const centers = {
+    '1m': [center('center-1m', 1)],
+    '5m': [{
+      ...center('center-5m', 2),
+      linestyle: '1',
+      done: false,
+      state: 'forming',
+      render_kind: 'center_preview',
+      provisional: true,
+      contains_unfinished_segment: true,
+    }],
+    '30m': [center('center-30m', 3)],
+    d: [center('center-d', 4)],
+  };
+  cm.obj_charts = {};
+  cm.chart = {};
+  cm.cl_show_config = {
+    fx: false,
+    bi: false,
+    xd: false,
+    pen_center: true,
+    center_control_all: true,
+    center_1m: true,
+    center_5m: true,
+    center_30m: false,
+    center_d: true,
+  };
+  cm.reconcile = (type, source) => { calls.push({ type, source }); };
+  cm._drawStrictStructure = () => {};
+  cm.updateDrawPalette = () => {};
+  cm._sweepOrphanTimer = null;
+  cm._disposed = false;
+
+  cm.drawChartElements({
+    symbolKey: 'a:SH.600000_5',
+    from: 0,
+    visibleRange: { from: 0, to: 2_000_000_000 },
+    barsResult: {
+      bars: Array.from({ length: 80 }, (_, index) => ({
+        time: (1_700_000_000 + index * 500) * 1000,
+      })),
+      fxs: [], bis: [], xds: [], bi_zss: [penCenter], xd_zss: centers['5m'],
+      higher_zs: [
+        { period: 'd', zss: centers.d },
+        { period: '1m', zss: centers['1m'] },
+        { period: '30m', zss: centers['30m'] },
+        { period: '5m', zss: centers['5m'] },
+      ],
+      recursive_levels: [{ level: 0, zss: [{ id: 'must-not-render-as-center' }] }],
+    },
+  }, '5');
+
+  const byType = new Map(calls.map((entry) => [entry.type, entry.source]));
+  assert.equal(byType.get('bi_zss')[0].id, penCenter.id);
+  assert.equal(byType.get('frequency_center_1m')[0].id, centers['1m'][0].id);
+  assert.equal(byType.get('frequency_center_5m')[0].id, centers['5m'][0].id);
+  assert.equal(byType.get('frequency_center_5m')[0].linestyle, '1');
+  assert.equal(byType.get('frequency_center_5m')[0].provisional, true);
+  assert.equal(byType.get('frequency_center_5m')[0].contains_unfinished_segment, true);
+  assert.equal(byType.get('frequency_center_30m').length, 0);
+  assert.equal(byType.get('frequency_center_d')[0].id, centers.d[0].id);
+  assert.equal(calls.some((entry) => entry.type.includes('center_L')), false);
+});
+
+test('周期中枢总开关关闭时只清空四周期中枢并保留笔中枢与子项偏好', () => {
+  const { ChartManager } = loadChartManager();
+  const cm = Object.create(ChartManager.prototype);
+  const calls = [];
+  cm.obj_charts = {};
+  cm.chart = {};
+  cm.cl_show_config = {
+    fx: false,
+    bi: false,
+    xd: false,
+    pen_center: true,
+    center_control_all: false,
+    center_1m: true,
+    center_5m: false,
+    center_30m: true,
+    center_d: true,
+  };
+  cm.reconcile = (type, source) => { calls.push({ type, source }); };
+  cm._drawStrictStructure = () => {};
+  cm.updateDrawPalette = () => {};
+  cm._sweepOrphanTimer = null;
+  cm._disposed = false;
+  const penCenter = { ...zone(0), id: 'pen-center' };
+  const periodCenter = { ...zone(1), id: 'period-center' };
+
+  cm.drawChartElements({
+    symbolKey: 'a:SH.600000_5',
+    from: 0,
+    visibleRange: { from: 0, to: 2_000_000_000 },
+    barsResult: {
+      bars: Array.from({ length: 20 }, (_, index) => ({
+        time: (1_700_000_000 + index * 500) * 1000,
+      })),
+      fxs: [], bis: [], xds: [], bi_zss: [penCenter], xd_zss: [periodCenter],
+      higher_zs: [
+        { period: '1m', zss: [periodCenter] },
+        { period: '5m', zss: [periodCenter] },
+        { period: '30m', zss: [periodCenter] },
+        { period: 'd', zss: [periodCenter] },
+      ],
+    },
+  }, '5');
+
+  const byType = new Map(calls.map((entry) => [entry.type, entry.source]));
+  assert.equal(byType.get('bi_zss').length, 1);
+  for (const period of ['1m', '5m', '30m', 'd']) {
+    assert.equal(byType.get(`frequency_center_${period}`).length, 0);
+  }
+  assert.deepEqual(
+    [cm.cl_show_config.center_1m, cm.cl_show_config.center_5m,
+      cm.cl_show_config.center_30m, cm.cl_show_config.center_d],
+    [true, false, true, true],
+  );
+});
+
+test('中枢绘制范围按已加载真实K线裁剪，加载范围扩大后自动恢复实际端点', () => {
+  const { ChartManager } = loadChartManager();
+  const cm = Object.create(ChartManager.prototype);
+  const base = 1_700_000_000;
+  const center = {
+    points: [
+      { time: base + 100, price: 12 },
+      { time: base + 600, price: 10 },
+    ],
+    linestyle: '0',
+  };
+  const visibleRange = { from: base, to: base + 700 };
+  const partialBars = [200, 300, 400, 500].map((offset) => ({
+    time: (base + offset) * 1000,
+  }));
+  const fullBars = [100, 200, 300, 400, 500, 600].map((offset) => ({
+    time: (base + offset) * 1000,
+  }));
+
+  const partial = cm._centerRenderList([center], partialBars, visibleRange, '5');
+  const full = cm._centerRenderList([center], fullBars, visibleRange, '5');
+
+  assert.deepEqual(partial[0].points.map((point) => point.time), [base + 200, base + 500]);
+  assert.deepEqual(full[0].points.map((point) => point.time), [base + 100, base + 600]);
+  assert.deepEqual(center.points.map((point) => point.time), [base + 100, base + 600], '不得修改原始中枢');
+});
+
+test('日线中枢原始收盘时刻会转换到日K的TradingView日期坐标', () => {
+  const { ChartManager } = loadChartManager();
+  const cm = Object.create(ChartManager.prototype);
+  const firstRaw = Date.UTC(2026, 6, 22, 7) / 1000;
+  const secondRaw = Date.UTC(2026, 6, 23, 7) / 1000;
+  const firstChart = Date.UTC(2026, 6, 22) / 1000;
+  const secondChart = Date.UTC(2026, 6, 23) / 1000;
+  const rendered = cm._centerRenderList([{
+    points: [
+      { time: firstRaw, price: 12 },
+      { time: secondRaw, price: 10 },
+    ],
+  }], [
+    { time: firstChart * 1000 },
+    { time: secondChart * 1000 },
+  ], { from: firstChart, to: secondChart }, '1D');
+
+  assert.deepEqual(rendered[0].points.map((point) => point.time), [firstChart, secondChart]);
+});
+
 test('reconcile: 列表尾部中枢边界变化且数量/from 不变时仍替换 shape', () => {
   const { ChartManager } = loadChartManager();
   const { cm, calls, create } = makeReconcileManager(ChartManager);
@@ -203,6 +375,90 @@ test('reconcile: 完全相同的中枢状态重复进入时保持零操作', () 
   cm.reconcile('bi_zss', zones, 1600000000, 'S', create, false, true);
   assert.equal(calls.create, before.create);
   assert.equal(calls.remove, before.remove);
+});
+
+test('reconcile: 旧异步创建晚到时不得把旧范围重新写回当前容器', async () => {
+  const { ChartManager } = loadChartManager();
+  const { cm, calls } = makeReconcileManager(ChartManager);
+  let resolveOld;
+  const oldPromise = new Promise((resolve) => { resolveOld = resolve; });
+  const oldZone = zone(0);
+  const currentZone = zone(1);
+
+  cm.reconcile('bi_zss', [oldZone], 1_600_000_000, 'S', () => oldPromise, false, true);
+  cm.reconcile('bi_zss', [currentZone], 1_600_000_000, 'S', () => 200, false, true);
+  resolveOld(100);
+  await Promise.resolve();
+  await Promise.resolve();
+
+  assert.deepEqual(cm.obj_charts.S.bi_zss.map((entry) => entry.id), [200]);
+  assert.equal(calls.remove, 1, '晚到的旧实体应立即删除');
+});
+
+test('reconcile: TradingView 后续移动已存在中枢时即使数据 key 未变也会自愈重建', () => {
+  const { ChartManager } = loadChartManager();
+  const cm = Object.create(ChartManager.prototype);
+  const calls = { create: [], remove: [] };
+  const created = new Map();
+  let nextId = 1;
+  cm.obj_charts = { S: { bi_zss: [] } };
+  cm._reconcileGuard = {};
+  cm._reconcileEpochs = new Map();
+  cm._reconcileOwnedIds = new Set();
+  cm._pendingRemovalIds = new Set();
+  cm._reconcileRetry = { count: 0, timer: null };
+  cm._disposed = false;
+  cm.chart = {
+    removeEntity(id) { calls.remove.push(id); created.delete(id); },
+    getShapeById(id) {
+      const item = created.get(id);
+      if (!item) return null;
+      return {
+        getPoints() {
+          const points = item.points.map((point) => ({ ...point }));
+          if (id === 1) points[0].price += 1;
+          return points;
+        },
+      };
+    },
+  };
+  const center = {
+    points: [
+      { time: 1_700_000_000, price: 12 },
+      { time: 1_700_000_900, price: 10 },
+    ],
+    linestyle: '0',
+  };
+  const create = (item) => {
+    const id = nextId++;
+    created.set(id, item);
+    calls.create.push(id);
+    return id;
+  };
+
+  // 首次创建时让 1 号实体先通过校验，随后模拟 TV 在历史加载中移动它。
+  cm.chart.getShapeById = (id) => {
+    const item = created.get(id);
+    if (!item) return null;
+    return { getPoints: () => item.points.map((point) => ({ ...point })) };
+  };
+  cm.reconcile('bi_zss', [center], 1_600_000_000, 'S', create, false, true, true);
+  cm.chart.getShapeById = (id) => {
+    const item = created.get(id);
+    if (!item) return null;
+    return {
+      getPoints() {
+        const points = item.points.map((point) => ({ ...point }));
+        if (id === 1) points[0].price += 1;
+        return points;
+      },
+    };
+  };
+  cm.reconcile('bi_zss', [center], 1_600_000_000, 'S', create, false, true, true);
+
+  assert.deepEqual(calls.create, [1, 2]);
+  assert.deepEqual(calls.remove, [1]);
+  assert.deepEqual(cm.obj_charts.S.bi_zss.map((entry) => entry.id), [2]);
 });
 
 test('reconcile: 截断范围后的未完成状态变化必须刷新样式', () => {
@@ -512,6 +768,103 @@ test('_maybeWidenDefaultView: 旧视窗完全落在已加载历史外时回到�
 
   assert.equal(applied.length, 1);
   assert.deepEqual(applied[0], { from: earliest, to: latest });
+});
+
+test('_maybeApplyCausalFocus: 风险点审计锁聚焦锚点且不越过因果截止', () => {
+  const { ChartManager, sb } = loadChartManager();
+  const cm = makeManager(ChartManager, null, new Map());
+  const focusAt = 1_735_891_200;
+  const reviewAsOf = focusAt + 10 * 86_400;
+  const applied = [];
+  const markers = [];
+  sb.window.__chanlunReviewChartLock = {
+    candidate_id: `sha256:${'1'.repeat(64)}`,
+    source_sha256: `sha256:${'2'.repeat(64)}`,
+    review_as_of: reviewAsOf,
+    focus_at: focusAt,
+    symbol: 'SH.000001',
+    chart_interval: '30',
+    lock_kind: 'RISK_POINT_AUDIT',
+  };
+  cm.widget = {
+    symbolInterval: () => ({ symbol: 'a:SH.000001', interval: '30' }),
+  };
+  cm.chart = {
+    setVisibleRange: (range) => { applied.push(range); },
+    createMultipointShape: (points, options) => {
+      markers.push({ points, options });
+      return 'audit-marker-1';
+    },
+  };
+  sb.setTimeout = (callback) => { callback(); return 0; };
+
+  assert.equal(cm._maybeApplyCausalFocus(), true);
+  assert.equal(applied.length, 1);
+  assert.ok(applied[0].from < focusAt);
+  assert.ok(applied[0].to > focusAt);
+  assert.ok(applied[0].to <= reviewAsOf);
+  assert.equal(markers.length, 1);
+  assert.deepEqual(markers[0].points, [{ time: focusAt }]);
+  assert.equal(Object.hasOwn(markers[0].points[0], 'price'), false);
+  assert.equal(markers[0].options.shape, 'vertical_line');
+  assert.match(markers[0].options.text, /无价格锚点/);
+  assert.equal(cm._maybeApplyCausalFocus(), true);
+  assert.equal(applied.length, 1, '同一稳定点只聚焦一次');
+  assert.equal(markers.length, 1, '同一稳定点只创建一条审计竖线');
+});
+
+test('_maybeApplyCausalFocus: QMT GICS3 复合代码保留内部冒号并可定位', () => {
+  const { ChartManager, sb } = loadChartManager();
+  const cm = makeManager(ChartManager, null, new Map());
+  const focusAt = 1_735_891_200;
+  const sector = `qmt-gics3:${'a'.repeat(64)}`;
+  sb.window.__chanlunReviewChartLock = {
+    candidate_id: `sha256:${'1'.repeat(64)}`,
+    source_sha256: `sha256:${'2'.repeat(64)}`,
+    review_as_of: focusAt + 86_400,
+    focus_at: focusAt,
+    symbol: sector,
+    chart_interval: '30',
+    lock_kind: 'RISK_POINT_AUDIT',
+  };
+  cm.widget = {
+    symbolInterval: () => ({ symbol: `a:${sector}`, interval: '30' }),
+  };
+  let markerPoint = null;
+  cm.chart = {
+    setVisibleRange: () => {},
+    createMultipointShape: (points) => {
+      markerPoint = points[0];
+      return 'sector-marker';
+    },
+  };
+  sb.setTimeout = (callback) => { callback(); return 0; };
+
+  assert.equal(cm._maybeApplyCausalFocus(), true);
+  assert.deepEqual(markerPoint, { time: focusAt });
+});
+
+test('_maybeApplyCausalFocus: 标的或周期与风险点锁不一致时不得聚焦', () => {
+  const { ChartManager, sb } = loadChartManager();
+  const cm = makeManager(ChartManager, null, new Map());
+  sb.window.__chanlunReviewChartLock = {
+    candidate_id: `sha256:${'1'.repeat(64)}`,
+    source_sha256: `sha256:${'2'.repeat(64)}`,
+    review_as_of: 1_735_891_200,
+    focus_at: 1_735_804_800,
+    symbol: 'SH.000001',
+    chart_interval: '30',
+    lock_kind: 'RISK_POINT_AUDIT',
+  };
+  cm.chart = { setVisibleRange: () => assert.fail('不应聚焦不匹配图表') };
+  cm.widget = {
+    symbolInterval: () => ({ symbol: 'a:SH.000002', interval: '30' }),
+  };
+  assert.equal(cm._maybeApplyCausalFocus(), false);
+  cm.widget = {
+    symbolInterval: () => ({ symbol: 'a:SH.000001', interval: '5' }),
+  };
+  assert.equal(cm._maybeApplyCausalFocus(), false);
 });
 
 test('_doReset: 首次 → 调 resetCache+resetData, 记账 backoff=0', () => {

@@ -1,0 +1,773 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="robots" content="noindex,nofollow" />
+    <title>当前缠论研究回放 · 统一审计</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/ui-system.css') }}?v={{ static_version|default('') }}" />
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/research_audit.css') }}?v={{ static_version|default('') }}" />
+  </head>
+  <body class="cp-ui cp-immersive">
+    <a class="cp-skip-link" href="#main-content">跳到审计结果</a>
+    <header class="ra-topbar cp-product-nav">
+      <div class="ra-shell ra-topbar-inner cp-product-links">
+        <a class="ra-back-link" href="/">← 行情与画图</a>
+        <a class="ra-back-link" href="{{ url_for('decision_support.early_screening') }}">提前选股与人工复核 →</a>
+      </div>
+    </header>
+
+    <main id="main-content" class="ra-shell">
+      <section class="ra-hero" aria-labelledby="ra-page-title">
+        <div class="ra-hero-copy">
+          <p class="ra-eyebrow">CURRENT RESEARCH · SHARED DECISION EVIDENCE</p>
+          <div class="ra-title-row">
+            <h1 id="ra-page-title">当前缠论研究回放</h1>
+            <span class="ra-readonly-badge">只读 · 禁止实盘</span>
+          </div>
+          <p class="ra-lead">
+            页面直接读取与历史回放相同的结果工件，展示板块触发、30m 战略级别、5m 短差和 1m 定位的研究证据。
+            它只帮助人筛选与复核，不替代人工划分，也不提供下单能力。内容哈希或回放决策核心不一致时整页拒绝展示。
+          </p>
+        </div>
+        <aside class="ra-boundary" role="note">
+          <span class="ra-boundary-icon" aria-hidden="true">1</span>
+          <div>
+            <strong>唯一当前研究变体</strong>
+            <span>QMT 当前 GICS3 板块成员回填最近一年；三程序关闭；最低使用已完成 1m K 线；状态恒为 RESEARCH_ONLY / LIVE_DISABLED。</span>
+          </div>
+        </aside>
+      </section>
+
+      {% if audit %}
+        {% set current = audit.current_research %}
+        {% set metrics = current.daily_metrics %}
+        {% set replay = current.replay_metrics %}
+        {% set lifecycle = current.lifecycle %}
+        {% set scheduler = current.scheduler_causality_audit %}
+        {% set causal_ablations = current.causal_ablations %}
+        {% set tactical = current.tactical_execution_audit %}
+        {% set accounting = current.terminal_accounting_attribution %}
+        {% set risk_effect = current.higher_timeframe_effectiveness_audit %}
+        {% set risk_execution = current.higher_timeframe_execution_attribution %}
+        {% set variant = current.research_variant %}
+
+        <section class="ra-verdict-panel is-blocked" data-live-ready="false" data-source-kind="{{ audit.source_kind }}" aria-labelledby="ra-verdict-title">
+          <header>
+            <div>
+              <p class="ra-section-index">00 · VERDICT FIRST</p>
+              <h2 id="ra-verdict-title">可以研究复核，不能解释为完整缠论体系收益</h2>
+            </div>
+            <strong class="ra-verdict-state">RESEARCH_ONLY · LIVE_DISABLED</strong>
+          </header>
+          <div class="ra-verdict-grid">
+            <article><span>严格完整体系</span><strong>不可评价</strong><small><code>{{ current.strict_full_system_status }}</code></small></article>
+            <article><span>研究变体绩效</span><strong>样本不足</strong><small><code>{{ current.performance_status }}</code></small></article>
+            <article><span>战略周期</span><strong>{{ replay.strategic_cycle_count }} / 100</strong><small>未达到验收下限</small></article>
+            <article><span>短差周期</span><strong>{{ replay.tactical_cycle_count }} / 200</strong><small>未达到验收下限</small></article>
+            <article><span>回放决策核心</span><strong>当前一致</strong><small>真实回放依赖与结果绑定</small></article>
+          </div>
+          <div class="ra-verdict-reasons">
+            <strong>{{ current.strict_full_system_reason }}</strong>
+            <span>{{ audit.verdict.failed_conditions|join(' · ') }}</span>
+          </div>
+        </section>
+
+        <section class="ra-notice ra-notice-warning" role="alert">
+          <strong>边界说明：</strong>
+          当前收益属于“当前板块成员回填 + 技术买卖点近似 + 人工辅助”的最近一年研究变体。
+          历史板块成分不是点时档案，三程序没有参与，且战略/短差样本不足；因此不能写成完整交易体系收益，也不能据此启用实盘。
+        </section>
+
+        <section class="ra-section" aria-labelledby="ra-performance-title">
+          <div class="ra-section-heading">
+            <div>
+              <p class="ra-section-index">01 · RECENT-YEAR PERFORMANCE</p>
+              <h2 id="ra-performance-title">最近一年固定参数结果</h2>
+              <p>{{ metrics.start }} 至 {{ metrics.end }}，共 {{ metrics.observations }} 个日度观察；参数没有依据留出区间结果重调。</p>
+            </div>
+            <span class="ra-status ra-status-blocked">样本不足</span>
+          </div>
+          <div class="ra-metric-grid">
+            <article class="ra-metric-card"><span>净收益</span><strong>{{ "%+.2f%%"|format((metrics.net_return|float) * 100) }}</strong><small>含期末持仓盯市</small></article>
+            <article class="ra-metric-card"><span>年化估算</span><strong>{{ "%+.2f%%"|format((metrics.annualized_return|float) * 100) }}</strong><small>{% if 'INSUFFICIENT_CALENDAR_SPAN_FOR_ANNUALIZATION' in replay.warnings %}不足完整自然年，仅数学外推{% else %}已覆盖完整自然年{% endif %}</small></article>
+            <article class="ra-metric-card ra-metric-card-warning"><span>最大回撤</span><strong>{{ "%.2f%%"|format((metrics.max_drawdown|float) * 100) }}</strong><small>日度权益曲线</small></article>
+            <article class="ra-metric-card"><span>Sharpe</span><strong>{{ "%.3f"|format(metrics.sharpe|float) }}</strong><small>仅研究统计</small></article>
+            <article class="ra-metric-card ra-metric-card-warning"><span>最终留出 20%</span><strong>{{ "%+.2f%%"|format((current.holdout_metrics.net_return|float) * 100) }}</strong><small>{{ current.holdout_metrics.start }} 至 {{ current.holdout_metrics.end }}</small></article>
+          </div>
+          {% if 'INSUFFICIENT_CALENDAR_SPAN_FOR_ANNUALIZATION' in replay.warnings %}
+            <div class="ra-notice ra-notice-warning" role="note">
+              <strong>年化值不是完整自然年实测：</strong>
+              日度年化仅把当前不足 365 天的总收益按时间比例数学外推；事件账本因此保持年化收益为 N/A。净收益、留出区间和基准对比应优先于该估算值。
+            </div>
+          {% endif %}
+          <div class="ra-fact-grid">
+            <div class="ra-fact"><span>初始资金</span><strong>1,000,000 元</strong></div>
+            <div class="ra-fact"><span>订单 / 成交</span><strong>{{ replay.order_count }} / {{ replay.fill_count }}</strong></div>
+            <div class="ra-fact"><span>拒绝事件</span><strong>{{ replay.rejection_count }}</strong></div>
+            <div class="ra-fact"><span>费用 / 换手</span><strong>{{ replay.total_fees }} 元 / {{ "%.2f%%"|format((replay.turnover|float) * 100) }}</strong></div>
+            <div class="ra-fact"><span>胜率</span><strong>{{ "%.2f%%"|format((replay.win_rate|float) * 100) if replay.win_rate is not none else 'N/A' }}</strong></div>
+            <div class="ra-fact"><span>盈亏比</span><strong>{{ replay.payoff_ratio if replay.payoff_ratio is not none else 'N/A' }}</strong></div>
+            <div class="ra-fact"><span>利润因子</span><strong>{{ replay.profit_factor if replay.profit_factor is not none else 'N/A' }}</strong></div>
+            <div class="ra-fact"><span>期末未平战略仓位</span><strong>{{ replay.open_cycle_count }}</strong></div>
+          </div>
+        </section>
+
+        <section class="ra-section" aria-labelledby="ra-accounting-title">
+          <div class="ra-section-heading">
+            <div>
+              <p class="ra-section-index">02 · TERMINAL ACCOUNTING</p>
+              <h2 id="ra-accounting-title">总收益由已平仓周期与期末开放周期共同构成</h2>
+              <p>这里使用回放事件账本的同一现金与持仓状态复算，不另造收益口径。开放周期可能含短差、分红或公司行为现金流，因此展示“按期末市值计量的开放周期净盈亏”，不冒充纯浮盈。</p>
+            </div>
+            <span class="ra-status ra-status-ok">恒等式差额 {{ accounting.pnl_decomposition.identity_difference }}</span>
+          </div>
+          <div class="ra-metric-grid">
+            <article class="ra-metric-card"><span>账户总净盈亏</span><strong>{{ "%+.2f"|format(accounting.terminal.total_net_pnl|float) }} 元</strong><small>期末权益减初始资金</small></article>
+            <article class="ra-metric-card{% if accounting.pnl_decomposition.closed_cycle_realized_net_pnl|float < 0 %} ra-metric-card-warning{% endif %}"><span>已平仓战略周期净盈亏</span><strong>{{ "%+.2f"|format(accounting.pnl_decomposition.closed_cycle_realized_net_pnl|float) }} 元</strong><small>已实现、费用后</small></article>
+            <article class="ra-metric-card"><span>开放周期按市值净盈亏</span><strong>{{ "%+.2f"|format(accounting.pnl_decomposition.open_cycle_marked_net_pnl|float) }} 元</strong><small>周期累计现金流 + 期末市值</small></article>
+            <article class="ra-metric-card"><span>期末持仓市值</span><strong>{{ "%.2f"|format(accounting.terminal.market_value|float) }} 元</strong><small>{{ accounting.terminal.observed_at }}</small></article>
+            <article class="ra-metric-card"><span>最大单票权益占比</span><strong>{{ "%.2f%%"|format((accounting.concentration.max_symbol_equity_fraction|float) * 100) }}</strong><small>{{ accounting.concentration.max_symbol or '无开放仓位' }}</small></article>
+            <article class="ra-metric-card"><span>最大板块权益占比</span><strong>{{ "%.2f%%"|format((accounting.concentration.max_sector_equity_fraction|float) * 100) }}</strong><small>{{ accounting.concentration.max_sector_id or '无开放仓位' }}</small></article>
+          </div>
+          <div class="ra-notice ra-notice-warning" role="note">
+            <strong>纯浮盈未声明：</strong>
+            缺少独立成本基础账本时，无法从含短差及公司行为现金流的开放周期中无损拆出纯浮盈；该字段保持 N/A，而不是推测。
+          </div>
+          {% if accounting.terminal.total_net_pnl|float > 0 and accounting.pnl_decomposition.closed_cycle_realized_net_pnl|float <= 0 %}
+            <div class="ra-notice ra-notice-warning" role="alert">
+              <strong>正收益尚未由已平仓周期验证：</strong>
+              已平战略周期合计为 {{ "%+.2f"|format(accounting.pnl_decomposition.closed_cycle_realized_net_pnl|float) }} 元；当前账户为正完全依赖期末开放周期的 {{ "%+.2f"|format(accounting.pnl_decomposition.open_cycle_marked_net_pnl|float) }} 元按市值计量贡献。
+            </div>
+          {% endif %}
+          <div class="ra-table-wrap ra-table-spaced">
+            <table>
+              <caption>期末开放仓位：逐标的市值、周期净盈亏与集中度</caption>
+              <thead><tr><th>标的 / 板块</th><th>数量</th><th>期末价 / 市值</th><th>开放周期净盈亏</th><th>账户权益占比</th><th>计量时点</th></tr></thead>
+              <tbody>
+                {% for row in accounting.open_positions %}
+                  <tr>
+                    <td><strong>{{ row.symbol }}</strong><span class="ra-subtext">{{ row.sector_name }} · {{ row.sector_id }}</span></td>
+                    <td>{{ row.quantity }}</td>
+                    <td>{{ "%.4f"|format(row.last_price|float) }} / {{ "%.2f"|format(row.market_value|float) }}</td>
+                    <td>{{ "%+.2f"|format(row.marked_net_pnl|float) }}</td>
+                    <td>{{ "%.2f%%"|format((row.account_equity_fraction|float) * 100) }}</td>
+                    <td>{{ row.marked_at }}</td>
+                  </tr>
+                {% else %}
+                  <tr><td colspan="6">期末没有开放仓位。</td></tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+          <div class="ra-table-wrap ra-table-spaced">
+            <table>
+              <caption>当前成分回填口径下的板块盈亏归因</caption>
+              <thead><tr><th>板块</th><th>已平周期</th><th>已实现净盈亏</th><th>开放仓位 / 市值</th><th>开放周期净盈亏</th><th>合计归因</th></tr></thead>
+              <tbody>
+                {% for row in accounting.sector_attribution %}
+                  <tr>
+                    <td><strong>{{ row.sector_name }}</strong><span class="ra-subtext">{{ row.sector_id }}</span></td>
+                    <td>{{ row.closed_cycle_count }}</td>
+                    <td>{{ "%+.2f"|format(row.closed_cycle_realized_net_pnl|float) }}</td>
+                    <td>{{ row.open_position_count }} / {{ "%.2f"|format(row.open_market_value|float) }}</td>
+                    <td>{{ "%+.2f"|format(row.open_cycle_marked_net_pnl|float) }}</td>
+                    <td>{{ "%+.2f"|format(row.total_attributed_net_pnl|float) }}</td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="ra-section" aria-labelledby="ra-contract-title">
+          <div class="ra-section-heading">
+            <div>
+              <p class="ra-section-index">03 · FIXED RESEARCH CONTRACT</p>
+              <h2 id="ra-contract-title">板块触发与多级别分工</h2>
+              <p>先由 QMT 板块范围触发，再由高级别风险门过滤；30m 管战略交易，5m 管短差，1m 只做精确定位与成交观察。</p>
+            </div>
+          </div>
+          <div class="ra-fact-grid">
+            <div class="ra-fact"><span>板块体系</span><strong>{{ variant.sector_taxonomy }}</strong><small>当前成员回填，非历史点时成员</small></div>
+            <div class="ra-fact"><span>30m</span><strong>战略级别</strong><small>近似战略买卖点</small></div>
+            <div class="ra-fact"><span>5m</span><strong>短差级别</strong><small>L1 短差卖出与买回</small></div>
+            <div class="ra-fact"><span>1m</span><strong>定位级别</strong><small>只消费已完成 K 线</small></div>
+            <div class="ra-fact"><span>个股三程序</span><strong>关闭</strong><small><code>{{ variant.three_program_mode }}</code></small></div>
+            <div class="ra-fact"><span>Tick 数据</span><strong>不使用</strong><small>禁止信号柱成交</small></div>
+            <div class="ra-fact"><span>暖机起点</span><strong>{{ variant.warmup_start }}</strong></div>
+            <div class="ra-fact"><span>评价区间</span><strong>{{ audit.effective_range.start }} → {{ audit.effective_range.end }}</strong></div>
+          </div>
+        </section>
+
+        <section class="ra-section" aria-labelledby="ra-risk-effect-title">
+          <div class="ra-section-heading">
+            <div>
+              <p class="ra-section-index">03A · M/W/D GATE EFFECTIVENESS</p>
+              <h2 id="ra-risk-effect-title">高级别风险门在候选时点实际做了什么</h2>
+              <p>按候选决策时点重新统计市场、板块、个股的月/周/日状态与阻断证据；这里区分严格规格的新仓门和当前人工辅助研究口径。</p>
+            </div>
+            <span class="ra-status ra-status-neutral"><code>{{ risk_effect.status }}</code></span>
+          </div>
+          <div class="ra-track-counts">
+            <div><span>有完整风险证据的候选</span><strong>{{ risk_effect.candidate_count }}</strong><small>逐候选复算，不取期末状态</small></div>
+            <div><span>严格三门全 GREEN</span><strong>{{ risk_effect.strict_green_risk_eligible_count }}</strong><small>原规格唯一允许新仓的风险状态</small></div>
+            <div><span>研究 GREEN / AMBER 可复核</span><strong>{{ risk_effect.research_green_or_amber_risk_eligible_count }}</strong><small>仅人工辅助研究，不等于可下单</small></div>
+            <div><span>仅因 AMBER 放宽而进入</span><strong>{{ risk_effect.research_amber_only_risk_eligible_count }}</strong><small>严格规格下全部禁止新仓</small></div>
+            <div><span>RED / UNRESOLVED 硬拒绝</span><strong>{{ risk_effect.hard_rejected_candidate_count }}</strong><small>研究变体也不放行</small></div>
+            <div><span>最终接受候选</span><strong>{{ risk_effect.accepted_candidate_count }}</strong><small>还需通过板块触发、流动性与账户门</small></div>
+          </div>
+          {% if risk_effect.strict_green_risk_eligible_count == 0 and risk_effect.research_green_or_amber_risk_eligible_count > 0 %}
+            <div class="ra-notice ra-notice-warning" role="alert">
+              <strong>当前成交样本全部不是严格高级别门样本：</strong>
+              冻结 V3 规格规定 AMBER 禁止新仓；本回放仅为“先由程序粗筛、再交给人识别”的研究变体，允许 AMBER 进入人工复核。它不能证明严格整套体系有收益。
+            </div>
+          {% endif %}
+          <div class="ra-track-counts">
+            <div><span>风险候选 → 入场单</span><strong>{{ risk_execution.accepted_candidate_count }} → {{ risk_execution.entry_order_count }}</strong><small>标的、决策时点、结构快照精确匹配</small></div>
+            <div><span>形成战略周期</span><strong>{{ risk_execution.entry_filled_candidate_count }}</strong><small>未成交 {{ risk_execution.entry_unfilled_candidate_count }}</small></div>
+            <div><span>严格 GREEN 成交候选</span><strong>{{ risk_execution.cohorts.STRICT_GREEN.entry_filled_candidate_count }}</strong><small>已平 {{ risk_execution.cohorts.STRICT_GREEN.closed_cycle_count }} · 开放 {{ risk_execution.cohorts.STRICT_GREEN.open_cycle_count }}</small></div>
+            <div><span>AMBER 研究成交候选</span><strong>{{ risk_execution.cohorts.RESEARCH_AMBER_ONLY.entry_filled_candidate_count }}</strong><small>已平 {{ risk_execution.cohorts.RESEARCH_AMBER_ONLY.closed_cycle_count }} · 开放 {{ risk_execution.cohorts.RESEARCH_AMBER_ONLY.open_cycle_count }}</small></div>
+            <div><span>AMBER 已平净盈亏</span><strong>{{ risk_execution.cohorts.RESEARCH_AMBER_ONLY.closed_realized_net_pnl }} 元</strong><small>费用后已实现</small></div>
+            <div><span>AMBER 开放周期盯市</span><strong>{{ risk_execution.cohorts.RESEARCH_AMBER_ONLY.open_marked_net_pnl }} 元</strong><small>不是纯浮盈口径</small></div>
+          </div>
+          {% if risk_execution.all_filled_entries_are_research_amber_only %}
+            <div class="ra-notice ra-notice-warning" role="alert">
+              <strong>候选—订单—成交—盈亏链已经证明：全部入场成交均来自 AMBER 研究放宽。</strong>
+              严格 GREEN 成交候选为 0；当前已平净盈亏和开放周期盯市均不能归因给严格高级别风险门。裁决为 <code>{{ risk_execution.status }}</code>，因果身份状态为 <code>{{ risk_execution.causal_identity_status }}</code>，该归因只读且不改变决策。
+            </div>
+          {% endif %}
+          <div class="ra-table-wrap ra-table-spaced">
+            <table>
+              <caption>高级别风险候选到入场订单、首次成交和终端战略周期的逐项归因</caption>
+              <thead><tr><th>候选时点</th><th>标的</th><th>风险队列</th><th>三门</th><th>订单</th><th>首次成交</th><th>终端周期</th><th>终端净盈亏</th></tr></thead>
+              <tbody>
+                {% for row in risk_execution.entries %}
+                  <tr>
+                    <td>{{ row.decision_at }}</td>
+                    <td><code>{{ row.symbol }}</code></td>
+                    <td><code>{{ row.risk_cohort }}</code></td>
+                    <td>M {{ row.risk_gates.market }} · S {{ row.risk_gates.sector }} · I {{ row.risk_gates.symbol }}</td>
+                    <td><code>{{ row.order_state }}</code>{% if row.unfilled_reason_codes %}<span class="ra-subtext">{{ row.unfilled_reason_codes|join(' · ') }}</span>{% endif %}</td>
+                    <td>{{ row.filled_quantity }} 股<span class="ra-subtext">{{ row.fill_count }} 条成交事实</span></td>
+                    <td><code>{{ row.cycle_status }}</code>{% if row.cycle_id %}<span class="ra-subtext">{{ row.cycle_id }}</span>{% endif %}</td>
+                    <td>{{ row.terminal_net_pnl if row.terminal_net_pnl is not none else 'N/A' }}</td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+          <div class="ra-table-wrap ra-table-spaced">
+            <table>
+              <caption>市场 / 板块 / 个股风险门的区分度、有效 M/W/D 状态、原始诊断与主要阻断</caption>
+              <thead><tr><th>对象</th><th>最终门分布</th><th>月状态</th><th>周状态</th><th>日状态</th><th>原始 FORMED_UNRESOLVED</th><th>暖机 / 来源</th><th>原生日线交易日覆盖</th><th>候选级阻断</th></tr></thead>
+              <tbody>
+                {% for subject, row in risk_effect.subjects.items() %}
+                  <tr>
+                    <td><strong>{{ {'market': '市场', 'sector': '板块', 'symbol': '个股'}[subject] }}</strong><span class="ra-subtext">有效证据 {{ row.resolved_evidence_count }} / {{ row.candidate_count }}</span></td>
+                    <td>G {{ row.gate_counts.get('GREEN', 0) }} · A {{ row.gate_counts.get('AMBER', 0) }} · R {{ row.gate_counts.get('RED', 0) }} · U {{ row.gate_counts.get('UNRESOLVED', 0) }}<span class="ra-subtext">不同门状态 {{ row.distinct_gate_count }} 种</span></td>
+                    <td>{% for state, count in row.effective_period_state_counts.M.items() %}<code>{{ state }}</code> {{ count }}{% if not loop.last %}<br>{% endif %}{% endfor %}{% if row.state_override_candidate_count %}<span class="ra-subtext">原始：{% for state, count in row.period_state_counts.M.items() %}{{ state }} {{ count }}{% if not loop.last %} · {% endif %}{% endfor %}</span>{% endif %}</td>
+                    <td>{% for state, count in row.effective_period_state_counts.W.items() %}<code>{{ state }}</code> {{ count }}{% if not loop.last %}<br>{% endif %}{% endfor %}{% if row.state_override_candidate_count %}<span class="ra-subtext">原始：{% for state, count in row.period_state_counts.W.items() %}{{ state }} {{ count }}{% if not loop.last %} · {% endif %}{% endfor %}</span>{% endif %}</td>
+                    <td>{% for state, count in row.effective_period_state_counts.D.items() %}<code>{{ state }}</code> {{ count }}{% if not loop.last %}<br>{% endif %}{% endfor %}{% if row.state_override_candidate_count %}<span class="ra-subtext">原始：{% for state, count in row.period_state_counts.D.items() %}{{ state }} {{ count }}{% if not loop.last %} · {% endif %}{% endfor %}</span>{% endif %}</td>
+                    <td>{{ row.formed_unresolved_period_count }}<span class="ra-subtext">安全覆盖候选 {{ row.state_override_candidate_count }}</span></td>
+                    <td>
+                      {% for code, count in row.warmup_reason_counts.items() %}<code>{{ code }}</code> × {{ count }}{% if not loop.last %}<br>{% endif %}{% endfor %}
+                      {% set convergence = row.warmup_convergence %}
+                      <span class="ra-subtext">多前缀收敛诊断（不改变现有双窗口交易门）</span>
+                      {% for status, count in convergence.status_counts.items() %}<code>{{ status }}</code> × {{ count }}{% if not loop.last %}<br>{% endif %}{% endfor %}
+                      <span class="ra-subtext">M/W/D 语义差异证据</span>
+                      {% for status, count in convergence.semantic_diagnostic_status_counts.items() %}<code>{{ status }}</code> × {{ count }}{% if not loop.last %}<br>{% endif %}{% endfor %}
+                      <span class="ra-subtext">低级别一卖/二卖映射供给逐点诊断</span>
+                      {% for status, count in convergence.mapping_supply_diagnostic_status_counts.items() %}<code>{{ status }}</code> × {{ count }}{% if not loop.last %}<br>{% endif %}{% endfor %}
+                      {% if convergence.mapping_supply_transition_code_counts %}
+                        <span class="ra-subtext">供给变化：{% for code, count in convergence.mapping_supply_transition_code_counts.items() %}<code>{{ code }}</code> × {{ count }}{% if not loop.last %} · {% endif %}{% endfor %}</span>
+                      {% endif %}
+                      {% if convergence.non_monotonic_changed_path_counts %}
+                        <span class="ra-subtext">非单调差异：{% for path, count in convergence.non_monotonic_changed_path_counts.items() %}<code>{{ path }}</code> × {{ count }}{% if not loop.last %} · {% endif %}{% endfor %}</span>
+                      {% endif %}
+                      {% if convergence.qualified_prefix_count_range %}
+                        <span class="ra-subtext">合格前缀 {{ convergence.qualified_prefix_count_range.minimum }}–{{ convergence.qualified_prefix_count_range.maximum }} 个；双窗口稳定但未获全部前缀稳定证明 {{ convergence.pairwise_stable_without_all_prefix_stability_count }} 个候选</span>
+                      {% else %}
+                        <span class="ra-subtext">本批没有可计数的多前缀证据；旧归档不得解释为稳定</span>
+                      {% endif %}
+                      {% if subject == 'sector' %}
+                        <span class="ra-subtext">严格同源暖机</span>
+                        {% for code, count in row.strict_same_base_warmup_reason_counts.items() %}<code>{{ code }}</code> × {{ count }}{% if not loop.last %}<br>{% endif %}{% endfor %}
+                        <span class="ra-subtext">严格5m同源多前缀诊断</span>
+                        {% for status, count in convergence.strict_same_base_status_counts.items() %}<code>{{ status }}</code> × {{ count }}{% if not loop.last %}<br>{% endif %}{% endfor %}
+                        <span class="ra-subtext">严格5m同源语义差异证据</span>
+                        {% for status, count in convergence.strict_same_base_semantic_diagnostic_status_counts.items() %}<code>{{ status }}</code> × {{ count }}{% if not loop.last %}<br>{% endif %}{% endfor %}
+                        <span class="ra-subtext">严格5m同源映射供给逐点诊断</span>
+                        {% for status, count in convergence.strict_same_base_mapping_supply_diagnostic_status_counts.items() %}<code>{{ status }}</code> × {{ count }}{% if not loop.last %}<br>{% endif %}{% endfor %}
+                        <span class="ra-subtext">实际来源</span>
+                        {% for code, count in row.source_mode_counts.items() %}<code>{{ code }}</code> × {{ count }}{% if not loop.last %}<br>{% endif %}{% endfor %}
+                        <span class="ra-subtext">严格5m历史边界</span>
+                        {% for code, count in row.strict_same_base_source_boundary_counts.items() %}<code>{{ code }}</code> × {{ count }}{% if not loop.last %}<br>{% endif %}{% endfor %}
+                        <span class="ra-subtext">物理 QMT 5m 文件左边界（只读诊断）</span>
+                        {% for code, count in row.strict_same_base_physical_source_boundary_counts.items() %}<code>{{ code }}</code> × {{ count }}{% if not loop.last %}<br>{% endif %}{% endfor %}
+                        {% if row.strict_same_base_physical_representative_member_range %}
+                          <span class="ra-subtext">代表成员 {{ row.strict_same_base_physical_representative_member_range.minimum }}–{{ row.strict_same_base_physical_representative_member_range.maximum }}；有物理文件 {{ row.strict_same_base_physical_available_member_range.minimum }}–{{ row.strict_same_base_physical_available_member_range.maximum }}；每柱最低需 {{ row.strict_same_base_physical_required_member_range.minimum }}–{{ row.strict_same_base_physical_required_member_range.maximum }} 个成员</span>
+                        {% endif %}
+                        {% if row.strict_same_base_physical_requested_start_range %}
+                          <span class="ra-subtext">回放请求起点：{{ row.strict_same_base_physical_requested_start_range.minimum }}–{{ row.strict_same_base_physical_requested_start_range.maximum }}</span>
+                        {% endif %}
+                        {% if row.strict_same_base_physical_required_start_range %}
+                          <span class="ra-subtext">达到最低成员覆盖的物理起点：{{ row.strict_same_base_physical_required_start_range.minimum }}–{{ row.strict_same_base_physical_required_start_range.maximum }}；这只解释数据缺口，不改变 480 日暖机参数</span>
+                        {% endif %}
+                        {% if row.strict_same_base_completed_daily_bar_range %}
+                          <span class="ra-subtext">完整日线 {{ row.strict_same_base_completed_daily_bar_range.minimum }}–{{ row.strict_same_base_completed_daily_bar_range.maximum }} 根；尚缺 {{ row.strict_same_base_remaining_daily_bar_range.minimum }}–{{ row.strict_same_base_remaining_daily_bar_range.maximum }} 根；暖机左边界前缺 {{ row.strict_same_base_leading_calendar_gap_range.minimum }}–{{ row.strict_same_base_leading_calendar_gap_range.maximum }} 个市场交易日</span>
+                        {% endif %}
+                      {% endif %}
+                    </td>
+                    {% set calendar_coverage = row.native_daily_calendar_coverage %}
+                    <td>
+                      {% for status, count in calendar_coverage.status_counts.items() %}<code>{{ status }}</code> × {{ count }}{% if not loop.last %}<br>{% endif %}{% endfor %}
+                      <span class="ra-subtext">结构化证据 {{ calendar_coverage.evidence_candidate_count }} 个候选；未解释缺口出现 {{ calendar_coverage.unexplained_missing_session_occurrence_count }} 日次</span>
+                      {% for gap in calendar_coverage.gap_rows %}
+                        <span class="ra-subtext"><strong>{{ gap.symbol }}</strong> @ {{ gap.observed_at }}：日历有而日线缺 {% for session in gap.unexplained_calendar_only_sessions %}<code>{{ session }}</code>{% if not loop.last %}、{% endif %}{% else %}0{% endfor %}；日线有而日历缺 {% for session in gap.native_only_sessions %}<code>{{ session }}</code>{% if not loop.last %}、{% endif %}{% else %}0{% endfor %}</span>
+                      {% endfor %}
+                      {% if calendar_coverage.gap_rows %}<span class="ra-subtext">缺失未证明为停牌，不自动填补，风险门保持失败关闭</span>{% endif %}
+                    </td>
+                    <td>{% for code, count in row.blocker_candidate_counts.items() %}<code>{{ code }}</code> × {{ count }}{% if not loop.last %}<br>{% endif %}{% else %}无{% endfor %}</td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+          <p class="ra-subtext">暖机语义差异只解释“增加左侧历史后，哪个月/周/日事实发生变化”，不改变现有双窗口风险门、候选资格、参数或成交。</p>
+          {% for subject, row in risk_effect.subjects.items() %}
+            {% set warmup_points = row.warmup_non_monotonic_point_audit %}
+            <details class="ra-point-details">
+              <summary>{{ {'market': '市场', 'sector': '板块', 'symbol': '个股'}[subject] }}暖机非单调差异（{{ warmup_points.point_count }}）</summary>
+              {% if warmup_points.points %}
+                <div class="ra-table-wrap">
+                  <table>
+                    <thead><tr><th>来源 / 周期</th><th>前缀与基准</th><th>变化字段</th><th>候选前缀事实</th><th>最长前缀事实</th><th>人工图表</th></tr></thead>
+                    <tbody>
+                      {% for point in warmup_points.points %}
+                        <tr id="warmup-diff-{{ point.point_id[7:23] }}">
+                          <td><strong>{{ point.source_symbol }}</strong><span class="ra-subtext">{{ point.source_frequency|upper }} → {{ point.chart_interval }} · 锚定 {{ point.point_anchor_at }}</span></td>
+                          <td>{{ point.prefix_bar_count }} 根<span class="ra-subtext">始于 {{ point.prefix_starts_at }}</span><span class="ra-subtext">最长 {{ point.reference_bar_count }} 根 · 始于 {{ point.reference_starts_at }}</span></td>
+                          <td>{% for path in point.changed_paths %}<code>{{ path }}</code>{% if not loop.last %}<br>{% endif %}{% endfor %}{% if point.mapping_supply_comparison %}<span class="ra-subtext">逐点供给：{% for code in point.mapping_supply_comparison.delta.transition_codes %}<code>{{ code }}</code>{% if not loop.last %} · {% endif %}{% endfor %}</span>{% endif %}<span class="ra-subtext">仅诊断 · 交易门不变</span></td>
+                          <td><code>{{ point.prefix_period_facts.state }}</code><span class="ra-subtext">证据柱 {{ point.prefix_period_facts.evidence_bar_end or '无' }}</span><span class="ra-subtext">MA5 {{ point.prefix_ma5 if point.prefix_ma5 is not none else '无' }}</span><span class="ra-subtext">映射 {{ point.prefix_period_facts.mapped_center_id or '未唯一' }}</span></td>
+                          <td><code>{{ point.reference_period_facts.state }}</code><span class="ra-subtext">证据柱 {{ point.reference_period_facts.evidence_bar_end or '无' }}</span><span class="ra-subtext">MA5 {{ point.reference_ma5 if point.reference_ma5 is not none else '无' }}</span><span class="ra-subtext">映射 {{ point.reference_period_facts.mapped_center_id or '未唯一' }}</span></td>
+                          <td>
+                            {% if point.chart_focus_supported %}
+                              <a class="ra-focus-link" target="_blank" rel="noopener" href="/?market=a&amp;code={{ point.source_symbol|urlencode }}&amp;layout=single&amp;intervals={{ point.chart_interval|urlencode }}&amp;review_candidate_id={{ point.point_id|urlencode }}&amp;review_source_sha256={{ risk_effect.audit_sha256|urlencode }}&amp;review_as_of={{ point.review_as_of_unix }}">{% if point.chart_source_kind == 'VERIFIED_QMT_SECTOR_ARCHIVE' %}打开回测同源板块图{% else %}因果锁定并定位{% endif %}</a>
+                            {% else %}
+                              <span class="ra-subtext">当前没有通过哈希验证的同源图表前缀</span>
+                            {% endif %}
+                          </td>
+                        </tr>
+                      {% endfor %}
+                    </tbody>
+                  </table>
+                </div>
+              {% else %}
+                <p class="ra-subtext">本批未记录非单调语义差异；旧快照的 <code>NOT_RECORDED_LEGACY</code> 不能解释为稳定。</p>
+              {% endif %}
+            </details>
+            {% set supply_points = row.warmup_mapping_supply_point_audit %}
+            <details class="ra-point-details">
+              <summary>{{ {'market': '市场', 'sector': '板块', 'symbol': '个股'}[subject] }}暖机映射供给逐点变化（{{ supply_points.point_count }}；稳定点 {{ supply_points.distinct_structural_point_id_count }}）</summary>
+              {% if supply_points.points %}
+                <div class="ra-table-wrap">
+                  <table>
+                    <thead><tr><th>变化方向</th><th>低级别点</th><th>中枢</th><th>因果时点</th><th>前缀对比</th><th>人工图表</th></tr></thead>
+                    <tbody>
+                      {% for point in supply_points.points %}
+                        <tr id="warmup-supply-{{ point.point_id[7:23] }}">
+                          <td><code>{{ point.delta_direction }}</code>{% if point.highest_mapping_candidate %}<span class="ra-subtext">原最高映射候选</span>{% endif %}</td>
+                          <td><strong>{{ point.source_symbol }}</strong> · <code>{{ point.point_type }}</code><span class="ra-subtext">{{ point.source_frequency }} → {{ point.chart_interval or '无图表周期' }}</span><span class="ra-subtext">结构点 {{ point.structural_point_id }}</span></td>
+                          <td><code>{{ point.center_id }}</code><span class="ra-subtext">级别 {{ point.center_level_rank }} · 完成 {{ point.center_completed }} · 扩展 {{ point.center_expanded }}</span><span class="ra-subtext">位于顶分型区间 {{ point.inside_active_top_interval }}</span></td>
+                          <td>锚定 {{ point.point_anchor_at }}<span class="ra-subtext">可用 {{ point.point_available_at }}</span><span class="ra-subtext">复核截止 {{ point.review_as_of }}</span></td>
+                          <td>{{ point.prefix_bar_count }} 根 → {{ point.reference_bar_count }} 根<span class="ra-subtext">{{ point.prefix_starts_at }} → {{ point.reference_starts_at }}</span></td>
+                          <td>
+                            {% if point.chart_focus_supported %}
+                              <a class="ra-focus-link" target="_blank" rel="noopener" href="/?market=a&amp;code={{ point.source_symbol|urlencode }}&amp;layout=single&amp;intervals={{ point.chart_interval|urlencode }}&amp;review_candidate_id={{ point.point_id|urlencode }}&amp;review_source_sha256={{ risk_effect.audit_sha256|urlencode }}&amp;review_as_of={{ point.review_as_of_unix }}">锁定低级别点</a>
+                            {% else %}
+                              <span class="ra-subtext">当前来源没有可验证的因果图表</span>
+                            {% endif %}
+                          </td>
+                        </tr>
+                      {% endfor %}
+                    </tbody>
+                  </table>
+                </div>
+              {% else %}
+                <p class="ra-subtext">本批没有保存逐点映射供给差异；<code>NOT_RECORDED_LEGACY</code> 仅表示旧产物缺少该旁路证据。</p>
+              {% endif %}
+            </details>
+            {% set lineage_points = row.warmup_structure_lineage_point_audit %}
+            <details class="ra-point-details">
+              <summary>{{ {'market': '市场', 'sector': '板块', 'symbol': '个股'}[subject] }}暖机结构谱系（{{ lineage_points.point_count }}；同核心 {{ lineage_points.same_core_interval_count }}；一笔相位偏移 {{ lineage_points.one_line_phase_shift_count }}；卖点触发线被吸收 {{ lineage_points.sell_trigger_absorbed_count }}）</summary>
+              {% if lineage_points.points %}
+                <div class="ra-table-wrap">
+                  <table>
+                    <thead><tr><th>低级别点与角色</th><th>稳定线共同后缀</th><th>短前缀中枢</th><th>最长前缀同源中枢</th><th>结构裁决</th><th>人工图表</th></tr></thead>
+                    <tbody>
+                      {% for point in lineage_points.points %}
+                        <tr id="warmup-lineage-{{ point.point_id[7:23] }}">
+                          <td><strong>{{ point.source_symbol }}</strong> · <code>{{ point.point_type }}</code><span class="ra-subtext">{{ point.point_anchor_at }}</span><span class="ra-subtext"><code>{{ point.prefix_trigger_role }}</code> → <code>{{ point.reference_trigger_role }}</code></span></td>
+                          <td>
+                            {% for sequence in point.line_sequences %}
+                              <code>{{ sequence.source_kind }}</code> {{ sequence.common_suffix_line_count }} 根相同<span class="ra-subtext">短/长 {{ sequence.prefix_line_count }}/{{ sequence.reference_line_count }}；左侧新增 {{ sequence.reference_leading_line_count }}；短前缀边界线 {{ sequence.prefix_leading_line_count }}</span>
+                            {% endfor %}
+                          </td>
+                          <td>
+                            {% if point.prefix_center %}
+                              <code>{{ point.prefix_center.center_id }}</code><span class="ra-subtext">{{ point.prefix_center.start_at }} → {{ point.prefix_center.end_at }}</span><span class="ra-subtext">核心 [{{ point.prefix_center.core_interval|join(', ') }}]；{{ point.prefix_center.constituent_line_count }} 根构成线</span>
+                            {% else %}<span class="ra-subtext">未记录</span>{% endif %}
+                          </td>
+                          <td>
+                            {% if point.reference_peer_center %}
+                              <code>{{ point.reference_peer_center.center_id }}</code><span class="ra-subtext">{{ point.reference_peer_center.start_at }} → {{ point.reference_peer_center.end_at }}</span><span class="ra-subtext">核心 [{{ point.reference_peer_center.core_interval|join(', ') }}]；共享/并集 {{ point.shared_constituent_line_count }}/{{ point.union_constituent_line_count }}</span>
+                            {% else %}<span class="ra-subtext">无重叠同源中枢</span>{% endif %}
+                          </td>
+                          <td>同核心 {{ point.same_core_interval }} · 一笔相位偏移 {{ point.one_line_phase_shift }}<span class="ra-subtext">{% for code in point.transition_codes %}<code>{{ code }}</code>{% if not loop.last %}<br>{% endif %}{% endfor %}</span><span class="ra-subtext">只解释分组敏感性，不参与风险门或交易信号。</span></td>
+                          <td>
+                            {% if point.chart_focus_supported %}
+                              <a class="ra-focus-link" target="_blank" rel="noopener" href="/?market=a&amp;code={{ point.source_symbol|urlencode }}&amp;layout=single&amp;intervals={{ point.chart_interval|urlencode }}&amp;review_candidate_id={{ point.point_id|urlencode }}&amp;review_source_sha256={{ risk_effect.audit_sha256|urlencode }}&amp;review_as_of={{ point.review_as_of_unix }}">锁定原映射点</a>
+                            {% else %}<span class="ra-subtext">当前来源没有可验证的因果图表</span>{% endif %}
+                          </td>
+                        </tr>
+                      {% endfor %}
+                    </tbody>
+                  </table>
+                </div>
+              {% else %}
+                <p class="ra-subtext">本批没有保存结构谱系差异；<code>NOT_RECORDED_LEGACY</code> 只表示旧产物缺少该诊断，不能解释成结构稳定。</p>
+              {% endif %}
+            </details>
+          {% endfor %}
+          <div class="ra-table-wrap ra-table-spaced">
+            <table>
+              <caption>候选时点的顶分型映射暴露（同一活动顶分型可被多个候选重复引用；只解释冻结的一/二卖映射）</caption>
+              <thead><tr><th>对象</th><th>候选周期暴露 / 已保存明细</th><th>暴露时点分类</th><th>暴露时点点位构成</th><th>诊断性一/二买</th><th>一/二卖漏斗</th></tr></thead>
+              <tbody>
+                {% for subject, row in risk_effect.subjects.items() %}
+                  {% set supply = row.mapping_supply_totals %}
+                  <tr>
+                    <td><strong>{{ {'market': '市场', 'sector': '板块', 'symbol': '个股'}[subject] }}</strong></td>
+                    <td>{{ supply.active_top_period_count }} / {{ supply.retained_mapping_supply_period_count }}<span class="ra-subtext">活动但缺明细 {{ supply.missing_active_mapping_supply_period_count }}</span></td>
+                    <td>{% for code, count in row.mapping_supply_class_counts.items() %}<code>{{ code }}</code> × {{ count }}{% if not loop.last %}<br>{% endif %}{% else %}无可用明细{% endfor %}</td>
+                    <td>一卖 {{ row.mapping_point_type_counts.get('1sell', 0) }} · 二卖 {{ row.mapping_point_type_counts.get('2sell', 0) }} · 三卖 {{ row.mapping_point_type_counts.get('3sell', 0) }} · 三买 {{ row.mapping_point_type_counts.get('3buy', 0) }}<span class="ra-subtext">全部低级别点 {{ supply.point_evidence_count }}</span></td>
+                    <td>一买 {{ row.diagnostic_buy_point_type_counts.get('1buy', 0) }} · 二买 {{ row.diagnostic_buy_point_type_counts.get('2buy', 0) }}<span class="ra-subtext">{% for code, count in row.diagnostic_directional_class_counts.items() %}<code>{{ code }}</code> × {{ count }}{% if not loop.last %}<br>{% endif %}{% endfor %}</span><span class="ra-subtext">仅解释方向供给，不参与风险门、卖点映射或订单</span></td>
+                    <td>全部一/二卖 {{ supply.completed_sell12_count }} 个已完成中枢<span class="ra-subtext">落在顶分型区间 {{ supply.in_top_interval_sell12_count }}；其中完成 {{ supply.completed_in_top_interval_sell12_count }}</span></td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+          <p class="ra-subtext">诊断性一/二买只说明低级别方向供给，不参与风险门、顶分型卖点映射、稳定卖点身份或订单决策；旧快照没有保存该旁路字段时标记为 <code>NOT_RECORDED_LEGACY</code>，不得解释成真实零。</p>
+          <div class="ra-table-wrap ra-table-spaced">
+            <table>
+              <caption>去重后的活动顶分型事件：按对象、周期和分型区间唯一化，取每个事件最后一次候选观察</caption>
+              <thead><tr><th>对象</th><th>暴露 / 唯一事件 / 重复</th><th>供给快照演化</th><th>事件末态分类</th><th>事件末态点位出现次数</th><th>末态诊断性一/二买</th><th>事件末态一/二卖漏斗</th></tr></thead>
+              <tbody>
+                {% for subject, row in risk_effect.subjects.items() %}
+                  {% set unique = row.unique_active_top_event_audit %}
+                  {% set terminal = unique.terminal_mapping_supply_totals %}
+                  <tr>
+                    <td><strong>{{ {'market': '市场', 'sector': '板块', 'symbol': '个股'}[subject] }}</strong></td>
+                    <td>{{ unique.candidate_period_exposure_count }} / {{ unique.distinct_active_top_event_count }} / {{ unique.repeated_candidate_exposure_count }}<span class="ra-subtext">单一事件最多被引用 {{ unique.max_candidate_references_to_one_event }} 次</span></td>
+                    <td>不同事件内供给快照 {{ unique.distinct_retained_supply_snapshot_count }}<span class="ra-subtext">供给发生演化的事件 {{ unique.events_with_evolving_supply_count }}；末态缺明细 {{ terminal.missing_terminal_supply_event_count }}</span></td>
+                    <td>{% for code, count in unique.terminal_mapping_supply_class_counts.items() %}<code>{{ code }}</code> × {{ count }}{% if not loop.last %}<br>{% endif %}{% else %}无可用末态{% endfor %}</td>
+                    <td>一卖 {{ unique.terminal_mapping_point_type_counts.get('1sell', 0) }} · 二卖 {{ unique.terminal_mapping_point_type_counts.get('2sell', 0) }} · 三卖 {{ unique.terminal_mapping_point_type_counts.get('3sell', 0) }} · 三买 {{ unique.terminal_mapping_point_type_counts.get('3buy', 0) }}<span class="ra-subtext">这是事件末态出现次数；下表再按稳定点 ID 全局去重</span></td>
+                    <td>一买 {{ unique.terminal_diagnostic_buy_point_type_counts.get('1buy', 0) }} · 二买 {{ unique.terminal_diagnostic_buy_point_type_counts.get('2buy', 0) }}<span class="ra-subtext">{% for code, count in unique.terminal_diagnostic_directional_class_counts.items() %}<code>{{ code }}</code> × {{ count }}{% if not loop.last %}<br>{% endif %}{% endfor %}</span></td>
+                    <td>已完成中枢一/二卖 {{ terminal.completed_sell12_count }}<span class="ra-subtext">分型区间内 {{ terminal.in_top_interval_sell12_count }}；其中完成 {{ terminal.completed_in_top_interval_sell12_count }}</span></td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+          {% set global_points = risk_effect.global_point_identity_audit %}
+          <div class="ra-table-wrap ra-table-spaced">
+            <table>
+              <caption>稳定买卖点身份：跨顶分型事件及对象去重，并绑定因果图表锚点</caption>
+              <thead><tr><th>对象</th><th>事件末态出现 / 有身份 / 唯一点 / 重复</th><th>唯一点类型</th><th>来源与图表覆盖</th><th>身份覆盖</th></tr></thead>
+              <tbody>
+                {% for subject, row in risk_effect.subjects.items() %}
+                  {% set points = row.globally_deduplicated_point_audit %}
+                  <tr>
+                    <td><strong>{{ {'market': '市场', 'sector': '板块', 'symbol': '个股'}[subject] }}</strong></td>
+                    <td>{{ points.terminal_event_point_occurrence_count }} / {{ points.identified_terminal_point_occurrence_count }} / {{ points.distinct_point_id_count }} / {{ points.repeated_terminal_point_occurrence_count }}<span class="ra-subtext">无法识别 {{ points.unidentified_terminal_point_occurrence_count }}</span></td>
+                    <td>一卖 {{ points.distinct_point_type_counts.get('1sell', 0) }} · 二卖 {{ points.distinct_point_type_counts.get('2sell', 0) }} · 三卖 {{ points.distinct_point_type_counts.get('3sell', 0) }} · 三买 {{ points.distinct_point_type_counts.get('3buy', 0) }}</td>
+                    <td>来源标的 {{ points.distinct_source_symbol_count }}<span class="ra-subtext">可因果定位 {{ points.chart_focus_supported_point_count }}；暂不可打开 {{ points.chart_focus_unavailable_point_count }}；原始审计内建支持 {{ points.artifact_chart_focus_supported_point_count }}</span></td>
+                    <td><code>{{ points.identity_coverage_status }}</code><span class="ra-subtext">{{ points.identity_contract_id }}</span></td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+          {% set chart_archive = risk_effect.chart_presentation_overlay %}
+          <p class="ra-subtext">
+            板块图表证据档案：<code>{{ chart_archive.status }}</code>
+            {% if chart_archive.status == 'VERIFIED' %}
+              · {{ chart_archive.entry_count }} 个因果前缀
+              · 板块稳定点（映射与诊断合计）可定位 {{ chart_archive.supported_sector_point_count }}
+              · 档案 <code>{{ chart_archive.manifest_content_sha256 }}</code>
+            {% else %}
+              · {{ chart_archive.detail }}
+            {% endif %}
+            。该档案只扩展人工核验展示，原 M/W/D 审计哈希不变。
+          </p>
+          <p class="ra-subtext">全对象合计：有身份的事件末态出现 {{ global_points.identified_terminal_point_occurrence_count }} 次，稳定点 {{ global_points.distinct_point_id_count }} 个；跨对象重复点 ID {{ global_points.cross_subject_repeated_point_id_count }} 个。点 ID只提交来源标的、低级别周期、中枢身份、级别、点类型、锚定与首次可见时刻，不随顶分型区间变化。</p>
+          {% for subject, row in risk_effect.subjects.items() %}
+            {% set point_audit = row.globally_deduplicated_point_audit %}
+            <details class="ra-point-details">
+              <summary>{{ {'market': '市场', 'sector': '板块', 'symbol': '个股'}[subject] }}稳定点明细（{{ point_audit.distinct_point_id_count }}）</summary>
+              {% if point_audit.points %}
+                <div class="ra-table-wrap">
+                  <table>
+                    <thead><tr><th>类型 / 点 ID</th><th>来源 / 周期</th><th>锚定与可见</th><th>最新因果观察</th><th>事件引用</th><th>中枢状态</th><th>人工图表</th></tr></thead>
+                    <tbody>
+                      {% for point in point_audit.points %}
+                        <tr id="risk-point-{{ point.point_id[7:23] }}">
+                          <td><strong>{{ point.point_type }}</strong><span class="ra-subtext"><code>{{ point.point_id[7:23] }}</code></span></td>
+                          <td>{{ point.source_symbol }}<span class="ra-subtext">{{ point.source_frequency }} → {{ point.chart_interval or '无图表周期' }}</span></td>
+                          <td>{{ point.point_anchor_at }}<span class="ra-subtext">可见于 {{ point.point_available_at }}</span></td>
+                          <td>{{ point.review_as_of }}</td>
+                          <td>{{ point.terminal_event_reference_count }}<span class="ra-subtext">落入分型 {{ point.inside_active_top_event_count }}；最高候选 {{ point.highest_mapping_candidate_event_count }}</span></td>
+                          <td>级别 {{ point.center_level_rank }} · {{ '完成' if point.center_completed_latest else '未完成' }}<span class="ra-subtext">{{ '发生扩展' if point.center_expanded_latest else '未标记扩展' }} · <code>{{ point.center_id[7:23] }}</code></span></td>
+                          <td>
+                            {% if point.chart_focus_supported %}
+                              <a class="ra-focus-link" target="_blank" rel="noopener" href="/?market=a&amp;code={{ point.source_symbol|urlencode }}&amp;layout=single&amp;intervals={{ point.chart_interval|urlencode }}&amp;review_candidate_id={{ point.point_id|urlencode }}&amp;review_source_sha256={{ risk_effect.audit_sha256|urlencode }}&amp;review_as_of={{ point.review_as_of_unix }}">{% if point.chart_source_kind == 'VERIFIED_QMT_SECTOR_ARCHIVE' %}打开回测同源板块图{% else %}因果锁定并定位{% endif %}</a>
+                            {% else %}
+                              <span class="ra-subtext">当前没有通过哈希验证的同源图表前缀</span>
+                            {% endif %}
+                          </td>
+                        </tr>
+                      {% endfor %}
+                    </tbody>
+                  </table>
+                </div>
+              {% else %}
+                <p class="ra-subtext">当前工件只有历史计数或没有点位，不能伪造稳定身份。</p>
+              {% endif %}
+            </details>
+          {% endfor %}
+          {% set global_diagnostic_points = risk_effect.global_diagnostic_buy_point_identity_audit %}
+          <div class="ra-table-wrap ra-table-spaced">
+            <table>
+              <caption>稳定诊断买点身份：仅供人工复核，不参与卖点映射、风险门或订单</caption>
+              <thead><tr><th>对象</th><th>事件末态出现 / 有身份 / 唯一点 / 重复</th><th>唯一诊断点类型</th><th>来源与图表覆盖</th><th>身份覆盖</th></tr></thead>
+              <tbody>
+                {% for subject, row in risk_effect.subjects.items() %}
+                  {% set points = row.globally_deduplicated_diagnostic_buy_point_audit %}
+                  <tr>
+                    <td><strong>{{ {'market': '市场', 'sector': '板块', 'symbol': '个股'}[subject] }}</strong></td>
+                    <td>{{ points.terminal_event_point_occurrence_count }} / {{ points.identified_terminal_point_occurrence_count }} / {{ points.distinct_point_id_count }} / {{ points.repeated_terminal_point_occurrence_count }}<span class="ra-subtext">无法识别 {{ points.unidentified_terminal_point_occurrence_count }}</span></td>
+                    <td>一买 {{ points.distinct_point_type_counts.get('1buy', 0) }} · 二买 {{ points.distinct_point_type_counts.get('2buy', 0) }}<span class="ra-subtext"><code>DIAGNOSTIC_ONLY</code> · <code>MAPPING_ELIGIBLE=false</code></span></td>
+                    <td>来源标的 {{ points.distinct_source_symbol_count }}<span class="ra-subtext">可因果定位 {{ points.chart_focus_supported_point_count }}；暂不可打开 {{ points.chart_focus_unavailable_point_count }}；原始审计内建支持 {{ points.artifact_chart_focus_supported_point_count }}</span></td>
+                    <td><code>{{ points.identity_coverage_status }}</code><span class="ra-subtext">{{ points.identity_contract_id }}</span></td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+          <p class="ra-subtext">全对象诊断合计：有身份的事件末态出现 {{ global_diagnostic_points.identified_terminal_point_occurrence_count }} 次，稳定诊断买点 {{ global_diagnostic_points.distinct_point_id_count }} 个；无法识别 {{ global_diagnostic_points.unidentified_terminal_point_occurrence_count }} 次。诊断身份契约与冻结卖点映射身份完全分离，页面复核不能提升其交易资格。</p>
+          {% for subject, row in risk_effect.subjects.items() %}
+            {% set point_audit = row.globally_deduplicated_diagnostic_buy_point_audit %}
+            <details class="ra-point-details">
+              <summary>{{ {'market': '市场', 'sector': '板块', 'symbol': '个股'}[subject] }}诊断一/二买明细（{{ point_audit.distinct_point_id_count }}）</summary>
+              {% if point_audit.points %}
+                <div class="ra-table-wrap">
+                  <table>
+                    <thead><tr><th>类型 / 点 ID</th><th>来源 / 周期</th><th>锚定与可见</th><th>最新因果观察</th><th>事件引用</th><th>中枢状态</th><th>人工图表</th></tr></thead>
+                    <tbody>
+                      {% for point in point_audit.points %}
+                        <tr id="diagnostic-buy-point-{{ point.point_id[7:23] }}">
+                          <td><strong>{{ point.point_type }}</strong><span class="ra-subtext"><code>{{ point.point_id[7:23] }}</code> · 仅诊断</span></td>
+                          <td>{{ point.source_symbol }}<span class="ra-subtext">{{ point.source_frequency }} → {{ point.chart_interval or '无图表周期' }}</span></td>
+                          <td>{{ point.point_anchor_at }}<span class="ra-subtext">可见于 {{ point.point_available_at }}</span></td>
+                          <td>{{ point.review_as_of }}</td>
+                          <td>{{ point.terminal_event_reference_count }}<span class="ra-subtext">落入分型 {{ point.inside_active_top_event_count }}；不参与映射</span></td>
+                          <td>级别 {{ point.center_level_rank }} · {{ '完成' if point.center_completed_latest else '未完成' }}<span class="ra-subtext">{{ '发生扩展' if point.center_expanded_latest else '未标记扩展' }} · <code>{{ point.center_id[7:23] }}</code></span></td>
+                          <td>
+                            {% if point.chart_focus_supported %}
+                              <a class="ra-focus-link" target="_blank" rel="noopener" href="/?market=a&amp;code={{ point.source_symbol|urlencode }}&amp;layout=single&amp;intervals={{ point.chart_interval|urlencode }}&amp;review_candidate_id={{ point.point_id|urlencode }}&amp;review_source_sha256={{ risk_effect.audit_sha256|urlencode }}&amp;review_as_of={{ point.review_as_of_unix }}">{% if point.chart_source_kind == 'VERIFIED_QMT_SECTOR_ARCHIVE' %}打开回测同源板块图{% else %}因果锁定并定位{% endif %}</a>
+                            {% else %}
+                              <span class="ra-subtext">当前没有通过哈希验证的同源图表前缀</span>
+                            {% endif %}
+                          </td>
+                        </tr>
+                      {% endfor %}
+                    </tbody>
+                  </table>
+                </div>
+              {% else %}
+                <p class="ra-subtext">当前工件只有诊断计数或没有一/二买点身份，不能伪造可复核点。</p>
+              {% endif %}
+            </details>
+          {% endfor %}
+          <p class="ra-subtext">证据哈希：<code>{{ risk_effect.audit_sha256 }}</code></p>
+        </section>
+
+        <section class="ra-section" aria-labelledby="ra-funnel-title">
+          <div class="ra-section-heading">
+            <div>
+              <p class="ra-section-index">04 · CANDIDATE FUNNEL</p>
+              <h2 id="ra-funnel-title">从全市场板块范围到可成交事件</h2>
+              <p>每一层保留通过与拒绝证据；三程序预筛选在本变体中明确为空，而不是被隐式模拟。</p>
+            </div>
+          </div>
+          <div class="ra-track-counts">
+            <div><span>QMT 板块已分类股票</span><strong>{{ current.candidate_funnel.all_market_sector_classified_symbols }}</strong><small>当前 GICS3 成员范围</small></div>
+            <div><span>递归潜在标的</span><strong>{{ current.candidate_funnel.terminal_recursive_potential_symbols }}</strong><small>进入因果提取前</small></div>
+            <div><span>因果重扫标的</span><strong>{{ current.candidate_funnel.causally_rescanned_symbols }}</strong><small>逐前缀消费已完成 K 线</small></div>
+            <div><span>技术入场 / 接受候选</span><strong>{{ current.candidate_funnel.causal_technical_entry_count }} / {{ current.candidate_funnel.accepted_candidate_count }}</strong><small>风险门和交易事实继续过滤</small></div>
+          </div>
+        </section>
+
+        <section class="ra-section" aria-labelledby="ra-lifecycle-title">
+          <div class="ra-section-heading">
+            <div>
+              <p class="ra-section-index">05 · EVENT-SOURCED LIFECYCLE</p>
+              <h2 id="ra-lifecycle-title">持久信号与幂等抑制</h2>
+              <p>同一战略退出或短差卖出只保留一个因果生命周期；后续重试不重复制造决策、订单或成交。</p>
+            </div>
+            <span class="ra-status ra-status-ok">账本自洽</span>
+          </div>
+          <div class="ra-integrity-summary">
+            <article><span>决策意图</span><strong>{{ lifecycle.intent_count }}</strong></article>
+            <article><span>已解决持久信号</span><strong>{{ lifecycle.resolved_persistent_intent_count }}</strong></article>
+            <article><span>已抑制重复事件</span><strong>{{ lifecycle.suppressed_retry_count }}</strong></article>
+          </div>
+          <div class="ra-callout ra-table-spaced" role="note">
+            <strong>历史调度与逐日前向检查点一致</strong>
+            <span>
+              已在冻结参数下收敛：构建 {{ scheduler.build_pass_count }} 轮、账本重放 {{ scheduler.replay_pass_count }} 轮；
+              事件 {{ scheduler.initial_event_count }} → {{ scheduler.final_event_count }}，
+              新显露 {{ scheduler.newly_exposed_event_count }}，移除跨日陈旧重试 {{ scheduler.removed_stale_retry_event_count }}。
+              持久信号只在裁决日结束后、从下一交易日起退役，同日重试仍由幂等身份抑制。
+            </span>
+          </div>
+          <div class="ra-table-wrap">
+            <table>
+              <caption>已解决生命周期及其被抑制的重复回放事件</caption>
+              <thead><tr><th>标的</th><th>类型</th><th>抑制次数</th><th>持久信号 ID</th></tr></thead>
+              <tbody>
+                {% for row in lifecycle.suppressions %}
+                  <tr><td>{{ row.symbol }}</td><td>{{ row.kind }}</td><td>{{ row.suppressed_retry_count }}</td><td><code>{{ row.persistent_intent_id }}</code></td></tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="ra-section" aria-labelledby="ra-tactical-title">
+          <div class="ra-section-heading">
+            <div>
+              <p class="ra-section-index">06 · TACTICAL EXECUTION AUDIT</p>
+              <h2 id="ra-tactical-title">5m 短差信号为何没有形成合法短差成交</h2>
+              <p>{{ tactical.adjudication }}。页面显示全部 {{ tactical.generated_signal_count }} 个源信号，不把“无合法手数”误报成漏单。</p>
+            </div>
+            <span class="ra-status ra-status-neutral">{{ tactical.completed_tactical_cycle_count }} 个完成周期</span>
+          </div>
+          <div class="ra-fact-grid">
+            <div class="ra-fact"><span>源信号 / 已派发</span><strong>{{ tactical.generated_signal_count }} / {{ tactical.dispatched_source_signal_count }}</strong></div>
+            <div class="ra-fact"><span>决策记录</span><strong>{{ tactical.decision_record_count }}</strong></div>
+            <div class="ra-fact"><span>短差订单 / 成交</span><strong>{{ tactical.order_count }} / {{ tactical.fill_count }}</strong></div>
+            <div class="ra-fact"><span>短差重复事件抑制</span><strong>{{ tactical.suppressed_retry_count }}</strong></div>
+          </div>
+          <div class="ra-table-wrap ra-table-spaced">
+            <table class="ra-source-table">
+              <thead><tr><th>时间</th><th>标的</th><th>类型</th><th>裁决</th><th>动作 / 原因</th><th>重复抑制</th></tr></thead>
+              <tbody>
+                {% for row in tactical.signals %}
+                  <tr>
+                    <td>{{ row.observed_at }}</td>
+                    <td>{{ row.symbol }}</td>
+                    <td>{{ row.kind }}</td>
+                    <td><code>{{ row.disposition }}</code></td>
+                    <td>{{ row.decision_actions|join(', ') or '未派发' }}<span class="ra-subtext">{{ row.reason_codes|join(' · ') or '无新增拒绝原因' }}</span></td>
+                    <td>{{ row.suppressed_retry_count }}</td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="ra-section" aria-labelledby="ra-ablation-title">
+          <div class="ra-section-heading">
+            <div>
+              <p class="ra-section-index">07 · CAUSAL ABLATIONS</p>
+              <h2 id="ra-ablation-title">从源信号独立重排的因果消融</h2>
+              <p>每个版本都重新运行逐日检查点调度与同一个事件账本，不是从主回放批次中删事件，因此持久退出、入场与短差信号的竞争会按该版本自身重新裁决。</p>
+            </div>
+            <span class="ra-status ra-status-ok">独立收敛</span>
+          </div>
+          <div class="ra-table-wrap">
+            <table>
+              <thead><tr><th>版本</th><th>净收益 / 可评价</th><th>订单 / 成交</th><th>战略 / 短差周期</th><th>独立调度证明</th></tr></thead>
+              <tbody>
+                {% for name, row in causal_ablations.items() %}
+                  {% set ablation_metrics = row.metrics %}
+                  {% set ablation_scheduler = row.scheduler_causality_audit %}
+                  <tr>
+                    <td><strong>{{ {'NO_TACTICAL': '禁用短差', 'EXACT_GREEN_HIGHER_TIMEFRAME_ONLY': '仅严格三门全 GREEN'}[name] }}</strong><span class="ra-subtext"><code>{{ name }}</code></span></td>
+                    <td>{{ "%+.2f%%"|format((ablation_metrics.net_return|float) * 100) }}<span class="ra-subtext">{{ '可评价但样本不足' if ablation_metrics.performance_evaluable else '不可评价' }}</span></td>
+                    <td>{{ ablation_metrics.order_count }} / {{ ablation_metrics.fill_count }}</td>
+                    <td>{{ ablation_metrics.strategic_cycle_count }} / {{ ablation_metrics.tactical_cycle_count }}</td>
+                    <td>构建 {{ ablation_scheduler.build_pass_count }} · 重放 {{ ablation_scheduler.replay_pass_count }}<span class="ra-subtext">事件 {{ ablation_scheduler.initial_event_count }} → {{ ablation_scheduler.final_event_count }} · <code>{{ ablation_scheduler.event_schedule_sha256[7:23] }}</code></span></td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="ra-section" aria-labelledby="ra-benchmark-title">
+          <div class="ra-section-heading">
+            <div><p class="ra-section-index">08 · BENCHMARK & HOLDOUT</p><h2 id="ra-benchmark-title">基准与独立留出</h2><p>策略最近一年为正，但跑输全部三个基准，且最终留出区间为负；这比总收益更应优先审查。</p></div>
+          </div>
+          <div class="ra-table-wrap">
+            <table>
+              <thead><tr><th>对象</th><th>净收益</th><th>最大回撤</th><th>Sharpe</th><th>区间</th></tr></thead>
+              <tbody>
+                <tr><td>研究变体</td><td>{{ "%+.2f%%"|format((metrics.net_return|float) * 100) }}</td><td>{{ "%.2f%%"|format((metrics.max_drawdown|float) * 100) }}</td><td>{{ "%.3f"|format(metrics.sharpe|float) }}</td><td>{{ metrics.start }} → {{ metrics.end }}</td></tr>
+                {% for row in current.benchmarks %}
+                  <tr><td>{{ row.symbol }}</td><td>{{ "%+.2f%%"|format((row.metrics.net_return|float) * 100) }}</td><td>{{ "%.2f%%"|format((row.metrics.max_drawdown|float) * 100) }}</td><td>{{ "%.3f"|format(row.metrics.sharpe|float) }}</td><td>{{ row.metrics.start }} → {{ row.metrics.end }}</td></tr>
+                {% endfor %}
+                <tr><td>FINAL_HOLDOUT_20</td><td>{{ "%+.2f%%"|format((current.holdout_metrics.net_return|float) * 100) }}</td><td>{{ "%.2f%%"|format((current.holdout_metrics.max_drawdown|float) * 100) }}</td><td>{{ "%.3f"|format(current.holdout_metrics.sharpe|float) }}</td><td>{{ current.holdout_metrics.start }} → {{ current.holdout_metrics.end }}</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="ra-section" aria-labelledby="ra-integrity-title">
+          <div class="ra-section-heading">
+            <div><p class="ra-section-index">09 · INTEGRITY & LIMITS</p><h2 id="ra-integrity-title">结果身份、参数身份与研究限制</h2><p>页面只展示已通过内容哈希和当前回放决策核心匹配的工件；任何真实回放依赖变化都会让接口与页面同时 503，前向适配器另由完整集成身份审计。</p></div>
+            <span class="ra-status ra-status-ok">完整性已验证</span>
+          </div>
+          <div class="ra-fact-grid">
+            <div class="ra-fact"><span>结果内容哈希</span><code>{{ audit.content_sha256 }}</code></div>
+            <div class="ra-fact"><span>文件哈希</span><code>{{ audit.artifact.file_sha256 }}</code></div>
+            <div class="ra-fact"><span>回放决策核心聚合哈希</span><code>{{ current.decision_source_aggregate_sha256 }}</code></div>
+            <div class="ra-fact"><span>研究参数哈希</span><code>{{ current.parameter_ids.research_parameter_set_id }}</code></div>
+          </div>
+          <h3 class="ra-minor-title">因果执行约束</h3>
+          <ul class="ra-blocker-list">
+            {% for item in current.causality_guards %}<li>{{ item }}</li>{% endfor %}
+          </ul>
+          <h3 class="ra-minor-title">必须保留的研究披露</h3>
+          <ul class="ra-blocker-list">
+            {% for item in current.approximation_disclosures %}<li>{{ item }}</li>{% endfor %}
+          </ul>
+          <p class="ra-subtext">工件：<code>{{ audit.artifact.relative_path }}</code></p>
+        </section>
+      {% else %}
+        <section class="ra-section ra-error" role="alert">
+          <p class="ra-section-index">FAIL CLOSED · NO RESULT DISPLAYED</p>
+          <h2>当前回放结果不能安全展示</h2>
+          <p>统一审计门检测到当前结果缺失、内容被改动，或其回放决策核心快照已落后于工作区。系统没有回退到旧报告，也没有展示可能过期的收益数字。</p>
+          <p>错误码：<code>{{ audit_error_code or 'current_research_artifact_invalid' }}</code></p>
+        </section>
+      {% endif %}
+    </main>
+
+    <footer class="ra-footer">只读研究界面 · 不连接账户 · 不发送订单 · LIVE_DISABLED</footer>
+  </body>
+</html>

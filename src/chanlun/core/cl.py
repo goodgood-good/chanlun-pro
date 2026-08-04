@@ -111,9 +111,20 @@ class CL(ICL):
         self._strict_evidence_lock = threading.RLock()
         self._strict_generation = 0
         # 实例化笔计算器
-        # The active base profile fixes the production stroke definition.  Do
-        # not hide a second algorithm switch behind the CL constructor.
-        self.bi_calculator = BiCalculator(bi_mode=self.config.get('bi_mode', 'new'))
+        # Explicit ``bi_mode`` remains authoritative for fixed production
+        # profiles.  The chart configuration, however, historically persisted
+        # only ``bi_type``.  Translate that legacy old-pen selection when no
+        # explicit mode is present; otherwise ``bi_type_old`` would silently
+        # run the new-stroke algorithm.
+        bi_mode = self.config.get('bi_mode')
+        if bi_mode is None:
+            bi_mode = (
+                'strict'
+                if self.config.get('bi_type') == Config.BI_TYPE_OLD.value
+                else 'new'
+            )
+        self.config['bi_mode'] = bi_mode
+        self.bi_calculator = BiCalculator(bi_mode=bi_mode)
         # 实例化线段计算器
         self.xd_calculator = XdCalculator(self.config)
 

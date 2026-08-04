@@ -11,7 +11,7 @@
   - `/set_stock_zixuan`
 """
 
-from flask import Blueprint, Response, render_template, request
+from flask import Blueprint, Response, current_app, render_template, request
 from flask_login import login_required
 from werkzeug.utils import secure_filename
 
@@ -28,6 +28,31 @@ _MAX_IMPORT_FILE_BYTES = 1 * 1024 * 1024
 _MAX_IMPORT_REQUEST_BYTES = _MAX_IMPORT_FILE_BYTES + 64 * 1024
 _MAX_GROUP_NAME_LENGTH = 64
 _VALID_MARKETS = frozenset(market.value for market in Market)
+
+
+def _notify_instrument_scope_changed(market: str) -> None:
+    """Best-effort wake-up after a successful watchlist membership edit."""
+
+    try:
+        if market == "a":
+            screening = current_app.extensions.get(
+                "decision_support_trading_screening"
+            )
+            notify = getattr(screening, "notify_instrument_scope_changed", None)
+            if callable(notify):
+                notify()
+        monitor = current_app.extensions.get("holding_group_monitor")
+        refresh = getattr(monitor, "request_refresh", None)
+        if callable(refresh):
+            refresh()
+    except Exception:
+        # Persistence already succeeded. Polling remains the correctness
+        # fallback, so a transient scheduler failure must not turn the user's
+        # successful edit into an HTTP 500 response.
+        current_app.logger.warning(
+            "live monitor wake-up failed after watchlist edit",
+            exc_info=True,
+        )
 
 
 def _normalize_group_name(value):
@@ -135,6 +160,8 @@ def opt_zixuan_group(market):
     zx = ZiXuan(market)
     if opt == "DEL":
         deleted = zx.del_zx_group(zx_group)
+        if deleted:
+            _notify_instrument_scope_changed(market)
         return {
             "ok": deleted,
             "group": zx_group,
@@ -225,10 +252,14 @@ def opt_zixuan_import():
 
     if imported:
         existing = [
-            stock for stock in zx.zx_stocks(zx_group) if stock["code"] not in imported
+            stock
+            for stock in zx.zx_stocks(zx_group)
+            if stock.get("market", market) == market
+            and stock["code"] not in imported
         ]
         if not zx.replace_zx_stocks(zx_group, existing + list(imported.values())):
             return {"ok": False, "msg": "导入失败"}, 409
+        _notify_instrument_scope_changed(market)
 
     return {"ok": True, "msg": f"成功导入 {len(imported)} 条记录"}
 
@@ -258,5 +289,8 @@ def set_stock_zixuan():
             res = zx.sort_bottom_stock(group_name, code)
     else:
         res = False
+
+    if res and opt in {"ADD", "DEL"}:
+        _notify_instrument_scope_changed(market)
 
     return {"ok": res}

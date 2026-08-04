@@ -39,7 +39,7 @@ def test_backtest_scan_and_notification_share_one_strategy_id() -> None:
     } == {"chanlun_source_faithful_v2"}
 
 
-def test_web_surface_has_only_read_only_new_strategy_routes() -> None:
+def test_web_surface_has_only_current_screening_and_human_review_routes() -> None:
     app = create_app(
         {
             "TESTING": True,
@@ -57,9 +57,18 @@ def test_web_surface_has_only_read_only_new_strategy_routes() -> None:
         assert routes == {
             "/decision-support/early-screening",
             "/decision-support/early-signals",
+            "/decision-support/human-review/data",
+            "/decision-support/human-review/feedback",
             "/decision-support/research-audit",
             "/decision-support/research-audit/data",
         }
+        feedback_rule = next(
+            rule
+            for rule in app.url_map.iter_rules()
+            if rule.rule == "/decision-support/human-review/feedback"
+        )
+        assert feedback_rule.methods == {"OPTIONS", "POST"}
+        assert all("order" not in route.lower() for route in routes)
         assert "decision_support_facade" not in app.extensions
         assert "install_decision_support_runtime" not in app.extensions
         assert "decision_support_trading_screening" in app.extensions

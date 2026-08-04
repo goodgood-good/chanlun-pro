@@ -158,3 +158,24 @@ def test_cl_uses_the_profile_new_stroke_mode_instead_of_a_hidden_runtime_switch(
     cd = CL("TST", "1m", dict(strict_base_config()))
 
     assert cd.bi_calculator.bi_mode == "new"
+
+
+def test_cl_maps_legacy_old_pen_config_to_strict_stroke_mode():
+    cd = CL("TST", "1m", {"bi_type": Config.BI_TYPE_OLD.value})
+
+    assert cd.get_config()["bi_mode"] == "strict"
+    assert cd.bi_calculator.bi_mode == "strict"
+
+
+def test_explicit_bi_mode_wins_over_legacy_bi_type():
+    cd = CL(
+        "TST",
+        "1m",
+        {
+            "bi_type": Config.BI_TYPE_OLD.value,
+            "bi_mode": "new",
+        },
+    )
+
+    assert cd.get_config()["bi_mode"] == "new"
+    assert cd.bi_calculator.bi_mode == "new"

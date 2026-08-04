@@ -2,18 +2,29 @@ var ZiXuan = (function () {
   var zx_group = "我的关注";
   var timeout_update_rates = null;
   var update_request_in_flight = false;
-  var update_retry_index = 0;
   var update_poll_generation = 0;
   var rate_polling_active = true;
   var UPDATE_NORMAL_DELAY_MS = 3000;
   var UPDATE_CLOSED_DELAY_MS = 300000;
   var UPDATE_RETRY_DELAYS_MS = [6000, 12000, 24000, 30000];
+  var marketRetryState = {};
+  var MARKET_LABELS = {
+    a: "A股",
+    hk: "港股",
+    us: "美股",
+    fx: "外汇",
+    futures: "期货",
+    ny_futures: "纽约期货",
+    currency: "数字货币",
+    currency_spot: "数字货币现货",
+  };
   var zixuanOptsRequestGeneration = 0;
   var stockListRequestGeneration = 0;
   var groupsRequestGeneration = 0;
   var searchRequestGeneration = 0;
   var stockTableHandlersBound = false;
   var groupUiBound = false;
+  var refreshUiBound = false;
   var createGroupRequestInFlight = false;
 
   function appAjax(options) {
@@ -40,7 +51,51 @@ var ZiXuan = (function () {
       timeout_update_rates = null;
     }
     update_poll_generation += 1;
-    update_retry_index = 0;
+    marketRetryState = {};
+  }
+
+  function marketLabel(market) {
+    return MARKET_LABELS[market] || String(market || "未知市场");
+  }
+
+  function recordMarketFailure(market) {
+    var previous = marketRetryState[market];
+    var retryIndex = previous
+      ? Math.min(previous.retryIndex + 1, UPDATE_RETRY_DELAYS_MS.length - 1)
+      : 0;
+    var delay = UPDATE_RETRY_DELAYS_MS[retryIndex];
+    marketRetryState[market] = {
+      retryIndex: retryIndex,
+      retryAt: Date.now() + delay,
+    };
+    return delay;
+  }
+
+  function recordMarketSuccess(market) {
+    delete marketRetryState[market];
+  }
+
+  function nextFailedMarketDelay(markets) {
+    var now = Date.now();
+    var delays = markets
+      .map(function (market) {
+        var state = marketRetryState[market];
+        return state ? Math.max(0, state.retryAt - now) : 0;
+      })
+      .filter(function (delay) { return delay > 0; });
+    return delays.length ? Math.min.apply(null, delays) : UPDATE_NORMAL_DELAY_MS;
+  }
+
+  function setMarketQuoteState(market, state, detail) {
+    $(".code_rate").each(function () {
+      var nodeMarket = String(
+        (this.dataset && this.dataset.market) || $(this).data("market") || ""
+      );
+      if (nodeMarket !== market) return;
+      if (this.dataset) this.dataset.quoteState = state;
+      else this.quoteState = state;
+      this.title = detail || "";
+    });
   }
 
   function schedule_rate_update(delay, generation) {
@@ -51,17 +106,6 @@ var ZiXuan = (function () {
       timeout_update_rates = null;
       ZiXuan.stocks_update_rate(generation);
     }, delay);
-  }
-
-  function schedule_rate_retry(generation) {
-    var delay = UPDATE_RETRY_DELAYS_MS[
-      Math.min(update_retry_index, UPDATE_RETRY_DELAYS_MS.length - 1)
-    ];
-    update_retry_index = Math.min(
-      update_retry_index + 1,
-      UPDATE_RETRY_DELAYS_MS.length - 1
-    );
-    schedule_rate_update(delay, generation);
   }
 
   function checkboxTemplate(name, checked) {
@@ -75,10 +119,11 @@ var ZiXuan = (function () {
     return span.outerHTML;
   }
 
-  function rateNode(code, price, rate, color) {
+  function rateNode(code, price, rate, color, market) {
     var root = document.createElement("div");
     root.className = "code_rate";
     root.dataset.code = String(code || "");
+    root.dataset.market = String(market || "");
     if (color) root.style.color = color;
     var rateLine = document.createElement("div");
     rateLine.className = "layui-font-14";
@@ -92,7 +137,7 @@ var ZiXuan = (function () {
     return root;
   }
 
-  function stockNode(name, code, color) {
+  function stockNode(name, code, color, market) {
     var root = document.createElement("div");
     var nameLine = document.createElement("div");
     nameLine.className = "layui-font-14";
@@ -100,7 +145,9 @@ var ZiXuan = (function () {
     nameLine.textContent = String(name || "");
     var codeLine = document.createElement("div");
     codeLine.className = "layui-font-12 layui-font-gray";
-    codeLine.textContent = String(code || "");
+    codeLine.textContent = market
+      ? String(market).toUpperCase() + " · " + String(code || "")
+      : String(code || "");
     root.appendChild(nameLine);
     root.appendChild(codeLine);
     return root;
@@ -363,11 +410,28 @@ var ZiXuan = (function () {
         return;
       }
 
-      update_retry_index = 0;
       ZiXuan.stocks_update_rate(update_poll_generation);
     },
 
-    // 批量请求当前列表中所有股票的实时涨跌幅并刷新 DOM
+    // 手动刷新只刷新行情，不重建表格。重建会先把全部现价替换成占位符，
+    // 再等待最慢的数据源，造成持仓信息短暂消失。已有请求继续更新同一批行，
+    // 避免重复请求；同时清除失败市场退避，让下一次请求立即尝试全部市场。
+    refresh_rates: function () {
+      if (!rate_polling_active) return false;
+      if (timeout_update_rates !== null) {
+        clearTimeout(timeout_update_rates);
+        timeout_update_rates = null;
+      }
+      marketRetryState = {};
+      setWatchStatus(
+        ZiXuan.zx_group === "我的持仓" ? "正在刷新持仓行情…" : "正在刷新行情…",
+        "loading"
+      );
+      if (update_request_in_flight) return true;
+      return ZiXuan.stocks_update_rate(update_poll_generation);
+    },
+
+    // 跨市场分组按标的自身市场拆批请求行情，分组本身不再从属于当前图表市场。
     stocks_update_rate: function (generation) {
       if (!rate_polling_active) return false;
       var request_generation =
@@ -375,88 +439,169 @@ var ZiXuan = (function () {
       if (request_generation !== update_poll_generation) return false;
       if (update_request_in_flight) return false;
 
-      let codes = [];
+      let codesByMarket = {};
       $(".code_rate").each(function () {
-        codes.push($(this).data("code"));
+        var node = $(this);
+        var market = String(node.data("market") || Utils.get_market() || "");
+        var code = node.data("code");
+        if (!market || !code) return;
+        if (!codesByMarket[market]) codesByMarket[market] = [];
+        if (codesByMarket[market].indexOf(code) === -1) {
+          codesByMarket[market].push(code);
+        }
       });
-      if (codes.length === 0) {
+      var allBatches = Object.keys(codesByMarket).map(function (market) {
+        return { market: market, codes: codesByMarket[market] };
+      });
+      if (allBatches.length === 0) {
         setWatchStatus("当前分组暂无标的", "empty");
         return true;
       }
 
+      var now = Date.now();
+      var waitingMarkets = [];
+      var batches = allBatches.filter(function (batch) {
+        var retry = marketRetryState[batch.market];
+        if (retry && retry.retryAt > now) {
+          waitingMarkets.push(batch.market);
+          return false;
+        }
+        return true;
+      });
+      if (batches.length === 0) {
+        setWatchStatus(
+          waitingMarkets.map(marketLabel).join("、") + "行情暂不可用，稍后重试",
+          "error"
+        );
+        schedule_rate_update(
+          nextFailedMarketDelay(waitingMarkets),
+          request_generation
+        );
+        return true;
+      }
+
       update_request_in_flight = true;
-      var completion_state = "retry";
-      appAjax({
-        type: "POST",
-        url: "/ticks",
-        data: { market: Utils.get_market(), codes: JSON.stringify(codes) },
-        dataType: "json",
-        timeout: 8000,
-        success: function (response) {
-          if (request_generation !== update_poll_generation) return;
-          if (
-            !response ||
-            response.ok !== true ||
-            (response.market_state !== "open" &&
-              response.market_state !== "closed" &&
-              response.market_state !== "unknown") ||
-            !Array.isArray(response.ticks)
-          ) {
-            return;
-          }
+      var pending = batches.length;
+      var marketStates = {};
 
-          for (let i = 0; i < response.ticks.length; i++) {
-            let tick = response.ticks[i];
-            if (!tick || typeof tick !== "object") continue;
-            let rate = Number(tick.rate);
-            let price = Number(tick.price);
-            if (!Number.isFinite(rate)) continue;
-            let color = "#1e9fff"; // flat
-            if (rate > 0) color = "#ff5722";
-            else if (rate < 0) color = "#16baaa";
-
-            let obj_span_rate = $(".code_rate").filter(function () {
-              return String($(this).data("code")) === String(tick.code);
-            });
-            var next = rateNode(
-              tick.code,
-              Number.isFinite(price) ? price : null,
-              rate,
-              color
+      function finishBatch() {
+        pending -= 1;
+        if (pending > 0) return;
+        update_request_in_flight = false;
+        if (request_generation !== update_poll_generation) {
+          if (rate_polling_active) schedule_rate_update(0, update_poll_generation);
+          return;
+        }
+        var unavailableMarkets = Object.keys(marketRetryState).filter(function (market) {
+          return Object.prototype.hasOwnProperty.call(codesByMarket, market);
+        });
+        var availableMarkets = Object.keys(codesByMarket).filter(function (market) {
+          return unavailableMarkets.indexOf(market) === -1;
+        });
+        if (unavailableMarkets.length) {
+          var unavailableText = unavailableMarkets.map(marketLabel).join("、");
+          if (availableMarkets.length) {
+            setWatchStatus(
+              unavailableText + "暂不可用；其余 " + availableMarkets.length + " 个市场继续更新",
+              "warning"
             );
-            obj_span_rate.replaceWith(next);
+          } else {
+            setWatchStatus(unavailableText + "行情暂不可用，稍后重试", "error");
           }
-          completion_state = response.market_state;
-          setWatchStatus(
-            response.market_state === "closed" ? "休市 · 低频检查" : "实时行情更新中",
-            response.market_state === "closed" ? "closed" : "live"
+          var availableStates = availableMarkets.map(function (market) {
+            return marketStates[market];
+          }).filter(Boolean);
+          var allAvailableClosed = availableStates.length > 0 && availableStates.every(function (state) {
+            return state === "closed";
+          });
+          schedule_rate_update(
+            availableMarkets.length && !allAvailableClosed
+              ? UPDATE_NORMAL_DELAY_MS
+              : Math.min(
+                UPDATE_CLOSED_DELAY_MS,
+                nextFailedMarketDelay(unavailableMarkets)
+              ),
+            request_generation
           );
-        },
-        error: function () {
-          completion_state = "retry";
-          setWatchStatus("行情连接中断，准备重试", "error");
-        },
-        complete: function () {
-          update_request_in_flight = false;
+          return;
+        }
+        var stateValues = Object.keys(marketStates).map(function (market) {
+          return marketStates[market];
+        });
+        var allClosed = stateValues.length > 0 && stateValues.every(function (state) {
+          return state === "closed";
+        });
+        setWatchStatus(allClosed ? "全部市场休市 · 低频检查" : "跨市场行情更新中", allClosed ? "closed" : "live");
+        schedule_rate_update(
+          allClosed ? UPDATE_CLOSED_DELAY_MS : UPDATE_NORMAL_DELAY_MS,
+          request_generation
+        );
+      }
 
-          if (request_generation !== update_poll_generation) {
-            if (rate_polling_active) {
-              schedule_rate_update(0, update_poll_generation);
+      batches.forEach(function (batch) {
+        var batchFailed = false;
+        function failBatch() {
+          if (request_generation !== update_poll_generation) return;
+          if (batchFailed) return;
+          batchFailed = true;
+          recordMarketFailure(batch.market);
+          setMarketQuoteState(
+            batch.market,
+            "unavailable",
+            marketLabel(batch.market) + "行情暂不可用，系统会独立重试"
+          );
+        }
+        appAjax({
+          type: "POST",
+          url: "/ticks",
+          data: { market: batch.market, codes: JSON.stringify(batch.codes) },
+          dataType: "json",
+          // uSMART 自身的读取上限为 8 秒；美股需给后端备用行情切换留出余量。
+          timeout: batch.market === "us" ? 12000 : 8000,
+          success: function (response) {
+            if (request_generation !== update_poll_generation) return;
+            if (
+              !response ||
+              response.ok !== true ||
+              (response.market_state !== "open" &&
+                response.market_state !== "closed" &&
+                response.market_state !== "unknown") ||
+              !Array.isArray(response.ticks)
+            ) {
+              failBatch();
+              return;
             }
-            return;
-          }
-          if (completion_state === "closed") {
-            update_retry_index = 0;
-            schedule_rate_update(UPDATE_CLOSED_DELAY_MS, request_generation);
-            return;
-          }
-          if (completion_state === "open" || completion_state === "unknown") {
-            update_retry_index = 0;
-            schedule_rate_update(UPDATE_NORMAL_DELAY_MS, request_generation);
-            return;
-          }
-          schedule_rate_retry(request_generation);
-        },
+            recordMarketSuccess(batch.market);
+            marketStates[batch.market] = response.market_state;
+            setMarketQuoteState(batch.market, "available", "");
+            for (let i = 0; i < response.ticks.length; i++) {
+              let tick = response.ticks[i];
+              if (!tick || typeof tick !== "object") continue;
+              let rate = Number(tick.rate);
+              let price = Number(tick.price);
+              if (!Number.isFinite(rate)) continue;
+              let color = "#1e9fff";
+              if (rate > 0) color = "#ff5722";
+              else if (rate < 0) color = "#16baaa";
+
+              let obj_span_rate = $(".code_rate").filter(function () {
+                var node = $(this);
+                var nodeMarket = String(node.data("market") || Utils.get_market() || "");
+                return nodeMarket === batch.market &&
+                  String(node.data("code")) === String(tick.code);
+              });
+              obj_span_rate.replaceWith(rateNode(
+                tick.code,
+                Number.isFinite(price) ? price : null,
+                rate,
+                color,
+                batch.market
+              ));
+            }
+          },
+          error: failBatch,
+          complete: finishBatch,
+        });
       });
     },
 
@@ -506,7 +651,7 @@ var ZiXuan = (function () {
                   title: "关注标的",
                   sort: false,
                   templet: function (d) {
-                    return stockNode(d.name, d.code, d.color).outerHTML;
+                    return stockNode(d.name, d.code, d.color, d.market).outerHTML;
                   },
                 },
                 {
@@ -515,7 +660,7 @@ var ZiXuan = (function () {
                   sort: false,
                   width: 70,
                   templet: function (d) {
-                    return rateNode(d.code, null, null, null).outerHTML;
+                    return rateNode(d.code, null, null, null, d.market).outerHTML;
                   },
                 },
               ]],
@@ -539,7 +684,7 @@ var ZiXuan = (function () {
         table.on("row(table_zixuan_list)", function (obj) {
           const data = obj.data;
           const code = data.code;
-          change_chart_ticker(Utils.get_market(), code);
+          change_chart_ticker(data.market || Utils.get_market(), code);
           table.setRowChecked("table_zixuan_list", {
             index: "all",
             checked: false,
@@ -551,6 +696,7 @@ var ZiXuan = (function () {
 
         table.on("rowContextmenu(table_zixuan_list)", function (obj) {
           let data = obj.data;
+          let rowMarket = data.market || Utils.get_market();
           let menu_data = [
             { title: "从当前分组移除", id: "del" },
             { title: "移至顶部", id: "sort_1", direction: "top" },
@@ -593,7 +739,7 @@ var ZiXuan = (function () {
             },
           ];
 
-          if (Utils.get_market() === "a") {
+          if (rowMarket === "a") {
             menu_data.splice(3, 0, { title: "查看公司资料", id: "dfcf" });
           }
 
@@ -608,7 +754,7 @@ var ZiXuan = (function () {
                   url: "/set_stock_zixuan",
                   data: {
                     opt: "DEL",
-                    market: Utils.get_market(),
+                    market: rowMarket,
                     group_name: ZiXuan.zx_group,
                     code: data.code,
                     color: "",
@@ -630,7 +776,7 @@ var ZiXuan = (function () {
                     url: "/set_stock_zixuan",
                     data: {
                       opt: "COLOR",
-                      market: Utils.get_market(),
+                      market: rowMarket,
                       group_name: ZiXuan.zx_group,
                       code: data.code,
                       color: menuData["color"],
@@ -654,7 +800,7 @@ var ZiXuan = (function () {
                     url: "/set_stock_zixuan",
                     data: {
                       opt: "SORT",
-                      market: Utils.get_market(),
+                      market: rowMarket,
                       group_name: ZiXuan.zx_group,
                       code: data.code,
                       color: "",
@@ -730,10 +876,12 @@ var ZiXuan = (function () {
                 ZiXuan.render_zixuan_stocks();
             });
 
-            $("#refresh_zixuan").click(function () {
-                setWatchStatus("正在手动刷新…", "loading");
-                ZiXuan.render_zixuan_stocks();
-            });
+            if (!refreshUiBound) {
+              refreshUiBound = true;
+              $("#refresh_zixuan").click(function () {
+                ZiXuan.refresh_rates();
+              });
+            }
 
              const searchSelect = xmSelect.render({
                 el: "#code_search",

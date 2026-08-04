@@ -252,17 +252,20 @@ def beichi_qs(
     """趋势背驰：≥2 个同向中枢的趋势中，离开末中枢的段相对连接两中枢的同向段是否衰竭。
 
     两中枢趋势结构 = [中枢0] → A段 → [B=末中枢] → C段。
-      - A 段 = 连接两个中枢的段 = 进入末中枢 last_zs 的段 = ``last_zs.start``
-        (即 prev_zs 的离开段);
+      - A 段 = 连接两个中枢的段 = 前一中枢 ``prev_zs`` 的完成离开段；
+        ``ZsCalculator`` 允许在相邻中枢之间跳过不能成枢的线段，因此
+        ``last_zs.start`` 不再保证与 ``prev_zs.end`` 是同一对象或同一方向；
       - B = 末中枢 last_zs;C 段 = 离开末中枢的段 = ``now_seg``。
     比较 C 段与 A 段力度，C < A 即标准趋势背驰。
-    注意：连接段 A(``last_zs.start``) 与「前面低部回拉的第一段」(``prev_zs.start``)
-    是两根不同的段，比较对象须取连接段 ``last_zs.start``。
+    注意：连接段 A 与「前面低部回拉的第一段」(``prev_zs.start``) 是两根不同的段，
+    当前模型以 ``prev_zs.end`` 表示前一中枢向后一中枢的完成离开；旧快照缺失该字段
+    时才兼容回退到 ``last_zs.start``。
 
     返回非背驰的情形：
     - ``len(zss) < 2`` —— 仅一个中枢时的背驰按盘整背驰处理；
     - 两中枢不构成同向趋势（``is_qs`` 失败）；
-    - 末中枢无进入段（开头中枢）或其方向与 now_seg 不一致 —— A/C 同向前提不满足。
+    - ``prev_zs.end`` 与兼容回退 ``last_zs.start`` 都不存在同向连接段 ——
+      A/C 同向前提不满足。
 
     ``lines`` 参数已不消费——保留仅为薄壳调用方接口兼容。
 
@@ -278,10 +281,19 @@ def beichi_qs(
     if not qs_direction or qs_direction != now_seg.type:
         return False, []
 
-    # A 段 = 连接两个中枢的段 = 进入末中枢的段 = last_zs.start
-    # (= prev_zs 的离开段)。注意区别于「前面低部回拉的第一段」prev_zs.start。
-    compare_line = last_zs.start
+    # A 段优先取前一中枢的完成离开段。旧对象可能没有 prev_zs.end，或旧构造只在
+    # last_zs.start 保存连接段；仅在前者不能成为同向连接段时兼容回退。二者同时
+    # 存在时必须优先 prev_zs.end，因为当前 ZsCalculator 已不保证二者恒等。
+    compare_line = getattr(prev_zs, "end", None)
     if compare_line is None or getattr(compare_line, "type", None) != now_seg.type:
+        legacy_connector = getattr(last_zs, "start", None)
+        compare_line = (
+            legacy_connector
+            if legacy_connector is not None
+            and getattr(legacy_connector, "type", None) == now_seg.type
+            else None
+        )
+    if compare_line is None:
         return False, []
 
     return is_beichi(compare_line, now_seg, ld_provider, frequency), [compare_line]

@@ -214,6 +214,75 @@
     return labels.length ? Array.from(new Set(labels)).join('、') : '暂无关联买卖点';
   }
 
+  function centerPointLabel(pointType) {
+    const canonical = MMD_ALIASES[String(pointType || '').toLowerCase()]
+      || String(pointType || '').toLowerCase();
+    return MMD_LABELS[canonical] || String(pointType || '三类点');
+  }
+
+  function centerLifecycleText(item, towerLabel) {
+    const phase = String(item && item.completion_phase || '').toUpperCase();
+    const expectedType = item && (
+      item.completion_point_type || item.expected_completion_point_type
+    );
+    const pointLabel = centerPointLabel(expectedType);
+    const scope = `${towerLabel}级`;
+
+    if (phase === 'FORMAL_THIRD_CLASS_POINT') {
+      return {
+        status: '已完成',
+        qualification: `${scope}${pointLabel}已确认`,
+        evidence: `${scope}${pointLabel}已确认`,
+        requirement: '同级别完成条件已满足',
+        associatedPoint: `${scope}${pointLabel}（已确认）`,
+        tone: 'complete',
+      };
+    }
+    if (phase === 'GEOMETRIC_THIRD_CLASS_POINT') {
+      return {
+        status: `${pointLabel}几何完成，待锁定`,
+        qualification: `${scope}${pointLabel}几何已成立；待线段锁定，仅作观察`,
+        evidence: `${scope}${pointLabel}几何成立（尚未锁定）`,
+        requirement: '等待当前同级别回抽线段锁定，才转为正式完成',
+        associatedPoint: `${scope}${pointLabel}（几何成立，待锁定）`,
+        tone: 'forming',
+      };
+    }
+    if (phase === 'AWAITING_SAME_LEVEL_RETURN') {
+      return {
+        status: '形成中',
+        qualification: `离开已出现；等待${scope}首次回抽确认`,
+        evidence: `尚无${scope}${pointLabel}确认`,
+        requirement: expectedType === '3sell'
+          ? `等待${scope}向上回抽不回中枢下沿`
+          : `等待${scope}向下回抽不回中枢上沿`,
+        associatedPoint: `尚无${scope}关联买卖点`,
+        tone: 'forming',
+      };
+    }
+    if (phase === 'AWAITING_SAME_LEVEL_DEPARTURE') {
+      return {
+        status: '形成中',
+        qualification: `主体已形成；等待${scope}有效离开及首次回抽`,
+        evidence: `尚无${scope}三类点确认`,
+        requirement: `等待${scope}有效离开，再观察首次回抽`,
+        associatedPoint: `尚无${scope}关联买卖点`,
+        tone: 'forming',
+      };
+    }
+    return null;
+  }
+
+  function coreDirectionText(values) {
+    const directions = Array.isArray(values) ? values : [];
+    if (directions.length !== 3) return '未提供主体三段';
+    const labels = directions.map((value) => (
+      DIRECTION_LABELS[String(value || '').toLowerCase()] || ''
+    ));
+    if (labels.some((value) => !value)) return '主体三段方向无效';
+    return labels.join(' → ');
+  }
+
   function summarizeZone(items, latestClose, levelLabel, options) {
     const settings = options || {};
     const candidates = Array.isArray(items) ? items : [];
@@ -241,13 +310,17 @@
         time: null,
         tone: 'neutral',
         tower: settings.tower === 'bi' ? '笔' : '线段',
-        recursiveLevel: settings.tower === 'bi' ? '观察层' : `L${settings.recursiveLevel || 0}`,
+        recursiveLevel: settings.periodLabel || '当前周期',
         zd: '--',
         zg: '--',
         completion: '尚未形成',
         enteringSegment: '未提供进入段',
+        coreDirections: '未提供主体三段',
         leavingSegment: '未提供离开段',
+        confirmationSegment: '尚无同级别确认回抽',
         associatedPoint: '暂无关联买卖点',
+        completionEvidence: '尚无同级别完成依据',
+        completionRequirement: '等待形成可计算的中枢结构',
       };
     }
 
@@ -258,21 +331,30 @@
     const explicitZg = numeric(latest.zg);
     const low = explicitZd === null ? (prices.length ? Math.min.apply(null, prices) : null) : explicitZd;
     const high = explicitZg === null ? (prices.length ? Math.max.apply(null, prices) : null) : explicitZg;
-    const status = typeof latest.done === 'boolean'
+    const fallbackStatus = typeof latest.done === 'boolean'
       ? (latest.done ? '已完成' : '形成中')
       : (String(latest.linestyle) === '1' ? '形成中' : '已完成');
     const renderKind = String(latest.render_kind || '');
+    // Collection ownership is authoritative: a point in ``bi_mmds`` cannot
+    // complete an XD center.  Lifecycle metadata binds the same-level return
+    // to this exact center and also preserves the useful live state where the
+    // third-class geometry exists but its terminal segment is not locked yet.
+    const tower = String(settings.tower || latest.tower || '').toLowerCase();
+    const towerLabel = tower === 'bi' ? '笔' : '线段';
+    const lifecycle = centerLifecycleText(latest, towerLabel);
+    const status = lifecycle ? lifecycle.status : fallbackStatus;
     const effectiveLevelLabel = renderKind === 'center_preview'
       ? '线段中枢预览'
       : levelLabel;
-    const qualification = renderKind === 'center_preview'
-      ? (String(latest.state) === 'completed'
-        ? '几何已完成，等待线段锁定，不可直接交易'
-        : '形成中预览，不可直接交易')
-      : (renderKind === 'center_observation' ? '观察证据，不可直接交易' : '');
+    const qualification = lifecycle
+      ? lifecycle.qualification
+      : (renderKind === 'center_preview'
+        ? (String(latest.state) === 'completed'
+          ? '几何已完成，等待线段锁定，不可直接交易'
+          : '形成中预览，不可直接交易')
+        : (renderKind === 'center_observation' ? '观察证据，不可直接交易' : ''));
     // The collection itself is authoritative.  Old cached payloads could carry
     // a stale ``tower`` value and must not relabel a bi center as an xd center.
-    const tower = String(settings.tower || latest.tower || '').toLowerCase();
     const recursiveLevel = numeric(latest.recursive_level);
     let position = '位置待定';
     if (latestClose !== null && low !== null && high !== null) {
@@ -307,17 +389,30 @@
       low,
       high,
       time: latestTime,
-      tone: status === '形成中' ? 'forming' : 'complete',
-      tower: tower === 'bi' ? '笔' : '线段',
-      recursiveLevel: recursiveLevel === null
-        ? (tower === 'bi' ? '观察层' : `L${settings.recursiveLevel || 0}`)
-        : `L${recursiveLevel}`,
+      tone: lifecycle ? lifecycle.tone : (status === '形成中' ? 'forming' : 'complete'),
+      tower: towerLabel,
+      recursiveLevel: settings.periodLabel || (
+        recursiveLevel === null ? '当前周期' : `L${recursiveLevel}`
+      ),
       zd: formatPrice(low),
       zg: formatPrice(high),
       completion: status,
       enteringSegment: segmentAuditText(latest.entering_segment, '未提供进入段'),
+      coreDirections: coreDirectionText(latest.core_directions),
       leavingSegment: segmentAuditText(latest.leaving_segment, '未提供离开段'),
-      associatedPoint: associatedPointText(latest.associated_points),
+      confirmationSegment: segmentAuditText(
+        latest.completion_return_segment,
+        '尚无同级别确认回抽',
+      ),
+      associatedPoint: lifecycle
+        ? lifecycle.associatedPoint
+        : associatedPointText(latest.associated_points),
+      completionEvidence: lifecycle
+        ? lifecycle.evidence
+        : associatedPointText(latest.associated_points),
+      completionRequirement: lifecycle
+        ? lifecycle.requirement
+        : (status === '已完成' ? '当前数据标记为已完成' : '等待同级别离开与回抽确认'),
     };
   }
   function latestSignal(groups, bars, kind, timeZone, latestClose) {
@@ -493,19 +588,26 @@
       boundary,
     };
   }
-  function segmentZoneItems(source) {
-    const recursiveZones = [];
-    (Array.isArray(source && source.recursive_levels) ? source.recursive_levels : []).forEach((level) => {
-      if (!level || Number(level.level) !== 0 || !Array.isArray(level.zss)) return;
-      level.zss.forEach((zone) => recursiveZones.push({
-        ...zone,
-        tower: zone && zone.tower ? zone.tower : 'xd',
-        recursive_level: zone && zone.recursive_level != null
-          ? zone.recursive_level
-          : Number(level.level),
-      }));
-    });
-    if (recursiveZones.length) return recursiveZones;
+  function centerFrequency(resolution) {
+    const value = String(resolution || '').trim();
+    if (/^\d+$/.test(value)) return `${value}m`;
+    if (value === 'D' || value === '1D' || value.toLowerCase() === 'd') return 'd';
+    if (value === 'W' || value === '1W' || value.toLowerCase() === 'w') return 'w';
+    return value.toLowerCase();
+  }
+
+  function centerFrequencyLabel(resolution) {
+    const frequency = centerFrequency(resolution);
+    return frequency === 'd' ? '日线' : (frequency || '当前周期');
+  }
+
+  function segmentZoneItems(source, resolution) {
+    const frequency = centerFrequency(resolution);
+    const groups = Array.isArray(source && source.higher_zs) ? source.higher_zs : [];
+    const current = groups.find((group) => (
+      group && String(group.period || '').toLowerCase() === frequency
+    ));
+    if (current) return Array.isArray(current.zss) ? current.zss : [];
     return Array.isArray(source && source.xd_zss) ? source.xd_zss : [];
   }
   function summarizeLegacyChartData(data, context) {
@@ -520,10 +622,12 @@
     const biZone = summarizeZone(source.bi_zss, latestClose, '笔中枢', {
       tower: 'bi',
       recursiveLevel: null,
+      periodLabel: centerFrequencyLabel(options.resolution),
     });
-    const xdZone = summarizeZone(segmentZoneItems(source), latestClose, '线段中枢', {
+    const xdZone = summarizeZone(segmentZoneItems(source, options.resolution), latestClose, '线段中枢', {
       tower: 'xd',
-      recursiveLevel: 0,
+      recursiveLevel: null,
+      periodLabel: centerFrequencyLabel(options.resolution),
     });
     const mmd = latestSignal(
       [source.bi_mmds, source.xd_mmds, source.mmds],
@@ -592,7 +696,7 @@
   }
 
   function strictEmptySummary(source, options, state, detail) {
-    const base = summarizeLegacyChartData({ bars: source.bars }, options);
+    const base = summarizeLegacyChartData(source, options);
     const unavailable = state === 'unavailable';
     return {
       ...base,
@@ -661,7 +765,12 @@
       || Number(snapshot.structure_price_quantum) <= 0) {
       throw new Error('严格结构价格量子无效');
     }
-    if (!Array.isArray(snapshot.stroke_center_observations) || !Array.isArray(snapshot.levels)) {
+    if (
+      !Array.isArray(snapshot.stroke_center_observations)
+      || (snapshot.display_center_observations !== undefined
+        && !Array.isArray(snapshot.display_center_observations))
+      || !Array.isArray(snapshot.levels)
+    ) {
       throw new Error('严格结构集合无效');
     }
 
@@ -882,58 +991,30 @@
     });
 
     const observations = snapshot.stroke_center_observations.map((item) => (
-      summarizeStrictCenter(item, '观察证据，不可直接交易')
+      summarizeStrictCenter(item, '严格笔中枢观察，不可直接交易')
     ));
     const confirmedPoints = rawConfirmedPoints.map(summarizeStrictPoint);
     const approachingPoints = rawApproachingPoints.map(summarizeStrictPoint);
     const divergences = rawDivergences.map((item) => (
       summarizeStrictDivergence(item, item.level_label)
     ));
-    const l0Centers = snapshot.levels
-      .filter((level) => level.structural_level === 0)
-      .flatMap((level) => level.centers)
-      .map((item) => ({
-        ...item,
-        zd: item.core && item.core.zd_price,
-        zg: item.core && item.core.zg_price,
-        done: item.state === 'completed',
-        recursive_level: 0,
-      }));
-    const l0CenterPreviews = snapshot.levels
-      .filter((level) => level.structural_level === 0)
-      .flatMap((level) => level.center_previews)
-      .map((item) => ({
-        ...item,
-        zd: item.core && item.core.zd_price,
-        zg: item.core && item.core.zg_price,
-        done: item.state === 'completed',
-        recursive_level: 0,
-      }));
-    const strokeObservationZones = snapshot.stroke_center_observations
-      .map((item) => ({
-        ...item,
-        zd: item.core && item.core.zd_price,
-        zg: item.core && item.core.zg_price,
-        done: item.state === 'completed',
-        recursive_level: null,
-      }));
-    // The strict snapshot is authoritative for centers, trends and signals.
-    // Current stroke/segment status, however, must describe the actual base
-    // geometry carried in the same bars response rather than relabeling an L0
-    // trend type as a segment.
+    // 基础笔/线段及两类中枢都消费页面同源结构；严格快照只补充走势、
+    // 买卖点和背驰证据，不能替换这里的笔中枢或真实周期线段中枢。
     const bi = summarizeLine(source.bis);
     const xd = summarizeLine(source.xds);
-    const biZone = summarizeZone(strokeObservationZones, latestClose, '笔观察中枢', {
+    const biZone = summarizeZone(source.bi_zss, latestClose, '笔中枢', {
       tower: 'bi',
       recursiveLevel: null,
+      periodLabel: centerFrequencyLabel(options.resolution),
     });
     const xdZone = summarizeZone(
-      l0Centers.concat(l0CenterPreviews),
+      segmentZoneItems(source, options.resolution),
       latestClose,
-      '正式中枢',
+      '线段中枢',
       {
         tower: 'xd',
-        recursiveLevel: 0,
+        recursiveLevel: null,
+        periodLabel: centerFrequencyLabel(options.resolution),
       },
     );
     const mmd = strictLegacySignal(
@@ -1130,8 +1211,12 @@
     setText(`${prefix}-bounds`, `ZD ${zone.zd} / ZG ${zone.zg}`);
     setText(`${prefix}-completion`, zone.completion);
     setText(`${prefix}-entry`, zone.enteringSegment);
+    setText(`${prefix}-core`, zone.coreDirections);
     setText(`${prefix}-exit`, zone.leavingSegment);
+    setText(`${prefix}-return`, zone.confirmationSegment);
     setText(`${prefix}-point`, zone.associatedPoint);
+    setText(`${prefix}-evidence`, zone.completionEvidence);
+    setText(`${prefix}-requirement`, zone.completionRequirement);
   }
 
   function renderSummary(summary, identity, symbolInfo) {

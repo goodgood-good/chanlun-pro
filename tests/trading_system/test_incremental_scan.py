@@ -35,6 +35,17 @@ def test_one_changed_stock_only_schedules_that_stock() -> None:
     assert plan.frequencies_for("SH.600000") == ("1m", "5m")
 
 
+def test_daily_change_refreshes_all_four_independent_physical_periods() -> None:
+    plan = build_scan_plan(
+        changed_bars=(BarKey("SH.600000", "d", CLOSED_AT),),
+        sector_members={},
+        active_watchlist=(),
+        previous=ScanCursor.current(),
+    )
+
+    assert plan.frequencies_for("SH.600000") == ("1m", "5m", "30m", "d")
+
+
 def test_ineligible_sector_change_is_not_misclassified_as_a_stock() -> None:
     blocked_sector = "qmt-gics3:blocked"
 
@@ -99,3 +110,4 @@ def test_scan_plan_deduplicates_and_sorts_deterministically() -> None:
     assert first == second
     assert first.symbols == tuple(sorted(set(first.symbols)))
     assert first.sectors == ("TDX.880301",)
+    assert first.frequencies_for("SH.600000") == ("1m", "5m", "30m", "d")

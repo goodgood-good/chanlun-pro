@@ -11,11 +11,12 @@ class TestNativeHealthHandler(AsyncHTTPTestCase):
         class _FlaskApp:
             extensions = {
                 "health_snapshot": staticmethod(
-                    lambda kind, market: (
+                    lambda kind, market, forward_session: (
                         {
                             "status": "not_ready",
                             "kind": kind,
                             "market": market,
+                            "forward_session": forward_session,
                         },
                         503,
                     )
@@ -34,4 +35,13 @@ class TestNativeHealthHandler(AsyncHTTPTestCase):
             "status": "not_ready",
             "kind": "readyz",
             "market": "a",
+            "forward_session": None,
         }
+
+    def test_forward_session_reaches_the_shared_health_snapshot(self):
+        response = self.fetch(
+            "/readyz?market=a&forward_session=2026-07-30"
+        )
+
+        assert response.code == 503
+        assert json.loads(response.body)["forward_session"] == "2026-07-30"

@@ -1,7 +1,9 @@
+from datetime import date, datetime
 import json
 import os
 from threading import Event
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -10,6 +12,9 @@ from cl_app.blueprints import other as other_mod
 from cl_app.services import constants as constants_service
 from cl_app.services import readiness as readiness_service
 from cl_app.services import stock_list as stock_list_service
+from chanlun.decision_support.trading_system.v3_trading_session import (
+    DEFAULT_OFFICIAL_TRADING_CALENDAR_PATH,
+)
 
 
 def _raise_external_call(*_args, **_kwargs):
@@ -73,6 +78,17 @@ def test_livez_and_healthz_have_distinct_compatible_contracts(app):
     assert health.status_code == 200
     assert health.get_json()["status"] == "ok"
     assert health.get_json()["revision"] == "test-revision"
+
+
+def test_disabled_scheduler_monitor_cannot_bypass_virtual_paper_gate(app):
+    service = app.extensions["decision_support_human_review"]
+
+    ready, reason = service._paper_forward_operations_eligibility(
+        source_session=date(2026, 7, 31)
+    )
+
+    assert ready is False
+    assert reason == "FORWARD_SCHEDULER_NOT_READY_FOR_PAPER"
 
 
 def test_index_loads_only_requested_market_metadata(app, monkeypatch):
@@ -154,6 +170,12 @@ def test_readyz_uses_only_local_snapshots(app, monkeypatch):
         "ready": True,
         "status": "ok",
         "error": None,
+    }
+    assert payload["components"]["trading_screening"] == {
+        "required": False,
+        "ready": True,
+        "status": "disabled",
+        "reasons": [],
     }
 
 
@@ -393,6 +415,358 @@ def test_readyz_requires_scheduler_only_when_enabled(app):
         "error": None,
     }
     assert payload["reasons"] == ["runtime_not_running", "scheduler_not_running"]
+
+
+def test_readyz_requires_the_app_owned_qmt_runtime(app):
+    app.config["SCHEDULER_ENABLED"] = True
+    app.config["QMT_RUNTIME_MODE"] = "APP"
+    app.extensions["readiness"].record_ticks_success("a")
+    scheduler = app.extensions["scheduler"]
+    scheduler.start(paused=True)
+    try:
+        app.extensions["runtime_status"] = lambda: {
+            "ready": True,
+            "status": "running",
+            "error": None,
+        }
+        app.extensions["app_qmt_runtime"] = SimpleNamespace(
+            snapshot=lambda: {
+                "schema": "chanlun-qmt-runtime-readiness/v1",
+                "contract_id": "chanlun-qmt-runtime/app-runtime-contract/v1",
+                "execution_owner": "APP_RUNTIME",
+                "ready": False,
+                "status": "not_ready",
+                "reason_code": "QMT_MAIN_PROCESS_MISSING",
+            }
+        )
+
+        blocked = app.test_client().get("/readyz?market=a")
+
+        assert blocked.status_code == 503
+        payload = blocked.get_json()
+        assert payload["components"]["qmt_runtime"]["required"] is True
+        assert payload["components"]["qmt_runtime"]["ready"] is False
+        assert payload["reasons"] == ["qmt_runtime_not_ready"]
+
+        app.extensions["app_qmt_runtime"] = SimpleNamespace(
+            snapshot=lambda: {
+                "schema": "chanlun-qmt-runtime-readiness/v1",
+                "contract_id": "chanlun-qmt-runtime/app-runtime-contract/v1",
+                "execution_owner": "APP_RUNTIME",
+                "ready": True,
+                "status": "ready",
+                "reason_code": "READY",
+            }
+        )
+        recovered = app.test_client().get("/readyz?market=a")
+        assert recovered.status_code == 200
+        assert recovered.get_json()["reasons"] == []
+    finally:
+        scheduler.shutdown(wait=False)
+
+
+def test_readyz_requires_screening_attestation_when_runtime_is_running(app):
+    app.config["SCHEDULER_ENABLED"] = True
+    app.config["TRADING_SCREENING_BACKGROUND_ENABLED"] = True
+    app.extensions["readiness"].record_ticks_success("a")
+    scheduler = app.extensions["scheduler"]
+    scheduler.start(paused=True)
+    try:
+        app.extensions["runtime_status"] = lambda: {
+            "ready": True,
+            "status": "running",
+            "error": None,
+        }
+        app.extensions["decision_support_trading_screening"] = SimpleNamespace(
+            health_snapshot=lambda: {
+                "ready": False,
+                "status": "not_ready",
+                "worker_alive": False,
+                "reasons": ["screening_worker_not_running"],
+            }
+        )
+
+        blocked = app.test_client().get("/readyz?market=a")
+
+        assert blocked.status_code == 503
+        payload = blocked.get_json()
+        assert payload["components"]["trading_screening"] == {
+            "required": True,
+            "ready": False,
+            "status": "not_ready",
+            "worker_alive": False,
+            "reasons": ["screening_worker_not_running"],
+        }
+        assert payload["reasons"] == ["trading_screening_not_ready"]
+
+        app.extensions["decision_support_trading_screening"] = SimpleNamespace(
+            health_snapshot=lambda: {
+                "ready": True,
+                "status": "ready",
+                "worker_alive": True,
+                "reasons": [],
+            }
+        )
+        recovered = app.test_client().get("/readyz?market=a")
+        assert recovered.status_code == 200
+        assert recovered.get_json()["reasons"] == []
+    finally:
+        scheduler.shutdown(wait=False)
+
+
+def test_readyz_does_not_call_a_complete_screen_a_complete_forward_archive(app):
+    """A page-complete snapshot cannot hide a missing same-session QMT capture."""
+
+    app.config["SCHEDULER_ENABLED"] = True
+    app.config["TRADING_SCREENING_BACKGROUND_ENABLED"] = True
+    app.extensions["readiness"].record_ticks_success("a")
+    scheduler = app.extensions["scheduler"]
+    scheduler.start(paused=True)
+    try:
+        app.extensions["runtime_status"] = lambda: {
+            "ready": True,
+            "status": "running",
+            "error": None,
+        }
+        app.extensions["decision_support_trading_screening"] = SimpleNamespace(
+            health_snapshot=lambda: {
+                "ready": True,
+                "status": "ready",
+                "worker_alive": True,
+                "screening_review_ready": True,
+                "screening_review_reason_code": "READY",
+                "forward_review_ready": True,
+                "forward_review_reason_code": "READY",
+                "reasons": [],
+            }
+        )
+        capture = {
+            "ready": False,
+            "status": "not_ready",
+            "reason_code": "REQUIRED_CAPTURE_MISSING",
+            "session": "2026-07-29",
+            "receipt_proven": False,
+            "live_status": "LIVE_DISABLED",
+        }
+        delivery = {
+            "ready": False,
+            "status": "not_ready",
+            "reason_code": "EVALUATION_MISSING_AFTER_DEADLINE",
+            "session": "2026-07-29",
+            "capture_ready": True,
+            "evaluation_ready": False,
+            "live_status": "LIVE_DISABLED",
+        }
+        app.extensions["decision_support_human_review"] = SimpleNamespace(
+            forward_archive_capture_readiness=lambda *, session: dict(capture),
+            forward_delivery_readiness=lambda *, session: (
+                _raise_external_call()
+            ),
+            forward_delivery_readiness_nonblocking=lambda *, session: dict(
+                delivery
+            ),
+        )
+
+        blocked = app.test_client().get(
+            "/readyz?market=a&forward_session=2026-07-29"
+        )
+
+        # Forward evidence is a research pipeline component. Its absence must
+        # not falsely make the Web process itself unavailable.
+        assert blocked.status_code == 200
+        payload = blocked.get_json()
+        assert payload["status"] == "ready"
+        archive = payload["components"]["forward_archive"]
+        assert archive["ready"] is False
+        assert archive["status"] == "not_ready"
+        assert archive["reason_code"] == "REQUIRED_CAPTURE_MISSING"
+        assert archive["screening_review_ready"] is True
+        assert archive["sector_capture_ready"] is False
+        assert archive["sector_capture_reason_code"] == (
+            "REQUIRED_CAPTURE_MISSING"
+        )
+        delivery_component = payload["components"]["forward_delivery"]
+        assert delivery_component["ready"] is False
+        assert delivery_component["reason_code"] == (
+            "EVALUATION_MISSING_AFTER_DEADLINE"
+        )
+
+        capture.update(
+            required=None,
+            requirement_resolved=False,
+            trading_session_status="UNRESOLVED",
+            reason_code="TRADING_SESSION_EVIDENCE_UNAVAILABLE",
+        )
+        delivery.update(
+            required=None,
+            requirement_resolved=False,
+            trading_session_status="UNRESOLVED",
+            reason_code="TRADING_SESSION_EVIDENCE_UNAVAILABLE",
+        )
+        unresolved = app.test_client().get(
+            "/readyz?market=a&forward_session=2026-07-29"
+        ).get_json()["components"]
+        assert unresolved["forward_archive"]["required"] is None
+        assert unresolved["forward_archive"]["requirement_resolved"] is False
+        assert unresolved["forward_delivery"]["required"] is None
+
+        capture.update(
+            required=True,
+            requirement_resolved=True,
+            ready=True,
+            status="ready",
+            reason_code="READY",
+            receipt_proven=True,
+        )
+        ready = app.test_client().get(
+            "/readyz?market=a&forward_session=2026-07-29"
+        )
+        archive = ready.get_json()["components"]["forward_archive"]
+        assert archive["ready"] is True
+        assert archive["status"] == "ready"
+        assert archive["reason_code"] == "READY"
+        assert archive["sector_capture_ready"] is True
+        # A complete input gate still does not prove that Evaluate archived
+        # the day.  The actual delivery component remains independently red.
+        assert ready.get_json()["components"]["forward_delivery"]["ready"] is False
+
+        delivery.update(
+            required=True,
+            requirement_resolved=True,
+            ready=True,
+            status="ready",
+            reason_code="READY",
+            evaluation_ready=True,
+        )
+        completed = app.test_client().get(
+            "/readyz?market=a&forward_session=2026-07-29"
+        ).get_json()
+        assert completed["components"]["forward_archive"]["ready"] is True
+        assert completed["components"]["forward_delivery"]["ready"] is True
+    finally:
+        scheduler.shutdown(wait=False)
+
+
+def test_readyz_exposes_forward_scheduler_contract_without_masking_web_health(
+    app,
+) -> None:
+    app.config["SCHEDULER_ENABLED"] = True
+    app.config["TRADING_SCREENING_BACKGROUND_ENABLED"] = True
+    app.config["FORWARD_SCHEDULER_MONITOR_ENABLED"] = True
+    app.extensions["readiness"].record_ticks_success("a")
+    scheduler = app.extensions["scheduler"]
+    scheduler.start(paused=True)
+    try:
+        app.extensions["runtime_status"] = lambda: {
+            "ready": True,
+            "status": "running",
+            "error": None,
+        }
+        app.extensions["decision_support_trading_screening"] = SimpleNamespace(
+            health_snapshot=lambda: {
+                "ready": True,
+                "status": "ready",
+                "worker_alive": True,
+                "screening_review_ready": False,
+                "screening_review_reason_code": "COVERAGE_INCOMPLETE",
+                "reasons": [],
+            }
+        )
+        app.extensions["forward_scheduler_probe"] = SimpleNamespace(
+            snapshot=lambda: {
+                "schema": "chanlun-v3-forward-scheduler-readiness/v1",
+                "contract_id": (
+                    "chanlun-v3-forward-scheduler/windows-task-contract/v1"
+                ),
+                "ready": False,
+                "status": "not_ready",
+                "reason_code": "SCHEDULED_TASK_PRINCIPAL_MISMATCH",
+                "reason_codes": ["SCHEDULED_TASK_PRINCIPAL_MISMATCH"],
+                "tasks": [],
+                "task_count": 0,
+                "live_status": "LIVE_DISABLED",
+            }
+        )
+        app.extensions["decision_support_human_review"] = SimpleNamespace(
+            forward_archive_capture_readiness=lambda *, session: {
+                "required": False,
+                "ready": False,
+                "status": "not_due",
+                "reason_code": "FORWARD_SESSION_NOT_DUE",
+                "session": None,
+            },
+            forward_delivery_readiness=lambda *, session: {
+                "required": True,
+                "ready": False,
+                "status": "pending",
+                "reason_code": "CAPTURE_NOT_DUE",
+                "session": "2026-07-31",
+            },
+        )
+
+        response = app.test_client().get("/readyz?market=a")
+
+        assert response.status_code == 200
+        payload = response.get_json()
+        component = payload["components"]["forward_scheduler"]
+        assert component["required"] is True
+        assert component["ready"] is False
+        assert component["reason_code"] == (
+            "SCHEDULED_TASK_PRINCIPAL_MISMATCH"
+        )
+        # Research delivery remains a distinct red component; it must not make
+        # the chart/Web process itself unavailable.
+        assert payload["status"] == "ready"
+        assert payload["reasons"] == []
+    finally:
+        scheduler.shutdown(wait=False)
+
+
+def test_readyz_rejects_an_invalid_forward_session(app):
+    response = app.test_client().get(
+        "/readyz?market=a&forward_session=not-a-session"
+    )
+
+    assert response.status_code == 400
+    assert response.get_json()["reasons"] == ["invalid_forward_session"]
+
+
+def test_production_calendar_provider_resolves_before_any_qmt_fallback(
+    monkeypatch,
+):
+    monkeypatch.setenv("CHANLUN_BUILD_REVISION", "test-official-calendar")
+    flask_app = create_app(
+        test_config={
+            "TESTING": True,
+            "LOGIN_DISABLED": True,
+            "VALIDATE_WEB_SECURITY": False,
+            "SCHEDULER_ENABLED": False,
+            "WTF_CSRF_ENABLED": False,
+            "TRADING_SESSION_OFFICIAL_CALENDAR_PATH": (
+                DEFAULT_OFFICIAL_TRADING_CALENDAR_PATH
+            ),
+        }
+    )
+    try:
+        service = flask_app.extensions["decision_support_human_review"]
+        evidence = service._trading_session_provider(
+            session=date(2026, 7, 31),
+            observed_at=datetime(
+                2026,
+                7,
+                31,
+                1,
+                tzinfo=ZoneInfo("Asia/Shanghai"),
+            ),
+        )
+
+        assert evidence["classification"] == "TRADING_SESSION"
+        assert evidence["source_method"] == "SSE_OFFICIAL_ANNUAL_CALENDAR"
+        assert evidence["tick_data_used"] is False
+        assert evidence["real_account_accessed"] is False
+        assert evidence["real_order_transport_enabled"] is False
+    finally:
+        flask_app.extensions["shutdown_scheduler"]()
 
 
 def test_ticks_dependency_failure_blocks_readiness_and_success_recovers(

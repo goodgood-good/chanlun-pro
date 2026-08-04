@@ -12,9 +12,9 @@ export class Requester implements IRequester {
 		this._timeoutMs = Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : 15_000;
 	}
 
-	public sendRequest<T extends UdfResponse>(datafeedUrl: string, urlPath: string, params?: RequestParams): Promise<T | UdfErrorResponse>;
-	public sendRequest<T>(datafeedUrl: string, urlPath: string, params?: RequestParams): Promise<T>;
-	public sendRequest<T>(datafeedUrl: string, urlPath: string, params?: RequestParams): Promise<T> {
+	public sendRequest<T extends UdfResponse>(datafeedUrl: string, urlPath: string, params?: RequestParams, timeoutMs?: number): Promise<T | UdfErrorResponse>;
+	public sendRequest<T>(datafeedUrl: string, urlPath: string, params?: RequestParams, timeoutMs?: number): Promise<T>;
+	public sendRequest<T>(datafeedUrl: string, urlPath: string, params?: RequestParams, timeoutMs?: number): Promise<T> {
 		if (params !== undefined) {
 			const paramKeys = Object.keys(params);
 			if (paramKeys.length !== 0) {
@@ -27,6 +27,9 @@ export class Requester implements IRequester {
 		}
 
 		logMessage('New request: ' + urlPath);
+		const effectiveTimeoutMs = Number.isFinite(timeoutMs) && Number(timeoutMs) > 0
+			? Number(timeoutMs)
+			: this._timeoutMs;
 
 		// Send user cookies if the URL is on the same origin as the calling script.
 		const controller = typeof AbortController === 'undefined' ? undefined : new AbortController();
@@ -38,8 +41,8 @@ export class Requester implements IRequester {
 		const timeout = new Promise<never>((_resolve, reject) => {
 			timeoutId = setTimeout(() => {
 				controller?.abort();
-				reject(new Error(`Request timed out after ${this._timeoutMs}ms`));
-			}, this._timeoutMs);
+				reject(new Error(`Request timed out after ${effectiveTimeoutMs}ms`));
+			}, effectiveTimeoutMs);
 		});
 
 		if (this._headers !== undefined) {

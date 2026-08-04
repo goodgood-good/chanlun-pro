@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Iterable
 
 from chanlun.core.strict_structure.identity import stable_structure_id
@@ -21,11 +21,16 @@ from chanlun.core.strict_structure.models import (
     TrendCenter,
     TrendType,
 )
+from chanlun.core.strict_structure.unit_adapter import (
+    UnitLockRegistry,
+    adapt_lines,
+)
 
 
 CHART_STRUCTURE_SCHEMA = "chanlun-chart-structure/v5"
 CHART_CENTER_SCHEMA = "chanlun-chart-center/v5"
 _ACTIVE_CENTER_STATES = frozenset({CenterState.ONGOING})
+_DISPLAY_SEGMENT_CENTER_ALGORITHM = "chanlun-display-segment-zhongshu/v1"
 
 
 def aware_datetime_to_epoch_seconds(value: datetime) -> int:
@@ -168,6 +173,227 @@ def center_observation_to_chart_dict(
     )
 
 
+def _price_tick(value, quantum: Decimal) -> int:
+    try:
+        normalized = Decimal(str(value))
+    except (InvalidOperation, ValueError) as exc:
+        raise ValueError("center price must be finite") from exc
+    if not normalized.is_finite():
+        raise ValueError("center price must be finite")
+    return int(
+        (normalized / quantum).quantize(
+            Decimal("1"),
+            rounding=ROUND_HALF_UP,
+        )
+    )
+
+
+def _display_line_key(line) -> tuple[object, ...]:
+    try:
+        return (
+            type(line).__name__,
+            line.type,
+            line.start.k.k_index,
+            line.end.k.k_index,
+        )
+    except AttributeError as exc:
+        raise ValueError("display center line has incomplete geometry") from exc
+
+
+def display_segment_center_observations_to_chart_dicts(
+    centers,
+    lines,
+    *,
+    price_basis_revision: str,
+    price_quantum: Decimal,
+    as_of: datetime,
+) -> tuple[dict[str, object], ...]:
+    """Serialize UI centers against the exact segments displayed by the chart.
+
+    These boxes are a non-tradable chart observation layer.  Formal recursive
+    centers and their evidence remain sourced from the fixed strict runtime.
+    """
+
+    center_values = tuple(centers)
+    if not center_values:
+        return ()
+    line_values = tuple(lines)
+    if not line_values:
+        raise ValueError("display segment centers require displayed segments")
+    if not isinstance(price_quantum, Decimal):
+        raise TypeError("price_quantum must be a Decimal")
+    quantum_text = _canonical_quantum(price_quantum)
+    quantum = Decimal(quantum_text)
+    source_closed_epoch = aware_datetime_to_epoch_seconds(as_of)
+    registry = UnitLockRegistry(price_basis_revision)
+    units = adapt_lines(
+        line_values,
+        structural_level=0,
+        source_kind=SourceKind.SEGMENT,
+        price_quantum=quantum,
+        as_of=as_of,
+        registry=registry,
+    )
+    by_identity = {
+        id(line): unit for line, unit in zip(line_values, units, strict=True)
+    }
+    by_geometry: dict[tuple[object, ...], ConstituentUnit] = {}
+    for line, unit in zip(line_values, units, strict=True):
+        key = _display_line_key(line)
+        previous = by_geometry.setdefault(key, unit)
+        if previous.unit_id != unit.unit_id:
+            raise ValueError("display segments contain duplicate geometry")
+
+    def source_unit(line) -> ConstituentUnit:
+        unit = by_identity.get(id(line))
+        if unit is None:
+            unit = by_geometry.get(_display_line_key(line))
+        if unit is None:
+            raise ValueError("segment center references a non-displayed segment")
+        return unit
+
+    payloads: list[dict[str, object]] = []
+    for center in center_values:
+        body_lines = tuple(getattr(center, "lines", ()) or ())
+        if len(body_lines) < 3:
+            raise ValueError("display segment center requires three body segments")
+        body_units = tuple(source_unit(line) for line in body_lines)
+        entry_line = (
+            getattr(center, "entry", None)
+            or getattr(center, "start", None)
+            or body_lines[0]
+        )
+        leaving_line = (
+            getattr(center, "exit", None)
+            or getattr(center, "end", None)
+            or body_lines[-1]
+        )
+        entry_unit = source_unit(entry_line)
+        leaving_unit = source_unit(leaving_line)
+        core_units = body_units[:3]
+        initial_units = body_units[: min(5, len(body_units))]
+        initial_exit_unit = initial_units[-1]
+        zd_tick = _price_tick(getattr(center, "zd", None), quantum)
+        zg_tick = _price_tick(getattr(center, "zg", None), quantum)
+        if zd_tick >= zg_tick:
+            raise ValueError("display segment center requires a positive core")
+        dd_value = getattr(center, "dd", None)
+        gg_value = getattr(center, "gg", None)
+        dd_tick = (
+            min(unit.low_tick for unit in body_units)
+            if dd_value is None
+            else _price_tick(dd_value, quantum)
+        )
+        gg_tick = (
+            max(unit.high_tick for unit in body_units)
+            if gg_value is None
+            else _price_tick(gg_value, quantum)
+        )
+        start_line = getattr(center, "start", None)
+        end_line = getattr(center, "end", None)
+        core_start = (
+            start_line.end.k.date
+            if start_line is not None
+            else body_lines[0].start.k.date
+        )
+        core_end = (
+            end_line.start.k.date
+            if end_line is not None
+            else body_lines[-1].end.k.date
+        )
+        core_start_epoch = aware_datetime_to_epoch_seconds(core_start)
+        core_end_epoch = aware_datetime_to_epoch_seconds(core_end)
+        if core_start_epoch > core_end_epoch:
+            raise ValueError("display segment center has reversed chart time")
+        done = bool(getattr(center, "done", False))
+        state = "completed" if done else "ongoing"
+        body_unit_ids = tuple(unit.unit_id for unit in body_units)
+        center_id = stable_structure_id(
+            _DISPLAY_SEGMENT_CENTER_ALGORITHM,
+            price_basis_revision,
+            entry_unit.unit_id,
+            tuple(unit.unit_id for unit in core_units),
+            zd_tick,
+            zg_tick,
+        )
+        body_revision = len(body_unit_ids)
+        render_fingerprint = stable_structure_id(
+            "chanlun-display-segment-zhongshu-render/v1",
+            center_id,
+            body_unit_ids,
+            leaving_unit.unit_id,
+            state,
+        )
+        established_at = max(unit.available_at for unit in initial_units)
+        available_at = max(
+            established_at,
+            leaving_unit.available_at,
+            *(unit.available_at for unit in body_units),
+        )
+        if available_at > as_of:
+            raise ValueError("display segment center cannot exceed source close")
+        payloads.append(
+            {
+                "schema": CHART_CENTER_SCHEMA,
+                "render_kind": "center_observation",
+                "center_id": center_id,
+                "render_id": (
+                    f"{center_id}@{body_revision}@{state}@{render_fingerprint}"
+                ),
+                "body_revision": body_revision,
+                "structural_level": 0,
+                "source_kind": SourceKind.SEGMENT.value,
+                "state": state,
+                "tradable": False,
+                "origin": "display_cl_segment_zhongshu",
+                "algorithm_revision": _DISPLAY_SEGMENT_CENTER_ALGORITHM,
+                "tower": "xd",
+                "points": [
+                    {"time": core_start_epoch, "price_tick": zg_tick},
+                    {"time": core_end_epoch, "price_tick": zd_tick},
+                ],
+                "core": {"zd_tick": zd_tick, "zg_tick": zg_tick},
+                "envelope": {"dd_tick": dd_tick, "gg_tick": gg_tick},
+                "entry_unit_id": entry_unit.unit_id,
+                "core_unit_ids": [unit.unit_id for unit in core_units],
+                "initial_exit_unit_id": initial_exit_unit.unit_id,
+                "initial_unit_ids": [unit.unit_id for unit in initial_units],
+                "body_unit_ids": list(body_unit_ids),
+                "extension_unit_ids": [
+                    unit.unit_id for unit in body_units[len(initial_units):]
+                ],
+                "pending_leave_unit_id": (
+                    None if done else leaving_unit.unit_id
+                ),
+                "completion_leave_unit_id": (
+                    leaving_unit.unit_id if done else None
+                ),
+                "completion_return_unit_id": None,
+                "completion_direction": leaving_unit.direction if done else None,
+                "entering_segment": _unit_audit_payload(entry_unit),
+                "leaving_segment": _unit_audit_payload(leaving_unit),
+                "established_market_time": aware_datetime_to_epoch_seconds(
+                    initial_exit_unit.market_end
+                ),
+                "established_at": aware_datetime_to_epoch_seconds(
+                    established_at
+                ),
+                "completed_at": (
+                    aware_datetime_to_epoch_seconds(leaving_unit.available_at)
+                    if done
+                    else None
+                ),
+                "available_at": aware_datetime_to_epoch_seconds(available_at),
+                "done": done,
+                "linestyle": "0" if done else "1",
+                "line_count": len(body_units),
+            }
+        )
+    if any(int(item["available_at"]) > source_closed_epoch for item in payloads):
+        raise ValueError("display segment center is not causally visible")
+    return tuple(payloads)
+
+
 def active_center_projection_to_chart_dict(
     center: TrendCenter,
     source_closed_at: datetime,
@@ -277,14 +503,13 @@ def strict_center_preview_to_chart_dict(
     expected_zg = min(item.high_tick for item in initial[1:4])
     if (preview.zd_tick, preview.zg_tick) != (expected_zd, expected_zg):
         raise ValueError("chart center preview core does not match its seed")
-    # A trend-linked live candidate may reuse the preceding active center's
-    # penultimate unit as external boundary evidence.  Only that first unit is
-    # allowed to miss the new core; the middle-three seed, initial exit and
-    # every extension/leave must still overlap it positively.
+    # The five seed roles are strict: entry, three core units and leave.  The
+    # old-center leave may be reused only as the new entry, never as a core
+    # unit, so every preview body unit must positively overlap its fixed core.
     if any(
         max(item.low_tick, preview.zd_tick)
         >= min(item.high_tick, preview.zg_tick)
-        for item in body[1:]
+        for item in body
     ):
         raise ValueError("chart center preview body must overlap its core")
     if source_closed_at < lifecycle_units[-1].market_end:
@@ -627,8 +852,15 @@ def build_strict_structure_snapshot(
     evidence: StrictEvidenceResult,
     *,
     interval: str,
+    display_center_observation_payloads: Iterable[dict[str, object]] | None = None,
 ) -> dict[str, object]:
-    """Build one authoritative, window-independent strict chart snapshot."""
+    """Build one authoritative, window-independent strict chart snapshot.
+
+    ``display_center_observation_payloads`` may provide a separate,
+    non-tradable chart layer derived from the displayed segments. Formal
+    centers, trends, signals and stroke evidence remain sourced from
+    ``evidence``.
+    """
 
     if not isinstance(evidence, StrictEvidenceResult):
         raise TypeError("evidence must be StrictEvidenceResult")
@@ -793,6 +1025,36 @@ def build_strict_structure_snapshot(
         ),
         "center_id",
     )
+    display_observations = (
+        list(observations)
+        if display_center_observation_payloads is None
+        else _sorted_payloads(
+            (dict(item) for item in display_center_observation_payloads),
+            "center_id",
+        )
+    )
+    for observation in display_observations:
+        if (
+            observation.get("render_kind") != "center_observation"
+            or observation.get("source_kind")
+            not in {
+                SourceKind.SEGMENT.value,
+                SourceKind.STROKE_OBSERVATION.value,
+            }
+            or observation.get("tradable") is not False
+            or observation.get("structural_level") != 0
+        ):
+            raise ValueError("invalid display center observation payload")
+        if not isinstance(observation.get("center_id"), str) or not isinstance(
+            observation.get("render_id"), str
+        ):
+            raise ValueError("display center observation identity is required")
+        points = observation.get("points")
+        if not isinstance(points, list) or len(points) != 2:
+            raise ValueError("display center observation requires two points")
+        available_at = observation.get("available_at")
+        if type(available_at) is not int or available_at > source_closed_epoch:
+            raise ValueError("display center observation is not causally visible")
     snapshot_revision = _revision(
         "chanlun-chart-snapshot/v5",
         evidence.structure_revision,
@@ -800,6 +1062,7 @@ def build_strict_structure_snapshot(
     )
     render_extras = {
         "stroke_center_observations": observations,
+        "display_center_observations": display_observations,
         "level_extras": [
             {
                 "structural_level": level["structural_level"],
@@ -828,6 +1091,7 @@ def build_strict_structure_snapshot(
         "snapshot_revision": snapshot_revision,
         "render_revision": render_revision,
         "stroke_center_observations": observations,
+        "display_center_observations": display_observations,
         "levels": levels,
     }
     return _with_prices(snapshot, quantum)
@@ -840,6 +1104,7 @@ __all__ = [
     "aware_datetime_to_epoch_seconds",
     "build_strict_structure_snapshot",
     "center_observation_to_chart_dict",
+    "display_segment_center_observations_to_chart_dicts",
     "strict_center_preview_to_chart_dict",
     "strict_center_to_chart_dict",
     "strict_divergence_to_chart_dict",

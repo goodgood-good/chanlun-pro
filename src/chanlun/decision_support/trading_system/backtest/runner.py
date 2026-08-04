@@ -43,7 +43,9 @@ from chanlun.decision_support.trading_system.backtest.walk_forward import (
     evaluate_locked_test,
     select_on_validation,
 )
-from chanlun.decision_support.trading_system.engine import TradingEngine
+from chanlun.decision_support.trading_system.human_assisted_decision import (
+    HumanAssistedDecisionCore,
+)
 from chanlun.decision_support.trading_system.models import TradingPolicy
 from chanlun.decision_support.trading_system.portfolio_risk import RiskLimits
 
@@ -237,7 +239,7 @@ def build_causal_period_runner(
             )
         return run_event_backtest(
             period,
-            engine=TradingEngine(policy),
+            engine=HumanAssistedDecisionCore(policy),
             structure_replay=replay,
             risk_limits=risk_limits,
             execution_policy=ExecutionPolicy(),

@@ -9,6 +9,30 @@ from chanlun.exchange import get_exchange
 
 _log = fun.get_logger()
 
+DEFAULT_ZX_GROUP = "我的关注"
+MANUAL_HOLDING_ZX_GROUP = "我的持仓"
+SYSTEM_ZX_GROUPS = (DEFAULT_ZX_GROUP, MANUAL_HOLDING_ZX_GROUP)
+
+
+def global_group_member_codes(
+    zx_group: str,
+    *,
+    market: str | None = None,
+) -> tuple[str, ...]:
+    """Return deterministic members of a global group.
+
+    ``market`` is an optional consumer capability filter, not part of the
+    group identity.  The A-share trading-screening engine uses it because that
+    engine currently understands only A-share stocks and exchange-traded ETFs.
+    """
+
+    values = {
+        stock.stock_code
+        for stock in db.zx_get_global_group_stocks(zx_group)
+        if market is None or stock.market == market
+    }
+    return tuple(sorted(values))
+
 
 class ZiXuan(object):
     """
@@ -22,37 +46,41 @@ class ZiXuan(object):
         self.zx_names = [_zx["name"] for _zx in self.zixuan_list]
 
     def get_zx_groups(self):
-        zx_groups = db.zx_get_groups(self.market_type)
-        if len(zx_groups) == 0:
+        zx_groups = db.zx_get_global_groups()
+        names = {group.zx_group for group in zx_groups}
+        for required_group in SYSTEM_ZX_GROUPS:
+            if required_group in names:
+                continue
             try:
-                db.zx_add_group(self.market_type, "我的关注")
+                db.zx_add_global_group(required_group)
             except IntegrityError:
-                # 并发下另一 ZiXuan 构造已抢先建默认组(复合主键 market+zx_group 冲突);重读即可
-                # 拿到该组, 不上抛致 view 500(R4-G1-1 姊妹:__init__ 每次构造都走此 check-then-insert)
+                # 并发构造时，另一请求可能已经创建了同一个全局组。
                 pass
-            zx_groups = db.zx_get_groups(self.market_type)
+        zx_groups = db.zx_get_global_groups()
         return [{"name": _g.zx_group} for _g in zx_groups]
 
     def add_zx_group(self, zx_group_name):
-        if zx_group_name in ["我的关注"]:
+        if zx_group_name in SYSTEM_ZX_GROUPS:
             return False
         if zx_group_name in [_z["name"] for _z in self.zixuan_list]:
             return False
         try:
-            db.zx_add_group(self.market_type, zx_group_name)
+            created = db.zx_add_global_group(zx_group_name)
         except IntegrityError:
-            # 并发下另一线程抢先建同名组(复合主键 market+zx_group 冲突);check-then-insert 非
-            # 原子, 幂等视为已存在返回 False(与上方存在性检查同义), 不上抛致 view opt_zixuan_group 500
+            # 并发下另一线程抢先建同名全局组，幂等视为已存在。
+            return False
+        if not created:
             return False
         self.zixuan_list = self.get_zx_groups()
         self.zx_names = [_zx["name"] for _zx in self.zixuan_list]
         return True
 
     def del_zx_group(self, zx_group_name):
-        if zx_group_name in ["我的关注"]:
+        if zx_group_name in SYSTEM_ZX_GROUPS:
             return False
-        self.clear_zx_stocks(zx_group_name)
-        db.zx_del_group(self.market_type, zx_group_name)
+        if zx_group_name not in self.zx_names:
+            return False
+        db.zx_del_global_group(zx_group_name)
         self.zixuan_list = self.get_zx_groups()
         self.zx_names = [_zx["name"] for _zx in self.zixuan_list]
         return True
@@ -66,23 +94,31 @@ class ZiXuan(object):
             for zx_name in self.zx_names
         ]
 
-    def zx_stocks(self, zx_group) -> List[Dict[str, str]]:
+    def zx_stocks(self, zx_group) -> List[Dict[str, object]]:
         """
         根据自选名称，获取其中的 代码列表
         """
         if zx_group not in self.zx_names:
             return []
-        stocks = db.zx_get_group_stocks(self.market_type, zx_group)
-        return [
-            {
-                "code": _stock.stock_code,
-                "name": _stock.stock_name,
-                "color": _stock.stock_color,
-                "memo": _stock.stock_memo,
-                "add_datetime": _stock.add_datetime,
-            }
-            for _stock in stocks
-        ]
+        stocks = db.zx_get_global_group_stocks(zx_group)
+        result: List[Dict[str, object]] = []
+        seen: set[tuple[str, str]] = set()
+        for stock in stocks:
+            identity = (stock.market, stock.stock_code)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            result.append(
+                {
+                    "market": stock.market,
+                    "code": stock.stock_code,
+                    "name": stock.stock_name,
+                    "color": stock.stock_color,
+                    "memo": stock.stock_memo,
+                    "add_datetime": stock.add_datetime,
+                }
+            )
+        return result
 
     def add_stock(
         self, zx_group: str, code: str, name: str, location="bottom", color="", memo=""
@@ -166,6 +202,12 @@ class ZiXuan(object):
         normalized = []
         ex = None
         for stock in stocks:
+            stock_market = stock.get("market")
+            if stock_market is not None and stock_market != self.market_type:
+                # ``replace_zx_stocks`` remains a scoped write used by the
+                # market-specific selector/import jobs.  Other-market members
+                # of the same global group are preserved by the DB operation.
+                continue
             code = stock["code"]
             name = stock.get("name")
             if not name:

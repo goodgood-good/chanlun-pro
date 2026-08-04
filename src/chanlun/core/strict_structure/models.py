@@ -137,13 +137,7 @@ class TrendCenter:
     source_kind: SourceKind
     price_basis_revision: str
     state: CenterState
-    initial_units: tuple[
-        ConstituentUnit,
-        ConstituentUnit,
-        ConstituentUnit,
-        ConstituentUnit,
-        ConstituentUnit,
-    ]
+    initial_units: tuple[ConstituentUnit, ...]
     body_units: tuple[ConstituentUnit, ...]
     extension_units: tuple[ConstituentUnit, ...]
     zd_tick: int
@@ -174,8 +168,14 @@ class TrendCenter:
             raise ValueError("structural_level must be >= 0")
         if not self.price_basis_revision or not self.price_basis_revision.strip():
             raise ValueError("price_basis_revision is required")
-        if len(self.initial_units) != 5:
-            raise ValueError("initial_units must contain exactly five units")
+        expected_seed_size = (
+            3 if self.source_kind is SourceKind.TREND_TYPE else 5
+        )
+        if len(self.initial_units) != expected_seed_size:
+            label = "three" if expected_seed_size == 3 else "five"
+            raise ValueError(
+                f"initial_units must contain exactly {label} units"
+            )
         if self.body_units != self.initial_units + self.extension_units:
             raise ValueError("body units must equal initial plus extension units")
         if any(
@@ -212,7 +212,13 @@ class TrendCenter:
         if len({item.unit_id for item in self.body_units}) != len(self.body_units):
             raise ValueError("center body unit ids must be unique")
         for previous, current in zip(self.body_units, self.body_units[1:]):
-            if previous.direction == current.direction:
+            # 线段恒有方向，故线段中枢的构成段必然交替。走势类型中枢不同：盘整
+            # 没有方向，「上涨—盘整—上涨」是合法构成，此处无法分辨盘整，故把
+            # 交替判定留给持有 oscillatory_ids 的 center_machine。
+            if (
+                self.source_kind is SourceKind.SEGMENT
+                and previous.direction == current.direction
+            ):
                 raise ValueError("center body directions must alternate")
             if previous.end_tick != current.start_tick:
                 raise ValueError("center body prices must connect")
@@ -267,7 +273,14 @@ class TrendCenter:
                     raise ValueError("pending leave must positively overlap center core")
                 if not self._outside_in_direction(self.pending_leave_unit):
                     raise ValueError("pending leave endpoint must be outside center core")
-                if self.pending_leave_unit.direction != self.entry_unit.direction:
+                # 五个严格交替单元的第0位与第4位必然同向，故该条对线段中枢是
+                # 恒真的派生结论。走势类型层允许「上涨进入、盘整、下跌离开」的
+                # 反转中枢，此处不再强制；真正的几何约束由上面的核心重叠与
+                # 离开端点在核心之外两条保证。
+                if (
+                    self.source_kind is SourceKind.SEGMENT
+                    and self.pending_leave_unit.direction != self.entry_unit.direction
+                ):
                     raise ValueError("pending leave direction must match center entry")
         else:
             if self.pending_leave_unit is not None:
@@ -286,9 +299,15 @@ class TrendCenter:
                 leave_unit
             ):
                 raise ValueError("completion leave geometry is invalid")
-            if leave_unit.direction != self.entry_unit.direction:
+            if (
+                self.source_kind is SourceKind.SEGMENT
+                and leave_unit.direction != self.entry_unit.direction
+            ):
                 raise ValueError("completion leave direction must match center entry")
-            if leave_unit.direction == return_unit.direction:
+            if (
+                self.source_kind is SourceKind.SEGMENT
+                and leave_unit.direction == return_unit.direction
+            ):
                 raise ValueError("completion return must alternate with leave")
             if leave_unit.end_tick != return_unit.start_tick:
                 raise ValueError("completion return must connect to leave")
@@ -327,7 +346,13 @@ class TrendCenter:
     def core_units(
         self,
     ) -> tuple[ConstituentUnit, ConstituentUnit, ConstituentUnit]:
-        return self.initial_units[1:4]
+        # A center made from already-completed lower-level trend types is
+        # established by the overlap of those three consecutive trend types
+        # themselves (L33/L38).  Segment-sourced level zero keeps the existing
+        # five-unit confirmation envelope and therefore uses its middle three.
+        if self.source_kind is SourceKind.TREND_TYPE:
+            return self.initial_units  # type: ignore[return-value]
+        return self.initial_units[1:4]  # type: ignore[return-value]
 
     @property
     def core_body_start_market_time(self) -> datetime:
@@ -345,7 +370,7 @@ class TrendCenter:
 
     @property
     def initial_exit_unit(self) -> ConstituentUnit:
-        return self.initial_units[4]
+        return self.initial_units[-1]
 
     @property
     def completion_direction(self) -> Direction | None:
@@ -395,13 +420,16 @@ class CenterPreview:
         ):
             raise ValueError("forming preview core must have positive width")
         if self.state is CenterPreviewState.COMPLETED:
+            required = 3 if self.source_kind is SourceKind.TREND_TYPE else 5
             if (
-                len(self.unit_ids) < 5
+                len(self.unit_ids) < required
                 or self.zd_tick is None
                 or self.zg_tick is None
                 or self.zd_tick >= self.zg_tick
             ):
-                raise ValueError("completed preview requires a positive five-unit core")
+                raise ValueError(
+                    "completed preview requires a positive source-specific core"
+                )
             if (
                 not self.completion_return_unit_id
                 or self.completion_return_unit_id in self.unit_ids
@@ -510,6 +538,48 @@ class CenterLevelResult:
     locked_unit_count: int
     replay_from: int
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "centers", tuple(self.centers))
+        object.__setattr__(self, "previews", tuple(self.previews))
+        object.__setattr__(self, "events", tuple(self.events))
+
+        ongoing = [
+            center
+            for center in self.centers
+            if center.state is CenterState.ONGOING
+        ]
+        if len(ongoing) > 1 or (
+            ongoing and self.centers[-1] is not ongoing[0]
+        ):
+            raise ValueError("only the terminal center may remain ongoing")
+
+        forming = [
+            preview
+            for preview in self.previews
+            if preview.state is CenterPreviewState.FORMING
+        ]
+        if len(forming) > 1:
+            raise ValueError("only one forming center preview is allowed")
+        if not ongoing or not forming:
+            return
+
+        active = ongoing[0]
+        seed_width = len(active.initial_units)
+        active_seed = tuple(item.unit_id for item in active.initial_units)
+        forming_seed = tuple(forming[0].unit_ids[:seed_width])
+        if forming_seed == active_seed:
+            return
+        active_completion_observed = any(
+            preview.state is CenterPreviewState.COMPLETED
+            and tuple(preview.unit_ids[:seed_width]) == active_seed
+            for preview in self.previews
+        )
+        if not active_completion_observed:
+            raise ValueError(
+                "shifted forming preview cannot displace an unresolved "
+                "active-center extension"
+            )
+
 
 @dataclass(frozen=True, slots=True)
 class TrendType:
@@ -589,11 +659,17 @@ class TrendType:
         if self.kind is TrendKind.TREND and len(self.centers) < 2:
             raise ValueError("trend must contain at least two centers")
 
+        segment_sourced = all(
+            item.source_kind is SourceKind.SEGMENT
+            for item in self.constituent_units
+        )
         for previous, current in zip(
             self.constituent_units,
             self.constituent_units[1:],
         ):
-            if previous.direction == current.direction:
+            # 同上：只有线段构成的走势类型才强制交替；走势类型构成的高层走势
+            # 允许盘整夹在两段同向趋势之间。
+            if segment_sourced and previous.direction == current.direction:
                 raise ValueError("trend constituent directions must alternate")
             if previous.end_tick != current.start_tick:
                 raise ValueError("trend constituent prices must connect")

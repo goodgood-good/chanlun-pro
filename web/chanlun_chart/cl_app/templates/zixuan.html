@@ -31,7 +31,7 @@
         <section class="zx-manager-card" aria-labelledby="zx-manager-add-title">
           <div class="zx-manager-card-header">
             <h2 id="zx-manager-add-title">新建分组</h2>
-            <p>建议按策略或阶段命名，例如“一买观察”“持仓管理”。</p>
+            <p>分组全局共用，不再按市场拆分；标的自身仍保留市场信息用于行情和图表路由。</p>
           </div>
           <form id="zixuan_manager_add_form" novalidate>
             <label class="zx-field-label" for="zixuan_manager_group_name">分组名称</label>
@@ -60,9 +60,9 @@
                 <span class="zx-manager-group-avatar" aria-hidden="true">{{ group['name'][:1] }}</span>
                 <span class="zx-manager-group-copy">
                   <strong>{{ group['name'] }}</strong>
-                  <small>{% if group['name'] == '我的关注' %}系统默认分组{% else %}自定义观察分组{% endif %}</small>
+                  <small>{% if group['name'] == '我的关注' %}系统默认分组{% elif group['name'] == '我的持仓' %}人工持仓监控分组{% else %}跨市场观察分组{% endif %}</small>
                 </span>
-                {% if group['name'] == '我的关注' %}
+                {% if group['name'] in ('我的关注', '我的持仓') %}
                   <span class="zx-manager-protected">不可删除</span>
                 {% else %}
                   <button
@@ -114,7 +114,7 @@
         </section>
 
         <aside class="zx-manager-notes" aria-label="分组使用说明">
-          <p><strong>使用建议：</strong>分组表达观察目的，不表达结论。买卖点仍由 30 分钟定位、5 分钟操作级别和 1 分钟递归结构共同确认。</p>
+          <p><strong>使用建议：</strong>“我的持仓”表示你人工声明需要优先监控，不代表读取了交易账户。分组可以同时包含不同市场标的；买卖点仍由 30 分钟、5 分钟和 1 分钟结构共同复核。</p>
           <p><strong>A 股代码示例：</strong>600519、SH.600519、SHSE.600519 均可在导入时识别。</p>
         </aside>
       </div>

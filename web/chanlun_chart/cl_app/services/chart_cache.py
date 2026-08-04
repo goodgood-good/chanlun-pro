@@ -327,7 +327,13 @@ def _stable_hash(obj) -> str:
 #   历史与当前 QMT 数据同属一个价格纪元，必须失效后用当前因子账本重建。
 # - v41 (2026-07-22) ── 严格结构快照 v5 新增 ``levels[*].center_previews``，把末条
 #   未完成线段参与形成的不可交易中枢候选送入图表；旧缓存缺少该字段，必须失效重算。
-_CHART_CACHE_SCHEMA_VERSION = "v41"
+# - v43 (2026-07-29) ── 恢复同源 ``bi_zss``，并重新启用 ``higher_zs`` 承载
+#   各真实周期独立线段中枢；旧缓存缺少基础笔中枢和多周期中枢控制数据。
+# - v44 (2026-07-29) ── ``higher_zs`` 固定为 1m/5m/30m/日线四个真实周期，
+#   以 period 为唯一身份，不再携带或依赖递归 level 编号。
+# v45 (2026-08-04): center previews now expose same-level third-class-point
+# lifecycle, confirmation return segment, and completion evidence.
+_CHART_CACHE_SCHEMA_VERSION = "v45"
 
 
 def _build_cache_key(market: str, code: str, frequency: str, cl_config: dict) -> str:

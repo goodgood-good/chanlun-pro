@@ -27,6 +27,9 @@ from chanlun.decision_support.trading_system.backtest.runner import (
 from chanlun.decision_support.trading_system.backtest.walk_forward import (
     FrozenParameters,
 )
+from chanlun.decision_support.trading_system.human_assisted_decision import (
+    HumanAssistedDecisionCore,
+)
 from tests.trading_system.backtest.helpers import (
     CN,
     dataset,
@@ -286,6 +289,7 @@ def test_causal_period_runner_applies_selected_policy_and_risk(
 
     engine = captured["engine"]
     risk_limits = captured["risk_limits"]
+    assert isinstance(engine, HumanAssistedDecisionCore)
     assert engine._policy.first_center_three_buy_only is False
     assert engine._policy.first_buy_risk_multiplier == Decimal("0.25")
     assert risk_limits.base_trade_risk == Decimal("0.0035")

@@ -31,9 +31,11 @@ test('symbol list load is bounded and uses the unified request layer', () => {
   assert.match(source, /AppRequest\.ajax\(\{[^]*url:\s*['"]\/symbols\/list['"][^]*timeout:\s*10000/);
 });
 
-test('drawing persistence serializes groups and validates the server acknowledgement', () => {
+test('drawing persistence stores only versioned user sources and validates acknowledgement', () => {
   const source = read('static/js/charts.js');
-  assert.match(source, /processedState\.groups\s*=\s*Object\.fromEntries/);
+  assert.match(source, /USER_DRAWING_STATE_SCHEMA\s*=\s*["']chanlun-user-drawings\/v2["']/);
+  assert.match(source, /serializeUserDrawingsState\(state\)/);
+  assert.match(source, /groups:\s*\{\}/);
   assert.match(source, /enqueueLatestDrawingSave/);
   assert.match(source, /payload\.status\s*!==\s*'ok'/);
 });

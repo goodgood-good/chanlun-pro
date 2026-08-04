@@ -64,6 +64,10 @@ def _verify_signature(key, content: str, encoded: str, *, urlsafe: bool):
     pkcs1_15.new(key.public_key()).verify(MD5.new(content.encode("utf-8")), signature)
 
 
+def test_usmart_kline_timestamp_contract_is_explicitly_end_labelled():
+    assert ExchangeUSmart.kline_time_label == "end"
+
+
 def test_quote_request_uses_exact_signed_body_and_required_headers(rsa_keys):
     session = _Session(_Response({"code": 0, "msg": "success", "data": {"status": 7}}))
     client = USmartClient(

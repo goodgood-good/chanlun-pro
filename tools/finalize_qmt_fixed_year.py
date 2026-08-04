@@ -38,6 +38,9 @@ from chanlun.decision_support.trading_system.backtest.report import (
     BacktestEvaluationResult,
     build_report,
 )
+from chanlun.decision_support.trading_system.qmt_sector_same_base import (
+    derive_qmt_sector_thirty_minute_frame,
+)
 from chanlun.exchange.qmt_screening_sector_source import (
     QMT_GICS3_COMPOSITE_MEMBER_LIMIT,
     QmtSectorCompositeSource,
@@ -367,16 +370,20 @@ def _sector_facts(
             facts = existing
         else:
             try:
-                frame = source.frame(
+                five_minute = source.frame(
                     sector_id=sector_id,
                     sector_name=name,
                     members=members,
-                    frequency="30m",
+                    frequency="5m",
                     as_of=datetime.combine(
                         requested_end,
                         time(15, 0),
                         tzinfo=CN,
                     ),
+                    request_bars=4000 * 6 + 47,
+                )
+                frame = derive_qmt_sector_thirty_minute_frame(
+                    five_minute,
                     request_bars=4000,
                 )
                 source_revision = _sector_source_revision(

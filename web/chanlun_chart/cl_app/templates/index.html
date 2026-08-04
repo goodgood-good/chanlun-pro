@@ -22,6 +22,9 @@
       href="{{ url_for('static', filename='css/chart_analysis.css') }}?v={{ static_version }}" />
     <link
       rel="stylesheet"
+      href="{{ url_for('static', filename='css/review_chart_lock.css') }}?v={{ static_version }}" />
+    <link
+      rel="stylesheet"
       href="{{ url_for('static', filename='css/zixuan.css') }}?v={{ static_version }}" />
 
     <script
@@ -46,6 +49,28 @@
   </head>
 
   <body class="cp-ui cp-workbench">
+    {% if review_chart_lock and review_chart_lock.lock_kind == 'RISK_POINT_AUDIT' %}
+      <aside class="causal-review-lock" role="status" aria-live="polite">
+        <div class="causal-review-lock__title">
+          <span>因果审计锁</span>
+          <span>{{ review_chart_lock.point_type }} · {{ review_chart_lock.source_frequency }} → {{ review_chart_lock.chart_interval }}</span>
+          {% if review_chart_lock.chart_source_kind == 'VERIFIED_QMT_SECTOR_ARCHIVE' %}
+            <span>回测同源 QMT 板块合成</span>
+          {% else %}
+            <span>A 股同源历史前缀</span>
+          {% endif %}
+        </div>
+        <div class="causal-review-lock__facts">
+          <span>来源 <code>{{ review_chart_lock.symbol }}</code>{% if review_chart_lock.sector_name %}（{{ review_chart_lock.sector_name }}）{% endif %}</span>
+          <span>锚定 {{ review_chart_lock.point_anchor_at }}</span>
+          <span>首次可见 {{ review_chart_lock.point_available_at }}</span>
+          <span>观察截止 {{ review_chart_lock.review_available_at }}</span>
+        </div>
+        <div class="causal-review-lock__notice">
+          橙色竖线只标记已记录审计点的时间，不表示当前页面重新识别出同一买卖点；证据没有价格锚点，禁止据竖线推断成交价。
+        </div>
+      </aside>
+    {% endif %}
     <a class="cp-skip-link" href="#chart_menu">跳到结构解盘侧栏</a>
     <form id="logout-form" method="post" action="/logout" style="display: none">
       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
@@ -367,22 +392,29 @@
                       <header><strong>笔中枢</strong><span id="ca-bi-zone-completion">尚未形成</span></header>
                       <dl>
                         <div><dt>塔层</dt><dd id="ca-bi-zone-tower">笔</dd></div>
-                        <div><dt>递归级别</dt><dd id="ca-bi-zone-level">观察层</dd></div>
+                        <div><dt>级别</dt><dd id="ca-bi-zone-level">当前周期</dd></div>
                         <div><dt>ZD / ZG</dt><dd id="ca-bi-zone-bounds">ZD -- / ZG --</dd></div>
                         <div><dt>进入段</dt><dd id="ca-bi-zone-entry">未提供进入段</dd></div>
                         <div><dt>离开段</dt><dd id="ca-bi-zone-exit">未提供离开段</dd></div>
+                        <div><dt>确认回抽</dt><dd id="ca-bi-zone-return">尚无同级别确认回抽</dd></div>
                         <div><dt>关联买卖点</dt><dd id="ca-bi-zone-point">暂无关联买卖点</dd></div>
+                        <div><dt>完成依据</dt><dd id="ca-bi-zone-evidence">尚无同级别完成依据</dd></div>
+                        <div><dt>下一确认</dt><dd id="ca-bi-zone-requirement">等待形成可计算的中枢结构</dd></div>
                       </dl>
                     </article>
                     <article>
                       <header><strong>线段中枢</strong><span id="ca-xd-zone-completion">尚未形成</span></header>
                       <dl>
                         <div><dt>塔层</dt><dd id="ca-xd-zone-tower">线段</dd></div>
-                        <div><dt>递归级别</dt><dd id="ca-xd-zone-level">L0</dd></div>
+                        <div><dt>周期</dt><dd id="ca-xd-zone-level">当前周期</dd></div>
                         <div><dt>ZD / ZG</dt><dd id="ca-xd-zone-bounds">ZD -- / ZG --</dd></div>
                         <div><dt>进入段</dt><dd id="ca-xd-zone-entry">未提供进入段</dd></div>
+                        <div><dt>主体三段</dt><dd id="ca-xd-zone-core">未提供主体三段</dd></div>
                         <div><dt>离开段</dt><dd id="ca-xd-zone-exit">未提供离开段</dd></div>
+                        <div><dt>确认回抽</dt><dd id="ca-xd-zone-return">尚无同级别确认回抽</dd></div>
                         <div><dt>关联买卖点</dt><dd id="ca-xd-zone-point">暂无关联买卖点</dd></div>
+                        <div><dt>完成依据</dt><dd id="ca-xd-zone-evidence">尚无同级别完成依据</dd></div>
+                        <div><dt>下一确认</dt><dd id="ca-xd-zone-requirement">等待形成可计算的中枢结构</dd></div>
                       </dl>
                     </article>
                   </div>
@@ -506,7 +538,7 @@
             </div>
             <div class="layui-colla-item">
               {# 自选内容 #}
-              <div class="layui-colla-title" data-ca-title="自选组"><span class="ca-menu-title-main">自选盯盘</span><small class="ca-menu-title-meta">分组 · 实时涨跌</small></div>
+              <div class="layui-colla-title" data-ca-title="自选组"><span class="ca-menu-title-main">自选盯盘</span><small class="ca-menu-title-meta">跨市场分组 · 实时涨跌</small></div>
               <div class="layui-colla-content layui-show zx-watch-content">
                 <section class="zx-watch-panel" id="zixuan_watch_panel" aria-label="自选盯盘工作区">
                   <header class="zx-watch-header">
@@ -529,7 +561,7 @@
 
                   <div class="zx-watch-metrics" aria-label="自选盯盘统计">
                     <div><span id="zixuan_group_count">—</span><small>分组</small></div>
-                    <div><span id="zixuan_stock_count">—</span><small>当前标的</small></div>
+                    <div><span id="zixuan_stock_count">—</span><small>跨市场标的</small></div>
                     <div><span>3 秒</span><small>盘中刷新</small></div>
                   </div>
 
@@ -569,7 +601,7 @@
                         class="layui-input"
                         maxlength="64"
                         autocomplete="off"
-                        placeholder="例如：一买观察、持仓管理" />
+                        placeholder="例如：一买观察；持仓请使用“我的持仓”" />
                       <button type="submit" id="zixuan_group_submit" class="zx-primary-button">创建分组</button>
                       <button type="button" id="zixuan_group_cancel" class="zx-text-button">取消</button>
                     </div>
@@ -599,7 +631,7 @@
                   <div class="zx-watch-table" aria-label="当前分组标的列表">
                     <table class="layui-hide" id="table_zixuan_list"></table>
                   </div>
-                  <p class="zx-watch-hint">点击行切换主图，右键可排序、标色或移出分组。</p>
+                  <p class="zx-watch-hint">同一分组可包含不同市场；“我的持仓”会进入持仓优先监控。点击行切换主图，右键可排序、标色或移出分组；跨市场标的会自动对齐对应市场。</p>
                 </section>
               </div>
             </div>
@@ -788,6 +820,9 @@
   <script nonce="{{ csp_nonce }}">
     // SSE 实时推送开关(后端 config.ENABLE_SSE_PUSH 注入); charts.js 据此决定是否建 EventSource 连接。
     window.__CHANLUN_SSE_ENABLED = {{ 'true' if enable_sse else 'false' }};
+    // 历史人工复核图由服务端验证候选身份后注入。charts.js 会把这些固定参数
+    // 传给每一次 /tv/history 请求；后端据此从取数和结构计算阶段截断未来 K 线。
+    window.__chanlunReviewChartLock = {{ (review_chart_lock|default(none))|tojson }};
     var initial_market = {{ initial_market|tojson }};
     var market_frequencys = `{{ market_frequencys| tojson }}`;
     var market_frequencys = JSON.parse(market_frequencys);

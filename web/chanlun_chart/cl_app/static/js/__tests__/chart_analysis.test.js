@@ -87,7 +87,7 @@ test('summarizeChartData explains current structure without turning it into a tr
   assert.doesNotMatch(summary.plan.now, /买入|卖出|开仓|清仓/);
 });
 
-test('line-segment zone reads branch-core recursive level zero before legacy xd_zss', () => {
+test('line-segment zone reads the matching real-frequency center and ignores recursive levels', () => {
   const data = {
     bars: [{ time: 1700000600000, close: 10.8, isBarClosed: true }],
     xd_zss: [{
@@ -110,6 +110,20 @@ test('line-segment zone reads branch-core recursive level zero before legacy xd_
         }],
       },
     ],
+    higher_zs: [{
+      period: '5m',
+      level: 0,
+      zss: [{
+        linestyle: '1',
+        done: false,
+        state: 'forming',
+        render_kind: 'center_preview',
+        provisional: true,
+        contains_unfinished_segment: true,
+        core_directions: ['down', 'up', 'down'],
+        points: [point(1700000000, 11.3), point(1700000500, 9.6)],
+      }],
+    }],
   };
 
   const summary = Analysis.summarizeChartData(data, { resolution: '5' });
@@ -117,6 +131,8 @@ test('line-segment zone reads branch-core recursive level zero before legacy xd_
   assert.equal(summary.xdZone.text, '9.60–11.30');
   assert.equal(summary.xdZone.position, '中枢内');
   assert.equal(summary.xdZone.status, '形成中');
+  assert.equal(summary.xdZone.qualification, '形成中预览，不可直接交易');
+  assert.equal(summary.xdZone.coreDirections, '向下 → 向上 → 向下');
 });
 test('summarizeChartData handles an empty or still-loading chart honestly', () => {
   const summary = Analysis.summarizeChartData({ bars: [] }, { resolution: '1D' });
@@ -197,6 +213,7 @@ test('zone summary exposes auditable tower level bounds segments and point metad
       zg: 11.3,
       points: [point(1699996000, 11.3), point(1699997000, 9.6)],
       entering_segment: null,
+      core_directions: ['down', 'up', 'down'],
       leaving_segment: null,
       associated_points: [],
     }],
@@ -205,7 +222,7 @@ test('zone summary exposes auditable tower level bounds segments and point metad
   const summary = Analysis.summarizeChartData(data, { resolution: '5' });
 
   assert.equal(summary.biZone.tower, '笔');
-  assert.equal(summary.biZone.recursiveLevel, '观察层');
+  assert.equal(summary.biZone.recursiveLevel, '5m');
   assert.equal(summary.biZone.zd, '10.00');
   assert.equal(summary.biZone.zg, '10.60');
   assert.equal(summary.biZone.completion, '已完成');
@@ -213,9 +230,88 @@ test('zone summary exposes auditable tower level bounds segments and point metad
   assert.equal(summary.biZone.leavingSegment, '向上 · 10.10 → 10.80');
   assert.equal(summary.biZone.associatedPoint, '三类买点');
   assert.equal(summary.xdZone.tower, '线段');
-  assert.equal(summary.xdZone.recursiveLevel, 'L0');
+  assert.equal(summary.xdZone.recursiveLevel, '5m');
   assert.equal(summary.xdZone.completion, '形成中');
+  assert.equal(summary.xdZone.coreDirections, '向下 → 向上 → 向下');
   assert.equal(summary.xdZone.associatedPoint, '暂无关联买卖点');
+});
+
+test('same-level three-sell geometry is not collapsed back to forming', () => {
+  const data = {
+    bars: [{ time: 1700000600000, close: 9.2, isBarClosed: true }],
+    xd_zss: [{
+      linestyle: '0',
+      done: false,
+      state: 'completed',
+      render_kind: 'center_preview',
+      provisional: true,
+      tower: 'xd',
+      zd: 10,
+      zg: 11,
+      points: [point(1700000000, 11), point(1700000500, 10)],
+      completion_phase: 'GEOMETRIC_THIRD_CLASS_POINT',
+      confirmation_scope: 'xd',
+      completion_point_type: '3sell',
+      expected_completion_point_type: '3sell',
+      completion_point_status: 'provisional',
+      associated_points: ['3sell'],
+      completion_return_segment: {
+        direction: 'up', start_price: 9.0, end_price: 9.8,
+      },
+    }],
+  };
+
+  const summary = Analysis.summarizeChartData(data, { resolution: '1' });
+
+  assert.equal(summary.xdZone.status, '三类卖点几何完成，待锁定');
+  assert.equal(summary.xdZone.completion, '三类卖点几何完成，待锁定');
+  assert.equal(
+    summary.xdZone.associatedPoint,
+    '线段级三类卖点（几何成立，待锁定）',
+  );
+  assert.equal(
+    summary.xdZone.completionEvidence,
+    '线段级三类卖点几何成立（尚未锁定）',
+  );
+  assert.equal(summary.xdZone.confirmationSegment, '向上 · 9.00 → 9.80');
+  assert.equal(
+    summary.xdZone.completionRequirement,
+    '等待当前同级别回抽线段锁定，才转为正式完成',
+  );
+  assert.match(summary.xdZone.meta, /线段级三类卖点几何已成立/);
+  assert.doesNotMatch(summary.xdZone.meta, /形成中预览/);
+});
+
+test('forming XD center names the missing same-level three-sell return', () => {
+  const data = {
+    bars: [{ time: 1700000600000, close: 9.2, isBarClosed: true }],
+    xd_zss: [{
+      linestyle: '1',
+      done: false,
+      state: 'forming',
+      render_kind: 'center_preview',
+      provisional: true,
+      tower: 'xd',
+      zd: 10,
+      zg: 11,
+      points: [point(1700000000, 11), point(1700000500, 10)],
+      completion_phase: 'AWAITING_SAME_LEVEL_RETURN',
+      confirmation_scope: 'xd',
+      completion_point_type: null,
+      expected_completion_point_type: '3sell',
+      completion_point_status: null,
+      associated_points: [],
+    }],
+  };
+
+  const summary = Analysis.summarizeChartData(data, { resolution: '1' });
+
+  assert.equal(summary.xdZone.status, '形成中');
+  assert.equal(summary.xdZone.associatedPoint, '尚无线段级关联买卖点');
+  assert.equal(
+    summary.xdZone.completionRequirement,
+    '等待线段级向上回抽不回中枢下沿',
+  );
 });
 
 test('analysis exposes only base line controls and never duplicates strict display controls', () => {
@@ -233,9 +329,13 @@ test('analysis exposes only base line controls and never duplicates strict displ
   for (const id of [
     'ca-bi-zone-tower', 'ca-bi-zone-level', 'ca-bi-zone-bounds',
     'ca-bi-zone-completion', 'ca-bi-zone-entry', 'ca-bi-zone-exit',
-    'ca-bi-zone-point', 'ca-xd-zone-tower', 'ca-xd-zone-level',
+    'ca-bi-zone-point', 'ca-bi-zone-return', 'ca-bi-zone-evidence',
+    'ca-bi-zone-requirement',
+    'ca-xd-zone-tower', 'ca-xd-zone-level',
     'ca-xd-zone-bounds', 'ca-xd-zone-completion', 'ca-xd-zone-entry',
-    'ca-xd-zone-exit', 'ca-xd-zone-point',
+    'ca-xd-zone-core', 'ca-xd-zone-exit', 'ca-xd-zone-return',
+    'ca-xd-zone-point',
+    'ca-xd-zone-evidence', 'ca-xd-zone-requirement',
   ]) {
     assert.match(template, new RegExp(`id=["']${id}["']`), `missing #${id}`);
   }
@@ -283,8 +383,6 @@ test('index page exposes a real current-chart analysis region and its assets', (
     'ca-structure-verdict',
     'ca-bi-state',
     'ca-xd-state',
-    'ca-bi-zone-state',
-    'ca-bi-zone-meta',
     'ca-xd-zone-state',
     'ca-xd-zone-meta',
     'ca-mmd-state',

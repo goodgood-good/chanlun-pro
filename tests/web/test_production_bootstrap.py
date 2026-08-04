@@ -10,6 +10,8 @@ from cl_app.services import chart_revalidate
 from cl_app.services import chart_cache
 from cl_app.services import constants
 from cl_app.services import trading_screening
+from cl_app.services import app_forward_scheduler
+from cl_app.services import app_qmt_runtime
 from cl_app.handlers import sse_stream
 from chanlun import config as chanlun_config
 from chanlun.persistence import file_db
@@ -17,7 +19,10 @@ from chanlun.signal_monitor import scheduler as signal_scheduler
 from chanlun.recursive_bt.monitor import app_monitor
 
 
-def test_scheduler_enabled_factory_runs_the_production_lifecycle(monkeypatch):
+def test_scheduler_enabled_factory_runs_the_production_lifecycle(
+    monkeypatch,
+    tmp_path,
+):
     calls = []
     monkeypatch.setattr(
         chanlun_config,
@@ -133,6 +138,33 @@ def test_scheduler_enabled_factory_runs_the_production_lifecycle(monkeypatch):
         "register_recursive_monitor_jobs",
         lambda _scheduler: calls.append(("recursive", None)) or [],
     )
+    qmt_data = tmp_path / "qmt"
+    (qmt_data / "Sector" / "Temple" / "GICS").mkdir(parents=True)
+    monkeypatch.setattr(
+        app_forward_scheduler.AppForwardSchedulerController,
+        "register_jobs",
+        lambda _self: calls.append(("app-forward-register", None)),
+    )
+    monkeypatch.setattr(
+        app_forward_scheduler.AppForwardSchedulerController,
+        "stop",
+        lambda _self: calls.append(("app-forward-stop", None)),
+    )
+    monkeypatch.setattr(
+        app_qmt_runtime.AppQmtRuntimeController,
+        "startup",
+        lambda _self: calls.append(("app-qmt-startup", None)),
+    )
+    monkeypatch.setattr(
+        app_qmt_runtime.AppQmtRuntimeController,
+        "register_jobs",
+        lambda _self: calls.append(("app-qmt-register", None)),
+    )
+    monkeypatch.setattr(
+        app_qmt_runtime.AppQmtRuntimeController,
+        "stop",
+        lambda _self: calls.append(("app-qmt-stop", None)),
+    )
 
     app = create_app(
         start_scheduler=True,
@@ -141,12 +173,23 @@ def test_scheduler_enabled_factory_runs_the_production_lifecycle(monkeypatch):
             "VALIDATE_WEB_SECURITY": False,
             "WTF_CSRF_ENABLED": False,
             "TRADING_SCREENING_BACKGROUND_ENABLED": True,
+            "FORWARD_SCHEDULER_MODE": "APP",
+            "FORWARD_QMT_LOCAL_DATA_DIR": str(qmt_data),
+            "QMT_RUNTIME_MODE": "APP",
+            "QMT_RUNTIME_WARMUP_SECONDS": 0,
         },
     )
     try:
         assert app.extensions["scheduler"].running is True
         assert app.extensions["metadata_warmup_thread"] is warmup_thread
+        screening = app.extensions["decision_support_trading_screening"]
+        assert screening._config.priority_monitoring_enabled is True
+        assert screening._config.max_priority_monitor_symbols_per_refresh == 16
+        assert screening._config.max_symbols_per_refresh == 64
+        assert screening._config.max_total_symbols_per_refresh == 64
+        assert screening._config.priority_monitor_interval_seconds == 60
         assert calls == [
+            ("app-qmt-startup", None),
             ("metadata-loaders", None),
             ("chart-cache", None),
             ("pickle-writes", None),
@@ -159,6 +202,8 @@ def test_scheduler_enabled_factory_runs_the_production_lifecycle(monkeypatch):
             ("alerts", None),
             ("signals", None),
             ("recursive", None),
+            ("app-qmt-register", None),
+            ("app-forward-register", None),
         ]
     finally:
         app.extensions["shutdown_runtime_services"]()
@@ -168,10 +213,12 @@ def test_scheduler_enabled_factory_runs_the_production_lifecycle(monkeypatch):
     assert ("stop-ticks", None) in calls
     assert ("stop-sse", None) in calls
     assert ("stop-trading-screening", None) in calls
+    assert ("app-qmt-stop", None) in calls
     assert ("stop-revalidation", None) in calls
     assert ("stop-chart-cache", None) in calls
     assert ("stop-pickle-writes", None) in calls
     assert ("stop-metadata-loaders", None) in calls
+    assert ("app-forward-stop", None) in calls
 
     # Shutdown is idempotent and does not enqueue work on a stopped IOLoop.
     before = list(calls)

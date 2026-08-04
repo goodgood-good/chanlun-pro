@@ -43,6 +43,9 @@ from chanlun.decision_support.trading_system.backtest.pit_metadata import (
     SectorMembershipChange,
     load_snapshot,
 )
+from chanlun.decision_support.trading_system.v3_sector_first_scope import (
+    build_sector_first_scope,
+)
 from tools.backtest_chanlun_trading_system import _algorithm_hashes
 
 
@@ -249,26 +252,27 @@ def _catalog_scope(
     requested_start: date,
     requested_end: date,
 ) -> tuple[tuple[tuple[str, str], ...], dict[str, object]]:
-    index = PITMetadataIndex(snapshot)
-    eligible = tuple(
-        row
-        for row in snapshot.securities
-        if row.intersects(requested_start, requested_end)
+    # The backtest universe is owned by the same sector-first contract used by
+    # the live candidate path.  Do not reconstruct a second, subtly different
+    # stock-first universe in this CLI.
+    sector_first = build_sector_first_scope(
+        snapshot,
+        requested_start=requested_start,
+        requested_end=requested_end,
     )
-    memberships_by_code = {
-        row.code: index.memberships_for(row.code) for row in eligible
-    }
+    index = PITMetadataIndex(snapshot)
+    selected = set(sector_first.selected_symbols)
     scope = tuple(
         (
             row.code,
             (
-                memberships_by_code[row.code][0].sector_id
-                if memberships_by_code[row.code]
+                index.memberships_for(row.code)[0].sector_id
+                if index.memberships_for(row.code)
                 else "qmt-sw1:unclassified"
             ),
         )
-        for row in eligible
-        if memberships_by_code[row.code]
+        for row in snapshot.securities
+        if row.code in selected
     )
     return tuple(sorted(scope)), {
         "catalog_revision": "sha256:" + hashlib.sha256(
@@ -278,13 +282,20 @@ def _catalog_scope(
         "catalog_sector_count": len(snapshot.qmt_sw1_sector_names),
         "eligible_sector_count": len(snapshot.qmt_sw1_sector_names),
         "membership_edge_count": len(snapshot.memberships),
-        "archived_intersecting_symbol_count": len(eligible),
+        "archived_intersecting_symbol_count": len(sector_first.symbols),
         "unique_symbol_count": len(scope),
         "classified_symbol_count": len(scope),
-        "unclassified_symbol_count": sum(
-            not memberships_by_code[row.code] for row in eligible
-        ),
+        "unclassified_symbol_count": len(sector_first.rejected_symbols),
         "duplicate_membership_count": 0,
+        "selection_path": sector_first.selection_path,
+        "selection_order": (
+            "POINT_IN_TIME_SECTOR_TRIGGER",
+            "POINT_IN_TIME_SECTOR_MEMBERS",
+            "INDIVIDUAL_THREE_PROGRAM",
+            "DIRECT_RECURSIVE_30M_5M_1M_TECHNICAL_ENTRY",
+        ),
+        "sector_first_scope_sha256": sector_first.content_sha256,
+        "etf_proxy_role": sector_first.etf_proxy_role,
         "pit_metadata_schema": snapshot.schema,
         "pit_source_hashes": dict(snapshot.source_hashes),
     }

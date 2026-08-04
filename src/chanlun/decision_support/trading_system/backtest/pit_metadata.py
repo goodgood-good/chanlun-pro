@@ -19,7 +19,7 @@ import hashlib
 import json
 from pathlib import Path
 import re
-from typing import Iterable, Mapping, Sequence
+from typing import Mapping, Sequence
 from zoneinfo import ZoneInfo
 
 from chanlun.decision_support.fingerprints import normalize_datetime

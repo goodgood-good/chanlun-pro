@@ -5,11 +5,13 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from chanlun.db_models.zixuan import TableByZixuan
+from chanlun.db_models.zixuan_group import TableByZxGroup
 from chanlun.persistence.db import DB
 
 
 def _isolated_db():
     engine = create_engine("sqlite:///:memory:")
+    TableByZxGroup.__table__.create(engine)
     TableByZixuan.__table__.create(engine)
     db_obj = object.__new__(DB.__wrapped__)
     db_obj.Session = sessionmaker(bind=engine, expire_on_commit=False)
@@ -108,3 +110,87 @@ def test_add_at_top_does_not_shift_same_named_group_in_other_market():
             .scalar()
         )
     assert hk_position == 0
+
+
+def test_global_group_adapter_merges_definitions_and_preserves_member_markets():
+    db_obj = _isolated_db()
+    now = datetime.datetime.now()
+    with db_obj.Session() as session:
+        session.add_all(
+            [
+                TableByZxGroup(market="a", zx_group="跨市场", add_dt=now),
+                TableByZxGroup(market="hk", zx_group="跨市场", add_dt=now),
+                TableByZxGroup(market="__global__", zx_group="我的持仓", add_dt=now),
+                TableByZixuan(
+                    market="a",
+                    zx_group="跨市场",
+                    stock_code="SH.600000",
+                    stock_name="浦发银行",
+                    position=0,
+                    add_datetime=now,
+                    stock_color="",
+                    stock_memo="",
+                ),
+                TableByZixuan(
+                    market="hk",
+                    zx_group="跨市场",
+                    stock_code="HK.00700",
+                    stock_name="腾讯控股",
+                    position=0,
+                    add_datetime=now,
+                    stock_color="",
+                    stock_memo="",
+                ),
+            ]
+        )
+        session.commit()
+
+    assert [row.zx_group for row in db_obj.zx_get_global_groups()] == [
+        "我的持仓",
+        "跨市场",
+    ]
+    assert [
+        (row.market, row.stock_code)
+        for row in db_obj.zx_get_global_group_stocks("跨市场")
+    ] == [("a", "SH.600000"), ("hk", "HK.00700")]
+    assert db_obj.zx_add_global_group("跨市场") is False
+    assert db_obj.zx_add_global_group("新分组") is True
+
+
+def test_global_group_delete_removes_every_definition_and_member_atomically():
+    db_obj = _isolated_db()
+    now = datetime.datetime.now()
+    with db_obj.Session() as session:
+        session.add_all(
+            [
+                TableByZxGroup(market="a", zx_group="删除目标", add_dt=now),
+                TableByZxGroup(market="hk", zx_group="删除目标", add_dt=now),
+                TableByZixuan(
+                    market="a",
+                    zx_group="删除目标",
+                    stock_code="SH.600000",
+                    stock_name="浦发银行",
+                    position=0,
+                    add_datetime=now,
+                    stock_color="",
+                    stock_memo="",
+                ),
+                TableByZixuan(
+                    market="hk",
+                    zx_group="删除目标",
+                    stock_code="HK.00700",
+                    stock_name="腾讯控股",
+                    position=0,
+                    add_datetime=now,
+                    stock_color="",
+                    stock_memo="",
+                ),
+            ]
+        )
+        session.commit()
+
+    assert db_obj.zx_del_global_group("删除目标") is True
+    assert db_obj.zx_get_global_group_stocks("删除目标") == []
+    assert all(
+        row.zx_group != "删除目标" for row in db_obj.zx_get_global_groups()
+    )

@@ -20,6 +20,17 @@ def test_restart_script_validates_and_reuses_configured_web_port():
     assert "-HealthUri $healthUri" in source
 
 
+def test_web_only_reload_preserves_qmt_processes():
+    source = (
+        Path(__file__).resolve().parents[1] / "ops" / "restart_qmt_daily.ps1"
+    ).read_text(encoding="utf-8")
+
+    assert "[switch]$WebOnly" in source
+    assert "if (-not $PreflightOnly -and -not $WebOnly)" in source
+    assert "if (-not $WebOnly)" in source
+    assert "web-only reload requested; QMT processes were not touched" in source
+
+
 @pytest.mark.skipif(os.name != "nt", reason="restart script targets Windows")
 def test_restart_dotenv_loader_preserves_equals_and_quotes(tmp_path):
     script = Path(__file__).resolve().parents[1] / "ops" / "restart_qmt_daily.ps1"
@@ -67,11 +78,160 @@ def test_restart_owns_only_the_configured_port_process_and_confirms_shutdown():
     ).read_text(encoding="utf-8")
 
     assert "[regex]::Escape($AppScript)" in source
+    assert "$relativeAppPattern" in source
+    assert "web[\\\\/]+chanlun_chart[\\\\/]+app\\.py" in source
     assert "Get-NetTCPConnection" in source
     assert "$targetWebProcs" in source
     assert "Wait-Process -Id" in source
+    assert "$i -lt 15" in source
+    assert "$remainingPortOwners.Count -gt 0" in source
     assert "web process or listening port remained after stop" in source
     assert "Restore-WebService" in source
+
+
+def test_restart_acquires_single_flight_lock_before_stopping_any_process():
+    source = (
+        Path(__file__).resolve().parents[1] / "ops" / "restart_qmt_daily.ps1"
+    ).read_text(encoding="utf-8")
+
+    preflight_only = source.index("if ($PreflightOnly)")
+    acquire = source.index("$deploymentMutex = Enter-DeploymentMutex")
+    stop_phase = source.index("# --- 1. Stop the web project")
+
+    assert preflight_only < acquire < stop_phase
+    assert "WaitOne(0)" in source
+    assert "AbandonedMutexException" in source
+    assert "another restart invocation owns deployment lock" in source
+    assert "Exit-DeploymentMutex -Mutex $deploymentMutex" in source
+    assert "ReleaseMutex()" in source
+    assert ".Dispose()" in source
+
+
+@pytest.mark.skipif(os.name != "nt", reason="restart script targets Windows")
+def test_restart_single_flight_lock_rejects_a_concurrent_process(tmp_path):
+    """Exercise contention and abandoned-owner recovery without touching services."""
+
+    script = Path(__file__).resolve().parents[1] / "ops" / "restart_qmt_daily.ps1"
+    helper = tmp_path / "deployment_lock_probe.ps1"
+    helper.write_text(
+        r"""
+param(
+    [Parameter(Mandatory = $true)][string]$ScriptPath,
+    [Parameter(Mandatory = $true)][string]$Root,
+    [Parameter(Mandatory = $true)][int]$Port,
+    [switch]$Hold
+)
+$tokens = $null
+$errors = $null
+$ast = [Management.Automation.Language.Parser]::ParseFile(
+    $ScriptPath,
+    [ref]$tokens,
+    [ref]$errors
+)
+if ($errors.Count -ne 0) { exit 40 }
+foreach ($functionName in @(
+    'Get-DeploymentMutexName',
+    'Enter-DeploymentMutex',
+    'Exit-DeploymentMutex'
+)) {
+    $definition = $ast.Find(
+        {
+            param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -eq $functionName
+        },
+        $true
+    )
+    if ($null -eq $definition) { exit 41 }
+    . ([scriptblock]::Create($definition.Extent.Text))
+}
+$name = Get-DeploymentMutexName -Root $Root -Port $Port
+$mutex = Enter-DeploymentMutex -Name $name
+if ($null -eq $mutex) {
+    Write-Output 'BLOCKED'
+    exit 23
+}
+Write-Output ('ACQUIRED:' + $name)
+[Console]::Out.Flush()
+if ($Hold) { [Console]::In.ReadLine() | Out-Null }
+Exit-DeploymentMutex -Mutex $mutex
+exit 0
+""".strip(),
+        encoding="utf-8",
+    )
+    command = [
+        "powershell",
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        str(helper),
+        "-ScriptPath",
+        str(script),
+        "-Root",
+        str(tmp_path),
+        "-Port",
+        "19991",
+    ]
+    holder = subprocess.Popen(
+        [*command, "-Hold"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        acquired = holder.stdout.readline().strip()
+        assert acquired.startswith("ACQUIRED:Local\\ChanlunProDeploy_")
+
+        blocked = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert blocked.returncode == 23
+        assert blocked.stdout.strip() == "BLOCKED"
+
+        assert holder.stdin is not None
+        holder.stdin.write("release\n")
+        holder.stdin.flush()
+        holder_stdout, holder_stderr = holder.communicate(timeout=30)
+        assert holder.returncode == 0, holder_stdout + holder_stderr
+
+        reacquired = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert reacquired.returncode == 0, reacquired.stdout + reacquired.stderr
+        assert reacquired.stdout.startswith("ACQUIRED:Local\\ChanlunProDeploy_")
+
+        abandoned = subprocess.Popen(
+            [*command, "-Hold"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        abandoned_acquired = abandoned.stdout.readline().strip()
+        assert abandoned_acquired.startswith("ACQUIRED:Local\\ChanlunProDeploy_")
+        abandoned.kill()
+        abandoned.wait(timeout=10)
+
+        recovered = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert recovered.returncode == 0, recovered.stdout + recovered.stderr
+        assert recovered.stdout.startswith("ACQUIRED:Local\\ChanlunProDeploy_")
+    finally:
+        if holder.poll() is None:
+            holder.kill()
+            holder.wait(timeout=10)
 
 
 def test_restart_loads_dotenv_and_resolves_the_project_python_before_preflight():
@@ -88,4 +248,54 @@ def test_restart_loads_dotenv_and_resolves_the_project_python_before_preflight()
     assert "CHANLUN_PYTHON" in source
     assert ".venv\\Scripts\\python.exe" in source
     assert "poetry" in source
+
+
+def test_poetry_python_resolution_tolerates_informational_stderr_only():
+    source = (
+        Path(__file__).resolve().parents[1] / "ops" / "restart_qmt_daily.ps1"
+    ).read_text(encoding="utf-8")
+
+    resolver = source.index("function Resolve-ProjectPython")
+    next_function = source.index("function Get-WebProcs")
+    body = source[resolver:next_function]
+
+    assert "$previousErrorActionPreference = $ErrorActionPreference" in body
+    assert "$ErrorActionPreference = 'Continue'" in body
+    assert "$ErrorActionPreference = $previousErrorActionPreference" in body
+    assert "if ($line -isnot [string]) { continue }" in body
+    assert "if ($exitCode -ne 0)" in body
     assert "C:\\Users\\lc\\miniconda3" not in source
+
+
+def test_forward_runner_collects_native_stderr_before_checking_exit_code():
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "ops"
+        / "run_v3_forward_paper_daily.ps1"
+    ).read_text(encoding="utf-8")
+
+    assert "$previousErrorActionPreference = $ErrorActionPreference" in source
+    assert "$ErrorActionPreference = 'Continue'" in source
+    assert "$ErrorActionPreference = $previousErrorActionPreference" in source
+    assert "$output = @(& $PythonExe @arguments 2>&1)" in source
+    assert "$exitCode = $LASTEXITCODE" in source
+    assert "$DataGateRetryCount = 5" in source
+    assert "$DataGateRetryDelaySeconds = 30" in source
+    assert "$CoverageWaitMinutes = 240" in source
+    assert "$CoveragePollSeconds = 60" in source
+    assert "Get-ForwardCoverageProbe" in source
+    assert "coverage_cycle_complete" in source
+    assert "pending_symbol_count" in source
+    assert "$screening.market_data_as_of" in source
+    assert "$screening.as_of" not in source
+    assert "trading screening market_data_as_of is unavailable" in source
+    assert "NO_SAMPLE_COVERAGE_BLOCKED" in source
+    assert "NO_SAMPLE_NON_TRADING_SESSION" in source
+    assert "NO_SAMPLE_DELIVERY_BLOCKED" in source
+    assert "no review pipeline or order transport ran" in source
+    assert "NO_SAMPLE_DATA_BLOCKED" in source
+    assert "exit 3" in source
+    assert (
+        "data gate blocked safely; no review pipeline or order transport ran"
+        not in source
+    )

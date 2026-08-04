@@ -16,16 +16,16 @@ def _strict_payload(revision: str = "sha256:one") -> dict[str, object]:
     }
 
 
-def test_v40_cache_is_rejected_after_center_preview_schema_cutover() -> None:
-    assert chart_cache._CHART_CACHE_SCHEMA_VERSION == "v41"
+def test_v44_cache_is_rejected_after_center_lifecycle_schema_cutover() -> None:
+    assert chart_cache._CHART_CACHE_SCHEMA_VERSION == "v45"
     key = chart_cache._build_cache_key(
         "a",
         "SH.600519",
         "5m",
         {},
     )
-    assert key.startswith("v41_")
-    assert not key.startswith("v40_")
+    assert key.startswith("v45_")
+    assert not key.startswith("v44_")
 
 
 def test_historical_pagination_omits_structure_instead_of_replacing_it() -> None:

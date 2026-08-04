@@ -76,8 +76,9 @@ class NativeHealthHandler(RequestHandler):
     def get(self):
         kind = self.request.path.strip("/")
         market = self.get_query_argument("market", "a")
+        forward_session = self.get_query_argument("forward_session", None)
         payload, status_code = self._flask_app.extensions["health_snapshot"](
-            kind, market
+            kind, market, forward_session
         )
         self.set_status(status_code)
         self.set_header("Content-Type", "application/json; charset=UTF-8")

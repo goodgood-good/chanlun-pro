@@ -885,13 +885,20 @@ class MonitorSymbolState:
         self.prev_close = 0.0
         self.seen = set()
         self.consecutive_refresh_failures = 0
+        self.consecutive_warmup_incomplete = 0
+        self.warmup_ready = False
         # 新鲜窗口=40个op bar(下限60min):覆盖买卖点右侧确认的滞后窗口(含1m偶发
         # >30min的深度确认),超窗才视为深度回溯修正不发。1m级别旧30min窗偏紧会吞真新信号。
         op_minutes = int(op_level[:-1]) if str(op_level).endswith("m") else 5
         self.signal_freshness = pd.Timedelta(minutes=max(op_minutes * 40, 60))
 
-    # 首轮 warmup 限窗(天):监控信号只需笔级买点+笔方向,限窗可大幅缩短初始化时间。
-    WARMUP_DAYS_BY_FREQ = {"1m": 30, "5m": 120}
+    # 首轮 warmup 限窗(天):三个分钟层级与日线风险窗口都必须收敛后才发提示。
+    WARMUP_DAYS_BY_FREQ = {
+        "1m": 30,
+        "5m": 120,
+        "30m": 365,
+        "d": 800,
+    }
 
     def _fetch_klines(self, frequency: str, last):
         """首轮按级别限窗 warmup;有锚点后只拉尾部窗口(锚点回退 5 天覆盖节假日/停牌缓冲)。"""
@@ -936,18 +943,32 @@ class MonitorSymbolState:
         return df
 
     def refresh(self) -> List:
+        # A previously-ready state must not remain green when a later refresh
+        # loses one of its required timeframe windows.
+        self.warmup_ready = False
         df_op = self._process_level(self.cd_op, self.op_level, "last_op", 100)
         if df_op is None:
+            self.consecutive_warmup_incomplete += 1
             return []
-        self._process_level(self.cd_big, self.big_level, "last_big", 50)
+        df_big = self._process_level(self.cd_big, self.big_level, "last_big", 50)
+        df_mid = None
         if self.cd_mid is not None:
-            self._process_level(self.cd_mid, self.mid_level, "last_mid", 50)
-        self._refresh_daily_window()
+            df_mid = self._process_level(self.cd_mid, self.mid_level, "last_mid", 50)
+        daily_ready = self._refresh_daily_window()
+        self.warmup_ready = bool(
+            df_big is not None
+            and (self.cd_mid is None or df_mid is not None)
+            and daily_ready
+        )
         self.last_open = float(df_op["open"].iloc[-1])
         self.last_px = float(df_op["close"].iloc[-1])
         # 涨跌停基准=前一交易日收盘(窗口内无昨日数据时为 0=不判),
         # 不能用前一根分钟 bar 收盘——日内累计涨停会被漏判。
         self.prev_close = latest_prev_day_close(df_op)
+        if not self.warmup_ready:
+            self.consecutive_warmup_incomplete += 1
+            return []
+        self.consecutive_warmup_incomplete = 0
         out = []
         for sig in collect_branch_signals(self.cd_op, use_xd=False, annotate_nest=True):
             key = (sig.date, sig.bs_type)
@@ -962,22 +983,31 @@ class MonitorSymbolState:
                 out.append(sig)
         return out
 
-    def _refresh_daily_window(self) -> None:
+    def _refresh_daily_window(self) -> bool:
         df = self._fetch_klines("d", self.lastd)
         if df is None or len(df) == 0:
-            return
-        today = pd.Timestamp.now(tz="Asia/Shanghai").date()
-        completed_mask = [
-            pd.Timestamp(value).date() < today for value in df["date"]
-        ]
+            return self.lastd is not None
+        timestamps = [pd.Timestamp(value) for value in df["date"]]
+        sample = timestamps[-1]
+        now = (
+            pd.Timestamp.now(tz=sample.tz)
+            if sample.tz is not None
+            else pd.Timestamp.now()
+        )
+        if self.kline_time_label == "end":
+            completed_mask = [value <= now for value in timestamps]
+        else:
+            # Start-labelled daily bars do not encode their exchange close.
+            # Fail closed until the next local calendar day.
+            completed_mask = [value.date() < now.date() for value in timestamps]
         df = df.loc[completed_mask].copy()
         if len(df) == 0:
-            return
+            return self.lastd is not None
         if self.lastd is None and len(df) < 100:
-            return
+            return False
         new = df if self.lastd is None else df[df["date"] > self.lastd]
         if not len(new):
-            return
+            return self.lastd is not None
         self.cdd.process_klines(new.reset_index(drop=True))
         self.lastd = df["date"].iloc[-1]
         for sig in collect_branch_signals(self.cdd, use_xd=False):
@@ -985,6 +1015,7 @@ class MonitorSymbolState:
                 until = sig.date + pd.Timedelta(days=11)
                 if self.d3_until is None or until > self.d3_until:
                     self.d3_until = until
+        return True
 
     def big_dir(self) -> str:
         return self._dir_from_cd(self.cd_big)

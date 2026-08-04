@@ -363,6 +363,24 @@ main.ra-shell {
   margin-bottom: 14px;
 }
 
+.ra-callout {
+  display: grid;
+  gap: 5px;
+  padding: 14px 16px;
+  border: 1px solid rgba(89, 196, 143, 0.28);
+  border-radius: 9px;
+  background: rgba(89, 196, 143, 0.07);
+}
+
+.ra-callout strong {
+  color: var(--ra-text);
+}
+
+.ra-callout span {
+  color: var(--ra-muted);
+  line-height: 1.65;
+}
+
 .ra-bootstrap-grid article,
 .ra-point-grid article,
 .ra-integrity-summary article {
@@ -457,6 +475,10 @@ main.ra-shell {
   border-radius: 10px;
 }
 
+.ra-table-spaced {
+  margin-top: 16px;
+}
+
 table {
   width: 100%;
   border-collapse: collapse;
@@ -505,6 +527,48 @@ tbody tr:hover td {
   margin-top: 3px;
   color: var(--ra-muted);
   font-size: 13px;
+}
+
+.ra-point-details {
+  margin-top: 14px;
+  border: 1px solid var(--ra-border);
+  border-radius: 10px;
+  background: rgba(8, 18, 27, 0.34);
+}
+
+.ra-point-details > summary {
+  padding: 13px 15px;
+  color: #d5e2e8;
+  cursor: pointer;
+  font-weight: 650;
+}
+
+.ra-point-details[open] > summary {
+  border-bottom: 1px solid var(--ra-border);
+}
+
+.ra-point-details .ra-table-wrap {
+  border: 0;
+  border-radius: 0 0 10px 10px;
+}
+
+.ra-focus-link {
+  display: inline-flex;
+  align-items: center;
+  min-height: 32px;
+  padding: 5px 9px;
+  border: 1px solid rgba(121, 184, 217, 0.45);
+  border-radius: 7px;
+  color: #bfe4f7;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.ra-focus-link:hover,
+.ra-focus-link:focus-visible {
+  border-color: #8dc8e6;
+  color: #effaff;
+  background: rgba(121, 184, 217, 0.1);
 }
 
 .ra-reason-list {

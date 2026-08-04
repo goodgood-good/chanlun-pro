@@ -1,5 +1,6 @@
 from dataclasses import replace
 from datetime import timedelta
+import random
 
 import pytest
 
@@ -292,21 +293,16 @@ def test_later_completed_seed_supersedes_broad_ongoing_seed_causally():
 
 
 @pytest.mark.parametrize(
-    "values,expected_core",
-    (
-        (_uptrend_linked_live_preview(), (120, 128)),
-        (_downtrend_linked_live_preview(), (82, 90)),
-    ),
+    "values",
+    (_uptrend_linked_live_preview(), _downtrend_linked_live_preview()),
 )
-def test_scan_previews_later_trend_linked_center_after_active_leave(
-    values,
-    expected_core,
-):
-    """A later separated consolidation may use the active center's tail.
+def test_scan_does_not_shift_active_leave_into_later_center_core(values):
+    """The active leave is only the next center's entering boundary.
 
-    The candidate entry is the penultimate locked unit of the active center,
-    so it does not overlap the later core.  It is accepted only as a
-    non-tradable live preview while the following three units are provisional.
+    Three provisional units after that shared boundary can provide the next
+    center's three core legs, but there is no fifth/leaving leg yet.  Reusing
+    the active center's penultimate body unit would shift every role one unit
+    early and incorrectly place the old leave inside the new core.
     """
 
     result = calculate_centers(values, 0, SourceKind.SEGMENT)
@@ -315,16 +311,195 @@ def test_scan_previews_later_trend_linked_center_after_active_leave(
     active = result.centers[0]
     assert active.state is CenterState.ONGOING
     assert active.pending_leave_unit is values[4]
+    assert not any(
+        preview.state is CenterPreviewState.FORMING
+        and len(preview.unit_ids) == 5
+        for preview in result.previews
+    )
+
+
+def test_scan_forms_adjacent_preview_only_after_new_leave_exists():
+    """A true adjacent preview shares only the old leave/new entry unit."""
+
+    values = valid_five_up_exit() + (
+        replace(unit(5, "down", 130, 120), locked=False, confirmed_at=None),
+        replace(unit(6, "up", 120, 140), locked=False, confirmed_at=None),
+        replace(unit(7, "down", 140, 125), locked=False, confirmed_at=None),
+        replace(unit(8, "up", 125, 150), locked=False, confirmed_at=None),
+    )
+
+    result = calculate_centers(values, 0, SourceKind.SEGMENT)
+
+    forming = [
+        preview
+        for preview in result.previews
+        if preview.state is CenterPreviewState.FORMING
+        and len(preview.unit_ids) == 5
+    ]
+    assert len(forming) == 1
+    assert forming[0].unit_ids == tuple(item.unit_id for item in values[4:9])
+    assert (forming[0].zd_tick, forming[0].zg_tick) == (125, 130)
+
+
+def test_active_center_forming_extension_suppresses_shifted_live_seed():
+    """SH.513100 1m: an unresolved extension is still the same center.
+
+    The locked fifth segment leaves below the center.  Every later segment is
+    provisional and its first return enters the original core, so there is no
+    third sell and therefore no boundary at which a second same-level center
+    may start.  A sliding five-unit window exists geometrically in the tail,
+    but it must not replace the active center's own extension projection.
+    """
+
+    values = (
+        unit(0, "down", 2192, 2103),
+        unit(1, "up", 2103, 2118),
+        unit(2, "down", 2118, 2094),
+        unit(3, "up", 2094, 2153),
+        unit(4, "down", 2153, 2095),
+        replace(unit(5, "up", 2095, 2122), locked=False, confirmed_at=None),
+        replace(unit(6, "down", 2122, 2035), locked=False, confirmed_at=None),
+        replace(unit(7, "up", 2035, 2186), locked=False, confirmed_at=None),
+    )
+
+    result = calculate_centers(values, 0, SourceKind.SEGMENT)
+
+    assert len(result.centers) == 1
+    assert result.centers[0].state is CenterState.ONGOING
     forming = [
         preview
         for preview in result.previews
         if preview.state is CenterPreviewState.FORMING
     ]
     assert len(forming) == 1
-    preview = forming[0]
-    assert preview.unit_ids == tuple(item.unit_id for item in values[3:8])
-    assert (preview.zd_tick, preview.zg_tick) == expected_core
-    assert values[3].direction == values[7].direction
+    assert forming[0].unit_ids == tuple(item.unit_id for item in values)
+    assert forming[0].unit_ids[:5] == tuple(item.unit_id for item in values[:5])
+    assert (forming[0].zd_tick, forming[0].zg_tick) == (2103, 2118)
+
+    shifted = calculate_centers(values[3:], 0, SourceKind.SEGMENT).previews[-1]
+    with pytest.raises(
+        ValueError,
+        match="shifted forming preview cannot displace",
+    ):
+        replace(result, previews=(shifted,))
+
+
+def test_shifted_forming_seed_cannot_bypass_rejected_active_projection():
+    """An unlocked incompatible tail cannot create a second active center.
+
+    This is the reduced SZ.000001 daily sequence from the full cache audit.
+    The locked center is ongoing, while its first provisional successor sits
+    wholly outside the old core and makes the active projection stop.  A later
+    five-unit sliding window exists, but it is only forming and must wait for
+    locked evidence instead of coexisting with the formal center.
+    """
+
+    values = (
+        unit(0, "down", 1061, 707),
+        unit(1, "up", 707, 982),
+        unit(2, "down", 982, 841),
+        unit(3, "up", 841, 1106),
+        unit(4, "down", 1106, 952),
+        unit(5, "up", 952, 1273),
+        replace(unit(6, "down", 1273, 1067), locked=False, confirmed_at=None),
+        replace(unit(7, "up", 1067, 1163), locked=False, confirmed_at=None),
+        replace(unit(8, "down", 1163, 999), locked=False, confirmed_at=None),
+    )
+
+    result = calculate_centers(values, 0, SourceKind.SEGMENT)
+
+    assert len(result.centers) == 1
+    assert result.centers[0].state is CenterState.ONGOING
+    assert not any(
+        preview.state is CenterPreviewState.FORMING
+        for preview in result.previews
+    )
+
+
+def test_deterministic_live_tail_fuzz_preserves_single_active_ownership():
+    """Exercise the ownership invariant over many connected live tails."""
+
+    generator = random.Random(20260805)
+    seeds = (
+        (
+            unit(0, "up", 900, 1200),
+            unit(1, "down", 1200, 1000),
+            unit(2, "up", 1000, 1150),
+            unit(3, "down", 1150, 1050),
+            unit(4, "up", 1050, 1300),
+        ),
+        (
+            unit(0, "down", 1300, 1000),
+            unit(1, "up", 1000, 1200),
+            unit(2, "down", 1200, 900),
+            unit(3, "up", 900, 1100),
+            unit(4, "down", 1100, 800),
+        ),
+    )
+    for case in range(250):
+        values = list(seeds[case % 2])
+        tail_size = generator.randint(1, 12)
+        for index in range(5, 5 + tail_size):
+            direction = "down" if values[-1].direction == "up" else "up"
+            start = values[-1].end_tick
+            distance = generator.randint(5, 180)
+            end = start + distance if direction == "up" else start - distance
+            values.append(unit(index, direction, start, end))
+        locked_count = generator.randint(5, len(values))
+        values = [
+            value
+            if index < locked_count
+            else replace(value, locked=False, confirmed_at=None)
+            for index, value in enumerate(values)
+        ]
+
+        for size in range(5, len(values) + 1):
+            result = calculate_centers(
+                tuple(values[:size]),
+                0,
+                SourceKind.SEGMENT,
+            )
+            assert sum(
+                center.state is CenterState.ONGOING
+                for center in result.centers
+            ) <= 1
+            assert sum(
+                preview.state is CenterPreviewState.FORMING
+                for preview in result.previews
+            ) <= 1
+
+
+def test_adjacent_forming_preview_does_not_erase_active_center_completion():
+    """A new live-edge seed must not regress an older geometric completion.
+
+    The first provisional return already stays outside the active center and
+    therefore completes its same-level third-class-point geometry.  Three
+    later provisional units may establish a new adjacent preview, but they
+    cannot make that earlier completion disappear from the same prefix.
+    """
+
+    values = _uptrend_linked_live_preview() + (
+        replace(unit(8, "up", 122, 140), locked=False, confirmed_at=None),
+    )
+
+    result = calculate_centers(values, 0, SourceKind.SEGMENT)
+
+    completed = [
+        preview
+        for preview in result.previews
+        if preview.state is CenterPreviewState.COMPLETED
+    ]
+    forming = [
+        preview
+        for preview in result.previews
+        if preview.state is CenterPreviewState.FORMING
+        and len(preview.unit_ids) == 5
+    ]
+    assert len(completed) == 1
+    assert completed[0].unit_ids[:5] == tuple(item.unit_id for item in values[:5])
+    assert completed[0].completion_return_unit_id == values[5].unit_id
+    assert len(forming) == 1
+    assert forming[0].unit_ids == tuple(item.unit_id for item in values[4:9])
 
 
 def test_scan_does_not_relax_non_overlapping_entry_without_active_center_tail():

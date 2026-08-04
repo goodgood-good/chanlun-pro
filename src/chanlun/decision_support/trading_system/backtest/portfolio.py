@@ -24,7 +24,6 @@ from chanlun.decision_support.trading_system.backtest.models import (
 from chanlun.decision_support.trading_system.engine import (
     EvaluatedSignal,
     SymbolStructureBundle,
-    TradingEngine,
 )
 from chanlun.decision_support.trading_system.models import (
     PointType,
@@ -57,6 +56,15 @@ class StructureReplay(Protocol):
         closed_at: datetime,
         code: str,
     ) -> SymbolStructureBundle: ...
+
+
+class DecisionEvaluator(Protocol):
+    """Structural interface shared by live-page and historical evaluators."""
+
+    def evaluate_symbol(
+        self,
+        bundle: SymbolStructureBundle,
+    ) -> tuple[EvaluatedSignal, ...]: ...
 
 
 class CausalBundleBuilder(Protocol):
@@ -1042,7 +1050,7 @@ def risk_candidate_from(
 def replay_engine_decisions(
     dataset: BacktestDataset,
     *,
-    engine: TradingEngine,
+    engine: DecisionEvaluator,
     structure_replay: StructureReplay,
     closed_at: datetime,
     held_structures: Mapping[str, tuple[StructureTower, int]] | None = None,
@@ -1068,7 +1076,7 @@ def replay_engine_decisions(
 def run_event_backtest(
     dataset: BacktestDataset,
     *,
-    engine: TradingEngine,
+    engine: DecisionEvaluator,
     structure_replay: StructureReplay,
     risk_limits: RiskLimits,
     execution_policy: ExecutionPolicy,

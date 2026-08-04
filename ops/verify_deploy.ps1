@@ -1,6 +1,10 @@
 [CmdletBinding()]
 param(
-    [string]$ProjectRoot = (Split-Path -Parent $PSScriptRoot),
+    # Windows PowerShell 5.1 does not reliably populate $PSScriptRoot while a
+    # parameter default expression is being bound for ``powershell -File``.
+    # Resolve the implicit root after binding, when the automatic variable is
+    # authoritative.
+    [string]$ProjectRoot = '',
     [string]$HealthUri = 'http://127.0.0.1:9900/readyz?market=a',
     [string]$ExpectedRevision = '',
     [string]$ExpectedSourceRevision = '',
@@ -11,57 +15,11 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+if ([string]::IsNullOrWhiteSpace($ProjectRoot)) {
+    $ProjectRoot = Split-Path -Parent $PSScriptRoot
+}
 . (Join-Path $PSScriptRoot 'deploy_common.ps1')
 $ok = $true
-
-function Get-ApplicationSourceRevision {
-    param([Parameter(Mandatory = $true)][string]$Root)
-
-    $headOutput = @(& git -C $Root rev-parse HEAD 2>$null)
-    if ($LASTEXITCODE -ne 0 -or $headOutput.Count -eq 0) {
-        throw 'unable to resolve deployment git revision'
-    }
-    $head = ([string]$headOutput[-1]).Trim()
-    if ([string]::IsNullOrWhiteSpace($head)) {
-        throw 'deployment git revision is empty'
-    }
-
-    $paths = @(& git -C $Root -c core.quotePath=false ls-files --cached --others --exclude-standard -- src web/chanlun_chart ops windows_run.bat 2>$null)
-    if ($LASTEXITCODE -ne 0) {
-        throw 'unable to enumerate application source files'
-    }
-    $runtimeConfig = 'src/chanlun/config.py'
-    if ((Test-Path -LiteralPath (Join-Path $Root $runtimeConfig) -PathType Leaf) -and $paths -notcontains $runtimeConfig) {
-        $paths += $runtimeConfig
-    }
-    $paths = @($paths | Sort-Object -Unique)
-    $existing = @($paths | Where-Object { Test-Path -LiteralPath (Join-Path $Root $_) -PathType Leaf })
-    $hashes = @()
-    if ($existing.Count -gt 0) {
-        $hashes = @($existing | & git -C $Root hash-object --no-filters --stdin-paths 2>$null)
-        if ($LASTEXITCODE -ne 0 -or $hashes.Count -ne $existing.Count) {
-            throw 'unable to hash application source files'
-        }
-    }
-    $hashByPath = @{}
-    for ($i = 0; $i -lt $existing.Count; $i++) {
-        $hashByPath[$existing[$i]] = ([string]$hashes[$i]).Trim()
-    }
-    $manifest = New-Object System.Collections.Generic.List[string]
-    $manifest.Add("HEAD`t$head")
-    foreach ($path in $paths) {
-        $hash = if ($hashByPath.ContainsKey($path)) { $hashByPath[$path] } else { 'deleted' }
-        $manifest.Add(('{0}`t{1}' -f $path, $hash))
-    }
-    $sha = [Security.Cryptography.SHA256]::Create()
-    try {
-        $bytes = [Text.Encoding]::UTF8.GetBytes(($manifest -join "`n"))
-        $digest = -join ($sha.ComputeHash($bytes) | ForEach-Object { $_.ToString('x2') })
-    } finally {
-        $sha.Dispose()
-    }
-    return ('{0}.tree.{1}' -f $head, $digest.Substring(0, 24))
-}
 
 try {
     $resolvedRoot = (Resolve-Path -LiteralPath $ProjectRoot).Path

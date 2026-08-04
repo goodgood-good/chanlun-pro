@@ -236,7 +236,7 @@ function dailyChartData(rawCloseAt = DAILY_CLOSE_AT) {
 }
 
 function manager(instanceId = 'chart-manager-1') {
-  const { ChartManager } = loadChartManager();
+  const { ChartManager, sandbox } = loadChartManager();
   const cm = Object.create(ChartManager.prototype);
   const calls = { create: [], remove: [] };
   let nextId = 1;
@@ -247,7 +247,9 @@ function manager(instanceId = 'chart-manager-1') {
   cm._reconcileRetry = { count: 0, timer: null };
   cm._reconcileGuard = {};
   cm._scheduleVerifyRebuild = () => {};
-  cm.cl_show_config = {};
+  // Reconciliation mechanics are exercised with the opt-in formal layer on;
+  // product defaults are covered by cl_show_config_per_resolution.test.js.
+  cm.cl_show_config = { center_all: true };
   cm.chart = {
     createMultipointShape(points, options) {
       const id = `${instanceId}-shape-${nextId++}`;
@@ -261,7 +263,7 @@ function manager(instanceId = 'chart-manager-1') {
     },
     removeEntity(id) { calls.remove.push(id); },
   };
-  return { cm, calls };
+  return { cm, calls, sandbox };
 }
 
 function scopeContext(cm) {
@@ -921,7 +923,7 @@ test('overlapping provisional center supersedes an ongoing formal center that ow
   assert.deepEqual(grouped.map((item) => item.render_kind), ['center_preview']);
 });
 
-test('boundary-sharing later preview keeps the adjacent ongoing formal center', () => {
+test('boundary-sharing forming preview is hidden without active completion evidence', () => {
   const { cm } = manager('chart-manager-boundary-preview');
   const formal = center(3, {
     points: [
@@ -953,13 +955,47 @@ test('boundary-sharing later preview keeps the adjacent ongoing formal center', 
   });
 
   const grouped = [...cm._strictRenderGroups(strict, scopeContext(cm)).values()].flat();
-  assert.deepEqual(
-    grouped.map((item) => item.render_kind).sort(),
-    ['center_preview', 'formal_center'],
-  );
+  assert.deepEqual(grouped.map((item) => item.render_kind), ['center_projection']);
 });
 
-test('disjoint later preview keeps the earlier formal center but hides its open projection', () => {
+test('completed active preview permits one adjacent boundary-sharing preview', () => {
+  const { cm } = manager('chart-manager-completed-boundary-preview');
+  const completed = centerPreview({
+    state: 'completed',
+    render_id: `preview-center-completed@completed@${BASE + 600}`,
+    completion_leave_unit_id: 'u5',
+    completion_return_unit_id: 'u6',
+  });
+  const adjacent = centerPreview({
+    center_id: 'preview-center-adjacent',
+    preview_id: 'preview-center-adjacent',
+    render_id: `preview-center-adjacent@forming@${BASE + 800}`,
+    points: [
+      { time: BASE + 500, price: 11.2 },
+      { time: BASE + 800, price: 10.8 },
+    ],
+    entry_unit_id: 'u5',
+    core_unit_ids: ['u6', 'u7', 'u8'],
+    initial_exit_unit_id: 'u9',
+    initial_unit_ids: ['u5', 'u6', 'u7', 'u8', 'u9'],
+    body_unit_ids: ['u5', 'u6', 'u7', 'u8', 'u9'],
+    available_at: BASE + 800,
+  });
+  const strict = snapshot({
+    levels: [{
+      ...snapshot().levels[0],
+      centers: [center()],
+      center_previews: [completed, adjacent],
+      center_projections: [],
+    }],
+  });
+
+  const grouped = [...cm._strictRenderGroups(strict, scopeContext(cm)).values()].flat();
+  assert.deepEqual(grouped.map((item) => item.render_kind), ['center_preview', 'center_preview']);
+  assert.deepEqual(grouped.map((item) => item.state), ['completed', 'forming']);
+});
+
+test('disjoint forming preview is hidden while formal center remains unresolved', () => {
   const { cm } = manager('chart-manager-disjoint-preview');
   const preview = centerPreview({
     entry_unit_id: 'u6',
@@ -978,10 +1014,7 @@ test('disjoint later preview keeps the earlier formal center but hides its open 
   });
 
   const grouped = [...cm._strictRenderGroups(strict, scopeContext(cm)).values()].flat();
-  assert.deepEqual(
-    grouped.map((item) => item.render_kind).sort(),
-    ['center_preview', 'formal_center'],
-  );
+  assert.deepEqual(grouped.map((item) => item.render_kind), ['center_projection']);
 });
 
 test('safeRemove retains ownership until TradingView confirms the entity disappeared', async () => {
@@ -1004,6 +1037,21 @@ test('safeRemove retains ownership until TradingView confirms the entity disappe
   await Promise.resolve();
   assert.equal(attempts, 2);
   assert.equal(cm._reconcileOwnedIds.has(entityId), false);
+});
+
+test('orphan sweep does not inspect TradingView-owned shapes outside debug mode', () => {
+  const { cm, sandbox } = manager('chart-manager-foreign-shape');
+  let detailReads = 0;
+  sandbox.__chanlunDebug = false;
+  cm.chart.getAllShapes = () => [{ id: 'tv-native-shape', name: 'trend_line' }];
+  cm.chart.getShapeById = () => {
+    detailReads += 1;
+    return { getPoints: () => [] };
+  };
+
+  cm.sweepOrphanShapes();
+
+  assert.equal(detailReads, 0);
 });
 
 test('confirmed fifth unit removes preview and creates a formal ongoing center', () => {
@@ -1044,6 +1092,7 @@ test('stroke observation is dashed only while ongoing and solid when completed',
   });
 
   const ongoing = manager('chart-manager-observation-ongoing');
+  ongoing.cm.cl_show_config.center_observation = true;
   ongoing.cm._drawStrictStructure(chartData('replace', snapshot({
     stroke_center_observations: [observation('ongoing')],
     levels: [],
@@ -1051,11 +1100,46 @@ test('stroke observation is dashed only while ongoing and solid when completed',
   assert.equal(ongoing.calls.create[0].options.overrides.linestyle, 2);
 
   const completed = manager('chart-manager-observation-completed');
+  completed.cm.cl_show_config.center_observation = true;
   completed.cm._drawStrictStructure(chartData('replace', snapshot({
     stroke_center_observations: [observation('completed')],
     levels: [],
   })), '5');
   assert.equal(completed.calls.create[0].options.overrides.linestyle, 0);
+});
+
+test('opt-in strict observation uses display segment evidence instead of stroke evidence', () => {
+  const stroke = center(1, {
+    render_kind: 'center_observation',
+    center_id: 'stroke-observation-1',
+    render_id: 'stroke-observation-1@1@ongoing',
+    source_kind: 'stroke_observation',
+    tradable: false,
+  });
+  const segment = center(1, {
+    render_kind: 'center_observation',
+    center_id: 'display-segment-center-1',
+    render_id: 'display-segment-center-1@1@completed',
+    source_kind: 'segment',
+    state: 'completed',
+    tradable: false,
+    points: [
+      { time: BASE + 100, price: 12 },
+      { time: BASE + 500, price: 9 },
+    ],
+  });
+  const { cm, calls } = manager('chart-manager-display-segment-center');
+  cm.cl_show_config.center_observation = true;
+
+  cm._drawStrictStructure(chartData('replace', snapshot({
+    stroke_center_observations: [stroke],
+    display_center_observations: [segment],
+    levels: [],
+  })), '5');
+
+  assert.equal(calls.create.length, 1);
+  assert.deepEqual(calls.create[0].points, segment.points);
+  assert.equal(calls.create[0].options.color, '#FF0000');
 });
 
 test('level-scoped consolidation and trend divergences render with explicit labels', () => {

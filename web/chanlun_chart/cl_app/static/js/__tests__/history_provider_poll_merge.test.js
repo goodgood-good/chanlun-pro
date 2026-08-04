@@ -260,6 +260,94 @@ test('向左滚动的历史响应不应 clobber 掉右侧现有 K线 bars(Round1
   assert.ok(times.includes(500 * 1000), '更旧K线 500 应被并入');
 });
 
+test('当前周期中枢始终与合并后的 xd_zss 同源，不接受 higher_zs 重复副本的旧边界', () => {
+  const df = makeDatafeed();
+  const hp = df._historyProvider;
+  const symbol = 'a:sh.513100';
+  const resolution = '5';
+  const current = seg(1000, 12, 2000, 10, 0);
+  const poisoned = seg(1000, 99, 2000, 1, 0);
+  const response = fullResponse([1000, 1500, 2000], [10, 11, 12], []);
+  response.xd_zss = [current];
+  response.higher_zs = [
+    { period: '5m', level_name: '5m 中枢', zss: [poisoned] },
+    { period: '30m', level_name: '30m 中枢', zss: [seg(500, 20, 2000, 18, 0)] },
+  ];
+
+  hp.applyChanlunUpdate(
+    response,
+    { symbol, resolution, from: 0, to: 2000, firstDataRequest: 'true' },
+  );
+
+  const stored = hp.bars_result.get(symbol.toLowerCase() + resolution);
+  const currentGroup = stored.higher_zs.find((group) => group.period === '5m');
+  assert.deepStrictEqual(currentGroup.zss, stored.xd_zss);
+  assert.equal(currentGroup.zss[0].points[0].price, 12);
+});
+
+test('向左翻历史不得用旧窗口 higher_zs 覆盖右侧四周期中枢快照', () => {
+  const df = makeDatafeed();
+  const hp = df._historyProvider;
+  const symbol = 'a:sh.513100';
+  const resolution = '5';
+  const base = { symbol, resolution };
+  const latestThirty = seg(4000, 30, 5500, 28, 0);
+  const initial = fullResponse([4000, 5000, 5500], [18, 20, 22], []);
+  initial.xd_zss = [seg(4000, 22, 5500, 20, 0)];
+  initial.higher_zs = [
+    { period: '5m', zss: initial.xd_zss },
+    { period: '30m', zss: [latestThirty] },
+  ];
+  hp.applyChanlunUpdate(
+    initial,
+    Object.assign({}, base, { from: 0, to: 5500, firstDataRequest: 'true' }),
+  );
+
+  const backward = pollResponse([500, 900, 1000], [9, 10, 10], []);
+  backward.xd_zss = [seg(500, 11, 1000, 9, 0)];
+  backward.higher_zs = [
+    { period: '5m', zss: backward.xd_zss },
+    { period: '30m', zss: [seg(500, 3, 1000, 2, 0)] },
+  ];
+  hp.applyChanlunUpdate(
+    backward,
+    Object.assign({}, base, { from: 0, to: 3000, firstDataRequest: 'false' }),
+  );
+
+  const stored = hp.bars_result.get(symbol.toLowerCase() + resolution);
+  const thirty = stored.higher_zs.find((group) => group.period === '30m');
+  assert.equal(thirty.zss[0].points[0].price, 30);
+  const current = stored.higher_zs.find((group) => group.period === '5m');
+  assert.deepStrictEqual(current.zss, stored.xd_zss);
+});
+
+test('较旧的 SSE full_snapshot 不得回退已缓存的中枢范围', () => {
+  const df = makeDatafeed();
+  const hp = df._historyProvider;
+  const symbol = 'a:sh.513100';
+  const resolution = '5';
+  const latestCenter = seg(2000, 22, 2500, 20, 0);
+  const latest = fullResponse([2000, 2500], [20, 22], []);
+  latest.xd_zss = [latestCenter];
+  latest.higher_zs = [{ period: '5m', zss: [latestCenter] }];
+  hp.applyChanlunUpdate(
+    latest,
+    { symbol, resolution, from: 0, to: 2500, firstDataRequest: 'true' },
+  );
+
+  const staleCenter = seg(1000, 99, 1500, 1, 0);
+  const stale = pollResponse([1000, 1500], [8, 9], []);
+  stale.full_snapshot = true;
+  stale.xd_zss = [staleCenter];
+  stale.higher_zs = [{ period: '5m', zss: [staleCenter] }];
+  hp.applyChanlunUpdate(stale, { symbol, resolution });
+
+  const stored = hp.bars_result.get(symbol.toLowerCase() + resolution);
+  assert.equal(stored.xd_zss[0].points[0].price, 22);
+  assert.equal(stored.higher_zs[0].zss[0].points[0].price, 22);
+  assert.deepStrictEqual(Array.from(stored.times), [2000 * 1000, 2500 * 1000]);
+});
+
 test('向左滚动且旧窗口自带非空买卖点时不应丢弃右侧最近买卖点(Round11 BUG2 回归)', () => {
   const df = makeDatafeed();
   const hp = df._historyProvider;

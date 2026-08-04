@@ -2,19 +2,46 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import ast
+from collections.abc import Callable, Mapping
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
+import hashlib
+import json
 import math
+import os
+from pathlib import Path
 import re
 from threading import RLock
 import unicodedata
+from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 import pandas as pd
 from xtquant import xtdata
 
 from chanlun.decision_support.fingerprints import normalize_datetime, sha256_json
+from chanlun.decision_support.trading_system.sector_strength import (
+    SectorStrengthBatch,
+    SectorStrengthEvidence,
+    build_horizontal_sector_strength_batch,
+)
+from chanlun.decision_support.trading_system.qmt_causal_factor_adjustment import (
+    QMT_CAUSAL_FACTOR_ADJUSTMENT_CONTRACT_ID,
+    QmtCausalFactorEvent,
+    apply_qmt_causal_factor_adjustment,
+    build_causal_sector_price_basis_metadata,
+    qmt_causal_factor_events_from_frame,
+    qmt_causal_factor_revision,
+)
+from chanlun.decision_support.trading_system.v3_etf_proxy_facts import DailyMarketBar
+from chanlun.decision_support.trading_system.v3_selection import (
+    CompletedDailyClose,
+    SectorMemberHistory,
+)
+from chanlun.decision_support.trading_system.v3_trading_session import (
+    build_trading_session_evidence,
+)
 from chanlun.exchange.exchange_qmt import _XTDATA_NATIVE_LOCK
 from chanlun.exchange.price_basis import (
     attach_price_basis_metadata,
@@ -24,17 +51,403 @@ from chanlun.exchange.price_basis import (
 
 QMT_GICS3_CATALOG_SOURCE = "qmt_gics3_components"
 QMT_GICS3_COMPOSITE_PROVIDER = "qmt-gics3-composite"
-QMT_GICS3_COMPOSITE_ADJUSTMENT = "none-stable-24-member-median-v2"
+QMT_GICS3_COMPOSITE_ADJUSTMENT = (
+    "causal-factor-stable-24-member-median-v5"
+)
 QMT_GICS3_COMPOSITE_MEMBER_LIMIT = 24
+QMT_GICS3_COMPOSITE_MINIMUM_MEMBER_COUNT = 8
+QMT_GICS3_COMPOSITE_MINIMUM_BAR_COVERAGE = Decimal("0.60")
+QMT_GICS3_COMPOSITE_CALENDAR_GRID_CONTRACT = (
+    "QMT_SH_TRADING_CALENDAR_CONTIGUOUS_VISIBLE_SUFFIX_V1"
+)
+QMT_GICS3_COMPOSITE_MEMBER_MASK_CONTRACT = (
+    "BIT_I_IS_SECTOR_COMPOSITE_MEMBERS_I_V1"
+)
+QMT_GICS3_COMPOSITE_METHOD = (
+    "DETERMINISTIC_HASH_SAMPLE_CAUSAL_FACTOR_MEDIAN_RETURN_CHAIN_V5"
+)
+QMT_CURRENT_A_SHARE_SECTOR = "沪深京A股"
+QMT_SECTOR_STRENGTH_PRICE_BASIS_CONTRACT = (
+    "QMT_FRONT_RATIO_TERMINAL_CLOSE_NORMALIZATION_V1"
+)
+QMT_SECTOR_STRENGTH_QMT_DIVIDEND_TYPE = "front_ratio"
+QMT_SECTOR_STRENGTH_ADJUSTMENT = (
+    "front-ratio-terminal-close-normalized-v1"
+)
 
 _GICS3_PREFIX = "GICS3"
 _QMT_A_SHARE_CODE = re.compile(r"^([0-9]{6})\.(SH|SZ|BJ)$")
 _NORMALIZED_A_SHARE_CODE = re.compile(r"^(SH|SZ|BJ)\.([0-9]{6})$")
-_FREQUENCY_SECONDS = {"5m": 5 * 60, "30m": 30 * 60}
+_FREQUENCY_SECONDS = {"5m": 5 * 60, "30m": 30 * 60, "1d": 24 * 60 * 60}
 _FIELDS = ("time", "open", "high", "low", "close", "volume")
 _PRICE_FIELDS = ("open", "high", "low", "close")
 _COMPOSITE_QUANTUM = Decimal("0.000001")
 _SHANGHAI = ZoneInfo("Asia/Shanghai")
+# The M/W/D convergence gate requires 480 completed daily observations.  At
+# two natural years, 550 calendar days can expose only about 390 A-share
+# sessions, making a valid sector gate mechanically impossible regardless of
+# how much 5m history QMT has.  This is evidence lookback, not a signal
+# parameter; retain ample holiday/suspension margin around the 480-session
+# requirement and validate the exact returned exchange calendar below.
+_QMT_TRADING_CALENDAR_LOOKBACK_DAYS = 1100
+_DAILY_FIELDS = ("time", "open", "high", "low", "close", "volume")
+_FACT_CACHE_ENVELOPE_SCHEMA = "chanlun-qmt-sector-fact-cache-envelope/v1"
+_COMPOSITE_FACT_SCHEMA = "chanlun-qmt-sector-composite-facts/v3"
+_DAILY_FACT_SCHEMA = "chanlun-qmt-sector-daily-facts/v3"
+_MEMBER_STATUS_FACT_SCHEMA = "chanlun-qmt-sector-member-status-facts/v1"
+_MEMBER_LISTING_FACT_SCHEMA = "chanlun-qmt-sector-member-listing-facts/v1"
+_FACT_PRODUCER_SCHEMA = "chanlun-qmt-sector-fact-producer/v2"
+_SHA256_ID = re.compile(r"^sha256:[0-9a-f]{64}$")
+
+
+def _producer_ast_manifest(
+    source: str,
+    *,
+    roots: tuple[str, ...],
+) -> tuple[tuple[str, str], ...]:
+    """Return the transitive top-level implementation used by ``roots``.
+
+    Hashing this entire large provider file made a daily-status-only change
+    invalidate all 112 intraday composite fact files.  A hand-maintained list
+    of helper names would be unsafe in the opposite direction: a newly called
+    helper could be omitted accidentally.  The AST closure follows every
+    referenced top-level definition and constant automatically, giving each
+    fact family the narrowest complete code identity.
+    """
+
+    tree = ast.parse(source)
+    definitions: dict[str, ast.AST] = {}
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            definitions[node.name] = node
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    definitions[target.id] = node
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            definitions[node.target.id] = node
+    if any(root not in definitions for root in roots):
+        raise RuntimeError("QMT fact producer root is unavailable")
+    pending = list(roots)
+    selected: set[str] = set()
+    while pending:
+        name = pending.pop()
+        if name in selected:
+            continue
+        selected.add(name)
+        node = definitions[name]
+        for child in ast.walk(node):
+            if (
+                isinstance(child, ast.Name)
+                and child.id in definitions
+                and child.id not in selected
+            ):
+                pending.append(child.id)
+    return tuple(
+        (
+            name,
+            ast.dump(
+                definitions[name],
+                annotate_fields=True,
+                include_attributes=False,
+            ),
+        )
+        for name in sorted(selected)
+    )
+
+
+def _qmt_fact_family_revision(*, family: str, roots: tuple[str, ...]) -> str:
+    package_root = Path(__file__).resolve().parents[1]
+    provider = Path(__file__).resolve()
+    manifest = _producer_ast_manifest(
+        provider.read_text(encoding="utf-8"),
+        roots=roots,
+    )
+    shared_paths = (
+        package_root / "exchange" / "price_basis.py",
+        package_root / "decision_support" / "fingerprints.py",
+        package_root
+        / "decision_support"
+        / "trading_system"
+        / "v3_etf_proxy_facts.py",
+        package_root
+        / "decision_support"
+        / "trading_system"
+        / "qmt_causal_factor_adjustment.py",
+    )
+    shared = tuple(
+        {
+            "path": path.relative_to(package_root).as_posix(),
+            "sha256": "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest(),
+        }
+        for path in shared_paths
+    )
+    return sha256_json(
+        {
+            "schema": _FACT_PRODUCER_SCHEMA,
+            "family": family,
+            "provider_module": provider.relative_to(package_root).as_posix(),
+            "provider_ast_manifest": manifest,
+            "shared_files": shared,
+            "minimum_market_data_frequency": "1m",
+            "tick_data_used": False,
+            "real_account_access": False,
+            "real_order_transport": False,
+        }
+    )
+
+
+def qmt_sector_composite_fact_producer_revision() -> str:
+    """Identity of only the normalized 5m/30m composite fact producer."""
+
+    return _qmt_fact_family_revision(
+        family="INTRADAY_SECTOR_COMPOSITE",
+        roots=("QmtSectorCompositeSource",),
+    )
+
+
+def qmt_sector_daily_fact_producer_revision() -> str:
+    """Identity of the daily member bars and suspension-fact producer."""
+
+    return _qmt_fact_family_revision(
+        family="DAILY_MEMBER_STRENGTH_AND_STATUS",
+        roots=("QmtSectorStrengthSource",),
+    )
+
+
+def qmt_sector_fact_producer_revision() -> str:
+    """Compatibility identity containing both independent fact families."""
+
+    return sha256_json(
+        {
+            "schema": _FACT_PRODUCER_SCHEMA,
+            "composite_revision": qmt_sector_composite_fact_producer_revision(),
+            "daily_revision": qmt_sector_daily_fact_producer_revision(),
+        }
+    )
+
+
+def _fact_cache_options(
+    path: Path | str | None,
+    revision: str | None,
+    *,
+    path_field: str,
+) -> tuple[Path | None, str | None]:
+    if (path is None) != (revision is None):
+        raise ValueError(f"{path_field} and fact_cache_revision must be set together")
+    if path is None:
+        return None, None
+    if not isinstance(revision, str) or _SHA256_ID.fullmatch(revision) is None:
+        raise ValueError("fact_cache_revision must be a sha256 identity")
+    return Path(path).resolve(), revision
+
+
+def _fact_mapping(value: object, field_name: str) -> Mapping[str, object]:
+    if not isinstance(value, Mapping) or any(
+        not isinstance(key, str) for key in value
+    ):
+        raise ValueError(f"{field_name} must be a string-keyed mapping")
+    return value
+
+
+def _read_fact_payload(path: Path) -> Mapping[str, object] | None:
+    """Return one hash-authenticated payload, otherwise fail closed to a miss."""
+
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+        outer = _fact_mapping(document, "fact cache envelope")
+        payload = _fact_mapping(outer.get("payload"), "fact cache payload")
+        if (
+            outer.get("schema") != _FACT_CACHE_ENVELOPE_SCHEMA
+            or outer.get("content_sha256") != sha256_json(payload)
+        ):
+            return None
+        return payload
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def _write_fact_payload(path: Path, payload: Mapping[str, object]) -> None:
+    """Publish one content-authenticated JSON fact document atomically."""
+
+    document = {
+        "schema": _FACT_CACHE_ENVELOPE_SCHEMA,
+        "content_sha256": sha256_json(payload),
+        "payload": dict(payload),
+    }
+    encoded = json.dumps(
+        document,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(
+        f".{path.name}.{os.getpid()}.{uuid4().hex}.tmp"
+    )
+    try:
+        with temporary.open("x", encoding="utf-8", newline="\n") as handle:
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _qmt_calendar_date(value: object) -> date:
+    if isinstance(value, bool):
+        raise TypeError("QMT trading calendar timestamp cannot be a boolean")
+    if isinstance(value, str) and re.fullmatch(r"\d{8}", value):
+        return datetime.strptime(value, "%Y%m%d").date()
+    if not isinstance(value, (int, float)):
+        raise TypeError("QMT trading calendar timestamp is invalid")
+    return (
+        pd.to_datetime(value, unit="ms", utc=True)
+        .tz_convert("Asia/Shanghai")
+        .date()
+    )
+
+
+def qmt_trading_session_evidence(
+    *,
+    session: date,
+    observed_at: datetime,
+) -> dict[str, object]:
+    """Read only the QMT calendar APIs and return fail-closed evidence.
+
+    The deployed QMT build publishes completed historical sessions only.  Its
+    empty same-day response is therefore unresolved until the target itself,
+    or a later trading session, has been published.  Native exceptions are
+    converted to an explicit unresolved document so callers never fall back
+    to a weekday guess.
+    """
+
+    observed = normalize_datetime(observed_at, "observed_at")
+    if isinstance(session, datetime) or not isinstance(session, date):
+        raise TypeError("session must be a date")
+    if session.weekday() >= 5 or session > observed.date():
+        return build_trading_session_evidence(
+            session=session,
+            observed_at=observed,
+            query_attempted=False,
+            query_succeeded=False,
+        )
+
+    try:
+        # The CLI status command is a machine-readable JSON surface.  QMT's
+        # optional connection greeting is operational noise, not evidence.
+        if hasattr(xtdata, "enable_hello"):
+            xtdata.enable_hello = False
+        with _XTDATA_NATIVE_LOCK:
+            response = xtdata.get_trading_dates(
+                "SH",
+                session.strftime("%Y%m%d"),
+                session.strftime("%Y%m%d"),
+                -1,
+            )
+            published_raw = xtdata.get_market_last_trade_date("SH")
+        if type(response) is not list:
+            raise TypeError("QMT trading dates response must be a list")
+        returned = tuple(sorted({_qmt_calendar_date(value) for value in response}))
+        if any(value != session for value in returned):
+            raise ValueError("QMT trading dates escaped the target interval")
+        try:
+            published_through = _qmt_calendar_date(published_raw)
+        except (TypeError, ValueError, OverflowError):
+            published_through = session if returned else None
+        return build_trading_session_evidence(
+            session=session,
+            observed_at=observed,
+            returned_sessions=returned,
+            published_through=published_through,
+            query_attempted=True,
+            query_succeeded=True,
+        )
+    except Exception:
+        return build_trading_session_evidence(
+            session=session,
+            observed_at=observed,
+            query_attempted=True,
+            query_succeeded=False,
+        )
+
+
+def qmt_trading_sessions(
+    *,
+    start: date,
+    end: date,
+    observed_at: datetime,
+) -> tuple[date, ...]:
+    """Return an exact published QMT trading-calendar interval.
+
+    This bulk form is used by the higher-timeframe bridge.  It deliberately
+    rejects an unpublished tail instead of filling weekdays or deriving the
+    calendar from the price rows being certified.
+    """
+
+    observed = normalize_datetime(observed_at, "observed_at")
+    if (
+        isinstance(start, datetime)
+        or isinstance(end, datetime)
+        or type(start) is not date
+        or type(end) is not date
+        or start > end
+        or end > observed.date()
+    ):
+        raise ValueError("QMT trading-calendar interval is invalid")
+    if hasattr(xtdata, "enable_hello"):
+        xtdata.enable_hello = False
+    with _XTDATA_NATIVE_LOCK:
+        response = xtdata.get_trading_dates(
+            "SH",
+            start.strftime("%Y%m%d"),
+            end.strftime("%Y%m%d"),
+            -1,
+        )
+        published_raw = xtdata.get_market_last_trade_date("SH")
+    if type(response) is not list:
+        raise RuntimeError("QMT trading calendar is unavailable")
+    sessions = tuple(sorted({_qmt_calendar_date(value) for value in response}))
+    if any(value < start or value > end for value in sessions):
+        raise RuntimeError("QMT trading calendar escaped the requested interval")
+    published_through = _qmt_calendar_date(published_raw)
+    if published_through < end:
+        raise RuntimeError("QMT trading calendar is not published through interval end")
+    if not sessions:
+        raise RuntimeError("QMT trading calendar interval is empty")
+    return sessions
+
+
+def _latest_completed_qmt_daily_session(observed: datetime) -> date | None:
+    """Return the latest session whose 15:00 daily bar must already exist.
+
+    Before the close, today's daily bar is not yet a completed fact, so the
+    search starts on the prior calendar day.  At and after 15:00 it starts on
+    the decision date.  Weekends and exchange holidays are skipped only when
+    QMT's official calendar proves they are non-trading sessions; an
+    unavailable or unpublished calendar fails closed instead of guessing.
+    """
+
+    cutoff = observed.date()
+    if observed.timetz().replace(tzinfo=None) < time(15, 0):
+        cutoff -= timedelta(days=1)
+    for offset in range(32):
+        candidate = cutoff - timedelta(days=offset)
+        evidence = qmt_trading_session_evidence(
+            session=candidate,
+            observed_at=observed,
+        )
+        classification = evidence.get("classification")
+        if classification == "TRADING_SESSION":
+            return candidate
+        if classification != "NON_TRADING_SESSION":
+            return None
+    return None
 
 
 def _canonical_sector_name(value: str) -> tuple[str, str] | None:
@@ -63,8 +476,89 @@ def _qmt_code(value: str) -> str:
     return f"{digits}.{market}"
 
 
-def build_qmt_gics3_sector_catalog() -> dict[str, object]:
+def _catalog_document(
+    *,
+    captures: list[tuple[str, str, list[object]]],
+    captured_at: datetime,
+    capture_transport: str,
+    capture_evidence: Mapping[str, object] | None = None,
+    eligible_member_codes: frozenset[str] | None = None,
+) -> dict[str, object]:
+    if not captures:
+        raise RuntimeError("QMT GICS3 sector catalog is empty")
+    sectors: list[dict[str, object]] = []
+    all_normalized_members: set[str] = set()
+    included_members: set[str] = set()
+    for source_key, name, raw_members in captures:
+        normalized_members = {
+            code
+            for code in (
+                _normalized_a_share_code(value) for value in raw_members
+            )
+            if code is not None
+        }
+        all_normalized_members.update(normalized_members)
+        if eligible_member_codes is not None:
+            normalized_members.intersection_update(eligible_member_codes)
+        included_members.update(normalized_members)
+        members = sorted(normalized_members)
+        sector_id = "qmt-gics3:" + sha256_json(
+            {
+                "schema": "chanlun-qmt-gics3-sector/v1",
+                "source_key": source_key,
+            }
+        ).removeprefix("sha256:")
+        sectors.append(
+            {
+                "sector_id": sector_id,
+                "name": name,
+                "source_key": source_key,
+                "member_codes": members,
+            }
+        )
+    sectors.sort(key=lambda row: str(row["source_key"]))
+    revision = sha256_json(
+        {
+            "schema": "chanlun-qmt-gics3-catalog/v1",
+            "sectors": sectors,
+        }
+    )
+    evidence = dict(capture_evidence or {})
+    excluded_members = all_normalized_members - included_members
+    evidence.update(
+        {
+            "membership_universe_filter_applied": (
+                eligible_member_codes is not None
+            ),
+            "unfiltered_gics3_member_count": len(all_normalized_members),
+            "included_gics3_member_count": len(included_members),
+            "excluded_noncurrent_member_count": len(excluded_members),
+            "excluded_noncurrent_members_sha256": sha256_json(
+                tuple(sorted(excluded_members))
+            ),
+        }
+    )
+    return {
+        "source": QMT_GICS3_CATALOG_SOURCE,
+        "captured_at": captured_at.isoformat(),
+        "point_in_time_scope": "CURRENT_CAPTURE_ONLY",
+        "catalog_revision": revision,
+        "sectors": sectors,
+        "capture_transport": capture_transport,
+        "capture_evidence": evidence,
+    }
+
+
+def build_qmt_gics3_sector_catalog(
+    *,
+    captured_at: datetime | None = None,
+) -> dict[str, object]:
     """Capture the current QMT GICS3 catalog without any TDX fallback."""
+
+    captured = normalize_datetime(
+        captured_at or datetime.now(_SHANGHAI),
+        "captured_at",
+    )
 
     with _XTDATA_NATIVE_LOCK:
         source_list = xtdata.get_sector_list()
@@ -74,6 +568,22 @@ def build_qmt_gics3_sector_catalog() -> dict[str, object]:
             or any(type(item) is not str for item in source_list)
         ):
             raise RuntimeError("QMT sector list is unavailable")
+        current_members_raw = xtdata.get_stock_list_in_sector(
+            QMT_CURRENT_A_SHARE_SECTOR,
+            real_timetag=-1,
+        )
+        if type(current_members_raw) is not list or not current_members_raw:
+            raise RuntimeError("QMT current A-share universe is unavailable")
+        current_members = tuple(
+            _normalized_a_share_code(value) for value in current_members_raw
+        )
+        if any(value is None for value in current_members):
+            raise RuntimeError("QMT current A-share universe contains invalid codes")
+        current_a_share_members = frozenset(
+            value for value in current_members if value is not None
+        )
+        if not current_a_share_members:
+            raise RuntimeError("QMT current A-share universe is empty")
         selected: list[tuple[str, str, str]] = []
         canonical_keys: set[str] = set()
         for raw_key in source_list:
@@ -98,61 +608,281 @@ def build_qmt_gics3_sector_catalog() -> dict[str, object]:
                 )
             captures.append((canonical_key, name, list(response)))
 
-    if not captures:
-        raise RuntimeError("QMT GICS3 sector catalog is empty")
-    sectors: list[dict[str, object]] = []
-    for source_key, name, raw_members in captures:
-        members = sorted(
-            {
-                code
-                for code in (
-                    _normalized_a_share_code(value) for value in raw_members
-                )
-                if code is not None
-            }
-        )
-        sector_id = "qmt-gics3:" + sha256_json(
-            {
-                "schema": "chanlun-qmt-gics3-sector/v1",
-                "source_key": source_key,
-            }
-        ).removeprefix("sha256:")
-        sectors.append(
-            {
-                "sector_id": sector_id,
-                "name": name,
-                "source_key": source_key,
-                "member_codes": members,
-            }
-        )
-    revision = sha256_json(
-        {
-            "schema": "chanlun-qmt-gics3-catalog/v1",
-            "sectors": sectors,
-        }
+    return _catalog_document(
+        captures=captures,
+        captured_at=captured,
+        capture_transport="QMT_RPC",
+        capture_evidence={
+            "membership_universe_source": (
+                f"QMT_RPC:{QMT_CURRENT_A_SHARE_SECTOR}"
+            ),
+            "membership_universe_member_count": len(current_a_share_members),
+        },
+        eligible_member_codes=current_a_share_members,
     )
-    return {
-        "source": QMT_GICS3_CATALOG_SOURCE,
-        "catalog_revision": revision,
-        "sectors": sectors,
+
+
+def build_qmt_gics3_sector_catalog_from_local_files(
+    *,
+    qmt_data_dir: Path,
+    captured_at: datetime | None = None,
+) -> dict[str, object]:
+    """Read QMT's own local GICS3 member files without an account/RPC session.
+
+    The directory is only a current local cache.  Its file mtimes and a content
+    manifest are returned as capture evidence so callers can flag staleness;
+    the data is never treated as historical membership before ``captured_at``.
+    """
+
+    captured = normalize_datetime(
+        captured_at or datetime.now(_SHANGHAI),
+        "captured_at",
+    )
+    root = Path(qmt_data_dir).resolve()
+    sector_dir = root / "Sector" / "Temple" / "GICS"
+    if not sector_dir.is_dir():
+        raise RuntimeError(f"QMT local GICS directory is unavailable: {sector_dir}")
+    captures: list[tuple[str, str, list[object]]] = []
+    manifest: list[tuple[str, str, int, str]] = []
+    mtimes: list[datetime] = []
+    for path in sorted(
+        (value for value in sector_dir.iterdir() if value.is_file()),
+        key=lambda value: value.name,
+    ):
+        parsed = _canonical_sector_name(path.name)
+        if parsed is None:
+            continue
+        canonical_key, name = parsed
+        payload = path.read_bytes()
+        try:
+            text = payload.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            text = payload.decode("gb18030")
+        members = [value.strip() for value in text.split(",") if value.strip()]
+        modified = datetime.fromtimestamp(path.stat().st_mtime, tz=_SHANGHAI)
+        mtimes.append(modified)
+        manifest.append(
+            (
+                path.name,
+                "sha256:" + hashlib.sha256(payload).hexdigest(),
+                len(payload),
+                modified.isoformat(),
+            )
+        )
+        captures.append((canonical_key, name, members))
+    if not captures:
+        raise RuntimeError("QMT local GICS3 sector catalog is empty")
+    evidence = {
+        "source_directory": str(sector_dir),
+        "source_file_count": len(manifest),
+        "source_manifest_sha256": sha256_json(
+            {
+                "schema": "chanlun-qmt-local-gics3-files/v1",
+                "files": tuple(manifest),
+            }
+        ),
+        "oldest_source_mtime": min(mtimes).isoformat(),
+        "latest_source_mtime": max(mtimes).isoformat(),
+        "source_age_seconds": max(
+            0,
+            int((captured - max(mtimes)).total_seconds()),
+        ),
+        "membership_universe_source": "UNAVAILABLE_IN_LOCAL_GICS3_FILES",
     }
+    return _catalog_document(
+        captures=captures,
+        captured_at=captured,
+        capture_transport="QMT_LOCAL_SECTOR_FILES",
+        capture_evidence=evidence,
+    )
 
 
 def _empty_composite_frame(
     sector_id: str,
     membership_revision: str,
+    *,
+    members: tuple[str, ...],
+    composite_members: tuple[str, ...],
+    minimum_member_count: int,
+    minimum_bar_coverage: Decimal,
+    maximum_composite_members: int,
+    factor_revision: str | None = None,
 ) -> pd.DataFrame:
     frame = pd.DataFrame(
-        columns=("code", "date", "open", "high", "low", "close", "volume")
+        columns=(
+            "code",
+            "date",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "member_mask",
+        )
     )
-    metadata = build_provider_price_basis_metadata(
-        provider=QMT_GICS3_COMPOSITE_PROVIDER,
-        market="a",
-        code=f"{sector_id}:{membership_revision}",
-        adjustment=QMT_GICS3_COMPOSITE_ADJUSTMENT,
-        structure_price_quantum=_COMPOSITE_QUANTUM,
+    metadata = (
+        build_provider_price_basis_metadata(
+            provider=QMT_GICS3_COMPOSITE_PROVIDER,
+            market="a",
+            code=f"{sector_id}:{membership_revision}",
+            adjustment=QMT_GICS3_COMPOSITE_ADJUSTMENT,
+            structure_price_quantum=_COMPOSITE_QUANTUM,
+        )
+        if factor_revision is None
+        else build_causal_sector_price_basis_metadata(
+            provider=QMT_GICS3_COMPOSITE_PROVIDER,
+            market="a",
+            code=f"{sector_id}:{membership_revision}",
+            adjustment=QMT_GICS3_COMPOSITE_ADJUSTMENT,
+            structure_price_quantum=_COMPOSITE_QUANTUM,
+            factor_revision=factor_revision,
+        )
     )
-    return attach_price_basis_metadata(frame, metadata)
+    result = attach_price_basis_metadata(frame, metadata)
+    return _attach_composite_provenance(
+        result,
+        sector_id=sector_id,
+        membership_revision="sha256:" + membership_revision,
+        members=members,
+        composite_members=composite_members,
+        minimum_member_count=minimum_member_count,
+        minimum_bar_coverage=minimum_bar_coverage,
+        maximum_composite_members=maximum_composite_members,
+        factor_revision=factor_revision,
+    )
+
+
+def _composite_required_member_count(
+    composite_member_count: int,
+    *,
+    minimum_member_count: int,
+    minimum_bar_coverage: Decimal,
+) -> int:
+    return max(
+        minimum_member_count,
+        math.ceil(composite_member_count * float(minimum_bar_coverage)),
+    )
+
+
+def _attach_composite_provenance(
+    frame: pd.DataFrame,
+    *,
+    sector_id: str,
+    membership_revision: str,
+    members: tuple[str, ...],
+    composite_members: tuple[str, ...],
+    minimum_member_count: int,
+    minimum_bar_coverage: Decimal,
+    maximum_composite_members: int,
+    factor_revision: str | None,
+) -> pd.DataFrame:
+    frame.attrs["sector_id"] = sector_id
+    frame.attrs["sector_membership_revision"] = membership_revision
+    frame.attrs["sector_membership_scope"] = "CALLER_SUPPLIED"
+    frame.attrs["sector_members"] = members
+    frame.attrs["sector_composite_members"] = composite_members
+    frame.attrs["sector_composite_member_limit"] = maximum_composite_members
+    frame.attrs["sector_composite_minimum_member_count"] = minimum_member_count
+    frame.attrs["sector_composite_minimum_bar_coverage"] = str(
+        minimum_bar_coverage
+    )
+    frame.attrs["sector_composite_required_member_count"] = (
+        _composite_required_member_count(
+            len(composite_members),
+            minimum_member_count=minimum_member_count,
+            minimum_bar_coverage=minimum_bar_coverage,
+        )
+    )
+    frame.attrs["sector_composite_member_mask_contract"] = (
+        QMT_GICS3_COMPOSITE_MEMBER_MASK_CONTRACT
+    )
+    frame.attrs["sector_composite_member_path_revision"] = (
+        _composite_member_path_revision(frame)
+    )
+    frame.attrs["sector_composite_method"] = QMT_GICS3_COMPOSITE_METHOD
+    frame.attrs["sector_factor_adjustment_contract_id"] = (
+        QMT_CAUSAL_FACTOR_ADJUSTMENT_CONTRACT_ID
+    )
+    frame.attrs["sector_factor_revision"] = factor_revision
+    return frame
+
+
+def _attach_native_daily_composite_provenance(
+    frame: pd.DataFrame,
+    *,
+    sector_id: str,
+    observed_at: datetime,
+) -> pd.DataFrame:
+    """Bind one native-daily advisory to its exact visible rows.
+
+    This deliberately does not claim equivalence with the component-median 5m
+    stream.  The higher-timeframe resolver retains the unreconciled blocker and
+    caps every otherwise favourable result at AMBER.
+    """
+
+    observed = normalize_datetime(observed_at, "observed_at")
+    revision = sha256_json(
+        {
+            "schema": "chanlun-qmt-current-sector-native-daily-base/v1",
+            "sector_id": sector_id,
+            "observed_at": observed,
+            "price_basis_revision": frame.attrs.get("price_basis_revision"),
+            "sector_membership_revision": frame.attrs.get(
+                "sector_membership_revision"
+            ),
+            "sector_factor_revision": frame.attrs.get("sector_factor_revision"),
+            "sector_composite_member_path_revision": frame.attrs.get(
+                "sector_composite_member_path_revision"
+            ),
+            "rows": tuple(
+                {
+                    "date": normalize_datetime(
+                        pd.Timestamp(row.date).to_pydatetime(),
+                        "sector native daily close",
+                    ),
+                    "open": float(row.open),
+                    "high": float(row.high),
+                    "low": float(row.low),
+                    "close": float(row.close),
+                    "volume": float(row.volume),
+                    "member_mask": int(row.member_mask),
+                }
+                for row in frame.itertuples(index=False)
+            ),
+        }
+    )
+    frame.attrs.update(
+        source_base_frequency="native-d",
+        source_base_stream_revision=revision,
+        derived_frequency="d",
+        sector_native_daily_role=(
+            "UNRECONCILED_RESEARCH_MWD_ADVISORY_ONLY"
+        ),
+        sector_native_daily_observed_at=observed.isoformat(),
+    )
+    return frame
+
+
+def _composite_member_path_revision(frame: pd.DataFrame) -> str | None:
+    if frame.empty:
+        return None
+    if "member_mask" not in frame.columns or "date" not in frame.columns:
+        raise ValueError("sector composite member path is unavailable")
+    return sha256_json(
+        {
+            "schema": "chanlun-qmt-sector-composite-member-path/v1",
+            "rows": tuple(
+                {
+                    "date": normalize_datetime(
+                        pd.Timestamp(row.date).to_pydatetime(),
+                        "sector composite member path date",
+                    ),
+                    "member_mask": int(row.member_mask),
+                }
+                for row in frame.itertuples(index=False)
+            ),
+        }
+    )
 
 
 def _copy_frame(value: pd.DataFrame) -> pd.DataFrame:
@@ -161,10 +891,34 @@ def _copy_frame(value: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
+def _tail_composite_frame(
+    value: pd.DataFrame,
+    request_bars: int,
+) -> pd.DataFrame:
+    result = value.tail(request_bars).copy(deep=True).reset_index(drop=True)
+    result.attrs = dict(value.attrs)
+    result.attrs["sector_composite_member_path_revision"] = (
+        _composite_member_path_revision(result)
+    )
+    if result.attrs.get("source_base_frequency") == "native-d":
+        observed_at = result.attrs.get("sector_native_daily_observed_at")
+        if not isinstance(observed_at, str):
+            raise ValueError("sector native-daily observation time is unavailable")
+        result = _attach_native_daily_composite_provenance(
+            result,
+            sector_id=str(result.attrs.get("sector_id") or ""),
+            observed_at=datetime.fromisoformat(observed_at),
+        )
+    return result
+
+
 def _member_ratios(
     raw: Mapping[str, object],
     native_code: str,
     *,
+    normalized_code: str,
+    factor_events: tuple[QmtCausalFactorEvent, ...],
+    frequency: str,
     not_after: datetime,
 ) -> pd.DataFrame | None:
     values: dict[str, pd.Series] = {}
@@ -189,9 +943,15 @@ def _member_ratios(
     frame = frame.dropna(subset=list(_FIELDS))
     if frame.empty:
         return None
-    frame["date"] = pd.to_datetime(frame["time"], unit="ms", utc=True).dt.tz_convert(
-        "Asia/Shanghai"
-    )
+    frame["date"] = pd.to_datetime(
+        frame["time"], unit="ms", utc=True
+    ).dt.tz_convert("Asia/Shanghai")
+    if frequency == "1d":
+        # QMT labels native daily rows at the session boundary.  A daily fact
+        # becomes decision-visible only at the completed A-share close.  Use
+        # that publication time both for the causal cutoff and for exact
+        # exchange-calendar suffix validation below.
+        frame["date"] = frame["date"].dt.normalize() + pd.Timedelta(hours=15)
     cutoff = pd.Timestamp(normalize_datetime(not_after, "not_after"))
     prices = frame.loc[:, list(_PRICE_FIELDS)]
     finite = frame.loc[:, list(_FIELDS)].map(
@@ -209,6 +969,11 @@ def _member_ratios(
     frame = frame.drop_duplicates(subset="date", keep="last")
     if len(frame) < 2:
         return None
+    frame = apply_qmt_causal_factor_adjustment(
+        frame,
+        code=normalized_code,
+        events=factor_events,
+    )
     previous_close = frame["close"].shift(1)
     result = pd.DataFrame({"date": frame["date"]})
     for field in _PRICE_FIELDS:
@@ -227,9 +992,12 @@ class QmtSectorCompositeSource:
     def __init__(
         self,
         *,
-        minimum_member_count: int = 8,
-        minimum_bar_coverage: Decimal = Decimal("0.60"),
+        minimum_member_count: int = QMT_GICS3_COMPOSITE_MINIMUM_MEMBER_COUNT,
+        minimum_bar_coverage: Decimal = QMT_GICS3_COMPOSITE_MINIMUM_BAR_COVERAGE,
         maximum_composite_members: int = QMT_GICS3_COMPOSITE_MEMBER_LIMIT,
+        progress_callback: Callable[[], None] = lambda: None,
+        fact_cache_directory: Path | str | None = None,
+        fact_cache_revision: str | None = None,
     ) -> None:
         if type(minimum_member_count) is not int or minimum_member_count <= 0:
             raise ValueError("minimum_member_count must be a positive integer")
@@ -246,22 +1014,288 @@ class QmtSectorCompositeSource:
             raise ValueError(
                 "maximum_composite_members must cover minimum_member_count"
             )
+        if not callable(progress_callback):
+            raise TypeError("progress_callback must be callable")
+        cache_directory, cache_revision = _fact_cache_options(
+            fact_cache_directory,
+            fact_cache_revision,
+            path_field="fact_cache_directory",
+        )
         self._minimum_member_count = minimum_member_count
         self._minimum_bar_coverage = minimum_bar_coverage
         self._maximum_composite_members = maximum_composite_members
+        self._progress_callback = progress_callback
+        self._fact_cache_directory = cache_directory
+        self._fact_cache_revision = cache_revision
         self._lock = RLock()
         self._cache: dict[
             tuple[str, str, int], tuple[int, str, pd.DataFrame]
         ] = {}
-        self._prepared_bucket: int | None = None
-        self._attempted_members: set[str] = set()
+        self._prepared_buckets: dict[str, int] = {}
+        self._attempted_members: dict[str, set[str]] = {}
         self._trading_dates_cache: tuple[date, tuple[date, ...]] | None = None
+        self._factor_cache: dict[
+            tuple[date, str], tuple[QmtCausalFactorEvent, ...]
+        ] = {}
+
+    def _report_progress(self) -> None:
+        self._progress_callback()
 
     @staticmethod
     def _bucket(as_of: datetime, frequency: str) -> int:
+        observed = normalize_datetime(as_of, "as_of")
+        if frequency == "1d":
+            # A pre-close and post-close request on the same session must not
+            # share a cache bucket: the 15:00 daily bar is invisible to the
+            # former and visible to the latter.
+            return observed.date().toordinal() * 2 + int(
+                observed.timetz().replace(tzinfo=None) >= time(15)
+            )
         seconds = _FREQUENCY_SECONDS[frequency]
-        epoch = int(normalize_datetime(as_of, "as_of").timestamp())
+        epoch = int(observed.timestamp())
         return epoch - epoch % seconds
+
+    def _fact_path(
+        self,
+        *,
+        sector_id: str,
+        frequency: str,
+        request_bars: int,
+    ) -> Path | None:
+        if self._fact_cache_directory is None:
+            return None
+        identity = sha256_json(
+            {
+                "schema": "chanlun-qmt-sector-composite-fact-path/v1",
+                "sector_id": sector_id,
+                "frequency": frequency,
+                "request_bars": request_bars,
+            }
+        ).removeprefix("sha256:")
+        return self._fact_cache_directory / f"{identity}.json"
+
+    def _fact_identity(
+        self,
+        *,
+        sector_id: str,
+        members: tuple[str, ...],
+        composite_members: tuple[str, ...],
+        membership_revision: str,
+        frequency: str,
+        request_bars: int,
+        expected_closed_at: datetime,
+        calendar_grid_revision: str,
+        factor_revision: str,
+    ) -> dict[str, object]:
+        if self._fact_cache_revision is None:
+            raise RuntimeError("composite fact cache is disabled")
+        return {
+            "schema": _COMPOSITE_FACT_SCHEMA,
+            "producer_revision": self._fact_cache_revision,
+            "sector_id": sector_id,
+            "frequency": frequency,
+            "request_bars": request_bars,
+            "expected_closed_at": expected_closed_at.isoformat(),
+            "calendar_grid_contract": (
+                QMT_GICS3_COMPOSITE_CALENDAR_GRID_CONTRACT
+            ),
+            "calendar_grid_revision": calendar_grid_revision,
+            "members": list(members),
+            "composite_members": list(composite_members),
+            "membership_revision": "sha256:" + membership_revision,
+            "minimum_member_count": self._minimum_member_count,
+            "minimum_bar_coverage": str(self._minimum_bar_coverage),
+            "maximum_composite_members": self._maximum_composite_members,
+            "provider": QMT_GICS3_COMPOSITE_PROVIDER,
+            "adjustment": QMT_GICS3_COMPOSITE_ADJUSTMENT,
+            "factor_adjustment_contract_id": (
+                QMT_CAUSAL_FACTOR_ADJUSTMENT_CONTRACT_ID
+            ),
+            "factor_revision": factor_revision,
+            "minimum_market_data_frequency": "1m",
+            "tick_data_used": False,
+            "real_account_access": False,
+            "real_order_transport": False,
+        }
+
+    @staticmethod
+    def _frame_from_fact_payload(
+        payload: Mapping[str, object],
+        *,
+        identity: Mapping[str, object],
+        observed_at: datetime,
+        expected_closed_at: datetime,
+        expected_closes: tuple[datetime, ...],
+    ) -> pd.DataFrame | None:
+        if any(payload.get(key) != value for key, value in identity.items()):
+            return None
+        raw_rows = payload.get("rows")
+        if not isinstance(raw_rows, list) or not raw_rows:
+            return None
+        if len(raw_rows) > int(identity["request_bars"]):
+            return None
+        rows: list[dict[str, object]] = []
+        closes: list[datetime] = []
+        sector_id = str(identity["sector_id"])
+        composite_member_count = len(tuple(identity["composite_members"]))
+        required_member_count = _composite_required_member_count(
+            composite_member_count,
+            minimum_member_count=int(identity["minimum_member_count"]),
+            minimum_bar_coverage=Decimal(
+                str(identity["minimum_bar_coverage"])
+            ),
+        )
+        try:
+            for index, value in enumerate(raw_rows):
+                row = _fact_mapping(value, f"rows[{index}]")
+                if row.get("code") != sector_id:
+                    return None
+                closed = normalize_datetime(
+                    datetime.fromisoformat(str(row.get("date"))),
+                    f"rows[{index}].date",
+                )
+                if closed > observed_at:
+                    return None
+                prices = {
+                    name: float(row.get(name))
+                    for name in ("open", "high", "low", "close")
+                }
+                volume = float(row.get("volume"))
+                member_mask = row.get("member_mask")
+                if (
+                    any(not math.isfinite(value) or value <= 0 for value in prices.values())
+                    or not math.isfinite(volume)
+                    or not volume.is_integer()
+                    or volume < required_member_count
+                    or volume > composite_member_count
+                    or type(member_mask) is not int
+                    or member_mask <= 0
+                    or member_mask >= 1 << composite_member_count
+                    or member_mask.bit_count() != int(volume)
+                    or prices["high"] < max(prices["open"], prices["close"])
+                    or prices["low"] > min(prices["open"], prices["close"])
+                ):
+                    return None
+                closes.append(closed)
+                rows.append(
+                    {
+                        "code": sector_id,
+                        "date": closed,
+                        **prices,
+                        "volume": volume,
+                        "member_mask": member_mask,
+                    }
+                )
+        except (ArithmeticError, TypeError, ValueError):
+            return None
+        if (
+            closes != sorted(closes)
+            or len(closes) != len(set(closes))
+            or closes[-1] != expected_closed_at
+            or len(closes) > len(expected_closes)
+            or tuple(closes) != expected_closes[-len(closes) :]
+        ):
+            return None
+        result = pd.DataFrame(rows)
+        # Match the provider-normalization dtype exactly.  Constructing a
+        # DataFrame directly from ``zoneinfo`` datetimes produces an equivalent
+        # looking but pandas-distinct timezone dtype on older pandas releases.
+        result["date"] = pd.to_datetime(result["date"], utc=True).dt.tz_convert(
+            "Asia/Shanghai"
+        )
+        metadata = build_causal_sector_price_basis_metadata(
+            provider=QMT_GICS3_COMPOSITE_PROVIDER,
+            market="a",
+            code=(
+                f"{sector_id}:"
+                + str(identity["membership_revision"]).removeprefix("sha256:")
+            ),
+            adjustment=QMT_GICS3_COMPOSITE_ADJUSTMENT,
+            structure_price_quantum=_COMPOSITE_QUANTUM,
+            factor_revision=str(identity["factor_revision"]),
+        )
+        result = attach_price_basis_metadata(result, metadata)
+        result = _attach_composite_provenance(
+            result,
+            sector_id=sector_id,
+            membership_revision=str(identity["membership_revision"]),
+            members=tuple(identity["members"]),
+            composite_members=tuple(identity["composite_members"]),
+            minimum_member_count=int(identity["minimum_member_count"]),
+            minimum_bar_coverage=Decimal(
+                str(identity["minimum_bar_coverage"])
+            ),
+            maximum_composite_members=int(
+                identity["maximum_composite_members"]
+            ),
+            factor_revision=str(identity["factor_revision"]),
+        )
+        if identity.get("frequency") == "1d":
+            result = _attach_native_daily_composite_provenance(
+                result,
+                sector_id=sector_id,
+                observed_at=observed_at,
+            )
+        return result
+
+    def _load_fact_frame(
+        self,
+        *,
+        path: Path | None,
+        identity: Mapping[str, object],
+        observed_at: datetime,
+        expected_closed_at: datetime,
+        expected_closes: tuple[datetime, ...],
+    ) -> pd.DataFrame | None:
+        if path is None:
+            return None
+        self._report_progress()
+        payload = _read_fact_payload(path)
+        self._report_progress()
+        if payload is None:
+            return None
+        return self._frame_from_fact_payload(
+            payload,
+            identity=identity,
+            observed_at=observed_at,
+            expected_closed_at=expected_closed_at,
+            expected_closes=expected_closes,
+        )
+
+    def _persist_fact_frame(
+        self,
+        *,
+        path: Path | None,
+        identity: Mapping[str, object],
+        frame: pd.DataFrame,
+    ) -> None:
+        if path is None or frame.empty:
+            return
+        rows = [
+            {
+                "code": str(item.code),
+                "date": normalize_datetime(
+                    pd.Timestamp(item.date).to_pydatetime(),
+                    "sector fact close",
+                ).isoformat(),
+                "open": repr(float(item.open)),
+                "high": repr(float(item.high)),
+                "low": repr(float(item.low)),
+                "close": repr(float(item.close)),
+                "volume": repr(float(item.volume)),
+                "member_mask": int(item.member_mask),
+            }
+            for item in frame.itertuples(index=False)
+        ]
+        self._report_progress()
+        try:
+            _write_fact_payload(path, {**identity, "rows": rows})
+        except OSError:
+            # Persistence is an optimization.  The already validated live QMT
+            # frame remains usable when the cache volume is temporarily read-only.
+            pass
+        finally:
+            self._report_progress()
 
     def _composite_members(
         self,
@@ -283,17 +1317,27 @@ class QmtSectorCompositeSource:
         return tuple(sorted(ranked[: self._maximum_composite_members]))
 
     @staticmethod
-    def _fresh_native_codes(
+    def _history_bounds_by_native_code(
         raw: object,
         native_codes: tuple[str, ...],
-        expected_closed_at: datetime,
-    ) -> set[str]:
+    ) -> dict[str, tuple[datetime, datetime]]:
+        """Return validated earliest/latest local timestamps per member.
+
+        A count-one freshness probe cannot distinguish a complete local cache
+        from one containing only the newest few bars.  The latter stays
+        permanently "fresh" while the M/W/D convergence gate can never obtain
+        its 480-session left context.  Callers compare both returned boundaries
+        with the exact visible span they require.  Interior absences may be
+        legitimate suspensions; the downstream frozen-sample coverage and exact
+        calendar-grid gates remain responsible for accepting or rejecting them.
+        """
+
         if not isinstance(raw, Mapping):
-            return set()
+            return {}
         source = raw.get("time")
         if not isinstance(source, pd.DataFrame):
-            return set()
-        fresh: set[str] = set()
+            return {}
+        bounds: dict[str, tuple[datetime, datetime]] = {}
         for native_code in native_codes:
             if native_code not in source.index:
                 continue
@@ -301,81 +1345,125 @@ class QmtSectorCompositeSource:
             if not isinstance(row, pd.Series):
                 continue
             values = pd.to_numeric(row, errors="coerce").dropna()
+            values = values[values > 0]
             if values.empty:
                 continue
             try:
-                latest = normalize_datetime(
-                    pd.to_datetime(
-                        values.iloc[-1], unit="ms", utc=True
-                    ).to_pydatetime(),
-                    "latest QMT member bar",
+                returned = tuple(
+                    normalize_datetime(
+                        pd.Timestamp(value).to_pydatetime(),
+                        "QMT member history bar",
+                    )
+                    for value in pd.to_datetime(
+                        values,
+                        unit="ms",
+                        utc=True,
+                        errors="coerce",
+                    ).dropna()
                 )
             except (OverflowError, TypeError, ValueError):
                 continue
-            if latest >= expected_closed_at:
-                fresh.add(native_code)
-        return fresh
+            if returned:
+                bounds[native_code] = (min(returned), max(returned))
+        return bounds
 
     def _prepare_history(
         self,
         *,
         members: tuple[str, ...],
         as_of: datetime,
+        expected_closes: tuple[datetime, ...],
+        required_bars: int,
+        frequency: str = "5m",
     ) -> None:
-        bucket = self._bucket(as_of, "5m")
+        if frequency not in {"5m", "1d"}:
+            raise ValueError("QMT sector history base must be 5m or 1d")
+        bucket = self._bucket(as_of, frequency)
         with self._lock:
-            if self._prepared_bucket != bucket:
-                self._prepared_bucket = bucket
-                self._attempted_members = set()
-            attempted = set(self._attempted_members)
+            if self._prepared_buckets.get(frequency) != bucket:
+                self._prepared_buckets[frequency] = bucket
+                self._attempted_members[frequency] = set()
+            attempted = set(self._attempted_members.get(frequency, set()))
         native_by_member = {code: _qmt_code(code) for code in members}
         native_codes = tuple(native_by_member.values())
+        self._report_progress()
         with _XTDATA_NATIVE_LOCK:
             latest = xtdata.get_market_data(
                 field_list=["time"],
                 stock_list=list(native_codes),
-                period="5m",
+                period=frequency,
                 start_time="",
                 end_time=as_of.strftime("%Y%m%d%H%M%S"),
-                count=1,
+                count=required_bars + 32,
                 dividend_type="none",
                 fill_data=False,
             )
-        fresh = self._fresh_native_codes(
+        self._report_progress()
+        if type(required_bars) is not int or required_bars <= 0:
+            raise ValueError("required_bars must be a positive integer")
+        if not expected_closes:
+            raise ValueError("expected_closes must not be empty")
+        required = expected_closes[-required_bars:]
+        bounds = self._history_bounds_by_native_code(
             latest,
             native_codes,
-            self._expected_closed_at(as_of, "5m"),
         )
+        ready = {
+            code
+            for code, (earliest, newest) in bounds.items()
+            if earliest <= required[0] and newest >= required[-1]
+        }
+        shallow = {
+            code
+            for code in native_codes
+            if code not in bounds or bounds[code][0] > required[0]
+        }
         pending = tuple(
             code
             for code in members
-            if native_by_member[code] not in fresh and code not in attempted
+            if native_by_member[code] not in ready and code not in attempted
         )
         completed_attempts: set[str] = set()
         for code in pending:
             try:
+                self._report_progress()
                 with _XTDATA_NATIVE_LOCK:
+                    native_code = native_by_member[code]
+                    repair_left_history = native_code in shallow
                     xtdata.download_history_data(
-                        native_by_member[code],
-                        "5m",
-                        start_time="",
-                        end_time="",
-                        incrementally=True,
+                        native_code,
+                        frequency,
+                        start_time=(
+                            required[0].strftime("%Y%m%d%H%M%S")
+                            if repair_left_history
+                            else ""
+                        ),
+                        end_time=(
+                            required[-1].strftime("%Y%m%d%H%M%S")
+                            if repair_left_history
+                            else ""
+                        ),
+                        incrementally=not repair_left_history,
                     )
+                self._report_progress()
             except Exception:
                 continue
             finally:
                 completed_attempts.add(code)
         with self._lock:
-            if self._prepared_bucket == bucket:
-                self._attempted_members.update(completed_attempts)
+            if self._prepared_buckets.get(frequency) == bucket:
+                self._attempted_members.setdefault(frequency, set()).update(
+                    completed_attempts
+                )
 
     @staticmethod
     def _session_closes(
         trading_day: date,
         frequency: str,
     ) -> tuple[datetime, ...]:
-        if frequency == "30m":
+        if frequency == "1d":
+            slots = ((15, 0),)
+        elif frequency == "30m":
             slots = (
                 (10, 0),
                 (10, 30),
@@ -410,13 +1498,18 @@ class QmtSectorCompositeSource:
             cached = self._trading_dates_cache
             if cached is not None and cached[0] == observed_day:
                 return cached[1]
+            self._report_progress()
             with _XTDATA_NATIVE_LOCK:
                 response = xtdata.get_trading_dates(
                     "SH",
-                    (as_of - timedelta(days=45)).strftime("%Y%m%d"),
+                    (
+                        as_of
+                        - timedelta(days=_QMT_TRADING_CALENDAR_LOOKBACK_DAYS)
+                    ).strftime("%Y%m%d"),
                     as_of.strftime("%Y%m%d"),
                     -1,
                 )
+            self._report_progress()
             if type(response) is not list or not response:
                 raise RuntimeError("QMT trading calendar is unavailable")
             try:
@@ -439,11 +1532,11 @@ class QmtSectorCompositeSource:
             self._trading_dates_cache = (observed_day, days)
             return days
 
-    def _expected_closed_at(
+    def _expected_closes(
         self,
         as_of: datetime,
         frequency: str,
-    ) -> datetime:
+    ) -> tuple[datetime, ...]:
         candidates = tuple(
             close
             for trading_day in self._trading_dates(as_of)
@@ -452,7 +1545,69 @@ class QmtSectorCompositeSource:
         )
         if not candidates:
             raise RuntimeError("QMT trading calendar has no closed sector bar")
-        return max(candidates)
+        return candidates
+
+    def _expected_closed_at(
+        self,
+        as_of: datetime,
+        frequency: str,
+    ) -> datetime:
+        return self._expected_closes(as_of, frequency)[-1]
+
+    def _causal_factor_snapshot(
+        self,
+        *,
+        members: tuple[str, ...],
+        as_of: datetime,
+    ) -> tuple[
+        dict[str, tuple[QmtCausalFactorEvent, ...]],
+        str,
+    ]:
+        """Read each member's factor ledger once per decision day.
+
+        Empty DataFrames are valid proof that a member has no event in the
+        bounded history.  Missing, malformed, or failing factor responses are
+        not treated as an empty ledger: the sector source fails closed.
+        """
+
+        observed_day = as_of.date()
+        not_before = observed_day - timedelta(
+            days=_QMT_TRADING_CALENDAR_LOOKBACK_DAYS
+        )
+        output: dict[str, tuple[QmtCausalFactorEvent, ...]] = {}
+        for code in members:
+            key = (observed_day, code)
+            with self._lock:
+                cached = self._factor_cache.get(key)
+            if cached is None:
+                self._report_progress()
+                try:
+                    with _XTDATA_NATIVE_LOCK:
+                        raw = xtdata.get_divid_factors(
+                            _qmt_code(code),
+                            not_before.strftime("%Y%m%d"),
+                            observed_day.strftime("%Y%m%d"),
+                        )
+                    cached = qmt_causal_factor_events_from_frame(
+                        code=code,
+                        frame=raw,
+                        not_before=not_before,
+                        not_after=observed_day,
+                    )
+                except Exception as exc:
+                    raise RuntimeError(
+                        f"QMT causal factor ledger unavailable for {code}"
+                    ) from exc
+                self._report_progress()
+                with self._lock:
+                    self._factor_cache[key] = cached
+            output[code] = cached
+        revision = qmt_causal_factor_revision(
+            members=members,
+            events_by_code=output,
+            known_through=observed_day,
+        )
+        return output, revision
 
     def frame(
         self,
@@ -469,7 +1624,7 @@ class QmtSectorCompositeSource:
         if not isinstance(sector_name, str) or not sector_name.strip():
             raise ValueError("sector_name is required")
         if frequency not in _FREQUENCY_SECONDS:
-            raise ValueError("QMT sector frequency must be 5m or 30m")
+            raise ValueError("QMT sector frequency must be 5m, 30m or 1d")
         if type(request_bars) is not int or request_bars <= 0:
             raise ValueError("request_bars must be a positive integer")
         if (
@@ -498,16 +1653,130 @@ class QmtSectorCompositeSource:
                 and cached[1] == membership_revision
             ):
                 return _copy_frame(cached[2])
+            supersets = tuple(
+                (cached_request_bars, cached_value)
+                for (
+                    cached_sector_id,
+                    cached_frequency,
+                    cached_request_bars,
+                ), cached_value in self._cache.items()
+                if cached_sector_id == sector_id
+                and cached_frequency == frequency
+                and cached_request_bars > request_bars
+                and cached_value[0] == bucket
+                and cached_value[1] == membership_revision
+                and len(cached_value[2]) >= request_bars
+            )
+            if supersets:
+                _, reusable = min(supersets, key=lambda item: item[0])
+                sliced = _tail_composite_frame(reusable[2], request_bars)
+                self._cache[cache_key] = (
+                    bucket,
+                    membership_revision,
+                    _copy_frame(sliced),
+                )
+                return _copy_frame(sliced)
 
-        empty = _empty_composite_frame(sector_id, membership_revision)
+        empty = _empty_composite_frame(
+            sector_id,
+            membership_revision,
+            members=members,
+            composite_members=composite_members,
+            minimum_member_count=self._minimum_member_count,
+            minimum_bar_coverage=self._minimum_bar_coverage,
+            maximum_composite_members=self._maximum_composite_members,
+        )
         if len(members) < self._minimum_member_count:
             result = empty
         else:
+            factor_events_by_code, factor_revision = (
+                self._causal_factor_snapshot(
+                    members=composite_members,
+                    as_of=observed_at,
+                )
+            )
+            empty = _empty_composite_frame(
+                sector_id,
+                membership_revision,
+                members=members,
+                composite_members=composite_members,
+                minimum_member_count=self._minimum_member_count,
+                minimum_bar_coverage=self._minimum_bar_coverage,
+                maximum_composite_members=self._maximum_composite_members,
+                factor_revision=factor_revision,
+            )
+            expected_closes = self._expected_closes(
+                observed_at,
+                frequency,
+            )
+            expected_closed_at = expected_closes[-1]
+            calendar_grid_revision = sha256_json(
+                {
+                    "schema": "chanlun-qmt-sector-calendar-grid/v1",
+                    "frequency": frequency,
+                    "expected_closes": expected_closes,
+                }
+            )
+            fact_path = self._fact_path(
+                sector_id=sector_id,
+                frequency=frequency,
+                request_bars=request_bars,
+            )
+            fact_identity = (
+                None
+                if self._fact_cache_revision is None
+                else self._fact_identity(
+                    sector_id=sector_id,
+                    members=members,
+                    composite_members=composite_members,
+                    membership_revision=membership_revision,
+                    frequency=frequency,
+                    request_bars=request_bars,
+                    expected_closed_at=expected_closed_at,
+                    calendar_grid_revision=calendar_grid_revision,
+                    factor_revision=factor_revision,
+                )
+            )
+            persisted = (
+                None
+                if fact_identity is None
+                else self._load_fact_frame(
+                    path=fact_path,
+                    identity=fact_identity,
+                    observed_at=observed_at,
+                    expected_closed_at=expected_closed_at,
+                    expected_closes=expected_closes,
+                )
+            )
+            if persisted is not None:
+                with self._lock:
+                    self._cache[cache_key] = (
+                        bucket,
+                        membership_revision,
+                        _copy_frame(persisted),
+                    )
+                return _copy_frame(persisted)
+            base_frequency = "1d" if frequency == "1d" else "5m"
+            base_expected_closes = (
+                expected_closes
+                if frequency in {"5m", "1d"}
+                else self._expected_closes(observed_at, "5m")
+            )
+            required_base_bars = min(
+                len(base_expected_closes),
+                request_bars + 1
+                if frequency in {"5m", "1d"}
+                else request_bars * 6 + 1,
+            )
             self._prepare_history(
                 members=composite_members,
                 as_of=observed_at,
+                expected_closes=base_expected_closes,
+                required_bars=required_base_bars,
+                frequency=base_frequency,
             )
             native_codes = tuple(_qmt_code(code) for code in composite_members)
+            self._report_progress()
             with _XTDATA_NATIVE_LOCK:
                 raw = xtdata.get_market_data(
                     field_list=list(_FIELDS),
@@ -519,33 +1788,42 @@ class QmtSectorCompositeSource:
                     dividend_type="none",
                     fill_data=False,
                 )
+            self._report_progress()
             if not isinstance(raw, Mapping):
                 result = empty
             else:
                 member_frames: list[pd.DataFrame] = []
-                for native_code in native_codes:
+                for member_index, (normalized_code, native_code) in enumerate(
+                    zip(composite_members, native_codes, strict=True)
+                ):
                     ratios = _member_ratios(
                         raw,
                         native_code,
+                        normalized_code=normalized_code,
+                        factor_events=factor_events_by_code[normalized_code],
+                        frequency=frequency,
                         not_after=observed_at,
                     )
                     if ratios is None:
                         continue
                     ratios.insert(0, "member", native_code)
+                    ratios.insert(1, "member_bit", 1 << member_index)
                     member_frames.append(ratios)
                 if len(member_frames) < self._minimum_member_count:
                     result = empty
                 else:
                     facts = pd.concat(member_frames, ignore_index=True)
-                    required_count = max(
-                        self._minimum_member_count,
-                        math.ceil(
-                            len(member_frames)
-                            * float(self._minimum_bar_coverage)
-                        ),
+                    required_count = _composite_required_member_count(
+                        len(composite_members),
+                        minimum_member_count=self._minimum_member_count,
+                        minimum_bar_coverage=self._minimum_bar_coverage,
                     )
                     grouped = facts.groupby("date", sort=True).agg(
                         member_count=("member", "nunique"),
+                        member_mask=(
+                            "member_bit",
+                            lambda values: sum(set(int(value) for value in values)),
+                        ),
                         open_ratio=("open_ratio", "median"),
                         high_ratio=("high_ratio", "median"),
                         low_ratio=("low_ratio", "median"),
@@ -576,33 +1854,67 @@ class QmtSectorCompositeSource:
                                 "low": low_value,
                                 "close": close_value,
                                 "volume": float(item["member_count"]),
+                                "member_mask": int(item["member_mask"]),
                             }
                         )
                         previous_close = close_value
-                    result = pd.DataFrame(rows).tail(request_bars).reset_index(drop=True)
-                    expected_closed_at = self._expected_closed_at(
-                        observed_at,
-                        frequency,
+                    result = (
+                        empty
+                        if not rows
+                        else pd.DataFrame(rows)
+                        .tail(request_bars)
+                        .reset_index(drop=True)
                     )
-                    actual_closed_at = (
-                        None
-                        if result.empty
-                        else normalize_datetime(
-                            pd.Timestamp(result["date"].iloc[-1]).to_pydatetime(),
+                    actual_closes = tuple(
+                        normalize_datetime(
+                            pd.Timestamp(value).to_pydatetime(),
                             "sector bar close",
                         )
+                        for value in result.get("date", ())
                     )
-                    if actual_closed_at != expected_closed_at:
+                    if (
+                        not actual_closes
+                        or len(actual_closes) > len(expected_closes)
+                        or actual_closes
+                        != expected_closes[-len(actual_closes) :]
+                    ):
                         result = empty
                     else:
-                        metadata = build_provider_price_basis_metadata(
+                        metadata = build_causal_sector_price_basis_metadata(
                             provider=QMT_GICS3_COMPOSITE_PROVIDER,
                             market="a",
                             code=f"{sector_id}:{membership_revision}",
                             adjustment=QMT_GICS3_COMPOSITE_ADJUSTMENT,
                             structure_price_quantum=_COMPOSITE_QUANTUM,
+                            factor_revision=factor_revision,
                         )
                         result = attach_price_basis_metadata(result, metadata)
+                        result = _attach_composite_provenance(
+                            result,
+                            sector_id=sector_id,
+                            membership_revision="sha256:" + membership_revision,
+                            members=members,
+                            composite_members=composite_members,
+                            minimum_member_count=self._minimum_member_count,
+                            minimum_bar_coverage=self._minimum_bar_coverage,
+                            maximum_composite_members=(
+                                self._maximum_composite_members
+                            ),
+                            factor_revision=factor_revision,
+                        )
+                        if frequency == "1d":
+                            result = _attach_native_daily_composite_provenance(
+                                result,
+                                sector_id=sector_id,
+                                observed_at=observed_at,
+                            )
+
+            if not result.empty and fact_identity is not None:
+                self._persist_fact_frame(
+                    path=fact_path,
+                    identity=fact_identity,
+                    frame=result,
+                )
 
         if not result.empty:
             with self._lock:
@@ -614,11 +1926,1271 @@ class QmtSectorCompositeSource:
         return _copy_frame(result)
 
 
+def _daily_rows(
+    raw: Mapping[str, object],
+    native_code: str,
+    *,
+    not_after: datetime,
+) -> tuple[DailyMarketBar, ...]:
+    """Convert QMT's field-oriented daily response into completed bars."""
+
+    values: dict[str, pd.Series] = {}
+    shared_columns = None
+    for field in _DAILY_FIELDS:
+        source = raw.get(field)
+        if not isinstance(source, pd.DataFrame) or source.index.has_duplicates:
+            return ()
+        if native_code not in source.index:
+            return ()
+        if shared_columns is None:
+            shared_columns = source.columns
+        elif not source.columns.equals(shared_columns):
+            return ()
+        row = source.loc[native_code]
+        if not isinstance(row, pd.Series):
+            return ()
+        values[field] = row.reset_index(drop=True)
+    frame = pd.DataFrame(values)
+    for field in _DAILY_FIELDS:
+        frame[field] = pd.to_numeric(frame[field], errors="coerce")
+    frame = frame.dropna(subset=list(_DAILY_FIELDS))
+    if frame.empty:
+        return ()
+    frame["date"] = pd.to_datetime(frame["time"], unit="ms", utc=True).dt.tz_convert(
+        "Asia/Shanghai"
+    )
+    prices = frame.loc[:, list(_PRICE_FIELDS)]
+    finite = frame.loc[:, list(_DAILY_FIELDS)].map(
+        lambda value: math.isfinite(float(value))
+    ).all(axis=1)
+    valid = (
+        finite
+        & (prices > 0).all(axis=1)
+        & (frame["volume"] >= 0)
+        & (frame["high"] >= prices.max(axis=1))
+        & (frame["low"] <= prices.min(axis=1))
+    )
+    frame = frame.loc[valid].sort_values("date")
+    cutoff = normalize_datetime(not_after, "not_after")
+    by_session: dict[date, DailyMarketBar] = {}
+    for item in frame.itertuples(index=False):
+        session = pd.Timestamp(item.date).date()
+        known_at = datetime.combine(session, time(15, 0), tzinfo=_SHANGHAI)
+        if known_at > cutoff:
+            continue
+        by_session[session] = DailyMarketBar(
+            session=session,
+            open=Decimal(str(item.open)),
+            high=Decimal(str(item.high)),
+            low=Decimal(str(item.low)),
+            close=Decimal(str(item.close)),
+            volume=Decimal(str(item.volume)),
+            known_at=known_at,
+        )
+    return tuple(by_session[key] for key in sorted(by_session))
+
+
+def _normalize_equal_ratio_daily_bars(
+    rows: tuple[DailyMarketBar, ...],
+) -> tuple[DailyMarketBar, ...]:
+    """Remove the future-wide scale from QMT equal-ratio front adjustment.
+
+    A corporate action after the decision cutoff multiplies every already
+    visible ``front_ratio`` price by the same positive factor.  Dividing all
+    OHLC values by the last visible close therefore makes both the broad-index
+    fractal topology and every member's close-vs-SMA category invariant to
+    that future event.  Actions already effective by the cutoff retain their
+    piecewise adjustment and continue to remove the ex-date discontinuity.
+
+    Twelve decimal places are deliberately retained: this is far below the
+    input price tick while making the persisted fact identity insensitive to
+    harmless binary-float representation noise in QMT's RPC response.
+    """
+
+    if not rows:
+        return ()
+    scale = rows[-1].close
+    if not scale.is_finite() or scale <= 0:
+        raise ValueError("daily strength normalization scale must be positive")
+    quantum = Decimal("0.000000000001")
+
+    def normalized(value: Decimal) -> Decimal:
+        return (value / scale).quantize(quantum)
+
+    return tuple(
+        DailyMarketBar(
+            session=value.session,
+            open=normalized(value.open),
+            high=normalized(value.high),
+            low=normalized(value.low),
+            close=normalized(value.close),
+            volume=value.volume,
+            known_at=value.known_at,
+            completed=value.completed,
+        )
+        for value in rows
+    )
+
+
+class QmtSectorStrengthSource:
+    """Daily all-member horizontal strength source for the live sector scan.
+
+    Unlike the intraday display composite, this path never samples the first
+    24 members.  Every current QMT member is requested and contributes equal
+    weight.  QMT equal-ratio front-adjusted prices are terminal-close
+    normalized so later corporate actions cannot rewrite an earlier ranking.
+    Results are cached by completed daily cutoff and membership hash.
+    """
+
+    def __init__(
+        self,
+        *,
+        benchmark_symbol: str = "SH.000300",
+        request_bars: int = 300,
+        request_chunk_size: int = 400,
+        progress_callback: Callable[[], None] = lambda: None,
+        fact_cache_path: Path | str | None = None,
+        fact_cache_revision: str | None = None,
+        status_fact_directory: Path | str | None = None,
+        status_capture_clock: Callable[[], datetime] = (
+            lambda: datetime.now(_SHANGHAI)
+        ),
+    ) -> None:
+        if _NORMALIZED_A_SHARE_CODE.fullmatch(benchmark_symbol) is None:
+            raise ValueError("benchmark_symbol must be a normalized A-share code")
+        if request_bars < 233 or request_chunk_size <= 0:
+            raise ValueError("daily sector strength history configuration is invalid")
+        if not callable(progress_callback):
+            raise TypeError("progress_callback must be callable")
+        if not callable(status_capture_clock):
+            raise TypeError("status_capture_clock must be callable")
+        cache_path, cache_revision = _fact_cache_options(
+            fact_cache_path,
+            fact_cache_revision,
+            path_field="fact_cache_path",
+        )
+        self._benchmark_symbol = benchmark_symbol
+        self._request_bars = request_bars
+        self._request_chunk_size = request_chunk_size
+        self._progress_callback = progress_callback
+        self._fact_cache_path = cache_path
+        self._fact_cache_revision = cache_revision
+        if status_fact_directory is not None and cache_revision is None:
+            raise ValueError(
+                "status_fact_directory requires authenticated fact caching"
+            )
+        self._status_fact_directory = (
+            None
+            if status_fact_directory is None
+            else Path(status_fact_directory).resolve()
+        )
+        self._status_capture_clock = status_capture_clock
+        self._lock = RLock()
+        self._listing_session_cache: dict[
+            tuple[date, date], tuple[date, ...]
+        ] = {}
+        self._cache: dict[
+            tuple[date, bool, str, date | None], SectorStrengthBatch
+        ] = {}
+
+    @staticmethod
+    def _after_daily_close(observed: datetime) -> bool:
+        return observed.timetz().replace(tzinfo=None) >= time(15, 0)
+
+    def _benchmark_cutoff_complete(
+        self,
+        bars: Mapping[str, tuple[DailyMarketBar, ...]],
+        *,
+        required_session: date | None,
+    ) -> bool:
+        """Prove that the benchmark reaches the latest required daily close.
+
+        QMT may publish the completed intraday 15:00 bars before its 1d table.
+        It may also leave an index's local 1d cache stale while member stocks
+        are current.  Persisting either response would freeze an obsolete
+        sector ranking for the decision phase.  The QMT calendar proves the
+        required session and the broad benchmark is its publication watermark;
+        suspended members may legitimately end earlier.
+        """
+
+        if required_session is None:
+            return False
+        benchmark = bars.get(self._benchmark_symbol, ())
+        return bool(benchmark) and benchmark[-1].session == required_session
+
+    @staticmethod
+    def _bundle_cutoff_complete(
+        bars: Mapping[str, tuple[DailyMarketBar, ...]],
+        *,
+        symbols: tuple[str, ...],
+        required_session: date | None,
+        explained_missing: frozenset[str] = frozenset(),
+    ) -> bool:
+        """Require every current member to reach the proven daily cutoff.
+
+        A shorter history may be a real suspension or a member whose verified
+        IPO date is after the required completed session.  Without either
+        point-in-time fact it is indistinguishable from a stale QMT local
+        cache.  The selection specification forbids guessing that missing
+        fact, so the raw bundle remains retryable and affected sectors are
+        unresolved.
+        """
+
+        return required_session is not None and not tuple(
+            symbol
+            for symbol in QmtSectorStrengthSource._incomplete_symbols(
+                bars,
+                symbols=symbols,
+                required_session=required_session,
+            )
+            if symbol not in explained_missing
+        )
+
+    @staticmethod
+    def _incomplete_symbols(
+        bars: Mapping[str, tuple[DailyMarketBar, ...]],
+        *,
+        symbols: tuple[str, ...],
+        required_session: date | None,
+    ) -> tuple[str, ...]:
+        if required_session is None:
+            return symbols
+        return tuple(
+            symbol
+            for symbol in symbols
+            if not bars.get(symbol)
+            or bars[symbol][-1].session != required_session
+        )
+
+    def _status_fact_session_directory(self, session: date) -> Path | None:
+        if self._status_fact_directory is None:
+            return None
+        return self._status_fact_directory / session.isoformat()
+
+    def _listing_fact_directory(self) -> Path | None:
+        if self._status_fact_directory is None:
+            return None
+        return self._status_fact_directory / "listing"
+
+    def _listing_facts_from_payload(
+        self,
+        payload: Mapping[str, object],
+        *,
+        observed: datetime,
+    ) -> dict[str, date] | None:
+        if (
+            payload.get("schema") != _MEMBER_LISTING_FACT_SCHEMA
+            or payload.get("producer_revision") != self._fact_cache_revision
+            or payload.get("source_method") != "QMT_GET_INSTRUMENT_DETAIL"
+            or payload.get("point_in_time_scope") != "AFTER_CAPTURE_ONLY"
+            or payload.get("minimum_market_data_frequency") != "1m"
+            or payload.get("tick_data_used") is not False
+            or payload.get("real_account_access") is not False
+            or payload.get("real_order_transport") is not False
+        ):
+            return None
+        try:
+            captured_at = normalize_datetime(
+                datetime.fromisoformat(str(payload["captured_at"])),
+                "listing_fact.captured_at",
+            )
+        except (KeyError, TypeError, ValueError):
+            return None
+        if captured_at > observed:
+            return None
+        raw_facts = payload.get("facts")
+        raw_symbols = payload.get("symbols")
+        if (
+            not isinstance(raw_facts, Mapping)
+            or any(not isinstance(key, str) for key in raw_facts)
+            or raw_symbols != sorted(raw_facts)
+        ):
+            return None
+        expected_fields = {"native_code", "open_date"}
+        result: dict[str, date] = {}
+        for symbol, raw in raw_facts.items():
+            if (
+                _NORMALIZED_A_SHARE_CODE.fullmatch(symbol) is None
+                or not isinstance(raw, Mapping)
+                or set(raw) != expected_fields
+                or raw.get("native_code") != _qmt_code(symbol)
+            ):
+                return None
+            try:
+                listed_on = date.fromisoformat(str(raw["open_date"]))
+            except (KeyError, TypeError, ValueError):
+                return None
+            if listed_on < date(1990, 1, 1) or listed_on > captured_at.date():
+                return None
+            result[symbol] = listed_on
+        return result
+
+    def _load_listing_facts(
+        self,
+        symbols: tuple[str, ...],
+        *,
+        observed: datetime,
+    ) -> dict[str, date]:
+        directory = self._listing_fact_directory()
+        if not symbols or directory is None or not directory.is_dir():
+            return {}
+        requested = frozenset(symbols)
+        accepted: dict[str, date] = {}
+        conflicts: set[str] = set()
+        self._progress_callback()
+        try:
+            for path in sorted(directory.glob("*.json")):
+                payload = _read_fact_payload(path)
+                if payload is None:
+                    continue
+                facts = self._listing_facts_from_payload(
+                    payload,
+                    observed=observed,
+                )
+                if facts is None:
+                    continue
+                for symbol, listed_on in facts.items():
+                    if symbol not in requested:
+                        continue
+                    prior = accepted.get(symbol)
+                    if prior is not None and prior != listed_on:
+                        conflicts.add(symbol)
+                    else:
+                        accepted[symbol] = listed_on
+        except OSError:
+            return {}
+        finally:
+            self._progress_callback()
+        for symbol in conflicts:
+            accepted.pop(symbol, None)
+        return accepted
+
+    def _persist_listing_facts(
+        self,
+        *,
+        captured_at: datetime,
+        facts: Mapping[str, date],
+    ) -> None:
+        directory = self._listing_fact_directory()
+        if directory is None or not facts:
+            return
+        payload: dict[str, object] = {
+            "schema": _MEMBER_LISTING_FACT_SCHEMA,
+            "producer_revision": self._fact_cache_revision,
+            "captured_at": captured_at.isoformat(),
+            "source_method": "QMT_GET_INSTRUMENT_DETAIL",
+            "point_in_time_scope": "AFTER_CAPTURE_ONLY",
+            "symbols": sorted(facts),
+            "facts": {
+                symbol: {
+                    "native_code": _qmt_code(symbol),
+                    "open_date": facts[symbol].isoformat(),
+                }
+                for symbol in sorted(facts)
+            },
+            "minimum_market_data_frequency": "1m",
+            "tick_data_used": False,
+            "real_account_access": False,
+            "real_order_transport": False,
+        }
+        path = directory / f"{sha256_json(payload).removeprefix('sha256:')}.json"
+        self._progress_callback()
+        try:
+            if not path.exists():
+                _write_fact_payload(path, payload)
+        except OSError:
+            pass
+        finally:
+            self._progress_callback()
+
+    def _capture_current_listing_dates(
+        self,
+        symbols: tuple[str, ...],
+        *,
+        observed: datetime,
+    ) -> tuple[dict[str, date], dict[str, Mapping[str, object]]]:
+        captured_at = normalize_datetime(
+            self._status_capture_clock(),
+            "status_capture_clock",
+        )
+        if not symbols or self._listing_fact_directory() is None:
+            return {}, {}
+        result: dict[str, date] = {}
+        details: dict[str, Mapping[str, object]] = {}
+        for symbol in symbols:
+            try:
+                self._progress_callback()
+                with _XTDATA_NATIVE_LOCK:
+                    detail = xtdata.get_instrument_detail(
+                        _qmt_code(symbol),
+                        iscomplete=False,
+                    )
+            except Exception:
+                continue
+            finally:
+                self._progress_callback()
+            if not isinstance(detail, Mapping):
+                continue
+            details[symbol] = dict(detail)
+            raw_open_date = str(detail.get("OpenDate") or "").strip()
+            try:
+                listed_on = datetime.strptime(raw_open_date, "%Y%m%d").date()
+            except ValueError:
+                continue
+            if listed_on < date(1990, 1, 1) or listed_on > captured_at.date():
+                continue
+            result[symbol] = listed_on
+        self._persist_listing_facts(
+            captured_at=captured_at,
+            facts=result,
+        )
+        return (
+            result if captured_at <= observed else {},
+            details,
+        )
+
+    def _listing_sessions(
+        self,
+        listed_on: date,
+        required_session: date,
+    ) -> tuple[date, ...] | None:
+        key = (listed_on, required_session)
+        cached = self._listing_session_cache.get(key)
+        if cached is not None:
+            return cached
+        try:
+            self._progress_callback()
+            try:
+                with _XTDATA_NATIVE_LOCK:
+                    raw_sessions = xtdata.get_trading_dates(
+                        "SH",
+                        listed_on.strftime("%Y%m%d"),
+                        required_session.strftime("%Y%m%d"),
+                        -1,
+                    )
+                    raw_published = xtdata.get_market_last_trade_date("SH")
+            finally:
+                self._progress_callback()
+            if type(raw_sessions) is not list:
+                return None
+            sessions = tuple(
+                sorted({_qmt_calendar_date(value) for value in raw_sessions})
+            )
+            published_through = _qmt_calendar_date(raw_published)
+            if (
+                published_through < required_session
+                or any(
+                    value < listed_on or value > required_session
+                    for value in sessions
+                )
+            ):
+                return None
+        except Exception:
+            return None
+        self._listing_session_cache[key] = sessions
+        return sessions
+
+    def _new_listing_history_complete(
+        self,
+        bars: tuple[DailyMarketBar, ...],
+        *,
+        listed_on: date | None,
+        required_session: date | None,
+        observed: datetime,
+    ) -> bool:
+        if (
+            listed_on is None
+            or required_session is None
+            or listed_on > observed.date()
+        ):
+            return False
+        if listed_on > required_session:
+            return not bars
+        sessions = self._listing_sessions(listed_on, required_session)
+        return bool(
+            sessions
+            and len(sessions) < 5
+            and sessions[0] == listed_on
+            and tuple(value.session for value in bars) == sessions
+        )
+
+    def _status_facts_from_payload(
+        self,
+        payload: Mapping[str, object],
+        *,
+        session: date,
+        observed: datetime,
+    ) -> dict[str, dict[str, object]] | None:
+        """Validate one immutable same-session QMT suspension capture.
+
+        The installed QMT client exposes only the current instrument detail;
+        its historical ``is_suspended_stock`` service is unavailable.  A
+        current response may therefore explain a missing daily bar only when
+        its native ``TradingDay`` exactly equals the required session and the
+        capture was already visible at the decision time.  Later captures are
+        never backfilled into earlier decisions.
+        """
+
+        if (
+            payload.get("schema") != _MEMBER_STATUS_FACT_SCHEMA
+            or payload.get("producer_revision") != self._fact_cache_revision
+            or payload.get("session") != session.isoformat()
+            or payload.get("source_method") != "QMT_GET_INSTRUMENT_DETAIL"
+            or payload.get("point_in_time_scope")
+            != "CAPTURE_SESSION_AFTER_CAPTURE_ONLY"
+            or payload.get("minimum_market_data_frequency") != "1m"
+            or payload.get("tick_data_used") is not False
+            or payload.get("real_account_access") is not False
+            or payload.get("real_order_transport") is not False
+        ):
+            return None
+        try:
+            captured_at = normalize_datetime(
+                datetime.fromisoformat(str(payload["captured_at"])),
+                "status_fact.captured_at",
+            )
+        except (KeyError, TypeError, ValueError):
+            return None
+        if captured_at.date() != session or captured_at > observed:
+            return None
+        raw_facts = payload.get("facts")
+        raw_symbols = payload.get("symbols")
+        if not isinstance(raw_facts, Mapping) or any(
+            not isinstance(key, str) for key in raw_facts
+        ):
+            return None
+        if raw_symbols != sorted(raw_facts):
+            return None
+        expected_fields = {
+            "native_code",
+            "trading_day",
+            "instrument_name",
+            "instrument_status",
+            "is_trading",
+            "suspended",
+        }
+        result: dict[str, dict[str, object]] = {}
+        for symbol, raw in raw_facts.items():
+            if (
+                _NORMALIZED_A_SHARE_CODE.fullmatch(symbol) is None
+                or not isinstance(raw, Mapping)
+                or set(raw) != expected_fields
+                or raw.get("native_code") != _qmt_code(symbol)
+                or raw.get("trading_day") != session.isoformat()
+                or not isinstance(raw.get("instrument_name"), str)
+                or not str(raw.get("instrument_name")).strip()
+                or type(raw.get("instrument_status")) is not int
+                or int(raw["instrument_status"]) < 1
+                or type(raw.get("is_trading")) is not bool
+                or raw.get("suspended") is not True
+            ):
+                return None
+            result[symbol] = dict(raw)
+        return result
+
+    def _load_status_facts(
+        self,
+        *,
+        session: date | None,
+        observed: datetime,
+    ) -> dict[str, dict[str, object]]:
+        if session is None:
+            return {}
+        directory = self._status_fact_session_directory(session)
+        if directory is None or not directory.is_dir():
+            return {}
+        self._progress_callback()
+        accepted: dict[str, dict[str, object]] = {}
+        conflicts: set[str] = set()
+        try:
+            paths = tuple(sorted(directory.glob("*.json")))
+            for path in paths:
+                payload = _read_fact_payload(path)
+                if payload is None:
+                    continue
+                facts = self._status_facts_from_payload(
+                    payload,
+                    session=session,
+                    observed=observed,
+                )
+                if facts is None:
+                    continue
+                for symbol, fact in facts.items():
+                    prior = accepted.get(symbol)
+                    if prior is not None and prior != fact:
+                        conflicts.add(symbol)
+                    else:
+                        accepted[symbol] = fact
+        except OSError:
+            return {}
+        finally:
+            self._progress_callback()
+        for symbol in conflicts:
+            accepted.pop(symbol, None)
+        return accepted
+
+    def _persist_status_facts(
+        self,
+        *,
+        session: date,
+        captured_at: datetime,
+        facts: Mapping[str, Mapping[str, object]],
+    ) -> None:
+        directory = self._status_fact_session_directory(session)
+        if directory is None or not facts:
+            return
+        payload: dict[str, object] = {
+            "schema": _MEMBER_STATUS_FACT_SCHEMA,
+            "producer_revision": self._fact_cache_revision,
+            "session": session.isoformat(),
+            "captured_at": captured_at.isoformat(),
+            "source_method": "QMT_GET_INSTRUMENT_DETAIL",
+            "point_in_time_scope": "CAPTURE_SESSION_AFTER_CAPTURE_ONLY",
+            "symbols": sorted(facts),
+            "facts": {
+                symbol: dict(facts[symbol]) for symbol in sorted(facts)
+            },
+            "minimum_market_data_frequency": "1m",
+            "tick_data_used": False,
+            "real_account_access": False,
+            "real_order_transport": False,
+        }
+        path = directory / f"{sha256_json(payload).removeprefix('sha256:')}.json"
+        self._progress_callback()
+        try:
+            if not path.exists():
+                _write_fact_payload(path, payload)
+        except OSError:
+            pass
+        finally:
+            self._progress_callback()
+
+    def _capture_current_suspensions(
+        self,
+        symbols: tuple[str, ...],
+        *,
+        session: date | None,
+        observed: datetime,
+        instrument_details: Mapping[
+            str, Mapping[str, object]
+        ] | None = None,
+    ) -> dict[str, dict[str, object]]:
+        """Capture only positive same-session suspension facts, never infer.
+
+        ``InstrumentStatus == 0`` is the observed normal state.  Negative or
+        absent values are unresolved rather than silently treated as normal;
+        only the SDK-documented positive suspension states can explain a
+        missing daily bar.
+        """
+
+        captured_at = normalize_datetime(
+            self._status_capture_clock(),
+            "status_capture_clock",
+        )
+        if (
+            not symbols
+            or session is None
+            or session != observed.date()
+            or not self._after_daily_close(observed)
+            or captured_at.date() != session
+            or not self._after_daily_close(captured_at)
+            or self._status_fact_directory is None
+        ):
+            return {}
+        result: dict[str, dict[str, object]] = {}
+        prefetched = instrument_details or {}
+        for symbol in symbols:
+            detail = prefetched.get(symbol)
+            if detail is None:
+                try:
+                    self._progress_callback()
+                    with _XTDATA_NATIVE_LOCK:
+                        detail = xtdata.get_instrument_detail(
+                            _qmt_code(symbol),
+                            iscomplete=False,
+                        )
+                except Exception:
+                    continue
+                finally:
+                    self._progress_callback()
+            if not isinstance(detail, Mapping):
+                continue
+            raw_trading_day = str(detail.get("TradingDay") or "").strip()
+            try:
+                trading_day = datetime.strptime(
+                    raw_trading_day,
+                    "%Y%m%d",
+                ).date()
+            except ValueError:
+                continue
+            status = detail.get("InstrumentStatus")
+            is_trading = detail.get("IsTrading")
+            name = str(detail.get("InstrumentName") or "").strip()
+            if (
+                trading_day != session
+                or type(status) is not int
+                or int(status) < 1
+                or is_trading not in {True, False, 0, 1}
+                or not name
+            ):
+                continue
+            result[symbol] = {
+                "native_code": _qmt_code(symbol),
+                "trading_day": trading_day.isoformat(),
+                "instrument_name": name,
+                "instrument_status": int(status),
+                # Wall-clock IsTrading is retained as raw evidence but does
+                # not participate in the suspension interpretation.
+                "is_trading": bool(is_trading),
+                "suspended": True,
+            }
+        self._persist_status_facts(
+            session=session,
+            captured_at=captured_at,
+            facts=result,
+        )
+        # A native fact read after the decision timestamp is valid forward
+        # evidence but cannot be injected into that earlier decision.  The
+        # unresolved batch remains retryable; a later request can load it.
+        return result if captured_at <= observed else {}
+
+    def _fact_identity(
+        self,
+        *,
+        symbols: tuple[str, ...],
+        observed: datetime,
+        membership_revision: str,
+        required_session: date | None,
+    ) -> dict[str, object] | None:
+        if self._fact_cache_revision is None or required_session is None:
+            return None
+        return {
+            "schema": _DAILY_FACT_SCHEMA,
+            "producer_revision": self._fact_cache_revision,
+            "decision_date": observed.date().isoformat(),
+            "after_daily_close": self._after_daily_close(observed),
+            "required_daily_session": required_session.isoformat(),
+            "benchmark_symbol": self._benchmark_symbol,
+            "request_bars": self._request_bars,
+            "symbols": list(symbols),
+            "membership_revision": membership_revision,
+            "bar_fields": [
+                "session",
+                "open",
+                "high",
+                "low",
+                "close",
+                "volume",
+                "known_at",
+                "completed",
+            ],
+            "period": "1d",
+            "qmt_dividend_type": QMT_SECTOR_STRENGTH_QMT_DIVIDEND_TYPE,
+            "adjustment": QMT_SECTOR_STRENGTH_ADJUSTMENT,
+            "price_basis_contract": (
+                QMT_SECTOR_STRENGTH_PRICE_BASIS_CONTRACT
+            ),
+            "minimum_market_data_frequency": "1m",
+            "tick_data_used": False,
+            "real_account_access": False,
+            "real_order_transport": False,
+        }
+
+    @staticmethod
+    def _daily_bars_from_payload(
+        payload: Mapping[str, object],
+        *,
+        identity: Mapping[str, object],
+        observed: datetime,
+    ) -> dict[str, tuple[DailyMarketBar, ...]] | None:
+        if any(payload.get(key) != value for key, value in identity.items()):
+            return None
+        raw_bars = payload.get("bars")
+        if not isinstance(raw_bars, Mapping) or any(
+            not isinstance(key, str) for key in raw_bars
+        ):
+            return None
+        symbols = tuple(identity["symbols"])
+        if set(raw_bars) != set(symbols):
+            return None
+        result: dict[str, tuple[DailyMarketBar, ...]] = {}
+        try:
+            for symbol in symbols:
+                raw_rows = raw_bars[symbol]
+                if not isinstance(raw_rows, list) or not raw_rows:
+                    return None
+                if len(raw_rows) > int(identity["request_bars"]):
+                    return None
+                rows: list[DailyMarketBar] = []
+                sessions: list[date] = []
+                for index, value in enumerate(raw_rows):
+                    if type(value) is not list or len(value) != 8:
+                        return None
+                    (
+                        raw_session,
+                        raw_open,
+                        raw_high,
+                        raw_low,
+                        raw_close,
+                        raw_volume,
+                        raw_known_at,
+                        raw_completed,
+                    ) = value
+                    session = date.fromisoformat(str(raw_session))
+                    known_at = normalize_datetime(
+                        datetime.fromisoformat(str(raw_known_at)),
+                        f"bars.{symbol}[{index}].known_at",
+                    )
+                    expected_known_at = datetime.combine(
+                        session,
+                        time(15, 0),
+                        tzinfo=_SHANGHAI,
+                    )
+                    if (
+                        raw_completed is not True
+                        or known_at != expected_known_at
+                        or known_at > observed
+                    ):
+                        return None
+                    decimals = dict(
+                        zip(
+                            ("open", "high", "low", "close", "volume"),
+                            (
+                                Decimal(str(raw_open)),
+                                Decimal(str(raw_high)),
+                                Decimal(str(raw_low)),
+                                Decimal(str(raw_close)),
+                                Decimal(str(raw_volume)),
+                            ),
+                        )
+                    )
+                    if any(not value.is_finite() for value in decimals.values()):
+                        return None
+                    rows.append(
+                        DailyMarketBar(
+                            session=session,
+                            known_at=known_at,
+                            completed=True,
+                            **decimals,
+                        )
+                    )
+                    sessions.append(session)
+                if (
+                    sessions != sorted(sessions)
+                    or len(sessions) != len(set(sessions))
+                ):
+                    return None
+                result[symbol] = tuple(rows)
+        except (ArithmeticError, TypeError, ValueError):
+            return None
+        required_session = date.fromisoformat(
+            str(identity["required_daily_session"])
+        )
+        incomplete = QmtSectorStrengthSource._incomplete_symbols(
+            result,
+            symbols=symbols,
+            required_session=required_session,
+        )
+        if payload.get("incomplete_symbols") != list(incomplete):
+            return None
+        return result
+
+    def _load_daily_facts(
+        self,
+        *,
+        identity: Mapping[str, object] | None,
+        observed: datetime,
+    ) -> dict[str, tuple[DailyMarketBar, ...]] | None:
+        if self._fact_cache_path is None or identity is None:
+            return None
+        self._progress_callback()
+        payload = _read_fact_payload(self._fact_cache_path)
+        self._progress_callback()
+        if payload is None:
+            return None
+        return self._daily_bars_from_payload(
+            payload,
+            identity=identity,
+            observed=observed,
+        )
+
+    def _persist_daily_facts(
+        self,
+        *,
+        identity: Mapping[str, object] | None,
+        bars: Mapping[str, tuple[DailyMarketBar, ...]],
+    ) -> None:
+        if self._fact_cache_path is None or identity is None:
+            return
+        symbols = tuple(identity["symbols"])
+        # Do not make a transient missing QMT response durable.  A complete
+        # symbol bundle may still contain a legitimately short newly listed
+        # history, but every requested symbol must have at least one fact.
+        if set(bars) != set(symbols) or any(not bars[symbol] for symbol in symbols):
+            return
+        document = {
+            symbol: [
+                [
+                    value.session.isoformat(),
+                    str(value.open),
+                    str(value.high),
+                    str(value.low),
+                    str(value.close),
+                    str(value.volume),
+                    value.known_at.isoformat(),
+                    value.completed,
+                ]
+                for value in bars[symbol]
+            ]
+            for symbol in symbols
+        }
+        required_session = date.fromisoformat(
+            str(identity["required_daily_session"])
+        )
+        incomplete = self._incomplete_symbols(
+            bars,
+            symbols=symbols,
+            required_session=required_session,
+        )
+        self._progress_callback()
+        try:
+            _write_fact_payload(
+                self._fact_cache_path,
+                {
+                    **identity,
+                    "incomplete_symbols": list(incomplete),
+                    "bars": document,
+                },
+            )
+        except OSError:
+            pass
+        finally:
+            self._progress_callback()
+
+    def _fetch(
+        self,
+        symbols: tuple[str, ...],
+        *,
+        as_of: datetime,
+    ) -> dict[str, tuple[DailyMarketBar, ...]]:
+        output: dict[str, tuple[DailyMarketBar, ...]] = {}
+        for start in range(0, len(symbols), self._request_chunk_size):
+            chunk = symbols[start : start + self._request_chunk_size]
+            native = tuple(_qmt_code(value) for value in chunk)
+            # QMT's local 1d tables can be stale by different amounts for whole
+            # exchange partitions.  Refresh each bounded chunk in one native
+            # call rather than issuing thousands of per-symbol downloads.  A
+            # failed chunk is still read and will fail the cutoff gate below.
+            try:
+                self._progress_callback()
+                with _XTDATA_NATIVE_LOCK:
+                    xtdata.download_history_data2(
+                        list(native),
+                        "1d",
+                        start_time="",
+                        end_time="",
+                        incrementally=True,
+                    )
+            except Exception:
+                pass
+            finally:
+                self._progress_callback()
+            self._progress_callback()
+            with _XTDATA_NATIVE_LOCK:
+                raw = xtdata.get_market_data(
+                    field_list=list(_DAILY_FIELDS),
+                    stock_list=list(native),
+                    period="1d",
+                    start_time="",
+                    end_time=as_of.strftime("%Y%m%d%H%M%S"),
+                    count=self._request_bars,
+                    dividend_type=QMT_SECTOR_STRENGTH_QMT_DIVIDEND_TYPE,
+                    fill_data=False,
+                )
+            self._progress_callback()
+            if not isinstance(raw, Mapping):
+                continue
+            for symbol, native_code in zip(chunk, native):
+                rows = _normalize_equal_ratio_daily_bars(
+                    _daily_rows(raw, native_code, not_after=as_of)
+                )
+                if rows:
+                    output[symbol] = rows
+        return output
+
+    def strengths(
+        self,
+        *,
+        members_by_sector: Mapping[str, tuple[str, ...]],
+        as_of: datetime,
+        membership_revision: str,
+    ) -> Mapping[str, SectorStrengthEvidence]:
+        observed = normalize_datetime(as_of, "as_of")
+        required_session = _latest_completed_qmt_daily_session(observed)
+        cache_key = (
+            observed.date(),
+            self._after_daily_close(observed),
+            membership_revision,
+            required_session,
+        )
+        with self._lock:
+            cached = self._cache.get(cache_key)
+            if cached is not None:
+                return cached
+        symbols = tuple(
+            sorted(
+                {self._benchmark_symbol}.union(
+                    code
+                    for members in members_by_sector.values()
+                    for code in members
+                )
+            )
+        )
+        fact_identity = self._fact_identity(
+            symbols=symbols,
+            observed=observed,
+            membership_revision=membership_revision,
+            required_session=required_session,
+        )
+        bars = self._load_daily_facts(
+            identity=fact_identity,
+            observed=observed,
+        )
+        current_bars = {} if bars is None else bars
+        member_symbols = frozenset(
+            code
+            for members in members_by_sector.values()
+            for code in members
+        )
+        status_facts = self._load_status_facts(
+            session=required_session,
+            observed=observed,
+        )
+        # A status capture is reusable only for a member in the current PIT
+        # basket.  It can never excuse a stale broad-market benchmark.
+        status_facts = {
+            symbol: fact
+            for symbol, fact in status_facts.items()
+            if symbol in member_symbols
+        }
+        raw_incomplete = self._incomplete_symbols(
+            current_bars,
+            symbols=symbols,
+            required_session=required_session,
+        )
+        refresh_targets = tuple(
+            symbol
+            for symbol in raw_incomplete
+            if symbol not in status_facts or not current_bars.get(symbol)
+        )
+        if refresh_targets and required_session is not None:
+            refreshed = self._fetch(refresh_targets, as_of=observed)
+            current_bars = {
+                symbol: refreshed.get(symbol, current_bars.get(symbol, ()))
+                for symbol in symbols
+            }
+            # Incomplete raw facts are safe to retain because their exact
+            # missing set is hash-authenticated and recomputed on every load.
+            # They never enter a resolved rank, and the next refresh retries
+            # only those symbols instead of redownloading the entire universe.
+            self._persist_daily_facts(
+                identity=fact_identity,
+                bars=current_bars,
+            )
+        raw_incomplete = self._incomplete_symbols(
+            current_bars,
+            symbols=symbols,
+            required_session=required_session,
+        )
+        listing_candidates = tuple(
+            sorted(
+                symbol
+                for symbol in member_symbols
+                if symbol not in status_facts
+                and (
+                    symbol in raw_incomplete
+                    or len(current_bars.get(symbol, ())) < 5
+                )
+            )
+        )
+        listing_dates = self._load_listing_facts(
+            listing_candidates,
+            observed=observed,
+        )
+        uncaptured_listing = tuple(
+            symbol
+            for symbol in listing_candidates
+            if symbol not in listing_dates
+        )
+        captured_listing, captured_instrument_details = (
+            self._capture_current_listing_dates(
+            uncaptured_listing,
+            observed=observed,
+            )
+        )
+        if captured_listing:
+            listing_dates = {**listing_dates, **captured_listing}
+        listing_gap_targets: list[str] = []
+        if required_session is not None:
+            for symbol, listed_on in listing_dates.items():
+                daily = current_bars.get(symbol, ())
+                if listed_on > required_session or len(daily) >= 5:
+                    continue
+                expected_sessions = self._listing_sessions(
+                    listed_on,
+                    required_session,
+                )
+                if (
+                    expected_sessions is not None
+                    and tuple(value.session for value in daily)
+                    != expected_sessions
+                ):
+                    listing_gap_targets.append(symbol)
+        if listing_gap_targets:
+            refreshed = self._fetch(
+                tuple(sorted(listing_gap_targets)),
+                as_of=observed,
+            )
+            current_bars = {
+                symbol: refreshed.get(symbol, current_bars.get(symbol, ()))
+                for symbol in symbols
+            }
+            self._persist_daily_facts(
+                identity=fact_identity,
+                bars=current_bars,
+            )
+            raw_incomplete = self._incomplete_symbols(
+                current_bars,
+                symbols=symbols,
+                required_session=required_session,
+            )
+        uncaptured_members = tuple(
+            symbol
+            for symbol in raw_incomplete
+            if symbol in member_symbols and symbol not in status_facts
+        )
+        captured = self._capture_current_suspensions(
+            uncaptured_members,
+            session=required_session,
+            observed=observed,
+            instrument_details=captured_instrument_details,
+        )
+        if captured:
+            status_facts = {**status_facts, **captured}
+        bars = current_bars
+        explained_suspended = frozenset(status_facts)
+        explained_prelisting = frozenset(
+            symbol
+            for symbol, listed_on in listing_dates.items()
+            if required_session is not None
+            and listed_on > required_session
+            and not bars.get(symbol)
+        )
+        benchmark_cutoff_complete = self._benchmark_cutoff_complete(
+            bars,
+            required_session=required_session,
+        )
+        bundle_cutoff_complete = self._bundle_cutoff_complete(
+            bars,
+            symbols=symbols,
+            required_session=required_session,
+            explained_missing=(
+                explained_suspended | explained_prelisting
+            ),
+        )
+        histories: dict[str, tuple[SectorMemberHistory, ...]] = {}
+        for sector_id, members in sorted(members_by_sector.items()):
+            rows: list[SectorMemberHistory] = []
+            for symbol in members:
+                daily = bars.get(symbol, ())
+                member_cutoff_complete = bool(daily) and (
+                    required_session is not None
+                    and daily[-1].session == required_session
+                )
+                member_suspended = (
+                    not member_cutoff_complete
+                    and symbol in explained_suspended
+                )
+                listed_on = listing_dates.get(symbol)
+                new_listing_complete = self._new_listing_history_complete(
+                    daily,
+                    listed_on=listed_on,
+                    required_session=required_session,
+                    observed=observed,
+                )
+                rows.append(
+                    SectorMemberHistory(
+                        symbol=symbol,
+                        listed_on=(
+                            listed_on
+                            or (daily[0].session if daily else observed.date())
+                        ),
+                        history_status=(
+                            "COMPLETE"
+                            if member_cutoff_complete and len(daily) >= 5
+                            else "NEW_LISTING"
+                            if new_listing_complete
+                            else "SUSPENDED"
+                            if member_suspended
+                            else "UNEXPLAINED_GAP"
+                        ),
+                        closes=tuple(
+                            CompletedDailyClose(
+                                session=value.session,
+                                close=value.close,
+                                known_at=value.known_at,
+                            )
+                            for value in daily
+                        ),
+                    )
+                )
+            histories[sector_id] = tuple(rows)
+        result = build_horizontal_sector_strength_batch(
+            decision_time=observed,
+            benchmark_symbol=self._benchmark_symbol,
+            benchmark_daily=(
+                bars.get(self._benchmark_symbol, ())
+                if benchmark_cutoff_complete
+                else ()
+            ),
+            members_by_sector=histories,
+            membership_revision=membership_revision,
+        )
+        # A publication lag or unresolved calendar is transient.  Keeping that
+        # unresolved batch in the day-long memory cache would prevent the
+        # singleton production source from ever recovering without a restart.
+        member_history_complete = all(
+            member.history_status != "UNEXPLAINED_GAP"
+            for members in histories.values()
+            for member in members
+        )
+        if bundle_cutoff_complete and member_history_complete:
+            with self._lock:
+                self._cache = {cache_key: result}
+        return result
+
+
 __all__ = (
+    "QMT_CURRENT_A_SHARE_SECTOR",
     "QMT_GICS3_CATALOG_SOURCE",
     "QMT_GICS3_COMPOSITE_ADJUSTMENT",
+    "QMT_GICS3_COMPOSITE_CALENDAR_GRID_CONTRACT",
+    "QMT_GICS3_COMPOSITE_MEMBER_MASK_CONTRACT",
+    "QMT_GICS3_COMPOSITE_MINIMUM_BAR_COVERAGE",
+    "QMT_GICS3_COMPOSITE_MINIMUM_MEMBER_COUNT",
     "QMT_GICS3_COMPOSITE_MEMBER_LIMIT",
+    "QMT_GICS3_COMPOSITE_METHOD",
+    "QMT_SECTOR_STRENGTH_ADJUSTMENT",
+    "QMT_SECTOR_STRENGTH_PRICE_BASIS_CONTRACT",
+    "QMT_SECTOR_STRENGTH_QMT_DIVIDEND_TYPE",
+    "QmtSectorStrengthSource",
     "QMT_GICS3_COMPOSITE_PROVIDER",
     "QmtSectorCompositeSource",
     "build_qmt_gics3_sector_catalog",
+    "build_qmt_gics3_sector_catalog_from_local_files",
+    "qmt_sector_composite_fact_producer_revision",
+    "qmt_sector_daily_fact_producer_revision",
+    "qmt_sector_fact_producer_revision",
+    "qmt_trading_session_evidence",
+    "qmt_trading_sessions",
 )

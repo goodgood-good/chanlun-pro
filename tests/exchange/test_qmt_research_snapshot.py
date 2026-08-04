@@ -229,14 +229,18 @@ def test_qmt_research_exact_kline_bounds_native_download_and_read_without_ambien
     monkeypatch,
 ):
     source_close = _at(10, 1)
+    future_close = _at(10, 2)
     native_code = "600000.SH"
     raw = {
-        "time": pd.DataFrame([[_native_ms(source_close)]], index=[native_code]),
-        "open": pd.DataFrame([[10]], index=[native_code]),
-        "high": pd.DataFrame([[11]], index=[native_code]),
-        "low": pd.DataFrame([[9]], index=[native_code]),
-        "close": pd.DataFrame([[10.5]], index=[native_code]),
-        "volume": pd.DataFrame([[100]], index=[native_code]),
+        "time": pd.DataFrame(
+            [[_native_ms(source_close), _native_ms(future_close)]],
+            index=[native_code],
+        ),
+        "open": pd.DataFrame([[10, 20]], index=[native_code]),
+        "high": pd.DataFrame([[11, 21]], index=[native_code]),
+        "low": pd.DataFrame([[9, 19]], index=[native_code]),
+        "close": pd.DataFrame([[10.5, 20.5]], index=[native_code]),
+        "volume": pd.DataFrame([[100, 200]], index=[native_code]),
     }
     lock = _TrackingLock()
     native = _BoundedKlineNative(lock, raw)
@@ -260,8 +264,12 @@ def test_qmt_research_exact_kline_bounds_native_download_and_read_without_ambien
     )
 
     assert tuple(frame["date"]) == (source_close,)
+    # QMT's download boundary is exclusive, so transport advances one second
+    # to fetch the exact 10:01 completion.  The read and dataframe visibility
+    # remain frozen at 10:01; the fake provider deliberately returns 10:02 as
+    # well and the assertion above proves it cannot leak through.
     assert [call[1]["end_time"] for call in native.calls] == [
-        "20260717100100",
+        "20260717100101",
         "20260717100100",
     ]
     assert lock.enter_count == 1

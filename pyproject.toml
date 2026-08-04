@@ -120,6 +120,7 @@ ignore = ["F403", "F405", "E402", "E731", "E741"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
+addopts = ["--import-mode=importlib"]
 # 让 `poetry run pytest`(console script 不把 cwd 加入 sys.path)也能 import tests.* 包,
 # 否则 tests/trader/test_ctp_*.py 的 `from tests.trader.conftest import ...` 在 poetry 口径下
 # 报 ModuleNotFoundError: No module named 'tests'(4 个 CTP 资金安全测试静默不收集)。审计 D4-MED-2。

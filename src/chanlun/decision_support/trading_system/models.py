@@ -1,11 +1,14 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime
-from decimal import Decimal
-from typing import TYPE_CHECKING, Literal
+from dataclasses import asdict, dataclass, fields
+from datetime import date, datetime
+from decimal import Decimal, InvalidOperation
+from typing import TYPE_CHECKING, Literal, Mapping
 
 from chanlun.decision_support.fingerprints import normalize_datetime, sha256_json
+from chanlun.decision_support.trading_system.a_share_minute_grid import (
+    a_share_optional_entry_valid_until,
+)
 
 
 if TYPE_CHECKING:
@@ -32,6 +35,22 @@ LifecycleStage = Literal[
     "invalidated",
 ]
 MAX_FIVE_MINUTE_SETUP_AGE_SECONDS = 4 * 24 * 60 * 60
+
+
+ENTRY_EXECUTION_BOUNDARY_POLICY_ID = sha256_json(
+    {
+        "schema": "chanlun-human-entry-execution-boundary/v1",
+        "locator_frequency": "1m",
+        "price_cap": "UNADJUSTED_CONFIRMATION_BAR_HIGH",
+        "validity": (
+            "NEXT_LOCATOR_BAR_CLOSE_OR_CURRENT_CONTINUOUS_AUCTION_END_FIRST"
+        ),
+        "signal_bar_fill_allowed": False,
+        "price_chasing_allowed": False,
+        "tick_data_used": False,
+        "live_status": "LIVE_DISABLED",
+    }
+)
 
 
 def build_point_id(
@@ -146,6 +165,134 @@ class StructuralPoint:
 
 
 @dataclass(frozen=True, slots=True)
+class EntryExecutionBoundary:
+    """Unadjusted confirmation-bar facts that bound one optional entry.
+
+    This is execution evidence, not a structural price.  In particular, a
+    first-buy structural anchor is normally the low of the divergence leg and
+    must never be reused as the confirmation bar's executable upper bound.
+    """
+
+    symbol: str
+    point_id: str
+    source_frequency: str
+    confirmation_bar_closed_at: datetime
+    raw_open: Decimal
+    raw_high: Decimal
+    raw_low: Decimal
+    raw_close: Decimal
+    raw_volume: Decimal
+    entry_valid_until: datetime
+    raw_price_basis_revision: str
+    policy_id: str = ENTRY_EXECUTION_BOUNDARY_POLICY_ID
+    tick_data_used: bool = False
+    live_status: str = "LIVE_DISABLED"
+
+    def __post_init__(self) -> None:
+        for field in ("confirmation_bar_closed_at", "entry_valid_until"):
+            object.__setattr__(
+                self,
+                field,
+                normalize_datetime(getattr(self, field), field),
+            )
+        if (
+            not isinstance(self.symbol, str)
+            or not self.symbol.strip()
+            or not isinstance(self.point_id, str)
+            or not self.point_id.strip()
+        ):
+            raise ValueError("entry execution boundary provenance is incomplete")
+        if self.source_frequency != "1m":
+            raise ValueError("entry execution boundary requires a 1m locator")
+        expected_valid_until = a_share_optional_entry_valid_until(
+            self.confirmation_bar_closed_at
+        )
+        if self.entry_valid_until != expected_valid_until:
+            raise ValueError(
+                "entry execution boundary validity must equal the frozen "
+                "A-share locator-bar TTL"
+            )
+        prices = (self.raw_open, self.raw_high, self.raw_low, self.raw_close)
+        if any(
+            not isinstance(value, Decimal)
+            or not value.is_finite()
+            or value <= 0
+            for value in prices
+        ):
+            raise ValueError("entry execution boundary prices are invalid")
+        if (
+            self.raw_low > min(self.raw_open, self.raw_close)
+            or self.raw_high < max(self.raw_open, self.raw_close)
+            or self.raw_low > self.raw_high
+            or not isinstance(self.raw_volume, Decimal)
+            or not self.raw_volume.is_finite()
+            or self.raw_volume < 0
+        ):
+            raise ValueError("entry execution boundary OHLCV is inconsistent")
+        if (
+            not isinstance(self.raw_price_basis_revision, str)
+            or not self.raw_price_basis_revision.strip()
+        ):
+            raise ValueError("entry execution raw price basis is required")
+        if (
+            self.policy_id != ENTRY_EXECUTION_BOUNDARY_POLICY_ID
+            or self.tick_data_used
+            or self.live_status != "LIVE_DISABLED"
+        ):
+            raise ValueError("entry execution boundary policy changed")
+
+    @property
+    def evidence_id(self) -> str:
+        return sha256_json(asdict(self))
+
+    def document(self) -> dict[str, object]:
+        stable = asdict(self)
+        for field in ("confirmation_bar_closed_at", "entry_valid_until"):
+            stable[field] = getattr(self, field).isoformat()
+        for field in (
+            "raw_open",
+            "raw_high",
+            "raw_low",
+            "raw_close",
+            "raw_volume",
+        ):
+            stable[field] = format(getattr(self, field), "f")
+        return {**stable, "evidence_id": self.evidence_id}
+
+
+def parse_entry_execution_boundary_document(
+    raw: object,
+) -> EntryExecutionBoundary:
+    """Parse and independently re-attest one portable boundary document."""
+
+    field_names = tuple(field.name for field in fields(EntryExecutionBoundary))
+    if not isinstance(raw, Mapping) or set(raw) != set(field_names) | {
+        "evidence_id"
+    }:
+        raise ValueError("entry execution boundary document is malformed")
+    values = {name: raw[name] for name in field_names}
+    try:
+        for name in ("confirmation_bar_closed_at", "entry_valid_until"):
+            values[name] = datetime.fromisoformat(str(values[name]))
+        for name in (
+            "raw_open",
+            "raw_high",
+            "raw_low",
+            "raw_close",
+            "raw_volume",
+        ):
+            values[name] = Decimal(str(values[name]))
+        boundary = EntryExecutionBoundary(**values)
+    except (InvalidOperation, TypeError, ValueError) as exc:
+        raise ValueError(
+            "entry execution boundary document is malformed"
+        ) from exc
+    if raw.get("evidence_id") != boundary.evidence_id:
+        raise ValueError("entry execution boundary document identity changed")
+    return boundary
+
+
+@dataclass(frozen=True, slots=True)
 class TimeframeContext:
     frequency: str
     direction: ContextDirection
@@ -180,6 +327,15 @@ class SectorAssessment:
     thirty_context: TimeframeContext | None = None
     five_context: TimeframeContext | None = None
     one_context: TimeframeContext | None = None
+    # Horizontal strength is an ordering fact only.  It never turns a hostile
+    # sector into an eligible one and it is kept separate from structural
+    # context so missing QMT history cannot silently become a neutral score.
+    horizontal_strength: Decimal | None = None
+    horizontal_rank: int | None = None
+    strength_anchor_session: date | None = None
+    strength_member_count: int = 0
+    strength_source_revision: str | None = None
+    strength_reason_codes: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.eligible == self.hard_block:
@@ -189,6 +345,23 @@ class SectorAssessment:
             raise ValueError("rank component names must be unique")
         if len(self.reason_codes) != len(set(self.reason_codes)):
             raise ValueError("reason_codes must be unique")
+        if self.strength_member_count < 0:
+            raise ValueError("strength_member_count cannot be negative")
+        if self.horizontal_rank is not None and self.horizontal_rank <= 0:
+            raise ValueError("horizontal_rank must be positive")
+        if self.horizontal_strength is not None and not self.horizontal_strength.is_finite():
+            raise ValueError("horizontal_strength must be finite")
+        resolved_strength = self.horizontal_strength is not None
+        if resolved_strength != (self.horizontal_rank is not None):
+            raise ValueError("sector strength and rank must resolve together")
+        if resolved_strength and (
+            self.strength_anchor_session is None
+            or self.strength_member_count <= 0
+            or not self.strength_source_revision
+        ):
+            raise ValueError("resolved sector strength provenance is incomplete")
+        if len(self.strength_reason_codes) != len(set(self.strength_reason_codes)):
+            raise ValueError("strength_reason_codes must be unique")
 
     @property
     def rank_score(self) -> int:

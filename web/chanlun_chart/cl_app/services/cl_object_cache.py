@@ -202,7 +202,8 @@ def _get_key_lock(key: str) -> threading.RLock:
 # ⚠ source_fingerprint() 只覆盖 chanlun/core/* + types + tv_chart/chart_config + _lookback,
 #   **不含本文件**(审查 F-4/F-9 已核实)。故改 _compute_kline_signature 的"签名计算逻辑"
 #   或本 key 的"输出结构"时,必须手动 bump 此版本号——否则旧 CL 对象不失效、留陈旧结果。
-_CHART_DATA_SCHEMA_VERSION = "v7"
+# v8 (2026-08-04): center-preview lifecycle and confirmation metadata.
+_CHART_DATA_SCHEMA_VERSION = "v8"
 
 
 def _build_cache_key(

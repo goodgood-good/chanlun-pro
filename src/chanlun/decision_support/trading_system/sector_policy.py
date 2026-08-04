@@ -19,6 +19,13 @@ def assess_sector(
 ) -> SectorAssessment:
     if market_data_source not in {
         "qmt_gics3_component_composite",
+        # Canonical V5 QMT median-return composite used by the page, forward
+        # paper path and the current-membership research replay.
+        "qmt-gics3-composite",
+        # User-authorized recent-year research variant.  The distinct source
+        # identity keeps current-constituent backfill visible in every hash
+        # and report; it remains RESEARCH_ONLY / LIVE_DISABLED.
+        "qmt-gics3-current-backfill-composite",
         "qmt-sw1-pit-composite",
         # Retained for historical backtest replay only. Production screening is
         # wired to the QMT source above.
@@ -89,7 +96,16 @@ def rank_sectors(
 ) -> tuple[RankedSector, ...]:
     eligible = sorted(
         (assessment for assessment in assessments if assessment.eligible),
-        key=lambda assessment: (-assessment.rank_score, assessment.sector_id),
+        key=lambda assessment: (
+            assessment.horizontal_strength is None,
+            -(
+                assessment.horizontal_strength
+                if assessment.horizontal_strength is not None
+                else 0
+            ),
+            -assessment.rank_score,
+            assessment.sector_id,
+        ),
     )
     return tuple(
         RankedSector(ordinal=index, assessment=assessment)

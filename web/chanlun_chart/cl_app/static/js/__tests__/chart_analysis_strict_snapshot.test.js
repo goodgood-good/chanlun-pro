@@ -172,6 +172,14 @@ function snapshot(overrides = {}) {
       structural_level: 0,
       tradable: false,
     })],
+    display_center_observations: [center({
+      render_kind: 'center_observation',
+      center_id: 'display-segment-center-1',
+      render_id: 'display-segment-center-1@r1@ongoing',
+      source_kind: 'segment',
+      structural_level: 0,
+      tradable: false,
+    })],
     levels: [{
       structural_level: 0,
       label: '5m',
@@ -230,6 +238,28 @@ function barsResult(strict = snapshot(), overrides = {}) {
       { time: 1700000000000, close: 10.4, isBarClosed: true },
       { time: CLOSED_AT * 1000, close: 11.0, isBarClosed: true },
     ],
+    bi_zss: [],
+    xd_zss: [],
+    higher_zs: [{
+      period: '5m',
+      level: 0,
+      zss: [{
+        linestyle: '1',
+        done: false,
+        zd: 10.0,
+        zg: 10.6,
+        points: [
+          { time: 1700000100, price: 10.6 },
+          { time: 1700000500, price: 10.0 },
+        ],
+        entering_segment: {
+          direction: 'up', start_price: 9.8, end_price: 10.8,
+        },
+        leaving_segment: {
+          direction: 'up', start_price: 10.0, end_price: 10.9,
+        },
+      }],
+    }],
     strict_structure_mode: 'replace',
     strict_structure: strict,
     ...overrides,
@@ -242,10 +272,9 @@ const context = {
   timeZone: 'Asia/Shanghai',
 };
 
-test('summary consumes the authoritative strict snapshot for centers and signals', () => {
+test('summary uses real-frequency centers while strict snapshot remains authoritative for signals', () => {
   const strictOnly = Analysis.summarizeChartData(barsResult(), context);
   const poisoned = Analysis.summarizeChartData(barsResult(snapshot(), {
-    bi_zss: [{ zd: -999, zg: 999 }],
     xd_zss: [{ zd: -888, zg: 888 }],
     recursive_levels: [{ level: 0, zss: [{ zd: -777, zg: 777 }] }],
     mmds: [{ text: 'legacy-only-buy' }],
@@ -261,16 +290,13 @@ test('summary consumes the authoritative strict snapshot for centers and signals
   assert.equal(strictOnly.centerPreviews[0].tradable, false);
   assert.equal(strictOnly.centerPreviews[0].qualification, '形成中预览，不可直接交易');
   assert.equal(strictOnly.observations[0].tradable, false);
-  assert.equal(strictOnly.observations[0].qualification, '观察证据，不可直接交易');
-  assert.equal(strictOnly.biZone.low, 10.0);
-  assert.equal(strictOnly.biZone.high, 10.6);
-  assert.equal(strictOnly.biZone.status, '\u5f62\u6210\u4e2d');
-  assert.match(strictOnly.biZone.meta, /\u4e0d\u53ef\u76f4\u63a5\u4ea4\u6613/);
-  assert.equal(strictOnly.xdZone.low, 12.0);
-  assert.equal(strictOnly.xdZone.high, 12.8);
+  assert.equal(strictOnly.observations[0].qualification, '严格笔中枢观察，不可直接交易');
+  assert.equal(strictOnly.biZone.exists, false);
+  assert.equal(strictOnly.xdZone.low, 10.0);
+  assert.equal(strictOnly.xdZone.high, 10.6);
   assert.equal(strictOnly.xdZone.status, '\u5f62\u6210\u4e2d');
-  assert.equal(strictOnly.xdZone.levelLabel, '\u7ebf\u6bb5\u4e2d\u67a2\u9884\u89c8');
-  assert.match(strictOnly.xdZone.meta, /\u4e0d\u53ef\u76f4\u63a5\u4ea4\u6613/);
+  assert.equal(strictOnly.xdZone.levelLabel, '线段中枢');
+  assert.doesNotMatch(strictOnly.xdZone.meta, /\u4e0d\u53ef\u76f4\u63a5\u4ea4\u6613/);
   assert.equal(strictOnly.xdZone.enteringSegment, '向上 · 9.80 → 10.80');
   assert.equal(strictOnly.xdZone.leavingSegment, '向上 · 10.00 → 10.90');
   assert.deepEqual(strictOnly.divergences.map((item) => item.label).sort(), ['盘整背驰', '趋势背驰']);
@@ -302,8 +328,8 @@ test('provisional third-class completion is reported as complete but non-tradabl
     summary.centerPreviews[0].qualification,
     '几何已完成，等待线段锁定，不可直接交易',
   );
-  assert.equal(summary.xdZone.status, '已完成');
-  assert.equal(summary.xdZone.tone, 'complete');
+  assert.equal(summary.xdZone.status, '形成中');
+  assert.equal(summary.xdZone.tone, 'forming');
 });
 
 test('current stroke and segment status use base geometry from the same response', () => {

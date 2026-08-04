@@ -315,13 +315,19 @@ class XdCalculator:
                 reverse_end_hint = None
             else:
                 if not _overlap(all_bis[pos], all_bis[pos + 2]):
-                    # Once at least one segment has been assembled, ``pos`` is
-                    # the first stroke after the preceding segment endpoint.
-                    # A missing three-stroke overlap means that the opposite
-                    # segment is still forming; it does not permit skipping
-                    # ahead to a later stroke.  Skipping used to produce a
-                    # disconnected, same-direction provisional tail.
-                    if segs:
+                    # 起始三笔无重叠 → 本候选段此刻还不成立。
+                    #
+                    # 这在实时边缘意味着「反向段仍在形成」，等新笔即可；但同一个
+                    # 条件出现在历史笔上时，直接 break 会把其后全部笔（可能数万根）
+                    # 一次性交给 _emit_pending 打成一条巨型未完成尾段，线段中枢、
+                    # 走势类型、递归层级与买卖点因而全部截断在该点，且再多数据也
+                    # 不会恢复（实测 510300 自 2020-03-10 起线段恒为 973 段）。
+                    #
+                    # 因此只有真正处在活动边缘——其后已不足以再构成任何一段——才
+                    # 终止；否则与「尚未成段」的首段情形一样向前推进一笔继续找。
+                    # 被跳过的笔不并入任何线段，这与首段之前的前导笔处理一致；
+                    # 末段的连续性仍由 _emit_segments_deferred 归一化保证。
+                    if segs and pos + 2 >= len(all_bis) - 1:
                         pending_tail = (pos, all_bis[pos].type)
                         break
                     pos += 1

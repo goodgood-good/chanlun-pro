@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -56,11 +58,15 @@ def test_only_material_lifecycle_transitions_notify(tmp_path: Path) -> None:
 
     assert len(sender.messages) == 1
     title, lines = sender.messages[0]
-    assert "买卖通知" in title
-    assert "结构失效价" in "\n".join(lines)
-    assert "30m" in "\n".join(lines)
-    assert "5m" in "\n".join(lines)
-    assert "1m" in "\n".join(lines)
+    assert title == "买卖通知｜候选股｜SZ.000001｜1分钟一类买点"
+    rendered = "\n".join(lines)
+    assert "失效价：9.80" in rendered
+    assert "30分钟向上（有利）" in rendered
+    assert "5分钟三类买点" in rendered
+    assert "1分钟一类买点" in rendered
+    assert "建议：确认反转后考虑分批买入" in rendered
+    assert "计划风险倍数" not in rendered
+    assert "结构层级" not in rendered
 
 
 def test_newly_discovered_triggered_signal_notifies_immediately(
@@ -75,7 +81,87 @@ def test_newly_discovered_triggered_signal_notifies_immediately(
     dispatcher.dispatch_changes(snapshot(None), snapshot("triggered"))
 
     assert len(sender.messages) == 1
-    assert "首次发现 → triggered" in "\n".join(sender.messages[0][1])
+    assert "首次发现→1分钟已触发" in "\n".join(sender.messages[0][1])
+
+
+@pytest.mark.parametrize(
+    ("stage", "label"),
+    (
+        ("observed", "结构观察"),
+        ("approaching", "即将确认"),
+        ("armed", "已入观察池"),
+        ("triggered", "1分钟已触发"),
+        ("executable", "强提示待人工复核"),
+        ("active", "持有跟踪"),
+        ("invalidated", "结构已失效"),
+        ("closed", "跟踪已结束"),
+    ),
+)
+def test_notification_localizes_every_lifecycle_stage(
+    stage: str,
+    label: str,
+) -> None:
+    title, lines = format_notification(
+        signal_document(stage),
+        old_stage=stage,
+        new_stage=stage,
+    )
+
+    assert label in "\n".join((title, *lines))
+    assert f"{label}→{label}" in lines[0]
+    assert f"{stage}→{stage}" not in lines[0]
+
+
+def test_holding_source_is_explicitly_separated_from_candidate() -> None:
+    signal = signal_document()
+    signal["selection_sources"] = ["HOLDING_MONITOR"]
+
+    title, lines = format_notification(
+        signal,
+        old_stage="armed",
+        new_stage="triggered",
+    )
+
+    assert title == "买卖通知｜持仓股｜SZ.000001｜1分钟一类买点"
+    assert "候选股" not in title
+    assert lines[-1] == "建议：确认反转后考虑分批增持"
+
+
+def test_watchlist_signal_remains_candidate_not_holding() -> None:
+    signal = signal_document()
+    signal["selection_sources"] = ["ACTIVE_WATCHLIST_MONITOR"]
+
+    title, _lines = format_notification(
+        signal,
+        old_stage="armed",
+        new_stage="triggered",
+    )
+
+    assert "｜候选股｜" in title
+    assert "｜持仓股｜" not in title
+
+
+def test_sell_and_invalidation_advice_are_explicit() -> None:
+    sell = signal_document()
+    sell["side"] = "sell"
+    sell["point_type"] = "3sell"
+    sell["setup_5m"] = {"point_type": "3sell", "center_ordinal": 1}
+    sell["trigger_1m"] = {}
+
+    title, lines = format_notification(
+        sell,
+        old_stage="armed",
+        new_stage="triggered",
+    )
+    assert title.endswith("5分钟三类卖点")
+    assert lines[-1] == "建议：优先检查退出条件"
+
+    _title, invalidated_lines = format_notification(
+        sell,
+        old_stage="triggered",
+        new_stage="invalidated",
+    )
+    assert invalidated_lines[-1] == "建议：取消该结构计划"
 
 
 @pytest.mark.parametrize(
@@ -109,6 +195,11 @@ def test_failed_send_remains_retryable(tmp_path: Path) -> None:
     dispatcher.dispatch_changes(snapshot("armed"), snapshot("triggered"))
 
     assert len(sender.messages) == 2
+    health = dispatcher.health_snapshot()
+    assert health["status"] == "verified"
+    assert health["success_count"] == 1
+    assert health["failure_count"] == 1
+    assert health["delivered_event_count"] == 1
 
 
 def test_persisted_event_id_deduplicates_after_restart(tmp_path: Path) -> None:
@@ -130,6 +221,29 @@ def test_persisted_event_id_deduplicates_after_restart(tmp_path: Path) -> None:
     persisted = json.loads(state_path.read_text(encoding="utf-8"))
     assert persisted["schema_version"] == "chanlun-signal-notifications/v1"
     assert len(persisted["delivered_event_ids"]) == 1
+    assert persisted["success_count"] == 1
+    assert persisted["failure_count"] == 0
+
+
+def test_notification_health_records_failure_without_exposing_payload(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 8, 3, 13, 1, tzinfo=ZoneInfo("Asia/Shanghai"))
+    dispatcher = SignalNotificationDispatcher(
+        RecordingNotifier([False]),
+        state_path=tmp_path / "delivered.json",
+        clock=lambda: now,
+    )
+
+    dispatcher.dispatch_changes(snapshot("armed"), snapshot("triggered"))
+
+    health = dispatcher.health_snapshot()
+    assert health["status"] == "degraded"
+    assert health["reason_code"] == "LATEST_NOTIFICATION_DELIVERY_FAILED"
+    assert health["last_failure_at"] == now.isoformat()
+    assert health["last_failure_reason"] == "NOTIFIER_RETURNED_FALSE"
+    assert health["credentials_exposed"] is False
+    assert "webhook" not in json.dumps(health).lower()
 
 
 def test_notification_payload_and_failure_log_never_contain_webhook(

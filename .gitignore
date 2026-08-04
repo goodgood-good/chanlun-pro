@@ -51,6 +51,9 @@ coverage.xml
 *.py,cover
 .hypothesis/
 .pytest_cache/
+.ruff_cache/
+.playwright-cli/
+*.dmp
 cover/
 
 # Translations
@@ -202,6 +205,11 @@ tests/fixtures/klines/
 tests/core/baselines.local.json
 *.gz
 *.md
+# Keep the unique trading specification and formal audit reports visible.
+# The large lesson corpus stays protected by its tree-hash manifest.
+!audit/chanlun_live_strategy/*.md
+!audit/chanlun_live_integration/*.md
+!audit/chanlun_trading_system_forward_paper/*.md
 # 知识库配图(1061张~100MB)由 docx 经 tools/build_kb.py 再生, 不入库
 knowledge_base/images/
 */.omc/

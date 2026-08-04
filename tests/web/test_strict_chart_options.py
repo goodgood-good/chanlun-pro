@@ -6,6 +6,8 @@ from pathlib import Path
 from flask import Flask
 
 from chanlun.cl_utils import chart_config
+from chanlun.core.cl import CL
+from chanlun.core.types.config import Config
 from cl_app.blueprints import options
 
 
@@ -49,6 +51,18 @@ def test_chart_defaults_exclude_legacy_and_browser_only_strict_options(monkeypat
 
     assert set(REMOVED_STRICT_DISPLAY_KEYS).isdisjoint(result)
     assert LEGACY_STRUCTURE_KEYS.isdisjoint(result)
+
+
+def test_chart_default_old_pen_selection_reaches_the_core_calculator(monkeypatch) -> None:
+    chart_config._cl_config_cache_invalidate()
+    monkeypatch.setattr(chart_config.db, "cache_get", lambda _key: None)
+
+    result = chart_config.query_cl_chart_config("a", "SH.600519")
+    cd = CL("SH.600519", "5m", dict(result), market="a")
+
+    assert result["bi_type"] == Config.BI_TYPE_OLD.value
+    assert cd.get_config()["bi_mode"] == "strict"
+    assert cd.bi_calculator.bi_mode == "strict"
 
 
 def test_options_and_file_cache_share_one_persisted_key_contract() -> None:

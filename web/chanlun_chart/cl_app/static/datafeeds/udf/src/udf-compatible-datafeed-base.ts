@@ -120,6 +120,7 @@ export class UDFCompatibleDatafeedBase implements IExternalDatafeed, IDatafeedQu
 	private readonly _quotesPulseProvider: QuotesPulseProvider;
 
 	private readonly _requester: IRequester;
+	private readonly _reviewResolveParams: Readonly<RequestParams>;
 
 	private _subscribersResetCallbacks: Record<string, () => void> = {};
 
@@ -133,6 +134,19 @@ export class UDFCompatibleDatafeedBase implements IExternalDatafeed, IDatafeedQu
 	) {
 		this._datafeedURL = datafeedURL;
 		this._requester = requester;
+		const reviewResolveParams: RequestParams = {};
+		const suppliedParams = options.historyParams || {};
+		for (const key of [
+			'review_candidate_id',
+			'review_source_sha256',
+			'review_as_of',
+		]) {
+			const value = suppliedParams[key];
+			if (value !== undefined && value !== null && value !== '') {
+				reviewResolveParams[key] = value;
+			}
+		}
+		this._reviewResolveParams = Object.freeze(reviewResolveParams);
 		this._historyProvider = new HistoryProvider(
 			datafeedURL,
 			this._requester,
@@ -319,6 +333,7 @@ export class UDFCompatibleDatafeedBase implements IExternalDatafeed, IDatafeedQu
 
 		if (!this._configuration.supports_group_request) {
 			const params: RequestParams = {
+				...this._reviewResolveParams,
 				symbol: symbolName,
 			};
 			if (currencyCode !== undefined) {

@@ -27,9 +27,35 @@ _GEOMETRY_STOP_ERRORS = frozenset(
 )
 
 
-def _alternates(values: tuple[ConstituentUnit, ...]) -> bool:
-    return all(
-        previous.direction != current.direction
+def _conflicting_pair(
+    previous: ConstituentUnit,
+    current: ConstituentUnit,
+    oscillatory_ids: frozenset[str],
+) -> bool:
+    """Return whether two adjacent units may not follow one another.
+
+    线段永远有方向，相邻线段必然一上一下，所以线段层保持严格交替。
+
+    走势类型层不同：盘整没有方向，不参与交替判定；但两段有向
+    趋势若直接相邻且同向，不能作为两个独立走势单元递归。原文的结合律
+    并非取消方向约束，而是要求先把这种同向相邻走势合并成一个走势，
+    再做同级别分解。
+
+    因此 ``oscillatory_ids`` 只豁免真正的盘整连接件；其余直接相邻单元仍必须
+    方向相反。线段层恒传空集，故与原严格交替完全等价。
+    """
+
+    if previous.unit_id in oscillatory_ids or current.unit_id in oscillatory_ids:
+        return False
+    return previous.direction == current.direction
+
+
+def _alternates(
+    values: tuple[ConstituentUnit, ...],
+    oscillatory_ids: frozenset[str] = frozenset(),
+) -> bool:
+    return not any(
+        _conflicting_pair(previous, current, oscillatory_ids)
         for previous, current in zip(values, values[1:])
     )
 
@@ -51,11 +77,48 @@ def _outside_in_direction(
 
 
 def _core(initial_units: tuple[ConstituentUnit, ...]) -> tuple[int, int]:
-    middle = initial_units[1:4]
+    if len(initial_units) == 3:
+        middle = initial_units
+    elif len(initial_units) in (4, 5):
+        middle = initial_units[1:4]
+    else:
+        raise ValueError("center seed must contain three or five units")
     return (
         max(item.low_tick for item in middle),
         min(item.high_tick for item in middle),
     )
+
+
+def _is_leave_candidate(
+    center: TrendCenter,
+    item: ConstituentUnit,
+) -> bool:
+    """Whether a touching unit may become this center's departure.
+
+    The five alternating segment envelope inherits the direction of its entry
+    leg.  A recursive center is made directly from three complete lower-level
+    trends, so it has no external entry leg; either direction may leave once
+    its endpoint is outside the core.
+    """
+
+    return _outside_in_direction(item, center.zd_tick, center.zg_tick) and (
+        center.source_kind is SourceKind.TREND_TYPE
+        or item.direction == center.entry_unit.direction
+    )
+
+
+def _seed_size(source_kind: SourceKind) -> int:
+    """Return the causal establishment width for one center source.
+
+    The unchanged segment layer keeps its five-unit confirmation envelope.
+    Once the inputs are already-completed lower-level trend types, the
+    original definition is the overlap of three consecutive trend types.
+    Requiring another entry and exit trend at every recursive level silently
+    turns the nine-segment rule into a fifteen-plus-segment rule and starves
+    the 1m -> 5m -> 30m hierarchy.
+    """
+
+    return 3 if SourceKind(source_kind) is SourceKind.TREND_TYPE else 5
 
 
 def _event(
@@ -114,13 +177,7 @@ def _validate_seed_context(
 
 
 def _new_ongoing_center(
-    initial_units: tuple[
-        ConstituentUnit,
-        ConstituentUnit,
-        ConstituentUnit,
-        ConstituentUnit,
-        ConstituentUnit,
-    ],
+    initial_units: tuple[ConstituentUnit, ...],
     structural_level: int,
     source_kind: SourceKind,
     price_basis_revision: str,
@@ -136,9 +193,14 @@ def _new_ongoing_center(
         zd_tick,
         zg_tick,
     )
+    last = initial_units[-1]
+    # For the three-trend recursive seed all three units are the center core;
+    # none may simultaneously be claimed as a departure.  The next locked
+    # lower-level trend is the first possible leave candidate.
     pending_leave = (
-        initial_units[4]
-        if _outside_in_direction(initial_units[4], zd_tick, zg_tick)
+        last
+        if len(initial_units) == 5
+        and _outside_in_direction(last, zd_tick, zg_tick)
         else None
     )
     return TrendCenter(
@@ -155,9 +217,9 @@ def _new_ongoing_center(
         dd_tick=min(item.low_tick for item in initial_units),
         gg_tick=max(item.high_tick for item in initial_units),
         body_start_market_time=initial_units[0].market_start,
-        established_market_time=initial_units[4].market_end,
-        established_at=initial_units[4].confirmed_at,
-        last_touch_market_time=initial_units[4].market_end,
+        established_market_time=last.market_end,
+        established_at=last.confirmed_at,
+        last_touch_market_time=last.market_end,
         pending_leave_unit=pending_leave,
         completion_leave_unit=None,
         completion_return_unit=None,
@@ -171,9 +233,12 @@ def establish_center(
     initial_units,
     structural_level: int,
     source_kind: SourceKind,
+    oscillatory_ids: frozenset[str] = frozenset(),
 ) -> TrendCenter | None:
     values = tuple(initial_units)
-    if len(values) != 5 or not _alternates(values):
+    if len(values) != _seed_size(source_kind) or not _alternates(
+        values, oscillatory_ids
+    ):
         return None
     price_basis_revision = _validate_seed_context(
         values,
@@ -187,7 +252,7 @@ def establish_center(
         return None
     if not _positive_overlap(values[0], zd_tick, zg_tick):
         return None
-    if not _positive_overlap(values[4], zd_tick, zg_tick):
+    if not _positive_overlap(values[-1], zd_tick, zg_tick):
         return None
     return _new_ongoing_center(
         values,
@@ -203,6 +268,7 @@ def establish_center_preview(
     initial_units,
     structural_level: int,
     source_kind: SourceKind,
+    oscillatory_ids: frozenset[str] = frozenset(),
 ) -> CenterPreview | None:
     """Build a non-formal five-unit candidate containing provisional units.
 
@@ -212,7 +278,9 @@ def establish_center_preview(
     """
 
     values = tuple(initial_units)
-    if len(values) != 5 or not _alternates(values):
+    if len(values) != _seed_size(source_kind) or not _alternates(
+        values, oscillatory_ids
+    ):
         return None
     price_basis_revision = _validate_seed_context(
         values,
@@ -232,91 +300,8 @@ def establish_center_preview(
         return None
     if not _positive_overlap(values[0], zd_tick, zg_tick):
         return None
-    if not _positive_overlap(values[4], zd_tick, zg_tick):
+    if not _positive_overlap(values[-1], zd_tick, zg_tick):
         return None
-    return CenterPreview(
-        structural_level=structural_level,
-        source_kind=SourceKind(source_kind),
-        price_basis_revision=price_basis_revision,
-        unit_ids=tuple(item.unit_id for item in values),
-        state=CenterPreviewState.FORMING,
-        zd_tick=zd_tick,
-        zg_tick=zg_tick,
-        available_at=max(item.available_at for item in values),
-    )
-
-
-def _establish_trend_linked_center_preview(
-    initial_units,
-    previous_center: TrendCenter,
-    structural_level: int,
-    source_kind: SourceKind,
-) -> CenterPreview | None:
-    """Build a guarded live preview above/below an active prior center.
-
-    This is the five-segment shape seen at the live edge of SH.000001/1m:
-    the candidate reuses the active center's penultimate body unit and pending
-    leave, then adds three provisional units.  Its middle-three core is
-    separated in the pending-leave direction, while the reused entry unit is
-    still on the old-center side and therefore cannot overlap the new core.
-
-    The exception is deliberately preview-only.  Locked formal centers keep
-    the ordinary five-unit overlap contract and the provisional shape may
-    repaint as its line segments lock.
-    """
-
-    values = tuple(initial_units)
-    if SourceKind(source_kind) is not SourceKind.SEGMENT:
-        return None
-    if len(values) != 5 or not _alternates(values):
-        return None
-    price_basis_revision = _validate_seed_context(
-        values,
-        structural_level,
-        source_kind,
-    )
-    unlocked_seen = False
-    for item in values:
-        if not item.locked:
-            unlocked_seen = True
-        elif unlocked_seen:
-            return None
-    if not unlocked_seen:
-        return None
-    if (
-        previous_center.state is not CenterState.ONGOING
-        or previous_center.structural_level != structural_level
-        or previous_center.source_kind is not SourceKind(source_kind)
-        or previous_center.price_basis_revision != price_basis_revision
-        or previous_center.pending_leave_unit is None
-        or len(previous_center.body_units) < 2
-    ):
-        return None
-    previous_tail_ids = tuple(
-        item.unit_id for item in previous_center.body_units[-2:]
-    )
-    if previous_tail_ids != tuple(item.unit_id for item in values[:2]):
-        return None
-    if values[1].unit_id != previous_center.pending_leave_unit.unit_id:
-        return None
-
-    zd_tick, zg_tick = _core(values)
-    if zd_tick >= zg_tick:
-        return None
-    if values[0].direction != values[4].direction:
-        return None
-    if _positive_overlap(values[0], zd_tick, zg_tick):
-        return None
-    if not _positive_overlap(values[4], zd_tick, zg_tick):
-        return None
-
-    pending_direction = previous_center.pending_leave_unit.direction
-    if pending_direction == "up":
-        if zd_tick <= previous_center.zg_tick:
-            return None
-    elif zg_tick >= previous_center.zd_tick:
-        return None
-
     return CenterPreview(
         structural_level=structural_level,
         source_kind=SourceKind(source_kind),
@@ -342,7 +327,8 @@ def _advance_center_preview_lifecycle(
     """
 
     body = list(initial_units)
-    if len(body) < 5 or tuple(item.unit_id for item in body) != preview.unit_ids:
+    required = _seed_size(preview.source_kind)
+    if len(body) < required or tuple(item.unit_id for item in body) != preview.unit_ids:
         raise ValueError("preview lifecycle seed mismatch")
     if preview.state is not CenterPreviewState.FORMING:
         raise ValueError("only a forming preview can advance")
@@ -452,7 +438,11 @@ def _project_ongoing_center_preview(
     )
 
 
-def _validate_transition_unit(center: TrendCenter, item: ConstituentUnit) -> None:
+def _validate_transition_unit(
+    center: TrendCenter,
+    item: ConstituentUnit,
+    oscillatory_ids: frozenset[str] = frozenset(),
+) -> None:
     if (
         item.structural_level != center.structural_level
         or item.source_kind is not center.source_kind
@@ -470,7 +460,7 @@ def _validate_transition_unit(center: TrendCenter, item: ConstituentUnit) -> Non
     previous = center.body_units[-1]
     if item.start_tick != previous.end_tick:
         raise ValueError("center transition must connect")
-    if item.direction == previous.direction:
+    if _conflicting_pair(previous, item, oscillatory_ids):
         raise ValueError("center transition must alternate")
     if item.market_start < previous.market_end:
         raise ValueError("center transition intervals must not overlap")
@@ -517,12 +507,7 @@ def _append_extension_return(
     center: TrendCenter,
     item: ConstituentUnit,
 ) -> tuple[TrendCenter, CenterEvent]:
-    pending_leave = (
-        item
-        if item.direction == center.entry_unit.direction
-        and _outside_in_direction(item, center.zd_tick, center.zg_tick)
-        else None
-    )
+    pending_leave = item if _is_leave_candidate(center, item) else None
     return _append_body_unit(center, item, pending_leave=pending_leave)
 
 
@@ -559,12 +544,13 @@ def _complete_center(
 def advance_center(
     center: TrendCenter,
     item: ConstituentUnit,
+    oscillatory_ids: frozenset[str] = frozenset(),
 ) -> tuple[TrendCenter, CenterEvent]:
     if center.state is CenterState.COMPLETED:
         raise ValueError("completed center cannot transition")
     if not item.locked:
         raise ValueError("formal center transition must be locked")
-    _validate_transition_unit(center, item)
+    _validate_transition_unit(center, item, oscillatory_ids)
 
     pending = center.pending_leave_unit
     if pending is not None:
@@ -588,12 +574,7 @@ def advance_center(
 
     if not _positive_overlap(item, center.zd_tick, center.zg_tick):
         raise ValueError("ongoing center unit must re-enter the core")
-    pending_leave = (
-        item
-        if item.direction == center.entry_unit.direction
-        and _outside_in_direction(item, center.zd_tick, center.zg_tick)
-        else None
-    )
+    pending_leave = item if _is_leave_candidate(center, item) else None
     return _append_body_unit(center, item, pending_leave=pending_leave)
 
 
@@ -601,9 +582,13 @@ def forming_preview(
     candidate,
     structural_level: int,
     source_kind: SourceKind,
+    oscillatory_ids: frozenset[str] = frozenset(),
 ) -> CenterPreview | None:
     values = tuple(candidate)
-    if not 1 <= len(values) <= 5 or not _alternates(values):
+    maximum = _seed_size(source_kind)
+    if not 1 <= len(values) <= maximum or not _alternates(
+        values, oscillatory_ids
+    ):
         return None
     price_basis_revision = _validate_seed_context(
         values,
@@ -613,7 +598,8 @@ def forming_preview(
     zd_tick = None
     zg_tick = None
     state = CenterPreviewState.FORMING
-    if len(values) >= 4:
+    core_ready = 3 if SourceKind(source_kind) is SourceKind.TREND_TYPE else 4
+    if len(values) >= core_ready:
         zd_tick, zg_tick = _core(values)
         if zd_tick > zg_tick:
             return None
@@ -635,6 +621,7 @@ def validate_unit_sequence(
     values: tuple[ConstituentUnit, ...],
     structural_level: int,
     source_kind: SourceKind,
+    oscillatory_ids: frozenset[str] = frozenset(),
 ) -> None:
     source_kind = SourceKind(source_kind)
     if len({item.unit_id for item in values}) != len(values):
@@ -656,7 +643,7 @@ def validate_unit_sequence(
         elif preview_seen:
             raise ValueError("locked units must form a prefix")
         if previous is not None:
-            if item.direction == previous.direction:
+            if _conflicting_pair(previous, item, oscillatory_ids):
                 raise ValueError("unit directions must alternate")
             if item.start_tick != previous.end_tick:
                 raise ValueError("adjacent unit prices must connect")
@@ -672,6 +659,7 @@ def _has_later_trend_candidate(
     current_body_end: int,
     structural_level: int,
     source_kind: SourceKind,
+    oscillatory_ids: frozenset[str] = frozenset(),
 ) -> bool:
     """Return whether a later overlapping window preserves the trend leg.
 
@@ -681,22 +669,25 @@ def _has_later_trend_candidate(
     viable center with a separated up/down relation to the previous center.
     """
 
-    last_start = min(current_body_end, len(formal) - 5)
+    width = _seed_size(source_kind)
+    last_start = min(current_body_end, len(formal) - width)
     for start in range(current_start + 1, last_start + 1):
         candidate = establish_center(
-            formal[start : start + 5],
+            formal[start : start + width],
             structural_level,
             source_kind,
+            oscillatory_ids,
         )
         if candidate is None:
             continue
-        offset = start + 5
+        offset = start + width
         geometry_stopped = False
         while offset < len(formal):
             try:
                 candidate, _event_value = advance_center(
                     candidate,
                     formal[offset],
+                    oscillatory_ids,
                 )
             except ValueError as exc:
                 if str(exc) not in _GEOMETRY_STOP_ERRORS:
@@ -723,6 +714,7 @@ def _find_later_completed_candidate(
     structural_level: int,
     source_kind: SourceKind,
     *,
+    oscillatory_ids: frozenset[str] = frozenset(),
     last_completion_offset: int | None = None,
 ) -> tuple[int, int, TrendCenter, list[CenterEvent]] | None:
     """Find the first later seed that is already complete in this prefix.
@@ -742,16 +734,18 @@ def _find_later_completed_candidate(
     )
     earliest = None
     earliest_key = None
-    for start in range(current_start + 1, last_offset - 4):
+    width = _seed_size(source_kind)
+    for start in range(current_start + 1, last_offset - width + 1):
         # A five-unit seed needs at least one following return unit.  Once a
         # later start cannot beat the earliest completion already found, no
         # subsequent start can beat it either.
-        if earliest_key is not None and start + 5 >= earliest_key[0]:
+        if earliest_key is not None and start + width >= earliest_key[0]:
             break
         candidate = establish_center(
-            formal[start : start + 5],
+            formal[start : start + width],
             structural_level,
             source_kind,
+            oscillatory_ids,
         )
         if candidate is None:
             continue
@@ -764,10 +758,12 @@ def _find_later_completed_candidate(
                 leave=candidate.initial_exit_unit,
             )
         ]
-        offset = start + 5
+        offset = start + width
         while offset <= last_offset:
             try:
-                candidate, event = advance_center(candidate, formal[offset])
+                candidate, event = advance_center(
+                    candidate, formal[offset], oscillatory_ids
+                )
             except ValueError as exc:
                 if str(exc) not in _GEOMETRY_STOP_ERRORS:
                     raise
@@ -792,10 +788,11 @@ def calculate_centers(
     units,
     structural_level: int,
     source_kind: SourceKind,
+    oscillatory_ids: frozenset[str] = frozenset(),
 ) -> CenterLevelResult:
     values = tuple(units)
     source_kind = SourceKind(source_kind)
-    validate_unit_sequence(values, structural_level, source_kind)
+    validate_unit_sequence(values, structural_level, source_kind, oscillatory_ids)
     price_basis_revision = values[0].price_basis_revision if values else None
 
     locked_count = 0
@@ -804,23 +801,26 @@ def calculate_centers(
             break
         locked_count += 1
     formal = values[:locked_count]
+    width = _seed_size(source_kind)
 
     centers: list[TrendCenter] = []
     events: list[CenterEvent] = []
     previews: list[CenterPreview] = []
     i = 0
     replay_from = 0
-    while i + 4 < len(formal):
+    while i + width - 1 < len(formal):
         center = establish_center(
-            formal[i : i + 5],
+            formal[i : i + width],
             structural_level,
             source_kind,
+            oscillatory_ids,
         )
         if center is None:
             observation = forming_preview(
-                formal[i : i + 5],
+                formal[i : i + width],
                 structural_level,
                 source_kind,
+                oscillatory_ids,
             )
             if (
                 observation is not None
@@ -837,14 +837,17 @@ def calculate_centers(
                 CenterEventKind.ESTABLISHED,
                 center.established_market_time,
                 center.available_at,
-                leave=center.initial_exit_unit,
+                # In the unchanged five-segment seed the fifth unit can
+                # already be a breakout watch.  A three-trend recursive seed
+                # consists entirely of the center core and has no leave yet.
+                leave=center.initial_exit_unit if width == 5 else None,
             )
         ]
-        j = i + 5
+        j = i + width
         geometry_stopped = False
         while j < len(formal):
             try:
-                center, event = advance_center(center, formal[j])
+                center, event = advance_center(center, formal[j], oscillatory_ids)
             except ValueError as exc:
                 if str(exc) not in _GEOMETRY_STOP_ERRORS:
                     raise
@@ -859,6 +862,7 @@ def calculate_centers(
             i,
             structural_level,
             source_kind,
+            oscillatory_ids=oscillatory_ids,
             last_completion_offset=(
                 j
                 if geometry_stopped or center.state is CenterState.COMPLETED
@@ -895,6 +899,7 @@ def calculate_centers(
                     j - 1,
                     structural_level,
                     source_kind,
+                    oscillatory_ids,
                 )
             ):
                 i += 1
@@ -912,29 +917,23 @@ def calculate_centers(
         break
 
     latest_live_preview = None
-    if locked_count < len(values) and len(values) >= 5:
-        # A valid five-unit window can end before the final provisional unit.
+    if locked_count < len(values) and len(values) >= width:
+        # A valid source-specific seed can end before the final provisional unit.
         # Scan every window that intersects the unlocked suffix and select the
         # latest consolidation candidate instead of assuming ``values[-5:]``.
-        first_live_start = max(0, locked_count - 4)
-        for start in range(first_live_start, len(values) - 4):
+        first_live_start = max(0, locked_count - (width - 1))
+        for start in range(first_live_start, len(values) - width + 1):
             preview = establish_center_preview(
-                values[start : start + 5],
+                values[start : start + width],
                 structural_level,
                 source_kind,
+                oscillatory_ids,
             )
-            if preview is None and centers:
-                preview = _establish_trend_linked_center_preview(
-                    values[start : start + 5],
-                    centers[-1],
-                    structural_level,
-                    source_kind,
-                )
             if preview is not None:
                 preview = _advance_center_preview_lifecycle(
                     preview,
-                    values[start : start + 5],
-                    values[start + 5 :],
+                    values[start : start + width],
+                    values[start + width :],
                 )
             if preview is not None:
                 # A geometrically completed candidate is stronger lifecycle
@@ -952,25 +951,72 @@ def calculate_centers(
                 centers[-1],
                 values[locked_count:],
             )
-            # A distinct later center candidate owns the live edge.  Project
-            # the formal center only when no such candidate exists; otherwise
-            # an old center's provisional completion would hide the newer
-            # consolidation (the SH.000001 linked-center case).
-            if projected is not None and latest_live_preview is None:
-                latest_live_preview = projected
+            if (
+                projected is None
+                and latest_live_preview is not None
+                and latest_live_preview.state is CenterPreviewState.FORMING
+            ):
+                # Unlocked tail geometry may temporarily stop being a valid
+                # extension of the locked, formal active center.  A shifted
+                # five-unit window made from that same provisional tail is not
+                # strong enough to create a second unresolved center or erase
+                # the formal one.  Hide the ordinary forming alternative until
+                # the tail locks.  A COMPLETED preview remains admissible below:
+                # its outside return is stronger third-class-point evidence.
+                latest_live_preview = None
+            if projected is not None:
+                projected_seed = projected.unit_ids[:width]
+                latest_seed = (
+                    ()
+                    if latest_live_preview is None
+                    else latest_live_preview.unit_ids[:width]
+                )
+                if latest_live_preview is None:
+                    latest_live_preview = projected
+                elif projected_seed == latest_seed:
+                    # The same candidate may be reached through both the live
+                    # window scan and formal-center projection.  Completion is
+                    # monotonic evidence and must win over a forming view.
+                    if (
+                        projected.state is CenterPreviewState.COMPLETED
+                        and latest_live_preview.state
+                        is not CenterPreviewState.COMPLETED
+                    ):
+                        latest_live_preview = projected
+                elif projected.state is CenterPreviewState.COMPLETED:
+                    # A new adjacent five-role candidate may coexist at the
+                    # live edge, but it cannot erase the already observed
+                    # same-level return that geometrically completed the active
+                    # center.  Preserve both; only the locked prefix can later
+                    # promote either preview to formal/tradable evidence.
+                    previews.append(projected)
+                elif latest_live_preview.state is CenterPreviewState.FORMING:
+                    # The formal center has not produced its same-level third-
+                    # class completion yet.  A later sliding five-unit window
+                    # inside that unresolved tail is therefore an alternative
+                    # decomposition of the *same* extension, not an independent
+                    # adjacent center.  Keep the projection rooted at the
+                    # formal seed so one live center cannot be rendered twice.
+                    # A genuinely adjacent candidate is preserved by the
+                    # COMPLETED branch above, after the active center has an
+                    # outside return that supplies a causal boundary.
+                    latest_live_preview = projected
         if latest_live_preview is not None and latest_live_preview not in previews:
             previews.append(latest_live_preview)
 
     if latest_live_preview is None:
-        tail_start = max(0, len(values) - 5)
+        tail_start = max(0, len(values) - width)
         tail = values[tail_start:]
         if tail and (
-            len(tail) < 5
+            len(tail) < width
             or any(not item.locked for item in tail)
-            or establish_center(tail, structural_level, source_kind) is None
+            or establish_center(tail, structural_level, source_kind, oscillatory_ids)
+            is None
         ):
-            preview = forming_preview(tail, structural_level, source_kind)
-            if len(tail) == 5 and (
+            preview = forming_preview(
+                tail, structural_level, source_kind, oscillatory_ids
+            )
+            if len(tail) == width and (
                 preview is None
                 or preview.state is not CenterPreviewState.TOUCH_ONLY
             ):

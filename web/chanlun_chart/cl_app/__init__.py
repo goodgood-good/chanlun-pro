@@ -28,7 +28,7 @@ from apscheduler.events import (
     EVENT_JOBSTORE_REMOVED,
 )
 from apscheduler.schedulers.background import BackgroundScheduler
-from flask import Flask, g, has_request_context, redirect, render_template, request, session
+from flask import Flask, abort, g, has_request_context, redirect, render_template, request, session
 from flask_login import LoginManager, UserMixin, login_required, login_user, logout_user
 from flask_wtf.csrf import CSRFError, generate_csrf
 from chanlun import config, fun
@@ -40,6 +40,14 @@ from chanlun.security import (
     validate_web_security_config,
     verify_login_password,
 )
+from chanlun.decision_support.trading_system.v3_trading_session import (
+    DEFAULT_OFFICIAL_TRADING_CALENDAR_PATH,
+    authoritative_trading_session_evidence,
+)
+from chanlun.decision_support.trading_system.decision_source_provenance import (
+    calculate_forward_application_source_revision,
+    is_content_addressed_application_source_revision,
+)
 __all__ = ["create_app"]
 
 
@@ -47,6 +55,28 @@ _TASK_HISTORY_LIMIT = 500
 _TASK_TERMINAL_STATES = {"已完成", "执行异常", "未执行", "删除作业"}
 _SHARED_RUNTIME_OWNER_LOCK = threading.RLock()
 _SHARED_RUNTIME_OWNER: object | None = None
+
+
+def _human_review_historical_paths() -> tuple[pathlib.Path, pathlib.Path]:
+    """Return the current release sidecar and the explicit legacy fallback."""
+
+    repository_root = pathlib.Path(__file__).resolve().parents[3]
+    backtests = repository_root / "audit" / "chanlun_trading_system_backtest"
+    return (
+        backtests
+        / "recent_year_current_sector_no3p_mwd_strength"
+        / "human_review_screen.json",
+        backtests
+        / "recent_year_current_sector_no3p"
+        / "human_review_screen.json",
+    )
+
+
+def _default_human_review_historical_report() -> pathlib.Path:
+    """Prefer the page sidecar produced beside the current formal release."""
+
+    current, legacy = _human_review_historical_paths()
+    return current if current.is_file() else legacy
 
 
 def _trim_task_history(task_map, limit: int = _TASK_HISTORY_LIMIT) -> None:
@@ -102,6 +132,154 @@ def create_app(test_config=None, start_scheduler=False):
         WTF_CSRF_TIME_LIMIT=12 * 60 * 60,
         READINESS_MARKETS=os.environ.get("CHANLUN_READINESS_MARKETS", "a"),
         TRADING_SCREENING_BACKGROUND_ENABLED=True,
+        TRADING_SCREENING_PRIORITY_MONITOR_ENABLED=True,
+        TRADING_SCREENING_PRIORITY_MONITOR_MAX_SYMBOLS=int(
+            os.environ.get(
+                "CHANLUN_TRADING_SCREENING_PRIORITY_MONITOR_MAX_SYMBOLS",
+                "16",
+            )
+        ),
+        TRADING_SCREENING_PRIORITY_MONITOR_INTERVAL_SECONDS=60,
+        # A system-local, market-independent watchlist group declares manual
+        # holdings.  It is only a monitoring fact: no broker/account access or
+        # order capability is inferred from membership.
+        TRADING_SCREENING_MANUAL_HOLDING_GROUP=os.environ.get(
+            "CHANLUN_TRADING_SCREENING_MANUAL_HOLDING_GROUP",
+            "我的持仓",
+        ).strip(),
+        HOLDING_GROUP_MONITOR_ENABLED=True,
+        HOLDING_GROUP_MONITOR_INTERVAL_SECONDS=int(
+            os.environ.get("CHANLUN_HOLDING_GROUP_MONITOR_INTERVAL_SECONDS", "60")
+        ),
+        HOLDING_GROUP_MONITOR_START_DELAY_SECONDS=int(
+            os.environ.get("CHANLUN_HOLDING_GROUP_MONITOR_START_DELAY_SECONDS", "8")
+        ),
+        HOLDING_GROUP_MONITOR_WORKERS=int(
+            os.environ.get(
+                "CHANLUN_HOLDING_GROUP_MONITOR_WORKERS",
+                str(max(2, min(8, (os.cpu_count() or 4) // 2))),
+            )
+        ),
+        TRADING_SCREENING_TOTAL_SYMBOLS_PER_REFRESH=int(
+            os.environ.get(
+                "CHANLUN_TRADING_SCREENING_TOTAL_SYMBOLS_PER_REFRESH",
+                "64",
+            )
+        ),
+        # Post-close full-universe coverage is start-to-start throttled to one
+        # batch per minute.  Keep the ordinary discovery lane aligned with the
+        # total 64-symbol budget; leaving its dataclass default at 32 idles the
+        # ten structure workers for most of every interval and roughly doubles
+        # the time needed to publish the next-session preselection.
+        TRADING_SCREENING_SYMBOLS_PER_REFRESH=int(
+            os.environ.get(
+                "CHANLUN_TRADING_SCREENING_SYMBOLS_PER_REFRESH",
+                "64",
+            )
+        ),
+        TRADING_SCREENING_NATIVE_PROCESS_ISOLATION=True,
+        TRADING_SCREENING_NATIVE_STARTUP_TIMEOUT_SECONDS=45.0,
+        TRADING_SCREENING_NATIVE_IDLE_TIMEOUT_SECONDS=210.0,
+        TRADING_SCREENING_NATIVE_RESTART_BACKOFF_SECONDS=30.0,
+        # One authenticated worker process can saturate only one CPU core.
+        # Use half the logical CPUs (capped at eight) for stock structure work,
+        # leaving capacity for QMT, Flask, charts and the operating system.
+        TRADING_SCREENING_STOCK_WORKERS=int(
+            os.environ.get(
+                "CHANLUN_TRADING_SCREENING_STOCK_WORKERS",
+                # Use roughly five eighths of logical CPUs, capped at ten.
+                # On the current 10-core/16-thread host this assigns one
+                # worker per physical core while retaining six logical CPUs
+                # for QMT, Flask, chart rendering and notification delivery.
+                str(
+                    min(
+                        10,
+                        max(1, (((os.cpu_count() or 4) * 5) + 7) // 8),
+                    )
+                ),
+            )
+        ),
+        FORWARD_SCHEDULER_MONITOR_ENABLED=True,
+        FORWARD_SCHEDULER_MONITOR_TTL_SECONDS=30.0,
+        # app.py is the long-running owner of forward business scheduling.
+        # Windows Task Scheduler is retained only for QMT/app bootstrap and
+        # recovery.  Set WINDOWS only during a bounded migration rollback.
+        FORWARD_SCHEDULER_MODE=os.environ.get(
+            "CHANLUN_FORWARD_SCHEDULER_MODE", "APP"
+        ).strip().upper(),
+        FORWARD_QMT_LOCAL_DATA_DIR=os.environ.get(
+            "CHANLUN_QMT_LOCAL_DATA_DIR", ""
+        ).strip(),
+        # app.py is also the sole owner of the interactive QMT runtime.  The
+        # legacy Windows QMT task is supported only as a bounded migration
+        # rollback and must be removed after the app-owned health gate passes.
+        QMT_RUNTIME_MODE=os.environ.get(
+            "CHANLUN_QMT_RUNTIME_MODE", "APP"
+        ).strip().upper(),
+        QMT_RUNTIME_HELPER=os.environ.get(
+            "CHANLUN_QMT_RUNTIME_HELPER", ""
+        ).strip(),
+        QMT_RUNTIME_STARTUP_TIMEOUT_SECONDS=120,
+        QMT_RUNTIME_WARMUP_SECONDS=90,
+        QMT_RUNTIME_RECOVERY_COOLDOWN_SECONDS=300,
+        QMT_RUNTIME_OBSERVATION_MAX_AGE_SECONDS=180,
+        TRADING_SESSION_OFFICIAL_CALENDAR_PATH=(
+            DEFAULT_OFFICIAL_TRADING_CALENDAR_PATH
+        ),
+        HUMAN_REVIEW_HISTORICAL_REPORT=(
+            _default_human_review_historical_report()
+        ),
+        HUMAN_REVIEW_CURRENT_HISTORICAL_REPORT=(
+            _human_review_historical_paths()[0]
+        ),
+        HUMAN_REVIEW_FORWARD_ROOT=(
+            pathlib.Path(__file__).resolve().parents[3]
+            / ".cache"
+            / "chanlun_v3_human_review_forward"
+        ),
+        HUMAN_REVIEW_FEEDBACK_LEDGER=(
+            pathlib.Path(__file__).resolve().parents[3]
+            / ".cache"
+            / "chanlun_v3_human_review"
+            / "feedback_ledger.json"
+        ),
+        HUMAN_REVIEW_PAPER_LEDGER=(
+            pathlib.Path(__file__).resolve().parents[3]
+            / ".cache"
+            / "chanlun_v3_human_review"
+            / "paper_ledger.json"
+        ),
+        HUMAN_REVIEW_PARAMETER_SNAPSHOT=(
+            pathlib.Path(__file__).resolve().parents[3]
+            / "audit"
+            / "chanlun_trading_system_backtest"
+            / "recent_year_current_sector_no3p"
+            / "parameter_snapshot_human_review.json"
+        ),
+        HUMAN_REVIEW_LIVE_ARCHIVE_ROOT=(
+            pathlib.Path(__file__).resolve().parents[3]
+            / ".cache"
+            / "chanlun_v3_human_review"
+            / "live_screens"
+        ),
+        HUMAN_REVIEW_FORWARD_MARKOUT=(
+            pathlib.Path(__file__).resolve().parents[3]
+            / ".cache"
+            / "chanlun_v3_human_review_forward"
+            / "forward_review_markout.json"
+        ),
+        HUMAN_REVIEW_FORWARD_WARMUP_LINEAGE=(
+            pathlib.Path(__file__).resolve().parents[3]
+            / ".cache"
+            / "chanlun_v3_human_review_forward"
+            / "forward_warmup_structure_lineage_rollup.json"
+        ),
+        QMT_SECTOR_CAPTURE_LEDGER=(
+            pathlib.Path(__file__).resolve().parents[3]
+            / ".cache"
+            / "chanlun_v3_qmt_sector_ledger"
+            / "qmt_gics3_catalog_ledger.json"
+        ),
     )
     if test_config:
         app.config.update(test_config)
@@ -112,6 +290,36 @@ def create_app(test_config=None, start_scheduler=False):
         # Runtime tests opt in explicitly. This keeps the default app factory
         # side-effect free and prevents real market scans in unrelated tests.
         app.config["TRADING_SCREENING_BACKGROUND_ENABLED"] = False
+    if app.testing and (
+        not test_config
+        or "TRADING_SCREENING_NATIVE_PROCESS_ISOLATION" not in test_config
+    ):
+        app.config["TRADING_SCREENING_NATIVE_PROCESS_ISOLATION"] = False
+    if app.testing and (
+        not test_config
+        or "FORWARD_SCHEDULER_MONITOR_ENABLED" not in test_config
+    ):
+        # Reading Windows Task Scheduler is an explicit integration-test opt-in.
+        # Generic app-factory tests remain host-independent and side-effect free.
+        app.config["FORWARD_SCHEDULER_MONITOR_ENABLED"] = False
+    if app.testing and (
+        not test_config or "FORWARD_SCHEDULER_MODE" not in test_config
+    ):
+        # Unit tests must opt into the process-owning scheduler explicitly.
+        app.config["FORWARD_SCHEDULER_MODE"] = "DISABLED"
+    if app.testing and (
+        not test_config or "QMT_RUNTIME_MODE" not in test_config
+    ):
+        # Host-process control is always an explicit integration-test opt-in.
+        app.config["QMT_RUNTIME_MODE"] = "DISABLED"
+    if app.testing and (
+        not test_config
+        or "TRADING_SESSION_OFFICIAL_CALENDAR_PATH" not in test_config
+    ):
+        # Unit tests opt into the immutable annual artifact explicitly.  This
+        # preserves injected calendar-provider tests and prevents a real
+        # filesystem artifact from silently replacing their fixture evidence.
+        app.config["TRADING_SESSION_OFFICIAL_CALENDAR_PATH"] = None
     if https_enabled:
         app.config["SESSION_COOKIE_SECURE"] = True
         app.config["REMEMBER_COOKIE_SECURE"] = True
@@ -232,6 +440,7 @@ def create_app(test_config=None, start_scheduler=False):
     _alert_tasks = AlertTasks(scheduler)
     _xuangu_tasks = XuanguTasks(scheduler)
     _recursive_monitors = []
+    holding_group_monitor = None
 
     # _other_tasks = OtherTasks(scheduler)
 
@@ -474,6 +683,14 @@ def create_app(test_config=None, start_scheduler=False):
             return configured
         project_root = pathlib.Path(__file__).resolve().parents[3]
         try:
+            # Direct ``app.py`` / PyCharm launches are the normal production
+            # owner in this project.  Bind readiness and persistent native fact
+            # caches to the exact dirty working tree instead of reporting only
+            # HEAD and disabling caches merely because no wrapper set an env var.
+            return calculate_forward_application_source_revision(project_root)
+        except (OSError, RuntimeError):
+            pass
+        try:
             completed = subprocess.run(
                 ["git", "-C", str(project_root), "rev-parse", "HEAD"],
                 check=True,
@@ -487,7 +704,7 @@ def create_app(test_config=None, start_scheduler=False):
 
     build_revision = _runtime_revision()
 
-    def _readyz_snapshot(market):
+    def _readyz_snapshot(market, forward_session=None):
         market = (market or "a").strip().lower()
         if market not in market_types:
             return {
@@ -564,7 +781,12 @@ def create_app(test_config=None, start_scheduler=False):
             ),
         }
         if scheduler_required:
-            runtime_component = runtime_status()
+            runtime_probe = app.extensions.get("runtime_status")
+            runtime_component = (
+                runtime_probe()
+                if callable(runtime_probe)
+                else runtime_status()
+            )
             runtime_component["required"] = True
         else:
             runtime_component = {
@@ -572,6 +794,370 @@ def create_app(test_config=None, start_scheduler=False):
                 "ready": True,
                 "status": "disabled",
                 "error": None,
+            }
+
+        qmt_runtime_required = bool(
+            scheduler_required
+            and market == "a"
+            and str(app.config.get("QMT_RUNTIME_MODE", "APP")).upper()
+            == "APP"
+        )
+        if qmt_runtime_required:
+            qmt_runtime_probe = app.extensions.get("app_qmt_runtime")
+            try:
+                if qmt_runtime_probe is None or not hasattr(
+                    qmt_runtime_probe, "snapshot"
+                ):
+                    raise RuntimeError("app-owned QMT runtime unavailable")
+                qmt_runtime_component = dict(qmt_runtime_probe.snapshot())
+                qmt_runtime_component["required"] = True
+            except Exception as exc:
+                app.logger.exception("readiness QMT runtime snapshot failed")
+                qmt_runtime_component = {
+                    "schema": "chanlun-qmt-runtime-readiness/v1",
+                    "contract_id": (
+                        "chanlun-qmt-runtime/app-runtime-contract/v1"
+                    ),
+                    "execution_owner": "APP_RUNTIME",
+                    "required": True,
+                    "ready": False,
+                    "status": "not_ready",
+                    "reason_code": "QMT_RUNTIME_OBSERVATION_UNAVAILABLE",
+                    "reason_codes": [
+                        "QMT_RUNTIME_OBSERVATION_UNAVAILABLE"
+                    ],
+                    "error": f"{type(exc).__name__}: {str(exc)[:160]}",
+                    "real_account_accessed": False,
+                    "real_order_transport_enabled": False,
+                    "automated_order_authorized": False,
+                    "live_status": "LIVE_DISABLED",
+                }
+        else:
+            qmt_runtime_component = {
+                "schema": "chanlun-qmt-runtime-readiness/v1",
+                "contract_id": "chanlun-qmt-runtime/app-runtime-contract/v1",
+                "execution_owner": None,
+                "required": False,
+                "ready": True,
+                "status": "disabled",
+                "reason_code": "QMT_RUNTIME_MANAGEMENT_DISABLED",
+                "reason_codes": [],
+                "real_account_accessed": False,
+                "real_order_transport_enabled": False,
+                "automated_order_authorized": False,
+                "live_status": "LIVE_DISABLED",
+            }
+
+        screening_required = bool(
+            scheduler_required
+            and runtime_component.get("status") == "running"
+            and market == "a"
+            and app.config.get("TRADING_SCREENING_BACKGROUND_ENABLED", True)
+        )
+        if screening_required:
+            screening_service = app.extensions.get(
+                "decision_support_trading_screening"
+            )
+            try:
+                if screening_service is None or not hasattr(
+                    screening_service, "health_snapshot"
+                ):
+                    raise RuntimeError("trading screening service unavailable")
+                screening_component = dict(
+                    screening_service.health_snapshot()
+                )
+                screening_component["required"] = True
+                screening_component["ready"] = bool(
+                    screening_component.get("ready")
+                )
+                screening_component["status"] = (
+                    "ready"
+                    if screening_component["ready"]
+                    else "not_ready"
+                )
+            except Exception as exc:
+                app.logger.exception("readiness trading screening snapshot failed")
+                screening_component = {
+                    "required": True,
+                    "ready": False,
+                    "status": "not_ready",
+                    "last_error": f"{type(exc).__name__}: {str(exc)[:160]}",
+                    "reasons": ["screening_health_failed"],
+                }
+        else:
+            screening_component = {
+                "required": False,
+                "ready": True,
+                "status": "disabled",
+                "reasons": [],
+            }
+
+        holding_monitor_required = bool(
+            scheduler_required
+            and runtime_component.get("status") == "running"
+            and app.config.get("HOLDING_GROUP_MONITOR_ENABLED", True)
+        )
+        if holding_monitor_required:
+            monitor_service = app.extensions.get("holding_group_monitor")
+            try:
+                if monitor_service is None or not callable(
+                    getattr(monitor_service, "health_snapshot", None)
+                ):
+                    raise RuntimeError("holding group monitor unavailable")
+                holding_monitor_component = dict(
+                    monitor_service.health_snapshot()
+                )
+                holding_monitor_component["required"] = True
+            except Exception as exc:
+                app.logger.exception("holding monitor readiness snapshot failed")
+                holding_monitor_component = {
+                    "schema": "chanlun-holding-group-monitor/v1",
+                    "required": True,
+                    "ready": False,
+                    "status": "not_ready",
+                    "reason_code": "HOLDING_MONITOR_HEALTH_UNAVAILABLE",
+                    "error": f"{type(exc).__name__}: {str(exc)[:160]}",
+                    "real_account_accessed": False,
+                    "real_order_transport_enabled": False,
+                    "automated_order_authorized": False,
+                    "live_status": "LIVE_DISABLED",
+                }
+        else:
+            holding_monitor_component = {
+                "schema": "chanlun-holding-group-monitor/v1",
+                "required": False,
+                "ready": True,
+                "status": "disabled",
+                "reason_code": "HOLDING_MONITOR_DISABLED",
+                "real_account_accessed": False,
+                "real_order_transport_enabled": False,
+                "automated_order_authorized": False,
+                "live_status": "LIVE_DISABLED",
+            }
+
+        forward_scheduler_required = bool(
+            screening_required
+            and app.config.get("FORWARD_SCHEDULER_MONITOR_ENABLED", True)
+        )
+        forward_scheduler_contract_id = (
+            "chanlun-v3-forward-scheduler/app-runtime-contract/v1"
+            if str(app.config.get("FORWARD_SCHEDULER_MODE", "APP")).upper()
+            == "APP"
+            else "chanlun-v3-forward-scheduler/windows-task-contract/v1"
+        )
+        if forward_scheduler_required:
+            forward_scheduler_probe = app.extensions.get(
+                "forward_scheduler_probe"
+            )
+            try:
+                if forward_scheduler_probe is None or not hasattr(
+                    forward_scheduler_probe, "snapshot"
+                ):
+                    raise RuntimeError("forward scheduler probe unavailable")
+                forward_scheduler_component = dict(
+                    forward_scheduler_probe.snapshot()
+                )
+                forward_scheduler_component["required"] = True
+            except Exception as exc:
+                app.logger.exception("forward scheduler observation failed")
+                forward_scheduler_component = {
+                    "schema": (
+                        "chanlun-v3-forward-scheduler-readiness/v1"
+                    ),
+                    "contract_id": (
+                        forward_scheduler_contract_id
+                    ),
+                    "required": True,
+                    "ready": False,
+                    "status": "unresolved",
+                    "reason_code": (
+                        "SCHEDULED_TASK_OBSERVATION_UNAVAILABLE"
+                    ),
+                    "reason_codes": [
+                        "SCHEDULED_TASK_OBSERVATION_UNAVAILABLE"
+                    ],
+                    "tasks": [],
+                    "task_count": 0,
+                    "error": f"{type(exc).__name__}: {str(exc)[:160]}",
+                    "real_account_accessed": False,
+                    "real_order_transport_enabled": False,
+                    "automated_order_authorized": False,
+                    "live_status": "LIVE_DISABLED",
+                }
+        else:
+            forward_scheduler_component = {
+                "schema": "chanlun-v3-forward-scheduler-readiness/v1",
+                "contract_id": (
+                    forward_scheduler_contract_id
+                ),
+                "required": False,
+                "ready": True,
+                "status": "disabled",
+                "reason_code": "FORWARD_SCHEDULER_MONITOR_DISABLED",
+                "reason_codes": [],
+                "tasks": [],
+                "task_count": 0,
+                "real_account_accessed": False,
+                "real_order_transport_enabled": False,
+                "automated_order_authorized": False,
+                "live_status": "LIVE_DISABLED",
+            }
+
+        if screening_required:
+            screening_review_ready = bool(
+                screening_component.get(
+                    "screening_review_ready",
+                    screening_component.get("forward_review_ready", False),
+                )
+            )
+            screening_review_reason = str(
+                screening_component.get(
+                    "screening_review_reason_code",
+                    screening_component.get(
+                        "forward_review_reason_code",
+                        "SCREENING_REVIEW_READINESS_UNAVAILABLE",
+                    ),
+                )
+            )
+            human_review_service = app.extensions.get(
+                "decision_support_human_review"
+            )
+            try:
+                capture_probe = getattr(
+                    human_review_service,
+                    "forward_archive_capture_readiness",
+                )
+                capture_component = dict(
+                    capture_probe(session=forward_session)
+                )
+            except Exception as exc:
+                app.logger.exception("forward archive capture readiness failed")
+                capture_component = {
+                    "required": None,
+                    "requirement_resolved": False,
+                    "trading_session_status": "UNRESOLVED",
+                    "trading_session_reason_code": (
+                        "TRADING_SESSION_EVIDENCE_UNAVAILABLE"
+                    ),
+                    "ready": False,
+                    "status": "not_ready",
+                    "reason_code": "SECTOR_CAPTURE_READINESS_UNAVAILABLE",
+                    "session": (
+                        None
+                        if forward_session is None
+                        else forward_session.isoformat()
+                    ),
+                    "receipt_proven": False,
+                    "error": f"{type(exc).__name__}: {str(exc)[:160]}",
+                    "real_account_accessed": False,
+                    "real_order_transport_enabled": False,
+                    "live_status": "LIVE_DISABLED",
+                }
+            sector_capture_ready = bool(capture_component.get("ready"))
+            sector_capture_reason = str(
+                capture_component.get("reason_code")
+                or "SECTOR_CAPTURE_READINESS_UNAVAILABLE"
+            )
+            forward_archive_ready = (
+                screening_review_ready and sector_capture_ready
+            )
+            forward_archive_reason = (
+                screening_review_reason
+                if not screening_review_ready
+                else sector_capture_reason
+            )
+            forward_archive_component = {
+                **capture_component,
+                "required": capture_component.get("required"),
+                "requirement_resolved": capture_component.get(
+                    "requirement_resolved",
+                    capture_component.get("required") is not None,
+                ),
+                "ready": forward_archive_ready,
+                "status": "ready" if forward_archive_ready else "not_ready",
+                "reason_code": (
+                    "READY" if forward_archive_ready else forward_archive_reason
+                ),
+                "screening_review_ready": screening_review_ready,
+                "screening_review_reason_code": screening_review_reason,
+                "sector_capture_ready": sector_capture_ready,
+                "sector_capture_reason_code": sector_capture_reason,
+            }
+            try:
+                delivery_probe = getattr(
+                    human_review_service,
+                    "forward_delivery_readiness_nonblocking",
+                    None,
+                )
+                if not callable(delivery_probe):
+                    delivery_probe = getattr(
+                        human_review_service,
+                        "forward_delivery_readiness",
+                    )
+                forward_delivery_component = dict(
+                    delivery_probe(session=forward_session)
+                )
+            except Exception as exc:
+                app.logger.exception("forward delivery readiness failed")
+                forward_delivery_component = {
+                    "required": None,
+                    "requirement_resolved": False,
+                    "trading_session_status": "UNRESOLVED",
+                    "trading_session_reason_code": (
+                        "TRADING_SESSION_EVIDENCE_UNAVAILABLE"
+                    ),
+                    "ready": False,
+                    "status": "not_ready",
+                    "reason_code": "FORWARD_DELIVERY_READINESS_UNAVAILABLE",
+                    "session": (
+                        None
+                        if forward_session is None
+                        else forward_session.isoformat()
+                    ),
+                    "capture_ready": False,
+                    "evaluation_ready": False,
+                    "error": f"{type(exc).__name__}: {str(exc)[:160]}",
+                    "real_account_accessed": False,
+                    "real_order_transport_enabled": False,
+                    "paper_status": "REVIEW_REQUIRED",
+                    "live_status": "LIVE_DISABLED",
+                }
+        else:
+            forward_archive_component = {
+                "required": False,
+                "ready": True,
+                "status": "disabled",
+                "reason_code": "SCREENING_DISABLED",
+                "session": (
+                    None
+                    if forward_session is None
+                    else forward_session.isoformat()
+                ),
+                "screening_review_ready": False,
+                "screening_review_reason_code": "SCREENING_DISABLED",
+                "sector_capture_ready": False,
+                "sector_capture_reason_code": "SCREENING_DISABLED",
+                "receipt_proven": False,
+                "real_account_accessed": False,
+                "real_order_transport_enabled": False,
+                "live_status": "LIVE_DISABLED",
+            }
+            forward_delivery_component = {
+                "required": False,
+                "ready": False,
+                "status": "disabled",
+                "reason_code": "SCREENING_DISABLED",
+                "session": (
+                    None
+                    if forward_session is None
+                    else forward_session.isoformat()
+                ),
+                "capture_ready": False,
+                "evaluation_ready": False,
+                "real_account_accessed": False,
+                "real_order_transport_enabled": False,
+                "paper_status": "REVIEW_REQUIRED",
+                "live_status": "LIVE_DISABLED",
             }
 
         reasons = []
@@ -595,6 +1181,13 @@ def create_app(test_config=None, start_scheduler=False):
                 reasons.append("runtime_not_running")
         if scheduler_required and not scheduler_ready:
             reasons.append("scheduler_not_running")
+        if qmt_runtime_required and not qmt_runtime_component["ready"]:
+            reasons.append("qmt_runtime_not_ready")
+        if screening_required and not screening_component["ready"]:
+            reasons.append("trading_screening_not_ready")
+        # 持仓预警属于只读研究观察面。其失败必须在独立组件中完整暴露，
+        # 但不能让图表 Web/QMT 本身被宣告不可用；这与 forward research
+        # evidence 的 readiness 口径一致。
 
         ready = not reasons
         payload = {
@@ -605,21 +1198,55 @@ def create_app(test_config=None, start_scheduler=False):
             "components": {
                 "scheduler": scheduler_component,
                 "runtime": runtime_component,
+                "qmt_runtime": qmt_runtime_component,
                 "metadata": metadata_component,
                 "symbols": symbols_component,
                 "ticks": ticks_component,
+                "trading_screening": screening_component,
+                "holding_group_monitor": holding_monitor_component,
+                "forward_scheduler": forward_scheduler_component,
+                "forward_archive": forward_archive_component,
+                "forward_delivery": forward_delivery_component,
             },
             "reasons": reasons,
         }
         return payload, 200 if ready else 503
 
-    def health_snapshot(kind, market="a"):
+    def health_snapshot(kind, market="a", forward_session=None):
         if kind == "livez":
             return {"status": "alive", "revision": build_revision}, 200
         if kind == "healthz":
             return {"status": "ok", "revision": build_revision}, 200
         if kind == "readyz":
-            return _readyz_snapshot(market)
+            parsed_forward_session = forward_session
+            if isinstance(forward_session, str):
+                try:
+                    parsed_forward_session = datetime.date.fromisoformat(
+                        forward_session
+                    )
+                    if parsed_forward_session.isoformat() != forward_session:
+                        raise ValueError("forward session is not canonical")
+                except ValueError:
+                    return {
+                        "status": "not_ready",
+                        "revision": build_revision,
+                        "pid": os.getpid(),
+                        "market": market,
+                        "components": {},
+                        "reasons": ["invalid_forward_session"],
+                    }, 400
+            elif forward_session is not None and not isinstance(
+                forward_session, datetime.date
+            ):
+                return {
+                    "status": "not_ready",
+                    "revision": build_revision,
+                    "pid": os.getpid(),
+                    "market": market,
+                    "components": {},
+                    "reasons": ["invalid_forward_session"],
+                }, 400
+            return _readyz_snapshot(market, parsed_forward_session)
         return {"status": "not_found", "revision": build_revision}, 404
 
     @app.route("/livez")
@@ -632,13 +1259,76 @@ def create_app(test_config=None, start_scheduler=False):
 
     @app.route("/readyz")
     def readyz():
-        return health_snapshot("readyz", request.args.get("market") or "a")
+        return health_snapshot(
+            "readyz",
+            request.args.get("market") or "a",
+            request.args.get("forward_session"),
+        )
 
     @app.route("/")
     @login_required
     def index_show():
         requested_market = (request.args.get("market") or "a").strip().lower()
         initial_market = requested_market if requested_market in market_types else "a"
+        review_chart_lock = None
+        review_values = {
+            "candidate_id": str(request.args.get("review_candidate_id") or ""),
+            "source_sha256": str(request.args.get("review_source_sha256") or ""),
+            "review_as_of": str(request.args.get("review_as_of") or ""),
+        }
+        if any(review_values.values()):
+            if not all(review_values.values()):
+                abort(404)
+            service = app.extensions.get("decision_support_human_review")
+            validator = getattr(service, "validate_chart_lock", None)
+            human_error = None
+            try:
+                if not callable(validator):
+                    raise ValueError("human review service unavailable")
+                review_chart_lock = validator(
+                    candidate_id=review_values["candidate_id"],
+                    source_sha256=review_values["source_sha256"],
+                    review_as_of=int(review_values["review_as_of"]),
+                )
+            except (TypeError, ValueError, RuntimeError) as exc:
+                human_error = exc
+            if review_chart_lock is None:
+                try:
+                    from .services.research_audit import (
+                        validate_risk_point_chart_lock,
+                    )
+
+                    review_chart_lock = validate_risk_point_chart_lock(
+                        app.config.get(
+                            "RESEARCH_AUDIT_ROOT",
+                            pathlib.Path(__file__).resolve().parents[3],
+                        ),
+                        point_id=review_values["candidate_id"],
+                        source_sha256=review_values["source_sha256"],
+                        review_as_of=int(review_values["review_as_of"]),
+                    )
+                except (TypeError, ValueError, RuntimeError):
+                    app.logger.debug(
+                        "causal chart lock rejected by human and risk validators: %r",
+                        human_error,
+                    )
+                    abort(404)
+            requested_code = str(request.args.get("code") or "")
+            if (
+                initial_market != "a"
+                or requested_code != review_chart_lock.get("symbol")
+            ):
+                abort(404)
+            if review_chart_lock.get("lock_kind") == "RISK_POINT_AUDIT":
+                requested_intervals = tuple(
+                    value.strip()
+                    for value in str(request.args.get("intervals") or "").split(",")
+                    if value.strip()
+                )
+                if requested_intervals != (
+                    str(review_chart_lock.get("chart_interval")),
+                ):
+                    abort(404)
 
         selected_default_codes = market_default_codes.cached_snapshot()
         selected_frequencies = market_frequencys.cached_snapshot()
@@ -654,7 +1344,8 @@ def create_app(test_config=None, start_scheduler=False):
             market_default_codes=selected_default_codes,
             market_frequencys=selected_frequencies,
             initial_market=initial_market,
-            enable_sse=config.ENABLE_SSE_PUSH,
+            enable_sse=(config.ENABLE_SSE_PUSH and review_chart_lock is None),
+            review_chart_lock=review_chart_lock,
         )
 
     from .blueprints.tv import tv_bp
@@ -711,6 +1402,11 @@ def create_app(test_config=None, start_scheduler=False):
         "ticks": None,
         "symbols": None,
     }
+    # Constructed after the QMT/official trading-session provider exists.  The
+    # lifecycle closures deliberately reference this late-bound controller so
+    # app factories remain side-effect free until start_runtime_services().
+    app_forward_scheduler = None
+    app_qmt_runtime = None
 
     def _probe_ticks(market):
         default_code = (
@@ -783,6 +1479,11 @@ def create_app(test_config=None, start_scheduler=False):
                 raise RuntimeError("runtime services are stopping")
 
         try:
+            if app_qmt_runtime is not None:
+                # QMT must be established before any metadata/tick/native
+                # screening worker can consume its local runtime.
+                app_qmt_runtime.startup()
+                _ensure_start_is_current()
             constants_service.start_market_metadata_loaders()
             _ensure_start_is_current()
             chart_cache_service.start_chart_cache_runtime()
@@ -820,6 +1521,9 @@ def create_app(test_config=None, start_scheduler=False):
                 from chanlun.signal_monitor.scheduler import register_signal_jobs
                 register_signal_jobs(scheduler)
 
+                if holding_group_monitor is not None:
+                    holding_group_monitor.register_job(scheduler)
+
                 recursive_root = getattr(config, "RECURSIVE_MONITOR_CONFIG", {})
                 if (
                     type(recursive_root) is dict
@@ -837,6 +1541,10 @@ def create_app(test_config=None, start_scheduler=False):
                     _recursive_monitors.extend(monitors.values())
                 elif monitors:
                     _recursive_monitors.extend(monitors)
+                if app_qmt_runtime is not None:
+                    app_qmt_runtime.register_jobs()
+                if app_forward_scheduler is not None:
+                    app_forward_scheduler.register_jobs()
                 with runtime_lock:
                     runtime_state["scheduler_start_attempted"] = True
                 scheduler.start()
@@ -926,12 +1634,19 @@ def create_app(test_config=None, start_scheduler=False):
                     raise
 
             _cleanup("scheduler", _shutdown_scheduler_resources)
+            if app_forward_scheduler is not None:
+                _cleanup("app-forward-scheduler", app_forward_scheduler.stop)
+            if app_qmt_runtime is not None:
+                _cleanup("app-qmt-runtime", app_qmt_runtime.stop)
             _cleanup(
                 "trading-screening",
                 lambda: decision_support_trading_screening.shutdown_background(
                     wait=True, timeout=1.0
                 ),
             )
+            native_gateway_close = getattr(trading_gateway, "close", None)
+            if callable(native_gateway_close):
+                _cleanup("trading-screening-native-gateway", native_gateway_close)
 
             def _handles_for(key):
                 value = runtime_state.get(key)
@@ -1020,7 +1735,9 @@ def create_app(test_config=None, start_scheduler=False):
             return configured()
         return datetime.datetime.now(pytz.timezone("Asia/Shanghai"))
 
-    from chanlun.decision_support.scanner import TradingEngine
+    from chanlun.decision_support.trading_system.human_assisted_decision import (
+        HumanAssistedDecisionCore,
+    )
     from chanlun.notifications import DingTalkWebhookNotifier
 
     from .services.research_audit import (
@@ -1033,9 +1750,16 @@ def create_app(test_config=None, start_scheduler=False):
         TradingScreeningService,
     )
     from .services.trading_screening_gateway import NativeTradingDataGateway
-    from chanlun.exchange.qmt_screening_sector_source import (
-        QmtSectorCompositeSource,
-        build_qmt_gics3_sector_catalog,
+    from .services.trading_screening_process import (
+        NativeTradingDataGatewayProcessProxy,
+        NativeWorkerProcessConfig,
+        native_sector_snapshot_cache_revision,
+    )
+    from .services.human_review_screening import HumanReviewScreeningService
+    from .services.holding_group_monitor import (
+        HoldingGroupMonitorConfig,
+        HoldingGroupMonitorService,
+        build_non_a_monitor_universe,
     )
 
     def _trading_screening_exchange():
@@ -1043,28 +1767,25 @@ def create_app(test_config=None, start_scheduler=False):
 
         return get_exchange(Market.A)
 
-    def _trading_screening_universe(exchange):
-        from .services.stock_list import _safe_all_stocks
-
-        return _safe_all_stocks(exchange, "a")
-
-    def _trading_screening_sectors():
-        return build_qmt_gics3_sector_catalog()
-
-    def _trading_screening_sector_exchange():
-        # QMT component frames are supplied separately below. Retaining this
-        # provider keeps the gateway's stock/legacy adapter boundary explicit.
-        return _trading_screening_exchange()
-
-    trading_screening_sector_frames = QmtSectorCompositeSource()
+    def _trading_screening_universe(_exchange):
+        # QMT GICS3 current components are authoritative for sector-first
+        # selection; never fall back to ExchangeQMT.all_stocks/get_full_tick.
+        return ()
 
     def _trading_screening_watchlist():
         from chanlun.persistence.db import db
 
+        holding_group = str(
+            app.config.get("TRADING_SCREENING_MANUAL_HOLDING_GROUP") or "我的持仓"
+        ).strip()
         values = []
-        for group in db.zx_get_groups("a"):
+        for group in db.zx_get_global_groups():
             group_name = group.zx_group
-            for stock in db.zx_get_group_stocks("a", group_name):
+            if group_name == holding_group:
+                continue
+            for stock in db.zx_get_global_group_stocks(group_name):
+                if stock.market != "a":
+                    continue
                 values.append(
                     {
                         "code": stock.stock_code,
@@ -1074,9 +1795,119 @@ def create_app(test_config=None, start_scheduler=False):
                 )
         return values
 
+    decision_support_human_review: HumanReviewScreeningService | None = None
+
+    def _trading_screening_manual_holdings_snapshot():
+        from chanlun.zixuan import MANUAL_HOLDING_ZX_GROUP, ZiXuan
+
+        holding_group = str(
+            app.config.get("TRADING_SCREENING_MANUAL_HOLDING_GROUP")
+            or MANUAL_HOLDING_ZX_GROUP
+        ).strip()
+        rows = ZiXuan("a").zx_stocks(holding_group)
+        positions = [
+            {
+                "market": str(row.get("market") or ""),
+                "code": str(row.get("code") or ""),
+                "name": str(row.get("name") or row.get("code") or ""),
+                "monitoring_scope": (
+                    "A_SHARE_STRICT_DECISION_CORE"
+                    if row.get("market") == "a"
+                    else "NON_A_AUXILIARY_STRUCTURE_RADAR"
+                ),
+                "decision_mode": (
+                    "UNIFIED_HUMAN_ASSISTED_DECISION_CORE"
+                    if row.get("market") == "a"
+                    else "APPROXIMATE_STRUCTURE_OBSERVATION"
+                ),
+            }
+            for row in rows
+            if row.get("market") and row.get("code")
+        ]
+        positions.sort(key=lambda row: (row["market"], row["code"]))
+        a_share_priority_count = sum(
+            row["monitoring_scope"] == "A_SHARE_STRICT_DECISION_CORE"
+            for row in positions
+        )
+        auxiliary_count = sum(
+            row["monitoring_scope"] == "NON_A_AUXILIARY_STRUCTURE_RADAR"
+            for row in positions
+        )
+        covered_count = a_share_priority_count + auxiliary_count
+        return {
+            "schema": "chanlun-local-manual-holdings/v1",
+            "source": "LOCAL_GLOBAL_WATCHLIST_GROUP",
+            "group_name": holding_group,
+            "group_scope": "GLOBAL_ACROSS_MARKETS",
+            "available": True,
+            "status": "ready",
+            "positions": positions,
+            "declared_count": len(positions),
+            "priority_monitor_count": a_share_priority_count,
+            "cross_market_monitor_count": auxiliary_count,
+            "covered_monitor_count": covered_count,
+            "unsupported_market_count": len(positions) - covered_count,
+            "quantity_available": False,
+            "cost_basis_available": False,
+            "sellable_quantity_available": False,
+            "real_account_accessed": False,
+            "real_order_transport_enabled": False,
+            "automated_order_authorized": False,
+            "live_status": "LIVE_DISABLED",
+        }
+
+    if not callable(
+        app.config.get("TRADING_SCREENING_MANUAL_HOLDINGS_SNAPSHOT_PROVIDER")
+    ):
+        app.config[
+            "TRADING_SCREENING_MANUAL_HOLDINGS_SNAPSHOT_PROVIDER"
+        ] = _trading_screening_manual_holdings_snapshot
+
     def _trading_screening_holdings():
         configured = app.config.get("TRADING_SCREENING_HOLDINGS_PROVIDER")
-        return configured() if callable(configured) else ()
+        if callable(configured):
+            return configured()
+        manual_snapshot = _trading_screening_manual_holdings_snapshot()
+        manually_declared = tuple(
+            row["code"]
+            for row in manual_snapshot["positions"]
+            if row["market"] == "a"
+        )
+        service = decision_support_human_review
+        virtual = () if service is None else service.virtual_holding_codes()
+        return tuple(dict.fromkeys((*manually_declared, *virtual)))
+
+    def _non_a_monitor_universe():
+        """Read global groups on every scan so UI edits need no app restart.
+
+        US symbols from every group are monitored. Other non-A markets retain
+        the previous holding-only behavior until their broader selection
+        contracts are explicitly enabled.
+        """
+
+        from chanlun.persistence.db import db
+        from chanlun.zixuan import MANUAL_HOLDING_ZX_GROUP
+
+        holding_group = str(
+            app.config.get("TRADING_SCREENING_MANUAL_HOLDING_GROUP")
+            or MANUAL_HOLDING_ZX_GROUP
+        ).strip()
+        group_members: dict[str, list[dict[str, object]]] = {}
+        for group in db.zx_get_global_groups():
+            group_name = str(group.zx_group)
+            group_members[group_name] = [
+                {
+                    "market": str(stock.market),
+                    "code": str(stock.stock_code),
+                    "name": str(stock.stock_name or stock.stock_code),
+                }
+                for stock in db.zx_get_global_group_stocks(group_name)
+            ]
+        return build_non_a_monitor_universe(
+            group_members,
+            holding_group=holding_group,
+            expanded_watchlist_markets=frozenset({"us"}),
+        )
 
     recursive_monitor_config = getattr(config, "RECURSIVE_MONITOR_CONFIG", {})
     recursive_common = (
@@ -1117,6 +1948,27 @@ def create_app(test_config=None, start_scheduler=False):
         if trading_screening_dingtalk_webhook or trading_screening_dry_run
         else None
     )
+    if app.config.get("HOLDING_GROUP_MONITOR_ENABLED", True):
+        holding_group_monitor = HoldingGroupMonitorService(
+            # The provider queries global groups every run. US watchlist edits
+            # therefore take effect within one monitor interval without an app
+            # restart. A shares remain exclusively in the strict decision core.
+            positions_provider=_non_a_monitor_universe,
+            notifier=raw_trading_notifier,
+            state_root=(config.get_data_path() / "monitor"),
+            config=HoldingGroupMonitorConfig(
+                interval_seconds=int(
+                    app.config["HOLDING_GROUP_MONITOR_INTERVAL_SECONDS"]
+                ),
+                start_delay_seconds=int(
+                    app.config["HOLDING_GROUP_MONITOR_START_DELAY_SECONDS"]
+                ),
+                max_workers=int(app.config["HOLDING_GROUP_MONITOR_WORKERS"]),
+                op_level="1m",
+                mid_level="5m",
+                big_level="30m",
+            ),
+        )
     trading_notification_dispatcher = (
         SignalNotificationDispatcher(
             raw_trading_notifier,
@@ -1131,15 +1983,152 @@ def create_app(test_config=None, start_scheduler=False):
     )
     trading_gateway = app.config.get("TRADING_SCREENING_GATEWAY")
     if trading_gateway is None:
-        trading_gateway = NativeTradingDataGateway(
-            exchange_provider=_trading_screening_exchange,
-            sector_exchange_provider=_trading_screening_sector_exchange,
-            universe_provider=_trading_screening_universe,
-            sector_provider=_trading_screening_sectors,
-            sector_frame_provider=trading_screening_sector_frames.frame,
-            watchlist_provider=_trading_screening_watchlist,
-            holdings_provider=_trading_screening_holdings,
+        if app.config.get("TRADING_SCREENING_NATIVE_PROCESS_ISOLATION", True):
+            # Manual/unversioned launches stay cache-disabled.  Official
+            # launches bind the persistent sector snapshot to its complete but
+            # UI-independent native producer: trading/structure/QMT changes
+            # invalidate it, while a template or JavaScript-only deploy does
+            # not force a 10-15 minute sector replay.
+            sector_cache_revision = native_sector_snapshot_cache_revision(
+                build_revision
+            )
+            trading_gateway = NativeTradingDataGatewayProcessProxy(
+                watchlist_provider=_trading_screening_watchlist,
+                holdings_provider=_trading_screening_holdings,
+                log_path=(
+                    config.get_data_path()
+                    / "decision_support"
+                    / "trading_screening_native_worker.log"
+                ),
+                process_config=NativeWorkerProcessConfig(
+                    startup_timeout_seconds=float(
+                        app.config[
+                            "TRADING_SCREENING_NATIVE_STARTUP_TIMEOUT_SECONDS"
+                        ]
+                    ),
+                    native_idle_timeout_seconds=float(
+                        app.config[
+                            "TRADING_SCREENING_NATIVE_IDLE_TIMEOUT_SECONDS"
+                        ]
+                    ),
+                    restart_backoff_seconds=float(
+                        app.config[
+                            "TRADING_SCREENING_NATIVE_RESTART_BACKOFF_SECONDS"
+                        ]
+                    ),
+                ),
+                sector_cache_path=(
+                    config.get_data_path()
+                    / "decision_support"
+                    / "trading_screening_sector_snapshot.json"
+                    if sector_cache_revision is not None
+                    else None
+                ),
+                sector_cache_revision=sector_cache_revision,
+                worker_environment={"CHANLUN_BUILD_REVISION": build_revision},
+                structure_worker_count=int(
+                    app.config["TRADING_SCREENING_STOCK_WORKERS"]
+                ),
+            )
+        else:
+            from chanlun.decision_support.trading_system.higher_timeframe_gate import (
+                QmtHigherTimeframeGateSource,
+            )
+            from chanlun.exchange.qmt_screening_sector_source import (
+                QmtSectorCompositeSource,
+                QmtSectorStrengthSource,
+                build_qmt_gics3_sector_catalog,
+                qmt_trading_session_evidence,
+                qmt_trading_sessions,
+            )
+
+            sector_frames = QmtSectorCompositeSource()
+            sector_strength = QmtSectorStrengthSource()
+            higher_timeframe = QmtHigherTimeframeGateSource(
+                exchange_provider=_trading_screening_exchange,
+                sector_frame_provider=sector_frames.frame,
+                trading_calendar_provider=qmt_trading_sessions,
+            )
+            trading_gateway = NativeTradingDataGateway(
+                exchange_provider=_trading_screening_exchange,
+                sector_exchange_provider=_trading_screening_exchange,
+                universe_provider=_trading_screening_universe,
+                sector_provider=build_qmt_gics3_sector_catalog,
+                sector_frame_provider=sector_frames.frame,
+                sector_strength_provider=sector_strength.strengths,
+                higher_timeframe_provider=higher_timeframe.gates,
+                trading_session_provider=qmt_trading_session_evidence,
+                watchlist_provider=_trading_screening_watchlist,
+                holdings_provider=_trading_screening_holdings,
+            )
+    official_calendar_path = app.config.get(
+        "TRADING_SESSION_OFFICIAL_CALENDAR_PATH"
+    )
+    qmt_calendar_provider = getattr(
+        trading_gateway,
+        "trading_session_evidence",
+        None,
+    )
+    if not callable(qmt_calendar_provider):
+        raise TypeError("trading screening calendar provider is unavailable")
+    if official_calendar_path is None:
+        trading_session_provider = qmt_calendar_provider
+    else:
+        def trading_session_provider(*, session, observed_at):
+            return authoritative_trading_session_evidence(
+                session=session,
+                observed_at=observed_at,
+                calendar_path=pathlib.Path(official_calendar_path),
+                fallback_provider=qmt_calendar_provider,
+            )
+
+    if (
+        app.config.get("TRADING_SCREENING_NATIVE_PROCESS_ISOLATION", True)
+        and not app.config.get("TESTING", False)
+        and (
+            ".run." in build_revision
+            or is_content_addressed_application_source_revision(build_revision)
         )
+    ):
+        # Prime recent immutable official/QMT calendar verdicts before the background
+        # universe scan can occupy the serialized native worker.  This keeps
+        # readiness non-blocking without masking a missed prior-session
+        # Capture/Evaluate delivery as merely "calendar unavailable".
+        calendar_provider = trading_session_provider
+        if callable(calendar_provider):
+            calendar_observed_at = _trading_screening_clock()
+            try:
+                if (
+                    not isinstance(calendar_observed_at, datetime.datetime)
+                    or calendar_observed_at.tzinfo is None
+                    or calendar_observed_at.utcoffset() is None
+                ):
+                    raise ValueError(
+                        "trading calendar warmup clock must be timezone-aware"
+                    )
+                calendar_observed_at = calendar_observed_at.astimezone(
+                    datetime.timezone(datetime.timedelta(hours=8))
+                )
+                for days_ago in range(1, 11):
+                    calendar_session = (
+                        calendar_observed_at.date()
+                        - datetime.timedelta(days=days_ago)
+                    )
+                    evidence = calendar_provider(
+                        session=calendar_session,
+                        observed_at=calendar_observed_at,
+                    )
+                    if (
+                        isinstance(evidence, Mapping)
+                        and evidence.get("classification") == "UNRESOLVED"
+                    ):
+                        break
+            except Exception as exc:
+                app.logger.warning(
+                    "trading calendar warmup unavailable: %s: %s",
+                    type(exc).__name__,
+                    str(exc)[:160],
+                )
     audit_root = app.config.get(
         "RESEARCH_AUDIT_ROOT",
         pathlib.Path(__file__).resolve().parents[3],
@@ -1159,11 +2148,14 @@ def create_app(test_config=None, start_scheduler=False):
     decision_support_trading_screening = TradingScreeningService(
         market_data=trading_gateway,
         sector_catalog=trading_gateway,
-        engine=TradingEngine(),
+        engine=HumanAssistedDecisionCore(),
         cache_path=(
             config.get_data_path()
             / "decision_support"
             / "trading_screening_snapshot.json"
+        ),
+        human_review_archive_root=pathlib.Path(
+            app.config["HUMAN_REVIEW_LIVE_ARCHIVE_ROOT"]
         ),
         clock=_trading_screening_clock,
         notifier=trading_notification_dispatcher,
@@ -1171,11 +2163,237 @@ def create_app(test_config=None, start_scheduler=False):
             refresh_interval_seconds=int(
                 app.config.get("TRADING_SCREENING_REFRESH_SECONDS", 60)
             ),
+            priority_monitoring_enabled=bool(
+                app.config.get(
+                    "TRADING_SCREENING_PRIORITY_MONITOR_ENABLED",
+                    True,
+                )
+            ),
+            max_priority_monitor_symbols_per_refresh=int(
+                app.config.get(
+                    "TRADING_SCREENING_PRIORITY_MONITOR_MAX_SYMBOLS",
+                    16,
+                )
+            ),
+            max_symbols_per_refresh=int(
+                app.config.get(
+                    "TRADING_SCREENING_SYMBOLS_PER_REFRESH",
+                    64,
+                )
+            ),
+            max_total_symbols_per_refresh=int(
+                app.config.get(
+                    "TRADING_SCREENING_TOTAL_SYMBOLS_PER_REFRESH",
+                    16,
+                )
+            ),
+            priority_monitor_interval_seconds=int(
+                app.config.get(
+                    "TRADING_SCREENING_PRIORITY_MONITOR_INTERVAL_SECONDS",
+                    60,
+                )
+            ),
             max_structure_age_seconds=int(
                 app.config.get("TRADING_SCREENING_MAX_STRUCTURE_AGE_SECONDS", 864000)
             ),
+            stock_worker_count=(
+                int(app.config["TRADING_SCREENING_STOCK_WORKERS"])
+                if app.config.get("TRADING_SCREENING_NATIVE_PROCESS_ISOLATION", True)
+                else 1
+            ),
         ),
         backtest_verdict=backtest_verdict,
+    )
+    trading_screening_snapshot_path = (
+        config.get_data_path()
+        / "decision_support"
+        / "trading_screening_snapshot.json"
+    )
+    repository_root = pathlib.Path(__file__).resolve().parents[3]
+    from .services.app_qmt_runtime import AppQmtRuntimeController
+    from .services.app_forward_scheduler import (
+        AppForwardSchedulerController,
+        discover_qmt_local_data_dir,
+        evaluation_readiness_from_health,
+    )
+    from .services.forward_scheduler import ForwardSchedulerProbe
+
+    qmt_runtime_mode = str(
+        app.config.get("QMT_RUNTIME_MODE", "APP")
+    ).strip().upper()
+    if qmt_runtime_mode not in {"APP", "WINDOWS", "DISABLED"}:
+        raise ValueError("QMT_RUNTIME_MODE must be APP, WINDOWS or DISABLED")
+    if qmt_runtime_mode == "APP":
+        def _prepare_qmt_runtime_change(action):
+            native_gateway_close = getattr(trading_gateway, "close", None)
+            if not callable(native_gateway_close):
+                return
+            try:
+                native_gateway_close()
+            except Exception:
+                app.logger.exception(
+                    "failed to quiesce native screening before QMT %s",
+                    action,
+                )
+
+        def _resume_after_qmt_runtime_change(action):
+            try:
+                decision_support_trading_screening.ensure_refresh()
+            except Exception:
+                app.logger.exception(
+                    "failed to wake native screening after QMT %s",
+                    action,
+                )
+
+        configured_helper = str(
+            app.config.get("QMT_RUNTIME_HELPER") or ""
+        ).strip()
+        app_qmt_runtime = AppQmtRuntimeController(
+            scheduler=scheduler,
+            repository_root=repository_root,
+            clock=_trading_screening_clock,
+            helper_script=(
+                pathlib.Path(configured_helper)
+                if configured_helper
+                else None
+            ),
+            before_change=_prepare_qmt_runtime_change,
+            after_change=_resume_after_qmt_runtime_change,
+            startup_timeout_seconds=int(
+                app.config.get("QMT_RUNTIME_STARTUP_TIMEOUT_SECONDS", 120)
+            ),
+            warmup_seconds=int(
+                app.config.get("QMT_RUNTIME_WARMUP_SECONDS", 90)
+            ),
+            recovery_cooldown_seconds=int(
+                app.config.get("QMT_RUNTIME_RECOVERY_COOLDOWN_SECONDS", 300)
+            ),
+            observation_max_age_seconds=int(
+                app.config.get("QMT_RUNTIME_OBSERVATION_MAX_AGE_SECONDS", 180)
+            ),
+        )
+
+    forward_windows_scheduler_probe = ForwardSchedulerProbe(
+        audit_script=repository_root
+        / "ops"
+        / "audit_v3_forward_paper_tasks.ps1",
+        ttl_seconds=float(
+            app.config.get("FORWARD_SCHEDULER_MONITOR_TTL_SECONDS", 30.0)
+        ),
+    )
+    forward_scheduler_mode = str(
+        app.config.get("FORWARD_SCHEDULER_MODE", "APP")
+    ).strip().upper()
+    if forward_scheduler_mode not in {"APP", "WINDOWS", "DISABLED"}:
+        raise ValueError(
+            "FORWARD_SCHEDULER_MODE must be APP, WINDOWS or DISABLED"
+        )
+    if forward_scheduler_mode == "APP":
+        def _app_forward_capture_readiness(*, session, observed_at):
+            payload, _status = health_snapshot(
+                "readyz",
+                market="a",
+                forward_session=session,
+            )
+            delivery = payload.get("components", {}).get(
+                "forward_delivery", {}
+            )
+            return {
+                # A sector receipt is merely an input.  Adoption/success must
+                # prove that the forward ledger itself contains CAPTURE.
+                "ready": bool(delivery.get("capture_ready")),
+                "reason_code": str(
+                    delivery.get("reason_code")
+                    or "FORWARD_CAPTURE_DELIVERY_UNAVAILABLE"
+                ),
+                "observed_at": observed_at.isoformat(),
+            }
+
+        def _app_forward_evaluation_readiness(*, session, observed_at):
+            """Reuse the exact readiness facts formerly polled by PowerShell."""
+
+            payload, _status = health_snapshot(
+                "readyz",
+                market="a",
+                forward_session=session,
+            )
+            return evaluation_readiness_from_health(
+                payload,
+                session=session,
+                observed_at=observed_at,
+            )
+
+        try:
+            forward_qmt_data_dir = discover_qmt_local_data_dir(
+                app.config.get("FORWARD_QMT_LOCAL_DATA_DIR") or None
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            # Keep the web page available but fail the paper-admission gate
+            # closed.  The controller snapshot carries the exact missing-QMT
+            # reason until configuration is repaired.
+            app.logger.error(
+                "app-owned forward QMT data directory unresolved: %s",
+                str(exc)[:200],
+            )
+            forward_qmt_data_dir = None
+        app_forward_scheduler = AppForwardSchedulerController(
+            scheduler=scheduler,
+            repository_root=repository_root,
+            forward_root=pathlib.Path(
+                app.config["HUMAN_REVIEW_FORWARD_ROOT"]
+            ),
+            qmt_local_data_dir=forward_qmt_data_dir,
+            trading_session_provider=trading_session_provider,
+            capture_readiness_provider=_app_forward_capture_readiness,
+            evaluation_readiness_provider=(
+                _app_forward_evaluation_readiness
+            ),
+            clock=_trading_screening_clock,
+        )
+        forward_scheduler_probe = app_forward_scheduler
+    else:
+        # WINDOWS is a rollback mode.  DISABLED is reserved for isolated tests;
+        # its monitor is disabled by default, so no host process is spawned.
+        forward_scheduler_probe = forward_windows_scheduler_probe
+    decision_support_human_review = HumanReviewScreeningService(
+        repository_root=repository_root,
+        historical_report=pathlib.Path(
+            app.config["HUMAN_REVIEW_HISTORICAL_REPORT"]
+        ),
+        preferred_historical_report=pathlib.Path(
+            app.config["HUMAN_REVIEW_CURRENT_HISTORICAL_REPORT"]
+        ),
+        forward_root=pathlib.Path(app.config["HUMAN_REVIEW_FORWARD_ROOT"]),
+        feedback_ledger=pathlib.Path(
+            app.config["HUMAN_REVIEW_FEEDBACK_LEDGER"]
+        ),
+        sector_ledger=pathlib.Path(app.config["QMT_SECTOR_CAPTURE_LEDGER"]),
+        paper_ledger=pathlib.Path(app.config["HUMAN_REVIEW_PAPER_LEDGER"]),
+        parameter_snapshot=pathlib.Path(
+            app.config["HUMAN_REVIEW_PARAMETER_SNAPSHOT"]
+        ),
+        live_screening_snapshot=trading_screening_snapshot_path,
+        live_archive_root=pathlib.Path(
+            app.config["HUMAN_REVIEW_LIVE_ARCHIVE_ROOT"]
+        ),
+        forward_markout_report=pathlib.Path(
+            app.config["HUMAN_REVIEW_FORWARD_MARKOUT"]
+        ),
+        forward_warmup_lineage_report=pathlib.Path(
+            app.config["HUMAN_REVIEW_FORWARD_WARMUP_LINEAGE"]
+        ),
+        sector_capture_due=datetime.time(9, 10),
+        trading_session_provider=trading_session_provider,
+        forward_scheduler_provider=(
+            forward_scheduler_probe.snapshot
+            if app.config.get("FORWARD_SCHEDULER_MONITOR_ENABLED", True)
+            # Disabling the readiness/UI observation must never turn into a
+            # semantic bypass for new virtual intents.  Generic tests keep the
+            # host-independent monitor disabled, so inject a deterministic
+            # invalid observation instead of starting PowerShell; the shared
+            # validator then fails the paper path closed.
+            else lambda **_kwargs: {}
+        ),
     )
 
     app.extensions.update(
@@ -1184,6 +2402,7 @@ def create_app(test_config=None, start_scheduler=False):
             "alert_tasks": _alert_tasks,
             "xuangu_tasks": _xuangu_tasks,
             "recursive_monitors": _recursive_monitors,
+            "holding_group_monitor": holding_group_monitor,
             "readiness": readiness_registry,
             "metadata_warmup_thread": metadata_warmup_thread,
             "login_rate_limiter": login_rate_limiter,
@@ -1195,6 +2414,14 @@ def create_app(test_config=None, start_scheduler=False):
             "decision_support_trading_screening": (
                 decision_support_trading_screening
             ),
+            "decision_support_trading_screening_gateway": trading_gateway,
+            "decision_support_human_review": decision_support_human_review,
+            "forward_scheduler_probe": forward_scheduler_probe,
+            "forward_windows_scheduler_probe": (
+                forward_windows_scheduler_probe
+            ),
+            "app_forward_scheduler": app_forward_scheduler,
+            "app_qmt_runtime": app_qmt_runtime,
         }
     )
     if scheduler_enabled:

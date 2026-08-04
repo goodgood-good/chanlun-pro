@@ -18,6 +18,11 @@ import { chartBarTimeSeconds } from "./bar-time";
 
 type StrictStructureMode = "replace" | "unchanged" | "unavailable";
 
+// 冷态 1m/5m 历史需要分页取数并计算结构，服务端实测可超过通用请求的 15 秒上限。
+// 只放宽周期切换触发的首个完整快照；配置、报价与实时增量仍由 Requester 的
+// 15 秒默认值约束，避免故障时所有请求长时间悬挂。
+const DEFAULT_INITIAL_HISTORY_TIMEOUT_MS = 45_000;
+
 interface StrictStructureError {
   code: string;
 }
@@ -105,6 +110,46 @@ interface TextPoint {
   text: string;
 }
 
+function currentCenterPeriod(resolution: unknown): string {
+  const value = String(resolution || "").trim();
+  if (/^[1-9][0-9]*$/.test(value)) return `${value}m`;
+  if (/^(1?D)$/i.test(value)) return "d";
+  return value.toLowerCase();
+}
+
+/**
+ * `higher_zs` 为跨周期中枢载体，但当前周期也会在其中重复一份 `xd_zss`。
+ * 两份数据经过增量合并后可能处于不同版本，页面若读取重复副本就会出现中枢
+ * 边界落后、刷新后才恢复。这里把当前周期组强制绑定到已合并的 `xd_zss`；
+ * 其他真实周期仍保留各自独立计算结果。
+ */
+function syncCurrentCenterGroup(
+  groups: unknown[] | undefined,
+  resolution: unknown,
+  currentCenters: LineSegment[]
+): unknown[] {
+  const period = currentCenterPeriod(resolution);
+  const supported = ["1m", "5m", "30m", "d"];
+  let found = false;
+  const result = (Array.isArray(groups) ? groups : []).map((group) => {
+    if (!group || typeof group !== "object" || Array.isArray(group)) return group;
+    const record = group as Record<string, unknown>;
+    if (String(record.period || "").toLowerCase() !== period) return group;
+    found = true;
+    return { ...record, zss: currentCenters };
+  });
+  if (!found && supported.includes(period)) {
+    const labels: Record<string, string> = {
+      "1m": "1m 中枢",
+      "5m": "5m 中枢",
+      "30m": "30m 中枢",
+      d: "日线 中枢",
+    };
+    result.push({ period, level_name: labels[period], zss: currentCenters });
+  }
+  return result;
+}
+
 export interface GetBarsResult {
   bars: Bar[];
   meta: HistoryMetadata;
@@ -168,6 +213,17 @@ export interface HistoryProviderOptions {
    * 只响应自己 datafeed 触发的事件。
    */
   managerId?: string | null;
+  /**
+   * 每次 /history 请求都携带的不可变上下文（例如人工复核因果锁）。
+   * 这些参数先写入，随后由 UDF 自己的 symbol/resolution/from/to 覆盖，调用方
+   * 因而不能借固定参数篡改实际行情请求范围。
+   */
+  historyParams?: Readonly<RequestParams>;
+  /**
+   * 周期切换/首次打开时完整历史快照的有界等待时间。默认 45 秒。
+   * 该值不会影响配置、报价或 firstDataRequest=false 的实时增量请求。
+   */
+  initialHistoryTimeoutMs?: number;
 }
 
 export class HistoryProvider {
@@ -175,6 +231,8 @@ export class HistoryProvider {
   private readonly _requester: IRequester;
   private readonly _limitedServerResponse?: LimitedResponseConfiguration;
   private readonly _options: HistoryProviderOptions;
+  private readonly _historyParams: Readonly<RequestParams>;
+  private readonly _initialHistoryTimeoutMs: number;
   private readonly _barsResultMaxSize: number;
   private _fullRequestSerial: number = 0;
   private readonly _latestFullRequestByKey: Map<string, number> = new Map();
@@ -193,6 +251,12 @@ export class HistoryProvider {
     this._requester = requester;
     this._limitedServerResponse = limitedServerResponse;
     this._options = options;
+    this._historyParams = Object.freeze({ ...(options.historyParams || {}) });
+    this._initialHistoryTimeoutMs =
+      Number.isFinite(options.initialHistoryTimeoutMs) &&
+      Number(options.initialHistoryTimeoutMs) > 0
+        ? Number(options.initialHistoryTimeoutMs)
+        : DEFAULT_INITIAL_HISTORY_TIMEOUT_MS;
     this._barsResultMaxSize = options.barsResultMaxSize || 100;
     this.bars_result = new Map();
   }
@@ -298,6 +362,7 @@ export class HistoryProvider {
     periodParams: PeriodParamsWithOptionalCountback
   ): Promise<GetBarsResult> {
     const requestParams: RequestParams = {
+      ...this._historyParams,
       symbol: symbolInfo.ticker || "",
       resolution: resolution,
       from: periodParams.from,
@@ -329,6 +394,9 @@ export class HistoryProvider {
     const requestGeneration = periodParams.firstDataRequest
       ? this._beginFullRequest(requestParams)
       : undefined;
+    const requestTimeoutMs = requestGeneration === undefined
+      ? undefined
+      : this._initialHistoryTimeoutMs;
 
     return new Promise(
       async (
@@ -340,7 +408,8 @@ export class HistoryProvider {
             await this._requester.sendRequest<HistoryResponse>(
               this._datafeedUrl,
               "history",
-              requestParams
+              requestParams,
+              requestTimeoutMs
             );
           const result = this._processHistoryResponse(
             initialResponse,
@@ -407,7 +476,10 @@ export class HistoryProvider {
           await this._requester.sendRequest<HistoryResponse>(
             this._datafeedUrl,
             "history",
-            requestParams
+            requestParams,
+            requestGeneration === undefined
+              ? undefined
+              : this._initialHistoryTimeoutMs
           );
         const followupResult = this._processHistoryResponse(
           followupResponse,
@@ -600,8 +672,11 @@ export class HistoryProvider {
       const existingLastRawMs = existingRawTimes.length > 0
         ? existingRawTimes[existingRawTimes.length - 1]
         : undefined;
+      const isAuthoritativeSnapshot =
+        response.update === false ||
+        (response as HistoryFullDataResponse).full_snapshot === true;
       const isRegressiveFullSnapshot =
-        response.update === false &&
+        isAuthoritativeSnapshot &&
         incomingLastRawMs !== undefined &&
         existingLastRawMs !== undefined &&
         incomingLastRawMs < existingLastRawMs;
@@ -644,7 +719,11 @@ export class HistoryProvider {
           xd_zslx: (response as HistoryFullDataResponse).xd_zslx || [],
           xd_zslx_lines: (response as HistoryFullDataResponse).xd_zslx_lines || [],
           recursive_levels: (response as HistoryFullDataResponse).recursive_levels || [],
-          higher_zs: (response as HistoryFullDataResponse).higher_zs || [],
+          higher_zs: syncCurrentCenterGroup(
+            (response as HistoryFullDataResponse).higher_zs,
+            resolution,
+            (response as HistoryFullDataResponse).xd_zss || []
+          ),
           interval_nest: (response as HistoryFullDataResponse).interval_nest,
           strict_structure_mode: (response as HistoryFullDataResponse).strict_structure_mode,
           strict_structure: (response as HistoryFullDataResponse).strict_structure,
@@ -906,7 +985,21 @@ export class HistoryProvider {
             });
           }
         }
-        obj_res.higher_zs = (response as HistoryFullDataResponse).higher_zs || [];
+        // higher_zs 是全局四周期快照，向左翻历史的窄窗口响应不得把右侧当前
+        // 快照覆盖掉。权威最新窗口才整体替换；随后无条件把当前周期组同步到
+        // 已经完成合并/全量替换的 xd_zss，消除同一中枢的双版本来源。
+        if (
+          (response as HistoryFullDataResponse).full_snapshot ||
+          isRecentWindowAuthoritative
+        ) {
+          obj_res.higher_zs =
+            (response as HistoryFullDataResponse).higher_zs || [];
+        }
+        obj_res.higher_zs = syncCurrentCenterGroup(
+          obj_res.higher_zs,
+          resolution,
+          obj_res.xd_zss || []
+        );
         obj_res.interval_nest = (response as HistoryFullDataResponse).interval_nest;
         obj_res.chart_color = (response as HistoryFullDataResponse).chart_color;
 
@@ -1002,7 +1095,11 @@ export class HistoryProvider {
       xd_zslx: (response as HistoryFullDataResponse).xd_zslx || [],
       xd_zslx_lines: (response as HistoryFullDataResponse).xd_zslx_lines || [],
       recursive_levels: (response as HistoryFullDataResponse).recursive_levels || [],
-      higher_zs: (response as HistoryFullDataResponse).higher_zs || [],
+      higher_zs: syncCurrentCenterGroup(
+        (response as HistoryFullDataResponse).higher_zs,
+        requestParams["resolution"],
+        (response as HistoryFullDataResponse).xd_zss || []
+      ),
       interval_nest: (response as HistoryFullDataResponse).interval_nest,
       strict_structure_mode: (response as HistoryFullDataResponse).strict_structure_mode,
       strict_structure: (response as HistoryFullDataResponse).strict_structure,

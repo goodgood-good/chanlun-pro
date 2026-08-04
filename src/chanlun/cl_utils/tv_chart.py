@@ -242,6 +242,417 @@ def _center_associated_points(zs) -> list[str]:
     return result
 
 
+def _line_associated_points(line) -> list[str]:
+    """Return point types attached to one explicit leaving segment."""
+    getter = getattr(line, "line_mmds", None)
+    if not callable(getter):
+        return []
+    try:
+        values = getter("|")
+    except TypeError:
+        values = getter()
+    return list(dict.fromkeys(str(value) for value in (values or ()) if str(value)))
+
+
+def _display_segment_price_quantum(lines):
+    """Return an exact decimal quantum for the supplied segment endpoints."""
+    from decimal import Decimal, InvalidOperation
+
+    exponents = [0]
+    for line in lines:
+        for endpoint in (getattr(line, "start", None), getattr(line, "end", None)):
+            try:
+                value = Decimal(str(endpoint.val))
+            except (AttributeError, InvalidOperation, ValueError) as exc:
+                raise ValueError("segment center endpoint price must be finite") from exc
+            if not value.is_finite():
+                raise ValueError("segment center endpoint price must be finite")
+            exponents.append(value.normalize().as_tuple().exponent)
+    return Decimal(1).scaleb(min(exponents))
+
+
+def _xd_five_role_center_payload(
+    *,
+    entry_unit,
+    core_units,
+    body_units,
+    leaving_unit,
+    completion_return_unit,
+    evidence_units,
+    unit_lines,
+    quantum,
+    center_id: str,
+    state: str,
+    done: bool,
+    provisional: bool,
+) -> dict | None:
+    """Serialize one validated five-role XD center for the chart.
+
+    ``done`` means every segment needed by the same-level third-class point is
+    locked and the center is formal.  A live ``CenterPreview`` can already be
+    geometrically complete while its return segment is still unlocked.  Keep
+    those states separate so the page never collapses "three-sell geometry is
+    present" back into the misleading binary label "forming".
+    """
+    expected_core = (
+        ("down", "up", "down")
+        if entry_unit.direction == "up"
+        else ("up", "down", "up")
+    )
+    if (
+        tuple(unit.direction for unit in core_units) != expected_core
+        or leaving_unit.direction != entry_unit.direction
+    ):
+        return None
+
+    entry_line = unit_lines[entry_unit.unit_id]
+    leaving_line = unit_lines[leaving_unit.unit_id]
+    completion_return_line = (
+        None
+        if completion_return_unit is None
+        else unit_lines[completion_return_unit.unit_id]
+    )
+    geometry_completed = state == "completed"
+    leaves_core = (
+        leaving_unit.end_tick > min(unit.high_tick for unit in core_units)
+        if leaving_unit.direction == "up"
+        else leaving_unit.end_tick < max(unit.low_tick for unit in core_units)
+    )
+    if geometry_completed:
+        completion_phase = (
+            "FORMAL_THIRD_CLASS_POINT"
+            if done
+            else "GEOMETRIC_THIRD_CLASS_POINT"
+        )
+        completion_point_type = (
+            "3buy" if leaving_unit.direction == "up" else "3sell"
+        )
+        completion_point_status = "confirmed" if done else "provisional"
+        associated_points = _line_associated_points(completion_return_line)
+        completion_point_observed = completion_point_type in associated_points
+        if completion_point_type not in associated_points:
+            associated_points.insert(0, completion_point_type)
+    else:
+        completion_phase = (
+            "AWAITING_SAME_LEVEL_RETURN"
+            if leaves_core
+            else "AWAITING_SAME_LEVEL_DEPARTURE"
+        )
+        completion_point_type = None
+        completion_point_status = None
+        associated_points = []
+        completion_point_observed = False
+    expected_completion_point_type = (
+        "3buy" if leaving_unit.direction == "up" else "3sell"
+    )
+    return {
+        "points": [
+            {
+                "time": fun.datetime_to_int(core_units[0].market_start),
+                "price": float(quantum * min(unit.high_tick for unit in core_units)),
+            },
+            {
+                "time": fun.datetime_to_int(leaving_unit.market_start),
+                "price": float(quantum * max(unit.low_tick for unit in core_units)),
+            },
+        ],
+        # Geometrically completed previews use a solid box as the strict
+        # renderer already does.  ``done`` and ``tradable`` remain false until
+        # the return segment locks, so visual completion cannot authorize a
+        # trade.
+        "linestyle": "0" if (done or geometry_completed) else "1",
+        "type": entry_unit.direction,
+        "tower": "xd",
+        "zd": float(quantum * max(unit.low_tick for unit in core_units)),
+        "zg": float(quantum * min(unit.high_tick for unit in core_units)),
+        "done": done,
+        "state": state,
+        "line_count": len(body_units),
+        "core_line_count": 3,
+        "core_directions": list(expected_core),
+        "entering_segment": _line_to_chart_metadata(entry_line),
+        "leaving_segment": _line_to_chart_metadata(leaving_line),
+        # A third-class point belongs to the first return, not to the leaving
+        # segment.  Reading ``leaving_line.line_mmds`` mixed center ownership
+        # and made a lower-level point look as if it completed this center.
+        "associated_points": associated_points,
+        "confirmation_scope": "xd",
+        "completion_phase": completion_phase,
+        "completion_point_type": completion_point_type,
+        "expected_completion_point_type": expected_completion_point_type,
+        "completion_point_status": completion_point_status,
+        # Distinguish calculated live geometry from a point already attached
+        # by the same-level signal calculator. This matters when resolving an
+        # overlap with an older ongoing center: observed 3-buy/3-sell evidence
+        # may advance the interpretation, geometry alone may not.
+        "completion_point_observed": completion_point_observed,
+        "completion_return_segment": _line_to_chart_metadata(
+            completion_return_line
+        ),
+        "center_id": center_id,
+        "center_state": state,
+        "provisional": provisional,
+        "contains_unfinished_segment": any(
+            not unit.locked for unit in evidence_units
+        ),
+        "render_kind": "center_preview" if provisional else "formal_center",
+        "tradable": not provisional,
+        "suppressed_overlapping_candidate_count": 0,
+        "algorithm_revision": "chanlun-display-xd-five-role/v5",
+    }
+
+
+def _collapse_overlapping_xd_center_candidates(payloads: list[dict]) -> list[dict]:
+    """Fold temporally overlapping same-level candidates into one center.
+
+    A displayed center body spans from the first core segment to the leaving
+    segment. Two bodies with a positive time overlap necessarily reuse the
+    same segment evidence, so only the most advanced coherent interpretation
+    may be shown. Evidence progress wins before object provenance: a confirmed
+    formal center, then completed third-class-point geometry, then an ongoing
+    formal center, then an ordinary forming preview. This prevents an older
+    ongoing object from hiding a later 3-buy/3-sell and from inheriting only
+    that candidate's opposite-direction leaving leg. Merely sharing one
+    boundary timestamp is valid adjacency and is deliberately not collapsed.
+    """
+
+    def interval(value: dict) -> tuple[int, int]:
+        first = int(value["points"][0]["time"])
+        second = int(value["points"][1]["time"])
+        return min(first, second), max(first, second)
+
+    def overlaps(left: dict, right: dict) -> bool:
+        left_start, left_end = interval(left)
+        right_start, right_end = interval(right)
+        return max(left_start, right_start) < min(left_end, right_end)
+
+    def winner_key(value: dict) -> tuple[int, int, int]:
+        start, end = interval(value)
+        if value.get("done") is True:
+            evidence_rank = 0
+        elif (
+            value.get("center_state") == "completed"
+            and value.get("completion_point_observed") is True
+        ):
+            evidence_rank = 1
+        elif value.get("render_kind") == "formal_center":
+            evidence_rank = 2
+        elif value.get("center_state") == "completed":
+            evidence_rank = 3
+        else:
+            evidence_rank = 4
+        return (
+            evidence_rank,
+            start,
+            -end,
+        )
+
+    retained: list[dict] = []
+    for raw_candidate in sorted(
+        payloads,
+        key=lambda item: (*interval(item), winner_key(item)[0]),
+    ):
+        candidate = dict(raw_candidate)
+        candidate.setdefault("suppressed_overlapping_candidate_count", 0)
+        overlapping_indexes = [
+            index
+            for index, existing in enumerate(retained)
+            if overlaps(existing, candidate)
+        ]
+        if not overlapping_indexes:
+            retained.append(candidate)
+            continue
+
+        contenders = [retained[index] for index in overlapping_indexes]
+        contenders.append(candidate)
+        winner = min(contenders, key=winner_key)
+        suppressed_count = sum(
+            int(value.get("suppressed_overlapping_candidate_count", 0))
+            for value in contenders
+        ) + len(contenders) - 1
+        winner = dict(winner)
+        winner["suppressed_overlapping_candidate_count"] = suppressed_count
+        # Never splice role metadata from a losing candidate into the winner.
+        # A shifted preview may have the opposite entry/leave direction and a
+        # different core.  Grafting only its leave previously produced payloads
+        # such as ``type=down`` with an ``up`` leaving segment, and could even
+        # turn a confirmed ``done`` center back into ``provisional``.  A real
+        # extension is projected from the same formal seed by center_machine
+        # and replaces that formal snapshot before this overlap reducer runs.
+
+        retained = [
+            value
+            for index, value in enumerate(retained)
+            if index not in overlapping_indexes
+        ]
+        retained.append(winner)
+
+    retained.sort(key=lambda item: interval(item))
+    return retained
+
+
+def xd_segment_centers_to_chart_dicts(lines) -> list[dict]:
+    """Build display centers from five explicit roles in the shown XD sequence.
+
+    Each center consumes the exact segment stream used by the page.  U1 is the
+    entering segment, U2-U4 are the fixed three-segment core, and only a
+    same-direction fifth segment serves as U5/the leaving leg.  Whether that
+    leg has completed a true departure remains explicit in the center state.
+    The live final segment participates through a provisional center preview;
+    it is rendered as forming evidence until that segment becomes locked.
+    The rectangle therefore spans U2.start -> leave.start;
+    neither the entering nor leaving segment is folded into its horizontal body.
+    """
+    from chanlun.core.strict_structure.center_machine import calculate_centers
+    from chanlun.core.strict_structure.identity import stable_structure_id
+    from chanlun.core.strict_structure.models import (
+        CenterPreviewState,
+        CenterState,
+        SourceKind,
+    )
+    from chanlun.core.strict_structure.unit_adapter import UnitLockRegistry, adapt_lines
+
+    line_values = tuple(lines or ())
+    if len(line_values) < 5:
+        return []
+
+    evidence_times = []
+    for line in line_values:
+        for value in (
+            getattr(getattr(getattr(line, "start", None), "k", None), "date", None),
+            getattr(getattr(getattr(line, "end", None), "k", None), "date", None),
+            getattr(line, "locked_at", None),
+        ):
+            if value is not None:
+                evidence_times.append(value)
+    if not evidence_times:
+        raise ValueError("segment center requires dated line evidence")
+
+    quantum = _display_segment_price_quantum(line_values)
+    units = adapt_lines(
+        line_values,
+        structural_level=0,
+        source_kind=SourceKind.SEGMENT,
+        price_quantum=quantum,
+        as_of=max(evidence_times),
+        registry=UnitLockRegistry("chanlun-display-xd-five-role/v5"),
+    )
+    unit_lines = {
+        unit.unit_id: line
+        for unit, line in zip(units, line_values, strict=True)
+    }
+    center_result = calculate_centers(
+        units,
+        structural_level=0,
+        source_kind=SourceKind.SEGMENT,
+    )
+
+    preview_payloads = []
+    preview_seed_ids: set[tuple[str, ...]] = set()
+    units_by_id = {unit.unit_id: unit for unit in units}
+    for preview in center_result.previews:
+        if (
+            preview.state not in (
+                CenterPreviewState.FORMING,
+                CenterPreviewState.COMPLETED,
+            )
+            or len(preview.unit_ids) < 5
+            or preview.zd_tick is None
+            or preview.zg_tick is None
+            or preview.zd_tick >= preview.zg_tick
+        ):
+            continue
+        body_units = tuple(units_by_id[unit_id] for unit_id in preview.unit_ids)
+        initial_units = body_units[:5]
+        entry_unit = initial_units[0]
+        core_units = initial_units[1:4]
+        leaving_unit = next(
+            unit
+            for unit in reversed(body_units)
+            if unit.direction == entry_unit.direction
+        )
+        completion_return = (
+            None
+            if preview.completion_return_unit_id is None
+            else units_by_id[preview.completion_return_unit_id]
+        )
+        center_id = stable_structure_id(
+            "chanlun-center/v3",
+            preview.price_basis_revision,
+            preview.structural_level,
+            preview.source_kind.value,
+            tuple(unit.unit_id for unit in initial_units),
+            preview.zd_tick,
+            preview.zg_tick,
+        )
+        payload = _xd_five_role_center_payload(
+            entry_unit=entry_unit,
+            core_units=core_units,
+            body_units=body_units,
+            leaving_unit=leaving_unit,
+            completion_return_unit=completion_return,
+            evidence_units=(
+                body_units
+                if completion_return is None
+                else body_units + (completion_return,)
+            ),
+            unit_lines=unit_lines,
+            quantum=quantum,
+            center_id=center_id,
+            state=preview.state.value,
+            # 未完成线段参与几何识别，但在线段锁定前不能冒充正式完成中枢。
+            done=False,
+            provisional=True,
+        )
+        if payload is None:
+            continue
+        preview_seed_ids.add(tuple(unit.unit_id for unit in initial_units))
+        preview_payloads.append(payload)
+
+    payloads = []
+    for center in center_result.centers:
+        seed_ids = tuple(unit.unit_id for unit in center.initial_units)
+        if seed_ids in preview_seed_ids:
+            # 同一中枢的实时预览包含最后未完成线段，必须取代只覆盖锁定前缀的
+            # 正式快照，否则页面会一直少画最后一段直到重新加载。
+            continue
+        leaving_unit = (
+            center.completion_leave_unit
+            or center.pending_leave_unit
+            or next(
+                unit
+                for unit in reversed(center.body_units)
+                if unit.direction == center.entry_unit.direction
+            )
+        )
+        entry_unit = center.entry_unit
+        core_units = tuple(center.core_units)
+        done = center.state is CenterState.COMPLETED
+        evidence_units = center.body_units + (
+            ()
+            if center.completion_return_unit is None
+            else (center.completion_return_unit,)
+        )
+        payload = _xd_five_role_center_payload(
+            entry_unit=entry_unit,
+            core_units=core_units,
+            body_units=center.body_units,
+            leaving_unit=leaving_unit,
+            completion_return_unit=center.completion_return_unit,
+            evidence_units=evidence_units,
+            unit_lines=unit_lines,
+            quantum=quantum,
+            center_id=center.center_id,
+            state=center.state.value,
+            done=done,
+            provisional=False,
+        )
+        if payload is not None:
+            payloads.append(payload)
+    payloads.extend(preview_payloads)
+    return _collapse_overlapping_xd_center_candidates(payloads)
+
+
 def zs_to_chart_dict(
     zs,
     use_envelope: bool = False,
@@ -309,7 +720,9 @@ def cl_data_to_tv_chart(
 ) -> Union[dict, None]:
     """Convert base lines and one atomic strict evidence snapshot for TV charts."""
 
-    from chanlun.cl_utils.strict_chart import build_strict_structure_snapshot
+    from chanlun.cl_utils.strict_chart import (
+        build_strict_structure_snapshot,
+    )
 
     klines = pd.DataFrame(
         [
@@ -459,6 +872,14 @@ def cl_data_to_tv_chart(
         "fxs": fx_data,
         "bis": bi_chart_data,
         "xds": xd_chart_data,
+        # 基础结构中的“笔中枢”必须与页面当前 CL 的笔同源；页面配置为
+        # 老笔时，这里也只能消费老笔形成的中枢，不能换成严格运行时的新笔证据。
+        # 中枢是否显示由前端独立控制。这里始终传输当前周期的笔中枢，
+        # 避免历史 chart_show_bi_zs 配置把新菜单默认开启的“笔中枢”变成空数据。
+        "bi_zss": [zs_to_chart_dict(zs) for zs in cd.get_bi_zss()],
+        # 当前周期中枢控制直接消费页面正在显示的老笔线段，并按五段角色重建：
+        # 进入段 + 下上下/上下上三段主体 + 真正离开段。它与递归结构完全解耦。
+        "xd_zss": xd_segment_centers_to_chart_dicts(cd.get_xds()),
     }
 
     if strict_runtime is not None and strict_runtime.error_code is not None:

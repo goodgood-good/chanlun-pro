@@ -10,9 +10,10 @@ import math
 import datetime
 import time
 import threading
+from pathlib import Path
 from threading import Semaphore
 from typing import Dict
-from flask import Blueprint, request
+from flask import Blueprint, current_app, request
 from flask_login import login_required
 
 from chanlun import fun
@@ -208,6 +209,75 @@ def _normalize_resolution(resolution: str):
     return {"D": "1D", "W": "1W", "M": "1M"}.get(resolution, resolution)
 
 
+def _validated_review_chart_lock():
+    """Return a server-verified human-review or risk-point causal lock."""
+
+    values = {
+        "candidate_id": str(request.args.get("review_candidate_id") or ""),
+        "source_sha256": str(request.args.get("review_source_sha256") or ""),
+        "review_as_of": str(request.args.get("review_as_of") or ""),
+    }
+    if not any(values.values()):
+        return None
+    if not all(values.values()):
+        raise ValueError("partial human-review chart lock")
+    service = current_app.extensions.get("decision_support_human_review")
+    validator = getattr(service, "validate_chart_lock", None)
+    if callable(validator):
+        try:
+            return validator(
+                candidate_id=values["candidate_id"],
+                source_sha256=values["source_sha256"],
+                review_as_of=int(values["review_as_of"]),
+            )
+        except (TypeError, ValueError, RuntimeError):
+            pass
+    try:
+        from ..services.research_audit import validate_risk_point_chart_lock
+
+        return validate_risk_point_chart_lock(
+            current_app.config.get(
+                "RESEARCH_AUDIT_ROOT", Path(__file__).resolve().parents[4]
+            ),
+            point_id=values["candidate_id"],
+            source_sha256=values["source_sha256"],
+            review_as_of=int(values["review_as_of"]),
+        )
+    except (TypeError, ValueError, RuntimeError) as risk_error:
+        raise ValueError(
+            "chart lock was rejected by both human-review and risk-point audits"
+        ) from risk_error
+
+
+def _sector_chart_archive_for_lock(lock):
+    """Resolve an already server-validated synthetic-sector chart lock."""
+
+    if (
+        not isinstance(lock, dict)
+        or lock.get("chart_source_kind") != "VERIFIED_QMT_SECTOR_ARCHIVE"
+    ):
+        return None
+    from ..services.sector_chart_archive import load_sector_chart_archive
+
+    archive = load_sector_chart_archive(
+        current_app.config.get(
+            "RESEARCH_AUDIT_ROOT", Path(__file__).resolve().parents[4]
+        ),
+        expected_manifest_content_sha256=str(
+            lock.get("sector_chart_archive_manifest_content_sha256") or ""
+        ),
+    )
+    entry_id = str(lock.get("sector_chart_archive_entry_id") or "")
+    entry = archive.entries_by_id.get(entry_id)
+    if (
+        entry is None
+        or entry.get("sector_id") != lock.get("symbol")
+        or entry.get("review_as_of_unix") != lock.get("review_as_of")
+    ):
+        raise ValueError("sector chart archive lock changed")
+    return archive, entry_id
+
+
 def _parse_tv_symbol(symbol: str):
     if not symbol:
         return None, None
@@ -230,6 +300,49 @@ def _drawing_storage_name(chart_id: str, layout_id: str, symbol: str, resolution
 
 def _legacy_drawing_storage_name(symbol: str, resolution: str):
     return f"drawings_{symbol}_{resolution}"
+
+
+_USER_DRAWING_STATE_SCHEMA = "chanlun-user-drawings/v2"
+
+
+def _empty_user_drawing_state():
+    """Return the only drawing-state shape accepted by the current UI.
+
+    Automatic Chanlun entities are reconstructed from chart data and must never
+    be restored from TradingView's line-tool persistence.  Older records mixed
+    those entities with manual drawings, so a schema-less state is deliberately
+    quarantined instead of guessed or migrated.
+    """
+
+    return {
+        "schema": _USER_DRAWING_STATE_SCHEMA,
+        "sources": {},
+        "groups": {},
+    }
+
+
+def _normalize_user_drawing_state(value):
+    """Normalize an explicit v2 manual-drawing state, or quarantine it."""
+
+    if not isinstance(value, dict):
+        return None
+    if value.get("schema") != _USER_DRAWING_STATE_SCHEMA:
+        return None
+    sources = value.get("sources")
+    groups = value.get("groups")
+    if not isinstance(sources, dict) or not isinstance(groups, dict):
+        return None
+    return {
+        "schema": _USER_DRAWING_STATE_SCHEMA,
+        "sources": {
+            str(source_id): source_state
+            for source_id, source_state in sources.items()
+            if isinstance(source_state, dict)
+        },
+        # The frontend intentionally persists no TradingView groups because a
+        # legacy group can retain references to filtered automatic entities.
+        "groups": {},
+    }
 
 
 # 单标的内 4 周期是否并行预热。
@@ -531,6 +644,24 @@ def tv_symbols():
     market, code = _parse_tv_symbol(raw_symbol)
     if market is None or code is None:
         return {"s": "error", "errmsg": f"invalid symbol: {raw_symbol}"}
+
+    try:
+        review_lock = _validated_review_chart_lock()
+        sector_archive = _sector_chart_archive_for_lock(review_lock)
+    except (TypeError, ValueError, RuntimeError) as exc:
+        LogUtil.warning(f"[tv_symbols] rejected review lock: {exc}")
+        return {"s": "error", "errmsg": "invalid causal chart lock"}
+    if sector_archive is not None:
+        if market != "a" or code != review_lock.get("symbol"):
+            return {"s": "error", "errmsg": "causal chart symbol mismatch"}
+        from ..services.sector_chart_archive import sector_chart_symbol_info
+
+        archive, entry_id = sector_archive
+        return sector_chart_symbol_info(
+            archive,
+            entry_id=entry_id,
+            interval=str(review_lock["chart_interval"]),
+        )
 
     try:
         ex = get_exchange(Market(market))
@@ -855,6 +986,18 @@ def tv_history():
         firstDataRequest = request.args.get("firstDataRequest", "false")
         _from = _normalize_unix_ts(request.args.get("from", "0"))
         _to = _normalize_unix_ts(request.args.get("to", "0"))
+        try:
+            _review_lock = _validated_review_chart_lock()
+        except (TypeError, ValueError, RuntimeError) as exc:
+            LogUtil.warning(f"[tv_history] rejected human-review lock: {exc}")
+            return {"s": "no_data"}
+        _review_as_of = (
+            None if _review_lock is None else int(_review_lock["review_as_of"])
+        )
+        if _review_as_of is not None:
+            _to = _review_as_of if _to <= 0 else min(_to, _review_as_of)
+            if _from > _review_as_of:
+                return {"s": "no_data"}
         # H1(阶段E): 前端断档 gap-reset 主动带 force_refresh=1 → 绕过缓存强制重算,补齐断档。
         # 绕过而非删缓存:走既有 MISS→重算路径,重算失败旧 entry 仍在(符合 C1"绝不丢好缓存")。
         force_refresh = request.args.get("force_refresh") == "1"
@@ -882,6 +1025,42 @@ def tv_history():
         if market is None or code is None:
             LogUtil.warning(f"[tv_history] invalid symbol: {symbol}")
             return {"s": "no_data"}
+        if _review_lock is not None and (
+            market != "a" or code != _review_lock.get("symbol")
+        ):
+            LogUtil.warning("[tv_history] review lock symbol mismatch")
+            return {"s": "no_data"}
+        if (
+            _review_lock is not None
+            and _review_lock.get("lock_kind") == "RISK_POINT_AUDIT"
+            and resolution != _review_lock.get("chart_interval")
+        ):
+            LogUtil.warning("[tv_history] risk-point review lock interval mismatch")
+            return {"s": "no_data"}
+
+        try:
+            sector_archive = _sector_chart_archive_for_lock(_review_lock)
+        except (TypeError, ValueError, RuntimeError) as exc:
+            LogUtil.warning(f"[tv_history] sector archive lock rejected: {exc}")
+            return {"s": "no_data"}
+        if sector_archive is not None:
+            from ..services.sector_chart_archive import (
+                SectorChartArchiveUnavailable,
+                sector_chart_history_payload,
+            )
+
+            archive, entry_id = sector_archive
+            try:
+                return sector_chart_history_payload(
+                    archive,
+                    entry_id=entry_id,
+                    interval=resolution,
+                    from_ts=_from,
+                    to_ts=_to,
+                )
+            except SectorChartArchiveUnavailable as exc:
+                LogUtil.warning(f"[tv_history] sector archive unavailable: {exc}")
+                return {"s": "no_data"}
 
         frequency = resolution_maps.get(resolution)
         if frequency is None:
@@ -932,6 +1111,12 @@ def tv_history():
             cl_config = {}
         # 使用稳定 hash 构造 cache_key（不受 PYTHONHASHSEED 影响，进程重启后仍一致）
         cache_key = _build_cache_key(market, code, frequency, cl_config)
+        if _review_lock is not None:
+            # 严禁与实时快照共享缓存：先按复核时点截断 K 线，再计算结构；不能
+            # 在包含未来 K 线的结构结果上做事后裁剪。
+            cache_key += (
+                f"_review_{_review_lock['candidate_id'][7:]}_{_review_as_of}"
+            )
 
         cl_chart_data = None
         is_cache_hit = False
@@ -952,13 +1137,18 @@ def tv_history():
         # （_SafeLockRegistry 用 WeakValueDictionary 存储锁，无强引用会被 GC）
         # 方向2: 交易时段决定 serve-stale 的过期阈值(盘中短/收盘长)。在锁外算
         # (带 30s TTL 缓存), 不占用 cache_lock 临界区。
-        _market_trading = market_now_trading(market)
+        _market_trading = (
+            False if _review_lock is not None else market_now_trading(market)
+        )
         _needs_refresh = False
         _calc_lock = chart_calc_locks.get(cache_key)
         with _calc_lock:
             # RAM miss may synchronously read a pickle. Keep that I/O outside the
             # process-wide cache lock; the per-key calc lock still serializes writes.
             cache_entry = _get_chart_cache_entry(cache_key)
+            if _review_lock is not None and cache_entry is not None:
+                # 历史复核输入不可变，禁止 live stale-revalidate 用当前行情覆盖它。
+                cache_entry = {**cache_entry, "validated_at": time.time()}
             with cache_lock:
                 is_cache_hit, cl_chart_data, miss_reason, _needs_refresh = (
                     evaluate_cache_for_tv_history(
@@ -1009,9 +1199,12 @@ def tv_history():
                         f"[tv_history] incremental request {code} range: {kline_args['start_date']} -> {kline_args['end_date']}"
                     )
                 else:
-                    kline_args["end_date"] = datetime.datetime.now(tz_sh).strftime(
-                        "%Y-%m-%d %H:%M:%S"
+                    end_at = (
+                        datetime.datetime.fromtimestamp(_review_as_of, tz_sh)
+                        if _review_as_of is not None
+                        else datetime.datetime.now(tz_sh)
                     )
+                    kline_args["end_date"] = end_at.strftime("%Y-%m-%d %H:%M:%S")
 
                 _fetch_result = fetch_klines_and_compute_cl_data(
                     market, code, frequency, cl_config,
@@ -1067,7 +1260,7 @@ def tv_history():
                         _set_chart_cache_entry(cache_key, cl_chart_data, is_full_snapshot=True)
 
                 # firstDataRequest 成功后，后台预热其他常用周期的缓存
-                if firstDataRequest == "true":
+                if firstDataRequest == "true" and _review_lock is None:
                     prewarm_common_intervals(market, code, cl_config)
 
         # Cache hit 路径 lazy 补算 HTF MACD:
@@ -1090,7 +1283,7 @@ def tv_history():
         # 方向1 (stale-while-revalidate): firstDataRequest 命中"过期全量快照"已即时
         # 返回旧快照(秒显), 这里派去重的后台重验证拉全新数据写回缓存, 经现有
         # SSE 推送 / TV polling 自愈到前端。submit 非阻塞, 不影响本次响应延迟。
-        if is_cache_hit and _needs_refresh:
+        if is_cache_hit and _needs_refresh and _review_lock is None:
             submit_revalidation(market, code, frequency, cl_config, cache_key)
 
         if cl_chart_data is None:
@@ -1503,12 +1696,23 @@ def tv_drawings(version):
                 "status": "error",
                 "message": "state must be a JSON object.",
             }, 400
+        normalized = _normalize_user_drawing_state(content)
+        if normalized is None:
+            # Old tabs can keep executing the pre-v2 JavaScript after the app
+            # has been upgraded.  A 2xx acknowledgement stops their retry/log
+            # loop, while ignored=true makes the quarantine observable.  Most
+            # importantly, the contaminated legacy payload never reaches DB.
+            return {
+                "status": "ok",
+                "ignored": True,
+                "reason_code": "LEGACY_DRAWING_STATE_QUARANTINED",
+            }
         db.tv_chart_save(
             "drawing",
             client_id,
             user_id,
             drawing_name,
-            json.dumps(content),
+            json.dumps(normalized, ensure_ascii=False, sort_keys=True),
             symbol,
             resolution,
         )
@@ -1517,30 +1721,42 @@ def tv_drawings(version):
     if request.method == "GET":
         drawing = db.tv_chart_get_by_name("drawing", drawing_name, client_id, user_id)
         if drawing is None:
-            drawing = db.tv_chart_get_by_name(
+            legacy_drawing = db.tv_chart_get_by_name(
                 "drawing", legacy_drawing_name, client_id, user_id
             )
-            if drawing is not None:
+            legacy_state = None
+            if legacy_drawing is not None:
+                try:
+                    legacy_state = _normalize_user_drawing_state(
+                        json.loads(legacy_drawing.content)
+                    )
+                except Exception:
+                    legacy_state = None
+            # Only an already-versioned manual state may cross the old key
+            # boundary.  Schema-less records are the source of the QQQ 1m
+            # orange shapes leaking into the 30m canvas and must stay inert.
+            if legacy_state is not None:
                 db.tv_chart_save(
                     "drawing",
                     client_id,
                     user_id,
                     drawing_name,
-                    drawing.content,
+                    json.dumps(legacy_state, ensure_ascii=False, sort_keys=True),
                     symbol,
                     resolution,
                 )
+                return {"status": "ok", "data": legacy_state}
 
         if drawing:
             try:
-                data = json.loads(drawing.content)
+                data = _normalize_user_drawing_state(json.loads(drawing.content))
             except Exception:
-                data = {}
+                data = None
             return {
                 "status": "ok",
-                "data": data,
+                "data": data or _empty_user_drawing_state(),
             }
         return {
             "status": "ok",
-            "data": {},
+            "data": _empty_user_drawing_state(),
         }

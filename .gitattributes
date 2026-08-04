@@ -1,3 +1,40 @@
+* text=auto
+.gitattributes text eol=lf
+.gitignore text eol=lf
+
+# Reproducible source and evidence hashes across Windows/Linux checkouts.
+*.py text eol=lf
+*.pyi text eol=lf
+*.json text eol=lf
+*.jsonl text eol=lf
+*.toml text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.js text eol=lf
+*.ts text eol=lf
+*.css text eol=lf
+*.html text eol=lf
+*.sh text eol=lf
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+*.parquet binary
+*.pkl binary
+*.pickle binary
+*.gz binary
+*.zip binary
+*.dmp binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.pdf binary
+*.docx binary
+*.xlsx binary
+
 *.ipynb linguist-language=python
 web/chanlun_chart/cl_app/__init__.py whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
 web/chanlun_chart/cl_app/templates/index.html whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol

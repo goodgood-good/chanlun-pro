@@ -563,3 +563,8 @@
   .zx-text-button,
   .zx-icon-button { transition: none; }
 }
+.code_rate[data-quote-state="unavailable"] {
+  opacity: 0.62;
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
+}

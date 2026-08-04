@@ -50,7 +50,7 @@
             }
             this._timeoutMs = Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : 15_000;
         }
-        sendRequest(datafeedUrl, urlPath, params) {
+        sendRequest(datafeedUrl, urlPath, params, timeoutMs) {
             if (params !== undefined) {
                 const paramKeys = Object.keys(params);
                 if (paramKeys.length !== 0) {
@@ -60,6 +60,9 @@
                     return `${encodeURIComponent(key)}=${encodeURIComponent(params[key].toString())}`;
                 }).join('&');
             }
+            const effectiveTimeoutMs = Number.isFinite(timeoutMs) && Number(timeoutMs) > 0
+                ? Number(timeoutMs)
+                : this._timeoutMs;
             // Send user cookies if the URL is on the same origin as the calling script.
             const controller = typeof AbortController === 'undefined' ? undefined : new AbortController();
             const options = { credentials: 'same-origin' };
@@ -70,8 +73,8 @@
             const timeout = new Promise((_resolve, reject) => {
                 timeoutId = setTimeout(() => {
                     controller?.abort();
-                    reject(new Error(`Request timed out after ${this._timeoutMs}ms`));
-                }, this._timeoutMs);
+                    reject(new Error(`Request timed out after ${effectiveTimeoutMs}ms`));
+                }, effectiveTimeoutMs);
             });
             if (this._headers !== undefined) {
                 options.headers = this._headers;
@@ -147,6 +150,48 @@
         return Date.UTC(year, month, day) / 1000;
     }
 
+    // 冷态 1m/5m 历史需要分页取数并计算结构，服务端实测可超过通用请求的 15 秒上限。
+    // 只放宽周期切换触发的首个完整快照；配置、报价与实时增量仍由 Requester 的
+    // 15 秒默认值约束，避免故障时所有请求长时间悬挂。
+    const DEFAULT_INITIAL_HISTORY_TIMEOUT_MS = 45_000;
+    function currentCenterPeriod(resolution) {
+        const value = String(resolution || "").trim();
+        if (/^[1-9][0-9]*$/.test(value))
+            return `${value}m`;
+        if (/^(1?D)$/i.test(value))
+            return "d";
+        return value.toLowerCase();
+    }
+    /**
+     * `higher_zs` 为跨周期中枢载体，但当前周期也会在其中重复一份 `xd_zss`。
+     * 两份数据经过增量合并后可能处于不同版本，页面若读取重复副本就会出现中枢
+     * 边界落后、刷新后才恢复。这里把当前周期组强制绑定到已合并的 `xd_zss`；
+     * 其他真实周期仍保留各自独立计算结果。
+     */
+    function syncCurrentCenterGroup(groups, resolution, currentCenters) {
+        const period = currentCenterPeriod(resolution);
+        const supported = ["1m", "5m", "30m", "d"];
+        let found = false;
+        const result = (Array.isArray(groups) ? groups : []).map((group) => {
+            if (!group || typeof group !== "object" || Array.isArray(group))
+                return group;
+            const record = group;
+            if (String(record.period || "").toLowerCase() !== period)
+                return group;
+            found = true;
+            return { ...record, zss: currentCenters };
+        });
+        if (!found && supported.includes(period)) {
+            const labels = {
+                "1m": "1m 中枢",
+                "5m": "5m 中枢",
+                "30m": "30m 中枢",
+                d: "日线 中枢",
+            };
+            result.push({ period, level_name: labels[period], zss: currentCenters });
+        }
+        return result;
+    }
     class HistoryProvider {
         constructor(datafeedUrl, requester, limitedServerResponse, options = {}) {
             this._fullRequestSerial = 0;
@@ -158,6 +203,12 @@
             this._requester = requester;
             this._limitedServerResponse = limitedServerResponse;
             this._options = options;
+            this._historyParams = Object.freeze({ ...(options.historyParams || {}) });
+            this._initialHistoryTimeoutMs =
+                Number.isFinite(options.initialHistoryTimeoutMs) &&
+                    Number(options.initialHistoryTimeoutMs) > 0
+                    ? Number(options.initialHistoryTimeoutMs)
+                    : DEFAULT_INITIAL_HISTORY_TIMEOUT_MS;
             this._barsResultMaxSize = options.barsResultMaxSize || 100;
             this.bars_result = new Map();
         }
@@ -236,6 +287,7 @@
         }
         getBars(symbolInfo, resolution, periodParams) {
             const requestParams = {
+                ...this._historyParams,
                 symbol: symbolInfo.ticker || "",
                 resolution: resolution,
                 from: periodParams.from,
@@ -262,9 +314,12 @@
             const requestGeneration = periodParams.firstDataRequest
                 ? this._beginFullRequest(requestParams)
                 : undefined;
+            const requestTimeoutMs = requestGeneration === undefined
+                ? undefined
+                : this._initialHistoryTimeoutMs;
             return new Promise(async (resolve, reject) => {
                 try {
-                    const initialResponse = await this._requester.sendRequest(this._datafeedUrl, "history", requestParams);
+                    const initialResponse = await this._requester.sendRequest(this._datafeedUrl, "history", requestParams, requestTimeoutMs);
                     const result = this._processHistoryResponse(initialResponse, requestParams, requestGeneration);
                     if (this._limitedServerResponse &&
                         this._fullRequestIsCurrent(requestParams, requestGeneration)) {
@@ -300,7 +355,9 @@
                     else {
                         requestParams.to = Math.round(result.bars[0].time / 1000);
                     }
-                    const followupResponse = await this._requester.sendRequest(this._datafeedUrl, "history", requestParams);
+                    const followupResponse = await this._requester.sendRequest(this._datafeedUrl, "history", requestParams, requestGeneration === undefined
+                        ? undefined
+                        : this._initialHistoryTimeoutMs);
                     const followupResult = this._processHistoryResponse(followupResponse, requestParams, requestGeneration);
                     lastResultLength = followupResult.bars.length;
                     // merge result with results collected so far
@@ -459,7 +516,9 @@
                 const existingLastRawMs = existingRawTimes.length > 0
                     ? existingRawTimes[existingRawTimes.length - 1]
                     : undefined;
-                const isRegressiveFullSnapshot = response.update === false &&
+                const isAuthoritativeSnapshot = response.update === false ||
+                    response.full_snapshot === true;
+                const isRegressiveFullSnapshot = isAuthoritativeSnapshot &&
                     incomingLastRawMs !== undefined &&
                     existingLastRawMs !== undefined &&
                     incomingLastRawMs < existingLastRawMs;
@@ -500,7 +559,7 @@
                         xd_zslx: response.xd_zslx || [],
                         xd_zslx_lines: response.xd_zslx_lines || [],
                         recursive_levels: response.recursive_levels || [],
-                        higher_zs: response.higher_zs || [],
+                        higher_zs: syncCurrentCenterGroup(response.higher_zs, resolution, response.xd_zss || []),
                         interval_nest: response.interval_nest,
                         strict_structure_mode: response.strict_structure_mode,
                         strict_structure: response.strict_structure,
@@ -715,7 +774,15 @@
                             });
                         }
                     }
-                    obj_res.higher_zs = response.higher_zs || [];
+                    // higher_zs 是全局四周期快照，向左翻历史的窄窗口响应不得把右侧当前
+                    // 快照覆盖掉。权威最新窗口才整体替换；随后无条件把当前周期组同步到
+                    // 已经完成合并/全量替换的 xd_zss，消除同一中枢的双版本来源。
+                    if (response.full_snapshot ||
+                        isRecentWindowAuthoritative) {
+                        obj_res.higher_zs =
+                            response.higher_zs || [];
+                    }
+                    obj_res.higher_zs = syncCurrentCenterGroup(obj_res.higher_zs, resolution, obj_res.xd_zss || []);
                     obj_res.interval_nest = response.interval_nest;
                     obj_res.chart_color = response.chart_color;
                     // ⚠ 增量更新 K线 bars：原 else 分支只更新缠论形态+MACD，漏了 obj_res.bars，
@@ -809,7 +876,7 @@
                 xd_zslx: response.xd_zslx || [],
                 xd_zslx_lines: response.xd_zslx_lines || [],
                 recursive_levels: response.recursive_levels || [],
-                higher_zs: response.higher_zs || [],
+                higher_zs: syncCurrentCenterGroup(response.higher_zs, requestParams["resolution"], response.xd_zss || []),
                 interval_nest: response.interval_nest,
                 strict_structure_mode: response.strict_structure_mode,
                 strict_structure: response.strict_structure,
@@ -1240,6 +1307,19 @@
             this._subscribersResetCallbacks = {};
             this._datafeedURL = datafeedURL;
             this._requester = requester;
+            const reviewResolveParams = {};
+            const suppliedParams = options.historyParams || {};
+            for (const key of [
+                'review_candidate_id',
+                'review_source_sha256',
+                'review_as_of',
+            ]) {
+                const value = suppliedParams[key];
+                if (value !== undefined && value !== null && value !== '') {
+                    reviewResolveParams[key] = value;
+                }
+            }
+            this._reviewResolveParams = Object.freeze(reviewResolveParams);
             this._historyProvider = new HistoryProvider(datafeedURL, this._requester, limitedServerResponse, options);
             this._quotesProvider = quotesProvider;
             this._dataPulseProvider = new DataPulseProvider(this._historyProvider, updateFrequency);
@@ -1392,6 +1472,7 @@
             }
             if (!this._configuration.supports_group_request) {
                 const params = {
+                    ...this._reviewResolveParams,
                     symbol: symbolName,
                 };
                 if (currencyCode !== undefined) {

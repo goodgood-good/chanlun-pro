@@ -156,3 +156,48 @@ def test_import_resolves_codes_once_and_replaces_group_atomically(monkeypatch):
             ],
         )
     ]
+
+
+def test_a_share_holding_membership_edit_wakes_both_live_lanes(monkeypatch):
+    class _ZiXuan:
+        def __init__(self, _market):
+            pass
+
+        def add_stock(self, _group, _code, _name):
+            return True
+
+    class _Screening:
+        def __init__(self):
+            self.calls = 0
+
+        def notify_instrument_scope_changed(self):
+            self.calls += 1
+
+    class _Monitor:
+        def __init__(self):
+            self.calls = 0
+
+        def request_refresh(self):
+            self.calls += 1
+
+    monkeypatch.setattr(zixuan_blueprint, "ZiXuan", _ZiXuan)
+    app = _app()
+    screening = _Screening()
+    monitor = _Monitor()
+    app.extensions["decision_support_trading_screening"] = screening
+    app.extensions["holding_group_monitor"] = monitor
+
+    response = app.test_client().post(
+        "/set_stock_zixuan",
+        data={
+            "market": "a",
+            "opt": "ADD",
+            "group_name": "我的持仓",
+            "code": "SZ.300826",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.get_json() == {"ok": True}
+    assert screening.calls == 1
+    assert monitor.calls == 1

@@ -15,6 +15,10 @@ from chanlun.decision_support.trading_system.backtest.pit_metadata import (
     PITMetadataSnapshot,
     qmt_native_code,
 )
+from chanlun.decision_support.trading_system.backtest.qmt_local_cache import (
+    read_qmt_local_derived_30m,
+    resolve_qmt_local_data_dir,
+)
 from chanlun.exchange.price_basis import (
     attach_price_basis_metadata,
     build_provider_price_basis_metadata,
@@ -224,12 +228,25 @@ def _load_qmt_member_frames(
     end_at: datetime,
     chunk_size: int = 256,
 ) -> dict[str, pd.DataFrame]:
-    from xtquant import xtdata
-
     output: dict[str, pd.DataFrame] = {}
-    native_by_code = {code: qmt_native_code(code) for code in codes}
     read_start = normalize_datetime(start_at, "start_at") - timedelta(days=10)
     read_end = normalize_datetime(end_at, "end_at")
+    local_data_dir = resolve_qmt_local_data_dir()
+    if local_data_dir is not None:
+        for code in codes:
+            frame, _audit = read_qmt_local_derived_30m(
+                data_dir=local_data_dir,
+                code=code,
+                start_at=read_start,
+                end_at=read_end,
+            )
+            if not frame.empty:
+                output[code] = frame.loc[:, list(_FIELDS)].copy()
+        return output
+
+    from xtquant import xtdata
+
+    native_by_code = {code: qmt_native_code(code) for code in codes}
     for offset in range(0, len(codes), chunk_size):
         chunk = tuple(codes[offset : offset + chunk_size])
         native_codes = [native_by_code[code] for code in chunk]

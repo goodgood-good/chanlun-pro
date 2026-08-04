@@ -8,7 +8,10 @@ from chanlun.core.strict_structure.base_profile import (
     strict_base_config_revision,
 )
 from chanlun.decision_support.trading_system.runtime_config import (
+    SCREENING_STRUCTURE_PROFILE_ID,
     STRICT_STRATEGY_ID,
+    screening_cl_config,
+    screening_runtime_config_revision,
     strict_cl_config,
     strict_runtime_config_revision,
     strict_snapshot_price_metadata,
@@ -52,6 +55,25 @@ def test_strict_cl_config_contains_only_fixed_base_and_runtime_identity() -> Non
     )
     forbidden_prefixes = ("chart_show_", "zs_", "recursive_")
     assert not any(key.startswith(forbidden_prefixes) for key in config)
+
+
+def test_screening_config_is_old_pen_and_non_recursive_level_zero() -> None:
+    config = screening_cl_config(
+        structure_price_quantum=Decimal("0.01"),
+        price_basis_revision="raw-v1",
+    )
+
+    assert config["strict_base_profile_id"] == SCREENING_STRUCTURE_PROFILE_ID
+    assert config["bi_type"] == "bi_type_old"
+    assert config["bi_mode"] == "strict"
+    assert config["screening_structure_scope"] == "physical-timeframe-level-zero"
+    assert config["screening_center_source"] == "segment"
+    assert config["screening_recursive_structure"] is False
+    assert config["screening_unfinished_segment_participates"] is True
+    assert config["strict_config_revision"] == screening_runtime_config_revision(
+        structure_price_quantum=Decimal("0.01"),
+        price_basis_revision="raw-v1",
+    )
 
 
 def test_snapshot_metadata_is_required_and_never_guessed() -> None:

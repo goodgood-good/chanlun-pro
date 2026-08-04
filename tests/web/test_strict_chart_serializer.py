@@ -334,6 +334,32 @@ def test_stroke_observation_is_explicitly_non_tradable() -> None:
     )
 
 
+def test_display_segment_centers_do_not_replace_strict_stroke_evidence() -> None:
+    stroke = _center(source_kind=SourceKind.STROKE_OBSERVATION)
+    display = strict_center_to_chart_dict(_center())
+    display.update(
+        render_kind="center_observation",
+        tradable=False,
+        origin="display_cl_segment_zhongshu",
+    )
+
+    snapshot = build_strict_structure_snapshot(
+        _evidence(observation=stroke),
+        interval="5m",
+        display_center_observation_payloads=(display,),
+    )
+
+    assert snapshot["stroke_center_observations"][0]["source_kind"] == (
+        "stroke_observation"
+    )
+    assert snapshot["display_center_observations"][0]["source_kind"] == (
+        "segment"
+    )
+    assert snapshot["display_center_observations"][0]["origin"] == (
+        "display_cl_segment_zhongshu"
+    )
+
+
 def test_formal_serializer_rejects_stroke_observation() -> None:
     with pytest.raises(ValueError, match="formal serializer rejects"):
         strict_center_to_chart_dict(
@@ -480,7 +506,7 @@ def test_snapshot_serializes_multiple_unlocked_preview_units() -> None:
     assert payload["pending_leave_unit_id"] == units[-1].unit_id
 
 
-def test_snapshot_serializes_trend_linked_preview_with_external_entry() -> None:
+def test_snapshot_keeps_active_core_until_adjacent_five_roles_exist() -> None:
     units = (
         _unit(0, "up", 90, 120),
         _unit(1, "down", 120, 100),
@@ -492,12 +518,13 @@ def test_snapshot_serializes_trend_linked_preview_with_external_entry() -> None:
         _unit(7, "down", 128, 122, locked=False),
     )
     result = calculate_centers(units, 0, SourceKind.SEGMENT)
-    preview = next(
-        item
+    assert not any(
+        item.unit_ids == tuple(unit.unit_id for unit in units[3:])
         for item in result.previews
-        if item.state is CenterPreviewState.FORMING
-        and item.unit_ids == tuple(unit.unit_id for unit in units[3:])
     )
+    assert len(result.previews) == 1
+    preview = result.previews[0]
+    assert preview.unit_ids == tuple(unit.unit_id for unit in units[:5])
 
     snapshot = build_strict_structure_snapshot(
         _evidence(
@@ -509,9 +536,9 @@ def test_snapshot_serializes_trend_linked_preview_with_external_entry() -> None:
     )
 
     payload = snapshot["levels"][0]["center_previews"][0]
-    assert payload["core"]["zd_tick"] == 120
-    assert payload["core"]["zg_tick"] == 128
-    assert payload["entry_unit_id"] == units[3].unit_id
+    assert payload["core"]["zd_tick"] == 105
+    assert payload["core"]["zg_tick"] == 115
+    assert payload["entry_unit_id"] == units[0].unit_id
 
 
 def test_snapshot_serializes_provisional_third_sell_completion() -> None:

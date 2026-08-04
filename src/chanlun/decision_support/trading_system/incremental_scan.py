@@ -7,12 +7,13 @@ from typing import Mapping
 from chanlun.decision_support.fingerprints import normalize_datetime
 
 
-_FREQUENCIES = {"1m", "5m", "30m"}
-_FREQUENCY_ORDER = {"1m": 0, "5m": 1, "30m": 2}
+_FREQUENCIES = {"1m", "5m", "30m", "d"}
+_FREQUENCY_ORDER = {"1m": 0, "5m": 1, "30m": 2, "d": 3}
 _DEPENDENCIES = {
     "1m": ("1m",),
     "5m": ("1m", "5m"),
     "30m": ("1m", "5m", "30m"),
+    "d": ("1m", "5m", "30m", "d"),
 }
 
 
@@ -89,7 +90,7 @@ def build_scan_plan(
         if bar.code in sector_ids or bar.code.startswith("TDX.88"):
             sectors.add(bar.code)
             for member in sector_members.get(bar.code, ()):
-                schedule(member, ("1m", "5m", "30m"))
+                schedule(member, ("1m", "5m", "30m", "d"))
             continue
         schedule(bar.code, _DEPENDENCIES[bar.frequency])
 

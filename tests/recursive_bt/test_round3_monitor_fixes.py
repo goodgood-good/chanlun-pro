@@ -296,6 +296,103 @@ def test_monitor_daily_window_excludes_current_session_bar():
     assert state.lastd == prior
 
 
+def test_monitor_warmup_requests_every_required_timeframe_window():
+    class _Exchange:
+        def __init__(self):
+            self.calls = []
+
+        def klines(self, _code, frequency, **kwargs):
+            self.calls.append((frequency, kwargs.get("start_date")))
+            return pd.DataFrame()
+
+    exchange = _Exchange()
+    state = MonitorSymbolState(
+        "TSLA.US",
+        exchange,
+        op_level="1m",
+        mid_level="5m",
+        big_level="30m",
+    )
+
+    for frequency in ("1m", "5m", "30m", "d"):
+        state._fetch_klines(frequency, None)
+
+    starts = dict(exchange.calls)
+    assert set(starts) == {"1m", "5m", "30m", "d"}
+    assert all(starts[frequency] for frequency in starts)
+    now = pd.Timestamp.now()
+    assert pd.Timestamp(starts["30m"]) <= now - pd.Timedelta(days=364)
+    assert pd.Timestamp(starts["d"]) <= now - pd.Timedelta(days=799)
+
+
+def test_monitor_emits_nothing_until_all_timeframes_converge(monkeypatch):
+    frame = pd.DataFrame(
+        {
+            "date": [
+                pd.Timestamp("2026-08-03 15:00:00"),
+                pd.Timestamp("2026-08-04 10:00:00"),
+            ],
+            "open": [10.0, 10.1],
+            "close": [10.1, 10.2],
+        }
+    )
+    state = MonitorSymbolState(
+        "TSLA.US",
+        object(),
+        op_level="1m",
+        mid_level="5m",
+        big_level="30m",
+    )
+    state._process_level = lambda *_args: frame
+    state._refresh_daily_window = lambda: False
+    monkeypatch.setattr(lm, "collect_branch_signals", lambda *_args, **_kwargs: ())
+
+    assert state.refresh() == []
+    assert state.warmup_ready is False
+    assert state.consecutive_warmup_incomplete == 1
+
+    state._refresh_daily_window = lambda: True
+    assert state.refresh() == []
+    assert state.warmup_ready is True
+    assert state.consecutive_warmup_incomplete == 0
+
+
+def test_end_labelled_daily_bar_uses_exchange_local_completion(monkeypatch):
+    local_now = pd.Timestamp.now(tz="US/Eastern")
+    completed = pd.date_range(
+        end=local_now - pd.Timedelta(hours=1),
+        periods=100,
+        freq="D",
+    )
+    still_open = local_now + pd.Timedelta(hours=1)
+    frame = pd.DataFrame(
+        {
+            "date": [*completed, still_open],
+            "open": [10.0] * 101,
+            "close": [10.1] * 101,
+        }
+    )
+
+    class _Exchange:
+        kline_time_label = "end"
+
+        def klines(self, *_args, **_kwargs):
+            return frame
+
+    processed = []
+    state = MonitorSymbolState("TSLA.US", _Exchange())
+    state.cdd = type(
+        "_DailyCL",
+        (),
+        {"process_klines": lambda self, value: processed.append(value.copy())},
+    )()
+    monkeypatch.setattr(lm, "collect_branch_signals", lambda *_args, **_kwargs: ())
+
+    assert state._refresh_daily_window() is True
+    assert len(processed[0]) == 100
+    assert state.lastd == completed[-1]
+
+
 # ==========================================================================
 # F-MED-1: freshness 按 op 级别
 # ==========================================================================

@@ -17,6 +17,7 @@ from chanlun.decision_support.trading_system.backtest.fixed_year import (
     run_sparse_portfolio,
     setup_active_ends,
     sparse_evaluation_times,
+    load_qmt_daily_frame,
     load_qmt_frame,
 )
 from tests.trading_system.backtest.helpers import minute_bar
@@ -248,6 +249,9 @@ def test_sparse_portfolio_fills_next_minute_and_marks_terminal_position(
         {sector.sector_id: sector_facts},
         initial_cash=Decimal("1000000"),
         minute_timeline=(observed_at, *dates),
+        selection_sources_by_code={
+            facts.code: ("QMT_SECTOR_TRIGGER",),
+        },
     )
 
     assert run.trades == ()
@@ -370,3 +374,45 @@ def test_qmt_frame_retries_a_transient_empty_native_response(monkeypatch) -> Non
     assert FakeXtdata.calls == 2
     assert len(frame) == 1
     assert frame.iloc[0]["date"] == observed_at
+
+
+def test_qmt_native_daily_is_visible_only_at_close_on_the_causal_price_basis(
+    monkeypatch,
+) -> None:
+    native = "000001.SZ"
+    session = datetime(2026, 7, 24, 0, 0, tzinfo=CN)
+    timestamp_ms = int(session.timestamp() * 1000)
+
+    class FakeXtdata:
+        enable_hello = True
+
+        @staticmethod
+        def get_market_data(**_kwargs):
+            values = {
+                "time": timestamp_ms,
+                "open": 10.0,
+                "high": 10.1,
+                "low": 9.9,
+                "close": 10.0,
+                "volume": 1000.0,
+            }
+            return {
+                field: pd.DataFrame([[value]], index=[native])
+                for field, value in values.items()
+            }
+
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "xtquant",
+        SimpleNamespace(xtdata=FakeXtdata),
+    )
+    frame = load_qmt_daily_frame(
+        "SZ.000001",
+        start_at=session,
+        end_at=session.replace(hour=15),
+    )
+
+    assert frame.iloc[0]["date"] == session.replace(hour=15)
+    assert frame.attrs["price_basis_provider"] == "qmt"
+    assert frame.attrs["price_basis_adjustment"] == "causal-forward-ex-date-v1"
+    assert str(frame.attrs["price_basis_revision"]).startswith("sha256:")
