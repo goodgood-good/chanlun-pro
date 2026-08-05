@@ -56,7 +56,43 @@ jobs:
         # 审计 Web/AI/通知/回测/监控部署画像；发现漏洞时阻断，不再假通过。
         # Poetry 在互斥 extras 中可能锁定同一包的不同版本；这里逐项审计全部已固定
         # 版本，不让 pip 再次解析并错误地把互斥画像合并安装。
-        run: pip-audit -r /tmp/req.txt --no-deps --disable-pip
+        run: |
+          # `--all-extras` may legitimately export more than one locked version of
+          # a package (for example websockets from mutually exclusive transports).
+          # pip-audit rejects duplicate package names in one requirements file, so
+          # distribute the Nth occurrence of each package into the Nth audit batch.
+          # Every locked version is still audited; none is silently discarded.
+          python - <<'PY'
+          from collections import defaultdict
+          from pathlib import Path
+
+          from packaging.requirements import Requirement
+          from packaging.utils import canonicalize_name
+
+          source = Path("/tmp/req.txt")
+          occurrences: dict[str, int] = defaultdict(int)
+          batches: dict[int, list[str]] = defaultdict(list)
+          for raw in source.read_text(encoding="utf-8").splitlines():
+              line = raw.strip()
+              # Exporter options such as --index-url are pip directives, not
+              # Requirement objects.  --disable-pip does not consume them.
+              if not line or line.startswith(("#", "--")):
+                  continue
+              name = canonicalize_name(Requirement(line).name)
+              batch = occurrences[name]
+              occurrences[name] += 1
+              batches[batch].append(line)
+
+          if not batches:
+              raise SystemExit("dependency export produced no auditable requirements")
+          for batch, lines in sorted(batches.items()):
+              target = Path(f"/tmp/req-audit-{batch + 1}.txt")
+              target.write_text("\n".join(lines) + "\n", encoding="utf-8")
+              print(f"{target}: {len(lines)} locked requirements")
+          PY
+          for requirements in /tmp/req-audit-*.txt; do
+            pip-audit -r "$requirements" --no-deps --disable-pip
+          done
 
   test:
     name: Test (pytest)
