@@ -1252,6 +1252,14 @@ def test_app_default_holdings_provider_reads_the_virtual_paper_ledger(
     )
 
     gateway = app.extensions["decision_support_trading_screening_gateway"]
+    # This test owns only the app-to-virtual-ledger binding.  Native QMT
+    # instrument classification has its own contract tests and must not turn
+    # this unit test into an external-service probe on CI.
+    monkeypatch.setattr(
+        gateway,
+        "tradable_instrument_codes",
+        lambda codes: tuple(codes),
+    )
     assert gateway.holdings() == ("SH.600000", "SZ.000001")
 
 

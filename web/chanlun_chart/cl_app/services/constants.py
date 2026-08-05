@@ -208,6 +208,16 @@ class _LazyMarketDict(dict):
         """Allow loads again after a prior lifecycle shutdown."""
         with self._state_lock:
             self._closed = False
+            # A shutdown followed by a new app lifecycle is an explicit retry
+            # boundary.  Do not retain a pre-shutdown failure for another
+            # retry_seconds window: that leaves supported resolutions and
+            # default symbols stuck at their empty fallbacks in the new app.
+            for key, state in self._states.items():
+                if state == "failed" or (
+                    state == "loading" and key not in self._attempts
+                ):
+                    self._states[key] = "unloaded"
+                    self._failed_at.pop(key, None)
 
     def shutdown(self, timeout=0.0):
         """Stop accepting loads and wait only briefly for active attempts."""

@@ -70,18 +70,24 @@ jobs:
           from packaging.utils import canonicalize_name
 
           source = Path("/tmp/req.txt")
-          occurrences: dict[str, int] = defaultdict(int)
-          batches: dict[int, list[str]] = defaultdict(list)
+          versions_by_name: dict[str, list[str]] = defaultdict(list)
           for raw in source.read_text(encoding="utf-8").splitlines():
               line = raw.strip()
               # Exporter options such as --index-url are pip directives, not
               # Requirement objects.  --disable-pip does not consume them.
               if not line or line.startswith(("#", "--")):
                   continue
-              name = canonicalize_name(Requirement(line).name)
-              batch = occurrences[name]
-              occurrences[name] += 1
-              batches[batch].append(line)
+              # Audit every distinct locked version, including versions whose
+              # Python marker is false on this particular Linux runner.
+              locked = line.split(";", 1)[0].strip()
+              name = canonicalize_name(Requirement(locked).name)
+              if locked not in versions_by_name[name]:
+                  versions_by_name[name].append(locked)
+
+          batches: dict[int, list[str]] = defaultdict(list)
+          for locked_versions in versions_by_name.values():
+              for batch, locked in enumerate(locked_versions):
+                  batches[batch].append(locked)
 
           if not batches:
               raise SystemExit("dependency export produced no auditable requirements")

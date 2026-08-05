@@ -167,7 +167,7 @@ try {
     }
     if (
         $null -ne $existingTask -and
-        $message -match '(?i)(access.*denied|拒绝访问)'
+        $message -match '(?i)(access.*denied|\u62d2\u7edd\u8bbf\u95ee)'
     ) {
         $ownerLabel = if ([string]::IsNullOrWhiteSpace($taskOwner)) {
             'an elevated principal'

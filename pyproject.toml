@@ -3,20 +3,25 @@ name = "chanlun-pro"
 version = "1.0.0"
 description = "chanlun pro"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.10,<3.14"
 dependencies = [
+    "aiohttp>=3.14.3",
     "akshare>=1.16.98",
     "apscheduler>=3.11.0",
     "cachetools>=7.1.1",
     "ccxt>=4.4.88",
+    "cryptography>=50.0.0",
     "dtaidistance>=2.3.13",
     "flask>=3.1.1",
     "flask-login>=0.6.3",
     "flask-wtf>=1.3.0",
+    "idna>=3.15",
     "longbridge>=4.1.0",
+    "msgpack>=1.2.1",
     "mytt>=2.9.3",
     "numpy==1.26.4",
     "pandas==2.1.0",
+    "pillow>=12.3,<13",
     "pinyin>=0.4.0",
     "prettytable>=3.16.0",
     "pyarrow>=22.0.0",
@@ -26,12 +31,14 @@ dependencies = [
     "redis>=6.2.0",
     "requests>=2.32.3",
     "scipy>=1.15.3",
-    "setuptools>=80.9.0",
+    "setuptools>=83.0.0",
+    "soupsieve>=2.8.4",
     "sqlalchemy>=2.0.41",
     "ta-lib",
     "tenacity>=9.1.2",
-    "tornado>=6.5.1",
+    "tornado>=6.5.7",
     "tqdm>=4.67.1",
+    "urllib3>=2.7.0",
 ]
 
 # 可选依赖：按需求场景分组安装（默认不装）
@@ -42,6 +49,7 @@ us = [
     "alpaca-py>=0.40.1",
     "polygon-api-client>=1.14.6",
     "ib-insync>=0.9.86",
+    "pyjwt>=2.13.0",
 ]
 hk = ["futu-api>=9.2.5208"]
 usmart = ["pycryptodome>=3.23.0"]
@@ -69,26 +77,6 @@ monitor = ["playwright>=1.53.0"]
 corpus = [
     "pdfplumber>=0.11.8,<0.12",
     "pypdf>=6.6,<7",
-    "pillow>=12,<13",
-]
-all = [
-    "alpaca-py>=0.40.1",
-    "polygon-api-client>=1.14.6",
-    "ib-insync>=0.9.86",
-    "futu-api>=9.2.5208",
-    "pycryptodome>=3.23.0",
-    "baostock>=0.8.9",
-    "tqsdk>=3.8.2",
-    "openctp-ctp>=6.7.11.0",
-    "openai>=1.84.0",
-    "lark-oapi>=1.4.17",
-    "pyfolio-reloaded>=0.9.9",
-    "pyecharts==2.1.0",
-    "matplotlib>=3.10.3",
-    "playwright>=1.53.0",
-    "pdfplumber>=0.11.8,<0.12",
-    "pypdf>=6.6,<7",
-    "pillow>=12,<13",
 ]
 
 [tool.ruff]

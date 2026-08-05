@@ -21,6 +21,27 @@ function ConvertTo-ProcessStartDate {
     }
 }
 
+function Get-ApplicationFileSha256 {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    # Use framework primitives instead of Get-FileHash.  The latter belongs to
+    # Microsoft.PowerShell.Utility and is absent from some minimal Windows CI
+    # hosts even when powershell.exe itself is available.
+    $stream = [IO.File]::Open(
+        $Path,
+        [IO.FileMode]::Open,
+        [IO.FileAccess]::Read,
+        [IO.FileShare]::ReadWrite
+    )
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+        return -join ($sha.ComputeHash($stream) | ForEach-Object { $_.ToString('x2') })
+    } finally {
+        $sha.Dispose()
+        $stream.Dispose()
+    }
+}
+
 function Get-ApplicationSourceRevision {
     param([Parameter(Mandatory = $true)][string]$Root)
 
@@ -71,9 +92,7 @@ function Get-ApplicationSourceRevision {
     $hashByPath = @{}
     foreach ($path in $existing) {
         try {
-            $hashByPath[$path] = (
-                Get-FileHash -LiteralPath (Join-Path $Root $path) -Algorithm SHA256 -ErrorAction Stop
-            ).Hash.ToLowerInvariant()
+            $hashByPath[$path] = Get-ApplicationFileSha256 -Path (Join-Path $Root $path)
         } catch {
             throw "unable to hash application source file '$path': $($_.Exception.Message)"
         }

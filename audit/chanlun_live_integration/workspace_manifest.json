@@ -803,9 +803,9 @@
     "tree_sha256": "sha256:fc47fa949552b6cd071f1a06f76352dd813292204ac5e556e228182eac0a7c94"
   },
   "protected_spec": {
-    "bytes": 89682,
+    "bytes": 89680,
     "path": "audit/chanlun_live_strategy/complete_strategy_v3.md",
-    "sha256": "sha256:2459281425e51b371034d807055ced4c55dcd8422e478ef719505a88640b9b73"
+    "sha256": "sha256:ce2b8920a409b24bf815d4194f44d1a9503fc53379f3d3493b7004c4b6e43448"
   },
   "schema": "chanlun-v3-workspace-manifest/v1"
 }

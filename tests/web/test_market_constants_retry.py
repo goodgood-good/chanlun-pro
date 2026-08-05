@@ -324,3 +324,30 @@ def test_mapping_interface_preserves_known_keys_and_custom_fallback():
     assert metadata["a"] == ""
     with pytest.raises(KeyError):
         _ = metadata["missing"]
+
+
+def test_new_lifecycle_retries_a_pre_shutdown_failure_immediately():
+    calls = 0
+
+    def builder(_key, _market):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("temporary startup failure")
+        return ["1m", "5m"]
+
+    metadata = _LazyMarketDict(
+        builder,
+        markets=[("a", object())],
+        fallback_factory=list,
+        retry_seconds=30,
+        clock=lambda: 0.0,
+    )
+
+    assert metadata["a"] == []
+    assert metadata.status("a") == {"state": "failed", "ready": False}
+    metadata.shutdown()
+    metadata.start()
+
+    assert metadata["a"] == ["1m", "5m"]
+    assert calls == 2

@@ -55,7 +55,7 @@ def test_qmt_registration_explains_admin_owned_task_migration() -> None:
     source = _source(REGISTER)
 
     assert "Get-Acl -LiteralPath $taskFile" in source
-    assert "access.*denied|拒绝访问" in source
+    assert "access.*denied|\\u62d2\\u7edd\\u8bbf\\u95ee" in source
     assert "Unregister-ScheduledTask -TaskName" in source
     assert "then return to a normal (non-admin) PowerShell" in source
     assert "The recreated task remains Interactive/Limited" in source
@@ -267,6 +267,8 @@ def test_qmt_audit_is_read_only_and_separates_configuration_from_operation() -> 
 def test_qmt_task_scripts_parse_as_powershell(path: Path) -> None:
     escaped = str(path).replace("'", "''")
     command = (
+        "[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); "
+        "$OutputEncoding=[Console]::OutputEncoding; "
         "$tokens=$null; $errors=$null; "
         f"[Management.Automation.Language.Parser]::ParseFile('{escaped}',"
         "[ref]$tokens,[ref]$errors) | Out-Null; "
@@ -277,7 +279,9 @@ def test_qmt_task_scripts_parse_as_powershell(path: Path) -> None:
         ["powershell", "-NoProfile", "-Command", command],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=30,
     )
 
-    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.returncode == 0, (result.stdout or "") + (result.stderr or "")

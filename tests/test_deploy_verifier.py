@@ -310,8 +310,9 @@ def test_restart_attests_dirty_source_and_verifier_rechecks_it():
         assert "deploy_common.ps1" in source
     assert "function Get-ApplicationSourceRevision" in helper
     assert "ls-files --cached --others --exclude-standard" in helper
-    assert "Get-FileHash" in helper
-    assert "-Algorithm SHA256" in helper
+    assert "Get-ApplicationFileSha256" in helper
+    assert "[Security.Cryptography.SHA256]::Create()" in helper
+    assert "[IO.File]::Open(" in helper
     assert "$env:CHANLUN_BUILD_REVISION = $deploymentRevision" in restart
     assert "-ExpectedSourceRevision $sourceRevision" in restart
     assert "current source revision" in verifier
