@@ -100,7 +100,8 @@ jobs:
           python-version: '3.11'
       - name: Run ruff
         run: |
-          pip install ruff
+          # 固定版本，避免 Ruff 新版本新增规则后让同一提交在不同日期得到不同结果。
+          pip install ruff==0.15.12
           ruff check --output-format=github src/ web/ tests/
 
   js-test:
