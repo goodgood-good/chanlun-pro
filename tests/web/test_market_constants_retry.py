@@ -351,3 +351,17 @@ def test_new_lifecycle_retries_a_pre_shutdown_failure_immediately():
 
     assert metadata["a"] == ["1m", "5m"]
     assert calls == 2
+
+
+def test_keyed_fallback_preserves_capability_without_claiming_readiness():
+    expected = ["1m", "5m", "30m", "q"]
+    metadata = _LazyMarketDict(
+        lambda _key, _market: (_ for _ in ()).throw(RuntimeError("offline")),
+        markets=[("fx", object())],
+        fallback_factory=list,
+        fallback_builder=lambda key: list(expected) if key == "fx" else [],
+        load_timeout_seconds=0.1,
+    )
+
+    assert metadata["fx"] == expected
+    assert metadata.status("fx") == {"state": "failed", "ready": False}

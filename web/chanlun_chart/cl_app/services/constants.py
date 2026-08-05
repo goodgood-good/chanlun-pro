@@ -54,6 +54,33 @@ _ALL_MARKETS = [
     ("currency_spot", Market.CURRENCY_SPOT),
 ]
 
+# Capability metadata must remain usable when a configured quote adapter is
+# temporarily offline.  These are deliberately the smallest cross-provider
+# contracts used by the chart router, not synthetic market data.  Readiness
+# still reports the failed metadata load; the fallback merely prevents a
+# transient connection failure from misclassifying ordinary 1m/5m requests as
+# unsupported.  Quarterly bars are an explicit FX-only contract.
+_STOCK_FUTURES_FREQUENCY_FALLBACK = (
+    "1m",
+    "5m",
+    "15m",
+    "30m",
+    "60m",
+    "d",
+    "w",
+    "m",
+)
+_MARKET_FREQUENCY_FALLBACKS = {
+    "a": _STOCK_FUTURES_FREQUENCY_FALLBACK,
+    "hk": _STOCK_FUTURES_FREQUENCY_FALLBACK,
+    "us": _STOCK_FUTURES_FREQUENCY_FALLBACK,
+    "futures": _STOCK_FUTURES_FREQUENCY_FALLBACK,
+    "ny_futures": _STOCK_FUTURES_FREQUENCY_FALLBACK,
+    "fx": (*_STOCK_FUTURES_FREQUENCY_FALLBACK, "q"),
+    "currency": ("1m", "5m", "15m", "30m", "60m", "3h", "4h", "d", "w"),
+    "currency_spot": ("1m", "5m", "15m", "30m", "60m", "4h", "d", "w"),
+}
+
 
 class _LazyMarketDict(dict):
     """Load and cache market metadata independently for each market."""
@@ -64,6 +91,7 @@ class _LazyMarketDict(dict):
         *,
         markets=None,
         fallback_factory=list,
+        fallback_builder=None,
         retry_seconds=30.0,
         load_wait_seconds=0.1,
         load_timeout_seconds=5.0,
@@ -73,6 +101,7 @@ class _LazyMarketDict(dict):
         self._builder = builder
         self._markets = dict(_ALL_MARKETS if markets is None else markets)
         self._fallback_factory = fallback_factory
+        self._fallback_builder = fallback_builder
         self._retry_seconds = retry_seconds
         self._load_wait_seconds = max(0.0, float(load_wait_seconds))
         self._load_timeout_seconds = max(0.0, float(load_timeout_seconds))
@@ -86,7 +115,12 @@ class _LazyMarketDict(dict):
 
         # Keep all known keys in the underlying dict for Jinja/JSON compatibility.
         for key in self._markets:
-            dict.__setitem__(self, key, self._fallback_factory())
+            dict.__setitem__(self, key, self._fallback_value(key))
+
+    def _fallback_value(self, key):
+        if self._fallback_builder is not None:
+            return self._fallback_builder(key)
+        return self._fallback_factory()
 
     def _cached_value_if_available(self, key):
         with self._state_lock:
@@ -100,7 +134,7 @@ class _LazyMarketDict(dict):
             return False, None
 
     def _record_failure(self, key, reason, attempt=None):
-        fallback = self._fallback_factory()
+        fallback = self._fallback_value(key)
         failed_at = self._clock()
         with self._state_lock:
             if attempt is not None and self._attempts.get(key) is not attempt:
@@ -307,6 +341,7 @@ def _build_market_default_codes(_key, market):
 market_frequencys = _LazyMarketDict(
     _build_market_frequencys,
     fallback_factory=list,
+    fallback_builder=lambda key: list(_MARKET_FREQUENCY_FALLBACKS[key]),
 )
 market_default_codes = _LazyMarketDict(
     _build_market_default_codes,

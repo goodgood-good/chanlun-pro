@@ -6570,7 +6570,7 @@ ai = ["openai"]
 backtest = ["matplotlib", "pyecharts", "pyfolio-reloaded"]
 charts = ["matplotlib", "pyecharts"]
 cn-extra = ["baostock"]
-corpus = ["pdfplumber", "pypdf"]
+corpus = ["pdfplumber", "pillow", "pypdf"]
 futures = ["openctp-ctp", "tqsdk"]
 hk = ["futu-api"]
 monitor = ["playwright"]
@@ -6581,4 +6581,4 @@ usmart = ["pycryptodome"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.10,<3.14"
-content-hash = "6cd388b4762d6385db5e42fbd981245ec037439f03eceb0f792e6446252b21da"
+content-hash = "9c5384cf9696121e4481ad74fe60811831f049af5b3c5a73bcbe6553dce3772e"
