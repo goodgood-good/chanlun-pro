@@ -1,15 +1,13 @@
-"""Non-A-share, read-only Chanlun clues for global watchlist groups.
+"""为全市场关注分组提供只读的缠论结构线索。
 
-The sector-first decision service is deliberately A-share specific.  This
-service is a separate auxiliary observation lane for the remaining markets.
-A-share holdings stay exclusively in ``TradingScreeningService`` and its
-``HumanAssistedDecisionCore``.  It never reads an account and never owns an
-order transport.
+板块先行决策服务专用于 A 股；本服务为其余市场提供独立的辅助观察通道。A 股持仓
+仍只进入 ``TradingScreeningService`` 及其 ``HumanAssistedDecisionCore``。
+本服务不会读取账户，也不具备订单通道。
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -25,11 +23,12 @@ from apscheduler.triggers.interval import IntervalTrigger
 from chanlun import fun
 from chanlun.exchange import get_exchange, market_now_trading
 from chanlun.market import Market
-from chanlun.recursive_bt.monitor.live_monitor import (
-    MonitorSymbolState,
-    collect_monitor_events,
-    fresh_monitor_events,
+from chanlun.decision_support.trading_system.strict_realtime_monitor import (
+    StrictPhysicalMonitorState,
+    collect_strict_monitor_events,
 )
+
+from .job_names import JOB_DISPLAY_NAMES
 
 
 CN = ZoneInfo("Asia/Shanghai")
@@ -60,6 +59,28 @@ _POINT_LABELS = {
     "类1buy": "类一买",
     "类1sell": "类一卖",
 }
+
+
+def fresh_monitor_events(events: Iterable[object], deduper: object) -> list[object]:
+    """Return unseen events after stable in-batch identity de-duplication.
+
+    This tiny ownership-neutral operation used to be imported from the legacy
+    recursive monitor, which made the active app runtime depend on an inactive
+    signal authority.  The durable deduper remains the sole persistence gate.
+    """
+
+    unique: list[object] = []
+    identities: set[str] = set()
+    for event in events:
+        identity = str(getattr(event, "identity"))
+        if identity in identities:
+            continue
+        identities.add(identity)
+        unique.append(event)
+    unseen = getattr(deduper, "unseen", None)
+    if not callable(unseen):
+        raise TypeError("monitor event deduper must provide unseen(events)")
+    return list(unseen(unique))
 _DIRECTION_LABELS = {
     "up": "向上",
     "down": "向下",
@@ -387,6 +408,7 @@ class HoldingMonitorRuntimeLedger:
             lines = raw.get("lines")
             identities = raw.get("identities")
             codes = raw.get("codes")
+            charts = raw.get("charts", [])
             transition_codes = raw.get("transition_codes", [])
             if not (
                 isinstance(title, str)
@@ -397,6 +419,8 @@ class HoldingMonitorRuntimeLedger:
                 and all(isinstance(value, str) for value in identities)
                 and isinstance(codes, list)
                 and all(isinstance(value, str) for value in codes)
+                and isinstance(charts, list)
+                and all(isinstance(value, Mapping) for value in charts)
                 and isinstance(transition_codes, list)
                 and all(isinstance(value, str) for value in transition_codes)
             ):
@@ -406,6 +430,7 @@ class HoldingMonitorRuntimeLedger:
                 "lines": list(lines),
                 "identities": list(identities),
                 "codes": list(codes),
+                "charts": [dict(value) for value in charts],
                 "transition_codes": list(transition_codes),
                 "event_count": len(identities),
             }
@@ -423,6 +448,11 @@ class HoldingMonitorRuntimeLedger:
                     str(value) for value in payload["identities"]
                 ],
                 "codes": [str(value) for value in payload["codes"]],
+                "charts": [
+                    dict(value)
+                    for value in payload.get("charts", [])
+                    if isinstance(value, Mapping)
+                ],
                 "transition_codes": [
                     str(value) for value in payload.get("transition_codes", [])
                 ],
@@ -453,9 +483,10 @@ class HoldingMonitorRuntimeLedger:
                 raw_identities = raw.get("identities", [])
                 raw_lines = raw.get("lines", [])
                 raw_codes = raw.get("codes", [])
+                raw_charts = raw.get("charts", [])
                 if not all(
                     isinstance(value, list)
-                    for value in (raw_identities, raw_lines, raw_codes)
+                    for value in (raw_identities, raw_lines, raw_codes, raw_charts)
                 ):
                     pending_notifications.pop(market, None)
                     changed = True
@@ -463,6 +494,7 @@ class HoldingMonitorRuntimeLedger:
                 identities = list(raw_identities)
                 lines = list(raw_lines)
                 codes = list(raw_codes)
+                charts = list(raw_charts)
                 keep = [
                     index
                     for index, code in enumerate(codes)
@@ -484,6 +516,12 @@ class HoldingMonitorRuntimeLedger:
                             str(identities[index]) for index in keep
                         ],
                         "codes": retained_codes,
+                        "charts": [
+                            dict(charts[index])
+                            for index in keep
+                            if index < len(charts)
+                            and isinstance(charts[index], Mapping)
+                        ],
                         "transition_codes": [
                             code
                             for code in retained_codes
@@ -746,8 +784,8 @@ class HoldingGroupMonitorService:
         market_open_provider: Callable[[object, str, datetime], bool] = (
             _default_market_open
         ),
-        state_factory: Callable[..., object] = MonitorSymbolState,
-        event_collector: Callable[..., list] = collect_monitor_events,
+        state_factory: Callable[..., object] = StrictPhysicalMonitorState,
+        event_collector: Callable[..., list] = collect_strict_monitor_events,
         deduper_factory: Callable[[Path], object] = BoundedEventDeduper,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
@@ -782,14 +820,26 @@ class HoldingGroupMonitorService:
         self._last_result: dict[str, object] | None = None
         self._log = fun.get_logger()
 
-    def _deliver(self, title: str, lines: list[str], *, event_count: int) -> bool:
+    def _deliver(
+        self,
+        title: str,
+        lines: list[str],
+        *,
+        event_count: int,
+        charts: Sequence[Mapping[str, object]] = (),
+    ) -> bool:
         if self._notifier is None or not bool(
             getattr(self._notifier, "available", True)
         ):
             self._runtime_ledger.record_failure("NOTIFIER_UNAVAILABLE")
             return False
         try:
-            delivered = bool(self._notifier.send(title, lines))
+            send_rich = getattr(self._notifier, "send_rich", None)
+            delivered = bool(
+                send_rich(title, lines, {"charts": list(charts)})
+                if callable(send_rich) and charts
+                else self._notifier.send(title, lines)
+            )
         except Exception as exc:
             self._runtime_ledger.record_failure(
                 f"{type(exc).__name__}: {str(exc)[:120]}"
@@ -814,6 +864,19 @@ class HoldingGroupMonitorService:
             "lines": [_notification_line(event) for event in events],
             "identities": [str(getattr(event, "identity")) for event in events],
             "codes": [str(getattr(event, "code", "")) for event in events],
+            "charts": [
+                {
+                    "market": market,
+                    "code": str(getattr(event, "code", "")),
+                    "name": str(
+                        getattr(event, "name", "")
+                        or getattr(event, "code", "")
+                    ),
+                    "artifact_key": str(getattr(event, "identity")),
+                    "observed_at": str(getattr(event, "signal_time", "")),
+                }
+                for event in events
+            ],
             "transition_codes": [
                 str(getattr(event, "code", ""))
                 for event in events
@@ -833,15 +896,19 @@ class HoldingGroupMonitorService:
         transitions = [
             str(value) for value in pending.get("transition_codes", [])
         ]
+        charts = [
+            dict(value)
+            for value in pending.get("charts", [])
+            if isinstance(value, Mapping)
+        ]
         seen = set(identities)
         extra_identities = list(additional.get("identities", []))
         extra_lines = list(additional.get("lines", []))
         extra_codes = list(additional.get("codes", []))
+        extra_charts = list(additional.get("charts", []))
         extra_transitions = set(additional.get("transition_codes", []))
-        for identity, line, code in zip(
-            extra_identities,
-            extra_lines,
-            extra_codes,
+        for index, (identity, line, code) in enumerate(
+            zip(extra_identities, extra_lines, extra_codes)
         ):
             identity = str(identity)
             if not identity or identity in seen:
@@ -852,11 +919,14 @@ class HoldingGroupMonitorService:
             codes.append(str(code))
             if code in extra_transitions:
                 transitions.append(str(code))
+            if index < len(extra_charts) and isinstance(extra_charts[index], Mapping):
+                charts.append(dict(extra_charts[index]))
         return {
             "title": str(pending.get("title") or additional["title"]),
             "lines": lines,
             "identities": identities,
             "codes": codes,
+            "charts": charts,
             "transition_codes": list(dict.fromkeys(transitions)),
             "event_count": len(identities),
         }
@@ -1157,7 +1227,10 @@ class HoldingGroupMonitorService:
         ]
         current_directions: dict[str, str] = {}
         for code, state in states.items():
-            if code in failed_codes:
+            # A partial warmup is not authoritative.  Persisting its high-level
+            # direction would make the first fully valid down-transition look
+            # old and suppress the corresponding holding exit notification.
+            if code in failed_codes or code in warming_codes:
                 continue
             try:
                 direction = str(state.big_dir() or "neutral")
@@ -1165,7 +1238,7 @@ class HoldingGroupMonitorService:
                 direction = "neutral"
             current_directions[code] = direction
 
-        # ``collect_monitor_events`` emits a big-down exit on every completed
+        # The strict collector emits a big-down exit on every completed
         # 30m bar while the direction remains down.  A holding alert must model
         # the state transition, not repeatedly announce the same state.  The
         # previous direction is durable, so an app restart does not re-alert an
@@ -1188,7 +1261,7 @@ class HoldingGroupMonitorService:
         failed_transition_codes: set[str] = set()
 
         # Retry the durable outbox before considering newly observed events.
-        # ``MonitorSymbolState`` may emit a structure point only once, so an
+        # ``StrictPhysicalMonitorState`` emits a structure point only once, so an
         # HTTP failure cannot be recovered by hoping the collector repeats it.
         pending = self._runtime_ledger.pending_notification(market)
         if pending is not None:
@@ -1196,6 +1269,7 @@ class HoldingGroupMonitorService:
                 str(pending["title"]),
                 list(pending["lines"]),
                 event_count=int(pending["event_count"]),
+                charts=tuple(pending.get("charts", ())),
             )
             if delivered:
                 deduper.mark_identities(pending["identities"])
@@ -1229,6 +1303,7 @@ class HoldingGroupMonitorService:
                 str(payload["title"]),
                 list(payload["lines"]),
                 event_count=int(payload["event_count"]),
+                charts=tuple(payload.get("charts", ())),
             )
             if delivered:
                 deduper.mark(fresh)
@@ -1457,7 +1532,7 @@ class HoldingGroupMonitorService:
                     seconds=max(30, self._config.interval_seconds)
                 ),
                 id=JOB_ID,
-                name="holding-group-cross-market-realtime-monitor",
+                name=JOB_DISPLAY_NAMES[JOB_ID],
                 max_instances=1,
                 coalesce=True,
                 replace_existing=True,
@@ -1469,7 +1544,7 @@ class HoldingGroupMonitorService:
             return JOB_ID
 
     def request_refresh(self) -> bool:
-        """Coalesce a membership edit into an immediate scheduler run."""
+        """把一次分组成员变更合并为一次立即执行的调度请求。"""
 
         with self._lock:
             scheduler = self._scheduler

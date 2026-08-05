@@ -15,7 +15,7 @@ from typing import Dict, Union
 from chanlun.core.types.config import Config
 
 
-STRICT_BASE_PROFILE_ID = "chanlun-source-faithful-base-v1"
+STRICT_BASE_PROFILE_ID = "chanlun-source-faithful-base-v2"
 
 
 _STRICT_BASE_CONFIG: Dict[str, Union[str, int, bool]] = {
@@ -41,6 +41,11 @@ _STRICT_BASE_CONFIG: Dict[str, Union[str, int, bool]] = {
     "xd_bi_pohuai": Config.XD_BI_POHUAI_NO.value,
     "xd_rule": "feature-sequence-v1",
     "xd_gap_rule": "second-feature-sequence-fractal-v1",
+    # L017/L020 and V3 §5.4: the first three consecutive lower-level
+    # components establish a closed [ZD, ZG] center.  Departure and first
+    # return are later lifecycle evidence, never extra seed roles.
+    "center_seed_rule": "first-three-components-closed-overlap-v1",
+    "center_lifecycle_rule": "departure-first-return-v1",
     # The strength measure is fixed too; it is evidence, never a definition
     # switch for K/fractal/stroke/segment structure.
     "idx_macd_fast": 12,

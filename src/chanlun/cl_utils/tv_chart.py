@@ -271,9 +271,8 @@ def _display_segment_price_quantum(lines):
     return Decimal(1).scaleb(min(exponents))
 
 
-def _xd_five_role_center_payload(
+def _xd_original_center_payload(
     *,
-    entry_unit,
     core_units,
     body_units,
     leaving_unit,
@@ -285,39 +284,28 @@ def _xd_five_role_center_payload(
     state: str,
     done: bool,
     provisional: bool,
+    tower: str = "xd",
+    algorithm_revision: str = "chanlun-display-xd-original-three/v1",
 ) -> dict | None:
-    """Serialize one validated five-role XD center for the chart.
+    """Serialize one original-text first-three line center for the chart.
 
-    ``done`` means every segment needed by the same-level third-class point is
-    locked and the center is formal.  A live ``CenterPreview`` can already be
-    geometrically complete while its return segment is still unlocked.  Keep
-    those states separate so the page never collapses "three-sell geometry is
-    present" back into the misleading binary label "forming".
+    The first three completed segments are the complete frozen core.  A fourth
+    segment may leave it and the first opposite return outside completes a
+    third-class point.  There is deliberately no synthetic external entry role.
     """
-    expected_core = (
-        ("down", "up", "down")
-        if entry_unit.direction == "up"
-        else ("up", "down", "up")
-    )
-    if (
-        tuple(unit.direction for unit in core_units) != expected_core
-        or leaving_unit.direction != entry_unit.direction
-    ):
+    if len(core_units) != 3:
         return None
 
-    entry_line = unit_lines[entry_unit.unit_id]
-    leaving_line = unit_lines[leaving_unit.unit_id]
+    leaving_line = (
+        None if leaving_unit is None else unit_lines[leaving_unit.unit_id]
+    )
     completion_return_line = (
         None
         if completion_return_unit is None
         else unit_lines[completion_return_unit.unit_id]
     )
     geometry_completed = state == "completed"
-    leaves_core = (
-        leaving_unit.end_tick > min(unit.high_tick for unit in core_units)
-        if leaving_unit.direction == "up"
-        else leaving_unit.end_tick < max(unit.low_tick for unit in core_units)
-    )
+    leaves_core = leaving_unit is not None
     if geometry_completed:
         completion_phase = (
             "FORMAL_THIRD_CLASS_POINT"
@@ -343,8 +331,17 @@ def _xd_five_role_center_payload(
         associated_points = []
         completion_point_observed = False
     expected_completion_point_type = (
-        "3buy" if leaving_unit.direction == "up" else "3sell"
+        None
+        if leaving_unit is None
+        else "3buy" if leaving_unit.direction == "up" else "3sell"
     )
+    end_time = (
+        body_units[-1].market_end
+        if leaving_unit is None
+        else leaving_unit.market_start
+    )
+    core_directions = [unit.direction for unit in core_units]
+    first_three_ids = [unit.unit_id for unit in core_units]
     return {
         "points": [
             {
@@ -352,7 +349,7 @@ def _xd_five_role_center_payload(
                 "price": float(quantum * min(unit.high_tick for unit in core_units)),
             },
             {
-                "time": fun.datetime_to_int(leaving_unit.market_start),
+                "time": fun.datetime_to_int(end_time),
                 "price": float(quantum * max(unit.low_tick for unit in core_units)),
             },
         ],
@@ -361,22 +358,29 @@ def _xd_five_role_center_payload(
         # the return segment locks, so visual completion cannot authorize a
         # trade.
         "linestyle": "0" if (done or geometry_completed) else "1",
-        "type": entry_unit.direction,
-        "tower": "xd",
+        "type": "zd" if leaving_unit is None else leaving_unit.direction,
+        "tower": tower,
         "zd": float(quantum * max(unit.low_tick for unit in core_units)),
         "zg": float(quantum * min(unit.high_tick for unit in core_units)),
         "done": done,
         "state": state,
         "line_count": len(body_units),
         "core_line_count": 3,
-        "core_directions": list(expected_core),
-        "entering_segment": _line_to_chart_metadata(entry_line),
+        "core_directions": core_directions,
+        "first_three_component_ids": first_three_ids,
+        "first_three_components": [
+            _line_to_chart_metadata(unit_lines[unit.unit_id])
+            for unit in core_units
+        ],
+        # Compatibility field retained explicitly as null.  The first core
+        # component must never again be mislabeled as an external entry leg.
+        "entering_segment": None,
         "leaving_segment": _line_to_chart_metadata(leaving_line),
         # A third-class point belongs to the first return, not to the leaving
         # segment.  Reading ``leaving_line.line_mmds`` mixed center ownership
         # and made a lower-level point look as if it completed this center.
         "associated_points": associated_points,
-        "confirmation_scope": "xd",
+        "confirmation_scope": tower,
         "completion_phase": completion_phase,
         "completion_point_type": completion_point_type,
         "expected_completion_point_type": expected_completion_point_type,
@@ -396,9 +400,11 @@ def _xd_five_role_center_payload(
             not unit.locked for unit in evidence_units
         ),
         "render_kind": "center_preview" if provisional else "formal_center",
-        "tradable": not provisional,
+        # Stroke-built centers are an observation layer.  Only segment-built
+        # level-zero centers can be consumed as formal structure evidence.
+        "tradable": bool(tower == "xd" and done and not provisional),
         "suppressed_overlapping_candidate_count": 0,
-        "algorithm_revision": "chanlun-display-xd-five-role/v5",
+        "algorithm_revision": algorithm_revision,
     }
 
 
@@ -491,29 +497,31 @@ def _collapse_overlapping_xd_center_candidates(payloads: list[dict]) -> list[dic
     return retained
 
 
-def xd_segment_centers_to_chart_dicts(lines) -> list[dict]:
-    """Build display centers from five explicit roles in the shown XD sequence.
+def _original_line_centers_to_chart_dicts(
+    lines,
+    *,
+    source_kind,
+    tower: str,
+    price_basis_revision: str,
+    algorithm_revision: str,
+) -> list[dict]:
+    """Build one line-center overlay through the canonical state machine.
 
-    Each center consumes the exact segment stream used by the page.  U1 is the
-    entering segment, U2-U4 are the fixed three-segment core, and only a
-    same-direction fifth segment serves as U5/the leaving leg.  Whether that
-    leg has completed a true departure remains explicit in the center state.
-    The live final segment participates through a provisional center preview;
-    it is rendered as forming evidence until that segment becomes locked.
-    The rectangle therefore spans U2.start -> leave.start;
-    neither the entering nor leaving segment is folded into its horizontal body.
+    The first three segment components establish the frozen core.  Later
+    segments extend, leave, or provide the first return.  Locked and provisional
+    evidence share this one state machine, so page geometry cannot drift from
+    recursive screening and third-class-point timing.
     """
     from chanlun.core.strict_structure.center_machine import calculate_centers
     from chanlun.core.strict_structure.identity import stable_structure_id
     from chanlun.core.strict_structure.models import (
         CenterPreviewState,
         CenterState,
-        SourceKind,
     )
     from chanlun.core.strict_structure.unit_adapter import UnitLockRegistry, adapt_lines
 
     line_values = tuple(lines or ())
-    if len(line_values) < 5:
+    if len(line_values) < 3:
         return []
 
     evidence_times = []
@@ -532,10 +540,10 @@ def xd_segment_centers_to_chart_dicts(lines) -> list[dict]:
     units = adapt_lines(
         line_values,
         structural_level=0,
-        source_kind=SourceKind.SEGMENT,
+        source_kind=source_kind,
         price_quantum=quantum,
         as_of=max(evidence_times),
-        registry=UnitLockRegistry("chanlun-display-xd-five-role/v5"),
+        registry=UnitLockRegistry(price_basis_revision),
     )
     unit_lines = {
         unit.unit_id: line
@@ -544,7 +552,7 @@ def xd_segment_centers_to_chart_dicts(lines) -> list[dict]:
     center_result = calculate_centers(
         units,
         structural_level=0,
-        source_kind=SourceKind.SEGMENT,
+        source_kind=source_kind,
     )
 
     preview_payloads = []
@@ -556,20 +564,21 @@ def xd_segment_centers_to_chart_dicts(lines) -> list[dict]:
                 CenterPreviewState.FORMING,
                 CenterPreviewState.COMPLETED,
             )
-            or len(preview.unit_ids) < 5
+            or len(preview.unit_ids) < 3
             or preview.zd_tick is None
             or preview.zg_tick is None
-            or preview.zd_tick >= preview.zg_tick
+            or preview.zd_tick > preview.zg_tick
         ):
             continue
         body_units = tuple(units_by_id[unit_id] for unit_id in preview.unit_ids)
-        initial_units = body_units[:5]
-        entry_unit = initial_units[0]
-        core_units = initial_units[1:4]
-        leaving_unit = next(
-            unit
-            for unit in reversed(body_units)
-            if unit.direction == entry_unit.direction
+        initial_units = body_units[:3]
+        core_units = initial_units
+        leaving_unit = (
+            body_units[-1]
+            if preview.state is CenterPreviewState.COMPLETED
+            else None
+            if preview.pending_leave_unit_id is None
+            else units_by_id[preview.pending_leave_unit_id]
         )
         completion_return = (
             None
@@ -577,7 +586,7 @@ def xd_segment_centers_to_chart_dicts(lines) -> list[dict]:
             else units_by_id[preview.completion_return_unit_id]
         )
         center_id = stable_structure_id(
-            "chanlun-center/v3",
+            "chanlun-center/v4",
             preview.price_basis_revision,
             preview.structural_level,
             preview.source_kind.value,
@@ -585,8 +594,7 @@ def xd_segment_centers_to_chart_dicts(lines) -> list[dict]:
             preview.zd_tick,
             preview.zg_tick,
         )
-        payload = _xd_five_role_center_payload(
-            entry_unit=entry_unit,
+        payload = _xd_original_center_payload(
             core_units=core_units,
             body_units=body_units,
             leaving_unit=leaving_unit,
@@ -603,6 +611,8 @@ def xd_segment_centers_to_chart_dicts(lines) -> list[dict]:
             # 未完成线段参与几何识别，但在线段锁定前不能冒充正式完成中枢。
             done=False,
             provisional=True,
+            tower=tower,
+            algorithm_revision=algorithm_revision,
         )
         if payload is None:
             continue
@@ -619,13 +629,7 @@ def xd_segment_centers_to_chart_dicts(lines) -> list[dict]:
         leaving_unit = (
             center.completion_leave_unit
             or center.pending_leave_unit
-            or next(
-                unit
-                for unit in reversed(center.body_units)
-                if unit.direction == center.entry_unit.direction
-            )
         )
-        entry_unit = center.entry_unit
         core_units = tuple(center.core_units)
         done = center.state is CenterState.COMPLETED
         evidence_units = center.body_units + (
@@ -633,8 +637,7 @@ def xd_segment_centers_to_chart_dicts(lines) -> list[dict]:
             if center.completion_return_unit is None
             else (center.completion_return_unit,)
         )
-        payload = _xd_five_role_center_payload(
-            entry_unit=entry_unit,
+        payload = _xd_original_center_payload(
             core_units=core_units,
             body_units=center.body_units,
             leaving_unit=leaving_unit,
@@ -646,11 +649,48 @@ def xd_segment_centers_to_chart_dicts(lines) -> list[dict]:
             state=center.state.value,
             done=done,
             provisional=False,
+            tower=tower,
+            algorithm_revision=algorithm_revision,
         )
         if payload is not None:
             payloads.append(payload)
     payloads.extend(preview_payloads)
     return _collapse_overlapping_xd_center_candidates(payloads)
+
+
+def xd_segment_centers_to_chart_dicts(lines) -> list[dict]:
+    """Build current-period segment centers through the original-text machine."""
+
+    from chanlun.core.strict_structure.models import SourceKind
+
+    return _original_line_centers_to_chart_dicts(
+        lines,
+        source_kind=SourceKind.SEGMENT,
+        tower="xd",
+        price_basis_revision="chanlun-display-xd-original-three/v1",
+        algorithm_revision="chanlun-display-xd-original-three/v1",
+    )
+
+
+def bi_stroke_centers_to_chart_dicts(lines) -> list[dict]:
+    """Build non-tradable pen-center observations with the same lifecycle.
+
+    The former page path serialized ``CL.get_bi_zss()``, whose legacy
+    five-role lifecycle could show two unfinished centers or keep a center
+    unfinished after its first outside return.  Pens remain the exact pens
+    displayed by the page, but center geometry now uses the same first-three
+    core, departure and first-return state machine as segment centers.
+    """
+
+    from chanlun.core.strict_structure.models import SourceKind
+
+    return _original_line_centers_to_chart_dicts(
+        lines,
+        source_kind=SourceKind.STROKE_OBSERVATION,
+        tower="bi",
+        price_basis_revision="chanlun-display-bi-original-three/v1",
+        algorithm_revision="chanlun-display-bi-original-three/v1",
+    )
 
 
 def zs_to_chart_dict(
@@ -775,10 +815,21 @@ def cl_data_to_tv_chart(
     def _enabled(name: str) -> bool:
         return config.get(name) in ("1", 1, True)
 
+    structure_cd = cd
+    if (
+        strict_runtime is not None
+        and strict_runtime.error_code is None
+        and strict_runtime.cd is not None
+    ):
+        # Lines, centers, trends and points must describe one structure graph.
+        # The base ``cd`` may reflect a user's historical chart switches;
+        # production decision evidence is fixed to the V3 old-pen profile.
+        structure_cd = strict_runtime.cd
+
     fx_data = []
     if _enabled("chart_show_fx"):
         valid_fxs = {}
-        for bi in cd.get_bis():
+        for bi in structure_cd.get_bis():
             for fx in (bi.start, bi.end):
                 if fx is not None:
                     valid_fxs[fun.datetime_to_int(fx.k.date)] = fx
@@ -809,7 +860,7 @@ def cl_data_to_tv_chart(
                 ],
                 "linestyle": "0" if bi.is_done() else "1",
             }
-            for bi in cd.get_bis()
+            for bi in structure_cd.get_bis()
         ]
         bi_chart_data.sort(key=lambda value: value["points"][0]["time"])
 
@@ -831,7 +882,7 @@ def cl_data_to_tv_chart(
                     "1" if getattr(xd, "forming", False) else "0"
                 ),
             }
-            for xd in cd.get_xds()
+            for xd in structure_cd.get_xds()
         ]
         xd_chart_data.sort(key=lambda value: value["points"][0]["time"])
 
@@ -876,10 +927,10 @@ def cl_data_to_tv_chart(
         # 老笔时，这里也只能消费老笔形成的中枢，不能换成严格运行时的新笔证据。
         # 中枢是否显示由前端独立控制。这里始终传输当前周期的笔中枢，
         # 避免历史 chart_show_bi_zs 配置把新菜单默认开启的“笔中枢”变成空数据。
-        "bi_zss": [zs_to_chart_dict(zs) for zs in cd.get_bi_zss()],
-        # 当前周期中枢控制直接消费页面正在显示的老笔线段，并按五段角色重建：
-        # 进入段 + 下上下/上下上三段主体 + 真正离开段。它与递归结构完全解耦。
-        "xd_zss": xd_segment_centers_to_chart_dicts(cd.get_xds()),
+        "bi_zss": bi_stroke_centers_to_chart_dicts(structure_cd.get_bis()),
+        # 当前周期中枢控制直接消费页面正在显示的老笔线段，并通过与严格
+        # 递归相同的原文首三段状态机重建；不再信任旧中枢对象的五段角色。
+        "xd_zss": xd_segment_centers_to_chart_dicts(structure_cd.get_xds()),
     }
 
     if strict_runtime is not None and strict_runtime.error_code is not None:
@@ -889,7 +940,7 @@ def cl_data_to_tv_chart(
         }
         return result
 
-    strict_cd = cd if strict_runtime is None else strict_runtime.cd
+    strict_cd = structure_cd if strict_runtime is None else strict_runtime.cd
     error_code = "strict_evidence_invalid"
     try:
         if strict_cd is None:

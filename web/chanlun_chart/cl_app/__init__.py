@@ -28,7 +28,17 @@ from apscheduler.events import (
     EVENT_JOBSTORE_REMOVED,
 )
 from apscheduler.schedulers.background import BackgroundScheduler
-from flask import Flask, abort, g, has_request_context, redirect, render_template, request, session
+from flask import (
+    Flask,
+    abort,
+    g,
+    has_request_context,
+    redirect,
+    render_template,
+    request,
+    send_file,
+    session,
+)
 from flask_login import LoginManager, UserMixin, login_required, login_user, logout_user
 from flask_wtf.csrf import CSRFError, generate_csrf
 from chanlun import config, fun
@@ -48,6 +58,7 @@ from chanlun.decision_support.trading_system.decision_source_provenance import (
     calculate_forward_application_source_revision,
     is_content_addressed_application_source_revision,
 )
+from .services.job_names import job_display_name
 __all__ = ["create_app"]
 
 
@@ -97,7 +108,14 @@ def _scheduler_task_snapshot(scheduler):
     else:
         with lock:
             task_map = dict(scheduler.my_task_list)
-    return [dict(task) for task in task_map.values()]
+    snapshot = []
+    for task in task_map.values():
+        row = dict(task)
+        # 任务编号属于稳定协议；名称只负责面向用户展示。按编号重新映射可以
+        # 同时覆盖升级前已经写入任务注册表的旧英文名称。
+        row["name"] = job_display_name(row.get("id"), row.get("name"))
+        snapshot.append(row)
+    return snapshot
 
 
 def create_app(test_config=None, start_scheduler=False):
@@ -131,6 +149,24 @@ def create_app(test_config=None, start_scheduler=False):
         MAX_FORM_PARTS=500,
         WTF_CSRF_TIME_LIMIT=12 * 60 * 60,
         READINESS_MARKETS=os.environ.get("CHANLUN_READINESS_MARKETS", "a"),
+        # The historical alert surfaces use MACD divergence and legacy
+        # bi/segment MMD rules.  They are not the strict first/second/third
+        # class point authority used by the chart, screening, holdings monitor
+        # and replay.  Keep them available only as an explicit compatibility
+        # opt-in so one running app cannot publish two conflicting meanings of
+        # "buy/sell signal".
+        LEGACY_ALERT_TASKS_ENABLED=(
+            os.environ.get("CHANLUN_LEGACY_ALERT_TASKS_ENABLED", "0")
+            .strip()
+            .lower()
+            in {"1", "true", "yes", "on"}
+        ),
+        LEGACY_SIGNAL_MONITOR_ENABLED=(
+            os.environ.get("CHANLUN_LEGACY_SIGNAL_MONITOR_ENABLED", "0")
+            .strip()
+            .lower()
+            in {"1", "true", "yes", "on"}
+        ),
         TRADING_SCREENING_BACKGROUND_ENABLED=True,
         TRADING_SCREENING_PRIORITY_MONITOR_ENABLED=True,
         TRADING_SCREENING_PRIORITY_MONITOR_MAX_SYMBOLS=int(
@@ -159,6 +195,23 @@ def create_app(test_config=None, start_scheduler=False):
                 "CHANLUN_HOLDING_GROUP_MONITOR_WORKERS",
                 str(max(2, min(8, (os.cpu_count() or 4) // 2))),
             )
+        ),
+        ALERT_CHART_PUBLIC_BASE_URL=str(
+            os.environ.get("CHANLUN_ALERT_CHART_PUBLIC_BASE_URL")
+            or getattr(config, "ALERT_CHART_PUBLIC_BASE_URL", "")
+            or ""
+        ).strip().rstrip("/"),
+        ALERT_CHART_TTL_SECONDS=int(
+            os.environ.get("CHANLUN_ALERT_CHART_TTL_SECONDS", str(30 * 24 * 60 * 60))
+        ),
+        ALERT_CHART_CAPTURE_BASE_URL=str(
+            os.environ.get(
+                "CHANLUN_ALERT_CHART_CAPTURE_BASE_URL",
+                "http://127.0.0.1:9900",
+            )
+        ).strip().rstrip("/"),
+        ALERT_CHART_ROOT=(
+            config.get_data_path() / "monitor" / "dingtalk_chart_images"
         ),
         TRADING_SCREENING_TOTAL_SYMBOLS_PER_REFRESH=int(
             os.environ.get(
@@ -437,7 +490,10 @@ def create_app(test_config=None, start_scheduler=False):
 
     from .alert_tasks import AlertTasks
     from .xuangu_tasks import XuanguTasks
-    _alert_tasks = AlertTasks(scheduler)
+    _alert_tasks = AlertTasks(
+        scheduler,
+        enabled=bool(app.config.get("LEGACY_ALERT_TASKS_ENABLED", False)),
+    )
     _xuangu_tasks = XuanguTasks(scheduler)
     _recursive_monitors = []
     holding_group_monitor = None
@@ -1484,6 +1540,15 @@ def create_app(test_config=None, start_scheduler=False):
                 # screening worker can consume its local runtime.
                 app_qmt_runtime.startup()
                 _ensure_start_is_current()
+            native_gateway_startup = getattr(trading_gateway, "startup", None)
+            if callable(native_gateway_startup):
+                # A restored coverage snapshot may make every scan currently
+                # not due.  Without an explicit, request-free handshake the
+                # lazy native process then remains stopped forever and
+                # /readyz incorrectly reports the otherwise healthy app as
+                # unavailable until the next market event happens to wake it.
+                native_gateway_startup()
+                _ensure_start_is_current()
             constants_service.start_market_metadata_loaders()
             _ensure_start_is_current()
             chart_cache_service.start_chart_cache_runtime()
@@ -1516,10 +1581,15 @@ def create_app(test_config=None, start_scheduler=False):
                 _ensure_start_is_current()
 
             if enable_scheduler:
-                _alert_tasks.run()
+                if app.config.get("LEGACY_ALERT_TASKS_ENABLED", False):
+                    _alert_tasks.run()
 
-                from chanlun.signal_monitor.scheduler import register_signal_jobs
-                register_signal_jobs(scheduler)
+                if app.config.get("LEGACY_SIGNAL_MONITOR_ENABLED", False):
+                    from chanlun.signal_monitor.scheduler import (
+                        register_signal_jobs,
+                    )
+
+                    register_signal_jobs(scheduler)
 
                 if holding_group_monitor is not None:
                     holding_group_monitor.register_job(scheduler)
@@ -1939,11 +2009,89 @@ def create_app(test_config=None, start_scheduler=False):
         if type(dry_run_value) is bool
         else str(dry_run_value).strip().lower() in {"1", "true", "yes", "on"}
     )
+    alert_chart_image_service = None
+    alert_chart_public_base_url = str(
+        app.config.get("ALERT_CHART_PUBLIC_BASE_URL") or ""
+    ).strip()
+    if alert_chart_public_base_url:
+        from .services.alert_chart_images import (
+            AlertChartImageService,
+            SignedAlertChartStore,
+        )
+        from .services.tradingview_chart_capture import (
+            TradingViewClientScreenshotRenderer,
+        )
+
+        signing_secret = hmac.new(
+            app.secret_key
+            if isinstance(app.secret_key, bytes)
+            else str(app.secret_key).encode("utf-8"),
+            b"chanlun-alert-chart-public-route/v1",
+            hashlib.sha256,
+        ).digest()
+        alert_chart_store = SignedAlertChartStore(
+            root=pathlib.Path(app.config["ALERT_CHART_ROOT"]),
+            public_base_url=alert_chart_public_base_url,
+            secret=signing_secret,
+            ttl_seconds=int(app.config["ALERT_CHART_TTL_SECONDS"]),
+        )
+
+        def _alert_capture_session_cookie() -> str:
+            serializer = app.session_interface.get_signing_serializer(app)
+            if serializer is None:
+                raise RuntimeError("alert capture session signer is unavailable")
+            return serializer.dumps(
+                {
+                    "_user_id": _current_login_user_id(),
+                    "_fresh": True,
+                }
+            )
+
+        tradingview_capture = TradingViewClientScreenshotRenderer(
+            base_url=str(app.config["ALERT_CHART_CAPTURE_BASE_URL"]),
+            session_cookie_provider=_alert_capture_session_cookie,
+        )
+        alert_chart_image_service = AlertChartImageService(
+            alert_chart_store,
+            browser_renderer=tradingview_capture,
+        )
+        app.extensions["alert_chart_image_store"] = alert_chart_store
+        app.extensions["alert_chart_image_service"] = alert_chart_image_service
+
+        @app.get("/public/alert-chart/<artifact_id>.png")
+        def public_alert_chart(artifact_id: str):
+            image_path = alert_chart_store.resolve(
+                artifact_id,
+                expires=request.args.get("expires"),
+                signature=request.args.get("signature"),
+            )
+            if image_path is None:
+                abort(404)
+            response = send_file(
+                image_path,
+                mimetype="image/png",
+                as_attachment=False,
+                conditional=True,
+                max_age=3600,
+            )
+            response.headers["Cache-Control"] = "public, max-age=3600, immutable"
+            response.headers["X-Robots-Tag"] = "noindex, noarchive"
+            return response
+
     raw_trading_notifier = (
         DingTalkWebhookNotifier(
             webhook=trading_screening_dingtalk_webhook,
             keyword=trading_screening_dingtalk_keyword,
             dry_run=trading_screening_dry_run,
+            # One final app-wide transport gate covers strict A-share signals
+            # and the auxiliary cross-market monitor.  It persists only
+            # message hashes, never webhook credentials or message bodies.
+            dedupe_state_path=(
+                config.get_data_path()
+                / "monitor"
+                / "dingtalk_outbound_dedupe.json"
+            ),
+            rich_content_provider=alert_chart_image_service,
         )
         if trading_screening_dingtalk_webhook or trading_screening_dry_run
         else None

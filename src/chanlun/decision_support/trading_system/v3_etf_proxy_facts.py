@@ -1439,11 +1439,15 @@ def _old_pen_structure_state(
     symbol: str,
     frequency: str,
     decision_time: datetime,
+    structure_price_quantum: Decimal,
+    price_basis_revision: str,
 ):
     import pandas as pd
 
     from chanlun.core.cl import CL
-    from chanlun.core.types.config import Config
+    from chanlun.decision_support.trading_system.runtime_config import (
+        v3_recursive_cl_config,
+    )
 
     decision = normalize_datetime(decision_time, "decision_time")
     visible = tuple(
@@ -1452,19 +1456,10 @@ def _old_pen_structure_state(
     ends = tuple(bar.end_at for bar in visible)
     if ends != tuple(sorted(set(ends))):
         raise ValueError("frozen structure bars must be unique and chronological")
-    config = {
-        "kline_type": Config.KLINE_TYPE_CHANLUN.value,
-        "kline_qk": Config.KLINE_QK_NONE.value,
-        "fx_qy": Config.FX_QY_THREE.value,
-        "fx_qj": Config.FX_QJ_CK.value,
-        "fx_bh": Config.FX_BH_NO.value,
-        "bi_type": Config.BI_TYPE_OLD.value,
-        "bi_mode": "strict",
-        "bi_bzh": Config.BI_BZH_YES.value,
-        "bi_qj": Config.BI_QJ_DD.value,
-        "bi_fx_cgd": Config.BI_FX_CHD_NO.value,
-        "macd_ld_use_htf": False,
-    }
+    config = v3_recursive_cl_config(
+        structure_price_quantum=structure_price_quantum,
+        price_basis_revision=price_basis_revision,
+    )
     frame = pd.DataFrame(
         (
             {
@@ -1499,105 +1494,86 @@ def _fractal_times(fractal: object) -> tuple[datetime, datetime]:
     )
 
 
-def _center_identity(center: object, *, level_rank: int, frequency: str) -> str:
-    start = normalize_datetime(center.start.start.k.date, "center_start")
-    end = normalize_datetime(center.end.end.k.date, "center_end")
-    return _fingerprint(
-        {
-            "frequency": frequency,
-            "level_rank": level_rank,
-            "index": center.index,
-            "start": start,
-            "end": end,
-            "zd": center.zd,
-            "zg": center.zg,
-            "type": center.type,
-        }
-    )
-
-
 def _lower_risk_evidence(
     state: object,
     *,
     frequency: str,
     decision_time: datetime,
 ) -> tuple[RiskCenterPointEvidence, ...]:
+    """Map the unified strict structure snapshot into high-risk evidence.
+
+    The completed high-timeframe fractal still comes from ORIGINAL_OLD_PEN.
+    Its lower-timeframe center and point mapping, however, must use the same
+    strict recursive center/point authority as the chart, screening and replay.
+    Reading ``get_bi_zss/get_xd_zss/get_mmds`` here used to create a second,
+    materially different trading authority.
+    """
+
+    from chanlun.core.strict_structure.center_relation import (
+        classify_center_relation,
+    )
+    from chanlun.core.strict_structure.models import (
+        CenterRelation,
+        CenterState,
+    )
+
     decision = normalize_datetime(decision_time, "decision_time")
-    centers: dict[int, tuple[object, int, str]] = {}
-    signatures: dict[tuple[object, ...], tuple[object, int, str]] = {}
-    for rank, values in ((1, state.get_bi_zss()), (2, state.get_xd_zss())):
-        for center in values:
-            if (
-                center.start is None
-                or center.end is None
-                or center.start.start is None
-                or center.end.end is None
-                or center.zd is None
-                or center.zg is None
-            ):
-                continue
-            identity = _center_identity(center, level_rank=rank, frequency=frequency)
-            centers[id(center)] = (center, rank, identity)
-            signatures[
-                (
-                    center.index,
-                    center.zd,
-                    center.zg,
-                    normalize_datetime(center.start.start.k.date, "center_start"),
-                    normalize_datetime(center.end.end.k.date, "center_end"),
-                )
-            ] = (center, rank, identity)
+    getter = getattr(state, "get_strict_evidence", None)
+    if not callable(getter):
+        raise ValueError("lower risk state has no strict evidence authority")
+    evidence = getter()
+    if (
+        getattr(evidence, "source_frequency", None) != frequency
+        or normalize_datetime(
+            getattr(evidence, "source_closed_at", None),
+            "source_closed_at",
+        )
+        > decision
+    ):
+        raise ValueError("lower strict evidence context is inconsistent")
+
+    centers: dict[str, object] = {}
+    expanded_ids: set[str] = set()
+    for level in evidence.structure.levels:
+        level_centers = tuple(level.center_result.centers)
+        for center in level_centers:
+            previous = centers.setdefault(center.center_id, center)
+            if previous is not center:
+                raise ValueError("strict lower center ids are duplicated")
+        for previous, current in zip(level_centers, level_centers[1:]):
+            if classify_center_relation(previous, current) is CenterRelation.UPGRADE:
+                expanded_ids.update((previous.center_id, current.center_id))
 
     output: dict[tuple[str, str, datetime, datetime], RiskCenterPointEvidence] = {}
-    for line in (*state.get_bis(), *state.get_xds()):
-        if not line.is_done() or line.locked_at is None:
-            continue
-        available = normalize_datetime(line.locked_at, "line_locked_at")
+    for point in evidence.confirmed_points:
+        available = normalize_datetime(point.available_at, "point_available_at")
         if available > decision:
+            raise ValueError("lower strict evidence contains a future point")
+        if point.point_type not in {
+            "1sell",
+            "2sell",
+            "3sell",
+            "3buy",
+            "1buy",
+            "2buy",
+        }:
             continue
-        anchor = normalize_datetime(line.end.k.date, "line_end")
-        for point in line.get_mmds():
-            if point.name not in {
-                "1sell",
-                "2sell",
-                "3sell",
-                "3buy",
-                "1buy",
-                "2buy",
-            }:
-                continue
-            matched = centers.get(id(point.zs))
-            if matched is None:
-                if (
-                    point.zs.start is None
-                    or point.zs.end is None
-                    or point.zs.start.start is None
-                    or point.zs.end.end is None
-                    or point.zs.zd is None
-                    or point.zs.zg is None
-                ):
-                    continue
-                key = (
-                    point.zs.index,
-                    point.zs.zd,
-                    point.zs.zg,
-                    normalize_datetime(point.zs.start.start.k.date, "center_start"),
-                    normalize_datetime(point.zs.end.end.k.date, "center_end"),
-                )
-                matched = signatures.get(key)
-            if matched is None:
-                continue
-            center, rank, identity = matched
-            fact = RiskCenterPointEvidence(
-                center_id=identity,
-                center_level_rank=rank,
-                center_completed=bool(center.done and center.real),
-                center_expanded=bool(getattr(center, "expanded_with", ())),
-                point_type=point.name,
-                point_anchor_at=anchor,
-                point_available_at=available,
-            )
-            output[(identity, point.name, anchor, available)] = fact
+        if point.center_id is None:
+            raise ValueError("strict risk point has no center identity")
+        center = centers.get(point.center_id)
+        if center is None or center.structural_level != point.structural_level:
+            raise ValueError("strict risk point references an unavailable center")
+        anchor = normalize_datetime(point.anchor_at, "point_anchor_at")
+        fact = RiskCenterPointEvidence(
+            center_id=center.center_id,
+            center_level_rank=center.structural_level,
+            center_completed=center.state is CenterState.COMPLETED,
+            center_expanded=center.center_id in expanded_ids,
+            point_type=point.point_type,
+            point_anchor_at=anchor,
+            point_available_at=available,
+        )
+        output[(center.center_id, point.point_type, anchor, available)] = fact
     return tuple(
         sorted(
             output.values(),
@@ -1758,17 +1734,40 @@ def build_risk_structure_state_fact(
     decision_time: datetime,
     symbol: str,
     structure_lineage_sink: dict[str, object] | None = None,
+    structure_price_quantum: Decimal = Decimal("0.01"),
+    price_basis_revision: str | None = None,
 ) -> RiskStructureStateFacts:
-    """Build one V3 high-timeframe risk state from frozen old-pen outputs.
+    """Build one V3 high-timeframe risk state from one structure authority.
 
-    This is a current-prefix adapter, not an alternative structure engine.  It
-    asks the existing inclusion/fractal/old-pen/segment/center implementation
-    for objects and only performs the V3 mapping: the highest unique completed
-    lower center carrying a first/second sell inside the inclusive high
-    fractal interval.  Ambiguity becomes ``FORMED_UNRESOLVED``.
+    High-period fractals retain the frozen ORIGINAL_OLD_PEN definition.  Lower
+    centers and points come from the V3 strict recursive evidence endpoint used
+    by charting, screening and replay.  The adapter only performs the V3
+    mapping: the highest unique completed lower center carrying a first/second
+    sell inside the inclusive high-fractal interval.  Ambiguity becomes
+    ``FORMED_UNRESOLVED``.
     """
 
     decision = normalize_datetime(decision_time, "decision_time")
+    if (
+        not isinstance(structure_price_quantum, Decimal)
+        or not structure_price_quantum.is_finite()
+        or structure_price_quantum <= 0
+    ):
+        raise ValueError("structure_price_quantum must be a positive Decimal")
+    resolved_price_basis = price_basis_revision or _fingerprint(
+        {
+            "schema": "chanlun-v3-risk-frozen-price-basis/v1",
+            "symbol": symbol,
+            "mode": "CALLER_FROZEN_POINT_IN_TIME_PRICES",
+            "pen_definition": "ORIGINAL_OLD_PEN",
+        }
+    )
+    if (
+        not isinstance(resolved_price_basis, str)
+        or not resolved_price_basis.strip()
+        or resolved_price_basis != resolved_price_basis.strip()
+    ):
+        raise ValueError("price_basis_revision must be a non-empty string")
     source_revision = _fingerprint(
         {
             "period": period,
@@ -1776,6 +1775,9 @@ def build_risk_structure_state_fact(
             "lower_frequency": lower_frequency,
             "decision": decision,
             "pen_definition_mode": "ORIGINAL_OLD_PEN",
+            "center_point_authority": "STRICT_RECURSIVE_EVIDENCE",
+            "structure_price_quantum": str(structure_price_quantum),
+            "price_basis_revision": resolved_price_basis,
             "high": [
                 (bar.end_at, bar.open, bar.high, bar.low, bar.close, bar.volume)
                 for bar in high_bars
@@ -1793,6 +1795,8 @@ def build_risk_structure_state_fact(
         symbol=symbol,
         frequency=high_frequency,
         decision_time=decision,
+        structure_price_quantum=structure_price_quantum,
+        price_basis_revision=resolved_price_basis,
     )
     completed_tops: list[tuple[datetime, object, tuple[datetime, datetime]]] = []
     if high_state is not None:
@@ -1849,6 +1853,8 @@ def build_risk_structure_state_fact(
         symbol=symbol,
         frequency=lower_frequency,
         decision_time=decision,
+        structure_price_quantum=structure_price_quantum,
+        price_basis_revision=resolved_price_basis,
     )
     all_evidence = (
         ()

@@ -19,16 +19,24 @@ def test_five_locked_units_form_level_zero_with_v3_schema():
     )
 
 
-def test_recursion_requires_five_total_inputs_and_only_locked_trends_recurse():
-    result = StrictRecursiveEngine(max_levels=8).calculate(valid_five_up_exit()[:4])
-    assert result.levels == ()
+def test_recursion_requires_three_total_inputs_and_only_locked_trends_recurse():
+    too_short = StrictRecursiveEngine(max_levels=8).calculate(
+        valid_five_up_exit()[:2]
+    )
+    assert too_short.levels == ()
+
+    result = StrictRecursiveEngine(max_levels=8).calculate(
+        valid_five_up_exit()[:4]
+    )
+    assert len(result.levels) == 1
+    assert result.levels[0].center_result.centers
 
     one_level = StrictRecursiveEngine(max_levels=8).calculate(valid_five_up_exit())
     assert len(one_level.levels) == 1
     assert not any(trend.locked for trend in one_level.levels[0].trend_types)
 
 
-def test_recursion_keeps_fifth_unlocked_unit_as_center_preview():
+def test_recursion_keeps_unlocked_departure_as_center_preview():
     values = valid_five_up_exit()
     values = values[:-1] + (
         replace(values[-1], locked=False, confirmed_at=None),
@@ -39,7 +47,8 @@ def test_recursion_keeps_fifth_unlocked_unit_as_center_preview():
     assert len(result.levels) == 1
     level = result.levels[0]
     assert level.center_result.locked_unit_count == 4
-    assert level.center_result.centers == ()
+    assert len(level.center_result.centers) == 1
+    assert level.center_result.centers[0].state is CenterState.ONGOING
     assert level.center_result.previews
 
 
@@ -77,7 +86,7 @@ def test_max_levels_is_a_hard_structural_depth_cap():
     assert len(result.levels) == 1
 
 
-def test_direction_flip_selects_same_direction_centers_for_trends():
+def test_direction_flip_centers_are_owned_by_trends_without_role_assumption():
     values = valid_five_up_exit() + (
         unit(5, "down", 130, 95),
         unit(6, "up", 95, 100),
@@ -92,10 +101,6 @@ def test_direction_flip_selects_same_direction_centers_for_trends():
     assert len(level.center_result.centers) == 2
     assert all(
         center.state is CenterState.COMPLETED
-        for center in level.center_result.centers
-    )
-    assert all(
-        center.entry_unit.direction == center.completion_direction
         for center in level.center_result.centers
     )
     owned_centers = tuple(

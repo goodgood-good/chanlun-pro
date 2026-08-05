@@ -5,7 +5,9 @@ from decimal import Decimal
 import pandas as pd
 
 from chanlun.cl_utils import strict_chart_runtime
-from chanlun.decision_support.trading_system.runtime_config import strict_cl_config
+from chanlun.decision_support.trading_system.runtime_config import (
+    v3_recursive_cl_config,
+)
 
 
 def _frame() -> pd.DataFrame:
@@ -28,7 +30,7 @@ def _frame() -> pd.DataFrame:
     return frame
 
 
-def test_strict_chart_runtime_uses_only_fixed_strict_config(monkeypatch) -> None:
+def test_strict_chart_runtime_uses_only_fixed_v3_recursive_config(monkeypatch) -> None:
     sentinel = object()
     captured = {}
 
@@ -52,7 +54,7 @@ def test_strict_chart_runtime_uses_only_fixed_strict_config(monkeypatch) -> None
     assert result.cd is sentinel
     assert result.error_code is None
     assert captured["frame"] is frame
-    assert captured["config"] == strict_cl_config(
+    assert captured["config"] == v3_recursive_cl_config(
         structure_price_quantum=Decimal("0.01"),
         price_basis_revision="sha256:test-basis",
     )

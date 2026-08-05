@@ -59,7 +59,7 @@ def _downward_center_segments():
     ]
 
 
-def test_upward_center_uses_entry_down_up_down_leave_roles() -> None:
+def test_upward_center_uses_first_three_then_leave() -> None:
     from chanlun.cl_utils.tv_chart import xd_segment_centers_to_chart_dicts
 
     lines = _upward_center_segments()
@@ -68,19 +68,19 @@ def test_upward_center_uses_entry_down_up_down_leave_roles() -> None:
     assert len(payloads) == 1
     center = payloads[0]
     assert center["type"] == "up"
-    assert center["core_directions"] == ["down", "up", "down"]
-    assert center["entering_segment"]["direction"] == "up"
+    assert center["core_directions"] == ["up", "down", "up"]
+    assert center["entering_segment"] is None
     assert center["leaving_segment"]["direction"] == "up"
-    assert [point["price"] for point in center["points"]] == [115.0, 105.0]
+    assert [point["price"] for point in center["points"]] == [115.0, 100.0]
     assert center["points"][0]["time"] == int(
-        lines[1].start.k.date.timestamp()
+        lines[0].start.k.date.timestamp()
     )
     assert center["points"][1]["time"] == int(
         lines[4].start.k.date.timestamp()
     )
 
 
-def test_downward_center_uses_entry_up_down_up_leave_roles() -> None:
+def test_downward_center_uses_first_three_then_leave() -> None:
     from chanlun.cl_utils.tv_chart import xd_segment_centers_to_chart_dicts
 
     lines = _downward_center_segments()
@@ -89,10 +89,10 @@ def test_downward_center_uses_entry_up_down_up_leave_roles() -> None:
     assert len(payloads) == 1
     center = payloads[0]
     assert center["type"] == "down"
-    assert center["core_directions"] == ["up", "down", "up"]
-    assert center["entering_segment"]["direction"] == "down"
+    assert center["core_directions"] == ["down", "up", "down"]
+    assert center["entering_segment"] is None
     assert center["leaving_segment"]["direction"] == "down"
-    assert [point["price"] for point in center["points"]] == [110.0, 100.0]
+    assert [point["price"] for point in center["points"]] == [120.0, 100.0]
 
 
 def test_fifth_segment_is_retained_as_ongoing_leave_leg_inside_core() -> None:
@@ -110,8 +110,7 @@ def test_fifth_segment_is_retained_as_ongoing_leave_leg_inside_core() -> None:
     assert center["completion_point_type"] is None
     assert center["completion_point_status"] is None
     assert center["completion_return_segment"] is None
-    assert center["leaving_segment"]["direction"] == "up"
-    assert center["leaving_segment"]["end_price"] == 110
+    assert center["leaving_segment"] is None
 
 
 def test_unfinished_fifth_segment_participates_in_center_recognition() -> None:
@@ -125,7 +124,7 @@ def test_unfinished_fifth_segment_participates_in_center_recognition() -> None:
     assert len(payloads) == 1
     center = payloads[0]
     assert center["type"] == "up"
-    assert center["core_directions"] == ["down", "up", "down"]
+    assert center["core_directions"] == ["up", "down", "up"]
     assert center["leaving_segment"]["start_time"] == int(
         lines[-1].start.k.date.timestamp()
     )
@@ -135,7 +134,7 @@ def test_unfinished_fifth_segment_participates_in_center_recognition() -> None:
     assert center["center_state"] == "forming"
     assert center["provisional"] is True
     assert center["contains_unfinished_segment"] is True
-    assert center["algorithm_revision"] == "chanlun-display-xd-five-role/v5"
+    assert center["algorithm_revision"] == "chanlun-display-xd-original-three/v1"
 
 
 def test_unfinished_fifth_segment_participates_for_downward_center() -> None:
@@ -147,7 +146,7 @@ def test_unfinished_fifth_segment_participates_for_downward_center() -> None:
     center = xd_segment_centers_to_chart_dicts(lines)[0]
 
     assert center["type"] == "down"
-    assert center["core_directions"] == ["up", "down", "up"]
+    assert center["core_directions"] == ["down", "up", "down"]
     assert center["leaving_segment"]["direction"] == "down"
     assert center["leaving_segment"]["end_price"] == 80
     assert center["provisional"] is True
@@ -173,7 +172,7 @@ def test_unfinished_extension_can_become_the_current_leaving_segment() -> None:
         lines[-1].start.k.date.timestamp()
     )
     assert live_center["leaving_segment"]["end_price"] == 130
-    assert live_center["core_directions"] == ["down", "up", "down"]
+    assert live_center["core_directions"] == ["up", "down", "up"]
     assert live_center["provisional"] is True
     assert live_center["done"] is False
 
@@ -200,10 +199,8 @@ def test_three_legs_after_active_leave_do_not_draw_shifted_center() -> None:
     assert centers[0]["render_kind"] == "center_preview"
     assert centers[0]["provisional"] is True
     assert centers[0]["tradable"] is False
-    assert (centers[0]["zd"], centers[0]["zg"]) == (105.0, 115.0)
-    assert centers[0]["entering_segment"]["start_time"] == int(
-        lines[0].start.k.date.timestamp()
-    )
+    assert (centers[0]["zd"], centers[0]["zg"]) == (100.0, 115.0)
+    assert centers[0]["entering_segment"] is None
     assert centers[0]["leaving_segment"]["start_time"] == int(
         lines[4].start.k.date.timestamp()
     )
@@ -226,10 +223,7 @@ def test_adjacent_preview_sharing_only_boundary_keeps_both_centers() -> None:
 
     centers = xd_segment_centers_to_chart_dicts(lines)
 
-    assert [item["render_kind"] for item in centers] == [
-        "center_preview",
-        "center_preview",
-    ]
+    assert [item["render_kind"] for item in centers] == ["center_preview"]
     # The first provisional return has already completed the old center's
     # same-level 3-buy geometry.  The later adjacent candidate may coexist,
     # but cannot regress that evidence back to ordinary "forming".
@@ -239,17 +233,8 @@ def test_adjacent_preview_sharing_only_boundary_keeps_both_centers() -> None:
     assert centers[0]["completion_return_segment"]["start_time"] == int(
         lines[5].start.k.date.timestamp()
     )
-    assert centers[1]["center_state"] == "forming"
-    assert (centers[1]["zd"], centers[1]["zg"]) == (125.0, 130.0)
-    assert centers[1]["entering_segment"]["start_time"] == int(
-        lines[4].start.k.date.timestamp()
-    )
-    assert centers[1]["points"][0]["time"] == int(
-        lines[5].start.k.date.timestamp()
-    )
-    assert centers[1]["leaving_segment"]["start_time"] == int(
-        lines[8].start.k.date.timestamp()
-    )
+    # A provisional completion owns the live suffix exclusively; a shifted
+    # forming candidate must not recreate the two-unfinished-centers bug.
 
 
 def test_overlapping_later_preview_is_folded_into_active_center_extension() -> None:
@@ -285,11 +270,11 @@ def test_overlapping_later_preview_is_folded_into_active_center_extension() -> N
     centers = xd_segment_centers_to_chart_dicts(lines)
 
     assert len(centers) == 1
-    assert centers[0]["render_kind"] == "formal_center"
-    assert centers[0]["center_state"] == "ongoing"
-    assert centers[0]["suppressed_overlapping_candidate_count"] == 1
-    assert centers[0]["algorithm_revision"] == "chanlun-display-xd-five-role/v5"
-    assert centers[0]["leaving_segment"]["direction"] == centers[0]["type"]
+    assert centers[0]["render_kind"] == "center_preview"
+    assert centers[0]["center_state"] == "forming"
+    assert centers[0]["suppressed_overlapping_candidate_count"] == 0
+    assert centers[0]["algorithm_revision"] == "chanlun-display-xd-original-three/v1"
+    assert centers[0]["leaving_segment"] is None
     assert not (centers[0]["done"] and centers[0]["provisional"])
 
 
@@ -317,15 +302,15 @@ def test_sh513100_unresolved_extension_draws_one_active_center() -> None:
 
     assert len(centers) == 1
     center = centers[0]
-    assert center["type"] == "down"
+    assert center["type"] == "up"
     assert center["center_state"] == "forming"
     assert center["render_kind"] == "center_preview"
     assert center["line_count"] == 8
     assert (center["zd"], center["zg"]) == (2.103, 2.118)
-    assert center["entering_segment"]["start_price"] == 2.192
-    assert center["leaving_segment"]["direction"] == "down"
-    assert center["leaving_segment"]["start_price"] == 2.122
-    assert center["leaving_segment"]["end_price"] == 2.035
+    assert center["entering_segment"] is None
+    assert center["leaving_segment"]["direction"] == "up"
+    assert center["leaving_segment"]["start_price"] == 2.035
+    assert center["leaving_segment"]["end_price"] == 2.186
     assert center["provisional"] is True
     assert center["tradable"] is False
 
@@ -354,11 +339,11 @@ def test_rejected_active_projection_does_not_draw_shifted_forming_center() -> No
     centers = xd_segment_centers_to_chart_dicts(lines)
 
     assert len(centers) == 1
-    assert centers[0]["render_kind"] == "formal_center"
-    assert centers[0]["center_state"] == "ongoing"
-    assert centers[0]["type"] == "down"
+    assert centers[0]["render_kind"] == "center_preview"
+    assert centers[0]["center_state"] == "completed"
+    assert centers[0]["type"] == "up"
     assert (centers[0]["zd"], centers[0]["zg"]) == (8.41, 9.82)
-    assert centers[0]["leaving_segment"]["direction"] == "down"
+    assert centers[0]["leaving_segment"]["direction"] == "up"
 
 
 def test_completed_three_sell_preview_supersedes_overlapping_ongoing_center() -> None:
@@ -399,13 +384,13 @@ def test_completed_three_sell_preview_supersedes_overlapping_ongoing_center() ->
     assert center["completion_point_observed"] is True
     assert center["associated_points"] == ["3sell"]
     assert center["type"] == "down"
-    assert center["entering_segment"]["direction"] == "down"
+    assert center["entering_segment"] is None
     assert center["leaving_segment"]["direction"] == "down"
     assert center["completion_return_segment"]["direction"] == "up"
     assert center["linestyle"] == "0"
     assert center["done"] is False
     assert center["provisional"] is True
-    assert center["suppressed_overlapping_candidate_count"] == 1
+    assert center["suppressed_overlapping_candidate_count"] == 0
 
 
 def test_unfinished_confirmation_uses_locked_leave_but_stays_provisional() -> None:
@@ -437,16 +422,16 @@ def test_unfinished_confirmation_uses_locked_leave_but_stays_provisional() -> No
     )
 
 
-def test_entry_and_leave_are_not_part_of_rectangle_body() -> None:
+def test_first_three_are_rectangle_body_and_leave_is_separate() -> None:
     from chanlun.cl_utils.tv_chart import xd_segment_centers_to_chart_dicts
 
     lines = _upward_center_segments()
     center = xd_segment_centers_to_chart_dicts(lines)[0]
 
     assert center["core_line_count"] == 3
-    assert center["entering_segment"]["end_time"] == center["points"][0]["time"]
+    assert center["entering_segment"] is None
+    assert center["first_three_components"][0]["start_time"] == center["points"][0]["time"]
     assert center["leaving_segment"]["start_time"] == center["points"][1]["time"]
-    assert center["entering_segment"]["start_time"] < center["points"][0]["time"]
     assert center["leaving_segment"]["end_time"] > center["points"][1]["time"]
 
 
@@ -497,7 +482,7 @@ def test_completed_downward_center_binds_same_level_three_sell() -> None:
     )
 
 
-def test_center_extension_moves_leave_without_changing_middle_three_core() -> None:
+def test_center_extension_moves_leave_without_changing_first_three_core() -> None:
     from chanlun.cl_utils.tv_chart import xd_segment_centers_to_chart_dicts
 
     lines = _upward_center_segments()
@@ -510,8 +495,8 @@ def test_center_extension_moves_leave_without_changing_middle_three_core() -> No
     )
     center = xd_segment_centers_to_chart_dicts(lines)[0]
 
-    assert center["core_directions"] == ["down", "up", "down"]
-    assert [point["price"] for point in center["points"]] == [115.0, 105.0]
+    assert center["core_directions"] == ["up", "down", "up"]
+    assert [point["price"] for point in center["points"]] == [115.0, 100.0]
     assert center["leaving_segment"]["start_time"] == int(
         lines[6].start.k.date.timestamp()
     )

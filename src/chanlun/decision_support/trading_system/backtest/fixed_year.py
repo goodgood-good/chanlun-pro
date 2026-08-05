@@ -34,7 +34,6 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 
 from chanlun.core.cl import CL
-from chanlun.core.strict_structure.base_profile import strict_base_config_revision
 from chanlun.core.strict_structure.identity import build_strict_evidence_revision
 from chanlun.core.strict_structure.level_catalog import recursive_level_labels
 from chanlun.core.strict_structure.models import (
@@ -74,7 +73,9 @@ from chanlun.decision_support.trading_system.models import (
     TimeframeContext,
     build_point_id,
 )
-from chanlun.decision_support.trading_system.runtime_config import strict_cl_config
+from chanlun.decision_support.trading_system.runtime_config import (
+    v3_recursive_cl_config,
+)
 from chanlun.decision_support.trading_system.structure_adapter import (
     extract_confirmed_points,
 )
@@ -453,7 +454,7 @@ def strict_state(code: str, frequency: str, frame: pd.DataFrame) -> CL:
         raise ValueError(f"{frequency} frame is empty")
     quantum = Decimal(str(frame.attrs["structure_price_quantum"]))
     revision = cast(str, frame.attrs["price_basis_revision"])
-    config = strict_cl_config(
+    config = v3_recursive_cl_config(
         structure_price_quantum=quantum,
         price_basis_revision=revision,
     )
@@ -586,8 +587,12 @@ class CausalCenterCompletionFact:
             raise ValueError("causal center identity is required")
         if self.structural_level < 0 or self.body_revision < 0:
             raise ValueError("causal center revisions and levels cannot be negative")
-        if self.zd_tick >= self.zg_tick:
-            raise ValueError("causal center core must have positive width")
+        # The unique strategy contract defines a center on the closed
+        # intersection ``ZD <= ZG``.  A one-tick/equality center is therefore
+        # valid causal evidence and must not disappear only in the historical
+        # ledger while remaining visible on the page and live path.
+        if self.zd_tick > self.zg_tick:
+            raise ValueError("causal center core must be a non-empty interval")
         if self.leave_direction != "up" or self.return_direction != "down":
             # V3.1 consumes only upward third-buy completion geometry.  Keeping
             # the generic ledger fail-closed prevents a sell-side center from
@@ -974,8 +979,9 @@ def _causal_confirmed_structure_events(
             *engine.second_class_points(first),
             *engine.third_class_points(),
         )
-        strict_config_revision = (
-            "chanlun-strict-signals/v3+" + strict_base_config_revision()
+        strict_config_revision = cast(
+            str,
+            state.get_config()["strict_config_revision"],
         )
         structure_revision = build_strict_evidence_revision(
             symbol=code,

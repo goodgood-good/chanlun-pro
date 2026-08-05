@@ -33,8 +33,13 @@ from chanlun.decision_support.trading_system.provisional import (
 )
 from chanlun.decision_support.trading_system.sector_policy import assess_sector
 from chanlun.decision_support.trading_system.runtime_config import (
-    strict_cl_config,
+    screening_cl_config,
     strict_snapshot_price_metadata,
+)
+from chanlun.decision_support.trading_system.screening_structure import (
+    build_screening_evidence,
+    merge_provisional_candidates,
+    unfinished_segment_candidates,
 )
 from chanlun.decision_support.trading_system.structure_adapter import (
     extract_confirmed_points,
@@ -683,6 +688,59 @@ class ReplayCL(Protocol):
 BundleFactory = Callable[..., object]
 
 
+class _PhysicalScreeningReplayCL:
+    """Expose the live old-pen, physical-L0 builder to historical replay.
+
+    ``CL.get_strict_evidence`` always builds the recursive strict profile and
+    stamps its own base-profile identity.  Calling it from replay while live
+    screening calls ``build_screening_evidence`` silently gives the two paths
+    different stroke definitions and different level semantics.  This wrapper
+    keeps the underlying incremental CL state but makes the evidence boundary
+    exactly the same one used by ``analyze_native_frame``.
+    """
+
+    def __init__(
+        self,
+        *,
+        state: object,
+        structure_price_quantum: Decimal,
+        price_basis_revision: str,
+        strict_config_revision: str,
+    ) -> None:
+        self._state = state
+        self._structure_price_quantum = structure_price_quantum
+        self._price_basis_revision = price_basis_revision
+        self._strict_config_revision = strict_config_revision
+        self._source_closed_at: datetime | None = None
+
+    def process_klines(self, frame: pd.DataFrame) -> object:
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            raise ValueError("screening replay requires non-empty K-lines")
+        result = self._state.process_klines(frame)
+        observed = normalize_datetime(
+            pd.Timestamp(frame["date"].iloc[-1]).to_pydatetime(),
+            "source_closed_at",
+        )
+        if self._source_closed_at is not None and observed < self._source_closed_at:
+            raise ValueError("screening replay cursor cannot move backwards")
+        self._source_closed_at = observed
+        return result
+
+    def get_strict_evidence(self) -> StrictEvidenceResult:
+        if self._source_closed_at is None:
+            raise ValueError("screening replay has not processed any K-lines")
+        return build_screening_evidence(
+            self._state,
+            source_closed_at=self._source_closed_at,
+            structure_price_quantum=self._structure_price_quantum,
+            price_basis_revision=self._price_basis_revision,
+            strict_config_revision=self._strict_config_revision,
+        )
+
+    def get_config(self) -> Mapping[str, object]:
+        return self._state.get_config()
+
+
 def _default_cl_factory(
     code: str,
     frequency: str,
@@ -691,14 +749,21 @@ def _default_cl_factory(
     from chanlun.core.cl import CL
 
     metadata = strict_snapshot_price_metadata(snapshot)
-    return CL(
+    config = screening_cl_config(
+        structure_price_quantum=metadata.structure_price_quantum,
+        price_basis_revision=metadata.price_basis_revision,
+    )
+    state = CL(
         code,
         frequency,
-        strict_cl_config(
-            structure_price_quantum=metadata.structure_price_quantum,
-            price_basis_revision=metadata.price_basis_revision,
-        ),
+        config,
         market="a",
+    )
+    return _PhysicalScreeningReplayCL(
+        state=state,
+        structure_price_quantum=metadata.structure_price_quantum,
+        price_basis_revision=metadata.price_basis_revision,
+        strict_config_revision=cast(str, config["strict_config_revision"]),
     )
 
 
@@ -847,6 +912,19 @@ class CausalStructureReplay:
             source_frequency=frequency,
             as_of=decision_at,
         )
+        # The production factory always exposes one physical level zero and
+        # therefore shares live screening's unfinished-segment candidates.
+        # Keep custom test/research factories compatible when they deliberately
+        # provide an empty or recursive evidence object.
+        if len(evidence.structure.levels) == 1:
+            provisional = merge_provisional_candidates(
+                provisional,
+                unfinished_segment_candidates(
+                    evidence,
+                    code=code,
+                    source_frequency=frequency,
+                ),
+            )
         analysis = _ReplayFrameAnalysis(
             direction=_strict_direction(evidence),
             confirmed_points=confirmed,

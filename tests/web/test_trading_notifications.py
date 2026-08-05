@@ -36,6 +36,24 @@ def snapshot(stage: str | None) -> dict[str, object]:
     return {"signals": [] if stage is None else [signal_document(stage)]}
 
 
+def shared_trigger_signal(signal_id: str, setup_point_type: str) -> dict[str, object]:
+    signal = signal_document("triggered")
+    signal["signal_id"] = signal_id
+    signal["point_type"] = setup_point_type
+    signal["setup_5m"] = {
+        "point_id": f"setup:{setup_point_type}",
+        "point_type": setup_point_type,
+        "center_ordinal": 1,
+        "invalidation_price": "9.80",
+    }
+    signal["trigger_1m"] = {
+        "point_id": "trigger:shared-1m-3buy",
+        "point_type": "3buy",
+        "confirmed_at": "2026-07-20T10:01:00+08:00",
+    }
+    return signal
+
+
 class RecordingNotifier:
     def __init__(self, results: list[bool] | None = None) -> None:
         self.messages: list[tuple[str, list[str]]] = []
@@ -44,6 +62,21 @@ class RecordingNotifier:
     def send(self, title: str, lines: list[str]) -> bool:
         self.messages.append((title, lines))
         return self.results.pop(0) if self.results else True
+
+
+class RichRecordingNotifier(RecordingNotifier):
+    def __init__(self) -> None:
+        super().__init__()
+        self.rich_messages: list[tuple[str, list[str], dict[str, object]]] = []
+
+    def send_rich(
+        self,
+        title: str,
+        lines: list[str],
+        context: dict[str, object],
+    ) -> bool:
+        self.rich_messages.append((title, lines, context))
+        return True
 
 
 def test_only_material_lifecycle_transitions_notify(tmp_path: Path) -> None:
@@ -60,13 +93,117 @@ def test_only_material_lifecycle_transitions_notify(tmp_path: Path) -> None:
     title, lines = sender.messages[0]
     assert title == "买卖通知｜候选股｜SZ.000001｜1分钟一类买点"
     rendered = "\n".join(lines)
-    assert "失效价：9.80" in rendered
+    assert "防守价：9.80（跌破买入结构失效）" in rendered
     assert "30分钟向上（有利）" in rendered
     assert "5分钟三类买点" in rendered
     assert "1分钟一类买点" in rendered
     assert "建议：确认反转后考虑分批买入" in rendered
     assert "计划风险倍数" not in rendered
     assert "结构层级" not in rendered
+
+
+def test_dispatcher_passes_stable_a_share_chart_context(tmp_path: Path) -> None:
+    sender = RichRecordingNotifier()
+    dispatcher = SignalNotificationDispatcher(
+        sender,
+        state_path=tmp_path / "delivered.json",
+    )
+
+    dispatcher.dispatch_changes(snapshot("armed"), snapshot("triggered"))
+
+    assert sender.messages == []
+    assert len(sender.rich_messages) == 1
+    context = sender.rich_messages[0][2]
+    chart = context["charts"][0]
+    assert chart["market"] == "a"
+    assert chart["code"] == "SZ.000001"
+    assert str(chart["artifact_key"]).startswith("sha256:")
+
+
+def test_same_one_minute_trigger_coalesces_multiple_five_minute_setups(
+    tmp_path: Path,
+) -> None:
+    sender = RecordingNotifier()
+    dispatcher = SignalNotificationDispatcher(
+        sender,
+        state_path=tmp_path / "delivered.json",
+    )
+    one_buy = shared_trigger_signal("signal:five-minute-one-buy", "1buy")
+    two_buy = shared_trigger_signal("signal:five-minute-two-buy", "2buy")
+    previous = {
+        "signals": [
+            {**one_buy, "lifecycle_stage": "armed"},
+            {**two_buy, "lifecycle_stage": "armed"},
+        ]
+    }
+
+    dispatcher.dispatch_changes(previous, {"signals": [one_buy, two_buy]})
+
+    assert len(sender.messages) == 1
+    rendered = "\n".join(sender.messages[0][1])
+    assert "5分钟一类买点、二类买点共振" in rendered
+    assert dispatcher.health_snapshot()["success_count"] == 1
+
+
+def test_semantic_trigger_dedupe_survives_restart_and_changed_setup_id(
+    tmp_path: Path,
+) -> None:
+    state_path = tmp_path / "delivered.json"
+    first_sender = RecordingNotifier()
+    first = shared_trigger_signal("signal:first-lane", "1buy")
+    SignalNotificationDispatcher(
+        first_sender,
+        state_path=state_path,
+    ).dispatch_changes(
+        {"signals": [{**first, "lifecycle_stage": "armed"}]},
+        {"signals": [first]},
+    )
+    second_sender = RecordingNotifier()
+    second = shared_trigger_signal("signal:second-lane", "2buy")
+    second["trigger_1m"] = {
+        **second["trigger_1m"],
+        # A price-basis rebuild may replace this internal ID while leaving the
+        # completed trigger bar and every visible notification fact unchanged.
+        "point_id": "trigger:rebuilt-same-causal-event",
+    }
+
+    SignalNotificationDispatcher(
+        second_sender,
+        state_path=state_path,
+    ).dispatch_changes(
+        {"signals": [{**second, "lifecycle_stage": "armed"}]},
+        {"signals": [second]},
+    )
+
+    assert len(first_sender.messages) == 1
+    assert second_sender.messages == []
+
+
+def test_distinct_one_minute_triggers_are_not_coalesced(tmp_path: Path) -> None:
+    sender = RecordingNotifier()
+    dispatcher = SignalNotificationDispatcher(
+        sender,
+        state_path=tmp_path / "delivered.json",
+    )
+    first = shared_trigger_signal("signal:first-trigger", "1buy")
+    second = shared_trigger_signal("signal:second-trigger", "2buy")
+    second["trigger_1m"] = {
+        **second["trigger_1m"],
+        "point_id": "trigger:distinct-1m-3buy",
+        "confirmed_at": "2026-07-20T10:02:00+08:00",
+    }
+
+    dispatcher.dispatch_changes(
+        {
+            "signals": [
+                {**first, "lifecycle_stage": "armed"},
+                {**second, "lifecycle_stage": "armed"},
+            ]
+        },
+        {"signals": [first, second]},
+    )
+
+    assert len(sender.messages) == 2
 
 
 def test_newly_discovered_triggered_signal_notifies_immediately(
@@ -145,7 +282,12 @@ def test_sell_and_invalidation_advice_are_explicit() -> None:
     sell = signal_document()
     sell["side"] = "sell"
     sell["point_type"] = "3sell"
-    sell["setup_5m"] = {"point_type": "3sell", "center_ordinal": 1}
+    sell["structural_stop"] = None
+    sell["setup_5m"] = {
+        "point_type": "3sell",
+        "center_ordinal": 1,
+        "invalidation_price": "10.80",
+    }
     sell["trigger_1m"] = {}
 
     title, lines = format_notification(
@@ -154,6 +296,7 @@ def test_sell_and_invalidation_advice_are_explicit() -> None:
         new_stage="triggered",
     )
     assert title.endswith("5分钟三类卖点")
+    assert "防守价：10.80（突破卖出结构失效）" in "\n".join(lines)
     assert lines[-1] == "建议：优先检查退出条件"
 
     _title, invalidated_lines = format_notification(
@@ -162,6 +305,20 @@ def test_sell_and_invalidation_advice_are_explicit() -> None:
         new_stage="invalidated",
     )
     assert invalidated_lines[-1] == "建议：取消该结构计划"
+
+
+def test_missing_defense_price_is_explicit_and_never_estimated() -> None:
+    signal = signal_document()
+    signal["structural_stop"] = None
+    signal["setup_5m"] = {"point_type": "3buy", "invalidation_price": None}
+
+    _title, lines = format_notification(
+        signal,
+        old_stage="armed",
+        new_stage="triggered",
+    )
+
+    assert "防守价：待结构确认（跌破买入结构失效）" in "\n".join(lines)
 
 
 @pytest.mark.parametrize(

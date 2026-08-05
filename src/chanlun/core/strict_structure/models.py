@@ -168,14 +168,12 @@ class TrendCenter:
             raise ValueError("structural_level must be >= 0")
         if not self.price_basis_revision or not self.price_basis_revision.strip():
             raise ValueError("price_basis_revision is required")
-        expected_seed_size = (
-            3 if self.source_kind is SourceKind.TREND_TYPE else 5
-        )
+        # Every formal center is established by the overlap of its first three
+        # completed lower-level components.  A segment center has no extra
+        # pre-core entry or in-seed exit role.
+        expected_seed_size = 3
         if len(self.initial_units) != expected_seed_size:
-            label = "three" if expected_seed_size == 3 else "five"
-            raise ValueError(
-                f"initial_units must contain exactly {label} units"
-            )
+            raise ValueError("initial_units must contain exactly three units")
         if self.body_units != self.initial_units + self.extension_units:
             raise ValueError("body units must equal initial plus extension units")
         if any(
@@ -195,19 +193,17 @@ class TrendCenter:
         expected_zd = max(item.low_tick for item in self.core_units)
         expected_zg = min(item.high_tick for item in self.core_units)
         if (self.zd_tick, self.zg_tick) != (expected_zd, expected_zg):
-            raise ValueError("center core must equal middle-three intersection")
+            raise ValueError("center core must equal first-three intersection")
         expected_dd = min(item.low_tick for item in self.body_units)
         expected_gg = max(item.high_tick for item in self.body_units)
         if (self.dd_tick, self.gg_tick) != (expected_dd, expected_gg):
             raise ValueError("center envelope must equal body envelope")
-        if self.zd_tick >= self.zg_tick:
-            raise ValueError("zd_tick must be < zg_tick")
+        if self.zd_tick > self.zg_tick:
+            raise ValueError("zd_tick must be <= zg_tick")
         if self.dd_tick > self.zd_tick or self.gg_tick < self.zg_tick:
             raise ValueError("envelope must contain the core")
-        if not self._positive_overlap(self.entry_unit):
-            raise ValueError("entry unit must positively overlap center core")
-        if not self._positive_overlap(self.initial_exit_unit):
-            raise ValueError("initial exit unit must positively overlap center core")
+        if any(not self._touches_core(item) for item in self.initial_units):
+            raise ValueError("each initial component must touch the center core")
 
         if len({item.unit_id for item in self.body_units}) != len(self.body_units):
             raise ValueError("center body unit ids must be unique")
@@ -269,19 +265,10 @@ class TrendCenter:
                     raise ValueError("pending leave must be the final body unit")
                 if not self.pending_leave_unit.locked:
                     raise ValueError("pending leave must be locked")
-                if not self._positive_overlap(self.pending_leave_unit):
-                    raise ValueError("pending leave must positively overlap center core")
+                if not self._touches_core(self.pending_leave_unit):
+                    raise ValueError("pending leave must touch center core")
                 if not self._outside_in_direction(self.pending_leave_unit):
                     raise ValueError("pending leave endpoint must be outside center core")
-                # 五个严格交替单元的第0位与第4位必然同向，故该条对线段中枢是
-                # 恒真的派生结论。走势类型层允许「上涨进入、盘整、下跌离开」的
-                # 反转中枢，此处不再强制；真正的几何约束由上面的核心重叠与
-                # 离开端点在核心之外两条保证。
-                if (
-                    self.source_kind is SourceKind.SEGMENT
-                    and self.pending_leave_unit.direction != self.entry_unit.direction
-                ):
-                    raise ValueError("pending leave direction must match center entry")
         else:
             if self.pending_leave_unit is not None:
                 raise ValueError("completed center cannot retain pending leave")
@@ -295,15 +282,10 @@ class TrendCenter:
                 raise ValueError("completion return must not enter center body")
             if not leave_unit.locked or not return_unit.locked:
                 raise ValueError("completion evidence must be locked")
-            if not self._positive_overlap(leave_unit) or not self._outside_in_direction(
+            if not self._touches_core(leave_unit) or not self._outside_in_direction(
                 leave_unit
             ):
                 raise ValueError("completion leave geometry is invalid")
-            if (
-                self.source_kind is SourceKind.SEGMENT
-                and leave_unit.direction != self.entry_unit.direction
-            ):
-                raise ValueError("completion leave direction must match center entry")
             if (
                 self.source_kind is SourceKind.SEGMENT
                 and leave_unit.direction == return_unit.direction
@@ -328,8 +310,8 @@ class TrendCenter:
             ):
                 raise ValueError("center availability must cover completion evidence")
 
-    def _positive_overlap(self, item: ConstituentUnit) -> bool:
-        return max(item.low_tick, self.zd_tick) < min(item.high_tick, self.zg_tick)
+    def _touches_core(self, item: ConstituentUnit) -> bool:
+        return max(item.low_tick, self.zd_tick) <= min(item.high_tick, self.zg_tick)
 
     def _outside_in_direction(self, item: ConstituentUnit) -> bool:
         return (
@@ -346,13 +328,7 @@ class TrendCenter:
     def core_units(
         self,
     ) -> tuple[ConstituentUnit, ConstituentUnit, ConstituentUnit]:
-        # A center made from already-completed lower-level trend types is
-        # established by the overlap of those three consecutive trend types
-        # themselves (L33/L38).  Segment-sourced level zero keeps the existing
-        # five-unit confirmation envelope and therefore uses its middle three.
-        if self.source_kind is SourceKind.TREND_TYPE:
-            return self.initial_units  # type: ignore[return-value]
-        return self.initial_units[1:4]  # type: ignore[return-value]
+        return self.initial_units  # type: ignore[return-value]
 
     @property
     def core_body_start_market_time(self) -> datetime:
@@ -366,7 +342,7 @@ class TrendCenter:
             return self.pending_leave_unit.market_start
         if self.extension_units:
             return self.body_units[-1].market_end
-        return self.initial_exit_unit.market_start
+        return self.initial_exit_unit.market_end
 
     @property
     def initial_exit_unit(self) -> ConstituentUnit:
@@ -393,6 +369,7 @@ class CenterPreview:
     zd_tick: int | None
     zg_tick: int | None
     available_at: datetime
+    pending_leave_unit_id: str | None = None
     completion_return_unit_id: str | None = None
 
     def __post_init__(self) -> None:
@@ -416,27 +393,34 @@ class CenterPreview:
         if (
             self.state is CenterPreviewState.FORMING
             and self.zd_tick is not None
-            and self.zd_tick >= self.zg_tick
+            and self.zd_tick > self.zg_tick
         ):
-            raise ValueError("forming preview core must have positive width")
+            raise ValueError("forming preview core must be a closed interval")
         if self.state is CenterPreviewState.COMPLETED:
-            required = 3 if self.source_kind is SourceKind.TREND_TYPE else 5
+            required = 3
             if (
                 len(self.unit_ids) < required
                 or self.zd_tick is None
                 or self.zg_tick is None
-                or self.zd_tick >= self.zg_tick
+                or self.zd_tick > self.zg_tick
             ):
                 raise ValueError(
-                    "completed preview requires a positive source-specific core"
+                    "completed preview requires a closed first-three core"
                 )
             if (
                 not self.completion_return_unit_id
                 or self.completion_return_unit_id in self.unit_ids
             ):
                 raise ValueError("completed preview requires a distinct return unit")
+            if self.pending_leave_unit_id is not None:
+                raise ValueError("completed preview cannot retain a pending leave")
         elif self.completion_return_unit_id is not None:
             raise ValueError("non-completed preview cannot retain a return unit")
+        if (
+            self.pending_leave_unit_id is not None
+            and self.pending_leave_unit_id not in self.unit_ids
+        ):
+            raise ValueError("preview pending leave must belong to its body")
 
 
 @dataclass(frozen=True, slots=True)
@@ -484,7 +468,7 @@ class CenterEvidence:
     @classmethod
     def from_center(cls, center: TrendCenter) -> "CenterEvidence":
         return cls(
-            schema_version="chanlun-center/v3",
+            schema_version="chanlun-center/v4",
             center_id=center.center_id,
             structural_level=center.structural_level,
             source_kind=center.source_kind,
@@ -686,24 +670,14 @@ class TrendType:
             raise ValueError("completed trend requires locked constituent units")
 
         constituent_ids = {item.unit_id for item in self.constituent_units}
-        for center_index, center in enumerate(self.centers):
+        for center in self.centers:
             missing = tuple(
                 item for item in center.body_units
                 if item.unit_id not in constituent_ids
             )
-            if not missing:
-                continue
-            shared_entry_is_external_boundary = (
-                center_index == 0
-                and missing == (center.entry_unit,)
-                and len(center.initial_units) >= 2
-                and self.constituent_units[0] is center.initial_units[1]
-                and center.entry_unit.market_end
-                == self.constituent_units[0].market_start
-            )
-            if not shared_entry_is_external_boundary:
+            if missing:
                 raise ValueError(
-                    "trend must contain every center body unit except its shared entry boundary"
+                    "trend must contain every center body unit"
                 )
         for center in self.centers[:-1]:
             if (
@@ -1217,9 +1191,9 @@ class StrictPointEvidence:
         if (
             self.center_zd_tick is not None
             and self.center_zg_tick is not None
-            and self.center_zd_tick >= self.center_zg_tick
+            and self.center_zd_tick > self.center_zg_tick
         ):
-            raise ValueError("center boundaries must have positive width")
+            raise ValueError("center boundaries must form a closed interval")
 
         if (
             self.variant is StrictPointVariant.BOUNDARY_TOUCH

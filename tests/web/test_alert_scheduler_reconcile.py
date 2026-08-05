@@ -69,6 +69,40 @@ def test_reconcile_can_register_jobs_before_scheduler_start(monkeypatch):
     assert scheduler.get_job("1") is not None
 
 
+def test_disabled_legacy_alerts_remove_jobs_without_reading_configuration(
+    monkeypatch,
+):
+    scheduler = _Scheduler()
+    tasks = AlertTasks(scheduler, enabled=False)
+    tasks.task_ids = ["1"]
+    monkeypatch.setattr(
+        tasks,
+        "task_list",
+        lambda: pytest.fail("disabled legacy alerts must not query task config"),
+    )
+
+    assert tasks.run() is True
+
+    assert scheduler.added == []
+    assert scheduler.removed == ["1"]
+    assert tasks.task_ids == []
+
+
+def test_app_disables_both_legacy_signal_authorities_by_default():
+    app = create_app(
+        test_config={
+            "TESTING": True,
+            "VALIDATE_WEB_SECURITY": False,
+            "WTF_CSRF_ENABLED": False,
+            "SCHEDULER_ENABLED": False,
+        }
+    )
+
+    assert app.config["LEGACY_ALERT_TASKS_ENABLED"] is False
+    assert app.config["LEGACY_SIGNAL_MONITOR_ENABLED"] is False
+    assert app.extensions["alert_tasks"].enabled is False
+
+
 def test_alert_endpoint_reports_stopped_scheduler():
     class _StoppedTasks:
         def alert_del(self, _alert_id):

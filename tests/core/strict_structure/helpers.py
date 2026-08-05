@@ -62,6 +62,20 @@ def valid_five_up_exit(
     zd_tick: int = 105,
     zg_tick: int = 115,
 ) -> tuple[ConstituentUnit, ...]:
+    """A complete first-three center, upward leave and first return.
+
+    The historical helper name is retained because many tests import it, but
+    its geometry now follows the original-text lifecycle:
+
+    * units 0..2 establish the closed core ``[ZD, ZG]``;
+    * unit 3 is an in-core extension;
+    * unit 4 leaves upward and becomes the pending departure.
+
+    A later unit 5 is the first return and may confirm a third buy.  Keeping
+    this five-unit shape preserves the long-standing continuation fixtures
+    while removing their obsolete middle-three establishment assumption.
+    """
+
     return (
         unit(
             unit_offset,
@@ -74,13 +88,13 @@ def valid_five_up_exit(
             unit_offset + 1,
             "down",
             zg_tick + 5,
-            zd_tick - 5,
+            zd_tick,
             structural_level=structural_level,
         ),
         unit(
             unit_offset + 2,
             "up",
-            zd_tick - 5,
+            zd_tick,
             zg_tick,
             structural_level=structural_level,
         ),
@@ -101,6 +115,23 @@ def valid_five_up_exit(
     )
 
 
+def valid_three_center_seed(
+    unit_offset: int = 0,
+    *,
+    structural_level: int = 0,
+    zd_tick: int = 105,
+    zg_tick: int = 115,
+) -> tuple[ConstituentUnit, ...]:
+    """The smallest formal center seed under the original contract."""
+
+    return valid_five_up_exit(
+        unit_offset,
+        structural_level=structural_level,
+        zd_tick=zd_tick,
+        zg_tick=zg_tick,
+    )[:3]
+
+
 def ongoing_center(
     unit_offset: int = 0,
     *,
@@ -109,14 +140,21 @@ def ongoing_center(
     zg_tick: int = 115,
     center_id: str | None = None,
 ) -> TrendCenter:
-    initial = valid_five_up_exit(
+    lifecycle = valid_five_up_exit(
         unit_offset,
         structural_level=structural_level,
         zd_tick=zd_tick,
         zg_tick=zg_tick,
     )
-    value = establish_center(initial, structural_level, SourceKind.SEGMENT)
+    value = establish_center(
+        lifecycle[:3], structural_level, SourceKind.SEGMENT
+    )
     assert value is not None
+    value, extension = advance_center(value, lifecycle[3])
+    assert extension.kind is CenterEventKind.EXTENDED
+    value, event = advance_center(value, lifecycle[4])
+    assert event.kind is CenterEventKind.BREAKOUT_WATCH_UP
+    assert value.state is CenterState.ONGOING
     return value if center_id is None else replace(value, center_id=center_id)
 
 
@@ -158,7 +196,7 @@ def ongoing_down_center(
     zg_tick: int = 105,
     center_id: str | None = None,
 ) -> TrendCenter:
-    initial = (
+    lifecycle = (
         unit(
             unit_offset,
             "down",
@@ -170,13 +208,13 @@ def ongoing_down_center(
             unit_offset + 1,
             "up",
             zd_tick - 5,
-            zg_tick + 5,
+            zg_tick,
             structural_level=structural_level,
         ),
         unit(
             unit_offset + 2,
             "down",
-            zg_tick + 5,
+            zg_tick,
             zd_tick,
             structural_level=structural_level,
         ),
@@ -195,8 +233,15 @@ def ongoing_down_center(
             structural_level=structural_level,
         ),
     )
-    value = establish_center(initial, structural_level, SourceKind.SEGMENT)
+    value = establish_center(
+        lifecycle[:3], structural_level, SourceKind.SEGMENT
+    )
     assert value is not None
+    value, extension = advance_center(value, lifecycle[3])
+    assert extension.kind is CenterEventKind.EXTENDED
+    value, event = advance_center(value, lifecycle[4])
+    assert event.kind is CenterEventKind.BREAKOUT_WATCH_DOWN
+    assert value.state is CenterState.ONGOING
     return value if center_id is None else replace(value, center_id=center_id)
 
 

@@ -5,11 +5,13 @@ from datetime import timedelta
 
 import pytest
 
-from chanlun.core.strict_structure.center_machine import advance_center
+from chanlun.core.strict_structure.center_machine import (
+    advance_center,
+    establish_center,
+)
 from chanlun.core.strict_structure.identity import stable_structure_id
 from chanlun.core.strict_structure.models import (
     CenterEvidence,
-    CenterState,
     ConstituentUnit,
     SourceKind,
 )
@@ -19,6 +21,7 @@ from tests.core.strict_structure.helpers import (
     completed_up_center,
     ongoing_center,
     unit,
+    valid_three_center_seed,
 )
 
 
@@ -112,15 +115,19 @@ def test_stable_structure_id_is_deterministic_and_namespaced():
 def test_trend_center_rejects_unlocked_initial_or_body_unit():
     value = ongoing_center()
     changed = replace(value.initial_units[2], locked=False, confirmed_at=None)
-    initial = value.initial_units[:2] + (changed,) + value.initial_units[3:]
+    initial = value.initial_units[:2] + (changed,)
     with pytest.raises(ValueError, match="formal center body units must be locked"):
-        replace(value, initial_units=initial, body_units=initial)
+        replace(
+            value,
+            initial_units=initial,
+            body_units=initial + value.extension_units,
+        )
 
 
-def test_trend_center_requires_exactly_five_initial_units():
+def test_trend_center_requires_exactly_three_initial_units():
     value = ongoing_center()
-    initial = value.initial_units[:4]
-    with pytest.raises(ValueError, match="exactly five units"):
+    initial = value.initial_units[:2]
+    with pytest.raises(ValueError, match="exactly three units"):
         replace(value, initial_units=initial, body_units=initial)
 
 
@@ -136,24 +143,17 @@ def test_ongoing_center_pending_leave_must_be_final_body_unit():
         replace(value, pending_leave_unit=value.entry_unit)
 
 
-def test_center_leave_direction_must_match_entry_direction():
-    value = ongoing_center()
-    crossed = unit(5, "down", value.initial_exit_unit.end_tick, 95)
-    extended, _event = advance_center(value, crossed)
+def test_center_departure_is_not_constrained_by_a_fictitious_external_entry():
+    seed = valid_three_center_seed()
+    value = establish_center(seed, 0, SourceKind.SEGMENT)
+    assert value is not None
+    downward_leave = unit(3, "down", seed[-1].end_tick, 95)
 
-    with pytest.raises(ValueError, match="pending leave direction must match"):
-        replace(extended, pending_leave_unit=crossed)
+    pending, _event = advance_center(value, downward_leave)
 
-    ret = unit(6, "up", 95, 100)
-    with pytest.raises(ValueError, match="completion leave direction must match"):
-        replace(
-            extended,
-            state=CenterState.COMPLETED,
-            completion_leave_unit=crossed,
-            completion_return_unit=ret,
-            completed_at=ret.confirmed_at,
-            available_at=max(extended.available_at, ret.available_at),
-        )
+    assert pending.pending_leave_unit is downward_leave
+    assert pending.entry_unit.direction == "up"
+    assert pending.pending_leave_unit.direction == "down"
 
 
 def test_completed_center_requires_atomic_locked_leave_return_and_timestamp():
@@ -175,7 +175,11 @@ def test_center_rejects_body_level_or_source_mismatch():
     value = ongoing_center()
     bad = tuple(replace(item, structural_level=1) for item in value.initial_units)
     with pytest.raises(ValueError, match="center body level/source mismatch"):
-        replace(value, initial_units=bad, body_units=bad)
+        replace(
+            value,
+            initial_units=bad,
+            body_units=bad + value.extension_units,
+        )
 
 
 def test_center_rejects_mixed_price_basis():
@@ -186,7 +190,11 @@ def test_center_rejects_mixed_price_basis():
     )
     initial = value.initial_units[:-1] + (bad_last,)
     with pytest.raises(ValueError, match="center body price basis mismatch"):
-        replace(value, initial_units=initial, body_units=initial)
+        replace(
+            value,
+            initial_units=initial,
+            body_units=initial + value.extension_units,
+        )
 
 
 def test_center_rejects_disconnected_or_non_alternating_body():
@@ -194,31 +202,39 @@ def test_center_rejects_disconnected_or_non_alternating_body():
     disconnected = replace(
         value.initial_units[1],
         start_tick=value.initial_units[1].start_tick - 1,
-        high_tick=value.initial_units[1].high_tick + 1,
     )
     initial = (value.initial_units[0], disconnected) + value.initial_units[2:]
     with pytest.raises(ValueError, match="center body prices must connect"):
-        replace(value, initial_units=initial, body_units=initial)
+        replace(
+            value,
+            initial_units=initial,
+            body_units=initial + value.extension_units,
+        )
 
     non_alternating = replace(
         value.initial_units[1],
         direction="up",
+        start_tick=value.initial_units[1].end_tick,
         end_tick=value.initial_units[1].start_tick,
     )
     initial = (value.initial_units[0], non_alternating) + value.initial_units[2:]
     with pytest.raises(ValueError, match="center body directions must alternate"):
-        replace(value, initial_units=initial, body_units=initial)
+        replace(
+            value,
+            initial_units=initial,
+            body_units=initial + value.extension_units,
+        )
 
 
 def test_center_rejects_forged_core_or_envelope_fields():
     value = ongoing_center()
-    with pytest.raises(ValueError, match="middle-three intersection"):
+    with pytest.raises(ValueError, match="first-three intersection"):
         replace(value, zg_tick=value.zg_tick + 1)
     with pytest.raises(ValueError, match="body envelope"):
         replace(value, gg_tick=value.gg_tick + 1)
 
 
-def test_center_core_body_time_excludes_entry_and_leaving_units():
+def test_center_core_body_time_uses_first_component_and_excludes_departure():
     ongoing = ongoing_center()
     completed = completed_up_center()
 
@@ -228,7 +244,7 @@ def test_center_core_body_time_excludes_entry_and_leaving_units():
     )
     assert (
         ongoing.core_body_end_market_time
-        == ongoing.initial_exit_unit.market_start
+        == ongoing.pending_leave_unit.market_start
     )
     assert (
         completed.core_body_end_market_time
@@ -241,7 +257,7 @@ def test_center_core_body_end_advances_only_after_an_accepted_reentry():
     reentry = unit(
         5,
         "down",
-        initial.initial_exit_unit.end_tick,
+        initial.body_units[-1].end_tick,
         initial.zd_tick + 5,
     )
     extended, _event = advance_center(initial, reentry)
@@ -261,10 +277,10 @@ def test_center_core_body_end_advances_only_after_an_accepted_reentry():
     assert leaving.core_body_end_market_time == next_leave.market_start
 
 
-def test_center_evidence_preserves_v3_roles_and_excludes_completion_return():
+def test_center_evidence_preserves_v4_first_three_and_excludes_return():
     value = completed_up_center()
     evidence = CenterEvidence.from_center(value)
-    assert evidence.schema_version == "chanlun-center/v3"
+    assert evidence.schema_version == "chanlun-center/v4"
     assert evidence.price_basis_revision == TEST_PRICE_BASIS
     assert evidence.initial_unit_ids == tuple(
         item.unit_id for item in value.initial_units

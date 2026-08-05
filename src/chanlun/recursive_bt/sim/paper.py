@@ -23,6 +23,10 @@ from typing import Dict, List, Optional
 import pandas as pd
 
 from chanlun.core.cl import CL
+from chanlun.exchange.kline_completion import (
+    drop_unclosed_last_bar as _shared_drop_unclosed_last_bar,
+    frequency_to_minutes,
+)
 from chanlun.recursive_bt.engine.engine import (
     CL_CFG,
     collect_branch_signals,
@@ -47,14 +51,9 @@ def limit_pct(code: str, market: str = "a") -> Optional[float]:
 
 
 def _freq_to_minutes(frequency: str) -> Optional[int]:
-    """把级别字符串转成分钟数;非分钟级(如 'd'/'w')返回 None=不裁剪。"""
-    f = str(frequency).strip().lower()
-    if f.endswith("m"):
-        try:
-            return max(int(f[:-1]), 1)
-        except ValueError:
-            return None
-    return None
+    """Compatibility alias for the market-neutral completion adapter."""
+
+    return frequency_to_minutes(frequency)
 
 
 def drop_unclosed_last_bar(
@@ -63,49 +62,13 @@ def drop_unclosed_last_bar(
     *,
     time_label: str = "start",
 ) -> "pd.DataFrame":
-    """丢弃 df 末尾仍在进行(未收盘)的那一根 bar,使 live 口径与回测一致。
+    """Compatibility wrapper around the shared live/replay boundary."""
 
-    判定方式自包含、不依赖外部 now(tz 不可知):用倒数第二根与最后一根的
-    时间差推断 bar 间隔,再用与最后一根**同 tz** 的当前时刻判断「最后一根
-    所属周期是否已结束」。非分钟级/不足两根时原样返回;间隔异常(session 首根
-    等)仅裁「标签在未来」的末根,绝不误删历史收盘 bar。
-    """
-    if time_label not in {"start", "end"}:
-        raise ValueError("time_label must be start or end")
-    minutes = _freq_to_minutes(frequency)
-    if minutes is None or df is None or len(df) == 0:
-        return df
-    try:
-        last_ts = pd.Timestamp(df["date"].iloc[-1])
-    except Exception:
-        return df
-    now = (
-        pd.Timestamp.now(tz=last_ts.tz)
-        if last_ts.tz is not None
-        else pd.Timestamp.now()
+    return _shared_drop_unclosed_last_bar(
+        df,
+        frequency,
+        time_label=time_label,
     )
-    if time_label == "end":
-        return df.iloc[:-1] if now < last_ts else df
-    if len(df) < 2:
-        return df
-    try:
-        prev_ts = pd.Timestamp(df["date"].iloc[-2])
-    except Exception:
-        return df
-    step = pd.Timedelta(minutes=minutes)
-    # 数据自身间隔与名义间隔不一致(节假日跳空/午休/隔夜 session 首根)时,无法用
-    # 前一根推断周期边界:仅裁「标签在未来」的末根——已收盘 bar 的标签无论起点/
-    # 终点约定必然 <= now,标签 > now 只可能是进行中 bar(QMT 端点标签的 session
-    # 首根即此形态),故绝不误删历史收盘 bar;起点标签源此分支行为不变(保守)。
-    if (last_ts - prev_ts) != step:
-        if now < last_ts:
-            return df.iloc[:-1]
-        return df
-    # 用与 last_ts 同 tz 的当前时刻(naive→naive, aware→对应 tz)
-    # bar 收盘时刻 = bar 起点 + 一个周期。now 还没到收盘时刻=这根还在进行中。
-    if now < last_ts + step:
-        return df.iloc[:-1]
-    return df
 
 
 class SymbolState:

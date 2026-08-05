@@ -1,0 +1,36 @@
+{
+  "code": "SZ.002299",
+  "dataset": "tests/fixtures/SZ.002299_1m.parquet",
+  "frequency": "1m",
+  "points": [
+    {
+      "anchor_at": "2025-07-02T03:04:00+00:00",
+      "available_at": "2025-07-04T06:43:00+00:00",
+      "center_id": "0829dc8724adfa33d3bf21bf161917128172127613d67841fd4524bd70dd1b46",
+      "center_ordinal": 1,
+      "confirmed_at": "2025-07-04T06:43:00+00:00",
+      "level": 0,
+      "point_id": "ae913f3f3de5b001ba04cc2d4b8959bac48e57503bac8ed7e82dad9afbbb8482",
+      "point_type": "3buy",
+      "strength_source": null,
+      "variant": "standard"
+    },
+    {
+      "anchor_at": "2025-07-07T01:34:00+00:00",
+      "available_at": "2025-07-08T05:22:00+00:00",
+      "center_id": "8649a0467f2d59953f1c25fba32db9c38b81d88e96a809a7ddeda4bf31625dac",
+      "center_ordinal": 1,
+      "confirmed_at": "2025-07-08T05:22:00+00:00",
+      "level": 0,
+      "point_id": "f6f064ed580ade03c0f96ef7686e7816566a0a4e66edebd8d822e12092653f7f",
+      "point_type": "3buy",
+      "strength_source": null,
+      "variant": "standard"
+    }
+  ],
+  "price_basis_revision": "test-raw-v1",
+  "rows": 1100,
+  "schema_version": "chanlun-strict-points-golden/v4",
+  "source_closed_at": "2025-07-10T06:57:00+00:00",
+  "structure_price_quantum": "0.01"
+}

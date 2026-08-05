@@ -1026,6 +1026,19 @@ class NativeWorkerProcessTransport:
                         self._in_flight_request_id = None
                         self._request_started_at = None
 
+    def startup(self) -> None:
+        """Establish the authenticated worker without issuing a data request.
+
+        Requests remain lazy and crash-recovering, but an application runtime
+        needs to prove that its isolated native dependency can actually start
+        before ``/readyz`` may report success.  Keeping the handshake separate
+        from a market-data method avoids advancing cursors or rebuilding the
+        sector snapshot merely to attest process readiness.
+        """
+
+        with self._request_lock:
+            self._spawn()
+
     def shutdown(self) -> None:
         acquired = self._request_lock.acquire(timeout=1.0)
         try:
@@ -1172,6 +1185,17 @@ class NativeTradingDataGatewayProcessProxy:
     def set_progress_callback(self, callback: Callable[[], None]) -> None:
         for transport in self._structure_transports:
             transport.set_progress_callback(callback)
+
+    def startup(self) -> None:
+        """Prime the primary read-only worker; structure shards stay lazy.
+
+        The primary transport owns gateway health and lightweight catalog/
+        calendar calls.  Starting all structure shards here would consume the
+        memory of a full coverage run even when the market is closed.  They are
+        still deterministically fanned out and started on first symbol use.
+        """
+
+        self._transport.startup()
 
     def _structure_transport(self, code: str) -> NativeWorkerProcessTransport:
         """Keep one symbol on one worker so its in-memory analysis cache survives."""

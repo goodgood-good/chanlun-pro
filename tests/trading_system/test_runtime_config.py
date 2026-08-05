@@ -10,11 +10,15 @@ from chanlun.core.strict_structure.base_profile import (
 from chanlun.decision_support.trading_system.runtime_config import (
     SCREENING_STRUCTURE_PROFILE_ID,
     STRICT_STRATEGY_ID,
+    V3_RECURSIVE_STRUCTURE_PROFILE_ID,
     screening_cl_config,
     screening_runtime_config_revision,
     strict_cl_config,
     strict_runtime_config_revision,
     strict_snapshot_price_metadata,
+    v3_recursive_base_config_revision,
+    v3_recursive_cl_config,
+    v3_recursive_runtime_config_revision,
 )
 
 
@@ -74,6 +78,32 @@ def test_screening_config_is_old_pen_and_non_recursive_level_zero() -> None:
         structure_price_quantum=Decimal("0.01"),
         price_basis_revision="raw-v1",
     )
+
+
+def test_v3_recursive_config_uses_original_old_pen_at_every_level() -> None:
+    config = v3_recursive_cl_config(
+        structure_price_quantum=Decimal("0.01"),
+        price_basis_revision="raw-v1",
+    )
+
+    assert config["strict_base_profile_id"] == V3_RECURSIVE_STRUCTURE_PROFILE_ID
+    assert config["bi_type"] == "bi_type_old"
+    assert config["bi_mode"] == "strict"
+    assert config["pen_definition"] == "ORIGINAL_OLD_PEN"
+    assert config["recursive_structure_scope"] == "same-source-direct-recursion"
+    assert config["strict_base_profile_revision"] == (
+        v3_recursive_base_config_revision()
+    )
+    assert config["strict_config_revision"] == (
+        v3_recursive_runtime_config_revision(
+            structure_price_quantum=Decimal("0.01"),
+            price_basis_revision="raw-v1",
+        )
+    )
+    assert config["strict_config_revision"] != screening_cl_config(
+        structure_price_quantum=Decimal("0.01"),
+        price_basis_revision="raw-v1",
+    )["strict_config_revision"]
 
 
 def test_snapshot_metadata_is_required_and_never_guessed() -> None:

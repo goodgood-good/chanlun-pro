@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import datetime
 from decimal import Decimal
 from zoneinfo import ZoneInfo
@@ -115,6 +116,12 @@ def center() -> CausalCenterCompletionFact:
         return_low_tick=320,
         return_high_tick=335,
     )
+
+
+def test_causal_center_completion_accepts_original_text_equality_boundary() -> None:
+    equality_center = replace(center(), zd_tick=320, zg_tick=320)
+
+    assert equality_center.zd_tick == equality_center.zg_tick == 320
 
 
 def trend(

@@ -672,9 +672,22 @@ class CL(ICL):
         approaching_points = self.get_strict_approaching_points()
         divergences = self.get_strict_divergences()
         price_basis_revision = self._strict_price_basis_revision()
-        strict_config_revision = (
-            "chanlun-strict-signals/v3+" + strict_base_config_revision()
-        )
+        configured_revision = self.config.get("strict_config_revision")
+        if configured_revision is None:
+            # Compatibility for direct research construction that predates
+            # runtime parameter snapshots.  Production factories always bind
+            # an exact revision and therefore take the branch below.
+            strict_config_revision = (
+                "chanlun-strict-signals/v3+" + strict_base_config_revision()
+            )
+        elif (
+            not isinstance(configured_revision, str)
+            or not configured_revision.strip()
+            or configured_revision != configured_revision.strip()
+        ):
+            raise ValueError("strict_config_revision must be a non-empty string")
+        else:
+            strict_config_revision = configured_revision
         structure_revision = build_strict_evidence_revision(
             symbol=self.get_code(),
             source_frequency=self.get_frequency(),

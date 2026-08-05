@@ -168,7 +168,13 @@ def test_startup_ensures_missing_qmt_then_registers_owned_jobs(
     assert set(scheduler.jobs) == {QMT_DAILY_JOB_ID, QMT_MONITOR_JOB_ID}
     assert scheduler.jobs[QMT_DAILY_JOB_ID]["hour"] == 8
     assert scheduler.jobs[QMT_DAILY_JOB_ID]["minute"] == 30
+    assert scheduler.jobs[QMT_DAILY_JOB_ID]["name"] == (
+        "QMT 工作日启动维护（应用托管）"
+    )
     assert scheduler.jobs[QMT_MONITOR_JOB_ID]["minutes"] == 1
+    assert scheduler.jobs[QMT_MONITOR_JOB_ID]["name"] == (
+        "QMT 运行状态与故障恢复监控"
+    )
     snapshot = controller.snapshot()
     assert snapshot["contract_id"] == APP_QMT_CONTRACT_ID
     assert snapshot["execution_owner"] == "APP_RUNTIME"

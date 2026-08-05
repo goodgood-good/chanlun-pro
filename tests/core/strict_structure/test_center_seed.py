@@ -4,11 +4,13 @@ import pytest
 
 from chanlun.core.strict_structure import center_machine
 from chanlun.core.strict_structure.center_machine import (
+    advance_center,
     calculate_centers,
     establish_center,
     forming_preview,
 )
 from chanlun.core.strict_structure.models import (
+    CenterEventKind,
     CenterPreviewState,
     CenterState,
     SourceKind,
@@ -17,191 +19,153 @@ from tests.core.strict_structure.helpers import (
     TEST_PRICE_BASIS,
     unit,
     valid_five_up_exit,
+    valid_three_center_seed,
 )
 
 
-def invalid_initial_five(mutation):
-    values = {
-        "middle_has_no_positive_core": (
-            unit(0, "up", 90, 120),
-            unit(1, "down", 120, 100),
-            unit(2, "up", 100, 130),
-            unit(3, "down", 130, 121),
-            unit(4, "up", 121, 140),
-        ),
-        "entry_has_no_positive_overlap": (
-            unit(0, "up", 80, 90),
-            unit(1, "down", 90, 70),
-            unit(2, "up", 70, 78),
-            unit(3, "down", 78, 72),
-            unit(4, "up", 72, 95),
-        ),
-        "exit_has_no_positive_overlap": (
-            unit(0, "down", 130, 100),
-            unit(1, "up", 100, 120),
-            unit(2, "down", 120, 90),
-            replace(unit(3, "up", 90, 95), high_tick=110),
-            unit(4, "down", 95, 80),
-        ),
-        "exit_endpoint_inside_core": (
-            unit(0, "up", 90, 120),
-            unit(1, "down", 120, 100),
-            unit(2, "up", 100, 115),
-            unit(3, "down", 115, 105),
-            unit(4, "up", 105, 110),
-        ),
-    }
-    return values[mutation]
+def test_first_three_locked_units_establish_original_text_center():
+    seed = valid_three_center_seed()
 
+    value = establish_center(seed, 0, SourceKind.SEGMENT)
 
-def test_five_locked_units_establish_ongoing_center_with_middle_core():
-    initial = valid_five_up_exit()
-    value = establish_center(initial, 0, SourceKind.SEGMENT)
     assert value is not None
     assert value.state is CenterState.ONGOING
-    assert value.initial_units == initial
-    assert value.entry_unit is initial[0]
-    assert value.core_units == initial[1:4]
-    assert value.initial_exit_unit is initial[4]
-    assert value.pending_leave_unit is initial[4]
+    assert value.initial_units == seed
+    assert value.core_units == seed
+    assert value.entry_unit is seed[0]  # deprecated compatibility alias
+    assert value.initial_exit_unit is seed[-1]  # compatibility alias
+    assert value.pending_leave_unit is None
     assert (value.zd_tick, value.zg_tick) == (105, 115)
-    assert value.established_at == initial[4].confirmed_at
-    assert value.body_units == initial
+    assert value.established_at == seed[-1].confirmed_at
+    assert value.body_units == seed
     assert value.price_basis_revision == TEST_PRICE_BASIS
 
 
-def test_three_or_four_locked_units_never_establish_formal_center():
-    initial = valid_five_up_exit()
-    assert establish_center(initial[:3], 0, SourceKind.SEGMENT) is None
-    assert establish_center(initial[:4], 0, SourceKind.SEGMENT) is None
+def test_fourth_can_extend_and_fifth_can_become_departure():
+    lifecycle = valid_five_up_exit()
+    value = establish_center(lifecycle[:3], 0, SourceKind.SEGMENT)
+    assert value is not None
+
+    extended, first = advance_center(value, lifecycle[3])
+    pending, event = advance_center(extended, lifecycle[4])
+
+    assert first.kind is CenterEventKind.EXTENDED
+    assert pending.state is CenterState.ONGOING
+    assert pending.pending_leave_unit is lifecycle[4]
+    assert pending.body_units == lifecycle
+    assert event.kind is CenterEventKind.BREAKOUT_WATCH_UP
 
 
-@pytest.mark.parametrize(
-    "mutation",
-    (
-        "middle_has_no_positive_core",
-        "entry_has_no_positive_overlap",
-        "exit_has_no_positive_overlap",
-    ),
-)
-def test_initial_five_reject_each_geometric_violation(mutation):
-    assert (
-        establish_center(
-            invalid_initial_five(mutation),
-            0,
-            SourceKind.SEGMENT,
-        )
-        is None
-    )
+def test_first_locked_return_outside_completes_center():
+    lifecycle = valid_five_up_exit()
+    ret = unit(5, "down", lifecycle[-1].end_tick, 120)
+    result = calculate_centers(lifecycle + (ret,), 0, SourceKind.SEGMENT)
+
+    assert len(result.centers) == 1
+    completed = result.centers[0]
+    assert completed.state is CenterState.COMPLETED
+    assert completed.completion_leave_unit is lifecycle[4]
+    assert completed.completion_return_unit is ret
+    assert result.events[-1].kind is CenterEventKind.COMPLETED_UP
 
 
-def test_five_locked_overlapping_units_establish_before_exit_moves_outside():
-    values = invalid_initial_five("exit_endpoint_inside_core")
-
-    center = establish_center(values, 0, SourceKind.SEGMENT)
-
-    assert center is not None
-    assert center.state is CenterState.ONGOING
-    assert center.entry_unit.direction == center.initial_exit_unit.direction == "up"
-    assert center.pending_leave_unit is None
-    assert (center.zd_tick, center.zg_tick) == (105, 115)
-    assert center.core_body_end_market_time == values[4].market_start
+def test_fewer_than_three_locked_units_never_establish_formal_center():
+    seed = valid_three_center_seed()
+    assert establish_center(seed[:1], 0, SourceKind.SEGMENT) is None
+    assert establish_center(seed[:2], 0, SourceKind.SEGMENT) is None
 
 
-def test_entry_touching_core_boundary_has_no_positive_overlap():
+def test_first_three_reject_when_closed_intersection_is_empty():
     values = (
-        unit(0, "up", 90, 105),
-        replace(unit(1, "down", 105, 100), high_tick=120),
-        unit(2, "up", 100, 115),
-        unit(3, "down", 115, 105),
-        unit(4, "up", 105, 130),
+        unit(0, "up", 90, 120),
+        unit(1, "down", 120, 70),
+        unit(2, "up", 70, 80),
     )
     assert establish_center(values, 0, SourceKind.SEGMENT) is None
 
 
-def test_initial_exit_touching_core_boundary_has_no_positive_overlap():
+def test_closed_boundary_intersection_is_a_formal_center_not_touch_only():
     values = (
         unit(0, "up", 90, 120),
         unit(1, "down", 120, 100),
-        unit(2, "up", 100, 115),
-        replace(unit(3, "down", 115, 115), low_tick=105),
-        unit(4, "up", 115, 130),
+        unit(2, "up", 100, 100),
     )
-    assert establish_center(values, 0, SourceKind.SEGMENT) is None
+
+    value = establish_center(values, 0, SourceKind.SEGMENT)
+
+    assert value is not None
+    assert value.zd_tick == value.zg_tick == 100
+    preview = forming_preview(values, 0, SourceKind.SEGMENT)
+    assert preview is not None
+    assert preview.state is CenterPreviewState.FORMING
 
 
-def test_unlocked_initial_exit_establishes_forming_preview_only():
-    initial = valid_five_up_exit()
-    active = initial[:-1] + (
-        replace(initial[-1], locked=False, confirmed_at=None),
+def test_unlocked_third_component_establishes_forming_preview_only():
+    seed = valid_three_center_seed()
+    active = seed[:-1] + (
+        replace(seed[-1], locked=False, confirmed_at=None),
     )
     assert establish_center(active, 0, SourceKind.SEGMENT) is None
     preview_builder = getattr(center_machine, "establish_center_preview", None)
     assert callable(preview_builder), "establish_center_preview is required"
+
     preview = preview_builder(active, 0, SourceKind.SEGMENT)
+
     assert preview is not None
     assert preview.state is CenterPreviewState.FORMING
     assert preview.price_basis_revision == TEST_PRICE_BASIS
     assert preview.unit_ids == tuple(item.unit_id for item in active)
     assert (preview.zd_tick, preview.zg_tick) == (105, 115)
-    assert not hasattr(preview, "center_id")
     result = calculate_centers(active, 0, SourceKind.SEGMENT)
     assert result.centers == ()
     assert result.previews == (preview,)
 
 
-def test_unlocked_fifth_unit_inside_core_is_forming_center_preview():
-    initial = valid_five_up_exit()
-    inside = replace(
-        initial[-1],
-        end_tick=110,
-        high_tick=115,
-        locked=False,
-        confirmed_at=None,
+def test_locked_seed_remains_formal_when_later_departure_is_unlocked():
+    lifecycle = valid_five_up_exit()
+    active_leave = replace(
+        lifecycle[4], locked=False, confirmed_at=None
     )
-    values = initial[:-1] + (inside,)
-    preview_builder = getattr(center_machine, "establish_center_preview", None)
-    assert callable(preview_builder), "establish_center_preview is required"
-    preview = preview_builder(values, 0, SourceKind.SEGMENT)
-    assert preview is not None
-    assert preview.state is CenterPreviewState.FORMING
-    assert preview.unit_ids == tuple(item.unit_id for item in values)
-    assert (preview.zd_tick, preview.zg_tick) == (105, 115)
-    assert calculate_centers(values, 0, SourceKind.SEGMENT).previews == (preview,)
-
-
-def test_zero_width_middle_intersection_is_touch_only_observation():
-    values = (
-        unit(0, "up", 90, 120),
-        unit(1, "down", 120, 100),
-        unit(2, "up", 100, 130),
-        unit(3, "down", 130, 120),
-        unit(4, "up", 120, 140),
+    result = calculate_centers(
+        lifecycle[:4] + (active_leave,), 0, SourceKind.SEGMENT
     )
-    assert establish_center(values, 0, SourceKind.SEGMENT) is None
-    preview = forming_preview(values, 0, SourceKind.SEGMENT)
-    assert preview is not None
-    assert preview.state is CenterPreviewState.TOUCH_ONLY
-    assert preview.zd_tick == preview.zg_tick == 120
+
+    assert len(result.centers) == 1
+    assert result.centers[0].state is CenterState.ONGOING
+    assert result.centers[0].pending_leave_unit is None
+    assert result.locked_unit_count == 4
+    assert result.previews
+    assert all(not hasattr(item, "center_id") for item in result.previews)
 
 
 def test_center_identity_namespace_includes_price_basis_revision():
-    initial = valid_five_up_exit()
-    original = establish_center(initial, 0, SourceKind.SEGMENT)
-    rebased_initial = tuple(
-        replace(item, price_basis_revision="post-action-v2") for item in initial
+    seed = valid_three_center_seed()
+    original = establish_center(seed, 0, SourceKind.SEGMENT)
+    rebased_seed = tuple(
+        replace(item, price_basis_revision="post-action-v2") for item in seed
     )
-    rebased = establish_center(rebased_initial, 0, SourceKind.SEGMENT)
+    rebased = establish_center(rebased_seed, 0, SourceKind.SEGMENT)
     assert original is not None and rebased is not None
     assert original.center_id != rebased.center_id
 
 
 def test_initial_units_reject_mixed_basis_instead_of_squeezing_it_into_center():
-    initial = valid_five_up_exit()
-    mixed = initial[:-1] + (
-        replace(initial[-1], price_basis_revision="post-action-v2"),
+    seed = valid_three_center_seed()
+    mixed = seed[:-1] + (
+        replace(seed[-1], price_basis_revision="post-action-v2"),
     )
     with pytest.raises(ValueError, match="seed price basis mismatch"):
         establish_center(mixed, 0, SourceKind.SEGMENT)
     with pytest.raises(ValueError, match="seed price basis mismatch"):
         forming_preview(mixed, 0, SourceKind.SEGMENT)
+
+
+def test_seed_rejects_disconnected_market_or_price_sequence():
+    seed = valid_three_center_seed()
+    disconnected = replace(
+        seed[1],
+        start_tick=seed[1].start_tick - 1,
+        low_tick=min(seed[1].low_tick, seed[1].start_tick - 1),
+    )
+    with pytest.raises(ValueError, match="seed prices must connect"):
+        establish_center((seed[0], disconnected, seed[2]), 0, SourceKind.SEGMENT)

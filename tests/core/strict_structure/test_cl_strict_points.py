@@ -120,3 +120,14 @@ def test_atomic_strict_evidence_uses_one_cl_generation(sample_frame):
         divergences=evidence.divergences,
     )
     assert evidence.source_closed_at == cd.get_src_klines()[-1].date
+
+
+def test_atomic_strict_evidence_uses_bound_runtime_config_revision(sample_frame):
+    config = strict_config()
+    config["strict_config_revision"] = "sha256:runtime-bound-test"
+    cd = CL("SH.600519", "5m", config)
+    cd.process_klines(sample_frame.head(800))
+
+    assert cd.get_strict_evidence().strict_config_revision == config[
+        "strict_config_revision"
+    ]

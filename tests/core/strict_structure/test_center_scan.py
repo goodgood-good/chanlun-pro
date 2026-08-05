@@ -94,16 +94,18 @@ def _sh000001_causal_prefix_units():
     )
 
 
-def test_scan_with_four_locked_units_has_no_formal_center():
+def test_scan_with_four_locked_units_has_one_formal_first_three_center():
     result = calculate_centers(
         valid_five_up_exit()[:4],
         0,
         SourceKind.SEGMENT,
     )
-    assert result.centers == ()
+    assert len(result.centers) == 1
+    assert result.centers[0].state is CenterState.ONGOING
+    assert result.centers[0].initial_units == valid_five_up_exit()[:3]
+    assert result.centers[0].extension_units == valid_five_up_exit()[3:4]
     assert result.locked_unit_count == 4
-    assert result.previews
-    assert all(not hasattr(item, "center_id") for item in result.previews)
+    assert result.previews == ()
 
 
 def test_scan_stops_formal_input_at_first_unlocked_unit():
@@ -124,7 +126,7 @@ def test_scan_stops_formal_input_at_first_unlocked_unit():
     assert all(item.locked for item in result.centers[0].body_units)
 
 
-def test_completion_return_can_start_next_initial_five_without_body_duplication():
+def test_completion_return_can_start_next_center_without_body_overlap():
     values = _two_completed_centers()
     result = calculate_centers(values, 0, SourceKind.SEGMENT)
     assert len(result.centers) == 2
@@ -149,12 +151,14 @@ def test_scan_emits_establish_extend_watch_complete_events_in_order():
         CenterEventKind.ESTABLISHED,
         CenterEventKind.EXTENDED,
         CenterEventKind.BREAKOUT_WATCH_UP,
+        CenterEventKind.EXTENDED,
+        CenterEventKind.BREAKOUT_WATCH_UP,
         CenterEventKind.COMPLETED_UP,
     ]
     assert result.centers[0].state is CenterState.COMPLETED
 
 
-def test_scan_slides_to_center_whose_entry_matches_the_leave_direction():
+def test_cross_core_return_extends_then_completes_opposite_side():
     values = valid_five_up_exit() + (
         unit(5, "down", 130, 95),
         unit(6, "up", 95, 100),
@@ -163,14 +167,14 @@ def test_scan_slides_to_center_whose_entry_matches_the_leave_direction():
     assert len(result.centers) == 1
     center = result.centers[0]
     assert center.state is CenterState.COMPLETED
-    assert center.entry_unit is values[1]
+    assert center.entry_unit is values[0]
     assert center.completion_direction == "down"
     assert center.completion_leave_unit is values[5]
     assert center.completion_return_unit is values[6]
-    assert center.entry_unit.direction == center.completion_direction
+    assert center.completion_leave_unit is center.body_units[-1]
 
 
-def test_scan_reuses_direction_flip_completion_return_for_next_center():
+def test_scan_reuses_completion_return_as_next_center_boundary():
     values = _direction_flip_then_later_center()
     result = calculate_centers(values, 0, SourceKind.SEGMENT)
     assert [item.state for item in result.centers] == [
@@ -179,13 +183,10 @@ def test_scan_reuses_direction_flip_completion_return_for_next_center():
     ]
     assert result.centers[0].completion_return_unit is values[6]
     assert result.centers[1].entry_unit is values[6]
-    assert all(
-        center.entry_unit.direction == center.completion_direction
-        for center in result.centers
-    )
+    assert result.centers[0].completion_return_unit is values[6]
 
 
-def test_scan_finds_later_five_unit_preview_with_multiple_unlocked_units():
+def test_scan_keeps_one_completed_preview_with_multiple_unlocked_units():
     values = list(_direction_flip_then_later_center())
     for index in range(8, len(values)):
         values[index] = replace(values[index], locked=False, confirmed_at=None)
@@ -199,13 +200,13 @@ def test_scan_finds_later_five_unit_preview_with_multiple_unlocked_units():
         if preview.state is CenterPreviewState.COMPLETED
     ]
     assert len(completed) == 1
-    assert completed[0].unit_ids == tuple(item.unit_id for item in values[6:11])
+    assert completed[0].unit_ids == tuple(item.unit_id for item in values[7:11])
     assert completed[0].completion_return_unit_id == values[11].unit_id
-    assert sum(not item.locked for item in values[6:11]) == 3
+    assert len(result.previews) == 1
 
 
-def test_completed_center_leave_can_be_next_center_entry():
-    """The 04-03..04-23 SH.000001 shape shares one boundary segment."""
+def test_completed_center_return_can_be_next_center_entry():
+    """Adjacent centers use the return as a unique non-overlapping boundary."""
 
     values = valid_five_up_exit() + (
         unit(5, "down", 130, 120),
@@ -223,15 +224,12 @@ def test_completed_center_leave_can_be_next_center_entry():
     ]
     first, second = result.centers
     assert first.completion_leave_unit is values[4]
-    assert second.entry_unit is values[4]
+    assert first.completion_return_unit is values[5]
+    assert second.entry_unit is values[5]
     assert second.completion_leave_unit is values[8]
     assert second.completion_return_unit is values[9]
-    assert set(item.unit_id for item in first.body_units) & set(
+    assert not set(item.unit_id for item in first.body_units) & set(
         item.unit_id for item in second.body_units
-    ) == {values[4].unit_id}
-    assert all(
-        center.entry_unit.direction == center.completion_direction
-        for center in result.centers
     )
 
 
@@ -284,12 +282,14 @@ def test_later_completed_seed_supersedes_broad_ongoing_seed_causally():
         values, 0, SourceKind.SEGMENT
     ).centers
 
-    assert len(at_completion) == len(after_broad_seed_breaks) == 1
+    assert len(at_completion) == 1
+    assert len(after_broad_seed_breaks) == 2
     assert at_completion[0].state is CenterState.COMPLETED
     assert at_completion[0].entry_unit is values[3]
     assert at_completion[0].completion_leave_unit is values[7]
     assert at_completion[0].completion_return_unit is values[8]
     assert at_completion[0] == after_broad_seed_breaks[0]
+    assert after_broad_seed_breaks[1].state is CenterState.ONGOING
 
 
 @pytest.mark.parametrize(
@@ -318,8 +318,8 @@ def test_scan_does_not_shift_active_leave_into_later_center_core(values):
     )
 
 
-def test_scan_forms_adjacent_preview_only_after_new_leave_exists():
-    """A true adjacent preview shares only the old leave/new entry unit."""
+def test_active_center_owns_preview_even_after_shifted_seed_exists():
+    """An unlocked shifted seed cannot coexist with its formal owner."""
 
     values = valid_five_up_exit() + (
         replace(unit(5, "down", 130, 120), locked=False, confirmed_at=None),
@@ -330,15 +330,13 @@ def test_scan_forms_adjacent_preview_only_after_new_leave_exists():
 
     result = calculate_centers(values, 0, SourceKind.SEGMENT)
 
-    forming = [
-        preview
-        for preview in result.previews
-        if preview.state is CenterPreviewState.FORMING
-        and len(preview.unit_ids) == 5
-    ]
-    assert len(forming) == 1
-    assert forming[0].unit_ids == tuple(item.unit_id for item in values[4:9])
-    assert (forming[0].zd_tick, forming[0].zg_tick) == (125, 130)
+    assert len(result.previews) == 1
+    preview = result.previews[0]
+    assert preview.state is CenterPreviewState.COMPLETED
+    assert preview.unit_ids[:3] == tuple(
+        item.unit_id for item in result.centers[-1].initial_units
+    )
+    assert preview.completion_return_unit_id == values[5].unit_id
 
 
 def test_active_center_forming_extension_suppresses_shifted_live_seed():
@@ -489,17 +487,10 @@ def test_adjacent_forming_preview_does_not_erase_active_center_completion():
         for preview in result.previews
         if preview.state is CenterPreviewState.COMPLETED
     ]
-    forming = [
-        preview
-        for preview in result.previews
-        if preview.state is CenterPreviewState.FORMING
-        and len(preview.unit_ids) == 5
-    ]
     assert len(completed) == 1
     assert completed[0].unit_ids[:5] == tuple(item.unit_id for item in values[:5])
     assert completed[0].completion_return_unit_id == values[5].unit_id
-    assert len(forming) == 1
-    assert forming[0].unit_ids == tuple(item.unit_id for item in values[4:9])
+    assert len(result.previews) == 1
 
 
 def test_scan_does_not_relax_non_overlapping_entry_without_active_center_tail():
@@ -555,23 +546,19 @@ def test_completed_center_is_not_rewritten_by_later_prefix_units():
     assert completed_at_17[: len(completed_at_14)] == completed_at_14
 
 
-def test_zero_width_middle_core_is_touch_only_not_formal_center():
+def test_zero_width_closed_core_is_formal_center():
     values = (
         unit(0, "up", 90, 120),
         unit(1, "down", 120, 100),
-        unit(2, "up", 100, 130),
-        unit(3, "down", 130, 120),
-        unit(4, "up", 120, 140),
+        unit(2, "up", 100, 100),
     )
     result = calculate_centers(values, 0, SourceKind.SEGMENT)
-    assert result.centers == ()
-    touch = [
-        item
+    assert len(result.centers) == 1
+    assert result.centers[0].zd_tick == result.centers[0].zg_tick == 100
+    assert not any(
+        item.state is CenterPreviewState.TOUCH_ONLY
         for item in result.previews
-        if item.state is CenterPreviewState.TOUCH_ONLY
-    ]
-    assert len(touch) == 1
-    assert touch[0].zd_tick == touch[0].zg_tick == 120
+    )
 
 
 def test_scan_rejects_locked_unit_after_preview_tail():
@@ -590,7 +577,12 @@ def _invalid_sequences():
     )
     same_direction = (
         base[0],
-        replace(base[1], direction="up", end_tick=base[1].start_tick),
+        replace(
+            base[1],
+            direction="up",
+            start_tick=base[1].end_tick,
+            end_tick=base[1].start_tick,
+        ),
         *base[2:],
     )
     disconnected = (
@@ -598,7 +590,6 @@ def _invalid_sequences():
         replace(
             base[1],
             start_tick=base[1].start_tick - 1,
-            high_tick=base[1].high_tick + 1,
         ),
         *base[2:],
     )
@@ -635,3 +626,47 @@ def test_scan_rejects_non_continuous_constituent_sequence(values, message):
 def test_level_result_carries_the_single_input_price_basis():
     result = calculate_centers(valid_five_up_exit(), 0, SourceKind.SEGMENT)
     assert result.price_basis_revision == TEST_PRICE_BASIS
+
+
+def test_recursive_preview_accepts_either_direction_as_departure():
+    """Three-trend centers have no external entry-direction constraint."""
+
+    values = (
+        unit(0, "up", 90, 120, source_kind=SourceKind.TREND_TYPE),
+        unit(1, "down", 120, 100, source_kind=SourceKind.TREND_TYPE),
+        unit(
+            2,
+            "up",
+            100,
+            115,
+            source_kind=SourceKind.TREND_TYPE,
+            locked=False,
+        ),
+        unit(
+            3,
+            "down",
+            115,
+            90,
+            source_kind=SourceKind.TREND_TYPE,
+            locked=False,
+        ),
+        unit(
+            4,
+            "up",
+            90,
+            99,
+            source_kind=SourceKind.TREND_TYPE,
+            locked=False,
+        ),
+    )
+
+    result = calculate_centers(values, 0, SourceKind.TREND_TYPE)
+
+    completed = [
+        preview
+        for preview in result.previews
+        if preview.state is CenterPreviewState.COMPLETED
+    ]
+    assert len(completed) == 1
+    assert completed[0].unit_ids == tuple(item.unit_id for item in values[:4])
+    assert completed[0].completion_return_unit_id == values[4].unit_id

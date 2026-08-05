@@ -10,7 +10,7 @@ from chanlun.core.strict_structure.base_profile import strict_base_config
 
 
 FIXTURES = Path(__file__).resolve().parents[2] / "fixtures"
-GOLDEN = Path(__file__).resolve().parents[1] / "golden" / "strict_points_v3.json"
+GOLDEN = Path(__file__).resolve().parents[1] / "golden" / "strict_points_v4.json"
 
 
 def strict_config():
@@ -96,14 +96,14 @@ def _golden_point(point):
     }
 
 
-def build_v3_golden_document():
+def build_v4_golden_document():
     rows = 1100
     frame = load_frame("SZ.002299_1m.parquet", rows)
     cd = CL("SZ.002299", "1m", strict_config())
     cd.process_klines(frame)
     evidence = cd.get_strict_evidence()
     points = [_golden_point(point) for point in evidence.confirmed_points]
-    assert points, "v3 golden fixture must remain non-vacuous"
+    assert points, "v4 golden fixture must remain non-vacuous"
     return {
         "code": "SZ.002299",
         "dataset": "tests/fixtures/SZ.002299_1m.parquet",
@@ -111,7 +111,7 @@ def build_v3_golden_document():
         "points": points,
         "price_basis_revision": evidence.price_basis_revision,
         "rows": rows,
-        "schema_version": "chanlun-strict-points-golden/v3",
+        "schema_version": "chanlun-strict-points-golden/v4",
         "source_closed_at": evidence.source_closed_at.isoformat(),
         "structure_price_quantum": str(evidence.structure_price_quantum),
     }
@@ -139,14 +139,14 @@ def test_zhongji_real_point_ledger_is_prefix_stable_and_non_vacuous():
     )
 
 
-def test_zhongji_real_points_match_audited_v3_golden():
+def test_zhongji_real_points_match_audited_v4_golden():
     expected = json.loads(GOLDEN.read_text(encoding="utf-8"))
     frame = load_frame("SZ.002299_1m.parquet", expected["rows"])
     cd = CL(expected["code"], expected["frequency"], strict_config())
     cd.process_klines(frame)
     evidence = cd.get_strict_evidence()
 
-    assert expected["schema_version"] == "chanlun-strict-points-golden/v3"
+    assert expected["schema_version"] == "chanlun-strict-points-golden/v4"
     assert evidence.source_closed_at.isoformat() == expected["source_closed_at"]
     assert evidence.price_basis_revision == expected["price_basis_revision"]
     assert str(evidence.structure_price_quantum) == expected["structure_price_quantum"]

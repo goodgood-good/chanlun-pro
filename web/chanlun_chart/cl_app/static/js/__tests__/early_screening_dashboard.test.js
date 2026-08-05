@@ -1663,7 +1663,7 @@ test("period path and evidence groups separate established missing blocking and 
         state: "等待",
         tone: "waiting",
         summary: "尚未取得同向精确触发",
-        boundary: "结构止损 9.80",
+        boundary: "结构防守价 9.80",
       },
     ],
   );
@@ -1682,7 +1682,7 @@ test("period path and evidence groups separate established missing blocking and 
   assert.deepEqual(groups.next, ["等待 1分钟同向买卖点闭合"]);
   assert.deepEqual(groups.risk, [
     "5分钟失效价：未提供",
-    "结构止损：9.80",
+    "结构防守价：9.80",
     "风险乘数：0.50",
   ]);
   assert.deepEqual(groups.raw, [

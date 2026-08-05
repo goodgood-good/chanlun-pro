@@ -7,6 +7,7 @@ import pandas as pd
 from chanlun.decision_support.trading_system.backtest.fixed_year import (
     FRAME_COLUMNS,
     final_confirmed_structure_events,
+    strict_state,
 )
 
 
@@ -46,3 +47,12 @@ def test_point_and_completed_trend_ledgers_are_prefix_invariant() -> None:
     assert prefix.completed_trends == tuple(
         trend for trend in full.completed_trends if trend.available_at <= cutoff
     )
+
+
+def test_causal_v3_structure_uses_original_old_pen_recursive_profile() -> None:
+    state = strict_state("SZ.002299", "1m", frame(900))
+    config = state.get_config()
+
+    assert config["bi_type"] == "bi_type_old"
+    assert config["pen_definition"] == "ORIGINAL_OLD_PEN"
+    assert config["recursive_structure_scope"] == "same-source-direct-recursion"

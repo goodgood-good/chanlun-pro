@@ -287,6 +287,9 @@ def test_default_replay_cl_factory_requires_snapshot_price_metadata() -> None:
     config = state.get_config()
     assert config["structure_price_quantum"] == "0.001"
     assert config["price_basis_revision"] == "causal-adjustment-ledger-v1"
+    assert config["bi_type"] == "bi_type_old"
+    assert config["screening_structure_scope"] == "physical-timeframe-level-zero"
+    assert config["screening_recursive_structure"] is False
     assert config["strict_config_revision"].startswith("sha256:")
     frame.attrs.clear()
     with pytest.raises(ValueError, match="structure_price_quantum metadata"):

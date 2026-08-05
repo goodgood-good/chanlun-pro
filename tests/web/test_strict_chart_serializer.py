@@ -98,8 +98,10 @@ def _center(
         _unit(3, "down", 115, 105, source_kind=source_kind),
         _unit(4, "up", 105, 130, source_kind=source_kind),
     )
-    value = establish_center(initial, 0, source_kind)
+    value = establish_center(initial[:3], 0, source_kind)
     assert value is not None
+    value, _event = advance_center(value, initial[3])
+    value, _event = advance_center(value, initial[4])
     if extension:
         value, _event = advance_center(
             value,
@@ -140,9 +142,7 @@ def _forming_preview_fixture():
     units = (
         _unit(0, "up", 90, 120),
         _unit(1, "down", 120, 100),
-        _unit(2, "up", 100, 115),
-        _unit(3, "down", 115, 105),
-        _unit(4, "up", 105, 130, locked=False),
+        _unit(2, "up", 100, 115, locked=False),
     )
     preview = establish_center_preview(units, 0, SourceKind.SEGMENT)
     assert preview is not None
@@ -247,11 +247,11 @@ def _evidence(
 def test_formal_center_rectangle_uses_core_not_envelope() -> None:
     payload = strict_center_to_chart_dict(_center(extension=True))
 
-    assert [point["price_tick"] for point in payload["points"]] == [115, 105]
+    assert [point["price_tick"] for point in payload["points"]] == [115, 100]
     assert payload["envelope"] == {"dd_tick": 90, "gg_tick": 130}
 
 
-def test_v5_center_payload_exposes_five_roles_and_completion_state() -> None:
+def test_v5_center_payload_exposes_first_three_and_completion_state() -> None:
     center = completed_up_center()
     payload = strict_center_to_chart_dict(center)
 
@@ -270,26 +270,17 @@ def test_v5_center_payload_exposes_five_roles_and_completion_state() -> None:
         payload["completion_return_unit_id"]
         == center.completion_return_unit.unit_id
     )
-    assert payload["entering_segment"] == {
-        "unit_id": center.entry_unit.unit_id,
-        "direction": center.entry_unit.direction,
-        "start_time": int(center.entry_unit.market_start.timestamp()),
-        "end_time": int(center.entry_unit.market_end.timestamp()),
-        "start_tick": center.entry_unit.start_tick,
-        "end_tick": center.entry_unit.end_tick,
-        "low_tick": center.entry_unit.low_tick,
-        "high_tick": center.entry_unit.high_tick,
-        "locked": True,
-    }
+    assert payload["entering_segment"] is None
+    assert payload["first_three_component_ids"] == [
+        item.unit_id for item in center.initial_units
+    ]
     assert payload["leaving_segment"]["unit_id"] == (
         center.completion_leave_unit.unit_id
     )
-    assert payload["leaving_segment"]["direction"] == (
-        payload["entering_segment"]["direction"]
-    )
+    assert payload["leaving_segment"]["direction"] == center.completion_direction
 
 
-def test_snapshot_exposes_entry_and_leave_prices_for_ui_audit() -> None:
+def test_snapshot_exposes_first_three_and_leave_prices_for_ui_audit() -> None:
     center = completed_up_center()
     snapshot = build_strict_structure_snapshot(
         _evidence(
@@ -300,18 +291,17 @@ def test_snapshot_exposes_entry_and_leave_prices_for_ui_audit() -> None:
     )
     payload = snapshot["levels"][0]["centers"][0]
 
-    assert payload["entering_segment"]["start_price"] == float(
-        QUANTUM * center.entry_unit.start_tick
-    )
-    assert payload["entering_segment"]["end_price"] == float(
-        QUANTUM * center.entry_unit.end_tick
+    assert payload["entering_segment"] is None
+    assert [item["unit_id"] for item in payload["first_three_components"]] == [
+        item.unit_id for item in center.initial_units
+    ]
+    assert payload["first_three_components"][0]["start_price"] == float(
+        QUANTUM * center.initial_units[0].start_tick
     )
     assert payload["leaving_segment"]["unit_id"] == (
         center.completion_leave_unit.unit_id
     )
-    assert payload["leaving_segment"]["direction"] == (
-        payload["entering_segment"]["direction"]
-    )
+    assert payload["leaving_segment"]["direction"] == center.completion_direction
 
 
 def test_center_render_id_changes_on_body_revision_or_state_only() -> None:
@@ -375,7 +365,7 @@ def test_chart_times_are_utc_epoch_seconds_and_reject_naive_datetime() -> None:
         center.core_units[0].market_start.timestamp()
     )
     assert payload["points"][1]["time"] == int(
-        center.initial_exit_unit.market_start.timestamp()
+        center.core_body_end_market_time.timestamp()
     )
     with pytest.raises(ValueError, match="timezone-aware"):
         aware_datetime_to_epoch_seconds(
@@ -394,7 +384,7 @@ def test_active_projection_is_one_box_from_core_start_through_source_close() -> 
     )
 
     assert body["points"][1]["time"] == int(
-        center.initial_exit_unit.market_start.timestamp()
+        center.core_body_end_market_time.timestamp()
     )
     assert projection["render_kind"] == "center_projection"
     assert projection["tradable"] is False
@@ -425,9 +415,18 @@ def test_snapshot_projects_only_the_latest_ongoing_center() -> None:
         center_id="latest-completed",
     )
     completion_points = engine_for(latest_completed).third_class_points()
-    completed_snapshot = build_strict_structure_snapshot(
+
+    # 一个未完成中枢之后不允许再出现已完成中枢；该状态只能来自陈旧缓存或
+    # 人工拼接，必须在模型边界失败关闭，不能交给序列化层猜测如何显示。
+    with pytest.raises(ValueError, match="only the terminal center may remain ongoing"):
         _evidence(
             formal_centers=(stale_ongoing, latest_completed),
+            confirmed_points=completion_points,
+        )
+
+    completed_snapshot = build_strict_structure_snapshot(
+        _evidence(
+            formal_centers=(latest_completed,),
             confirmed_points=completion_points,
         ),
         interval="5m",
@@ -472,24 +471,35 @@ def test_snapshot_serializes_unlocked_tail_as_non_tradable_center_preview() -> N
     assert payload["state"] == "forming"
     assert payload["tradable"] is False
     assert payload["core"] == {
-        "zd_tick": 105,
+        "zd_tick": 100,
         "zg_tick": 115,
-        "zd_price": 1.05,
+        "zd_price": 1.0,
         "zg_price": 1.15,
     }
     assert payload["initial_unit_ids"] == [item.unit_id for item in units]
     assert payload["points"][1]["time"] == snapshot["source_closed_at"]
 
 
-def test_snapshot_serializes_multiple_unlocked_preview_units() -> None:
+def test_snapshot_serializes_three_trend_recursive_center_preview() -> None:
+    """Recursive centers establish from three lower-level trend types."""
+
     units = (
-        _unit(0, "up", 90, 120),
-        _unit(1, "down", 120, 100),
-        _unit(2, "up", 100, 115, locked=False),
-        _unit(3, "down", 115, 105, locked=False),
-        _unit(4, "up", 105, 130, locked=False),
+        _unit(0, "up", 90, 120, source_kind=SourceKind.TREND_TYPE),
+        _unit(1, "down", 120, 100, source_kind=SourceKind.TREND_TYPE),
+        _unit(
+            2,
+            "up",
+            100,
+            115,
+            source_kind=SourceKind.TREND_TYPE,
+            locked=False,
+        ),
     )
-    preview = establish_center_preview(units, 0, SourceKind.SEGMENT)
+    preview = establish_center_preview(
+        units,
+        0,
+        SourceKind.TREND_TYPE,
+    )
     assert preview is not None
 
     snapshot = build_strict_structure_snapshot(
@@ -502,11 +512,42 @@ def test_snapshot_serializes_multiple_unlocked_preview_units() -> None:
     )
 
     payload = snapshot["levels"][0]["center_previews"][0]
+    assert payload["source_kind"] == "trend_type"
     assert payload["initial_unit_ids"] == [item.unit_id for item in units]
-    assert payload["pending_leave_unit_id"] == units[-1].unit_id
+    assert payload["core_unit_ids"] == [item.unit_id for item in units]
+    assert payload["entry_unit_id"] == units[0].unit_id
+    assert payload["initial_exit_unit_id"] == units[-1].unit_id
+    assert payload["body_revision"] == 0
 
 
-def test_snapshot_keeps_active_core_until_adjacent_five_roles_exist() -> None:
+def test_snapshot_serializes_multiple_unlocked_preview_units() -> None:
+    units = (
+        _unit(0, "up", 90, 120),
+        _unit(1, "down", 120, 100),
+        _unit(2, "up", 100, 115, locked=False),
+        _unit(3, "down", 115, 105, locked=False),
+        _unit(4, "up", 105, 130, locked=False),
+    )
+    result = calculate_centers(units, 0, SourceKind.SEGMENT)
+    assert len(result.previews) == 1
+    preview = result.previews[0]
+
+    snapshot = build_strict_structure_snapshot(
+        _evidence(
+            formal_centers=(),
+            previews=(preview,),
+            level_units=units,
+        ),
+        interval="5m",
+    )
+
+    payload = snapshot["levels"][0]["center_previews"][0]
+    assert payload["initial_unit_ids"] == list(preview.unit_ids)
+    assert payload["initial_unit_ids"] == [item.unit_id for item in units[2:]]
+    assert payload["pending_leave_unit_id"] is None
+
+
+def test_snapshot_keeps_active_core_until_adjacent_first_three_exist() -> None:
     units = (
         _unit(0, "up", 90, 120),
         _unit(1, "down", 120, 100),
@@ -536,7 +577,7 @@ def test_snapshot_keeps_active_core_until_adjacent_five_roles_exist() -> None:
     )
 
     payload = snapshot["levels"][0]["center_previews"][0]
-    assert payload["core"]["zd_tick"] == 105
+    assert payload["core"]["zd_tick"] == 100
     assert payload["core"]["zg_tick"] == 115
     assert payload["entry_unit_id"] == units[0].unit_id
 
@@ -551,14 +592,14 @@ def test_snapshot_serializes_provisional_third_sell_completion() -> None:
         _unit(5, "up", 90, 100, locked=False),
     )
     result = calculate_centers(units, 0, SourceKind.SEGMENT)
-    assert result.centers == ()
+    assert len(result.centers) == 1
     assert len(result.previews) == 1
     preview = result.previews[0]
     assert preview.state is CenterPreviewState.COMPLETED
 
     snapshot = build_strict_structure_snapshot(
         _evidence(
-            formal_centers=(),
+            formal_centers=result.centers,
             previews=(preview,),
             level_units=units,
         ),
@@ -596,21 +637,17 @@ def test_completed_preview_serializer_rejects_return_that_crosses_core() -> None
         )
 
 
-def test_later_preview_suppresses_projection_of_earlier_ongoing_center() -> None:
+def test_shifted_forming_preview_cannot_replace_active_ongoing_center() -> None:
     preview, units = _forming_preview_fixture()
-    snapshot = build_strict_structure_snapshot(
+    with pytest.raises(
+        ValueError,
+        match="shifted forming preview cannot displace an unresolved active-center",
+    ):
         _evidence(
             formal_centers=(ongoing_center(20),),
             previews=(preview,),
             level_units=units,
-        ),
-        interval="5m",
-    )
-
-    level = snapshot["levels"][0]
-    assert len(level["centers"]) == 1
-    assert len(level["center_previews"]) == 1
-    assert level["center_projections"] == []
+        )
 
 
 def test_center_preview_changes_render_revision_not_formal_revision() -> None:

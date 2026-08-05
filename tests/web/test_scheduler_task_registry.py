@@ -5,7 +5,7 @@ import pytest
 from apscheduler.events import EVENT_JOB_EXECUTED, EVENT_JOB_SUBMITTED, JobEvent
 from apscheduler.jobstores.base import ConflictingIdError
 
-from cl_app import create_app
+from cl_app import _scheduler_task_snapshot, create_app
 from cl_app.xuangu_tasks import XuanguTasks, xuangu_task_configs
 
 
@@ -53,10 +53,55 @@ def test_jobs_snapshot_survives_listener_mutation_during_iteration():
         response = app.test_client().get("/jobs")
 
         assert response.status_code == 200
+        assert "后台调度状态" in response.get_data(as_text=True)
     except RuntimeError as exc:
         pytest.fail(f"/jobs iterated a mutating task registry: {exc}")
     finally:
         app.extensions["shutdown_scheduler"]()
+
+
+def test_jobs_snapshot_translates_cached_english_background_task_names():
+    class Scheduler:
+        my_task_lock = threading.RLock()
+        my_task_list = {
+            "holding_group_realtime_monitor": {
+                "id": "holding_group_realtime_monitor",
+                "name": "holding-group-cross-market-realtime-monitor",
+                "state": "已完成",
+            },
+            "qmt_app_daily_restart": {
+                "id": "qmt_app_daily_restart",
+                "name": "QMT weekday restart (app-owned)",
+                "state": "已添加",
+            },
+            "qmt_app_runtime_monitor": {
+                "id": "qmt_app_runtime_monitor",
+                "name": "QMT runtime recovery monitor",
+                "state": "已完成",
+            },
+            "v3_forward_capture": {
+                "id": "v3_forward_capture",
+                "name": "V3 forward Capture (app-owned)",
+                "state": "已添加",
+            },
+            "v3_forward_evaluate": {
+                "id": "v3_forward_evaluate",
+                "name": "V3 forward Evaluate (app-owned)",
+                "state": "已添加",
+            },
+        }
+
+    names = {
+        row["id"]: row["name"] for row in _scheduler_task_snapshot(Scheduler())
+    }
+
+    assert names == {
+        "holding_group_realtime_monitor": "持仓与关注分组跨市场实时监听",
+        "qmt_app_daily_restart": "QMT 工作日启动维护（应用托管）",
+        "qmt_app_runtime_monitor": "QMT 运行状态与故障恢复监控",
+        "v3_forward_capture": "V3 前向模拟盘前快照采集（应用托管）",
+        "v3_forward_evaluate": "V3 前向模拟盘后评估（应用托管）",
+    }
 
 
 class _CollisionScheduler:

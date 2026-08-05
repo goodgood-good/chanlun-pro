@@ -719,7 +719,7 @@
       title,
       detail: allowed ? "程序条件已形成强提示，仍须人工识别" : (reasons[0] ? reasonLabel(reasons[0]) : "等待剩余结构条件"),
       invalidation: text(setup.invalidation_price, "未提供"),
-      structuralStop: text(safeSignal.structural_stop, "未提供"),
+      structuralStop: text(setup.invalidation_price ?? safeSignal.structural_stop, "未提供"),
       riskMultiplier: text(safeSignal.risk_multiplier, "未提供"),
     };
   }
@@ -811,7 +811,7 @@
         state: triggerState,
         tone: triggerTone,
         summary: triggerKnown ? `${triggerPoint}已触发` : "尚未取得同向精确触发",
-        boundary: `结构止损 ${text(safeSignal.structural_stop, "未提供")}`,
+        boundary: `结构防守价 ${text(setup.invalidation_price ?? safeSignal.structural_stop, "未提供")}`,
         evidence: triggerEvidence.map(reasonLabel),
       },
     ];
@@ -1199,7 +1199,7 @@
       next: [nextByStage[safeSignal.lifecycle_stage] || "等待新的可审计结构事实"],
       risk: [
         `5分钟失效价：${invalidation}`,
-        `结构止损：${structuralStop}`,
+        `结构防守价：${structuralStop}`,
         `风险乘数：${riskMultiplier}`,
         ...periodDiagnosticLines("市场", marketDiagnostics),
         ...periodDiagnosticLines("板块", sectorDiagnostics),
@@ -1586,7 +1586,7 @@
     const supplied = (value) => value !== null && value !== undefined && String(value).trim() !== "";
     const riskParts = [];
     if (warmup.converged !== true) riskParts.push("暖机未收敛");
-    if (supplied(invalidation)) riskParts.push(`失效 ${text(invalidation)}`);
+    if (supplied(invalidation)) riskParts.push(`防守 ${text(invalidation)}`);
     if (supplied(signal.structural_stop) && String(signal.structural_stop) !== String(invalidation)) {
       riskParts.push(`止损 ${text(signal.structural_stop)}`);
     }
@@ -1692,7 +1692,7 @@
         ["d", "未知", "等待日线线段结构证据", "日线环境边界未提供"],
         ["30m", "未知", "等待大级别环境证据", "环境边界未提供"],
         ["5m", "未知", "等待操作级别设置", "失效价未提供"],
-        ["1m", "等待", "尚未取得同向精确触发", "结构止损未提供"],
+        ["1m", "等待", "尚未取得同向精确触发", "结构防守价未提供"],
       ];
       for (const [periodFrequency, state, summary, boundary] of emptyPeriods) {
         const periodNode = rootElement.querySelector(`[data-period-node="${periodFrequency}"]`);
@@ -1749,7 +1749,12 @@
     setNodeText(rootElement, "[data-selected-point]", POINT_LABELS[signal.point_type] || signal.point_type);
     setNodeText(rootElement, "[data-selected-stage]", lifecycleLabel(signal.lifecycle_stage));
     setNodeText(rootElement, "[data-selected-tower]", "老笔 → 线段中枢 / 本周期0级（非递归）");
-    setNodeText(rootElement, "[data-selected-stop]", text(signal.structural_stop, "未提供"));
+    const selectedSetup = isRecord(signal.setup_5m) ? signal.setup_5m : {};
+    setNodeText(
+      rootElement,
+      "[data-selected-stop]",
+      text(selectedSetup.invalidation_price ?? signal.structural_stop, "未提供"),
+    );
     setNodeText(rootElement, "[data-selected-risk]", text(signal.risk_multiplier, "未提供"));
 
     const decision = decisionSummaryForSignal(signal);

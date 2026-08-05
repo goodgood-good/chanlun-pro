@@ -111,11 +111,11 @@ class StrengthTable:
 
 def divergent_strength(direction, *, extended=False):
     if direction == "up":
-        values = {"u-6": (100, 5, 2), "u-12": (80, 3, 1)}
+        values = {"u-6": (100, 5, 2), "u-10": (80, 3, 1)}
         if extended:
             values.update({"u-14": (100, 5, 2), "u-20": (60, 2, 0.5)})
     else:
-        values = {"u-6": (100, -5, -2), "u-12": (80, -3, -1)}
+        values = {"u-6": (100, -5, -2), "u-10": (80, -3, -1)}
         if extended:
             values.update({"u-14": (100, -5, -2), "u-20": (60, -2, -0.5)})
     return StrengthTable(values)
@@ -239,7 +239,7 @@ def test_completed_first_point_survives_later_same_direction_trend_extension():
         structure,
         divergent_strength("up", extended=True),
     ).first_class_points()
-    assert [point.anchor_unit_id for point in points] == ["u-12", "u-20"]
+    assert [point.anchor_unit_id for point in points] == ["u-10", "u-20"]
     frozen = points[0]
     assert frozen.available_at == snapshots[0].available_at
     assert frozen.point_id != points[1].point_id

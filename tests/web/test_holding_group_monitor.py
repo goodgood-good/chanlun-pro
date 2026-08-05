@@ -11,6 +11,10 @@ from cl_app.services.holding_group_monitor import (
     HoldingGroupMonitorService,
     build_non_a_monitor_universe,
 )
+from chanlun.decision_support.trading_system.strict_realtime_monitor import (
+    StrictPhysicalMonitorState,
+    collect_strict_monitor_events,
+)
 from chanlun.recursive_bt.monitor.live_monitor import MonitorEvent
 
 
@@ -27,6 +31,16 @@ class _Notifier:
     def send(self, title: str, lines: list[str]) -> bool:
         self.messages.append((title, list(lines)))
         return self.results.pop(0) if self.results else True
+
+
+class _RichNotifier(_Notifier):
+    def __init__(self) -> None:
+        super().__init__()
+        self.rich_messages = []
+
+    def send_rich(self, title, lines, context) -> bool:
+        self.rich_messages.append((title, list(lines), dict(context)))
+        return True
 
 
 class _State:
@@ -127,6 +141,17 @@ def _register(service):
     service.register_job(_Scheduler())
 
 
+def test_production_defaults_use_strict_physical_timeframe_authority(tmp_path):
+    service = HoldingGroupMonitorService(
+        positions_provider=lambda: [],
+        notifier=None,
+        state_root=tmp_path,
+    )
+
+    assert service._state_factory is StrictPhysicalMonitorState
+    assert service._event_collector is collect_strict_monitor_events
+
+
 def test_every_non_a_holding_is_routed_to_its_own_market(tmp_path):
     positions = [
         {"market": "us", "code": "TSLA.US", "name": "特斯拉"},
@@ -163,6 +188,26 @@ def test_every_non_a_holding_is_routed_to_its_own_market(tmp_path):
     assert all(row["op_level"] == "1m" for row in result["positions"])
     assert all(row["mid_level"] == "5m" for row in result["positions"])
     assert all(row["big_level"] == "30m" for row in result["positions"])
+
+
+def test_cross_market_alert_passes_symbol_aligned_chart_context(tmp_path):
+    positions = [{"market": "us", "code": "TSLA.US", "name": "特斯拉"}]
+    notifier = _RichNotifier()
+    service, notifier, _exchange_calls = _service(
+        tmp_path,
+        positions,
+        notifier=notifier,
+    )
+
+    assert service.run_once()["sent_count"] == 1
+
+    assert notifier.messages == []
+    assert len(notifier.rich_messages) == 1
+    chart = notifier.rich_messages[0][2]["charts"][0]
+    assert chart["market"] == "us"
+    assert chart["code"] == "TSLA.US"
+    assert chart["name"] == "特斯拉"
+    assert "small_sell|TSLA.US" in chart["artifact_key"]
 
 
 def test_same_signal_is_not_notified_twice_even_after_restart(tmp_path):
@@ -324,6 +369,32 @@ def test_failed_or_warming_state_never_publishes_stale_structure_event(tmp_path)
     assert notifier.messages == []
 
 
+def test_warming_direction_does_not_suppress_first_authoritative_exit(tmp_path):
+    positions = [{"market": "us", "code": "TSLA.US", "name": "Tesla"}]
+
+    class _InitiallyWarmingState(_State):
+        def __init__(self, code, exchange, **levels):
+            super().__init__(code, exchange, **levels)
+            self.warmup_ready = False
+
+    service, notifier, _exchange_calls = _service(
+        tmp_path,
+        positions,
+        event_collector=_big_down_collector,
+        state_factory=_InitiallyWarmingState,
+    )
+
+    warming = service.run_once()
+    assert warming["sent_count"] == 0
+    assert service._runtime_ledger.previous_direction("us", "TSLA.US") is None
+
+    service._states[("us", "TSLA.US")].warmup_ready = True
+    ready = service.run_once()
+    assert ready["sent_count"] == 1
+    assert len(notifier.messages) == 1
+    assert service._runtime_ledger.previous_direction("us", "TSLA.US") == "down"
+
+
 def test_warmup_that_does_not_converge_becomes_an_observable_outage(tmp_path):
     positions = [{"market": "us", "code": "TSLA.US", "name": "特斯拉"}]
     service, notifier, _exchange_calls = _service(tmp_path, positions)
@@ -442,6 +513,9 @@ def test_scheduler_registration_is_idempotent(tmp_path):
     assert first == "holding_group_realtime_monitor"
     assert second == first
     assert list(scheduler.jobs) == [first]
+    assert scheduler.jobs[first][1]["name"] == (
+        "持仓与关注分组跨市场实时监听"
+    )
     assert service.health_snapshot()["job_registered"] is True
 
 

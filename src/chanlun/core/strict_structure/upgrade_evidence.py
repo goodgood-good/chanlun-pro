@@ -7,7 +7,6 @@ from enum import Enum
 from chanlun.core.strict_structure.identity import stable_structure_id
 from chanlun.core.strict_structure.models import (
     CenterState,
-    SourceKind,
     StrictStructureResult,
     TrendCenter,
 )
@@ -114,15 +113,12 @@ class RecursiveUpgradeEvidence:
 def _center_touch_units(center: TrendCenter):
     """Return only the lower-level movements that actually touch the core.
 
-    Segment-sourced level zero retains its external entry boundary, while a
-    recursive center's three initial trend types are the core themselves.
-    In both representations the completed departure is the final body unit
-    and is excluded from the nine-touch count.
+    All source kinds use their first three components as the center core.  A
+    completed departure is the final body unit and is excluded from the
+    nine-touch count.
     """
 
-    if center.source_kind is SourceKind.TREND_TYPE:
-        return center.body_units[:-1]
-    return center.body_units[1:-1]
+    return center.body_units[:-1]
 
 
 def _resolved_standard_center(
@@ -152,9 +148,8 @@ def _nine_segment_evidence(
 ) -> RecursiveUpgradeEvidence | None:
     if center.state is not CenterState.COMPLETED:
         return None
-    # ``body_units`` = entry + center-touching units + completed leave.  The
-    # original nine-segment rule counts the center-touching lower-level
-    # movements, not the entry and departure boundaries.
+    # ``body_units`` = first-three core + extensions + completed leave.  The
+    # original nine-segment rule counts only center-touching movements.
     touch_units = _center_touch_units(center)
     if len(touch_units) < 9:
         return None

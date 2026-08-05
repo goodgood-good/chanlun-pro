@@ -28,41 +28,25 @@ def relation_center(
         for item in (
             unit(
                 unit_offset,
-                "up",
-                dd,
+                "down",
                 gg,
+                dd,
                 structural_level=structural_level,
                 source_kind=source_kind,
             ),
             unit(
                 unit_offset + 1,
-                "down",
-                gg,
-                zd,
+                "up",
+                dd,
+                zg,
                 structural_level=structural_level,
                 source_kind=source_kind,
             ),
             unit(
                 unit_offset + 2,
-                "up",
-                zd,
-                zg,
-                structural_level=structural_level,
-                source_kind=source_kind,
-            ),
-            unit(
-                unit_offset + 3,
                 "down",
                 zg,
                 zd,
-                structural_level=structural_level,
-                source_kind=source_kind,
-            ),
-            unit(
-                unit_offset + 4,
-                "up",
-                zd,
-                gg,
                 structural_level=structural_level,
                 source_kind=source_kind,
             ),
@@ -112,7 +96,7 @@ def test_cores_touching_at_one_tick_are_upgrade():
 
 def test_extension_changes_envelope_revision_but_never_fixed_core_or_identity():
     value = relation_center("a", 0, 100, 110, 90, 120)
-    entered = replace(unit(5, "down", 120, 105), low_tick=80)
+    entered = replace(unit(3, "up", 100, 105), low_tick=80)
     updated, _event = advance_center(value, entered)
     assert updated.center_id == value.center_id
     assert (updated.zd_tick, updated.zg_tick) == (100, 110)

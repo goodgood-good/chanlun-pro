@@ -4,38 +4,25 @@ import pytest
 
 from chanlun.core.strict_structure.center_machine import (
     advance_center,
-    establish_center,
 )
 from chanlun.core.strict_structure.models import (
     CenterEventKind,
     CenterState,
-    SourceKind,
 )
 from tests.core.strict_structure.helpers import (
     TEST_PRICE_BASIS,
+    ongoing_center,
+    ongoing_down_center,
     unit,
-    valid_five_up_exit,
 )
 
 
 def _ongoing_up_center():
-    value = establish_center(valid_five_up_exit(), 0, SourceKind.SEGMENT)
-    assert value is not None
-    return value
+    return ongoing_center()
 
 
 def _ongoing_down_center():
-    initial = (
-        unit(0, "down", 120, 90),
-        unit(1, "up", 90, 110),
-        unit(2, "down", 110, 95),
-        unit(3, "up", 95, 105),
-        unit(4, "down", 105, 80),
-    )
-    value = establish_center(initial, 0, SourceKind.SEGMENT)
-    assert value is not None
-    assert (value.zd_tick, value.zg_tick) == (95, 105)
-    return value
+    return ongoing_down_center()
 
 
 def test_locked_return_into_core_extends_without_moving_core():
@@ -44,11 +31,11 @@ def test_locked_return_into_core_extends_without_moving_core():
     updated, event = advance_center(value, ret)
     assert updated.state is CenterState.ONGOING
     assert updated.pending_leave_unit is None
-    assert updated.extension_units == (ret,)
+    assert updated.extension_units == value.extension_units + (ret,)
     assert updated.body_units == value.body_units + (ret,)
     assert updated.center_id == value.center_id
     assert (updated.zd_tick, updated.zg_tick) == (105, 115)
-    assert updated.body_revision == 1
+    assert updated.body_revision == value.body_revision + 1
     assert event.kind is CenterEventKind.EXTENDED
 
 
@@ -58,7 +45,7 @@ def test_locked_return_outside_completes_center():
     completed, event = advance_center(value, ret)
     assert completed.state is CenterState.COMPLETED
     assert completed.pending_leave_unit is None
-    assert completed.completion_leave_unit is value.initial_exit_unit
+    assert completed.completion_leave_unit is value.pending_leave_unit
     assert completed.completion_return_unit is ret
     assert ret not in completed.body_units
     assert completed.completed_at == ret.confirmed_at
@@ -81,7 +68,7 @@ def test_down_leave_and_outside_return_complete_down_center():
     completed, event = advance_center(value, ret)
     assert completed.state is CenterState.COMPLETED
     assert completed.completion_direction == "down"
-    assert completed.completion_leave_unit is value.initial_exit_unit
+    assert completed.completion_leave_unit is value.pending_leave_unit
     assert completed.completion_return_unit is ret
     assert event.kind is CenterEventKind.COMPLETED_DOWN
 
@@ -96,8 +83,8 @@ def test_return_extension_then_new_leave_keeps_core_and_emits_watch():
     assert first_event.kind is CenterEventKind.EXTENDED
     assert pending.state is CenterState.ONGOING
     assert pending.pending_leave_unit is leave
-    assert pending.extension_units == (entered, leave)
-    assert pending.body_revision == 2
+    assert pending.extension_units == value.extension_units + (entered, leave)
+    assert pending.body_revision == value.body_revision + 2
     assert pending.center_id == value.center_id
     assert (pending.zd_tick, pending.zg_tick) == (105, 115)
     assert watch.kind is CenterEventKind.BREAKOUT_WATCH_UP
@@ -110,34 +97,36 @@ def test_return_extension_then_new_leave_keeps_core_and_emits_watch():
     assert completion.kind is CenterEventKind.COMPLETED_UP
 
 
-def test_return_crossing_core_is_not_an_opposite_down_leave():
+def test_return_crossing_core_can_become_an_opposite_down_leave():
     value = _ongoing_up_center()
     crossed = unit(5, "down", 130, 95)
     pending, event = advance_center(value, crossed)
 
     assert pending.state is CenterState.ONGOING
-    assert pending.pending_leave_unit is None
-    assert pending.extension_units == (crossed,)
-    assert event.kind is CenterEventKind.EXTENDED
+    assert pending.pending_leave_unit is crossed
+    assert pending.extension_units == value.extension_units + (crossed,)
+    assert event.kind is CenterEventKind.BREAKOUT_WATCH_DOWN
 
     ret = unit(6, "up", 95, 100)
-    with pytest.raises(ValueError, match="ongoing center unit must re-enter"):
-        advance_center(pending, ret)
+    completed, completion = advance_center(pending, ret)
+    assert completed.state is CenterState.COMPLETED
+    assert completion.kind is CenterEventKind.COMPLETED_DOWN
 
 
-def test_return_crossing_core_is_not_an_opposite_up_leave():
+def test_return_crossing_core_can_become_an_opposite_up_leave():
     value = _ongoing_down_center()
     crossed = unit(5, "up", 80, 115)
     pending, event = advance_center(value, crossed)
 
     assert pending.state is CenterState.ONGOING
-    assert pending.pending_leave_unit is None
-    assert pending.extension_units == (crossed,)
-    assert event.kind is CenterEventKind.EXTENDED
+    assert pending.pending_leave_unit is crossed
+    assert pending.extension_units == value.extension_units + (crossed,)
+    assert event.kind is CenterEventKind.BREAKOUT_WATCH_UP
 
     ret = unit(6, "down", 115, 110)
-    with pytest.raises(ValueError, match="ongoing center unit must re-enter"):
-        advance_center(pending, ret)
+    completed, completion = advance_center(pending, ret)
+    assert completed.state is CenterState.COMPLETED
+    assert completion.kind is CenterEventKind.COMPLETED_UP
 
 
 def test_transition_rejects_unlocked_cross_context_and_duplicate_evidence():

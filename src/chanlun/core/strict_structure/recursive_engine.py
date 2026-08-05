@@ -55,14 +55,9 @@ class StrictRecursiveEngine:
                 else SourceKind.TREND_TYPE
             )
             validate_unit_sequence(units, level, source_kind, oscillatory_ids)
-            # Segment-sourced L0 keeps the existing five-unit confirmation
-            # envelope.  Recursive levels consume already-complete lower
-            # trends, so the original center definition is available after
-            # exactly three such trends; retaining the old five-unit gate here
-            # would silently delay or drop a valid higher-level center.
-            minimum_units = (
-                5 if source_kind is SourceKind.SEGMENT else 3
-            )
+            # Every level uses the same original-text first-three center
+            # establishment rule.
+            minimum_units = 3
             if len(units) < minimum_units:
                 break
 

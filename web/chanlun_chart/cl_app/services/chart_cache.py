@@ -333,7 +333,10 @@ def _stable_hash(obj) -> str:
 #   以 period 为唯一身份，不再携带或依赖递归 level 编号。
 # v45 (2026-08-04): center previews now expose same-level third-class-point
 # lifecycle, confirmation return segment, and completion evidence.
-_CHART_CACHE_SCHEMA_VERSION = "v45"
+# v46 (2026-08-05): preview pending-leave identity is explicit.  A return that
+# re-enters the core clears it, so renderers can no longer resurrect an older
+# body leg as a phantom departure line.
+_CHART_CACHE_SCHEMA_VERSION = "v46"
 
 
 def _build_cache_key(market: str, code: str, frequency: str, cl_config: dict) -> str:

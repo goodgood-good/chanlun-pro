@@ -112,10 +112,22 @@ def test_registers_exact_due_jobs_and_app_readiness_contract(
     }
     assert scheduler.jobs[CAPTURE_JOB_ID]["hour"] == 9
     assert scheduler.jobs[CAPTURE_JOB_ID]["minute"] == 10
+    assert scheduler.jobs[CAPTURE_JOB_ID]["name"] == (
+        "V3 前向模拟盘前快照采集（应用托管）"
+    )
     assert scheduler.jobs[EVALUATE_JOB_ID]["hour"] == 15
     assert scheduler.jobs[EVALUATE_JOB_ID]["minute"] == 20
+    assert scheduler.jobs[EVALUATE_JOB_ID]["name"] == (
+        "V3 前向模拟盘后评估（应用托管）"
+    )
     assert scheduler.jobs[EVALUATE_JOB_ID]["misfire_grace_time"] == 8 * 60 * 60
     assert scheduler.jobs[RECONCILE_JOB_ID]["minutes"] == 5
+    assert scheduler.jobs[RECONCILE_JOB_ID]["name"] == (
+        "V3 前向模拟失败恢复协调"
+    )
+    assert scheduler.jobs[STARTUP_JOB_ID]["name"] == (
+        "V3 前向模拟启动一致性检查"
+    )
 
     _start, evaluate_end = controller._window("EVALUATE", date(2026, 8, 3))
     assert evaluate_end == datetime(2026, 8, 3, 23, 0, tzinfo=CN)

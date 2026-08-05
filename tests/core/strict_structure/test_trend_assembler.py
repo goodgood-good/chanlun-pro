@@ -3,9 +3,7 @@ from dataclasses import replace
 import pytest
 
 from chanlun.core.strict_structure.center_machine import (
-    advance_center,
     calculate_centers,
-    establish_center,
 )
 from chanlun.core.strict_structure.models import (
     SourceKind,
@@ -40,13 +38,9 @@ def three_center_fixture():
         unit(17, "down", 185, 160),
         unit(18, "up", 160, 170),
     )
-    first = establish_center(values[0:5], 0, SourceKind.SEGMENT)
-    second = establish_center(values[8:13], 0, SourceKind.SEGMENT)
-    third = establish_center(values[13:18], 0, SourceKind.SEGMENT)
-    assert first is not None and second is not None and third is not None
-    first, _ = advance_center(first, values[5])
-    second, _ = advance_center(second, values[13])
-    third, _ = advance_center(third, values[18])
+    centers = calculate_centers(values, 0, SourceKind.SEGMENT).centers
+    assert len(centers) == 3
+    first, second, third = centers
     return values, first, second, third
 
 
@@ -106,7 +100,7 @@ def test_two_separated_centers_form_complete_uptrend_with_internal_return():
     assert trend.kind is TrendKind.TREND
     assert trend.direction == "up"
     assert trend.centers == (first, second)
-    assert trend.constituent_units == values[:13]
+    assert trend.constituent_units == values[:11]
     assert first.completion_return_unit in trend.constituent_units
     assert second.completion_return_unit not in trend.constituent_units
     assert trend.terminal_unit is second.completion_leave_unit
@@ -119,19 +113,22 @@ def test_upgrade_boundary_locks_previous_trend_and_starts_at_completion_return()
     locked, tail = result.current_trends
     assert locked.state is TrendState.LOCKED
     assert locked.centers == (first, second)
-    assert locked.constituent_units == values[:13]
+    assert locked.constituent_units == values[:11]
     assert locked.terminal_unit is second.completion_leave_unit
     assert tail.state is TrendState.COMPLETE
     assert tail.centers == (third,)
-    assert tail.constituent_units == values[13:18]
+    assert tail.constituent_units == values[11:18]
     assert tail.constituent_units[0] is second.completion_return_unit
     assert third.completion_return_unit not in tail.constituent_units
 
 
 def test_ongoing_boundary_does_not_lock_a_stable_completed_trend():
     values, first, second, _third = three_center_fixture()
-    ongoing_third = establish_center(values[13:18], 0, SourceKind.SEGMENT)
-    assert ongoing_third is not None
+    ongoing_centers = calculate_centers(
+        values[:18], 0, SourceKind.SEGMENT
+    ).centers
+    assert len(ongoing_centers) == 3
+    ongoing_third = ongoing_centers[-1]
 
     result = assemble_trend_types(
         (first, second, ongoing_third),
@@ -150,14 +147,14 @@ def test_ongoing_boundary_does_not_lock_a_stable_completed_trend():
 def test_non_center_bridge_units_are_preserved_exactly_once():
     values, first, second, _third = three_center_fixture()
     trend = assemble_trend_types((first, second), values[:14], 0).current_trends[0]
-    bridge = values[6:8]
+    bridge = values[5:7]
     assert all(item in trend.constituent_units for item in bridge)
     assert len({item.unit_id for item in trend.constituent_units}) == len(
         trend.constituent_units
     )
 
 
-def test_trend_assembler_accepts_one_shared_completion_leave_boundary():
+def test_trend_assembler_uses_return_as_non_overlapping_boundary():
     values = valid_five_up_exit() + (
         unit(5, "down", 130, 120),
         unit(6, "up", 120, 140),
@@ -170,13 +167,16 @@ def test_trend_assembler_accepts_one_shared_completion_leave_boundary():
     result = assemble_trend_types(centers, values, 0)
 
     assert len(centers) == 2
-    assert centers[0].completion_leave_unit is centers[1].entry_unit
+    assert centers[0].completion_return_unit is centers[1].entry_unit
     assert result.current_trends
     assert len(result.current_trends) == 2
     first_trend, second_trend = result.current_trends
     assert first_trend.constituent_units[-1] is centers[0].completion_leave_unit
     assert second_trend.constituent_units[0] is centers[0].completion_return_unit
-    assert centers[1].entry_unit not in second_trend.constituent_units
+    assert centers[1].entry_unit in second_trend.constituent_units
+    assert not set(
+        item.unit_id for item in first_trend.constituent_units
+    ) & set(item.unit_id for item in second_trend.constituent_units)
     assert (
         first_trend.constituent_units[-1].market_end
         == second_trend.constituent_units[0].market_start

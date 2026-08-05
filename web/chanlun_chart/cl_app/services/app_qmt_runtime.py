@@ -1,10 +1,8 @@
-"""Application-owned lifecycle management for the local QMT terminal.
+"""由应用进程管理本地 QMT 终端的完整生命周期。
 
-The manually launched ``app.py`` process is the sole runtime owner.  This
-controller starts QMT when it is absent, performs the bounded 08:30 weekday
-restart, and repairs an unexpected QMT exit.  It delegates exact-process
-handling to ``ops/manage_qmt_runtime.ps1`` and never touches an account or an
-order transport.
+人工启动的 ``app.py`` 是唯一运行所有者。本控制器会在 QMT 缺失时启动它，执行
+工作日 08:30 的有界维护，并在 QMT 意外退出后恢复运行。具体进程操作委托给
+``ops/manage_qmt_runtime.ps1``；整个过程不会访问账户或订单通道。
 """
 
 from __future__ import annotations
@@ -23,6 +21,7 @@ from chanlun.decision_support.trading_system.file_lock import (
     interprocess_file_lock,
 )
 from .app_runtime_owner import pid_alive
+from .job_names import JOB_DISPLAY_NAMES
 
 
 CN = ZoneInfo("Asia/Shanghai")
@@ -420,7 +419,7 @@ class AppQmtRuntimeController:
                 self.daily_restart,
                 trigger="cron",
                 id=QMT_DAILY_JOB_ID,
-                name="QMT weekday restart (app-owned)",
+                name=JOB_DISPLAY_NAMES[QMT_DAILY_JOB_ID],
                 day_of_week="mon-fri",
                 hour=8,
                 minute=30,
@@ -431,7 +430,7 @@ class AppQmtRuntimeController:
                 self.monitor,
                 trigger="interval",
                 id=QMT_MONITOR_JOB_ID,
-                name="QMT runtime recovery monitor",
+                name=JOB_DISPLAY_NAMES[QMT_MONITOR_JOB_ID],
                 minutes=1,
                 next_run_time=observed_at + timedelta(minutes=1),
                 misfire_grace_time=60,

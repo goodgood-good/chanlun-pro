@@ -1,10 +1,8 @@
-"""Original three-lower-trend center formation at recursive levels.
+"""Original first-three center formation at every recursive level.
 
-The segment-sourced level-zero center keeps its existing five-unit contract.
-At higher recursive levels the inputs are already-completed lower-level trend
-types; L33/L38 define their center as the overlap of three consecutive trend
-types.  Requiring a five-trend seed there turns the original nine-segment
-upgrade into a fifteen-plus-segment rule and starves the 1m -> 5m -> 30m path.
+Both segment-sourced level zero and higher trend-type levels obey the same
+L17/L20 definition.  Adding fictitious entry/exit roles at level zero delays
+visible completion and makes a confirmed third-class point appear unfinished.
 """
 
 from decimal import Decimal
@@ -85,13 +83,15 @@ def test_three_locked_trends_establish_recursive_center() -> None:
     assert center.pending_leave_unit is None
 
 
-def test_three_segments_do_not_change_level_zero_seed_contract() -> None:
+def test_three_segments_use_the_same_original_level_zero_contract() -> None:
     values = tuple(
         unit(index, item.direction, item.start_tick, item.end_tick)
         for index, item in enumerate(_trend_units()[:3])
     )
 
-    assert establish_center(values, 0, SourceKind.SEGMENT) is None
+    center = establish_center(values, 0, SourceKind.SEGMENT)
+    assert center is not None
+    assert center.initial_units == values
 
 
 def test_recursive_center_completes_only_after_leave_and_return() -> None:

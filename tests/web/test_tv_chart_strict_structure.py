@@ -114,13 +114,13 @@ class _StrictOnlyCD:
     get_branch_bcs = _legacy
 
 
-def test_chart_payload_keeps_base_centers_separate_from_strict_sources() -> None:
+def test_chart_payload_never_reads_legacy_center_objects() -> None:
     cd = _StrictOnlyCD()
 
     payload = cl_data_to_tv_chart(cd, _config())
 
     assert cd.evidence_calls == 1
-    assert cd.base_center_calls == {"bi": 1, "xd": 0}
+    assert cd.base_center_calls == {"bi": 0, "xd": 0}
     assert payload["strict_structure_mode"] == "replace"
     assert payload["strict_structure"]["schema"] == "chanlun-chart-structure/v5"
     assert payload["strict_structure"]["source_closed_at"] == payload["t"][-1]

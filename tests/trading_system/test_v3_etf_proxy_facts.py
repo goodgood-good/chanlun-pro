@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+from chanlun.core.strict_structure.models import CenterState
 from chanlun.decision_support.trading_system.v3_etf_proxy_facts import (
     DailyMarketBar,
     EtfProxyPitRepository,
@@ -515,46 +516,32 @@ def test_buy_side_supply_is_causal_diagnostic_only_and_cannot_map() -> None:
     center_start = datetime(2020, 1, 2, 15, tzinfo=CN)
     center_end = datetime(2020, 1, 10, 15, tzinfo=CN)
     center = SimpleNamespace(
-        index=7,
-        zd=Decimal("9"),
-        zg=Decimal("11"),
-        type="zd",
-        done=True,
-        real=True,
-        expanded_with=(),
-        start=SimpleNamespace(
-            start=SimpleNamespace(k=SimpleNamespace(date=center_start))
-        ),
-        end=SimpleNamespace(
-            end=SimpleNamespace(k=SimpleNamespace(date=center_end))
-        ),
+        center_id="sha256:" + "7" * 64,
+        structural_level=0,
+        state=CenterState.COMPLETED,
     )
-
-    def line(
-        point_type: str,
-        *,
-        locked_at: datetime,
-        completed: bool = True,
-    ) -> SimpleNamespace:
-        point = SimpleNamespace(name=point_type, zs=center)
-        return SimpleNamespace(
-            locked_at=locked_at,
-            end=SimpleNamespace(k=SimpleNamespace(date=center_end)),
-            is_done=lambda: completed,
-            get_mmds=lambda: (point,),
-        )
-
-    state = SimpleNamespace(
-        get_bi_zss=lambda: (center,),
-        get_xd_zss=lambda: (),
-        get_bis=lambda: (
-            # Equality boundary: available exactly at decision is visible.
-            line("1buy", locked_at=decision),
-            # A future lock and an unfinished line are both excluded.
-            line("2buy", locked_at=decision + timedelta(minutes=1)),
-            line("2buy", locked_at=decision, completed=False),
+    point = SimpleNamespace(
+        point_type="1buy",
+        center_id=center.center_id,
+        structural_level=0,
+        anchor_at=center_end,
+        # Equality boundary: available exactly at decision is visible.
+        available_at=decision,
+    )
+    strict_evidence = SimpleNamespace(
+        source_frequency="30m",
+        source_closed_at=decision,
+        structure=SimpleNamespace(
+            levels=(
+                SimpleNamespace(
+                    center_result=SimpleNamespace(centers=(center,)),
+                ),
+            ),
         ),
-        get_xds=lambda: (),
+        confirmed_points=(point,),
+    )
+    state = SimpleNamespace(
+        get_strict_evidence=lambda: strict_evidence,
     )
     all_evidence = etf_facts._lower_risk_evidence(
         state,
@@ -562,6 +549,26 @@ def test_buy_side_supply_is_causal_diagnostic_only_and_cannot_map() -> None:
         decision_time=decision,
     )
     assert tuple(row.point_type for row in all_evidence) == ("1buy",)
+
+    future_evidence = SimpleNamespace(
+        **{
+            **strict_evidence.__dict__,
+            "confirmed_points": (
+                SimpleNamespace(
+                    **{
+                        **point.__dict__,
+                        "available_at": decision + timedelta(minutes=1),
+                    }
+                ),
+            ),
+        }
+    )
+    with pytest.raises(ValueError, match="future point"):
+        etf_facts._lower_risk_evidence(
+            SimpleNamespace(get_strict_evidence=lambda: future_evidence),
+            frequency="30m",
+            decision_time=decision,
+        )
 
     mapped, candidates = select_unique_top_center_mapping(
         all_evidence,
@@ -933,7 +940,15 @@ def test_benchmark_daily_risk_consumes_equal_boundary_completed_30m_prefix(
     original_structure = etf_facts._old_pen_structure_state
     lower_state = object()
 
-    def structure_state(bars, *, symbol, frequency, decision_time):
+    def structure_state(
+        bars,
+        *,
+        symbol,
+        frequency,
+        decision_time,
+        structure_price_quantum,
+        price_basis_revision,
+    ):
         if frequency == "30m":
             assert tuple(bars) == completed_30m
             return lower_state
@@ -942,6 +957,8 @@ def test_benchmark_daily_risk_consumes_equal_boundary_completed_30m_prefix(
             symbol=symbol,
             frequency=frequency,
             decision_time=decision_time,
+            structure_price_quantum=structure_price_quantum,
+            price_basis_revision=price_basis_revision,
         )
 
     def lower_evidence(state, *, frequency, decision_time):

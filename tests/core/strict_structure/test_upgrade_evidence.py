@@ -57,7 +57,7 @@ def test_nine_touching_units_derive_one_higher_context() -> None:
     assert evidence.source_level == 0 and evidence.target_level == 1
     assert evidence.source_center_ids == (center.center_id,)
     assert len(evidence.source_unit_ids) == 9
-    assert evidence.extension_unit_ids == ()
+    assert evidence.extension_unit_ids == (center.body_units[9].unit_id,)
     assert evidence.available_at >= center.available_at
     assert evidence.signal_eligible is False
 

@@ -1,6 +1,6 @@
 from chanlun.core.strict_structure.center_machine import (
     advance_center,
-    establish_center,
+    calculate_centers,
 )
 from chanlun.core.strict_structure.divergence import collect_strict_divergences
 from chanlun.core.strict_structure.models import (
@@ -8,12 +8,10 @@ from chanlun.core.strict_structure.models import (
     CenterState,
     SourceKind,
     TrendKind,
-    TrendState,
-    TrendType,
 )
 from chanlun.core.strict_structure.strength import StrengthSnapshot
+from chanlun.core.strict_structure.trend_assembler import assemble_trend_types
 from tests.core.strict_structure.helpers import (
-    TEST_PRICE_BASIS,
     ongoing_center,
     structure_for,
     unit,
@@ -22,7 +20,8 @@ from tests.core.strict_structure.helpers import (
 
 def completed_consolidation_fixture(level=0):
     value = ongoing_center(structural_level=level)
-    earlier = value.initial_exit_unit
+    earlier = value.pending_leave_unit
+    assert earlier is not None
     entered = unit(5, "down", 130, 110, structural_level=level)
     value, _ = advance_center(value, entered)
     later = unit(6, "up", 110, 135, structural_level=level)
@@ -51,34 +50,19 @@ def completed_trend_fixture(level=0):
         unit(12, "up", 145, 170, structural_level=level),
         unit(13, "down", 170, 160, structural_level=level),
     )
-    first = establish_center(values[0:5], level, SourceKind.SEGMENT)
-    second = establish_center(values[8:13], level, SourceKind.SEGMENT)
-    assert first is not None and second is not None
-    first, _ = advance_center(first, values[5])
-    second, _ = advance_center(second, values[13])
-    owned = values[:13]
-    trend = TrendType(
-        trend_id=f"trend-{level}",
-        structural_level=level,
-        price_basis_revision=TEST_PRICE_BASIS,
-        kind=TrendKind.TREND,
-        direction="up",
-        state=TrendState.COMPLETE,
-        centers=(first, second),
-        constituent_units=owned,
-        start_tick=owned[0].start_tick,
-        end_tick=owned[-1].end_tick,
-        low_tick=min(item.low_tick for item in owned),
-        high_tick=max(item.high_tick for item in owned),
-        market_start=owned[0].market_start,
-        market_end=owned[-1].market_end,
-        confirmed_at=second.completed_at,
-        available_at=second.available_at,
+    center_result = calculate_centers(values, level, SourceKind.SEGMENT)
+    assert len(center_result.centers) == 2
+    first, second = center_result.centers
+    assembly = assemble_trend_types(center_result.centers, values, level)
+    trend = next(
+        item
+        for item in assembly.completed_trends
+        if item.kind is TrendKind.TREND and len(item.centers) == 2
     )
     return (
         structure_for(first, second, completed_trends=(trend,)),
         values[6],
-        second.completion_leave_unit,
+        trend.terminal_unit,
     )
 
 

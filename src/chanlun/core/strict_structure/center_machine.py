@@ -60,8 +60,29 @@ def _alternates(
     )
 
 
-def _positive_overlap(item: ConstituentUnit, zd_tick: int, zg_tick: int) -> bool:
-    return max(item.low_tick, zd_tick) < min(item.high_tick, zg_tick)
+def _touches_core(item: ConstituentUnit, zd_tick: int, zg_tick: int) -> bool:
+    """Return whether a closed component interval intersects the closed core."""
+
+    return max(item.low_tick, zd_tick) <= min(item.high_tick, zg_tick)
+
+
+def _return_reenters_core(
+    leave: ConstituentUnit,
+    ret: ConstituentUnit,
+    zd_tick: int,
+    zg_tick: int,
+) -> bool:
+    """A first return re-enters only after crossing the relevant boundary.
+
+    Equality stays outside by the V3 contract: ``low >= ZG`` is a third buy
+    and ``high <= ZD`` is a third sell.
+    """
+
+    return (
+        ret.low_tick < zg_tick
+        if leave.direction == "up"
+        else ret.high_tick > zd_tick
+    )
 
 
 def _outside_in_direction(
@@ -77,15 +98,11 @@ def _outside_in_direction(
 
 
 def _core(initial_units: tuple[ConstituentUnit, ...]) -> tuple[int, int]:
-    if len(initial_units) == 3:
-        middle = initial_units
-    elif len(initial_units) in (4, 5):
-        middle = initial_units[1:4]
-    else:
-        raise ValueError("center seed must contain three or five units")
+    if len(initial_units) != 3:
+        raise ValueError("center seed must contain exactly three units")
     return (
-        max(item.low_tick for item in middle),
-        min(item.high_tick for item in middle),
+        max(item.low_tick for item in initial_units),
+        min(item.high_tick for item in initial_units),
     )
 
 
@@ -93,32 +110,16 @@ def _is_leave_candidate(
     center: TrendCenter,
     item: ConstituentUnit,
 ) -> bool:
-    """Whether a touching unit may become this center's departure.
+    """Whether a touching component departs beyond the frozen core."""
 
-    The five alternating segment envelope inherits the direction of its entry
-    leg.  A recursive center is made directly from three complete lower-level
-    trends, so it has no external entry leg; either direction may leave once
-    its endpoint is outside the core.
-    """
-
-    return _outside_in_direction(item, center.zd_tick, center.zg_tick) and (
-        center.source_kind is SourceKind.TREND_TYPE
-        or item.direction == center.entry_unit.direction
-    )
+    return _outside_in_direction(item, center.zd_tick, center.zg_tick)
 
 
 def _seed_size(source_kind: SourceKind) -> int:
-    """Return the causal establishment width for one center source.
+    """Return the original-text first-three establishment width."""
 
-    The unchanged segment layer keeps its five-unit confirmation envelope.
-    Once the inputs are already-completed lower-level trend types, the
-    original definition is the overlap of three consecutive trend types.
-    Requiring another entry and exit trend at every recursive level silently
-    turns the nine-segment rule into a fifteen-plus-segment rule and starves
-    the 1m -> 5m -> 30m hierarchy.
-    """
-
-    return 3 if SourceKind(source_kind) is SourceKind.TREND_TYPE else 5
+    SourceKind(source_kind)
+    return 3
 
 
 def _event(
@@ -131,7 +132,7 @@ def _event(
 ) -> CenterEvent:
     return CenterEvent(
         event_id=stable_structure_id(
-            "chanlun-center-event/v3",
+            "chanlun-center-event/v4",
             center.price_basis_revision,
             center.structural_level,
             center.source_kind.value,
@@ -185,7 +186,7 @@ def _new_ongoing_center(
     zg_tick: int,
 ) -> TrendCenter:
     center_id = stable_structure_id(
-        "chanlun-center/v3",
+        "chanlun-center/v4",
         price_basis_revision,
         structural_level,
         source_kind.value,
@@ -194,15 +195,9 @@ def _new_ongoing_center(
         zg_tick,
     )
     last = initial_units[-1]
-    # For the three-trend recursive seed all three units are the center core;
-    # none may simultaneously be claimed as a departure.  The next locked
-    # lower-level trend is the first possible leave candidate.
-    pending_leave = (
-        last
-        if len(initial_units) == 5
-        and _outside_in_direction(last, zd_tick, zg_tick)
-        else None
-    )
+    # All three seed components belong to the core.  The next component is the
+    # first one that may become a departure.
+    pending_leave = None
     return TrendCenter(
         center_id=center_id,
         structural_level=structural_level,
@@ -248,11 +243,9 @@ def establish_center(
     if any(not item.locked for item in values):
         return None
     zd_tick, zg_tick = _core(values)
-    if zd_tick >= zg_tick:
+    if zd_tick > zg_tick:
         return None
-    if not _positive_overlap(values[0], zd_tick, zg_tick):
-        return None
-    if not _positive_overlap(values[-1], zd_tick, zg_tick):
+    if any(not _touches_core(item, zd_tick, zg_tick) for item in values):
         return None
     return _new_ongoing_center(
         values,
@@ -270,11 +263,11 @@ def establish_center_preview(
     source_kind: SourceKind,
     oscillatory_ids: frozenset[str] = frozenset(),
 ) -> CenterPreview | None:
-    """Build a non-formal five-unit candidate containing provisional units.
+    """Build a non-formal first-three candidate containing provisional units.
 
     Segment calculation can expose more than one unlocked unit at the live
     edge.  Such a candidate is display evidence only, but every provisional
-    unit may participate in the five-unit overlap test.
+    unit may participate in the first-three overlap test.
     """
 
     values = tuple(initial_units)
@@ -296,11 +289,9 @@ def establish_center_preview(
     if not unlocked_seen:
         return None
     zd_tick, zg_tick = _core(values)
-    if zd_tick >= zg_tick:
+    if zd_tick > zg_tick:
         return None
-    if not _positive_overlap(values[0], zd_tick, zg_tick):
-        return None
-    if not _positive_overlap(values[-1], zd_tick, zg_tick):
+    if any(not _touches_core(item, zd_tick, zg_tick) for item in values):
         return None
     return CenterPreview(
         structural_level=structural_level,
@@ -318,6 +309,7 @@ def _advance_center_preview_lifecycle(
     preview: CenterPreview,
     initial_units,
     following_units,
+    oscillatory_ids: frozenset[str] = frozenset(),
 ) -> CenterPreview | None:
     """Advance provisional center geometry without promoting it to formal evidence.
 
@@ -335,13 +327,7 @@ def _advance_center_preview_lifecycle(
     if preview.zd_tick is None or preview.zg_tick is None:
         raise ValueError("preview lifecycle requires a positive core")
 
-    entry = body[0]
-    pending = (
-        body[-1]
-        if body[-1].direction == entry.direction
-        and _outside_in_direction(body[-1], preview.zd_tick, preview.zg_tick)
-        else None
-    )
+    pending = None
     available_at = max(item.available_at for item in body)
 
     for item in following_units:
@@ -355,7 +341,7 @@ def _advance_center_preview_lifecycle(
         if item.unit_id in {value.unit_id for value in body}:
             raise ValueError("preview transition unit already belongs to body")
         if (
-            item.direction == previous.direction
+            _conflicting_pair(previous, item, oscillatory_ids)
             or item.start_tick != previous.end_tick
             or item.market_start < previous.market_end
         ):
@@ -363,15 +349,6 @@ def _advance_center_preview_lifecycle(
         available_at = max(available_at, item.available_at)
 
         if pending is not None:
-            if _positive_overlap(item, preview.zd_tick, preview.zg_tick):
-                body.append(item)
-                pending = (
-                    item
-                    if item.direction == entry.direction
-                    and _outside_in_direction(item, preview.zd_tick, preview.zg_tick)
-                    else None
-                )
-                continue
             completes_up = (
                 pending.direction == "up"
                 and item.direction == "down"
@@ -388,17 +365,34 @@ def _advance_center_preview_lifecycle(
                     unit_ids=tuple(value.unit_id for value in body),
                     state=CenterPreviewState.COMPLETED,
                     available_at=available_at,
+                    pending_leave_unit_id=None,
                     completion_return_unit_id=item.unit_id,
                 )
+            if _return_reenters_core(
+                pending,
+                item,
+                preview.zd_tick,
+                preview.zg_tick,
+            ) and _touches_core(item, preview.zd_tick, preview.zg_tick):
+                body.append(item)
+                pending = (
+                    item
+                    if _outside_in_direction(
+                        item,
+                        preview.zd_tick,
+                        preview.zg_tick,
+                    )
+                    else None
+                )
+                continue
             return None
 
-        if not _positive_overlap(item, preview.zd_tick, preview.zg_tick):
+        if not _touches_core(item, preview.zd_tick, preview.zg_tick):
             return None
         body.append(item)
         pending = (
             item
-            if item.direction == entry.direction
-            and _outside_in_direction(item, preview.zd_tick, preview.zg_tick)
+            if _outside_in_direction(item, preview.zd_tick, preview.zg_tick)
             else None
         )
 
@@ -406,12 +400,14 @@ def _advance_center_preview_lifecycle(
         preview,
         unit_ids=tuple(value.unit_id for value in body),
         available_at=available_at,
+        pending_leave_unit_id=(None if pending is None else pending.unit_id),
     )
 
 
 def _project_ongoing_center_preview(
     center: TrendCenter,
     following_units,
+    oscillatory_ids: frozenset[str] = frozenset(),
 ) -> CenterPreview | None:
     """Project an already-formal ongoing center through provisional units."""
 
@@ -435,6 +431,7 @@ def _project_ongoing_center_preview(
         preview,
         seed,
         center.extension_units + following,
+        oscillatory_ids,
     )
 
 
@@ -554,8 +551,6 @@ def advance_center(
 
     pending = center.pending_leave_unit
     if pending is not None:
-        if _positive_overlap(item, center.zd_tick, center.zg_tick):
-            return _append_extension_return(center, item)
         if (
             pending.direction == "up"
             and item.direction == "down"
@@ -568,11 +563,18 @@ def advance_center(
             and item.high_tick <= center.zd_tick
         ):
             return _complete_center(center, pending, item)
+        if _return_reenters_core(
+            pending,
+            item,
+            center.zd_tick,
+            center.zg_tick,
+        ) and _touches_core(item, center.zd_tick, center.zg_tick):
+            return _append_extension_return(center, item)
         raise ValueError(
             "return geometry is neither extension nor third-class completion"
         )
 
-    if not _positive_overlap(item, center.zd_tick, center.zg_tick):
+    if not _touches_core(item, center.zd_tick, center.zg_tick):
         raise ValueError("ongoing center unit must re-enter the core")
     pending_leave = item if _is_leave_candidate(center, item) else None
     return _append_body_unit(center, item, pending_leave=pending_leave)
@@ -598,13 +600,11 @@ def forming_preview(
     zd_tick = None
     zg_tick = None
     state = CenterPreviewState.FORMING
-    core_ready = 3 if SourceKind(source_kind) is SourceKind.TREND_TYPE else 4
+    core_ready = 3
     if len(values) >= core_ready:
         zd_tick, zg_tick = _core(values)
         if zd_tick > zg_tick:
             return None
-        if zd_tick == zg_tick:
-            state = CenterPreviewState.TOUCH_ONLY
     return CenterPreview(
         structural_level=structural_level,
         source_kind=SourceKind(source_kind),
@@ -837,10 +837,9 @@ def calculate_centers(
                 CenterEventKind.ESTABLISHED,
                 center.established_market_time,
                 center.available_at,
-                # In the unchanged five-segment seed the fifth unit can
-                # already be a breakout watch.  A three-trend recursive seed
-                # consists entirely of the center core and has no leave yet.
-                leave=center.initial_exit_unit if width == 5 else None,
+                # All seed units belong to the core; departure evidence starts
+                # with the following completed lower-level component.
+                leave=None,
             )
         ]
         j = i + width
@@ -908,11 +907,14 @@ def calculate_centers(
         events.extend(candidate_events)
         replay_from = i
         if center.state is CenterState.COMPLETED:
-            # Adjacent centers may share the completed center's leaving unit:
-            # it is simultaneously the next center's entering unit.  Start one
-            # unit before the completion return, then slide to the return when
-            # that shared-boundary candidate is not viable.
-            i = max(i + 1, j - 1)
+            # The departure belongs to the completed center body.  Its first
+            # outside return is confirmation evidence (not body) and is the
+            # earliest unit eligible to seed the next center.  Reusing the
+            # departure in both centers makes their bodies overlap and forces
+            # the trend assembler either to duplicate a source unit or omit a
+            # center component.  Starting at the return gives a unique,
+            # contiguous same-level decomposition.
+            i = max(i + 1, j)
             continue
         break
 
@@ -934,6 +936,7 @@ def calculate_centers(
                     preview,
                     values[start : start + width],
                     values[start + width :],
+                    oscillatory_ids,
                 )
             if preview is not None:
                 # A geometrically completed candidate is stronger lifecycle
@@ -950,57 +953,18 @@ def calculate_centers(
             projected = _project_ongoing_center_preview(
                 centers[-1],
                 values[locked_count:],
+                oscillatory_ids,
             )
-            if (
-                projected is None
-                and latest_live_preview is not None
-                and latest_live_preview.state is CenterPreviewState.FORMING
-            ):
-                # Unlocked tail geometry may temporarily stop being a valid
-                # extension of the locked, formal active center.  A shifted
-                # five-unit window made from that same provisional tail is not
-                # strong enough to create a second unresolved center or erase
-                # the formal one.  Hide the ordinary forming alternative until
-                # the tail locks.  A COMPLETED preview remains admissible below:
-                # its outside return is stronger third-class-point evidence.
-                latest_live_preview = None
-            if projected is not None:
-                projected_seed = projected.unit_ids[:width]
-                latest_seed = (
-                    ()
-                    if latest_live_preview is None
-                    else latest_live_preview.unit_ids[:width]
-                )
-                if latest_live_preview is None:
-                    latest_live_preview = projected
-                elif projected_seed == latest_seed:
-                    # The same candidate may be reached through both the live
-                    # window scan and formal-center projection.  Completion is
-                    # monotonic evidence and must win over a forming view.
-                    if (
-                        projected.state is CenterPreviewState.COMPLETED
-                        and latest_live_preview.state
-                        is not CenterPreviewState.COMPLETED
-                    ):
-                        latest_live_preview = projected
-                elif projected.state is CenterPreviewState.COMPLETED:
-                    # A new adjacent five-role candidate may coexist at the
-                    # live edge, but it cannot erase the already observed
-                    # same-level return that geometrically completed the active
-                    # center.  Preserve both; only the locked prefix can later
-                    # promote either preview to formal/tradable evidence.
-                    previews.append(projected)
-                elif latest_live_preview.state is CenterPreviewState.FORMING:
-                    # The formal center has not produced its same-level third-
-                    # class completion yet.  A later sliding five-unit window
-                    # inside that unresolved tail is therefore an alternative
-                    # decomposition of the *same* extension, not an independent
-                    # adjacent center.  Keep the projection rooted at the
-                    # formal seed so one live center cannot be rendered twice.
-                    # A genuinely adjacent candidate is preserved by the
-                    # COMPLETED branch above, after the active center has an
-                    # outside return that supplies a causal boundary.
-                    latest_live_preview = projected
+            # A formal ongoing center owns the entire provisional suffix.
+            # Any shifted three-unit window inside that suffix is merely an
+            # alternative decomposition until the source units lock; showing
+            # it beside the owner created the duplicate unfinished centers
+            # reported on TSLA/SH.513100 and could also manufacture a second
+            # provisional third-class point.  Fail closed: expose only the
+            # projection rooted at the immutable formal center_id.  If that
+            # projection is geometrically invalid, expose no replacement until
+            # the locked-prefix calculation can resolve the boundary.
+            latest_live_preview = projected
         if latest_live_preview is not None and latest_live_preview not in previews:
             previews.append(latest_live_preview)
 

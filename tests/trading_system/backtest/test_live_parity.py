@@ -1,12 +1,18 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from pathlib import Path
 
 import pandas as pd
 
 from chanlun.core.strict_structure.models import StrictPointStatus
 from chanlun.decision_support.trading_system.backtest.data_source import (
     CausalStructureReplay as AtomicStructureReplay,
+    _default_cl_factory,
+)
+from chanlun.decision_support.trading_system.backtest.fixed_year import (
+    FRAME_COLUMNS,
+    final_confirmed_structure_events,
 )
 from chanlun.decision_support.trading_system.backtest.portfolio import (
     CausalStructureReplay,
@@ -15,6 +21,16 @@ from chanlun.decision_support.trading_system.backtest.portfolio import (
 from chanlun.decision_support.trading_system.engine import (
     SymbolStructureBundle,
     TradingEngine,
+)
+from chanlun.decision_support.trading_system.provisional import (
+    extract_provisional_candidates,
+)
+from chanlun.decision_support.trading_system.screening_structure import (
+    merge_provisional_candidates,
+    unfinished_segment_candidates,
+)
+from chanlun.decision_support.trading_system.structure_adapter import (
+    extract_confirmed_points,
 )
 from tests.trading_system.backtest.helpers import dataset, minute_bar, normal_status
 from tests.trading_system.helpers import (
@@ -29,6 +45,9 @@ from tests.trading_system.strict_helpers import (
 )
 from cl_app.services import trading_screening_gateway as gateway_module
 from cl_app.services.trading_screening_gateway import analyze_native_frame
+
+
+FIXTURES = Path(__file__).resolve().parents[2] / "fixtures"
 
 
 def deterministic_bundle() -> SymbolStructureBundle:
@@ -209,3 +228,73 @@ def test_live_and_replay_share_strict_point_ids_and_availability(monkeypatch) ->
     ) == (replay_approaching.candidate_id, replay_approaching.observed_at)
     assert live_state.evidence_calls == 0
     assert all(state.evidence_calls == 1 for state in replay_states.values())
+
+
+def test_live_and_default_replay_share_real_old_pen_physical_l0_evidence() -> None:
+    """The parity contract must cover production config, not only injected facts."""
+
+    frame = pd.read_parquet(FIXTURES / "SZ.002299_1m.parquet")[
+        ["date", "open", "high", "low", "close", "volume"]
+    ].head(900).copy()
+    frame.attrs.update(
+        structure_price_quantum="0.01",
+        price_basis_revision="test-raw-v1",
+    )
+    as_of = pd.Timestamp(frame["date"].iloc[-1]).to_pydatetime()
+
+    live = analyze_native_frame(
+        code="SZ.002299",
+        frequency="1m",
+        frame=frame,
+        as_of=as_of,
+    )
+    replay_state = _default_cl_factory("SZ.002299", "1m", frame)
+    # Historical replay advances incrementally while the page receives one
+    # complete snapshot.  Exercise that real difference rather than feeding
+    # both paths the same one-shot call.
+    replay_state.process_klines(frame.iloc[:450].copy())
+    replay_state.process_klines(frame.iloc[450:].copy())
+    evidence = replay_state.get_strict_evidence()
+    replay_confirmed = extract_confirmed_points(
+        evidence,
+        code="SZ.002299",
+        source_frequency="1m",
+        as_of=as_of,
+    )
+    replay_provisional = merge_provisional_candidates(
+        extract_provisional_candidates(
+            evidence,
+            code="SZ.002299",
+            source_frequency="1m",
+            as_of=as_of,
+        ),
+        unfinished_segment_candidates(
+            evidence,
+            code="SZ.002299",
+            source_frequency="1m",
+        ),
+    )
+
+    assert len(evidence.structure.levels) == 1
+    assert evidence.structure.levels[0].structural_level == 0
+    assert replay_state.get_config()["bi_type"] == "bi_type_old"
+    assert live.confirmed_points
+    assert live.confirmed_points == replay_confirmed
+    assert live.provisional_points == replay_provisional
+
+    causal_frame = frame.copy()
+    causal_frame.insert(0, "code", "SZ.002299")
+    for field in ("open", "high", "low", "close"):
+        causal_frame[f"raw_{field}"] = causal_frame[field]
+    causal_frame = causal_frame.loc[:, list(FRAME_COLUMNS)]
+    causal_frame.attrs = dict(frame.attrs)
+    causal_level_zero = tuple(
+        point
+        for point in final_confirmed_structure_events(
+            "SZ.002299",
+            "1m",
+            causal_frame,
+        ).points
+        if point.recursive_level == 0
+    )
+    assert live.confirmed_points == causal_level_zero

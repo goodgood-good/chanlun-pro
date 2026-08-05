@@ -199,8 +199,6 @@ def test_scheduler_enabled_factory_runs_the_production_lifecycle(
             ("revalidation", None),
             ("sse", None),
             ("trading-screening", None),
-            ("alerts", None),
-            ("signals", None),
             ("recursive", None),
             ("app-qmt-register", None),
             ("app-forward-register", None),

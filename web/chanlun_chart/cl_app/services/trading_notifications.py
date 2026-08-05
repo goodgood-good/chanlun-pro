@@ -60,6 +60,14 @@ _DISPOSITION_LABELS = {
     "hostile": "不利",
 }
 _HOLDING_SOURCES = frozenset({"HOLDING_MONITOR", "VIRTUAL_HOLDING_MONITOR"})
+_SETUP_POINT_ORDER = {
+    "1buy": 0,
+    "2buy": 1,
+    "3buy": 2,
+    "1sell": 3,
+    "2sell": 4,
+    "3sell": 5,
+}
 
 
 def _signals_by_id(snapshot: Mapping[str, object]) -> dict[str, Mapping[str, object]]:
@@ -106,6 +114,70 @@ def notification_event_id(signal_id: str, old_stage: str, new_stage: str) -> str
     return "sha256:" + hashlib.sha256(payload).hexdigest()
 
 
+def _defense_price_value(
+    signal: Mapping[str, object],
+    setup: Mapping[str, object],
+) -> object:
+    value = setup.get("invalidation_price")
+    if value is None or not str(value).strip():
+        value = signal.get("structural_stop")
+    return value
+
+
+def _trigger_occurrence_key(
+    signal: Mapping[str, object],
+    new_stage: str,
+) -> tuple[str, ...] | None:
+    """Identify one visible trigger even when several 5m setups consume it."""
+
+    if new_stage not in {"triggered", "executable"}:
+        return None
+    trigger = _mapping(signal.get("trigger_1m"))
+    trigger_type = str(trigger.get("point_type") or "")
+    trigger_time = next(
+        (
+            str(trigger.get(key))
+            for key in ("confirmed_at", "available_at", "anchor_at")
+            if trigger.get(key)
+        ),
+        "",
+    )
+    # ``point_id`` may change when a completed structure is rebuilt under a
+    # newer price-basis revision.  The visible causal occurrence does not: its
+    # point type and completed-bar time remain the same.  Use the ID only for
+    # legacy documents that lack every causal timestamp.
+    trigger_identity = (
+        f"{trigger_type}@{trigger_time}"
+        if trigger_type and trigger_time
+        else str(trigger.get("point_id") or "")
+    )
+    if not trigger_identity:
+        return None
+    setup = _mapping(signal.get("setup_5m"))
+    side = str(signal.get("side") or setup.get("side") or "")
+    return (
+        str(signal.get("code") or ""),
+        side,
+        new_stage,
+        trigger_identity,
+        str(_defense_price_value(signal, setup) or ""),
+    )
+
+
+def _trigger_occurrence_event_id(key: tuple[str, ...]) -> str:
+    payload = json.dumps(
+        {
+            "schema": "chanlun-signal-notification-trigger-occurrence/v1",
+            "strategy_id": STRATEGY_ID,
+            "key": key,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(payload).hexdigest()
+
+
 def _mapping(value: object) -> Mapping[str, object]:
     return value if isinstance(value, Mapping) else {}
 
@@ -134,6 +206,45 @@ def _scope_label(signal: Mapping[str, object]) -> str:
     values = raw if isinstance(raw, (list, tuple, set, frozenset)) else ()
     sources = {str(value) for value in values}
     return "持仓股" if sources & _HOLDING_SOURCES else "候选股"
+
+
+def _signal_market(signal: Mapping[str, object]) -> str:
+    explicit = str(signal.get("market") or "").strip().lower()
+    if explicit:
+        return explicit
+    code = str(signal.get("code") or "").strip().upper()
+    if code.endswith(".US"):
+        return "us"
+    if code.startswith("HK.") or code.endswith(".HK"):
+        return "hk"
+    return "a"
+
+
+def _defense_price_text(
+    signal: Mapping[str, object],
+    setup: Mapping[str, object],
+) -> str:
+    """Render the operation-level structural defense without inventing a price.
+
+    The 5-minute setup owns the structure that generated the alert, so its
+    invalidation price is authoritative for both buy and sell signals.  Older
+    buy documents exposed the same value only as ``structural_stop``; retain
+    that field as a compatibility fallback.  A sell defense is an *upper*
+    invalidation boundary, not a downside stop, hence the direction is stated
+    explicitly in the notification.
+    """
+
+    value = _defense_price_value(signal, setup)
+    rendered = _text(value, "待结构确认")
+    side = str(signal.get("side") or "").strip()
+    if not side:
+        point = str(setup.get("point_type") or signal.get("point_type") or "")
+        side = "buy" if point.endswith("buy") else "sell" if point.endswith("sell") else ""
+    if side == "buy":
+        return f"{rendered}（跌破买入结构失效）"
+    if side == "sell":
+        return f"{rendered}（突破卖出结构失效）"
+    return rendered
 
 
 def _action_advice(
@@ -183,9 +294,28 @@ def format_notification(
     sector = _mapping(signal.get("sector"))
     code = _text(signal.get("code"))
     name = _text(signal.get("name"), code)
-    setup_point = _point_label(
-        setup.get("point_type") or signal.get("point_type"),
-        "结构信号",
+    raw_setup_points = signal.get("notification_setup_point_types")
+    setup_points = (
+        tuple(
+            sorted(
+                {
+                    str(value)
+                    for value in raw_setup_points
+                    if isinstance(value, str) and value
+                },
+                key=lambda value: (_SETUP_POINT_ORDER.get(value, 99), value),
+            )
+        )
+        if isinstance(raw_setup_points, (list, tuple, set, frozenset))
+        else ()
+    )
+    setup_point = (
+        "、".join(_point_label(value) for value in setup_points) + "共振"
+        if len(setup_points) > 1
+        else _point_label(
+            setup.get("point_type") or signal.get("point_type"),
+            "结构信号",
+        )
     )
     trigger_point = _point_label(trigger.get("point_type"))
     scope = _scope_label(signal)
@@ -217,12 +347,13 @@ def format_notification(
         trigger.get("confirmed_at") or signal.get("observed_at"),
         "时间未知",
     )
+    defense_price = _defense_price_text(signal, setup)
     lines = [
         f"{name}｜{old_stage_label}→{new_stage_label}｜{confirmed_at}",
         f"结构：{context_text}｜5分钟{setup_point}｜1分钟{trigger_point}",
         (
             f"板块：{_text(sector.get('sector_name'))}｜"
-            f"失效价：{_text(signal.get('structural_stop'))}"
+            f"防守价：{defense_price}"
         ),
         _action_advice(
             signal,
@@ -395,26 +526,103 @@ class SignalNotificationDispatcher:
     ) -> None:
         with self._lock:
             before = _signals_by_id(previous)
+            grouped: dict[
+                tuple[str, ...],
+                list[tuple[str, str, str, Mapping[str, object], str]],
+            ] = {}
             for signal_id, document in sorted(_signals_by_id(current).items()):
                 old_stage = _stage(before.get(signal_id))
                 new_stage = _stage(document)
                 transition = (old_stage, new_stage)
                 if transition not in _NOTIFIABLE_TRANSITIONS:
                     continue
-                event_id = notification_event_id(
+                legacy_event_id = notification_event_id(
                     signal_id,
                     str(old_stage),
                     str(new_stage),
                 )
-                if event_id in self._delivered:
+                occurrence_key = _trigger_occurrence_key(document, str(new_stage))
+                group_key = (
+                    ("trigger", *occurrence_key)
+                    if occurrence_key is not None
+                    else ("signal", legacy_event_id)
+                )
+                grouped.setdefault(group_key, []).append(
+                    (
+                        signal_id,
+                        str(old_stage),
+                        str(new_stage),
+                        document,
+                        legacy_event_id,
+                    )
+                )
+
+            for group_key in sorted(grouped):
+                candidates = grouped[group_key]
+                event_id = (
+                    _trigger_occurrence_event_id(group_key[1:])
+                    if group_key[0] == "trigger"
+                    else group_key[1]
+                )
+                legacy_event_ids = {value[4] for value in candidates}
+                if event_id in self._delivered or self._delivered & legacy_event_ids:
                     continue
+                candidates.sort(
+                    key=lambda value: (
+                        not bool(
+                            set(value[3].get("selection_sources") or ())
+                            & _HOLDING_SOURCES
+                        ),
+                        not bool(
+                            value[3].get("entry_allowed")
+                            or value[3].get("exit_allowed")
+                        ),
+                        value[0],
+                    )
+                )
+                _signal_id, old_stage, new_stage, document, _legacy_id = candidates[0]
+                setup_point_types = tuple(
+                    sorted(
+                        {
+                            str(_mapping(value[3].get("setup_5m")).get("point_type"))
+                            for value in candidates
+                            if _mapping(value[3].get("setup_5m")).get("point_type")
+                        },
+                        key=lambda value: (_SETUP_POINT_ORDER.get(value, 99), value),
+                    )
+                )
+                notification_document = dict(document)
+                if len(setup_point_types) > 1:
+                    notification_document["notification_setup_point_types"] = list(
+                        setup_point_types
+                    )
                 title, lines = format_notification(
-                    document,
-                    str(old_stage),
-                    str(new_stage),
+                    notification_document,
+                    old_stage,
+                    new_stage,
                 )
                 try:
-                    sent = bool(self._notifier.send(title, lines))
+                    send_rich = getattr(self._notifier, "send_rich", None)
+                    if callable(send_rich):
+                        code = _text(notification_document.get("code"), "")
+                        name = _text(notification_document.get("name"), code)
+                        context = {
+                            "charts": [
+                                {
+                                    "market": _signal_market(notification_document),
+                                    "code": code,
+                                    "name": name,
+                                    "artifact_key": event_id,
+                                    "observed_at": _text(
+                                        notification_document.get("observed_at"),
+                                        "",
+                                    ),
+                                }
+                            ]
+                        }
+                        sent = bool(send_rich(title, lines, context))
+                    else:
+                        sent = bool(self._notifier.send(title, lines))
                 except Exception as exc:
                     self._failure_count += 1
                     self._last_failure_at = self._now().isoformat()

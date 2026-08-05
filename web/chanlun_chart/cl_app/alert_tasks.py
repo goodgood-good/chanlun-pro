@@ -15,11 +15,12 @@ from chanlun.zixuan import ZiXuan
 
 
 class AlertTasks(object):
-    def __init__(self, scheduler: BackgroundScheduler):
+    def __init__(self, scheduler: BackgroundScheduler, *, enabled: bool = True):
         """
         异步执行后台定时任务
         """
         self.scheduler: BackgroundScheduler = scheduler
+        self.enabled = bool(enabled)
         self.task_ids = []
         self._run_lock = threading.RLock()
         self.log = fun.get_logger()
@@ -29,6 +30,18 @@ class AlertTasks(object):
             raise RuntimeError("scheduler is not configured")
         with self._run_lock:
             previous_ids = list(self.task_ids)
+            if not self.enabled:
+                # A saved legacy configuration must not bypass the app-level
+                # single-authority gate.  Also retire jobs reconciled before a
+                # runtime switch disabled this compatibility surface.
+                for job_id in previous_ids:
+                    try:
+                        self.scheduler.remove_job(job_id)
+                    except JobLookupError:
+                        pass
+                self.task_ids = []
+                return True
+
             desired_ids = []
             task_list = self.task_list()
             for _t in task_list:
@@ -59,6 +72,14 @@ class AlertTasks(object):
         return True
 
     def alert_run(self, alert_id):
+        # Compatibility callers created before the authority switch may
+        # deserialize/subclass this object without the new flag.  Production
+        # instances always set it explicitly; a missing attribute keeps the
+        # historical direct-call contract instead of crashing midway.
+        if not getattr(self, "enabled", True):
+            # Fail closed even if an already-queued APScheduler invocation
+            # races with disabling/removing the legacy job.
+            return True
         # Chart rendering is optional and pulls in pyecharts. Keep it outside
         # module import so the core Web application starts without [charts].
         from chanlun import monitor

@@ -1,15 +1,12 @@
-"""Application-owned scheduling for the V3 human-review forward pipeline.
+"""由应用进程托管 V3 人工复核前向模拟调度。
 
-The long-running ``app.py`` process is the natural owner of business
-scheduling.  Windows Task Scheduler remains a bootstrap/recovery mechanism for
-QMT and the web process; it must not own Capture/Evaluate once this controller
-is active.
+长期运行的 ``app.py`` 是业务调度的唯一所有者。Windows 任务计划程序只保留为
+QMT 与网页进程的启动、恢复机制；本控制器启用后，不再由它执行盘前快照采集或
+盘后评估。
 
-Each phase still runs through ``tools/run_v3_forward_paper.py`` in a fresh
-Python process.  That preserves the tool's implementation-provenance contract
-and guarantees that the page, historical replay and forward sample all consume
-the same frozen decision core.  This controller never opens an account and
-never enables an order transport.
+每个阶段仍通过全新的 Python 进程运行 ``tools/run_v3_forward_paper.py``，以保留
+工具的实现来源证明，并保证页面、历史回放和前向样本共用同一冻结决策核心。
+本控制器不会打开账户，也不会启用订单通道。
 """
 
 from __future__ import annotations
@@ -34,6 +31,7 @@ from chanlun.decision_support.trading_system.v3_trading_session import (
     resolve_trading_session_requirement,
 )
 from .app_runtime_owner import pid_alive
+from .job_names import JOB_DISPLAY_NAMES
 
 
 CN = ZoneInfo("Asia/Shanghai")
@@ -354,7 +352,7 @@ class AppForwardSchedulerController:
             _atomic_json(self._owner_path, self._owner_payload(observed_at))
 
     def register_jobs(self) -> None:
-        """Register exact due times plus one bounded five-minute reconciler."""
+        """注册两个固定时点任务，以及一个有界的五分钟恢复任务。"""
 
         with self._state_lock:
             if self._registered:
@@ -371,7 +369,7 @@ class AppForwardSchedulerController:
                 self.capture_due,
                 trigger="cron",
                 id=CAPTURE_JOB_ID,
-                name="V3 forward Capture (app-owned)",
+                name=JOB_DISPLAY_NAMES[CAPTURE_JOB_ID],
                 day_of_week="mon-fri",
                 hour=9,
                 minute=10,
@@ -382,13 +380,12 @@ class AppForwardSchedulerController:
                 self.evaluate_due,
                 trigger="cron",
                 id=EVALUATE_JOB_ID,
-                name="V3 forward Evaluate (app-owned)",
+                name=JOB_DISPLAY_NAMES[EVALUATE_JOB_ID],
                 day_of_week="mon-fri",
                 hour=15,
                 minute=20,
-                # Full-market post-close screening remains valid through the
-                # 23:00 preselection boundary.  Do not expire the recovery job
-                # at the former 19:20 deadline while coverage is progressing.
+                # 全市场盘后筛选在 23:00 的次日预选边界前仍然有效。覆盖仍在
+                # 推进时，不应沿用旧的 19:20 截止时间让恢复任务提前失效。
                 misfire_grace_time=8 * 60 * 60,
                 **common,
             )
@@ -396,7 +393,7 @@ class AppForwardSchedulerController:
                 self.reconcile,
                 trigger="interval",
                 id=RECONCILE_JOB_ID,
-                name="V3 forward bounded recovery reconciler",
+                name=JOB_DISPLAY_NAMES[RECONCILE_JOB_ID],
                 minutes=5,
                 next_run_time=observed_at + timedelta(minutes=5),
                 misfire_grace_time=5 * 60,
@@ -406,14 +403,13 @@ class AppForwardSchedulerController:
                 self.reconcile,
                 trigger="date",
                 id=STARTUP_JOB_ID,
-                name="V3 forward startup reconciliation",
+                name=JOB_DISPLAY_NAMES[STARTUP_JOB_ID],
                 run_date=observed_at + timedelta(seconds=3),
                 misfire_grace_time=5 * 60,
                 **common,
             )
             self._registered = True
-            # Rewrite after the flag flips so health and the transition guard
-            # observe one coherent owner claim.
+            # 注册标记切换后重新写入，使健康检查与状态迁移门看到一致的所有权声明。
             self._heartbeat(observed_at)
 
     def stop(self) -> None:

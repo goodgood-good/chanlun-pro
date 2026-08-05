@@ -225,6 +225,25 @@ def test_authenticated_child_reports_progress_and_safety_boundary(
     assert transport.health_snapshot()["worker_alive"] is False
 
 
+def test_explicit_startup_attests_worker_without_data_request(tmp_path: Path) -> None:
+    transport = _transport(tmp_path)
+    try:
+        transport.startup()
+        health = transport.health_snapshot()
+        assert health["ready"] is True
+        assert health["worker_alive"] is True
+        assert health["last_method"] is None
+        assert health["in_flight"] is False
+        assert health["restart_count"] == 1
+
+        # Startup is idempotent and must not replace a healthy process.
+        worker_pid = health["worker_pid"]
+        transport.startup()
+        assert transport.health_snapshot()["worker_pid"] == worker_pid
+    finally:
+        transport.shutdown()
+
+
 class _DisconnectedParent:
     def send(self, _value) -> None:
         raise ConnectionResetError(10054, "parent closed the IPC socket")
