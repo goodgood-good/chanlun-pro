@@ -75,7 +75,8 @@ jobs:
       - name: Smoke test fresh core Web import
         env:
           PYTHONPATH: src;web/chanlun_chart
-        run: poetry run python -c "from cl_app import create_app; app=create_app({'TESTING': True}); assert not app.extensions['scheduler'].running"
+        run: >-
+          poetry run python -c "from cl_app import create_app; app=create_app({'TESTING': True}); assert not app.extensions['scheduler'].running"
       - name: Install test profile dependencies
         run: poetry install --extras monitor --extras backtest --extras ai
       - name: Install Playwright browser
