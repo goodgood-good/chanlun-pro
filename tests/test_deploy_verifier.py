@@ -310,7 +310,8 @@ def test_restart_attests_dirty_source_and_verifier_rechecks_it():
         assert "deploy_common.ps1" in source
     assert "function Get-ApplicationSourceRevision" in helper
     assert "ls-files --cached --others --exclude-standard" in helper
-    assert "hash-object --no-filters --stdin-paths" in helper
+    assert "Get-FileHash" in helper
+    assert "-Algorithm SHA256" in helper
     assert "$env:CHANLUN_BUILD_REVISION = $deploymentRevision" in restart
     assert "-ExpectedSourceRevision $sourceRevision" in restart
     assert "current source revision" in verifier
@@ -362,7 +363,7 @@ def test_task_registration_reports_failure_and_confirms_registration():
 
     assert "$ErrorActionPreference = 'Stop'" in source
     assert "Register-ScheduledTask @regArgs -ErrorAction Stop" in source
-    assert "-CatchUpWindowMinutes {1}" in source
+    assert "-CatchUpWindowMinutes {2}" in source
     assert "Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop" in source
     assert "catch" in source
     assert "exit 1" in source

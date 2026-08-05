@@ -23,13 +23,19 @@ from chanlun.decision_support.rule_cards import (
 )
 
 
+_CERTIFIED_CORPUS_ROOT = Path("audit/chanlun_lesson_corpus_v3")
+_CERTIFIED_RULE_CARDS = Path("config/decision_support/rule_cards.json")
+pytestmark = pytest.mark.skipif(
+    not _CERTIFIED_CORPUS_ROOT.is_dir() or not _CERTIFIED_RULE_CARDS.is_file(),
+    reason="optional certified legacy corpus package is not versioned",
+)
+
+
 def test_certified_runtime_reverifies_status_evidence_and_image_bytes(
     make_bound_decision_event,
     make_risk_context,
 ) -> None:
-    runtime = CertifiedCorpusRuntime(
-        Path("audit/chanlun_lesson_corpus_v3")
-    )
+    runtime = CertifiedCorpusRuntime(_CERTIFIED_CORPUS_ROOT)
     event = make_bound_decision_event()
     context = make_risk_context(
         quote_code=event.code,
@@ -75,10 +81,10 @@ def test_real_rule_card_evidence_binding_resolves_certified_text_and_chart(
     make_decision_event,
     make_risk_context,
 ) -> None:
-    runtime = CertifiedCorpusRuntime(Path("audit/chanlun_lesson_corpus_v3"))
+    runtime = CertifiedCorpusRuntime(_CERTIFIED_CORPUS_ROOT)
     corpus = runtime.corpus()
     rules = load_rule_set_file(
-        Path("config/decision_support/rule_cards.json"),
+        _CERTIFIED_RULE_CARDS,
         corpus=corpus,
     )
     card = next(
@@ -86,7 +92,7 @@ def test_real_rule_card_evidence_binding_resolves_certified_text_and_chart(
     )
     event = make_decision_event(
         level=0,
-        track=StrategyTrack.TREND_CONTINUATION,
+        track=StrategyTrack.CHANLUN_SOURCE_FAITHFUL,
     )
     assert event.signal.level in card.applicable_levels
     support_ids = tuple(sorted(item.evidence_id for item in card.evidence))

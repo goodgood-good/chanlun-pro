@@ -18,11 +18,15 @@ def test_late_pickle_write_does_not_restart_writer_after_shutdown(tmp_path):
     from chanlun.persistence import file_db as module
 
     module.shutdown_pickle_writes(wait=False, cancel_pending=True)
-    file_db = object.__new__(FileCacheDB)
-    target = tmp_path / "late.pkl"
+    try:
+        file_db = object.__new__(FileCacheDB)
+        target = tmp_path / "late.pkl"
 
-    future = file_db._atomic_write_pickle(target, {"late": True})
+        future = file_db._atomic_write_pickle(target, {"late": True})
 
-    assert future.result(timeout=1) is None
-    assert target.exists() is False
-    assert module._PICKLE_WRITE_EXECUTOR is None
+        assert future.result(timeout=1) is None
+        assert target.exists() is False
+        assert module._PICKLE_WRITE_EXECUTOR is None
+    finally:
+        # Process-wide writer state must not leak into later test modules.
+        module.allow_lazy_pickle_writes()

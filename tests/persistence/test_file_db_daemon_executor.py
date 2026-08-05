@@ -89,6 +89,9 @@ def test_pickle_executor_workers_are_daemon_threads():
         assert all(thread.daemon for thread in threads)
     finally:
         file_db_module.shutdown_pickle_writes(wait=True, cancel_pending=True)
+        # The writer lifecycle is process-wide.  Restore lazy startup so this
+        # test cannot poison later persistence modules in the same pytest run.
+        file_db_module.allow_lazy_pickle_writes()
 
 def test_hung_pickle_write_does_not_block_interpreter_exit():
     root = pathlib.Path(__file__).resolve().parents[2]

@@ -38,6 +38,7 @@ function Get-ApplicationSourceRevision {
     # subprocesses execute decision/PIT code from disk and therefore belong to
     # the deployed application identity; unrelated maintenance tools do not.
     $forwardPipelineTools = @(
+        'tools/audit_qmt_warmup_convergence.py',
         'tools/backtest_v3_sector_first_full_market.py',
         'tools/build_v3_recent_year_current_sector_triggers.py',
         'tools/extract_v3_sector_first_direct_facts.py',
@@ -62,16 +63,20 @@ function Get-ApplicationSourceRevision {
     # cross-runtime source identity.
     [Array]::Sort($paths, [StringComparer]::Ordinal)
     $existing = @($paths | Where-Object { Test-Path -LiteralPath (Join-Path $Root $_) -PathType Leaf })
-    $hashes = @()
-    if ($existing.Count -gt 0) {
-        $hashes = @($existing | & git -C $Root hash-object --no-filters --stdin-paths 2>$null)
-        if ($LASTEXITCODE -ne 0 -or $hashes.Count -ne $existing.Count) {
-            throw 'unable to hash application source files'
-        }
-    }
+    # Do not pipe path names into a native executable. Windows PowerShell 5.1
+    # may prefix that native stdin stream with a BOM; Git then interprets the
+    # BOM as part of the first path and fails only on some runner code pages.
+    # Direct SHA-256 content hashes are stable across PowerShell/Python and
+    # still bind the exact bytes used by the running application.
     $hashByPath = @{}
-    for ($i = 0; $i -lt $existing.Count; $i++) {
-        $hashByPath[$existing[$i]] = ([string]$hashes[$i]).Trim()
+    foreach ($path in $existing) {
+        try {
+            $hashByPath[$path] = (
+                Get-FileHash -LiteralPath (Join-Path $Root $path) -Algorithm SHA256 -ErrorAction Stop
+            ).Hash.ToLowerInvariant()
+        } catch {
+            throw "unable to hash application source file '$path': $($_.Exception.Message)"
+        }
     }
     $manifest = New-Object System.Collections.Generic.List[string]
     $manifest.Add("HEAD`t$head")

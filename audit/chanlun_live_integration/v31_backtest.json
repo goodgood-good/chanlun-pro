@@ -1,0 +1,572 @@
+{
+  "ablation": {
+    "constituent_unit_instead_of_complete_trend": "DIAGNOSTIC_ONLY_REJECTED_AS_NONCOMPLIANT_WITH_V3",
+    "tactical_disabled": "ACTIVE_PARAMETER_BUT_NOT_REACHED_NO_STRATEGIC_HOLDING"
+  },
+  "benchmark": {
+    "csi300_price_index": {
+      "annualized_return": 0.05818240323650059,
+      "maximum_drawdown": 0.39585518177006873,
+      "observations": 1044,
+      "sharpe_ratio": 0.376934244111214,
+      "total_return": 0.2637271806596826
+    },
+    "etf_total_return": {
+      "annualized_return": 0.07395770825236747,
+      "maximum_drawdown": 0.3765053240879589,
+      "observations": 1044,
+      "sharpe_ratio": 0.44580834800876745,
+      "total_return": 0.34354585308930385
+    },
+    "source_artifact_sha256": "sha256:54a21f4f9aee483cfc50fefa1efc5d0bfe0dd92a8c183576f55175332d4f6d7b",
+    "status": "REFERENCE_ONLY_STRATEGY_NOT_COMPARABLE"
+  },
+  "bias_and_causality": {
+    "future_function_detected": false,
+    "known_limit": "FULL_V31_EVENT_REPLAY_NOT_RUN_AFTER_UPSTREAM_GATE_FAILURE",
+    "live_backtest_decision_difference_count": 0,
+    "signal_bar_fills": 0,
+    "survivorship_bias": "FULL_SYSTEM_NOT_EVALUATED; PIT_DATA_REMAINS_COMPONENT_ONLY"
+  },
+  "cash_only_component_observation": {
+    "annualized_return": 0.0,
+    "capacity": "NOT_APPLICABLE_NO_ORDERS",
+    "cost": 0.0,
+    "interpretation": "Zero-entry cash observation after an upstream gate failure; not a compliant full-V3.1 return result.",
+    "maximum_drawdown": 0.0,
+    "payoff_ratio": null,
+    "profit_factor": null,
+    "sharpe_ratio": null,
+    "total_return": 0.0,
+    "turnover": 0.0,
+    "win_rate": null
+  },
+  "content_sha256": "sha256:f73086e89c04d005f36209b3367d92b4022737058fae731631fd63a74f379188",
+  "data": {
+    "grade": "COMPONENT_ONLY",
+    "market_database_sha256": "sha256:fc632160e527e13508be981eda46e9c5e10f39e507552d08d4937b3233cc2c15",
+    "pit_database_sha256": "sha256:6071389e4b639f6b5582f9f35217e28ba483aec2b14a08630c2322d9db9abe7f",
+    "rows": {
+      "1m": 250560,
+      "30m": 8352,
+      "5m": 50112
+    },
+    "sessions": 1044,
+    "source_end": "2023-01-19",
+    "source_start": "2018-10-09",
+    "tick_requirement": "WAIVED_BY_USER_FOR_RESEARCH_ONLY"
+  },
+  "entry_evidence": {
+    "aligned_chains": 0,
+    "l0_candidates": 7,
+    "l1_completed_trends": 8,
+    "l2_first_or_second_buys": 1,
+    "rejection_counts": {
+      "NO_COMPLETED_L1_UP_DEPARTURE_INSIDE_L0_LEAVE_UNIT": 7
+    }
+  },
+  "evaluation_status": "NOT_EVALUATED_GATE_FAILED",
+  "first_failed_gate": {
+    "gate": "complete_l1_trend_from_frozen_5m_structure",
+    "passed": false,
+    "status": "BLOCKED_BY_FROZEN_STRUCTURE"
+  },
+  "frozen_structure": {
+    "after_sha256": "sha256:eb0ad84f56e718fa37d70626abc140b33cccf5b9884e47332ee29180d76e16eb",
+    "before_sha256": "sha256:eb0ad84f56e718fa37d70626abc140b33cccf5b9884e47332ee29180d76e16eb",
+    "file_count": 48,
+    "representative_outputs_unchanged": true,
+    "status": "PASS_ZERO_CHANGE"
+  },
+  "full_v31_performance": {
+    "annualized_return": "NOT_EVALUATED",
+    "capacity": "NOT_EVALUATED",
+    "cost": "NOT_EVALUATED",
+    "maximum_drawdown": "NOT_EVALUATED",
+    "payoff_ratio": "NOT_EVALUATED",
+    "profit_factor": "NOT_EVALUATED",
+    "sharpe_ratio": "NOT_EVALUATED",
+    "total_return": "NOT_EVALUATED",
+    "turnover": "NOT_EVALUATED",
+    "win_rate": "NOT_EVALUATED"
+  },
+  "gates": [
+    {
+      "evidence": {
+        "after": "sha256:eb0ad84f56e718fa37d70626abc140b33cccf5b9884e47332ee29180d76e16eb",
+        "before": "sha256:eb0ad84f56e718fa37d70626abc140b33cccf5b9884e47332ee29180d76e16eb"
+      },
+      "gate": "frozen_structure_zero_change",
+      "passed": true,
+      "status": "PASS_ZERO_CHANGE"
+    },
+    {
+      "evidence": {
+        "L0": "30m",
+        "L1": "5m",
+        "L2": "1m"
+      },
+      "gate": "independent_timeframe_mapping",
+      "passed": true,
+      "status": "PASS"
+    },
+    {
+      "evidence": 7,
+      "gate": "l0_center_completion_evidence",
+      "passed": true,
+      "status": "PASS"
+    },
+    {
+      "evidence": {
+        "aligned_chains": 0,
+        "complete_trends": 8,
+        "rejections": {
+          "NO_COMPLETED_L1_UP_DEPARTURE_INSIDE_L0_LEAVE_UNIT": 7
+        },
+        "sufficiency": {
+          "core_change_permitted": false,
+          "latest_completed_l1_trend_available_at": "2019-03-05T13:20:00+08:00",
+          "latest_completed_l1_trend_market_end": "2019-02-25T15:00:00+08:00",
+          "latest_completed_l1_unit_market_end_diagnostic": "2019-03-04T14:00:00+08:00",
+          "reason": "Frozen 5m output contains no complete L1 trend satisfying the L0 leave/first-return windows; the structure core is read-only.",
+          "source_end": "2023-01-19",
+          "status": "BLOCKED_BY_FROZEN_STRUCTURE"
+        }
+      },
+      "gate": "complete_l1_trend_from_frozen_5m_structure",
+      "passed": false,
+      "status": "BLOCKED_BY_FROZEN_STRUCTURE"
+    },
+    {
+      "evidence": 1,
+      "gate": "l2_confirmation_raw_bar",
+      "passed": true,
+      "status": "PASS_COMPONENT_NOT_REACHED"
+    },
+    {
+      "evidence": "30 V3.1 tests; included in 603-test related suite",
+      "gate": "shared_decision_order_execution_components",
+      "passed": true,
+      "status": "PASS_SYNTHETIC_COMPONENT"
+    },
+    {
+      "evidence": [
+        "BLOCKED_BY_FROZEN_STRUCTURE",
+        "STRICT_V3_CANDIDATE_PIT_SNAPSHOT_SET_UNAVAILABLE",
+        "BROKER_VINTAGE_EXECUTION_RULES_UNAVAILABLE",
+        "HIGH_TIMEFRAME_FACT_ADAPTER_NOT_CERTIFIED"
+      ],
+      "gate": "full_point_in_time_data",
+      "passed": false,
+      "status": "COMPONENT_ONLY"
+    }
+  ],
+  "generated_at": "2026-07-26T21:48:42.736108+08:00",
+  "highest_status": "RESEARCH_ONLY",
+  "initial_capital_cny": 1000000,
+  "live_status": "LIVE_DISABLED",
+  "parameter_manifest": {
+    "live_status": "LIVE_DISABLED",
+    "manifest_sha256": "sha256:7a5476ceabfafd0e4df25b9f0f3df9da436be47621ba11d505c2abc163788fad",
+    "schema": "chanlun-v31-parameter-snapshots/v1",
+    "scope": "RESEARCH_ONLY/PAPER_CANDIDATE",
+    "snapshots": {
+      "ETF_PROXY": {
+        "parameter_set_id": "sha256:e3364317327ca6edb28a206fa64443e3800ae6be3a92b30d6b822eb0ce0d5d7e",
+        "parameters": {
+          "caution_drawdown": "0.05",
+          "caution_new_risk_multiplier": "0.50",
+          "cluster_exposure_cap": "0.36",
+          "cluster_open_risk_cap": "0.010",
+          "deleverage_drawdown": "0.12",
+          "deleverage_target_exposure": "0.45",
+          "entry_halt_drawdown": "0.10",
+          "gross_exposure_cap": "0.90",
+          "level_relation_mode": "INDEPENDENT_CHART_EVIDENCE_V31",
+          "live_status": "LIVE_DISABLED",
+          "max_slots_per_cluster": 2,
+          "parent_v3_parameter_set_id": "sha256:b16882b09253581c2adbdc5ded720be3a0c75fa51e40acd8109dc7f1de6c3f0d",
+          "pen_definition_mode": "ORIGINAL_OLD_PEN",
+          "per_position_open_risk_fraction": "0.005",
+          "portfolio_open_risk_cap": "0.025",
+          "program_trading_report_required": true,
+          "require_licensed_market_data": true,
+          "selection_path": "ETF_PROXY",
+          "slot_count": 5,
+          "slot_notional_cap": "0.18",
+          "strategy_id": "CL-HIER-30M5M1M-v3.1-paper-candidate",
+          "structural_gap_buffer_fraction": "0.01",
+          "structural_gap_buffer_ticks_min": 2,
+          "tactical_enabled": false
+        },
+        "parent_v3_parameter_set_id": "sha256:b16882b09253581c2adbdc5ded720be3a0c75fa51e40acd8109dc7f1de6c3f0d"
+      },
+      "INDIVIDUAL_THREE_PROGRAM": {
+        "parameter_set_id": "sha256:a9adeebb5e32800d284c1618e4c42654d0507b04e3b9427db94198f3722103ca",
+        "parameters": {
+          "caution_drawdown": "0.05",
+          "caution_new_risk_multiplier": "0.50",
+          "cluster_exposure_cap": "0.36",
+          "cluster_open_risk_cap": "0.010",
+          "deleverage_drawdown": "0.12",
+          "deleverage_target_exposure": "0.45",
+          "entry_halt_drawdown": "0.10",
+          "gross_exposure_cap": "0.90",
+          "level_relation_mode": "INDEPENDENT_CHART_EVIDENCE_V31",
+          "live_status": "LIVE_DISABLED",
+          "max_slots_per_cluster": 2,
+          "parent_v3_parameter_set_id": "sha256:63810cea2432d4ac58ec9bf232799b0e6f78176b89ec1d22025cf8d06bb4984d",
+          "pen_definition_mode": "ORIGINAL_OLD_PEN",
+          "per_position_open_risk_fraction": "0.005",
+          "portfolio_open_risk_cap": "0.025",
+          "program_trading_report_required": true,
+          "require_licensed_market_data": true,
+          "selection_path": "INDIVIDUAL_THREE_PROGRAM",
+          "slot_count": 5,
+          "slot_notional_cap": "0.18",
+          "strategy_id": "CL-HIER-30M5M1M-v3.1-paper-candidate",
+          "structural_gap_buffer_fraction": "0.01",
+          "structural_gap_buffer_ticks_min": 2,
+          "tactical_enabled": false
+        },
+        "parent_v3_parameter_set_id": "sha256:63810cea2432d4ac58ec9bf232799b0e6f78176b89ec1d22025cf8d06bb4984d"
+      }
+    },
+    "strategy_id": "CL-HIER-30M5M1M-v3.1-paper-candidate"
+  },
+  "parameter_manifest_sha256": "sha256:7a5476ceabfafd0e4df25b9f0f3df9da436be47621ba11d505c2abc163788fad",
+  "performance": {
+    "annualized_return": "NOT_EVALUABLE_GATE_FAILED",
+    "capacity": "NOT_EVALUABLE_GATE_FAILED",
+    "cost": "NOT_EVALUABLE_GATE_FAILED",
+    "maximum_drawdown": "NOT_EVALUABLE_GATE_FAILED",
+    "payoff_ratio": "NOT_EVALUABLE_GATE_FAILED",
+    "profit_factor": "NOT_EVALUABLE_GATE_FAILED",
+    "sharpe_ratio": "NOT_EVALUABLE_GATE_FAILED",
+    "total_return": "NOT_EVALUABLE_GATE_FAILED",
+    "turnover": "NOT_EVALUABLE_GATE_FAILED",
+    "win_rate": "NOT_EVALUABLE_GATE_FAILED"
+  },
+  "protected_inputs": {
+    "lesson_corpus": {
+      "after": {
+        "bytes": 114729882,
+        "file_count": 220,
+        "path": "audit/chanlun_lesson_corpus",
+        "tree_sha256": "sha256:fc47fa949552b6cd071f1a06f76352dd813292204ac5e556e228182eac0a7c94"
+      },
+      "before": {
+        "bytes": 114729882,
+        "file_count": 220,
+        "path": "audit/chanlun_lesson_corpus",
+        "tree_sha256": "sha256:fc47fa949552b6cd071f1a06f76352dd813292204ac5e556e228182eac0a7c94"
+      },
+      "unchanged": true
+    },
+    "schema": "chanlun-v31-protected-input-verification/v1",
+    "specification": {
+      "after": {
+        "bytes": 89682,
+        "path": "audit/chanlun_live_strategy/complete_strategy_v3.md",
+        "sha256": "sha256:2459281425e51b371034d807055ced4c55dcd8422e478ef719505a88640b9b73"
+      },
+      "before": {
+        "bytes": 89682,
+        "path": "audit/chanlun_live_strategy/complete_strategy_v3.md",
+        "sha256": "sha256:2459281425e51b371034d807055ced4c55dcd8422e478ef719505a88640b9b73"
+      },
+      "unchanged": true
+    },
+    "status": "PASS_ZERO_CHANGE"
+  },
+  "reference_market_periods": {
+    "calendar_years": {
+      "2018": {
+        "csi300_price_index_benchmark": {
+          "annualized_return": -0.31872455683859113,
+          "maximum_drawdown": 0.09230167967728786,
+          "observations": 59,
+          "sharpe_ratio": -1.395794918102839,
+          "total_return": -0.08454337419275615
+        },
+        "end": "2018-12-28",
+        "etf_total_return_benchmark": {
+          "annualized_return": -0.3244510709219487,
+          "maximum_drawdown": 0.0924769550996134,
+          "observations": 59,
+          "sharpe_ratio": -1.324196103293496,
+          "total_return": -0.08632019115890077
+        },
+        "sessions": 59,
+        "start": "2018-10-09",
+        "strategy": {
+          "annualized_return": 0.0,
+          "maximum_drawdown": 0.0,
+          "observations": 59,
+          "sharpe_ratio": null,
+          "total_return": 0.0
+        }
+      },
+      "2019": {
+        "csi300_price_index_benchmark": {
+          "annualized_return": 0.39607411043757934,
+          "maximum_drawdown": 0.13491456284677228,
+          "observations": 244,
+          "sharpe_ratio": 1.7818083611232653,
+          "total_return": 0.37953642106898
+        },
+        "end": "2019-12-31",
+        "etf_total_return_benchmark": {
+          "annualized_return": 0.4230830023860266,
+          "maximum_drawdown": 0.1339805825242718,
+          "observations": 244,
+          "sharpe_ratio": 1.8760770254812689,
+          "total_return": 0.40526336077568614
+        },
+        "sessions": 244,
+        "start": "2019-01-02",
+        "strategy": {
+          "annualized_return": 0.0,
+          "maximum_drawdown": 0.0,
+          "observations": 244,
+          "sharpe_ratio": null,
+          "total_return": 0.0
+        }
+      },
+      "2020": {
+        "csi300_price_index_benchmark": {
+          "annualized_return": 0.2668918766422803,
+          "maximum_drawdown": 0.16079474743904698,
+          "observations": 243,
+          "sharpe_ratio": 1.1531827043094907,
+          "total_return": 0.2550544997293991
+        },
+        "end": "2020-12-31",
+        "etf_total_return_benchmark": {
+          "annualized_return": 0.28711012044612416,
+          "maximum_drawdown": 0.16087577344121828,
+          "observations": 243,
+          "sharpe_ratio": 1.1908856248495068,
+          "total_return": 0.27428295974933725
+        },
+        "sessions": 243,
+        "start": "2020-01-02",
+        "strategy": {
+          "annualized_return": 0.0,
+          "maximum_drawdown": 0.0,
+          "observations": 243,
+          "sharpe_ratio": null,
+          "total_return": 0.0
+        }
+      },
+      "2021": {
+        "csi300_price_index_benchmark": {
+          "annualized_return": -0.06462472392412366,
+          "maximum_drawdown": 0.1818968999378775,
+          "observations": 243,
+          "sharpe_ratio": -0.26647059770801657,
+          "total_return": -0.06214167003355775
+        },
+        "end": "2021-12-31",
+        "etf_total_return_benchmark": {
+          "annualized_return": -0.05068432234570652,
+          "maximum_drawdown": 0.1718615464095058,
+          "observations": 243,
+          "sharpe_ratio": -0.18926141231694077,
+          "total_return": -0.04872287003728493
+        },
+        "sessions": 243,
+        "start": "2021-01-04",
+        "strategy": {
+          "annualized_return": 0.0,
+          "maximum_drawdown": 0.0,
+          "observations": 243,
+          "sharpe_ratio": null,
+          "total_return": 0.0
+        }
+      },
+      "2022": {
+        "csi300_price_index_benchmark": {
+          "annualized_return": -0.22127277341878027,
+          "maximum_drawdown": 0.2865248367993487,
+          "observations": 242,
+          "sharpe_ratio": -1.1207171153031061,
+          "total_return": -0.2127249748986597
+        },
+        "end": "2022-12-30",
+        "etf_total_return_benchmark": {
+          "annualized_return": -0.20656033098851379,
+          "maximum_drawdown": 0.27442212765105756,
+          "observations": 242,
+          "sharpe_ratio": -1.0481866853481976,
+          "total_return": -0.1985061258597094
+        },
+        "sessions": 242,
+        "start": "2022-01-04",
+        "strategy": {
+          "annualized_return": 0.0,
+          "maximum_drawdown": 0.0,
+          "observations": 242,
+          "sharpe_ratio": null,
+          "total_return": 0.0
+        }
+      },
+      "2023": {
+        "csi300_price_index_benchmark": {
+          "annualized_return": 3.0568437852198063,
+          "maximum_drawdown": 0.0018526070251561055,
+          "observations": 13,
+          "sharpe_ratio": 12.342986062198566,
+          "total_return": 0.06895973537585554
+        },
+        "end": "2023-01-19",
+        "etf_total_return_benchmark": {
+          "annualized_return": 3.0953934657474447,
+          "maximum_drawdown": 0.0031378228336956804,
+          "observations": 13,
+          "sharpe_ratio": 12.537976594330393,
+          "total_return": 0.06944125839750948
+        },
+        "sessions": 13,
+        "start": "2023-01-03",
+        "strategy": {
+          "annualized_return": 0.0,
+          "maximum_drawdown": 0.0,
+          "observations": 13,
+          "sharpe_ratio": null,
+          "total_return": 0.0
+        }
+      }
+    },
+    "status": "REFERENCE_ONLY_STRATEGY_GATE_FAILED",
+    "train_validation_holdout": {
+      "FINAL_HOLDOUT_20_PERCENT": {
+        "csi300_price_index_benchmark": {
+          "annualized_return": -2.1367630604118837e-05,
+          "maximum_drawdown": 0.21959969887213626,
+          "observations": 209,
+          "sharpe_ratio": 0.09538617658013618,
+          "total_return": -1.76368073673272e-05
+        },
+        "end": "2023-01-19",
+        "etf_total_return_benchmark": {
+          "annualized_return": 0.02261039523758379,
+          "maximum_drawdown": 0.2114576421145763,
+          "observations": 209,
+          "sharpe_ratio": 0.21245325926756486,
+          "total_return": 0.01862603217842862
+        },
+        "sessions": 209,
+        "start": "2022-03-16",
+        "strategy": {
+          "annualized_return": 0.0,
+          "maximum_drawdown": 0.0,
+          "observations": 209,
+          "sharpe_ratio": null,
+          "total_return": 0.0
+        }
+      },
+      "TRAIN_60_PERCENT": {
+        "csi300_price_index_benchmark": {
+          "annualized_return": 0.1898404107825613,
+          "maximum_drawdown": 0.16079474743904698,
+          "observations": 626,
+          "sharpe_ratio": 0.9020083807459106,
+          "total_return": 0.5389481759092813
+        },
+        "end": "2021-05-06",
+        "etf_total_return_benchmark": {
+          "annualized_return": 0.20417129755665786,
+          "maximum_drawdown": 0.16087577344121828,
+          "observations": 626,
+          "sharpe_ratio": 0.938697273946129,
+          "total_return": 0.5853301540675118
+        },
+        "sessions": 626,
+        "start": "2018-10-09",
+        "strategy": {
+          "annualized_return": 0.0,
+          "maximum_drawdown": 0.0,
+          "observations": 626,
+          "sharpe_ratio": null,
+          "total_return": 0.0
+        }
+      },
+      "VALIDATION_20_PERCENT": {
+        "csi300_price_index_benchmark": {
+          "annualized_return": -0.23989842277043805,
+          "maximum_drawdown": 0.2542023952839704,
+          "observations": 209,
+          "sharpe_ratio": -1.4837372128806956,
+          "total_return": -0.20260809098350785
+        },
+        "end": "2022-03-15",
+        "etf_total_return_benchmark": {
+          "annualized_return": -0.2287879851001995,
+          "maximum_drawdown": 0.2453711194651721,
+          "observations": 209,
+          "sharpe_ratio": -1.4306390752931728,
+          "total_return": -0.19299987515605488
+        },
+        "sessions": 209,
+        "start": "2021-05-07",
+        "strategy": {
+          "annualized_return": 0.0,
+          "maximum_drawdown": 0.0,
+          "observations": 209,
+          "sharpe_ratio": null,
+          "total_return": 0.0
+        }
+      }
+    }
+  },
+  "result_label": "STRICT_V31_INDEPENDENT_30M_5M_1M",
+  "result_scope": "COMPONENT_ONLY_BLOCKED_BEFORE_ENTRY",
+  "schema": "chanlun-v31-backtest/v1",
+  "selection_path": "ETF_PROXY",
+  "selection_path_evaluated": "ETF_PROXY",
+  "test_results": {
+    "all_related_trading_and_core": {
+      "command": "python -m pytest -q tests/trading_system tests/core",
+      "failed": 0,
+      "passed": 603,
+      "status": "PASS"
+    },
+    "compileall": {
+      "command": "python -m compileall -q src/chanlun/decision_support/trading_system tools tests/trading_system",
+      "status": "PASS"
+    },
+    "full_repository_diagnostic": {
+      "command": "python -m pytest tests -q",
+      "failed": 103,
+      "passed": 2906,
+      "representative_failures": [
+        "missing audit/chanlun_lesson_corpus_v3",
+        "pre-existing forbidden legacy imports",
+        "decision_support numeric/environment expectations",
+        "persistence concurrency tests",
+        "web frequency gate"
+      ],
+      "skipped": 1,
+      "status": "FAIL_PREEXISTING_OR_ENVIRONMENT_BASELINES",
+      "v31_report_tests_rerun": "3 passed after shared artifact regeneration"
+    },
+    "v31_targeted": {
+      "command": "python -m pytest -q tests/trading_system/test_v31_timeframe_alignment.py tests/trading_system/test_v31_decision.py tests/trading_system/test_v31_risk_compliance.py tests/trading_system/test_v31_execution.py tests/trading_system/test_v31_backtest_gate.py",
+      "failed": 0,
+      "passed": 30,
+      "status": "PASS"
+    }
+  },
+  "trade_counts": {
+    "fills": 0,
+    "interpretation": "zero because the entry-evidence gate failed; not a 0% strategy return",
+    "orders": 0,
+    "sample_status": "INSUFFICIENT_BELOW_100_STRATEGIC_AND_200_TACTICAL",
+    "strategic_cycles": 0,
+    "tactical_cycles": 0
+  },
+  "train_validation_holdout": "NOT_REACHED_ENTRY_GATE_FAILED",
+  "walk_forward": "NOT_REACHED_ENTRY_GATE_FAILED",
+  "workspace_content_sha256": "sha256:de39441c730a4ed04807dc0633823b6d8beb2d532229e163158da3911b99ef39"
+}

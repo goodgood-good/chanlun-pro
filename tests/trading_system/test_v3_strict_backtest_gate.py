@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+from pathlib import Path
+
+import pytest
+
+import tools.backtest_chanlun_v3_strict as subject
 from tools.backtest_chanlun_v3_strict import build_report
 
 
@@ -35,7 +40,23 @@ def inputs() -> dict[str, object]:
     }
 
 
-def test_gate_failure_never_turns_no_trades_into_zero_return() -> None:
+def _bind_source_files(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    market = tmp_path / "market.sqlite3"
+    pit = tmp_path / "pit.sqlite3"
+    market.write_bytes(b"unit-test-market")
+    pit.write_bytes(b"unit-test-pit")
+    monkeypatch.setattr(subject, "DEFAULT_MARKET_DATABASE", market)
+    monkeypatch.setattr(subject, "DEFAULT_PIT_DATABASE", pit)
+
+
+def test_gate_failure_never_turns_no_trades_into_zero_return(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _bind_source_files(monkeypatch, tmp_path)
     report = build_report(**inputs())
 
     assert report["evaluation_status"] == "NOT_EVALUATED_GATE_FAILED"
@@ -49,7 +70,11 @@ def test_gate_failure_never_turns_no_trades_into_zero_return() -> None:
     assert report["live_status"] == "LIVE_DISABLED"
 
 
-def test_frozen_core_mismatch_is_the_first_failed_gate() -> None:
+def test_frozen_core_mismatch_is_the_first_failed_gate(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _bind_source_files(monkeypatch, tmp_path)
     values = inputs()
     values["current_core"] = {"core_contract_sha256": "sha256:changed"}
 

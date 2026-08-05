@@ -1,0 +1,23 @@
+{
+  "schema": "chanlun-official-a-share-calendar-source/v1",
+  "authority": "Shanghai Stock Exchange",
+  "market": "a",
+  "timezone": "Asia/Shanghai",
+  "source_id": "SSE-ANNOUNCEMENT-2025-45",
+  "announcement_id": "SSE-ANNOUNCEMENT-2025-45",
+  "published_on": "2025-12-22",
+  "source_url": "https://www.sse.com.cn/disclosure/announcement/general/c/c_20251222_10802507.shtml",
+  "coverage_start": "2026-01-01",
+  "coverage_end": "2026-12-31",
+  "weekends_closed": true,
+  "closure_ranges": [
+    {"label": "NEW_YEAR", "start": "2026-01-01", "end": "2026-01-03"},
+    {"label": "SPRING_FESTIVAL", "start": "2026-02-15", "end": "2026-02-23"},
+    {"label": "QINGMING", "start": "2026-04-04", "end": "2026-04-06"},
+    {"label": "LABOUR_DAY", "start": "2026-05-01", "end": "2026-05-05"},
+    {"label": "DRAGON_BOAT", "start": "2026-06-19", "end": "2026-06-21"},
+    {"label": "MID_AUTUMN", "start": "2026-09-25", "end": "2026-09-27"},
+    {"label": "NATIONAL_DAY", "start": "2026-10-01", "end": "2026-10-07"}
+  ],
+  "content_sha256": "sha256:3bdfe6112278242f64aef533b0f0ae5fef896f86890168548a89271e8a26d44f"
+}

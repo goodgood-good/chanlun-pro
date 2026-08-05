@@ -374,21 +374,18 @@ def test_cash_cap_rounds_down_to_board_lot(
     assert decision.shares == 200
 
 
-def test_bottom_reversal_target_weight_is_half_of_trend(
+def test_source_faithful_target_weight_is_deterministic(
     make_decision_event,
     make_risk_context,
 ) -> None:
-    trend_event = make_decision_event(track=StrategyTrack.TREND_CONTINUATION)
-    reversal_event = replace(
-        trend_event,
-        strategy_track=StrategyTrack.BOTTOM_REVERSAL,
-    )
-    context = make_risk_context(asof=trend_event.observed_at)
+    event = make_decision_event(track=StrategyTrack.CHANLUN_SOURCE_FAITHFUL)
+    context = make_risk_context(asof=event.observed_at)
 
-    trend = evaluate_entry(trend_event, context, RiskPolicy.conservative())
-    reversal = evaluate_entry(reversal_event, context, RiskPolicy.conservative())
+    first = evaluate_entry(event, context, RiskPolicy.conservative())
+    second = evaluate_entry(event, context, RiskPolicy.conservative())
 
-    assert reversal.target_weight == trend.target_weight * Decimal("0.5")
+    assert first.target_weight == second.target_weight
+    assert first.target_weight > Decimal("0")
 
 
 def test_stale_quote_fails_closed(

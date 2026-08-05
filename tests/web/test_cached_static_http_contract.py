@@ -15,13 +15,32 @@ ENTRYPOINT = "charting_library.standalone.js"
 
 
 class TestCachedStaticHttpContract(AsyncHTTPTestCase):
+    def setUp(self):
+        # The repository deliberately does not version generated ``.gz``
+        # siblings. Build both representations inside the test so its result
+        # cannot depend on whether app.py happened to precompress assets first.
+        self._temporary_directory = tempfile.TemporaryDirectory()
+        self.static_root = pathlib.Path(self._temporary_directory.name)
+        source = CHARTING_ROOT / ENTRYPOINT
+        target = self.static_root / ENTRYPOINT
+        target.write_bytes(source.read_bytes())
+        with gzip.open(self.static_root / f"{ENTRYPOINT}.gz", "wb") as stream:
+            stream.write(target.read_bytes())
+        super().setUp()
+
+    def tearDown(self):
+        try:
+            super().tearDown()
+        finally:
+            self._temporary_directory.cleanup()
+
     def get_app(self):
         return Application(
             [
                 (
                     r"/(.*)",
                     CachedStaticFileHandler,
-                    {"path": str(CHARTING_ROOT)},
+                    {"path": str(self.static_root)},
                 )
             ]
         )

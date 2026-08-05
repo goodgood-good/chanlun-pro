@@ -4993,6 +4993,10 @@ def test_paper_risk_state_persists_day_start_high_water_and_sticky_latches(
         SQLitePaperRiskState(path, policy=changed)
 
 
+@pytest.mark.skipif(
+    not Path("audit/chanlun_lesson_corpus_v3").is_dir(),
+    reason="optional certified legacy corpus package is not versioned",
+)
 def test_all_open_positions_are_evaluated_when_removed_from_entry_universe(
     tmp_path,
     make_decision_event,

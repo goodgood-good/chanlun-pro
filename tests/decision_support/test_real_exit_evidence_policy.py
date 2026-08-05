@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from chanlun.decision_support.corpus_loader import load_certified_lesson_corpus
 from chanlun.decision_support.corpus_types import SourceTier
 from chanlun.decision_support.exit_evidence_policy import (
@@ -64,8 +66,15 @@ _EXPECTED_PHRASES = {
 }
 
 
+_CERTIFIED_CORPUS_ROOT = Path("audit/chanlun_lesson_corpus_v3")
+
+
+@pytest.mark.skipif(
+    not _CERTIFIED_CORPUS_ROOT.is_dir(),
+    reason="optional certified legacy corpus package is not versioned",
+)
 def test_real_exit_policy_resolves_only_certified_original_semantic_units() -> None:
-    corpus_root = Path("audit/chanlun_lesson_corpus_v3")
+    corpus_root = _CERTIFIED_CORPUS_ROOT
     policy_path = Path("config/decision_support/exit_evidence_policy.json")
     assert policy_path.is_file(), "production exit evidence policy is missing"
 

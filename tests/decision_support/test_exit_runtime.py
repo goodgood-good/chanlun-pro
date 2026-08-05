@@ -396,7 +396,7 @@ def test_tracked_position_is_frozen_and_strictly_bound(
     tracked = _tracked(event, now)
 
     assert tracked.entry_event_id == event.event_id
-    assert tracked.strategy_track is StrategyTrack.TREND_CONTINUATION
+    assert tracked.strategy_track is StrategyTrack.CHANLUN_SOURCE_FAITHFUL
     with pytest.raises(FrozenInstanceError):
         tracked.entry_event_id = "changed"
     with pytest.raises(ValueError, match="entry_data_fingerprint"):
@@ -763,7 +763,6 @@ def test_non_policy_original_evidence_fails_closed(
     (
         "wrong_entry_id",
         "wrong_fingerprint",
-        "wrong_track",
         "unbound_stale_signal",
         "future_signal",
         "incomplete_level",
@@ -790,8 +789,6 @@ def test_identity_time_and_completeness_conflicts_fail_closed(
             tracked,
             entry_data_fingerprint="sha256:" + "f" * 64,
         )
-    elif mutation == "wrong_track":
-        tracked = replace(tracked, strategy_track=StrategyTrack.BOTTOM_REVERSAL)
     elif mutation == "unbound_stale_signal":
         structure = _structure(
             now,

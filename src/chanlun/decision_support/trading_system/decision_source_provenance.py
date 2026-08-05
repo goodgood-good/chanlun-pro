@@ -173,17 +173,10 @@ def calculate_forward_application_source_revision(
         paths.add(runtime_config)
     ordered_paths = tuple(sorted(value for value in paths if value))
     existing = tuple(value for value in ordered_paths if (root / value).is_file())
-    hash_by_path: dict[str, str] = {}
-    if existing:
-        hashes = git(
-            "hash-object",
-            "--no-filters",
-            "--stdin-paths",
-            stdin="\n".join(existing) + "\n",
-        ).splitlines()
-        if len(hashes) != len(existing):
-            raise RuntimeError("forward application source hashes are incomplete")
-        hash_by_path = dict(zip(existing, hashes, strict=True))
+    hash_by_path = {
+        value: hashlib.sha256((root / value).read_bytes()).hexdigest()
+        for value in existing
+    }
     manifest = [f"HEAD\t{head}"]
     manifest.extend(
         f"{path}\t{hash_by_path.get(path, 'deleted')}" for path in ordered_paths

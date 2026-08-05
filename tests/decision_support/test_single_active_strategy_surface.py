@@ -58,6 +58,7 @@ def test_web_surface_has_only_current_screening_and_human_review_routes() -> Non
             "/decision-support/early-screening",
             "/decision-support/early-signals",
             "/decision-support/human-review/data",
+            "/decision-support/human-review/candidate-detail",
             "/decision-support/human-review/feedback",
             "/decision-support/research-audit",
             "/decision-support/research-audit/data",

@@ -281,7 +281,7 @@ def test_forward_runner_collects_native_stderr_before_checking_exit_code():
     assert "$exitCode = $LASTEXITCODE" in source
     assert "$DataGateRetryCount = 5" in source
     assert "$DataGateRetryDelaySeconds = 30" in source
-    assert "$CoverageWaitMinutes = 240" in source
+    assert "$CoverageWaitMinutes = 460" in source
     assert "$CoveragePollSeconds = 60" in source
     assert "Get-ForwardCoverageProbe" in source
     assert "coverage_cycle_complete" in source

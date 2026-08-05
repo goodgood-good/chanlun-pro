@@ -94,13 +94,13 @@ REDIS_PORT = 6379
 # 数字货币（合约）支持： binance / db
 # 数字货币（现货）支持：binance_spot / db
 # 美股市场支持： alpaca / polygon / ib / tdx_us / cq / usmart / db
-EXCHANGE_A = "tdx"  # 沪深A股市场
-EXCHANGE_HK = "tdx_hk"  # 港股市场
+EXCHANGE_A = "qmt"  # 沪深A股市场（当前产品默认使用 QMT）
+EXCHANGE_HK = "usmart"  # 港股市场
 EXCHANGE_FUTURES = "tdx_futures"  # 期货市场
 EXCHANGE_NY_FUTURES = "tdx_ny_futures"  # 纽约期货市场
 EXCHANGE_CURRENCY = "binance"  # 数字货币（合约）
 EXCHANGE_CURRENCY_SPOT = "binance_spot"  # 数字货币（现货）
-EXCHANGE_US = "tdx_us"  # 美股市场
+EXCHANGE_US = "usmart"  # 美股市场
 EXCHANGE_FX = "tdx_fx"  # 外汇市场
 
 
@@ -286,7 +286,8 @@ DECISION_SUPPORT_PAPER_BOOTSTRAP = {
         "money_quantum": "0.01",
     },
     "paper_calendar_provider": (
-        "audit/paper_trading_calendar_2026/a_share_trading_calendar_2026.json"
+        "src/chanlun/decision_support/trading_system/data/"
+        "a_share_trading_calendar_2026.json"
     ),
     "paper_ledger_path": "paper_ledger.sqlite3",
     "trusted_bar_store_path": "trusted_bars.sqlite3",

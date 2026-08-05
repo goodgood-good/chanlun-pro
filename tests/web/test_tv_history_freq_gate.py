@@ -12,9 +12,20 @@
 import pathlib
 import sys
 
+import pytest
+
 _root = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_root / "src"))
 sys.path.insert(0, str(_root / "web" / "chanlun_chart"))
+
+
+@pytest.fixture(autouse=True)
+def _restart_market_metadata_lifecycle():
+    """A prior app shutdown must not leave this module reading closed fallbacks."""
+
+    from cl_app.services.constants import start_market_metadata_loaders
+
+    start_market_metadata_loaders()
 
 
 def test_resolution_3m_maps_to_quarter_q():

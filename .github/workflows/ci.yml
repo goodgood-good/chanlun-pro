@@ -54,7 +54,9 @@ jobs:
           grep -v -E '(@ file:|package/.*\.whl)' /tmp/req-all.txt > /tmp/req.txt
       - name: Audit dependencies (CVE scan)
         # 审计 Web/AI/通知/回测/监控部署画像；发现漏洞时阻断，不再假通过。
-        run: pip-audit -r /tmp/req.txt --no-deps
+        # Poetry 在互斥 extras 中可能锁定同一包的不同版本；这里逐项审计全部已固定
+        # 版本，不让 pip 再次解析并错误地把互斥画像合并安装。
+        run: pip-audit -r /tmp/req.txt --no-deps --disable-pip
 
   test:
     name: Test (pytest)

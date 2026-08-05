@@ -128,7 +128,7 @@ def make_factory_input():
             "market_constraints": constraints,
             "completed_bars": completed_bars,
             "config": {"recursive_l0_min_zs_lines": 5},
-            "strategy_track": StrategyTrack.TREND_CONTINUATION,
+            "strategy_track": StrategyTrack.CHANLUN_SOURCE_FAITHFUL,
         }
 
     return factory
@@ -166,7 +166,7 @@ def _rule_evaluation(**changes: object) -> RuleEvaluation:
         "corpus_manifest_fingerprint": "sha256:" + "3" * 64,
         "algorithm_fingerprint": "sha256:" + "4" * 64,
         "evaluation_input_fingerprint": "sha256:" + "5" * 64,
-        "strategy_track": StrategyTrack.TREND_CONTINUATION,
+        "strategy_track": StrategyTrack.CHANLUN_SOURCE_FAITHFUL,
         "level": 1,
         "verdict": EvaluationVerdict.CONFIRM,
         "candidate_satisfied": True,
@@ -363,12 +363,6 @@ def test_bind_evaluation_keeps_event_identity_but_binds_distinct_inputs(
 def test_bind_evaluation_rejects_identity_mismatch(make_factory_input) -> None:
     event = event_from_signal(**make_factory_input())
     assert event is not None
-
-    with pytest.raises(ValueError, match="strategy track mismatch"):
-        bind_rule_evaluation(
-            event,
-            _rule_evaluation(strategy_track=StrategyTrack.BOTTOM_REVERSAL),
-        )
 
     with pytest.raises(ValueError, match="signal level mismatch"):
         bind_rule_evaluation(event, _rule_evaluation(level=2))

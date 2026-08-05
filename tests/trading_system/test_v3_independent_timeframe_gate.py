@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+from pathlib import Path
+
+import pytest
+
 from chanlun.decision_support.trading_system.v3_timeframe_alignment import (
     independent_alignment_contract,
 )
+import tools.backtest_chanlun_v3_independent_timeframes as subject
 from tools.backtest_chanlun_v3_independent_timeframes import build_report
 
 
@@ -48,7 +53,23 @@ def inputs() -> dict[str, object]:
     }
 
 
-def test_certified_zero_entry_alignment_produces_measured_cash_result() -> None:
+def _bind_source_files(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    market = tmp_path / "market.sqlite3"
+    pit = tmp_path / "pit.sqlite3"
+    market.write_bytes(b"unit-test-market")
+    pit.write_bytes(b"unit-test-pit")
+    monkeypatch.setattr(subject, "DEFAULT_MARKET_DATABASE", market)
+    monkeypatch.setattr(subject, "DEFAULT_PIT_DATABASE", pit)
+
+
+def test_certified_zero_entry_alignment_produces_measured_cash_result(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _bind_source_files(monkeypatch, tmp_path)
     report = build_report(**inputs())
 
     statuses = {gate["gate"]: gate["status"] for gate in report["gates"]}
@@ -63,7 +84,11 @@ def test_certified_zero_entry_alignment_produces_measured_cash_result() -> None:
     assert report["live_status"] == "LIVE_DISABLED"
 
 
-def test_missing_independent_streams_fail_before_alignment() -> None:
+def test_missing_independent_streams_fail_before_alignment(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _bind_source_files(monkeypatch, tmp_path)
     values = inputs()
     values["structure"] = {
         **values["structure"],

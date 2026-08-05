@@ -14,7 +14,10 @@ import pickle
 import pandas as pd
 
 from chanlun.core import cl
-from chanlun.file_db_mixins.cl_object_cache import _CLObjectCacheMixin
+from chanlun.file_db_mixins.cl_object_cache import (
+    _CLObjectCacheMixin,
+    _versioned_config_key,
+)
 
 _CFG = {"macd_ld_use_htf": True, "recursive_zs_diversity": False}
 
@@ -60,7 +63,8 @@ def _mk_klines(n=60):
 
 
 def _pkl_path(root):
-    return root / "a" / "a_SH_600519_d_testkey.pkl"
+    key = _versioned_config_key("testkey")
+    return root / "a" / f"a_SH_600519_d_{key}.pkl"
 
 
 def test_process_klines_exception_evicts_bad_pkl_and_recomputes(tmp_path):

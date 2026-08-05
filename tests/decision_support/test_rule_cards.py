@@ -189,7 +189,7 @@ def _valid_card(*, rule_id: str = "chanlun.third_buy") -> dict[str, object]:
     return {
         "rule_id": rule_id,
         "version": 1,
-        "track": "trend_continuation",
+        "track": "chanlun_source_faithful_v2",
         "applicable_levels": [1],
         "algorithm_version": "chanlun-core/1",
         "concepts": ["third_buy", "central_zone_retest"],
@@ -281,7 +281,7 @@ def test_loads_immutable_versioned_rule_card_with_original_evidence() -> None:
     assert rules.source_pdf_sha256 == _SOURCE_PDF_SHA256
     assert card.rule_id == "chanlun.third_buy"
     assert card.version == 1
-    assert card.track is StrategyTrack.TREND_CONTINUATION
+    assert card.track is StrategyTrack.CHANLUN_SOURCE_FAITHFUL
     assert card.applicable_levels == (1,)
     assert card.evidence[0].pdf_pages == (320,)
     assert card.evidence[0].lesson_chart_ids == ("lesson-20-chart",)
@@ -897,7 +897,7 @@ def test_evaluator_rejects_legacy_bare_boolean_manual_check() -> None:
     result = evaluate_rule_card(
         card,
         _evaluation_context(),
-        track=StrategyTrack.TREND_CONTINUATION,
+        track=StrategyTrack.CHANLUN_SOURCE_FAITHFUL,
         level=1,
         manual_checks={"chart.structure_confirmed": True},
     )
@@ -935,7 +935,7 @@ def test_evaluator_confirms_only_matching_audited_manual_check() -> None:
     result = evaluate_rule_card(
         card,
         _audited_context(_evaluation_context()),
-        track=StrategyTrack.TREND_CONTINUATION,
+        track=StrategyTrack.CHANLUN_SOURCE_FAITHFUL,
         level=1,
     )
 
@@ -952,7 +952,7 @@ def test_evaluator_rejects_manual_check_with_unbound_evidence() -> None:
             _evaluation_context(),
             evidence_ids=("lesson-20-counter",),
         ),
-        track=StrategyTrack.TREND_CONTINUATION,
+        track=StrategyTrack.CHANLUN_SOURCE_FAITHFUL,
         level=1,
     )
 
@@ -972,7 +972,7 @@ def test_evaluator_revalidates_mutated_manual_check_snapshot() -> None:
     result = evaluate_rule_card(
         card,
         context,
-        track=StrategyTrack.TREND_CONTINUATION,
+        track=StrategyTrack.CHANLUN_SOURCE_FAITHFUL,
         level=1,
     )
 
@@ -991,7 +991,7 @@ def test_evaluator_confirms_complete_machine_and_manual_rule() -> None:
     result = evaluate_rule_card(
         card,
         _audited_context(context),
-        track=StrategyTrack.TREND_CONTINUATION,
+        track=StrategyTrack.CHANLUN_SOURCE_FAITHFUL,
         level=1,
     )
 
@@ -1029,7 +1029,7 @@ def test_evaluation_carries_ruleset_corpus_and_algorithm_fingerprints() -> None:
         card,
         _audited_context(_evaluation_context()),
         rule_set=rule_set,
-        track=StrategyTrack.TREND_CONTINUATION,
+        track=StrategyTrack.CHANLUN_SOURCE_FAITHFUL,
         level=1,
     )
 
@@ -1055,7 +1055,7 @@ def test_evaluator_rejects_rule_card_mutated_after_loader_validation() -> None:
     result = evaluate_rule_card(
         mutated,
         _audited_context(_evaluation_context()),
-        track=StrategyTrack.TREND_CONTINUATION,
+        track=StrategyTrack.CHANLUN_SOURCE_FAITHFUL,
         level=1,
     )
 
@@ -1093,7 +1093,7 @@ def test_open_bar_can_never_confirm() -> None:
     result = evaluate_rule_card(
         card,
         _audited_context(context),
-        track=StrategyTrack.TREND_CONTINUATION,
+        track=StrategyTrack.CHANLUN_SOURCE_FAITHFUL,
         level=1,
     )
 
@@ -1110,7 +1110,7 @@ def test_nonconfirming_result_keeps_supporting_and_counterevidence() -> None:
     result = evaluate_rule_card(
         card,
         _audited_context(context),
-        track=StrategyTrack.TREND_CONTINUATION,
+        track=StrategyTrack.CHANLUN_SOURCE_FAITHFUL,
         level=1,
     )
 
@@ -1128,7 +1128,7 @@ def test_critical_indeterminate_is_authoritatively_blocked() -> None:
     result = evaluate_rule_card(
         card,
         _audited_context(context),
-        track=StrategyTrack.TREND_CONTINUATION,
+        track=StrategyTrack.CHANLUN_SOURCE_FAITHFUL,
         level=1,
     )
 
@@ -1219,7 +1219,7 @@ def test_evaluator_fail_closes_missing_null_and_inconsistent_values() -> None:
         result = evaluate_rule_card(
             card,
             _audited_context(context),
-            track=StrategyTrack.TREND_CONTINUATION,
+        track=StrategyTrack.CHANLUN_SOURCE_FAITHFUL,
             level=1,
         )
 
@@ -1248,7 +1248,7 @@ def test_evaluator_applies_watch_reject_precedence_and_manual_boundary() -> None
         (
             unsupported_candidate,
             {"chart.structure_confirmed": True},
-            StrategyTrack.TREND_CONTINUATION,
+            StrategyTrack.CHANLUN_SOURCE_FAITHFUL,
             1,
             EvaluationVerdict.WATCH,
             "candidate_not_satisfied",
@@ -1259,7 +1259,7 @@ def test_evaluator_applies_watch_reject_precedence_and_manual_boundary() -> None
         (
             _evaluation_context(),
             {"chart.structure_confirmed": False},
-            StrategyTrack.TREND_CONTINUATION,
+            StrategyTrack.CHANLUN_SOURCE_FAITHFUL,
             1,
             EvaluationVerdict.WATCH,
             "confirmation_not_satisfied",
@@ -1272,7 +1272,7 @@ def test_evaluator_applies_watch_reject_precedence_and_manual_boundary() -> None
         (
             insufficient_bars,
             {"chart.structure_confirmed": True},
-            StrategyTrack.TREND_CONTINUATION,
+            StrategyTrack.CHANLUN_SOURCE_FAITHFUL,
             1,
             EvaluationVerdict.WATCH,
             "insufficient_completed_bars",
@@ -1285,7 +1285,7 @@ def test_evaluator_applies_watch_reject_precedence_and_manual_boundary() -> None
         (
             open_latest_bar,
             {"chart.structure_confirmed": True},
-            StrategyTrack.TREND_CONTINUATION,
+            StrategyTrack.CHANLUN_SOURCE_FAITHFUL,
             1,
             EvaluationVerdict.WATCH,
             "latest_bar_not_closed",
@@ -1298,7 +1298,7 @@ def test_evaluator_applies_watch_reject_precedence_and_manual_boundary() -> None
         (
             invalidated,
             {"chart.structure_confirmed": True},
-            StrategyTrack.TREND_CONTINUATION,
+            StrategyTrack.CHANLUN_SOURCE_FAITHFUL,
             1,
             EvaluationVerdict.REJECT,
             "invalidation_triggered",
@@ -1311,7 +1311,7 @@ def test_evaluator_applies_watch_reject_precedence_and_manual_boundary() -> None
         (
             conflict,
             {"chart.structure_confirmed": True},
-            StrategyTrack.TREND_CONTINUATION,
+            StrategyTrack.CHANLUN_SOURCE_FAITHFUL,
             1,
             EvaluationVerdict.REJECT,
             "conflict_triggered",
@@ -1322,7 +1322,7 @@ def test_evaluator_applies_watch_reject_precedence_and_manual_boundary() -> None
         (
             _evaluation_context(),
             {"chart.structure_confirmed": True, "unknown.check": True},
-            StrategyTrack.TREND_CONTINUATION,
+            StrategyTrack.CHANLUN_SOURCE_FAITHFUL,
             1,
             EvaluationVerdict.REJECT,
             "manual_check_set_mismatch",
@@ -1335,7 +1335,7 @@ def test_evaluator_applies_watch_reject_precedence_and_manual_boundary() -> None
         (
             negative_bar_count,
             {"chart.structure_confirmed": True},
-            StrategyTrack.TREND_CONTINUATION,
+            StrategyTrack.CHANLUN_SOURCE_FAITHFUL,
             1,
             EvaluationVerdict.REJECT,
             "inconsistent_completed_bar_count",
@@ -1346,7 +1346,7 @@ def test_evaluator_applies_watch_reject_precedence_and_manual_boundary() -> None
         (
             _evaluation_context(),
             {"chart.structure_confirmed": "yes"},
-            StrategyTrack.TREND_CONTINUATION,
+            StrategyTrack.CHANLUN_SOURCE_FAITHFUL,
             1,
             EvaluationVerdict.REJECT,
             "manual_checks_inconsistent",
@@ -1357,7 +1357,7 @@ def test_evaluator_applies_watch_reject_precedence_and_manual_boundary() -> None
         (
             _evaluation_context(),
             {"chart.structure_confirmed": True},
-            StrategyTrack.BOTTOM_REVERSAL,
+            "retired_strategy",
             1,
             EvaluationVerdict.REJECT,
             "strategy_track_mismatch",

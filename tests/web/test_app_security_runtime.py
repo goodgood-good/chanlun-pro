@@ -65,7 +65,9 @@ app.extensions['shutdown_runtime_services']()
         env={**os.environ, "PYTHONPATH": python_path},
         capture_output=True,
         text=True,
-        timeout=10,
+        # A cold GitHub Windows runner imports scientific dependencies from
+        # scratch and can legitimately exceed ten seconds without hanging.
+        timeout=30,
     )
 
     assert completed.returncode == 0, completed.stderr

@@ -155,6 +155,10 @@ def test_secondary_runtime_accepts_schema_one_manifest_without_new_optional_fiel
     ] == 2
 
 
+@pytest.mark.skipif(
+    not Path("audit/decision_corpus_build/trusted_manifest.json").is_file(),
+    reason="optional secondary corpus build is not versioned",
+)
 def test_real_secondary_manifest_is_incomplete_advisory_evidence_only(
     make_decision_event,
 ) -> None:
