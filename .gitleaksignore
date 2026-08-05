@@ -1,7 +1,8 @@
-# 已知历史泄露 finding，登记后 gitleaks 全历史扫描跳过这些指纹。
-# 当前代码已清理（config.py 改用环境变量、run.py 改用 config.GM_TOKEN），
-# 泄露仅存在于旧 commit 历史中。相关密钥应在对应平台后台轮换。
-413fe6b64de916b4a8cc2c74dc297d805070414f:src/chanlun/config.py:generic-api-key:73
-413fe6b64de916b4a8cc2c74dc297d805070414f:src/chanlun/config.py:generic-api-key:74
+# 已人工核验的非凭证常量。仅按提交、文件、规则和行号组成的精确指纹豁免，
+# 不放宽 generic-api-key 或其他密钥检测规则。
+52efa3f34d2c3ec93e1890757c388809f6e53623:web/chanlun_chart/cl_app/services/trading_screening.py:generic-api-key:2031
+f71f3ebe1de8ab71dfed01c2c34827e184fd5027:tests/web/test_kline_recompute_price_basis.py:generic-api-key:85
+
+# 该令牌已存在于 master 的 2023 历史提交，当前 HEAD 已删除。这里仅建立精确历史
+# 基线；对应外部平台令牌仍应按已泄露处理并轮换，不应重新写入仓库。
 8e51c06150831703cfb6cbb95590a0d55c8dc613:src/cl_myquant/run.py:generic-api-key:22
-4c1b0e83d1af17f4b71d4184b311336aae5f25c2:src/cl_myquant/run.py:generic-api-key:22

@@ -27,7 +27,9 @@ jobs:
         run: |
           VER=8.30.1
           curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${VER}/gitleaks_${VER}_linux_x64.tar.gz" | tar -xz -C /tmp gitleaks
-          /tmp/gitleaks git . --redact --no-banner
+          # 只扫描当前发布分支的完整祖先历史；checkout 会抓取所有远端 refs，
+          # 不限制 HEAD 会把无关实验分支中的历史凭证也算进本次发布结果。
+          /tmp/gitleaks git . --log-opts=HEAD --redact --no-banner
 
   dependency-audit:
     name: Dependency Audit (pip-audit on poetry lock)
@@ -78,7 +80,8 @@ jobs:
         run: >-
           poetry run python -c "from cl_app import create_app; app=create_app({'TESTING': True}); assert not app.extensions['scheduler'].running"
       - name: Install test profile dependencies
-        run: poetry install --extras monitor --extras backtest --extras ai
+        # tests/exchange/test_usmart.py 在收集阶段直接导入 Crypto，必须安装 usmart 画像。
+        run: poetry install --extras monitor --extras backtest --extras ai --extras usmart
       - name: Install Playwright browser
         run: poetry run playwright install chromium
       - name: Run tests
