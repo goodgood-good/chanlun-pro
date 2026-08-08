@@ -34,11 +34,9 @@ CL_CFG = {
     "chart_show_xd_mmd": "1", "chart_show_bi_bc": "1", "chart_show_xd_bc": "1",
     "zs_bi_type": ["zs_type_bz"], "zs_xd_type": ["zs_type_bz"],
     "idx_macd_fast": 12, "idx_macd_slow": 26, "idx_macd_signal": 9,
-    # 成枢门 = 5(用户口径 2026-06-26 拍板 4→5, commit 7c231295「⚠回测须重跑」条款,
-    # 2026-07-06 补落实——拍板时仅改了 core 侧,回测侧本键/DEFAULT/白名单三处漏同步,
-    # 致「图表(5)≠回测(4)」跨链分裂)。递归全级别统一用本值(「L≥1 仍 3」为已废历史口径);
-    # legacy 两层亦经 cl 单点解析同值。改本键 → cl_cfg_hash 变 → 信号缓存自动失效。
-    "recursive_l0_min_zs_lines": 5,
+    # ``center.lines`` 不含进入段，4 对应五角色：进入 + A/B/C + 离开。
+    # L1+ 由三个完成走势类型重叠成枢；改本键会改变 cl_cfg_hash 并失效旧缓存。
+    "recursive_l0_min_zs_lines": 4,
 }
 
 CACHE_DIR = "D:/chanlun_pro/chart_cache"

@@ -175,7 +175,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .es-operation-guide[open] > summary { margin-bottom: 7px; }
 .es-operation-guide .es-pipeline { margin-top: 0; }
 
-.es-summary { display: grid; grid-template-columns: repeat(4, minmax(145px, 1fr)); gap: 8px; margin-top: 9px; }
+.es-summary { display: grid; grid-template-columns: repeat(5, minmax(125px, 1fr)); gap: 8px; margin-top: 9px; }
 .es-summary article { min-width: 0; padding: 13px 14px; border: 1px solid var(--es-line); border-radius: 11px; background: rgba(13, 25, 22, 0.74); }
 .es-summary span, .es-summary strong, .es-summary small { display: block; }
 .es-summary span { color: var(--es-muted); font-weight: 700; }

@@ -122,7 +122,7 @@ def test_chart_payload_never_reads_legacy_center_objects() -> None:
     assert cd.evidence_calls == 1
     assert cd.base_center_calls == {"bi": 0, "xd": 0}
     assert payload["strict_structure_mode"] == "replace"
-    assert payload["strict_structure"]["schema"] == "chanlun-chart-structure/v5"
+    assert payload["strict_structure"]["schema"] == "chanlun-chart-structure/v12"
     assert payload["strict_structure"]["source_closed_at"] == payload["t"][-1]
     assert payload["bi_zss"] == []
     assert payload["xd_zss"] == []
@@ -255,3 +255,138 @@ def test_explicit_metadata_failure_does_not_call_any_strict_source() -> None:
     assert payload["strict_structure_error"] == {
         "code": "strict_price_metadata_unavailable"
     }
+
+
+def test_chart_serializer_drops_future_end_label_before_both_structure_engines(
+    monkeypatch,
+) -> None:
+    from cl_app.services import chart_compute
+
+    completed_at = pd.Timestamp("2026-08-05 15:00:00", tz="Asia/Shanghai")
+    future_at = pd.Timestamp("2099-01-01 09:30:00", tz="Asia/Shanghai")
+    frame = pd.DataFrame(
+        [
+            {
+                "date": completed_at,
+                "code": "SH.000001",
+                "open": 10.0,
+                "high": 10.2,
+                "low": 9.9,
+                "close": 10.1,
+                "volume": 1000.0,
+            },
+            {
+                "date": future_at,
+                "code": "SH.000001",
+                "open": 10.1,
+                "high": 10.3,
+                "low": 10.0,
+                "close": 10.2,
+                "volume": 10.0,
+            },
+        ]
+    )
+    frame.attrs.update(
+        structure_price_quantum="0.01",
+        price_basis_revision="test-qmt-v1",
+    )
+    stale_legacy = object()
+    rebuilt_legacy = object()
+    strict_runtime = object()
+    calls: list[tuple] = []
+
+    def rebuild(market, code, frames, config):
+        rebuilt_frame = frames["1m"]
+        calls.append(("legacy", tuple(rebuilt_frame["date"]), dict(rebuilt_frame.attrs)))
+        assert market == "a"
+        assert code == "SH.000001"
+        assert config == {"pen": "old"}
+        return [rebuilt_legacy]
+
+    def build_strict(*, market, code, frequency, frame):
+        calls.append(("strict", tuple(frame["date"]), dict(frame.attrs)))
+        return strict_runtime
+
+    def serialize(cd, config, *, strict_runtime):
+        calls.append(("serialize", cd, config, strict_runtime))
+        return {"strict_structure_mode": "replace"}
+
+    monkeypatch.setattr(chart_compute, "web_batch_get_cl_datas", rebuild)
+    monkeypatch.setattr(chart_compute, "build_strict_chart_cd", build_strict)
+    monkeypatch.setattr(chart_compute, "cl_data_to_tv_chart", serialize)
+
+    result = chart_compute.serialize_chart_data_with_strict_runtime(
+        market="a",
+        code="SH.000001",
+        display_frequency="1m",
+        display_klines=frame,
+        legacy_cd=stale_legacy,
+        legacy_config={"pen": "old"},
+    )
+
+    assert result == {"strict_structure_mode": "replace"}
+    assert calls[0] == (
+        "legacy",
+        (completed_at,),
+        {
+            "structure_price_quantum": "0.01",
+            "price_basis_revision": "test-qmt-v1",
+        },
+    )
+    assert calls[1][0:2] == ("strict", (completed_at,))
+    assert calls[1][2] == frame.attrs
+    assert calls[2] == (
+        "serialize",
+        rebuilt_legacy,
+        {"pen": "old"},
+        strict_runtime,
+    )
+
+
+def test_chart_serializer_keeps_an_already_completed_prefix(monkeypatch) -> None:
+    from cl_app.services import chart_compute
+
+    frame = pd.DataFrame(
+        [
+            {
+                "date": pd.Timestamp("2020-01-02 09:31:00", tz="Asia/Shanghai"),
+                "code": "SH.000001",
+                "open": 10.0,
+                "high": 10.2,
+                "low": 9.9,
+                "close": 10.1,
+                "volume": 1000.0,
+            }
+        ]
+    )
+    legacy = object()
+    strict_runtime = object()
+
+    monkeypatch.setattr(
+        chart_compute,
+        "web_batch_get_cl_datas",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("completed legacy CL must not be rebuilt")
+        ),
+    )
+    monkeypatch.setattr(
+        chart_compute,
+        "build_strict_chart_cd",
+        lambda **kwargs: strict_runtime,
+    )
+    monkeypatch.setattr(
+        chart_compute,
+        "cl_data_to_tv_chart",
+        lambda cd, config, *, strict_runtime: (cd, config, strict_runtime),
+    )
+
+    result = chart_compute.serialize_chart_data_with_strict_runtime(
+        market="a",
+        code="SH.000001",
+        display_frequency="1m",
+        display_klines=frame,
+        legacy_cd=legacy,
+        legacy_config={"pen": "old"},
+    )
+
+    assert result == (legacy, {"pen": "old"}, strict_runtime)

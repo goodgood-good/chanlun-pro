@@ -100,8 +100,9 @@ class StrictRealtimeMonitorEvent:
 
     @property
     def identity(self) -> str:
-        if self.evidence_id:
-            return "|".join((self.kind, self.code, self.evidence_id))
+        # Point IDs contain full structure lineage and may legitimately change
+        # when the same completed source bars are rebuilt.  Notification
+        # identity is the causal market occurrence, not an implementation ID.
         return "|".join(
             (self.kind, self.code, self.bs_type or "-", self.signal_time or "-")
         )
@@ -113,6 +114,7 @@ class _FrequencyRuntime:
     metadata: StrictSnapshotPriceMetadata
     strict_config_revision: str
     evidence: StrictEvidenceResult | None = None
+    source_frame: pd.DataFrame | None = None
 
 
 class StrictPhysicalMonitorState:
@@ -165,7 +167,8 @@ class StrictPhysicalMonitorState:
         self.last_px = 0.0
         self.prev_close = 0.0
         self.d3_until: datetime | None = None
-        self.seen: set[str] = set()
+        self.seen: set[tuple[str, ...]] = set()
+        self._op_baseline_initialized = False
         self.consecutive_refresh_failures = 0
         self.consecutive_warmup_incomplete = 0
         self.warmup_ready = False
@@ -257,6 +260,33 @@ class StrictPhysicalMonitorState:
             strict_config_revision=revision,
         )
 
+    @staticmethod
+    def _merge_authoritative_tail(
+        existing: pd.DataFrame,
+        tail: pd.DataFrame,
+    ) -> pd.DataFrame:
+        """Replace the fetched overlap and retain only the untouched prefix."""
+
+        first_tail_at = pd.Timestamp(tail["date"].iloc[0])
+        prefix = existing.loc[pd.to_datetime(existing["date"]) < first_tail_at]
+        merged = pd.concat((prefix, tail), ignore_index=True)
+        merged = merged.sort_values("date", kind="stable").reset_index(drop=True)
+        copy_price_basis_metadata(tail, merged)
+        if pd.to_datetime(merged["date"]).duplicated().any():
+            raise ValueError("authoritative kline merge produced duplicate times")
+        strict_snapshot_price_metadata(merged)
+        return merged
+
+    @staticmethod
+    def _point_occurrence_key(point: StructuralPoint) -> tuple[str, ...]:
+        return (
+            str(point.code),
+            str(point.source_frequency),
+            str(point.side),
+            str(point.point_type),
+            point.available_at.isoformat(timespec="seconds"),
+        )
+
     def _process_level(
         self,
         frequency: str,
@@ -282,44 +312,70 @@ class StrictPhysicalMonitorState:
                 raise _WarmupIncomplete(
                     f"{frequency} warmup requires {minimum} completed bars, got {len(frame)}"
                 )
-            runtime = self._new_runtime(frequency, metadata)
-            self._runtime_by_frequency[frequency] = runtime
+            source_frame = frame.reset_index(drop=True)
+            copy_price_basis_metadata(frame, source_frame)
         elif runtime.metadata != metadata:
             raise ValueError(f"{frequency} price basis changed during full warmup")
+        else:
+            if runtime.source_frame is None:
+                # Runtime states created before the authoritative-frame
+                # contract cannot safely continue incrementally.
+                frame = self._closed_frame(
+                    self._fetch_klines(frequency, None),
+                    frequency,
+                )
+                metadata = strict_snapshot_price_metadata(frame)
+                if runtime.metadata != metadata:
+                    runtime = None
+                    setattr(self, last_attr, None)
+                source_frame = frame.reset_index(drop=True)
+                copy_price_basis_metadata(frame, source_frame)
+            else:
+                source_frame = self._merge_authoritative_tail(
+                    runtime.source_frame,
+                    frame,
+                )
 
-        new = frame if last is None else frame.loc[frame["date"] > last]
-        if len(new):
-            new = new.reset_index(drop=True)
-            copy_price_basis_metadata(frame, new)
-            runtime.cd.process_klines(new)
-            latest = pd.Timestamp(frame["date"].iloc[-1])
-            setattr(self, last_attr, latest)
-            if frequency == "5m":
-                self.last5 = latest
-            elif frequency == "30m":
-                self.last30 = latest
+        latest = pd.Timestamp(source_frame["date"].iloc[-1])
 
         source_closed_at = observed_at.astimezone(CN)
-        latest_market_time = _aware_datetime(frame["date"].iloc[-1])
+        latest_market_time = _aware_datetime(source_frame["date"].iloc[-1])
         if source_closed_at < latest_market_time.astimezone(CN):
             raise ValueError(f"{frequency} snapshot contains a future completed bar")
-        # No completed K-line means no structural fact can have changed.  Keep
-        # the exact previous evidence identity instead of rebuilding four
-        # complete structures on every polling tick.
-        if not len(new) and runtime.evidence is not None:
+        unchanged = (
+            runtime is not None
+            and runtime.source_frame is not None
+            and runtime.source_frame.reset_index(drop=True).equals(source_frame)
+        )
+        if unchanged and runtime.evidence is not None:
             return runtime.evidence
-        runtime.evidence = build_screening_evidence(
-            runtime.cd,
+
+        # Rebuild atomically from the complete retained source frame.  Strict
+        # structures can revise historical IDs and centers when a pending tail
+        # locks; feeding only the new rows creates a different state from the
+        # full chart recomputation used as notification evidence.
+        candidate = self._new_runtime(frequency, metadata)
+        candidate.cd.process_klines(source_frame)
+        candidate.evidence = build_screening_evidence(
+            candidate.cd,
             source_closed_at=source_closed_at,
             structure_price_quantum=metadata.structure_price_quantum,
             price_basis_revision=metadata.price_basis_revision,
-            strict_config_revision=runtime.strict_config_revision,
+            strict_config_revision=candidate.strict_config_revision,
         )
-        return runtime.evidence
+        candidate.source_frame = source_frame
+        self._runtime_by_frequency[frequency] = candidate
+        setattr(self, last_attr, latest)
+        if frequency == "5m":
+            self.last5 = latest
+        elif frequency == "30m":
+            self.last30 = latest
+        return candidate.evidence
 
     def refresh(self) -> list[StructuralPoint]:
         self.warmup_ready = False
         observed_at = datetime.now(CN)
+        baseline_only = not self._op_baseline_initialized
         try:
             op = self._process_level(self.op_level, "last_op", observed_at)
             big = self._process_level(self.big_level, "last_big", observed_at)
@@ -363,14 +419,16 @@ class StrictPhysicalMonitorState:
 
         output: list[StructuralPoint] = []
         for point in points:
-            if point.point_id in self.seen:
+            occurrence_key = self._point_occurrence_key(point)
+            if occurrence_key in self.seen:
                 continue
-            self.seen.add(point.point_id)
-            if self.last_op is None:
+            self.seen.add(occurrence_key)
+            if baseline_only:
                 continue
             lag = pd.Timestamp(self.last_op) - pd.Timestamp(point.available_at)
             if pd.Timedelta(0) <= lag <= self.signal_freshness:
                 output.append(point)
+        self._op_baseline_initialized = True
         # Keep explicit references for diagnostic callers and direction gates.
         if mid is not None and _strict_direction(mid) not in {"up", "down", "neutral"}:
             raise AssertionError("invalid strict middle direction")
@@ -416,6 +474,44 @@ class StrictPhysicalMonitorState:
 
         runtime = self._runtime_by_frequency.get(str(frequency))
         return None if runtime is None else runtime.cd
+
+    def confirmed_point_occurrence(
+        self,
+        point_type: str,
+        signal_time: str,
+        *,
+        frequency: str = "1m",
+    ) -> StructuralPoint | None:
+        """Resolve an alert marker from this exact computed chart snapshot."""
+
+        evidence = self.evidence(frequency)
+        if evidence is None or not point_type or not signal_time:
+            return None
+        try:
+            target = pd.Timestamp(signal_time)
+        except (TypeError, ValueError):
+            return None
+        if target.tzinfo is None:
+            return None
+        now = datetime.now(CN)
+        target_datetime = target.to_pydatetime()
+        as_of = max(now, target_datetime.astimezone(CN))
+        points = extract_confirmed_points(
+            evidence,
+            code=self.code,
+            source_frequency=frequency,
+            as_of=as_of,
+        )
+        target_utc = target.tz_convert("UTC")
+        return next(
+            (
+                point
+                for point in points
+                if point.point_type == point_type
+                and pd.Timestamp(point.available_at).tz_convert("UTC") == target_utc
+            ),
+            None,
+        )
 
     def big_dir(self) -> str:
         return _strict_direction(self.evidence(self.big_level))

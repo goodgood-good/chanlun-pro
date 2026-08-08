@@ -231,6 +231,7 @@
         Number(snapshot.total_qualified_signal_count) || snapshot.signals.length,
       );
       setText("es-approaching-count", countStage("approaching"));
+      setText("es-formed-count", countStage("formed"));
       setText("es-armed-count", countStage("armed"));
       setText("es-triggered-count", countStage("triggered"));
       setText("es-executable-count", countStage("executable"));
@@ -267,10 +268,11 @@
         triggered: 1,
         active: 2,
         armed: 3,
-        approaching: 4,
-        observed: 5,
-        invalidated: 6,
-        closed: 7,
+        formed: 4,
+        approaching: 5,
+        observed: 6,
+        invalidated: 7,
+        closed: 8,
       };
       const signalsByIdentity = new Map();
       const holdingSignals = [
@@ -285,9 +287,9 @@
         if (!code) continue;
         const key = identityKey(inferSignalMarket(signal), code);
         const current = signalsByIdentity.get(key);
-        const nextRank = stagePriority[Ui.text(signal.lifecycle_stage, "")] ?? 99;
+        const nextRank = stagePriority[Ui.lifecycleStageForSignal(signal)] ?? 99;
         const currentRank = current
-          ? stagePriority[Ui.text(current.lifecycle_stage, "")] ?? 99
+          ? stagePriority[Ui.lifecycleStageForSignal(current)] ?? 99
           : Number.POSITIVE_INFINITY;
         if (!current || nextRank < currentRank) signalsByIdentity.set(key, signal);
       }
@@ -320,7 +322,7 @@
       }
       if (!list) return;
       const fragment = document.createDocumentFragment();
-      const alertStages = new Set(["approaching", "armed", "triggered", "executable", "active"]);
+      const alertStages = new Set(["approaching", "formed", "armed", "triggered", "executable", "active"]);
       const marketLabels = {
         a: "A股", hk: "港股", us: "美股", fx: "外汇", futures: "期货",
         ny_futures: "纽约期货", currency: "数字货币", currency_spot: "数字货币现货",
@@ -330,7 +332,7 @@
         const code = Ui.text(position.code, "").trim();
         const name = Ui.text(position.name, code);
         const signal = signalsByIdentity.get(identityKey(market, code)) || null;
-        const stage = signal ? Ui.text(signal.lifecycle_stage, "") : "";
+        const stage = signal ? Ui.lifecycleStageForSignal(signal) : "";
         const card = document.createElement("a");
         card.className = "es-holding-card";
         card.setAttribute("role", "listitem");
@@ -425,7 +427,7 @@
         const count = stage === "all"
           ? scopedSignals.length
           : scopedSignals.filter(
-            (signal) => Ui.text(signal.lifecycle_stage, "") === stage,
+            (signal) => Ui.lifecycleStageForSignal(signal) === stage,
           ).length;
         button.dataset.count = String(count);
         button.setAttribute("aria-label", `${button.textContent.trim()}，${count} 条`);

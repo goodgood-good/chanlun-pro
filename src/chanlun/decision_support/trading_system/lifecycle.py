@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping
 from datetime import datetime
 
 from chanlun.decision_support.fingerprints import normalize_datetime, sha256_json
@@ -14,10 +15,70 @@ from chanlun.decision_support.trading_system.models import (
 from chanlun.decision_support.trading_system.provisional import ProvisionalCandidate
 
 
+FORMED_GEOMETRY_EVIDENCE_CODES = frozenset(
+    {
+        "provisional_center_completion",
+        "core_boundary_held",
+    }
+)
+
+
+def has_formed_provisional_geometry(
+    point_type: object,
+    evidence_codes: object,
+) -> bool:
+    """Return whether a provisional third-class point is geometrically complete.
+
+    Segment locking is a later causal fact.  A same-level external leave plus
+    first return that holds outside the frozen center core already forms the
+    third-class point geometry and must not be folded back into ``approaching``.
+    """
+
+    if point_type not in {"3buy", "3sell"} or isinstance(
+        evidence_codes, (str, bytes)
+    ):
+        return False
+    if not isinstance(evidence_codes, Iterable):
+        return False
+    normalized = {
+        value for value in evidence_codes if isinstance(value, str) and value
+    }
+    return FORMED_GEOMETRY_EVIDENCE_CODES.issubset(normalized)
+
+
+def lifecycle_stage_from_signal(signal: Mapping[str, object]) -> str | None:
+    """Return the effective lifecycle stage for a serialized signal.
+
+    V9 snapshots used ``approaching`` for both genuinely incomplete structures
+    and completed center-preview geometry.  Operational consumers (monitoring,
+    ranking and presentation) use this one compatibility rule while immutable
+    source documents are migrated to the current contract.
+    """
+
+    stage = signal.get("lifecycle_stage")
+    if not isinstance(stage, str):
+        return None
+    if stage != "approaching":
+        return stage
+    setup = signal.get("setup_5m")
+    if not isinstance(setup, Mapping) or setup.get("status") != "provisional":
+        return stage
+    point_type = setup.get("point_type", signal.get("point_type"))
+    return (
+        "formed"
+        if has_formed_provisional_geometry(
+            point_type,
+            setup.get("evidence_codes"),
+        )
+        else stage
+    )
+
+
 _TRANSITIONS: dict[LifecycleStage | None, set[LifecycleStage]] = {
-    None: {"observed", "approaching", "armed"},
-    "observed": {"approaching", "armed", "invalidated"},
-    "approaching": {"armed", "invalidated"},
+    None: {"observed", "approaching", "formed", "armed"},
+    "observed": {"approaching", "formed", "armed", "invalidated"},
+    "approaching": {"formed", "armed", "invalidated"},
+    "formed": {"armed", "invalidated"},
     "armed": {"triggered", "invalidated"},
     "triggered": {"executable", "invalidated"},
     "executable": {"active", "invalidated"},
@@ -100,6 +161,16 @@ def match_one_minute_trigger(
 
 def _base_stage(setup: TradeSetup) -> LifecycleStage:
     if isinstance(setup.point, ProvisionalCandidate):
+        # A completed center preview already has a same-level external leave
+        # and first return that holds outside the frozen core.  That is a
+        # geometrically formed third-class point, even though the deferred XD
+        # lock still keeps it non-actionable.  Do not collapse this factual
+        # state back into the earlier "approaching" bucket.
+        if has_formed_provisional_geometry(
+            setup.point.point_type,
+            setup.point.evidence_codes,
+        ):
+            return "formed"
         return "approaching"
     if not setup.point.confirmed:
         return "observed"
@@ -114,6 +185,7 @@ def _reason_codes(stage: LifecycleStage) -> tuple[str, ...]:
     return {
         "observed": ("context_or_sector_blocked",),
         "approaching": ("five_minute_provisional",),
+        "formed": ("five_minute_geometric_point_formed",),
         "armed": ("waiting_one_minute_trigger",),
         "triggered": ("one_minute_trigger_confirmed",),
         "executable": ("execution_constraints_passed",),

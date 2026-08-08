@@ -336,7 +336,23 @@ def _stable_hash(obj) -> str:
 # v46 (2026-08-05): preview pending-leave identity is explicit.  A return that
 # re-enters the core clears it, so renderers can no longer resurrect an older
 # body leg as a phantom departure line.
-_CHART_CACHE_SCHEMA_VERSION = "v46"
+# v48 (2026-08-06)：曾误把五角色解释成“外部进入 + 五个重叠本体”。
+# v49 (2026-08-06)：纠正为“外部进入 + 三段冻结核心 + 扩展/外部离开”，
+# 进入和成功离开均不参与 ZD/ZG；严格结构与图表协议升级到 v8。
+# v50 (2026-08-06)：曾错误地把横向显示范围扩到进入段和离开段。
+# v51 (2026-08-06)：实体中枢由连续五段成立，价格核心只取中间三段
+# 的交集；图框排除进入段和当前离开段，拒绝旧几何缓存。
+# v52 (2026-08-06)：第五段可作为首个延伸完成中枢成熟；离开方向不再绑定
+# 进入方向，并锁定“前中枢离开段 = 后中枢最早进入段”的扫描所有权。
+# v53 (2026-08-06)：三类点完成后的扫描后缀采用第一个成熟候选的因果所有权；
+# 禁止用内部更晚、完成更快的候选后视替换已经形成的新中枢。
+# v55 (2026-08-06)：四段正重叠即可显示未成熟中枢预览；预览三类点完成后
+# 复用其离开段继续构建末端中枢。第五段仍是正式成熟与交易授权门槛。
+# v54 (2026-08-06)：显示去重只比较中枢本体，不再把“前中枢离开段 =
+# 后中枢进入段”的共享连接误判成重复中枢。
+# v47 (2026-08-06)：页面 CL 与严格结构证据在计算前统一剔除数据源返回的
+# 未来/未完成分钟K线。旧缓存可能让严格结构截止时点晚于可见 OHLC，禁止复用。
+_CHART_CACHE_SCHEMA_VERSION = "v55"
 
 
 def _build_cache_key(market: str, code: str, frequency: str, cl_config: dict) -> str:

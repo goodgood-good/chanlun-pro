@@ -28,6 +28,14 @@ def relation_center(
         for item in (
             unit(
                 unit_offset,
+                "up",
+                dd - 10,
+                gg,
+                structural_level=structural_level,
+                source_kind=source_kind,
+            ),
+            unit(
+                unit_offset + 1,
                 "down",
                 gg,
                 dd,
@@ -35,7 +43,7 @@ def relation_center(
                 source_kind=source_kind,
             ),
             unit(
-                unit_offset + 1,
+                unit_offset + 2,
                 "up",
                 dd,
                 zg,
@@ -43,17 +51,38 @@ def relation_center(
                 source_kind=source_kind,
             ),
             unit(
-                unit_offset + 2,
+                unit_offset + 3,
                 "down",
                 zg,
                 zd,
                 structural_level=structural_level,
                 source_kind=source_kind,
             ),
+            unit(
+                unit_offset + 4,
+                "up",
+                zd,
+                gg,
+                structural_level=structural_level,
+                source_kind=source_kind,
+            ),
+            unit(
+                unit_offset + 5,
+                "down",
+                gg,
+                zd,
+                structural_level=structural_level,
+                source_kind=source_kind,
+            ),
         )
     )
-    value = establish_center(initial, structural_level, source_kind)
+    value = establish_center(
+        initial[:5],
+        structural_level,
+        source_kind,
+    )
     assert value is not None
+    value, _event = advance_center(value, initial[5])
     assert (value.zd_tick, value.zg_tick) == (zd, zg)
     assert (value.dd_tick, value.gg_tick) == (dd, gg)
     return replace(value, center_id=center_id)
@@ -96,12 +125,15 @@ def test_cores_touching_at_one_tick_are_upgrade():
 
 def test_extension_changes_envelope_revision_but_never_fixed_core_or_identity():
     value = relation_center("a", 0, 100, 110, 90, 120)
-    entered = replace(unit(3, "up", 100, 105), low_tick=80)
-    updated, _event = advance_center(value, entered)
+    leave = unit(6, "up", 100, 120)
+    pending, _watch = advance_center(value, leave)
+    entered = replace(unit(7, "down", 120, 105), low_tick=80)
+    updated, _event = advance_center(pending, entered)
     assert updated.center_id == value.center_id
     assert (updated.zd_tick, updated.zg_tick) == (100, 110)
     assert (updated.dd_tick, updated.gg_tick) == (80, 120)
-    assert updated.body_revision == 1
+    # The failed external leave and its re-entry are folded into the body.
+    assert updated.body_revision == 4
 
 
 def test_relation_rejects_cross_basis_or_cross_level_centers():

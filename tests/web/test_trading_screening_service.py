@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from dataclasses import replace
 from datetime import date, datetime, timedelta
 from decimal import Decimal
@@ -15,6 +16,7 @@ import cl_app.services.trading_screening as trading_screening_subject
 
 from chanlun.decision_support.fingerprints import sha256_json
 from chanlun.decision_support.trading_system.human_assisted_decision import (
+    signal_decision_document_id,
     validate_signal_decision_document,
 )
 from chanlun.decision_support.trading_system.v3_live_human_review import (
@@ -31,6 +33,9 @@ from chanlun.decision_support.trading_system.engine import (
     SymbolStructureBundle,
     TradingEngine,
 )
+from chanlun.decision_support.trading_system.a_share_minute_grid import (
+    a_share_optional_entry_valid_until,
+)
 from chanlun.decision_support.trading_system.higher_timeframe_gate import (
     HIGHER_TIMEFRAME_SESSION_EVIDENCE_CONTRACT_ID,
     QMT_SECTOR_NATIVE_DAILY_RESEARCH_SOURCE_MODE,
@@ -42,6 +47,7 @@ from chanlun.decision_support.trading_system.higher_timeframe_gate import (
     sector_native_daily_research_bridge_contract,
     unresolved_higher_timeframe_gates,
 )
+from chanlun.decision_support.trading_system.models import EntryExecutionBoundary
 from chanlun.decision_support.trading_system.incremental_scan import ScanPlan
 from chanlun.decision_support.trading_system.live_review_materialization import (
     live_review_materialization_receipt,
@@ -524,6 +530,95 @@ def test_current_snapshot_migrations_preserve_tree_identity(tmp_path: Path) -> N
     sector_migrated = _migrate_sector_coverage_snapshot(snapshot)
     assert sector_migrated is snapshot
     assert _migrate_signal_document_v8(sector_migrated) is snapshot
+
+
+def test_v9_snapshot_migrates_completed_preview_to_formed_contract(
+    tmp_path: Path,
+) -> None:
+    class FormedPreviewMarket(RecordingMarketData):
+        def structure_bundle(
+            self,
+            code: str,
+            *,
+            as_of: datetime,
+            sector,
+            frequencies=(),
+        ) -> SymbolStructureBundle:
+            del frequencies
+            point = replace(
+                provisional_point("3buy"),
+                evidence_codes=(
+                    "physical_timeframe_level_zero",
+                    "provisional_center_completion",
+                    "core_boundary_held",
+                ),
+            )
+            return SymbolStructureBundle(
+                code=code,
+                as_of=as_of,
+                sector=sector,
+                thirty_direction="neutral",
+                thirty_points=(),
+                five_points=(point,),
+                one_points=(),
+                opposite_points=(),
+            )
+
+    service = TradingScreeningService(
+        market_data=FormedPreviewMarket(),
+        sector_catalog=RecordingSectorCatalog(),
+        engine=TradingEngine(),
+        scan_planner=RecordingPlanner(),
+        cache_path=tmp_path / "snapshot.json",
+        clock=lambda: AS_OF,
+        notifier=None,
+    )
+    current = service.refresh_now()
+    assert current["signals"][0]["lifecycle_stage"] == "formed"
+
+    legacy = copy.deepcopy(current)
+    legacy_contract = "chanlun-human-assisted-signal-document/v9"
+    legacy_signal = legacy["signals"][0]
+    legacy_signal["lifecycle_stage"] = "approaching"
+    legacy_signal["decision_document_id"] = signal_decision_document_id(legacy_signal)
+    legacy["counts_by_stage"] = {"approaching": 1}
+    manifest = legacy["coverage_manifest"]
+    epoch_arguments = {
+        "market_data_as_of": datetime.fromisoformat(manifest["market_data_as_of"]),
+        "universe_revision": manifest["universe_revision"],
+        "sector_catalog_revision": manifest["sector_catalog_revision"],
+        "sector_strength_evidence_revision": manifest.get(
+            "sector_strength_evidence_revision"
+        ),
+        "decision_core_id": legacy["decision_core_id"],
+        "screening_policy_id": manifest["screening_policy_id"],
+        "structure_version": legacy["structure_version"],
+        "parameter_version": legacy["parameter_version"],
+    }
+    legacy_epoch = screening_coverage_epoch_id(
+        **epoch_arguments,
+        signal_document_contract_id=legacy_contract,
+    )
+    legacy["signal_document_contract_id"] = legacy_contract
+    manifest["signal_document_contract_id"] = legacy_contract
+    legacy["coverage_epoch_id"] = legacy_epoch
+    manifest["coverage_epoch_id"] = legacy_epoch
+    legacy["snapshot_content_sha256"] = live_screening_snapshot_content_sha256(
+        legacy
+    )
+
+    migrated = _migrate_signal_document_v8(legacy)
+
+    assert migrated["signal_document_contract_id"] == SIGNAL_DOCUMENT_CONTRACT_ID
+    assert migrated["coverage_manifest"]["signal_document_contract_id"] == (
+        SIGNAL_DOCUMENT_CONTRACT_ID
+    )
+    assert migrated["signals"][0]["lifecycle_stage"] == "formed"
+    assert migrated["counts_by_stage"] == {"formed": 1}
+    validate_signal_decision_document(migrated["signals"][0])
+    assert migrated["snapshot_content_sha256"] == (
+        live_screening_snapshot_content_sha256(migrated)
+    )
 
 
 def test_service_recovers_corrupt_primary_from_content_addressed_generation(
@@ -4128,6 +4223,24 @@ def test_priority_buy_candidates_exclude_unowned_sell_only_signals() -> None:
                 "lifecycle_stage": "armed",
             },
             {
+                "code": "BUY_EXECUTABLE",
+                "point_type": "2buy",
+                "lifecycle_stage": "executable",
+            },
+            {
+                "code": "BUY_LEGACY_FORMED",
+                "point_type": "3buy",
+                "lifecycle_stage": "approaching",
+                "setup_5m": {
+                    "point_type": "3buy",
+                    "status": "provisional",
+                    "evidence_codes": [
+                        "provisional_center_completion",
+                        "core_boundary_held",
+                    ],
+                },
+            },
+            {
                 "code": "WATCHED_BUY",
                 "point_type": "2buy",
                 "lifecycle_stage": "triggered",
@@ -4136,7 +4249,12 @@ def test_priority_buy_candidates_exclude_unowned_sell_only_signals() -> None:
         excluded_codes=frozenset({"WATCHED_BUY"}),
     )
 
-    assert candidates == ("BUY_ARMED", "BUY_APPROACHING")
+    assert candidates == (
+        "BUY_EXECUTABLE",
+        "BUY_ARMED",
+        "BUY_LEGACY_FORMED",
+        "BUY_APPROACHING",
+    )
 
 
 def test_priority_state_prunes_only_unowned_sell_overlay_documents(
@@ -4248,6 +4366,92 @@ def test_priority_monitor_notification_is_early_and_idempotent(
         def active_watchlist(self) -> tuple[str, ...]:
             return (symbols[0],)
 
+        def structure_bundle_with_risk_cutoff(
+            self,
+            code: str,
+            *,
+            as_of: datetime,
+            sector,
+            frequencies=(),
+            risk_evidence_cutoff: datetime,
+        ) -> SymbolStructureBundle:
+            del frequencies
+            self.bundle_codes.append(code)
+            if code != symbols[0]:
+                return SymbolStructureBundle(
+                    code=code,
+                    as_of=as_of,
+                    sector=sector,
+                    thirty_direction="neutral",
+                    thirty_points=(),
+                    five_points=(),
+                    one_points=(),
+                    opposite_points=(),
+                    physical_timeframe_level_zero=True,
+                )
+            setup = confirmed_point("2buy", minutes_after=295)
+            trigger = confirmed_point(
+                "1buy",
+                frequency="1m",
+                minutes_after=298,
+            )
+
+            def green(subject: str) -> HigherTimeframeGateEvidence:
+                identity = sha256_json(
+                    {
+                        "schema": "fresh-priority-green-gate/v1",
+                        "subject": subject,
+                        "observed_at": risk_evidence_cutoff.isoformat(),
+                    }
+                )
+                return HigherTimeframeGateEvidence(
+                    subject=subject,
+                    observed_at=risk_evidence_cutoff,
+                    monthly="NONE",
+                    weekly="NONE",
+                    daily="NONE",
+                    gate="GREEN",
+                    grade="RESEARCH_ONLY",
+                    snapshot_id=identity,
+                    source_revision=identity,
+                )
+
+            boundary = EntryExecutionBoundary(
+                symbol=code,
+                point_id=trigger.point_id,
+                source_frequency="1m",
+                confirmation_bar_closed_at=trigger.available_at,
+                raw_open=Decimal("9.95"),
+                raw_high=Decimal("10.05"),
+                raw_low=Decimal("9.90"),
+                raw_close=Decimal("10.00"),
+                raw_volume=Decimal("10000"),
+                entry_valid_until=a_share_optional_entry_valid_until(
+                    trigger.available_at
+                ),
+                raw_price_basis_revision="test-raw-v1",
+            )
+            return SymbolStructureBundle(
+                code=code,
+                as_of=as_of,
+                sector=sector,
+                thirty_direction="neutral",
+                thirty_points=(),
+                five_points=(setup,),
+                one_points=(trigger,),
+                opposite_points=(),
+                higher_timeframe_gates=HigherTimeframeGateBundle(
+                    market=green("SH.000300"),
+                    sector=green(sector.sector_id),
+                    symbol=green(code),
+                ),
+                enforce_higher_timeframe_entry_gate=True,
+                warmup_converged=True,
+                enforce_warmup_entry_gate=True,
+                physical_timeframe_level_zero=True,
+                entry_execution_boundaries=(boundary,),
+            )
+
     class RecordingSender:
         def __init__(self) -> None:
             self.messages: list[tuple[str, list[str]]] = []
@@ -4261,9 +4465,19 @@ def test_priority_monitor_notification_is_early_and_idempotent(
         sender,
         state_path=tmp_path / "notification_state.json",
     )
+    supportive_sector = replace(eligible_sector(), regime="supportive")
+    sector_catalog = RecordingSectorCatalog(
+        SectorAssessmentBatch(
+            assessments=(supportive_sector,),
+            discovered_count=1,
+            completed_count=1,
+            failure_counts=(),
+            errors=(),
+        )
+    )
     service = TradingScreeningService(
         market_data=WatchlistMarket(),
-        sector_catalog=RecordingSectorCatalog(),
+        sector_catalog=sector_catalog,
         engine=TradingEngine(),
         scan_planner=SequencedPlanner((symbols,)),
         cache_path=tmp_path / "snapshot.json",
@@ -4278,6 +4492,7 @@ def test_priority_monitor_notification_is_early_and_idempotent(
     )
 
     first = service.refresh_now()
+    assert first["signals"], first["errors"]
     assert first["signals"][0]["lifecycle_stage"] == "triggered"
     # The first pass is still a frozen full-universe coverage epoch.  It is
     # persisted for the daily shortlist, but may not masquerade as a current
@@ -4287,7 +4502,10 @@ def test_priority_monitor_notification_is_early_and_idempotent(
     observed_at[0] += timedelta(minutes=1)
     second = service.refresh_now()
     assert second["coverage_manifest"]["complete"] is False
-    assert len(sender.messages) == 1
+    assert len(sender.messages) == 1, (
+        dispatcher.health_snapshot(),
+        service._priority_monitor_latest_documents,
+    )
     presentation = service.presentation_snapshot()
     archive = service.snapshot()
     assert presentation["priority_live_overlay"]["live"] is True

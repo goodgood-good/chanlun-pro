@@ -121,6 +121,35 @@ def test_rich_notification_chart_failure_falls_back_to_one_text(monkeypatch):
     assert payload["msgtype"] == "text"
 
 
+def test_evidence_bound_chart_failure_blocks_the_notification(monkeypatch):
+    import urllib.request
+
+    requests = []
+
+    monkeypatch.setattr(
+        urllib.request,
+        "urlopen",
+        lambda request, timeout: requests.append((request, timeout)),
+    )
+    monkeypatch.setattr(
+        "chanlun.notifications.fun.get_logger",
+        lambda: type("Logger", (), {"warning": lambda _self, _message: None})(),
+    )
+    notifier = DingTalkWebhookNotifier(
+        "https://example.invalid/send",
+        rich_content_provider=lambda _context: (_ for _ in ()).throw(
+            RuntimeError("claimed marker absent")
+        ),
+    )
+
+    assert notifier.send_rich(
+        "买卖通知",
+        ["TSLA.US"],
+        {"require_evidence_match": True, "charts": [{"code": "TSLA.US"}]},
+    ) is False
+    assert requests == []
+
+
 def test_persistent_outbound_gate_sends_identical_message_only_once(
     monkeypatch,
     tmp_path,

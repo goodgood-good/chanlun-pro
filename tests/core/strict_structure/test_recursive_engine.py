@@ -8,7 +8,7 @@ from tests.core.strict_structure.helpers import valid_five_up_exit
 from tests.core.strict_structure.helpers import unit
 
 
-def test_five_locked_units_form_level_zero_with_v3_schema():
+def test_entry_plus_five_locked_body_units_form_level_zero_with_v3_schema():
     result = StrictRecursiveEngine(max_levels=4).calculate(valid_five_up_exit())
     assert result.schema_version == "chanlun-structure/v3"
     assert len(result.levels) == 1
@@ -19,24 +19,20 @@ def test_five_locked_units_form_level_zero_with_v3_schema():
     )
 
 
-def test_recursion_requires_three_total_inputs_and_only_locked_trends_recurse():
-    too_short = StrictRecursiveEngine(max_levels=8).calculate(
-        valid_five_up_exit()[:2]
-    )
-    assert too_short.levels == ()
-
+def test_recursion_exposes_level_before_maturity_but_only_locked_trends_recurse():
     result = StrictRecursiveEngine(max_levels=8).calculate(
         valid_five_up_exit()[:4]
     )
-    assert len(result.levels) == 1
-    assert result.levels[0].center_result.centers
+    # 四段连“进入 + 中间三段 + 离开”的完整窗口都没有，不能暴露
+    # 一个貌似已经成立的结构层。
+    assert result.levels == ()
 
     one_level = StrictRecursiveEngine(max_levels=8).calculate(valid_five_up_exit())
     assert len(one_level.levels) == 1
     assert not any(trend.locked for trend in one_level.levels[0].trend_types)
 
 
-def test_recursion_keeps_unlocked_departure_as_center_preview():
+def test_recursion_keeps_unlocked_fifth_segment_as_preview_only():
     values = valid_five_up_exit()
     values = values[:-1] + (
         replace(values[-1], locked=False, confirmed_at=None),
@@ -47,8 +43,7 @@ def test_recursion_keeps_unlocked_departure_as_center_preview():
     assert len(result.levels) == 1
     level = result.levels[0]
     assert level.center_result.locked_unit_count == 4
-    assert len(level.center_result.centers) == 1
-    assert level.center_result.centers[0].state is CenterState.ONGOING
+    assert level.center_result.centers == ()
     assert level.center_result.previews
 
 
@@ -87,14 +82,16 @@ def test_max_levels_is_a_hard_structural_depth_cap():
 
 
 def test_direction_flip_centers_are_owned_by_trends_without_role_assumption():
+    # 第一个中心由 u0..u4 成立，u5 回抽确认离开；随后 u6..u10
+    # 是第二个连续五段窗口，u11 回抽确认。全序列严格交替且首尾相接。
     values = valid_five_up_exit() + (
-        unit(5, "down", 130, 95),
-        unit(6, "up", 95, 100),
-        unit(7, "down", 100, 96),
-        unit(8, "up", 96, 99),
-        unit(9, "down", 99, 97),
-        unit(10, "up", 97, 105),
-        unit(11, "down", 105, 101),
+        unit(5, "down", 130, 120),
+        unit(6, "up", 120, 175),
+        unit(7, "down", 175, 155),
+        unit(8, "up", 155, 175),
+        unit(9, "down", 175, 160),
+        unit(10, "up", 160, 190),
+        unit(11, "down", 190, 177),
     )
     result = StrictRecursiveEngine(max_levels=1).calculate(values)
     level = result.levels[0]

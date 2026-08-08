@@ -179,8 +179,9 @@ def _forming_dedup(forming: List[ZS], existing: List[ZS]) -> List[ZS]:
 class RecursiveBranchCalculator:
     """递归装配计算器。无状态，每次 calculate 全量重算。"""
 
-    def __init__(self, l0_min_zs_lines: int = 5, pending_min_lines=None):  # 用户口径 2026-06-26(4→5);语义=lines(不含进入段)≥5,详见 cl._recursive_l0_min_zs_lines
-        self.l0_min_zs_lines = int(l0_min_zs_lines or 5)
+    def __init__(self, l0_min_zs_lines: int = 4, pending_min_lines=None):
+        # L0 的 ``lines`` 不含外部进入段；4 = 进入 + A/B/C + 离开共五角色。
+        self.l0_min_zs_lines = int(l0_min_zs_lines or 4)
         self.pending_min_lines = pending_min_lines   # O2:pending 披露门(None=沿用成枢门)
         # 递归层增量化:持久化各级 ZsBranchCalculator(内含持久 ZsCalculator)+ ZslxBranch,
         # 跨 calculate(跨 K)复用 → 各级 calculator 增量状态保留。L0 输入(units=xds/bis 浅
@@ -254,7 +255,9 @@ class RecursiveBranchCalculator:
         zslx_calc = self._zslx_calc    # 持久复用(见 __init__)
         level = 0
         while level < _MAX_LEVELS:
-            min_lines = self.l0_min_zs_lines  # 用户口径 2026-06-26: 全级别统一(L0 与 L≥1 升级中枢都用 l0_min=5)
+            # 物理 L0 使用五角色门；L1+ 的构成单元已经是完成走势类型，
+            # 按原文三个连续次级别走势类型重叠即可成枢。
+            min_lines = self.l0_min_zs_lines if level == 0 else 3
             # 换周期 MACD:各级用对应级别 ld_provider(L0→5m/L1→30m…);无 factory 退化用单一
             lp = ld_provider_for_level(level) if ld_provider_for_level is not None else ld_provider
             # 复用本级持久 ZsBranchCalculator(其持久 ZsCalculator 承载增量状态);ld/freq/wzgx

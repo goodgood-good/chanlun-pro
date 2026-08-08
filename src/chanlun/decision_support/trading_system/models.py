@@ -27,6 +27,7 @@ ContextDisposition = Literal["supportive", "neutral", "hostile"]
 LifecycleStage = Literal[
     "observed",
     "approaching",
+    "formed",
     "armed",
     "triggered",
     "executable",

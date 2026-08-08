@@ -234,6 +234,68 @@ class AlertChartImageService:
                 if identity in seen_symbols:
                     continue
                 seen_symbols.add(identity)
+                evidence_required = raw.get("evidence_required") is True
+                if evidence_required:
+                    point_type = str(raw.get("point_type") or "").strip()
+                    signal_time = str(raw.get("signal_time") or "").strip()
+                    if not point_type or not signal_time:
+                        raise RuntimeError(
+                            f"alert evidence identity incomplete for {market}:{code}"
+                        )
+                    state = self._state(market, code)
+                    refresh_chart_levels = getattr(
+                        state,
+                        "refresh_chart_levels",
+                        None,
+                    )
+                    if callable(refresh_chart_levels):
+                        refresh_chart_levels()
+                    else:
+                        state.refresh()
+                    if getattr(state, "warmup_ready", False) is not True:
+                        raise RuntimeError(
+                            f"chart warmup incomplete for {market}:{code}"
+                        )
+                    resolve_occurrence = getattr(
+                        state,
+                        "confirmed_point_occurrence",
+                        None,
+                    )
+                    if not callable(resolve_occurrence) or resolve_occurrence(
+                        point_type,
+                        signal_time,
+                        frequency="1m",
+                    ) is None:
+                        raise RuntimeError(
+                            f"alert point absent from chart evidence for {market}:{code}"
+                        )
+                    charts = []
+                    for frequency, label in (
+                        ("30m", "30分钟"),
+                        ("5m", "5分钟"),
+                        ("1m", "1分钟"),
+                    ):
+                        chart_data = state.chart_data(frequency)
+                        if chart_data is None:
+                            raise RuntimeError(
+                                f"{frequency} chart data unavailable"
+                            )
+                        charts.append((f"{name} {code} · {label}", chart_data))
+                    png = self._renderer(charts)
+                    url = self.store.publish(
+                        png,
+                        artifact_key=f"{artifact_key}:strict-evidence-bound:v1",
+                    )
+                    output.append(
+                        {
+                            "url": url,
+                            "alt": (
+                                f"{name} {code} 30分钟/5分钟/1分钟结构图"
+                                f"（已核验1分钟{point_type}：{signal_time}）"
+                            ),
+                        }
+                    )
+                    continue
                 if self._browser_renderer is not None:
                     try:
                         captures = tuple(

@@ -1,0 +1,24 @@
+{
+  "code": "SZ.002299",
+  "dataset": "tests/fixtures/SZ.002299_1m.parquet",
+  "frequency": "1m",
+  "points": [
+    {
+      "anchor_at": "2025-07-02T03:04:00+00:00",
+      "available_at": "2025-07-07T05:49:00+00:00",
+      "center_id": "3a37c2626e383479b94d99932743a784fa6a60421ecb6cc983cd1a306a484317",
+      "center_ordinal": 1,
+      "confirmed_at": "2025-07-07T05:49:00+00:00",
+      "level": 0,
+      "point_id": "da4012210d680f7d327cb295a36aa113301609daa76ee91d231cf5186669c149",
+      "point_type": "3buy",
+      "strength_source": null,
+      "variant": "standard"
+    }
+  ],
+  "price_basis_revision": "test-raw-v1",
+  "rows": 1100,
+  "schema_version": "chanlun-strict-points-golden/v5",
+  "source_closed_at": "2025-07-10T06:57:00+00:00",
+  "structure_price_quantum": "0.01"
+}

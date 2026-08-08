@@ -80,3 +80,32 @@ def test_gap_invalidation_keeps_the_later_causal_witness(monkeypatch) -> None:
 
     assert isinstance(result, xd_calculator._GapConfirmationInvalidated)
     assert result.witnessed_at == values[5].locked_at
+
+
+def test_segment_lock_waits_for_the_full_cascade_horizon() -> None:
+    """候选段至少有四个后继段后，才允许进入不可改写的 locked 前缀。"""
+
+    calculator = XdCalculator({})
+    assert calculator._DEFER_DONE >= 4
+    base = datetime(2026, 5, 11, 9, 30, tzinfo=timezone.utc)
+    segments = [
+        (
+            index * 3,
+            index * 3 + 2,
+            "up" if index % 2 == 0 else "down",
+            base + timedelta(minutes=index),
+        )
+        for index in range(calculator._DEFER_DONE + 1)
+    ]
+    locked: dict[tuple[int, int, str], datetime] = {}
+
+    calculator._freeze_confirmed_candidate(
+        segments[: calculator._DEFER_DONE],
+        locked,
+    )
+    assert locked == {}
+
+    calculator._freeze_confirmed_candidate(segments, locked)
+    first = segments[0]
+    boundary = segments[calculator._DEFER_DONE]
+    assert locked[(first[0], first[1], first[2])] == max(first[3], boundary[3])

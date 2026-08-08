@@ -111,6 +111,7 @@ def _service(
     notifier: _Notifier | None = None,
     event_collector=_event_collector,
     state_factory=_State,
+    clock=None,
 ):
     notifier = notifier or _Notifier()
     exchange_calls: list[str] = []
@@ -127,7 +128,7 @@ def _service(
         market_open_provider=lambda _exchange, _market, _now: market_open,
         state_factory=state_factory,
         event_collector=event_collector,
-        clock=lambda: datetime(2026, 8, 4, 10, 1, tzinfo=CN),
+        clock=clock or (lambda: datetime(2026, 8, 4, 10, 1, tzinfo=CN)),
         config=HoldingGroupMonitorConfig(max_workers=4),
     )
     return service, notifier, exchange_calls
@@ -208,6 +209,10 @@ def test_cross_market_alert_passes_symbol_aligned_chart_context(tmp_path):
     assert chart["code"] == "TSLA.US"
     assert chart["name"] == "特斯拉"
     assert "small_sell|TSLA.US" in chart["artifact_key"]
+    assert chart["point_type"] == "1sell"
+    assert chart["signal_time"] == "2026-08-04 10:00:00"
+    assert chart["evidence_required"] is True
+    assert notifier.rich_messages[0][2]["require_evidence_match"] is True
 
 
 def test_same_signal_is_not_notified_twice_even_after_restart(tmp_path):
@@ -259,6 +264,29 @@ def test_failed_delivery_is_not_deduplicated_and_retries(tmp_path):
     assert second["notification_delivery"]["success_count"] == 1
     assert second["notification_delivery"]["pending_event_count"] == 0
     assert len(notifier.messages) == 2
+
+
+def test_failed_delivery_is_dropped_after_the_realtime_window(tmp_path):
+    positions = [{"market": "us", "code": "TSLA.US", "name": "特斯拉"}]
+    notifier = _Notifier([False, True])
+    now = [datetime(2026, 8, 4, 10, 1, tzinfo=CN)]
+    service, notifier, _exchange_calls = _service(
+        tmp_path,
+        positions,
+        notifier=notifier,
+        clock=lambda: now[0],
+    )
+
+    first = service.run_once()
+    assert first["notification_delivery"]["pending_event_count"] == 1
+    now[0] = now[0].replace(minute=4)
+
+    second = service.run_once()
+
+    assert second["sent_count"] == 0
+    assert second["notification_delivery"]["pending_event_count"] == 0
+    assert second["notification_delivery"]["expired_event_count"] == 1
+    assert len(notifier.messages) == 1
 
 
 def test_dry_run_never_masquerades_as_verified_delivery(tmp_path):

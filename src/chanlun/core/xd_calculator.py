@@ -656,12 +656,15 @@ class XdCalculator:
             return None
         return real_end, real_end + 1, rb2, all_bis[rb2].locked_at
 
-    # 确认级联推迟 done 的深度:一条段被确认(done)须其反向段「锁定不再延伸」——反向段
-    # 自身的反向被确认时才锁定(确认有递归前提)。breaks-back 合并可回溯 ≥1 级(反向假反弹的
-    # 高/低点可越过更前段起点),故末 _DEFER_DONE 条已确认段保持 pending,防止「已 done 段被
-    # 后续假反弹回溯合并」的当下性违例。此处 2 是末尾 done/pending 边界的经验值,因 calculate
-    # 全量重建、不影响已 done 段端点正确性;若发现需 ≥3 级回溯再调。
-    _DEFER_DONE = 2
+    # 确认级联推迟 done 的深度：一条段被确认(done)须其反向段「锁定不再延伸」——反向段
+    # 自身的反向被确认时才锁定(确认有递归前提)。除了 breaks-back，退化反向成段还会触发
+    # A-B-C 吸收；这两层级联叠加时，第四个后继段才足以排除对候选段的再次拆分/回溯。
+    #
+    # 只保留 2 个后继段曾在真实前缀中把尚可重划的段过早标为 done：SZ.300981 5m 的
+    # 2026-04-24~04-28 下段先被锁定，未来到 05-11 后又被拆成三段，连带改写已完成
+    # 中枢和三买。SZ.300132 1m 同样发生确认时点后移。四段缓冲使这两个反例和全缓存
+    # 前缀审计都只消费几何已经稳定的 locked 段。
+    _DEFER_DONE = 4
 
     def _freeze_confirmed_candidate(self, segs, locked_candidates) -> None:
         """Freeze geometry and the first witness once two successors exist."""

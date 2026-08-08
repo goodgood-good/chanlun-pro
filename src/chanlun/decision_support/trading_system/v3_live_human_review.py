@@ -95,7 +95,7 @@ from chanlun.decision_support.trading_system.warmup_structure_lineage import (
 
 
 LIVE_SCREENING_SCHEMA = "chanlun-trading-screening/v3"
-SIGNAL_DOCUMENT_CONTRACT_ID = "chanlun-human-assisted-signal-document/v9"
+SIGNAL_DOCUMENT_CONTRACT_ID = "chanlun-human-assisted-signal-document/v10"
 LEGACY_UNATTESTED_SCREENING_POLICY_ID = "LEGACY_UNATTESTED_SCREENING_POLICY"
 _GATES = frozenset({"GREEN", "AMBER", "RED", "UNRESOLVED"})
 _RISK_PERIODS = ("M", "W", "D")
@@ -115,7 +115,7 @@ _POINT_TYPES = frozenset(
     {"1buy", "2buy", "3buy", "1sell", "2sell", "3sell"}
 )
 _LIFECYCLE_STAGES = frozenset(
-    {"approaching", "armed", "observed", "triggered", "executable"}
+    {"approaching", "formed", "armed", "observed", "triggered", "executable"}
 )
 _SELECTION_SOURCES = frozenset(
     {
@@ -3730,7 +3730,7 @@ def live_signal_human_review_alert(
         else "MEDIUM"
         if stage in {"observed", "triggered", "executable"}
         else "LOW"
-        if stage == "armed"
+        if stage in {"formed", "armed"}
         else "UNRESOLVED"
     )
     alert_type = _alert_type(signal)

@@ -11,6 +11,7 @@ from Crypto.Hash import MD5
 from Crypto.PublicKey import RSA
 from Crypto.Signature import pkcs1_15
 
+from chanlun import config
 from chanlun.exchange.exchange_usmart import ExchangeUSmart, USmartClient
 from chanlun.market import Market
 
@@ -254,6 +255,69 @@ def test_kline_paginates_backwards_filters_range_and_attaches_price_basis():
     assert client.calls[1][1]["start"] == 20240102235959999
 
 
+def test_us_kline_uses_configured_long_history_backend_without_mixing_sources(
+    monkeypatch,
+):
+    expected = pd.DataFrame(
+        {
+            "date": [pd.Timestamp("2026-08-06 16:00", tz="US/Eastern")],
+            "frequency": ["1m"],
+            "code": ["TSLA.US"],
+            "open": [320.0],
+            "high": [321.0],
+            "low": [319.0],
+            "close": [320.5],
+            "volume": [100],
+        }
+    )
+    expected.attrs["price_basis_provider"] = "longbridge"
+
+    class _HistoryExchange:
+        def __init__(self):
+            self.calls = []
+
+        def support_frequencys(self):
+            return {"1m": "1 Min"}
+
+        def klines(self, code, frequency, start_date=None, end_date=None, args=None):
+            self.calls.append(
+                (code, frequency, start_date, end_date, dict(args or {}))
+            )
+            return expected
+
+    monkeypatch.setattr(config, "US_HISTORY_KLINE_SOURCE", "longbridge")
+    quote_client = _QuoteClient(
+        lambda *_: pytest.fail("uSMART K-line endpoint must not be mixed in")
+    )
+    history = _HistoryExchange()
+    exchange = ExchangeUSmart(
+        "us",
+        client=quote_client,
+        history_exchange=history,
+    )
+
+    actual = exchange.klines(
+        "TSLA.US",
+        "1m",
+        start_date="2026-07-07 00:00:00",
+        end_date="2026-08-06 23:59:59",
+        args={"right": "qfq", "count": 1000},
+    )
+
+    assert actual is expected
+    assert actual.attrs["price_basis_provider"] == "longbridge"
+    assert history.calls == [
+        (
+            "TSLA.US",
+            "1m",
+            "2026-07-07 00:00:00",
+            "2026-08-06 23:59:59",
+            {"right": "qfq", "count": 1000},
+        )
+    ]
+    assert quote_client.calls == []
+
+
 def test_realtime_ticks_preserve_callers_codes_and_calculate_rate():
     def handler(endpoint, payload):
         assert endpoint == "realtime"
@@ -358,7 +422,8 @@ def test_missing_auth_configuration_fails_without_making_a_request():
     assert session.calls == []
 
 
-def test_end_date_cursor_and_filter_include_the_whole_calendar_day():
+def test_end_date_cursor_and_filter_include_the_whole_calendar_day(monkeypatch):
+    monkeypatch.setattr(config, "US_HISTORY_KLINE_SOURCE", "usmart")
     def handler(endpoint, payload):
         assert endpoint == "kline"
         return {
@@ -391,7 +456,8 @@ def test_end_date_cursor_and_filter_include_the_whole_calendar_day():
     assert client.calls[0][1]["start"] == 20240102235959999
 
 
-def test_us_intraday_bounds_follow_project_shanghai_time_contract():
+def test_us_intraday_bounds_follow_project_shanghai_time_contract(monkeypatch):
+    monkeypatch.setattr(config, "US_HISTORY_KLINE_SOURCE", "usmart")
     def handler(endpoint, payload):
         assert endpoint == "kline"
         return {

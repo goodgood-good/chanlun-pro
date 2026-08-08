@@ -321,13 +321,13 @@ class DingTalkWebhookNotifier:
     ) -> bool:
         """Send one Markdown alert with optional chart images.
 
-        Rendering is best-effort.  If market data, the strict static renderer
-        or the public image store is unavailable, the same event is delivered
-        once as text; it is never followed by a second, duplicate image
-        notification.
+        Rendering is normally best-effort.  Evidence-bound trading alerts are
+        fail-closed when a configured chart provider cannot prove that the
+        claimed point exists in the exact image snapshot.
         """
 
         images: Sequence[Mapping[str, str] | str] = ()
+        evidence_required = context.get("require_evidence_match") is True
         if self._rich_content_provider is not None:
             try:
                 images = self._rich_content_provider(context)
@@ -335,6 +335,13 @@ class DingTalkWebhookNotifier:
                 fun.get_logger().warning(
                     f"[notify] chart enrichment failed: {type(exc).__name__}"
                 )
+                if evidence_required:
+                    return False
+            if evidence_required and not images:
+                fun.get_logger().warning(
+                    "[notify] evidence-bound chart enrichment returned no image"
+                )
+                return False
         return self._send_content(title, lines, images=images)
 
 

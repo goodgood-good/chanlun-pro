@@ -206,6 +206,55 @@ def test_modern_snapshot_selection_uses_review_facts_and_deduplicates() -> None:
     assert all(row["selection_profile"] == "MODERN_BUY_REVIEW_ORDER" for row in selected)
 
 
+def test_candidate_diagnostics_use_effective_formed_stage_and_executable_priority() -> None:
+    snapshot = {
+        "signals": [
+            {
+                "code": "SH.600010",
+                "side": "buy",
+                "point_type": "3buy",
+                "lifecycle_stage": "approaching",
+                "setup_5m": {
+                    "point_type": "3buy",
+                    "status": "provisional",
+                    "evidence_codes": [
+                        "provisional_center_completion",
+                        "core_boundary_held",
+                    ],
+                },
+                "sector": {"horizontal_rank": 1},
+            },
+            {
+                "code": "SH.600011",
+                "side": "buy",
+                "point_type": "3buy",
+                "lifecycle_stage": "approaching",
+                "sector": {"horizontal_rank": 1},
+            },
+            {
+                "code": "SH.600012",
+                "side": "buy",
+                "point_type": "1buy",
+                "lifecycle_stage": "executable",
+                "sector": {"horizontal_rank": 9},
+            },
+        ]
+    }
+
+    selected = select_candidate_warmup_rows(snapshot, limit=3)
+
+    assert [row["code"] for row in selected] == [
+        "SH.600012",
+        "SH.600010",
+        "SH.600011",
+    ]
+    assert [row["lifecycle_stage"] for row in selected] == [
+        "executable",
+        "formed",
+        "approaching",
+    ]
+
+
 def test_compact_presentation_is_bound_and_does_not_claim_a_gate() -> None:
     def frames(**_kwargs):
         return _frame(4)

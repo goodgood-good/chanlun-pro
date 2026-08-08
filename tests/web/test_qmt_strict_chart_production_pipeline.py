@@ -59,7 +59,7 @@ def test_qmt_frame_reaches_replace_payload_with_fixed_strict_config() -> None:
 
     assert payload["strict_structure_mode"] == "replace"
     strict = payload["strict_structure"]
-    assert strict["schema"] == "chanlun-chart-structure/v5"
+    assert strict["schema"] == "chanlun-chart-structure/v12"
     assert strict["symbol"] == "SH.600519"
     assert strict["source_frequency"] == "5m"
     assert strict["display_frequency"] == "5m"

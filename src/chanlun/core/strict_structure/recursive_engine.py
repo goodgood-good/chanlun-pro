@@ -11,6 +11,7 @@ from chanlun.core.strict_structure.models import (
     StrictStructureResult,
     TrendKind,
     TrendState,
+    center_seed_size,
 )
 from chanlun.core.strict_structure.same_level_decomposition import (
     combine_same_level_trends,
@@ -55,9 +56,14 @@ class StrictRecursiveEngine:
                 else SourceKind.TREND_TYPE
             )
             validate_unit_sequence(units, level, source_kind, oscillatory_ids)
-            # Every level uses the same original-text first-three center
-            # establishment rule.
-            minimum_units = 3
+            # L0 consumes one immutable five-segment window: entry + middle
+            # three + leave. Higher levels retain three completed lower-level
+            # trends plus their auditable preceding trend entry.
+            minimum_units = (
+                center_seed_size(source_kind) + 1
+                if source_kind is SourceKind.TREND_TYPE
+                else 5
+            )
             if len(units) < minimum_units:
                 break
 

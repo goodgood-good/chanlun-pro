@@ -30,7 +30,7 @@ def _consolidation_pair(center):
     ):
         return None
     signal = center.completion_leave_unit
-    for earlier in reversed(center.body_units[4:-1]):
+    for earlier in reversed(center.extension_units):
         if (
             earlier.locked
             and earlier.direction == signal.direction

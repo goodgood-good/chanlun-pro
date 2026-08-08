@@ -123,6 +123,25 @@ def test_engine_keeps_provisional_five_minute_points_as_approaching() -> None:
     assert evaluated[0].entry.allowed is False
 
 
+def test_engine_exposes_completed_preview_as_formed_not_approaching() -> None:
+    point = replace(
+        provisional_point("3buy"),
+        evidence_codes=(
+            "physical_timeframe_level_zero",
+            "provisional_center_completion",
+            "core_boundary_held",
+        ),
+    )
+
+    evaluated = TradingEngine().evaluate_symbol(
+        symbol_bundle(five_points=(point,))
+    )
+
+    assert len(evaluated) == 1
+    assert evaluated[0].lifecycle.stage == "formed"
+    assert evaluated[0].lifecycle.actionable is False
+
+
 def test_repeated_evaluation_is_deterministic() -> None:
     bundle = symbol_bundle(
         five_points=(confirmed_point("2buy"),),

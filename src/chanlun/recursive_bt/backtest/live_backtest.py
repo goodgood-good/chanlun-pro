@@ -48,9 +48,9 @@ DEFAULT_SIGNAL_MODE = "walk_forward"
 DEFAULT_SIGNAL_CACHE_DIR = "D:/chanlun_pro/reports/live_backtest_signal_cache"
 DEFAULT_SIGNAL_SCAN_CHUNK_BARS = 0
 DEFAULT_TREND_DIR_WARMUP_BARS = 200
-DEFAULT_RECURSIVE_L0_MIN_ZS_LINES = 5  # 成枢门=5(2026-06-26 拍板,2026-07-06 补落实回测侧;全级别统一,「L≥1 仍 3」已废)
+DEFAULT_RECURSIVE_L0_MIN_ZS_LINES = 4  # legacy lines 不含进入段：4 = 进入+A/B/C+离开共五角色
 DEFAULT_BS_POINT_RATIO_OVERRIDES = "D:/chanlun_pro/reports/strategy_bs_point_ratio_overrides.json"
-_SIGNAL_CACHE_VERSION = "v21"  # 信号缓存版本号:中枢/信号口径变更时递增以失效旧缓存(v21: 区间套中途落败兄弟整棵子树剥离(>=3层链收敛单点完备,R1-F1-1); v20: 区间套同父兄弟末端去重(beichi_nest,中途同向背驰非套内确认点,operable 收敛单点),nest-soft 买卖点口径变; v19: 美股高周期MACD日级分桶时区修正 +8→-5(cl.py 按 .US 后缀自动推断 market),htf口径变更; v18: dingli2 升级中枢三类事件入流; v17: 审计修复——盘整背驰进入vs离开+zslx背驰精修切分+成枢门legacy统一5;v16: 背驰收紧 柱子OR→AND + 黄白线删0轴宽口径)
+_SIGNAL_CACHE_VERSION = "v22"  # v22: 修复进入段误计，五角色门改为 legacy lines=4，并恢复 L1+ 三走势成枢
 _SIGNAL_CHECKPOINT_VERSION = "v1"
 UPGRADE_CHAIN = getattr(
     CL,
@@ -1302,7 +1302,7 @@ def build_symbol_from_klines(
     recursive_l0_min_zs_lines = int(
         recursive_l0_min_zs_lines or DEFAULT_RECURSIVE_L0_MIN_ZS_LINES
     )
-    if recursive_l0_min_zs_lines not in {3, 4, 5}:  # 3/4 保留供历史 A/B;5=现行拍板口径
+    if recursive_l0_min_zs_lines not in {3, 4, 5}:  # 4=五角色生产口径；3/5仅供历史A/B
         raise ValueError(
             f"unsupported recursive_l0_min_zs_lines: {recursive_l0_min_zs_lines!r}"
         )
@@ -2033,7 +2033,7 @@ def run_backtest(args) -> tuple[dict, dict]:
         getattr(args, "recursive_l0_min_zs_lines", DEFAULT_RECURSIVE_L0_MIN_ZS_LINES)
         or DEFAULT_RECURSIVE_L0_MIN_ZS_LINES
     )
-    if args.recursive_l0_min_zs_lines not in {3, 4, 5}:  # 3/4 保留供历史 A/B;5=现行拍板口径
+    if args.recursive_l0_min_zs_lines not in {3, 4, 5}:  # 4=五角色生产口径；3/5仅供历史A/B
         raise ValueError(
             f"unsupported recursive_l0_min_zs_lines: {args.recursive_l0_min_zs_lines!r}"
         )

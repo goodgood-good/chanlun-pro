@@ -30,12 +30,10 @@ class ZsCalculator:
         # 线段层 zss_calculator 的 zss+pending 喂 recursive(走势类型/level0 中枢),必须保守
         # 全量(默认 False),否则中途 get_branch_* 触发的重算会与全量分叉。
         self.allow_tail_noop: bool = allow_tail_noop
-        # min_zs_lines：center.lines 长度下限(核心+延伸+离开段;lines **不含进入段**,
-        # 进入段在 zs.start)。本参数默认 4 = 核心3+离开1(第 3 段须由第 4 段确认完成),
-        # 但 legacy 线段/笔中枢现由 cl._recursive_l0_min_zs_lines 单点显式传 5(见 cl.__init__:80,82,
-        # P1a 已与递归链统一),不再用此默认值。
-        # 递归/新核心链路现**全级别传 5**(用户口径 2026-06-26,经
-        # cl._recursive_l0_min_zs_lines 单点解析;「level≥1 传 3」为已废历史口径)。
+        # min_zs_lines：center.lines 长度下限。legacy ``center.lines`` **不含进入段**，
+        # ``zs.start`` 才是外部进入段。因此物理层五角色口径是 start + 4 lines；
+        # 把本参数设成 5 会错误地要求六个角色。递归高层仍按原文由三个已完成
+        # 次级别走势类型重叠构成，见 RecursiveBranchCalculator。
         self.min_zs_lines: int = min_zs_lines
         # pending 披露门(O2,原文 L018:8/L020:2「前三个重叠部分确定」):pending(已产生未
         # 完成)可比 done 确认门更早披露;缺省 None=沿用 min_zs_lines(零行为变化),显式 3=
@@ -81,9 +79,8 @@ class ZsCalculator:
             self._last_lines_obj = None
             return []
 
-        # 检查线段数量：中枢最少由 min_zs_lines 段重叠构成（level0 线段中枢
-        # 默认 4，离开段计入核心；level≥1 走势类型中枢为 3）。进入段可选，
-        # 故 min_zs_lines 段即起步、不足则不可能成中枢。
+        # 检查构成段数量。物理层 min_zs_lines=4，与外部 zs.start 合计五角色；
+        # 递归走势类型层 min_zs_lines=3，保持“三个次级别走势重叠”的原文定义。
         if len(lines) < min(self.min_zs_lines, self.pending_min_lines):
             # 段数跌回 <min(末段被回撤):必须清空中枢,与「全新实例从同样 <min 的
             # lines 起算 = 0 中枢」一致。否则只更新 _last_* 而残留上一轮 zss/pending_zs,
@@ -491,8 +488,7 @@ class ZsCalculator:
             center.update_boundaries()
 
             if is_completed:
-                # 有效中枢须满足：有离开段、核心线段 >= min_zs_lines（level0
-                # 线段中枢默认 4，离开段计入核心故含离开段共 >= 4 段重叠）。
+                # 有效中枢须满足：有离开段、内部构成段 >= min_zs_lines。
                 # 进入段可为 None（开头中枢无进入段），故不校验 center.start。
                 is_valid_center = (
                         center.end is not None and
@@ -524,9 +520,8 @@ class ZsCalculator:
         直接看到 5 段连续重叠，则第 1 段不再是核心段，而是进入段，
         中枢核心应从第 2 段开始。
 
-        ⚠ 当前恒 no-op:守卫要求 min_zs_lines == 4,而生产全路径经
-        cl._recursive_l0_min_zs_lines 传 5(P1a),故本方法在生产口径下从不触发
-        (min=5 语义本就不含进入段)。保留待成枢门口径再变动时复用。
+        该修正只适用于 legacy 四内部段（外部进入 + 四内部段 = 五角色）口径；
+        其他显式实验参数保持 no-op。
         """
         if (
             self.min_zs_lines != 4

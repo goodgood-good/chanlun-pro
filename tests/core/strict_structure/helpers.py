@@ -62,20 +62,7 @@ def valid_five_up_exit(
     zd_tick: int = 105,
     zg_tick: int = 115,
 ) -> tuple[ConstituentUnit, ...]:
-    """A complete first-three center, upward leave and first return.
-
-    The historical helper name is retained because many tests import it, but
-    its geometry now follows the original-text lifecycle:
-
-    * units 0..2 establish the closed core ``[ZD, ZG]``;
-    * unit 3 is an in-core extension;
-    * unit 4 leaves upward and becomes the pending departure.
-
-    A later unit 5 is the first return and may confirm a third buy.  Keeping
-    this five-unit shape preserves the long-standing continuation fixtures
-    while removing their obsolete middle-three establishment assumption.
-    """
-
+    """Five consecutive physical segments: entry + core A/B/C + leave."""
     return (
         unit(
             unit_offset,
@@ -88,13 +75,13 @@ def valid_five_up_exit(
             unit_offset + 1,
             "down",
             zg_tick + 5,
-            zd_tick,
+            zd_tick - 5,
             structural_level=structural_level,
         ),
         unit(
             unit_offset + 2,
             "up",
-            zd_tick,
+            zd_tick - 5,
             zg_tick,
             structural_level=structural_level,
         ),
@@ -122,14 +109,18 @@ def valid_three_center_seed(
     zd_tick: int = 105,
     zg_tick: int = 115,
 ) -> tuple[ConstituentUnit, ...]:
-    """The smallest formal center seed under the original contract."""
+    """Three connected units for explicit recursive trend-type tests."""
 
-    return valid_five_up_exit(
+    values = valid_five_up_exit(
         unit_offset,
         structural_level=structural_level,
         zd_tick=zd_tick,
         zg_tick=zg_tick,
-    )[:3]
+    )[1:4]
+    return tuple(
+        replace(item, source_kind=SourceKind.TREND_TYPE)
+        for item in values
+    )
 
 
 def ongoing_center(
@@ -140,21 +131,18 @@ def ongoing_center(
     zg_tick: int = 115,
     center_id: str | None = None,
 ) -> TrendCenter:
-    lifecycle = valid_five_up_exit(
+    initial = valid_five_up_exit(
         unit_offset,
         structural_level=structural_level,
         zd_tick=zd_tick,
         zg_tick=zg_tick,
     )
     value = establish_center(
-        lifecycle[:3], structural_level, SourceKind.SEGMENT
+        initial,
+        structural_level,
+        SourceKind.SEGMENT,
     )
     assert value is not None
-    value, extension = advance_center(value, lifecycle[3])
-    assert extension.kind is CenterEventKind.EXTENDED
-    value, event = advance_center(value, lifecycle[4])
-    assert event.kind is CenterEventKind.BREAKOUT_WATCH_UP
-    assert value.state is CenterState.ONGOING
     return value if center_id is None else replace(value, center_id=center_id)
 
 
@@ -196,13 +184,13 @@ def ongoing_down_center(
     zg_tick: int = 105,
     center_id: str | None = None,
 ) -> TrendCenter:
-    lifecycle = (
+    initial = (
         unit(
-            unit_offset,
-            "down",
-            zg_tick + 15,
-            zd_tick - 5,
-            structural_level=structural_level,
+        unit_offset,
+        "down",
+        zg_tick + 15,
+        zd_tick - 5,
+        structural_level=structural_level,
         ),
         unit(
             unit_offset + 1,
@@ -234,14 +222,11 @@ def ongoing_down_center(
         ),
     )
     value = establish_center(
-        lifecycle[:3], structural_level, SourceKind.SEGMENT
+        initial,
+        structural_level,
+        SourceKind.SEGMENT,
     )
     assert value is not None
-    value, extension = advance_center(value, lifecycle[3])
-    assert extension.kind is CenterEventKind.EXTENDED
-    value, event = advance_center(value, lifecycle[4])
-    assert event.kind is CenterEventKind.BREAKOUT_WATCH_DOWN
-    assert value.state is CenterState.ONGOING
     return value if center_id is None else replace(value, center_id=center_id)
 
 
@@ -323,7 +308,15 @@ def structure_for(*centers, completed_trends=()) -> StrictStructureResult:
             for item in trend.constituent_units:
                 by_id.setdefault(item.unit_id, item)
         for center_value in level_centers:
-            for item in center_value.body_units:
+            for item in (
+                *center_value.establishment_units,
+                *center_value.body_units,
+                *(
+                    ()
+                    if center_value.completion_leave_unit is None
+                    else (center_value.completion_leave_unit,)
+                ),
+            ):
                 by_id.setdefault(item.unit_id, item)
             ret = center_value.completion_return_unit
             if ret is not None:

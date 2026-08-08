@@ -9,22 +9,22 @@ from cl_app.services.chart_compute import (
 
 def _strict_payload(revision: str = "sha256:one") -> dict[str, object]:
     return {
-        "schema": "chanlun-chart-structure/v5",
+        "schema": "chanlun-chart-structure/v12",
         "structure_revision": revision,
         "snapshot_revision": revision + "-snapshot",
         "render_revision": revision + "-render",
     }
 
 
-def test_pre_v46_cache_is_rejected_after_unified_structure_cutover() -> None:
-    assert chart_cache._CHART_CACHE_SCHEMA_VERSION == "v46"
+def test_pre_v55_cache_is_rejected_after_terminal_preview_recall_cutover() -> None:
+    assert chart_cache._CHART_CACHE_SCHEMA_VERSION == "v55"
     key = chart_cache._build_cache_key(
         "a",
         "SH.600519",
         "5m",
         {},
     )
-    assert key.startswith("v46_")
+    assert key.startswith("v55_")
     assert not key.startswith("v44_")
     assert not key.startswith("v45_")
 

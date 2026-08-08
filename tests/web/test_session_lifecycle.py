@@ -1,3 +1,5 @@
+import datetime
+
 import pytest
 
 from cl_app import create_app
@@ -29,6 +31,32 @@ def test_post_logout_revokes_the_current_session(monkeypatch):
     assert response.headers["Location"].endswith("/login")
     assert client.get("/").status_code == 302
     app.extensions["shutdown_scheduler"]()
+
+
+def test_remembered_login_survives_browser_restart_and_refreshes(monkeypatch):
+    password = ["first-password"]
+    app = _make_app(monkeypatch, password)
+    client = app.test_client()
+
+    try:
+        assert app.config["REMEMBER_COOKIE_DURATION"] == datetime.timedelta(days=30)
+        assert app.config["REMEMBER_COOKIE_REFRESH_EACH_REQUEST"] is True
+        assert client.post("/login", data={"password": password[0]}).status_code == 302
+
+        remember_cookie = client.get_cookie("remember_token")
+        assert remember_cookie is not None
+
+        reopened_client = app.test_client()
+        reopened_client.set_cookie("remember_token", remember_cookie.value)
+        response = reopened_client.get("/")
+    finally:
+        app.extensions["shutdown_scheduler"]()
+
+    assert response.status_code == 200
+    assert any(
+        header.startswith("remember_token=")
+        for header in response.headers.getlist("Set-Cookie")
+    )
 
 
 def test_password_rotation_invalidates_existing_session(monkeypatch):

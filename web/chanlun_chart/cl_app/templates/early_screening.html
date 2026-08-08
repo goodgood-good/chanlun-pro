@@ -116,6 +116,7 @@
       <section class="es-summary" aria-label="实时快照摘要">
         <article><span>合格板块</span><strong id="es-sector-count">0</strong><small>全部进入股票扫描</small></article>
         <article class="is-watch"><span>即将确认</span><strong id="es-approaching-count">0</strong><small>可含未完成线段，仅供提前观察</small></article>
+        <article class="is-watch"><span>已形成</span><strong id="es-formed-count">0</strong><small>离开与首次回抽几何成立，等待线段锁定</small></article>
         <article class="is-watch"><span>已入观察池</span><strong id="es-armed-count">0</strong><small>已经接近但尚未触发</small></article>
         <article class="is-trigger"><span>已触发</span><strong id="es-triggered-count">0</strong><small>1m 已给出结构触发</small></article>
       </section>
@@ -357,6 +358,7 @@
                   <button class="is-active" type="button" data-lifecycle="all" aria-pressed="true">全部</button>
                   <button type="button" data-lifecycle="observed" aria-pressed="false">结构观察</button>
                   <button type="button" data-lifecycle="approaching" aria-pressed="false">即将确认</button>
+                  <button type="button" data-lifecycle="formed" aria-pressed="false">已形成</button>
                   <button type="button" data-lifecycle="armed" aria-pressed="false">已入观察池</button>
                   <button type="button" data-lifecycle="triggered" aria-pressed="false">已触发</button>
                   <button type="button" data-lifecycle="executable" aria-pressed="false">强提示待复核</button>
@@ -560,7 +562,7 @@
           <article><strong>六类点独立</strong><p>一买看背驰反转，二买看首次回试确认，三买看离开中枢后的延续；卖点按对称规则独立处理。</p></article>
           <article><strong>第一中枢约束</strong><p>三买只取第一中枢；序号未知或后续中枢一律关闭。</p></article>
           <article><strong>结构口径</strong><p>日线、30m、5m、1m 都固定使用老笔→线段→本周期线段中枢；不使用走势类型递归。</p></article>
-          <article><strong>因果边界</strong><p>最后未完成线段参与中枢与候选识别，但只能进入待确认观察，不能冒充已确认买卖点。</p></article>
+          <article><strong>因果边界</strong><p>最后未完成线段参与中枢与候选识别；离开与首次回抽几何成立后显示“已形成”，线段锁定后才进入正式确认。</p></article>
           <article><strong>当前性窗口</strong><p>5m 设置只保留最近 4 个自然日内、各买卖点的最新本周期0级事件；临近点必须来自当前结构。</p></article>
         </div>
       </details>

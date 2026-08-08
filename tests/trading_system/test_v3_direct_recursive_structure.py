@@ -40,6 +40,9 @@ def _empty_centers(level: int) -> CenterLevelResult:
 
 def _recursive_units() -> tuple[tuple, tuple, tuple]:
     geometry = (
+        # External entry, three overlapping core trends, same-direction
+        # departure, and the first return that confirms a third buy.
+        ("up", 80, 120),
         ("down", 120, 100),
         ("up", 100, 115),
         ("down", 115, 105),
@@ -113,7 +116,7 @@ def _evidence(
     ).third_class_points()
     assert len(strategic) == 1
 
-    anchor = level_zero[4 if locator_in_first_return else 0]
+    anchor = level_zero[5 if locator_in_first_return else 0]
     raw_locator = confirmed_point(
         point_type=locator_type,
         price_basis_revision=TEST_PRICE_BASIS,
@@ -182,8 +185,8 @@ def test_direct_recursive_chain_maps_one_graph_to_30m_5m_1m() -> None:
     decision = path.decisions[0]
     assert decision.status == "PASS"
     assert decision.chain is not None
-    assert decision.chain.l1_return_unit_id == "l2-4"
-    assert "l0-4" in decision.chain.provenance_unit_ids
+    assert decision.chain.l1_return_unit_id == "l2-5"
+    assert "l0-5" in decision.chain.provenance_unit_ids
     entry = path.technical_entries[0]
     assert (
         entry.l0_source_frequency,

@@ -11,7 +11,7 @@ const DAILY_CLOSE_AT = 1784703600;
 
 function center(overrides = {}) {
   return {
-    schema: 'chanlun-chart-center/v5',
+    schema: 'chanlun-chart-center/v12',
     render_kind: 'formal_center',
     center_id: 'center-l0-1',
     render_id: 'center-l0-1@r1@ongoing',
@@ -153,7 +153,7 @@ function point(pointType, status, overrides = {}) {
 
 function snapshot(overrides = {}) {
   return {
-    schema: 'chanlun-chart-structure/v5',
+    schema: 'chanlun-chart-structure/v12',
     symbol: 'SZ.000001',
     source_frequency: '5m',
     display_frequency: '5m',

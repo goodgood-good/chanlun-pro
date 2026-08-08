@@ -1235,6 +1235,7 @@ test("dashboard exposes approaching signals and honest batch coverage", () => {
   assert.deepEqual(Ui.LIFECYCLE_LABELS, {
     observed: "结构观察",
     approaching: "即将确认",
+    formed: "已形成",
     armed: "已入观察池",
     triggered: "1分钟已触发",
     executable: "强提示待人工复核",
@@ -1245,6 +1246,7 @@ test("dashboard exposes approaching signals and honest batch coverage", () => {
   assert.equal(Ui.lifecycleLabel("triggered"), "1分钟已触发");
   assert.equal(Ui.lifecycleLabel("unexpected-stage"), "未知状态");
   assert.match(template, /data-lifecycle="approaching"/);
+  assert.match(template, /data-lifecycle="formed"/);
   assert.equal(
     Ui.scanCoverageText({
       planned_symbol_count: 32,
@@ -1461,6 +1463,54 @@ test("dashboard exposes approaching signals and honest batch coverage", () => {
   assert.match(controllerSource, /真实失败/);
   assert.doesNotMatch(controllerSource, /只标的需复核/);
   assert.match(controllerSource, /本轮板块结构质量不足，保留上一快照/);
+});
+
+test("completed center preview is displayed as formed, not approaching", () => {
+  const Ui = loadUi();
+  const formed = {
+    point_type: "3buy",
+    lifecycle_stage: "approaching",
+    setup_5m: {
+      point_type: "3buy",
+      status: "provisional",
+      evidence_codes: [
+        "physical_timeframe_level_zero",
+        "provisional_center_completion",
+        "core_boundary_held",
+      ],
+    },
+  };
+  const pending = {
+    point_type: "3buy",
+    lifecycle_stage: "approaching",
+    setup_5m: {
+      point_type: "3buy",
+      status: "provisional",
+      evidence_codes: ["live_first_return"],
+    },
+  };
+  const nonThird = {
+    ...formed,
+    point_type: "2buy",
+    setup_5m: { ...formed.setup_5m, point_type: "2buy" },
+  };
+
+  assert.equal(Ui.lifecycleStageForSignal(formed), "formed");
+  assert.equal(Ui.lifecycleStageForSignal(pending), "approaching");
+  assert.equal(Ui.lifecycleStageForSignal(nonThird), "approaching");
+  assert.equal(Ui.decisionSummaryForSignal(formed).tone, "waiting");
+  assert.deepEqual(
+    Ui.filterSignals([formed, pending], { lifecycle: "formed" }),
+    [formed],
+  );
+  assert.equal(Ui.lifecycleLabel("formed"), "已形成");
+
+  const normalized = Ui.normalizeSnapshot({
+    ...snapshot,
+    signals: [],
+    manual_holding_signals: [formed],
+  });
+  assert.equal(normalized.manual_holding_signals[0].lifecycle_stage, "formed");
 });
 
 test("operator status copy explains degraded state without exposing internal codes", () => {

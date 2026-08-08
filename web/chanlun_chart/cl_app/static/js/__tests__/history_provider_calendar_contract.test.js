@@ -57,7 +57,7 @@ function response(times, revision, update = false) {
     mmds: [],
     strict_structure_mode: 'replace',
     strict_structure: {
-      schema: 'chanlun-chart-structure/v5',
+      schema: 'chanlun-chart-structure/v12',
       source_closed_at: times[times.length - 1],
       render_revision: revision,
     },

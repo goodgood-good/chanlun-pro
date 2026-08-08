@@ -42,6 +42,7 @@ from chanlun.exchange.exchange import (
     convert_futures_kline_frequency,
     convert_stock_kline_frequency,
 )
+from chanlun.exchange.kline_completion import drop_unclosed_last_bar
 from chanlun.tools.log_util import LogUtil
 
 from .chart_cache import (
@@ -462,6 +463,55 @@ def serialize_chart_data_with_strict_runtime(
 ):
     """Serialize one chart with strict structure derived from its displayed bars."""
 
+    # QMT 可能在下一根分钟K线真正收盘前就返回该结束时刻的数据，盘前的
+    # 09:30 集合竞价/开盘K线最容易触发。若先计算结构、最后才在
+    # ``/tv/history`` 裁掉未来K线，同一响应会包含两套截止时点：严格结构已经
+    # 锚定未来K线，而页面 OHLC 尚未到达该时点，传输安全门只能判为不可用。
+    #
+    # 因此必须在页面结构和严格决策结构计算前统一关闭因果边界。这里循环剔除是
+    # 有意的：冷启动时数据源可能一次带回多根未来末端K线；日/周/月不受影响。
+    source_attrs = dict(getattr(display_klines, "attrs", {}))
+    completed_klines = display_klines
+    while completed_klines is not None and len(completed_klines) > 0:
+        closed_prefix = drop_unclosed_last_bar(
+            completed_klines,
+            display_frequency,
+            time_label="end",
+        )
+        if len(closed_prefix) == len(completed_klines):
+            break
+        completed_klines = closed_prefix
+
+    if completed_klines is None or len(completed_klines) == 0:
+        LogUtil.warning(
+            f"[chart_compute] no completed bars "
+            f"market={market} code={code} frequency={display_frequency}"
+        )
+        return None
+
+    if len(completed_klines) != len(display_klines):
+        dropped = len(display_klines) - len(completed_klines)
+        completed_klines = completed_klines.copy(deep=True)
+        completed_klines.attrs.clear()
+        completed_klines.attrs.update(source_attrs)
+        legacy_values = web_batch_get_cl_datas(
+            market,
+            code,
+            {display_frequency: completed_klines},
+            legacy_config,
+        )
+        if len(legacy_values) != 1:
+            raise ValueError(
+                "已完成K线的页面周期必须且只能生成一个 CL 对象"
+            )
+        legacy_cd = legacy_values[0]
+        display_klines = completed_klines
+        LogUtil.info(
+            f"[chart_compute] 结构计算前剔除 {dropped} 根未完成/未来K线 "
+            f"market={market} code={code} "
+            f"frequency={display_frequency}"
+        )
+
     strict_runtime = build_strict_chart_cd(
         market=market,
         code=code,
@@ -730,9 +780,9 @@ def strict_structure_history_fields(
         strict = chart_data.get("strict_structure")
         if (
             not isinstance(strict, dict)
-            or strict.get("schema") != "chanlun-chart-structure/v5"
+            or strict.get("schema") != "chanlun-chart-structure/v12"
         ):
-            raise ValueError("replace mode requires strict chart schema v5")
+            raise ValueError("replace 模式要求严格图表结构协议 v8")
         if (
             expected_source_closed_at is not None
             and strict.get("source_closed_at") != expected_source_closed_at

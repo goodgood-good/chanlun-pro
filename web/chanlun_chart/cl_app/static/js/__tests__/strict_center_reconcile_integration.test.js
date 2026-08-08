@@ -53,13 +53,15 @@ function loadChartManager(runtimeOverrides = {}) {
   vm.createContext(sandbox);
   let source = fs.readFileSync(path.join(__dirname, '..', 'charts.js'), 'utf8');
   source += '\n;globalThis.__STRICT_CM = ChartManager;';
+  source += '\n;globalThis.__STRICT_DYNAMIC_COLOR = getDynamicColor;';
+  source += '\n;globalThis.__STRICT_VISUAL_API = { getSignalColor, getCenterVisualStyle, getTrendVisualStyle, getStrictPointVisual, getStrictDivergenceVisual };';
   vm.runInContext(source, sandbox, { filename: 'charts.js' });
   return { ChartManager: sandbox.__STRICT_CM, sandbox };
 }
 
 function center(revision = 1, overrides = {}) {
   return {
-    schema: 'chanlun-chart-center/v5',
+    schema: 'chanlun-chart-center/v12',
     render_kind: 'formal_center',
     center_id: 'center-1',
     render_id: `center-1@${revision}@ongoing`,
@@ -89,7 +91,7 @@ function center(revision = 1, overrides = {}) {
 
 function centerPreview(overrides = {}) {
   return {
-    schema: 'chanlun-chart-center/v5',
+    schema: 'chanlun-chart-center/v12',
     render_kind: 'center_preview',
     center_id: 'preview-center-1',
     preview_id: 'preview-center-1',
@@ -122,7 +124,7 @@ function centerPreview(overrides = {}) {
 
 function centerProjection(overrides = {}) {
   return {
-    schema: 'chanlun-chart-center/v5',
+    schema: 'chanlun-chart-center/v12',
     render_kind: 'center_projection',
     center_id: 'center-1',
     render_id: `center-1@1@ongoing@projection@${BASE + 600}`,
@@ -168,7 +170,7 @@ function divergence(kind = 'trend', overrides = {}) {
 
 function snapshot(overrides = {}) {
   return {
-    schema: 'chanlun-chart-structure/v5',
+    schema: 'chanlun-chart-structure/v12',
     symbol: 'SH.600519',
     source_frequency: '5m',
     display_frequency: '5m',
@@ -848,7 +850,7 @@ test('forming center preview is non-tradable and renders as a thin dashed box', 
   assert.equal(calls.create[0].options.shape, 'rectangle');
   assert.equal(calls.create[0].options.overrides.linestyle, 2);
   assert.equal(calls.create[0].options.overrides.linewidth, 1);
-  assert.equal(calls.create[0].options.overrides.transparency, 90);
+  assert.equal(calls.create[0].options.overrides.transparency, 100);
 });
 
 test('geometrically completed preview stays non-tradable but renders solid', () => {
@@ -872,8 +874,8 @@ test('geometrically completed preview stays non-tradable but renders solid', () 
 
   assert.equal(calls.create.length, 1);
   assert.equal(calls.create[0].options.overrides.linestyle, 0);
-  assert.equal(calls.create[0].options.overrides.linewidth, 2);
-  assert.equal(calls.create[0].options.overrides.transparency, 82);
+  assert.equal(calls.create[0].options.overrides.linewidth, 1);
+  assert.equal(calls.create[0].options.overrides.transparency, 96);
   assert.equal(item.tradable, false);
 });
 
@@ -1128,7 +1130,7 @@ test('opt-in strict observation uses display segment evidence instead of stroke 
       { time: BASE + 500, price: 9 },
     ],
   });
-  const { cm, calls } = manager('chart-manager-display-segment-center');
+  const { cm, calls, sandbox } = manager('chart-manager-display-segment-center');
   cm.cl_show_config.center_observation = true;
 
   cm._drawStrictStructure(chartData('replace', snapshot({
@@ -1139,10 +1141,13 @@ test('opt-in strict observation uses display segment evidence instead of stroke 
 
   assert.equal(calls.create.length, 1);
   assert.deepEqual(calls.create[0].points, segment.points);
-  assert.equal(calls.create[0].options.color, '#FF0000');
+  assert.equal(
+    calls.create[0].options.color,
+    sandbox.__STRICT_DYNAMIC_COLOR('5', 'xd_zss'),
+  );
 });
 
-test('level-scoped consolidation and trend divergences render with explicit labels', () => {
+test('level-scoped consolidation and trend divergences render with direction and explicit labels', () => {
   const { cm, calls } = manager('chart-manager-divergence');
   const strict = snapshot();
   strict.levels[0].divergences = [divergence('consolidation'), divergence('trend')];
@@ -1150,5 +1155,39 @@ test('level-scoped consolidation and trend divergences render with explicit labe
   cm._drawStrictStructure(chartData('replace', strict), '5');
 
   const texts = calls.create.map((entry) => entry.options.text).filter(Boolean);
-  assert.deepEqual(texts.sort(), ['5m·盘整背驰', '5m·趋势背驰'].sort());
+  assert.deepEqual(texts.sort(), ['▲5m·盘整背驰', '▲5m·趋势背驰'].sort());
+  const consolidation = calls.create.find((entry) => entry.options.text?.includes('盘整背驰'));
+  const trend = calls.create.find((entry) => entry.options.text?.includes('趋势背驰'));
+  assert.equal(consolidation.options.overrides.fontsize, 12);
+  assert.equal(consolidation.options.overrides.bold, false);
+  assert.equal(trend.options.overrides.fontsize, 13);
+  assert.equal(trend.options.overrides.bold, true);
+});
+
+test('confirmed point uses a concise Chinese direction label and level-aware size', () => {
+  const { cm, calls, sandbox } = manager('chart-manager-point-style');
+  const strict = snapshot();
+  strict.levels[0].centers = [];
+  strict.levels[0].confirmed_points = [{
+    schema: 'chanlun-chart-point/v4',
+    render_kind: 'point_confirmed',
+    render_id: 'point-1@confirmed',
+    point_id: 'point-1',
+    structural_level: 0,
+    point_type: '3buy',
+    side: 'buy',
+    status: 'confirmed',
+    points: [{ time: BASE + 500, price: 10 }],
+  }];
+
+  cm._drawStrictStructure(chartData('replace', strict), '5');
+
+  assert.equal(calls.create.length, 1);
+  assert.equal(calls.create[0].options.text, '▲5m·三买');
+  assert.equal(calls.create[0].options.overrides.fontsize, 12);
+  assert.equal(calls.create[0].options.overrides.bold, true);
+  assert.equal(
+    calls.create[0].options.overrides.color,
+    sandbox.__STRICT_VISUAL_API.getSignalColor('buy', 'light'),
+  );
 });

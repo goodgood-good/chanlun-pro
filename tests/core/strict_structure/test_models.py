@@ -12,6 +12,7 @@ from chanlun.core.strict_structure.center_machine import (
 from chanlun.core.strict_structure.identity import stable_structure_id
 from chanlun.core.strict_structure.models import (
     CenterEvidence,
+    CenterEventKind,
     ConstituentUnit,
     SourceKind,
 )
@@ -115,7 +116,7 @@ def test_stable_structure_id_is_deterministic_and_namespaced():
 def test_trend_center_rejects_unlocked_initial_or_body_unit():
     value = ongoing_center()
     changed = replace(value.initial_units[2], locked=False, confirmed_at=None)
-    initial = value.initial_units[:2] + (changed,)
+    initial = value.initial_units[:2] + (changed,) + value.initial_units[3:]
     with pytest.raises(ValueError, match="formal center body units must be locked"):
         replace(
             value,
@@ -124,10 +125,10 @@ def test_trend_center_rejects_unlocked_initial_or_body_unit():
         )
 
 
-def test_trend_center_requires_exactly_three_initial_units():
+def test_segment_center_requires_exactly_five_body_initial_units():
     value = ongoing_center()
     initial = value.initial_units[:2]
-    with pytest.raises(ValueError, match="exactly three units"):
+    with pytest.raises(ValueError, match="source-specific center body"):
         replace(value, initial_units=initial, body_units=initial)
 
 
@@ -137,23 +138,42 @@ def test_trend_center_rejects_body_not_equal_to_initial_plus_extensions():
         replace(value, body_units=value.body_units[:-1])
 
 
-def test_ongoing_center_pending_leave_must_be_final_body_unit():
+def test_ongoing_center_pending_leave_must_stay_external_to_body():
     value = ongoing_center()
-    with pytest.raises(ValueError, match="pending leave must be the final body unit"):
-        replace(value, pending_leave_unit=value.entry_unit)
+    with pytest.raises(ValueError, match="pending leave must stay outside center body"):
+        replace(value, pending_leave_unit=value.body_units[-1])
 
 
-def test_center_departure_is_not_constrained_by_a_fictitious_external_entry():
-    seed = valid_three_center_seed()
-    value = establish_center(seed, 0, SourceKind.SEGMENT)
+def test_recursive_trend_center_can_depart_opposite_its_entry_direction():
+    seed = tuple(
+        replace(item, source_kind=SourceKind.TREND_TYPE)
+        for item in valid_three_center_seed()
+    )
+    entry = replace(
+        unit(0, "up", 90, seed[0].start_tick),
+        source_kind=SourceKind.TREND_TYPE,
+    )
+    value = establish_center(
+        seed,
+        0,
+        SourceKind.TREND_TYPE,
+        entry_unit=entry,
+    )
     assert value is not None
-    downward_leave = unit(3, "down", seed[-1].end_tick, 95)
+    downward_leave = replace(
+        unit(4, "down", seed[-1].end_tick, 95),
+        source_kind=SourceKind.TREND_TYPE,
+    )
 
-    pending, _event = advance_center(value, downward_leave)
+    departed, event = advance_center(
+        value,
+        downward_leave,
+        frozenset({seed[-1].unit_id}),
+    )
 
-    assert pending.pending_leave_unit is downward_leave
-    assert pending.entry_unit.direction == "up"
-    assert pending.pending_leave_unit.direction == "down"
+    assert departed.pending_leave_unit is downward_leave
+    assert departed.extension_units == ()
+    assert event.kind is CenterEventKind.BREAKOUT_WATCH_DOWN
 
 
 def test_completed_center_requires_atomic_locked_leave_return_and_timestamp():
@@ -168,7 +188,7 @@ def test_completed_center_requires_atomic_locked_leave_return_and_timestamp():
 def test_completion_return_is_confirmation_evidence_not_center_body():
     value = completed_up_center()
     with pytest.raises(ValueError, match="completion return must not enter center body"):
-        replace(value, completion_return_unit=value.entry_unit)
+        replace(value, completion_return_unit=value.body_units[0])
 
 
 def test_center_rejects_body_level_or_source_mismatch():
@@ -202,6 +222,7 @@ def test_center_rejects_disconnected_or_non_alternating_body():
     disconnected = replace(
         value.initial_units[1],
         start_tick=value.initial_units[1].start_tick - 1,
+        low_tick=value.initial_units[1].low_tick - 1,
     )
     initial = (value.initial_units[0], disconnected) + value.initial_units[2:]
     with pytest.raises(ValueError, match="center body prices must connect"):
@@ -209,11 +230,12 @@ def test_center_rejects_disconnected_or_non_alternating_body():
             value,
             initial_units=initial,
             body_units=initial + value.extension_units,
+            dd_tick=value.dd_tick - 1,
         )
 
     non_alternating = replace(
         value.initial_units[1],
-        direction="up",
+        direction="down",
         start_tick=value.initial_units[1].end_tick,
         end_tick=value.initial_units[1].start_tick,
     )
@@ -228,7 +250,7 @@ def test_center_rejects_disconnected_or_non_alternating_body():
 
 def test_center_rejects_forged_core_or_envelope_fields():
     value = ongoing_center()
-    with pytest.raises(ValueError, match="first-three intersection"):
+    with pytest.raises(ValueError, match="three core-unit intersection"):
         replace(value, zg_tick=value.zg_tick + 1)
     with pytest.raises(ValueError, match="body envelope"):
         replace(value, gg_tick=value.gg_tick + 1)
@@ -252,12 +274,30 @@ def test_center_core_body_time_uses_first_component_and_excludes_departure():
     )
 
 
+def test_center_display_range_excludes_entry_and_departure_legs():
+    ongoing = ongoing_center()
+    completed = completed_up_center()
+
+    assert (
+        ongoing.display_range_start_market_time
+        == ongoing.core_units[0].market_start
+    )
+    assert (
+        ongoing.display_range_end_market_time
+        == ongoing.pending_leave_unit.market_start
+    )
+    assert (
+        completed.display_range_end_market_time
+        == completed.completion_leave_unit.market_start
+    )
+
+
 def test_center_core_body_end_advances_only_after_an_accepted_reentry():
     initial = ongoing_center()
     reentry = unit(
         5,
         "down",
-        initial.body_units[-1].end_tick,
+        initial.pending_leave_unit.end_tick,
         initial.zd_tick + 5,
     )
     extended, _event = advance_center(initial, reentry)
@@ -277,18 +317,19 @@ def test_center_core_body_end_advances_only_after_an_accepted_reentry():
     assert leaving.core_body_end_market_time == next_leave.market_start
 
 
-def test_center_evidence_preserves_v4_first_three_and_excludes_return():
+def test_center_evidence_preserves_external_roles_and_excludes_return():
     value = completed_up_center()
     evidence = CenterEvidence.from_center(value)
-    assert evidence.schema_version == "chanlun-center/v4"
+    assert evidence.schema_version == "chanlun-center/v11"
     assert evidence.price_basis_revision == TEST_PRICE_BASIS
     assert evidence.initial_unit_ids == tuple(
         item.unit_id for item in value.initial_units
     )
     assert evidence.entry_unit_id == value.entry_unit.unit_id
     assert evidence.core_unit_ids == tuple(item.unit_id for item in value.core_units)
+    assert evidence.establishment_unit_id == value.establishment_unit.unit_id
     assert evidence.initial_exit_unit_id == value.initial_exit_unit.unit_id
-    assert evidence.completion_leave_unit_id in evidence.body_unit_ids
+    assert evidence.completion_leave_unit_id not in evidence.body_unit_ids
     assert evidence.completion_return_unit_id not in evidence.body_unit_ids
     assert evidence.completed_at == value.completed_at
     assert evidence.tradable is True

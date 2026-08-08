@@ -23,36 +23,45 @@ UP_VALUES = (
     ("down", 120, 100),
     ("up", 100, 115),
     ("down", 115, 105),
+    ("up", 105, 115),
+    ("down", 115, 105),
     ("up", 105, 130),
     ("down", 130, 120),
-    ("up", 120, 160),
-    ("down", 160, 150),
-    ("up", 150, 180),
-    ("down", 180, 160),
-    ("up", 160, 175),
-    ("down", 175, 165),
-    ("up", 165, 190),
-    ("down", 190, 180),
-    ("up", 180, 185),
+    ("up", 120, 125),
+    ("down", 125, 120),
+    ("up", 120, 150),
+    ("down", 150, 135),
+    ("up", 135, 145),
+    ("down", 145, 138),
+    ("up", 138, 145),
+    ("down", 145, 138),
+    ("up", 138, 170),
+    ("down", 170, 150),
+    ("up", 150, 165),
 )
 
 EXTENDED_UP_VALUES = (
-    *UP_VALUES[:14],
-    ("up", 180, 260),
-    ("down", 260, 200),
-    ("up", 200, 240),
-    ("down", 240, 220),
-    ("up", 220, 235),
-    ("down", 235, 225),
-    ("up", 225, 280),
-    ("down", 280, 240),
+    *UP_VALUES[:18],
+    ("up", 150, 157),
+    ("down", 157, 152),
+    ("up", 152, 180),
+    ("down", 180, 172),
+    ("up", 172, 177),
+    ("down", 177, 174),
+    ("up", 174, 177),
+    ("down", 177, 174),
+    ("up", 174, 200),
+    ("down", 200, 180),
 )
 
 NO_NEW_HIGH_VALUES = (
-    *UP_VALUES[:6],
-    ("up", 120, 200),
-    ("down", 200, 150),
-    *UP_VALUES[8:],
+    *UP_VALUES[:12],
+    ("up", 135, 145),
+    ("down", 145, 138),
+    ("up", 138, 145),
+    ("down", 145, 138),
+    ("up", 138, 148),
+    ("down", 148, 146),
 )
 
 
@@ -111,13 +120,28 @@ class StrengthTable:
 
 def divergent_strength(direction, *, extended=False):
     if direction == "up":
-        values = {"u-6": (100, 5, 2), "u-10": (80, 3, 1)}
+        values = {
+            # The newly visible shared-boundary center creates an earlier
+            # two-center trend.  Keep that comparison deliberately
+            # non-divergent so this fixture still targets the terminal trend.
+            "u-6": (50, 2, 1),
+            "u-10": (100, 5, 2),
+            "u-12": (100, 5, 2),
+            "u-16": (80, 3, 1),
+        }
         if extended:
-            values.update({"u-14": (100, 5, 2), "u-20": (60, 2, 0.5)})
+            values["u-20"] = (60, 2, 0.5)
+            values["u-26"] = (40, 1, 0.25)
     else:
-        values = {"u-6": (100, -5, -2), "u-10": (80, -3, -1)}
+        values = {
+            "u-6": (50, -2, -1),
+            "u-10": (100, -5, -2),
+            "u-12": (100, -5, -2),
+            "u-16": (80, -3, -1),
+        }
         if extended:
-            values.update({"u-14": (100, -5, -2), "u-20": (60, -2, -0.5)})
+            values["u-20"] = (60, -2, -0.5)
+            values["u-26"] = (40, -1, -0.25)
     return StrengthTable(values)
 
 
@@ -139,10 +163,10 @@ def target_trend(assembly):
     matches = tuple(
         trend
         for trend in assembly.completed_trends
-        if trend.kind is TrendKind.TREND and len(trend.centers) == 2
+        if trend.kind is TrendKind.TREND
     )
-    assert len(matches) == 1
-    return matches[0]
+    assert matches
+    return max(matches, key=lambda trend: len(trend.centers))
 
 
 def test_down_trend_terminal_divergence_emits_one_buy():
@@ -174,13 +198,20 @@ def test_single_center_consolidation_does_not_emit_first_class():
 
 def test_smaller_macd_without_new_price_extreme_is_not_divergence():
     structure, assembly = structure_from_values(values=NO_NEW_HIGH_VALUES)
-    trend = tuple(
-        item for item in assembly.completed_trends if item.kind is TrendKind.TREND
-    )[0]
+    trend = max(
+        (
+            item
+            for item in assembly.completed_trends
+            if item.kind is TrendKind.TREND
+        ),
+        key=lambda item: len(item.centers),
+    )
     comparison = _comparison_unit(trend, trend.terminal_unit)
     assert comparison.high_tick > trend.terminal_unit.high_tick
     strength = StrengthTable(
         {
+            "u-6": (50, 2, 1),
+            "u-10": (100, 5, 2),
             comparison.unit_id: (100, 5, 2),
             trend.terminal_unit.unit_id: (80, 3, 1),
         }
@@ -229,17 +260,17 @@ def test_first_class_available_at_uses_trend_completion():
     )
 
 
-def test_completed_first_point_survives_later_same_direction_trend_extension():
+def test_completed_first_point_survives_later_same_direction_trend():
     structure, assembly = structure_from_values(values=EXTENDED_UP_VALUES)
     snapshots = tuple(
         trend for trend in assembly.completed_trends if trend.kind is TrendKind.TREND
     )
-    assert [len(trend.centers) for trend in snapshots] == [2, 3]
+    assert [len(trend.centers) for trend in snapshots] == [2, 2]
     points = engine_for(
         structure,
         divergent_strength("up", extended=True),
     ).first_class_points()
-    assert [point.anchor_unit_id for point in points] == ["u-10", "u-20"]
+    assert [point.anchor_unit_id for point in points] == ["u-16", "u-26"]
     frozen = points[0]
     assert frozen.available_at == snapshots[0].available_at
     assert frozen.point_id != points[1].point_id

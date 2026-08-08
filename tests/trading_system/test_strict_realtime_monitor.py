@@ -93,7 +93,9 @@ def test_strict_collector_carries_point_identity_and_exact_point_type() -> None:
     assert event.side == "buy"
     assert event.kind == "strict_buy_point"
     assert event.evidence_id == point.point_id
-    assert event.identity == "strict_buy_point|TSLA.US|sha256:strict-third-buy"
+    assert event.identity == (
+        "strict_buy_point|TSLA.US|3buy|2026-08-05T10:00:00+08:00"
+    )
     assert event.signal_time == AT.isoformat(timespec="seconds")
 
 
@@ -239,6 +241,112 @@ def test_poll_without_new_completed_bar_reuses_exact_evidence(monkeypatch) -> No
     assert first is evidence
     assert second is evidence
     assert len(calls) == 1
+
+
+def test_new_completed_bar_rebuilds_from_the_complete_authoritative_frame(
+    monkeypatch,
+) -> None:
+    first_frame = _frame(metadata=True)
+    second_frame = pd.concat(
+        (
+            first_frame,
+            pd.DataFrame(
+                {
+                    "date": [pd.Timestamp("2026-08-04 09:34", tz=CN)],
+                    "open": [100.4],
+                    "high": [100.6],
+                    "low": [100.3],
+                    "close": [100.5],
+                    "volume": [1000.0],
+                }
+            ),
+        ),
+        ignore_index=True,
+    )
+    attach_price_basis_metadata(
+        second_frame,
+        build_provider_price_basis_metadata(
+            provider="test-provider",
+            market="us",
+            code="TSLA.US",
+            adjustment="none",
+            structure_price_quantum=Decimal("0.01"),
+        ),
+    )
+    state = StrictPhysicalMonitorState(
+        "TSLA.US",
+        SimpleNamespace(market="us", kline_time_label="start"),
+    )
+    frames = iter((first_frame, second_frame))
+    monkeypatch.setattr(state, "_fetch_klines", lambda *_args: next(frames))
+    monkeypatch.setattr(
+        state,
+        "MINIMUM_BARS_BY_FREQ",
+        {**state.MINIMUM_BARS_BY_FREQ, "1m": 1},
+    )
+    processed_lengths: list[int] = []
+
+    class _CD:
+        def process_klines(self, frame):
+            processed_lengths.append(len(frame))
+
+    def _runtime(_frequency, metadata):
+        return monitor_module._FrequencyRuntime(
+            cd=_CD(),
+            metadata=metadata,
+            strict_config_revision="strict-revision",
+        )
+
+    monkeypatch.setattr(state, "_new_runtime", _runtime)
+    monkeypatch.setattr(
+        monitor_module,
+        "build_screening_evidence",
+        lambda *_args, **_kwargs: SimpleNamespace(marker=len(processed_lengths)),
+    )
+
+    state._process_level("1m", "last_op", AT)
+    state._process_level("1m", "last_op", AT)
+
+    assert processed_lengths == [4, 5]
+    assert len(state._runtime_by_frequency["1m"].source_frame) == 5
+
+
+def test_first_successful_refresh_only_builds_a_semantic_baseline(monkeypatch) -> None:
+    state = StrictPhysicalMonitorState(
+        "TSLA.US",
+        SimpleNamespace(market="us", kline_time_label="start"),
+    )
+    current_points = [_point("3buy", point_id="first-build-id")]
+    evidence_by_frequency = {
+        frequency: SimpleNamespace(
+            frequency=frequency,
+            structure=SimpleNamespace(levels=[]),
+        )
+        for frequency in ("1m", "5m", "30m", "d")
+    }
+
+    class _SourceCD:
+        def get_src_klines(self):
+            return [SimpleNamespace(o=100.0, c=100.0)]
+
+    state._runtime_by_frequency["1m"] = SimpleNamespace(cd=_SourceCD())
+
+    def _process(frequency, last_attr, _observed_at):
+        setattr(state, last_attr, pd.Timestamp(AT))
+        return evidence_by_frequency[frequency]
+
+    monkeypatch.setattr(state, "_process_level", _process)
+    monkeypatch.setattr(
+        monitor_module,
+        "extract_confirmed_points",
+        lambda evidence, **_kwargs: (
+            tuple(current_points) if evidence.frequency == "1m" else ()
+        ),
+    )
+
+    assert state.refresh() == []
+    current_points[:] = [_point("3buy", point_id="rebuilt-same-occurrence")]
+    assert state.refresh() == []
 
 
 def test_monitor_runtime_uses_the_same_screening_profile_as_page_and_replay() -> None:

@@ -1,9 +1,4 @@
-"""Original first-three center formation at every recursive level.
-
-Both segment-sourced level zero and higher trend-type levels obey the same
-L17/L20 definition.  Adding fictitious entry/exit roles at level zero delays
-visible completion and makes a confirmed third-class point appear unfinished.
-"""
+"""Five physical roles at L0 and three core trends plus external entry recursively."""
 
 from decimal import Decimal
 
@@ -20,13 +15,25 @@ from chanlun.core.strict_structure.models import (
     StrictStructureResult,
 )
 from chanlun.core.strict_structure.signals import StrictSignalEngine
-from tests.core.strict_structure.helpers import TEST_PRICE_BASIS, unit
+from tests.core.strict_structure.helpers import (
+    TEST_PRICE_BASIS,
+    unit,
+    valid_five_up_exit,
+)
 
 
 def _trend_units():
     return (
         unit(
             0,
+            "up",
+            80,
+            120,
+            source_kind=SourceKind.TREND_TYPE,
+            structural_level=1,
+        ),
+        unit(
+            1,
             "down",
             120,
             100,
@@ -34,7 +41,7 @@ def _trend_units():
             structural_level=1,
         ),
         unit(
-            1,
+            2,
             "up",
             100,
             115,
@@ -42,7 +49,7 @@ def _trend_units():
             structural_level=1,
         ),
         unit(
-            2,
+            3,
             "down",
             115,
             105,
@@ -51,7 +58,7 @@ def _trend_units():
         ),
         # Departure above the [105, 115] core.
         unit(
-            3,
+            4,
             "up",
             105,
             130,
@@ -60,7 +67,7 @@ def _trend_units():
         ),
         # First return holds the upper boundary (equality is valid).
         unit(
-            4,
+            5,
             "down",
             130,
             115,
@@ -73,41 +80,55 @@ def _trend_units():
 def test_three_locked_trends_establish_recursive_center() -> None:
     values = _trend_units()
 
-    center = establish_center(values[:3], 1, SourceKind.TREND_TYPE)
+    center = establish_center(
+        values[1:4],
+        1,
+        SourceKind.TREND_TYPE,
+        entry_unit=values[0],
+    )
 
     assert center is not None
     assert center.state is CenterState.ONGOING
-    assert center.initial_units == values[:3]
-    assert center.core_units == values[:3]
+    assert center.entry_unit is values[0]
+    assert center.initial_units == values[1:4]
+    assert center.core_units == values[1:4]
     assert (center.zd_tick, center.zg_tick) == (105, 115)
     assert center.pending_leave_unit is None
 
 
-def test_three_segments_use_the_same_original_level_zero_contract() -> None:
-    values = tuple(
-        unit(index, item.direction, item.start_tick, item.end_tick)
-        for index, item in enumerate(_trend_units()[:3])
-    )
+def test_level_zero_uses_five_segment_gate_and_middle_three_core() -> None:
+    values = valid_five_up_exit()
 
-    center = establish_center(values, 0, SourceKind.SEGMENT)
+    center = establish_center(
+        values[1:], 0, SourceKind.SEGMENT, entry_unit=values[0]
+    )
     assert center is not None
-    assert center.initial_units == values
+    assert center.initial_units == values[1:4]
+    assert center.extension_units == ()
+    assert center.initial_exit_unit is values[4]
+    assert center.establishment_units == values
+    assert center.entry_unit is values[0]
 
 
 def test_recursive_center_completes_only_after_leave_and_return() -> None:
     values = _trend_units()
-    center = establish_center(values[:3], 1, SourceKind.TREND_TYPE)
+    center = establish_center(
+        values[1:4],
+        1,
+        SourceKind.TREND_TYPE,
+        entry_unit=values[0],
+    )
     assert center is not None
 
-    center, _watch = advance_center(center, values[3])
+    center, _watch = advance_center(center, values[4])
     assert center.state is CenterState.ONGOING
-    assert center.pending_leave_unit is values[3]
+    assert center.pending_leave_unit is values[4]
 
-    center, _complete = advance_center(center, values[4])
+    center, _complete = advance_center(center, values[5])
     assert center.state is CenterState.COMPLETED
-    assert center.completion_leave_unit is values[3]
-    assert center.completion_return_unit is values[4]
-    assert center.completed_at == values[4].confirmed_at
+    assert center.completion_leave_unit is values[4]
+    assert center.completion_return_unit is values[5]
+    assert center.completed_at == values[5].confirmed_at
 
 
 def test_recursive_scan_emits_first_center_third_buy() -> None:
@@ -157,7 +178,7 @@ def test_recursive_scan_emits_first_center_third_buy() -> None:
 
 def test_recursive_center_identity_is_prefix_stable() -> None:
     values = _trend_units()
-    forming = calculate_centers(values[:4], 1, SourceKind.TREND_TYPE)
+    forming = calculate_centers(values[:5], 1, SourceKind.TREND_TYPE)
     completed = calculate_centers(values, 1, SourceKind.TREND_TYPE)
 
     assert forming.centers[0].center_id == completed.centers[0].center_id

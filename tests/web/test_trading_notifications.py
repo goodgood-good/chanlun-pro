@@ -18,14 +18,47 @@ def signal_document(stage: str = "triggered") -> dict[str, object]:
     return {
         "signal_id": "signal:stable",
         "code": "SZ.000001",
+        "side": "buy",
         "point_type": "3buy",
         "tower": "xd",
         "recursive_level": 1,
         "lifecycle_stage": stage,
+        "physical_timeframe_level_zero": True,
+        "observed_at": "2026-07-20T10:01:30+08:00",
         "context_30m": {"direction": "up", "disposition": "supportive"},
-        "setup_5m": {"point_type": "3buy", "center_ordinal": 1},
-        "trigger_1m": {"point_type": "1buy", "confirmed_at": "2026-07-20T10:01:00+08:00"},
+        "setup_5m": {
+            "point_id": "setup:stable-5m-3buy",
+            "point_type": "3buy",
+            "center_ordinal": 1,
+            "status": "confirmed",
+            "source_frequency": "5m",
+            "actionable": True,
+            "available_at": "2026-07-20T10:00:00+08:00",
+        },
+        "trigger_1m": {
+            "point_id": "trigger:stable-1m-1buy",
+            "point_type": "1buy",
+            "status": "confirmed",
+            "source_frequency": "1m",
+            "actionable": True,
+            "available_at": "2026-07-20T10:01:00+08:00",
+            "confirmed_at": "2026-07-20T10:01:00+08:00",
+        },
         "sector": {"sector_name": "银行", "regime": "supportive"},
+        "sector_triggered": True,
+        "higher_timeframe_risk": {
+            "market_gate": "GREEN",
+            "sector_gate": "GREEN",
+            "symbol_gate": "GREEN",
+        },
+        "warmup": {"converged": True},
+        "conflict": {"hard_block": False},
+        "entry_allowed": True,
+        "exit_allowed": False,
+        "entry_execution_boundary": {
+            "confirmation_bar_closed_at": "2026-07-20T10:01:00+08:00",
+            "entry_valid_until": "2026-07-20T10:02:00+08:00",
+        },
         "structural_stop": "9.80",
         "risk_multiplier": "0.75",
         "decision_reasons": [],
@@ -41,12 +74,14 @@ def shared_trigger_signal(signal_id: str, setup_point_type: str) -> dict[str, ob
     signal["signal_id"] = signal_id
     signal["point_type"] = setup_point_type
     signal["setup_5m"] = {
+        **signal["setup_5m"],
         "point_id": f"setup:{setup_point_type}",
         "point_type": setup_point_type,
         "center_ordinal": 1,
         "invalidation_price": "9.80",
     }
     signal["trigger_1m"] = {
+        **signal["trigger_1m"],
         "point_id": "trigger:shared-1m-3buy",
         "point_type": "3buy",
         "confirmed_at": "2026-07-20T10:01:00+08:00",
@@ -91,13 +126,13 @@ def test_only_material_lifecycle_transitions_notify(tmp_path: Path) -> None:
 
     assert len(sender.messages) == 1
     title, lines = sender.messages[0]
-    assert title == "买卖通知｜候选股｜SZ.000001｜1分钟一类买点"
+    assert title == "买卖通知｜候选股｜SZ.000001｜5分钟三类买点（1分钟一类买点确认）"
     rendered = "\n".join(lines)
     assert "防守价：9.80（跌破买入结构失效）" in rendered
     assert "30分钟向上（有利）" in rendered
     assert "5分钟三类买点" in rendered
     assert "1分钟一类买点" in rendered
-    assert "建议：确认反转后考虑分批买入" in rendered
+    assert "建议：回抽确认后考虑分批买入" in rendered
     assert "计划风险倍数" not in rendered
     assert "结构层级" not in rendered
 
@@ -118,6 +153,11 @@ def test_dispatcher_passes_stable_a_share_chart_context(tmp_path: Path) -> None:
     assert chart["market"] == "a"
     assert chart["code"] == "SZ.000001"
     assert str(chart["artifact_key"]).startswith("sha256:")
+    assert chart["point_type"] == "1buy"
+    assert chart["signal_time"] == "2026-07-20T10:01:00+08:00"
+    assert chart["evidence_id"] == "trigger:stable-1m-1buy"
+    assert chart["evidence_required"] is True
+    assert sender.rich_messages[0][2]["require_evidence_match"] is True
 
 
 def test_same_one_minute_trigger_coalesces_multiple_five_minute_setups(
@@ -190,7 +230,13 @@ def test_distinct_one_minute_triggers_are_not_coalesced(tmp_path: Path) -> None:
     second["trigger_1m"] = {
         **second["trigger_1m"],
         "point_id": "trigger:distinct-1m-3buy",
+        "available_at": "2026-07-20T10:02:00+08:00",
         "confirmed_at": "2026-07-20T10:02:00+08:00",
+    }
+    second["observed_at"] = "2026-07-20T10:02:30+08:00"
+    second["entry_execution_boundary"] = {
+        "confirmation_bar_closed_at": "2026-07-20T10:02:00+08:00",
+        "entry_valid_until": "2026-07-20T10:03:00+08:00",
     }
 
     dispatcher.dispatch_changes(
@@ -206,7 +252,7 @@ def test_distinct_one_minute_triggers_are_not_coalesced(tmp_path: Path) -> None:
     assert len(sender.messages) == 2
 
 
-def test_newly_discovered_triggered_signal_notifies_immediately(
+def test_newly_discovered_triggered_signal_only_seeds_the_baseline(
     tmp_path: Path,
 ) -> None:
     sender = RecordingNotifier()
@@ -217,8 +263,215 @@ def test_newly_discovered_triggered_signal_notifies_immediately(
 
     dispatcher.dispatch_changes(snapshot(None), snapshot("triggered"))
 
+    assert sender.messages == []
+    assert dispatcher.health_snapshot()["success_count"] == 0
+
+
+@pytest.mark.parametrize(
+    ("mutation", "reason"),
+    (
+        ({"entry_allowed": False}, "ENTRY_NOT_ALLOWED"),
+        ({"warmup": {"converged": False}}, "WARMUP_NOT_CONVERGED"),
+        (
+            {
+                "higher_timeframe_risk": {
+                    "market_gate": "GREEN",
+                    "sector_gate": "AMBER",
+                    "symbol_gate": "GREEN",
+                }
+            },
+            "HIGHER_TIMEFRAME_GATE_NOT_GREEN",
+        ),
+        ({"sector_triggered": False}, "CURRENT_SECTOR_TRIGGER_REQUIRED"),
+        ({"physical_timeframe_level_zero": False}, "PHYSICAL_TIMEFRAME_AUTHORITY_MISSING"),
+    ),
+)
+def test_buy_transition_fails_closed_when_decision_gate_is_not_proven(
+    tmp_path: Path,
+    mutation: dict[str, object],
+    reason: str,
+) -> None:
+    sender = RecordingNotifier()
+    dispatcher = SignalNotificationDispatcher(
+        sender,
+        state_path=tmp_path / f"{reason}.json",
+    )
+    current = signal_document("triggered")
+    current.update(mutation)
+
+    dispatcher.dispatch_changes(snapshot("armed"), {"signals": [current]})
+
+    assert sender.messages == []
+    health = dispatcher.health_snapshot()
+    assert health["suppressed_count"] == 1
+    assert health["last_suppressed_reason"] == reason
+
+
+def test_stale_or_expired_one_minute_trigger_never_notifies(tmp_path: Path) -> None:
+    sender = RecordingNotifier()
+    dispatcher = SignalNotificationDispatcher(
+        sender,
+        state_path=tmp_path / "delivered.json",
+    )
+    stale = signal_document("triggered")
+    stale["observed_at"] = "2026-07-20T10:04:00+08:00"
+
+    dispatcher.dispatch_changes(snapshot("armed"), {"signals": [stale]})
+
+    assert sender.messages == []
+    assert dispatcher.health_snapshot()["last_suppressed_reason"] == "TRIGGER_STALE"
+
+
+def test_expired_entry_boundary_never_notifies_even_while_trigger_is_fresh(
+    tmp_path: Path,
+) -> None:
+    sender = RecordingNotifier()
+    dispatcher = SignalNotificationDispatcher(
+        sender,
+        state_path=tmp_path / "delivered.json",
+    )
+    expired = signal_document("triggered")
+    expired["observed_at"] = "2026-07-20T10:01:30+08:00"
+    expired["entry_execution_boundary"] = {
+        "confirmation_bar_closed_at": "2026-07-20T10:01:00+08:00",
+        "entry_valid_until": "2026-07-20T10:01:15+08:00",
+    }
+
+    dispatcher.dispatch_changes(snapshot("armed"), {"signals": [expired]})
+
+    assert sender.messages == []
+    assert dispatcher.health_snapshot()["last_suppressed_reason"] == "ENTRY_WINDOW_EXPIRED"
+
+
+def test_sell_transition_requires_an_actual_holding_exit_decision(
+    tmp_path: Path,
+) -> None:
+    sender = RecordingNotifier()
+    dispatcher = SignalNotificationDispatcher(
+        sender,
+        state_path=tmp_path / "delivered.json",
+    )
+    sell = signal_document("triggered")
+    sell.update(
+        {
+            "side": "sell",
+            "point_type": "3sell",
+            "entry_allowed": False,
+            "exit_allowed": False,
+            "setup_5m": {**sell["setup_5m"], "point_type": "3sell"},
+            "trigger_1m": {**sell["trigger_1m"], "point_type": "1sell"},
+        }
+    )
+    previous_sell = {**sell, "lifecycle_stage": "armed"}
+
+    dispatcher.dispatch_changes(
+        {"signals": [previous_sell]},
+        {"signals": [sell]},
+    )
+
+    assert sender.messages == []
+    assert dispatcher.health_snapshot()["last_suppressed_reason"] == "EXIT_NOT_ALLOWED"
+
+
+def test_same_trigger_stage_upgrade_does_not_send_twice(tmp_path: Path) -> None:
+    sender = RecordingNotifier()
+    dispatcher = SignalNotificationDispatcher(
+        sender,
+        state_path=tmp_path / "delivered.json",
+    )
+    triggered = signal_document("triggered")
+    executable = signal_document("executable")
+
+    dispatcher.dispatch_changes(snapshot("armed"), {"signals": [triggered]})
+    dispatcher.dispatch_changes({"signals": [triggered]}, {"signals": [executable]})
+
     assert len(sender.messages) == 1
-    assert "首次发现→1分钟已触发" in "\n".join(sender.messages[0][1])
+    assert dispatcher.health_snapshot()["delivered_event_count"] == 1
+
+
+def test_same_trigger_with_changed_defense_price_is_one_notification(
+    tmp_path: Path,
+) -> None:
+    sender = RecordingNotifier()
+    dispatcher = SignalNotificationDispatcher(
+        sender,
+        state_path=tmp_path / "delivered.json",
+    )
+    first = shared_trigger_signal("signal:first", "1buy")
+    second = shared_trigger_signal("signal:second", "2buy")
+    first["setup_5m"] = {**first["setup_5m"], "invalidation_price": "9.80"}
+    second["setup_5m"] = {**second["setup_5m"], "invalidation_price": "9.60"}
+
+    dispatcher.dispatch_changes(
+        {
+            "signals": [
+                {**first, "lifecycle_stage": "armed"},
+                {**second, "lifecycle_stage": "armed"},
+            ]
+        },
+        {"signals": [first, second]},
+    )
+
+    assert len(sender.messages) == 1
+    assert "防守价：9.80、9.60（跌破买入结构失效）" in "\n".join(
+        sender.messages[0][1]
+    )
+
+
+def test_authoritative_refresh_retracts_a_disappeared_trigger(tmp_path: Path) -> None:
+    sender = RecordingNotifier()
+    dispatcher = SignalNotificationDispatcher(
+        sender,
+        state_path=tmp_path / "delivered.json",
+    )
+
+    dispatcher.dispatch_changes(
+        {"signals": [signal_document("triggered")]},
+        {
+            "signals": [],
+            "notification_authoritative_codes": ["SZ.000001"],
+        },
+    )
+
+    assert len(sender.messages) == 1
+    assert "结构已失效" in sender.messages[0][0]
+    assert "取消该结构计划" in "\n".join(sender.messages[0][1])
+
+
+def test_partial_refresh_never_retracts_an_unrecomputed_symbol(tmp_path: Path) -> None:
+    sender = RecordingNotifier()
+    dispatcher = SignalNotificationDispatcher(
+        sender,
+        state_path=tmp_path / "delivered.json",
+    )
+
+    dispatcher.dispatch_changes(
+        {"signals": [signal_document("triggered")]},
+        {"signals": [], "notification_authoritative_codes": ["SZ.000002"]},
+    )
+
+    assert sender.messages == []
+
+
+def test_event_audit_persists_delivery_and_suppression_facts(tmp_path: Path) -> None:
+    state_path = tmp_path / "delivered.json"
+    sender = RecordingNotifier()
+    dispatcher = SignalNotificationDispatcher(sender, state_path=state_path)
+    blocked = signal_document("triggered")
+    blocked["entry_allowed"] = False
+
+    dispatcher.dispatch_changes(snapshot("armed"), {"signals": [blocked]})
+    dispatcher.dispatch_changes(snapshot("armed"), snapshot("triggered"))
+
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))
+    assert [row["status"] for row in persisted["event_audit"]] == [
+        "suppressed",
+        "delivered",
+    ]
+    assert persisted["event_audit"][0]["reason"] == "ENTRY_NOT_ALLOWED"
+    assert persisted["event_audit"][1]["trigger_available_at"] == (
+        "2026-07-20T10:01:00+08:00"
+    )
 
 
 @pytest.mark.parametrize(
@@ -226,6 +479,7 @@ def test_newly_discovered_triggered_signal_notifies_immediately(
     (
         ("observed", "结构观察"),
         ("approaching", "即将确认"),
+        ("formed", "已形成"),
         ("armed", "已入观察池"),
         ("triggered", "1分钟已触发"),
         ("executable", "强提示待人工复核"),
@@ -259,9 +513,9 @@ def test_holding_source_is_explicitly_separated_from_candidate() -> None:
         new_stage="triggered",
     )
 
-    assert title == "买卖通知｜持仓股｜SZ.000001｜1分钟一类买点"
+    assert title == "买卖通知｜持仓股｜SZ.000001｜5分钟三类买点（1分钟一类买点确认）"
     assert "候选股" not in title
-    assert lines[-1] == "建议：确认反转后考虑分批增持"
+    assert lines[-1] == "建议：回抽确认后考虑分批增持"
 
 
 def test_watchlist_signal_remains_candidate_not_holding() -> None:
@@ -357,6 +611,33 @@ def test_failed_send_remains_retryable(tmp_path: Path) -> None:
     assert health["success_count"] == 1
     assert health["failure_count"] == 1
     assert health["delivered_event_count"] == 1
+
+
+def test_failed_trigger_retries_after_lifecycle_has_already_advanced(
+    tmp_path: Path,
+) -> None:
+    sender = RecordingNotifier([False, True])
+    dispatcher = SignalNotificationDispatcher(
+        sender,
+        state_path=tmp_path / "delivered.json",
+    )
+    triggered = signal_document("triggered")
+    executable = signal_document("executable")
+
+    dispatcher.dispatch_changes(
+        {"signals": [triggered]},
+        {"signals": [executable]},
+    )
+    dispatcher.dispatch_changes(
+        {"signals": [executable]},
+        {"signals": [executable]},
+    )
+
+    assert len(sender.messages) == 2
+    health = dispatcher.health_snapshot()
+    assert health["success_count"] == 1
+    assert health["failure_count"] == 1
+    assert health["pending_trigger_event_count"] == 0
 
 
 def test_persisted_event_id_deduplicates_after_restart(tmp_path: Path) -> None:

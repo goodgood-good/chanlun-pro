@@ -665,15 +665,167 @@ function saveClIndependentDrawings(chartId, val) {
 
 const CHART_CONFIG = {
     COLORS: {
-        DING: "#FA8072", DI: "#1E90FF", BI: "#708090", XD: "#00BFFF",
+        BI: "#C026D3", XD: "#2563EB",
         BI_ZSS: "#708090", XD_ZSS: "#00BFFF",
-        BCS: "#D1D4DC", BC_TEXT: "#fccbcd",
-        MMD_UP: "#E64A19", MMD_DOWN: "#1565C0",
         AREA_POS: "#ef5350", AREA_NEG: "#26a69a",
     },
     LINE_STYLES: { SOLID: 0, DOTTED: 1, DASHED: 2 },
     CHART_TYPES: ["fxs", "bis", "xds"],
 };
+
+// 方向性标记必须同时适配 TradingView 浅色、深色画布。结构级别继续使用下方
+// LEVEL_COLOR_CHAIN；这里的红/蓝只表达“买/卖、顶/底”等方向语义，不能拿来表达级别。
+const SIGNAL_COLOR_THEMES = Object.freeze({
+    light: Object.freeze({
+        fractalTop: "#B91C1C",
+        fractalBottom: "#0369A1",
+        buy: "#C2410C",
+        sell: "#1D4ED8",
+        neutralSurface: "#E2E8F0",
+        neutralText: "#1E293B",
+    }),
+    dark: Object.freeze({
+        fractalTop: "#FB7185",
+        fractalBottom: "#38BDF8",
+        buy: "#FB923C",
+        sell: "#60A5FA",
+        neutralSurface: "#334155",
+        neutralText: "#F8FAFC",
+    }),
+});
+
+// 视觉编码约束：颜色=绝对结构级别/交易方向，线宽=对象权重，线型=完成状态，
+// 透明度=证据确定性。所有数值集中在这里，避免各绘制分支再次产生互相矛盾的魔法数。
+const CHANLUN_VISUAL_STYLE = Object.freeze({
+    fractal: Object.freeze({ linewidth: 2 }),
+    center: Object.freeze({
+        pen: Object.freeze({ linewidth: 1, completedTransparency: 97, ongoingTransparency: 99 }),
+        frequency: Object.freeze({ linewidth: 1, completedTransparency: 94, ongoingTransparency: 97 }),
+        formal: Object.freeze({ linewidth: 1, completedTransparency: 92, ongoingTransparency: 96 }),
+        preview: Object.freeze({ linewidth: 1, completedTransparency: 96, ongoingTransparency: 100 }),
+        observation: Object.freeze({ linewidth: 1, completedTransparency: 100, ongoingTransparency: 100 }),
+        projection: Object.freeze({ linewidth: 1, completedTransparency: 100, ongoingTransparency: 100 }),
+    }),
+    trend: Object.freeze({ linewidth: 1, completedTransparency: 12, formingTransparency: 30 }),
+    point: Object.freeze({ fontsize: 12, higherFontsize: 13, approachingFontsize: 11 }),
+    divergence: Object.freeze({ consolidationFontsize: 12, trendFontsize: 13 }),
+});
+
+function normalizeChartTheme(theme) {
+    return String(theme || "").trim().toLowerCase() === "dark" ? "dark" : "light";
+}
+
+function currentChartTheme() {
+    try {
+        if (typeof Utils !== "undefined" && typeof Utils.get_local_data === "function") {
+            const configured = Utils.get_local_data("theme");
+            if (String(configured || "").trim().toLowerCase() === "dark") return "dark";
+            if (String(configured || "").trim().toLowerCase() === "light") return "light";
+        }
+    } catch (e) { /* 回退到 TradingView 本地状态 */ }
+    try {
+        if (typeof localStorage !== "undefined") {
+            const raw = typeof localStorage.getItem === "function"
+                ? localStorage.getItem("tv_chart")
+                : localStorage.tv_chart;
+            const stored = raw ? JSON.parse(raw) : {};
+            return normalizeChartTheme(stored.theme);
+        }
+    } catch (e) { /* 回退浅色 */ }
+    return "light";
+}
+
+function getSignalColor(role, theme = currentChartTheme()) {
+    const palette = SIGNAL_COLOR_THEMES[normalizeChartTheme(theme)];
+    return palette[role] || palette.neutralText;
+}
+
+function _centerIsOngoing(item) {
+    const state = String(item?.state || "").toLowerCase();
+    const hasLineStyle = item?.linestyle !== undefined && item?.linestyle !== null;
+    return state === "ongoing" || state === "forming"
+        || (hasLineStyle && parseInt(item.linestyle) !== 0);
+}
+
+function getCenterVisualStyle(role, item = {}) {
+    const spec = CHANLUN_VISUAL_STYLE.center[role] || CHANLUN_VISUAL_STYLE.center.frequency;
+    const ongoing = _centerIsOngoing(item);
+    let linestyle = ongoing ? CHART_CONFIG.LINE_STYLES.DASHED : CHART_CONFIG.LINE_STYLES.SOLID;
+    if (role === "projection") linestyle = CHART_CONFIG.LINE_STYLES.DOTTED;
+    return {
+        linewidth: spec.linewidth,
+        transparency: ongoing ? spec.ongoingTransparency : spec.completedTransparency,
+        linestyle,
+    };
+}
+
+function getTrendVisualStyle(item = {}) {
+    const forming = String(item.state || "").toLowerCase() === "forming";
+    return {
+        linewidth: CHANLUN_VISUAL_STYLE.trend.linewidth,
+        transparency: forming
+            ? CHANLUN_VISUAL_STYLE.trend.formingTransparency
+            : CHANLUN_VISUAL_STYLE.trend.completedTransparency,
+        linestyle: forming ? CHART_CONFIG.LINE_STYLES.DASHED : CHART_CONFIG.LINE_STYLES.SOLID,
+    };
+}
+
+const POINT_TYPE_LABELS = Object.freeze({
+    "1buy": "一买", "2buy": "二买", "3buy": "三买",
+    "1sell": "一卖", "2sell": "二卖", "3sell": "三卖",
+});
+
+function pointTypeLabel(pointType) {
+    const value = String(pointType || "");
+    return POINT_TYPE_LABELS[value.toLowerCase()] || value;
+}
+
+function getStrictPointVisual(item = {}) {
+    const pointType = String(item.point_type || "").toLowerCase();
+    const isBuy = String(item.side || "").toLowerCase() === "buy" || pointType.includes("buy");
+    const confirmed = item.render_kind === "point_confirmed";
+    const level = Number.isInteger(item.structural_level) ? item.structural_level : 0;
+    const levelLabel = item.level_label || `L${level}`;
+    const fontsize = confirmed
+        ? (level > 0 ? CHANLUN_VISUAL_STYLE.point.higherFontsize : CHANLUN_VISUAL_STYLE.point.fontsize)
+        : CHANLUN_VISUAL_STYLE.point.approachingFontsize;
+    return {
+        color: getSignalColor(isBuy ? "buy" : "sell"),
+        fontsize,
+        bold: confirmed,
+        transparency: confirmed ? 0 : 45,
+        text: `${isBuy ? "▲" : "▼"}${confirmed ? "" : "接近·"}${levelLabel}·${pointTypeLabel(pointType)}`,
+    };
+}
+
+function getStrictDivergenceVisual(item = {}) {
+    const bullish = item.direction === "down";
+    const trend = item.kind === "trend";
+    const level = Number.isInteger(item.structural_level) ? item.structural_level : 0;
+    const levelLabel = item.level_label || `L${level}`;
+    return {
+        color: getSignalColor(bullish ? "buy" : "sell"),
+        fontsize: trend
+            ? CHANLUN_VISUAL_STYLE.divergence.trendFontsize
+            : CHANLUN_VISUAL_STYLE.divergence.consolidationFontsize,
+        bold: trend,
+        text: `${bullish ? "▲" : "▼"}${levelLabel}·${trend ? "趋势背驰" : "盘整背驰"}`,
+    };
+}
+
+// 基础结构保留“笔细、线段粗”的第二重视觉层级；颜色由下面的绝对递归级别色链决定，
+// 因而 1m 线段与 5m 笔、5m 线段与 30m 笔始终同色。这里只影响显示，不改变结构计算。
+const BASE_STRUCTURE_LINE_WIDTHS = Object.freeze({
+    bis: 1,
+    xds: 2,
+});
+
+function getBaseStructureStyle(interval, elementType) {
+    return {
+        color: getDynamicColor(interval, elementType),
+        linewidth: BASE_STRUCTURE_LINE_WIDTHS[elementType] || 1,
+    };
+}
 
 // 买卖点用「双 shape」:小 icon 箭头(定位准,尺寸可调)+text 类型标签(标明几买几卖)。
 // 单个形状无法三者兼得:arrow_up/down 定位准+带文字但尺寸写死偏大;icon 小+定位准但装不了文字;
@@ -699,22 +851,22 @@ const DEFAULT_COLORS = {
 };
 
 // ─────────────────────────────────────────────────────────────────────────
-// 缠论研习院「学院缠图递归颜色」规范(chanlunschool.com/学院缠图递归颜色)。
-// 绝对递归级别链:每个绝对级别一个固定颜色,**同一绝对级别在任何周期图上恒同色**——
-// 这正是「递归颜色」的本质,便于跨周期一致辨认。颜色像素级提取自官方「画图级别颜色标准」
-// 图(canvas 逐格扫描),详见 audit/recursive_colors_spec.md。
-//   index: 0=15秒(白) 1=1FB橙 2=1FC黄 3=1F青 4=5F红 5=30F绿 6=日蓝 7=周粉 8=月橄榄 9=季棕
+// 绝对递归级别色链：每个绝对级别一个固定颜色，**同一绝对级别在任何周期图上恒同色**。
+// 例如 1m 线段与 5m 笔都落在 index 2；5m 线段与 30m 笔都落在 index 3。
+// 相邻级别采用跨色相、高饱和且兼顾明暗主题的颜色，避免旧橙/黄组合在密集 K 线上混淆。
+//   index: 0=15秒(白) 1=1FB品红 2=1FC蓝 3=1F橙 4=5F青绿 5=30F紫
+//          6=日琥珀 7=周青 8=月玫红 9=季橄榄绿
 const LEVEL_COLOR_CHAIN = [
     "#FFFFFF", // 0  15秒(占位,基本不作基础色)
-    "#FF8C00", // 1  1FB  橙(深橙 darkorange,从网站#FFC000琥珀加深:与线段的黄#FFFF00拉开色相+明度,更易分辨) —— 1分钟笔
-    "#F2C94C", // 2  1FC  黄(柔和黄,从刺眼纯黄#FFFF00改柔,护眼+与笔的橙更分;同步柔化笔中枢/5m笔) —— 1分钟线段
-    "#07C9E9", // 3  1F   青(cyan)
-    "#FF0000", // 4  5F   红(red)
-    "#66FF66", // 5  30F  绿(green)
-    "#5B9BD5", // 6  日线 蓝(blue)
-    "#FF99FF", // 7  周线 粉(pink)
-    "#70AD46", // 8  月线 橄榄绿(olive)
-    "#C35811", // 9  季线 棕(brown)
+    "#C026D3", // 1  1FB  品红 —— 1分钟笔
+    "#2563EB", // 2  1FC  皇家蓝 —— 1分钟线段 / 5分钟笔
+    "#EA580C", // 3  1F   深橙 —— 5分钟线段 / 30分钟笔
+    "#0F766E", // 4  5F   青绿 —— 30分钟线段 / 日线笔
+    "#7C3AED", // 5  30F  紫 —— 日线线段 / 周线笔
+    "#B45309", // 6  日线 琥珀 —— 周线线段 / 月线笔
+    "#0891B2", // 7  周线 青
+    "#BE185D", // 8  月线 玫红
+    "#4D7C0F", // 9  季线 橄榄绿
 ];
 // 按链索引取色:溢出(深递归 > 9)在 [1..9] 区间循环,既不 undefined 又仍可辨。
 function chainColor(idx) {
@@ -724,8 +876,8 @@ function chainColor(idx) {
     return LEVEL_COLOR_CHAIN[1 + ((idx - 1) % span)];
 }
 
-// 图周期 → 该图「笔」在链上的索引 p。由 FREQ_CHAIN 反推得自洽(令日线恒落 index 6=蓝、
-// 周线恒 7=粉…),故 15m/60m 等非标准周期也对齐到与标准周期相同的颜色锚点。
+// 图周期 → 该图「笔」在链上的索引 p：1m=1、5m/15m=2、30m/60m=3、
+// 日线=4、周线=5、月线=6。非标准周期按最接近的操作级别共享颜色锚点。
 const CHART_BI_INDEX = { "1": 1, "5": 2, "15": 2, "30": 3, "60": 3, "1D": 4, "1W": 5, "1M": 6 };
 function chartBiIndex(interval) {
     const p = CHART_BI_INDEX[interval];
@@ -757,7 +909,7 @@ function getDynamicColor(interval, elementType) {
 }
 
 // 递归层级中枢 Lk(L0 = 本周期线段中枢) → 链色 C[p+2+k]。
-// 1m 图: L0=青(1F)/L1=红(5F)/L2=绿(30F)/L3=蓝(日线)…
+// 1m 图：L0=深橙、L1=青绿、L2=紫、L3=琥珀。
 function getRecursiveLevelColor(interval, level) {
     return chainColor(chartBiIndex(interval) + 2 + (level || 0));
 }
@@ -770,8 +922,7 @@ function getPeriodCenterColor(period) {
 
 // 递归层级走势类型「线段」线条与本级中枢同绝对级别 → 同色,直接复用 getRecursiveLevelColor:
 //   recursive_levels[k].zslx_lines = 分支级 k 走势类型 = 构成第 k+1 周期中枢的构件,
-//   按链 = C[p+2+k]。1m 图: L0线条=青(=5分钟线段)/L1线条=红(=30分钟线段)/L2线条=绿(=日线线段),
-//   严格对齐网站「5分钟线段=青、30分钟线段=红…」。形状(线 vs 框)区分走势类型与中枢。
+//   按链 = C[p+2+k]。颜色只表达绝对结构级别；形状（线 vs 框）区分走势类型与中枢。
 
 function debounce(func, wait) {
     let timeout;
@@ -812,18 +963,61 @@ const ChartUtils = {
         }
     },
     createFxShape(chart, fx, options = {}) {
-        const color = fx.text === "ding" ? CHART_CONFIG.COLORS.DING : CHART_CONFIG.COLORS.DI;
-        return this.createShape(chart, fx.points, { shape: "circle", overrides: { backgroundColor: color, color: color, linewidth: 4, ...options.overrides }, ...options });
+        const { overrides = {}, ...shapeOptions } = options;
+        const color = getSignalColor(fx.text === "ding" ? "fractalTop" : "fractalBottom");
+        return this.createShape(chart, fx.points, {
+            shape: "circle",
+            ...shapeOptions,
+            overrides: {
+                backgroundColor: color,
+                color,
+                linecolor: color,
+                linewidth: CHANLUN_VISUAL_STYLE.fractal.linewidth,
+                transparency: 0,
+                ...overrides,
+            },
+        });
     },
     createLineShape(chart, line, options = {}) {
-        return this.createShape(chart, line.points, { shape: "trend_line", overrides: { linestyle: parseInt(line.linestyle) || 0, linewidth: options.linewidth || 1, linecolor: options.color || CHART_CONFIG.COLORS.BI, ...options.overrides }, ...options });
+        const {
+            overrides = {},
+            linewidth = 1,
+            color = CHART_CONFIG.COLORS.BI,
+            ...shapeOptions
+        } = options;
+        return this.createShape(chart, line.points, {
+            shape: "trend_line",
+            ...shapeOptions,
+            overrides: {
+                linestyle: parseInt(line.linestyle) || 0,
+                linewidth,
+                linecolor: color,
+                transparency: 0,
+                ...overrides,
+            },
+        });
     },
     createZhongshuShape(chart, zs, options = {}) {
         const { overrides = {}, ...shapeOptions } = options;
         const color = shapeOptions.color || CHART_CONFIG.COLORS.BI;
-        const linewidth = shapeOptions.linewidth || 1;
-        const transparency = 95;
-        return this.createShape(chart, zs.points, { shape: "rectangle", ...shapeOptions, overrides: { linestyle: parseInt(zs.linestyle) || 0, linewidth, linecolor: color, backgroundColor: color, transparency, color, "trendline.linecolor": color, fillBackground: true, filled: true, ...overrides } });
+        const defaultStyle = getCenterVisualStyle("frequency", zs);
+        const linewidth = shapeOptions.linewidth || defaultStyle.linewidth;
+        return this.createShape(chart, zs.points, {
+            shape: "rectangle",
+            ...shapeOptions,
+            overrides: {
+                linestyle: defaultStyle.linestyle,
+                linewidth,
+                linecolor: color,
+                backgroundColor: color,
+                transparency: defaultStyle.transparency,
+                color,
+                "trendline.linecolor": color,
+                fillBackground: true,
+                filled: true,
+                ...overrides,
+            },
+        });
     },
     // 买卖点偏移基准:近 N 根 K 线平均振幅(high-low)。波动越大基准越大,
     // 跨标的 / 周期 / 缩放自适应。无有效 K 线时返回 0,调用方回退到价格百分比。
@@ -869,9 +1063,9 @@ const ChartUtils = {
     // 买卖点箭头:icon 单字形,尺寸可控、横向居中锚定到 K 线(定位与分型圆点一致,准确);
     // 使用绘制层偏移点,避免箭头贴住或覆盖 K 线;原始 mmd.points 仍保留真实买卖点位置。
     createMmdShape(chart, mmd, options = {}) {
-        const { offsetBase = 0, ...rest } = options;
+        const { offsetBase = 0, overrides = {}, ...shapeOptions } = options;
         const isBuy = this._mmdIsBuy(mmd);   // 统一口径(小写含 b):buy/1B/3buy… 含 b;sell/S 不含
-        const color = isBuy ? CHART_CONFIG.COLORS.MMD_UP : CHART_CONFIG.COLORS.MMD_DOWN;
+        const color = getSignalColor(isBuy ? "buy" : "sell");
         const isSplit = !!mmd.level;
         const isXd = isSplit && mmd.level === "xd";
         const isHi = isSplit && mmd.level !== "xd" && mmd.level !== "bi";  // 5m/30m/… 高级别买卖点
@@ -880,16 +1074,16 @@ const ChartUtils = {
         return this.createShape(chart, this.mmdIconPoint(mmd, offsetBase), {
             shape: "icon",
             icon,
-            overrides: { color, size, "linetoolicon.color": color, "linetoolicon.size": size, ...rest.overrides },
-            ...rest,
+            ...shapeOptions,
+            overrides: { color, size, "linetoolicon.color": color, "linetoolicon.size": size, ...overrides },
         });
     },
     // 买卖点文字标签:第二个 shape,标明级别+类型(段1B / 笔3B / 笔L3B…)以区分一二三类。
     // 标签单独纵向偏移;text 有横向宽度会向右展开,定位以箭头为准,标签仅作说明。
     createMmdLabelShape(chart, mmd, options = {}) {
-        const { offsetBase = 0, ...rest } = options;
+        const { offsetBase = 0, overrides = {}, ...shapeOptions } = options;
         const isBuy = this._mmdIsBuy(mmd);   // 统一口径, 与偏移/箭头一致
-        const color = isBuy ? CHART_CONFIG.COLORS.MMD_UP : CHART_CONFIG.COLORS.MMD_DOWN;
+        const color = getSignalColor(isBuy ? "buy" : "sell");
         const isSplit = !!mmd.level;
         const isXd = isSplit && mmd.level === "xd";
         const isHi = isSplit && mmd.level !== "xd" && mmd.level !== "bi";   // 5m/30m/… 高级别
@@ -900,6 +1094,7 @@ const ChartUtils = {
         return this.createShape(chart, this.mmdLabelPoint(mmd, offsetBase), {
             shape: "text",
             text,
+            ...shapeOptions,
             overrides: {
                 color,
                 fontsize,
@@ -907,15 +1102,30 @@ const ChartUtils = {
                 "linetooltext.color": color,
                 "linetooltext.fontsize": fontsize,
                 "linetooltext.bold": isXd,
-                ...rest.overrides,
+                ...overrides,
             },
-            ...rest,
         });
     },
     createBcShape(chart, bc, options = {}) {
+        const { overrides = {}, ...shapeOptions } = options;
         const lvl = bc.level;   // 5m/30m/… 高级别背驰加 freq 前缀(段/笔不加)
         const prefix = (lvl && lvl !== "xd" && lvl !== "bi") ? (lvl + "·") : "";
-        return this.createShape(chart, bc.points, { shape: "balloon", text: prefix + bc.text, overrides: { markerColor: CHART_CONFIG.COLORS.BCS, backgroundColor: CHART_CONFIG.COLORS.BCS, textColor: CHART_CONFIG.COLORS.BC_TEXT, transparency: 70, backgroundTransparency: 70, fontsize: 12, ...options.overrides }, ...options });
+        const surface = getSignalColor("neutralSurface");
+        const textColor = getSignalColor("neutralText");
+        return this.createShape(chart, bc.points, {
+            shape: "balloon",
+            text: prefix + bc.text,
+            ...shapeOptions,
+            overrides: {
+                markerColor: textColor,
+                backgroundColor: surface,
+                textColor,
+                transparency: 20,
+                backgroundTransparency: 20,
+                fontsize: 12,
+                ...overrides,
+            },
+        });
     },
 };
 
@@ -2057,6 +2267,11 @@ class ChartManager {
                 const _swatch = (color) => `
                     <span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:${color};
                         margin-right:4px;vertical-align:middle;border:1px solid rgba(0,0,0,0.25);"></span>`;
+                const _dualSwatch = (first, second, title) => `
+                    <span title="${title}" style="display:inline-flex;width:12px;height:10px;border-radius:2px;
+                        margin-right:4px;vertical-align:middle;overflow:hidden;border:1px solid rgba(0,0,0,0.25);">
+                        <span style="width:6px;background:${first};"></span><span style="width:6px;background:${second};"></span>
+                    </span>`;
 
                 let html = `
                     <div id="${menuId}" role="dialog" aria-modal="false" aria-labelledby="${menuId}_title" tabindex="-1"
@@ -2084,7 +2299,8 @@ class ChartManager {
 
                         ${_grpTitle('基础结构')}
                         <div style="display:flex;gap:16px;flex-wrap:wrap;font-size:14px;">
-                            <label style="cursor:pointer;"><input type="checkbox" id="${cbId('fx')}" ${_checked('fx') ? 'checked' : ''}> 分型</label>
+                            <label style="cursor:pointer;"><input type="checkbox" id="${cbId('fx')}" ${_checked('fx') ? 'checked' : ''}>
+                                ${_dualSwatch(getSignalColor('fractalTop'), getSignalColor('fractalBottom'), '顶分型 / 底分型')}分型</label>
                             <label style="cursor:pointer;"><input type="checkbox" id="${cbId('bi')}" ${_checked('bi') ? 'checked' : ''}> ${_swatch(getDynamicColor(_curInterval, 'bis'))}笔</label>
                             <label style="cursor:pointer;"><input type="checkbox" id="${cbId('xd')}" ${_checked('xd') ? 'checked' : ''}> ${_swatch(getDynamicColor(_curInterval, 'xds'))}线段</label>
                             <label style="cursor:pointer;"><input type="checkbox" id="${cbId('pen_center')}" ${_checked('pen_center') ? 'checked' : ''}> ${_swatch(getDynamicColor(_curInterval, 'bi_zss'))}笔中枢</label>
@@ -2113,7 +2329,8 @@ class ChartManager {
                         <div style="padding-left:14px;display:grid;grid-template-columns:repeat(3,1fr);gap:4px 10px;font-size:14px;">
                             ${_pointTypes.map((item) => `
                                 <label style="cursor:pointer;"><input type="checkbox" id="${cbId(item.key)}"
-                                    ${_checked(item.key) ? 'checked' : ''}> ${item.label}</label>`).join('')}
+                                    ${_checked(item.key) ? 'checked' : ''}>
+                                    ${_swatch(getSignalColor(item.key.endsWith('buy') ? 'buy' : 'sell'))}${item.label}</label>`).join('')}
                         </div>
 
                         ${_grpTitle('背驰', '由当前 K 线递归产生')}
@@ -2122,7 +2339,7 @@ class ChartManager {
                             ${_divergenceLevels.map((item) => `
                                 <label style="cursor:pointer;"><input type="checkbox" id="${cbId(item.key)}"
                                     ${_checked(item.key) ? 'checked' : ''}>
-                                    ${_swatch(getRecursiveLevelColor(_curInterval, item.level))}${item.label}</label>`).join('')}
+                                    ${_dualSwatch(getSignalColor('buy'), getSignalColor('sell'), '向上背驰 / 向下背驰')}${item.label}</label>`).join('')}
                         </div>
 
                         ${_grpTitle('画线设置')}
@@ -3078,7 +3295,7 @@ class ChartManager {
     }
 
     _validateStrictStructureSnapshot(snapshot, chartData, currentInterval) {
-        if (!snapshot || snapshot.schema !== 'chanlun-chart-structure/v5') {
+        if (!snapshot || snapshot.schema !== 'chanlun-chart-structure/v12') {
             throw new Error('strict structure schema mismatch');
         }
         const requiredStrings = [
@@ -3187,7 +3404,11 @@ class ChartManager {
         const add = (values, levelLabel = null) => {
             for (const rawItem of values || []) {
                 const labeledItem = (
-                    levelLabel && rawItem?.render_kind === 'strict_divergence'
+                    levelLabel && (
+                        rawItem?.render_kind === 'strict_divergence'
+                        || rawItem?.render_kind === 'point_confirmed'
+                        || rawItem?.render_kind === 'point_approaching'
+                    )
                         ? { ...rawItem, level_label: levelLabel }
                         : rawItem
                 );
@@ -3284,7 +3505,7 @@ class ChartManager {
             if (!hasPreview) add(level.center_projections);
             add(level.current_trends);
             // completed_trend_snapshots 是只读审计证据，不创建默认图形。
-            add(level.confirmed_points);
+            add(level.confirmed_points, level.label);
             add(level.divergences, level.label);
         }
         return groups;
@@ -3294,87 +3515,86 @@ class ChartManager {
         const level = item.structural_level || 0;
         const levelColor = getRecursiveLevelColor(currentInterval, level);
         if (item.render_kind === 'formal_center') {
+            const style = getCenterVisualStyle('formal', item);
             return ChartUtils.createZhongshuShape(this.chart, item, {
                 color: levelColor,
-                linewidth: level === 0 ? 2 : 3,
+                linewidth: style.linewidth,
                 overrides: {
-                    linestyle: item.state === 'ongoing'
-                        ? CHART_CONFIG.LINE_STYLES.DASHED
-                        : CHART_CONFIG.LINE_STYLES.SOLID,
+                    linestyle: style.linestyle,
+                    transparency: style.transparency,
                 },
             });
         }
         if (item.render_kind === 'center_preview') {
-            const completed = item.state === 'completed';
-            const linestyle = completed
-                ? CHART_CONFIG.LINE_STYLES.SOLID
-                : CHART_CONFIG.LINE_STYLES.DASHED;
+            const style = getCenterVisualStyle('preview', item);
             return ChartUtils.createZhongshuShape(this.chart, {
                 ...item,
-                linestyle,
+                linestyle: style.linestyle,
             }, {
                 color: levelColor,
-                linewidth: completed ? 2 : 1,
+                linewidth: style.linewidth,
                 overrides: {
-                    transparency: completed ? 82 : 90,
-                    linestyle,
+                    transparency: style.transparency,
+                    linestyle: style.linestyle,
                 },
             });
         }
         if (item.render_kind === 'center_observation') {
-            const linestyle = item.state === 'ongoing'
-                ? CHART_CONFIG.LINE_STYLES.DASHED
-                : CHART_CONFIG.LINE_STYLES.SOLID;
-            return ChartUtils.createZhongshuShape(this.chart, { ...item, linestyle }, {
+            const style = getCenterVisualStyle('observation', item);
+            return ChartUtils.createZhongshuShape(this.chart, { ...item, linestyle: style.linestyle }, {
                 color: getDynamicColor(currentInterval, 'xd_zss'),
-                linewidth: 1,
-                overrides: { transparency: 98, linestyle },
+                linewidth: style.linewidth,
+                overrides: { transparency: style.transparency, linestyle: style.linestyle },
             });
         }
         if (item.render_kind === 'center_projection') {
-            return ChartUtils.createZhongshuShape(this.chart, { ...item, linestyle: CHART_CONFIG.LINE_STYLES.DASHED }, {
+            const style = getCenterVisualStyle('projection', item);
+            return ChartUtils.createZhongshuShape(this.chart, { ...item, linestyle: style.linestyle }, {
                 color: levelColor,
-                linewidth: 1,
-                overrides: { transparency: 100, linestyle: CHART_CONFIG.LINE_STYLES.DASHED },
+                linewidth: style.linewidth,
+                overrides: { transparency: style.transparency, linestyle: style.linestyle },
             });
         }
         if (item.render_kind === 'strict_trend') {
+            const style = getTrendVisualStyle(item);
             return ChartUtils.createLineShape(this.chart, {
                 ...item,
-                linestyle: item.state === 'forming' ? CHART_CONFIG.LINE_STYLES.DASHED : CHART_CONFIG.LINE_STYLES.SOLID,
-            }, { color: levelColor, linewidth: 2 });
+                linestyle: style.linestyle,
+            }, {
+                color: levelColor,
+                linewidth: style.linewidth,
+                overrides: { transparency: style.transparency },
+            });
         }
         if (item.render_kind === 'point_confirmed' || item.render_kind === 'point_approaching') {
-            const isBuy = String(item.side || item.point_type || '').toLowerCase().includes('buy');
-            const color = isBuy ? CHART_CONFIG.COLORS.MMD_UP : CHART_CONFIG.COLORS.MMD_DOWN;
-            const prefix = item.render_kind === 'point_approaching' ? '接近·' : '';
+            const style = getStrictPointVisual(item);
             return ChartUtils.createShape(this.chart, item.points[0], {
                 shape: 'text',
-                text: `${prefix}L${level}·${item.point_type}`,
+                text: style.text,
                 overrides: {
-                    color,
-                    fontsize: 13,
-                    bold: item.render_kind === 'point_confirmed',
-                    transparency: item.render_kind === 'point_confirmed' ? 0 : 35,
-                    'linetooltext.color': color,
-                    'linetooltext.fontsize': 13,
+                    color: style.color,
+                    fontsize: style.fontsize,
+                    bold: style.bold,
+                    transparency: style.transparency,
+                    'linetooltext.color': style.color,
+                    'linetooltext.fontsize': style.fontsize,
+                    'linetooltext.bold': style.bold,
                 },
             });
         }
         if (item.render_kind === 'strict_divergence') {
-            const isBullish = item.direction === 'down';
-            const color = isBullish ? CHART_CONFIG.COLORS.MMD_UP : CHART_CONFIG.COLORS.MMD_DOWN;
-            const kindLabel = item.kind === 'consolidation' ? '盘整背驰' : '趋势背驰';
+            const style = getStrictDivergenceVisual(item);
             return ChartUtils.createShape(this.chart, item.points[0], {
                 shape: 'text',
-                text: `${item.level_label || `L${level}`}·${kindLabel}`,
+                text: style.text,
                 overrides: {
-                    color,
-                    fontsize: 13,
-                    bold: true,
+                    color: style.color,
+                    fontsize: style.fontsize,
+                    bold: style.bold,
                     transparency: 0,
-                    'linetooltext.color': color,
-                    'linetooltext.fontsize': 13,
+                    'linetooltext.color': style.color,
+                    'linetooltext.fontsize': style.fontsize,
+                    'linetooltext.bold': style.bold,
                 },
             });
         }
@@ -4258,18 +4478,27 @@ class ChartManager {
             currentInterval,
         );
         this.reconcile('fxs', cfg.fx ? barsResult.fxs : [], from, symbolKey, (item) => safeCreate(ChartUtils.createFxShape(this.chart, item), 'fx'), false);
-        // 笔细(1)、线段粗(2):缠论惯例,笔数量多取细线、线段更高级取粗线;粗细差再叠加颜色差,提升可辨识。
-        this.reconcile('bis', cfg.bi ? barsResult.bis : [], from, symbolKey, (item) => safeCreate(ChartUtils.createLineShape(this.chart, item, { color: getDynamicColor(currentInterval, "bis"), linewidth: 1 }), 'bi'));
-        this.reconcile('xds', cfg.xd ? barsResult.xds : [], from, symbolKey, (item) => safeCreate(ChartUtils.createLineShape(this.chart, item, { color: getDynamicColor(currentInterval, "xds"), linewidth: 2 }), 'xd'));
+        // 基础结构按绝对递归级别取色，同时让线段比笔再粗一级；菜单色块走同一颜色函数。
+        const biLineStyle = getBaseStructureStyle(currentInterval, 'bis');
+        const xdLineStyle = getBaseStructureStyle(currentInterval, 'xds');
+        this.reconcile('bis', cfg.bi ? barsResult.bis : [], from, symbolKey, (item) => safeCreate(ChartUtils.createLineShape(this.chart, item, biLineStyle), 'bi'));
+        this.reconcile('xds', cfg.xd ? barsResult.xds : [], from, symbolKey, (item) => safeCreate(ChartUtils.createLineShape(this.chart, item, xdLineStyle), 'xd'));
         this.reconcile(
             'bi_zss',
             cfg.pen_center ? centerRenderItems(barsResult.bi_zss) : [],
             from,
             symbolKey,
-            (item) => safeCreate(ChartUtils.createZhongshuShape(this.chart, item, {
-                color: getDynamicColor(currentInterval, 'bi_zss'),
-                linewidth: 1,
-            }), 'bi_zs'),
+            (item) => {
+                const style = getCenterVisualStyle('pen', item);
+                return safeCreate(ChartUtils.createZhongshuShape(this.chart, item, {
+                    color: getDynamicColor(currentInterval, 'bi_zss'),
+                    linewidth: style.linewidth,
+                    overrides: {
+                        transparency: style.transparency,
+                        linestyle: style.linestyle,
+                    },
+                }), 'bi_zs');
+            },
             false,
             true,
             true,
@@ -4295,10 +4524,17 @@ class ChartManager {
                 cfg.center_control_all !== false && cfg[key] !== false ? centerItems : [],
                 from,
                 symbolKey,
-                (item) => safeCreate(ChartUtils.createZhongshuShape(this.chart, item, {
-                    color: getPeriodCenterColor(period),
-                    linewidth: 1,
-                }), `frequency_center_${period}`),
+                (item) => {
+                    const style = getCenterVisualStyle('frequency', item);
+                    return safeCreate(ChartUtils.createZhongshuShape(this.chart, item, {
+                        color: getPeriodCenterColor(period),
+                        linewidth: style.linewidth,
+                        overrides: {
+                            transparency: style.transparency,
+                            linestyle: style.linestyle,
+                        },
+                    }), `frequency_center_${period}`);
+                },
                 false,
                 true,
                 true,

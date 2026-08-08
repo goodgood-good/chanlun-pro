@@ -36,6 +36,7 @@ SCHEMA = "chanlun-holding-group-monitor/v1"
 JOB_ID = "holding_group_realtime_monitor"
 DEDUPE_SCHEMA = "chanlun-holding-group-event-deduper/v1"
 RUNTIME_SCHEMA = "chanlun-holding-group-runtime-ledger/v1"
+_PENDING_NOTIFICATION_MAX_AGE = timedelta(minutes=2)
 _MARKET_LABELS = {
     "a": "A股",
     "hk": "港股",
@@ -228,11 +229,13 @@ class HoldingMonitorRuntimeLedger:
             "success_count": 0,
             "simulated_success_count": 0,
             "failure_count": 0,
+            "expired_event_count": 0,
             "consecutive_failure_count": 0,
             "last_success_at": None,
             "last_simulated_at": None,
             "last_failure_at": None,
             "last_failure_reason": None,
+            "last_expired_at": None,
         }
 
     def _load(self) -> dict[str, object]:
@@ -252,11 +255,13 @@ class HoldingMonitorRuntimeLedger:
             "success_count",
             "simulated_success_count",
             "failure_count",
+            "expired_event_count",
             "consecutive_failure_count",
             "last_success_at",
             "last_simulated_at",
             "last_failure_at",
             "last_failure_reason",
+            "last_expired_at",
         ):
             if key in payload:
                 state[key] = payload[key]
@@ -266,11 +271,24 @@ class HoldingMonitorRuntimeLedger:
             state["active_outages"] = {}
         if not isinstance(state["pending_notifications"], dict):
             state["pending_notifications"] = {}
+        else:
+            valid_pending = {}
+            for market, raw in state["pending_notifications"].items():
+                if not isinstance(raw, Mapping):
+                    continue
+                try:
+                    queued_at = datetime.fromisoformat(str(raw["queued_at"]))
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if queued_at.tzinfo is not None and queued_at.utcoffset() is not None:
+                    valid_pending[str(market)] = dict(raw)
+            state["pending_notifications"] = valid_pending
         for key in (
             "delivered_event_count",
             "success_count",
             "simulated_success_count",
             "failure_count",
+            "expired_event_count",
             "consecutive_failure_count",
         ):
             value = state[key]
@@ -350,6 +368,12 @@ class HoldingMonitorRuntimeLedger:
             self._state["last_simulated_at"] = self._now().isoformat()
             self._persist()
 
+    def record_expired(self, event_count: int) -> None:
+        with self._lock:
+            self._state["expired_event_count"] += max(0, int(event_count))
+            self._state["last_expired_at"] = self._now().isoformat()
+            self._persist()
+
     def snapshot(self) -> dict[str, object]:
         with self._lock:
             success_count = int(self._state["success_count"])
@@ -357,6 +381,7 @@ class HoldingMonitorRuntimeLedger:
                 self._state["simulated_success_count"]
             )
             failure_count = int(self._state["failure_count"])
+            expired_event_count = int(self._state["expired_event_count"])
             consecutive_failures = int(
                 self._state["consecutive_failure_count"]
             )
@@ -391,12 +416,14 @@ class HoldingMonitorRuntimeLedger:
                 "success_count": success_count,
                 "simulated_success_count": simulated_success_count,
                 "failure_count": failure_count,
+                "expired_event_count": expired_event_count,
                 "consecutive_failure_count": consecutive_failures,
                 "pending_event_count": pending_count,
                 "last_success_at": self._state["last_success_at"],
                 "last_simulated_at": self._state["last_simulated_at"],
                 "last_failure_at": self._state["last_failure_at"],
                 "last_failure_reason": self._state["last_failure_reason"],
+                "last_expired_at": self._state["last_expired_at"],
             }
 
     def pending_notification(self, market: str) -> dict[str, object] | None:
@@ -409,6 +436,7 @@ class HoldingMonitorRuntimeLedger:
             identities = raw.get("identities")
             codes = raw.get("codes")
             charts = raw.get("charts", [])
+            queued_at = raw.get("queued_at")
             transition_codes = raw.get("transition_codes", [])
             if not (
                 isinstance(title, str)
@@ -423,6 +451,8 @@ class HoldingMonitorRuntimeLedger:
                 and all(isinstance(value, Mapping) for value in charts)
                 and isinstance(transition_codes, list)
                 and all(isinstance(value, str) for value in transition_codes)
+                and isinstance(queued_at, str)
+                and queued_at
             ):
                 return None
             return {
@@ -432,6 +462,7 @@ class HoldingMonitorRuntimeLedger:
                 "codes": list(codes),
                 "charts": [dict(value) for value in charts],
                 "transition_codes": list(transition_codes),
+                "queued_at": queued_at,
                 "event_count": len(identities),
             }
 
@@ -456,6 +487,7 @@ class HoldingMonitorRuntimeLedger:
                 "transition_codes": [
                     str(value) for value in payload.get("transition_codes", [])
                 ],
+                "queued_at": str(payload["queued_at"]),
             }
             self._persist()
 
@@ -527,6 +559,7 @@ class HoldingMonitorRuntimeLedger:
                             for code in retained_codes
                             if code in transition_codes
                         ],
+                        "queued_at": str(raw.get("queued_at") or ""),
                     }
                 changed = True
             if changed:
@@ -836,7 +869,17 @@ class HoldingGroupMonitorService:
         try:
             send_rich = getattr(self._notifier, "send_rich", None)
             delivered = bool(
-                send_rich(title, lines, {"charts": list(charts)})
+                send_rich(
+                    title,
+                    lines,
+                    {
+                        "charts": list(charts),
+                        "require_evidence_match": any(
+                            value.get("evidence_required") is True
+                            for value in charts
+                        ),
+                    },
+                )
                 if callable(send_rich) and charts
                 else self._notifier.send(title, lines)
             )
@@ -854,8 +897,8 @@ class HoldingGroupMonitorService:
         self._runtime_ledger.record_failure("NOTIFIER_RETURNED_FALSE")
         return False
 
-    @staticmethod
     def _event_notification_payload(
+        self,
         market: str,
         events: Sequence[object],
     ) -> dict[str, object]:
@@ -874,6 +917,13 @@ class HoldingGroupMonitorService:
                     ),
                     "artifact_key": str(getattr(event, "identity")),
                     "observed_at": str(getattr(event, "signal_time", "")),
+                    "point_type": str(getattr(event, "bs_type", "")),
+                    "signal_time": str(getattr(event, "signal_time", "")),
+                    "evidence_id": str(getattr(event, "evidence_id", "")),
+                    "evidence_required": bool(
+                        str(getattr(event, "bs_type", ""))
+                        and str(getattr(event, "signal_time", ""))
+                    ),
                 }
                 for event in events
             ],
@@ -882,6 +932,7 @@ class HoldingGroupMonitorService:
                 for event in events
                 if str(getattr(event, "kind", "")) == "big_down_exit"
             ],
+            "queued_at": self._now().isoformat(),
             "event_count": len(events),
         }
 
@@ -928,8 +979,24 @@ class HoldingGroupMonitorService:
             "codes": codes,
             "charts": charts,
             "transition_codes": list(dict.fromkeys(transitions)),
+            "queued_at": str(
+                pending.get("queued_at") or additional["queued_at"]
+            ),
             "event_count": len(identities),
         }
+
+    def _pending_notification_expired(
+        self,
+        pending: Mapping[str, object],
+    ) -> bool:
+        try:
+            queued_at = datetime.fromisoformat(str(pending["queued_at"]))
+        except (KeyError, TypeError, ValueError):
+            return True
+        if queued_at.tzinfo is None or queued_at.utcoffset() is None:
+            return True
+        age = self._now() - queued_at.astimezone(CN)
+        return age < timedelta(0) or age > _PENDING_NOTIFICATION_MAX_AGE
 
     def _publish_result(self, result: Mapping[str, object]) -> dict[str, object]:
         published = dict(result)
@@ -1264,6 +1331,15 @@ class HoldingGroupMonitorService:
         # ``StrictPhysicalMonitorState`` emits a structure point only once, so an
         # HTTP failure cannot be recovered by hoping the collector repeats it.
         pending = self._runtime_ledger.pending_notification(market)
+        if pending is not None and self._pending_notification_expired(pending):
+            # A trading clue that could not be delivered promptly is no longer
+            # actionable.  Mark its occurrence consumed so a repeating state
+            # event (for example a still-down 30m direction) cannot resurrect
+            # the same stale alert later in this cycle.
+            deduper.mark_identities(pending["identities"])
+            self._runtime_ledger.record_expired(int(pending["event_count"]))
+            self._runtime_ledger.clear_pending_notification(market)
+            pending = None
         if pending is not None:
             delivered = self._deliver(
                 str(pending["title"]),

@@ -176,7 +176,8 @@ def unfinished_segment_candidates(
 ) -> tuple[ProvisionalCandidate, ...]:
     """Expose completed live center previews as non-actionable candidates.
 
-    A preview can geometrically contain entry, core, leave and first return,
+    A preview can geometrically identify an external entry, a three-unit core,
+    an external leave and its first return,
     yet remain non-formal because at least one segment is unfinished.  This is
     useful early-screening evidence, but it must never masquerade as a locked
     third-class point.
@@ -196,18 +197,21 @@ def unfinished_segment_candidates(
             or preview.structural_level != 0
             or preview.zd_tick is None
             or preview.zg_tick is None
+            or preview.completion_leave_unit_id is None
             or preview.completion_return_unit_id is None
         ):
             continue
         try:
+            entry = units[preview.entry_unit_id]
             body = tuple(units[unit_id] for unit_id in preview.unit_ids)
+            leave = units[preview.completion_leave_unit_id]
             return_unit = units[preview.completion_return_unit_id]
         except KeyError as exc:
             raise ValueError("center preview references an unavailable segment") from exc
-        if not body or all(unit.locked for unit in (*body, return_unit)):
+        if not body or all(
+            unit.locked for unit in (entry, *body, leave, return_unit)
+        ):
             raise ValueError("unfinished center preview must contain a live segment")
-        entry = body[0]
-        leave = body[-1]
         if (
             entry.direction == "up"
             and leave.direction == "up"
@@ -233,7 +237,9 @@ def unfinished_segment_candidates(
             evidence.price_basis_revision,
             source_frequency,
             point_type,
+            preview.entry_unit_id,
             preview.unit_ids,
+            preview.completion_leave_unit_id,
             preview.completion_return_unit_id,
             preview.zd_tick,
             preview.zg_tick,

@@ -74,7 +74,7 @@ const KEY = 'a:sh.6005195';
 test('history unchanged preserves the snapshot without replaying replace mode', () => {
   const hp = makeHistoryProvider();
   const first = {
-    schema: 'chanlun-chart-structure/v5',
+    schema: 'chanlun-chart-structure/v12',
     render_revision: 'sha256:render-1',
   };
   hp.applyChanlunUpdate(response('replace', first), PARAMS);
@@ -92,14 +92,14 @@ test('replace swaps the whole strict object and unavailable clears it', () => {
   const hp = makeHistoryProvider();
   hp.applyChanlunUpdate(
     response('replace', {
-      schema: 'chanlun-chart-structure/v5',
+      schema: 'chanlun-chart-structure/v12',
       render_revision: 'sha256:render-1',
     }),
     PARAMS,
   );
   hp.applyChanlunUpdate(
     response('replace', {
-      schema: 'chanlun-chart-structure/v5',
+      schema: 'chanlun-chart-structure/v12',
       render_revision: 'sha256:render-2',
     }, true),
     { ...PARAMS, firstDataRequest: 'false' },

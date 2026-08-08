@@ -63,11 +63,21 @@ def test_stroke_observation_center_is_never_formal_third_class_point():
     formal = completed_up_center()
     converted = {
         item.unit_id: replace(item, source_kind=SourceKind.STROKE_OBSERVATION)
-        for item in (*formal.body_units, formal.completion_return_unit)
+        for item in (
+            formal.entry_unit,
+            *formal.body_units,
+            formal.completion_leave_unit,
+            formal.completion_return_unit,
+        )
     }
     observation = replace(
         formal,
-        source_kind=SourceKind.STROKE_OBSERVATION,
+            source_kind=SourceKind.STROKE_OBSERVATION,
+            entry_unit=converted[formal.entry_unit.unit_id],
+            establishment_unit=converted[formal.establishment_unit.unit_id],
+            establishment_leave_unit=converted[
+                formal.establishment_leave_unit.unit_id
+            ],
         initial_units=tuple(
             converted[item.unit_id] for item in formal.initial_units
         ),

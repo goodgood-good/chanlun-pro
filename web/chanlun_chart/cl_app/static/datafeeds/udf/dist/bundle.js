@@ -819,7 +819,7 @@
                     if (strictMode === "replace") {
                         const strictStructure = response.strict_structure;
                         if (strictStructure &&
-                            strictStructure.schema === "chanlun-chart-structure/v5") {
+                            strictStructure.schema === "chanlun-chart-structure/v12") {
                             obj_res.strict_structure_mode = "replace";
                             obj_res.strict_structure = strictStructure;
                             delete obj_res.strict_structure_error;

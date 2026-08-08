@@ -19,6 +19,19 @@ class SourceKind(str, Enum):
     STROKE_OBSERVATION = "stroke_observation"
 
 
+def center_seed_size(source_kind: SourceKind) -> int:
+    """Return the three-unit price-core width.
+
+    ``initial_units`` always stores the three units whose intersection freezes
+    ``ZD/ZG``.  Physical line/stroke centers have a separate five-segment
+    establishment gate (entry + these three units + maturity); recursive
+    trend-type centers keep the original three completed lower-level trends.
+    """
+
+    SourceKind(source_kind)
+    return 3
+
+
 class CenterState(str, Enum):
     ONGOING = "ongoing"
     COMPLETED = "completed"
@@ -137,6 +150,9 @@ class TrendCenter:
     source_kind: SourceKind
     price_basis_revision: str
     state: CenterState
+    entry_unit: ConstituentUnit
+    establishment_unit: ConstituentUnit | None
+    establishment_leave_unit: ConstituentUnit | None
     initial_units: tuple[ConstituentUnit, ...]
     body_units: tuple[ConstituentUnit, ...]
     extension_units: tuple[ConstituentUnit, ...]
@@ -168,14 +184,15 @@ class TrendCenter:
             raise ValueError("structural_level must be >= 0")
         if not self.price_basis_revision or not self.price_basis_revision.strip():
             raise ValueError("price_basis_revision is required")
-        # Every formal center is established by the overlap of its first three
-        # completed lower-level components.  A segment center has no extra
-        # pre-core entry or in-seed exit role.
-        expected_seed_size = 3
-        if len(self.initial_units) != expected_seed_size:
-            raise ValueError("initial_units must contain exactly three units")
+        expected_initial_count = center_seed_size(self.source_kind)
+        if len(self.initial_units) != expected_initial_count:
+            raise ValueError(
+                "initial_units must contain the source-specific center body"
+            )
         if self.body_units != self.initial_units + self.extension_units:
             raise ValueError("body units must equal initial plus extension units")
+        if not isinstance(self.entry_unit, ConstituentUnit):
+            raise ValueError("center requires an external entry unit")
         if any(
             item.structural_level != self.structural_level
             or item.source_kind is not self.source_kind
@@ -189,21 +206,90 @@ class TrendCenter:
             raise ValueError("center body price basis mismatch")
         if any(not item.locked for item in self.body_units):
             raise ValueError("formal center body units must be locked")
+        if (
+            self.entry_unit.structural_level != self.structural_level
+            or self.entry_unit.source_kind is not self.source_kind
+        ):
+            raise ValueError("center entry level/source mismatch")
+        if self.entry_unit.price_basis_revision != self.price_basis_revision:
+            raise ValueError("center entry price basis mismatch")
+        if not self.entry_unit.locked:
+            raise ValueError("formal center entry unit must be locked")
+        if self.entry_unit in self.body_units:
+            raise ValueError("external entry must not enter center body")
+
+        establishment_unit = self.establishment_unit
+        initial_leave = self.establishment_leave_unit
+        if self.source_kind is SourceKind.TREND_TYPE:
+            if establishment_unit is not None or initial_leave is not None:
+                raise ValueError(
+                    "recursive trend-type center has no physical fifth segment"
+                )
+        else:
+            if establishment_unit is None:
+                raise ValueError(
+                    "physical center requires a fifth establishment segment"
+                )
+            if (
+                establishment_unit.structural_level != self.structural_level
+                or establishment_unit.source_kind is not self.source_kind
+            ):
+                raise ValueError("establishment unit level/source mismatch")
+            if establishment_unit.price_basis_revision != self.price_basis_revision:
+                raise ValueError("establishment unit price basis mismatch")
+            if not establishment_unit.locked:
+                raise ValueError("establishment unit must be locked")
+            if establishment_unit in self.initial_units:
+                raise ValueError(
+                    "fifth establishment unit must follow the middle-three core"
+                )
+            if initial_leave is not None and initial_leave != establishment_unit:
+                raise ValueError(
+                    "initial leave must be the fifth establishment unit"
+                )
 
         expected_zd = max(item.low_tick for item in self.core_units)
         expected_zg = min(item.high_tick for item in self.core_units)
         if (self.zd_tick, self.zg_tick) != (expected_zd, expected_zg):
-            raise ValueError("center core must equal first-three intersection")
+            raise ValueError("center core must equal its three core-unit intersection")
         expected_dd = min(item.low_tick for item in self.body_units)
         expected_gg = max(item.high_tick for item in self.body_units)
         if (self.dd_tick, self.gg_tick) != (expected_dd, expected_gg):
             raise ValueError("center envelope must equal body envelope")
-        if self.zd_tick > self.zg_tick:
-            raise ValueError("zd_tick must be <= zg_tick")
+        if self.source_kind is SourceKind.TREND_TYPE:
+            if self.zd_tick > self.zg_tick:
+                raise ValueError("trend-type center requires zd_tick <= zg_tick")
+        elif self.zd_tick >= self.zg_tick:
+            raise ValueError("line center requires zd_tick < zg_tick")
         if self.dd_tick > self.zd_tick or self.gg_tick < self.zg_tick:
             raise ValueError("envelope must contain the core")
-        if any(not self._touches_core(item) for item in self.initial_units):
-            raise ValueError("each initial component must touch the center core")
+        if any(not self._overlaps_core(item) for item in self.body_units):
+            raise ValueError(
+                "each center body unit must overlap the frozen center core"
+            )
+        if self.source_kind is not SourceKind.TREND_TYPE:
+            if not self._overlaps_core(self.entry_unit):
+                raise ValueError("entry unit must positively overlap center core")
+            if establishment_unit is None or not self._overlaps_core(
+                establishment_unit
+            ):
+                raise ValueError(
+                    "fifth establishment unit must positively overlap center core"
+                )
+            if initial_leave is not None:
+                if not self._outside_in_direction(initial_leave):
+                    raise ValueError(
+                        "initial leave endpoint must be outside center core"
+                    )
+            else:
+                if not self.extension_units or self.extension_units[0] != establishment_unit:
+                    raise ValueError(
+                        "non-leaving fifth unit must be the first center extension"
+                    )
+                if self._outside_in_direction(establishment_unit):
+                    raise ValueError(
+                        "outside fifth unit must be represented as initial leave"
+                    )
 
         if len({item.unit_id for item in self.body_units}) != len(self.body_units):
             raise ValueError("center body unit ids must be unique")
@@ -221,24 +307,46 @@ class TrendCenter:
             if current.market_start < previous.market_end:
                 raise ValueError("center body intervals must not overlap")
 
+        first = self.body_units[0]
+        if self.entry_unit.end_tick != first.start_tick:
+            raise ValueError("center entry must connect to first core unit")
+        if first.market_start < self.entry_unit.market_end:
+            raise ValueError("center body cannot overlap external entry")
+
         if self.body_start_market_time != self.body_units[0].market_start:
             raise ValueError("body start time must equal first body unit")
-        if self.established_market_time != self.initial_exit_unit.market_end:
-            raise ValueError("established market time must equal initial exit end")
-        if self.established_at != self.initial_exit_unit.confirmed_at:
-            raise ValueError("established_at must equal initial exit confirmation")
+        maturity_unit = (
+            self.initial_units[-1]
+            if self.source_kind is SourceKind.TREND_TYPE
+            else self.establishment_unit
+        )
+        if maturity_unit is None:
+            raise ValueError("physical center maturity evidence is missing")
+        if self.established_market_time != maturity_unit.market_end:
+            raise ValueError(
+                "established market time must equal final initial body unit end"
+            )
+        if self.established_at != maturity_unit.confirmed_at:
+            raise ValueError(
+                "established_at must equal final initial body unit confirmation"
+            )
         if self.established_at is None:
-            raise ValueError("established center requires confirmed initial exit")
+            raise ValueError("established center requires a confirmed maturity unit")
         if self.last_touch_market_time != self.body_units[-1].market_end:
             raise ValueError("last touch time must equal final body unit end")
         if self.available_at < self.established_at:
             raise ValueError("available_at must not precede established_at")
-        if self.available_at < max(item.available_at for item in self.body_units):
+        center_evidence = (self.entry_unit,) + self.body_units + (
+            () if self.establishment_unit is None else (self.establishment_unit,)
+        )
+        if self.available_at < max(item.available_at for item in center_evidence):
             raise ValueError("center availability must cover body evidence")
         if self.body_revision != len(self.extension_units):
             raise ValueError("body_revision must equal extension unit count")
 
         for terminal in (
+            self.establishment_unit,
+            self.establishment_leave_unit,
             self.pending_leave_unit,
             self.completion_leave_unit,
             self.completion_return_unit,
@@ -261,14 +369,15 @@ class TrendCenter:
             ):
                 raise ValueError("ongoing center cannot retain completion evidence")
             if self.pending_leave_unit is not None:
-                if self.pending_leave_unit is not self.body_units[-1]:
-                    raise ValueError("pending leave must be the final body unit")
+                if self.pending_leave_unit in self.body_units:
+                    raise ValueError("pending leave must stay outside center body")
                 if not self.pending_leave_unit.locked:
                     raise ValueError("pending leave must be locked")
-                if not self._touches_core(self.pending_leave_unit):
-                    raise ValueError("pending leave must touch center core")
+                if not self._overlaps_core(self.pending_leave_unit):
+                    raise ValueError("pending leave must overlap center core")
                 if not self._outside_in_direction(self.pending_leave_unit):
                     raise ValueError("pending leave endpoint must be outside center core")
+                self._validate_external_leave(self.pending_leave_unit)
         else:
             if self.pending_leave_unit is not None:
                 raise ValueError("completed center cannot retain pending leave")
@@ -276,18 +385,19 @@ class TrendCenter:
             return_unit = self.completion_return_unit
             if leave_unit is None or return_unit is None or self.completed_at is None:
                 raise ValueError("completed center requires leave, return and completed_at")
-            if leave_unit is not self.body_units[-1]:
-                raise ValueError("completion leave must be the final body unit")
+            if leave_unit in self.body_units:
+                raise ValueError("completion leave must stay outside center body")
             if return_unit in self.body_units:
                 raise ValueError("completion return must not enter center body")
             if not leave_unit.locked or not return_unit.locked:
                 raise ValueError("completion evidence must be locked")
-            if not self._touches_core(leave_unit) or not self._outside_in_direction(
+            if not self._overlaps_core(
                 leave_unit
-            ):
+            ) or not self._outside_in_direction(leave_unit):
                 raise ValueError("completion leave geometry is invalid")
+            self._validate_external_leave(leave_unit)
             if (
-                self.source_kind is SourceKind.SEGMENT
+                self.source_kind is not SourceKind.TREND_TYPE
                 and leave_unit.direction == return_unit.direction
             ):
                 raise ValueError("completion return must alternate with leave")
@@ -310,8 +420,12 @@ class TrendCenter:
             ):
                 raise ValueError("center availability must cover completion evidence")
 
-    def _touches_core(self, item: ConstituentUnit) -> bool:
-        return max(item.low_tick, self.zd_tick) <= min(item.high_tick, self.zg_tick)
+    def _overlaps_core(self, item: ConstituentUnit) -> bool:
+        left = max(item.low_tick, self.zd_tick)
+        right = min(item.high_tick, self.zg_tick)
+        if self.source_kind is SourceKind.TREND_TYPE:
+            return left <= right
+        return left < right
 
     def _outside_in_direction(self, item: ConstituentUnit) -> bool:
         return (
@@ -320,15 +434,19 @@ class TrendCenter:
             else item.end_tick < self.zd_tick
         )
 
-    @property
-    def entry_unit(self) -> ConstituentUnit:
-        return self.initial_units[0]
-
+    def _validate_external_leave(self, leave: ConstituentUnit) -> None:
+        previous = self.body_units[-1]
+        if leave.end_tick == previous.end_tick and leave.market_end == previous.market_end:
+            raise ValueError("external leave must be distinct from center body")
+        if previous.end_tick != leave.start_tick:
+            raise ValueError("external leave must connect to center body")
+        if leave.market_start < previous.market_end:
+            raise ValueError("external leave cannot overlap center body in time")
     @property
     def core_units(
         self,
     ) -> tuple[ConstituentUnit, ConstituentUnit, ConstituentUnit]:
-        return self.initial_units  # type: ignore[return-value]
+        return self.initial_units[:3]  # type: ignore[return-value]
 
     @property
     def core_body_start_market_time(self) -> datetime:
@@ -340,13 +458,80 @@ class TrendCenter:
             return self.completion_leave_unit.market_start
         if self.pending_leave_unit is not None:
             return self.pending_leave_unit.market_start
-        if self.extension_units:
-            return self.body_units[-1].market_end
-        return self.initial_exit_unit.market_end
+        return self.body_units[-1].market_end
 
     @property
-    def initial_exit_unit(self) -> ConstituentUnit:
-        return self.initial_units[-1]
+    def display_range_start_market_time(self) -> datetime:
+        """Start of the visible center rectangle (middle-three core only)."""
+
+        return self.core_body_start_market_time
+
+    @property
+    def display_range_end_market_time(self) -> datetime:
+        """End of the visible center body, before the external leaving leg."""
+
+        return self.core_body_end_market_time
+
+    @property
+    def initial_exit_unit(self) -> ConstituentUnit | None:
+        """The fifth segment when it was already an external departure."""
+
+        return self.establishment_leave_unit
+
+    @property
+    def maturity_unit(self) -> ConstituentUnit:
+        """Return the immutable unit whose lock made the center public."""
+
+        if self.source_kind is SourceKind.TREND_TYPE:
+            return self.initial_units[-1]
+        if self.establishment_unit is None:  # guarded by ``__post_init__``
+            raise ValueError("physical center maturity evidence is missing")
+        return self.establishment_unit
+
+    @property
+    def establishment_units(self) -> tuple[ConstituentUnit, ...]:
+        """Return the exact source window used to establish this center."""
+
+        if self.source_kind is SourceKind.TREND_TYPE:
+            return self.initial_units
+        maturity = self.establishment_unit
+        if maturity is None:  # guarded by ``__post_init__``; keeps typing exact
+            return ()
+        return (self.entry_unit, *self.initial_units, maturity)
+
+    @property
+    def lifecycle_leave_unit(self) -> ConstituentUnit | None:
+        """Return the external leave currently owned by this center."""
+
+        return self.completion_leave_unit or self.pending_leave_unit
+
+    @property
+    def lifecycle_role_count(self) -> int:
+        """Count entry, true body components and one external leave.
+
+        The completion return confirms a third-class point and is deliberately
+        not part of the five-role center.  A failed leave and its return are
+        folded into ``body_units`` first, so they are counted as extensions
+        only after their failed-departure status is known.
+        """
+
+        return (
+            1
+            + len(self.body_units)
+            + (1 if self.lifecycle_leave_unit is not None else 0)
+        )
+
+    @property
+    def has_minimum_physical_roles(self) -> bool:
+        """Whether this object may leave the internal physical state machine."""
+
+        if self.source_kind is SourceKind.TREND_TYPE:
+            return True
+        return (
+            self.establishment_unit is not None
+            and len(self.establishment_units) == 5
+            and self.lifecycle_role_count >= 5
+        )
 
     @property
     def completion_direction(self) -> Direction | None:
@@ -364,13 +549,17 @@ class CenterPreview:
     structural_level: int
     source_kind: SourceKind
     price_basis_revision: str
+    entry_unit_id: str
     unit_ids: tuple[str, ...]
     state: CenterPreviewState
     zd_tick: int | None
     zg_tick: int | None
     available_at: datetime
     pending_leave_unit_id: str | None = None
+    completion_leave_unit_id: str | None = None
     completion_return_unit_id: str | None = None
+    establishment_unit_id: str | None = None
+    establishment_leave_unit_id: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "source_kind", SourceKind(self.source_kind))
@@ -380,10 +569,14 @@ class CenterPreview:
             raise ValueError("structural_level must be >= 0")
         if not self.price_basis_revision or not self.price_basis_revision.strip():
             raise ValueError("price_basis_revision is required")
+        if not self.entry_unit_id:
+            raise ValueError("preview requires an external entry unit")
         if not self.unit_ids:
             raise ValueError("preview must reference at least one body unit")
         if len(set(self.unit_ids)) != len(self.unit_ids):
             raise ValueError("preview unit ids must be unique")
+        if self.entry_unit_id in self.unit_ids:
+            raise ValueError("preview entry must stay outside its body")
         if (self.zd_tick is None) != (self.zg_tick is None):
             raise ValueError("preview core ticks must be both present or both absent")
         if self.state is CenterPreviewState.TOUCH_ONLY and (
@@ -393,34 +586,67 @@ class CenterPreview:
         if (
             self.state is CenterPreviewState.FORMING
             and self.zd_tick is not None
-            and self.zd_tick > self.zg_tick
+            and (
+                self.zd_tick > self.zg_tick
+                if self.source_kind is SourceKind.TREND_TYPE
+                else self.zd_tick >= self.zg_tick
+            )
         ):
-            raise ValueError("forming preview core must be a closed interval")
+            raise ValueError("forming preview core violates source overlap contract")
         if self.state is CenterPreviewState.COMPLETED:
-            required = 3
             if (
-                len(self.unit_ids) < required
+                len(self.unit_ids) < 3
                 or self.zd_tick is None
                 or self.zg_tick is None
-                or self.zd_tick > self.zg_tick
+                or (
+                    self.zd_tick > self.zg_tick
+                    if self.source_kind is SourceKind.TREND_TYPE
+                    else self.zd_tick >= self.zg_tick
+                )
             ):
                 raise ValueError(
-                    "completed preview requires a closed first-three core"
+                    "completed preview requires a source-valid center core"
                 )
-            if (
-                not self.completion_return_unit_id
-                or self.completion_return_unit_id in self.unit_ids
-            ):
+            if not self.completion_leave_unit_id:
+                raise ValueError("completed preview requires an external leave unit")
+            if not self.completion_return_unit_id:
                 raise ValueError("completed preview requires a distinct return unit")
             if self.pending_leave_unit_id is not None:
                 raise ValueError("completed preview cannot retain a pending leave")
-        elif self.completion_return_unit_id is not None:
-            raise ValueError("non-completed preview cannot retain a return unit")
-        if (
-            self.pending_leave_unit_id is not None
-            and self.pending_leave_unit_id not in self.unit_ids
+        elif (
+            self.completion_leave_unit_id is not None
+            or self.completion_return_unit_id is not None
         ):
-            raise ValueError("preview pending leave must belong to its body")
+            raise ValueError("non-completed preview cannot retain completion evidence")
+        lifecycle_ids = tuple(
+            value
+            for value in (
+                self.pending_leave_unit_id,
+                self.completion_leave_unit_id,
+                self.completion_return_unit_id,
+            )
+            if value is not None
+        )
+        if len(set(lifecycle_ids)) != len(lifecycle_ids):
+            raise ValueError("preview lifecycle unit ids must be distinct")
+        if set(lifecycle_ids) & set(self.unit_ids):
+            raise ValueError("preview lifecycle units must stay outside its body")
+        if self.entry_unit_id in lifecycle_ids:
+            raise ValueError("preview entry and lifecycle units must be distinct")
+        if (
+            self.establishment_leave_unit_id is not None
+            and self.establishment_leave_unit_id != self.establishment_unit_id
+        ):
+            raise ValueError(
+                "preview initial leave must be its fifth establishment unit"
+            )
+        if self.source_kind is SourceKind.TREND_TYPE and (
+            self.establishment_unit_id is not None
+            or self.establishment_leave_unit_id is not None
+        ):
+            raise ValueError(
+                "trend-type preview has no physical fifth establishment unit"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -451,7 +677,8 @@ class CenterEvidence:
     initial_unit_ids: tuple[str, ...]
     entry_unit_id: str
     core_unit_ids: tuple[str, str, str]
-    initial_exit_unit_id: str
+    establishment_unit_id: str | None
+    initial_exit_unit_id: str | None
     body_unit_ids: tuple[str, ...]
     extension_unit_ids: tuple[str, ...]
     pending_leave_unit_id: str | None
@@ -468,7 +695,7 @@ class CenterEvidence:
     @classmethod
     def from_center(cls, center: TrendCenter) -> "CenterEvidence":
         return cls(
-            schema_version="chanlun-center/v4",
+            schema_version="chanlun-center/v11",
             center_id=center.center_id,
             structural_level=center.structural_level,
             source_kind=center.source_kind,
@@ -482,7 +709,16 @@ class CenterEvidence:
             initial_unit_ids=tuple(item.unit_id for item in center.initial_units),
             entry_unit_id=center.entry_unit.unit_id,
             core_unit_ids=tuple(item.unit_id for item in center.core_units),
-            initial_exit_unit_id=center.initial_exit_unit.unit_id,
+            establishment_unit_id=(
+                None
+                if center.establishment_unit is None
+                else center.establishment_unit.unit_id
+            ),
+            initial_exit_unit_id=(
+                None
+                if center.initial_exit_unit is None
+                else center.initial_exit_unit.unit_id
+            ),
             body_unit_ids=tuple(item.unit_id for item in center.body_units),
             extension_unit_ids=tuple(
                 item.unit_id for item in center.extension_units
@@ -548,14 +784,40 @@ class CenterLevelResult:
             return
 
         active = ongoing[0]
-        seed_width = len(active.initial_units)
-        active_seed = tuple(item.unit_id for item in active.initial_units)
-        forming_seed = tuple(forming[0].unit_ids[:seed_width])
+        active_seed = tuple(
+            item.unit_id
+            for item in (
+                active.establishment_units
+                if active.source_kind is not SourceKind.TREND_TYPE
+                else (active.entry_unit, *active.initial_units)
+            )
+        )
+        seed_width = center_seed_size(active.source_kind)
+        forming_seed = (
+            forming[0].entry_unit_id,
+            *forming[0].unit_ids[:seed_width],
+            *(
+                ()
+                if active.source_kind is SourceKind.TREND_TYPE
+                or forming[0].establishment_unit_id is None
+                else (forming[0].establishment_unit_id,)
+            ),
+        )
         if forming_seed == active_seed:
             return
         active_completion_observed = any(
             preview.state is CenterPreviewState.COMPLETED
-            and tuple(preview.unit_ids[:seed_width]) == active_seed
+            and (
+                preview.entry_unit_id,
+                *preview.unit_ids[:seed_width],
+                *(
+                    ()
+                    if active.source_kind is SourceKind.TREND_TYPE
+                    or preview.establishment_unit_id is None
+                    else (preview.establishment_unit_id,)
+                ),
+            )
+            == active_seed
             for preview in self.previews
         )
         if not active_completion_observed:

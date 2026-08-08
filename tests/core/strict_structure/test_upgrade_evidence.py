@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import timedelta
 
 import pytest
@@ -25,22 +26,27 @@ from tests.core.strict_structure.helpers import (
 
 def nine_touch_center(*, structural_level: int = 0):
     center = ongoing_center(structural_level=structural_level)
+    # u4 是成立窗口的第五段离开；u5 回到核心后，u4/u5 才成为
+    # 延伸体。再追加四段核心内震荡，正好形成九个真实触核 body units。
     additions = (
         unit(5, "down", 130, 110, structural_level=structural_level),
-        unit(6, "up", 110, 120, structural_level=structural_level),
-        unit(7, "down", 120, 110, structural_level=structural_level),
-        unit(8, "up", 110, 120, structural_level=structural_level),
-        unit(9, "down", 120, 110, structural_level=structural_level),
-        unit(10, "up", 110, 120, structural_level=structural_level),
+        unit(6, "up", 110, 114, structural_level=structural_level),
+        unit(7, "down", 114, 106, structural_level=structural_level),
+        unit(8, "up", 106, 114, structural_level=structural_level),
+        unit(9, "down", 114, 110, structural_level=structural_level),
     )
     for item in additions:
         center, _ = advance_center(center, item)
     completed, _ = advance_center(
         center,
-        unit(11, "down", 120, 116, structural_level=structural_level),
+        unit(10, "up", 110, 130, structural_level=structural_level),
+    )
+    completed, _ = advance_center(
+        completed,
+        unit(11, "down", 130, 116, structural_level=structural_level),
     )
     assert completed.state is CenterState.COMPLETED
-    assert len(completed.body_units[1:-1]) == 9
+    assert len(completed.body_units) == 9
     return completed
 
 
@@ -57,14 +63,14 @@ def test_nine_touching_units_derive_one_higher_context() -> None:
     assert evidence.source_level == 0 and evidence.target_level == 1
     assert evidence.source_center_ids == (center.center_id,)
     assert len(evidence.source_unit_ids) == 9
-    assert evidence.extension_unit_ids == (center.body_units[9].unit_id,)
+    assert evidence.extension_unit_ids == ()
     assert evidence.available_at >= center.available_at
     assert evidence.signal_eligible is False
 
 
 def test_fewer_than_nine_touching_units_do_not_upgrade() -> None:
     center = completed_up_center()
-    assert len(center.body_units[1:-1]) < 9
+    assert len(center.body_units) < 9
     assert collect_recursive_upgrade_evidence(structure_for(center)) == ()
 
 
@@ -107,7 +113,6 @@ def test_only_tail_pair_can_remain_expansion_reclassifying() -> None:
 def test_nine_segment_evidence_links_existing_standard_target_center() -> None:
     source = nine_touch_center()
     target = nine_touch_center(structural_level=1)
-    from dataclasses import replace
     level_zero = structure_for(source).levels[0]
     level_one = StrictLevelResult(
         structural_level=1,
@@ -129,6 +134,53 @@ def test_nine_segment_evidence_links_existing_standard_target_center() -> None:
 
     evidence = collect_recursive_upgrade_evidence(structure)[0]
     assert evidence.resolved_by_standard_center_id == target.center_id
+
+
+def test_future_standard_target_does_not_rewrite_nine_segment_evidence() -> None:
+    source = nine_touch_center()
+    target = nine_touch_center(structural_level=1)
+    future = source.available_at + timedelta(days=1)
+    future_return = replace(
+        target.completion_return_unit,
+        confirmed_at=future,
+        available_at=future,
+    )
+    target = replace(
+        target,
+        completion_return_unit=future_return,
+        completed_at=future,
+        available_at=future,
+    )
+    level_zero = structure_for(source).levels[0]
+    level_one = StrictLevelResult(
+        structural_level=1,
+        units=target.body_units + (target.completion_return_unit,),
+        center_result=replace(
+            level_zero.center_result,
+            structural_level=1,
+            centers=(target,),
+            price_basis_revision=target.price_basis_revision,
+        ),
+        trend_types=(),
+        completed_trends=(),
+    )
+    structure = StrictStructureResult(
+        schema_version="chanlun-structure/v3",
+        price_basis_revision=source.price_basis_revision,
+        levels=(level_zero, level_one),
+    )
+
+    without_future_target = collect_recursive_upgrade_evidence(
+        StrictStructureResult(
+            schema_version="chanlun-structure/v3",
+            price_basis_revision=source.price_basis_revision,
+            levels=(level_zero,),
+        )
+    )[0]
+    with_future_target = collect_recursive_upgrade_evidence(structure)[0]
+
+    assert with_future_target == without_future_target
+    assert with_future_target.resolved_by_standard_center_id is None
 
 
 def test_as_of_cannot_see_future_nine_segment_or_expansion_evidence() -> None:

@@ -86,6 +86,7 @@ _FREQUENCY_LABELS = {
     "y": "Year",
 }
 _CALENDAR_FREQUENCIES = frozenset({"d", "w", "m", "q", "6m", "y"})
+_US_HISTORY_SOURCES = frozenset({"usmart", "longbridge", "alpaca"})
 _KLINE_COLUMNS = [
     "date",
     "frequency",
@@ -444,13 +445,34 @@ class ExchangeUSmart(Exchange):
     # calendar bars are normalized to the local market close below.
     kline_time_label = "end"
 
-    def __init__(self, market: str, client: USmartClient | None = None):
+    def __init__(
+        self,
+        market: str,
+        client: USmartClient | None = None,
+        history_exchange: Exchange | None = None,
+    ):
         market_key = str(market).lower()
         if market_key not in _MARKET_API_CODES:
             raise ValueError(f"uSMART does not support market {market!r}")
         self.market = market_key
         self.client = client or USmartClient()
         self.tz = pytz.timezone(_MARKET_TIMEZONES[market_key])
+        self._us_history_source = (
+            str(
+                getattr(config, "US_HISTORY_KLINE_SOURCE", "usmart")
+            ).strip().lower()
+            if market_key == "us"
+            else "usmart"
+        )
+        if self._us_history_source not in _US_HISTORY_SOURCES:
+            raise ValueError(
+                "US_HISTORY_KLINE_SOURCE must be one of "
+                f"{sorted(_US_HISTORY_SOURCES)}, got "
+                f"{self._us_history_source!r}"
+            )
+        # Lazily created so uSMART can still provide symbols/ticks without
+        # opening a second quote connection during application startup.
+        self._us_history_exchange = history_exchange
         self._all_stocks: List[Dict[str, Any]] | None = None
         self._stock_by_code: Dict[str, Dict[str, Any]] = {}
         self._all_stocks_lock = threading.Lock()
@@ -464,6 +486,40 @@ class ExchangeUSmart(Exchange):
 
     def support_frequencys(self) -> dict:
         return dict(_FREQUENCY_LABELS)
+
+    def _configured_us_history_exchange(
+        self,
+        frequency: str,
+        right_type: int,
+    ) -> Exchange | None:
+        """Return the stable configured US K-line backend for this instance.
+
+        uSMART's intraday endpoint returns at most 300 rows per page and has a
+        much shorter provider-side retention window than the chart contract.
+        The project already exposes ``US_HISTORY_KLINE_SOURCE``; honoring it
+        here keeps full loads and polling on one provider/price basis. Native
+        uSMART remains the fallback for unsupported periods and non-forward
+        adjustment requests, which the Longbridge adapter cannot represent.
+        """
+
+        if (
+            self.market != "us"
+            or self._us_history_source == "usmart"
+            or right_type != 1
+        ):
+            return None
+        if self._us_history_exchange is None:
+            if self._us_history_source == "longbridge":
+                from chanlun.exchange.exchange_cq import ExchangeChangQiao
+
+                self._us_history_exchange = ExchangeChangQiao()
+            else:
+                from chanlun.exchange.exchange_alpaca import ExchangeAlpaca
+
+                self._us_history_exchange = ExchangeAlpaca()
+        if frequency not in self._us_history_exchange.support_frequencys():
+            return None
+        return self._us_history_exchange
 
     def _project_code(self, api_market: str, symbol: str) -> str:
         symbol = str(symbol).strip()
@@ -611,6 +667,18 @@ class ExchangeUSmart(Exchange):
             raise ValueError(f"uSMART does not support frequency {frequency!r}")
         args = dict(args or {})
         right_type = self._right_type(args)
+        history_exchange = self._configured_us_history_exchange(
+            frequency,
+            right_type,
+        )
+        if history_exchange is not None:
+            return history_exchange.klines(
+                code,
+                frequency,
+                start_date=start_date,
+                end_date=end_date,
+                args=args,
+            )
         page_size = _positive_number(
             args.get("count", getattr(config, "USMART_KLINE_PAGE_SIZE", 1000)),
             1000,

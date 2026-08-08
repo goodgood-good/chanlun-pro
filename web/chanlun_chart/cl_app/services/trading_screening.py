@@ -63,6 +63,9 @@ from chanlun.decision_support.trading_system.models import (
 from chanlun.decision_support.trading_system.live_review_materialization import (
     resolve_live_review_materialization_receipt,
 )
+from chanlun.decision_support.trading_system.lifecycle import (
+    lifecycle_stage_from_signal,
+)
 from chanlun.decision_support.trading_system.portfolio_risk import RiskLimits
 from chanlun.decision_support.trading_system.qmt_sector_same_base import (
     QMT_SECTOR_THIRTY_MINUTE_DERIVATION_CONTRACT,
@@ -153,6 +156,9 @@ _LEGACY_SIGNAL_DOCUMENT_CONTRACT_IDS = frozenset(
         # unreachable and silently discarded a resumable full-market queue on
         # app restart.
         "chanlun-human-assisted-signal-document/v8",
+        # V9 predates the explicit ``formed`` lifecycle.  Its evidence is
+        # sufficient for a deterministic stage migration without replaying QMT.
+        "chanlun-human-assisted-signal-document/v9",
     }
 )
 _KNOWN_MONITOR_INSTRUMENT_TYPES = frozenset(
@@ -620,10 +626,13 @@ def _priority_monitor_delay_seconds(
 
 
 _PRIORITY_BUY_STAGE_RANK = {
-    "triggered": 0,
-    "armed": 1,
-    "approaching": 2,
-    "observed": 3,
+    "executable": 0,
+    "triggered": 1,
+    "armed": 2,
+    "formed": 3,
+    "approaching": 4,
+    "observed": 5,
+    "active": 6,
 }
 
 
@@ -646,7 +655,7 @@ def _priority_buy_candidate_codes(
         for row in group:
             code = row.get("code")
             point_type = row.get("point_type")
-            stage = row.get("lifecycle_stage")
+            stage = lifecycle_stage_from_signal(row)
             if (
                 not isinstance(code, str)
                 or not code
@@ -658,7 +667,7 @@ def _priority_buy_candidate_codes(
                 or stage in {"closed", "invalidated"}
             ):
                 continue
-            rank = (_PRIORITY_BUY_STAGE_RANK.get(stage, 4), code)
+            rank = (_PRIORITY_BUY_STAGE_RANK.get(stage, 10**6), code)
             previous = best_rank.get(code)
             if previous is None or rank < previous:
                 best_rank[code] = rank
@@ -2000,6 +2009,9 @@ def _presentation_signal_document(
         _presentation_fields(signal.get("setup_5m"), _PRESENTATION_SETUP_FIELDS)
         or {}
     )
+    effective_stage = lifecycle_stage_from_signal(signal)
+    if effective_stage is not None:
+        document["lifecycle_stage"] = effective_stage
     raw_trigger = signal.get("trigger_1m")
     document["trigger_1m"] = (
         None
@@ -2515,7 +2527,7 @@ def _migrate_member_history_diagnostics(
 def _migrate_signal_document_v8(
     snapshot: Mapping[str, object],
 ) -> dict[str, object]:
-    """Upgrade authenticated v7/v8 rows to the hash-bound v9 decision contract.
+    """Upgrade authenticated v7-v9 rows to the current decision contract.
 
     V7 used ``QMT_SECTOR_TRIGGER`` for every member of every eligible sector.
     V8 reserves that source for a supportive sector and labels a neutral sector
@@ -2524,8 +2536,10 @@ def _migrate_signal_document_v8(
     deterministic rewrite.  V9 additionally binds the final selection scope and
     entry result to the shared page/replay decision identity.  Every required
     decision field is already present in v8, so it can be hashed without a QMT
-    replay.  Any malformed or contradictory row stays on its old contract and
-    follows the existing fail-closed full-universe replay path.
+    replay.  V10 also separates a geometrically completed provisional
+    third-class point from a genuinely incomplete ``approaching`` point.  Any
+    malformed or contradictory row stays on its old contract and follows the
+    existing fail-closed full-universe replay path.
     """
 
     original = snapshot if isinstance(snapshot, dict) else dict(snapshot)
@@ -2535,6 +2549,7 @@ def _migrate_signal_document_v8(
     if legacy_contract_id not in {
         "chanlun-human-assisted-signal-document/v7",
         "chanlun-human-assisted-signal-document/v8",
+        "chanlun-human-assisted-signal-document/v9",
     }:
         return original
     value = copy.deepcopy(original)
@@ -2618,10 +2633,19 @@ def _migrate_signal_document_v8(
         signal["monitor_only"] = not sector_triggered
         warmup.setdefault("difference_codes_by_frequency", [])
         signal["decision_document_schema"] = SIGNAL_DECISION_DOCUMENT_SCHEMA
+        effective_stage = lifecycle_stage_from_signal(signal)
+        if effective_stage is None:
+            return original
+        signal["lifecycle_stage"] = effective_stage
         try:
             signal["decision_document_id"] = signal_decision_document_id(signal)
         except (TypeError, ValueError):
             return original
+    counts_by_stage: dict[str, int] = {}
+    for signal in signals:
+        stage = str(signal["lifecycle_stage"])
+        counts_by_stage[stage] = counts_by_stage.get(stage, 0) + 1
+    value["counts_by_stage"] = dict(sorted(counts_by_stage.items()))
     value["signal_document_contract_id"] = SIGNAL_DOCUMENT_CONTRACT_ID
     manifest["signal_document_contract_id"] = SIGNAL_DOCUMENT_CONTRACT_ID
     value["coverage_epoch_id"] = current_epoch_id
@@ -3234,9 +3258,19 @@ class TradingScreeningService:
         self._priority_monitor_critical_offset = critical_offset
         self._priority_monitor_sector_offset = sector_offset
         self._priority_monitor_single_slot_sector_turn = single_slot_sector_turn
-        self._priority_monitor_signal_stages = {
-            str(key): str(value) for key, value in raw_stages.items()
-        }
+        effective_stages: dict[str, str] = {}
+        for key, value in raw_stages.items():
+            signal_id = str(key)
+            document = latest_documents.get(signal_id)
+            stage = (
+                lifecycle_stage_from_signal(document)
+                if isinstance(document, Mapping)
+                else None
+            )
+            if stage is not None and isinstance(document, dict):
+                document["lifecycle_stage"] = stage
+            effective_stages[signal_id] = stage or str(value)
+        self._priority_monitor_signal_stages = effective_stages
         self._priority_monitor_signal_codes = {
             str(key): str(value) for key, value in raw_codes.items()
         }
@@ -3353,7 +3387,8 @@ class TradingScreeningService:
             for document in documents or ():
                 signal_id = str(document["signal_id"])
                 self._priority_monitor_signal_stages[signal_id] = str(
-                    document["lifecycle_stage"]
+                    lifecycle_stage_from_signal(document)
+                    or document["lifecycle_stage"]
                 )
                 self._priority_monitor_signal_codes[signal_id] = str(document["code"])
             if compact_documents is not None:
@@ -3659,15 +3694,29 @@ class TradingScreeningService:
         holding_codes = set(holdings)
         supportive_code_set = set(supportive_codes)
         main_previous_stages = {
-            str(row["signal_id"]): str(row["lifecycle_stage"])
+            str(row["signal_id"]): str(
+                lifecycle_stage_from_signal(row) or row["lifecycle_stage"]
+            )
             for row in previous.get("signals", ())
             if isinstance(row, Mapping)
             and isinstance(row.get("signal_id"), str)
             and isinstance(row.get("lifecycle_stage"), str)
         }
+        monitor_previous_stages = dict(self._priority_monitor_signal_stages)
+        for row in monitor_signal_documents:
+            signal_id = row.get("signal_id")
+            stage = lifecycle_stage_from_signal(row)
+            if isinstance(signal_id, str) and stage is not None:
+                monitor_previous_stages[signal_id] = stage
         prior_stages = {
             **main_previous_stages,
-            **self._priority_monitor_signal_stages,
+            **monitor_previous_stages,
+        }
+        previous_documents_by_id = {
+            str(row["signal_id"]): copy.deepcopy(dict(row))
+            for row in (*main_signal_documents, *monitor_signal_documents)
+            if isinstance(row.get("signal_id"), str)
+            and isinstance(row.get("code"), str)
         }
 
         def selection_sources_for(code: str) -> tuple[str, ...]:
@@ -3765,16 +3814,25 @@ class TradingScreeningService:
                 str(row.get("signal_id")),
             )
         )
+        authoritative_codes = tuple(
+            sorted(code for code, _rows, exc in results if exc is None)
+        )
+        authoritative_code_set = set(authoritative_codes)
         previous_notification = {
             "signals": [
-                {
-                    "signal_id": signal_id,
-                    "lifecycle_stage": stage,
-                }
-                for signal_id, stage in sorted(prior_stages.items())
+                document
+                for signal_id, document in sorted(previous_documents_by_id.items())
+                if signal_id in prior_stages
+                and document.get("code") in authoritative_code_set
             ]
         }
-        current_notification = {"signals": documents}
+        current_notification = {
+            "signals": documents,
+            # A missing signal is meaningful only for symbols successfully
+            # recomputed in this partial lane.  The dispatcher uses this scope
+            # to emit a retraction without invalidating rotated-out symbols.
+            "notification_authoritative_codes": list(authoritative_codes),
+        }
         self._record_priority_monitor_result(
             observed_at=observed_at,
             codes=codes,
@@ -6987,7 +7045,7 @@ class TradingScreeningService:
                     previous_stage = None
                     previous_row = previous_signals.get(item.lifecycle.signal_id)
                     if isinstance(previous_row, Mapping):
-                        stage = previous_row.get("lifecycle_stage")
+                        stage = lifecycle_stage_from_signal(previous_row)
                         previous_stage = stage if isinstance(stage, str) else None
                     signals.append(
                         _signal_document(

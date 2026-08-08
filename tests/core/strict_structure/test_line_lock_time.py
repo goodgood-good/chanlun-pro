@@ -25,6 +25,19 @@ def sample_frame() -> pd.DataFrame:
     )
 
 
+@pytest.fixture(scope="module")
+def segment_frame() -> pd.DataFrame:
+    """Four-successor XD locking needs a longer non-vacuous real sample."""
+
+    return (
+        pd.read_parquet(FIXTURE)[
+            ["date", "open", "high", "low", "close", "volume"]
+        ]
+        .head(800)
+        .reset_index(drop=True)
+    )
+
+
 def _line_identity(kind, line):
     return (
         kind,
@@ -118,9 +131,9 @@ def test_bi_lock_time_is_first_sufficient_following_endpoint_witness(sample_fram
         assert bi.locked_at >= _first_sufficient_fractal_witness(bi.end)
 
 
-def test_xd_lock_time_comes_from_a_later_locked_bi_witness(sample_frame):
+def test_xd_lock_time_comes_from_a_later_locked_bi_witness(segment_frame):
     cd = CL("SH.600519", "5m", dict(strict_base_config()))
-    cd.process_klines(sample_frame)
+    cd.process_klines(segment_frame)
 
     bi_witness_times = {bi.locked_at for bi in cd.get_bis() if bi.is_done()}
     locked_xds = [line for line in cd.get_xds() if line.is_done()]

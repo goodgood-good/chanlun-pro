@@ -15,7 +15,7 @@ from typing import Dict, Union
 from chanlun.core.types.config import Config
 
 
-STRICT_BASE_PROFILE_ID = "chanlun-source-faithful-base-v2"
+STRICT_BASE_PROFILE_ID = "chanlun-source-faithful-base-v7"
 
 
 _STRICT_BASE_CONFIG: Dict[str, Union[str, int, bool]] = {
@@ -41,11 +41,14 @@ _STRICT_BASE_CONFIG: Dict[str, Union[str, int, bool]] = {
     "xd_bi_pohuai": Config.XD_BI_POHUAI_NO.value,
     "xd_rule": "feature-sequence-v1",
     "xd_gap_rule": "second-feature-sequence-fractal-v1",
-    # L017/L020 and V3 §5.4: the first three consecutive lower-level
-    # components establish a closed [ZD, ZG] center.  Departure and first
-    # return are later lifecycle evidence, never extra seed roles.
-    "center_seed_rule": "first-three-components-closed-overlap-v1",
-    "center_lifecycle_rule": "departure-first-return-v1",
+    # Physical centers use entry + middle-three core + maturity as one five-role
+    # window. Maturity is either an initial leave or the first extension. A
+    # completed leave may simultaneously be the next center's entry, and later
+    # departures may use either direction. Recursive centers retain the original
+    # three-trend core and obtain their shared entry from the preceding trend.
+    "center_seed_rule": "shared-leave-entry-three-core-five-role-v7",
+    "center_lifecycle_rule": "bidirectional-shared-leave-first-return-v5",
+    "center_scan_rule": "post-third-point-first-mature-causal-owner-v1",
     # The strength measure is fixed too; it is evidence, never a definition
     # switch for K/fractal/stroke/segment structure.
     "idx_macd_fast": 12,

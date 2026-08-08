@@ -18,6 +18,9 @@ from pathlib import Path
 import re
 
 from chanlun.decision_support.fingerprints import sha256_json
+from chanlun.decision_support.trading_system.lifecycle import (
+    lifecycle_stage_from_signal,
+)
 from chanlun.decision_support.trading_system.v3_live_human_review import (
     live_screening_snapshot_content_sha256,
 )
@@ -47,10 +50,13 @@ DEFAULT_MINIMUM_PREFIX_BARS = {"d": 480, "30m": 480, "5m": 960, "1m": 1440}
 _SHA256_ID = re.compile(r"^sha256:[0-9a-f]{64}$")
 _A_STOCK_CODE = re.compile(r"^(?:SH|SZ|BJ)\.\d{6}$")
 _STAGE_ORDER = {
-    "triggered": 0,
-    "armed": 1,
-    "approaching": 2,
-    "observed": 3,
+    "executable": 0,
+    "triggered": 1,
+    "armed": 2,
+    "formed": 3,
+    "approaching": 4,
+    "observed": 5,
+    "active": 6,
 }
 _POINT_ORDER = {"1buy": 0, "2buy": 1, "3buy": 2}
 _CLOSED_STAGES = frozenset({"closed", "invalidated"})
@@ -107,10 +113,13 @@ def candidate_warmup_parameter_document(
             "source_position",
         ],
         "lifecycle_stage_order": [
+            "executable",
             "triggered",
             "armed",
+            "formed",
             "approaching",
             "observed",
+            "active",
         ],
         "point_type_order": ["1buy", "2buy", "3buy"],
         "frequencies": list(values),
@@ -246,7 +255,7 @@ def select_candidate_warmup_rows(
         if not isinstance(code, str) or _A_STOCK_CODE.fullmatch(code) is None:
             continue
         side = str(value.get("side", "")).lower()
-        stage = str(value.get("lifecycle_stage", "")).lower()
+        stage = str(lifecycle_stage_from_signal(value) or "").lower()
         if modern and (side != "buy" or stage in _CLOSED_STAGES):
             continue
         point_type = str(value.get("point_type", "")).lower()

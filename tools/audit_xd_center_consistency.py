@@ -11,6 +11,7 @@ unresolved active center being displaced by a shifted live-edge seed.
 from __future__ import annotations
 
 import argparse
+from collections import Counter, defaultdict
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime
 from decimal import Decimal, DecimalException
@@ -41,7 +42,14 @@ from chanlun.cl_utils.tv_chart import (
     xd_segment_centers_to_chart_dicts,
 )
 from chanlun.core.cl import CL
-from chanlun.core.strict_structure.center_machine import calculate_centers
+from chanlun.core.strict_structure.center_machine import (
+    _advance_center_preview_lifecycle,
+    _preview_matches_center_seed,
+    calculate_centers,
+    establish_center,
+    establish_center_preview,
+    forming_preview,
+)
 from chanlun.core.strict_structure.models import (
     CenterPreviewState,
     CenterState,
@@ -175,20 +183,52 @@ def discover_latest_datasets(cache_root: Path) -> list[dict[str, object]]:
 
 
 def _payload_issues(payloads: Iterable[Mapping[str, object]]) -> list[str]:
-    """Validate the page payload against the original first-three contract.
+    """Validate the exact physical contract emitted to the chart.
 
-    There is no synthetic external entry segment. Three consecutive same-level
-    segments establish ``[ZD, ZG]`` (equality is valid); a later segment may
-    leave, and only its first opposite return outside completes a third-class
-    point. A forming center therefore legitimately has no leaving segment yet.
+    A provisional center is visible after four consecutive components:
+    ``S0 entry + S1/S2/S3 core``.  It becomes formal only after the fifth
+    ``S4 maturity`` component also positively overlaps the frozen core. Only
+    S1/S2/S3 determine ``[ZD, ZG]``. S4 is either the initial departure or the
+    first extension. A failed leave may join the body after its return
+    re-enters the core; that same return can immediately become a new
+    departure through the opposite boundary.
     """
+
+    Segment = tuple[str, int, int, float, float]
+
+    def parse_segment(raw: object) -> Segment | None:
+        if not isinstance(raw, Mapping):
+            return None
+        try:
+            return (
+                str(raw["direction"]),
+                int(raw["start_time"]),
+                int(raw["end_time"]),
+                float(raw["start_price"]),
+                float(raw["end_price"]),
+            )
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    def positive_overlap(segment: Segment, zd: float, zg: float) -> bool:
+        return max(min(segment[3], segment[4]), zd) < min(
+            max(segment[3], segment[4]), zg
+        )
+
+    def connected(previous: Segment, current: Segment) -> bool:
+        return (
+            previous[0] != current[0]
+            and previous[2] == current[1]
+            and abs(previous[4] - current[3]) <= 1e-12
+        )
 
     values = list(payloads)
     issues: list[str] = []
     active = [
         value
         for value in values
-        if value.get("center_state", value.get("state")) in ("forming", "ongoing")
+        if value.get("center_state", value.get("state"))
+        in ("forming", "ongoing")
     ]
     if len(active) > 1:
         issues.append("MULTIPLE_UNRESOLVED_CENTERS")
@@ -200,37 +240,110 @@ def _payload_issues(payloads: Iterable[Mapping[str, object]]) -> list[str]:
     for index, value in enumerate(values):
         prefix = f"CENTER_{index}"
         direction = value.get("type")
-        entry = value.get("entering_segment")
-        leave = value.get("leaving_segment")
-        if entry is not None:
-            issues.append(f"{prefix}_SYNTHETIC_ENTRY_PRESENT")
-        core_directions = value.get("core_directions")
+        entry_raw = value.get("entering_segment")
+        leave_raw = value.get("leaving_segment")
+        entry = parse_segment(entry_raw)
+        leave = parse_segment(leave_raw)
+        first_raw = value.get("first_three_components")
+        body_raw = value.get("body_components")
+        establishment_raw = value.get("establishment_segments")
+        overlap_raw = value.get("overlap_components")
+        state = value.get("center_state", value.get("state"))
+        provisional = value.get("provisional") is True
+
+        try:
+            first = [parse_segment(item) for item in first_raw]  # type: ignore[arg-type]
+            body = [parse_segment(item) for item in body_raw]  # type: ignore[arg-type]
+            establishment = [
+                parse_segment(item) for item in establishment_raw  # type: ignore[arg-type]
+            ]
+            overlap = [parse_segment(item) for item in overlap_raw]  # type: ignore[arg-type]
+        except TypeError:
+            first, body, establishment, overlap = [], [], [], []
+
+        immature_preview = (
+            state == "forming"
+            and provisional
+            and leave is None
+            and len(establishment) == 4
+        )
+        expected_establishment_count = 4 if immature_preview else 5
+        minimum_overlap_count = 4 if immature_preview else 5
+
         if (
-            not isinstance(core_directions, list)
-            or len(core_directions) != 3
-            or any(item not in ("up", "down") for item in core_directions)
-            or core_directions[0] == core_directions[1]
-            or core_directions[1] == core_directions[2]
+            entry is None
+            or len(first) != 3
+            or any(item is None for item in first)
+            or len(body) < 3
+            or any(item is None for item in body)
+            or len(establishment) != expected_establishment_count
+            or any(item is None for item in establishment)
+            or len(overlap) < minimum_overlap_count
+            or any(item is None for item in overlap)
         ):
-            issues.append(f"{prefix}_CORE_DIRECTION_MISMATCH")
-        first_three_ids = value.get("first_three_component_ids")
-        first_three = value.get("first_three_components")
+            issues.append(f"{prefix}_ENTRY_CORE_ROLE_EVIDENCE_INVALID")
+            continue
+
+        first_segments = tuple(first)  # type: ignore[arg-type]
+        body_segments = tuple(body)  # type: ignore[arg-type]
+        establishment_segments = tuple(establishment)  # type: ignore[arg-type]
+        overlap_segments = tuple(overlap)  # type: ignore[arg-type]
+
         if (
-            value.get("core_line_count") != 3
-            or not isinstance(first_three_ids, list)
-            or len(first_three_ids) != 3
-            or len(set(first_three_ids)) != 3
-            or not isinstance(first_three, list)
-            or len(first_three) != 3
-            or any(not isinstance(item, Mapping) for item in first_three)
+            value.get("entry_role") != "external_entry"
+            or value.get("core_component_count") != 3
+            or value.get("core_line_count") != 3
+            or value.get("minimum_lifecycle_role_count") != 5
+            or value.get("establishment_component_count")
+            != expected_establishment_count
+            or value.get("overlap_component_count") != len(overlap_segments)
+            or value.get("lifecycle_role_count")
+            != 1 + len(body_segments) + int(leave is not None)
+        ):
+            issues.append(f"{prefix}_ENTRY_CORE_ROLE_EVIDENCE_INVALID")
+
+        first_ids = value.get("first_three_component_ids")
+        establishment_ids = value.get("establishment_segment_ids")
+        if (
+            not isinstance(first_ids, list)
+            or len(first_ids) != 3
+            or len(set(first_ids)) != 3
+            or not isinstance(establishment_ids, list)
+            or len(establishment_ids) != expected_establishment_count
+            or len(set(establishment_ids)) != expected_establishment_count
         ):
             issues.append(f"{prefix}_FIRST_THREE_EVIDENCE_INVALID")
 
+        if (
+            establishment_segments[0] != entry
+            or establishment_segments[1:4] != first_segments
+            or body_segments[:3] != first_segments
+        ):
+            issues.append(f"{prefix}_FIVE_SEGMENT_ROLE_ORDER_INVALID")
+        if establishment_segments[0] != entry:
+            issues.append(f"{prefix}_EXTERNAL_ENTRY_INVALID")
+
+        core_directions = value.get("core_directions")
+        if (
+            core_directions != [item[0] for item in first_segments]
+            or any(
+                item[0] not in ("up", "down")
+                for item in establishment_segments
+            )
+            or any(
+                not connected(previous, current)
+                for previous, current in zip(
+                    establishment_segments,
+                    establishment_segments[1:],
+                )
+            )
+        ):
+            issues.append(f"{prefix}_FIVE_SEGMENT_NOT_CONSECUTIVE")
+
         points = value.get("points")
-        if not isinstance(points, list) or len(points) != 2:
-            issues.append(f"{prefix}_POINTS_INVALID")
-            continue
         try:
+            if not isinstance(points, list) or len(points) != 2:
+                raise ValueError
             start = int(points[0]["time"])
             end = int(points[1]["time"])
             zd = float(value["zd"])
@@ -238,103 +351,357 @@ def _payload_issues(payloads: Iterable[Mapping[str, object]]) -> list[str]:
         except (KeyError, TypeError, ValueError):
             issues.append(f"{prefix}_GEOMETRY_INVALID")
             continue
-        # ZD == ZG is a valid zero-width center in the original definition.
-        if start >= end or zd > zg:
+        if start >= end or zd >= zg:
             issues.append(f"{prefix}_GEOMETRY_INVALID")
         if previous_start is not None and start < previous_start:
             issues.append(f"{prefix}_TIME_ORDER_REGRESSED")
         previous_start = start
-        if isinstance(first_three, list) and first_three and isinstance(
-            first_three[0], Mapping
+
+        expected_zd = max(min(item[3], item[4]) for item in first_segments)
+        expected_zg = min(max(item[3], item[4]) for item in first_segments)
+        if abs(expected_zd - zd) > 1e-12 or abs(expected_zg - zg) > 1e-12:
+            issues.append(f"{prefix}_MIDDLE_THREE_CORE_MISMATCH")
+        for role_index, segment in enumerate(establishment_segments):
+            if not positive_overlap(segment, zd, zg):
+                issues.append(
+                    f"{prefix}_ESTABLISHMENT_{role_index}_NOT_POSITIVE_OVERLAP"
+                )
+        if any(not positive_overlap(item, zd, zg) for item in overlap_segments):
+            issues.append(f"{prefix}_OVERLAP_COMPONENT_INVALID")
+
+        if immature_preview:
+            if value.get("establishment_unit_id") is not None:
+                issues.append(f"{prefix}_IMMATURE_WITH_MATURITY_ID")
+        else:
+            maturity = establishment_segments[4]
+            maturity_outside = (
+                maturity[4] > zg
+                if maturity[0] == "up"
+                else maturity[4] < zd
+            )
+            if maturity[0] != entry[0]:
+                issues.append(f"{prefix}_MATURITY_DIRECTION_INVALID")
+            if not maturity_outside and maturity not in body_segments:
+                issues.append(f"{prefix}_MATURITY_EXTENSION_MISSING_FROM_BODY")
+
+        display_range = value.get("display_range")
+        expected_end_role = (
+            "body_tail_end"
+            if len(body_segments) > 3
+            else "middle_three_last_end"
+        )
+        if (
+            not isinstance(display_range, Mapping)
+            or display_range.get("start_role")
+            != "middle_three_first_start"
+            or display_range.get("end_role") != expected_end_role
+            or display_range.get("includes_entry") is not False
+            or display_range.get("includes_leave") is not False
+            or display_range.get("price_core_source")
+            != "middle_three_intersection"
         ):
-            if int(first_three[0].get("start_time", -1)) != start:
-                issues.append(f"{prefix}_FIRST_CORE_BOUNDARY_MISMATCH")
-        if isinstance(leave, Mapping):
-            if direction not in ("up", "down"):
-                issues.append(f"{prefix}_LEAVE_DIRECTION_INVALID")
-            elif leave.get("direction") != direction:
-                issues.append(f"{prefix}_LEAVE_DIRECTION_MISMATCH")
-            if int(leave.get("start_time", -1)) != end:
-                issues.append(f"{prefix}_CORE_LEAVE_BOUNDARY_MISMATCH")
-        elif leave is not None:
+            issues.append(f"{prefix}_DISPLAY_RANGE_METADATA_INVALID")
+        if start != first_segments[0][1] or end != body_segments[-1][2]:
+            issues.append(f"{prefix}_CENTER_TIME_BOUNDARY_MISMATCH")
+        if start == entry[1] or (leave is not None and end == leave[2]):
+            issues.append(f"{prefix}_ENTRY_OR_LEAVE_INSIDE_DISPLAY_RANGE")
+
+        if leave is not None:
+            leave_outside = leave[4] > zg if leave[0] == "up" else leave[4] < zd
+            if (
+                direction != leave[0]
+                or not leave_outside
+                or not connected(body_segments[-1], leave)
+                or not positive_overlap(leave, zd, zg)
+            ):
+                issues.append(f"{prefix}_LEAVE_GEOMETRY_INVALID")
+        elif leave_raw is not None:
             issues.append(f"{prefix}_LEAVE_METADATA_INVALID")
         elif direction != "zd":
             issues.append(f"{prefix}_DIRECTION_WITHOUT_LEAVE")
 
-        state = value.get("center_state", value.get("state"))
         done = value.get("done") is True
-        provisional = value.get("provisional") is True
         point_type = value.get("completion_point_type")
-        return_segment = value.get("completion_return_segment")
+        return_raw = value.get("completion_return_segment")
+        return_segment = parse_segment(return_raw)
         if state not in ("forming", "ongoing", "completed"):
             issues.append(f"{prefix}_STATE_INVALID")
         if done and (state != "completed" or provisional):
             issues.append(f"{prefix}_DONE_STATE_CONFLICT")
-        if state == "completed" and (
-            point_type not in ("3buy", "3sell")
-            or not isinstance(return_segment, Mapping)
-            or value.get("linestyle") != "0"
-        ):
-            issues.append(f"{prefix}_COMPLETION_EVIDENCE_INCOMPLETE")
-        if state == "completed" and isinstance(return_segment, Mapping):
-            if not isinstance(leave, Mapping) or direction not in ("up", "down"):
-                issues.append(f"{prefix}_COMPLETION_LEAVE_MISSING")
-                continue
+        if state == "completed":
             expected_point = "3buy" if direction == "up" else "3sell"
             expected_return_direction = "down" if direction == "up" else "up"
             if (
-                point_type != expected_point
+                leave is None
+                or return_segment is None
+                or point_type != expected_point
                 or value.get("expected_completion_point_type") != expected_point
-                or return_segment.get("direction") != expected_return_direction
+                or return_segment[0] != expected_return_direction
+                or not connected(leave, return_segment)
+                or value.get("linestyle") != "0"
             ):
-                issues.append(f"{prefix}_COMPLETION_DIRECTION_MISMATCH")
-            if (
-                leave.get("end_time") != return_segment.get("start_time")
-                or leave.get("end_price") != return_segment.get("start_price")
+                issues.append(f"{prefix}_COMPLETION_EVIDENCE_INCOMPLETE")
+            elif not (
+                min(return_segment[3], return_segment[4]) >= zg
+                if direction == "up"
+                else max(return_segment[3], return_segment[4]) <= zd
             ):
-                issues.append(f"{prefix}_COMPLETION_RETURN_DISCONNECTED")
-            try:
-                return_prices = (
-                    float(return_segment["start_price"]),
-                    float(return_segment["end_price"]),
-                )
-            except (KeyError, TypeError, ValueError):
-                issues.append(f"{prefix}_COMPLETION_RETURN_PRICE_INVALID")
-            else:
-                return_stays_outside = (
-                    min(return_prices) >= zg
-                    if direction == "up"
-                    else max(return_prices) <= zd
-                )
-                if not return_stays_outside:
-                    issues.append(f"{prefix}_COMPLETION_RETURN_CROSSES_CORE")
+                issues.append(f"{prefix}_COMPLETION_RETURN_CROSSES_CORE")
             expected_status = "confirmed" if done else "provisional"
             if value.get("completion_point_status") != expected_status:
                 issues.append(f"{prefix}_COMPLETION_STATUS_MISMATCH")
-        if state in ("forming", "ongoing") and point_type is not None:
-            issues.append(f"{prefix}_UNRESOLVED_WITH_COMPLETION_POINT")
-        if state in ("forming", "ongoing") and return_segment is not None:
-            issues.append(f"{prefix}_UNRESOLVED_WITH_COMPLETION_RETURN")
-        if state in ("forming", "ongoing") and value.get("linestyle") != "1":
-            issues.append(f"{prefix}_UNRESOLVED_NOT_DASHED")
-        if state in ("forming", "ongoing"):
+        else:
+            if point_type is not None or return_raw is not None:
+                issues.append(f"{prefix}_UNRESOLVED_WITH_COMPLETION_EVIDENCE")
+            if value.get("linestyle") != "1":
+                issues.append(f"{prefix}_UNRESOLVED_NOT_DASHED")
             expected_phase = (
-                "AWAITING_SAME_LEVEL_RETURN"
-                if isinstance(leave, Mapping)
+                "AWAITING_MATURITY_SEGMENT"
+                if immature_preview
+                else "AWAITING_SAME_LEVEL_RETURN"
+                if leave is not None
                 else "AWAITING_SAME_LEVEL_DEPARTURE"
+            )
+            expected_point = (
+                None
+                if leave is None
+                else "3buy" if direction == "up" else "3sell"
             )
             if value.get("completion_phase") != expected_phase:
                 issues.append(f"{prefix}_UNRESOLVED_PHASE_MISMATCH")
-            expected_point = (
-                None
-                if not isinstance(leave, Mapping)
-                else "3buy" if direction == "up" else "3sell"
-            )
             if value.get("expected_completion_point_type") != expected_point:
                 issues.append(f"{prefix}_EXPECTED_POINT_MISMATCH")
         if value.get("tradable") is True and (provisional or not done):
             issues.append(f"{prefix}_TRADABLE_PROVISIONAL_CONFLICT")
     return sorted(set(issues))
+
+
+def _post_completion_recall_issues(result, units) -> list[str]:
+    """Prove the first mature seed after a third-class point is retained.
+
+    The next seed may start at the completed leave, at its first return, or at
+    a later unit after invalid windows have been skipped. Once the earliest
+    valid five-unit window exists, later faster-completing windows must not
+    replace it with hindsight.
+    """
+
+    if result is None or not units:
+        return []
+    source_kind = SourceKind(units[0].source_kind)
+    if source_kind is SourceKind.TREND_TYPE:
+        return []
+    index = {item.unit_id: offset for offset, item in enumerate(units)}
+    issues: list[str] = []
+    for position, previous in enumerate(result.centers):
+        if previous.state is not CenterState.COMPLETED:
+            continue
+        leave = previous.completion_leave_unit
+        if leave is None:
+            continue
+        resume_start = index[leave.unit_id]
+        expected_start = None
+        for start in range(
+            resume_start,
+            result.locked_unit_count - 4,
+        ):
+            candidate = establish_center(
+                units[start : start + 5],
+                result.structural_level,
+                source_kind,
+            )
+            if candidate is not None:
+                expected_start = start
+                break
+        if expected_start is None:
+            continue
+        if position + 1 >= len(result.centers):
+            issues.append(
+                "POST_THIRD_POINT_CENTER_MISSING_"
+                f"AFTER_{resume_start}_AT_{expected_start}"
+            )
+            continue
+        following = result.centers[position + 1]
+        following_start = index[following.entry_unit.unit_id]
+        if following_start != expected_start:
+            issues.append(
+                "POST_THIRD_POINT_CENTER_REPLACED_"
+                f"AFTER_{resume_start}_AT_{expected_start}_BY_{following_start}"
+            )
+
+    if (
+        result.locked_unit_count < len(units)
+        and result.centers
+        and result.centers[-1].state is CenterState.COMPLETED
+    ):
+        previous = result.centers[-1]
+        completion_return = previous.completion_return_unit
+        if completion_return is None:
+            issues.append("POST_THIRD_POINT_COMPLETION_RETURN_MISSING")
+            return issues
+        return_start = index[completion_return.unit_id]
+        resume_start = return_start - 1
+        first_live_start = max(
+            resume_start,
+            result.locked_unit_count - 4,
+        )
+        expected_preview_start = None
+        for start in range(first_live_start, len(units) - 4):
+            preview = establish_center_preview(
+                units[start : start + 5],
+                result.structural_level,
+                source_kind,
+            )
+            if preview is not None:
+                preview = _advance_center_preview_lifecycle(
+                    preview,
+                    units[start : start + 5],
+                    units[start + 5 :],
+                )
+            if preview is not None:
+                expected_preview_start = start
+                break
+        if expected_preview_start is not None:
+            live = [
+                preview
+                for preview in result.previews
+                if preview.state
+                in (CenterPreviewState.FORMING, CenterPreviewState.COMPLETED)
+            ]
+            if not live:
+                issues.append(
+                    "POST_THIRD_POINT_PREVIEW_MISSING_"
+                    f"AFTER_{resume_start}_AT_{expected_preview_start}"
+                )
+            else:
+                actual_preview_starts = {
+                    index[preview.entry_unit_id]
+                    for preview in live
+                    if preview.entry_unit_id in index
+                }
+                if expected_preview_start not in actual_preview_starts:
+                    replacement_start = min(
+                        actual_preview_starts,
+                        default=-1,
+                    )
+                    issues.append(
+                        "POST_THIRD_POINT_PREVIEW_REPLACED_"
+                        f"AFTER_{resume_start}_AT_{expected_preview_start}_"
+                        f"BY_{replacement_start}"
+                    )
+
+    # A provisional completion can occur while its formal owner is still
+    # ongoing. Its leave is nevertheless the causal entry of the next live
+    # center. Audit the four-component disclosure gate as well as mature
+    # five-component windows so the terminal center cannot disappear merely
+    # because its fifth component has not arrived yet.
+    active_owner = next(
+        (
+            center
+            for center in reversed(result.centers)
+            if center.state is CenterState.ONGOING
+        ),
+        None,
+    )
+    for completed in result.previews:
+        if completed.state is not CenterPreviewState.COMPLETED:
+            continue
+        if (
+            active_owner is not None
+            and not _preview_matches_center_seed(completed, active_owner)
+        ):
+            # A shifted completed observation is stronger than an ordinary
+            # shifted forming window, but it still does not own the unresolved
+            # formal center's suffix. It cannot spawn another decomposition.
+            continue
+        return_id = completed.completion_return_unit_id
+        if return_id is None or return_id not in index:
+            issues.append("LIVE_COMPLETION_RETURN_MISSING")
+            continue
+        resume_start = index[return_id] - 1
+        expected_preview_start = None
+        for start in range(resume_start, len(units) - 3):
+            remaining = len(units) - start
+            if remaining >= 5:
+                preview = establish_center_preview(
+                    units[start : start + 5],
+                    result.structural_level,
+                    source_kind,
+                )
+                if preview is not None:
+                    preview = _advance_center_preview_lifecycle(
+                        preview,
+                        units[start : start + 5],
+                        units[start + 5 :],
+                    )
+            else:
+                preview = forming_preview(
+                    units[start:],
+                    result.structural_level,
+                    source_kind,
+                )
+            if (
+                preview is not None
+                and preview.state
+                in (CenterPreviewState.FORMING, CenterPreviewState.COMPLETED)
+                and preview.zd_tick is not None
+                and preview.zg_tick is not None
+            ):
+                expected_preview_start = start
+                break
+        if expected_preview_start is None:
+            continue
+        successor_starts = {
+            index[preview.entry_unit_id]
+            for preview in result.previews
+            if preview.entry_unit_id in index
+            and index[preview.entry_unit_id] >= resume_start
+        }
+        if expected_preview_start not in successor_starts:
+            issues.append(
+                "LIVE_POST_THIRD_POINT_PREVIEW_MISSING_"
+                f"AFTER_{resume_start}_AT_{expected_preview_start}"
+            )
+    return issues
+
+
+def _display_completed_center_recall_issues(result, payloads) -> list[str]:
+    """Require every canonical completed center to survive display reduction.
+
+    A live preview may replace the snapshot of its own seed, but a completed
+    canonical center is immutable evidence and must never disappear merely
+    because its leaving segment is reused as the next center's entry.
+    """
+
+    if result is None:
+        return []
+    displayed_entries: set[tuple[str, int, int]] = set()
+    for value in payloads:
+        if not isinstance(value, Mapping):
+            continue
+        entry = value.get("entering_segment")
+        if not isinstance(entry, Mapping):
+            continue
+        try:
+            displayed_entries.add(
+                (
+                    str(entry["direction"]),
+                    int(entry["start_time"]),
+                    int(entry["end_time"]),
+                )
+            )
+        except (KeyError, TypeError, ValueError):
+            continue
+    return [
+        f"DISPLAY_COMPLETED_CENTER_MISSING_{center.center_id}"
+        for center in result.centers
+        if center.state is CenterState.COMPLETED
+        and (
+            str(center.entry_unit.direction),
+            int(center.entry_unit.market_start.timestamp()),
+            int(center.entry_unit.market_end.timestamp()),
+        )
+        not in displayed_entries
+    ]
 
 
 def _preview_ownership_issues(result) -> list[str]:
@@ -355,14 +722,23 @@ def _preview_ownership_issues(result) -> list[str]:
     if active is None or not forming:
         return issues
 
-    width = len(active.initial_units)
-    active_seed = tuple(item.unit_id for item in active.initial_units)
-    forming_seed = tuple(forming[0].unit_ids[:width])
+    active_seed = (
+        active.entry_unit.unit_id,
+        *(item.unit_id for item in active.core_units),
+    )
+    forming_seed = (
+        forming[0].entry_unit_id,
+        *forming[0].unit_ids[:3],
+    )
     if forming_seed == active_seed:
         return issues
     completed_active_projection = any(
         value.state is CenterPreviewState.COMPLETED
-        and tuple(value.unit_ids[:width]) == active_seed
+        and (
+            value.entry_unit_id,
+            *value.unit_ids[:3],
+        )
+        == active_seed
         for value in result.previews
     )
     if not completed_active_projection:
@@ -574,7 +950,7 @@ def _snapshot_issues(evidence, snapshot) -> list[str]:
     """Exercise the production serializer and audit its cardinality contract."""
 
     issues: list[str] = []
-    if snapshot.get("schema") != "chanlun-chart-structure/v5":
+    if snapshot.get("schema") != "chanlun-chart-structure/v12":
         issues.append("STRICT_SNAPSHOT_SCHEMA_MISMATCH")
     levels = snapshot.get("levels")
     if not isinstance(levels, list) or len(levels) != len(
@@ -706,6 +1082,35 @@ def _immutable_prefix_issues(prefix_evidence, final_evidence, size: int) -> list
                 f"{item.evidence_id}"
             )
     return issues
+
+
+_TERMINAL_REWRITE_MARKERS = (
+    ("COMPLETED_CENTER_REWRITTEN", "completed_center"),
+    ("COMPLETED_TREND_REWRITTEN", "completed_trend"),
+    ("CONFIRMED_POINT_REWRITTEN", "confirmed_point"),
+    ("DIVERGENCE_REWRITTEN", "divergence"),
+    ("NINE_SEGMENT_UPGRADE_REWRITTEN", "nine_segment_upgrade"),
+    ("_LEVEL_", "recursive_level"),
+)
+
+
+def _terminal_projection_rewrite_counts(
+    issues: Iterable[str],
+) -> dict[str, int]:
+    """Classify projection rewrites so signal changes cannot hide in a total."""
+
+    counts: Counter[str] = Counter()
+    for issue in issues:
+        kind = next(
+            (
+                label
+                for marker, label in _TERMINAL_REWRITE_MARKERS
+                if marker in issue
+            ),
+            "other",
+        )
+        counts[kind] += 1
+    return dict(sorted(counts.items()))
 
 
 def _causal_frame(
@@ -900,6 +1305,10 @@ def _audit_dataset(
         result, units = _raw_result(lines, price_basis=raw_basis)
         if result is not None:
             issues.extend(_preview_ownership_issues(result))
+            issues.extend(_post_completion_recall_issues(result, units))
+            issues.extend(
+                _display_completed_center_recall_issues(result, payloads)
+            )
         strict_config = strict_cl_config(
             structure_price_quantum=strict_quantum,
             price_basis_revision=raw_basis,
@@ -915,6 +1324,13 @@ def _audit_dataset(
             issues.extend(
                 f"STRICT_LEVEL_{level.structural_level}_{issue}"
                 for issue in _preview_ownership_issues(level.center_result)
+            )
+            issues.extend(
+                f"STRICT_LEVEL_{level.structural_level}_{issue}"
+                for issue in _post_completion_recall_issues(
+                    level.center_result,
+                    level.units,
+                )
             )
         stroke_observations = strict_calculation.get_stroke_observation_centers()
         issues.extend(
@@ -1064,6 +1480,9 @@ def _audit_dataset(
         terminal_projection_rewrites = sorted(
             set(terminal_projection_rewrites)
         )
+        terminal_projection_rewrite_counts = (
+            _terminal_projection_rewrite_counts(terminal_projection_rewrites)
+        )
         return {
             "identity": identity,
             "path": str(path),
@@ -1108,6 +1527,9 @@ def _audit_dataset(
                 terminal_projection_rewrites
             ),
             "terminal_projection_rewrites": terminal_projection_rewrites,
+            "terminal_projection_rewrite_counts": (
+                terminal_projection_rewrite_counts
+            ),
             "price_basis_source": price_basis_source,
             "active_center_count": sum(
                 value.get("center_state", value.get("state"))
@@ -1139,6 +1561,7 @@ def _audit_dataset(
             "bar_prefix_count": 0,
             "terminal_projection_rewrite_count": 0,
             "terminal_projection_rewrites": [],
+            "terminal_projection_rewrite_counts": {},
             "price_basis_source": "unavailable",
             "active_center_count": 0,
             "duration_ms": round((time.perf_counter() - started) * 1000, 3),
@@ -1181,6 +1604,15 @@ def main() -> int:
     results.sort(key=lambda value: str(value["identity"]))
     failed = [value for value in results if value["status"] == "fail"]
     errors = [value for value in results if value["status"] == "error"]
+    terminal_rewrite_counts: Counter[str] = Counter()
+    terminal_rewrite_datasets: defaultdict[str, list[str]] = defaultdict(list)
+    for value in results:
+        rewrite_counts = value["terminal_projection_rewrite_counts"]
+        if not isinstance(rewrite_counts, Mapping):
+            raise TypeError("terminal projection rewrite counts must be a mapping")
+        for kind, count in rewrite_counts.items():
+            terminal_rewrite_counts[str(kind)] += int(count)
+            terminal_rewrite_datasets[str(kind)].append(str(value["identity"]))
     payload = {
         "schema": SCHEMA,
         "observed_at": datetime.now().astimezone().isoformat(),
@@ -1243,6 +1675,13 @@ def main() -> int:
             int(value["terminal_projection_rewrite_count"]) > 0
             for value in results
         ),
+        "terminal_projection_rewrite_counts_by_kind": dict(
+            sorted(terminal_rewrite_counts.items())
+        ),
+        "terminal_projection_rewrite_datasets_by_kind": {
+            kind: sorted(set(identities))
+            for kind, identities in sorted(terminal_rewrite_datasets.items())
+        },
         "production_basis_count": sum(
             value["price_basis_source"] == "cached_production"
             for value in results

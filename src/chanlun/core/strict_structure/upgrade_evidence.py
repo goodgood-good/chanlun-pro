@@ -113,12 +113,13 @@ class RecursiveUpgradeEvidence:
 def _center_touch_units(center: TrendCenter):
     """Return only the lower-level movements that actually touch the core.
 
-    All source kinds use their first three components as the center core.  A
-    completed departure is the final body unit and is excluded from the
-    nine-touch count.
+    All source kinds use three components as the frozen center core.  Failed
+    departures and their re-entry legs are folded into ``body_units``;
+    successful pending/completion leaves remain external and therefore need
+    no positional exclusion here.
     """
 
-    return center.body_units[:-1]
+    return center.body_units
 
 
 def _resolved_standard_center(
@@ -148,8 +149,8 @@ def _nine_segment_evidence(
 ) -> RecursiveUpgradeEvidence | None:
     if center.state is not CenterState.COMPLETED:
         return None
-    # ``body_units`` = first-three core + extensions + completed leave.  The
-    # original nine-segment rule counts only center-touching movements.
+    # ``body_units`` already contains only center-touching movements.  Entry,
+    # successful leave and first return are external lifecycle evidence.
     touch_units = _center_touch_units(center)
     if len(touch_units) < 9:
         return None
@@ -166,7 +167,23 @@ def _nine_segment_evidence(
         return None
     source_ids = tuple(item.unit_id for item in establishing)
     extension_ids = tuple(item.unit_id for item in extension)
-    resolved = _resolved_standard_center(center, target_centers)
+    available_at = max(
+        center.available_at,
+        *(item.available_at for item in establishing),
+    )
+    # A confirmed nine-segment derivation is append-only evidence.  A standard
+    # higher-level center discovered later may describe the same geometry, but
+    # must not retroactively mutate this historical evidence object.  Record a
+    # resolution link only when that target was already observable when the
+    # derivation itself first became available.
+    resolved = _resolved_standard_center(
+        center,
+        tuple(
+            target
+            for target in target_centers
+            if target.available_at <= available_at
+        ),
+    )
     evidence_id = stable_structure_id(
         "chanlun-nine-segment-upgrade/v1",
         center.price_basis_revision,
@@ -194,10 +211,7 @@ def _nine_segment_evidence(
         market_end=establishing[-1].market_end,
         # A completed source center is the conservative immutable boundary for
         # a derived context.  This never back-dates the upgrade to its ninth leg.
-        available_at=max(
-            center.available_at,
-            *(item.available_at for item in establishing),
-        ),
+        available_at=available_at,
         resolved_by_standard_center_id=resolved,
         signal_eligible=False,
     )

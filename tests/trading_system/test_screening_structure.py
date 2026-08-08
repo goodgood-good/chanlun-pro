@@ -71,11 +71,13 @@ def test_completed_preview_from_unfinished_segment_is_non_actionable() -> None:
         structural_level=0,
         source_kind=SourceKind.SEGMENT,
         price_basis_revision=BASIS,
-        unit_ids=tuple(unit.unit_id for unit in units[:5]),
+        entry_unit_id=units[0].unit_id,
+        unit_ids=tuple(unit.unit_id for unit in units[1:4]),
         state=CenterPreviewState.COMPLETED,
         zd_tick=9,
         zg_tick=11,
         available_at=NOW,
+        completion_leave_unit_id=units[4].unit_id,
         completion_return_unit_id=units[5].unit_id,
     )
     center_result = CenterLevelResult(
@@ -172,4 +174,3 @@ def test_builder_always_returns_one_physical_segment_level() -> None:
         unit.source_kind is SourceKind.SEGMENT
         for unit in evidence.structure.levels[0].units
     )
-

@@ -6,6 +6,7 @@ import pytest
 from chanlun.decision_support.trading_system.lifecycle import (
     advance_lifecycle,
     build_setup,
+    lifecycle_stage_from_signal,
     match_one_minute_trigger,
 )
 from tests.trading_system.helpers import (
@@ -59,6 +60,63 @@ def test_provisional_five_minute_candidate_cannot_reach_triggered() -> None:
 
     assert lifecycle.stage == "approaching"
     assert lifecycle.actionable is False
+
+
+def test_geometrically_completed_third_class_candidate_is_formed() -> None:
+    point = replace(
+        provisional_point("3buy"),
+        evidence_codes=(
+            "physical_timeframe_level_zero",
+            "provisional_center_completion",
+            "core_boundary_held",
+        ),
+    )
+    setup = build_setup(
+        point,
+        neutral_context("30m"),
+        eligible_sector(),
+    )
+
+    lifecycle = advance_lifecycle(None, setup, None, as_of=AS_OF)
+
+    assert lifecycle.stage == "formed"
+    assert lifecycle.reason_codes == ("five_minute_geometric_point_formed",)
+    assert lifecycle.actionable is False
+
+
+def test_legacy_serialized_completed_preview_uses_formed_stage() -> None:
+    signal = {
+        "point_type": "3buy",
+        "lifecycle_stage": "approaching",
+        "setup_5m": {
+            "point_type": "3buy",
+            "status": "provisional",
+            "evidence_codes": [
+                "physical_timeframe_level_zero",
+                "provisional_center_completion",
+                "core_boundary_held",
+            ],
+        },
+    }
+
+    assert lifecycle_stage_from_signal(signal) == "formed"
+
+
+def test_formed_evidence_does_not_promote_non_third_class_candidate() -> None:
+    signal = {
+        "point_type": "2buy",
+        "lifecycle_stage": "approaching",
+        "setup_5m": {
+            "point_type": "2buy",
+            "status": "provisional",
+            "evidence_codes": [
+                "provisional_center_completion",
+                "core_boundary_held",
+            ],
+        },
+    }
+
+    assert lifecycle_stage_from_signal(signal) == "approaching"
 
 
 def test_trigger_before_setup_start_is_rejected() -> None:

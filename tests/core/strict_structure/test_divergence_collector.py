@@ -16,6 +16,7 @@ from tests.core.strict_structure.helpers import (
     structure_for,
     unit,
 )
+from tests.core.strict_structure.test_first_class_points import UP_VALUES
 
 
 def completed_consolidation_fixture(level=0):
@@ -34,34 +35,21 @@ def completed_consolidation_fixture(level=0):
 
 
 def completed_trend_fixture(level=0):
-    values = (
-        unit(0, "up", 90, 120, structural_level=level),
-        unit(1, "down", 120, 100, structural_level=level),
-        unit(2, "up", 100, 115, structural_level=level),
-        unit(3, "down", 115, 105, structural_level=level),
-        unit(4, "up", 105, 130, structural_level=level),
-        unit(5, "down", 130, 120, structural_level=level),
-        unit(6, "up", 120, 140, structural_level=level),
-        unit(7, "down", 140, 135, structural_level=level),
-        unit(8, "up", 135, 160, structural_level=level),
-        unit(9, "down", 160, 140, structural_level=level),
-        unit(10, "up", 140, 155, structural_level=level),
-        unit(11, "down", 155, 145, structural_level=level),
-        unit(12, "up", 145, 170, structural_level=level),
-        unit(13, "down", 170, 160, structural_level=level),
+    values = tuple(
+        unit(index, direction, start, end, structural_level=level)
+        for index, (direction, start, end) in enumerate(UP_VALUES[:18])
     )
     center_result = calculate_centers(values, level, SourceKind.SEGMENT)
-    assert len(center_result.centers) == 2
-    first, second = center_result.centers
     assembly = assemble_trend_types(center_result.centers, values, level)
     trend = next(
         item
         for item in assembly.completed_trends
         if item.kind is TrendKind.TREND and len(item.centers) == 2
     )
+    first, second = trend.centers
     return (
         structure_for(first, second, completed_trends=(trend,)),
-        values[6],
+        second.entry_unit,
         trend.terminal_unit,
     )
 

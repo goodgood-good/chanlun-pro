@@ -31,11 +31,17 @@ def test_locked_return_into_core_extends_without_moving_core():
     updated, event = advance_center(value, ret)
     assert updated.state is CenterState.ONGOING
     assert updated.pending_leave_unit is None
-    assert updated.extension_units == value.extension_units + (ret,)
-    assert updated.body_units == value.body_units + (ret,)
+    assert updated.extension_units == value.extension_units + (
+        value.pending_leave_unit,
+        ret,
+    )
+    assert updated.body_units == value.body_units + (
+        value.pending_leave_unit,
+        ret,
+    )
     assert updated.center_id == value.center_id
     assert (updated.zd_tick, updated.zg_tick) == (105, 115)
-    assert updated.body_revision == value.body_revision + 1
+    assert updated.body_revision == value.body_revision + 2
     assert event.kind is CenterEventKind.EXTENDED
 
 
@@ -83,7 +89,11 @@ def test_return_extension_then_new_leave_keeps_core_and_emits_watch():
     assert first_event.kind is CenterEventKind.EXTENDED
     assert pending.state is CenterState.ONGOING
     assert pending.pending_leave_unit is leave
-    assert pending.extension_units == value.extension_units + (entered, leave)
+    assert pending.extension_units == value.extension_units + (
+        value.pending_leave_unit,
+        entered,
+    )
+    assert leave not in pending.body_units
     assert pending.body_revision == value.body_revision + 2
     assert pending.center_id == value.center_id
     assert (pending.zd_tick, pending.zg_tick) == (105, 115)
@@ -97,35 +107,47 @@ def test_return_extension_then_new_leave_keeps_core_and_emits_watch():
     assert completion.kind is CenterEventKind.COMPLETED_UP
 
 
-def test_return_crossing_core_can_become_an_opposite_down_leave():
+def test_opposite_down_crossing_reuses_return_as_new_leave():
     value = _ongoing_up_center()
     crossed = unit(5, "down", 130, 95)
     pending, event = advance_center(value, crossed)
 
     assert pending.state is CenterState.ONGOING
     assert pending.pending_leave_unit is crossed
-    assert pending.extension_units == value.extension_units + (crossed,)
+    assert pending.extension_units == value.extension_units + (
+        value.pending_leave_unit,
+    )
+    assert crossed.direction != value.entry_unit.direction
     assert event.kind is CenterEventKind.BREAKOUT_WATCH_DOWN
 
-    ret = unit(6, "up", 95, 100)
-    completed, completion = advance_center(pending, ret)
+    completed, completion = advance_center(
+        pending,
+        unit(6, "up", 95, 100),
+    )
     assert completed.state is CenterState.COMPLETED
+    assert completed.completion_leave_unit is crossed
     assert completion.kind is CenterEventKind.COMPLETED_DOWN
 
 
-def test_return_crossing_core_can_become_an_opposite_up_leave():
+def test_opposite_up_crossing_reuses_return_as_new_leave():
     value = _ongoing_down_center()
     crossed = unit(5, "up", 80, 115)
     pending, event = advance_center(value, crossed)
 
     assert pending.state is CenterState.ONGOING
     assert pending.pending_leave_unit is crossed
-    assert pending.extension_units == value.extension_units + (crossed,)
+    assert pending.extension_units == value.extension_units + (
+        value.pending_leave_unit,
+    )
+    assert crossed.direction != value.entry_unit.direction
     assert event.kind is CenterEventKind.BREAKOUT_WATCH_UP
 
-    ret = unit(6, "down", 115, 110)
-    completed, completion = advance_center(pending, ret)
+    completed, completion = advance_center(
+        pending,
+        unit(6, "down", 115, 110),
+    )
     assert completed.state is CenterState.COMPLETED
+    assert completed.completion_leave_unit is crossed
     assert completion.kind is CenterEventKind.COMPLETED_UP
 
 

@@ -588,6 +588,34 @@ test('中枢矩形的局部样式覆盖不得丢失级别颜色和线宽', () =>
   assert.equal(calls[0].options.overrides.linestyle, 0);
 });
 
+test('走势线透明度覆盖不得丢失级别颜色、线宽和完成状态', () => {
+  const { ChartUtils } = loadChartManager();
+  const calls = [];
+  const chart = {
+    createMultipointShape(points, options) {
+      calls.push({ points, options });
+      return 'trend-shape';
+    },
+  };
+  const points = [
+    { time: 1_700_000_000, price: 10 },
+    { time: 1_700_000_300, price: 12 },
+  ];
+
+  const id = ChartUtils.createLineShape(
+    chart,
+    { points, linestyle: 2 },
+    { color: '#0F766E', linewidth: 2, overrides: { transparency: 30 } },
+  );
+
+  assert.equal(id, 'trend-shape');
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].options.overrides.linecolor, '#0F766E');
+  assert.equal(calls[0].options.overrides.linewidth, 2);
+  assert.equal(calls[0].options.overrides.linestyle, 2);
+  assert.equal(calls[0].options.overrides.transparency, 30);
+});
+
 test('CSP 模式禁用 blob iframe 并使用同源 TradingView 启动页', () => {
   const { disabledFeatures } = loadChartManager();
   assert.ok(Array.isArray(disabledFeatures));

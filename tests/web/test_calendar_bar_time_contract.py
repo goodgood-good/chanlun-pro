@@ -88,7 +88,7 @@ def test_calendar_poll_window_includes_the_active_period() -> None:
 
 def test_final_response_close_must_match_atomic_strict_snapshot() -> None:
     strict = {
-        "schema": "chanlun-chart-structure/v5",
+        "schema": "chanlun-chart-structure/v12",
         "source_closed_at": _ts(2026, 7, 31, 7),
     }
     chart_data = {
@@ -134,7 +134,7 @@ def test_monthly_history_response_keeps_active_bar_and_matching_strict_snapshot(
     chart_data.update({
         "strict_structure_mode": "replace",
         "strict_structure": {
-            "schema": "chanlun-chart-structure/v5",
+            "schema": "chanlun-chart-structure/v12",
             "source_closed_at": july_close,
         },
     })

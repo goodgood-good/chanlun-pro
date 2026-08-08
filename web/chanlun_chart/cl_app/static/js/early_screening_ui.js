@@ -16,11 +16,12 @@
     executable: 0,
     triggered: 1,
     armed: 2,
-    approaching: 3,
-    observed: 4,
-    active: 5,
-    invalidated: 6,
-    closed: 7,
+    formed: 3,
+    approaching: 4,
+    observed: 5,
+    active: 6,
+    invalidated: 7,
+    closed: 8,
   };
   const FREQUENCIES = new Set(["d", "30m", "5m", "1m"]);
   const LAYOUTS = new Set(["focus", "dual", "triple"]);
@@ -36,6 +37,7 @@
   const LIFECYCLE_LABELS = {
     observed: "结构观察",
     approaching: "即将确认",
+    formed: "已形成",
     armed: "已入观察池",
     triggered: "1分钟已触发",
     executable: "强提示待人工复核",
@@ -47,6 +49,28 @@
   function lifecycleLabel(value) {
     const stage = text(value, "");
     return LIFECYCLE_LABELS[stage] || "未知状态";
+  }
+
+  function lifecycleStageForSignal(signal) {
+    const safeSignal = isRecord(signal) ? signal : {};
+    const stage = text(safeSignal.lifecycle_stage, "");
+    const setup = isRecord(safeSignal.setup_5m) ? safeSignal.setup_5m : {};
+    const pointType = text(setup.point_type || safeSignal.point_type, "");
+    const evidence = Array.isArray(setup.evidence_codes)
+      ? setup.evidence_codes.map((value) => text(value, ""))
+      : [];
+    // Snapshots produced before the dedicated `formed` lifecycle used
+    // `approaching` for both a genuinely pending point and a completed
+    // leave/first-return geometry.  Normalize only the latter so persisted
+    // snapshots immediately display the same semantics as fresh evaluations.
+    if (
+      stage === "approaching"
+      && setup.status === "provisional"
+      && ["3buy", "3sell"].includes(pointType)
+      && evidence.includes("provisional_center_completion")
+      && evidence.includes("core_boundary_held")
+    ) return "formed";
+    return stage;
   }
   const DIRECTION_LABELS = { up: "向上", down: "向下", neutral: "震荡" };
   const DISPOSITION_LABELS = { supportive: "支撑", neutral: "中性", hostile: "风险" };
@@ -63,6 +87,7 @@
   const REASON_LABELS = {
     structural_ranking_only: "仅按缠论结构排序",
     core_confirmed_point: "核心买卖点已确认",
+    five_minute_geometric_point_formed: "5分钟三类买卖点几何已形成，等待线段锁定",
     one_minute_not_confirmed: "1分钟同向确认尚未完成",
     one_minute_sell_not_confirmed: "1分钟同向卖点确认尚未完成",
     confirmed_sell_with_down_structure: "下跌结构中的卖点已确认",
@@ -619,7 +644,9 @@
 
   function defaultFrequencyForSignal(signal) {
     const safeSignal = isRecord(signal) ? signal : {};
-    return ["triggered", "executable", "active"].includes(safeSignal.lifecycle_stage)
+    return ["triggered", "executable", "active"].includes(
+      lifecycleStageForSignal(safeSignal),
+    )
       ? "1m"
       : "5m";
   }
@@ -682,7 +709,7 @@
 
   function decisionSummaryForSignal(signal) {
     const safeSignal = isRecord(signal) ? signal : {};
-    const stage = text(safeSignal.lifecycle_stage, "");
+    const stage = lifecycleStageForSignal(safeSignal);
     const setup = isRecord(safeSignal.setup_5m) ? safeSignal.setup_5m : {};
     const allowed = safeSignal.entry_allowed === true || safeSignal.exit_allowed === true;
     let tone = "neutral";
@@ -699,6 +726,9 @@
     } else if (stage === "armed") {
       tone = "waiting";
       title = "等待 1分钟精确触发";
+    } else if (stage === "formed") {
+      tone = "waiting";
+      title = "5分钟三类买卖点已形成，等待线段锁定";
     } else if (stage === "approaching") {
       tone = "waiting";
       title = "5分钟结构正在形成";
@@ -757,9 +787,19 @@
 
     let setupState = "未知";
     let setupTone = "unknown";
+    const setupEvidenceCodes = Array.isArray(setup.evidence_codes)
+      ? setup.evidence_codes
+      : [];
     if (setup.status === "confirmed") {
       setupState = "已确认";
       setupTone = "supportive";
+    } else if (
+      setup.status === "provisional"
+      && setupEvidenceCodes.includes("provisional_center_completion")
+      && setupEvidenceCodes.includes("core_boundary_held")
+    ) {
+      setupState = "已形成（待锁定）";
+      setupTone = "waiting";
     } else if (setup.status === "provisional") {
       setupState = "形成中";
       setupTone = "waiting";
@@ -930,6 +970,7 @@
 
   function evidenceGroupsForSignal(signal) {
     const safeSignal = isRecord(signal) ? signal : {};
+    const stage = lifecycleStageForSignal(safeSignal);
     const daily = isRecord(safeSignal.context_d) ? safeSignal.context_d : {};
     const context = isRecord(safeSignal.context_30m) ? safeSignal.context_30m : {};
     const setup = isRecord(safeSignal.setup_5m) ? safeSignal.setup_5m : {};
@@ -1161,6 +1202,7 @@
     const nextByStage = {
       observed: "等待 5分钟形成可审计买卖点设置",
       approaching: "等待 5分钟设置闭合并确认",
+      formed: "三类买卖点几何已形成；等待相关线段锁定后进入正式观察池",
       armed: "等待 1分钟同向买卖点闭合",
       triggered: "等待人工核对下一根已完成 K 线",
       executable: "人工复核中枢、走势类型、级别与买卖点",
@@ -1197,7 +1239,7 @@
         ? nativeDailyCalendarLines("个股", symbolNativeDailyCalendar)
         : []),
       ]),
-      next: [nextByStage[safeSignal.lifecycle_stage] || "等待新的可审计结构事实"],
+      next: [nextByStage[stage] || "等待新的可审计结构事实"],
       risk: [
         `5分钟失效价：${invalidation}`,
         `结构防守价：${structuralStop}`,
@@ -1288,7 +1330,20 @@
     if (!Array.isArray(value.sectors) || !Array.isArray(value.signals) || !isRecord(value.data_quality)) {
       throw new Error("snapshot_shape_invalid");
     }
-    const signals = value.signals.filter(isRecord).map((row) => ({ ...row }));
+    const normalizeSignal = (row) => {
+      const signal = { ...row };
+      signal.lifecycle_stage = lifecycleStageForSignal(signal);
+      return signal;
+    };
+    const signals = value.signals.filter(isRecord).map(normalizeSignal);
+    const manualHoldingSignals = Array.isArray(value.manual_holding_signals)
+      ? value.manual_holding_signals.filter(isRecord).map(normalizeSignal)
+      : [];
+    const countsByStage = {};
+    signals.forEach((signal) => {
+      const stage = text(signal.lifecycle_stage, "unknown");
+      countsByStage[stage] = (countsByStage[stage] || 0) + 1;
+    });
     if (signals.some((signal) => {
       const risk = isRecord(signal.higher_timeframe_risk)
         ? signal.higher_timeframe_risk
@@ -1299,10 +1354,11 @@
     }
     return {
       ...value,
-      counts_by_stage: isRecord(value.counts_by_stage) ? { ...value.counts_by_stage } : {},
+      counts_by_stage: countsByStage,
       counts_by_point_type: isRecord(value.counts_by_point_type)
         ? { ...value.counts_by_point_type }
         : Object.fromEntries(POINT_TYPES.map((point) => [point, 0])),
+      manual_holding_signals: manualHoldingSignals,
       sectors: value.sectors.filter(isRecord).map((row) => ({ ...row })),
       signals,
       data_quality: { ...value.data_quality },
@@ -1321,7 +1377,7 @@
       if (pointType === "buy" && !signalPoint.endsWith("buy")) return false;
       if (pointType === "sell" && !signalPoint.endsWith("sell")) return false;
       if (!["all", "buy", "sell"].includes(pointType) && signalPoint !== pointType) return false;
-      if (lifecycle !== "all" && signal.lifecycle_stage !== lifecycle) return false;
+      if (lifecycle !== "all" && lifecycleStageForSignal(signal) !== lifecycle) return false;
       const sector = isRecord(signal.sector) ? signal.sector : {};
       if (sectorId !== "all" && text(sector.sector_id, "unclassified") !== sectorId) return false;
       if (!query) return true;
@@ -1342,9 +1398,9 @@
     );
     const pointOrder = new Map(POINT_TYPES.map((value, index) => [value, index]));
     return (Array.isArray(signals) ? signals : []).slice().sort((left, right) => {
-      const leftStage = REVIEW_STAGE_ORDER[text(left && left.lifecycle_stage, "")]
+      const leftStage = REVIEW_STAGE_ORDER[lifecycleStageForSignal(left)]
         ?? Number.MAX_SAFE_INTEGER;
-      const rightStage = REVIEW_STAGE_ORDER[text(right && right.lifecycle_stage, "")]
+      const rightStage = REVIEW_STAGE_ORDER[lifecycleStageForSignal(right)]
         ?? Number.MAX_SAFE_INTEGER;
       if (leftStage !== rightStage) return leftStage - rightStage;
       const leftSector = isRecord(left && left.sector) ? left.sector : {};
@@ -1569,7 +1625,7 @@
     const tags = element(documentRef, "span", "es-signal-card__tags");
     tags.append(
       element(documentRef, "b", "", POINT_LABELS[signal.point_type] || text(signal.point_type)),
-      element(documentRef, "em", "", lifecycleLabel(signal.lifecycle_stage)),
+      element(documentRef, "em", "", lifecycleLabel(lifecycleStageForSignal(signal))),
       element(documentRef, "em", "", selectionLabelForSignal(signal)),
     );
     const sector = isRecord(signal.sector) ? signal.sector : {};
@@ -1748,7 +1804,11 @@
     setNodeText(rootElement, "[data-selected-name]", text(signal.name, signal.code));
     setNodeText(rootElement, "[data-selected-code]", signal.code);
     setNodeText(rootElement, "[data-selected-point]", POINT_LABELS[signal.point_type] || signal.point_type);
-    setNodeText(rootElement, "[data-selected-stage]", lifecycleLabel(signal.lifecycle_stage));
+    setNodeText(
+      rootElement,
+      "[data-selected-stage]",
+      lifecycleLabel(lifecycleStageForSignal(signal)),
+    );
     setNodeText(rootElement, "[data-selected-tower]", "老笔 → 线段中枢 / 本周期0级（非递归）");
     const selectedSetup = isRecord(signal.setup_5m) ? signal.setup_5m : {};
     setNodeText(
@@ -1839,6 +1899,7 @@
     filterSignals,
     groupSignalsBySector,
     lifecycleLabel,
+    lifecycleStageForSignal,
     manualFocusState,
     memberHistoryDiagnosticsText,
     normalizeSnapshot,

@@ -215,8 +215,8 @@ class ZsBranchCalculator:
 
         ``wzgx`` 默认 GD（GG/DD 严格口径，与 CL_CFG 默认一致；生产链路均由调用方
         显式传入，默认值只影响裸构造）。``min_zs_lines`` = 底层 ZsCalculator 的
-        center.lines 长度下限(**不含进入段**):递归链现全级别传 5(经
-        cl._recursive_l0_min_zs_lines);「level0=4/level≥1=3」为已废历史口径,默认 4 仅裸构造。
+        center.lines 长度下限（**不含进入段**）。物理 level0=4（外部进入另计），
+        递归 level>=1=3，由 RecursiveBranchCalculator 在每层显式传入。
 
         中枢段数不封顶(_NO_CAP)：曾试在第 8 段封顶，但逐标的·逐中枢·逐线段核验证伪
         并撤回——封顶会在第 8 段强制收口、把一个长盘整劈成两个核心区重叠的同级别中枢，

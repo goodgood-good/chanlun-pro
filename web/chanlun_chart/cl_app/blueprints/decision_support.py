@@ -10,6 +10,10 @@ from zoneinfo import ZoneInfo
 from flask import Blueprint, current_app, make_response, render_template, request
 from flask_login import current_user, login_required
 
+from chanlun.decision_support.trading_system.lifecycle import (
+    lifecycle_stage_from_signal,
+)
+
 from ..services.research_audit import (
     ResearchAuditUnavailable,
     build_research_audit_snapshot,
@@ -73,11 +77,15 @@ def _presentation_scope(
 ) -> dict[str, object]:
     """Bound the minute-polled response without changing the audit snapshot."""
 
-    signals = [
-        dict(value)
-        for value in output.get("signals", [])
-        if isinstance(value, Mapping)
-    ]
+    signals = []
+    for value in output.get("signals", []):
+        if not isinstance(value, Mapping):
+            continue
+        signal = dict(value)
+        effective_stage = lifecycle_stage_from_signal(signal)
+        if effective_stage is not None:
+            signal["lifecycle_stage"] = effective_stage
+        signals.append(signal)
     sector_triggered = [
         value
         for value in signals

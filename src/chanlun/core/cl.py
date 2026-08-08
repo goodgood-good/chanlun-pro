@@ -749,18 +749,18 @@ class CL(ICL):
     def _recursive_l0_min_zs_lines(self) -> int:
         """统一解析递归 L0 中枢成枢线数:所有链路必须经此单点读取。
 
-        fallback=5(用户口径 2026-06-26 拍板 4→5, commit 7c231295)。精确语义:ZsCalculator 的
-        min_zs_lines = center.lines 长度下限,而 lines **不含进入段**(进入段在 zs.start)——
-        故 5 = 与核心区重叠的段数(含离开段)≥5,比 7c231295 注释宣称的「进入+核心+离开=5」
-        实际严一段;golden/回测基线均已固化在该行为上,若要按字面意图放宽须另行拍板并联动重跑。
-        递归链(recursive_branch/recursive_calculator)**全级别统一**用本值——L≥1 走势类型
-        中枢同为 5(历史曾用 3,旧注释勿信)。
-        成枢门已统一(P1a):legacy 线段/笔中枢(zss_calculator/bi_zss_calculator, 见 __init__:80,82)
-        与递归链同用本单点值 min=5+封顶 8——落实 7c231295 拍板意图(曾同步笔层=5、被 3737497a
-        重构无声回退,现已一并统一;audit/zhihu_lizhengli_audit.md F1 的口径分裂已收敛)。
-        ⚠ 改成枢门 → 信号/买卖点变 → golden 须重生成 + 信号缓存版本 +1 + 回测基线须重跑。
+        ``ZsCalculator.center.lines`` 不包含保存在 ``zs.start`` 的外部进入段。
+        因而用户拍板的五角色“进入段 + 核心 A/B/C + 离开段”在 legacy
+        计数中应为 4。旧值 5 实际要求了六个角色，是本次逐字段审计确认的
+        off-by-one。更高递归层按原文由三个完成走势类型构成中枢。
+
+        ⚠ 修改该门会改变历史信号；须同步失效缓存、重跑 golden 与回测基线。
         """
-        return int(self.config.get('recursive_l0_min_zs_lines', 5) or 5)
+        # ``center.lines`` excludes the external entry stored in ``zs.start``.
+        # Four legacy lines therefore mean the approved five physical roles:
+        # entry + core A/B/C + leave.  The previous value 5 accidentally
+        # required six roles and is the source of the off-by-one geometry.
+        return int(self.config.get('recursive_l0_min_zs_lines', 4) or 4)
 
     def _recursive_branch_calc(self, use_xd: bool):
         """按塔(use_xd:False=笔/True=段)取 RecursiveBranchCalculator。设计上支持递归层增量(各级持久子
@@ -839,7 +839,10 @@ class CL(ICL):
         ld = lambda s, e: query_macd_ld(self, s, e)
         wzgx = self._recursive_wzgx()
         res = ZsBranchCalculator(
-            ld_provider=ld, frequency=self.frequency, wzgx=wzgx, min_zs_lines=5,  # 用户口径: 进入+核心+离开≥5
+            ld_provider=ld,
+            frequency=self.frequency,
+            wzgx=wzgx,
+            min_zs_lines=self._recursive_l0_min_zs_lines(),
         ).calculate(list(self.get_bis()))
         return res.done_zss
 

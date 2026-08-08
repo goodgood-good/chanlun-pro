@@ -5,7 +5,7 @@ from flask_login import LoginManager, UserMixin, login_user
 import pytest
 
 from cl_app.blueprints.alert import alert_bp
-from cl_app.blueprints.decision_support import decision_support_bp
+from cl_app.blueprints.decision_support import _presentation_scope, decision_support_bp
 
 
 class _User(UserMixin):
@@ -230,6 +230,37 @@ def test_early_signals_supports_bounded_sector_scope_without_breaking_legacy_all
     assert len(all_payload["signals"]) == 2
     assert all_payload["manual_holding_signals"] == []
     assert all_payload["counts_by_point_type"] == {"3buy": 1, "2buy": 1}
+
+
+def test_server_projection_normalizes_legacy_formed_holding_signal() -> None:
+    output = {
+        "signals": [
+            {
+                "signal_id": "sha256:" + "3" * 64,
+                "code": "SZ.301004",
+                "point_type": "3buy",
+                "lifecycle_stage": "approaching",
+                "selection_sources": ["QMT_SECTOR_TRIGGER", "HOLDING_MONITOR"],
+                "setup_5m": {
+                    "point_type": "3buy",
+                    "status": "provisional",
+                    "evidence_codes": [
+                        "provisional_center_completion",
+                        "core_boundary_held",
+                    ],
+                },
+            }
+        ],
+        "manual_holdings": {
+            "positions": [{"market": "a", "code": "SZ.301004"}],
+        },
+    }
+
+    projected = _presentation_scope(output, "sector-trigger")
+
+    assert projected["signals"][0]["lifecycle_stage"] == "formed"
+    assert projected["manual_holding_signals"][0]["lifecycle_stage"] == "formed"
+    assert projected["counts_by_stage"] == {"formed": 1}
 
 
 def test_early_signals_exposes_cross_market_manual_holdings_without_account_access(

@@ -13,7 +13,7 @@ from chanlun.core.strict_structure.models import (
 )
 from chanlun.core.strict_structure.trend_assembler import assemble_trend_types
 from chanlun.core.strict_structure.unit_adapter import trend_type_to_unit
-from tests.core.strict_structure.helpers import ongoing_center, unit, valid_five_up_exit
+from tests.core.strict_structure.helpers import ongoing_center, unit
 
 
 def three_center_fixture():
@@ -22,21 +22,21 @@ def three_center_fixture():
         unit(1, "down", 120, 100),
         unit(2, "up", 100, 115),
         unit(3, "down", 115, 105),
-        unit(4, "up", 105, 130),
-        unit(5, "down", 130, 120),
-        unit(6, "up", 120, 160),
-        unit(7, "down", 160, 150),
-        unit(8, "up", 150, 180),
-        unit(9, "down", 180, 160),
-        unit(10, "up", 160, 175),
-        unit(11, "down", 175, 165),
-        unit(12, "up", 165, 190),
-        unit(13, "down", 190, 180),
-        unit(14, "up", 180, 195),
-        unit(15, "down", 195, 175),
-        unit(16, "up", 175, 185),
-        unit(17, "down", 185, 160),
-        unit(18, "up", 160, 170),
+        unit(4, "up", 105, 140),
+        unit(5, "down", 140, 125),
+        unit(6, "up", 125, 175),
+        unit(7, "down", 175, 155),
+        unit(8, "up", 155, 175),
+        unit(9, "down", 175, 160),
+        unit(10, "up", 160, 190),
+        unit(11, "down", 190, 177),
+        unit(12, "up", 177, 200),
+        unit(13, "down", 200, 130),
+        unit(14, "up", 130, 150),
+        unit(15, "down", 150, 120),
+        unit(16, "up", 120, 145),
+        unit(17, "down", 145, 100),
+        unit(18, "up", 100, 120),
     )
     centers = calculate_centers(values, 0, SourceKind.SEGMENT).centers
     assert len(centers) == 3
@@ -87,14 +87,15 @@ def test_single_completed_center_owns_body_and_excludes_completion_return():
     trend = result.current_trends[0]
     assert trend.state is TrendState.COMPLETE
     assert trend.kind is TrendKind.CONSOLIDATION
-    assert trend.constituent_units == first.body_units == values[:5]
+    assert trend.constituent_units == values[:5]
+    assert first.body_units == values[1:4]
     assert trend.terminal_unit is first.completion_leave_unit
     assert first.completion_return_unit not in trend.constituent_units
 
 
 def test_two_separated_centers_form_complete_uptrend_with_internal_return():
     values, first, second, _third = three_center_fixture()
-    result = assemble_trend_types((first, second), values[:14], 0)
+    result = assemble_trend_types((first, second), values[:12], 0)
     trend = result.current_trends[0]
     assert trend.state is TrendState.COMPLETE
     assert trend.kind is TrendKind.TREND
@@ -146,7 +147,7 @@ def test_ongoing_boundary_does_not_lock_a_stable_completed_trend():
 
 def test_non_center_bridge_units_are_preserved_exactly_once():
     values, first, second, _third = three_center_fixture()
-    trend = assemble_trend_types((first, second), values[:14], 0).current_trends[0]
+    trend = assemble_trend_types((first, second), values[:12], 0).current_trends[0]
     bridge = values[5:7]
     assert all(item in trend.constituent_units for item in bridge)
     assert len({item.unit_id for item in trend.constituent_units}) == len(
@@ -154,41 +155,62 @@ def test_non_center_bridge_units_are_preserved_exactly_once():
     )
 
 
-def test_trend_assembler_uses_return_as_non_overlapping_boundary():
-    values = valid_five_up_exit() + (
+def test_trend_assembler_keeps_return_and_bridge_exactly_once_between_centers():
+    values, first, second, _third = three_center_fixture()
+    values = values[:12]
+    centers = (first, second)
+
+    result = assemble_trend_types(centers, values, 0)
+
+    assert len(centers) == 2
+    assert result.current_trends
+    assert len(result.current_trends) == 1
+    trend = result.current_trends[0]
+    ids = [item.unit_id for item in trend.constituent_units]
+    shared = centers[0].completion_return_unit
+    assert shared is not None
+    assert ids.count(shared.unit_id) == 1
+    assert centers[1].entry_unit.market_start >= shared.market_start
+    assert len(ids) == len(set(ids))
+
+
+def test_trend_assembler_accepts_leave_shared_as_next_center_entry():
+    values = (
+        unit(0, "up", 90, 120),
+        unit(1, "down", 120, 100),
+        unit(2, "up", 100, 115),
+        unit(3, "down", 115, 105),
+        unit(4, "up", 105, 130),
         unit(5, "down", 130, 120),
         unit(6, "up", 120, 140),
         unit(7, "down", 140, 125),
-        unit(8, "up", 125, 150),
-        unit(9, "down", 150, 135),
+        unit(8, "up", 125, 135),
+        unit(9, "down", 135, 132),
     )
     centers = calculate_centers(values, 0, SourceKind.SEGMENT).centers
 
     result = assemble_trend_types(centers, values, 0)
 
     assert len(centers) == 2
-    assert centers[0].completion_return_unit is centers[1].entry_unit
-    assert result.current_trends
+    assert centers[1].entry_unit is centers[0].completion_leave_unit
     assert len(result.current_trends) == 2
-    first_trend, second_trend = result.current_trends
-    assert first_trend.constituent_units[-1] is centers[0].completion_leave_unit
-    assert second_trend.constituent_units[0] is centers[0].completion_return_unit
-    assert centers[1].entry_unit in second_trend.constituent_units
-    assert not set(
-        item.unit_id for item in first_trend.constituent_units
-    ) & set(item.unit_id for item in second_trend.constituent_units)
-    assert (
-        first_trend.constituent_units[-1].market_end
-        == second_trend.constituent_units[0].market_start
-    )
-    for trend in result.current_trends:
-        ids = [item.unit_id for item in trend.constituent_units]
-        assert len(ids) == len(set(ids))
+    first_ids = [
+        item.unit_id for item in result.current_trends[0].constituent_units
+    ]
+    second_ids = [
+        item.unit_id for item in result.current_trends[1].constituent_units
+    ]
+    assert first_ids == [item.unit_id for item in values[:5]]
+    assert second_ids == [item.unit_id for item in values[5:9]]
+    assert (first_ids + second_ids).count(values[4].unit_id) == 1
 
 
 def test_ongoing_center_produces_forming_trend_without_confirmation():
     center = ongoing_center()
-    result = assemble_trend_types((center,), center.body_units, 0)
+    evidence = (center.entry_unit,) + center.body_units + (
+        (center.pending_leave_unit,) if center.pending_leave_unit else ()
+    )
+    result = assemble_trend_types((center,), evidence, 0)
     trend = result.current_trends[0]
     assert trend.state is TrendState.FORMING
     assert trend.confirmed_at is None
@@ -200,7 +222,7 @@ def test_center_reference_validation_rejects_missing_or_changed_evidence():
     with pytest.raises(ValueError, match="completion return"):
         assemble_trend_types((first,), values[:5], 0)
     changed = values[:4] + (replace(values[4], unit_id="changed"),) + values[5:6]
-    with pytest.raises(ValueError, match="missing unit"):
+    with pytest.raises(ValueError, match="completion leave"):
         assemble_trend_types((first,), changed, 0)
 
 

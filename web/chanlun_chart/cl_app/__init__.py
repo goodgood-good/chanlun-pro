@@ -143,7 +143,11 @@ def create_app(test_config=None, start_scheduler=False):
         REMEMBER_COOKIE_SAMESITE="Lax",
         REMEMBER_COOKIE_SECURE=secure_cookie_enabled,
         PERMANENT_SESSION_LIFETIME=datetime.timedelta(hours=12),
-        REMEMBER_COOKIE_DURATION=datetime.timedelta(hours=12),
+        # Keep a trusted browser signed in across app/browser restarts.  The
+        # expiry slides while the app is used, but password rotation and an
+        # explicit logout still revoke the existing login identity.
+        REMEMBER_COOKIE_DURATION=datetime.timedelta(days=30),
+        REMEMBER_COOKIE_REFRESH_EACH_REQUEST=True,
         MAX_CONTENT_LENGTH=8 * 1024 * 1024,
         MAX_FORM_MEMORY_SIZE=2 * 1024 * 1024,
         MAX_FORM_PARTS=500,
@@ -512,7 +516,7 @@ def create_app(test_config=None, start_scheduler=False):
     # secret_key 解析顺序：环境变量 CHANLUN_FLASK_SECRET_KEY > config.FLASK_SECRET_KEY > 数据目录持久化文件。
     app.secret_key = get_flask_secret_key()
 
-    # CSRF token 与最长登录会话使用同一 12 小时边界。
+    # CSRF token 与当前浏览器会话使用同一 12 小时边界；记住登录 Cookie 独立续期。
     from .csrf import csrf
     csrf.init_app(app)
 

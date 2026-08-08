@@ -100,11 +100,23 @@ def test_bounded_segment_walks_preserve_center_and_third_point_invariants() -> N
             assert {point.center_id for point in points} == completed_ids
 
             for center in final.centers:
+                assert len(center.core_units) == 3
+                assert center.body_units[:3] == center.core_units
+                assert center.entry_unit not in center.body_units
+                assert center.entry_unit.end_tick == center.core_units[0].start_tick
+                if center.pending_leave_unit is not None:
+                    assert center.pending_leave_unit not in center.body_units
+                    assert (
+                        center.pending_leave_unit.end_tick > center.zg_tick
+                        if center.pending_leave_unit.direction == "up"
+                        else center.pending_leave_unit.end_tick < center.zd_tick
+                    )
                 if center.state is not CenterState.COMPLETED:
                     continue
                 leave = center.completion_leave_unit
                 ret = center.completion_return_unit
                 assert leave is not None and ret is not None
+                assert leave not in center.body_units
                 if leave.direction == "up":
                     assert ret.direction == "down"
                     assert ret.low_tick >= center.zg_tick
@@ -116,4 +128,6 @@ def test_bounded_segment_walks_preserve_center_and_third_point_invariants() -> N
             completed_count += len(completed_ids)
 
     assert checked == 512
-    assert completed_count == 248
+    # Pin the exhaustive count so that either-direction departures and fifth-
+    # segment maturity cannot be weakened without an explicit contract change.
+    assert completed_count == 168

@@ -27,8 +27,7 @@ def _validate_center_references(
         raise ValueError("center ids must be unique")
 
     previous_start = -1
-    previous_return_index = None
-    previous_leave_index = None
+    previous_completion_leave_index = None
     for center in centers:
         if (
             center.structural_level != structural_level
@@ -41,36 +40,53 @@ def _validate_center_references(
             body_indexes = tuple(index[item.unit_id] for item in center.body_units)
         except KeyError as exc:
             raise ValueError("center references a missing unit") from exc
+        entry_index = index.get(center.entry_unit.unit_id)
+        if entry_index is None or units[entry_index] != center.entry_unit:
+            raise ValueError("center references missing or changed entry evidence")
+        if entry_index + 1 != body_indexes[0]:
+            raise ValueError("external entry must immediately precede center body")
         if body_indexes != tuple(range(body_indexes[0], body_indexes[-1] + 1)):
             raise ValueError("center body must be a contiguous unit slice")
         for offset, item in zip(body_indexes, center.body_units):
             if units[offset] != item:
                 raise ValueError("center unit evidence changed")
 
-        start = body_indexes[0]
+        start = entry_index
         if start <= previous_start:
             raise ValueError("centers must be strictly ordered in the unit stream")
-        if previous_return_index is not None and start < previous_return_index:
-            if start != previous_leave_index:
-                raise ValueError(
-                    "next center can only reuse the previous completion leave"
-                )
+        if (
+            previous_completion_leave_index is not None
+            and start < previous_completion_leave_index
+        ):
+            raise ValueError(
+                "next center cannot precede the previous completion leave"
+            )
 
         return_index = None
+        completion_leave_index = None
         if center.state is CenterState.COMPLETED:
             leave = center.completion_leave_unit
             ret = center.completion_return_unit
             if leave is None or ret is None:
                 raise ValueError("completed center requires completion ownership")
-            if leave is not center.body_units[-1]:
-                raise ValueError("completion leave must be the final body unit")
-            if units[body_indexes[-1]] != leave:
-                raise ValueError("completion leave evidence changed")
+            leave_index = index.get(leave.unit_id)
+            if leave_index != body_indexes[-1] + 1 or units[leave_index] != leave:
+                raise ValueError(
+                    "external completion leave must immediately follow center body"
+                )
+            completion_leave_index = leave_index
             return_index = index.get(ret.unit_id)
-            if return_index != body_indexes[-1] + 1:
-                raise ValueError("completion return must immediately follow center body")
+            if return_index != leave_index + 1:
+                raise ValueError("completion return must immediately follow leave")
             if units[return_index] != ret:
                 raise ValueError("completion return evidence changed")
+        elif center.pending_leave_unit is not None:
+            leave = center.pending_leave_unit
+            leave_index = index.get(leave.unit_id)
+            if leave_index != body_indexes[-1] + 1 or units[leave_index] != leave:
+                raise ValueError(
+                    "external pending leave must immediately follow center body"
+                )
         elif (
             center.completion_leave_unit is not None
             or center.completion_return_unit is not None
@@ -79,10 +95,7 @@ def _validate_center_references(
             raise ValueError("ongoing center cannot expose completion ownership")
 
         previous_start = start
-        previous_return_index = return_index
-        previous_leave_index = (
-            None if return_index is None else return_index - 1
-        )
+        previous_completion_leave_index = completion_leave_index
     return index
 
 
@@ -182,7 +195,7 @@ def assemble_trend_types(
     output = []
     completed = {}
     group = [values[0]]
-    group_start = index[values[0].initial_units[0].unit_id]
+    group_start = index[values[0].entry_unit.unit_id]
     group_relation = None
 
     def record_complete(candidate_group, candidate_start):
@@ -254,10 +267,9 @@ def assemble_trend_types(
             terminal_return = group[-1].completion_return_unit
             if terminal_return is None:
                 raise ValueError("complete trend requires terminal return")
-            # A center may reuse the prior center's completion leave as its
-            # entry evidence.  The shared segment belongs to the preceding
-            # trend type; start the next trend at the completion return so
-            # recursive trend units remain adjacent instead of overlapping.
+            # The previous completion return is the earliest source unit of
+            # the next five-component center and keeps recursive trend units
+            # adjacent without reusing the prior departure.
             group_start = index[terminal_return.unit_id]
             group = [current]
             group_relation = None
@@ -268,7 +280,8 @@ def assemble_trend_types(
         )
         boundary_available_at = max(
             complete_available_at,
-            max(item.available_at for item in current.initial_units),
+            current.available_at,
+            max(item.available_at for item in current.establishment_units),
         )
         output.append(
             _build(

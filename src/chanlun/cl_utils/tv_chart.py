@@ -273,9 +273,13 @@ def _display_segment_price_quantum(lines):
 
 def _xd_original_center_payload(
     *,
+    entry_unit,
+    direction_unit,
     core_units,
+    establishment_units,
     body_units,
     leaving_unit,
+    pending_leave_active: bool,
     completion_return_unit,
     evidence_units,
     unit_lines,
@@ -285,17 +289,70 @@ def _xd_original_center_payload(
     done: bool,
     provisional: bool,
     tower: str = "xd",
-    algorithm_revision: str = "chanlun-display-xd-original-three/v1",
+    algorithm_revision: str = "chanlun-display-xd-five-role/v10",
 ) -> dict | None:
-    """Serialize one original-text first-three line center for the chart.
+    """Serialize one physical center without leaking lifecycle roles.
 
-    The first three completed segments are the complete frozen core.  A fourth
-    segment may leave it and the first opposite return outside completes a
-    third-class point.  There is deliberately no synthetic external entry role.
+    A forming preview may contain only ``S0..S3``: external entry plus the
+    middle-three core.  ``S4`` remains the immutable formal-maturity gate and
+    is required for every formal or completed center.  Only ``S1..S3`` define
+    the frozen price core and initial box span in either phase.
     """
-    if len(core_units) != 3:
+    lifecycle_role_count = (
+        1
+        + len(body_units)
+        + int(pending_leave_active and leaving_unit is not None)
+    )
+    immature_preview = (
+        provisional
+        and state == "forming"
+        and len(establishment_units) == 4
+        and len(body_units) == 3
+        and leaving_unit is None
+        and not pending_leave_active
+    )
+    if (
+        len(core_units) != 3
+        or (
+            not immature_preview
+            and (
+                len(establishment_units) != 5
+                or lifecycle_role_count < 5
+            )
+        )
+        or (immature_preview and lifecycle_role_count != 4)
+    ):
         return None
 
+    expected_core = (
+        ("down", "up", "down")
+        if direction_unit.direction == "up"
+        else ("up", "down", "up")
+    )
+    if (
+        tuple(unit.direction for unit in core_units) != expected_core
+        or entry_unit is None
+        or direction_unit is not entry_unit
+        or establishment_units[0] is not entry_unit
+        or tuple(establishment_units[1:4]) != tuple(core_units)
+        or (
+            not immature_preview
+            and establishment_units[4].direction != entry_unit.direction
+        )
+        or (pending_leave_active and leaving_unit is None)
+    ):
+        return None
+
+    zd_tick = max(unit.low_tick for unit in core_units)
+    zg_tick = min(unit.high_tick for unit in core_units)
+    if zd_tick >= zg_tick or any(
+        max(unit.low_tick, zd_tick) >= min(unit.high_tick, zg_tick)
+        for unit in establishment_units
+    ):
+        return None
+    entry_line = (
+        None if entry_unit is None else unit_lines[entry_unit.unit_id]
+    )
     leaving_line = (
         None if leaving_unit is None else unit_lines[leaving_unit.unit_id]
     )
@@ -305,7 +362,11 @@ def _xd_original_center_payload(
         else unit_lines[completion_return_unit.unit_id]
     )
     geometry_completed = state == "completed"
-    leaves_core = leaving_unit is not None
+    leaves_core = pending_leave_active and leaving_unit is not None and (
+        leaving_unit.end_tick > min(unit.high_tick for unit in core_units)
+        if leaving_unit.direction == "up"
+        else leaving_unit.end_tick < max(unit.low_tick for unit in core_units)
+    )
     if geometry_completed:
         completion_phase = (
             "FORMAL_THIRD_CLASS_POINT"
@@ -322,7 +383,9 @@ def _xd_original_center_payload(
             associated_points.insert(0, completion_point_type)
     else:
         completion_phase = (
-            "AWAITING_SAME_LEVEL_RETURN"
+            "AWAITING_MATURITY_SEGMENT"
+            if immature_preview
+            else "AWAITING_SAME_LEVEL_RETURN"
             if leaves_core
             else "AWAITING_SAME_LEVEL_DEPARTURE"
         )
@@ -332,50 +395,105 @@ def _xd_original_center_payload(
         completion_point_observed = False
     expected_completion_point_type = (
         None
-        if leaving_unit is None
+        if not pending_leave_active or leaving_unit is None
         else "3buy" if leaving_unit.direction == "up" else "3sell"
     )
+    # Entry and active leave are evidence around the body, never horizontal
+    # rectangle boundaries. Failed departures become body extensions only
+    # after their return has actually re-entered the frozen core.
     end_time = (
         body_units[-1].market_end
-        if leaving_unit is None
-        else leaving_unit.market_start
+        if len(body_units) > 3
+        else core_units[-1].market_end
     )
+    overlap_units = tuple(dict.fromkeys(
+        (*establishment_units, *body_units, *((leaving_unit,) if leaving_unit else ()))
+    ))
     core_directions = [unit.direction for unit in core_units]
     first_three_ids = [unit.unit_id for unit in core_units]
     return {
         "points": [
             {
                 "time": fun.datetime_to_int(core_units[0].market_start),
-                "price": float(quantum * min(unit.high_tick for unit in core_units)),
+                "price": float(quantum * zg_tick),
             },
             {
                 "time": fun.datetime_to_int(end_time),
-                "price": float(quantum * max(unit.low_tick for unit in core_units)),
+                "price": float(quantum * zd_tick),
             },
         ],
+        "display_range": {
+            "start_role": "middle_three_first_start",
+            "end_role": (
+                "body_tail_end" if len(body_units) > 3
+                else "middle_three_last_end"
+            ),
+            "includes_entry": False,
+            "includes_leave": False,
+            "price_core_source": "middle_three_intersection",
+        },
         # Geometrically completed previews use a solid box as the strict
         # renderer already does.  ``done`` and ``tradable`` remain false until
         # the return segment locks, so visual completion cannot authorize a
         # trade.
         "linestyle": "0" if (done or geometry_completed) else "1",
-        "type": "zd" if leaving_unit is None else leaving_unit.direction,
+        # The seed direction only validates the first-three alternation.
+        # Once a same-level departure exists, the center's active direction
+        # is the departure direction.  Keeping the seed direction here made
+        # a geometrically completed third sell render as an upward center.
+        "type": (
+            leaving_unit.direction
+            if pending_leave_active
+            else "zd"
+        ),
         "tower": tower,
-        "zd": float(quantum * max(unit.low_tick for unit in core_units)),
-        "zg": float(quantum * min(unit.high_tick for unit in core_units)),
+        "zd": float(quantum * zd_tick),
+        "zg": float(quantum * zg_tick),
         "done": done,
         "state": state,
         "line_count": len(body_units),
+        "lifecycle_role_count": lifecycle_role_count,
+        "minimum_lifecycle_role_count": 5,
+        "core_component_count": 3,
+        "overlap_component_count": len(overlap_units),
+        "establishment_component_count": len(establishment_units),
+        "entry_role": "external_entry",
         "core_line_count": 3,
         "core_directions": core_directions,
         "first_three_component_ids": first_three_ids,
+        "establishment_unit_id": (
+            None
+            if immature_preview
+            else establishment_units[4].unit_id
+        ),
         "first_three_components": [
             _line_to_chart_metadata(unit_lines[unit.unit_id])
             for unit in core_units
         ],
-        # Compatibility field retained explicitly as null.  The first core
-        # component must never again be mislabeled as an external entry leg.
-        "entering_segment": None,
-        "leaving_segment": _line_to_chart_metadata(leaving_line),
+        "establishment_segment_ids": [
+            unit.unit_id for unit in establishment_units
+        ],
+        "establishment_segments": [
+            _line_to_chart_metadata(unit_lines[unit.unit_id])
+            for unit in establishment_units
+        ],
+        "overlap_components": [
+            _line_to_chart_metadata(unit_lines[unit.unit_id])
+            for unit in overlap_units
+        ],
+        "body_components": [
+            _line_to_chart_metadata(unit_lines[unit.unit_id])
+            for unit in body_units
+        ],
+        "entering_segment": _line_to_chart_metadata(entry_line),
+        "leaving_segment": (
+            _line_to_chart_metadata(leaving_line)
+            if pending_leave_active
+            else None
+        ),
+        "latest_overlap_component": _line_to_chart_metadata(
+            unit_lines[body_units[-1].unit_id]
+        ),
         # A third-class point belongs to the first return, not to the leaving
         # segment.  Reading ``leaving_line.line_mmds`` mixed center ownership
         # and made a lower-level point look as if it completed this center.
@@ -409,12 +527,14 @@ def _xd_original_center_payload(
 
 
 def _collapse_overlapping_xd_center_candidates(payloads: list[dict]) -> list[dict]:
-    """Fold temporally overlapping same-level candidates into one center.
+    """Fold candidates that reuse the same center-body time interval.
 
-    A displayed center body spans from the first core segment to the leaving
-    segment. Two bodies with a positive time overlap necessarily reuse the
-    same segment evidence, so only the most advanced coherent interpretation
-    may be shown. Evidence progress wins before object provenance: a confirmed
+    The visible rectangle starts at S1 and ends at S3 (or at a confirmed body
+    extension); it never includes S0 entry or the active leaving leg. Adjacent
+    centers may legitimately share a connection boundary, so display-range
+    overlap alone is not duplicate evidence. Only positive overlap of the
+    explicit body-component intervals participates in this reducer. Evidence
+    progress wins before object provenance: a confirmed
     formal center, then completed third-class-point geometry, then an ongoing
     formal center, then an ordinary forming preview. This prevents an older
     ongoing object from hiding a later 3-buy/3-sell and from inheriting only
@@ -427,13 +547,39 @@ def _collapse_overlapping_xd_center_candidates(payloads: list[dict]) -> list[dic
         second = int(value["points"][1]["time"])
         return min(first, second), max(first, second)
 
+    def body_interval(value: dict) -> tuple[int, int]:
+        # ``overlap_components`` is lifecycle evidence: it deliberately
+        # contains the external entry and the active leave. A completed
+        # center's leave may immediately become the next center's entry, so
+        # using that collection here makes two distinct adjacent bodies look
+        # like duplicates. Only the rectangle-owning body is valid duplicate
+        # evidence. Older payloads without this explicit field fall back to
+        # the rectangle interval, which likewise excludes entry and leave.
+        components = value.get("body_components")
+        if isinstance(components, list) and components:
+            try:
+                bounds = [
+                    (
+                        int(component["start_time"]),
+                        int(component["end_time"]),
+                    )
+                    for component in components
+                ]
+                return (
+                    min(min(start, end) for start, end in bounds),
+                    max(max(start, end) for start, end in bounds),
+                )
+            except (KeyError, TypeError, ValueError):
+                pass
+        return interval(value)
+
     def overlaps(left: dict, right: dict) -> bool:
-        left_start, left_end = interval(left)
-        right_start, right_end = interval(right)
+        left_start, left_end = body_interval(left)
+        right_start, right_end = body_interval(right)
         return max(left_start, right_start) < min(left_end, right_end)
 
     def winner_key(value: dict) -> tuple[int, int, int]:
-        start, end = interval(value)
+        start, end = body_interval(value)
         if value.get("done") is True:
             evidence_rank = 0
         elif (
@@ -507,21 +653,25 @@ def _original_line_centers_to_chart_dicts(
 ) -> list[dict]:
     """Build one line-center overlay through the canonical state machine.
 
-    The first three segment components establish the frozen core.  Later
-    segments extend, leave, or provide the first return.  Locked and provisional
-    evidence share this one state machine, so page geometry cannot drift from
-    recursive screening and third-class-point timing.
+    A physical center is displayed provisionally once ``S0`` entry and the
+    middle-three ``S1..S3`` core have positive overlap.  It becomes formal only
+    after the consecutive ``S4`` maturity component also overlaps that core.
+    S4 can be the first extension or an initial departure. A later first return
+    confirms either a failed departure extension or a third-class completion.
+    Locked and provisional evidence share this state machine.
     """
     from chanlun.core.strict_structure.center_machine import calculate_centers
     from chanlun.core.strict_structure.identity import stable_structure_id
     from chanlun.core.strict_structure.models import (
         CenterPreviewState,
         CenterState,
+        center_seed_size,
     )
     from chanlun.core.strict_structure.unit_adapter import UnitLockRegistry, adapt_lines
 
     line_values = tuple(lines or ())
-    if len(line_values) < 3:
+    seed_size = center_seed_size(source_kind)
+    if len(line_values) < seed_size + 1:
         return []
 
     evidence_times = []
@@ -564,45 +714,69 @@ def _original_line_centers_to_chart_dicts(
                 CenterPreviewState.FORMING,
                 CenterPreviewState.COMPLETED,
             )
-            or len(preview.unit_ids) < 3
+            or len(preview.unit_ids) < seed_size
             or preview.zd_tick is None
             or preview.zg_tick is None
-            or preview.zd_tick > preview.zg_tick
+            or preview.zd_tick >= preview.zg_tick
+            or (
+                preview.establishment_unit_id is None
+                and preview.state is not CenterPreviewState.FORMING
+            )
         ):
             continue
         body_units = tuple(units_by_id[unit_id] for unit_id in preview.unit_ids)
-        initial_units = body_units[:3]
-        core_units = initial_units
+        core_units = body_units[:3]
+        entry_unit = units_by_id[preview.entry_unit_id]
+        direction_unit = entry_unit
         leaving_unit = (
-            body_units[-1]
-            if preview.state is CenterPreviewState.COMPLETED
-            else None
-            if preview.pending_leave_unit_id is None
+            units_by_id[preview.completion_leave_unit_id]
+            if preview.completion_leave_unit_id is not None
             else units_by_id[preview.pending_leave_unit_id]
+            if preview.pending_leave_unit_id is not None
+            else None
         )
         completion_return = (
             None
             if preview.completion_return_unit_id is None
             else units_by_id[preview.completion_return_unit_id]
         )
+        establishment_unit = (
+            None
+            if preview.establishment_unit_id is None
+            else units_by_id[preview.establishment_unit_id]
+        )
+        establishment_units = (
+            entry_unit,
+            *core_units,
+            *((establishment_unit,) if establishment_unit is not None else ()),
+        )
         center_id = stable_structure_id(
-            "chanlun-center/v4",
+            "chanlun-center/v9",
             preview.price_basis_revision,
             preview.structural_level,
             preview.source_kind.value,
-            tuple(unit.unit_id for unit in initial_units),
+            entry_unit.unit_id,
+            tuple(unit.unit_id for unit in body_units[:seed_size]),
+            preview.establishment_unit_id,
             preview.zd_tick,
             preview.zg_tick,
         )
         payload = _xd_original_center_payload(
+            entry_unit=entry_unit,
+            direction_unit=direction_unit,
             core_units=core_units,
+            establishment_units=establishment_units,
             body_units=body_units,
             leaving_unit=leaving_unit,
+            pending_leave_active=(
+                preview.state is CenterPreviewState.COMPLETED
+                or preview.pending_leave_unit_id is not None
+            ),
             completion_return_unit=completion_return,
             evidence_units=(
-                body_units
-                if completion_return is None
-                else body_units + (completion_return,)
+                (entry_unit,) + body_units
+                + (() if leaving_unit is None else (leaving_unit,))
+                + (() if completion_return is None else (completion_return,))
             ),
             unit_lines=unit_lines,
             quantum=quantum,
@@ -616,12 +790,30 @@ def _original_line_centers_to_chart_dicts(
         )
         if payload is None:
             continue
-        preview_seed_ids.add(tuple(unit.unit_id for unit in initial_units))
+        preview_seed_ids.add(
+            (
+                entry_unit.unit_id,
+                *(unit.unit_id for unit in body_units[:seed_size]),
+                *(
+                    ()
+                    if establishment_unit is None
+                    else (establishment_unit.unit_id,)
+                ),
+            )
+        )
         preview_payloads.append(payload)
 
     payloads = []
     for center in center_result.centers:
-        seed_ids = tuple(unit.unit_id for unit in center.initial_units)
+        seed_ids = (
+            center.entry_unit.unit_id,
+            *(unit.unit_id for unit in center.initial_units),
+            *(
+                ()
+                if center.establishment_unit is None
+                else (center.establishment_unit.unit_id,)
+            ),
+        )
         if seed_ids in preview_seed_ids:
             # 同一中枢的实时预览包含最后未完成线段，必须取代只覆盖锁定前缀的
             # 正式快照，否则页面会一直少画最后一段直到重新加载。
@@ -631,16 +823,29 @@ def _original_line_centers_to_chart_dicts(
             or center.pending_leave_unit
         )
         core_units = tuple(center.core_units)
+        external_entry = center.entry_unit
         done = center.state is CenterState.COMPLETED
-        evidence_units = center.body_units + (
-            ()
-            if center.completion_return_unit is None
-            else (center.completion_return_unit,)
+        evidence_units = (
+            (center.entry_unit,)
+            + center.body_units
+            + (() if leaving_unit is None else (leaving_unit,))
+            + (
+                ()
+                if center.completion_return_unit is None
+                else (center.completion_return_unit,)
+            )
         )
         payload = _xd_original_center_payload(
+            entry_unit=external_entry,
+            direction_unit=center.entry_unit,
             core_units=core_units,
+            establishment_units=center.establishment_units,
             body_units=center.body_units,
             leaving_unit=leaving_unit,
+            pending_leave_active=(
+                center.state is CenterState.COMPLETED
+                or center.pending_leave_unit is not None
+            ),
             completion_return_unit=center.completion_return_unit,
             evidence_units=evidence_units,
             unit_lines=unit_lines,
@@ -667,8 +872,8 @@ def xd_segment_centers_to_chart_dicts(lines) -> list[dict]:
         lines,
         source_kind=SourceKind.SEGMENT,
         tower="xd",
-        price_basis_revision="chanlun-display-xd-original-three/v1",
-        algorithm_revision="chanlun-display-xd-original-three/v1",
+        price_basis_revision="chanlun-display-xd-five-role/v10",
+        algorithm_revision="chanlun-display-xd-five-role/v10",
     )
 
 
@@ -676,10 +881,9 @@ def bi_stroke_centers_to_chart_dicts(lines) -> list[dict]:
     """Build non-tradable pen-center observations with the same lifecycle.
 
     The former page path serialized ``CL.get_bi_zss()``, whose legacy
-    five-role lifecycle could show two unfinished centers or keep a center
-    unfinished after its first outside return.  Pens remain the exact pens
-    displayed by the page, but center geometry now uses the same first-three
-    core, departure and first-return state machine as segment centers.
+    lifecycle could show two unfinished centers or keep a center unfinished
+    after its first outside return. Pens remain the exact pens displayed by the
+    page, while their observations use the same entry/core/leave lifecycle.
     """
 
     from chanlun.core.strict_structure.models import SourceKind
@@ -688,8 +892,8 @@ def bi_stroke_centers_to_chart_dicts(lines) -> list[dict]:
         lines,
         source_kind=SourceKind.STROKE_OBSERVATION,
         tower="bi",
-        price_basis_revision="chanlun-display-bi-original-three/v1",
-        algorithm_revision="chanlun-display-bi-original-three/v1",
+        price_basis_revision="chanlun-display-bi-five-role/v10",
+        algorithm_revision="chanlun-display-bi-five-role/v10",
     )
 
 
