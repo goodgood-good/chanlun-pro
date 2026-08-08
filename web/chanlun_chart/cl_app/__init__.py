@@ -549,6 +549,8 @@ def create_app(test_config=None, start_scheduler=False):
         # 改动都会让 static_version 变化，模板里带 ?v={{ static_version }} 的资源
         # 随之 cache-bust，用户改前端后普通刷新即可生效，无需手动硬刷新。
         targets = [
+            os.path.join(app.static_folder, "favicon.ico"),
+            os.path.join(app.static_folder, "chanlun-mark.png"),
             os.path.join(app.static_folder, "datafeeds", "udf", "dist", "bundle.js"),
             os.path.join(
                 app.static_folder,

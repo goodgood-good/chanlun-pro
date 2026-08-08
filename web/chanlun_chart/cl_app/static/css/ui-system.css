@@ -272,17 +272,11 @@ body.cp-ui {
 }
 
 .cp-product-mark {
-  display: inline-grid;
+  display: block;
   width: 30px;
   height: 30px;
-  place-items: center;
-  border: 1px solid var(--cp-border-strong);
   border-radius: 9px;
-  background: var(--cp-surface);
-  color: var(--cp-accent);
-  font-size: 11px;
-  font-weight: 900;
-  letter-spacing: 0.04em;
+  object-fit: contain;
 }
 
 .cp-product-links {
