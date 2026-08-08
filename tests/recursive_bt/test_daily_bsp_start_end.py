@@ -1,9 +1,9 @@
 """R6-#3: _daily_bsp_and_d3 用默认回看窗口拉日线, 未接收 build 的 start/end。
 
 build(start,end) 只把窗口传给 small/big 的 _sig(), 而 _daily_bsp_and_d3(code,ex,dates)
-内部 ex.klines(code,"d") 无 start_date → 落 get_start_date_by_frequency("d")=默认回看3年。
-当 build 的 start 早于"今日-3年"(如 `fetch daily` 的 2022-2024 熊市验证窗)时, 日线只从
-约(今日-3年)起, daily_bsp/d3_ok 缺失最老约1.5年 → 写入 pkl 的日线共振字段系统性偏移。
+内部 ex.klines(code,"d") 无 start_date → 落 get_start_date_by_frequency("d") 的默认窗口
+(修复发生时为3年，现已扩大到6年)。当 build 的 start 早于默认窗口时，日线前缀会缺失，
+导致 daily_bsp/d3_ok 与写入 pkl 的日线共振字段系统性偏移。
 修复=build 透传 start/end 给 _daily_bsp_and_d3, 内部 klines 带 start_date/end_date。
 """
 import pathlib

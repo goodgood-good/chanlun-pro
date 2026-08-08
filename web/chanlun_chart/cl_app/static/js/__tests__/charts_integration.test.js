@@ -798,6 +798,43 @@ test('_maybeWidenDefaultView: 旧视窗完全落在已加载历史外时回到�
   assert.deepEqual(applied[0], { from: earliest, to: latest });
 });
 
+test('_maybeWidenDefaultView: 30 分钟与日线使用扩展后的默认时间跨度', () => {
+  const { ChartManager, sb } = loadChartManager();
+  const latest = 1_784_691_000;
+  const day = 86_400;
+  sb.setTimeout = (callback) => { callback(); return 0; };
+
+  for (const { interval, spanDays } of [
+    { interval: '30', spanDays: 90 },
+    { interval: '1D', spanDays: 800 },
+  ]) {
+    const symbol = 'a:SH.513100';
+    const resultKey = symbol.toLowerCase() + interval.toLowerCase();
+    const bars = [
+      { time: (latest - 2_000 * day) * 1000 },
+      { time: latest * 1000 },
+    ];
+    const cm = makeManager(
+      ChartManager,
+      null,
+      new Map([[resultKey, { bars }]]),
+    );
+    const applied = [];
+    cm._viewSetFor = null;
+    cm.widget = {
+      symbolInterval: () => ({ symbol, interval }),
+    };
+    cm.chart = {
+      getVisibleRange: () => ({ from: latest - 10 * day, to: latest }),
+      setVisibleRange: (range) => { applied.push(range); },
+    };
+
+    cm._maybeWidenDefaultView();
+
+    assert.deepEqual(applied, [{ from: latest - spanDays * day, to: latest }]);
+  }
+});
+
 test('_maybeApplyCausalFocus: 风险点审计锁聚焦锚点且不越过因果截止', () => {
   const { ChartManager, sb } = loadChartManager();
   const cm = makeManager(ChartManager, null, new Map());
