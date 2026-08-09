@@ -158,7 +158,7 @@ def test_analyzer_uses_dedicated_non_recursive_screening_builder(monkeypatch) ->
     assert state.evidence_calls == 0
     assert state.process_calls == 1
     assert len(builder_calls) == 1
-    assert analysis.direction == "neutral"
+    assert analysis.direction == "up"
     assert tuple(point.point_type for point in analysis.confirmed_points) == (
         "1buy",
     )

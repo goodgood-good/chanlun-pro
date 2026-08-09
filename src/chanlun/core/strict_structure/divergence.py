@@ -4,13 +4,11 @@ from chanlun.core.strict_structure.models import (
     CenterState,
     SourceKind,
     StrictStructureResult,
-    TrendKind,
-    TrendState,
 )
-from chanlun.core.strict_structure.signals import _comparison_unit
 from chanlun.core.strict_structure.strength import (
     MacdStrengthUnavailable,
     compare_divergence,
+    compare_terminal_trend_divergence,
 )
 
 
@@ -41,25 +39,17 @@ def _consolidation_pair(center):
     return None
 
 
-def _trend_pair(trend):
-    if (
-        trend.kind is not TrendKind.TREND
-        or trend.state is not TrendState.COMPLETE
-        or len(trend.centers) < 2
-    ):
-        return None
-    signal = trend.centers[-1].completion_leave_unit
-    if signal is None or signal.source_kind is SourceKind.STROKE_OBSERVATION:
-        return None
-    earlier = _comparison_unit(trend, signal)
-    return None if earlier is None else (earlier, signal)
-
-
 def collect_strict_divergences(structure, strength):
     if not isinstance(structure, StrictStructureResult):
         raise TypeError("structure must be a StrictStructureResult")
     by_id = {}
     for level in structure.levels:
+        for boundary in level.decomposition_boundaries:
+            evidence = boundary.divergence
+            previous = by_id.setdefault(evidence.divergence_id, evidence)
+            if previous != evidence:
+                raise ValueError("divergence id maps to conflicting evidence")
+
         for center in level.center_result.centers:
             pair = _consolidation_pair(center)
             if pair is None:
@@ -78,22 +68,62 @@ def collect_strict_divergences(structure, strength):
                     raise ValueError("divergence id maps to conflicting evidence")
 
         for trend in level.completed_trends:
-            pair = _trend_pair(trend)
-            if pair is None:
+            evidence = trend.terminal_divergence
+            if evidence is None:
+                try:
+                    compared = compare_terminal_trend_divergence(
+                        trend.centers,
+                        level.units,
+                        strength,
+                        trend_start_unit_id=trend.constituent_units[0].unit_id,
+                    )
+                except MacdStrengthUnavailable:
+                    continue
+                evidence = None if compared is None else compared[0]
+            if evidence is None or not evidence.is_divergent:
                 continue
-            try:
-                evidence = compare_divergence(
-                    *pair,
-                    strength,
-                    kind="trend",
-                )
-            except MacdStrengthUnavailable:
-                continue
-            if evidence.is_divergent:
-                previous = by_id.setdefault(evidence.divergence_id, evidence)
-                if previous != evidence:
-                    raise ValueError("divergence id maps to conflicting evidence")
+            previous = by_id.setdefault(evidence.divergence_id, evidence)
+            if previous != evidence:
+                raise ValueError("divergence id maps to conflicting evidence")
 
+    return tuple(
+        sorted(
+            by_id.values(),
+            key=lambda item: (
+                item.available_at,
+                item.structural_level,
+                item.kind,
+                item.divergence_id,
+            ),
+        )
+    )
+
+
+def merge_formal_divergence_ledger(
+    structure,
+    confirmed_points,
+    divergences=(),
+):
+    """Close the top-level ledger over every embedded formal divergence."""
+
+    by_id = {}
+
+    def record(evidence) -> None:
+        if evidence is None:
+            return
+        previous = by_id.setdefault(evidence.divergence_id, evidence)
+        if previous != evidence:
+            raise ValueError("divergence id maps to conflicting evidence")
+
+    for evidence in divergences:
+        record(evidence)
+    for point in confirmed_points:
+        record(point.divergence)
+    for level in structure.levels:
+        for trend in (*level.trend_types, *level.completed_trends):
+            record(trend.terminal_divergence)
+        for boundary in level.decomposition_boundaries:
+            record(boundary.divergence)
     return tuple(
         sorted(
             by_id.values(),

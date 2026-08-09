@@ -2,14 +2,19 @@ from __future__ import annotations
 
 from chanlun.core.strict_structure.center_machine import validate_unit_sequence
 from chanlun.core.strict_structure.center_relation import classify_center_relation
-from chanlun.core.strict_structure.identity import stable_structure_id
+from chanlun.core.strict_structure.identity import build_trend_id, stable_structure_id
 from chanlun.core.strict_structure.models import (
     CenterRelation,
     CenterState,
+    DecompositionBoundaryEvidence,
     TrendAssemblyResult,
     TrendKind,
     TrendState,
     TrendType,
+)
+from chanlun.core.strict_structure.strength import (
+    MacdStrengthUnavailable,
+    compare_terminal_trend_divergence,
 )
 
 
@@ -99,9 +104,9 @@ def _validate_center_references(
     return index
 
 
-def _constituent_units(group, units, index, group_start):
+def _constituent_units(group, units, index, group_start, *, end_index=None):
     tail = group[-1].completion_leave_unit or group[-1].body_units[-1]
-    end = index[tail.unit_id]
+    end = index[tail.unit_id] if end_index is None else end_index
     if end < group_start:
         raise ValueError("trend unit slice is inverted")
     return units[group_start : end + 1]
@@ -149,6 +154,7 @@ def _build(
     state,
     confirmed_at,
     available_at,
+    terminal_divergence=None,
 ):
     all_units = tuple(constituent_units)
     start = all_units[0]
@@ -156,13 +162,12 @@ def _build(
     direction = _direction(all_units)
     kind = TrendKind.TREND if len(group) >= 2 else TrendKind.CONSOLIDATION
     return TrendType(
-        trend_id=stable_structure_id(
-            "chanlun-trend/v3",
-            start.price_basis_revision,
-            structural_level,
-            tuple(center.center_id for center in group),
-            tuple(item.unit_id for item in all_units),
-            direction,
+        trend_id=build_trend_id(
+            price_basis_revision=start.price_basis_revision,
+            structural_level=structural_level,
+            center_ids=tuple(center.center_id for center in group),
+            constituent_unit_ids=tuple(item.unit_id for item in all_units),
+            direction=direction,
         ),
         structural_level=structural_level,
         price_basis_revision=start.price_basis_revision,
@@ -179,11 +184,110 @@ def _build(
         market_end=tail.market_end,
         confirmed_at=confirmed_at,
         available_at=available_at,
+        terminal_divergence=terminal_divergence,
     )
 
 
+def _confirmed_divergence_boundary(
+    group,
+    source_units,
+    index,
+    group_start,
+    structural_level,
+    strength,
+):
+    """Return a complete-c divergence boundary from confirmed evidence only."""
+
+    if strength is None or len(group) < 2:
+        return None
+    try:
+        compared = compare_terminal_trend_divergence(
+            group,
+            source_units,
+            strength,
+            trend_start_unit_id=source_units[group_start].unit_id,
+        )
+    except MacdStrengthUnavailable:
+        return None
+    if compared is None:
+        return None
+    divergence, terminal_leg = compared
+    if not divergence.is_divergent:
+        return None
+    terminal_component_id = terminal_leg.child_ids[-1]
+    end_index = index.get(terminal_component_id)
+    if end_index is None:
+        raise ValueError("terminal c references a missing source unit")
+    constituent_units = _constituent_units(
+        group,
+        source_units,
+        index,
+        group_start,
+        end_index=end_index,
+    )
+    if not _group_is_complete(group, constituent_units):
+        return None
+    if _direction(constituent_units) != divergence.direction:
+        return None
+    confirmed_at, available_at = _completion_times(group, constituent_units)
+    confirmed_at = max(confirmed_at, divergence.confirmed_at)
+    available_at = max(available_at, divergence.available_at)
+    complete = _build(
+        group,
+        constituent_units,
+        structural_level,
+        TrendState.COMPLETE,
+        confirmed_at,
+        available_at,
+        terminal_divergence=divergence,
+    )
+    locked = _build(
+        group,
+        constituent_units,
+        structural_level,
+        TrendState.LOCKED,
+        confirmed_at,
+        available_at,
+        terminal_divergence=divergence,
+    )
+    boundary = DecompositionBoundaryEvidence(
+        boundary_id=stable_structure_id(
+            "chanlun-decomposition-boundary/v1",
+            divergence.price_basis_revision,
+            "same_level",
+            "trend_divergence",
+            divergence.structural_level,
+            divergence.source_kind.value,
+            locked.trend_id,
+            divergence.divergence_id,
+        ),
+        decomposition_mode="same_level",
+        boundary_kind="trend_divergence",
+        structural_level=divergence.structural_level,
+        source_kind=divergence.source_kind,
+        price_basis_revision=divergence.price_basis_revision,
+        left_trend_id=locked.trend_id,
+        # Divergence strength is attached to a distinct complete-c measurement
+        # identity; the decomposition endpoint remains the raw terminal unit.
+        anchor_unit_id=terminal_component_id,
+        anchor_at=divergence.anchor_at,
+        anchor_tick=divergence.anchor_tick,
+        confirmed_at=divergence.confirmed_at,
+        available_at=divergence.available_at,
+        divergence=divergence,
+    )
+    return complete, locked, boundary, end_index
+
+
 def assemble_trend_types(
-    centers, units, structural_level, oscillatory_ids=frozenset()
+    centers,
+    units,
+    structural_level,
+    oscillatory_ids=frozenset(),
+    *,
+    strength=None,
+    ignored_boundary_anchor_ids: frozenset[str] = frozenset(),
+    group_start_unit_id: str | None = None,
 ) -> TrendAssemblyResult:
     values = tuple(centers)
     source_units = tuple(units)
@@ -192,11 +296,22 @@ def assemble_trend_types(
     index = _validate_center_references(
         values, source_units, structural_level, oscillatory_ids
     )
+    ignored_boundaries = frozenset(ignored_boundary_anchor_ids)
+    if not ignored_boundaries.issubset(index):
+        raise ValueError("ignored boundary anchors must reference source units")
     output = []
     completed = {}
+    boundaries = {}
     group = [values[0]]
-    group_start = index[values[0].entry_unit.unit_id]
+    group_start = (
+        index[values[0].entry_unit.unit_id]
+        if group_start_unit_id is None
+        else index.get(group_start_unit_id, -1)
+    )
+    if not 0 <= group_start <= index[values[0].entry_unit.unit_id]:
+        raise ValueError("trend group start must precede its first center")
     group_relation = None
+    active_divergence_end = None
 
     def record_complete(candidate_group, candidate_start):
         constituent_units = _constituent_units(
@@ -226,6 +341,51 @@ def assemble_trend_types(
 
     record_complete(group, group_start)
     for current in values[1:]:
+        if group:
+            divergence_boundary = _confirmed_divergence_boundary(
+                group,
+                source_units,
+                index,
+                group_start,
+                structural_level,
+                strength,
+            )
+            if (
+                divergence_boundary is not None
+                and divergence_boundary[2].anchor_unit_id in ignored_boundaries
+            ):
+                divergence_boundary = None
+            if divergence_boundary is not None:
+                complete, locked, boundary, end_index = divergence_boundary
+                previous = completed.setdefault(complete.trend_id, complete)
+                if previous != complete:
+                    raise ValueError("completed divergence trend identity collision")
+                output.append(locked)
+                previous_boundary = boundaries.setdefault(boundary.boundary_id, boundary)
+                if previous_boundary != boundary:
+                    raise ValueError("decomposition boundary identity collision")
+                group_start = end_index + 1
+                group = []
+                group_relation = None
+                active_divergence_end = end_index
+
+        if not group:
+            first_body_index = index[current.body_units[0].unit_id]
+            if (
+                active_divergence_end is not None
+                and first_body_index <= active_divergence_end
+            ):
+                # This raw center window straddles a boundary that was already
+                # confirmed on an earlier prefix.  It cannot revoke or cross
+                # that immutable same-level split; wait for the first center
+                # whose body starts wholly to its right.
+                continue
+            group = [current]
+            group_relation = None
+            active_divergence_end = None
+            record_complete(group, group_start)
+            continue
+
         relation = classify_center_relation(group[-1], current)
         continues = (
             relation in (CenterRelation.UP_TREND, CenterRelation.DOWN_TREND)
@@ -301,42 +461,75 @@ def assemble_trend_types(
         group_relation = None
         record_complete(group, group_start)
 
-    constituent_units = _constituent_units(
-        group,
-        source_units,
-        index,
-        group_start,
-    )
-    if _group_is_complete(group, constituent_units):
-        tail_state = TrendState.COMPLETE
-        tail_confirmed_at, tail_available_at = _completion_times(
+    divergence_boundary = (
+        None
+        if not group
+        else _confirmed_divergence_boundary(
             group,
-            constituent_units,
-        )
-    else:
-        tail_state = TrendState.FORMING
-        tail_confirmed_at = None
-        tail_available_at = max(
-            tuple(center.available_at for center in group)
-            + tuple(item.available_at for item in constituent_units)
-        )
-    output.append(
-        _build(
-            group,
-            constituent_units,
+            source_units,
+            index,
+            group_start,
             structural_level,
-            tail_state,
-            tail_confirmed_at,
-            tail_available_at,
+            strength,
         )
     )
-    record_complete(group, group_start)
+    if (
+        divergence_boundary is not None
+        and divergence_boundary[2].anchor_unit_id in ignored_boundaries
+    ):
+        divergence_boundary = None
+    if divergence_boundary is not None:
+        complete, locked, boundary, _end_index = divergence_boundary
+        previous = completed.setdefault(complete.trend_id, complete)
+        if previous != complete:
+            raise ValueError("completed divergence trend identity collision")
+        output.append(locked)
+        previous_boundary = boundaries.setdefault(boundary.boundary_id, boundary)
+        if previous_boundary != boundary:
+            raise ValueError("decomposition boundary identity collision")
+    elif group:
+        constituent_units = _constituent_units(
+            group,
+            source_units,
+            index,
+            group_start,
+        )
+        if _group_is_complete(group, constituent_units):
+            tail_state = TrendState.COMPLETE
+            tail_confirmed_at, tail_available_at = _completion_times(
+                group,
+                constituent_units,
+            )
+        else:
+            tail_state = TrendState.FORMING
+            tail_confirmed_at = None
+            tail_available_at = max(
+                tuple(center.available_at for center in group)
+                + tuple(item.available_at for item in constituent_units)
+            )
+        output.append(
+            _build(
+                group,
+                constituent_units,
+                structural_level,
+                tail_state,
+                tail_confirmed_at,
+                tail_available_at,
+            )
+        )
+        record_complete(group, group_start)
     return TrendAssemblyResult(
         current_trends=tuple(output),
         completed_trends=tuple(
             sorted(
                 completed.values(),
                 key=lambda trend: (trend.available_at, trend.trend_id),
+            )
+        ),
+        decomposition_boundaries=tuple(
+            sorted(
+                boundaries.values(),
+                key=lambda item: (item.available_at, item.boundary_id),
             )
         ),
     )

@@ -86,3 +86,66 @@ test('cold history gets a 45s deadline while incremental polling stays at 15s', 
   );
   assert.equal(delays.at(-1), 15_000);
 });
+
+test('cold history retries one startup timeout and returns the recovered bars', async () => {
+  const delays = [];
+  let historyAttempts = 0;
+  const sandbox = {
+    console, Math, JSON, Array, Object, String, Number, Boolean, Promise, Error, Map, Set,
+    fetch: (url) => {
+      if (String(url).includes('/config')) {
+        return Promise.resolve({
+          ok: true,
+          text: () => Promise.resolve(JSON.stringify({
+            supports_search: true,
+            supports_group_request: false,
+            supported_resolutions: ['1', '5', '30', '1D'],
+            supports_marks: false,
+            supports_timescale_marks: false,
+          })),
+        });
+      }
+      historyAttempts += 1;
+      if (historyAttempts === 1) {
+        return Promise.reject(new Error('Request timed out after 45000ms'));
+      }
+      return Promise.resolve({
+        ok: true,
+        text: () => Promise.resolve(JSON.stringify({
+          s: 'ok', update: false,
+          t: [1000], o: [1], h: [1], l: [1], c: [1], v: [1],
+          fxs: [], bis: [], xds: [], bi_zss: [], xd_zss: [], bcs: [], mmds: [],
+        })),
+      });
+    },
+    setTimeout: (callback, delay) => {
+      delays.push(delay);
+      if (delay === 750) {
+        Promise.resolve().then(callback);
+      }
+      return delays.length;
+    },
+    clearTimeout: () => {},
+    setInterval: () => 0,
+    clearInterval: () => {},
+  };
+  sandbox.globalThis = sandbox;
+  sandbox.self = sandbox;
+  sandbox.window = sandbox;
+  vm.createContext(sandbox);
+  const bundlePath = path.join(
+    __dirname, '..', '..', 'datafeeds', 'udf', 'dist', 'bundle.js'
+  );
+  vm.runInContext(fs.readFileSync(bundlePath, 'utf8'), sandbox, { filename: 'bundle.js' });
+
+  const datafeed = new sandbox.Datafeeds.UDFCompatibleDatafeed('http://test');
+  const result = await datafeed._historyProvider.getBars(
+    { ticker: 'a:SZ.301268' },
+    '5',
+    { from: 1000, to: 2000, firstDataRequest: true },
+  );
+
+  assert.equal(historyAttempts, 2);
+  assert.equal(delays.filter((delay) => delay === 750).length, 1);
+  assert.equal(result.bars.length, 1);
+});

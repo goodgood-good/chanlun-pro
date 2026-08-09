@@ -121,6 +121,11 @@ def sse_runtime_status():
 def start_sse_runtime():
     global _runtime_closed
     with _runtime_lock:
+        # The HTTP server can accept an SSE connection just before the explicit
+        # runtime bootstrap reaches this function.  In that case recomputes are
+        # valid work on an already-open runtime, not evidence of a restart.
+        if not _runtime_closed:
+            return
         if _runtime_inflight:
             raise RuntimeError("cannot restart SSE runtime with active recomputes")
         _runtime_closed = False

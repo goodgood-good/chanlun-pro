@@ -15,7 +15,7 @@ from typing import Dict, Union
 from chanlun.core.types.config import Config
 
 
-STRICT_BASE_PROFILE_ID = "chanlun-source-faithful-base-v7"
+STRICT_BASE_PROFILE_ID = "chanlun-source-faithful-base-v10"
 
 
 _STRICT_BASE_CONFIG: Dict[str, Union[str, int, bool]] = {
@@ -47,15 +47,30 @@ _STRICT_BASE_CONFIG: Dict[str, Union[str, int, bool]] = {
     # departures may use either direction. Recursive centers retain the original
     # three-trend core and obtain their shared entry from the preceding trend.
     "center_seed_rule": "shared-leave-entry-three-core-five-role-v7",
-    "center_lifecycle_rule": "bidirectional-shared-leave-first-return-v5",
+    "center_lifecycle_rule": "bidirectional-shared-leave-first-return-event-v6",
     "center_scan_rule": "post-third-point-first-mature-causal-owner-v1",
+    # L037/L043: compare complete same-level departure legs (the terminal c
+    # contains the last center's third point), and let confirmed divergence
+    # close the fixed same-level decomposition at its causal endpoint.
+    "trend_divergence_rule": "identified-complete-c-price-extreme-any-decay-v2",
+    "decomposition_rule": "confirmed-divergence-partition-replay-v2",
+    # L044/L053: a lower-level reversal may cross multiple levels and produce a
+    # higher-level second point even when that target level has no first point.
+    # Every target must still be confirmed by the reverse third point of its
+    # own direct sub-level's dynamic last center.
+    "second_class_rule": (
+        "parent-or-cross-level-small-large-direct-subcenter-third-retest-v3"
+    ),
     # The strength measure is fixed too; it is evidence, never a definition
     # switch for K/fractal/stroke/segment structure.
     "idx_macd_fast": 12,
     "idx_macd_slow": 26,
     "idx_macd_signal": 9,
     "use_macd_ld": True,
-    "macd_ld_use_htf": True,
+    # Formal divergence boundaries must be prefix-stable.  Interpolated HTF
+    # MACD rewrites the current bucket's historical source bars, so the strict
+    # evidence path uses native source-frequency MACD.
+    "macd_ld_use_htf": False,
 }
 
 

@@ -40,6 +40,10 @@ def build_v31_technical_entry_snapshot(
         or l2_locator.point_type not in {"1buy", "2buy"}
     ):
         raise ValueError("V3.1 requires a confirmed independent 1m locator")
+    if l2_locator.point_type == "2buy":
+        raise ValueError(
+            "V3.1 second-buy locator requires a closed small-to-large proof graph"
+        )
     if (
         chain.l0_point_id != l0_three_buy.point_id
         or chain.l2_locator_point_id != l2_locator.point_id

@@ -5,9 +5,10 @@ from datetime import timedelta
 
 import pytest
 
-from chanlun.core.strict_structure.center_machine import advance_center
+from chanlun.core.strict_structure.center_machine import advance_center, establish_center
 from chanlun.core.strict_structure.models import (
     CenterState,
+    SourceKind,
     StrictLevelResult,
     StrictStructureResult,
 )
@@ -25,25 +26,84 @@ from tests.core.strict_structure.helpers import (
 
 
 def nine_touch_center(*, structural_level: int = 0):
-    center = ongoing_center(structural_level=structural_level)
+    source_kind = (
+        SourceKind.SEGMENT
+        if structural_level == 0
+        else SourceKind.TREND_TYPE
+    )
+    if structural_level == 0:
+        center = ongoing_center(structural_level=structural_level)
+    else:
+        initial = (
+            unit(
+                0,
+                "up",
+                90,
+                120,
+                structural_level=structural_level,
+                source_kind=source_kind,
+            ),
+            unit(
+                1,
+                "down",
+                120,
+                100,
+                structural_level=structural_level,
+                source_kind=source_kind,
+            ),
+            unit(
+                2,
+                "up",
+                100,
+                115,
+                structural_level=structural_level,
+                source_kind=source_kind,
+            ),
+            unit(
+                3,
+                "down",
+                115,
+                105,
+                structural_level=structural_level,
+                source_kind=source_kind,
+            ),
+        )
+        center = establish_center(
+            initial[1:],
+            structural_level,
+            source_kind,
+            entry_unit=initial[0],
+        )
+        assert center is not None
+        center, _ = advance_center(
+            center,
+            unit(
+                4,
+                "up",
+                105,
+                130,
+                structural_level=structural_level,
+                source_kind=source_kind,
+            ),
+        )
     # u4 是成立窗口的第五段离开；u5 回到核心后，u4/u5 才成为
     # 延伸体。再追加四段核心内震荡，正好形成九个真实触核 body units。
     additions = (
-        unit(5, "down", 130, 110, structural_level=structural_level),
-        unit(6, "up", 110, 114, structural_level=structural_level),
-        unit(7, "down", 114, 106, structural_level=structural_level),
-        unit(8, "up", 106, 114, structural_level=structural_level),
-        unit(9, "down", 114, 110, structural_level=structural_level),
+        unit(5, "down", 130, 110, structural_level=structural_level, source_kind=source_kind),
+        unit(6, "up", 110, 114, structural_level=structural_level, source_kind=source_kind),
+        unit(7, "down", 114, 106, structural_level=structural_level, source_kind=source_kind),
+        unit(8, "up", 106, 114, structural_level=structural_level, source_kind=source_kind),
+        unit(9, "down", 114, 110, structural_level=structural_level, source_kind=source_kind),
     )
     for item in additions:
         center, _ = advance_center(center, item)
     completed, _ = advance_center(
         center,
-        unit(10, "up", 110, 130, structural_level=structural_level),
+        unit(10, "up", 110, 130, structural_level=structural_level, source_kind=source_kind),
     )
     completed, _ = advance_center(
         completed,
-        unit(11, "down", 130, 116, structural_level=structural_level),
+        unit(11, "down", 130, 116, structural_level=structural_level, source_kind=source_kind),
     )
     assert completed.state is CenterState.COMPLETED
     assert len(completed.body_units) == 9
@@ -114,14 +174,21 @@ def test_nine_segment_evidence_links_existing_standard_target_center() -> None:
     source = nine_touch_center()
     target = nine_touch_center(structural_level=1)
     level_zero = structure_for(source).levels[0]
+    target_units = (
+        target.entry_unit,
+        *target.body_units,
+        target.completion_leave_unit,
+        target.completion_return_unit,
+    )
     level_one = StrictLevelResult(
         structural_level=1,
-        units=target.body_units + (target.completion_return_unit,),
+        units=target_units,
         center_result=replace(
             level_zero.center_result,
             structural_level=1,
             centers=(target,),
             price_basis_revision=target.price_basis_revision,
+            locked_unit_count=len(target_units),
         ),
         trend_types=(),
         completed_trends=(),
@@ -152,14 +219,21 @@ def test_future_standard_target_does_not_rewrite_nine_segment_evidence() -> None
         available_at=future,
     )
     level_zero = structure_for(source).levels[0]
+    target_units = (
+        target.entry_unit,
+        *target.body_units,
+        target.completion_leave_unit,
+        target.completion_return_unit,
+    )
     level_one = StrictLevelResult(
         structural_level=1,
-        units=target.body_units + (target.completion_return_unit,),
+        units=target_units,
         center_result=replace(
             level_zero.center_result,
             structural_level=1,
             centers=(target,),
             price_basis_revision=target.price_basis_revision,
+            locked_unit_count=len(target_units),
         ),
         trend_types=(),
         completed_trends=(),

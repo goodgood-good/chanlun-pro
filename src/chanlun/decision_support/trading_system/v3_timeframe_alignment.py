@@ -8,6 +8,9 @@ from typing import Iterable, Literal
 from chanlun.core.strict_structure.models import TrendType
 from chanlun.decision_support.fingerprints import normalize_datetime
 from chanlun.decision_support.trading_system.models import StructuralPoint
+from chanlun.decision_support.trading_system.structure_adapter import (
+    has_explicit_small_to_large_second_proof,
+)
 from chanlun.decision_support.trading_system.v3_parameters import snapshot_sha256
 from chanlun.decision_support.trading_system.v3_timeframe_override import (
     ENTRY_ALIGNMENT_CONTRACT_ID,
@@ -261,6 +264,15 @@ def align_independent_entry_chains(
         _validate_l2(point)
     if any(point_id not in {point.point_id for point in l2_values} for point_id in second_buy_ids):
         raise ValueError("allowed L2 second-buy evidence references an unknown point")
+    l2_by_id = {point.point_id: point for point in l2_values}
+    proven_second_ids = frozenset(
+        point.point_id
+        for point in l2_values
+        if has_explicit_small_to_large_second_proof(
+            point,
+            points_by_id=l2_by_id,
+        )
+    )
 
     decisions: list[AlignmentDecision] = []
     for l0 in sorted(l0_values, key=lambda item: (item.available_at, item.point_id)):
@@ -353,7 +365,13 @@ def align_independent_entry_chains(
                 )
                 if point.price_basis_revision == l0.price_basis_revision
                 and point.point_type in {"1buy", "2buy"}
-                and (point.point_type == "1buy" or point.point_id in second_buy_ids)
+                and (
+                    point.point_type == "1buy"
+                    or (
+                        point.point_id in second_buy_ids
+                        and point.point_id in proven_second_ids
+                    )
+                )
                 and first_return.terminal_start
                 <= point.anchor_at
                 <= first_return.terminal_end

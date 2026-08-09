@@ -76,6 +76,57 @@ def test_adjacent_same_direction_trends_require_combination() -> None:
     assert len(decomposed.combinations) == 1
 
 
+def test_confirmed_divergence_edge_survives_higher_level_combination_provenance() -> None:
+    values = connected((100, 120), (120, 140))
+
+    decomposed = combine_same_level_trends(
+        values,
+        frozenset(),
+        frozenset({values[0].unit_id}),
+    )
+
+    assert len(decomposed.units) == 1
+    assert len(decomposed.combinations) == 1
+    assert decomposed.combinations[0].protected_after_ids == (
+        values[0].unit_id,
+    )
+
+
+def test_same_level_combination_identity_is_associative_and_leaf_flattened() -> None:
+    values = connected((100, 120), (120, 140), (140, 160))
+    protected = frozenset({values[0].unit_id, values[1].unit_id})
+
+    direct = combine_same_level_trends(values, frozenset(), protected).units[0]
+    left = combine_same_level_trends(
+        (
+            combine_same_level_trends(
+                values[:2],
+                frozenset(),
+                frozenset({values[0].unit_id}),
+            ).units[0],
+            values[2],
+        ),
+        frozenset(),
+        protected,
+    ).units[0]
+    right = combine_same_level_trends(
+        (
+            values[0],
+            combine_same_level_trends(
+                values[1:],
+                frozenset(),
+                frozenset({values[1].unit_id}),
+            ).units[0],
+        ),
+        frozenset(),
+        protected,
+    ).units[0]
+
+    assert direct == left == right
+    assert direct.child_ids == tuple(item.unit_id for item in values)
+    assert direct.protected_after_ids == tuple(item.unit_id for item in values[:2])
+
+
 def test_consolidation_between_same_direction_trends_is_legal() -> None:
     """「上涨—盘整—上涨」是中枢上移的标准形态，必须合法。"""
 

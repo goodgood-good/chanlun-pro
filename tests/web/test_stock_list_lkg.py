@@ -114,6 +114,26 @@ def test_disk_restore_marks_symbols_ready(monkeypatch):
     }
 
 
+def test_disk_warmed_first_round_does_not_open_exchange(monkeypatch):
+    with stock_list._stock_cache_lock:
+        stock_list.stock_cache["a"] = list(LKG)
+
+    def fail_if_exchange_is_opened(_market):
+        raise AssertionError("disk-warmed startup must not access the exchange")
+
+    monkeypatch.setattr(stock_list, "get_exchange", fail_if_exchange_is_opened)
+
+    stock_list._preload_single_exchange("a", skip_if_disk_warm=True)
+
+    assert stock_list.get_symbol_readiness("a") == {
+        "market": "a",
+        "ready": True,
+        "status": "ready",
+        "count": 1,
+        "last_error": None,
+    }
+
+
 def test_sync_empty_result_cannot_overwrite_concurrent_lkg(monkeypatch):
     def _get_exchange_with_concurrent_lkg(_market):
         with stock_list._stock_cache_lock:
@@ -158,7 +178,7 @@ def test_lkg_survives_refresh_ttl_after_failures(monkeypatch):
     assert stock_list._cached_symbols_or_empty("a") == LKG
 
 
-def test_first_preload_round_refreshes_disk_warmed_symbols(monkeypatch):
+def test_first_preload_round_skips_refresh_for_disk_warmed_symbols(monkeypatch):
     calls = []
 
     def record_refresh(exchange, skip_if_disk_warm=False):
@@ -176,7 +196,32 @@ def test_first_preload_round_refreshes_disk_warmed_symbols(monkeypatch):
     with pytest.raises(RuntimeError, match="stop after first refresh"):
         stock_list.preload_symbols()
 
-    assert calls == [("a", False)]
+    assert calls == [("a", True)]
+
+
+def test_later_preload_rounds_refresh_disk_warmed_symbols(monkeypatch):
+    calls = []
+    sleep_calls = 0
+
+    def record_refresh(exchange, skip_if_disk_warm=False):
+        calls.append((exchange, skip_if_disk_warm))
+
+    def stop_after_second_round(_seconds):
+        nonlocal sleep_calls
+        sleep_calls += 1
+        if sleep_calls == 2:
+            raise RuntimeError("stop after second refresh")
+
+    monkeypatch.setattr(stock_list, "PRELOAD_EXCHANGES", ["a"])
+    monkeypatch.setattr(stock_list, "PRELOAD_PARALLEL_WORKERS", 1)
+    monkeypatch.setattr(stock_list, "PRELOAD_STARTUP_DELAY_SECONDS", 0)
+    monkeypatch.setattr(stock_list, "_preload_single_exchange", record_refresh)
+    monkeypatch.setattr(stock_list.time, "sleep", stop_after_second_round)
+
+    with pytest.raises(RuntimeError, match="stop after second refresh"):
+        stock_list.preload_symbols()
+
+    assert calls == [("a", True), ("a", False)]
 
 
 def test_disabled_preload_is_ready_without_symbol_cache(monkeypatch):

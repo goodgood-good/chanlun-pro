@@ -38,6 +38,79 @@ def stable_structure_id(namespace: str, *parts: Any) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def build_center_id(
+    *,
+    price_basis_revision: str,
+    structural_level: int,
+    source_kind: str,
+    entry_unit_id: str,
+    initial_unit_ids: tuple[str, ...],
+    establishment_unit_id: str | None,
+    zd_tick: int,
+    zg_tick: int,
+) -> str:
+    """Return the immutable identity of a formal center seed."""
+
+    return stable_structure_id(
+        "chanlun-center/v9",
+        price_basis_revision,
+        structural_level,
+        source_kind,
+        entry_unit_id,
+        tuple(initial_unit_ids),
+        establishment_unit_id,
+        zd_tick,
+        zg_tick,
+    )
+
+
+def build_trend_id(
+    *,
+    price_basis_revision: str,
+    structural_level: int,
+    center_ids: tuple[str, ...],
+    constituent_unit_ids: tuple[str, ...],
+    direction: str,
+) -> str:
+    """Return the immutable identity shared by a trend's state snapshots."""
+
+    return stable_structure_id(
+        "chanlun-trend/v3",
+        price_basis_revision,
+        structural_level,
+        tuple(center_ids),
+        tuple(constituent_unit_ids),
+        direction,
+    )
+
+
+def complete_c_measurement_id(
+    *,
+    price_basis_revision: str,
+    structural_level: int,
+    source_kind: str,
+    child_unit_ids: tuple[str, str, str],
+) -> str:
+    """Return the stable identity of a complete-c strength window.
+
+    A complete ``c`` is measured from the last center's departure through its
+    outside first return and the following same-direction terminal unit.  It is
+    a measurement window, not the raw terminal unit, so it must never reuse the
+    terminal unit's identity.
+    """
+
+    children = tuple(child_unit_ids)
+    if len(children) != 3 or len(set(children)) != 3 or any(not item for item in children):
+        raise ValueError("complete-c measurement requires three distinct child units")
+    return stable_structure_id(
+        "chanlun-complete-c-measurement/v1",
+        price_basis_revision,
+        structural_level,
+        source_kind,
+        children,
+    )
+
+
 def _canonical_revision_value(value: Any) -> Any:
     if isinstance(value, datetime):
         if value.tzinfo is None or value.utcoffset() is None:
@@ -104,9 +177,15 @@ def _formal_structure_payload(structure) -> dict:
         centers = tuple(level.center_result.centers)
         current_trends = tuple(level.trend_types)
         completed_trends = tuple(level.completed_trends)
+        decomposition_boundaries = tuple(level.decomposition_boundaries)
         _require_unique_ids(centers, "center_id", "formal center")
         _require_unique_ids(current_trends, "trend_id", "current trend")
         _require_unique_ids(completed_trends, "trend_id", "completed trend")
+        _require_unique_ids(
+            decomposition_boundaries,
+            "boundary_id",
+            "decomposition boundary",
+        )
         levels.append(
             {
                 "structural_level": level.structural_level,
@@ -114,6 +193,7 @@ def _formal_structure_payload(structure) -> dict:
                 "centers": centers,
                 "current_trends": current_trends,
                 "completed_trends": completed_trends,
+                "decomposition_boundaries": decomposition_boundaries,
             }
         )
     return {

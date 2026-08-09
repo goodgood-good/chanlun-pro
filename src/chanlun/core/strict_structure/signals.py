@@ -20,7 +20,11 @@ from chanlun.core.strict_structure.models import (
     TrendType,
     build_strict_point_id,
 )
-from chanlun.core.strict_structure.strength import compare_divergence
+from chanlun.core.strict_structure.strength import (
+    MacdStrengthUnavailable,
+    compare_divergence,
+    compare_terminal_trend_divergence,
+)
 from chanlun.core.strict_structure.identity import stable_structure_id
 
 
@@ -302,43 +306,59 @@ class StrictSignalEngine:
             return None
         for trend in reversed(level.trend_types):
             if (
-                trend.state is not TrendState.FORMING
+                trend.state is not TrendState.COMPLETE
                 or trend.kind is not TrendKind.TREND
                 or len(trend.centers) < 2
+                or trend.terminal_divergence is not None
                 or tail.direction != trend.direction
                 or tail.source_kind is SourceKind.STROKE_OBSERVATION
-                or trend.terminal_unit.end_tick != tail.start_tick
-                or tail.market_start < trend.terminal_unit.market_end
             ):
                 continue
-            comparison = _comparison_unit(trend, tail)
-            if comparison is None:
+            last_center = trend.centers[-1]
+            leave = last_center.completion_leave_unit
+            ret = last_center.completion_return_unit
+            if leave is None or ret is None:
                 continue
+            unit_index = {
+                item.unit_id: index for index, item in enumerate(level.units)
+            }
+            return_index = unit_index.get(ret.unit_id)
+            if (
+                return_index is None
+                or return_index + 1 >= len(level.units)
+                or level.units[return_index + 1].unit_id != tail.unit_id
+                or leave.direction != tail.direction
+                or ret.direction == tail.direction
+                or ret.end_tick != tail.start_tick
+                or tail.market_start < ret.market_end
+            ):
+                continue
+            projected_units = list(level.units)
+            projected_units[return_index + 1] = _locked_projection(tail)
             try:
-                divergence = compare_divergence(
-                    comparison,
-                    _locked_projection(tail),
+                compared = compare_terminal_trend_divergence(
+                    trend.centers,
+                    tuple(projected_units),
                     self.strength,
-                    kind="trend",
+                    trend_start_unit_id=trend.constituent_units[0].unit_id,
                 )
-            except ValueError as exc:
-                if any(
-                    marker in str(exc)
-                    for marker in ("MACD", "directional MACD bars", "market interval")
-                ):
-                    continue
-                raise
+            except MacdStrengthUnavailable:
+                continue
+            if compared is None:
+                continue
+            divergence, complete_c = compared
             if not divergence.is_divergent:
                 continue
-            last_center = trend.centers[-1]
+            if complete_c.child_ids[-1] != tail.unit_id:
+                raise ValueError("approaching first-class c anchor changed")
             if trend.direction == "down":
                 point_type = "1buy"
                 side = "buy"
-                anchor_tick = tail.low_tick
+                anchor_tick = divergence.anchor_tick
             else:
                 point_type = "1sell"
                 side = "sell"
-                anchor_tick = tail.high_tick
+                anchor_tick = divergence.anchor_tick
             return StrictPointEvidence(
                 point_id=_approaching_point_id(
                     price_basis_revision=trend.price_basis_revision,
@@ -374,9 +394,10 @@ class StrictSignalEngine:
                 divergence=divergence,
                 parent_point_id=None,
                 evidence_codes=(
-                    "forming_formal_trend",
+                    "complete_formal_trend_prefix",
                     "two_separated_centers",
-                    "live_terminal_leg",
+                    "complete_c_contains_last_center_third_class",
+                    "live_complete_c_terminal",
                     "temporary_trend_divergence",
                 ),
                 missing_conditions=("terminal_unit_locked",),
@@ -517,39 +538,62 @@ class StrictSignalEngine:
                     or len(trend.centers) < 2
                 ):
                     continue
-                signal = trend.centers[-1].completion_leave_unit
+                divergence = trend.terminal_divergence
+                boundary_confirmed = divergence is not None
+                if divergence is None:
+                    if self.strength is None:
+                        continue
+                    try:
+                        compared = compare_terminal_trend_divergence(
+                            trend.centers,
+                            level.units,
+                            self.strength,
+                            trend_start_unit_id=trend.constituent_units[0].unit_id,
+                        )
+                    except MacdStrengthUnavailable:
+                        continue
+                    if compared is None:
+                        continue
+                    divergence, terminal_evidence = compared
+                    if len(terminal_evidence.child_ids) != 3:
+                        raise ValueError("terminal c measurement proof is incomplete")
+                    terminal_anchor_id = terminal_evidence.child_ids[-1]
+                    signal = next(
+                        (
+                            unit
+                            for unit in level.units
+                            if unit.unit_id == terminal_anchor_id
+                        ),
+                        None,
+                    )
+                    if signal is None:
+                        raise ValueError("terminal c anchor is missing from level units")
+                    signal_extreme = (
+                        signal.high_tick
+                        if signal.direction == "up"
+                        else signal.low_tick
+                    )
+                    if (
+                        signal.market_end != divergence.anchor_at
+                        or signal_extreme != divergence.anchor_tick
+                    ):
+                        raise ValueError("terminal c anchor changed after measurement")
+                else:
+                    signal = trend.terminal_unit
                 if (
-                    signal is None
-                    or not signal.locked
+                    not signal.locked
                     or signal.direction != trend.direction
-                    or signal != trend.terminal_unit
                     or signal.source_kind is SourceKind.STROKE_OBSERVATION
                 ):
                     continue
-                comparison = _comparison_unit(trend, signal)
-                if comparison is None:
-                    continue
-                if self.strength is None:
-                    raise ValueError("first-class points require a strength provider")
-                try:
-                    divergence = compare_divergence(
-                        comparison,
-                        signal,
-                        self.strength,
-                        kind="trend",
-                    )
-                except ValueError as exc:
-                    unavailable_markers = (
-                        "MACD",
-                        "directional MACD bars",
-                        "market interval must align",
-                    )
-                    if any(marker in str(exc) for marker in unavailable_markers):
-                        continue
-                    raise
                 if not divergence.is_divergent:
                     continue
-                point = self._first_class_point(trend, signal, divergence)
+                point = self._first_class_point(
+                    trend,
+                    signal,
+                    divergence,
+                    boundary_confirmed=boundary_confirmed,
+                )
                 key = (
                     point.structural_level,
                     point.point_type,
@@ -593,8 +637,14 @@ class StrictSignalEngine:
             for point in lower_points
         ):
             raise ValueError("lower-level references must be confirmed first points")
+        all_first_by_id = {point.point_id: point for point in parents}
+        for point in lower_points:
+            previous = all_first_by_id.setdefault(point.point_id, point)
+            if previous != point:
+                raise ValueError("first-class id maps to conflicting evidence")
+        all_first = tuple(all_first_by_id.values())
         levels = {level.structural_level: level for level in self.structure.levels}
-        output = []
+        output: dict[tuple[int, str, str], StrictPointEvidence] = {}
         for parent in parents:
             if (
                 parent.status is not StrictPointStatus.CONFIRMED
@@ -669,31 +719,48 @@ class StrictSignalEngine:
                 if not divergence.is_divergent:
                     continue
                 variant = StrictPointVariant.WEAK_DIVERGENCE
-            output.append(
-                self._second_class_point(
-                    parent,
-                    pullback,
-                    variant=variant,
-                    divergence=divergence,
-                    related_point_ids=tuple(
-                        sorted(
-                            point.point_id
-                            for point in lower_points
-                            if point.structural_level == parent.structural_level - 1
-                            and point.side == parent.side
-                            and point.price_basis_revision
-                            == parent.price_basis_revision
-                            and pullback.market_start
-                            <= point.anchor_at
-                            <= pullback.market_end
-                            and point.available_at <= pullback.available_at
-                        )
-                    ),
-                )
+            point = self._second_class_point(
+                parent,
+                pullback,
+                variant=variant,
+                divergence=divergence,
+                related_point_ids=tuple(
+                    sorted(
+                        point.point_id
+                        for point in all_first
+                        if point.structural_level == parent.structural_level - 1
+                        and point.side == parent.side
+                        and point.price_basis_revision
+                        == parent.price_basis_revision
+                        and pullback.market_start
+                        <= point.anchor_at
+                        <= pullback.market_end
+                        and point.available_at <= pullback.available_at
+                    )
+                ),
+            )
+            output.setdefault(
+                (point.structural_level, point.point_type, point.anchor_unit_id),
+                point,
+            )
+
+        # L053's small-level-to-large-level reversal has no same-level first
+        # point.  A confirmed lower-level first point closes its containing
+        # higher-level unit; the immediate complete rebound and first pullback
+        # then form the higher-level second point.  Ordinary same-level-parent
+        # evidence wins if both paths identify the same anchor.
+        for point in self._small_to_large_second_points(
+            all_first,
+            levels,
+            self.third_class_points(),
+        ):
+            output.setdefault(
+                (point.structural_level, point.point_type, point.anchor_unit_id),
+                point,
             )
         return tuple(
             sorted(
-                output,
+                output.values(),
                 key=lambda point: (
                     point.available_at,
                     point.structural_level,
@@ -727,6 +794,11 @@ class StrictSignalEngine:
             if variant is StrictPointVariant.STRICT
             else anchor_tick
         )
+        confirmed_at = max(
+            parent.confirmed_at,
+            pullback.confirmed_at,
+            pullback.confirmed_at if divergence is None else divergence.confirmed_at,
+        )
         available_at = max(
             parent.available_at,
             pullback.available_at,
@@ -751,7 +823,7 @@ class StrictSignalEngine:
             price_basis_revision=parent.price_basis_revision,
             anchor_unit_id=pullback.unit_id,
             anchor_at=pullback.market_end,
-            confirmed_at=pullback.confirmed_at,
+            confirmed_at=confirmed_at,
             available_at=available_at,
             price_quantum=self.price_quantum,
             anchor_tick=anchor_tick,
@@ -775,11 +847,358 @@ class StrictSignalEngine:
             related_point_ids=related_point_ids,
         )
 
+    @staticmethod
+    def _lower_descendant_ids(unit, lower_level) -> frozenset[str]:
+        descendants = set(unit.child_ids)
+        changed = True
+        while changed:
+            changed = False
+            for trend in lower_level.trend_types:
+                if trend.trend_id not in descendants:
+                    continue
+                before = len(descendants)
+                for child in trend.constituent_units:
+                    descendants.add(child.unit_id)
+                    descendants.update(child.child_ids)
+                changed = changed or len(descendants) != before
+        return frozenset(descendants)
+
+    @classmethod
+    def _recursive_descendant_ids(cls, unit, levels) -> frozenset[str]:
+        """Expand one recursive carrier to every auditable lower-level leaf.
+
+        A higher-level unit may directly contain lower-level units, a locked
+        trend id, or an associative same-level combination.  The graph is
+        therefore expanded by stable identity instead of assuming that the
+        small reversal belongs to the immediately adjacent level.
+        """
+
+        children_by_id: dict[str, tuple[str, ...]] = {}
+
+        def register(identifier: str, children) -> None:
+            values = tuple(children)
+            previous = children_by_id.setdefault(identifier, values)
+            if previous != values:
+                raise ValueError("recursive carrier id maps to conflicting children")
+
+        for level in levels.values():
+            for candidate in level.units:
+                register(candidate.unit_id, candidate.child_ids)
+            for trend in level.trend_types:
+                register(
+                    trend.trend_id,
+                    (item.unit_id for item in trend.constituent_units),
+                )
+
+        descendants: set[str] = set()
+        pending = list(unit.child_ids)
+        while pending:
+            identifier = pending.pop()
+            if identifier in descendants:
+                continue
+            descendants.add(identifier)
+            pending.extend(children_by_id.get(identifier, ()))
+        return frozenset(descendants)
+
+    @classmethod
+    def _contains_lower_anchor(cls, unit, levels, anchor_unit_id: str) -> bool:
+        return anchor_unit_id in cls._recursive_descendant_ids(unit, levels)
+
+    @classmethod
+    def _last_lower_reverse_third(
+        cls,
+        parent,
+        lower_level,
+        signal,
+        rebound,
+        pullback,
+        lower_third_points,
+    ):
+        signal_children = cls._lower_descendant_ids(signal, lower_level)
+        rebound_children = cls._lower_descendant_ids(rebound, lower_level)
+        movement_children = signal_children | rebound_children
+        if not rebound_children or not movement_children:
+            return None
+
+        candidates = tuple(
+            center
+            for center in lower_level.center_result.centers
+            if signal.market_start
+            <= center.body_start_market_time
+            <= center.established_market_time
+            <= rebound.market_end
+            and center.entry_unit.unit_id in movement_children
+            and all(
+                item.unit_id in movement_children
+                for item in (
+                    *center.establishment_units,
+                    *center.body_units,
+                    *center.extension_units,
+                )
+            )
+        )
+        if not candidates:
+            return None
+        last_center = max(
+            candidates,
+            key=lambda center: (
+                center.body_start_market_time,
+                center.established_market_time,
+                center.center_id,
+            ),
+        )
+        if (
+            last_center.state is not CenterState.COMPLETED
+            or last_center.completion_leave_unit is None
+            or last_center.completion_return_unit is None
+            or last_center.available_at > rebound.available_at
+            or last_center.completion_leave_unit.unit_id not in rebound_children
+            or last_center.completion_return_unit.unit_id not in rebound_children
+            or last_center.completion_return_unit.market_end > rebound.market_end
+        ):
+            return None
+        expected_type = "3buy" if parent.side == "buy" else "3sell"
+        matches = tuple(
+            point
+            for point in lower_third_points
+            if point.structural_level == lower_level.structural_level
+            and point.center_id == last_center.center_id
+            and point.point_type == expected_type
+            and point.status is StrictPointStatus.CONFIRMED
+            and point.anchor_unit_id
+            == last_center.completion_return_unit.unit_id
+            and rebound.market_start <= point.anchor_at <= rebound.market_end
+            and point.available_at <= rebound.available_at
+            and point.available_at <= pullback.available_at
+        )
+        if len(matches) > 1:
+            raise ValueError("last lower-level center has duplicate third points")
+        return None if not matches else matches[0]
+
+    def _small_to_large_second_points(
+        self,
+        lower_first_points,
+        levels,
+        lower_third_points,
+    ):
+        output = []
+        for parent in lower_first_points:
+            for target_level_number in sorted(
+                level_number
+                for level_number in levels
+                if level_number > parent.structural_level
+            ):
+                target = levels[target_level_number]
+                lower_level = levels.get(target_level_number - 1)
+                if lower_level is None:
+                    continue
+                matches = [
+                    index
+                    for index, unit in enumerate(target.units)
+                    if self._contains_lower_anchor(
+                        unit,
+                        levels,
+                        parent.anchor_unit_id,
+                    )
+                ]
+                if len(matches) != 1:
+                    continue
+                anchor_index = matches[0]
+                if len(target.units) < anchor_index + 3:
+                    continue
+                signal, rebound, pullback = target.units[
+                    anchor_index : anchor_index + 3
+                ]
+                expected_signal_direction = (
+                    "down" if parent.side == "buy" else "up"
+                )
+                signal_extreme_matches = (
+                    signal.low_tick == parent.anchor_tick
+                    if parent.side == "buy"
+                    else signal.high_tick == parent.anchor_tick
+                )
+                if (
+                    not signal.locked
+                    or not rebound.locked
+                    or not pullback.locked
+                    or signal.direction != expected_signal_direction
+                    or signal.market_end != parent.anchor_at
+                    or signal.end_tick != parent.anchor_tick
+                    or not signal_extreme_matches
+                    or signal.direction == rebound.direction
+                    or signal.direction != pullback.direction
+                    or signal.end_tick != rebound.start_tick
+                    or rebound.end_tick != pullback.start_tick
+                    or rebound.market_start < signal.market_end
+                    or pullback.market_start < rebound.market_end
+                ):
+                    continue
+                if (
+                    signal.source_kind is SourceKind.STROKE_OBSERVATION
+                    or rebound.source_kind is not signal.source_kind
+                    or pullback.source_kind is not signal.source_kind
+                    or signal.price_basis_revision != parent.price_basis_revision
+                    or rebound.price_basis_revision != parent.price_basis_revision
+                    or pullback.price_basis_revision != parent.price_basis_revision
+                ):
+                    raise ValueError("small-to-large second-class evidence mismatch")
+                reverse_third = self._last_lower_reverse_third(
+                    parent,
+                    lower_level,
+                    signal,
+                    rebound,
+                    pullback,
+                    lower_third_points,
+                )
+                if reverse_third is None:
+                    # L044: every promoted target uses the dynamic last center
+                    # of its own direct sub-level.  A still smaller first point
+                    # is only a possible turn, never sufficient proof alone.
+                    continue
+                held = (
+                    pullback.low_tick >= parent.anchor_tick
+                    if parent.side == "buy"
+                    else pullback.high_tick <= parent.anchor_tick
+                )
+                divergence = None
+                if held:
+                    variant = StrictPointVariant.STRICT
+                else:
+                    if self.strength is None:
+                        raise ValueError(
+                            "weak small-to-large second-class point requires "
+                            "a strength provider"
+                        )
+                    try:
+                        divergence = compare_divergence(
+                            signal,
+                            pullback,
+                            self.strength,
+                            kind="consolidation",
+                        )
+                    except ValueError as exc:
+                        if any(
+                            marker in str(exc)
+                            for marker in (
+                                "MACD",
+                                "directional MACD bars",
+                                "market interval must align",
+                            )
+                        ):
+                            continue
+                        raise
+                    if not divergence.is_divergent:
+                        continue
+                    variant = StrictPointVariant.WEAK_DIVERGENCE
+                output.append(
+                    self._small_to_large_second_class_point(
+                        parent,
+                        target_level_number,
+                        signal,
+                        rebound,
+                        pullback,
+                        variant=variant,
+                        divergence=divergence,
+                        reverse_third=reverse_third,
+                    )
+                )
+        return tuple(output)
+
+    def _small_to_large_second_class_point(
+        self,
+        parent: StrictPointEvidence,
+        structural_level: int,
+        signal: ConstituentUnit,
+        rebound: ConstituentUnit,
+        pullback: ConstituentUnit,
+        *,
+        variant: StrictPointVariant,
+        divergence,
+        reverse_third: StrictPointEvidence,
+    ) -> StrictPointEvidence:
+        if pullback.confirmed_at is None:
+            raise ValueError("small-to-large pullback requires confirmation")
+        if reverse_third.center_id is None:
+            raise ValueError("small-to-large reverse third requires its center")
+        point_type = "2buy" if parent.side == "buy" else "2sell"
+        anchor_tick = (
+            pullback.low_tick if parent.side == "buy" else pullback.high_tick
+        )
+        invalidation_tick = (
+            parent.anchor_tick
+            if variant is StrictPointVariant.STRICT
+            else anchor_tick
+        )
+        confirmed_at = max(
+            parent.confirmed_at,
+            reverse_third.confirmed_at,
+            pullback.confirmed_at,
+            pullback.confirmed_at if divergence is None else divergence.confirmed_at,
+        )
+        available_at = max(
+            parent.available_at,
+            reverse_third.available_at,
+            pullback.available_at,
+            pullback.available_at if divergence is None else divergence.available_at,
+        )
+        point_id = build_strict_point_id(
+            price_basis_revision=parent.price_basis_revision,
+            point_type=point_type,
+            structural_level=structural_level,
+            anchor_unit_id=pullback.unit_id,
+            center_id=None,
+            parent_point_id=parent.point_id,
+        )
+        return StrictPointEvidence(
+            point_id=point_id,
+            point_type=point_type,
+            side=parent.side,
+            status=StrictPointStatus.CONFIRMED,
+            variant=variant,
+            structural_level=structural_level,
+            source_kind=pullback.source_kind,
+            price_basis_revision=parent.price_basis_revision,
+            anchor_unit_id=pullback.unit_id,
+            anchor_at=pullback.market_end,
+            confirmed_at=confirmed_at,
+            available_at=available_at,
+            price_quantum=self.price_quantum,
+            anchor_tick=anchor_tick,
+            invalidation_tick=invalidation_tick,
+            center_id=None,
+            center_zd_tick=None,
+            center_zg_tick=None,
+            center_ordinal=None,
+            divergence=divergence,
+            parent_point_id=parent.point_id,
+            evidence_codes=(
+                "confirmed_lower_level_first_class_parent",
+                "small_to_large_reversal",
+                "last_lower_level_center_reverse_third_class",
+                "complete_adjacent_rebound",
+                "complete_first_pullback",
+                (
+                    "prior_extreme_held"
+                    if variant is StrictPointVariant.STRICT
+                    else "consolidation_divergence"
+                ),
+            ),
+            related_point_ids=(parent.point_id, reverse_third.point_id),
+            small_to_large_carrier_unit_ids=(
+                signal.unit_id,
+                rebound.unit_id,
+                pullback.unit_id,
+            ),
+            small_to_large_last_center_id=reverse_third.center_id,
+        )
+
     def _first_class_point(
         self,
         trend: TrendType,
         signal: ConstituentUnit,
         divergence,
+        *,
+        boundary_confirmed: bool,
     ) -> StrictPointEvidence:
         last_center = trend.centers[-1]
         if trend.direction == "down":
@@ -790,7 +1209,7 @@ class StrictSignalEngine:
             point_type = "1sell"
             side = "sell"
             anchor_tick = signal.high_tick
-        if trend.confirmed_at is None:
+        if trend.confirmed_at is None or signal.confirmed_at is None:
             raise ValueError("completed trend requires confirmation")
         available_at = max(
             signal.available_at,
@@ -817,7 +1236,11 @@ class StrictSignalEngine:
             price_basis_revision=trend.price_basis_revision,
             anchor_unit_id=signal.unit_id,
             anchor_at=signal.market_end,
-            confirmed_at=trend.confirmed_at,
+            confirmed_at=max(
+                trend.confirmed_at,
+                signal.confirmed_at,
+                divergence.confirmed_at,
+            ),
             available_at=available_at,
             price_quantum=self.price_quantum,
             anchor_tick=anchor_tick,
@@ -831,7 +1254,12 @@ class StrictSignalEngine:
             evidence_codes=(
                 "formal_trend",
                 "two_separated_centers",
-                "terminal_leave",
+                "complete_c_contains_third_point",
+                (
+                    "confirmed_same_level_boundary"
+                    if boundary_confirmed
+                    else "post_assembly_complete_c_confirmation"
+                ),
                 "trend_divergence",
             ),
         )

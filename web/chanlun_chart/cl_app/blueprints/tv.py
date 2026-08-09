@@ -153,6 +153,7 @@ from ..services.stock_list import (  # noqa: E402
     PRELOAD_INTERVAL_SECONDS,
     PRELOAD_PARALLEL_WORKERS,
     PRELOAD_STARTUP_DELAY_SECONDS,
+    get_cached_processed_stock,
     get_cached_processed_stocks,
     preload_symbols,
     start_symbol_preload_thread,
@@ -663,20 +664,27 @@ def tv_symbols():
             interval=str(review_lock["chart_interval"]),
         )
 
-    try:
-        ex = get_exchange(Market(market))
-    except Exception as e:
-        LogUtil.error(f"[tv_symbols] get_exchange failed symbol={raw_symbol} err={e}")
-        return {"s": "error", "errmsg": "invalid market"}
-
-    try:
-        stocks = ex.stock_info(code)
-    except Exception as e:
-        # 数据源故障(如 QMT/xtquant 不可用)时优雅降级为 error,不抛到 flask 变 500。
-        LogUtil.error(f"[tv_symbols] stock_info failed symbol={raw_symbol} err={e}")
-        return {"s": "error", "errmsg": f"unknown symbol: {raw_symbol}"}
+    # 先读已恢复的 last-known-good symbol 缓存。冷启动时 QMT 的全市场刷新会长时间
+    # 持有 xtdata native lock；若这里先调 stock_info，前端 Requester 会在 15 秒后超时并把
+    # 一次临时阻塞永久记成 unknown_symbol，直到用户手动“重新加载数据”。缓存命中时不再
+    # 调用 stock_info / xtdata native lock，保证 TradingView 首次 resolveSymbol 能立即完成。
+    stocks = get_cached_processed_stock(market, code)
+    ex = None
     if stocks is None:
-        return {"s": "error", "errmsg": f"unknown symbol: {raw_symbol}"}
+        try:
+            ex = get_exchange(Market(market))
+        except Exception as e:
+            LogUtil.error(f"[tv_symbols] get_exchange failed symbol={raw_symbol} err={e}")
+            return {"s": "error", "errmsg": "invalid market"}
+
+        try:
+            stocks = ex.stock_info(code)
+        except Exception as e:
+            # 数据源故障(如 QMT/xtquant 不可用)时优雅降级为 error,不抛到 flask 变 500。
+            LogUtil.error(f"[tv_symbols] stock_info failed symbol={raw_symbol} err={e}")
+            return {"s": "error", "errmsg": f"unknown symbol: {raw_symbol}"}
+        if stocks is None:
+            return {"s": "error", "errmsg": f"unknown symbol: {raw_symbol}"}
 
     if "code" not in stocks:
         stocks["code"] = code
@@ -685,7 +693,7 @@ def tv_symbols():
 
     sector = ""
     industry = ""
-    if market == "a":
+    if market == "a" and ex is not None:
         try:
             gnbk = ex.stock_owner_plate(code)
             sector = " / ".join([_g["name"] for _g in gnbk["GN"]])
@@ -693,17 +701,16 @@ def tv_symbols():
         except Exception:
             pass
 
-    # precision 缺失或非法时默认 100（即 2 位小数），避免 TradingView minmov 校验失败
+    # precision 缺失或非法时使用 K 线精度的同一规则；A 股磁盘 LKG 为控制体积不保存
+    # precision，因此 ETF/基金需按代码恢复到 1000，普通股票恢复到 100。
     precision = stocks.get("precision")
     if precision is None:
-        # 外汇(tdx_fx)stock_info 不带 precision,回落 100(2位)会严重截断汇率显示
-        # (如 0.87655 → 0.88)。按 kline_precision 的 fx=5 位设 pricescale=10^5,与 K 线
-        # 归一精度对齐(单一真相源)。其余不带 precision 的 market(美股/港股)维持 100:
-        # 主流 2 位,不强改显示惯例。
-        if market == "fx":
+        # 外汇(tdx_fx)stock_info 也不带 precision；与 K 线归一精度对齐，避免截断。
+        if market in ("a", "fx"):
             from chanlun.exchange.kline_precision import resolve_decimals
-            _dec = resolve_decimals("fx", code)
-            precision = 10 ** _dec if _dec else 100
+
+            _dec = resolve_decimals(market, code)
+            precision = 10 ** _dec if _dec is not None else 100
         else:
             precision = 100
     else:

@@ -5,8 +5,8 @@ from datetime import timedelta
 
 import pytest
 
-from chanlun.core.strict_structure.center_machine import advance_center
-from chanlun.core.strict_structure.models import CenterState
+from chanlun.core.strict_structure.center_machine import advance_center, establish_center
+from chanlun.core.strict_structure.models import CenterState, SourceKind
 from chanlun.decision_support.trading_system.recursive_1m_decision import (
     Recursive1mDataFacts,
     evaluate_recursive_1m_entry,
@@ -22,28 +22,88 @@ from chanlun.decision_support.trading_system.recursive_1m_research import (
 )
 from tests.core.strict_structure.helpers import (
     completed_up_center,
-    ongoing_center,
     structure_for,
     unit,
+    valid_five_up_exit,
 )
 from tests.trading_system.helpers import confirmed_point
 
 
 def _nine_touch_center(*, structural_level: int):
-    center = ongoing_center(structural_level=structural_level)
+    initial = tuple(
+        replace(item, source_kind=SourceKind.TREND_TYPE)
+        for item in valid_five_up_exit(structural_level=structural_level)
+    )
+    center = establish_center(
+        initial[1:4],
+        structural_level,
+        SourceKind.TREND_TYPE,
+        entry_unit=initial[0],
+    )
+    assert center is not None
+    center, _ = advance_center(center, initial[4])
     additions = (
-        unit(5, "down", 130, 110, structural_level=structural_level),
-        unit(6, "up", 110, 120, structural_level=structural_level),
-        unit(7, "down", 120, 110, structural_level=structural_level),
-        unit(8, "up", 110, 120, structural_level=structural_level),
-        unit(9, "down", 120, 110, structural_level=structural_level),
-        unit(10, "up", 110, 120, structural_level=structural_level),
+        unit(
+            5,
+            "down",
+            130,
+            110,
+            structural_level=structural_level,
+            source_kind=SourceKind.TREND_TYPE,
+        ),
+        unit(
+            6,
+            "up",
+            110,
+            120,
+            structural_level=structural_level,
+            source_kind=SourceKind.TREND_TYPE,
+        ),
+        unit(
+            7,
+            "down",
+            120,
+            110,
+            structural_level=structural_level,
+            source_kind=SourceKind.TREND_TYPE,
+        ),
+        unit(
+            8,
+            "up",
+            110,
+            120,
+            structural_level=structural_level,
+            source_kind=SourceKind.TREND_TYPE,
+        ),
+        unit(
+            9,
+            "down",
+            120,
+            110,
+            structural_level=structural_level,
+            source_kind=SourceKind.TREND_TYPE,
+        ),
+        unit(
+            10,
+            "up",
+            110,
+            120,
+            structural_level=structural_level,
+            source_kind=SourceKind.TREND_TYPE,
+        ),
     )
     for item in additions:
         center, _ = advance_center(center, item)
     center, _ = advance_center(
         center,
-        unit(11, "down", 120, 116, structural_level=structural_level),
+        unit(
+            11,
+            "down",
+            120,
+            116,
+            structural_level=structural_level,
+            source_kind=SourceKind.TREND_TYPE,
+        ),
     )
     assert center.state is CenterState.COMPLETED
     return center

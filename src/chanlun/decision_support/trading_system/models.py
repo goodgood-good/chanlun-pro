@@ -110,6 +110,9 @@ class StructuralPoint:
     divergence_kind: str | None
     parent_point_id: str | None
     evidence_codes: tuple[str, ...]
+    related_point_ids: tuple[str, ...] = ()
+    small_to_large_carrier_unit_ids: tuple[str, ...] = ()
+    small_to_large_last_center_id: str | None = None
 
     def __post_init__(self) -> None:
         expected_side = "buy" if self.point_type.endswith("buy") else "sell"
@@ -136,6 +139,43 @@ class StructuralPoint:
             raise ValueError("confirmed point requires confirmed_at")
         if self.status != "confirmed" and self.confirmed_at is not None:
             raise ValueError("non-confirmed point cannot carry confirmed_at")
+        object.__setattr__(self, "evidence_codes", tuple(self.evidence_codes))
+        object.__setattr__(self, "related_point_ids", tuple(self.related_point_ids))
+        object.__setattr__(
+            self,
+            "small_to_large_carrier_unit_ids",
+            tuple(self.small_to_large_carrier_unit_ids),
+        )
+        if any(
+            not isinstance(point_id, str) or not point_id
+            for point_id in self.related_point_ids
+        ) or len(set(self.related_point_ids)) != len(self.related_point_ids):
+            raise ValueError("related point ids must be unique non-empty strings")
+        if self.point_id in self.related_point_ids:
+            raise ValueError("structural point cannot reference itself")
+        is_small_to_large = "small_to_large_reversal" in self.evidence_codes
+        if is_small_to_large:
+            if (
+                self.point_type not in {"2buy", "2sell"}
+                or len(self.small_to_large_carrier_unit_ids) != 3
+                or len(set(self.small_to_large_carrier_unit_ids)) != 3
+                or any(
+                    not isinstance(unit_id, str) or not unit_id
+                    for unit_id in self.small_to_large_carrier_unit_ids
+                )
+                or not isinstance(self.small_to_large_last_center_id, str)
+                or not self.small_to_large_last_center_id
+            ):
+                raise ValueError(
+                    "small-to-large point requires its carrier and last center"
+                )
+        elif (
+            self.small_to_large_carrier_unit_ids
+            or self.small_to_large_last_center_id is not None
+        ):
+            raise ValueError(
+                "ordinary point cannot carry small-to-large structural evidence"
+            )
         if (
             self.structure_anchor_price <= 0
             or self.structure_invalidation_price <= 0

@@ -13,22 +13,26 @@ from datetime import datetime
 from decimal import Decimal
 
 from chanlun.core.strict_structure.center_machine import calculate_centers
-from chanlun.core.strict_structure.divergence import collect_strict_divergences
+from chanlun.core.strict_structure.divergence import (
+    collect_strict_divergences,
+    merge_formal_divergence_ledger,
+)
 from chanlun.core.strict_structure.identity import (
     build_strict_evidence_revision,
     stable_structure_id,
 )
 from chanlun.core.strict_structure.models import (
     CenterPreviewState,
-    CenterState,
     SourceKind,
     StrictEvidenceResult,
     StrictLevelResult,
     StrictStructureResult,
 )
+from chanlun.core.strict_structure.recursive_engine import (
+    calculate_level_with_divergence_boundaries,
+)
 from chanlun.core.strict_structure.signals import StrictSignalEngine
 from chanlun.core.strict_structure.strength import MacdStrengthProvider
-from chanlun.core.strict_structure.trend_assembler import assemble_trend_types
 from chanlun.core.strict_structure.unit_adapter import UnitLockRegistry, adapt_lines
 from chanlun.decision_support.trading_system.provisional import ProvisionalCandidate
 
@@ -73,21 +77,12 @@ def build_screening_evidence(
         source_closed_at,
         registry,
     )
-    center_result = calculate_centers(
+    strength = MacdStrengthProvider(cd)
+    center_result, assembly = calculate_level_with_divergence_boundaries(
         segment_units,
         0,
         SourceKind.SEGMENT,
-    )
-    centers_for_trends = tuple(
-        center
-        for index, center in enumerate(center_result.centers)
-        if center.state is CenterState.COMPLETED
-        or index == len(center_result.centers) - 1
-    )
-    assembly = assemble_trend_types(
-        centers_for_trends,
-        segment_units,
-        0,
+        strength=strength,
     )
     level_zero = StrictLevelResult(
         structural_level=0,
@@ -95,6 +90,7 @@ def build_screening_evidence(
         center_result=center_result,
         trend_types=assembly.current_trends,
         completed_trends=assembly.completed_trends,
+        decomposition_boundaries=assembly.decomposition_boundaries,
     )
     structure = StrictStructureResult(
         schema_version="chanlun-structure/v3",
@@ -116,7 +112,6 @@ def build_screening_evidence(
         SourceKind.STROKE_OBSERVATION,
     )
 
-    strength = MacdStrengthProvider(cd)
     signal_engine = StrictSignalEngine(
         structure=structure,
         strength=strength,
@@ -142,7 +137,11 @@ def build_screening_evidence(
         )
     )
     approaching = signal_engine.approaching_points(source_closed_at)
-    divergences = collect_strict_divergences(structure, strength)
+    divergences = merge_formal_divergence_ledger(
+        structure,
+        confirmed,
+        collect_strict_divergences(structure, strength),
+    )
     structure_revision = build_strict_evidence_revision(
         symbol=cd.get_code(),
         source_frequency=cd.get_frequency(),

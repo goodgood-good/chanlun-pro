@@ -661,7 +661,7 @@ def _original_line_centers_to_chart_dicts(
     Locked and provisional evidence share this state machine.
     """
     from chanlun.core.strict_structure.center_machine import calculate_centers
-    from chanlun.core.strict_structure.identity import stable_structure_id
+    from chanlun.core.strict_structure.identity import build_center_id
     from chanlun.core.strict_structure.models import (
         CenterPreviewState,
         CenterState,
@@ -750,16 +750,17 @@ def _original_line_centers_to_chart_dicts(
             *core_units,
             *((establishment_unit,) if establishment_unit is not None else ()),
         )
-        center_id = stable_structure_id(
-            "chanlun-center/v9",
-            preview.price_basis_revision,
-            preview.structural_level,
-            preview.source_kind.value,
-            entry_unit.unit_id,
-            tuple(unit.unit_id for unit in body_units[:seed_size]),
-            preview.establishment_unit_id,
-            preview.zd_tick,
-            preview.zg_tick,
+        center_id = build_center_id(
+            price_basis_revision=preview.price_basis_revision,
+            structural_level=preview.structural_level,
+            source_kind=preview.source_kind.value,
+            entry_unit_id=entry_unit.unit_id,
+            initial_unit_ids=tuple(
+                unit.unit_id for unit in body_units[:seed_size]
+            ),
+            establishment_unit_id=preview.establishment_unit_id,
+            zd_tick=preview.zd_tick,
+            zg_tick=preview.zg_tick,
         )
         payload = _xd_original_center_payload(
             entry_unit=entry_unit,

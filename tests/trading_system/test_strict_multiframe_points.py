@@ -64,13 +64,13 @@ def test_first_center_policy_filters_entry_without_mutating_signal_ledger() -> N
     later_three_buy = replace(
         strict_point("3buy"),
         center_ordinal=2,
-        anchor_tick=120,
-        invalidation_tick=110,
     )
+    raw_trigger = strict_point("1buy")
     trigger = replace(
-        strict_point("1buy"),
+        raw_trigger,
         anchor_tick=115,
         invalidation_tick=110,
+        divergence=replace(raw_trigger.divergence, anchor_tick=115),
     )
     five = _mapped("5m", (later_three_buy,))
     one = _mapped("1m", (trigger,))

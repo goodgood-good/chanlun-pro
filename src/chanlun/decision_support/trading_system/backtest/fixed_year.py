@@ -35,6 +35,10 @@ import pandas as pd
 
 from chanlun.core.cl import CL
 from chanlun.core.strict_structure.identity import build_strict_evidence_revision
+from chanlun.core.strict_structure.divergence import (
+    collect_strict_divergences,
+    merge_formal_divergence_ledger,
+)
 from chanlun.core.strict_structure.level_catalog import recursive_level_labels
 from chanlun.core.strict_structure.models import (
     CenterLevelResult,
@@ -66,18 +70,17 @@ from chanlun.decision_support.trading_system.engine import SymbolStructureBundle
 from chanlun.decision_support.trading_system.models import (
     ContextDirection,
     MAX_FIVE_MINUTE_SETUP_AGE_SECONDS,
-    PointType,
     SectorAssessment,
     StructuralPoint,
     StructureTower,
     TimeframeContext,
-    build_point_id,
 )
 from chanlun.decision_support.trading_system.runtime_config import (
     v3_recursive_cl_config,
 )
 from chanlun.decision_support.trading_system.structure_adapter import (
     extract_confirmed_points,
+    structural_point_id_map,
 )
 from chanlun.decision_support.trading_system.v3_direct_recursive_structure import (
     DirectRecursiveEntryChain,
@@ -900,6 +903,7 @@ def _causal_confirmed_structure_events(
         structure = StrictRecursiveEngine(max_levels=max_levels).calculate(
             units,
             price_basis_revision=price_basis_revision,
+            strength=strength,
         )
         for level in structure.levels:
             for unit in level.units:
@@ -983,6 +987,11 @@ def _causal_confirmed_structure_events(
             str,
             state.get_config()["strict_config_revision"],
         )
+        divergences = merge_formal_divergence_ledger(
+            structure,
+            raw_points,
+            collect_strict_divergences(structure, strength),
+        )
         structure_revision = build_strict_evidence_revision(
             symbol=code,
             source_frequency=frequency,
@@ -990,7 +999,7 @@ def _causal_confirmed_structure_events(
             strict_config_revision=strict_config_revision,
             structure=structure,
             confirmed_points=raw_points,
-            divergences=(),
+            divergences=divergences,
         )
         snapshot = StrictEvidenceResult(
             symbol=code,
@@ -1012,19 +1021,15 @@ def _causal_confirmed_structure_events(
             ),
             confirmed_points=raw_points,
             approaching_points=(),
+            divergences=divergences,
+        )
+        converted_point_ids = structural_point_id_map(
+            raw_points,
+            code=code,
+            source_frequency=frequency,
         )
         raw_anchor_by_point_id = {
-            build_point_id(
-                code=code,
-                price_basis_revision=raw.price_basis_revision,
-                point_type=cast(PointType, raw.point_type),
-                source_frequency=frequency,
-                tower="formal",
-                recursive_level=raw.structural_level,
-                anchor_at=raw.anchor_at,
-                center_id=raw.center_id,
-                parent_point_id=raw.parent_point_id,
-            ): raw.anchor_unit_id
+            converted_point_ids[raw.point_id]: raw.anchor_unit_id
             for raw in raw_points
         }
         for point in extract_confirmed_points(

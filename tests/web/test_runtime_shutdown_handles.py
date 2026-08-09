@@ -1,6 +1,8 @@
 import threading
 import time
 
+import pytest
+
 from cl_app.handlers import sse_stream
 from cl_app.services import chart_cache, chart_revalidate, constants
 
@@ -75,6 +77,39 @@ def test_sse_runtime_shutdown_and_restart_without_active_work():
     assert sse_stream.sse_runtime_status()["closed"] is True
     sse_stream.start_sse_runtime()
     assert sse_stream.sse_runtime_status()["closed"] is False
+
+
+def test_sse_start_is_idempotent_with_active_work_on_open_runtime():
+    marker = object()
+    with sse_stream._runtime_lock:
+        previous_closed = sse_stream._runtime_closed
+        sse_stream._runtime_closed = False
+        sse_stream._runtime_inflight.add(marker)
+    try:
+        sse_stream.start_sse_runtime()
+        assert sse_stream.sse_runtime_status()["closed"] is False
+    finally:
+        with sse_stream._runtime_lock:
+            sse_stream._runtime_inflight.discard(marker)
+            sse_stream._runtime_closed = previous_closed
+
+
+def test_sse_restart_still_rejects_active_work_after_shutdown():
+    marker = object()
+    with sse_stream._runtime_lock:
+        previous_closed = sse_stream._runtime_closed
+        sse_stream._runtime_closed = True
+        sse_stream._runtime_inflight.add(marker)
+    try:
+        with pytest.raises(
+            RuntimeError,
+            match="cannot restart SSE runtime with active recomputes",
+        ):
+            sse_stream.start_sse_runtime()
+    finally:
+        with sse_stream._runtime_lock:
+            sse_stream._runtime_inflight.discard(marker)
+            sse_stream._runtime_closed = previous_closed
 
 
 def test_chart_cache_writer_threads_are_daemon():

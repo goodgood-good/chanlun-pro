@@ -55,6 +55,7 @@ def fake_strength_provider(
     htf_hist=None,
     htf_dif=None,
     htf_dates=None,
+    allow_noncausal_htf=False,
 ):
     htf = None
     if htf_hist is not None:
@@ -64,7 +65,8 @@ def fake_strength_provider(
             "dates": tuple(htf_dates or source_dates(len(htf_hist))),
         }
     return MacdStrengthProvider(
-        FakeCD(native_hist, native_dif=native_dif, htf=htf)
+        FakeCD(native_hist, native_dif=native_dif, htf=htf),
+        allow_noncausal_htf=allow_noncausal_htf,
     )
 
 
@@ -109,15 +111,30 @@ def test_strength_slice_uses_only_unit_market_interval():
     assert snapshot.histogram_area == 3
 
 
-def test_strength_prefers_aligned_htf_macd():
+def test_noncausal_htf_macd_requires_explicit_diagnostic_opt_in():
     provider = fake_strength_provider(
         native_hist=(9, 9, 9),
         htf_hist=(1, 2, 1),
         htf_dates=source_dates(3),
+        allow_noncausal_htf=True,
     )
     snapshot = provider.snapshot(unit_covering_indexes(0, 2, direction="up"))
     assert snapshot.source == "macd_htf"
     assert snapshot.histogram_area == 4
+
+
+def test_formal_strength_is_stable_when_open_htf_bucket_is_rewritten():
+    before = fake_strength_provider(
+        native_hist=(1, 2, 1),
+        htf_hist=(1, 2, 1),
+    ).snapshot(unit_covering_indexes(0, 2, direction="up"))
+    after = fake_strength_provider(
+        native_hist=(1, 2, 1),
+        htf_hist=(9, 8, 7),
+    ).snapshot(unit_covering_indexes(0, 2, direction="up"))
+
+    assert before == after
+    assert before.source == "macd_native"
 
 
 def test_same_length_but_misaligned_htf_dates_fall_back_to_native():
@@ -185,7 +202,7 @@ def test_divergence_requires_new_extreme_area_peak_and_dif_decay():
     assert evidence.confirmed_at == later.confirmed_at
 
 
-def test_missing_dif_decay_rejects_divergence_even_when_area_is_smaller():
+def test_one_macd_decay_signal_is_valid_and_multiple_signals_are_strong():
     earlier, later = same_direction_units_with_new_low()
     provider = TableProvider(
         {
@@ -197,7 +214,9 @@ def test_missing_dif_decay_rejects_divergence_even_when_area_is_smaller():
     assert evidence.histogram_area_decayed is True
     assert evidence.histogram_peak_decayed is True
     assert evidence.dif_extreme_decayed is False
-    assert evidence.is_divergent is False
+    assert evidence.is_divergent is True
+    assert evidence.strength_decay_count == 2
+    assert evidence.is_strong_divergent is True
 
 
 def test_strength_rejects_non_finite_or_missing_directional_macd_bars():
@@ -219,7 +238,7 @@ def test_strict_strength_matches_existing_formula_for_locked_xd_pair():
         **strict_base_config(),
         "price_basis_revision": "test-raw-v1",
         "structure_price_quantum": "0.01",
-        "macd_ld_use_htf": True,
+        "macd_ld_use_htf": False,
         "skip_legacy_zslx": True,
         "skip_legacy_mmd": True,
     }
@@ -277,7 +296,7 @@ def test_strict_strength_matches_existing_formula_for_locked_xd_pair():
             later_dif = later_ld["dif"][
                 "max" if direction == "up" else "min"
             ]
-            assert earlier_snapshot.source == later_snapshot.source == "macd_htf"
+            assert earlier_snapshot.source == later_snapshot.source == "macd_native"
             assert evidence.price_extreme_confirmed == (
                 later_unit.high_tick > earlier_unit.high_tick
                 if direction == "up"

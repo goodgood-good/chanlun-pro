@@ -6,7 +6,13 @@ from decimal import Decimal
 from enum import Enum
 from typing import Literal
 
-from chanlun.core.strict_structure.identity import stable_structure_id
+from chanlun.core.strict_structure.identity import (
+    build_center_id,
+    build_strict_evidence_revision,
+    build_trend_id,
+    complete_c_measurement_id,
+    stable_structure_id,
+)
 
 
 Direction = Literal["up", "down"]
@@ -98,6 +104,8 @@ class ConstituentUnit:
     available_at: datetime
     locked: bool
     child_ids: tuple[str, ...]
+    same_level_combination: bool = False
+    protected_after_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.unit_id:
@@ -141,6 +149,28 @@ class ConstituentUnit:
         if any(not isinstance(child_id, str) or not child_id for child_id in child_ids):
             raise ValueError("child_ids must contain non-empty strings")
         object.__setattr__(self, "child_ids", child_ids)
+        if type(self.same_level_combination) is not bool:
+            raise TypeError("same_level_combination must be a bool")
+        protected_after_ids = tuple(self.protected_after_ids)
+        object.__setattr__(self, "protected_after_ids", protected_after_ids)
+        if any(
+            not isinstance(child_id, str) or not child_id
+            for child_id in protected_after_ids
+        ):
+            raise ValueError("protected_after_ids must contain non-empty strings")
+        if len(set(protected_after_ids)) != len(protected_after_ids):
+            raise ValueError("protected_after_ids must be unique")
+        if self.same_level_combination:
+            if self.source_kind is not SourceKind.TREND_TYPE or len(child_ids) < 2:
+                raise ValueError(
+                    "same-level combination requires at least two trend-type leaves"
+                )
+            if len(set(child_ids)) != len(child_ids):
+                raise ValueError("same-level combination leaves must be unique")
+            if not set(protected_after_ids).issubset(child_ids):
+                raise ValueError("protected edges must reference combination leaves")
+        elif protected_after_ids:
+            raise ValueError("ordinary unit cannot carry same-level protected edges")
 
 
 @dataclass(frozen=True, slots=True)
@@ -419,6 +449,23 @@ class TrendCenter:
                 return_unit.available_at,
             ):
                 raise ValueError("center availability must cover completion evidence")
+
+        expected_center_id = build_center_id(
+            price_basis_revision=self.price_basis_revision,
+            structural_level=self.structural_level,
+            source_kind=self.source_kind.value,
+            entry_unit_id=self.entry_unit.unit_id,
+            initial_unit_ids=tuple(item.unit_id for item in self.initial_units),
+            establishment_unit_id=(
+                None
+                if self.establishment_unit is None
+                else self.establishment_unit.unit_id
+            ),
+            zd_tick=self.zd_tick,
+            zg_tick=self.zg_tick,
+        )
+        if self.center_id != expected_center_id:
+            raise ValueError("center_id must match the immutable center seed")
 
     def _overlaps_core(self, item: ConstituentUnit) -> bool:
         left = max(item.low_tick, self.zd_tick)
@@ -845,6 +892,10 @@ class TrendType:
     market_end: datetime
     confirmed_at: datetime | None
     available_at: datetime
+    # A confirmed same-level divergence may finish the trend before a later
+    # center-relation change appears.  The field is deliberately optional so
+    # ordinary geometric COMPLETE snapshots remain representable.
+    terminal_divergence: DivergenceEvidence | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "kind", TrendKind(self.kind))
@@ -949,10 +1000,109 @@ class TrendType:
                 raise ValueError("internal completion return must remain in trend")
         terminal_leave = self.centers[-1].completion_leave_unit
         terminal_return = self.centers[-1].completion_return_unit
-        if terminal_return is not None and terminal_return.unit_id in constituent_ids:
-            raise ValueError("terminal completion return belongs to the next trend")
-        if terminal_leave is not None and self.constituent_units[-1] != terminal_leave:
-            raise ValueError("terminal unit must be the final leave unit")
+        if self.terminal_divergence is None:
+            if terminal_return is not None and terminal_return.unit_id in constituent_ids:
+                raise ValueError("terminal completion return belongs to the next trend")
+            if terminal_leave is not None and self.constituent_units[-1] != terminal_leave:
+                raise ValueError("terminal unit must be the final leave unit")
+        else:
+            divergence = self.terminal_divergence
+            if (
+                self.kind is not TrendKind.TREND
+                or self.state not in (TrendState.COMPLETE, TrendState.LOCKED)
+                or divergence.kind != "trend"
+                or not divergence.is_divergent
+                or divergence.structural_level != self.structural_level
+                or divergence.source_kind not in source_kinds
+                or divergence.price_basis_revision != self.price_basis_revision
+                or divergence.direction != self.direction
+            ):
+                raise ValueError("terminal divergence must finish this formal trend")
+            if terminal_leave is None or terminal_return is None:
+                raise ValueError("divergence-locked trend requires a completed last center")
+            unit_index = {
+                item.unit_id: offset
+                for offset, item in enumerate(self.constituent_units)
+            }
+
+            def complete_c_identity(center: TrendCenter) -> tuple[str, ConstituentUnit]:
+                leave = center.completion_leave_unit
+                ret = center.completion_return_unit
+                if leave is None or ret is None:
+                    raise ValueError(
+                        "divergence comparison requires completed center departures"
+                    )
+                leave_index = unit_index.get(leave.unit_id)
+                return_index = unit_index.get(ret.unit_id)
+                if (
+                    leave_index is None
+                    or return_index != leave_index + 1
+                    or return_index + 1 >= len(self.constituent_units)
+                ):
+                    raise ValueError(
+                        "complete c requires adjacent leave, first return, and terminal"
+                    )
+                signal = self.constituent_units[return_index + 1]
+                if (
+                    signal.direction != leave.direction
+                    or signal.market_start < ret.market_end
+                    or signal.start_tick != ret.end_tick
+                ):
+                    raise ValueError("complete c terminal evidence is not adjacent")
+                signal_extreme = (
+                    signal.high_tick if signal.direction == "up" else signal.low_tick
+                )
+                prior_extreme = (
+                    max(leave.high_tick, ret.high_tick)
+                    if signal.direction == "up"
+                    else min(leave.low_tick, ret.low_tick)
+                )
+                if (
+                    signal_extreme <= prior_extreme
+                    if signal.direction == "up"
+                    else signal_extreme >= prior_extreme
+                ):
+                    raise ValueError("complete c terminal must own its directional extreme")
+                children = (leave.unit_id, ret.unit_id, signal.unit_id)
+                return (
+                    complete_c_measurement_id(
+                        price_basis_revision=self.price_basis_revision,
+                        structural_level=self.structural_level,
+                        source_kind=signal.source_kind.value,
+                        child_unit_ids=children,
+                    ),
+                    signal,
+                )
+
+            expected_compare_id, _compare_terminal = complete_c_identity(
+                self.centers[-2]
+            )
+            expected_signal_id, terminal = complete_c_identity(self.centers[-1])
+            if terminal != self.constituent_units[-1]:
+                raise ValueError(
+                    "terminal c must continue after the last center's first return"
+                )
+            expected_anchor = (
+                terminal.high_tick if self.direction == "up" else terminal.low_tick
+            )
+            makes_whole_trend_extreme = (
+                terminal.high_tick
+                > max(item.high_tick for item in self.constituent_units[:-1])
+                if self.direction == "up"
+                else terminal.low_tick
+                < min(item.low_tick for item in self.constituent_units[:-1])
+            )
+            if (
+                terminal.direction != self.direction
+                or divergence.compare_unit_id != expected_compare_id
+                or divergence.signal_unit_id != expected_signal_id
+                or not makes_whole_trend_extreme
+                or terminal.market_end != divergence.anchor_at
+                or expected_anchor != divergence.anchor_tick
+                or self.confirmed_at < divergence.confirmed_at
+                or self.available_at < divergence.available_at
+            ):
+                raise ValueError("trend terminal c must match divergence evidence")
 
         ticks = (self.start_tick, self.end_tick, self.low_tick, self.high_tick)
         if any(type(tick) is not int for tick in ticks):
@@ -1001,6 +1151,18 @@ class TrendType:
         if self.available_at < max(evidence_availability):
             raise ValueError("trend availability must cover all evidence")
 
+        expected_trend_id = build_trend_id(
+            price_basis_revision=self.price_basis_revision,
+            structural_level=self.structural_level,
+            center_ids=tuple(center.center_id for center in self.centers),
+            constituent_unit_ids=tuple(
+                item.unit_id for item in self.constituent_units
+            ),
+            direction=self.direction,
+        )
+        if self.trend_id != expected_trend_id:
+            raise ValueError("trend_id must match the immutable trend evidence")
+
     @property
     def locked(self) -> bool:
         return self.state is TrendState.LOCKED
@@ -1018,10 +1180,16 @@ class TrendType:
 class TrendAssemblyResult:
     current_trends: tuple[TrendType, ...]
     completed_trends: tuple[TrendType, ...]
+    decomposition_boundaries: tuple[DecompositionBoundaryEvidence, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "current_trends", tuple(self.current_trends))
         object.__setattr__(self, "completed_trends", tuple(self.completed_trends))
+        object.__setattr__(
+            self,
+            "decomposition_boundaries",
+            tuple(self.decomposition_boundaries),
+        )
         if any(
             trend.state is not TrendState.COMPLETE
             for trend in self.completed_trends
@@ -1040,6 +1208,28 @@ class TrendAssemblyResult:
             self.completed_trends
         ):
             raise ValueError("completed trend snapshots must be unique")
+        boundaries = self.decomposition_boundaries
+        if tuple(
+            sorted(boundaries, key=lambda item: (item.available_at, item.boundary_id))
+        ) != boundaries:
+            raise ValueError("decomposition boundaries must be deterministically ordered")
+        if len({item.boundary_id for item in boundaries}) != len(boundaries):
+            raise ValueError("decomposition boundaries must be unique")
+        current_ids = {trend.trend_id for trend in self.current_trends}
+        if any(item.left_trend_id not in current_ids for item in boundaries):
+            raise ValueError("decomposition boundary must reference a current trend")
+        current_by_id = {trend.trend_id: trend for trend in self.current_trends}
+        for boundary in boundaries:
+            trend = current_by_id[boundary.left_trend_id]
+            if (
+                trend.state is not TrendState.LOCKED
+                or trend.terminal_divergence != boundary.divergence
+                or trend.terminal_unit.unit_id != boundary.anchor_unit_id
+                or trend.market_end != boundary.anchor_at
+            ):
+                raise ValueError(
+                    "decomposition boundary must preserve its exact terminal trend"
+                )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1049,22 +1239,192 @@ class StrictLevelResult:
     center_result: CenterLevelResult
     trend_types: tuple[TrendType, ...]
     completed_trends: tuple[TrendType, ...]
+    decomposition_boundaries: tuple[DecompositionBoundaryEvidence, ...] = ()
+    decomposition_mode: Literal["same_level"] = "same_level"
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "units", tuple(self.units))
         object.__setattr__(self, "trend_types", tuple(self.trend_types))
         object.__setattr__(self, "completed_trends", tuple(self.completed_trends))
+        object.__setattr__(
+            self,
+            "decomposition_boundaries",
+            tuple(self.decomposition_boundaries),
+        )
         if type(self.structural_level) is not int or self.structural_level < 0:
             raise ValueError("structural_level must be non-negative")
+        if self.decomposition_mode != "same_level":
+            raise ValueError("strict level requires fixed same-level decomposition")
         if self.center_result.structural_level != self.structural_level:
             raise ValueError("level result center level mismatch")
         if any(item.structural_level != self.structural_level for item in self.units):
             raise ValueError("level result unit level mismatch")
+        expected_source = (
+            SourceKind.SEGMENT
+            if self.structural_level == 0
+            else SourceKind.TREND_TYPE
+        )
+        if any(item.source_kind is not expected_source for item in self.units):
+            raise ValueError("strict level units must use the canonical recursive source")
+        if any(
+            center.source_kind is not expected_source
+            for center in self.center_result.centers
+        ) or any(
+            preview.source_kind is not expected_source
+            for preview in self.center_result.previews
+        ):
+            raise ValueError("strict level centers must match their recursive source")
         if any(
             trend.structural_level != self.structural_level
             for trend in self.trend_types + self.completed_trends
         ):
             raise ValueError("level result trend level mismatch")
+        if any(
+            boundary.structural_level != self.structural_level
+            for boundary in self.decomposition_boundaries
+        ):
+            raise ValueError("level result boundary level mismatch")
+        current_trend_ids = tuple(trend.trend_id for trend in self.trend_types)
+        completed_trend_ids = tuple(
+            trend.trend_id for trend in self.completed_trends
+        )
+        if len(set(current_trend_ids)) != len(current_trend_ids):
+            raise ValueError("strict level current trend ids must be unique")
+        if len(set(completed_trend_ids)) != len(completed_trend_ids):
+            raise ValueError("strict level completed trend ids must be unique")
+        trend_ids = set(current_trend_ids)
+        if any(
+            boundary.left_trend_id not in trend_ids
+            for boundary in self.decomposition_boundaries
+        ):
+            raise ValueError("level result boundary trend is missing")
+        trend_by_id = {trend.trend_id: trend for trend in self.trend_types}
+        locked_trends = tuple(
+            trend for trend in self.trend_types if trend.state is TrendState.LOCKED
+        )
+        for previous, current in zip(locked_trends, locked_trends[1:]):
+            if (
+                previous.end_tick != current.start_tick
+                or current.market_start < previous.market_end
+            ):
+                raise ValueError("locked same-level trends must form one causal chain")
+        unit_index = {unit.unit_id: index for index, unit in enumerate(self.units)}
+        if len(unit_index) != len(self.units):
+            raise ValueError("strict level unit ids must be unique")
+        locked_count = self.center_result.locked_unit_count
+        replay_from = self.center_result.replay_from
+        if (
+            type(locked_count) is not int
+            or type(replay_from) is not int
+            or not 0 <= replay_from <= locked_count <= len(self.units)
+            or any(not unit.locked for unit in self.units[:locked_count])
+            or any(unit.locked for unit in self.units[locked_count:])
+        ):
+            raise ValueError("center replay counts must match the locked unit prefix")
+        units_by_id = {unit.unit_id: unit for unit in self.units}
+        centers_by_id = {
+            center.center_id: center for center in self.center_result.centers
+        }
+        if len(centers_by_id) != len(self.center_result.centers):
+            raise ValueError("strict level center ids must be unique")
+        for center in self.center_result.centers:
+            evidence_units = (
+                center.entry_unit,
+                *center.establishment_units,
+                *center.body_units,
+                *center.extension_units,
+                *(
+                    ()
+                    if center.pending_leave_unit is None
+                    else (center.pending_leave_unit,)
+                ),
+                *(
+                    ()
+                    if center.completion_leave_unit is None
+                    else (center.completion_leave_unit,)
+                ),
+                *(
+                    ()
+                    if center.completion_return_unit is None
+                    else (center.completion_return_unit,)
+                ),
+            )
+            if any(
+                units_by_id.get(unit.unit_id) != unit
+                for unit in evidence_units
+            ):
+                raise ValueError("center evidence is not closed over level units")
+        for preview in self.center_result.previews:
+            referenced = (
+                preview.entry_unit_id,
+                *preview.unit_ids,
+                *(
+                    unit_id
+                    for unit_id in (
+                        preview.pending_leave_unit_id,
+                        preview.completion_leave_unit_id,
+                        preview.completion_return_unit_id,
+                        preview.establishment_unit_id,
+                        preview.establishment_leave_unit_id,
+                    )
+                    if unit_id is not None
+                ),
+            )
+            if any(unit_id not in units_by_id for unit_id in referenced):
+                raise ValueError("center preview references a missing level unit")
+        for event in self.center_result.events:
+            if event.center_id not in centers_by_id or any(
+                unit_id is not None and unit_id not in units_by_id
+                for unit_id in (event.leave_unit_id, event.return_unit_id)
+            ):
+                raise ValueError("center event references missing formal evidence")
+        for trend in (*self.trend_types, *self.completed_trends):
+            if any(
+                units_by_id.get(unit.unit_id) != unit
+                for unit in trend.constituent_units
+            ) or any(
+                centers_by_id.get(center.center_id) != center
+                for center in trend.centers
+            ):
+                raise ValueError("trend evidence is not closed over its strict level")
+        for boundary in self.decomposition_boundaries:
+            trend = trend_by_id[boundary.left_trend_id]
+            if (
+                trend.state is not TrendState.LOCKED
+                or trend.terminal_divergence != boundary.divergence
+                or trend.terminal_unit.unit_id != boundary.anchor_unit_id
+                or trend.market_end != boundary.anchor_at
+            ):
+                raise ValueError("boundary must reference its exact terminal trend")
+            boundary_index = unit_index.get(boundary.anchor_unit_id)
+            if boundary_index is None:
+                raise ValueError("boundary anchor is missing from level units")
+            for center in self.center_result.centers:
+                evidence = (
+                    center.entry_unit,
+                    *center.body_units,
+                    *(
+                        ()
+                        if center.pending_leave_unit is None
+                        else (center.pending_leave_unit,)
+                    ),
+                    *(
+                        ()
+                        if center.completion_leave_unit is None
+                        else (center.completion_leave_unit,)
+                    ),
+                    *(
+                        ()
+                        if center.completion_return_unit is None
+                        else (center.completion_return_unit,)
+                    ),
+                )
+                try:
+                    offsets = tuple(unit_index[item.unit_id] for item in evidence)
+                except KeyError as exc:
+                    raise ValueError("center evidence is missing from level units") from exc
+                if min(offsets) <= boundary_index < max(offsets):
+                    raise ValueError("same-level center cannot cross divergence boundary")
 
 
 @dataclass(frozen=True, slots=True)
@@ -1127,6 +1487,54 @@ class StrictEvidenceResult:
             raise ValueError("structure_price_quantum must be a positive Decimal")
         if self.structure.price_basis_revision != self.price_basis_revision:
             raise ValueError("strict evidence structure price basis mismatch")
+        self._validate_recursive_unit_lineage()
+        for level in self.structure.levels:
+            for unit in level.units:
+                if (
+                    unit.market_end > self.source_closed_at
+                    or unit.available_at > self.source_closed_at
+                    or (
+                        unit.confirmed_at is not None
+                        and unit.confirmed_at > self.source_closed_at
+                    )
+                ):
+                    raise ValueError("strict structure contains future unit evidence")
+            for center in level.center_result.centers:
+                if (
+                    center.established_at > self.source_closed_at
+                    or center.available_at > self.source_closed_at
+                    or (
+                        center.completed_at is not None
+                        and center.completed_at > self.source_closed_at
+                    )
+                ):
+                    raise ValueError("strict structure contains future center evidence")
+            for preview in level.center_result.previews:
+                if preview.available_at > self.source_closed_at:
+                    raise ValueError("strict structure contains future center preview")
+            for event in level.center_result.events:
+                if (
+                    event.market_time > self.source_closed_at
+                    or event.available_at > self.source_closed_at
+                ):
+                    raise ValueError("strict structure contains future center event")
+            for trend in (*level.trend_types, *level.completed_trends):
+                if (
+                    trend.market_end > self.source_closed_at
+                    or trend.available_at > self.source_closed_at
+                    or (
+                        trend.confirmed_at is not None
+                        and trend.confirmed_at > self.source_closed_at
+                    )
+                ):
+                    raise ValueError("strict structure contains future trend evidence")
+            for boundary in level.decomposition_boundaries:
+                if (
+                    boundary.anchor_at > self.source_closed_at
+                    or boundary.confirmed_at > self.source_closed_at
+                    or boundary.available_at > self.source_closed_at
+                ):
+                    raise ValueError("strict structure contains future boundary evidence")
         if self.stroke_center_observations.price_basis_revision not in {
             None,
             self.price_basis_revision,
@@ -1137,6 +1545,24 @@ class StrictEvidenceResult:
             for center in self.stroke_center_observations.centers
         ):
             raise ValueError("stroke center observations must remain non-tradable")
+        if any(
+            value > self.source_closed_at
+            for value in (
+                *(
+                    center.available_at
+                    for center in self.stroke_center_observations.centers
+                ),
+                *(
+                    preview.available_at
+                    for preview in self.stroke_center_observations.previews
+                ),
+                *(
+                    event.available_at
+                    for event in self.stroke_center_observations.events
+                ),
+            )
+        ):
+            raise ValueError("stroke observations contain future evidence")
         if any(
             point.status is not StrictPointStatus.CONFIRMED
             for point in self.confirmed_points
@@ -1155,6 +1581,44 @@ class StrictEvidenceResult:
             raise ValueError("strict evidence point price basis mismatch")
         if any(point.available_at > self.source_closed_at for point in all_points):
             raise ValueError("strict evidence contains future-visible point")
+        levels_by_number = {
+            level.structural_level: level for level in self.structure.levels
+        }
+        for point in all_points:
+            level = levels_by_number.get(point.structural_level)
+            if level is None:
+                raise ValueError("strict point structural level is unavailable")
+            expected_source = (
+                SourceKind.SEGMENT
+                if point.structural_level == 0
+                else SourceKind.TREND_TYPE
+            )
+            if point.source_kind is not expected_source:
+                raise ValueError("strict point source does not match its level")
+            anchors = tuple(
+                unit
+                for unit in level.units
+                if unit.unit_id == point.anchor_unit_id
+            )
+            if len(anchors) != 1:
+                raise ValueError("strict point anchor is missing from its level")
+            anchor = anchors[0]
+            expected_tick = (
+                anchor.low_tick if point.side == "buy" else anchor.high_tick
+            )
+            if (
+                anchor.source_kind is not point.source_kind
+                or anchor.market_end != point.anchor_at
+                or expected_tick != point.anchor_tick
+                or anchor.available_at > point.available_at
+            ):
+                raise ValueError("strict point does not preserve its anchor unit")
+            if point.status is StrictPointStatus.CONFIRMED and (
+                not anchor.locked
+                or anchor.confirmed_at is None
+                or anchor.confirmed_at > point.confirmed_at
+            ):
+                raise ValueError("confirmed point anchor is not causally locked")
         if len({point.point_id for point in self.confirmed_points}) != len(
             self.confirmed_points
         ):
@@ -1163,6 +1627,62 @@ class StrictEvidenceResult:
             self.approaching_points
         ):
             raise ValueError("approaching point ids must be unique")
+        if len({point.point_id for point in all_points}) != len(all_points):
+            raise ValueError("confirmed and approaching point ids must be disjoint")
+        confirmed_by_id = {
+            point.point_id: point for point in self.confirmed_points
+        }
+        for point in self.confirmed_points:
+            related = []
+            for related_id in point.related_point_ids:
+                evidence = confirmed_by_id.get(related_id)
+                if evidence is None:
+                    raise ValueError("confirmed point related evidence is missing")
+                if evidence.available_at > point.available_at:
+                    raise ValueError("related point evidence is available too late")
+                if evidence.confirmed_at > point.confirmed_at:
+                    raise ValueError("related point confirmation is available too late")
+                related.append(evidence)
+            if point.point_type not in {"2buy", "2sell"}:
+                if point.parent_point_id is not None:
+                    raise ValueError("only second-class points may reference a parent")
+                continue
+            parent = confirmed_by_id.get(point.parent_point_id)
+            expected_parent_type = "1buy" if point.side == "buy" else "1sell"
+            if (
+                parent is None
+                or parent.point_type != expected_parent_type
+                or parent.side != point.side
+                or parent.confirmed_at > point.confirmed_at
+                or parent.available_at > point.available_at
+            ):
+                raise ValueError("second-class parent evidence is unresolved")
+            is_small_to_large = "small_to_large_reversal" in point.evidence_codes
+            if is_small_to_large:
+                reverse_type = "3buy" if point.side == "buy" else "3sell"
+                reverse = tuple(
+                    item
+                    for item in related
+                    if item.point_type == reverse_type
+                    and item.side == point.side
+                    and item.structural_level == point.structural_level - 1
+                )
+                if (
+                    parent.structural_level >= point.structural_level
+                    or parent.point_id not in point.related_point_ids
+                    or len(reverse) != 1
+                ):
+                    raise ValueError(
+                        "small-to-large second-class evidence graph is incomplete"
+                    )
+                self._validate_small_to_large_second(
+                    point,
+                    parent,
+                    reverse[0],
+                    levels_by_number,
+                )
+            elif parent.structural_level != point.structural_level:
+                raise ValueError("ordinary second-class parent must be same-level")
         if len({item.divergence_id for item in self.divergences}) != len(
             self.divergences
         ):
@@ -1191,6 +1711,42 @@ class StrictEvidenceResult:
             for item in self.divergences
         ):
             raise ValueError("strict evidence contains future-visible divergence")
+        divergence_by_id = {
+            item.divergence_id: item for item in self.divergences
+        }
+        embedded_divergences = tuple(
+            item
+            for item in (
+                *(point.divergence for point in self.confirmed_points),
+                *(
+                    trend.terminal_divergence
+                    for level in self.structure.levels
+                    for trend in (*level.trend_types, *level.completed_trends)
+                ),
+                *(
+                    boundary.divergence
+                    for level in self.structure.levels
+                    for boundary in level.decomposition_boundaries
+                ),
+            )
+            if item is not None
+        )
+        if any(
+            divergence_by_id.get(item.divergence_id) != item
+            for item in embedded_divergences
+        ):
+            raise ValueError("embedded divergence is missing from the formal ledger")
+        expected_revision = build_strict_evidence_revision(
+            symbol=self.symbol,
+            source_frequency=self.source_frequency,
+            price_basis_revision=self.price_basis_revision,
+            strict_config_revision=self.strict_config_revision,
+            structure=self.structure,
+            confirmed_points=self.confirmed_points,
+            divergences=self.divergences,
+        )
+        if self.structure_revision != expected_revision:
+            raise ValueError("structure_revision does not match formal evidence")
 
         completed_keys = [
             (
@@ -1230,6 +1786,174 @@ class StrictEvidenceResult:
             raise ValueError(
                 "completed centers and third-class points must match"
             )
+
+    def _validate_small_to_large_second(
+        self,
+        point,
+        parent,
+        reverse_third,
+        levels_by_number,
+    ) -> None:
+        """Rebuild L044's dynamic-last-center proof from the frozen graph."""
+
+        target = levels_by_number[point.structural_level]
+        lower = levels_by_number.get(point.structural_level - 1)
+        if lower is None:
+            raise ValueError("small-to-large direct sublevel is unavailable")
+        carrier_ids = point.small_to_large_carrier_unit_ids
+        positions = {
+            unit.unit_id: index for index, unit in enumerate(target.units)
+        }
+        if any(unit_id not in positions for unit_id in carrier_ids):
+            raise ValueError("small-to-large carrier is missing from target level")
+        indexes = tuple(positions[unit_id] for unit_id in carrier_ids)
+        if indexes != tuple(range(indexes[0], indexes[0] + 3)):
+            raise ValueError("small-to-large carrier must be the immediate sequence")
+        signal, rebound, pullback = (
+            target.units[index] for index in indexes
+        )
+        expected_signal = "down" if point.side == "buy" else "up"
+        signal_extreme = (
+            signal.low_tick == parent.anchor_tick
+            if point.side == "buy"
+            else signal.high_tick == parent.anchor_tick
+        )
+        if (
+            not signal.locked
+            or not rebound.locked
+            or not pullback.locked
+            or signal.direction != expected_signal
+            or signal.market_end != parent.anchor_at
+            or signal.end_tick != parent.anchor_tick
+            or not signal_extreme
+            or rebound.direction == signal.direction
+            or pullback.direction != signal.direction
+            or signal.end_tick != rebound.start_tick
+            or rebound.end_tick != pullback.start_tick
+            or rebound.market_start < signal.market_end
+            or pullback.market_start < rebound.market_end
+            or pullback.unit_id != point.anchor_unit_id
+        ):
+            raise ValueError("small-to-large carrier geometry is invalid")
+
+        children_by_id: dict[str, tuple[str, ...]] = {}
+
+        def register(identifier: str, children) -> None:
+            values = tuple(children)
+            previous = children_by_id.setdefault(identifier, values)
+            if previous != values:
+                raise ValueError("recursive evidence identity changed")
+
+        for level in self.structure.levels:
+            for unit in level.units:
+                register(unit.unit_id, unit.child_ids)
+            for trend in (*level.trend_types, *level.completed_trends):
+                register(
+                    trend.trend_id,
+                    (unit.unit_id for unit in trend.constituent_units),
+                )
+
+        def descendants(unit) -> frozenset[str]:
+            output: set[str] = set()
+            pending = list(unit.child_ids)
+            while pending:
+                identifier = pending.pop()
+                if identifier in output:
+                    continue
+                output.add(identifier)
+                pending.extend(children_by_id.get(identifier, ()))
+            return frozenset(output)
+
+        signal_descendants = descendants(signal)
+        rebound_descendants = descendants(rebound)
+        if parent.anchor_unit_id not in signal_descendants:
+            raise ValueError("small-to-large parent is outside its signal carrier")
+        lower_ids = {unit.unit_id for unit in lower.units}
+        signal_children = signal_descendants & lower_ids
+        rebound_children = rebound_descendants & lower_ids
+        movement_children = signal_children | rebound_children
+        candidates = tuple(
+            center
+            for center in lower.center_result.centers
+            if signal.market_start
+            <= center.body_start_market_time
+            <= center.established_market_time
+            <= rebound.market_end
+            and center.entry_unit.unit_id in movement_children
+            and all(
+                unit.unit_id in movement_children
+                for unit in (
+                    *center.establishment_units,
+                    *center.body_units,
+                    *center.extension_units,
+                )
+            )
+        )
+        if not candidates:
+            raise ValueError("small-to-large direct sublevel center is missing")
+        last_center = max(
+            candidates,
+            key=lambda center: (
+                center.body_start_market_time,
+                center.established_market_time,
+                center.center_id,
+            ),
+        )
+        leave = last_center.completion_leave_unit
+        return_unit = last_center.completion_return_unit
+        if (
+            last_center.center_id != point.small_to_large_last_center_id
+            or last_center.state is not CenterState.COMPLETED
+            or leave is None
+            or return_unit is None
+            or last_center.available_at > rebound.available_at
+            or leave.unit_id not in rebound_children
+            or return_unit.unit_id not in rebound_children
+            or return_unit.market_end > rebound.market_end
+            or reverse_third.center_id != last_center.center_id
+            or reverse_third.anchor_unit_id != return_unit.unit_id
+            or reverse_third.available_at > rebound.available_at
+        ):
+            raise ValueError(
+                "small-to-large point does not preserve the dynamic last center"
+            )
+
+    def _validate_recursive_unit_lineage(self) -> None:
+        """Replay the exact production recursion between adjacent levels."""
+
+        # Lazy imports avoid a models -> adapter/decomposition -> models cycle.
+        from chanlun.core.strict_structure.same_level_decomposition import (
+            combine_same_level_trends,
+        )
+        from chanlun.core.strict_structure.unit_adapter import trend_type_to_unit
+
+        for level_number in range(1, len(self.structure.levels)):
+            previous = self.structure.levels[level_number - 1]
+            current = self.structure.levels[level_number]
+            locked_trends = tuple(
+                trend
+                for trend in previous.trend_types
+                if trend.state is TrendState.LOCKED
+            )
+            source_units = tuple(trend_type_to_unit(trend) for trend in locked_trends)
+            oscillatory_ids = frozenset(
+                trend.trend_id
+                for trend in locked_trends
+                if trend.kind is TrendKind.CONSOLIDATION
+            )
+            protected_ids = frozenset(
+                boundary.left_trend_id
+                for boundary in previous.decomposition_boundaries
+            )
+            expected = combine_same_level_trends(
+                source_units,
+                oscillatory_ids,
+                protected_ids,
+            ).units
+            if current.units != expected:
+                raise ValueError(
+                    "recursive level units must exactly replay prior locked trends"
+                )
 
     @property
     def formal_inputs(self) -> dict:
@@ -1348,14 +2072,84 @@ class DivergenceEvidence:
 
     @property
     def is_divergent(self) -> bool:
-        return all(
+        # L024/L027 use MACD as auxiliary strength evidence: after structure
+        # has selected comparable same-level legs and price makes a new
+        # extreme, area, histogram height, or DIF weakening is a valid signal;
+        # several agreeing measures merely make the evidence stronger.
+        return self.price_extreme_confirmed and any(
             (
-                self.price_extreme_confirmed,
                 self.histogram_area_decayed,
                 self.histogram_peak_decayed,
                 self.dif_extreme_decayed,
             )
         )
+
+    @property
+    def strength_decay_count(self) -> int:
+        return sum(
+            (
+                self.histogram_area_decayed,
+                self.histogram_peak_decayed,
+                self.dif_extreme_decayed,
+            )
+        )
+
+    @property
+    def is_strong_divergent(self) -> bool:
+        return self.price_extreme_confirmed and self.strength_decay_count >= 2
+
+
+@dataclass(frozen=True, slots=True)
+class DecompositionBoundaryEvidence:
+    """A causal, confirmed boundary used by fixed same-level decomposition."""
+
+    boundary_id: str
+    decomposition_mode: Literal["same_level"]
+    boundary_kind: Literal["trend_divergence", "consolidation_divergence"]
+    structural_level: int
+    source_kind: SourceKind
+    price_basis_revision: str
+    left_trend_id: str
+    anchor_unit_id: str
+    anchor_at: datetime
+    anchor_tick: int
+    confirmed_at: datetime
+    available_at: datetime
+    divergence: DivergenceEvidence
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "source_kind", SourceKind(self.source_kind))
+        if self.decomposition_mode != "same_level":
+            raise ValueError("unsupported decomposition mode")
+        expected_kind = f"{self.divergence.kind}_divergence"
+        if self.boundary_kind != expected_kind:
+            raise ValueError("boundary kind must match divergence kind")
+        if not self.divergence.is_divergent:
+            raise ValueError("decomposition boundary requires confirmed divergence")
+        if (
+            self.structural_level != self.divergence.structural_level
+            or self.source_kind is not self.divergence.source_kind
+            or self.price_basis_revision != self.divergence.price_basis_revision
+            or self.anchor_at != self.divergence.anchor_at
+            or self.anchor_tick != self.divergence.anchor_tick
+            or self.confirmed_at != self.divergence.confirmed_at
+            or self.available_at != self.divergence.available_at
+        ):
+            raise ValueError("boundary must preserve exact divergence evidence")
+        if not self.left_trend_id or not self.anchor_unit_id:
+            raise ValueError("boundary requires its completed left trend")
+        expected_id = stable_structure_id(
+            "chanlun-decomposition-boundary/v1",
+            self.price_basis_revision,
+            self.decomposition_mode,
+            self.boundary_kind,
+            self.structural_level,
+            self.source_kind.value,
+            self.left_trend_id,
+            self.divergence.divergence_id,
+        )
+        if self.boundary_id != expected_id:
+            raise ValueError("boundary_id does not match formal evidence")
 
 
 @dataclass(frozen=True, slots=True)
@@ -1384,6 +2178,8 @@ class StrictPointEvidence:
     evidence_codes: tuple[str, ...]
     missing_conditions: tuple[str, ...] = ()
     related_point_ids: tuple[str, ...] = ()
+    small_to_large_carrier_unit_ids: tuple[str, ...] = ()
+    small_to_large_last_center_id: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "status", StrictPointStatus(self.status))
@@ -1392,6 +2188,11 @@ class StrictPointEvidence:
         object.__setattr__(self, "evidence_codes", tuple(self.evidence_codes))
         object.__setattr__(self, "missing_conditions", tuple(self.missing_conditions))
         object.__setattr__(self, "related_point_ids", tuple(self.related_point_ids))
+        object.__setattr__(
+            self,
+            "small_to_large_carrier_unit_ids",
+            tuple(self.small_to_large_carrier_unit_ids),
+        )
 
         if not self.point_id:
             raise ValueError("point_id is required")
@@ -1502,6 +2303,26 @@ class StrictPointEvidence:
             raise ValueError("center ordinal is reserved for third class")
         if self.divergence is not None and self.available_at < self.divergence.available_at:
             raise ValueError("point availability must cover divergence")
+        if self.divergence is not None and (
+            self.point_type in {"1buy", "1sell"}
+            or self.variant is StrictPointVariant.WEAK_DIVERGENCE
+        ):
+            expected_direction = "down" if self.side == "buy" else "up"
+            if (
+                self.divergence.structural_level != self.structural_level
+                or self.divergence.source_kind is not self.source_kind
+                or self.divergence.price_basis_revision
+                != self.price_basis_revision
+                or self.divergence.direction != expected_direction
+                or self.divergence.anchor_at != self.anchor_at
+                or self.divergence.anchor_tick != self.anchor_tick
+            ):
+                raise ValueError("point must preserve its exact divergence anchor")
+            if (
+                self.confirmed_at is not None
+                and self.confirmed_at < self.divergence.confirmed_at
+            ):
+                raise ValueError("point confirmation must cover divergence confirmation")
         if self.center_ordinal is not None and self.center_ordinal <= 0:
             raise ValueError("center ordinal must be positive")
 
@@ -1516,6 +2337,43 @@ class StrictPointEvidence:
                 raise ValueError(f"{label} must be unique")
         if self.point_id in self.related_point_ids:
             raise ValueError("point cannot reference itself")
+        is_small_to_large = "small_to_large_reversal" in self.evidence_codes
+        if is_small_to_large:
+            if self.point_type not in {"2buy", "2sell"}:
+                raise ValueError("small-to-large evidence requires second class")
+            if (
+                len(self.small_to_large_carrier_unit_ids) != 3
+                or len(set(self.small_to_large_carrier_unit_ids)) != 3
+                or any(
+                    not isinstance(unit_id, str) or not unit_id
+                    for unit_id in self.small_to_large_carrier_unit_ids
+                )
+                or self.anchor_unit_id
+                != self.small_to_large_carrier_unit_ids[-1]
+                or not isinstance(self.small_to_large_last_center_id, str)
+                or not self.small_to_large_last_center_id
+            ):
+                raise ValueError(
+                    "small-to-large point requires its exact carrier and last center"
+                )
+        elif (
+            self.small_to_large_carrier_unit_ids
+            or self.small_to_large_last_center_id is not None
+        ):
+            raise ValueError(
+                "ordinary point cannot carry small-to-large structural evidence"
+            )
+        if self.status is StrictPointStatus.CONFIRMED:
+            expected_id = build_strict_point_id(
+                price_basis_revision=self.price_basis_revision,
+                point_type=self.point_type,
+                structural_level=self.structural_level,
+                anchor_unit_id=self.anchor_unit_id,
+                center_id=self.center_id,
+                parent_point_id=self.parent_point_id,
+            )
+            if self.point_id != expected_id:
+                raise ValueError("confirmed point_id does not match formal evidence")
 
     @property
     def structure_anchor_price(self) -> Decimal:

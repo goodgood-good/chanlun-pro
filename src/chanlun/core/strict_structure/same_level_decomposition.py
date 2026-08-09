@@ -14,6 +14,7 @@ class SameLevelCombination:
     combined_unit_id: str
     child_unit_ids: tuple[str, ...]
     direction: str
+    protected_after_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,11 +65,40 @@ def _validate_source_chain(
             raise ValueError("same-level source intervals must not overlap")
 
 
-def _combined_unit(group: tuple[ConstituentUnit, ...]) -> ConstituentUnit:
+def _combination_leaves(item: ConstituentUnit) -> tuple[str, ...]:
+    return item.child_ids if item.same_level_combination else (item.unit_id,)
+
+
+def _combined_unit(
+    group: tuple[ConstituentUnit, ...],
+    protected_after_ids: frozenset[str],
+) -> ConstituentUnit:
     first = group[0]
     last = group[-1]
     direction = first.direction
-    child_ids = tuple(item.unit_id for item in group)
+    child_ids = tuple(
+        leaf_id
+        for item in group
+        for leaf_id in _combination_leaves(item)
+    )
+    inherited_protected = {
+        leaf_id
+        for item in group
+        for leaf_id in item.protected_after_ids
+    }
+    explicit_protected = set()
+    for item in group:
+        leaves = _combination_leaves(item)
+        explicit_protected.update(
+            leaf_id for leaf_id in leaves if leaf_id in protected_after_ids
+        )
+        if item.unit_id in protected_after_ids:
+            explicit_protected.add(leaves[-1])
+    protected_leaves = tuple(
+        leaf_id
+        for leaf_id in child_ids
+        if leaf_id in inherited_protected or leaf_id in explicit_protected
+    )
     return ConstituentUnit(
         unit_id=stable_structure_id(
             "chanlun-same-level-combination/v1",
@@ -91,12 +121,15 @@ def _combined_unit(group: tuple[ConstituentUnit, ...]) -> ConstituentUnit:
         available_at=max(item.available_at for item in group),
         locked=True,
         child_ids=child_ids,
+        same_level_combination=True,
+        protected_after_ids=protected_leaves,
     )
 
 
 def combine_same_level_trends(
     units: tuple[ConstituentUnit, ...],
     oscillatory_ids: frozenset[str],
+    protected_after_ids: frozenset[str] = frozenset(),
 ) -> SameLevelDecompositionResult:
     """Apply the same-level combination law before recursive center building.
 
@@ -104,7 +137,10 @@ def combine_same_level_trends(
     under the associative combination law.  Consolidations are directionless
     connectors for this purpose and are deliberately never merged, so
     ``trend + consolidation + trend`` and ``consolidation + consolidation``
-    remain observable decompositions.
+    remain observable decompositions.  Confirmed divergence edges belong to
+    the fixed same-level ledger.  If the higher-level associative carrier must
+    combine adjacent same-direction trends, ``SameLevelCombination`` retains
+    every protected child edge instead of erasing its provenance.
 
     The output is deterministic and prefix-causal: a run is combined only from
     already locked source trend types, and the composite becomes available no
@@ -114,7 +150,16 @@ def combine_same_level_trends(
 
     values = tuple(units)
     oscillatory = frozenset(oscillatory_ids)
+    protected = frozenset(protected_after_ids)
     _validate_source_chain(values, oscillatory)
+    unit_ids = {item.unit_id for item in values}
+    leaf_ids = tuple(
+        leaf_id for item in values for leaf_id in _combination_leaves(item)
+    )
+    if len(set(leaf_ids)) != len(leaf_ids):
+        raise ValueError("same-level combination leaves must not overlap")
+    if not protected.issubset(unit_ids | set(leaf_ids)):
+        raise ValueError("protected boundary ids must reference source units")
     if not values:
         return SameLevelDecompositionResult((), frozenset(), ())
 
@@ -141,13 +186,14 @@ def combine_same_level_trends(
         if len(group) == 1:
             output.append(current)
         else:
-            combined = _combined_unit(group)
+            combined = _combined_unit(group, protected)
             output.append(combined)
             combinations.append(
                 SameLevelCombination(
                     combined_unit_id=combined.unit_id,
                     child_unit_ids=combined.child_ids,
                     direction=combined.direction,
+                    protected_after_ids=combined.protected_after_ids,
                 )
             )
         index = end

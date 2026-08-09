@@ -1,8 +1,9 @@
 """标的列表服务（service）。
 
 设计要点：
-- 启动后延迟 ``PRELOAD_STARTUP_DELAY_SECONDS`` 才开始第一轮，让首次访问页面
-  不被预加载抢占资源；之后每 ``PRELOAD_INTERVAL_SECONDS`` 周期性刷新。
+- 启动后延迟 ``PRELOAD_STARTUP_DELAY_SECONDS`` 才开始第一轮；若已从磁盘恢复缓存，
+  首轮只确认缓存可用，不立即访问交易所，避免抢占首屏行情请求所需资源。
+- 之后每 ``PRELOAD_INTERVAL_SECONDS`` 周期性刷新交易所数据。
 - 单市场预加载失败/超时不会影响其他市场（_preload_single_exchange 自吞异常）。
 - 缓存 miss 时按调用方意愿走两条路径：
   - allow_sync_fallback=False: 触发异步刷新 + raise（适合不能阻塞的初始化路径）
@@ -11,7 +12,8 @@
 API：
 - ``stock_cache``: LRUCache(100)，市场 → 最后一次成功处理的 symbols 列表
 - ``preload_symbols`` / ``start_symbol_preload_thread``: 后台预加载入口
-- ``get_cached_processed_stocks(exchange, allow_sync_fallback=False)``: 读取入口
+- ``get_cached_processed_stocks(exchange, allow_sync_fallback=False)``: 列表读取入口
+- ``get_cached_processed_stock(exchange, code)``: 无 I/O 的单标的读取入口
 - ``_trigger_async_refresh(exchange)``: 单例化的异步刷新触发器
 """
 import json
@@ -109,6 +111,29 @@ def _mark_symbol_degraded(exchange: str, error: str) -> None:
 def _cached_symbols_or_empty(exchange: str):
     with _stock_cache_lock:
         return stock_cache.get(exchange) or []
+
+
+def get_cached_processed_stock(exchange: str, code: str):
+    """Return one cached symbol without triggering refreshes or external I/O.
+
+    ``/tv/symbols`` is on the chart's critical startup path.  In particular,
+    QMT's full-market refresh holds its native lock for the duration of the
+    scan, so falling through to ``exchange.stock_info`` while that refresh is
+    running can outlive the datafeed's 15 second timeout.  A disk-warmed cache
+    already contains enough metadata to resolve the chart immediately.
+
+    Return a copy so callers cannot mutate the process-wide last-known-good
+    cache while normalising optional fields such as ``precision``.
+    """
+    normalized_code = str(code or "").strip()
+    if not normalized_code:
+        return None
+    with _stock_cache_lock:
+        cached = stock_cache.get(exchange) or ()
+        for stock in cached:
+            if stock.get("code") == normalized_code:
+                return stock.copy()
+    return None
 
 
 def get_symbol_readiness(exchange: str):
@@ -379,7 +404,7 @@ class SymbolPreloadHandle:
         return self._thread.name
 
 
-def _start_preload_attempt(exchange: str):
+def _start_preload_attempt(exchange: str, *, skip_if_disk_warm: bool = False):
     """Start at most one daemon refresh attempt for a market."""
     with _preload_attempts_lock:
         existing = _preload_attempts.get(exchange)
@@ -398,7 +423,10 @@ def _start_preload_attempt(exchange: str):
 
         def _worker():
             try:
-                _preload_single_exchange(exchange)
+                _preload_single_exchange(
+                    exchange,
+                    skip_if_disk_warm=skip_if_disk_warm,
+                )
             finally:
                 done.set()
                 with _preload_attempts_lock:
@@ -430,10 +458,13 @@ def _mark_preload_timeout(exchange: str, attempt) -> None:
     LogUtil.warning(f"市场 {exchange} symbols 刷新超过 {seconds:g}s，保留现有缓存")
 
 
-def _run_preload_round(stop_event=None) -> bool:
+def _run_preload_round(stop_event=None, *, skip_if_disk_warm: bool = False) -> bool:
     attempts = []
     for exchange in PRELOAD_EXCHANGES:
-        attempt = _start_preload_attempt(exchange)
+        attempt = _start_preload_attempt(
+            exchange,
+            skip_if_disk_warm=skip_if_disk_warm,
+        )
         if attempt is not None:
             attempts.append((exchange, attempt))
 
@@ -463,10 +494,15 @@ def preload_symbols(stop_event=None):
         elif stop_event.wait(PRELOAD_STARTUP_DELAY_SECONDS):
             return
 
+    first_round = True
     while stop_event is None or not stop_event.is_set():
         LogUtil.info("开始预加载并更新所有市场的 symbols（有界并行）...")
         round_start = time.time()
-        _run_preload_round(stop_event)
+        _run_preload_round(
+            stop_event,
+            skip_if_disk_warm=first_round,
+        )
+        first_round = False
         LogUtil.info(
             f"本轮 symbols 预加载调度完成，总耗时 {time.time() - round_start:.2f}s"
         )

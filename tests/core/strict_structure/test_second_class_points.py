@@ -2,11 +2,20 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+from chanlun.core.strict_structure.center_machine import advance_center, establish_center
 from chanlun.core.strict_structure.models import (
     CenterLevelResult,
+    SourceKind,
     StrictLevelResult,
     StrictPointVariant,
     StrictStructureResult,
+    build_strict_point_id,
+)
+from tests.core.strict_structure.helpers import (
+    TEST_PRICE_BASIS,
+    completed_up_center,
+    ongoing_center,
+    unit,
 )
 from tests.core.strict_structure.signal_helpers import confirmed_point
 from tests.core.strict_structure.test_first_class_points import (
@@ -17,14 +26,17 @@ from tests.core.strict_structure.test_first_class_points import (
 )
 
 
-STRICT_VALUES = UP_VALUES
+STRICT_VALUES = UP_VALUES + (
+    ("down", 175, 150),
+    ("up", 150, 160),
+)
 
-TOUCH_VALUES = STRICT_VALUES[:-1] + (("up", 150, 170),)
+TOUCH_VALUES = STRICT_VALUES[:-1] + (("up", 150, 175),)
 
-WEAK_VALUES = STRICT_VALUES[:-1] + (("up", 150, 175),)
+WEAK_VALUES = STRICT_VALUES[:-1] + (("up", 150, 185),)
 
 INVALID_THEN_LATER_VALUES = WEAK_VALUES + (
-    ("down", 175, 160),
+    ("down", 185, 160),
     ("up", 160, 168),
 )
 
@@ -32,32 +44,33 @@ INVALID_THEN_LATER_VALUES = WEAK_VALUES + (
 def strengths(direction, *, weak=False, invalid=False):
     if direction == "up":
         values = {
-            "u-6": (50, 2, 1),
-            "u-10": (120, 6, 3),
             "u-12": (120, 6, 3),
-            "u-16": (100, 5, 2),
+            "u-18": (100, 5, 2),
         }
         if weak:
-            values["u-18"] = (80, 3, 1)
+            values["u-20"] = (80, 3, 1)
         if invalid:
-            values["u-18"] = (110, 6, 3)
+            values["u-20"] = (110, 6, 3)
     else:
         values = {
-            "u-6": (50, -2, -1),
-            "u-10": (120, -6, -3),
             "u-12": (120, -6, -3),
-            "u-16": (100, -5, -2),
+            "u-18": (100, -5, -2),
         }
         if weak:
-            values["u-18"] = (80, -3, -1)
+            values["u-20"] = (80, -3, -1)
         if invalid:
-            values["u-18"] = (110, -6, -3)
+            values["u-20"] = (110, -6, -3)
     return StrengthTable(values)
 
 
 def strict_engine(direction="down", values=STRICT_VALUES, **strength_options):
-    structure, _assembly = structure_from_values(values=values, direction=direction)
-    return engine_for(structure, strengths(direction, **strength_options))
+    strength = strengths(direction, **strength_options)
+    structure, _assembly = structure_from_values(
+        values=values,
+        direction=direction,
+        strength=strength,
+    )
+    return engine_for(structure, strength)
 
 
 def only_point(points):
@@ -84,7 +97,7 @@ def test_new_low_pullback_requires_weak_divergence():
     accepted = strict_engine(direction="down", values=WEAK_VALUES, weak=True)
     first = only_point(accepted.first_class_points())
     point = only_point(accepted.second_class_points((first,)))
-    pullback = accepted.structure.levels[0].units[18]
+    pullback = accepted.structure.levels[0].units[20]
     assert point.variant is StrictPointVariant.WEAK_DIVERGENCE
     assert point.invalidation_tick == pullback.low_tick
     assert point.available_at == max(
@@ -105,8 +118,12 @@ def test_unlocked_pullback_remains_non_confirmed():
     engine = strict_engine(direction="down")
     first = only_point(engine.first_class_points())
     level = engine.structure.levels[0]
-    unlocked = replace(level.units[18], locked=False, confirmed_at=None)
-    projected_level = replace(level, units=level.units[:18] + (unlocked,))
+    unlocked = replace(level.units[20], locked=False, confirmed_at=None)
+    projected_level = replace(
+        level,
+        units=level.units[:20] + (unlocked,),
+        center_result=replace(level.center_result, locked_unit_count=20),
+    )
     projected = replace(engine.structure, levels=(projected_level,))
     projected_engine = engine_for(projected, strengths("down"))
     assert projected_engine.second_class_points((first,)) == ()
@@ -131,6 +148,7 @@ def test_invalid_first_completed_pullback_cannot_be_skipped_for_later_pullback()
     extended_structure, _assembly = structure_from_values(
         values=INVALID_THEN_LATER_VALUES,
         direction="down",
+        strength=strengths("down", invalid=True),
     )
     engine = engine_for(extended_structure, strengths("down", invalid=True))
     assert engine.second_class_points((first,)) == ()
@@ -238,23 +256,445 @@ def promote_structure_to_level_one(structure):
     )
 
 
-def test_lower_level_first_point_enriches_but_does_not_duplicate_second_class():
-    base, _assembly = structure_from_values(values=STRICT_VALUES, direction="down")
-    promoted = promote_structure_to_level_one(base)
-    engine = engine_for(promoted, strengths("down"))
-    parent = only_point(engine.first_class_points())
-    pullback = promoted.levels[1].units[18]
+def test_lower_level_first_point_independently_emits_higher_level_second_buy():
+    lower_anchor = unit(6, "down", 110, 90)
+    reverse_center = completed_up_center(7)
+    reverse_return = reverse_center.completion_return_unit
+    assert reverse_return is not None
+    reverse_children = (
+        reverse_center.entry_unit.unit_id,
+        *(item.unit_id for item in reverse_center.body_units),
+        reverse_center.completion_leave_unit.unit_id,
+        reverse_return.unit_id,
+    )
+    signal = replace(
+        unit(
+            6,
+            "down",
+            110,
+            90,
+            source_kind=SourceKind.TREND_TYPE,
+            structural_level=1,
+        ),
+        unit_id="l1-signal",
+        child_ids=(lower_anchor.unit_id,),
+    )
+    rebound = replace(
+        unit(
+            7,
+            "up",
+            90,
+            120,
+            source_kind=SourceKind.TREND_TYPE,
+            structural_level=1,
+        ),
+        unit_id="l1-rebound",
+        market_end=reverse_return.market_end,
+        confirmed_at=reverse_return.confirmed_at,
+        available_at=reverse_return.available_at,
+        child_ids=reverse_children,
+    )
+    pullback = replace(
+        unit(
+            13,
+            "down",
+            120,
+            105,
+            source_kind=SourceKind.TREND_TYPE,
+            structural_level=1,
+        ),
+        unit_id="l1-pullback",
+    )
+
     lower = confirmed_point(point_type="1buy")
     lower = replace(
         lower,
-        anchor_at=pullback.market_start,
-        confirmed_at=pullback.market_start,
-        available_at=pullback.market_start,
-        divergence=replace(lower.divergence, available_at=pullback.market_start),
+        point_id=build_strict_point_id(
+            price_basis_revision=TEST_PRICE_BASIS,
+            point_type="1buy",
+            structural_level=0,
+            anchor_unit_id=lower_anchor.unit_id,
+            center_id=None,
+            parent_point_id=None,
+        ),
+        anchor_unit_id=lower_anchor.unit_id,
+        anchor_at=signal.market_end,
+        confirmed_at=signal.confirmed_at,
+        available_at=signal.available_at,
+        anchor_tick=signal.end_tick,
+        invalidation_tick=signal.end_tick,
+        divergence=replace(
+            lower.divergence,
+            anchor_at=signal.market_end,
+            anchor_tick=signal.end_tick,
+            confirmed_at=signal.market_end,
+        ),
     )
-    points = engine.second_class_points(
-        (parent,),
-        lower_level_first_points=(lower,),
+
+    def empty_centers(level, locked_count):
+        return CenterLevelResult(
+            structural_level=level,
+            price_basis_revision=TEST_PRICE_BASIS,
+            centers=(),
+            previews=(),
+            events=(),
+            locked_unit_count=locked_count,
+            replay_from=0,
+        )
+
+    missing_reverse_third = StrictStructureResult(
+        schema_version="chanlun-structure/v3",
+        price_basis_revision=TEST_PRICE_BASIS,
+        levels=(
+            StrictLevelResult(
+                0,
+                (lower_anchor,),
+                empty_centers(0, 1),
+                (),
+                (),
+            ),
+            StrictLevelResult(
+                1,
+                (signal, rebound, pullback),
+                empty_centers(1, 3),
+                (),
+                (),
+            ),
+        ),
     )
-    assert len(points) == 1
-    assert points[0].related_point_ids == (lower.point_id,)
+    assert (
+        engine_for(missing_reverse_third, None).second_class_points((lower,))
+        == ()
+    )
+
+    lower_units = (
+        lower_anchor,
+        reverse_center.entry_unit,
+        *reverse_center.body_units,
+        reverse_center.completion_leave_unit,
+        reverse_return,
+    )
+    lower_centers = CenterLevelResult(
+        structural_level=0,
+        price_basis_revision=TEST_PRICE_BASIS,
+        centers=(reverse_center,),
+        previews=(),
+        events=(),
+        locked_unit_count=len(lower_units),
+        replay_from=0,
+    )
+    structure = replace(
+        missing_reverse_third,
+        levels=(
+            StrictLevelResult(0, lower_units, lower_centers, (), ()),
+            missing_reverse_third.levels[1],
+        ),
+    )
+    unrelated_rebound = replace(rebound, child_ids=())
+    unrelated = replace(
+        structure,
+        levels=(
+            structure.levels[0],
+            StrictLevelResult(
+                1,
+                (signal, unrelated_rebound, pullback),
+                empty_centers(1, 3),
+                (),
+                (),
+            ),
+        ),
+    )
+    assert not tuple(
+        point
+        for point in engine_for(unrelated, None).second_class_points((lower,))
+        if point.structural_level == 1
+    )
+
+    points = engine_for(structure, None).second_class_points((lower,))
+    promoted = tuple(point for point in points if point.structural_level == 1)
+    assert len(promoted) == 1
+    point = promoted[0]
+    assert point.point_type == "2buy"
+    assert point.parent_point_id == lower.point_id
+    assert "small_to_large_reversal" in point.evidence_codes
+    assert "last_lower_level_center_reverse_third_class" in point.evidence_codes
+    assert len(point.related_point_ids) == 2
+
+    later_center = ongoing_center(13, zd_tick=135, zg_tick=145)
+    later_leave = later_center.pending_leave_unit
+    assert later_leave is not None
+    later_children = (
+        later_center.entry_unit.unit_id,
+        *(item.unit_id for item in later_center.body_units),
+        later_leave.unit_id,
+    )
+    extended_rebound = replace(
+        rebound,
+        market_end=later_leave.market_end,
+        confirmed_at=later_leave.confirmed_at,
+        available_at=later_leave.available_at,
+        child_ids=reverse_children + later_children,
+    )
+    extended_pullback = replace(
+        unit(
+            18,
+            "down",
+            120,
+            105,
+            source_kind=SourceKind.TREND_TYPE,
+            structural_level=1,
+        ),
+        unit_id="l1-extended-pullback",
+    )
+    extended_lower_units = (
+        *lower_units,
+        later_center.entry_unit,
+        *later_center.body_units,
+        later_leave,
+    )
+    dynamic_last = StrictStructureResult(
+        schema_version="chanlun-structure/v3",
+        price_basis_revision=TEST_PRICE_BASIS,
+        levels=(
+            StrictLevelResult(
+                0,
+                extended_lower_units,
+                CenterLevelResult(
+                    structural_level=0,
+                    price_basis_revision=TEST_PRICE_BASIS,
+                    centers=(reverse_center, later_center),
+                    previews=(),
+                    events=(),
+                    locked_unit_count=len(extended_lower_units),
+                    replay_from=0,
+                ),
+                (),
+                (),
+            ),
+            StrictLevelResult(
+                1,
+                (signal, extended_rebound, extended_pullback),
+                empty_centers(1, 3),
+                (),
+                (),
+            ),
+        ),
+    )
+    assert not tuple(
+        point
+        for point in engine_for(dynamic_last, None).second_class_points((lower,))
+        if point.structural_level == 1
+    )
+
+
+def test_small_first_point_can_promote_across_multiple_levels_with_direct_sublevel_third():
+    lower_anchor = unit(6, "down", 110, 90)
+    bridge = replace(
+        unit(
+            6,
+            "down",
+            110,
+            90,
+            source_kind=SourceKind.TREND_TYPE,
+            structural_level=1,
+        ),
+        unit_id="l1-bridge",
+        child_ids=(lower_anchor.unit_id,),
+    )
+    recursive_units = (
+        unit(
+            7,
+            "up",
+            90,
+            120,
+            source_kind=SourceKind.TREND_TYPE,
+            structural_level=1,
+        ),
+        unit(
+            8,
+            "down",
+            120,
+            100,
+            source_kind=SourceKind.TREND_TYPE,
+            structural_level=1,
+        ),
+        unit(
+            9,
+            "up",
+            100,
+            115,
+            source_kind=SourceKind.TREND_TYPE,
+            structural_level=1,
+        ),
+        unit(
+            10,
+            "down",
+            115,
+            105,
+            source_kind=SourceKind.TREND_TYPE,
+            structural_level=1,
+        ),
+        unit(
+            11,
+            "up",
+            105,
+            130,
+            source_kind=SourceKind.TREND_TYPE,
+            structural_level=1,
+        ),
+        unit(
+            12,
+            "down",
+            130,
+            115,
+            source_kind=SourceKind.TREND_TYPE,
+            structural_level=1,
+        ),
+    )
+    reverse_center = establish_center(
+        recursive_units[1:4],
+        1,
+        SourceKind.TREND_TYPE,
+        entry_unit=recursive_units[0],
+    )
+    assert reverse_center is not None
+    reverse_center, _ = advance_center(reverse_center, recursive_units[4])
+    reverse_center, _ = advance_center(reverse_center, recursive_units[5])
+    reverse_return = reverse_center.completion_return_unit
+    assert reverse_return is not None
+    reverse_units = recursive_units
+    signal = replace(
+        unit(
+            6,
+            "down",
+            110,
+            90,
+            source_kind=SourceKind.TREND_TYPE,
+            structural_level=2,
+        ),
+        unit_id="l2-signal",
+        child_ids=(bridge.unit_id,),
+    )
+    rebound = replace(
+        unit(
+            7,
+            "up",
+            90,
+            115,
+            source_kind=SourceKind.TREND_TYPE,
+            structural_level=2,
+        ),
+        unit_id="l2-rebound",
+        market_end=reverse_return.market_end,
+        confirmed_at=reverse_return.confirmed_at,
+        available_at=reverse_return.available_at,
+        child_ids=tuple(item.unit_id for item in reverse_units),
+    )
+    pullback = replace(
+        unit(
+            13,
+            "down",
+            115,
+            105,
+            source_kind=SourceKind.TREND_TYPE,
+            structural_level=2,
+        ),
+        unit_id="l2-pullback",
+    )
+    parent = confirmed_point(point_type="1buy")
+    parent = replace(
+        parent,
+        point_id=build_strict_point_id(
+            price_basis_revision=TEST_PRICE_BASIS,
+            point_type="1buy",
+            structural_level=0,
+            anchor_unit_id=lower_anchor.unit_id,
+            center_id=None,
+            parent_point_id=None,
+        ),
+        anchor_unit_id=lower_anchor.unit_id,
+        anchor_at=signal.market_end,
+        confirmed_at=signal.confirmed_at,
+        available_at=signal.available_at,
+        anchor_tick=signal.end_tick,
+        invalidation_tick=signal.end_tick,
+        divergence=replace(
+            parent.divergence,
+            anchor_at=signal.market_end,
+            anchor_tick=signal.end_tick,
+            confirmed_at=signal.market_end,
+        ),
+    )
+
+    def empty_centers(level, locked_count):
+        return CenterLevelResult(
+            structural_level=level,
+            price_basis_revision=TEST_PRICE_BASIS,
+            centers=(),
+            previews=(),
+            events=(),
+            locked_unit_count=locked_count,
+            replay_from=0,
+        )
+
+    structure = StrictStructureResult(
+        schema_version="chanlun-structure/v3",
+        price_basis_revision=TEST_PRICE_BASIS,
+        levels=(
+            StrictLevelResult(
+                0,
+                (lower_anchor,),
+                empty_centers(0, 1),
+                (),
+                (),
+            ),
+            StrictLevelResult(
+                1,
+                (bridge, *reverse_units),
+                CenterLevelResult(
+                    structural_level=1,
+                    price_basis_revision=TEST_PRICE_BASIS,
+                    centers=(reverse_center,),
+                    previews=(),
+                    events=(),
+                    locked_unit_count=1 + len(reverse_units),
+                    replay_from=0,
+                ),
+                (),
+                (),
+            ),
+            StrictLevelResult(
+                2,
+                (signal, rebound, pullback),
+                empty_centers(2, 3),
+                (),
+                (),
+            ),
+        ),
+    )
+    points = engine_for(structure, None).second_class_points((parent,))
+    promoted = tuple(point for point in points if point.structural_level == 2)
+    assert len(promoted) == 1
+    assert promoted[0].parent_point_id == parent.point_id
+    assert len(promoted[0].related_point_ids) == 2
+
+    false_extreme = replace(signal, low_tick=80)
+    rejected = replace(
+        structure,
+        levels=(
+            structure.levels[0],
+            structure.levels[1],
+            StrictLevelResult(
+                2,
+                (false_extreme, rebound, pullback),
+                empty_centers(2, 3),
+                (),
+                (),
+            ),
+        ),
+    )
+    assert not tuple(
+        point
+        for point in engine_for(rejected, None).second_class_points((parent,))
+        if point.structural_level == 2
+    )

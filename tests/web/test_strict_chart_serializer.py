@@ -25,6 +25,7 @@ from chanlun.core.strict_structure.center_machine import (
     forming_preview,
 )
 from chanlun.core.strict_structure.identity import (
+    build_trend_id,
     build_strict_evidence_revision,
     stable_structure_id,
 )
@@ -42,6 +43,7 @@ from chanlun.core.strict_structure.models import (
     TrendKind,
     TrendState,
     TrendType,
+    build_strict_point_id,
 )
 from tests.core.strict_structure.helpers import (
     completed_up_center,
@@ -117,7 +119,13 @@ def _trend(center: TrendCenter) -> TrendType:
         "up" if units[-1].end_tick > units[0].start_tick else "down"
     )
     return TrendType(
-        trend_id="trend-0",
+        trend_id=build_trend_id(
+            price_basis_revision=PRICE_BASIS,
+            structural_level=0,
+            center_ids=(center.center_id,),
+            constituent_unit_ids=tuple(item.unit_id for item in units),
+            direction=direction,
+        ),
         structural_level=0,
         price_basis_revision=PRICE_BASIS,
         kind=TrendKind.CONSOLIDATION,
@@ -165,31 +173,41 @@ def _evidence(
     source_frequency: str = "5m",
 ) -> StrictEvidenceResult:
     formal_center = _center(extension=True)
-    trend = _trend(formal_center)
     selected_centers = (
         (formal_center,) if formal_centers is None else tuple(formal_centers)
     )
     if level_units is None:
-        lifecycle = (
-            formal_center.entry_unit,
-            *formal_center.body_units,
-            *(
-                ()
-                if formal_center.establishment_leave_unit is None
-                else (formal_center.establishment_leave_unit,)
-            ),
-            *(
-                ()
-                if formal_center.lifecycle_leave_unit is None
-                else (formal_center.lifecycle_leave_unit,)
-            ),
-            *(
-                ()
-                if formal_center.completion_return_unit is None
-                else (formal_center.completion_return_unit,)
-            ),
+        units_by_id = {}
+        for center in selected_centers:
+            lifecycle = (
+                center.entry_unit,
+                *center.establishment_units,
+                *center.body_units,
+                *(
+                    ()
+                    if center.pending_leave_unit is None
+                    else (center.pending_leave_unit,)
+                ),
+                *(
+                    ()
+                    if center.completion_leave_unit is None
+                    else (center.completion_leave_unit,)
+                ),
+                *(
+                    ()
+                    if center.completion_return_unit is None
+                    else (center.completion_return_unit,)
+                ),
+            )
+            for item in lifecycle:
+                previous = units_by_id.setdefault(item.unit_id, item)
+                assert previous == item
+        selected_units = tuple(
+            sorted(
+                units_by_id.values(),
+                key=lambda item: (item.market_start, item.unit_id),
+            )
         )
-        selected_units = tuple(dict.fromkeys(lifecycle))
     else:
         selected_units = tuple(level_units)
     center_result = CenterLevelResult(
@@ -205,7 +223,11 @@ def _evidence(
         structural_level=0,
         units=selected_units,
         center_result=center_result,
-        trend_types=(trend,) if selected_centers else (),
+        trend_types=(
+            (_trend(formal_center),)
+            if selected_centers == (formal_center,)
+            else ()
+        ),
         completed_trends=(),
     )
     levels = [first_level]
@@ -480,11 +502,8 @@ def test_completed_center_range_excludes_leave_and_completion_return() -> None:
 
 
 def test_snapshot_projects_only_the_latest_ongoing_center() -> None:
-    stale_ongoing = ongoing_center(20, center_id="stale-ongoing")
-    latest_completed = completed_up_center(
-        40,
-        center_id="latest-completed",
-    )
+    stale_ongoing = ongoing_center(20)
+    latest_completed = completed_up_center(40)
     completion_points = engine_for(latest_completed).third_class_points()
     with pytest.raises(ValueError, match="only the terminal center may remain ongoing"):
         _evidence(
@@ -502,7 +521,7 @@ def test_snapshot_projects_only_the_latest_ongoing_center() -> None:
 
     assert completed_snapshot["levels"][0]["center_projections"] == []
 
-    latest_ongoing = ongoing_center(60, center_id="latest-ongoing")
+    latest_ongoing = ongoing_center(60)
     ongoing_snapshot = build_strict_structure_snapshot(
         _evidence(
             formal_centers=(latest_completed, latest_ongoing),
@@ -514,7 +533,7 @@ def test_snapshot_projects_only_the_latest_ongoing_center() -> None:
     assert [
         item["center_id"]
         for item in ongoing_snapshot["levels"][0]["center_projections"]
-    ] == ["latest-ongoing"]
+    ] == [latest_ongoing.center_id]
 
 
 def test_snapshot_serializes_unlocked_tail_as_non_tradable_center_preview() -> None:
@@ -747,12 +766,13 @@ def test_center_preview_changes_render_revision_not_formal_revision() -> None:
 
 def test_trend_and_point_serializers_preserve_strict_identity() -> None:
     center = _center(extension=True)
-    trend = strict_trend_to_chart_dict(_trend(center))
+    source_trend = _trend(center)
+    trend = strict_trend_to_chart_dict(source_trend)
     source_point = strict_point("3buy")
     point = strict_point_to_chart_dict(source_point)
 
-    assert trend["trend_id"] == "trend-0"
-    assert trend["render_id"].startswith("trend-0@forming@")
+    assert trend["trend_id"] == source_trend.trend_id
+    assert trend["render_id"].startswith(f"{source_trend.trend_id}@forming@")
     assert point["point_id"] == source_point.point_id
     assert point["point_type"] == "3buy"
     assert point["status"] == "confirmed"
@@ -819,10 +839,30 @@ def test_v8_snapshot_groups_independent_divergences_by_level() -> None:
 
 def test_observation_or_approaching_change_updates_render_not_decision_revision() -> None:
     observation = _center(source_kind=SourceKind.STROKE_OBSERVATION)
+    formal_center = _center(extension=True)
+    anchor = formal_center.body_units[-1]
     approaching = strict_point(
         "3buy",
         status=StrictPointStatus.APPROACHING,
         available_at=BASE + timedelta(hours=5),
+    )
+    approaching = replace(
+        approaching,
+        point_id="approaching:"
+        + build_strict_point_id(
+            price_basis_revision=PRICE_BASIS,
+            point_type=approaching.point_type,
+            structural_level=0,
+            anchor_unit_id=anchor.unit_id,
+            center_id=formal_center.center_id,
+            parent_point_id=None,
+        ),
+        anchor_unit_id=anchor.unit_id,
+        anchor_at=anchor.market_end,
+        anchor_tick=anchor.low_tick,
+        center_id=formal_center.center_id,
+        center_zd_tick=formal_center.zd_tick,
+        center_zg_tick=formal_center.zg_tick,
     )
     before = build_strict_structure_snapshot(_evidence(), interval="5m")
     observation_after = build_strict_structure_snapshot(

@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 
 from chanlun.core.cl import CL
+from chanlun.core.strict_structure.identity import build_strict_evidence_revision
 from chanlun.core.strict_structure.models import (
     CenterLevelResult,
     CenterPreview,
@@ -89,6 +90,27 @@ def test_completed_preview_from_unfinished_segment_is_non_actionable() -> None:
         locked_unit_count=4,
         replay_from=0,
     )
+    structure = StrictStructureResult(
+        schema_version="chanlun-structure/v3",
+        price_basis_revision=BASIS,
+        levels=(
+            StrictLevelResult(
+                structural_level=0,
+                units=units,
+                center_result=center_result,
+                trend_types=(),
+                completed_trends=(),
+            ),
+        ),
+    )
+    revision = build_strict_evidence_revision(
+        symbol="SZ.000001",
+        source_frequency="5m",
+        price_basis_revision=BASIS,
+        strict_config_revision="screening-old-pen-v1",
+        structure=structure,
+        confirmed_points=(),
+    )
     evidence = StrictEvidenceResult(
         symbol="SZ.000001",
         source_frequency="5m",
@@ -96,20 +118,8 @@ def test_completed_preview_from_unfinished_segment_is_non_actionable() -> None:
         price_basis_revision=BASIS,
         structure_price_quantum=QUANTUM,
         strict_config_revision="screening-old-pen-v1",
-        structure_revision="sha256:test",
-        structure=StrictStructureResult(
-            schema_version="chanlun-structure/v3",
-            price_basis_revision=BASIS,
-            levels=(
-                StrictLevelResult(
-                    structural_level=0,
-                    units=units,
-                    center_result=center_result,
-                    trend_types=(),
-                    completed_trends=(),
-                ),
-            ),
-        ),
+        structure_revision=revision,
+        structure=structure,
         stroke_center_observations=CenterLevelResult(
             structural_level=0,
             price_basis_revision=None,

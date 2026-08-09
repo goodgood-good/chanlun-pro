@@ -141,19 +141,28 @@ def test_l067_l071_gap_classification_uses_first_two_feature_elements():
 def test_strict_base_profile_is_single_new_stroke_profile_without_legacy_center_keys():
     config = dict(strict_base_config())
 
-    assert STRICT_BASE_PROFILE_ID == "chanlun-source-faithful-base-v7"
+    assert STRICT_BASE_PROFILE_ID == "chanlun-source-faithful-base-v10"
     assert config["strict_base_profile_id"] == STRICT_BASE_PROFILE_ID
     assert config["bi_type"] == Config.BI_TYPE_NEW.value
     assert config["bi_mode"] == "new"
-    assert config["macd_ld_use_htf"] is True
+    assert config["macd_ld_use_htf"] is False
     assert config["center_seed_rule"] == (
         "shared-leave-entry-three-core-five-role-v7"
     )
     assert config["center_lifecycle_rule"] == (
-        "bidirectional-shared-leave-first-return-v5"
+        "bidirectional-shared-leave-first-return-event-v6"
     )
     assert config["center_scan_rule"] == (
         "post-third-point-first-mature-causal-owner-v1"
+    )
+    assert config["trend_divergence_rule"] == (
+        "identified-complete-c-price-extreme-any-decay-v2"
+    )
+    assert config["decomposition_rule"] == (
+        "confirmed-divergence-partition-replay-v2"
+    )
+    assert config["second_class_rule"] == (
+        "parent-or-cross-level-small-large-direct-subcenter-third-retest-v3"
     )
     assert not any(
         key.startswith(("zs_", "chart_", "recursive_")) or "mmd" in key

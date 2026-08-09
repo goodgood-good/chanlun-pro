@@ -20,7 +20,7 @@ from collections import Counter
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from decimal import Decimal
-from typing import Literal, cast
+from typing import Literal
 
 from chanlun.core.strict_structure.models import (
     CenterState,
@@ -33,12 +33,12 @@ from chanlun.core.strict_structure.upgrade_evidence import (
 )
 from chanlun.decision_support.fingerprints import normalize_datetime, sha256_json
 from chanlun.decision_support.trading_system.models import (
-    PointType,
     StructuralPoint,
-    build_point_id,
 )
 from chanlun.decision_support.trading_system.structure_adapter import (
     extract_confirmed_points,
+    has_explicit_small_to_large_second_proof,
+    structural_point_id_map,
 )
 from chanlun.decision_support.trading_system.v3_structure_adapter import (
     build_v3_direct_recursive_technical_entry_snapshot,
@@ -50,7 +50,7 @@ from chanlun.decision_support.trading_system.v3_selection import (
 
 AlignmentStatus = Literal["PASS", "REJECT"]
 DIRECT_RECURSIVE_ALIGNMENT_CONTRACT_ID = (
-    "V3_DIRECT_RECURSIVE_1M_RAW_LEVELS_2_1_0_V1"
+    "V3_DIRECT_RECURSIVE_1M_RAW_LEVELS_2_1_0_V2"
 )
 
 
@@ -65,7 +65,7 @@ class DirectRecursiveAlignmentContract:
     l1_logical_frequency: str = "5m"
     l2_logical_frequency: str = "1m"
     locator_scope: str = "EXACT_DIRECT_FIRST_RETURN_DESCENDANTS"
-    second_buy_policy: str = "EXPLICIT_SIGNED_POINT_ID_ONLY"
+    second_buy_policy: str = "STRUCTURAL_SMALL_TO_LARGE_PROOF_AND_SIGNED_POINT_ID"
     live_status: str = "LIVE_DISABLED"
 
     def __post_init__(self) -> None:
@@ -92,7 +92,7 @@ class DirectRecursiveAlignmentContract:
             "5m",
             "1m",
             "EXACT_DIRECT_FIRST_RETURN_DESCENDANTS",
-            "EXPLICIT_SIGNED_POINT_ID_ONLY",
+            "STRUCTURAL_SMALL_TO_LARGE_PROOF_AND_SIGNED_POINT_ID",
             "LIVE_DISABLED",
         ):
             raise ValueError("direct recursive alignment contract changed")
@@ -219,19 +219,14 @@ def _point_facts(
         source_frequency="1m",
         as_of=evidence.source_closed_at,
     )
+    converted_ids = structural_point_id_map(
+        evidence.confirmed_points,
+        code=code,
+        source_frequency="1m",
+    )
     raw_by_id: dict[str, StrictPointEvidence] = {}
     for raw in evidence.confirmed_points:
-        point_id = build_point_id(
-            code=code,
-            price_basis_revision=raw.price_basis_revision,
-            point_type=cast(PointType, raw.point_type),
-            source_frequency="1m",
-            tower="formal",
-            recursive_level=raw.structural_level,
-            anchor_at=raw.anchor_at,
-            center_id=raw.center_id,
-            parent_point_id=raw.parent_point_id,
-        )
+        point_id = converted_ids[raw.point_id]
         previous = raw_by_id.setdefault(point_id, raw)
         if previous != raw:
             raise ValueError("direct recursive point identity collision")
@@ -343,6 +338,17 @@ def build_v3_direct_recursive_structure_path(
     allowed_seconds = frozenset(allowed_l2_second_buy_ids)
     if not allowed_seconds.issubset(known_locator_ids):
         raise ValueError("allowed direct-recursive second buy is unknown")
+    locator_points_by_id = {
+        fact.point.point_id: fact.point for fact in facts
+    }
+    proven_small_seconds = frozenset(
+        fact.point.point_id
+        for fact in locator_facts
+        if has_explicit_small_to_large_second_proof(
+            fact.point,
+            points_by_id=locator_points_by_id,
+        )
+    )
 
     level_two = evidence.structure.levels[2]
     centers = {value.center_id: value for value in level_two.center_result.centers}
@@ -431,7 +437,10 @@ def build_v3_direct_recursive_structure_path(
                     and item.point.available_at <= point.available_at
                     and (
                         item.point.point_type == "1buy"
-                        or item.point.point_id in allowed_seconds
+                        or (
+                            item.point.point_id in allowed_seconds
+                            and item.point.point_id in proven_small_seconds
+                        )
                     )
                 ),
                 key=lambda item: (item.point.available_at, item.point.point_id),
@@ -439,15 +448,35 @@ def build_v3_direct_recursive_structure_path(
         )
         locator = eligible_locators[0] if eligible_locators else None
         if locator is None:
-            has_unapproved_second = any(
+            candidate_seconds = tuple(
+                item
+                for item in locator_facts
+                if item.anchor_unit_id in return_trace.level_zero_leaf_ids
+                and first_return.market_start
+                <= item.point.anchor_at
+                <= first_return.market_end
+                and item.point.available_at <= point.available_at
+                and item.point.point_type == "2buy"
+            )
+            has_unproven_second = any(
+                item.point.point_id not in proven_small_seconds
+                for item in candidate_seconds
+            )
+            has_unsigned_second = any(
                 item.anchor_unit_id in return_trace.level_zero_leaf_ids
                 and item.point.point_type == "2buy"
+                and item.point.point_id in proven_small_seconds
+                and item.point.point_id not in allowed_seconds
                 for item in locator_facts
             )
             reasons.append(
-                "L2_1M_SECOND_BUY_REQUIRES_SIGNED_EVIDENCE"
-                if has_unapproved_second
-                else "NO_L2_1M_LOCATOR_IN_DIRECT_FIRST_RETURN"
+                "L2_1M_SECOND_BUY_REQUIRES_SMALL_TO_LARGE_EVIDENCE"
+                if has_unproven_second
+                else (
+                    "L2_1M_SECOND_BUY_REQUIRES_SIGNED_EVIDENCE"
+                    if has_unsigned_second
+                    else "NO_L2_1M_LOCATOR_IN_DIRECT_FIRST_RETURN"
+                )
             )
 
         if reasons:

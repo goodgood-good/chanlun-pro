@@ -4087,6 +4087,69 @@ class ChartManager {
         return result;
     }
 
+    _fractalRenderList(sourceList, bars, visibleRange, currentInterval) {
+        if (!Array.isArray(sourceList) || sourceList.length === 0) return [];
+        if (!Array.isArray(bars) || bars.length === 0) return [];
+
+        // bars_result 中的 Bar.time 已经是 TradingView 实际使用的坐标。日/周/月线
+        // 会从市场收盘时刻规整到 UTC 周期锚点，因此不能直接把分型的原始收盘时刻
+        // 交给 createMultipointShape 再依赖 TV 猜测最近 K 线。
+        const barTimes = new Set(
+            bars
+                .map((bar) => Number(bar?.time) / 1000)
+                .filter((time) => Number.isInteger(time)),
+        );
+        if (barTimes.size === 0) return [];
+
+        const rawFrom = Number(visibleRange?.from);
+        const rawTo = Number(visibleRange?.to);
+        const visibleFrom = Number.isFinite(rawFrom) ? Math.floor(rawFrom) : Number.NEGATIVE_INFINITY;
+        const visibleTo = Number.isFinite(rawTo) ? Math.ceil(rawTo) : Number.POSITIVE_INFINITY;
+        const result = [];
+        sourceList.forEach((item) => {
+            if (!item || !Array.isArray(item.points) || item.points.length === 0) return;
+            const anchorTime = this._centerChartTimeCoordinate(
+                item.points[0]?.time,
+                currentInterval,
+            );
+            if (
+                !Number.isInteger(anchorTime)
+                || !barTimes.has(anchorTime)
+                || anchorTime < visibleFrom
+                || anchorTime > visibleTo
+            ) return;
+
+            const points = item.points.map((point) => ({
+                ...point,
+                time: anchorTime,
+            }));
+            if (points.some((point) => !Number.isFinite(Number(point.price)))) return;
+            result.push({ ...item, points });
+        });
+        return result;
+    }
+
+    _fractalCreatedAnchorMatches(item, realId) {
+        if (!this.chart || typeof this.chart.getShapeById !== 'function') return true;
+        try {
+            const shape = this.chart.getShapeById(realId);
+            if (!shape || typeof shape.getPoints !== 'function') return false;
+            const actual = shape.getPoints()?.[0];
+            const expected = item?.points?.[0];
+            const expectedPrice = Number(expected?.price);
+            const actualPrice = Number(actual?.price);
+            if (
+                Number(actual?.time) !== Number(expected?.time)
+                || !Number.isFinite(expectedPrice)
+                || !Number.isFinite(actualPrice)
+            ) return false;
+            const tolerance = Math.max(1e-10, Math.abs(expectedPrice) * 1e-10);
+            return Math.abs(actualPrice - expectedPrice) <= tolerance;
+        } catch (e) {
+            return false;
+        }
+    }
+
     _centerCreatedGeometryMatches(item, realId) {
         if (!this.chart || typeof this.chart.getShapeById !== 'function') return true;
         try {
@@ -4200,17 +4263,22 @@ class ChartManager {
         const keyToRenderItem = new Map(
             itemsToProcess.map(({ key, item }) => [key, item]),
         );
+        const geometryVerifier = typeof verifyGeometry === 'function'
+            ? verifyGeometry
+            : verifyGeometry
+                ? (item, realId) => this._centerCreatedGeometryMatches(item, realId)
+                : null;
         // TradingView 可能在后续加载历史或改变可视区时移动已经创建好的 line tool。
-        // 数据 key 没变并不代表画布几何仍正确；中心矩形需要在 W1 守卫之前读取实体
-        // 端点，漂移或实体丢失时强制走下面的 remove + recreate 自愈路径。
+        // 数据 key 没变并不代表画布几何仍正确；启用校验的中枢/分型需要在 W1
+        // 守卫之前读取实体端点，漂移或实体丢失时强制走 remove + recreate 自愈路径。
         const driftedKeys = new Set();
-        if (verifyGeometry) {
+        if (geometryVerifier) {
             container.forEach((existing) => {
                 const renderItem = keyToRenderItem.get(existing.key);
                 if (
                     renderItem
                     && existing.id != null
-                    && !this._centerCreatedGeometryMatches(renderItem, existing.id)
+                    && !geometryVerifier(renderItem, existing.id)
                 ) {
                     driftedKeys.add(existing.key);
                 }
@@ -4297,7 +4365,7 @@ class ChartManager {
                         this.safeRemove(realId);
                         return;
                     }
-                    if (verifyGeometry && !this._centerCreatedGeometryMatches(item, realId)) {
+                    if (geometryVerifier && !geometryVerifier(item, realId)) {
                         this.safeRemove(realId);
                         delete this._reconcileGuard[guardKey];
                         this._scheduleReconcileRetry(`${type}:async-snapped`);
@@ -4306,17 +4374,23 @@ class ChartManager {
                     entry.id = realId;
                     container.push(entry);
                     this._markAutomaticShapeId(realId);
+                    if (typeof verifyGeometry === 'function' && !this._isVerifyingNow()) {
+                        this._scheduleVerifyRebuild();
+                    }
                 }).catch((e) => {
                     console.warn(`[CHANLUN-DIAG][reconcile.${type}] async create→reject key=${(key||'').slice(0,40)}`, e);
                     delete this._reconcileGuard[guardKey];
                     this._scheduleReconcileRetry(`${type}:async-reject`);
                 });
             } else if (result != null && (
-                !verifyGeometry || this._centerCreatedGeometryMatches(item, result)
+                !geometryVerifier || geometryVerifier(item, result)
             )) {
                 entry.id = result;
                 container.push(entry);
                 this._markAutomaticShapeId(result);
+                if (typeof verifyGeometry === 'function' && !this._isVerifyingNow()) {
+                    this._scheduleVerifyRebuild();
+                }
                 createSync += 1;
             } else if (result != null) {
                 this.safeRemove(result);
@@ -4479,7 +4553,22 @@ class ChartManager {
             visibleRange,
             currentInterval,
         );
-        this.reconcile('fxs', cfg.fx ? barsResult.fxs : [], from, symbolKey, (item) => safeCreate(ChartUtils.createFxShape(this.chart, item), 'fx'), false);
+        const fractalRenderItems = this._fractalRenderList(
+            barsResult.fxs || [],
+            barsResult.bars || [],
+            visibleRange,
+            currentInterval,
+        );
+        this.reconcile(
+            'fxs',
+            cfg.fx ? fractalRenderItems : [],
+            from,
+            symbolKey,
+            (item) => safeCreate(ChartUtils.createFxShape(this.chart, item), 'fx'),
+            false,
+            false,
+            (item, realId) => this._fractalCreatedAnchorMatches(item, realId),
+        );
         // 基础结构按绝对递归级别取色，同时让线段比笔再粗一级；菜单色块走同一颜色函数。
         const biLineStyle = getBaseStructureStyle(currentInterval, 'bis');
         const xdLineStyle = getBaseStructureStyle(currentInterval, 'xds');
@@ -4657,8 +4746,8 @@ class ChartManager {
             }
         }
 
-        // reconcile 入口已用 headTime >= from 过滤，shape 起点严格在可见窗内，
-        // 不会被 TV snap 到边缘，无需 snap-check + remove+recreate，仅保留孤儿扫描即可。
+        // snap 校验由各 reconcile scope 在创建与稳定画布复核时完成；这里仅负责
+        // 所有权容器之外的孤儿扫描，避免和按类型的几何自愈重复删除同一实体。
     }
 
     async draw_chanlun() {

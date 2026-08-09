@@ -45,6 +45,17 @@ def test_locked_return_into_core_extends_without_moving_core():
     assert event.kind is CenterEventKind.EXTENDED
 
 
+def test_each_extension_event_has_distinct_trigger_identity():
+    value = _ongoing_up_center()
+    first, first_event = advance_center(value, unit(5, "down", 130, 110))
+    second, second_event = advance_center(first, unit(6, "up", 110, 112))
+
+    assert first_event.kind is second_event.kind is CenterEventKind.EXTENDED
+    assert first_event.market_time != second_event.market_time
+    assert first_event.event_id != second_event.event_id
+    assert second.body_revision > first.body_revision
+
+
 def test_locked_return_outside_completes_center():
     value = _ongoing_up_center()
     ret = unit(5, "down", 130, 120)

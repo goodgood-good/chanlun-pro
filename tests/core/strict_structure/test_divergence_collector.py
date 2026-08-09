@@ -9,7 +9,10 @@ from chanlun.core.strict_structure.models import (
     SourceKind,
     TrendKind,
 )
-from chanlun.core.strict_structure.strength import StrengthSnapshot
+from chanlun.core.strict_structure.strength import (
+    StrengthSnapshot,
+    completed_center_departure_leg,
+)
 from chanlun.core.strict_structure.trend_assembler import assemble_trend_types
 from tests.core.strict_structure.helpers import (
     ongoing_center,
@@ -34,23 +37,51 @@ def completed_consolidation_fixture(level=0):
     return structure_for(value), earlier, later
 
 
-def completed_trend_fixture(level=0):
+def completed_trend_fixture(level=0, *, decayed=True):
+    source_kind = SourceKind.SEGMENT if level == 0 else SourceKind.TREND_TYPE
     values = tuple(
-        unit(index, direction, start, end, structural_level=level)
-        for index, (direction, start, end) in enumerate(UP_VALUES[:18])
+        unit(
+            index,
+            direction,
+            start,
+            end,
+            structural_level=level,
+            source_kind=source_kind,
+        )
+        for index, (direction, start, end) in enumerate(UP_VALUES)
     )
-    center_result = calculate_centers(values, level, SourceKind.SEGMENT)
-    assembly = assemble_trend_types(center_result.centers, values, level)
-    trend = next(
-        item
-        for item in assembly.completed_trends
-        if item.kind is TrendKind.TREND and len(item.centers) == 2
+    center_result = calculate_centers(values, level, source_kind)
+    strength = FixedStrength(
+        {
+            "u-12": (10.0, 5.0, 4.0),
+            "u-18": (
+                (5.0, 2.0, 2.0)
+                if decayed
+                else (12.0, 6.0, 5.0)
+            ),
+        }
     )
-    first, second = trend.centers
+    assembly = assemble_trend_types(
+        center_result.centers,
+        values,
+        level,
+        strength=strength,
+    )
+    trend = max(
+        (
+            item
+            for item in assembly.completed_trends
+            if item.kind is TrendKind.TREND
+        ),
+        key=lambda item: len(item.constituent_units),
+    )
+    earlier = completed_center_departure_leg(trend.centers[-2], values)
+    later = completed_center_departure_leg(trend.centers[-1], values)
+    assert earlier is not None and later is not None
     return (
-        structure_for(first, second, completed_trends=(trend,)),
-        second.entry_unit,
-        trend.terminal_unit,
+        structure_for(*trend.centers, completed_trends=(trend,)),
+        earlier,
+        later,
     )
 
 
@@ -59,7 +90,12 @@ class FixedStrength:
         self.values = values
 
     def snapshot(self, item):
-        area, peak, dif = self.values[item.unit_id]
+        key = (
+            item.child_ids[-1]
+            if item.child_ids and item.child_ids[-1] in self.values
+            else item.unit_id
+        )
+        area, peak, dif = self.values[key]
         return StrengthSnapshot(
             unit_id=item.unit_id,
             direction=item.direction,
@@ -118,7 +154,7 @@ def test_completed_trend_emits_trend_divergence_at_recursive_level():
 
 
 def test_non_divergent_comparison_is_not_formal_evidence():
-    structure, earlier, later = completed_trend_fixture(level=1)
+    structure, earlier, later = completed_trend_fixture(level=1, decayed=False)
     assert (
         collect_strict_divergences(
             structure,

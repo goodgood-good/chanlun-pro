@@ -309,6 +309,7 @@ def structure_for(*centers, completed_trends=()) -> StrictStructureResult:
                 by_id.setdefault(item.unit_id, item)
         for center_value in level_centers:
             for item in (
+                center_value.entry_unit,
                 *center_value.establishment_units,
                 *center_value.body_units,
                 *(

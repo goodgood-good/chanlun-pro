@@ -154,6 +154,9 @@
     // 只放宽周期切换触发的首个完整快照；配置、报价与实时增量仍由 Requester 的
     // 15 秒默认值约束，避免故障时所有请求长时间悬挂。
     const DEFAULT_INITIAL_HISTORY_TIMEOUT_MS = 45_000;
+    // 首次冷态请求若刚好撞上服务启动或缓存落盘，服务端可能在客户端超时后不久完成。
+    // 自动重试一次即可命中刚生成的缓存，避免图表永久停在“这里没有数据”等待手动刷新。
+    const INITIAL_HISTORY_RETRY_DELAY_MS = 750;
     function currentCenterPeriod(resolution) {
         const value = String(resolution || "").trim();
         if (/^[1-9][0-9]*$/.test(value))
@@ -285,6 +288,32 @@
             }
             catch (e) { /* SSR 或测试环境无 window 时静默忽略 */ }
         }
+        async _requestHistoryWithStartupRetry(requestParams, requestTimeoutMs, requestGeneration) {
+            try {
+                return await this._requester.sendRequest(this._datafeedUrl, "history", requestParams, requestTimeoutMs);
+            }
+            catch (error) {
+                const reasonString = error instanceof Error || typeof error === "string"
+                    ? getErrorMessage(error)
+                    : "";
+                const retryableStartupTimeout = requestGeneration !== undefined &&
+                    reasonString.startsWith("Request timed out after ") &&
+                    this._fullRequestIsCurrent(requestParams, requestGeneration);
+                if (!retryableStartupTimeout) {
+                    throw error;
+                }
+                // tslint:disable-next-line:no-console
+                console.warn(`HistoryProvider: initial history timed out; retrying once after ${INITIAL_HISTORY_RETRY_DELAY_MS}ms`);
+                await new Promise((resolve) => {
+                    setTimeout(resolve, INITIAL_HISTORY_RETRY_DELAY_MS);
+                });
+                // 用户可能在退避期间切换标的/周期。旧请求不得再制造额外后端负载。
+                if (!this._fullRequestIsCurrent(requestParams, requestGeneration)) {
+                    throw error;
+                }
+                return this._requester.sendRequest(this._datafeedUrl, "history", requestParams, requestTimeoutMs);
+            }
+        }
         getBars(symbolInfo, resolution, periodParams) {
             const requestParams = {
                 ...this._historyParams,
@@ -319,7 +348,7 @@
                 : this._initialHistoryTimeoutMs;
             return new Promise(async (resolve, reject) => {
                 try {
-                    const initialResponse = await this._requester.sendRequest(this._datafeedUrl, "history", requestParams, requestTimeoutMs);
+                    const initialResponse = await this._requestHistoryWithStartupRetry(requestParams, requestTimeoutMs, requestGeneration);
                     const result = this._processHistoryResponse(initialResponse, requestParams, requestGeneration);
                     if (this._limitedServerResponse &&
                         this._fullRequestIsCurrent(requestParams, requestGeneration)) {

@@ -362,8 +362,25 @@ def _point_proof(
         }
         if not required_codes.issubset(set(point.evidence_codes)):
             reasons.append("UNRESOLVED_SECOND_POINT_COMPLETION_EVIDENCE")
+        proof_ids: list[str] = [] if parent is None else [parent.point_id]
+        if "small_to_large_reversal" in point.evidence_codes:
+            reverse_type = "3buy" if point.side == "buy" else "3sell"
+            reverse = tuple(
+                points_by_id.get(point_id)
+                for point_id in point.related_point_ids
+                if points_by_id.get(point_id) is not None
+                and points_by_id[point_id].point_type == reverse_type
+                and points_by_id[point_id].side == point.side
+                and points_by_id[point_id].recursive_level
+                == point.recursive_level - 1
+                and points_by_id[point_id].available_at <= point.available_at
+            )
+            if len(reverse) != 1:
+                reasons.append("UNRESOLVED_SMALL_TO_LARGE_REVERSE_THIRD_LINK")
+            else:
+                proof_ids.append(reverse[0].point_id)
         return (
-            () if parent is None else (parent.point_id,),
+            tuple(proof_ids),
             tuple(reasons),
         )
     return (), ()

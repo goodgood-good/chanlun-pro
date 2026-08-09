@@ -132,7 +132,7 @@ def test_causal_replay_never_passes_future_bars_to_builder() -> None:
 
 
 def test_live_and_replay_share_strict_point_ids_and_availability(monkeypatch) -> None:
-    confirmed = strict_point("2buy", available_at=AS_OF)
+    confirmed = strict_point("1buy", available_at=AS_OF)
     approaching = strict_point(
         "3buy",
         status=StrictPointStatus.APPROACHING,

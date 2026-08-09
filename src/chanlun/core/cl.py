@@ -528,6 +528,7 @@ class CL(ICL):
         from chanlun.core.strict_structure.recursive_engine import (
             StrictRecursiveEngine,
         )
+        from chanlun.core.strict_structure.strength import MacdStrengthProvider
         from chanlun.core.strict_structure.unit_adapter import adapt_lines
 
         price_basis_revision = self._strict_price_basis_revision()
@@ -549,6 +550,7 @@ class CL(ICL):
         result = StrictRecursiveEngine(max_levels=len(labels)).calculate(
             units,
             price_basis_revision=price_basis_revision,
+            strength=MacdStrengthProvider(self),
         )
         self._strict_structure_memo["formal"] = result
         return result
@@ -658,6 +660,9 @@ class CL(ICL):
         from chanlun.core.strict_structure.base_profile import (
             strict_base_config_revision,
         )
+        from chanlun.core.strict_structure.divergence import (
+            merge_formal_divergence_ledger,
+        )
         from chanlun.core.strict_structure.identity import (
             build_strict_evidence_revision,
         )
@@ -670,7 +675,11 @@ class CL(ICL):
         stroke_observations = self.get_stroke_observation_centers()
         confirmed_points = self.get_strict_points()
         approaching_points = self.get_strict_approaching_points()
-        divergences = self.get_strict_divergences()
+        divergences = merge_formal_divergence_ledger(
+            structure,
+            confirmed_points,
+            self.get_strict_divergences(),
+        )
         price_basis_revision = self._strict_price_basis_revision()
         configured_revision = self.config.get("strict_config_revision")
         if configured_revision is None:

@@ -157,7 +157,7 @@ def test_old_locator_and_unevidenced_second_buy_are_rejected() -> None:
         l1_trends=(departure, first_return),
         l2_points=(old, second),
     )[0]
-    accepted = align_independent_entry_chains(
+    still_rejected = align_independent_entry_chains(
         l0_points=(l0,),
         l1_trends=(departure, first_return),
         l2_points=(old, second),
@@ -165,7 +165,9 @@ def test_old_locator_and_unevidenced_second_buy_are_rejected() -> None:
     )[0]
 
     assert rejected.reason_codes == ("NO_L2_LOCATOR_AT_FIRST_L1_RETURN_TERMINAL",)
-    assert accepted.status == "PASS"
+    assert still_rejected.reason_codes == (
+        "NO_L2_LOCATOR_AT_FIRST_L1_RETURN_TERMINAL",
+    )
 
 
 def test_appending_future_facts_cannot_change_historical_alignment() -> None:

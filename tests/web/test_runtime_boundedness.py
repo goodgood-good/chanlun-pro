@@ -54,7 +54,8 @@ def test_symbol_preload_is_singleton_stoppable_and_marks_hung_attempt(monkeypatc
     entered = threading.Event()
     release = threading.Event()
 
-    def blocking_refresh(_exchange):
+    def blocking_refresh(_exchange, skip_if_disk_warm=False):
+        assert skip_if_disk_warm is True
         entered.set()
         release.wait(timeout=2)
 

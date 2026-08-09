@@ -349,6 +349,79 @@ test('日线中枢原始收盘时刻会转换到日K的TradingView日期坐标',
   assert.deepEqual(rendered[0].points.map((point) => point.time), [firstChart, secondChart]);
 });
 
+test('分型只使用已加载真实K线坐标，日线收盘时刻会规整到对应日K', () => {
+  const { ChartManager } = loadChartManager();
+  const cm = Object.create(ChartManager.prototype);
+  const rawClose = Date.UTC(2026, 6, 22, 7) / 1000;
+  const chartTime = Date.UTC(2026, 6, 22) / 1000;
+  const missingRawClose = Date.UTC(2026, 6, 23, 7) / 1000;
+  const source = [
+    {
+      text: 'ding',
+      points: [
+        { time: rawClose, price: 12 },
+        { time: rawClose, price: 12 },
+      ],
+    },
+    {
+      text: 'di',
+      points: [
+        { time: missingRawClose, price: 9 },
+        { time: missingRawClose, price: 9 },
+      ],
+    },
+  ];
+
+  const rendered = cm._fractalRenderList(
+    source,
+    [{ time: chartTime * 1000 }],
+    { from: chartTime - 1, to: chartTime + 1 },
+    '1D',
+  );
+
+  assert.equal(rendered.length, 1, '对应K线尚未加载的分型不得交给TV吸附');
+  assert.deepEqual(rendered[0].points.map((point) => point.time), [chartTime, chartTime]);
+  assert.deepEqual(source[0].points.map((point) => point.time), [rawClose, rawClose], '不得修改后端原始证据');
+});
+
+test('drawChartElements 为分型接入真实K线规整与创建后锚点校验', () => {
+  const { ChartManager } = loadChartManager();
+  const cm = Object.create(ChartManager.prototype);
+  const rawClose = Date.UTC(2026, 6, 22, 7) / 1000;
+  const chartTime = Date.UTC(2026, 6, 22) / 1000;
+  const calls = [];
+  cm.obj_charts = {};
+  cm.chart = {};
+  cm.cl_show_config = { fx: true };
+  cm.reconcile = (...args) => calls.push(args);
+  cm._drawStrictStructure = () => {};
+  cm.updateDrawPalette = () => {};
+  cm._sweepOrphanTimer = null;
+  cm._disposed = false;
+
+  cm.drawChartElements({
+    symbolKey: 'a:SH.600000_1D',
+    from: chartTime - 1,
+    visibleRange: { from: chartTime - 1, to: chartTime + 1 },
+    barsResult: {
+      bars: [{ time: chartTime * 1000 }],
+      fxs: [{
+        text: 'ding',
+        points: [
+          { time: rawClose, price: 12 },
+          { time: rawClose, price: 12 },
+        ],
+      }],
+      bis: [], xds: [], bi_zss: [], xd_zss: [], higher_zs: [],
+    },
+  }, '1D');
+
+  const fractalCall = calls.find((args) => args[0] === 'fxs');
+  assert.ok(fractalCall, '必须进入分型 reconcile');
+  assert.deepEqual(fractalCall[1][0].points.map((point) => point.time), [chartTime, chartTime]);
+  assert.equal(typeof fractalCall[7], 'function', '必须校验TV创建后的实际锚点');
+});
+
 test('reconcile: 列表尾部中枢边界变化且数量/from 不变时仍替换 shape', () => {
   const { ChartManager } = loadChartManager();
   const { cm, calls, create } = makeReconcileManager(ChartManager);
@@ -459,6 +532,62 @@ test('reconcile: TradingView 后续移动已存在中枢时即使数据 key 未�
   assert.deepEqual(calls.create, [1, 2]);
   assert.deepEqual(calls.remove, [1]);
   assert.deepEqual(cm.obj_charts.S.bi_zss.map((entry) => entry.id), [2]);
+});
+
+test('reconcile: TradingView 后续把分型吸附到错误K线时自动删除并重建', () => {
+  const { ChartManager } = loadChartManager();
+  const cm = Object.create(ChartManager.prototype);
+  const calls = { create: [], remove: [] };
+  const created = new Map();
+  let nextId = 1;
+  let driftFirst = false;
+  cm.obj_charts = { S: { fxs: [] } };
+  cm._reconcileGuard = {};
+  cm._reconcileEpochs = new Map();
+  cm._reconcileOwnedIds = new Set();
+  cm._pendingRemovalIds = new Set();
+  cm._reconcileRetry = { count: 0, timer: null };
+  cm._disposed = false;
+  cm._verifyingUntil = null;
+  let stableRechecks = 0;
+  cm._scheduleVerifyRebuild = () => { stableRechecks++; };
+  cm.chart = {
+    removeEntity(id) { calls.remove.push(id); created.delete(id); },
+    getShapeById(id) {
+      const item = created.get(id);
+      if (!item) return null;
+      return {
+        getPoints() {
+          const points = item.points.map((point) => ({ ...point }));
+          if (id === 1 && driftFirst) points[0].time += 300;
+          return points;
+        },
+      };
+    },
+  };
+  const fractal = {
+    text: 'ding',
+    points: [
+      { time: 1_700_000_000, price: 12 },
+      { time: 1_700_000_000, price: 12 },
+    ],
+  };
+  const create = (item) => {
+    const id = nextId++;
+    created.set(id, item);
+    calls.create.push(id);
+    return id;
+  };
+  const verify = (item, id) => cm._fractalCreatedAnchorMatches(item, id);
+
+  cm.reconcile('fxs', [fractal], 1_600_000_000, 'S', create, false, false, verify);
+  driftFirst = true;
+  cm.reconcile('fxs', [fractal], 1_600_000_000, 'S', create, false, false, verify);
+
+  assert.deepEqual(calls.create, [1, 2]);
+  assert.deepEqual(calls.remove, [1]);
+  assert.deepEqual(cm.obj_charts.S.fxs.map((entry) => entry.id), [2]);
+  assert.equal(stableRechecks, 2, '每次接受分型后都要在稳定画布上再复核一次');
 });
 
 test('reconcile: 截断范围后的未完成状态变化必须刷新样式', () => {

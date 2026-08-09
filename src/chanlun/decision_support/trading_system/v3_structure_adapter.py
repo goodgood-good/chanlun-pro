@@ -52,6 +52,10 @@ def build_v3_technical_entry_snapshot(
         raise ValueError("v3 locator must be a confirmed frozen 1m point")
     if l2_locator.point_type not in {"1buy", "2buy"} or l2_locator.side != "buy":
         raise ValueError("v3 locator must be a frozen first or second buy")
+    if l2_locator.point_type == "2buy":
+        raise ValueError(
+            "v3 second-buy locator requires a closed small-to-large proof graph"
+        )
     if l0_three_buy.price_basis_revision != l2_locator.price_basis_revision:
         raise ValueError("v3 structure adapter cannot cross price bases")
     if l0_three_buy.available_at > observed or l2_locator.available_at > observed:
@@ -140,6 +144,10 @@ def build_v3_independent_technical_entry_snapshot(
         raise ValueError("independent entry requires a frozen first L0 center")
     if l2_locator.point_type not in {"1buy", "2buy"}:
         raise ValueError("independent entry locator must be first or allowed second buy")
+    if l2_locator.point_type == "2buy":
+        raise ValueError(
+            "independent second-buy locator requires a closed small-to-large proof graph"
+        )
     return TechnicalEntrySnapshot(
         structure_snapshot_id=structure_snapshot_id,
         observed_at=observed,
@@ -207,6 +215,10 @@ def build_v3_direct_recursive_technical_entry_snapshot(
         or l2_locator.point_type not in {"1buy", "2buy"}
     ):
         raise ValueError("direct recursion requires a level-0 first/second buy")
+    if l2_locator.point_type == "2buy":
+        raise ValueError(
+            "direct-recursive second-buy locator requires a closed small-to-large proof graph"
+        )
     if (
         chain.l0_point_id != l0_three_buy.point_id
         or chain.l0_center_id != l0_three_buy.center_id

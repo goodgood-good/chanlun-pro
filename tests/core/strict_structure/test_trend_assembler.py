@@ -5,13 +5,19 @@ import pytest
 from chanlun.core.strict_structure.center_machine import (
     calculate_centers,
 )
+from chanlun.core.strict_structure.identity import build_trend_id
 from chanlun.core.strict_structure.models import (
     SourceKind,
     TrendKind,
     TrendState,
     TrendType,
 )
+from chanlun.core.strict_structure.recursive_engine import StrictRecursiveEngine
 from chanlun.core.strict_structure.trend_assembler import assemble_trend_types
+from chanlun.core.strict_structure.strength import (
+    StrengthSnapshot,
+    completed_center_departure_leg,
+)
 from chanlun.core.strict_structure.unit_adapter import trend_type_to_unit
 from tests.core.strict_structure.helpers import ongoing_center, unit
 
@@ -46,19 +52,24 @@ def three_center_fixture():
 
 def _trend_for(center, *, state, constituent_units=None):
     values = center.body_units if constituent_units is None else constituent_units
+    direction = "up" if values[-1].end_tick > values[0].start_tick else "down"
     confirmed_at = (
         None
         if state is TrendState.FORMING
         else center.completed_at or center.established_at
     )
     return TrendType(
-        trend_id=f"trend-{state.value}",
+        trend_id=build_trend_id(
+            price_basis_revision=center.price_basis_revision,
+            structural_level=center.structural_level,
+            center_ids=(center.center_id,),
+            constituent_unit_ids=tuple(item.unit_id for item in values),
+            direction=direction,
+        ),
         structural_level=center.structural_level,
         price_basis_revision=center.price_basis_revision,
         kind=TrendKind.CONSOLIDATION,
-        direction=(
-            "up" if values[-1].end_tick > values[0].start_tick else "down"
-        ),
+        direction=direction,
         state=state,
         centers=(center,),
         constituent_units=values,
@@ -249,4 +260,219 @@ def test_locked_trend_becomes_next_level_unit_with_owned_children():
     assert item.unit_id == locked.trend_id
     assert item.child_ids == tuple(
         value.unit_id for value in locked.constituent_units
+    )
+
+
+def test_trend_identity_cannot_be_detached_from_its_evidence():
+    values, first, _second, _third = three_center_fixture()
+    trend = assemble_trend_types((first,), values[:6], 0).current_trends[0]
+    with pytest.raises(ValueError, match="immutable trend evidence"):
+        replace(trend, trend_id="forged-trend-id")
+
+
+class BoundaryStrength:
+    def snapshot(self, value):
+        key = value.child_ids[-1] if value.child_ids else value.unit_id
+        area, peak, dif = {
+            "u-6": (100, 5, 2),
+            "u-12": (50, 3, 1),
+        }[key]
+        return StrengthSnapshot(
+            unit_id=value.unit_id,
+            direction=value.direction,
+            histogram_area=area,
+            histogram_peak=peak,
+            dif_extreme=dif,
+            source="macd_htf",
+            available_at=value.available_at,
+        )
+
+
+def test_confirmed_complete_c_divergence_is_an_immediate_trend_boundary():
+    values, first, second, third = three_center_fixture()
+
+    result = assemble_trend_types(
+        (first, second, third),
+        values,
+        0,
+        strength=BoundaryStrength(),
+    )
+
+    assert len(result.decomposition_boundaries) == 1
+    locked, tail = result.current_trends
+    boundary = result.decomposition_boundaries[0]
+    assert locked.state is TrendState.LOCKED
+    assert locked.centers == (first, second)
+    assert locked.terminal_unit is values[12]
+    assert locked.terminal_divergence is boundary.divergence
+    assert boundary.anchor_at == values[12].market_end
+    assert boundary.anchor_unit_id == values[12].unit_id
+    assert boundary.divergence.signal_unit_id != boundary.anchor_unit_id
+    assert boundary.available_at >= boundary.anchor_at
+    assert boundary.left_trend_id == locked.trend_id
+    assert tail.constituent_units[0] is values[13]
+
+
+def test_complete_c_strength_window_covers_leave_return_and_terminal_signal():
+    values, _first, second, _third = three_center_fixture()
+
+    leg = completed_center_departure_leg(second, values)
+
+    assert leg is not None
+    assert leg.unit_id != values[12].unit_id
+    assert leg.market_start == second.completion_leave_unit.market_start
+    assert leg.market_end == values[12].market_end
+    assert leg.child_ids == ("u-10", "u-11", "u-12")
+
+
+def test_divergence_boundary_does_not_exist_before_terminal_c_is_confirmed():
+    values, first, second, _third = three_center_fixture()
+
+    before = assemble_trend_types(
+        (first, second),
+        values[:12],
+        0,
+        strength=BoundaryStrength(),
+    )
+    after = assemble_trend_types(
+        (first, second),
+        values[:13],
+        0,
+        strength=BoundaryStrength(),
+    )
+
+    assert before.decomposition_boundaries == ()
+    assert before.current_trends[-1].state is TrendState.COMPLETE
+    assert len(after.decomposition_boundaries) == 1
+    assert after.current_trends[-1].state is TrendState.LOCKED
+
+
+class CausalDecayStrength:
+    def snapshot(self, value):
+        magnitude = max(1.0, 100_000_000.0 - value.market_end.timestamp() / 300)
+        signed = magnitude if value.direction == "up" else -magnitude
+        return StrengthSnapshot(
+            unit_id=value.unit_id,
+            direction=value.direction,
+            histogram_area=magnitude,
+            histogram_peak=signed,
+            dif_extreme=signed,
+            source="macd_native",
+            available_at=value.available_at,
+        )
+
+
+def test_boundary_replay_keeps_centers_and_locked_trends_on_one_side():
+    specs = (
+        ("up", 100, 115), ("down", 115, 80), ("up", 80, 118),
+        ("down", 118, 88), ("up", 88, 94), ("down", 94, 66),
+        ("up", 66, 74), ("down", 74, 44), ("up", 44, 56),
+        ("down", 56, 30), ("up", 30, 45), ("down", 45, 12),
+        ("up", 12, 27), ("down", 27, 12), ("up", 12, 17),
+        ("down", 17, -16), ("up", -16, -1), ("down", -1, -36),
+        ("up", -36, -31), ("down", -31, -64), ("up", -64, -38),
+        ("down", -38, -64), ("up", -64, -41), ("down", -41, -78),
+        ("up", -78, -56), ("down", -56, -87), ("up", -87, -73),
+        ("down", -73, -107), ("up", -107, -82), ("down", -82, -95),
+        ("up", -95, -76), ("down", -76, -104), ("up", -104, -70),
+        ("down", -70, -108), ("up", -108, -97),
+    )
+    values = tuple(
+        unit(index, direction, start, end)
+        for index, (direction, start, end) in enumerate(specs)
+    )
+    strength = CausalDecayStrength()
+    seen = {}
+    latest = None
+    for size in range(5, len(values) + 1):
+        latest = StrictRecursiveEngine(max_levels=3).calculate(
+            values[:size],
+            strength=strength,
+        )
+        current = {
+            boundary.boundary_id: boundary
+            for level in latest.levels
+            for boundary in level.decomposition_boundaries
+        }
+        assert set(seen).issubset(current)
+        assert all(current[item_id] == item for item_id, item in seen.items())
+        seen.update(current)
+
+    assert latest is not None
+    level = latest.levels[0]
+    assert tuple(item.anchor_unit_id for item in level.decomposition_boundaries) == (
+        "u-27",
+    )
+    locked = tuple(trend for trend in level.trend_types if trend.locked)
+    assert all(
+        previous.end_tick == current.start_tick
+        for previous, current in zip(locked, locked[1:])
+    )
+    index = {item.unit_id: offset for offset, item in enumerate(level.units)}
+    boundary_index = index["u-27"]
+    for center in level.center_result.centers:
+        evidence = [center.entry_unit, *center.body_units]
+        if center.completion_leave_unit is not None:
+            evidence.append(center.completion_leave_unit)
+        if center.completion_return_unit is not None:
+            evidence.append(center.completion_return_unit)
+        offsets = tuple(index[item.unit_id] for item in evidence)
+        assert not min(offsets) <= boundary_index < max(offsets)
+
+
+def test_terminal_c_without_whole_trend_new_extreme_is_not_trend_boundary():
+    specs = (
+        ("up", 159, 172), ("down", 172, 148), ("up", 148, 176),
+        ("down", 176, 155), ("up", 155, 203), ("down", 203, 196),
+        ("up", 196, 228), ("down", 228, 208), ("up", 208, 216),
+        ("down", 216, 208), ("up", 208, 239), ("down", 239, 200),
+        ("up", 200, 240), ("down", 240, 207), ("up", 207, 233),
+        ("down", 233, 223), ("up", 223, 239),
+    )
+    values = tuple(
+        unit(index, direction, start, end)
+        for index, (direction, start, end) in enumerate(specs)
+    )
+
+    result = StrictRecursiveEngine(max_levels=1).calculate(
+        values,
+        strength=CausalDecayStrength(),
+    )
+
+    assert result.levels[0].decomposition_boundaries == ()
+    assert all(
+        trend.terminal_divergence is None
+        for trend in result.levels[0].completed_trends
+    )
+
+
+def test_terminal_extreme_uses_exact_group_start_before_first_center_entry():
+    specs = (
+        ("up", 100, 136), ("down", 136, 90), ("up", 90, 139),
+        ("down", 139, 125), ("up", 125, 133), ("down", 133, 88),
+        ("up", 88, 116), ("down", 116, 108), ("up", 108, 123),
+        ("down", 123, 120), ("up", 120, 128), ("down", 128, 101),
+        ("up", 101, 115), ("down", 115, 98), ("up", 98, 101),
+        ("down", 101, 55), ("up", 55, 93), ("down", 93, 89),
+        ("up", 89, 142), ("down", 142, 126), ("up", 126, 158),
+        ("down", 158, 133), ("up", 133, 139), ("down", 139, 117),
+        ("up", 117, 141), ("down", 141, 114), ("up", 114, 120),
+        ("down", 120, 97), ("up", 97, 110), ("down", 110, 79),
+        ("up", 79, 113), ("down", 113, 60), ("up", 60, 113),
+        ("down", 113, 81), ("up", 81, 88), ("down", 88, 56),
+    )
+    values = tuple(
+        unit(index, direction, start, end)
+        for index, (direction, start, end) in enumerate(specs)
+    )
+
+    structure = StrictRecursiveEngine(max_levels=3).calculate(
+        values,
+        strength=CausalDecayStrength(),
+    )
+
+    assert all(
+        boundary.anchor_unit_id != "u-35"
+        for level in structure.levels
+        for boundary in level.decomposition_boundaries
     )

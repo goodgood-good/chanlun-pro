@@ -12,7 +12,7 @@ from tests.core.strict_structure.helpers import unit
 
 
 def relation_center(
-    center_id,
+    _center_label,
     unit_offset,
     zd,
     zg,
@@ -85,7 +85,7 @@ def relation_center(
     value, _event = advance_center(value, initial[5])
     assert (value.zd_tick, value.zg_tick) == (zd, zg)
     assert (value.dd_tick, value.gg_tick) == (dd, gg)
-    return replace(value, center_id=center_id)
+    return value
 
 
 def test_core_overlap_after_previous_center_is_frozen_is_upgrade():

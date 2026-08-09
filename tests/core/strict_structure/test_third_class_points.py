@@ -2,6 +2,7 @@ from dataclasses import replace
 
 import pytest
 
+from chanlun.core.strict_structure.identity import build_center_id
 from chanlun.core.strict_structure.models import (
     SourceKind,
     StrictPointStatus,
@@ -72,12 +73,22 @@ def test_stroke_observation_center_is_never_formal_third_class_point():
     }
     observation = replace(
         formal,
-            source_kind=SourceKind.STROKE_OBSERVATION,
-            entry_unit=converted[formal.entry_unit.unit_id],
-            establishment_unit=converted[formal.establishment_unit.unit_id],
-            establishment_leave_unit=converted[
-                formal.establishment_leave_unit.unit_id
-            ],
+        center_id=build_center_id(
+            price_basis_revision=formal.price_basis_revision,
+            structural_level=formal.structural_level,
+            source_kind=SourceKind.STROKE_OBSERVATION.value,
+            entry_unit_id=formal.entry_unit.unit_id,
+            initial_unit_ids=tuple(item.unit_id for item in formal.initial_units),
+            establishment_unit_id=formal.establishment_unit.unit_id,
+            zd_tick=formal.zd_tick,
+            zg_tick=formal.zg_tick,
+        ),
+        source_kind=SourceKind.STROKE_OBSERVATION,
+        entry_unit=converted[formal.entry_unit.unit_id],
+        establishment_unit=converted[formal.establishment_unit.unit_id],
+        establishment_leave_unit=converted[
+            formal.establishment_leave_unit.unit_id
+        ],
         initial_units=tuple(
             converted[item.unit_id] for item in formal.initial_units
         ),
@@ -88,7 +99,8 @@ def test_stroke_observation_center_is_never_formal_third_class_point():
         completion_leave_unit=converted[formal.completion_leave_unit.unit_id],
         completion_return_unit=converted[formal.completion_return_unit.unit_id],
     )
-    assert engine_for(observation).third_class_points() == ()
+    with pytest.raises(ValueError, match="canonical recursive source"):
+        engine_for(observation)
 
 
 def test_formal_center_model_rejects_unlocked_completion_return():

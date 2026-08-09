@@ -7,8 +7,10 @@ from decimal import Decimal
 import pytest
 
 from chanlun.core.strict_structure.identity import build_strict_evidence_revision
+from chanlun.core.strict_structure.divergence import merge_formal_divergence_ledger
 from chanlun.core.strict_structure.models import (
     CenterLevelResult,
+    SourceKind,
     StrictEvidenceResult,
     StrictLevelResult,
     StrictPointStatus,
@@ -20,6 +22,7 @@ from tests.core.strict_structure.helpers import (
     engine_for,
     ongoing_center,
     structure_for,
+    unit,
 )
 
 
@@ -29,19 +32,27 @@ NOW = datetime(2026, 7, 20, 8, 0, tzinfo=timezone.utc)
 def empty_structure(*, with_level=False):
     levels = ()
     if with_level:
+        anchor = replace(
+            unit(0, "up", 100, 100),
+            unit_id="anchor-unit",
+            market_start=NOW - timedelta(minutes=1),
+            market_end=NOW,
+            confirmed_at=NOW + timedelta(minutes=1),
+            available_at=NOW + timedelta(minutes=1),
+        )
         center_result = CenterLevelResult(
             structural_level=0,
             price_basis_revision="test-raw-v1",
             centers=(),
             previews=(),
             events=(),
-            locked_unit_count=0,
+            locked_unit_count=1,
             replay_from=0,
         )
         levels = (
             StrictLevelResult(
                 structural_level=0,
-                units=(),
+                units=(anchor,),
                 center_result=center_result,
                 trend_types=(),
                 completed_trends=(),
@@ -70,7 +81,13 @@ def aware_confirmed_point(point_type="3buy"):
     point = confirmed_point(point_type=point_type)
     divergence = point.divergence
     if divergence is not None:
-        divergence = replace(divergence, available_at=NOW + timedelta(minutes=2))
+        divergence = replace(
+            divergence,
+            anchor_at=NOW,
+            anchor_tick=point.anchor_tick,
+            confirmed_at=NOW + timedelta(minutes=1),
+            available_at=NOW + timedelta(minutes=2),
+        )
     return replace(
         point,
         anchor_at=NOW,
@@ -99,7 +116,14 @@ def evidence_bundle(
     approaching_points=(),
     divergences=(),
 ):
-    formal = structure or empty_structure()
+    formal = structure or empty_structure(
+        with_level=bool(confirmed_points or approaching_points)
+    )
+    divergences = merge_formal_divergence_ledger(
+        formal,
+        confirmed_points,
+        divergences,
+    )
     revision = build_strict_evidence_revision(
         symbol="SZ.000001",
         source_frequency="1m",
@@ -170,6 +194,110 @@ def test_evidence_revision_changes_for_formal_point_or_structure_change():
     ) == 3
 
 
+def test_atomic_bundle_rejects_formal_point_tampering_with_stale_revision():
+    point = aware_confirmed_point("1buy")
+    base = evidence_bundle(confirmed_points=(point,))
+    tampered = replace(
+        point,
+        evidence_codes=(*point.evidence_codes, "tampered-proof-code"),
+    )
+
+    with pytest.raises(ValueError, match="structure_revision does not match"):
+        replace(base, confirmed_points=(tampered,))
+
+
+def test_atomic_bundle_requires_embedded_divergence_in_top_level_ledger():
+    point = aware_confirmed_point("1buy")
+    base = evidence_bundle(confirmed_points=(point,))
+    revision_without_ledger = build_strict_evidence_revision(
+        symbol=base.symbol,
+        source_frequency=base.source_frequency,
+        price_basis_revision=base.price_basis_revision,
+        strict_config_revision=base.strict_config_revision,
+        structure=base.structure,
+        confirmed_points=base.confirmed_points,
+        divergences=(),
+    )
+
+    with pytest.raises(ValueError, match="embedded divergence is missing"):
+        replace(
+            base,
+            divergences=(),
+            structure_revision=revision_without_ledger,
+        )
+
+
+def test_atomic_bundle_rejects_future_structure_without_any_points():
+    future_unit = replace(
+        unit(0, "up", 100, 110),
+        market_start=NOW + timedelta(hours=2),
+        market_end=NOW + timedelta(hours=2, minutes=5),
+        confirmed_at=NOW + timedelta(hours=2, minutes=10),
+        available_at=NOW + timedelta(hours=2, minutes=10),
+    )
+    structure = StrictStructureResult(
+        schema_version="chanlun-structure/v3",
+        price_basis_revision="test-raw-v1",
+        levels=(
+            StrictLevelResult(
+                structural_level=0,
+                units=(future_unit,),
+                center_result=CenterLevelResult(
+                    structural_level=0,
+                    price_basis_revision="test-raw-v1",
+                    centers=(),
+                    previews=(),
+                    events=(),
+                    locked_unit_count=1,
+                    replay_from=0,
+                ),
+                trend_types=(),
+                completed_trends=(),
+            ),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="future unit evidence"):
+        evidence_bundle(structure=structure)
+
+
+def test_atomic_bundle_rejects_missing_recursive_unit_lineage():
+    lower = unit(0, "up", 100, 110)
+    higher = replace(
+        lower,
+        unit_id="l1-carrier",
+        structural_level=1,
+        source_kind=SourceKind.TREND_TYPE,
+        child_ids=("missing-l0-child",),
+    )
+
+    def level(number, units):
+        return StrictLevelResult(
+            structural_level=number,
+            units=units,
+            center_result=CenterLevelResult(
+                structural_level=number,
+                price_basis_revision="test-raw-v1",
+                centers=(),
+                previews=(),
+                events=(),
+                locked_unit_count=len(units),
+                replay_from=0,
+            ),
+            trend_types=(),
+            completed_trends=(),
+        )
+
+    structure = StrictStructureResult(
+        schema_version="chanlun-structure/v3",
+        price_basis_revision="test-raw-v1",
+        levels=(level(0, (lower,)), level(1, (higher,))),
+    )
+
+    with pytest.raises(ValueError, match="exactly replay prior locked trends"):
+        evidence_bundle(structure=structure)
+
+
 def test_evidence_revision_is_order_independent_for_confirmed_point_ledger():
     one = aware_confirmed_point("1buy")
     two = aware_confirmed_point("1sell")
@@ -214,14 +342,35 @@ def test_evidence_rejects_completed_center_without_matching_third_point():
         )
 
 
+def test_center_identity_cannot_be_detached_from_its_seed_evidence():
+    with pytest.raises(ValueError, match="immutable center seed"):
+        replace(completed_up_center(), center_id="forged-center-id")
+
+
+def test_confirmed_and_approaching_ledgers_cannot_share_one_point_identity():
+    confirmed = aware_confirmed_point("1buy")
+    approaching = replace(
+        confirmed,
+        status=StrictPointStatus.APPROACHING,
+        confirmed_at=None,
+        missing_conditions=("terminal_unit_locked",),
+    )
+    with pytest.raises(ValueError, match="must be disjoint"):
+        evidence_bundle(
+            confirmed_points=(confirmed,),
+            approaching_points=(approaching,),
+        )
+
+
 def test_evidence_rejects_third_point_for_ongoing_center():
-    ongoing = ongoing_center(center_id="shared-center")
-    completed = completed_up_center(center_id=ongoing.center_id)
+    ongoing = ongoing_center()
+    completed = completed_up_center()
+    assert completed.center_id == ongoing.center_id
     points = engine_for(completed).third_class_points()
     assert len(points) == 1
     with pytest.raises(
         ValueError,
-        match="completed centers and third-class points must match",
+        match="strict point anchor is missing from its level",
     ):
         evidence_bundle(
             structure=structure_for(ongoing),

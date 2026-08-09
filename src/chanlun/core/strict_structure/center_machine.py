@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import datetime
 
-from chanlun.core.strict_structure.identity import stable_structure_id
+from chanlun.core.strict_structure.identity import build_center_id, stable_structure_id
 from chanlun.core.strict_structure.models import (
     CenterEvent,
     CenterEventKind,
@@ -168,12 +168,14 @@ def _event(
 ) -> CenterEvent:
     return CenterEvent(
         event_id=stable_structure_id(
-            "chanlun-center-event/v8",
+            "chanlun-center-event/v9",
             center.price_basis_revision,
             center.structural_level,
             center.source_kind.value,
             center.center_id,
             kind.value,
+            center.body_revision,
+            market_time,
             None if leave is None else leave.unit_id,
             None if ret is None else ret.unit_id,
         ),
@@ -227,22 +229,17 @@ def _new_ongoing_center(
     zd_tick: int,
     zg_tick: int,
 ) -> TrendCenter:
-    center_id = stable_structure_id(
-        # Keep identities stable for centers whose five establishment units
-        # were already valid under the previous contract.
-        "chanlun-center/v9",
-        price_basis_revision,
-        structural_level,
-        source_kind.value,
-        entry_unit.unit_id,
-        tuple(item.unit_id for item in initial_units),
-        (
-            None
-            if establishment_unit is None
-            else establishment_unit.unit_id
+    center_id = build_center_id(
+        price_basis_revision=price_basis_revision,
+        structural_level=structural_level,
+        source_kind=source_kind.value,
+        entry_unit_id=entry_unit.unit_id,
+        initial_unit_ids=tuple(item.unit_id for item in initial_units),
+        establishment_unit_id=(
+            None if establishment_unit is None else establishment_unit.unit_id
         ),
-        zd_tick,
-        zg_tick,
+        zd_tick=zd_tick,
+        zg_tick=zg_tick,
     )
     body_units = initial_units + extension_units
     maturity = establishment_unit or initial_units[-1]
@@ -1272,6 +1269,8 @@ def calculate_centers(
     structural_level: int,
     source_kind: SourceKind,
     oscillatory_ids: frozenset[str] = frozenset(),
+    *,
+    hard_boundary_after_ids: frozenset[str] = frozenset(),
 ) -> CenterLevelResult:
     values = tuple(units)
     source_kind = SourceKind(source_kind)
@@ -1285,6 +1284,71 @@ def calculate_centers(
         locked_count += 1
     formal = values[:locked_count]
     width = _seed_size(source_kind)
+
+    hard_boundaries = frozenset(hard_boundary_after_ids)
+    if hard_boundaries:
+        offsets = {item.unit_id: index for index, item in enumerate(values)}
+        if len(offsets) != len(values):
+            raise ValueError("unit ids must be unique")
+        missing = hard_boundaries.difference(offsets)
+        if missing:
+            raise ValueError("hard center boundary references a missing unit")
+        if any(offsets[item] >= locked_count for item in hard_boundaries):
+            raise ValueError("hard center boundary requires a locked unit")
+
+        boundary_offsets = tuple(sorted(offsets[item] for item in hard_boundaries))
+        starts = (0, *(offset + 1 for offset in boundary_offsets))
+        ends = (*(offset + 1 for offset in boundary_offsets), len(values))
+        centers: list[TrendCenter] = []
+        events_by_id: dict[str, CenterEvent] = {}
+        previews: tuple[CenterPreview, ...] = ()
+        replay_from = starts[-1]
+        for partition_index, (start, end) in enumerate(zip(starts, ends)):
+            partition = values[start:end]
+            if not partition:
+                continue
+            partition_ids = {item.unit_id for item in partition}
+            result = calculate_centers(
+                partition,
+                structural_level,
+                source_kind,
+                frozenset(
+                    item for item in oscillatory_ids if item in partition_ids
+                ),
+            )
+            final_partition = partition_index == len(starts) - 1
+            retained = (
+                result.centers
+                if final_partition
+                else tuple(
+                    center
+                    for center in result.centers
+                    if center.state is CenterState.COMPLETED
+                )
+            )
+            retained_ids = {center.center_id for center in retained}
+            centers.extend(retained)
+            for event in result.events:
+                if event.center_id not in retained_ids:
+                    continue
+                previous = events_by_id.setdefault(event.event_id, event)
+                if previous != event:
+                    raise ValueError("center event id maps to conflicting evidence")
+            if final_partition:
+                previews = result.previews
+                replay_from = start + result.replay_from
+
+        if len({center.center_id for center in centers}) != len(centers):
+            raise ValueError("partitioned center identities must be unique")
+        return CenterLevelResult(
+            structural_level=structural_level,
+            price_basis_revision=price_basis_revision,
+            centers=tuple(centers),
+            previews=previews,
+            events=tuple(events_by_id.values()),
+            locked_unit_count=locked_count,
+            replay_from=replay_from,
+        )
 
     centers: list[TrendCenter] = []
     events: list[CenterEvent] = []

@@ -63,6 +63,35 @@ def test_v3_adapter_rejects_wrong_frequency_or_future_point() -> None:
         )
 
 
+def test_v3_adapter_cannot_relabel_ordinary_second_buy_as_small_to_large() -> None:
+    l0 = confirmed_point(
+        "3buy",
+        frequency="30m",
+        anchor=10.0,
+        center_zg=10.0,
+        center_ordinal=1,
+    )
+    ordinary_second = confirmed_point(
+        "2buy",
+        frequency="1m",
+        anchor=10.2,
+        minutes_after=1,
+    )
+
+    with pytest.raises(ValueError, match="closed small-to-large proof graph"):
+        build_v3_technical_entry_snapshot(
+            structure_snapshot_id="strict-evidence:v1",
+            observed_at=POINT_AT + timedelta(minutes=2),
+            l0_three_buy=l0,
+            l2_locator=ordinary_second,
+            l1_departure_completed=True,
+            l1_first_return_completed=True,
+            first_return_low=Decimal("10.0"),
+            direct_recursive_levels_unique=True,
+            all_components_completed=True,
+        )
+
+
 def test_independent_adapter_copies_only_the_certified_chain() -> None:
     l0 = confirmed_point(
         "3buy",
