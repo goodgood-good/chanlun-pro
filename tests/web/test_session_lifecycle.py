@@ -1,12 +1,19 @@
 import datetime
 
 import pytest
+from werkzeug.security import generate_password_hash
 
 from cl_app import create_app
 
 
 def _make_app(monkeypatch, password_ref):
-    monkeypatch.setattr("cl_app.get_login_password", lambda: password_ref[0])
+    password_hashes: dict[str, str] = {}
+
+    def configured_password() -> str:
+        raw = password_ref[0]
+        return password_hashes.setdefault(raw, generate_password_hash(raw))
+
+    monkeypatch.setattr("cl_app.get_login_password", configured_password)
     return create_app(
         test_config={
             "TESTING": True,
@@ -132,10 +139,8 @@ def test_api_request_returns_json_401_after_authentication_expires(monkeypatch):
     }
 
 
-@pytest.mark.parametrize("path", ["/alert_del/1", "/xuangu/task_add"])
-def test_ajax_post_endpoints_share_json_authentication_contract(
-    monkeypatch, path
-):
+@pytest.mark.parametrize("path", ["/xuangu/task_add"])
+def test_ajax_post_endpoints_share_json_authentication_contract(monkeypatch, path):
     password = ["first-password"]
     app = _make_app(monkeypatch, password)
 

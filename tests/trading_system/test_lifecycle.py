@@ -84,24 +84,6 @@ def test_geometrically_completed_third_class_candidate_is_formed() -> None:
     assert lifecycle.actionable is False
 
 
-def test_legacy_serialized_completed_preview_uses_formed_stage() -> None:
-    signal = {
-        "point_type": "3buy",
-        "lifecycle_stage": "approaching",
-        "setup_5m": {
-            "point_type": "3buy",
-            "status": "provisional",
-            "evidence_codes": [
-                "physical_timeframe_level_zero",
-                "provisional_center_completion",
-                "core_boundary_held",
-            ],
-        },
-    }
-
-    assert lifecycle_stage_from_signal(signal) == "formed"
-
-
 def test_formed_evidence_does_not_promote_non_third_class_candidate() -> None:
     signal = {
         "point_type": "2buy",

@@ -17,10 +17,7 @@ function loadDatafeeds(requestUrls) {
 
   const configuration = {
     supports_search: true,
-    supports_group_request: false,
     supported_resolutions: ['1'],
-    supports_marks: false,
-    supports_timescale_marks: false,
     supports_time: false,
   };
   const sb = {

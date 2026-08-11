@@ -85,6 +85,6 @@ def test_point_availability_must_cover_divergence_evidence():
 
 
 def test_point_identity_is_namespaced_by_price_basis_revision():
-    raw = confirmed_point(price_basis_revision="raw-v1")
+    raw = confirmed_point(price_basis_revision="raw")
     rebased = confirmed_point(price_basis_revision="corp-action-2026-07-20")
     assert raw.point_id != rebased.point_id

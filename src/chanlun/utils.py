@@ -2,21 +2,13 @@
 消息推送与配置工具：钉钉/飞书消息发送，代理/凭证配置读取（DB 缓存优先）。
 """
 
-import base64
-import hashlib
-import hmac
 import json
 import sys
 import threading
-import time
-import urllib.parse
-from typing import Dict, Optional, Union
-
-import requests
+from typing import Dict, Union
 
 from chanlun import config
 from chanlun.persistence.db import db
-from chanlun.tools.log_util import LogUtil
 
 
 class _StdoutNoiseFilter:
@@ -75,35 +67,6 @@ def config_get_proxy() -> Dict[str, str]:
     return {"host": config.PROXY_HOST, "port": config.PROXY_PORT}
 
 
-def config_get_dingding_keys(market: str) -> Optional[Dict[str, str]]:
-    """
-    Return DingTalk robot keys for the given market.
-
-    DB cache `dd_keys` overrides defaults when present and complete.
-    Market mapping:
-    - a -> `config.DINGDING_KEY_A`
-    - hk -> `config.DINGDING_KEY_HK`
-    - us -> `config.DINGDING_KEY_US`
-    - futures -> `config.DINGDING_KEY_FUTURES`
-    - currency -> `config.DINGDING_KEY_CURRENCY`
-    """
-    db_dd_key = db.cache_get("dd_keys")
-    if db_dd_key is not None and db_dd_key.get("token") and db_dd_key.get("secret"):
-        return db_dd_key
-    if market == "a":
-        return config.DINGDING_KEY_A
-    if market == "hk":  # fixed wrong duplicate 'a' condition
-        return config.DINGDING_KEY_HK
-    if market == "us":
-        return config.DINGDING_KEY_US
-    if market == "futures":
-        return config.DINGDING_KEY_FUTURES
-    if market == "currency":
-        return config.DINGDING_KEY_CURRENCY
-
-    return None
-
-
 def config_get_feishu_keys(market: str) -> Dict[str, str]:
     """
     Get Feishu app credentials and target user.
@@ -113,7 +76,7 @@ def config_get_feishu_keys(market: str) -> Dict[str, str]:
     from chanlun.security import decrypt_str
     db_fs_key = db.cache_get("fs_keys")
     if db_fs_key is not None:
-        # fs_app_secret 在 web 设置页加密落库，这里解密；历史明文记录会被 decrypt_str 原样返回。
+        # fs_app_secret 在 Web 设置页按唯一当前格式加密落库，这里严格解密。
         app_secret_plain = decrypt_str(db_fs_key.get("fs_app_secret"))
         if (
             db_fs_key.get("fs_app_id")
@@ -130,73 +93,6 @@ def config_get_feishu_keys(market: str) -> Dict[str, str]:
         keys = config.FEISHU_KEYS[market].copy()
     keys["user_id"] = config.FEISHU_KEYS["user_id"]
     return keys
-
-
-# 旧版的API接口已经下架，不能新增了，后续使用 飞书的 消息接口
-def send_dd_msg(market: str, msg: Union[str, Dict[str, str]]) -> bool:
-    """
-    发送钉钉消息（自定义机器人）。
-
-    - `msg` 为字符串时发送文本消息。
-    - `msg` 为字典时发送 markdown 消息，形如 `{"title": "标题", "text": "markdown内容"}`。
-    """
-    dd_info = config_get_dingding_keys(market)
-    if dd_info is None or dd_info["token"] == "" or dd_info["secret"] == "":
-        return True  # no-op when not configured
-
-    url = "https://oapi.dingtalk.com/robot/send?access_token=%s&timestamp=%s&sign=%s"
-
-    def sign():
-        timestamp = str(round(time.time() * 1000))
-        secret = dd_info["secret"]
-        secret_enc = secret.encode("utf-8")
-        string_to_sign = "{}\n{}".format(timestamp, secret)
-        string_to_sign_enc = string_to_sign.encode("utf-8")
-        hmac_code = hmac.new(
-            secret_enc, string_to_sign_enc, digestmod=hashlib.sha256
-        ).digest()
-        _sign = urllib.parse.quote_plus(base64.b64encode(hmac_code))
-        return timestamp, _sign
-
-    t, s = sign()
-    url = url % (dd_info["token"], t, s)
-    # 加 (connect, read) 双段超时，避免外网网络抖动时整条任务被卡住。
-    request_timeout = (5, 10)
-    try:
-        if isinstance(msg, str):
-            res = requests.post(
-                url,
-                json={
-                    "msgtype": "text",
-                    "text": {"content": msg},
-                },
-                timeout=request_timeout,
-            )
-        else:
-            res = requests.post(
-                url,
-                json={"msgtype": "markdown", "markdown": msg},
-                timeout=request_timeout,
-            )
-    except requests.RequestException as exc:
-        LogUtil.error(f"send_dd_msg request failed: {exc}")
-        return False
-
-    # 钉钉成功返回 errcode == 0，否则视为失败但不抛出，避免上层任务被打断。
-    try:
-        body = res.json()
-        if body.get("errcode", 0) != 0:
-            LogUtil.error(
-                f"send_dd_msg api error, errcode={body.get('errcode')}, errmsg={body.get('errmsg')}"
-            )
-            return False
-    except ValueError:
-        LogUtil.error(
-            f"send_dd_msg got non-json response, status={res.status_code}, text={res.text[:200]}"
-        )
-        return False
-
-    return True
 
 
 def send_fs_msg(market: str, title: str, contents: Union[str, list]) -> bool:
@@ -279,9 +175,3 @@ def send_fs_msg(market: str, title: str, contents: Union[str, list]) -> bool:
         )
         return False
     return True
-
-
-if __name__ == "__main__":
-    send_fs_msg(
-        "us", "这里是选股的测试消息", ["运行完成", "选出300只股票", "用时1000小时"]
-    )

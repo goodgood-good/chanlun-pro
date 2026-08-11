@@ -3,7 +3,7 @@ from __future__ import annotations
 import importlib
 from pathlib import Path
 
-from chanlun.decision_support import scanner
+from chanlun.decision_support.trading_system.engine import TradingEngine
 from chanlun.decision_support.trading_system.backtest.report import (
     STRATEGY_ID as BACKTEST_STRATEGY_ID,
 )
@@ -22,21 +22,18 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_only_new_trading_system_is_importable() -> None:
-    assert scanner.ACTIVE_STRATEGY_ID == "chanlun_source_faithful_v2"
-    assert hasattr(scanner, "TradingEngine")
-    assert not hasattr(scanner, "classify_early_signal")
-    assert not hasattr(scanner, "classify_" + "early_signals")
-    assert not hasattr(scanner, "classify_" + "sector_level")
+    assert STRICT_STRATEGY_ID == "chanlun_source_faithful"
+    assert TradingEngine is not None
+    assert not (ROOT / "src/chanlun/decision_support/scanner.py").exists()
 
 
 def test_backtest_scan_and_notification_share_one_strategy_id() -> None:
     assert {
         STRICT_STRATEGY_ID,
-        scanner.ACTIVE_STRATEGY_ID,
         BACKTEST_STRATEGY_ID,
         NOTIFICATION_STRATEGY_ID,
-        TradingScreeningConfig().algorithm_version,
-    } == {"chanlun_source_faithful_v2"}
+        TradingScreeningConfig().algorithm_id,
+    } == {"chanlun_source_faithful"}
 
 
 def test_web_surface_has_only_current_screening_and_human_review_routes() -> None:
@@ -80,24 +77,13 @@ def test_web_surface_has_only_current_screening_and_human_review_routes() -> Non
     assert "install_decision_support_runtime" not in app.extensions
 
 
-def test_web_factory_wires_private_dingtalk_dispatcher_into_trading_screening(
-    monkeypatch,
-) -> None:
-    monkeypatch.setattr(
-        "chanlun.config.RECURSIVE_MONITOR_CONFIG",
-        {
-            "common": {
-                "dingtalk_webhook": "https://legacy.invalid/robot/send",
-                "dingtalk_keyword": "旧通知关键词",
-            }
-        },
-    )
+def test_web_factory_wires_private_dingtalk_dispatcher_into_trading_screening() -> None:
     app = create_app(
         {
             "TESTING": True,
             "VALIDATE_WEB_SECURITY": False,
             "WTF_CSRF_ENABLED": False,
-            "EARLY_SCREENING_DINGTALK_WEBHOOK": (
+            "TRADING_SCREENING_DINGTALK_WEBHOOK": (
                 "https://example.invalid/robot/send?access_token=redacted"
             ),
         },
@@ -113,14 +99,14 @@ def test_web_factory_wires_private_dingtalk_dispatcher_into_trading_screening(
         app.extensions["shutdown_runtime_services"]()
 
 
-def test_retired_ui_and_calibration_entry_files_are_deleted() -> None:
-    retired_paths = (
+def test_removed_ui_and_calibration_entry_files_are_absent() -> None:
+    removed_paths = (
         "web/chanlun_chart/cl_app/static/js/decision_support.js",
         "web/chanlun_chart/cl_app/static/js/__tests__/decision_support.test.js",
         "tools/build_causal_oos_candidates.py",
         "tools/decision_support_forward_oos.py",
     )
-    assert all(not (ROOT / relative).exists() for relative in retired_paths)
+    assert all(not (ROOT / relative).exists() for relative in removed_paths)
     index = (ROOT / "web/chanlun_chart/cl_app/templates/index.html").read_text(
         encoding="utf-8"
     )
@@ -130,20 +116,20 @@ def test_retired_ui_and_calibration_entry_files_are_deleted() -> None:
     assert "缠论提前选股" in index
 
 
-def test_retired_web_composition_is_physically_removed() -> None:
+def test_removed_web_composition_is_absent() -> None:
     app_factory = (ROOT / "web/chanlun_chart/cl_app/__init__.py").read_text(
         encoding="utf-8"
     )
-    for retired_name in (
+    for removed_name in (
         "DECISION_SUPPORT_ENABLED",
         "build_persistent_decision_support_facade",
         "install_decision_support_runtime",
         "DecisionEventStore",
         "OpportunityStore",
     ):
-        assert retired_name not in app_factory
+        assert removed_name not in app_factory
 
-    retired_paths = (
+    removed_paths = (
         "web/chanlun_chart/cl_app/services/decision_support.py",
         "tools/build_current_readiness_input.py",
         "tools/build_historical_decision_dossier.py",
@@ -152,22 +138,25 @@ def test_retired_web_composition_is_physically_removed() -> None:
         "tools/decision_support_validation_evidence.py",
         "tools/validate_decision_support.py",
     )
-    assert all(not (ROOT / relative).exists() for relative in retired_paths)
+    assert all(not (ROOT / relative).exists() for relative in removed_paths)
 
 
-def test_reusable_risk_paper_and_backtest_infrastructure_still_imports() -> None:
-    for module_name in (
-        "chanlun.decision_support.risk",
-        "chanlun.decision_support.paper_adapter",
-        "chanlun.decision_support.paper_admission",
-        "chanlun.decision_support.paper_read_model",
-        "chanlun.decision_support.paper_runtime",
-    ):
-        assert importlib.import_module(module_name) is not None
+def test_removed_decision_and_paper_subsystem_is_absent() -> None:
+    removed = (
+        "risk.py",
+        "paper_adapter.py",
+        "paper_admission.py",
+        "paper_read_model.py",
+        "paper_runtime.py",
+        "event_store.py",
+        "review_service.py",
+    )
+    source_root = ROOT / "src/chanlun/decision_support"
+    assert all(not (source_root / name).exists() for name in removed)
 
 
-def test_retired_early_screening_backtest_is_physically_removed() -> None:
-    retired_paths = (
+def test_removed_early_screening_backtest_is_absent() -> None:
+    removed_paths = (
         "src/chanlun/decision_support/early_screening_backtest.py",
         "tools/backtest_early_screening.py",
         "tests/decision_support/test_early_screening_backtest.py",
@@ -177,16 +166,16 @@ def test_retired_early_screening_backtest_is_physically_removed() -> None:
         "src/chanlun/decision_support/strategies.py",
     )
 
-    assert all(not (ROOT / relative).exists() for relative in retired_paths)
+    assert all(not (ROOT / relative).exists() for relative in removed_paths)
 
 
-def test_decision_support_source_contains_no_retired_strategy_identity() -> None:
+def test_decision_support_source_contains_no_removed_strategy_identity() -> None:
     source_root = ROOT / "src/chanlun/decision_support"
     source = "\n".join(
         path.read_text(encoding="utf-8")
         for path in sorted(source_root.glob("*.py"))
     )
-    for retired_name in (
+    for removed_name in (
         "trend_continuation",
         "bottom_reversal",
         "live_parity",
@@ -196,7 +185,7 @@ def test_decision_support_source_contains_no_retired_strategy_identity() -> None
         "TREND_CONTINUATION",
         "BOTTOM_REVERSAL",
     ):
-        assert retired_name not in source
+        assert removed_name not in source
 
 
 def test_every_remaining_decision_support_module_imports() -> None:

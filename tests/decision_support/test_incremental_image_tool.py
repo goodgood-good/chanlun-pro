@@ -64,7 +64,7 @@ def test_tool_archives_each_page_incrementally_and_deduplicates_reused_asset(
         identity=identity,
         lesson_by_page={},
         blocks_by_page={},
-        extractor_version="lesson-image/2",
+        extractor_id="lesson-image-changed",
     )
 
     inventory = load_lesson_image_cache(published, expected_identity=identity)
@@ -93,7 +93,7 @@ def test_tool_releases_each_page_cache_before_inventory_validation(
             identity=identity,
             lesson_by_page={},
             blocks_by_page={},
-            extractor_version="lesson-image/2",
+            extractor_id="lesson-image-changed",
             expected_asset_count=2,
         )
 
@@ -114,7 +114,7 @@ def test_tool_does_not_publish_incremental_archive_when_inventory_gate_fails(
             identity=identity,
             lesson_by_page={},
             blocks_by_page={},
-            extractor_version="lesson-image/2",
+            extractor_id="lesson-image-changed",
             expected_asset_count=2,
             expected_occurrence_count=2,
             expected_primary_raw_bytes=1,

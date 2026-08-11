@@ -4,7 +4,7 @@ import pandas as pd
 
 from chanlun.core.cl import CL
 from chanlun.core.strict_structure.base_profile import strict_base_config
-from chanlun.core.strict_structure.incremental import IncrementalCenterEngine
+from chanlun.core.strict_structure.center_machine import calculate_centers
 from chanlun.core.strict_structure.models import SourceKind
 from chanlun.core.strict_structure.unit_adapter import UnitLockRegistry, adapt_lines
 
@@ -37,11 +37,9 @@ def _strict_cl(code, frequency):
     config = strict_base_config()
     config.update(
         {
-            "skip_legacy_zslx": True,
-            "skip_legacy_mmd": True,
         }
     )
-    return CL(code, frequency, config)
+    return CL(code, frequency, config, market="a")
 
 
 def _assert_real_prefix_stability(
@@ -52,8 +50,7 @@ def _assert_real_prefix_stability(
     *,
     require_completed=False,
 ):
-    registry = UnitLockRegistry("test-raw-v1")
-    engine = IncrementalCenterEngine(0, SourceKind.SEGMENT)
+    registry = UnitLockRegistry("test-raw")
     frozen = ()
     last_units = ()
     saw_formal = False
@@ -72,7 +69,7 @@ def _assert_real_prefix_stability(
             as_of,
             registry,
         )
-        result = engine.update(units)
+        result = calculate_centers(units, 0, SourceKind.SEGMENT)
         saw_formal = saw_formal or bool(result.centers)
 
         assert result.locked_unit_count == sum(item.locked for item in units)

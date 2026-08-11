@@ -18,7 +18,7 @@ from ..services.research_audit import (
     ResearchAuditUnavailable,
     build_research_audit_snapshot,
 )
-from ..services.trading_screening import SCHEMA_VERSION
+from ..services.trading_screening import SCHEMA
 from ..services.human_review_screening import (
     HumanReviewScreenUnavailable,
     HumanReviewScreeningService,
@@ -152,7 +152,7 @@ def _trading_screening_snapshot(
         raise DecisionSupportError("trading_screening_unavailable") from exc
     if (
         not isinstance(payload, dict)
-        or payload.get("schema_version") != SCHEMA_VERSION
+        or payload.get("schema") != SCHEMA
         or payload.get("sector_first") is not True
         or payload.get("read_only") is not True
         or payload.get("research_only") is not True
@@ -200,7 +200,7 @@ def _manual_holdings_snapshot() -> dict[str, object]:
     """Return local user-declared holdings without touching a broker account."""
 
     unavailable = {
-        "schema": "chanlun-local-manual-holdings/v1",
+        "schema": "chanlun-local-manual-holdings",
         "source": "LOCAL_GLOBAL_WATCHLIST_GROUP",
         "group_name": "我的持仓",
         "group_scope": "GLOBAL_ACROSS_MARKETS",
@@ -413,7 +413,7 @@ def _human_review_forward_operations() -> dict[str, object]:
 
     health_provider = current_app.extensions.get("health_snapshot")
     unavailable = {
-        "schema": "chanlun-v3-human-review-forward-operations/v1",
+        "schema": "chanlun-human-review-forward-operations",
         "session": None,
         "screening_market_data_as_of": None,
         "scheduler": {
@@ -495,7 +495,7 @@ def _human_review_forward_operations() -> dict[str, object]:
             else delivery_value.get("session") or archive_value.get("session")
         )
         return {
-            "schema": "chanlun-v3-human-review-forward-operations/v1",
+            "schema": "chanlun-human-review-forward-operations",
             "session": session_label,
             "screening_market_data_as_of": market_data_as_of,
             "scheduler": scheduler_value,
@@ -570,7 +570,7 @@ def human_review_candidate_detail():
     if (
         not isinstance(payload, Mapping)
         or payload.get("schema")
-        != "chanlun-v3-human-review-candidate-detail-web/v1"
+        != "chanlun-human-review-candidate-detail-web"
         or payload.get("candidate_id") != candidate_id
         or payload.get("source_content_sha256") != source_sha256
         or payload.get("highest_status") != "REVIEW_REQUIRED"

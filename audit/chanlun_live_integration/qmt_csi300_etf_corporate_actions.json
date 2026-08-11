@@ -1,0 +1,965 @@
+{
+  "content_sha256": "sha256:3b1e7cc8d6aecc4211e5e248cb0fd59ee471aeb080e025d42b8830eb5490b00d",
+  "generated_at": "2026-07-26T21:21:47.876989+08:00",
+  "instruments": [
+    {
+      "causal_application": "ALLOWED_FROM_EFFECTIVE_SESSION_ONLY_RESEARCH_NO_FINAL_FORWARD_SERIES",
+      "code": "159919.SZ",
+      "event_count": 7,
+      "events": [
+        {
+          "availability_policy": "EFFECTIVE_SESSION_OPEN_RESEARCH_ASSUMPTION",
+          "effective_on": "2012-12-03",
+          "raw": {
+            "allotNum": 0.0,
+            "allotPrice": 0.0,
+            "dr": 0.38169,
+            "gugai": 0.0,
+            "interest": 0.0,
+            "stockBonus": -0.61778,
+            "stockGift": 0.0,
+            "time": 1354464000000.0
+          }
+        },
+        {
+          "availability_policy": "EFFECTIVE_SESSION_OPEN_RESEARCH_ASSUMPTION",
+          "effective_on": "2019-01-14",
+          "raw": {
+            "allotNum": 0.0,
+            "allotPrice": 0.0,
+            "dr": 1.110097,
+            "gugai": 0.0,
+            "interest": 0.0,
+            "stockBonus": 0.110681,
+            "stockGift": 0.0,
+            "time": 1547395200000.0
+          }
+        },
+        {
+          "availability_policy": "EFFECTIVE_SESSION_OPEN_RESEARCH_ASSUMPTION",
+          "effective_on": "2020-09-14",
+          "raw": {
+            "allotNum": 0.0,
+            "allotPrice": 0.0,
+            "dr": 1.0330489999999999,
+            "gugai": 0.0,
+            "interest": 0.152,
+            "stockBonus": 0.0,
+            "stockGift": 0.0,
+            "time": 1600012800000.0
+          }
+        },
+        {
+          "availability_policy": "EFFECTIVE_SESSION_OPEN_RESEARCH_ASSUMPTION",
+          "effective_on": "2021-09-13",
+          "raw": {
+            "allotNum": 0.0,
+            "allotPrice": 0.0,
+            "dr": 1.013496,
+            "gugai": 0.0,
+            "interest": 0.07,
+            "stockBonus": 0.0,
+            "stockGift": 0.0,
+            "time": 1631462400000.0
+          }
+        },
+        {
+          "availability_policy": "EFFECTIVE_SESSION_OPEN_RESEARCH_ASSUMPTION",
+          "effective_on": "2024-09-18",
+          "raw": {
+            "allotNum": 0.0,
+            "allotPrice": 0.0,
+            "dr": 1.012463,
+            "gugai": 0.0,
+            "interest": 0.0453,
+            "stockBonus": 0.0,
+            "stockGift": 0.0,
+            "time": 1726588800000.0
+          }
+        },
+        {
+          "availability_policy": "EFFECTIVE_SESSION_OPEN_RESEARCH_ASSUMPTION",
+          "effective_on": "2025-03-31",
+          "raw": {
+            "allotNum": 0.0,
+            "allotPrice": 0.0,
+            "dr": 1.016009,
+            "gugai": 0.0,
+            "interest": 0.0661,
+            "stockBonus": 0.0,
+            "stockGift": 0.0,
+            "time": 1743350400000.0
+          }
+        },
+        {
+          "availability_policy": "EFFECTIVE_SESSION_OPEN_RESEARCH_ASSUMPTION",
+          "effective_on": "2025-12-08",
+          "raw": {
+            "allotNum": 0.0,
+            "allotPrice": 0.0,
+            "dr": 1.015723,
+            "gugai": 0.0,
+            "interest": 0.0728,
+            "stockBonus": 0.0,
+            "stockGift": 0.0,
+            "time": 1765123200000.0
+          }
+        }
+      ],
+      "events_sha256": "sha256:999245f87baff6e90952a17eca647edac8c582830f38ee200d9937f02667d776",
+      "first_effective_on": "2012-12-03",
+      "instrument": {
+        "ExchangeID": "SZ",
+        "ExpireDate": "99999999",
+        "InstrumentID": "159919",
+        "InstrumentName": "沪深300ETF嘉实",
+        "OpenDate": "20120528",
+        "ProductID": "",
+        "ProductName": ""
+      },
+      "last_effective_on": "2025-12-08",
+      "provider_columns": [
+        "time",
+        "interest",
+        "stockBonus",
+        "stockGift",
+        "allotNum",
+        "allotPrice",
+        "gugai",
+        "dr"
+      ],
+      "status": "EFFECTIVE_DATED_EVENTS_AVAILABLE"
+    },
+    {
+      "causal_application": "ALLOWED_FROM_EFFECTIVE_SESSION_ONLY_RESEARCH_NO_FINAL_FORWARD_SERIES",
+      "code": "159925.SZ",
+      "event_count": 3,
+      "events": [
+        {
+          "availability_policy": "EFFECTIVE_SESSION_OPEN_RESEARCH_ASSUMPTION",
+          "effective_on": "2024-01-29",
+          "raw": {
+            "allotNum": 0.0,
+            "allotPrice": 0.0,
+            "dr": 0.503293,
+            "gugai": 0.0,
+            "interest": 0.0,
+            "stockBonus": -0.496295,
+            "stockGift": 0.0,
+            "time": 1706457600000.0
+          }
+        },
+        {
+          "availability_policy": "EFFECTIVE_SESSION_OPEN_RESEARCH_ASSUMPTION",
+          "effective_on": "2024-08-13",
+          "raw": {
+            "allotNum": 0.0,
+            "allotPrice": 0.0,
+            "dr": 1.022674,
+            "gugai": 0.0,
+            "interest": 0.074,
+            "stockBonus": 0.0,
+            "stockGift": 0.0,
+            "time": 1723478400000.0
+          }
+        },
+        {
+          "availability_policy": "EFFECTIVE_SESSION_OPEN_RESEARCH_ASSUMPTION",
+          "effective_on": "2025-10-27",
+          "raw": {
+            "allotNum": 0.0,
+            "allotPrice": 0.0,
+            "dr": 1.026724,
+            "gugai": 0.0,
+            "interest": 0.125,
+            "stockBonus": 0.0,
+            "stockGift": 0.0,
+            "time": 1761494400000.0
+          }
+        }
+      ],
+      "events_sha256": "sha256:d3acb3ed3d48752d3b5e53ebf43496048b946192193899f9cfe277c917836437",
+      "first_effective_on": "2024-01-29",
+      "instrument": {
+        "ExchangeID": "SZ",
+        "ExpireDate": "99999999",
+        "InstrumentID": "159925",
+        "InstrumentName": "沪深300ETF南方",
+        "OpenDate": "20130411",
+        "ProductID": "",
+        "ProductName": ""
+      },
+      "last_effective_on": "2025-10-27",
+      "provider_columns": [
+        "time",
+        "interest",
+        "stockBonus",
+        "stockGift",
+        "allotNum",
+        "allotPrice",
+        "gugai",
+        "dr"
+      ],
+      "status": "EFFECTIVE_DATED_EVENTS_AVAILABLE"
+    },
+    {
+      "causal_application": "ALLOWED_FROM_EFFECTIVE_SESSION_ONLY_RESEARCH_NO_FINAL_FORWARD_SERIES",
+      "code": "510300.SH",
+      "event_count": 14,
+      "events": [
+        {
+          "availability_policy": "EFFECTIVE_SESSION_OPEN_RESEARCH_ASSUMPTION",
+          "effective_on": "2012-12-18",
+          "raw": {
+            "allotNum": 0.0,
+            "allotPrice": 0.0,
+            "dr": 1.016587,
+            "gugai": 0.0,
+            "interest": 0.033,
+            "stockBonus": 0.0,
+            "stockGift": 0.0,
+            "time": 1355760000000.0
+          }
+        },
+        {
+          "availability_policy": "EFFECTIVE_SESSION_OPEN_RESEARCH_ASSUMPTION",
+          "effective_on": "2014-01-21",
+          "raw": {
+            "allotNum": 0.0,
+            "allotPrice": 0.0,
+            "dr": 1.019742,
+            "gugai": 0.0,
+            "interest": 0.048,
+            "stockBonus": 0.0,
+            "stockGift": 0.0,
+            "time": 1390233600000.0
+          }
+        },
+        {
+          "availability_policy": "EFFECTIVE_SESSION_OPEN_RESEARCH_ASSUMPTION",
+          "effective_on": "2015-01-20",
+          "raw": {
+            "allotNum": 0.0,
+            "allotPrice": 0.0,
+            "dr": 1.009604,
+            "gugai": 0.0,
+            "interest": 0.035,
+            "stockBonus": 0.0,
+            "stockGift": 0.0,
+            "time": 1421683200000.0
+          }
+        },
+        {
+          "availability_policy": "EFFECTIVE_SESSION_OPEN_RESEARCH_ASSUMPTION",
+          "effective_on": "2016-01-20",
+          "raw": {
+            "allotNum": 0.0,
+            "allotPrice": 0.0,
+            "dr": 1.0128679999999999,
+            "gugai": 0.0,
+            "interest": 0.051,
+            "stockBonus": 0.0,
+            "stockGift": 0.0,
+            "time": 1453219200000.0
+          }
+        },
+        {
+          "availability_policy": "EFFECTIVE_SESSION_OPEN_RESEARCH_ASSUMPTION",
+          "effective_on": "2017-01-23",
+          "raw": {
+            "allotNum": 0.0,
+            "allotPrice": 0.0,
+            "dr": 1.017575,
+            "gugai": 0.0,
+            "interest": 0.055,
+            "stockBonus": 0.0,
+            "stockGift": 0.0,
+            "time": 1485100800000.0
+          }
+        },
+        {
+          "availability_policy": "EFFECTIVE_SESSION_OPEN_RESEARCH_ASSUMPTION",
+          "effective_on": "2018-01-23",
+          "raw": {
+            "allotNum": 0.0,
+            "allotPrice": 0.0,
+            "dr": 1.011414,
+            "gugai": 0.0,
+            "interest": 0.046,
+            "stockBonus": 0.0,
+            "stockGift": 0.0,
+            "time": 1516636800000.0
+          }
+        },
+        {
+          "availability_policy": "EFFECTIVE_SESSION_OPEN_RESEARCH_ASSUMPTION",
+          "effective_on": "2019-01-16",
+          "raw": {
+            "allotNum": 0.0,
+            "allotPrice": 0.0,
+            "dr": 1.019666,
+            "gugai": 0.0,
+            "interest": 0.059,
+            "stockBonus": 0.0,
+            "stockGift": 0.0,
+            "time": 1547568000000.0
+          }
+        },
+        {
+          "availability_policy": "EFFECTIVE_SESSION_OPEN_RESEARCH_ASSUMPTION",
+          "effective_on": "2019-12-11",
+          "raw": {
+            "allotNum": 0.0,
+            "allotPrice": 0.0,
+            "dr": 1.015064,
+            "gugai": 0.0,
+            "interest": 0.062,
+            "stockBonus": 0.0,
+            "stockGift": 0.0,
+            "time": 1575993600000.0
+          }
+        },
+        {
+          "availability_policy": "EFFECTIVE_SESSION_OPEN_RESEARCH_ASSUMPTION",
+          "effective_on": "2021-01-18",
+          "raw": {
+            "allotNum": 0.0,
+            "allotPrice": 0.0,
+            "dr": 1.0147789999999999,
+            "gugai": 0.0,
+            "interest": 0.072,
+            "stockBonus": 0.0,
+            "stockGift": 0.0,
+            "time": 1610899200000.0
+          }
+        },
+        {
+          "availability_policy": "EFFECTIVE_SESSION_OPEN_RESEARCH_ASSUMPTION",
+          "effective_on": "2022-01-19",
+          "raw": {
+            "allotNum": 0.0,
+            "allotPrice": 0.0,
+            "dr": 1.015821,
+            "gugai": 0.0,
+            "interest": 0.075,
+            "stockBonus": 0.0,
+            "stockGift": 0.0,
+            "time": 1642521600000.0
+          }
+        },
+        {
+          "availability_policy": "EFFECTIVE_SESSION_OPEN_RESEARCH_ASSUMPTION",
+          "effective_on": "2023-01-16",
+          "raw": {
+            "allotNum": 0.0,
+            "allotPrice": 0.0,
+            "dr": 1.017571,
+            "gugai": 0.0,
+            "interest": 0.064,
+            "stockBonus": 0.0,
+            "stockGift": 0.0,
+            "time": 1673798400000.0
+          }
+        },
+        {
+          "availability_policy": "EFFECTIVE_SESSION_OPEN_RESEARCH_ASSUMPTION",
+          "effective_on": "2024-01-18",
+          "raw": {
+            "allotNum": 0.0,
+            "allotPrice": 0.0,
+            "dr": 1.020116,
+            "gugai": 0.0,
+            "interest": 0.069,
+            "stockBonus": 0.0,
+            "stockGift": 0.0,
+            "time": 1705507200000.0
+          }
+        },
+        {
+          "availability_policy": "EFFECTIVE_SESSION_OPEN_RESEARCH_ASSUMPTION",
+          "effective_on": "2025-06-18",
+          "raw": {
+            "allotNum": 0.0,
+            "allotPrice": 0.0,
+            "dr": 1.0247249999999999,
+            "gugai": 0.0,
+            "interest": 0.088,
+            "stockBonus": 0.0,
+            "stockGift": 0.0,
+            "time": 1750176000000.0
+          }
+        },
+        {
+          "availability_policy": "EFFECTIVE_SESSION_OPEN_RESEARCH_ASSUMPTION",
+          "effective_on": "2026-01-19",
+          "raw": {
+            "allotNum": 0.0,
+            "allotPrice": 0.0,
+            "dr": 1.026565,
+            "gugai": 0.0,
+            "interest": 0.123,
+            "stockBonus": 0.0,
+            "stockGift": 0.0,
+            "time": 1768752000000.0
+          }
+        }
+      ],
+      "events_sha256": "sha256:4072a683d1d37ba42412d9958c4d7afd191df7c9ee3af1ab950edb4623f06424",
+      "first_effective_on": "2012-12-18",
+      "instrument": {
+        "ExchangeID": "SH",
+        "ExpireDate": "99999999",
+        "InstrumentID": "510300",
+        "InstrumentName": "沪深300ETF华泰柏瑞",
+        "OpenDate": "20120528",
+        "ProductID": "",
+        "ProductName": ""
+      },
+      "last_effective_on": "2026-01-19",
+      "provider_columns": [
+        "time",
+        "interest",
+        "stockBonus",
+        "stockGift",
+        "allotNum",
+        "allotPrice",
+        "gugai",
+        "dr"
+      ],
+      "status": "EFFECTIVE_DATED_EVENTS_AVAILABLE"
+    },
+    {
+      "causal_application": "ALLOWED_FROM_EFFECTIVE_SESSION_ONLY_RESEARCH_NO_FINAL_FORWARD_SERIES",
+      "code": "510310.SH",
+      "event_count": 7,
+      "events": [
+        {
+          "availability_policy": "EFFECTIVE_SESSION_OPEN_RESEARCH_ASSUMPTION",
+          "effective_on": "2024-09-23",
+          "raw": {
+            "allotNum": 0.0,
+            "allotPrice": 0.0,
+            "dr": 0.499687,
+            "gugai": 0.0,
+            "interest": 0.0,
+            "stockBonus": -0.500224,
+            "stockGift": 0.0,
+            "time": 1727020800000.0
+          }
+        },
+        {
+          "availability_policy": "EFFECTIVE_SESSION_OPEN_RESEARCH_ASSUMPTION",
+          "effective_on": "2024-10-21",
+          "raw": {
+            "allotNum": 0.0,
+            "allotPrice": 0.0,
+            "dr": 1.01975,
+            "gugai": 0.0,
+            "interest": 0.0804,
+            "stockBonus": 0.0,
+            "stockGift": 0.0,
+            "time": 1729440000000.0
+          }
+        },
+        {
+          "availability_policy": "EFFECTIVE_SESSION_OPEN_RESEARCH_ASSUMPTION",
+          "effective_on": "2025-04-30",
+          "raw": {
+            "allotNum": 0.0,
+            "allotPrice": 0.0,
+            "dr": 1.004324,
+            "gugai": 0.0,
+            "interest": 0.019,
+            "stockBonus": 0.0,
+            "stockGift": 0.0,
+            "time": 1745942400000.0
+          }
+        },
+        {
+          "availability_policy": "EFFECTIVE_SESSION_OPEN_RESEARCH_ASSUMPTION",
+          "effective_on": "2025-08-01",
+          "raw": {
+            "allotNum": 0.0,
+            "allotPrice": 0.0,
+            "dr": 1.00975,
+            "gugai": 0.0,
+            "interest": 0.041,
+            "stockBonus": 0.0,
+            "stockGift": 0.0,
+            "time": 1753977600000.0
+          }
+        },
+        {
+          "availability_policy": "EFFECTIVE_SESSION_OPEN_RESEARCH_ASSUMPTION",
+          "effective_on": "2025-09-19",
+          "raw": {
+            "allotNum": 0.0,
+            "allotPrice": 0.0,
+            "dr": 1.0041,
+            "gugai": 0.0,
+            "interest": 0.022,
+            "stockBonus": 0.0,
+            "stockGift": 0.0,
+            "time": 1758211200000.0
+          }
+        },
+        {
+          "availability_policy": "EFFECTIVE_SESSION_OPEN_RESEARCH_ASSUMPTION",
+          "effective_on": "2025-11-21",
+          "raw": {
+            "allotNum": 0.0,
+            "allotPrice": 0.0,
+            "dr": 1.004121,
+            "gugai": 0.0,
+            "interest": 0.024,
+            "stockBonus": 0.0,
+            "stockGift": 0.0,
+            "time": 1763654400000.0
+          }
+        },
+        {
+          "availability_policy": "EFFECTIVE_SESSION_OPEN_RESEARCH_ASSUMPTION",
+          "effective_on": "2026-01-20",
+          "raw": {
+            "allotNum": 0.0,
+            "allotPrice": 0.0,
+            "dr": 1.016812,
+            "gugai": 0.0,
+            "interest": 0.075,
+            "stockBonus": 0.0,
+            "stockGift": 0.0,
+            "time": 1768838400000.0
+          }
+        }
+      ],
+      "events_sha256": "sha256:aea1c32c7e45bd9cd317321dc292036ef124ad89a180e5cbe16c435bb99fb437",
+      "first_effective_on": "2024-09-23",
+      "instrument": {
+        "ExchangeID": "SH",
+        "ExpireDate": "99999999",
+        "InstrumentID": "510310",
+        "InstrumentName": "沪深300ETF易方达",
+        "OpenDate": "20130325",
+        "ProductID": "",
+        "ProductName": ""
+      },
+      "last_effective_on": "2026-01-20",
+      "provider_columns": [
+        "time",
+        "interest",
+        "stockBonus",
+        "stockGift",
+        "allotNum",
+        "allotPrice",
+        "gugai",
+        "dr"
+      ],
+      "status": "EFFECTIVE_DATED_EVENTS_AVAILABLE"
+    },
+    {
+      "causal_application": "ALLOWED_FROM_EFFECTIVE_SESSION_ONLY_RESEARCH_NO_FINAL_FORWARD_SERIES",
+      "code": "510330.SH",
+      "event_count": 12,
+      "events": [
+        {
+          "availability_policy": "EFFECTIVE_SESSION_OPEN_RESEARCH_ASSUMPTION",
+          "effective_on": "2013-09-06",
+          "raw": {
+            "allotNum": 0.0,
+            "allotPrice": 0.0,
+            "dr": 1.008119,
+            "gugai": 0.0,
+            "interest": 0.02,
+            "stockBonus": 0.0,
+            "stockGift": 0.0,
+            "time": 1378396800000.0
+          }
+        },
+        {
+          "availability_policy": "EFFECTIVE_SESSION_OPEN_RESEARCH_ASSUMPTION",
+          "effective_on": "2014-02-14",
+          "raw": {
+            "allotNum": 0.0,
+            "allotPrice": 0.0,
+            "dr": 1.008968,
+            "gugai": 0.0,
+            "interest": 0.02,
+            "stockBonus": 0.0,
+            "stockGift": 0.0,
+            "time": 1392307200000.0
+          }
+        },
+        {
+          "availability_policy": "EFFECTIVE_SESSION_OPEN_RESEARCH_ASSUMPTION",
+          "effective_on": "2014-07-11",
+          "raw": {
+            "allotNum": 0.0,
+            "allotPrice": 0.0,
+            "dr": 1.009216,
+            "gugai": 0.0,
+            "interest": 0.02,
+            "stockBonus": 0.0,
+            "stockGift": 0.0,
+            "time": 1405008000000.0
+          }
+        },
+        {
+          "availability_policy": "EFFECTIVE_SESSION_OPEN_RESEARCH_ASSUMPTION",
+          "effective_on": "2014-11-28",
+          "raw": {
+            "allotNum": 0.0,
+            "allotPrice": 0.0,
+            "dr": 1.0064629999999999,
+            "gugai": 0.0,
+            "interest": 0.02,
+            "stockBonus": 0.0,
+            "stockGift": 0.0,
+            "time": 1417104000000.0
+          }
+        },
+        {
+          "availability_policy": "EFFECTIVE_SESSION_OPEN_RESEARCH_ASSUMPTION",
+          "effective_on": "2018-11-08",
+          "raw": {
+            "allotNum": 0.0,
+            "allotPrice": 0.0,
+            "dr": 1.048648,
+            "gugai": 0.0,
+            "interest": 0.1633,
+            "stockBonus": 0.0,
+            "stockGift": 0.0,
+            "time": 1541606400000.0
+          }
+        },
+        {
+          "availability_policy": "EFFECTIVE_SESSION_OPEN_RESEARCH_ASSUMPTION",
+          "effective_on": "2018-12-11",
+          "raw": {
+            "allotNum": 0.0,
+            "allotPrice": 0.0,
+            "dr": 1.049371,
+            "gugai": 0.0,
+            "interest": 0.16,
+            "stockBonus": 0.0,
+            "stockGift": 0.0,
+            "time": 1544457600000.0
+          }
+        },
+        {
+          "availability_policy": "EFFECTIVE_SESSION_OPEN_RESEARCH_ASSUMPTION",
+          "effective_on": "2020-01-14",
+          "raw": {
+            "allotNum": 0.0,
+            "allotPrice": 0.0,
+            "dr": 1.017073,
+            "gugai": 0.0,
+            "interest": 0.071,
+            "stockBonus": 0.0,
+            "stockGift": 0.0,
+            "time": 1578931200000.0
+          }
+        },
+        {
+          "availability_policy": "EFFECTIVE_SESSION_OPEN_RESEARCH_ASSUMPTION",
+          "effective_on": "2021-01-25",
+          "raw": {
+            "allotNum": 0.0,
+            "allotPrice": 0.0,
+            "dr": 1.017463,
+            "gugai": 0.0,
+            "interest": 0.096,
+            "stockBonus": 0.0,
+            "stockGift": 0.0,
+            "time": 1611504000000.0
+          }
+        },
+        {
+          "availability_policy": "EFFECTIVE_SESSION_OPEN_RESEARCH_ASSUMPTION",
+          "effective_on": "2022-01-17",
+          "raw": {
+            "allotNum": 0.0,
+            "allotPrice": 0.0,
+            "dr": 1.01643,
+            "gugai": 0.0,
+            "interest": 0.079,
+            "stockBonus": 0.0,
+            "stockGift": 0.0,
+            "time": 1642348800000.0
+          }
+        },
+        {
+          "availability_policy": "EFFECTIVE_SESSION_OPEN_RESEARCH_ASSUMPTION",
+          "effective_on": "2023-01-16",
+          "raw": {
+            "allotNum": 0.0,
+            "allotPrice": 0.0,
+            "dr": 1.0157209999999999,
+            "gugai": 0.0,
+            "interest": 0.065,
+            "stockBonus": 0.0,
+            "stockGift": 0.0,
+            "time": 1673798400000.0
+          }
+        },
+        {
+          "availability_policy": "EFFECTIVE_SESSION_OPEN_RESEARCH_ASSUMPTION",
+          "effective_on": "2025-01-13",
+          "raw": {
+            "allotNum": 0.0,
+            "allotPrice": 0.0,
+            "dr": 1.016049,
+            "gugai": 0.0,
+            "interest": 0.066,
+            "stockBonus": 0.0,
+            "stockGift": 0.0,
+            "time": 1736697600000.0
+          }
+        },
+        {
+          "availability_policy": "EFFECTIVE_SESSION_OPEN_RESEARCH_ASSUMPTION",
+          "effective_on": "2025-07-14",
+          "raw": {
+            "allotNum": 0.0,
+            "allotPrice": 0.0,
+            "dr": 1.014603,
+            "gugai": 0.0,
+            "interest": 0.06,
+            "stockBonus": 0.0,
+            "stockGift": 0.0,
+            "time": 1752422400000.0
+          }
+        }
+      ],
+      "events_sha256": "sha256:f9a78b282e572d52cb2c0bb14fc66f9f86c46a5fb1bb9e08936ca78b4f0a8f66",
+      "first_effective_on": "2013-09-06",
+      "instrument": {
+        "ExchangeID": "SH",
+        "ExpireDate": "99999999",
+        "InstrumentID": "510330",
+        "InstrumentName": "沪深300ETF华夏",
+        "OpenDate": "20130116",
+        "ProductID": "",
+        "ProductName": ""
+      },
+      "last_effective_on": "2025-07-14",
+      "provider_columns": [
+        "time",
+        "interest",
+        "stockBonus",
+        "stockGift",
+        "allotNum",
+        "allotPrice",
+        "gugai",
+        "dr"
+      ],
+      "status": "EFFECTIVE_DATED_EVENTS_AVAILABLE"
+    },
+    {
+      "causal_application": "NOT_ALLOWED_UNTIL_CROSS_SOURCE_CERTIFIED",
+      "code": "510360.SH",
+      "events": [],
+      "events_sha256": "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "instrument": {
+        "ExchangeID": "SH",
+        "ExpireDate": "99999999",
+        "InstrumentID": "510360",
+        "InstrumentName": "沪深300ETF广发",
+        "OpenDate": "20150909",
+        "ProductID": "",
+        "ProductName": ""
+      },
+      "provider_columns": [],
+      "status": "NO_ROWS_UNKNOWN_NOT_CERTIFIED_NO_EVENT"
+    },
+    {
+      "causal_application": "NOT_ALLOWED_UNTIL_CROSS_SOURCE_CERTIFIED",
+      "code": "510380.SH",
+      "events": [],
+      "events_sha256": "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "instrument": {
+        "ExchangeID": "SH",
+        "ExpireDate": "99999999",
+        "InstrumentID": "510380",
+        "InstrumentName": "沪深300ETF国寿",
+        "OpenDate": "20180207",
+        "ProductID": "",
+        "ProductName": ""
+      },
+      "provider_columns": [],
+      "status": "NO_ROWS_UNKNOWN_NOT_CERTIFIED_NO_EVENT"
+    },
+    {
+      "causal_application": "ALLOWED_FROM_EFFECTIVE_SESSION_ONLY_RESEARCH_NO_FINAL_FORWARD_SERIES",
+      "code": "510390.SH",
+      "event_count": 2,
+      "events": [
+        {
+          "availability_policy": "EFFECTIVE_SESSION_OPEN_RESEARCH_ASSUMPTION",
+          "effective_on": "2020-12-21",
+          "raw": {
+            "allotNum": 0.0,
+            "allotPrice": 0.0,
+            "dr": 1.051923,
+            "gugai": 0.0,
+            "interest": 0.273,
+            "stockBonus": 0.0,
+            "stockGift": 0.0,
+            "time": 1608480000000.0
+          }
+        },
+        {
+          "availability_policy": "EFFECTIVE_SESSION_OPEN_RESEARCH_ASSUMPTION",
+          "effective_on": "2021-11-26",
+          "raw": {
+            "allotNum": 0.0,
+            "allotPrice": 0.0,
+            "dr": 1.0517239999999999,
+            "gugai": 0.0,
+            "interest": 0.255,
+            "stockBonus": 0.0,
+            "stockGift": 0.0,
+            "time": 1637856000000.0
+          }
+        }
+      ],
+      "events_sha256": "sha256:6e1f354fa0428ae0ffe5b6858cfa7c810d6820bb12b4132f18d6d840f2d8e3f9",
+      "first_effective_on": "2020-12-21",
+      "instrument": {
+        "ExchangeID": "SH",
+        "ExpireDate": "99999999",
+        "InstrumentID": "510390",
+        "InstrumentName": "沪深300ETF平安",
+        "OpenDate": "20180126",
+        "ProductID": "",
+        "ProductName": ""
+      },
+      "last_effective_on": "2021-11-26",
+      "provider_columns": [
+        "time",
+        "interest",
+        "stockBonus",
+        "stockGift",
+        "allotNum",
+        "allotPrice",
+        "gugai",
+        "dr"
+      ],
+      "status": "EFFECTIVE_DATED_EVENTS_AVAILABLE"
+    }
+  ],
+  "live_status": "LIVE_DISABLED",
+  "policy": "KEEP_RAW_EVENTS_AND_EFFECTIVE_DATES; NEVER_BUILD_A_FINAL_FORWARD_ADJUSTED_SERIES; EMPTY_PROVIDER_ROWS_REMAIN_UNKNOWN",
+  "price_adjustment_output": "NONE",
+  "raw_provider_fields": [
+    "time",
+    "interest",
+    "stockBonus",
+    "stockGift",
+    "allotNum",
+    "allotPrice",
+    "gugai",
+    "dr"
+  ],
+  "reference_510300": {
+    "crosscheck": {
+      "cash_mismatches": [],
+      "common_events": 14,
+      "qmt_events": 14,
+      "qmt_only_dates": [],
+      "reference_events": 14,
+      "reference_only_dates": [],
+      "status": "EXACT_EFFECTIVE_DATE_AND_CASH_MATCH"
+    },
+    "events": [
+      {
+        "cash_per_share": "0.033000",
+        "cumulative_cash_per_share": "0.033000",
+        "effective_on": "2012-12-18",
+        "source": "AKShare:fund_etf_dividend_sina:sh510300"
+      },
+      {
+        "cash_per_share": "0.048000",
+        "cumulative_cash_per_share": "0.081000",
+        "effective_on": "2014-01-21",
+        "source": "AKShare:fund_etf_dividend_sina:sh510300"
+      },
+      {
+        "cash_per_share": "0.035000",
+        "cumulative_cash_per_share": "0.116000",
+        "effective_on": "2015-01-20",
+        "source": "AKShare:fund_etf_dividend_sina:sh510300"
+      },
+      {
+        "cash_per_share": "0.051000",
+        "cumulative_cash_per_share": "0.167000",
+        "effective_on": "2016-01-20",
+        "source": "AKShare:fund_etf_dividend_sina:sh510300"
+      },
+      {
+        "cash_per_share": "0.055000",
+        "cumulative_cash_per_share": "0.222000",
+        "effective_on": "2017-01-23",
+        "source": "AKShare:fund_etf_dividend_sina:sh510300"
+      },
+      {
+        "cash_per_share": "0.046000",
+        "cumulative_cash_per_share": "0.268000",
+        "effective_on": "2018-01-23",
+        "source": "AKShare:fund_etf_dividend_sina:sh510300"
+      },
+      {
+        "cash_per_share": "0.059000",
+        "cumulative_cash_per_share": "0.327000",
+        "effective_on": "2019-01-16",
+        "source": "AKShare:fund_etf_dividend_sina:sh510300"
+      },
+      {
+        "cash_per_share": "0.062000",
+        "cumulative_cash_per_share": "0.389000",
+        "effective_on": "2019-12-11",
+        "source": "AKShare:fund_etf_dividend_sina:sh510300"
+      },
+      {
+        "cash_per_share": "0.072000",
+        "cumulative_cash_per_share": "0.461000",
+        "effective_on": "2021-01-18",
+        "source": "AKShare:fund_etf_dividend_sina:sh510300"
+      },
+      {
+        "cash_per_share": "0.075000",
+        "cumulative_cash_per_share": "0.536000",
+        "effective_on": "2022-01-19",
+        "source": "AKShare:fund_etf_dividend_sina:sh510300"
+      },
+      {
+        "cash_per_share": "0.064000",
+        "cumulative_cash_per_share": "0.600000",
+        "effective_on": "2023-01-16",
+        "source": "AKShare:fund_etf_dividend_sina:sh510300"
+      },
+      {
+        "cash_per_share": "0.069000",
+        "cumulative_cash_per_share": "0.669000",
+        "effective_on": "2024-01-18",
+        "source": "AKShare:fund_etf_dividend_sina:sh510300"
+      },
+      {
+        "cash_per_share": "0.088000",
+        "cumulative_cash_per_share": "0.757000",
+        "effective_on": "2025-06-18",
+        "source": "AKShare:fund_etf_dividend_sina:sh510300"
+      },
+      {
+        "cash_per_share": "0.123000",
+        "cumulative_cash_per_share": "0.880000",
+        "effective_on": "2026-01-19",
+        "source": "AKShare:fund_etf_dividend_sina:sh510300"
+      }
+    ],
+    "events_sha256": "sha256:1894a726a3ff477f87574a3c8f2f6b1589e28cfdd533685f2f960db431e31507",
+    "source": "existing read-only etf_distributions ledger"
+  },
+  "schema": "chanlun-qmt-etf-corporate-actions/v1",
+  "source": "QMT.xtdata.get_divid_factors",
+  "source_store_sha256": "sha256:c07d6e93972b7db9c88c3126fe4d7522551e50e2cea8fa3eb9d83d6686c6175b"
+}

@@ -6,7 +6,7 @@ from dataclasses import replace
 import pytest
 
 from chanlun.decision_support.certified_lesson_package import (
-    SEMANTIC_AUDIT_VERSION,
+    SEMANTIC_AUDIT_CONTRACT_ID,
     SemanticAuditPolicy,
     build_semantic_certification,
     lesson_boundary_sha256,
@@ -148,7 +148,7 @@ def test_semantic_gate_blocks_reader_leak_ambiguous_reply_and_unreviewed_unknown
         page_rotation=0,
         source_role=SourceRole.UNKNOWN_IMAGE,
         reason_codes=("unreviewed",),
-        classifier_version="test/1",
+        classifier_id="test-classifier",
     )
     inventory = LessonImageInventory(
         assets=(unknown_asset,),
@@ -166,7 +166,7 @@ def test_semantic_gate_blocks_reader_leak_ambiguous_reply_and_unreviewed_unknown
         policy=_policy(extraction, inventory),
     )
 
-    assert result.payload["semantic_audit_version"] == SEMANTIC_AUDIT_VERSION
+    assert result.payload["semantic_audit_contract_id"] == SEMANTIC_AUDIT_CONTRACT_ID
     assert result.payload["semantic_gate_passed"] is False
     assert result.payload["role_audit"]["reader_authoritative_leak_count"] == 1
     assert result.payload["role_audit"]["ambiguous_reply_record_count"] == 1
@@ -242,8 +242,8 @@ def test_semantic_classification_hash_binds_image_classification_id() -> None:
         "source_role": SourceRole.UNKNOWN_IMAGE,
         "reason_codes": ("unreviewed",),
     }
-    first = ImageOccurrence.create(**values, classifier_version="test/1")
-    second = ImageOccurrence.create(**values, classifier_version="test/2")
+    first = ImageOccurrence.create(**values, classifier_id="test-classifier")
+    second = ImageOccurrence.create(**values, classifier_id="changed-classifier")
     assert first.occurrence_id == second.occurrence_id
     assert first.classification_id != second.classification_id
 

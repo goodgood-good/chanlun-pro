@@ -4,7 +4,7 @@ import unicodedata
 from dataclasses import dataclass
 from typing import Iterable, Sequence
 
-from .corpus_types import EvidenceUnit, ImageEvidence, SourceTier
+from .corpus_types import EvidenceUnit, SourceTier
 
 
 SOURCE_WEIGHT: dict[SourceTier, float] = {
@@ -158,19 +158,13 @@ class _IndexEntry:
 
 
 class CorpusIndex:
-    def __init__(
-        self,
-        entries: tuple[_IndexEntry, ...],
-        images: tuple[ImageEvidence, ...] = (),
-    ) -> None:
+    def __init__(self, entries: tuple[_IndexEntry, ...]) -> None:
         self._entries = entries
-        self._images = {image.image_id: image for image in images}
 
     @classmethod
     def build(
         cls,
         units: Sequence[EvidenceUnit],
-        images: Sequence[ImageEvidence] = (),
     ) -> CorpusIndex:
         seen: set[str] = set()
         entries: list[_IndexEntry] = []
@@ -209,33 +203,10 @@ class CorpusIndex:
                 )
             )
         entries.sort(key=lambda entry: entry.unit.evidence_id)
-        seen_images: set[str] = set()
-        indexed_images: list[ImageEvidence] = []
-        for image in images:
-            if not isinstance(image, ImageEvidence):
-                raise TypeError("images must contain ImageEvidence values")
-            if image.source_tier is SourceTier.MODEL_INFERENCE:
-                continue
-            if image.image_id in seen:
-                raise ValueError(
-                    f"duplicate evidence identifier: {image.image_id}"
-                )
-            if image.image_id in seen_images:
-                raise ValueError(f"duplicate image_id: {image.image_id}")
-            seen_images.add(image.image_id)
-            indexed_images.append(image)
-        indexed_images.sort(key=lambda image: image.image_id)
-        return cls(tuple(entries), tuple(indexed_images))
+        return cls(tuple(entries))
 
     def __len__(self) -> int:
         return len(self._entries)
-
-    def images_for(self, image_ids: Iterable[str]) -> tuple[ImageEvidence, ...]:
-        return tuple(
-            self._images[image_id]
-            for image_id in dict.fromkeys(image_ids)
-            if image_id in self._images
-        )
 
     def units_for(self, evidence_ids: Iterable[str]) -> tuple[EvidenceUnit, ...]:
         units = {entry.unit.evidence_id: entry.unit for entry in self._entries}

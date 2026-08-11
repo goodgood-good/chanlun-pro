@@ -32,7 +32,7 @@ from tests.core.strict_structure.helpers import (
 
 CN = ZoneInfo("Asia/Shanghai")
 DEFAULT_CLOSED_AT = datetime(2026, 7, 20, 15, 0, tzinfo=CN)
-PRICE_BASIS = "test-raw-v1"
+PRICE_BASIS = "test-raw"
 
 
 def strict_point(
@@ -49,23 +49,19 @@ def strict_point(
     anchor_at = available_at - timedelta(minutes=10)
     confirmed_at = available_at - timedelta(minutes=5)
     divergence = raw.divergence
-    source_kind = (
-        SourceKind.SEGMENT
-        if structural_level == 0
-        else SourceKind.TREND_TYPE
-    )
+    source_kind = SourceKind.SEGMENT if structural_level == 0 else SourceKind.TREND_TYPE
     if divergence is not None:
         divergence = replace(
             divergence,
             divergence_id=stable_structure_id(
-                "chanlun-strict-divergence/v3",
+                "chanlun-strict-divergence",
                 PRICE_BASIS,
                 structural_level,
                 source_kind.value,
                 divergence.kind,
                 divergence.direction,
-                divergence.compare_unit_id,
-                divergence.signal_unit_id,
+                divergence.compare_leg_unit_ids,
+                divergence.signal_leg_unit_ids,
             ),
             structural_level=structural_level,
             source_kind=source_kind,
@@ -91,15 +87,11 @@ def strict_point(
         structural_level=structural_level,
         source_kind=source_kind,
         anchor_at=anchor_at,
-        confirmed_at=(
-            confirmed_at if status is StrictPointStatus.CONFIRMED else None
-        ),
+        confirmed_at=(confirmed_at if status is StrictPointStatus.CONFIRMED else None),
         available_at=available_at,
         divergence=divergence,
         missing_conditions=(
-            ()
-            if status is StrictPointStatus.CONFIRMED
-            else ("terminal_unit_locked",)
+            () if status is StrictPointStatus.CONFIRMED else ("terminal_unit_locked",)
         ),
     )
 
@@ -119,9 +111,7 @@ def strict_evidence_result(
             normalized_confirmed.append(point)
             continue
         center_factory = (
-            completed_up_center
-            if point.point_type == "3buy"
-            else completed_down_center
+            completed_up_center if point.point_type == "3buy" else completed_down_center
         )
         center = center_factory(
             ordinal * 10,
@@ -192,7 +182,7 @@ def strict_evidence_result(
         structure_for(*completed_centers)
         if completed_centers
         else StrictStructureResult(
-            schema_version="chanlun-structure/v3",
+            schema="chanlun-structure",
             price_basis_revision=PRICE_BASIS,
             levels=(),
         )
@@ -210,7 +200,7 @@ def strict_evidence_result(
                 replay_from=0,
             )
             structure = StrictStructureResult(
-                schema_version="chanlun-structure/v3",
+                schema="chanlun-structure",
                 price_basis_revision=PRICE_BASIS,
                 levels=(
                     StrictLevelResult(
@@ -278,7 +268,7 @@ def strict_evidence_result(
         symbol=code,
         source_frequency=source_frequency,
         price_basis_revision=PRICE_BASIS,
-        strict_config_revision="strict-config-v1",
+        strict_config_revision="strict-config",
         structure=structure,
         confirmed_points=confirmed_points,
         divergences=divergences,
@@ -289,7 +279,7 @@ def strict_evidence_result(
         source_closed_at=source_closed_at,
         price_basis_revision=PRICE_BASIS,
         structure_price_quantum=Decimal("0.01"),
-        strict_config_revision="strict-config-v1",
+        strict_config_revision="strict-config",
         structure_revision=revision,
         structure=structure,
         stroke_center_observations=observations,
@@ -313,14 +303,3 @@ class StrictOnlyCL:
         if self.evidence_calls > 1:
             raise AssertionError("strict evidence must be read exactly once")
         return self.evidence
-
-    def _legacy(self, *_args, **_kwargs):
-        raise AssertionError("legacy structure method must not be read")
-
-    get_branch_bspoints = _legacy
-    get_recursive_branch_levels_for_tower = _legacy
-    get_xds = _legacy
-    get_bis = _legacy
-    get_strict_points = _legacy
-    get_strict_approaching_points = _legacy
-    get_strict_structure_levels = _legacy

@@ -43,7 +43,7 @@ def structure_for_units(units):
         completed_trends=assembly.completed_trends,
     )
     return StrictStructureResult(
-        schema_version="chanlun-structure/v3",
+        schema="chanlun-structure",
         price_basis_revision=TEST_PRICE_BASIS,
         levels=(level,),
     )

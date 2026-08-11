@@ -104,9 +104,6 @@ EXCHANGE_US = "usmart"  # 美股市场
 EXCHANGE_FX = "tdx_fx"  # 外汇市场
 
 
-# 通达信目录（例如 C:/new_tdx），用于获取行业与概念信息，留空则使用 exchange/stocks_bkgn.json 进行获取
-TDX_PATH = ''
-
 # 掘金设置 https://www.myquant.cn/docs2/faq/#%E5%A6%82%E4%BD%95%E4%BD%BF%E7%94%A8-linux-%E7%89%88%E6%9C%AC%E7%9A%84-python-sdk
 GM_SERVER_ADDR = '127.0.0.1:7001'
 GM_TOKEN = '******'
@@ -144,22 +141,9 @@ TQ_SP_NAME = 'simnow'
 TQ_SP_ACCOUNT = ''
 TQ_SP_PWD = ''
 
-# CTP期货配置
-CTP_BROKER_ID = ""      # 期货公司 broker id
-CTP_USER_ID = ""        # 账号
-CTP_PASSWORD = ""       # 密码
-CTP_APP_ID = "client_chanlun-pro_1.0"         # AppID, 自研或开源量化软件通常以client开头
-CTP_AUTH_CODE = ""      # 交易所提供的授权码
-CTP_MD_FRONT = ""       # 行情服务器地址
-CTP_TD_FRONT = ""       # 交易服务器地址
-
 # 币安交易所配置
 BINANCE_APIKEY = ''
 BINANCE_SECRET = ''
-
-# ZB交易所配置
-ZB_APIKEY = ''
-ZB_SECRET = ''
 
 # 美股 Ploygon API 配置（申请网址 https://polygon.io/）
 POLYGON_APIKEY = ''
@@ -171,21 +155,7 @@ ALPACA_SECRET = ''
 # 盈透证券 TWS 设置
 IB_HOST = '127.0.0.1'
 IB_PORT = 7497
-IB_CLIENT_ID = 1
 IB_ACCOUNT = ''
-
-# AI 分析配置  （硅基流动和 Openrouteai 二选一，都配置优先使用 Openrouteai）
-# 使用硅基流动的API调用模型，并返回数据
-# 邀请链接：https://cloud.siliconflow.cn/i/HwLeeOjK   （注册送 14 元）
-AI_TOKEN = ""
-AI_MODEL = "Pro/deepseek-ai/DeepSeek-R1"
-# AI_MODEL = "Pro/deepseek-ai/DeepSeek-V3"
-
-# OpenRouterAI 的api key
-# API KEY 获取地址： https://openrouter.ai/settings/keys
-# 模型获取地址：https://openrouter.ai/models
-OPENROUTER_AI_KEYS = ""
-OPENROUTER_AI_MODEL = "google/gemini-2.5-pro-preview"
 
 # 飞书消息配置 (项目中新的消息推送使用飞书，user_id 是唯一的，不同的市场可以配置不同的机器人，没有设置则使用 default 的机器人)
 # 配置获取方法，在 web 页面的系统设置中有教程
@@ -237,81 +207,6 @@ FEISHU_KEYS = {
 #        "currency"(数字货币合约), "currency_spot"(数字货币现货)
 # 不配置该项时默认仅预加载 ["a", "hk", "us"], 避免境外/网络受限的市场拖慢启动 (如通达信期货 30s 超时、币安 451 限制)。
 PRELOAD_MARKETS = ["a", "hk", "us"]
-
-# 缠论原文驱动的决策辅助。默认关闭；只允许研究、模拟盘和人工外部下单记录。
-# `auto_order_enabled` 是硬安全边界，任何运行时都必须保持 False。
-DECISION_SUPPORT = {
-    "enabled": False,
-    "markets": ["a"],
-    "scan_interval_seconds": 30,
-    "review_workers": 1,
-    "review_queue_limit": 20,
-    "max_llm_reviews_per_day": 20,
-    "review_mode": "offline_abstain",
-    "paper_enabled": True,
-    "auto_order_enabled": False,
-}
-
-DECISION_SUPPORT_A_SELECTION = {
-    "bt_data": "D:/chanlun_pro/bt_data_all_a",
-    "fund_data": "D:/chanlun_pro/bt_data_fund_all_a",
-    "scan_limit": 0,
-    "max_codes": 90,
-    "lookback_bars": 48,
-    "buy_classes": [3, 2, 1],
-    "require_three_systems": True,
-    "fundamental_roe_ann_min": 8.0,
-    "require_big_not_down": True,
-    "require_mid_not_down": True,
-    "min_bars": 100,
-}
-RECURSIVE_MONITOR_CONFIG = {"enabled": False}
-
-# 仅在 DECISION_SUPPORT.enabled=True 时读取。字段必须完整，不能加入 broker、
-# order 或任何自动下单对象；五个可写 SQLite 路径只能是相对文件名，并解析到
-# DATA_PATH/decision_support 受信任状态目录。engine-build 指纹绑定除本地 config.py
-# 外的完整 src/chanlun Python 源码清单，其余指纹分别绑定 scanner/structure/
-# paper-account/bar-provider 源文件。相关实现变化时，必须更新对应指纹并显式提升
-# paper_strategy_epoch，旧 epoch 不会被静默复用。
-DECISION_SUPPORT_PAPER_BOOTSTRAP = {
-    "paper_initial_cash": "1000000",
-    "paper_fee_schedule": {
-        "commission_rate": "0.0003",
-        "minimum_commission": "5",
-        "sell_stamp_duty_rate": "0.0005",
-        "transfer_fee_rate": "0.00001",
-        "regulatory_fee_rate": "0.0000541",
-        "slippage_rate": "0.001",
-        "price_quantum": "0.01",
-        "money_quantum": "0.01",
-    },
-    "paper_calendar_provider": (
-        "src/chanlun/decision_support/trading_system/data/"
-        "a_share_trading_calendar_2026.json"
-    ),
-    "paper_ledger_path": "paper_ledger.sqlite3",
-    "trusted_bar_store_path": "trusted_bars.sqlite3",
-    "paper_risk_state_path": "paper_risk.sqlite3",
-    "exit_evaluation_store_path": "exit_evaluations.sqlite3",
-    "paper_strategy_registry_path": "strategy_runs.sqlite3",
-    "paper_strategy_epoch": 7,
-    "paper_strategy_engine_build_fingerprint": (
-        "sha256:338b504f3f7e8e818a952a1cd197ded2c8fe7f916ae4898d8f617777822197f9"
-    ),
-    "paper_scanner_algorithm_fingerprint": (
-        "sha256:42d2af3e42232827edb8f984ea9611f41e548bd1ee84b3b1eb4caaf08bb8c613"
-    ),
-    "paper_structure_algorithm_fingerprint": (
-        "sha256:e466652dc5656078581e2953bcf56fba8d09c50404d17b12331319eed3a26afb"
-    ),
-    "paper_account_algorithm_fingerprint": (
-        "sha256:a8f72d3e4d59186de0572b724ff3886a628990b68e0cf4badc6c02a82fe0893e"
-    ),
-    "paper_bar_provider_fingerprint": (
-        "sha256:53cb639d3ed5efd5ce1849e5d8930d7dd8046d7c68ec89a4c443e06be02a728b"
-    ),
-}
-
 
 def get_data_path():
     # 获取项目数据的目录

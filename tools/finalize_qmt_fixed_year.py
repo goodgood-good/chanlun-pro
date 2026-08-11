@@ -46,12 +46,7 @@ from chanlun.exchange.qmt_screening_sector_source import (
     QmtSectorCompositeSource,
     build_qmt_gics3_sector_catalog,
 )
-from tools.backtest_chanlun_trading_system import (
-    _algorithm_hashes,
-    _unavailable_ablations,
-    _unavailable_benchmarks,
-    write_report_atomic,
-)
+from tools import qmt_research_contract
 
 
 CN = ZoneInfo("Asia/Shanghai")
@@ -160,7 +155,7 @@ def _write_causality_gate(
 ) -> Path:
     path = directory / "causality_gate.json"
     payload = {
-        "schema": "chanlun-backtest-causality-gate/v1",
+        "schema": "chanlun-backtest-causality-gate",
         "checked_at": datetime.now().astimezone().isoformat(),
         "status": "blocked",
         "pnl_generated": False,
@@ -237,7 +232,7 @@ def _frozen_algorithm(
     frozen = tuple(hashes)
     if _algorithm_revision(frozen) != revision:
         raise ValueError("extract manifest algorithm revision is inconsistent")
-    if _algorithm_hashes() != frozen:
+    if qmt_research_contract.algorithm_hashes() != frozen:
         raise RuntimeError("source code changed after symbol extraction")
     return revision, frozen
 
@@ -577,8 +572,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     report = build_report(
         evidence=evidence,
         result=result,
-        ablations=_unavailable_ablations("fixed_policy_ablation_not_run"),
-        benchmarks=_unavailable_benchmarks(),
+        ablations=qmt_research_contract.unavailable_ablations(
+            "fixed_policy_ablation_not_run"
+        ),
+        benchmarks=qmt_research_contract.unavailable_benchmarks(),
         generated_at=datetime.now().astimezone(),
         algorithm_hashes=algorithm_hashes,
         limitations=limitations,
@@ -626,9 +623,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             ("portfolio_run", _sha256(run_path)),
         ),
     )
-    if _algorithm_hashes() != algorithm_hashes:
+    if qmt_research_contract.algorithm_hashes() != algorithm_hashes:
         raise RuntimeError("source code changed during finalization")
-    write_report_atomic(args.report, report)
+    qmt_research_contract.write_report_atomic(args.report, report)
     print(
         json.dumps(
             {

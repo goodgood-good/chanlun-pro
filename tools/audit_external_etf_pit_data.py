@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Publish the point-in-time ETF data decision for the strict v3 replay."""
+"""Publish the point-in-time ETF data decision for the strict strategy replay."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from tools.chanlun_v3_research_data import (
+from tools.research_data import (
     CN,
     DEFAULT_MARKET_DATABASE,
     DEFAULT_PIT_DATABASE,
@@ -162,7 +162,7 @@ def audit() -> dict[str, object]:
             "evidence": (
                 f"{len(snapshots)} pre-frozen exploratory CSI300 snapshots; "
                 f"{len(first - last)} removals and {len(last - first)} additions; "
-                "they are not strict-V3 entry dates and cannot certify the final "
+                "they are not strict entry dates and cannot certify the final "
                 "selection path"
             ),
         },
@@ -197,10 +197,10 @@ def audit() -> dict[str, object]:
         },
     )
     structural_pass = (
-        recursive.get("decision") == "STRICT_V3_STRUCTURE_FACTS_CERTIFIED"
+        recursive.get("decision") == "STRICT_STRUCTURE_FACTS_CERTIFIED"
     )
     result: dict[str, object] = {
-        "schema": "chanlun-v3-external-data-acceptance/v2",
+        "schema": "chanlun-external-data-acceptance",
         "generated_at": datetime.now(CN),
         "market_database_sha256": sha256_file(DEFAULT_MARKET_DATABASE),
         "external_pit_database_sha256": pit_hash,
@@ -210,18 +210,18 @@ def audit() -> dict[str, object]:
         "basket_snapshot_failures": len(basket_failures),
         "strict_candidate_membership_snapshots_available": False,
         "membership_snapshot_scope": (
-            "EXPLORATORY_TECHNICAL_CANDIDATE_DATES_NOT_STRICT_V3_ENTRIES"
+            "EXPLORATORY_TECHNICAL_CANDIDATE_DATES_NOT_STRICT_ENTRIES"
         ),
         "requirements": requirements,
         "recursive_structure_decision": recursive["decision"],
         "data_grade": "COMPONENT_ONLY",
-        "strict_full_v3_return_evaluation_allowed": False,
+        "strict_full_return_evaluation_allowed": False,
         "component_diagnostic_allowed": True,
         "blocking_reasons": tuple(
             reason
             for reason, blocked in (
                 ("BLOCKED_BY_FROZEN_STRUCTURE", not structural_pass),
-                ("STRICT_V3_CANDIDATE_PIT_SNAPSHOT_SET_UNAVAILABLE", True),
+                ("STRICT_CANDIDATE_PIT_SNAPSHOT_SET_UNAVAILABLE", True),
                 ("BROKER_VINTAGE_EXECUTION_RULES_UNAVAILABLE", True),
                 ("HIGH_TIMEFRAME_FACT_ADAPTER_NOT_CERTIFIED", True),
             )
@@ -241,8 +241,8 @@ def main() -> int:
             {
                 "output": str(DEFAULT_OUTPUT.resolve()),
                 "data_grade": result["data_grade"],
-                "strict_full_v3_return_evaluation_allowed": result[
-                    "strict_full_v3_return_evaluation_allowed"
+                "strict_full_return_evaluation_allowed": result[
+                    "strict_full_return_evaluation_allowed"
                 ],
                 "blocking_reasons": result["blocking_reasons"],
             },

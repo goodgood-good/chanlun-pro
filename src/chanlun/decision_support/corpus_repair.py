@@ -504,7 +504,7 @@ def write_repair_report(
     )
     repaired = sum(item.ok for item in ordered)
     payload = {
-        "schema_version": 1,
+        "schema": "current",
         "summary": {
             "attempted": len(ordered),
             "failed": len(ordered) - repaired,

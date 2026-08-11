@@ -35,12 +35,12 @@ from chanlun.decision_support.trading_system.backtest.pit_metadata import CN
 
 
 QMT_LOCAL_DATA_ENV: Final = "CHANLUN_QMT_LOCAL_DATA_DIR"
-QMT_LOCAL_CACHE_SCHEMA: Final = "chanlun-qmt-local-fixed-record/v1"
+QMT_LOCAL_CACHE_SCHEMA: Final = "chanlun-qmt-local-fixed-record"
 _KLINE_SENTINEL: Final = bytes.fromhex("feffffffffffff7f")
 _KLINE_RECORD_BYTES: Final = 64
 _PERSHARE_RECORD_BYTES: Final = 344
 _QMT_MISSING_FLOAT: Final = float.fromhex("0x1.fffffffffffffp+1023")
-_DERIVED_30M_GRID_REVISION: Final = "QMT_LOCAL_COMPLETED_5M_TO_30M_V1"
+_DERIVED_30M_GRID_REVISION: Final = "QMT_LOCAL_COMPLETED_5M_TO_30M"
 
 _PERIOD_DIRECTORIES: Final = {
     "1m": "60",
@@ -136,12 +136,9 @@ class QMTLocalKlineAudit:
     selected_record_count: int
     first_at: datetime | None
     last_at: datetime | None
-    # Physical file boundaries are deliberately separate from ``first_at`` /
-    # ``last_at``.  The latter describe only the caller-selected window and
-    # cannot tell an auditor whether old history was clipped by the request or
-    # is absent from QMT's rolling local cache altogether.  They are excluded
-    # from the legacy ``audit_id`` so existing decision identities remain
-    # byte-for-byte compatible; ``source_sha256`` already binds these facts.
+    # Physical file boundaries are separate from ``first_at`` / ``last_at``.
+    # The latter describe only the caller-selected window, while these fields
+    # bind the complete QMT file coverage into the audit identity.
     source_first_at: datetime | None = None
     source_last_at: datetime | None = None
     schema: str = QMT_LOCAL_CACHE_SCHEMA
@@ -160,6 +157,8 @@ class QMTLocalKlineAudit:
                 "selected_record_count": self.selected_record_count,
                 "first_at": self.first_at,
                 "last_at": self.last_at,
+                "source_first_at": self.source_first_at,
+                "source_last_at": self.source_last_at,
             }
         )
 
@@ -471,7 +470,7 @@ class QMTPershareAudit:
     record_count: int
     first_report_period: date | None
     last_report_period: date | None
-    schema: str = "chanlun-qmt-local-pershare-index/v1"
+    schema: str = "chanlun-qmt-local-pershare-index"
     data_grade: str = "RESEARCH_APPROXIMATION"
     live_status: str = "LIVE_DISABLED"
 

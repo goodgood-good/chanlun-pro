@@ -34,12 +34,12 @@ from chanlun.decision_support.trading_system.qmt_causal_factor_adjustment import
     qmt_causal_factor_events_from_frame,
     qmt_causal_factor_revision,
 )
-from chanlun.decision_support.trading_system.v3_etf_proxy_facts import DailyMarketBar
-from chanlun.decision_support.trading_system.v3_selection import (
+from chanlun.decision_support.trading_system.etf_proxy_facts import DailyMarketBar
+from chanlun.decision_support.trading_system.selection import (
     CompletedDailyClose,
     SectorMemberHistory,
 )
-from chanlun.decision_support.trading_system.v3_trading_session import (
+from chanlun.decision_support.trading_system.trading_session import (
     build_trading_session_evidence,
 )
 from chanlun.exchange.exchange_qmt import _XTDATA_NATIVE_LOCK
@@ -52,27 +52,27 @@ from chanlun.exchange.price_basis import (
 QMT_GICS3_CATALOG_SOURCE = "qmt_gics3_components"
 QMT_GICS3_COMPOSITE_PROVIDER = "qmt-gics3-composite"
 QMT_GICS3_COMPOSITE_ADJUSTMENT = (
-    "causal-factor-stable-24-member-median-v5"
+    "causal-factor-stable-24-member-median"
 )
 QMT_GICS3_COMPOSITE_MEMBER_LIMIT = 24
 QMT_GICS3_COMPOSITE_MINIMUM_MEMBER_COUNT = 8
 QMT_GICS3_COMPOSITE_MINIMUM_BAR_COVERAGE = Decimal("0.60")
 QMT_GICS3_COMPOSITE_CALENDAR_GRID_CONTRACT = (
-    "QMT_SH_TRADING_CALENDAR_CONTIGUOUS_VISIBLE_SUFFIX_V1"
+    "QMT_SH_TRADING_CALENDAR_CONTIGUOUS_VISIBLE_SUFFIX"
 )
 QMT_GICS3_COMPOSITE_MEMBER_MASK_CONTRACT = (
-    "BIT_I_IS_SECTOR_COMPOSITE_MEMBERS_I_V1"
+    "BIT_I_IS_SECTOR_COMPOSITE_MEMBERS_I"
 )
 QMT_GICS3_COMPOSITE_METHOD = (
-    "DETERMINISTIC_HASH_SAMPLE_CAUSAL_FACTOR_MEDIAN_RETURN_CHAIN_V5"
+    "DETERMINISTIC_HASH_SAMPLE_CAUSAL_FACTOR_MEDIAN_RETURN_CHAIN"
 )
 QMT_CURRENT_A_SHARE_SECTOR = "沪深京A股"
 QMT_SECTOR_STRENGTH_PRICE_BASIS_CONTRACT = (
-    "QMT_FRONT_RATIO_TERMINAL_CLOSE_NORMALIZATION_V1"
+    "QMT_FRONT_RATIO_TERMINAL_CLOSE_NORMALIZATION"
 )
 QMT_SECTOR_STRENGTH_QMT_DIVIDEND_TYPE = "front_ratio"
 QMT_SECTOR_STRENGTH_ADJUSTMENT = (
-    "front-ratio-terminal-close-normalized-v1"
+    "front-ratio-terminal-close-normalized"
 )
 
 _GICS3_PREFIX = "GICS3"
@@ -91,12 +91,12 @@ _SHANGHAI = ZoneInfo("Asia/Shanghai")
 # requirement and validate the exact returned exchange calendar below.
 _QMT_TRADING_CALENDAR_LOOKBACK_DAYS = 1100
 _DAILY_FIELDS = ("time", "open", "high", "low", "close", "volume")
-_FACT_CACHE_ENVELOPE_SCHEMA = "chanlun-qmt-sector-fact-cache-envelope/v1"
-_COMPOSITE_FACT_SCHEMA = "chanlun-qmt-sector-composite-facts/v3"
-_DAILY_FACT_SCHEMA = "chanlun-qmt-sector-daily-facts/v3"
-_MEMBER_STATUS_FACT_SCHEMA = "chanlun-qmt-sector-member-status-facts/v1"
-_MEMBER_LISTING_FACT_SCHEMA = "chanlun-qmt-sector-member-listing-facts/v1"
-_FACT_PRODUCER_SCHEMA = "chanlun-qmt-sector-fact-producer/v2"
+_FACT_CACHE_ENVELOPE_SCHEMA = "chanlun-qmt-sector-fact-cache-envelope"
+_COMPOSITE_FACT_SCHEMA = "chanlun-qmt-sector-composite-facts"
+_DAILY_FACT_SCHEMA = "chanlun-qmt-sector-daily-facts"
+_MEMBER_STATUS_FACT_SCHEMA = "chanlun-qmt-sector-member-status-facts"
+_MEMBER_LISTING_FACT_SCHEMA = "chanlun-qmt-sector-member-listing-facts"
+_FACT_PRODUCER_SCHEMA = "chanlun-qmt-sector-fact-producer"
 _SHA256_ID = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
@@ -169,7 +169,7 @@ def _qmt_fact_family_revision(*, family: str, roots: tuple[str, ...]) -> str:
         package_root
         / "decision_support"
         / "trading_system"
-        / "v3_etf_proxy_facts.py",
+        / "etf_proxy_facts.py",
         package_root
         / "decision_support"
         / "trading_system"
@@ -212,18 +212,6 @@ def qmt_sector_daily_fact_producer_revision() -> str:
     return _qmt_fact_family_revision(
         family="DAILY_MEMBER_STRENGTH_AND_STATUS",
         roots=("QmtSectorStrengthSource",),
-    )
-
-
-def qmt_sector_fact_producer_revision() -> str:
-    """Compatibility identity containing both independent fact families."""
-
-    return sha256_json(
-        {
-            "schema": _FACT_PRODUCER_SCHEMA,
-            "composite_revision": qmt_sector_composite_fact_producer_revision(),
-            "daily_revision": qmt_sector_daily_fact_producer_revision(),
-        }
     )
 
 
@@ -504,7 +492,7 @@ def _catalog_document(
         members = sorted(normalized_members)
         sector_id = "qmt-gics3:" + sha256_json(
             {
-                "schema": "chanlun-qmt-gics3-sector/v1",
+                "schema": "chanlun-qmt-gics3-sector",
                 "source_key": source_key,
             }
         ).removeprefix("sha256:")
@@ -519,7 +507,7 @@ def _catalog_document(
     sectors.sort(key=lambda row: str(row["source_key"]))
     revision = sha256_json(
         {
-            "schema": "chanlun-qmt-gics3-catalog/v1",
+            "schema": "chanlun-qmt-gics3-catalog",
             "sectors": sectors,
         }
     )
@@ -677,7 +665,7 @@ def build_qmt_gics3_sector_catalog_from_local_files(
         "source_file_count": len(manifest),
         "source_manifest_sha256": sha256_json(
             {
-                "schema": "chanlun-qmt-local-gics3-files/v1",
+                "schema": "chanlun-qmt-local-gics3-files",
                 "files": tuple(manifest),
             }
         ),
@@ -823,7 +811,7 @@ def _attach_native_daily_composite_provenance(
     observed = normalize_datetime(observed_at, "observed_at")
     revision = sha256_json(
         {
-            "schema": "chanlun-qmt-current-sector-native-daily-base/v1",
+            "schema": "chanlun-qmt-current-sector-native-daily-base",
             "sector_id": sector_id,
             "observed_at": observed,
             "price_basis_revision": frame.attrs.get("price_basis_revision"),
@@ -870,7 +858,7 @@ def _composite_member_path_revision(frame: pd.DataFrame) -> str | None:
         raise ValueError("sector composite member path is unavailable")
     return sha256_json(
         {
-            "schema": "chanlun-qmt-sector-composite-member-path/v1",
+            "schema": "chanlun-qmt-sector-composite-member-path",
             "rows": tuple(
                 {
                     "date": normalize_datetime(
@@ -1066,7 +1054,7 @@ class QmtSectorCompositeSource:
             return None
         identity = sha256_json(
             {
-                "schema": "chanlun-qmt-sector-composite-fact-path/v1",
+                "schema": "chanlun-qmt-sector-composite-fact-path",
                 "sector_id": sector_id,
                 "frequency": frequency,
                 "request_bars": request_bars,
@@ -1308,7 +1296,7 @@ class QmtSectorCompositeSource:
             members,
             key=lambda code: sha256_json(
                 {
-                    "schema": "chanlun-qmt-gics3-sample/v1",
+                    "schema": "chanlun-qmt-gics3-sample",
                     "sector_id": sector_id,
                     "code": code,
                 }
@@ -1547,13 +1535,6 @@ class QmtSectorCompositeSource:
             raise RuntimeError("QMT trading calendar has no closed sector bar")
         return candidates
 
-    def _expected_closed_at(
-        self,
-        as_of: datetime,
-        frequency: str,
-    ) -> datetime:
-        return self._expected_closes(as_of, frequency)[-1]
-
     def _causal_factor_snapshot(
         self,
         *,
@@ -1637,7 +1618,7 @@ class QmtSectorCompositeSource:
         composite_members = self._composite_members(sector_id, members)
         membership_revision = sha256_json(
             {
-                "schema": "chanlun-qmt-gics3-members/v2",
+                "schema": "chanlun-qmt-gics3-members",
                 "sector_id": sector_id,
                 "members": members,
                 "composite_members": composite_members,
@@ -1712,7 +1693,7 @@ class QmtSectorCompositeSource:
             expected_closed_at = expected_closes[-1]
             calendar_grid_revision = sha256_json(
                 {
-                    "schema": "chanlun-qmt-sector-calendar-grid/v1",
+                    "schema": "chanlun-qmt-sector-calendar-grid",
                     "frequency": frequency,
                     "expected_closes": expected_closes,
                 }
@@ -2107,7 +2088,7 @@ class QmtSectorStrengthSource:
 
         QMT may publish the completed intraday 15:00 bars before its 1d table.
         It may also leave an index's local 1d cache stale while member stocks
-        are current.  Persisting either response would freeze an obsolete
+        are current.  Persisting either response would freeze a stale
         sector ranking for the decision phase.  The QMT calendar proves the
         required session and the broad benchmark is its publication watermark;
         suspended members may legitimately end earlier.
@@ -3190,7 +3171,6 @@ __all__ = (
     "build_qmt_gics3_sector_catalog_from_local_files",
     "qmt_sector_composite_fact_producer_revision",
     "qmt_sector_daily_fact_producer_revision",
-    "qmt_sector_fact_producer_revision",
     "qmt_trading_session_evidence",
     "qmt_trading_sessions",
 )

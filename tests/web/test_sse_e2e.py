@@ -8,6 +8,7 @@ import os
 
 import tornado.testing
 import tornado.web
+from werkzeug.security import generate_password_hash
 
 from cl_app import create_app
 from cl_app.handlers import sse_stream
@@ -21,7 +22,11 @@ FAKE_CD = {
 
 class SseFlowTest(tornado.testing.AsyncHTTPTestCase):
     def setUp(self):
-        self._login_env = mock.patch.dict(os.environ, {"CHANLUN_LOGIN_PWD": ""})
+        self._password = "sse-flow-test-password"
+        self._login_env = mock.patch.dict(
+            os.environ,
+            {"CHANLUN_LOGIN_PWD": generate_password_hash(self._password)},
+        )
         self._login_env.start()
         super().setUp()
 
@@ -32,9 +37,12 @@ class SseFlowTest(tornado.testing.AsyncHTTPTestCase):
             self._login_env.stop()
 
     def get_app(self):
-        from chanlun import config
-        config.LOGIN_PWD = ""  # 免密模式(本地默认即空)
-        self.flask_app = create_app()
+        self.flask_app = create_app(test_config={
+            "TESTING": True,
+            "VALIDATE_WEB_SECURITY": False,
+            "SCHEDULER_ENABLED": False,
+            "WTF_CSRF_ENABLED": False,
+        })
         return tornado.web.Application(
             [(r"/tv/stream", sse_stream.SseStreamHandler,
               {"flask_app": self.flask_app, "pool": None})]
@@ -42,7 +50,11 @@ class SseFlowTest(tornado.testing.AsyncHTTPTestCase):
 
     def _login_cookie(self):
         with self.flask_app.test_client() as c:
-            r = c.get("/login", follow_redirects=False)
+            r = c.post(
+                "/login",
+                data={"password": self._password},
+                follow_redirects=False,
+            )
         sc = r.headers.get("Set-Cookie") or ""
         return sc.split(";")[0]
 

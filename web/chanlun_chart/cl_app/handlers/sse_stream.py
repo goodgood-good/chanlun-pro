@@ -119,7 +119,7 @@ def sse_runtime_status():
 
 
 def start_sse_runtime():
-    global _runtime_closed
+    global _runtime_closed, _recompute_slots
     with _runtime_lock:
         # The HTTP server can accept an SSE connection just before the explicit
         # runtime bootstrap reaches this function.  In that case recomputes are
@@ -128,6 +128,10 @@ def start_sse_runtime():
             return
         if _runtime_inflight:
             raise RuntimeError("cannot restart SSE runtime with active recomputes")
+        _runtime_timed_out.clear()
+        _recompute_slots = threading.BoundedSemaphore(
+            max(1, int(_RECOMPUTE_MAX_PENDING))
+        )
         _runtime_closed = False
 
 
@@ -154,16 +158,6 @@ def shutdown_sse_runtime():
     getattr(_hub, "_subs", {}).clear()
     return not any(not future.done() for future in futures)
 
-
-def _reset_sse_runtime_for_tests(max_pending=8):
-    global _runtime_closed, _recompute_slots, _RECOMPUTE_MAX_PENDING
-    with _runtime_lock:
-        if _runtime_inflight:
-            raise RuntimeError("cannot reset SSE runtime with active recomputes")
-        _runtime_timed_out.clear()
-        _RECOMPUTE_MAX_PENDING = max(1, int(max_pending))
-        _recompute_slots = threading.BoundedSemaphore(_RECOMPUTE_MAX_PENDING)
-        _runtime_closed = False
 
 def _refresh_interval_ms(market: str) -> int:
     # 默认值与 config 实际值(均 8000)对齐:getattr 默认仅在 config 缺该属性时生效,

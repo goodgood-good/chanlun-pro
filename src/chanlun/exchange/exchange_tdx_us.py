@@ -296,7 +296,7 @@ class ExchangeTDXUS(Exchange):
                     )
         return ticks
 
-    def now_trading(self):
+    def now_trading(self, market: str):
         """返回当前是否处于美股交易时间（美东时间周一至周五 09:30-16:00）。"""
         tz = pytz.timezone("US/Eastern")
         now = datetime.datetime.now(tz)
@@ -367,9 +367,3 @@ class ExchangeTDXUS(Exchange):
 
     def plate_stocks(self, code: str):
         raise Exception("交易所不支持")
-
-
-if __name__ == "__main__":
-    ex = ExchangeTDXUS()
-    klines = ex.klines("AAPL", "30m")
-    print(klines.tail(20))

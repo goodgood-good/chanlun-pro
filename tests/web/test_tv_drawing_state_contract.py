@@ -7,13 +7,12 @@ from cl_app import create_app
 from cl_app.blueprints import tv
 
 
-SCHEMA = "chanlun-user-drawings/v2"
+SCHEMA = "chanlun-user-drawings"
 URL = (
     "/tv/1.1/drawings?client=test&user=1&chart=default&layout=default"
     "&symbol=US:QQQ.US&resolution=all"
 )
 CURRENT_NAME = "drawings_default_default_US:QQQ.US_all"
-LEGACY_NAME = "drawings_US:QQQ.US_all"
 
 
 @pytest.fixture
@@ -52,7 +51,7 @@ def _install_fake_store(monkeypatch, records=None):
     return stored, writes
 
 
-def test_legacy_open_tab_cannot_overwrite_drawing_state(app, monkeypatch):
+def test_schema_less_state_is_rejected(app, monkeypatch):
     _, writes = _install_fake_store(monkeypatch)
 
     response = app.test_client().post(
@@ -69,16 +68,15 @@ def test_legacy_open_tab_cannot_overwrite_drawing_state(app, monkeypatch):
         },
     )
 
-    assert response.status_code == 200
+    assert response.status_code == 400
     assert response.get_json() == {
-        "status": "ok",
-        "ignored": True,
-        "reason_code": "LEGACY_DRAWING_STATE_QUARANTINED",
+        "status": "error",
+        "message": "unsupported drawing state schema",
     }
     assert writes == []
 
 
-def test_v2_write_is_normalized_to_explicit_manual_sources(app, monkeypatch):
+def test_write_is_normalized_to_explicit_manual_sources(app, monkeypatch):
     _, writes = _install_fake_store(monkeypatch)
 
     response = app.test_client().post(
@@ -91,7 +89,7 @@ def test_v2_write_is_normalized_to_explicit_manual_sources(app, monkeypatch):
                     "null-source": None,
                     "array-source": [],
                 },
-                "groups": {"legacy-group": {"lineTools": ["manual"]}},
+                "groups": {"ignored-group": {"lineTools": ["manual"]}},
             }
         },
     )
@@ -110,7 +108,7 @@ def test_v2_write_is_normalized_to_explicit_manual_sources(app, monkeypatch):
     }
 
 
-def test_legacy_current_record_is_quarantined_on_read(app, monkeypatch):
+def test_invalid_current_record_is_not_restored(app, monkeypatch):
     _, writes = _install_fake_store(
         monkeypatch,
         {
@@ -137,24 +135,3 @@ def test_legacy_current_record_is_quarantined_on_read(app, monkeypatch):
         "data": {"schema": SCHEMA, "sources": {}, "groups": {}},
     }
     assert writes == []
-
-
-def test_only_v2_legacy_key_may_migrate_to_current_key(app, monkeypatch):
-    legacy_state = {
-        "schema": SCHEMA,
-        "sources": {"manual": {"type": "LineToolTrendLine", "state": {}}},
-        "groups": {},
-    }
-    _, writes = _install_fake_store(
-        monkeypatch,
-        {LEGACY_NAME: SimpleNamespace(content=json.dumps(legacy_state))},
-    )
-
-    response = app.test_client().get(URL)
-
-    assert response.status_code == 200
-    assert response.get_json() == {"status": "ok", "data": legacy_state}
-    assert len(writes) == 1
-    assert writes[0][0] == CURRENT_NAME
-    assert json.loads(writes[0][1]) == legacy_state
-

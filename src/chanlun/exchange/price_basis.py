@@ -136,7 +136,7 @@ def build_price_basis_revision(
     adjustment_ledger: Sequence[Mapping[str, object]],
 ) -> str:
     return _build_price_basis_revision(
-        schema="chanlun-price-basis/qmt-v1",
+        schema="chanlun-price-basis/qmt",
         provider=provider,
         market=market,
         code=code,
@@ -191,7 +191,7 @@ def build_provider_price_basis_metadata(
     if any(not isinstance(value, str) or not value.strip() for value in values.values()):
         raise ValueError("provider price basis fields must be non-empty strings")
     revision = _build_price_basis_revision(
-        schema="chanlun-price-basis/provider-v1",
+        schema="chanlun-price-basis/provider",
         provider=provider,
         market=market,
         code=code,
@@ -204,27 +204,6 @@ def build_provider_price_basis_metadata(
         price_basis_revision=revision,
         provider=provider,
         adjustment=adjustment,
-    )
-
-
-def build_tdx_industry_price_basis_metadata(
-    code: str,
-    structure_price_quantum: Decimal,
-) -> PriceBasisMetadata:
-    revision = _build_price_basis_revision(
-        schema="chanlun-price-basis/tdx-industry-v1",
-        provider="tdx-industry-index",
-        market="a",
-        code=code,
-        adjustment="none",
-        structure_price_quantum=structure_price_quantum,
-        adjustment_ledger=(),
-    )
-    return PriceBasisMetadata(
-        structure_price_quantum=structure_price_quantum,
-        price_basis_revision=revision,
-        provider="tdx-industry-index",
-        adjustment="none",
     )
 
 
@@ -285,7 +264,6 @@ __all__ = (
     "build_price_basis_revision",
     "build_provider_price_basis_metadata",
     "build_qmt_price_basis_metadata",
-    "build_tdx_industry_price_basis_metadata",
     "copy_price_basis_metadata",
     "merge_price_basis_metadata",
 )

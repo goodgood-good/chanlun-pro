@@ -84,7 +84,7 @@ def line_to_unit(
     start_tick = _tick(line.start.val, quantum)
     end_tick = _tick(line.end.val, quantum)
     unit_id = stable_structure_id(
-        "chanlun-unit/v2",
+        "chanlun-unit",
         registry.price_basis_revision,
         structural_level,
         source_kind,

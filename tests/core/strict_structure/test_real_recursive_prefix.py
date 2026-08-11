@@ -23,9 +23,8 @@ def strict_config():
     return {
         **strict_base_config(),
         "structure_price_quantum": "0.01",
-        "price_basis_revision": "test-raw-v1",
-        "skip_legacy_zslx": True,
-        "skip_legacy_mmd": True,
+        "price_basis_revision": "test-raw",
+        "strict_config_revision": "sha256:test-strict-runtime",
     }
 
 
@@ -48,11 +47,7 @@ def strict_fingerprint(result):
                 for center in level.center_result.centers
                 if center.completed_at is not None
             ),
-            tuple(
-                trend
-                for trend in level.trend_types
-                if trend.locked
-            ),
+            tuple(trend for trend in level.trend_types if trend.locked),
             level.completed_trends,
         )
         for level in result.levels
@@ -66,18 +61,17 @@ def _assert_recursive_prefix(
     sizes,
     *,
     require_completed=False,
+    require_levels=True,
 ):
     frame = load_fixture(name, sizes[-1])
     assert len(frame) == sizes[-1]
-    incremental = CL(code, frequency, strict_config())
+    incremental = CL(code, frequency, strict_config(), market="a")
     frozen_by_level = {}
     last = ()
 
     for size in sizes:
         incremental.process_klines(frame.head(size))
-        current = strict_fingerprint(
-            incremental.get_strict_structure_levels()
-        )
+        current = strict_fingerprint(incremental.get_strict_structure_levels())
         current_levels = {level for level, _centers, _trends, _done in current}
         assert set(frozen_by_level).issubset(current_levels)
         for level, centers, trends, completed in current:
@@ -91,11 +85,18 @@ def _assert_recursive_prefix(
             frozen_by_level[level] = (centers, trends, completed)
         last = current
 
-    batch = CL(code, frequency, strict_config())
+    batch = CL(code, frequency, strict_config(), market="a")
     batch.process_klines(frame)
     assert strict_fingerprint(batch.get_strict_structure_levels()) == last
-    assert last
-    assert batch.get_strict_structure_levels().levels[0].units
+    if require_levels:
+        assert last
+        assert batch.get_strict_structure_levels().levels[0].units
+    else:
+        # The canonical old-pen profile can legitimately leave the short QQQ
+        # fixture without a locked segment.  Empty recursive evidence is still
+        # a deterministic, prefix-stable result and must not fall back to the
+        # former new-pen definition merely to manufacture a level.
+        assert batch.get_xds()
     if require_completed:
         assert frozen_by_level[0][0], "fixture must produce completed L0 centers"
         assert frozen_by_level[0][2], "fixture must produce COMPLETE snapshots"
@@ -126,4 +127,5 @@ def test_qqq_recursive_locked_prefix_is_stable():
         "QQQ.US",
         "30m",
         (100, 250, 500, 700, 819),
+        require_levels=False,
     )

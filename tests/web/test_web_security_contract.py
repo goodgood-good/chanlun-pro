@@ -12,11 +12,14 @@ def test_tv_state_writes_are_not_csrf_exempt():
     assert "@csrf.exempt" not in source
 
 
-def test_alert_delete_uses_post():
-    source = (ROOT / "web/chanlun_chart/cl_app/blueprints/alert.py").read_text(
-        encoding="utf-8"
-    )
-    assert '@alert_bp.route("/alert_del/<id>", methods=["POST"])' in source
+def test_removed_alert_surface_is_absent():
+    for relative in (
+        "web/chanlun_chart/cl_app/blueprints/alert.py",
+        "web/chanlun_chart/cl_app/alert_tasks.py",
+        "web/chanlun_chart/cl_app/templates/alert.html",
+        "web/chanlun_chart/cl_app/static/js/alert.js",
+    ):
+        assert not (ROOT / relative).exists()
 
 
 def test_secret_form_is_not_logged_to_console():

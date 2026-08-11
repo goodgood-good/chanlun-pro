@@ -132,7 +132,7 @@ def test_center_identity_includes_price_basis_revision():
     values = valid_five_up_exit()
     original = _establish(values)
     rebased_values = tuple(
-        replace(item, price_basis_revision="post-action-v2") for item in values
+        replace(item, price_basis_revision="post-action") for item in values
     )
     rebased = _establish(rebased_values)
     assert original is not None and rebased is not None
@@ -142,7 +142,7 @@ def test_center_identity_includes_price_basis_revision():
 def test_seed_rejects_mixed_basis_in_entry_or_body():
     values = valid_five_up_exit()
     mixed = values[:-1] + (
-        replace(values[-1], price_basis_revision="post-action-v2"),
+        replace(values[-1], price_basis_revision="post-action"),
     )
     with pytest.raises(ValueError, match="seed price basis mismatch"):
         _establish(mixed)

@@ -56,9 +56,9 @@ def test_single_row_db_cache_does_not_crash_and_still_increments(cls):
         )
     )
     out = ex.klines("BTC/USDT", "d")
-    assert out is not None  # 旧实现: IndexError 被吞返回 None → RetryError
+    assert out is not None
     assert len(out) == 3
-    assert ex.db_exchange.inserted is not None  # 增量入库真的发生(旧实现永远到不了)
+    assert ex.db_exchange.inserted is not None
 
 
 @pytest.mark.parametrize(

@@ -5,15 +5,15 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="robots" content="noindex,nofollow" />
     <title>缠论提前选股 · 实时盯盘与个股分析</title>
-    <link rel="shortcut icon" href="{{ url_for('static', filename='favicon.ico') }}?v={{ static_version|default('') }}" />
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/ui-system.css') }}?v={{ static_version|default('') }}" />
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/early_screening.css') }}?v={{ static_version|default('') }}" />
+    <link rel="shortcut icon" href="{{ url_for('static', filename='favicon.ico') }}?asset={{ static_asset_token|default('') }}" />
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/ui-system.css') }}?asset={{ static_asset_token|default('') }}" />
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/early_screening.css') }}?asset={{ static_asset_token|default('') }}" />
     {% if csrf_token is defined %}{% include 'dark.html' %}{% endif %}
-    <script defer src="{{ url_for('static', filename='js/early_screening_ui.js') }}?v={{ static_version|default('') }}"></script>
-    <script defer src="{{ url_for('static', filename='js/early_screening_chart_resize.js') }}?v={{ static_version|default('') }}"></script>
-    <script defer src="{{ url_for('static', filename='js/early_screening.js') }}?v={{ static_version|default('') }}"></script>
-    <script defer src="{{ url_for('static', filename='js/human_review_markout_audit.js') }}?v={{ static_version|default('') }}"></script>
-    <script defer src="{{ url_for('static', filename='js/human_review_screening.js') }}?v={{ static_version|default('') }}"></script>
+    <script defer src="{{ url_for('static', filename='js/early_screening_ui.js') }}?asset={{ static_asset_token|default('') }}"></script>
+    <script defer src="{{ url_for('static', filename='js/early_screening_chart_resize.js') }}?asset={{ static_asset_token|default('') }}"></script>
+    <script defer src="{{ url_for('static', filename='js/early_screening.js') }}?asset={{ static_asset_token|default('') }}"></script>
+    <script defer src="{{ url_for('static', filename='js/human_review_markout_audit.js') }}?asset={{ static_asset_token|default('') }}"></script>
+    <script defer src="{{ url_for('static', filename='js/human_review_screening.js') }}?asset={{ static_asset_token|default('') }}"></script>
   </head>
   <body class="cp-ui cp-immersive">
     <a class="cp-skip-link" href="#es-dashboard">跳到实时筛选结果</a>
@@ -32,9 +32,9 @@
     <main
       id="es-dashboard"
       class="es-shell es-dashboard"
-      data-schema="chanlun-trading-screening/v3"
+      data-schema="chanlun-trading-screening"
       data-endpoint="{{ url_for('decision_support.early_signals') }}"
-      data-human-review-schema="chanlun-v3-human-review-web/v1"
+      data-human-review-schema="chanlun-human-review-web"
       data-human-review-endpoint="{{ url_for('decision_support.human_review_data') }}"
       data-human-review-detail-endpoint="{{ url_for('decision_support.human_review_candidate_detail') }}"
       data-human-feedback-endpoint="{{ url_for('decision_support.human_review_feedback') }}"
@@ -198,7 +198,6 @@
           <div><dt>待虚拟成交</dt><dd id="hr-virtual-pending-count">0</dd></div>
           <div><dt>已撤销虚拟意图</dt><dd id="hr-virtual-cancelled-count">0</dd></div>
           <div><dt>执行门撤买</dt><dd id="hr-virtual-operations-cancelled-count">0</dd></div>
-          <div><dt>资金/槽位拒绝</dt><dd id="hr-virtual-capital-rejected-count">0</dd></div>
           <div><dt>待成交连续性</dt><dd id="hr-pending-continuity-status">无待成交意图</dd></div>
           <div><dt>执行门处置</dt><dd id="hr-execution-chronology-status">撤买保退出</dd></div>
           <div><dt>虚拟卖出预留</dt><dd id="hr-virtual-reserved-sell-quantity">0</dd></div>
@@ -207,8 +206,7 @@
           <div><dt>板块准入证据</dt><dd id="hr-entry-selection-evidence-status">尚无虚拟买入</dd></div>
           <div><dt>成交证据</dt><dd id="hr-execution-evidence-status">无虚拟成交</dd></div>
           <div><dt>时价拒绝</dt><dd id="hr-execution-rejection-evidence-status">无时价拒绝</dd></div>
-          <div><dt>拒绝证据</dt><dd id="hr-capital-rejection-evidence-status">无资金拒绝</dd></div>
-          <div><dt>拒绝裁决</dt><dd id="hr-capital-decision-audit-status">无资金拒绝</dd></div>
+          <div><dt>组合拒绝证据</dt><dd id="hr-portfolio-rejection-evidence-status">无组合拒绝</dd></div>
           <div><dt>组合裁决</dt><dd id="hr-portfolio-decision-audit-status">无组合拒绝</dd></div>
           <div><dt>成交裁决</dt><dd id="hr-portfolio-fill-decision-audit-status">无组合成交</dd></div>
           <div><dt>信号复用</dt><dd id="hr-signal-lifecycle-status">终态买卖点不可复用</dd></div>

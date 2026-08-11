@@ -27,7 +27,7 @@ from chanlun.decision_support.trading_system.runtime_config import (
 )
 
 
-SCHEMA_VERSION = "chanlun-low-drawdown-backtest/v1"
+SCHEMA = "chanlun-low-drawdown-backtest"
 STRATEGY_ID = STRICT_STRATEGY_ID
 REQUIRED_ABLATION_IDS = (
     "original_definitions_only",
@@ -285,7 +285,7 @@ def build_report(
     requested_range: tuple[date, date] | None = None,
     effective_range: tuple[date, date] | None = None,
     evaluation_mode: str = "walk_forward",
-    sector_price_source: str = "tdx_native_880_index",
+    sector_price_source: str = "qmt_gics3_component_composite",
     universe_summary: dict[str, object] | None = None,
     data_source_hashes: tuple[tuple[str, str], ...] = (),
 ) -> dict[str, object]:
@@ -435,7 +435,7 @@ def build_report(
         report_limitations.append("required_benchmark_evidence_invalid")
     report_limitations.append("research_output_not_an_order_instruction")
     report: dict[str, object] = {
-        "schema_version": SCHEMA_VERSION,
+        "schema": SCHEMA,
         "generated_at": generated.isoformat(),
         "strategy_id": STRATEGY_ID,
         "strategy_label": "缠论原文定义 · 低回撤执行体系",
@@ -563,7 +563,7 @@ __all__ = [
     "BenchmarkResult",
     "REQUIRED_ABLATION_IDS",
     "REQUIRED_BENCHMARK_IDS",
-    "SCHEMA_VERSION",
+    "SCHEMA",
     "STRATEGY_ID",
     "WalkForwardWindowResult",
     "build_report",

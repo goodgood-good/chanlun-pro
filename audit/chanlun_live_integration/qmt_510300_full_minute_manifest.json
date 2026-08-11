@@ -1,0 +1,28 @@
+{
+  "complete": true,
+  "generated_at": "2026-07-26T14:32:33.704116+08:00",
+  "records": {
+    "510300.SH": {
+      "earliest": "2025-07-25T14:10:00+08:00",
+      "latest": "2026-07-23T15:00:00+08:00",
+      "rows": 57891
+    }
+  },
+  "request": {
+    "codes": [
+      "510300.SH"
+    ],
+    "end": "2026-07-24",
+    "period": "1m",
+    "start": "2012-05-28"
+  },
+  "schema": "chanlun-qmt-history-supplement/v1",
+  "summary": {
+    "codes_verified": 1,
+    "codes_with_rows": 1,
+    "codes_without_rows": 0,
+    "earliest": "2025-07-25T14:10:00+08:00",
+    "latest": "2026-07-23T15:00:00+08:00",
+    "total_rows": 57891
+  }
+}

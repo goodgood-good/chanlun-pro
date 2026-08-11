@@ -368,7 +368,7 @@ def _invalid_sequences():
         *base[2:],
     )
     wrong_level = (base[0], replace(base[1], structural_level=1), *base[2:])
-    mixed_basis = (*base[:-1], replace(base[-1], price_basis_revision="post-action-v2"))
+    mixed_basis = (*base[:-1], replace(base[-1], price_basis_revision="post-action"))
     return (
         (duplicate, "unit ids must be unique"),
         (same_direction, "unit directions must alternate"),

@@ -15,7 +15,7 @@ import pytest
 from chanlun.decision_support import lesson_image_cache as image_cache_module
 from chanlun.decision_support.lesson_corpus import PdfIdentity, SourceRole
 from chanlun.decision_support.lesson_image_cache import (
-    build_lesson_image_cache,
+    IncrementalLessonImageCacheBuilder,
     load_lesson_image_cache,
 )
 from chanlun.decision_support.lesson_images import ImageOccurrence, PdfImageAsset
@@ -57,7 +57,7 @@ def _occurrences():
         xobject_name="IM875",
         page_size=(595.3, 841.9),
         page_rotation=0,
-        classifier_version="lesson-image/1",
+        classifier_id="lesson-image",
         cropbox_pdf=(0.0, 0.0, 595.3, 841.9),
         mediabox_pdf=(0.0, 0.0, 595.3, 841.9),
     )
@@ -79,6 +79,30 @@ def _occurrences():
             reason_codes=("no_verified_caption",),
         ),
     )
+
+
+def build_lesson_image_cache(
+    target: Path,
+    *,
+    identity: PdfIdentity,
+    assets,
+    occurrences,
+    materialized_raw_by_sha256: dict[str, bytes],
+    materialized_smask_raw_by_sha256: dict[str, bytes] | None = None,
+    extractor_id: str,
+) -> Path:
+    with IncrementalLessonImageCacheBuilder(
+        target,
+        identity=identity,
+        extractor_id=extractor_id,
+    ) as builder:
+        builder.add_batch(
+            assets=assets,
+            occurrences=occurrences,
+            primary_raw_by_sha256=materialized_raw_by_sha256,
+            smask_raw_by_sha256=dict(materialized_smask_raw_by_sha256 or {}),
+        )
+        return builder.publish()
 
 
 def _rewrite_jsonl_and_descriptor(
@@ -142,7 +166,7 @@ def test_image_cache_is_deterministic_and_materializes_only_verified_charts(tmp_
         assets=(_asset(),),
         occurrences=_occurrences(),
         materialized_raw_by_sha256={digest: _VALID_JPEG},
-        extractor_version="lesson-image/1",
+        extractor_id="lesson-image",
     )
     second = build_lesson_image_cache(
         tmp_path / "second",
@@ -150,7 +174,7 @@ def test_image_cache_is_deterministic_and_materializes_only_verified_charts(tmp_
         assets=(_asset(),),
         occurrences=tuple(reversed(_occurrences())),
         materialized_raw_by_sha256={digest: _VALID_JPEG},
-        extractor_version="lesson-image/1",
+        extractor_id="lesson-image",
     )
 
     loaded = load_lesson_image_cache(first, expected_identity=_identity())
@@ -171,7 +195,7 @@ def test_image_cache_rejects_inventory_tampering(tmp_path: Path) -> None:
         assets=(_asset(),),
         occurrences=_occurrences(),
         materialized_raw_by_sha256={digest: _VALID_JPEG},
-        extractor_version="lesson-image/1",
+        extractor_id="lesson-image",
     )
     path = target / "image_assets.jsonl"
     path.write_bytes(path.read_bytes().replace(b"875", b"876", 1))
@@ -188,7 +212,7 @@ def test_image_cache_rejects_unlisted_nested_archive_payload(tmp_path: Path) -> 
         assets=(_asset(),),
         occurrences=_occurrences(),
         materialized_raw_by_sha256={digest: _VALID_JPEG},
-        extractor_version="lesson-image/2",
+        extractor_id="lesson-image-changed",
     )
     orphan = target / "primary_assets" / "nested" / "orphan.jpg"
     orphan.parent.mkdir()
@@ -206,7 +230,7 @@ def test_image_cache_rejects_forged_chart_view_path(tmp_path: Path) -> None:
         assets=(_asset(),),
         occurrences=_occurrences(),
         materialized_raw_by_sha256={digest: _VALID_JPEG},
-        extractor_version="lesson-image/2",
+        extractor_id="lesson-image-changed",
     )
     manifest_path = target / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -248,7 +272,7 @@ def test_image_cache_archives_every_primary_asset_and_smask_without_promoting_un
         page_rotation=0,
         source_role=SourceRole.UNKNOWN_IMAGE,
         reason_codes=("no_verified_caption",),
-        classifier_version="lesson-image/1",
+        classifier_id="lesson-image",
     )
     occurrences = (_occurrences()[0], unknown_occurrence)
     primary = {
@@ -262,7 +286,7 @@ def test_image_cache_archives_every_primary_asset_and_smask_without_promoting_un
         occurrences=tuple(reversed(occurrences)),
         materialized_raw_by_sha256=dict(reversed(tuple(primary.items()))),
         materialized_smask_raw_by_sha256={unknown.smask_sha256: smask},
-        extractor_version="lesson-image/2",
+        extractor_id="lesson-image-changed",
     )
 
     loaded = load_lesson_image_cache(target, expected_identity=_identity())
@@ -311,7 +335,7 @@ def test_incremental_image_cache_builder_spools_batches_and_deduplicates_payload
         page_rotation=0,
         source_role=SourceRole.UNKNOWN_IMAGE,
         reason_codes=("no_verified_caption",),
-        classifier_version="lesson-image/2",
+        classifier_id="lesson-image-changed",
     )
     repeated = ImageOccurrence.create(
         source_pdf_sha256="a" * 64,
@@ -326,13 +350,13 @@ def test_incremental_image_cache_builder_spools_batches_and_deduplicates_payload
         page_rotation=0,
         source_role=SourceRole.EDITOR_IMAGE,
         reason_codes=("nearby_editor_flowchart_text",),
-        classifier_version="lesson-image/2",
+        classifier_id="lesson-image-changed",
     )
     target = tmp_path / "incremental"
     with image_cache_module.IncrementalLessonImageCacheBuilder(
         target,
         identity=_identity(),
-        extractor_version="lesson-image/2",
+        extractor_id="lesson-image-changed",
     ) as builder:
         first_progress = builder.add_batch(
             assets=(chart,),
@@ -374,7 +398,7 @@ def test_image_cache_rejects_asset_bound_to_a_different_source_pdf(tmp_path: Pat
         assets=(_asset(),),
         occurrences=_occurrences(),
         materialized_raw_by_sha256={digest: _VALID_JPEG},
-        extractor_version="lesson-image/2",
+        extractor_id="lesson-image-changed",
     )
     rows = [
         json.loads(line)
@@ -402,7 +426,7 @@ def test_image_cache_rejects_occurrence_bound_to_a_different_source_pdf(
         assets=(_asset(),),
         occurrences=_occurrences(),
         materialized_raw_by_sha256={digest: _VALID_JPEG},
-        extractor_version="lesson-image/2",
+        extractor_id="lesson-image-changed",
     )
     rows = [
         image_cache_module._occurrence_dict(
@@ -429,7 +453,7 @@ def test_image_cache_rejects_root_symlink_before_resolving_it(tmp_path: Path) ->
         assets=(_asset(),),
         occurrences=_occurrences(),
         materialized_raw_by_sha256={digest: _VALID_JPEG},
-        extractor_version="lesson-image/2",
+        extractor_id="lesson-image-changed",
     )
     alias = tmp_path / "cache-root-alias"
     _symlink_or_skip(alias, target, target_is_directory=True)
@@ -446,7 +470,7 @@ def test_image_cache_rejects_cross_root_archived_leaf_symlink(tmp_path: Path) ->
         assets=(_asset(),),
         occurrences=_occurrences(),
         materialized_raw_by_sha256={digest: _VALID_JPEG},
-        extractor_version="lesson-image/2",
+        extractor_id="lesson-image-changed",
     )
     external = tmp_path / "outside-cache.jpg"
     external.write_bytes(_VALID_JPEG)
@@ -469,7 +493,7 @@ def test_image_cache_rejects_archived_leaf_with_reparse_attribute(
         assets=(_asset(),),
         occurrences=_occurrences(),
         materialized_raw_by_sha256={digest: _VALID_JPEG},
-        extractor_version="lesson-image/2",
+        extractor_id="lesson-image-changed",
     )
     archived_leaf = target / "primary_assets" / f"{digest}.jpg"
     original_lstat = Path.lstat
@@ -497,7 +521,7 @@ def test_image_cache_rejects_archived_directory_symlink(tmp_path: Path) -> None:
         assets=(_asset(),),
         occurrences=_occurrences(),
         materialized_raw_by_sha256={digest: _VALID_JPEG},
-        extractor_version="lesson-image/2",
+        extractor_id="lesson-image-changed",
     )
     archive_directory = target / "primary_assets"
     external_directory = tmp_path / "outside-primary-assets"
@@ -519,7 +543,7 @@ def test_image_cache_streams_archived_payload_verification(
         assets=(_asset(),),
         occurrences=_occurrences(),
         materialized_raw_by_sha256={digest: _VALID_JPEG},
-        extractor_version="lesson-image/2",
+        extractor_id="lesson-image-changed",
     )
     original_read_bytes = Path.read_bytes
 
@@ -533,26 +557,3 @@ def test_image_cache_streams_archived_payload_verification(
     loaded = load_lesson_image_cache(target, expected_identity=_identity())
 
     assert set(loaded.archived_primary_paths) == {digest}
-
-
-def test_legacy_image_cache_builder_rejects_large_in_memory_fixture(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    digest = hashlib.sha256(_VALID_JPEG).hexdigest()
-    monkeypatch.setattr(
-        image_cache_module,
-        "_LEGACY_FIXTURE_MAX_TOTAL_BYTES",
-        len(_VALID_JPEG) - 1,
-        raising=False,
-    )
-
-    with pytest.raises(ValueError, match="small fixtures"):
-        build_lesson_image_cache(
-            tmp_path / "oversized-legacy-cache",
-            identity=_identity(),
-            assets=(_asset(),),
-            occurrences=_occurrences(),
-            materialized_raw_by_sha256={digest: _VALID_JPEG},
-            extractor_version="lesson-image/2",
-        )

@@ -11,7 +11,6 @@ from chanlun.decision_support.trading_system.forward_warmup_structure_lineage im
     ForwardWarmupLineageSessionSnapshot,
     build_forward_warmup_structure_lineage_rollup,
     validate_forward_warmup_structure_lineage_rollup,
-    validate_forward_warmup_structure_lineage_rollup_document,
 )
 from chanlun.decision_support.trading_system.warmup_structure_lineage import (
     WARMUP_STRUCTURE_LINEAGE_DIAGNOSTIC_CONTRACT_ID,
@@ -50,20 +49,18 @@ def _recorded_signal(*, as_of: datetime) -> dict[str, object]:
             ),
             "sector_warmup_structure_lineage_diagnostic_evidence": None,
             "symbol_warmup_structure_lineage_diagnostic_evidence": None,
+            "sector_strict_same_5m_warmup_structure_lineage_diagnostic_evidence": None,
         }
     }
 
 
-def test_rollup_keeps_legacy_sessions_and_deduplicates_repeated_risk() -> None:
+def test_rollup_requires_current_evidence_and_deduplicates_repeated_risk() -> None:
     recorded_at = datetime.fromisoformat("2026-06-01T11:30:00+08:00")
     recorded_signal = _recorded_signal(as_of=recorded_at)
-    legacy = _source(
+    empty = _source(
         session=date(2026, 5, 29),
         suffix="1",
-        signals=(
-            {"higher_timeframe_risk": {"market_gate": "AMBER"}},
-            {"higher_timeframe_risk": {"market_gate": "AMBER"}},
-        ),
+        signals=(),
     )
     recorded = _source(
         session=date(2026, 6, 1),
@@ -73,19 +70,17 @@ def test_rollup_keeps_legacy_sessions_and_deduplicates_repeated_risk() -> None:
     )
 
     result = build_forward_warmup_structure_lineage_rollup(
-        (recorded, legacy),
+        (recorded, empty),
         through_session=date(2026, 6, 2),
         source_session_qualification_sha256=QUALIFICATION,
     )
 
     assert result["schema"] == FORWARD_WARMUP_STRUCTURE_LINEAGE_ROLLUP_SCHEMA
-    assert result["status"] == "RECORDED_WITH_LEGACY_SESSIONS"
+    assert result["status"] == "RECORDED"
     assert result["qualified_session_count"] == 2
-    assert result["recorded_session_count"] == 1
-    assert result["legacy_session_count"] == 1
-    assert result["source_signal_count"] == 4
+    assert result["recorded_session_count"] == 2
+    assert result["source_signal_count"] == 2
     assert result["lineage_extension_signal_count"] == 2
-    assert result["legacy_signal_count"] == 2
     assert result["unique_lineage_diagnostic_count"] == 1
     market = result["subjects"]["market"]
     assert market["diagnostic_status_counts"] == {"NON_MONOTONIC": 1}
@@ -106,7 +101,7 @@ def test_rollup_keeps_legacy_sessions_and_deduplicates_repeated_risk() -> None:
 
     # Source ordering is irrelevant; session/date ordering is canonical.
     reordered = build_forward_warmup_structure_lineage_rollup(
-        (legacy, recorded),
+        (empty, recorded),
         through_session=date(2026, 6, 2),
         source_session_qualification_sha256=QUALIFICATION,
     )
@@ -127,7 +122,7 @@ def test_rollup_rejects_partial_extension_and_duplicate_sessions() -> None:
             },
         ),
     )
-    with pytest.raises(ValueError, match="partial or foreign"):
+    with pytest.raises(ValueError, match="incomplete or foreign"):
         build_forward_warmup_structure_lineage_rollup(
             (partial,),
             through_session=date(2026, 6, 2),
@@ -147,25 +142,19 @@ def test_rollup_rejects_partial_extension_and_duplicate_sessions() -> None:
         )
 
 
-def test_missing_risk_signal_makes_recorded_session_explicitly_mixed() -> None:
+def test_missing_risk_signal_is_rejected() -> None:
     observed_at = datetime.fromisoformat("2026-06-01T11:30:00+08:00")
     source = _source(
         session=observed_at.date(),
         suffix="6",
         signals=(_recorded_signal(as_of=observed_at), {"candidate_id": "missing"}),
     )
-    result = build_forward_warmup_structure_lineage_rollup(
-        (source,),
-        through_session=date(2026, 6, 2),
-        source_session_qualification_sha256=QUALIFICATION,
-    )
-
-    assert result["status"] == "RECORDED_WITH_LEGACY_SESSIONS"
-    assert result["unrecorded_signal_count"] == 1
-    assert result["sessions"][0]["recording_status"] == (
-        "MIXED_RECORDED_AND_LEGACY_SIGNALS"
-    )
-    assert validate_forward_warmup_structure_lineage_rollup_document(result) == result
+    with pytest.raises(ValueError, match="no higher-timeframe risk evidence"):
+        build_forward_warmup_structure_lineage_rollup(
+            (source,),
+            through_session=date(2026, 6, 2),
+            source_session_qualification_sha256=QUALIFICATION,
+        )
 
 
 def test_rehashed_derived_rollup_tamper_is_rejected() -> None:

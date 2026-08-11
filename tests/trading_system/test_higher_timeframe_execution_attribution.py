@@ -46,7 +46,7 @@ def _candidate(
 
 
 def _execution_id(index: int) -> str:
-    return f"v3-replay-order:{index:064x}:bar:{index + 1}"
+    return f"replay-order:{index:064x}:bar:{index + 1}"
 
 
 def _order(
@@ -93,7 +93,7 @@ def _order(
 
 
 def _cycle_id(candidate: dict[str, object], index: int) -> str:
-    return f"v3-cycle:{candidate['symbol']}:{_execution_id(index)}"
+    return f"cycle:{candidate['symbol']}:{_execution_id(index)}"
 
 
 def _fixture() -> tuple[
@@ -252,7 +252,7 @@ def test_execution_attribution_rejects_orphan_terminal_cycle() -> None:
     candidates, replay, terminal = _fixture()
     terminal["open_positions"].append(
         {
-            "cycle_id": "v3-cycle:SZ.999999:orphan",
+            "cycle_id": "cycle:SZ.999999:orphan",
             "symbol": "SZ.999999",
             "opened_at": (START + timedelta(days=20)).isoformat(),
             "marked_at": (START + timedelta(days=30)).isoformat(),

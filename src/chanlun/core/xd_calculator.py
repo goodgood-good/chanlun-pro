@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-线段计算模块 v2
+线段计算模块（当前实现）
 基于笔列表识别线段，逻辑简洁清晰。
 """
 from dataclasses import dataclass
@@ -134,34 +134,14 @@ def _resolve_pivot_bi(elem: dict, seg_type: str):
         target = max(merged, key=lambda b: b.high) if seg_type == 'up' else min(merged, key=lambda b: b.low)
     return target
 
-# _try_end 中"反向 CS 元素扫描上限"：防止反向 CS 一直被包含合并、
-# second_elems 凑不齐 2 个，导致单次扫到数组末尾造成 O(n²) 退化。
-# 默认 50，可用环境变量 CHANLUN_XD_LOOKAHEAD 覆盖(import 时读一次的模块全局 SAFETY_LOOKAHEAD,改后须重启)。
-# 注：无 config 实例级覆盖(_try_end 直读模块全局 SAFETY_LOOKAHEAD, 非 self.config); 且该值不进 cl_config/
-# source_fingerprint/kline signature 任何缓存指纹 → 改 env 后磁盘 chart_data 旧条目不自动失效(需重启+靠新鲜度窗口)。
-import os as _os
-
-def _get_default_safety_lookahead() -> int:
-    raw = _os.environ.get('CHANLUN_XD_LOOKAHEAD', '50')
-    try:
-        v = int(raw)
-        # 不接受 < 5 的过小值（容易误中止合理走势），也不接受 > 1000 的过大值（性能失控）
-        if v < 5:
-            return 5
-        if v > 1000:
-            return 1000
-        return v
-    except (TypeError, ValueError):
-        return 50
-
-SAFETY_LOOKAHEAD = _get_default_safety_lookahead()
+# 固定生产扫描上限，属于算法身份，不允许由进程环境覆盖。
+SAFETY_LOOKAHEAD = 50
 
 
 class XdCalculator:
     """线段计算器：基于笔列表全量识别线段（每次调用都全量重算，不做增量）。"""
 
-    def __init__(self, config: dict):
-        self.config = config
+    def __init__(self):
         self.xds: List[XD] = []
         # 上轮喂入的 bis 列表对象。bi_calculator 在 bis 变更时换新列表、未变时返回
         # 同一对象;且变更只「删后缀 + 新建」(_rebuild_from_fxs:del bis[stable:]),
@@ -201,7 +181,7 @@ class XdCalculator:
 
         确认级联会使已确认段终点被后续假反弹回溯合并，旧段增量「删末 2 段、复用前缀
         （依赖 done 段不回改）」的前提不再成立，故 calculate 改为每次全量重建：
-        self.xds.clear() + _find_start + _build_segments。下方 identity 脏检查
+        self.xds.clear() + _find_strict_start + _build_segments。下方 identity 脏检查
         （_identity_prefix_len）保留：实测约半数 calculate 命中、省全量 xd 重建。
         全量重建下，增量喂入 == 批量 由 tests/chan_core/test_incremental_equivalence.py 对拍守护。
         """
@@ -227,7 +207,10 @@ class XdCalculator:
         # 禁用段增量(全量重建保 inc==batch)：级联使已确认段终点可被后续假反弹回溯合并,
         # 旧段增量「删末2段、复用前缀(依赖 done 段不回改)」的前提不再成立。
         self.xds.clear()
-        start = self._find_start(all_bis)
+        start = self._find_strict_start(all_bis)
+        if start < 0:
+            self._last_bis_obj = all_bis
+            return self.xds
         self._build_segments(all_bis, start)
 
         self._last_bis_obj = all_bis
@@ -235,7 +218,7 @@ class XdCalculator:
 
     # ----------------------------------------------------------
     def _find_strict_start(self, all_bis: List[BI]) -> int:
-        """关键笔起点扫描 (严格版, 不走 fallback)。
+        """按唯一现行规则扫描关键笔起点。
 
         条件: bi[i].start/end 同时是 (bi[i], bi[i+2], bi[i+4]) 中的方向极值
         ——up 笔取最低, down 笔取最高——并且 bi[i] 与 bi[i+2] 有重叠。
@@ -243,8 +226,6 @@ class XdCalculator:
         Returns:
             int: 找到的起点位置 (>= 0); 未找到返回 -1。
 
-        与 ``_find_start`` 的关系: 后者在 strict 找不到时 fallback 到 overlap-only,
-        给出权宜起点供首次建段。
         """
         for i in range(len(all_bis) - 4):
             bi_i = all_bis[i]
@@ -267,26 +248,6 @@ class XdCalculator:
             if is_extreme and _overlap(bi_i, bi_i2):
                 return i
         return -1
-
-    def _find_start(self, all_bis: List[BI]) -> int:
-        """寻找首段起点 (含 fallback)。
-
-        首段无前段可破坏,缺乏精确起点规则,故 strict/fallback 为工程取舍。
-
-        优先策略 (关键笔, 见 ``_find_strict_start``): 段起点恰好是方向极值,
-        避免 ``xd.start.val 与 xd.low/high 语义不一致的退化首段``。
-
-        回退策略: strict 找不到时退回 overlap-only 的"权宜起点", 让首段能建立。
-          再失败返回 0, 主循环 pos+=1 兜底。
-        """
-        strict = self._find_strict_start(all_bis)
-        if strict >= 0:
-            return strict
-        # Fallback: overlap-only
-        for i in range(len(all_bis) - 2):
-            if _overlap(all_bis[i], all_bis[i + 2]):
-                return i
-        return 0
 
     # ----------------------------------------------------------
     # 主循环
@@ -725,7 +686,7 @@ class XdCalculator:
     # ----------------------------------------------------------
     def _try_end(self, all_bis, seg_start, seg_end, seg_type,
                  seg_high, seg_low, check_pos,
-                 seg_cs_bis_cache: Optional[List[BI]] = None) -> Optional[tuple]:
+                 seg_cs_bis_cache: List[BI]) -> Optional[tuple]:
         """尝试用反向特征序列分型判定当前线段是否终结。
 
         命中返回 (当前段终点笔位置, 反向段起点, 反向段终点)，否则返回 None。
@@ -735,15 +696,10 @@ class XdCalculator:
         frac_name = '顶分型' if seg_type == 'up' else '底分型'
 
         # ---- 步骤1 ----
-        # 优先使用调用方传入的增量缓存（由 _build_segments 维护），
-        # 否则回退为按 seg_start..seg_end 全量过滤（兜底/向后兼容）。
-        # 增量维护把每次 _try_end 的 cs 笔收集成本从 O(seg_len) 降到 O(1)，
+        # 调用方必须传入由 _build_segments 维护的增量缓存。
+        # 这把每次 _try_end 的 cs 笔收集成本从 O(seg_len) 降到 O(1)，
         # 在 90天 1min 数据这种长段场景下消除 O(n²) 退化。
-        if seg_cs_bis_cache is not None:
-            seg_cs_bis = seg_cs_bis_cache
-        else:
-            seg_cs_bis = [all_bis[i] for i in range(seg_start, seg_end + 1)
-                          if all_bis[i].type == cs_bi_type]
+        seg_cs_bis = seg_cs_bis_cache
         if not seg_cs_bis:
             _log.debug(lambda:"    _try_end: 段内无CS笔 → 跳过")
             return None
@@ -1073,7 +1029,6 @@ class XdCalculator:
             end_line=seg_bis[-1],
             _type=seg_type,
             index=len(self.xds),
-            default_zs_type=self.config.get('zs_type_xd', None),
         )
         xd.high = max(bi.high for bi in seg_bis)
         xd.low = min(bi.low for bi in seg_bis)
@@ -1091,12 +1046,6 @@ class XdCalculator:
         xd.locked_at = locked_at if done else None
         self.xds.append(xd)
         return xd
-
-    def _emit_segment(self, all_bis, start, end, seg_type, locked_at):
-        seg_bis = all_bis[start: end + 1]
-        xd = self._make_xd(seg_bis, seg_type, done=True, locked_at=locked_at)
-        sv, ev = seg_bis[0].start.val, seg_bis[-1].end.val
-        _log.debug(lambda:f"[完成] XD[{xd.index}] {seg_type} {_bi_label(seg_bis[0])}~{_bi_label(seg_bis[-1])} ({len(seg_bis)}笔) {sv:.3f}→{ev:.3f}")
 
     def _emit_pending(self, all_bis, start, seg_type):
         """输出未完成线段（全局极值优先 + 兜底末尾同向笔）。

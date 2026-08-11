@@ -31,8 +31,8 @@ def _fractal_lock_witness(fx: FX):
             right_high = min(source.h for source in prefix)
             right_low = min(source.l for source in prefix)
         else:
-            # A non-merged shoulder has one source K.  For defensive legacy
-            # data with missing direction, replay the latest source snapshot.
+            # A non-merged shoulder has one source K.  Missing direction is a
+            # malformed intermediate state; replay its latest source snapshot.
             right_high = prefix[-1].h
             right_low = prefix[-1].l
 
@@ -65,17 +65,16 @@ class BiCalculator:
 
     对内采用“已确认笔 + 当前待定笔”的状态机，每次在最新缠论 K 线上重放，
     优先保证结果正确与全量/增量一致性。
-    bi_mode 支持 'strict'（严格笔）或 'new'（新笔）两种成笔模式。
+    生产规则只允许严格笔。
     """
 
-    def __init__(self, bi_mode: str = 'strict'):
+    def __init__(self):
         self.bis: List[BI] = []
         self.fxs: List[FX] = []
         self.confirmed_bis: List[BI] = []
         self.pending_bi: Optional[BI] = None
         self.bi_index: int = 0
         self.cl_klines: List[CLKline] = []
-        self.bi_mode = bi_mode  # 'strict' (严格笔) 或 'new' (新笔)
         self._last_kline_snapshot: Optional[tuple] = None
         # 增量字段必须在此初始化：calculate() 里 _try_incremental_extend 先于
         # _update_prefix_fingerprint（唯一赋值入口）调用，否则首次调用 AttributeError。
@@ -101,27 +100,16 @@ class BiCalculator:
     def _check_stroke_validity(self, fx1: FX, fx2: FX) -> bool:
         """检查两个分型是否能构成有效的一笔。
 
-        成笔距离两种模式度量在不同坐标空间：
-          strict 严格笔：顶底之间间隔足够的「独立(包含处理后)缠论K线」
-              ⟺ 合并缠论K线坐标 ``fx.k.index`` 距离 ≥4。
-          new   新笔：顶峰原始K线与底谷原始K线之间(不含两端)、「不考虑包含
-              关系」间隔足够的原始K线 ⟺ 原始K线坐标距离 ≥4。
+        顶底之间必须间隔足够的独立（包含处理后）缠论 K 线，即合并
+        缠论 K 线坐标 ``fx.k.index`` 距离至少为 4。
         """
         if fx1.type == fx2.type:
             return False
 
-        if self.bi_mode == 'strict':
-            if fx2.k.index <= fx1.k.index:
-                return False
-            if (fx2.k.index - fx1.k.index) < 4:
-                return False
-        else:
-            s1 = self._extreme_src_index(fx1)
-            s2 = self._extreme_src_index(fx2)
-            if s2 <= s1:
-                return False
-            if (s2 - s1) < 4:
-                return False
+        if fx2.k.index <= fx1.k.index:
+            return False
+        if (fx2.k.index - fx1.k.index) < 4:
+            return False
 
         if fx1.type == 'ding':
             if fx2.val >= fx1.val:
@@ -131,21 +119,6 @@ class BiCalculator:
                 return False
 
         return True
-
-    @staticmethod
-    def _extreme_src_index(fx: FX) -> int:
-        """新笔成笔距离用：分型「极值原始K线」的原始坐标 index。
-
-        顶分型→峰缠论K线内 h 最大的原始K线 index；底分型→谷缠论K线内 l 最小的
-        原始K线 index。即取顶分型中最高K线 / 底分型的最低K线，落在原始K线坐标系
-        (非合并缠论K线序号)。无原始K线明细时退回 ``k_index`` 兜底。
-        """
-        srcs = fx.k.klines
-        if not srcs:
-            return fx.k.k_index
-        if fx.type == 'ding':
-            return max(srcs, key=lambda k: k.h).index
-        return min(srcs, key=lambda k: k.l).index
 
     @staticmethod
     def _is_more_extreme(new_fx: FX, old_fx: FX) -> bool:

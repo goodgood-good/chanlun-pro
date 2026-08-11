@@ -37,14 +37,14 @@ from chanlun.exchange.price_basis import (
 __tz = pytz.timezone("Asia/Shanghai")
 
 
-def _get_env(new_key: str, legacy_key: str = None):
-    # 优先读取长桥当前环境变量；如果用户还在沿用旧的 LONGPORT_*，这里继续兼容。
-    return os.getenv(new_key) or (os.getenv(legacy_key) if legacy_key else None)
+def _get_env(key: str):
+    # 生产配置只接受当前 LONGBRIDGE_* 命名空间。
+    return os.getenv(key)
 
 
-def _get_env_bool(new_key: str, legacy_key: str = None, default: bool = False) -> bool:
+def _get_env_bool(key: str, default: bool = False) -> bool:
     # SDK 的布尔配置通常通过环境变量传入，这里统一做一次字符串到 bool 的转换。
-    value = _get_env(new_key, legacy_key)
+    value = _get_env(key)
     if value is None:
         return default
     return value.lower() == "true"
@@ -60,24 +60,23 @@ def _env_int(key: str, default: int) -> int:
 
 
 def _build_longbridge_config() -> Config:
-    """
-    优先使用长桥新环境变量，兼容旧 LONGPORT_* 配置与新旧 SDK 初始化方法。
-    """
-    app_key = _get_env("LONGBRIDGE_APP_KEY", "LONGPORT_APP_KEY")
-    app_secret = _get_env("LONGBRIDGE_APP_SECRET", "LONGPORT_APP_SECRET")
-    access_token = _get_env("LONGBRIDGE_ACCESS_TOKEN", "LONGPORT_ACCESS_TOKEN")
+    """按当前长桥 SDK 与 LONGBRIDGE_* 环境变量构建配置。"""
+    app_key = _get_env("LONGBRIDGE_APP_KEY")
+    app_secret = _get_env("LONGBRIDGE_APP_SECRET")
+    access_token = _get_env("LONGBRIDGE_ACCESS_TOKEN")
 
-    http_url = _get_env("LONGBRIDGE_HTTP_URL", "LONGPORT_HTTP_URL")
-    quote_ws_url = _get_env("LONGBRIDGE_QUOTE_WS_URL", "LONGPORT_QUOTE_WS_URL")
-    trade_ws_url = _get_env("LONGBRIDGE_TRADE_WS_URL", "LONGPORT_TRADE_WS_URL")
-    enable_overnight = _get_env_bool("LONGBRIDGE_ENABLE_OVERNIGHT", "LONGPORT_ENABLE_OVERNIGHT", False)
+    http_url = _get_env("LONGBRIDGE_HTTP_URL")
+    quote_ws_url = _get_env("LONGBRIDGE_QUOTE_WS_URL")
+    trade_ws_url = _get_env("LONGBRIDGE_TRADE_WS_URL")
+    enable_overnight = _get_env_bool("LONGBRIDGE_ENABLE_OVERNIGHT", False)
     enable_print_quote_packages = _get_env_bool(
-        "LONGBRIDGE_PRINT_QUOTE_PACKAGES", "LONGPORT_PRINT_QUOTE_PACKAGES", True
+        "LONGBRIDGE_PRINT_QUOTE_PACKAGES", True
     )
-    log_path = _get_env("LONGBRIDGE_LOG_PATH", "LONGPORT_LOG_PATH")
+    log_path = _get_env("LONGBRIDGE_LOG_PATH")
 
-    # 新版 SDK 优先走 from_apikey；这样可以显式传入 host / ws / 其他开关，避免不同版本行为差异。
-    if hasattr(Config, "from_apikey") and app_key and app_secret and access_token:
+    # 显式凭证允许同时传入接入点与运行开关。
+    credentials = (app_key, app_secret, access_token)
+    if all(credentials):
         return Config.from_apikey(
             app_key,
             app_secret,
@@ -90,26 +89,11 @@ def _build_longbridge_config() -> Config:
             log_path=log_path,
         )
 
-    # 某些版本只提供 from_apikey_env，会自行从环境变量读取凭证与接入点。
-    if hasattr(Config, "from_apikey_env"):
-        return Config.from_apikey_env()
-
-    # 再兼容更老的 SDK 版本；如果没有这个方法，会继续走最下方的构造函数初始化。
-    if hasattr(Config, "from_env"):
-        return Config.from_env()
-
-    # 兜底直接实例化，兼容不提供类方法的 SDK 版本。
-    return Config(
-        app_key=app_key,
-        app_secret=app_secret,
-        access_token=access_token,
-        http_url=http_url,
-        quote_ws_url=quote_ws_url,
-        trade_ws_url=trade_ws_url,
-        enable_overnight=enable_overnight,
-        enable_print_quote_packages=enable_print_quote_packages,
-        log_path=log_path,
-    )
+    if any(credentials):
+        raise RuntimeError(
+            "Longbridge credentials must be configured as a complete set"
+        )
+    return Config.from_apikey_env()
 
 
 class RateLimiter:
@@ -149,11 +133,7 @@ class _PreemptiveQuotaExhausted(Exception):
 
 
 def _quota_exhausted_advice(symbol) -> str:
-    """按 LB symbol 的市场后缀返回针对性的 fallback 建议。
-
-    旧实现硬编码 "考虑切到 alpaca: 设 config.US_HISTORY_KLINE_SOURCE = 'alpaca'"
-    会误导港股/A 股用户——alpaca 仅美股；这里按 .HK / .US / .SH/.SZ/.BJ 分支。
-    """
+    """按 LB symbol 的市场后缀返回可用的数据源建议。"""
     if not isinstance(symbol, str) or not symbol:
         return "考虑等待月初配额重置，或切到非长桥数据源"
     upper = symbol.upper()
@@ -218,9 +198,7 @@ class ExchangeChangQiao(Exchange):
         # market 调 all_stocks 都返回同一份美股数据，导致 web 搜索框 A 股/港股全是美股标的。
         # 改为按 market 维度分桶缓存，并支持显式传入 market 区分。
         self.stock_list_cache: Dict[str, List[Dict]] = {}
-        # 由 get_exchange 在创建实例后注入，标识"当前调用来自哪个 market"。
-        # 不传时 all_stocks 兜底走 US（保留原行为，避免外部裸调用 ExchangeChangQiao() 后行为突变）。
-        self.default_market: str = "us"
+        self._alpaca_instance = None
 
         # 线程池配置
         # 建议设置在 8-16 之间。过高可能导致 API 触发流控限制 (Rate Limit)
@@ -438,15 +416,18 @@ class ExchangeChangQiao(Exchange):
 
     @classmethod
     def _to_lb_symbol(cls, code: str) -> str:
-        """项目内部 code → 长桥 symbol。无法识别的格式原样返回（向后兼容）。"""
-        if not code or "." not in code:
-            return code
+        """把现行项目代码转换为长桥 symbol，并拒绝未知格式。"""
+        if type(code) is not str or not code or "." not in code:
+            raise ValueError("invalid Longbridge symbol")
         head, tail = code.split(".", 1)
-        # 已经是 <code>.<exchange> 形式（美股 TSLA.US, 或调用方主动传长桥格式）
-        if head not in cls._PREFIX_TO_LB_SUFFIX:
+        if head in cls._PREFIX_TO_LB_SUFFIX:
+            if not tail:
+                raise ValueError("invalid Longbridge symbol")
+            return f"{tail}.{cls._PREFIX_TO_LB_SUFFIX[head]}"
+        suffix = code.rsplit(".", 1)[1].upper()
+        if suffix in {"US", "HK", "SH", "SZ"}:
             return code
-        # 项目侧 KH.00700 → 长桥 00700.HK; A 股同理。
-        return f"{tail}.{cls._PREFIX_TO_LB_SUFFIX[head]}"
+        raise ValueError("unsupported Longbridge symbol market")
 
     @classmethod
     def _market_of_code(cls, code: str) -> str:
@@ -456,16 +437,22 @@ class ExchangeChangQiao(Exchange):
           A 股  SH.600519 / SZ.000001  → "a"
           港股  KH.00700               → "hk"
           美股  TSLA.US                → "us"
-        未识别格式兜底返回 "us"（与原 default_market 默认值保持一致）。
         """
-        if not code or "." not in code:
-            return "us"
+        if type(code) is not str or not code or "." not in code:
+            raise ValueError("invalid project symbol")
         head = code.split(".", 1)[0].upper()
         if head in ("SH", "SZ"):
             return "a"
         if head == "KH":
             return "hk"
-        return "us"
+        suffix = code.rsplit(".", 1)[1].upper()
+        if suffix in ("SH", "SZ"):
+            return "a"
+        if suffix == "HK":
+            return "hk"
+        if suffix == "US":
+            return "us"
+        raise ValueError("unsupported project symbol market")
 
     @classmethod
     def _from_lb_symbol(cls, symbol: str) -> str:
@@ -571,17 +558,16 @@ class ExchangeChangQiao(Exchange):
             )
         return []
 
-    def all_stocks(self, market: str = None):
+    def all_stocks(self, market: str):
         """获取指定 market 的全量 symbol 列表。
 
-        :param market: 可选；项目内的 market 标识（"a"/"hk"/"us" 等）。不传则使用
-            ``self.default_market``（由 ``get_exchange`` 注入）。这是为了兼容 ``Exchange``
-            基类无参签名，同时避免历史 bug——同一个长桥单例被三个市场共用，原实现写死
-            ``Market.US`` 导致 A 股/港股的 ``all_stocks`` 都返回美股列表。
+        :param market: 项目内的 market 标识（"a"/"hk"/"us"）。
 
         缓存策略：按 market 分桶，避免互相污染。
         """
-        market_key = (market or self.default_market or "us").lower()
+        if type(market) is not str or market.lower() not in {"a", "hk", "us"}:
+            raise ValueError("unsupported Longbridge stock-list market")
+        market_key = market.lower()
 
         cached = self.stock_list_cache.get(market_key)
         if cached is not None:
@@ -620,13 +606,8 @@ class ExchangeChangQiao(Exchange):
                 return self._fallback_all_stocks(market_key)
             return []
 
-    def now_trading(self, market="us"):
-        """
-        判断该 market 当前是否交易时间。
-
-        cq(@fun.singleton)被 us/hk 共享同一实例, 原实现硬编码 Market.US → 港股(默认
-        EXCHANGE_HK=cq)盘中恒被判成美股时段。按 market 选对应 trading_session + 本地时区判定。
-        """
+    def now_trading(self, market: str):
+        """按市场对应的交易时段和本地时区判断当前是否开市。"""
         if pytz is None:
             return False
 
@@ -634,7 +615,9 @@ class ExchangeChangQiao(Exchange):
             "us": (Market.US, "America/New_York"),
             "hk": (Market.HK, "Asia/Hong_Kong"),
         }
-        lb_market, tz_name = _market_map.get(market, (Market.US, "America/New_York"))
+        if market not in _market_map:
+            raise ValueError("unsupported Longbridge trading-session market")
+        lb_market, tz_name = _market_map[market]
 
         def _do_check():
             try:
@@ -852,7 +835,7 @@ class ExchangeChangQiao(Exchange):
 
     def _get_alpaca(self):
         """惰性拿到 ExchangeAlpaca 单例（避免启动时无意义触网）。"""
-        if not hasattr(self, "_alpaca_instance") or self._alpaca_instance is None:
+        if self._alpaca_instance is None:
             from chanlun.exchange.exchange_alpaca import ExchangeAlpaca
             self._alpaca_instance = ExchangeAlpaca()
         return self._alpaca_instance
@@ -915,7 +898,7 @@ class ExchangeChangQiao(Exchange):
             else:
                 start_dt = start_dt.astimezone(tz)
         else:
-            lookback = get_lookback_timedelta(frequency, default=timedelta(days=30))
+            lookback = get_lookback_timedelta(frequency)
             start_dt = end_dt - lookback
 
         # 限制最大回看范围:不允许请求超过统一 lookback 表的历史数据
@@ -923,7 +906,7 @@ class ExchangeChangQiao(Exchange):
             args.get("allow_long_history") or args.get("no_lookback_limit")
         )
         if not allow_long_history:
-            max_lookback = get_lookback_timedelta(frequency, default=timedelta(days=30))
+            max_lookback = get_lookback_timedelta(frequency)
             # 裁剪基准用 end_dt(查询窗口的结束)而非 now_dt:历史区间查询(end_date 在过去)用
             # now_dt 会把 start 裁到"现在回看窗口"、导致 start>=end 直接返空(审查 H2)。改 end_dt
             # 后语义为"从 end_dt 往前最多 lookback",窗口宽度仍受限(不超拉),历史查询也成立。
@@ -1161,8 +1144,7 @@ class ExchangeChangQiao(Exchange):
         获取股票基础信息
         """
         try:
-            # 旧实现强行给 code 拼 ".US", 港股/A 股直接被拼成 "KH.00700.US" 之类的非法 symbol,
-            # static_info 返回空, 上层就以为"标的不存在"。这里改成走统一的 symbol 转换。
+            # 所有市场统一通过 Longbridge symbol 转换，避免市场后缀污染。
             symbol = self._to_lb_symbol(code)
             infos = self._quote_call(lambda: self._quote_ctx().static_info([symbol]))
             if not infos:
@@ -1271,15 +1253,13 @@ class ExchangeChangQiaoMarketView:
     def market(self) -> str:
         return self._market
 
-    @property
-    def default_market(self) -> str:
-        return self.market
+    def all_stocks(self):
+        return self._backend.all_stocks(self.market)
 
-    def all_stocks(self, market: str = None):
-        return self._backend.all_stocks(market or self.market)
-
-    def now_trading(self, market: str = None):
-        return self._backend.now_trading(market or self.market)
+    def now_trading(self, market: str):
+        if market != self.market:
+            raise ValueError("market view received a mismatched market")
+        return self._backend.now_trading(market)
 
     def __getattr__(self, name):
         return getattr(self._backend, name)

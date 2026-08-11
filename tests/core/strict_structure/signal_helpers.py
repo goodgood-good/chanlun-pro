@@ -25,14 +25,14 @@ def _trend_divergence(
     direction = "down" if point_type == "1buy" else "up"
     return DivergenceEvidence(
         divergence_id=stable_structure_id(
-            "chanlun-strict-divergence/v3",
+            "chanlun-strict-divergence",
             price_basis_revision,
             0,
             SourceKind.SEGMENT.value,
             "trend",
             direction,
-            "compare-unit",
-            "anchor-unit",
+            ("compare-unit",),
+            ("anchor-unit",),
         ),
         structural_level=0,
         source_kind=SourceKind.SEGMENT,
@@ -56,7 +56,7 @@ def _trend_divergence(
 def confirmed_point(
     *,
     point_type: str = "3buy",
-    price_basis_revision: str = "test-raw-v1",
+    price_basis_revision: str = "test-raw",
 ) -> StrictPointEvidence:
     side = "buy" if point_type.endswith("buy") else "sell"
     anchor_at = BASE

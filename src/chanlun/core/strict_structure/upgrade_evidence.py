@@ -185,7 +185,7 @@ def _nine_segment_evidence(
         ),
     )
     evidence_id = stable_structure_id(
-        "chanlun-nine-segment-upgrade/v1",
+        "chanlun-nine-segment-upgrade",
         center.price_basis_revision,
         center.structural_level,
         center.center_id,
@@ -244,7 +244,7 @@ def _expansion_pair(
         )
     )
     evidence_id = stable_structure_id(
-        "chanlun-center-expansion/v1",
+        "chanlun-center-expansion",
         previous.price_basis_revision,
         previous.structural_level,
         previous.center_id,

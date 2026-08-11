@@ -37,7 +37,7 @@ def _point(point_type: str, *, point_id: str = "strict-point") -> StructuralPoin
         status="confirmed",
         variant="standard",
         source_frequency="1m",
-        price_basis_revision="provider-basis-v1",
+        price_basis_revision="provider-basis",
         tower="formal",
         recursive_level=0,
         anchor_at=AT,
@@ -86,16 +86,13 @@ def test_strict_collector_carries_point_identity_and_exact_point_type() -> None:
         {"TSLA.US": _StrictState((point,))},
         names={"TSLA.US": "Tesla"},
         holdings=set(),
-        max_pos=0,
     )
 
     assert event.bs_type == "3buy"
     assert event.side == "buy"
     assert event.kind == "strict_buy_point"
     assert event.evidence_id == point.point_id
-    assert event.identity == (
-        "strict_buy_point|TSLA.US|3buy|2026-08-05T10:00:00+08:00"
-    )
+    assert event.identity == ("strict_buy_point|TSLA.US|3buy|2026-08-05T10:00:00+08:00")
     assert event.signal_time == AT.isoformat(timespec="seconds")
 
 
@@ -107,7 +104,6 @@ def test_strict_collector_applies_high_level_gate_but_keeps_sell_points() -> Non
         {"TSLA.US": _StrictState((buy, sell), big="down")},
         names={"TSLA.US": "Tesla"},
         holdings=set(),
-        max_pos=0,
     )
 
     assert [(event.side, event.evidence_id) for event in events] == [("sell", "sell")]
@@ -290,11 +286,12 @@ def test_new_completed_bar_rebuilds_from_the_complete_authoritative_frame(
         def process_klines(self, frame):
             processed_lengths.append(len(frame))
 
-    def _runtime(_frequency, metadata):
+    def _runtime(_frequency, metadata, source_frame):
         return monitor_module._FrequencyRuntime(
             cd=_CD(),
             metadata=metadata,
             strict_config_revision="strict-revision",
+            source_frame=source_frame,
         )
 
     monkeypatch.setattr(state, "_new_runtime", _runtime)
@@ -360,11 +357,12 @@ def test_monitor_runtime_uses_the_same_screening_profile_as_page_and_replay() ->
         "1m",
         # Deliberately parse through the public snapshot gate just as runtime does.
         strict_snapshot_price_metadata(metadata),
+        metadata,
     )
 
     config = runtime.cd.get_config()
     assert config["screening_structure_scope"] == "physical-timeframe-level-zero"
     assert config["screening_center_source"] == "segment"
     assert config["screening_recursive_structure"] is False
-    assert config["bi_rule"] == "old-stroke-cl-k-distance-v1"
+    assert config["stroke_rule"] == "strict-cl-k-distance"
     assert runtime.strict_config_revision == config["strict_config_revision"]

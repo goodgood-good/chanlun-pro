@@ -156,7 +156,7 @@ def test_parameter_paths_are_separate_and_permanently_live_disabled() -> None:
     }
     assert etf["parameters"]["strategic_slot_fraction"] == "0.1350"
     assert etf["parameters"]["strategic_exit_rule"] == (
-        "L0_THIRD_SELL_ONLY_OTHER_V3_EXITS_UNRESOLVED"
+        "L0_THIRD_SELL_ONLY_OTHER_EXITS_UNRESOLVED"
     )
     assert etf["parameters"]["full_system_eligible"] is False
     diagnostic = manifest["diagnostic_execution"]

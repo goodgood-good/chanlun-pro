@@ -1,11 +1,10 @@
 import asyncio
-import gc
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
 from cl_app.handlers import sse_stream
-from cl_app.services import chart_revalidate, cl_object_cache, constants, stock_list
+from cl_app.services import chart_revalidate, constants, stock_list
 
 
 def _wait_until(predicate, timeout=1.0):
@@ -120,7 +119,8 @@ def test_revalidation_timeout_is_observable_and_active_work_is_bounded(monkeypat
     monkeypatch.setattr(chart_revalidate, "_do_revalidate", blocking)
     monkeypatch.setattr(chart_revalidate, "_REVALIDATION_TIMEOUT_SECONDS", 0.05)
     monkeypatch.setattr(chart_revalidate, "_MAX_ACTIVE_REVALIDATIONS", 1)
-    chart_revalidate._reset_revalidation_state_for_tests()
+    assert chart_revalidate.shutdown_revalidation(wait=True) is True
+    chart_revalidate.start_revalidation_runtime()
 
     assert chart_revalidate.submit_revalidation("a", "X", "5m", {}, "K1") is True
     assert entered.wait(timeout=1)
@@ -146,7 +146,9 @@ def test_sse_recompute_timeout_does_not_block_ioloop_or_overqueue(monkeypatch):
 
         monkeypatch.setattr(sse_stream, "recompute_chart_data", blocking)
         monkeypatch.setattr(sse_stream, "_RECOMPUTE_TIMEOUT_SECONDS", 0.05)
-        sse_stream._reset_sse_runtime_for_tests(max_pending=1)
+        monkeypatch.setattr(sse_stream, "_RECOMPUTE_MAX_PENDING", 1)
+        assert sse_stream.shutdown_sse_runtime() is True
+        sse_stream.start_sse_runtime()
         pool = ThreadPoolExecutor(max_workers=1)
         ctx = {}
         args = ("a", "X", "1m", {}, "K")
@@ -179,11 +181,3 @@ def test_sse_recompute_timeout_does_not_block_ioloop_or_overqueue(monkeypatch):
             pool.shutdown(wait=True)
 
     asyncio.run(scenario())
-
-
-def test_cl_object_key_lock_registry_releases_unused_keys():
-    cl_object_cache.clear_all()
-    for index in range(200):
-        cl_object_cache._get_key_lock(f"key-{index}")
-    gc.collect()
-    assert len(cl_object_cache._key_locks) <= 1

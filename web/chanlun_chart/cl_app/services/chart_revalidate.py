@@ -136,6 +136,10 @@ def revalidation_status():
 def start_revalidation_runtime():
     global _closed
     with _lock:
+        if _active_attempts:
+            raise RuntimeError("cannot restart revalidation with active attempts")
+        _inflight.clear()
+        _timed_out.clear()
         _closed = False
 
 
@@ -157,13 +161,3 @@ def shutdown_revalidation(wait=False, timeout=1.0):
                 break
             thread.join(remaining)
     return not any(thread.is_alive() for thread in threads)
-
-
-def _reset_revalidation_state_for_tests():
-    global _closed
-    with _lock:
-        if _active_attempts:
-            raise RuntimeError("cannot reset revalidation state while attempts are active")
-        _inflight.clear()
-        _timed_out.clear()
-        _closed = False

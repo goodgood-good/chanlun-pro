@@ -19,12 +19,6 @@ def test_bi_endpoint_change_changes_sig():
     assert compute_signature(a) != compute_signature(b)
 
 
-def test_new_mmd_changes_sig():
-    a = {"t": [1, 2], "mmds": []}
-    b = {"t": [1, 2], "mmds": [{"points": {"time": 2}}]}
-    assert compute_signature(a) != compute_signature(b)
-
-
 def test_empty_safe():
     assert isinstance(compute_signature({}), str)
     assert isinstance(compute_signature(None), str)

@@ -28,7 +28,7 @@ var TvIdxMACDBackend = (function () {
           } catch (e) { }
         }
         // 多级别: 按周期等价挑出本指标 study 自己的那个 widget(选不出/单图→首个,
-        // 保持旧行为与 V31 对 context 数字周期的修正); 避免误用别周期 widget 覆盖 interval。
+        // 保持旧行为与 current system 对 context 数字周期的修正); 避免误用别周期 widget 覆盖 interval。
         const ownIdx = pickPreferredWidgetIndex(
           tickerMatches.map(function (m) { return m.interval; }), rawInterval);
         if (ownIdx >= 0) preferredWidget = tickerMatches[ownIdx].widget;
@@ -49,20 +49,6 @@ var TvIdxMACDBackend = (function () {
           if (datafeed && !preferredDatafeeds.includes(datafeed)) {
             preferredDatafeeds.push(datafeed);
           }
-        }
-      }
-    }
-
-    if (!preferredWidget && window.tvWidget) {
-      preferredWidget = window.tvWidget;
-    }
-    if (window.tvDatafeed && !preferredDatafeeds.includes(window.tvDatafeed)) {
-      preferredDatafeeds.push(window.tvDatafeed);
-    }
-    if (window.GlobalTVDatafeeds && window.GlobalTVDatafeeds.length > 0) {
-      for (const datafeed of window.GlobalTVDatafeeds) {
-        if (datafeed && !preferredDatafeeds.includes(datafeed)) {
-          preferredDatafeeds.push(datafeed);
         }
       }
     }

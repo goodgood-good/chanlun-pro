@@ -95,35 +95,6 @@ function loadZiXuanSelect() {
   return { ZiXuan: sandbox.__ZiXuan, ajaxCalls, select };
 }
 
-function loadAiSelect() {
-  const select = selectableCollection();
-  function $(value, props) {
-    if (value === '#ai_frequencys' || value === select) return select;
-    if (value === '<option>') return optionNode(props || {});
-    return genericCollection();
-  }
-  const layui = {
-    form: { render() {} },
-    each(values, callback) { values.forEach((value, index) => callback(index, value)); },
-    use() {},
-  };
-  const sandbox = {
-    $,
-    layui,
-    market_frequencys: { a: ['d', '5m'] },
-    Utils: { get_market() { return 'a'; }, get_code() { return 'a:alpha'; } },
-    SafeHtml: { escapeText(value) { return String(value); }, renderMarkdown(value) { return String(value); } },
-    change_chart_ticker() {},
-    console: { log() {}, warn() {}, error() {} },
-  };
-  sandbox.window = sandbox;
-  sandbox.globalThis = sandbox;
-  vm.createContext(sandbox);
-  const source = fs.readFileSync(path.join(__dirname, '..', 'ai.js'), 'utf8');
-  vm.runInContext(source + '\n;globalThis.__AI = AI;', sandbox, { filename: 'ai.js' });
-  return { AI: sandbox.__AI, select };
-}
-
 test('watchlist group initialization replaces options instead of duplicating them', () => {
   const h = loadZiXuanSelect();
   const groups = [{ name: 'Core' }, { name: 'Watch' }];
@@ -134,13 +105,4 @@ test('watchlist group initialization replaces options instead of duplicating the
   h.ajaxCalls[1].success(groups);
 
   assert.deepEqual(h.select.options.map((item) => item.value), ['Core', 'Watch']);
-});
-
-test('AI frequency initialization replaces options instead of duplicating them', () => {
-  const h = loadAiSelect();
-
-  h.AI.init_ai_opts();
-  h.AI.init_ai_opts();
-
-  assert.deepEqual(h.select.options.map((item) => item.value), ['d', '5m']);
 });

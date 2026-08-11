@@ -9,25 +9,18 @@ import json
 import math
 import datetime
 import time
-import threading
 from pathlib import Path
-from threading import Semaphore
-from typing import Dict
 from flask import Blueprint, current_app, request
 from flask_login import login_required
 
 from chanlun import fun
 from chanlun.market import Market
 from chanlun.cl_utils import (
-    kcharts_frequency_h_l_map,
     query_cl_chart_config,
-    web_batch_get_cl_datas,
 )
 from chanlun.persistence.db import db
 from chanlun.exchange import get_exchange
-from chanlun.exchange.lb_priority import lb_low_priority
 from chanlun.tools.log_util import LogUtil
-from chanlun.tools.daemon_executor import DaemonExecutor
 
 from ..services.constants import (
     frequency_maps,
@@ -42,52 +35,13 @@ from ..services.last_chart_state import record_user_request
 tv_bp = Blueprint("tv", __name__)
 
 # 图表缓存、symbols 预加载、跨周期 MACD 等基础设施均已迁至 services 子包，
-# 以下 re-export 保持本模块内部引用不变。
 from ..services.chart_cache import (  # noqa: E402
-    _CACHE_REVALIDATION_INTERVAL,
     _build_cache_key,
-    _build_chart_cache_entry,
-    _cache_entry_recently_validated,
-    _chart_cache_disk_executor,
-    _full_snapshot_is_stale,
     _get_chart_cache_entry,
-    _get_chart_cache_entry_ram_only,
-    _is_negatively_cached,
-    _mark_chart_cache_validated,
-    _mark_negative_cache,
-    _normalize_cache_entry,
-    _persist_chart_cache_async,
     _set_chart_cache_entry,
-    _stable_hash,
     cache_lock,
-    chart_data_cache,
     evaluate_cache_for_tv_history,
 )
-
-
-# ---------------------------------------------------------------------------
-# 批量预热活动注册表（service 层，与 symbols.py PrewarmManager 协作）
-# ---------------------------------------------------------------------------
-from ..services.prewarm_status import (  # noqa: E402
-    is_batch_prewarm_active,
-    mark_batch_prewarm_active,
-)
-
-_MAX_PREWARMED_SIZE = 50  # prewarmed 集合上限，防止线程异常导致无限增长
-# 已"在飞行中"的 prewarm cache_key 集合，避免同一个 key 被多个 prewarm 任务重复计算。
-# 设计上始终通过 discard 移除，size 不会超过同时 in-flight 的预热任务数（极小）。
-chart_data_cache_stats = {"prewarmed": set()}
-# 用户实际同时打开的 4 个周期（界面默认布局）。砍掉 15/60/1W 后单标的预热从 ~20s 降到 ~5s。
-# 如果将来用户启用别的周期，TV chart 自己的 first=true 请求会触发计算，不会丢功能。
-COMMON_INTERVALS = ["1", "5", "30", "1D"]
-
-# Prewarm 全局并发限制：xtquant native 不是线程安全的，且每次启动 prewarm 会拉 7 个周期，
-# 多个 prewarm 线程并发会直接撞 BSON 断言。这里用信号量限制全局只有 1 个 prewarm 在飞行。
-_PREWARM_MAX_CONCURRENT = 1
-_prewarm_semaphore = Semaphore(_PREWARM_MAX_CONCURRENT)
-# 记录最近一次 prewarm 的目标 symbol，用户快速切换时旧任务可主动放弃。
-_prewarm_latest_target = {"key": None}
-_prewarm_target_lock = threading.Lock()
 
 
 # ---------------------------------------------------------------------------
@@ -95,8 +49,8 @@ _prewarm_target_lock = threading.Lock()
 # ---------------------------------------------------------------------------
 # 前端按 index 取 c/o/h/l/v[i] 与 macd_*[i]/higher_macd_*[i]（上界 = t.length），任一列短于 t →
 # 越界处取到 undefined → 静默 NaN（K 线缺口 / MACD 面板空洞，无异常无日志，最难排查）。正常计算路径
-# 恒等长，但跨版本 / 半态磁盘冷层 entry 经 slice / 合并后可能错位（审查 F-1/MED-3）。形态对象数组
-# （fxs/bis/mmds/...）长度本就 != bar 数，不在此列。
+# 恒等长，但不完整磁盘缓存经 slice / 合并后可能错位。基础形态对象数组
+# （fxs/bis/xds）长度本就 != bar 数，不在此列。
 _TV_VALUE_COLUMNS = (
     "c", "o", "h", "l", "v",
     "macd_dif", "macd_dea", "macd_hist", "macd_area",
@@ -119,71 +73,21 @@ def _align_value_columns_to_t(cl_chart_data, symbol="", resolution=""):
             )
             cl_chart_data[_col_k] = list(_col[:_n_bars]) + [None] * max(0, _n_bars - len(_col))
 
-# 2026-04 修复：prewarm 入口去重（dedupe）。
-# 问题：用户界面上 4 个面板看同一标的不同周期时，4 个 first=true 几乎同时进来，
-# 每个 first=true 都会触发一次 prewarm_common_intervals → 启动 4 个预热线程；
-# 全局信号量只放过去 1 个跑、其余 3 个 skip 掉，但每次还是会读锁、调用 _stable_hash、
-# 写 _prewarm_latest_target，浪费 CPU；更糟的是，4 个 prewarm 各自 hold 一段
-# semaphore 等待时间，"哪个先抢到 semaphore"是随机的，会反复打断 _is_still_latest 检查。
-#
-# 修复：记录每个 (market, code, cl_config_hash) 最近一次 prewarm 的启动时间戳，
-# 30 秒内同 target 再来直接 return，连线程都不启动。
-# 30s 是经验值：用户切回同标的的频率通常 > 30s（除非主动反复切换），
-# 而 4 面板齐发的 first=true 时间窗口在 ~100ms 内，30s 远超这个窗口，足够去重。
-_PREWARM_DEDUPE_TTL_SECONDS = 30.0
-_prewarm_recent_targets: Dict[str, float] = {}
-_prewarm_dedupe_lock = threading.Lock()
-
-
-# ---------------------------------------------------------------------------
-# 用户活跃度跟踪（service 层，供 symbols.py 的批量预热让位用）
-# ---------------------------------------------------------------------------
-from ..services.user_activity import (  # noqa: E402
-    _get_last_user_request_time,
-    _get_user_recent_codes,
-    _mark_user_request,
-)
+from ..services.user_activity import _mark_user_request  # noqa: E402
 # stock_list 服务：symbols 预加载、缓存、读取
 from ..services.stock_list import (  # noqa: E402
-    _preload_single_exchange,
-    _process_stock_list,
-    _safe_all_stocks,
-    _trigger_async_refresh,
-    PRELOAD_EXCHANGES,
-    PRELOAD_INTERVAL_SECONDS,
-    PRELOAD_PARALLEL_WORKERS,
-    PRELOAD_STARTUP_DELAY_SECONDS,
     get_cached_processed_stock,
     get_cached_processed_stocks,
-    preload_symbols,
-    start_symbol_preload_thread,
-    stock_cache,
 )
-# chart_compute 服务：MACD 倍率 + 锁注册表 + chart 合并 + 主计算路径
+# chart_compute 服务：锁注册表 + chart 序列化 + 主计算路径
 from ..services.chart_compute import (  # noqa: E402
-    HIGHER_MACD_RATIO,
-    MARKET_30M_TO_D_RATIO,
-    MARKET_D_TO_W_RATIO,
-    _SafeLockRegistry,
-    _build_display_frequency_cl,
-    _merge_shape_lists,
-    _shape_time,
-    apply_higher_macd_to_chart_data,
-    apply_higher_zs_to_chart_data,
     chart_calc_locks,
-    compute_and_cache_chart_data,
     fetch_klines_and_compute_cl_data,
     market_now_trading,
-    should_lazy_apply_higher_macd,
-    serialize_chart_data_with_strict_runtime,
     slice_chart_data_to_window,
     strict_structure_history_fields,
     _decide_full_snapshot,
-    _miss_source_is_full,
     trim_future_bars,
-)
-from ..services.kline_recompute import (  # noqa: E402
-    prepend_klines_and_replace_cache,
 )
 from ..services.chart_revalidate import submit_revalidation  # noqa: E402
 
@@ -299,20 +203,15 @@ def _drawing_storage_name(chart_id: str, layout_id: str, symbol: str, resolution
     return f"drawings_{layout_id}_{chart_id}_{symbol}_{resolution}"
 
 
-def _legacy_drawing_storage_name(symbol: str, resolution: str):
-    return f"drawings_{symbol}_{resolution}"
-
-
-_USER_DRAWING_STATE_SCHEMA = "chanlun-user-drawings/v2"
+_USER_DRAWING_STATE_SCHEMA = "chanlun-user-drawings"
 
 
 def _empty_user_drawing_state():
     """Return the only drawing-state shape accepted by the current UI.
 
     Automatic Chanlun entities are reconstructed from chart data and must never
-    be restored from TradingView's line-tool persistence.  Older records mixed
-    those entities with manual drawings, so a schema-less state is deliberately
-    quarantined instead of guessed or migrated.
+    be restored from TradingView's line-tool persistence. Schema-less state is
+    rejected rather than inferred.
     """
 
     return {
@@ -323,7 +222,7 @@ def _empty_user_drawing_state():
 
 
 def _normalize_user_drawing_state(value):
-    """Normalize an explicit v2 manual-drawing state, or quarantine it."""
+    """Normalize an explicit current-schema manual-drawing state."""
 
     if not isinstance(value, dict):
         return None
@@ -340,251 +239,9 @@ def _normalize_user_drawing_state(value):
             for source_id, source_state in sources.items()
             if isinstance(source_state, dict)
         },
-        # The frontend intentionally persists no TradingView groups because a
-        # legacy group can retain references to filtered automatic entities.
+        # Automatic entities never belong to persisted TradingView groups.
         "groups": {},
     }
-
-
-# 单标的内 4 周期是否并行预热。
-# - HTTP 数据源（cq/polygon/futu）：True，并行可省 3-4 倍时间
-# - native 数据源（xtquant/tdx）：False，因为 native 客户端线程不安全
-# 启动时根据 market 决定，但 prewarm_common_intervals 会针对每次调用动态选。
-# fx(tdx 外汇)是 native 源(每次调用新建 TdxExHq_API 连接),并行只会徒增连接压力,
-# 故移出本集合,与 symbols.py 的 _NATIVE_SERIAL_MARKETS({a,futures,ny_futures,fx})对齐。
-_PREWARM_INTERVALS_PARALLEL_MARKETS = {"us", "hk", "currency", "currency_spot"}
-_PREWARM_PARALLEL_TIMEOUT_SECONDS = 60.0
-
-
-def _run_parallel_prewarm(intervals, compute, should_abort):
-    """Run one bounded parallel batch without joining hung dependency calls."""
-    interval_list = list(intervals)
-    if not interval_list:
-        return True
-    executor = DaemonExecutor(
-        max_workers=len(interval_list),
-        thread_name_prefix="PrewarmInterval",
-        max_pending=len(interval_list),
-    )
-    futures = []
-    deadline = time.monotonic() + max(
-        0.01, float(_PREWARM_PARALLEL_TIMEOUT_SECONDS)
-    )
-    try:
-        futures = [executor.submit(compute, interval) for interval in interval_list]
-        for future in futures:
-            try:
-                future.result(timeout=max(0.0, deadline - time.monotonic()))
-            except Exception as exc:
-                LogUtil.error(f"[tv_history] prewarm future error: {exc}")
-            if should_abort():
-                return False
-        return True
-    finally:
-        for future in futures:
-            future.cancel()
-        executor.shutdown(wait=False, cancel_futures=True)
-
-def prewarm_common_intervals(market, code, cl_config):
-    """
-    用户首次切到一个标的时，后台预热其他常用周期，让用户切周期时能秒命中缓存。
-
-    核心设计（重要！这个函数曾经是切标的卡顿的主犯）：
-    1. **入口去重**（2026-04 新增）：30 秒内同 (market, code, cl_config) 只触发 1 次预热。
-       4 面板齐发 first=true 时，只有第一个会真正启动预热线程，其余 3 个直接 return。
-    2. **HTTP 市场 4 周期并行**：us/hk 用 ThreadPoolExecutor 并发跑，总时长 = max(各周期) ≈ 5s，
-       而不是 sum(各周期) ≈ 20s。native 市场（a股 xtquant）保持串行避免 BSON 崩溃。
-    3. **激进让位**：只要用户在最近 N 秒内有过 firstDataRequest=true（即切了标的或周期），
-       本预热立即放弃。比 _is_still_latest 更敏感——后者只比 symbol，前者切周期也会让位。
-    4. **全局信号量**：只允许 1 个 prewarm 任务在跑，新的 prewarm 来直接 skip
-       （旧 prewarm 会通过 _is_still_latest 自然退出，新 prewarm 替补上来）。
-    """
-    # 2026-04 新增：如果当前 market 有 symbols.py 的批量预热在跑，旧版逐标的预热
-    # 让位，避免双方争抢同一份 chart_calc_locks 与上游 HTTP 配额。批量预热已经覆盖
-    # 该 cache_key（且写盘持久化），用户切回该标的时会从磁盘命中。
-    if is_batch_prewarm_active(market):
-        return
-
-    target_key = f"{market}:{code}:{_stable_hash(cl_config)}"
-
-    # 入口去重：30s 内同 target 已经触发过预热则直接 return。
-    # 注意这里只去重"启动调用"，真正预热任务跑完后会留在 chart_data_cache 里供命中，
-    # 与下面的 in-flight semaphore + _is_still_latest 是 3 道独立防线，互相不冲突。
-    now = time.time()
-    with _prewarm_dedupe_lock:
-        last_ts = _prewarm_recent_targets.get(target_key, 0.0)
-        if now - last_ts < _PREWARM_DEDUPE_TTL_SECONDS:
-            # 4 面板齐发的场景下，第 2~4 个 first=true 走到这里直接退出，避免日志刷屏。
-            # 只在调试时打 debug 日志，info 级别不打，否则正常使用每分钟会刷几十行。
-            LogUtil.debug(
-                f"[tv_history] Prewarm dedup-skip for {market}:{code} "
-                f"(last triggered {now - last_ts:.1f}s ago)"
-            )
-            return
-        _prewarm_recent_targets[target_key] = now
-        # 懒清理过期项，避免长期运行时无限增长
-        if len(_prewarm_recent_targets) > 500:
-            cutoff = now - _PREWARM_DEDUPE_TTL_SECONDS
-            stale = [k for k, t in _prewarm_recent_targets.items() if t < cutoff]
-            for k in stale:
-                _prewarm_recent_targets.pop(k, None)
-
-    # 记录本次 prewarm 启动时的"用户活跃时间快照"，后续判断"用户是否又有了新动作"
-    prewarm_start_user_ts = _get_last_user_request_time()
-
-    with _prewarm_target_lock:
-        _prewarm_latest_target["key"] = target_key
-
-    def _is_still_latest():
-        with _prewarm_target_lock:
-            return _prewarm_latest_target["key"] == target_key
-
-    def _user_acted_after_prewarm_start():
-        """用户在 prewarm 启动之后，又触发过新的 firstDataRequest=true（切标的或切周期）。"""
-        # 注意：必须 > 而不是 >=，因为本次触发 prewarm 的请求自己也会更新 _last_user_request_ts
-        return _get_last_user_request_time() > prewarm_start_user_ts + 0.1
-
-    def _compute_one_interval(interval: str, ex, tz_sh) -> bool:
-        """计算单个周期的缓存。返回 True 表示已写入或已存在。"""
-        if not _is_still_latest() or _user_acted_after_prewarm_start():
-            return False
-
-        cache_key = None
-        try:
-            freq = resolution_maps.get(interval, interval)
-            cache_key = _build_cache_key(market, code, freq, cl_config)
-
-            # 2026-04 修复：跳过已经确认无数据的周期，避免反复重算空 K 线。
-            # 典型场景：ZK.US 1m 周期长桥拉不到数据，之前每次 prewarm 都会再尝试一遍，
-            # 4 周期里有 1 个空 = 整个 prewarm 会卡住其它 3 个周期的并行槽位。
-            if _is_negatively_cached(cache_key):
-                LogUtil.debug(f"[prewarm] skip negatively-cached {market}:{code} interval={interval}")
-                return False
-
-            LogUtil.info(f"[prewarm] >>> {market}:{code} interval={interval}")
-
-            # 已在缓存或正在计算中则跳过
-            with cache_lock:
-                if cache_key in chart_data_cache or cache_key in chart_data_cache_stats["prewarmed"]:
-                    return True
-                if len(chart_data_cache_stats["prewarmed"]) >= _MAX_PREWARMED_SIZE:
-                    chart_data_cache_stats["prewarmed"].clear()
-                    LogUtil.warning(f"[tv_history] prewarmed 集合已达上限 {_MAX_PREWARMED_SIZE}，已清空")
-                chart_data_cache_stats["prewarmed"].add(cache_key)
-
-            # 用 chart_calc_locks 上的 per-key 锁，避免和用户的 tv_history 计算撞车（同一标的同周期不会双重计算）
-            with chart_calc_locks.get(cache_key):
-                # 二次检查：拿锁过程中可能用户的 first=true 请求已经填了缓存
-                with cache_lock:
-                    if cache_key in chart_data_cache:
-                        chart_data_cache_stats["prewarmed"].discard(cache_key)
-                        return True
-
-                if not _is_still_latest() or _user_acted_after_prewarm_start():
-                    with cache_lock:
-                        chart_data_cache_stats["prewarmed"].discard(cache_key)
-                    return False
-
-                kline_args = {
-                    'end_date': datetime.datetime.now(tz_sh).strftime("%Y-%m-%d %H:%M:%S")
-                }
-
-                to_frequency = None
-                if cl_config.get("enable_kchart_low_to_high") == "1":
-                    frequency_low, to_frequency = kcharts_frequency_h_l_map(market, freq)
-                    if frequency_low is not None and to_frequency is not None:
-                        with lb_low_priority():
-                            klines = ex.klines(code, frequency_low, **kline_args)
-                        cd, display_klines = _build_display_frequency_cl(
-                            market=market,
-                            code=code,
-                            fetched_klines=klines,
-                            fetched_frequency=frequency_low,
-                            display_frequency=freq,
-                            cl_config=cl_config,
-                        )
-                    else:
-                        with lb_low_priority():
-                            klines = ex.klines(code, freq, **kline_args)
-                        cd = web_batch_get_cl_datas(market, code, {freq: klines}, cl_config)[0]
-                        display_klines = klines
-                        to_frequency = None
-                else:
-                    with lb_low_priority():
-                        klines = ex.klines(code, freq, **kline_args)
-                    cd = web_batch_get_cl_datas(market, code, {freq: klines}, cl_config)[0]
-                    display_klines = klines
-
-                cl_chart_data = serialize_chart_data_with_strict_runtime(
-                    market=market,
-                    code=code,
-                    display_frequency=freq,
-                    display_klines=display_klines,
-                    legacy_cd=cd,
-                    legacy_config=cl_config,
-                )
-                if cl_chart_data is None:
-                    # 2026-04 修复：cl_chart_data 为空说明这个 cache_key 没数据，打负缓存防止反复重算
-                    _mark_negative_cache(cache_key)
-                    with cache_lock:
-                        chart_data_cache_stats["prewarmed"].discard(cache_key)
-                    return False
-
-                with cache_lock:
-                    _set_chart_cache_entry(cache_key, cl_chart_data, is_full_snapshot=True)
-                    chart_data_cache_stats["prewarmed"].discard(cache_key)
-                    LogUtil.debug(f"[tv_history] Pre-warmed cache for {market}:{code} interval {interval}")
-                return True
-        except Exception as e:
-            if cache_key is not None:
-                with cache_lock:
-                    chart_data_cache_stats["prewarmed"].discard(cache_key)
-            LogUtil.error(f"[tv_history] Pre-warm failed for {interval}: {e}")
-            return False
-
-    def _prewarm():
-        # 非阻塞获取信号量；获取不到说明已有 prewarm 在跑，本次直接放弃
-        if not _prewarm_semaphore.acquire(blocking=False):
-            LogUtil.info(f"[tv_history] Prewarm skipped (another in flight) for {market}:{code}")
-            return
-        try:
-            if not _is_still_latest():
-                return
-            ex = get_exchange(Market(market))
-            tz_sh = pytz.timezone("Asia/Shanghai")
-
-            use_parallel = market in _PREWARM_INTERVALS_PARALLEL_MARKETS
-            if use_parallel:
-                completed = _run_parallel_prewarm(
-                    COMMON_INTERVALS,
-                    lambda interval: _compute_one_interval(interval, ex, tz_sh),
-                    lambda: (
-                        _user_acted_after_prewarm_start()
-                        or not _is_still_latest()
-                    ),
-                )
-                if not completed:
-                    LogUtil.warning(
-                        f"[tv_history] Prewarm aborted (user acted) for {market}:{code}"
-                    )
-            else:
-                # native 市场（a 股等）：保持串行避免线程安全问题
-                for interval in COMMON_INTERVALS:
-                    if not _is_still_latest() or _user_acted_after_prewarm_start():
-                        LogUtil.warning(
-                            f"[tv_history] Prewarm aborted (user acted) for {market}:{code}"
-                        )
-                        return
-                    _compute_one_interval(interval, ex, tz_sh)
-                    time.sleep(0.1)  # 串行场景下小憩，避免对 native 接口持续压力
-        except Exception as e:
-            LogUtil.error(f"[tv_history] Pre-warm thread error: {e}")
-        finally:
-            _prewarm_semaphore.release()
-
-    t = threading.Thread(target=_prewarm, daemon=True, name="IntervalPrewarmThread")
-    t.start()
-    LogUtil.info(f"[tv_history] Started pre-warm thread for {market}:{code}")
 
 
 @tv_bp.route("/tv/config")
@@ -593,10 +250,7 @@ def tv_config():
     supportedResolutions = list(frequency_maps.values())
     return {
         "supports_search": True,
-        "supports_group_request": False,
         "supported_resolutions": supportedResolutions,
-        "supports_marks": True,
-        "supports_timescale_marks": True,
         "supports_time": False,
         "exchanges": [
             {"value": "a", "name": "沪深", "desc": "沪深A股"},
@@ -617,25 +271,6 @@ def tv_config():
             },
         ],
     }
-
-
-@tv_bp.route("/tv/symbol_info")
-@login_required
-def tv_symbol_info():
-    group = request.args.get("group")
-    try:
-        all_symbols = get_cached_processed_stocks(group)
-    except Exception:
-        ex = get_exchange(Market(group))
-        all_symbols = _safe_all_stocks(ex, group)
-
-    info = {
-        "symbol": [s["code"] for s in all_symbols],
-        "description": [s["name"] for s in all_symbols],
-        "exchange-listed": group,
-        "exchange-traded": group,
-    }
-    return info
 
 
 @tv_bp.route("/tv/symbols")
@@ -727,6 +362,7 @@ def tv_symbols():
         "full_name": f"{market}:{stocks['code']}",
         "description": stocks["name"],
         "exchange": market,
+        "listed_exchange": market,
         "type": market_types.get(market, "stock"),
         "session": market_session.get(market, "24x7"),
         "timezone": market_timezone.get(market, "Asia/Shanghai"),
@@ -953,35 +589,6 @@ def tv_search():
         )
     return infos
 
-def _lazy_writeback_htf(
-    cache_key, cl_chart_data, frequency, market, cl_config, symbol="", resolution=""
-):
-    """Cache-hit 但 chart_data 缺 higher_macd_* 时懒补算 HTF MACD 并回写缓存, 返回补算后的
-    chart_data(供本次响应用), 未补算返回原 cl_chart_data。
-
-    并发安全(M2/T0-2): 补算+回写在 cache_lock 内; apply 只对浅拷副本(dict())加顶层
-    higher_macd_* 键/整列替换, 不原地改共享 dict, 锁外 trim/SSE 迭代恒安全。
-    """
-    with cache_lock:
-        if not should_lazy_apply_higher_macd(cl_chart_data, frequency, market):
-            return cl_chart_data
-        LogUtil.debug(
-            f"[tv_history] cache hit but HTF missing/short, lazy-applying {symbol} {resolution}"
-        )
-        # R15-C1: 基于缓存 entry 当前 data 补算(而非请求入口 T0 读到的 cl_chart_data 陈旧快照),
-        # 否则并发写者(SSE/revalidate 持 chart_calc_locks 完成的全量重算)在 T0 后写入的新缠论
-        # 会被这里的回写整体覆盖(TOCTOU 数据丢失)。缓存缺 entry 时回退用传入快照。
-        _existing = _get_chart_cache_entry_ram_only(cache_key)
-        _base = (_existing or {}).get("data")
-        if _base is None:
-            _base = cl_chart_data
-        _patched = dict(_base)
-        if apply_higher_macd_to_chart_data(_patched, frequency, market, cl_config):
-            _is_full = (_existing or {}).get("is_full_snapshot", False)
-            _set_chart_cache_entry(cache_key, _patched, is_full_snapshot=_is_full)
-            return _patched
-        return cl_chart_data
-
 @tv_bp.route("/tv/history")
 @login_required
 def tv_history():
@@ -1176,7 +783,7 @@ def tv_history():
                 # TradingView UDF 翻页时下一次请求的 _to 正好等于上次的 cache_min_time,
                 # 用 <= 才能覆盖这种边界. 切片逻辑 bisect_left 是左闭右开, _to == min_time
                 # 时切片 [0:0] 仍为空, 语义一致.
-                # 不早返会触发 ex.klines + web_batch_get_cl_datas 共耗 300-500ms.
+                # 不早返会触发行情拉取和严格结构计算。
                 if (
                     is_range_request
                     and _to > 0
@@ -1224,17 +831,12 @@ def tv_history():
                 if _fetch_result is None:
                     return {"s": "no_data"}
                 cl_chart_data = _fetch_result["cl_chart_data"]
-                cd = _fetch_result["cd"]
+                _src_is_full = _fetch_result["is_full_snapshot"]
+                _cache_already_written = _fetch_result["cache_already_written"]
                 # D4-F1/F2: MISS 全量性与 entry 写入 is_full_snapshot 同口径(非range/cache_empty/prepend cd None→全量)。
-                _src_is_full = _miss_source_is_full(is_range_request, cache_miss_reason, cd is None)
 
-                # 跨周期 MACD (P5 third step)
-                _htf_applied = apply_higher_macd_to_chart_data(cl_chart_data, frequency, market, cl_config)
-                # P8 取代 P7：停用真实多周期叠加，高级别中枢改由 recursive_levels 产出
-                # apply_higher_zs_to_chart_data(cl_chart_data, market, code, frequency, cl_config)
-
-                if cd is not None:
-                    # 2026-07 修复(幽灵形态): 不再与 existing_entry 做 _merge_chart_data 合并。
+                if not _cache_already_written:
+                    # 全量重算结果直接替换 existing_entry，避免保留失效形态。
                     # 这里走到的都是 MISS 全量重算(cache_empty/cache_partial_snapshot/
                     # cache_stale_snapshot 等), cl_chart_data 本身就是基于完整回看窗口的
                     # 全量权威结果。existing_entry 可能是几分钟到几天前的陈旧快照——
@@ -1250,42 +852,8 @@ def tv_history():
                             # ⚠ 不再继承 existing_entry 的 is_full_snapshot:range-miss 是窄窗口结果,
                             # 继承会把"窄范围 merge 进旧全量"误标成完整快照,令 firstDataRequest 命中
                             # 只有几根 K 线的假全量(审查 H-1,目前仅靠 tail_gap 改道 prepend 侥幸不触发)。
-                            is_full_snapshot=(
-                                (not is_range_request)
-                                or cache_miss_reason == "cache_empty"
-                            ),
+                            is_full_snapshot=_src_is_full,
                         )
-
-                # prepend 路径在补完 higher_macd 后,需要把 cl_chart_data 重新写回 cache,
-                # 否则下次相同范围请求 hit 时拿到的还是无 higher_macd 的版本。
-                # M-2: 仅当 higher_macd 真被应用(_htf_applied=True)才回写——此回写纯为把新补的
-                # higher_macd 落盘(prepend 自身已落基础数据:changed 走 _set、unchanged 不变)。
-                # 无高周期倍率的周期(15m/60m/d/w/m 等)apply 返回 False → 跳过这次对未变数据的重复
-                # deepcopy+异步写盘(纯 IO);有倍率周期 apply 每次重算返 True 仍照常回写,无害不丢数据。
-                if cd is None and cl_chart_data is not None and _htf_applied:
-                    with cache_lock:
-                        _set_chart_cache_entry(cache_key, cl_chart_data, is_full_snapshot=True)
-
-                # firstDataRequest 成功后，后台预热其他常用周期的缓存
-                if firstDataRequest == "true" and _review_lock is None:
-                    prewarm_common_intervals(market, code, cl_config)
-
-        # Cache hit 路径 lazy 补算 HTF MACD:
-        # apply_higher_macd_to_chart_data 只在上面的 ``if not is_cache_hit`` 块里调,
-        # cache hit 时若 cache 内 chart_data 缺 ``higher_macd_*`` (旧版 prewarm 路径
-        # 漏调 apply、或 prepend 半态写入残留), 每次 hit 都会让 server 返回
-        # ``higher_macd_hist: []`` 给前端 — 前端 study 拿不到 HTF 数据。
-        # 这里 lazy 检测并即时补算 + 回写 cache, 一次修好后续 hit 都走快路径。
-        # M1: 仅对"确有高周期倍率"的 frequency 补算（should_lazy_apply_higher_macd
-        #     内已判定）。15m/60m 等无倍率周期 HTF 本就该缺失，旧逻辑只看长度不符
-        #     会让它们每次 polling 都误判为需补算 → 冗余重写缓存 + 异步写盘。
-        # M2: 补算 + 回写整体放进 cache_lock。apply_higher_macd 是对 cache 内共享
-        #     chart_data 的 in-place 修改，必须与 _persist_chart_cache_async 的
-        #     deepcopy 互斥；should_lazy 在锁内复查，并发请求只有一个真正补算。
-        if is_cache_hit and cl_chart_data is not None and not _needs_refresh:
-            cl_chart_data = _lazy_writeback_htf(
-                cache_key, cl_chart_data, frequency, market, cl_config, symbol, resolution
-            )
 
         # 方向1 (stale-while-revalidate): firstDataRequest 命中"过期全量快照"已即时
         # 返回旧快照(秒显), 这里派去重的后台重验证拉全新数据写回缓存, 经现有
@@ -1312,9 +880,7 @@ def tv_history():
         )
         _full_shape_snapshot = None
         if _emit_full_snapshot:
-            _shape_keys = ("fxs", "bis", "xds", "bi_zss", "xd_zss", "bcs", "mmds",
-                           "bi_mmds", "xd_mmds", "bi_bcs", "xd_bcs", "xd_zslx",
-                           "xd_zslx_lines", "recursive_levels", "higher_zs", "interval_nest")
+            _shape_keys = ("fxs", "bis", "xds")
             _full_shape_snapshot = {_k: cl_chart_data.get(_k) for _k in _shape_keys}
         if not is_cache_hit:
             _fxs_cnt = len(cl_chart_data.get("fxs", []))
@@ -1377,9 +943,7 @@ def tv_history():
             f"fxs={len(cl_chart_data.get('fxs', []))} "
             f"bis={len(cl_chart_data.get('bis', []))} "
             f"xds={len(cl_chart_data.get('xds', []))} "
-            f"bi_zss={len(cl_chart_data.get('bi_zss', []))} "
-            f"bcs={len(cl_chart_data.get('bcs', []))} "
-            f"mmds={len(cl_chart_data.get('mmds', []))}"
+            f"strict={_strict_history_fields.get('strict_structure_mode')}"
         )
 
         _elapsed_ms = (time.time() - _req_start_ts) * 1000
@@ -1410,21 +974,6 @@ def tv_history():
             "fxs": cl_chart_data.get("fxs", []),
             "bis": cl_chart_data.get("bis", []),
             "xds": cl_chart_data.get("xds", []),
-            "bi_zss": cl_chart_data.get("bi_zss", []),
-            "xd_zss": cl_chart_data.get("xd_zss", []),
-            "bcs": cl_chart_data.get("bcs", []),
-            "mmds": cl_chart_data.get("mmds", []),
-            # 拆分版买卖点/背驰(笔/段独立),前端按级别独立渲染 + 独立 toggle
-            "bi_mmds": cl_chart_data.get("bi_mmds", []),
-            "xd_mmds": cl_chart_data.get("xd_mmds", []),
-            "bi_bcs": cl_chart_data.get("bi_bcs", []),
-            "xd_bcs": cl_chart_data.get("xd_bcs", []),
-            # 原文化新增(③④/区间套):走势类型区间 + 递归层级 + 区间套链
-            "xd_zslx": cl_chart_data.get("xd_zslx", []),
-            "xd_zslx_lines": cl_chart_data.get("xd_zslx_lines", []),
-            "recursive_levels": cl_chart_data.get("recursive_levels", []),
-            "higher_zs": cl_chart_data.get("higher_zs", []),
-            "interval_nest": cl_chart_data.get("interval_nest"),
             "update": False if firstDataRequest == "true" else True,
             "full_snapshot": _emit_full_snapshot,
             **_strict_history_fields,
@@ -1438,136 +987,16 @@ def tv_history():
         }, 503
 
 
-@tv_bp.route("/tv/timescale_marks")
-@login_required
-def tv_timescale_marks():
-    symbol = request.args.get("symbol", "")
-    _from = _normalize_unix_ts(request.args.get("from"))
-    _to = _normalize_unix_ts(request.args.get("to"))
-    resolution = _normalize_resolution(request.args.get("resolution"))
-    market, code = _parse_tv_symbol(symbol)
-    if market is None or code is None:
-        return []
-    freq = resolution_maps.get(resolution)
-    if freq is None:
-        return []
-
-    order_type_maps = {
-        "buy": "买入",
-        "sell": "卖出",
-        "open_long": "买入开多",
-        "open_short": "买入开空",
-        "close_long": "卖出平多",
-        "close_short": "买入平空",
-    }
-    marks = []
-
-    orders = db.order_query_by_code(market, code)
-    for i in range(len(orders)):
-        o = orders[i]
-        _dt_int = fun.datetime_to_int(o["datetime"])
-        if _from <= _dt_int <= _to:
-            m = {
-                "id": i,
-                "time": _dt_int,
-                "color": (
-                    "red"
-                    if o["type"] in ["buy", "open_long", "close_short"]
-                    else "green"
-                ),
-                "label": (
-                    "B" if o["type"] in ["buy", "open_long", "close_short"] else "S"
-                ),
-                "tooltip": [
-                    f"{order_type_maps[o['type']]}[{o['price']}/{o['amount']}]",
-                    f"{'' if 'info' not in o else o['info']}",
-                ],
-                "shape": (
-                    "earningUp"
-                    if o["type"] in ["buy", "open_long", "close_short"]
-                    else "earningDown"
-                ),
-            }
-            marks.append(m)
-
-    other_marks = db.marks_query(market, code)
-    for i in range(len(other_marks)):
-        _m = other_marks[i]
-        if _m.frequency == "" or _m.frequency == freq:
-            if _from <= _m.mark_time <= _to:
-                marks.append(
-                    {
-                        "id": f"m-{i}",
-                        "time": int(_m.mark_time),
-                        "color": _m.mark_color,
-                        "label": _m.mark_label,
-                        "tooltip": _m.mark_tooltip,
-                        "shape": _m.mark_shape,
-                    }
-                )
-
-    return marks
-
-
-@tv_bp.route("/tv/marks")
-@login_required
-def tv_marks():
-    symbol = request.args.get("symbol", "")
-    _from = _normalize_unix_ts(request.args.get("from"))
-    _to = _normalize_unix_ts(request.args.get("to"))
-    resolution = _normalize_resolution(request.args.get("resolution"))
-    market, code = _parse_tv_symbol(symbol)
-    if market is None or code is None:
-        return []
-    freq = resolution_maps.get(resolution)
-    if freq is None:
-        return []
-
-    marks = []
-    price_marks = db.marks_query_by_price(market, code, start_date=_from)
-    for i in range(len(price_marks)):
-        _m = price_marks[i]
-        if _m.frequency == "" or _m.frequency == freq:
-            if _from <= _m.mark_time <= _to:
-                marks.append(
-                    {
-                        "id": f"m-{i}",
-                        "time": int(_m.mark_time),
-                        "color": _m.mark_color,
-                        "text": _m.mark_text,
-                        "label": _m.mark_label,
-                        "labelFontColor": _m.mark_label_font_color,
-                        "minSize": _m.mark_min_size,
-                    }
-                )
-
-    return marks
-
-
-# TradingView charting_library 是第三方 JS 库，无法注入 CSRF token，
-# 这些路由通过 @login_required 保证只有登录用户可访问，CSRF 风险可控。
-@tv_bp.route("/tv/del_marks", methods=["POST"])
-@login_required
-def tv_del_marks():
-    symbol = request.form["symbol"]
-    market, code = _parse_tv_symbol(symbol)
-    if market is None or code is None:
-        return {"status": "ok"}
-
-    db.marks_del_all_by_code(market, code)
-
-    return {"status": "ok"}
-
-
 @tv_bp.route("/tv/time")
 @login_required
 def tv_time():
     return fun.datetime_to_int(datetime.datetime.now())
 
 
-@tv_bp.route("/tv/<version>/charts", methods=["GET", "POST", "DELETE"])
+@tv_bp.route("/tv/<api_revision>/charts", methods=["GET", "POST", "DELETE"])
 @login_required
-def tv_charts(version):
+def tv_charts(api_revision):
+    del api_revision  # TradingView storage API 路径契约要求保留该段。
     client_id = str(request.args.get("client"))
     user_id = str(request.args.get("user"))
 
@@ -1638,9 +1067,10 @@ def tv_charts(version):
             return {"status": "ok"}
 
 
-@tv_bp.route("/tv/<version>/study_templates", methods=["GET", "POST", "DELETE"])
+@tv_bp.route("/tv/<api_revision>/study_templates", methods=["GET", "POST", "DELETE"])
 @login_required
-def tv_study_templates(version):
+def tv_study_templates(api_revision):
+    del api_revision  # TradingView storage API 路径契约要求保留该段。
     client_id = str(request.args.get("client"))
     user_id = str(request.args.get("user"))
 
@@ -1676,9 +1106,10 @@ def tv_study_templates(version):
         return {"status": "ok"}
 
 
-@tv_bp.route("/tv/<version>/drawings", methods=["GET", "POST"])
+@tv_bp.route("/tv/<api_revision>/drawings", methods=["GET", "POST"])
 @login_required
-def tv_drawings(version):
+def tv_drawings(api_revision):
+    del api_revision  # TradingView storage API 路径契约要求保留该段。
     client_id = str(request.args.get("client"))
     user_id = str(request.args.get("user"))
     chart_id = request.args.get("chart", "default")
@@ -1687,8 +1118,6 @@ def tv_drawings(version):
     resolution = request.args.get("resolution", "")
 
     drawing_name = _drawing_storage_name(chart_id, layout_id, symbol, resolution)
-    legacy_drawing_name = _legacy_drawing_storage_name(symbol, resolution)
-
     if request.method == "POST":
         payload = request.get_json(silent=True)
         if request.is_json and not isinstance(payload, dict):
@@ -1705,15 +1134,10 @@ def tv_drawings(version):
             }, 400
         normalized = _normalize_user_drawing_state(content)
         if normalized is None:
-            # Old tabs can keep executing the pre-v2 JavaScript after the app
-            # has been upgraded.  A 2xx acknowledgement stops their retry/log
-            # loop, while ignored=true makes the quarantine observable.  Most
-            # importantly, the contaminated legacy payload never reaches DB.
             return {
-                "status": "ok",
-                "ignored": True,
-                "reason_code": "LEGACY_DRAWING_STATE_QUARANTINED",
-            }
+                "status": "error",
+                "message": "unsupported drawing state schema",
+            }, 400
         db.tv_chart_save(
             "drawing",
             client_id,
@@ -1727,33 +1151,6 @@ def tv_drawings(version):
 
     if request.method == "GET":
         drawing = db.tv_chart_get_by_name("drawing", drawing_name, client_id, user_id)
-        if drawing is None:
-            legacy_drawing = db.tv_chart_get_by_name(
-                "drawing", legacy_drawing_name, client_id, user_id
-            )
-            legacy_state = None
-            if legacy_drawing is not None:
-                try:
-                    legacy_state = _normalize_user_drawing_state(
-                        json.loads(legacy_drawing.content)
-                    )
-                except Exception:
-                    legacy_state = None
-            # Only an already-versioned manual state may cross the old key
-            # boundary.  Schema-less records are the source of the QQQ 1m
-            # orange shapes leaking into the 30m canvas and must stay inert.
-            if legacy_state is not None:
-                db.tv_chart_save(
-                    "drawing",
-                    client_id,
-                    user_id,
-                    drawing_name,
-                    json.dumps(legacy_state, ensure_ascii=False, sort_keys=True),
-                    symbol,
-                    resolution,
-                )
-                return {"status": "ok", "data": legacy_state}
-
         if drawing:
             try:
                 data = _normalize_user_drawing_state(json.loads(drawing.content))

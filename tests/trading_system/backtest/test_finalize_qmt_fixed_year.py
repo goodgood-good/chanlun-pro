@@ -39,7 +39,7 @@ def test_fixed_year_sector_facts_use_five_minute_first_composite(
             "source_base_frequency": "5m",
             "derived_frequency": "30m",
             "sector_thirty_minute_derivation_contract": (
-                "SIX_CONTIGUOUS_COMPLETED_5M_COMPOSITE_BARS_V1"
+                "SIX_CONTIGUOUS_COMPLETED_5M_COMPOSITE_BARS"
             ),
         }
         return result

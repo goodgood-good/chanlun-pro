@@ -254,29 +254,3 @@ def test_network_failure_log_never_exposes_webhook_token(monkeypatch):
     assert DingTalkWebhookNotifier(webhook=webhook).send("t", ["x"]) is False
     assert warnings
     assert "never-log-this-sensitive-token" not in warnings[0]
-
-def test_iter_hook_commands_malformed_degrades_empty():
-    """F1-NOTIF-4: settings.json 合法 JSON 但畸形结构(hooks/Notification=null 或非预期类型)
-    必须降级空, 不得抛 AttributeError/TypeError 逃逸 discover→ClaudeHookNotifier.__init__→监控崩。"""
-    from chanlun.notifications import _iter_hook_commands
-
-    assert list(_iter_hook_commands({"hooks": None}, "Notification")) == []
-    assert list(_iter_hook_commands({"hooks": {"Notification": None}}, "Notification")) == []
-    assert list(_iter_hook_commands({"hooks": {"Notification": {"x": 1}}}, "Notification")) == []
-    assert list(_iter_hook_commands(None, "Notification")) == []
-    assert list(_iter_hook_commands({"hooks": {"Notification": [None, "s", {}]}}, "Notification")) == []
-
-
-def test_iter_hook_commands_valid_returns_command():
-    from chanlun.notifications import _iter_hook_commands
-
-    settings = {"hooks": {"Notification": [{"hooks": [{"type": "command", "command": "notify.sh"}]}]}}
-    assert list(_iter_hook_commands(settings, "Notification")) == ["notify.sh"]
-
-
-def test_discover_malformed_settings_returns_none(tmp_path):
-    from chanlun.notifications import discover_claude_notification_command
-
-    p = tmp_path / "settings.json"
-    p.write_text('{"hooks": null}', encoding="utf-8")  # 合法 JSON 但 hooks=null
-    assert discover_claude_notification_command(settings_path=str(p)) is None

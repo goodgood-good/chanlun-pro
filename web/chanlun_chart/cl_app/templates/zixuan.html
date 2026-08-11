@@ -4,12 +4,12 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <title>管理自选分组 - Chanlun Pro</title>
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/layui.css') }}?v={{ static_version }}" />
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}?v={{ static_version }}" />
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/ui-system.css') }}?v={{ static_version|default('') }}" />
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/zixuan.css') }}?v={{ static_version }}" />
-    <script src="{{ url_for('static', filename='jquery-3.7.0.min.js') }}?v={{ static_version }}"></script>
-    <script src="{{ url_for('static', filename='layui.js') }}?v={{ static_version }}"></script>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/layui.css') }}?asset={{ static_asset_token }}" />
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}?asset={{ static_asset_token }}" />
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/ui-system.css') }}?asset={{ static_asset_token|default('') }}" />
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/zixuan.css') }}?asset={{ static_asset_token }}" />
+    <script src="{{ url_for('static', filename='jquery-3.7.0.min.js') }}?asset={{ static_asset_token }}"></script>
+    <script src="{{ url_for('static', filename='layui.js') }}?asset={{ static_asset_token }}"></script>
     {% include 'dark.html' %}
   </head>
   <body class="cp-ui zx-manager-page">

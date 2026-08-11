@@ -19,9 +19,8 @@ function loadDatafeedsWithSpy() {
       // 泄漏成 unhandledRejection。/config 返回合法配置,其余(history)返回一根 K 线。
       const body = u.includes('/config')
         ? {
-            supports_search: true, supports_group_request: false,
+            supports_search: true,
             supported_resolutions: ['1', '5', '30', '1D'],
-            supports_marks: false, supports_timescale_marks: false,
           }
         : { s: 'ok', t: [1000], o: [1], h: [1], l: [1], c: [1], v: [1] };
       return Promise.resolve({ text: () => Promise.resolve(JSON.stringify(body)) });

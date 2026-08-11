@@ -26,21 +26,18 @@ def strict_config():
     return {
         **strict_base_config(),
         "structure_price_quantum": "0.01",
-        "price_basis_revision": "test-raw-v1",
-        "skip_legacy_zslx": True,
-        "skip_legacy_mmd": True,
+        "price_basis_revision": "test-raw",
+        "strict_config_revision": "sha256:test-strict-runtime",
     }
 
 
-def test_cl_exposes_strict_levels_during_transitional_read_only_phase(sample_frame):
-    cd = CL("SH.600519", "5m", strict_config())
+def test_cl_exposes_only_strict_recursive_levels(sample_frame):
+    cd = CL("SH.600519", "5m", strict_config(), market="a")
     cd.process_klines(sample_frame.head(1000))
-    legacy = cd.get_recursive_branch_levels()
     strict = cd.get_strict_structure_levels()
 
-    assert strict.schema_version == "chanlun-structure/v3"
-    assert strict.price_basis_revision == "test-raw-v1"
-    assert legacy is cd.get_recursive_branch_levels()
+    assert strict.schema == "chanlun-structure"
+    assert strict.price_basis_revision == "test-raw"
     assert strict.levels
     assert all(
         item.source_kind is SourceKind.SEGMENT
@@ -49,7 +46,7 @@ def test_cl_exposes_strict_levels_during_transitional_read_only_phase(sample_fra
 
 
 def test_stroke_observation_never_enters_strict_levels(sample_frame):
-    cd = CL("SH.600519", "5m", strict_config())
+    cd = CL("SH.600519", "5m", strict_config(), market="a")
     cd.process_klines(sample_frame.head(1000))
     observed = cd.get_stroke_observation_centers()
     strict = cd.get_strict_structure_levels()
@@ -77,7 +74,7 @@ def test_cl_limits_recursive_depth_to_frequency_catalog(sample_frame, monkeypatc
             super().__init__(max_levels=max_levels)
 
     monkeypatch.setattr(recursive_engine, "StrictRecursiveEngine", RecordingEngine)
-    cd = CL("SH.600519", "5m", strict_config())
+    cd = CL("SH.600519", "5m", strict_config(), market="a")
     cd.process_klines(sample_frame.head(400))
     cd.get_strict_structure_levels()
 
@@ -85,7 +82,7 @@ def test_cl_limits_recursive_depth_to_frequency_catalog(sample_frame, monkeypatc
 
 
 def test_strict_memo_invalidates_but_lock_registry_survives_new_bars(sample_frame):
-    cd = CL("SH.600519", "5m", strict_config())
+    cd = CL("SH.600519", "5m", strict_config(), market="a")
     cd.process_klines(sample_frame.head(600))
     first = cd.get_strict_structure_levels()
     assert first is cd.get_strict_structure_levels()
@@ -99,8 +96,8 @@ def test_strict_memo_invalidates_but_lock_registry_survives_new_bars(sample_fram
     assert cd._strict_unit_registry is registry
 
 
-def test_legacy_cl_construction_does_not_require_strict_metadata(sample_frame):
-    cd = CL("SH.600519", "5m", strict_base_config())
+def test_base_structure_can_be_built_before_strict_metadata_is_bound(sample_frame):
+    cd = CL("SH.600519", "5m", strict_base_config(), market="a")
     cd.process_klines(sample_frame.head(400))
     assert cd.get_xds() is not None
 
@@ -111,7 +108,7 @@ def test_legacy_cl_construction_does_not_require_strict_metadata(sample_frame):
 def test_strict_interface_rejects_invalid_quantum(sample_frame):
     config = strict_config()
     config["structure_price_quantum"] = "NaN"
-    cd = CL("SH.600519", "5m", config)
+    cd = CL("SH.600519", "5m", config, market="a")
     cd.process_klines(sample_frame.head(400))
 
     with pytest.raises(ValueError, match="positive finite price quantum"):
@@ -119,17 +116,17 @@ def test_strict_interface_rejects_invalid_quantum(sample_frame):
 
 
 def test_price_basis_cannot_change_within_one_cl_lifecycle(sample_frame):
-    cd = CL("SH.600519", "5m", strict_config())
+    cd = CL("SH.600519", "5m", strict_config(), market="a")
     cd.process_klines(sample_frame.head(600))
     cd.get_strict_structure_levels()
-    cd.config["price_basis_revision"] = "post-action-v2"
+    cd.config["price_basis_revision"] = "post-action"
 
     with pytest.raises(ValueError, match="price basis changed within CL lifecycle"):
         cd.get_strict_structure_levels()
 
 
 def test_price_quantum_cannot_change_within_one_cl_lifecycle(sample_frame):
-    cd = CL("SH.600519", "5m", strict_config())
+    cd = CL("SH.600519", "5m", strict_config(), market="a")
     cd.process_klines(sample_frame.head(600))
     cd.get_strict_structure_levels()
     cd.config["structure_price_quantum"] = "0.001"
@@ -141,7 +138,7 @@ def test_price_quantum_cannot_change_within_one_cl_lifecycle(sample_frame):
 def test_strict_evidence_wraps_internal_contract_errors(sample_frame, monkeypatch):
     from chanlun.core.strict_structure.errors import StrictStructureContractError
 
-    cd = CL("SH.600519", "5m", strict_config())
+    cd = CL("SH.600519", "5m", strict_config(), market="a")
     cd.process_klines(sample_frame.head(400))
 
     def invalid_structure():

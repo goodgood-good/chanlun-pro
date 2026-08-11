@@ -7,7 +7,8 @@ from decimal import Decimal
 import pytest
 
 from chanlun.decision_support.fingerprints import sha256_json
-from chanlun.decision_support.trading_system.v3_etf_proxy_facts import (
+from chanlun.core.strict_structure.identity import stable_structure_id
+from chanlun.decision_support.trading_system.etf_proxy_facts import (
     RiskMappingPointEvidenceFacts,
     RiskMappingSupplyFacts,
 )
@@ -54,7 +55,7 @@ def _line(
     identity = WarmupStructureLineFacts.identity(
         source_symbol=SYMBOL,
         source_frequency=FREQUENCY,
-        source_kind="BI",
+        source_kind="SEGMENT",
         direction=direction,
         start_at=start,
         end_at=end,
@@ -65,7 +66,7 @@ def _line(
     )
     return WarmupStructureLineFacts(
         line_id=identity,
-        source_kind="BI",
+        source_kind="SEGMENT",
         ordinal=ordinal,
         direction=direction,
         start_at=start,
@@ -84,20 +85,18 @@ def _center(
     entry: WarmupStructureLineFacts,
     constituents: tuple[WarmupStructureLineFacts, ...],
 ) -> WarmupStructureCenterFacts:
-    center_id = WarmupStructureCenterFacts.identity(
-        source_frequency=FREQUENCY,
-        level_rank=1,
-        center_index=index,
-        start_at=entry.start_at,
-        end_at=constituents[-1].end_at,
-        core_low=Decimal("90"),
-        core_high=Decimal("110"),
-        direction=direction,
+    center_id = stable_structure_id(
+        "test-strict-center",
+        FREQUENCY,
+        index,
+        entry.line_id,
+        tuple(value.line_id for value in constituents),
+        direction,
     )
     return WarmupStructureCenterFacts(
         center_id=center_id,
-        source_kind="BI",
-        level_rank=1,
+        source_kind="SEGMENT",
+        level_rank=0,
         center_index=index,
         direction=direction,
         start_at=entry.start_at,
@@ -126,7 +125,7 @@ def _point(
         source_symbol=SYMBOL,
         source_frequency=FREQUENCY,
         center_id=center.center_id,
-        center_level_rank=1,
+        center_level_rank=0,
         point_type=point_type,
         point_anchor_at=trigger.end_at,
         point_available_at=trigger.locked_at,
@@ -136,7 +135,7 @@ def _point(
         source_symbol=SYMBOL,
         source_frequency=FREQUENCY,
         center_id=center.center_id,
-        center_level_rank=1,
+        center_level_rank=0,
         center_completed=True,
         center_expanded=False,
         point_type=point_type,  # type: ignore[arg-type]

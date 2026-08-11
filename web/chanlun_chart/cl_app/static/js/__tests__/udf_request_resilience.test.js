@@ -36,15 +36,12 @@ test('cold history gets a 45s deadline while incremental polling stays at 15s', 
       const body = String(url).includes('/config')
         ? {
             supports_search: true,
-            supports_group_request: false,
             supported_resolutions: ['1', '5', '30', '1D'],
-            supports_marks: false,
-            supports_timescale_marks: false,
           }
         : {
             s: 'ok', update: false,
             t: [1000], o: [1], h: [1], l: [1], c: [1], v: [1],
-            fxs: [], bis: [], xds: [], bi_zss: [], xd_zss: [], bcs: [], mmds: [],
+            fxs: [], bis: [], xds: [],
           };
       return Promise.resolve({
         ok: true,
@@ -98,10 +95,7 @@ test('cold history retries one startup timeout and returns the recovered bars', 
           ok: true,
           text: () => Promise.resolve(JSON.stringify({
             supports_search: true,
-            supports_group_request: false,
             supported_resolutions: ['1', '5', '30', '1D'],
-            supports_marks: false,
-            supports_timescale_marks: false,
           })),
         });
       }
@@ -114,7 +108,7 @@ test('cold history retries one startup timeout and returns the recovered bars', 
         text: () => Promise.resolve(JSON.stringify({
           s: 'ok', update: false,
           t: [1000], o: [1], h: [1], l: [1], c: [1], v: [1],
-          fxs: [], bis: [], xds: [], bi_zss: [], xd_zss: [], bcs: [], mmds: [],
+          fxs: [], bis: [], xds: [],
         })),
       });
     },

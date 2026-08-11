@@ -70,13 +70,6 @@ def test_qmt_fact_families_have_distinct_authenticated_revisions() -> None:
     assert composite.startswith("sha256:") and len(composite) == 71
     assert daily.startswith("sha256:") and len(daily) == 71
     assert composite != daily
-    assert subject.qmt_sector_fact_producer_revision() == sha256_json(
-        {
-            "schema": "chanlun-qmt-sector-fact-producer/v2",
-            "composite_revision": composite,
-            "daily_revision": daily,
-        }
-    )
 
 
 class FakeXtdata:
@@ -321,7 +314,7 @@ def test_qmt_component_source_builds_and_caches_auditable_sector_frame(
     assert (first["low"] <= first[["open", "close"]].min(axis=1)).all()
     assert first.attrs["price_basis_provider"] == QMT_GICS3_COMPOSITE_PROVIDER
     assert first.attrs["price_basis_adjustment"] == (
-        "causal-factor-stable-24-member-median-v5"
+        "causal-factor-stable-24-member-median"
     )
     assert first.attrs["structure_price_quantum"] == "0.000001"
     assert first.attrs["price_basis_revision"].startswith("sha256:")
@@ -334,17 +327,17 @@ def test_qmt_component_source_builds_and_caches_auditable_sector_frame(
     assert first.attrs["sector_composite_minimum_bar_coverage"] == "0.60"
     assert first.attrs["sector_composite_required_member_count"] == 8
     assert first.attrs["sector_composite_member_mask_contract"] == (
-        "BIT_I_IS_SECTOR_COMPOSITE_MEMBERS_I_V1"
+        "BIT_I_IS_SECTOR_COMPOSITE_MEMBERS_I"
     )
     assert first.attrs["sector_composite_member_path_revision"].startswith(
         "sha256:"
     )
     assert (first["member_mask"] == (1 << len(members)) - 1).all()
     assert first.attrs["sector_composite_method"] == (
-        "DETERMINISTIC_HASH_SAMPLE_CAUSAL_FACTOR_MEDIAN_RETURN_CHAIN_V5"
+        "DETERMINISTIC_HASH_SAMPLE_CAUSAL_FACTOR_MEDIAN_RETURN_CHAIN"
     )
     assert first.attrs["sector_factor_adjustment_contract_id"] == (
-        "QMT_RAW_PRICE_DIVISOR_CAUSAL_EX_DATE_V1"
+        "QMT_RAW_PRICE_DIVISOR_CAUSAL_EX_DATE"
     )
     assert first.attrs["sector_factor_revision"].startswith("sha256:")
 
@@ -505,7 +498,7 @@ def test_qmt_component_source_neutralizes_ex_date_jump_causally(
     assert len(fake.factor_calls) == len(members)
     assert all(call[2] == "20260723" for call in fake.factor_calls)
     assert result.attrs["sector_factor_adjustment_contract_id"] == (
-        "QMT_RAW_PRICE_DIVISOR_CAUSAL_EX_DATE_V1"
+        "QMT_RAW_PRICE_DIVISOR_CAUSAL_EX_DATE"
     )
 
 
@@ -678,8 +671,8 @@ def test_qmt_component_source_anchors_coverage_to_frozen_sample(
             if kwargs["field_list"] == ["time"]:
                 return result
             # QMT returned usable bars for only eight of the requested 24
-            # deterministic representatives.  Coverage must be 8/24, not the
-            # survivor-biased 8/8 used by the old implementation.
+            # deterministic representatives.  The frozen denominator keeps
+            # coverage at 8/24 instead of survivor-biased 8/8.
             return {
                 field: values.iloc[:8].copy()
                 for field, values in result.items()
@@ -1457,7 +1450,10 @@ def test_qmt_daily_fact_cache_recomputes_strength_with_current_code(
 
     assert fake.market_calls == calls_after_first == 1
     assert len(builder_calls) == 2
-    assert first.evidence_document()["schema"].endswith("/v3")
+    assert (
+        first.evidence_document()["schema"]
+        == "chanlun-horizontal-sector-strength-evidence"
+    )
     assert second.evidence_document() == first.evidence_document()
 
     after_close = _daily_strength_arguments()

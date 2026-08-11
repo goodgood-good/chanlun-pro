@@ -39,7 +39,11 @@ def test_disk_read_happens_outside_cache_lock(monkeypatch):
         th.start()
         th.join()
         lock_acquirable.append(result[0])
-        return {"t": [1, 2], "o": [1.0, 1.0], "h": [1.0, 1.0], "l": [1.0, 1.0], "c": [1.0, 1.0], "v": [1, 1]}
+        data = {"t": [1, 2], "o": [1.0, 1.0], "h": [1.0, 1.0], "l": [1.0, 1.0], "c": [1.0, 1.0], "v": [1, 1]}
+        return chart_cache._build_chart_cache_entry(
+            data,
+            is_full_snapshot=True,
+        )
 
     monkeypatch.setattr(chart_cache.fdb, "get_chart_cache", _mock_disk)
     try:

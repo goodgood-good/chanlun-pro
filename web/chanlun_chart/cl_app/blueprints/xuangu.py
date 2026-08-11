@@ -63,9 +63,7 @@ def xuangu_task_add():
     frequencys = [frequency.strip() for frequency in frequencys.split(",")]
     opt_type = opt_type.split(",")
 
-    # R6-#6: 服务端校验 opt_type, 非法值(空串/拼写错)会经 get_opt_types 的 direction_types[x]
-    # 抛 KeyError 被 process_xuangu_by_code 逐码吞 → xg_results 空 → 无条件 clear_zx_stocks
-    # 清空目标自选组(静默数据丢失)。仅接受 long/short, 非法直接拒绝不进 run_xuangu。
+    # 只接受任务执行器明确支持的方向，避免无效任务进入逐标的计算。
     if not opt_type or any(o not in ("long", "short") for o in opt_type):
         return {"ok": False, "msg": "选股方向(opt_type)非法，仅支持 long/short"}
     if any(not frequency for frequency in frequencys):

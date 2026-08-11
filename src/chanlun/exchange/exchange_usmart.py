@@ -842,7 +842,7 @@ class ExchangeUSmart(Exchange):
             normalized_code = str(code)
         return self._stock_by_code.get(normalized_code.upper())
 
-    def now_trading(self):
+    def now_trading(self, market: str):
         api_market = _MARKET_API_CODES[self.market][0]
         try:
             data = self.client.quote("marketstate", {"market": api_market})

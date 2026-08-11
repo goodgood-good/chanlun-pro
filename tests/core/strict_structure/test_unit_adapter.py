@@ -54,7 +54,7 @@ def fake_done_line():
 
 
 def test_adapter_keeps_unfinished_lines_out_of_the_locked_prefix(fake_lines):
-    registry = UnitLockRegistry("test-raw-v1")
+    registry = UnitLockRegistry("test-raw")
     values = adapt_lines(
         fake_lines,
         structural_level=0,
@@ -70,7 +70,7 @@ def test_adapter_keeps_unfinished_lines_out_of_the_locked_prefix(fake_lines):
 
 
 def test_first_lock_time_does_not_move_on_later_updates(fake_done_line):
-    registry = UnitLockRegistry("test-raw-v1")
+    registry = UnitLockRegistry("test-raw")
     first = adapt_lines(
         [fake_done_line],
         0,
@@ -103,7 +103,7 @@ def test_adapter_rejects_done_line_without_causal_lock_time(fake_done_line):
             SourceKind.SEGMENT,
             Decimal("0.01"),
             BASE + timedelta(hours=2),
-            UnitLockRegistry("test-raw-v1"),
+            UnitLockRegistry("test-raw"),
         )
 
 
@@ -117,7 +117,7 @@ def test_adapter_rejects_unfinished_line_with_a_lock_time(fake_done_line):
             SourceKind.SEGMENT,
             Decimal("0.01"),
             BASE + timedelta(hours=2),
-            UnitLockRegistry("test-raw-v1"),
+            UnitLockRegistry("test-raw"),
         )
 
 
@@ -129,11 +129,11 @@ def test_adapter_rejects_lock_evidence_from_after_as_of(fake_done_line):
             SourceKind.SEGMENT,
             Decimal("0.01"),
             fake_done_line.locked_at - timedelta(seconds=1),
-            UnitLockRegistry("test-raw-v1"),
+            UnitLockRegistry("test-raw"),
         )
 
 
-def test_formal_segment_interval_uses_endpoints_not_legacy_zs_fields(
+def test_formal_segment_interval_uses_endpoints_not_auxiliary_zs_fields(
     fake_done_line,
 ):
     fake_done_line.start.val = 100
@@ -146,14 +146,14 @@ def test_formal_segment_interval_uses_endpoints_not_legacy_zs_fields(
         SourceKind.SEGMENT,
         Decimal("1"),
         BASE + timedelta(hours=2),
-        UnitLockRegistry("test-raw-v1"),
+        UnitLockRegistry("test-raw"),
     )[0]
 
     assert (value.low_tick, value.high_tick) == (100, 120)
 
 
 def test_adapter_identity_uses_normalized_ticks(fake_done_line):
-    registry = UnitLockRegistry("test-raw-v1")
+    registry = UnitLockRegistry("test-raw")
     first = adapt_lines(
         [fake_done_line],
         0,
@@ -178,7 +178,7 @@ def test_adapter_identity_uses_normalized_ticks(fake_done_line):
 
 
 def test_registry_rejects_a_changed_confirmation_for_same_unit(fake_done_line):
-    registry = UnitLockRegistry("test-raw-v1")
+    registry = UnitLockRegistry("test-raw")
     adapt_lines(
         [fake_done_line],
         0,
@@ -208,7 +208,7 @@ def test_adapter_rejects_non_positive_price_quantum(fake_done_line):
             SourceKind.SEGMENT,
             Decimal("0"),
             BASE + timedelta(hours=2),
-            UnitLockRegistry("test-raw-v1"),
+            UnitLockRegistry("test-raw"),
         )
 
 
@@ -223,12 +223,12 @@ def test_adapter_rejects_line_endpoint_after_observation_time(fake_done_line):
             SourceKind.SEGMENT,
             Decimal("0.01"),
             fake_done_line.end.k.date - timedelta(seconds=1),
-            UnitLockRegistry("test-raw-v1"),
+            UnitLockRegistry("test-raw"),
         )
 
 
 def test_invalid_early_lock_does_not_poison_registry(fake_done_line):
-    registry = UnitLockRegistry("test-raw-v1")
+    registry = UnitLockRegistry("test-raw")
     fake_done_line.locked_at = fake_done_line.end.k.date - timedelta(seconds=1)
 
     with pytest.raises(ValueError, match="locked_at must not precede line end"):
@@ -261,5 +261,5 @@ def test_line_adapter_rejects_recursive_trend_source_kind(fake_done_line):
             SourceKind.TREND_TYPE,
             Decimal("0.01"),
             BASE + timedelta(hours=2),
-            UnitLockRegistry("test-raw-v1"),
+            UnitLockRegistry("test-raw"),
         )

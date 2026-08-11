@@ -119,7 +119,7 @@ def test_import_resolves_codes_once_and_replaces_group_atomically(monkeypatch):
     monkeypatch.setattr(
         stock_list,
         "_safe_all_stocks",
-        lambda _exchange, _market: [
+        lambda _exchange: [
             {"code": "SH.600000", "name": "浦发银行"},
             {"code": "SZ.000001", "name": "平安银行"},
         ],

@@ -101,7 +101,7 @@ def _combined_unit(
     )
     return ConstituentUnit(
         unit_id=stable_structure_id(
-            "chanlun-same-level-combination/v1",
+            "chanlun-same-level-combination",
             first.price_basis_revision,
             first.structural_level,
             direction,

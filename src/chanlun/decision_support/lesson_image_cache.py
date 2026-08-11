@@ -16,7 +16,6 @@ from .lesson_images import ImageOccurrence, PdfImageAssetDescriptor
 
 _ARCHIVE_HASH_CHUNK_BYTES = 1024 * 1024
 _FILE_ATTRIBUTE_REPARSE_POINT = 0x400
-_LEGACY_FIXTURE_MAX_TOTAL_BYTES = 16 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -140,7 +139,7 @@ def _occurrence_dict(occurrence: ImageOccurrence) -> dict[str, object]:
         "caption_page_number": occurrence.caption_page_number,
         "caption_source_sequence_index": occurrence.caption_source_sequence_index,
         "classification_id": occurrence.classification_id,
-        "classifier_version": occurrence.classifier_version,
+        "classifier_id": occurrence.classifier_id,
         "cropbox_pdf": list(occurrence.cropbox_pdf) if occurrence.cropbox_pdf is not None else None,
         "draw_index": occurrence.draw_index,
         "draw_bbox_pdf_bottom_left": list(occurrence.draw_bbox_pdf_bottom_left),
@@ -202,15 +201,15 @@ class IncrementalLessonImageCacheBuilder:
         target: Path,
         *,
         identity: PdfIdentity,
-        extractor_version: str,
+        extractor_id: str,
     ) -> None:
         if not isinstance(identity, PdfIdentity):
             raise TypeError("identity must be PdfIdentity")
-        if not isinstance(extractor_version, str):
-            raise TypeError("extractor_version must be a string")
-        version = extractor_version.strip()
-        if not version or len(version) > 128:
-            raise ValueError("extractor_version must be present and bounded")
+        if not isinstance(extractor_id, str):
+            raise TypeError("extractor_id must be a string")
+        extractor_identity = extractor_id.strip()
+        if not extractor_identity or len(extractor_identity) > 128:
+            raise ValueError("extractor_id must be present and bounded")
         target_path = Path(target).absolute()
         if target_path.is_symlink():
             raise ValueError("target must not be a symbolic link")
@@ -219,7 +218,7 @@ class IncrementalLessonImageCacheBuilder:
         target_path.parent.mkdir(parents=True, exist_ok=True)
         self._target = target_path
         self._identity = identity
-        self._extractor_version = version
+        self._extractor_id = extractor_identity
         self._staging = Path(
             tempfile.mkdtemp(
                 prefix=f".{target_path.name}.staging-", dir=target_path.parent
@@ -235,7 +234,7 @@ class IncrementalLessonImageCacheBuilder:
     def __enter__(self) -> IncrementalLessonImageCacheBuilder:
         return self
 
-    def __exit__(self, exc_type, exc, traceback) -> bool:
+    def __exit__(self, _exc_type, _exc, _traceback) -> bool:
         if not self._published and self._staging.exists():
             shutil.rmtree(self._staging)
         return False
@@ -388,7 +387,7 @@ class IncrementalLessonImageCacheBuilder:
             "archived_primary_asset_count": len(expected_primary),
             "archived_smask_asset_count": len(expected_smasks),
             "asset_count": len(ordered_assets),
-            "extractor_version": self._extractor_version,
+            "extractor_id": self._extractor_id,
             "files": {
                 "assets": {
                     "path": "image_assets.jsonl",
@@ -411,7 +410,7 @@ class IncrementalLessonImageCacheBuilder:
             "role_counts": dict(
                 sorted(Counter(item.source_role.value for item in ordered_occurrences).items())
             ),
-            "schema_version": 2,
+            "schema": "current",
             "source_pdf": asdict(self._identity),
             "total_primary_raw_stream_bytes": sum(
                 asset.raw_size_bytes for asset in ordered_assets
@@ -424,47 +423,6 @@ class IncrementalLessonImageCacheBuilder:
         os.replace(self._staging, self._target)
         self._published = True
         return _absolute_without_resolving(self._target)
-
-
-def build_lesson_image_cache(
-    target: Path,
-    *,
-    identity: PdfIdentity,
-    assets: tuple[PdfImageAssetDescriptor, ...] | list[PdfImageAssetDescriptor],
-    occurrences: tuple[ImageOccurrence, ...] | list[ImageOccurrence],
-    materialized_raw_by_sha256: dict[str, bytes],
-    materialized_smask_raw_by_sha256: dict[str, bytes] | None = None,
-    extractor_version: str,
-) -> Path:
-    """Build a cache from one small in-memory test fixture.
-
-    Production extraction must use ``IncrementalLessonImageCacheBuilder`` so image
-    payloads are released after each batch instead of retaining the full PDF archive.
-    """
-    smask_payloads = dict(materialized_smask_raw_by_sha256 or {})
-    payloads = tuple(materialized_raw_by_sha256.values()) + tuple(
-        smask_payloads.values()
-    )
-    if any(not isinstance(payload, bytes) for payload in payloads):
-        raise TypeError("legacy image cache fixture payloads must be bytes")
-    total_bytes = sum(len(payload) for payload in payloads)
-    if total_bytes > _LEGACY_FIXTURE_MAX_TOTAL_BYTES:
-        raise ValueError(
-            "build_lesson_image_cache is limited to small fixtures; "
-            "use IncrementalLessonImageCacheBuilder for production archives"
-        )
-    with IncrementalLessonImageCacheBuilder(
-        target,
-        identity=identity,
-        extractor_version=extractor_version,
-    ) as builder:
-        builder.add_batch(
-            assets=assets,
-            occurrences=occurrences,
-            primary_raw_by_sha256=materialized_raw_by_sha256,
-            smask_raw_by_sha256=smask_payloads,
-        )
-        return builder.publish()
 
 
 def _identity(value: object) -> PdfIdentity:
@@ -517,7 +475,7 @@ def _occurrence_from_dict(value: object) -> ImageOccurrence:
             page_rotation=value["page_rotation"],
             source_role=SourceRole(value["source_role"]),
             reason_codes=tuple(value["reason_codes"]),
-            classifier_version=value["classifier_version"],
+            classifier_id=value["classifier_id"],
             caption_page_number=value["caption_page_number"],
             caption_source_sequence_index=value["caption_source_sequence_index"],
             cropbox_pdf=(tuple(value["cropbox_pdf"]) if value["cropbox_pdf"] is not None else None),
@@ -655,7 +613,7 @@ def load_lesson_image_cache(
     if (
         not isinstance(manifest, dict)
         or manifest.get("package_kind") != "chanlun_pdf_image_inventory"
-        or manifest.get("schema_version") != 2
+        or manifest.get("schema") != "current"
     ):
         raise ValueError("image cache manifest kind is invalid")
     if _identity(manifest.get("source_pdf")) != expected_identity:

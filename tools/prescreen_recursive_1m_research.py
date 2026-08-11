@@ -43,26 +43,26 @@ from chanlun.decision_support.trading_system.recursive_1m_research import (  # n
 from chanlun.decision_support.trading_system.structure_adapter import (  # noqa: E402
     extract_confirmed_points,
 )
-from tools.chanlun_v3_research_data import (  # noqa: E402
+from tools.research_data import (  # noqa: E402
     DEFAULT_PIT_DATABASE,
     atomic_json,
     content_sha256,
     sha256_file,
 )
-from tools.prescreen_v31_cached_symbols import (  # noqa: E402
+from tools.prescreen_cached_symbols import (  # noqa: E402
     _build_frames,
     provider_to_project_code,
 )
 
 
 DEFAULT_UNIVERSE = Path(
-    "audit/chanlun_live_integration/csi300_broad_etf_universe_v1.json"
+    "audit/chanlun_live_integration/csi300_broad_etf_universe.json"
 )
 DEFAULT_MARKET_DATABASE = Path(
-    ".cache/chanlun_v31_csi300_broad_pool/financial_data_query_bars.sqlite3"
+    ".cache/chanlun_csi300_broad_pool/financial_data_query_bars.sqlite3"
 )
 DEFAULT_CORPORATE_ACTIONS = Path(
-    "audit/chanlun_live_integration/qmt_etf_corporate_actions_v1.json"
+    "audit/chanlun_live_integration/qmt_etf_corporate_actions.json"
 )
 DEFAULT_OUTPUT = Path(
     "audit/chanlun_live_integration/recursive_1m_etf_prescreen.json"
@@ -248,7 +248,7 @@ def _instrument_report(
 def build_report(args: argparse.Namespace) -> dict[str, object]:
     universe = args.universe.resolve()
     payload = __import__("json").loads(universe.read_text(encoding="utf-8"))
-    if payload.get("schema") != "chanlun-csi300-broad-etf-universe/v1":
+    if payload.get("schema") != "chanlun-csi300-broad-etf-universe":
         raise ValueError("unsupported ETF universe artifact")
     symbols = tuple(item["symbol"] for item in payload["instruments"])
     if args.symbol:
@@ -281,7 +281,7 @@ def build_report(args: argparse.Namespace) -> dict[str, object]:
     )
     manifest = recursive_1m_parameter_manifest()
     report: dict[str, object] = {
-        "schema": "chanlun-recursive-1m-etf-prescreen/v1",
+        "schema": "chanlun-recursive-1m-etf-prescreen",
         "scope": "STRATEGIC_STRUCTURE_COMPONENT_PRESCREEN",
         "universe_artifact": str(universe),
         "universe_artifact_sha256": sha256_file(universe),

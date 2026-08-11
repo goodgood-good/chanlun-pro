@@ -10,20 +10,20 @@ from chanlun.decision_support.trading_system.recursive_1m_research import (
     Recursive1mDiagnosticExecutionParameters,
     Recursive1mResearchParameters,
 )
-from chanlun.decision_support.trading_system.v3_bar_execution import (
+from chanlun.decision_support.trading_system.bar_execution import (
     BarProxyExecutionStatus,
     HistoricalMinuteExecutionBar,
 )
-from chanlun.decision_support.trading_system.v3_execution import (
-    V3FeeModel,
-    V3FeeRateAt,
-    V3OrderIntent,
+from chanlun.decision_support.trading_system.execution import (
+    FeeModel,
+    FeeRateAt,
+    OrderIntent,
 )
-from chanlun.decision_support.trading_system.v3_parameters import (
-    StrategyV3Parameters,
+from chanlun.decision_support.trading_system.parameters import (
+    StrategyParameters,
     etf_parameter_snapshot,
 )
-from chanlun.decision_support.trading_system.v3_portfolio import (
+from chanlun.decision_support.trading_system.portfolio import (
     floor_to_increment,
 )
 
@@ -186,11 +186,11 @@ class Recursive1mEntrySizingDecision:
 
 def diagnostic_fee_model(
     assumptions: Recursive1mDiagnosticExecutionParameters,
-) -> V3FeeModel:
-    return V3FeeModel(
+) -> FeeModel:
+    return FeeModel(
         schedule_id=assumptions.execution_id,
         rates=(
-            V3FeeRateAt(
+            FeeRateAt(
                 effective_from=date(1900, 1, 1),
                 commission_rate=assumptions.commission_rate,
                 minimum_commission=assumptions.minimum_commission,
@@ -208,7 +208,7 @@ def _maximum_affordable_with_tactical_reserve(
     upper_bound: int,
     increment: int,
     reserve_ratio: Decimal,
-    fee_model: V3FeeModel,
+    fee_model: FeeModel,
     session: date,
 ) -> int:
     quantity = floor_to_increment(upper_bound, increment)
@@ -256,7 +256,7 @@ def size_recursive_1m_diagnostic_entry(
         or drawdown < 0
     ):
         raise ValueError("recursive 1m entry sizing inputs are invalid")
-    inherited = research.inherited_v3_parameters
+    inherited = research.inherited_parameters
     increment = assumptions.buy_quantity_increment
     strategic_cash = account_equity * research.strategic_slot_fraction
     remaining_exposure = max(
@@ -327,7 +327,7 @@ def _order_id(
 ) -> str:
     return sha256_json(
         {
-            "schema": "chanlun-recursive-1m-diagnostic-order/v1",
+            "schema": "chanlun-recursive-1m-diagnostic-order",
             "signal_id": signal.signal_id,
             "side": side,
             "quantity": quantity,
@@ -344,8 +344,8 @@ def diagnostic_entry_order(
     next_bar: HistoricalMinuteExecutionBar,
     account_snapshot_id: str,
     assumptions: Recursive1mDiagnosticExecutionParameters,
-    strategy: StrategyV3Parameters | None = None,
-) -> V3OrderIntent:
+    strategy: StrategyParameters | None = None,
+) -> OrderIntent:
     if signal.kind != "ENTRY" or quantity <= 0:
         raise ValueError("diagnostic entry order requires an entry signal and quantity")
     strategy = strategy or etf_parameter_snapshot()
@@ -359,7 +359,7 @@ def diagnostic_entry_order(
         created_at=created_at,
         sequence=0,
     )
-    return V3OrderIntent(
+    return OrderIntent(
         client_order_id=f"recursive-1m:{identity}",
         intent_id=f"recursive-1m-entry:{signal.signal_id}",
         parameter_set_id=strategy.parameter_set_id,
@@ -389,8 +389,8 @@ def diagnostic_exit_order(
     account_snapshot_id: str,
     sequence: int,
     assumptions: Recursive1mDiagnosticExecutionParameters,
-    strategy: StrategyV3Parameters | None = None,
-) -> V3OrderIntent:
+    strategy: StrategyParameters | None = None,
+) -> OrderIntent:
     if signal.kind != "L0_THIRD_SELL" or position.quantity <= 0:
         raise ValueError("diagnostic exit order requires a third sell and position")
     strategy = strategy or etf_parameter_snapshot()
@@ -402,7 +402,7 @@ def diagnostic_exit_order(
         created_at=created,
         sequence=sequence,
     )
-    return V3OrderIntent(
+    return OrderIntent(
         client_order_id=f"recursive-1m:{identity}",
         intent_id=f"recursive-1m-exit:{position.cycle_id}:{signal.signal_id}",
         parameter_set_id=strategy.parameter_set_id,

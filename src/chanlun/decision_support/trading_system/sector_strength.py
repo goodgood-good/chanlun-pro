@@ -10,11 +10,11 @@ import json
 from typing import Mapping, Sequence
 
 from chanlun.decision_support.fingerprints import normalize_datetime, sha256_json
-from chanlun.decision_support.trading_system.v3_etf_proxy_facts import (
+from chanlun.decision_support.trading_system.etf_proxy_facts import (
     DailyMarketBar,
     latest_completed_bottom_fractal_anchor,
 )
-from chanlun.decision_support.trading_system.v3_selection import (
+from chanlun.decision_support.trading_system.selection import (
     SectorMemberHistory,
     SectorStrengthSnapshot,
     build_sector_strength_snapshot,
@@ -23,10 +23,10 @@ from chanlun.decision_support.trading_system.v3_selection import (
 
 MIN_MEMBER_HISTORY_COVERAGE = Decimal("1")
 SECTOR_STRENGTH_EVIDENCE_SCHEMA = (
-    "chanlun-horizontal-sector-strength-evidence/v3"
+    "chanlun-horizontal-sector-strength-evidence"
 )
 SECTOR_MEMBER_HISTORY_DIAGNOSTICS_SCHEMA = (
-    "chanlun-sector-member-history-diagnostics/v1"
+    "chanlun-sector-member-history-diagnostics"
 )
 _MEMBER_HISTORY_STATUS_ORDER = (
     "COMPLETE",
@@ -181,7 +181,7 @@ def _build_horizontal_sector_strength(
 ) -> tuple[dict[str, SectorStrengthEvidence], dict[str, object]]:
     """Rank sectors by equal-weight member MA categories from one anchor.
 
-    The category definition is the existing V3 rule (MA5/13/21/34/55/89/
+    The category definition is the existing strict strategy rule (MA5/13/21/34/55/89/
     144/233 conquered since the latest completed broad-market daily bottom
     fractal).  Missing histories are never synthesized or removed from the
     denominator.  A sector is resolved only when every current QMT member has
@@ -196,7 +196,7 @@ def _build_horizontal_sector_strength(
         symbol=benchmark_symbol,
     )
     source_base = {
-        "schema": "chanlun-horizontal-sector-strength/v4",
+        "schema": "chanlun-horizontal-sector-strength",
         "decision_time": observed,
         "benchmark_symbol": benchmark_symbol,
         "benchmark_source_revision": anchor.source_revision,
@@ -415,7 +415,7 @@ def _build_horizontal_sector_strength_from_categories(
         symbol=benchmark_symbol,
     )
     source_base = {
-        "schema": "chanlun-horizontal-sector-strength/v4",
+        "schema": "chanlun-horizontal-sector-strength",
         "decision_time": observed,
         "benchmark_symbol": benchmark_symbol,
         "benchmark_source_revision": anchor.source_revision,
@@ -900,7 +900,7 @@ def sector_strength_batch_from_evidence_document(
         for ordinal, row in enumerate(resolved_order, start=1)
     }
     source_base = {
-        "schema": "chanlun-horizontal-sector-strength/v4",
+        "schema": "chanlun-horizontal-sector-strength",
         "decision_time": observed,
         "benchmark_symbol": benchmark_symbol,
         "benchmark_source_revision": benchmark_revision,

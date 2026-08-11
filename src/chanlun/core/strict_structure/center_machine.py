@@ -12,10 +12,77 @@ from chanlun.core.strict_structure.models import (
     CenterPreviewState,
     CenterState,
     ConstituentUnit,
+    DivergenceEvidence,
     SourceKind,
     TrendCenter,
     center_seed_size,
 )
+
+
+def close_center_at_divergence(
+    center: TrendCenter,
+    divergence: DivergenceEvidence,
+) -> TrendCenter:
+    """Freeze a center at its width-matched divergence boundary."""
+
+    signal = center.lifecycle_leave_unit
+    if signal is None:
+        raise ValueError("divergence closure requires a center departure")
+    signal_extreme = signal.high_tick if signal.direction == "up" else signal.low_tick
+    if (
+        divergence.structural_level != center.structural_level
+        or divergence.source_kind is not center.source_kind
+        or divergence.price_basis_revision != center.price_basis_revision
+        or divergence.signal_leg_unit_ids[0] != signal.unit_id
+        or divergence.direction != signal.direction
+        or not divergence.is_divergent
+    ):
+        raise ValueError("center divergence closure evidence does not match its leave")
+    width = divergence.comparison_width
+    if width == 1:
+        if (
+            divergence.signal_unit_id != signal.unit_id
+            or divergence.anchor_at != signal.market_end
+            or divergence.anchor_tick != signal_extreme
+        ):
+            raise ValueError("one-unit divergence must anchor at the raw leave")
+        pending_leave = signal
+        completion_leave = None
+        completion_return = None
+        completed_at = None
+    else:
+        completion_leave = center.completion_leave_unit
+        completion_return = center.completion_return_unit
+        if (
+            completion_leave != signal
+            or completion_return is None
+            or divergence.signal_leg_unit_ids[:2]
+            != (completion_leave.unit_id, completion_return.unit_id)
+        ):
+            raise ValueError(
+                "three-unit divergence requires the center leave and outside return"
+            )
+        pending_leave = None
+        completed_at = center.completed_at
+    evidence_units = (center.entry_unit, *center.body_units)
+    if center.establishment_unit is not None:
+        evidence_units = (*evidence_units, center.establishment_unit)
+    available_at = max(
+        divergence.available_at,
+        signal.available_at,
+        *(item.available_at for item in evidence_units),
+    )
+    return replace(
+        center,
+        state=CenterState.DIVERGENCE_CLOSED,
+        pending_leave_unit=pending_leave,
+        completion_leave_unit=completion_leave,
+        completion_return_unit=completion_return,
+        completed_at=completed_at,
+        available_at=available_at,
+        boundary_divergence_id=divergence.divergence_id,
+        boundary_anchor_unit_id=divergence.signal_unit_id,
+    )
 
 
 _GEOMETRY_STOP_ERRORS = frozenset(
@@ -101,14 +168,12 @@ def _return_reenters_core(
 ) -> bool:
     """A first return re-enters only after crossing the relevant boundary.
 
-    Equality stays outside by the V3 contract: ``low >= ZG`` is a third buy
+    Equality stays outside by the strict strategy contract: ``low >= ZG`` is a third buy
     and ``high <= ZD`` is a third sell.
     """
 
     return (
-        ret.low_tick < zg_tick
-        if leave.direction == "up"
-        else ret.high_tick > zd_tick
+        ret.low_tick < zg_tick if leave.direction == "up" else ret.high_tick > zd_tick
     )
 
 
@@ -118,9 +183,7 @@ def _outside_in_direction(
     zg_tick: int,
 ) -> bool:
     return (
-        item.end_tick > zg_tick
-        if item.direction == "up"
-        else item.end_tick < zd_tick
+        item.end_tick > zg_tick if item.direction == "up" else item.end_tick < zd_tick
     )
 
 
@@ -168,7 +231,7 @@ def _event(
 ) -> CenterEvent:
     return CenterEvent(
         event_id=stable_structure_id(
-            "chanlun-center-event/v9",
+            "chanlun-center-event",
             center.price_basis_revision,
             center.structural_level,
             center.source_kind.value,
@@ -328,8 +391,7 @@ def establish_center(
     ):
         return None
     if any(
-        not _overlaps_core(item, zd_tick, zg_tick, source_kind)
-        for item in core_units
+        not _overlaps_core(item, zd_tick, zg_tick, source_kind) for item in core_units
     ):
         return None
     if source_kind is not SourceKind.TREND_TYPE and (
@@ -420,8 +482,7 @@ def establish_center_preview(
     ):
         return None
     if any(
-        not _overlaps_core(item, zd_tick, zg_tick, source_kind)
-        for item in core_units
+        not _overlaps_core(item, zd_tick, zg_tick, source_kind) for item in core_units
     ):
         return None
     if source_kind is not SourceKind.TREND_TYPE and (
@@ -486,7 +547,9 @@ def _advance_center_preview_lifecycle(
     if preview.zd_tick is None or preview.zg_tick is None:
         raise ValueError("preview lifecycle requires a positive core")
 
-    available_at = max(item.available_at for item in (entry, *body, *((pending,) if pending else ())))
+    available_at = max(
+        item.available_at for item in (entry, *body, *((pending,) if pending else ()))
+    )
     occupied_ids = {entry.unit_id, *(item.unit_id for item in body)}
     if pending is not None:
         occupied_ids.add(pending.unit_id)
@@ -592,8 +655,10 @@ def _project_ongoing_center_preview(
     following = tuple(following_units)
     if not following or all(item.locked for item in following):
         return None
-    known = (center.entry_unit,) + center.body_units + (
-        () if center.pending_leave_unit is None else (center.pending_leave_unit,)
+    known = (
+        (center.entry_unit,)
+        + center.body_units
+        + (() if center.pending_leave_unit is None else (center.pending_leave_unit,))
     )
     preview = CenterPreview(
         structural_level=center.structural_level,
@@ -936,23 +1001,18 @@ def forming_preview(
         zd_tick, zg_tick = _core(core_units)
         if zd_tick > zg_tick:
             return None
-        if (
-            zd_tick == zg_tick
-            and source_kind is not SourceKind.TREND_TYPE
-        ):
+        if zd_tick == zg_tick and source_kind is not SourceKind.TREND_TYPE:
             state = CenterPreviewState.TOUCH_ONLY
         if state is CenterPreviewState.TOUCH_ONLY:
             # Zero-width intersections are diagnostic observations only.  A
             # component must at least contain the shared boundary; this never
             # promotes to a formal center and the chart gate will not draw it.
             if any(
-                item.low_tick > zd_tick or item.high_tick < zg_tick
-                for item in body
+                item.low_tick > zd_tick or item.high_tick < zg_tick for item in body
             ):
                 return None
         elif any(
-            not _overlaps_core(item, zd_tick, zg_tick, source_kind)
-            for item in body
+            not _overlaps_core(item, zd_tick, zg_tick, source_kind) for item in body
         ):
             return None
         if source_kind is not SourceKind.TREND_TYPE:
@@ -993,14 +1053,12 @@ def forming_preview(
         ),
         establishment_unit_id=(
             None
-            if source_kind is SourceKind.TREND_TYPE
-            or establishment_unit is None
+            if source_kind is SourceKind.TREND_TYPE or establishment_unit is None
             else establishment_unit.unit_id
         ),
         establishment_leave_unit_id=(
             None
-            if source_kind is SourceKind.TREND_TYPE
-            or establishment_leave is None
+            if source_kind is SourceKind.TREND_TYPE or establishment_leave is None
             else establishment_leave.unit_id
         ),
     )
@@ -1271,6 +1329,7 @@ def calculate_centers(
     oscillatory_ids: frozenset[str] = frozenset(),
     *,
     hard_boundary_after_ids: frozenset[str] = frozenset(),
+    boundary_closed_centers: tuple[TrendCenter, ...] = (),
 ) -> CenterLevelResult:
     values = tuple(units)
     source_kind = SourceKind(source_kind)
@@ -1286,6 +1345,22 @@ def calculate_centers(
     width = _seed_size(source_kind)
 
     hard_boundaries = frozenset(hard_boundary_after_ids)
+    closed_by_anchor = {}
+    for center in tuple(boundary_closed_centers):
+        anchor_id = center.boundary_anchor_unit_id
+        if (
+            center.state is not CenterState.DIVERGENCE_CLOSED
+            or anchor_id is None
+            or anchor_id not in hard_boundaries
+        ):
+            raise ValueError(
+                "boundary-closed centers must match declared hard boundaries"
+            )
+        previous = closed_by_anchor.setdefault(anchor_id, center)
+        if previous != center:
+            raise ValueError("hard boundary center evidence conflicts")
+    if set(closed_by_anchor) != set(hard_boundaries):
+        raise ValueError("every hard boundary requires its closed center snapshot")
     if hard_boundaries:
         offsets = {item.unit_id: index for index, item in enumerate(values)}
         if len(offsets) != len(values):
@@ -1312,20 +1387,58 @@ def calculate_centers(
                 partition,
                 structural_level,
                 source_kind,
-                frozenset(
-                    item for item in oscillatory_ids if item in partition_ids
-                ),
+                frozenset(item for item in oscillatory_ids if item in partition_ids),
             )
             final_partition = partition_index == len(starts) - 1
-            retained = (
-                result.centers
-                if final_partition
-                else tuple(
+            if final_partition:
+                retained = result.centers
+            else:
+                boundary_center = closed_by_anchor[partition[-1].unit_id]
+                matches = tuple(
                     center
                     for center in result.centers
-                    if center.state is CenterState.COMPLETED
+                    if center.center_id == boundary_center.center_id
                 )
-            )
+                if len(matches) != 1:
+                    raise ValueError(
+                        "hard boundary center is missing from causal partition replay"
+                    )
+                live = matches[0]
+                if boundary_center.pending_leave_unit is not None:
+                    lifecycle_matches = (
+                        live.state is CenterState.ONGOING
+                        and live.pending_leave_unit
+                        == boundary_center.pending_leave_unit
+                        and live.completion_leave_unit is None
+                        and live.completion_return_unit is None
+                    )
+                else:
+                    lifecycle_matches = (
+                        live.state is CenterState.COMPLETED
+                        and live.pending_leave_unit is None
+                        and live.completion_leave_unit
+                        == boundary_center.completion_leave_unit
+                        and live.completion_return_unit
+                        == boundary_center.completion_return_unit
+                        and live.completed_at == boundary_center.completed_at
+                    )
+                if (
+                    not lifecycle_matches
+                    or live.entry_unit != boundary_center.entry_unit
+                    or live.body_units != boundary_center.body_units
+                    or live.establishment_unit != boundary_center.establishment_unit
+                ):
+                    raise ValueError(
+                        "hard boundary center changed during causal partition replay"
+                    )
+                retained = tuple(
+                    boundary_center
+                    if center.center_id == boundary_center.center_id
+                    else center
+                    for center in result.centers
+                    if center.state is CenterState.COMPLETED
+                    or center.center_id == boundary_center.center_id
+                )
             retained_ids = {center.center_id for center in retained}
             centers.extend(retained)
             for event in result.events:
@@ -1403,9 +1516,7 @@ def calculate_centers(
             if center.state is CenterState.COMPLETED:
                 break
             j += 1
-        previous_leave = (
-            None if not centers else centers[-1].completion_leave_unit
-        )
+        previous_leave = None if not centers else centers[-1].completion_leave_unit
         owns_post_completion_tail = previous_leave is not None
         # After a third-class completion the scanner resumes at the completed
         # leave and slides forward. The first five-unit seed that matures in
@@ -1429,8 +1540,7 @@ def calculate_centers(
             )
         )
         if completed_later is not None and (
-            center.state is not CenterState.COMPLETED
-            or completed_later[1] < j
+            center.state is not CenterState.COMPLETED or completed_later[1] < j
         ):
             i, j, center, candidate_events = completed_later
             geometry_stopped = False
@@ -1541,14 +1651,12 @@ def calculate_centers(
                 # regressed to an old ongoing box.
                 if (
                     latest_live_preview is None
-                    or latest_live_preview.state
-                    is not CenterPreviewState.COMPLETED
+                    or latest_live_preview.state is not CenterPreviewState.COMPLETED
                 ):
                     latest_live_preview = None
             elif (
                 latest_live_preview is None
-                or latest_live_preview.state
-                is not CenterPreviewState.COMPLETED
+                or latest_live_preview.state is not CenterPreviewState.COMPLETED
                 or projected.state is CenterPreviewState.COMPLETED
             ):
                 latest_live_preview = projected
@@ -1559,14 +1667,11 @@ def calculate_centers(
                 if centers and centers[-1].state is CenterState.ONGOING
                 else None
             )
-            if (
-                latest_live_preview.state is CenterPreviewState.COMPLETED
-                and (
-                    active_owner is None
-                    or _preview_matches_center_seed(
-                        latest_live_preview,
-                        active_owner,
-                    )
+            if latest_live_preview.state is CenterPreviewState.COMPLETED and (
+                active_owner is None
+                or _preview_matches_center_seed(
+                    latest_live_preview,
+                    active_owner,
                 )
             ):
                 for successor in _successor_previews_after_completion(
@@ -1607,8 +1712,7 @@ def calculate_centers(
                 entry_unit=tail_entry,
             )
             if len(tail) == width and (
-                preview is None
-                or preview.state is not CenterPreviewState.TOUCH_ONLY
+                preview is None or preview.state is not CenterPreviewState.TOUCH_ONLY
             ):
                 preview = None
             if preview is not None and preview not in previews:

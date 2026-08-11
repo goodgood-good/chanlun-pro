@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, replace
+from dataclasses import replace
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 import json
@@ -13,14 +13,11 @@ import pytest
 from chanlun.decision_support.fingerprints import sha256_json
 from chanlun.decision_support.trading_system.human_paper_accounting import (
     assess_human_paper_portfolio_fill,
-    audit_human_paper_capital_decisions,
     audit_human_paper_portfolio_decisions,
     audit_human_paper_portfolio_fill_decisions,
     load_human_paper_accounting_parameters,
-    rebuild_human_paper_accounting,
 )
 from chanlun.decision_support.trading_system.human_paper_ledger import (
-    HumanPaperCapitalRejection,
     HumanPaperEntrySelectionEvidence,
     HumanPaperMinuteBar,
     HumanPaperOperationsCancellation,
@@ -30,31 +27,26 @@ from chanlun.decision_support.trading_system.human_paper_ledger import (
     audit_human_paper_pending_continuity,
     append_human_paper_intent,
     build_human_paper_intent,
-    human_paper_capital_rejected_intent_ids,
     human_paper_consumed_signal_lifecycle_ids,
-    human_paper_oldest_open_lot_sessions,
-    human_paper_pending_sell_quantities,
     human_paper_position_quantities,
     human_paper_portfolio_rejected_intent_ids,
     human_paper_terminal_intent_ids,
     latest_human_paper_pending_continuity,
     load_human_paper_ledger,
     reconcile_human_paper_feedback,
-    settle_human_paper_intents,
-    settle_human_paper_intents_with_capital_controls,
     settle_human_paper_intents_with_portfolio_controls,
 )
 from chanlun.decision_support.trading_system.models import EntryExecutionBoundary
-from chanlun.decision_support.trading_system.v3_human_review_screening import (
+from chanlun.decision_support.trading_system.human_review_screening import (
     HumanReviewAlert,
     HumanReviewFeedback,
     SectorRankingReviewEvidence,
     human_review_screening_parameters,
 )
-from chanlun.decision_support.trading_system.v3_qmt_sector_ledger import (
+from chanlun.decision_support.trading_system.qmt_sector_ledger import (
     catalog_capture_entry,
 )
-from chanlun.decision_support.trading_system.v3_technical_approximation import (
+from chanlun.decision_support.trading_system.technical_approximation import (
     technical_approximation_parameters,
 )
 
@@ -142,7 +134,7 @@ def _live_ranked_alert_and_catalog() -> tuple[
         },
     )
     revision = sha256_json(
-        {"schema": "chanlun-qmt-gics3-catalog/v1", "sectors": sectors}
+        {"schema": "chanlun-qmt-gics3-catalog", "sectors": sectors}
     )
     catalog = catalog_capture_entry(
         {
@@ -156,7 +148,6 @@ def _live_ranked_alert_and_catalog() -> tuple[
     )
     base = _alert()
     ranking = SectorRankingReviewEvidence(
-        source_profile="LIVE_FULL_RANKING",
         sector_id=base.sector_id,
         sector_name="银行",
         observed_at=base.signal_at,
@@ -422,53 +413,6 @@ def test_portfolio_gate_enforces_exact_ninety_percent_exposure_boundary() -> Non
     ]
 
 
-def test_green_human_confirmation_fills_only_on_later_completed_1m_bar(
-    tmp_path: Path,
-) -> None:
-    path = tmp_path / "paper.json"
-    alert = _alert()
-    intent = build_human_paper_intent(feedback=_feedback(alert), alert=alert)
-    assert intent is not None
-    assert intent.status == "PENDING"
-
-    first, _event = append_human_paper_intent(path, intent)
-    duplicate, _event = append_human_paper_intent(path, intent)
-    assert len(first["events"]) == len(duplicate["events"]) == 1
-
-    settled = settle_human_paper_intents(
-        path,
-        bars_by_symbol={
-            alert.symbol: (
-                # The signal/feedback bar opened before the decision and is
-                # therefore never eligible.  A bar opening exactly at the
-                # decision boundary is the first later full 1m interval.
-                _bar(REVIEWED_AT - timedelta(minutes=1)),
-                _bar(REVIEWED_AT + timedelta(minutes=1), complete=False),
-                _bar(REVIEWED_AT + timedelta(minutes=2), suspended=True),
-                _bar(REVIEWED_AT + timedelta(minutes=3), limit_up_locked=True),
-                _bar(REVIEWED_AT + timedelta(minutes=4)),
-            )
-        },
-    )
-    fills = [event for event in settled["events"] if event["kind"] == "FILL"]
-    assert len(fills) == 1
-    assert fills[0]["payload"]["price"] == "10.20"
-    assert fills[0]["payload"]["filled_at"] == (
-        REVIEWED_AT + timedelta(minutes=5)
-    ).isoformat()
-    assert fills[0]["payload"]["tick_data_used"] is False
-    assert fills[0]["payload"]["virtual_only"] is True
-    assert fills[0]["payload"]["execution_snapshot_sha256"] == (
-        "sha256:" + "6" * 64
-    )
-
-    repeated = settle_human_paper_intents(
-        path,
-        bars_by_symbol={alert.symbol: (_bar(REVIEWED_AT + timedelta(minutes=4)),)},
-    )
-    assert repeated == settled
-
-
 def test_monitor_only_buy_cannot_create_a_pending_virtual_entry() -> None:
     """Sector-first selection cannot be bypassed through human paper feedback."""
 
@@ -583,7 +527,7 @@ def test_strategic_buy_intent_retains_full_entry_boundary_attestation() -> None:
         raw_close=Decimal("10.03"),
         raw_volume=Decimal("10000"),
         entry_valid_until=REVIEWED_AT + timedelta(minutes=1),
-        raw_price_basis_revision="qmt-none-test-v1",
+        raw_price_basis_revision="qmt-none-test",
     )
     alert = replace(
         _alert(),
@@ -698,7 +642,7 @@ def test_entry_selection_audit_rejects_missing_member_and_tampering() -> None:
     )
     bad_revision = sha256_json(
         {
-            "schema": "chanlun-qmt-gics3-catalog/v1",
+            "schema": "chanlun-qmt-gics3-catalog",
             "sectors": bad_sectors,
         }
     )
@@ -756,519 +700,14 @@ def test_entry_selection_evidence_binds_source_and_chronology() -> None:
         )
 
 
-def test_pre_attestation_intent_identity_and_document_remain_unchanged() -> None:
+def test_current_intent_identity_covers_the_complete_document() -> None:
     intent = build_human_paper_intent(feedback=_feedback(_alert()), alert=_alert())
     assert intent is not None
     document = intent.document()
-    assert "entry_selection_evidence" not in document
-    stable = asdict(intent)
-    stable.pop("entry_selection_evidence")
-    stable.pop("entry_execution_boundary")
+    assert document["entry_selection_evidence"] is None
+    stable = dict(document)
+    stable.pop("intent_id")
     assert intent.intent_id == sha256_json(stable)
-
-
-def test_first_executable_bar_above_cap_is_terminal_no_chase(
-    tmp_path: Path,
-) -> None:
-    path = tmp_path / "paper.json"
-    alert = replace(
-        _alert(),
-        signal_at=REVIEWED_AT,
-        entry_confirmation_bar_closed_at=REVIEWED_AT,
-        entry_price_cap=Decimal("10.05"),
-        entry_valid_until=REVIEWED_AT + timedelta(minutes=1),
-    )
-    intent = build_human_paper_intent(feedback=_feedback(alert), alert=alert)
-    assert intent is not None and intent.status == "PENDING"
-    append_human_paper_intent(path, intent)
-
-    rejected = settle_human_paper_intents(
-        path,
-        bars_by_symbol={
-            alert.symbol: (
-                replace(
-                    _bar(REVIEWED_AT),
-                    open=Decimal("10.10"),
-                    high=Decimal("10.20"),
-                    low=Decimal("10.06"),
-                    close=Decimal("10.15"),
-                    # Price-cap rejection is independently observable even
-                    # when the completed bar cannot prove fill capacity.
-                    volume=Decimal("0"),
-                ),
-            )
-        },
-    )
-    assert [event["kind"] for event in rejected["events"]] == [
-        "INTENT",
-        "EXECUTION_REJECT",
-    ]
-    assert rejected["events"][-1]["payload"]["reason_code"] == (
-        "BUY_PRICE_CAP_EXCEEDED_AT_FIRST_EXECUTABLE_BAR"
-    )
-
-    cheaper = replace(
-        _bar(REVIEWED_AT + timedelta(minutes=1)),
-        open=Decimal("10.00"),
-        high=Decimal("10.04"),
-        low=Decimal("9.99"),
-        close=Decimal("10.02"),
-    )
-    repeated = settle_human_paper_intents(
-        path,
-        bars_by_symbol={alert.symbol: (cheaper,)},
-    )
-    assert repeated == rejected
-
-
-@pytest.mark.parametrize(
-    ("high", "volume", "expected_kind", "expected_reason"),
-    (
-        (
-            Decimal("10.20"),
-            Decimal("10000"),
-            "EXECUTION_REJECT",
-            "BUY_ORDER_TTL_EXPIRED_WITHOUT_FILL",
-        ),
-        (
-            Decimal("10.25"),
-            Decimal("10000"),
-            "EXECUTION_REJECT",
-            "BUY_ORDER_TTL_EXPIRED_WITHOUT_FILL",
-        ),
-        (
-            Decimal("10.19"),
-            Decimal("1900"),
-            "EXECUTION_REJECT",
-            "BUY_ORDER_TTL_EXPIRED_WITHOUT_FILL",
-        ),
-        (Decimal("10.19"), Decimal("2000"), "FILL", None),
-    ),
-)
-def test_buy_requires_whole_bar_strict_cross_and_five_percent_capacity(
-    tmp_path: Path,
-    high: Decimal,
-    volume: Decimal,
-    expected_kind: str,
-    expected_reason: str | None,
-) -> None:
-    """A completed 1m proxy may never infer fills from touch/mixed volume."""
-
-    path = tmp_path / f"paper-{high}-{volume}.json"
-    alert = replace(
-        _alert(),
-        signal_at=REVIEWED_AT,
-        entry_confirmation_bar_closed_at=REVIEWED_AT,
-        entry_price_cap=Decimal("10.20"),
-        entry_valid_until=REVIEWED_AT + timedelta(minutes=1),
-    )
-    intent = build_human_paper_intent(feedback=_feedback(alert), alert=alert)
-    assert intent is not None and intent.status == "PENDING"
-    append_human_paper_intent(path, intent)
-    candidate = replace(
-        _bar(REVIEWED_AT),
-        high=high,
-        volume=volume,
-    )
-
-    settled = settle_human_paper_intents(
-        path,
-        bars_by_symbol={alert.symbol: (candidate,)},
-    )
-
-    terminal = settled["events"][-1]
-    assert terminal["kind"] == expected_kind
-    if expected_reason is not None:
-        assert terminal["payload"]["reason_code"] == expected_reason
-
-
-def test_buy_fill_uses_adverse_completed_bar_price_and_close_time(
-    tmp_path: Path,
-) -> None:
-    """Whole-bar facts cannot create an open-time fill at the open price."""
-
-    path = tmp_path / "paper-causal-price-time.json"
-    alert = replace(
-        _alert(),
-        signal_at=REVIEWED_AT,
-        entry_confirmation_bar_closed_at=REVIEWED_AT,
-        entry_price_cap=Decimal("10.20"),
-        entry_valid_until=REVIEWED_AT + timedelta(minutes=1),
-    )
-    intent = build_human_paper_intent(feedback=_feedback(alert), alert=alert)
-    assert intent is not None and intent.status == "PENDING"
-    append_human_paper_intent(path, intent)
-    candidate = replace(
-        _bar(REVIEWED_AT),
-        open=Decimal("10.10"),
-        high=Decimal("10.19"),
-        low=Decimal("10.00"),
-        close=Decimal("10.15"),
-        volume=Decimal("2000"),
-    )
-
-    settled = settle_human_paper_intents(
-        path,
-        bars_by_symbol={alert.symbol: (candidate,)},
-    )
-
-    fill = settled["events"][-1]
-    assert fill["kind"] == "FILL"
-    assert fill["payload"]["price"] == "10.19"
-    assert fill["payload"]["filled_at"] == candidate.closed_at.isoformat()
-    assert fill["payload"]["source_bar_closed_at"] == (
-        candidate.closed_at.isoformat()
-    )
-
-
-def test_buy_without_eligible_bar_is_terminal_at_ttl(tmp_path: Path) -> None:
-    path = tmp_path / "paper.json"
-    alert = replace(
-        _alert(),
-        signal_at=REVIEWED_AT,
-        entry_confirmation_bar_closed_at=REVIEWED_AT,
-        entry_price_cap=Decimal("10.20"),
-        entry_valid_until=REVIEWED_AT + timedelta(minutes=1),
-    )
-    intent = build_human_paper_intent(feedback=_feedback(alert), alert=alert)
-    assert intent is not None and intent.status == "PENDING"
-    append_human_paper_intent(path, intent)
-
-    rejected = settle_human_paper_intents(
-        path,
-        bars_by_symbol={
-            alert.symbol: (_bar(REVIEWED_AT, limit_up_locked=True),)
-        },
-    )
-
-    assert rejected["events"][-1]["kind"] == "EXECUTION_REJECT"
-    assert rejected["events"][-1]["payload"]["reason_code"] == (
-        "BUY_ORDER_TTL_EXPIRED_WITHOUT_FILL"
-    )
-
-
-def test_later_watch_feedback_cancels_pending_intent_idempotently(
-    tmp_path: Path,
-) -> None:
-    path = tmp_path / "paper.json"
-    alert = _alert()
-    first_feedback = _feedback(alert)
-    first, first_event, cancellations, changed = reconcile_human_paper_feedback(
-        path,
-        feedback=first_feedback,
-        alert=alert,
-    )
-    assert changed is True
-    assert first_event is not None
-    assert cancellations == ()
-    intent_id = str(first_event["payload"]["intent_id"])
-
-    later = replace(
-        first_feedback,
-        reviewed_at=REVIEWED_AT + timedelta(minutes=5),
-        disposition="WATCH",
-        notes="结构尚未确认，撤销待模拟成交",
-    )
-    cancelled, replacement, cancellations, changed = (
-        reconcile_human_paper_feedback(path, feedback=later, alert=alert)
-    )
-    assert changed is True
-    assert replacement is None
-    assert [event["kind"] for event in cancelled["events"]] == ["INTENT", "CANCEL"]
-    assert len(cancellations) == 1
-    assert cancellations[0]["payload"]["intent_id"] == intent_id
-    assert cancellations[0]["payload"]["status"] == "CANCELLED"
-    assert cancellations[0]["payload"]["superseding_feedback_id"] == (
-        later.feedback_id
-    )
-
-    retried, retry_replacement, retry_cancellations, retry_changed = (
-        reconcile_human_paper_feedback(path, feedback=later, alert=alert)
-    )
-    assert retried == cancelled
-    assert retry_replacement is None
-    assert retry_cancellations == ()
-    assert retry_changed is False
-
-    settled = settle_human_paper_intents(
-        path,
-        bars_by_symbol={
-            alert.symbol: (_bar(REVIEWED_AT + timedelta(minutes=10)),)
-        },
-    )
-    assert [event["kind"] for event in settled["events"]] == ["INTENT", "CANCEL"]
-    continuity = audit_human_paper_pending_continuity(
-        tuple(settled["events"]),
-        forward_root=tmp_path,
-        current_session=REVIEWED_AT.date(),
-        trading_sessions=(),
-    )
-    assert continuity["status"] == "NO_PENDING_INTENTS"
-
-
-def test_later_paper_feedback_replaces_instead_of_double_filling(
-    tmp_path: Path,
-) -> None:
-    path = tmp_path / "paper.json"
-    alert = _alert()
-    first_feedback = _feedback(alert)
-    _first, first_event, _cancellations, _changed = (
-        reconcile_human_paper_feedback(path, feedback=first_feedback, alert=alert)
-    )
-    assert first_event is not None
-    first_intent_id = str(first_event["payload"]["intent_id"])
-    later = replace(
-        first_feedback,
-        reviewed_at=REVIEWED_AT + timedelta(minutes=5),
-        notes="按最新人工复核重新建立模拟观察",
-    )
-
-    replaced, replacement, cancellations, changed = reconcile_human_paper_feedback(
-        path,
-        feedback=later,
-        alert=alert,
-    )
-
-    assert changed is True
-    assert replacement is not None
-    replacement_id = str(replacement["payload"]["intent_id"])
-    assert replacement_id != first_intent_id
-    assert [event["kind"] for event in replaced["events"]] == [
-        "INTENT",
-        "CANCEL",
-        "INTENT",
-    ]
-    assert cancellations[0]["payload"]["intent_id"] == first_intent_id
-
-    settled = settle_human_paper_intents(
-        path,
-        bars_by_symbol={
-            alert.symbol: (_bar(REVIEWED_AT + timedelta(minutes=10)),)
-        },
-    )
-    fills = [event for event in settled["events"] if event["kind"] == "FILL"]
-    assert len(fills) == 1
-    assert fills[0]["payload"]["intent_id"] == replacement_id
-
-
-def test_later_feedback_never_cancels_an_already_filled_intent(
-    tmp_path: Path,
-) -> None:
-    path = tmp_path / "paper.json"
-    alert = _alert()
-    first_feedback = _feedback(alert)
-    reconcile_human_paper_feedback(path, feedback=first_feedback, alert=alert)
-    filled = settle_human_paper_intents(
-        path,
-        bars_by_symbol={
-            alert.symbol: (_bar(REVIEWED_AT + timedelta(minutes=1)),)
-        },
-    )
-    assert [event["kind"] for event in filled["events"]] == ["INTENT", "FILL"]
-    later = replace(
-        first_feedback,
-        reviewed_at=REVIEWED_AT + timedelta(minutes=5),
-        disposition="REJECT",
-        notes="成交后的新判断只能追加反馈，不能撤销历史成交",
-    )
-
-    reconciled, replacement, cancellations, changed = (
-        reconcile_human_paper_feedback(path, feedback=later, alert=alert)
-    )
-
-    assert replacement is None
-    assert cancellations == ()
-    assert changed is False
-    assert reconciled == filled
-
-
-def test_production_settlement_rejects_buy_without_cash_including_fees(
-    tmp_path: Path,
-) -> None:
-    path = tmp_path / "paper.json"
-    alert = _alert()
-    intent = build_human_paper_intent(feedback=_feedback(alert), alert=alert)
-    assert intent is not None
-    append_human_paper_intent(path, intent)
-    expensive = replace(
-        _bar(REVIEWED_AT + timedelta(minutes=1)),
-        open=Decimal("10000.00"),
-        high=Decimal("10001.00"),
-        low=Decimal("9999.00"),
-        close=Decimal("10000.00"),
-    )
-
-    rejected, evaluations = settle_human_paper_intents_with_capital_controls(
-        path,
-        bars_by_symbol={alert.symbol: (expensive,)},
-        accounting_parameters=ACCOUNTING_PARAMETERS,
-    )
-
-    assert [event["kind"] for event in rejected["events"]] == [
-        "INTENT",
-        "CAPITAL_REJECT",
-    ]
-    rejection = rejected["events"][-1]["payload"]
-    assert rejection["status"] == "CAPITAL_REJECTED"
-    assert rejection["reason_codes"] == [
-        "INSUFFICIENT_VIRTUAL_CASH_INCLUDING_FEES"
-    ]
-    assert rejection["required_cash"] == "1000410.03"
-    assert human_paper_capital_rejected_intent_ids(rejected["events"]) == {
-        intent.intent_id
-    }
-    assert evaluations[0]["result"] == "CAPITAL_REJECTED"
-    assert evaluations[0]["fixed_one_lot_diagnostic"] is True
-    assert evaluations[0]["slot_fraction_notional_gate_evaluable"] is False
-    assert human_paper_position_quantities(rejected["events"]) == {}
-    decision_audit = audit_human_paper_capital_decisions(
-        rejected["events"],
-        parameters=ACCOUNTING_PARAMETERS,
-    )
-    assert decision_audit["status"] == "COMPLETE"
-    assert decision_audit["verified_rejection_count"] == 1
-    assert audit_human_paper_pending_continuity(
-        rejected["events"],
-        forward_root=tmp_path,
-        current_session=REVIEWED_AT.date(),
-        trading_sessions=(),
-    )["status"] == "NO_PENDING_INTENTS"
-
-    retried, retry_evaluations = (
-        settle_human_paper_intents_with_capital_controls(
-            path,
-            bars_by_symbol={alert.symbol: (expensive,)},
-            accounting_parameters=ACCOUNTING_PARAMETERS,
-        )
-    )
-    assert retried == rejected
-    assert retry_evaluations == ()
-
-
-def test_production_settlement_fills_only_five_distinct_symbol_slots(
-    tmp_path: Path,
-) -> None:
-    path = tmp_path / "paper.json"
-    base_alert = _alert()
-    base_intent = build_human_paper_intent(
-        feedback=_feedback(base_alert),
-        alert=base_alert,
-    )
-    assert base_intent is not None
-    bars_by_symbol: dict[str, tuple[HumanPaperMinuteBar, ...]] = {}
-    symbols = tuple(f"SH.60000{index}" for index in range(6))
-    for index, symbol in enumerate(symbols):
-        intent = replace(
-            base_intent,
-            symbol=symbol,
-            feedback_id="sha256:" + f"{index + 1:x}" * 64,
-            signal_lifecycle_id=sha256_json({"symbol": symbol}),
-        )
-        append_human_paper_intent(path, intent)
-        bars_by_symbol[symbol] = (
-            replace(
-                _bar(REVIEWED_AT + timedelta(minutes=1)),
-                symbol=symbol,
-            ),
-        )
-
-    settled, evaluations = settle_human_paper_intents_with_capital_controls(
-        path,
-        bars_by_symbol=bars_by_symbol,
-        accounting_parameters=ACCOUNTING_PARAMETERS,
-    )
-
-    fills = [event for event in settled["events"] if event["kind"] == "FILL"]
-    rejections = [
-        event for event in settled["events"] if event["kind"] == "CAPITAL_REJECT"
-    ]
-    assert len(fills) == 5
-    assert len(rejections) == 1
-    assert rejections[0]["payload"]["symbol"] == symbols[-1]
-    assert rejections[0]["payload"]["reason_codes"] == [
-        "NO_FREE_VIRTUAL_STRATEGIC_SLOT"
-    ]
-    assert len(human_paper_position_quantities(settled["events"])) == 5
-    assert len(evaluations) == 6
-    assert [value["result"] for value in evaluations].count("FILL_ALLOWED") == 5
-    assert [value["result"] for value in evaluations].count("CAPITAL_REJECTED") == 1
-
-
-def test_production_settlement_allocates_cash_in_global_bar_time_order(
-    tmp_path: Path,
-) -> None:
-    """Ledger insertion order must not overtake an earlier executable 1m bar."""
-
-    path = tmp_path / "paper.json"
-    alert = _alert()
-    base = build_human_paper_intent(feedback=_feedback(alert), alert=alert)
-    assert base is not None
-    late_symbol = "SH.600001"
-    early_symbol = "SH.600002"
-    late = replace(
-        base,
-        symbol=late_symbol,
-        feedback_id="sha256:" + "7" * 64,
-        signal_lifecycle_id=sha256_json({"symbol": late_symbol}),
-    )
-    early = replace(
-        base,
-        symbol=early_symbol,
-        feedback_id="sha256:" + "8" * 64,
-        signal_lifecycle_id=sha256_json({"symbol": early_symbol}),
-    )
-    # Deliberately append the later market opportunity first.
-    append_human_paper_intent(path, late)
-    append_human_paper_intent(path, early)
-
-    def expensive_bar(symbol: str, opened_at: datetime) -> HumanPaperMinuteBar:
-        return replace(
-            _bar(opened_at),
-            symbol=symbol,
-            open=Decimal("6000.00"),
-            high=Decimal("6001.00"),
-            low=Decimal("5999.00"),
-            close=Decimal("6000.00"),
-        )
-
-    settled, evaluations = settle_human_paper_intents_with_capital_controls(
-        path,
-        bars_by_symbol={
-            late_symbol: (
-                expensive_bar(
-                    late_symbol,
-                    REVIEWED_AT + timedelta(minutes=10),
-                ),
-            ),
-            early_symbol: (
-                expensive_bar(
-                    early_symbol,
-                    REVIEWED_AT + timedelta(minutes=5),
-                ),
-            ),
-        },
-        accounting_parameters=ACCOUNTING_PARAMETERS,
-    )
-
-    terminal = [
-        event for event in settled["events"] if event["kind"] != "INTENT"
-    ]
-    assert [(event["kind"], event["payload"]["symbol"]) for event in terminal] == [
-        ("FILL", early_symbol),
-        ("CAPITAL_REJECT", late_symbol),
-    ]
-    assert [value["result"] for value in evaluations] == [
-        "FILL_ALLOWED",
-        "CAPITAL_REJECTED",
-    ]
-    assert evaluations[0]["candidate_bar_opened_at"] < evaluations[1][
-        "candidate_bar_opened_at"
-    ]
-    audit = audit_human_paper_capital_decisions(
-        settled["events"],
-        parameters=ACCOUNTING_PARAMETERS,
-    )
-    assert audit["status"] == "COMPLETE"
 
 
 def test_portfolio_settlement_rejects_one_lot_above_eighteen_percent(
@@ -1379,7 +818,7 @@ def test_portfolio_settlement_rejects_a_second_buy_for_the_same_symbol(
     )
 
     next_day = REVIEWED_AT + timedelta(days=1)
-    # Simulate a legacy/pre-existing pending intent.  New feedback creation is
+    # Simulate a pre-existing pending intent. New feedback creation is
     # already observation-only, but settlement must independently fail closed.
     duplicate = replace(
         first,
@@ -1415,33 +854,6 @@ def test_portfolio_settlement_rejects_a_second_buy_for_the_same_symbol(
         rejected["events"],
         parameters=ACCOUNTING_PARAMETERS,
     )["status"] == "COMPLETE"
-
-
-def test_legacy_fill_remains_readable_and_is_not_claimed_as_v2_approval(
-    tmp_path: Path,
-) -> None:
-    path = tmp_path / "paper.json"
-    alert = _alert()
-    intent = build_human_paper_intent(feedback=_feedback(alert), alert=alert)
-    assert intent is not None
-    append_human_paper_intent(path, intent)
-
-    settled = settle_human_paper_intents(
-        path,
-        bars_by_symbol={
-            alert.symbol: (_bar(REVIEWED_AT + timedelta(minutes=1)),)
-        },
-    )
-
-    fill = settled["events"][-1]["payload"]
-    assert "portfolio_decision_sha256" not in fill
-    assert load_human_paper_ledger(path) == settled
-    audit = audit_human_paper_portfolio_fill_decisions(
-        settled["events"],
-        parameters=ACCOUNTING_PARAMETERS,
-    )
-    assert audit["status"] == "NO_APPROVED_FILLS"
-    assert audit["approved_fill_count"] == 0
 
 
 def test_portfolio_fill_decision_audit_rejects_embedded_cash_tampering(
@@ -1789,75 +1201,6 @@ def test_portfolio_decision_audit_rejects_prefix_cash_tampering(
     assert audit["verified_rejection_count"] == 0
 
 
-def test_cancelling_pending_sell_releases_virtual_position_reservation(
-    tmp_path: Path,
-) -> None:
-    path = tmp_path / "paper.json"
-    buy_alert = _alert()
-    reconcile_human_paper_feedback(
-        path,
-        feedback=_feedback(buy_alert),
-        alert=buy_alert,
-    )
-    bought = settle_human_paper_intents(
-        path,
-        bars_by_symbol={
-            buy_alert.symbol: (_bar(REVIEWED_AT + timedelta(minutes=1)),)
-        },
-    )
-    assert human_paper_position_quantities(bought["events"]) == {
-        buy_alert.symbol: 100
-    }
-
-    sell_alert = _alert(alert_type="POSSIBLE_30M_EXIT")
-    sell_feedback = _sell_feedback(sell_alert)
-    pending, sell_event, cancellations, changed = reconcile_human_paper_feedback(
-        path,
-        feedback=sell_feedback,
-        alert=sell_alert,
-    )
-    assert changed is True
-    assert sell_event is not None
-    assert cancellations == ()
-    assert sell_event["payload"]["side"] == "SELL"
-    assert sell_event["payload"]["status"] == "PENDING"
-    assert human_paper_pending_sell_quantities(pending["events"]) == {
-        buy_alert.symbol: 100
-    }
-
-    later_watch = replace(
-        sell_feedback,
-        reviewed_at=sell_feedback.reviewed_at + timedelta(minutes=5),
-        disposition="WATCH",
-        notes="卖点尚未确认，释放虚拟卖出预留量",
-    )
-    cancelled, replacement, cancellations, changed = (
-        reconcile_human_paper_feedback(
-            path,
-            feedback=later_watch,
-            alert=sell_alert,
-        )
-    )
-    assert changed is True
-    assert replacement is None
-    assert len(cancellations) == 1
-    assert human_paper_pending_sell_quantities(cancelled["events"]) == {}
-    assert human_paper_position_quantities(cancelled["events"]) == {
-        buy_alert.symbol: 100
-    }
-
-    after_bar = settle_human_paper_intents(
-        path,
-        bars_by_symbol={
-            buy_alert.symbol: (_bar(REVIEWED_AT + timedelta(days=1)),)
-        },
-    )
-    assert [event["kind"] for event in after_bar["events"]].count("FILL") == 1
-    assert human_paper_position_quantities(after_bar["events"]) == {
-        buy_alert.symbol: 100
-    }
-
-
 def test_feedback_for_other_signal_lifecycle_does_not_cancel_pending_intent(
     tmp_path: Path,
 ) -> None:
@@ -1937,21 +1280,6 @@ def test_paper_intent_rejects_backdated_human_feedback() -> None:
         build_human_paper_intent(feedback=feedback, alert=alert)
 
 
-def test_non_green_risk_gate_never_creates_a_virtual_fill(tmp_path: Path) -> None:
-    path = tmp_path / "paper.json"
-    alert = _alert(market_gate="AMBER")
-    intent = build_human_paper_intent(feedback=_feedback(alert), alert=alert)
-    assert intent is not None
-    assert intent.status == "BLOCKED_BY_RISK_GATE"
-    append_human_paper_intent(path, intent)
-
-    settled = settle_human_paper_intents(
-        path,
-        bars_by_symbol={alert.symbol: (_bar(REVIEWED_AT + timedelta(minutes=1)),)},
-    )
-    assert [event["kind"] for event in settled["events"]] == ["INTENT"]
-
-
 def test_non_green_sector_gate_blocks_virtual_buy_intent() -> None:
     alert = _alert(sector_gate="UNRESOLVED")
     intent = build_human_paper_intent(feedback=_feedback(alert), alert=alert)
@@ -1959,252 +1287,6 @@ def test_non_green_sector_gate_blocks_virtual_buy_intent() -> None:
     assert intent is not None
     assert intent.status == "BLOCKED_BY_RISK_GATE"
     assert "SECTOR_GATE_UNRESOLVED" in intent.reason_codes
-
-
-@pytest.mark.parametrize(
-    ("missing_field", "bar_kwargs"),
-    (
-        ("security_status", {"security_status_complete": False}),
-        ("corporate_action", {"corporate_action_state_complete": False}),
-    ),
-)
-def test_virtual_fill_fails_closed_when_execution_fact_is_missing(
-    tmp_path: Path,
-    missing_field: str,
-    bar_kwargs: dict[str, bool],
-) -> None:
-    path = tmp_path / f"paper-{missing_field}.json"
-    alert = _alert()
-    intent = build_human_paper_intent(feedback=_feedback(alert), alert=alert)
-    assert intent is not None
-    append_human_paper_intent(path, intent)
-
-    settled = settle_human_paper_intents(
-        path,
-        bars_by_symbol={
-            alert.symbol: (_bar(REVIEWED_AT + timedelta(minutes=4), **bar_kwargs),)
-        },
-    )
-
-    assert [event["kind"] for event in settled["events"]] == ["INTENT"]
-
-
-def test_virtual_sell_requires_position_and_obeys_t_plus_one(tmp_path: Path) -> None:
-    path = tmp_path / "paper.json"
-    alert = _alert()
-    buy = build_human_paper_intent(feedback=_feedback(alert), alert=alert)
-    assert buy is not None
-    append_human_paper_intent(path, buy)
-    bought = settle_human_paper_intents(
-        path,
-        bars_by_symbol={alert.symbol: (_bar(REVIEWED_AT + timedelta(minutes=4)),)},
-    )
-    positions = human_paper_position_quantities(bought["events"])
-    assert positions == {alert.symbol: 100}
-
-    sell_alert = _alert(alert_type="POSSIBLE_30M_EXIT")
-    sell = build_human_paper_intent(
-        feedback=_sell_feedback(sell_alert),
-        alert=sell_alert,
-        virtual_position_quantity=positions[alert.symbol],
-    )
-    assert sell is not None and sell.status == "PENDING" and sell.side == "SELL"
-    append_human_paper_intent(path, sell)
-    pending_document = load_human_paper_ledger(path)
-    reserved = human_paper_pending_sell_quantities(pending_document["events"])
-    assert reserved == {alert.symbol: 100}
-    duplicate_review = build_human_paper_intent(
-        feedback=replace(
-            _sell_feedback(sell_alert),
-            reviewed_at=REVIEWED_AT + timedelta(hours=1, minutes=1),
-        ),
-        alert=sell_alert,
-        virtual_position_quantity=max(0, positions[alert.symbol] - reserved[alert.symbol]),
-    )
-    assert duplicate_review is not None
-    assert duplicate_review.status == "OBSERVATION_ONLY"
-
-    same_day = _bar(REVIEWED_AT + timedelta(hours=3))
-    next_day = _bar(REVIEWED_AT + timedelta(days=1, minutes=1))
-    settled = settle_human_paper_intents(
-        path,
-        bars_by_symbol={alert.symbol: (same_day, next_day)},
-    )
-    fills = [event["payload"] for event in settled["events"] if event["kind"] == "FILL"]
-    assert [fill["side"] for fill in fills] == ["BUY", "SELL"]
-    assert fills[-1]["filled_at"] == next_day.closed_at.isoformat()
-    assert human_paper_position_quantities(settled["events"]) == {}
-    assert human_paper_pending_sell_quantities(settled["events"]) == {}
-
-
-def test_oldest_open_lot_resets_after_closed_cycle_and_new_buy(
-    tmp_path: Path,
-) -> None:
-    """Company-action provenance follows the oldest remaining FIFO lot.
-
-    An action that happened during a fully closed strategic cycle must not
-    contaminate a later cycle in the same symbol.
-    """
-
-    path = tmp_path / "paper.json"
-    alert = _alert()
-    first_buy = build_human_paper_intent(feedback=_feedback(alert), alert=alert)
-    assert first_buy is not None
-    append_human_paper_intent(path, first_buy)
-    first_fill_at = REVIEWED_AT + timedelta(minutes=4)
-    bought = settle_human_paper_intents(
-        path,
-        bars_by_symbol={alert.symbol: (_bar(first_fill_at),)},
-    )
-    assert human_paper_oldest_open_lot_sessions(bought["events"]) == {
-        alert.symbol: first_fill_at.date()
-    }
-
-    sell_alert = _alert(alert_type="POSSIBLE_30M_EXIT")
-    sell = build_human_paper_intent(
-        feedback=_sell_feedback(sell_alert),
-        alert=sell_alert,
-        virtual_position_quantity=100,
-    )
-    assert sell is not None
-    append_human_paper_intent(path, sell)
-    closed = settle_human_paper_intents(
-        path,
-        bars_by_symbol={
-            alert.symbol: (_bar(REVIEWED_AT + timedelta(days=1, minutes=1)),)
-        },
-    )
-    assert human_paper_oldest_open_lot_sessions(closed["events"]) == {}
-
-    second_session = REVIEWED_AT + timedelta(days=2)
-    second_buy = replace(
-        first_buy,
-        feedback_id="sha256:" + "c" * 64,
-        candidate_id="sha256:" + "d" * 64,
-        signal_lifecycle_id="sha256:" + "e" * 64,
-        created_at=second_session,
-        earliest_fill_at=second_session,
-        entry_confirmation_bar_closed_at=second_session,
-        entry_valid_until=second_session + timedelta(days=1),
-        entry_boundary_evidence_id="sha256:" + "f" * 64,
-    )
-    append_human_paper_intent(path, second_buy)
-    second_fill_at = second_session + timedelta(minutes=1)
-    reopened = settle_human_paper_intents(
-        path,
-        bars_by_symbol={alert.symbol: (_bar(second_fill_at),)},
-    )
-
-    assert human_paper_position_quantities(reopened["events"]) == {
-        alert.symbol: 100
-    }
-    assert human_paper_oldest_open_lot_sessions(reopened["events"]) == {
-        alert.symbol: second_fill_at.date()
-    }
-
-
-def test_human_paper_accounting_uses_frozen_minimum_fee_stamp_and_fifo(
-    tmp_path: Path,
-) -> None:
-    """虚拟账本复用冻结费率；已实现盈亏不是伪造的逐日组合绩效。"""
-
-    path = tmp_path / "paper.json"
-    alert = _alert()
-    buy = build_human_paper_intent(feedback=_feedback(alert), alert=alert)
-    assert buy is not None
-    append_human_paper_intent(path, buy)
-    bought = settle_human_paper_intents(
-        path,
-        bars_by_symbol={alert.symbol: (_bar(REVIEWED_AT + timedelta(minutes=4)),)},
-    )
-    buy_accounting = rebuild_human_paper_accounting(
-        bought["events"],
-        parameters=load_human_paper_accounting_parameters(PARAMETER_SNAPSHOT),
-        execution_evidence_status="COMPLETE",
-    )
-    assert buy_accounting["status"] == "OPEN_POSITIONS_UNMARKED"
-    assert buy_accounting["cash_balance"] == "998974.99"
-    assert buy_accounting["total_fees"] == "5.01"
-    assert buy_accounting["remaining_cost_basis"] == "1025.01"
-    assert buy_accounting["positions"][alert.symbol] == {
-        "quantity": 100,
-        "remaining_cost_basis": "1025.01",
-        "average_cost": "10.2501",
-        "oldest_acquired_session": "2026-07-28",
-    }
-    assert buy_accounting["cash_ledger_complete"] is False
-    assert buy_accounting["performance_evaluable"] is False
-
-    sell_alert = _alert(alert_type="POSSIBLE_30M_EXIT")
-    sell = build_human_paper_intent(
-        feedback=_sell_feedback(sell_alert),
-        alert=sell_alert,
-        virtual_position_quantity=100,
-    )
-    assert sell is not None
-    append_human_paper_intent(path, sell)
-    sell_bar = replace(
-        _bar(REVIEWED_AT + timedelta(days=1, minutes=1)),
-        open=Decimal("11.00"),
-        high=Decimal("11.10"),
-        low=Decimal("10.90"),
-        close=Decimal("11.05"),
-    )
-    closed = settle_human_paper_intents(
-        path,
-        bars_by_symbol={alert.symbol: (sell_bar,)},
-    )
-    accounting = rebuild_human_paper_accounting(
-        closed["events"],
-        parameters=load_human_paper_accounting_parameters(PARAMETER_SNAPSHOT),
-        execution_evidence_status="COMPLETE",
-    )
-    # 买入按整柱最高价10.20，卖出按整柱最低价10.90；费用仍复用冻结费率。
-    assert accounting["status"] == "CLOSED_BOOK_NO_DAILY_EQUITY"
-    assert accounting["cash_balance"] == "1000059.43"
-    assert accounting["total_fees"] == "10.57"
-    assert accounting["turnover_notional"] == "2110.00"
-    assert accounting["realized_pnl"] == "59.43"
-    assert accounting["closed_cycle_count"] == 1
-    assert accounting["positions"] == {}
-    assert accounting["cash_ledger_complete"] is True
-    assert accounting["equity_curve_available"] is False
-    assert accounting["performance_evaluable"] is False
-
-
-def test_human_paper_accounting_no_fill_and_unverified_evidence_are_explicit(
-    tmp_path: Path,
-) -> None:
-    parameters = load_human_paper_accounting_parameters(PARAMETER_SNAPSHOT)
-    empty = rebuild_human_paper_accounting(
-        (),
-        parameters=parameters,
-        execution_evidence_status="NO_FILLS",
-    )
-    assert empty["status"] == "NO_FILLS"
-    assert empty["accounting_valid"] is True
-    assert empty["cash_balance"] == "1000000.00"
-    assert empty["fee_model_attached"] is True
-    assert empty["cash_ledger_attached"] is True
-    assert empty["performance_evaluable"] is False
-
-    path = tmp_path / "paper.json"
-    alert = _alert()
-    intent = build_human_paper_intent(feedback=_feedback(alert), alert=alert)
-    assert intent is not None
-    append_human_paper_intent(path, intent)
-    filled = settle_human_paper_intents(
-        path,
-        bars_by_symbol={alert.symbol: (_bar(REVIEWED_AT + timedelta(minutes=4)),)},
-    )
-    unverified = rebuild_human_paper_accounting(
-        filled["events"],
-        parameters=parameters,
-        execution_evidence_status="MISSING",
-    )
-    assert unverified["status"] == "EXECUTION_EVIDENCE_UNVERIFIED"
-    assert unverified["accounting_valid"] is False
-    assert "EXECUTION_EVIDENCE_NOT_COMPLETE" in unverified["reason_codes"]
 
 
 def test_human_paper_accounting_rejects_fee_snapshot_mutation(tmp_path: Path) -> None:
@@ -2232,7 +1314,7 @@ def _write_continuity_evidence(
     session_root = forward_root / "sessions" / session.date().isoformat()
     captured_at = session.replace(hour=15, minute=20).isoformat()
     facts_stable = {
-        "schema": "chanlun-human-paper-execution-facts/v1",
+        "schema": "chanlun-human-paper-execution-facts",
         "session": session.date().isoformat(),
         "captured_at": captured_at,
         "symbols": [
@@ -2336,7 +1418,7 @@ def _write_continuity_evidence(
         "COMPLETE" if eligible else "NOT_REQUIRED_INSTRUMENT_INELIGIBLE"
     )
     evidence_stable = {
-        "schema": "chanlun-human-paper-execution-evidence/v1",
+        "schema": "chanlun-human-paper-execution-evidence",
         "session": session.date().isoformat(),
         "captured_at": captured_at,
         "execution_fact_snapshot_sha256": fact_id,
@@ -3041,151 +2123,6 @@ def test_open_strategic_cycle_cannot_create_another_buy_intent() -> None:
     )
 
 
-def test_consumed_buy_point_cannot_reopen_after_strategic_cycle_closes(
-    tmp_path: Path,
-) -> None:
-    """卖空旧周期后仍必须等待新 source point，不能复用旧买点。"""
-
-    path = tmp_path / "paper.json"
-    buy_alert = _alert()
-    reconcile_human_paper_feedback(
-        path,
-        feedback=_feedback(buy_alert),
-        alert=buy_alert,
-    )
-    settle_human_paper_intents(
-        path,
-        bars_by_symbol={
-            buy_alert.symbol: (_bar(REVIEWED_AT + timedelta(minutes=1)),)
-        },
-    )
-
-    sell_alert = _alert(alert_type="POSSIBLE_30M_EXIT")
-    reconcile_human_paper_feedback(
-        path,
-        feedback=_sell_feedback(sell_alert),
-        alert=sell_alert,
-    )
-    closed = settle_human_paper_intents(
-        path,
-        bars_by_symbol={
-            buy_alert.symbol: (_bar(REVIEWED_AT + timedelta(days=1)),)
-        },
-    )
-    assert human_paper_position_quantities(closed["events"]) == {}
-
-    later_review = REVIEWED_AT + timedelta(days=2)
-    repeated_alert = replace(
-        buy_alert,
-        signal_at=later_review - timedelta(minutes=30),
-        review_available_at=later_review,
-        structure_snapshot_id="sha256:" + "8" * 64,
-        source_fact_ids=("sha256:" + "9" * 64,),
-    )
-    assert repeated_alert.candidate_id != buy_alert.candidate_id
-    assert repeated_alert.signal_lifecycle_id == buy_alert.signal_lifecycle_id
-    repeated_feedback = replace(
-        _feedback(repeated_alert),
-        reviewed_at=later_review,
-        source_screen_content_sha256="sha256:" + "a" * 64,
-    )
-
-    document, event, cancellations, changed = reconcile_human_paper_feedback(
-        path,
-        feedback=repeated_feedback,
-        alert=repeated_alert,
-    )
-
-    assert changed is True
-    assert cancellations == ()
-    assert event is not None
-    assert event["payload"]["status"] == "OBSERVATION_ONLY"
-    assert event["payload"]["reason_codes"] == [
-        "SIGNAL_LIFECYCLE_ALREADY_CONSUMED",
-        "NEW_STRUCTURE_REQUIRED_FOR_NEW_VIRTUAL_CYCLE",
-    ]
-    assert human_paper_position_quantities(document["events"]) == {}
-    assert [value["kind"] for value in document["events"]].count("FILL") == 2
-
-
-def test_direct_append_cannot_bypass_consumed_lifecycle_latch(
-    tmp_path: Path,
-) -> None:
-    path = tmp_path / "paper.json"
-    alert = _alert()
-    first = build_human_paper_intent(feedback=_feedback(alert), alert=alert)
-    assert first is not None
-    append_human_paper_intent(path, first)
-    settle_human_paper_intents(
-        path,
-        bars_by_symbol={alert.symbol: (_bar(REVIEWED_AT + timedelta(minutes=1)),)},
-    )
-
-    later = REVIEWED_AT + timedelta(days=1)
-    repeated_alert = replace(
-        alert,
-        signal_at=later - timedelta(minutes=30),
-        review_available_at=later,
-        structure_snapshot_id="sha256:" + "8" * 64,
-    )
-    repeated = build_human_paper_intent(
-        feedback=replace(_feedback(repeated_alert), reviewed_at=later),
-        alert=repeated_alert,
-    )
-    assert repeated is not None and repeated.status == "PENDING"
-
-    with pytest.raises(ValueError, match="reused a consumed signal lifecycle"):
-        append_human_paper_intent(path, repeated)
-
-
-def test_fully_rehashed_consumed_lifecycle_reuse_is_rejected(
-    tmp_path: Path,
-) -> None:
-    """局部、事件链和文件哈希全重算也不能复用旧买点。"""
-
-    path = tmp_path / "paper.json"
-    alert = _alert()
-    first = build_human_paper_intent(feedback=_feedback(alert), alert=alert)
-    assert first is not None
-    append_human_paper_intent(path, first)
-    settle_human_paper_intents(
-        path,
-        bars_by_symbol={alert.symbol: (_bar(REVIEWED_AT + timedelta(minutes=1)),)},
-    )
-
-    later = REVIEWED_AT + timedelta(days=1)
-    repeated_alert = replace(
-        alert,
-        signal_at=later - timedelta(minutes=30),
-        review_available_at=later,
-        structure_snapshot_id="sha256:" + "8" * 64,
-    )
-    repeated = build_human_paper_intent(
-        feedback=replace(_feedback(repeated_alert), reviewed_at=later),
-        alert=repeated_alert,
-    )
-    assert repeated is not None and repeated.status == "PENDING"
-
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    raw_intent = json.loads(json.dumps(asdict(repeated), default=str))
-    raw_intent["intent_id"] = repeated.intent_id
-    stable_event = {
-        "kind": "INTENT",
-        "payload": raw_intent,
-        "previous_event_id": payload["events"][-1]["event_id"],
-    }
-    payload["events"].append(
-        {**stable_event, "event_id": sha256_json(stable_event)}
-    )
-    stable_document = dict(payload)
-    stable_document.pop("content_sha256")
-    payload["content_sha256"] = sha256_json(stable_document)
-    path.write_text(json.dumps(payload), encoding="utf-8")
-
-    with pytest.raises(ValueError, match="reused a consumed signal lifecycle"):
-        load_human_paper_ledger(path)
-
-
 def test_human_paper_ledger_rejects_outer_rehashed_payload_tampering(
     tmp_path: Path,
 ) -> None:
@@ -3276,198 +2213,6 @@ def test_human_paper_ledger_rejects_fully_rehashed_cancellation_tampering(
     path.write_text(json.dumps(payload), encoding="utf-8")
 
     with pytest.raises(ValueError, match="cancellation payload is invalid"):
-        load_human_paper_ledger(path)
-
-
-def test_human_paper_ledger_rejects_fully_rehashed_capital_rejection_tampering(
-    tmp_path: Path,
-) -> None:
-    path = tmp_path / "paper.json"
-    alert = _alert()
-    intent = build_human_paper_intent(feedback=_feedback(alert), alert=alert)
-    assert intent is not None
-    append_human_paper_intent(path, intent)
-    expensive = replace(
-        _bar(REVIEWED_AT + timedelta(minutes=1)),
-        open=Decimal("10000.00"),
-        high=Decimal("10001.00"),
-        low=Decimal("9999.00"),
-        close=Decimal("10000.00"),
-    )
-    settle_human_paper_intents_with_capital_controls(
-        path,
-        bars_by_symbol={alert.symbol: (expensive,)},
-        accounting_parameters=ACCOUNTING_PARAMETERS,
-    )
-
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    rejection_event = payload["events"][-1]
-    rejection = rejection_event["payload"]
-    rejection["available_cash"] = rejection["required_cash"]
-    rejection_identity = dict(rejection)
-    rejection_identity.pop("rejection_id")
-    rejection["rejection_id"] = sha256_json(rejection_identity)
-    stable_event = dict(rejection_event)
-    stable_event.pop("event_id")
-    rejection_event["event_id"] = sha256_json(stable_event)
-    stable_document = dict(payload)
-    stable_document.pop("content_sha256")
-    payload["content_sha256"] = sha256_json(stable_document)
-    path.write_text(json.dumps(payload), encoding="utf-8")
-
-    with pytest.raises(ValueError, match="capital rejection payload is invalid"):
-        load_human_paper_ledger(path)
-
-
-def test_capital_decision_audit_rejects_plausible_fully_rehashed_cash_tampering(
-    tmp_path: Path,
-) -> None:
-    """A locally self-consistent rejection must still match its ledger prefix."""
-
-    path = tmp_path / "paper.json"
-    alert = _alert()
-    intent = build_human_paper_intent(feedback=_feedback(alert), alert=alert)
-    assert intent is not None
-    append_human_paper_intent(path, intent)
-    expensive = replace(
-        _bar(REVIEWED_AT + timedelta(minutes=1)),
-        open=Decimal("10000.00"),
-        high=Decimal("10001.00"),
-        low=Decimal("9999.00"),
-        close=Decimal("10000.00"),
-    )
-    settle_human_paper_intents_with_capital_controls(
-        path,
-        bars_by_symbol={alert.symbol: (expensive,)},
-        accounting_parameters=ACCOUNTING_PARAMETERS,
-    )
-
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    rejection_event = payload["events"][-1]
-    rejection = rejection_event["payload"]
-    # Keep the insufficient-cash predicate true so the dataclass remains
-    # locally valid, but lie about the cash reconstructed from prior fills.
-    rejection["available_cash"] = "999999.99"
-    decision_stable = {
-        "schema": "chanlun-human-paper-cash-slot-decision/v1",
-        "accounting_contract_id": rejection["accounting_contract_id"],
-        "symbol": rejection["symbol"],
-        "quantity": rejection["quantity"],
-        "price": rejection["candidate_price"],
-        "session": datetime.fromisoformat(
-            rejection["candidate_bar_opened_at"]
-        ).date().isoformat(),
-        "available_cash": rejection["available_cash"],
-        "notional": rejection["notional"],
-        "terminal_buy_fee": rejection["terminal_buy_fee"],
-        "required_cash": rejection["required_cash"],
-        "occupied_slots": rejection["occupied_slots"],
-        "slot_count": rejection["slot_count"],
-        "allowed": False,
-        "reason_codes": tuple(rejection["reason_codes"]),
-        "slot_fraction_notional_gate_evaluable": False,
-        "account_exposure_notional_gate_evaluable": False,
-        "fixed_one_lot_diagnostic": True,
-        "tick_data_used": False,
-        "broker_transport_available": False,
-        "live_status": "LIVE_DISABLED",
-    }
-    rejection["cash_slot_decision_sha256"] = sha256_json(decision_stable)
-    model_values = dict(rejection)
-    model_values.pop("rejection_id")
-    for name in (
-        "candidate_bar_opened_at",
-        "candidate_bar_closed_at",
-        "rejected_at",
-    ):
-        model_values[name] = datetime.fromisoformat(model_values[name])
-    for name in (
-        "candidate_price",
-        "available_cash",
-        "notional",
-        "terminal_buy_fee",
-        "required_cash",
-    ):
-        model_values[name] = Decimal(model_values[name])
-    model_values["reason_codes"] = tuple(model_values["reason_codes"])
-    rejection["rejection_id"] = HumanPaperCapitalRejection(
-        **model_values
-    ).rejection_id
-    stable_event = dict(rejection_event)
-    stable_event.pop("event_id")
-    rejection_event["event_id"] = sha256_json(stable_event)
-    stable_document = dict(payload)
-    stable_document.pop("content_sha256")
-    payload["content_sha256"] = sha256_json(stable_document)
-    path.write_text(json.dumps(payload), encoding="utf-8")
-
-    loaded = load_human_paper_ledger(path)
-    audit = audit_human_paper_capital_decisions(
-        loaded["events"],
-        parameters=ACCOUNTING_PARAMETERS,
-    )
-    assert audit["status"] == "INVALID"
-    assert audit["verified_rejection_count"] == 0
-    assert "decision identity disagrees" in audit["invalid_decisions"][0]["reason"]
-
-
-def test_human_paper_ledger_rejects_fully_rehashed_t_plus_one_violation(
-    tmp_path: Path,
-) -> None:
-    """同日卖出即使重算全部身份，也不能成为可加载的虚拟事实。"""
-
-    path = tmp_path / "paper.json"
-    alert = _alert()
-    buy = build_human_paper_intent(feedback=_feedback(alert), alert=alert)
-    assert buy is not None
-    append_human_paper_intent(path, buy)
-    bought = settle_human_paper_intents(
-        path,
-        bars_by_symbol={alert.symbol: (_bar(REVIEWED_AT + timedelta(minutes=4)),)},
-    )
-    positions = human_paper_position_quantities(bought["events"])
-    sell_alert = _alert(alert_type="POSSIBLE_30M_EXIT")
-    sell = build_human_paper_intent(
-        feedback=_sell_feedback(sell_alert),
-        alert=sell_alert,
-        virtual_position_quantity=positions[alert.symbol],
-    )
-    assert sell is not None
-    append_human_paper_intent(path, sell)
-    settle_human_paper_intents(
-        path,
-        bars_by_symbol={
-            alert.symbol: (_bar(REVIEWED_AT + timedelta(days=1, minutes=1)),)
-        },
-    )
-
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    event = payload["events"][-1]
-    fill_payload = event["payload"]
-    forged_fill_at = REVIEWED_AT + timedelta(hours=3)
-    forged_fill_close = forged_fill_at + timedelta(minutes=1)
-    fill_payload["filled_at"] = forged_fill_close.isoformat()
-    fill_payload["source_bar_closed_at"] = forged_fill_close.isoformat()
-    fill_identity = dict(fill_payload)
-    fill_identity.pop("fill_id")
-    fill_identity["filled_at"] = datetime.fromisoformat(
-        str(fill_identity["filled_at"])
-    )
-    fill_identity["source_bar_closed_at"] = datetime.fromisoformat(
-        str(fill_identity["source_bar_closed_at"])
-    )
-    fill_identity["price"] = Decimal(str(fill_identity["price"]))
-    fill_payload["fill_id"] = sha256_json(fill_identity)
-
-    stable_event = dict(event)
-    stable_event.pop("event_id")
-    event["event_id"] = sha256_json(stable_event)
-    stable_document = dict(payload)
-    stable_document.pop("content_sha256")
-    payload["content_sha256"] = sha256_json(stable_document)
-    path.write_text(json.dumps(payload), encoding="utf-8")
-
-    with pytest.raises(ValueError, match=r"oversell or T\+1 violation"):
         load_human_paper_ledger(path)
 
 

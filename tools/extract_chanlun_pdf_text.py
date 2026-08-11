@@ -28,7 +28,7 @@ TRUSTED_IDENTITY = PdfIdentity(
     page_count=2_533,
     sha256="867b1262af2d3430b98421df4c5372748eb75a4eb7600cd967ecdc374817429e",
 )
-EXTRACTOR_VERSION = "lesson-pdf/pdfplumber-0.11.10/2"
+EXTRACTOR_ID = "lesson-pdf/pdfplumber-0.11.10"
 
 
 def _analysis(spans: tuple[object, ...]) -> dict[str, object]:
@@ -114,7 +114,7 @@ def main() -> int:
             target,
             identity=verified,
             spans=spans,
-            extractor_version=EXTRACTOR_VERSION,
+            extractor_id=EXTRACTOR_ID,
             first_page=7,
             last_page=verified.page_count,
         )
@@ -124,7 +124,7 @@ def main() -> int:
         "cache_action": cache_action,
         "cache_path": str(target),
         "elapsed_seconds": round(time.monotonic() - started, 3),
-        "extractor_version": EXTRACTOR_VERSION,
+        "extractor_id": EXTRACTOR_ID,
         "source_pdf": {
             "filename": verified.filename,
             "page_count": verified.page_count,

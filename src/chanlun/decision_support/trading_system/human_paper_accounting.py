@@ -18,29 +18,26 @@ from pathlib import Path
 from typing import Mapping, Sequence
 
 from chanlun.decision_support.fingerprints import sha256_json
-from chanlun.decision_support.trading_system.v3_execution import (
+from chanlun.decision_support.trading_system.execution import (
     InstrumentKind,
-    V3FeeModel,
-    V3FeeRateAt,
+    FeeModel,
+    FeeRateAt,
 )
-from chanlun.decision_support.trading_system.v3_forward_paper import (
+from chanlun.decision_support.trading_system.forward_paper import (
     FROZEN_RESEARCH_PARAMETER_SET_ID,
     load_frozen_forward_contract,
 )
 
 
-ACCOUNTING_SCHEMA = "chanlun-human-paper-accounting/v1"
-CAPITAL_DECISION_AUDIT_SCHEMA = (
-    "chanlun-human-paper-capital-decision-audit/v1"
-)
+ACCOUNTING_SCHEMA = "chanlun-human-paper-accounting"
 PORTFOLIO_DECISION_AUDIT_SCHEMA = (
-    "chanlun-human-paper-portfolio-decision-audit/v2"
+    "chanlun-human-paper-portfolio-decision-audit"
 )
 PORTFOLIO_FILL_DECISION_AUDIT_SCHEMA = (
-    "chanlun-human-paper-portfolio-fill-decision-audit/v2"
+    "chanlun-human-paper-portfolio-fill-decision-audit"
 )
 _EXPECTED_FEE_SCHEDULE = {
-    "schedule_id": "A_SHARE_RESEARCH_2025_V1",
+    "schedule_id": "A_SHARE_RESEARCH_2025",
     "commission_rate": "0.0003",
     "minimum_commission": "5",
     "stock_sell_stamp_rate": "0.0005",
@@ -61,7 +58,7 @@ class HumanPaperAccountingParameters:
     slot_fraction: Decimal
     account_exposure_cap: Decimal
     instrument_kind: InstrumentKind
-    fee_model: V3FeeModel
+    fee_model: FeeModel
     live_status: str = "LIVE_DISABLED"
 
     def __post_init__(self) -> None:
@@ -84,7 +81,7 @@ class HumanPaperAccountingParameters:
         fee_rate["effective_from"] = rate.effective_from.isoformat()
         return sha256_json(
             {
-                "schema": "chanlun-human-paper-accounting-contract/v1",
+                "schema": "chanlun-human-paper-accounting-contract",
                 "strategy_parameter_set_id": self.strategy_parameter_set_id,
                 "parameter_snapshot_sha256": self.parameter_snapshot_sha256,
                 "effective_from": self.effective_from.isoformat(),
@@ -122,7 +119,7 @@ def load_human_paper_accounting_parameters(
         raise ValueError("frozen human paper accounting effective date changed")
     try:
         effective_from = date.fromisoformat(str(payload["effective_start"]))
-        rate = V3FeeRateAt(
+        rate = FeeRateAt(
             effective_from=effective_from,
             commission_rate=Decimal(str(fee["commission_rate"])),
             minimum_commission=Decimal(str(fee["minimum_commission"])),
@@ -131,7 +128,7 @@ def load_human_paper_accounting_parameters(
             other_buy_rate=Decimal(str(fee["other_buy_rate"])),
             other_sell_rate=Decimal(str(fee["other_sell_rate"])),
         )
-        fee_model = V3FeeModel(
+        fee_model = FeeModel(
             schedule_id=str(fee["schedule_id"]),
             rates=(rate,),
             currency_quantum=Decimal(str(fee["currency_quantum"])),
@@ -331,182 +328,6 @@ def rebuild_human_paper_accounting(
     return {**stable, "content_sha256": sha256_json(stable)}
 
 
-def assess_human_paper_cash_and_slot_fill(
-    events: Sequence[Mapping[str, object]],
-    *,
-    parameters: HumanPaperAccountingParameters,
-    symbol: str,
-    quantity: int,
-    price: Decimal,
-    session: date,
-) -> dict[str, object]:
-    """Evaluate the exact pre-fill constraints available to the paper book.
-
-    Cash (including the frozen terminal buy fee) and occupied symbol slots are
-    exactly reconstructable from immutable fills.  The 18%/90% notional gates
-    additionally require decision-time equity and marks for every open symbol;
-    the fixed-one-lot diagnostic book does not invent those facts here.
-    """
-
-    if not symbol or quantity <= 0 or price <= 0:
-        raise ValueError("human paper cash/slot candidate is invalid")
-    fill_count = sum(
-        event.get("kind") == "FILL" and isinstance(event.get("payload"), Mapping)
-        for event in events
-    )
-    accounting = rebuild_human_paper_accounting(
-        events,
-        parameters=parameters,
-        execution_evidence_status="COMPLETE" if fill_count else "NO_FILLS",
-    )
-    if accounting.get("constraint_violations"):
-        raise ValueError("existing human paper account constraints are invalid")
-    cash = Decimal(str(accounting["cash_balance"]))
-    positions = accounting.get("positions")
-    if not isinstance(positions, Mapping):
-        raise ValueError("human paper positions are unavailable")
-    occupied_slots = len(positions)
-    fee = parameters.fee_model.order_cost(
-        side="buy",
-        instrument_kind=parameters.instrument_kind,
-        quantity=quantity,
-        price=price,
-        session=session,
-    )
-    notional = Decimal(quantity) * price
-    required_cash = notional + fee
-    reasons: list[str] = []
-    if symbol not in positions and occupied_slots >= parameters.slot_count:
-        reasons.append("NO_FREE_VIRTUAL_STRATEGIC_SLOT")
-    if required_cash > cash:
-        reasons.append("INSUFFICIENT_VIRTUAL_CASH_INCLUDING_FEES")
-    stable: dict[str, object] = {
-        "schema": "chanlun-human-paper-cash-slot-decision/v1",
-        "accounting_contract_id": parameters.accounting_contract_id,
-        "symbol": symbol,
-        "quantity": quantity,
-        "price": format(price, "f"),
-        "session": session.isoformat(),
-        "available_cash": format(_money(cash, parameters.fee_model.currency_quantum), "f"),
-        "notional": format(_money(notional, parameters.fee_model.currency_quantum), "f"),
-        "terminal_buy_fee": format(fee, "f"),
-        "required_cash": format(
-            _money(required_cash, parameters.fee_model.currency_quantum),
-            "f",
-        ),
-        "occupied_slots": occupied_slots,
-        "slot_count": parameters.slot_count,
-        "allowed": not reasons,
-        "reason_codes": reasons,
-        "slot_fraction_notional_gate_evaluable": False,
-        "account_exposure_notional_gate_evaluable": False,
-        "fixed_one_lot_diagnostic": True,
-        "tick_data_used": False,
-        "broker_transport_available": False,
-        "live_status": "LIVE_DISABLED",
-    }
-    return {**stable, "content_sha256": sha256_json(stable)}
-
-
-def audit_human_paper_capital_decisions(
-    events: Sequence[Mapping[str, object]],
-    *,
-    parameters: HumanPaperAccountingParameters,
-) -> dict[str, object]:
-    """Recompute every terminal cash/slot rejection from its ledger prefix."""
-
-    rejection_indexes = tuple(
-        index
-        for index, event in enumerate(events)
-        if event.get("kind") == "CAPITAL_REJECT"
-        and isinstance(event.get("payload"), Mapping)
-    )
-    if not rejection_indexes:
-        return {
-            "schema": CAPITAL_DECISION_AUDIT_SCHEMA,
-            "status": "NO_REJECTIONS",
-            "rejection_count": 0,
-            "verified_rejection_count": 0,
-            "invalid_decisions": [],
-            "accounting_contract_id": parameters.accounting_contract_id,
-            "slot_fraction_notional_gate_evaluable": False,
-            "account_exposure_notional_gate_evaluable": False,
-            "tick_data_used": False,
-            "broker_transport_available": False,
-            "live_status": "LIVE_DISABLED",
-        }
-
-    invalid: list[dict[str, str]] = []
-    for index in rejection_indexes:
-        event = events[index]
-        payload = event["payload"]
-        assert isinstance(payload, Mapping)
-        rejection_id = str(payload.get("rejection_id") or "")
-        try:
-            candidate_price = Decimal(str(payload["candidate_price"]))
-            candidate_at = datetime.fromisoformat(
-                str(payload["candidate_bar_opened_at"])
-            )
-            expected = assess_human_paper_cash_and_slot_fill(
-                events[:index],
-                parameters=parameters,
-                symbol=str(payload["symbol"]),
-                quantity=int(payload["quantity"]),
-                price=candidate_price,
-                session=candidate_at.date(),
-            )
-            exact_text_fields = {
-                "accounting_contract_id": "accounting_contract_id",
-                "cash_slot_decision_sha256": "content_sha256",
-            }
-            if any(
-                str(payload.get(actual) or "") != str(expected[derived])
-                for actual, derived in exact_text_fields.items()
-            ):
-                raise ValueError("capital rejection decision identity disagrees")
-            decimal_fields = {
-                "available_cash": "available_cash",
-                "notional": "notional",
-                "terminal_buy_fee": "terminal_buy_fee",
-                "required_cash": "required_cash",
-            }
-            if any(
-                Decimal(str(payload[actual])) != Decimal(str(expected[derived]))
-                for actual, derived in decimal_fields.items()
-            ):
-                raise ValueError("capital rejection cash reconstruction disagrees")
-            if (
-                int(payload["occupied_slots"]) != int(expected["occupied_slots"])
-                or int(payload["slot_count"]) != int(expected["slot_count"])
-                or tuple(payload["reason_codes"])
-                != tuple(expected["reason_codes"])
-                or expected["allowed"] is not False
-            ):
-                raise ValueError("capital rejection slot/reason reconstruction disagrees")
-        except (InvalidOperation, KeyError, TypeError, ValueError) as exc:
-            invalid.append(
-                {
-                    "rejection_id": rejection_id,
-                    "event_index": str(index),
-                    "reason": f"{type(exc).__name__}: {str(exc)[:200]}",
-                }
-            )
-
-    return {
-        "schema": CAPITAL_DECISION_AUDIT_SCHEMA,
-        "status": "INVALID" if invalid else "COMPLETE",
-        "rejection_count": len(rejection_indexes),
-        "verified_rejection_count": len(rejection_indexes) - len(invalid),
-        "invalid_decisions": invalid,
-        "accounting_contract_id": parameters.accounting_contract_id,
-        "slot_fraction_notional_gate_evaluable": False,
-        "account_exposure_notional_gate_evaluable": False,
-        "tick_data_used": False,
-        "broker_transport_available": False,
-        "live_status": "LIVE_DISABLED",
-    }
-
-
 def assess_human_paper_portfolio_fill(
     events: Sequence[Mapping[str, object]],
     *,
@@ -591,7 +412,7 @@ def assess_human_paper_portfolio_fill(
         reasons.append("VIRTUAL_ACCOUNT_EXPOSURE_CAP_EXCEEDED")
 
     stable: dict[str, object] = {
-        "schema": "chanlun-human-paper-portfolio-decision/v2",
+        "schema": "chanlun-human-paper-portfolio-decision",
         "accounting_contract_id": parameters.accounting_contract_id,
         "symbol": symbol,
         "quantity": quantity,
@@ -638,7 +459,7 @@ def audit_human_paper_portfolio_decisions(
     *,
     parameters: HumanPaperAccountingParameters,
 ) -> dict[str, object]:
-    """Recompute every v2 portfolio rejection from its strict ledger prefix."""
+    """Recompute every portfolio rejection from its strict ledger prefix."""
 
     rejection_indexes = tuple(
         index
@@ -746,7 +567,7 @@ def audit_human_paper_portfolio_fill_decisions(
     *,
     parameters: HumanPaperAccountingParameters,
 ) -> dict[str, object]:
-    """Recompute every atomic v2 BUY-fill approval from its ledger prefix."""
+    """Recompute every atomic BUY-fill approval from its ledger prefix."""
 
     approved_fill_indexes = tuple(
         index
@@ -853,13 +674,10 @@ def audit_human_paper_portfolio_fill_decisions(
 
 __all__ = (
     "ACCOUNTING_SCHEMA",
-    "CAPITAL_DECISION_AUDIT_SCHEMA",
     "PORTFOLIO_DECISION_AUDIT_SCHEMA",
     "PORTFOLIO_FILL_DECISION_AUDIT_SCHEMA",
     "HumanPaperAccountingParameters",
-    "assess_human_paper_cash_and_slot_fill",
     "assess_human_paper_portfolio_fill",
-    "audit_human_paper_capital_decisions",
     "audit_human_paper_portfolio_decisions",
     "audit_human_paper_portfolio_fill_decisions",
     "load_human_paper_accounting_parameters",

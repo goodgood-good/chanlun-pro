@@ -10,20 +10,12 @@ from cl_app import xuangu_tasks
 class _FakeZiXuan:
     def __init__(self):
         self.zx_names = ["src", "dst"]
-        self.cleared = []
-        self.added = []
         self.replaced = []
 
     def zx_stocks(self, group):
         if group == "src":
             return [{"code": "SH.600000"}, {"code": "SZ.000001"}]
         return []
-
-    def clear_zx_stocks(self, group):
-        self.cleared.append(group)
-
-    def add_stock(self, group, code, _name):
-        self.added.append((group, code))
 
     def replace_zx_stocks(self, group, stocks):
         self.replaced.append((group, list(stocks)))
@@ -46,7 +38,7 @@ def _patch_task_dependencies(monkeypatch, fake_zx):
 
 def _run(src_group="src"):
     return xuangu_tasks.process_xuangu_task(
-        "a", "xg_single_bi_1mmd", ["5m"], ["long"], src_group, "dst"
+        "a", "strict_l0_class1_point", ["5m"], ["long"], src_group, "dst"
     )
 
 
@@ -62,8 +54,6 @@ def test_all_code_errors_do_not_replace_target_group(monkeypatch):
     )
 
     assert _run() is False
-    assert fake_zx.cleared == []
-    assert fake_zx.added == []
     assert fake_zx.replaced == []
 
 
@@ -80,12 +70,10 @@ def test_partial_code_errors_do_not_replace_target_group(monkeypatch):
     )
 
     assert _run() is False
-    assert fake_zx.cleared == []
-    assert fake_zx.added == []
     assert fake_zx.replaced == []
 
 
-def test_legitimate_zero_matches_still_clear_target_group(monkeypatch):
+def test_legitimate_zero_matches_publish_empty_snapshot(monkeypatch):
     fake_zx = _FakeZiXuan()
     _patch_task_dependencies(monkeypatch, fake_zx)
     monkeypatch.setattr(
@@ -93,8 +81,6 @@ def test_legitimate_zero_matches_still_clear_target_group(monkeypatch):
     )
 
     assert _run() is True
-    assert fake_zx.cleared == []
-    assert fake_zx.added == []
     assert fake_zx.replaced == [("dst", [])]
 
 
@@ -107,19 +93,17 @@ def test_successful_evaluation_publishes_with_one_atomic_replace(monkeypatch):
     )
 
     assert _run() is True
-    assert fake_zx.cleared == []
-    assert fake_zx.added == []
     assert fake_zx.replaced == [
         ("dst", [{"code": "SH.600000", "msg": "matched"}])
     ]
 
 
-def test_unknown_source_group_does_not_clear_target_group(monkeypatch):
+def test_unknown_source_group_does_not_replace_target_group(monkeypatch):
     fake_zx = _FakeZiXuan()
     _patch_task_dependencies(monkeypatch, fake_zx)
 
     assert _run(src_group="missing") is False
-    assert fake_zx.cleared == []
+    assert fake_zx.replaced == []
 
 
 def test_task_level_exception_reports_failure(monkeypatch):
@@ -132,7 +116,7 @@ def test_task_level_exception_reports_failure(monkeypatch):
     )
 
     assert _run() is False
-    assert fake_zx.cleared == []
+    assert fake_zx.replaced == []
 
 
 def test_per_code_exception_has_distinct_failure_result(monkeypatch):
@@ -147,7 +131,7 @@ def test_per_code_exception_has_distinct_failure_result(monkeypatch):
     )
 
     result = xuangu_tasks.process_xuangu_by_code(
-        ("SH.600000", "a", ["5m"], "xg_single_bi_1mmd", ["long"])
+        ("SH.600000", "a", ["5m"], "strict_l0_class1_point", ["long"])
     )
     assert result is failed
 

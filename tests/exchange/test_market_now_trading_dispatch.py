@@ -1,4 +1,4 @@
-"""市场感知的交易时段判断必须把 HK/US 传给支持该参数的适配器。"""
+"""Every exchange implements the single market-aware session contract."""
 
 from pathlib import Path
 
@@ -9,54 +9,34 @@ class _MarketAwareExchange:
     def __init__(self):
         self.received = None
 
-    def now_trading(self, market="us"):
+    def now_trading(self, market: str):
         self.received = market
         return market == "hk"
 
 
-class _LegacyExchange:
-    def __init__(self):
-        self.calls = 0
-
-    def now_trading(self):
-        self.calls += 1
-        return True
-
-
-class _LegacyUnknownExchange:
-    def now_trading(self):
+class _UnknownExchange:
+    def now_trading(self, market: str):
         return None
 
 
-def test_market_now_trading_dispatches_market_only_when_supported():
+def test_market_now_trading_always_dispatches_market():
     aware = _MarketAwareExchange()
     assert market_now_trading(aware, Market.HK) is True
     assert aware.received == "hk"
 
-    legacy = _LegacyExchange()
-    assert market_now_trading(legacy, Market.HK) is True
-    assert legacy.calls == 1
 
-
-def test_market_now_trading_preserves_legacy_unknown_state():
-    """ExchangeDB 用 None 表示未知，不能被共享分派器改写成明确休市。"""
-    assert market_now_trading(_LegacyUnknownExchange(), Market.A) is None
+def test_market_now_trading_preserves_unknown_state():
+    assert market_now_trading(_UnknownExchange(), Market.A) is None
 
 
 def test_market_sensitive_callers_use_shared_dispatcher():
     root = Path(__file__).resolve().parents[2]
     expected = {
-        "src/chanlun/signal_monitor/scheduler.py": (
-            "market_now_trading(ex, task.market)",
-        ),
-        "web/chanlun_chart/cl_app/alert_tasks.py": (
-            "market_now_trading(ex, alert_config.market)",
-        ),
         "web/chanlun_chart/cl_app/blueprints/other.py": (
             "market_now_trading(ex, market)",
         ),
-        "src/chanlun/recursive_bt/monitor/live_monitor.py": (
-            "market_now_trading(ex, market)",
+        "web/chanlun_chart/cl_app/services/holding_group_monitor.py": (
+            "market_now_trading(exchange, market)",
         ),
     }
     for rel, needles in expected.items():

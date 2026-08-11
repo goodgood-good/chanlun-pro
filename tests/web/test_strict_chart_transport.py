@@ -1,32 +1,27 @@
 from __future__ import annotations
 
+from chanlun.tools.cache_identity import source_fingerprint
 from cl_app.services import chart_cache
-from cl_app.services.chart_compute import (
-    _merge_chart_data,
-    strict_structure_history_fields,
-)
+from cl_app.services.chart_compute import strict_structure_history_fields
 
 
 def _strict_payload(revision: str = "sha256:one") -> dict[str, object]:
     return {
-        "schema": "chanlun-chart-structure/v12",
+        "schema": "chanlun-chart-structure",
         "structure_revision": revision,
         "snapshot_revision": revision + "-snapshot",
         "render_revision": revision + "-render",
     }
 
 
-def test_pre_v55_cache_is_rejected_after_terminal_preview_recall_cutover() -> None:
-    assert chart_cache._CHART_CACHE_SCHEMA_VERSION == "v55"
+def test_cache_namespace_is_bound_to_the_current_strict_chart_schema() -> None:
     key = chart_cache._build_cache_key(
         "a",
         "SH.600519",
         "5m",
         {},
     )
-    assert key.startswith("v55_")
-    assert not key.startswith("v44_")
-    assert not key.startswith("v45_")
+    assert key.startswith(f"{source_fingerprint()}_")
 
 
 def test_historical_pagination_omits_structure_instead_of_replacing_it() -> None:
@@ -73,39 +68,3 @@ def test_unavailable_authoritative_response_clears_prior_structure() -> None:
         "strict_structure_mode": "unavailable",
         "strict_structure_error": error,
     }
-
-
-def test_merge_replaces_strict_snapshot_as_one_atomic_value() -> None:
-    old = _strict_payload("sha256:old")
-    new = _strict_payload("sha256:new")
-    existing = {
-        "t": [1],
-        "strict_structure_mode": "replace",
-        "strict_structure": old,
-    }
-
-    replaced = _merge_chart_data(
-        existing,
-        {
-            "t": [2],
-            "strict_structure_mode": "replace",
-            "strict_structure": new,
-        },
-    )
-    unchanged = _merge_chart_data(
-        existing,
-        {"t": [2], "strict_structure_mode": "unchanged"},
-    )
-    unavailable = _merge_chart_data(
-        existing,
-        {
-            "t": [2],
-            "strict_structure_mode": "unavailable",
-            "strict_structure_error": {"code": "strict_evidence_invalid"},
-        },
-    )
-
-    assert replaced["strict_structure"] is new
-    assert unchanged["strict_structure"] is old
-    assert "strict_structure" not in unavailable
-    assert unavailable["strict_structure_mode"] == "unavailable"

@@ -29,7 +29,6 @@ def test_metadata_loader_can_be_stopped_and_reopened():
 
 
 def test_revalidation_runtime_rejects_after_shutdown_and_can_reopen(monkeypatch):
-    chart_revalidate._reset_revalidation_state_for_tests()
     assert chart_revalidate.shutdown_revalidation(wait=True) is True
     assert chart_revalidate.submit_revalidation("a", "X", "1m", {}, "K") is False
 
@@ -72,7 +71,6 @@ def test_sse_shutdown_wakes_connected_handlers():
     sse_stream.start_sse_runtime()
 
 def test_sse_runtime_shutdown_and_restart_without_active_work():
-    sse_stream._reset_sse_runtime_for_tests(max_pending=1)
     assert sse_stream.shutdown_sse_runtime() is True
     assert sse_stream.sse_runtime_status()["closed"] is True
     sse_stream.start_sse_runtime()

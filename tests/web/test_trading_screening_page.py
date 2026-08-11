@@ -4,7 +4,6 @@ from flask import Flask, jsonify
 from flask_login import LoginManager, UserMixin, login_user
 import pytest
 
-from cl_app.blueprints.alert import alert_bp
 from cl_app.blueprints.decision_support import _presentation_scope, decision_support_bp
 
 
@@ -33,9 +32,9 @@ class _TradingScreeningService:
 
     def snapshot(self) -> dict[str, object]:
         return {
-            "schema_version": "chanlun-trading-screening/v3",
-            "algorithm_version": "chanlun_source_faithful_v2",
-            "structure_version": "v3",
+            "schema": "chanlun-trading-screening",
+            "algorithm_id": "chanlun_source_faithful",
+            "structure_contract_id": "physical-timeframe-l0",
             "available": True,
             "scan_state": "complete",
             "generated_at": "2026-07-20T15:00:00+08:00",
@@ -98,7 +97,6 @@ def app() -> Flask:
         _TradingScreeningService()
     )
     app.register_blueprint(decision_support_bp)
-    app.register_blueprint(alert_bp)
     return app
 
 
@@ -116,8 +114,8 @@ def test_early_signals_requires_new_schema(app: Flask, logged_in_client) -> None
     assert response.status_code == 200
     assert response.headers["Cache-Control"] == "private, no-store"
     assert payload["ok"] is True
-    assert payload["data"]["schema_version"] == "chanlun-trading-screening/v3"
-    assert payload["data"]["structure_version"] == "v3"
+    assert payload["data"]["schema"] == "chanlun-trading-screening"
+    assert payload["data"]["structure_contract_id"] == "physical-timeframe-l0"
     assert payload["data"]["presentation_scope"] == "all-qualified"
     assert payload["data"]["presentation_signal_count"] == 0
     assert payload["data"]["total_qualified_signal_count"] == 0
@@ -133,7 +131,7 @@ def test_early_signals_requires_new_schema(app: Flask, logged_in_client) -> None
             "snapshot_hash_coverage": "EXCLUDED_OPERATIONAL_METADATA",
     }
     assert payload["data"]["manual_holdings"] == {
-        "schema": "chanlun-local-manual-holdings/v1",
+        "schema": "chanlun-local-manual-holdings",
         "source": "LOCAL_GLOBAL_WATCHLIST_GROUP",
         "group_name": "我的持仓",
         "group_scope": "GLOBAL_ACROSS_MARKETS",
@@ -157,13 +155,13 @@ def test_early_signals_requires_new_schema(app: Flask, logged_in_client) -> None
     assert service.refresh_requests == 1
 
 
-def test_early_signals_supports_bounded_sector_scope_without_breaking_legacy_all(
+def test_early_signals_supports_bounded_sector_scope_and_unfiltered_scope(
     app: Flask,
     logged_in_client,
 ) -> None:
     service = app.extensions["decision_support_trading_screening"]
     app.config["TRADING_SCREENING_MANUAL_HOLDINGS_SNAPSHOT_PROVIDER"] = lambda: {
-        "schema": "chanlun-local-manual-holdings/v1",
+        "schema": "chanlun-local-manual-holdings",
         "source": "LOCAL_GLOBAL_WATCHLIST_GROUP",
         "group_name": "我的持仓",
         "group_scope": "GLOBAL_ACROSS_MARKETS",
@@ -232,7 +230,7 @@ def test_early_signals_supports_bounded_sector_scope_without_breaking_legacy_all
     assert all_payload["counts_by_point_type"] == {"3buy": 1, "2buy": 1}
 
 
-def test_server_projection_normalizes_legacy_formed_holding_signal() -> None:
+def test_server_projection_preserves_declared_holding_signal_stage() -> None:
     output = {
         "signals": [
             {
@@ -258,9 +256,9 @@ def test_server_projection_normalizes_legacy_formed_holding_signal() -> None:
 
     projected = _presentation_scope(output, "sector-trigger")
 
-    assert projected["signals"][0]["lifecycle_stage"] == "formed"
-    assert projected["manual_holding_signals"][0]["lifecycle_stage"] == "formed"
-    assert projected["counts_by_stage"] == {"formed": 1}
+    assert projected["signals"][0]["lifecycle_stage"] == "approaching"
+    assert projected["manual_holding_signals"][0]["lifecycle_stage"] == "approaching"
+    assert projected["counts_by_stage"] == {"approaching": 1}
 
 
 def test_early_signals_exposes_cross_market_manual_holdings_without_account_access(
@@ -268,7 +266,7 @@ def test_early_signals_exposes_cross_market_manual_holdings_without_account_acce
     logged_in_client,
 ) -> None:
     app.config["TRADING_SCREENING_MANUAL_HOLDINGS_SNAPSHOT_PROVIDER"] = lambda: {
-        "schema": "chanlun-local-manual-holdings/v1",
+        "schema": "chanlun-local-manual-holdings",
         "source": "LOCAL_GLOBAL_WATCHLIST_GROUP",
         "group_name": "我的持仓",
         "group_scope": "GLOBAL_ACROSS_MARKETS",
@@ -328,7 +326,7 @@ def test_early_signals_fails_closed_on_inconsistent_manual_holdings_contract(
     logged_in_client,
 ) -> None:
     app.config["TRADING_SCREENING_MANUAL_HOLDINGS_SNAPSHOT_PROVIDER"] = lambda: {
-        "schema": "chanlun-local-manual-holdings/v1",
+        "schema": "chanlun-local-manual-holdings",
         "source": "LOCAL_GLOBAL_WATCHLIST_GROUP",
         "group_name": "我的持仓",
         "group_scope": "GLOBAL_ACROSS_MARKETS",
@@ -380,7 +378,7 @@ def test_screening_page_uses_new_three_workspace_contract(
 
     assert response.status_code == 200
     assert response.headers["Cache-Control"] == "private, no-store"
-    assert 'data-schema="chanlun-trading-screening/v3"' in html
+    assert 'data-schema="chanlun-trading-screening"' in html
     assert 'id="es-sector-completion"' in html
     assert 'id="es-member-history"' in html
     assert 'id="es-holdings-title"' in html
@@ -427,7 +425,7 @@ def test_screening_page_uses_new_three_workspace_contract(
     assert "三买只取第一中枢" in html
     assert "历史研究/审计成果" in html
     assert "只读研究 · 无订单能力" in html
-    assert 'data-human-review-schema="chanlun-v3-human-review-web/v1"' in html
+    assert 'data-human-review-schema="chanlun-human-review-web"' in html
     assert 'data-default-mode="live"' in html
     assert (
         'data-screening-mode="human-review" aria-selected="false"'
@@ -506,7 +504,7 @@ class _HumanReviewService:
 
     def snapshot(self, *, source="latest"):
         return {
-            "schema": "chanlun-v3-human-review-web/v1",
+            "schema": "chanlun-human-review-web",
             "source_kind": source,
             "review_queue": [],
             "highest_status": "REVIEW_REQUIRED",
@@ -528,7 +526,7 @@ class _HumanReviewService:
 
     def candidate_detail(self, *, candidate_id, source_sha256):
         return {
-            "schema": "chanlun-v3-human-review-candidate-detail-web/v1",
+            "schema": "chanlun-human-review-candidate-detail-web",
             "candidate_id": candidate_id,
             "source_content_sha256": source_sha256,
             "sector_higher_timeframe_evidence": None,
@@ -564,9 +562,9 @@ def test_human_review_data_route_enforces_review_only_contract(
                     "market_data_as_of": "2026-07-30T15:00:00+08:00",
                 },
                 "qmt_runtime": {
-                    "schema": "chanlun-qmt-runtime-readiness/v1",
+                    "schema": "chanlun-qmt-runtime-readiness",
                     "contract_id": (
-                        "chanlun-qmt-runtime/app-runtime-contract/v1"
+                        "chanlun-qmt-runtime/app-runtime-contract"
                     ),
                     "execution_owner": "APP_RUNTIME",
                     "ready": True,
@@ -601,7 +599,7 @@ def test_human_review_data_route_enforces_review_only_contract(
     assert response.status_code == 200
     assert response.headers["Cache-Control"] == "private, no-store"
     payload = response.get_json()["data"]
-    assert payload["schema"] == "chanlun-v3-human-review-web/v1"
+    assert payload["schema"] == "chanlun-human-review-web"
     assert payload["source_kind"] == "historical"
     assert payload["automated_order_authorized"] is False
     operations = payload["forward_operations"]

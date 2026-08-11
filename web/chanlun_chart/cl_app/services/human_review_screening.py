@@ -38,7 +38,7 @@ from chanlun.decision_support.trading_system.live_review_materialization import 
     resolve_live_review_materialization_receipt,
     resolve_live_review_web_bundle_receipt,
 )
-from chanlun.decision_support.trading_system.v3_human_review_screening import (
+from chanlun.decision_support.trading_system.human_review_screening import (
     HUMAN_REVIEW_SCREEN_SCHEMA,
     HumanReviewAlert,
     HumanReviewFeedback,
@@ -51,7 +51,6 @@ from chanlun.decision_support.trading_system.v3_human_review_screening import (
 )
 from chanlun.decision_support.trading_system.file_lock import interprocess_file_lock
 from chanlun.decision_support.trading_system.human_paper_accounting import (
-    audit_human_paper_capital_decisions,
     audit_human_paper_portfolio_decisions,
     audit_human_paper_portfolio_fill_decisions,
     load_human_paper_accounting_parameters,
@@ -59,14 +58,13 @@ from chanlun.decision_support.trading_system.human_paper_accounting import (
 )
 from chanlun.decision_support.trading_system.human_paper_ledger import (
     HumanPaperEntrySelectionEvidence,
-    audit_human_paper_capital_rejection_evidence,
+    audit_human_paper_portfolio_rejection_evidence,
     audit_human_paper_entry_boundary_attestations,
     audit_human_paper_entry_selection_attestations,
     audit_human_paper_entry_selection_source_bindings,
     audit_human_paper_execution_evidence,
     audit_human_paper_execution_rejection_evidence,
     audit_human_paper_operations_cancellation_evidence,
-    human_paper_capital_rejected_intent_ids,
     human_paper_cancelled_intent_ids,
     human_paper_pending_sell_quantities,
     human_paper_position_quantities,
@@ -82,11 +80,11 @@ from chanlun.decision_support.trading_system.human_paper_valuation import (
 from chanlun.decision_support.trading_system.models import (
     parse_entry_execution_boundary_document,
 )
-from chanlun.decision_support.trading_system.v3_bar_execution import (
+from chanlun.decision_support.trading_system.bar_execution import (
     STRICT_BAR_EXECUTION_TIMESTAMP_RULE,
     STRICT_BAR_PRICE_RULE,
 )
-from chanlun.decision_support.trading_system.v3_forward_paper import (
+from chanlun.decision_support.trading_system.forward_paper import (
     FORWARD_IMPLEMENTATION_CONTINUITY_SCHEMA,
     FORWARD_PAPER_SESSION_DELIVERY_SCHEMA,
     audit_forward_implementation_continuity,
@@ -94,17 +92,16 @@ from chanlun.decision_support.trading_system.v3_forward_paper import (
     load_forward_paper_ledger,
     load_frozen_forward_contract,
 )
-from chanlun.decision_support.trading_system.v3_live_human_review import (
+from chanlun.decision_support.trading_system.live_human_review import (
     live_human_review_document,
     validate_live_screening_market_watermark,
     validate_live_review_snapshot,
 )
-from chanlun.decision_support.trading_system.v3_trading_session import (
+from chanlun.decision_support.trading_system.trading_session import (
     resolve_trading_session_requirement,
 )
-from chanlun.decision_support.trading_system.v3_forward_review_markout import (
+from chanlun.decision_support.trading_system.forward_review_markout import (
     FORWARD_REVIEW_MARKOUT_SCHEMA,
-    LEGACY_FORWARD_REVIEW_MARKOUT_SCHEMAS,
     validate_forward_review_markout_document,
 )
 from chanlun.decision_support.trading_system.forward_warmup_structure_lineage import (
@@ -116,7 +113,7 @@ from chanlun.decision_support.trading_system.candidate_warmup_diagnostics import
     candidate_warmup_presentation,
     validate_candidate_warmup_diagnostic_document,
 )
-from chanlun.decision_support.trading_system.v3_qmt_sector_ledger import (
+from chanlun.decision_support.trading_system.qmt_sector_ledger import (
     QMT_FORWARD_CAPTURE_READINESS_SCHEMA,
     QMT_SECTOR_RECEIPT_AUDIT_SCHEMA,
     audit_forward_sector_capture_readiness,
@@ -128,7 +125,7 @@ from .forward_scheduler import validate_forward_scheduler_snapshot
 
 
 SCREEN_SCHEMA = HUMAN_REVIEW_SCREEN_SCHEMA
-WEB_SCHEMA = "chanlun-v3-human-review-web/v1"
+WEB_SCHEMA = "chanlun-human-review-web"
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 _IMMUTABLE_REPORT_NAME = re.compile(r"^[0-9a-f]{64}\.json$")
 _SOURCE_KINDS = frozenset({"latest", "live", "forward", "historical"})
@@ -162,8 +159,24 @@ _PAPER_RISK_REDUCING_RECONCILIATION_REASONS = frozenset(
         "SAME_SESSION_FORWARD_CAPTURE_NOT_READY_FOR_PAPER",
     }
 )
-_EXACT_SECTOR_RANKING_CATALOG_ATTESTATION = (
-    "EXACT_REVISION_NAME_AND_MEMBERSHIP_MATCH"
+_EXACT_SECTOR_RANKING_CATALOG_ATTESTATION = "EXACT_REVISION_NAME_AND_MEMBERSHIP_MATCH"
+_COMPACT_CANDIDATE_FIELDS = frozenset(HumanReviewAlert.__dataclass_fields__) - {
+    "sector_higher_timeframe_evidence",
+    "market_symbol_higher_timeframe_evidence",
+} | {
+    "candidate_id",
+    "signal_lifecycle_id",
+    "evidence_detail_available",
+    "sector_higher_timeframe_evidence_id",
+    "market_symbol_higher_timeframe_evidence_id",
+    "sector_ranking_evidence_id",
+    "market_symbol_higher_timeframe_source_attestation",
+    "sector_ranking_attestation",
+    "detail_locator",
+}
+_COMPACT_RISK_GATES = frozenset({"GREEN", "AMBER", "RED", "UNRESOLVED"})
+_COMPACT_MARKET_SYMBOL_SOURCE_ATTESTATIONS = frozenset(
+    {"SELF_CONTAINED", "PARTIAL_SOURCE_SUPPORT", "STRUCTURE_ONLY"}
 )
 
 
@@ -197,20 +210,14 @@ class _HumanReviewCandidateSummary:
     sector_higher_timeframe_evidence_id: str | None
     market_symbol_higher_timeframe_evidence_id: str | None
     sector_ranking_evidence_id: str | None
-    market_symbol_higher_timeframe_attestation: str
     market_symbol_higher_timeframe_source_attestation: str
     sector_ranking_attestation: str
-    sector_risk_gate_attestation: str
     evidence_detail_available: bool
     detail_offset: int
     detail_length: int
     detail_line_sha256: str
     sector_higher_timeframe_evidence: None = None
     market_symbol_higher_timeframe_evidence: None = None
-
-    @property
-    def sector_risk_gate_attested(self) -> bool:
-        return self.sector_risk_gate_attestation == "SELF_CONTAINED"
 
 
 _ReviewCandidate = HumanReviewAlert | _HumanReviewCandidateSummary
@@ -243,7 +250,7 @@ def _optional_decimal(value: object) -> Decimal | None:
 
 
 def _parse_candidate_summary(raw: object) -> _HumanReviewCandidateSummary:
-    if not isinstance(raw, Mapping):
+    if not isinstance(raw, Mapping) or set(raw) != _COMPACT_CANDIDATE_FIELDS:
         raise ValueError("compact human review candidate must be a mapping")
     candidate_id = str(raw.get("candidate_id") or "")
     lifecycle_id = str(raw.get("signal_lifecycle_id") or "")
@@ -252,6 +259,7 @@ def _parse_candidate_summary(raw: object) -> _HumanReviewCandidateSummary:
         _SHA256.fullmatch(candidate_id) is None
         or _SHA256.fullmatch(lifecycle_id) is None
         or not isinstance(locator, Mapping)
+        or set(locator) != {"offset", "length", "line_sha256"}
         or type(locator.get("offset")) is not int
         or int(locator["offset"]) < 0
         or type(locator.get("length")) is not int
@@ -268,29 +276,26 @@ def _parse_candidate_summary(raw: object) -> _HumanReviewCandidateSummary:
         raise ValueError("compact human review candidate timing is invalid")
     ranking = raw.get("sector_ranking_evidence")
     parsed_ranking = (
-        None
-        if ranking is None
-        else parse_sector_ranking_review_evidence(ranking)
+        None if ranking is None else parse_sector_ranking_review_evidence(ranking)
     )
     ranking_id = raw.get("sector_ranking_evidence_id")
-    if (
-        parsed_ranking is not None
-        and parsed_ranking.evidence_id != ranking_id
+    if (parsed_ranking is None) != (ranking_id is None) or (
+        parsed_ranking is not None and parsed_ranking.evidence_id != ranking_id
     ):
         raise ValueError("compact sector ranking identity changed")
     boundary = raw.get("entry_execution_boundary")
     parsed_boundary = (
-        None
-        if boundary is None
-        else parse_entry_execution_boundary_document(boundary)
+        None if boundary is None else parse_entry_execution_boundary_document(boundary)
     )
-    warning_codes = tuple(str(value) for value in raw.get("warning_codes") or ())
-    source_fact_ids = tuple(
-        str(value) for value in raw.get("source_fact_ids") or ()
-    )
-    review_checklist = tuple(
-        str(value) for value in raw.get("review_checklist") or ()
-    )
+    if any(
+        not isinstance(raw.get(field), list)
+        or any(type(value) is not str or not value for value in raw[field])
+        for field in ("warning_codes", "source_fact_ids", "review_checklist")
+    ):
+        raise ValueError("compact review provenance is invalid")
+    warning_codes = tuple(raw["warning_codes"])
+    source_fact_ids = tuple(raw["source_fact_ids"])
+    review_checklist = tuple(raw["review_checklist"])
     if (
         not source_fact_ids
         or len(warning_codes) != len(set(warning_codes))
@@ -311,6 +316,38 @@ def _parse_candidate_summary(raw: object) -> _HumanReviewCandidateSummary:
         for value in evidence_ids.values()
     ):
         raise ValueError("compact review evidence identity is invalid")
+    market_symbol_id = evidence_ids["market_symbol_higher_timeframe_evidence_id"]
+    sector_id = evidence_ids["sector_higher_timeframe_evidence_id"]
+    market_symbol_source_attestation = raw[
+        "market_symbol_higher_timeframe_source_attestation"
+    ]
+    ranking_attestation = raw["sector_ranking_attestation"]
+    evidence_detail_available = raw["evidence_detail_available"]
+    if (
+        any(
+            raw[field] not in _COMPACT_RISK_GATES
+            for field in (
+                "market_risk_gate",
+                "sector_risk_gate",
+                "symbol_risk_gate",
+            )
+        )
+        or (
+            market_symbol_id is None
+            and market_symbol_source_attestation != "SUMMARY_ONLY"
+        )
+        or (
+            market_symbol_id is not None
+            and market_symbol_source_attestation
+            not in _COMPACT_MARKET_SYMBOL_SOURCE_ATTESTATIONS
+        )
+        or ranking_attestation
+        != ("FULL_STRUCTURAL_COMPONENTS" if ranking_id is not None else "NOT_ATTACHED")
+        or type(evidence_detail_available) is not bool
+        or evidence_detail_available
+        != any(value is not None for value in (sector_id, market_symbol_id, ranking_id))
+    ):
+        raise ValueError("compact review attestation is invalid")
     return _HumanReviewCandidateSummary(
         candidate_id=candidate_id,
         signal_lifecycle_id=lifecycle_id,
@@ -318,9 +355,7 @@ def _parse_candidate_summary(raw: object) -> _HumanReviewCandidateSummary:
         alert_type=str(raw.get("alert_type") or ""),
         signal_at=signal_at,
         review_available_at=review_at,
-        sector_id=(
-            None if raw.get("sector_id") is None else str(raw["sector_id"])
-        ),
+        sector_id=(None if raw.get("sector_id") is None else str(raw["sector_id"])),
         confidence=str(raw.get("confidence") or ""),
         review_priority=int(raw.get("review_priority")),
         reference_price=_optional_decimal(raw.get("reference_price")),
@@ -339,7 +374,7 @@ def _parse_candidate_summary(raw: object) -> _HumanReviewCandidateSummary:
         ),
         entry_execution_boundary=parsed_boundary,
         market_risk_gate=str(raw.get("market_risk_gate") or ""),
-        sector_risk_gate=str(raw.get("sector_risk_gate") or "UNRESOLVED"),
+        sector_risk_gate=str(raw["sector_risk_gate"]),
         symbol_risk_gate=str(raw.get("symbol_risk_gate") or ""),
         warning_codes=warning_codes,
         source_fact_ids=source_fact_ids,
@@ -352,30 +387,19 @@ def _parse_candidate_summary(raw: object) -> _HumanReviewCandidateSummary:
         ),
         market_symbol_higher_timeframe_evidence_id=(
             None
-            if evidence_ids["market_symbol_higher_timeframe_evidence_id"]
-            is None
-            else str(
-                evidence_ids["market_symbol_higher_timeframe_evidence_id"]
-            )
+            if evidence_ids["market_symbol_higher_timeframe_evidence_id"] is None
+            else str(evidence_ids["market_symbol_higher_timeframe_evidence_id"])
         ),
         sector_ranking_evidence_id=(
             None
             if evidence_ids["sector_ranking_evidence_id"] is None
             else str(evidence_ids["sector_ranking_evidence_id"])
         ),
-        market_symbol_higher_timeframe_attestation=str(
-            raw.get("market_symbol_higher_timeframe_attestation") or ""
-        ),
         market_symbol_higher_timeframe_source_attestation=str(
             raw.get("market_symbol_higher_timeframe_source_attestation") or ""
         ),
-        sector_ranking_attestation=str(
-            raw.get("sector_ranking_attestation") or ""
-        ),
-        sector_risk_gate_attestation=str(
-            raw.get("sector_risk_gate_attestation") or ""
-        ),
-        evidence_detail_available=raw.get("evidence_detail_available") is True,
+        sector_ranking_attestation=str(raw.get("sector_ranking_attestation") or ""),
+        evidence_detail_available=evidence_detail_available,
         detail_offset=int(locator["offset"]),
         detail_length=int(locator["length"]),
         detail_line_sha256=str(locator["line_sha256"]),
@@ -422,13 +446,14 @@ def _review_lane(
     if virtual_position_quantity > 0 and is_sell_hint:
         return "POSITION_MANAGEMENT"
     if alert.alert_type == "POSSIBLE_30M_BUY" and (
-        alert.confidence in {"HIGH", "MEDIUM"}
-        or paper_reconciliation_pending
+        alert.confidence in {"HIGH", "MEDIUM"} or paper_reconciliation_pending
     ):
         return "ACTIONABLE_REVIEW"
     if alert.alert_type == "POSSIBLE_30M_BUY":
         return "WATCHLIST"
     return "RESEARCH_ARCHIVE"
+
+
 _SECTOR_RANKING_CATALOG_ENTRY_REASONS = {
     "EXACT_REVISION_UNAVAILABLE_AT_OBSERVATION": (
         "QMT_RANKING_CATALOG_EXACT_REVISION_UNAVAILABLE_FOR_PAPER_ENTRY"
@@ -479,20 +504,13 @@ def _validate_report(payload: dict[str, object]) -> tuple[HumanReviewAlert, ...]
 
 
 def _market_symbol_source_attestation(alert: _ReviewCandidate) -> str:
-    """Classify source support separately from structural M/W/D evidence.
-
-    ``market_symbol_higher_timeframe_attestation`` predates portable session,
-    warmup and native-daily support and must retain its public meaning for
-    existing page clients.  This additive field prevents callers from reading
-    structural self-containment as proof that the underlying data supply was
-    also archived.
-    """
+    """Classify source support separately from structural M/W/D evidence."""
 
     if isinstance(alert, _HumanReviewCandidateSummary):
         return alert.market_symbol_higher_timeframe_source_attestation
     evidence = alert.market_symbol_higher_timeframe_evidence
     if evidence is None:
-        return "LEGACY_SUMMARY_ONLY"
+        return "SOURCE_SUPPORT_UNAVAILABLE"
     support_count = sum(
         side.source_support is not None
         for side in (evidence.market, evidence.symbol_evidence)
@@ -509,10 +527,8 @@ def _sector_ranking_attestation(alert: _ReviewCandidate) -> str:
         return alert.sector_ranking_attestation
     evidence = alert.sector_ranking_evidence
     if evidence is None:
-        return "LEGACY_NOT_ATTACHED"
-    if evidence.source_profile == "LIVE_FULL_RANKING":
-        return "FULL_STRUCTURAL_COMPONENTS"
-    return "HISTORICAL_TRIGGER_SUMMARY_NO_COMPONENTS"
+        return "RANKING_EVIDENCE_UNAVAILABLE"
+    return "FULL_STRUCTURAL_COMPONENTS"
 
 
 def _sector_name_presentation(
@@ -524,10 +540,7 @@ def _sector_name_presentation(
     sector_id = alert.sector_id
     ranking = alert.sector_ranking_evidence
     ranking_catalog_revision = (
-        ranking.sector_catalog_revision
-        if ranking is not None
-        and ranking.source_profile == "LIVE_FULL_RANKING"
-        else None
+        ranking.sector_catalog_revision if ranking is not None else None
     )
     if sector_id is None:
         return {
@@ -598,10 +611,7 @@ def _sector_name_presentation(
         selected = max(eligible, default=None, key=lambda value: value[0])
     if selected is not None:
         captured_at, entry = selected
-        sectors = {
-            str(row["sector_id"]): row
-            for row in entry.get("sectors") or ()
-        }
+        sectors = {str(row["sector_id"]): row for row in entry.get("sectors") or ()}
         sector = sectors.get(sector_id)
         ranking_name_matches = bool(
             ranking_catalog_revision is None
@@ -641,9 +651,7 @@ def _sector_name_presentation(
                     else "SAME_SESSION_SECTOR_ID_UNRESOLVED"
                 )
             ),
-            "sector_name_point_in_time": (
-                sector is not None and ranking_name_matches
-            ),
+            "sector_name_point_in_time": (sector is not None and ranking_name_matches),
             "sector_membership_attestation": (
                 "RANKING_SOURCE_NAME_MISMATCH"
                 if not ranking_name_matches
@@ -662,34 +670,6 @@ def _sector_name_presentation(
             "sector_ranking_catalog_attestation": exact_attestation,
         }
 
-    if entries:
-        latest = entries[-1]
-        sectors = {
-            str(row["sector_id"]): row
-            for row in latest.get("sectors") or ()
-        }
-        sector = sectors.get(sector_id)
-        if sector is not None:
-            membership_present = alert.symbol in {
-                str(value) for value in sector.get("member_codes") or ()
-            }
-            return {
-                "sector_name": str(sector["name"]),
-                "sector_name_attestation": (
-                    "LATEST_CATALOG_FALLBACK_NOT_POINT_IN_TIME"
-                ),
-                "sector_name_point_in_time": False,
-                "sector_membership_attestation": (
-                    "LATEST_CATALOG_FALLBACK_NOT_POINT_IN_TIME"
-                    if membership_present
-                    else "LATEST_CATALOG_SYMBOL_NOT_MEMBER"
-                ),
-                "sector_membership_point_in_time": False,
-                "sector_name_captured_at": str(latest["captured_at"]),
-                "sector_name_entry_sha256": latest.get("entry_sha256"),
-                "sector_name_catalog_revision": latest.get("catalog_revision"),
-                "sector_ranking_catalog_attestation": "NOT_APPLICABLE",
-            }
     return {
         "sector_name": "板块名称待映射",
         "sector_name_attestation": "UNRESOLVED",
@@ -707,21 +687,15 @@ def _paper_entry_sector_eligibility(
     alert: _ReviewCandidate,
     sector_presentation: Mapping[str, object],
 ) -> tuple[bool, str | None]:
-    """Fail closed new strategic entries when live rank membership cannot bind.
+    """Fail closed new strategic entries when rank membership cannot bind.
 
     The catalog gate is deliberately candidate-scoped.  It applies only to a
-    new 30m strategic buy sourced from a live full ranking; sell/exit reviews
-    must remain available even when selection provenance is unavailable.  Old
-    historical summaries retain their existing read-only compatibility and are
-    already stopped by the report-level paper gate.
+    new 30m strategic buy sourced from complete ranking evidence; sell/exit
+    reviews remain available when selection provenance is unavailable.
     """
 
     ranking = alert.sector_ranking_evidence
-    if (
-        alert.alert_type != "POSSIBLE_30M_BUY"
-        or ranking is None
-        or ranking.source_profile != "LIVE_FULL_RANKING"
-    ):
+    if alert.alert_type != "POSSIBLE_30M_BUY" or ranking is None:
         return True, None
     attestation = str(
         sector_presentation.get("sector_ranking_catalog_attestation") or ""
@@ -742,7 +716,7 @@ def _paper_entry_selection_evidence(
     alert: HumanReviewAlert,
     sector_presentation: Mapping[str, object],
 ) -> HumanPaperEntrySelectionEvidence | None:
-    """Freeze the exact QMT catalog admission used by a live-ranked buy."""
+    """Freeze the exact QMT catalog admission used by a ranked buy."""
 
     ranking = alert.sector_ranking_evidence
     if (
@@ -750,7 +724,6 @@ def _paper_entry_selection_evidence(
         or not feedback.point_judgement.startswith("BUY_")
         or feedback.disposition != "PAPER_OBSERVE"
         or ranking is None
-        or ranking.source_profile != "LIVE_FULL_RANKING"
     ):
         return None
     if (
@@ -787,7 +760,6 @@ class HumanReviewScreeningService:
         *,
         repository_root: Path,
         historical_report: Path,
-        preferred_historical_report: Path | None = None,
         forward_root: Path,
         feedback_ledger: Path,
         sector_ledger: Path,
@@ -799,22 +771,13 @@ class HumanReviewScreeningService:
         forward_warmup_lineage_report: Path | None = None,
         clock: Callable[[], datetime] | None = None,
         sector_capture_due: datetime_time | None = None,
-        trading_session_provider: Callable[..., Mapping[str, object]]
-        | None = None,
-        forward_scheduler_provider: Callable[..., Mapping[str, object]]
-        | None = None,
-        forward_implementation_provenance_provider: Callable[
-            [], Mapping[str, object]
-        ]
+        trading_session_provider: Callable[..., Mapping[str, object]] | None = None,
+        forward_scheduler_provider: Callable[..., Mapping[str, object]] | None = None,
+        forward_implementation_provenance_provider: Callable[[], Mapping[str, object]]
         | None = None,
     ) -> None:
         self.repository_root = repository_root.resolve()
         self.historical_report = historical_report.resolve()
-        self.preferred_historical_report = (
-            self.historical_report
-            if preferred_historical_report is None
-            else preferred_historical_report.resolve()
-        )
         self.forward_root = forward_root.resolve()
         self.feedback_ledger = feedback_ledger.resolve()
         self.sector_ledger = sector_ledger.resolve()
@@ -830,20 +793,15 @@ class HumanReviewScreeningService:
         ):
             raise TypeError("forward_scheduler_provider must be callable")
         self._forward_scheduler_provider = forward_scheduler_provider
-        if (
-            forward_implementation_provenance_provider is not None
-            and not callable(forward_implementation_provenance_provider)
+        if forward_implementation_provenance_provider is not None and not callable(
+            forward_implementation_provenance_provider
         ):
             raise TypeError(
                 "forward_implementation_provenance_provider must be callable"
             )
         self._forward_implementation_provenance_provider = (
             forward_implementation_provenance_provider
-            or (
-                lambda: current_forward_implementation_provenance(
-                    self.repository_root
-                )
-            )
+            or (lambda: current_forward_implementation_provenance(self.repository_root))
         )
         self.paper_ledger = (
             paper_ledger
@@ -865,14 +823,10 @@ class HumanReviewScreeningService:
             else live_screening_snapshot.resolve()
         )
         self.live_archive_root = (
-            None
-            if live_archive_root is None
-            else live_archive_root.resolve()
+            None if live_archive_root is None else live_archive_root.resolve()
         )
         self.forward_markout_report = (
-            None
-            if forward_markout_report is None
-            else forward_markout_report.resolve()
+            None if forward_markout_report is None else forward_markout_report.resolve()
         )
         self.forward_warmup_lineage_report = (
             forward_root / "forward_warmup_structure_lineage_rollup.json"
@@ -906,14 +860,10 @@ class HumanReviewScreeningService:
         # request.  The app-facing method below owns one background validation
         # and caches only the verdict for the exact input identity.
         self._forward_delivery_readiness_lock = threading.Lock()
-        self._forward_delivery_readiness_cache_key: tuple[object, ...] | None = (
-            None
-        )
+        self._forward_delivery_readiness_cache_key: tuple[object, ...] | None = None
         self._forward_delivery_readiness_cache: dict[str, object] | None = None
         self._forward_delivery_readiness_cache_at: float | None = None
-        self._forward_delivery_readiness_inflight_key: (
-            tuple[object, ...] | None
-        ) = None
+        self._forward_delivery_readiness_inflight_key: tuple[object, ...] | None = None
         self._forward_delivery_readiness_thread: threading.Thread | None = None
 
     def _forward_warmup_structure_lineage(self) -> dict[str, object]:
@@ -923,16 +873,13 @@ class HumanReviewScreeningService:
                 "status": "NOT_AVAILABLE",
                 "qualified_session_count": 0,
                 "recorded_session_count": 0,
-                "legacy_session_count": 0,
                 "structure_event_count": 0,
                 "subjects": {},
                 "sessions": [],
                 "diagnostic_only": True,
                 "parameters_changed": False,
                 "live_status": "LIVE_DISABLED",
-                "reason_codes": [
-                    "FORWARD_WARMUP_STRUCTURE_LINEAGE_NOT_YET_AVAILABLE"
-                ],
+                "reason_codes": ["FORWARD_WARMUP_STRUCTURE_LINEAGE_NOT_YET_AVAILABLE"],
             }
         payload = _read_json(
             path,
@@ -955,12 +902,10 @@ class HumanReviewScreeningService:
             ],
             "qualified_session_count": validated["qualified_session_count"],
             "recorded_session_count": validated["recorded_session_count"],
-            "legacy_session_count": validated["legacy_session_count"],
             "source_signal_count": validated["source_signal_count"],
             "lineage_extension_signal_count": validated[
                 "lineage_extension_signal_count"
             ],
-            "unrecorded_signal_count": validated["unrecorded_signal_count"],
             "unique_lineage_diagnostic_count": validated[
                 "unique_lineage_diagnostic_count"
             ],
@@ -1048,19 +993,14 @@ class HumanReviewScreeningService:
         reasons = payload.get("reason_codes")
         schema = payload.get("schema")
         source_provenance_status = payload.get("source_provenance_status")
-        v3_contract_valid = True
-        if schema == FORWARD_REVIEW_MARKOUT_SCHEMA:
-            try:
-                validate_forward_review_markout_document(payload)
-            except (ArithmeticError, KeyError, TypeError, ValueError):
-                v3_contract_valid = False
-        else:
-            source_provenance_status = "SESSION_QUALIFICATION_UNATTESTED"
+        contract_valid = True
+        try:
+            validate_forward_review_markout_document(payload)
+        except (ArithmeticError, KeyError, TypeError, ValueError):
+            contract_valid = False
         if (
-            schema
-            not in LEGACY_FORWARD_REVIEW_MARKOUT_SCHEMAS
-            | {FORWARD_REVIEW_MARKOUT_SCHEMA}
-            or not v3_contract_valid
+            schema != FORWARD_REVIEW_MARKOUT_SCHEMA
+            or not contract_valid
             or payload.get("content_sha256") != sha256_json(stable)
             or payload.get("diagnostic_only") is not True
             or payload.get("portfolio_performance_evaluable") is not False
@@ -1074,59 +1014,7 @@ class HumanReviewScreeningService:
             or not isinstance(sample, Mapping)
             or not isinstance(reasons, list)
         ):
-            raise HumanReviewScreenUnavailable(
-                "human_review_forward_markout_invalid"
-            )
-        if schema in LEGACY_FORWARD_REVIEW_MARKOUT_SCHEMAS:
-            # v1-v6 reports predate the delivery-session qualification bound
-            # into v7.  Their rows remain useful as immutable diagnostics, but
-            # cannot be presented as pending cumulative evidence: the current
-            # real v1 artifact contains 126 lifecycles from two sessions that
-            # later failed the full forward-delivery audit.
-            archived_pending = {
-                str(horizon): int(
-                    (summary.get(str(horizon)) or {}).get("pending_count") or 0
-                )
-                for horizon in (5, 10, 20)
-                if isinstance(summary.get(str(horizon)), Mapping)
-            }
-            return {
-                "status": "UNQUALIFIED",
-                "through_session": payload.get("through_session"),
-                "content_sha256": payload.get("content_sha256"),
-                "diagnostic_only": True,
-                "portfolio_performance_evaluable": False,
-                "summary": {},
-                "summary_by_risk_class": {},
-                "sample": {
-                    "unique_lifecycle_count": 0,
-                    "eligible_by_horizon": {"5": 0, "10": 0, "20": 0},
-                    "sample_sufficient_by_horizon": {
-                        "5": False,
-                        "10": False,
-                        "20": False,
-                    },
-                    "source_cohort_ids": [],
-                    "source_identity_status": "NOT_APPLICABLE",
-                },
-                "excluded_legacy_sample": {
-                    "schema": schema,
-                    "unique_lifecycle_count": int(
-                        sample.get("unique_lifecycle_count") or 0
-                    ),
-                    "pending_by_horizon": archived_pending,
-                },
-                "source_provenance_status": source_provenance_status,
-                "reason_codes": list(
-                    dict.fromkeys(
-                        [
-                            *reasons,
-                            "FORWARD_SESSION_QUALIFICATION_UNATTESTED",
-                            "LEGACY_MARKOUT_EXCLUDED_FROM_CUMULATIVE_SAMPLE",
-                        ]
-                    )
-                ),
-            }
+            raise HumanReviewScreenUnavailable("human_review_forward_markout_invalid")
         return {
             "status": "AVAILABLE",
             "through_session": payload.get("through_session"),
@@ -1134,9 +1022,7 @@ class HumanReviewScreeningService:
             "diagnostic_only": True,
             "portfolio_performance_evaluable": False,
             "summary": dict(summary),
-            "summary_by_risk_class": dict(
-                payload.get("summary_by_risk_class") or {}
-            ),
+            "summary_by_risk_class": dict(payload.get("summary_by_risk_class") or {}),
             "sample": dict(sample),
             "source_provenance_status": source_provenance_status,
             "source_session_qualification": dict(
@@ -1191,9 +1077,7 @@ class HumanReviewScreeningService:
                 live_snapshot=payload,
                 source_snapshot_sha256=source_sha256,
                 session=session,
-                decision_source_snapshot=(
-                    _WEB_PROCESS_DECISION_SOURCE_SNAPSHOT
-                ),
+                decision_source_snapshot=(_WEB_PROCESS_DECISION_SOURCE_SNAPSHOT),
             )
         except (ArithmeticError, TypeError, ValueError) as exc:
             raise HumanReviewScreenUnavailable(
@@ -1288,9 +1172,7 @@ class HumanReviewScreeningService:
             bundle.index_path,
             "human_review_web_bundle_unreadable",
         )
-        stable = {
-            key: value for key, value in index.items() if key != "content_sha256"
-        }
+        stable = {key: value for key, value in index.items() if key != "content_sha256"}
         queue = index.get("review_queue")
         try:
             if (
@@ -1314,9 +1196,7 @@ class HumanReviewScreeningService:
             ):
                 raise ValueError("compact review index boundary is invalid")
             candidates = tuple(_parse_candidate_summary(value) for value in queue)
-            by_candidate_id = {
-                value.candidate_id: value for value in candidates
-            }
+            by_candidate_id = {value.candidate_id: value for value in candidates}
             if len(by_candidate_id) != len(candidates):
                 raise ValueError("compact review candidate identity duplicated")
             spans = sorted(
@@ -1344,9 +1224,7 @@ class HumanReviewScreeningService:
             "scope": index.get("scope") or {},
             "candidate_funnel": index.get("candidate_funnel") or {},
             "signal_counts": index.get("signal_counts") or {},
-            "event_study": {
-                "summary": index.get("event_study_summary") or {}
-            },
+            "event_study": {"summary": index.get("event_study_summary") or {}},
             "data_caveats": index.get("data_caveats") or [],
             "division_of_responsibility": (
                 index.get("division_of_responsibility") or {}
@@ -1451,9 +1329,7 @@ class HumanReviewScreeningService:
         if not root.is_dir():
             return ()
         aliases = tuple(root.glob("*/forward_human_review_screen.json"))
-        immutable = tuple(
-            root.glob("*/objects/forward_human_review_screen/*.json")
-        )
+        immutable = tuple(root.glob("*/objects/forward_human_review_screen/*.json"))
         return tuple(
             sorted(
                 set((*aliases, *immutable)),
@@ -1468,16 +1344,9 @@ class HumanReviewScreeningService:
         )
 
     def _historical_reports(self) -> tuple[Path, ...]:
-        """Prefer the current-release page sidecar, retaining old archives."""
+        """Return the current-release sidecar when it exists."""
 
-        output: list[Path] = []
-        for value in (
-            self.preferred_historical_report,
-            self.historical_report,
-        ):
-            if value.is_file() and value not in output:
-                output.append(value)
-        return tuple(output)
+        return (self.historical_report,) if self.historical_report.is_file() else ()
 
     def _candidate_paths(self, source: str) -> tuple[tuple[str, Path], ...]:
         if source not in _SOURCE_KINDS:
@@ -1485,22 +1354,14 @@ class HumanReviewScreeningService:
         if source == "live":
             paths = tuple(("live", value) for value in self._live_reports())
         elif source == "forward":
-            paths = tuple(
-                ("forward", value) for value in self._forward_reports()
-            )
+            paths = tuple(("forward", value) for value in self._forward_reports())
         elif source == "historical":
-            paths = tuple(
-                ("historical", value)
-                for value in self._historical_reports()
-            )
+            paths = tuple(("historical", value) for value in self._historical_reports())
         else:
             live = tuple(("live", value) for value in self._live_reports())
-            forward = tuple(
-                ("forward", value) for value in self._forward_reports()
-            )
+            forward = tuple(("forward", value) for value in self._forward_reports())
             historical = tuple(
-                ("historical", value)
-                for value in self._historical_reports()
+                ("historical", value) for value in self._historical_reports()
             )
             paths = live + forward + historical
         if not paths:
@@ -1617,7 +1478,9 @@ class HumanReviewScreeningService:
     @staticmethod
     def _report_market_session(report: Mapping[str, object]) -> date:
         sample = report.get("sample")
-        raw_cutoff = sample.get("market_data_as_of") if isinstance(sample, Mapping) else None
+        raw_cutoff = (
+            sample.get("market_data_as_of") if isinstance(sample, Mapping) else None
+        )
         declared_session = report.get("forward_paper_session")
         try:
             if raw_cutoff is not None:
@@ -1627,9 +1490,10 @@ class HumanReviewScreeningService:
                 session = cutoff.astimezone(ZoneInfo("Asia/Shanghai")).date()
             else:
                 session = date.fromisoformat(str(declared_session))
-            if declared_session is not None and date.fromisoformat(
-                str(declared_session)
-            ) != session:
+            if (
+                declared_session is not None
+                and date.fromisoformat(str(declared_session)) != session
+            ):
                 raise ValueError("report session differs from market cutoff")
         except (TypeError, ValueError) as exc:
             raise HumanReviewScreenUnavailable(
@@ -1648,9 +1512,7 @@ class HumanReviewScreeningService:
             report = self._load_web_bundle(bundle).report
             sample = report.get("sample")
             raw_cutoff = (
-                sample.get("market_data_as_of")
-                if isinstance(sample, Mapping)
-                else None
+                sample.get("market_data_as_of") if isinstance(sample, Mapping) else None
             )
             try:
                 cutoff = datetime.fromisoformat(str(raw_cutoff))
@@ -1708,8 +1570,7 @@ class HumanReviewScreeningService:
             try:
                 large_live_source = bool(
                     source is not None
-                    and source.stat().st_size
-                    > _MAX_SYNCHRONOUS_LIVE_SNAPSHOT_BYTES
+                    and source.stat().st_size > _MAX_SYNCHRONOUS_LIVE_SNAPSHOT_BYTES
                 )
             except OSError:
                 large_live_source = True
@@ -1726,9 +1587,7 @@ class HumanReviewScreeningService:
                 current_kind = "live"
                 current_report = self._load_web_bundle(bundle).report
             else:
-                current_kind, _path, current_report, _alerts = self._load_source(
-                    kind
-                )
+                current_kind, _path, current_report, _alerts = self._load_source(kind)
         except HumanReviewScreenUnavailable:
             return (
                 False,
@@ -1784,7 +1643,9 @@ class HumanReviewScreeningService:
             True,
             None,
             source_session.isoformat(),
-            None if current_market_session is None else current_market_session.isoformat(),
+            None
+            if current_market_session is None
+            else current_market_session.isoformat(),
         )
 
     def _paper_forward_operations_eligibility(
@@ -1843,9 +1704,7 @@ class HumanReviewScreeningService:
         # after Capture and reconciled into an intent without losing review
         # work.
         try:
-            capture = self.forward_archive_capture_readiness(
-                session=source_session
-            )
+            capture = self.forward_archive_capture_readiness(session=source_session)
         except (OSError, RuntimeError, TypeError, ValueError):
             return False, "SAME_SESSION_FORWARD_CAPTURE_NOT_READY_FOR_PAPER"
         if capture.get("ready") is not True:
@@ -1866,7 +1725,6 @@ class HumanReviewScreeningService:
         }
         boundary_count = 0
         verified = 0
-        legacy: list[str] = []
         unavailable: list[str] = []
         invalid: list[dict[str, str]] = []
         for event in events:
@@ -1882,7 +1740,12 @@ class HumanReviewScreeningService:
             intent_id = str(payload.get("intent_id") or "UNKNOWN_INTENT")
             raw_boundary = payload.get("entry_execution_boundary")
             if raw_boundary is None:
-                legacy.append(intent_id)
+                invalid.append(
+                    {
+                        "intent_id": intent_id,
+                        "reason": "ENTRY_EXECUTION_BOUNDARY_REQUIRED",
+                    }
+                )
                 continue
             source_hash = str(payload.get("source_screen_content_sha256") or "")
             if source_hash not in cache:
@@ -1915,7 +1778,12 @@ class HumanReviewScreeningService:
                 )
                 continue
             if source_alert.entry_execution_boundary is None:
-                legacy.append(intent_id)
+                invalid.append(
+                    {
+                        "intent_id": intent_id,
+                        "reason": "SOURCE_ALERT_ENTRY_BOUNDARY_REQUIRED",
+                    }
+                )
                 continue
             try:
                 boundary = parse_entry_execution_boundary_document(raw_boundary)
@@ -1940,18 +1808,15 @@ class HumanReviewScreeningService:
             status = "INVALID"
         elif unavailable:
             status = "INCOMPLETE_SOURCE_ARCHIVE"
-        elif legacy:
-            status = "LEGACY_REDUCED_EVIDENCE"
         elif boundary_count:
             status = "COMPLETE"
         else:
             status = "NO_BOUNDARY_INTENTS"
         return {
-            "schema": "chanlun-human-paper-entry-boundary-source-audit/v1",
+            "schema": "chanlun-human-paper-entry-boundary-source-audit",
             "status": status,
             "boundary_intent_count": boundary_count,
             "verified_source_binding_count": verified,
-            "legacy_reduced_boundary_intent_ids": legacy,
             "source_unavailable_intent_ids": unavailable,
             "invalid_source_bindings": invalid,
             "immutable_source_alert_resolved": status
@@ -1978,9 +1843,7 @@ class HumanReviewScreeningService:
                 or payload.get("side") != "BUY"
             ):
                 continue
-            source_hash = str(
-                payload.get("source_screen_content_sha256") or ""
-            )
+            source_hash = str(payload.get("source_screen_content_sha256") or "")
             candidate_id = str(payload.get("candidate_id") or "")
             required.setdefault(source_hash, set()).add(candidate_id)
         resolved: dict[str, tuple[HumanReviewAlert, ...]] = {}
@@ -1999,11 +1862,9 @@ class HumanReviewScreeningService:
             loaded: list[HumanReviewAlert] = []
             for candidate_id in sorted(candidate_ids):
                 try:
-                    _kind, _path, _report, source_alert = (
-                        self._load_candidate_by_hash(
-                            source_sha256=source_hash,
-                            candidate_id=candidate_id,
-                        )
+                    _kind, _path, _report, source_alert = self._load_candidate_by_hash(
+                        source_sha256=source_hash,
+                        candidate_id=candidate_id,
                     )
                 except HumanReviewScreenUnavailable:
                     loaded = []
@@ -2106,8 +1967,7 @@ class HumanReviewScreeningService:
         self,
         *,
         session: date | None,
-        _calendar_requirement: tuple[dict[str, object], str | None]
-        | None = None,
+        _calendar_requirement: tuple[dict[str, object], str | None] | None = None,
     ) -> dict[str, object]:
         """Return a side-effect-free proof for the daily forward archive gate."""
 
@@ -2116,8 +1976,7 @@ class HumanReviewScreeningService:
             raise ValueError("human review clock must be timezone-aware")
         local = observed_at.astimezone(ZoneInfo("Asia/Shanghai"))
         if session is None and (
-            self._sector_capture_due is None
-            or local.time() < self._sector_capture_due
+            self._sector_capture_due is None or local.time() < self._sector_capture_due
         ):
             return {
                 "schema": QMT_FORWARD_CAPTURE_READINESS_SCHEMA,
@@ -2154,9 +2013,7 @@ class HumanReviewScreeningService:
                 **requirement,
                 "ready": False,
                 "status": (
-                    "not_due"
-                    if requirement["required"] is False
-                    else "unresolved"
+                    "not_due" if requirement["required"] is False else "unresolved"
                 ),
                 "reason_code": (
                     "NON_TRADING_SESSION_NOT_DUE"
@@ -2215,13 +2072,17 @@ class HumanReviewScreeningService:
         # The complete catalog and receipt documents can be large and are
         # already available from their dedicated audited surfaces.  Readiness
         # exposes only their immutable identities and verdict.
-        return {
-            key: value
-            for key, value in result.items()
-            if key not in {"catalog", "receipt_audit"}
-        } | requirement | {
-            "trading_session_provider_error": provider_error,
-        }
+        return (
+            {
+                key: value
+                for key, value in result.items()
+                if key not in {"catalog", "receipt_audit"}
+            }
+            | requirement
+            | {
+                "trading_session_provider_error": provider_error,
+            }
+        )
 
     def _feedback_entries(self) -> tuple[dict[str, object], ...]:
         if not self.feedback_ledger.is_file():
@@ -2311,17 +2172,11 @@ class HumanReviewScreeningService:
         )
         source_sha256 = str(report["content_sha256"])
         raw_input_hashes = report.get("input_hashes")
-        input_hashes = (
-            raw_input_hashes
-            if isinstance(raw_input_hashes, Mapping)
-            else {}
-        )
+        input_hashes = raw_input_hashes if isinstance(raw_input_hashes, Mapping) else {}
         candidate_warmup_diagnostic = self._candidate_warmup_diagnostic(
             input_hashes.get("live_screening_snapshot")
         )
-        raw_candidate_warmup_views = candidate_warmup_diagnostic.get(
-            "candidates"
-        )
+        raw_candidate_warmup_views = candidate_warmup_diagnostic.get("candidates")
         candidate_warmup_views = (
             raw_candidate_warmup_views
             if isinstance(raw_candidate_warmup_views, Mapping)
@@ -2332,28 +2187,22 @@ class HumanReviewScreeningService:
             paper_observation_reason,
             paper_observation_source_session,
             paper_observation_current_market_session,
-        ) = (
-            self._paper_observation_eligibility(
-                kind=kind,
-                source_sha256=source_sha256,
-                source_report=report,
-            )
+        ) = self._paper_observation_eligibility(
+            kind=kind,
+            source_sha256=source_sha256,
+            source_report=report,
         )
-        sector_catalogs, sector_captured_at, sector_warning = (
-            self._sector_catalogs()
-        )
+        sector_catalogs, sector_captured_at, sector_warning = self._sector_catalogs()
         sector_receipt_audit = self._sector_receipt_audit()
         feedback = self._feedback_entries()
         paper_events = self._paper_events()
         paper_entry_boundary_attestation = (
             audit_human_paper_entry_boundary_attestations(paper_events)
         )
-        paper_entry_boundary_source_audit = (
-            self._paper_entry_boundary_source_audit(
-                paper_events,
-                current_source_sha256=source_sha256,
-                current_alerts=alerts,
-            )
+        paper_entry_boundary_source_audit = self._paper_entry_boundary_source_audit(
+            paper_events,
+            current_source_sha256=source_sha256,
+            current_alerts=alerts,
         )
         paper_entry_selection_attestation = (
             audit_human_paper_entry_selection_attestations(
@@ -2361,17 +2210,13 @@ class HumanReviewScreeningService:
                 sector_catalog_entries=sector_catalogs,
             )
         )
-        paper_entry_selection_source_audit = (
-            self._paper_entry_selection_source_audit(
-                paper_events,
-                current_source_sha256=source_sha256,
-                current_alerts=alerts,
-            )
+        paper_entry_selection_source_audit = self._paper_entry_selection_source_audit(
+            paper_events,
+            current_source_sha256=source_sha256,
+            current_alerts=alerts,
         )
         forward_event_source = self._forward_events()
-        forward_events = (
-            () if forward_event_source is None else forward_event_source
-        )
+        forward_events = () if forward_event_source is None else forward_event_source
         pending_continuity = latest_human_paper_pending_continuity(
             paper_events,
             forward_events,
@@ -2392,8 +2237,8 @@ class HumanReviewScreeningService:
                 forward_root=self.forward_root,
             )
         )
-        paper_capital_rejection_evidence = (
-            audit_human_paper_capital_rejection_evidence(
+        paper_portfolio_rejection_evidence = (
+            audit_human_paper_portfolio_rejection_evidence(
                 paper_events,
                 forward_root=self.forward_root,
             )
@@ -2403,15 +2248,9 @@ class HumanReviewScreeningService:
             accounting_parameters = load_human_paper_accounting_parameters(
                 self.parameter_snapshot
             )
-            paper_capital_decision_audit = audit_human_paper_capital_decisions(
+            paper_portfolio_decision_audit = audit_human_paper_portfolio_decisions(
                 paper_events,
                 parameters=accounting_parameters,
-            )
-            paper_portfolio_decision_audit = (
-                audit_human_paper_portfolio_decisions(
-                    paper_events,
-                    parameters=accounting_parameters,
-                )
             )
             paper_portfolio_fill_decision_audit = (
                 audit_human_paper_portfolio_fill_decisions(
@@ -2420,19 +2259,8 @@ class HumanReviewScreeningService:
                 )
             )
         except (OSError, TypeError, ValueError) as exc:
-            paper_capital_decision_audit = {
-                "schema": "chanlun-human-paper-capital-decision-audit/v1",
-                "status": "PARAMETER_SNAPSHOT_INVALID",
-                "rejection_count": None,
-                "verified_rejection_count": 0,
-                "invalid_decisions": [
-                    {"reason": f"{type(exc).__name__}: {str(exc)[:200]}"}
-                ],
-                "broker_transport_available": False,
-                "live_status": "LIVE_DISABLED",
-            }
             paper_portfolio_decision_audit = {
-                "schema": "chanlun-human-paper-portfolio-decision-audit/v2",
+                "schema": "chanlun-human-paper-portfolio-decision-audit",
                 "status": "PARAMETER_SNAPSHOT_INVALID",
                 "rejection_count": None,
                 "verified_rejection_count": 0,
@@ -2443,9 +2271,7 @@ class HumanReviewScreeningService:
                 "live_status": "LIVE_DISABLED",
             }
             paper_portfolio_fill_decision_audit = {
-                "schema": (
-                    "chanlun-human-paper-portfolio-fill-decision-audit/v2"
-                ),
+                "schema": ("chanlun-human-paper-portfolio-fill-decision-audit"),
                 "status": "PARAMETER_SNAPSHOT_INVALID",
                 "approved_fill_count": None,
                 "verified_approved_fill_count": 0,
@@ -2469,7 +2295,7 @@ class HumanReviewScreeningService:
             )
         except (OSError, TypeError, ValueError) as exc:
             paper_accounting = {
-                "schema": "chanlun-human-paper-accounting/v1",
+                "schema": "chanlun-human-paper-accounting",
                 "status": "PARAMETER_SNAPSHOT_INVALID",
                 "accounting_valid": False,
                 "performance_evaluable": False,
@@ -2497,15 +2323,11 @@ class HumanReviewScreeningService:
                 paper_events=paper_events,
                 accounting_parameters=accounting_parameters,
             )
-        paper_valuation = audit_human_paper_valuation_evidence(
-            **valuation_source
-        )
+        paper_valuation = audit_human_paper_valuation_evidence(**valuation_source)
         virtual_positions = human_paper_position_quantities(paper_events)
         virtual_reserved_sells = human_paper_pending_sell_quantities(paper_events)
         paper_candidate_by_intent = {
-            str(event["payload"]["intent_id"]): str(
-                event["payload"]["candidate_id"]
-            )
+            str(event["payload"]["intent_id"]): str(event["payload"]["candidate_id"])
             for event in paper_events
             if event.get("kind") == "INTENT"
             and isinstance(event.get("payload"), Mapping)
@@ -2551,12 +2373,10 @@ class HumanReviewScreeningService:
             )
             candidate_paper_reconcilable = (
                 paper_observation_eligible
-                or paper_observation_reason
-                in _PAPER_RECONCILIABLE_OPERATIONAL_REASONS
+                or paper_observation_reason in _PAPER_RECONCILIABLE_OPERATIONAL_REASONS
             ) and (
                 paper_entry_sector_eligible
-                or paper_entry_sector_reason
-                in _PAPER_RECONCILIABLE_OPERATIONAL_REASONS
+                or paper_entry_sector_reason in _PAPER_RECONCILIABLE_OPERATIONAL_REASONS
             )
             history_by_id = {
                 str(row["feedback_id"]): row
@@ -2606,8 +2426,7 @@ class HumanReviewScreeningService:
                 isinstance(latest_feedback, Mapping)
                 and candidate_paper_reconcilable
                 and latest_feedback.get("candidate_id") == alert.candidate_id
-                and latest_feedback.get("source_screen_content_sha256")
-                == source_sha256
+                and latest_feedback.get("source_screen_content_sha256") == source_sha256
                 and latest_feedback.get("disposition") == "PAPER_OBSERVE"
                 and isinstance(latest_feedback.get("request_id"), str)
                 and bool(latest_feedback.get("request_id"))
@@ -2621,9 +2440,7 @@ class HumanReviewScreeningService:
             )
             review_lane = _review_lane(
                 alert,
-                virtual_position_quantity=int(
-                    virtual_positions.get(alert.symbol, 0)
-                ),
+                virtual_position_quantity=int(virtual_positions.get(alert.symbol, 0)),
                 paper_reconciliation_pending=paper_reconciliation_pending,
             )
             queue.append(
@@ -2637,29 +2454,21 @@ class HumanReviewScreeningService:
                     "review_as_of_unix": int(alert.review_available_at.timestamp()),
                     "sector_id": alert.sector_id,
                     **sector_presentation,
-                    "paper_observation_source_eligible": (
-                        paper_observation_eligible
-                    ),
-                    "paper_observation_source_reason": (
-                        paper_observation_reason
-                    ),
+                    "paper_observation_source_eligible": (paper_observation_eligible),
+                    "paper_observation_source_reason": (paper_observation_reason),
                     "paper_entry_sector_eligible": paper_entry_sector_eligible,
                     "paper_entry_sector_reason": paper_entry_sector_reason,
                     "paper_observation_eligible": (
                         candidate_paper_observation_eligible
                     ),
-                    "paper_observation_reason": (
-                        candidate_paper_observation_reason
-                    ),
+                    "paper_observation_reason": (candidate_paper_observation_reason),
                     "confidence": alert.confidence,
                     "review_priority": alert.review_priority,
                     # Presentation-only fields.  They neither modify the
                     # source alert nor authorize a trade.
                     "review_lane": review_lane,
                     "sector_horizontal_rank": sector_horizontal_rank,
-                    "sector_horizontal_strength": (
-                        sector_horizontal_strength
-                    ),
+                    "sector_horizontal_strength": (sector_horizontal_strength),
                     "reference_price": (
                         None
                         if alert.reference_price is None
@@ -2685,25 +2494,18 @@ class HumanReviewScreeningService:
                         if alert.entry_valid_until is None
                         else alert.entry_valid_until.isoformat()
                     ),
-                    "entry_boundary_evidence_id": (
-                        alert.entry_boundary_evidence_id
-                    ),
+                    "entry_boundary_evidence_id": (alert.entry_boundary_evidence_id),
                     "entry_boundary_attestation": (
                         "SELF_CONTAINED_RAW_1M_OHLCV"
                         if alert.entry_execution_boundary is not None
                         else (
-                            "LEGACY_REDUCED_EVIDENCE"
+                            "MISSING_CURRENT_BOUNDARY_EVIDENCE"
                             if alert.entry_boundary_evidence_id is not None
                             else "NOT_AVAILABLE"
                         )
                     ),
                     "market_risk_gate": alert.market_risk_gate,
                     "sector_risk_gate": alert.sector_risk_gate,
-                    "sector_risk_gate_attestation": (
-                        "SELF_CONTAINED"
-                        if alert.sector_risk_gate_attested
-                        else "LEGACY_OMITTED_FAIL_CLOSED"
-                    ),
                     "symbol_risk_gate": alert.symbol_risk_gate,
                     "sector_higher_timeframe_evidence": (
                         None
@@ -2724,30 +2526,17 @@ class HumanReviewScreeningService:
                         None
                         if not include_evidence
                         or alert.market_symbol_higher_timeframe_evidence is None
-                        else (
-                            alert.market_symbol_higher_timeframe_evidence.document()
-                        )
+                        else (alert.market_symbol_higher_timeframe_evidence.document())
                     ),
                     "market_symbol_higher_timeframe_evidence_id": (
                         alert.market_symbol_higher_timeframe_evidence_id
                         if compact_alert
                         else (
                             None
-                            if alert.market_symbol_higher_timeframe_evidence
-                            is None
+                            if alert.market_symbol_higher_timeframe_evidence is None
                             else (
                                 alert.market_symbol_higher_timeframe_evidence.evidence_id
                             )
-                        )
-                    ),
-                    "market_symbol_higher_timeframe_attestation": (
-                        alert.market_symbol_higher_timeframe_attestation
-                        if compact_alert
-                        else (
-                            "SELF_CONTAINED"
-                            if alert.market_symbol_higher_timeframe_evidence
-                            is not None
-                            else "LEGACY_SUMMARY_ONLY"
                         )
                     ),
                     "market_symbol_higher_timeframe_source_attestation": (
@@ -2755,8 +2544,7 @@ class HumanReviewScreeningService:
                     ),
                     "sector_ranking_evidence": (
                         None
-                        if not include_evidence
-                        or alert.sector_ranking_evidence is None
+                        if not include_evidence or alert.sector_ranking_evidence is None
                         else alert.sector_ranking_evidence.document()
                     ),
                     "sector_ranking_evidence_id": (
@@ -2780,18 +2568,14 @@ class HumanReviewScreeningService:
                             )
                         )
                     ),
-                    "sector_ranking_attestation": (
-                        _sector_ranking_attestation(alert)
-                    ),
+                    "sector_ranking_attestation": (_sector_ranking_attestation(alert)),
                     "warning_codes": list(alert.warning_codes),
                     "source_fact_ids": list(alert.source_fact_ids),
                     "review_checklist": list(alert.review_checklist),
                     # Bounded multi-prefix evidence is presentation-only and
                     # bound to this exact screen hash.  It is intentionally
                     # absent from alert/candidate identities and queue sorting.
-                    "deep_warmup_diagnostic": candidate_warmup_views.get(
-                        alert.symbol
-                    ),
+                    "deep_warmup_diagnostic": candidate_warmup_views.get(alert.symbol),
                     "status": "REVIEW_REQUIRED",
                     "live_status": "LIVE_DISABLED",
                     "automated_action_authorized": False,
@@ -2799,9 +2583,7 @@ class HumanReviewScreeningService:
                     "feedback_history": history,
                     "latest_feedback": latest_feedback,
                     "paper_events": candidate_paper_events,
-                    "paper_reconciliation_pending": (
-                        paper_reconciliation_pending
-                    ),
+                    "paper_reconciliation_pending": (paper_reconciliation_pending),
                     "paper_reconciliation_eligible": (
                         paper_reconciliation_pending
                         and candidate_paper_observation_eligible
@@ -2827,9 +2609,7 @@ class HumanReviewScreeningService:
                 str(value["candidate_id"]),
             )
         )
-        review_lane_counts = Counter(
-            str(value["review_lane"]) for value in queue
-        )
+        review_lane_counts = Counter(str(value["review_lane"]) for value in queue)
 
         alert_counts = Counter(value.alert_type for value in alerts)
         confidence_counts = Counter(value.confidence for value in alerts)
@@ -2847,18 +2627,10 @@ class HumanReviewScreeningService:
             source_options.insert(0, "live")
         if kind == "historical":
             source_currentness = {
-                "status": (
-                    "CURRENT_RELEASE_SIDECAR"
-                    if path == self.preferred_historical_report
-                    else "LEGACY_FALLBACK"
-                ),
+                "status": "CURRENT_RELEASE_SIDECAR",
                 "source_session": None,
                 "current_market_session": None,
-                "reason_code": (
-                    None
-                    if path == self.preferred_historical_report
-                    else "CURRENT_RELEASE_HUMAN_REVIEW_SIDECAR_UNAVAILABLE"
-                ),
+                "reason_code": None,
             }
         elif (
             paper_observation_source_session is not None
@@ -2871,9 +2643,7 @@ class HumanReviewScreeningService:
             source_currentness = {
                 "status": "CURRENT" if source_is_current else "STALE",
                 "source_session": paper_observation_source_session,
-                "current_market_session": (
-                    paper_observation_current_market_session
-                ),
+                "current_market_session": (paper_observation_current_market_session),
                 "reason_code": (
                     None
                     if source_is_current
@@ -2884,19 +2654,12 @@ class HumanReviewScreeningService:
             source_currentness = {
                 "status": "UNPROVEN",
                 "source_session": paper_observation_source_session,
-                "current_market_session": (
-                    paper_observation_current_market_session
-                ),
+                "current_market_session": (paper_observation_current_market_session),
                 "reason_code": (
-                    paper_observation_reason
-                    or "CURRENT_MARKET_SESSION_UNAVAILABLE"
+                    paper_observation_reason or "CURRENT_MARKET_SESSION_UNAVAILABLE"
                 ),
             }
         warnings = [sector_warning] if sector_warning else []
-        if source_currentness["status"] == "LEGACY_FALLBACK":
-            warnings.append(
-                "CURRENT_RELEASE_HUMAN_REVIEW_SIDECAR_UNAVAILABLE"
-            )
         receipt_status = str(sector_receipt_audit.get("status") or "UNAVAILABLE")
         if receipt_status != "COMPLETE":
             warnings.append(f"QMT_SECTOR_RECEIPTS_{receipt_status}")
@@ -2915,8 +2678,7 @@ class HumanReviewScreeningService:
             "NO_BOUNDARY_INTENTS",
         }:
             warnings.append(
-                "HUMAN_PAPER_ENTRY_BOUNDARY_ATTESTATION_"
-                f"{entry_attestation_status}"
+                f"HUMAN_PAPER_ENTRY_BOUNDARY_ATTESTATION_{entry_attestation_status}"
             )
         entry_source_status = str(
             paper_entry_boundary_source_audit.get("status") or "INVALID"
@@ -2925,10 +2687,7 @@ class HumanReviewScreeningService:
             "COMPLETE",
             "NO_BOUNDARY_INTENTS",
         }:
-            warnings.append(
-                "HUMAN_PAPER_ENTRY_BOUNDARY_SOURCE_"
-                f"{entry_source_status}"
-            )
+            warnings.append(f"HUMAN_PAPER_ENTRY_BOUNDARY_SOURCE_{entry_source_status}")
         selection_attestation_status = str(
             paper_entry_selection_attestation.get("status") or "INVALID"
         )
@@ -2948,8 +2707,7 @@ class HumanReviewScreeningService:
             "NO_REQUIRED_SELECTION_INTENTS",
         }:
             warnings.append(
-                "HUMAN_PAPER_ENTRY_SELECTION_SOURCE_"
-                f"{selection_source_status}"
+                f"HUMAN_PAPER_ENTRY_SELECTION_SOURCE_{selection_source_status}"
             )
         execution_rejection_evidence_status = str(
             paper_execution_rejection_evidence.get("status") or "INVALID"
@@ -2973,26 +2731,16 @@ class HumanReviewScreeningService:
                 "HUMAN_PAPER_OPERATIONS_CANCELLATION_EVIDENCE_"
                 f"{operations_cancellation_evidence_status}"
             )
-        capital_rejection_evidence_status = str(
-            paper_capital_rejection_evidence.get("status") or "INVALID"
+        portfolio_rejection_evidence_status = str(
+            paper_portfolio_rejection_evidence.get("status") or "INVALID"
         )
-        if capital_rejection_evidence_status not in {
+        if portfolio_rejection_evidence_status not in {
             "COMPLETE",
             "NO_REJECTIONS",
         }:
             warnings.append(
-                "HUMAN_PAPER_CAPITAL_REJECTION_EVIDENCE_"
-                f"{capital_rejection_evidence_status}"
-            )
-        capital_decision_audit_status = str(
-            paper_capital_decision_audit.get("status") or "INVALID"
-        )
-        if capital_decision_audit_status not in {
-            "COMPLETE",
-            "NO_REJECTIONS",
-        }:
-            warnings.append(
-                f"HUMAN_PAPER_CAPITAL_DECISION_{capital_decision_audit_status}"
+                "HUMAN_PAPER_PORTFOLIO_REJECTION_EVIDENCE_"
+                f"{portfolio_rejection_evidence_status}"
             )
         portfolio_decision_audit_status = str(
             paper_portfolio_decision_audit.get("status") or "INVALID"
@@ -3002,8 +2750,7 @@ class HumanReviewScreeningService:
             "NO_REJECTIONS",
         }:
             warnings.append(
-                "HUMAN_PAPER_PORTFOLIO_DECISION_"
-                f"{portfolio_decision_audit_status}"
+                f"HUMAN_PAPER_PORTFOLIO_DECISION_{portfolio_decision_audit_status}"
             )
         portfolio_fill_decision_audit_status = str(
             paper_portfolio_fill_decision_audit.get("status") or "INVALID"
@@ -3040,16 +2787,14 @@ class HumanReviewScreeningService:
         virtual_intent_count = sum(
             event.get("kind") == "INTENT" for event in paper_events
         )
-        virtual_fill_count = sum(
-            event.get("kind") == "FILL" for event in paper_events
-        )
+        virtual_fill_count = sum(event.get("kind") == "FILL" for event in paper_events)
         cancelled_intent_ids = human_paper_cancelled_intent_ids(paper_events)
         operations_cancelled_intent_count = sum(
             event.get("kind") == "OPERATIONS_CANCEL" for event in paper_events
         )
-        capital_rejected_intent_ids = human_paper_capital_rejected_intent_ids(
+        portfolio_rejected_intent_ids = human_paper_portfolio_rejected_intent_ids(
             paper_events
-        ) | human_paper_portfolio_rejected_intent_ids(paper_events)
+        )
         terminal_intent_ids = human_paper_terminal_intent_ids(paper_events)
         paper_intents = [
             event["payload"]
@@ -3063,12 +2808,10 @@ class HumanReviewScreeningService:
             for intent in paper_intents
         )
         virtual_blocked_intent_count = sum(
-            intent.get("status") == "BLOCKED_BY_RISK_GATE"
-            for intent in paper_intents
+            intent.get("status") == "BLOCKED_BY_RISK_GATE" for intent in paper_intents
         )
         virtual_observation_only_intent_count = sum(
-            intent.get("status") == "OBSERVATION_ONLY"
-            for intent in paper_intents
+            intent.get("status") == "OBSERVATION_ONLY" for intent in paper_intents
         )
         try:
             forward_markout = self._forward_markout()
@@ -3084,15 +2827,12 @@ class HumanReviewScreeningService:
             }
             warnings.append(exc.code)
         try:
-            forward_warmup_structure_lineage = (
-                self._forward_warmup_structure_lineage()
-            )
+            forward_warmup_structure_lineage = self._forward_warmup_structure_lineage()
         except HumanReviewScreenUnavailable as exc:
             forward_warmup_structure_lineage = {
                 "status": "INVALID",
                 "qualified_session_count": 0,
                 "recorded_session_count": 0,
-                "legacy_session_count": 0,
                 "structure_event_count": 0,
                 "subjects": {},
                 "sessions": [],
@@ -3115,9 +2855,7 @@ class HumanReviewScreeningService:
             "source_options": source_options,
             "paper_observation_eligible": paper_observation_eligible,
             "paper_observation_reason": paper_observation_reason,
-            "paper_observation_source_session": (
-                paper_observation_source_session
-            ),
+            "paper_observation_source_session": (paper_observation_source_session),
             "paper_observation_current_market_session": (
                 paper_observation_current_market_session
             ),
@@ -3127,12 +2865,11 @@ class HumanReviewScreeningService:
             "signal_counts": report.get("signal_counts") or {},
             "event_study_summary": event_summary,
             "forward_markout": forward_markout,
-            "forward_warmup_structure_lineage": (
-                forward_warmup_structure_lineage
-            ),
+            "forward_warmup_structure_lineage": (forward_warmup_structure_lineage),
             "candidate_warmup_diagnostic": candidate_warmup_diagnostic,
             "data_caveats": list(report.get("data_caveats") or ()),
-            "division_of_responsibility": report.get("division_of_responsibility") or {},
+            "division_of_responsibility": report.get("division_of_responsibility")
+            or {},
             "sector_catalog_captured_at": sector_captured_at,
             "sector_capture_receipts": sector_receipt_audit,
             "alert_counts": dict(alert_counts),
@@ -3159,7 +2896,9 @@ class HumanReviewScreeningService:
                 "trade_authorization_changed": False,
                 "live_status": "LIVE_DISABLED",
             },
-            "reviewed_candidate_count": sum(bool(row["feedback_history"]) for row in queue),
+            "reviewed_candidate_count": sum(
+                bool(row["feedback_history"]) for row in queue
+            ),
             "feedback_entry_count": sum(len(row["feedback_history"]) for row in queue),
             "virtual_intent_count": virtual_intent_count,
             "virtual_fill_count": virtual_fill_count,
@@ -3167,8 +2906,8 @@ class HumanReviewScreeningService:
             "virtual_operations_cancelled_intent_count": (
                 operations_cancelled_intent_count
             ),
-            "virtual_capital_rejected_intent_count": len(
-                capital_rejected_intent_ids
+            "virtual_portfolio_rejected_intent_count": len(
+                portfolio_rejected_intent_ids
             ),
             "virtual_pending_intent_count": virtual_pending_intent_count,
             "virtual_blocked_intent_count": virtual_blocked_intent_count,
@@ -3180,28 +2919,15 @@ class HumanReviewScreeningService:
             "virtual_reserved_sell_quantities": virtual_reserved_sells,
             "virtual_reserved_sell_quantity": sum(virtual_reserved_sells.values()),
             "paper_execution_evidence": paper_execution_evidence,
-            "paper_entry_boundary_attestation": (
-                paper_entry_boundary_attestation
-            ),
-            "paper_entry_boundary_source_audit": (
-                paper_entry_boundary_source_audit
-            ),
-            "paper_entry_selection_attestation": (
-                paper_entry_selection_attestation
-            ),
-            "paper_entry_selection_source_audit": (
-                paper_entry_selection_source_audit
-            ),
-            "paper_execution_rejection_evidence": (
-                paper_execution_rejection_evidence
-            ),
+            "paper_entry_boundary_attestation": (paper_entry_boundary_attestation),
+            "paper_entry_boundary_source_audit": (paper_entry_boundary_source_audit),
+            "paper_entry_selection_attestation": (paper_entry_selection_attestation),
+            "paper_entry_selection_source_audit": (paper_entry_selection_source_audit),
+            "paper_execution_rejection_evidence": (paper_execution_rejection_evidence),
             "paper_operations_cancellation_evidence": (
                 paper_operations_cancellation_evidence
             ),
-            "paper_capital_rejection_evidence": (
-                paper_capital_rejection_evidence
-            ),
-            "paper_capital_decision_audit": paper_capital_decision_audit,
+            "paper_portfolio_rejection_evidence": (paper_portfolio_rejection_evidence),
             "paper_portfolio_decision_audit": paper_portfolio_decision_audit,
             "paper_portfolio_fill_decision_audit": (
                 paper_portfolio_fill_decision_audit
@@ -3224,15 +2950,13 @@ class HumanReviewScreeningService:
                 "persistent_strategic_sell_never_expires": True,
                 "later_feedback_mutates_existing_intent": False,
                 "later_feedback_supersedes_pending_intent": True,
-                "fee_model_attached": bool(
-                    paper_accounting.get("fee_model_attached")
-                ),
+                "fee_model_attached": bool(paper_accounting.get("fee_model_attached")),
                 "cash_accounting_attached": bool(
                     paper_accounting.get("cash_ledger_attached")
                 ),
                 "cash_and_slot_pretrade_enforced": True,
-                "capital_rejection_exact_1m_evidence_audited": True,
-                "capital_rejection_ledger_prefix_recomputed": True,
+                "portfolio_rejection_exact_1m_evidence_audited": True,
+                "portfolio_rejection_ledger_prefix_recomputed": True,
                 "slot_fraction_notional_gate_evaluable": True,
                 "account_exposure_notional_gate_evaluable": True,
                 "synchronous_open_position_one_minute_marks_required": True,
@@ -3264,11 +2988,10 @@ class HumanReviewScreeningService:
                 "persistent_exit_security_blocked_remains_pending": True,
                 "persistent_exit_fact_incomplete_remains_pending": True,
                 "fill_and_rejection_full_session_grid_audited": (
-                    paper_execution_evidence.get("status")
-                    in {"COMPLETE", "NO_FILLS"}
+                    paper_execution_evidence.get("status") in {"COMPLETE", "NO_FILLS"}
                     and paper_execution_rejection_evidence.get("status")
                     in {"COMPLETE", "NO_REJECTIONS"}
-                    and paper_capital_rejection_evidence.get("status")
+                    and paper_portfolio_rejection_evidence.get("status")
                     in {"COMPLETE", "NO_REJECTIONS"}
                     and paper_operations_cancellation_evidence.get("status")
                     in {"COMPLETE", "NO_CANCELLATIONS"}
@@ -3313,9 +3036,9 @@ class HumanReviewScreeningService:
                 "immutable_execution_evidence_objects": True,
                 "contract_change_required_for_new_execution_semantics": True,
             },
-            "paper_contract_id": load_human_paper_ledger(
-                self.paper_ledger
-            )["paper_contract_id"],
+            "paper_contract_id": load_human_paper_ledger(self.paper_ledger)[
+                "paper_contract_id"
+            ],
             "warnings": warnings,
             "highest_status": "REVIEW_REQUIRED",
             "human_confirmation_required": True,
@@ -3347,11 +3070,9 @@ class HumanReviewScreeningService:
             required_session, date
         ):
             raise TypeError("session must be a date")
-        requirement, trading_session_provider_error = (
-            self._trading_session_requirement(
-                session=required_session,
-                observed_at=local,
-            )
+        requirement, trading_session_provider_error = self._trading_session_requirement(
+            session=required_session,
+            observed_at=local,
         )
         trading_session_evidence = requirement["trading_session_evidence"]
         ledger_path = self.forward_root / "forward_paper_ledger.json"
@@ -3378,14 +3099,12 @@ class HumanReviewScreeningService:
                 forward_root=self.forward_root,
             )
             try:
-                implementation_continuity = (
-                    audit_forward_implementation_continuity(
-                        tuple(ledger["events"]),
-                        session=required_session,
-                        current_implementation_provenance=(
-                            self._forward_implementation_provenance_provider()
-                        ),
-                    )
+                implementation_continuity = audit_forward_implementation_continuity(
+                    tuple(ledger["events"]),
+                    session=required_session,
+                    current_implementation_provenance=(
+                        self._forward_implementation_provenance_provider()
+                    ),
                 )
             except (OSError, RuntimeError, TypeError, ValueError) as exc:
                 implementation_continuity = {
@@ -3393,12 +3112,8 @@ class HumanReviewScreeningService:
                     "session": required_session.isoformat(),
                     "ready": False,
                     "status": "unresolved",
-                    "reason_code": (
-                        "CURRENT_IMPLEMENTATION_PROVENANCE_UNAVAILABLE"
-                    ),
-                    "capture_event_present": result.get(
-                        "capture_event_present", False
-                    ),
+                    "reason_code": ("CURRENT_IMPLEMENTATION_PROVENANCE_UNAVAILABLE"),
+                    "capture_event_present": result.get("capture_event_present", False),
                     "evaluation_event_present": result.get(
                         "evaluation_event_present", False
                     ),
@@ -3409,9 +3124,7 @@ class HumanReviewScreeningService:
                     "paper_status": "REVIEW_REQUIRED",
                     "live_status": "LIVE_DISABLED",
                 }
-            result["implementation_continuity_preflight"] = (
-                implementation_continuity
-            )
+            result["implementation_continuity_preflight"] = implementation_continuity
             result["implementation_continuity_required_before_evaluation"] = True
             if (
                 result.get("required") is True
@@ -3421,9 +3134,7 @@ class HumanReviewScreeningService:
             ):
                 result["ready"] = False
                 result["status"] = "not_ready"
-                result["reason_code"] = implementation_continuity[
-                    "reason_code"
-                ]
+                result["reason_code"] = implementation_continuity["reason_code"]
             if trading_session_provider_error is not None:
                 result["trading_session_provider_error"] = (
                     trading_session_provider_error
@@ -3434,18 +3145,14 @@ class HumanReviewScreeningService:
                 "schema": FORWARD_PAPER_SESSION_DELIVERY_SCHEMA,
                 "required": requirement["required"],
                 "requirement_resolved": requirement["requirement_resolved"],
-                "trading_session_status": requirement[
-                    "trading_session_status"
-                ],
+                "trading_session_status": requirement["trading_session_status"],
                 "trading_session_reason_code": requirement[
                     "trading_session_reason_code"
                 ],
                 "trading_session_evidence_proven": requirement[
                     "trading_session_evidence_proven"
                 ],
-                "trading_session_evidence": requirement[
-                    "trading_session_evidence"
-                ],
+                "trading_session_evidence": requirement["trading_session_evidence"],
                 "ready": False,
                 "status": "not_ready",
                 "reason_code": "FORWARD_LEDGER_INVALID",
@@ -3461,9 +3168,7 @@ class HumanReviewScreeningService:
                 "data_ready_evidence_proven": False,
                 "evaluation_artifacts_proven": False,
                 "error": f"{type(exc).__name__}: {str(exc)[:160]}",
-                "trading_session_provider_error": (
-                    trading_session_provider_error
-                ),
+                "trading_session_provider_error": (trading_session_provider_error),
                 "real_account_accessed": False,
                 "real_order_transport_enabled": False,
                 "paper_status": "REVIEW_REQUIRED",
@@ -3528,9 +3233,7 @@ class HumanReviewScreeningService:
             "required": None,
             "requirement_resolved": False,
             "trading_session_status": "UNRESOLVED",
-            "trading_session_reason_code": (
-                "FORWARD_DELIVERY_VALIDATION_PENDING"
-            ),
+            "trading_session_reason_code": ("FORWARD_DELIVERY_VALIDATION_PENDING"),
             "trading_session_evidence_proven": False,
             "trading_session_evidence": None,
             "ready": False,
@@ -3566,14 +3269,10 @@ class HumanReviewScreeningService:
         except Exception as exc:  # readiness must remain observable, never hang
             observed_at = self._clock()
             if observed_at.tzinfo is None:
-                observed_at = observed_at.replace(
-                    tzinfo=ZoneInfo("Asia/Shanghai")
-                )
+                observed_at = observed_at.replace(tzinfo=ZoneInfo("Asia/Shanghai"))
             result = self._pending_forward_delivery_readiness(
                 session=session,
-                observed_at=observed_at.astimezone(
-                    ZoneInfo("Asia/Shanghai")
-                ),
+                observed_at=observed_at.astimezone(ZoneInfo("Asia/Shanghai")),
             )
             result.update(
                 status="not_ready",
@@ -3628,9 +3327,7 @@ class HumanReviewScreeningService:
             if worker is None or not worker.is_alive():
                 self._forward_delivery_readiness_inflight_key = cache_key
                 worker = threading.Thread(
-                    target=(
-                        self._validate_forward_delivery_readiness_in_background
-                    ),
+                    target=(self._validate_forward_delivery_readiness_in_background),
                     kwargs={
                         "session": required_session,
                         "cache_key": cache_key,
@@ -3680,7 +3377,7 @@ class HumanReviewScreeningService:
             candidate_id=candidate_id,
         )
         return {
-            "schema": "chanlun-v3-human-review-candidate-detail-web/v1",
+            "schema": "chanlun-human-review-candidate-detail-web",
             "candidate_id": alert.candidate_id,
             "source_content_sha256": source_sha256,
             "sector_higher_timeframe_evidence": (
@@ -3712,11 +3409,6 @@ class HumanReviewScreeningService:
                 None
                 if alert.sector_ranking_evidence is None
                 else alert.sector_ranking_evidence.evidence_id
-            ),
-            "market_symbol_higher_timeframe_attestation": (
-                "SELF_CONTAINED"
-                if alert.market_symbol_higher_timeframe_evidence is not None
-                else "LEGACY_SUMMARY_ONLY"
             ),
             "market_symbol_higher_timeframe_source_attestation": (
                 _market_symbol_source_attestation(alert)
@@ -3770,12 +3462,9 @@ class HumanReviewScreeningService:
                     values.get("center_expansion_judgement") or "UNCERTAIN"
                 ),
                 nine_segment_upgrade_judgement=str(
-                    values.get("nine_segment_upgrade_judgement")
-                    or "UNCERTAIN"
+                    values.get("nine_segment_upgrade_judgement") or "UNCERTAIN"
                 ),
-                locator_judgement=str(
-                    values.get("locator_judgement") or "UNCERTAIN"
-                ),
+                locator_judgement=str(values.get("locator_judgement") or "UNCERTAIN"),
                 notes=notes,
                 request_id=request_id,
                 signal_lifecycle_id=alert.signal_lifecycle_id,
@@ -3788,22 +3477,18 @@ class HumanReviewScreeningService:
             if feedback.reviewed_at > observed_at:
                 raise ValueError("human review feedback cannot be future-dated")
         except (TypeError, ValueError) as exc:
-            raise HumanReviewScreenUnavailable(
-                "human_review_feedback_invalid"
-            ) from exc
+            raise HumanReviewScreenUnavailable("human_review_feedback_invalid") from exc
         with self._write_lock:
             (
                 paper_observation_eligible,
                 paper_observation_reason,
                 paper_observation_source_session,
                 paper_observation_current_market_session,
-            ) = (
-                self._paper_observation_eligibility(
-                    kind=kind,
-                    source_sha256=source_sha256,
-                    source_report=report,
-                    force_refresh_scheduler=True,
-                )
+            ) = self._paper_observation_eligibility(
+                kind=kind,
+                source_sha256=source_sha256,
+                source_report=report,
+                force_refresh_scheduler=True,
             )
             paper_observation_source_eligible = paper_observation_eligible
             paper_observation_source_reason = paper_observation_reason
@@ -3817,8 +3502,7 @@ class HumanReviewScreeningService:
                 paper_entry_sector_reason,
             ) = _paper_entry_sector_eligibility(alert, sector_presentation)
             paper_observation_eligible = (
-                paper_observation_source_eligible
-                and paper_entry_sector_eligible
+                paper_observation_source_eligible and paper_entry_sector_eligible
             )
             paper_observation_reason = (
                 paper_observation_source_reason
@@ -3843,10 +3527,7 @@ class HumanReviewScreeningService:
             )
             paper_ledger_reconciliation_eligible = (
                 paper_source_reconciliation_eligible
-                and (
-                    paper_entry_sector_eligible
-                    or not new_strategic_entry_requested
-                )
+                and (paper_entry_sector_eligible or not new_strategic_entry_requested)
             )
             try:
                 document = append_human_review_feedback(
@@ -3880,12 +3561,10 @@ class HumanReviewScreeningService:
             paper_changed = False
             if paper_ledger_reconciliation_eligible:
                 try:
-                    entry_selection_evidence = (
-                        _paper_entry_selection_evidence(
-                            stored_feedback,
-                            alert,
-                            sector_presentation,
-                        )
+                    entry_selection_evidence = _paper_entry_selection_evidence(
+                        stored_feedback,
+                        alert,
+                        sector_presentation,
                     )
                     (
                         paper_document,
@@ -3896,9 +3575,7 @@ class HumanReviewScreeningService:
                         self.paper_ledger,
                         feedback=stored_feedback,
                         alert=alert,
-                        entry_selection_evidence=(
-                            entry_selection_evidence
-                        ),
+                        entry_selection_evidence=(entry_selection_evidence),
                     )
                 except ValueError as exc:
                     raise HumanReviewScreenUnavailable(
@@ -3907,13 +3584,9 @@ class HumanReviewScreeningService:
         return {
             "feedback": entry,
             "ledger_content_sha256": document["content_sha256"],
-            "paper_intent": (
-                None if paper_event is None else paper_event["payload"]
-            ),
+            "paper_intent": (None if paper_event is None else paper_event["payload"]),
             "paper_ledger_content_sha256": (
-                None
-                if paper_document is None
-                else paper_document["content_sha256"]
+                None if paper_document is None else paper_document["content_sha256"]
             ),
             "superseded_paper_intents": [
                 event["payload"] for event in cancellation_events
@@ -3921,9 +3594,7 @@ class HumanReviewScreeningService:
             "paper_ledger_changed": paper_changed,
             "paper_observation_eligible": paper_observation_eligible,
             "paper_observation_reason": paper_observation_reason,
-            "paper_observation_source_eligible": (
-                paper_observation_source_eligible
-            ),
+            "paper_observation_source_eligible": (paper_observation_source_eligible),
             "paper_observation_source_reason": paper_observation_source_reason,
             "paper_entry_sector_eligible": paper_entry_sector_eligible,
             "paper_entry_sector_reason": paper_entry_sector_reason,
@@ -3933,9 +3604,7 @@ class HumanReviewScreeningService:
             "sector_ranking_catalog_attestation": sector_presentation.get(
                 "sector_ranking_catalog_attestation"
             ),
-            "paper_observation_source_session": (
-                paper_observation_source_session
-            ),
+            "paper_observation_source_session": (paper_observation_source_session),
             "paper_observation_current_market_session": (
                 paper_observation_current_market_session
             ),

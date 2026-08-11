@@ -44,7 +44,7 @@ class Exchange(ABC):
         """获取该市场全量标的列表，每项包含 code/name/type 等字段。"""
 
     @abstractmethod
-    def now_trading(self):
+    def now_trading(self, market: str):
         """返回当前是否处于可交易时段（bool）。"""
 
     @abstractmethod
@@ -801,84 +801,3 @@ def convert_us_tdx_kline_frequency(klines: pd.DataFrame, to_f: str) -> pd.DataFr
     period_klines.drop("date_index", axis=1, inplace=True)
 
     return period_klines[["code", "date", "open", "high", "low", "close", "volume"]]
-
-
-def convert_kline_frequency(
-    klines: pd.DataFrame, to_f: str, dt_align_type: str = "eob"
-) -> pd.DataFrame:
-    """通用 K 线周期合成，支持 eob（后对齐）和 bob（前对齐）两种时间戳模式。
-
-    :param dt_align_type: 'eob'（end-of-bar，bar 结束时刻，默认）或 'bob'（begin-of-bar，bar 开始时刻）。
-        应与原始 K 线的对齐方式一致，错误匹配会导致 OHLC 取错方向。
-    """
-    period_maps = {
-        "2m": "2min",
-        "3m": "3min",
-        "5m": "5min",
-        "10m": "10min",
-        "15m": "15min",
-        "30m": "30min",
-        "60m": "1H",
-        "120m": "2H",
-        "d": "D",
-        "w": "W",
-    }
-    if len(klines) == 0:
-        return None
-    klines.insert(0, column="date_index", value=klines["date"])
-    klines.set_index("date_index", inplace=True)
-    period_type = period_maps[to_f]
-
-    agg_dict = {
-        "code": "first",
-        "open": "first",
-        "close": "last",
-        "high": "max",
-        "low": "min",
-        "volume": "sum",
-    }
-    if "position" in klines.columns:
-        agg_dict["position"] = "last"
-
-    if dt_align_type == "bob":
-        agg_dict["date"] = "first"
-        period_klines = klines.resample(period_type, label="right", closed="left").agg(
-            agg_dict
-        )
-    else:
-        agg_dict["date"] = "last"
-        period_klines = klines.resample(period_type, label="left", closed="right").agg(
-            agg_dict
-        )
-
-    period_klines.dropna(inplace=True)
-    period_klines.reset_index(inplace=True)
-    period_klines.drop("date_index", axis=1, inplace=True)
-
-    return period_klines
-
-
-if __name__ == "__main__":
-    import pandas as pd
-
-    from chanlun.exchange.exchange_tq import ExchangeTq
-
-    ex = ExchangeTq()
-    code = ex.default_code()
-    to_f = "15m"
-
-    klines_1m = ex.klines(code, "1m")
-
-    print(f"1分钟k线数据：{len(klines_1m)}")
-    print(klines_1m.tail(10))
-
-    src_klines_to_f = ex.klines(code, to_f)
-    print(f"原始 {to_f} 数据")
-    print(src_klines_to_f.tail(10))
-
-    convert_ch = convert_futures_kline_frequency(
-        klines_1m, to_f, process_exchange_type="tq"
-    )
-    print(f"转换后的 {to_f} 数据")
-    print(convert_ch.tail(10))
-    print("Done")

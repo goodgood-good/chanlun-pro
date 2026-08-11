@@ -221,17 +221,17 @@ def review(
         (
             "prescreen",
             prescreen,
-            "chanlun-recursive-1m-etf-prescreen/v1",
+            "chanlun-recursive-1m-etf-prescreen",
         ),
         (
             "backtest",
             backtest,
-            "chanlun-recursive-1m-component-backtest/v1",
+            "chanlun-recursive-1m-component-backtest",
         ),
         (
             "data_gate",
             data_gate,
-            "chanlun-recursive-1m-data-acceptance/v1",
+            "chanlun-recursive-1m-data-acceptance",
         ),
     ):
         checks.add(
@@ -632,7 +632,7 @@ def review(
     minimum_capacity = min(candidate_capacities) if candidate_capacities else None
 
     report: dict[str, object] = {
-        "schema": "chanlun-recursive-1m-independent-review/v1",
+        "schema": "chanlun-recursive-1m-independent-review",
         "review_mode": "READ_ONLY_SERIALIZED_EVIDENCE_RECOMPUTATION",
         "passed": checks.passed,
         "failed_checks": checks.failed_names,

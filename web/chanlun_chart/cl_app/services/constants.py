@@ -113,7 +113,7 @@ class _LazyMarketDict(dict):
         self._attempts = {}
         self._closed = False
 
-        # Keep all known keys in the underlying dict for Jinja/JSON compatibility.
+        # Templates address every supported market directly, so initialize all keys.
         for key in self._markets:
             dict.__setitem__(self, key, self._fallback_value(key))
 

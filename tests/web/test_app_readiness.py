@@ -12,7 +12,7 @@ from cl_app.blueprints import other as other_mod
 from cl_app.services import constants as constants_service
 from cl_app.services import readiness as readiness_service
 from cl_app.services import stock_list as stock_list_service
-from chanlun.decision_support.trading_system.v3_trading_session import (
+from chanlun.decision_support.trading_system.trading_session import (
     DEFAULT_OFFICIAL_TRADING_CALENDAR_PATH,
 )
 
@@ -431,8 +431,8 @@ def test_readyz_requires_the_app_owned_qmt_runtime(app):
         }
         app.extensions["app_qmt_runtime"] = SimpleNamespace(
             snapshot=lambda: {
-                "schema": "chanlun-qmt-runtime-readiness/v1",
-                "contract_id": "chanlun-qmt-runtime/app-runtime-contract/v1",
+                "schema": "chanlun-qmt-runtime-readiness",
+                "contract_id": "chanlun-qmt-runtime/app-runtime-contract",
                 "execution_owner": "APP_RUNTIME",
                 "ready": False,
                 "status": "not_ready",
@@ -450,8 +450,8 @@ def test_readyz_requires_the_app_owned_qmt_runtime(app):
 
         app.extensions["app_qmt_runtime"] = SimpleNamespace(
             snapshot=lambda: {
-                "schema": "chanlun-qmt-runtime-readiness/v1",
-                "contract_id": "chanlun-qmt-runtime/app-runtime-contract/v1",
+                "schema": "chanlun-qmt-runtime-readiness",
+                "contract_id": "chanlun-qmt-runtime/app-runtime-contract",
                 "execution_owner": "APP_RUNTIME",
                 "ready": True,
                 "status": "ready",
@@ -653,6 +653,7 @@ def test_readyz_exposes_forward_scheduler_contract_without_masking_web_health(
     app.config["SCHEDULER_ENABLED"] = True
     app.config["TRADING_SCREENING_BACKGROUND_ENABLED"] = True
     app.config["FORWARD_SCHEDULER_MONITOR_ENABLED"] = True
+    app.config["FORWARD_SCHEDULER_MODE"] = "APP"
     app.extensions["readiness"].record_ticks_success("a")
     scheduler = app.extensions["scheduler"]
     scheduler.start(paused=True)
@@ -674,10 +675,11 @@ def test_readyz_exposes_forward_scheduler_contract_without_masking_web_health(
         )
         app.extensions["forward_scheduler_probe"] = SimpleNamespace(
             snapshot=lambda: {
-                "schema": "chanlun-v3-forward-scheduler-readiness/v1",
+                "schema": "chanlun-forward-scheduler-readiness",
                 "contract_id": (
-                    "chanlun-v3-forward-scheduler/windows-task-contract/v1"
+                    "chanlun-forward-scheduler/app-runtime-contract"
                 ),
+                "execution_owner": "APP_RUNTIME",
                 "ready": False,
                 "status": "not_ready",
                 "reason_code": "SCHEDULED_TASK_PRINCIPAL_MISMATCH",

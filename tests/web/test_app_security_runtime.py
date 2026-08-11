@@ -286,7 +286,10 @@ def test_factory_blocks_external_request_when_runtime_bind_bypasses_config(
     monkeypatch.setenv("CHANLUN_WEB_HOST", "127.0.0.1")
     monkeypatch.setenv("CHANLUN_HTTPS", "0")
     monkeypatch.delenv("CHANLUN_LOGIN_PWD", raising=False)
-    monkeypatch.setattr("cl_app.get_login_password", lambda: "")
+    monkeypatch.setattr(
+        "cl_app.get_login_password",
+        lambda: "scrypt:32768:8:1$stub$stub",
+    )
     app = create_app(test_config={"TESTING": True, "SCHEDULER_ENABLED": False})
 
     response = app.test_client().get(
@@ -331,10 +334,11 @@ def test_factory_accepts_external_hash_with_https_and_forces_secure_cookies(
     app.extensions["shutdown_scheduler"]()
 
 
-def test_factory_allows_loopback_passwordless_http(monkeypatch):
+def test_factory_allows_loopback_hash_with_http(monkeypatch):
     monkeypatch.setenv("CHANLUN_WEB_HOST", "127.0.0.1")
-    monkeypatch.delenv("CHANLUN_LOGIN_PWD", raising=False)
-    monkeypatch.setattr("cl_app.get_login_password", lambda: "")
+    monkeypatch.setenv(
+        "CHANLUN_LOGIN_PWD", "scrypt:32768:8:1$stub$stub"
+    )
     monkeypatch.setenv("CHANLUN_HTTPS", "0")
 
     app = create_app(test_config={"TESTING": True, "SCHEDULER_ENABLED": False})

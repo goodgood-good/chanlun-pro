@@ -1,8 +1,4 @@
-"""K 线 CSV/parquet 双写缓存 Mixin。
-
-负责通达信 K 线的 CSV + parquet 双写过渡（parquet 为主，CSV 为灰度期兜底），
-挂载到 FileCacheDB 主类通过多继承提供方法。
-"""
+"""Parquet-only K-line cache mixin."""
 
 from __future__ import annotations
 
@@ -19,22 +15,15 @@ from chanlun.tools.log_util import LogUtil
 
 
 class _KlineCacheMixin:
-    """K 线 CSV/parquet 双写缓存，parquet 为主，CSV 为灰度期兜底。"""
+    """Persist and retrieve the sole production K-line cache format."""
 
     def _kline_parquet_path(self, market: str, code: str, frequency: str) -> pathlib.Path:
         return self.klines_path / market / f"{code.replace('.', '_')}_{frequency}.parquet"
 
-    def _kline_csv_path(self, market: str, code: str, frequency: str) -> pathlib.Path:
-        return self.klines_path / market / f"{code.replace('.', '_')}_{frequency}.csv"
-
     def save_klines_parquet(
         self, market: str, code: str, frequency: str, df: pd.DataFrame
     ) -> bool:
-        """K 线 DataFrame 落盘为 parquet (pyarrow + zstd)。
-
-        相比 CSV: 体积小 60-80%, 读写快 5x, 原生保留 datetime / tz / dtype。
-        与 save_tdx_klines 的关系: 后者会同时调本方法 (双写过渡)。
-        """
+        """Atomically persist a K-line frame as parquet (pyarrow + zstd)."""
         path = self._kline_parquet_path(market, code, frequency)
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self._make_unique_tmp_path(path)
@@ -60,7 +49,7 @@ class _KlineCacheMixin:
     def load_klines_parquet(
         self, market: str, code: str, frequency: str
     ) -> Union[None, pd.DataFrame]:
-        """读 parquet K 线, 不存在或损坏返回 None (调用方可走 CSV fallback)。"""
+        """Read parquet K-lines; missing or corrupt files are cache misses."""
         path = self._kline_parquet_path(market, code, frequency)
         if not path.is_file():
             return None
@@ -77,29 +66,13 @@ class _KlineCacheMixin:
     def get_tdx_klines(
         self, market: str, code: str, frequency: str
     ) -> Union[None, pd.DataFrame]:
-        """
-        获取缓存在文件中的股票数据。
-
-        优先读 parquet（体积小、读快），失败 fallback CSV（兼容老数据）。
-        新数据由 save_tdx_klines 同时写 parquet + CSV（双写过渡），
-        灰度期满后可拆掉 CSV 路径只留 parquet。
-        """
+        """Return cached K-lines from the sole parquet representation."""
         _klines = self.load_klines_parquet(market, code, frequency)
         if _klines is None:
-            file_pathname = self._kline_csv_path(market, code, frequency)
-            if file_pathname.is_file() is False:
-                return None
-            try:
-                _klines = pd.read_csv(file_pathname, parse_dates=["date"])
-            except Exception:
-                # missing_ok 防止并发清理线程已删过该文件时再次抛错
-                file_pathname.unlink(missing_ok=True)
-                return None
+            return None
 
-        # date 列统一为 datetime:parquet 原样保留 dtype, 若源 df 的 date 为 str(如 IB
-        # 缓存)读回即 str, 下游 datetime 运算(script_ib_tasks 增量 diff_days /
-        # sort_values 混合列比较)会 TypeError。CSV 路径已 parse_dates, 此处补齐 parquet
-        # 路径, 使所有消费方拿到 datetime。(第2轮C4)
+        # Parquet preserves the source dtype, which can still be string for
+        # some vendors. Normalize it before downstream datetime arithmetic.
         if _klines is not None and len(_klines) > 0 and "date" in _klines.columns:
             if not pd.api.types.is_datetime64_any_dtype(_klines["date"]):
                 _klines["date"] = pd.to_datetime(_klines["date"], errors="coerce")
@@ -122,34 +95,24 @@ class _KlineCacheMixin:
     def save_tdx_klines(
         self, market: str, code: str, frequency: str, kline: pd.DataFrame
     ):
-        """保存通达信 k 线数据对象到文件中。
-
-        同时写 parquet（主）+ CSV（兜底，灰度期）；灰度期满后只删
-        _atomic_write_csv 这一行 + clear 里的 csv glob 即可。
-        """
-        self.save_klines_parquet(market, code, frequency, kline)
-        csv_path = self._kline_csv_path(market, code, frequency)
-        self._atomic_write_csv(csv_path, kline)
-        return True
+        """Persist K-lines using the production parquet cache format."""
+        return self.save_klines_parquet(market, code, frequency, kline)
 
     def clear_tdx_old_klines(self, market):
-        """删除 15 天前的 k 线数据 (parquet + CSV 都清), 减少占用空间。"""
+        """Delete parquet K-line cache files older than 15 days."""
         del_lt_times = fun.datetime_to_int(datetime.datetime.now()) - (
             15 * 24 * 60 * 60
         )
         market_dir = self.klines_path / market
-        # parquet 和 CSV 一起清，二者文件名同源，mtime 同步更新
-        for pattern in ("*.csv", "*.parquet"):
-            for filename in market_dir.glob(pattern):
-                try:
-                    if filename.stat().st_mtime < del_lt_times:
-                        # missing_ok=True: 防御 glob 后 unlink 前的并发清理
-                        filename.unlink(missing_ok=True)
-                except Exception as exc:
-                    LogUtil.debug(
-                        f"[FileCacheDB.clear_tdx_old_klines] unlink failed "
-                        f"file={filename} err={exc}"
-                    )
+        for filename in market_dir.glob("*.parquet"):
+            try:
+                if filename.stat().st_mtime < del_lt_times:
+                    filename.unlink(missing_ok=True)
+            except Exception as exc:
+                LogUtil.debug(
+                    f"[FileCacheDB.clear_tdx_old_klines] unlink failed "
+                    f"file={filename} err={exc}"
+                )
         return True
 
 

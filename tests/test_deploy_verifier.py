@@ -12,9 +12,7 @@ import pytest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "ops" / "verify_deploy.ps1"
-LEGACY_SCRIPT = ROOT / "ops" / "verify_deploy_v17.ps1"
 WINDOWS_RUN = ROOT / "windows_run.bat"
-REGISTER_SCRIPT = ROOT / "ops" / "register_qmt_restart_task.ps1"
 
 
 class _HealthHandler(BaseHTTPRequestHandler):
@@ -207,8 +205,8 @@ def test_deploy_verifier_rejects_health_from_an_unrelated_pid():
     assert result.returncode != 0
     assert "web process" in result.stdout
 
-def test_daily_restart_completes_preflight_before_stopping_web():
-    source = (ROOT / "ops" / "restart_qmt_daily.ps1").read_text(encoding="utf-8")
+def test_web_restart_completes_preflight_before_stopping_web():
+    source = (ROOT / "ops" / "restart_web.ps1").read_text(encoding="utf-8")
     stop_at = source.index("# --- 1. Stop the web project FIRST")
     required_preflight = {
         "project directories": "foreach ($requiredDir in @($ProjectRoot, $AppDir, $SrcPath))",
@@ -225,14 +223,12 @@ def test_daily_restart_completes_preflight_before_stopping_web():
 
 def test_operations_default_to_readiness_probe():
     verifier = SCRIPT.read_text(encoding="utf-8")
-    legacy = LEGACY_SCRIPT.read_text(encoding="utf-8")
-    restart = (ROOT / "ops" / "restart_qmt_daily.ps1").read_text(encoding="utf-8")
+    restart = (ROOT / "ops" / "restart_web.ps1").read_text(encoding="utf-8")
     windows_run = WINDOWS_RUN.read_text(encoding="utf-8")
 
     assert "http://127.0.0.1:9900/readyz?market=a" in verifier
     assert "ExpectedSourceRevision is required" in verifier
     assert "Get-NetTCPConnection" in verifier
-    assert "http://127.0.0.1:9900/readyz?market=a" in legacy
     assert '$healthUri = "http://${probeHost}:$webPort/readyz?market=a"' in restart
     assert "[int]$WebReadinessTimeoutSeconds = 1800" in restart
     assert "AddSeconds($WebReadinessTimeoutSeconds)" in restart
@@ -294,14 +290,8 @@ def test_process_start_date_converter_accepts_datetime_and_dmtf():
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-def test_legacy_verifier_is_only_a_compatibility_wrapper():
-    source = LEGACY_SCRIPT.read_text(encoding="utf-8")
-    assert "verify_deploy.ps1" in source
-    assert "_SIGNAL_CACHE_VERSION" not in source
-
-
 def test_restart_attests_dirty_source_and_verifier_rechecks_it():
-    restart = (ROOT / "ops" / "restart_qmt_daily.ps1").read_text(encoding="utf-8")
+    restart = (ROOT / "ops" / "restart_web.ps1").read_text(encoding="utf-8")
     verifier = SCRIPT.read_text(encoding="utf-8")
     helper = (ROOT / "ops" / "deploy_common.ps1").read_text(encoding="utf-8")
 
@@ -330,7 +320,9 @@ def test_restart_source_manifest_uses_real_tab_delimiters():
 
 @pytest.mark.skipif(os.name != "nt", reason="deployment script targets Windows")
 def test_restart_and_forward_runner_compute_the_same_source_revision():
-    from tools.run_v3_forward_paper import _application_source_revision
+    from chanlun.decision_support.trading_system.decision_source_provenance import (
+        calculate_forward_application_source_revision,
+    )
 
     helper = str(ROOT / "ops" / "deploy_common.ps1").replace("'", "''")
     root = str(ROOT).replace("'", "''")
@@ -347,28 +339,7 @@ def test_restart_and_forward_runner_compute_the_same_source_revision():
 
     assert completed.returncode == 0, completed.stdout + completed.stderr
     output = tuple(line.strip() for line in completed.stdout.splitlines() if line.strip())
-    assert output[-1] == _application_source_revision(ROOT)
-
-
-def test_restart_has_a_bounded_scheduled_catch_up_window():
-    source = (ROOT / "ops" / "restart_qmt_daily.ps1").read_text(encoding="utf-8")
-
-    assert "[switch]$Force" in source
-    assert "$CatchUpWindowMinutes" in source
-    assert ".AddMinutes($CatchUpWindowMinutes)" in source
-    assert "outside the scheduled catch-up window" in source
-
-
-def test_task_registration_reports_failure_and_confirms_registration():
-    source = REGISTER_SCRIPT.read_text(encoding="utf-8")
-
-    assert "$ErrorActionPreference = 'Stop'" in source
-    assert "Register-ScheduledTask @regArgs -ErrorAction Stop" in source
-    assert "-CatchUpWindowMinutes {2}" in source
-    assert "Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop" in source
-    assert "catch" in source
-    assert "exit 1" in source
-    assert "exit 0" in source
+    assert output[-1] == calculate_forward_application_source_revision(ROOT)
 
 
 def test_windows_launcher_uses_the_same_python_resolution_without_masking_dotenv():

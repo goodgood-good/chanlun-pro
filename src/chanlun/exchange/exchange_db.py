@@ -8,14 +8,7 @@ from tzlocal import get_localzone
 from chanlun import fun
 from chanlun.market import Market
 from chanlun.persistence.db import db
-from chanlun.exchange.exchange import (
-    Exchange,
-    Tick,
-    convert_currency_kline_frequency,
-    convert_futures_kline_frequency,
-    convert_stock_kline_frequency,
-    convert_us_kline_frequency,
-)
+from chanlun.exchange.exchange import Exchange, Tick
 from chanlun.exchange.kline_precision import normalize_kline_precision
 
 
@@ -27,9 +20,6 @@ class ExchangeDB(Exchange):
         :param market: 市场标识，如 'a'/'hk'/'us'/'currency'/'currency_spot'/'futures'
         """
         self.market = market
-        self.exchange = None
-        self.online_ex = None
-
         # 美股使用东部时间，数字货币使用本机本地时区，其余默认上海时区
         self.tz = pytz.timezone("Asia/Shanghai")
         if self.market == "us":
@@ -153,15 +143,6 @@ class ExchangeDB(Exchange):
         db.klines_insert(self.market, code, frequency, klines)
         return True
 
-    def del_klines(self, code, frequency, _datetime: datetime.datetime):
-        """删除指定时间点的单条 K 线记录。"""
-        db.klines_delete(self.market, code, frequency, _datetime)
-        return
-
-    def del_klines_by_code(self, code):
-        db.klines_delete(self.market, code)
-        return
-
     def del_klines_by_code_freq(self, code, freq):
         db.klines_delete(self.market, code, frequency=freq)
         return
@@ -246,24 +227,10 @@ class ExchangeDB(Exchange):
                 return dt.replace(hour=9, minute=30)
         return dt
 
-    def convert_kline_frequency(self, klines: pd.DataFrame, to_f: str) -> pd.DataFrame:
-        """按市场类型分发到对应的周期合成函数。"""
-        if (
-            self.market == Market.CURRENCY.value
-            or self.market == Market.CURRENCY_SPOT.value
-        ):
-            return convert_currency_kline_frequency(klines, to_f)
-        elif self.market == Market.FUTURES.value:
-            return convert_futures_kline_frequency(klines, to_f)
-        elif self.market == Market.US.value:
-            return convert_us_kline_frequency(klines, to_f)
-        else:
-            return convert_stock_kline_frequency(klines, to_f)
-
     def all_stocks(self):
         return []
 
-    def now_trading(self):
+    def now_trading(self, market: str):
         pass
 
     def ticks(self, codes: List[str]) -> Dict[str, Tick]:
@@ -306,16 +273,3 @@ class ExchangeDB(Exchange):
 
     def order(self, code: str, o_type: str, amount: float, args=None):
         pass
-
-
-if __name__ == "__main__":
-    ex = ExchangeDB(Market.CURRENCY_SPOT.value)
-    klines = ex.klines(
-        "BTC/USDT",
-        "4h",
-        # start_date="2023-12-01 00:00:00",
-        args={"limit": 10000},
-    )
-    print(len(klines))
-    print(klines.head(5))
-    print(klines.tail(5))

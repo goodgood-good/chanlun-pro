@@ -324,22 +324,6 @@ class ExchangeTDX(Exchange):
             pass
         return None
 
-    @staticmethod
-    def get_monday(date):
-        """
-        获取给定日期当周的周日
-        """
-        weekday = date.weekday()
-        if weekday == 0:
-            return date
-        elif 0 < weekday < 5:
-            days_to_mon = weekday
-        elif weekday == 5:
-            days_to_mon = 5
-        else:
-            days_to_mon = 6
-        return date - datetime.timedelta(days=days_to_mon)
-
     def stock_info(self, code: str) -> Union[Dict, None]:
         """
         获取股票名称
@@ -437,7 +421,7 @@ class ExchangeTDX(Exchange):
 
         return ticks
 
-    def now_trading(self):
+    def now_trading(self, market: str):
         """
         返回当前是否是交易时间
         周一至周五，09:30-11:30 13:00-15:00
@@ -741,9 +725,3 @@ class ExchangeTDX(Exchange):
         data = data.query("if_trade==1 and open != 0")
 
         return data[["code", "date", "open", "close", "high", "low", "volume"]]
-
-
-if __name__ == "__main__":
-    ex = ExchangeTDX()
-    klines = ex.klines("SH.512800", "d")
-    print(klines.tail(20))

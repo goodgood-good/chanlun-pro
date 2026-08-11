@@ -1,6 +1,6 @@
 // MACD 区间统计：在 TradingView 图表上选区间统计 MACD/MACD_HTF 红绿柱面积与峰谷，
 // 提供工具栏按钮 + 右键菜单选点 + 可拖拽侧边面板。
-// 依赖: charts.js (ChartManager / ChanlunTVRegistry / GlobalTVDatafeeds)
+// 依赖: charts.js (ChartManager / ChanlunTVRegistry)
 
 var MacdStats = (function () {
 
@@ -71,10 +71,10 @@ var MacdStats = (function () {
 
     function findBarsResult(targetCode, targetInterval) {
         const datafeeds = [];
-        if (window.GlobalTVDatafeeds && window.GlobalTVDatafeeds.length > 0) {
-            for (const df of window.GlobalTVDatafeeds) datafeeds.push(df);
+        const registry = window.ChanlunTVRegistry;
+        if (registry && registry.datafeeds instanceof Map) {
+            for (const df of registry.datafeeds.values()) datafeeds.push(df);
         }
-        if (window.tvDatafeed && !datafeeds.includes(window.tvDatafeed)) datafeeds.push(window.tvDatafeed);
 
         const code = String(targetCode || '').toLowerCase();
         const itv = String(targetInterval || '').toLowerCase();

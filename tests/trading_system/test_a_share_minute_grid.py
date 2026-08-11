@@ -40,7 +40,7 @@ def _boundary(closed_at: datetime) -> EntryExecutionBoundary:
         raw_close=Decimal("10.03"),
         raw_volume=Decimal("10000"),
         entry_valid_until=a_share_optional_entry_valid_until(closed_at),
-        raw_price_basis_revision="qmt-none-test-v1",
+        raw_price_basis_revision="qmt-none-test",
     )
 
 

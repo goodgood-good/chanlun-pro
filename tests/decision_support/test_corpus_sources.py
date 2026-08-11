@@ -185,7 +185,7 @@ def test_manifest_is_deterministic_and_marks_missing_original(tmp_path: Path):
 
     assert first.read_bytes() == second.read_bytes()
     body = json.loads(first.read_text("utf-8"))
-    assert body["schema_version"] == 1
+    assert body["schema"] == "current"
     assert body["corpus_status"]["original_evidence"] == "missing_original"
     assert body["corpus_status"]["integrity"] == "incomplete"
     assert [item["evidence_id"] for item in body["units"]] == sorted(

@@ -63,6 +63,7 @@ def test_tv_symbols_resolves_from_warm_cache_without_touching_exchange(
     payload = _resolve(monkeypatch, f"a:{code}")
 
     assert payload["ticker"] == f"a:{code}"
+    assert payload["listed_exchange"] == "a"
     assert payload["description"] == name
     assert payload["pricescale"] == expected_pricescale
     assert payload["supported_resolutions"] == ["1", "5", "30", "1D", "1W", "1M"]
@@ -87,6 +88,7 @@ def test_tv_symbols_cache_miss_preserves_live_exchange_fallback(
 
     assert calls == ["SH.600000"]
     assert payload["ticker"] == "a:SH.600000"
+    assert payload["listed_exchange"] == "a"
     assert payload["description"] == "浦发银行"
 
 

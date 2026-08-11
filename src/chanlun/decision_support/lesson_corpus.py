@@ -344,7 +344,7 @@ class SourceRecord:
     output_path: str
     source_sequence_index: int
     block_index: int
-    extractor_version: str
+    extractor_id: str
     normalized_text_sha256: str | None = None
     cropbox_pdf: tuple[float, float, float, float] | None = None
     mediabox_pdf: tuple[float, float, float, float] | None = None
@@ -465,11 +465,11 @@ class SourceRecord:
             raise ValueError("source_sequence_index must be a non-negative integer")
         if isinstance(self.block_index, bool) or not isinstance(self.block_index, int) or self.block_index < 0:
             raise ValueError("block_index must be a non-negative integer")
-        if not isinstance(self.extractor_version, str):
-            raise TypeError("extractor_version must be a string")
-        extractor_version = self.extractor_version.strip()
-        if not extractor_version or len(extractor_version) > 128:
-            raise ValueError("extractor_version must be present and bounded")
+        if not isinstance(self.extractor_id, str):
+            raise TypeError("extractor_id must be a string")
+        extractor_id = self.extractor_id.strip()
+        if not extractor_id or len(extractor_id) > 128:
+            raise ValueError("extractor_id must be present and bounded")
 
         bbox = (x0, top, x1, bottom)
         normalized_color = tuple(color) if color is not None else None
@@ -481,7 +481,7 @@ class SourceRecord:
             "content_sha256": content_sha256,
             "coordinate_system": self.coordinate_system,
             "cropbox_pdf": list(cropbox_pdf) if cropbox_pdf is not None else None,
-            "extractor_version": extractor_version,
+            "extractor_id": extractor_id,
             "lesson_number": self.lesson_number,
             "mediabox_pdf": list(mediabox_pdf) if mediabox_pdf is not None else None,
             "normalized_text_sha256": normalized_text_sha256,
@@ -514,7 +514,7 @@ class SourceRecord:
         object.__setattr__(self, "source_object_id", source_object_id)
         object.__setattr__(self, "source_pdf_sha256", source_pdf_sha256)
         object.__setattr__(self, "output_path", output_path)
-        object.__setattr__(self, "extractor_version", extractor_version)
+        object.__setattr__(self, "extractor_id", extractor_id)
         object.__setattr__(self, "record_id", "source:" + hashlib.sha256(serialized).hexdigest())
 
 
@@ -898,7 +898,7 @@ def _source_record_dict(record: SourceRecord) -> dict[str, object]:
         "normalized_text_sha256": record.normalized_text_sha256,
         "coordinate_system": record.coordinate_system,
         "cropbox_pdf": list(record.cropbox_pdf) if record.cropbox_pdf is not None else None,
-        "extractor_version": record.extractor_version,
+        "extractor_id": record.extractor_id,
         "lesson_number": record.lesson_number,
         "mediabox_pdf": list(record.mediabox_pdf) if record.mediabox_pdf is not None else None,
         "output_path": record.output_path,
@@ -917,7 +917,7 @@ def _source_record_dict(record: SourceRecord) -> dict[str, object]:
 def _lesson_markdown(
     boundary: LessonBoundary,
     identity: PdfIdentity,
-    extractor_version: str,
+    extractor_id: str,
     rows: tuple[tuple[LessonTextBlock, SourceRecord], ...],
 ) -> str:
     parts = [
@@ -926,7 +926,7 @@ def _lesson_markdown(
         f"- Lesson: {boundary.lesson_number}",
         f"- Pages: {boundary.page_start}-{boundary.page_end}",
         f"- Source-PDF-SHA256: {identity.sha256}",
-        f"- Extractor-Version: {extractor_version}",
+        f"- Extractor-ID: {extractor_id}",
         "",
     ]
     for block, record in rows:
@@ -973,7 +973,7 @@ def build_lesson_package(
     identity: PdfIdentity,
     boundaries: tuple[LessonBoundary, ...] | list[LessonBoundary],
     text_blocks: tuple[LessonTextBlock, ...] | list[LessonTextBlock],
-    extractor_version: str,
+    extractor_id: str,
     expected_first_page: int = 7,
     expected_last_page: int = 2533,
 ) -> Path:
@@ -986,11 +986,11 @@ def build_lesson_package(
     )
     if expected_last_page != identity.page_count:
         raise ValueError("lesson coverage must end at the verified PDF page_count")
-    if not isinstance(extractor_version, str):
-        raise TypeError("extractor_version must be a string")
-    version = extractor_version.strip()
-    if not version or len(version) > 128:
-        raise ValueError("extractor_version must be present and bounded")
+    if not isinstance(extractor_id, str):
+        raise TypeError("extractor_id must be a string")
+    extractor_identity = extractor_id.strip()
+    if not extractor_identity or len(extractor_identity) > 128:
+        raise ValueError("extractor_id must be present and bounded")
     blocks = tuple(text_blocks)
     if any(not isinstance(block, LessonTextBlock) for block in blocks):
         raise TypeError("text_blocks must contain LessonTextBlock values")
@@ -1054,14 +1054,19 @@ def build_lesson_package(
                     output_path=filename,
                     source_sequence_index=block.source_sequence_index,
                     block_index=block_index,
-                    extractor_version=version,
+                    extractor_id=extractor_identity,
                 )
                 records.append(record)
                 rows.append((block, record))
             lesson_path = staging / filename
             _write_utf8(
                 lesson_path,
-                _lesson_markdown(boundary, identity, version, tuple(rows)),
+                _lesson_markdown(
+                    boundary,
+                    identity,
+                    extractor_identity,
+                    tuple(rows),
+                ),
             )
             lesson_files.append(lesson_path)
             lesson_entry = {
@@ -1117,12 +1122,12 @@ def build_lesson_package(
                 "last_page": expected_last_page,
                 "lesson_count": len(validated_boundaries),
             },
-            "extractor_version": version,
+            "extractor_id": extractor_identity,
             "files": [_file_entry(path, staging) for path in package_files],
             "lessons": lesson_entries,
             "package_kind": "chanlun_lesson_corpus",
             "role_counts": role_counts,
-            "schema_version": 1,
+            "schema": "current",
             "source_pdf": {
                 "filename": identity.filename,
                 "page_count": identity.page_count,

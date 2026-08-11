@@ -3,11 +3,11 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from chanlun.core import cl as cl_module
+from chanlun.cl_utils.strict_chart_runtime import StrictChartRuntimeResult
 from cl_app.services import chart_cache, chart_compute, kline_recompute
 
 
-def _chart_data(revision: str | None = "sha256:basis-v1") -> dict:
+def _chart_data(revision: str | None = "sha256:basis") -> dict:
     payload = {
         "t": [1000, 1060],
         "o": [10.0, 11.0],
@@ -28,7 +28,7 @@ def _chart_data(revision: str | None = "sha256:basis-v1") -> dict:
 
 
 def _klines(
-    revision: str | None = "sha256:basis-v1",
+    revision: str | None = "sha256:basis",
     *,
     prices: tuple[float, ...] = (10.0, 11.0),
 ) -> pd.DataFrame:
@@ -60,7 +60,7 @@ def test_extract_chart_payload_recovers_strict_price_basis_metadata() -> None:
     frame = kline_recompute.extract_klines_df_from_chart_data(_chart_data())
 
     assert frame.attrs["structure_price_quantum"] == "0.01"
-    assert frame.attrs["price_basis_revision"] == "sha256:basis-v1"
+    assert frame.attrs["price_basis_revision"] == "sha256:basis"
 
 
 def test_merge_same_price_basis_preserves_new_metadata() -> None:
@@ -75,14 +75,14 @@ def test_merge_same_price_basis_preserves_new_metadata() -> None:
 
 @pytest.mark.parametrize(
     "cached_revision",
-    ["sha256:basis-v1", None],
+    ["sha256:basis", None],
     ids=["changed-known-basis", "unknown-cached-basis"],
 )
 def test_prepend_rejects_unsafe_basis_mix_and_invalidates_cache(
     monkeypatch,
     cached_revision,
 ) -> None:
-    cache_key = "v40-test-a-SH.600926-1m"
+    cache_key = "price-basis-test-a-SH.600926-1m"
     deleted = []
     recomputed = []
     monkeypatch.setattr(
@@ -110,7 +110,7 @@ def test_prepend_rejects_unsafe_basis_mix_and_invalidates_cache(
             "SH.600926",
             "1m",
             {},
-            _klines("sha256:basis-v2"),
+            _klines("sha256:new-basis"),
             cache_key,
         )
 
@@ -125,7 +125,7 @@ def test_prepend_rejects_unsafe_basis_mix_and_invalidates_cache(
 
 
 def test_delete_chart_cache_entry_clears_ram_and_disk(monkeypatch) -> None:
-    cache_key = "v40-delete-test"
+    cache_key = "price-basis-delete-test"
     deleted = []
     with chart_cache.cache_lock:
         chart_cache.chart_data_cache[cache_key] = {"data": _chart_data()}
@@ -148,28 +148,25 @@ def test_recompute_serializes_exact_frame_through_strict_bridge(monkeypatch) -> 
     captured = {}
 
     class FakeCL:
-        def __init__(self, code, frequency, cl_config, *, market):
-            captured["init"] = (code, frequency, cl_config, market)
-
         def process_klines(self, klines):
             captured["processed"] = klines
+
+    def build(**kwargs):
+        captured["build"] = kwargs
+        cd = FakeCL()
+        cd.process_klines(kwargs["frame"])
+        return StrictChartRuntimeResult.success(cd)
 
     def serialize(**kwargs):
         captured["serialize"] = kwargs
         return {"t": [1000, 1060]}
 
-    monkeypatch.setattr(cl_module, "CL", FakeCL)
+    monkeypatch.setattr(chart_compute, "build_strict_chart_cd", build)
     monkeypatch.setattr(
         chart_compute,
         "serialize_chart_data_with_strict_runtime",
         serialize,
     )
-    monkeypatch.setattr(
-        chart_compute,
-        "apply_higher_macd_to_chart_data",
-        lambda *args, **kwargs: False,
-    )
-
     result = kline_recompute.recompute_chart_data_from_klines(
         "a",
         "SH.600926",
@@ -185,5 +182,5 @@ def test_recompute_serializes_exact_frame_through_strict_bridge(monkeypatch) -> 
     assert serialized["code"] == "SH.600926"
     assert serialized["display_frequency"] == "1m"
     assert serialized["display_klines"] is frame
-    assert serialized["legacy_config"] is config
-    assert isinstance(serialized["legacy_cd"], FakeCL)
+    assert serialized["chart_config"] is config
+    assert isinstance(serialized["strict_runtime"].cd, FakeCL)

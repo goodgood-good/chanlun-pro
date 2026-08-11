@@ -372,7 +372,7 @@ class ExchangeTDXNYFutures(Exchange):
                     )
         return ticks
 
-    def now_trading(self):
+    def now_trading(self, market: str):
         """纽约期货近似 24 小时交易，始终返回 True。"""
         return True
 
@@ -395,10 +395,3 @@ class ExchangeTDXNYFutures(Exchange):
 
     def plate_stocks(self, code: str):
         raise Exception("交易所不支持")
-
-
-if __name__ == "__main__":
-    ex = ExchangeTDXNYFutures()
-    klines = ex.klines("CO.GC00W", "30m")
-    print(len(klines))
-    print(klines)

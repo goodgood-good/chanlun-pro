@@ -89,7 +89,7 @@ class SignedAlertChartStore:
         if not key:
             raise ValueError("artifact_key is required")
         artifact_id = hashlib.sha256(
-            f"chanlun-alert-chart/v1\n{key}".encode("utf-8")
+            f"chanlun-alert-chart\n{key}".encode("utf-8")
         ).hexdigest()
         now = self._now()
         with self._lock:
@@ -115,7 +115,7 @@ class SignedAlertChartStore:
                 except (OSError, ValueError, TypeError, json.JSONDecodeError):
                     pass
             metadata = {
-                "schema": "chanlun-alert-chart-artifact/v1",
+                "schema": "chanlun-alert-chart-artifact",
                 "artifact_id": artifact_id,
                 "expires": expires,
             }
@@ -164,7 +164,7 @@ class SignedAlertChartStore:
         except (OSError, UnicodeDecodeError, json.JSONDecodeError):
             return None
         if (
-            metadata.get("schema") != "chanlun-alert-chart-artifact/v1"
+            metadata.get("schema") != "chanlun-alert-chart-artifact"
             or metadata.get("artifact_id") != artifact_id
             or metadata.get("expires") != expires_value
         ):
@@ -284,7 +284,7 @@ class AlertChartImageService:
                     png = self._renderer(charts)
                     url = self.store.publish(
                         png,
-                        artifact_key=f"{artifact_key}:strict-evidence-bound:v1",
+                        artifact_key=f"{artifact_key}:strict-evidence-bound",
                     )
                     output.append(
                         {
@@ -349,7 +349,7 @@ class AlertChartImageService:
                                 png,
                                 artifact_key=(
                                     f"{artifact_key}:tradingview-client:"
-                                    f"{frequency}:v1"
+                                    f"{frequency}:strict"
                                 ),
                             )
                             output.append(
@@ -379,7 +379,7 @@ class AlertChartImageService:
                 png = self._renderer(charts)
                 url = self.store.publish(
                     png,
-                    artifact_key=f"{artifact_key}:strict-static-fallback:v2",
+                    artifact_key=f"{artifact_key}:strict-static-fallback",
                 )
                 output.append(
                     {

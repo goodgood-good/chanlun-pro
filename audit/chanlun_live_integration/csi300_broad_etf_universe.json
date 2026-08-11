@@ -1,0 +1,83 @@
+{
+  "content_sha256": "sha256:983529861b564e35f437daba7dc062612f18b321fff70dd151d7f8e9a8c6da03",
+  "generated_at": "2026-07-26T21:41:35.546701+08:00",
+  "instrument_count": 8,
+  "instruments": [
+    {
+      "legal_name": "嘉实沪深300交易型开放式指数证券投资基金",
+      "listed_on": "2012-05-28",
+      "market": "深圳证券交易所",
+      "secu_abbr": "嘉实沪深300ETF",
+      "symbol": "159919.SZ",
+      "trading_state_at_query_time": "正常交易"
+    },
+    {
+      "legal_name": "南方沪深300交易型开放式指数证券投资基金",
+      "listed_on": "2013-04-11",
+      "market": "深圳证券交易所",
+      "secu_abbr": "南方沪深300ETF",
+      "symbol": "159925.SZ",
+      "trading_state_at_query_time": "正常交易"
+    },
+    {
+      "legal_name": "华泰柏瑞沪深300交易型开放式指数证券投资基金",
+      "listed_on": "2012-05-28",
+      "market": "上海证券交易所",
+      "secu_abbr": "华泰柏瑞沪深300ETF",
+      "symbol": "510300.SH",
+      "trading_state_at_query_time": "正常交易"
+    },
+    {
+      "legal_name": "易方达沪深300交易型开放式指数发起式证券投资基金",
+      "listed_on": "2013-03-25",
+      "market": "上海证券交易所",
+      "secu_abbr": "易方达沪深300ETF",
+      "symbol": "510310.SH",
+      "trading_state_at_query_time": "正常交易"
+    },
+    {
+      "legal_name": "华夏沪深300交易型开放式指数证券投资基金",
+      "listed_on": "2013-01-16",
+      "market": "上海证券交易所",
+      "secu_abbr": "华夏沪深300ETF",
+      "symbol": "510330.SH",
+      "trading_state_at_query_time": "正常交易"
+    },
+    {
+      "legal_name": "广发沪深300交易型开放式指数证券投资基金",
+      "listed_on": "2015-09-09",
+      "market": "上海证券交易所",
+      "secu_abbr": "广发沪深300ETF",
+      "symbol": "510360.SH",
+      "trading_state_at_query_time": "正常交易"
+    },
+    {
+      "legal_name": "国寿安保沪深300交易型开放式指数证券投资基金",
+      "listed_on": "2018-02-07",
+      "market": "上海证券交易所",
+      "secu_abbr": "国寿安保沪深300ETF",
+      "symbol": "510380.SH",
+      "trading_state_at_query_time": "正常交易"
+    },
+    {
+      "legal_name": "平安沪深300交易型开放式指数证券投资基金",
+      "listed_on": "2018-01-26",
+      "market": "上海证券交易所",
+      "secu_abbr": "平安沪深300ETF",
+      "symbol": "510390.SH",
+      "trading_state_at_query_time": "正常交易"
+    }
+  ],
+  "listed_no_later_than": "2018-10-09",
+  "live_status": "LIVE_DISABLED",
+  "result_status": "RESEARCH_ONLY",
+  "schema": "chanlun-csi300-broad-etf-universe/v1",
+  "selection_rule": "EXACT_LEGAL_NAME_UNMODIFIED_CSI300_ETF; NO_CURRENT_TRADING_STATE_SURVIVOR_FILTER",
+  "source_endpoint": "/api/v1/common/symbol-by-cond",
+  "source_parameters": {
+    "asset_sub_type": "场内公募",
+    "asset_type": "基金",
+    "secu_category": "开放式基金"
+  },
+  "source_response_sha256": "sha256:b767813522b55103f441a9a46075c5a880369ad7de90dce2821376d248138f61"
+}

@@ -7,7 +7,7 @@ import pytest
 
 def test_restart_script_validates_and_reuses_configured_web_port():
     source = (
-        Path(__file__).resolve().parents[1] / "ops" / "restart_qmt_daily.ps1"
+        Path(__file__).resolve().parents[1] / "ops" / "restart_web.ps1"
     ).read_text(encoding="utf-8")
 
     port_preflight = source.index("$webPort = 9900")
@@ -20,20 +20,9 @@ def test_restart_script_validates_and_reuses_configured_web_port():
     assert "-HealthUri $healthUri" in source
 
 
-def test_web_only_reload_preserves_qmt_processes():
-    source = (
-        Path(__file__).resolve().parents[1] / "ops" / "restart_qmt_daily.ps1"
-    ).read_text(encoding="utf-8")
-
-    assert "[switch]$WebOnly" in source
-    assert "if (-not $PreflightOnly -and -not $WebOnly)" in source
-    assert "if (-not $WebOnly)" in source
-    assert "web-only reload requested; QMT processes were not touched" in source
-
-
 @pytest.mark.skipif(os.name != "nt", reason="restart script targets Windows")
 def test_restart_dotenv_loader_preserves_equals_and_quotes(tmp_path):
-    script = Path(__file__).resolve().parents[1] / "ops" / "restart_qmt_daily.ps1"
+    script = Path(__file__).resolve().parents[1] / "ops" / "restart_web.ps1"
     env_file = tmp_path / ".env"
     env_file.write_bytes(
         b'CHANLUN_WEB_HOST="127.0.0.1"\nCHANLUN_WEB_PORT=19999\n'
@@ -74,7 +63,7 @@ def test_restart_dotenv_loader_preserves_equals_and_quotes(tmp_path):
 
 def test_restart_owns_only_the_configured_port_process_and_confirms_shutdown():
     source = (
-        Path(__file__).resolve().parents[1] / "ops" / "restart_qmt_daily.ps1"
+        Path(__file__).resolve().parents[1] / "ops" / "restart_web.ps1"
     ).read_text(encoding="utf-8")
 
     assert "[regex]::Escape($AppScript)" in source
@@ -91,7 +80,7 @@ def test_restart_owns_only_the_configured_port_process_and_confirms_shutdown():
 
 def test_restart_acquires_single_flight_lock_before_stopping_any_process():
     source = (
-        Path(__file__).resolve().parents[1] / "ops" / "restart_qmt_daily.ps1"
+        Path(__file__).resolve().parents[1] / "ops" / "restart_web.ps1"
     ).read_text(encoding="utf-8")
 
     preflight_only = source.index("if ($PreflightOnly)")
@@ -111,7 +100,7 @@ def test_restart_acquires_single_flight_lock_before_stopping_any_process():
 def test_restart_single_flight_lock_rejects_a_concurrent_process(tmp_path):
     """Exercise contention and abandoned-owner recovery without touching services."""
 
-    script = Path(__file__).resolve().parents[1] / "ops" / "restart_qmt_daily.ps1"
+    script = Path(__file__).resolve().parents[1] / "ops" / "restart_web.ps1"
     helper = tmp_path / "deployment_lock_probe.ps1"
     helper.write_text(
         r"""
@@ -236,7 +225,7 @@ exit 0
 
 def test_restart_loads_dotenv_and_resolves_the_project_python_before_preflight():
     source = (
-        Path(__file__).resolve().parents[1] / "ops" / "restart_qmt_daily.ps1"
+        Path(__file__).resolve().parents[1] / "ops" / "restart_web.ps1"
     ).read_text(encoding="utf-8")
 
     dotenv = source.index("Import-ProjectDotEnv")
@@ -252,7 +241,7 @@ def test_restart_loads_dotenv_and_resolves_the_project_python_before_preflight()
 
 def test_poetry_python_resolution_tolerates_informational_stderr_only():
     source = (
-        Path(__file__).resolve().parents[1] / "ops" / "restart_qmt_daily.ps1"
+        Path(__file__).resolve().parents[1] / "ops" / "restart_web.ps1"
     ).read_text(encoding="utf-8")
 
     resolver = source.index("function Resolve-ProjectPython")
@@ -265,37 +254,3 @@ def test_poetry_python_resolution_tolerates_informational_stderr_only():
     assert "if ($line -isnot [string]) { continue }" in body
     assert "if ($exitCode -ne 0)" in body
     assert "C:\\Users\\lc\\miniconda3" not in source
-
-
-def test_forward_runner_collects_native_stderr_before_checking_exit_code():
-    source = (
-        Path(__file__).resolve().parents[1]
-        / "ops"
-        / "run_v3_forward_paper_daily.ps1"
-    ).read_text(encoding="utf-8")
-
-    assert "$previousErrorActionPreference = $ErrorActionPreference" in source
-    assert "$ErrorActionPreference = 'Continue'" in source
-    assert "$ErrorActionPreference = $previousErrorActionPreference" in source
-    assert "$output = @(& $PythonExe @arguments 2>&1)" in source
-    assert "$exitCode = $LASTEXITCODE" in source
-    assert "$DataGateRetryCount = 5" in source
-    assert "$DataGateRetryDelaySeconds = 30" in source
-    assert "$CoverageWaitMinutes = 460" in source
-    assert "$CoveragePollSeconds = 60" in source
-    assert "Get-ForwardCoverageProbe" in source
-    assert "coverage_cycle_complete" in source
-    assert "pending_symbol_count" in source
-    assert "$screening.market_data_as_of" in source
-    assert "$screening.as_of" not in source
-    assert "trading screening market_data_as_of is unavailable" in source
-    assert "NO_SAMPLE_COVERAGE_BLOCKED" in source
-    assert "NO_SAMPLE_NON_TRADING_SESSION" in source
-    assert "NO_SAMPLE_DELIVERY_BLOCKED" in source
-    assert "no review pipeline or order transport ran" in source
-    assert "NO_SAMPLE_DATA_BLOCKED" in source
-    assert "exit 3" in source
-    assert (
-        "data gate blocked safely; no review pipeline or order transport ran"
-        not in source
-    )

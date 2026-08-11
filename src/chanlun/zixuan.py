@@ -14,26 +14,6 @@ MANUAL_HOLDING_ZX_GROUP = "我的持仓"
 SYSTEM_ZX_GROUPS = (DEFAULT_ZX_GROUP, MANUAL_HOLDING_ZX_GROUP)
 
 
-def global_group_member_codes(
-    zx_group: str,
-    *,
-    market: str | None = None,
-) -> tuple[str, ...]:
-    """Return deterministic members of a global group.
-
-    ``market`` is an optional consumer capability filter, not part of the
-    group identity.  The A-share trading-screening engine uses it because that
-    engine currently understands only A-share stocks and exchange-traded ETFs.
-    """
-
-    values = {
-        stock.stock_code
-        for stock in db.zx_get_global_group_stocks(zx_group)
-        if market is None or stock.market == market
-    }
-    return tuple(sorted(values))
-
-
 class ZiXuan(object):
     """
     自选池功能
@@ -168,13 +148,6 @@ class ZiXuan(object):
         db.zx_update_stock_color(self.market_type, zx_group, code, color)
         return True
 
-    def rename_stock(self, zx_group, code, rename):
-        """
-        修改指定代码的自选名称
-        """
-        db.zx_update_stock_name(self.market_type, zx_group, code, rename)
-        return True
-
     def sort_top_stock(self, zx_group, code):
         """
         将股票排在最上面
@@ -187,11 +160,6 @@ class ZiXuan(object):
         将股票排在最下面
         """
         db.zx_stock_sort_bottom(self.market_type, zx_group, code)
-        return True
-
-    def clear_zx_stocks(self, zx_group):
-        """清空自选组内的股票。"""
-        db.zx_clear_by_group(self.market_type, zx_group)
         return True
 
     def replace_zx_stocks(self, zx_group: str, stocks: List[Dict[str, str]]) -> bool:
@@ -247,8 +215,3 @@ class ZiXuan(object):
             for _g in self.zixuan_list
         ]
         return res_zx_group
-
-
-if __name__ == "__main__":
-    zx = ZiXuan("currency")
-    zx.add_stock("我的关注", "LTC/USDT", None)

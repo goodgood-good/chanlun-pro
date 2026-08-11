@@ -99,7 +99,7 @@ class ExchangeBaostock(Exchange):
         self.g_all_stocks = __all_stocks
         return self.g_all_stocks
 
-    def now_trading(self):
+    def now_trading(self, market: str):
         """
         返回当前是否是交易时间
         周一至周五，09:30-11:30 13:00-15:00
@@ -311,9 +311,3 @@ class ExchangeBaostock(Exchange):
         :return:
         """
         raise Exception("账户资产接口不支持")
-
-
-if __name__ == "__main__":
-    ex = ExchangeBaostock()
-    klines = ex.klines("SZ.000001", "d")
-    print(klines.tail())

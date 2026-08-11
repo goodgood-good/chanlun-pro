@@ -51,13 +51,9 @@ function response(times, revision, update = false) {
     fxs: [],
     bis: [],
     xds: [],
-    bi_zss: [],
-    xd_zss: [],
-    bcs: [],
-    mmds: [],
     strict_structure_mode: 'replace',
     strict_structure: {
-      schema: 'chanlun-chart-structure/v12',
+      schema: 'chanlun-chart-structure',
       source_closed_at: times[times.length - 1],
       render_revision: revision,
     },
@@ -156,7 +152,7 @@ test('SSE realtime bars use the same calendar coordinate as history bars', () =>
   assert.equal(received[0].time, Date.UTC(2026, 6, 23));
 });
 
-test('calendar authoritative windows remove invalidated legacy shapes', () => {
+test('calendar authoritative windows remove invalidated shapes', () => {
   const { historyProvider } = loadDatafeed();
   const symbol = 'a:SH.513100';
   const rawClose = Date.UTC(2026, 6, 31, 7) / 1000;

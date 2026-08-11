@@ -5,18 +5,20 @@ import datetime
 import json
 from typing import List
 
-from chanlun.core.types.config import Config
 
 
 def _slot_setstate(obj, state):
-    """__slots__ pickle 兼容: 旧 (无 __slots__) state 为 dict, 新为 (None, {slots}) tuple。"""
-    if isinstance(state, dict):
-        for k, v in state.items():
-            setattr(obj, k, v)
-    else:
-        _, slot_dict = state
-        for k, v in (slot_dict or {}).items():
-            setattr(obj, k, v)
+    """Restore only the canonical state emitted by the current slotted type."""
+    if (
+        type(state) is not tuple
+        or len(state) != 2
+        or state[0] is not None
+        or type(state[1]) is not dict
+        or set(state[1]) != set(type(obj).__slots__)
+    ):
+        raise ValueError("kline pickle state does not match the current schema")
+    for key, value in state[1].items():
+        setattr(obj, key, value)
 
 
 class Kline:
@@ -115,16 +117,6 @@ class CLKline:
 
     def __setstate__(self, state):
         _slot_setstate(self, state)
-
-    @property
-    def cl_index(self) -> int:
-        """缠论K线坐标系中的序号别名。"""
-        return self.index
-
-    @property
-    def src_index(self) -> int:
-        """原始K线坐标系中的序号别名。"""
-        return self.k_index
 
     def to_dict(self):
         """将CLKline对象转换为字典"""
@@ -235,61 +227,6 @@ class FX:
             ) / (three_k.klines[0].h - three_k.klines[0].l) < 0.3:
                 ld += 1
         return ld
-
-    def high(self, qj_type: str, qy_type: str) -> float:
-        """
-        获取分型最高点
-        """
-        if qj_type == Config.FX_QJ_CK.value:
-            # （获取缠论K线的最高点）
-            if qy_type == Config.FX_QY_MIDDLE.value:
-                return self.k.h
-            return max([_ck.h for _ck in self.klines if _ck is not None])
-        elif qj_type == Config.FX_QJ_K.value:
-            # （获取原始K线的最高点）
-            if qy_type == Config.FX_QY_MIDDLE.value:
-                return max([_k.h for _k in self.k.klines])
-            return max(
-                [_k.h for _ck in self.klines if _ck is not None for _k in _ck.klines]
-            )
-        else:
-            raise Exception(f"获取分型高点的区间类型错误 {qj_type}")
-
-    def low(self, qj_type: str, qy_type: str) -> float:
-        """
-        获取分型的最低点（取原始K线的最低点）
-        """
-        if qj_type == Config.FX_QJ_CK.value:
-            if qy_type == Config.FX_QY_MIDDLE.value:
-                return self.k.l
-            return min([_ck.l for _ck in self.klines if _ck is not None])
-        elif qj_type == Config.FX_QJ_K.value:
-            if qy_type == Config.FX_QY_MIDDLE.value:
-                return min([_k.l for _k in self.k.klines])
-            return min(
-                [_k.l for _ck in self.klines if _ck is not None for _k in _ck.klines]
-            )
-        else:
-            raise Exception(f"获取分型低点的区间类型错误 {qj_type}")
-
-    def fx_k_nums(self) -> int:
-        # 分型内原始K线的数量
-        k_nums = 0
-        for _ck in self.klines:
-            if _ck is None:
-                continue
-            k_nums += len(_ck.klines)
-        return k_nums
-
-    def get_start_src_k(self) -> Kline:
-        return self.klines[0].klines[0]
-
-    def get_end_src_k(self) -> Kline:
-        return (
-            self.klines[-1].klines[-1]
-            if self.klines[-1] is not None
-            else self.klines[-2].klines[-1]
-        )
 
     def to_dict(self):
         """将FX对象转换为字典"""

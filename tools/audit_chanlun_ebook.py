@@ -247,7 +247,7 @@ def audit_main_epub(
                         findings.append(Finding("warning", "layout", chapter, f"分类说明疑似异常: {categories[0]}"))
 
                 source_norm = "" if entry.id in {"cover", "original_toc"} else normalize_text(builder.source_chapter_text(entry, next_page, pages))
-                ebook_norm = "" if entry.id in {"cover", "original_toc"} else normalize_text(builder.ebook_chapter_text(Path(tmp / "dummy"))) if False else ""
+                ebook_norm = ""
                 if entry.id not in {"cover", "original_toc"}:
                     ebook_text = ebook_visible_text(root)
                     ebook_norm = normalize_text(ebook_text)

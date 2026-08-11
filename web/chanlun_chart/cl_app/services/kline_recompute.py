@@ -8,14 +8,12 @@
     2. merge_klines_df:把新拉取的窄范围 K 线合并进去(按 date 去重 + 排序)
     3. recompute_chart_data_from_klines:用合并后的完整 K 线集走 cl.CL.process_klines
        全量重算,生成新的 chart_data dict
-  调用方(tv_history)拿到新 chart_data 后,**整体替换** chart_data_cache,
-  不再走 _merge_chart_data 的"shape 起点合并"路径。
+  调用方(tv_history)拿到新 chart_data 后,**整体替换** chart_data_cache。
 
 状态:extract/merge 为纯函数;另有进程级持久 CL 实例池(_cl_pool, LRU)承载增量
 重算状态——recompute_chart_data_from_klines 传 cache_key 时复用持久 CL, 让盘中
 末根刷新/新增根只算增量而非每次全量重建。复用判定见该函数与 _cl_pool 注释。
 """
-import copy
 import hashlib
 import threading
 import time
@@ -170,14 +168,6 @@ _cl_pool: "OrderedDict[str, dict]" = OrderedDict()
 _cl_pool_lock = threading.Lock()
 
 
-def _make_cl_config_key(cl_config: dict, market: str, to_frequency: Optional[str]) -> str:
-    """CL 复用配置指纹: config/market/to_frequency 任一变, 都不可复用同一实例。"""
-    import json
-    try:
-        cfg = json.dumps(cl_config, sort_keys=True, default=str)
-    except (TypeError, ValueError):
-        cfg = repr(sorted(cl_config.items())) if isinstance(cl_config, dict) else repr(cl_config)
-    return f"{market}|{to_frequency}|{cfg}"
 
 
 def reset_cl_pool() -> None:
@@ -205,43 +195,6 @@ def _klines_prefix_fp(klines, upto: int) -> str:
         return ""
 
 
-def store_cl_to_pool(cache_key, cl, klines, cl_config, market, to_frequency=None) -> None:
-    """把外部算好的 CL 实例(如首次加载 web_batch_get_cl_datas 的产物)存入池。
-
-    让"首次加载(cache miss, 走 web_batch 全量)后的第一次轮询/SSE"命中增量复用、走 inc
-    而非 full——否则多标的 + 拉取争 CPU 时, 那次 full 全量重算会飙到几十秒(实测 52s)。
-    复用键(首根 date 的 unix 秒 + 根数)与 recompute_chart_data_from_klines 一致。
-    """
-    if cache_key is None or cl is None or klines is None or len(klines) == 0:
-        return
-    config_key = _make_cl_config_key(cl_config, market, to_frequency)
-    first_date = int(klines.iloc[0]["date"].timestamp())
-    # T0-1: 存独立副本(deepcopy)而非传入实例的引用。传入的 cl 往往是 cl_object_cache 的
-    # 共享实例(web_batch_get_cl_datas 产物);若按引用存池, _cl_pool 路径(锁 chart_calc_locks)
-    # 与 cl_object_cache 路径(锁 _key_locks)会在两套不相交锁下并发 mutate 同一 CL → 增量
-    # 状态机撕裂 → 静默错误缠论/买卖点。CL 是纯计算对象图(无锁/句柄/连接)可安全深拷;
-    # deepcopy 放 _cl_pool_lock 之外做, 不拉长持锁时间。
-    # ⚠ chart_calc_locks 只串行本函数自身(同 cache_key 不并发进来), 但**不保护 deepcopy 对抗
-    # 并发渲染**:同一共享实例可被不持 chart_calc_locks 的 prewarm/revalidate(compute_and_cache
-    # → cl_data_to_tv_chart)并发写 _recursive_memo, deepcopy 迭代期可能撞 "dictionary changed
-    # size during iteration"。故包 try/except 降级:深拷失败就跳过入池(下次 recompute 走 full,
-    # 仅慢一次), 绝不让异常冒泡拖垮调用方(firstload 的用户首屏请求)。
-    try:
-        cl_copy = copy.deepcopy(cl)
-    except Exception as e:
-        LogUtil.warning(f"[cl_pool] store deepcopy 失败, 跳过入池(下次走 full) {cache_key}: {e}")
-        return
-    with _cl_pool_lock:
-        _cl_pool[cache_key] = {
-            "cl": cl_copy,
-            "config_key": config_key,
-            "first_date": first_date,
-            "n": len(klines),
-            "prefix_fp": _klines_prefix_fp(klines, len(klines) - 1),
-        }
-        _cl_pool.move_to_end(cache_key)
-        while len(_cl_pool) > _CL_POOL_MAX:
-            _cl_pool.popitem(last=False)
 
 
 def recompute_chart_data_from_klines(
@@ -250,46 +203,54 @@ def recompute_chart_data_from_klines(
     frequency: str,
     cl_config: dict,
     klines: pd.DataFrame,
-    to_frequency: Optional[str] = None,
     cache_key: Optional[str] = None,
 ) -> Optional[dict]:
-    """从一份**完整连续**的 K 线 DataFrame 出发,直接构造空 CL → process_klines →
-    cl_data_to_tv_chart,返回新鲜的 chart_data dict。
+    """Recompute chart data through the single strict incremental CL."""
 
-    关键:
-      - 不复用 ``fdb.get_web_cl_data`` 的 .pkl 缓存(那条路径有"末尾追加"假设,
-        与"向左滚动"语义不兼容,会触发不必要的全量/增量分裂)。
-      - 不调用 ``_merge_chart_data``;调用方拿到的就是基于完整 K 线的"权威"
-        chart_data,直接整体替换 chart_data_cache。
-      - to_frequency 用于"低周期合成高周期"场景,直接透传给 cl_data_to_tv_chart。
-    返回 None 当 klines 为空(调用方用 _mark_negative_cache 兜底)。
-    """
     if klines is None or len(klines) == 0:
         return None
-
-    # 防御性 tz 归一化:``merge_klines_df`` 之后 dtype 通常已是 datetime64[ns, UTC],
-    # 但极端 edge case(数据源混合返回 tz-aware/naive datetime 对象、长桥 SDK 边界
-    # 行带 tzinfo 而其他行不带)会让 'date' 列退化成 object dtype。下游
-    # ``KlineDataProcessor._preprocess`` 在 ``pd.api.types.is_datetime64_any_dtype``
-    # 判断后会走 ``pd.to_datetime(klines['date'])`` —— 不传 ``utc=True``,pandas 2.x
-    # 遇到混合 tz 会抛 ``ValueError: Tz-aware datetime.datetime cannot be converted
-    # to datetime64 unless utc=True``,整条 prepend 路径崩。在这里提前用 ``utc=True``
-    # 强制归一化为 ``datetime64[ns, UTC]``,既绕开 _preprocess 的脆弱分支,又不改
-    # 其通用入口契约。
-    if 'date' in klines.columns and not pd.api.types.is_datetime64_any_dtype(klines['date']):
+    if "date" not in klines.columns:
+        raise ValueError("chart K lines require a date column")
+    if not pd.api.types.is_datetime64_any_dtype(klines["date"]):
         klines = klines.copy()
-        klines['date'] = pd.to_datetime(klines['date'], utc=True)
+        klines["date"] = pd.to_datetime(klines["date"], utc=True)
 
-    # 局部 import,避免顶层 import 循环(chanlun.cl_utils 反向依赖 chart_compute 几率小,
-    # 但 cl.CL 的初始化栈较深,放到调用时 import 更稳)。
-    from chanlun.core.cl import CL
+    from chanlun.cl_utils.strict_chart_runtime import StrictChartRuntimeResult
+    from chanlun.exchange.kline_completion import drop_unclosed_last_bar
     from . import chart_compute as _chart_compute
 
-    config_key = _make_cl_config_key(cl_config, market, to_frequency)
-    first_date = int(klines.iloc[0]["date"].timestamp()) if len(klines) else None
-    n = len(klines)
+    display_frequency = frequency
+    display_klines = klines
 
-    # 取可复用的持久 CL(承载增量状态)或新建空 CL(全量)。
+    source_attrs = dict(getattr(display_klines, "attrs", {}))
+    completed_klines = display_klines
+    while completed_klines is not None and len(completed_klines) > 0:
+        closed_prefix = drop_unclosed_last_bar(
+            completed_klines,
+            display_frequency,
+            time_label="end",
+        )
+        if len(closed_prefix) == len(completed_klines):
+            break
+        completed_klines = closed_prefix
+    if completed_klines is None or len(completed_klines) == 0:
+        return None
+    if len(completed_klines) != len(display_klines):
+        completed_klines = completed_klines.copy(deep=True)
+        completed_klines.attrs.clear()
+        completed_klines.attrs.update(source_attrs)
+    display_klines = completed_klines
+
+    runtime_key = "|".join(
+        (
+            market,
+            display_frequency,
+            str(display_klines.attrs.get("price_basis_revision")),
+            str(display_klines.attrs.get("structure_price_quantum")),
+        )
+    )
+    first_date = int(display_klines.iloc[0]["date"].timestamp())
+    n = len(display_klines)
     cd = None
     reused = False
     if cache_key is not None:
@@ -297,82 +258,59 @@ def recompute_chart_data_from_klines(
             entry = _cl_pool.get(cache_key)
             if (
                 entry is not None
-                and entry["config_key"] == config_key
+                and entry["config_key"] == runtime_key
                 and entry["first_date"] == first_date
                 and n >= entry["n"]
-                # 不可变前缀(末根之前)指纹一致才复用:防数据源回填/订正中间根时增量丢变更
-                # → 增量 != 全量(审计 H1)。只追加/末根更新→前缀不变→指纹一致→照常增量。
-                and _klines_prefix_fp(klines, entry["n"] - 1) == entry.get("prefix_fp")
+                and _klines_prefix_fp(display_klines, entry["n"] - 1)
+                == entry.get("prefix_fp")
             ):
                 cd = entry["cl"]
                 reused = True
                 _cl_pool.move_to_end(cache_key)
-    if cd is None:
-        cd = CL(code, frequency, dict(cl_config), market=market)
 
-    _wait_t0 = time.time()
-    with _recompute_sem:  # 限并发，防多窗口同时全量重算把 CPU 打满导致雪崩
-        _calc_t0 = time.time()
-        cd.process_klines(klines)  # 复用→增量(只算末根/新增根), 新建→全量
-        if to_frequency is None:
-            display_frequency = frequency
-            display_klines = klines
-            display_cd = cd
-        else:
-            display_frequency = to_frequency
-            display_cd, display_klines = _chart_compute._build_display_frequency_cl(
+    wait_started = time.time()
+    with _recompute_sem:
+        calc_started = time.time()
+        if cd is None:
+            strict_runtime = _chart_compute.build_strict_chart_cd(
                 market=market,
                 code=code,
-                fetched_klines=klines,
-                fetched_frequency=frequency,
-                display_frequency=display_frequency,
-                cl_config=cl_config,
+                frequency=display_frequency,
+                frame=display_klines,
             )
+            cd = strict_runtime.cd
+        else:
+            cd.process_klines(display_klines)
+            strict_runtime = StrictChartRuntimeResult.success(cd)
+
         result = _chart_compute.serialize_chart_data_with_strict_runtime(
             market=market,
             code=code,
             display_frequency=display_frequency,
             display_klines=display_klines,
-            legacy_cd=display_cd,
-            legacy_config=cl_config,
+            chart_config=cl_config,
+            strict_runtime=strict_runtime,
         )
-        # 与 getBars/prewarm(chart_compute.py:362)路径对齐: SSE 实时重算后也补算跨周期
-        # MACD(higher_macd_*)。否则 SSE 每次推送的 chart_data 缺 higher_macd 字段, 前端
-        # applyChanlunUpdate 合并进 bars_result 后实时更新的那段 higher_macd 退化为 NaN
-        # → MACD_HTF 指标"该显示却不显示"(切标的慢解决后仍存在的真根因)。放 sem 内同受限
-        # 并发; 补算失败只告警不阻断推送(主缠论/K线优先, HTF MACD 缺失可降级)。
-        if result is not None:
-            try:
-                _chart_compute.apply_higher_macd_to_chart_data(
-                    result,
-                    display_frequency,
-                    market,
-                    cl_config,
-                )
-            except Exception as _macd_e:
-                LogUtil.warning(
-                    f"[recompute] apply_higher_macd 补算失败 {market}:{code} {frequency}: {_macd_e}"
-                )
-    _done = time.time()
+    done_at = time.time()
 
-    # 回填池: 记录本次实例与"首根 date + 根数", 供下次末尾刷新判定可否增量复用。
-    if cache_key is not None:
+    if cache_key is not None and cd is not None:
         with _cl_pool_lock:
             _cl_pool[cache_key] = {
                 "cl": cd,
-                "config_key": config_key,
+                "config_key": runtime_key,
                 "first_date": first_date,
                 "n": n,
-                "prefix_fp": _klines_prefix_fp(klines, n - 1),
+                "prefix_fp": _klines_prefix_fp(display_klines, n - 1),
             }
             _cl_pool.move_to_end(cache_key)
             while len(_cl_pool) > _CL_POOL_MAX:
-                _cl_pool.popitem(last=False)  # 淘汰最久未用, 防内存无界增长
+                _cl_pool.popitem(last=False)
 
     LogUtil.info(
-        f"[recompute] {market}:{code} {frequency} klines={n} "
+        f"[recompute] {market}:{code} {display_frequency} klines={n} "
         f"{'inc' if reused else 'full'} "
-        f"wait={(_calc_t0 - _wait_t0) * 1000:.0f}ms calc={(_done - _calc_t0) * 1000:.0f}ms"
+        f"wait={(calc_started - wait_started) * 1000:.0f}ms "
+        f"calc={(done_at - calc_started) * 1000:.0f}ms"
     )
     return result
 
@@ -407,7 +345,6 @@ def prepend_klines_and_replace_cache(
     cl_config: dict,
     new_klines: pd.DataFrame,
     cache_key: str,
-    to_frequency: Optional[str] = None,
 ) -> Optional[dict]:
     """范围请求(向左滚动)主入口。
 
@@ -415,7 +352,7 @@ def prepend_klines_and_replace_cache(
       1. 从 chart_data_cache 取既有 entry,反构建已缓存 K 线 DataFrame
       2. 与 new_klines 合并(cached 优先 + 去重 + 升序)
       3. 用合并后的"完整连续 K 线集"重新构造空 CL,跑 process_klines,产出新 chart_data
-      4. **整体替换** chart_data_cache(is_full_snapshot=True,不再走 _merge_chart_data)
+      4. **整体替换** chart_data_cache(is_full_snapshot=True)
 
     调用方(tv_history)在 chart_calc_locks.get(cache_key) 持锁期间调用本函数,
     保证"反构建 → 合并 → 重算 → 写回"原子性,前端不会读到中间态。
@@ -494,7 +431,7 @@ def prepend_klines_and_replace_cache(
             pass
 
     new_chart_data = recompute_chart_data_from_klines(
-        market, code, frequency, cl_config, merged, to_frequency=to_frequency,
+        market, code, frequency, cl_config, merged,
         cache_key=cache_key,
     )
     if new_chart_data is None:

@@ -8,7 +8,7 @@ from chanlun.core.xd_calculator import XdCalculator
 
 
 def test_pending_tail_is_connected_and_opposes_previous_segment(monkeypatch) -> None:
-    calculator = XdCalculator({})
+    calculator = XdCalculator()
     emitted: list[tuple[int, str]] = []
     monkeypatch.setattr(calculator, "_make_xd", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
@@ -60,7 +60,7 @@ def test_gap_invalidation_keeps_the_later_causal_witness(monkeypatch) -> None:
         bi(5, "down", 11, 9),
         bi(6, "up", 11, 9),
     ]
-    calculator = XdCalculator({})
+    calculator = XdCalculator()
     monkeypatch.setattr(
         calculator,
         "_check_type2",
@@ -85,7 +85,7 @@ def test_gap_invalidation_keeps_the_later_causal_witness(monkeypatch) -> None:
 def test_segment_lock_waits_for_the_full_cascade_horizon() -> None:
     """候选段至少有四个后继段后，才允许进入不可改写的 locked 前缀。"""
 
-    calculator = XdCalculator({})
+    calculator = XdCalculator()
     assert calculator._DEFER_DONE >= 4
     base = datetime(2026, 5, 11, 9, 30, tzinfo=timezone.utc)
     segments = [

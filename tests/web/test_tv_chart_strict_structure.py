@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 from datetime import timedelta
-from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
 
 from chanlun.cl_utils import cl_data_to_tv_chart
+from chanlun.cl_utils.strict_chart_runtime import StrictChartRuntimeResult
 from tests.trading_system.strict_helpers import strict_evidence_result
 
 
@@ -15,77 +15,47 @@ def _config() -> dict[str, object]:
         "chart_show_fx": "0",
         "chart_show_bi": "0",
         "chart_show_xd": "0",
-        "chart_show_bi_zs": "1",
-        "chart_show_xd_zs": "1",
-        "chart_show_recursive_levels": "1",
-        "chart_use_branch_core": "1",
-        "chart_show_xd_zslx": "1",
-        "chart_show_bi_bc": "1",
-        "chart_show_xd_bc": "1",
-        "chart_show_bi_mmd": "1",
-        "chart_show_xd_mmd": "1",
-        "zs_bi_type": ["bz"],
-        "zs_xd_type": ["bz"],
-        "idx_macd_fast": 12,
-        "idx_macd_slow": 26,
-        "idx_macd_signal": 9,
     }
 
 
-class _StrictOnlyCD:
+def _frame(evidence=None) -> pd.DataFrame:
+    evidence = evidence or strict_evidence_result()
+    closed_at = evidence.source_closed_at
+    frame = pd.DataFrame(
+        (
+            {
+                "date": closed_at - timedelta(minutes=5),
+                "open": 10.0,
+                "high": 10.2,
+                "low": 9.8,
+                "close": 10.1,
+                "volume": 1000.0,
+            },
+            {
+                "date": closed_at,
+                "open": 10.1,
+                "high": 10.4,
+                "low": 10.0,
+                "close": 10.3,
+                "volume": 1200.0,
+            },
+        )
+    )
+    frame.attrs.update(
+        structure_price_quantum="0.01",
+        price_basis_revision=evidence.price_basis_revision,
+    )
+    return frame
+
+
+class _StrictCD:
     def __init__(self, *, evidence=None, error: Exception | None = None) -> None:
         self.evidence = evidence or strict_evidence_result()
         self.error = error
         self.evidence_calls = 0
-        self.base_center_calls = {"bi": 0, "xd": 0}
-        closed_at = self.evidence.source_closed_at
-        self._bars = [
-            SimpleNamespace(
-                date=closed_at - timedelta(minutes=5),
-                h=10.2,
-                l=9.8,
-                o=10.0,
-                c=10.1,
-                a=1000.0,
-            ),
-            SimpleNamespace(
-                date=closed_at,
-                h=10.4,
-                l=10.0,
-                o=10.1,
-                c=10.3,
-                a=1200.0,
-            ),
-        ]
-
-    def get_code(self):
-        return self.evidence.symbol
-
-    def get_frequency(self):
-        return self.evidence.source_frequency
-
-    def get_klines(self):
-        return list(self._bars)
-
-    def get_src_klines(self):
-        return list(self._bars)
-
-    def get_bis(self):
-        return []
-
-    def get_xds(self):
-        return []
-
-    def get_bi_zss(self):
-        self.base_center_calls["bi"] += 1
-        return []
-
-    def get_xd_zss(self):
-        self.base_center_calls["xd"] += 1
-        return []
 
     def get_idx(self):
-        values = np.array([0.0, 0.1])
+        values = np.array((0.0, 0.1))
         return {
             "macd": {
                 "dif": values,
@@ -95,6 +65,12 @@ class _StrictOnlyCD:
             }
         }
 
+    def get_bis(self):
+        return []
+
+    def get_xds(self):
+        return []
+
     def get_strict_evidence(self):
         self.evidence_calls += 1
         if self.evidence_calls > 1:
@@ -103,161 +79,76 @@ class _StrictOnlyCD:
             raise self.error
         return self.evidence
 
-    def _legacy(self, *_args, **_kwargs):
-        raise AssertionError("legacy chart structure source must not be read")
 
-    get_bi_zhongshu = _legacy
-    get_xd_zslx = _legacy
-    get_recursive_branch_levels = _legacy
-    get_kuozhan_levels = _legacy
-    get_branch_bspoints = _legacy
-    get_branch_bcs = _legacy
+def _serialize(cd: _StrictCD, frame: pd.DataFrame | None = None) -> dict:
+    evidence = cd.evidence
+    return cl_data_to_tv_chart(
+        frame if frame is not None else _frame(evidence),
+        _config(),
+        market="a",
+        code=evidence.symbol,
+        frequency=evidence.source_frequency,
+        strict_runtime=StrictChartRuntimeResult.success(cd),
+    )
 
 
-def test_chart_payload_never_reads_legacy_center_objects() -> None:
-    cd = _StrictOnlyCD()
+def test_chart_payload_uses_only_the_strict_snapshot() -> None:
+    cd = _StrictCD()
 
-    payload = cl_data_to_tv_chart(cd, _config())
+    payload = _serialize(cd)
 
     assert cd.evidence_calls == 1
-    assert cd.base_center_calls == {"bi": 0, "xd": 0}
     assert payload["strict_structure_mode"] == "replace"
-    assert payload["strict_structure"]["schema"] == "chanlun-chart-structure/v12"
+    assert payload["strict_structure"]["schema"] == "chanlun-chart-structure"
     assert payload["strict_structure"]["source_closed_at"] == payload["t"][-1]
-    assert payload["bi_zss"] == []
-    assert payload["xd_zss"] == []
-    for legacy_field in (
-        "bcs",
-        "mmds",
-        "recursive_levels",
-        "interval_nest",
-    ):
-        assert legacy_field not in payload
+    assert len(payload["macd_dif"]) == len(payload["t"]) == 2
 
 
-def test_strict_structure_failure_is_atomic_unavailable_not_legacy_fallback() -> None:
-    cd = _StrictOnlyCD(error=ValueError("broken strict evidence"))
+def test_strict_structure_failure_is_atomic_unavailable() -> None:
+    cd = _StrictCD(error=ValueError("broken strict evidence"))
 
-    payload = cl_data_to_tv_chart(cd, _config())
+    payload = _serialize(cd)
 
     assert payload["t"]
     assert payload["strict_structure_mode"] == "unavailable"
     assert "strict_structure" not in payload
     assert payload["strict_structure_error"]["code"] == "strict_evidence_invalid"
-    assert cd.evidence_calls == 1
 
 
 def test_strict_snapshot_source_close_must_match_display_bars() -> None:
-    cd = _StrictOnlyCD()
-    cd._bars[-1].date = cd._bars[-1].date - timedelta(minutes=1)
+    cd = _StrictCD()
+    frame = _frame(cd.evidence)
+    frame.loc[frame.index[-1], "date"] -= timedelta(minutes=1)
 
-    payload = cl_data_to_tv_chart(cd, _config())
+    payload = _serialize(cd, frame)
 
     assert payload["strict_structure_mode"] == "unavailable"
     assert payload["strict_structure_error"]["code"] == "strict_context_mismatch"
-    assert "strict_structure" not in payload
 
 
-def test_low_to_high_display_recomputes_strict_structure_on_display_bars(
-    monkeypatch,
-) -> None:
-    from cl_app.services import chart_compute
-
-    source = pd.DataFrame(
-        [
-            {
-                "date": strict_evidence_result().source_closed_at,
-                "code": "SH.600519",
-                "open": 10.0,
-                "high": 10.5,
-                "low": 9.8,
-                "close": 10.2,
-                "volume": 1000.0,
-            }
-        ]
-    )
-    source.attrs.update(
-        structure_price_quantum="0.01",
-        price_basis_revision="test-raw-v1",
-    )
-    converted = source.copy(deep=True)
-    calls = []
-    sentinel_cd = object()
-
-    def convert(market, frame, target):
-        calls.append(("convert", market, tuple(frame["date"]), target))
-        return converted
-
-    def build(market, code, frames, config):
-        calls.append(("build", market, code, tuple(frames), config))
-        assert frames["30m"].attrs == source.attrs
-        return [sentinel_cd]
-
-    monkeypatch.setattr(
-        chart_compute,
-        "_convert_chart_frequency",
-        convert,
-    )
-    monkeypatch.setattr(chart_compute, "web_batch_get_cl_datas", build)
-
-    cd, display = chart_compute._build_display_frequency_cl(
-        market="a",
-        code="SH.600519",
-        fetched_klines=source,
-        fetched_frequency="5m",
-        display_frequency="30m",
-        cl_config={"strict": True},
-    )
-
-    assert cd is sentinel_cd
-    assert display is not source
-    assert tuple(display["date"]) == tuple(converted["date"])
-    assert calls[0][0:2] == ("convert", "a")
-    assert calls[0][3] == "30m"
-    assert calls[1][0:4] == ("build", "a", "SH.600519", ("30m",))
-
-
-def test_chart_payload_reads_explicit_strict_runtime_not_legacy_cd() -> None:
-    from chanlun.cl_utils.strict_chart_runtime import StrictChartRuntimeResult
-
-    legacy = _StrictOnlyCD()
-    strict = _StrictOnlyCD()
-    legacy.get_strict_evidence = lambda: (_ for _ in ()).throw(
-        AssertionError("legacy CL must not provide strict evidence")
-    )
-
-    payload = cl_data_to_tv_chart(
-        legacy,
-        _config(),
-        strict_runtime=StrictChartRuntimeResult.success(strict),
-    )
-
-    assert strict.evidence_calls == 1
-    assert payload["strict_structure_mode"] == "replace"
-
-
-def test_explicit_metadata_failure_does_not_call_any_strict_source() -> None:
-    from chanlun.cl_utils.strict_chart_runtime import StrictChartRuntimeResult
-
-    legacy = _StrictOnlyCD()
-    legacy.get_strict_evidence = lambda: (_ for _ in ()).throw(
-        AssertionError("strict evidence must not run")
-    )
+def test_explicit_metadata_failure_does_not_read_structure() -> None:
+    evidence = strict_evidence_result()
     runtime = StrictChartRuntimeResult.unavailable(
         "strict_price_metadata_unavailable",
         "price metadata missing",
     )
 
-    payload = cl_data_to_tv_chart(legacy, _config(), strict_runtime=runtime)
+    payload = cl_data_to_tv_chart(
+        _frame(evidence),
+        _config(),
+        market="a",
+        code=evidence.symbol,
+        frequency=evidence.source_frequency,
+        strict_runtime=runtime,
+    )
 
-    assert payload["t"]
     assert payload["strict_structure_mode"] == "unavailable"
     assert payload["strict_structure_error"] == {
         "code": "strict_price_metadata_unavailable"
     }
 
 
-def test_chart_serializer_drops_future_end_label_before_both_structure_engines(
+def test_chart_serializer_drops_future_end_label_before_strict_runtime(
     monkeypatch,
 ) -> None:
     from cl_app.services import chart_compute
@@ -265,10 +156,9 @@ def test_chart_serializer_drops_future_end_label_before_both_structure_engines(
     completed_at = pd.Timestamp("2026-08-05 15:00:00", tz="Asia/Shanghai")
     future_at = pd.Timestamp("2099-01-01 09:30:00", tz="Asia/Shanghai")
     frame = pd.DataFrame(
-        [
+        (
             {
                 "date": completed_at,
-                "code": "SH.000001",
                 "open": 10.0,
                 "high": 10.2,
                 "low": 9.9,
@@ -277,41 +167,29 @@ def test_chart_serializer_drops_future_end_label_before_both_structure_engines(
             },
             {
                 "date": future_at,
-                "code": "SH.000001",
                 "open": 10.1,
                 "high": 10.3,
                 "low": 10.0,
                 "close": 10.2,
                 "volume": 10.0,
             },
-        ]
+        )
     )
     frame.attrs.update(
         structure_price_quantum="0.01",
-        price_basis_revision="test-qmt-v1",
+        price_basis_revision="test-qmt",
     )
-    stale_legacy = object()
-    rebuilt_legacy = object()
-    strict_runtime = object()
-    calls: list[tuple] = []
-
-    def rebuild(market, code, frames, config):
-        rebuilt_frame = frames["1m"]
-        calls.append(("legacy", tuple(rebuilt_frame["date"]), dict(rebuilt_frame.attrs)))
-        assert market == "a"
-        assert code == "SH.000001"
-        assert config == {"pen": "old"}
-        return [rebuilt_legacy]
+    runtime = object()
+    calls: list[tuple[object, ...]] = []
 
     def build_strict(*, market, code, frequency, frame):
-        calls.append(("strict", tuple(frame["date"]), dict(frame.attrs)))
-        return strict_runtime
+        calls.append(("build", tuple(frame["date"]), dict(frame.attrs)))
+        return runtime
 
-    def serialize(cd, config, *, strict_runtime):
-        calls.append(("serialize", cd, config, strict_runtime))
+    def serialize(frame, config, *, market, code, frequency, strict_runtime):
+        calls.append(("serialize", tuple(frame["date"]), strict_runtime))
         return {"strict_structure_mode": "replace"}
 
-    monkeypatch.setattr(chart_compute, "web_batch_get_cl_datas", rebuild)
     monkeypatch.setattr(chart_compute, "build_strict_chart_cd", build_strict)
     monkeypatch.setattr(chart_compute, "cl_data_to_tv_chart", serialize)
 
@@ -320,73 +198,47 @@ def test_chart_serializer_drops_future_end_label_before_both_structure_engines(
         code="SH.000001",
         display_frequency="1m",
         display_klines=frame,
-        legacy_cd=stale_legacy,
-        legacy_config={"pen": "old"},
+        chart_config=_config(),
     )
 
     assert result == {"strict_structure_mode": "replace"}
     assert calls[0] == (
-        "legacy",
+        "build",
         (completed_at,),
         {
             "structure_price_quantum": "0.01",
-            "price_basis_revision": "test-qmt-v1",
+            "price_basis_revision": "test-qmt",
         },
     )
-    assert calls[1][0:2] == ("strict", (completed_at,))
-    assert calls[1][2] == frame.attrs
-    assert calls[2] == (
-        "serialize",
-        rebuilt_legacy,
-        {"pen": "old"},
-        strict_runtime,
-    )
+    assert calls[1] == ("serialize", (completed_at,), runtime)
 
 
-def test_chart_serializer_keeps_an_already_completed_prefix(monkeypatch) -> None:
+def test_supplied_strict_runtime_is_reused(monkeypatch) -> None:
     from cl_app.services import chart_compute
 
-    frame = pd.DataFrame(
-        [
-            {
-                "date": pd.Timestamp("2020-01-02 09:31:00", tz="Asia/Shanghai"),
-                "code": "SH.000001",
-                "open": 10.0,
-                "high": 10.2,
-                "low": 9.9,
-                "close": 10.1,
-                "volume": 1000.0,
-            }
-        ]
-    )
-    legacy = object()
-    strict_runtime = object()
-
+    evidence = strict_evidence_result()
+    frame = _frame(evidence).tail(1)
+    runtime = object()
     monkeypatch.setattr(
         chart_compute,
-        "web_batch_get_cl_datas",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("completed legacy CL must not be rebuilt")
+        "build_strict_chart_cd",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("supplied strict runtime must be reused")
         ),
     )
     monkeypatch.setattr(
         chart_compute,
-        "build_strict_chart_cd",
-        lambda **kwargs: strict_runtime,
-    )
-    monkeypatch.setattr(
-        chart_compute,
         "cl_data_to_tv_chart",
-        lambda cd, config, *, strict_runtime: (cd, config, strict_runtime),
+        lambda frame, config, **kwargs: kwargs["strict_runtime"],
     )
 
     result = chart_compute.serialize_chart_data_with_strict_runtime(
         market="a",
-        code="SH.000001",
-        display_frequency="1m",
+        code=evidence.symbol,
+        display_frequency=evidence.source_frequency,
         display_klines=frame,
-        legacy_cd=legacy,
-        legacy_config={"pen": "old"},
+        chart_config=_config(),
+        strict_runtime=runtime,
     )
 
-    assert result == (legacy, {"pen": "old"}, strict_runtime)
+    assert result is runtime

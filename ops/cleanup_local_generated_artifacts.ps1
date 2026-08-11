@@ -70,23 +70,7 @@ $fixedTargets = @(
     @{ path = ".pytest_cache"; category = "test_cache" },
     @{ path = ".ruff_cache"; category = "lint_cache" },
     @{ path = "2026072510712998.dmp"; category = "crash_dump" },
-    @{ path = "20260725110105013.dmp"; category = "crash_dump" },
-    @{
-        path = ".cache\chanlun_v3_forward_paper"
-        category = "obsolete_forward_prototype"
-    },
-    @{
-        path = ".cache\chanlun_v3_forward_paper_approximate"
-        category = "obsolete_forward_prototype"
-    },
-    @{
-        path = ".cache\chanlun_v3_scheduler\forward_task_registration.json"
-        category = "stale_scheduler_receipt"
-    },
-    @{
-        path = ".cache\chanlun_v3_scheduler\qmt_restart_registration.json"
-        category = "stale_scheduler_receipt"
-    }
+    @{ path = "20260725110105013.dmp"; category = "crash_dump" }
 )
 foreach ($target in $fixedTargets) {
     Add-CleanupCandidate `
@@ -104,7 +88,7 @@ foreach ($target in $pythonCaches) {
 
 $logRoot = Join-Path $repositoryRoot "ops\logs"
 if (Test-Path -LiteralPath $logRoot) {
-    $legacyLogs = @(
+    $generatedLogs = @(
         Get-ChildItem -LiteralPath $logRoot -File -Force |
             Where-Object {
                 $_.Name -like "web_restart_*" -or
@@ -114,8 +98,8 @@ if (Test-Path -LiteralPath $logRoot) {
                 $_.Name -like "restart_*"
             }
     )
-    foreach ($target in $legacyLogs) {
-        Add-CleanupCandidate -LiteralPath $target.FullName -Category "legacy_log"
+    foreach ($target in $generatedLogs) {
+        Add-CleanupCandidate -LiteralPath $target.FullName -Category "generated_log"
     }
 }
 
@@ -159,7 +143,7 @@ $byCategory = @(
 )
 
 $result = [ordered]@{
-    schema = "chanlun-local-generated-artifact-cleanup/v1"
+    schema = "chanlun-local-generated-artifact-cleanup"
     observed_at = [DateTimeOffset]::Now.ToString("o")
     mode = if ($Execute) { "EXECUTE" } else { "DRY_RUN" }
     repository_root = $repositoryRoot
@@ -179,13 +163,13 @@ $result = [ordered]@{
                 Select-Object -ExpandProperty FullName
         )
         active_forward_cache = Test-Path -LiteralPath (
-            Join-Path $repositoryRoot ".cache\chanlun_v3_human_review_forward"
+            Join-Path $repositoryRoot ".cache\chanlun_human_review_forward"
         )
         human_review_ledger = Test-Path -LiteralPath (
-            Join-Path $repositoryRoot ".cache\chanlun_v3_human_review"
+            Join-Path $repositoryRoot ".cache\chanlun_human_review"
         )
         qmt_sector_ledger = Test-Path -LiteralPath (
-            Join-Path $repositoryRoot ".cache\chanlun_v3_qmt_sector_ledger"
+            Join-Path $repositoryRoot ".cache\chanlun_qmt_sector_ledger"
         )
     }
 }
@@ -194,7 +178,7 @@ $json = $result | ConvertTo-Json -Depth 6
 if ($Execute) {
     $receiptPath = Join-Path `
         $repositoryRoot `
-        ".cache\chanlun_v3_scheduler\local_cleanup_latest.json"
+        ".cache\chanlun_scheduler\local_cleanup_latest.json"
     $receiptDirectory = Split-Path -Parent $receiptPath
     New-Item -ItemType Directory -Path $receiptDirectory -Force | Out-Null
     $temporaryReceipt = $receiptPath + ".tmp"

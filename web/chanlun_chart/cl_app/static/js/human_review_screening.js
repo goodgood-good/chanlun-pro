@@ -228,7 +228,7 @@
       if (diagnostic && diagnostic.state === "NONE") {
         return [`${label}映射供给：无活动顶部结构，不适用次级卖点映射`];
       }
-      return [`${label}映射供给：旧证据未保存明细`];
+      return [`${label}映射供给：当前证据不完整，按无效处理`];
     }
     const counts = supply.point_type_counts
       && typeof supply.point_type_counts === "object"
@@ -244,14 +244,14 @@
       ? supply.diagnostic_buy_point_type_counts
       : null;
     if (!diagnosticCounts) {
-      lines.push(`${label}方向诊断：旧证据未记录一买/二买，不能解释为真实零`);
+      lines.push(`${label}方向诊断：当前证据缺少一买/二买计数，按无效处理`);
       return lines;
     }
     const diagnosticEvidence = Array.isArray(
       supply.diagnostic_buy_point_evidence,
     ) ? supply.diagnostic_buy_point_evidence : null;
     const identityDisclosure = diagnosticEvidence === null
-      ? "稳定身份未随旧证据保存"
+      ? "稳定身份明细缺失"
       : `稳定身份 ${diagnosticEvidence.length} 个`;
     lines.push(
       `${label}方向诊断：一买 ${Number(diagnosticCounts["1buy"] || 0)} / 二买 ${Number(diagnosticCounts["2buy"] || 0)} · ${identityDisclosure} · 仅供人工识别，不参与卖点映射、风险门或订单`,
@@ -310,19 +310,11 @@
         candidate && candidate.sector_higher_timeframe_evidence_id,
       );
       if (deferred) return deferred;
-      if (
-        candidate
-        && candidate.sector_risk_gate_attestation === "LEGACY_OMITTED_FAIL_CLOSED"
-      ) {
-        return {
-          tag: "板块门旧归档未证明",
-          lines: [
-            "旧归档未单独携带板块风险门；系统仅按 UNRESOLVED 失败关闭读取，不能用于虚拟买入",
-          ],
-          factIds: [],
-        };
-      }
-      return { tag: "", lines: [], factIds: [] };
+      return {
+        tag: "板块高级别证据无效",
+        lines: ["候选未携带当前契约要求的板块高级别证据，保持 REVIEW_REQUIRED / LIVE_DISABLED"],
+        factIds: [],
+      };
     }
     const warmup = evidence.strict_same_5m_warmup_evidence
       && typeof evidence.strict_same_5m_warmup_evidence === "object"
@@ -375,9 +367,7 @@
         : [];
       if (reasons.length) decisionLines.push(`板块原因：${reasons.join("；")}`);
     } else {
-      decisionLines.push(
-        "旧版板块证据仅保存来源模式与暖机；板块 M/W/D 状态、逐周期结构映射和方向诊断未认证",
-      );
+      decisionLines.push("板块高级别证据不符合当前契约，状态、结构映射与方向诊断均未认证");
     }
     if (evidence.source_mode === "PAGE_PARITY_SAME_5M_BASE") {
       return {
@@ -449,25 +439,6 @@
         factIds,
       };
     }
-    if (
-      membershipAttestation
-      === "LATEST_CATALOG_FALLBACK_NOT_POINT_IN_TIME"
-    ) {
-      return {
-        label: `${name}〔最新目录，非点时〕`,
-        tag: "板块归属非点时",
-        line: `QMT板块：${name} · 候选股票属于最新可用目录 · ${capturedAt} · 不是历史板块成分证明`,
-        factIds,
-      };
-    }
-    if (membershipAttestation === "LATEST_CATALOG_SYMBOL_NOT_MEMBER") {
-      return {
-        label: `${name}〔最新目录，个股非成分〕`,
-        tag: "板块归属未证明",
-        line: `QMT板块：${name} · 最新可用目录中候选股票不属于该板块 · ${capturedAt}`,
-        factIds,
-      };
-    }
     if (attestation === "UNCLASSIFIED") {
       return {
         label: name,
@@ -498,8 +469,8 @@
       );
       if (deferred) return deferred;
       return {
-        tag: "板块排序旧归档未附",
-        lines: ["该候选没有自包含的板块排序证据，不能从最终名次反推排序原因"],
+        tag: "板块排序证据无效",
+        lines: ["该候选缺少当前契约要求的完整板块排序证据，已按无效处理"],
         factIds: [],
       };
     }
@@ -511,14 +482,11 @@
       ? Object.entries(evidence.rank_components)
         .map(([name, value]) => `${name}=${Number(value)}`)
       : [];
-    const structural = components.length
-      ? `结构分 ${Number(evidence.rank_score || 0)}（${components.join(" / ")}）`
-      : `结构分 ${Number(evidence.rank_score || 0)}（历史摘要未附分项）`;
+    const structural = `结构分 ${Number(evidence.rank_score || 0)}（${components.join(" / ")}）`;
     const strength = evidence.horizontal_strength === null
       || evidence.horizontal_strength === undefined
       ? "横向强度未解决，未以中性值替代"
       : `横向强度 ${text(evidence.horizontal_strength)} · 横向第 ${text(evidence.horizontal_rank)} 名 · 观测 ${timeText(evidence.strength_observed_at)} · 锚点 ${text(evidence.strength_anchor_session)} · 成员 ${Number(evidence.strength_member_count || 0)}`;
-    const full = evidence.source_profile === "LIVE_FULL_RANKING";
     const catalogAttestation = text(
       candidate && candidate.sector_ranking_catalog_attestation,
       "NOT_APPLICABLE",
@@ -530,19 +498,16 @@
       EXACT_REVISION_SYMBOL_NOT_MEMBER: "同一QMT目录修订中候选股票不属于该板块，保持失败关闭",
       EXACT_REVISION_SECTOR_ID_UNRESOLVED: "排序引用的QMT目录修订中找不到该板块ID，保持失败关闭",
     }[catalogAttestation];
-    const catalogMismatch = full
-      && catalogAttestation !== "NOT_APPLICABLE"
+    const catalogMismatch = catalogAttestation !== "NOT_APPLICABLE"
       && catalogAttestation !== "EXACT_REVISION_NAME_AND_MEMBERSHIP_MATCH";
     return {
       tag: catalogMismatch
         ? "板块排序目录未闭环"
-        : (full ? "板块排序分项可复核" : "板块排序摘要可复核"),
+        : "板块排序分项可复核",
       lines: [
         `板块排序：${ordinal} · ${structural}`,
         strength,
-        full
-          ? "结构排序分项来自统一实时决策核心；横向强度只参与排序，不覆盖板块资格门"
-          : "历史触发账本保留总分、名次和横向强度；旧账本没有分项，系统未反推补造",
+        "结构排序分项来自统一决策核心；横向强度只参与排序，不覆盖板块资格门",
         ...(catalogLine ? [catalogLine] : []),
       ],
       factIds: [
@@ -578,9 +543,9 @@
       );
       if (deferred) return deferred;
       return {
-        tag: "M/W/D仅门色",
+        tag: "M/W/D证据无效",
         lines: [
-          "旧归档或研究近似仅保留最终门色；市场与个股 M/W/D 分项、完成K线数量及结构映射未证明",
+          "当前候选缺少市场与个股 M/W/D 分项、完成K线数量及结构映射，已按无效处理",
         ],
         factIds: [],
       };
@@ -705,7 +670,6 @@
       CANCEL: "CANCELLED",
       OPERATIONS_CANCEL: "OPERATIONS_CANCELLED",
       EXECUTION_REJECT: "EXECUTION_REJECTED",
-      CAPITAL_REJECT: "CAPITAL_REJECTED",
       PORTFOLIO_REJECT: "PORTFOLIO_REJECTED",
     };
     const payload = event && event.payload && typeof event.payload === "object" ? event.payload : {};
@@ -1000,7 +964,7 @@
             || !payload
             || payload.ok !== true
             || !detail
-            || detail.schema !== "chanlun-v3-human-review-candidate-detail-web/v1"
+            || detail.schema !== "chanlun-human-review-candidate-detail-web"
             || detail.candidate_id !== candidate.candidate_id
             || detail.source_content_sha256 !== sourceHash
             || detail.highest_status !== "REVIEW_REQUIRED"
@@ -1048,7 +1012,6 @@
         "hr-virtual-operations-cancelled-count",
         snapshot.virtual_operations_cancelled_intent_count,
       );
-      setText("hr-virtual-capital-rejected-count", snapshot.virtual_capital_rejected_intent_count);
       setText("hr-virtual-reserved-sell-quantity", snapshot.virtual_reserved_sell_quantity);
       setText("hr-virtual-fill-count", snapshot.virtual_fill_count);
       setText("hr-virtual-position-count", snapshot.virtual_open_position_count);
@@ -1066,9 +1029,7 @@
             ? "QMT 目录归档不完整"
             : selectionSourceStatus === "INCOMPLETE_SOURCE_ARCHIVE"
               ? "筛选来源归档不完整"
-              : selectionSourceStatus === "LEGACY_UNATTESTED_LIVE_RANKED_BUY"
-                ? "旧虚拟买入缺板块准入证明"
-                : selectionStatus === "INVALID" || selectionSourceStatus === "INVALID"
+              : selectionStatus === "INVALID" || selectionSourceStatus === "INVALID"
                   ? "板块准入证据无效"
                   : "尚未验证";
       setText("hr-entry-selection-evidence-status", selectionLabel);
@@ -1078,9 +1039,7 @@
         ? `${Number(executionEvidence.verified_fill_count || 0)}/${Number(executionEvidence.fill_count || 0)} 完整`
         : executionEvidenceStatus === "NO_FILLS"
           ? "无虚拟成交"
-          : executionEvidenceStatus === "LEGACY_FACT_ONLY"
-            ? "旧成交缺少精确 1m 柱"
-            : executionEvidenceStatus === "MISSING"
+          : executionEvidenceStatus === "MISSING"
               ? "成交证据对象缺失"
               : executionEvidenceStatus === "INVALID"
                 ? "成交证据无效"
@@ -1098,28 +1057,18 @@
               ? "证据无效"
               : executionRejectionStatus;
       setText("hr-execution-rejection-evidence-status", executionRejectionLabel);
-      const capitalRejectionEvidence = snapshot.paper_capital_rejection_evidence || {};
-      const capitalRejectionEvidenceStatus = text(capitalRejectionEvidence.status, "UNAVAILABLE");
-      const capitalRejectionEvidenceLabel = capitalRejectionEvidenceStatus === "COMPLETE"
-        ? `${Number(capitalRejectionEvidence.verified_rejection_count || 0)}/${Number(capitalRejectionEvidence.rejection_count || 0)} 完整`
-        : capitalRejectionEvidenceStatus === "NO_REJECTIONS"
-          ? "无资金拒绝"
-          : capitalRejectionEvidenceStatus === "MISSING"
+      const portfolioRejectionEvidence = snapshot.paper_portfolio_rejection_evidence || {};
+      const portfolioRejectionEvidenceStatus = text(portfolioRejectionEvidence.status, "UNAVAILABLE");
+      const portfolioRejectionEvidenceLabel = portfolioRejectionEvidenceStatus === "COMPLETE"
+        ? `${Number(portfolioRejectionEvidence.verified_rejection_count || 0)}/${Number(portfolioRejectionEvidence.rejection_count || 0)} 完整`
+        : portfolioRejectionEvidenceStatus === "NO_REJECTIONS"
+          ? "无组合拒绝"
+          : portfolioRejectionEvidenceStatus === "MISSING"
             ? "缺失"
-            : capitalRejectionEvidenceStatus === "INVALID"
+            : portfolioRejectionEvidenceStatus === "INVALID"
               ? "无效"
-              : capitalRejectionEvidenceStatus;
-      setText("hr-capital-rejection-evidence-status", capitalRejectionEvidenceLabel);
-      const capitalDecisionAudit = snapshot.paper_capital_decision_audit || {};
-      const capitalDecisionAuditStatus = text(capitalDecisionAudit.status, "UNAVAILABLE");
-      const capitalDecisionAuditLabel = capitalDecisionAuditStatus === "COMPLETE"
-        ? `${Number(capitalDecisionAudit.verified_rejection_count || 0)}/${Number(capitalDecisionAudit.rejection_count || 0)} 已复算`
-        : capitalDecisionAuditStatus === "NO_REJECTIONS"
-          ? "无资金拒绝"
-          : capitalDecisionAuditStatus === "INVALID"
-            ? "账本前缀不一致"
-            : capitalDecisionAuditStatus;
-      setText("hr-capital-decision-audit-status", capitalDecisionAuditLabel);
+              : portfolioRejectionEvidenceStatus;
+      setText("hr-portfolio-rejection-evidence-status", portfolioRejectionEvidenceLabel);
       const portfolioDecisionAudit = snapshot.paper_portfolio_decision_audit || {};
       const portfolioDecisionAuditStatus = text(portfolioDecisionAudit.status, "UNAVAILABLE");
       const portfolioDecisionAuditLabel = portfolioDecisionAuditStatus === "COMPLETE"
@@ -1260,11 +1209,7 @@
         ? "证据无效"
         : lineageStatus === "NO_QUALIFIED_SESSIONS"
           ? "0 个合格会话 · 等待完整前向日"
-          : lineageStatus === "NOT_RECORDED_LEGACY"
-            ? `${qualifiedLineageSessions} 个合格旧会话 · 当时未记录`
-            : lineageStatus === "RECORDED_WITH_LEGACY_SESSIONS"
-              ? `${recordedLineageSessions}/${qualifiedLineageSessions} 日已记录 · ${lineageEvents} 个结构事件`
-              : lineageStatus === "RECORDED"
+          : lineageStatus === "RECORDED"
                 ? `${recordedLineageSessions} 日已记录 · ${lineageEvents} 个结构事件`
                 : "尚未开始逐日记录";
       setText("hr-forward-lineage-status", lineageLabel);
@@ -1275,9 +1220,7 @@
       const receiptStatus = text(receiptAudit.status, "UNAVAILABLE");
       const receiptLabel = receiptStatus === "COMPLETE"
         ? `${validReceipts}/${receiptEntries} 完整`
-        : receiptStatus === "LEGACY_RECEIPT_GAPS"
-          ? `${validReceipts}/${receiptEntries}（历史缺口）`
-          : receiptStatus === "REQUIRED_CAPTURE_MISSING"
+        : receiptStatus === "REQUIRED_CAPTURE_MISSING"
             ? `${validReceipts}/${receiptEntries}（当日板块快照缺失）`
           : receiptStatus === "REQUIRED_RECEIPT_GAPS"
             ? `${validReceipts}/${receiptEntries}（当日回执缺失）`
@@ -1334,7 +1277,6 @@
         CURRENT: "当前行情会话",
         STALE: `已过期：${text(sourceCurrentness.source_session, "来源未知")} / 当前 ${text(sourceCurrentness.current_market_session, "未知")}`,
         CURRENT_RELEASE_SIDECAR: "当前正式研究版本",
-        LEGACY_FALLBACK: "旧历史制品回退",
         UNPROVEN: "当前会话未证明",
       };
       setText(
@@ -1361,13 +1303,6 @@
           "ready",
           "盘中实时复核候选已验证并归档",
           `${snapshot.review_queue_count} 条提醒 · 30m 战略/5m 短差/1m 定位 · 候选报告自身零订单/零成交 · ${virtualLedgerSummary}`,
-        );
-      }
-      if (sourceCurrentness.status === "LEGACY_FALLBACK") {
-        setStatus(
-          "warning",
-          "当前正式研究版本尚未发布人审页面制品",
-          "页面正明确回退到旧历史筛选报告；可做因果复核，不得把它当作当前正式回测候选。REVIEW_REQUIRED / LIVE_DISABLED",
         );
       }
       if (
@@ -1873,7 +1808,7 @@
         const refreshedCandidate = currentCandidate();
         const paperDecision = paperPathDecision(state.snapshot, refreshedCandidate);
         const cancellationStatus = superseded.length
-          ? `；已追加撤销 ${superseded.length} 个旧待成交虚拟意图`
+          ? `；已追加撤销 ${superseded.length} 个先前待成交虚拟意图`
           : "";
         const feedbackHeadline = refreshedCandidate
           && refreshedCandidate.paper_reconciliation_pending === true

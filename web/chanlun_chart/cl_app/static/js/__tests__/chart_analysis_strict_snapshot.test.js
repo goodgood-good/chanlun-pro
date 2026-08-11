@@ -11,7 +11,7 @@ const DAILY_CLOSE_AT = 1784703600;
 
 function center(overrides = {}) {
   return {
-    schema: 'chanlun-chart-center/v12',
+    schema: 'chanlun-chart-center',
     render_kind: 'formal_center',
     center_id: 'center-l0-1',
     render_id: 'center-l0-1@r1@ongoing',
@@ -19,7 +19,11 @@ function center(overrides = {}) {
     structural_level: 0,
     source_kind: 'segment',
     state: 'ongoing',
-    tradable: true,
+    tradable: false,
+    completion_phase: 'AWAITING_SAME_LEVEL_RETURN',
+    completion_point_type: null,
+    expected_completion_point_type: '3buy',
+    completion_point_status: null,
     points: [
       { time: 1699997000, price_tick: 1060, price: 10.6 },
       { time: 1700000300, price_tick: 1000, price: 10.0 },
@@ -32,7 +36,7 @@ function center(overrides = {}) {
     initial_unit_ids: ['u1', 'u2', 'u3', 'u4', 'u5'],
     body_unit_ids: ['u1', 'u2', 'u3', 'u4', 'u5'],
     extension_unit_ids: [],
-    pending_leave_unit_id: null,
+    pending_leave_unit_id: 'u5',
     completion_leave_unit_id: null,
     completion_return_unit_id: null,
     completion_direction: null,
@@ -44,6 +48,7 @@ function center(overrides = {}) {
       unit_id: 'u5', direction: 'up', start_time: 1699999700, end_time: 1700000300,
       start_tick: 1000, end_tick: 1090, start_price: 10.0, end_price: 10.9,
     },
+    completion_return_segment: null,
     established_market_time: 1699999000,
     established_at: 1699999300,
     completed_at: null,
@@ -69,7 +74,7 @@ function centerPreview(overrides = {}) {
 
 function divergence(kind, structuralLevel = 0, overrides = {}) {
   return {
-    schema: 'chanlun-chart-divergence/v4',
+    schema: 'chanlun-chart-divergence',
     render_kind: 'strict_divergence',
     render_id: `${kind}-l${structuralLevel}`,
     divergence_id: `${kind}-l${structuralLevel}`,
@@ -77,9 +82,12 @@ function divergence(kind, structuralLevel = 0, overrides = {}) {
     direction: kind === 'trend' ? 'down' : 'up',
     structural_level: structuralLevel,
     source_kind: 'segment',
-    price_basis_revision: 'price-v1',
+    price_basis_revision: 'price-test',
     compare_unit_id: `compare-${kind}`,
     signal_unit_id: `signal-${kind}`,
+    comparison_width: 3,
+    compare_leg_unit_ids: ['a1', 'a2', `compare-${kind}`],
+    signal_leg_unit_ids: ['c1', 'c2', `signal-${kind}`],
     anchor_at: 1700000300,
     anchor_tick: kind === 'trend' ? 1020 : 1080,
     anchor_price: kind === 'trend' ? 10.2 : 10.8,
@@ -92,6 +100,8 @@ function divergence(kind, structuralLevel = 0, overrides = {}) {
       dif_extreme_decayed: false,
       strength_source: 'macd',
       is_divergent: true,
+      strength_decay_count: 2,
+      is_strong_divergent: true,
     },
     tradable: true,
     points: [{ time: 1700000300, price: kind === 'trend' ? 10.2 : 10.8 }],
@@ -102,7 +112,7 @@ function divergence(kind, structuralLevel = 0, overrides = {}) {
 function point(pointType, status, overrides = {}) {
   const buy = pointType.endsWith('buy');
   return {
-    schema: 'chanlun-chart-point/v3',
+    schema: 'chanlun-chart-point',
     render_kind: status === 'confirmed' ? 'point_confirmed' : 'point_approaching',
     render_id: `${pointType}-${status}`,
     point_id: `${pointType}-${status}`,
@@ -112,7 +122,7 @@ function point(pointType, status, overrides = {}) {
     variant: 'standard',
     structural_level: 0,
     source_kind: 'segment',
-    price_basis_revision: 'price-v1',
+    price_basis_revision: 'price-test',
     anchor_unit_id: `anchor-${pointType}`,
     anchor_at: 1700000000,
     confirmed_at: status === 'confirmed' ? 1700000300 : null,
@@ -153,13 +163,13 @@ function point(pointType, status, overrides = {}) {
 
 function snapshot(overrides = {}) {
   return {
-    schema: 'chanlun-chart-structure/v12',
+    schema: 'chanlun-chart-structure',
     symbol: 'SZ.000001',
     source_frequency: '5m',
     display_frequency: '5m',
-    price_basis_revision: 'price-v1',
+    price_basis_revision: 'price-test',
     structure_price_quantum: '0.01',
-    strict_config_revision: 'strict-v1',
+    strict_config_revision: 'strict-test',
     source_closed_at: CLOSED_AT,
     structure_revision: 'sha256:structure-revision-1234567890',
     snapshot_revision: 'sha256:snapshot-revision-1234567890',
@@ -171,14 +181,10 @@ function snapshot(overrides = {}) {
       source_kind: 'stroke_observation',
       structural_level: 0,
       tradable: false,
-    })],
-    display_center_observations: [center({
-      render_kind: 'center_observation',
-      center_id: 'display-segment-center-1',
-      render_id: 'display-segment-center-1@r1@ongoing',
-      source_kind: 'segment',
-      structural_level: 0,
-      tradable: false,
+      completion_phase: 'NON_TRADABLE_OBSERVATION',
+      completion_point_type: null,
+      expected_completion_point_type: null,
+      completion_point_status: null,
     })],
     levels: [{
       structural_level: 0,
@@ -195,7 +201,7 @@ function snapshot(overrides = {}) {
       })],
       center_projections: [],
       current_trends: [{
-        schema: 'chanlun-chart-trend/v3',
+        schema: 'chanlun-chart-trend',
         render_kind: 'strict_trend',
         trend_id: 'trend-l0-current',
         render_id: 'trend-l0-current@forming@u6',
@@ -238,28 +244,6 @@ function barsResult(strict = snapshot(), overrides = {}) {
       { time: 1700000000000, close: 10.4, isBarClosed: true },
       { time: CLOSED_AT * 1000, close: 11.0, isBarClosed: true },
     ],
-    bi_zss: [],
-    xd_zss: [],
-    higher_zs: [{
-      period: '5m',
-      level: 0,
-      zss: [{
-        linestyle: '1',
-        done: false,
-        zd: 10.0,
-        zg: 10.6,
-        points: [
-          { time: 1700000100, price: 10.6 },
-          { time: 1700000500, price: 10.0 },
-        ],
-        entering_segment: {
-          direction: 'up', start_price: 9.8, end_price: 10.8,
-        },
-        leaving_segment: {
-          direction: 'up', start_price: 10.0, end_price: 10.9,
-        },
-      }],
-    }],
     strict_structure_mode: 'replace',
     strict_structure: strict,
     ...overrides,
@@ -272,35 +256,31 @@ const context = {
   timeZone: 'Asia/Shanghai',
 };
 
-test('summary uses real-frequency centers while strict snapshot remains authoritative for signals', () => {
+test('strict snapshot supplies centers and signals through one contract', () => {
   const strictOnly = Analysis.summarizeChartData(barsResult(), context);
-  const poisoned = Analysis.summarizeChartData(barsResult(snapshot(), {
-    xd_zss: [{ zd: -888, zg: 888 }],
-    recursive_levels: [{ level: 0, zss: [{ zd: -777, zg: 777 }] }],
-    mmds: [{ text: 'legacy-only-buy' }],
-    bcs: [{ text: 'legacy-only-divergence' }],
-  }), context);
-
-  assert.deepEqual(poisoned, strictOnly);
   assert.equal(strictOnly.state, 'ready');
   assert.equal(strictOnly.trends[0].directionLabel, '向上');
-  assert.equal(strictOnly.formalCenters[0].tradable, true);
+  assert.equal(strictOnly.formalCenters[0].tradable, false);
   assert.equal(strictOnly.formalCenters[0].enteringSegment.direction, 'up');
   assert.equal(strictOnly.formalCenters[0].leavingSegment.direction, 'up');
   assert.equal(strictOnly.centerPreviews[0].tradable, false);
   assert.equal(strictOnly.centerPreviews[0].qualification, '形成中预览，不可直接交易');
   assert.equal(strictOnly.observations[0].tradable, false);
   assert.equal(strictOnly.observations[0].qualification, '严格笔中枢观察，不可直接交易');
-  assert.equal(strictOnly.biZone.exists, false);
-  assert.equal(strictOnly.xdZone.low, 10.0);
-  assert.equal(strictOnly.xdZone.high, 10.6);
+  assert.equal(strictOnly.biZone.exists, true);
+  assert.equal(strictOnly.xdZone.low, 12.0);
+  assert.equal(strictOnly.xdZone.high, 12.8);
   assert.equal(strictOnly.xdZone.status, '\u5f62\u6210\u4e2d');
-  assert.equal(strictOnly.xdZone.levelLabel, '线段中枢');
+  assert.equal(strictOnly.xdZone.levelLabel, '线段中枢预览');
   assert.doesNotMatch(strictOnly.xdZone.meta, /\u4e0d\u53ef\u76f4\u63a5\u4ea4\u6613/);
   assert.equal(strictOnly.xdZone.enteringSegment, '向上 · 9.80 → 10.80');
   assert.equal(strictOnly.xdZone.leavingSegment, '向上 · 10.00 → 10.90');
   assert.deepEqual(strictOnly.divergences.map((item) => item.label).sort(), ['盘整背驰', '趋势背驰']);
   assert.equal(strictOnly.divergences.every((item) => item.levelLabel === '5m'), true);
+  assert.equal(strictOnly.divergences.every((item) => item.comparisonWidth === 3), true);
+  assert.equal(strictOnly.divergences.every((item) => item.compareLegUnitIds.length === 3), true);
+  assert.equal(strictOnly.divergences.every((item) => item.strengthDecayCount === 2), true);
+  assert.equal(strictOnly.divergences.every((item) => item.isStrongDivergent === true), true);
 });
 
 test('provisional third-class completion is reported as complete but non-tradable', () => {
@@ -311,6 +291,11 @@ test('provisional third-class completion is reported as complete but non-tradabl
     completion_leave_unit_id: 'u5',
     completion_return_unit_id: 'u6',
     completion_direction: 'down',
+    pending_leave_unit_id: null,
+    completion_phase: 'GEOMETRIC_THIRD_CLASS_POINT',
+    completion_point_type: '3sell',
+    expected_completion_point_type: '3sell',
+    completion_point_status: 'provisional',
   });
   const strict = snapshot({
     levels: [{
@@ -328,7 +313,7 @@ test('provisional third-class completion is reported as complete but non-tradabl
     summary.centerPreviews[0].qualification,
     '几何已完成，等待线段锁定，不可直接交易',
   );
-  assert.equal(summary.xdZone.status, '形成中');
+  assert.equal(summary.xdZone.status, '三类卖点几何完成，待锁定');
   assert.equal(summary.xdZone.tone, 'forming');
 });
 
@@ -373,13 +358,11 @@ test('all six buy and sell point classes stay independent across confirmed and a
   assert.equal(summary.bc.levelLabel, '5m');
 });
 
-test('unavailable or context-mismatched strict data reports synchronization failure without legacy fallback', () => {
+test('unavailable or context-mismatched strict data reports synchronization failure', () => {
   const unavailable = Analysis.summarizeChartData({
     bars: [{ time: CLOSED_AT * 1000, close: 11 }],
     strict_structure_mode: 'unavailable',
     strict_structure_error: { code: 'strict_evidence_invalid' },
-    bi_zss: [{ zd: 1, zg: 2 }],
-    mmds: [{ text: '3buy' }],
   }, context);
   assert.equal(unavailable.state, 'unavailable');
   assert.equal(unavailable.formalCenters.length, 0);
@@ -458,7 +441,6 @@ test('unchanged transport may reuse only the manager-provided strict snapshot', 
   const summary = Analysis.summarizeChartData({
     bars: barsResult().bars,
     strict_structure_mode: 'unchanged',
-    bi_zss: [{ zd: 1, zg: 2 }],
   }, { ...context, cachedStrictSnapshot: snapshot() });
 
   assert.equal(summary.state, 'ready');

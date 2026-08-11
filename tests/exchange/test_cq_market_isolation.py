@@ -2,19 +2,21 @@ import pytest
 
 import chanlun.exchange as exchange_module
 from chanlun.exchange import exchange_cq
+from chanlun.exchange.exchange_cq import ExchangeChangQiao
 from chanlun.market import Market
+
+_CQ_TYPE = ExchangeChangQiao.__wrapped__
 
 
 class _FakeChangQiao:
     def __init__(self):
-        self.default_market = "us"
         self.calls = []
 
-    def all_stocks(self, market=None):
+    def all_stocks(self, market):
         self.calls.append(("all_stocks", market))
         return [{"code": market}]
 
-    def now_trading(self, market="us"):
+    def now_trading(self, market: str):
         self.calls.append(("now_trading", market))
         return market == "us"
 
@@ -36,8 +38,18 @@ def test_get_exchange_uses_stable_market_views_for_shared_cq_singleton(monkeypat
     assert us.market == "us"
     assert hk.all_stocks() == [{"code": "hk"}]
     assert us.all_stocks() == [{"code": "us"}]
-    assert hk.now_trading() is False
-    assert us.now_trading() is True
-    assert backend.default_market == "us"
+    assert hk.now_trading("hk") is False
+    assert us.now_trading("us") is True
     with pytest.raises(AttributeError):
         hk.market = "us"
+
+
+def test_longbridge_symbol_contract_rejects_unknown_formats():
+    assert _CQ_TYPE._to_lb_symbol("KH.00700") == "00700.HK"
+    assert _CQ_TYPE._to_lb_symbol("TSLA.US") == "TSLA.US"
+    assert _CQ_TYPE._market_of_code("SH.600519") == "a"
+    assert _CQ_TYPE._market_of_code("00700.HK") == "hk"
+    with pytest.raises(ValueError):
+        _CQ_TYPE._to_lb_symbol("UNKNOWN")
+    with pytest.raises(ValueError):
+        _CQ_TYPE._market_of_code("BTC.FX")

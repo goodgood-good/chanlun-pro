@@ -55,16 +55,12 @@ function Get-ApplicationSourceRevision {
     }
 
     # Keep this list byte-for-byte equivalent to
-    # tools/run_v3_forward_paper.py::FORWARD_PIPELINE_TOOL_PATHS.  These
+    # tools/run_forward_paper.py::FORWARD_PIPELINE_TOOL_PATHS.  These
     # subprocesses execute decision/PIT code from disk and therefore belong to
     # the deployed application identity; unrelated maintenance tools do not.
     $forwardPipelineTools = @(
         'tools/audit_qmt_warmup_convergence.py',
-        'tools/backtest_v3_sector_first_full_market.py',
-        'tools/build_v3_recent_year_current_sector_triggers.py',
-        'tools/extract_v3_sector_first_direct_facts.py',
-        'tools/prescreen_v3_sector_first_research_candidates.py',
-        'tools/run_v3_forward_paper.py',
+        'tools/run_forward_paper.py',
         'tools/snapshot_qmt_gics3_sector_ledger.py',
         'tools/snapshot_qmt_pit_metadata.py'
     )
@@ -78,7 +74,7 @@ function Get-ApplicationSourceRevision {
         $paths += $runtimeConfig
     }
     $paths = [string[]]@($paths | Sort-Object -Unique)
-    # Sort-Object is culture-aware (for example v3_* sorts before v31_*),
+    # Sort-Object is culture-aware (for example * sorts before *),
     # while the Python forward runner uses ordinal ordering.  The explicit
     # comparer gives deployment, verification and forward evidence one
     # cross-runtime source identity.

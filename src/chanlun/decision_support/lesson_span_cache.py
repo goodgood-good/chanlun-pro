@@ -73,17 +73,17 @@ def build_lesson_span_cache(
     *,
     identity: PdfIdentity,
     spans: tuple[PageSpan, ...] | list[PageSpan],
-    extractor_version: str,
+    extractor_id: str,
     first_page: int,
     last_page: int,
 ) -> Path:
     if not isinstance(identity, PdfIdentity):
         raise TypeError("identity must be PdfIdentity")
-    if not isinstance(extractor_version, str):
-        raise TypeError("extractor_version must be a string")
-    version = extractor_version.strip()
-    if not version or len(version) > 128:
-        raise ValueError("extractor_version must be present and bounded")
+    if not isinstance(extractor_id, str):
+        raise TypeError("extractor_id must be a string")
+    extractor_identity = extractor_id.strip()
+    if not extractor_identity or len(extractor_identity) > 128:
+        raise ValueError("extractor_id must be present and bounded")
     if (
         isinstance(first_page, bool)
         or not isinstance(first_page, int)
@@ -113,9 +113,9 @@ def build_lesson_span_cache(
         span_path.write_bytes(span_bytes)
         manifest = {
             "coverage": {"first_page": first_page, "last_page": last_page},
-            "extractor_version": version,
+            "extractor_id": extractor_identity,
             "package_kind": "chanlun_pdf_text_span_cache",
-            "schema_version": 1,
+            "schema": "current",
             "source_pdf": asdict(identity),
             "span_count": len(ordered),
             "text_spans": {
@@ -222,4 +222,3 @@ def load_lesson_span_cache(
     if any(not first_page <= span.page_number <= last_page for span in spans):
         raise ValueError("cache span lies outside declared coverage")
     return spans
-

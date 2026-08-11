@@ -6,7 +6,7 @@
     <title>任务运行状态 · Chanlun Pro</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='css/layui.css') }}" />
     <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}" />
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/ui-system.css') }}?v={{ static_version|default('') }}" />
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/ui-system.css') }}?asset={{ static_asset_token|default('') }}" />
     <script src="{{ url_for('static', filename='layui.js') }}"></script>
     <script src="{{ url_for('static', filename='jquery-3.7.0.min.js') }}"></script>
     {% include 'dark.html' %}

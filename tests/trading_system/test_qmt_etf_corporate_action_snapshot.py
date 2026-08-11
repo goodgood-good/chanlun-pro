@@ -20,7 +20,7 @@ def test_schema_and_snapshot_hash_are_deterministic() -> None:
         "schema": snapshot.SCHEMA,
     }
 
-    assert snapshot.SCHEMA == "chanlun-qmt-etf-corporate-actions/v1"
+    assert snapshot.SCHEMA == "chanlun-qmt-etf-corporate-actions"
     assert snapshot._snapshot_content_sha256(left) == snapshot._snapshot_content_sha256(
         right
     )

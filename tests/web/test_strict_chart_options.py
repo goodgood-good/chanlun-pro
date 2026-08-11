@@ -7,11 +7,10 @@ from flask import Flask
 
 from chanlun.cl_utils import chart_config
 from chanlun.core.cl import CL
-from chanlun.core.types.config import Config
 from cl_app.blueprints import options
 
 
-LEGACY_STRUCTURE_KEYS = {
+UNSUPPORTED_STRUCTURE_KEYS = {
     "zs_bi_type",
     "zs_xd_type",
     "zs_qj",
@@ -43,26 +42,25 @@ def _app() -> Flask:
     return app
 
 
-def test_chart_defaults_exclude_legacy_and_browser_only_strict_options(monkeypatch) -> None:
-    chart_config._cl_config_cache_invalidate()
+def test_chart_defaults_exclude_unsupported_and_browser_only_options(monkeypatch) -> None:
+    chart_config._cache_invalidate("a")
     monkeypatch.setattr(chart_config.db, "cache_get", lambda _key: None)
 
     result = chart_config.query_cl_chart_config("a", "SH.600519")
 
     assert set(REMOVED_STRICT_DISPLAY_KEYS).isdisjoint(result)
-    assert LEGACY_STRUCTURE_KEYS.isdisjoint(result)
+    assert UNSUPPORTED_STRUCTURE_KEYS.isdisjoint(result)
 
 
-def test_chart_default_old_pen_selection_reaches_the_core_calculator(monkeypatch) -> None:
-    chart_config._cl_config_cache_invalidate()
+def test_chart_preferences_do_not_control_the_core_calculator(monkeypatch) -> None:
+    chart_config._cache_invalidate("a")
     monkeypatch.setattr(chart_config.db, "cache_get", lambda _key: None)
 
     result = chart_config.query_cl_chart_config("a", "SH.600519")
-    cd = CL("SH.600519", "5m", dict(result), market="a")
+    cd = CL("SH.600519", "5m", market="a")
 
-    assert result["bi_type"] == Config.BI_TYPE_OLD.value
-    assert cd.get_config()["bi_mode"] == "strict"
-    assert cd.bi_calculator.bi_mode == "strict"
+    assert "bi_type" not in result
+    assert cd.get_config()["stroke_rule"] == "strict-cl-k-distance"
 
 
 def test_options_and_file_cache_share_one_persisted_key_contract() -> None:
@@ -72,24 +70,18 @@ def test_options_and_file_cache_share_one_persisted_key_contract() -> None:
     assert set(REMOVED_STRICT_DISPLAY_KEYS).isdisjoint(
         chart_config.CL_CHART_CONFIG_PERSIST_KEYS
     )
-    assert LEGACY_STRUCTURE_KEYS.isdisjoint(
+    assert UNSUPPORTED_STRUCTURE_KEYS.isdisjoint(
         chart_config.CL_CHART_CONFIG_PERSIST_KEYS
     )
     assert set(REMOVED_STRICT_DISPLAY_KEYS).isdisjoint(
         chart_config.CL_COMPUTE_CACHE_CONFIG_KEYS
     )
-    assert LEGACY_STRUCTURE_KEYS.isdisjoint(
+    assert UNSUPPORTED_STRUCTURE_KEYS.isdisjoint(
         chart_config.CL_COMPUTE_CACHE_CONFIG_KEYS
     )
 
-    source = Path("src/chanlun/persistence/file_db.py").read_text(
-        encoding="utf-8"
-    )
-    assert "CL_CHART_CONFIG_PERSIST_KEYS" in source
-    assert "CL_COMPUTE_CACHE_CONFIG_KEYS" in source
 
-
-def test_old_structure_option_submission_is_rejected_with_400(monkeypatch) -> None:
+def test_unsupported_structure_option_submission_is_rejected_with_400(monkeypatch) -> None:
     writes: list[dict] = []
     monkeypatch.setattr(
         options,
@@ -153,7 +145,7 @@ def test_options_template_excludes_browser_only_strict_structure_controls() -> N
 
     for key in REMOVED_STRICT_DISPLAY_KEYS:
         assert f'name="{key}"' not in source
-    for key in LEGACY_STRUCTURE_KEYS:
+    for key in UNSUPPORTED_STRUCTURE_KEYS:
         assert f'name="{key}"' not in source
 
 
@@ -169,10 +161,7 @@ def test_options_form_fields_match_the_shared_persistence_contract() -> None:
             if tag not in {"input", "select"}:
                 return
             attributes = dict(attrs)
-            if (
-                attributes.get("lay-filter") == "cl_config"
-                and attributes.get("name")
-            ):
+            if attributes.get("name"):
                 self.names.add(attributes["name"])
 
     source = Path(
@@ -181,7 +170,7 @@ def test_options_form_fields_match_the_shared_persistence_contract() -> None:
     parser = FormFieldParser()
     parser.feed(source)
 
-    assert parser.names == set(chart_config.CL_CHART_CONFIG_PERSIST_KEYS) | {
+    assert parser.names - {"is_del"} == set(chart_config.CL_CHART_CONFIG_PERSIST_KEYS) | {
         "market",
         "code",
     }

@@ -1,13 +1,8 @@
 import datetime
-import re
 import threading
 from collections.abc import Mapping
-from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation
-from numbers import Integral
 from typing import Dict, List, Union
 from datetime import timedelta
-from zoneinfo import ZoneInfo
 import pandas as pd
 import pytz
 from tenacity import retry, stop_after_attempt, wait_random
@@ -35,114 +30,20 @@ from xtquant import xtdata
 # 串行化，作为防御性兜底，避免多线程并发触发崩溃。
 _XTDATA_NATIVE_LOCK = threading.RLock()
 
-_RESEARCH_CODE_PATTERN = re.compile(r"^(?:SH|SZ|BJ)\.\d{6}$")
-_RESEARCH_TIMEZONE = ZoneInfo("Asia/Shanghai")
-_UNIX_EPOCH_UTC = datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)
-
-
-def _validated_research_codes(codes: object) -> tuple[str, ...]:
+def _validated_screening_codes(codes: object) -> tuple[str, ...]:
     if type(codes) is not tuple:
         raise TypeError("codes must be an exact tuple")
     if any(
-        type(code) is not str or _RESEARCH_CODE_PATTERN.fullmatch(code) is None
+        type(code) is not str
+        or len(code) != 9
+        or code[:3] not in {"SH.", "SZ.", "BJ."}
+        or not code[3:].isdigit()
         for code in codes
     ):
         raise ValueError("codes must contain exact normalized A-share codes")
     if len(set(codes)) != len(codes):
         raise ValueError("codes must not contain duplicates")
     return codes
-
-
-def _research_decimal(value: object, field_name: str) -> Decimal:
-    if isinstance(value, bool):
-        raise ValueError(f"{field_name} must be a finite native numeric value")
-    try:
-        converted = Decimal(str(value))
-    except (InvalidOperation, TypeError, ValueError) as error:
-        raise ValueError(
-            f"{field_name} must be a finite native numeric value"
-        ) from error
-    if not converted.is_finite():
-        raise ValueError(f"{field_name} must be a finite native numeric value")
-    return converted
-
-
-def _research_integer(value: object, field_name: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, Integral):
-        raise ValueError(f"{field_name} must be a native integer")
-    converted = int(value)
-    if field_name == "native_time_ms" and converted < 0:
-        raise ValueError("native_time_ms must be non-negative")
-    return converted
-
-
-def _datetime_from_native_ms(native_time_ms: int) -> datetime.datetime:
-    return (
-        _UNIX_EPOCH_UTC + datetime.timedelta(milliseconds=native_time_ms)
-    ).astimezone(_RESEARCH_TIMEZONE)
-
-
-@dataclass(frozen=True, slots=True)
-class QmtResearchTick:
-    code: str
-    native_time_ms: int
-    last_price: Decimal
-    last_close: Decimal
-    volume: Decimal
-    stock_status: int
-
-    def __post_init__(self) -> None:
-        if (
-            type(self.code) is not str
-            or _RESEARCH_CODE_PATTERN.fullmatch(self.code) is None
-        ):
-            raise ValueError("code must be an exact normalized A-share code")
-        if (
-            type(self.native_time_ms) is not int
-            or isinstance(self.native_time_ms, bool)
-            or self.native_time_ms < 0
-        ):
-            raise ValueError("native_time_ms must be an exact non-negative int")
-        for field_name in ("last_price", "last_close", "volume"):
-            value = getattr(self, field_name)
-            if type(value) is not Decimal or not value.is_finite():
-                raise ValueError(f"{field_name} must be a finite Decimal")
-        if type(self.stock_status) is not int or isinstance(self.stock_status, bool):
-            raise ValueError("stock_status must be an exact int")
-
-
-@dataclass(frozen=True, slots=True)
-class QmtDailyAmount:
-    code: str
-    source_timestamp: datetime.datetime
-    session: datetime.date
-    amount: Decimal
-
-    def __post_init__(self) -> None:
-        if (
-            type(self.code) is not str
-            or _RESEARCH_CODE_PATTERN.fullmatch(self.code) is None
-        ):
-            raise ValueError("code must be an exact normalized A-share code")
-        if not isinstance(self.source_timestamp, datetime.datetime):
-            raise ValueError("source_timestamp must be a timezone-aware datetime")
-        if (
-            self.source_timestamp.tzinfo is None
-            or self.source_timestamp.utcoffset() is None
-        ):
-            raise ValueError("source_timestamp must be timezone-aware")
-        normalized_timestamp = self.source_timestamp.astimezone(_RESEARCH_TIMEZONE)
-        object.__setattr__(self, "source_timestamp", normalized_timestamp)
-        if type(self.session) is not datetime.date:
-            raise ValueError("session must be an exact date")
-        if self.session != normalized_timestamp.date():
-            raise ValueError("session must equal source_timestamp Shanghai date")
-        if (
-            type(self.amount) is not Decimal
-            or not self.amount.is_finite()
-            or self.amount <= 0
-        ):
-            raise ValueError("amount must be a positive finite Decimal")
 
 
 class ExchangeQMT(Exchange):
@@ -296,8 +197,10 @@ class ExchangeQMT(Exchange):
         如果上层指定了 req_counts（用户实际只要这么多根 K 线），会按周期估算
         一个紧凑的回看窗口，避免无谓地拉超长历史导致 BSON payload 过大。
         """
+        if frequency not in self.download_frequency_map:
+            raise ValueError(f"unsupported QMT frequency: {frequency}")
         now = datetime.datetime.now()
-        delta = self.DEFAULT_LOOKBACK.get(frequency, timedelta(days=365))
+        delta = self.DEFAULT_LOOKBACK[frequency]
 
         # 当调用方指定了请求 K 线数量时，按周期估算一个紧凑的窗口（带 3 倍冗余）。
         # 这样典型场景（300 根 1m）只需要 ~3 天历史，而不是 30 天。
@@ -327,7 +230,7 @@ class ExchangeQMT(Exchange):
                     "w": 60 * 24 * 7,
                     "m": 60 * 24 * 30,
                 }
-                est_minutes = minutes_per_bar.get(frequency, 60) * req_counts * 3
+                est_minutes = minutes_per_bar[frequency] * req_counts * 3
                 est_delta = timedelta(minutes=est_minutes)
             # 取估算窗口和默认窗口中较小的
             if est_delta < delta:
@@ -356,6 +259,14 @@ class ExchangeQMT(Exchange):
         - 单块异常吞掉(warning):该块标的逐只 download 仍能兜底(不传 skip_download 时)。
         - cancel_check() 返回 True 尽快中止。
         """
+        frequencies = tuple(frequencies)
+        if any(type(freq) is not str for freq in frequencies):
+            raise TypeError("QMT frequencies must be exact strings")
+        unsupported = set(frequencies) - set(self.download_frequency_map)
+        if unsupported:
+            raise ValueError(
+                f"unsupported QMT frequencies: {sorted(unsupported)}"
+            )
         if req_counts_by_frequency is None:
             req_counts_by_frequency = {}
         if not isinstance(req_counts_by_frequency, Mapping):
@@ -374,9 +285,7 @@ class ExchangeQMT(Exchange):
         # 基础下载周期 → 该周期需覆盖的最早 start(用到它的各 freq 取最长回看)
         base_starts: dict = {}
         for freq in frequencies:
-            base = self.download_frequency_map.get(freq)
-            if base is None:
-                base = "1m" if freq in ("1m", "5m", "15m", "30m", "60m") else "1d"
+            base = self.download_frequency_map[freq]
             start = self.get_start_date_by_frequency(
                 freq,
                 req_counts=req_counts_by_frequency.get(freq),
@@ -427,24 +336,43 @@ class ExchangeQMT(Exchange):
     ) -> pd.DataFrame:
         empty_df = pd.DataFrame(columns=['code', 'date', 'open', 'high', 'low', 'close', 'volume'])
 
+        if args is not None:
+            if type(args) is not dict:
+                raise TypeError("QMT K-line args must be an exact dict")
+            unknown_args = set(args) - {
+                "req_counts",
+                "research_exact_end",
+                "dividend_type",
+                "skip_download",
+            }
+            if unknown_args:
+                raise ValueError(
+                    f"unsupported QMT K-line args: {sorted(unknown_args)}"
+                )
+            if "req_counts" in args and (
+                type(args["req_counts"]) is not int
+                or args["req_counts"] <= 0
+            ):
+                raise ValueError("req_counts must be a positive exact int")
+            if "skip_download" in args and type(args["skip_download"]) is not bool:
+                raise ValueError("skip_download must be an exact bool")
+
         # QMT 可服务周期 = 原生(frequency_map) + convert 合成(2m/10m resample, 120m 分段)。
         # 其余(q/y/3m/6m 等)convert 不支持:历史会 fallback 读 1m 再 convert 抛异常,被外层
         # @retry 吞 3 次 → RetryError(审查 M5)。与 cq 一致在入口如实拒绝,不降级、不进 retry。
-        QMT_SUPPORTED_FREQS = {"1m", "2m", "5m", "10m", "15m", "30m", "60m", "120m", "d", "w", "m"}
+        QMT_SUPPORTED_FREQS = frozenset(self.download_frequency_map)
         if frequency not in QMT_SUPPORTED_FREQS:
             LogUtil.warning(f"[ExchangeQMT.klines] 不支持的周期 {frequency} code={code}, 返回空(不降级)")
             return empty_df
 
-        qmt_read_period = self.frequency_map.get(frequency, "1m")
+        qmt_read_period = (
+            self.frequency_map[frequency]
+            if frequency in self.frequency_map
+            else "1m"
+        )
         qmt_code = self.code_to_qmt(code)
 
-        # 按 download_frequency_map 选取下载基础周期，映射外的周期按日内/日线降级
-        qmt_download_period = self.download_frequency_map.get(frequency)
-        if qmt_download_period is None:
-            if frequency in ["1m", "5m", "15m", "30m", "60m"]:
-                qmt_download_period = "1m"
-            else:
-                qmt_download_period = "1d"
+        qmt_download_period = self.download_frequency_map[frequency]
 
         # args["req_counts"] 允许上层声明实际需要的 K 线数量，用于收紧回看窗口
         req_counts = args.get("req_counts") if args else None
@@ -453,13 +381,13 @@ class ExchangeQMT(Exchange):
         else:
             query_start = self.get_start_date_by_frequency(frequency, req_counts=req_counts)
         if (
-            isinstance(args, dict)
+            args is not None
             and "research_exact_end" in args
             and type(args["research_exact_end"]) is not bool
         ):
             raise ValueError("research_exact_end must be an exact bool")
         research_exact_end = (
-            isinstance(args, dict) and args.get("research_exact_end") is True
+            args is not None and args.get("research_exact_end") is True
         )
         if research_exact_end and not end_date:
             raise ValueError("research_exact_end requires end_date")
@@ -490,15 +418,22 @@ class ExchangeQMT(Exchange):
             )
 
         dividend_type = args.get("dividend_type", "front") if args else "front"
+        if dividend_type not in {
+            "none",
+            "front",
+            "back",
+            "front_ratio",
+            "back_ratio",
+        }:
+            raise ValueError("unsupported QMT dividend_type")
 
         # download + get_market_data 一起持锁，防止其他线程在两次调用之间插入导致状态错乱
         # incrementally=True 避免全量下载，减小 BSON payload，降低 `u < 1000000` 断言触发概率
         field_list = ["time", "open", "high", "low", "close", "volume"]
         # 预热批量预下载后, 逐只可跳过 download(数据已在本地库), 只读取——省下逐只 QMT 往返。
         # 仅预热路径经 args 显式传入 skip_download=True; 用户实时请求不传, 行为不变。
-        _skip_dl = bool(args.get("skip_download")) if isinstance(args, dict) else False
+        _skip_dl = args.get("skip_download", False) if args is not None else False
         price_basis_factors = None
-        price_basis_error = None
         with _XTDATA_NATIVE_LOCK:
             try:
                 if not _skip_dl:
@@ -519,17 +454,12 @@ class ExchangeQMT(Exchange):
                     dividend_type=dividend_type,
                     fill_data=False,
                 )
-                if dividend_type != "none":
-                    try:
-                        price_basis_factors = xtdata.get_divid_factors(qmt_code)
-                    except Exception as exc:
-                        price_basis_error = exc
-                        LogUtil.warning(
-                            "[ExchangeQMT.price_basis] factor read failed "
-                            f"code={code} frequency={frequency} "
-                            f"adjustment={dividend_type} "
-                            f"error={type(exc).__name__}: {exc}"
-                        )
+                if (
+                    dividend_type != "none"
+                    and isinstance(raw_data, Mapping)
+                    and raw_data
+                ):
+                    price_basis_factors = xtdata.get_divid_factors(qmt_code)
             except Exception as e:
                 # native 层抛出的普通异常仍然走外层 retry；
                 # 注意：BSON 断言导致的 0xC0000409 进程崩溃 Python 无法捕获，
@@ -540,38 +470,29 @@ class ExchangeQMT(Exchange):
                 )
                 raise
 
-        # xtdata.get_market_data 老版本返回 pd.DataFrame，新版本可能是 np.ndarray，需兼容两种检空方式
+        if not isinstance(raw_data, Mapping):
+            raise TypeError("QMT K-line response must be a field mapping")
         if not raw_data:
             return empty_df
-        time_col = raw_data.get("time")
-        if time_col is None:
+        if set(raw_data) != set(field_list) or any(
+            not isinstance(raw_data[field], pd.DataFrame)
+            for field in field_list
+        ):
+            raise TypeError("QMT K-line response field contract is invalid")
+        time_col = raw_data["time"]
+        if time_col.empty:
             return empty_df
-        try:
-            if hasattr(time_col, "empty"):
-                if time_col.empty:
-                    return empty_df
-            elif hasattr(time_col, "size"):
-                if time_col.size == 0:
-                    return empty_df
-            elif len(time_col) == 0:
-                return empty_df
-        except Exception as e:
-            LogUtil.warning(
-                f"[exchange_qmt._build_empty_df] check time_col failed code={code} freq={frequency}: {e}"
-            )
-            return empty_df
-
-        try:
-            data_dict = {
-                "date": raw_data["time"].values[0],
-                "open": raw_data["open"].values[0],
-                "high": raw_data["high"].values[0],
-                "low": raw_data["low"].values[0],
-                "close": raw_data["close"].values[0],
-                "volume": raw_data["volume"].values[0]
-            }
-        except (IndexError, KeyError, AttributeError, ValueError):
-            return empty_df
+        shapes = {raw_data[field].shape for field in field_list}
+        if len(shapes) != 1 or next(iter(shapes))[0] != 1:
+            raise ValueError("QMT K-line response fields must share one-symbol shape")
+        data_dict = {
+            "date": raw_data["time"].values[0],
+            "open": raw_data["open"].values[0],
+            "high": raw_data["high"].values[0],
+            "low": raw_data["low"].values[0],
+            "close": raw_data["close"].values[0],
+            "volume": raw_data["volume"].values[0],
+        }
 
         klines_df = pd.DataFrame(data_dict)
 
@@ -629,38 +550,16 @@ class ExchangeQMT(Exchange):
                 klines_df = klines_df.iloc[-req_counts:]
 
         klines_df = normalize_kline_precision(klines_df, "a", code)
-        if price_basis_error is not None:
-            klines_df.attrs["price_basis_provider"] = "qmt"
-            klines_df.attrs["price_basis_adjustment"] = dividend_type
-            klines_df.attrs["price_basis_error_code"] = "qmt_factor_read_failed"
-        else:
-            try:
-                quantum = resolve_structure_price_quantum("a", code)
-                if quantum is None:
-                    raise ValueError(
-                        "A-share structure price quantum is unavailable"
-                    )
-                metadata = build_qmt_price_basis_metadata(
-                    code=code,
-                    adjustment=dividend_type,
-                    structure_price_quantum=quantum,
-                    factors=price_basis_factors,
-                )
-                attach_price_basis_metadata(klines_df, metadata)
-            except Exception as exc:
-                klines_df.attrs.pop("structure_price_quantum", None)
-                klines_df.attrs.pop("price_basis_revision", None)
-                klines_df.attrs["price_basis_provider"] = "qmt"
-                klines_df.attrs["price_basis_adjustment"] = dividend_type
-                klines_df.attrs["price_basis_error_code"] = (
-                    "qmt_price_basis_invalid"
-                )
-                LogUtil.warning(
-                    "[ExchangeQMT.price_basis] metadata build failed "
-                    f"code={code} frequency={frequency} "
-                    f"adjustment={dividend_type} "
-                    f"error={type(exc).__name__}: {exc}"
-                )
+        quantum = resolve_structure_price_quantum("a", code)
+        if quantum is None:
+            raise ValueError("A-share structure price quantum is unavailable")
+        metadata = build_qmt_price_basis_metadata(
+            code=code,
+            adjustment=dividend_type,
+            structure_price_quantum=quantum,
+            factors=price_basis_factors,
+        )
+        attach_price_basis_metadata(klines_df, metadata)
         return klines_df
 
     def stock_info(self, code: str) -> Union[Dict, None]:
@@ -688,7 +587,7 @@ class ExchangeQMT(Exchange):
         unsupported responses remain explicit and fail closed downstream.
         """
 
-        normalized = _validated_research_codes(codes)
+        normalized = _validated_screening_codes(codes)
         result: dict[str, str] = {}
         with _XTDATA_NATIVE_LOCK:
             for code in normalized:
@@ -706,189 +605,6 @@ class ExchangeQMT(Exchange):
                 else:
                     kind = "unsupported_cn"
                 result[code] = kind
-        return result
-
-    def research_tick_snapshots(
-        self,
-        codes: tuple[str, ...],
-    ) -> Mapping[str, QmtResearchTick]:
-        """Read one native QMT tick batch without synthesizing research facts."""
-
-        normalized_codes = _validated_research_codes(codes)
-        if not normalized_codes:
-            return {}
-        native_codes = tuple(self.code_to_qmt(code) for code in normalized_codes)
-        requested_by_native = dict(zip(native_codes, normalized_codes))
-        with _XTDATA_NATIVE_LOCK:
-            native_result = xtdata.get_full_tick(list(native_codes))
-        if not isinstance(native_result, Mapping):
-            return {}
-        unknown_codes = [
-            code for code in native_result if code not in requested_by_native
-        ]
-        if unknown_codes:
-            raise RuntimeError(
-                f"QMT returned unknown native code: {unknown_codes[0]!r}"
-            )
-
-        snapshots: dict[str, QmtResearchTick] = {}
-        required_fields = (
-            "time",
-            "lastPrice",
-            "lastClose",
-            "volume",
-            "stockStatus",
-        )
-        for native_code, code in zip(native_codes, normalized_codes):
-            native_tick = native_result.get(native_code)
-            if not isinstance(native_tick, Mapping) or any(
-                field not in native_tick for field in required_fields
-            ):
-                continue
-            try:
-                snapshot = QmtResearchTick(
-                    code=code,
-                    native_time_ms=_research_integer(
-                        native_tick["time"], "native_time_ms"
-                    ),
-                    last_price=_research_decimal(
-                        native_tick["lastPrice"], "lastPrice"
-                    ),
-                    last_close=_research_decimal(
-                        native_tick["lastClose"], "lastClose"
-                    ),
-                    volume=_research_decimal(native_tick["volume"], "volume"),
-                    stock_status=_research_integer(
-                        native_tick["stockStatus"], "stockStatus"
-                    ),
-                )
-            except (TypeError, ValueError):
-                continue
-            snapshots[code] = snapshot
-        return snapshots
-
-    def research_daily_amounts(
-        self,
-        codes: tuple[str, ...],
-        *,
-        start_session: datetime.date,
-        end_session: datetime.date,
-    ) -> Mapping[str, tuple[QmtDailyAmount, ...]]:
-        """Read native daily ``time`` and ``amount`` facts for a bounded window."""
-
-        normalized_codes = _validated_research_codes(codes)
-        if type(start_session) is not datetime.date:
-            raise TypeError("start_session must be an exact date")
-        if type(end_session) is not datetime.date:
-            raise TypeError("end_session must be an exact date")
-        if start_session > end_session:
-            raise ValueError("start_session must not be after end_session")
-        empty_result = {code: () for code in normalized_codes}
-        if not normalized_codes:
-            return empty_result
-
-        native_codes = tuple(self.code_to_qmt(code) for code in normalized_codes)
-        requested_by_native = dict(zip(native_codes, normalized_codes))
-        start_text = start_session.strftime("%Y%m%d")
-        end_text = end_session.strftime("%Y%m%d")
-        with _XTDATA_NATIVE_LOCK:
-            xtdata.download_history_data2(
-                list(native_codes),
-                "1d",
-                start_time=start_text,
-                end_time=end_text,
-                incrementally=True,
-            )
-            native_result = xtdata.get_market_data(
-                field_list=["time", "amount"],
-                stock_list=list(native_codes),
-                period="1d",
-                start_time=start_text,
-                end_time=end_text,
-                count=-1,
-                dividend_type="none",
-                fill_data=False,
-            )
-        if not isinstance(native_result, Mapping):
-            return empty_result
-
-        time_frame = native_result.get("time")
-        amount_frame = native_result.get("amount")
-        for frame in (time_frame, amount_frame):
-            if isinstance(frame, pd.DataFrame):
-                for native_code in frame.index:
-                    if native_code not in requested_by_native:
-                        raise RuntimeError(
-                            f"QMT returned unknown native code: {native_code!r}"
-                        )
-        if not isinstance(time_frame, pd.DataFrame) or not isinstance(
-            amount_frame, pd.DataFrame
-        ):
-            return empty_result
-        if (
-            not time_frame.columns.equals(amount_frame.columns)
-            or time_frame.columns.has_duplicates
-            or amount_frame.columns.has_duplicates
-        ):
-            return empty_result
-
-        result: dict[str, tuple[QmtDailyAmount, ...]] = {}
-        for native_code, code in zip(native_codes, normalized_codes):
-            if native_code not in time_frame.index or native_code not in amount_frame.index:
-                result[code] = ()
-                continue
-            native_times = time_frame.loc[native_code]
-            native_amounts = amount_frame.loc[native_code]
-            if not isinstance(native_times, pd.Series) or not isinstance(
-                native_amounts, pd.Series
-            ):
-                result[code] = ()
-                continue
-            time_values = tuple(native_times.tolist())
-            amount_values = tuple(native_amounts.tolist())
-            if len(time_values) != len(amount_values):
-                result[code] = ()
-                continue
-
-            rows: list[QmtDailyAmount] = []
-            invalid = False
-            previous_timestamp: datetime.datetime | None = None
-            previous_session: datetime.date | None = None
-            for native_time, native_amount in zip(time_values, amount_values):
-                try:
-                    native_time_ms = _research_integer(
-                        native_time, "native_time_ms"
-                    )
-                    source_timestamp = _datetime_from_native_ms(native_time_ms)
-                except (TypeError, ValueError, OverflowError):
-                    invalid = True
-                    break
-                session = source_timestamp.date()
-                if session < start_session or session > end_session:
-                    continue
-                try:
-                    amount = _research_decimal(native_amount, "amount")
-                    row = QmtDailyAmount(
-                        code=code,
-                        source_timestamp=source_timestamp,
-                        session=session,
-                        amount=amount,
-                    )
-                except (TypeError, ValueError):
-                    invalid = True
-                    break
-                if (
-                    previous_timestamp is not None
-                    and source_timestamp <= previous_timestamp
-                ) or (
-                    previous_session is not None and session <= previous_session
-                ):
-                    invalid = True
-                    break
-                rows.append(row)
-                previous_timestamp = source_timestamp
-                previous_session = session
-            result[code] = () if invalid else tuple(rows)
         return result
 
     def ticks(self, codes: List[str]) -> Dict[str, Tick]:
@@ -959,39 +675,7 @@ class ExchangeQMT(Exchange):
         df["divid_date"] = pd.to_datetime(df["time"] / 1000, unit="s")
         return df
 
-    def subscribe_all_ticks(
-        self, callback, market_list: List[str] = ["SH", "SZ", "BJ"]
-    ):
-        all_stocks = self.all_stocks()
-        all_codes = [_s["code"] for _s in all_stocks]
-
-        def on_tick(_ticks):
-            for _code, _tick in _ticks.items():
-                _tdx_code = self.code_to_tdx(_code)
-                if _tdx_code not in all_codes:
-                    continue
-                callback(_tdx_code, _tick)
-
-        xtdata.subscribe_whole_quote(market_list, on_tick)
-        xtdata.run()
-
-    def subscribe_stocks_quotes(self, codes: List[str], callback):
-        """
-        订阅股票行情
-        """
-        qmt_codes = [self.code_to_qmt(_c) for _c in codes]
-
-        def on_tick(_ticks):
-            for _code, _tick in _ticks.items():
-                _tdx_code = self.code_to_tdx(_code)
-                if _tdx_code not in codes:
-                    continue
-                callback(_tdx_code, _tick)
-
-        xtdata.subscribe_whole_quote(qmt_codes, on_tick)
-        xtdata.run()
-
-    def now_trading(self):
+    def now_trading(self, market: str):
         """
         返回当前是否是交易时间。
 
@@ -1040,19 +724,3 @@ class ExchangeQMT(Exchange):
 
     def order(self, code: str, o_type: str, amount: float, args=None):
         raise Exception("QMT 交易功能在 trader 目录实现")
-
-
-if __name__ == "__main__":
-    ex = ExchangeQMT()
-
-    klines = ex.klines(
-        "SZ.002645",
-        "1m",
-    )
-
-    # 验证指定日期的 volume 累加是否正确
-    klines["ddd"] = klines["date"].apply(lambda x: x.strftime("%Y-%m-%d"))
-    volume = klines[klines["ddd"] == "2026-02-04"]["volume"].sum()
-
-    print(klines[klines["ddd"] == "2026-02-04"])
-    print(volume)

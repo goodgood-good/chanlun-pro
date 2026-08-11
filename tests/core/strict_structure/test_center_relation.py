@@ -21,7 +21,7 @@ def relation_center(
     *,
     structural_level=0,
     source_kind=SourceKind.SEGMENT,
-    price_basis_revision="test-raw-v1",
+    price_basis_revision="test-raw",
 ):
     initial = tuple(
         replace(item, price_basis_revision=price_basis_revision)
@@ -145,7 +145,7 @@ def test_relation_rejects_cross_basis_or_cross_level_centers():
         140,
         130,
         150,
-        price_basis_revision="post-action-v2",
+        price_basis_revision="post-action",
     )
     with pytest.raises(ValueError, match="same price basis"):
         classify_center_relation(previous, rebased)

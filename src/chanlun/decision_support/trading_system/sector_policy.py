@@ -19,7 +19,7 @@ def assess_sector(
 ) -> SectorAssessment:
     if market_data_source not in {
         "qmt_gics3_component_composite",
-        # Canonical V5 QMT median-return composite used by the page, forward
+        # Canonical QMT median-return composite used by the page, forward
         # paper path and the current-membership research replay.
         "qmt-gics3-composite",
         # User-authorized recent-year research variant.  The distinct source
@@ -27,9 +27,6 @@ def assess_sector(
         # and report; it remains RESEARCH_ONLY / LIVE_DISABLED.
         "qmt-gics3-current-backfill-composite",
         "qmt-sw1-pit-composite",
-        # Retained for historical backtest replay only. Production screening is
-        # wired to the QMT source above.
-        "tdx_native_880_index",
     }:
         return SectorAssessment(
             sector_id,

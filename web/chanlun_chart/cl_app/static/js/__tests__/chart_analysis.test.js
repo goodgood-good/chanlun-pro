@@ -10,173 +10,21 @@ const templatePath = path.join(__dirname, '..', '..', '..', 'templates', 'index.
 const staticJsPath = path.join(__dirname, '..');
 const analysisCssPath = path.join(__dirname, '..', '..', 'css', 'chart_analysis.css');
 
-function point(time, price) {
-  return { time, price };
-}
-
-function line(startTime, startPrice, endTime, endPrice, linestyle = '1') {
-  return {
-    linestyle,
-    points: [point(startTime, startPrice), point(endTime, endPrice)],
-  };
-}
-
-function signal(time, price, text, level) {
-  return { points: point(time, price), text, level };
-}
-
-test('summarizeChartData explains current structure without turning it into a trade command', () => {
-  const data = {
-    bars: [
-      { time: 1700000000000, close: 10.1, isBarClosed: true },
-      { time: 1700000300000, close: 10.4, isBarClosed: true },
-      { time: 1700000600000, close: 10.8, isBarClosed: false },
-    ],
-    bis: [line(1700000000, 9.8, 1700000600, 10.8, '1')],
-    xds: [line(1699997000, 12.2, 1700000000, 9.8, '1')],
-    bi_zss: [{
-      linestyle: '0',
-      points: [point(1699998000, 10.6), point(1699999500, 10.0)],
-    }],
-    xd_zss: [{
-      linestyle: '1',
-      points: [point(1699996000, 11.3), point(1699997000, 9.6)],
-    }],
-    bi_mmds: [signal(1700000300, 10.4, '3buy', 'bi')],
-    xd_mmds: [signal(1699990000, 11.8, '1sell', 'xd')],
-    bi_bcs: [signal(1699999500, 10.0, 'PZ', 'bi')],
-    xd_bcs: [],
-    mmds: [],
-    bcs: [],
-  };
-
-  const summary = Analysis.summarizeChartData(data, { resolution: '5' });
-
-  assert.equal(summary.price, '10.80');
-  assert.equal(summary.barState, '收盘待确认');
-  assert.equal(summary.bi.text, '向上 · 形成中');
-  assert.equal(summary.bi.meta, '9.80 → 10.80 · 未闭合');
-  assert.equal(summary.xd.text, '向下 · 形成中');
-  assert.equal(summary.xd.meta, '12.20 → 9.80 · 未闭合');
-  assert.equal(summary.biZone.text, '10.00–10.60');
-  assert.equal(summary.biZone.position, '上方');
-  assert.equal(summary.biZone.meta, '已完成 · 高于上沿 0.20（1.89%）');
-  assert.equal(summary.xdZone.text, '9.60–11.30');
-  assert.equal(summary.xdZone.position, '中枢内');
-  assert.equal(summary.xdZone.meta, '形成中 · 位于区间内 · 距上沿 0.50');
-  assert.match(summary.plan.now, /笔中枢上方/);
-  assert.match(summary.plan.now, /线段中枢内/);
-  assert.equal(summary.mmd.label, '三类买点');
-  assert.equal(summary.mmd.levelLabel, '笔');
-  assert.equal(summary.mmd.recency, '距当前 1 根 K 线');
-  assert.match(summary.mmd.meta, /信号价 10\.40/);
-  assert.match(summary.mmd.meta, /现价较信号 \+3\.85%/);
-  assert.equal(summary.mmd.tone, 'buy');
-  assert.equal(summary.bc.label, '盘整背驰');
-  assert.equal(summary.bc.recency, '当前加载区间之前');
-  assert.equal(summary.verdict, '线段向下未完成，当前笔向上反向运行');
-  assert.equal(
-    summary.verdictDetail,
-    '现价位于笔中枢上方、线段中枢内；形成中的笔或线段边界仍可能变化。',
-  );
-  assert.match(summary.plan.wait, /当前向上笔闭合/);
-  assert.match(summary.plan.wait, /线段中枢 9\.60–11\.30/);
-  assert.match(summary.plan.boundary, /9\.80/);
-  assert.match(summary.plan.boundary, /触发结构重算/);
-  assert.match(summary.plan.boundary, /不是自动开仓、平仓或止损价/);
-  assert.doesNotMatch(summary.plan.now, /买入|卖出|开仓|清仓/);
-});
-
-test('line-segment zone reads the matching real-frequency center and ignores recursive levels', () => {
-  const data = {
-    bars: [{ time: 1700000600000, close: 10.8, isBarClosed: true }],
-    xd_zss: [{
-      linestyle: '0',
-      points: [point(1700000300, 8.0), point(1700000400, 7.0)],
-    }],
-    recursive_levels: [
-      {
-        level: 0,
-        zss: [{
-          linestyle: '1',
-          points: [point(1700000000, 11.3), point(1700000500, 9.6)],
-        }],
-      },
-      {
-        level: 1,
-        zss: [{
-          linestyle: '0',
-          points: [point(1700000550, 20), point(1700000580, 5)],
-        }],
-      },
-    ],
-    higher_zs: [{
-      period: '5m',
-      level: 0,
-      zss: [{
-        linestyle: '1',
-        done: false,
-        state: 'forming',
-        render_kind: 'center_preview',
-        provisional: true,
-        contains_unfinished_segment: true,
-        core_directions: ['down', 'up', 'down'],
-        points: [point(1700000000, 11.3), point(1700000500, 9.6)],
-      }],
-    }],
-  };
-
-  const summary = Analysis.summarizeChartData(data, { resolution: '5' });
-
-  assert.equal(summary.xdZone.text, '9.60–11.30');
-  assert.equal(summary.xdZone.position, '中枢内');
-  assert.equal(summary.xdZone.status, '形成中');
-  assert.equal(summary.xdZone.qualification, '形成中预览，不可直接交易');
-  assert.equal(summary.xdZone.coreDirections, '向下 → 向上 → 向下');
-});
 test('summarizeChartData handles an empty or still-loading chart honestly', () => {
   const summary = Analysis.summarizeChartData({ bars: [] }, { resolution: '1D' });
 
   assert.equal(summary.price, '--');
-  assert.equal(summary.verdict, '等待形成可解释的笔或线段');
-  assert.equal(summary.verdictDetail, '当前数据不足，暂不判断方向或中枢位置。');
+  assert.equal(summary.verdict, '正在同步严格缠论结构');
+  assert.equal(summary.verdictDetail, '严格结构传输状态缺失');
   assert.equal(summary.bi.text, '尚未形成');
   assert.equal(summary.bi.meta, '等待至少两个有效端点');
   assert.equal(summary.xd.text, '尚未形成');
   assert.equal(summary.xd.meta, '等待至少两个有效端点');
-  assert.equal(summary.biZone.text, '尚无笔中枢');
-  assert.equal(summary.xdZone.text, '尚无线段中枢');
+  assert.equal(summary.biZone.text, '尚无笔中枢观察');
+  assert.equal(summary.xdZone.text, '尚无严格中枢');
   assert.equal(summary.mmd.empty, true);
   assert.equal(summary.bc.empty, true);
-  assert.match(summary.plan.wait, /等待至少一笔形成并闭合/);
-});
-
-test('latest signal wins across split and compatibility arrays with readable labels', () => {
-  const data = {
-    bars: [
-      { time: 1700000000000, close: 8.2, isBarClosed: true },
-      { time: 1700000300000, close: 8.4, isBarClosed: true },
-    ],
-    bis: [],
-    xds: [],
-    bi_mmds: [signal(1699990000, 8.0, '1buy', 'bi')],
-    xd_mmds: [signal(1700000300, 8.4, 'l2sell', 'xd')],
-    mmds: [signal(1699995000, 8.3, '2buy', 'bi')],
-    bi_bcs: [signal(1699990000, 8.0, 'QS', 'bi')],
-    xd_bcs: [signal(1700000000, 8.2, 'PZ', 'xd')],
-    bcs: [],
-  };
-
-  const summary = Analysis.summarizeChartData(data, { resolution: '5' });
-
-  assert.equal(summary.mmd.label, '类二类卖点');
-  assert.equal(summary.mmd.levelLabel, '线段');
-  assert.equal(summary.mmd.tone, 'sell');
-  assert.equal(summary.mmd.recency, '最近一根 K 线');
-  assert.match(summary.mmd.meta, /现价较信号 \+0\.00%/);
-  assert.equal(summary.bc.label, '盘整背驰');
-  assert.equal(summary.bc.levelLabel, '线段');
-  assert.equal(summary.bc.recency, '距当前 1 根 K 线');
+  assert.match(summary.plan.wait, /等待同一标的、周期和末根闭合时间/);
 });
 
 test('formatResolution covers intraday and higher timeframes', () => {
@@ -185,133 +33,6 @@ test('formatResolution covers intraday and higher timeframes', () => {
   assert.equal(Analysis.formatResolution('1W'), '周线');
   assert.equal(Analysis.formatResolution('1M'), '月线');
   assert.equal(Analysis.formatResolution('10S'), '10 秒');
-});
-
-test('zone summary exposes auditable tower level bounds segments and point metadata', () => {
-  const data = {
-    bars: [{ time: 1700000600000, close: 10.8, isBarClosed: true }],
-    bi_zss: [{
-      linestyle: '0',
-      tower: 'xd', // stale payload metadata must not relabel the bi channel
-      recursive_level: null,
-      zd: 10,
-      zg: 10.6,
-      points: [point(1700000000, 10.6), point(1700000500, 10)],
-      entering_segment: {
-        direction: 'down', start_price: 11.2, end_price: 10,
-      },
-      leaving_segment: {
-        direction: 'up', start_price: 10.1, end_price: 10.8,
-      },
-      associated_points: ['3buy'],
-    }],
-    xd_zss: [{
-      linestyle: '1',
-      tower: 'bi', // stale payload metadata must not relabel the xd channel
-      recursive_level: 0,
-      zd: 9.6,
-      zg: 11.3,
-      points: [point(1699996000, 11.3), point(1699997000, 9.6)],
-      entering_segment: null,
-      core_directions: ['down', 'up', 'down'],
-      leaving_segment: null,
-      associated_points: [],
-    }],
-  };
-
-  const summary = Analysis.summarizeChartData(data, { resolution: '5' });
-
-  assert.equal(summary.biZone.tower, '笔');
-  assert.equal(summary.biZone.recursiveLevel, '5m');
-  assert.equal(summary.biZone.zd, '10.00');
-  assert.equal(summary.biZone.zg, '10.60');
-  assert.equal(summary.biZone.completion, '已完成');
-  assert.equal(summary.biZone.enteringSegment, '向下 · 11.20 → 10.00');
-  assert.equal(summary.biZone.leavingSegment, '向上 · 10.10 → 10.80');
-  assert.equal(summary.biZone.associatedPoint, '三类买点');
-  assert.equal(summary.xdZone.tower, '线段');
-  assert.equal(summary.xdZone.recursiveLevel, '5m');
-  assert.equal(summary.xdZone.completion, '形成中');
-  assert.equal(summary.xdZone.coreDirections, '向下 → 向上 → 向下');
-  assert.equal(summary.xdZone.associatedPoint, '暂无关联买卖点');
-});
-
-test('same-level three-sell geometry is not collapsed back to forming', () => {
-  const data = {
-    bars: [{ time: 1700000600000, close: 9.2, isBarClosed: true }],
-    xd_zss: [{
-      linestyle: '0',
-      done: false,
-      state: 'completed',
-      render_kind: 'center_preview',
-      provisional: true,
-      tower: 'xd',
-      zd: 10,
-      zg: 11,
-      points: [point(1700000000, 11), point(1700000500, 10)],
-      completion_phase: 'GEOMETRIC_THIRD_CLASS_POINT',
-      confirmation_scope: 'xd',
-      completion_point_type: '3sell',
-      expected_completion_point_type: '3sell',
-      completion_point_status: 'provisional',
-      associated_points: ['3sell'],
-      completion_return_segment: {
-        direction: 'up', start_price: 9.0, end_price: 9.8,
-      },
-    }],
-  };
-
-  const summary = Analysis.summarizeChartData(data, { resolution: '1' });
-
-  assert.equal(summary.xdZone.status, '三类卖点几何完成，待锁定');
-  assert.equal(summary.xdZone.completion, '三类卖点几何完成，待锁定');
-  assert.equal(
-    summary.xdZone.associatedPoint,
-    '线段级三类卖点（几何成立，待锁定）',
-  );
-  assert.equal(
-    summary.xdZone.completionEvidence,
-    '线段级三类卖点几何成立（尚未锁定）',
-  );
-  assert.equal(summary.xdZone.confirmationSegment, '向上 · 9.00 → 9.80');
-  assert.equal(
-    summary.xdZone.completionRequirement,
-    '等待当前同级别回抽线段锁定，才转为正式完成',
-  );
-  assert.match(summary.xdZone.meta, /线段级三类卖点几何已成立/);
-  assert.doesNotMatch(summary.xdZone.meta, /形成中预览/);
-});
-
-test('forming XD center names the missing same-level three-sell return', () => {
-  const data = {
-    bars: [{ time: 1700000600000, close: 9.2, isBarClosed: true }],
-    xd_zss: [{
-      linestyle: '1',
-      done: false,
-      state: 'forming',
-      render_kind: 'center_preview',
-      provisional: true,
-      tower: 'xd',
-      zd: 10,
-      zg: 11,
-      points: [point(1700000000, 11), point(1700000500, 10)],
-      completion_phase: 'AWAITING_SAME_LEVEL_RETURN',
-      confirmation_scope: 'xd',
-      completion_point_type: null,
-      expected_completion_point_type: '3sell',
-      completion_point_status: null,
-      associated_points: [],
-    }],
-  };
-
-  const summary = Analysis.summarizeChartData(data, { resolution: '1' });
-
-  assert.equal(summary.xdZone.status, '形成中');
-  assert.equal(summary.xdZone.associatedPoint, '尚无线段级关联买卖点');
-  assert.equal(
-    summary.xdZone.completionRequirement,
-    '等待线段级向上回抽不回中枢下沿',
-  );
 });
 
 test('analysis exposes only base line controls and never duplicates strict display controls', () => {
@@ -455,7 +176,7 @@ test('current structure interpretation defaults closed and remembers only the re
   const boundaryAt = template.indexOf('id="ca-plan-boundary"');
   const factAt = template.indexOf('id="ca-plan-now"');
 
-  assert.match(source, /OVERVIEW_COLLAPSE_STORAGE_KEY\s*=\s*['"]chart_analysis_overview_collapsed_v2['"]/);
+  assert.match(source, /OVERVIEW_COLLAPSE_STORAGE_KEY\s*=\s*['"]chart_analysis_overview_collapsed['"]/);
   assert.match(source, /stored\s*===\s*null\s*\?\s*true/);
   assert.doesNotMatch(source, /getItem\(['"]chart_analysis_overview_collapsed['"]\)/);
   assert.ok(waitAt > 0 && waitAt < boundaryAt && boundaryAt < factAt);

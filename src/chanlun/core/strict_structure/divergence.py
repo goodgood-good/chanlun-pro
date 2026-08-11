@@ -2,41 +2,40 @@ from __future__ import annotations
 
 from chanlun.core.strict_structure.models import (
     CenterState,
-    SourceKind,
     StrictStructureResult,
+    TrendKind,
 )
 from chanlun.core.strict_structure.strength import (
     MacdStrengthUnavailable,
-    compare_divergence,
-    compare_terminal_trend_divergence,
+    center_departure_comparison_leg,
+    center_entry_comparison_leg,
+    compare_comparison_legs,
 )
 
 
-def _outside_fixed_core(item, center) -> bool:
-    return (
-        item.end_tick > center.zg_tick
-        if item.direction == "up"
-        else item.end_tick < center.zd_tick
-    )
+def _consolidation_pair(center, units):
+    """Return the same width-matched A/C legs used by trend divergence."""
 
-
-def _consolidation_pair(center):
     if (
         center.state is not CenterState.COMPLETED
-        or center.source_kind is SourceKind.STROKE_OBSERVATION
-        or center.completion_leave_unit is None
     ):
         return None
-    signal = center.completion_leave_unit
-    for earlier in reversed(center.extension_units):
-        if (
-            earlier.locked
-            and earlier.direction == signal.direction
-            and _outside_fixed_core(earlier, center)
-            and earlier.market_end <= signal.market_start
-        ):
-            return earlier, signal
-    return None
+    entry = center_entry_comparison_leg(center, units)
+    departure = (
+        None
+        if entry is None
+        else center_departure_comparison_leg(center, units, width=entry.width)
+    )
+    if (
+        entry is None
+        or departure is None
+        or entry.measurement_unit.direction
+        != departure.measurement_unit.direction
+        or entry.measurement_unit.market_end
+        > departure.measurement_unit.market_start
+    ):
+        return None
+    return entry, departure
 
 
 def collect_strict_divergences(structure, strength):
@@ -44,6 +43,12 @@ def collect_strict_divergences(structure, strength):
         raise TypeError("structure must be a StrictStructureResult")
     by_id = {}
     for level in structure.levels:
+        trend_center_ids = {
+            center.center_id
+            for trend in (*level.trend_types, *level.completed_trends)
+            if trend.kind is TrendKind.TREND
+            for center in trend.centers
+        }
         for boundary in level.decomposition_boundaries:
             evidence = boundary.divergence
             previous = by_id.setdefault(evidence.divergence_id, evidence)
@@ -51,11 +56,17 @@ def collect_strict_divergences(structure, strength):
                 raise ValueError("divergence id maps to conflicting evidence")
 
         for center in level.center_result.centers:
-            pair = _consolidation_pair(center)
+            # Once two separated centers form a trend, its terminal A/C
+            # comparison is the sole classification.  Emitting an additional
+            # consolidation label for each embedded center would give one
+            # structural movement two incompatible divergence kinds.
+            if center.center_id in trend_center_ids:
+                continue
+            pair = _consolidation_pair(center, level.units)
             if pair is None:
                 continue
             try:
-                evidence = compare_divergence(
+                evidence = compare_comparison_legs(
                     *pair,
                     strength,
                     kind="consolidation",
@@ -69,17 +80,6 @@ def collect_strict_divergences(structure, strength):
 
         for trend in level.completed_trends:
             evidence = trend.terminal_divergence
-            if evidence is None:
-                try:
-                    compared = compare_terminal_trend_divergence(
-                        trend.centers,
-                        level.units,
-                        strength,
-                        trend_start_unit_id=trend.constituent_units[0].unit_id,
-                    )
-                except MacdStrengthUnavailable:
-                    continue
-                evidence = None if compared is None else compared[0]
             if evidence is None or not evidence.is_divergent:
                 continue
             previous = by_id.setdefault(evidence.divergence_id, evidence)

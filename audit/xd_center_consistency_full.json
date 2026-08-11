@@ -1,0 +1,75 @@
+{
+  "approaching_point_count": 70,
+  "audit_as_cached_basis_count": 187,
+  "bar_count": 3175574,
+  "bar_prefix_count": 1062,
+  "bar_prefix_depth": 2,
+  "cache_root": "D:\\chanlun_pro\\chart_cache",
+  "center_count": 2824,
+  "confirmed_point_count": 4123,
+  "dataset_count": 532,
+  "datasets_with_terminal_projection_rewrites": 6,
+  "divergence_count": 779,
+  "duration_seconds": 1326.78,
+  "error_count": 0,
+  "errors": [],
+  "expansion_upgrade_count": 207,
+  "fail_count": 0,
+  "failed": [],
+  "nine_segment_upgrade_count": 656,
+  "observed_at": "2026-08-10T02:51:54.147129+08:00",
+  "pass_count": 532,
+  "prefix_depth": 100000,
+  "production_basis_count": 345,
+  "ready": true,
+  "recursive_level_count": 761,
+  "schema": "chanlun-xd-center-consistency-audit/v1",
+  "screening_center_count": 2407,
+  "screening_confirmed_point_count": 2406,
+  "screening_dataset_count": 513,
+  "screening_provisional_candidate_count": 200,
+  "segment_count": 23698,
+  "source_fingerprint": "6bdb086c",
+  "stroke_observation_center_count": 34532,
+  "terminal_projection_rewrite_count": 20,
+  "terminal_projection_rewrite_counts_by_kind": {
+    "completed_center": 6,
+    "completed_trend": 6,
+    "confirmed_point": 6,
+    "divergence": 1,
+    "nine_segment_upgrade": 1
+  },
+  "terminal_projection_rewrite_datasets_by_kind": {
+    "completed_center": [
+      "a:SH.510300:5m",
+      "a:SH.603527:1m",
+      "a:SH.603826:1m",
+      "a:SH.688081:5m",
+      "a:SZ.300626:30m",
+      "us:UNH.US:5m"
+    ],
+    "completed_trend": [
+      "a:SH.510300:5m",
+      "a:SH.603527:1m",
+      "a:SH.603826:1m",
+      "a:SH.688081:5m",
+      "a:SZ.300626:30m",
+      "us:UNH.US:5m"
+    ],
+    "confirmed_point": [
+      "a:SH.510300:5m",
+      "a:SH.603527:1m",
+      "a:SH.603826:1m",
+      "a:SH.688081:5m",
+      "a:SZ.300626:30m",
+      "us:UNH.US:5m"
+    ],
+    "divergence": [
+      "us:UNH.US:5m"
+    ],
+    "nine_segment_upgrade": [
+      "a:SH.603527:1m"
+    ]
+  },
+  "workers": 8
+}

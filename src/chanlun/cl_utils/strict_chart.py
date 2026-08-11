@@ -22,14 +22,10 @@ from chanlun.core.strict_structure.models import (
     TrendType,
     center_seed_size,
 )
-from chanlun.core.strict_structure.unit_adapter import (
-    UnitLockRegistry,
-    adapt_lines,
-)
 
 
-CHART_STRUCTURE_SCHEMA = "chanlun-chart-structure/v12"
-CHART_CENTER_SCHEMA = "chanlun-chart-center/v12"
+CHART_STRUCTURE_SCHEMA = "chanlun-chart-structure"
+CHART_CENTER_SCHEMA = "chanlun-chart-center"
 _ACTIVE_CENTER_STATES = frozenset({CenterState.ONGOING})
 
 
@@ -153,6 +149,52 @@ def _unit_audit_payload(unit: ConstituentUnit) -> dict[str, object]:
     }
 
 
+def _center_lifecycle_payload(
+    *,
+    pending_leave: ConstituentUnit | None,
+    completion_leave: ConstituentUnit | None,
+    completed: bool,
+    provisional: bool = False,
+    observation: bool = False,
+) -> dict[str, object]:
+    """Serialize the sole same-level departure/return lifecycle contract."""
+
+    leave = completion_leave if completed else pending_leave
+    expected_point_type = (
+        None
+        if leave is None
+        else "3buy"
+        if leave.direction == "up"
+        else "3sell"
+    )
+    if observation:
+        phase = "NON_TRADABLE_OBSERVATION"
+        point_type = None
+        point_status = None
+    elif completed and provisional:
+        phase = "GEOMETRIC_THIRD_CLASS_POINT"
+        point_type = expected_point_type
+        point_status = "provisional"
+    elif completed:
+        phase = "FORMAL_THIRD_CLASS_POINT"
+        point_type = expected_point_type
+        point_status = "confirmed"
+    elif pending_leave is not None:
+        phase = "AWAITING_SAME_LEVEL_RETURN"
+        point_type = None
+        point_status = None
+    else:
+        phase = "AWAITING_SAME_LEVEL_DEPARTURE"
+        point_type = None
+        point_status = None
+    return {
+        "completion_phase": phase,
+        "completion_point_type": point_type,
+        "expected_completion_point_type": expected_point_type,
+        "completion_point_status": point_status,
+    }
+
+
 def _center_payload(
     center: TrendCenter,
     *,
@@ -185,7 +227,15 @@ def _center_payload(
         "structural_level": center.structural_level,
         "source_kind": center.source_kind.value,
         "state": center.state.value,
-        "tradable": bool(tradable and center.state is CenterState.COMPLETED),
+        "tradable": bool(tradable and center.physically_completed),
+        **_center_lifecycle_payload(
+            pending_leave=center.pending_leave_unit,
+            completion_leave=center.completion_leave_unit,
+            completed=center.physically_completed,
+            observation=(
+                center.source_kind is SourceKind.STROKE_OBSERVATION
+            ),
+        ),
         "points": [
             {
                 "time": aware_datetime_to_epoch_seconds(
@@ -260,6 +310,8 @@ def _center_payload(
             else center.completion_return_unit.unit_id
         ),
         "completion_direction": center.completion_direction,
+        "boundary_divergence_id": center.boundary_divergence_id,
+        "boundary_anchor_unit_id": center.boundary_anchor_unit_id,
         "entering_segment": _unit_audit_payload(center.entry_unit),
         "first_three_components": [
             _unit_audit_payload(unit) for unit in center.core_units
@@ -272,6 +324,11 @@ def _center_payload(
         ],
         "leaving_segment": (
             None if leaving_unit is None else _unit_audit_payload(leaving_unit)
+        ),
+        "completion_return_segment": (
+            None
+            if center.completion_return_unit is None
+            else _unit_audit_payload(center.completion_return_unit)
         ),
         "established_market_time": aware_datetime_to_epoch_seconds(
             center.established_market_time
@@ -307,107 +364,6 @@ def center_observation_to_chart_dict(
         center,
         render_kind="center_observation",
         tradable=False,
-    )
-
-
-def display_segment_center_observations_to_chart_dicts(
-    centers,
-    lines,
-    *,
-    price_basis_revision: str,
-    price_quantum: Decimal,
-    as_of: datetime,
-) -> tuple[dict[str, object], ...]:
-    """Serialize displayed segment centers through the canonical state machine.
-
-    ``centers`` remains in the public signature for compatibility, but legacy
-    center objects are no longer allowed to define the rectangle or lifecycle.
-    The exact displayed segments are adapted once and consumed by the same
-    entry/core/leave role machine used by screening, recursion, and the chart.
-    """
-
-    from chanlun.core.strict_structure.center_machine import calculate_centers
-
-    tuple(centers)  # eagerly validate/consume a legacy iterable; never trust it
-    line_values = tuple(lines)
-    if not line_values:
-        return ()
-    if not isinstance(price_quantum, Decimal):
-        raise TypeError("price_quantum must be a Decimal")
-    quantum = Decimal(_canonical_quantum(price_quantum))
-    units = adapt_lines(
-        line_values,
-        structural_level=0,
-        source_kind=SourceKind.SEGMENT,
-        price_quantum=quantum,
-        as_of=as_of,
-        registry=UnitLockRegistry(price_basis_revision),
-    )
-    result = calculate_centers(units, 0, SourceKind.SEGMENT)
-    renderable_previews = tuple(
-        preview for preview in result.previews if _renderable_center_preview(preview)
-    )
-    preview_seed_ids = {
-        (
-            preview.entry_unit_id,
-            *preview.unit_ids[: center_seed_size(preview.source_kind)],
-            *(
-                ()
-                if preview.source_kind is SourceKind.TREND_TYPE
-                or preview.establishment_unit_id is None
-                else (preview.establishment_unit_id,)
-            ),
-        )
-        for preview in renderable_previews
-    }
-    payloads: list[dict[str, object]] = []
-    for center in result.centers:
-        if (
-            center.entry_unit.unit_id,
-            *(unit.unit_id for unit in center.initial_units),
-            *(
-                ()
-                if center.source_kind is SourceKind.TREND_TYPE
-                or center.establishment_unit is None
-                else (center.establishment_unit.unit_id,)
-            ),
-        ) in preview_seed_ids:
-            continue
-        payload = _center_payload(
-            center,
-            render_kind="center_observation",
-            tradable=False,
-        )
-        payload.update(
-            origin="display_cl_segment_zhongshu",
-            algorithm_revision="chanlun-display-xd-five-role/v10",
-            done=center.state is CenterState.COMPLETED,
-            linestyle="0" if center.state is CenterState.COMPLETED else "1",
-        )
-        payloads.append(payload)
-    for preview in renderable_previews:
-        payload = strict_center_preview_to_chart_dict(
-            preview,
-            units,
-            source_closed_at=as_of,
-        )
-        payload.update(
-            render_kind="center_observation",
-            origin="display_cl_segment_zhongshu",
-            algorithm_revision="chanlun-display-xd-five-role/v10",
-            done=False,
-            linestyle="0" if preview.state is CenterPreviewState.COMPLETED else "1",
-        )
-        payloads.append(payload)
-    return tuple(
-        sorted(
-            payloads,
-            key=lambda item: (
-                int(item["points"][0]["time"]),
-                int(item["points"][1]["time"]),
-                str(item["center_id"]),
-            ),
-        )
     )
 
 
@@ -449,6 +405,11 @@ def active_center_projection_to_chart_dict(
         "source_kind": center.source_kind.value,
         "state": center.state.value,
         "tradable": False,
+        **_center_lifecycle_payload(
+            pending_leave=center.pending_leave_unit,
+            completion_leave=None,
+            completed=False,
+        ),
         "points": [
             {"time": display_start_epoch, "price_tick": center.zg_tick},
             {"time": lifecycle_end_epoch, "price_tick": center.zd_tick},
@@ -693,7 +654,7 @@ def strict_center_preview_to_chart_dict(
         )
     )
     preview_id = stable_structure_id(
-        "chanlun-center-preview/v6",
+        "chanlun-center-preview",
         preview.price_basis_revision,
         preview.structural_level,
         preview.source_kind.value,
@@ -724,6 +685,12 @@ def strict_center_preview_to_chart_dict(
         "source_kind": preview.source_kind.value,
         "state": preview.state.value,
         "tradable": False,
+        **_center_lifecycle_payload(
+            pending_leave=pending_leave,
+            completion_leave=completion_leave,
+            completed=completed,
+            provisional=completed,
+        ),
         "points": [
             {
                 "time": aware_datetime_to_epoch_seconds(
@@ -802,6 +769,11 @@ def strict_center_preview_to_chart_dict(
         "leaving_segment": (
             None if leaving_unit is None else _unit_audit_payload(leaving_unit)
         ),
+        "completion_return_segment": (
+            None
+            if completion_return is None
+            else _unit_audit_payload(completion_return)
+        ),
         "established_market_time": (
             None
             if preview.source_kind is not SourceKind.TREND_TYPE
@@ -839,7 +811,7 @@ def strict_trend_to_chart_dict(trend: TrendType) -> dict[str, object]:
         raise TypeError("trend must be a TrendType")
     terminal_id = trend.terminal_unit.unit_id
     return {
-        "schema": "chanlun-chart-trend/v3",
+        "schema": "chanlun-chart-trend",
         "render_kind": "strict_trend",
         "trend_id": trend.trend_id,
         "render_id": f"{trend.trend_id}@{trend.state.value}@{terminal_id}",
@@ -885,9 +857,11 @@ def strict_divergence_to_chart_dict(
         "dif_extreme_decayed": divergence.dif_extreme_decayed,
         "strength_source": divergence.strength_source,
         "is_divergent": divergence.is_divergent,
+        "strength_decay_count": divergence.strength_decay_count,
+        "is_strong_divergent": divergence.is_strong_divergent,
     }
     return {
-        "schema": "chanlun-chart-divergence/v4",
+        "schema": "chanlun-chart-divergence",
         "render_kind": "strict_divergence",
         "render_id": divergence.divergence_id,
         "divergence_id": divergence.divergence_id,
@@ -898,6 +872,9 @@ def strict_divergence_to_chart_dict(
         "price_basis_revision": divergence.price_basis_revision,
         "compare_unit_id": divergence.compare_unit_id,
         "signal_unit_id": divergence.signal_unit_id,
+        "comparison_width": divergence.comparison_width,
+        "compare_leg_unit_ids": list(divergence.compare_leg_unit_ids),
+        "signal_leg_unit_ids": list(divergence.signal_leg_unit_ids),
         "anchor_at": aware_datetime_to_epoch_seconds(divergence.anchor_at),
         "anchor_tick": divergence.anchor_tick,
         "confirmed_at": aware_datetime_to_epoch_seconds(
@@ -938,7 +915,7 @@ def strict_point_to_chart_dict(
         raise TypeError("point must be StrictPointEvidence")
     status = point.status.value
     evidence_revision = "sha256:" + stable_structure_id(
-        "chanlun-chart-point-evidence/v3",
+        "chanlun-chart-point-evidence",
         point.point_id,
         status,
         point.variant.value,
@@ -958,7 +935,7 @@ def strict_point_to_chart_dict(
         else f"{point.point_id}@{evidence_revision}"
     )
     return {
-        "schema": "chanlun-chart-point/v3",
+        "schema": "chanlun-chart-point",
         "render_kind": render_kind,
         "render_id": render_id,
         "point_id": point.point_id,
@@ -1065,15 +1042,8 @@ def build_strict_structure_snapshot(
     evidence: StrictEvidenceResult,
     *,
     interval: str,
-    display_center_observation_payloads: Iterable[dict[str, object]] | None = None,
 ) -> dict[str, object]:
-    """Build one authoritative, window-independent strict chart snapshot.
-
-    ``display_center_observation_payloads`` may provide a separate,
-    non-tradable chart layer derived from the displayed segments. Formal
-    centers, trends, signals and stroke evidence remain sourced from
-    ``evidence``.
-    """
+    """Build one authoritative, window-independent strict chart snapshot."""
 
     if not isinstance(evidence, StrictEvidenceResult):
         raise TypeError("evidence must be StrictEvidenceResult")
@@ -1231,44 +1201,13 @@ def build_strict_structure_snapshot(
         ),
         "center_id",
     )
-    display_observations = (
-        list(observations)
-        if display_center_observation_payloads is None
-        else _sorted_payloads(
-            (dict(item) for item in display_center_observation_payloads),
-            "center_id",
-        )
-    )
-    for observation in display_observations:
-        if (
-            observation.get("render_kind") != "center_observation"
-            or observation.get("source_kind")
-            not in {
-                SourceKind.SEGMENT.value,
-                SourceKind.STROKE_OBSERVATION.value,
-            }
-            or observation.get("tradable") is not False
-            or observation.get("structural_level") != 0
-        ):
-            raise ValueError("invalid display center observation payload")
-        if not isinstance(observation.get("center_id"), str) or not isinstance(
-            observation.get("render_id"), str
-        ):
-            raise ValueError("display center observation identity is required")
-        points = observation.get("points")
-        if not isinstance(points, list) or len(points) != 2:
-            raise ValueError("display center observation requires two points")
-        available_at = observation.get("available_at")
-        if type(available_at) is not int or available_at > source_closed_epoch:
-            raise ValueError("display center observation is not causally visible")
     snapshot_revision = _revision(
-        "chanlun-chart-snapshot/v5",
+        "chanlun-chart-snapshot",
         evidence.structure_revision,
         source_closed_epoch,
     )
     render_extras = {
         "stroke_center_observations": observations,
-        "display_center_observations": display_observations,
         "level_extras": [
             {
                 "structural_level": level["structural_level"],
@@ -1280,7 +1219,7 @@ def build_strict_structure_snapshot(
         ],
     }
     render_revision = _revision(
-        "chanlun-chart-render/v8",
+        "chanlun-chart-render",
         snapshot_revision,
         render_extras,
     )
@@ -1297,7 +1236,6 @@ def build_strict_structure_snapshot(
         "snapshot_revision": snapshot_revision,
         "render_revision": render_revision,
         "stroke_center_observations": observations,
-        "display_center_observations": display_observations,
         "levels": levels,
     }
     return _with_prices(snapshot, quantum)
@@ -1310,7 +1248,6 @@ __all__ = [
     "aware_datetime_to_epoch_seconds",
     "build_strict_structure_snapshot",
     "center_observation_to_chart_dict",
-    "display_segment_center_observations_to_chart_dicts",
     "strict_center_preview_to_chart_dict",
     "strict_center_to_chart_dict",
     "strict_divergence_to_chart_dict",

@@ -7,12 +7,14 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
+from chanlun.decision_support.trading_system.backtest import fixed_year
 from chanlun.decision_support.trading_system.backtest.fixed_year import (
     FACT_SCHEMA,
     SECTOR_FACT_SCHEMA,
     SectorResearchFacts,
     SparseEvaluationFact,
     SymbolResearchFacts,
+    build_symbol_bundle,
     first_matching_trigger,
     run_sparse_portfolio,
     setup_active_ends,
@@ -22,6 +24,47 @@ from chanlun.decision_support.trading_system.backtest.fixed_year import (
 )
 from tests.trading_system.backtest.helpers import minute_bar
 from tests.trading_system.helpers import CN, confirmed_point, eligible_sector
+
+
+def test_symbol_bundle_keeps_recursive_points_as_research_only() -> None:
+    observed_at = datetime(2026, 7, 20, 10, 0, tzinfo=CN)
+    sector = eligible_sector()
+    thirty_l0 = confirmed_point("1buy", frequency="30m", level=0)
+    thirty_l1 = confirmed_point("1buy", frequency="30m", level=1)
+    five_l0 = confirmed_point("3buy", frequency="5m", level=0)
+    five_l1 = confirmed_point("3buy", frequency="5m", level=1)
+    one_l0 = confirmed_point("1buy", frequency="1m", level=0)
+    one_l1 = confirmed_point("1buy", frequency="1m", level=1)
+    evaluation = SparseEvaluationFact(
+        observed_at=observed_at,
+        thirty_direction="neutral",
+        bar=minute_bar(
+            opened_at=observed_at - timedelta(minutes=1),
+        ),
+    )
+    facts = SymbolResearchFacts(
+        schema=FACT_SCHEMA,
+        algorithm_revision="sha256:" + "a" * 64,
+        source_revision="sha256:" + "b" * 64,
+        code="SZ.000001",
+        sector_id=sector.sector_id,
+        requested_start=observed_at.date(),
+        requested_end=observed_at.date(),
+        effective_start=observed_at.date(),
+        row_counts=(("30m", 1), ("5m", 1), ("1m", 1)),
+        thirty_points=(thirty_l0, thirty_l1),
+        five_points=(five_l0, five_l1),
+        one_points=(one_l0, one_l1),
+        evaluations=(evaluation,),
+    )
+
+    bundle = build_symbol_bundle(facts, evaluation, sector)
+
+    assert bundle.physical_timeframe_level_zero is True
+    assert bundle.thirty_points == (thirty_l0,)
+    assert bundle.five_points == (five_l0,)
+    assert bundle.one_points == (one_l0,)
+    assert bundle.opposite_points == (thirty_l0, five_l0, one_l0)
 
 
 def test_newer_same_lane_supersedes_setup_before_four_day_expiry() -> None:
@@ -295,7 +338,7 @@ def test_relevant_setup_cannot_silently_accept_missing_qmt_one_minute_data(
     )
     context.attrs.update(
         structure_price_quantum="0.01",
-        price_basis_revision="test-raw-v1",
+        price_basis_revision="test-raw",
     )
     monkeypatch.setattr(
         fixed_year,
@@ -359,6 +402,7 @@ def test_qmt_frame_retries_a_transient_empty_native_response(monkeypatch) -> Non
         "xtquant",
         SimpleNamespace(xtdata=FakeXtdata),
     )
+    monkeypatch.setattr(fixed_year, "resolve_qmt_local_data_dir", lambda: None)
     monkeypatch.setattr(
         "chanlun.decision_support.trading_system.backtest.fixed_year.wall_time.sleep",
         lambda _seconds: None,
@@ -406,6 +450,7 @@ def test_qmt_native_daily_is_visible_only_at_close_on_the_causal_price_basis(
         "xtquant",
         SimpleNamespace(xtdata=FakeXtdata),
     )
+    monkeypatch.setattr(fixed_year, "resolve_qmt_local_data_dir", lambda: None)
     frame = load_qmt_daily_frame(
         "SZ.000001",
         start_at=session,
@@ -414,5 +459,5 @@ def test_qmt_native_daily_is_visible_only_at_close_on_the_causal_price_basis(
 
     assert frame.iloc[0]["date"] == session.replace(hour=15)
     assert frame.attrs["price_basis_provider"] == "qmt"
-    assert frame.attrs["price_basis_adjustment"] == "causal-forward-ex-date-v1"
+    assert frame.attrs["price_basis_adjustment"] == "causal-forward-ex-date"
     assert str(frame.attrs["price_basis_revision"]).startswith("sha256:")

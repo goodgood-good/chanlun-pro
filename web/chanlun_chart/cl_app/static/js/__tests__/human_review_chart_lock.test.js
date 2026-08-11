@@ -9,10 +9,7 @@ const vm = require('vm');
 function loadDatafeed(requestUrls) {
   const configuration = {
     supports_search: true,
-    supports_group_request: false,
     supported_resolutions: ['1', '5', '30'],
-    supports_marks: false,
-    supports_timescale_marks: false,
   };
   const sandbox = {
     console, Math, JSON, Array, Object, String, Number, Boolean, Promise, Error, Map, Set,

@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import argparse
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from datetime import date, datetime, time
 import hashlib
 import json
@@ -33,11 +33,11 @@ from chanlun.decision_support.trading_system.backtest.fixed_year import (
 from chanlun.decision_support.trading_system.backtest.pit_metadata import (
     SecurityMasterRecord,
 )
-from tools.backtest_chanlun_trading_system import _algorithm_hashes
+from tools import qmt_research_contract
 
 
 CN = ZoneInfo("Asia/Shanghai")
-AUDIT_SCHEMA = "chanlun-prefix-invariance-audit/v1"
+AUDIT_SCHEMA = "chanlun-prefix-invariance-audit"
 
 
 def _positive_int(value: str) -> int:
@@ -82,7 +82,9 @@ def _sha256(path: Path) -> str:
 
 def _algorithm_revision() -> str:
     encoded = json.dumps(
-        _algorithm_hashes(), ensure_ascii=False, separators=(",", ":")
+        qmt_research_contract.algorithm_hashes(),
+        ensure_ascii=False,
+        separators=(",", ":"),
     ).encode("utf-8")
     return "sha256:" + hashlib.sha256(encoded).hexdigest()
 

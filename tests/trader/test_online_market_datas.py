@@ -54,6 +54,6 @@ def test_clear_cache_still_works():
     """保留 clear_cache 兼容: 清缓存后重新取数。"""
     md, ex = _md()
     md.klines("rb2405", "5m")
-    md.clear_cache()
+    md.begin_round()
     md.klines("rb2405", "5m")
     assert ex.calls == 2

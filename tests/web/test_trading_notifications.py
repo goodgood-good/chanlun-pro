@@ -34,6 +34,7 @@ def signal_document(stage: str = "triggered") -> dict[str, object]:
             "source_frequency": "5m",
             "actionable": True,
             "available_at": "2026-07-20T10:00:00+08:00",
+            "invalidation_price": "9.80",
         },
         "trigger_1m": {
             "point_id": "trigger:stable-1m-1buy",
@@ -59,7 +60,6 @@ def signal_document(stage: str = "triggered") -> dict[str, object]:
             "confirmation_bar_closed_at": "2026-07-20T10:01:00+08:00",
             "entry_valid_until": "2026-07-20T10:02:00+08:00",
         },
-        "structural_stop": "9.80",
         "risk_multiplier": "0.75",
         "decision_reasons": [],
     }
@@ -283,7 +283,10 @@ def test_newly_discovered_triggered_signal_only_seeds_the_baseline(
             "HIGHER_TIMEFRAME_GATE_NOT_GREEN",
         ),
         ({"sector_triggered": False}, "CURRENT_SECTOR_TRIGGER_REQUIRED"),
-        ({"physical_timeframe_level_zero": False}, "PHYSICAL_TIMEFRAME_AUTHORITY_MISSING"),
+        (
+            {"physical_timeframe_level_zero": False},
+            "PHYSICAL_TIMEFRAME_AUTHORITY_MISSING",
+        ),
     ),
 )
 def test_buy_transition_fails_closed_when_decision_gate_is_not_proven(
@@ -340,7 +343,9 @@ def test_expired_entry_boundary_never_notifies_even_while_trigger_is_fresh(
     dispatcher.dispatch_changes(snapshot("armed"), {"signals": [expired]})
 
     assert sender.messages == []
-    assert dispatcher.health_snapshot()["last_suppressed_reason"] == "ENTRY_WINDOW_EXPIRED"
+    assert (
+        dispatcher.health_snapshot()["last_suppressed_reason"] == "ENTRY_WINDOW_EXPIRED"
+    )
 
 
 def test_sell_transition_requires_an_actual_holding_exit_decision(
@@ -413,9 +418,7 @@ def test_same_trigger_with_changed_defense_price_is_one_notification(
     )
 
     assert len(sender.messages) == 1
-    assert "防守价：9.80、9.60（跌破买入结构失效）" in "\n".join(
-        sender.messages[0][1]
-    )
+    assert "防守价：9.80、9.60（跌破买入结构失效）" in "\n".join(sender.messages[0][1])
 
 
 def test_authoritative_refresh_retracts_a_disappeared_trigger(tmp_path: Path) -> None:
@@ -536,7 +539,6 @@ def test_sell_and_invalidation_advice_are_explicit() -> None:
     sell = signal_document()
     sell["side"] = "sell"
     sell["point_type"] = "3sell"
-    sell["structural_stop"] = None
     sell["setup_5m"] = {
         "point_type": "3sell",
         "center_ordinal": 1,
@@ -563,7 +565,6 @@ def test_sell_and_invalidation_advice_are_explicit() -> None:
 
 def test_missing_defense_price_is_explicit_and_never_estimated() -> None:
     signal = signal_document()
-    signal["structural_stop"] = None
     signal["setup_5m"] = {"point_type": "3buy", "invalidation_price": None}
 
     _title, lines = format_notification(
@@ -657,7 +658,7 @@ def test_persisted_event_id_deduplicates_after_restart(tmp_path: Path) -> None:
     assert len(first_sender.messages) == 1
     assert second_sender.messages == []
     persisted = json.loads(state_path.read_text(encoding="utf-8"))
-    assert persisted["schema_version"] == "chanlun-signal-notifications/v1"
+    assert persisted["schema"] == "chanlun-signal-notifications"
     assert len(persisted["delivered_event_ids"]) == 1
     assert persisted["success_count"] == 1
     assert persisted["failure_count"] == 0

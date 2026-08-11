@@ -19,12 +19,12 @@ from chanlun.decision_support.trading_system.recursive_1m_research import (
     recursive_1m_diagnostic_execution_snapshot,
     recursive_1m_parameter_snapshot,
 )
-from chanlun.decision_support.trading_system.v3_bar_execution import (
+from chanlun.decision_support.trading_system.bar_execution import (
     HistoricalMinuteExecutionBar,
     bar_proxy_parameter_snapshot,
     match_historical_minute_bars,
 )
-from chanlun.decision_support.trading_system.v3_parameters import (
+from chanlun.decision_support.trading_system.parameters import (
     etf_parameter_snapshot,
 )
 

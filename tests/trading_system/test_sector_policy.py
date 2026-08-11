@@ -17,7 +17,7 @@ def test_sector_neutral_five_minute_does_not_require_a_synchronous_buy() -> None
     assessment = assess_sector(
         sector_id="TDX.880301",
         sector_name="煤炭",
-        market_data_source="tdx_native_880_index",
+        market_data_source="qmt_gics3_component_composite",
         thirty=thirty,
         five=five,
         one=neutral_context("1m"),
@@ -56,7 +56,7 @@ def test_higher_level_hostile_sector_is_blocked() -> None:
     assessment = assess_sector(
         sector_id="TDX.880301",
         sector_name="煤炭",
-        market_data_source="tdx_native_880_index",
+        market_data_source="qmt_gics3_component_composite",
         thirty=hostile_context("30m"),
         five=supportive_context("5m"),
         one=supportive_context("1m"),
@@ -72,7 +72,7 @@ def test_sector_ranking_is_deterministic_and_explainable() -> None:
     supportive = assess_sector(
         sector_id="TDX.880302",
         sector_name="电力",
-        market_data_source="tdx_native_880_index",
+        market_data_source="qmt_gics3_component_composite",
         thirty=supportive_context("30m"),
         five=supportive_context("5m"),
         one=neutral_context("1m"),
@@ -81,7 +81,7 @@ def test_sector_ranking_is_deterministic_and_explainable() -> None:
     neutral = assess_sector(
         sector_id="TDX.880301",
         sector_name="煤炭",
-        market_data_source="tdx_native_880_index",
+        market_data_source="qmt_gics3_component_composite",
         thirty=neutral_context("30m"),
         five=neutral_context("5m"),
         one=neutral_context("1m"),

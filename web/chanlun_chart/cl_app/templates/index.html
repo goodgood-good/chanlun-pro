@@ -7,44 +7,44 @@
 
     <link
       rel="shortcut icon"
-      href="{{ url_for('static', filename='favicon.ico') }}?v={{ static_version }}" />
+      href="{{ url_for('static', filename='favicon.ico') }}?asset={{ static_asset_token }}" />
     <link
       rel="stylesheet"
-      href="{{ url_for('static', filename='css/layui.css') }}?v={{ static_version }}" />
+      href="{{ url_for('static', filename='css/layui.css') }}?asset={{ static_asset_token }}" />
     <link
       rel="stylesheet"
-      href="{{ url_for('static', filename='css/app.css') }}?v={{ static_version }}" />
+      href="{{ url_for('static', filename='css/app.css') }}?asset={{ static_asset_token }}" />
     <link
       rel="stylesheet"
-      href="{{ url_for('static', filename='css/ui-system.css') }}?v={{ static_version|default('') }}" />
+      href="{{ url_for('static', filename='css/ui-system.css') }}?asset={{ static_asset_token|default('') }}" />
     <link
       rel="stylesheet"
-      href="{{ url_for('static', filename='css/chart_analysis.css') }}?v={{ static_version }}" />
+      href="{{ url_for('static', filename='css/chart_analysis.css') }}?asset={{ static_asset_token }}" />
     <link
       rel="stylesheet"
-      href="{{ url_for('static', filename='css/review_chart_lock.css') }}?v={{ static_version }}" />
+      href="{{ url_for('static', filename='css/review_chart_lock.css') }}?asset={{ static_asset_token }}" />
     <link
       rel="stylesheet"
-      href="{{ url_for('static', filename='css/zixuan.css') }}?v={{ static_version }}" />
+      href="{{ url_for('static', filename='css/zixuan.css') }}?asset={{ static_asset_token }}" />
 
     <script
       type="text/javascript"
-      src="{{ url_for('static', filename='jquery-3.7.0.min.js') }}?v={{ static_version }}"></script>
+      src="{{ url_for('static', filename='jquery-3.7.0.min.js') }}?asset={{ static_asset_token }}"></script>
     <script
       type="text/javascript"
-      src="{{ url_for('static', filename='layui.js') }}?v={{ static_version }}"></script>
+      src="{{ url_for('static', filename='layui.js') }}?asset={{ static_asset_token }}"></script>
     <script
       type="text/javascript"
-      src="{{ url_for('static', filename='xm-select.js') }}?v={{ static_version }}"></script>
+      src="{{ url_for('static', filename='xm-select.js') }}?asset={{ static_asset_token }}"></script>
     <script
       type="text/javascript"
-      src="{{ url_for('static', filename='js/safe_html.js') }}?v={{ static_version }}"></script>
+      src="{{ url_for('static', filename='js/safe_html.js') }}?asset={{ static_asset_token }}"></script>
     <script
       type="text/javascript"
-      src="{{ url_for('static', filename='charting_library/charting_library.standalone.js') }}?v={{ static_version }}"></script>
+      src="{{ url_for('static', filename='charting_library/charting_library.standalone.js') }}?asset={{ static_asset_token }}"></script>
     <script
       type="text/javascript"
-      src="{{ url_for('static', filename='datafeeds/udf/dist/bundle.js') }}?v={{ static_version }}"></script>
+      src="{{ url_for('static', filename='datafeeds/udf/dist/bundle.js') }}?asset={{ static_asset_token }}"></script>
     {% include 'dark.html' %}
   </head>
 
@@ -815,7 +815,6 @@
         </div>
       </div>
     </main>
-    {% include 'sub_temp.html' %}
   </body>
   <script nonce="{{ csp_nonce }}">
     // SSE 实时推送开关(后端 config.ENABLE_SSE_PUSH 注入); charts.js 据此决定是否建 EventSource 连接。
@@ -945,33 +944,31 @@
       ZiXuan.render_zixuan_opts();
     }
   </script>
-  <script src="{{ url_for('static', filename='js/utils.js') }}?v={{ static_version }}"></script>
-  <script src="{{ url_for('static', filename='js/tv_indicators/chart_idx_ama.js') }}?v={{ static_version }}"></script>
-  <script src="{{ url_for('static', filename='js/tv_indicators/chart_idx_atr.js') }}?v={{ static_version }}"></script>
-  <script src="{{ url_for('static', filename='js/tv_indicators/chart_idx_cdbb.js') }}?v={{ static_version }}"></script>
-  <script src="{{ url_for('static', filename='js/tv_indicators/chart_idx_cmcm.js') }}?v={{ static_version }}"></script>
-  <script src="{{ url_for('static', filename='js/tv_indicators/chart_idx_demo.js') }}?v={{ static_version }}"></script>
-  <script src="{{ url_for('static', filename='js/tv_indicators/chart_idx_fcx.js') }}?v={{ static_version }}"></script>
-  <script src="{{ url_for('static', filename='js/tv_indicators/chart_idx_hdly.js') }}?v={{ static_version }}"></script>
-  <script src="{{ url_for('static', filename='js/tv_indicators/chart_idx_heima.js') }}?v={{ static_version }}"></script>
-  <script src="{{ url_for('static', filename='js/tv_indicators/chart_idx_hlblw.js') }}?v={{ static_version }}"></script>
-  <script src="{{ url_for('static', filename='js/tv_indicators/chart_idx_hlftx.js') }}?v={{ static_version }}"></script>
-  <script src="{{ url_for('static', filename='js/tv_indicators/chart_idx_kdj.js') }}?v={{ static_version }}"></script>
-  <script src="{{ url_for('static', filename='js/tv_indicators/chart_idx_ltqs.js') }}?v={{ static_version }}"></script>
-  <script src="{{ url_for('static', filename='js/tv_indicators/chart_idx_ma.js') }}?v={{ static_version }}"></script>
-  <script src="{{ url_for('static', filename='js/tv_indicators/chart_idx_macdbl.js') }}?v={{ static_version }}"></script>
-  <script src="{{ url_for('static', filename='js/tv_indicators/chart_idx_vegasma.js') }}?v={{ static_version }}"></script>
-  <script src="{{ url_for('static', filename='js/tv_indicators/chart_idx_vol.js') }}?v={{ static_version }}"></script>
-  <script src="{{ url_for('static', filename='js/tv_indicators/chart_idx_macd_backend.js') }}?v={{ static_version }}"></script>
-  <script src="{{ url_for('static', filename='js/tv_indicators/chart_idx_rsx.js') }}?v={{ static_version }}"></script>
-  <script src="{{ url_for('static', filename='js/sse_gap.js') }}?v={{ static_version }}"></script>
-  <script src="{{ url_for('static', filename='js/chart_structure_reconcile.js') }}?v={{ static_version }}"></script>
-  <script src="{{ url_for('static', filename='js/charts.js') }}?v={{ static_version }}"></script>
-  <script src="{{ url_for('static', filename='js/chart_analysis.js') }}?v={{ static_version }}"></script>
-  <script src="{{ url_for('static', filename='js/macd_stats.js') }}?v={{ static_version }}"></script>
-  <script src="{{ url_for('static', filename='js/zixuan.js') }}?v={{ static_version }}"></script>
-  <script src="{{ url_for('static', filename='js/alert.js') }}?v={{ static_version }}"></script>
-  <script src="{{ url_for('static', filename='js/bkgn.js') }}?v={{ static_version }}"></script>
+  <script src="{{ url_for('static', filename='js/utils.js') }}?asset={{ static_asset_token }}"></script>
+  <script src="{{ url_for('static', filename='js/tv_indicators/chart_idx_ama.js') }}?asset={{ static_asset_token }}"></script>
+  <script src="{{ url_for('static', filename='js/tv_indicators/chart_idx_atr.js') }}?asset={{ static_asset_token }}"></script>
+  <script src="{{ url_for('static', filename='js/tv_indicators/chart_idx_cdbb.js') }}?asset={{ static_asset_token }}"></script>
+  <script src="{{ url_for('static', filename='js/tv_indicators/chart_idx_cmcm.js') }}?asset={{ static_asset_token }}"></script>
+  <script src="{{ url_for('static', filename='js/tv_indicators/chart_idx_fcx.js') }}?asset={{ static_asset_token }}"></script>
+  <script src="{{ url_for('static', filename='js/tv_indicators/chart_idx_hdly.js') }}?asset={{ static_asset_token }}"></script>
+  <script src="{{ url_for('static', filename='js/tv_indicators/chart_idx_heima.js') }}?asset={{ static_asset_token }}"></script>
+  <script src="{{ url_for('static', filename='js/tv_indicators/chart_idx_hlblw.js') }}?asset={{ static_asset_token }}"></script>
+  <script src="{{ url_for('static', filename='js/tv_indicators/chart_idx_hlftx.js') }}?asset={{ static_asset_token }}"></script>
+  <script src="{{ url_for('static', filename='js/tv_indicators/chart_idx_kdj.js') }}?asset={{ static_asset_token }}"></script>
+  <script src="{{ url_for('static', filename='js/tv_indicators/chart_idx_ltqs.js') }}?asset={{ static_asset_token }}"></script>
+  <script src="{{ url_for('static', filename='js/tv_indicators/chart_idx_ma.js') }}?asset={{ static_asset_token }}"></script>
+  <script src="{{ url_for('static', filename='js/tv_indicators/chart_idx_macdbl.js') }}?asset={{ static_asset_token }}"></script>
+  <script src="{{ url_for('static', filename='js/tv_indicators/chart_idx_vegasma.js') }}?asset={{ static_asset_token }}"></script>
+  <script src="{{ url_for('static', filename='js/tv_indicators/chart_idx_vol.js') }}?asset={{ static_asset_token }}"></script>
+  <script src="{{ url_for('static', filename='js/tv_indicators/chart_idx_macd_backend.js') }}?asset={{ static_asset_token }}"></script>
+  <script src="{{ url_for('static', filename='js/tv_indicators/chart_idx_rsx.js') }}?asset={{ static_asset_token }}"></script>
+  <script src="{{ url_for('static', filename='js/sse_gap.js') }}?asset={{ static_asset_token }}"></script>
+  <script src="{{ url_for('static', filename='js/chart_structure_reconcile.js') }}?asset={{ static_asset_token }}"></script>
+  <script src="{{ url_for('static', filename='js/charts.js') }}?asset={{ static_asset_token }}"></script>
+  <script src="{{ url_for('static', filename='js/chart_analysis.js') }}?asset={{ static_asset_token }}"></script>
+  <script src="{{ url_for('static', filename='js/macd_stats.js') }}?asset={{ static_asset_token }}"></script>
+  <script src="{{ url_for('static', filename='js/zixuan.js') }}?asset={{ static_asset_token }}"></script>
+  <script src="{{ url_for('static', filename='js/bkgn.js') }}?asset={{ static_asset_token }}"></script>
   <script nonce="{{ csp_nonce }}">
     // 右栏「标的列表」区块：按市场全量加载标的，本地过滤，点击代码直接切图。
     // 不依赖 layui.table，纯 jQuery + AJAX 渲染，避免折叠面板内表格高度计算问题。
@@ -1568,18 +1565,6 @@
               id: 2,
             },
             {
-              title: "管理预警任务",
-              templet:
-                '<div><i class="layui-icon layui-icon-list"></i> <span>管理预警任务</span></div>',
-              id: 3,
-            },
-            {
-              title: "新增预警任务",
-              templet:
-                '<div><i class="layui-icon layui-icon-speaker"></i> <span>新增预警任务</span></div>',
-              id: 4,
-            },
-            {
               title: "查看后台任务",
               templet:
                 '<div><i class="layui-icon layui-icon-senior"></i> <span>查看后台任务</span></div>',
@@ -1659,39 +1644,6 @@
                 title: "管理自选分组",
                 area: ["800px", "50vh"],
                 content: "/zixuan_group/" + Utils.get_market(),
-                anim: 1,
-                fixed: true,
-                shadeClose: true,
-              });
-            } else if (item.id === 3) {
-              layer.open({
-                type: 1,
-                title: "管理预警任务",
-                area: ["1000px", "50vh"],
-                content: $("#layer-wrapper-alert-task-list"),
-                anim: 1,
-                fixed: true,
-                shadeClose: true,
-                btn: ["重新加载"],
-                btn1: function (index, layero, that) {
-                  Alert.refresh_alerts_table();
-                },
-                success: function (layero, index, that) {
-                  // 初始渲染表格
-                  if (typeof Alert.refresh_alerts_table === "function") {
-                    Alert.refresh_alerts_table();
-                  }
-                },
-                end: function () {
-                  $("#layer-wrapper-alert-task-list").hide();
-                },
-              });
-            } else if (item.id === 4) {
-              layer.open({
-                type: 2,
-                title: "新增预警任务",
-                area: ["1000px", "90vh"],
-                content: "/alert_edit/" + Utils.get_market() + "/0",
                 anim: 1,
                 fixed: true,
                 shadeClose: true,

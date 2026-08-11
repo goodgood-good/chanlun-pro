@@ -101,13 +101,13 @@ def test_factor_revision_binds_cutoff_members_and_economics() -> None:
         provider="qmt-gics3-composite",
         market="a",
         code="qmt-gics3:test:membership",
-        adjustment="causal-factor-stable-24-member-median-v5",
+        adjustment="causal-factor-stable-24-member-median",
         structure_price_quantum=Decimal("0.000001"),
         factor_revision=first,
     )
     assert metadata.price_basis_revision.startswith("sha256:")
     assert QMT_CAUSAL_FACTOR_ADJUSTMENT_CONTRACT_ID in (
-        "QMT_RAW_PRICE_DIVISOR_CAUSAL_EX_DATE_V1",
+        "QMT_RAW_PRICE_DIVISOR_CAUSAL_EX_DATE",
     )
 
 

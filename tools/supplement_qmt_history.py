@@ -33,7 +33,7 @@ if str(SOURCE_ROOT) not in sys.path:
 CN = ZoneInfo("Asia/Shanghai")
 CODE_RE = re.compile(r"^\d{6}\.(?:SH|SZ|BJ)$")
 DEFAULT_SCOPE = "\u6caa\u6df1\u4eacA\u80a1"
-SCHEMA = "chanlun-qmt-history-supplement/v1"
+SCHEMA = "chanlun-qmt-history-supplement"
 
 
 def _day(value: str) -> date:

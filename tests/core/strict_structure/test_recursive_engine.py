@@ -8,9 +8,9 @@ from tests.core.strict_structure.helpers import valid_five_up_exit
 from tests.core.strict_structure.helpers import unit
 
 
-def test_entry_plus_five_locked_body_units_form_level_zero_with_v3_schema():
+def test_entry_plus_five_locked_body_units_form_level_zero_with_schema():
     result = StrictRecursiveEngine(max_levels=4).calculate(valid_five_up_exit())
-    assert result.schema_version == "chanlun-structure/v3"
+    assert result.schema == "chanlun-structure"
     assert len(result.levels) == 1
     assert result.levels[0].structural_level == 0
     assert result.levels[0].center_result.centers
@@ -63,11 +63,11 @@ def test_empty_recursion_requires_explicit_basis_and_has_no_levels():
 
     result = StrictRecursiveEngine().calculate(
         (),
-        price_basis_revision="test-raw-v1",
+        price_basis_revision="test-raw",
     )
-    assert result.schema_version == "chanlun-structure/v3"
+    assert result.schema == "chanlun-structure"
     assert result.levels == ()
-    assert result.price_basis_revision == "test-raw-v1"
+    assert result.price_basis_revision == "test-raw"
 
 
 def test_recursive_engine_rejects_invalid_level_limit():

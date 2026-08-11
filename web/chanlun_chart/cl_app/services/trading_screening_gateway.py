@@ -15,7 +15,6 @@ from typing import Protocol, cast
 
 import pandas as pd
 
-from chanlun.core.cl import CL
 from chanlun.core.strict_structure.errors import StrictStructureContractError
 from chanlun.core.strict_structure.models import StrictEvidenceResult
 from chanlun.decision_support.fingerprints import normalize_datetime, sha256_json
@@ -51,16 +50,18 @@ from chanlun.decision_support.trading_system.qmt_causal_factor_adjustment import
     QMT_CAUSAL_FACTOR_ADJUSTMENT_CONTRACT_ID,
 )
 from chanlun.decision_support.trading_system.runtime_config import (
-    screening_cl_config,
     strict_snapshot_price_metadata,
+)
+from chanlun.decision_support.trading_system.screening_runtime import (
+    screening_evidence_from_frame,
 )
 from chanlun.decision_support.trading_system.screening_structure import (
     SCREENING_STRUCTURE_FREQUENCIES,
-    build_screening_evidence,
     merge_provisional_candidates,
     unfinished_segment_candidates,
 )
 from chanlun.decision_support.trading_system.screening_warmup import (
+    SCREENING_QMT_30M_FALLBACK_REASON_CODE,
     SCREENING_WARMUP_DIFFERENCE_CODES,
     SCREENING_WARMUP_REQUIRED_BARS,
 )
@@ -69,10 +70,10 @@ from chanlun.decision_support.trading_system.sector_strength import (
     SectorStrengthBatch,
     SectorStrengthEvidence,
 )
-from chanlun.decision_support.trading_system.v3_qmt_sector_ledger import (
+from chanlun.decision_support.trading_system.qmt_sector_ledger import (
     qmt_sector_catalog_revision,
 )
-from chanlun.decision_support.trading_system.v3_qmt_same_base_stream import (
+from chanlun.decision_support.trading_system.qmt_same_base_stream import (
     normalize_qmt_opening_events_for_completed_minutes,
 )
 from chanlun.decision_support.trading_system.structure_adapter import (
@@ -83,14 +84,7 @@ from chanlun.decision_support.trading_system.warmup_convergence import (
     WarmupPrefixObservation,
     classify_warmup_convergence_envelope,
 )
-from chanlun.exchange.kline_precision import (
-    resolve_tdx_industry_index_quantum,
-)
 from chanlun.exchange.exchange import convert_stock_kline_frequency
-from chanlun.exchange.price_basis import (
-    attach_price_basis_metadata,
-    build_tdx_industry_price_basis_metadata,
-)
 from chanlun.exchange.qmt_screening_sector_source import (
     QMT_GICS3_CATALOG_SOURCE,
     QMT_GICS3_COMPOSITE_ADJUSTMENT,
@@ -102,12 +96,7 @@ from chanlun.tools.log_util import LogUtil
 _FREQUENCIES = SCREENING_STRUCTURE_FREQUENCIES
 _SECTOR_FREQUENCIES = ("30m", "5m")
 _A_STOCK_CODE = re.compile(r"^(?:SH|SZ|BJ)\.\d{6}$")
-_TDX_SECTOR_SOURCE = "tdx_880_industry_index"
-_TDX_SECTOR_PRICE_SOURCE = "tdx_native_880_index"
 _FRAME_UNSET = object()
-_QMT_30M_RESAMPLE_REASON = (
-    "QMT_NATIVE_30M_INVALID_RESAMPLED_FROM_COMPLETED_5M"
-)
 _WARMUP_ENVELOPE_PREFIX_RATIOS = ((1, 2), (2, 3), (5, 6), (1, 1))
 _TRADABLE_SCREENING_INSTRUMENT_TYPES = frozenset({"stock_cn", "etf_cn"})
 _KNOWN_SCREENING_INSTRUMENT_TYPES = frozenset(
@@ -247,15 +236,12 @@ class SectorAssessmentBatch:
     errors: tuple[SectorAnalysisFailure, ...]
     exclusion_counts: tuple[tuple[str, int], ...] = ()
     exclusions: tuple[SectorAnalysisExclusion, ...] = ()
-    # Exact QMT catalog identity when the native source provides one.  Test
-    # and fallback adapters may omit it; the screening service then derives a
-    # deterministic membership identity, but a forward sample can only match
-    # an externally captured QMT catalog when this exact revision is present.
+    # Exact QMT catalog identity.  A missing value keeps the batch fail-closed
+    # and ineligible for forward publication.
     catalog_revision: str | None = None
     # Compact member-category evidence used to recompute every horizontal
-    # strength, cross-sector rank and per-sector source identity.  Legacy/test
-    # providers may omit it; such a batch remains displayable but is not an
-    # independently auditable forward sample.
+    # strength, cross-sector rank and per-sector source identity.  A missing
+    # value remains display-only and cannot enter a forward publication.
     strength_evidence: SectorStrengthBatch | None = None
 
     def __post_init__(self) -> None:
@@ -439,16 +425,6 @@ class NativeTradingGatewayConfig:
             "minimum_bars_by_frequency",
         ):
             values = dict(getattr(self, field_name))
-            # Preserve compatibility with explicit test/adapter configs made
-            # before the physical daily structure was added.  The production
-            # defaults above always state the daily budget explicitly.
-            if set(values) == {"30m", "5m", "1m"}:
-                values["d"] = values["30m"]
-                object.__setattr__(
-                    self,
-                    field_name,
-                    tuple((frequency, values[frequency]) for frequency in _FREQUENCIES),
-                )
             if set(values) != set(_FREQUENCIES):
                 raise ValueError(
                     f"{field_name} must define d, 30m, 5m and 1m"
@@ -580,7 +556,7 @@ def _frame_content_revision(frame: pd.DataFrame) -> str:
     has_member_mask = "member_mask" in frame.columns
     return sha256_json(
         {
-            "schema": "chanlun-screening-closed-frame/v2",
+            "schema": "chanlun-screening-closed-frame",
             "attrs": identity_attrs,
             "rows": tuple(
                 {
@@ -667,27 +643,18 @@ def analyze_native_frame(
     if frequency not in _FREQUENCIES:
         raise ValueError("unsupported trading frequency")
     closed_at = normalize_datetime(as_of, "as_of")
-    metadata = strict_snapshot_price_metadata(frame)
-    config = screening_cl_config(
-        structure_price_quantum=metadata.structure_price_quantum,
-        price_basis_revision=metadata.price_basis_revision,
-    )
-    cd = CL(
-        code,
-        frequency,
-        config,
-        market="a",
-    )
-    cd.process_klines(frame)
+    # Metadata failures describe the input snapshot, not a structure-engine
+    # contract violation, and retain their public ValueError classification.
+    strict_snapshot_price_metadata(frame)
     try:
-        evidence = build_screening_evidence(
-            cd,
-            source_closed_at=closed_at,
-            structure_price_quantum=metadata.structure_price_quantum,
-            price_basis_revision=metadata.price_basis_revision,
-            strict_config_revision=cast(str, config["strict_config_revision"]),
+        evidence = screening_evidence_from_frame(
+            code=code,
+            frequency=frequency,
+            frame=frame,
+            as_of=closed_at,
+            market="a",
         )
-    except (StrictStructureContractError, TypeError, ValueError) as exc:
+    except (StrictStructureContractError, ValueError) as exc:
         raise StrictStructureAnalysisError(str(exc)) from exc
     provisional = extract_provisional_candidates(
         evidence,
@@ -982,7 +949,7 @@ def audit_native_frame_warmup_envelope(
         raise ValueError("prefix_ratios require at least three valid fractions")
     parameter_set_id = sha256_json(
         {
-            "contract": "warmup-common-tail-multi-prefix/v1",
+            "contract": "warmup-common-tail-multi-prefix",
             "frequency": frequency,
             "prefix_ratios": ratios,
             "minimum_prefix_bars": SCREENING_WARMUP_REQUIRED_BARS[frequency],
@@ -1063,25 +1030,6 @@ def _stock_codes(raw: object) -> tuple[str, ...]:
     return tuple(sorted(values))
 
 
-def _universe_metadata(
-    raw: object,
-) -> tuple[dict[str, str], dict[str, str]]:
-    if isinstance(raw, (str, bytes)) or not isinstance(raw, Sequence):
-        raise TypeError("universe provider must return a sequence")
-    result: dict[str, str] = {}
-    names: dict[str, str] = {}
-    for item in raw:
-        if not isinstance(item, Mapping) or item.get("type") != "stock_cn":
-            continue
-        code = item.get("code")
-        if isinstance(code, str) and _A_STOCK_CODE.fullmatch(code):
-            result.setdefault(code.split(".", 1)[1], code)
-            name = item.get("name")
-            if isinstance(name, str) and name.strip():
-                names.setdefault(code, name.strip())
-    return result, names
-
-
 def _qmt_catalog_universe(
     rows: Sequence[object],
 ) -> dict[str, str]:
@@ -1108,25 +1056,12 @@ def _qmt_catalog_universe(
 
 
 def _catalog_member_count(raw: Sequence[object]) -> int:
-    """Count unique A-share identities before intersecting the scan universe.
-
-    QMT catalogs normally expose ``SH.600000`` style codes, while older TDX
-    adapters can expose six-digit identities.  Reducing both forms to their
-    six-digit identity prevents a duplicated representation from inflating the
-    catalog count.  This is deliberately separate from ``members`` below:
-    that value is the current controlled-universe intersection, not the source
-    catalog's actual constituent count.
-    """
+    """Count unique canonical A-share identities in the QMT catalog."""
 
     identities: set[str] = set()
     for value in raw:
-        if not isinstance(value, str):
-            continue
-        normalized = value.strip()
-        if _A_STOCK_CODE.fullmatch(normalized):
-            identities.add(normalized.split(".", 1)[1])
-        elif re.fullmatch(r"\d{6}", normalized):
-            identities.add(normalized)
+        if isinstance(value, str) and _A_STOCK_CODE.fullmatch(value):
+            identities.add(value)
     return len(identities)
 
 
@@ -1137,8 +1072,6 @@ class NativeTradingDataGateway:
         self,
         *,
         exchange_provider: Callable[[], object],
-        sector_exchange_provider: Callable[[], object],
-        universe_provider: Callable[[object], object],
         sector_provider: Callable[[], object],
         sector_frame_provider: Callable[..., object] | None = None,
         sector_strength_provider: Callable[..., Mapping[str, SectorStrengthEvidence]]
@@ -1155,8 +1088,6 @@ class NativeTradingDataGateway:
     ) -> None:
         providers = (
             exchange_provider,
-            sector_exchange_provider,
-            universe_provider,
             sector_provider,
             watchlist_provider,
             holdings_provider,
@@ -1182,8 +1113,6 @@ class NativeTradingDataGateway:
         ):
             raise TypeError("trading_session_provider must be callable")
         self._exchange_provider = exchange_provider
-        self._sector_exchange_provider = sector_exchange_provider
-        self._universe_provider = universe_provider
         self._sector_provider = sector_provider
         self._sector_frame_provider = sector_frame_provider
         self._sector_strength_provider = sector_strength_provider
@@ -1201,6 +1130,13 @@ class NativeTradingDataGateway:
         self._emitted_sector_bars: dict[tuple[str, str], datetime] = {}
         self._analysis_cache: dict[
             tuple[str, str], tuple[str, FrameStructureAnalysis]
+        ] = {}
+        # M/W/D facts are immutable at the explicit causal cutoff used by the
+        # intraday monitor.  Cache only fully resolved bundles so repeated 1m
+        # and 5m observations do not resample hundreds of daily sessions, while
+        # transient UNRESOLVED evidence remains retryable.
+        self._higher_timeframe_cache: dict[
+            tuple[str, str, str, str, str], HigherTimeframeGateBundle
         ] = {}
 
     def _report_progress(self) -> None:
@@ -1232,7 +1168,6 @@ class NativeTradingDataGateway:
     ) -> FrameStructureAnalysis:
         if sector_source not in {
             None,
-            _TDX_SECTOR_SOURCE,
             QMT_GICS3_CATALOG_SOURCE,
         }:
             raise ValueError("unsupported sector source")
@@ -1248,19 +1183,6 @@ class NativeTradingDataGateway:
         args: dict[str, object] = {
             "req_counts": self._config.request_bars(frequency)
         }
-        sector_metadata = None
-        if sector_source == _TDX_SECTOR_SOURCE:
-            quantum = resolve_tdx_industry_index_quantum(code)
-            if quantum is None:
-                raise SectorAnalysisUnavailable(
-                    "sector_price_basis_unavailable",
-                    f"unsupported TDX industry index code: {code}",
-                )
-            sector_metadata = build_tdx_industry_price_basis_metadata(
-                code,
-                quantum,
-            )
-            args["fq"] = "none"
         if frame_override is _FRAME_UNSET:
             try:
                 self._report_progress()
@@ -1284,43 +1206,34 @@ class NativeTradingDataGateway:
                     "kline frame is unavailable",
                 )
             try:
-                if sector_source == _TDX_SECTOR_SOURCE:
-                    attach_price_basis_metadata(raw_frame, sector_metadata)
-                    expected_attrs = {
-                        "structure_price_quantum": "0.01",
-                        "price_basis_revision": sector_metadata.price_basis_revision,
-                        "price_basis_provider": "tdx-industry-index",
-                        "price_basis_adjustment": "none",
-                    }
-                else:
-                    expected_attrs = {
-                        "price_basis_provider": QMT_GICS3_COMPOSITE_PROVIDER,
-                        "price_basis_adjustment": QMT_GICS3_COMPOSITE_ADJUSTMENT,
-                        "sector_factor_adjustment_contract_id": (
-                            QMT_CAUSAL_FACTOR_ADJUSTMENT_CONTRACT_ID
-                        ),
-                    }
-                    factor_revision = raw_frame.attrs.get(
-                        "sector_factor_revision"
+                expected_attrs = {
+                    "price_basis_provider": QMT_GICS3_COMPOSITE_PROVIDER,
+                    "price_basis_adjustment": QMT_GICS3_COMPOSITE_ADJUSTMENT,
+                    "sector_factor_adjustment_contract_id": (
+                        QMT_CAUSAL_FACTOR_ADJUSTMENT_CONTRACT_ID
+                    ),
+                }
+                factor_revision = raw_frame.attrs.get(
+                    "sector_factor_revision"
+                )
+                if (
+                    not isinstance(factor_revision, str)
+                    or re.fullmatch(r"sha256:[0-9a-f]{64}", factor_revision)
+                    is None
+                ):
+                    raise ValueError(
+                        "sector causal factor revision is unavailable"
                     )
-                    if (
-                        not isinstance(factor_revision, str)
-                        or re.fullmatch(r"sha256:[0-9a-f]{64}", factor_revision)
-                        is None
-                    ):
-                        raise ValueError(
-                            "sector causal factor revision is unavailable"
-                        )
-                    if frequency == "30m":
-                        expected_attrs.update(
-                            {
-                                "source_base_frequency": "5m",
-                                "derived_frequency": "30m",
-                                "sector_thirty_minute_derivation_contract": (
-                                    QMT_SECTOR_THIRTY_MINUTE_DERIVATION_CONTRACT
-                                ),
-                            }
-                        )
+                if frequency == "30m":
+                    expected_attrs.update(
+                        {
+                            "source_base_frequency": "5m",
+                            "derived_frequency": "30m",
+                            "sector_thirty_minute_derivation_contract": (
+                                QMT_SECTOR_THIRTY_MINUTE_DERIVATION_CONTRACT
+                            ),
+                        }
+                    )
                 if any(
                     raw_frame.attrs.get(name) != value
                     for name, value in expected_attrs.items()
@@ -1366,19 +1279,20 @@ class NativeTradingDataGateway:
                         "validated completed-5m fallback unavailable: "
                         f"{type(fallback_exc).__name__}: {fallback_exc}"
                     ) from fallback_exc
-                fallback_reason_codes = (_QMT_30M_RESAMPLE_REASON,)
+                fallback_reason_codes = (
+                    SCREENING_QMT_30M_FALLBACK_REASON_CODE,
+                )
                 LogUtil.warning(
                     "[trading_screening.market_data_fallback] "
-                    f"code={code} frequency=30m reason={_QMT_30M_RESAMPLE_REASON}"
+                    "code="
+                    f"{code} frequency=30m "
+                    f"reason={SCREENING_QMT_30M_FALLBACK_REASON_CODE}"
                 )
             else:
                 raise
         try:
             strict_snapshot_price_metadata(frame)
-            if sector_source == _TDX_SECTOR_SOURCE:
-                expected_provider = "tdx-industry-index"
-                expected_adjustment = "none"
-            elif sector_source == QMT_GICS3_CATALOG_SOURCE:
+            if sector_source == QMT_GICS3_CATALOG_SOURCE:
                 expected_provider = QMT_GICS3_COMPOSITE_PROVIDER
                 expected_adjustment = QMT_GICS3_COMPOSITE_ADJUSTMENT
             else:
@@ -1593,42 +1507,21 @@ class NativeTradingDataGateway:
         if not isinstance(raw, Mapping):
             raise TypeError("sector catalog must be a mapping")
         catalog_source = raw.get("source")
-        if catalog_source not in {
-            _TDX_SECTOR_SOURCE,
-            QMT_GICS3_CATALOG_SOURCE,
-        }:
+        if catalog_source != QMT_GICS3_CATALOG_SOURCE:
             raise ValueError("sector catalog must expose QMT GICS3 components")
         rows = raw.get("sectors")
         if isinstance(rows, (str, bytes)) or not isinstance(rows, Sequence):
             raise TypeError("sector catalog must expose a sectors sequence")
-        catalog_revision: str | None = None
-        if catalog_source == QMT_GICS3_CATALOG_SOURCE:
-            catalog_revision = qmt_sector_catalog_revision(raw)
-            provided_revision = raw.get("catalog_revision")
-            if (
-                provided_revision is not None
-                and provided_revision != catalog_revision
-            ):
-                raise ValueError(
-                    "QMT sector catalog revision does not match its members"
-                )
-            # Current QMT components are the point-in-time selection universe.
-            # Do not call the tick-backed generic all-stocks enumerator.
-            digits = _qmt_catalog_universe(rows)
-            symbol_names: dict[str, str] = {}
-        else:
-            stock_exchange = self._exchange_provider()
-            self._report_progress()
-            digits, symbol_names = _universe_metadata(
-                self._universe_provider(stock_exchange)
+        catalog_revision = qmt_sector_catalog_revision(raw)
+        provided_revision = raw.get("catalog_revision")
+        if provided_revision is not None and provided_revision != catalog_revision:
+            raise ValueError(
+                "QMT sector catalog revision does not match its members"
             )
-            self._report_progress()
+        # Current QMT components are the point-in-time selection universe.
+        digits = _qmt_catalog_universe(rows)
+        symbol_names: dict[str, str] = {}
         universe_codes = set(digits.values())
-        sector_exchange = (
-            self._sector_exchange_provider()
-            if catalog_source == _TDX_SECTOR_SOURCE
-            else None
-        )
         assessments: list[SectorAssessment] = []
         errors: list[SectorAnalysisFailure] = []
         exclusions: list[SectorAnalysisExclusion] = []
@@ -1642,24 +1535,13 @@ class NativeTradingDataGateway:
                 continue
             sector_id = row.get("sector_id")
             sector_name = row.get("name")
-            kline_code = row.get("kline_code")
             source_key = row.get("source_key")
             raw_members = row.get("member_codes")
             valid_identity = (
                 isinstance(sector_id, str)
-                and (
-                    (
-                        catalog_source == _TDX_SECTOR_SOURCE
-                        and sector_id.startswith("tdx-industry:")
-                        and isinstance(kline_code, str)
-                    )
-                    or (
-                        catalog_source == QMT_GICS3_CATALOG_SOURCE
-                        and sector_id.startswith("qmt-gics3:")
-                        and isinstance(source_key, str)
-                        and source_key.startswith("GICS3")
-                    )
-                )
+                and sector_id.startswith("qmt-gics3:")
+                and isinstance(source_key, str)
+                and source_key.startswith("GICS3")
             )
             if (
                 not valid_identity
@@ -1697,12 +1579,7 @@ class NativeTradingDataGateway:
                     detail_code = "sector_universe_member_coverage_insufficient"
                 exclusion = SectorAnalysisExclusion(
                     sector_id=sector_id,
-                    code=cast(
-                        str,
-                        source_key
-                        if catalog_source == QMT_GICS3_CATALOG_SOURCE
-                        else kline_code,
-                    ),
+                    code=cast(str, source_key),
                     reason_code="sector_member_coverage_insufficient",
                     reason=(
                         f"catalog_members={catalog_member_count}; "
@@ -1737,59 +1614,43 @@ class NativeTradingDataGateway:
                 analyses: dict[str, FrameStructureAnalysis] = {}
                 for frequency in _SECTOR_FREQUENCIES:
                     current_frequency = frequency
-                    if catalog_source == QMT_GICS3_CATALOG_SOURCE:
-                        if self._sector_frame_provider is None:
+                    if self._sector_frame_provider is None:
+                        raise SectorAnalysisUnavailable(
+                            "sector_adapter_error",
+                            "QMT sector frame provider is unavailable",
+                        )
+                    provider_frequency = frequency
+                    provider_request_bars = self._config.request_bars(frequency)
+                    if frequency == "30m":
+                        # A median of native 30m member returns is not the same
+                        # object as six chained medians of 5m member returns.
+                        provider_frequency = "5m"
+                        provider_request_bars = (
+                            self._config.request_bars("30m") * 6 + 47
+                        )
+                    self._report_progress()
+                    raw_sector_frame = self._sector_frame_provider(
+                        sector_id=sector_id,
+                        sector_name=sector_name.strip(),
+                        members=members,
+                        frequency=provider_frequency,
+                        as_of=observed_at,
+                        request_bars=provider_request_bars,
+                    )
+                    self._report_progress()
+                    if frequency == "30m":
+                        if not isinstance(raw_sector_frame, pd.DataFrame):
                             raise SectorAnalysisUnavailable(
-                                "sector_adapter_error",
-                                "QMT sector frame provider is unavailable",
+                                "sector_kline_unavailable",
+                                "QMT sector 5m base is unavailable",
                             )
-                        provider_frequency = frequency
-                        provider_request_bars = self._config.request_bars(
-                            frequency
+                        raw_sector_frame = derive_qmt_sector_thirty_minute_frame(
+                            raw_sector_frame,
+                            request_bars=self._config.request_bars("30m"),
                         )
-                        if frequency == "30m":
-                            # A median of native 30m member returns is not the
-                            # same object as six chained medians of 5m member
-                            # returns.  The page and M/W/D risk gate must use
-                            # one causal composite base, so the strategic
-                            # sector frame is always derived from 5m here.
-                            provider_frequency = "5m"
-                            provider_request_bars = (
-                                self._config.request_bars("30m") * 6 + 47
-                            )
-                        self._report_progress()
-                        raw_sector_frame = self._sector_frame_provider(
-                            sector_id=sector_id,
-                            sector_name=sector_name.strip(),
-                            members=members,
-                            frequency=provider_frequency,
-                            as_of=observed_at,
-                            request_bars=provider_request_bars,
-                        )
-                        self._report_progress()
-                        if frequency == "30m":
-                            if not isinstance(raw_sector_frame, pd.DataFrame):
-                                raise SectorAnalysisUnavailable(
-                                    "sector_kline_unavailable",
-                                    "QMT sector 5m base is unavailable",
-                                )
-                            raw_sector_frame = (
-                                derive_qmt_sector_thirty_minute_frame(
-                                    raw_sector_frame,
-                                    request_bars=self._config.request_bars(
-                                        "30m"
-                                    ),
-                                )
-                            )
-                    else:
-                        raw_sector_frame = _FRAME_UNSET
                     analyses[frequency] = self._load_analysis(
-                        exchange=sector_exchange,
-                        code=(
-                            sector_id
-                            if catalog_source == QMT_GICS3_CATALOG_SOURCE
-                            else cast(str, kline_code)
-                        ),
+                        exchange=None,
+                        code=sector_id,
                         analysis_code=sector_id,
                         frequency=frequency,
                         as_of=observed_at,
@@ -1822,11 +1683,7 @@ class NativeTradingDataGateway:
                     assess_sector(
                         sector_id=sector_id,
                         sector_name=sector_name.strip(),
-                        market_data_source=(
-                            "qmt_gics3_component_composite"
-                            if catalog_source == QMT_GICS3_CATALOG_SOURCE
-                            else _TDX_SECTOR_PRICE_SOURCE
-                        ),
+                        market_data_source="qmt_gics3_component_composite",
                         thirty=contexts["30m"],
                         five=contexts["5m"],
                         one=one,
@@ -1839,12 +1696,7 @@ class NativeTradingDataGateway:
             except SectorAnalysisUnavailable as exc:
                 failure = SectorAnalysisFailure(
                     sector_id=sector_id,
-                    code=cast(
-                        str,
-                        source_key
-                        if catalog_source == QMT_GICS3_CATALOG_SOURCE
-                        else kline_code,
-                    ),
+                    code=cast(str, source_key),
                     error_type=exc.code,
                     reason=str(exc),
                 )
@@ -1852,7 +1704,7 @@ class NativeTradingDataGateway:
                 LogUtil.error(
                     "[trading_screening.sector] "
                     f"sector={sector_id} frequency={current_frequency} "
-                    f"provider={'qmt-gics3-composite' if catalog_source == QMT_GICS3_CATALOG_SOURCE else 'tdx-industry-index'} "
+                    "provider=qmt-gics3-composite "
                     f"error_type={failure.error_type} reason={failure.reason}"
                 )
                 assessments.append(
@@ -1869,12 +1721,7 @@ class NativeTradingDataGateway:
             except Exception as exc:
                 failure = SectorAnalysisFailure(
                     sector_id=sector_id,
-                    code=cast(
-                        str,
-                        source_key
-                        if catalog_source == QMT_GICS3_CATALOG_SOURCE
-                        else kline_code,
-                    ),
+                    code=cast(str, source_key),
                     error_type="sector_adapter_error",
                     reason=str(exc),
                 )
@@ -1882,7 +1729,7 @@ class NativeTradingDataGateway:
                 LogUtil.error(
                     "[trading_screening.sector] "
                     f"sector={sector_id} frequency={current_frequency} "
-                    f"provider={'qmt-gics3-composite' if catalog_source == QMT_GICS3_CATALOG_SOURCE else 'tdx-industry-index'} "
+                    "provider=qmt-gics3-composite "
                     f"error_type={failure.error_type} reason={failure.reason}"
                 )
                 assessments.append(
@@ -1896,13 +1743,6 @@ class NativeTradingDataGateway:
                         reason_codes=(failure.error_type,),
                     )
                 )
-        if catalog_revision is None:
-            catalog_revision = sha256_json(
-                {
-                    "schema": "chanlun-live-sector-membership/v1",
-                    "members": members_by_sector,
-                }
-            )
         strength_evidence: SectorStrengthBatch | None = None
         if self._sector_strength_provider is not None:
             try:
@@ -2204,7 +2044,6 @@ class NativeTradingDataGateway:
                     if frequency in requested or cached is None
                     else cached
                 )
-            cached_one = self._cached_analysis(code, "1m")
             if "1m" in requested:
                 analyses["1m"] = self._load_analysis(
                     exchange=exchange,
@@ -2213,8 +2052,6 @@ class NativeTradingDataGateway:
                     frequency="1m",
                     as_of=observed_at,
                 )
-            elif cached_one is not None:
-                analyses["1m"] = cached_one
         bundle_as_of = max(item.closed_at for item in analyses.values())
         # The low-level 1m precision lane may legitimately be newer than the
         # latest completed sector 5m bar (for example 09:47 versus 09:45).
@@ -2248,20 +2085,37 @@ class NativeTradingDataGateway:
             self._higher_timeframe_provider is not None
             and has_current_five_minute_setup
         ):
-            try:
-                self._report_progress()
-                higher_timeframe_gates = self._higher_timeframe_provider(
-                    symbol=code,
-                    as_of=risk_as_of,
-                    sector_id=sector.sector_id,
-                    sector_name=sector.sector_name,
-                    sector_members=(
-                        self._members.get(sector.sector_id)
-                        if sector_members is None
-                        else sector_members
-                    ),
+            resolved_sector_members = (
+                self._members.get(sector.sector_id)
+                if sector_members is None
+                else sector_members
+            )
+            higher_timeframe_cache_key = (
+                code,
+                risk_as_of.isoformat(),
+                sector.sector_id,
+                sector.sector_name,
+                sha256_json(
+                    {
+                        "sector_members": list(resolved_sector_members or ()),
+                    }
+                ),
+            )
+            with self._lock:
+                higher_timeframe_gates = self._higher_timeframe_cache.get(
+                    higher_timeframe_cache_key
                 )
-                self._report_progress()
+            try:
+                if higher_timeframe_gates is None:
+                    self._report_progress()
+                    higher_timeframe_gates = self._higher_timeframe_provider(
+                        symbol=code,
+                        as_of=risk_as_of,
+                        sector_id=sector.sector_id,
+                        sector_name=sector.sector_name,
+                        sector_members=resolved_sector_members,
+                    )
+                    self._report_progress()
                 if not isinstance(
                     higher_timeframe_gates,
                     HigherTimeframeGateBundle,
@@ -2269,6 +2123,22 @@ class NativeTradingDataGateway:
                     raise TypeError(
                         "higher timeframe provider returned an invalid bundle"
                     )
+                if all(
+                    evidence.gate != "UNRESOLVED"
+                    for evidence in (
+                        higher_timeframe_gates.market,
+                        higher_timeframe_gates.sector,
+                        higher_timeframe_gates.symbol,
+                    )
+                ):
+                    with self._lock:
+                        if len(self._higher_timeframe_cache) >= 4096:
+                            self._higher_timeframe_cache.pop(
+                                next(iter(self._higher_timeframe_cache))
+                            )
+                        self._higher_timeframe_cache[
+                            higher_timeframe_cache_key
+                        ] = higher_timeframe_gates
             except HigherTimeframeDataUnavailable as exc:
                 LogUtil.error(
                     "[trading_screening.higher_timeframe.data] "

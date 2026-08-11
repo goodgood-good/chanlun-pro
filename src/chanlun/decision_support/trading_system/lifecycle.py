@@ -47,31 +47,12 @@ def has_formed_provisional_geometry(
 
 
 def lifecycle_stage_from_signal(signal: Mapping[str, object]) -> str | None:
-    """Return the effective lifecycle stage for a serialized signal.
-
-    V9 snapshots used ``approaching`` for both genuinely incomplete structures
-    and completed center-preview geometry.  Operational consumers (monitoring,
-    ranking and presentation) use this one compatibility rule while immutable
-    source documents are migrated to the current contract.
-    """
+    """Return the lifecycle stage declared by a current serialized signal."""
 
     stage = signal.get("lifecycle_stage")
-    if not isinstance(stage, str):
+    if stage not in _TRANSITIONS:
         return None
-    if stage != "approaching":
-        return stage
-    setup = signal.get("setup_5m")
-    if not isinstance(setup, Mapping) or setup.get("status") != "provisional":
-        return stage
-    point_type = setup.get("point_type", signal.get("point_type"))
-    return (
-        "formed"
-        if has_formed_provisional_geometry(
-            point_type,
-            setup.get("evidence_codes"),
-        )
-        else stage
-    )
+    return stage
 
 
 _TRANSITIONS: dict[LifecycleStage | None, set[LifecycleStage]] = {
@@ -111,7 +92,7 @@ def build_setup(
         point_identity = point.candidate_id
     setup_id = sha256_json(
         {
-            "schema": "chanlun-trade-setup/v1",
+            "schema": "chanlun-trade-setup",
             "point_id": point_identity,
             "sector_id": sector.sector_id,
         }
@@ -198,7 +179,7 @@ def _reason_codes(stage: LifecycleStage) -> tuple[str, ...]:
 def _signal_id(setup: TradeSetup) -> str:
     return sha256_json(
         {
-            "schema": "chanlun-signal-lifecycle/v1",
+            "schema": "chanlun-signal-lifecycle",
             "setup_id": setup.setup_id,
             "side": setup.point.side,
         }

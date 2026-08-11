@@ -26,9 +26,12 @@ MARKET, CODE, FREQ = "a", "SH.688182", "5m"
 
 @pytest.fixture
 def client():
-    app = create_app()
-    app.config["LOGIN_DISABLED"] = True
-    app.config["TESTING"] = True
+    app = create_app(test_config={
+        "TESTING": True,
+        "LOGIN_DISABLED": True,
+        "VALIDATE_WEB_SECURITY": False,
+        "SCHEDULER_ENABLED": False,
+    })
     return app.test_client()
 
 
@@ -59,13 +62,6 @@ def test_stale_snapshot_serves_stale_and_revalidates(client, monkeypatch):
     monkeypatch.setattr(tv_mod, "market_now_trading", lambda m: False)
     called = []
     monkeypatch.setattr(tv_mod, "submit_revalidation", lambda *a, **k: called.append(a))
-    monkeypatch.setattr(
-        tv_mod,
-        "_lazy_writeback_htf",
-        lambda *_args, **_kwargs: pytest.fail(
-            "stale snapshots must not perform synchronous HTF enrichment"
-        ),
-    )
     monkeypatch.setattr(
         tv_mod.market_frequencys,
         "get",
@@ -126,7 +122,7 @@ def test_endpoint_reads_disk_cache_outside_global_cache_lock(client, monkeypatch
     assert observed == [False]
 
 
-def test_lazy_htf_does_not_mutate_shared_cache_dict(client, monkeypatch):
+def test_partial_cache_entry_is_not_mutated(client, monkeypatch):
     """T0-2: cache hit 缺 higher_macd_* 键时的 lazy 补算, 不得原地给共享 cache dict 加键。
 
     否则锁外的 trim_future_bars(dict(chart_data) 整体迭代) / SSE {**data} 读同一共享 dict 时,
@@ -172,5 +168,5 @@ def test_lazy_htf_does_not_mutate_shared_cache_dict(client, monkeypatch):
     assert set(shared.keys()) == keys_before, (
         f"共享 cache dict 被原地加键: {set(shared.keys()) - keys_before}"
     )
-    # 非空校验: lazy 确实跑了(response 带出补算的 HTF), 否则上面的"未加键"是空过。
-    assert len(j.get("higher_macd_hist") or []) > 0, "lazy 未触发/未产出 HTF, 测试未覆盖 mutation 路径"
+    # The current cache contract does not patch incomplete payloads in place.
+    assert j.get("higher_macd_hist") == []

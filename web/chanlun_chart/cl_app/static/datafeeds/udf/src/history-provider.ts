@@ -30,17 +30,6 @@ interface StrictStructureError {
   code: string;
 }
 
-// tslint:disable: no-any
-interface HistoryPartialDataResponse extends UdfOkResponse {
-  t: number[];
-  c: number[];
-  o?: never;
-  h?: never;
-  l?: never;
-  v?: never;
-  update?: boolean;
-}
-
 interface HistoryFullDataResponse extends UdfOkResponse {
   macd_dif?: number[];
   macd_dea?: number[];
@@ -58,28 +47,12 @@ interface HistoryFullDataResponse extends UdfOkResponse {
   fxs: TextPoint[];
   bis: LineSegment[];
   xds: LineSegment[];
-  bi_zss: LineSegment[];
-  xd_zss: LineSegment[];
-  bcs: TextPoint[];
-  mmds: TextPoint[];
-  bi_mmds?: TextPoint[];
-  xd_mmds?: TextPoint[];
-  bi_bcs?: TextPoint[];
-  xd_bcs?: TextPoint[];
-  xd_zslx?: LineSegment[];
-  xd_zslx_lines?: LineSegment[];
-  recursive_levels?: unknown[];
-  higher_zs?: unknown[];
-  interval_nest?: unknown;
   update: boolean;
   full_snapshot?: boolean;
   strict_structure_mode?: StrictStructureMode;
   strict_structure?: Record<string, unknown>;
   strict_structure_error?: StrictStructureError;
-  chart_color?: Map<string, string>;
 }
-
-// tslint:enable: no-any
 interface HistoryNoDataResponse extends UdfResponse {
   s: "no_data";
   nextTime?: number;
@@ -87,7 +60,6 @@ interface HistoryNoDataResponse extends UdfResponse {
 
 type HistoryResponse =
   | HistoryFullDataResponse
-  | HistoryPartialDataResponse
   | HistoryNoDataResponse;
 
 export type PeriodParamsWithOptionalCountback = Omit<
@@ -113,46 +85,6 @@ interface TextPoint {
   text: string;
 }
 
-function currentCenterPeriod(resolution: unknown): string {
-  const value = String(resolution || "").trim();
-  if (/^[1-9][0-9]*$/.test(value)) return `${value}m`;
-  if (/^(1?D)$/i.test(value)) return "d";
-  return value.toLowerCase();
-}
-
-/**
- * `higher_zs` 为跨周期中枢载体，但当前周期也会在其中重复一份 `xd_zss`。
- * 两份数据经过增量合并后可能处于不同版本，页面若读取重复副本就会出现中枢
- * 边界落后、刷新后才恢复。这里把当前周期组强制绑定到已合并的 `xd_zss`；
- * 其他真实周期仍保留各自独立计算结果。
- */
-function syncCurrentCenterGroup(
-  groups: unknown[] | undefined,
-  resolution: unknown,
-  currentCenters: LineSegment[]
-): unknown[] {
-  const period = currentCenterPeriod(resolution);
-  const supported = ["1m", "5m", "30m", "d"];
-  let found = false;
-  const result = (Array.isArray(groups) ? groups : []).map((group) => {
-    if (!group || typeof group !== "object" || Array.isArray(group)) return group;
-    const record = group as Record<string, unknown>;
-    if (String(record.period || "").toLowerCase() !== period) return group;
-    found = true;
-    return { ...record, zss: currentCenters };
-  });
-  if (!found && supported.includes(period)) {
-    const labels: Record<string, string> = {
-      "1m": "1m 中枢",
-      "5m": "5m 中枢",
-      "30m": "30m 中枢",
-      d: "日线 中枢",
-    };
-    result.push({ period, level_name: labels[period], zss: currentCenters });
-  }
-  return result;
-}
-
 export interface GetBarsResult {
   bars: Bar[];
   meta: HistoryMetadata;
@@ -167,23 +99,9 @@ export interface GetBarsResult {
   fxs: TextPoint[];
   bis: LineSegment[];
   xds: LineSegment[];
-  bi_zss: LineSegment[];
-  xd_zss: LineSegment[];
-  bcs: TextPoint[];
-  mmds: TextPoint[];
-  bi_mmds?: TextPoint[];
-  xd_mmds?: TextPoint[];
-  bi_bcs?: TextPoint[];
-  xd_bcs?: TextPoint[];
-  xd_zslx?: LineSegment[];
-  xd_zslx_lines?: LineSegment[];
-  recursive_levels?: unknown[];
-  higher_zs?: unknown[];
-  interval_nest?: unknown;
   strict_structure_mode?: StrictStructureMode;
   strict_structure?: Record<string, unknown>;
   strict_structure_error?: StrictStructureError;
-  chart_color?: Map<string, string>;
 }
 
 export interface LimitedResponseConfiguration {
@@ -601,29 +519,17 @@ export class HistoryProvider {
       meta.noData = true;
       meta.nextTime = response.nextTime;
     } else {
-      const volumePresent = response.v !== undefined;
-      const ohlPresent = response.o !== undefined;
       const resolution = String(requestParams["resolution"] || "");
 
       for (let i = 0; i < response.t.length; ++i) {
         const barValue: Bar = {
           time: chartBarTimeSeconds(response.t[i], resolution) * 1000,
           close: response.c[i],
-          open: response.c[i],
-          high: response.c[i],
-          low: response.c[i],
+          open: response.o[i],
+          high: response.h[i],
+          low: response.l[i],
+          volume: response.v[i],
         };
-
-        if (ohlPresent) {
-          barValue.open = (response as HistoryFullDataResponse).o[i];
-          barValue.high = (response as HistoryFullDataResponse).h[i];
-          barValue.low = (response as HistoryFullDataResponse).l[i];
-        }
-
-        if (volumePresent) {
-          barValue.volume = (response as HistoryFullDataResponse).v[i];
-        }
-
         bars.push(barValue);
       }
 
@@ -754,27 +660,9 @@ export class HistoryProvider {
           fxs: (response as HistoryFullDataResponse).fxs,
           bis: (response as HistoryFullDataResponse).bis,
           xds: (response as HistoryFullDataResponse).xds,
-          bi_zss: (response as HistoryFullDataResponse).bi_zss,
-          xd_zss: (response as HistoryFullDataResponse).xd_zss,
-          bcs: (response as HistoryFullDataResponse).bcs,
-          mmds: (response as HistoryFullDataResponse).mmds,
-          bi_mmds: (response as HistoryFullDataResponse).bi_mmds || [],
-          xd_mmds: (response as HistoryFullDataResponse).xd_mmds || [],
-          bi_bcs: (response as HistoryFullDataResponse).bi_bcs || [],
-          xd_bcs: (response as HistoryFullDataResponse).xd_bcs || [],
-          xd_zslx: (response as HistoryFullDataResponse).xd_zslx || [],
-          xd_zslx_lines: (response as HistoryFullDataResponse).xd_zslx_lines || [],
-          recursive_levels: (response as HistoryFullDataResponse).recursive_levels || [],
-          higher_zs: syncCurrentCenterGroup(
-            (response as HistoryFullDataResponse).higher_zs,
-            resolution,
-            (response as HistoryFullDataResponse).xd_zss || []
-          ),
-          interval_nest: (response as HistoryFullDataResponse).interval_nest,
           strict_structure_mode: (response as HistoryFullDataResponse).strict_structure_mode,
           strict_structure: (response as HistoryFullDataResponse).strict_structure,
           strict_structure_error: (response as HistoryFullDataResponse).strict_structure_error,
-          chart_color: (response as HistoryFullDataResponse).chart_color,
         });
         this._pruneBarsResult();
         this._emitBarsReady(res_key, requestParams);
@@ -785,11 +673,7 @@ export class HistoryProvider {
         // 然后添加返回的数据；
         // 最后按时间排序；
 
-        // 1. 更新其他数据结构（如分型、笔、线段等）
-        // 处理TextPoint类型数据（fxs, bcs, mmds）
-        // 2026-07 修复(前端幽灵形态，对称补 updateLineSegments 同款窗口删除): 新响应为空
-        // 时原逻辑无条件保留全部旧点位——权威窗口内被证伪撤销的买卖点/背驰/分型会同样
-        // "幽灵"残留(与线段类型此前的漏洞同源)。windowFrom/windowTo 权威时按窗口过滤。
+        // 分型是单点基础图元；权威窗口内未再次出现的点应被删除。
         const updateTextPoints = (
           existingPoints: TextPoint[],
           newPoints: TextPoint[]
@@ -815,10 +699,7 @@ export class HistoryProvider {
           }
           if (!existingPoints || existingPoints.length === 0) return newPoints;
 
-          // Round11 BUG2 修复(对称 updateLineSegments 的 key-upsert): 原按 minResponseTime 时间切割只保留
-          // 早于新响应最早点的旧点——向左滚动时新响应是更旧窗口(min 小), 右侧最近的分型/买卖点/背驰
-          // (time 大)全不 < min → 被丢弃(与已硬化线段不对称)。改 time+price+text 身份 upsert:
-          // 权威窗口内(右侧最新窗)未被新响应提及的旧点剔除(去幽灵), 向左滚动(window undefined)只增不删。
+          // 权威窗口内按身份替换；向左分页只合并，不删除右侧图元。
           const isTextInAuthWindow = (p: TextPoint): boolean => {
             if (windowFrom === undefined || windowTo === undefined) return false;
             const tt = getPointTime(p);
@@ -843,13 +724,13 @@ export class HistoryProvider {
           );
         };
 
-        // 处理LineSegment类型数据（bis, xds, bi_zss, xd_zss）
+        // 笔与线段按起点身份合并。
         // 用 key 合并去重：避免按 minResponseTime 切割导致「起点在窗口内、
         // 终点在窗口外」的跨界线段在 backward 历史响应处理中被永久丢弃。
-        // 未完成线段（linestyle=1）以 起点+linestyle 为 key，让新版本覆盖旧版本。
+        // 未完成线段（linestyle=1）以起点和线型为 key，让本次响应覆盖先前状态。
         //
         // 2026-07 修复(前端幽灵形态)：仅靠 key upsert 只增不删——已完成段一旦起点
-        // 被新行情证伪、新响应里不再提及，旧版本会永久残留(后端刚修的同类 bug，
+        // 被新行情证伪、新响应里不再提及，先前状态会永久残留(后端刚修的同类 bug，
         // 只是从后端搬到前端)。windowFrom/windowTo 非 undefined 时(右侧最新窗口的
         // 权威响应，见调用处 isRecentWindowAuthoritative)，落在该窗口内的已有段一律
         // 先剔除，只有仍被新响应提及(同 key)才会重新加入——真正体现"这段窗口内，
@@ -886,11 +767,11 @@ export class HistoryProvider {
             return newSegments;
 
           // 身份 key：仅用起点 (head.time, head.price)。
-          // 一根线段从某个起点出发，任意时刻只该有一个版本——
+          // 一根线段从某个起点出发，任意时刻只该有一个状态——
           // 端点(tail)随 K 线包含合并会漂移（CLKline.k.date 会变），
           // linestyle 也会从 1(未完成) 翻成 0(完成)，
-          // 把它们写进 key 会让"同一根段的新旧两版"都被保留 → 视觉上线段重叠/断裂。
-          // 用 head 作为身份，Map.set 让最新版本覆盖旧版本即可。
+          // 把它们写进 key 会同时保留同一根段的前后状态 → 视觉上线段重叠/断裂。
+          // 用 head 作为身份，Map.set 让本次响应覆盖先前状态即可。
           const segmentKey = (s: LineSegment): string => {
             const head = s.points[0];
             return `${head.time}_${head.price}`;
@@ -944,111 +825,13 @@ export class HistoryProvider {
           obj_res.xds,
           (response as HistoryFullDataResponse).xds
         );
-        obj_res.bi_zss = updateLineSegments(
-          obj_res.bi_zss,
-          (response as HistoryFullDataResponse).bi_zss
-        );
-        obj_res.xd_zss = updateLineSegments(
-          obj_res.xd_zss,
-          (response as HistoryFullDataResponse).xd_zss
-        );
-        obj_res.bcs = updateTextPoints(
-          obj_res.bcs,
-          (response as HistoryFullDataResponse).bcs
-        );
-        obj_res.mmds = updateTextPoints(
-          obj_res.mmds,
-          (response as HistoryFullDataResponse).mmds
-        );
-        obj_res.bi_mmds = updateTextPoints(
-          obj_res.bi_mmds || [],
-          (response as HistoryFullDataResponse).bi_mmds || []
-        );
-        obj_res.xd_mmds = updateTextPoints(
-          obj_res.xd_mmds || [],
-          (response as HistoryFullDataResponse).xd_mmds || []
-        );
-        obj_res.bi_bcs = updateTextPoints(
-          obj_res.bi_bcs || [],
-          (response as HistoryFullDataResponse).bi_bcs || []
-        );
-        obj_res.xd_bcs = updateTextPoints(
-          obj_res.xd_bcs || [],
-          (response as HistoryFullDataResponse).xd_bcs || []
-        );
-        obj_res.xd_zslx = updateLineSegments(
-          obj_res.xd_zslx || [],
-          (response as HistoryFullDataResponse).xd_zslx || []
-        );
-        obj_res.xd_zslx_lines = updateLineSegments(
-          obj_res.xd_zslx_lines || [],
-          (response as HistoryFullDataResponse).xd_zslx_lines || []
-        );
-        // SSE 全量快照(prepend 产出完整 chart_data):形态列表直接整体替换,绕过上面为"部分响应
-        // (向左滚动)"设计的 updateXxx 合并 → 从根上杜绝任何形态(笔/线段/中枢/走势类型/分型/
-        // 买卖点/背驰)的"只增不删"陈旧累积(如多个未完成笔)。K线 bars/MACD 仍走下面增量合并
+        // SSE 全量快照直接整体替换基础图元。K线 bars/MACD 仍走下面增量合并
         // 保持视图不重置、随末根推进。scroll 等部分响应不带 full_snapshot, 仍走上面的合并(兜底)。
         if ((response as HistoryFullDataResponse).full_snapshot) {
           obj_res.fxs = (response as HistoryFullDataResponse).fxs || [];
           obj_res.bis = (response as HistoryFullDataResponse).bis || [];
           obj_res.xds = (response as HistoryFullDataResponse).xds || [];
-          obj_res.bi_zss = (response as HistoryFullDataResponse).bi_zss || [];
-          obj_res.xd_zss = (response as HistoryFullDataResponse).xd_zss || [];
-          obj_res.bcs = (response as HistoryFullDataResponse).bcs || [];
-          obj_res.mmds = (response as HistoryFullDataResponse).mmds || [];
-          obj_res.bi_mmds = (response as HistoryFullDataResponse).bi_mmds || [];
-          obj_res.xd_mmds = (response as HistoryFullDataResponse).xd_mmds || [];
-          obj_res.bi_bcs = (response as HistoryFullDataResponse).bi_bcs || [];
-          obj_res.xd_bcs = (response as HistoryFullDataResponse).xd_bcs || [];
-          obj_res.xd_zslx = (response as HistoryFullDataResponse).xd_zslx || [];
-          obj_res.xd_zslx_lines = (response as HistoryFullDataResponse).xd_zslx_lines || [];
         }
-        // R1-C7: recursive_levels 的嵌套 mmds/bcs 与顶层同为「按窗口裁切的单点形态」,
-        // 无条件整体替换会让 backward(向左滚动)响应用老窗口(通常为空)clobber 右侧
-        // 最新高级别买卖点/背驰(R11 BUG2 只修顶层 mmds/bcs 的兄弟盲区)。full_snapshot
-        // 仍整体替换; 非快照按 level 键对齐, 嵌套 mmds/bcs 走 updateTextPoints 同口径
-        // 合并(backward 只增不删/右侧权威窗内被证伪剔除), zss/zslx_lines 等后端全局
-        // 透传字段以新响应为准。
-        {
-          const newLevels =
-            (response as HistoryFullDataResponse).recursive_levels || [];
-          if ((response as HistoryFullDataResponse).full_snapshot) {
-            obj_res.recursive_levels = newLevels;
-          } else {
-            const oldByLevel = new Map<any, any>();
-            (obj_res.recursive_levels || []).forEach((lv: any, i: number) => {
-              oldByLevel.set(lv && lv.level !== undefined ? lv.level : i, lv);
-            });
-            obj_res.recursive_levels = newLevels.map((lv: any, i: number) => {
-              if (!lv || typeof lv !== 'object') return lv;
-              const key = lv.level !== undefined ? lv.level : i;
-              const old = oldByLevel.get(key);
-              if (!old || typeof old !== 'object') return lv;
-              const merged: any = Object.assign({}, lv);
-              merged.mmds = updateTextPoints(old.mmds || [], lv.mmds || []);
-              merged.bcs = updateTextPoints(old.bcs || [], lv.bcs || []);
-              return merged;
-            });
-          }
-        }
-        // higher_zs 是全局四周期快照，向左翻历史的窄窗口响应不得把右侧当前
-        // 快照覆盖掉。权威最新窗口才整体替换；随后无条件把当前周期组同步到
-        // 已经完成合并/全量替换的 xd_zss，消除同一中枢的双版本来源。
-        if (
-          (response as HistoryFullDataResponse).full_snapshot ||
-          isRecentWindowAuthoritative
-        ) {
-          obj_res.higher_zs =
-            (response as HistoryFullDataResponse).higher_zs || [];
-        }
-        obj_res.higher_zs = syncCurrentCenterGroup(
-          obj_res.higher_zs,
-          resolution,
-          obj_res.xd_zss || []
-        );
-        obj_res.interval_nest = (response as HistoryFullDataResponse).interval_nest;
-        obj_res.chart_color = (response as HistoryFullDataResponse).chart_color;
-
         // ⚠ 增量更新 K线 bars：原 else 分支只更新缠论形态+MACD，漏了 obj_res.bars，
         // 导致 SSE 推送(update:true)缠论更新而 K线 lastBar 不动。保留旧 bars 中早于新数据
         // 首根的，追加本次 bars，让 K线随 SSE 实时推进(与 dist/bundle.js 同步)。
@@ -1085,7 +868,7 @@ export class HistoryProvider {
           const strictStructure = (response as HistoryFullDataResponse).strict_structure;
           if (
             strictStructure &&
-            strictStructure.schema === "chanlun-chart-structure/v12"
+            strictStructure.schema === "chanlun-chart-structure"
           ) {
             obj_res.strict_structure_mode = "replace";
             obj_res.strict_structure = strictStructure;
@@ -1130,27 +913,9 @@ export class HistoryProvider {
       fxs: (response as HistoryFullDataResponse).fxs,
       bis: (response as HistoryFullDataResponse).bis,
       xds: (response as HistoryFullDataResponse).xds,
-      bi_zss: (response as HistoryFullDataResponse).bi_zss,
-      xd_zss: (response as HistoryFullDataResponse).xd_zss,
-      bcs: (response as HistoryFullDataResponse).bcs,
-      mmds: (response as HistoryFullDataResponse).mmds,
-      bi_mmds: (response as HistoryFullDataResponse).bi_mmds || [],
-      xd_mmds: (response as HistoryFullDataResponse).xd_mmds || [],
-      bi_bcs: (response as HistoryFullDataResponse).bi_bcs || [],
-      xd_bcs: (response as HistoryFullDataResponse).xd_bcs || [],
-      xd_zslx: (response as HistoryFullDataResponse).xd_zslx || [],
-      xd_zslx_lines: (response as HistoryFullDataResponse).xd_zslx_lines || [],
-      recursive_levels: (response as HistoryFullDataResponse).recursive_levels || [],
-      higher_zs: syncCurrentCenterGroup(
-        (response as HistoryFullDataResponse).higher_zs,
-        requestParams["resolution"],
-        (response as HistoryFullDataResponse).xd_zss || []
-      ),
-      interval_nest: (response as HistoryFullDataResponse).interval_nest,
       strict_structure_mode: (response as HistoryFullDataResponse).strict_structure_mode,
       strict_structure: (response as HistoryFullDataResponse).strict_structure,
       strict_structure_error: (response as HistoryFullDataResponse).strict_structure_error,
-      chart_color: (response as HistoryFullDataResponse).chart_color,
     };
 
     return result;

@@ -36,7 +36,7 @@ def check_env(
 
     # 检查 环境变量是否设置正确
     try:
-        importer("chanlun.core.cl_interface")
+        importer("chanlun.core.cl")
     except Exception:
         output("无法导入 chanlun 模块，环境变量未设置或设置错误")
         output(f"当前的环境变量如下：{sys.path}")

@@ -36,12 +36,6 @@ class LbQuotaTracker:
                 cls._instance = LbQuotaTracker()
         return cls._instance
 
-    @classmethod
-    def _reset_singleton_for_test(cls) -> None:
-        """仅用于测试隔离，生产代码不要调。"""
-        with cls._instance_lock:
-            cls._instance = None
-
     def __init__(self):
         self._lock = threading.Lock()
         self._symbols: Set[str] = set()

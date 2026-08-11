@@ -12,6 +12,10 @@ from dataclasses import dataclass, fields, replace
 from decimal import Decimal, InvalidOperation
 from typing import Mapping, Sequence
 
+from chanlun.core.strict_structure.base_profile import (
+    STRICT_BASE_PROFILE_ID,
+    strict_base_config_revision,
+)
 from chanlun.decision_support.fingerprints import sha256_json
 from chanlun.decision_support.trading_system.engine import (
     EvaluatedSignal,
@@ -25,10 +29,14 @@ from chanlun.decision_support.trading_system.models import (
     TradingPolicy,
 )
 from chanlun.decision_support.trading_system.provisional import ProvisionalCandidate
+from chanlun.decision_support.trading_system.runtime_config import (
+    SCREENING_STRUCTURE_PROFILE_ID,
+    screening_base_config_revision,
+)
 
 
-DECISION_CORE_SCHEMA = "chanlun-human-assisted-decision-core/v3"
-SIGNAL_DECISION_DOCUMENT_SCHEMA = "chanlun-human-assisted-signal-decision/v1"
+DECISION_CORE_SCHEMA = "chanlun-human-assisted-decision-core"
+SIGNAL_DECISION_DOCUMENT_SCHEMA = "chanlun-human-assisted-signal-decision"
 MONITOR_ONLY_BUY_REASON_CODE = "current_qmt_sector_trigger_required"
 
 _SIGNAL_DECISION_FIELDS = (
@@ -125,6 +133,10 @@ class HumanAssistedDecisionContract:
     locator_frequency: str = "1m"
     physical_structure_frequencies: tuple[str, ...] = ("d", "30m", "5m", "1m")
     stroke_mode: str = "old"
+    strict_base_profile_id: str = STRICT_BASE_PROFILE_ID
+    strict_base_profile_revision: str = strict_base_config_revision()
+    strict_runtime_scope_profile_id: str = SCREENING_STRUCTURE_PROFILE_ID
+    strict_runtime_scope_profile_revision: str = screening_base_config_revision()
     recursive_structure_allowed: bool = False
     unfinished_segment_candidates: bool = True
     human_confirmation_required: bool = True
@@ -144,6 +156,12 @@ class HumanAssistedDecisionContract:
         if (
             self.physical_structure_frequencies != ("d", "30m", "5m", "1m")
             or self.stroke_mode != "old"
+            or self.strict_base_profile_id != STRICT_BASE_PROFILE_ID
+            or self.strict_base_profile_revision != strict_base_config_revision()
+            or self.strict_runtime_scope_profile_id
+            != SCREENING_STRUCTURE_PROFILE_ID
+            or self.strict_runtime_scope_profile_revision
+            != screening_base_config_revision()
             or self.recursive_structure_allowed
             or not self.unfinished_segment_candidates
         ):
@@ -175,6 +193,14 @@ class HumanAssistedDecisionContract:
                 self.physical_structure_frequencies
             ),
             "stroke_mode": self.stroke_mode,
+            "strict_base_profile_id": self.strict_base_profile_id,
+            "strict_base_profile_revision": self.strict_base_profile_revision,
+            "strict_runtime_scope_profile_id": (
+                self.strict_runtime_scope_profile_id
+            ),
+            "strict_runtime_scope_profile_revision": (
+                self.strict_runtime_scope_profile_revision
+            ),
             "recursive_structure_allowed": self.recursive_structure_allowed,
             "unfinished_segment_candidates": self.unfinished_segment_candidates,
             "human_confirmation_required": self.human_confirmation_required,
@@ -249,6 +275,10 @@ def validate_human_assisted_contract_document(
         "tactical_frequency",
         "locator_frequency",
         "stroke_mode",
+        "strict_base_profile_id",
+        "strict_base_profile_revision",
+        "strict_runtime_scope_profile_id",
+        "strict_runtime_scope_profile_revision",
         "live_status",
     )
     if any(not isinstance(document.get(name), str) for name in string_fields):
@@ -276,6 +306,14 @@ def validate_human_assisted_contract_document(
         locator_frequency=str(document["locator_frequency"]),
         physical_structure_frequencies=tuple(physical_frequencies),
         stroke_mode=str(document["stroke_mode"]),
+        strict_base_profile_id=str(document["strict_base_profile_id"]),
+        strict_base_profile_revision=str(document["strict_base_profile_revision"]),
+        strict_runtime_scope_profile_id=str(
+            document["strict_runtime_scope_profile_id"]
+        ),
+        strict_runtime_scope_profile_revision=str(
+            document["strict_runtime_scope_profile_revision"]
+        ),
         recursive_structure_allowed=bool(document["recursive_structure_allowed"]),
         unfinished_segment_candidates=bool(document["unfinished_segment_candidates"]),
         human_confirmation_required=bool(document["human_confirmation_required"]),
@@ -639,9 +677,6 @@ class HumanAssistedDecisionCore:
     """Sole evaluator for page screening and historical bundle replay."""
 
     def __init__(self, policy: TradingPolicy = TradingPolicy()) -> None:
-        # Compatibility for existing backtest/report consumers that inspect
-        # the frozen policy on the former TradingEngine instance.
-        self._policy = policy
         self.contract = HumanAssistedDecisionContract(policy=policy)
         self._engine = TradingEngine(policy)
 

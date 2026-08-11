@@ -157,44 +157,6 @@
     // 首次冷态请求若刚好撞上服务启动或缓存落盘，服务端可能在客户端超时后不久完成。
     // 自动重试一次即可命中刚生成的缓存，避免图表永久停在“这里没有数据”等待手动刷新。
     const INITIAL_HISTORY_RETRY_DELAY_MS = 750;
-    function currentCenterPeriod(resolution) {
-        const value = String(resolution || "").trim();
-        if (/^[1-9][0-9]*$/.test(value))
-            return `${value}m`;
-        if (/^(1?D)$/i.test(value))
-            return "d";
-        return value.toLowerCase();
-    }
-    /**
-     * `higher_zs` 为跨周期中枢载体，但当前周期也会在其中重复一份 `xd_zss`。
-     * 两份数据经过增量合并后可能处于不同版本，页面若读取重复副本就会出现中枢
-     * 边界落后、刷新后才恢复。这里把当前周期组强制绑定到已合并的 `xd_zss`；
-     * 其他真实周期仍保留各自独立计算结果。
-     */
-    function syncCurrentCenterGroup(groups, resolution, currentCenters) {
-        const period = currentCenterPeriod(resolution);
-        const supported = ["1m", "5m", "30m", "d"];
-        let found = false;
-        const result = (Array.isArray(groups) ? groups : []).map((group) => {
-            if (!group || typeof group !== "object" || Array.isArray(group))
-                return group;
-            const record = group;
-            if (String(record.period || "").toLowerCase() !== period)
-                return group;
-            found = true;
-            return { ...record, zss: currentCenters };
-        });
-        if (!found && supported.includes(period)) {
-            const labels = {
-                "1m": "1m 中枢",
-                "5m": "5m 中枢",
-                "30m": "30m 中枢",
-                d: "日线 中枢",
-            };
-            result.push({ period, level_name: labels[period], zss: currentCenters });
-        }
-        return result;
-    }
     class HistoryProvider {
         constructor(datafeedUrl, requester, limitedServerResponse, options = {}) {
             this._fullRequestSerial = 0;
@@ -443,25 +405,16 @@
                 meta.nextTime = response.nextTime;
             }
             else {
-                const volumePresent = response.v !== undefined;
-                const ohlPresent = response.o !== undefined;
                 const resolution = String(requestParams["resolution"] || "");
                 for (let i = 0; i < response.t.length; ++i) {
                     const barValue = {
                         time: chartBarTimeSeconds(response.t[i], resolution) * 1000,
                         close: response.c[i],
-                        open: response.c[i],
-                        high: response.c[i],
-                        low: response.c[i],
+                        open: response.o[i],
+                        high: response.h[i],
+                        low: response.l[i],
+                        volume: response.v[i],
                     };
-                    if (ohlPresent) {
-                        barValue.open = response.o[i];
-                        barValue.high = response.h[i];
-                        barValue.low = response.l[i];
-                    }
-                    if (volumePresent) {
-                        barValue.volume = response.v[i];
-                    }
                     bars.push(barValue);
                 }
                 // 设置保存的key
@@ -577,23 +530,9 @@
                         fxs: response.fxs,
                         bis: response.bis,
                         xds: response.xds,
-                        bi_zss: response.bi_zss,
-                        xd_zss: response.xd_zss,
-                        bcs: response.bcs,
-                        mmds: response.mmds,
-                        bi_mmds: response.bi_mmds || [],
-                        xd_mmds: response.xd_mmds || [],
-                        bi_bcs: response.bi_bcs || [],
-                        xd_bcs: response.xd_bcs || [],
-                        xd_zslx: response.xd_zslx || [],
-                        xd_zslx_lines: response.xd_zslx_lines || [],
-                        recursive_levels: response.recursive_levels || [],
-                        higher_zs: syncCurrentCenterGroup(response.higher_zs, resolution, response.xd_zss || []),
-                        interval_nest: response.interval_nest,
                         strict_structure_mode: response.strict_structure_mode,
                         strict_structure: response.strict_structure,
                         strict_structure_error: response.strict_structure_error,
-                        chart_color: response.chart_color,
                     });
                     this._pruneBarsResult();
                     this._emitBarsReady(res_key, requestParams);
@@ -604,11 +543,7 @@
                     // 保留小于返回的第一个时间的所有数据；
                     // 然后添加返回的数据；
                     // 最后按时间排序；
-                    // 1. 更新其他数据结构（如分型、笔、线段等）
-                    // 处理TextPoint类型数据（fxs, bcs, mmds）
-                    // 2026-07 修复(前端幽灵形态，对称补 updateLineSegments 同款窗口删除): 新响应为空
-                    // 时原逻辑无条件保留全部旧点位——权威窗口内被证伪撤销的买卖点/背驰/分型会同样
-                    // "幽灵"残留(与线段类型此前的漏洞同源)。windowFrom/windowTo 权威时按窗口过滤。
+                    // 分型是单点基础图元；权威窗口内未再次出现的点应被删除。
                     const updateTextPoints = (existingPoints, newPoints) => {
                         // 获取点位时间的辅助函数，处理points可能是对象或数组的情况
                         const getPointTime = (point) => {
@@ -633,10 +568,7 @@
                         }
                         if (!existingPoints || existingPoints.length === 0)
                             return newPoints;
-                        // Round11 BUG2 修复(对称 updateLineSegments 的 key-upsert): 原按 minResponseTime 时间切割只保留
-                        // 早于新响应最早点的旧点——向左滚动时新响应是更旧窗口(min 小), 右侧最近的分型/买卖点/背驰
-                        // (time 大)全不 < min → 被丢弃(与已硬化线段不对称)。改 time+price+text 身份 upsert:
-                        // 权威窗口内(右侧最新窗)未被新响应提及的旧点剔除(去幽灵), 向左滚动(window undefined)只增不删。
+                        // 权威窗口内按身份替换；向左分页只合并，不删除右侧图元。
                         const isTextInAuthWindow = (p) => {
                             if (windowFrom === undefined || windowTo === undefined)
                                 return false;
@@ -659,13 +591,13 @@
                         }
                         return Array.from(mergedTextByKey.values()).sort((a, b) => getPointTime(a) - getPointTime(b));
                     };
-                    // 处理LineSegment类型数据（bis, xds, bi_zss, xd_zss）
+                    // 笔与线段按起点身份合并。
                     // 用 key 合并去重：避免按 minResponseTime 切割导致「起点在窗口内、
                     // 终点在窗口外」的跨界线段在 backward 历史响应处理中被永久丢弃。
-                    // 未完成线段（linestyle=1）以 起点+linestyle 为 key，让新版本覆盖旧版本。
+                    // 未完成线段（linestyle=1）以起点和线型为 key，让本次响应覆盖先前状态。
                     //
                     // 2026-07 修复(前端幽灵形态)：仅靠 key upsert 只增不删——已完成段一旦起点
-                    // 被新行情证伪、新响应里不再提及，旧版本会永久残留(后端刚修的同类 bug，
+                    // 被新行情证伪、新响应里不再提及，先前状态会永久残留(后端刚修的同类 bug，
                     // 只是从后端搬到前端)。windowFrom/windowTo 非 undefined 时(右侧最新窗口的
                     // 权威响应，见调用处 isRecentWindowAuthoritative)，落在该窗口内的已有段一律
                     // 先剔除，只有仍被新响应提及(同 key)才会重新加入——真正体现"这段窗口内，
@@ -700,11 +632,11 @@
                         if (!existingSegments || existingSegments.length === 0)
                             return newSegments;
                         // 身份 key：仅用起点 (head.time, head.price)。
-                        // 一根线段从某个起点出发，任意时刻只该有一个版本——
+                        // 一根线段从某个起点出发，任意时刻只该有一个状态——
                         // 端点(tail)随 K 线包含合并会漂移（CLKline.k.date 会变），
                         // linestyle 也会从 1(未完成) 翻成 0(完成)，
-                        // 把它们写进 key 会让"同一根段的新旧两版"都被保留 → 视觉上线段重叠/断裂。
-                        // 用 head 作为身份，Map.set 让最新版本覆盖旧版本即可。
+                        // 把它们写进 key 会同时保留同一根段的前后状态 → 视觉上线段重叠/断裂。
+                        // 用 head 作为身份，Map.set 让本次响应覆盖先前状态即可。
                         const segmentKey = (s) => {
                             const head = s.points[0];
                             return `${head.time}_${head.price}`;
@@ -744,76 +676,13 @@
                     obj_res.fxs = updateTextPoints(obj_res.fxs, response.fxs);
                     obj_res.bis = updateLineSegments(obj_res.bis, response.bis);
                     obj_res.xds = updateLineSegments(obj_res.xds, response.xds);
-                    obj_res.bi_zss = updateLineSegments(obj_res.bi_zss, response.bi_zss);
-                    obj_res.xd_zss = updateLineSegments(obj_res.xd_zss, response.xd_zss);
-                    obj_res.bcs = updateTextPoints(obj_res.bcs, response.bcs);
-                    obj_res.mmds = updateTextPoints(obj_res.mmds, response.mmds);
-                    obj_res.bi_mmds = updateTextPoints(obj_res.bi_mmds || [], response.bi_mmds || []);
-                    obj_res.xd_mmds = updateTextPoints(obj_res.xd_mmds || [], response.xd_mmds || []);
-                    obj_res.bi_bcs = updateTextPoints(obj_res.bi_bcs || [], response.bi_bcs || []);
-                    obj_res.xd_bcs = updateTextPoints(obj_res.xd_bcs || [], response.xd_bcs || []);
-                    obj_res.xd_zslx = updateLineSegments(obj_res.xd_zslx || [], response.xd_zslx || []);
-                    obj_res.xd_zslx_lines = updateLineSegments(obj_res.xd_zslx_lines || [], response.xd_zslx_lines || []);
-                    // SSE 全量快照(prepend 产出完整 chart_data):形态列表直接整体替换,绕过上面为"部分响应
-                    // (向左滚动)"设计的 updateXxx 合并 → 从根上杜绝任何形态(笔/线段/中枢/走势类型/分型/
-                    // 买卖点/背驰)的"只增不删"陈旧累积(如多个未完成笔)。K线 bars/MACD 仍走下面增量合并
+                    // SSE 全量快照直接整体替换基础图元。K线 bars/MACD 仍走下面增量合并
                     // 保持视图不重置、随末根推进。scroll 等部分响应不带 full_snapshot, 仍走上面的合并(兜底)。
                     if (response.full_snapshot) {
                         obj_res.fxs = response.fxs || [];
                         obj_res.bis = response.bis || [];
                         obj_res.xds = response.xds || [];
-                        obj_res.bi_zss = response.bi_zss || [];
-                        obj_res.xd_zss = response.xd_zss || [];
-                        obj_res.bcs = response.bcs || [];
-                        obj_res.mmds = response.mmds || [];
-                        obj_res.bi_mmds = response.bi_mmds || [];
-                        obj_res.xd_mmds = response.xd_mmds || [];
-                        obj_res.bi_bcs = response.bi_bcs || [];
-                        obj_res.xd_bcs = response.xd_bcs || [];
-                        obj_res.xd_zslx = response.xd_zslx || [];
-                        obj_res.xd_zslx_lines = response.xd_zslx_lines || [];
                     }
-                    // R1-C7: recursive_levels 的嵌套 mmds/bcs 与顶层同为「按窗口裁切的单点形态」,
-                    // 无条件整体替换会让 backward(向左滚动)响应用老窗口(通常为空)clobber 右侧
-                    // 最新高级别买卖点/背驰(R11 BUG2 只修顶层 mmds/bcs 的兄弟盲区)。full_snapshot
-                    // 仍整体替换; 非快照按 level 键对齐, 嵌套 mmds/bcs 走 updateTextPoints 同口径
-                    // 合并(backward 只增不删/右侧权威窗内被证伪剔除), zss/zslx_lines 等后端全局
-                    // 透传字段以新响应为准。
-                    {
-                        const newLevels = response.recursive_levels || [];
-                        if (response.full_snapshot) {
-                            obj_res.recursive_levels = newLevels;
-                        }
-                        else {
-                            const oldByLevel = new Map();
-                            (obj_res.recursive_levels || []).forEach((lv, i) => {
-                                oldByLevel.set(lv && lv.level !== undefined ? lv.level : i, lv);
-                            });
-                            obj_res.recursive_levels = newLevels.map((lv, i) => {
-                                if (!lv || typeof lv !== 'object')
-                                    return lv;
-                                const key = lv.level !== undefined ? lv.level : i;
-                                const old = oldByLevel.get(key);
-                                if (!old || typeof old !== 'object')
-                                    return lv;
-                                const merged = Object.assign({}, lv);
-                                merged.mmds = updateTextPoints(old.mmds || [], lv.mmds || []);
-                                merged.bcs = updateTextPoints(old.bcs || [], lv.bcs || []);
-                                return merged;
-                            });
-                        }
-                    }
-                    // higher_zs 是全局四周期快照，向左翻历史的窄窗口响应不得把右侧当前
-                    // 快照覆盖掉。权威最新窗口才整体替换；随后无条件把当前周期组同步到
-                    // 已经完成合并/全量替换的 xd_zss，消除同一中枢的双版本来源。
-                    if (response.full_snapshot ||
-                        isRecentWindowAuthoritative) {
-                        obj_res.higher_zs =
-                            response.higher_zs || [];
-                    }
-                    obj_res.higher_zs = syncCurrentCenterGroup(obj_res.higher_zs, resolution, obj_res.xd_zss || []);
-                    obj_res.interval_nest = response.interval_nest;
-                    obj_res.chart_color = response.chart_color;
                     // ⚠ 增量更新 K线 bars：原 else 分支只更新缠论形态+MACD，漏了 obj_res.bars，
                     // 导致 SSE 推送(update:true)缠论更新而 K线 lastBar 不动。保留旧 bars 中早于新数据
                     // 首根的，追加本次 bars，让 K线随 SSE 实时推进(与 dist/bundle.js 同步)。
@@ -848,7 +717,7 @@
                     if (strictMode === "replace") {
                         const strictStructure = response.strict_structure;
                         if (strictStructure &&
-                            strictStructure.schema === "chanlun-chart-structure/v12") {
+                            strictStructure.schema === "chanlun-chart-structure") {
                             obj_res.strict_structure_mode = "replace";
                             obj_res.strict_structure = strictStructure;
                             delete obj_res.strict_structure_error;
@@ -894,23 +763,9 @@
                 fxs: response.fxs,
                 bis: response.bis,
                 xds: response.xds,
-                bi_zss: response.bi_zss,
-                xd_zss: response.xd_zss,
-                bcs: response.bcs,
-                mmds: response.mmds,
-                bi_mmds: response.bi_mmds || [],
-                xd_mmds: response.xd_mmds || [],
-                bi_bcs: response.bi_bcs || [],
-                xd_bcs: response.xd_bcs || [],
-                xd_zslx: response.xd_zslx || [],
-                xd_zslx_lines: response.xd_zslx_lines || [],
-                recursive_levels: response.recursive_levels || [],
-                higher_zs: syncCurrentCenterGroup(response.higher_zs, requestParams["resolution"], response.xd_zss || []),
-                interval_nest: response.interval_nest,
                 strict_structure_mode: response.strict_structure_mode,
                 strict_structure: response.strict_structure,
                 strict_structure_error: response.strict_structure_error,
-                chart_color: response.chart_color,
             };
             return result;
         }
@@ -1121,210 +976,6 @@
         }
     }
 
-    function extractField$1(data, field, arrayIndex, valueIsArray) {
-        if (!(field in data)) {
-            // eslint-disable-next-line no-console
-            console.warn(`Field "${String(field)}" not present in response`);
-            return undefined;
-        }
-        const value = data[field];
-        if (Array.isArray(value) && (!valueIsArray || Array.isArray(value[0]))) {
-            return value[arrayIndex];
-        }
-        return value;
-    }
-    function symbolKey(symbol, currency, unit) {
-        // here we're using a separator that quite possible shouldn't be in a real symbol name
-        return symbol + (currency !== undefined ? '_%|#|%_' + currency : '') + (unit !== undefined ? '_%|#|%_' + unit : '');
-    }
-    class SymbolsStorage {
-        constructor(datafeedUrl, datafeedSupportedResolutions, requester) {
-            this._exchangesList = ['NYSE', 'FOREX', 'AMEX'];
-            this._symbolsInfo = {};
-            this._symbolsList = [];
-            this._datafeedUrl = datafeedUrl;
-            this._datafeedSupportedResolutions = datafeedSupportedResolutions;
-            this._requester = requester;
-            this._readyPromise = this._init();
-            this._readyPromise.catch((error) => {
-                // seems it is impossible
-                // eslint-disable-next-line no-console
-                console.error(`SymbolsStorage: Cannot init, error=${error.toString()}`);
-            });
-        }
-        // BEWARE: this function does not consider symbol's exchange
-        resolveSymbol(symbolName, currencyCode, unitId) {
-            return this._readyPromise.then(() => {
-                const symbolInfo = this._symbolsInfo[symbolKey(symbolName, currencyCode, unitId)];
-                if (symbolInfo === undefined) {
-                    return Promise.reject('invalid symbol');
-                }
-                return Promise.resolve(symbolInfo);
-            });
-        }
-        searchSymbols(searchString, exchange, symbolType, maxSearchResults) {
-            return this._readyPromise.then(() => {
-                const weightedResult = [];
-                const queryIsEmpty = searchString.length === 0;
-                searchString = searchString.toUpperCase();
-                for (const symbolName of this._symbolsList) {
-                    const symbolInfo = this._symbolsInfo[symbolName];
-                    if (symbolInfo === undefined) {
-                        continue;
-                    }
-                    if (symbolType.length > 0 && symbolInfo.type !== symbolType) {
-                        continue;
-                    }
-                    if (exchange && exchange.length > 0 && symbolInfo.exchange !== exchange) {
-                        continue;
-                    }
-                    const positionInName = symbolInfo.name.toUpperCase().indexOf(searchString);
-                    const positionInDescription = symbolInfo.description.toUpperCase().indexOf(searchString);
-                    if (queryIsEmpty || positionInName >= 0 || positionInDescription >= 0) {
-                        const alreadyExists = weightedResult.some((item) => item.symbolInfo === symbolInfo);
-                        if (!alreadyExists) {
-                            const weight = positionInName >= 0 ? positionInName : 8000 + positionInDescription;
-                            weightedResult.push({ symbolInfo: symbolInfo, weight: weight });
-                        }
-                    }
-                }
-                const result = weightedResult
-                    .sort((item1, item2) => item1.weight - item2.weight)
-                    .slice(0, maxSearchResults)
-                    .map((item) => {
-                    const symbolInfo = item.symbolInfo;
-                    return {
-                        symbol: symbolInfo.name,
-                        full_name: `${symbolInfo.exchange}:${symbolInfo.name}`,
-                        description: symbolInfo.description,
-                        exchange: symbolInfo.exchange,
-                        params: [],
-                        type: symbolInfo.type,
-                        ticker: symbolInfo.name,
-                    };
-                });
-                return Promise.resolve(result);
-            });
-        }
-        _init() {
-            const promises = [];
-            const alreadyRequestedExchanges = {};
-            for (const exchange of this._exchangesList) {
-                if (alreadyRequestedExchanges[exchange]) {
-                    continue;
-                }
-                alreadyRequestedExchanges[exchange] = true;
-                promises.push(this._requestExchangeData(exchange));
-            }
-            return Promise.all(promises)
-                .then(() => {
-                this._symbolsList.sort();
-            });
-        }
-        _requestExchangeData(exchange) {
-            return new Promise((resolve, reject) => {
-                this._requester.sendRequest(this._datafeedUrl, 'symbol_info', { group: exchange })
-                    .then((response) => {
-                    try {
-                        this._onExchangeDataReceived(exchange, response);
-                    }
-                    catch (error) {
-                        reject(error instanceof Error ? error : new Error(`SymbolsStorage: Unexpected exception ${error}`));
-                        return;
-                    }
-                    resolve();
-                })
-                    .catch((reason) => {
-                    logMessage(`SymbolsStorage: Request data for exchange '${exchange}' failed, reason=${getErrorMessage(reason)}`);
-                    resolve();
-                });
-            });
-        }
-        _onExchangeDataReceived(exchange, data) {
-            let symbolIndex = 0;
-            let fullName;
-            try {
-                const symbolsCount = data.symbol.length;
-                const tickerPresent = data.ticker !== undefined;
-                for (; symbolIndex < symbolsCount; ++symbolIndex) {
-                    const symbolName = data.symbol[symbolIndex];
-                    const listedExchange = extractField$1(data, 'exchange-listed', symbolIndex);
-                    const tradedExchange = extractField$1(data, 'exchange-traded', symbolIndex);
-                    if (listedExchange !== undefined || tradedExchange !== undefined) {
-                        // eslint-disable-next-line no-console
-                        console.warn('Starting from v30, both "exchange-listed" and "exchange-traded" fields are deprecated. Please use "exchange_listed_name" instead.');
-                        fullName = tradedExchange + ':' + symbolName;
-                    }
-                    const exchangeListedName = extractField$1(data, 'exchange_listed_name', symbolIndex);
-                    if (exchangeListedName === undefined) {
-                        // eslint-disable-next-line no-console
-                        console.warn('Starting from v30, both "exchange-listed" and "exchange-traded" fields are deprecated. Please use "exchange_listed_name" instead.');
-                    }
-                    else {
-                        fullName = exchangeListedName + ':' + symbolName;
-                    }
-                    const currencyCode = extractField$1(data, 'currency-code', symbolIndex);
-                    const unitId = extractField$1(data, 'unit-id', symbolIndex);
-                    const ticker = tickerPresent ? extractField$1(data, 'ticker', symbolIndex) : symbolName;
-                    const symbolInfo = {
-                        ticker: ticker,
-                        name: symbolName,
-                        base_name: [listedExchange + ':' + symbolName],
-                        listed_exchange: listedExchange,
-                        exchange: exchangeListedName || listedExchange,
-                        currency_code: currencyCode,
-                        original_currency_code: extractField$1(data, 'original-currency-code', symbolIndex),
-                        unit_id: unitId,
-                        original_unit_id: extractField$1(data, 'original-unit-id', symbolIndex),
-                        unit_conversion_types: extractField$1(data, 'unit-conversion-types', symbolIndex, true),
-                        description: extractField$1(data, 'description', symbolIndex),
-                        has_intraday: definedValueOrDefault(extractField$1(data, 'has-intraday', symbolIndex), false),
-                        visible_plots_set: definedValueOrDefault(extractField$1(data, 'visible-plots-set', symbolIndex), undefined),
-                        minmov: extractField$1(data, 'minmovement', symbolIndex) || extractField$1(data, 'minmov', symbolIndex) || 0,
-                        minmove2: extractField$1(data, 'minmove2', symbolIndex) || extractField$1(data, 'minmov2', symbolIndex),
-                        fractional: extractField$1(data, 'fractional', symbolIndex),
-                        pricescale: extractField$1(data, 'pricescale', symbolIndex),
-                        type: extractField$1(data, 'type', symbolIndex),
-                        session: extractField$1(data, 'session-regular', symbolIndex),
-                        session_holidays: extractField$1(data, 'session-holidays', symbolIndex),
-                        corrections: extractField$1(data, 'corrections', symbolIndex),
-                        timezone: extractField$1(data, 'timezone', symbolIndex),
-                        supported_resolutions: definedValueOrDefault(extractField$1(data, 'supported-resolutions', symbolIndex, true), this._datafeedSupportedResolutions),
-                        has_daily: definedValueOrDefault(extractField$1(data, 'has-daily', symbolIndex), true),
-                        intraday_multipliers: definedValueOrDefault(extractField$1(data, 'intraday-multipliers', symbolIndex, true), ['1', '5', '15', '30', '60']),
-                        has_weekly_and_monthly: extractField$1(data, 'has-weekly-and-monthly', symbolIndex),
-                        has_empty_bars: extractField$1(data, 'has-empty-bars', symbolIndex),
-                        volume_precision: definedValueOrDefault(extractField$1(data, 'volume-precision', symbolIndex), 0),
-                        format: 'price',
-                    };
-                    this._symbolsInfo[ticker] = symbolInfo;
-                    this._symbolsInfo[symbolName] = symbolInfo;
-                    if (fullName !== undefined) {
-                        this._symbolsInfo[fullName] = symbolInfo;
-                    }
-                    if (currencyCode !== undefined || unitId !== undefined) {
-                        this._symbolsInfo[symbolKey(ticker, currencyCode, unitId)] = symbolInfo;
-                        this._symbolsInfo[symbolKey(symbolName, currencyCode, unitId)] = symbolInfo;
-                        if (fullName !== undefined) {
-                            this._symbolsInfo[symbolKey(fullName, currencyCode, unitId)] = symbolInfo;
-                        }
-                    }
-                    this._symbolsList.push(symbolName);
-                }
-            }
-            catch (error) {
-                throw new Error(`SymbolsStorage: API error when processing exchange ${exchange} symbol #${symbolIndex} (${data.symbol[symbolIndex]}): ${Object(error).message}`);
-            }
-        }
-    }
-    function definedValueOrDefault(value, defaultValue) {
-        return value !== undefined ? value : defaultValue;
-    }
-
-    function extractField(data, field, arrayIndex) {
-        const value = data[field];
-        return Array.isArray(value) ? value[arrayIndex] : value;
-    }
     /**
      * This class implements interaction with UDF-compatible datafeed.
      * See [UDF protocol reference](@docs/connecting_data/UDF.md)
@@ -1332,7 +983,6 @@
     class UDFCompatibleDatafeedBase {
         constructor(datafeedURL, quotesProvider, requester, updateFrequency = 10 * 1000, limitedServerResponse, options = {}) {
             this._configuration = defaultConfiguration();
-            this._symbolsStorage = null;
             this._subscribersResetCallbacks = {};
             this._datafeedURL = datafeedURL;
             this._requester = requester;
@@ -1375,78 +1025,6 @@
         unsubscribeQuotes(listenerGuid) {
             this._quotesPulseProvider.unsubscribeQuotes(listenerGuid);
         }
-        getMarks(symbolInfo, from, to, onDataCallback, resolution) {
-            if (!this._configuration.supports_marks) {
-                return;
-            }
-            const requestParams = {
-                symbol: symbolInfo.ticker || '',
-                from: from,
-                to: to,
-                resolution: resolution,
-            };
-            this._send('marks', requestParams)
-                .then((response) => {
-                if (!Array.isArray(response)) {
-                    const result = [];
-                    for (let i = 0; i < response.id.length; ++i) {
-                        result.push({
-                            id: extractField(response, 'id', i),
-                            time: extractField(response, 'time', i),
-                            color: extractField(response, 'color', i),
-                            text: extractField(response, 'text', i),
-                            label: extractField(response, 'label', i),
-                            labelFontColor: extractField(response, 'labelFontColor', i),
-                            minSize: extractField(response, 'minSize', i),
-                            borderWidth: extractField(response, 'borderWidth', i),
-                            hoveredBorderWidth: extractField(response, 'hoveredBorderWidth', i),
-                            imageUrl: extractField(response, 'imageUrl', i),
-                            showLabelWhenImageLoaded: extractField(response, 'showLabelWhenImageLoaded', i),
-                        });
-                    }
-                    response = result;
-                }
-                onDataCallback(response);
-            })
-                .catch((error) => {
-                logMessage(`UdfCompatibleDatafeed: Request marks failed: ${getErrorMessage(error)}`);
-                onDataCallback([]);
-            });
-        }
-        getTimescaleMarks(symbolInfo, from, to, onDataCallback, resolution) {
-            if (!this._configuration.supports_timescale_marks) {
-                return;
-            }
-            const requestParams = {
-                symbol: symbolInfo.ticker || '',
-                from: from,
-                to: to,
-                resolution: resolution,
-            };
-            this._send('timescale_marks', requestParams)
-                .then((response) => {
-                if (!Array.isArray(response)) {
-                    const result = [];
-                    for (let i = 0; i < response.id.length; ++i) {
-                        result.push({
-                            id: extractField(response, 'id', i),
-                            time: extractField(response, 'time', i),
-                            color: extractField(response, 'color', i),
-                            label: extractField(response, 'label', i),
-                            tooltip: extractField(response, 'tooltip', i),
-                            imageUrl: extractField(response, 'imageUrl', i),
-                            showLabelWhenImageLoaded: extractField(response, 'showLabelWhenImageLoaded', i),
-                        });
-                    }
-                    response = result;
-                }
-                onDataCallback(response);
-            })
-                .catch((error) => {
-                logMessage(`UdfCompatibleDatafeed: Request timescale marks failed: ${getErrorMessage(error)}`);
-                onDataCallback([]);
-            });
-        }
         getServerTime(callback) {
             if (!this._configuration.supports_time) {
                 return;
@@ -1463,35 +1041,25 @@
             });
         }
         searchSymbols(userInput, exchange, symbolType, onResult) {
-            if (this._configuration.supports_search) {
-                const params = {
-                    limit: 30 /* Constants.SearchItemsLimit */,
-                    query: userInput.toUpperCase(),
-                    type: symbolType,
-                    exchange: exchange,
-                };
-                this._send('search', params)
-                    .then((response) => {
-                    if (response.s !== undefined) {
-                        logMessage(`UdfCompatibleDatafeed: search symbols error=${response.errmsg}`);
-                        onResult([]);
-                        return;
-                    }
-                    onResult(response);
-                })
-                    .catch((reason) => {
-                    logMessage(`UdfCompatibleDatafeed: Search symbols for '${userInput}' failed. Error=${getErrorMessage(reason)}`);
+            const params = {
+                limit: 30 /* Constants.SearchItemsLimit */,
+                query: userInput.toUpperCase(),
+                type: symbolType,
+                exchange: exchange,
+            };
+            this._send('search', params)
+                .then((response) => {
+                if (response.s !== undefined) {
+                    logMessage(`UdfCompatibleDatafeed: search symbols error=${response.errmsg}`);
                     onResult([]);
-                });
-            }
-            else {
-                if (this._symbolsStorage === null) {
-                    throw new Error('UdfCompatibleDatafeed: inconsistent configuration (symbols storage)');
+                    return;
                 }
-                this._symbolsStorage.searchSymbols(userInput, exchange, symbolType, 30 /* Constants.SearchItemsLimit */)
-                    .then(onResult)
-                    .catch(onResult.bind(null, []));
-            }
+                onResult(response);
+            })
+                .catch((reason) => {
+                logMessage(`UdfCompatibleDatafeed: Search symbols for '${userInput}' failed. Error=${getErrorMessage(reason)}`);
+                onResult([]);
+            });
         }
         resolveSymbol(symbolName, onResolve, onError, extension) {
             const currencyCode = extension && extension.currencyCode;
@@ -1499,66 +1067,55 @@
             function onResultReady(symbolInfo) {
                 onResolve(symbolInfo);
             }
-            if (!this._configuration.supports_group_request) {
-                const params = {
-                    ...this._reviewResolveParams,
-                    symbol: symbolName,
-                };
-                if (currencyCode !== undefined) {
-                    params.currencyCode = currencyCode;
-                }
-                if (unitId !== undefined) {
-                    params.unitId = unitId;
-                }
-                this._send('symbols', params)
-                    .then((response) => {
-                    if (response.s !== undefined) {
-                        onError('unknown_symbol');
-                    }
-                    else {
-                        const symbol = response.name;
-                        const listedExchange = response.listed_exchange ?? response['exchange-listed'];
-                        const tradedExchange = response.exchange ?? response['exchange-traded'];
-                        const result = {
-                            ...response,
-                            name: symbol,
-                            base_name: [listedExchange + ':' + symbol],
-                            listed_exchange: listedExchange,
-                            exchange: tradedExchange,
-                            ticker: response.ticker,
-                            currency_code: response.currency_code ?? response['currency-code'],
-                            original_currency_code: response.original_currency_code ?? response['original-currency-code'],
-                            unit_id: response.unit_id ?? response['unit-id'],
-                            original_unit_id: response.original_unit_id ?? response['original-unit-id'],
-                            unit_conversion_types: response.unit_conversion_types ?? response['unit-conversion-types'],
-                            has_intraday: response.has_intraday ?? response['has-intraday'] ?? false,
-                            visible_plots_set: response.visible_plots_set ?? response['visible-plots-set'],
-                            minmov: response.minmovement ?? response.minmov ?? 0,
-                            minmove2: response.minmovement2 ?? response.minmove2,
-                            session: response.session ?? response['session-regular'],
-                            session_holidays: response.session_holidays ?? response['session-holidays'],
-                            supported_resolutions: response.supported_resolutions ?? response['supported-resolutions'] ?? this._configuration.supported_resolutions ?? [],
-                            has_daily: response.has_daily ?? response['has-daily'] ?? true,
-                            intraday_multipliers: response.intraday_multipliers ?? response['intraday-multipliers'] ?? ['1', '5', '15', '30', '60'],
-                            has_weekly_and_monthly: response.has_weekly_and_monthly ?? response['has-weekly-and-monthly'],
-                            has_empty_bars: response.has_empty_bars ?? response['has-empty-bars'],
-                            volume_precision: response.volume_precision ?? response['volume-precision'],
-                            format: response.format ?? 'price',
-                        };
-                        onResultReady(result);
-                    }
-                })
-                    .catch((reason) => {
-                    logMessage(`UdfCompatibleDatafeed: Error resolving symbol: ${getErrorMessage(reason)}`);
+            const params = {
+                ...this._reviewResolveParams,
+                symbol: symbolName,
+            };
+            if (currencyCode !== undefined) {
+                params.currencyCode = currencyCode;
+            }
+            if (unitId !== undefined) {
+                params.unitId = unitId;
+            }
+            this._send('symbols', params)
+                .then((response) => {
+                if (response.s !== undefined) {
                     onError('unknown_symbol');
-                });
-            }
-            else {
-                if (this._symbolsStorage === null) {
-                    throw new Error('UdfCompatibleDatafeed: inconsistent configuration (symbols storage)');
+                    return;
                 }
-                this._symbolsStorage.resolveSymbol(symbolName, currencyCode, unitId).then(onResultReady).catch(onError);
-            }
+                const symbol = response.name;
+                const result = {
+                    ...response,
+                    name: symbol,
+                    base_name: [response.listed_exchange + ':' + symbol],
+                    listed_exchange: response.listed_exchange,
+                    exchange: response.exchange,
+                    ticker: response.ticker,
+                    currency_code: response.currency_code,
+                    original_currency_code: response.original_currency_code,
+                    unit_id: response.unit_id,
+                    original_unit_id: response.original_unit_id,
+                    unit_conversion_types: response.unit_conversion_types,
+                    has_intraday: response.has_intraday ?? false,
+                    visible_plots_set: response.visible_plots_set,
+                    minmov: response.minmov ?? 0,
+                    minmove2: response.minmove2,
+                    session: response.session,
+                    session_holidays: response.session_holidays,
+                    supported_resolutions: response.supported_resolutions ?? this._configuration.supported_resolutions ?? [],
+                    has_daily: response.has_daily ?? true,
+                    intraday_multipliers: response.intraday_multipliers ?? ['1', '5', '15', '30', '60'],
+                    has_weekly_and_monthly: response.has_weekly_and_monthly,
+                    has_empty_bars: response.has_empty_bars,
+                    volume_precision: response.volume_precision,
+                    format: response.format ?? 'price',
+                };
+                onResultReady(result);
+            })
+                .catch((reason) => {
+                logMessage(`UdfCompatibleDatafeed: Error resolving symbol: ${getErrorMessage(reason)}`);
+                onError('unknown_symbol');
+            });
         }
         getBars(symbolInfo, resolution, periodParams, onResult, onError) {
             this._historyProvider.getBars(symbolInfo, resolution, periodParams)
@@ -1650,19 +1207,15 @@
             if (configurationData.exchanges === undefined) {
                 configurationData.exchanges = [];
             }
-            if (!configurationData.supports_search && !configurationData.supports_group_request) {
-                throw new Error('Unsupported datafeed configuration. Must either support search, or support group request');
-            }
-            if (configurationData.supports_group_request || !configurationData.supports_search) {
-                this._symbolsStorage = new SymbolsStorage(this._datafeedURL, configurationData.supported_resolutions || [], this._requester);
+            if (!configurationData.supports_search) {
+                throw new Error('Unsupported datafeed configuration. Search is required');
             }
             logMessage(`UdfCompatibleDatafeed: Initialized with ${JSON.stringify(configurationData)}`);
         }
     }
     function defaultConfiguration() {
         return {
-            supports_search: false,
-            supports_group_request: true,
+            supports_search: true,
             supported_resolutions: [
                 '1',
                 '5',
@@ -1673,8 +1226,6 @@
                 '1W',
                 '1M',
             ],
-            supports_marks: false,
-            supports_timescale_marks: false,
         };
     }
 

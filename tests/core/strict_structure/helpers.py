@@ -21,7 +21,7 @@ from chanlun.core.strict_structure.models import (
 
 
 BASE = datetime(2026, 1, 5, 9, 30, tzinfo=timezone.utc)
-TEST_PRICE_BASIS = "test-raw-v1"
+TEST_PRICE_BASIS = "test-raw"
 
 
 def unit(
@@ -260,30 +260,6 @@ def completed_down_center(
     return completed
 
 
-# Transitional aliases keep older dependent test modules importable while their
-# assertions are migrated in Task 2.
-def center(unit_offset: int = 0, **changes) -> TrendCenter:
-    return ongoing_center(
-        unit_offset,
-        structural_level=changes.pop("structural_level", 0),
-        zd_tick=changes.pop("zd_tick", 105),
-        zg_tick=changes.pop("zg_tick", 115),
-        center_id=changes.pop("center_id", None),
-    )
-
-
-def destroyed_up_center(unit_offset: int = 0, **changes) -> TrendCenter:
-    changes.pop("dd_tick", None)
-    changes.pop("gg_tick", None)
-    return completed_up_center(unit_offset, **changes)
-
-
-def destroyed_down_center(unit_offset: int = 0, **changes) -> TrendCenter:
-    changes.pop("dd_tick", None)
-    changes.pop("gg_tick", None)
-    return completed_down_center(unit_offset, **changes)
-
-
 def structure_for(*centers, completed_trends=()) -> StrictStructureResult:
     center_values = tuple(centers)
     trend_values = tuple(completed_trends)
@@ -354,7 +330,7 @@ def structure_for(*centers, completed_trends=()) -> StrictStructureResult:
             )
         )
     return StrictStructureResult(
-        schema_version="chanlun-structure/v3",
+        schema="chanlun-structure",
         price_basis_revision=TEST_PRICE_BASIS,
         levels=tuple(levels),
     )

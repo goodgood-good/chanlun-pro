@@ -23,15 +23,14 @@
   function cohortLabel(markoutValue) {
     const markout = markoutValue || {};
     if (markout.status === "INVALID") return "证据无效";
-    if (markout.status === "UNQUALIFIED") return "历史样本 · 会话资格未认证";
     if (markout.status !== "AVAILABLE") return "尚无观察样本";
     const sample = markout.sample || {};
     const sourceStatus = text(markout.source_provenance_status, "UNAVAILABLE");
-    const identityStatus = text(sample.source_identity_status, "LEGACY_UNATTESTED");
+    const identityStatus = text(sample.source_identity_status, "UNAVAILABLE");
     const cohortCount = Array.isArray(sample.source_cohort_ids)
       ? sample.source_cohort_ids.length
       : 0;
-    if (sourceStatus === "LEGACY_UNATTESTED") return "旧版样本 · 源码未认证";
+    if (sourceStatus !== "COMPLETE") return "价格来源未完整";
     if (identityStatus === "NOT_APPLICABLE") return "尚无观察样本";
     if (identityStatus !== "ATTESTED") return `${cohortCount} 批 · 源码未认证`;
     if (sample.mixed_sample_cohorts === true) {
@@ -44,12 +43,11 @@
     const markout = markoutValue || {};
     const horizon = String(horizonValue);
     if (markout.status === "INVALID") return "证据无效";
-    if (markout.status === "UNQUALIFIED") return "不合格会话样本已排除";
     if (markout.status !== "AVAILABLE") return "尚未积累 · 不可评价";
     const sample = markout.sample || {};
     const row = (markout.summary || {})[horizon] || {};
     const sourceStatus = text(markout.source_provenance_status, "UNAVAILABLE");
-    const identityStatus = text(sample.source_identity_status, "LEGACY_UNATTESTED");
+    const identityStatus = text(sample.source_identity_status, "UNAVAILABLE");
     const minimum = Number(sample.minimum_strategic_observations || 100);
     const eligible = Number(row.eligible_count || 0);
     const sufficient = (sample.sample_sufficient_by_horizon || {})[horizon] === true
@@ -58,7 +56,7 @@
       && eligible >= minimum;
     let verdict = "同批样本不足";
     if (sourceStatus === "INCOMPLETE") verdict = "价格来源未完整";
-    else if (sourceStatus === "LEGACY_UNATTESTED" || identityStatus !== "ATTESTED") {
+    else if (sourceStatus !== "COMPLETE" || identityStatus !== "ATTESTED") {
       verdict = "源码未认证";
     } else if (sample.mixed_sample_cohorts === true) {
       verdict = "已拆分，禁止合并";

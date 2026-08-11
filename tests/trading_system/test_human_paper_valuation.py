@@ -179,7 +179,7 @@ def _forward_evaluation_event(
         }
     }
     stable: dict[str, object] = {
-        "schema": "chanlun-v3-forward-paper-event/v1",
+        "schema": "chanlun-forward-paper-event",
         "session": session_value.isoformat(),
         "recorded_at": datetime.combine(
             session_value,
@@ -215,7 +215,7 @@ def _promote_execution_capture(root: Path) -> None:
         "sell_eligible": True,
     }
     facts_stable: dict[str, object] = {
-        "schema": "chanlun-human-paper-execution-facts/v1",
+        "schema": "chanlun-human-paper-execution-facts",
         "session": SESSION.isoformat(),
         "captured_at": captured_at,
         "symbols": [fact],
@@ -265,7 +265,7 @@ def _promote_execution_capture(root: Path) -> None:
             }
         )
     evidence_stable: dict[str, object] = {
-        "schema": "chanlun-human-paper-execution-evidence/v1",
+        "schema": "chanlun-human-paper-execution-evidence",
         "session": SESSION.isoformat(),
         "captured_at": captured_at,
         "execution_fact_snapshot_sha256": facts["content_sha256"],
@@ -785,7 +785,7 @@ def test_rehashed_valuation_must_resolve_real_ledger_and_accounting_prefix(
     assert audit["source_provenance_verified"] is False
 
 
-def test_legacy_buy_without_portfolio_approval_cannot_back_equity(
+def test_unapproved_buy_cannot_back_equity(
     monkeypatch,
     tmp_path: Path,
 ) -> None:

@@ -34,6 +34,8 @@ from chanlun.decision_support.fingerprints import normalize_datetime, sha256_jso
 from chanlun.decision_support.trading_system.engine import SymbolStructureBundle
 from chanlun.decision_support.trading_system.incremental_scan import BarKey
 from chanlun.decision_support.trading_system.decision_source_provenance import (
+    calculate_forward_application_source_revision,
+    content_addressed_source_revision_from_build,
     is_content_addressed_application_source_revision,
 )
 from chanlun.decision_support.trading_system.sector_strength import (
@@ -43,7 +45,7 @@ from chanlun.decision_support.trading_system.models import (
     SectorAssessment,
     TimeframeContext,
 )
-from chanlun.decision_support.trading_system.v3_trading_session import (
+from chanlun.decision_support.trading_system.trading_session import (
     build_trading_session_evidence,
     validate_trading_session_evidence,
 )
@@ -56,16 +58,14 @@ from cl_app.services.trading_screening_gateway import (
 )
 
 
-IPC_SCHEMA = "chanlun-trading-screening-native-ipc/v1"
+IPC_SCHEMA = "chanlun-trading-screening-native-ipc"
 IPC_AUTHKEY_ENV = "CHANLUN_SCREENING_WORKER_AUTHKEY"
 _CN = ZoneInfo("Asia/Shanghai")
 _PROJECT_ROOT = Path(__file__).resolve().parents[4]
 _DEFAULT_WORKER = Path(__file__).with_name("trading_screening_native_worker.py")
-_SECTOR_CACHE_SCHEMA = "chanlun-native-sector-snapshot-cache/v2"
-_SECTOR_CACHE_PAYLOAD_SCHEMA = "chanlun-native-sector-snapshot-cache-payload/v2"
-_SECTOR_SNAPSHOT_PRODUCER_SCHEMA = (
-    "chanlun-native-sector-snapshot-producer/v1"
-)
+_SECTOR_CACHE_SCHEMA = "chanlun-native-sector-snapshot-cache"
+_SECTOR_CACHE_PAYLOAD_SCHEMA = "chanlun-native-sector-snapshot-cache-payload"
+_SECTOR_SNAPSHOT_PRODUCER_SCHEMA = "chanlun-native-sector-snapshot-producer"
 _SECTOR_SNAPSHOT_WEB_PRODUCERS = (
     "web/chanlun_chart/cl_app/services/trading_screening_gateway.py",
     "web/chanlun_chart/cl_app/services/trading_screening_native_worker.py",
@@ -85,9 +85,7 @@ def _sector_cache_decision_epoch(value: datetime) -> tuple[date, str, int]:
     but can never carry a snapshot across a possible new bar.
     """
 
-    local = normalize_datetime(value, "sector cache decision time").astimezone(
-        _CN
-    )
+    local = normalize_datetime(value, "sector cache decision time").astimezone(_CN)
     minute = local.hour * 60 + local.minute
     if local.weekday() >= 5:
         return local.date(), "NON_TRADING_WEEKEND", 0
@@ -121,11 +119,7 @@ def native_sector_snapshot_producer_revision(
     source and are excluded.
     """
 
-    root = (
-        _PROJECT_ROOT
-        if project_root is None
-        else Path(project_root).resolve()
-    )
+    root = _PROJECT_ROOT if project_root is None else Path(project_root).resolve()
     source_root = root / "src"
     required = tuple(root / value for value in _SECTOR_SNAPSHOT_WEB_PRODUCERS)
     if not source_root.is_dir() or any(not value.is_file() for value in required):
@@ -144,8 +138,7 @@ def native_sector_snapshot_producer_revision(
     manifest = tuple(
         {
             "path": value.relative_to(root).as_posix(),
-            "sha256": "sha256:"
-            + hashlib.sha256(value.read_bytes()).hexdigest(),
+            "sha256": "sha256:" + hashlib.sha256(value.read_bytes()).hexdigest(),
         }
         for value in sorted(paths, key=lambda item: item.relative_to(root).as_posix())
     )
@@ -166,15 +159,12 @@ def native_sector_snapshot_cache_revision(
     *,
     project_root: Path | str | None = None,
 ) -> str | None:
-    """Enable cache for a legacy official run or exact content-addressed tree."""
+    """Enable cache only for an exact content-addressed source tree."""
 
     if not isinstance(build_revision, str):
         raise TypeError("build_revision must be a string")
     runtime_revision = build_revision.strip()
-    if (
-        ".run." not in runtime_revision
-        and not is_content_addressed_application_source_revision(runtime_revision)
-    ):
+    if content_addressed_source_revision_from_build(runtime_revision) is None:
         return None
     return native_sector_snapshot_producer_revision(project_root=project_root)
 
@@ -209,8 +199,7 @@ class NativeScreeningWorkerRemoteError(NativeScreeningWorkerError):
         self.remote_error_type = remote_error_type
         self.remote_message = remote_message
         super().__init__(
-            f"native worker {method} failed: "
-            f"{remote_error_type}: {remote_message}"
+            f"native worker {method} failed: {remote_error_type}: {remote_message}"
         )
 
 
@@ -255,9 +244,7 @@ class _SectorSnapshotCacheError(ValueError):
 
 
 def _cache_mapping(value: object, field_name: str) -> Mapping[str, object]:
-    if not isinstance(value, Mapping) or any(
-        not isinstance(key, str) for key in value
-    ):
+    if not isinstance(value, Mapping) or any(not isinstance(key, str) for key in value):
         raise ValueError(f"{field_name} must be a string-keyed mapping")
     return value
 
@@ -311,9 +298,7 @@ def _cache_date(value: object, field_name: str) -> date:
 
 def _cache_strings(value: object, field_name: str) -> tuple[str, ...]:
     values = _cache_sequence(value, field_name)
-    result = tuple(
-        _cache_string(item, f"{field_name}[]") for item in values
-    )
+    result = tuple(_cache_string(item, f"{field_name}[]") for item in values)
     if len(result) != len(set(result)):
         raise ValueError(f"{field_name} values must be unique")
     return result
@@ -339,9 +324,7 @@ def _context_from_cache(value: object, field_name: str) -> TimeframeContext | No
         return None
     row = _cache_mapping(value, field_name)
     direction = _cache_string(row.get("direction"), f"{field_name}.direction")
-    disposition = _cache_string(
-        row.get("disposition"), f"{field_name}.disposition"
-    )
+    disposition = _cache_string(row.get("disposition"), f"{field_name}.disposition")
     point_type = _cache_optional_string(
         row.get("dominant_point_type"), f"{field_name}.dominant_point_type"
     )
@@ -352,14 +335,10 @@ def _context_from_cache(value: object, field_name: str) -> TimeframeContext | No
     if point_type not in {None, "1buy", "2buy", "3buy", "1sell", "2sell", "3sell"}:
         raise ValueError(f"{field_name}.dominant_point_type is unsupported")
     return TimeframeContext(
-        frequency=_cache_string(
-            row.get("frequency"), f"{field_name}.frequency"
-        ),
+        frequency=_cache_string(row.get("frequency"), f"{field_name}.frequency"),
         direction=direction,  # type: ignore[arg-type]
         disposition=disposition,  # type: ignore[arg-type]
-        hard_block=_cache_bool(
-            row.get("hard_block"), f"{field_name}.hard_block"
-        ),
+        hard_block=_cache_bool(row.get("hard_block"), f"{field_name}.hard_block"),
         dominant_point_id=_cache_optional_string(
             row.get("dominant_point_id"), f"{field_name}.dominant_point_id"
         ),
@@ -427,28 +406,32 @@ def _assessment_from_cache(value: object, field_name: str) -> SectorAssessment:
         raise ValueError(f"{field_name}.regime is unsupported")
     raw_strength = row.get("horizontal_strength")
     try:
-        strength = None if raw_strength is None else Decimal(
-            _cache_string(raw_strength, f"{field_name}.horizontal_strength")
+        strength = (
+            None
+            if raw_strength is None
+            else Decimal(
+                _cache_string(raw_strength, f"{field_name}.horizontal_strength")
+            )
         )
     except ArithmeticError as exc:
         raise ValueError(f"{field_name}.horizontal_strength is invalid") from exc
     raw_rank = row.get("horizontal_rank")
-    rank = None if raw_rank is None else _cache_int(
-        raw_rank, f"{field_name}.horizontal_rank", minimum=1
+    rank = (
+        None
+        if raw_rank is None
+        else _cache_int(raw_rank, f"{field_name}.horizontal_rank", minimum=1)
     )
     raw_session = row.get("strength_anchor_session")
-    anchor_session = None if raw_session is None else _cache_date(
-        raw_session, f"{field_name}.strength_anchor_session"
+    anchor_session = (
+        None
+        if raw_session is None
+        else _cache_date(raw_session, f"{field_name}.strength_anchor_session")
     )
     return SectorAssessment(
         sector_id=_cache_string(row.get("sector_id"), f"{field_name}.sector_id"),
-        sector_name=_cache_string(
-            row.get("sector_name"), f"{field_name}.sector_name"
-        ),
+        sector_name=_cache_string(row.get("sector_name"), f"{field_name}.sector_name"),
         eligible=_cache_bool(row.get("eligible"), f"{field_name}.eligible"),
-        hard_block=_cache_bool(
-            row.get("hard_block"), f"{field_name}.hard_block"
-        ),
+        hard_block=_cache_bool(row.get("hard_block"), f"{field_name}.hard_block"),
         regime=regime,  # type: ignore[arg-type]
         rank_components=_rank_components_from_cache(
             row.get("rank_components"), f"{field_name}.rank_components"
@@ -505,9 +488,7 @@ def _failure_from_cache(value: object, field_name: str) -> SectorAnalysisFailure
     return SectorAnalysisFailure(
         sector_id=_cache_string(row.get("sector_id"), f"{field_name}.sector_id"),
         code=_cache_string(row.get("code"), f"{field_name}.code"),
-        error_type=_cache_string(
-            row.get("error_type"), f"{field_name}.error_type"
-        ),
+        error_type=_cache_string(row.get("error_type"), f"{field_name}.error_type"),
         reason=_cache_string(row.get("reason"), f"{field_name}.reason"),
         detail_code=_cache_optional_string(
             row.get("detail_code"), f"{field_name}.detail_code"
@@ -540,13 +521,9 @@ def _exclusion_from_cache(
     return SectorAnalysisExclusion(
         sector_id=_cache_string(row.get("sector_id"), f"{field_name}.sector_id"),
         code=_cache_string(row.get("code"), f"{field_name}.code"),
-        reason_code=_cache_string(
-            row.get("reason_code"), f"{field_name}.reason_code"
-        ),
+        reason_code=_cache_string(row.get("reason_code"), f"{field_name}.reason_code"),
         reason=_cache_string(row.get("reason"), f"{field_name}.reason"),
-        detail_code=_cache_string(
-            row.get("detail_code"), f"{field_name}.detail_code"
-        ),
+        detail_code=_cache_string(row.get("detail_code"), f"{field_name}.detail_code"),
         catalog_member_count=_cache_int(
             row.get("catalog_member_count"),
             f"{field_name}.catalog_member_count",
@@ -565,17 +542,13 @@ def _exclusion_from_cache(
 
 def _batch_cache_document(value: SectorAssessmentBatch) -> dict[str, object]:
     return {
-        "assessments": [
-            _assessment_cache_document(item) for item in value.assessments
-        ],
+        "assessments": [_assessment_cache_document(item) for item in value.assessments],
         "discovered_count": value.discovered_count,
         "completed_count": value.completed_count,
         "failure_counts": [list(item) for item in value.failure_counts],
         "errors": [_failure_cache_document(item) for item in value.errors],
         "exclusion_counts": [list(item) for item in value.exclusion_counts],
-        "exclusions": [
-            _exclusion_cache_document(item) for item in value.exclusions
-        ],
+        "exclusions": [_exclusion_cache_document(item) for item in value.exclusions],
         # This is the independently recomputed QMT catalog identity carried by
         # the native gateway.  Dropping it on cache round-trip makes an ordinary
         # same-build Web restart silently replace it with the service's weaker
@@ -638,9 +611,7 @@ def _batch_from_cache(value: object) -> SectorAssessmentBatch:
         exclusion_counts.append(
             (
                 _cache_string(pair[0], "sector exclusion-count code"),
-                _cache_int(
-                    pair[1], "sector exclusion-count value", minimum=1
-                ),
+                _cache_int(pair[1], "sector exclusion-count value", minimum=1),
             )
         )
     return SectorAssessmentBatch(
@@ -693,9 +664,7 @@ def _bar_from_cache(value: object, field_name: str) -> BarKey:
         frequency=_cache_string(  # type: ignore[arg-type]
             row.get("frequency"), f"{field_name}.frequency"
         ),
-        closed_at=_cache_datetime(
-            row.get("closed_at"), f"{field_name}.closed_at"
-        ),
+        closed_at=_cache_datetime(row.get("closed_at"), f"{field_name}.closed_at"),
     )
 
 
@@ -710,6 +679,7 @@ class NativeWorkerProcessTransport:
         worker_command: Sequence[str] | None = None,
         environment: Mapping[str, str] | None = None,
         progress_callback: Callable[[], None] = lambda: None,
+        expected_application_source_revision: str | None = None,
     ) -> None:
         if worker_command is not None and (
             isinstance(worker_command, (str, bytes)) or not worker_command
@@ -717,18 +687,37 @@ class NativeWorkerProcessTransport:
             raise ValueError("worker_command must be a non-empty argument sequence")
         if not callable(progress_callback):
             raise TypeError("progress_callback must be callable")
+        if expected_application_source_revision is None and worker_command is None:
+            expected_application_source_revision = (
+                calculate_forward_application_source_revision(_PROJECT_ROOT)
+            )
+        if (
+            expected_application_source_revision is not None
+            and not is_content_addressed_application_source_revision(
+                expected_application_source_revision
+            )
+        ):
+            raise ValueError(
+                "expected_application_source_revision must be content-addressed"
+            )
         self._log_path = log_path.resolve()
         self._config = config
         self._worker_command = (
-            None if worker_command is None else tuple(str(value) for value in worker_command)
+            None
+            if worker_command is None
+            else tuple(str(value) for value in worker_command)
         )
         self._environment = None if environment is None else dict(environment)
         self._progress_callback = progress_callback
+        self._expected_application_source_revision = (
+            expected_application_source_revision
+        )
         self._request_lock = Lock()
         self._state_lock = RLock()
         self._process: subprocess.Popen[bytes] | None = None
         self._connection: Connection | None = None
         self._worker_pid: int | None = None
+        self._worker_application_source_revision: str | None = None
         self._started_at: datetime | None = None
         self._request_started_at: datetime | None = None
         self._last_progress_at: datetime | None = None
@@ -775,9 +764,8 @@ class NativeWorkerProcessTransport:
                 return
             last_failure = self._last_failure_monotonic
             if last_failure is not None:
-                remaining = (
-                    self._config.restart_backoff_seconds
-                    - (time.monotonic() - last_failure)
+                remaining = self._config.restart_backoff_seconds - (
+                    time.monotonic() - last_failure
                 )
                 if remaining > 0:
                     raise NativeScreeningWorkerUnavailable(
@@ -787,7 +775,9 @@ class NativeWorkerProcessTransport:
         authkey = secrets.token_bytes(32)
         listener = Listener(("127.0.0.1", 0), authkey=authkey)
         host, port = listener.address
-        accepted: Queue[tuple[Connection | None, BaseException | None]] = Queue(maxsize=1)
+        accepted: Queue[tuple[Connection | None, BaseException | None]] = Queue(
+            maxsize=1
+        )
         Thread(
             target=self._accept_connection,
             args=(listener, accepted),
@@ -849,8 +839,15 @@ class NativeWorkerProcessTransport:
                         f"native worker exited before handshake ({process.returncode})"
                     )
             if not connection.poll(0):
-                raise NativeScreeningWorkerUnavailable("native worker handshake timeout")
+                raise NativeScreeningWorkerUnavailable(
+                    "native worker handshake timeout"
+                )
             handshake = connection.recv()
+            worker_source_revision = (
+                handshake.get("application_source_revision")
+                if isinstance(handshake, Mapping)
+                else None
+            )
             if not isinstance(handshake, Mapping) or (
                 handshake.get("schema") != IPC_SCHEMA
                 or handshake.get("type") != "ready"
@@ -860,6 +857,15 @@ class NativeWorkerProcessTransport:
             ):
                 raise NativeScreeningWorkerProtocolError(
                     "native worker returned an invalid safety handshake"
+                )
+            if self._expected_application_source_revision is not None and (
+                not is_content_addressed_application_source_revision(
+                    worker_source_revision
+                )
+                or worker_source_revision != self._expected_application_source_revision
+            ):
+                raise NativeScreeningWorkerProtocolError(
+                    "native worker application source revision mismatch"
                 )
         except BaseException as exc:
             try:
@@ -877,6 +883,9 @@ class NativeWorkerProcessTransport:
             self._process = process
             self._connection = connection
             self._worker_pid = int(handshake["pid"])
+            self._worker_application_source_revision = (
+                None if worker_source_revision is None else str(worker_source_revision)
+            )
             self._started_at = started
             self._last_progress_at = started
             self._last_response_at = started
@@ -912,6 +921,7 @@ class NativeWorkerProcessTransport:
             self._connection = None
             self._process = None
             self._worker_pid = None
+            self._worker_application_source_revision = None
             self._in_flight_request_id = None
             self._request_started_at = None
         try:
@@ -987,8 +997,7 @@ class NativeWorkerProcessTransport:
                         with self._state_lock:
                             self._last_progress_at = progressed
                         idle_deadline = (
-                            time.monotonic()
-                            + self._config.native_idle_timeout_seconds
+                            time.monotonic() + self._config.native_idle_timeout_seconds
                         )
                         self._notify_progress()
                         continue
@@ -1077,14 +1086,31 @@ class NativeWorkerProcessTransport:
                     self._config.restart_backoff_seconds
                     - (time.monotonic() - self._last_failure_monotonic),
                 )
-            ready = alive and self._connection is not None and self._last_error is None
+            revision_match = (
+                None
+                if self._expected_application_source_revision is None
+                or self._worker_application_source_revision is None
+                else self._worker_application_source_revision
+                == self._expected_application_source_revision
+            )
+            ready = (
+                alive
+                and self._connection is not None
+                and self._last_error is None
+                and revision_match is not False
+            )
             reasons: list[str] = []
             if not alive:
                 reasons.append("native_screening_worker_not_running")
             if self._last_error is not None:
                 reasons.append("native_screening_worker_failed")
+            if revision_match is False or (
+                self._last_error is not None
+                and "source revision mismatch" in self._last_error
+            ):
+                reasons.append("native_screening_worker_source_revision_mismatch")
             return {
-                "schema": "chanlun-trading-screening-native-health/v1",
+                "schema": "chanlun-trading-screening-native-health",
                 "required": True,
                 "ready": ready,
                 "status": "ready" if ready else "not_ready",
@@ -1092,6 +1118,13 @@ class NativeWorkerProcessTransport:
                 "loopback_authenticated": True,
                 "worker_pid": self._worker_pid,
                 "worker_alive": alive,
+                "expected_application_source_revision": (
+                    self._expected_application_source_revision
+                ),
+                "worker_application_source_revision": (
+                    self._worker_application_source_revision
+                ),
+                "application_source_revision_match": revision_match,
                 "started_at": _iso(self._started_at),
                 "in_flight": self._in_flight_request_id is not None,
                 "request_started_at": _iso(self._request_started_at),
@@ -1126,6 +1159,7 @@ class NativeTradingDataGatewayProcessProxy:
         sector_cache_revision: str | None = None,
         worker_environment: Mapping[str, str] | None = None,
         structure_worker_count: int = 1,
+        expected_application_source_revision: str | None = None,
     ) -> None:
         if not callable(watchlist_provider) or not callable(holdings_provider):
             raise TypeError("watchlist and holdings providers must be callable")
@@ -1140,8 +1174,19 @@ class NativeTradingDataGatewayProcessProxy:
         if type(structure_worker_count) is not int or structure_worker_count <= 0:
             raise ValueError("structure_worker_count must be a positive integer")
         if transport is not None and structure_worker_count != 1:
+            raise ValueError("custom transport supports exactly one structure worker")
+        if transport is None and expected_application_source_revision is None:
+            expected_application_source_revision = (
+                calculate_forward_application_source_revision(_PROJECT_ROOT)
+            )
+        if (
+            expected_application_source_revision is not None
+            and not is_content_addressed_application_source_revision(
+                expected_application_source_revision
+            )
+        ):
             raise ValueError(
-                "custom transport supports exactly one structure worker"
+                "expected_application_source_revision must be content-addressed"
             )
         self._watchlist_provider = watchlist_provider
         self._holdings_provider = holdings_provider
@@ -1149,10 +1194,9 @@ class NativeTradingDataGatewayProcessProxy:
             log_path=log_path,  # type: ignore[arg-type]
             config=process_config,
             environment=worker_environment,
+            expected_application_source_revision=(expected_application_source_revision),
         )
-        structure_transports: list[NativeWorkerProcessTransport] = [
-            self._transport
-        ]
+        structure_transports: list[NativeWorkerProcessTransport] = [self._transport]
         if transport is None and structure_worker_count > 1:
             assert log_path is not None
             for index in range(1, structure_worker_count):
@@ -1164,6 +1208,9 @@ class NativeTradingDataGatewayProcessProxy:
                         log_path=worker_log,
                         config=process_config,
                         environment=worker_environment,
+                        expected_application_source_revision=(
+                            expected_application_source_revision
+                        ),
                     )
                 )
         self._structure_transports = tuple(structure_transports)
@@ -1223,7 +1270,7 @@ class NativeTradingDataGatewayProcessProxy:
         as_of: datetime,
     ) -> _SectorSnapshotComponents:
         if not isinstance(value, Mapping) or (
-            value.get("schema") != "chanlun-native-sector-snapshot/v1"
+            value.get("schema") != "chanlun-native-sector-snapshot"
         ):
             raise NativeScreeningWorkerProtocolError("invalid atomic sector snapshot")
         if (
@@ -1320,11 +1367,12 @@ class NativeTradingDataGatewayProcessProxy:
                 assessment.strength_anchor_session is not None
                 and assessment.strength_anchor_session > as_of.date()
             ):
-                raise ValueError("sector strength anchor is later than the decision date")
+                raise ValueError(
+                    "sector strength anchor is later than the decision date"
+                )
 
         bar_ids = tuple(
-            (item.code, item.frequency, item.closed_at)
-            for item in value.changed_bars
+            (item.code, item.frequency, item.closed_at) for item in value.changed_bars
         )
         if bar_ids != tuple(
             sorted(bar_ids, key=lambda item: (item[2], item[0], item[1]))
@@ -1345,14 +1393,12 @@ class NativeTradingDataGatewayProcessProxy:
         if self._sector_cache_revision is None:
             raise ValueError("sector snapshot cache is disabled")
         snapshot = {
-            "schema": "chanlun-native-sector-snapshot/v1",
+            "schema": "chanlun-native-sector-snapshot",
             "assessments": _batch_cache_document(value.batch),
             "members": {
                 key: list(items) for key, items in sorted(value.members.items())
             },
-            "changed_bars": [
-                _bar_cache_document(item) for item in value.changed_bars
-            ],
+            "changed_bars": [_bar_cache_document(item) for item in value.changed_bars],
             "symbol_names": dict(sorted(value.symbol_names.items())),
             "minimum_market_data_frequency": "1m",
             "tick_data_used": False,
@@ -1414,7 +1460,7 @@ class NativeTradingDataGatewayProcessProxy:
         _cache_datetime(payload.get("captured_at"), "sector cache captured_at")
 
         snapshot = _cache_mapping(payload.get("snapshot"), "sector cache snapshot")
-        if snapshot.get("schema") != "chanlun-native-sector-snapshot/v1":
+        if snapshot.get("schema") != "chanlun-native-sector-snapshot":
             raise _SectorSnapshotCacheError(
                 "CACHE_ATOMIC_SCHEMA_MISMATCH",
                 "cached atomic sector snapshot schema is unsupported",
@@ -1458,9 +1504,7 @@ class NativeTradingDataGatewayProcessProxy:
         except _SectorSnapshotCacheError:
             raise
         except (NativeScreeningWorkerProtocolError, TypeError, ValueError) as exc:
-            raise _SectorSnapshotCacheError(
-                "CACHE_DOCUMENT_INVALID", str(exc)
-            ) from exc
+            raise _SectorSnapshotCacheError("CACHE_DOCUMENT_INVALID", str(exc)) from exc
         return components, expected_hash
 
     def _set_sector_cache_status(
@@ -1574,9 +1618,7 @@ class NativeTradingDataGatewayProcessProxy:
             or any(not isinstance(item, str) for item in items)
             for key, items in value.items()
         ):
-            raise NativeScreeningWorkerProtocolError(
-                "invalid sector membership result"
-            )
+            raise NativeScreeningWorkerProtocolError("invalid sector membership result")
         return {str(key): tuple(items) for key, items in value.items()}
 
     def members(self) -> Mapping[str, tuple[str, ...]]:
@@ -1607,8 +1649,7 @@ class NativeTradingDataGatewayProcessProxy:
             raise ValueError("catalog_revision must be a non-empty string")
         validated = self._validated_members(members)
         if any(
-            not sector_id
-            or values != tuple(sorted(set(values)))
+            not sector_id or values != tuple(sorted(set(values)))
             for sector_id, values in validated.items()
         ):
             raise NativeScreeningWorkerProtocolError(
@@ -1616,7 +1657,7 @@ class NativeTradingDataGatewayProcessProxy:
             )
         attestation = sha256_json(
             {
-                "schema": "chanlun-restored-sector-member-routing/v1",
+                "schema": "chanlun-restored-sector-member-routing",
                 "as_of": observed_at.isoformat(),
                 "catalog_revision": catalog_revision,
                 "members": {
@@ -1632,7 +1673,9 @@ class NativeTradingDataGatewayProcessProxy:
             self._sector_cache_content_sha256 = attestation
 
     def changed_bars(self, since: datetime | None) -> tuple[BarKey, ...]:
-        cutoff = None if since is None else normalize_datetime(since, "changed bars cutoff")
+        cutoff = (
+            None if since is None else normalize_datetime(since, "changed bars cutoff")
+        )
         with self._cache_lock:
             changed = tuple(
                 item
@@ -1659,9 +1702,7 @@ class NativeTradingDataGatewayProcessProxy:
     ) -> tuple[tuple[str, ...], tuple[str, ...]]:
         requested = _stock_codes(self._watchlist_provider())
         eligible = self.tradable_instrument_codes(requested)
-        return eligible, tuple(
-            code for code in requested if code not in eligible
-        )
+        return eligible, tuple(code for code in requested if code not in eligible)
 
     def holdings(self) -> tuple[str, ...]:
         return self.holdings_scope()[0]
@@ -1671,9 +1712,7 @@ class NativeTradingDataGatewayProcessProxy:
     ) -> tuple[tuple[str, ...], tuple[str, ...]]:
         requested = _stock_codes(self._holdings_provider())
         eligible = self.tradable_instrument_codes(requested)
-        return eligible, tuple(
-            code for code in requested if code not in eligible
-        )
+        return eligible, tuple(code for code in requested if code not in eligible)
 
     def tradable_instrument_codes(
         self,
@@ -1777,9 +1816,7 @@ class NativeTradingDataGatewayProcessProxy:
             observed_at=observed,
         )
         if not isinstance(value, Mapping):
-            raise NativeScreeningWorkerProtocolError(
-                "invalid trading session evidence"
-            )
+            raise NativeScreeningWorkerProtocolError("invalid trading session evidence")
         try:
             validated = validate_trading_session_evidence(
                 value,
@@ -1845,9 +1882,7 @@ class NativeTradingDataGatewayProcessProxy:
         with self._cache_lock:
             members = self._sector_members
             sector_members = (
-                None
-                if members is None
-                else tuple(members.get(sector.sector_id, ()))
+                None if members is None else tuple(members.get(sector.sector_id, ()))
             )
         if sector_members is None:
             raise NativeScreeningWorkerUnavailable(
@@ -1869,9 +1904,14 @@ class NativeTradingDataGatewayProcessProxy:
     def health_snapshot(self) -> dict[str, object]:
         result = self._transport.health_snapshot()
         worker_health = tuple(
-            transport.health_snapshot()
-            for transport in self._structure_transports
+            transport.health_snapshot() for transport in self._structure_transports
         )
+        running_revisions = {
+            value.get("worker_application_source_revision")
+            for value in worker_health
+            if value.get("worker_alive") is True
+            and isinstance(value.get("worker_application_source_revision"), str)
+        }
         result["structure_worker_pool"] = {
             "configured_worker_count": len(worker_health),
             "running_worker_count": sum(
@@ -1888,6 +1928,15 @@ class NativeTradingDataGatewayProcessProxy:
                 for value in worker_health
                 if type(value.get("worker_pid")) is int
             ],
+            "application_source_revision_consistent": (
+                len(running_revisions) <= 1
+                and all(
+                    value.get("application_source_revision_match") is not False
+                    for value in worker_health
+                    if value.get("worker_alive") is True
+                )
+            ),
+            "running_application_source_revisions": sorted(running_revisions),
             "workers": list(worker_health),
         }
         with self._cache_lock:

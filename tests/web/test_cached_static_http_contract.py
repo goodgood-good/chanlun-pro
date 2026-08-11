@@ -16,7 +16,7 @@ ENTRYPOINT = "charting_library.standalone.js"
 
 class TestCachedStaticHttpContract(AsyncHTTPTestCase):
     def setUp(self):
-        # The repository deliberately does not version generated ``.gz``
+        # The repository deliberately does not track generated ``.gz``
         # siblings. Build both representations inside the test so its result
         # cannot depend on whether app.py happened to precompress assets first.
         self._temporary_directory = tempfile.TemporaryDirectory()

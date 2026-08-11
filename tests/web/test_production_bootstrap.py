@@ -3,7 +3,6 @@ import threading
 import pytest
 
 from cl_app import create_app
-from cl_app import alert_tasks
 from cl_app.services import readiness
 from cl_app.services import stock_list
 from cl_app.services import chart_revalidate
@@ -13,10 +12,7 @@ from cl_app.services import trading_screening
 from cl_app.services import app_forward_scheduler
 from cl_app.services import app_qmt_runtime
 from cl_app.handlers import sse_stream
-from chanlun import config as chanlun_config
 from chanlun.persistence import file_db
-from chanlun.signal_monitor import scheduler as signal_scheduler
-from chanlun.recursive_bt.monitor import app_monitor
 
 
 def test_scheduler_enabled_factory_runs_the_production_lifecycle(
@@ -24,12 +20,6 @@ def test_scheduler_enabled_factory_runs_the_production_lifecycle(
     tmp_path,
 ):
     calls = []
-    monkeypatch.setattr(
-        chanlun_config,
-        "RECURSIVE_MONITOR_CONFIG",
-        {"enabled": True},
-    )
-
     class _Handle:
         def __init__(self, name):
             self.name = name
@@ -123,21 +113,6 @@ def test_scheduler_enabled_factory_runs_the_production_lifecycle(
         "shutdown_background",
         lambda _self, **_kwargs: calls.append(("stop-trading-screening", None)),
     )
-    monkeypatch.setattr(
-        alert_tasks.AlertTasks,
-        "run",
-        lambda _self: calls.append(("alerts", None)) or True,
-    )
-    monkeypatch.setattr(
-        signal_scheduler,
-        "register_signal_jobs",
-        lambda _scheduler: calls.append(("signals", None)),
-    )
-    monkeypatch.setattr(
-        app_monitor,
-        "register_recursive_monitor_jobs",
-        lambda _scheduler: calls.append(("recursive", None)) or [],
-    )
     qmt_data = tmp_path / "qmt"
     (qmt_data / "Sector" / "Temple" / "GICS").mkdir(parents=True)
     monkeypatch.setattr(
@@ -184,7 +159,14 @@ def test_scheduler_enabled_factory_runs_the_production_lifecycle(
         assert app.extensions["metadata_warmup_thread"] is warmup_thread
         screening = app.extensions["decision_support_trading_screening"]
         assert screening._config.priority_monitoring_enabled is True
-        assert screening._config.max_priority_monitor_symbols_per_refresh == 16
+        assert (
+            screening._config.max_five_minute_candidate_symbols_per_refresh
+            == 256
+        )
+        assert (
+            screening._config.max_thirty_minute_candidate_symbols_per_refresh
+            == 96
+        )
         assert screening._config.max_symbols_per_refresh == 64
         assert screening._config.max_total_symbols_per_refresh == 64
         assert screening._config.priority_monitor_interval_seconds == 60
@@ -199,7 +181,6 @@ def test_scheduler_enabled_factory_runs_the_production_lifecycle(
             ("revalidation", None),
             ("sse", None),
             ("trading-screening", None),
-            ("recursive", None),
             ("app-qmt-register", None),
             ("app-forward-register", None),
         ]

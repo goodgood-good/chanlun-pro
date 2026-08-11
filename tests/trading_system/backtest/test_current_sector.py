@@ -315,7 +315,7 @@ def test_current_sector_uses_same_causal_factor_and_excludes_future_event() -> N
         "sector_factor_revision"
     ]
     assert first.attrs["sector_factor_adjustment_contract_id"] == (
-        "QMT_RAW_PRICE_DIVISOR_CAUSAL_EX_DATE_V1"
+        "QMT_RAW_PRICE_DIVISOR_CAUSAL_EX_DATE"
     )
 
 
@@ -379,7 +379,7 @@ def test_current_sector_history_uses_live_sample_and_five_minute_first_derivatio
     assert result.attrs["source_base_frequency"] == "5m"
     assert result.attrs["derived_frequency"] == "30m"
     assert result.attrs["sector_thirty_minute_derivation_contract"] == (
-        "SIX_CONTIGUOUS_COMPLETED_5M_COMPOSITE_BARS_V1"
+        "SIX_CONTIGUOUS_COMPLETED_5M_COMPOSITE_BARS"
     )
 
 

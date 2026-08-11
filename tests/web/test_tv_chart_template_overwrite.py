@@ -33,12 +33,12 @@ def _mk_db():
 
 def test_study_template_same_name_overwrites_not_duplicate():
     d = _mk_db()
-    d.tv_chart_save("template", "c1", "u1", "myTpl", "v1", "", "")
-    d.tv_chart_save("template", "c1", "u1", "myTpl", "v2", "", "")
+    d.tv_chart_save("template", "c1", "u1", "myTpl", "first", "", "")
+    d.tv_chart_save("template", "c1", "u1", "myTpl", "latest", "", "")
     rows = d.tv_chart_list("template", "c1", "u1")
     assert len(rows) == 1  # 修复前=2(堆积重复行)
     got = d.tv_chart_get_by_name("template", "myTpl", "c1", "u1")
-    assert got.content == "v2"  # 修复前 .first() 取最旧 → "v1"(编辑丢失)
+    assert got.content == "latest"  # 必须返回最近一次保存的内容。
 
 
 def test_study_template_different_name_still_inserts():

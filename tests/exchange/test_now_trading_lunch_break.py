@@ -1,13 +1,5 @@
 # -*- coding: utf-8 -*-
-"""R13-#2: 期货 now_trading() 上午收盘误判。
-
-exchange_tq / exchange_tdx_futures 的 now_trading 用 hour in {9,10,11,...},
-hour==11 使 11:00-11:59 整段判为交易时段,但期货上午 11:30 收盘 → 11:30-11:59
-误判为交易中。经 signal_monitor/scheduler.py:38 `if ex.now_trading() is False`
-可达(EXCHANGE_FUTURES 默认 tdx_futures):11:30-11:59 会让信号监控任务在期货
-已休市时误扫。修复=移除集合中的 11,加 (hour == 11 and minute < 30)
-(与 exchange_baostock.py:115 权威口径一致)。
-"""
+"""期货交易时段统一遵守 11:30 上午收盘边界。"""
 import sys
 import types
 
@@ -45,7 +37,7 @@ def _call(cls, mod, hour, minute, monkeypatch):
         "strftime",
         lambda fmt: f"{hour:02d}" if fmt == "%H" else f"{minute:02d}",
     )
-    return cls.now_trading(object())
+    return cls.now_trading(object(), "futures")
 
 
 @pytest.mark.parametrize("cls,mod,name", _CASES)

@@ -23,9 +23,12 @@ from chanlun.market import Market  # noqa: E402
 
 @pytest.fixture
 def client():
-    app = create_app()
-    app.config["LOGIN_DISABLED"] = True
-    app.config["TESTING"] = True
+    app = create_app(test_config={
+        "TESTING": True,
+        "LOGIN_DISABLED": True,
+        "VALIDATE_WEB_SECURITY": False,
+        "SCHEDULER_ENABLED": False,
+    })
     return app.test_client()
 
 

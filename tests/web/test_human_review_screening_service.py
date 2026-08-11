@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, replace
+from dataclasses import replace
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 import json
@@ -39,7 +39,7 @@ from chanlun.decision_support.trading_system.candidate_warmup_diagnostics import
     candidate_warmup_parameter_document,
 )
 from chanlun.decision_support.trading_system.models import EntryExecutionBoundary
-from chanlun.decision_support.trading_system.v3_human_review_screening import (
+from chanlun.decision_support.trading_system.human_review_screening import (
     HumanReviewAlert,
     HumanReviewFeedback,
     HigherTimeframeReviewSourceSupport,
@@ -52,37 +52,38 @@ from chanlun.decision_support.trading_system.v3_human_review_screening import (
     human_review_screening_parameters,
     load_human_review_feedback_ledger,
 )
-from chanlun.decision_support.trading_system.v3_forward_paper import (
+from chanlun.decision_support.trading_system.forward_paper import (
     append_forward_paper_event,
     load_frozen_forward_contract,
 )
-from chanlun.decision_support.trading_system.v3_forward_review_markout import (
+from chanlun.decision_support.trading_system.forward_review_markout import (
     FORWARD_REVIEW_SAMPLE_COHORT_CONTRACT_ID,
     build_forward_review_markout,
 )
 from chanlun.decision_support.trading_system.forward_warmup_structure_lineage import (
     build_forward_warmup_structure_lineage_rollup,
 )
-from chanlun.decision_support.trading_system.v3_live_human_review import (
+from chanlun.decision_support.trading_system.live_human_review import (
     live_screening_snapshot_content_sha256,
 )
-from chanlun.decision_support.trading_system.v3_qmt_sector_ledger import (
+from chanlun.decision_support.trading_system.qmt_sector_ledger import (
     append_sector_catalog,
 )
-from chanlun.decision_support.trading_system.v3_qmt_higher_timeframe import (
+from chanlun.decision_support.trading_system.qmt_higher_timeframe import (
+    QMT_HIGHER_TIMEFRAME_WARMUP_CONVERGENCE_PARAMETER_SET_ID,
     QmtHigherTimeframeWarmupEvidence,
 )
-from chanlun.decision_support.trading_system.v3_trading_session import (
+from chanlun.decision_support.trading_system.trading_session import (
     build_trading_session_evidence,
 )
-from chanlun.decision_support.trading_system.v3_technical_approximation import (
+from chanlun.decision_support.trading_system.technical_approximation import (
     technical_approximation_parameters,
 )
 from chanlun.decision_support.trading_system.warmup_convergence import (
     WarmupPrefixObservation,
     classify_warmup_convergence_envelope,
 )
-from tests.trading_system.test_v3_live_human_review import live_snapshot
+from tests.trading_system.test_live_human_review import live_snapshot
 from cl_app.services.human_review_screening import (
     HumanReviewScreenUnavailable,
     HumanReviewScreeningService,
@@ -105,11 +106,11 @@ PARAMETER_SNAPSHOT = (
 
 def _implementation_provenance(source_digit: str = "a") -> dict[str, object]:
     stable: dict[str, object] = {
-        "schema": "chanlun-v3-forward-implementation-provenance/v1",
+        "schema": "chanlun-forward-implementation-provenance",
         "application_source_revision": (
             source_digit * 40 + ".tree." + source_digit * 24
         ),
-        "forward_runner_script_sha256": "sha256:" + "1" * 64,
+        "forward_scheduler_module_sha256": "sha256:" + "1" * 64,
         "forward_python_tool_sha256": "sha256:" + "2" * 64,
         "sector_capture_tool_sha256": "sha256:" + "3" * 64,
         "python_implementation": "CPython",
@@ -185,7 +186,7 @@ def _report(
 ) -> dict[str, object]:
     alert = _alert() if alert is None else alert
     stable: dict[str, object] = {
-        "schema": "chanlun-v3-human-review-screen/v1",
+        "schema": "chanlun-human-review-screen",
         "data_grade": "HUMAN_REVIEW_SCREENING",
         "highest_status": "REVIEW_REQUIRED",
         "live_status": "LIVE_DISABLED",
@@ -211,6 +212,7 @@ def _report(
             {
                 **_jsonable(human_review_alert_document(alert)),
                 "candidate_id": alert.candidate_id,
+                "signal_lifecycle_id": alert.signal_lifecycle_id,
             }
         ],
     }
@@ -249,7 +251,7 @@ def _write_sector_ledger(path: Path) -> None:
             "captured_at": "2026-07-28T09:15:00+08:00",
             "point_in_time_scope": "CURRENT_CAPTURE_ONLY",
             "catalog_revision": sha256_json(
-                {"schema": "chanlun-qmt-gics3-catalog/v1", "sectors": sectors}
+                {"schema": "chanlun-qmt-gics3-catalog", "sectors": sectors}
             ),
             "sectors": sectors,
         },
@@ -274,10 +276,9 @@ def _live_ranked_alert(
         raw_close=Decimal("12.35"),
         raw_volume=Decimal("10000"),
         entry_valid_until=signal_at + timedelta(minutes=1),
-        raw_price_basis_revision="qmt-none-test-v1",
+        raw_price_basis_revision="qmt-none-test",
     )
     ranking = SectorRankingReviewEvidence(
-        source_profile="LIVE_FULL_RANKING",
         sector_id=SECTOR_ID,
         sector_name="银行",
         observed_at=signal_at,
@@ -372,15 +373,14 @@ def _forward_scheduler_observation(
             "operational_reason_codes": list(reasons),
         }
         for name, phase in (
-            ("Chanlun-V3-Forward-Capture", "CAPTURE"),
-            ("Chanlun-V3-Forward-Evaluate", "EVALUATE"),
+            ("chanlun-app-forward-capture", "CAPTURE"),
+            ("chanlun-app-forward-evaluate", "EVALUATE"),
         )
     ]
     return {
-        "schema": "chanlun-v3-forward-scheduler-readiness/v1",
-        "contract_id": (
-            "chanlun-v3-forward-scheduler/windows-task-contract/v1"
-        ),
+        "schema": "chanlun-forward-scheduler-readiness",
+        "contract_id": ("chanlun-forward-scheduler/app-runtime-contract"),
+        "execution_owner": "APP_RUNTIME",
         "observed_at": observed_at,
         "ready": ready,
         "status": "ready" if ready else "not_ready",
@@ -394,7 +394,7 @@ def _forward_scheduler_observation(
         "registered_at": "2026-07-28T08:55:00+08:00",
         "pinned_python_executable": "D:\\software\\Python310\\python.exe",
         "upstream_qmt": {
-            "schema": "chanlun-qmt-restart-scheduler-readiness/v1",
+            "schema": "chanlun-qmt-runtime-readiness",
             "ready": ready,
             "status": "ready" if ready else "not_ready",
             "reason_code": "READY" if ready else reasons[0],
@@ -504,13 +504,11 @@ def test_compact_live_bundle_avoids_full_report_walk_and_loads_one_detail(
         json.dumps(report, ensure_ascii=False, sort_keys=True),
         encoding="utf-8",
     )
-    index_path, detail_path, index = (
-        review_validator_subject._materialize_web_bundle(
-            report=report,
-            archive_root=archive,
-            source_snapshot_content_sha256=source_hash,
-            decision_source_snapshot_id=decision_source_id,
-        )
+    index_path, detail_path, index = review_validator_subject._materialize_web_bundle(
+        report=report,
+        archive_root=archive,
+        source_snapshot_content_sha256=source_hash,
+        decision_source_snapshot_id=decision_source_id,
     )
     receipt = live_review_web_bundle_receipt(
         source_path=source,
@@ -639,7 +637,6 @@ def test_snapshot_exposes_hash_bound_sector_ranking_without_inference(
 ) -> None:
     base = _alert()
     evidence = SectorRankingReviewEvidence(
-        source_profile="HISTORICAL_TRIGGER_SUMMARY",
         sector_id=SECTOR_ID,
         sector_name="银行",
         observed_at=base.signal_at,
@@ -648,7 +645,7 @@ def test_snapshot_exposes_hash_bound_sector_ranking_without_inference(
         regime="supportive",
         ordinal=2,
         rank_score=45,
-        rank_components=(),
+        rank_components=(("neutral_access", 5), ("thirty_support", 40)),
         reason_codes=("structural_ranking_only",),
         horizontal_strength=Decimal("7.5"),
         horizontal_rank=1,
@@ -657,6 +654,7 @@ def test_snapshot_exposes_hash_bound_sector_ranking_without_inference(
         strength_member_count=42,
         strength_source_revision="sha256:" + "7" * 64,
         strength_evidence_revision="sha256:" + "8" * 64,
+        sector_catalog_revision="sha256:" + "9" * 64,
     )
     alert = replace(
         base,
@@ -667,9 +665,7 @@ def test_snapshot_exposes_hash_bound_sector_ranking_without_inference(
 
     candidate = service.snapshot(source="historical")["review_queue"][0]
     assert candidate["sector_ranking_evidence"] == evidence.document()
-    assert candidate["sector_ranking_attestation"] == (
-        "HISTORICAL_TRIGGER_SUMMARY_NO_COMPONENTS"
-    )
+    assert candidate["sector_ranking_attestation"] == "FULL_STRUCTURAL_COMPONENTS"
     assert evidence.evidence_id in candidate["source_fact_ids"]
     assert candidate["review_lane"] == "ACTIONABLE_REVIEW"
     assert candidate["sector_horizontal_rank"] == 1
@@ -678,27 +674,39 @@ def test_snapshot_exposes_hash_bound_sector_ranking_without_inference(
 
 def test_review_lanes_are_display_only_and_put_open_position_risk_first() -> None:
     buy = _alert()
-    assert _review_lane(
-        buy,
-        virtual_position_quantity=0,
-        paper_reconciliation_pending=False,
-    ) == "ACTIONABLE_REVIEW"
-    assert _review_lane(
-        replace(buy, confidence="LOW"),
-        virtual_position_quantity=0,
-        paper_reconciliation_pending=False,
-    ) == "WATCHLIST"
+    assert (
+        _review_lane(
+            buy,
+            virtual_position_quantity=0,
+            paper_reconciliation_pending=False,
+        )
+        == "ACTIONABLE_REVIEW"
+    )
+    assert (
+        _review_lane(
+            replace(buy, confidence="LOW"),
+            virtual_position_quantity=0,
+            paper_reconciliation_pending=False,
+        )
+        == "WATCHLIST"
+    )
     exit_alert = replace(buy, alert_type="POSSIBLE_30M_EXIT")
-    assert _review_lane(
-        exit_alert,
-        virtual_position_quantity=100,
-        paper_reconciliation_pending=False,
-    ) == "POSITION_MANAGEMENT"
-    assert _review_lane(
-        exit_alert,
-        virtual_position_quantity=0,
-        paper_reconciliation_pending=False,
-    ) == "RESEARCH_ARCHIVE"
+    assert (
+        _review_lane(
+            exit_alert,
+            virtual_position_quantity=100,
+            paper_reconciliation_pending=False,
+        )
+        == "POSITION_MANAGEMENT"
+    )
+    assert (
+        _review_lane(
+            exit_alert,
+            virtual_position_quantity=0,
+            paper_reconciliation_pending=False,
+        )
+        == "RESEARCH_ARCHIVE"
+    )
 
 
 def test_entry_boundary_source_audit_rejects_an_internally_rehashed_intent(
@@ -716,7 +724,7 @@ def test_entry_boundary_source_audit_rejects_an_internally_rehashed_intent(
         raw_close=Decimal("10.03"),
         raw_volume=Decimal("10000"),
         entry_valid_until=confirmed_at + timedelta(minutes=1),
-        raw_price_basis_revision="qmt-none-test-v1",
+        raw_price_basis_revision="qmt-none-test",
     )
     base = _alert()
     alert = replace(
@@ -788,6 +796,9 @@ def test_snapshot_is_sector_first_review_only_and_builds_causal_chart_urls(
     service: HumanReviewScreeningService,
 ) -> None:
     snapshot = service.snapshot(source="latest")
+    accounting_contract_id = load_human_paper_accounting_parameters(
+        PARAMETER_SNAPSHOT
+    ).accounting_contract_id
 
     assert snapshot["source_kind"] == "historical"
     assert snapshot["paper_observation_eligible"] is False
@@ -805,9 +816,7 @@ def test_snapshot_is_sector_first_review_only_and_builds_causal_chart_urls(
         "trade_authorization_changed": False,
         "live_status": "LIVE_DISABLED",
     }
-    assert snapshot["source_currentness"]["status"] == (
-        "CURRENT_RELEASE_SIDECAR"
-    )
+    assert snapshot["source_currentness"]["status"] == ("CURRENT_RELEASE_SIDECAR")
     assert snapshot["orders_created"] == snapshot["fills_created"] == 0
     assert snapshot["automated_order_authorized"] is False
     assert snapshot["highest_status"] == "REVIEW_REQUIRED"
@@ -816,26 +825,21 @@ def test_snapshot_is_sector_first_review_only_and_builds_causal_chart_urls(
     assert snapshot["forward_markout"]["status"] == "NOT_AVAILABLE"
     assert snapshot["forward_markout"]["portfolio_performance_evaluable"] is False
     assert snapshot["forward_markout"]["source_provenance_status"] == "UNAVAILABLE"
-    assert snapshot["forward_warmup_structure_lineage"]["status"] == (
-        "NOT_AVAILABLE"
-    )
+    assert snapshot["forward_warmup_structure_lineage"]["status"] == ("NOT_AVAILABLE")
     assert snapshot["forward_warmup_structure_lineage"]["diagnostic_only"] is True
-    assert (
-        snapshot["sector_capture_receipts"]["status"]
-        == "RECEIPT_COVERAGE_UNPROVEN"
-    )
+    assert snapshot["sector_capture_receipts"]["status"] == "REQUIRED_RECEIPT_GAPS"
     assert snapshot["sector_capture_receipts"]["entry_count"] == 1
     assert snapshot["sector_capture_receipts"]["valid_receipt_count"] == 0
-    assert snapshot["sector_capture_receipts"][
-        "historical_receipts_synthesized"
-    ] is False
-    assert "QMT_SECTOR_RECEIPTS_RECEIPT_COVERAGE_UNPROVEN" in snapshot["warnings"]
+    assert (
+        snapshot["sector_capture_receipts"]["historical_receipts_synthesized"] is False
+    )
+    assert "QMT_SECTOR_RECEIPTS_REQUIRED_RECEIPT_GAPS" in snapshot["warnings"]
     accounting = snapshot["paper_accounting"]
     assert accounting["status"] == "NO_FILLS"
     assert accounting["accounting_valid"] is True
     assert accounting["performance_evaluable"] is False
     assert accounting["fee_model_attached"] is True
-    assert accounting["fee_schedule_id"] == "A_SHARE_RESEARCH_2025_V1"
+    assert accounting["fee_schedule_id"] == "A_SHARE_RESEARCH_2025"
     assert accounting["cash_ledger_attached"] is True
     assert accounting["cash_ledger_complete"] is True
     assert accounting["cash_balance"] == "1000000.00"
@@ -853,7 +857,6 @@ def test_snapshot_is_sector_first_review_only_and_builds_causal_chart_urls(
     assert snapshot["virtual_pending_intent_count"] == 0
     assert snapshot["virtual_cancelled_intent_count"] == 0
     assert snapshot["virtual_operations_cancelled_intent_count"] == 0
-    assert snapshot["virtual_capital_rejected_intent_count"] == 0
     assert snapshot["paper_pending_continuity"] == {
         "status": "NO_PENDING_INTENTS",
         "pending_intent_count": 0,
@@ -873,13 +876,12 @@ def test_snapshot_is_sector_first_review_only_and_builds_causal_chart_urls(
         "unique_execution_evidence_count": 0,
         "missing_evidence": [],
         "invalid_evidence": [],
-        "legacy_fact_only_evidence": [],
         "tick_data_used": False,
         "broker_transport_available": False,
         "live_status": "LIVE_DISABLED",
     }
     assert snapshot["paper_execution_rejection_evidence"] == {
-        "schema": "chanlun-human-paper-execution-rejection-evidence-audit/v1",
+        "schema": "chanlun-human-paper-execution-rejection-evidence-audit",
         "status": "NO_REJECTIONS",
         "rejection_count": 0,
         "verified_rejection_count": 0,
@@ -893,10 +895,7 @@ def test_snapshot_is_sector_first_review_only_and_builds_causal_chart_urls(
         "live_status": "LIVE_DISABLED",
     }
     assert snapshot["paper_operations_cancellation_evidence"] == {
-        "schema": (
-            "chanlun-human-paper-operations-cancellation-"
-            "evidence-audit/v1"
-        ),
+        "schema": ("chanlun-human-paper-operations-cancellation-evidence-audit"),
         "status": "NO_CANCELLATIONS",
         "cancellation_count": 0,
         "verified_cancellation_count": 0,
@@ -923,45 +922,27 @@ def test_snapshot_is_sector_first_review_only_and_builds_causal_chart_urls(
         "broker_transport_available": False,
         "live_status": "LIVE_DISABLED",
     }
-    assert snapshot["paper_capital_rejection_evidence"] == {
-        "schema": "chanlun-human-paper-capital-rejection-evidence-audit/v1",
+    assert snapshot["paper_portfolio_rejection_evidence"] == {
+        "schema": "chanlun-human-paper-portfolio-rejection-evidence-audit",
         "status": "NO_REJECTIONS",
         "rejection_count": 0,
         "verified_rejection_count": 0,
         "unique_execution_evidence_count": 0,
         "missing_evidence": [],
         "invalid_evidence": [],
-        "legacy_fact_only_evidence": [],
         "first_eligible_bar_verified": True,
         "synchronous_position_marks_verified": True,
         "tick_data_used": False,
         "broker_transport_available": False,
         "live_status": "LIVE_DISABLED",
     }
-    assert snapshot["paper_capital_decision_audit"] == {
-        "schema": "chanlun-human-paper-capital-decision-audit/v1",
-        "status": "NO_REJECTIONS",
-        "rejection_count": 0,
-        "verified_rejection_count": 0,
-        "invalid_decisions": [],
-        "accounting_contract_id": (
-            "sha256:45354d2e7f694500c324faf991940dbb3e41c17f4be16c3760e8997b4ab38257"
-        ),
-        "slot_fraction_notional_gate_evaluable": False,
-        "account_exposure_notional_gate_evaluable": False,
-        "tick_data_used": False,
-        "broker_transport_available": False,
-        "live_status": "LIVE_DISABLED",
-    }
     assert snapshot["paper_portfolio_decision_audit"] == {
-        "schema": "chanlun-human-paper-portfolio-decision-audit/v2",
+        "schema": "chanlun-human-paper-portfolio-decision-audit",
         "status": "NO_REJECTIONS",
         "rejection_count": 0,
         "verified_rejection_count": 0,
         "invalid_decisions": [],
-        "accounting_contract_id": (
-            "sha256:45354d2e7f694500c324faf991940dbb3e41c17f4be16c3760e8997b4ab38257"
-        ),
+        "accounting_contract_id": accounting_contract_id,
         "slot_fraction_notional_gate_evaluable": True,
         "account_exposure_notional_gate_evaluable": True,
         "minimum_market_data_frequency": "1m",
@@ -970,14 +951,12 @@ def test_snapshot_is_sector_first_review_only_and_builds_causal_chart_urls(
         "live_status": "LIVE_DISABLED",
     }
     assert snapshot["paper_portfolio_fill_decision_audit"] == {
-        "schema": "chanlun-human-paper-portfolio-fill-decision-audit/v2",
+        "schema": "chanlun-human-paper-portfolio-fill-decision-audit",
         "status": "NO_APPROVED_FILLS",
         "approved_fill_count": 0,
         "verified_approved_fill_count": 0,
         "invalid_decisions": [],
-        "accounting_contract_id": (
-            "sha256:45354d2e7f694500c324faf991940dbb3e41c17f4be16c3760e8997b4ab38257"
-        ),
+        "accounting_contract_id": accounting_contract_id,
         "slot_fraction_notional_gate_evaluable": True,
         "account_exposure_notional_gate_evaluable": True,
         "synchronous_open_position_one_minute_marks_required": True,
@@ -987,9 +966,7 @@ def test_snapshot_is_sector_first_review_only_and_builds_causal_chart_urls(
         "live_status": "LIVE_DISABLED",
     }
     assert snapshot["paper_entry_selection_attestation"] == {
-        "schema": (
-            "chanlun-human-paper-entry-selection-attestation-audit/v1"
-        ),
+        "schema": ("chanlun-human-paper-entry-selection-attestation-audit"),
         "status": "NO_SELECTION_ATTESTATIONS",
         "attested_buy_intent_count": 0,
         "verified_catalog_binding_count": 0,
@@ -1004,12 +981,11 @@ def test_snapshot_is_sector_first_review_only_and_builds_causal_chart_urls(
         "live_status": "LIVE_DISABLED",
     }
     assert snapshot["paper_entry_selection_source_audit"] == {
-        "schema": "chanlun-human-paper-entry-selection-source-audit/v1",
+        "schema": "chanlun-human-paper-entry-selection-source-audit",
         "status": "NO_REQUIRED_SELECTION_INTENTS",
         "required_live_ranked_buy_intent_count": 0,
         "verified_source_binding_count": 0,
         "verified_required_buy_intent_ids": [],
-        "legacy_unattested_intent_ids": [],
         "source_unavailable_intent_ids": [],
         "invalid_source_bindings": [],
         "immutable_source_ranking_resolved": True,
@@ -1032,8 +1008,8 @@ def test_snapshot_is_sector_first_review_only_and_builds_causal_chart_urls(
         "fee_model_attached": True,
         "cash_accounting_attached": True,
         "cash_and_slot_pretrade_enforced": True,
-        "capital_rejection_exact_1m_evidence_audited": True,
-        "capital_rejection_ledger_prefix_recomputed": True,
+        "portfolio_rejection_exact_1m_evidence_audited": True,
+        "portfolio_rejection_ledger_prefix_recomputed": True,
         "slot_fraction_notional_gate_evaluable": True,
         "account_exposure_notional_gate_evaluable": True,
         "synchronous_open_position_one_minute_marks_required": True,
@@ -1046,32 +1022,32 @@ def test_snapshot_is_sector_first_review_only_and_builds_causal_chart_urls(
         "human_trend_type_confirmation_required": True,
         "warmup_divergence_blocks_strategic_virtual_buy": True,
         "warmup_divergence_never_blocks_existing_virtual_exit": True,
-            "strategic_buy_confirmation_bar_price_cap_enforced": True,
-            "strategic_buy_no_chase_reject_independent_of_volume": True,
-            "strategic_buy_entire_bar_strict_cross_enforced": True,
-            "strategic_buy_five_percent_bar_volume_cap_enforced": True,
-            "persistent_sell_five_percent_bar_volume_cap_enforced": True,
-            "adverse_observed_bar_extreme_fill_price_enforced": True,
-            "completed_bar_close_fill_timestamp_enforced": True,
-            "strategic_buy_one_locator_bar_ttl_enforced": True,
-            "strategic_buy_causal_full_1m_window_prechecked": True,
-            "full_session_240_bar_grid_required": True,
-            "opening_auction_event_merged_into_0931": True,
-            "optional_buy_data_fault_cancelled": True,
-            "optional_buy_security_gate_cancelled": True,
-            "execution_fact_incomplete_optional_buy_cancelled": True,
-            "operations_cancellation_exact_evidence_audited": True,
-            "persistent_exit_independent_symbol_continues": True,
-            "persistent_exit_security_blocked_remains_pending": True,
-            "persistent_exit_fact_incomplete_remains_pending": True,
-            "fill_and_rejection_full_session_grid_audited": True,
-            "pending_continuity_requires_gap_free_240_bar_grid": True,
-            "current_pending_continuity_proven": True,
-            "current_review_queue_raw_1m_boundaries_self_contained": False,
-            "raw_1m_entry_boundary_self_contained": True,
-            "raw_1m_entry_boundary_source_resolved": True,
-            "live_ranked_entry_exact_qmt_catalog_attested": True,
-            "structure_anchor_never_used_as_execution_cap": True,
+        "strategic_buy_confirmation_bar_price_cap_enforced": True,
+        "strategic_buy_no_chase_reject_independent_of_volume": True,
+        "strategic_buy_entire_bar_strict_cross_enforced": True,
+        "strategic_buy_five_percent_bar_volume_cap_enforced": True,
+        "persistent_sell_five_percent_bar_volume_cap_enforced": True,
+        "adverse_observed_bar_extreme_fill_price_enforced": True,
+        "completed_bar_close_fill_timestamp_enforced": True,
+        "strategic_buy_one_locator_bar_ttl_enforced": True,
+        "strategic_buy_causal_full_1m_window_prechecked": True,
+        "full_session_240_bar_grid_required": True,
+        "opening_auction_event_merged_into_0931": True,
+        "optional_buy_data_fault_cancelled": True,
+        "optional_buy_security_gate_cancelled": True,
+        "execution_fact_incomplete_optional_buy_cancelled": True,
+        "operations_cancellation_exact_evidence_audited": True,
+        "persistent_exit_independent_symbol_continues": True,
+        "persistent_exit_security_blocked_remains_pending": True,
+        "persistent_exit_fact_incomplete_remains_pending": True,
+        "fill_and_rejection_full_session_grid_audited": True,
+        "pending_continuity_requires_gap_free_240_bar_grid": True,
+        "current_pending_continuity_proven": True,
+        "current_review_queue_raw_1m_boundaries_self_contained": False,
+        "raw_1m_entry_boundary_self_contained": True,
+        "raw_1m_entry_boundary_source_resolved": True,
+        "live_ranked_entry_exact_qmt_catalog_attested": True,
+        "structure_anchor_never_used_as_execution_cap": True,
         "execution_rejection_exact_1m_evidence_audited": True,
         "cash_and_equity_accounting_attached": False,
         "daily_valuation_supported": True,
@@ -1085,26 +1061,23 @@ def test_snapshot_is_sector_first_review_only_and_builds_causal_chart_urls(
     assert candidate["entry_confirmation_bar_closed_at"] is not None
     assert candidate["entry_valid_until"] is not None
     assert candidate["entry_boundary_attestation"] == (
-        "LEGACY_REDUCED_EVIDENCE"
+        "MISSING_CURRENT_BOUNDARY_EVIDENCE"
     )
-    assert candidate["sector_name"] == "银行"
-    assert candidate["sector_name_attestation"] == (
-        "LATEST_CATALOG_FALLBACK_NOT_POINT_IN_TIME"
-    )
+    assert candidate["sector_name"] == "板块名称待映射"
+    assert candidate["sector_name_attestation"] == ("UNRESOLVED")
     assert candidate["sector_name_point_in_time"] is False
-    assert candidate["sector_membership_attestation"] == (
-        "LATEST_CATALOG_FALLBACK_NOT_POINT_IN_TIME"
-    )
+    assert candidate["sector_membership_attestation"] == ("UNRESOLVED")
     assert candidate["sector_membership_point_in_time"] is False
 
-    assert candidate["sector_name_captured_at"] == (
-        "2026-07-28T09:15:00+08:00"
-    )
-    assert candidate["sector_name_entry_sha256"].startswith("sha256:")
-    assert candidate["sector_name_catalog_revision"].startswith("sha256:")
+    assert candidate["sector_name_captured_at"] is None
+    assert candidate["sector_name_entry_sha256"] is None
+    assert candidate["sector_name_catalog_revision"] is None
     assert "review_candidate_id=" in candidate["chart_urls"]["30m"]
     assert "review_source_sha256=" in candidate["chart_urls"]["30m"]
-    assert f"review_as_of={candidate['review_as_of_unix']}" in candidate["chart_urls"]["30m"]
+    assert (
+        f"review_as_of={candidate['review_as_of_unix']}"
+        in candidate["chart_urls"]["30m"]
+    )
     assert "intervals=30" in candidate["chart_urls"]["30m"]
 
 
@@ -1123,13 +1096,9 @@ def test_sector_name_is_point_in_time_only_after_same_session_capture(
     _write_report(service.historical_report, alert=at_capture)
     candidate = service.snapshot(source="historical")["review_queue"][0]
     assert candidate["sector_name"] == "银行"
-    assert candidate["sector_name_attestation"] == (
-        "POINT_IN_TIME_SAME_SESSION"
-    )
+    assert candidate["sector_name_attestation"] == ("POINT_IN_TIME_SAME_SESSION")
     assert candidate["sector_name_point_in_time"] is True
-    assert candidate["sector_membership_attestation"] == (
-        "POINT_IN_TIME_SAME_SESSION"
-    )
+    assert candidate["sector_membership_attestation"] == ("POINT_IN_TIME_SAME_SESSION")
     assert candidate["sector_membership_point_in_time"] is True
     assert candidate["sector_name_captured_at"] == capture_at.isoformat()
     assert candidate["sector_name_entry_sha256"].startswith("sha256:")
@@ -1145,14 +1114,10 @@ def test_sector_name_is_point_in_time_only_after_same_session_capture(
     )
     _write_report(service.historical_report, alert=too_early)
     candidate = service.snapshot(source="historical")["review_queue"][0]
-    assert candidate["sector_name"] == "银行"
-    assert candidate["sector_name_attestation"] == (
-        "LATEST_CATALOG_FALLBACK_NOT_POINT_IN_TIME"
-    )
+    assert candidate["sector_name"] == "板块名称待映射"
+    assert candidate["sector_name_attestation"] == ("UNRESOLVED")
     assert candidate["sector_name_point_in_time"] is False
-    assert candidate["sector_membership_attestation"] == (
-        "LATEST_CATALOG_FALLBACK_NOT_POINT_IN_TIME"
-    )
+    assert candidate["sector_membership_attestation"] == ("UNRESOLVED")
     assert candidate["sector_membership_point_in_time"] is False
 
     wrong_member = replace(at_capture, symbol="SZ.000002")
@@ -1190,7 +1155,7 @@ def test_live_ranking_uses_its_exact_qmt_catalog_revision(
             "point_in_time_scope": "CURRENT_CAPTURE_ONLY",
             "catalog_revision": sha256_json(
                 {
-                    "schema": "chanlun-qmt-gics3-catalog/v1",
+                    "schema": "chanlun-qmt-gics3-catalog",
                     "sectors": later_sectors,
                 }
             ),
@@ -1200,7 +1165,6 @@ def test_live_ranking_uses_its_exact_qmt_catalog_revision(
     signal_at = datetime(2026, 7, 28, 9, 20, tzinfo=TZ)
     base = _alert()
     ranking = SectorRankingReviewEvidence(
-        source_profile="LIVE_FULL_RANKING",
         sector_id=SECTOR_ID,
         sector_name="银行",
         observed_at=signal_at,
@@ -1296,27 +1260,30 @@ def test_live_ranked_buy_requires_exact_catalog_before_virtual_intent(
     assert selection["candidate_id"] == exact_candidate["candidate_id"]
     assert selection["sector_id"] == SECTOR_ID
     assert selection["sector_name"] == "银行"
-    assert selection["sector_ranking_evidence_id"] == (
-        exact_candidate["sector_ranking_evidence"]["evidence_id"]
+    assert (
+        selection["sector_ranking_evidence_id"]
+        == (exact_candidate["sector_ranking_evidence"]["evidence_id"])
     )
-    assert selection["sector_catalog_entry_sha256"] == (
-        exact_candidate["sector_name_entry_sha256"]
+    assert (
+        selection["sector_catalog_entry_sha256"]
+        == (exact_candidate["sector_name_entry_sha256"])
     )
-    assert selection["sector_catalog_revision"] == (
-        exact_candidate["sector_name_catalog_revision"]
+    assert (
+        selection["sector_catalog_revision"]
+        == (exact_candidate["sector_name_catalog_revision"])
     )
-    assert selection["attestation"] == (
-        "EXACT_REVISION_NAME_AND_MEMBERSHIP_MATCH"
-    )
+    assert selection["attestation"] == ("EXACT_REVISION_NAME_AND_MEMBERSHIP_MATCH")
     audited = exact.snapshot(source="forward")
     assert audited["paper_entry_selection_attestation"]["status"] == "COMPLETE"
-    assert audited["paper_entry_selection_attestation"][
-        "verified_catalog_binding_count"
-    ] == 1
+    assert (
+        audited["paper_entry_selection_attestation"]["verified_catalog_binding_count"]
+        == 1
+    )
     assert audited["paper_entry_selection_source_audit"]["status"] == "COMPLETE"
-    assert audited["paper_entry_selection_source_audit"][
-        "verified_source_binding_count"
-    ] == 1
+    assert (
+        audited["paper_entry_selection_source_audit"]["verified_source_binding_count"]
+        == 1
+    )
 
     # Losing the catalog proof must stop another buy, but a later WATCH/REJECT
     # remains authorized to cancel the already-pending optional entry.
@@ -1387,7 +1354,9 @@ def test_live_ranked_buy_requires_exact_catalog_before_virtual_intent(
     assert missing_result["paper_intent"] is None
     assert missing_result["paper_ledger_changed"] is False
     assert not missing.paper_ledger.exists()
-    assert len(load_human_review_feedback_ledger(missing.feedback_ledger)["entries"]) == 1
+    assert (
+        len(load_human_review_feedback_ledger(missing.feedback_ledger)["entries"]) == 1
+    )
     pending = missing.snapshot(source="forward")["review_queue"][0]
     assert pending["paper_reconciliation_pending"] is True
     assert pending["paper_reconciliation_eligible"] is False
@@ -1433,9 +1402,9 @@ def test_entry_selection_source_audit_rejects_rehashed_ranking_binding(
 
     assert audit["status"] == "INVALID"
     assert audit["verified_source_binding_count"] == 0
-    assert "differs from source ranking" in audit["invalid_source_bindings"][0][
-        "reason"
-    ]
+    assert (
+        "differs from source ranking" in audit["invalid_source_bindings"][0]["reason"]
+    )
 
 
 def test_catalog_entry_gate_does_not_block_virtual_exit_review(
@@ -1598,7 +1567,9 @@ def test_missing_exact_catalog_can_idempotently_reconcile_after_capture_arrives(
     assert waiting["paper_observation_reason"] == (
         "QMT_RANKING_CATALOG_EXACT_REVISION_UNAVAILABLE_FOR_PAPER_ENTRY"
     )
-    assert len(load_human_review_feedback_ledger(service.feedback_ledger)["entries"]) == 1
+    assert (
+        len(load_human_review_feedback_ledger(service.feedback_ledger)["entries"]) == 1
+    )
     queued = service.snapshot(source="forward")["review_queue"][0]
     assert queued["paper_reconciliation_pending"] is True
     assert queued["paper_reconciliation_eligible"] is False
@@ -1611,11 +1582,14 @@ def test_missing_exact_catalog_can_idempotently_reconcile_after_capture_arrives(
     promoted = service.append_feedback(**common)
     assert promoted["feedback"]["feedback_id"] == waiting["feedback"]["feedback_id"]
     assert promoted["paper_intent"]["status"] == "PENDING"
-    assert promoted["paper_intent"]["entry_selection_evidence"][
-        "feedback_id"
-    ] == waiting["feedback"]["feedback_id"]
+    assert (
+        promoted["paper_intent"]["entry_selection_evidence"]["feedback_id"]
+        == waiting["feedback"]["feedback_id"]
+    )
     assert promoted["paper_ledger_changed"] is True
-    assert len(load_human_review_feedback_ledger(service.feedback_ledger)["entries"]) == 1
+    assert (
+        len(load_human_review_feedback_ledger(service.feedback_ledger)["entries"]) == 1
+    )
     final = service.snapshot(source="forward")["review_queue"][0]
     assert final["paper_reconciliation_pending"] is False
 
@@ -1635,6 +1609,19 @@ def test_sector_source_evidence_survives_report_reload_and_rejects_tampering(
         suffix_signature="sha256:" + "7" * 64,
     )
     base = _alert()
+    convergence = classify_warmup_convergence_envelope(
+        frequency="d",
+        as_of=base.signal_at,
+        parameter_set_id=(QMT_HIGHER_TIMEFRAME_WARMUP_CONVERGENCE_PARAMETER_SET_ID),
+        observations=tuple(
+            WarmupPrefixObservation(
+                bar_count=count,
+                starts_at=base.signal_at - timedelta(days=count),
+                signature_sha256="sha256:" + "6" * 64,
+            )
+            for count in (480, 640, 800, 960)
+        ),
+    )
     evidence = SectorHigherTimeframeReviewEvidence(
         source_mode="PAGE_PARITY_SAME_5M_BASE",
         strict_same_5m_warmup_evidence=warmup,
@@ -1645,24 +1632,33 @@ def test_sector_source_evidence_survives_report_reload_and_rejects_tampering(
                 calendar_first_session=(base.signal_at - timedelta(days=800)).date(),
                 first_visible_bar_at=base.signal_at - timedelta(days=700),
                 last_visible_bar_at=base.signal_at - timedelta(minutes=5),
-                first_completed_session=(
-                    base.signal_at - timedelta(days=700)
-                ).date(),
-                last_completed_session=(
-                    base.signal_at - timedelta(days=1)
-                ).date(),
+                first_completed_session=(base.signal_at - timedelta(days=700)).date(),
+                last_completed_session=(base.signal_at - timedelta(days=1)).date(),
                 visible_five_minute_bar_count=480 * 48,
                 completed_daily_bar_count=480,
                 required_daily_bar_count=480,
                 remaining_daily_bar_count=0,
                 missing_leading_calendar_session_count=0,
                 warmup_converged=True,
-                warmup_reason_code=(
-                    "QMT_HIGHER_TIMEFRAME_WARMUP_TAIL_STABLE"
-                ),
+                warmup_reason_code=("QMT_HIGHER_TIMEFRAME_WARMUP_TAIL_STABLE"),
                 boundary_status="REQUIRED_HISTORY_CONVERGED",
+                physical_source_boundary_status=(
+                    "PHYSICAL_QMT_CACHE_LEFT_BOUNDARY_AFTER_REQUESTED_WARMUP"
+                ),
+                physical_source_requested_start_at=(
+                    base.signal_at - timedelta(days=800)
+                ),
+                physical_source_required_contributor_start_at=(
+                    base.signal_at - timedelta(days=700)
+                ),
+                physical_source_representative_member_count=10,
+                physical_source_available_member_count=10,
+                physical_source_required_contributor_count=8,
+                physical_source_inventory_revision="sha256:" + "f" * 64,
             )
         ),
+        warmup_convergence_evidence=convergence,
+        strict_same_5m_warmup_convergence_evidence=convergence,
         sector_id=base.sector_id,
         observed_at=base.signal_at,
         gate=base.sector_risk_gate,
@@ -1719,9 +1715,7 @@ def test_market_symbol_mwd_evidence_is_exposed_with_explicit_attestation(
     service: HumanReviewScreeningService,
 ) -> None:
     base = _alert()
-    unresolved_states = tuple(
-        (period, "UNRESOLVED") for period in ("M", "W", "D")
-    )
+    unresolved_states = tuple((period, "UNRESOLVED") for period in ("M", "W", "D"))
     evidence = MarketSymbolHigherTimeframeReviewEvidence(
         symbol=base.symbol,
         observed_at=base.signal_at,
@@ -1750,13 +1744,7 @@ def test_market_symbol_mwd_evidence_is_exposed_with_explicit_attestation(
     _write_report(service.historical_report, alert=alert)
 
     candidate = service.snapshot(source="historical")["review_queue"][0]
-    assert candidate["market_symbol_higher_timeframe_evidence"] == (
-        evidence.document()
-    )
-    assert (
-        candidate["market_symbol_higher_timeframe_attestation"]
-        == "SELF_CONTAINED"
-    )
+    assert candidate["market_symbol_higher_timeframe_evidence"] == (evidence.document())
     assert (
         candidate["market_symbol_higher_timeframe_source_attestation"]
         == "STRUCTURE_ONLY"
@@ -1770,9 +1758,7 @@ def test_market_symbol_source_support_survives_service_restart(
     """The page receives replayable source facts, not only coloured M/W/D gates."""
 
     base = _alert()
-    unresolved_states = tuple(
-        (period, "UNRESOLVED") for period in ("M", "W", "D")
-    )
+    unresolved_states = tuple((period, "UNRESOLVED") for period in ("M", "W", "D"))
     market_support = HigherTimeframeReviewSourceSupport(
         subject="MARKET",
         session_evidence=HigherTimeframeSessionEvidence.exact(),
@@ -1827,16 +1813,11 @@ def test_market_symbol_source_support_survives_service_restart(
     )
     candidate = restarted.snapshot(source="historical")["review_queue"][0]
     portable = candidate["market_symbol_higher_timeframe_evidence"]
-    assert candidate["market_symbol_higher_timeframe_attestation"] == (
-        "SELF_CONTAINED"
-    )
     assert candidate["market_symbol_higher_timeframe_source_attestation"] == (
         "SELF_CONTAINED"
     )
     assert portable["market"]["source_support"] == market_support.document()
-    assert portable["symbol_evidence"]["source_support"] == (
-        symbol_support.document()
-    )
+    assert portable["symbol_evidence"]["source_support"] == (symbol_support.document())
     assert market_support.support_id in candidate["source_fact_ids"]
     assert symbol_support.support_id in candidate["source_fact_ids"]
 
@@ -1863,11 +1844,9 @@ def test_market_symbol_source_support_survives_service_restart(
     )
 
 
-def test_legacy_sector_gate_omission_is_visible_and_fail_closed(
+def test_sector_gate_omission_is_rejected(
     service: HumanReviewScreeningService,
 ) -> None:
-    """The page must not silently present an inferred legacy gate as attested."""
-
     current = replace(
         _alert(),
         entry_confirmation_bar_closed_at=None,
@@ -1875,7 +1854,7 @@ def test_legacy_sector_gate_omission_is_visible_and_fail_closed(
         entry_valid_until=None,
         entry_boundary_evidence_id=None,
     )
-    legacy_identity = human_review_alert_document(current)
+    incomplete_identity = human_review_alert_document(current)
     for field in (
         "sector_risk_gate",
         "entry_confirmation_bar_closed_at",
@@ -1883,13 +1862,13 @@ def test_legacy_sector_gate_omission_is_visible_and_fail_closed(
         "entry_valid_until",
         "entry_boundary_evidence_id",
     ):
-        legacy_identity.pop(field, None)
-    legacy_candidate_id = sha256_json(legacy_identity)
+        incomplete_identity.pop(field, None)
+    incomplete_candidate_id = sha256_json(incomplete_identity)
     report = _report()
     report["review_queue"] = [
         {
-            **_jsonable(legacy_identity),
-            "candidate_id": legacy_candidate_id,
+            **_jsonable(incomplete_identity),
+            "candidate_id": incomplete_candidate_id,
             "signal_lifecycle_id": current.signal_lifecycle_id,
         }
     ]
@@ -1900,23 +1879,8 @@ def test_legacy_sector_gate_omission_is_visible_and_fail_closed(
         encoding="utf-8",
     )
 
-    candidate = service.snapshot(source="historical")["review_queue"][0]
-    assert candidate["candidate_id"] == legacy_candidate_id
-    assert candidate["sector_risk_gate"] == "UNRESOLVED"
-    assert (
-        candidate["sector_risk_gate_attestation"]
-        == "LEGACY_OMITTED_FAIL_CLOSED"
-    )
-    assert candidate["sector_higher_timeframe_evidence"] is None
-    assert candidate["market_symbol_higher_timeframe_evidence"] is None
-    assert (
-        candidate["market_symbol_higher_timeframe_attestation"]
-        == "LEGACY_SUMMARY_ONLY"
-    )
-    assert (
-        candidate["market_symbol_higher_timeframe_source_attestation"]
-        == "LEGACY_SUMMARY_ONLY"
-    )
+    with pytest.raises(HumanReviewScreenUnavailable):
+        service.snapshot(source="historical")
 
 
 def test_snapshot_attaches_only_valid_immutable_daily_valuation(
@@ -2010,9 +1974,7 @@ def test_forward_archive_readiness_requires_the_capture_receipt(
     )
 
     assert result["ready"] is False
-    assert result["reason_code"] == (
-        "SAME_SESSION_SECTOR_CAPTURE_RECEIPT_UNPROVEN"
-    )
+    assert result["reason_code"] == ("SAME_SESSION_SECTOR_CAPTURE_RECEIPT_UNPROVEN")
     assert result["receipt_proven"] is False
     assert result["catalog_entry_sha256"].startswith("sha256:")
 
@@ -2054,9 +2016,7 @@ def test_forward_delivery_readiness_rejects_self_reported_evaluated_event(
     )
     captured = delivery_service.forward_delivery_readiness(session=session)
     assert captured["ready"] is False
-    assert captured["reason_code"] == (
-        "CAPTURE_IMPLEMENTATION_PROVENANCE_UNATTESTED"
-    )
+    assert captured["reason_code"] == ("CAPTURE_IMPLEMENTATION_PROVENANCE_UNATTESTED")
     assert captured["implementation_continuity_preflight"]["ready"] is False
 
     append_forward_paper_event(
@@ -2093,7 +2053,7 @@ def test_forward_delivery_readiness_health_adapter_is_single_flight(
         started.set()
         assert release.wait(timeout=2)
         return {
-            "schema": "chanlun-v3-forward-paper-session-delivery/v1",
+            "schema": "chanlun-forward-paper-session-delivery",
             "required": True,
             "requirement_resolved": True,
             "ready": True,
@@ -2121,9 +2081,7 @@ def test_forward_delivery_readiness_health_adapter_is_single_flight(
     deadline = time_module.monotonic() + 2
     cached = second
     while time_module.monotonic() < deadline:
-        cached = service.forward_delivery_readiness_nonblocking(
-            session=session
-        )
+        cached = service.forward_delivery_readiness_nonblocking(session=session)
         if cached["reason_code"] == "READY":
             break
         time_module.sleep(0.01)
@@ -2173,9 +2131,7 @@ def test_forward_delivery_preflight_blocks_changed_source_and_recovers(
     assert changed["reason_code"] == "IMPLEMENTATION_CHANGED_SINCE_CAPTURE"
     assert changed["implementation_continuity_preflight"]["ready"] is False
     assert (
-        changed["implementation_continuity_preflight"][
-            "market_data_read_authorized"
-        ]
+        changed["implementation_continuity_preflight"]["market_data_read_authorized"]
         is False
     )
 
@@ -2219,12 +2175,8 @@ def test_forward_surfaces_share_fail_closed_qmt_calendar_requirement(
         trading_session_provider=unpublished,
     )
 
-    archive = unresolved_service.forward_archive_capture_readiness(
-        session=session
-    )
-    default_archive = unresolved_service.forward_archive_capture_readiness(
-        session=None
-    )
+    archive = unresolved_service.forward_archive_capture_readiness(session=session)
+    default_archive = unresolved_service.forward_archive_capture_readiness(session=None)
     delivery = unresolved_service.forward_delivery_readiness(session=session)
 
     for result in (archive, default_archive, delivery):
@@ -2262,12 +2214,12 @@ def test_forward_surfaces_share_fail_closed_qmt_calendar_requirement(
     assert not_due["reason_code"] == "NON_TRADING_SESSION_NOT_DUE"
 
 
-def test_snapshot_excludes_legacy_markout_without_session_qualification(
+def test_snapshot_rejects_markout_without_session_qualification(
     service: HumanReviewScreeningService,
     tmp_path: Path,
 ) -> None:
     markout_stable = {
-        "schema": "chanlun-v3-forward-review-markout/v1",
+        "schema": "chanlun-forward-review-markout",
         "through_session": "2026-07-28",
         "diagnostic_only": True,
         "portfolio_performance_evaluable": False,
@@ -2313,24 +2265,11 @@ def test_snapshot_excludes_legacy_markout_without_session_qualification(
         forward_markout_report=markout,
     )
 
-    snapshot = linked.snapshot()
-
-    assert snapshot["forward_markout"]["status"] == "UNQUALIFIED"
-    assert snapshot["forward_markout"]["summary"] == {}
-    assert snapshot["forward_markout"]["sample"]["unique_lifecycle_count"] == 0
-    assert snapshot["forward_markout"]["excluded_legacy_sample"] == {
-        "schema": "chanlun-v3-forward-review-markout/v1",
-        "unique_lifecycle_count": 25,
-        "pending_by_horizon": {"5": 25, "10": 25, "20": 25},
-    }
-    assert snapshot["forward_markout"]["portfolio_performance_evaluable"] is False
-    assert snapshot["forward_markout"]["source_provenance_status"] == (
-        "SESSION_QUALIFICATION_UNATTESTED"
-    )
-    assert "LEGACY_MARKOUT_EXCLUDED_FROM_CUMULATIVE_SAMPLE" in snapshot[
-        "forward_markout"
-    ]["reason_codes"]
-    assert snapshot["orders_created"] == snapshot["fills_created"] == 0
+    with pytest.raises(
+        HumanReviewScreenUnavailable,
+        match="human_review_forward_markout_invalid",
+    ):
+        linked._forward_markout()
 
 
 def test_snapshot_requires_the_current_forward_source_audit_contract(
@@ -2339,7 +2278,7 @@ def test_snapshot_requires_the_current_forward_source_audit_contract(
 ) -> None:
     through_session = date(2026, 7, 28)
     qualification_stable = {
-        "schema": "chanlun-v3-forward-review-session-qualification/v2",
+        "schema": "chanlun-forward-review-session-qualification",
         "through_session": through_session.isoformat(),
         "observed_at": datetime(2026, 7, 28, 15, 20, tzinfo=TZ).isoformat(),
         "qualified_sessions": [],
@@ -2389,11 +2328,7 @@ def test_snapshot_requires_the_current_forward_source_audit_contract(
     ):
         tampered = dict(report)
         tampered.pop(required_field)
-        stable = {
-            key: tampered[key]
-            for key in tampered
-            if key != "content_sha256"
-        }
+        stable = {key: tampered[key] for key in tampered if key != "content_sha256"}
         tampered["content_sha256"] = sha256_json(stable)
         markout.write_text(json.dumps(tampered), encoding="utf-8")
         reloaded = HumanReviewScreeningService(
@@ -2447,9 +2382,7 @@ def test_snapshot_validates_forward_warmup_lineage_rollup(
     assert lineage["status"] == "NO_QUALIFIED_SESSIONS"
     assert lineage["qualified_session_count"] == 0
     assert lineage["structure_event_count"] == 0
-    assert lineage["validation_scope"] == (
-        "SELF_CONTAINED_DERIVED_INVARIANTS"
-    )
+    assert lineage["validation_scope"] == ("SELF_CONTAINED_DERIVED_INVARIANTS")
     assert lineage["source_rebuild_required_for_full_verification"] is True
 
     forged = dict(report)
@@ -2463,15 +2396,19 @@ def test_snapshot_validates_forward_warmup_lineage_rollup(
         "human_review_forward_warmup_structure_lineage_invalid"
     ]
     assert (
-        "human_review_forward_warmup_structure_lineage_invalid"
-        in invalid["warnings"]
+        "human_review_forward_warmup_structure_lineage_invalid" in invalid["warnings"]
     )
 
 
 def test_latest_prefers_the_newest_forward_screen(
     service: HumanReviewScreeningService,
 ) -> None:
-    report = service.forward_root / "sessions" / "2026-07-28" / "forward_human_review_screen.json"
+    report = (
+        service.forward_root
+        / "sessions"
+        / "2026-07-28"
+        / "forward_human_review_screen.json"
+    )
     _write_report(report, forward_session="2026-07-28")
 
     snapshot = service.snapshot(source="latest")
@@ -2481,15 +2418,14 @@ def test_latest_prefers_the_newest_forward_screen(
     assert "forward" in snapshot["source_options"]
 
 
-def test_historical_source_promotes_current_release_sidecar_without_restart(
+def test_historical_source_requires_the_current_release_sidecar(
     service: HumanReviewScreeningService,
     tmp_path: Path,
 ) -> None:
-    preferred = tmp_path / "current_release" / "human_review_screen.json"
+    current = tmp_path / "current_release" / "human_review_screen.json"
     guarded = HumanReviewScreeningService(
         repository_root=service.repository_root,
-        historical_report=service.historical_report,
-        preferred_historical_report=preferred,
+        historical_report=current,
         forward_root=service.forward_root,
         feedback_ledger=service.feedback_ledger,
         sector_ledger=service.sector_ledger,
@@ -2498,27 +2434,16 @@ def test_historical_source_promotes_current_release_sidecar_without_restart(
         trading_session_provider=_trading_session_provider,
     )
 
-    fallback = guarded.snapshot(source="historical")
-    assert fallback["source_currentness"] == {
-        "status": "LEGACY_FALLBACK",
-        "source_session": None,
-        "current_market_session": None,
-        "reason_code": (
-            "CURRENT_RELEASE_HUMAN_REVIEW_SIDECAR_UNAVAILABLE"
-        ),
-    }
-    assert "CURRENT_RELEASE_HUMAN_REVIEW_SIDECAR_UNAVAILABLE" in fallback[
-        "warnings"
-    ]
+    with pytest.raises(
+        HumanReviewScreenUnavailable,
+        match="human_review_report_unavailable",
+    ):
+        guarded.snapshot(source="historical")
 
-    _write_report(preferred)
+    _write_report(current)
     promoted = guarded.snapshot(source="historical")
-    assert promoted["source_path"].endswith(
-        "current_release/human_review_screen.json"
-    )
-    assert promoted["source_currentness"]["status"] == (
-        "CURRENT_RELEASE_SIDECAR"
-    )
+    assert promoted["source_path"].endswith("current_release/human_review_screen.json")
+    assert promoted["source_currentness"]["status"] == ("CURRENT_RELEASE_SIDECAR")
 
 
 def test_latest_materializes_live_scan_and_keeps_old_chart_lock(
@@ -2549,9 +2474,7 @@ def test_latest_materializes_live_scan_and_keeps_old_chart_lock(
     assert first["review_queue_count"] == 2
     assert first["source_options"][0] == "live"
     old = next(
-        row
-        for row in first["review_queue"]
-        if row["alert_type"] == "POSSIBLE_30M_BUY"
+        row for row in first["review_queue"] if row["alert_type"] == "POSSIBLE_30M_BUY"
     )
     feedback = live_service.append_feedback(
         candidate_id=old["candidate_id"],
@@ -2578,9 +2501,7 @@ def test_latest_materializes_live_scan_and_keeps_old_chart_lock(
 
     changed = live_snapshot()
     changed["signals"][0]["name"] = "revision-with-same-signal-lifecycle"
-    changed["snapshot_content_sha256"] = (
-        live_screening_snapshot_content_sha256(changed)
-    )
+    changed["snapshot_content_sha256"] = live_screening_snapshot_content_sha256(changed)
     live_path.write_text(json.dumps(changed, ensure_ascii=False), encoding="utf-8")
     second = live_service.snapshot(source="live")
     assert second["source_content_sha256"] != first["source_content_sha256"]
@@ -2611,9 +2532,7 @@ def test_latest_materializes_live_scan_and_keeps_old_chart_lock(
         },
     )
     assert stale_feedback["paper_observation_eligible"] is False
-    assert stale_feedback["paper_observation_reason"] == (
-        "SOURCE_SUPERSEDED_FOR_PAPER"
-    )
+    assert stale_feedback["paper_observation_reason"] == ("SOURCE_SUPERSEDED_FOR_PAPER")
     assert stale_feedback["superseded_paper_intents"] == []
     assert not live_service.paper_ledger.exists()
 
@@ -2641,10 +2560,12 @@ def test_live_materialization_uses_semantic_not_operational_snapshot_identity(
         {"batch_duration_ms": 100, "coverage_cycle_batch_count": 3}
     )
     first_payload["coverage_manifest"]["batch_count"] = 3
-    first_payload["snapshot_content_sha256"] = (
-        live_screening_snapshot_content_sha256(first_payload)
+    first_payload["snapshot_content_sha256"] = live_screening_snapshot_content_sha256(
+        first_payload
     )
-    live_path.write_text(json.dumps(first_payload, ensure_ascii=False), encoding="utf-8")
+    live_path.write_text(
+        json.dumps(first_payload, ensure_ascii=False), encoding="utf-8"
+    )
     live_service = HumanReviewScreeningService(
         repository_root=service.repository_root,
         historical_report=service.historical_report,
@@ -2664,8 +2585,8 @@ def test_live_materialization_uses_semantic_not_operational_snapshot_identity(
     second_payload["scan_audit"]["batch_duration_ms"] = 900
     second_payload["scan_audit"]["coverage_cycle_batch_count"] = 4
     second_payload["coverage_manifest"]["batch_count"] = 4
-    second_payload["snapshot_content_sha256"] = (
-        live_screening_snapshot_content_sha256(second_payload)
+    second_payload["snapshot_content_sha256"] = live_screening_snapshot_content_sha256(
+        second_payload
     )
     assert sha256_json(second_payload) != sha256_json(first_payload)
     assert (
@@ -2776,8 +2697,8 @@ def test_incomplete_live_epoch_keeps_last_archive_and_does_not_block_forward(
     incomplete["scan_audit"]["coverage_cycle_complete"] = False
     incomplete["scan_audit"]["pending_symbol_count"] = 1
     incomplete["coverage_manifest"]["complete"] = False
-    incomplete["snapshot_content_sha256"] = (
-        live_screening_snapshot_content_sha256(incomplete)
+    incomplete["snapshot_content_sha256"] = live_screening_snapshot_content_sha256(
+        incomplete
     )
     live_path.write_text(
         json.dumps(incomplete, ensure_ascii=False),
@@ -2935,14 +2856,12 @@ def test_historical_feedback_is_hash_chained_but_never_creates_paper_intent(
     assert len(ledger["entries"]) == 1
     assert ledger["entries"][0]["candidate_id"] == candidate["candidate_id"]
     assert ledger["entries"][0]["request_id"] == "review-request-1"
-    assert ledger["entries"][0]["signal_lifecycle_id"] == candidate[
-        "signal_lifecycle_id"
-    ]
+    assert (
+        ledger["entries"][0]["signal_lifecycle_id"] == candidate["signal_lifecycle_id"]
+    )
     assert ledger["entries"][0]["decomposition_judgement"] == "COMBINED"
     assert ledger["entries"][0]["center_expansion_judgement"] == "REJECTED"
-    assert ledger["entries"][0]["nine_segment_upgrade_judgement"] == (
-        "CONFIRMED"
-    )
+    assert ledger["entries"][0]["nine_segment_upgrade_judgement"] == ("CONFIRMED")
     assert ledger["entries"][0]["locator_judgement"] == "CONFIRMED"
     assert retry["feedback"]["feedback_id"] == result["feedback"]["feedback_id"]
     assert retry["paper_intent"] is None
@@ -2956,7 +2875,10 @@ def test_historical_feedback_is_hash_chained_but_never_creates_paper_intent(
     assert refreshed["virtual_observation_only_intent_count"] == 0
     assert refreshed["virtual_open_position_count"] == 0
     assert refreshed["virtual_open_positions"] == {}
-    assert refreshed["review_queue"][0]["latest_feedback"]["disposition"] == "PAPER_OBSERVE"
+    assert (
+        refreshed["review_queue"][0]["latest_feedback"]["disposition"]
+        == "PAPER_OBSERVE"
+    )
     assert refreshed["review_queue"][0]["paper_reconciliation_pending"] is False
     assert refreshed["review_queue"][0]["paper_reconciliation_eligible"] is False
 
@@ -3034,7 +2956,7 @@ def test_snapshot_rejects_a_preexisting_future_dated_feedback_ledger(
         HumanReviewFeedback(
             candidate_id=alert.candidate_id,
             source_screen_content_sha256=str(_report()["content_sha256"]),
-            reviewer="legacy-future-writer",
+            reviewer="preexisting-future-writer",
             reviewed_at=observed_at + timedelta(microseconds=1),
             center_judgement="CONFIRMED",
             trend_judgement="UP",
@@ -3077,7 +2999,11 @@ def test_scheduler_failure_keeps_feedback_but_blocks_and_recovers_paper_intent(
     )
     report = _report(forward_session="2026-07-28")
     report["review_queue"] = [
-        {**_jsonable(asdict(alert)), "candidate_id": alert.candidate_id}
+        {
+            **_jsonable(human_review_alert_document(alert)),
+            "candidate_id": alert.candidate_id,
+            "signal_lifecycle_id": alert.signal_lifecycle_id,
+        }
     ]
     report.pop("content_sha256")
     report["content_sha256"] = sha256_json(report)
@@ -3164,9 +3090,7 @@ def test_scheduler_failure_keeps_feedback_but_blocks_and_recovers_paper_intent(
         request_id="scheduler-gated-review",
         values=values,
     )
-    assert still_waiting["feedback"]["feedback_id"] == first["feedback"][
-        "feedback_id"
-    ]
+    assert still_waiting["feedback"]["feedback_id"] == first["feedback"]["feedback_id"]
     assert still_waiting["paper_intent"] is None
     assert still_waiting["paper_ledger_changed"] is False
     assert still_waiting["paper_observation_reason"] == (
@@ -3273,7 +3197,11 @@ def test_paper_intent_always_requires_same_session_capture_receipt(
     )
     report = _report(forward_session="2026-07-28")
     report["review_queue"] = [
-        {**_jsonable(asdict(alert)), "candidate_id": alert.candidate_id}
+        {
+            **_jsonable(human_review_alert_document(alert)),
+            "candidate_id": alert.candidate_id,
+            "signal_lifecycle_id": alert.signal_lifecycle_id,
+        }
     ]
     report.pop("content_sha256")
     report["content_sha256"] = sha256_json(report)
@@ -3323,7 +3251,11 @@ def test_later_human_feedback_supersedes_pending_virtual_intent(
     )
     report = _report(forward_session="2026-07-28")
     report["review_queue"] = [
-        {**_jsonable(asdict(alert)), "candidate_id": alert.candidate_id}
+        {
+            **_jsonable(human_review_alert_document(alert)),
+            "candidate_id": alert.candidate_id,
+            "signal_lifecycle_id": alert.signal_lifecycle_id,
+        }
     ]
     report.pop("content_sha256")
     report["content_sha256"] = sha256_json(report)
@@ -3387,9 +3319,7 @@ def test_later_human_feedback_supersedes_pending_virtual_intent(
     refreshed = service.snapshot(source="forward")
     assert refreshed["virtual_pending_intent_count"] == 0
     assert refreshed["virtual_cancelled_intent_count"] == 1
-    assert refreshed["paper_pending_continuity"]["status"] == (
-        "NO_PENDING_INTENTS"
-    )
+    assert refreshed["paper_pending_continuity"]["status"] == ("NO_PENDING_INTENTS")
 
 
 def test_feedback_request_id_cannot_be_reused_for_different_values(
@@ -3512,17 +3442,23 @@ def test_candidate_warmup_sidecar_is_hash_bound_and_presentation_only(
     snapshot = service.snapshot(source="forward")
     candidate = snapshot["review_queue"][0]
 
-    assert candidate["candidate_id"] == _live_ranked_alert(
-        catalog_revision=json.loads(
-            service.sector_ledger.read_text(encoding="utf-8")
-        )["entries"][0]["catalog_revision"]
-    ).candidate_id
+    assert (
+        candidate["candidate_id"]
+        == _live_ranked_alert(
+            catalog_revision=json.loads(
+                service.sector_ledger.read_text(encoding="utf-8")
+            )["entries"][0]["catalog_revision"]
+        ).candidate_id
+    )
     assert candidate["deep_warmup_diagnostic"]["status"] == "AVAILABLE"
     assert len(candidate["deep_warmup_diagnostic"]["frequencies"]) == 4
     assert snapshot["candidate_warmup_diagnostic"]["status"] == "COMPLETE"
-    assert snapshot["candidate_warmup_diagnostic"][
-        "ranking_parameters_unchanged"
-    ] is True
-    assert snapshot["candidate_warmup_diagnostic"][
-        "paper_observation_eligibility_unchanged"
-    ] is True
+    assert (
+        snapshot["candidate_warmup_diagnostic"]["ranking_parameters_unchanged"] is True
+    )
+    assert (
+        snapshot["candidate_warmup_diagnostic"][
+            "paper_observation_eligibility_unchanged"
+        ]
+        is True
+    )

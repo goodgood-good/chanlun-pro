@@ -11,6 +11,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 
+import pytest
+
 from chanlun.core.bi_calculator import BiCalculator
 from chanlun.core.cl import CL
 from chanlun.core.cl_kline_process import CL_Kline_Process
@@ -20,7 +22,6 @@ from chanlun.core.strict_structure.base_profile import (
     strict_base_config_revision,
 )
 from chanlun.core.types import CLKline, FX, Kline
-from chanlun.core.types.config import Config
 from chanlun.core.xd_calculator import _overlap, _process_inclusion
 
 
@@ -90,7 +91,7 @@ def test_l065_directional_inclusion_is_sequential_and_source_preserving():
 
 
 def test_l062_fractal_requires_both_high_and_low_relationships():
-    calc = BiCalculator(bi_mode="new")
+    calc = BiCalculator()
     top = calc._find_fractal(_cl(0, 10, 5), _cl(1, 12, 7), _cl(2, 11, 6))
     bottom = calc._find_fractal(_cl(3, 11, 6), _cl(4, 9, 4), _cl(5, 10, 5))
     high_only = calc._find_fractal(_cl(6, 10, 5), _cl(7, 12, 4), _cl(8, 11, 6))
@@ -100,11 +101,11 @@ def test_l062_fractal_requires_both_high_and_low_relationships():
     assert high_only is None
 
 
-def test_l065_new_stroke_uses_unmerged_source_distance_and_extreme_endpoint():
-    calc = BiCalculator(bi_mode="new")
+def test_l065_strict_stroke_uses_merged_k_distance_and_extreme_endpoint():
+    calc = BiCalculator()
     bottom = _fx("di", cl_index=10, source_index=10, value=90)
-    too_near_top = _fx("ding", cl_index=20, source_index=13, value=110)
-    valid_top = _fx("ding", cl_index=20, source_index=14, value=111)
+    too_near_top = _fx("ding", cl_index=13, source_index=13, value=110)
+    valid_top = _fx("ding", cl_index=14, source_index=14, value=111)
 
     assert calc._check_stroke_validity(bottom, too_near_top) is False
     assert calc._check_stroke_validity(bottom, valid_top) is True
@@ -138,31 +139,33 @@ def test_l067_l071_gap_classification_uses_first_two_feature_elements():
     assert _overlap(first, gap_second) is False
 
 
-def test_strict_base_profile_is_single_new_stroke_profile_without_legacy_center_keys():
+def test_strict_base_profile_contains_only_current_production_rules():
     config = dict(strict_base_config())
 
-    assert STRICT_BASE_PROFILE_ID == "chanlun-source-faithful-base-v10"
+    assert STRICT_BASE_PROFILE_ID == "chanlun-source-faithful-base"
     assert config["strict_base_profile_id"] == STRICT_BASE_PROFILE_ID
-    assert config["bi_type"] == Config.BI_TYPE_NEW.value
-    assert config["bi_mode"] == "new"
-    assert config["macd_ld_use_htf"] is False
-    assert config["center_seed_rule"] == (
-        "shared-leave-entry-three-core-five-role-v7"
-    )
+    assert config["stroke_rule"] == "strict-cl-k-distance"
+    assert config["segment_rule"] == "feature-sequence"
+    assert config["segment_gap_rule"] == "second-feature-sequence-fractal"
+    assert config["strict_macd_source"] == "causal_htf"
+    assert config["strict_macd_htf_policy"] == "level_plus_one"
+    assert config["strict_macd_area"] == "same_sign_magnitude"
+    assert config["strict_macd_decay_rule"] == "area-or-peak-or-dif"
+    assert config["center_seed_rule"] == ("shared-leave-entry-three-core-five-role")
     assert config["center_lifecycle_rule"] == (
-        "bidirectional-shared-leave-first-return-event-v6"
+        "bidirectional-shared-leave-first-return-event"
     )
     assert config["center_scan_rule"] == (
-        "post-third-point-first-mature-causal-owner-v1"
+        "post-third-point-first-mature-causal-owner"
     )
     assert config["trend_divergence_rule"] == (
-        "identified-complete-c-price-extreme-any-decay-v2"
+        "entry-width-matched-one-or-three-price-extreme-any-macd-decay"
     )
     assert config["decomposition_rule"] == (
-        "confirmed-divergence-partition-replay-v2"
+        "matched-leg-terminal-prefix-partition"
     )
     assert config["second_class_rule"] == (
-        "parent-or-cross-level-small-large-direct-subcenter-third-retest-v3"
+        "parent-or-cross-level-small-large-direct-subcenter-third-retest"
     )
     assert not any(
         key.startswith(("zs_", "chart_", "recursive_")) or "mmd" in key
@@ -172,28 +175,32 @@ def test_strict_base_profile_is_single_new_stroke_profile_without_legacy_center_
     assert strict_base_config_revision() == strict_base_config_revision()
 
 
-def test_cl_uses_the_profile_new_stroke_mode_instead_of_a_hidden_runtime_switch():
-    cd = CL("TST", "1m", dict(strict_base_config()))
+def test_cl_uses_the_fixed_profile_without_a_runtime_structure_switch():
+    cd = CL("TST", "1m", dict(strict_base_config()), market="a")
 
-    assert cd.bi_calculator.bi_mode == "new"
-
-
-def test_cl_maps_legacy_old_pen_config_to_strict_stroke_mode():
-    cd = CL("TST", "1m", {"bi_type": Config.BI_TYPE_OLD.value})
-
-    assert cd.get_config()["bi_mode"] == "strict"
-    assert cd.bi_calculator.bi_mode == "strict"
+    assert cd.get_config() == strict_base_config()
 
 
-def test_explicit_bi_mode_wins_over_legacy_bi_type():
-    cd = CL(
-        "TST",
-        "1m",
-        {
-            "bi_type": Config.BI_TYPE_OLD.value,
-            "bi_mode": "new",
-        },
-    )
-
-    assert cd.get_config()["bi_mode"] == "new"
-    assert cd.bi_calculator.bi_mode == "new"
+@pytest.mark.parametrize(
+    "unsupported_key",
+    (
+        "kline_type",
+        "kline_qk",
+        "fx_qy",
+        "fx_qj",
+        "fx_bh",
+        "bi_type",
+        "bi_mode",
+        "bi_bzh",
+        "bi_qj",
+        "bi_fx_cgd",
+        "xd_qj",
+        "xd_bzh",
+        "xd_bi_pohuai",
+        "use_macd_ld",
+        "macd_ld_use_htf",
+    ),
+)
+def test_cl_rejects_unsupported_structure_config_fields(unsupported_key):
+    with pytest.raises(ValueError, match="unsupported CL configuration fields"):
+        CL("TST", "1m", {unsupported_key: "unsupported"}, market="a")

@@ -1,22 +1,14 @@
 // 缠论显示配置（cl_show_config）与独立周期画线开关（cl_independent_drawings）
-// 按 ChartManager 实例和图表周期独立维护，key 形如 cl_show_config_<chartId>_<resolution>；
-// 旧全局 key 仅在新 key 不存在时作为默认值迁移，老用户设置不丢失。
+// 按 ChartManager 实例和图表周期独立维护，key 形如 cl_show_config_<chartId>_<resolution>。
 
 // 默认的缠论显示项配置
 const CL_SHOW_DEFAULT = {
-    schema_version: 9,
+    schema: "chanlun-chart-config",
     fx: true,
     bi: true,
     xd: true,
-    pen_center: true,
-    center_control_all: true,
-    center_1m: true,
-    center_5m: true,
-    center_30m: true,
-    center_d: true,
-    // 严格证据中的观察/递归中枢不属于页面的中枢控制。
-    center_observation: false,
-    center_all: false,
+    center_observation: true,
+    center_all: true,
     trend_all: false,
     point_all: true,
     point_1buy: true,
@@ -27,26 +19,6 @@ const CL_SHOW_DEFAULT = {
     point_3sell: true,
     divergence_all: true,
 };
-
-// “中枢控制”是固定的真实周期集合。period/key 均与递归层级无关；无论主图
-// 当前处于哪个周期，菜单都稳定提供这四个独立开关。
-const CENTER_CONTROL_PERIODS = Object.freeze([
-    Object.freeze({ period: '1m', label: '1m 中枢', key: 'center_1m', colorIndex: 3 }),
-    Object.freeze({ period: '5m', label: '5m 中枢', key: 'center_5m', colorIndex: 4 }),
-    Object.freeze({ period: '30m', label: '30m 中枢', key: 'center_30m', colorIndex: 5 }),
-    Object.freeze({ period: 'd', label: '日线 中枢', key: 'center_d', colorIndex: 6 }),
-]);
-
-function centerControlPeriods() {
-    return CENTER_CONTROL_PERIODS;
-}
-
-function centerPeriodFromInterval(interval) {
-    const value = String(interval || '').trim();
-    if (/^\d+$/.test(value)) return `${value}m`;
-    if (/^(1?D)$/i.test(value)) return 'd';
-    return value.toLowerCase();
-}
 
 function recursiveDisplayLevels(interval) {
     const key = String(interval || '').trim();
@@ -85,7 +57,7 @@ const CHART_DISABLED_FEATURES = Object.freeze([
     "go_to_date",
     "use_blob_for_iframe_loading",
 ]);
-const USER_DRAWING_STATE_SCHEMA = "chanlun-user-drawings/v2";
+const USER_DRAWING_STATE_SCHEMA = "chanlun-user-drawings";
 const DEFAULT_STUDY_ALLOWLIST = new Set(["MACD_HTF"]);
 function requestedDefaultStudies(search) {
     try {
@@ -495,52 +467,33 @@ function bindClDisplayMenuDrag(menuElement, handleElement, topWindow) {
     };
 }
 
-// 旧配置只作为一次性迁移输入；返回值严格限定为当前周期的 schema v9。
-// 总开关只 gate，不改写任何子项偏好。
+// 只接受当前 schema；调用方必须显式丢弃非当前配置。
 function normalizeClShowConfig(config, interval) {
-    const source = (config && typeof config === 'object') ? config : {};
+    const source = config === null || config === undefined
+        ? CL_SHOW_DEFAULT
+        : config;
+    if (
+        !source
+        || typeof source !== 'object'
+        || Array.isArray(source)
+        || source.schema !== CL_SHOW_DEFAULT.schema
+    ) {
+        throw new TypeError('cl_show_config_current_schema_required');
+    }
     const has = (key) => Object.prototype.hasOwnProperty.call(source, key);
-    const sourceSchemaVersion = Number.isInteger(Number(source.schema_version))
-        ? Number(source.schema_version)
-        : 0;
     const output = Object.assign({}, CL_SHOW_DEFAULT);
     for (const key of [
-        'fx', 'bi', 'xd', 'trend_all',
+        'fx', 'bi', 'xd', 'center_observation', 'center_all', 'trend_all',
         'point_all', 'point_1buy', 'point_2buy', 'point_3buy',
         'point_1sell', 'point_2sell', 'point_3sell', 'divergence_all',
     ]) {
         if (has(key)) output[key] = source[key] !== false;
     }
-    // v8 明确拆分“基础笔中枢”和四个固定真实周期线段中枢。旧版本同名开关
-    // 曾表示笔观察、线段观察或递归中枢，语义均不兼容，升级时不得沿用。
-    if (sourceSchemaVersion >= 8 && has('pen_center')) {
-        output.pen_center = source.pen_center !== false;
-    }
-    // v9 新增的总开关只控制四个真实周期中枢。v8 及更早版本没有这个
-    // 语义，升级时默认开启；切换总开关不会改写下面任何周期的偏好。
-    output.center_control_all = sourceSchemaVersion >= 9 && has('center_control_all')
-        ? source.center_control_all !== false
-        : true;
-    for (const { key } of centerControlPeriods()) {
-        output[key] = sourceSchemaVersion >= 8 && has(key)
-            ? source[key] !== false
-            : true;
-    }
-    if (!has('point_all')) {
-        if (has('point_confirmed')) output.point_all = source.point_confirmed !== false;
-        else if (has('mmd')) output.point_all = source.mmd !== false;
-    }
-    if (!has('trend_all')) {
-        output.trend_all = Object.keys(source).some(
-            (key) => /^(trend|xd)_L[0-9]+$/.test(key) && source[key] === true,
-        );
-    }
     for (const { level } of recursiveDisplayLevels(interval)) {
+        const centerKey = `center_L${level}`;
         const trendKey = `trend_L${level}`;
-        const legacyTrendKey = `xd_L${level}`;
-        output[trendKey] = has(trendKey)
-            ? source[trendKey] !== false
-            : (has(legacyTrendKey) ? source[legacyTrendKey] !== false : true);
+        output[centerKey] = has(centerKey) ? source[centerKey] !== false : true;
+        output[trendKey] = has(trendKey) ? source[trendKey] !== false : true;
         for (const kind of ['consolidation', 'trend']) {
             const divergenceKey = `divergence_${kind}_L${level}`;
             output[divergenceKey] = has(divergenceKey)
@@ -582,52 +535,35 @@ function _resolutionKey(resolution) {
 }
 
 function loadClShowConfig(chartId, resolution) {
+    const storageKey = 'cl_show_config_' + chartId + '_' + _resolutionKey(resolution);
     try {
-        const raw = localStorage.getItem('cl_show_config_' + chartId + '_' + _resolutionKey(resolution));
+        const raw = localStorage.getItem(storageKey);
         if (raw) {
             const parsed = JSON.parse(raw);
             return normalizeClShowConfig(parsed, resolution);
         }
     } catch (e) {
-        console.warn('[CHARTS] loadClShowConfig parse failed', e);
+        localStorage.removeItem(storageKey);
+        console.warn('[CHARTS] invalid cl_show_config removed', e);
     }
-    // 该周期从未配置 → null 哨兵,由 resolveClConfigForResolution 决定继承/迁移。
+    // 该周期从未配置 → null 哨兵，由 resolveClConfigForResolution 决定继承。
     return null;
 }
 
 function saveClShowConfig(chartId, resolution, cfg) {
+    const normalized = normalizeClShowConfig(cfg, resolution);
     try {
         localStorage.setItem(
             'cl_show_config_' + chartId + '_' + _resolutionKey(resolution),
-            JSON.stringify(normalizeClShowConfig(cfg, resolution)),
+            JSON.stringify(normalized),
         );
     } catch (e) {
         console.warn('[CHARTS] saveClShowConfig failed', e);
     }
 }
 
-// 迁移回退:老用户此前按 chartId(无周期)存的配置,或更早的全局旧 key,作为"从未配过任何周期"时的初始基准,
-// 保证升级后首个周期不丢现有设置。均 merge CL_SHOW_DEFAULT 补齐新增开关。
-function _clShowConfigBaseline(chartId, resolution) {
-    try {
-        const raw = localStorage.getItem('cl_show_config_' + chartId);
-        if (raw) {
-            const parsed = JSON.parse(raw);
-            return normalizeClShowConfig(parsed, resolution);
-        }
-        const legacy = localStorage.getItem('cl_show_config');
-        if (legacy) {
-            const parsed = JSON.parse(legacy);
-            return normalizeClShowConfig(parsed, resolution);
-        }
-    } catch (e) {
-        console.warn('[CHARTS] _clShowConfigBaseline parse failed', e);
-    }
-    return normalizeClShowConfig({}, resolution);
-}
-
 // 按周期解析应用配置:该周期已配过 → 用存储值(persist=false);未配过 → 继承切换前当前配置的副本,
-// 无当前配置(首次构造 currentCfg=null)则用迁移基准;persist=true 表示需固化到该周期 key。
+// 无当前配置则使用当前生产默认值；persist=true 表示需固化到该周期 key。
 function resolveClConfigForResolution(chartId, resolution, currentCfg) {
     const loaded = loadClShowConfig(chartId, resolution);
     if (loaded !== null) {
@@ -635,7 +571,7 @@ function resolveClConfigForResolution(chartId, resolution, currentCfg) {
     }
     const base = currentCfg
         ? normalizeClShowConfig(currentCfg, resolution)
-        : _clShowConfigBaseline(chartId, resolution);
+        : normalizeClShowConfig(null, resolution);
     return { cfg: base, persist: true };
 }
 
@@ -644,10 +580,6 @@ function loadClIndependentDrawings(chartId) {
         const raw = localStorage.getItem('cl_independent_drawings_' + chartId);
         if (raw !== null) {
             return JSON.parse(raw) === true;
-        }
-        const legacy = localStorage.getItem('cl_independent_drawings');
-        if (legacy !== null) {
-            return JSON.parse(legacy) === true;
         }
     } catch (e) {
         console.warn('[CHARTS] loadClIndependentDrawings parse failed', e);
@@ -666,7 +598,6 @@ function saveClIndependentDrawings(chartId, val) {
 const CHART_CONFIG = {
     COLORS: {
         BI: "#C026D3", XD: "#2563EB",
-        BI_ZSS: "#708090", XD_ZSS: "#00BFFF",
         AREA_POS: "#ef5350", AREA_NEG: "#26a69a",
     },
     LINE_STYLES: { SOLID: 0, DOTTED: 1, DASHED: 2 },
@@ -699,8 +630,6 @@ const SIGNAL_COLOR_THEMES = Object.freeze({
 const CHANLUN_VISUAL_STYLE = Object.freeze({
     fractal: Object.freeze({ linewidth: 2 }),
     center: Object.freeze({
-        pen: Object.freeze({ linewidth: 1, completedTransparency: 97, ongoingTransparency: 99 }),
-        frequency: Object.freeze({ linewidth: 1, completedTransparency: 94, ongoingTransparency: 97 }),
         formal: Object.freeze({ linewidth: 1, completedTransparency: 92, ongoingTransparency: 96 }),
         preview: Object.freeze({ linewidth: 1, completedTransparency: 96, ongoingTransparency: 100 }),
         observation: Object.freeze({ linewidth: 1, completedTransparency: 100, ongoingTransparency: 100 }),
@@ -748,7 +677,7 @@ function _centerIsOngoing(item) {
 }
 
 function getCenterVisualStyle(role, item = {}) {
-    const spec = CHANLUN_VISUAL_STYLE.center[role] || CHANLUN_VISUAL_STYLE.center.frequency;
+    const spec = CHANLUN_VISUAL_STYLE.center[role] || CHANLUN_VISUAL_STYLE.center.formal;
     const ongoing = _centerIsOngoing(item);
     let linestyle = ongoing ? CHART_CONFIG.LINE_STYLES.DASHED : CHART_CONFIG.LINE_STYLES.SOLID;
     if (role === "projection") linestyle = CHART_CONFIG.LINE_STYLES.DOTTED;
@@ -827,27 +756,8 @@ function getBaseStructureStyle(interval, elementType) {
     };
 }
 
-// 买卖点用「双 shape」:小 icon 箭头(定位准,尺寸可调)+text 类型标签(标明几买几卖)。
-// 单个形状无法三者兼得:arrow_up/down 定位准+带文字但尺寸写死偏大;icon 小+定位准但装不了文字;
-// text 能带文字但有横向宽度且无锚点控制、会偏离目标 K 线。
-// 箭头码点取自随库 lt-icons-atlas 的 arrows/ 集(Font Awesome:f062=上箭头、f063=下箭头)。
-const MMD_ICON = { buy: 0xf062, sell: 0xf063 };
-// 尺寸/字号一处可调:段层为主级别略大并加粗、笔层数量多取小值;合并版居中。
-const MMD_ICON_SIZE = { xd: 14, bi: 10, default: 12 };
-const MMD_LABEL_FONTSIZE = { xd: 12, bi: 10, default: 11 };
-// 买卖点图标/文字只在绘制层偏移,不改后端真实买卖点价格。买点下移、卖点上移,避免盖住 K 线。
-// 偏移基准用「近 N 根 K 线平均振幅(ATR 式)」而非绝对价格百分比:
-// 价格百分比(price × 0.25%)在高价 / 低波动标的(典型如港美股)上,相对可视波动过大,
-// 买卖点会明显浮空、脱离 K 线高低点。改用平均振幅后跨标的 / 周期 / 缩放自适应。
-// ATR 不可用时(无 K 线)回退到旧的价格百分比,保持兼容。
-const MMD_ICON_ATR_RATIO = 0.8;          // 箭头离端点 ≈ 0.8 根典型 K 线高度
-const MMD_LABEL_ATR_RATIO = 1.5;         // 文字标签在箭头外侧 ≈ 1.5 根
-const MMD_ICON_PRICE_OFFSET = 0.0025;    // 回退:无 K 线时按价格百分比
-const MMD_LABEL_PRICE_OFFSET = 0.0015;
-
 const DEFAULT_COLORS = {
     bis: CHART_CONFIG.COLORS.BI, xds: CHART_CONFIG.COLORS.XD,
-    bi_zss: CHART_CONFIG.COLORS.BI_ZSS, xd_zss: CHART_CONFIG.COLORS.XD_ZSS,
 };
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -896,10 +806,8 @@ const FREQ_CHAIN = {
     "1M": ["月线", "年线", "10年", "30年"],
 };
 
-// 元素 → 相对「笔」的链偏移(见 spec §4):
-//   笔 bis = +0、线段 xds = +1、笔中枢 bi_zss = +1(中枢色 = 构件级别 +1,笔中枢由笔构成)、
-//   线段中枢 xd_zss / 递归 L0 = +2。
-const ELEMENT_CHAIN_OFFSET = { bis: 0, xds: 1, bi_zss: 1, xd_zss: 2 };
+// 基础元素相对「笔」的链偏移。
+const ELEMENT_CHAIN_OFFSET = { bis: 0, xds: 1 };
 
 // 基础元素(笔/线段/笔中枢/线段中枢)按当前周期取链色。替代旧 DYNAMIC_CHART_COLORS。
 function getDynamicColor(interval, elementType) {
@@ -914,15 +822,7 @@ function getRecursiveLevelColor(interval, level) {
     return chainColor(chartBiIndex(interval) + 2 + (level || 0));
 }
 
-// 真实周期中枢使用绝对周期色，不随主图周期或递归层级移动。
-function getPeriodCenterColor(period) {
-    const item = centerControlPeriods().find((candidate) => candidate.period === period);
-    return chainColor(item ? item.colorIndex : 3);
-}
-
-// 递归层级走势类型「线段」线条与本级中枢同绝对级别 → 同色,直接复用 getRecursiveLevelColor:
-//   recursive_levels[k].zslx_lines = 分支级 k 走势类型 = 构成第 k+1 周期中枢的构件,
-//   按链 = C[p+2+k]。颜色只表达绝对结构级别；形状（线 vs 框）区分走势类型与中枢。
+// 递归层级走势类型与本级中枢同色；形状区分走势与中枢。
 
 function debounce(func, wait) {
     let timeout;
@@ -1019,114 +919,6 @@ const ChartUtils = {
             },
         });
     },
-    // 买卖点偏移基准:近 N 根 K 线平均振幅(high-low)。波动越大基准越大,
-    // 跨标的 / 周期 / 缩放自适应。无有效 K 线时返回 0,调用方回退到价格百分比。
-    computeMmdOffsetBase(bars) {
-        if (!Array.isArray(bars) || bars.length === 0) return 0;
-        const slice = bars.slice(-60);
-        let sum = 0, cnt = 0;
-        for (const b of slice) {
-            if (b && typeof b.high === "number" && typeof b.low === "number" && b.high >= b.low) {
-                sum += b.high - b.low;
-                cnt++;
-            }
-        }
-        return cnt > 0 ? sum / cnt : 0;
-    },
-    // 买卖点是否为"买":统一口径(小写含 b),供偏移/颜色/箭头三处共用,杜绝大小写漂移。
-    // bs_type 变体(1buy/2buy/3buy/类1buy/大写 1B…)均含 b;sell/S 不含 b。
-    _mmdIsBuy(mmd) {
-        return ((mmd && mmd.text) || "").toLowerCase().includes("b");
-    },
-    // 偏移点:优先用 ATR 基准(offsetBase × atrRatio);基准不可用时回退价格百分比。
-    mmdOffsetPoint(mmd, atrRatio, priceRatioFallback, offsetBase = 0, fromPoint = null) {
-        const src = fromPoint || mmd.points || {};
-        const base = mmd.points || {};
-        if (typeof src.price !== "number" || typeof base.price !== "number") return src;
-        const off = offsetBase > 0
-            ? offsetBase * atrRatio
-            : Math.abs(base.price) * priceRatioFallback;
-        // 买点下移(price-off)、卖点上移(price+off)。判定与颜色/箭头同口径(_mmdIsBuy):
-        // 修历史 bug——此处曾用大写 includes("B"),而默认 branch_core 文本是小写 buy → 买点被误画到上方。
-        return { ...src, price: this._mmdIsBuy(mmd) ? src.price - off : src.price + off };
-    },
-    // 买卖点箭头锚点:买点放到 K 线下方、卖点放到 K 线上方,避免和 high/low 重叠。
-    mmdIconPoint(mmd, offsetBase = 0) {
-        return this.mmdOffsetPoint(mmd, MMD_ICON_ATR_RATIO, MMD_ICON_PRICE_OFFSET, offsetBase);
-    },
-    // 买卖点标签锚点:文字在箭头外侧再让出一档,避免文字、箭头、K 线三者互相覆盖。
-    mmdLabelPoint(mmd, offsetBase = 0) {
-        const p = mmd.points || {};
-        if (typeof p.price !== "number") return p;
-        return this.mmdOffsetPoint(mmd, MMD_LABEL_ATR_RATIO, MMD_LABEL_PRICE_OFFSET, offsetBase, this.mmdIconPoint(mmd, offsetBase));
-    },
-    // 买卖点箭头:icon 单字形,尺寸可控、横向居中锚定到 K 线(定位与分型圆点一致,准确);
-    // 使用绘制层偏移点,避免箭头贴住或覆盖 K 线;原始 mmd.points 仍保留真实买卖点位置。
-    createMmdShape(chart, mmd, options = {}) {
-        const { offsetBase = 0, overrides = {}, ...shapeOptions } = options;
-        const isBuy = this._mmdIsBuy(mmd);   // 统一口径(小写含 b):buy/1B/3buy… 含 b;sell/S 不含
-        const color = getSignalColor(isBuy ? "buy" : "sell");
-        const isSplit = !!mmd.level;
-        const isXd = isSplit && mmd.level === "xd";
-        const isHi = isSplit && mmd.level !== "xd" && mmd.level !== "bi";  // 5m/30m/… 高级别买卖点
-        const size = isHi ? MMD_ICON_SIZE.xd : (isSplit ? (isXd ? MMD_ICON_SIZE.xd : MMD_ICON_SIZE.bi) : MMD_ICON_SIZE.default);
-        const icon = isBuy ? MMD_ICON.buy : MMD_ICON.sell;
-        return this.createShape(chart, this.mmdIconPoint(mmd, offsetBase), {
-            shape: "icon",
-            icon,
-            ...shapeOptions,
-            overrides: { color, size, "linetoolicon.color": color, "linetoolicon.size": size, ...overrides },
-        });
-    },
-    // 买卖点文字标签:第二个 shape,标明级别+类型(段1B / 笔3B / 笔L3B…)以区分一二三类。
-    // 标签单独纵向偏移;text 有横向宽度会向右展开,定位以箭头为准,标签仅作说明。
-    createMmdLabelShape(chart, mmd, options = {}) {
-        const { offsetBase = 0, overrides = {}, ...shapeOptions } = options;
-        const isBuy = this._mmdIsBuy(mmd);   // 统一口径, 与偏移/箭头一致
-        const color = getSignalColor(isBuy ? "buy" : "sell");
-        const isSplit = !!mmd.level;
-        const isXd = isSplit && mmd.level === "xd";
-        const isHi = isSplit && mmd.level !== "xd" && mmd.level !== "bi";   // 5m/30m/… 高级别
-        const fontsize = isHi ? MMD_LABEL_FONTSIZE.xd : (isSplit ? (isXd ? MMD_LABEL_FONTSIZE.xd : MMD_LABEL_FONTSIZE.bi) : MMD_LABEL_FONTSIZE.default);
-        // 级别前缀:段/笔(线段/笔)、否则用 freq 标签(5m·/30m·/日线·)
-        const levelPrefix = isSplit ? (isXd ? "段" : mmd.level === "bi" ? "笔" : (mmd.level + "·")) : "";
-        const text = levelPrefix + mmd.text.replace(/[笔段]:/g, "");
-        return this.createShape(chart, this.mmdLabelPoint(mmd, offsetBase), {
-            shape: "text",
-            text,
-            ...shapeOptions,
-            overrides: {
-                color,
-                fontsize,
-                bold: isXd,
-                "linetooltext.color": color,
-                "linetooltext.fontsize": fontsize,
-                "linetooltext.bold": isXd,
-                ...overrides,
-            },
-        });
-    },
-    createBcShape(chart, bc, options = {}) {
-        const { overrides = {}, ...shapeOptions } = options;
-        const lvl = bc.level;   // 5m/30m/… 高级别背驰加 freq 前缀(段/笔不加)
-        const prefix = (lvl && lvl !== "xd" && lvl !== "bi") ? (lvl + "·") : "";
-        const surface = getSignalColor("neutralSurface");
-        const textColor = getSignalColor("neutralText");
-        return this.createShape(chart, bc.points, {
-            shape: "balloon",
-            text: prefix + bc.text,
-            ...shapeOptions,
-            overrides: {
-                markerColor: textColor,
-                backgroundColor: surface,
-                textColor,
-                transparency: 20,
-                backgroundTransparency: 20,
-                fontsize: 12,
-                ...overrides,
-            },
-        });
-    },
 };
 
 function getInitialChartInterval(chartId) {
@@ -1167,8 +959,7 @@ class ChartManager {
         this._defaultStudiesPromise = null;
         this._defaultStudyIds = new Map();
         // 每个图表面板独立维护缠论显示配置与独立周期画线开关
-        // 初始 resolution:优先本地已记录(切过周期即有),回退 "1";据此载入该周期显示配置,
-        // 未配过则用迁移基准(不丢老用户旧配置)。this._curResolution 供切周期/ toggle 保存复用。
+        // 初始 resolution:优先本地已记录(切过周期即有),回退 "1";据此载入该周期显示配置。
         let _initRes = '1';
         try {
             const _saved = getInitialChartInterval(this.id);
@@ -1182,14 +973,14 @@ class ChartManager {
         this._initialLoadDone = false; // 首次数据就绪前屏蔽 visibleRangeChange 重绘
         // 当前标的/周期的数据就绪代际。bars_result 更新早于 TradingView 接收 K 线，
         // 因此首次算法图形必须等当前代际 dataReady() 为 true 后才能创建。
-        this._dataContextVersion = 0;
-        this._tvDataReadyVersion = -1;
+        this._dataContextGeneration = 0;
+        this._tvDataReadyGeneration = -1;
         this._tvDataReadyIdentity = null;
-        this._pendingChanlunDrawVersion = null;
+        this._pendingChanlunDrawGeneration = null;
         this._pendingChanlunDrawIdentity = null;
-        this._dataReadyProbeVersion = null;
+        this._dataReadyProbeGeneration = null;
         this._dataReadyProbeIdentity = null;
-        this._intervalVersion = 0;
+        this._intervalGeneration = 0;
         this._drawingsCache = new Map();  // 按 symbol+interval 缓存用户画线状态
         this._intervalSwitchSeq = 0;
         this._drawingsRequestSeq = 0;
@@ -1401,20 +1192,14 @@ class ChartManager {
         return {
             schema: USER_DRAWING_STATE_SCHEMA,
             sources,
-            // Groups from legacy records may reference filtered automatic ids.
-            // Persisting an empty group map is valid and prevents schema errors;
-            // user geometry itself remains fully preserved in sources.
             groups: {},
         };
     }
 
     deserializeUserDrawingsState(state) {
         if (!state || state.schema !== USER_DRAWING_STATE_SCHEMA) {
-            // Legacy records are kept server-side for recovery but deliberately
-            // quarantined: existing records contain automatic Chanlun lines,
-            // null sources and even shapes from another symbol.
             this._userDrawingIds = new Set();
-            return this.emptyUserDrawingsState();
+            throw new Error('drawing_state_schema_invalid');
         }
         const sources = new Map();
         for (const [rawId, sourceState] of this._drawingStateEntries(state.sources)) {
@@ -1583,7 +1368,7 @@ class ChartManager {
             this._drawRetryCount = 0;
             this._latestAppliedBarTime = null;
 
-            // Always read through the server v2 gate.  The local cache may
+            // Always read through the server strict gate.  The local cache may
             // have been populated before an app upgrade or by a previous
             // symbol/resolution context.  applyUserDrawingsState first removes
             // every line tool, then restores only explicit manual drawings.
@@ -1597,11 +1382,7 @@ class ChartManager {
                 const historyProvider = this.udf_datafeed?._historyProvider;
                 if (historyProvider) historyProvider._forceRefreshOnce = true;
             } catch (e) { /* optional datafeed optimization */ }
-            try {
-                if (typeof this.widget.resetCache === 'function') {
-                    this.widget.resetCache();
-                }
-            } catch (e) { /* older TradingView build */ }
+            this.widget.resetCache();
 
             this.chart.resetData();
             // K lines and automatic structures have different lifecycles.
@@ -1618,15 +1399,15 @@ class ChartManager {
     }
 
     _resetDataReadyContext() {
-        this._dataContextVersion = (this._dataContextVersion || 0) + 1;
-        this._tvDataReadyVersion = -1;
+        this._dataContextGeneration = (this._dataContextGeneration || 0) + 1;
+        this._tvDataReadyGeneration = -1;
         this._tvDataReadyIdentity = null;
-        this._pendingChanlunDrawVersion = null;
+        this._pendingChanlunDrawGeneration = null;
         this._pendingChanlunDrawIdentity = null;
-        this._dataReadyProbeVersion = null;
+        this._dataReadyProbeGeneration = null;
         this._dataReadyProbeIdentity = null;
         this._initialLoadDone = false;
-        return this._dataContextVersion;
+        return this._dataContextGeneration;
     }
 
     _chartDataReadyNow() {
@@ -1648,18 +1429,18 @@ class ChartManager {
     }
 
     _requestChanlunDrawWhenReady() {
-        const contextVersion = this._dataContextVersion || 0;
+        const contextGeneration = this._dataContextGeneration || 0;
         const contextIdentity = this._currentDataIdentityKey();
         if (!contextIdentity) return false;
-        this._pendingChanlunDrawVersion = contextVersion;
+        this._pendingChanlunDrawGeneration = contextGeneration;
         this._pendingChanlunDrawIdentity = contextIdentity;
 
         if (
-            this._tvDataReadyVersion === contextVersion &&
+            this._tvDataReadyGeneration === contextGeneration &&
             this._tvDataReadyIdentity === contextIdentity &&
             this._chartDataReadyNow()
         ) {
-            this._pendingChanlunDrawVersion = null;
+            this._pendingChanlunDrawGeneration = null;
             this._pendingChanlunDrawIdentity = null;
             this._initialLoadDone = true;
             this.debouncedDrawChanlun();
@@ -1668,24 +1449,24 @@ class ChartManager {
 
         if (!this.chart || typeof this.chart.dataReady !== 'function') return false;
         if (
-            this._dataReadyProbeVersion === contextVersion &&
+            this._dataReadyProbeGeneration === contextGeneration &&
             this._dataReadyProbeIdentity === contextIdentity
         ) return false;
-        this._dataReadyProbeVersion = contextVersion;
+        this._dataReadyProbeGeneration = contextGeneration;
         this._dataReadyProbeIdentity = contextIdentity;
         try {
             const readyNow = this.chart.dataReady(
-                () => this.handleDataReady(contextVersion, contextIdentity)
+                () => this.handleDataReady(contextGeneration, contextIdentity)
             );
             if (readyNow === true) {
-                return this.handleDataReady(contextVersion, contextIdentity);
+                return this.handleDataReady(contextGeneration, contextIdentity);
             }
         } catch (e) {
             if (
-                this._dataReadyProbeVersion === contextVersion &&
+                this._dataReadyProbeGeneration === contextGeneration &&
                 this._dataReadyProbeIdentity === contextIdentity
             ) {
-                this._dataReadyProbeVersion = null;
+                this._dataReadyProbeGeneration = null;
                 this._dataReadyProbeIdentity = null;
             }
         }
@@ -1711,7 +1492,7 @@ class ChartManager {
             return;
         }
         const wasInitialLoad = (
-            this._tvDataReadyVersion !== (this._dataContextVersion || 0) ||
+            this._tvDataReadyGeneration !== (this._dataContextGeneration || 0) ||
             this._tvDataReadyIdentity !== this._currentDataIdentityKey()
         );
         clog(`[CHANLUN-TIMING] @${performance.now().toFixed(0)}ms handleBarsReadyEvent ✓ symbol=${detail.symbol} res=${detail.resolution} bars=${detail.bars || '?'} fxs=${detail.fxs || '?'} bis=${detail.bis || '?'} xds=${detail.xds || '?'} wasInitialLoad=${wasInitialLoad}`);
@@ -1747,16 +1528,6 @@ class ChartManager {
         registry.chartManagers.set(this.instanceId, this);
         registry.datafeeds.set(this.instanceId, this.udf_datafeed);
         registry.activeManagerId = this.instanceId;
-
-        // GlobalTVDatafeeds 供 MACD_HTF 等自定义指标跨图表查找 bars 数据
-        if (!window.GlobalTVDatafeeds) {
-            window.GlobalTVDatafeeds = [];
-        }
-        if (window.GlobalTVDatafeeds.length > 10) {
-            window.GlobalTVDatafeeds.shift();
-        }
-        window.GlobalTVDatafeeds.push(this.udf_datafeed);
-        window.tvDatafeed = this.udf_datafeed; // 兼容旧版单图表引用
 
         // 诊断工具挂在 window，生产环境默认静默；设 window.__chanlunDebug=true 可开启详细日志。
         // 在 console 跑 __chanlunDiag() 一键 dump 当前图表状态，__chanlunDumpLines() 打印 shape 端点。
@@ -2047,7 +1818,7 @@ class ChartManager {
         };
         this.save_load_adapter = save_load_adapter;
 
-        this.widget = window.tvWidget = new TradingView.widget({
+        this.widget = new TradingView.widget({
             // loading_screen 让 widget 内部加载阶段显示 spinner 而非空白
             loading_screen: (function () {
                 var isDark = false;
@@ -2090,7 +1861,7 @@ class ChartManager {
         return Promise.resolve([
             TvIdxMACDBackend.idx(PineJS),
             TvIdxAMA.idx(PineJS), TvIdxATR.idx(PineJS), TvIdxCDBB.idx(PineJS),
-            TvIdxCMCM.idx(PineJS), TvIdxDemo.idx(PineJS), TvIdxFCX.idx(PineJS),
+            TvIdxCMCM.idx(PineJS), TvIdxFCX.idx(PineJS),
             TvIdxHDLY.idx(PineJS), TvIdxHeima.idx(PineJS), TvIdxHLBLW.idx(PineJS),
             TvIdxHLFTX.idx(PineJS), TvIdxKDJ.idx(PineJS), TvIdxLTQS.idx(PineJS),
             TvIdxMA.idx(PineJS), TvIdxMACDBL.idx(PineJS), TvIdxVegasMA.idx(PineJS),
@@ -2162,32 +1933,6 @@ class ChartManager {
     setupEventListeners() {
         const global_widget = this.widget;
         const self = this;
-        this.measureShapeId = null;
-
-        // TV shape 事件携带的对象结构因版本而异，递归深度扫描兼容多种 points 字段位置
-        const scanForPoints = (obj, depth = 0) => {
-            if (!obj || depth > 3) return null;
-            try {
-                if (Array.isArray(obj.points) && obj.points.length >= 2 && obj.points[0].time) return obj.points;
-                if (Array.isArray(obj._points) && obj._points.length >= 2 && obj._points[0].time) return obj._points;
-
-                const keys = Object.keys(obj);
-                for (let k of keys) {
-                    const val = obj[k];
-                    if (val && typeof val === 'object') {
-                        if (Array.isArray(val) && val.length >= 2 && val[0] && val[0].hasOwnProperty('time')) {
-                            console.log(`[MACD] 通过深度扫描在属性 [${k}] 中找到坐标!`);
-                            return val;
-                        }
-                        if (!Array.isArray(val) && k !== 'parent' && k !== 'chart') {
-                            const found = scanForPoints(val, depth + 1);
-                            if (found) return found;
-                        }
-                    }
-                }
-            } catch (e) { }
-            return null;
-        };
 
         this.widget.headerReady().then(function () {
             var btnDisplay = global_widget.createButton();
@@ -2204,7 +1949,6 @@ class ChartManager {
             btnDisplay.addEventListener("click", function (event) {
                 // 每个图表面板独立一套菜单 DOM，防止多图布局下互相干扰
                 const menuId = 'cl_display_menu_' + self.id;
-                const backdropId = 'cl_menu_backdrop_' + self.id;
                 const cleanupOutsideDismiss = () => {
                     const cleanup = self._clDisplayMenuOutsideCleanup;
                     self._clDisplayMenuOutsideCleanup = null;
@@ -2213,13 +1957,10 @@ class ChartManager {
                 if ($('#' + menuId).length > 0) {
                     cleanupOutsideDismiss();
                     $('#' + menuId).remove();
-                    $('#' + backdropId).remove();   // 兼容旧版残留 backdrop
                     btnDisplay.setAttribute('aria-expanded', 'false');
                     return;
                 }
                 cleanupOutsideDismiss();
-                // 兼容旧版可能遗留的 backdrop(刷新前的旧 charts.js 创建过)
-                $('#' + backdropId).remove();
 
                 const cfg = self.cl_show_config;
                 const cbId = (k) => 'cl_cb_' + k + '_' + self.id;
@@ -2228,7 +1969,9 @@ class ChartManager {
                 let _curInterval = "?";
                 try { _curInterval = self.widget.symbolInterval().interval; } catch (e) {}
                 const _displayLevels = recursiveDisplayLevels(_curInterval);
-                const _centerPeriods = centerControlPeriods();
+                const _centerLevels = _displayLevels.map((item) => ({
+                    label: `${item.label} 中枢`, key: `center_L${item.level}`, level: item.level,
+                }));
                 const _trendLevels = _displayLevels.map((item) => ({
                     label: `${item.label} 走势类型`, key: `trend_L${item.level}`, level: item.level,
                 }));
@@ -2294,7 +2037,7 @@ class ChartManager {
                         </div>
                         <div id="${menuId}_lvl_detail" style="display:none;font-size:13px;color:#687386;line-height:20px;
                             padding:5px 0 5px 14px;border-left:2px solid #dce3eb;margin:3px 0 5px 4px;">
-                            笔中枢由当前周期的笔计算；中枢控制中的每一级都使用对应周期自己的线段独立计算，与递归结构无关。
+                            中枢、走势类型、背驰与三类买卖点均来自同一份严格结构快照。
                         </div>
 
                         ${_grpTitle('基础结构')}
@@ -2303,16 +2046,16 @@ class ChartManager {
                                 ${_dualSwatch(getSignalColor('fractalTop'), getSignalColor('fractalBottom'), '顶分型 / 底分型')}分型</label>
                             <label style="cursor:pointer;"><input type="checkbox" id="${cbId('bi')}" ${_checked('bi') ? 'checked' : ''}> ${_swatch(getDynamicColor(_curInterval, 'bis'))}笔</label>
                             <label style="cursor:pointer;"><input type="checkbox" id="${cbId('xd')}" ${_checked('xd') ? 'checked' : ''}> ${_swatch(getDynamicColor(_curInterval, 'xds'))}线段</label>
-                            <label style="cursor:pointer;"><input type="checkbox" id="${cbId('pen_center')}" ${_checked('pen_center') ? 'checked' : ''}> ${_swatch(getDynamicColor(_curInterval, 'bi_zss'))}笔中枢</label>
+                            <label style="cursor:pointer;"><input type="checkbox" id="${cbId('center_observation')}" ${_checked('center_observation') ? 'checked' : ''}> ${_swatch(getRecursiveLevelColor(_curInterval, 0))}笔中枢观察</label>
                         </div>
 
-                        ${_grpTitle('中枢控制', '各周期线段独立计算')}
-                        ${_cbRow('center_control_all', '中枢总开关')}
+                        ${_grpTitle('中枢控制', '严格递归结构')}
+                        ${_cbRow('center_all', '中枢总开关')}
                         <div style="padding-left:14px;display:flex;gap:12px;flex-wrap:wrap;font-size:14px;">
-                            ${_centerPeriods.map((item) => `
+                            ${_centerLevels.map((item) => `
                                 <label style="cursor:pointer;"><input type="checkbox" id="${cbId(item.key)}"
                                     ${_checked(item.key) ? 'checked' : ''}>
-                                    ${_swatch(getPeriodCenterColor(item.period))}${item.label}</label>`).join('')}
+                                    ${_swatch(getRecursiveLevelColor(_curInterval, item.level))}${item.label}</label>`).join('')}
                         </div>
 
                         ${_grpTitle('走势类型', '由当前 K 线递归产生')}
@@ -2397,9 +2140,9 @@ class ChartManager {
                 });
 
                 const keys = [
-                    'fx', 'bi', 'xd', 'pen_center', 'center_control_all', 'trend_all',
+                    'fx', 'bi', 'xd', 'center_observation', 'center_all', 'trend_all',
                     'point_all', 'divergence_all',
-                    ..._centerPeriods.map((item) => item.key),
+                    ..._centerLevels.map((item) => item.key),
                     ..._trendLevels.map((item) => item.key),
                     ..._pointTypes.map((item) => item.key),
                     ..._divergenceLevels.map((item) => item.key),
@@ -2489,17 +2232,6 @@ class ChartManager {
                 });
             });
 
-            var buttonHideMark = global_widget.createButton();
-            buttonHideMark.textContent = "隐藏标记";
-            buttonHideMark.addEventListener("click", function () { global_widget.activeChart().clearMarks(); });
-
-            var buttonDeleteMark = global_widget.createButton();
-            buttonDeleteMark.textContent = "删除标记";
-            buttonDeleteMark.addEventListener("click", function () {
-                let symbol = global_widget.symbolInterval();
-                AppRequest.ajax({ type: "POST", url: "/tv/del_marks", dataType: "json", data: { symbol: symbol.symbol }, success: function (res) { if (res.status == "ok") { global_widget.activeChart().clearMarks(); layer.msg("删除标记成功"); } } });
-            });
-
         });
         this.widget.onChartReady(() => {
             // widget 就绪后移除首屏骨架占位
@@ -2515,7 +2247,6 @@ class ChartManager {
             const registry = getTVRegistry();
             registry.widgets.set(this.instanceId, this.widget);
             registry.activeManagerId = this.instanceId;
-            window.tvWidget = this.widget;
             this.widget._chanlunManagerId = this.instanceId;
             this.udf_datafeed._chanlunManagerId = this.instanceId;
 
@@ -2524,18 +2255,18 @@ class ChartManager {
             this.chart.onDataLoaded().subscribe(
                 null,
                 () => this.handleDataReady(
-                    this._dataContextVersion || 0,
+                    this._dataContextGeneration || 0,
                     this._currentDataIdentityKey()
                 ),
                 true
             );
-            const initialDataContextVersion = this._dataContextVersion || 0;
+            const initialDataContextGeneration = this._dataContextGeneration || 0;
             const initialDataContextIdentity = this._currentDataIdentityKey();
             const readyNow = this.chart.dataReady(
-                () => this.handleDataReady(initialDataContextVersion, initialDataContextIdentity)
+                () => this.handleDataReady(initialDataContextGeneration, initialDataContextIdentity)
             );
             if (readyNow === true) {
-                this.handleDataReady(initialDataContextVersion, initialDataContextIdentity);
+                this.handleDataReady(initialDataContextGeneration, initialDataContextIdentity);
             }
             this.widget.subscribe("onTick", () => this.handleTick());
             this.chart.onVisibleRangeChanged().subscribe(null, () => this.handleVisibleRangeChange());
@@ -2838,8 +2569,8 @@ class ChartManager {
         this._drawRetryCount = 0;
         this._latestAppliedBarTime = null;
         const currentSeq = ++this._intervalSwitchSeq;
-        this._intervalVersion++;
-        clog(`[CHANLUN-TIMING] @${performance.now().toFixed(0)}ms handleIntervalChange → ${interval} (seq=${currentSeq}, ver=${this._intervalVersion}) [_initialLoadDone reset to false]`);
+        this._intervalGeneration++;
+        clog(`[CHANLUN-TIMING] @${performance.now().toFixed(0)}ms handleIntervalChange → ${interval} (seq=${currentSeq}, generation=${this._intervalGeneration}) [_initialLoadDone reset to false]`);
         Utils.set_local_data(`${market}_interval_${this.id}`, interval);
         this._applyResolutionConfig(interval);   // 切周期:存旧周期配置、载入本周期配置(未配过继承当前)
         this.clear_draw_chanlun();
@@ -2849,32 +2580,32 @@ class ChartManager {
     }
 
     handleDataReady(
-        contextVersion = this._dataContextVersion || 0,
+        contextGeneration = this._dataContextGeneration || 0,
         expectedIdentity = this._currentDataIdentityKey()
     ) {
-        if (contextVersion !== (this._dataContextVersion || 0)) return false;
+        if (contextGeneration !== (this._dataContextGeneration || 0)) return false;
         const currentIdentity = this._currentDataIdentityKey();
         if (!currentIdentity || expectedIdentity !== currentIdentity) return false;
         if (!this._chartDataReadyNow()) return false;
 
         const wasInitialLoad = (
-            this._tvDataReadyVersion !== contextVersion ||
+            this._tvDataReadyGeneration !== contextGeneration ||
             this._tvDataReadyIdentity !== currentIdentity
         );
         const hasPendingDraw = (
-            this._pendingChanlunDrawVersion === contextVersion &&
+            this._pendingChanlunDrawGeneration === contextGeneration &&
             this._pendingChanlunDrawIdentity === currentIdentity
         );
         const hadReconcileFailures = (this._reconcileRetry?.count || 0) > 0;
         if (hadReconcileFailures) this._resetReconcileRetry();
-        this._tvDataReadyVersion = contextVersion;
+        this._tvDataReadyGeneration = contextGeneration;
         this._tvDataReadyIdentity = currentIdentity;
-        this._dataReadyProbeVersion = null;
+        this._dataReadyProbeGeneration = null;
         this._dataReadyProbeIdentity = null;
-        this._pendingChanlunDrawVersion = null;
+        this._pendingChanlunDrawGeneration = null;
         this._pendingChanlunDrawIdentity = null;
         this._initialLoadDone = true;
-        clog(`[CHANLUN-TIMING] @${performance.now().toFixed(0)}ms handleDataReady ✓ context=${contextVersion} initial=${wasInitialLoad} pending=${hasPendingDraw}`);
+        clog(`[CHANLUN-TIMING] @${performance.now().toFixed(0)}ms handleDataReady ✓ context=${contextGeneration} initial=${wasInitialLoad} pending=${hasPendingDraw}`);
         if (!this._maybeApplyCausalFocus()) this._maybeWidenDefaultView();
 
         if (hasPendingDraw || wasInitialLoad || hadReconcileFailures) {
@@ -3105,9 +2836,7 @@ class ChartManager {
 
     _finishAutoEntityRemoval(entityId) {
         const presence = this._autoEntityPresence(entityId);
-        // 旧版/测试图表没有 getAllShapes 时，只能沿用 removeEntity 的成功返回；
-        // 能检查时必须等到实体确实消失，检查本身失败则继续保留追踪。
-        if (presence === false || presence === null) {
+        if (presence === false) {
             this._reconcileOwnedIds?.delete(entityId);
             this._pendingRemovalIds?.delete(entityId);
             return true;
@@ -3297,7 +3026,7 @@ class ChartManager {
     }
 
     _validateStrictStructureSnapshot(snapshot, chartData, currentInterval) {
-        if (!snapshot || snapshot.schema !== 'chanlun-chart-structure/v12') {
+        if (!snapshot || snapshot.schema !== 'chanlun-chart-structure') {
             throw new Error('strict structure schema mismatch');
         }
         const requiredStrings = [
@@ -3319,10 +3048,6 @@ class ChartManager {
         }
         if (
             !Array.isArray(snapshot.stroke_center_observations)
-            || (
-                snapshot.display_center_observations !== undefined
-                && !Array.isArray(snapshot.display_center_observations)
-            )
             || !Array.isArray(snapshot.levels)
         ) {
             throw new Error('strict structure collections are invalid');
@@ -3427,11 +3152,7 @@ class ChartManager {
                 groups.get(scope).push(item);
             }
         };
-        add(
-            Array.isArray(snapshot.display_center_observations)
-                ? snapshot.display_center_observations
-                : snapshot.stroke_center_observations,
-        );
+        add(snapshot.stroke_center_observations);
         for (const level of snapshot.levels) {
             if (
                 !level || !Number.isInteger(level.structural_level)
@@ -3544,7 +3265,7 @@ class ChartManager {
         if (item.render_kind === 'center_observation') {
             const style = getCenterVisualStyle('observation', item);
             return ChartUtils.createZhongshuShape(this.chart, { ...item, linestyle: style.linestyle }, {
-                color: getDynamicColor(currentInterval, 'xd_zss'),
+                color: getRecursiveLevelColor(currentInterval, 0),
                 linewidth: style.linewidth,
                 overrides: { transparency: style.transparency, linestyle: style.linestyle },
             });
@@ -4024,69 +3745,6 @@ class ChartManager {
         const coordinate = Date.UTC(year, month, day) / 1000;
         return Number.isInteger(coordinate) ? coordinate : null;
     }
-
-    _centerRenderList(sourceList, bars, visibleRange, currentInterval) {
-        if (!Array.isArray(sourceList) || sourceList.length === 0) return [];
-        if (!Array.isArray(bars) || bars.length === 0) return [];
-
-        const barTimes = Array.from(new Set(
-            bars
-                .map((bar) => Number(bar?.time) / 1000)
-                .filter((time) => Number.isInteger(time)),
-        )).sort((a, b) => a - b);
-        if (barTimes.length === 0) return [];
-
-        const rawFrom = Number(visibleRange?.from);
-        const rawTo = Number(visibleRange?.to);
-        const visibleFrom = Number.isFinite(rawFrom) ? Math.floor(rawFrom) : barTimes[0];
-        const visibleTo = Number.isFinite(rawTo)
-            ? Math.ceil(rawTo)
-            : barTimes[barTimes.length - 1];
-        const drawableFrom = Math.max(barTimes[0], visibleFrom);
-        const drawableTo = Math.min(barTimes[barTimes.length - 1], visibleTo);
-        if (drawableFrom > drawableTo) return [];
-
-        const lowerBound = (target) => {
-            let low = 0;
-            let high = barTimes.length;
-            while (low < high) {
-                const middle = low + Math.floor((high - low) / 2);
-                if (barTimes[middle] < target) low = middle + 1;
-                else high = middle;
-            }
-            return low;
-        };
-
-        const result = [];
-        sourceList.forEach((item) => {
-            if (!item || !Array.isArray(item.points) || item.points.length < 2) return;
-            const points = item.points.map((point) => ({
-                ...point,
-                time: this._centerChartTimeCoordinate(point?.time, currentInterval),
-            }));
-            if (points.some((point) => !Number.isInteger(point.time) || !Number.isFinite(Number(point.price)))) {
-                return;
-            }
-            const sourceFrom = points[0].time;
-            const sourceTo = points[points.length - 1].time;
-            if (sourceFrom > sourceTo || sourceTo < visibleFrom || sourceFrom > visibleTo) return;
-
-            const desiredFrom = Math.max(sourceFrom, drawableFrom);
-            const desiredTo = Math.min(sourceTo, drawableTo);
-            const fromIndex = lowerBound(desiredFrom);
-            const afterToIndex = lowerBound(desiredTo + 1);
-            if (fromIndex >= barTimes.length || afterToIndex <= fromIndex) return;
-            const renderFrom = barTimes[fromIndex];
-            const renderTo = barTimes[afterToIndex - 1];
-            if (renderFrom > desiredTo || renderTo < desiredFrom || renderFrom > renderTo) return;
-
-            points[0].time = renderFrom;
-            points[points.length - 1].time = renderTo;
-            result.push({ ...item, points });
-        });
-        return result;
-    }
-
     _fractalRenderList(sourceList, bars, visibleRange, currentInterval) {
         if (!Array.isArray(sourceList) || sourceList.length === 0) return [];
         if (!Array.isArray(bars) || bars.length === 0) return [];
@@ -4149,33 +3807,6 @@ class ChartManager {
             return false;
         }
     }
-
-    _centerCreatedGeometryMatches(item, realId) {
-        if (!this.chart || typeof this.chart.getShapeById !== 'function') return true;
-        try {
-            const shape = this.chart.getShapeById(realId);
-            if (!shape || typeof shape.getPoints !== 'function') return false;
-            const actualPoints = shape.getPoints();
-            const expectedPoints = item?.points;
-            if (!Array.isArray(actualPoints) || !Array.isArray(expectedPoints)) return false;
-            if (actualPoints.length !== expectedPoints.length) return false;
-            return expectedPoints.every((expected, index) => {
-                const actual = actualPoints[index];
-                const expectedPrice = Number(expected?.price);
-                const actualPrice = Number(actual?.price);
-                if (
-                    Number(actual?.time) !== Number(expected?.time)
-                    || !Number.isFinite(expectedPrice)
-                    || !Number.isFinite(actualPrice)
-                ) return false;
-                const tolerance = Math.max(1e-10, Math.abs(expectedPrice) * 1e-10);
-                return Math.abs(actualPrice - expectedPrice) <= tolerance;
-            });
-        } catch (e) {
-            return false;
-        }
-    }
-
     getUniqueRenderList(sourceList) {
         if (!sourceList || !Array.isArray(sourceList)) return [];
         const finished = [];
@@ -4243,7 +3874,7 @@ class ChartManager {
             }
             // 默认只在头部进入可视窗(必已加载)时创建，避免 createMultipointShape 把画外/未加载
             // 角点 snap 到边缘造成错位。
-            // 注:单点形态(bcs/mmds)head=tail,等价;tailTime 仍用于下方 keep 判定。
+            // 单点分型的 head 与 tail 相同；tailTime 仍用于下方 keep 判定。
             const shouldRender = includeOverlaps ? tailTime >= from : headTime >= from;
             if (shouldRender) {
                 const key = this.makeKey(item);
@@ -4265,9 +3896,7 @@ class ChartManager {
         );
         const geometryVerifier = typeof verifyGeometry === 'function'
             ? verifyGeometry
-            : verifyGeometry
-                ? (item, realId) => this._centerCreatedGeometryMatches(item, realId)
-                : null;
+            : null;
         // TradingView 可能在后续加载历史或改变可视区时移动已经创建好的 line tool。
         // 数据 key 没变并不代表画布几何仍正确；启用校验的中枢/分型需要在 W1
         // 守卫之前读取实体端点，漂移或实体丢失时强制走 remove + recreate 自愈路径。
@@ -4547,12 +4176,6 @@ class ChartManager {
             from,
             to: Number.POSITIVE_INFINITY,
         };
-        const centerRenderItems = (items) => this._centerRenderList(
-            items || [],
-            barsResult.bars || [],
-            visibleRange,
-            currentInterval,
-        );
         const fractalRenderItems = this._fractalRenderList(
             barsResult.fxs || [],
             barsResult.bars || [],
@@ -4574,65 +4197,7 @@ class ChartManager {
         const xdLineStyle = getBaseStructureStyle(currentInterval, 'xds');
         this.reconcile('bis', cfg.bi ? barsResult.bis : [], from, symbolKey, (item) => safeCreate(ChartUtils.createLineShape(this.chart, item, biLineStyle), 'bi'));
         this.reconcile('xds', cfg.xd ? barsResult.xds : [], from, symbolKey, (item) => safeCreate(ChartUtils.createLineShape(this.chart, item, xdLineStyle), 'xd'));
-        this.reconcile(
-            'bi_zss',
-            cfg.pen_center ? centerRenderItems(barsResult.bi_zss) : [],
-            from,
-            symbolKey,
-            (item) => {
-                const style = getCenterVisualStyle('pen', item);
-                return safeCreate(ChartUtils.createZhongshuShape(this.chart, item, {
-                    color: getDynamicColor(currentInterval, 'bi_zss'),
-                    linewidth: style.linewidth,
-                    overrides: {
-                        transparency: style.transparency,
-                        linestyle: style.linestyle,
-                    },
-                }), 'bi_zs');
-            },
-            false,
-            true,
-            true,
-        );
-        const frequencyCenters = Array.isArray(barsResult.higher_zs) ? barsResult.higher_zs : [];
-        const centersByPeriod = new Map();
-        frequencyCenters.forEach((group) => {
-            if (!group || typeof group !== 'object') return;
-            const period = String(group.period || '').toLowerCase();
-            if (!period) return;
-            centersByPeriod.set(period, Array.isArray(group.zss) ? group.zss : []);
-        });
-        const currentPeriod = centerPeriodFromInterval(currentInterval);
-        centerControlPeriods().forEach(({ period, key }) => {
-            // 当前周期必须与页面所画线段使用同一次 CL 计算结果；higher_zs 只承担
-            // 其他真实周期的独立数据，不能用一份可能较旧的重复数据覆盖 xd_zss。
-            const sourceItems = period === currentPeriod
-                ? (barsResult.xd_zss || [])
-                : (centersByPeriod.get(period) || []);
-            const centerItems = centerRenderItems(sourceItems);
-            this.reconcile(
-                `frequency_center_${period}`,
-                cfg.center_control_all !== false && cfg[key] !== false ? centerItems : [],
-                from,
-                symbolKey,
-                (item) => {
-                    const style = getCenterVisualStyle('frequency', item);
-                    return safeCreate(ChartUtils.createZhongshuShape(this.chart, item, {
-                        color: getPeriodCenterColor(period),
-                        linewidth: style.linewidth,
-                        overrides: {
-                            transparency: style.transparency,
-                            linestyle: style.linestyle,
-                        },
-                    }), `frequency_center_${period}`);
-                },
-                false,
-                true,
-                true,
-            );
-        });
-        // 笔中枢与各周期中枢走上面的同源基础/多周期数据；严格原子快照只继续提供
-        // 走势类型、买卖点和背驰等审计结构，不参与“中枢控制”的几何来源。
+        // 中枢、走势、买卖点与背驰由同一个严格原子快照统一绘制。
         this._drawStrictStructure(chartData, currentInterval);
         this.updateDrawPalette();
         if (this._sweepOrphanTimer) clearTimeout(this._sweepOrphanTimer);
@@ -4752,7 +4317,7 @@ class ChartManager {
 
     async draw_chanlun() {
         if (this._disposed) return;
-        const currentVersion = this._intervalVersion;
+        const currentGeneration = this._intervalGeneration;
         const capturedSeq = this._intervalSwitchSeq;
 
         if (!this.chart) {
@@ -4764,10 +4329,10 @@ class ChartManager {
             }
         }
 
-        const dataContextVersion = this._dataContextVersion || 0;
+        const dataContextGeneration = this._dataContextGeneration || 0;
         const dataContextIdentity = this._currentDataIdentityKey();
         if (
-            this._tvDataReadyVersion !== dataContextVersion ||
+            this._tvDataReadyGeneration !== dataContextGeneration ||
             this._tvDataReadyIdentity !== dataContextIdentity ||
             !this._chartDataReadyNow()
         ) {
@@ -4777,7 +4342,7 @@ class ChartManager {
 
         await new Promise(resolve => setTimeout(resolve, 0));
 
-        if (this._intervalVersion !== currentVersion || capturedSeq !== this._intervalSwitchSeq) {
+        if (this._intervalGeneration !== currentGeneration || capturedSeq !== this._intervalSwitchSeq) {
             console.warn("周期已切换，丢弃过期的缠论渲染任务");
             return;
         }
@@ -4898,8 +4463,8 @@ class ChartManager {
             const ch = (this.widget && typeof this.widget.activeChart === 'function') ? this.widget.activeChart() : null;
             // 无图表: 不持久化 gate.state(等同未 reset, 下次重新判), 避免空记账污染退避。
             if (!ch || typeof ch.resetData !== 'function') return false;
-            // 契约: resetData 前先 resetCache(TV 文档要求)。容错: 老版无 resetCache 时降级裸 resetData。
-            try { if (this.widget && typeof this.widget.resetCache === 'function') this.widget.resetCache(); } catch (e) { /* ignore */ }
+            // 契约: resetData 前先 resetCache(TV 文档要求)。
+            this.widget.resetCache();
             // H1(阶段E): 置一次性 force_refresh 标志 → 下次 firstDataRequest(即将由 resetData 触发)绕过后端
             // 缓存重算,补齐断档(datafeed getBars 读此标志注入 force_refresh=1,用后即清)。同步置位,不改时序。
             try {
@@ -5020,8 +4585,6 @@ class ChartManager {
         }
         const displayMenu = document.getElementById('cl_display_menu_' + this.id);
         if (displayMenu) displayMenu.remove();
-        const legacyBackdrop = document.getElementById('cl_menu_backdrop_' + this.id);
-        if (legacyBackdrop) legacyBackdrop.remove();
         if (this._strictReconcileEpoch) {
             try { this._strictReconcileEpoch.dispose(); } catch (e) { /* already disposed */ }
             this._strictReconcileEpoch = null;

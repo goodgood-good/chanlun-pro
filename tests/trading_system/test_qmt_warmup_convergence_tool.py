@@ -15,7 +15,6 @@ from chanlun.decision_support.trading_system.candidate_warmup_diagnostics import
     validate_candidate_warmup_diagnostic_document,
 )
 from tools.audit_qmt_warmup_convergence import (
-    _snapshot_codes,
     collect_qmt_warmup_convergence,
     qmt_local_frame_provider,
 )
@@ -41,7 +40,7 @@ def _frame(rows: int, *, frequency: str = "1min") -> pd.DataFrame:
     )
     result.attrs.update(
         structure_price_quantum="0.01",
-        price_basis_revision="test-front-v1",
+        price_basis_revision="test-front",
     )
     return result
 
@@ -138,23 +137,7 @@ def test_qmt_local_frame_provider_sets_skip_download() -> None:
     ]
 
 
-def test_snapshot_signal_selection_is_ordered_and_unique() -> None:
-    snapshot = {
-        "signals": (
-            {"code": "SH.600000"},
-            {"code": "SH.600000"},
-            {"code": "SZ.000001"},
-            {"code": "not-a-stock"},
-        )
-    }
-
-    assert _snapshot_codes(snapshot, explicit=None, limit=2) == (
-        "SH.600000",
-        "SZ.000001",
-    )
-
-
-def test_modern_snapshot_selection_uses_review_facts_and_deduplicates() -> None:
+def test_current_snapshot_selection_uses_review_facts_and_deduplicates() -> None:
     snapshot = {
         "signals": [
             {
@@ -203,10 +186,14 @@ def test_modern_snapshot_selection_uses_review_facts_and_deduplicates() -> None:
         "SH.600003",
     ]
     assert [row["rank"] for row in selected] == [1, 2, 3]
-    assert all(row["selection_profile"] == "MODERN_BUY_REVIEW_ORDER" for row in selected)
+    assert all(
+        row["selection_profile"] == "CURRENT_BUY_REVIEW_ORDER" for row in selected
+    )
 
 
-def test_candidate_diagnostics_use_effective_formed_stage_and_executable_priority() -> None:
+def test_candidate_diagnostics_preserve_declared_stage_and_executable_priority() -> (
+    None
+):
     snapshot = {
         "signals": [
             {
@@ -250,7 +237,7 @@ def test_candidate_diagnostics_use_effective_formed_stage_and_executable_priorit
     ]
     assert [row["lifecycle_stage"] for row in selected] == [
         "executable",
-        "formed",
+        "approaching",
         "approaching",
     ]
 

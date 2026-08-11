@@ -324,7 +324,7 @@ def test_source_record_id_is_stable_and_binds_pdf_location_and_role() -> None:
         output_path="L016_中小资金的高效买卖法.md",
         source_sequence_index=27,
         block_index=12,
-        extractor_version="lesson-corpus/1",
+        extractor_id="lesson-corpus",
     )
 
     first = SourceRecord.create(**arguments)
@@ -366,7 +366,7 @@ def test_lesson_chart_source_record_binds_caption_and_pdf_occurrence() -> None:
         output_path="images/a.jpg",
         source_sequence_index=1,
         block_index=0,
-        extractor_version="lesson-corpus/1",
+        extractor_id="lesson-corpus",
         caption_record_id="source:" + "c" * 64,
         source_object_id="occurrence:" + "d" * 64,
     )
@@ -466,7 +466,7 @@ def test_lesson_package_writes_109_lessons_and_is_byte_deterministic(tmp_path: P
         identity=identity,
         boundaries=boundaries,
         text_blocks=blocks,
-        extractor_version="lesson-corpus/1",
+        extractor_id="lesson-corpus",
         expected_first_page=7,
         expected_last_page=115,
     )
@@ -475,7 +475,7 @@ def test_lesson_package_writes_109_lessons_and_is_byte_deterministic(tmp_path: P
         identity=identity,
         boundaries=boundaries,
         text_blocks=tuple(reversed(blocks)),
-        extractor_version="lesson-corpus/1",
+        extractor_id="lesson-corpus",
         expected_first_page=7,
         expected_last_page=115,
     )
@@ -550,7 +550,7 @@ def test_lesson_package_never_replaces_an_unowned_existing_directory(tmp_path: P
             identity=_identity_for(b"source", pages=115),
             boundaries=boundaries,
             text_blocks=blocks,
-            extractor_version="lesson-corpus/1",
+            extractor_id="lesson-corpus",
             expected_first_page=7,
             expected_last_page=115,
         )
@@ -559,19 +559,19 @@ def test_lesson_package_never_replaces_an_unowned_existing_directory(tmp_path: P
     assert tuple(target.iterdir()) == (sentinel,)
 
 
-def test_lesson_package_rejects_missing_extractor_version_before_writing(tmp_path: Path) -> None:
+def test_lesson_package_rejects_missing_extractor_id_before_writing(tmp_path: Path) -> None:
     boundaries = tuple(
         LessonBoundary(number, f"教你炒股票 {number}", 7 + number, 7 + number)
         for number in range(109)
     )
 
-    with pytest.raises(TypeError, match="extractor_version"):
+    with pytest.raises(TypeError, match="extractor_id"):
         build_lesson_package(
             tmp_path / "never-created",
             identity=_identity_for(b"source", pages=115),
             boundaries=boundaries,
             text_blocks=(),
-            extractor_version=None,
+            extractor_id=None,
             expected_first_page=7,
             expected_last_page=115,
         )
@@ -591,7 +591,7 @@ def test_lesson_package_coverage_cannot_exceed_verified_pdf_pages(tmp_path: Path
             identity=_identity_for(b"source", pages=114),
             boundaries=boundaries,
             text_blocks=(),
-            extractor_version="lesson-corpus/1",
+            extractor_id="lesson-corpus",
             expected_first_page=7,
             expected_last_page=115,
         )
@@ -648,9 +648,9 @@ def test_required_provenance_strings_reject_none_instead_of_stringifying() -> No
         output_path="L001.md",
         source_sequence_index=0,
         block_index=0,
-        extractor_version="lesson-corpus/1",
+        extractor_id="lesson-corpus",
     )
     with pytest.raises(TypeError, match="output_path"):
         SourceRecord.create(**{**record_arguments, "output_path": None})
-    with pytest.raises(TypeError, match="extractor_version"):
-        SourceRecord.create(**{**record_arguments, "extractor_version": None})
+    with pytest.raises(TypeError, match="extractor_id"):
+        SourceRecord.create(**{**record_arguments, "extractor_id": None})

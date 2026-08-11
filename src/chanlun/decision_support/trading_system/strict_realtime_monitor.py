@@ -2,10 +2,8 @@
 
 The chart screening gateway, historical replay and this monitor all consume
 the same ``screening_cl_config`` + ``build_screening_evidence`` decision
-core.  This module deliberately does not fall back to the legacy
-``collect_branch_signals`` path: missing price-basis metadata or an invalid
-structure snapshot is an observable refresh failure, never an alternative
-buy/sell signal.
+core. Missing price-basis metadata or an invalid structure snapshot is an
+observable refresh failure, never an alternative buy/sell signal.
 """
 
 from __future__ import annotations
@@ -90,8 +88,6 @@ class StrictRealtimeMonitorEvent:
     price: float
     big_dir: str
     reason: str
-    buy_ratio: float = 0.0
-    sell_ratio: float = 0.0
     op_level: str = "1m"
     big_level: str = "30m"
     mid_level: str = "5m"
@@ -113,18 +109,17 @@ class _FrequencyRuntime:
     cd: CL
     metadata: StrictSnapshotPriceMetadata
     strict_config_revision: str
+    source_frame: pd.DataFrame
     evidence: StrictEvidenceResult | None = None
-    source_frame: pd.DataFrame | None = None
 
 
 class StrictPhysicalMonitorState:
-    """Incremental 1m/5m/30m/d monitor using the screening decision core."""
+    """Incremental 1m/5m/30m monitor using the screening decision core."""
 
     WARMUP_DAYS_BY_FREQ = {
         "1m": 30,
         "5m": 120,
         "30m": 365,
-        "d": 800,
     }
     MINIMUM_BARS_BY_FREQ = {
         "1m": 960,
@@ -160,13 +155,7 @@ class StrictPhysicalMonitorState:
         self.last_op: pd.Timestamp | None = None
         self.last_mid: pd.Timestamp | None = None
         self.last_big: pd.Timestamp | None = None
-        self.lastd: pd.Timestamp | None = None
-        self.last5: pd.Timestamp | None = None
-        self.last30: pd.Timestamp | None = None
-        self.last_open = 0.0
         self.last_px = 0.0
-        self.prev_close = 0.0
-        self.d3_until: datetime | None = None
         self.seen: set[tuple[str, ...]] = set()
         self._op_baseline_initialized = False
         self.consecutive_refresh_failures = 0
@@ -180,9 +169,9 @@ class StrictPhysicalMonitorState:
         if last is None:
             warmup_days = self.WARMUP_DAYS_BY_FREQ.get(frequency)
             if warmup_days:
-                start = (
-                    pd.Timestamp.now() - pd.Timedelta(days=warmup_days)
-                ).strftime("%Y-%m-%d %H:%M:%S")
+                start = (pd.Timestamp.now() - pd.Timedelta(days=warmup_days)).strftime(
+                    "%Y-%m-%d %H:%M:%S"
+                )
                 try:
                     return self.ex.klines(
                         self.code,
@@ -248,6 +237,7 @@ class StrictPhysicalMonitorState:
         self,
         frequency: str,
         metadata: StrictSnapshotPriceMetadata,
+        source_frame: pd.DataFrame,
     ) -> _FrequencyRuntime:
         config = screening_cl_config(
             structure_price_quantum=metadata.structure_price_quantum,
@@ -258,6 +248,7 @@ class StrictPhysicalMonitorState:
             cd=CL(self.code, frequency, config, market=self.market),
             metadata=metadata,
             strict_config_revision=revision,
+            source_frame=source_frame,
         )
 
     @staticmethod
@@ -317,24 +308,10 @@ class StrictPhysicalMonitorState:
         elif runtime.metadata != metadata:
             raise ValueError(f"{frequency} price basis changed during full warmup")
         else:
-            if runtime.source_frame is None:
-                # Runtime states created before the authoritative-frame
-                # contract cannot safely continue incrementally.
-                frame = self._closed_frame(
-                    self._fetch_klines(frequency, None),
-                    frequency,
-                )
-                metadata = strict_snapshot_price_metadata(frame)
-                if runtime.metadata != metadata:
-                    runtime = None
-                    setattr(self, last_attr, None)
-                source_frame = frame.reset_index(drop=True)
-                copy_price_basis_metadata(frame, source_frame)
-            else:
-                source_frame = self._merge_authoritative_tail(
-                    runtime.source_frame,
-                    frame,
-                )
+            source_frame = self._merge_authoritative_tail(
+                runtime.source_frame,
+                frame,
+            )
 
         latest = pd.Timestamp(source_frame["date"].iloc[-1])
 
@@ -342,11 +319,9 @@ class StrictPhysicalMonitorState:
         latest_market_time = _aware_datetime(source_frame["date"].iloc[-1])
         if source_closed_at < latest_market_time.astimezone(CN):
             raise ValueError(f"{frequency} snapshot contains a future completed bar")
-        unchanged = (
-            runtime is not None
-            and runtime.source_frame is not None
-            and runtime.source_frame.reset_index(drop=True).equals(source_frame)
-        )
+        unchanged = runtime is not None and runtime.source_frame.reset_index(
+            drop=True
+        ).equals(source_frame)
         if unchanged and runtime.evidence is not None:
             return runtime.evidence
 
@@ -354,7 +329,7 @@ class StrictPhysicalMonitorState:
         # structures can revise historical IDs and centers when a pending tail
         # locks; feeding only the new rows creates a different state from the
         # full chart recomputation used as notification evidence.
-        candidate = self._new_runtime(frequency, metadata)
+        candidate = self._new_runtime(frequency, metadata, source_frame)
         candidate.cd.process_klines(source_frame)
         candidate.evidence = build_screening_evidence(
             candidate.cd,
@@ -363,13 +338,8 @@ class StrictPhysicalMonitorState:
             price_basis_revision=metadata.price_basis_revision,
             strict_config_revision=candidate.strict_config_revision,
         )
-        candidate.source_frame = source_frame
         self._runtime_by_frequency[frequency] = candidate
         setattr(self, last_attr, latest)
-        if frequency == "5m":
-            self.last5 = latest
-        elif frequency == "30m":
-            self.last30 = latest
         return candidate.evidence
 
     def refresh(self) -> list[StructuralPoint]:
@@ -384,7 +354,6 @@ class StrictPhysicalMonitorState:
                 if self.mid_level
                 else None
             )
-            daily = self._process_level("d", "lastd", observed_at)
         except _WarmupIncomplete:
             self.consecutive_warmup_incomplete += 1
             return []
@@ -397,24 +366,10 @@ class StrictPhysicalMonitorState:
             source_frequency=self.op_level,
             as_of=observed_at,
         )
-        daily_points = extract_confirmed_points(
-            daily,
-            code=self.code,
-            source_frequency="d",
-            as_of=observed_at,
-        )
-        for point in daily_points:
-            if point.point_type != "3buy":
-                continue
-            until = point.available_at + pd.Timedelta(days=11)
-            if self.d3_until is None or until > self.d3_until:
-                self.d3_until = until
-
         op_runtime = self._runtime_by_frequency[self.op_level]
         klines = op_runtime.cd.get_src_klines()
         if klines:
             last_kline = klines[-1]
-            self.last_open = float(last_kline.o)
             self.last_px = float(last_kline.c)
 
         output: list[StructuralPoint] = []
@@ -517,38 +472,20 @@ class StrictPhysicalMonitorState:
         return _strict_direction(self.evidence(self.big_level))
 
     def mid_dir(self) -> str:
-        return "" if not self.mid_level else _strict_direction(self.evidence(self.mid_level))
-
-    def in_d3(self) -> bool:
-        if self.d3_until is None or self.last_op is None:
-            return False
-        return _aware_datetime(self.last_op).astimezone(CN) <= self.d3_until
-
-
-def _point_class(point_type: str) -> int:
-    try:
-        return int(point_type[0])
-    except (IndexError, TypeError, ValueError):
-        return 0
-
+        return (
+            ""
+            if not self.mid_level
+            else _strict_direction(self.evidence(self.mid_level))
+        )
 
 def collect_strict_monitor_events(
     states: Mapping[str, object],
     *,
     names: Mapping[str, str] | None = None,
     holdings: set[str] | None = None,
-    max_pos: int = 0,
-    sell_scope: str = "all",
-    regime_mode: str = "off",
-    mid_gate: str = "soft",
-    require_nest: bool = False,
-    nest_mode: str = "soft",
-    trend_3boost: bool = False,
-    **_unused: object,
 ) -> list[StrictRealtimeMonitorEvent]:
     """Refresh states and map only strict confirmed points into alerts."""
 
-    del regime_mode, require_nest, nest_mode, trend_3boost
     names = names or {}
     holdings = holdings or set()
     signals: dict[str, Iterable[StructuralPoint]] = {}
@@ -581,15 +518,9 @@ def collect_strict_monitor_events(
         for point in points:
             side = str(point.side)
             point_type = str(point.point_type)
-            if side == "buy":
-                if big_dir == "down":
-                    continue
-                if mid_dir == "down" and mid_gate != "soft":
-                    continue
-            elif side == "sell":
-                if sell_scope == "positions" and code not in holdings:
-                    continue
-            else:
+            if side not in {"buy", "sell"}:
+                continue
+            if side == "buy" and big_dir == "down":
                 continue
             event = StrictRealtimeMonitorEvent(
                 code=code,
@@ -608,11 +539,6 @@ def collect_strict_monitor_events(
                 evidence_id=point.point_id,
             )
             (buys if side == "buy" else others).append(event)
-
-    if max_pos > 0:
-        free = max(max_pos - len(holdings), 0)
-        buys.sort(key=lambda event: (-_point_class(event.bs_type), event.code))
-        buys = buys[:free]
 
     for code in sorted(holdings):
         state = states.get(code)

@@ -21,7 +21,7 @@ from chanlun.decision_support.fingerprints import sha256_json
 from chanlun.decision_support.trading_system.lifecycle import (
     lifecycle_stage_from_signal,
 )
-from chanlun.decision_support.trading_system.v3_live_human_review import (
+from chanlun.decision_support.trading_system.live_human_review import (
     live_screening_snapshot_content_sha256,
 )
 from chanlun.decision_support.trading_system.warmup_convergence import (
@@ -35,13 +35,13 @@ from chanlun.decision_support.trading_system.warmup_structure_lineage import (
 
 
 CANDIDATE_WARMUP_DIAGNOSTIC_SCHEMA = (
-    "chanlun-v3-candidate-warmup-diagnostic/v1"
+    "chanlun-candidate-warmup-diagnostic"
 )
 CANDIDATE_WARMUP_PARAMETER_SCHEMA = (
-    "chanlun-v3-candidate-warmup-diagnostic-parameters/v1"
+    "chanlun-candidate-warmup-diagnostic-parameters"
 )
 IMMUTABLE_LIVE_SCREENING_SCHEMA = (
-    "chanlun-v3-forward-live-screening-snapshot/v1"
+    "chanlun-forward-live-screening-snapshot"
 )
 DEFAULT_CANDIDATE_LIMIT = 16
 DEFAULT_FREQUENCIES = ("d", "30m", "5m", "1m")
@@ -153,13 +153,7 @@ def candidate_warmup_parameter_set_id(
 def unwrap_live_screening_snapshot(
     document: Mapping[str, object],
 ) -> tuple[dict[str, object], str, str | None]:
-    """Validate a raw screen or immutable forward wrapper.
-
-    Returns ``(raw_snapshot, source_identity, wrapper_identity)``.  Legacy
-    wrappers without ``source_payload_sha256`` used the exact payload hash as
-    their source identity; current wrappers use the page-parity semantic hash
-    and attest the exact payload independently.
-    """
+    """Validate a current raw screen or immutable forward wrapper."""
 
     if document.get("schema") != IMMUTABLE_LIVE_SCREENING_SCHEMA:
         snapshot = dict(document)
@@ -187,10 +181,7 @@ def unwrap_live_screening_snapshot(
         "immutable screening source_content_sha256",
     )
     payload_identity = document.get("source_payload_sha256")
-    if payload_identity is None:
-        if source_identity != exact_identity:
-            raise ValueError("legacy immutable screening source identity changed")
-    elif (
+    if (
         _require_sha256(payload_identity, "source_payload_sha256")
         != exact_identity
         or source_identity != semantic_identity
@@ -205,12 +196,7 @@ def select_candidate_warmup_rows(
     limit: int = DEFAULT_CANDIDATE_LIMIT,
     explicit_codes: Sequence[str] | None = None,
 ) -> tuple[dict[str, object], ...]:
-    """Select a bounded candidate subset without changing source ranking.
-
-    Modern screens are sorted deterministically by existing presentation facts.
-    Very old fixtures that contain no side or lifecycle metadata keep their
-    input order so the diagnostic tool remains usable for historical audits.
-    """
+    """Select a bounded candidate subset without changing source ranking."""
 
     if limit <= 0:
         raise ValueError("candidate diagnostic limit must be positive")
@@ -242,11 +228,6 @@ def select_candidate_warmup_rows(
             raise ValueError("explicit diagnostic codes are empty")
         return tuple(result)
 
-    modern = any(
-        isinstance(value, Mapping)
-        and ("side" in value or "lifecycle_stage" in value)
-        for value in signals
-    )
     candidates: list[tuple[tuple[object, ...], dict[str, object]]] = []
     for position, value in enumerate(signals):
         if not isinstance(value, Mapping):
@@ -256,7 +237,9 @@ def select_candidate_warmup_rows(
             continue
         side = str(value.get("side", "")).lower()
         stage = str(lifecycle_stage_from_signal(value) or "").lower()
-        if modern and (side != "buy" or stage in _CLOSED_STAGES):
+        if not side or not stage:
+            raise ValueError("screening signal lacks current side or lifecycle")
+        if side != "buy" or stage in _CLOSED_STAGES:
             continue
         point_type = str(value.get("point_type", "")).lower()
         sector = value.get("sector")
@@ -270,28 +253,21 @@ def select_candidate_warmup_rows(
             if type(raw_horizontal_rank) is int and raw_horizontal_rank > 0
             else None
         )
-        selection_profile = (
-            "MODERN_BUY_REVIEW_ORDER" if modern else "LEGACY_INPUT_ORDER"
-        )
         row = {
             "code": code,
             "source_position": position,
             "lifecycle_stage": stage or None,
             "sector_horizontal_rank": horizontal_rank,
             "point_type": point_type or None,
-            "selection_profile": selection_profile,
+            "selection_profile": "CURRENT_BUY_REVIEW_ORDER",
         }
-        sort_key: tuple[object, ...]
-        if modern:
-            sort_key = (
-                _STAGE_ORDER.get(stage, 10**6),
-                horizontal_rank if horizontal_rank is not None else 10**9,
-                _POINT_ORDER.get(point_type, 10**6),
-                code,
-                position,
-            )
-        else:
-            sort_key = (position,)
+        sort_key: tuple[object, ...] = (
+            _STAGE_ORDER.get(stage, 10**6),
+            horizontal_rank if horizontal_rank is not None else 10**9,
+            _POINT_ORDER.get(point_type, 10**6),
+            code,
+            position,
+        )
         candidates.append((sort_key, row))
 
     candidates.sort(key=lambda value: value[0])

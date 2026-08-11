@@ -17,8 +17,8 @@ import re
 from typing import Mapping, Sequence
 
 
-SCHEMA = "chanlun-csi300-broad-etf-universe/v1"
-SOURCE_ENDPOINT = "/api/v1/common/symbol-by-cond"
+SCHEMA = "chanlun-csi300-broad-etf-universe"
+SOURCE_ENDPOINT = "/api/common/symbol-by-cond"
 SOURCE_PARAMETERS = {
     "asset_type": "基金",
     "asset_sub_type": "场内公募",

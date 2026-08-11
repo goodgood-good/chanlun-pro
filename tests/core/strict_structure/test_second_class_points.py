@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from chanlun.core.strict_structure.center_machine import advance_center, establish_center
+from chanlun.core.strict_structure.center_machine import (
+    advance_center,
+    establish_center,
+)
 from chanlun.core.strict_structure.models import (
     CenterLevelResult,
     SourceKind,
@@ -27,13 +30,13 @@ from tests.core.strict_structure.test_first_class_points import (
 
 
 STRICT_VALUES = UP_VALUES + (
-    ("down", 175, 150),
-    ("up", 150, 160),
+    ("down", 175, 152),
+    ("up", 152, 165),
 )
 
-TOUCH_VALUES = STRICT_VALUES[:-1] + (("up", 150, 175),)
+TOUCH_VALUES = STRICT_VALUES[:-1] + (("up", 152, 175),)
 
-WEAK_VALUES = STRICT_VALUES[:-1] + (("up", 150, 185),)
+WEAK_VALUES = STRICT_VALUES[:-1] + (("up", 152, 185),)
 
 INVALID_THEN_LATER_VALUES = WEAK_VALUES + (
     ("down", 185, 160),
@@ -44,22 +47,22 @@ INVALID_THEN_LATER_VALUES = WEAK_VALUES + (
 def strengths(direction, *, weak=False, invalid=False):
     if direction == "up":
         values = {
-            "u-12": (120, 6, 3),
-            "u-18": (100, 5, 2),
+            ("u-8", "u-9", "u-10"): (120, 6, 3),
+            ("u-16", "u-17", "u-18"): (100, 5, 2),
         }
         if weak:
-            values["u-20"] = (80, 3, 1)
+            values.update({"u-18": (120, 6, 3), "u-20": (80, 3, 1)})
         if invalid:
-            values["u-20"] = (110, 6, 3)
+            values.update({"u-18": (120, 6, 3), "u-20": (130, 7, 4)})
     else:
         values = {
-            "u-12": (120, -6, -3),
-            "u-18": (100, -5, -2),
+            ("u-8", "u-9", "u-10"): (120, -6, -3),
+            ("u-16", "u-17", "u-18"): (100, -5, -2),
         }
         if weak:
-            values["u-20"] = (80, -3, -1)
+            values.update({"u-18": (120, -6, -3), "u-20": (80, -3, -1)})
         if invalid:
-            values["u-20"] = (110, -6, -3)
+            values.update({"u-18": (120, -6, -3), "u-20": (130, -7, -4)})
     return StrengthTable(values)
 
 
@@ -156,10 +159,7 @@ def test_invalid_first_completed_pullback_cannot_be_skipped_for_later_pullback()
 
 def promote_structure_to_level_one(structure):
     original = structure.levels[0]
-    units = {
-        item.unit_id: replace(item, structural_level=1)
-        for item in original.units
-    }
+    units = {item.unit_id: replace(item, structural_level=1) for item in original.units}
     centers = {}
     for value in original.center_result.centers:
         centers[value.center_id] = replace(
@@ -176,9 +176,7 @@ def promote_structure_to_level_one(structure):
                 if value.establishment_leave_unit is None
                 else units[value.establishment_leave_unit.unit_id]
             ),
-            initial_units=tuple(
-                units[item.unit_id] for item in value.initial_units
-            ),
+            initial_units=tuple(units[item.unit_id] for item in value.initial_units),
             body_units=tuple(units[item.unit_id] for item in value.body_units),
             extension_units=tuple(
                 units[item.unit_id] for item in value.extension_units
@@ -204,7 +202,9 @@ def promote_structure_to_level_one(structure):
             trend,
             structural_level=1,
             centers=tuple(centers[value.center_id] for value in trend.centers),
-            constituent_units=tuple(units[item.unit_id] for item in trend.constituent_units),
+            constituent_units=tuple(
+                units[item.unit_id] for item in trend.constituent_units
+            ),
         )
         for trend in original.trend_types
     )
@@ -213,7 +213,9 @@ def promote_structure_to_level_one(structure):
             trend,
             structural_level=1,
             centers=tuple(centers[value.center_id] for value in trend.centers),
-            constituent_units=tuple(units[item.unit_id] for item in trend.constituent_units),
+            constituent_units=tuple(
+                units[item.unit_id] for item in trend.constituent_units
+            ),
         )
         for trend in original.completed_trends
     )
@@ -236,7 +238,9 @@ def promote_structure_to_level_one(structure):
     promoted_center_result = CenterLevelResult(
         structural_level=1,
         price_basis_revision=structure.price_basis_revision,
-        centers=tuple(centers[value.center_id] for value in original.center_result.centers),
+        centers=tuple(
+            centers[value.center_id] for value in original.center_result.centers
+        ),
         previews=(),
         events=(),
         locked_unit_count=original.center_result.locked_unit_count,
@@ -250,7 +254,7 @@ def promote_structure_to_level_one(structure):
         completed_trends=promoted_completed,
     )
     return StrictStructureResult(
-        schema_version=structure.schema_version,
+        schema=structure.schema,
         price_basis_revision=structure.price_basis_revision,
         levels=(level_zero, level_one),
     )
@@ -343,7 +347,7 @@ def test_lower_level_first_point_independently_emits_higher_level_second_buy():
         )
 
     missing_reverse_third = StrictStructureResult(
-        schema_version="chanlun-structure/v3",
+        schema="chanlun-structure",
         price_basis_revision=TEST_PRICE_BASIS,
         levels=(
             StrictLevelResult(
@@ -362,10 +366,7 @@ def test_lower_level_first_point_independently_emits_higher_level_second_buy():
             ),
         ),
     )
-    assert (
-        engine_for(missing_reverse_third, None).second_class_points((lower,))
-        == ()
-    )
+    assert engine_for(missing_reverse_third, None).second_class_points((lower,)) == ()
 
     lower_units = (
         lower_anchor,
@@ -453,7 +454,7 @@ def test_lower_level_first_point_independently_emits_higher_level_second_buy():
         later_leave,
     )
     dynamic_last = StrictStructureResult(
-        schema_version="chanlun-structure/v3",
+        schema="chanlun-structure",
         price_basis_revision=TEST_PRICE_BASIS,
         levels=(
             StrictLevelResult(
@@ -638,7 +639,7 @@ def test_small_first_point_can_promote_across_multiple_levels_with_direct_sublev
         )
 
     structure = StrictStructureResult(
-        schema_version="chanlun-structure/v3",
+        schema="chanlun-structure",
         price_basis_revision=TEST_PRICE_BASIS,
         levels=(
             StrictLevelResult(

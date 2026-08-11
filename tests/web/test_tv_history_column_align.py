@@ -2,7 +2,7 @@
 
 前端按 index 取 c/o/h/l/v[i] 以及 macd_*[i]/higher_macd_*[i]（上界 = t.length）。任一数值列
 短于 t → 越界处取到 undefined → 静默 NaN（K 线缺口 / MACD 面板空洞，无异常无日志，最难排查）。
-正常计算路径恒等长，但跨版本 / 半态磁盘冷层 entry 经 slice / 合并后可能错位。
+正常计算路径恒等长，但不完整磁盘缓存经 slice / 合并后可能错位。
 
 此前只有 OHLCV 5 列有对齐守卫，macd_*/higher_macd_* 7 列原样直塞、无校验（MED-3）。
 本测试锁定：**所有** 数值列都对齐到 len(t)，且形态对象数组（fxs/bis/...，本就 != t 长度）不被误伤。
@@ -72,14 +72,14 @@ def test_equal_length_columns_unchanged():
 
 
 def test_formation_arrays_not_touched():
-    # 形态对象数组长度本就 != bar 数，绝不能被当数值列截断/pad（会毁掉笔/买卖点）。
+    # 基础形态数组长度本就 != bar 数，绝不能被当数值列截断或补齐。
     d = _chart(3)
-    d["bis"] = [{"a": 1}, {"a": 2}]        # 2 条笔，!= 3 bar
-    d["mmds"] = [{"m": 1}]                  # 1 个买卖点
-    d["fxs"] = [{"f": i} for i in range(7)]  # 7 个分型
+    d["bis"] = [{"a": 1}, {"a": 2}]
+    d["xds"] = [{"x": 1}]
+    d["fxs"] = [{"f": i} for i in range(7)]
     tv_mod._align_value_columns_to_t(d)
     assert d["bis"] == [{"a": 1}, {"a": 2}]
-    assert d["mmds"] == [{"m": 1}]
+    assert d["xds"] == [{"x": 1}]
     assert len(d["fxs"]) == 7
 
 

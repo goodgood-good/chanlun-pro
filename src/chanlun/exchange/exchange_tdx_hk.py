@@ -319,7 +319,7 @@ class ExchangeTDXHK(Exchange):
                     )
         return ticks
 
-    def now_trading(self):
+    def now_trading(self, market: str):
         """返回当前是否是港股交易时间（简化判断：09:00-15:59）。"""
         hour = int(time.strftime("%H"))
         if hour in {9, 10, 11, 12, 13, 14, 15}:
@@ -391,9 +391,3 @@ class ExchangeTDXHK(Exchange):
 
     def plate_stocks(self, code: str):
         raise Exception("交易所不支持")
-
-
-if __name__ == "__main__":
-    ex = ExchangeTDXHK()
-    klines = ex.klines("KH.09618", "d")
-    print(klines.tail(20))

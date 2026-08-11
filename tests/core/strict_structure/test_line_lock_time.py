@@ -101,7 +101,7 @@ def _first_sufficient_fractal_witness(fx):
 
 
 def test_done_and_locked_at_are_bijective(sample_frame):
-    cd = CL("SH.600519", "5m", dict(strict_base_config()))
+    cd = CL("SH.600519", "5m", dict(strict_base_config()), market="a")
     cd.process_klines(sample_frame)
 
     assert any(line.is_done() for line in (*cd.get_bis(), *cd.get_xds()))
@@ -113,7 +113,7 @@ def test_done_and_locked_at_are_bijective(sample_frame):
 
 
 def test_bi_lock_time_is_first_sufficient_following_endpoint_witness(sample_frame):
-    cd = CL("SH.600519", "5m", dict(strict_base_config()))
+    cd = CL("SH.600519", "5m", dict(strict_base_config()), market="a")
     cd.process_klines(sample_frame)
 
     all_bis = cd.get_bis()
@@ -132,7 +132,7 @@ def test_bi_lock_time_is_first_sufficient_following_endpoint_witness(sample_fram
 
 
 def test_xd_lock_time_comes_from_a_later_locked_bi_witness(segment_frame):
-    cd = CL("SH.600519", "5m", dict(strict_base_config()))
+    cd = CL("SH.600519", "5m", dict(strict_base_config()), market="a")
     cd.process_klines(segment_frame)
 
     bi_witness_times = {bi.locked_at for bi in cd.get_bis() if bi.is_done()}
@@ -151,7 +151,7 @@ def test_xd_lock_times_follow_causal_segment_order():
         .head(800)
         .reset_index(drop=True)
     )
-    cd = CL("SH.600519", "5m", dict(strict_base_config()))
+    cd = CL("SH.600519", "5m", dict(strict_base_config()), market="a")
     cd.process_klines(frame)
 
     locked_at = [xd.locked_at for xd in cd.get_xds() if xd.is_done()]
@@ -160,10 +160,15 @@ def test_xd_lock_times_follow_causal_segment_order():
 
 
 def test_batch_and_bar_by_bar_have_identical_line_lock_times(sample_frame):
-    batch = CL("SH.600519", "5m", dict(strict_base_config()))
+    batch = CL("SH.600519", "5m", dict(strict_base_config()), market="a")
     batch.process_klines(sample_frame)
 
-    incremental = CL("SH.600519", "5m", dict(strict_base_config()))
+    incremental = CL(
+        "SH.600519",
+        "5m",
+        dict(strict_base_config()),
+        market="a",
+    )
     for row in sample_frame.itertuples(index=False):
         _incremental_update(incremental, row)
 
@@ -171,7 +176,7 @@ def test_batch_and_bar_by_bar_have_identical_line_lock_times(sample_frame):
 
 
 def test_locked_line_time_never_moves_on_longer_prefix(sample_frame):
-    cd = CL("SH.600519", "5m", dict(strict_base_config()))
+    cd = CL("SH.600519", "5m", dict(strict_base_config()), market="a")
     frozen = {}
     for row in sample_frame.itertuples(index=False):
         _incremental_update(cd, row)

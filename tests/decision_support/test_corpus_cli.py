@@ -132,7 +132,7 @@ def test_cli_builds_complete_trusted_corpus_with_verifiable_hashes(
     units_payload = json.loads(
         (build_root / "corpus_units.json").read_text(encoding="utf-8")
     )
-    assert units_payload["schema_version"] == 1
+    assert units_payload["schema"] == "current"
     assert units_payload["indexed_units"] == len(manifest["units"])
     assert units_payload["units"] == manifest["units"]
     repair_report = json.loads(
@@ -199,7 +199,7 @@ def test_cli_repairs_from_bounded_url_map_and_builds(
     url_map.write_text(
         json.dumps(
             {
-                "schema_version": 1,
+                "schema": "current",
                 "targets": [
                     {
                         "root": "output",
@@ -341,7 +341,7 @@ def test_cli_reads_secret_source_url_from_environment_without_reporting_it(
     url_map.write_text(
         json.dumps(
             {
-                "schema_version": 1,
+                "schema": "current",
                 "targets": [
                     {
                         "root": "output",
@@ -423,7 +423,7 @@ def test_cli_rejects_url_map_path_traversal_without_mutation(tmp_path: Path) -> 
     url_map.write_text(
         json.dumps(
             {
-                "schema_version": 1,
+                "schema": "current",
                 "targets": [
                     {
                         "root": "output",
@@ -503,7 +503,7 @@ def test_cli_clears_stale_trust_before_url_map_validation(tmp_path: Path) -> Non
     url_map.write_text(
         json.dumps(
             {
-                "schema_version": 1,
+                "schema": "current",
                 "targets": [
                     {
                         "root": "output",
@@ -656,7 +656,7 @@ def test_cli_rejects_url_map_target_that_is_not_invalid(tmp_path: Path) -> None:
     url_map.write_text(
         json.dumps(
             {
-                "schema_version": 1,
+                "schema": "current",
                 "targets": [
                     {
                         "root": "output",
@@ -967,7 +967,7 @@ After
     (archive_root / "index.json").write_text(
         json.dumps(
             {
-                "schema_version": 1,
+                "schema": "current",
                 "repair_targets": [
                     {
                         "path": "articles/images/missing.jpg",
@@ -1023,7 +1023,7 @@ def test_cli_missing_url_environment_is_bounded_repair_failure(
     url_map.write_text(
         json.dumps(
             {
-                "schema_version": 1,
+                "schema": "current",
                 "targets": [
                     {
                         "root": "output",

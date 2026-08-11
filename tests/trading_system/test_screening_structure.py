@@ -26,7 +26,7 @@ from chanlun.decision_support.trading_system.screening_structure import (
 
 
 NOW = datetime(2026, 7, 20, 15, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
-BASIS = "test-raw-v1"
+BASIS = "test-raw"
 QUANTUM = Decimal("1")
 
 
@@ -91,7 +91,7 @@ def test_completed_preview_from_unfinished_segment_is_non_actionable() -> None:
         replay_from=0,
     )
     structure = StrictStructureResult(
-        schema_version="chanlun-structure/v3",
+        schema="chanlun-structure",
         price_basis_revision=BASIS,
         levels=(
             StrictLevelResult(
@@ -107,7 +107,7 @@ def test_completed_preview_from_unfinished_segment_is_non_actionable() -> None:
         symbol="SZ.000001",
         source_frequency="5m",
         price_basis_revision=BASIS,
-        strict_config_revision="screening-old-pen-v1",
+        strict_config_revision="screening-old-pen",
         structure=structure,
         confirmed_points=(),
     )
@@ -117,7 +117,7 @@ def test_completed_preview_from_unfinished_segment_is_non_actionable() -> None:
         source_closed_at=NOW,
         price_basis_revision=BASIS,
         structure_price_quantum=QUANTUM,
-        strict_config_revision="screening-old-pen-v1",
+        strict_config_revision="screening-old-pen",
         structure_revision=revision,
         structure=structure,
         stroke_center_observations=CenterLevelResult(
@@ -177,8 +177,7 @@ def test_builder_always_returns_one_physical_segment_level() -> None:
         strict_config_revision=str(config["strict_config_revision"]),
     )
 
-    assert cd.config["bi_type"] == "bi_type_old"
-    assert cd.config["bi_mode"] == "strict"
+    assert cd.config["stroke_rule"] == "strict-cl-k-distance"
     assert tuple(level.structural_level for level in evidence.structure.levels) == (0,)
     assert all(
         unit.source_kind is SourceKind.SEGMENT

@@ -69,7 +69,7 @@ class MACD:
         elif current_count == self._last_kline_count:
             # 模式B：Tick 更新最后一根，先回滚到倒数第二根再重算
             self._rollback_state()
-            self._incremental_calculation(klines[-1], is_update_last=True)
+            self._incremental_calculation(klines[-1])
 
         elif current_count > self._last_kline_count:
             # 模式C：新增 Bar。一次更新可能同时"重绘旧末根 + 追加新根"
@@ -83,16 +83,14 @@ class MACD:
                 self._full_calculation(klines)
             else:
                 self._rollback_state()
-                self._incremental_calculation(
-                    klines[self._last_kline_count - 1], is_update_last=True
-                )
+                self._incremental_calculation(klines[self._last_kline_count - 1])
                 for k in klines[self._last_kline_count:]:
                     # 计算新 Bar 前，当前的 val 变成 prev
                     self._ema_fast_val_prev = self._ema_fast_val
                     self._ema_slow_val_prev = self._ema_slow_val
                     self._dea_val_prev = self._dea_val
 
-                    self._incremental_calculation(k, is_update_last=False)
+                    self._incremental_calculation(k)
 
         self._last_kline_count = current_count
 
@@ -141,7 +139,7 @@ class MACD:
         self.hist_area = []
         self._calculate_hist_area_incremental(self.hist, start_index=0)
 
-    def _incremental_calculation(self, kline: Kline, is_update_last: bool = False):
+    def _incremental_calculation(self, kline: Kline):
         """增量单根计算 (手动实现 EMA 公式)"""
         close = kline.c
         # §2.1: 增量路径原无 NaN 防护(全量路径有 fillna)。close=NaN/Inf 会让 new_ema 全 NaN 并
@@ -175,7 +173,6 @@ class MACD:
         self._dea_val = new_dea
 
         # Tick 更新模式下列表已在 _rollback_state pop 过，两种模式都用 append。
-        # is_update_last 保留作调用方语义标识；append 行为对两种模式一致。
         self.dif.append(new_dif)
         self.dea.append(new_dea)
         self.hist.append(new_hist)

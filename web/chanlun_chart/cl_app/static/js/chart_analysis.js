@@ -203,17 +203,6 @@
     return `${direction} · ${formatPrice(segment.start_price)} → ${formatPrice(segment.end_price)}`;
   }
 
-  function associatedPointText(values) {
-    const labels = (Array.isArray(values) ? values : [])
-      .map((value) => {
-        const raw = typeof value === 'object' && value ? value.point_type : value;
-        const canonical = MMD_ALIASES[String(raw || '').toLowerCase()] || String(raw || '').toLowerCase();
-        return MMD_LABELS[canonical] || String(raw || '');
-      })
-      .filter(Boolean);
-    return labels.length ? Array.from(new Set(labels)).join('、') : '暂无关联买卖点';
-  }
-
   function centerPointLabel(pointType) {
     const canonical = MMD_ALIASES[String(pointType || '').toLowerCase()]
       || String(pointType || '').toLowerCase();
@@ -248,6 +237,16 @@
         tone: 'forming',
       };
     }
+    if (phase === 'NON_TRADABLE_OBSERVATION') {
+      return {
+        status: '观察证据',
+        qualification: `${scope}中枢观察不产生买卖点`,
+        evidence: '仅保留非交易结构观察',
+        requirement: '等待正式同级别结构形成',
+        associatedPoint: '无可交易关联买卖点',
+        tone: 'neutral',
+      };
+    }
     if (phase === 'AWAITING_SAME_LEVEL_RETURN') {
       return {
         status: '形成中',
@@ -270,7 +269,14 @@
         tone: 'forming',
       };
     }
-    return null;
+    return {
+      status: '结构契约无效',
+      qualification: '缺少同级别中枢完成阶段',
+      evidence: '当前中枢未提供 completion_phase',
+      requirement: '重新计算当前严格结构快照',
+      associatedPoint: '关联买卖点不可判定',
+      tone: 'neutral',
+    };
   }
 
   function coreDirectionText(values) {
@@ -327,34 +333,27 @@
     const prices = shapePoints(latest)
       .map((item) => numeric(item && item.price))
       .filter((value) => value !== null);
-    const explicitZd = numeric(latest.zd);
-    const explicitZg = numeric(latest.zg);
+    const core = latest.core && typeof latest.core === 'object' ? latest.core : {};
+    const explicitZd = numeric(
+      latest.zd === undefined ? core.zd_price : latest.zd,
+    );
+    const explicitZg = numeric(
+      latest.zg === undefined ? core.zg_price : latest.zg,
+    );
     const low = explicitZd === null ? (prices.length ? Math.min.apply(null, prices) : null) : explicitZd;
     const high = explicitZg === null ? (prices.length ? Math.max.apply(null, prices) : null) : explicitZg;
-    const fallbackStatus = typeof latest.done === 'boolean'
-      ? (latest.done ? '已完成' : '形成中')
-      : (String(latest.linestyle) === '1' ? '形成中' : '已完成');
     const renderKind = String(latest.render_kind || '');
-    // Collection ownership is authoritative: a point in ``bi_mmds`` cannot
-    // complete an XD center.  Lifecycle metadata binds the same-level return
-    // to this exact center and also preserves the useful live state where the
-    // third-class geometry exists but its terminal segment is not locked yet.
+    // Lifecycle metadata binds the same-level return to this exact center and
+    // preserves the live state where third-class geometry awaits line locking.
     const tower = String(settings.tower || latest.tower || '').toLowerCase();
     const towerLabel = tower === 'bi' ? '笔' : '线段';
     const lifecycle = centerLifecycleText(latest, towerLabel);
-    const status = lifecycle ? lifecycle.status : fallbackStatus;
+    const status = lifecycle.status;
     const effectiveLevelLabel = renderKind === 'center_preview'
       ? '线段中枢预览'
       : levelLabel;
-    const qualification = lifecycle
-      ? lifecycle.qualification
-      : (renderKind === 'center_preview'
-        ? (String(latest.state) === 'completed'
-          ? '几何已完成，等待线段锁定，不可直接交易'
-          : '形成中预览，不可直接交易')
-        : (renderKind === 'center_observation' ? '观察证据，不可直接交易' : ''));
-    // The collection itself is authoritative.  Old cached payloads could carry
-    // a stale ``tower`` value and must not relabel a bi center as an xd center.
+    const qualification = lifecycle.qualification;
+    // Collection ownership is authoritative for the center tower.
     const recursiveLevel = numeric(latest.recursive_level);
     let position = '位置待定';
     if (latestClose !== null && low !== null && high !== null) {
@@ -389,7 +388,7 @@
       low,
       high,
       time: latestTime,
-      tone: lifecycle ? lifecycle.tone : (status === '形成中' ? 'forming' : 'complete'),
+      tone: lifecycle.tone,
       tower: towerLabel,
       recursiveLevel: settings.periodLabel || (
         recursiveLevel === null ? '当前周期' : `L${recursiveLevel}`
@@ -404,15 +403,9 @@
         latest.completion_return_segment,
         '尚无同级别确认回抽',
       ),
-      associatedPoint: lifecycle
-        ? lifecycle.associatedPoint
-        : associatedPointText(latest.associated_points),
-      completionEvidence: lifecycle
-        ? lifecycle.evidence
-        : associatedPointText(latest.associated_points),
-      completionRequirement: lifecycle
-        ? lifecycle.requirement
-        : (status === '已完成' ? '当前数据标记为已完成' : '等待同级别离开与回抽确认'),
+      associatedPoint: lifecycle.associatedPoint,
+      completionEvidence: lifecycle.evidence,
+      completionRequirement: lifecycle.requirement,
     };
   }
   function latestSignal(groups, bars, kind, timeZone, latestClose) {
@@ -588,29 +581,7 @@
       boundary,
     };
   }
-  function centerFrequency(resolution) {
-    const value = String(resolution || '').trim();
-    if (/^\d+$/.test(value)) return `${value}m`;
-    if (value === 'D' || value === '1D' || value.toLowerCase() === 'd') return 'd';
-    if (value === 'W' || value === '1W' || value.toLowerCase() === 'w') return 'w';
-    return value.toLowerCase();
-  }
-
-  function centerFrequencyLabel(resolution) {
-    const frequency = centerFrequency(resolution);
-    return frequency === 'd' ? '日线' : (frequency || '当前周期');
-  }
-
-  function segmentZoneItems(source, resolution) {
-    const frequency = centerFrequency(resolution);
-    const groups = Array.isArray(source && source.higher_zs) ? source.higher_zs : [];
-    const current = groups.find((group) => (
-      group && String(group.period || '').toLowerCase() === frequency
-    ));
-    if (current) return Array.isArray(current.zss) ? current.zss : [];
-    return Array.isArray(source && source.xd_zss) ? source.xd_zss : [];
-  }
-  function summarizeLegacyChartData(data, context) {
+  function summarizeBaseChartData(data, context) {
     const source = data || {};
     const options = context || {};
     const bars = Array.isArray(source.bars) ? source.bars : [];
@@ -619,30 +590,16 @@
     const timeZone = options.timeZone;
     const bi = summarizeLine(source.bis);
     const xd = summarizeLine(source.xds);
-    const biZone = summarizeZone(source.bi_zss, latestClose, '笔中枢', {
+    const biZone = summarizeZone([], latestClose, '笔中枢观察', {
       tower: 'bi',
-      recursiveLevel: null,
-      periodLabel: centerFrequencyLabel(options.resolution),
+      periodLabel: '当前周期',
     });
-    const xdZone = summarizeZone(segmentZoneItems(source, options.resolution), latestClose, '线段中枢', {
+    const xdZone = summarizeZone([], latestClose, '严格中枢', {
       tower: 'xd',
-      recursiveLevel: null,
-      periodLabel: centerFrequencyLabel(options.resolution),
+      periodLabel: '当前周期 L0',
     });
-    const mmd = latestSignal(
-      [source.bi_mmds, source.xd_mmds, source.mmds],
-      bars,
-      'mmd',
-      timeZone,
-      latestClose,
-    );
-    const bc = latestSignal(
-      [source.bi_bcs, source.xd_bcs, source.bcs],
-      bars,
-      'bc',
-      timeZone,
-      latestClose,
-    );
+    const mmd = latestSignal([], bars, 'mmd', timeZone, latestClose);
+    const bc = latestSignal([], bars, 'bc', timeZone, latestClose);
     const plan = buildPlan(bi, xd, biZone, xdZone);
     const narrative = structureNarrative(bi, xd, biZone, xdZone);
 
@@ -696,7 +653,7 @@
   }
 
   function strictEmptySummary(source, options, state, detail) {
-    const base = summarizeLegacyChartData(source, options);
+    const base = summarizeBaseChartData(source, options);
     const unavailable = state === 'unavailable';
     return {
       ...base,
@@ -744,7 +701,7 @@
 
   function validateStrictSnapshot(snapshot, source, options, validationOptions) {
     const validation = validationOptions || {};
-    if (!snapshot || snapshot.schema !== 'chanlun-chart-structure/v12') {
+    if (!snapshot || snapshot.schema !== 'chanlun-chart-structure') {
       throw new Error('严格结构数据契约不匹配');
     }
     const requiredStrings = [
@@ -767,8 +724,6 @@
     }
     if (
       !Array.isArray(snapshot.stroke_center_observations)
-      || (snapshot.display_center_observations !== undefined
-        && !Array.isArray(snapshot.display_center_observations))
       || !Array.isArray(snapshot.levels)
     ) {
       throw new Error('严格结构集合无效');
@@ -838,6 +793,8 @@
       completionLeaveUnitId: item.completion_leave_unit_id || null,
       completionReturnUnitId: item.completion_return_unit_id || null,
       completionDirection: item.completion_direction || null,
+      boundaryDivergenceId: item.boundary_divergence_id || null,
+      boundaryAnchorUnitId: item.boundary_anchor_unit_id || null,
       enteringSegment: item.entering_segment || null,
       leavingSegment: item.leaving_segment || null,
     };
@@ -922,28 +879,35 @@
       priceBasisRevision: item.price_basis_revision,
       compareUnitId: item.compare_unit_id,
       signalUnitId: item.signal_unit_id,
+      comparisonWidth: numeric(item.comparison_width),
+      compareLegUnitIds: Array.isArray(item.compare_leg_unit_ids)
+        ? item.compare_leg_unit_ids.slice() : [],
+      signalLegUnitIds: Array.isArray(item.signal_leg_unit_ids)
+        ? item.signal_leg_unit_ids.slice() : [],
       anchorAt: toSeconds(item.anchor_at),
       anchorPrice: numeric(item.anchor_price),
       confirmedAt: toSeconds(item.confirmed_at),
       availableAt: toSeconds(item.available_at),
       strengthSource: metrics.strength_source || null,
+      strengthDecayCount: numeric(metrics.strength_decay_count),
+      isStrongDivergent: metrics.is_strong_divergent === true,
       tradable: item.tradable === true,
     };
   }
 
-  function strictLegacySignal(points, bars, timeZone, latestClose, kind) {
-    const legacyItems = points.map((item) => ({
+  function strictLatestSignal(points, bars, timeZone, latestClose, kind) {
+    const signalItems = points.map((item) => ({
       ...item,
       text: kind === 'mmd'
         ? item.point_type
         : (item.kind || (item.divergence && item.divergence.kind)),
       level: item.level_label || `L${item.structural_level}`,
     }));
-    return latestSignal([legacyItems], bars, kind, timeZone, latestClose);
+    return latestSignal([signalItems], bars, kind, timeZone, latestClose);
   }
 
   function summarizeStrictChartData(source, options, snapshot) {
-    const base = summarizeLegacyChartData({ bars: source.bars }, options);
+    const base = summarizeBaseChartData(source, options);
     const bars = Array.isArray(source.bars) ? source.bars : [];
     const latestBar = bars.length ? bars[bars.length - 1] : null;
     const latestClose = numeric(latestBar && latestBar.close);
@@ -999,33 +963,39 @@
     const divergences = rawDivergences.map((item) => (
       summarizeStrictDivergence(item, item.level_label)
     ));
-    // 基础笔/线段及两类中枢都消费页面同源结构；严格快照只补充走势、
-    // 买卖点和背驰证据，不能替换这里的笔中枢或真实周期线段中枢。
+    // 基础笔/线段和所有高级结构消费同一严格运行时；不存在旧中枢回退源。
     const bi = summarizeLine(source.bis);
     const xd = summarizeLine(source.xds);
-    const biZone = summarizeZone(source.bi_zss, latestClose, '笔中枢', {
-      tower: 'bi',
-      recursiveLevel: null,
-      periodLabel: centerFrequencyLabel(options.resolution),
-    });
-    const xdZone = summarizeZone(
-      segmentZoneItems(source, options.resolution),
+    const biZone = summarizeZone(
+      snapshot.stroke_center_observations,
       latestClose,
-      '线段中枢',
+      '笔中枢观察',
       {
-        tower: 'xd',
-        recursiveLevel: null,
-        periodLabel: centerFrequencyLabel(options.resolution),
+      tower: 'bi',
+      periodLabel: '当前周期',
       },
     );
-    const mmd = strictLegacySignal(
+    const levelZero = snapshot.levels.find((level) => level.structural_level === 0);
+    const currentLevelCenters = levelZero
+      ? levelZero.centers.concat(levelZero.center_previews, levelZero.center_projections)
+      : [];
+    const xdZone = summarizeZone(
+      currentLevelCenters,
+      latestClose,
+      '严格中枢',
+      {
+        tower: 'xd',
+        periodLabel: levelZero ? levelZero.label : '当前周期 L0',
+      },
+    );
+    const mmd = strictLatestSignal(
       rawConfirmedPoints.concat(rawApproachingPoints),
       bars,
       options.timeZone,
       latestClose,
       'mmd',
     );
-    const bc = strictLegacySignal(
+    const bc = strictLatestSignal(
       rawDivergences,
       bars,
       options.timeZone,
@@ -1071,7 +1041,7 @@
     const source = data || {};
     const options = context || {};
     if (!Object.prototype.hasOwnProperty.call(source, 'strict_structure_mode')) {
-      return summarizeLegacyChartData(source, options);
+      return strictEmptySummary(source, options, 'syncing', '严格结构传输状态缺失');
     }
     const mode = source.strict_structure_mode;
     if (mode === 'unavailable') {
@@ -1132,7 +1102,7 @@
     symbolInfoCache: new Map(),
     timer: null,
   };
-  const OVERVIEW_COLLAPSE_STORAGE_KEY = 'chart_analysis_overview_collapsed_v2';
+  const OVERVIEW_COLLAPSE_STORAGE_KEY = 'chart_analysis_overview_collapsed';
 
   function element(id) {
     return root && root.document ? root.document.getElementById(id) : null;

@@ -15,7 +15,7 @@ exit /b 1
 :resolve_python
 REM app.py loads project .env before resolving CHANLUN_WEB_HOST and
 REM CHANLUN_WEB_PORT. Do not set launcher defaults that mask .env values.
-REM Python resolution matches ops/restart_qmt_daily.ps1:
+REM Python resolution matches ops/restart_web.ps1:
 REM CHANLUN_PYTHON, then .venv, then the Poetry environment.
 if defined CHANLUN_PYTHON goto :run_configured_python
 if exist "%ROOT_DIR%.venv\Scripts\python.exe" goto :run_venv_python

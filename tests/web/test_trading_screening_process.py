@@ -21,10 +21,10 @@ from chanlun.decision_support.trading_system.models import (
     SectorAssessment,
     TimeframeContext,
 )
-from chanlun.decision_support.trading_system.v3_selection import (
+from chanlun.decision_support.trading_system.selection import (
     SectorMemberHistory,
 )
-from chanlun.decision_support.trading_system.v3_trading_session import (
+from chanlun.decision_support.trading_system.trading_session import (
     build_trading_session_evidence,
 )
 from cl_app.services.trading_screening_native_worker import (
@@ -55,26 +55,26 @@ FIXTURE = Path(__file__).parent / "fixtures" / "native_screening_test_worker.py"
 
 
 def test_native_qmt_fact_cache_is_official_launch_only(tmp_path: Path) -> None:
-    producer = "sha256:" + "1" * 64
     content_revision = "a" * 40 + ".tree." + "b" * 24
+    deployment_revision = content_revision + ".run." + "c" * 32
 
     assert _qmt_fact_cache_settings(
         build_revision="manual-head",
         data_path=tmp_path,
-        producer_revision=producer,
+    ) == (None, None, None, None, None)
+    assert _qmt_fact_cache_settings(
+        build_revision="head.tree.abc.run.0123456789abcdef",
+        data_path=tmp_path,
     ) == (None, None, None, None, None)
 
     composite, daily, status, composite_revision, daily_revision = (
         _qmt_fact_cache_settings(
-            build_revision="head.tree.abc.run.0123456789abcdef",
+            build_revision=content_revision,
             data_path=tmp_path,
-            producer_revision=producer,
         )
     )
     assert composite == (
-        tmp_path.resolve()
-        / "decision_support"
-        / "trading_screening_sector_frame_facts"
+        tmp_path.resolve() / "decision_support" / "trading_screening_sector_frame_facts"
     )
     assert daily == (
         tmp_path.resolve()
@@ -86,19 +86,8 @@ def test_native_qmt_fact_cache_is_official_launch_only(tmp_path: Path) -> None:
         / "decision_support"
         / "trading_screening_sector_member_status_facts"
     )
-    assert composite_revision == producer
-    assert daily_revision == producer
-
-    content_addressed = _qmt_fact_cache_settings(
-        build_revision=content_revision,
-        data_path=tmp_path,
-        producer_revision=producer,
-    )
-    assert content_addressed[:3] == (composite, daily, status)
-    assert content_addressed[-2:] == (producer, producer)
-
-    official = _qmt_fact_cache_settings(
-        build_revision="head.tree.abc.run.official",
+    deployed = _qmt_fact_cache_settings(
+        build_revision=deployment_revision,
         data_path=tmp_path,
     )
     from chanlun.exchange.qmt_screening_sector_source import (
@@ -106,9 +95,11 @@ def test_native_qmt_fact_cache_is_official_launch_only(tmp_path: Path) -> None:
         qmt_sector_daily_fact_producer_revision,
     )
 
-    assert official[-2] == qmt_sector_composite_fact_producer_revision()
-    assert official[-1] == qmt_sector_daily_fact_producer_revision()
-    assert official[-2] != official[-1]
+    assert deployed[:3] == (composite, daily, status)
+    assert deployed[-2:] == (composite_revision, daily_revision)
+    assert composite_revision == qmt_sector_composite_fact_producer_revision()
+    assert daily_revision == qmt_sector_daily_fact_producer_revision()
+    assert composite_revision != daily_revision
 
 
 def _native_sector_revision_fixture(root: Path) -> None:
@@ -137,12 +128,15 @@ def test_native_sector_snapshot_revision_ignores_ui_but_tracks_producer(
     # but it cannot alter native sector facts and must retain the same cache.
     static = tmp_path / "web" / "chanlun_chart" / "cl_app" / "static"
     static.mkdir(parents=True)
-    (static / "screen.js").write_text("const label = 'v2';\n", encoding="utf-8")
+    (static / "screen.js").write_text("const label = 'current';\n", encoding="utf-8")
     assert native_sector_snapshot_producer_revision(project_root=tmp_path) == first
+    content_revision = "a" * 40 + ".tree." + "b" * 24
     assert native_sector_snapshot_cache_revision(
-        "head.tree.ui-a.run.1", project_root=tmp_path
+        content_revision + ".run." + "c" * 32,
+        project_root=tmp_path,
     ) == native_sector_snapshot_cache_revision(
-        "head.tree.ui-b.run.2", project_root=tmp_path
+        content_revision + ".run." + "d" * 32,
+        project_root=tmp_path,
     )
 
     # A decision/source or native codec change must invalidate the snapshot.
@@ -167,17 +161,24 @@ def test_native_sector_snapshot_cache_is_official_launch_only(
     tmp_path: Path,
 ) -> None:
     _native_sector_revision_fixture(tmp_path)
+    content_revision = "a" * 40 + ".tree." + "b" * 24
+    deployment_revision = content_revision + ".run." + "c" * 32
+    assert (
+        native_sector_snapshot_cache_revision("manual-head", project_root=tmp_path)
+        is None
+    )
     assert (
         native_sector_snapshot_cache_revision(
-            "manual-head", project_root=tmp_path
+            "head.tree.source.run.official", project_root=tmp_path
         )
         is None
     )
     assert native_sector_snapshot_cache_revision(
-        "head.tree.source.run.official", project_root=tmp_path
+        content_revision,
+        project_root=tmp_path,
     ) == native_sector_snapshot_producer_revision(project_root=tmp_path)
     assert native_sector_snapshot_cache_revision(
-        "a" * 40 + ".tree." + "b" * 24,
+        deployment_revision,
         project_root=tmp_path,
     ) == native_sector_snapshot_producer_revision(project_root=tmp_path)
 
@@ -240,6 +241,34 @@ def test_explicit_startup_attests_worker_without_data_request(tmp_path: Path) ->
         worker_pid = health["worker_pid"]
         transport.startup()
         assert transport.health_snapshot()["worker_pid"] == worker_pid
+    finally:
+        transport.shutdown()
+
+
+def test_worker_startup_fails_closed_when_source_revision_is_missing(
+    tmp_path: Path,
+) -> None:
+    expected = "a" * 40 + ".tree." + "b" * 24
+    transport = NativeWorkerProcessTransport(
+        log_path=tmp_path / "native-worker-revision.log",
+        worker_command=(sys.executable, str(FIXTURE)),
+        expected_application_source_revision=expected,
+        config=NativeWorkerProcessConfig(
+            startup_timeout_seconds=3.0,
+            native_idle_timeout_seconds=1.0,
+            restart_backoff_seconds=0.05,
+        ),
+    )
+    try:
+        with pytest.raises(
+            NativeScreeningWorkerProtocolError,
+            match="source revision mismatch",
+        ):
+            transport.startup()
+        health = transport.health_snapshot()
+        assert health["ready"] is False
+        assert health["expected_application_source_revision"] == expected
+        assert health["worker_application_source_revision"] is None
     finally:
         transport.shutdown()
 
@@ -324,8 +353,7 @@ class _FakeGateway:
 
     def screening_instrument_types(self, codes):
         return {
-            code: "index_cn" if code == "SH.000001" else "stock_cn"
-            for code in codes
+            code: "index_cn" if code == "SH.000001" else "stock_cn" for code in codes
         }
 
 
@@ -468,9 +496,10 @@ def test_process_proxy_filters_watchlist_and_holdings_through_native_qmt_type() 
         ("SH.510300",),
         ("SH.000001",),
     )
-    assert proxy.screening_instrument_types(
-        ("SH.000001", "SH.510300")
-    ) == {"SH.000001": "index_cn", "SH.510300": "stock_cn"}
+    assert proxy.screening_instrument_types(("SH.000001", "SH.510300")) == {
+        "SH.000001": "index_cn",
+        "SH.510300": "stock_cn",
+    }
     assert transport.calls == [
         (
             "tradable_instrument_codes",
@@ -526,6 +555,7 @@ class _AtomicGateway:
         assert code == "SH.600000"
         self.calls.append(f"symbol_name:{code}")
         return "浦发银行"
+
     def trading_session_evidence(self, *, session, observed_at):
         self.calls.append("trading_session_evidence")
         return build_trading_session_evidence(
@@ -548,7 +578,7 @@ def test_worker_builds_one_atomic_sector_snapshot() -> None:
         kwargs={"as_of": as_of},
     )
 
-    assert snapshot["schema"] == "chanlun-native-sector-snapshot/v1"
+    assert snapshot["schema"] == "chanlun-native-sector-snapshot"
     assert snapshot["members"] == {"TDX.880301": ("SH.600000",)}
     assert snapshot["changed_bars"] == (BarKey("TDX.880301", "5m", as_of),)
     assert snapshot["symbol_names"] == {}
@@ -619,7 +649,7 @@ def _atomic_snapshot(as_of: datetime) -> dict[str, object]:
         reason_codes=("test_eligible",),
     )
     return {
-        "schema": "chanlun-native-sector-snapshot/v1",
+        "schema": "chanlun-native-sector-snapshot",
         "assessments": SectorAssessmentBatch(
             assessments=(assessment,),
             discovered_count=1,
@@ -824,14 +854,20 @@ def test_proxy_requeries_unresolved_calendar_and_rejects_tampering() -> None:
     transport = _CalendarTransport(unresolved)
     proxy = NativeTradingDataGatewayProcessProxy(transport=transport)  # type: ignore[arg-type]
 
-    assert proxy.trading_session_evidence(
-        session=session,
-        observed_at=observed,
-    )["classification"] == "UNRESOLVED"
-    assert proxy.trading_session_evidence(
-        session=session,
-        observed_at=observed,
-    )["classification"] == "UNRESOLVED"
+    assert (
+        proxy.trading_session_evidence(
+            session=session,
+            observed_at=observed,
+        )["classification"]
+        == "UNRESOLVED"
+    )
+    assert (
+        proxy.trading_session_evidence(
+            session=session,
+            observed_at=observed,
+        )["classification"]
+        == "UNRESOLVED"
+    )
     assert len(transport.calls) == 2
 
     forged = dict(unresolved)
@@ -844,8 +880,7 @@ def test_proxy_requeries_unresolved_calendar_and_rejects_tampering() -> None:
         )
 
 
-def test_proxy_calendar_readiness_never_waits_behind_busy_native_screening(
-) -> None:
+def test_proxy_calendar_readiness_never_waits_behind_busy_native_screening() -> None:
     session = date(2026, 7, 31)
     observed = datetime(2026, 7, 31, 9, 11, tzinfo=ZoneInfo("Asia/Shanghai"))
     resolved = build_trading_session_evidence(
@@ -927,11 +962,11 @@ def test_proxy_persists_and_reuses_same_revision_same_decision_snapshot(
 
     expected = first.native_sector_assessments(as_of=as_of)
     document = json.loads(cache_path.read_text(encoding="utf-8"))
-    assert document["schema"] == "chanlun-native-sector-snapshot-cache/v2"
+    assert document["schema"] == "chanlun-native-sector-snapshot-cache"
     assert document["content_sha256"] == sha256_json(document["payload"])
-    assert document["payload"]["snapshot"]["assessments"][
-        "catalog_revision"
-    ] == ("sha256:" + "7" * 64)
+    assert document["payload"]["snapshot"]["assessments"]["catalog_revision"] == (
+        "sha256:" + "7" * 64
+    )
     assert not tuple(tmp_path.glob(".sector-snapshot.json.*.tmp"))
     assert first.health_snapshot()["sector_snapshot_cache"]["state"] == "refreshed"
 
@@ -1045,9 +1080,7 @@ def test_proxy_cache_roundtrips_sector_eligibility_exclusions(
     expected = first.native_sector_assessments(as_of=as_of)
     document = json.loads(cache_path.read_text(encoding="utf-8"))
     cached = document["payload"]["snapshot"]["assessments"]
-    assert cached["exclusion_counts"] == [
-        ["sector_member_coverage_insufficient", 1]
-    ]
+    assert cached["exclusion_counts"] == [["sector_member_coverage_insufficient", 1]]
     assert cached["exclusions"][0]["required_member_count"] == 3
 
     transport = _AtomicTransport(_atomic_snapshot(as_of))
@@ -1061,9 +1094,7 @@ def test_proxy_cache_roundtrips_sector_eligibility_exclusions(
 
     assert restored == expected
     assert restored.errors == ()
-    assert restored.exclusion_counts == (
-        ("sector_member_coverage_insufficient", 1),
-    )
+    assert restored.exclusion_counts == (("sector_member_coverage_insufficient", 1),)
     assert restored.exclusions[0].detail_code == (
         "sector_constituent_count_below_minimum"
     )
@@ -1168,9 +1199,7 @@ def test_proxy_rejects_wrong_time_or_source_revision_cache(
     )
     second.native_sector_assessments(as_of=requested_as_of)
 
-    assert transport.calls == [
-        ("sector_snapshot", {"as_of": requested_as_of})
-    ]
+    assert transport.calls == [("sector_snapshot", {"as_of": requested_as_of})]
 
 
 def test_proxy_rejects_live_sector_snapshot_with_future_bar() -> None:
@@ -1268,7 +1297,7 @@ def test_app_factory_binds_sector_cache_to_semantic_producer_revision(
 ) -> None:
     monkeypatch.setenv(
         "CHANLUN_BUILD_REVISION",
-        "head.tree.abc123.run.0123456789abcdef",
+        "a" * 40 + ".tree." + "b" * 24 + ".run." + "c" * 32,
     )
     app = create_app(
         start_scheduler=False,
@@ -1295,7 +1324,11 @@ def test_app_default_screening_parallelism_is_bounded_and_tunable(
 ) -> None:
     monkeypatch.delenv("CHANLUN_TRADING_SCREENING_STOCK_WORKERS", raising=False)
     monkeypatch.delenv(
-        "CHANLUN_TRADING_SCREENING_PRIORITY_MONITOR_MAX_SYMBOLS",
+        "CHANLUN_TRADING_SCREENING_CANDIDATE_5M_MAX_SYMBOLS",
+        raising=False,
+    )
+    monkeypatch.delenv(
+        "CHANLUN_TRADING_SCREENING_CANDIDATE_30M_MAX_SYMBOLS",
         raising=False,
     )
     monkeypatch.delenv(
@@ -1318,7 +1351,8 @@ def test_app_default_screening_parallelism_is_bounded_and_tunable(
         max(1, (((os.cpu_count() or 4) * 5) + 7) // 8),
     )
     assert app.config["TRADING_SCREENING_STOCK_WORKERS"] == expected_workers
-    assert app.config["TRADING_SCREENING_PRIORITY_MONITOR_MAX_SYMBOLS"] == 16
+    assert app.config["TRADING_SCREENING_CANDIDATE_5M_MAX_SYMBOLS"] == 256
+    assert app.config["TRADING_SCREENING_CANDIDATE_30M_MAX_SYMBOLS"] == 96
     assert app.config["TRADING_SCREENING_TOTAL_SYMBOLS_PER_REFRESH"] == 64
     gateway = app.extensions["decision_support_trading_screening_gateway"]
     assert len(gateway._structure_transports) == expected_workers  # noqa: SLF001

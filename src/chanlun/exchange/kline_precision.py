@@ -9,7 +9,6 @@ docs/superpowers/specs/2026-05-18-kline-precision-normalization-design.md
 """
 
 from decimal import ROUND_HALF_UP, Decimal
-import re
 from typing import Optional
 
 import pandas as pd
@@ -29,19 +28,6 @@ _MARKET_DECIMALS = {
 
 _A_STOCK_DECIMALS = 2  # A股 股票
 _A_FUND_DECIMALS = 3   # A股 ETF/基金/可转债
-_TDX_INDUSTRY_INDEX = re.compile(r"^SH\.880\d{3}$")
-
-
-def resolve_tdx_industry_index_quantum(code: str) -> Optional[Decimal]:
-    """Return the native two-decimal tick for a TDX 880 industry index."""
-
-    return (
-        Decimal("0.01")
-        if _TDX_INDUSTRY_INDEX.fullmatch(str(code))
-        else None
-    )
-
-
 def _a_share_decimals(code: str) -> int:
     """A股：代码数字部分首位 ∈ {1,5} 为基金/ETF/可转债（3 位），其余为股票（2 位）。
 

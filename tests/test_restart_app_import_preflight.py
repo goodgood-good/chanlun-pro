@@ -3,7 +3,7 @@ from pathlib import Path
 
 def test_restart_compiles_sources_without_importing_app_before_stopping_service():
     source = (
-        Path(__file__).resolve().parents[1] / "ops" / "restart_qmt_daily.ps1"
+        Path(__file__).resolve().parents[1] / "ops" / "restart_web.ps1"
     ).read_text(encoding="utf-8")
 
     preflight = source.index("$preflightCode =")

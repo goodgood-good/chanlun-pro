@@ -88,7 +88,7 @@ def _integrity_payload(report: IntegrityReport) -> dict[str, object]:
         body["path"] = str(item.path)
         files.append(body)
     return {
-        "schema_version": 1,
+        "schema": "current",
         "summary": {
             "invalid": sum(1 for item in report.files if not item.valid),
             "scanned": len(report.files),
@@ -223,7 +223,7 @@ def _load_url_map(
         payload = json.loads(map_bytes.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ValueError("invalid url map") from exc
-    if not isinstance(payload, dict) or payload.get("schema_version") != 1:
+    if not isinstance(payload, dict) or payload.get("schema") != "current":
         raise ValueError("invalid url map schema")
     targets = payload.get("targets")
     if not isinstance(targets, list):
@@ -485,7 +485,7 @@ def _build_trusted_outputs(
     units_path = _atomic_write_json(
         build_root / "corpus_units.json",
         {
-            "schema_version": 1,
+            "schema": "current",
             "indexed_units": len(index),
             "units": manifest["units"],
         },

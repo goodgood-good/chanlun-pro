@@ -29,7 +29,7 @@ from chanlun.decision_support.trading_system.backtest.models import (
 
 
 CN = ZoneInfo("Asia/Shanghai")
-PIT_METADATA_SCHEMA = "chanlun-qmt-pit-metadata/v1"
+PIT_METADATA_SCHEMA = "chanlun-qmt-pit-metadata"
 SW_STANDARD_CODE = "008003"
 _NATIVE_CODE = re.compile(r"^(?P<digits>[0-9]{6})\.(?P<market>SH|SZ|BJ)$")
 _NORMALIZED_CODE = re.compile(r"^(?P<market>SH|SZ|BJ)\.(?P<digits>[0-9]{6})$")
@@ -59,18 +59,6 @@ def qmt_native_code(value: str) -> str:
     if match is None:
         raise ValueError(f"invalid normalized A-share code: {value!r}")
     return f"{match.group('digits')}.{match.group('market')}"
-
-
-def _source_date(value: object, *, label: str, open_ended: bool) -> date | None:
-    text = str(value or "").strip()
-    if text in {"", "0", "99999999"}:
-        if open_ended:
-            return None
-        raise ValueError(f"{label} is missing")
-    try:
-        return datetime.strptime(text, "%Y%m%d").date()
-    except ValueError as exc:
-        raise ValueError(f"invalid {label}: {text!r}") from exc
 
 
 def _iso_date(value: object, label: str) -> date:
@@ -122,20 +110,6 @@ class SecurityMasterRecord:
         return self.listed_from <= end and (
             self.listed_through is None or self.listed_through >= start
         )
-
-    @classmethod
-    def from_qmt(cls, native_code: str, detail: Mapping[str, object]) -> "SecurityMasterRecord":
-        return cls(
-            code=normalize_qmt_a_share_code(native_code),
-            name=str(detail.get("InstrumentName") or "").strip(),
-            listed_from=_source_date(
-                detail.get("OpenDate"), label="OpenDate", open_ended=False
-            ),
-            listed_through=_source_date(
-                detail.get("ExpireDate"), label="ExpireDate", open_ended=True
-            ),
-        )
-
 
 @dataclass(frozen=True, slots=True)
 class SectorMembershipChange:

@@ -21,4 +21,3 @@ def test_tv_config_does_not_load_market_metadata(monkeypatch):
         tv_module.frequency_maps.values()
     )
     assert payload["supports_search"] is True
-    assert payload["supports_group_request"] is False

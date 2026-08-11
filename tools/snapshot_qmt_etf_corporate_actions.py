@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Snapshot raw QMT ETF corporate actions without constructing adjusted prices.
 
-The snapshot is deliberately outside the frozen Chanlun structure and V3/V3.1
+The snapshot is deliberately outside the frozen Chanlun structure and strict strategy
 decision implementations.  It records QMT's effective-dated raw fields exactly
 as returned.  An empty QMT frame is classified as unknown, not as proof that an
 instrument has never had a corporate action.
@@ -26,7 +26,7 @@ if str(SOURCE_ROOT) not in sys.path:
     sys.path.insert(0, str(SOURCE_ROOT))
 
 
-SCHEMA = "chanlun-qmt-etf-corporate-actions/v1"
+SCHEMA = "chanlun-qmt-etf-corporate-actions"
 DEFAULT_CODES = (
     "510300.SH",
     "510050.SH",
@@ -345,7 +345,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--pit-database",
         type=Path,
-        default=Path(".cache/chanlun_v3_external_pit/etf_proxy_pit.sqlite3"),
+        default=Path(".cache/chanlun_external_pit/etf_proxy_pit.sqlite3"),
     )
     parser.add_argument("--output", type=Path, required=True)
     return parser.parse_args()

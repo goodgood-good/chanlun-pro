@@ -10,9 +10,7 @@ from flask_login import current_user
 
 def is_request_authenticated(flask_app, cookie_header) -> bool:
     if not cookie_header:
-        # 无 cookie：仅当未设登录密码(免密模式, 全站无保护)时放行。
-        from chanlun.security import get_login_password
-        return get_login_password() == ""
+        return False
     try:
         with flask_app.test_request_context(headers={"Cookie": cookie_header}):
             flask_app.preprocess_request()  # 触发 login_manager 从 cookie 恢复 user

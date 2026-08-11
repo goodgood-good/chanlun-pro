@@ -17,8 +17,8 @@ from chanlun.decision_support.trading_system.sector_strength import (
     build_sector_member_history_diagnostics,
     sector_strength_batch_from_evidence_document,
 )
-from chanlun.decision_support.trading_system.v3_etf_proxy_facts import DailyMarketBar
-from chanlun.decision_support.trading_system.v3_selection import (
+from chanlun.decision_support.trading_system.etf_proxy_facts import DailyMarketBar
+from chanlun.decision_support.trading_system.selection import (
     CompletedDailyClose,
     SectorMemberHistory,
     member_ma_strength_category,
@@ -314,7 +314,7 @@ def test_member_history_diagnostics_are_recomputed_from_authenticated_evidence()
     diagnostics = build_sector_member_history_diagnostics(batch)
 
     assert diagnostics == {
-        "schema": "chanlun-sector-member-history-diagnostics/v1",
+        "schema": "chanlun-sector-member-history-diagnostics",
         "evidence_revision": batch.evidence_revision,
         "sector_count": 2,
         "sector_member_relation_count": 5,

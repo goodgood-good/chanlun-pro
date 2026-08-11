@@ -52,7 +52,7 @@ def build_center_id(
     """Return the immutable identity of a formal center seed."""
 
     return stable_structure_id(
-        "chanlun-center/v9",
+        "chanlun-center",
         price_basis_revision,
         structural_level,
         source_kind,
@@ -71,43 +71,18 @@ def build_trend_id(
     center_ids: tuple[str, ...],
     constituent_unit_ids: tuple[str, ...],
     direction: str,
+    terminal_divergence_id: str | None = None,
 ) -> str:
     """Return the immutable identity shared by a trend's state snapshots."""
 
     return stable_structure_id(
-        "chanlun-trend/v3",
+        "chanlun-trend",
         price_basis_revision,
         structural_level,
         tuple(center_ids),
         tuple(constituent_unit_ids),
         direction,
-    )
-
-
-def complete_c_measurement_id(
-    *,
-    price_basis_revision: str,
-    structural_level: int,
-    source_kind: str,
-    child_unit_ids: tuple[str, str, str],
-) -> str:
-    """Return the stable identity of a complete-c strength window.
-
-    A complete ``c`` is measured from the last center's departure through its
-    outside first return and the following same-direction terminal unit.  It is
-    a measurement window, not the raw terminal unit, so it must never reuse the
-    terminal unit's identity.
-    """
-
-    children = tuple(child_unit_ids)
-    if len(children) != 3 or len(set(children)) != 3 or any(not item for item in children):
-        raise ValueError("complete-c measurement requires three distinct child units")
-    return stable_structure_id(
-        "chanlun-complete-c-measurement/v1",
-        price_basis_revision,
-        structural_level,
-        source_kind,
-        children,
+        terminal_divergence_id,
     )
 
 
@@ -155,7 +130,9 @@ def _canonical_revision_value(value: Any) -> Any:
 
 def _require_unique_ids(values, attribute: str, label: str) -> None:
     identifiers = tuple(getattr(value, attribute) for value in values)
-    if any(not isinstance(identifier, str) or not identifier for identifier in identifiers):
+    if any(
+        not isinstance(identifier, str) or not identifier for identifier in identifiers
+    ):
         raise ValueError(f"{label} requires non-empty ids")
     if len(identifiers) != len(set(identifiers)):
         raise ValueError(f"duplicate {label} id")
@@ -165,10 +142,7 @@ def _formal_structure_payload(structure) -> dict:
     levels = []
     _require_unique_ids(
         tuple(
-            unit
-            for level in structure.levels
-            for unit in level.units
-            if unit.locked
+            unit for level in structure.levels for unit in level.units if unit.locked
         ),
         "unit_id",
         "formal unit",
@@ -197,7 +171,7 @@ def _formal_structure_payload(structure) -> dict:
             }
         )
     return {
-        "schema_version": structure.schema_version,
+        "schema": structure.schema,
         "price_basis_revision": structure.price_basis_revision,
         "levels": tuple(levels),
     }
@@ -228,8 +202,7 @@ def build_strict_evidence_revision(
     points = tuple(confirmed_points)
     _require_unique_ids(points, "point_id", "confirmed point")
     if any(
-        getattr(point.status, "value", point.status) != "confirmed"
-        for point in points
+        getattr(point.status, "value", point.status) != "confirmed" for point in points
     ):
         raise ValueError("formal evidence accepts confirmed points only")
     if any(point.price_basis_revision != price_basis_revision for point in points):
@@ -237,21 +210,15 @@ def build_strict_evidence_revision(
     divergence_items = tuple(divergences)
     _require_unique_ids(divergence_items, "divergence_id", "divergence")
     if any(
-        item.price_basis_revision != price_basis_revision
-        for item in divergence_items
+        item.price_basis_revision != price_basis_revision for item in divergence_items
     ):
         raise ValueError("strict evidence divergence price basis mismatch")
-    structure_levels = {
-        level.structural_level for level in structure.levels
-    }
-    if any(
-        item.structural_level not in structure_levels
-        for item in divergence_items
-    ):
+    structure_levels = {level.structural_level for level in structure.levels}
+    if any(item.structural_level not in structure_levels for item in divergence_items):
         raise ValueError("strict evidence divergence level is unavailable")
     payload = _canonical_revision_value(
         {
-            "schema": "chanlun-strict-evidence/v3",
+            "schema": "chanlun-strict-evidence",
             "symbol": symbol,
             "source_frequency": source_frequency,
             "price_basis_revision": price_basis_revision,

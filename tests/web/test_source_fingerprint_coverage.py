@@ -5,7 +5,7 @@ exchange 层对原始数据的解释(时区/周期合成/精度归一/去重)一
 这类修复(如本轮 tdx_us tz replace->localize)不失效旧图表缓存, 磁盘冷层持续下发旧时间戳。
 纳入整个 exchange/*.py 后, 数据产出口径一改 -> 指纹变 -> chart_data/cl_object 缓存自动失效。
 """
-from chanlun.tools.cache_version import _fingerprint_files
+from chanlun.tools.cache_identity import _fingerprint_files
 
 
 def test_source_fingerprint_covers_exchange_dataoutput_files():

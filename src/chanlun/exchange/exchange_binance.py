@@ -67,7 +67,7 @@ class ExchangeBinance(Exchange):
             "1m": "1m",
         }
 
-    def now_trading(self):
+    def now_trading(self, market: str):
         """
         返回交易时间，数字货币 24 小时可交易
         """
@@ -424,11 +424,6 @@ class ExchangeBinance(Exchange):
                 res_poss.append(p)
         return res_poss
 
-    def cancel_all_order(self, code):
-        """撤销指定合约的所有挂单。"""
-        self.exchange.cancel_all_orders(symbol=code)
-        return True
-
     def order(self, code: str, o_type: str, amount: float, args=None):
         trade_maps = {
             "open_long": {"side": "BUY", "positionSide": "LONG"},
@@ -446,7 +441,7 @@ class ExchangeBinance(Exchange):
             params={"positionSide": trade_maps[o_type]["positionSide"]},
         )
         # N5: 市价单 ccxt price 常为 None(成交均价在 average)、amount=请求量(成交量在 filled)。
-        # 规范化为真实成交口径, 防 trader_currency 记 None 价污染账本 + 平仓 res['price']*res['amount']
+        # 规范化为真实成交口径，避免上层收到 None 价格或请求量而非实际成交量。
         # None 算术 TypeError(仿 tqsdk H4 的 filled 口径)。
         if isinstance(res, dict):
             _price = res.get("average")
@@ -464,10 +459,3 @@ class ExchangeBinance(Exchange):
 
     def plate_stocks(self, code: str):
         raise Exception("交易所不支持")
-
-
-if __name__ == "__main__":
-    ex = ExchangeBinance()
-
-    klines = ex.klines("BTC/USDT", "d")
-    print(klines)

@@ -1,9 +1,8 @@
 """R1-C1: session 首根进行中 bar 必须被裁剪(drop_unclosed_last_bar 两副本口径一致)。
 
 QMT 5m 为端点标签(09:35..11:30 / 13:05..15:00): 9:30/13:00 开盘扫描时末根
-= 进行中的 09:35/13:05 bar, 其与前一根(昨 15:00 / 11:30)间隔 != 名义 5m,
-旧实现的「间隔异常→原样返回」把这根只有数秒数据的半成品 bar 放行, 经增量
-only-once 喂入后在 CL 里永久定格(live_monitor 严格大于过滤不再重喂)。
+= 进行中的 09:35/13:05 bar, 其与前一根(昨 15:00 / 11:30)间隔 != 名义 5m。
+该半成品 bar 不能进入 only-once 增量计算，否则会在 CL 中永久定格。
 
 修复口径: 间隔异常时仅裁「标签在未来」的末根——已收盘 bar 的标签无论起点/
 终点约定必然 <= now, 标签 > now 只可能是进行中 bar, 故绝不误删历史收盘 bar;
@@ -12,7 +11,6 @@ only-once 喂入后在 CL 里永久定格(live_monitor 严格大于过滤不再�
 import pandas as pd
 import pytest
 
-from chanlun.recursive_bt.sim.paper import drop_unclosed_last_bar
 from chanlun.trader.online_market_datas import _drop_unclosed_last_bar
 
 
@@ -23,10 +21,7 @@ def _df(dates):
     })
 
 
-IMPLS = [
-    pytest.param(drop_unclosed_last_bar, id="paper"),
-    pytest.param(_drop_unclosed_last_bar, id="online_market_datas"),
-]
+IMPLS = [pytest.param(_drop_unclosed_last_bar, id="online_market_datas")]
 
 
 @pytest.mark.parametrize("impl", IMPLS)

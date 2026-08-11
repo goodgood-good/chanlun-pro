@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import copy
 from dataclasses import replace
 from datetime import date, datetime, timedelta
 from decimal import Decimal
@@ -15,18 +14,13 @@ import pytest
 import cl_app.services.trading_screening as trading_screening_subject
 
 from chanlun.decision_support.fingerprints import sha256_json
-from chanlun.decision_support.trading_system.human_assisted_decision import (
-    signal_decision_document_id,
-    validate_signal_decision_document,
-)
-from chanlun.decision_support.trading_system.v3_live_human_review import (
+from chanlun.decision_support.trading_system.live_human_review import (
     MONITOR_ONLY_BUY_REASON_CODE,
     SECTOR_COVERAGE_CONTRACT_ID,
-    live_review_risk_evidence_replay_codes,
     live_screening_snapshot_content_sha256,
     screening_coverage_epoch_id,
 )
-from chanlun.decision_support.trading_system.v3_human_review_screening import (
+from chanlun.decision_support.trading_system.human_review_screening import (
     market_symbol_higher_timeframe_review_evidence_from_risk,
 )
 from chanlun.decision_support.trading_system.engine import (
@@ -53,19 +47,16 @@ from chanlun.decision_support.trading_system.live_review_materialization import 
     live_review_materialization_receipt,
 )
 from chanlun.decision_support.trading_system.sector_policy import assess_sector
-from chanlun.decision_support.trading_system.screening_structure import (
-    SCREENING_STRUCTURE_FREQUENCIES,
-)
 from chanlun.decision_support.trading_system.sector_strength import (
     build_horizontal_sector_strength_batch,
 )
-from chanlun.decision_support.trading_system.v3_selection import (
+from chanlun.decision_support.trading_system.selection import (
     SectorMemberHistory,
 )
-from chanlun.decision_support.trading_system.v3_qmt_same_base_stream import (
+from chanlun.decision_support.trading_system.qmt_same_base_stream import (
     QmtMinuteSessionIssue,
 )
-from chanlun.decision_support.trading_system.v3_qmt_higher_timeframe import (
+from chanlun.decision_support.trading_system.qmt_higher_timeframe import (
     QMT_HIGHER_TIMEFRAME_WARMUP_CONVERGENCE_PARAMETER_SET_ID,
     QMT_HIGHER_TIMEFRAME_WARMUP_EVIDENCE_CONTRACT_ID,
     QmtHigherTimeframeWarmupEvidence,
@@ -74,7 +65,7 @@ from chanlun.decision_support.trading_system.warmup_convergence import (
     WARMUP_CONVERGENCE_ENVELOPE_CONTRACT_ID,
     classify_warmup_convergence_envelope,
 )
-from chanlun.decision_support.trading_system.v3_qmt_native_daily_bridge import (
+from chanlun.decision_support.trading_system.qmt_native_daily_bridge import (
     QMT_NATIVE_DAILY_CALENDAR_COVERAGE_EVIDENCE_CONTRACT_ID,
     QMT_NATIVE_DAILY_RECONCILIATION_CONTRACT_ID,
     QmtNativeDailyCalendarCoverageEvidence,
@@ -90,20 +81,18 @@ from tests.trading_system.helpers import (
     supportive_context,
 )
 from cl_app.services.trading_screening import (
-    HEALTH_REPLAY_CODE_SAMPLE_LIMIT,
     SIGNAL_DOCUMENT_CONTRACT_ID,
     TradingScreeningConfig,
     TradingScreeningService,
     _apply_selection_scope,
     _cache_is_valid,
     _full_coverage_refresh_window_open,
-    _migrate_sector_coverage_snapshot,
-    _migrate_signal_document_v8,
     _next_background_active_start,
     _next_full_coverage_active_start,
     _priority_buy_candidate_codes,
     _priority_monitor_delay_seconds,
     _priority_monitor_session_open,
+    _take_due_candidate_batch,
     _sector_source_evidence_complete,
 )
 from cl_app.services.trading_notifications import SignalNotificationDispatcher
@@ -117,6 +106,7 @@ from cl_app.services.trading_screening_gateway import (
 class RecordingMarketData:
     def __init__(self) -> None:
         self.bundle_codes: list[str] = []
+        self.bundle_frequency_requests: list[tuple[str, tuple[str, ...]]] = []
         self.name_codes: list[str] = []
 
     def changed_bars(self, since: datetime | None):
@@ -169,7 +159,7 @@ class RecordingMarketData:
         sector,
         frequencies=(),
     ) -> SymbolStructureBundle:
-        del frequencies
+        self.bundle_frequency_requests.append((code, tuple(frequencies)))
         self.bundle_codes.append(code)
         return SymbolStructureBundle(
             code=code,
@@ -180,6 +170,23 @@ class RecordingMarketData:
             five_points=(),
             one_points=(),
             opposite_points=(),
+        )
+
+    def structure_bundle_with_risk_cutoff(
+        self,
+        code: str,
+        *,
+        as_of: datetime,
+        sector,
+        frequencies=(),
+        risk_evidence_cutoff: datetime,
+    ) -> SymbolStructureBundle:
+        del risk_evidence_cutoff
+        return self.structure_bundle(
+            code,
+            as_of=as_of,
+            sector=sector,
+            frequencies=frequencies,
         )
 
 
@@ -272,7 +279,7 @@ def _evidence_sector_batch(
     sector = eligible_sector()
     membership_revision = sha256_json(
         {
-            "schema": "test-sector-membership/v1",
+            "schema": "test-sector-membership",
             "sector_id": sector.sector_id,
             "symbols": symbols,
         }
@@ -298,7 +305,7 @@ def _evidence_sector_batch(
         supportive_context("5m"),
         dominant_point_id=sha256_json(
             {
-                "schema": "test-sector-dominant-point/v1",
+                "schema": "test-sector-dominant-point",
                 "revision": context_revision,
             }
         ),
@@ -513,114 +520,6 @@ def test_snapshot_persistence_is_cross_thread_atomic(tmp_path: Path) -> None:
     assert not tuple(tmp_path.glob(".snapshot.json.*.tmp"))
 
 
-def test_current_snapshot_migrations_preserve_tree_identity(tmp_path: Path) -> None:
-    """A current 100+ MiB publication must not be deep-copied at startup."""
-
-    service = TradingScreeningService(
-        market_data=RecordingMarketData(),
-        sector_catalog=RecordingSectorCatalog(),
-        engine=RecordingEngine(),
-        scan_planner=RecordingPlanner(),
-        cache_path=tmp_path / "snapshot.json",
-        clock=lambda: AS_OF,
-        notifier=None,
-    )
-    snapshot = service.refresh_now()
-
-    sector_migrated = _migrate_sector_coverage_snapshot(snapshot)
-    assert sector_migrated is snapshot
-    assert _migrate_signal_document_v8(sector_migrated) is snapshot
-
-
-def test_v9_snapshot_migrates_completed_preview_to_formed_contract(
-    tmp_path: Path,
-) -> None:
-    class FormedPreviewMarket(RecordingMarketData):
-        def structure_bundle(
-            self,
-            code: str,
-            *,
-            as_of: datetime,
-            sector,
-            frequencies=(),
-        ) -> SymbolStructureBundle:
-            del frequencies
-            point = replace(
-                provisional_point("3buy"),
-                evidence_codes=(
-                    "physical_timeframe_level_zero",
-                    "provisional_center_completion",
-                    "core_boundary_held",
-                ),
-            )
-            return SymbolStructureBundle(
-                code=code,
-                as_of=as_of,
-                sector=sector,
-                thirty_direction="neutral",
-                thirty_points=(),
-                five_points=(point,),
-                one_points=(),
-                opposite_points=(),
-            )
-
-    service = TradingScreeningService(
-        market_data=FormedPreviewMarket(),
-        sector_catalog=RecordingSectorCatalog(),
-        engine=TradingEngine(),
-        scan_planner=RecordingPlanner(),
-        cache_path=tmp_path / "snapshot.json",
-        clock=lambda: AS_OF,
-        notifier=None,
-    )
-    current = service.refresh_now()
-    assert current["signals"][0]["lifecycle_stage"] == "formed"
-
-    legacy = copy.deepcopy(current)
-    legacy_contract = "chanlun-human-assisted-signal-document/v9"
-    legacy_signal = legacy["signals"][0]
-    legacy_signal["lifecycle_stage"] = "approaching"
-    legacy_signal["decision_document_id"] = signal_decision_document_id(legacy_signal)
-    legacy["counts_by_stage"] = {"approaching": 1}
-    manifest = legacy["coverage_manifest"]
-    epoch_arguments = {
-        "market_data_as_of": datetime.fromisoformat(manifest["market_data_as_of"]),
-        "universe_revision": manifest["universe_revision"],
-        "sector_catalog_revision": manifest["sector_catalog_revision"],
-        "sector_strength_evidence_revision": manifest.get(
-            "sector_strength_evidence_revision"
-        ),
-        "decision_core_id": legacy["decision_core_id"],
-        "screening_policy_id": manifest["screening_policy_id"],
-        "structure_version": legacy["structure_version"],
-        "parameter_version": legacy["parameter_version"],
-    }
-    legacy_epoch = screening_coverage_epoch_id(
-        **epoch_arguments,
-        signal_document_contract_id=legacy_contract,
-    )
-    legacy["signal_document_contract_id"] = legacy_contract
-    manifest["signal_document_contract_id"] = legacy_contract
-    legacy["coverage_epoch_id"] = legacy_epoch
-    manifest["coverage_epoch_id"] = legacy_epoch
-    legacy["snapshot_content_sha256"] = live_screening_snapshot_content_sha256(
-        legacy
-    )
-
-    migrated = _migrate_signal_document_v8(legacy)
-
-    assert migrated["signal_document_contract_id"] == SIGNAL_DOCUMENT_CONTRACT_ID
-    assert migrated["coverage_manifest"]["signal_document_contract_id"] == (
-        SIGNAL_DOCUMENT_CONTRACT_ID
-    )
-    assert migrated["signals"][0]["lifecycle_stage"] == "formed"
-    assert migrated["counts_by_stage"] == {"formed": 1}
-    validate_signal_decision_document(migrated["signals"][0])
-    assert migrated["snapshot_content_sha256"] == (
-        live_screening_snapshot_content_sha256(migrated)
-    )
-
-
 def test_service_recovers_corrupt_primary_from_content_addressed_generation(
     tmp_path: Path,
 ) -> None:
@@ -685,11 +584,6 @@ def test_same_epoch_completed_progress_cannot_silently_reset(tmp_path: Path) -> 
     with pytest.raises(ValueError, match="lost completed symbols"):
         service._persist_atomic(regressed)
 
-    service._risk_evidence_replay_codes.add(completed_code)
-    service._persist_atomic(regressed)
-    assert json.loads(cache_path.read_text(encoding="utf-8")) == regressed
-
-
 def test_service_uses_incremental_scan_plan_and_new_engine(tmp_path: Path) -> None:
     market = RecordingMarketData()
     engine = RecordingEngine()
@@ -706,8 +600,8 @@ def test_service_uses_incremental_scan_plan_and_new_engine(tmp_path: Path) -> No
 
     payload = service.refresh_now()
 
-    assert payload["schema_version"] == "chanlun-trading-screening/v3"
-    assert payload["structure_version"] == "physical-timeframe-l0-v1"
+    assert payload["schema"] == "chanlun-trading-screening"
+    assert payload["structure_contract_id"] == "physical-timeframe-l0"
     assert payload["sector_first"] is True
     assert payload["read_only"] is True
     assert payload["no_order_execution"] is True
@@ -718,9 +612,9 @@ def test_service_uses_incremental_scan_plan_and_new_engine(tmp_path: Path) -> No
         "sector_catalog_source": "qmt_gics3_components",
         "sector_price_source": "qmt_gics3_component_composite",
         "sector_composite_provider": "qmt-gics3-composite",
-        "sector_composite_adjustment": ("causal-factor-stable-24-member-median-v5"),
+        "sector_composite_adjustment": ("causal-factor-stable-24-member-median"),
         "sector_composite_factor_adjustment_contract": (
-            "QMT_RAW_PRICE_DIVISOR_CAUSAL_EX_DATE_V1"
+            "QMT_RAW_PRICE_DIVISOR_CAUSAL_EX_DATE"
         ),
         "sector_composite_factor_cutoff": "decision_date_only",
         "sector_composite_factor_failure_policy": "fail_closed",
@@ -732,21 +626,21 @@ def test_service_uses_incremental_scan_plan_and_new_engine(tmp_path: Path) -> No
             "frozen_deterministic_representative_sample"
         ),
         "sector_composite_calendar_grid_contract": (
-            "QMT_SH_TRADING_CALENDAR_CONTIGUOUS_VISIBLE_SUFFIX_V1"
+            "QMT_SH_TRADING_CALENDAR_CONTIGUOUS_VISIBLE_SUFFIX"
         ),
         "sector_composite_member_mask_contract": (
-            "BIT_I_IS_SECTOR_COMPOSITE_MEMBERS_I_V1"
+            "BIT_I_IS_SECTOR_COMPOSITE_MEMBERS_I"
         ),
         "sector_scope": "all_eligible",
         "stock_scope": "all_members_of_all_eligible_sectors",
         "sector_frequencies": ["30m", "5m"],
         "sector_higher_timeframe_base_frequency": "5m",
         "sector_thirty_minute_derivation_contract": (
-            "SIX_CONTIGUOUS_COMPLETED_5M_COMPOSITE_BARS_V1"
+            "SIX_CONTIGUOUS_COMPLETED_5M_COMPOSITE_BARS"
         ),
         "sector_higher_timeframe_frequencies": ["M", "W", "D"],
         "sector_higher_timeframe_membership_provenance": (
-            "exact_members_sample_coverage_price_grid_and_path_v6"
+            "exact_members_sample_coverage_price_grid_and_path"
         ),
         "stock_structure_frequencies": ["d", "30m", "5m", "1m"],
         "stroke_mode": "old",
@@ -756,15 +650,15 @@ def test_service_uses_incremental_scan_plan_and_new_engine(tmp_path: Path) -> No
         "stock_trigger_frequency": "1m",
         "minimum_market_data_frequency": "1m",
         "qmt_one_minute_grid_revision": (
-            "QMT_A_SHARE_END_LABELLED_241_TO_COMPLETED_240_TRADE_AWARE_V2"
+            "QMT_A_SHARE_END_LABELLED_241_TO_COMPLETED_240_TRADE_AWARE"
         ),
         "tick_data_used": False,
         "selection_universe_source": "qmt_gics3_current_components",
-        "monitor_instrument_eligibility": ("qmt_native_stock_or_etf_fail_closed_v1"),
+        "monitor_instrument_eligibility": ("qmt_native_stock_or_etf_fail_closed"),
         "sector_strength_qmt_dividend_type": "front_ratio",
-        "sector_strength_adjustment": ("front-ratio-terminal-close-normalized-v1"),
+        "sector_strength_adjustment": ("front-ratio-terminal-close-normalized"),
         "sector_strength_price_basis_contract": (
-            "QMT_FRONT_RATIO_TERMINAL_CLOSE_NORMALIZATION_V1"
+            "QMT_FRONT_RATIO_TERMINAL_CLOSE_NORMALIZATION"
         ),
         "sector_strength_min_member_history_coverage": "1",
         "higher_timeframe_partial_evidence_policy": (
@@ -773,7 +667,7 @@ def test_service_uses_incremental_scan_plan_and_new_engine(tmp_path: Path) -> No
         "higher_timeframe_warmup_required_daily_bars": 480,
         "higher_timeframe_warmup_required_thirty_minute_bars": 3840,
         "higher_timeframe_warmup_convergence_contract": (
-            "drop_oldest_third_compare_mwd_state_mapping_and_ma5_v1"
+            "drop_oldest_third_compare_mwd_state_mapping_and_ma5"
         ),
         "higher_timeframe_warmup_entry_policy": (
             "fail_closed_on_insufficient_or_diverged"
@@ -898,41 +792,6 @@ def test_replacement_epoch_forces_every_current_eligible_sector_member(
     assert second["coverage_manifest"]["discovered_codes"] == list(symbols)
     assert second["coverage_manifest"]["completed_codes"] == list(symbols)
     assert second["coverage_manifest"]["complete"] is True
-    assert market.bundle_codes == [*symbols, *symbols]
-
-
-def test_incomplete_epoch_repairs_members_missing_from_discovered_scope(
-    tmp_path: Path,
-) -> None:
-    """An older partial ledger self-heals without replaying valid dispositions."""
-
-    symbols = ("SZ.000001", "SZ.000002", "SZ.000003")
-    market = RecordingMarketData()
-    service = TradingScreeningService(
-        market_data=market,
-        sector_catalog=MultiMemberSectorCatalog(symbols),
-        engine=RecordingEngine(),
-        scan_planner=SequencedPlanner((symbols,)),
-        cache_path=tmp_path / "snapshot.json",
-        clock=lambda: AS_OF,
-        notifier=None,
-    )
-    first = service.refresh_now()
-    assert first["coverage_manifest"]["complete"] is True
-
-    # Reproduce the exact latent production shape: the universe identity is
-    # already the full three-member sector, but an older planner persisted only
-    # one discovered/pending code in the in-progress ledger.
-    service._coverage_cycle_discovered_codes = {symbols[0]}
-    service._coverage_cycle_completed_codes.clear()
-    service._pending_frequencies = {symbols[0]: set(SCREENING_STRUCTURE_FREQUENCIES)}
-
-    repaired = service.refresh_now()
-
-    assert repaired["coverage_epoch_id"] == first["coverage_epoch_id"]
-    assert repaired["coverage_manifest"]["discovered_codes"] == list(symbols)
-    assert repaired["coverage_manifest"]["completed_codes"] == list(symbols)
-    assert repaired["coverage_manifest"]["complete"] is True
     assert market.bundle_codes == [*symbols, *symbols]
 
 
@@ -1066,7 +925,7 @@ def _empty_scan_plan(**_kwargs) -> ScanPlan:
     )
 
 
-def test_member_history_diagnostics_are_published_and_mirrored_in_health(
+def test_member_history_diagnostics_are_required_by_current_cache_contract(
     tmp_path: Path,
 ) -> None:
     sector = eligible_sector()
@@ -1138,11 +997,11 @@ def test_member_history_diagnostics_are_published_and_mirrored_in_health(
     forged["snapshot_content_sha256"] = live_screening_snapshot_content_sha256(forged)
     assert _sector_source_evidence_complete(forged) is False
 
-    legacy = json.loads(json.dumps(payload))
-    legacy.pop("sector_member_history_diagnostics")
-    legacy["snapshot_content_sha256"] = live_screening_snapshot_content_sha256(legacy)
+    noncurrent = json.loads(json.dumps(payload))
+    noncurrent.pop("sector_member_history_diagnostics")
+    noncurrent["snapshot_content_sha256"] = live_screening_snapshot_content_sha256(noncurrent)
     cache_path.write_text(
-        json.dumps(legacy, ensure_ascii=False, sort_keys=True),
+        json.dumps(noncurrent, ensure_ascii=False, sort_keys=True),
         encoding="utf-8",
     )
     restored_service = TradingScreeningService(
@@ -1156,11 +1015,11 @@ def test_member_history_diagnostics_are_published_and_mirrored_in_health(
     )
     restored = restored_service.snapshot()
 
-    assert restored["coverage_epoch_id"] == payload["coverage_epoch_id"]
-    assert restored["coverage_manifest"] == payload["coverage_manifest"]
-    assert restored["sector_member_history_diagnostics"] == diagnostics
-    assert restored_service.health_snapshot()["sector_cache_migration_applied"] is True
-    assert _sector_source_evidence_complete(restored) is True
+    assert restored["scan_state"] == "not_started"
+    assert restored["coverage_epoch_id"] is None
+    assert restored["sector_member_history_diagnostics"] is None
+    health = restored_service.health_snapshot()
+    assert health["quarantined_cache_reason"] == "CURRENT_CACHE_CONTRACT_INVALID"
 
 
 def test_sector_eligibility_exclusion_resolves_without_quality_failure(
@@ -1209,7 +1068,7 @@ def test_sector_eligibility_exclusion_resolves_without_quality_failure(
     assert health["sector_exclusions"] == payload["sector_exclusions"]
 
 
-def test_legacy_small_sector_failures_migrate_without_resetting_stock_epoch(
+def test_old_sector_failure_contract_is_rejected_without_migration(
     tmp_path: Path,
 ) -> None:
     cache_path = tmp_path / "snapshot.json"
@@ -1223,10 +1082,10 @@ def test_legacy_small_sector_failures_migrate_without_resetting_stock_epoch(
         notifier=None,
     )
     current = service.refresh_now()
-    legacy = json.loads(json.dumps(current))
-    [exclusion] = legacy.pop("sector_exclusions")
-    legacy.pop("sector_coverage_contract_id")
-    legacy["errors"] = [
+    noncurrent = json.loads(json.dumps(current))
+    [exclusion] = noncurrent.pop("sector_exclusions")
+    noncurrent.pop("sector_coverage_contract_id")
+    noncurrent["errors"] = [
         {
             "sector_id": exclusion["sector_id"],
             "code": exclusion["code"],
@@ -1237,26 +1096,26 @@ def test_legacy_small_sector_failures_migrate_without_resetting_stock_epoch(
             "universe_member_count": exclusion["universe_member_count"],
         }
     ]
-    legacy_audit = legacy["scan_audit"]
+    noncurrent_audit = noncurrent["scan_audit"]
     for field in (
         "sector_excluded_count",
         "sector_resolved_count",
         "sector_resolution_ratio",
         "sector_exclusion_counts",
     ):
-        legacy_audit.pop(field)
-    legacy_audit["sector_failed_count"] = 1
-    legacy_audit["sector_failure_counts"] = {
+        noncurrent_audit.pop(field)
+    noncurrent_audit["sector_failed_count"] = 1
+    noncurrent_audit["sector_failure_counts"] = {
         "sector_member_coverage_insufficient": 1,
     }
-    legacy["data_quality"] = {
+    noncurrent["data_quality"] = {
         "complete": False,
         "stale": False,
         "failure_codes": ["sector_scan_partial"],
     }
-    legacy["snapshot_content_sha256"] = live_screening_snapshot_content_sha256(legacy)
+    noncurrent["snapshot_content_sha256"] = live_screening_snapshot_content_sha256(noncurrent)
     cache_path.write_text(
-        json.dumps(legacy, ensure_ascii=False, sort_keys=True),
+        json.dumps(noncurrent, ensure_ascii=False, sort_keys=True),
         encoding="utf-8",
     )
 
@@ -1271,25 +1130,13 @@ def test_legacy_small_sector_failures_migrate_without_resetting_stock_epoch(
     )
     restored = restored_service.snapshot()
 
-    assert restored["coverage_epoch_id"] == current["coverage_epoch_id"]
-    assert restored["coverage_manifest"] == current["coverage_manifest"]
-    assert restored["sector_coverage_contract_id"] == (SECTOR_COVERAGE_CONTRACT_ID)
-    assert restored["sector_exclusions"] == current["sector_exclusions"]
-    assert restored["errors"] == []
-    assert restored["scan_audit"]["sector_excluded_count"] == 1
-    assert restored["scan_audit"]["sector_failed_count"] == 0
-    assert restored["scan_audit"]["sector_resolution_ratio"] == "1"
-    assert restored["data_quality"]["complete"] is True
-    assert restored["snapshot_content_sha256"] == (
-        live_screening_snapshot_content_sha256(restored)
-    )
+    assert restored["scan_state"] == "not_started"
+    assert restored["coverage_epoch_id"] is None
+    assert restored["sector_exclusions"] == []
     persisted = json.loads(cache_path.read_text(encoding="utf-8"))
-    assert persisted == restored
-    assert persisted["sector_coverage_contract_id"] == (SECTOR_COVERAGE_CONTRACT_ID)
+    assert persisted == noncurrent
     health = restored_service.health_snapshot()
-    assert health["sector_cache_migration_applied"] is True
-    assert health["sector_cache_migration_persist_error"] is None
-    assert "screening_cache_migration_persist_failed" not in health["reasons"]
+    assert health["quarantined_cache_reason"] == "CURRENT_CACHE_CONTRACT_INVALID"
 
 
 def test_rehashed_sector_disposition_forgery_is_not_restored(
@@ -1393,12 +1240,12 @@ def test_cache_with_another_schema_is_rejected(tmp_path: Path) -> None:
     cache_path.write_text(
         json.dumps(
             {
-                "schema_version": "chanlun-early-screening/v13",
-                "algorithm_version": "chanlun-original-low-drawdown/v1",
+                "schema": "chanlun-early-screening",
+                "algorithm_id": "chanlun-original-low-drawdown",
                 "read_only": True,
                 "no_order_execution": True,
                 "sectors": [],
-                "signals": [{"signal_id": "legacy"}],
+                "signals": [{"signal_id": "noncurrent"}],
                 "data_quality": {},
             }
         ),
@@ -1416,8 +1263,8 @@ def test_cache_with_another_schema_is_rejected(tmp_path: Path) -> None:
     )
 
     snapshot = service.snapshot()
-    assert snapshot["schema_version"] == "chanlun-trading-screening/v3"
-    assert snapshot["structure_version"] == "physical-timeframe-l0-v1"
+    assert snapshot["schema"] == "chanlun-trading-screening"
+    assert snapshot["structure_contract_id"] == "physical-timeframe-l0"
     assert snapshot["scan_state"] == "not_started"
     assert snapshot["signals"] == []
 
@@ -1456,6 +1303,46 @@ def test_cache_from_previous_partial_member_policy_is_rejected(
     assert restarted.snapshot()["scan_state"] == "not_started"
 
 
+def test_cache_from_previous_decision_core_is_quarantined(
+    tmp_path: Path,
+) -> None:
+    cache_path = tmp_path / "snapshot.json"
+    first = TradingScreeningService(
+        market_data=RecordingMarketData(),
+        sector_catalog=RecordingSectorCatalog(),
+        engine=RecordingEngine(),
+        scan_planner=RecordingPlanner(),
+        cache_path=cache_path,
+        clock=lambda: AS_OF,
+        notifier=None,
+    )
+    previous = first.refresh_now()
+
+    class ReplacementEngine(RecordingEngine):
+        pass
+
+    restarted = TradingScreeningService(
+        market_data=RecordingMarketData(),
+        sector_catalog=RecordingSectorCatalog(),
+        engine=ReplacementEngine(),
+        scan_planner=RecordingPlanner(),
+        cache_path=cache_path,
+        clock=lambda: AS_OF,
+        notifier=None,
+        config=TradingScreeningConfig(full_coverage_refresh_enabled=False),
+    )
+
+    assert restarted.snapshot()["scan_state"] == "not_started"
+    health = restarted.health_snapshot()
+    assert health["quarantined_cache_decision_core_id"] == (
+        previous["decision_core_id"]
+    )
+    assert health["quarantined_cache_reason"] == (
+        "DECISION_CORE_IDENTITY_MISMATCH"
+    )
+    assert "screening_snapshot_unavailable" not in health["reasons"]
+
+
 def test_cache_from_previous_coverage_state_contract_is_rejected(
     tmp_path: Path,
 ) -> None:
@@ -1472,10 +1359,10 @@ def test_cache_from_previous_coverage_state_contract_is_rejected(
         notifier=None,
     )
     first.refresh_now()
-    legacy = json.loads(cache_path.read_text(encoding="utf-8"))
-    legacy["coverage_manifest"].pop("coverage_state_contract_id")
-    first._finalize_snapshot_identity(legacy)
-    cache_path.write_text(json.dumps(legacy), encoding="utf-8")
+    noncurrent = json.loads(cache_path.read_text(encoding="utf-8"))
+    noncurrent["coverage_manifest"].pop("coverage_state_contract_id")
+    first._finalize_snapshot_identity(noncurrent)
+    cache_path.write_text(json.dumps(noncurrent), encoding="utf-8")
 
     restarted = TradingScreeningService(
         market_data=RecordingMarketData(),
@@ -1491,7 +1378,7 @@ def test_cache_from_previous_coverage_state_contract_is_rejected(
     assert restarted.snapshot()["coverage_epoch_id"] is None
 
 
-def test_legacy_signal_document_contract_replays_full_current_universe(
+def test_noncurrent_signal_document_contract_replays_full_current_universe(
     tmp_path: Path,
 ) -> None:
     """An output-schema upgrade may not leave old/new signal rows mixed.
@@ -1517,16 +1404,16 @@ def test_legacy_signal_document_contract_replays_full_current_universe(
     decision_core_id = current["decision_core_id"]
     screening_policy_id = current["screening_policy_id"]
 
-    legacy = json.loads(cache_path.read_text(encoding="utf-8"))
-    legacy["signal_document_contract_id"] = "chanlun-human-assisted-signal-document/v2"
-    legacy["coverage_manifest"]["signal_document_contract_id"] = (
-        "chanlun-human-assisted-signal-document/v2"
+    noncurrent = json.loads(cache_path.read_text(encoding="utf-8"))
+    noncurrent["signal_document_contract_id"] = "chanlun-human-assisted-signal-document"
+    noncurrent["coverage_manifest"]["signal_document_contract_id"] = (
+        "chanlun-human-assisted-signal-document"
     )
-    legacy_epoch = sha256_json({"schema": "legacy-signal-document/v1"})
-    legacy["coverage_epoch_id"] = legacy_epoch
-    legacy["coverage_manifest"]["coverage_epoch_id"] = legacy_epoch
-    first._finalize_snapshot_identity(legacy)
-    cache_path.write_text(json.dumps(legacy), encoding="utf-8")
+    noncurrent_epoch = sha256_json({"schema": "noncurrent-signal-document"})
+    noncurrent["coverage_epoch_id"] = noncurrent_epoch
+    noncurrent["coverage_manifest"]["coverage_epoch_id"] = noncurrent_epoch
+    first._finalize_snapshot_identity(noncurrent)
+    cache_path.write_text(json.dumps(noncurrent), encoding="utf-8")
 
     planner_calls: list[object] = []
 
@@ -1560,7 +1447,7 @@ def test_legacy_signal_document_contract_replays_full_current_universe(
     assert migrated["coverage_manifest"]["signal_document_contract_id"] == (
         SIGNAL_DOCUMENT_CONTRACT_ID
     )
-    assert migrated["coverage_epoch_id"] != legacy_epoch
+    assert migrated["coverage_epoch_id"] != noncurrent_epoch
     assert migrated["coverage_manifest"]["complete"] is False
     assert set(migrated["coverage_manifest"]["pending_frequencies"]) == {
         "SZ.000002",
@@ -1575,7 +1462,7 @@ def test_legacy_signal_document_contract_replays_full_current_universe(
     assert completed["coverage_manifest"]["completed_codes"] == list(symbols)
 
 
-def test_incomplete_legacy_contract_does_not_restore_its_pending_epoch(
+def test_incomplete_noncurrent_contract_does_not_restore_its_pending_epoch(
     tmp_path: Path,
 ) -> None:
     """A schema migration must restart even when the old queue is unfinished.
@@ -1601,15 +1488,15 @@ def test_incomplete_legacy_contract_does_not_restore_its_pending_epoch(
     assert incomplete["coverage_manifest"]["complete"] is False
     assert incomplete["coverage_manifest"]["completed_codes"] == ["SZ.000001"]
 
-    legacy = json.loads(cache_path.read_text(encoding="utf-8"))
-    legacy_contract = "chanlun-human-assisted-signal-document/v4"
-    legacy_epoch = sha256_json({"schema": "legacy-incomplete-epoch/v1"})
-    legacy["signal_document_contract_id"] = legacy_contract
-    legacy["coverage_epoch_id"] = legacy_epoch
-    legacy["coverage_manifest"]["signal_document_contract_id"] = legacy_contract
-    legacy["coverage_manifest"]["coverage_epoch_id"] = legacy_epoch
-    first._finalize_snapshot_identity(legacy)
-    cache_path.write_text(json.dumps(legacy), encoding="utf-8")
+    noncurrent = json.loads(cache_path.read_text(encoding="utf-8"))
+    noncurrent_contract = "chanlun-human-assisted-signal-document"
+    noncurrent_epoch = sha256_json({"schema": "noncurrent-incomplete-epoch"})
+    noncurrent["signal_document_contract_id"] = noncurrent_contract
+    noncurrent["coverage_epoch_id"] = noncurrent_epoch
+    noncurrent["coverage_manifest"]["signal_document_contract_id"] = noncurrent_contract
+    noncurrent["coverage_manifest"]["coverage_epoch_id"] = noncurrent_epoch
+    first._finalize_snapshot_identity(noncurrent)
+    cache_path.write_text(json.dumps(noncurrent), encoding="utf-8")
 
     planner_cursors: list[object] = []
 
@@ -1640,7 +1527,7 @@ def test_incomplete_legacy_contract_does_not_restore_its_pending_epoch(
 
     assert planner_cursors and planner_cursors[0].initialized is False
     assert market.bundle_codes == ["SZ.000001"]
-    assert migrated["coverage_epoch_id"] != legacy_epoch
+    assert migrated["coverage_epoch_id"] != noncurrent_epoch
     assert migrated["coverage_manifest"]["batch_count"] == 1
     assert migrated["coverage_manifest"]["completed_codes"] == ["SZ.000001"]
     assert set(migrated["coverage_manifest"]["pending_frequencies"]) == {
@@ -1649,7 +1536,7 @@ def test_incomplete_legacy_contract_does_not_restore_its_pending_epoch(
     }
 
 
-def test_signal_contract_migration_drops_unscanned_legacy_signal_rows(
+def test_old_signal_contract_is_rebuilt_without_reusing_signal_rows(
     tmp_path: Path,
 ) -> None:
     """A replacement epoch may publish only signals recomputed in that epoch.
@@ -1689,21 +1576,21 @@ def test_signal_contract_migration_drops_unscanned_legacy_signal_rows(
     current = first.refresh_now()
     assert {row["code"] for row in current["signals"]} == {"SZ.000001"}
 
-    legacy = json.loads(cache_path.read_text(encoding="utf-8"))
-    unscanned_legacy_signal = dict(legacy["signals"][0])
-    unscanned_legacy_signal["code"] = "SZ.000003"
-    unscanned_legacy_signal["signal_id"] = "legacy-signal:SZ.000003"
-    unscanned_legacy_signal["name"] = "legacy-only"
-    unscanned_legacy_signal["lifecycle_stage"] = "closed"
-    legacy["signals"].append(unscanned_legacy_signal)
-    legacy_contract = "chanlun-human-assisted-signal-document/v5"
-    legacy_epoch = sha256_json({"schema": "legacy-signals-epoch/v1"})
-    legacy["signal_document_contract_id"] = legacy_contract
-    legacy["coverage_epoch_id"] = legacy_epoch
-    legacy["coverage_manifest"]["signal_document_contract_id"] = legacy_contract
-    legacy["coverage_manifest"]["coverage_epoch_id"] = legacy_epoch
-    first._finalize_snapshot_identity(legacy)
-    cache_path.write_text(json.dumps(legacy), encoding="utf-8")
+    noncurrent = json.loads(cache_path.read_text(encoding="utf-8"))
+    unscanned_noncurrent_signal = dict(noncurrent["signals"][0])
+    unscanned_noncurrent_signal["code"] = "SZ.000003"
+    unscanned_noncurrent_signal["signal_id"] = "noncurrent-signal:SZ.000003"
+    unscanned_noncurrent_signal["name"] = "noncurrent-only"
+    unscanned_noncurrent_signal["lifecycle_stage"] = "closed"
+    noncurrent["signals"].append(unscanned_noncurrent_signal)
+    noncurrent_contract = "chanlun-human-assisted-signal-document"
+    noncurrent_epoch = sha256_json({"schema": "noncurrent-signals-epoch"})
+    noncurrent["signal_document_contract_id"] = noncurrent_contract
+    noncurrent["coverage_epoch_id"] = noncurrent_epoch
+    noncurrent["coverage_manifest"]["signal_document_contract_id"] = noncurrent_contract
+    noncurrent["coverage_manifest"]["coverage_epoch_id"] = noncurrent_epoch
+    first._finalize_snapshot_identity(noncurrent)
+    cache_path.write_text(json.dumps(noncurrent), encoding="utf-8")
 
     restarted = TradingScreeningService(
         market_data=ActionableMarketData(),
@@ -1719,7 +1606,7 @@ def test_signal_contract_migration_drops_unscanned_legacy_signal_rows(
     completed_codes = set(migrated["coverage_manifest"]["completed_codes"])
     signal_codes = {str(row["code"]) for row in migrated["signals"]}
 
-    assert completed_codes == {"SZ.000001", "SZ.000002"}
+    assert completed_codes == {"SZ.000001"}
     assert signal_codes.issubset(completed_codes)
     assert "SZ.000003" not in signal_codes
 
@@ -1741,14 +1628,14 @@ def test_cache_without_sector_source_evidence_replays_current_universe(
     )
     first.refresh_now()
 
-    legacy = json.loads(cache_path.read_text(encoding="utf-8"))
-    assert legacy["signal_document_contract_id"] == SIGNAL_DOCUMENT_CONTRACT_ID
-    legacy.pop("sector_strength_evidence")
-    legacy.pop("sector_strength_evidence_revision")
-    for sector in legacy["sectors"]:
+    noncurrent = json.loads(cache_path.read_text(encoding="utf-8"))
+    assert noncurrent["signal_document_contract_id"] == SIGNAL_DOCUMENT_CONTRACT_ID
+    noncurrent.pop("sector_strength_evidence")
+    noncurrent.pop("sector_strength_evidence_revision")
+    for sector in noncurrent["sectors"]:
         sector.pop("strength_source_revision")
-    first._finalize_snapshot_identity(legacy)
-    cache_path.write_text(json.dumps(legacy), encoding="utf-8")
+    first._finalize_snapshot_identity(noncurrent)
+    cache_path.write_text(json.dumps(noncurrent), encoding="utf-8")
 
     previous_cursors: list[object] = []
 
@@ -1780,7 +1667,7 @@ def test_cache_without_sector_source_evidence_replays_current_universe(
     assert "sector_strength_evidence_revision" in migrated
 
 
-def test_v7_neutral_sector_scope_migrates_without_recomputing_structure(
+def test_incomplete_warmup_signal_contract_is_rejected_without_conversion(
     tmp_path: Path,
 ) -> None:
     cache_path = tmp_path / "snapshot.json"
@@ -1795,8 +1682,8 @@ def test_v7_neutral_sector_scope_migrates_without_recomputing_structure(
     )
     first.refresh_now()
 
-    legacy = json.loads(cache_path.read_text(encoding="utf-8"))
-    [signal] = legacy["signals"]
+    noncurrent = json.loads(cache_path.read_text(encoding="utf-8"))
+    [signal] = noncurrent["signals"]
     signal["selection_sources"] = ["QMT_SECTOR_TRIGGER"]
     signal["sector_triggered"] = True
     signal["monitor_only"] = False
@@ -1806,25 +1693,25 @@ def test_v7_neutral_sector_scope_migrates_without_recomputing_structure(
         if reason != MONITOR_ONLY_BUY_REASON_CODE
     ]
     signal["warmup"].pop("difference_codes_by_frequency", None)
-    legacy_contract = "chanlun-human-assisted-signal-document/v7"
-    legacy["signal_document_contract_id"] = legacy_contract
-    legacy["coverage_manifest"]["signal_document_contract_id"] = legacy_contract
-    manifest = legacy["coverage_manifest"]
-    legacy_epoch_id = screening_coverage_epoch_id(
+    noncurrent_contract = "chanlun-human-assisted-signal-document"
+    noncurrent["signal_document_contract_id"] = noncurrent_contract
+    noncurrent["coverage_manifest"]["signal_document_contract_id"] = noncurrent_contract
+    manifest = noncurrent["coverage_manifest"]
+    noncurrent_epoch_id = screening_coverage_epoch_id(
         market_data_as_of=datetime.fromisoformat(manifest["market_data_as_of"]),
         universe_revision=manifest["universe_revision"],
         sector_catalog_revision=manifest["sector_catalog_revision"],
         sector_strength_evidence_revision=manifest["sector_strength_evidence_revision"],
-        decision_core_id=legacy["decision_core_id"],
+        decision_core_id=noncurrent["decision_core_id"],
         screening_policy_id=manifest["screening_policy_id"],
-        structure_version=legacy["structure_version"],
-        parameter_version=legacy["parameter_version"],
-        signal_document_contract_id=legacy_contract,
+        structure_contract_id=noncurrent["structure_contract_id"],
+        parameter_set_id=noncurrent["parameter_set_id"],
+        signal_document_contract_id=noncurrent_contract,
     )
-    legacy["coverage_epoch_id"] = legacy_epoch_id
-    manifest["coverage_epoch_id"] = legacy_epoch_id
-    first._finalize_snapshot_identity(legacy)
-    cache_path.write_text(json.dumps(legacy), encoding="utf-8")
+    noncurrent["coverage_epoch_id"] = noncurrent_epoch_id
+    manifest["coverage_epoch_id"] = noncurrent_epoch_id
+    first._finalize_snapshot_identity(noncurrent)
+    cache_path.write_text(json.dumps(noncurrent), encoding="utf-8")
 
     restarted_market = ApproachingMarketData()
     restarted = TradingScreeningService(
@@ -1838,27 +1725,17 @@ def test_v7_neutral_sector_scope_migrates_without_recomputing_structure(
     )
     migrated = restarted.snapshot()
 
-    [migrated_signal] = migrated["signals"]
+    assert migrated["scan_state"] == "not_started"
+    assert migrated["signals"] == []
+    assert migrated["coverage_epoch_id"] is None
     assert migrated["signal_document_contract_id"] == SIGNAL_DOCUMENT_CONTRACT_ID
-    assert migrated["coverage_manifest"]["signal_document_contract_id"] == (
-        SIGNAL_DOCUMENT_CONTRACT_ID
+    assert restarted.health_snapshot()["quarantined_cache_reason"] == (
+        "CURRENT_CACHE_CONTRACT_INVALID"
     )
-    assert migrated["coverage_epoch_id"] != legacy_epoch_id
-    assert (
-        migrated["coverage_manifest"]["coverage_epoch_id"]
-        == migrated["coverage_epoch_id"]
-    )
-    assert migrated_signal["selection_sources"] == ["QMT_SECTOR_ELIGIBLE_SCOPE"]
-    assert migrated_signal["sector_triggered"] is False
-    assert migrated_signal["monitor_only"] is True
-    assert migrated_signal["entry_allowed"] is False
-    assert migrated_signal["risk_multiplier"] == "0"
-    assert MONITOR_ONLY_BUY_REASON_CODE in migrated_signal["decision_reasons"]
-    assert migrated_signal["warmup"]["difference_codes_by_frequency"] == []
     assert restarted_market.bundle_codes == []
 
 
-def test_v8_signal_rows_gain_decision_identity_without_qmt_replay(
+def test_missing_decision_identity_contract_is_rejected_without_conversion(
     tmp_path: Path,
 ) -> None:
     cache_path = tmp_path / "snapshot.json"
@@ -1873,29 +1750,29 @@ def test_v8_signal_rows_gain_decision_identity_without_qmt_replay(
     )
     first.refresh_now()
 
-    legacy = json.loads(cache_path.read_text(encoding="utf-8"))
-    legacy_contract = "chanlun-human-assisted-signal-document/v8"
-    for signal in legacy["signals"]:
+    noncurrent = json.loads(cache_path.read_text(encoding="utf-8"))
+    noncurrent_contract = "chanlun-human-assisted-signal-document"
+    for signal in noncurrent["signals"]:
         signal.pop("decision_document_schema", None)
         signal.pop("decision_document_id", None)
-    legacy["signal_document_contract_id"] = legacy_contract
-    manifest = legacy["coverage_manifest"]
-    manifest["signal_document_contract_id"] = legacy_contract
-    legacy_epoch_id = screening_coverage_epoch_id(
+    noncurrent["signal_document_contract_id"] = noncurrent_contract
+    manifest = noncurrent["coverage_manifest"]
+    manifest["signal_document_contract_id"] = noncurrent_contract
+    noncurrent_epoch_id = screening_coverage_epoch_id(
         market_data_as_of=datetime.fromisoformat(manifest["market_data_as_of"]),
         universe_revision=manifest["universe_revision"],
         sector_catalog_revision=manifest["sector_catalog_revision"],
         sector_strength_evidence_revision=manifest["sector_strength_evidence_revision"],
-        decision_core_id=legacy["decision_core_id"],
+        decision_core_id=noncurrent["decision_core_id"],
         screening_policy_id=manifest["screening_policy_id"],
-        structure_version=legacy["structure_version"],
-        parameter_version=legacy["parameter_version"],
-        signal_document_contract_id=legacy_contract,
+        structure_contract_id=noncurrent["structure_contract_id"],
+        parameter_set_id=noncurrent["parameter_set_id"],
+        signal_document_contract_id=noncurrent_contract,
     )
-    legacy["coverage_epoch_id"] = legacy_epoch_id
-    manifest["coverage_epoch_id"] = legacy_epoch_id
-    first._finalize_snapshot_identity(legacy)
-    cache_path.write_text(json.dumps(legacy), encoding="utf-8")
+    noncurrent["coverage_epoch_id"] = noncurrent_epoch_id
+    manifest["coverage_epoch_id"] = noncurrent_epoch_id
+    first._finalize_snapshot_identity(noncurrent)
+    cache_path.write_text(json.dumps(noncurrent), encoding="utf-8")
 
     restarted_market = ApproachingMarketData()
     restarted = TradingScreeningService(
@@ -1909,19 +1786,18 @@ def test_v8_signal_rows_gain_decision_identity_without_qmt_replay(
     )
     migrated = restarted.snapshot()
 
-    assert migrated["scan_state"] == "complete"
-    assert migrated["coverage_manifest"]["complete"] is True
-    assert len(migrated["signals"]) == len(legacy["signals"]) > 0
+    assert migrated["scan_state"] == "not_started"
+    assert migrated["coverage_manifest"]["complete"] is False
+    assert migrated["signals"] == []
     assert migrated["signal_document_contract_id"] == SIGNAL_DOCUMENT_CONTRACT_ID
-    assert migrated["coverage_epoch_id"] != legacy_epoch_id
-    assert all(
-        validate_signal_decision_document(signal) == signal["decision_document_id"]
-        for signal in migrated["signals"]
+    assert migrated["coverage_epoch_id"] is None
+    assert restarted.health_snapshot()["quarantined_cache_reason"] == (
+        "CURRENT_CACHE_CONTRACT_INVALID"
     )
     assert restarted_market.bundle_codes == []
 
 
-def test_incomplete_v8_coverage_queue_resumes_after_identity_migration(
+def test_incomplete_noncurrent_queue_is_not_resumed_by_current_runtime(
     tmp_path: Path,
 ) -> None:
     symbols = ("SZ.000001", "SZ.000002", "SZ.000003")
@@ -1940,29 +1816,29 @@ def test_incomplete_v8_coverage_queue_resumes_after_identity_migration(
     assert partial["coverage_manifest"]["complete"] is False
     assert set(partial["coverage_manifest"]["pending_frequencies"]) == set(symbols[1:])
 
-    legacy = json.loads(cache_path.read_text(encoding="utf-8"))
-    legacy_contract = "chanlun-human-assisted-signal-document/v8"
-    for signal in legacy["signals"]:
+    noncurrent = json.loads(cache_path.read_text(encoding="utf-8"))
+    noncurrent_contract = "chanlun-human-assisted-signal-document"
+    for signal in noncurrent["signals"]:
         signal.pop("decision_document_schema", None)
         signal.pop("decision_document_id", None)
-    legacy["signal_document_contract_id"] = legacy_contract
-    manifest = legacy["coverage_manifest"]
-    manifest["signal_document_contract_id"] = legacy_contract
-    legacy_epoch_id = screening_coverage_epoch_id(
+    noncurrent["signal_document_contract_id"] = noncurrent_contract
+    manifest = noncurrent["coverage_manifest"]
+    manifest["signal_document_contract_id"] = noncurrent_contract
+    noncurrent_epoch_id = screening_coverage_epoch_id(
         market_data_as_of=datetime.fromisoformat(manifest["market_data_as_of"]),
         universe_revision=manifest["universe_revision"],
         sector_catalog_revision=manifest["sector_catalog_revision"],
         sector_strength_evidence_revision=manifest["sector_strength_evidence_revision"],
-        decision_core_id=legacy["decision_core_id"],
+        decision_core_id=noncurrent["decision_core_id"],
         screening_policy_id=manifest["screening_policy_id"],
-        structure_version=legacy["structure_version"],
-        parameter_version=legacy["parameter_version"],
-        signal_document_contract_id=legacy_contract,
+        structure_contract_id=noncurrent["structure_contract_id"],
+        parameter_set_id=noncurrent["parameter_set_id"],
+        signal_document_contract_id=noncurrent_contract,
     )
-    legacy["coverage_epoch_id"] = legacy_epoch_id
-    manifest["coverage_epoch_id"] = legacy_epoch_id
-    first._finalize_snapshot_identity(legacy)
-    cache_path.write_text(json.dumps(legacy), encoding="utf-8")
+    noncurrent["coverage_epoch_id"] = noncurrent_epoch_id
+    manifest["coverage_epoch_id"] = noncurrent_epoch_id
+    first._finalize_snapshot_identity(noncurrent)
+    cache_path.write_text(json.dumps(noncurrent), encoding="utf-8")
 
     restarted_market = ActionableMarketData()
     restarted = TradingScreeningService(
@@ -1975,14 +1851,19 @@ def test_incomplete_v8_coverage_queue_resumes_after_identity_migration(
         notifier=None,
         config=TradingScreeningConfig(max_symbols_per_refresh=1),
     )
-    migrated = restarted.snapshot()
+    rejected = restarted.snapshot()
 
-    assert migrated["signal_document_contract_id"] == SIGNAL_DOCUMENT_CONTRACT_ID
-    assert migrated["coverage_manifest"]["complete"] is False
-    assert set(migrated["coverage_manifest"]["pending_frequencies"]) == set(symbols[1:])
-    assert set(restarted._pending_frequencies) == set(symbols[1:])
-    assert len(migrated["signals"]) == len(legacy["signals"]) > 0
+    assert rejected["scan_state"] == "not_started"
+    assert rejected["signals"] == []
+    assert rejected["coverage_epoch_id"] is None
+    assert restarted._pending_frequencies == {}
     assert restarted_market.bundle_codes == []
+
+    rebuilt = restarted.refresh_now()
+    assert set(rebuilt["coverage_manifest"]["pending_frequencies"]) == set(
+        symbols[1:]
+    )
+    assert restarted_market.bundle_codes == ["SZ.000001"]
 
 
 def test_cache_with_tampered_semantic_content_is_rejected(tmp_path: Path) -> None:
@@ -2759,7 +2640,7 @@ class SessionIssueMarketData(ActionableMarketData):
                     warning_codes=(),
                     source_revision=sha256_json(
                         {
-                            "schema": "test-higher-timeframe-period/v1",
+                            "schema": "test-higher-timeframe-period",
                             "subject": "SH.000300",
                             "period": period,
                         }
@@ -2779,6 +2660,12 @@ class SessionIssueMarketData(ActionableMarketData):
             bundle,
             higher_timeframe_gates=HigherTimeframeGateBundle(
                 market=market,
+                sector=replace(
+                    market,
+                    subject=bundle.sector.sector_id,
+                    snapshot_id="sector:test",
+                    source_revision="sector:test",
+                ),
                 symbol=symbol,
             ),
             enforce_higher_timeframe_entry_gate=True,
@@ -2973,6 +2860,21 @@ class SectorNativeDailyResearchMarketData(ActionableMarketData):
             warmup_converged=False,
             warmup_reason_code=("QMT_HIGHER_TIMEFRAME_WARMUP_HISTORY_INSUFFICIENT"),
             boundary_status="VISIBLE_PREFIX_STARTS_AFTER_REQUESTED_WARMUP",
+            physical_source_boundary_status=(
+                "REQUESTED_REPLAY_LEFT_BOUNDARY_CLIPS_EARLIER_QMT_HISTORY"
+            ),
+            physical_source_requested_start_at=bundle.as_of.replace(
+                hour=9,
+                minute=35,
+            ),
+            physical_source_required_contributor_start_at=bundle.as_of.replace(
+                hour=9,
+                minute=35,
+            ),
+            physical_source_representative_member_count=24,
+            physical_source_available_member_count=23,
+            physical_source_required_contributor_count=15,
+            physical_source_inventory_revision="sha256:" + "9" * 64,
         )
         blocker = "QMT_SECTOR_NATIVE_DAILY_AND_5M_UNRECONCILED_RESEARCH_BRIDGE"
         diagnostics = tuple(
@@ -2989,7 +2891,7 @@ class SectorNativeDailyResearchMarketData(ActionableMarketData):
                 warning_codes=(),
                 source_revision=sha256_json(
                     {
-                        "schema": "test-sector-native-daily-period/v1",
+                        "schema": "test-sector-native-daily-period",
                         "period": period,
                     }
                 ),
@@ -3006,9 +2908,9 @@ class SectorNativeDailyResearchMarketData(ActionableMarketData):
             # deliberately caps that result to AMBER.
             gate="AMBER",
             grade="RESEARCH_ONLY",
-            snapshot_id=sha256_json({"schema": "test-sector-native-daily-gate/v1"}),
+            snapshot_id=sha256_json({"schema": "test-sector-native-daily-gate"}),
             source_revision=sha256_json(
-                {"schema": "test-sector-native-daily-source/v1"}
+                {"schema": "test-sector-native-daily-source"}
             ),
             reason_codes=(blocker,),
             period_diagnostics=diagnostics,
@@ -3273,7 +3175,7 @@ def test_snapshot_exposes_exact_session_gap_without_claiming_suspension(
     ]
 
 
-def test_snapshot_binds_mwd_warmup_evidence_and_rejects_rehashed_counts(
+def test_snapshot_binds_mwd_warmup_evidence(
     tmp_path: Path,
 ) -> None:
     service = TradingScreeningService(
@@ -3313,31 +3215,6 @@ def test_snapshot_binds_mwd_warmup_evidence_and_rejects_rehashed_counts(
     )
     assert risk["sector_warmup_convergence_evidence"]["active_gate_unchanged"] is True
     assert risk["symbol_warmup_convergence_evidence"]["diagnostic_only"] is True
-    assert live_review_risk_evidence_replay_codes(payload) == ()
-
-    forged = json.loads(json.dumps(payload))
-    forged_risk = forged["signals"][0]["higher_timeframe_risk"]
-    forged_risk["market_warmup_evidence"]["suffix_daily_bar_count"] = 80
-    service._finalize_snapshot_identity(forged)
-
-    assert live_review_risk_evidence_replay_codes(forged) == ("SZ.000001",)
-
-    forged_convergence = json.loads(json.dumps(payload))
-    forged_envelope = forged_convergence["signals"][0]["higher_timeframe_risk"][
-        "market_warmup_convergence_evidence"
-    ]
-    forged_envelope["status"] = "STABLE_ALL_PREFIXES"
-    forged_envelope["stable_all_prefixes"] = True
-    forged_envelope["reason_codes"] = ["WARMUP_ENVELOPE_STABLE_ALL_PREFIXES"]
-    stable = {
-        key: value for key, value in forged_envelope.items() if key != "content_sha256"
-    }
-    forged_envelope["content_sha256"] = sha256_json(stable)
-    service._finalize_snapshot_identity(forged_convergence)
-
-    assert live_review_risk_evidence_replay_codes(forged_convergence) == ("SZ.000001",)
-
-
 def test_newer_one_minute_signal_uses_frozen_mwd_cutoff_and_is_self_consistent(
     tmp_path: Path,
 ) -> None:
@@ -3392,11 +3269,6 @@ def test_newer_one_minute_signal_uses_frozen_mwd_cutoff_and_is_self_consistent(
             risk[f"{subject}_warmup_convergence_evidence"]["as_of"]
             == risk_cutoff.isoformat()
         )
-    # The producer and the exact live-review reader must agree immediately;
-    # otherwise every restart would put this symbol back into the replay queue.
-    assert live_review_risk_evidence_replay_codes(payload) == ()
-
-
 def test_presentation_snapshot_compacts_audit_only_evidence(
     tmp_path: Path,
 ) -> None:
@@ -3418,7 +3290,7 @@ def test_presentation_snapshot_compacts_audit_only_evidence(
     visible_risk = visible_signal["higher_timeframe_risk"]
 
     assert presentation["presentation_schema"] == (
-        "chanlun-trading-screening-presentation/v1"
+        "chanlun-trading-screening-presentation"
     )
     assert (
         presentation["source_snapshot_content_sha256"]
@@ -3454,7 +3326,7 @@ def test_presentation_snapshot_compacts_audit_only_evidence(
     assert service.snapshot()["signals"][0]["code"] == "SZ.000001"
 
 
-def test_snapshot_binds_native_daily_reconciliation_and_rejects_relabeling(
+def test_snapshot_binds_native_daily_reconciliation(
     tmp_path: Path,
 ) -> None:
     service = TradingScreeningService(
@@ -3494,17 +3366,7 @@ def test_snapshot_binds_native_daily_reconciliation_and_rejects_relabeling(
         risk["symbol_native_daily_calendar_coverage_evidence"]["entry_disposition"]
         == "NO_CALENDAR_BLOCKER"
     )
-    assert live_review_risk_evidence_replay_codes(payload) == ()
-
-    forged = json.loads(json.dumps(payload))
-    forged_risk = forged["signals"][0]["higher_timeframe_risk"]
-    forged_risk["symbol_native_daily_reconciliation_evidence"]["symbol"] = "SH.600000"
-    service._finalize_snapshot_identity(forged)
-
-    assert live_review_risk_evidence_replay_codes(forged) == ("SZ.000001",)
-
-
-def test_native_daily_ahead_snapshot_is_targeted_for_transport_repair_replay(
+def test_native_daily_ahead_snapshot_fails_closed(
     tmp_path: Path,
 ) -> None:
     service = TradingScreeningService(
@@ -3523,7 +3385,7 @@ def test_native_daily_ahead_snapshot_is_targeted_for_transport_repair_replay(
     assert payload["signals"][0]["higher_timeframe_risk"]["market_gate"] == (
         "UNRESOLVED"
     )
-    assert live_review_risk_evidence_replay_codes(payload) == ("SZ.000001",)
+    assert payload["signals"][0]["entry_allowed"] is False
 
 
 def test_snapshot_binds_unexplained_native_daily_gap_without_claiming_suspension(
@@ -3553,7 +3415,6 @@ def test_snapshot_binds_unexplained_native_daily_gap_without_claiming_suspension
     )
     assert coverage["point_in_time_status_evidence_present"] is False
     assert coverage["entry_disposition"] == "FAIL_CLOSED"
-    assert live_review_risk_evidence_replay_codes(payload) == ()
     review = market_symbol_higher_timeframe_review_evidence_from_risk(
         risk,
         symbol="SZ.000001",
@@ -3565,16 +3426,6 @@ def test_snapshot_binds_unexplained_native_daily_gap_without_claiming_suspension
     assert support.native_daily_calendar_coverage_evidence.status == (
         "UNEXPLAINED_CALENDAR_SESSION_MISSING"
     )
-
-    forged = json.loads(json.dumps(payload))
-    forged_coverage = forged["signals"][0]["higher_timeframe_risk"][
-        "symbol_native_daily_calendar_coverage_evidence"
-    ]
-    forged_coverage["point_in_time_status_evidence_present"] = True
-    service._finalize_snapshot_identity(forged)
-
-    assert live_review_risk_evidence_replay_codes(forged) == ("SZ.000001",)
-
 
 def test_snapshot_authenticates_sector_native_daily_research_cap(
     tmp_path: Path,
@@ -3610,102 +3461,6 @@ def test_snapshot_authenticates_sector_native_daily_research_cap(
         risk["sector_research_bridge_parameter_set_id"]
         == (sector_native_daily_research_bridge_contract()["parameter_set_id"])
     )
-    assert live_review_risk_evidence_replay_codes(payload) == ()
-
-    mutations = (
-        ("sector_higher_timeframe_source_mode", "PAGE_PARITY_SAME_5M_BASE"),
-        ("sector_research_bridge_parameter_set_id", "sha256:" + "9" * 64),
-        ("sector_gate", "GREEN"),
-    )
-    for field, value in mutations:
-        forged = json.loads(json.dumps(payload))
-        forged["signals"][0]["higher_timeframe_risk"][field] = value
-        service._finalize_snapshot_identity(forged)
-        assert live_review_risk_evidence_replay_codes(forged) == ("SZ.000001",)
-
-    missing = json.loads(json.dumps(payload))
-    missing_risk = missing["signals"][0]["higher_timeframe_risk"]
-    for field in (
-        "sector_higher_timeframe_source_mode",
-        "sector_strict_same_5m_warmup_evidence",
-        "sector_strict_same_5m_source_coverage_evidence",
-        "sector_research_bridge_parameter_set_id",
-    ):
-        missing_risk.pop(field)
-    service._finalize_snapshot_identity(missing)
-    assert live_review_risk_evidence_replay_codes(missing) == ("SZ.000001",)
-
-
-def test_restart_targetedly_replays_legacy_session_evidence_rows(
-    tmp_path: Path,
-) -> None:
-    """Legacy generic gaps must be repaired before the final review boundary.
-
-    The repair stays in the same frozen coverage epoch and replays only the
-    affected symbol.  All parameter identities remain untouched.
-    """
-
-    cache_path = tmp_path / "snapshot.json"
-    symbols = ("SZ.000001",)
-    catalog = MultiMemberSectorCatalog(symbols)
-    first = TradingScreeningService(
-        market_data=SessionIssueMarketData(),
-        sector_catalog=catalog,
-        engine=TradingEngine(),
-        scan_planner=SequencedPlanner((symbols,)),
-        cache_path=cache_path,
-        clock=lambda: AS_OF,
-        notifier=None,
-    )
-    current = first.refresh_now()
-    assert current["coverage_manifest"]["complete"] is True
-    assert live_review_risk_evidence_replay_codes(current) == ()
-
-    legacy = json.loads(json.dumps(current))
-    target = next(
-        signal for signal in legacy["signals"] if signal["code"] == symbols[0]
-    )
-    risk = target["higher_timeframe_risk"]
-    risk.pop("session_evidence_contract_id")
-    risk.pop("market_session_evidence")
-    risk.pop("symbol_session_evidence")
-    first._finalize_snapshot_identity(legacy)
-    cache_path.write_text(json.dumps(legacy), encoding="utf-8")
-    assert live_review_risk_evidence_replay_codes(legacy) == (symbols[0],)
-
-    replay_market = SessionIssueMarketData()
-
-    def unexpected_replan(**_kwargs) -> ScanPlan:
-        raise AssertionError("targeted evidence replay must resume the frozen epoch")
-
-    restarted = TradingScreeningService(
-        market_data=replay_market,
-        sector_catalog=MultiMemberSectorCatalog(symbols),
-        engine=TradingEngine(),
-        scan_planner=unexpected_replan,
-        cache_path=cache_path,
-        clock=lambda: AS_OF + timedelta(minutes=10),
-        notifier=None,
-    )
-    health = restarted.health_snapshot()
-    assert health["risk_evidence_replay_symbol_count"] == 1
-    assert health["risk_evidence_replay_codes"] == [symbols[0]]
-
-    repaired = restarted.refresh_now()
-
-    assert replay_market.bundle_codes == [symbols[0]]
-    assert repaired["coverage_epoch_id"] == current["coverage_epoch_id"]
-    assert repaired["screening_policy_id"] == current["screening_policy_id"]
-    assert repaired["decision_core_id"] == current["decision_core_id"]
-    assert repaired["coverage_manifest"]["complete"] is True
-    assert repaired["coverage_manifest"]["completed_codes"] == list(symbols)
-    assert repaired["coverage_manifest"]["pending_frequencies"] == {}
-    assert live_review_risk_evidence_replay_codes(repaired) == ()
-    repaired_health = restarted.health_snapshot()
-    assert repaired_health["risk_evidence_replay_symbol_count"] == 0
-    assert repaired_health["risk_evidence_replay_codes"] == []
-
-
 def test_signal_identity_survives_service_restart(tmp_path: Path) -> None:
     cache_path = tmp_path / "snapshot.json"
     first_service = TradingScreeningService(
@@ -3733,7 +3488,9 @@ def test_signal_identity_survives_service_restart(tmp_path: Path) -> None:
     assert len(first["signals"]) == len(second["signals"]) == 1
     assert first["signals"][0]["signal_id"] == second["signals"][0]["signal_id"]
     assert first["signals"][0]["lifecycle_stage"] == "triggered"
-    assert second["signals"][0]["lifecycle_stage"] == "executable"
+    # A process restart with the same frozen market cutoff must not advance a
+    # lifecycle merely because wall-clock time passed.
+    assert second["signals"][0]["lifecycle_stage"] == "triggered"
     assert second["signals"][0]["chart_urls"] == {
         "d": "/?market=a&code=SZ.000001&layout=single&intervals=D",
         "30m": "/?market=a&code=SZ.000001&layout=single&intervals=30",
@@ -3761,7 +3518,7 @@ def test_confirmed_signal_serializes_causal_and_price_basis_evidence(
         signal["setup_5m"]["available_at"]
         == confirmed_point("2buy").available_at.isoformat()
     )
-    assert signal["setup_5m"]["price_basis_revision"] == "test-raw-v1"
+    assert signal["setup_5m"]["price_basis_revision"] == "test-raw"
     assert signal["setup_5m"]["tower"] == "formal"
     assert (
         signal["trigger_1m"]["available_at"]
@@ -3823,7 +3580,7 @@ def test_incomplete_frozen_coverage_never_emits_realtime_notification(
 
     assert snapshot["coverage_manifest"]["complete"] is False
     assert snapshot["notification_context"] == {
-        "schema": "chanlun-realtime-notification-context/v1",
+        "schema": "chanlun-realtime-notification-context",
         "realtime_eligible": False,
         "reason_code": "COVERAGE_IN_PROGRESS",
         "source": "FROZEN_COVERAGE",
@@ -3945,7 +3702,8 @@ def test_priority_monitor_uses_current_bars_while_coverage_epoch_stays_frozen(
         config=TradingScreeningConfig(
             max_symbols_per_refresh=1,
             priority_monitoring_enabled=True,
-            max_priority_monitor_symbols_per_refresh=2,
+            max_five_minute_candidate_symbols_per_refresh=2,
+            max_thirty_minute_candidate_symbols_per_refresh=2,
             priority_monitor_interval_seconds=60,
         ),
     )
@@ -3959,16 +3717,14 @@ def test_priority_monitor_uses_current_bars_while_coverage_epoch_stays_frozen(
     second = service.refresh_now()
 
     assert market.bundle_observations == [
-        # The live lane starts immediately and uses otherwise-unscanned
-        # supportive-sector capacity without changing coverage accounting.
+        # The 5m/30m candidate lanes start immediately with an otherwise
+        # unscanned supportive-sector member, without changing coverage.
         (symbols[2], frozen_as_of),
-        (symbols[3], frozen_as_of),
         (symbols[0], frozen_as_of),
         (symbols[1], frozen_as_of),
-        # One minute later the live lane returns to the owned/watchlist names,
-        # while the archival queue keeps its original frozen cutoff.
+        # One minute later the explicit watchlist is always in the current 1m
+        # lane, while the archival queue keeps its original frozen cutoff.
         (symbols[0], observed_at[0]),
-        (symbols[1], observed_at[0]),
         (symbols[2], frozen_as_of),
     ]
     # Sector selection stays frozen for the coverage/preselection epoch;
@@ -3979,7 +3735,10 @@ def test_priority_monitor_uses_current_bars_while_coverage_epoch_stays_frozen(
     assert set(second["coverage_manifest"]["pending_frequencies"]) == {symbols[3]}
     priority_state = json.loads(state_path.read_text(encoding="utf-8"))
     assert priority_state["last_at"] == observed_at[0].isoformat()
-    assert priority_state["last_codes"] == list(symbols[:2])
+    assert priority_state["last_codes"] == [symbols[0]]
+    assert priority_state["candidate_monitor_contract_id"] == (
+        "bar-cadence-live-candidate-monitor"
+    )
     assert priority_state["decision_core_id"] == service._decision_core_id
     assert priority_state["sector_source_mode"] == "FROZEN_COVERAGE_EPOCH"
     assert priority_state["sector_as_of"] == frozen_as_of.isoformat()
@@ -3987,7 +3746,8 @@ def test_priority_monitor_uses_current_bars_while_coverage_epoch_stays_frozen(
     health = service.health_snapshot()
     assert health["priority_monitor_ready"] is True
     assert health["priority_monitor_status"] == "verified"
-    assert health["priority_monitor_last_codes"] == list(symbols[:2])
+    assert health["priority_monitor_last_codes"] == [symbols[0]]
+    assert health["candidate_monitor_status"] == "warming"
     assert health["priority_monitor_sector_source_mode"] == ("FROZEN_COVERAGE_EPOCH")
     assert health["priority_monitor_sector_as_of"] == frozen_as_of.isoformat()
     assert (
@@ -4051,7 +3811,8 @@ def test_priority_only_refresh_does_not_consume_archival_coverage_queue(
         config=TradingScreeningConfig(
             max_symbols_per_refresh=1,
             priority_monitoring_enabled=True,
-            max_priority_monitor_symbols_per_refresh=2,
+            max_five_minute_candidate_symbols_per_refresh=2,
+            max_thirty_minute_candidate_symbols_per_refresh=2,
             priority_monitor_interval_seconds=60,
         ),
     )
@@ -4074,7 +3835,7 @@ def test_priority_only_refresh_does_not_consume_archival_coverage_queue(
     assert len(catalog.restore_calls) == 1
     assert catalog.restore_calls[0][0] == observed_at[0] - timedelta(minutes=1)
     assert catalog.restore_calls[0][1].startswith("sha256:")
-    assert len(market.bundle_codes) == first_bundle_count + 2
+    assert len(market.bundle_codes) == first_bundle_count + 1
     health = service.health_snapshot()
     assert health["priority_monitor_last_at"] == observed_at[0].isoformat()
     assert health["priority_monitor_last_error_count"] == 0
@@ -4119,72 +3880,70 @@ def test_restarted_priority_monitor_requires_immediate_runtime_verification(
     ]
 
 
-def test_single_slot_priority_monitor_alternates_critical_and_sector_lanes(
-    tmp_path: Path,
-) -> None:
-    service = TradingScreeningService(
-        market_data=RecordingMarketData(),
-        sector_catalog=RecordingSectorCatalog(),
-        engine=RecordingEngine(),
-        scan_planner=RecordingPlanner(),
-        cache_path=tmp_path / "snapshot.json",
-        clock=lambda: AS_OF,
-        notifier=None,
-        config=TradingScreeningConfig(
-            priority_monitoring_enabled=True,
-            max_priority_monitor_symbols_per_refresh=1,
-        ),
-    )
+def test_candidate_scheduler_covers_a_five_minute_universe_once_per_cadence() -> None:
+    universe = tuple(f"SZ.{value:06d}" for value in range(10))
+    observed_at = AS_OF.replace(hour=10, minute=0)
+    last_success_at: dict[str, datetime] = {}
 
-    batches = [
-        service._take_priority_monitor_codes(
-            critical_codes=("C1", "C2"),
-            sector_trigger_codes=("S1", "S2"),
+    batches = []
+    for minute in range(5):
+        current = observed_at + timedelta(minutes=minute)
+        batch = _take_due_candidate_batch(
+            universe,
+            last_success_at=last_success_at,
+            observed_at=current,
+            target_seconds=300,
+            monitor_interval_seconds=60,
+            max_symbols=2,
+            previous_monitor_at=(
+                None if minute == 0 else current - timedelta(minutes=1)
+            ),
         )
-        for _ in range(4)
-    ]
-
-    assert batches == [("C1",), ("S1",), ("C2",), ("S2",)]
-
-
-def test_priority_monitor_keeps_holdings_and_watchlist_in_every_fitting_batch(
-    tmp_path: Path,
-) -> None:
-    service = TradingScreeningService(
-        market_data=RecordingMarketData(),
-        sector_catalog=RecordingSectorCatalog(),
-        engine=RecordingEngine(),
-        scan_planner=RecordingPlanner(),
-        cache_path=tmp_path / "snapshot.json",
-        clock=lambda: AS_OF,
-        notifier=None,
-        config=TradingScreeningConfig(
-            priority_monitoring_enabled=True,
-            max_priority_monitor_symbols_per_refresh=4,
-        ),
-    )
-
-    batches = [
-        service._take_priority_monitor_codes(
-            always_codes=("HOLDING", "WATCHLIST"),
-            critical_codes=("BUY1", "BUY2"),
-            sector_trigger_codes=("SECTOR1", "SECTOR2"),
-        )
-        for _ in range(2)
-    ]
+        batches.append(batch)
+        last_success_at.update({code: current for code in batch})
 
     assert batches == [
-        ("HOLDING", "WATCHLIST", "BUY1", "SECTOR1"),
-        ("HOLDING", "WATCHLIST", "BUY2", "SECTOR2"),
+        universe[0:2],
+        universe[2:4],
+        universe[4:6],
+        universe[6:8],
+        universe[8:10],
     ]
+    assert set(last_success_at) == set(universe)
 
 
-def test_priority_monitor_never_rotates_holdings_behind_the_configured_limit(
+def test_candidate_scheduler_exposes_hard_capacity_instead_of_overclaiming() -> None:
+    universe = tuple(f"SZ.{value:06d}" for value in range(20))
+
+    batch = _take_due_candidate_batch(
+        universe,
+        last_success_at={},
+        observed_at=AS_OF,
+        target_seconds=300,
+        monitor_interval_seconds=60,
+        max_symbols=3,
+    )
+
+    # Four symbols per minute would be required for a five-minute SLA.  The
+    # scheduler honors its hard cap; health reports the insufficiency.
+    assert batch == universe[:3]
+
+
+def test_candidate_health_reports_insufficient_configured_cadence_capacity(
     tmp_path: Path,
 ) -> None:
+    symbols = tuple(f"SZ.{value:06d}" for value in range(1, 21))
+    catalog = MultiMemberSectorCatalog(symbols)
+    catalog.batch = SectorAssessmentBatch(
+        assessments=(replace(eligible_sector(), regime="supportive"),),
+        discovered_count=1,
+        completed_count=1,
+        failure_counts=(),
+        errors=(),
+    )
     service = TradingScreeningService(
         market_data=RecordingMarketData(),
-        sector_catalog=RecordingSectorCatalog(),
+        sector_catalog=catalog,
         engine=RecordingEngine(),
         scan_planner=RecordingPlanner(),
         cache_path=tmp_path / "snapshot.json",
@@ -4192,21 +3951,127 @@ def test_priority_monitor_never_rotates_holdings_behind_the_configured_limit(
         notifier=None,
         config=TradingScreeningConfig(
             priority_monitoring_enabled=True,
-            max_priority_monitor_symbols_per_refresh=2,
+            max_five_minute_candidate_symbols_per_refresh=3,
+            max_thirty_minute_candidate_symbols_per_refresh=3,
         ),
     )
 
-    assert service._take_priority_monitor_codes(
-        holding_codes=("H1", "H2", "H3"),
-        always_codes=("WATCHLIST",),
-        critical_codes=("BUY",),
-        sector_trigger_codes=("SECTOR",),
-    ) == ("H1", "H2", "H3")
+    service._run_priority_monitor(
+        previous={
+            "signals": [
+                {
+                    "signal_id": f"formed:{code}",
+                    "code": code,
+                    "point_type": "2buy",
+                    "lifecycle_stage": "formed",
+                }
+                for code in symbols
+            ]
+        },
+        observed_at=AS_OF,
+    )
+
+    health = service.health_snapshot()
+    assert health["candidate_monitor_capacity_sufficient"] is False
+    assert health["candidate_monitor_status"] == "capacity_insufficient"
+    assert health["candidate_monitor_reason_codes"] == [
+        "CANDIDATE_MONITOR_CONFIGURED_CAPACITY_INSUFFICIENT"
+    ]
+    assert health["candidate_monitor_five_minute"][
+        "required_symbols_per_refresh"
+    ] == 4
+    assert health["candidate_monitor_five_minute"]["last_batch_count"] == 3
+
+
+def test_priority_monitor_uses_bar_cadence_lanes_and_merges_frequency_work(
+    tmp_path: Path,
+) -> None:
+    symbols = tuple(f"SZ.{value:06d}" for value in range(1, 5))
+    observed_at = AS_OF.replace(hour=14, minute=58)
+    market = RecordingMarketData()
+    catalog = MultiMemberSectorCatalog(symbols)
+    catalog.batch = SectorAssessmentBatch(
+        assessments=(replace(eligible_sector(), regime="supportive"),),
+        discovered_count=1,
+        completed_count=1,
+        failure_counts=(),
+        errors=(),
+    )
+    service = TradingScreeningService(
+        market_data=market,
+        sector_catalog=catalog,
+        engine=RecordingEngine(),
+        scan_planner=RecordingPlanner(),
+        cache_path=tmp_path / "snapshot.json",
+        clock=lambda: observed_at,
+        notifier=None,
+        config=TradingScreeningConfig(
+            priority_monitoring_enabled=True,
+            stock_worker_count=1,
+            max_five_minute_candidate_symbols_per_refresh=8,
+            max_thirty_minute_candidate_symbols_per_refresh=8,
+        ),
+    )
+    previous = {
+        "signals": [
+            {
+                "signal_id": "armed-buy",
+                "code": symbols[0],
+                "point_type": "1buy",
+                "lifecycle_stage": "armed",
+            },
+            {
+                "signal_id": "formed-buy",
+                "code": symbols[1],
+                "point_type": "2buy",
+                "lifecycle_stage": "formed",
+            },
+        ]
+    }
+
+    service._run_priority_monitor(previous=previous, observed_at=observed_at)
+    service._run_priority_monitor(
+        previous=previous,
+        observed_at=observed_at + timedelta(minutes=1),
+    )
+
+    assert market.bundle_frequency_requests == [
+        (symbols[0], ("30m", "5m", "1m")),
+        (symbols[1], ("30m", "5m")),
+    ]
+    service._clock = lambda: observed_at + timedelta(minutes=1)
+    health = service.health_snapshot()
+    assert health["priority_monitor_last_codes"] == []
+    assert health["candidate_monitor_status"] == "warming"
+    assert health["candidate_monitor_five_minute"]["current_count"] == 2
+    assert health["candidate_monitor_five_minute"]["missing_count"] == 0
+    assert health["candidate_monitor_five_minute"]["last_batch_codes"] == [
+        symbols[1]
+    ]
+    assert health["candidate_monitor_thirty_minute"]["last_batch_codes"] == [
+        symbols[1]
+    ]
+    restarted = TradingScreeningService(
+        market_data=RecordingMarketData(),
+        sector_catalog=catalog,
+        engine=RecordingEngine(),
+        scan_planner=RecordingPlanner(),
+        cache_path=tmp_path / "snapshot.json",
+        clock=lambda: observed_at + timedelta(minutes=1, seconds=30),
+        notifier=None,
+        config=service._config,
+    )
+    assert set(restarted._candidate_monitor_five_last_success_at) == set(
+        symbols[:2]
+    )
+    assert set(restarted._candidate_monitor_thirty_last_success_at) == set(
+        symbols[:2]
+    )
+    assert restarted._priority_monitor_runtime_verified is False
 
 
 def test_priority_buy_candidates_exclude_unowned_sell_only_signals() -> None:
-    candidates = _priority_buy_candidate_codes(
-        (
+    rows = (
             {
                 "code": "SELL_ONLY",
                 "point_type": "3sell",
@@ -4228,33 +4093,35 @@ def test_priority_buy_candidates_exclude_unowned_sell_only_signals() -> None:
                 "lifecycle_stage": "executable",
             },
             {
-                "code": "BUY_LEGACY_FORMED",
+                "code": "BUY_APPROACHING_B",
                 "point_type": "3buy",
                 "lifecycle_stage": "approaching",
-                "setup_5m": {
-                    "point_type": "3buy",
-                    "status": "provisional",
-                    "evidence_codes": [
-                        "provisional_center_completion",
-                        "core_boundary_held",
-                    ],
-                },
             },
             {
                 "code": "WATCHED_BUY",
                 "point_type": "2buy",
                 "lifecycle_stage": "triggered",
             },
-        ),
+        )
+    candidates = _priority_buy_candidate_codes(
+        rows,
         excluded_codes=frozenset({"WATCHED_BUY"}),
     )
 
     assert candidates == (
         "BUY_EXECUTABLE",
         "BUY_ARMED",
-        "BUY_LEGACY_FORMED",
         "BUY_APPROACHING",
+        "BUY_APPROACHING_B",
     )
+    urgent = _priority_buy_candidate_codes(
+        rows,
+        excluded_codes=frozenset({"WATCHED_BUY"}),
+        allowed_stages=frozenset(
+            {"armed", "triggered", "executable", "active"}
+        ),
+    )
+    assert urgent == ("BUY_EXECUTABLE", "BUY_ARMED")
 
 
 def test_priority_state_prunes_only_unowned_sell_overlay_documents(
@@ -4399,7 +4266,7 @@ def test_priority_monitor_notification_is_early_and_idempotent(
             def green(subject: str) -> HigherTimeframeGateEvidence:
                 identity = sha256_json(
                     {
-                        "schema": "fresh-priority-green-gate/v1",
+                        "schema": "fresh-priority-green-gate",
                         "subject": subject,
                         "observed_at": risk_evidence_cutoff.isoformat(),
                     }
@@ -4429,7 +4296,7 @@ def test_priority_monitor_notification_is_early_and_idempotent(
                 entry_valid_until=a_share_optional_entry_valid_until(
                     trigger.available_at
                 ),
-                raw_price_basis_revision="test-raw-v1",
+                raw_price_basis_revision="test-raw",
             )
             return SymbolStructureBundle(
                 code=code,
@@ -4486,7 +4353,8 @@ def test_priority_monitor_notification_is_early_and_idempotent(
         config=TradingScreeningConfig(
             max_symbols_per_refresh=1,
             priority_monitoring_enabled=True,
-            max_priority_monitor_symbols_per_refresh=1,
+            max_five_minute_candidate_symbols_per_refresh=1,
+            max_thirty_minute_candidate_symbols_per_refresh=1,
             priority_monitor_interval_seconds=60,
         ),
     )
@@ -4531,6 +4399,49 @@ def test_priority_monitor_notification_is_early_and_idempotent(
     observed_at[0] += timedelta(minutes=1)
     service.refresh_now()
     assert len(sender.messages) == 1
+
+
+def test_candidate_cadence_lane_cannot_emit_realtime_notification(
+    tmp_path: Path,
+) -> None:
+    class RecordingNotifier:
+        def __init__(self) -> None:
+            self.calls: list[tuple[dict[str, object], dict[str, object]]] = []
+
+        def dispatch_changes(self, previous, current) -> None:
+            self.calls.append((dict(previous), dict(current)))
+
+    notifier = RecordingNotifier()
+    service = TradingScreeningService(
+        market_data=ActionableMarketData(),
+        sector_catalog=RecordingSectorCatalog(),
+        engine=TradingEngine(),
+        scan_planner=RecordingPlanner(),
+        cache_path=tmp_path / "snapshot.json",
+        clock=lambda: AS_OF,
+        notifier=notifier,
+        config=TradingScreeningConfig(priority_monitoring_enabled=True),
+    )
+    previous = {
+        "signals": [
+            {
+                "signal_id": "formed-buy",
+                "code": "SZ.000001",
+                "point_type": "2buy",
+                "lifecycle_stage": "formed",
+            }
+        ]
+    }
+
+    service._run_priority_monitor(previous=previous, observed_at=AS_OF)
+
+    assert len(notifier.calls) == 1
+    _previous_notification, current_notification = notifier.calls[0]
+    assert current_notification["signals"] == []
+    assert current_notification["notification_authoritative_codes"] == []
+    [overlay] = service.presentation_snapshot()["signals"]
+    assert overlay["observation_lane"] == "CANDIDATE_CURRENT_5M"
+    assert overlay["realtime_observation"] is False
 
 
 def test_partial_coverage_epoch_resumes_after_service_restart(
@@ -4636,157 +4547,6 @@ def test_partial_epoch_restores_exact_sector_batch_across_restart(
     )
 
 
-def test_restart_targetedly_replays_mixed_sector_evidence(
-    tmp_path: Path,
-) -> None:
-    """A legacy mixed snapshot is repaired without replaying unaffected scope."""
-
-    cache_path = tmp_path / "snapshot.json"
-    symbols = ("SZ.000001",)
-    batch = _evidence_sector_batch(symbols, context_revision="frozen")
-    service = TradingScreeningService(
-        market_data=ActionableMarketData(),
-        sector_catalog=EvidenceSectorCatalog(batch, symbols),
-        engine=TradingEngine(),
-        scan_planner=RecordingPlanner(symbols),
-        cache_path=cache_path,
-        clock=lambda: AS_OF,
-        notifier=None,
-    )
-    current = service.refresh_now()
-    assert len(current["signals"]) == 1
-
-    mixed = json.loads(cache_path.read_text(encoding="utf-8"))
-    mixed_point_id = sha256_json(
-        {
-            "schema": "test-sector-dominant-point/v1",
-            "revision": "mixed-top-level-only",
-        }
-    )
-    mixed["sectors"][0]["context_5m"]["dominant_point_id"] = mixed_point_id
-    mixed["snapshot_content_sha256"] = live_screening_snapshot_content_sha256(mixed)
-    cache_path.write_text(
-        json.dumps(mixed, ensure_ascii=False, sort_keys=True),
-        encoding="utf-8",
-    )
-
-    changed_assessment = replace(
-        batch.assessments[0],
-        five_context=replace(
-            batch.assessments[0].five_context,
-            dominant_point_id=mixed_point_id,
-        ),
-    )
-    changed_batch = replace(batch, assessments=(changed_assessment,))
-    changed_catalog = EvidenceSectorCatalog(changed_batch, symbols)
-    replay_market = ActionableMarketData()
-    restarted = TradingScreeningService(
-        market_data=replay_market,
-        sector_catalog=changed_catalog,
-        engine=TradingEngine(),
-        scan_planner=RecordingPlanner(("SHOULD.NOT.REPLAN",)),
-        cache_path=cache_path,
-        clock=lambda: AS_OF + timedelta(minutes=1),
-        notifier=None,
-    )
-
-    before = restarted.health_snapshot()
-    repaired = restarted.refresh_now()
-    after = restarted.health_snapshot()
-
-    assert before["sector_evidence_replay_symbol_count"] == 1
-    assert before["sector_evidence_replay_codes"] == ["SZ.000001"]
-    assert changed_catalog.assessment_calls == []
-    assert changed_catalog.member_calls == 1
-    assert replay_market.bundle_codes == ["SZ.000001"]
-    assert repaired["coverage_manifest"]["complete"] is True
-    assert (
-        repaired["signals"][0]["sector"]["context_5m"]["dominant_point_id"]
-        == mixed_point_id
-    )
-    assert after["sector_evidence_replay_symbol_count"] == 0
-    assert after["sector_evidence_replay_codes"] == []
-
-
-def test_health_bounds_large_evidence_replay_code_lists(tmp_path: Path) -> None:
-    service = TradingScreeningService(
-        market_data=RecordingMarketData(),
-        sector_catalog=RecordingSectorCatalog(),
-        engine=RecordingEngine(),
-        scan_planner=RecordingPlanner(),
-        cache_path=tmp_path / "snapshot.json",
-        clock=lambda: AS_OF,
-        notifier=None,
-    )
-    all_codes = {
-        f"SZ.{index:06d}" for index in range(HEALTH_REPLAY_CODE_SAMPLE_LIMIT + 17)
-    }
-    service._sector_evidence_replay_codes = set(all_codes)
-
-    health = service.health_snapshot()
-
-    assert health["sector_evidence_replay_symbol_count"] == len(all_codes)
-    assert len(health["sector_evidence_replay_codes"]) == (
-        HEALTH_REPLAY_CODE_SAMPLE_LIMIT
-    )
-    assert health["sector_evidence_replay_codes_truncated"] is True
-    assert health["sector_evidence_replay_codes_sha256"] == sha256_json(
-        {"codes": sorted(all_codes)}
-    )
-
-
-def test_evidence_replay_codes_survive_process_restart(tmp_path: Path) -> None:
-    """An explicit evidence replay remains pending across app processes."""
-
-    cache_path = tmp_path / "snapshot.json"
-    symbols = ("SZ.000001", "SZ.000002")
-    batch = _evidence_sector_batch(symbols, context_revision="frozen")
-    first = TradingScreeningService(
-        market_data=ActionableMarketData(),
-        sector_catalog=EvidenceSectorCatalog(batch, symbols),
-        engine=TradingEngine(),
-        scan_planner=SequencedPlanner((symbols,)),
-        cache_path=cache_path,
-        clock=lambda: AS_OF,
-        notifier=None,
-        config=TradingScreeningConfig(max_symbols_per_refresh=1),
-    )
-    partial = first.refresh_now()
-    completed_code = partial["coverage_manifest"]["completed_codes"][0]
-
-    first._risk_evidence_replay_codes = {completed_code}
-    first._sector_evidence_replay_codes = {completed_code}
-    persisted = json.loads(json.dumps(first.snapshot()))
-    persisted["coverage_manifest"] = first._coverage_manifest(complete=False)
-    persisted["snapshot_content_sha256"] = live_screening_snapshot_content_sha256(
-        persisted
-    )
-    first._persist_atomic(persisted)
-
-    restarted = TradingScreeningService(
-        market_data=ActionableMarketData(),
-        sector_catalog=EvidenceSectorCatalog(batch, symbols),
-        engine=TradingEngine(),
-        scan_planner=RecordingPlanner(("SHOULD.NOT.REPLAN",)),
-        cache_path=cache_path,
-        clock=lambda: AS_OF + timedelta(minutes=1),
-        notifier=None,
-        config=TradingScreeningConfig(max_symbols_per_refresh=1),
-    )
-
-    health = restarted.health_snapshot()
-    assert health["risk_evidence_replay_codes"] == [completed_code]
-    assert health["sector_evidence_replay_codes"] == [completed_code]
-    assert completed_code not in restarted._coverage_cycle_completed_codes
-    assert completed_code in restarted._pending_frequencies
-    assert restarted._pending_frequencies[completed_code] == {
-        "d",
-        "30m",
-        "5m",
-        "1m",
-    }
-
-
 def test_complete_epoch_keeps_full_coverage_during_post_restart_monitoring(
     tmp_path: Path,
 ) -> None:
@@ -4871,6 +4631,57 @@ def test_same_epoch_monitoring_never_reopens_completed_coverage_queue(
     assert monitored["coverage_manifest"]["complete"] is True
     assert monitored["coverage_manifest"]["pending_frequencies"] == {}
     assert monitored["scan_audit"]["coverage_cycle_complete"] is True
+
+
+def test_same_epoch_monitoring_with_changed_sector_identity_keeps_publication_immutable(
+    tmp_path: Path,
+) -> None:
+    """A current sector probe may not be mixed into the frozen daily page."""
+
+    cache_path = tmp_path / "snapshot.json"
+    symbols = ("SZ.000001",)
+    first_batch = _evidence_sector_batch(symbols, context_revision="first")
+    first_service = TradingScreeningService(
+        market_data=ActionableMarketData(),
+        sector_catalog=EvidenceSectorCatalog(first_batch, symbols),
+        engine=TradingEngine(),
+        scan_planner=RecordingPlanner(symbols),
+        cache_path=cache_path,
+        clock=lambda: AS_OF,
+        notifier=None,
+    )
+    first = first_service.refresh_now()
+    first_point_id = first["sectors"][0]["context_5m"]["dominant_point_id"]
+    assert first["signals"]
+    assert all(
+        row["sector"]["context_5m"]["dominant_point_id"] == first_point_id
+        for row in first["signals"]
+    )
+
+    changed_batch = _evidence_sector_batch(symbols, context_revision="second")
+    changed_catalog = HydratingEvidenceSectorCatalog(changed_batch, symbols)
+    monitor_market = ActionableMarketData()
+    preopen = AS_OF + timedelta(hours=17, minutes=50)
+    monitor_service = TradingScreeningService(
+        market_data=monitor_market,
+        sector_catalog=changed_catalog,
+        engine=TradingEngine(),
+        scan_planner=RecordingPlanner(symbols),
+        cache_path=cache_path,
+        clock=lambda: preopen,
+        notifier=None,
+    )
+
+    monitored = monitor_service.refresh_now()
+
+    assert changed_catalog.assessment_calls == [preopen]
+    assert monitor_market.bundle_codes == ["SZ.000001"]
+    assert monitored == first
+    assert monitored["snapshot_content_sha256"] == first["snapshot_content_sha256"]
+    assert monitored["sectors"][0]["context_5m"]["dominant_point_id"] == (
+        first_point_id
+    )
+    assert json.loads(cache_path.read_text(encoding="utf-8")) == first
 
 
 def test_same_epoch_monitoring_failure_keeps_valid_last_good_snapshot(
@@ -5336,12 +5147,6 @@ def test_background_idles_after_one_process_refresh_of_complete_close_snapshot(
         "COMPLETE_CLOSE_SNAPSHOT_OUTSIDE_ACTIVE_WINDOW"
     )
     assert health["next_background_active_at"] == ("2026-07-21T08:45:00+08:00")
-    assert health["background_active_window"] == {
-        "timezone": "Asia/Shanghai",
-        "weekdays": [0, 1, 2, 3, 4],
-        "start": "15:05:00",
-        "end": "23:00:00",
-    }
     assert health["background_active_windows"] == [
         {
             "phase": "POST_CLOSE_PRESELECTION",
@@ -5697,6 +5502,49 @@ def test_background_loop_runs_due_priority_lane_when_coverage_is_idle(
     assert calls == [(False, True)]
 
 
+def test_disabled_full_coverage_never_runs_full_lane_inside_active_window(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed_at = AS_OF.replace(hour=15, minute=5)
+    service = TradingScreeningService(
+        market_data=RecordingMarketData(),
+        sector_catalog=RecordingSectorCatalog(),
+        engine=RecordingEngine(),
+        scan_planner=RecordingPlanner(("SZ.000001",)),
+        cache_path=tmp_path / "snapshot.json",
+        clock=lambda: observed_at,
+        notifier=None,
+        config=TradingScreeningConfig(
+            refresh_interval_seconds=60,
+            full_coverage_refresh_enabled=False,
+        ),
+    )
+    calls: list[tuple[bool, bool]] = []
+    stop = threading.Event()
+
+    monkeypatch.setattr(service, "_needs_refresh", lambda: True)
+
+    def refresh_now(*, copy_result: bool, priority_only: bool):
+        calls.append((copy_result, priority_only))
+        stop.set()
+        return dict(service._snapshot_reference())
+
+    monkeypatch.setattr(service, "refresh_now", refresh_now)
+    service._background_loop(stop, threading.Event())
+
+    assert calls == [(False, True)]
+    health = service.health_snapshot()
+    assert health["full_coverage_refresh_enabled"] is False
+    assert health["full_coverage_refresh_window_open"] is False
+    assert health["full_coverage_refresh_pause_reason"] == (
+        "FULL_COVERAGE_REFRESH_DISABLED"
+    )
+    assert health["full_coverage_next_active_at"] is None
+    assert health["current_logic_snapshot_required"] is False
+    assert "screening_snapshot_unavailable" not in health["reasons"]
+
+
 def test_membership_edit_forces_next_priority_scan_and_wakes_worker(
     tmp_path: Path,
 ) -> None:
@@ -5834,17 +5682,17 @@ def test_background_health_rechecks_an_untrusted_snapshot_publication(
     with service._state_lock:
         service._snapshot["data_quality"]["stale"] = False
         service._snapshot["signal_document_contract_id"] = (
-            "chanlun-human-assisted-signal-document/v5"
+            "chanlun-human-assisted-signal-document"
         )
         service._snapshot["coverage_manifest"]["signal_document_contract_id"] = (
-            "chanlun-human-assisted-signal-document/v5"
+            "chanlun-human-assisted-signal-document"
         )
         service._finalize_snapshot_identity(service._snapshot)
-    legacy_but_self_hashed = service.health_snapshot()
+    noncurrent_but_self_hashed = service.health_snapshot()
 
-    assert legacy_but_self_hashed["ready"] is False
-    assert legacy_but_self_hashed["snapshot_content_sha256"] is None
-    assert "screening_snapshot_identity_missing" in (legacy_but_self_hashed["reasons"])
+    assert noncurrent_but_self_hashed["ready"] is False
+    assert noncurrent_but_self_hashed["snapshot_content_sha256"] is None
+    assert "screening_snapshot_identity_missing" in (noncurrent_but_self_hashed["reasons"])
 
     with service._state_lock:
         service._snapshot["signal_document_contract_id"] = SIGNAL_DOCUMENT_CONTRACT_ID
@@ -5926,8 +5774,6 @@ def test_background_health_uses_the_shared_forward_review_validator(
     rejected = service.health_snapshot()
 
     assert rejected["ready"] is True
-    assert rejected["forward_review_ready"] is False
-    assert rejected["forward_review_reason_code"] == "REVIEW_BOUNDARY_INVALID"
     assert rejected["daily_preselection_ready"] is False
     assert rejected["daily_preselection_status"] == "review_blocked"
     assert len(calls) == 1
@@ -5950,8 +5796,6 @@ def test_background_health_uses_the_shared_forward_review_validator(
     assert accepted["ready"] is True
     assert accepted["screening_review_ready"] is True
     assert accepted["screening_review_reason_code"] == "READY"
-    assert accepted["forward_review_ready"] is True
-    assert accepted["forward_review_reason_code"] == "READY"
     assert accepted["daily_preselection_ready"] is True
     assert accepted["daily_preselection_status"] == "ready"
     assert accepted["daily_preselection_candidate_count"] == 0
@@ -6271,7 +6115,7 @@ def test_nontradable_watchlist_exclusion_is_visible_but_not_discovered(
     payload = service.refresh_now()
 
     assert payload["monitor_instrument_exclusion_contract_id"] == (
-        "chanlun-monitor-instrument-exclusion/v2"
+        "chanlun-monitor-instrument-exclusion"
     )
     assert payload["monitor_instrument_exclusions"] == [
         {

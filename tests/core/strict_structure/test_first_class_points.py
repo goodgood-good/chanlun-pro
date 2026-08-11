@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from dataclasses import replace
 from decimal import Decimal
-from types import SimpleNamespace
-
 from chanlun.core.strict_structure.models import (
     StrictLevelResult,
     StrictStructureResult,
@@ -14,8 +12,12 @@ from chanlun.core.strict_structure.models import (
 from chanlun.core.strict_structure.recursive_engine import (
     calculate_level_with_divergence_boundaries,
 )
-from chanlun.core.strict_structure.signals import StrictSignalEngine, _comparison_unit
-from chanlun.core.strict_structure.strength import StrengthSnapshot
+from chanlun.core.strict_structure.signals import StrictSignalEngine
+from chanlun.core.strict_structure.strength import (
+    StrengthSnapshot,
+    center_departure_comparison_leg,
+    center_entry_comparison_leg,
+)
 from tests.core.strict_structure.helpers import TEST_PRICE_BASIS, unit
 
 
@@ -99,7 +101,7 @@ def structure_from_values(values=UP_VALUES, *, direction="up", strength=None):
         decomposition_boundaries=assembly.decomposition_boundaries,
     )
     structure = StrictStructureResult(
-        schema_version="chanlun-structure/v3",
+        schema="chanlun-structure",
         price_basis_revision=TEST_PRICE_BASIS,
         levels=(level,),
     )
@@ -111,11 +113,7 @@ class StrengthTable:
         self.values = values
 
     def snapshot(self, value):
-        key = (
-            value.child_ids[-1]
-            if value.child_ids and value.child_ids[-1] in self.values
-            else value.unit_id
-        )
+        key = tuple(value.child_ids) if len(value.child_ids) == 3 else value.unit_id
         area, peak, dif = self.values[key]
         return StrengthSnapshot(
             unit_id=value.unit_id,
@@ -131,13 +129,13 @@ class StrengthTable:
 def divergent_strength(direction, *, extended=False):
     if direction == "up":
         values = {
-            "u-12": (100, 5, 2),
-            "u-18": (80, 3, 1),
+            ("u-8", "u-9", "u-10"): (100, 5, 2),
+            ("u-16", "u-17", "u-18"): (80, 3, 1),
         }
     else:
         values = {
-            "u-12": (100, -5, -2),
-            "u-18": (80, -3, -1),
+            ("u-8", "u-9", "u-10"): (100, -5, -2),
+            ("u-16", "u-17", "u-18"): (80, -3, -1),
         }
     return StrengthTable(values)
 
@@ -158,9 +156,7 @@ def only_point(points):
 
 def target_trend(assembly):
     matches = tuple(
-        trend
-        for trend in assembly.completed_trends
-        if trend.kind is TrendKind.TREND
+        trend for trend in assembly.completed_trends if trend.kind is TrendKind.TREND
     )
     assert matches
     divergent = tuple(
@@ -195,17 +191,12 @@ def test_up_trend_terminal_divergence_emits_one_sell():
     assert point.invalidation_tick == trend.terminal_unit.high_tick
 
 
-def test_post_assembly_strength_provider_keeps_first_class_api_compatible():
+def test_post_assembly_strength_cannot_retroactively_create_formal_first_class():
     structure, _assembly = structure_from_values(direction="up")
-    point = only_point(
-        engine_for(structure, divergent_strength("up")).first_class_points()
-    )
-
-    assert point.anchor_unit_id == "u-18"
-    assert "post_assembly_complete_c_confirmation" in point.evidence_codes
+    assert engine_for(structure, divergent_strength("up")).first_class_points() == ()
 
 
-def test_approaching_first_requires_complete_c_third_point_and_live_terminal():
+def test_approaching_first_waits_for_unlocked_third_departure_segment():
     strength = divergent_strength("up")
     units = list(make_units(UP_VALUES, "up"))
     units[-1] = replace(units[-1], locked=False, confirmed_at=None)
@@ -216,7 +207,7 @@ def test_approaching_first_requires_complete_c_third_point_and_live_terminal():
         strength=strength,
     )
     structure = StrictStructureResult(
-        schema_version="chanlun-structure/v3",
+        schema="chanlun-structure",
         price_basis_revision=TEST_PRICE_BASIS,
         levels=(
             StrictLevelResult(
@@ -236,7 +227,9 @@ def test_approaching_first_requires_complete_c_third_point_and_live_terminal():
     assert point.point_type == "1sell"
     assert point.anchor_unit_id == units[-1].unit_id
     assert point.missing_conditions == ("terminal_unit_locked",)
-    assert "complete_c_contains_last_center_third_class" in point.evidence_codes
+    assert "live_width_matched_departure_leg" in point.evidence_codes
+    assert "comparison_leg_width_3" in point.evidence_codes
+    assert "macd_histogram_area_decay" in point.evidence_codes
 
 
 def test_single_center_consolidation_does_not_emit_first_class():
@@ -244,8 +237,8 @@ def test_single_center_consolidation_does_not_emit_first_class():
     assert engine_for(structure, StrengthTable({})).first_class_points() == ()
 
 
-def test_incomplete_terminal_c_is_not_formal_divergence():
-    strength = StrengthTable({})
+def test_departure_without_whole_trend_new_extreme_is_not_formal_divergence():
+    strength = divergent_strength("up")
     structure, _assembly = structure_from_values(
         values=NO_NEW_HIGH_VALUES,
         strength=strength,
@@ -253,28 +246,33 @@ def test_incomplete_terminal_c_is_not_formal_divergence():
     assert engine_for(structure, strength).first_class_points() == ()
 
 
-def test_internal_center_body_unit_is_never_used_as_trend_comparison():
+def test_trend_comparison_uses_equal_three_unit_entry_and_departure_legs():
     _structure, assembly = structure_from_values()
     trend = target_trend(assembly)
     last_center = trend.centers[-1]
-    body_only_projection = SimpleNamespace(
-        centers=(last_center,),
-        constituent_units=last_center.body_units,
+    entry = center_entry_comparison_leg(last_center, trend.constituent_units)
+    assert entry is not None
+    departure = center_departure_comparison_leg(
+        last_center,
+        make_units(UP_VALUES, "up"),
+        width=entry.width,
     )
-    assert (
-        _comparison_unit(body_only_projection, last_center.completion_leave_unit)
-        is None
+    assert tuple(item.unit_id for item in entry.units) == ("u-8", "u-9", "u-10")
+    assert departure is not None
+    assert tuple(item.unit_id for item in departure.units) == (
+        "u-16",
+        "u-17",
+        "u-18",
     )
 
 
 def test_forming_trend_is_observation_only_not_first_class():
     strength = divergent_strength("up")
-    structure, assembly = structure_from_values(strength=strength)
+    structure, assembly = structure_from_values()
     trend = next(
         item
         for item in assembly.completed_trends
-        if item.kind is TrendKind.TREND
-        and item.terminal_divergence is None
+        if item.kind is TrendKind.TREND and item.terminal_divergence is None
     )
     forming = replace(
         trend,
@@ -311,9 +309,7 @@ def test_first_class_available_at_uses_trend_completion():
 def test_completed_first_point_survives_later_same_direction_trend():
     strength = divergent_strength("up", extended=True)
     prefix_structure, _ = structure_from_values(strength=strength)
-    frozen = only_point(
-        engine_for(prefix_structure, strength).first_class_points()
-    )
+    frozen = only_point(engine_for(prefix_structure, strength).first_class_points())
     structure, _assembly = structure_from_values(
         values=EXTENDED_UP_VALUES,
         strength=strength,

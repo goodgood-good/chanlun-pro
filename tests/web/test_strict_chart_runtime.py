@@ -6,7 +6,7 @@ import pandas as pd
 
 from chanlun.cl_utils import strict_chart_runtime
 from chanlun.decision_support.trading_system.runtime_config import (
-    v3_recursive_cl_config,
+    recursive_cl_config,
 )
 
 
@@ -30,31 +30,32 @@ def _frame() -> pd.DataFrame:
     return frame
 
 
-def test_strict_chart_runtime_uses_only_fixed_v3_recursive_config(monkeypatch) -> None:
-    sentinel = object()
+def test_strict_chart_runtime_uses_only_fixed_recursive_config(monkeypatch) -> None:
     captured = {}
 
-    def build(market, code, frames, config):
-        captured.update(
-            market=market,
-            code=code,
-            frequency=tuple(frames),
-            frame=frames["1m"],
-            config=config,
-        )
-        return [sentinel]
+    class FakeCL:
+        def __init__(self, code, frequency, config, *, market):
+            captured.update(
+                market=market,
+                code=code,
+                frequency=frequency,
+                config=config,
+            )
 
-    monkeypatch.setattr(strict_chart_runtime, "web_batch_get_cl_datas", build)
+        def process_klines(self, frame):
+            captured["frame"] = frame
+
+    monkeypatch.setattr(strict_chart_runtime, "CL", FakeCL)
     frame = _frame()
 
     result = strict_chart_runtime.build_strict_chart_cd(
         market="a", code="SH.600926", frequency="1m", frame=frame
     )
 
-    assert result.cd is sentinel
+    assert isinstance(result.cd, FakeCL)
     assert result.error_code is None
     assert captured["frame"] is frame
-    assert captured["config"] == v3_recursive_cl_config(
+    assert captured["config"] == recursive_cl_config(
         structure_price_quantum=Decimal("0.01"),
         price_basis_revision="sha256:test-basis",
     )
@@ -64,7 +65,7 @@ def test_strict_chart_runtime_uses_only_fixed_v3_recursive_config(monkeypatch) -
 def test_strict_chart_runtime_fails_closed_before_cl_build(monkeypatch) -> None:
     monkeypatch.setattr(
         strict_chart_runtime,
-        "web_batch_get_cl_datas",
+        "CL",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
             AssertionError("CL builder must not run")
         ),

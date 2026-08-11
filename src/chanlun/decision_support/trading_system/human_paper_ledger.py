@@ -21,7 +21,7 @@ from chanlun.decision_support.trading_system.a_share_minute_grid import (
     validate_a_share_complete_session_closes,
     validate_a_share_completed_one_minute_interval,
 )
-from chanlun.decision_support.trading_system.v3_bar_execution import (
+from chanlun.decision_support.trading_system.bar_execution import (
     STRICT_BAR_CROSS_RULE,
     STRICT_BAR_EXECUTION_TIMESTAMP_RULE,
     STRICT_BAR_PRICE_RULE,
@@ -33,36 +33,35 @@ from chanlun.decision_support.trading_system.v3_bar_execution import (
 from chanlun.decision_support.trading_system.file_lock import interprocess_file_lock
 from chanlun.decision_support.trading_system.human_paper_accounting import (
     HumanPaperAccountingParameters,
-    assess_human_paper_cash_and_slot_fill,
     assess_human_paper_portfolio_fill,
 )
 from chanlun.decision_support.trading_system.models import (
     EntryExecutionBoundary,
     parse_entry_execution_boundary_document,
 )
-from chanlun.decision_support.trading_system.v3_human_review_screening import (
+from chanlun.decision_support.trading_system.human_review_screening import (
     MONITOR_ONLY_WARNING_CODE,
     HumanReviewAlert,
     HumanReviewFeedback,
     validate_human_review_feedback_causality,
 )
-from chanlun.decision_support.trading_system.v3_qmt_sector_ledger import (
+from chanlun.decision_support.trading_system.qmt_sector_ledger import (
     catalog_capture_entry,
 )
 
 
-LEDGER_SCHEMA = "chanlun-human-paper-ledger/v1"
-EXECUTION_EVIDENCE_SCHEMA = "chanlun-human-paper-execution-evidence/v1"
-EXECUTION_FACT_SCHEMA = "chanlun-human-paper-execution-facts/v1"
+LEDGER_SCHEMA = "chanlun-human-paper-ledger"
+EXECUTION_EVIDENCE_SCHEMA = "chanlun-human-paper-execution-evidence"
+EXECUTION_FACT_SCHEMA = "chanlun-human-paper-execution-facts"
 ENTRY_SELECTION_EVIDENCE_SCHEMA = (
-    "chanlun-human-paper-entry-selection-evidence/v1"
+    "chanlun-human-paper-entry-selection-evidence"
 )
 ENTRY_SELECTION_EXACT_ATTESTATION = (
     "EXACT_REVISION_NAME_AND_MEMBERSHIP_MATCH"
 )
 PAPER_CONTRACT_ID = sha256_json(
     {
-        "schema": "chanlun-human-paper-contract/v1",
+        "schema": "chanlun-human-paper-contract",
         "quantity": 100,
         "fill_source": STRICT_BAR_PRICE_RULE,
         "fill_timestamp_rule": STRICT_BAR_EXECUTION_TIMESTAMP_RULE,
@@ -271,7 +270,7 @@ class HumanPaperIntent:
         "OBSERVATION_ONLY",
     ]
     reason_codes: tuple[str, ...]
-    signal_lifecycle_id: str | None = None
+    signal_lifecycle_id: str
     entry_confirmation_bar_closed_at: datetime | None = None
     entry_price_cap: Decimal | None = None
     entry_valid_until: datetime | None = None
@@ -392,56 +391,31 @@ class HumanPaperIntent:
             raise ValueError("human paper intent cannot authorize live trading")
         if len(self.reason_codes) != len(set(self.reason_codes)):
             raise ValueError("human paper intent reasons must be unique")
-        if (
-            self.signal_lifecycle_id is not None
-            and _SHA256.fullmatch(self.signal_lifecycle_id) is None
-        ):
+        if _SHA256.fullmatch(self.signal_lifecycle_id) is None:
             raise ValueError("human paper signal lifecycle identity is invalid")
 
     @property
     def intent_id(self) -> str:
+        return sha256_json(self._stable_document())
+
+    def _stable_document(self) -> dict[str, object]:
         stable = asdict(self)
-        if self.entry_execution_boundary is None:
-            stable.pop("entry_execution_boundary")
-        if self.entry_selection_evidence is None:
-            # Preserve every pre-attestation intent identity exactly.  The
-            # optional field is absent, not serialized as null.
-            stable.pop("entry_selection_evidence")
-        if all(
-            stable[field] is None
-            for field in (
-                "entry_confirmation_bar_closed_at",
-                "entry_price_cap",
-                "entry_valid_until",
-                "entry_boundary_evidence_id",
-            )
-        ):
-            for field in (
-                "entry_confirmation_bar_closed_at",
-                "entry_price_cap",
-                "entry_valid_until",
-                "entry_boundary_evidence_id",
-            ):
-                stable.pop(field)
-        return sha256_json(stable)
+        stable["entry_execution_boundary"] = (
+            None
+            if self.entry_execution_boundary is None
+            else self.entry_execution_boundary.document()
+        )
+        stable["entry_selection_evidence"] = (
+            None
+            if self.entry_selection_evidence is None
+            else self.entry_selection_evidence.document()
+        )
+        return _jsonable(stable)
 
     def document(self) -> dict[str, object]:
         """Portable intent retaining the complete raw 1m boundary proof."""
 
-        stable = asdict(self)
-        if self.entry_execution_boundary is None:
-            stable.pop("entry_execution_boundary")
-        else:
-            stable["entry_execution_boundary"] = (
-                self.entry_execution_boundary.document()
-            )
-        if self.entry_selection_evidence is None:
-            stable.pop("entry_selection_evidence")
-        else:
-            stable["entry_selection_evidence"] = (
-                self.entry_selection_evidence.document()
-            )
-        return {**_jsonable(stable), "intent_id": self.intent_id}
+        return {**self._stable_document(), "intent_id": self.intent_id}
 
 
 @dataclass(frozen=True, slots=True)
@@ -502,7 +476,7 @@ class HumanPaperMinuteBar:
 class HumanPaperFill:
     intent_id: str
     symbol: str
-    side: Literal["BUY", "SELL"]
+    side: Literal["SELL"]
     quantity: int
     price: Decimal
     filled_at: datetime
@@ -527,8 +501,8 @@ class HumanPaperFill:
             or self.price <= 0
         ):
             raise ValueError("paper fill quantity or price is invalid")
-        if self.side not in {"BUY", "SELL"}:
-            raise ValueError("human paper fill side is invalid")
+        if self.side != "SELL":
+            raise ValueError("basic human paper fills are SELL-only")
         if _SHA256.fullmatch(self.execution_snapshot_sha256) is None:
             raise ValueError("paper fill execution snapshot identity is invalid")
         validate_a_share_completed_one_minute_interval(
@@ -556,7 +530,7 @@ class HumanPaperCancellation:
     intent_id: str
     superseding_feedback_id: str
     candidate_id: str
-    signal_lifecycle_id: str | None
+    signal_lifecycle_id: str
     cancelled_at: datetime
     reason_code: Literal["SUPERSEDED_BY_LATER_HUMAN_FEEDBACK"]
     status: Literal["CANCELLED"] = "CANCELLED"
@@ -652,10 +626,7 @@ class HumanPaperOperationsCancellation:
                 self.execution_fact_snapshot_sha256,
                 self.execution_evidence_snapshot_sha256,
             )
-        ) or (
-            self.signal_lifecycle_id is not None
-            and _SHA256.fullmatch(self.signal_lifecycle_id) is None
-        ):
+        ) or _SHA256.fullmatch(self.signal_lifecycle_id) is None:
             raise ValueError("human paper operations cancellation identity is invalid")
         if self.grid_status not in {
             "EXECUTION_FACT_MISSING_FAIL_CLOSED",
@@ -784,137 +755,6 @@ class HumanPaperExecutionRejection:
 
 
 @dataclass(frozen=True, slots=True)
-class HumanPaperCapitalRejection:
-    """Terminal virtual rejection proved at the first market-eligible bar."""
-
-    intent_id: str
-    symbol: str
-    quantity: int
-    candidate_bar_opened_at: datetime
-    candidate_bar_closed_at: datetime
-    candidate_price: Decimal
-    execution_snapshot_sha256: str
-    cash_slot_decision_sha256: str
-    accounting_contract_id: str
-    available_cash: Decimal
-    notional: Decimal
-    terminal_buy_fee: Decimal
-    required_cash: Decimal
-    occupied_slots: int
-    slot_count: int
-    reason_codes: tuple[
-        Literal[
-            "NO_FREE_VIRTUAL_STRATEGIC_SLOT",
-            "INSUFFICIENT_VIRTUAL_CASH_INCLUDING_FEES",
-        ],
-        ...,
-    ]
-    rejected_at: datetime
-    status: Literal["CAPITAL_REJECTED"] = "CAPITAL_REJECTED"
-    paper_contract_id: str = PAPER_CONTRACT_ID
-    virtual_only: bool = True
-    broker_transport_available: bool = False
-    live_status: str = "LIVE_DISABLED"
-
-    def __post_init__(self) -> None:
-        for field in (
-            "candidate_bar_opened_at",
-            "candidate_bar_closed_at",
-            "rejected_at",
-        ):
-            object.__setattr__(
-                self,
-                field,
-                normalize_datetime(getattr(self, field), field),
-            )
-        if any(
-            _SHA256.fullmatch(value) is None
-            for value in (
-                self.intent_id,
-                self.execution_snapshot_sha256,
-                self.cash_slot_decision_sha256,
-                self.accounting_contract_id,
-            )
-        ):
-            raise ValueError("human paper capital rejection identity is invalid")
-        if (
-            not self.symbol
-            or self.quantity != 100
-            or self.candidate_price <= 0
-            or self.available_cash < 0
-            or self.notional <= 0
-            or self.terminal_buy_fee < 0
-            or self.required_cash <= 0
-            or self.occupied_slots < 0
-            or self.slot_count != 5
-        ):
-            raise ValueError("human paper capital rejection values are invalid")
-        if (
-            self.notional != Decimal(self.quantity) * self.candidate_price
-            or self.required_cash != self.notional + self.terminal_buy_fee
-        ):
-            raise ValueError("human paper capital rejection cash equation changed")
-        if self.rejected_at != self.candidate_bar_closed_at:
-            raise ValueError("human paper capital rejection timing is invalid")
-        validate_a_share_completed_one_minute_interval(
-            self.candidate_bar_opened_at,
-            self.candidate_bar_closed_at,
-        )
-        expected_reasons = tuple(
-            value
-            for value, violated in (
-                (
-                    "NO_FREE_VIRTUAL_STRATEGIC_SLOT",
-                    self.occupied_slots >= self.slot_count,
-                ),
-                (
-                    "INSUFFICIENT_VIRTUAL_CASH_INCLUDING_FEES",
-                    self.required_cash > self.available_cash,
-                ),
-            )
-            if violated
-        )
-        if self.reason_codes != expected_reasons:
-            raise ValueError("human paper capital rejection reasons are invalid")
-        if (
-            self.status != "CAPITAL_REJECTED"
-            or self.paper_contract_id != PAPER_CONTRACT_ID
-            or not self.virtual_only
-            or self.broker_transport_available
-            or self.live_status != "LIVE_DISABLED"
-        ):
-            raise ValueError("human paper capital rejection safety boundary changed")
-        decision_stable = {
-            "schema": "chanlun-human-paper-cash-slot-decision/v1",
-            "accounting_contract_id": self.accounting_contract_id,
-            "symbol": self.symbol,
-            "quantity": self.quantity,
-            "price": format(self.candidate_price, "f"),
-            "session": self.candidate_bar_opened_at.date().isoformat(),
-            "available_cash": format(self.available_cash, "f"),
-            "notional": format(self.notional, "f"),
-            "terminal_buy_fee": format(self.terminal_buy_fee, "f"),
-            "required_cash": format(self.required_cash, "f"),
-            "occupied_slots": self.occupied_slots,
-            "slot_count": self.slot_count,
-            "allowed": False,
-            "reason_codes": self.reason_codes,
-            "slot_fraction_notional_gate_evaluable": False,
-            "account_exposure_notional_gate_evaluable": False,
-            "fixed_one_lot_diagnostic": True,
-            "tick_data_used": False,
-            "broker_transport_available": False,
-            "live_status": "LIVE_DISABLED",
-        }
-        if self.cash_slot_decision_sha256 != sha256_json(decision_stable):
-            raise ValueError("human paper cash/slot decision identity changed")
-
-    @property
-    def rejection_id(self) -> str:
-        return sha256_json(asdict(self))
-
-
-@dataclass(frozen=True, slots=True)
 class HumanPaperDecisionPositionMark:
     symbol: str
     quantity: int
@@ -933,13 +773,7 @@ class HumanPaperDecisionPositionMark:
 
 @dataclass(frozen=True, slots=True)
 class HumanPaperPortfolioFill:
-    """Atomic BUY fill plus the exact v2 portfolio approval that allowed it.
-
-    Keeping the approval inside the existing ``FILL`` event closes a crash
-    window: the immutable ledger can prove both the execution and the
-    decision-time cash/slot/exposure gates without relying on a later forward
-    archive event.  Legacy ``HumanPaperFill`` rows remain valid and readable.
-    """
+    """Atomic BUY fill plus the exact portfolio approval that allowed it."""
 
     intent_id: str
     symbol: str
@@ -1054,7 +888,7 @@ class HumanPaperPortfolioFill:
         ):
             raise ValueError("paper portfolio fill boundary changed")
         stable = {
-            "schema": "chanlun-human-paper-portfolio-decision/v2",
+            "schema": "chanlun-human-paper-portfolio-decision",
             "accounting_contract_id": self.accounting_contract_id,
             "symbol": self.symbol,
             "quantity": self.quantity,
@@ -1108,7 +942,7 @@ class HumanPaperPortfolioFill:
 
 @dataclass(frozen=True, slots=True)
 class HumanPaperPortfolioRejection:
-    """Terminal v2 rejection with synchronous marks and 18%/90% gates."""
+    """Terminal rejection with synchronous marks and 18%/90% gates."""
 
     intent_id: str
     symbol: str
@@ -1248,7 +1082,7 @@ class HumanPaperPortfolioRejection:
         ):
             raise ValueError("human paper portfolio rejection safety boundary changed")
         stable = {
-            "schema": "chanlun-human-paper-portfolio-decision/v2",
+            "schema": "chanlun-human-paper-portfolio-decision",
             "accounting_contract_id": self.accounting_contract_id,
             "symbol": self.symbol,
             "quantity": self.quantity,
@@ -1345,7 +1179,6 @@ def human_paper_event_effective_at(event: Mapping[str, object]) -> datetime:
         "CANCEL": "cancelled_at",
         "OPERATIONS_CANCEL": "cancelled_at",
         "EXECUTION_REJECT": "rejected_at",
-        "CAPITAL_REJECT": "rejected_at",
         "PORTFOLIO_REJECT": "rejected_at",
     }
     field = field_by_kind.get(str(event.get("kind") or ""))
@@ -1407,34 +1240,9 @@ def _intent_from_payload(payload: object) -> HumanPaperIntent:
         raise ValueError("human paper intent payload is malformed")
     field_names = tuple(field.name for field in fields(HumanPaperIntent))
     expected = set(field_names) | {"intent_id"}
-    boundary_fields = {
-        "entry_confirmation_bar_closed_at",
-        "entry_price_cap",
-        "entry_valid_until",
-        "entry_boundary_evidence_id",
-    }
-    full_boundary_field = {"entry_execution_boundary"}
-    selection_field = {"entry_selection_evidence"}
-    accepted_without_selection_compatibility = {
-        frozenset(expected),
-        frozenset(expected - {"signal_lifecycle_id"}),
-        frozenset(expected - full_boundary_field),
-        frozenset(expected - full_boundary_field - {"signal_lifecycle_id"}),
-        frozenset(expected - boundary_fields - full_boundary_field),
-        frozenset(
-            expected
-            - boundary_fields
-            - full_boundary_field
-            - {"signal_lifecycle_id"}
-        ),
-    }
-    accepted = accepted_without_selection_compatibility | {
-        frozenset(value - selection_field)
-        for value in accepted_without_selection_compatibility
-    }
-    if frozenset(payload) not in accepted:
+    if set(payload) != expected:
         raise ValueError("human paper intent fields changed")
-    values = {name: payload[name] for name in field_names if name in payload}
+    values = {name: payload[name] for name in field_names}
     try:
         for name in (
             "created_at",
@@ -1471,16 +1279,7 @@ def _intent_from_payload(payload: object) -> HumanPaperIntent:
         intent = HumanPaperIntent(**values)
     except (InvalidOperation, TypeError, ValueError) as exc:
         raise ValueError("human paper intent payload is invalid") from exc
-    expected_identity = intent.intent_id
-    if "signal_lifecycle_id" not in payload:
-        expected_identity = sha256_json(
-            {
-                field.name: getattr(intent, field.name)
-                for field in fields(HumanPaperIntent)
-                if field.name != "signal_lifecycle_id" and field.name in payload
-            }
-        )
-    if payload.get("intent_id") != expected_identity:
+    if payload.get("intent_id") != intent.intent_id:
         raise ValueError("human paper intent identity changed")
     return intent
 
@@ -1490,15 +1289,14 @@ def audit_human_paper_entry_boundary_attestations(
 ) -> dict[str, object]:
     """Recompute every self-contained raw-1m optional-entry attestation.
 
-    Reduced v1 evidence remains readable and is labelled explicitly; it is
-    never promoted to a complete attestation.  This audit intentionally does
+    Every boundary-bearing intent must retain the complete raw OHLCV proof.
+    This audit intentionally does
     not replace the immutable source-report link—it proves that the ledger
     itself retains a recomputable OHLCV boundary.
     """
 
     boundary_intent_count = 0
     verified = 0
-    legacy: list[str] = []
     invalid: list[dict[str, str]] = []
     for event in events:
         payload = event.get("payload")
@@ -1506,14 +1304,19 @@ def audit_human_paper_entry_boundary_attestations(
             continue
         if payload.get("side") != "BUY":
             continue
-        reduced_present = payload.get("entry_boundary_evidence_id") is not None
+        boundary_id_present = payload.get("entry_boundary_evidence_id") is not None
         full_present = payload.get("entry_execution_boundary") is not None
-        if not reduced_present and not full_present:
+        if not boundary_id_present and not full_present:
             continue
         boundary_intent_count += 1
         intent_id = str(payload.get("intent_id") or "UNKNOWN_INTENT")
         if not full_present:
-            legacy.append(intent_id)
+            invalid.append(
+                {
+                    "intent_id": intent_id,
+                    "reason": "ENTRY_EXECUTION_BOUNDARY_REQUIRED",
+                }
+            )
             continue
         try:
             boundary = parse_entry_execution_boundary_document(
@@ -1550,20 +1353,17 @@ def audit_human_paper_entry_boundary_attestations(
         verified += 1
     if invalid:
         status = "INVALID"
-    elif legacy:
-        status = "LEGACY_REDUCED_EVIDENCE"
     elif boundary_intent_count:
         status = "COMPLETE"
     else:
         status = "NO_BOUNDARY_INTENTS"
     return {
         "schema": (
-            "chanlun-human-paper-entry-boundary-attestation-audit/v1"
+            "chanlun-human-paper-entry-boundary-attestation-audit"
         ),
         "status": status,
         "boundary_intent_count": boundary_intent_count,
         "verified_full_boundary_count": verified,
-        "legacy_reduced_boundary_intent_ids": legacy,
         "invalid_attestations": invalid,
         "raw_unadjusted_one_minute_ohlcv_self_contained": (
             status in {"COMPLETE", "NO_BOUNDARY_INTENTS"}
@@ -1716,7 +1516,7 @@ def audit_human_paper_entry_selection_attestations(
     else:
         status = "NO_SELECTION_ATTESTATIONS"
     return {
-        "schema": "chanlun-human-paper-entry-selection-attestation-audit/v1",
+        "schema": "chanlun-human-paper-entry-selection-attestation-audit",
         "status": status,
         "attested_buy_intent_count": attested_count,
         "verified_catalog_binding_count": verified,
@@ -1767,7 +1567,6 @@ def audit_human_paper_entry_selection_source_bindings(
     required_count = 0
     verified = 0
     verified_intent_ids: list[str] = []
-    legacy: list[str] = []
     unavailable: list[str] = []
     invalid: list[dict[str, str]] = []
     for event in events:
@@ -1812,7 +1611,6 @@ def audit_human_paper_entry_selection_source_bindings(
         required = (
             source_alert.alert_type == "POSSIBLE_30M_BUY"
             and ranking is not None
-            and ranking.source_profile == "LIVE_FULL_RANKING"
         )
         raw_evidence = payload.get("entry_selection_evidence")
         if not required:
@@ -1826,7 +1624,12 @@ def audit_human_paper_entry_selection_source_bindings(
             continue
         required_count += 1
         if raw_evidence is None:
-            legacy.append(intent_id)
+            invalid.append(
+                {
+                    "intent_id": intent_id,
+                    "reason": "ENTRY_SELECTION_EVIDENCE_REQUIRED",
+                }
+            )
             continue
         try:
             evidence = parse_human_paper_entry_selection_evidence(raw_evidence)
@@ -1859,19 +1662,16 @@ def audit_human_paper_entry_selection_source_bindings(
         status = "INVALID"
     elif unavailable:
         status = "INCOMPLETE_SOURCE_ARCHIVE"
-    elif legacy:
-        status = "LEGACY_UNATTESTED_LIVE_RANKED_BUY"
     elif required_count:
         status = "COMPLETE"
     else:
         status = "NO_REQUIRED_SELECTION_INTENTS"
     return {
-        "schema": "chanlun-human-paper-entry-selection-source-audit/v1",
+        "schema": "chanlun-human-paper-entry-selection-source-audit",
         "status": status,
         "required_live_ranked_buy_intent_count": required_count,
         "verified_source_binding_count": verified,
         "verified_required_buy_intent_ids": sorted(verified_intent_ids),
-        "legacy_unattested_intent_ids": legacy,
         "source_unavailable_intent_ids": unavailable,
         "invalid_source_bindings": invalid,
         "immutable_source_ranking_resolved": status
@@ -1886,15 +1686,21 @@ def _fill_from_payload(
 ) -> HumanPaperFill | HumanPaperPortfolioFill:
     if not isinstance(payload, Mapping):
         raise ValueError("human paper fill payload is malformed")
-    legacy_fields = tuple(field.name for field in fields(HumanPaperFill))
+    sell_fields = tuple(field.name for field in fields(HumanPaperFill))
     portfolio_fields = tuple(
         field.name for field in fields(HumanPaperPortfolioFill)
     )
     actual_fields = set(payload)
-    if actual_fields == set(legacy_fields) | {"fill_id"}:
+    if (
+        payload.get("side") == "SELL"
+        and actual_fields == set(sell_fields) | {"fill_id"}
+    ):
         fill_type = HumanPaperFill
-        field_names = legacy_fields
-    elif actual_fields == set(portfolio_fields) | {"fill_id"}:
+        field_names = sell_fields
+    elif (
+        payload.get("side") == "BUY"
+        and actual_fields == set(portfolio_fields) | {"fill_id"}
+    ):
         fill_type = HumanPaperPortfolioFill
         field_names = portfolio_fields
     else:
@@ -2020,39 +1826,6 @@ def _execution_rejection_from_payload(
     return rejection
 
 
-def _capital_rejection_from_payload(
-    payload: object,
-) -> HumanPaperCapitalRejection:
-    if not isinstance(payload, Mapping):
-        raise ValueError("human paper capital rejection payload is malformed")
-    field_names = tuple(field.name for field in fields(HumanPaperCapitalRejection))
-    if set(payload) != set(field_names) | {"rejection_id"}:
-        raise ValueError("human paper capital rejection fields changed")
-    values = {name: payload[name] for name in field_names}
-    try:
-        for name in (
-            "candidate_bar_opened_at",
-            "candidate_bar_closed_at",
-            "rejected_at",
-        ):
-            values[name] = datetime.fromisoformat(str(values[name]))
-        for name in (
-            "candidate_price",
-            "available_cash",
-            "notional",
-            "terminal_buy_fee",
-            "required_cash",
-        ):
-            values[name] = Decimal(str(values[name]))
-        values["reason_codes"] = tuple(values["reason_codes"])
-        rejection = HumanPaperCapitalRejection(**values)
-    except (InvalidOperation, TypeError, ValueError) as exc:
-        raise ValueError("human paper capital rejection payload is invalid") from exc
-    if payload.get("rejection_id") != rejection.rejection_id:
-        raise ValueError("human paper capital rejection identity changed")
-    return rejection
-
-
 def _portfolio_rejection_from_payload(
     payload: object,
 ) -> HumanPaperPortfolioRejection:
@@ -2135,7 +1908,6 @@ def load_human_paper_ledger(path: Path) -> dict[str, object]:
     filled_intents: set[str] = set()
     cancelled_intents: set[str] = set()
     execution_rejected_intents: set[str] = set()
-    capital_rejected_intents: set[str] = set()
     portfolio_rejected_intents: set[str] = set()
     lots_by_symbol: dict[str, list[list[object]]] = {}
     active_pending_lifecycles: dict[str, str] = {}
@@ -2162,7 +1934,7 @@ def load_human_paper_ledger(path: Path) -> dict[str, object]:
             if intent_id in intents:
                 raise ValueError("human paper intent identity is duplicated")
             lifecycle = intent.signal_lifecycle_id
-            if intent.status == "PENDING" and lifecycle is not None:
+            if intent.status == "PENDING":
                 if lifecycle in consumed_signal_lifecycles:
                     raise ValueError(
                         "human paper pending intent reused a consumed signal lifecycle"
@@ -2183,7 +1955,6 @@ def load_human_paper_ledger(path: Path) -> dict[str, object]:
                 fill.intent_id in filled_intents
                 or fill.intent_id in cancelled_intents
                 or fill.intent_id in execution_rejected_intents
-                or fill.intent_id in capital_rejected_intents
                 or fill.intent_id in portfolio_rejected_intents
             ):
                 raise ValueError("human paper intent was already terminal")
@@ -2219,13 +1990,12 @@ def load_human_paper_ledger(path: Path) -> dict[str, object]:
                 lots_by_symbol.setdefault(fill.symbol, []).append(
                     [fill.filled_at.date(), fill.quantity]
                 )
-            if intent.signal_lifecycle_id is not None:
-                active_pending_lifecycles.pop(intent.signal_lifecycle_id, None)
-                if intent.signal_lifecycle_id in consumed_signal_lifecycles:
-                    raise ValueError(
-                        "human paper signal lifecycle has multiple terminal outcomes"
-                    )
-                consumed_signal_lifecycles.add(intent.signal_lifecycle_id)
+            active_pending_lifecycles.pop(intent.signal_lifecycle_id, None)
+            if intent.signal_lifecycle_id in consumed_signal_lifecycles:
+                raise ValueError(
+                    "human paper signal lifecycle has multiple terminal outcomes"
+                )
+            consumed_signal_lifecycles.add(intent.signal_lifecycle_id)
             filled_intents.add(fill.intent_id)
         elif kind == "CANCEL":
             cancellation = _cancellation_from_payload(event.get("payload"))
@@ -2237,14 +2007,12 @@ def load_human_paper_ledger(path: Path) -> dict[str, object]:
                 or cancellation.intent_id in filled_intents
                 or cancellation.intent_id in cancelled_intents
                 or cancellation.intent_id in execution_rejected_intents
-                or cancellation.intent_id in capital_rejected_intents
                 or cancellation.intent_id in portfolio_rejected_intents
                 or cancellation.cancelled_at < intent.created_at
                 or cancellation.signal_lifecycle_id != intent.signal_lifecycle_id
             ):
                 raise ValueError("human paper cancellation does not match its intent")
-            if intent.signal_lifecycle_id is not None:
-                active_pending_lifecycles.pop(intent.signal_lifecycle_id, None)
+            active_pending_lifecycles.pop(intent.signal_lifecycle_id, None)
             cancelled_intents.add(cancellation.intent_id)
         elif kind == "OPERATIONS_CANCEL":
             cancellation = _operations_cancellation_from_payload(
@@ -2261,7 +2029,6 @@ def load_human_paper_ledger(path: Path) -> dict[str, object]:
                 or cancellation.intent_id in filled_intents
                 or cancellation.intent_id in cancelled_intents
                 or cancellation.intent_id in execution_rejected_intents
-                or cancellation.intent_id in capital_rejected_intents
                 or cancellation.intent_id in portfolio_rejected_intents
                 or cancellation.cancelled_at < intent.created_at
                 or cancellation.symbol != intent.symbol
@@ -2273,13 +2040,12 @@ def load_human_paper_ledger(path: Path) -> dict[str, object]:
                     "human paper operations cancellation does not match its intent"
                 )
             lifecycle = intent.signal_lifecycle_id
-            if lifecycle is not None:
-                active_pending_lifecycles.pop(lifecycle, None)
-                if lifecycle in consumed_signal_lifecycles:
-                    raise ValueError(
-                        "human paper signal lifecycle has multiple terminal outcomes"
-                    )
-                consumed_signal_lifecycles.add(lifecycle)
+            active_pending_lifecycles.pop(lifecycle, None)
+            if lifecycle in consumed_signal_lifecycles:
+                raise ValueError(
+                    "human paper signal lifecycle has multiple terminal outcomes"
+                )
+            consumed_signal_lifecycles.add(lifecycle)
             cancelled_intents.add(cancellation.intent_id)
         elif kind == "EXECUTION_REJECT":
             rejection = _execution_rejection_from_payload(event.get("payload"))
@@ -2294,7 +2060,6 @@ def load_human_paper_ledger(path: Path) -> dict[str, object]:
                 or rejection.intent_id in filled_intents
                 or rejection.intent_id in cancelled_intents
                 or rejection.intent_id in execution_rejected_intents
-                or rejection.intent_id in capital_rejected_intents
                 or rejection.intent_id in portfolio_rejected_intents
                 or rejection.symbol != intent.symbol
                 or intent.entry_price_cap != rejection.entry_price_cap
@@ -2309,46 +2074,13 @@ def load_human_paper_ledger(path: Path) -> dict[str, object]:
                 raise ValueError(
                     "human paper execution rejection does not match its intent"
                 )
-            if intent.signal_lifecycle_id is not None:
-                active_pending_lifecycles.pop(intent.signal_lifecycle_id, None)
-                if intent.signal_lifecycle_id in consumed_signal_lifecycles:
-                    raise ValueError(
-                        "human paper signal lifecycle has multiple terminal outcomes"
-                    )
-                consumed_signal_lifecycles.add(intent.signal_lifecycle_id)
-            execution_rejected_intents.add(rejection.intent_id)
-        elif kind == "CAPITAL_REJECT":
-            rejection = _capital_rejection_from_payload(event.get("payload"))
-            intent = intents.get(rejection.intent_id)
-            if intent is None:
-                raise ValueError("human paper capital rejection has no preceding intent")
-            if (
-                intent.status != "PENDING"
-                or intent.side != "BUY"
-                or rejection.intent_id in filled_intents
-                or rejection.intent_id in cancelled_intents
-                or rejection.intent_id in execution_rejected_intents
-                or rejection.intent_id in capital_rejected_intents
-                or rejection.intent_id in portfolio_rejected_intents
-                or rejection.symbol != intent.symbol
-                or rejection.quantity != intent.quantity
-                or rejection.candidate_bar_opened_at < intent.earliest_fill_at
-                or intent.entry_price_cap is None
-                or intent.entry_valid_until is None
-                or rejection.candidate_price > intent.entry_price_cap
-                or rejection.candidate_bar_closed_at > intent.entry_valid_until
-            ):
+            active_pending_lifecycles.pop(intent.signal_lifecycle_id, None)
+            if intent.signal_lifecycle_id in consumed_signal_lifecycles:
                 raise ValueError(
-                    "human paper capital rejection does not match its intent"
+                    "human paper signal lifecycle has multiple terminal outcomes"
                 )
-            if intent.signal_lifecycle_id is not None:
-                active_pending_lifecycles.pop(intent.signal_lifecycle_id, None)
-                if intent.signal_lifecycle_id in consumed_signal_lifecycles:
-                    raise ValueError(
-                        "human paper signal lifecycle has multiple terminal outcomes"
-                    )
-                consumed_signal_lifecycles.add(intent.signal_lifecycle_id)
-            capital_rejected_intents.add(rejection.intent_id)
+            consumed_signal_lifecycles.add(intent.signal_lifecycle_id)
+            execution_rejected_intents.add(rejection.intent_id)
         elif kind == "PORTFOLIO_REJECT":
             rejection = _portfolio_rejection_from_payload(event.get("payload"))
             intent = intents.get(rejection.intent_id)
@@ -2360,7 +2092,6 @@ def load_human_paper_ledger(path: Path) -> dict[str, object]:
                 or rejection.intent_id in filled_intents
                 or rejection.intent_id in cancelled_intents
                 or rejection.intent_id in execution_rejected_intents
-                or rejection.intent_id in capital_rejected_intents
                 or rejection.intent_id in portfolio_rejected_intents
                 or rejection.symbol != intent.symbol
                 or rejection.quantity != intent.quantity
@@ -2373,13 +2104,12 @@ def load_human_paper_ledger(path: Path) -> dict[str, object]:
                 raise ValueError(
                     "human paper portfolio rejection does not match its intent"
                 )
-            if intent.signal_lifecycle_id is not None:
-                active_pending_lifecycles.pop(intent.signal_lifecycle_id, None)
-                if intent.signal_lifecycle_id in consumed_signal_lifecycles:
-                    raise ValueError(
-                        "human paper signal lifecycle has multiple terminal outcomes"
-                    )
-                consumed_signal_lifecycles.add(intent.signal_lifecycle_id)
+            active_pending_lifecycles.pop(intent.signal_lifecycle_id, None)
+            if intent.signal_lifecycle_id in consumed_signal_lifecycles:
+                raise ValueError(
+                    "human paper signal lifecycle has multiple terminal outcomes"
+                )
+            consumed_signal_lifecycles.add(intent.signal_lifecycle_id)
             portfolio_rejected_intents.add(rejection.intent_id)
         else:
             raise ValueError(f"human paper event kind invalid at {index}")
@@ -2446,7 +2176,7 @@ def _append_event_unlocked(
     if kind == "INTENT":
         candidate = _intent_from_payload(payload)
         lifecycle = candidate.signal_lifecycle_id
-        if candidate.status == "PENDING" and lifecycle is not None:
+        if candidate.status == "PENDING":
             if lifecycle in human_paper_consumed_signal_lifecycle_ids(events):
                 raise ValueError(
                     "human paper pending intent reused a consumed signal lifecycle"
@@ -2645,13 +2375,12 @@ def build_human_paper_intent(
     if not (is_buy or is_sell):
         return None
     ranking = alert.sector_ranking_evidence
-    exact_live_sector_selection_required = (
+    exact_sector_selection_required = (
         is_buy
         and alert.alert_type == "POSSIBLE_30M_BUY"
         and ranking is not None
-        and ranking.source_profile == "LIVE_FULL_RANKING"
     )
-    if exact_live_sector_selection_required:
+    if exact_sector_selection_required:
         # Keep this check in the shared decision/ledger core as well as the
         # page service.  A direct caller may not bypass the exact QMT catalog
         # gate merely by avoiding the web endpoint.
@@ -2911,17 +2640,6 @@ def human_paper_cancelled_intent_ids(
     )
 
 
-def human_paper_capital_rejected_intent_ids(
-    events: Sequence[Mapping[str, object]],
-) -> frozenset[str]:
-    return frozenset(
-        str(event["payload"]["intent_id"])
-        for event in events
-        if event.get("kind") == "CAPITAL_REJECT"
-        and isinstance(event.get("payload"), Mapping)
-    )
-
-
 def human_paper_execution_rejected_intent_ids(
     events: Sequence[Mapping[str, object]],
 ) -> frozenset[str]:
@@ -2957,7 +2675,6 @@ def human_paper_terminal_intent_ids(
         filled
         | set(human_paper_cancelled_intent_ids(events))
         | set(human_paper_execution_rejected_intent_ids(events))
-        | set(human_paper_capital_rejected_intent_ids(events))
         | set(human_paper_portfolio_rejected_intent_ids(events))
     )
 
@@ -2989,7 +2706,6 @@ def human_paper_consumed_signal_lifecycle_ids(
             "FILL",
             "OPERATIONS_CANCEL",
             "EXECUTION_REJECT",
-            "CAPITAL_REJECT",
             "PORTFOLIO_REJECT",
         }
         and isinstance(event.get("payload"), Mapping)
@@ -2998,7 +2714,7 @@ def human_paper_consumed_signal_lifecycle_ids(
         str(lifecycle)
         for intent_id in terminal_ids
         if (intent := intents.get(intent_id)) is not None
-        and (lifecycle := intent.get("signal_lifecycle_id")) is not None
+        for lifecycle in (intent["signal_lifecycle_id"],)
     )
 
 
@@ -3251,16 +2967,13 @@ def _settle_human_paper_intents_unlocked(
     path: Path,
     *,
     bars_by_symbol: Mapping[str, Sequence[HumanPaperMinuteBar]],
-    accounting_parameters: HumanPaperAccountingParameters | None = None,
-    enforce_portfolio_controls: bool = False,
+    accounting_parameters: HumanPaperAccountingParameters,
     operations_cancellations: Sequence[
         HumanPaperOperationsCancellation
     ] = (),
     entry_provenance_blocked_intent_ids: Sequence[str] = (),
     causal_gap_blocked_intent_ids: Sequence[str] = (),
 ) -> tuple[dict[str, object], tuple[dict[str, object], ...]]:
-    if enforce_portfolio_controls and accounting_parameters is None:
-        raise ValueError("portfolio controls require accounting parameters")
     ledger = load_human_paper_ledger(path)
     events = tuple(ledger["events"])
     if any(
@@ -3380,9 +3093,7 @@ def _settle_human_paper_intents_unlocked(
             if side == "BUY" and (
                 entry_valid_until is None or entry_price_cap is None
             ):
-                # Old research ledgers remain readable, but a legacy BUY that
-                # lacks an exact confirmation-bar boundary can never fill.
-                continue
+                raise ValueError("pending BUY intent lacks its execution boundary")
             candidates = tuple(
                 sorted(
                     (
@@ -3565,95 +3276,81 @@ def _settle_human_paper_intents_unlocked(
                 )
                 continue
         decision: dict[str, object] | None = None
-        if side == "BUY" and accounting_parameters is not None:
-            if enforce_portfolio_controls:
-                position_quantities = human_paper_position_quantities(
-                    tuple(document["events"])
+        if side == "BUY":
+            position_quantities = human_paper_position_quantities(
+                tuple(document["events"])
+            )
+            position_marks: dict[str, Decimal] = {}
+            unresolved_marks: list[dict[str, str]] = []
+            for position_symbol in sorted(position_quantities):
+                matches = tuple(
+                    value
+                    for value in bars_by_symbol.get(position_symbol, ())
+                    if value.opened_at == bar.opened_at
+                    and value.closed_at == bar.closed_at
                 )
-                position_marks: dict[str, Decimal] = {}
-                unresolved_marks: list[dict[str, str]] = []
-                for position_symbol in sorted(position_quantities):
-                    matches = tuple(
-                        value
-                        for value in bars_by_symbol.get(position_symbol, ())
-                        if value.opened_at == bar.opened_at
-                        and value.closed_at == bar.closed_at
-                    )
-                    if len(matches) != 1:
-                        unresolved_marks.append(
-                            {
-                                "symbol": position_symbol,
-                                "reason": "EXACT_SYNCHRONOUS_1M_BAR_NOT_UNIQUE",
-                            }
-                        )
-                        continue
-                    mark_bar = matches[0]
-                    if (
-                        not mark_bar.complete
-                        or mark_bar.suspended
-                        or not mark_bar.security_status_complete
-                        or not mark_bar.corporate_action_state_complete
-                        or mark_bar.execution_snapshot_sha256
-                        != bar.execution_snapshot_sha256
-                    ):
-                        unresolved_marks.append(
-                            {
-                                "symbol": position_symbol,
-                                "reason": "SYNCHRONOUS_1M_MARK_FACTS_INCOMPLETE",
-                            }
-                        )
-                        continue
-                    position_marks[position_symbol] = mark_bar.close
-                if unresolved_marks:
-                    capital_evaluations.append(
+                if len(matches) != 1:
+                    unresolved_marks.append(
                         {
-                            "schema": (
-                                "chanlun-human-paper-portfolio-mark-resolution/v1"
-                            ),
-                            "result": "PORTFOLIO_MARKS_UNRESOLVED",
-                            "intent_id": intent_id,
-                            "symbol": str(intent["symbol"]),
-                            "candidate_bar_opened_at": bar.opened_at.isoformat(),
-                            "candidate_bar_closed_at": bar.closed_at.isoformat(),
-                            "execution_snapshot_sha256": (
-                                bar.execution_snapshot_sha256
-                            ),
-                            "open_position_count": len(position_quantities),
-                            "resolved_position_mark_count": len(position_marks),
-                            "unresolved_position_marks": unresolved_marks,
-                            "reason_codes": [
-                                "ALL_OPEN_POSITIONS_REQUIRE_EXACT_SYNCHRONOUS_1M_MARKS"
-                            ],
-                            "optional_buy_deferred_for_unresolved_marks": True,
-                            "persistent_exit_processing_continues": True,
-                            "slot_fraction_notional_gate_evaluable": False,
-                            "account_exposure_notional_gate_evaluable": False,
-                            "minimum_market_data_frequency": "1m",
-                            "tick_data_used": False,
-                            "broker_transport_available": False,
-                            "live_status": "LIVE_DISABLED",
+                            "symbol": position_symbol,
+                            "reason": "EXACT_SYNCHRONOUS_1M_BAR_NOT_UNIQUE",
                         }
                     )
-                    portfolio_mark_blocked_intents.add(intent_id)
                     continue
-                decision = assess_human_paper_portfolio_fill(
-                    tuple(document["events"]),
-                    parameters=accounting_parameters,
-                    symbol=str(intent["symbol"]),
-                    quantity=quantity,
-                    price=execution_price,
-                    session=bar.closed_at.date(),
-                    position_marks=position_marks,
+                mark_bar = matches[0]
+                if (
+                    not mark_bar.complete
+                    or mark_bar.suspended
+                    or not mark_bar.security_status_complete
+                    or not mark_bar.corporate_action_state_complete
+                    or mark_bar.execution_snapshot_sha256
+                    != bar.execution_snapshot_sha256
+                ):
+                    unresolved_marks.append(
+                        {
+                            "symbol": position_symbol,
+                            "reason": "SYNCHRONOUS_1M_MARK_FACTS_INCOMPLETE",
+                        }
+                    )
+                    continue
+                position_marks[position_symbol] = mark_bar.close
+            if unresolved_marks:
+                capital_evaluations.append(
+                    {
+                        "schema": "chanlun-human-paper-portfolio-mark-resolution",
+                        "result": "PORTFOLIO_MARKS_UNRESOLVED",
+                        "intent_id": intent_id,
+                        "symbol": str(intent["symbol"]),
+                        "candidate_bar_opened_at": bar.opened_at.isoformat(),
+                        "candidate_bar_closed_at": bar.closed_at.isoformat(),
+                        "execution_snapshot_sha256": bar.execution_snapshot_sha256,
+                        "open_position_count": len(position_quantities),
+                        "resolved_position_mark_count": len(position_marks),
+                        "unresolved_position_marks": unresolved_marks,
+                        "reason_codes": [
+                            "ALL_OPEN_POSITIONS_REQUIRE_EXACT_SYNCHRONOUS_1M_MARKS"
+                        ],
+                        "optional_buy_deferred_for_unresolved_marks": True,
+                        "persistent_exit_processing_continues": True,
+                        "slot_fraction_notional_gate_evaluable": False,
+                        "account_exposure_notional_gate_evaluable": False,
+                        "minimum_market_data_frequency": "1m",
+                        "tick_data_used": False,
+                        "broker_transport_available": False,
+                        "live_status": "LIVE_DISABLED",
+                    }
                 )
-            else:
-                decision = assess_human_paper_cash_and_slot_fill(
-                    tuple(document["events"]),
-                    parameters=accounting_parameters,
-                    symbol=str(intent["symbol"]),
-                    quantity=quantity,
-                    price=execution_price,
-                    session=bar.closed_at.date(),
-                )
+                portfolio_mark_blocked_intents.add(intent_id)
+                continue
+            decision = assess_human_paper_portfolio_fill(
+                tuple(document["events"]),
+                parameters=accounting_parameters,
+                symbol=str(intent["symbol"]),
+                quantity=quantity,
+                price=execution_price,
+                session=bar.closed_at.date(),
+                position_marks=position_marks,
+            )
             evaluation = {
                 **decision,
                 "intent_id": intent_id,
@@ -3661,7 +3358,7 @@ def _settle_human_paper_intents_unlocked(
                 "candidate_bar_closed_at": bar.closed_at.isoformat(),
                 "execution_snapshot_sha256": bar.execution_snapshot_sha256,
             }
-            if decision["allowed"] is not True and enforce_portfolio_controls:
+            if decision["allowed"] is not True:
                 rejection = HumanPaperPortfolioRejection(
                     intent_id=intent_id,
                     symbol=str(intent["symbol"]),
@@ -3728,68 +3425,16 @@ def _settle_human_paper_intents_unlocked(
                     }
                 )
                 continue
-            if decision["allowed"] is not True:
-                rejection = HumanPaperCapitalRejection(
-                    intent_id=intent_id,
-                    symbol=str(intent["symbol"]),
-                    quantity=quantity,
-                    candidate_bar_opened_at=bar.opened_at,
-                    candidate_bar_closed_at=bar.closed_at,
-                    candidate_price=execution_price,
-                    execution_snapshot_sha256=str(
-                        bar.execution_snapshot_sha256
-                    ),
-                    cash_slot_decision_sha256=str(
-                        decision["content_sha256"]
-                    ),
-                    accounting_contract_id=(
-                        accounting_parameters.accounting_contract_id
-                    ),
-                    available_cash=Decimal(
-                        str(decision["available_cash"])
-                    ),
-                    notional=Decimal(str(decision["notional"])),
-                    terminal_buy_fee=Decimal(
-                        str(decision["terminal_buy_fee"])
-                    ),
-                    required_cash=Decimal(
-                        str(decision["required_cash"])
-                    ),
-                    occupied_slots=int(decision["occupied_slots"]),
-                    slot_count=int(decision["slot_count"]),
-                    reason_codes=tuple(decision["reason_codes"]),
-                    rejected_at=bar.closed_at,
-                )
-                document, _event = _append_event_unlocked(
-                    path,
-                    kind="CAPITAL_REJECT",
-                    payload={
-                        **_jsonable(asdict(rejection)),
-                        "rejection_id": rejection.rejection_id,
-                    },
-                    identity_field="rejection_id",
-                    identity=rejection.rejection_id,
-                )
-                terminal_intents.add(intent_id)
-                capital_evaluations.append(
-                    {
-                        **evaluation,
-                        "result": "CAPITAL_REJECTED",
-                        "rejection_id": rejection.rejection_id,
-                    }
-                )
-                continue
         if side == "SELL":
             _consume_sellable_lots(
                 lots_by_symbol.setdefault(str(intent["symbol"]), []),
                 at=bar.closed_at,
                 quantity=quantity,
             )
-        if side == "BUY" and enforce_portfolio_controls:
+        if side == "BUY":
             if decision is None or decision.get("allowed") is not True:
                 raise ValueError("allowed portfolio fill decision is unavailable")
-            fill: HumanPaperFill | HumanPaperPortfolioFill = (
-                HumanPaperPortfolioFill(
+            fill: HumanPaperFill | HumanPaperPortfolioFill = HumanPaperPortfolioFill(
                     intent_id=intent_id,
                     symbol=str(intent["symbol"]),
                     side="BUY",
@@ -3843,7 +3488,6 @@ def _settle_human_paper_intents_unlocked(
                         for value in decision["position_marks"]
                     ),
                 )
-            )
         else:
             fill = HumanPaperFill(
                 intent_id=intent_id,
@@ -3866,7 +3510,7 @@ def _settle_human_paper_intents_unlocked(
         )
         filled_intents.add(intent_id)
         terminal_intents.add(intent_id)
-        if side == "BUY" and accounting_parameters is not None:
+        if side == "BUY":
             capital_evaluations.append(
                 {
                     **evaluation,
@@ -3899,7 +3543,7 @@ def _settle_human_paper_intents_unlocked(
         terminal_intents.add(cancellation.intent_id)
         capital_evaluations.append(
             {
-                "schema": "chanlun-human-paper-operations-cancellation/v1",
+                "schema": "chanlun-human-paper-operations-cancellation",
                 "result": cancellation.reason_code,
                 "intent_id": cancellation.intent_id,
                 "symbol": cancellation.symbol,
@@ -3919,37 +3563,6 @@ def _settle_human_paper_intents_unlocked(
             }
         )
     return document, tuple(capital_evaluations)
-
-
-def settle_human_paper_intents(
-    path: Path,
-    *,
-    bars_by_symbol: Mapping[str, Sequence[HumanPaperMinuteBar]],
-) -> dict[str, object]:
-    """Settle the full pending set under one cross-process ledger lock."""
-
-    with interprocess_file_lock(path.with_suffix(path.suffix + ".lock")):
-        document, _evaluations = _settle_human_paper_intents_unlocked(
-            path,
-            bars_by_symbol=bars_by_symbol,
-        )
-        return document
-
-
-def settle_human_paper_intents_with_capital_controls(
-    path: Path,
-    *,
-    bars_by_symbol: Mapping[str, Sequence[HumanPaperMinuteBar]],
-    accounting_parameters: HumanPaperAccountingParameters,
-) -> tuple[dict[str, object], tuple[dict[str, object], ...]]:
-    """Production settlement with exact frozen cash/fee and slot gates."""
-
-    with interprocess_file_lock(path.with_suffix(path.suffix + ".lock")):
-        return _settle_human_paper_intents_unlocked(
-            path,
-            bars_by_symbol=bars_by_symbol,
-            accounting_parameters=accounting_parameters,
-        )
 
 
 def settle_human_paper_intents_with_portfolio_controls(
@@ -3975,7 +3588,6 @@ def settle_human_paper_intents_with_portfolio_controls(
             path,
             bars_by_symbol=bars_by_symbol,
             accounting_parameters=accounting_parameters,
-            enforce_portfolio_controls=True,
             operations_cancellations=operations_cancellations,
             entry_provenance_blocked_intent_ids=(
                 entry_provenance_blocked_intent_ids
@@ -4635,7 +4247,7 @@ def _verify_synchronous_position_marks(
     opened_at: datetime,
     closed_at: datetime,
 ) -> None:
-    """Verify v2 marks against the exact decision interval and fact object."""
+    """Verify marks against the exact decision interval and fact object."""
 
     if not isinstance(raw_marks, list):
         raise ValueError("portfolio decision marks are malformed")
@@ -4756,7 +4368,6 @@ def audit_human_paper_execution_evidence(
             "unique_execution_evidence_count": 0,
             "missing_evidence": [],
             "invalid_evidence": [],
-            "legacy_fact_only_evidence": [],
             "tick_data_used": False,
             "broker_transport_available": False,
             "live_status": "LIVE_DISABLED",
@@ -4773,7 +4384,6 @@ def audit_human_paper_execution_evidence(
     ] = {}
     missing: list[dict[str, str]] = []
     invalid: list[dict[str, str]] = []
-    legacy: list[dict[str, str]] = []
     verified = 0
     capture_events = (
         events if _capture_state_events is None else _capture_state_events
@@ -4813,28 +4423,13 @@ def audit_human_paper_execution_evidence(
                 / f"{identity[7:]}.json"
             )
             if not evidence_path.is_file():
-                fact_only_path = (
-                    session_root
-                    / "objects"
-                    / "paper_execution_facts"
-                    / f"{identity[7:]}.json"
+                missing.append(
+                    {
+                        "fill_id": fill_id,
+                        "execution_snapshot_sha256": identity,
+                        "reason": "EXECUTION_EVIDENCE_OBJECT_MISSING",
+                    }
                 )
-                if fact_only_path.is_file():
-                    legacy.append(
-                        {
-                            "fill_id": fill_id,
-                            "execution_snapshot_sha256": identity,
-                            "reason": "LEGACY_FACT_SNAPSHOT_HAS_NO_EXACT_1M_BAR",
-                        }
-                    )
-                else:
-                    missing.append(
-                        {
-                            "fill_id": fill_id,
-                            "execution_snapshot_sha256": identity,
-                            "reason": "EXECUTION_EVIDENCE_OBJECT_MISSING",
-                        }
-                    )
                 continue
 
             if identity not in cache:
@@ -5063,8 +4658,6 @@ def audit_human_paper_execution_evidence(
         status = "INVALID"
     elif missing:
         status = "MISSING"
-    elif legacy:
-        status = "LEGACY_FACT_ONLY"
     return {
         "status": status,
         "fill_count": len(fills),
@@ -5072,7 +4665,6 @@ def audit_human_paper_execution_evidence(
         "unique_execution_evidence_count": len(cache),
         "missing_evidence": missing,
         "invalid_evidence": invalid,
-        "legacy_fact_only_evidence": legacy,
         "tick_data_used": False,
         "broker_transport_available": False,
         "live_status": "LIVE_DISABLED",
@@ -5092,7 +4684,7 @@ def audit_human_paper_execution_rejection_evidence(
         if event.get("kind") == "EXECUTION_REJECT"
         and isinstance(event.get("payload"), Mapping)
     )
-    schema = "chanlun-human-paper-execution-rejection-evidence-audit/v1"
+    schema = "chanlun-human-paper-execution-rejection-evidence-audit"
     if not rejections:
         return {
             "schema": schema,
@@ -5376,7 +4968,7 @@ def audit_human_paper_operations_cancellation_evidence(
         if event.get("kind") == "OPERATIONS_CANCEL"
         and isinstance(event.get("payload"), Mapping)
     )
-    schema = "chanlun-human-paper-operations-cancellation-evidence-audit/v1"
+    schema = "chanlun-human-paper-operations-cancellation-evidence-audit"
     if not cancellations:
         return {
             "schema": schema,
@@ -5736,12 +5328,12 @@ def audit_human_paper_operations_cancellation_evidence(
     }
 
 
-def audit_human_paper_capital_rejection_evidence(
+def audit_human_paper_portfolio_rejection_evidence(
     events: Sequence[Mapping[str, object]],
     *,
     forward_root: Path,
 ) -> dict[str, object]:
-    """Prove each v1/v2 capital rejection against exact immutable 1m facts.
+    """Prove each portfolio rejection against exact immutable 1m facts.
 
     The immutable rejection proves the frozen cash equation.  This audit also
     proves that its price came from the first eligible completed 1m bar in the
@@ -5752,10 +5344,10 @@ def audit_human_paper_capital_rejection_evidence(
     rejections = tuple(
         event["payload"]
         for event in events
-        if event.get("kind") in {"CAPITAL_REJECT", "PORTFOLIO_REJECT"}
+        if event.get("kind") == "PORTFOLIO_REJECT"
         and isinstance(event.get("payload"), Mapping)
     )
-    schema = "chanlun-human-paper-capital-rejection-evidence-audit/v1"
+    schema = "chanlun-human-paper-portfolio-rejection-evidence-audit"
     if not rejections:
         return {
             "schema": schema,
@@ -5765,7 +5357,6 @@ def audit_human_paper_capital_rejection_evidence(
             "unique_execution_evidence_count": 0,
             "missing_evidence": [],
             "invalid_evidence": [],
-            "legacy_fact_only_evidence": [],
             "first_eligible_bar_verified": True,
             "synchronous_position_marks_verified": True,
             "tick_data_used": False,
@@ -5822,10 +5413,8 @@ def audit_human_paper_capital_rejection_evidence(
 
     missing = rejection_rows("missing_evidence")
     invalid = rejection_rows("invalid_evidence")
-    legacy = rejection_rows("legacy_fact_only_evidence")
     invalid_ids = {value["rejection_id"] for value in invalid}
     missing_ids = {value["rejection_id"] for value in missing}
-    legacy_ids = {value["rejection_id"] for value in legacy}
     intents = {
         str(event["payload"].get("intent_id") or ""): event["payload"]
         for event in events
@@ -5835,11 +5424,11 @@ def audit_human_paper_capital_rejection_evidence(
 
     # The shared verifier proves the selected bar.  This pass proves it was
     # not selected after an earlier eligible 1m bar in that same snapshot and
-    # that every v2 open-position mark came from the exact same completed 1m
+    # that every open-position mark came from the exact same completed 1m
     # interval and immutable instrument-fact snapshot.
     for rejection in rejections:
         rejection_id = str(rejection.get("rejection_id") or "")
-        if rejection_id in invalid_ids | missing_ids | legacy_ids:
+        if rejection_id in invalid_ids | missing_ids:
             continue
         identity = str(rejection.get("execution_snapshot_sha256") or "")
         try:
@@ -5942,30 +5531,24 @@ def audit_human_paper_capital_rejection_evidence(
                 _capture_lots,
             ) = _execution_evidence_capture_state(events, identity=identity)
             raw_marks = rejection.get("position_marks")
-            if raw_marks is None:
-                if capture_positions:
-                    raise ValueError(
-                        "legacy capital rejection cannot prove open-position marks"
-                    )
-            else:
-                _verify_synchronous_position_marks(
-                    raw_marks=raw_marks,
-                    bars_by_symbol=bars_by_symbol,
-                    facts=facts,
-                    capture_positions=capture_positions,
-                    capture_oldest_lots=capture_oldest_lots,
-                    opened_at=opened_at,
-                    closed_at=closed_at,
-                )
-                mark_symbols = {
-                    str(mark.get("symbol") or "")
-                    for mark in raw_marks
-                    if isinstance(mark, Mapping)
-                }
-                if mark_symbols != set(capture_positions):
-                    raise ValueError(
-                        "portfolio rejection mark coverage changed"
-                    )
+            if not isinstance(raw_marks, list):
+                raise ValueError("portfolio rejection position marks are missing")
+            _verify_synchronous_position_marks(
+                raw_marks=raw_marks,
+                bars_by_symbol=bars_by_symbol,
+                facts=facts,
+                capture_positions=capture_positions,
+                capture_oldest_lots=capture_oldest_lots,
+                opened_at=opened_at,
+                closed_at=closed_at,
+            )
+            mark_symbols = {
+                str(mark.get("symbol") or "")
+                for mark in raw_marks
+                if isinstance(mark, Mapping)
+            }
+            if mark_symbols != set(capture_positions):
+                raise ValueError("portfolio rejection mark coverage changed")
         except (InvalidOperation, KeyError, OSError, TypeError, ValueError) as exc:
             invalid.append(
                 {
@@ -5976,14 +5559,12 @@ def audit_human_paper_capital_rejection_evidence(
             )
             invalid_ids.add(rejection_id)
 
-    verified = len(rejections) - len(invalid_ids | missing_ids | legacy_ids)
+    verified = len(rejections) - len(invalid_ids | missing_ids)
     status = "COMPLETE"
     if invalid:
         status = "INVALID"
     elif missing:
         status = "MISSING"
-    elif legacy:
-        status = "LEGACY_FACT_ONLY"
     return {
         "schema": schema,
         "status": status,
@@ -5994,7 +5575,6 @@ def audit_human_paper_capital_rejection_evidence(
         ),
         "missing_evidence": missing,
         "invalid_evidence": invalid,
-        "legacy_fact_only_evidence": legacy,
         "first_eligible_bar_verified": status == "COMPLETE",
         "synchronous_position_marks_verified": status == "COMPLETE",
         "tick_data_used": False,
@@ -6152,9 +5732,7 @@ def _continuity_evidence_for_intent(
             valid_until_raw = intent.get("entry_valid_until")
             price_cap_raw = intent.get("entry_price_cap")
             if valid_until_raw is None or price_cap_raw is None:
-                # Legacy reduced BUY intents are observation-only and cannot
-                # create a fill/rejection obligation.
-                return str(evidence["content_sha256"]), ""
+                raise ValueError("pending BUY intent lacks its execution boundary")
             if (
                 verified_fact["buy_eligible"] is not True
                 or verified_fact["corporate_action_state_complete"]
@@ -6488,7 +6066,6 @@ __all__ = (
     "ENTRY_SELECTION_EVIDENCE_SCHEMA",
     "ENTRY_SELECTION_EXACT_ATTESTATION",
     "EXECUTION_EVIDENCE_SCHEMA",
-    "HumanPaperCapitalRejection",
     "HumanPaperDecisionPositionMark",
     "HumanPaperCancellation",
     "HumanPaperExecutionRejection",
@@ -6500,7 +6077,7 @@ __all__ = (
     "HumanPaperPortfolioFill",
     "HumanPaperPortfolioRejection",
     "PAPER_CONTRACT_ID",
-    "audit_human_paper_capital_rejection_evidence",
+    "audit_human_paper_portfolio_rejection_evidence",
     "audit_human_paper_entry_boundary_attestations",
     "audit_human_paper_entry_selection_attestations",
     "audit_human_paper_entry_selection_source_bindings",
@@ -6511,7 +6088,6 @@ __all__ = (
     "append_human_paper_intent",
     "build_human_paper_intent",
     "human_paper_cancelled_intent_ids",
-    "human_paper_capital_rejected_intent_ids",
     "human_paper_consumed_signal_lifecycle_ids",
     "human_paper_execution_rejected_intent_ids",
     "human_paper_event_effective_at",
@@ -6527,8 +6103,6 @@ __all__ = (
     "load_human_paper_ledger",
     "parse_human_paper_entry_selection_evidence",
     "reconcile_human_paper_feedback",
-    "settle_human_paper_intents",
-    "settle_human_paper_intents_with_capital_controls",
     "settle_human_paper_intents_with_portfolio_controls",
     "validate_a_share_completed_one_minute_interval",
 )

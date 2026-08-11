@@ -55,7 +55,7 @@ def _benchmark_dataset() -> BacktestDataset:
             memberships.append(
                 SectorMembershipAt(
                     session=session,
-                    sector_id="tdx-industry:SH.880301",
+                    sector_id="qmt-gics3:test-sector",
                     code=code,
                     known_at=opened_at - timedelta(hours=6),
                 )

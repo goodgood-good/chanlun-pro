@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field as dataclass_field, replace
+from dataclasses import dataclass, replace
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from math import ceil
@@ -28,7 +28,7 @@ from chanlun.decision_support.trading_system.warmup_structure_lineage import (
     WARMUP_STRUCTURE_LINEAGE_DIAGNOSTIC_CONTRACT_ID,
     WarmupStructureLineageDiagnosticEnvelope,
 )
-from chanlun.decision_support.trading_system.v3_qmt_higher_timeframe import (
+from chanlun.decision_support.trading_system.qmt_higher_timeframe import (
     QMT_HIGHER_TIMEFRAME_WARMUP_REQUIRED_DAILY_BARS,
     QMT_HIGHER_TIMEFRAME_WARMUP_CONVERGENCE_PARAMETER_SET_ID,
     QMT_SECTOR_NATIVE_DAILY_RESEARCH_BASE_FREQUENCY,
@@ -37,12 +37,12 @@ from chanlun.decision_support.trading_system.v3_qmt_higher_timeframe import (
     build_qmt_higher_timeframe_risk,
     qmt_higher_timeframe_inputs,
 )
-from chanlun.decision_support.trading_system.v3_etf_proxy_facts import (
+from chanlun.decision_support.trading_system.etf_proxy_facts import (
     RiskDiagnosticBuyPointEvidenceFacts,
     RiskMappingPointEvidenceFacts,
     RiskMappingSupplyFacts,
 )
-from chanlun.decision_support.trading_system.v3_qmt_native_daily_bridge import (
+from chanlun.decision_support.trading_system.qmt_native_daily_bridge import (
     QMT_NATIVE_DAILY_CALENDAR_COVERAGE_EVIDENCE_CONTRACT_ID,
     QMT_NATIVE_DAILY_RECONCILED_BASE_FREQUENCY,
     QmtNativeDailyCalendarCoverageEvidence,
@@ -57,7 +57,7 @@ from chanlun.decision_support.trading_system.qmt_causal_factor_adjustment import
     QMT_CAUSAL_FACTOR_ADJUSTMENT_CONTRACT_ID,
     build_causal_sector_price_basis_metadata,
 )
-from chanlun.decision_support.trading_system.v3_qmt_same_base_stream import (
+from chanlun.decision_support.trading_system.qmt_same_base_stream import (
     QmtMinuteSessionIssue,
     build_qmt_same_base_stream_frames,
 )
@@ -72,30 +72,24 @@ _QMT_SECTOR_COMPOSITE_MINIMUM_MEMBER_COUNT = 8
 _QMT_SECTOR_COMPOSITE_MINIMUM_BAR_COVERAGE = "0.60"
 _QMT_SECTOR_COMPOSITE_PROVIDER = "qmt-gics3-composite"
 _QMT_SECTOR_COMPOSITE_ADJUSTMENT = (
-    "causal-factor-stable-24-member-median-v5"
+    "causal-factor-stable-24-member-median"
 )
 _QMT_SECTOR_COMPOSITE_QUANTUM = Decimal("0.000001")
 _QMT_SECTOR_COMPOSITE_MEMBER_MASK_CONTRACT = (
-    "BIT_I_IS_SECTOR_COMPOSITE_MEMBERS_I_V1"
+    "BIT_I_IS_SECTOR_COMPOSITE_MEMBERS_I"
 )
 _QMT_SECTOR_COMPOSITE_METHOD = (
-    "DETERMINISTIC_HASH_SAMPLE_CAUSAL_FACTOR_MEDIAN_RETURN_CHAIN_V5"
+    "DETERMINISTIC_HASH_SAMPLE_CAUSAL_FACTOR_MEDIAN_RETURN_CHAIN"
 )
 _SHA256_ID = re.compile(r"^sha256:[0-9a-f]{64}$")
 HIGHER_TIMEFRAME_SESSION_EVIDENCE_CONTRACT_ID = (
-    "chanlun-higher-timeframe-session-evidence/v1"
-)
-QMT_SECTOR_SAME_BASE_COVERAGE_EVIDENCE_LEGACY_CONTRACT_ID = (
-    "chanlun-qmt-sector-same-5m-source-coverage/v1"
-)
-QMT_SECTOR_SAME_BASE_COVERAGE_EVIDENCE_PHYSICAL_LEGACY_CONTRACT_ID = (
-    "chanlun-qmt-sector-same-5m-source-coverage/v2"
+    "chanlun-higher-timeframe-session-evidence"
 )
 QMT_SECTOR_SAME_BASE_COVERAGE_EVIDENCE_CONTRACT_ID = (
-    "chanlun-qmt-sector-same-5m-source-coverage/v3"
+    "chanlun-qmt-sector-same-5m-source-coverage"
 )
 HIGHER_TIMEFRAME_EFFECTIVENESS_AUDIT_SCHEMA = (
-    "chanlun-v3-higher-timeframe-effectiveness-audit/v15"
+    "chanlun-higher-timeframe-effectiveness-audit"
 )
 _HIGHER_TIMEFRAME_GATES = frozenset({"GREEN", "AMBER", "RED", "UNRESOLVED"})
 _A_SHARE_CHART_SYMBOL = re.compile(r"^(?:SH|SZ|BJ)\.\d{6}$")
@@ -143,9 +137,9 @@ def sector_native_daily_research_bridge_contract() -> dict[str, object]:
     """Return the frozen, non-trading contract for the sector M/W/D fallback."""
 
     stable: dict[str, object] = {
-        "schema": "chanlun-sector-native-daily-research-bridge/v1",
+        "schema": "chanlun-sector-native-daily-research-bridge",
         "activation": "STRICT_SAME_5M_WARMUP_HISTORY_INSUFFICIENT_ONLY",
-        "daily_source": "CURRENT_MEMBER_NATIVE_DAILY_V5_MEDIAN_RETURN_CHAIN",
+        "daily_source": "CURRENT_MEMBER_NATIVE_DAILY_MEDIAN_RETURN_CHAIN",
         "thirty_minute_source": "CURRENT_MEMBER_COMPLETED_5M_DERIVED_30M",
         "cross_frequency_reconciliation": "UNRECONCILED_NONLINEAR_MEDIAN",
         "entry_disposition": "RESEARCH_AMBER_OR_RED_ONLY",
@@ -243,23 +237,17 @@ class QmtSectorSameBaseCoverageEvidence:
         "VISIBLE_PREFIX_INSUFFICIENT_WITHOUT_LEADING_GAP",
     ]
     physical_source_boundary_status: Literal[
-        "NOT_RECORDED_LEGACY",
         "PHYSICAL_QMT_CACHE_LEFT_BOUNDARY_AFTER_REQUESTED_WARMUP",
         "REQUESTED_REPLAY_LEFT_BOUNDARY_CLIPS_EARLIER_QMT_HISTORY",
         "INSUFFICIENT_PHYSICAL_QMT_MEMBER_FILES",
         "PHYSICAL_QMT_SOURCE_BOUNDARY_UNAVAILABLE",
-    ] = "NOT_RECORDED_LEGACY"
-    physical_source_requested_start_at: datetime | None = None
-    physical_source_required_contributor_start_at: datetime | None = None
-    physical_source_representative_member_count: int | None = None
-    physical_source_available_member_count: int | None = None
-    physical_source_required_contributor_count: int | None = None
-    physical_source_inventory_revision: str | None = None
-    _physical_source_legacy_v2: bool = dataclass_field(
-        default=False,
-        repr=False,
-        compare=False,
-    )
+    ]
+    physical_source_requested_start_at: datetime
+    physical_source_required_contributor_start_at: datetime | None
+    physical_source_representative_member_count: int
+    physical_source_available_member_count: int
+    physical_source_required_contributor_count: int
+    physical_source_inventory_revision: str
 
     def __post_init__(self) -> None:
         observed = normalize_datetime(self.observed_at, "observed_at")
@@ -314,31 +302,20 @@ class QmtSectorSameBaseCoverageEvidence:
             "TAIL_STABLE"
         ):
             raise ValueError("sector 5m coverage contradicts its warmup verdict")
-        physical_scalars = (
-            self.physical_source_requested_start_at,
-            self.physical_source_representative_member_count,
-            self.physical_source_available_member_count,
-            self.physical_source_required_contributor_count,
-            self.physical_source_inventory_revision,
-        )
-        if self.physical_source_boundary_status == "NOT_RECORDED_LEGACY":
-            if (
-                self._physical_source_legacy_v2
-                or
-                self.physical_source_required_contributor_start_at is not None
-                or any(value is not None for value in physical_scalars)
-            ):
-                raise ValueError(
-                    "legacy sector physical coverage cannot carry source facts"
-                )
+        if self.physical_source_boundary_status not in {
+            "PHYSICAL_QMT_CACHE_LEFT_BOUNDARY_AFTER_REQUESTED_WARMUP",
+            "REQUESTED_REPLAY_LEFT_BOUNDARY_CLIPS_EARLIER_QMT_HISTORY",
+            "INSUFFICIENT_PHYSICAL_QMT_MEMBER_FILES",
+            "PHYSICAL_QMT_SOURCE_BOUNDARY_UNAVAILABLE",
+        }:
+            raise ValueError("sector physical source boundary status is invalid")
         else:
             requested = self.physical_source_requested_start_at
             representative = self.physical_source_representative_member_count
             available = self.physical_source_available_member_count
             required = self.physical_source_required_contributor_count
             if (
-                (requested is None and not self._physical_source_legacy_v2)
-                or type(self._physical_source_legacy_v2) is not bool
+                requested is None
                 or
                 type(representative) is not int
                 or type(available) is not int
@@ -354,20 +331,19 @@ class QmtSectorSameBaseCoverageEvidence:
                 is None
             ):
                 raise ValueError("sector physical source counts are invalid")
-            if requested is not None:
-                requested = normalize_datetime(
-                    requested,
-                    "physical_source_requested_start_at",
+            requested = normalize_datetime(
+                requested,
+                "physical_source_requested_start_at",
+            )
+            object.__setattr__(
+                self,
+                "physical_source_requested_start_at",
+                requested,
+            )
+            if requested > first_bar:
+                raise ValueError(
+                    "sector physical source request starts after visible history"
                 )
-                object.__setattr__(
-                    self,
-                    "physical_source_requested_start_at",
-                    requested,
-                )
-                if requested > first_bar:
-                    raise ValueError(
-                        "sector physical source request starts after visible history"
-                    )
             expected_required = max(
                 _QMT_SECTOR_COMPOSITE_MINIMUM_MEMBER_COUNT,
                 ceil(
@@ -420,19 +396,15 @@ class QmtSectorSameBaseCoverageEvidence:
                     raise ValueError(
                         "resolved physical source boundary lost its quorum"
                     )
-                if requested is not None:
-                    expected_physical_status = (
-                        "PHYSICAL_QMT_CACHE_LEFT_BOUNDARY_AFTER_REQUESTED_WARMUP"
-                        if required_start > requested
-                        else "REQUESTED_REPLAY_LEFT_BOUNDARY_CLIPS_EARLIER_QMT_HISTORY"
+                expected_physical_status = (
+                    "PHYSICAL_QMT_CACHE_LEFT_BOUNDARY_AFTER_REQUESTED_WARMUP"
+                    if required_start > requested
+                    else "REQUESTED_REPLAY_LEFT_BOUNDARY_CLIPS_EARLIER_QMT_HISTORY"
+                )
+                if self.physical_source_boundary_status != expected_physical_status:
+                    raise ValueError(
+                        "physical source boundary status contradicts its timestamps"
                     )
-                    if (
-                        self.physical_source_boundary_status
-                        != expected_physical_status
-                    ):
-                        raise ValueError(
-                            "physical source boundary status contradicts its timestamps"
-                        )
 
     def document(self) -> dict[str, object]:
         document = {
@@ -494,11 +466,6 @@ class QmtSectorSameBaseCoverageEvidence:
             "data_grade": "RESEARCH_ONLY",
             "live_status": "LIVE_DISABLED",
         }
-        if self._physical_source_legacy_v2:
-            document["contract_id"] = (
-                QMT_SECTOR_SAME_BASE_COVERAGE_EVIDENCE_PHYSICAL_LEGACY_CONTRACT_ID
-            )
-            document.pop("physical_source_requested_start_at")
         return document
 
     @classmethod
@@ -508,12 +475,7 @@ class QmtSectorSameBaseCoverageEvidence:
     ) -> QmtSectorSameBaseCoverageEvidence:
         contract_id = value.get("contract_id")
         if (
-            contract_id
-            not in {
-                QMT_SECTOR_SAME_BASE_COVERAGE_EVIDENCE_CONTRACT_ID,
-                QMT_SECTOR_SAME_BASE_COVERAGE_EVIDENCE_PHYSICAL_LEGACY_CONTRACT_ID,
-                QMT_SECTOR_SAME_BASE_COVERAGE_EVIDENCE_LEGACY_CONTRACT_ID,
-            }
+            contract_id != QMT_SECTOR_SAME_BASE_COVERAGE_EVIDENCE_CONTRACT_ID
             or value.get("base_frequency") != "5m"
             or value.get("prefix_only") is not True
             or value.get("data_grade") != "RESEARCH_ONLY"
@@ -544,14 +506,6 @@ class QmtSectorSameBaseCoverageEvidence:
             first_visible_bar_at = datetime.fromisoformat(
                 str(value["first_visible_bar_at"])
             )
-            is_v1 = (
-                contract_id
-                == QMT_SECTOR_SAME_BASE_COVERAGE_EVIDENCE_LEGACY_CONTRACT_ID
-            )
-            is_v2 = (
-                contract_id
-                == QMT_SECTOR_SAME_BASE_COVERAGE_EVIDENCE_PHYSICAL_LEGACY_CONTRACT_ID
-            )
             raw_required_start = value.get(
                 "physical_source_required_contributor_start_at"
             )
@@ -581,63 +535,31 @@ class QmtSectorSameBaseCoverageEvidence:
                 warmup_converged=value["warmup_converged"],
                 warmup_reason_code=str(value["warmup_reason_code"]),
                 boundary_status=str(value["boundary_status"]),
-                physical_source_boundary_status=(
-                    "NOT_RECORDED_LEGACY"
-                    if is_v1
-                    else str(value["physical_source_boundary_status"])
+                physical_source_boundary_status=str(
+                    value["physical_source_boundary_status"]
                 ),
                 physical_source_requested_start_at=(
-                    None
-                    if is_v1 or is_v2
-                    else None
-                    if value.get("physical_source_requested_start_at") is None
-                    else datetime.fromisoformat(
+                    datetime.fromisoformat(
                         str(value["physical_source_requested_start_at"])
                     )
                 ),
-                physical_source_required_contributor_start_at=(
-                    None if is_v1 else required_start_at
-                ),
+                physical_source_required_contributor_start_at=required_start_at,
                 physical_source_representative_member_count=(
-                    None
-                    if is_v1
-                    else value.get(
-                        "physical_source_representative_member_count"
-                    )
+                    value["physical_source_representative_member_count"]
                 ),
                 physical_source_available_member_count=(
-                    None
-                    if is_v1
-                    else value.get("physical_source_available_member_count")
+                    value["physical_source_available_member_count"]
                 ),
                 physical_source_required_contributor_count=(
-                    None
-                    if is_v1
-                    else value.get(
-                        "physical_source_required_contributor_count"
-                    )
+                    value["physical_source_required_contributor_count"]
                 ),
                 physical_source_inventory_revision=(
-                    None
-                    if is_v1
-                    else value.get("physical_source_inventory_revision")
+                    str(value["physical_source_inventory_revision"])
                 ),
-                _physical_source_legacy_v2=is_v2,
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise ValueError("sector 5m coverage document is malformed") from exc
-        expected = result.document()
-        if (
-            contract_id
-            == QMT_SECTOR_SAME_BASE_COVERAGE_EVIDENCE_LEGACY_CONTRACT_ID
-        ):
-            expected["contract_id"] = (
-                QMT_SECTOR_SAME_BASE_COVERAGE_EVIDENCE_LEGACY_CONTRACT_ID
-            )
-            for name in tuple(expected):
-                if name.startswith("physical_source_"):
-                    expected.pop(name)
-        if dict(value) != expected:
+        if dict(value) != result.document():
             raise ValueError("sector 5m coverage document is non-canonical")
         return result
 
@@ -707,6 +629,8 @@ class HigherTimeframePeriodDiagnostic:
     def __post_init__(self) -> None:
         if self.period not in {"M", "W", "D"}:
             raise ValueError("invalid higher-timeframe diagnostic period")
+        if self.state not in _HIGHER_TIMEFRAME_STATES:
+            raise ValueError("invalid higher-timeframe diagnostic state")
         if self.completed_bar_count < 0:
             raise ValueError("completed higher-timeframe bar count cannot be negative")
         if not self.source_revision:
@@ -746,6 +670,122 @@ class HigherTimeframePeriodDiagnostic:
                     raise ValueError("unique mapping has inconsistent supply evidence")
             elif self.mapping_supply.classification == "UNIQUE_MAPPING":
                 raise ValueError("unresolved mapping claims unique supply")
+        if self.state == "NONE":
+            if (
+                self.active_top_interval is not None
+                or not self.mapping_unique
+                or self.mapped_center_id is not None
+                or self.mapping_candidate_ids
+                or self.mapping_supply is not None
+            ):
+                raise ValueError("empty state cannot retain mapping evidence")
+        elif self.mapping_supply is None:
+            raise ValueError("active state requires mapping supply evidence")
+        if self.state != "NONE" and self.mapping_unique:
+            if (
+                self.mapped_center_id is None
+                or self.mapping_candidate_ids != (self.mapped_center_id,)
+            ):
+                raise ValueError("unique mapping identity is inconsistent")
+        elif self.state != "NONE" and self.mapped_center_id is not None:
+            raise ValueError("non-unique mapping cannot retain a mapped center")
+
+    @classmethod
+    def from_document(cls, raw: object) -> "HigherTimeframePeriodDiagnostic":
+        required = {
+            "period",
+            "state",
+            "completed_bar_count",
+            "evidence_bar_end",
+            "active_top_interval",
+            "mapping_unique",
+            "mapped_center_id",
+            "mapping_candidate_ids",
+            "blocker_codes",
+            "warning_codes",
+            "source_revision",
+        }
+        if not isinstance(raw, Mapping) or frozenset(raw) not in {
+            frozenset(required),
+            frozenset(required | {"mapping_supply"}),
+        }:
+            raise ValueError("higher-timeframe period diagnostic is malformed")
+        if raw.get("period") not in {"M", "W", "D"} or raw.get(
+            "state"
+        ) not in _HIGHER_TIMEFRAME_STATES:
+            raise ValueError("higher-timeframe period/state is malformed")
+        if not isinstance(raw.get("source_revision"), str) or not raw[
+            "source_revision"
+        ]:
+            raise ValueError("higher-timeframe source revision is malformed")
+        if type(raw.get("completed_bar_count")) is not int:
+            raise ValueError("higher-timeframe completed bar count is malformed")
+        if type(raw.get("mapping_unique")) is not bool:
+            raise ValueError("higher-timeframe mapping uniqueness is malformed")
+        mapped_center_id = raw.get("mapped_center_id")
+        if mapped_center_id is not None and (
+            not isinstance(mapped_center_id, str) or not mapped_center_id
+        ):
+            raise ValueError("higher-timeframe mapped center identity is malformed")
+        collections: dict[str, tuple[str, ...]] = {}
+        for field in (
+            "mapping_candidate_ids",
+            "blocker_codes",
+            "warning_codes",
+        ):
+            value = raw.get(field)
+            if not isinstance(value, (tuple, list)) or any(
+                not isinstance(item, str) or not item for item in value
+            ):
+                raise ValueError(
+                    f"higher-timeframe {field.replace('_', ' ')} is malformed"
+                )
+            collections[field] = tuple(value)
+
+        def parse_time(value: object, field: str) -> datetime | None:
+            if value is None:
+                return None
+            if not isinstance(value, str):
+                raise ValueError(f"higher-timeframe {field} is malformed")
+            try:
+                return normalize_datetime(datetime.fromisoformat(value), field)
+            except ValueError as exc:
+                raise ValueError(f"higher-timeframe {field} is malformed") from exc
+
+        raw_interval = raw.get("active_top_interval")
+        if raw_interval is None:
+            active_interval = None
+        elif isinstance(raw_interval, (tuple, list)) and len(raw_interval) == 2:
+            start = parse_time(raw_interval[0], "active_top_interval.start")
+            end = parse_time(raw_interval[1], "active_top_interval.end")
+            if start is None or end is None:
+                raise ValueError("higher-timeframe active top interval is malformed")
+            active_interval = (start, end)
+        else:
+            raise ValueError("higher-timeframe active top interval is malformed")
+        mapping_supply = (
+            RiskMappingSupplyFacts.from_document(raw["mapping_supply"])
+            if "mapping_supply" in raw
+            else None
+        )
+        return cls(
+            period=str(raw["period"]),  # type: ignore[arg-type]
+            state=str(raw["state"]),
+            completed_bar_count=int(raw["completed_bar_count"]),
+            evidence_bar_end=parse_time(
+                raw.get("evidence_bar_end"), "evidence_bar_end"
+            ),
+            active_top_interval=active_interval,
+            mapping_unique=bool(raw["mapping_unique"]),
+            mapped_center_id=(
+                None if mapped_center_id is None else str(mapped_center_id)
+            ),
+            mapping_candidate_ids=collections["mapping_candidate_ids"],
+            blocker_codes=collections["blocker_codes"],
+            warning_codes=collections["warning_codes"],
+            source_revision=str(raw["source_revision"]),
+            mapping_supply=mapping_supply,
+        )
 
     def document(self) -> dict[str, object]:
         document = {
@@ -1072,18 +1112,13 @@ class SectorHigherTimeframeGateResolution:
 @dataclass(frozen=True, slots=True)
 class HigherTimeframeGateBundle:
     market: HigherTimeframeGateEvidence
+    sector: HigherTimeframeGateEvidence
     symbol: HigherTimeframeGateEvidence
-    # The frozen V3 specification runs the M/W/D state machine independently
-    # on the broad market, the point-in-time sector proxy and the symbol.  Keep
-    # this optional at the Python API boundary for old adapters, but treat a
-    # missing sector fact as fail-closed below.
-    sector: HigherTimeframeGateEvidence | None = None
 
     @property
     def allows_new_entry(self) -> bool:
         return (
             self.market.allows_new_entry
-            and self.sector is not None
             and self.sector.allows_new_entry
             and self.symbol.allows_new_entry
         )
@@ -1129,7 +1164,7 @@ def _from_envelope(
             grade=envelope.grade,
             snapshot_id=sha256_json(
                 {
-                    "schema": "chanlun-higher-timeframe-unresolved/v1",
+                    "schema": "chanlun-higher-timeframe-unresolved",
                     "source_revision": envelope.inputs.source_revision,
                     "reason_codes": reasons,
                 }
@@ -1174,14 +1209,7 @@ def _from_envelope(
 def higher_timeframe_gate_evidence_from_envelope(
     envelope: QmtHigherTimeframeRiskEnvelope,
 ) -> HigherTimeframeGateEvidence:
-    """Expose the shared, lossless diagnostic projection of a risk envelope.
-
-    Historical replay used to retain only the final gate and warmup summary
-    for market/symbol risks, while the page path retained the full M/W/D
-    evidence.  That made the decision reproducible but its actual filtering
-    power impossible to review.  This public projection keeps both consumers
-    on the same evidence object without changing the gate itself.
-    """
+    """Expose the shared, lossless diagnostic projection of a risk envelope."""
 
     return _from_envelope(envelope)
 
@@ -1233,19 +1261,8 @@ def _risk_evidence_states(
         dict.fromkeys(str(value) for value in blockers)
     )
     evidence = row.get(f"{subject}_risk_warmup_evidence")
-    if evidence is None:
-        if gate != "UNRESOLVED":
-            raise ValueError(f"{subject} resolved gate lost its M/W/D evidence")
-        return (
-            {period: "UNRESOLVED" for period in ("M", "W", "D")},
-            {period: "UNRESOLVED" for period in ("M", "W", "D")},
-            candidate_blockers,
-            (),
-            "UNRESOLVED",
-            tuple((period, None, None) for period in ("M", "W", "D")),
-        )
     if not isinstance(evidence, Mapping):
-        raise ValueError(f"{subject} risk evidence must be a mapping")
+        raise ValueError(f"{subject} current risk evidence is required")
     states = {
         period: evidence.get(name)
         for period, name in (("M", "monthly"), ("W", "weekly"), ("D", "daily"))
@@ -1266,88 +1283,29 @@ def _risk_evidence_states(
         raise ValueError(f"{subject} risk evidence must contain M/W/D diagnostics")
     seen_periods: list[str] = []
     for raw in diagnostics:
-        if not isinstance(raw, Mapping):
-            raise ValueError(f"{subject} period diagnostic must be a mapping")
-        period = raw.get("period")
-        state = raw.get("state")
-        blockers = raw.get("blocker_codes")
-        mapping_fields = (
-            "mapping_candidate_ids",
-            "mapping_unique",
-            "active_top_interval",
+        try:
+            diagnostic = HigherTimeframePeriodDiagnostic.from_document(raw)
+        except ValueError as exc:
+            raise ValueError(
+                f"{subject} period diagnostic is inconsistent: {exc}"
+            ) from exc
+        active_interval_key = (
+            None
+            if diagnostic.active_top_interval is None
+            else tuple(
+                value.isoformat() for value in diagnostic.active_top_interval
+            )
         )
-        mapping_fields_present = tuple(field in raw for field in mapping_fields)
-        if any(mapping_fields_present) and not all(mapping_fields_present):
-            raise ValueError(f"{subject} period mapping evidence is incomplete")
-        has_mapping_fields = all(mapping_fields_present)
-        candidates = raw.get("mapping_candidate_ids", ())
-        mapping_unique = raw.get("mapping_unique")
-        active_interval = raw.get("active_top_interval")
-        active_interval_key: tuple[str, str] | None = None
-        if (
-            period not in {"M", "W", "D"}
-            or state not in _HIGHER_TIMEFRAME_STATES
-            or not isinstance(blockers, (tuple, list))
-            or any(not isinstance(value, str) or not value for value in blockers)
-            or (
-                has_mapping_fields
-                and (
-                    not isinstance(candidates, (tuple, list))
-                    or any(
-                        not isinstance(value, str) or not value
-                        for value in candidates
-                    )
-                    or len(candidates) != len(set(candidates))
-                    or type(mapping_unique) is not bool
-                )
+        seen_periods.append(diagnostic.period)
+        diagnostic_states[diagnostic.period] = diagnostic.state
+        period_blockers.extend(diagnostic.blocker_codes)
+        mapping_supplies.append(
+            (
+                diagnostic.period,
+                active_interval_key,
+                diagnostic.mapping_supply,
             )
-            or (
-                has_mapping_fields
-                and active_interval is not None
-                and (
-                    not isinstance(active_interval, (tuple, list))
-                    or len(active_interval) != 2
-                )
-            )
-        ):
-            raise ValueError(f"{subject} period diagnostic is inconsistent")
-        if active_interval is not None:
-            normalized_interval: list[datetime] = []
-            for value in active_interval:
-                try:
-                    parsed = (
-                        value
-                        if isinstance(value, datetime)
-                        else datetime.fromisoformat(str(value))
-                    )
-                    normalized_interval.append(
-                        normalize_datetime(parsed, "active_top_interval")
-                    )
-                except (TypeError, ValueError) as exc:
-                    raise ValueError(
-                        f"{subject} active top interval is malformed"
-                    ) from exc
-            if normalized_interval[0] > normalized_interval[1]:
-                raise ValueError(f"{subject} active top interval is reversed")
-            active_interval_key = (
-                normalized_interval[0].isoformat(),
-                normalized_interval[1].isoformat(),
-            )
-        supply = None
-        if raw.get("mapping_supply") is not None:
-            if not has_mapping_fields:
-                raise ValueError(f"{subject} mapping supply lost its mapping fields")
-            supply = RiskMappingSupplyFacts.from_document(raw.get("mapping_supply"))
-            if active_interval is None:
-                raise ValueError(f"{subject} mapping supply has no active fractal")
-            if supply.highest_candidate_center_count != len(candidates):
-                raise ValueError(f"{subject} mapping supply candidate count changed")
-            if bool(mapping_unique) != (supply.classification == "UNIQUE_MAPPING"):
-                raise ValueError(f"{subject} mapping supply uniqueness changed")
-        seen_periods.append(str(period))
-        diagnostic_states[str(period)] = str(state)
-        period_blockers.extend(str(value) for value in blockers)
-        mapping_supplies.append((str(period), active_interval_key, supply))
+        )
     if tuple(seen_periods) != ("M", "W", "D"):
         raise ValueError(f"{subject} period diagnostics must be ordered M/W/D")
     if gate == "UNRESOLVED":
@@ -1361,12 +1319,11 @@ def _risk_evidence_states(
         )
 
     warmup = evidence.get("warmup")
-    if warmup is None:
-        warmup_reason = "UNRESOLVED"
-    elif isinstance(warmup, Mapping) and isinstance(warmup.get("reason_code"), str):
-        warmup_reason = str(warmup["reason_code"])
-    else:
+    if not isinstance(warmup, Mapping) or not isinstance(
+        warmup.get("reason_code"), str
+    ):
         raise ValueError(f"{subject} warmup evidence is malformed")
+    warmup_reason = str(warmup["reason_code"])
     return (
         {key: str(value) for key, value in states.items()},
         diagnostic_states,
@@ -1382,7 +1339,7 @@ def higher_timeframe_effectiveness_audit(
 ) -> dict[str, object]:
     """Measure what M/W/D gates actually did at candidate decision times.
 
-    The strict V3 contract permits a new entry only when market, sector and
+    The strict strategy contract permits a new entry only when market, sector and
     symbol are all GREEN.  The explicitly labelled research variant admits
     AMBER for human review.  Reporting only aggregate gate counts hid that
     distinction, so this audit reconstructs both populations directly from
@@ -1393,11 +1350,9 @@ def higher_timeframe_effectiveness_audit(
     subject_rows: dict[str, dict[str, object]] = {}
     global_point_types: dict[str, str] = {}
     global_identified_point_occurrences = 0
-    global_unidentified_point_occurrences = 0
     global_subject_distinct_point_total = 0
     global_diagnostic_point_types: dict[str, str] = {}
     global_identified_diagnostic_point_occurrences = 0
-    global_unidentified_diagnostic_point_occurrences = 0
     global_subject_distinct_diagnostic_point_total = 0
     parsed: dict[int, dict[str, tuple[str, dict[str, str]]]] = {
         index: {} for index in range(len(rows))
@@ -1452,7 +1407,7 @@ def higher_timeframe_effectiveness_audit(
         mapping_supply_totals: Counter[str] = Counter()
         event_exposures: dict[
             tuple[str, str, str, str],
-            list[tuple[datetime, str | None, RiskMappingSupplyFacts | None]],
+            list[tuple[datetime, str, RiskMappingSupplyFacts]],
         ] = {}
         period_counts = {period: Counter() for period in ("M", "W", "D")}
         effective_period_counts = {
@@ -1502,47 +1457,9 @@ def higher_timeframe_effectiveness_audit(
                 else raw_risk_evidence.get("warmup_convergence")
             )
             if raw_convergence is None:
-                warmup_convergence_status_counts["NOT_RECORDED_LEGACY"] += 1
-                raw_diagnostic = (
-                    None
-                    if not isinstance(raw_risk_evidence, Mapping)
-                    else raw_risk_evidence.get(
-                        "warmup_convergence_diagnostic"
-                    )
+                raise ValueError(
+                    f"{subject} current warmup convergence evidence is required"
                 )
-                if raw_diagnostic is not None:
-                    raise ValueError(
-                        f"{subject} warmup diagnostic has no envelope"
-                    )
-                warmup_diagnostic_status_counts["NOT_RECORDED_LEGACY"] += 1
-                raw_supply_diagnostic = (
-                    None
-                    if not isinstance(raw_risk_evidence, Mapping)
-                    else raw_risk_evidence.get(
-                        "warmup_mapping_supply_diagnostic"
-                    )
-                )
-                if raw_supply_diagnostic is not None:
-                    raise ValueError(
-                        f"{subject} warmup mapping supply has no envelope"
-                    )
-                warmup_mapping_supply_diagnostic_status_counts[
-                    "NOT_RECORDED_LEGACY"
-                ] += 1
-                raw_lineage_diagnostic = (
-                    None
-                    if not isinstance(raw_risk_evidence, Mapping)
-                    else raw_risk_evidence.get(
-                        "warmup_structure_lineage_diagnostic"
-                    )
-                )
-                if raw_lineage_diagnostic is not None:
-                    raise ValueError(
-                        f"{subject} warmup structure lineage has no envelope"
-                    )
-                warmup_structure_lineage_diagnostic_status_counts[
-                    "NOT_RECORDED_LEGACY"
-                ] += 1
             else:
                 if not isinstance(raw_convergence, Mapping):
                     raise ValueError(
@@ -1573,27 +1490,9 @@ def higher_timeframe_effectiveness_audit(
                     "warmup_convergence_diagnostic"
                 )
                 if raw_diagnostic is None:
-                    warmup_diagnostic_status_counts[
-                        "NOT_RECORDED_LEGACY"
-                    ] += 1
-                    if raw_risk_evidence.get(
-                        "warmup_mapping_supply_diagnostic"
-                    ) is not None:
-                        raise ValueError(
-                            f"{subject} mapping supply has no semantic diagnostic"
-                        )
-                    warmup_mapping_supply_diagnostic_status_counts[
-                        "NOT_RECORDED_LEGACY"
-                    ] += 1
-                    if raw_risk_evidence.get(
-                        "warmup_structure_lineage_diagnostic"
-                    ) is not None:
-                        raise ValueError(
-                            f"{subject} structure lineage has no semantic diagnostic"
-                        )
-                    warmup_structure_lineage_diagnostic_status_counts[
-                        "NOT_RECORDED_LEGACY"
-                    ] += 1
+                    raise ValueError(
+                        f"{subject} current warmup semantic diagnostic is required"
+                    )
                 else:
                     if not isinstance(raw_diagnostic, Mapping):
                         raise ValueError(
@@ -1612,18 +1511,9 @@ def higher_timeframe_effectiveness_audit(
                         "warmup_mapping_supply_diagnostic"
                     )
                     if raw_supply_diagnostic is None:
-                        warmup_mapping_supply_diagnostic_status_counts[
-                            "NOT_RECORDED_LEGACY"
-                        ] += 1
-                        if raw_risk_evidence.get(
-                            "warmup_structure_lineage_diagnostic"
-                        ) is not None:
-                            raise ValueError(
-                                f"{subject} structure lineage has no supply diagnostic"
-                            )
-                        warmup_structure_lineage_diagnostic_status_counts[
-                            "NOT_RECORDED_LEGACY"
-                        ] += 1
+                        raise ValueError(
+                            f"{subject} current mapping supply diagnostic is required"
+                        )
                     else:
                         if not isinstance(raw_supply_diagnostic, Mapping):
                             raise ValueError(
@@ -1666,9 +1556,9 @@ def higher_timeframe_effectiveness_audit(
                             "warmup_structure_lineage_diagnostic"
                         )
                         if raw_lineage_diagnostic is None:
-                            warmup_structure_lineage_diagnostic_status_counts[
-                                "NOT_RECORDED_LEGACY"
-                            ] += 1
+                            raise ValueError(
+                                f"{subject} current structure lineage diagnostic is required"
+                            )
                         else:
                             if not isinstance(raw_lineage_diagnostic, Mapping):
                                 raise ValueError(
@@ -1779,7 +1669,7 @@ def higher_timeframe_effectiveness_audit(
                                         {
                                             "schema": (
                                                 "chanlun-warmup-mapping-"
-                                                "supply-chart-point/v1"
+                                                "supply-chart-point"
                                             ),
                                             "subject": subject,
                                             "review_as_of": decision_at,
@@ -1987,7 +1877,7 @@ def higher_timeframe_effectiveness_audit(
                                     {
                                         "schema": (
                                             "chanlun-warmup-non-monotonic-"
-                                            "chart-point/v1"
+                                            "chart-point"
                                         ),
                                         "subject": subject,
                                         "source_symbol": source_symbol,
@@ -2135,7 +2025,7 @@ def higher_timeframe_effectiveness_audit(
                                                 {
                                                     "schema": (
                                                         "chanlun-warmup-mapping-"
-                                                        "supply-chart-point/v1"
+                                                        "supply-chart-point"
                                                     ),
                                                     "subject": subject,
                                                     "review_as_of": decision_at,
@@ -2239,9 +2129,9 @@ def higher_timeframe_effectiveness_audit(
                     )
                 native_daily_calendar_status_counts["NOT_APPLICABLE"] += 1
             elif raw_native_calendar is None:
-                native_daily_calendar_status_counts[
-                    "NOT_RECORDED_LEGACY"
-                ] += 1
+                raise ValueError(
+                    f"{subject} current native-daily calendar evidence is required"
+                )
             else:
                 if not isinstance(raw_native_calendar, Mapping):
                     raise ValueError(
@@ -2300,59 +2190,40 @@ def higher_timeframe_effectiveness_audit(
                         }
                     )
             for period, active_interval, supply in mapping_supplies:
-                active = active_interval is not None
-                mapping_supply_totals["active_top_period_count"] += int(active)
                 if supply is None:
-                    mapping_supply_totals[
-                        "missing_active_mapping_supply_period_count"
-                    ] += int(active)
-                else:
-                    mapping_supply_totals[
-                        "retained_mapping_supply_period_count"
-                    ] += 1
-                    mapping_supply_class_counts[supply.classification] += 1
-                    mapping_point_type_counts.update(dict(supply.point_type_counts))
-                    diagnostic_directional_class_counts[
-                        supply.diagnostic_directional_classification
-                    ] += 1
-                    if supply.diagnostic_buy_point_type_counts is None:
-                        mapping_supply_totals[
-                            "diagnostic_buy_point_unrecorded_period_count"
-                        ] += 1
-                    else:
-                        diagnostic_buy_point_type_counts.update(
-                            dict(supply.diagnostic_buy_point_type_counts)
-                        )
-                        mapping_supply_totals[
-                            "diagnostic_buy_point_evidence_count"
-                        ] += sum(
-                            count
-                            for _name, count in (
-                                supply.diagnostic_buy_point_type_counts
-                            )
-                        )
-                        if supply.diagnostic_buy_point_evidence is None:
-                            mapping_supply_totals[
-                                "diagnostic_buy_point_identity_unrecorded_period_count"
-                            ] += 1
-                        else:
-                            mapping_supply_totals[
-                                "diagnostic_buy_point_identified_occurrence_count"
-                            ] += len(supply.diagnostic_buy_point_evidence)
-                    mapping_supply_totals["point_evidence_count"] += (
-                        supply.point_evidence_count
-                    )
-                    mapping_supply_totals["completed_sell12_count"] += (
-                        supply.completed_sell12_count
-                    )
-                    mapping_supply_totals["in_top_interval_sell12_count"] += (
-                        supply.in_top_interval_sell12_count
-                    )
-                    mapping_supply_totals[
-                        "completed_in_top_interval_sell12_count"
-                    ] += supply.completed_in_top_interval_sell12_count
-                if active_interval is None:
                     continue
+                if active_interval is None:
+                    raise ValueError("mapping supply lost its active top interval")
+                mapping_supply_totals["active_top_period_count"] += 1
+                mapping_supply_class_counts[supply.classification] += 1
+                mapping_point_type_counts.update(dict(supply.point_type_counts))
+                diagnostic_directional_class_counts[
+                    supply.diagnostic_directional_classification
+                ] += 1
+                diagnostic_buy_point_type_counts.update(
+                    dict(supply.diagnostic_buy_point_type_counts)
+                )
+                mapping_supply_totals[
+                    "diagnostic_buy_point_evidence_count"
+                ] += sum(
+                    count
+                    for _name, count in supply.diagnostic_buy_point_type_counts
+                )
+                mapping_supply_totals[
+                    "diagnostic_buy_point_identified_occurrence_count"
+                ] += len(supply.diagnostic_buy_point_evidence)
+                mapping_supply_totals["point_evidence_count"] += (
+                    supply.point_evidence_count
+                )
+                mapping_supply_totals["completed_sell12_count"] += (
+                    supply.completed_sell12_count
+                )
+                mapping_supply_totals["in_top_interval_sell12_count"] += (
+                    supply.in_top_interval_sell12_count
+                )
+                mapping_supply_totals[
+                    "completed_in_top_interval_sell12_count"
+                ] += supply.completed_in_top_interval_sell12_count
                 if datetime.fromisoformat(active_interval[1]) > decision_at:
                     raise ValueError("active top interval exceeds candidate decision")
                 if subject == "market":
@@ -2372,30 +2243,15 @@ def higher_timeframe_effectiveness_audit(
                     active_interval[0],
                     active_interval[1],
                 )
-                supply_id = (
-                    None if supply is None else sha256_json(supply.document())
-                )
+                supply_id = sha256_json(supply.document())
                 event_exposures.setdefault(event_key, []).append(
                     (decision_at, supply_id, supply)
                 )
             if subject == "sector":
                 raw_evidence = row.get("sector_risk_warmup_evidence")
-                if raw_evidence is None:
-                    source_mode_counts["UNRESOLVED"] += 1
-                    strict_same_base_warmup_counts["UNRESOLVED"] += 1
-                    strict_same_base_convergence_status_counts[
-                        "NOT_RECORDED_LEGACY"
-                    ] += 1
-                    strict_same_base_diagnostic_status_counts[
-                        "NOT_RECORDED_LEGACY"
-                    ] += 1
-                    strict_same_base_boundary_counts["UNRESOLVED"] += 1
-                    strict_same_base_physical_boundary_counts[
-                        "UNRESOLVED"
-                    ] += 1
+                if not isinstance(raw_evidence, Mapping):
+                    raise ValueError("sector source evidence must be a mapping")
                 else:
-                    if not isinstance(raw_evidence, Mapping):
-                        raise ValueError("sector source evidence must be a mapping")
                     source_mode = raw_evidence.get("source_mode")
                     if source_mode not in {
                         QMT_SECTOR_SAME_BASE_SOURCE_MODE,
@@ -2477,30 +2333,9 @@ def higher_timeframe_effectiveness_audit(
                         "strict_same_5m_warmup_structure_lineage_diagnostic"
                     )
                     if raw_strict_convergence is None:
-                        strict_same_base_convergence_status_counts[
-                            "NOT_RECORDED_LEGACY"
-                        ] += 1
-                        if raw_strict_diagnostic is not None:
-                            raise ValueError(
-                                "sector strict warmup diagnostic has no envelope"
-                            )
-                        strict_same_base_diagnostic_status_counts[
-                            "NOT_RECORDED_LEGACY"
-                        ] += 1
-                        if raw_strict_supply_diagnostic is not None:
-                            raise ValueError(
-                                "sector strict mapping supply has no envelope"
-                            )
-                        strict_same_base_mapping_supply_diagnostic_status_counts[
-                            "NOT_RECORDED_LEGACY"
-                        ] += 1
-                        if raw_strict_lineage_diagnostic is not None:
-                            raise ValueError(
-                                "sector strict structure lineage has no envelope"
-                            )
-                        strict_same_base_structure_lineage_diagnostic_status_counts[
-                            "NOT_RECORDED_LEGACY"
-                        ] += 1
+                        raise ValueError(
+                            "sector current strict convergence evidence is required"
+                        )
                     else:
                         if not isinstance(raw_strict_convergence, Mapping):
                             raise ValueError(
@@ -2523,25 +2358,9 @@ def higher_timeframe_effectiveness_audit(
                             strict_convergence.status
                         ] += 1
                         if raw_strict_diagnostic is None:
-                            strict_same_base_diagnostic_status_counts[
-                                "NOT_RECORDED_LEGACY"
-                            ] += 1
-                            if raw_strict_supply_diagnostic is not None:
-                                raise ValueError(
-                                    "sector strict mapping supply has no semantic "
-                                    "diagnostic"
-                                )
-                            strict_same_base_mapping_supply_diagnostic_status_counts[
-                                "NOT_RECORDED_LEGACY"
-                            ] += 1
-                            if raw_strict_lineage_diagnostic is not None:
-                                raise ValueError(
-                                    "sector strict structure lineage has no semantic "
-                                    "diagnostic"
-                                )
-                            strict_same_base_structure_lineage_diagnostic_status_counts[
-                                "NOT_RECORDED_LEGACY"
-                            ] += 1
+                            raise ValueError(
+                                "sector current strict semantic diagnostic is required"
+                            )
                         else:
                             if not isinstance(
                                 raw_strict_diagnostic, Mapping
@@ -2562,17 +2381,9 @@ def higher_timeframe_effectiveness_audit(
                                 strict_diagnostic.status
                             ] += 1
                             if raw_strict_supply_diagnostic is None:
-                                strict_same_base_mapping_supply_diagnostic_status_counts[
-                                    "NOT_RECORDED_LEGACY"
-                                ] += 1
-                                if raw_strict_lineage_diagnostic is not None:
-                                    raise ValueError(
-                                        "sector strict structure lineage has no "
-                                        "supply diagnostic"
-                                    )
-                                strict_same_base_structure_lineage_diagnostic_status_counts[
-                                    "NOT_RECORDED_LEGACY"
-                                ] += 1
+                                raise ValueError(
+                                    "sector current strict mapping supply diagnostic is required"
+                                )
                             else:
                                 if not isinstance(
                                     raw_strict_supply_diagnostic, Mapping
@@ -2596,9 +2407,9 @@ def higher_timeframe_effectiveness_audit(
                                     strict_supply_diagnostic.status
                                 ] += 1
                                 if raw_strict_lineage_diagnostic is None:
-                                    strict_same_base_structure_lineage_diagnostic_status_counts[
-                                        "NOT_RECORDED_LEGACY"
-                                    ] += 1
+                                    raise ValueError(
+                                        "sector current strict structure lineage diagnostic is required"
+                                    )
                                 else:
                                     if not isinstance(
                                         raw_strict_lineage_diagnostic, Mapping
@@ -2700,15 +2511,11 @@ def higher_timeframe_effectiveness_audit(
         max_event_references = 0
         for event_key, exposures in event_exposures.items():
             max_event_references = max(max_event_references, len(exposures))
-            retained_ids = {value[1] for value in exposures if value[1] is not None}
-            observed_state_ids = {
-                "MISSING" if value[1] is None else value[1]
-                for value in exposures
-            }
+            retained_ids = {value[1] for value in exposures}
             distinct_retained_snapshots.update(
                 (event_key, value) for value in retained_ids
             )
-            evolving_event_count += int(len(observed_state_ids) > 1)
+            evolving_event_count += int(len(retained_ids) > 1)
             latest_at = max(value[0] for value in exposures)
             latest = tuple(value for value in exposures if value[0] == latest_at)
             latest_ids = {value[1] for value in latest}
@@ -2717,9 +2524,6 @@ def higher_timeframe_effectiveness_audit(
                     "one active top event has conflicting supply at the same decision time"
                 )
             terminal_supply = latest[0][2]
-            if terminal_supply is None:
-                event_terminal_totals["missing_terminal_supply_event_count"] += 1
-                continue
             event_terminal_totals["retained_terminal_supply_event_count"] += 1
             event_terminal_class_counts[terminal_supply.classification] += 1
             event_terminal_point_type_counts.update(
@@ -2728,82 +2532,67 @@ def higher_timeframe_effectiveness_audit(
             event_terminal_directional_class_counts[
                 terminal_supply.diagnostic_directional_classification
             ] += 1
-            if terminal_supply.diagnostic_buy_point_type_counts is None:
-                event_terminal_totals[
-                    "diagnostic_buy_point_unrecorded_event_count"
-                ] += 1
-            else:
-                event_terminal_buy_point_type_counts.update(
-                    dict(terminal_supply.diagnostic_buy_point_type_counts)
+            event_terminal_buy_point_type_counts.update(
+                dict(terminal_supply.diagnostic_buy_point_type_counts)
+            )
+            event_terminal_totals[
+                "diagnostic_buy_point_evidence_count"
+            ] += sum(
+                count
+                for _name, count in (
+                    terminal_supply.diagnostic_buy_point_type_counts
                 )
-                event_terminal_totals[
-                    "diagnostic_buy_point_evidence_count"
-                ] += sum(
-                    count
-                    for _name, count in (
-                        terminal_supply.diagnostic_buy_point_type_counts
-                    )
-                )
-                if terminal_supply.diagnostic_buy_point_evidence is None:
-                    event_terminal_totals[
-                        "diagnostic_buy_point_identity_unrecorded_event_count"
-                    ] += 1
+            )
             event_terminal_totals["point_evidence_count"] += (
                 terminal_supply.point_evidence_count
             )
-            if terminal_supply.point_evidence is not None:
-                event_interval = (
-                    datetime.fromisoformat(event_key[2]),
-                    datetime.fromisoformat(event_key[3]),
-                )
-                for point in terminal_supply.point_evidence:
-                    if point.point_available_at > latest_at:
-                        raise ValueError(
-                            "risk point evidence was unavailable at candidate decision"
-                        )
-                    expected_inside = (
-                        event_interval[0]
-                        <= point.point_anchor_at
-                        <= event_interval[1]
+            event_interval = (
+                datetime.fromisoformat(event_key[2]),
+                datetime.fromisoformat(event_key[3]),
+            )
+            for point in terminal_supply.point_evidence:
+                if point.point_available_at > latest_at:
+                    raise ValueError(
+                        "risk point evidence was unavailable at candidate decision"
                     )
-                    if point.inside_active_top_interval != expected_inside:
-                        raise ValueError(
-                            "risk point interval membership contradicts active top event"
-                        )
-                    if subject == "symbol" and point.source_symbol != event_key[0]:
-                        raise ValueError(
-                            "symbol risk point evidence changed subject identity"
-                        )
-                    terminal_point_observations.setdefault(
-                        point.point_id, []
-                    ).append((latest_at, point))
-            if terminal_supply.diagnostic_buy_point_evidence is not None:
-                event_interval = (
-                    datetime.fromisoformat(event_key[2]),
-                    datetime.fromisoformat(event_key[3]),
+                expected_inside = (
+                    event_interval[0]
+                    <= point.point_anchor_at
+                    <= event_interval[1]
                 )
-                for point in terminal_supply.diagnostic_buy_point_evidence:
-                    if point.point_available_at > latest_at:
-                        raise ValueError(
-                            "diagnostic buy point was unavailable at candidate decision"
-                        )
-                    expected_inside = (
-                        event_interval[0]
-                        <= point.point_anchor_at
-                        <= event_interval[1]
+                if point.inside_active_top_interval != expected_inside:
+                    raise ValueError(
+                        "risk point interval membership contradicts active top event"
                     )
-                    if point.inside_active_top_interval != expected_inside:
-                        raise ValueError(
-                            "diagnostic buy point interval membership contradicts "
-                            "active top event"
-                        )
-                    if subject == "symbol" and point.source_symbol != event_key[0]:
-                        raise ValueError(
-                            "symbol diagnostic buy point changed subject identity"
-                        )
-                    terminal_diagnostic_point_observations.setdefault(
-                        point.point_id, []
-                    ).append((latest_at, point))
+                if subject == "symbol" and point.source_symbol != event_key[0]:
+                    raise ValueError(
+                        "symbol risk point evidence changed subject identity"
+                    )
+                terminal_point_observations.setdefault(point.point_id, []).append(
+                    (latest_at, point)
+                )
+            for point in terminal_supply.diagnostic_buy_point_evidence:
+                if point.point_available_at > latest_at:
+                    raise ValueError(
+                        "diagnostic buy point was unavailable at candidate decision"
+                    )
+                expected_inside = (
+                    event_interval[0]
+                    <= point.point_anchor_at
+                    <= event_interval[1]
+                )
+                if point.inside_active_top_interval != expected_inside:
+                    raise ValueError(
+                        "diagnostic buy point interval membership contradicts "
+                        "active top event"
+                    )
+                if subject == "symbol" and point.source_symbol != event_key[0]:
+                    raise ValueError(
+                        "symbol diagnostic buy point changed subject identity"
+                    )
+                terminal_diagnostic_point_observations.setdefault(
+                    point.point_id, []
+                ).append((latest_at, point))
             event_terminal_totals["completed_sell12_count"] += (
                 terminal_supply.completed_sell12_count
             )
@@ -2816,12 +2605,10 @@ def higher_timeframe_effectiveness_audit(
         identified_point_occurrences = sum(
             len(values) for values in terminal_point_observations.values()
         )
-        unidentified_point_occurrences = (
-            event_terminal_totals.get("point_evidence_count", 0)
-            - identified_point_occurrences
-        )
-        if unidentified_point_occurrences < 0:
-            raise ValueError("identified risk points exceed aggregate point supply")
+        if identified_point_occurrences != event_terminal_totals.get(
+            "point_evidence_count", 0
+        ):
+            raise ValueError("risk point identities do not cover aggregate supply")
         global_identified_point_occurrences += identified_point_occurrences
         point_rows: list[dict[str, object]] = []
         distinct_point_type_counts: Counter[str] = Counter()
@@ -2922,29 +2709,16 @@ def higher_timeframe_effectiveness_audit(
             )
         )
         global_subject_distinct_point_total += len(point_rows)
-        global_unidentified_point_occurrences += unidentified_point_occurrences
         globally_deduplicated_point_audit = {
             "counting_basis": (
                 "DISTINCT_STABLE_POINT_ID_ACROSS_TERMINAL_ACTIVE_TOP_EVENTS"
             ),
-            "identity_contract_id": "chanlun-risk-mapping-point-identity/v1",
-            "identity_coverage_status": (
-                "COMPLETE"
-                if unidentified_point_occurrences == 0
-                else (
-                    "UNAVAILABLE"
-                    if identified_point_occurrences == 0
-                    else "PARTIAL"
-                )
-            ),
+            "identity_contract_id": "chanlun-risk-mapping-point-identity",
             "terminal_event_point_occurrence_count": event_terminal_totals.get(
                 "point_evidence_count", 0
             ),
             "identified_terminal_point_occurrence_count": (
                 identified_point_occurrences
-            ),
-            "unidentified_terminal_point_occurrence_count": (
-                unidentified_point_occurrences
             ),
             "distinct_point_id_count": len(point_rows),
             "repeated_terminal_point_occurrence_count": (
@@ -2966,13 +2740,13 @@ def higher_timeframe_effectiveness_audit(
             len(values)
             for values in terminal_diagnostic_point_observations.values()
         )
-        unidentified_diagnostic_point_occurrences = (
+        diagnostic_identity_count_difference = (
             event_terminal_totals.get("diagnostic_buy_point_evidence_count", 0)
             - identified_diagnostic_point_occurrences
         )
-        if unidentified_diagnostic_point_occurrences < 0:
+        if diagnostic_identity_count_difference != 0:
             raise ValueError(
-                "identified diagnostic buy points exceed aggregate diagnostic supply"
+                "diagnostic buy-point identities do not cover aggregate supply"
             )
         global_identified_diagnostic_point_occurrences += (
             identified_diagnostic_point_occurrences
@@ -3083,25 +2857,13 @@ def higher_timeframe_effectiveness_audit(
         global_subject_distinct_diagnostic_point_total += len(
             diagnostic_point_rows
         )
-        global_unidentified_diagnostic_point_occurrences += (
-            unidentified_diagnostic_point_occurrences
-        )
         globally_deduplicated_diagnostic_buy_point_audit = {
             "counting_basis": (
                 "DISTINCT_STABLE_DIAGNOSTIC_BUY_POINT_ID_ACROSS_TERMINAL_"
                 "ACTIVE_TOP_EVENTS"
             ),
             "identity_contract_id": (
-                "chanlun-risk-diagnostic-buy-point-identity/v1"
-            ),
-            "identity_coverage_status": (
-                "COMPLETE"
-                if unidentified_diagnostic_point_occurrences == 0
-                else (
-                    "UNAVAILABLE"
-                    if identified_diagnostic_point_occurrences == 0
-                    else "PARTIAL"
-                )
+                "chanlun-risk-diagnostic-buy-point-identity"
             ),
             "terminal_event_point_occurrence_count": (
                 event_terminal_totals.get(
@@ -3110,9 +2872,6 @@ def higher_timeframe_effectiveness_audit(
             ),
             "identified_terminal_point_occurrence_count": (
                 identified_diagnostic_point_occurrences
-            ),
-            "unidentified_terminal_point_occurrence_count": (
-                unidentified_diagnostic_point_occurrences
             ),
             "distinct_point_id_count": len(diagnostic_point_rows),
             "repeated_terminal_point_occurrence_count": (
@@ -3177,14 +2936,11 @@ def higher_timeframe_effectiveness_audit(
                 key: event_terminal_totals.get(key, 0)
                 for key in (
                     "retained_terminal_supply_event_count",
-                    "missing_terminal_supply_event_count",
                     "point_evidence_count",
                     "completed_sell12_count",
                     "in_top_interval_sell12_count",
                     "completed_in_top_interval_sell12_count",
                     "diagnostic_buy_point_evidence_count",
-                    "diagnostic_buy_point_unrecorded_event_count",
-                    "diagnostic_buy_point_identity_unrecorded_event_count",
                 )
             },
             "point_count_disclosure": (
@@ -3302,7 +3058,7 @@ def higher_timeframe_effectiveness_audit(
                 ),
             },
             "warmup_non_monotonic_point_audit": {
-                "schema": "chanlun-warmup-non-monotonic-point-audit/v1",
+                "schema": "chanlun-warmup-non-monotonic-point-audit",
                 "counting_basis": (
                     "NON_LONGEST_PREFIX_PERIOD_DIFFERENCE_OCCURRENCES"
                 ),
@@ -3343,7 +3099,7 @@ def higher_timeframe_effectiveness_audit(
                 "active_gate_unchanged": True,
             },
             "warmup_mapping_supply_point_audit": {
-                "schema": "chanlun-warmup-mapping-supply-point-audit/v1",
+                "schema": "chanlun-warmup-mapping-supply-point-audit",
                 "counting_basis": (
                     "PREFIX_VS_LONGEST_LOST_AND_GAINED_STABLE_POINT_IDENTITIES"
                 ),
@@ -3395,7 +3151,7 @@ def higher_timeframe_effectiveness_audit(
                 "active_gate_unchanged": True,
             },
             "warmup_structure_lineage_point_audit": {
-                "schema": "chanlun-warmup-structure-lineage-point-audit/v1",
+                "schema": "chanlun-warmup-structure-lineage-point-audit",
                 "counting_basis": (
                     "LOST_PREFIX_POINT_TO_BEST_LONGEST_PREFIX_CENTER_ROLE_CHANGES"
                 ),
@@ -3444,7 +3200,7 @@ def higher_timeframe_effectiveness_audit(
                 "evidence_candidate_count": sum(
                     count
                     for status, count in native_daily_calendar_status_counts.items()
-                    if status not in {"NOT_APPLICABLE", "NOT_RECORDED_LEGACY"}
+                    if status != "NOT_APPLICABLE"
                 ),
                 "unexplained_missing_session_occurrence_count": sum(
                     native_daily_calendar_missing_counts
@@ -3568,16 +3324,12 @@ def higher_timeframe_effectiveness_audit(
                 key: mapping_supply_totals.get(key, 0)
                 for key in (
                     "active_top_period_count",
-                    "retained_mapping_supply_period_count",
-                    "missing_active_mapping_supply_period_count",
                     "point_evidence_count",
                     "completed_sell12_count",
                     "in_top_interval_sell12_count",
                     "completed_in_top_interval_sell12_count",
                     "diagnostic_buy_point_evidence_count",
-                    "diagnostic_buy_point_unrecorded_period_count",
                     "diagnostic_buy_point_identified_occurrence_count",
-                    "diagnostic_buy_point_identity_unrecorded_period_count",
                 )
             },
             "mapping_supply_counting_basis": (
@@ -3660,9 +3412,6 @@ def higher_timeframe_effectiveness_audit(
             "identified_terminal_point_occurrence_count": (
                 global_identified_point_occurrences
             ),
-            "unidentified_terminal_point_occurrence_count": (
-                global_unidentified_point_occurrences
-            ),
             "sum_of_subject_distinct_point_counts": (
                 global_subject_distinct_point_total
             ),
@@ -3683,13 +3432,10 @@ def higher_timeframe_effectiveness_audit(
                 "TERMINAL_EVENTS"
             ),
             "identity_contract_id": (
-                "chanlun-risk-diagnostic-buy-point-identity/v1"
+                "chanlun-risk-diagnostic-buy-point-identity"
             ),
             "identified_terminal_point_occurrence_count": (
                 global_identified_diagnostic_point_occurrences
-            ),
-            "unidentified_terminal_point_occurrence_count": (
-                global_unidentified_diagnostic_point_occurrences
             ),
             "sum_of_subject_distinct_point_counts": (
                 global_subject_distinct_diagnostic_point_total
@@ -3716,18 +3462,15 @@ def higher_timeframe_effectiveness_audit(
             "GREEN_OR_AMBER_FOR_HUMAN_ASSISTED_RESEARCH_ONLY"
         ),
         "disclosures": [
-            "AMBER prohibits new entry under the frozen strict V3 specification",
+            "AMBER prohibits new entry under the frozen strict strategy specification",
             "the current replay admits AMBER only inside the explicit human-assisted research variant",
             "period states and blockers are counted at candidate decision times, not inferred from terminal results",
             "when safety logic removes a decision snapshot, effective states become UNRESOLVED while raw period diagnostics remain visible",
             "mapping supply counts explain the frozen first/second-sell mapping and never promote third-class points",
             "first/second-buy evidence is diagnostic-only directional supply with a separate stable identity contract and never enters the sell mapping, risk gate, stable mapping-point identity, or order decision",
-            "a legacy mapping snapshot without buy-side diagnostics is reported as NOT_RECORDED_LEGACY rather than observed zero",
             "candidate-period mapping counts measure gate exposure and may repeat one active top event across candidates",
             "unique active-top event counts use each subject/period/fractal interval once and retain its latest observed supply",
             "per-event terminal point totals remain occurrence counts; the separate stable-point audit de-duplicates them across top events and subjects",
-            "legacy count-only mapping documents remain readable but are explicitly reported as unidentified point occurrences",
-            "legacy diagnostic buy counts without point identities remain readable but are explicitly reported as unidentified diagnostic occurrences",
             "chart focus is offered only for a stable point with an A-share/index symbol and a causal review cutoff",
             "a native-daily calendar gap remains unexplained and fails closed unless separately captured point-in-time trade-status evidence proves a lawful absence; a missing bar is never inferred to be a suspension",
             "physical QMT member-file boundaries are diagnostic-only and distinguish a vendor-cache left boundary from caller-side replay clipping; they never relax the 480-session warmup gate",
@@ -3821,7 +3564,7 @@ def build_qmt_sector_same_base_coverage_evidence(
         boundary_status = "VISIBLE_PREFIX_STARTS_AFTER_REQUESTED_WARMUP"
     else:
         boundary_status = "VISIBLE_PREFIX_INSUFFICIENT_WITHOUT_LEADING_GAP"
-    physical_status = "NOT_RECORDED_LEGACY"
+    physical_status = ""
     physical_requested_start: datetime | None = None
     physical_required_start: datetime | None = None
     physical_representative_count: int | None = None
@@ -3831,6 +3574,8 @@ def build_qmt_sector_same_base_coverage_evidence(
     raw_physical = five_minute_frame.attrs.get(
         "qmt_physical_five_minute_source_coverage"
     )
+    if raw_physical is None:
+        raise ValueError("sector physical 5m source coverage is required")
     if raw_physical is not None:
         if not isinstance(raw_physical, Mapping):
             raise ValueError("sector physical 5m source coverage is malformed")
@@ -3957,7 +3702,7 @@ def build_qmt_sector_same_base_coverage_evidence(
         ) else None
         if (
             raw_physical.get("schema")
-            != "chanlun-qmt-current-sector-physical-5m-coverage/v1"
+            != "chanlun-qmt-current-sector-physical-5m-coverage"
             or raw_physical.get("diagnostic_only") is not True
             or raw_physical.get("decision_core_input") is not False
             or raw_physical.get("warmup_requirement_unchanged") is not True
@@ -4055,7 +3800,7 @@ def _expected_sector_composite_members(
         members,
         key=lambda code: sha256_json(
             {
-                "schema": "chanlun-qmt-gics3-sample/v1",
+                "schema": "chanlun-qmt-gics3-sample",
                 "sector_id": sector_id,
                 "code": code,
             }
@@ -4071,7 +3816,7 @@ def _expected_sector_membership_revision(
 ) -> str:
     return sha256_json(
         {
-            "schema": "chanlun-qmt-gics3-members/v2",
+            "schema": "chanlun-qmt-gics3-members",
             "sector_id": sector_id,
             "members": members,
             "composite_members": composite_members,
@@ -4277,7 +4022,7 @@ def _sector_same_base_frames(
         )
     expected_member_path_revision = sha256_json(
         {
-            "schema": "chanlun-qmt-sector-composite-member-path/v1",
+            "schema": "chanlun-qmt-sector-composite-member-path",
             "rows": tuple(
                 {
                     "date": pd.Timestamp(row.date).to_pydatetime(),
@@ -4320,7 +4065,7 @@ def _sector_same_base_frames(
         )
     base_revision = sha256_json(
         {
-            "schema": "chanlun-qmt-sector-five-minute-same-base/v1",
+            "schema": "chanlun-qmt-sector-five-minute-same-base",
             "sector_id": sector_id,
             "decision_time": decision,
             "price_basis_provider": input_attrs.get("price_basis_provider"),
@@ -4468,7 +4213,7 @@ def build_sector_higher_timeframe_gate_from_five_minute(
         calendar_coverage_end=coverage_end,
         snapshot_id=sha256_json(
             {
-                "schema": "chanlun-live-qmt-sector-mwd-risk/v1",
+                "schema": "chanlun-live-qmt-sector-mwd-risk",
                 "sector_id": sector_id,
                 "observed_at": inputs.observed_at,
                 "source_revision": inputs.source_revision,
@@ -4490,7 +4235,7 @@ def build_sector_higher_timeframe_gate_from_five_minute(
             calendar_coverage_end=coverage_end,
             snapshot_id=sha256_json(
                 {
-                    "schema": "chanlun-live-qmt-sector-mwd-convergence/v1",
+                    "schema": "chanlun-live-qmt-sector-mwd-convergence",
                     "sector_id": sector_id,
                     "observed_at": diagnostic_inputs.observed_at,
                     "source_revision": diagnostic_inputs.source_revision,
@@ -4581,7 +4326,7 @@ def build_sector_higher_timeframe_research_gate_from_native_daily(
     )
     path_revision = sha256_json(
         {
-            "schema": "chanlun-qmt-sector-composite-member-path/v1",
+            "schema": "chanlun-qmt-sector-composite-member-path",
             "rows": tuple(
                 {
                     "date": pd.Timestamp(row.date).to_pydatetime(),
@@ -4632,7 +4377,7 @@ def build_sector_higher_timeframe_research_gate_from_native_daily(
         calendar_coverage_end=coverage_end,
         snapshot_id=sha256_json(
             {
-                "schema": "chanlun-qmt-sector-native-daily-research-mwd-risk/v1",
+                "schema": "chanlun-qmt-sector-native-daily-research-mwd-risk",
                 "sector_id": sector_id,
                 "observed_at": inputs.observed_at,
                 "source_revision": inputs.source_revision,
@@ -4657,7 +4402,7 @@ def build_sector_higher_timeframe_research_gate_from_native_daily(
             snapshot_id=sha256_json(
                 {
                     "schema": (
-                        "chanlun-qmt-sector-native-daily-mwd-convergence/v1"
+                        "chanlun-qmt-sector-native-daily-mwd-convergence"
                     ),
                     "sector_id": sector_id,
                     "observed_at": diagnostic_inputs.observed_at,
@@ -4679,7 +4424,7 @@ def build_sector_higher_timeframe_research_gate_from_native_daily(
             gate="AMBER",
             snapshot_id=sha256_json(
                 {
-                    "schema": "chanlun-qmt-sector-research-gate-cap/v1",
+                    "schema": "chanlun-qmt-sector-research-gate-cap",
                     "raw_snapshot_id": result.snapshot_id,
                     "cap": "GREEN_TO_AMBER_UNRECONCILED_NATIVE_DAILY",
                 }
@@ -4788,7 +4533,7 @@ def resolve_sector_higher_timeframe_gate(
             ),
             snapshot_id=sha256_json(
                 {
-                    "schema": "chanlun-sector-strict-gate-with-fallback-failure/v1",
+                    "schema": "chanlun-sector-strict-gate-with-fallback-failure",
                     "strict_snapshot_id": strict.snapshot_id,
                     "fallback_unavailable_reason_codes": unavailable_reasons,
                 }
@@ -5263,7 +5008,7 @@ class QmtHigherTimeframeGateSource:
             calendar_coverage_end=calendar_coverage_end,
             snapshot_id=sha256_json(
                 {
-                    "schema": "chanlun-live-qmt-mwd-risk/v1",
+                    "schema": "chanlun-live-qmt-mwd-risk",
                     "symbol": symbol,
                     "observed_at": inputs.observed_at,
                     "source_revision": inputs.source_revision,
@@ -5286,7 +5031,7 @@ class QmtHigherTimeframeGateSource:
     ) -> HigherTimeframeGateEvidence:
         sector_identity = sha256_json(
             {
-                "schema": "chanlun-higher-timeframe-sector-input/v1",
+                "schema": "chanlun-higher-timeframe-sector-input",
                 "sector_id": sector_id,
                 "sector_name": sector_name,
                 "sector_members": sector_members,
@@ -5373,7 +5118,7 @@ class QmtHigherTimeframeGateSource:
             if sector_id is None
             else sha256_json(
                 {
-                    "schema": "chanlun-higher-timeframe-sector-input/v1",
+                    "schema": "chanlun-higher-timeframe-sector-input",
                     "sector_id": sector_id,
                     "sector_name": sector_name,
                     "sector_members": sector_members,
@@ -5456,11 +5201,9 @@ class QmtHigherTimeframeGateSource:
                     exc.native_daily_calendar_coverage_evidence
                 ),
             ).symbol
-        if sector_id is None:
-            sector_gate = None
-        elif sector_name is None or sector_members is None:
+        if sector_id is None or sector_name is None or sector_members is None:
             sector_gate = _unresolved_higher_timeframe_gate(
-                subject=sector_id,
+                subject=sector_id or "SECTOR",
                 observed_at=observed,
                 reason_codes=("QMT_SECTOR_HIGHER_TIMEFRAME_INPUT_UNAVAILABLE",),
                 session_evidence=HigherTimeframeSessionEvidence.unavailable(),
@@ -5548,15 +5291,11 @@ def unresolved_higher_timeframe_gates(
                 symbol_native_daily_calendar_coverage_evidence
             ),
         ),
-        sector=(
-            None
-            if sector_subject is None
-            else _unresolved_higher_timeframe_gate(
-                subject=sector_subject,
-                observed_at=observed,
-                reason_codes=reasons,
-                session_evidence=evidence,
-            )
+        sector=_unresolved_higher_timeframe_gate(
+            subject=sector_subject or "SECTOR",
+            observed_at=observed,
+            reason_codes=reasons,
+            session_evidence=evidence,
         ),
     )
 
@@ -5580,7 +5319,7 @@ def _unresolved_higher_timeframe_gate(
     )
     source = sha256_json(
         {
-            "schema": "chanlun-higher-timeframe-provider-failure/v1",
+            "schema": "chanlun-higher-timeframe-provider-failure",
             "subject": subject,
             "observed_at": observed_at,
             "native_daily_calendar_coverage_evidence": (

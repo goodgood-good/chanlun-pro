@@ -13,7 +13,7 @@ from chanlun.decision_support.fingerprints import normalize_datetime, sha256_jso
 
 
 QMT_SECTOR_THIRTY_MINUTE_DERIVATION_CONTRACT = (
-    "SIX_CONTIGUOUS_COMPLETED_5M_COMPOSITE_BARS_V1"
+    "SIX_CONTIGUOUS_COMPLETED_5M_COMPOSITE_BARS"
 )
 _SHANGHAI = ZoneInfo("Asia/Shanghai")
 _REQUIRED = ("date", "open", "high", "low", "close", "volume")
@@ -127,7 +127,7 @@ def derive_qmt_sector_thirty_minute_frame(
     has_member_mask = "member_mask" in rows_for_revision.columns
     base_revision = sha256_json(
         {
-            "schema": "chanlun-qmt-sector-five-minute-derived-base/v1",
+            "schema": "chanlun-qmt-sector-five-minute-derived-base",
             "sector_id": source_attrs.get("sector_id"),
             "sector_membership_revision": source_attrs.get(
                 "sector_membership_revision"

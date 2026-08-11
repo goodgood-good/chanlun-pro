@@ -61,7 +61,7 @@ function loadChartManager(runtimeOverrides = {}) {
 
 function center(revision = 1, overrides = {}) {
   return {
-    schema: 'chanlun-chart-center/v12',
+    schema: 'chanlun-chart-center',
     render_kind: 'formal_center',
     center_id: 'center-1',
     render_id: `center-1@${revision}@ongoing`,
@@ -91,7 +91,7 @@ function center(revision = 1, overrides = {}) {
 
 function centerPreview(overrides = {}) {
   return {
-    schema: 'chanlun-chart-center/v12',
+    schema: 'chanlun-chart-center',
     render_kind: 'center_preview',
     center_id: 'preview-center-1',
     preview_id: 'preview-center-1',
@@ -124,7 +124,7 @@ function centerPreview(overrides = {}) {
 
 function centerProjection(overrides = {}) {
   return {
-    schema: 'chanlun-chart-center/v12',
+    schema: 'chanlun-chart-center',
     render_kind: 'center_projection',
     center_id: 'center-1',
     render_id: `center-1@1@ongoing@projection@${BASE + 600}`,
@@ -145,7 +145,7 @@ function centerProjection(overrides = {}) {
 
 function divergence(kind = 'trend', overrides = {}) {
   return {
-    schema: 'chanlun-chart-divergence/v4',
+    schema: 'chanlun-chart-divergence',
     render_kind: 'strict_divergence',
     render_id: `${kind}-divergence-1`,
     divergence_id: `${kind}-divergence-1`,
@@ -153,15 +153,23 @@ function divergence(kind = 'trend', overrides = {}) {
     direction: 'down',
     structural_level: 0,
     source_kind: 'segment',
-    price_basis_revision: 'raw-v1',
+    price_basis_revision: 'raw-test',
     compare_unit_id: 'u1',
     signal_unit_id: 'u5',
+    comparison_width: 1,
+    compare_leg_unit_ids: ['u1'],
+    signal_leg_unit_ids: ['u5'],
     anchor_at: BASE + 500,
     anchor_tick: 1000,
     anchor_price: 10,
     confirmed_at: BASE + 500,
     available_at: BASE + 500,
-    metrics: { is_divergent: true, strength_source: 'macd' },
+    metrics: {
+      is_divergent: true,
+      strength_source: 'macd',
+      strength_decay_count: 1,
+      is_strong_divergent: false,
+    },
     tradable: true,
     points: [{ time: BASE + 500, price: 10 }],
     ...overrides,
@@ -170,14 +178,14 @@ function divergence(kind = 'trend', overrides = {}) {
 
 function snapshot(overrides = {}) {
   return {
-    schema: 'chanlun-chart-structure/v12',
+    schema: 'chanlun-chart-structure',
     symbol: 'SH.600519',
     source_frequency: '5m',
     display_frequency: '5m',
     source_closed_at: BASE + 600,
-    price_basis_revision: 'raw-v1',
+    price_basis_revision: 'raw-test',
     structure_price_quantum: '0.01',
-    strict_config_revision: 'strict-config-v1',
+    strict_config_revision: 'strict-config-test',
     structure_revision: 'sha256:structure-1',
     snapshot_revision: 'sha256:snapshot-1',
     render_revision: 'sha256:render-1',
@@ -273,7 +281,7 @@ function scopeContext(cm) {
     chartInstanceId: cm.instanceId,
     symbol: 'SH.600519',
     interval: '5m',
-    price_basis_revision: 'raw-v1',
+    price_basis_revision: 'raw-test',
   };
 }
 
@@ -335,6 +343,7 @@ test('body revision replaces one entity under the same logical center key', () =
 
 test('late promise from an older revision is removed and never enters current container', async () => {
   const { cm, calls } = manager();
+  cm.chart.getAllShapes = () => [];
   const first = center(1);
   const second = center(2);
   const scope = Reconcile.scopeKey(scopeContext(cm), first);
@@ -569,10 +578,10 @@ test('saved drawing state is awaited before automatic Chanlun redraw', async () 
 test('late TradingView data-ready event reopens an exhausted reconcile budget', () => {
   const { cm } = manager('chart-manager-late-ready');
   let draws = 0;
-  cm._dataContextVersion = 3;
-  cm._tvDataReadyVersion = 3;
+  cm._dataContextGeneration = 3;
+  cm._tvDataReadyGeneration = 3;
   cm._tvDataReadyIdentity = 'sh.600519|5';
-  cm._pendingChanlunDrawVersion = null;
+  cm._pendingChanlunDrawGeneration = null;
   cm._pendingChanlunDrawIdentity = null;
   cm._reconcileRetry = { count: 7, timer: null };
   cm._currentDataIdentityKey = () => 'sh.600519|5';
@@ -1110,43 +1119,6 @@ test('stroke observation is dashed only while ongoing and solid when completed',
   assert.equal(completed.calls.create[0].options.overrides.linestyle, 0);
 });
 
-test('opt-in strict observation uses display segment evidence instead of stroke evidence', () => {
-  const stroke = center(1, {
-    render_kind: 'center_observation',
-    center_id: 'stroke-observation-1',
-    render_id: 'stroke-observation-1@1@ongoing',
-    source_kind: 'stroke_observation',
-    tradable: false,
-  });
-  const segment = center(1, {
-    render_kind: 'center_observation',
-    center_id: 'display-segment-center-1',
-    render_id: 'display-segment-center-1@1@completed',
-    source_kind: 'segment',
-    state: 'completed',
-    tradable: false,
-    points: [
-      { time: BASE + 100, price: 12 },
-      { time: BASE + 500, price: 9 },
-    ],
-  });
-  const { cm, calls, sandbox } = manager('chart-manager-display-segment-center');
-  cm.cl_show_config.center_observation = true;
-
-  cm._drawStrictStructure(chartData('replace', snapshot({
-    stroke_center_observations: [stroke],
-    display_center_observations: [segment],
-    levels: [],
-  })), '5');
-
-  assert.equal(calls.create.length, 1);
-  assert.deepEqual(calls.create[0].points, segment.points);
-  assert.equal(
-    calls.create[0].options.color,
-    sandbox.__STRICT_DYNAMIC_COLOR('5', 'xd_zss'),
-  );
-});
-
 test('level-scoped consolidation and trend divergences render with direction and explicit labels', () => {
   const { cm, calls } = manager('chart-manager-divergence');
   const strict = snapshot();
@@ -1169,7 +1141,7 @@ test('confirmed point uses a concise Chinese direction label and level-aware siz
   const strict = snapshot();
   strict.levels[0].centers = [];
   strict.levels[0].confirmed_points = [{
-    schema: 'chanlun-chart-point/v4',
+    schema: 'chanlun-chart-point',
     render_kind: 'point_confirmed',
     render_id: 'point-1@confirmed',
     point_id: 'point-1',

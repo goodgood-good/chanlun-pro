@@ -74,17 +74,17 @@ def test_watchlist_and_holdings_remain_in_sell_risk_scope() -> None:
     assert all(plan.frequencies_for(code) == ("1m",) for code in plan.symbols)
 
 
-def test_version_change_only_requests_background_refresh() -> None:
+def test_contract_identity_change_only_requests_background_refresh() -> None:
     plan = build_scan_plan(
         changed_bars=(),
         sector_members={},
         active_watchlist=(),
         previous=ScanCursor.current(
-            structure_version="old",
-            parameter_version="v1",
+            structure_contract_id="old",
+            parameter_set_id="frozen-parameters",
         ),
-        structure_version="new",
-        parameter_version="v1",
+        structure_contract_id="new",
+        parameter_set_id="frozen-parameters",
     )
 
     assert plan.full_market_history_scan is False

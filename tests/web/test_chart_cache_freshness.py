@@ -48,7 +48,7 @@ def test_first_request_moderately_stale_serves_stale_and_flags_refresh():
 
 def test_first_request_heavily_stale_trading_is_miss():
     # 重度过期(盘中 >30min 上限): 不再 serve-stale(会把几小时前的旧未完成笔发给前端,
-    # 用户报"未完成笔滞后/该实仍虚"), 回退旧版阻塞重算保证新鲜。
+    # 用户报"未完成笔滞后/该实仍虚"), 回退同步阻塞重算保证新鲜。
     now = 100_000.0
     entry = _full_entry(validated_at=now - 7200)  # 2h 前 >> 盘中上限 1800s
     is_hit, _data, reason, needs_refresh = evaluate_cache_for_tv_history(

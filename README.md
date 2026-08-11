@@ -1,6 +1,6 @@
 # 缠论 Pro（chanlun-pro）
 
-> 多市场「缠论」自动化分析与量化交易平台 —— 覆盖 A股 / 港股 / 美股 / 期货 / 外汇 / 数字货币，内置 TradingView 实时图表、递归多级别缠论核心、回测、选股、实盘交易与信号监控。
+> 多市场「缠论」自动化分析平台 —— 覆盖 A股 / 港股 / 美股 / 期货 / 外汇 / 数字货币，内置 TradingView 实时图表、统一结构计算、严格选股、研究回放与盘中信号监控。
 
 ![Python](https://img.shields.io/badge/Python-3.10--3.13-blue)
 ![License](https://img.shields.io/badge/License-Apache%202.0-green)
@@ -15,7 +15,7 @@ chanlun-pro 是一套以**缠论**为核心的行情分析与量化交易系统�
 
 - 基于 **TradingView Charting Library** 的 Web 实时图表（自定义 datafeed + SSE 服务端推送，缠论形态随行情实时刷新）；
 - 覆盖 **8 大市场、十余种数据源**的统一行情适配层，一套配置切换数据源；
-- **回测、选股、实盘交易、信号监控、AI 辅助分析**等模块开箱即用。
+- **严格选股、候选分钟级复核、持仓买卖点监控与研究回放**共用同一套结构判定。
 
 > ⚠️ 本项目仅供学习与研究使用，不构成任何投资建议。实盘交易涉及资金安全，请务必在充分测试与风控前提下谨慎使用（见文末[注意事项](#注意事项)）。
 
@@ -26,10 +26,9 @@ chanlun-pro 是一套以**缠论**为核心的行情分析与量化交易系统�
 - **递归多级别缠论核心**：分型 → 笔 → 线段 → 中枢 → 买卖点 → 背驰 → 走势类型，支持中枢升级、区间套、同级别分解、走势多样性等进阶结构，级别可递归向上封顶。
 - **多市场统一适配**：A股 / 港股 / 美股 / 国内期货 / 外盘期货 / 外汇 / 数字货币（合约+现货），同一套接口切换券商与数据源。
 - **Web 实时图表**：TradingView 专业图表 + 自定义 datafeed；SSE 服务端定时重算并推送，缠论笔/线段/中枢/买卖点随 K 线实时更新；各级别递归着色、可独立开关。
-- **回测与选股**：递归回测栈（engine/sim/portfolio）、走势/买卖点选股、策略参数优化。
-- **实盘交易**：A股 / 港股 / 期货（CTP / 天勤）/ 数字货币 交易器，配套持仓与风控。
-- **信号监控与推送**：信号评估、强度比较、定时调度，飞书（Lark）消息推送。
-- **AI 辅助分析**：接入 DeepSeek / Gemini 等模型（硅基流动 / OpenRouter）对当前标的做缠论解读。
+- **研究回放与严格选股**：冻结事实回放、固定区间评估、走势/买卖点选股与全量重建工具。
+- **盘中实时监听**：候选池分钟级复核、持仓结构事件监控、定时调度与运行就绪度检查。
+- **消息推送**：严格结构事件使用钉钉 Webhook，通用选股任务可选飞书（Lark）。
 
 ---
 
@@ -60,9 +59,9 @@ chanlun-pro 是一套以**缠论**为核心的行情分析与量化交易系统�
 | 数据计算 | pandas、numpy、pyarrow、scipy、TA-Lib、MyTT |
 | Web / 图表 | Flask + Tornado（单进程 WSGI）、TradingView Charting Library、SSE |
 | 存储 | file_db（Parquet 本地列存）、SQLAlchemy + SQLite/MySQL、Redis（可选） |
-| 行情/交易 SDK | akshare、longbridge（长桥）、uSMART Open API、pytdx、ccxt、alpaca-py、polygon、ib-insync、futu-api、baostock、tqsdk（天勤）、openctp-ctp |
-| 通知 / AI | lark-oapi（飞书）、openai（DeepSeek/Gemini） |
-| 券商框架适配 | 迅投 QMT（vendored `xtquant`）、掘金（`cl_myquant`）、vnpy（`cl_vnpy`）、WonderTrader（`cl_wtpy`） |
+| 行情 SDK | akshare、longbridge（长桥）、uSMART Open API、pytdx、ccxt、alpaca-py、polygon、ib-insync、futu-api、baostock、tqsdk（天勤） |
+| 通知 | 钉钉 Webhook、lark-oapi（飞书，可选） |
+| 券商行情适配 | 迅投 QMT（vendored `xtquant`） |
 
 ---
 
@@ -89,7 +88,7 @@ windows_install.bat
 pip install poetry
 poetry install                       # 仅核心依赖
 # 按需安装可选市场/功能（extras）：
-#   us / hk / usmart / cn-extra / futures / ai / notify / backtest / monitor / charts
+#   us / hk / usmart / cn-extra / futures / notify / charts / monitor / corpus
 poetry install --extras us --extras hk
 poetry install --extras usmart          # 盈立 Open API 的 RSA 签名依赖
 poetry install --all-extras          # 一次装齐
@@ -106,7 +105,7 @@ cp src/chanlun/config.py.demo src/chanlun/config.py   # Windows: copy
 - **Web**：`WEB_HOST`（示例配置默认 `127.0.0.1`）、`LOGIN_PWD`、`PRELOAD_MARKETS`（启动预加载的市场，默认 `a/hk/us`）。非回环监听另见下方安全部署要求。
 - **存储**：`DB_TYPE`（`sqlite`/`mysql`）、`DATA_PATH`（默认 `~/.chanlun_pro`）、`REDIS_HOST`（可选）。
 - **实时推送**：`ENABLE_SSE_PUSH`、`SSE_REFRESH_MS`（服务端重算+推送间隔，默认 8000ms）。
-- **AI / 通知**：`AI_TOKEN` / `OPENROUTER_AI_KEYS`、`FEISHU_KEYS`（可按市场配置不同机器人）。
+- **通知**：`CHANLUN_DINGTALK_*` 用于严格结构事件，`FEISHU_KEYS` 用于通用选股任务。
 
 #### uSMART（盈立）行情源
 
@@ -180,26 +179,22 @@ chanlun-pro/
 │  ├─ chanlun/                  # 主包
 │  │  ├─ core/                  # 缠论核心算法（笔/线段/中枢/买卖点/背驰/走势类型/递归/区间套）
 │  │  ├─ exchange/              # 行情数据源适配层（tdx/qmt/长桥/富途/binance/alpaca/…）
-│  │  ├─ recursive_bt/          # 递归回测栈：engine / sim / data / select / backtest / monitor / strategy_optimizer
-│  │  ├─ backtesting/           # 交易栈基类（Trader/Strategy/Position）+ 传统回测
-│  │  ├─ trader/                # 实盘交易器（A股/港股/期货CTP/天勤/数字货币）
-│  │  ├─ strategy/              # 交易策略
-│  │  ├─ xuangu/                # 选股
-│  │  ├─ signal_monitor/        # 信号监控 / 评估 / 强度比较 / 调度
+│  │  ├─ decision_support/      # 唯一严格策略、研究回放与证据契约
+│  │  ├─ trading/、trader/      # 实时筛选所需的行情数据契约与在线适配器
+│  │  ├─ xuangu/                # 共用严格结构逻辑的选股入口
 │  │  ├─ persistence/           # 持久化（file_db Parquet / DB）
-│  │  ├─ cl_utils/、tools/      # 缠论工具、日志/AI/缓存等工具
+│  │  ├─ cl_utils/、tools/      # 缠论工具、日志与缓存工具
 │  │  ├─ config.py.demo         # 配置模板（复制为 config.py）
 │  │  └─ market.py、fun.py …    # 市场枚举、通用工具
 │  ├─ xtquant/                  # 迅投 QMT SDK（vendored）
-│  └─ cl_myquant / cl_vnpy / cl_wtpy   # 掘金 / vnpy / WonderTrader 适配
 ├─ web/chanlun_chart/
 │  ├─ app.py                    # Web 入口（Flask + Tornado，默认端口 9900）
 │  └─ cl_app/
-│     ├─ blueprints/            # 路由：tv(图表)/zixuan(自选)/xuangu(选股)/bkgn(板块)/alert(预警)/ai/setting/…
+│     ├─ blueprints/            # 路由：tv(图表)/zixuan(自选)/xuangu(选股)/bkgn(板块)/setting/…
 │     ├─ services/、handlers/   # 图表缓存、SSE 推送、静态资源等
 │     ├─ static/、templates/    # TradingView 图表库 + 自定义 datafeed + 页面
 │     └─ *_tasks.py             # 预警/选股/其它定时任务
-├─ tests/                       # pytest：core / exchange / recursive_bt / signal_monitor / trader / web / fixtures
+├─ tests/                       # pytest：core / exchange / trading_system / trader / web / xuangu / fixtures
 ├─ package/                     # TA-Lib / pytdx 本地 wheel
 ├─ pyproject.toml、poetry.lock  # Poetry 依赖
 └─ windows_install.bat / windows_run.bat
@@ -226,12 +221,10 @@ chanlun-pro/
 
 ## 主要功能模块
 
-- **Web 图表**（`web/chanlun_chart`）：TradingView 实时看盘，缠论多级别叠加渲染、SSE 实时推送、自选/选股/板块/预警/AI 分析等页面。
-- **回测**（`recursive_bt`、`backtesting`）：递归多级别回测、纸上组合模拟、策略参数优化、walk-forward 验证。
-- **选股**（`xuangu`、`recursive_bt/select`）：按缠论买卖点/走势结构、行业与自定义系统选股。
-- **实盘交易**（`trader`）：A股、港股、国内期货（CTP / 天勤）、数字货币交易器。
-- **信号监控**（`signal_monitor`）：缠论信号采集、评估、强度比较、定时调度与推送。
-- **AI 分析**（`tools/ai_analyse`、`blueprints/ai`）：调用大模型对当前标的做缠论解读。
+- **Web 图表**（`web/chanlun_chart`）：TradingView 实时看盘，缠论多级别叠加渲染、SSE 实时推送、自选、选股、板块与运行状态页面。
+- **研究回放**（`decision_support/trading_system/backtest`、`tools`）：冻结事实回放、固定年度评估、walk-forward 验证与全量重建。
+- **选股**（`xuangu`、`cl_app/xuangu_tasks.py`）：所有三类买卖点与背驰判断统一进入严格结构实现。
+- **盘中监控**（`cl_app/services/trading_screening.py`、`holding_group_monitor.py`）：候选池分钟级复核、持仓结构事件监听与通知。
 
 ---
 
@@ -258,7 +251,7 @@ CI 见 `.github/workflows/`（`ci.yml` 跑 Poetry 安装 + pytest，`codeql.yml`
 - **单进程架构**：Web 服务以 `s.start(1)` 单进程运行是**刻意设计**——所有图表缓存、per-key 锁、数据源单例都是进程内内存，多进程会让缓存与锁全部失效。扩容请用反向代理 + 多端口，或先把缓存迁到 Redis。
 - **访问鉴权**：本机模式使用回环监听；非回环模式必须通过 HTTPS 反向代理访问，并配置 Werkzeug 密码哈希。任一条件缺失时应用会拒绝启动。
 - **数据源配额**：长桥（cq）按订阅级别限制每月可查询的历史 K 线 symbol 数量，相关防御见 `LB_QUOTA_MONTHLY_LIMIT` / `US_HISTORY_KLINE_SOURCE` / `US_PREWARM_ZIXUAN_ONLY`。
-- **实盘风险**：实盘交易涉及真实资金，务必先用模拟/纸上盘充分验证并做好风控。**本项目不对任何交易结果负责。**
+- **信号边界**：当前仓库不包含自动下单执行器；选股、回放与盘中提示均只输出研究信号。**本项目不对任何交易结果负责。**
 
 ---
 

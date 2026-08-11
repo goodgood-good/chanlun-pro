@@ -160,9 +160,9 @@ class ExchangeFutu(Exchange):
                     # 回看时长从统一表读取，修改请改 _lookback.py
                     from chanlun.exchange._lookback import get_lookback_timedelta
 
-                    _lb = get_lookback_timedelta(frequency, default=dt.timedelta(days=30))
+                    _lb = get_lookback_timedelta(frequency)
                     start_date = (end_datetime - _lb).strftime(time_format)
-                ret, kline, pk = CTX().request_history_kline(
+                ret, kline, _ = CTX().request_history_kline(
                     code=code,
                     start=start_date,
                     end=end_date,
@@ -244,7 +244,7 @@ class ExchangeFutu(Exchange):
         )
         return data if ret == RET_OK else None
 
-    def now_trading(self):
+    def now_trading(self, market: str):
         """
         返回当前是否是交易时间
         :return:
@@ -273,14 +273,6 @@ class ExchangeFutu(Exchange):
                 }:
                     return True
         return False
-
-    @staticmethod
-    def query_kline_edu():
-        ret, data = CTX().get_history_kl_quota(get_detail=False)
-        if ret == RET_OK:
-            print(data)
-        else:
-            print("error:", data)
 
     def stock_owner_plate(self, code: str):
         plate_infos = {"HY": [], "GN": []}
@@ -345,27 +337,6 @@ class ExchangeFutu(Exchange):
 
         raise RuntimeError(f"Futu position query failed: {poss}")
 
-    @staticmethod
-    def can_trade_val(code):
-        """
-        查询股票可以交易的数量
-        :param code:
-        :return:
-        """
-        ret, data = TTX().acctradinginfo_query(
-            order_type=OrderType.MARKET, code=code, price=0
-        )
-        if ret == RET_OK:
-            return {
-                "max_cash_buy": data.iloc[0]["max_cash_buy"],
-                "max_margin_buy": data.iloc[0]["max_cash_and_margin_buy"],
-                "max_position_sell": data.iloc[0]["max_position_sell"],
-                "max_margin_short": data.iloc[0]["max_sell_short"],
-                "max_buy_back": data.iloc[0]["max_buy_back"],
-            }
-        print("Can Trade Val Error : ", data)
-        return None
-
     def order(self, code, o_type, amount, args=None):
         order_type_map = {"buy": TrdSide.BUY, "sell": TrdSide.SELL}
         TTX().unlock_trade(config.FUTU_UNLOCK_PWD)  # 先解锁交易
@@ -397,9 +368,3 @@ class ExchangeFutu(Exchange):
             print("Order Error : ", data)
 
         return False
-
-
-if __name__ == "__main__":
-    ex = ExchangeFutu()
-    klines = ex.klines("HK.00700", "d")
-    print(klines.tail())

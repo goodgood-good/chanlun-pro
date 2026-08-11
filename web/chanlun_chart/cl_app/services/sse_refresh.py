@@ -22,7 +22,6 @@ def recompute_chart_data(market, code, frequency, cl_config, cache_key):
     # 局部 import 避免与 chart_compute / kline_recompute 形成顶层 import 链。
     from .chart_compute import chart_calc_locks
     from .kline_recompute import prepend_klines_and_replace_cache
-    from chanlun.cl_utils import kcharts_frequency_h_l_map
     from .chart_cache import (
         _TRANSIENT_NEGATIVE_TTL_SECONDS,
         _is_negatively_cached,
@@ -30,12 +29,6 @@ def recompute_chart_data(market, code, frequency, cl_config, cache_key):
         _mark_negative_cache,
     )
     try:
-        # low-to-high 合成标的:SSE 增量 prepend 从"已合成的缓存"无法反推低周期源,只能用高周期
-        # 重算缠论 → 与 tv_history(在低周期算缠论、再合成显示)口径分歧、会闪。故这类标的 SSE 不推,
-        # 由前端 12s 健康哨兵自动转 fallback 快轮询(走 tv_history,口径正确)。(SSE low2high 分歧)
-        _, _kchart_to_freq = kcharts_frequency_h_l_map(market, frequency)
-        if cl_config.get("enable_kchart_low_to_high") == "1" and _kchart_to_freq is not None:
-            return None
         # 负缓存:退市/新上市等空数据标的 5min 内不再反复拉数据源(审查 L1)。与 tv_history
         # 共享同一负缓存,口径一致;只有 client 连着才会走到这,故不会无谓占用。
         if _is_negatively_cached(cache_key):

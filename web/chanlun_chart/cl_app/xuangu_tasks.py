@@ -9,74 +9,73 @@ from chanlun import zixuan
 from chanlun import fun
 from chanlun import utils
 from chanlun.exchange import Market, get_exchange
-from chanlun.xuangu import xuangu
+from chanlun.xuangu import strict_xuangu
 from chanlun.trader.online_market_datas import OnlineMarketDatas
 from tqdm.auto import tqdm
-from chanlun.cl_utils import query_cl_chart_config
 
 log = fun.get_logger()
 
 # 选股运行配置
 xuangu_task_configs: Dict[str, Dict[str, object]] = {
-    "xg_single_bi_1mmd": {
-        "name": "笔的一类买卖点",
-        "task_fun": xuangu.xg_single_bi_1mmd,
-        "task_memo": "笔的一类买卖点，并且所在的中枢笔数量小于9",
+    "strict_l0_class1_point": {
+        "name": "严格结构一类买卖点",
+        "task_fun": strict_xuangu.select_strict_l0_class1_point,
+        "task_memo": "物理周期L0当前确认段上的严格一类买卖点",
         "frequency_num": 1,
         "frequency_memo": "单周期",
     },
-    "xg_single_bi_2mmd": {
-        "name": "笔的二类买卖点",
-        "task_fun": xuangu.xg_single_bi_2mmd,
-        "task_memo": "笔的二类买卖点，并且所在的中枢笔数量小于9",
+    "strict_l0_class2_point": {
+        "name": "严格结构二类买卖点",
+        "task_fun": strict_xuangu.select_strict_l0_class2_point,
+        "task_memo": "物理周期L0当前确认段上的严格二类买卖点",
         "frequency_num": 1,
         "frequency_memo": "单周期",
     },
-    "xg_single_bi_3mmd": {
-        "name": "笔的三类买卖点",
-        "task_fun": xuangu.xg_single_bi_3mmd,
-        "task_memo": "笔的三类买卖点，并且所在的中枢笔数量小于9",
+    "strict_l0_class3_point": {
+        "name": "严格结构三类买卖点",
+        "task_fun": strict_xuangu.select_strict_l0_class3_point,
+        "task_memo": "物理周期L0当前确认段上的严格三类买卖点",
         "frequency_num": 1,
         "frequency_memo": "单周期",
     },
-    "xg_single_find_3buy_by_1buy": {
+    "strict_l0_class3_after_class1": {
         "name": "一类买卖点后的三类买卖点",
-        "task_fun": xuangu.xg_single_find_3buy_by_1buy,
-        "task_memo": "找三类买卖点，前提是前面中枢内有一类买卖点（不同的中枢配置，筛选的条件会有差异）",
+        "task_fun": strict_xuangu.select_strict_l0_class3_after_class1,
+        "task_memo": "当前严格三类点，且此前已确认同向严格一类点",
         "frequency_num": 1,
         "frequency_memo": "单周期",
     },
-    "xg_single_find_3buy_by_zhuanzhe": {
+    "strict_l0_class3_after_trend_divergence": {
         "name": "趋势下跌后的三类买卖点",
-        "task_fun": xuangu.xg_single_find_3buy_by_zhuanzhe,
-        "task_memo": "找三类买卖点，之前段内要有是一个上涨/下跌趋势，后续趋势结束，出现转折中枢的三买（缠论的笔中枢配置要是段内中枢）",
+        "task_fun": strict_xuangu.select_strict_l0_class3_after_trend_divergence,
+        "task_memo": "当前严格三类点，且此前同向严格趋势背驰已确认",
         "frequency_num": 1,
         "frequency_memo": "单周期",
     },
-    "xg_single_xd_and_bi_mmd": {
-        "name": "线段和笔都有出现买点",
-        "task_fun": xuangu.xg_single_xd_and_bi_mmd,
-        "task_memo": "线段和笔都有出现买点",
+    "strict_l0_point_divergence_confluence": {
+        "name": "严格买卖点与背驰共振",
+        "task_fun": strict_xuangu.select_strict_l0_point_divergence_confluence,
+        "task_memo": "物理周期L0当前确认段同时存在严格买卖点与同向严格背驰",
         "frequency_num": 1,
         "frequency_memo": "单周期",
     },
-    "xg_multiple_xd_bi_mmd": {
-        "name": "高级别线段买点或背驰，并且次级别笔买点或背驰",
-        "task_fun": xuangu.xg_multiple_xd_bi_mmd,
-        "task_memo": "高级别线段买点或背驰，并且次级别笔买点或背驰",
+    "strict_l0_two_frequency_confluence": {
+        "name": "双周期严格买卖点或背驰共振",
+        "task_fun": strict_xuangu.select_strict_l0_two_frequency_confluence,
+        "task_memo": "两个物理周期的L0严格买卖点或背驰方向一致",
         "frequency_num": 2,
         "frequency_memo": "两个周期",
     },
-    "xg_multiple_low_level_12mmd": {
-        "name": "高级别出现背驰或者买卖点，并且低级别中出现一二类买点",
-        "task_fun": xuangu.xg_multiple_low_level_12mmd,
-        "task_memo": "高级别出现背驰或者买卖点，并且在低级别中，其中有任意一个低级别有出现过1/2类买点",
+    "strict_l0_lower_class12_confluence": {
+        "name": "高周期严格事件与低周期一二类点共振",
+        "task_fun": strict_xuangu.select_strict_l0_lower_class12_confluence,
+        "task_memo": "高周期L0严格事件与任一低周期当前严格一/二类点方向一致",
         "frequency_num": 3,
         "frequency_memo": "三个周期",
     },
-    "xg_single_ma_250": {
+    "closed_ma250": {
         "name": "均线250选股",
-        "task_fun": xuangu.xg_single_ma_250,
+        "task_fun": strict_xuangu.select_closed_ma250,
         "task_memo": "最新价格在均线 250 之上 或者 之下",
         "frequency_num": 1,
         "frequency_memo": "一个周期",
@@ -92,12 +91,11 @@ def process_xuangu_by_code(args):
     try:
         code, market, frequencys, task_name, opt_types = args
         ex = get_exchange(Market(market))
-        cl_config = query_cl_chart_config(market, "----")
         task_fun = xuangu_task_configs[task_name]["task_fun"]
         # 选股场景下同一只票多周期会复用底层缠论数据，开缓存能显著减少重复拉行情/重复计算。
         # OnlineMarketDatas 的缓存生命周期与对象同生共死，每个 code 一个新实例，
         # 不会跨 code 串数据，因此开 use_cache=True 是安全的。
-        mk_datas = OnlineMarketDatas(market, frequencys, ex, cl_config, use_cache=True)
+        mk_datas = OnlineMarketDatas(market, frequencys, ex, {}, use_cache=True)
         xg_res = task_fun(code, mk_datas, opt_types)
         return xg_res
     except Exception as e:
@@ -131,11 +129,10 @@ def process_xuangu_task(
         ex = get_exchange(Market(market))
         run_codes = []
         if src_zx_group == "all":
-            # 获取交易所下的股票代码。cq singleton 的 default_market 会被后初始化
-            # 市场覆盖, 必须显式传 market(统一入口 _safe_all_stocks, 历史实测复现)。
+            # 获取当前市场视图绑定的股票代码。
             from .services.stock_list import _safe_all_stocks
 
-            run_codes = [_s["code"] for _s in _safe_all_stocks(ex, market)]
+            run_codes = [_s["code"] for _s in _safe_all_stocks(ex)]
             if market == "a":
                 run_codes = [
                     _c
@@ -295,11 +292,3 @@ class XuanguTasks(object):
                     self.scheduler.my_task_list[task_id] = previous
                 raise
         return True
-
-if __name__ == "__main__":
-    xt = XuanguTasks(None)
-    print(
-        process_xuangu_task(
-            "a", "xg_single_xd_and_bi_mmd", ["d"], ["long"], "all", "测试"
-        )
-    )

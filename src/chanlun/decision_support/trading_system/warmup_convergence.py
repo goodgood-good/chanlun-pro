@@ -1,4 +1,4 @@
-"""Versioned, diagnostic-only convergence evidence for structure warmup.
+"""Current diagnostic-only convergence evidence for structure warmup.
 
 The active screening gate currently compares one full history with one shorter
 left-history prefix.  Real QMT A/B probes showed that this pairwise result is
@@ -17,7 +17,7 @@ import re
 from typing import TYPE_CHECKING, Literal
 
 from chanlun.decision_support.fingerprints import normalize_datetime, sha256_json
-from chanlun.decision_support.trading_system.v3_etf_proxy_facts import (
+from chanlun.decision_support.trading_system.etf_proxy_facts import (
     RiskMappingSupplyFacts,
 )
 
@@ -28,7 +28,7 @@ if TYPE_CHECKING:
 
 
 WARMUP_CONVERGENCE_ENVELOPE_SCHEMA = (
-    "chanlun-warmup-convergence-envelope/v1"
+    "chanlun-warmup-convergence-envelope"
 )
 WARMUP_CONVERGENCE_ENVELOPE_CONTRACT_ID = sha256_json(
     {
@@ -55,7 +55,7 @@ WarmupEnvelopeStatus = Literal[
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 _PERIODS = ("M", "W", "D")
 WARMUP_CONVERGENCE_DIAGNOSTIC_SCHEMA = (
-    "chanlun-warmup-convergence-semantic-diagnostic/v1"
+    "chanlun-warmup-convergence-semantic-diagnostic"
 )
 WARMUP_CONVERGENCE_DIAGNOSTIC_CONTRACT_ID = sha256_json(
     {
@@ -78,7 +78,7 @@ WARMUP_CONVERGENCE_DIAGNOSTIC_CONTRACT_ID = sha256_json(
     }
 )
 WARMUP_MAPPING_SUPPLY_DIAGNOSTIC_SCHEMA = (
-    "chanlun-warmup-mapping-supply-diagnostic/v1"
+    "chanlun-warmup-mapping-supply-diagnostic"
 )
 WARMUP_MAPPING_SUPPLY_DIAGNOSTIC_CONTRACT_ID = sha256_json(
     {
@@ -87,7 +87,7 @@ WARMUP_MAPPING_SUPPLY_DIAGNOSTIC_CONTRACT_ID = sha256_json(
             "warmup-convergence-envelope-and-semantic-diagnostic-content-sha256"
         ),
         "comparison": "changed-prefix-period-vs-longest-left-history-prefix",
-        "point_identity": "chanlun-risk-mapping-point-identity/v1",
+        "point_identity": "chanlun-risk-mapping-point-identity",
         "diagnostic_only": True,
         "active_gate_unchanged": True,
     }
@@ -258,7 +258,7 @@ class WarmupPeriodSemanticFacts:
             raise ValueError("mapped_center_id must be non-empty when present")
 
     def signature_document(self) -> dict[str, object]:
-        """Recreate the exact v1 document used by the existing hash gate."""
+        """Recreate the exact canonical document used by the existing hash gate."""
 
         return {
             "period": self.period,
@@ -370,7 +370,7 @@ class WarmupSemanticSnapshot:
     def signature_sha256(self) -> str:
         return sha256_json(
             {
-                "schema": "chanlun-qmt-mwd-warmup-semantic-tail/v1",
+                "schema": "chanlun-qmt-mwd-warmup-semantic-tail",
                 "states": tuple(
                     value.signature_document() for value in self.periods
                 ),
@@ -1129,9 +1129,9 @@ class WarmupConvergenceEnvelope:
     diagnostic_only: bool = True
     active_gate_unchanged: bool = True
     live_status: str = "LIVE_DISABLED"
-    # The v1 envelope remains byte-for-byte stable.  Human-readable semantic
+    # The convergence envelope remains byte-for-byte stable.  Human-readable semantic
     # facts live in a separately hashed, envelope-bound diagnostic and are
-    # deliberately excluded from equality and the v1 content identity.
+    # deliberately excluded from equality and the convergence content identity.
     diagnostic: WarmupConvergenceDiagnosticEnvelope | None = field(
         default=None,
         compare=False,
@@ -1143,7 +1143,7 @@ class WarmupConvergenceEnvelope:
         repr=False,
     )
     # A third, independently hashed sibling records old-pen/center/trigger-line
-    # lineage.  It is deliberately absent from the original v1 document and
+    # lineage.  It is deliberately absent from the convergence document and
     # equality so adding human-review evidence cannot mutate the active gate.
     structure_lineage_diagnostic: (
         WarmupStructureLineageDiagnosticEnvelope | None
@@ -1357,7 +1357,7 @@ def bind_warmup_convergence_diagnostic(
     *,
     snapshots: tuple[WarmupSemanticSnapshot, ...],
 ) -> WarmupConvergenceEnvelope:
-    """Attach explanatory M/W/D facts without changing the v1 gate identity."""
+    """Attach explanatory M/W/D facts without changing the convergence gate identity."""
 
     values = tuple(snapshots)
     if len(values) != len(envelope.observations):
@@ -1388,7 +1388,7 @@ def bind_warmup_mapping_supply_diagnostic(
     *,
     snapshots: tuple[WarmupMappingSupplySnapshot, ...],
 ) -> WarmupConvergenceEnvelope:
-    """Attach point-level supply deltas without changing either v1 identity."""
+    """Attach point-level supply deltas without changing either convergence identity."""
 
     semantic = envelope.diagnostic
     if semantic is None:

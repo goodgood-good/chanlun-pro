@@ -7,9 +7,7 @@ from typing import List, Dict
 import pandas as pd
 
 from chanlun.trading.base import MarketDatas
-from chanlun.core.types import ICL
 from chanlun.exchange.exchange import Exchange
-from chanlun.persistence.file_db import FileCacheDB
 
 
 def _freq_minutes(frequency: str):
@@ -31,8 +29,7 @@ def _freq_minutes(frequency: str):
 def _drop_unclosed_last_bar(df: pd.DataFrame, frequency: str) -> pd.DataFrame:
     """丢弃仍在进行(未收盘)的末根 bar, 使实盘缠论信号口径与回测/paper 一致(D2-F4)。
 
-    口径同 recursive_bt.sim.paper.drop_unclosed_last_bar(此处内联避免 trader->recursive_bt
-    跨层依赖): 自包含不依赖外部 now, 用末两根推断间隔, 再用与末根同 tz 的当前时刻判断末根
+    该函数自包含且不依赖外部时钟参数：用末两根推断间隔，再用与末根同 tz 的当前时刻判断末根
     周期是否已结束。非分钟级/不足两根时原样返回; 间隔异常(session 首根等)仅裁
     「标签在未来」的末根, 绝不误删历史收盘 bar。
     """
@@ -71,33 +68,21 @@ class OnlineMarketDatas(MarketDatas):
     ):
         """
         :param use_cache: 是否开启循环内 K 线缓存。
-            开启时同一根 K 线在一次循环内只请求一次，循环结束后须调用 clear_cache() 清除，
-            否则下次循环仍会读到旧数据。
+            开启时同一根 K 线在一次循环内只请求一次；每轮开始必须调用 begin_round()。
         """
         super().__init__(market, frequencys, cl_config)
         self.ex = ex
-        self.fdb = FileCacheDB()
 
         self.use_cache = use_cache
 
-        # key 为 "{_round_seq}_{code}_{frequency}"，循环结束需显式清除或调 begin_round
+        # key 为 "{_round_seq}_{code}_{frequency}"，每轮由 begin_round 推进。
         self.cache_klines: Dict[str, pd.DataFrame] = {}
 
-        # L2: 轮次序号; begin_round() 每轮自增使上轮 K 线缓存键自动失效, 免依赖 clear_cache
+        # 轮次序号；begin_round() 每轮自增使上轮 K 线缓存键失效。
         self._round_seq = 0
 
-    def clear_cache(self):
-        """每次实盘循环结束后调用，清空 K 线缓存以便下次取到最新行情。"""
-        self.cache_klines = {}
-        return True
-
     def begin_round(self):
-        """每轮循环开始调用, 推进轮次序号使上轮 K 线缓存自动失效 (L2)。
-
-        与 clear_cache 等价 (都清缓存), 但把清理从"轮末易漏"挪到"轮首必调";
-        缓存键含 _round_seq 是双保险。驱动每轮 for code 前调用本方法替代轮末 clear_cache
-        (clear_cache 保留兼容)。
-        """
+        """每轮循环开始调用；推进轮次序号并清除上轮 K 线缓存。"""
         self._round_seq += 1
         self.cache_klines = {}
         return True
@@ -112,6 +97,25 @@ class OnlineMarketDatas(MarketDatas):
             self.cache_klines[key] = klines
         return klines
 
+    def closed_klines(self, code, frequency) -> pd.DataFrame:
+        """Return the cached frame with any still-open terminal bar removed.
+
+        Strict live screening, replay and stock selection all consume this
+        exact closed-bar boundary.  Keeping it public avoids each caller
+        reimplementing the wall-clock rule before entering the canonical
+        structure runtime.
+        """
+
+        return _drop_unclosed_last_bar(self.klines(code, frequency), frequency)
+
+    def closed_bar_as_of(self, code, frequency):
+        """Return the causal close time of the terminal row in closed_klines."""
+
+        frame = self.closed_klines(code, frequency)
+        if frame is None or frame.empty:
+            raise ValueError("closed market bars are unavailable")
+        return pd.Timestamp(frame["date"].iloc[-1]).to_pydatetime()
+
     def last_k_info(self, code) -> dict:
         klines = self.klines(code, self.frequencys[-1])
         return {
@@ -121,26 +125,3 @@ class OnlineMarketDatas(MarketDatas):
             "high": float(klines.iloc[-1]["high"]),
             "low": float(klines.iloc[-1]["low"]),
         }
-
-    def get_cl_data(self, code, frequency, cl_config: dict = None) -> ICL:
-        """返回指定标的+周期的缠论计算结果；cl_config 优先级：code > frequency > 'default' > 全局。"""
-        # 支持按标的或周期单独配置缠论参数，优先级依次降低
-        if code in self.cl_config.keys():
-            cl_config = self.cl_config[code]
-        elif frequency in self.cl_config.keys():
-            cl_config = self.cl_config[frequency]
-        elif "default" in self.cl_config.keys():
-            cl_config = self.cl_config["default"]
-        else:
-            cl_config = self.cl_config
-
-        klines = self.klines(code, frequency)
-
-        # D2-F4: 实盘缠论信号只认已收盘 bar(丢弃进行中末根), 与回测/paper/monitor 口径一致,
-        # 避免在未收盘 bar 上算出买卖点过早真实下单。⚠ 止损口径同步变更: strategy.close 止损经
-        # get_cl_data 读价(get_klines()[-1].c), 故止损也降到已收盘 bar 粒度(与 backtest 一致,
-        # 最多滞后 1 根周期); last_k_info 保持实时末根但仅用于盈亏统计, 不参与止损触发。
-        # 波及全部 OnlineMarketDatas 消费方(a/hk/currency 实盘 + 期货 tq/ctp + 选股 xuangu)。
-        klines = _drop_unclosed_last_bar(klines, frequency)
-        cd = self.fdb.get_web_cl_data(self.market, code, frequency, cl_config, klines)
-        return cd

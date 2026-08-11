@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import pytest
+from tenacity import RetryError
 
 from chanlun.exchange import exchange_qmt
 from chanlun.exchange.exchange_qmt import ExchangeQMT
@@ -89,16 +91,14 @@ def test_qmt_none_adjustment_does_not_read_factor_api(monkeypatch) -> None:
     assert _FakeXt.factor_calls == 0
 
 
-def test_qmt_factor_failure_keeps_legacy_bars_but_omits_formal_metadata(
+def test_qmt_factor_failure_rejects_unattested_adjusted_bars(
     monkeypatch,
 ) -> None:
     _FakeXt.factor_calls = 0
     _FakeXt.factor_error = RuntimeError("native factor service unavailable")
     monkeypatch.setattr(exchange_qmt, "xtdata", _FakeXt)
 
-    frame = ExchangeQMT().klines("SH.600926", "1m", start_date="2025-01-09")
+    with pytest.raises(RetryError):
+        ExchangeQMT().klines("SH.600926", "1m", start_date="2025-01-09")
 
-    assert len(frame) == 2
-    assert "structure_price_quantum" not in frame.attrs
-    assert "price_basis_revision" not in frame.attrs
-    assert frame.attrs["price_basis_error_code"] == "qmt_factor_read_failed"
+    assert _FakeXt.factor_calls == 3

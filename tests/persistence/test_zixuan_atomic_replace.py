@@ -112,14 +112,13 @@ def test_add_at_top_does_not_shift_same_named_group_in_other_market():
     assert hk_position == 0
 
 
-def test_global_group_adapter_merges_definitions_and_preserves_member_markets():
+def test_global_group_definitions_preserve_cross_market_members():
     db_obj = _isolated_db()
     now = datetime.datetime.now()
     with db_obj.Session() as session:
         session.add_all(
             [
-                TableByZxGroup(market="a", zx_group="跨市场", add_dt=now),
-                TableByZxGroup(market="hk", zx_group="跨市场", add_dt=now),
+                TableByZxGroup(market="__global__", zx_group="跨市场", add_dt=now),
                 TableByZxGroup(market="__global__", zx_group="我的持仓", add_dt=now),
                 TableByZixuan(
                     market="a",
@@ -145,10 +144,10 @@ def test_global_group_adapter_merges_definitions_and_preserves_member_markets():
         )
         session.commit()
 
-    assert [row.zx_group for row in db_obj.zx_get_global_groups()] == [
+    assert {row.zx_group for row in db_obj.zx_get_global_groups()} == {
         "我的持仓",
         "跨市场",
-    ]
+    }
     assert [
         (row.market, row.stock_code)
         for row in db_obj.zx_get_global_group_stocks("跨市场")
@@ -163,8 +162,9 @@ def test_global_group_delete_removes_every_definition_and_member_atomically():
     with db_obj.Session() as session:
         session.add_all(
             [
-                TableByZxGroup(market="a", zx_group="删除目标", add_dt=now),
-                TableByZxGroup(market="hk", zx_group="删除目标", add_dt=now),
+                TableByZxGroup(
+                    market="__global__", zx_group="删除目标", add_dt=now
+                ),
                 TableByZixuan(
                     market="a",
                     zx_group="删除目标",

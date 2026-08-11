@@ -10,7 +10,7 @@ min_zs_lines 边界(3↔4)反复横跳」的瞬态分叉,真实行情 fixture �
 要求配 golden 终态;合成病态数据不属于「生产行为指纹」语义,故隔到 synthetic/
 子目录(glob 非递归、不收集),只供对拍网逐根读取。
 
-固化为 parquet(保 float64 精度、免 numpy default_rng 跨版本漂移)。重生:
+固化为 parquet，以保留 float64 精度并避免随机数实现变化造成漂移。重生:
   PYTHONIOENCODING=utf-8 .venv/Scripts/python.exe tests/fixtures/synthetic/gen_syn_inclusion.py
 """
 from pathlib import Path

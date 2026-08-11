@@ -2,7 +2,7 @@
 
 (function startTradingScreeningController() {
   const POLL_INTERVAL_MS = 60_000;
-  const STORAGE_KEY = "chanlun:trading-screening:view-v1";
+  const STORAGE_KEY = "chanlun:trading-screening:view";
 
   function boot() {
     const Ui = globalThis.TradingScreeningUi;

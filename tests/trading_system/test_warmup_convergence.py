@@ -22,7 +22,7 @@ from chanlun.decision_support.trading_system.warmup_convergence import (
     bind_warmup_mapping_supply_diagnostic,
     classify_warmup_convergence_envelope,
 )
-from chanlun.decision_support.trading_system.v3_etf_proxy_facts import (
+from chanlun.decision_support.trading_system.etf_proxy_facts import (
     RiskMappingPointEvidenceFacts,
     RiskMappingSupplyFacts,
 )
@@ -456,7 +456,7 @@ def test_mapping_supply_diagnostic_explains_disappearing_sell_mapping() -> None:
     ] == "3buy"
 
 
-def test_mapping_supply_diagnostic_round_trip_and_v1_identities_are_stable() -> None:
+def test_mapping_supply_diagnostic_round_trip_and_identities_are_stable() -> None:
     envelope = mapping_supply_envelope()
     assert envelope.diagnostic is not None
     assert envelope.mapping_supply_diagnostic is not None
@@ -466,7 +466,7 @@ def test_mapping_supply_diagnostic_round_trip_and_v1_identities_are_stable() -> 
     )
     restored.validate_against(envelope)
     assert restored == envelope.mapping_supply_diagnostic
-    # Both existing v1 documents remain unaware of the additive sibling.
+    # Both existing documents remain unaware of the additive sibling.
     bare = classify_warmup_convergence_envelope(
         frequency=envelope.frequency,
         as_of=envelope.as_of,

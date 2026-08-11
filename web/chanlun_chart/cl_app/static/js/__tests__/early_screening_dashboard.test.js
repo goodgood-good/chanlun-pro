@@ -103,9 +103,34 @@ function fakeChartRoot() {
   };
 }
 
+function currentHigherTimeframeRisk() {
+  return {
+    market_gate: "GREEN",
+    sector_gate: "GREEN",
+    symbol_gate: "GREEN",
+    market_reason_codes: [],
+    sector_reason_codes: [],
+    symbol_reason_codes: [],
+    reason_codes: [],
+    sector_higher_timeframe_source_mode: "PAGE_PARITY_SAME_5M_BASE",
+    sector_strict_same_5m_warmup_evidence: {
+      required_daily_bar_count: 480,
+      full_daily_bar_count: 480,
+      suffix_daily_bar_count: 320,
+      converged: true,
+      reason_code: "QMT_HIGHER_TIMEFRAME_WARMUP_TAIL_STABLE",
+    },
+    sector_strict_same_5m_source_coverage_evidence: sectorSameBaseCoverage({
+      converged: true,
+      fullCount: 480,
+    }),
+    sector_research_bridge_parameter_set_id: null,
+  };
+}
+
 const snapshot = {
-  schema_version: "chanlun-trading-screening/v3",
-  structure_version: "physical-timeframe-l0-v1",
+  schema: "chanlun-trading-screening",
+  structure_contract_id: "physical-timeframe-l0",
   available: true,
   scan_state: "complete",
   generated_at: "2026-07-20T15:00:00+08:00",
@@ -121,7 +146,7 @@ const snapshot = {
   },
   sectors: [
     {
-      sector_id: "tdx-industry:SH.880471",
+      sector_id: "qmt-gics3:bank",
       sector_name: "银行",
       eligible: true,
       hard_block: false,
@@ -152,7 +177,7 @@ const snapshot = {
       recursive_level: 0,
       lifecycle_stage: "armed",
       observed_at: "2026-07-20T14:55:00+08:00",
-      sector: { sector_id: "tdx-industry:SH.880471", sector_name: "银行" },
+      sector: { sector_id: "qmt-gics3:bank", sector_name: "银行" },
       context_30m: { direction: "up", disposition: "supportive" },
       setup_5m: { point_type: "1buy", center_ordinal: null },
       trigger_1m: null,
@@ -161,10 +186,12 @@ const snapshot = {
       entry_allowed: false,
       exit_allowed: false,
       decision_reasons: ["one_minute_not_confirmed"],
+      higher_timeframe_risk: currentHigherTimeframeRisk(),
       chart_urls: {
-        "30m": "/?market=a&code=SZ.000001&frequency=30m",
-        "5m": "/?market=a&code=SZ.000001&frequency=5m",
-        "1m": "/?market=a&code=SZ.000001&frequency=1m",
+        "d": "/?market=a&code=SZ.000001&layout=single&intervals=D",
+        "30m": "/?market=a&code=SZ.000001&layout=single&intervals=30",
+        "5m": "/?market=a&code=SZ.000001&layout=single&intervals=5",
+        "1m": "/?market=a&code=SZ.000001&layout=single&intervals=1",
       },
     },
     {
@@ -177,7 +204,7 @@ const snapshot = {
       recursive_level: 1,
       lifecycle_stage: "triggered",
       observed_at: "2026-07-20T14:58:00+08:00",
-      sector: { sector_id: "tdx-industry:SH.880482", sector_name: "房地产" },
+      sector: { sector_id: "qmt-gics3:real-estate", sector_name: "房地产" },
       context_30m: { direction: "neutral", disposition: "neutral" },
       setup_5m: { point_type: "2buy", center_ordinal: null },
       trigger_1m: { point_type: "1buy" },
@@ -186,7 +213,13 @@ const snapshot = {
       entry_allowed: true,
       exit_allowed: false,
       decision_reasons: [],
-      chart_urls: {},
+      higher_timeframe_risk: currentHigherTimeframeRisk(),
+      chart_urls: {
+        "d": "/?market=a&code=SZ.000002&layout=single&intervals=D",
+        "30m": "/?market=a&code=SZ.000002&layout=single&intervals=30",
+        "5m": "/?market=a&code=SZ.000002&layout=single&intervals=5",
+        "1m": "/?market=a&code=SZ.000002&layout=single&intervals=1",
+      },
     },
   ],
   risk_limits: {},
@@ -203,7 +236,7 @@ const snapshot = {
 };
 
 test("dashboard exposes sector signal and chart workspaces", () => {
-  assert.match(template, /data-schema="chanlun-trading-screening\/v3"/);
+  assert.match(template, /data-schema="chanlun-trading-screening\"/);
   assert.match(template, /id="es-sector-completion"/);
   assert.match(template, /id="es-scan-timing"/);
   assert.match(template, /id="hr-sector-receipts"/);
@@ -246,15 +279,13 @@ test("dashboard exposes sector signal and chart workspaces", () => {
   assert.match(humanReviewSource, /EVALUATION_VALUATION_EVIDENCE_MISSING/);
   assert.match(humanReviewSource, /EVALUATION_ARTIFACT_EVIDENCE_INVALID/);
   assert.match(humanReviewSource, /逐日前向交付尚未完成/);
-  assert.match(humanReviewSource, /历史缺口/);
   assert.match(humanReviewSource, /当日板块快照缺失/);
   assert.match(humanReviewSource, /当日回执缺失/);
   assert.match(humanReviewSource, /回执未证明/);
   assert.match(humanReviewSource, /回执无效/);
   assert.match(template, /id="hr-execution-evidence-status"/);
   assert.match(template, /id="hr-entry-selection-evidence-status"/);
-  assert.match(template, /id="hr-capital-rejection-evidence-status"/);
-  assert.match(template, /id="hr-capital-decision-audit-status"/);
+  assert.match(template, /id="hr-portfolio-rejection-evidence-status"/);
   assert.match(template, /id="hr-portfolio-decision-audit-status"/);
   assert.match(template, /id="hr-portfolio-fill-decision-audit-status"/);
   assert.match(template, /id="hr-tactical-execution-status"/);
@@ -262,7 +293,6 @@ test("dashboard exposes sector signal and chart workspaces", () => {
   assert.match(template, /id="hr-virtual-reserved-sell-quantity"/);
   assert.match(template, /id="hr-virtual-cancelled-count"/);
   assert.match(template, /id="hr-virtual-operations-cancelled-count"/);
-  assert.match(template, /id="hr-virtual-capital-rejected-count"/);
   assert.match(template, /id="hr-paper-path-status"/);
   assert.match(template, /id="hr-paper-path-reasons"/);
   assert.match(humanReviewSource, /paperPathDecision/);
@@ -319,8 +349,7 @@ test("dashboard exposes sector signal and chart workspaces", () => {
   assert.match(humanReviewSource, /paper_entry_selection_source_audit/);
   assert.match(humanReviewSource, /精确 QMT 目录/);
   assert.match(humanReviewSource, /paper_operations_cancellation_evidence/);
-  assert.match(humanReviewSource, /paper_capital_rejection_evidence/);
-  assert.match(humanReviewSource, /paper_capital_decision_audit/);
+  assert.match(humanReviewSource, /paper_portfolio_rejection_evidence/);
   assert.match(humanReviewSource, /paper_portfolio_decision_audit/);
   assert.match(humanReviewSource, /paper_portfolio_fill_decision_audit/);
   assert.match(humanReviewSource, /terminal_signal_lifecycle_one_shot_enforced/);
@@ -330,16 +359,12 @@ test("dashboard exposes sector signal and chart workspaces", () => {
   assert.match(humanReviewSource, /sector_higher_timeframe_evidence/);
   assert.match(humanReviewSource, /原生日线研究桥（AMBER上限）/);
   assert.match(humanReviewSource, /严格5m暖机/);
-  assert.match(humanReviewSource, /LEGACY_OMITTED_FAIL_CLOSED/);
-  assert.match(humanReviewSource, /板块门旧归档未证明/);
-  assert.match(humanReviewSource, /系统仅按 UNRESOLVED 失败关闭读取/);
   assert.match(humanReviewSource, /marketSymbolHigherTimeframeDisclosure/);
   assert.match(humanReviewSource, /market_symbol_higher_timeframe_evidence/);
   assert.match(humanReviewSource, /M\/W\/D结构与来源可复核/);
   assert.match(humanReviewSource, /M\/W\/D结构可复核·来源未附/);
   assert.match(humanReviewSource, /M\/W\/D结构可复核·来源部分/);
-  assert.match(humanReviewSource, /M\/W\/D仅门色/);
-  assert.match(humanReviewSource, /完成K线数量及结构映射未证明/);
+  assert.match(humanReviewSource, /完成K线数量及结构映射，已按无效处理/);
   assert.match(humanReviewSource, /evidence_bar_end/);
   assert.match(humanReviewSource, /mapping_candidate_ids/);
   assert.match(humanReviewSource, /source_support/);
@@ -350,12 +375,9 @@ test("dashboard exposes sector signal and chart workspaces", () => {
   assert.match(humanReviewSource, /原生日线调和：与1m派生日线重合/);
   assert.match(humanReviewSource, /sectorNameDisclosure/);
   assert.match(humanReviewSource, /POINT_IN_TIME_SAME_SESSION/);
-  assert.match(humanReviewSource, /LATEST_CATALOG_FALLBACK_NOT_POINT_IN_TIME/);
   assert.match(humanReviewSource, /SAME_SESSION_SYMBOL_NOT_MEMBER/);
-  assert.match(humanReviewSource, /LATEST_CATALOG_SYMBOL_NOT_MEMBER/);
   assert.match(humanReviewSource, /排序观测/);
   assert.match(humanReviewSource, /候选股票属于该快照/);
-  assert.match(humanReviewSource, /不是历史板块成分证明/);
   assert.match(
     humanReviewSource,
     /QMT_SECTOR_NATIVE_DAILY_AND_5M_UNRECONCILED_RESEARCH_BRIDGE/,
@@ -402,7 +424,6 @@ test("dashboard exposes sector signal and chart workspaces", () => {
   assert.match(humanReviewSource, /CLOSED_BOOK_NO_DAILY_EQUITY/);
   assert.match(humanReviewSource, /virtual_reserved_sell_quantity/);
   assert.match(humanReviewSource, /virtual_cancelled_intent_count/);
-  assert.match(humanReviewSource, /virtual_capital_rejected_intent_count/);
   assert.match(humanReviewSource, /superseded_paper_intents/);
   assert.match(humanReviewSource, /已追加撤销/);
   assert.match(humanReviewSource, /paper_observation_eligible/);
@@ -415,7 +436,6 @@ test("dashboard exposes sector signal and chart workspaces", () => {
   assert.match(humanReviewSource, /同一请求 ID 幂等补建虚拟意图/);
   assert.match(humanReviewSource, /REVIEW_ONLY/);
   assert.match(humanReviewSource, /成交证据对象缺失/);
-  assert.match(humanReviewSource, /旧成交缺少精确 1m 柱/);
   assert.match(template, /data-workspace="sector"/);
   assert.match(template, /data-workspace="signals"/);
   assert.match(template, /data-workspace="charts"/);
@@ -483,7 +503,6 @@ test("human review disclosures execute outside boot and explain sector ranking",
     sector_name_catalog_revision: `sha256:${"2".repeat(64)}`,
     sector_ranking_catalog_attestation: "EXACT_REVISION_NAME_AND_MEMBERSHIP_MATCH",
     sector_ranking_evidence: {
-      source_profile: "LIVE_FULL_RANKING",
       ordinal: 2,
       rank_score: 45,
       rank_components: { five_support: 0, neutral_access: 5, thirty_support: 40 },
@@ -517,9 +536,9 @@ test("human review disclosures execute outside boot and explain sector ranking",
   assert.equal(mixed.tag, "板块排序目录未闭环");
   assert.match(mixed.lines[3], /未改配到同日其他快照/);
 
-  const legacy = Ui.sectorRankingDisclosure({});
-  assert.equal(legacy.tag, "板块排序旧归档未附");
-  assert.match(legacy.lines[0], /不能从最终名次反推/);
+  const invalid = Ui.sectorRankingDisclosure({});
+  assert.equal(invalid.tag, "板块排序证据无效");
+  assert.match(invalid.lines[0], /当前契约要求的完整板块排序证据/);
 });
 
 test("human review carries sector M/W/D diagnostics and labels buy points diagnostic-only", () => {
@@ -575,7 +594,7 @@ test("human review carries sector M/W/D diagnostics and labels buy points diagno
     mapping_supply: null,
   });
   const sectorEvidence = {
-    schema: "chanlun-human-review-sector-higher-timeframe-evidence/v4",
+    schema: "chanlun-human-review-sector-higher-timeframe-evidence",
     source_mode: "PAGE_PARITY_SAME_5M_BASE",
     strict_same_5m_warmup_evidence: warmup,
     warmup_convergence_evidence: convergence,
@@ -625,17 +644,8 @@ test("human review carries sector M/W/D diagnostics and labels buy points diagno
   assert.match(marketSymbol.lines.join("\n"), /市场M\/W\/D多前缀暖机诊断：非单调/);
   assert.match(marketSymbol.lines.join("\n"), /仅诊断，不改变现有双窗口交易门/);
 
-  const legacy = Ui.sectorSourceDisclosure({
-    sector_higher_timeframe_evidence: {
-      schema: "chanlun-human-review-sector-higher-timeframe-evidence/v1",
-      source_mode: "PAGE_PARITY_SAME_5M_BASE",
-      strict_same_5m_warmup_evidence: warmup,
-      research_bridge_parameter_set_id: null,
-      evidence_id: `sha256:${"f".repeat(64)}`,
-    },
-  });
-  assert.match(legacy.lines.join("\n"), /旧版板块证据仅保存来源模式与暖机/);
-  assert.doesNotMatch(legacy.lines.join("\n"), /一买 0 \/ 二买 0/);
+  const invalid = Ui.sectorSourceDisclosure({});
+  assert.match(invalid.lines.join("\n"), /当前契约要求的板块高级别证据/);
 });
 
 test("candidate QMT catalog gate is visible before virtual entry feedback", () => {
@@ -794,10 +804,10 @@ test("normalizeSnapshot accepts only the new read-only schema", () => {
   const Ui = loadUi();
   const normalized = Ui.normalizeSnapshot(snapshot);
 
-  assert.equal(normalized.schema_version, "chanlun-trading-screening/v3");
+  assert.equal(normalized.schema, "chanlun-trading-screening");
   assert.equal(normalized.signals.length, 2);
   assert.throws(
-    () => Ui.normalizeSnapshot({ ...snapshot, schema_version: "chanlun-early-screening/v13" }),
+    () => Ui.normalizeSnapshot({ ...snapshot, schema: "chanlun-early-screening" }),
     /snapshot_schema_invalid/,
   );
   assert.throws(
@@ -811,7 +821,7 @@ function sectorSameBaseCoverage({ converged = false, fullCount = 240 } = {}) {
     ? "QMT_HIGHER_TIMEFRAME_WARMUP_TAIL_STABLE"
     : "QMT_HIGHER_TIMEFRAME_WARMUP_HISTORY_INSUFFICIENT";
   return {
-    contract_id: "chanlun-qmt-sector-same-5m-source-coverage/v3",
+    contract_id: "chanlun-qmt-sector-same-5m-source-coverage",
     observed_at: "2026-07-20T15:00:00+08:00",
     calendar_first_session: "2023-05-04",
     first_visible_bar_at: "2025-04-29T11:05:00+08:00",
@@ -908,7 +918,7 @@ test("filters preserve independent point lifecycle sector and query choices", ()
     ["signal-2"],
   );
   assert.deepEqual(
-    Ui.filterSignals(signals, { sectorId: "tdx-industry:SH.880471" })
+    Ui.filterSignals(signals, { sectorId: "qmt-gics3:bank" })
       .map((row) => row.signal_id),
     ["signal-1"],
   );
@@ -1000,13 +1010,13 @@ test("signals group by native sector without price-change logic", () => {
   const grouped = Ui.groupSignalsBySector(snapshot.signals);
 
   assert.deepEqual(Object.keys(grouped), [
-    "tdx-industry:SH.880471",
-    "tdx-industry:SH.880482",
+    "qmt-gics3:bank",
+    "qmt-gics3:real-estate",
   ]);
-  assert.equal(grouped["tdx-industry:SH.880471"][0].signal_id, "signal-1");
+  assert.equal(grouped["qmt-gics3:bank"][0].signal_id, "signal-1");
 });
 
-test("chart URLs normalize legacy frequency links and fill all four intervals", () => {
+test("chart URLs use the supplied current four-period contract", () => {
   const Ui = loadUi();
 
   assert.deepEqual(Ui.chartUrlsForSignal(snapshot.signals[0]), {
@@ -1028,6 +1038,7 @@ test("chart URLs keep fragments and never duplicate the requested MACD_HTF study
   const urls = Ui.chartUrlsForSignal({
     code: "SH.600000",
     chart_urls: {
+      "d": "/?market=a&code=SH.600000&layout=single&intervals=D#daily",
       "30m": "/?market=a&code=SH.600000&layout=single&intervals=30&default_study=MACD_HTF#main",
       "5m": "/?market=a&code=SH.600000&layout=single&intervals=5&chart_sidebar=expanded#setup",
       "1m": "/?market=a&code=SH.600000&layout=single&intervals=1#trigger",
@@ -1051,16 +1062,15 @@ test("chart URLs keep fragments and never duplicate the requested MACD_HTF study
   }
 });
 
-test("analysis layout switch uses task semantics and migrates legacy values", () => {
+test("analysis layout switch accepts only current layout values", () => {
   const Ui = loadUi();
   const root = { dataset: { currentLayout: "focus" } };
 
   assert.equal(Ui.setChartLayout(root, "dual"), "dual");
   assert.equal(root.dataset.layout, "dual");
   assert.equal(root.dataset.currentLayout, "dual");
-  assert.equal(Ui.setChartLayout(root, "quad"), "triple");
+  assert.equal(Ui.setChartLayout(root, "triple"), "triple");
   assert.equal(root.dataset.layout, "triple");
-  assert.equal(Ui.setChartLayout(root, "single"), "focus");
   assert.equal(Ui.setChartLayout(root, "unknown"), "focus");
   assert.equal(root.dataset.currentLayout, "focus");
 });
@@ -1411,7 +1421,7 @@ test("dashboard exposes approaching signals and honest batch coverage", () => {
   assert.equal(
     Ui.memberHistoryDiagnosticsText({
       sector_member_history_diagnostics: {
-        schema: "chanlun-sector-member-history-diagnostics/v1",
+        schema: "chanlun-sector-member-history-diagnostics",
         unique_symbol_count: 5132,
         unique_symbol_status_counts: {
           COMPLETE: 5126,
@@ -1465,7 +1475,7 @@ test("dashboard exposes approaching signals and honest batch coverage", () => {
   assert.match(controllerSource, /本轮板块结构质量不足，保留上一快照/);
 });
 
-test("completed center preview is displayed as formed, not approaching", () => {
+test("the current lifecycle field is authoritative", () => {
   const Ui = loadUi();
   const formed = {
     point_type: "3buy",
@@ -1479,6 +1489,7 @@ test("completed center preview is displayed as formed, not approaching", () => {
         "core_boundary_held",
       ],
     },
+    chart_urls: snapshot.signals[0].chart_urls,
   };
   const pending = {
     point_type: "3buy",
@@ -1495,20 +1506,22 @@ test("completed center preview is displayed as formed, not approaching", () => {
     setup_5m: { ...formed.setup_5m, point_type: "2buy" },
   };
 
-  assert.equal(Ui.lifecycleStageForSignal(formed), "formed");
+  const explicitFormed = { ...formed, lifecycle_stage: "formed" };
+  assert.equal(Ui.lifecycleStageForSignal(formed), "approaching");
+  assert.equal(Ui.lifecycleStageForSignal(explicitFormed), "formed");
   assert.equal(Ui.lifecycleStageForSignal(pending), "approaching");
   assert.equal(Ui.lifecycleStageForSignal(nonThird), "approaching");
-  assert.equal(Ui.decisionSummaryForSignal(formed).tone, "waiting");
+  assert.equal(Ui.decisionSummaryForSignal(explicitFormed).tone, "waiting");
   assert.deepEqual(
-    Ui.filterSignals([formed, pending], { lifecycle: "formed" }),
-    [formed],
+    Ui.filterSignals([formed, explicitFormed], { lifecycle: "formed" }),
+    [explicitFormed],
   );
   assert.equal(Ui.lifecycleLabel("formed"), "已形成");
 
   const normalized = Ui.normalizeSnapshot({
     ...snapshot,
     signals: [],
-    manual_holding_signals: [formed],
+    manual_holding_signals: [explicitFormed],
   });
   assert.equal(normalized.manual_holding_signals[0].lifecycle_stage, "formed");
 });
@@ -1524,7 +1537,6 @@ test("operator status copy explains degraded state without exposing internal cod
     daily_preselection_target_session: "2026-08-04",
     daily_preselection_market_data_as_of: "2026-08-04T09:07:23+08:00",
     full_coverage_next_active_at: "NEXT_SCAN",
-    sector_evidence_replay_symbol_count: 1323,
   };
   const summary = Ui.dailyPreselectionText(blockedHealth);
   const diagnostic = Ui.dailyPreselectionDiagnosticsText(blockedHealth);
@@ -1537,7 +1549,7 @@ test("operator status copy explains degraded state without exposing internal cod
   assert.match(diagnostic, /内部状态 review_blocked/);
   assert.match(diagnostic, /原因 HUMAN_REVIEW_MATERIALIZATION_FAILED/);
   assert.match(diagnostic, /结构线索 1664（买入 612）/);
-  assert.match(diagnostic, /待重放板块证据 1323 只/);
+  assert.doesNotMatch(diagnostic, /重放板块证据/);
 
   assert.equal(
     Ui.dailyPreselectionText({
@@ -1652,6 +1664,7 @@ test("period path and evidence groups separate established missing blocking and 
   const Ui = loadUi();
   const signal = {
     ...snapshot.signals[0],
+    higher_timeframe_risk: {},
     point_type: "2buy",
     context_30m: {
       direction: "up",
@@ -1728,12 +1741,18 @@ test("period path and evidence groups separate established missing blocking and 
     "1分钟：尚未取得同向精确触发",
     "1分钟同向确认尚未完成",
   ]);
-  assert.deepEqual(groups.blocking, ["较低或无关结构存在风险"]);
+  assert.deepEqual(groups.blocking, [
+    "较低或无关结构存在风险",
+    "板块高级别来源字段不完整，不能据此解除风险门",
+  ]);
   assert.deepEqual(groups.next, ["等待 1分钟同向买卖点闭合"]);
   assert.deepEqual(groups.risk, [
     "5分钟失效价：未提供",
     "结构防守价：9.80",
     "风险乘数：0.50",
+    "市场1分钟会话证据：当前契约字段缺失 · 失败关闭",
+    "板块1分钟会话证据：当前契约字段缺失 · 失败关闭",
+    "个股1分钟会话证据：当前契约字段缺失 · 失败关闭",
   ]);
   assert.deepEqual(groups.raw, [
     "confirmed_buy_structure",
@@ -1811,23 +1830,23 @@ test("market sector and symbol MWD diagnostics remain distinct in the evidence p
       ],
       sector_period_diagnostics: [],
       symbol_period_diagnostics: [],
-      session_evidence_contract_id: "chanlun-higher-timeframe-session-evidence/v1",
+      session_evidence_contract_id: "chanlun-higher-timeframe-session-evidence",
       market_session_evidence: {
-        contract_id: "chanlun-higher-timeframe-session-evidence/v1",
+        contract_id: "chanlun-higher-timeframe-session-evidence",
         status: "EXACT",
         issue_count: 0,
         issues: [],
         entry_disposition: "NO_SESSION_BLOCKER",
       },
       sector_session_evidence: {
-        contract_id: "chanlun-higher-timeframe-session-evidence/v1",
+        contract_id: "chanlun-higher-timeframe-session-evidence",
         status: "UNAVAILABLE",
         issue_count: 0,
         issues: [],
         entry_disposition: "FAIL_CLOSED",
       },
       symbol_session_evidence: {
-        contract_id: "chanlun-higher-timeframe-session-evidence/v1",
+        contract_id: "chanlun-higher-timeframe-session-evidence",
         status: "EXACT",
         issue_count: 1,
         issues: [
@@ -1843,9 +1862,9 @@ test("market sector and symbol MWD diagnostics remain distinct in the evidence p
         ],
         entry_disposition: "FAIL_CLOSED",
       },
-      warmup_evidence_contract_id: "chanlun-qmt-mwd-warmup-evidence/v1",
+      warmup_evidence_contract_id: "chanlun-qmt-mwd-warmup-evidence",
       market_warmup_evidence: {
-        contract_id: "chanlun-qmt-mwd-warmup-evidence/v1",
+        contract_id: "chanlun-qmt-mwd-warmup-evidence",
         required_daily_bar_count: 480,
         full_daily_bar_count: 480,
         suffix_daily_bar_count: 320,
@@ -1858,9 +1877,9 @@ test("market sector and symbol MWD diagnostics remain distinct in the evidence p
       sector_warmup_evidence: null,
       symbol_warmup_evidence: null,
       native_daily_reconciliation_contract_id:
-        "chanlun-qmt-native-daily-reconciled-with-one-minute/v2",
+        "chanlun-qmt-native-daily-reconciled-with-one-minute",
       market_native_daily_reconciliation_evidence: {
-        contract_id: "chanlun-qmt-native-daily-reconciled-with-one-minute/v2",
+        contract_id: "chanlun-qmt-native-daily-reconciled-with-one-minute",
         symbol: "SH.000300",
         observed_at: "2026-07-23T14:30:00+08:00",
         native_daily_bar_count: 600,
@@ -1876,7 +1895,7 @@ test("market sector and symbol MWD diagnostics remain distinct in the evidence p
       sector_native_daily_reconciliation_evidence: null,
       symbol_native_daily_reconciliation_evidence: null,
       native_daily_calendar_coverage_contract_id:
-        "chanlun-qmt-native-daily-calendar-coverage/v1",
+        "chanlun-qmt-native-daily-calendar-coverage",
       market_native_daily_calendar_coverage_evidence: {
         status: "EXACT",
         native_daily_bar_count: 600,
@@ -2035,7 +2054,7 @@ test("sector native-daily research bridge is disclosed and can never look green"
   );
 });
 
-test("strict same-base sector source and legacy source absence render safely", () => {
+test("strict same-base sector source passes and incomplete source fails closed", () => {
   const Ui = loadUi();
   const strict = Ui.evidenceGroupsForSignal({
     ...snapshot.signals[0],
@@ -2074,7 +2093,7 @@ test("strict same-base sector source and legacy source absence render safely", (
     true,
   );
 
-  const legacy = Ui.evidenceGroupsForSignal({
+  const incomplete = Ui.evidenceGroupsForSignal({
     ...snapshot.signals[0],
     higher_timeframe_risk: {
       market_gate: "GREEN",
@@ -2087,12 +2106,12 @@ test("strict same-base sector source and legacy source absence render safely", (
     },
   });
   assert.equal(
-    legacy.risk.some((value) => value.includes("板块高级别来源")),
+    incomplete.risk.some((value) => value.includes("板块高级别来源")),
     false,
   );
   assert.equal(
-    legacy.blocking.some((value) => value.includes("板块高级别来源字段")),
-    false,
+    incomplete.blocking.some((value) => value.includes("板块高级别来源字段")),
+    true,
   );
 
   const partial = Ui.evidenceGroupsForSignal({
@@ -2114,7 +2133,7 @@ test("strict same-base sector source and legacy source absence render safely", (
   );
 });
 
-test("legacy session blocker without exact dates is explicit and not reviewable", () => {
+test("missing current session evidence is explicit and not reviewable", () => {
   const Ui = loadUi();
   const groups = Ui.evidenceGroupsForSignal({
     ...snapshot.signals[0],
@@ -2134,7 +2153,7 @@ test("legacy session blocker without exact dates is explicit and not reviewable"
 
   assert.equal(
     groups.risk.includes(
-      "个股1分钟会话证据：旧信号缺少精确日期 · 不可用于最终复核 · 失败关闭",
+      "个股1分钟会话证据：当前契约字段缺失 · 失败关闭",
     ),
     true,
   );

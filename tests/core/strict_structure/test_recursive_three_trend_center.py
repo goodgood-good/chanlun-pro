@@ -160,7 +160,7 @@ def test_recursive_scan_emits_first_center_third_buy() -> None:
         completed_trends=(),
     )
     structure = StrictStructureResult(
-        schema_version="chanlun-structure/v3",
+        schema="chanlun-structure",
         price_basis_revision=TEST_PRICE_BASIS,
         levels=(empty_level, recursive_level),
     )

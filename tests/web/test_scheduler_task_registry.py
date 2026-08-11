@@ -79,14 +79,14 @@ def test_jobs_snapshot_translates_cached_english_background_task_names():
                 "name": "QMT runtime recovery monitor",
                 "state": "已完成",
             },
-            "v3_forward_capture": {
-                "id": "v3_forward_capture",
-                "name": "V3 forward Capture (app-owned)",
+            "forward_capture": {
+                "id": "forward_capture",
+                "name": "strict strategy forward Capture (app-owned)",
                 "state": "已添加",
             },
-            "v3_forward_evaluate": {
-                "id": "v3_forward_evaluate",
-                "name": "V3 forward Evaluate (app-owned)",
+            "forward_evaluate": {
+                "id": "forward_evaluate",
+                "name": "strict strategy forward Evaluate (app-owned)",
                 "state": "已添加",
             },
         }
@@ -99,8 +99,8 @@ def test_jobs_snapshot_translates_cached_english_background_task_names():
         "holding_group_realtime_monitor": "持仓与关注分组跨市场实时监听",
         "qmt_app_daily_restart": "QMT 工作日启动维护（应用托管）",
         "qmt_app_runtime_monitor": "QMT 运行状态与故障恢复监控",
-        "v3_forward_capture": "V3 前向模拟盘前快照采集（应用托管）",
-        "v3_forward_evaluate": "V3 前向模拟盘后评估（应用托管）",
+        "forward_capture": "统一策略前向模拟盘前快照采集（应用托管）",
+        "forward_evaluate": "统一策略前向模拟盘后评估（应用托管）",
     }
 
 

@@ -9,7 +9,6 @@ from gm.api import ADJUST_NONE, get_symbols, history, set_serv_addr, set_token
 from tqdm.auto import tqdm
 
 from chanlun import config, fun
-from chanlun.exchange.exchange import convert_futures_kline_frequency
 from chanlun.exchange.exchange_db import ExchangeDB
 
 # 远程执行时需指定掘金终端地址，详见 https://www.myquant.cn/docs/gm3_faq/154#b244aeed0032526e
@@ -42,14 +41,6 @@ exclude_codes = [
     "GFEX.PS",
 ]
 run_codes = [_c for _c in run_codes if _c not in exclude_codes]
-
-# run_codes = [
-#     "SHFE.RB",
-#     "SHFE.FU",
-#     "SHFE.HC",
-#     "CZCE.MA",
-#     "DCE.V",
-# ]
 
 print(run_codes)
 print(len(run_codes))
@@ -136,35 +127,5 @@ if __name__ == "__main__":
         sync_code(_code)
 
     print(error_codes)
-
-    # 按需将 1m 数据合并为其他周期（需要时将 False 改为 True）
-    if False:
-        for _code in tqdm(
-            [
-                "SHFE.RB",
-                "SHFE.FU",
-                "SHFE.HC",
-                "CZCE.MA",
-                "DCE.V",
-            ]
-        ):
-            convert_code = _code
-            ex = ExchangeDB("futures")
-
-            klines = ex.klines(convert_code, "1m", args={"limit": 99999999})
-            for _to_f in ["5m"]:
-                tqdm.write(f"code: {convert_code} len: {len(klines)}")
-                to_klines = convert_futures_kline_frequency(
-                    klines, _to_f, process_exchange_type="gm"
-                )
-                tqdm.write(f"code: {convert_code} to_f: {_to_f} len: {len(to_klines)}")
-                ex.insert_klines(convert_code, _to_f, to_klines)
-
-    # 清理多余周期数据（需要时将 False 改为 True）
-    if False:
-        for _code in tqdm(run_codes):
-            ex = ExchangeDB("futures")
-            for _f in ["5m"]:
-                ex.del_klines_by_code_freq(_code, _f)
 
     print("Done")

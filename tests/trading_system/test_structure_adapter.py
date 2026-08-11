@@ -22,7 +22,7 @@ from chanlun.core.strict_structure.strength import StrengthSnapshot
 from chanlun.decision_support.trading_system.structure_adapter import (
     extract_confirmed_points,
 )
-from chanlun.decision_support.trading_system.v3_structure_signal_adapter import (
+from chanlun.decision_support.trading_system.structure_signal_adapter import (
     _point_proof,
 )
 from tests.core.strict_structure.signal_helpers import confirmed_point
@@ -41,34 +41,89 @@ SIX_POINT_TYPES = ("1buy", "2buy", "3buy", "1sell", "2sell", "3sell")
 
 
 SMALL_TO_LARGE_SPECS = (
-    ("down", 114, 78), ("up", 78, 105), ("down", 105, 82),
-    ("up", 82, 98), ("down", 98, 69), ("up", 69, 82),
-    ("down", 82, 39), ("up", 39, 51), ("down", 51, 24),
-    ("up", 24, 30), ("down", 30, 6), ("up", 6, 46),
-    ("down", 46, -4), ("up", -4, 8), ("down", 8, -10),
-    ("up", -10, 34), ("down", 34, -3), ("up", -3, 45),
-    ("down", 45, 31), ("up", 31, 71), ("down", 71, 50),
-    ("up", 50, 61), ("down", 61, 56), ("up", 56, 69),
-    ("down", 69, 64), ("up", 64, 112), ("down", 112, 92),
-    ("up", 92, 138), ("down", 138, 102), ("up", 102, 145),
-    ("down", 145, 99), ("up", 99, 111), ("down", 111, 106),
-    ("up", 106, 152), ("down", 152, 146), ("up", 146, 194),
-    ("down", 194, 159), ("up", 159, 203), ("down", 203, 198),
-    ("up", 198, 210), ("down", 210, 193), ("up", 193, 219),
-    ("down", 219, 180), ("up", 180, 220), ("down", 220, 170),
-    ("up", 170, 177), ("down", 177, 159), ("up", 159, 183),
-    ("down", 183, 162), ("up", 162, 204), ("down", 204, 185),
-    ("up", 185, 222), ("down", 222, 173), ("up", 173, 222),
-    ("down", 222, 173), ("up", 173, 203), ("down", 203, 193),
-    ("up", 193, 227), ("down", 227, 214),
+    ("down", 114, 78),
+    ("up", 78, 105),
+    ("down", 105, 82),
+    ("up", 82, 98),
+    ("down", 98, 69),
+    ("up", 69, 82),
+    ("down", 82, 39),
+    ("up", 39, 51),
+    ("down", 51, 24),
+    ("up", 24, 30),
+    ("down", 30, 6),
+    ("up", 6, 46),
+    ("down", 46, -4),
+    ("up", -4, 8),
+    ("down", 8, -10),
+    ("up", -10, 34),
+    ("down", 34, -3),
+    ("up", -3, 45),
+    ("down", 45, 31),
+    ("up", 31, 71),
+    ("down", 71, 50),
+    ("up", 50, 61),
+    ("down", 61, 56),
+    ("up", 56, 69),
+    ("down", 69, 64),
+    ("up", 64, 112),
+    ("down", 112, 92),
+    ("up", 92, 138),
+    ("down", 138, 102),
+    ("up", 102, 145),
+    ("down", 145, 99),
+    ("up", 99, 111),
+    ("down", 111, 106),
+    ("up", 106, 152),
+    ("down", 152, 146),
+    ("up", 146, 194),
+    ("down", 194, 159),
+    ("up", 159, 203),
+    ("down", 203, 198),
+    ("up", 198, 210),
+    ("down", 210, 193),
+    ("up", 193, 219),
+    # The rebound ends on u-41. Its dynamic last lower-level center leaves
+    # upward on u-41 and completes a genuine 3buy on u-42, the first segment
+    # of the immediately following higher-level pullback.
+    ("down", 219, 205),
+    ("up", 205, 215),
+    ("down", 215, 207),
+    ("up", 207, 213),
+    ("down", 213, 185),
+    ("up", 185, 195),
+    ("down", 195, 187),
+    ("up", 187, 193),
+    ("down", 193, 189),
+    ("up", 189, 210),
+    ("down", 210, 200),
+    ("up", 200, 208),
+    ("down", 208, 202),
+    ("up", 202, 225),
+    ("down", 225, 215),
+    ("up", 215, 222),
+    ("down", 222, 217),
+    ("up", 217, 240),
+    ("down", 240, 223),
+    ("up", 223, 235),
+    ("down", 235, 227),
+    ("up", 227, 233),
+    ("down", 233, 200),
+    ("up", 200, 210),
 )
 
 
 class SmallToLargeFixtureStrength:
     def snapshot(self, value):
-        magnitude = max(
-            1.0,
-            100_000_000.0 - value.market_end.timestamp() / 300,
+        # Only the opening downward trend is divergent. Equal upward strength
+        # keeps the rebound intact until its genuine relation boundary.
+        magnitude = (
+            100_000_000.0
+            if value.direction == "up"
+            else max(
+                1.0,
+                100_000_000.0 - value.market_end.timestamp() / 300,
+            )
         )
         signed = magnitude if value.direction == "up" else -magnitude
         return StrengthSnapshot(
@@ -77,16 +132,14 @@ class SmallToLargeFixtureStrength:
             histogram_area=magnitude,
             histogram_peak=signed,
             dif_extreme=signed,
-            source="macd_native",
+            source="macd_htf",
             available_at=value.available_at,
         )
 
 
 def _anchor_unit(point) -> ConstituentUnit:
     source = (
-        SourceKind.SEGMENT
-        if point.structural_level == 0
-        else SourceKind.TREND_TYPE
+        SourceKind.SEGMENT if point.structural_level == 0 else SourceKind.TREND_TYPE
     )
     return ConstituentUnit(
         unit_id=point.anchor_unit_id,
@@ -124,7 +177,7 @@ def _with_point_anchors(structure, points) -> StrictStructureResult:
                 units=(),
                 center_result=CenterLevelResult(
                     structural_level=level,
-                    price_basis_revision="test-raw-v1",
+                    price_basis_revision="test-raw",
                     centers=(),
                     previews=(),
                     events=(),
@@ -144,7 +197,9 @@ def _with_point_anchors(structure, points) -> StrictStructureResult:
         levels[level_number] = replace(
             level,
             units=tuple(
-                sorted(by_id.values(), key=lambda unit: (unit.market_start, unit.unit_id))
+                sorted(
+                    by_id.values(), key=lambda unit: (unit.market_start, unit.unit_id)
+                )
             ),
             center_result=replace(
                 level.center_result,
@@ -197,15 +252,15 @@ def _evidence(
     structure = _with_point_anchors(
         structure
         or StrictStructureResult(
-            schema_version="chanlun-structure/v3",
-            price_basis_revision="test-raw-v1",
+            schema="chanlun-structure",
+            price_basis_revision="test-raw",
             levels=(),
         ),
         points,
     )
     observations = CenterLevelResult(
         structural_level=0,
-        price_basis_revision="test-raw-v1",
+        price_basis_revision="test-raw",
         centers=(),
         previews=(),
         events=(),
@@ -216,8 +271,8 @@ def _evidence(
     revision = build_strict_evidence_revision(
         symbol=symbol,
         source_frequency=source_frequency,
-        price_basis_revision="test-raw-v1",
-        strict_config_revision="strict-config-v1",
+        price_basis_revision="test-raw",
+        strict_config_revision="strict-config",
         structure=structure,
         confirmed_points=points,
         divergences=divergences,
@@ -226,9 +281,9 @@ def _evidence(
         symbol=symbol,
         source_frequency=source_frequency,
         source_closed_at=AS_OF,
-        price_basis_revision="test-raw-v1",
+        price_basis_revision="test-raw",
         structure_price_quantum=Decimal("0.01"),
-        strict_config_revision="strict-config-v1",
+        strict_config_revision="strict-config",
         structure_revision=revision,
         structure=structure,
         stroke_center_observations=observations,
@@ -292,9 +347,10 @@ def test_all_six_types_survive_adapter_without_category_collapse() -> None:
 
     assert {point.point_type for point in points} == set(SIX_POINT_TYPES)
     assert len(points) == 6
-    assert next(
-        point for point in points if point.point_type == "3buy"
-    ).center_ordinal == 1
+    assert (
+        next(point for point in points if point.point_type == "3buy").center_ordinal
+        == 1
+    )
 
 
 def test_adapter_rejects_mismatched_or_future_snapshot_context() -> None:
@@ -320,9 +376,7 @@ def test_small_to_large_parent_and_reverse_third_links_survive_id_conversion() -
     strength = SmallToLargeFixtureStrength()
     units = tuple(
         unit(index, direction, start_tick + 1_000, end_tick + 1_000)
-        for index, (direction, start_tick, end_tick) in enumerate(
-            SMALL_TO_LARGE_SPECS
-        )
+        for index, (direction, start_tick, end_tick) in enumerate(SMALL_TO_LARGE_SPECS)
     )
     structure = StrictRecursiveEngine(max_levels=3).calculate(
         units,
@@ -349,8 +403,7 @@ def test_small_to_large_parent_and_reverse_third_links_survive_id_conversion() -
     reverse_third = next(
         point
         for point in reverse_points
-        if point.point_id in second.related_point_ids
-        and point.point_type == "3buy"
+        if point.point_id in second.related_point_ids and point.point_type == "3buy"
     )
     all_points_by_id = {}
     for point in (*first_points, *second_points, *reverse_points):

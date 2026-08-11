@@ -533,7 +533,7 @@ def get_market_data_ex_ori(
     if isinstance(end_time, dt.datetime):
         end_time = int(end_time.timestamp() * 1000)
 
-    return client.get_market_data3(field_list, stock_list, period, start_time, end_time, count, dividend_type, fill_data, 'v3', enable_read_from_local, enable_read_from_server, debug_mode, data_dir)
+    return client.get_market_data3(field_list, stock_list, period, start_time, end_time, count, dividend_type, fill_data, 'strict strategy', enable_read_from_local, enable_read_from_server, debug_mode, data_dir)
 
 
 def get_market_data_ex(

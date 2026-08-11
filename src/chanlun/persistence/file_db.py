@@ -3,31 +3,15 @@ from collections import deque
 from collections.abc import Callable
 import datetime
 import os
-import hashlib
 import pathlib
 import pickle
-import random
 import threading
 import time
 import uuid
 from concurrent.futures import Future
-from decimal import Decimal
-from typing import Optional, Union
 
-import pandas as pd
-import pytz
-
-from chanlun.cl_utils.chart_config import (
-    CL_CHART_CONFIG_PERSIST_KEYS,
-    CL_COMPUTE_CACHE_CONFIG_KEYS,
-)
-
-from chanlun import fun
-from chanlun.core import cl
 from chanlun.market import Market
-from chanlun.core.types import ICL
 from chanlun.config import get_data_path
-from chanlun.persistence.db import db
 from chanlun.tools.daemon_executor import DaemonExecutor
 from chanlun.tools.log_util import LogUtil
 
@@ -159,31 +143,22 @@ def _shutdown_pickle_write_executor() -> None:
 atexit.register(_shutdown_pickle_write_executor)
 
 
-# 4 个 Mixin 类与 _ChartCacheSafeUnpickler 已物理拆到 file_db_mixins/ 包内
-# (generic_pkl / chart_data / kline_cache / cl_object_cache)。
-# 本文件保留 FileCacheDB facade + 共享 helper，4 个 Mixin 通过多继承聚合。
-# 外部 ``from chanlun.file_db import _ChartCacheSafeUnpickler`` 仍工作 (re-export)。
-from chanlun.file_db_mixins import (  # noqa: E402  re-export keeps外部 import 兼容
-    _ChartCacheSafeUnpickler,
+# Persistence responsibilities are composed from focused mixins.
+from chanlun.file_db_mixins import (  # noqa: E402
     _ChartDataCacheMixin,
-    _CLObjectCacheMixin,
-    _GenericPklCacheMixin,
     _KlineCacheMixin,
 )
 
 
-class FileCacheDB(_GenericPklCacheMixin, _ChartDataCacheMixin, _KlineCacheMixin, _CLObjectCacheMixin):
+class FileCacheDB(_ChartDataCacheMixin, _KlineCacheMixin):
     """
     文件数据对象
     """
 
     def __init__(self):
         """初始化各数据目录，不存在时自动创建。"""
-        self.home_path = pathlib.Path.home()
         self.project_path = get_data_path()
         self.project_path.mkdir(parents=True, exist_ok=True)
-        self.cl_data_path = self.project_path / "cl_data"
-        self.cl_data_path.mkdir(parents=True, exist_ok=True)
         self.klines_path = self.project_path / "klines"
         self.klines_path.mkdir(parents=True, exist_ok=True)
         # 旧数据清理的并发节流：用 Lock + 时间戳保证全局最多 N 分钟一次清理，
@@ -193,9 +168,6 @@ class FileCacheDB(_GenericPklCacheMixin, _ChartDataCacheMixin, _KlineCacheMixin,
         # 同一类清理任务两次执行的最小间隔（秒）：5 分钟
         self._cleanup_min_interval = 5 * 60
 
-        self.cache_pkl_path = self.project_path / "cache_pkl"
-        self.cache_pkl_path.mkdir(parents=True, exist_ok=True)
-
         # TV 图表缠论计算结果的落盘缓存目录。
         # 进程重启 / RAM TTL 淘汰后仍可秒命中，单文件对应一个 cache_key。
         self.chart_cache_path = self.project_path / "chart_cache"
@@ -204,41 +176,7 @@ class FileCacheDB(_GenericPklCacheMixin, _ChartDataCacheMixin, _KlineCacheMixin,
         self.chart_cache_max_age_seconds = 7 * 24 * 60 * 60
 
         for market in Market:
-            (self.cl_data_path / market.value).mkdir(parents=True, exist_ok=True)
             (self.klines_path / market.value).mkdir(parents=True, exist_ok=True)
-
-        self.tz = pytz.timezone("Asia/Shanghai")
-        # self.us_tz = pytz.timezone('US/Eastern')
-
-        # 持久化白名单与 options 使用同一常量源；计算缓存轴是其严格子集，
-        # 不含任何纯显示键，切换图层不会让 CL 对象缓存失效。
-        self.persisted_config_keys = list(CL_CHART_CONFIG_PERSIST_KEYS)
-        self.config_keys = list(CL_COMPUTE_CACHE_CONFIG_KEYS)
-
-        # 缠论算法版本号；与 DB 中存储值不一致时触发全量清缓存，强制重算。
-        # 每次修改核心算法逻辑后需更新此日期。
-        self.cl_update_date = "2025-06-15"
-        cache_cl_update_date = db.cache_get("__cl_update_date")
-        if cache_cl_update_date != self.cl_update_date:
-            # 先清缓存再写版本标记: 若 clear_all_cl_data 被 kill/断电/单文件 unlink 失败中断
-            # 而版本已先写, 下次启动版本匹配→跳过清理→旧算法 pkl 被新代码增量续算(静默错缠论)。
-            # 反序后中断则版本保持旧值, 下次启动重试清理(恒安全)。
-            self.clear_all_cl_data()
-            db.cache_set("__cl_update_date", self.cl_update_date)
-
-    def _config_md5(self, cl_config: dict) -> str:
-        """
-        生成稳定的配置 MD5：严格按照 self.config_keys 顺序生成，避免 dict 插入顺序差异。
-        列表类型做字符串化处理以保持一致性。
-        """
-        parts = []
-        for k in self.config_keys:
-            v = cl_config.get(k, "0")
-            if isinstance(v, list):
-                v = ",".join(v)
-            parts.append(f"{k}:{v}")
-        unique_str = "|".join(parts)
-        return hashlib.md5(unique_str.encode("UTF-8")).hexdigest()
 
     # 固定 pickle 协议为 4（Python 3.4+ 都兼容），避免不同 Python 版本之间互不兼容。
     # 之前用 pickle.HIGHEST_PROTOCOL，从 3.8 升到 3.12 后旧 pkl 文件无法读取。
@@ -446,25 +384,6 @@ class FileCacheDB(_GenericPklCacheMixin, _ChartDataCacheMixin, _KlineCacheMixin,
 
         return result_future
 
-    def _atomic_write_csv(self, path: pathlib.Path, df: pd.DataFrame):
-        """
-        原子化写入 CSV，先写入临时文件再替换，保证读侧一致性。失败时主动清理 .tmp 残留。
-        """
-        tmp = self._make_unique_tmp_path(path)
-        try:
-            df.to_csv(tmp, index=False)
-            os.replace(tmp, path)
-        except Exception:
-            try:
-                if tmp.exists():
-                    tmp.unlink(missing_ok=True)
-            except Exception as cleanup_exc:
-                LogUtil.debug(
-                    f"[FileCacheDB._atomic_write_csv] cleanup tmp failed "
-                    f"path={tmp} err={cleanup_exc}"
-                )
-            raise
-
     def _try_run_cleanup(self, key: str, fn, on_error=None):
         """
         以「单飞行 + 时间戳节流」方式执行清理任务。
@@ -504,43 +423,7 @@ class FileCacheDB(_GenericPklCacheMixin, _ChartDataCacheMixin, _KlineCacheMixin,
         finally:
             self._cleanup_lock.release()
 
-    # KlineCache / CLObjectCache / GenericPklCache / ChartDataCache 方法
-    # 均已抽到 file_db_mixins/ 对应 Mixin 类，通过多继承挂到 FileCacheDB。
+    # Kline, generic-pickle and chart-data methods are supplied by mixins.
 
 
 fdb = FileCacheDB()
-
-if __name__ == "__main__":
-    from chanlun.cl_utils import query_cl_chart_config
-    from chanlun.exchange.exchange_binance import ExchangeBinance
-
-    # market = 'a'
-    # code = 'SHSE.000001'
-    # frequency = '5m'
-    # cl_config = query_cl_chart_config(market, code)
-    # ex = ExchangeDB(market)
-
-    fdb = FileCacheDB()
-
-    ex = ExchangeBinance()
-    market = "currency"
-    code = "APT/USDT"
-    freq = "d"
-    cl_config = query_cl_chart_config(market, code)
-    klines = ex.klines(code, freq)
-
-    cd = fdb.get_web_cl_data(market, code, freq, cl_config, klines)
-    print(cd)
-    cl_config = query_cl_chart_config(market, code)
-    cd = fdb.get_web_cl_data(market, code, freq, cl_config, klines)
-    print(cd)
-
-
-#     currency--APT/USDT--d 726a8925bda1d6fb6ac6fbe5b146fd5a index: 541 date: 2024-04-12 08:00:00+08:00 h: 12.223 l: 8.422 o: 11.862 c:9.775 a:42964252.4 code                       APT/USDT
-# date      2024-04-12 08:00:00+08:00
-# open                         11.862
-# high                         12.223
-# low                           8.422
-# close                         9.775
-# volume                   42964300.0
-# Name: 541, dtype: object

@@ -233,7 +233,7 @@ class TradingEngine:
         market_gate = "UNRESOLVED" if gate_bundle is None else gate_bundle.market.gate
         sector_gate = (
             "UNRESOLVED"
-            if gate_bundle is None or gate_bundle.sector is None
+            if gate_bundle is None
             else gate_bundle.sector.gate
         )
         symbol_gate = "UNRESOLVED" if gate_bundle is None else gate_bundle.symbol.gate
@@ -249,7 +249,7 @@ class TradingEngine:
         )
         sector_risk_reasons = (
             ("HIGHER_TIMEFRAME_SECTOR_GATE_NOT_ATTACHED",)
-            if gate_bundle is None or gate_bundle.sector is None
+            if gate_bundle is None
             else gate_bundle.sector.reason_codes
         )
         risk_reasons = (
@@ -295,7 +295,7 @@ class TradingEngine:
                 ("W", "UNRESOLVED"),
                 ("D", "UNRESOLVED"),
             )
-            if gate_bundle is None or gate_bundle.sector is None
+            if gate_bundle is None
             else (
                 ("M", gate_bundle.sector.monthly),
                 ("W", gate_bundle.sector.weekly),
@@ -310,7 +310,7 @@ class TradingEngine:
         )
         sector_diagnostics = (
             ()
-            if gate_bundle is None or gate_bundle.sector is None
+            if gate_bundle is None
             else gate_bundle.sector.period_diagnostics
         )
         entry_boundaries = {

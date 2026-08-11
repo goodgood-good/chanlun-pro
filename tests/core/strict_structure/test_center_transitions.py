@@ -170,7 +170,7 @@ def test_transition_rejects_unlocked_cross_context_and_duplicate_evidence():
 
     rebased = replace(
         unit(5, "down", 130, 120),
-        price_basis_revision="post-action-v2",
+        price_basis_revision="post-action",
     )
     with pytest.raises(ValueError, match="transition price basis mismatch"):
         advance_center(value, rebased)

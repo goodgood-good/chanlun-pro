@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Capture today's QMT GICS3 catalog into the immutable V3 PIT ledger.
+"""Capture today's QMT GICS3 catalog into the immutable strict strategy PIT ledger.
 
 Run this before a decision session (and again after a catalog revision when
 needed).  The command only records facts; it does not scan candidates, connect
@@ -15,9 +15,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import shutil
 import sys
-from typing import Mapping
 from zoneinfo import ZoneInfo
 
 
@@ -26,9 +24,9 @@ SRC = PROJECT_ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from chanlun.decision_support.trading_system.v3_qmt_sector_ledger import (  # noqa: E402
+from chanlun.decision_support.trading_system.qmt_sector_ledger import (  # noqa: E402
+    QMT_SECTOR_RECEIPT_SCHEMA,
     _append_sector_catalog_unlocked,
-    audit_sector_capture_receipts,
     load_sector_ledger,
 )
 from chanlun.decision_support.trading_system.file_lock import (  # noqa: E402
@@ -41,7 +39,7 @@ from chanlun.exchange.qmt_screening_sector_source import (  # noqa: E402
 
 
 DEFAULT_OUTPUT = Path(
-    ".cache/chanlun_v3_qmt_sector_ledger/qmt_gics3_catalog_ledger.json"
+    ".cache/chanlun_qmt_sector_ledger/qmt_gics3_catalog_ledger.json"
 )
 QMT_LOCAL_DATA_ENV = "CHANLUN_QMT_LOCAL_DATA_DIR"
 CN = ZoneInfo("Asia/Shanghai")
@@ -106,50 +104,13 @@ def _capture(args: argparse.Namespace) -> tuple[dict[str, object], str, str | No
     )
 
 
-def _archive_existing(path: Path) -> str | None:
-    if not path.is_file():
-        return None
-    digest = _sha256_file(path)
-    archive = path.parent / "archive" / f"{digest.removeprefix('sha256:')}.json"
-    if not archive.exists():
-        archive.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(path, archive)
-    if _sha256_file(archive) != digest:
-        raise RuntimeError("archived QMT sector ledger hash mismatch")
-    return str(archive)
-
-
-def _predecessor_archive(
-    path: Path,
-    ledger: Mapping[str, object],
-) -> str | None:
-    """Recover the exact pre-append archive on an idempotent daily retry."""
-
-    entries = tuple(ledger["entries"])  # type: ignore[arg-type]
-    if len(entries) < 2:
-        return None
-    archive_dir = path.parent / "archive"
-    if not archive_dir.is_dir():
-        return None
-    for archive in sorted(archive_dir.glob("*.json")):
-        try:
-            candidate = load_sector_ledger(archive)
-        except ValueError:
-            continue
-        if tuple(candidate["entries"]) == entries[:-1]:
-            return str(archive)
-    return None
-
-
 def _receipt_candidates(receipt_dir: Path, capture_session: str) -> tuple[Path, ...]:
-    legacy = receipt_dir / f"{capture_session}.json"
     revision_dir = receipt_dir / capture_session
-    revisions = (
+    return (
         tuple(sorted(revision_dir.glob("*.json")))
         if revision_dir.is_dir()
         else ()
     )
-    return (legacy, *revisions)
 
 
 def _matching_receipt(
@@ -171,7 +132,7 @@ def _matching_receipt(
         if (
             not isinstance(value, dict)
             or value.get("schema")
-            != "chanlun-v3-qmt-sector-daily-capture-receipt/v1"
+            != QMT_SECTOR_RECEIPT_SCHEMA
             or value.get("capture_session") != capture_session
             or value.get("receipt_path") != str(path)
         ):
@@ -192,28 +153,10 @@ def _new_receipt_path(
     capture_session: str,
     entry_sha256: str,
 ) -> Path:
-    """Keep the legacy daily path, then version later intraday revisions."""
-
-    legacy = receipt_dir / f"{capture_session}.json"
-    if not legacy.exists():
-        return legacy
     return (
         receipt_dir
         / capture_session
         / f"{entry_sha256.removeprefix('sha256:')}.json"
-    )
-
-
-def audit_daily_capture_receipts(
-    *,
-    output: Path,
-    receipt_dir: Path | None = None,
-) -> dict[str, object]:
-    """Compatibility wrapper around the reusable ledger receipt audit."""
-
-    return audit_sector_capture_receipts(
-        output=output,
-        receipt_dir=receipt_dir,
     )
 
 
@@ -260,8 +203,7 @@ def capture_daily(args: argparse.Namespace) -> dict[str, object]:
         )
         if prior_receipt is not None:
             # A retry must not mutate a receipt already referenced by a paper
-            # event. This is true for both the legacy daily path and a later
-            # intraday revision path.
+            # event, including a later same-session revision.
             return prior_receipt
         evidence = dict(catalog.get("capture_evidence") or {})
         source_date = (
@@ -277,7 +219,7 @@ def capture_daily(args: argparse.Namespace) -> dict[str, object]:
         if receipt_path.exists():
             raise RuntimeError("existing daily QMT receipt is not bound to the ledger")
         receipt: dict[str, object] = {
-            "schema": "chanlun-v3-qmt-sector-daily-capture-receipt/v1",
+            "schema": QMT_SECTOR_RECEIPT_SCHEMA,
             "complete": True,
             "output": str(output),
             "capture_count": len(entries),

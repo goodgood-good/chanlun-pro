@@ -19,7 +19,8 @@ for _path in (_PROJECT_ROOT / "web" / "chanlun_chart", _PROJECT_ROOT / "src"):
 
 from cl_app.services.trading_screening_process import IPC_AUTHKEY_ENV, IPC_SCHEMA
 from chanlun.decision_support.trading_system.decision_source_provenance import (
-    is_content_addressed_application_source_revision,
+    calculate_forward_application_source_revision,
+    content_addressed_source_revision_from_build,
 )
 
 
@@ -49,7 +50,6 @@ def _qmt_fact_cache_settings(
     *,
     build_revision: str | None = None,
     data_path: Path | str | None = None,
-    producer_revision: str | None = None,
 ) -> tuple[
     Path | None,
     Path | None,
@@ -59,10 +59,10 @@ def _qmt_fact_cache_settings(
 ]:
     """Enable normalized QMT fact persistence only for official launches.
 
-    Manual or unversioned workers stay cache-disabled.  A launcher may provide
-    the legacy per-run suffix, while a direct ``app.py`` launch supplies an
-    exact content-addressed working-tree revision.  The fact identity remains
-    independently derived from the narrow QMT producer implementation.
+    Manual or unofficial workers stay cache-disabled. An official ``app.py``
+    launch supplies an exact content-addressed working-tree revision.  The fact
+    identity remains independently derived from the narrow QMT producer
+    implementation.
     """
 
     runtime_revision = (
@@ -70,10 +70,7 @@ def _qmt_fact_cache_settings(
         if build_revision is None
         else build_revision.strip()
     )
-    if (
-        ".run." not in runtime_revision
-        and not is_content_addressed_application_source_revision(runtime_revision)
-    ):
+    if content_addressed_source_revision_from_build(runtime_revision) is None:
         return None, None, None, None, None
     if data_path is None:
         from chanlun import config
@@ -81,20 +78,13 @@ def _qmt_fact_cache_settings(
         root = config.get_data_path().resolve()
     else:
         root = Path(data_path).resolve()
-    if producer_revision is None:
-        from chanlun.exchange.qmt_screening_sector_source import (
-            qmt_sector_composite_fact_producer_revision,
-            qmt_sector_daily_fact_producer_revision,
-        )
+    from chanlun.exchange.qmt_screening_sector_source import (
+        qmt_sector_composite_fact_producer_revision,
+        qmt_sector_daily_fact_producer_revision,
+    )
 
-        composite_revision = qmt_sector_composite_fact_producer_revision()
-        daily_revision = qmt_sector_daily_fact_producer_revision()
-    else:
-        # Explicit tests and compatibility launchers may still pin one
-        # revision for both families.  Official launches always use the two
-        # independently derived identities above.
-        composite_revision = producer_revision
-        daily_revision = producer_revision
+    composite_revision = qmt_sector_composite_fact_producer_revision()
+    daily_revision = qmt_sector_daily_fact_producer_revision()
     support = root / "decision_support"
     return (
         support / "trading_screening_sector_frame_facts",
@@ -143,7 +133,7 @@ def dispatch_gateway_request(
         members = gateway.members()
         changed_bars = gateway.changed_bars(None)
         return {
-            "schema": "chanlun-native-sector-snapshot/v1",
+            "schema": "chanlun-native-sector-snapshot",
             "assessments": assessments,
             "members": members,
             "changed_bars": changed_bars,
@@ -170,20 +160,14 @@ def dispatch_gateway_request(
         return gateway.symbol_name(code)
     if method == "tradable_instrument_codes":
         if set(kwargs) != {"codes"}:
-            raise ValueError(
-                "tradable_instrument_codes requires exactly codes"
-            )
+            raise ValueError("tradable_instrument_codes requires exactly codes")
         codes = kwargs.get("codes")
         if type(codes) is not tuple or any(type(code) is not str for code in codes):
-            raise ValueError(
-                "tradable_instrument_codes requires an exact string tuple"
-            )
+            raise ValueError("tradable_instrument_codes requires an exact string tuple")
         return gateway.tradable_instrument_codes(codes)
     if method == "screening_instrument_types":
         if set(kwargs) != {"codes"}:
-            raise ValueError(
-                "screening_instrument_types requires exactly codes"
-            )
+            raise ValueError("screening_instrument_types requires exactly codes")
         codes = kwargs.get("codes")
         if type(codes) is not tuple or any(type(code) is not str for code in codes):
             raise ValueError(
@@ -195,9 +179,8 @@ def dispatch_gateway_request(
         if not isinstance(code, str):
             raise ValueError("structure_bundle requires code")
         sector_members = kwargs.get("sector_members")
-        if (
-            type(sector_members) is not tuple
-            or any(type(value) is not str for value in sector_members)
+        if type(sector_members) is not tuple or any(
+            type(value) is not str for value in sector_members
         ):
             raise ValueError("structure_bundle requires exact sector_members")
         return gateway.structure_bundle(
@@ -279,10 +262,6 @@ def _build_gateway(connection: Connection, request_id: list[str | None]) -> _Gat
     )
     return NativeTradingDataGateway(
         exchange_provider=exchange_provider,
-        sector_exchange_provider=exchange_provider,
-        # QMT GICS3 current components are the selection universe.  An empty
-        # fallback prevents this path from invoking the tick-backed all_stocks.
-        universe_provider=lambda _exchange: (),
         sector_provider=build_qmt_gics3_sector_catalog,
         sector_frame_provider=sector_frames.frame,
         sector_strength_provider=sector_strength.strengths,
@@ -296,6 +275,9 @@ def _build_gateway(connection: Connection, request_id: list[str | None]) -> _Gat
 
 def run_worker(connection: Connection) -> int:
     request_id: list[str | None] = [None]
+    application_source_revision = calculate_forward_application_source_revision(
+        _PROJECT_ROOT
+    )
     gateway = _build_gateway(connection, request_id)
     _send_to_parent(
         connection,
@@ -303,6 +285,7 @@ def run_worker(connection: Connection) -> int:
             "schema": IPC_SCHEMA,
             "type": "ready",
             "pid": os.getpid(),
+            "application_source_revision": application_source_revision,
             "real_account_access": False,
             "real_order_transport": False,
         },

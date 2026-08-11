@@ -46,7 +46,7 @@ def trade(index: int, *, concentrated: bool = False) -> BacktestTrade:
     entered = GENERATED_AT - timedelta(days=365 - index)
     return BacktestTrade(
         code=f"SZ.{code_index:06d}",
-        sector_id=f"tdx-industry:SH.880{300 + sector_index}",
+        sector_id=f"qmt-gics3:test-sector-{sector_index}",
         point_type=cast(PointType, point_type),
         entry_at=entered,
         exit_at=entered + timedelta(hours=1),

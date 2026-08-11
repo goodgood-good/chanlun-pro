@@ -3,10 +3,10 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-    <title>传统选股任务 · Chanlun Pro</title>
+    <title>统一选股任务 · Chanlun Pro</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='css/layui.css') }}" />
     <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}" />
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/ui-system.css') }}?v={{ static_version|default('') }}" />
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/ui-system.css') }}?asset={{ static_asset_token|default('') }}" />
     <script src="{{ url_for('static', filename='layui.js') }}"></script>
     <script src="{{ url_for('static', filename='jquery-3.7.0.min.js') }}"></script>
     {% include 'dark.html' %}
@@ -17,9 +17,9 @@
     <main id="main-content" class="cp-page cp-page--compact cp-page-stack">
       <header class="cp-page-header">
         <div class="cp-page-header-copy">
-          <span class="cp-eyebrow">LEGACY SCREENER TASK</span>
-          <h1>传统选股任务</h1>
-          <p>运行已有策略任务并把结果写入指定自选组。实时提前选股请使用“缠论提前选股”工作台。</p>
+          <span class="cp-eyebrow">STRICT SCREENER TASK</span>
+          <h1>统一选股任务</h1>
+          <p>运行当前严格结构选股任务并把结果写入指定自选组。实时提前选股请使用“缠论提前选股”工作台。</p>
         </div>
         <div class="cp-page-header-actions">
           <div class="cp-context-card">
@@ -36,7 +36,7 @@
               <span class="cp-section-index">01</span>
               <div>
                 <h2 id="task-direction-title">任务与方向</h2>
-                <p>选择传统策略及其允许的多空方向。</p>
+                <p>选择当前统一策略及其允许的多空方向。</p>
               </div>
             </div>
           </div>

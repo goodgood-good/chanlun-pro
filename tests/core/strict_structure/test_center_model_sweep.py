@@ -76,7 +76,7 @@ def test_bounded_segment_walks_preserve_center_and_third_point_invariants() -> N
                         assert final_by_id.get(center.center_id) == center
 
             structure = StrictStructureResult(
-                schema_version="chanlun-structure/v3",
+                schema="chanlun-structure",
                 price_basis_revision=TEST_PRICE_BASIS,
                 levels=(
                     StrictLevelResult(

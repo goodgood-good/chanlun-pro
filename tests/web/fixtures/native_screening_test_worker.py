@@ -8,7 +8,7 @@ import os
 import time
 
 
-SCHEMA = "chanlun-trading-screening-native-ipc/v1"
+SCHEMA = "chanlun-trading-screening-native-ipc"
 AUTHKEY_ENV = "CHANLUN_SCREENING_WORKER_AUTHKEY"
 
 

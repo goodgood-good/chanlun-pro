@@ -355,7 +355,7 @@ def test_write_repair_report_is_atomic_deterministic_and_complete(tmp_path: Path
 
     assert first.read_bytes() == second.read_bytes()
     body = json.loads(first.read_text("utf-8"))
-    assert body["schema_version"] == 1
+    assert body["schema"] == "current"
     assert body["summary"] == {"attempted": 2, "failed": 2, "repaired": 0}
     assert [item["destination"] for item in body["results"]] == ["a.jpg", "b.jpg"]
     assert not first.with_suffix(first.suffix + ".tmp").exists()
@@ -489,7 +489,7 @@ def test_repair_keeps_backup_when_hardlink_install_fails(
     ] == []
 
 
-def test_repair_preserves_both_versions_when_interrupt_follows_payload_link(
+def test_repair_preserves_both_payloads_when_interrupt_follows_payload_link(
     tmp_path: Path,
     monkeypatch,
 ):

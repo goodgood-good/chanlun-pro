@@ -12,7 +12,7 @@ import re
 from typing import Any, Mapping
 
 from chanlun.decision_support.trading_system.backtest.report import (
-    SCHEMA_VERSION,
+    SCHEMA,
     STRATEGY_ID,
     verify_report_hash,
 )
@@ -28,7 +28,7 @@ from chanlun.decision_support.trading_system.higher_timeframe_execution_attribut
     HIGHER_TIMEFRAME_EXECUTION_ATTRIBUTION_SCHEMA,
     higher_timeframe_execution_attribution,
 )
-from chanlun.research_release.v3_sector_release_manifest import (
+from chanlun.research_release.sector_release_manifest import (
     SectorReleaseManifestError,
     verify_sector_release_manifest,
 )
@@ -44,14 +44,14 @@ _CURRENT_RESEARCH_PATH = (
     / "approximate_technical_backtest_sector_mwd_strength_tactical_lifecycle.json"
 )
 _CURRENT_RESEARCH_SCHEMA = (
-    "chanlun-v3-sector-first-full-market-research-backtest/v2"
+    "chanlun-sector-first-full-market-research-backtest"
 )
-_TACTICAL_AUDIT_SCHEMA = "chanlun-v3-tactical-execution-audit/v1"
+_TACTICAL_AUDIT_SCHEMA = "chanlun-tactical-execution-audit"
 _SCHEDULER_CAUSALITY_AUDIT_SCHEMA = (
-    "chanlun-v3-session-checkpoint-scheduler-audit/v1"
+    "chanlun-session-checkpoint-scheduler-audit"
 )
 _TERMINAL_ACCOUNTING_SCHEMA = (
-    "chanlun-v3-terminal-accounting-attribution/v1"
+    "chanlun-terminal-accounting-attribution"
 )
 _PURE_UNREALIZED_REASON = (
     "OPEN_CYCLE_TACTICAL_AND_CORPORATE_CASH_FLOWS_REQUIRE_"
@@ -341,7 +341,7 @@ def _gate_details(
             raise
         raise ResearchAuditUnavailable("causality_gate_invalid") from exc
     if (
-        schema != "chanlun-backtest-causality-gate/v2"
+        schema != "chanlun-backtest-causality-gate"
         or status not in {"blocked", "passed"}
         or _HASH_RE.fullmatch(algorithm_revision) is None
         or _HASH_RE.fullmatch(snapshot_hash) is None
@@ -404,7 +404,7 @@ def _validate_report(
     gate: dict[str, Any],
 ) -> None:
     if (
-        payload.get("schema_version") != SCHEMA_VERSION
+        payload.get("schema") != SCHEMA
         or payload.get("strategy_id") != STRATEGY_ID
         or payload.get("active_strategy_count") != 1
         or payload.get("read_only") is not True
@@ -659,7 +659,6 @@ def _current_replay_metrics(
                 "performance_evaluable",
                 "strategic_sample_insufficient",
                 "tactical_sample_insufficient",
-                "valid",
             )
         }
     )
@@ -667,9 +666,7 @@ def _current_replay_metrics(
         _text(item, max_length=160)
         for item in _sequence(document.get("warnings"))
     ]
-    if output["valid"] is not output["ledger_valid"] or output[
-        "ledger_valid"
-    ] is not True:
+    if output["ledger_valid"] is not True:
         raise ResearchAuditUnavailable("artifact_invalid_schema")
     if require_evaluable and (
         output["empty_replay"] is True
@@ -1113,7 +1110,7 @@ def _apply_sector_chart_archive_overlay(
         )
     except SectorChartArchiveUnavailable as exc:
         summary: dict[str, object] = {
-            "schema": "chanlun-v3-sector-chart-evidence-archive/v1",
+            "schema": "chanlun-sector-chart-evidence-archive",
             "status": "UNAVAILABLE",
             "reason_code": type(exc).__name__,
             "detail": str(exc),
@@ -1709,7 +1706,7 @@ def _build_current_research_snapshot(
         payload.get("schema") != _CURRENT_RESEARCH_SCHEMA
         or payload.get("result_label")
         != "RECENT_YEAR_APPROXIMATE_CHANLUN_POINT_RESEARCH_BACKTEST"
-        or payload.get("forward_paper_session") is not None
+        or "forward_paper_session" in payload
         or payload.get("data_grade") != "RESEARCH_APPROXIMATION"
         or payload.get("highest_status") != "RESEARCH_ONLY"
         or payload.get("live_status") != "LIVE_DISABLED"
@@ -1729,7 +1726,7 @@ def _build_current_research_snapshot(
         )
     raw_input_hashes = _mapping(payload.get("input_hashes"))
     release_receipt: dict[str, object] | None = None
-    # v21 introduced immutable direct checkpoints and a complete terminal query
+    # The current contract requires immutable direct checkpoints and a complete terminal query
     # plan.  Once both identities are present, the page must also prove where
     # those bytes live; otherwise a new result can silently read the old files
     # that happen to remain beside the canonical page artifact.
@@ -1737,7 +1734,7 @@ def _build_current_research_snapshot(
         try:
             release_receipt = verify_sector_release_manifest(
                 root=root,
-                manifest_path=path.parent / "v3_release_manifest.json",
+                manifest_path=path.parent / "release_manifest.json",
                 expected_artifact_path=path,
             )
         except (OSError, SectorReleaseManifestError) as exc:
@@ -1972,10 +1969,10 @@ def _build_current_research_snapshot(
         failed_conditions.append("STRICT_GREEN_HIGHER_TIMEFRAME_SAMPLE_EMPTY")
     failed_conditions.extend(sample_warnings)
     return {
-        "schema_version": "research-audit-page-v14",
+        "schema": "research-audit-page",
         "source_kind": "current_research_variant",
-        "strategy_id": "chanlun_v3_current_sector_human_assisted",
-        "strategy_label": "缠论 V3 当前板块触发·30m/5m/1m 人工辅助研究",
+        "strategy_id": "chanlun_current_sector_human_assisted",
+        "strategy_label": "缠论统一策略 当前板块触发·30m/5m/1m 人工辅助研究",
         "active_strategy_count": 1,
         "read_only": True,
         "historical": True,
@@ -2112,7 +2109,7 @@ def build_research_audit_snapshot(root: str | Path) -> dict[str, object]:
     evidence = _mapping(payload.get("data_evidence"))
     evidence_warnings = _sequence(evidence.get("warnings"))
     return {
-        "schema_version": "research-audit-page-v12",
+        "schema": "research-audit-page",
         "source_kind": "certified_report",
         "strategy_id": STRATEGY_ID,
         "strategy_label": _text(payload.get("strategy_label"), max_length=120),

@@ -3,7 +3,7 @@
 M3：原负缓存单一 300s TTL 不区分「真空(新股/退市,真没数据)」与「异常空(数据源暂时不可用)」。
 C1 让 cq 缺段返回 attrs['fetch_incomplete'] 的空 DataFrame,若仍走 300s 负缓存 → 数据源暂时
 失败时 SSE/轮询 5 分钟不自愈(比带洞更糟)。本阶段给 _mark_negative_cache 增可选 ttl:
-真空仍 300s(向后兼容),异常空传 30s 短退避 → ≤30s 自愈。
+正常空结果保持 300s，异常空传使用 30s 短退避以便快速自愈。
 """
 import pathlib
 import sys
@@ -15,7 +15,7 @@ sys.path.insert(0, str(_root / "web" / "chanlun_chart"))
 import cl_app.services.chart_cache as cc  # noqa: E402
 
 
-def test_default_ttl_still_300_backward_compatible(monkeypatch):
+def test_default_ttl_is_300_seconds(monkeypatch):
     # 不传 ttl → 保持 300s(所有现有调用点行为不变)。
     t = [10000.0]
     monkeypatch.setattr(cc.time, "time", lambda: t[0])

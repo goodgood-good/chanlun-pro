@@ -25,11 +25,11 @@ from .job_names import JOB_DISPLAY_NAMES
 
 
 CN = ZoneInfo("Asia/Shanghai")
-QMT_RUNTIME_SCHEMA = "chanlun-qmt-runtime-readiness/v1"
-QMT_OBSERVATION_SCHEMA = "chanlun-qmt-app-runtime-observation/v1"
-QMT_STATE_SCHEMA = "chanlun-qmt-app-runtime-state/v1"
-QMT_OWNER_SCHEMA = "chanlun-qmt-execution-owner/v1"
-APP_QMT_CONTRACT_ID = "chanlun-qmt-runtime/app-runtime-contract/v1"
+QMT_RUNTIME_SCHEMA = "chanlun-qmt-runtime-readiness"
+QMT_OBSERVATION_SCHEMA = "chanlun-qmt-app-runtime-observation"
+QMT_STATE_SCHEMA = "chanlun-qmt-app-runtime-state"
+QMT_OWNER_SCHEMA = "chanlun-qmt-execution-owner"
+APP_QMT_CONTRACT_ID = "chanlun-qmt-runtime/app-runtime-contract"
 
 QMT_DAILY_JOB_ID = "qmt_app_daily_restart"
 QMT_MONITOR_JOB_ID = "qmt_app_runtime_monitor"
@@ -118,7 +118,7 @@ class AppQmtRuntimeController:
             if helper_script is not None
             else self._root / "ops" / "manage_qmt_runtime.ps1"
         )
-        runtime_root = self._root / ".cache" / "chanlun_v3_scheduler"
+        runtime_root = self._root / ".cache" / "chanlun_scheduler"
         self._state_path = state_path or runtime_root / "app_qmt_runtime.json"
         self._owner_path = owner_path or runtime_root / "qmt_execution_owner.json"
         self._before_change = before_change

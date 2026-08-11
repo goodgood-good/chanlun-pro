@@ -65,7 +65,6 @@ from ..services.chart_cache import (
 )
 from ..services.chart_compute import compute_and_cache_chart_data, market_now_trading
 from ..services.constants import market_types, resolution_maps
-from ..services.prewarm_status import mark_batch_prewarm_active
 from ..services.stock_list import get_cached_processed_stocks
 from ..services.user_activity import (
     _get_last_user_request_time,
@@ -355,8 +354,6 @@ PREWARM_QMT_BATCH_CHUNK = _env_int("PREWARM_QMT_BATCH_CHUNK", 100)
 # 按 config.EXCHANGE_<MARKET> 实际数据源归类：a→qmt(xtquant)、futures→tdx_futures、
 # ny_futures→tdx_ny_futures、fx→tdx_fx 均为 native；hk/us→cq(长桥 HTTP)、
 # currency/currency_spot→binance(HTTP) 可并行。
-# 注：不沿用 tv.py 的 _PREWARM_INTERVALS_PARALLEL_MARKETS——那份集合把 tdx 的 fx
-# 误列为可并行，是既有缺陷。
 _NATIVE_SERIAL_MARKETS = frozenset({"a", "futures", "ny_futures", "fx"})
 
 
@@ -366,8 +363,7 @@ def _resolve_freq_parallelism(market: str) -> int:
     native 市场（a 股 xtquant、tdx 期货）→ 1（强制串行，客户端线程不安全）；
     其余 HTTP 数据源市场 → ``PREWARM_FREQ_PARALLELISM``。
 
-    历史 bug：旧实现对所有市场统一用 PREWARM_FREQ_PARALLELISM，a 股批量预热
-    会并发 2 个 xtquant ``ex.klines`` 调用，与"native 必须串行"约束冲突。
+    A 股批量预热强制串行，避免并发调用 xtquant ``ex.klines``。
     """
     if market in _NATIVE_SERIAL_MARKETS:
         return 1
@@ -864,16 +860,6 @@ class PrewarmManager:
             if t.status != "running" and t.finished_at and (now - t.finished_at) > PREWARM_TASK_RETAIN_SECONDS:
                 self._tasks.pop(market, None)
 
-    def _find_running_task_locked(self) -> Optional[PrewarmTask]:
-        """返回当前任意一个仍在运行的 task（多 group 并发时只返回首个）。
-
-        保留此方法供调试/状态汇总用；start() 互斥检查已改为 group 维度，不再依赖此方法。
-        """
-        for t in self._tasks.values():
-            if t.status == "running":
-                return t
-        return None
-
     def _run_task(self, task: PrewarmTask, codes: List[dict]) -> None:
         """worker 线程主体：按市场配置的并发度并行处理多个标的。
 
@@ -976,10 +962,6 @@ class PrewarmManager:
             # 周期性持久化任务进度（崩溃后最多丢失 _PREWARM_PERSIST_EVERY_N_DONE 个标的的进度）
             if done_now % _PREWARM_PERSIST_EVERY_N_DONE == 0:
                 self._persist_task(task)
-
-        # 注册批量预热活动状态：tv.prewarm_common_intervals 看到此标记会让位，
-        # 避免逐标的旧版 prewarm 与本任务双倍争抢 chart_calc_locks / 上游 HTTP 配额。
-        mark_batch_prewarm_active(market, True)
 
         # QMT 批量预下载(加速): 逐只计算前先把所有标的的基础周期数据批量拉到本地库,
         # 之后逐只 compute 传 skip_download=True 跳过逐只 download。仅 A股/QMT(交易所暴露
@@ -1132,10 +1114,6 @@ class PrewarmManager:
                 group = self._market_group(market)
                 if self._running_groups.get(group) == market:
                     self._running_groups.pop(group, None)
-            # 清除批量预热活动状态：必须在最外层 finally，确保异常路径也释放，
-            # 否则 prewarm_common_intervals 会被永久误判为"批量预热中"而不工作。
-            mark_batch_prewarm_active(market, False)
-
     @staticmethod
     def _yield_to_user_if_active(cancel_event: threading.Event) -> None:
         """如果用户最近活跃（有 firstDataRequest=true 的请求），sleep 让出 QPS。
@@ -1207,11 +1185,7 @@ class PrewarmManager:
         cancel_event: threading.Event,
         skip_download: bool = False,
     ) -> bool:
-        """预热单个标的的 4 个常用周期，**4 个周期并行计算**。返回是否至少有 1 个成功。
-
-        关键设计变化（2026-04 重构）：
-        - 旧实现：4 个周期串行，单标的总耗时 = sum(各周期)，~30s/标的；
-        - 新实现：4 个周期用 ThreadPoolExecutor 并发，单标的总耗时 = max(各周期)，~10s/标的。
+        """并行预热单个标的的 4 个常用周期，返回是否至少有 1 个成功。
 
         为什么可以并行：
         - 每个周期独立拉数据（ex.klines）→ 独立算缠论 → 独立写 cache_key 不同的缓存；
@@ -1331,19 +1305,10 @@ _prewarm_manager = PrewarmManager()
 def symbols_prewarm():
     """启动当前市场的全量缠论数据预热。
 
-    Body 参数（JSON 或 form）：
+    Form 参数：
     - market : 市场代码（必填）
     """
     market = (request.values.get("market") or "").strip().lower()
-    if not market:
-        # 兼容 JSON body
-        body = request.get_json(silent=True)
-        if request.is_json and not isinstance(body, dict):
-            return jsonify(
-                {"ok": False, "msg": "JSON body must be an object."}
-            ), 400
-        body = body or {}
-        market = (body.get("market") or "").strip().lower()
     if market not in market_types:
         return jsonify({"ok": False, "msg": f"未知市场: {market!r}"}), 400
 
@@ -1391,14 +1356,6 @@ def symbols_prewarm_status():
 def symbols_prewarm_cancel():
     """取消某市场正在运行的预热任务。"""
     market = (request.values.get("market") or "").strip().lower()
-    if not market:
-        body = request.get_json(silent=True)
-        if request.is_json and not isinstance(body, dict):
-            return jsonify(
-                {"ok": False, "msg": "JSON body must be an object."}
-            ), 400
-        body = body or {}
-        market = (body.get("market") or "").strip().lower()
     if market not in market_types:
         return jsonify({"ok": False, "msg": f"未知市场: {market!r}"}), 400
 

@@ -26,7 +26,7 @@ from chanlun.decision_support.trading_system.human_paper_ledger import (
 )
 
 
-VALUATION_SCHEMA = "chanlun-human-paper-valuation/v1"
+VALUATION_SCHEMA = "chanlun-human-paper-valuation"
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 _CENT = Decimal("0.01")
 
@@ -710,18 +710,14 @@ def _audit_forward_valuation_continuity(
     and evidence hashes here protects direct callers and makes the valuation
     audit independently fail closed if an in-memory event is altered.
 
-    Legacy ``EVALUATED`` rows before the first promoted valuation are ignored:
-    valuation capture did not exist when those rows were written.  From the
-    first promoted point onward, however, every successful decision must carry
-    one matching ``VALUATION_COMPLETE`` anchor and every point must have one
-    such anchor.
+    Every successful decision must carry one matching
+    ``VALUATION_COMPLETE`` anchor and every point must have one such anchor.
     """
 
     point_identities = {
         str(point["session"]): str(point["content_sha256"])
         for point in points
     }
-    first_session = min(point_identities, default=None)
     source_available = forward_events is not None
     if forward_events is None:
         return {
@@ -766,17 +762,8 @@ def _audit_forward_valuation_continuity(
             if isinstance(evidence, Mapping)
             else None
         )
-        # With no promoted point yet, an old EVALUATED row without the newer
-        # valuation field is not evidence that valuation capture had started.
-        if first_session is None and not (
-            isinstance(valuation, Mapping)
-            and valuation.get("status") == "VALUATION_COMPLETE"
-        ):
-            continue
-        if first_session is not None and session_text < first_session:
-            continue
         try:
-            if event.get("schema") != "chanlun-v3-forward-paper-event/v1":
+            if event.get("schema") != "chanlun-forward-paper-event":
                 raise ValueError("unsupported forward event schema")
             event_identity = str(event.get("event_sha256") or "")
             event_stable = {

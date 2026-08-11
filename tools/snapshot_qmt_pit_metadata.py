@@ -11,7 +11,6 @@ import json
 import os
 from pathlib import Path
 import sys
-import threading
 import time
 from typing import Mapping, Sequence
 
@@ -377,7 +376,7 @@ def _membership_checkpoint(
     _atomic_json(
         target,
         {
-            "schema": "cninfo-p_stock2110-checkpoint/v1",
+            "schema": "cninfo-p_stock2110-checkpoint",
             "code": code,
             "not_after": end.isoformat(),
             "records": records,
@@ -392,7 +391,7 @@ def _valid_checkpoint(path: Path, *, code: str, end: date) -> bool:
         raw = json.loads(path.read_text(encoding="utf-8"))
         return (
             isinstance(raw, Mapping)
-            and raw.get("schema") == "cninfo-p_stock2110-checkpoint/v1"
+            and raw.get("schema") == "cninfo-p_stock2110-checkpoint"
             and raw.get("code") == code
             and raw.get("not_after") == end.isoformat()
             and isinstance(raw.get("records"), list)

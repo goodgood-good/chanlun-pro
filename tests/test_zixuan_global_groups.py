@@ -6,9 +6,8 @@ import chanlun.zixuan as zixuan_module
 class _GlobalWatchlistDb:
     def __init__(self):
         self.groups = [
-            SimpleNamespace(market="a", zx_group="我的关注"),
-            SimpleNamespace(market="hk", zx_group="我的关注"),
-            SimpleNamespace(market="hk", zx_group="跨市场观察"),
+            SimpleNamespace(market="__global__", zx_group="我的关注"),
+            SimpleNamespace(market="__global__", zx_group="跨市场观察"),
         ]
         self.stocks = [
             SimpleNamespace(
@@ -33,13 +32,7 @@ class _GlobalWatchlistDb:
         self.replacements = []
 
     def zx_get_global_groups(self):
-        seen = set()
-        result = []
-        for group in self.groups:
-            if group.zx_group not in seen:
-                seen.add(group.zx_group)
-                result.append(group)
-        return result
+        return list(self.groups)
 
     def zx_add_global_group(self, name):
         if any(group.zx_group == name for group in self.groups):
@@ -60,7 +53,7 @@ class _GlobalWatchlistDb:
         return True
 
 
-def test_group_identity_and_members_are_global_but_member_market_is_preserved(
+def test_group_identity_is_global_and_member_market_is_preserved(
     monkeypatch,
 ):
     fake = _GlobalWatchlistDb()
@@ -135,30 +128,3 @@ def test_system_holding_group_is_global_and_cannot_be_deleted(monkeypatch):
 
     assert watchlist.del_zx_group("我的持仓") is False
     assert "我的持仓" in {group.zx_group for group in fake.groups}
-
-
-def test_holding_consumer_filters_capability_without_partitioning_group(monkeypatch):
-    fake = _GlobalWatchlistDb()
-    fake.stocks.extend(
-        [
-            SimpleNamespace(
-                market="a",
-                zx_group="我的持仓",
-                stock_code="SH.600000",
-            ),
-            SimpleNamespace(
-                market="hk",
-                zx_group="我的持仓",
-                stock_code="00700",
-            ),
-        ]
-    )
-    monkeypatch.setattr(zixuan_module, "db", fake)
-
-    assert zixuan_module.global_group_member_codes("我的持仓") == (
-        "00700",
-        "SH.600000",
-    )
-    assert zixuan_module.global_group_member_codes("我的持仓", market="a") == (
-        "SH.600000",
-    )

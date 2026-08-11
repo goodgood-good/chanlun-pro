@@ -23,7 +23,7 @@ _SECRET_PLACEHOLDER = "__keep__"
 def setting():
     proxy = db.cache_get("req_proxy")
     fs_setting = db.cache_get("fs_keys") or {}
-    # 读取时解密；历史明文记录会被原样返回（首次保存后改写为密文）。
+    # 只读取当前加密协议；无前缀内容失效关闭。
     fs_app_secret_plain = decrypt_str(fs_setting.get("fs_app_secret"))
     set_config = {
         "fs_app_id": fs_setting.get("fs_app_id", ""),
@@ -76,7 +76,7 @@ def setting_save():
     submitted_secret = request.form.get("fs_app_secret", "")
     existing = db.cache_get("fs_keys") or {}
     if submitted_secret == _SECRET_PLACEHOLDER:
-        # 用户未修改：保留原密文（若历史是明文则在这里完成一次升级写入）。
+        # 用户未修改：重新封装当前可解密的 secret；无效内容会被清空。
         existing_secret_plain = decrypt_str(existing.get("fs_app_secret"))
         encrypted_secret = encrypt_str(existing_secret_plain)
     else:

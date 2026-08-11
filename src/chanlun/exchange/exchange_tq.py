@@ -76,14 +76,6 @@ class ExchangeTq(Exchange):
         time.sleep(1)
         return True
 
-    def restart_task_thread(self):
-        self.close_task_thread()
-        time.sleep(2)
-        self.stop_thread = False
-        self.t = threading.Thread(target=self.thread_run_tasks)
-        self.t.start()
-        return True
-
     def thread_run_tasks(self):
         """
         子进程发送并更新行情请求
@@ -108,7 +100,7 @@ class ExchangeTq(Exchange):
                     if self.get_api().is_changing(kline):
                         self.res_klines[f"{code}_{frequency}"] = kline
 
-        def reset_api(force: bool = False):
+        def reset_api():
             print("天勤 : 重启服务")
             try:
                 self.close_api()
@@ -141,7 +133,7 @@ class ExchangeTq(Exchange):
                 self.get_api().wait_update(time.time() + 1)
             except Exception as e:
                 print(f"天勤 循环等待更新行情数据异常 {e}，重启")
-                reset_api(force=True)
+                reset_api()
                 time.sleep(5)
 
     def get_api(self, use_account=False):
@@ -349,7 +341,7 @@ class ExchangeTq(Exchange):
             {"code": code, "name": code},
         )
 
-    def now_trading(self):
+    def now_trading(self, market: str):
         """
         返回当前是否是交易时间
         TODO 简单判断 ：9-12 , 13:30-15:00 21:00-02:30
@@ -516,42 +508,6 @@ class ExchangeTq(Exchange):
         avg_price = turnover_total / filled_total if filled_total > 0 else order.trade_price
         return {"id": last_order_id, "price": avg_price, "amount": filled_total}
 
-    def all_orders(self):
-        """
-        获取所有订单 (有效订单)
-        """
-        api = self.get_api(use_account=True)
-        if self.g_account_enable is False:
-            raise Exception("账户链接失败，暂时不可用，请稍后尝试")
-
-        orders = api.get_order()
-        api.wait_update(time.time() + 5)
-
-        res_orders = []
-        for _id in orders:
-            _o = orders[_id]
-            if _o.status == "ALIVE":
-                res_orders.append(_o)
-
-        return res_orders
-
-    def cancel_all_orders(self):
-        """
-        撤销所有订单
-        """
-        api = self.get_api(use_account=True)
-        if self.g_account_enable is False:
-            raise Exception("账户链接失败，暂时不可用，请稍后尝试")
-
-        orders = api.get_order()
-        api.wait_update(time.time() + 2)
-        for _id in orders:
-            _o = orders[_id]
-            if _o.status == "ALIVE":
-                self.cancel_order(_o)
-
-        return True
-
     def cancel_order(self, order):
         """
         取消订单，直到订单取消成功
@@ -573,16 +529,3 @@ class ExchangeTq(Exchange):
 
     def plate_stocks(self, code: str):
         raise Exception("交易所不支持")
-
-
-if __name__ == "__main__":
-    ex = ExchangeTq(use_simulate_account=False)
-
-    balance = ex.balance()
-    print(balance)
-    # ex.restart_task_thread()
-    # ex.close_task_thread()
-    # ex.close_api()
-    print("Done")
-
-    # ex.close_api()

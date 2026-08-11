@@ -47,7 +47,7 @@ def _frame(sessions: tuple[date, ...]) -> pd.DataFrame:
         sector_composite_members=tuple(f"SH.{600000 + index:06d}" for index in range(24)),
         sector_composite_member_path_revision="sha256:" + "b" * 64,
         price_basis_provider="qmt-gics3-composite",
-        price_basis_adjustment="causal-factor-stable-24-member-median-v5",
+        price_basis_adjustment="causal-factor-stable-24-member-median",
         price_basis_revision="sha256:" + "c" * 64,
         structure_price_quantum="0.000001",
     )

@@ -340,7 +340,7 @@ class ExchangeTDXFX(Exchange):
                     )
         return ticks
 
-    def now_trading(self):
+    def now_trading(self, market: str):
         """返回当前是否是交易时间（外汇视为始终可交易）"""
         return True
 
@@ -358,14 +358,3 @@ class ExchangeTDXFX(Exchange):
 
     def plate_stocks(self, code: str):
         raise Exception("交易所不支持")
-
-
-if __name__ == "__main__":
-    ex = ExchangeTDXFX()
-    stocks = ex.all_stocks()
-    print(len(stocks))
-    print(stocks)
-
-    klines = ex.klines("FX.GBPEUR", "1m", args={"pages": 10})
-    print(len(klines))
-    print(klines)

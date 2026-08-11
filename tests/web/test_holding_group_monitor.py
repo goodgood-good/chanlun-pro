@@ -15,7 +15,9 @@ from chanlun.decision_support.trading_system.strict_realtime_monitor import (
     StrictPhysicalMonitorState,
     collect_strict_monitor_events,
 )
-from chanlun.recursive_bt.monitor.live_monitor import MonitorEvent
+from chanlun.decision_support.trading_system.strict_realtime_monitor import (
+    StrictRealtimeMonitorEvent as MonitorEvent,
+)
 
 
 CN = ZoneInfo("Asia/Shanghai")

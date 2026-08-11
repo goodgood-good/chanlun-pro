@@ -37,7 +37,7 @@ from cachetools import TTLCache
 
 from chanlun.persistence.file_db import fdb
 from chanlun.tools.daemon_executor import DaemonExecutor
-from chanlun.tools.cache_version import source_fingerprint
+from chanlun.tools.cache_identity import source_fingerprint
 from chanlun.tools.log_util import LogUtil
 
 # ---------------- 状态 ----------------
@@ -170,7 +170,7 @@ def _cfg_int(name: str, default: int) -> int:
 _SNAPSHOT_STALE_AFTER_TRADING = _cfg_int("CHART_SNAPSHOT_STALE_AFTER_TRADING", 300)
 _SNAPSHOT_STALE_AFTER_CLOSED = _cfg_int("CHART_SNAPSHOT_STALE_AFTER_CLOSED", 3600)
 
-# serve-stale 过期"上限": 超过此幅度的重度过期不再 serve-stale, 回退旧版 MISS-阻塞重算。
+# serve-stale 过期上限：超过上限后同步重算。
 # 根因(2026-06-29): 上面两个阈值只决定"是否 serve-stale", serve-stale 本身**无上限**——
 # 非活跃周期的缓存(1m 隔午休/隔夜、30m 隔日)会停更几小时~几天, firstDataRequest 仍把那份
 # 旧快照原样返回, 其"未完成笔"是几小时/几天前的(用户报"未完成笔滞后/该实仍虚")。
@@ -199,173 +199,14 @@ def _stable_hash(obj) -> str:
     return hashlib.md5(s.encode("utf-8")).hexdigest()
 
 
-# chart_data 序列化结构版本号。
-#
-# 后端 ``cl_data_to_tv_chart`` 输出的 chart_data dict 结构改动(新增/重命名字段、
-# 字段语义变化)时,**必须 bump 这个版本**——否则启动 ``chart_warm`` 会把磁盘
-# (fdb)里旧版本的 chart_data 回填 RAM,endpoint cache hit 永远拿到 stale 数据。
-#
-# 历史:
-# - v5 (2026-05) ── 加入版本号机制本身。本次 bump 让 ``recursive_levels`` /
-#   ``interval_nest`` / ``xd_zslx`` / ``bi_mmds`` / ``xd_mmds`` / ``bi_bcs`` /
-#   ``xd_bcs`` 等原文化新字段在旧 entry 上全部失效,杜绝 endpoint 漏字段。
-# - v6 (2026-05) ── 新增 ``xd_zslx_lines`` 以及 recursive_levels[*].zslx_lines,
-#   让当前级别走势类型以线段形式参与下一层中枢显示。
-# - v7 (2026-06) ── 级别纠正(递归 L0=线段中枢 / 笔中枢走 bi_zss 观察层 / 多周期
-#   higher_zs)+ 中枢区间改用核心区 [ZD,ZG]。均改 chart_data 内容但不进 config,
-#   bump 强制旧磁盘缓存失效重算,否则用户看不到这些改动。
-# - v8 (2026-06) ── P8 中枢扩展实体化:高级别中枢改由 recursive_levels L1/L2/L3 承载,
-#   P7 higher_zs 停用;图表渲染逻辑随之更新,旧 cache 需强制失效。
-# - v9 (2026-06) ── P8 中枢扩展(错机制)拆除;中枢升级按 line4898 重做中,图表暂时只画 L0。
-# - v10 (2026-06) ── P9 中枢升级·扩展(line4898 三段重合)上线: L1 由 zs_upgrade.kuozhan_zhongshu 产。
-# - v11 (2026-06) ── 扩展区间改「摆动分段」(进入段+前3走势, 非全局底/顶): 301004 z9-11 [38.06]→[39.01]。
-# - v12 (2026-06) ── 扩展中枢「离开不回」结束(三类买卖点)+全段走势定区间: 301004 出 3 个依次下移中枢。
-# - v13 (2026-06) ── P9 正常case:中枢强制方向交替(line7268)消走势递归假中枢 + 相邻同类型走势
-#   类型合并为扩展(line7264):L0 走势类型 band 渲染随之改变(301004 [下跌×3,盘整]→[下跌,盘整]),
-#   bump 强制旧 cache 失效。
-# - v14 (2026-06) ── 「正在形成的未完成中枢」入图(虚线框), 两层都改, 旧 cache 强制失效:
-#   (a) L0: recursive_branch 非终止级别原只取 done_zss、丢弃 live → 改经 LevelResult.live_zss
-#       带出右边缘正在形成的 L0(本周期)中枢, recursive_levels[L0].zss 新增 done=False 项。
-#   (b) L1(5m级别)=kuozhan 扩展中枢三修: 主修 guard off-by-overlap(原误杀右边缘整组扩展)、
-#       次修延伸到末线段标 done=False(虚线)、第三修一个 is_kuozhan run 内逐个抽取扩展中枢
-#       (原一个 run 只出首个、跳过剩余 → 右边缘正在形成的 5min 中枢被吞)。
-#       000001 右边缘 5min 中枢空档从 36~42 段 → 1~5 段, recursive_levels[L1] 内容变化。
-# - v15 (2026-06) ── kuozhan 三修是在 v14 之后才落地的: v14 缓存可能已写入旧 kuozhan 输出
-#   (5 个 L1、无右边缘中枢), key 不变会继续命中陈旧数据。bump v15 强制失效, 让 L1 三修生效。
-#   并含「完成度口径回归原文」: L1(5m)扩展中枢的 done 改由**中枢结束条件**判(原文 line10031
-#   三类点 / line7260 走势终完美)——已完成须由后续中枢确认其离开,**序列最后一个中枢恒未完成
-#   (done=False 虚线)**,替换原「离开不回」判据(会把右边缘提前1段离开的最后中枢误判为已完成)。
-#   recursive_levels[L1] 末个中枢 linestyle 0→1。
-# - v16 (2026-06) ── L1(5m)中枢几何重做(对齐原文 line31774/10029, 替代旧摆动 three_segment):
-#   kuozhan 改「子中枢运行交集分组」——沿 is_kuozhan run 累积子中枢、维持包络交集 [max dd,min gg]
-#   有效, 塌缩点切成多个中枢, 区间=组内子中枢包络重合(原旧摆动法过度框选成超宽框, 见 000001
-#   出图对比)。完成度=line26870「2 子中枢=进行式」+ line7260 结束条件「序列最后一个=未完成」。
-#   recursive_levels[L1] 的中枢个数/区间/linestyle 全面变化, 强制旧 cache 失效。
-# - v17 (2026-06) ── L1 完成度口径修正:原 v16「2 子中枢=进行式也算未完成」会让历史中间的 2 子
-#   中枢组全标虚线 → 图上多个未完成中枢(用户:只该有一个)。改为**纯结束条件**:仅序列最后一个
-#   中枢未完成(done=False), 其余全已完成。recursive_levels[L1] 中间中枢 linestyle 1→0。
-# - v18 (2026-06) ── 买卖点分级修正:原 branch core 开时 `get_branch_bspoints` 恒用笔级却全塞
-#   xd_mmds(段)=笔买卖点冒充段买卖点。改为**笔级→bi_mmds、段级(线段)→xd_mmds** 各归其位,
-#   且 branch core 开时不再叠 legacy line_mmds。bi_mmds/xd_mmds 内容全变, 强制失效。
-# - v19 (2026-06) ── 背驰信号接新核心:原图表背驰走 legacy line_bcs(极稀疏 笔3/段2)、与新核心
-#   一类买卖点不一致(用户:背驰信号没有)。branch core 开时改接 get_branch_bcs(笔→bi_bcs/段→
-#   xd_bcs, done_divergence 里 is_beichi 的离开段, QS/PZ)。000001:bi_bcs 3→36、xd_bcs 2→6。
-# - v20 (2026-06) ── L0 结构化二类买卖点:bs2_branch 是跨级(次级别一类=二类)、对 L0 跳过 →
-#   段级/笔级 L0 原无二类。新增 bs_branch.second_class(一类后首次回调不破前低/高=二类),接进
-#   get_branch_bspoints。000001:笔级 +2buy×4/2sell×4、段级 +2sell×1。bi_mmds/xd_mmds 增二类项。
-# - v21 (2026-06) ── 走势类型分段重写(item2,趋势型L1):原 zslx_branch 用 classify_rel 逐对+
-#   _merge_same_type → 过度合并(000001:21中枢压成2走势类型,升不出L1;且反转处L0中枢重叠时
-#   classify_rel 返回 expand 对反转失明)。重写为**本体摆动**(本体分离反转,line24727/24736/30931)
-#   + **同级别中枢细分**(趋势内连续重叠中枢=盘整,line24727/24728/24735) + **本体分离分类**
-#   (line8152/21637)。000001:2→6 走势类型(方向交替)、recursive 升出 L1 中枢(get_recursive_
-#   branch_levels[L1])、L1 买卖点(Bs3 三类)激活。L0 走势类型显示(xd_zslx)/买卖点变化 → 强制失效。
-# - v22 (2026-06) ── 多级别(5m/30m)中枢+买卖点+背驰:1min 图叠加高级别结构。递归 kuozhan
-#   (中心定理二 line10029 套用)L0→L1(5m)→L2(30m)→L3(日线),各级中枢入 recursive_levels;
-#   各级背驰/买卖点(cl.get_kuozhan_levels:kuozhan 中枢补进入/离开段→is_beichi 背驰+一类、
-#   几何三类)带 freq 级别标入 xd_mmds/xd_bcs(level=5m/30m/日线)。000001:L1=7/L2=2 中枢、
-#   5m 买卖点 10(含 1sell 顶背驰=L0 漏的)+背驰 3、30m 3buy×1。recursive_levels/xd_mmds/
-#   xd_bcs 内容全变,强制旧缓存失效。
-# - v23 (2026-06) ── 30m 中枢改**同级别分解**(原文 line24727/24735,用户硬性要求):升级链
-#   封顶 30m 操作级——<30m(1m→5m)用 kuozhan(非同级别,延伸/扩展),30m 用 tongjibie_zhongshu
-#   (次级别走势类型恰好3段重合、不延伸、允许盘整+盘整)。get_kuozhan_levels 按 _UPGRADE_CHAIN
-#   分方法;30m/日线图无升级链(只 base)。L2(30m)中枢区间/个数与 v22(纯 kuozhan)不同 → 失效。
-# - v24 (2026-06) ── get_kuozhan_levels 即使某级空也出层(升级链=该周期可用级别):短数据下 30m
-#   同级别分解=0 中枢时,recursive_levels 仍含(空)level=2 → 前端菜单恒有 30m(zs_L2)选项(修
-#   「1min图看不到30min选项」)。数据够了自动填充。recursive_levels 结构变(多空层)→ 失效。
-# - v25 (2026-06) ── QMT 1m/5m 回看 90→365 天(exchange_qmt 专属覆盖):lookback 不进 cache_key
-#   (key 只含 config hash),故 lookback 改了旧缓存仍命中陈旧 90 天数据 → 本 bump 强制失效,
-#   让 365 天更长历史(更多 5m/30m 中枢)在重启后立即生效、免手动清缓存。
-# - v26 (2026-06) ── get_kuozhan_levels 逐级容错:某级(尤其 30m 同级别 zslx/tongjibie)在边缘
-#   实时数据上抛异常时,原整个函数抛出→cl_utils 静默吞→recursive_levels 只剩[0]、5m/30m 中枢/
-#   买卖点/背驰全没(用户「看不到5m/30m买卖点背驰」真凶)。改逐级 try/except:只丢出错级、其他
-#   级照常产出。用户数据 recursive_levels 从[0]变回[0,1,2]→强制旧缓存失效。
-# - v27 (2026-06) ── 30m 同级别分解改**严格交替腿**(原文 line24727 上下上/下上下、24751 操作
-#   程式严格交替、25123「更大就分解成小的」):原 tongjibie 喂 ZslxBranchCalculator 合并走势类型
-#   (趋势含多中枢、方向不交替)→ 凑不出上下上 → 30m 中枢恒 0(000001 5m 图实测)。改为从中枢序列
-#   直接建严格交替腿(连续同向并一腿、反转处断开共享极值中枢)→ 三腿重合=中枢。000001:5m 图 30m
-#   中枢 0→2、1m 图 30m 中枢 1→3(+买卖点/背驰)。recursive_levels[30m] 内容变,强制旧缓存失效。
-# - v28 (2026-06) ── 中枢升级(非同级别)重做为**延伸+扩张+优先级**(原文 line8157/23045/10029,
-#   用户口径):① 延伸=单中枢 line_num≥9 → 3+3+3 分 3 组重合(原 TODO 未实现);② 扩张=相邻两同级别
-#   中枢 GG/DD 重叠 → 三走势[A·连接·B]重合(原用「运行交集」把 N 个囫囵分组);③ 延伸优先于扩张。
-#   000001 1m 图 5m 中枢 22→29(延伸10+扩张19)、30m 中枢随之变。recursive_levels 内容变,强制失效。
-# - v29 (2026-06) ── 扩张升级的「三走势」改**按股价分**(原文10012,用户口径「复用走势类型分解」):
-#   原写死 [中枢A本体·连接·中枢B本体],改为 _three_zoushi_overlap——把跨两中枢的区间在最高线段(顶)/
-#   最低线段(底)两处转折切 3 段(上涨/下跌/盘整任意组合、段数可变),取三段重合。扩张中枢区间变(数量
-#   不变),30m tongjibie 随之 3→4。recursive_levels 内容变,强制旧缓存失效。
-# - v30 (2026-06) ── 30m 同级别分解修正(用户指出原 30m 中枢不对):原「交替腿」从原始线段中枢按中心
-#   分组=级别错。按原文 38/39 课重做:次级别单位=5 分钟走势类型(zslx,原文 25178「Ai 是 5 分钟走势
-#   类型」),经结合运算(line25179 合并相邻同方向)成严格交替段(Ai 奇下偶上),连续 3 段上下上/下上下
-#   重合=中枢(line24727)。000001:5m 图 30m 中枢 2→1[3947,3984]、1m 图 30m 3→1。强制旧缓存失效。
-# - v31 (2026-06) ── 同级别分解两修:① 段区间改**整段高低点**(原文20课 gn/dn=Zn 的高低点,原用段内
-#   中枢 gg/dd 包络=口径过严,趋势段两端远超包络→三段重合饿死);② 30m 买卖点/背驰改**段粒度**
-#   (tongjibie_level_signals:回抽=中枢后第一个交替段整段,原 kuozhan_level_signals 用单根 5m 线段
-#   =级别错配恒空)。000001 5m 图:30m 中枢 [3817,3984]+3buy@2026-04-08(原买卖点恒空)。强制失效。
-# - v32 (2026-06) ── 扩张升级区间改 **[max(前DD,后DD), min(前GG,后GG)]**(原文 line10018 三段重叠
-#   简化公式,Z段=前/后中枢段整段极值;非空性⟺中心定理二触及条件,与 is_kuozhan 自洽)。原「顶/底切
-#   三走势再交集」把中枢本体劈开(violates Z段=完整次级别走势类型),区间系统性偏窄/空(实测10/19流入
-#   退化分支)。kuozhan L1 区间变宽→L2(tongjibie 基于 L1 走势类型)随之。强制失效。
-# - v33 (2026-06) ── 全链整段口径收口:zslx_branch._finalize 喂回 zs_high/zs_low 改**走势类型
-#   整段高低点**(原文20课 gn/dn,含进入/离开段端点;原中枢 gg/dd 包络=过严)。影响 L1+ 递归树与
-#   bs2/bs3 跨级信号(实测10只:413信号不变/仅1增1减=0.5%,L0 全零变动;kuozhan 各级数量不变)。
-# - v34 (2026-06-11) ── 同级别分解段语义对齐原文(fix/zhongshu-l0):① zslx 盘整段 _type 改净位移·
-#   **转折点口径**(进入段起点→离开段**起点**,L25128 段起点=前段结束点/L8131 a1=b1;原继承摆动腿
-#   方向对「横盘+暴跌收尾」错标,原净位移用离开段终点对 V 型链翻号);② tongjibie 交替段改
-#   **本体摆动腿直出**(_swing_alternating_segs,39课L25179 Ai 严格交替/42课L26239 趋势仍是一段;
-#   原「zslx 标签+_jiehe_segments 同向合并」对 V/Λ 型 expand 链方向歧义)。实测10只:L0 买卖点 64
-#   个零变动;30m 中枢仅 600519 区间收紧[1322,1510]→[1322,1431]、510300 假窄条[4.71,4.78]消失
-#   (z5 本体与前震荡区真实不重叠)。recursive_levels L1+/30m tongjibie 内容变化,强制旧缓存失效。
-# - v35 (2026-06-11) ── kuozhan 级买卖点/背驰**段粒度化**(V3 审计修复):kuozhan_level_signals_ex
-#   次级别=下级中枢摆动腿(topic2 C2.10:对 5m 中枢,3买回试=「1m 走势类型」,非单根线段;旧
-#   xds[b0+1]/[b0+2] 单线段口径与 30m 修复前同质的级别错配)。影响 1m 图 recursive_levels
-#   L1(5m) 的 bsp/bcs(中枢序列不变);5m/30m 图升级链走 tongjibie 不受影响。强制旧缓存失效。
-# - v36 (2026-06-24) ── 递归配色:kuozhan 高级别(5m/30m…)补 ``zslx_lines``(取同级分支 zslxs),
-#   供前端在低周期图上画各级走势类型「线段」线条(原仅 L0 有线条、高级别空)。字段已存在、
-#   现在被填充;source_fingerprint 已随 tv_chart 改动变化,显式 bump 求稳。
-# - v37 (2026-07-20) ── 中枢图形补充 tower/recursive_level/ZD/ZG/done、进入段、离开段与
-#   关联买卖点元数据，供右栏双塔审计详情直接展示。输出字段结构变化，显式失效旧磁盘缓存。
-# - v39 (2026-07-21) ── 严格结构快照携带可还原的价格基准元数据；旧缓存无法证明复权
-#   历史与当前 QMT 数据同属一个价格纪元，必须失效后用当前因子账本重建。
-# - v41 (2026-07-22) ── 严格结构快照 v5 新增 ``levels[*].center_previews``，把末条
-#   未完成线段参与形成的不可交易中枢候选送入图表；旧缓存缺少该字段，必须失效重算。
-# - v43 (2026-07-29) ── 恢复同源 ``bi_zss``，并重新启用 ``higher_zs`` 承载
-#   各真实周期独立线段中枢；旧缓存缺少基础笔中枢和多周期中枢控制数据。
-# - v44 (2026-07-29) ── ``higher_zs`` 固定为 1m/5m/30m/日线四个真实周期，
-#   以 period 为唯一身份，不再携带或依赖递归 level 编号。
-# v45 (2026-08-04): center previews now expose same-level third-class-point
-# lifecycle, confirmation return segment, and completion evidence.
-# v46 (2026-08-05): preview pending-leave identity is explicit.  A return that
-# re-enters the core clears it, so renderers can no longer resurrect an older
-# body leg as a phantom departure line.
-# v48 (2026-08-06)：曾误把五角色解释成“外部进入 + 五个重叠本体”。
-# v49 (2026-08-06)：纠正为“外部进入 + 三段冻结核心 + 扩展/外部离开”，
-# 进入和成功离开均不参与 ZD/ZG；严格结构与图表协议升级到 v8。
-# v50 (2026-08-06)：曾错误地把横向显示范围扩到进入段和离开段。
-# v51 (2026-08-06)：实体中枢由连续五段成立，价格核心只取中间三段
-# 的交集；图框排除进入段和当前离开段，拒绝旧几何缓存。
-# v52 (2026-08-06)：第五段可作为首个延伸完成中枢成熟；离开方向不再绑定
-# 进入方向，并锁定“前中枢离开段 = 后中枢最早进入段”的扫描所有权。
-# v53 (2026-08-06)：三类点完成后的扫描后缀采用第一个成熟候选的因果所有权；
-# 禁止用内部更晚、完成更快的候选后视替换已经形成的新中枢。
-# v55 (2026-08-06)：四段正重叠即可显示未成熟中枢预览；预览三类点完成后
-# 复用其离开段继续构建末端中枢。第五段仍是正式成熟与交易授权门槛。
-# v54 (2026-08-06)：显示去重只比较中枢本体，不再把“前中枢离开段 =
-# 后中枢进入段”的共享连接误判成重复中枢。
-# v47 (2026-08-06)：页面 CL 与严格结构证据在计算前统一剔除数据源返回的
-# 未来/未完成分钟K线。旧缓存可能让严格结构截止时点晚于可见 OHLC，禁止复用。
-_CHART_CACHE_SCHEMA_VERSION = "v55"
-
-
 def _build_cache_key(market: str, code: str, frequency: str, cl_config: dict) -> str:
     """统一构造 chart_data_cache 的 key,确保所有调用方一致。
 
-    key = 版本号 + **源码指纹** + market/code/freq + cl_config hash:
-    - ``_CHART_CACHE_SCHEMA_VERSION``:手动 schema 版本,输出**字段结构**变化时 bump。
-    - ``source_fingerprint()``:核心计算/渲染源文件内容 md5,**计算逻辑**变化(线段划分算法等,
-      值变但字段不变)时自动变 → 旧缓存自动失效,免手动 bump(原只靠手动版本号、改算法忘 bump
-      会留陈旧线段,实例 R34/A-B-C 修复后 AAPL 仍显示旧交叉线段)。
+    源码指纹覆盖当前计算与序列化实现，字段或语义变化都会自然生成
+    新 key；无需维护第二套手工版本号。
     """
-    return (f"{_CHART_CACHE_SCHEMA_VERSION}_{source_fingerprint()}"
-            f"_{market}_{code}_{frequency}_{_stable_hash(cl_config)}")
+    return (f"{source_fingerprint()}_{market}_{code}_{frequency}"
+            f"_{_stable_hash(cl_config)}")
 
 
 def _build_chart_cache_entry(cl_chart_data: dict, is_full_snapshot: bool, validated_at: float = None):
@@ -381,22 +222,17 @@ def _build_chart_cache_entry(cl_chart_data: dict, is_full_snapshot: bool, valida
 
 
 def _normalize_cache_entry(cached) -> Optional[dict]:
-    """把任意来源（RAM / 磁盘）的 cache 对象规范化为带 validated_at 的 dict。
-
-    None / 非 dict 一律视为 miss；老格式没有 validated_at 时补一个当前时间，
-    保持下游 _cache_entry_recently_validated 等逻辑可用。
-    """
-    if cached is None:
+    """Validate the sole production chart-cache entry schema."""
+    required = {"data", "min_time", "max_time", "validated_at", "is_full_snapshot"}
+    if not isinstance(cached, dict) or set(cached) != required:
         return None
-    if isinstance(cached, dict) and "data" in cached and "validated_at" in cached:
-        return cached
-    if isinstance(cached, dict):
-        # 老格式(无 validated_at 的裸 chart_data)补 validated_at 设 0 而非 now():设 now() 会把
-        # 一条实际很旧的磁盘老格式 entry 误标"刚验证过",绕过新鲜度兜底(审查 L-2)。设 0 →
-        # _entry_freshness 判 stale → firstDataRequest 强制重算,安全。(v36+source_fingerprint
-        # 已使绝大多数老格式 key 自然 miss,此为防御性收口。)
-        return _build_chart_cache_entry(cached, is_full_snapshot=True, validated_at=0)
-    return None
+    if not isinstance(cached["data"], dict):
+        return None
+    if not isinstance(cached["validated_at"], (int, float)):
+        return None
+    if type(cached["is_full_snapshot"]) is not bool:
+        return None
+    return cached
 
 
 def _get_chart_cache_entry(cache_key: str):
@@ -487,19 +323,6 @@ def _cache_entry_recently_validated(cache_entry: dict) -> bool:
     return _entry_freshness(cache_entry, mode="polling") == "fresh"
 
 
-def _full_snapshot_is_stale(cache_entry: dict) -> bool:
-    """全量快照是否过期: validated_at 距今超过 _SNAPSHOT_STALE_AFTER。
-
-    用于 tv_history 在 firstDataRequest=true 路径下校验从磁盘冷层加载的 entry
-    时效: 程序停机期间没有 polling 推 validated_at, 重启后第一个请求若不做时效
-    校验会直接命中老快照, 导致缺停机期间产生的 K 线。
-    None / 非 dict / 缺字段一律视为过期 (保守降级, 触发 cache miss 重新拉取)。
-
-    委托给 _entry_freshness("first_request"); ``unknown`` 也按过期处理。
-    """
-    return _entry_freshness(cache_entry, mode="first_request") != "fresh"
-
-
 def _first_request_freshness(
     cache_entry: dict, market_is_trading: bool, now: float = None
 ) -> str:
@@ -509,7 +332,7 @@ def _first_request_freshness(
     - ``"fresh"``: 足够新鲜, 直接返回, 不必后台刷新;
     - ``"serve_stale"``: 小幅过期, 秒显旧快照 + 派后台重验证(方向1);
     - ``"too_stale"``: 重度过期(超 ``_SNAPSHOT_SERVE_STALE_MAX_*`` 上限, 或
-      validated_at 缺失/<=0 的老格式未知时效), 不能 serve-stale(会把几小时/几天前
+      validated_at 缺失/<=0、时效无法验证), 不能 serve-stale(会把几小时/几天前
       的旧未完成笔发给前端), 交由调用方走 MISS-阻塞重算保证新鲜。
 
     阈值按交易时段区分(方向2): 盘中短/收盘长。重度过期上限同样按时段区分:
@@ -523,8 +346,7 @@ def _first_request_freshness(
     """
     validated_at = cache_entry.get("validated_at")
     if not isinstance(validated_at, (int, float)) or validated_at <= 0:
-        # 老格式/未知时效: 无法判断有多旧, 保守走阻塞重算(等价旧 _full_snapshot_is_stale
-        # 的 MISS), 一次重算后写入真实 validated_at, 后续即可正常分档。
+        # 时效无法验证：保守走同步重算。
         return "too_stale"
     now = time.time() if now is None else now
     age = now - validated_at
@@ -596,11 +418,7 @@ def evaluate_cache_for_tv_history(
         if not cache_entry.get("is_full_snapshot", False):
             # 部分快照(可能只有几根 K 线)不能冒充全量返回, 仍走同步 MISS 重算。
             return False, None, "cache_partial_snapshot", False
-        # 方向1+2 + 上限(2026-06-29): 按新鲜度三档处理。
-        # - serve_stale(小幅过期): 秒显旧图 + 后台重验证, ≤数秒自愈, 不阻塞。
-        # - too_stale(重度过期/老格式未知时效): 回退旧版 MISS-阻塞重算 —— serve-stale 无上限
-        #   会把几小时/几天前的旧未完成笔发给前端(用户报"未完成笔滞后/该实仍虚"), 重度过期
-        #   下必须重算保证新鲜(冷加载阻塞 0.5-2s 可接受, 远胜显示明显错误的旧笔)。
+        # 小幅过期可先展示并后台校验；重度过期或时效不明则同步重算。
         freshness = _first_request_freshness(cache_entry, market_is_trading, now)
         if freshness == "too_stale":
             return False, None, "cache_stale_snapshot", False
@@ -793,7 +611,7 @@ def _mark_chart_cache_validated(cache_key: str):
 
 # 2026-04 修复：空数据周期的负缓存。
 # 问题：ZK.US 这种新上市标的，长桥 1m 接口返回不了那么久的历史 → ex.klines() 返回 []
-# → web_batch_get_cl_datas 抛 "输入的K线数据为空" warning → 缓存里永远没有 1m 的 entry
+# → 严格图表运行时无法构建快照，缓存里永远没有 1m 的 entry
 # → 用户每 3 秒 polling 一次都会重新尝试算 1m → 每次又拉空 → 无限重试，浪费 HTTP 配额。
 #
 # 修复：klines 为空或 cl_chart_data 为空时，把 cache_key 加入负缓存集合，

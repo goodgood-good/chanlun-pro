@@ -43,13 +43,13 @@ from chanlun.decision_support.trading_system.backtest.pit_metadata import (
     SectorMembershipChange,
     load_snapshot,
 )
-from chanlun.decision_support.trading_system.v3_sector_first_scope import (
+from chanlun.decision_support.trading_system.sector_first_scope import (
     build_sector_first_scope,
 )
-from tools.backtest_chanlun_trading_system import _algorithm_hashes
+from tools import qmt_research_contract
 
 
-RUN_SCHEMA = "chanlun-fixed-year-qmt-run/v3"
+RUN_SCHEMA = "chanlun-fixed-year-qmt-run"
 DEFAULT_WARMUP_START = date(2025, 5, 1)
 DEFAULT_REQUESTED_START = date(2025, 7, 25)
 DEFAULT_EFFECTIVE_START = date(2025, 8, 1)
@@ -77,7 +77,9 @@ class WorkerRequest:
 def _algorithm_revision(
     hashes: Sequence[tuple[str, str]] | None = None,
 ) -> str:
-    values = tuple(_algorithm_hashes() if hashes is None else hashes)
+    values = tuple(
+        qmt_research_contract.algorithm_hashes() if hashes is None else hashes
+    )
     payload = json.dumps(
         values,
         ensure_ascii=False,
@@ -371,7 +373,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise ValueError("expected warmup_start <= start <= effective_start <= end")
     if args.workers > 16:
         raise ValueError("workers cannot exceed 16")
-    algorithm_hashes = _algorithm_hashes()
+    algorithm_hashes = qmt_research_contract.algorithm_hashes()
     algorithm_revision = _algorithm_revision(algorithm_hashes)
     output_dir = args.output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)

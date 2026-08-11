@@ -60,18 +60,18 @@ from chanlun.decision_support.trading_system.recursive_1m_research import (  # n
 from chanlun.decision_support.trading_system.structure_adapter import (  # noqa: E402
     extract_confirmed_points,
 )
-from chanlun.decision_support.trading_system.v3_bar_execution import (  # noqa: E402
+from chanlun.decision_support.trading_system.bar_execution import (  # noqa: E402
     HistoricalMinuteExecutionBar,
     bar_proxy_parameter_snapshot,
     match_historical_minute_bars,
 )
-from chanlun.decision_support.trading_system.v3_parameters import (  # noqa: E402
+from chanlun.decision_support.trading_system.parameters import (  # noqa: E402
     etf_parameter_snapshot,
 )
-from chanlun.decision_support.trading_system.v3_portfolio import (  # noqa: E402
+from chanlun.decision_support.trading_system.portfolio import (  # noqa: E402
     floor_to_increment,
 )
-from tools.chanlun_v3_research_data import (  # noqa: E402
+from tools.research_data import (  # noqa: E402
     atomic_json,
     content_sha256,
     read_cached_series,
@@ -83,7 +83,7 @@ from tools.prescreen_recursive_1m_research import (  # noqa: E402
     DEFAULT_OUTPUT as DEFAULT_PRESCREEN,
     SPLITS,
 )
-from tools.prescreen_v31_cached_symbols import (  # noqa: E402
+from tools.prescreen_cached_symbols import (  # noqa: E402
     _build_frames,
     provider_to_project_code,
 )
@@ -92,7 +92,7 @@ from tools.prescreen_v31_cached_symbols import (  # noqa: E402
 CN = ZoneInfo("Asia/Shanghai")
 INITIAL_CASH = Decimal("1000000")
 DEFAULT_PIT_DATABASE = Path(
-    ".cache/chanlun_v3_external_pit/etf_proxy_pit.sqlite3"
+    ".cache/chanlun_external_pit/etf_proxy_pit.sqlite3"
 )
 DEFAULT_OUTPUT = Path(
     "audit/chanlun_live_integration/recursive_1m_component_backtest.json"
@@ -257,7 +257,7 @@ def _signal(
     return Recursive1mExecutionSignal(
         signal_id=sha256_json(
             {
-                "schema": "chanlun-recursive-1m-execution-signal/v1",
+                "schema": "chanlun-recursive-1m-execution-signal",
                 "point_id": point.point_id,
                 "kind": kind,
                 "decision_at": point.available_at,
@@ -389,7 +389,7 @@ class _DiagnosticReplay:
     def _account_snapshot_id(self, observed_at: datetime) -> str:
         return sha256_json(
             {
-                "schema": "chanlun-recursive-1m-diagnostic-account/v1",
+                "schema": "chanlun-recursive-1m-diagnostic-account",
                 "observed_at": observed_at,
                 "cash": self.cash,
                 "positions": {
@@ -581,7 +581,7 @@ class _DiagnosticReplay:
         position = Recursive1mPosition(
             cycle_id=sha256_json(
                 {
-                    "schema": "chanlun-recursive-1m-cycle/v1",
+                    "schema": "chanlun-recursive-1m-cycle",
                     "symbol": signal.symbol,
                     "entry_point_id": signal.point_id,
                     "opened_at": opened_at,
@@ -1110,7 +1110,7 @@ def _build_data_gate(
         for value in reports
     )
     payload: dict[str, object] = {
-        "schema": "chanlun-recursive-1m-data-acceptance/v1",
+        "schema": "chanlun-recursive-1m-data-acceptance",
         "market_database": str(args.database.resolve()),
         "market_database_sha256": sha256_file(args.database),
         "pit_database": str(args.pit_database.resolve()),
@@ -1176,7 +1176,7 @@ def _build_data_gate(
 def build_report(args: argparse.Namespace) -> tuple[dict, dict]:
     prescreen = json.loads(args.prescreen.read_text(encoding="utf-8"))
     _verify_content_hash(prescreen)
-    if prescreen.get("schema") != "chanlun-recursive-1m-etf-prescreen/v1":
+    if prescreen.get("schema") != "chanlun-recursive-1m-etf-prescreen":
         raise ValueError("unsupported recursive 1m prescreen schema")
     expected_sources = {
         "market_sha256": sha256_file(args.database),
@@ -1374,7 +1374,7 @@ def build_report(args: argparse.Namespace) -> tuple[dict, dict]:
         execution_facts=execution_facts,
     )
     report: dict[str, object] = {
-        "schema": "chanlun-recursive-1m-component-backtest/v1",
+        "schema": "chanlun-recursive-1m-component-backtest",
         "scope": "L0_1M_STRATEGIC_STRUCTURE_COMPONENT",
         "initial_cash": INITIAL_CASH,
         "prescreen_path": str(args.prescreen.resolve()),

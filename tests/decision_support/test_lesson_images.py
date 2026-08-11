@@ -56,7 +56,7 @@ def test_image_occurrence_keeps_repeated_draws_of_the_same_asset_distinct() -> N
         page_rotation=0,
         source_role=SourceRole.UNKNOWN_IMAGE,
         reason_codes=("no_verified_caption",),
-        classifier_version="lesson-image/1",
+        classifier_id="lesson-image",
     )
 
     first = ImageOccurrence.create(**common, draw_index=0)
@@ -137,7 +137,7 @@ def test_image_occurrence_physical_id_does_not_change_when_classification_change
         **physical,
         source_role=SourceRole.UNKNOWN_IMAGE,
         reason_codes=("no_verified_caption",),
-        classifier_version="lesson-image/1",
+        classifier_id="lesson-image",
     )
     editor = ImageOccurrence.create(
         **{
@@ -147,13 +147,13 @@ def test_image_occurrence_physical_id_does_not_change_when_classification_change
         },
         source_role=SourceRole.EDITOR_IMAGE,
         reason_codes=("editor_flowchart_hint",),
-        classifier_version="lesson-image/2",
+        classifier_id="lesson-image-changed",
     )
     chart = ImageOccurrence.create(
         **physical,
         source_role=SourceRole.LESSON_CHART,
         reason_codes=("verified_black_caption_below",),
-        classifier_version="lesson-image/3",
+        classifier_id="lesson-image-other",
         caption_page_number=313,
         caption_source_sequence_index=9,
     )
@@ -176,14 +176,14 @@ def test_image_occurrence_classification_id_changes_with_classification_evidence
         source_role=SourceRole.UNKNOWN_IMAGE,
         reason_codes=("no_verified_caption",),
     )
-    first = ImageOccurrence.create(**common, classifier_version="lesson-image/1")
+    first = ImageOccurrence.create(**common, classifier_id="lesson-image")
     reclassified = ImageOccurrence.create(
         **{
             **common,
             "source_role": SourceRole.EDITOR_IMAGE,
             "reason_codes": ("editor_flowchart_hint",),
         },
-        classifier_version="lesson-image/2",
+        classifier_id="lesson-image-changed",
     )
 
     assert first.occurrence_id == reclassified.occurrence_id
@@ -207,7 +207,7 @@ def test_image_occurrence_physical_id_tracks_raw_draw_geometry_not_clipped_bbox(
         page_rotation=0,
         source_role=SourceRole.UNKNOWN_IMAGE,
         reason_codes=("no_verified_caption",),
-        classifier_version="lesson-image/1",
+        classifier_id="lesson-image",
     )
     baseline = ImageOccurrence.create(**common)
     differently_clipped = ImageOccurrence.create(

@@ -81,8 +81,8 @@ def test_qmt_basis_revision_is_order_independent_and_fact_sensitive() -> None:
     assert first.price_basis_revision != changed.price_basis_revision
     assert first.price_basis_revision != back.price_basis_revision
     assert first.price_basis_revision == (
-        "sha256:a506389b93ea7f8626c8d8f41c77032f"
-        "c3cf83be8294de20c609fb4ff6a98dc9"
+        "sha256:a57c35ffabd80b46ec85fb9e8da25aa9"
+        "04bc554e007a75910bf44a13daef4ea7"
     )
 
 
@@ -156,24 +156,24 @@ def test_merge_metadata_uses_new_basis_and_rejects_cross_basis() -> None:
     old = pd.DataFrame({"close": [10.0]})
     new = pd.DataFrame({"close": [11.0]})
     target = pd.DataFrame({"close": [10.0, 11.0]})
-    v1 = build_qmt_price_basis_metadata(
+    original = build_qmt_price_basis_metadata(
         code="SH.600926",
         adjustment="front",
         structure_price_quantum=Decimal("0.01"),
         factors=_factors(),
     )
-    attach_price_basis_metadata(old, v1)
-    attach_price_basis_metadata(new, v1)
+    attach_price_basis_metadata(old, original)
+    attach_price_basis_metadata(new, original)
     merge_price_basis_metadata(old, new, target)
-    assert target.attrs["price_basis_revision"] == v1.price_basis_revision
+    assert target.attrs["price_basis_revision"] == original.price_basis_revision
 
-    v2 = build_qmt_price_basis_metadata(
+    revised = build_qmt_price_basis_metadata(
         code="SH.600926",
         adjustment="front",
         structure_price_quantum=Decimal("0.01"),
         factors=_factors(dr=1.03),
     )
-    attach_price_basis_metadata(new, v2)
+    attach_price_basis_metadata(new, revised)
     with pytest.raises(PriceBasisMismatchError):
         merge_price_basis_metadata(old, new, target)
 

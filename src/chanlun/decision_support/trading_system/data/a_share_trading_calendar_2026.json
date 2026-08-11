@@ -1,9 +1,9 @@
 {
-  "schema_version": 1,
+  "schema": "current",
   "market": "a",
   "timezone": "Asia/Shanghai",
   "source_id": "SSE-ANNOUNCEMENT-2025-45",
-  "source_fingerprint": "sha256:3bdfe6112278242f64aef533b0f0ae5fef896f86890168548a89271e8a26d44f",
+  "source_fingerprint": "sha256:8f5ea6d9f7e5e253a3d3b8920da690c5f3a7e73934bc2e2011babc9dd6e32777",
   "coverage_start": "2026-01-01",
   "coverage_end": "2026-12-31",
   "trading_days": [
@@ -63,5 +63,5 @@
     "2026-12-21", "2026-12-22", "2026-12-23", "2026-12-24", "2026-12-25",
     "2026-12-28", "2026-12-29", "2026-12-30", "2026-12-31"
   ],
-  "calendar_fingerprint": "sha256:f7418dc5215ec8a3f1463acbb14329e6e9f7280f5e80cb8b706e0b7b5dff9bc4"
+  "calendar_fingerprint": "sha256:76b408312bc3628e3f7b5287a07230725201e00accbff377a6be160910ff45e5"
 }

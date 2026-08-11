@@ -1,5 +1,5 @@
 {
-  "schema": "chanlun-official-a-share-calendar-source/v1",
+  "schema": "chanlun-official-a-share-calendar-source",
   "authority": "Shanghai Stock Exchange",
   "market": "a",
   "timezone": "Asia/Shanghai",
@@ -19,5 +19,5 @@
     {"label": "MID_AUTUMN", "start": "2026-09-25", "end": "2026-09-27"},
     {"label": "NATIONAL_DAY", "start": "2026-10-01", "end": "2026-10-07"}
   ],
-  "content_sha256": "sha256:3bdfe6112278242f64aef533b0f0ae5fef896f86890168548a89271e8a26d44f"
+  "content_sha256": "sha256:8f5ea6d9f7e5e253a3d3b8920da690c5f3a7e73934bc2e2011babc9dd6e32777"
 }

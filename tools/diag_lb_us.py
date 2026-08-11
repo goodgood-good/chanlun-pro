@@ -7,7 +7,7 @@
   B) 长桥服务端/网络/账户持续问题 → 重建救不了，本脚本会暴露真实错误码。
 
 ⚠️ 必须先停掉正在跑的 web 进程再跑，避免与生产抢同账户连接、加重问题。
-⚠️ 需要 LONGBRIDGE_*(或 LONGPORT_*) 环境变量在当前 shell 可用
+⚠️ 需要 LONGBRIDGE_* 环境变量在当前 shell 可用
    （若你在 PyCharm run config 里配的，请在同环境下跑）。
 ⚠️ 若长桥真的 hang，每个 quote() 可能卡到 SDK 内部 REQUEST_TIMEOUT(~30s) 才报错，属正常。
 
@@ -25,10 +25,13 @@ from chanlun.exchange.exchange_cq import _build_longbridge_config  # noqa: E402
 
 
 def _check_env() -> None:
-    new = ("LONGBRIDGE_APP_KEY", "LONGBRIDGE_APP_SECRET", "LONGBRIDGE_ACCESS_TOKEN")
-    legacy = ("LONGPORT_APP_KEY", "LONGPORT_APP_SECRET", "LONGPORT_ACCESS_TOKEN")
-    if not (all(os.getenv(k) for k in new) or all(os.getenv(k) for k in legacy)):
-        print("⚠️  未检测到 LONGBRIDGE_*/LONGPORT_* 环境变量，config 可能构造失败。")
+    required = (
+        "LONGBRIDGE_APP_KEY",
+        "LONGBRIDGE_APP_SECRET",
+        "LONGBRIDGE_ACCESS_TOKEN",
+    )
+    if not all(os.getenv(key) for key in required):
+        print("⚠️  未检测到完整的 LONGBRIDGE_* 环境变量，config 构造将失败。")
 
 
 def main() -> None:

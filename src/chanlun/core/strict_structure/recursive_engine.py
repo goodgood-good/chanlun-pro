@@ -33,7 +33,21 @@ def calculate_level_with_divergence_boundaries(
 
     values = tuple(units)
     unit_index = {item.unit_id: index for index, item in enumerate(values)}
+    if strength is None:
+        center_result = calculate_centers(
+            values,
+            structural_level,
+            source_kind,
+            oscillatory_ids,
+        )
+        return center_result, assemble_trend_types(
+            center_result.centers,
+            values,
+            structural_level,
+            oscillatory_ids,
+        )
     accepted: frozenset[str] = frozenset()
+    closed_centers = {}
     frozen_current = {}
     frozen_completed = {}
     frozen_boundaries = {}
@@ -46,42 +60,97 @@ def calculate_level_with_divergence_boundaries(
             if previous != item:
                 raise ValueError(f"{label} id maps to conflicting evidence")
 
+    locked_count = 0
+    for item in values:
+        if not item.locked:
+            break
+        locked_count += 1
+
     for _pass in range(len(values) + 1):
-        center_result = calculate_centers(
-            values,
-            structural_level,
-            source_kind,
-            oscillatory_ids,
-            hard_boundary_after_ids=accepted,
-        )
-        centers_for_trends = tuple(
-            center
-            for index, center in enumerate(center_result.centers)
-            if unit_index[center.entry_unit.unit_id] > last_boundary_index
-            and (
-                center.state is CenterState.COMPLETED
-                or index == len(center_result.centers) - 1
+        discovered = None
+        # A departure can later be folded back into its center body.  Replay
+        # locked prefixes so the first confirmed divergence remains an
+        # immutable boundary in batch, incremental, and restart calculations.
+        for prefix_end in range(last_boundary_index + 1, locked_count):
+            prefix = values[: prefix_end + 1]
+            prefix_centers = calculate_centers(
+                prefix,
+                structural_level,
+                source_kind,
+                oscillatory_ids,
+                hard_boundary_after_ids=accepted,
+                boundary_closed_centers=tuple(closed_centers.values()),
             )
-        )
-        suffix = assemble_trend_types(
-            centers_for_trends,
-            values,
-            structural_level,
-            oscillatory_ids,
-            strength=strength,
-            group_start_unit_id=(
-                None
-                if last_boundary_index < 0
-                or last_boundary_index + 1 >= len(values)
-                else values[last_boundary_index + 1].unit_id
-            ),
-        )
-        candidates = tuple(
-            boundary
-            for boundary in suffix.decomposition_boundaries
-            if unit_index[boundary.anchor_unit_id] > last_boundary_index
-        )
-        if not candidates:
+            centers_for_trends = tuple(
+                center
+                for index, center in enumerate(prefix_centers.centers)
+                if unit_index[center.entry_unit.unit_id] > last_boundary_index
+                and (
+                    center.state is CenterState.COMPLETED
+                    or index == len(prefix_centers.centers) - 1
+                )
+            )
+            suffix = assemble_trend_types(
+                centers_for_trends,
+                prefix,
+                structural_level,
+                oscillatory_ids,
+                strength=strength,
+                group_start_unit_id=(
+                    None
+                    if last_boundary_index < 0
+                    else values[last_boundary_index + 1].unit_id
+                ),
+            )
+            candidates = tuple(
+                boundary
+                for boundary in suffix.decomposition_boundaries
+                if unit_index[boundary.anchor_unit_id] > last_boundary_index
+            )
+            if candidates:
+                discovered = (
+                    min(
+                        candidates,
+                        key=lambda boundary: (
+                            unit_index[boundary.anchor_unit_id],
+                            boundary.available_at,
+                            boundary.boundary_id,
+                        ),
+                    ),
+                    suffix,
+                )
+                break
+
+        if discovered is None:
+            center_result = calculate_centers(
+                values,
+                structural_level,
+                source_kind,
+                oscillatory_ids,
+                hard_boundary_after_ids=accepted,
+                boundary_closed_centers=tuple(closed_centers.values()),
+            )
+            centers_for_trends = tuple(
+                center
+                for index, center in enumerate(center_result.centers)
+                if unit_index[center.entry_unit.unit_id] > last_boundary_index
+                and (
+                    center.state is CenterState.COMPLETED
+                    or index == len(center_result.centers) - 1
+                )
+            )
+            suffix = assemble_trend_types(
+                centers_for_trends,
+                values,
+                structural_level,
+                oscillatory_ids,
+                strength=strength,
+                group_start_unit_id=(
+                    None
+                    if last_boundary_index < 0 or last_boundary_index + 1 >= len(values)
+                    else values[last_boundary_index + 1].unit_id
+                ),
+            )
             merged_current = dict(frozen_current)
             merge_unique(
                 merged_current,
@@ -114,14 +183,8 @@ def calculate_level_with_divergence_boundaries(
                     )
                 ),
             )
-        candidate = min(
-            candidates,
-            key=lambda boundary: (
-                unit_index[boundary.anchor_unit_id],
-                boundary.available_at,
-                boundary.boundary_id,
-            ),
-        )
+
+        candidate, suffix = discovered
         current_ids = [trend.trend_id for trend in suffix.current_trends]
         try:
             boundary_trend_index = current_ids.index(candidate.left_trend_id)
@@ -139,6 +202,11 @@ def calculate_level_with_divergence_boundaries(
                 trend
                 for trend in suffix.completed_trends
                 if trend.market_end <= candidate.anchor_at
+                and (
+                    candidate.terminal_center_id
+                    not in {center.center_id for center in trend.centers}
+                    or trend.terminal_divergence == candidate.divergence
+                )
             ),
             "trend_id",
             "completed trend",
@@ -150,6 +218,19 @@ def calculate_level_with_divergence_boundaries(
             "decomposition boundary",
         )
         accepted = accepted | {candidate.anchor_unit_id}
+        boundary_trend = suffix.current_trends[boundary_trend_index]
+        terminal_center = boundary_trend.centers[-1]
+        if (
+            terminal_center.center_id != candidate.terminal_center_id
+            or terminal_center.state is not CenterState.DIVERGENCE_CLOSED
+        ):
+            raise ValueError("boundary terminal center is not causally closed")
+        previous_center = closed_centers.setdefault(
+            candidate.anchor_unit_id,
+            terminal_center,
+        )
+        if previous_center != terminal_center:
+            raise ValueError("boundary center identity collision")
         last_boundary_index = unit_index[candidate.anchor_unit_id]
     raise RuntimeError("center/divergence decomposition did not converge")
 
@@ -173,8 +254,7 @@ class StrictRecursiveEngine:
             if price_basis_revision is None:
                 price_basis_revision = inferred_basis
             if price_basis_revision != inferred_basis or any(
-                item.price_basis_revision != price_basis_revision
-                for item in units
+                item.price_basis_revision != price_basis_revision for item in units
             ):
                 raise ValueError("strict recursion cannot cross price basis")
         elif not price_basis_revision:
@@ -185,11 +265,7 @@ class StrictRecursiveEngine:
         # 交替完全等价，本改动不触及线段与 level-0 线段中枢。
         oscillatory_ids: frozenset[str] = frozenset()
         for level in range(self.max_levels):
-            source_kind = (
-                SourceKind.SEGMENT
-                if level == 0
-                else SourceKind.TREND_TYPE
-            )
+            source_kind = SourceKind.SEGMENT if level == 0 else SourceKind.TREND_TYPE
             validate_unit_sequence(units, level, source_kind, oscillatory_ids)
             # L0 consumes one immutable five-segment window: entry + middle
             # three + leave. Higher levels retain three completed lower-level
@@ -267,7 +343,7 @@ class StrictRecursiveEngine:
             oscillatory_ids = next_oscillatory_ids
 
         return StrictStructureResult(
-            schema_version="chanlun-structure/v3",
+            schema="chanlun-structure",
             price_basis_revision=price_basis_revision,
             levels=tuple(levels),
         )

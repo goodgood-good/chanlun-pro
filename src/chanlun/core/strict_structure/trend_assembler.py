@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from chanlun.core.strict_structure.center_machine import validate_unit_sequence
+from chanlun.core.strict_structure.center_machine import (
+    close_center_at_divergence,
+    validate_unit_sequence,
+)
 from chanlun.core.strict_structure.center_relation import classify_center_relation
 from chanlun.core.strict_structure.identity import build_trend_id, stable_structure_id
 from chanlun.core.strict_structure.models import (
@@ -63,9 +66,7 @@ def _validate_center_references(
             previous_completion_leave_index is not None
             and start < previous_completion_leave_index
         ):
-            raise ValueError(
-                "next center cannot precede the previous completion leave"
-            )
+            raise ValueError("next center cannot precede the previous completion leave")
 
         return_index = None
         completion_leave_index = None
@@ -127,6 +128,28 @@ def _group_is_complete(group, constituent_units):
     )
 
 
+def _group_is_divergence_complete(group, constituent_units, divergence):
+    terminal_center = group[-1]
+    leave = terminal_center.lifecycle_leave_unit
+    unit_ids = tuple(item.unit_id for item in constituent_units)
+    signal_ids = divergence.signal_leg_unit_ids
+    if len(signal_ids) > len(unit_ids):
+        return False
+    return (
+        len(group) >= 2
+        and all(center.state is CenterState.COMPLETED for center in group[:-1])
+        and terminal_center.state is CenterState.DIVERGENCE_CLOSED
+        and terminal_center.boundary_divergence_id == divergence.divergence_id
+        and terminal_center.boundary_anchor_unit_id == divergence.signal_unit_id
+        and leave is not None
+        and leave.unit_id == signal_ids[0]
+        and bool(constituent_units)
+        and unit_ids[-len(signal_ids) :] == signal_ids
+        and constituent_units[-1].unit_id == divergence.signal_unit_id
+        and all(item.locked for item in constituent_units)
+    )
+
+
 def _direction(constituent_units):
     start = constituent_units[0].start_tick
     end = constituent_units[-1].end_tick
@@ -168,6 +191,11 @@ def _build(
             center_ids=tuple(center.center_id for center in group),
             constituent_unit_ids=tuple(item.unit_id for item in all_units),
             direction=direction,
+            terminal_divergence_id=(
+                None
+                if terminal_divergence is None
+                else terminal_divergence.divergence_id
+            ),
         ),
         structural_level=structural_level,
         price_basis_revision=start.price_basis_revision,
@@ -196,7 +224,7 @@ def _confirmed_divergence_boundary(
     structural_level,
     strength,
 ):
-    """Return a complete-c divergence boundary from confirmed evidence only."""
+    """Return a confirmed width-matched divergence boundary."""
 
     if strength is None or len(group) < 2:
         return None
@@ -211,29 +239,44 @@ def _confirmed_divergence_boundary(
         return None
     if compared is None:
         return None
-    divergence, terminal_leg = compared
+    divergence, signal = compared
     if not divergence.is_divergent:
         return None
-    terminal_component_id = terminal_leg.child_ids[-1]
-    end_index = index.get(terminal_component_id)
+    end_index = index.get(signal.unit_id)
     if end_index is None:
-        raise ValueError("terminal c references a missing source unit")
+        raise ValueError("divergence signal references a missing source unit")
+    closed_terminal = close_center_at_divergence(group[-1], divergence)
+    closed_group = (*group[:-1], closed_terminal)
     constituent_units = _constituent_units(
-        group,
+        closed_group,
         source_units,
         index,
         group_start,
         end_index=end_index,
     )
-    if not _group_is_complete(group, constituent_units):
+    if not _group_is_divergence_complete(
+        closed_group,
+        constituent_units,
+        divergence,
+    ):
         return None
     if _direction(constituent_units) != divergence.direction:
         return None
-    confirmed_at, available_at = _completion_times(group, constituent_units)
-    confirmed_at = max(confirmed_at, divergence.confirmed_at)
-    available_at = max(available_at, divergence.available_at)
+    prior_completions = tuple(center.completed_at for center in closed_group[:-1])
+    if any(value is None for value in prior_completions):
+        raise ValueError("divergence trend requires completed prior centers")
+    confirmed_at = max(
+        *prior_completions,
+        signal.confirmed_at,
+        divergence.confirmed_at,
+    )
+    available_at = max(
+        divergence.available_at,
+        *(center.available_at for center in closed_group),
+        *(item.available_at for item in constituent_units),
+    )
     complete = _build(
-        group,
+        closed_group,
         constituent_units,
         structural_level,
         TrendState.COMPLETE,
@@ -242,7 +285,7 @@ def _confirmed_divergence_boundary(
         terminal_divergence=divergence,
     )
     locked = _build(
-        group,
+        closed_group,
         constituent_units,
         structural_level,
         TrendState.LOCKED,
@@ -252,13 +295,14 @@ def _confirmed_divergence_boundary(
     )
     boundary = DecompositionBoundaryEvidence(
         boundary_id=stable_structure_id(
-            "chanlun-decomposition-boundary/v1",
+            "chanlun-decomposition-boundary",
             divergence.price_basis_revision,
             "same_level",
             "trend_divergence",
             divergence.structural_level,
             divergence.source_kind.value,
             locked.trend_id,
+            closed_terminal.center_id,
             divergence.divergence_id,
         ),
         decomposition_mode="same_level",
@@ -267,9 +311,8 @@ def _confirmed_divergence_boundary(
         source_kind=divergence.source_kind,
         price_basis_revision=divergence.price_basis_revision,
         left_trend_id=locked.trend_id,
-        # Divergence strength is attached to a distinct complete-c measurement
-        # identity; the decomposition endpoint remains the raw terminal unit.
-        anchor_unit_id=terminal_component_id,
+        terminal_center_id=closed_terminal.center_id,
+        anchor_unit_id=signal.unit_id,
         anchor_at=divergence.anchor_at,
         anchor_tick=divergence.anchor_tick,
         confirmed_at=divergence.confirmed_at,
@@ -361,7 +404,9 @@ def assemble_trend_types(
                 if previous != complete:
                     raise ValueError("completed divergence trend identity collision")
                 output.append(locked)
-                previous_boundary = boundaries.setdefault(boundary.boundary_id, boundary)
+                previous_boundary = boundaries.setdefault(
+                    boundary.boundary_id, boundary
+                )
                 if previous_boundary != boundary:
                     raise ValueError("decomposition boundary identity collision")
                 group_start = end_index + 1
@@ -387,10 +432,10 @@ def assemble_trend_types(
             continue
 
         relation = classify_center_relation(group[-1], current)
-        continues = (
-            relation in (CenterRelation.UP_TREND, CenterRelation.DOWN_TREND)
-            and (group_relation is None or relation is group_relation)
-        )
+        continues = relation in (
+            CenterRelation.UP_TREND,
+            CenterRelation.DOWN_TREND,
+        ) and (group_relation is None or relation is group_relation)
         if continues:
             group.append(current)
             group_relation = relation

@@ -10,7 +10,6 @@ __all__ = [
     "chart_cache",
     "chart_compute",
     "constants",
-    "prewarm_status",
     "stock_list",
     "user_activity",
 ]

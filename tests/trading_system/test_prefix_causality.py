@@ -45,10 +45,10 @@ def deterministic_cl_state(*, bar_count: int) -> CL:
         {
             **strict_base_config(),
             "structure_price_quantum": "0.01",
-            "price_basis_revision": "test-raw-v1",
-            "skip_legacy_zslx": True,
-            "skip_legacy_mmd": True,
+            "price_basis_revision": "test-raw",
+            "strict_config_revision": "sha256:test-strict-runtime",
         },
+        market="a",
     )
     cd.process_klines(_deterministic_klines(bar_count))
     return cd

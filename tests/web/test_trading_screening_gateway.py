@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import date, datetime
+from datetime import date, datetime, time
 from decimal import Decimal
 
 import pandas as pd
@@ -9,6 +9,7 @@ import pytest
 
 from chanlun.core.strict_structure.models import StrictPointStatus
 from chanlun.decision_support.trading_system.runtime_config import screening_cl_config
+import chanlun.decision_support.trading_system.screening_runtime as screening_runtime_module
 from chanlun.decision_support.trading_system.higher_timeframe_gate import (
     HigherTimeframeDataUnavailable,
     HigherTimeframeGateBundle,
@@ -21,10 +22,10 @@ from chanlun.decision_support.trading_system.sector_strength import (
     SectorStrengthEvidence,
     build_horizontal_sector_strength_batch,
 )
-from chanlun.decision_support.trading_system.v3_selection import (
+from chanlun.decision_support.trading_system.selection import (
     SectorMemberHistory,
 )
-from chanlun.decision_support.trading_system.v3_qmt_same_base_stream import (
+from chanlun.decision_support.trading_system.qmt_same_base_stream import (
     QmtMinuteSessionIssue,
 )
 from tests.trading_system.helpers import confirmed_point, provisional_point
@@ -125,23 +126,20 @@ def test_analyzer_uses_dedicated_non_recursive_screening_builder(monkeypatch) ->
         status=StrictPointStatus.APPROACHING,
         available_at=closed_at,
     )
-    state = StrictOnlyCL(
-        strict_evidence_result(
-            code="SZ.000001",
-            source_frequency="5m",
-            source_closed_at=closed_at,
-            confirmed_points=(confirmed,),
-            approaching_points=(approaching,),
-        )
+    evidence = strict_evidence_result(
+        code="SZ.000001",
+        source_frequency="5m",
+        source_closed_at=closed_at,
+        confirmed_points=(confirmed,),
+        approaching_points=(approaching,),
     )
-    monkeypatch.setattr(gateway_module, "CL", lambda *_args, **_kwargs: state)
     builder_calls = []
 
-    def build(cd, **kwargs):
-        builder_calls.append((cd, kwargs))
-        return state.evidence
+    def build(**kwargs):
+        builder_calls.append(kwargs)
+        return evidence
 
-    monkeypatch.setattr(gateway_module, "build_screening_evidence", build)
+    monkeypatch.setattr(gateway_module, "screening_evidence_from_frame", build)
     monkeypatch.setattr(
         gateway_module,
         "unfinished_segment_candidates",
@@ -155,16 +153,13 @@ def test_analyzer_uses_dedicated_non_recursive_screening_builder(monkeypatch) ->
         as_of=closed_at,
     )
 
-    assert state.evidence_calls == 0
-    assert state.process_calls == 1
     assert len(builder_calls) == 1
+    assert builder_calls[0]["code"] == "SZ.000001"
+    assert builder_calls[0]["frequency"] == "5m"
+    assert builder_calls[0]["as_of"] == closed_at
     assert analysis.direction == "up"
-    assert tuple(point.point_type for point in analysis.confirmed_points) == (
-        "1buy",
-    )
-    assert tuple(point.point_type for point in analysis.provisional_points) == (
-        "2buy",
-    )
+    assert tuple(point.point_type for point in analysis.confirmed_points) == ("1buy",)
+    assert tuple(point.point_type for point in analysis.provisional_points) == ("2buy",)
 
 
 def test_analyzer_builds_strict_cl_from_snapshot_metadata(monkeypatch) -> None:
@@ -187,9 +182,9 @@ def test_analyzer_builds_strict_cl_from_snapshot_metadata(monkeypatch) -> None:
         )
         return state
 
-    monkeypatch.setattr(gateway_module, "CL", factory)
+    monkeypatch.setattr(screening_runtime_module, "CL", factory)
     monkeypatch.setattr(
-        gateway_module,
+        screening_runtime_module,
         "build_screening_evidence",
         lambda *_args, **_kwargs: state.evidence,
     )
@@ -211,7 +206,7 @@ def test_analyzer_builds_strict_cl_from_snapshot_metadata(monkeypatch) -> None:
         "frequency": "5m",
         "config": screening_cl_config(
             structure_price_quantum=Decimal("0.01"),
-            price_basis_revision="test-raw-v1",
+            price_basis_revision="test-raw",
         ),
         "market": "a",
     }
@@ -221,7 +216,7 @@ def test_analyzer_rejects_snapshot_without_price_basis_metadata(monkeypatch) -> 
     frame = _frame()
     frame.attrs.clear()
     monkeypatch.setattr(
-        gateway_module,
+        screening_runtime_module,
         "CL",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
             AssertionError("CL must not be created without metadata")
@@ -238,23 +233,9 @@ def test_analyzer_rejects_snapshot_without_price_basis_metadata(monkeypatch) -> 
 
 
 def test_analyzer_wraps_known_strict_structure_contract_errors(monkeypatch) -> None:
-    class InvalidStrictState:
-        def process_klines(self, _frame) -> None:
-            return None
-
-        def get_strict_evidence(self):
-            raise gateway_module.StrictStructureContractError(
-                "unit directions must alternate"
-            )
-
     monkeypatch.setattr(
         gateway_module,
-        "CL",
-        lambda *_args, **_kwargs: InvalidStrictState(),
-    )
-    monkeypatch.setattr(
-        gateway_module,
-        "build_screening_evidence",
+        "screening_evidence_from_frame",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
             gateway_module.StrictStructureContractError(
                 "unit directions must alternate"
@@ -278,7 +259,11 @@ def test_analyzer_does_not_wrap_unrelated_type_error(monkeypatch) -> None:
     def invalid_factory(*_args, **_kwargs):
         raise TypeError("unrelated decoder failure")
 
-    monkeypatch.setattr(gateway_module, "CL", invalid_factory)
+    monkeypatch.setattr(
+        gateway_module,
+        "screening_evidence_from_frame",
+        invalid_factory,
+    )
 
     with pytest.raises(TypeError, match="unrelated decoder failure"):
         analyze_native_frame(
@@ -478,7 +463,7 @@ def _frame(*, with_metadata: bool = True) -> pd.DataFrame:
     )
     if with_metadata:
         frame.attrs["structure_price_quantum"] = "0.01"
-        frame.attrs["price_basis_revision"] = "test-raw-v1"
+        frame.attrs["price_basis_revision"] = "test-raw"
     return frame
 
 
@@ -518,16 +503,16 @@ def _qmt_sector_five_frame(
     # Model the provider contract: it must never return a completed bar later
     # than the requested decision time, even when its backing fixture contains
     # later rows from the same session.
-    frame = frame.loc[frame["date"] <= pd.Timestamp(as_of)].tail(
-        request_bars
-    ).reset_index(drop=True)
+    frame = (
+        frame.loc[frame["date"] <= pd.Timestamp(as_of)]
+        .tail(request_bars)
+        .reset_index(drop=True)
+    )
     frame.attrs.update(
         structure_price_quantum="0.000001",
-        price_basis_revision="qmt-gics3-composite-v1",
+        price_basis_revision="qmt-gics3-composite",
         price_basis_provider="qmt-gics3-composite",
-        price_basis_adjustment=(
-            gateway_module.QMT_GICS3_COMPOSITE_ADJUSTMENT
-        ),
+        price_basis_adjustment=(gateway_module.QMT_GICS3_COMPOSITE_ADJUSTMENT),
         sector_factor_adjustment_contract_id=(
             gateway_module.QMT_CAUSAL_FACTOR_ADJUSTMENT_CONTRACT_ID
         ),
@@ -616,7 +601,7 @@ def _qmt_native_one_minute_session(*, adjustment: str) -> pd.DataFrame:
     )
     frame.attrs.update(
         structure_price_quantum="0.01",
-        price_basis_revision=f"qmt-{adjustment}-test-v1",
+        price_basis_revision=f"qmt-{adjustment}-test",
         price_basis_provider="qmt",
         price_basis_adjustment=adjustment,
     )
@@ -644,8 +629,7 @@ class OpeningAuctionAnalyzer(RecordingAnalyzer):
         )
         minutes_after = int(
             (
-                first_closed_at
-                - datetime.fromisoformat("2026-07-20T10:00:00+08:00")
+                first_closed_at - datetime.fromisoformat("2026-07-20T10:00:00+08:00")
             ).total_seconds()
             // 60
         )
@@ -670,15 +654,13 @@ def test_native_gateway_merges_opening_event_for_structure_and_entry_boundary() 
     analyzer = OpeningAuctionAnalyzer()
     gateway = NativeTradingDataGateway(
         exchange_provider=lambda: exchange,
-        sector_exchange_provider=lambda: exchange,
-        universe_provider=lambda _exchange: (),
         sector_provider=lambda: {"source": "test", "sectors": ()},
         watchlist_provider=lambda: (),
         holdings_provider=lambda: (),
         analyzer=analyzer,
         config=NativeTradingGatewayConfig(
-            request_bars_by_frequency=(("30m", 2), ("5m", 2), ("1m", 300)),
-            minimum_bars_by_frequency=(("30m", 2), ("5m", 2), ("1m", 2)),
+            request_bars_by_frequency=(("d", 2), ("30m", 2), ("5m", 2), ("1m", 300)),
+            minimum_bars_by_frequency=(("d", 2), ("30m", 2), ("5m", 2), ("1m", 2)),
             minimum_sector_members=1,
         ),
     )
@@ -708,7 +690,51 @@ def test_native_gateway_merges_opening_event_for_structure_and_entry_boundary() 
     )
     assert boundary.raw_high == Decimal("10.4")
     assert boundary.raw_volume == Decimal("300.0")
-    assert boundary.raw_price_basis_revision == "qmt-none-test-v1"
+    assert boundary.raw_price_basis_revision == "qmt-none-test"
+    assert len(exchange.calls) == 2
+
+
+class SparseOpeningAuctionExchange(OpeningAuctionExchange):
+    def klines(self, _code: str, frequency: str, *, args: dict[str, object]):
+        frame = super().klines(_code, frequency, args=args)
+        return frame.drop(index=[1, 2]).reset_index(drop=True)
+
+
+def test_native_gateway_keeps_serving_when_live_qmt_omits_0931() -> None:
+    exchange = SparseOpeningAuctionExchange()
+    analyzer = OpeningAuctionAnalyzer()
+    gateway = NativeTradingDataGateway(
+        exchange_provider=lambda: exchange,
+        sector_provider=lambda: {"source": "test", "sectors": ()},
+        watchlist_provider=lambda: (),
+        holdings_provider=lambda: (),
+        analyzer=analyzer,
+        config=NativeTradingGatewayConfig(
+            request_bars_by_frequency=(("d", 2), ("30m", 2), ("5m", 2), ("1m", 300)),
+            minimum_bars_by_frequency=(("d", 2), ("30m", 2), ("5m", 2), ("1m", 2)),
+            minimum_sector_members=1,
+        ),
+    )
+
+    analysis = gateway._load_analysis(
+        exchange=exchange,
+        code="SH.603768",
+        analysis_code="SH.603768",
+        frequency="1m",
+        as_of=datetime.fromisoformat("2026-07-20T15:00:00+08:00"),
+    )
+
+    [structure_frame] = analyzer.frames
+    assert tuple(structure_frame.iloc[:2]["date"].dt.time) == (
+        time(9, 31),
+        time(9, 33),
+    )
+    assert structure_frame.iloc[0]["volume"] == 100.0
+    [boundary] = analysis.entry_execution_boundaries
+    assert boundary.confirmation_bar_closed_at == datetime.fromisoformat(
+        "2026-07-20T09:31:00+08:00"
+    )
+    assert boundary.raw_volume == Decimal("100.0")
     assert len(exchange.calls) == 2
 
 
@@ -754,7 +780,7 @@ class InvalidNativeThirtyExchange:
             raise AssertionError(f"unexpected frequency: {frequency}")
         frame.attrs.update(
             structure_price_quantum="0.01",
-            price_basis_revision="qmt-front-test-v1",
+            price_basis_revision="qmt-front-test",
         )
         return frame
 
@@ -772,45 +798,46 @@ class FailingAnalyzer(RecordingAnalyzer):
 
 def _gateway(
     *,
-    sector_frame: pd.DataFrame | None = None,
     analyzer: RecordingAnalyzer | None = None,
-    sector_code: str = "SH.880471",
     sector_strength_provider=None,
     higher_timeframe_provider=None,
 ) -> tuple[NativeTradingDataGateway, RecordingAnalyzer, RecordingExchange]:
     stock_exchange = RecordingExchange()
-    sector_exchange = RecordingExchange(sector_frame)
     analyzer = analyzer if analyzer is not None else RecordingAnalyzer()
+
+    def sector_frame_provider(**kwargs):
+        return _qmt_sector_five_frame(
+            request_bars=kwargs["request_bars"],
+            member_count=len(kwargs["members"]),
+            as_of=kwargs["as_of"],
+        )
+
     gateway = NativeTradingDataGateway(
         exchange_provider=lambda: stock_exchange,
-        sector_exchange_provider=lambda: sector_exchange,
-        universe_provider=lambda _exchange: (
-            {"type": "stock_cn", "code": "SZ.000001", "name": "平安银行"},
-            {"type": "stock_cn", "code": "SH.600000", "name": "浦发银行"},
-        ),
         sector_provider=lambda: {
-            "source": "tdx_880_industry_index",
+            "source": gateway_module.QMT_GICS3_CATALOG_SOURCE,
             "sectors": [
                 {
-                    "sector_id": f"tdx-industry:{sector_code}",
+                    "sector_id": "qmt-gics3:bank",
                     "name": "银行",
-                    "kline_code": sector_code,
-                    "member_codes": ["000001", "600000"],
+                    "source_key": "GICS3银行",
+                    "member_codes": ["SZ.000001", "SH.600000"],
                 }
             ],
         },
+        sector_frame_provider=sector_frame_provider,
         sector_strength_provider=sector_strength_provider,
         higher_timeframe_provider=higher_timeframe_provider,
         watchlist_provider=lambda: ({"code": "SZ.000001"},),
         holdings_provider=lambda: ("SH.600000",),
         analyzer=analyzer,
         config=NativeTradingGatewayConfig(
-            request_bars_by_frequency=(("30m", 4), ("5m", 4), ("1m", 4)),
-            minimum_bars_by_frequency=(("30m", 2), ("5m", 2), ("1m", 2)),
+            request_bars_by_frequency=(("d", 4), ("30m", 4), ("5m", 4), ("1m", 4)),
+            minimum_bars_by_frequency=(("d", 2), ("30m", 2), ("5m", 2), ("1m", 2)),
             minimum_sector_members=1,
         ),
     )
-    return gateway, analyzer, sector_exchange
+    return gateway, analyzer, stock_exchange
 
 
 def test_native_gateway_attaches_horizontal_strength_and_rank() -> None:
@@ -819,8 +846,8 @@ def test_native_gateway_attaches_horizontal_strength_and_rank() -> None:
     def strength_provider(**kwargs):
         calls.append(kwargs)
         return {
-            "tdx-industry:SH.880471": SectorStrengthEvidence(
-                sector_id="tdx-industry:SH.880471",
+            "qmt-gics3:bank": SectorStrengthEvidence(
+                sector_id="qmt-gics3:bank",
                 observed_at=NOW,
                 anchor_session=date(2026, 7, 1),
                 member_count=2,
@@ -831,9 +858,7 @@ def test_native_gateway_attaches_horizontal_strength_and_rank() -> None:
             )
         }
 
-    gateway, _analyzer, _exchange = _gateway(
-        sector_strength_provider=strength_provider
-    )
+    gateway, _analyzer, _exchange = _gateway(sector_strength_provider=strength_provider)
     [assessment] = gateway.native_sector_assessments(as_of=NOW).assessments
 
     assert assessment.horizontal_strength == Decimal("7.5")
@@ -841,7 +866,7 @@ def test_native_gateway_attaches_horizontal_strength_and_rank() -> None:
     assert assessment.strength_anchor_session == date(2026, 7, 1)
     assert assessment.strength_member_count == 2
     assert calls[0]["members_by_sector"] == {
-        "tdx-industry:SH.880471": ("SH.600000", "SZ.000001")
+        "qmt-gics3:bank": ("SH.600000", "SZ.000001")
     }
 
 
@@ -866,15 +891,14 @@ def test_native_gateway_carries_recomputable_strength_batch() -> None:
             membership_revision=kwargs["membership_revision"],
         )
 
-    gateway, _analyzer, _exchange = _gateway(
-        sector_strength_provider=strength_provider
-    )
+    gateway, _analyzer, _exchange = _gateway(sector_strength_provider=strength_provider)
     batch = gateway.native_sector_assessments(as_of=NOW)
 
     assert batch.strength_evidence is not None
-    assert batch.strength_evidence.evidence_document()[
-        "membership_revision"
-    ] == batch.catalog_revision
+    assert (
+        batch.strength_evidence.evidence_document()["membership_revision"]
+        == batch.catalog_revision
+    )
     [assessment] = batch.assessments
     assert assessment.strength_source_revision == (
         batch.strength_evidence[assessment.sector_id].source_revision
@@ -1019,9 +1043,7 @@ def test_structure_bundle_keeps_newer_1m_signal_but_freezes_mwd_cutoff() -> None
         higher_timeframe_as_of=cutoff,
     )
 
-    assert bundle.as_of == datetime.fromisoformat(
-        "2026-07-20T10:01:00+08:00"
-    )
+    assert bundle.as_of == datetime.fromisoformat("2026-07-20T10:01:00+08:00")
     assert calls[0]["as_of"] == cutoff
     assert bundle.higher_timeframe_gates is not None
     assert bundle.higher_timeframe_gates.market.observed_at == cutoff
@@ -1059,9 +1081,7 @@ def test_structure_bundle_preserves_higher_timeframe_data_blockers() -> None:
             ),
         )
 
-    gateway, _analyzer, _exchange = _gateway(
-        higher_timeframe_provider=unavailable
-    )
+    gateway, _analyzer, _exchange = _gateway(higher_timeframe_provider=unavailable)
     [sector] = gateway.native_sector_assessments(as_of=NOW).assessments
     bundle = gateway.structure_bundle("SZ.000001", as_of=NOW, sector=sector)
 
@@ -1080,12 +1100,13 @@ def test_structure_bundle_preserves_higher_timeframe_data_blockers() -> None:
         "2026-07-23",
     ]
     assert all(
-        value["historical_trade_status_proven"] is False
-        for value in document["issues"]
+        value["historical_trade_status_proven"] is False for value in document["issues"]
     )
 
 
-def test_structure_bundle_skips_mwd_read_when_decision_output_is_provably_empty() -> None:
+def test_structure_bundle_skips_mwd_read_when_decision_output_is_provably_empty() -> (
+    None
+):
     """No current 5m setup means the shared decision core emits no row.
 
     The M/W/D provider derives roughly 300 sessions from a QMT 1m base stream.
@@ -1121,19 +1142,17 @@ def test_native_gateway_ranks_real_sector_bars_and_emits_only_changed_keys() -> 
 
     assert len(assessments) == 1
     assert batch.completed_count == batch.discovered_count == 1
-    assert assessments[0].sector_id == "tdx-industry:SH.880471"
+    assert assessments[0].sector_id == "qmt-gics3:bank"
     assert assessments[0].eligible is True
-    assert gateway.members() == {
-        "tdx-industry:SH.880471": ("SH.600000", "SZ.000001")
-    }
+    assert gateway.members() == {"qmt-gics3:bank": ("SH.600000", "SZ.000001")}
     first = gateway.changed_bars(None)
     second = gateway.changed_bars(NOW)
     assert {item.frequency for item in first} == {"5m", "30m"}
-    assert {item.code for item in first} == {"tdx-industry:SH.880471"}
+    assert {item.code for item in first} == {"qmt-gics3:bank"}
     assert second == ()
     assert analyzer.calls[:2] == [
-        ("tdx-industry:SH.880471", "30m"),
-        ("tdx-industry:SH.880471", "5m"),
+        ("qmt-gics3:bank", "30m"),
+        ("qmt-gics3:bank", "5m"),
     ]
 
 
@@ -1161,13 +1180,7 @@ def test_gateway_uses_qmt_gics3_component_frames_for_sector_assessment() -> None
 
     gateway = NativeTradingDataGateway(
         exchange_provider=lambda: stock_exchange,
-        sector_exchange_provider=lambda: (_ for _ in ()).throw(
-            AssertionError("QMT sectors must not read TDX industry indexes")
-        ),
         sector_frame_provider=qmt_sector_frame,
-        universe_provider=lambda _exchange: (_ for _ in ()).throw(
-            AssertionError("QMT GICS3 universe must not call tick-backed all_stocks")
-        ),
         sector_provider=lambda: {
             "source": "qmt_gics3_components",
             "sectors": [
@@ -1181,10 +1194,10 @@ def test_gateway_uses_qmt_gics3_component_frames_for_sector_assessment() -> None
         },
         analyzer=analyzer,
         config=NativeTradingGatewayConfig(
-            request_bars_by_frequency=(("30m", 4), ("5m", 4), ("1m", 4)),
+            request_bars_by_frequency=(("d", 4), ("30m", 4), ("5m", 4), ("1m", 4)),
             # At NOW=10:02 only the 10:00 30m bucket is completed.  This test
             # exercises source routing, so require one causal strategic bar.
-            minimum_bars_by_frequency=(("30m", 1), ("5m", 2), ("1m", 2)),
+            minimum_bars_by_frequency=(("d", 2), ("30m", 1), ("5m", 2), ("1m", 2)),
             minimum_sector_members=1,
         ),
     )
@@ -1194,30 +1207,24 @@ def test_gateway_uses_qmt_gics3_component_frames_for_sector_assessment() -> None
     assert batch.completed_count == batch.discovered_count == 1
     assert batch.assessments[0].sector_id == "qmt-gics3:bank"
     assert batch.assessments[0].eligible is True
-    assert gateway.members() == {
-        "qmt-gics3:bank": ("SH.600000", "SZ.000001")
-    }
+    assert gateway.members() == {"qmt-gics3:bank": ("SH.600000", "SZ.000001")}
     assert [call["frequency"] for call in frame_calls] == ["5m", "5m"]
     assert [call["request_bars"] for call in frame_calls] == [71, 4]
-    assert all(
-        call["members"] == ("SH.600000", "SZ.000001")
-        for call in frame_calls
-    )
+    assert all(call["members"] == ("SH.600000", "SZ.000001") for call in frame_calls)
     assert {frame.attrs["price_basis_provider"] for frame in analyzer.frames} == {
         "qmt-gics3-composite"
     }
     assert analyzer.frames[0].attrs["source_base_frequency"] == "5m"
-    assert analyzer.frames[0].attrs[
-        "sector_thirty_minute_derivation_contract"
-    ] == "SIX_CONTIGUOUS_COMPLETED_5M_COMPOSITE_BARS_V1"
+    assert (
+        analyzer.frames[0].attrs["sector_thirty_minute_derivation_contract"]
+        == "SIX_CONTIGUOUS_COMPLETED_5M_COMPOSITE_BARS"
+    )
     assert str(batch.catalog_revision).startswith("sha256:")
 
 
 def test_gateway_rejects_self_asserted_qmt_catalog_revision() -> None:
     gateway = NativeTradingDataGateway(
         exchange_provider=RecordingExchange,
-        sector_exchange_provider=RecordingExchange,
-        universe_provider=lambda _exchange: (),
         sector_provider=lambda: {
             "source": "qmt_gics3_components",
             "catalog_revision": "sha256:" + "0" * 64,
@@ -1240,13 +1247,8 @@ def test_small_qmt_sector_is_counted_and_rejected_instead_of_silently_dropped() 
     stock_exchange = RecordingExchange()
     gateway = NativeTradingDataGateway(
         exchange_provider=lambda: stock_exchange,
-        sector_exchange_provider=lambda: stock_exchange,
         sector_frame_provider=lambda **_kwargs: (_ for _ in ()).throw(
             AssertionError("undersized sector must not request a composite")
-        ),
-        universe_provider=lambda _exchange: (
-            {"type": "stock_cn", "code": "SZ.000001"},
-            {"type": "stock_cn", "code": "SH.600000"},
         ),
         sector_provider=lambda: {
             "source": "qmt_gics3_components",
@@ -1260,8 +1262,8 @@ def test_small_qmt_sector_is_counted_and_rejected_instead_of_silently_dropped() 
             ],
         },
         config=NativeTradingGatewayConfig(
-            request_bars_by_frequency=(("30m", 4), ("5m", 4), ("1m", 4)),
-            minimum_bars_by_frequency=(("30m", 2), ("5m", 2), ("1m", 2)),
+            request_bars_by_frequency=(("d", 4), ("30m", 4), ("5m", 4), ("1m", 4)),
+            minimum_bars_by_frequency=(("d", 2), ("30m", 2), ("5m", 2), ("1m", 2)),
             minimum_sector_members=3,
         ),
     )
@@ -1272,19 +1274,13 @@ def test_small_qmt_sector_is_counted_and_rejected_instead_of_silently_dropped() 
     assert batch.completed_count == 0
     assert batch.failure_counts == ()
     assert batch.errors == ()
-    assert batch.exclusion_counts == (
-        ("sector_member_coverage_insufficient", 1),
-    )
+    assert batch.exclusion_counts == (("sector_member_coverage_insufficient", 1),)
     [exclusion] = batch.exclusions
-    assert exclusion.detail_code == (
-        "sector_constituent_count_below_minimum"
-    )
+    assert exclusion.detail_code == ("sector_constituent_count_below_minimum")
     assert exclusion.catalog_member_count == 2
     assert exclusion.universe_member_count == 2
     assert exclusion.required_member_count == 3
-    assert exclusion.reason == (
-        "catalog_members=2; universe_members=2; required=3"
-    )
+    assert exclusion.reason == ("catalog_members=2; universe_members=2; required=3")
     assert batch.resolution_ratio == Decimal("1")
     assert batch.assessments[0].hard_block is True
     assert batch.assessments[0].reason_codes == (
@@ -1297,11 +1293,9 @@ def test_qmt_sector_missing_catalog_members_remains_explicit() -> None:
     stock_exchange = RecordingExchange()
     gateway = NativeTradingDataGateway(
         exchange_provider=lambda: stock_exchange,
-        sector_exchange_provider=lambda: stock_exchange,
         sector_frame_provider=lambda **_kwargs: (_ for _ in ()).throw(
             AssertionError("undersized sector must not request a composite")
         ),
-        universe_provider=lambda _exchange: (),
         sector_provider=lambda: {
             "source": "qmt_gics3_components",
             "sectors": [
@@ -1314,8 +1308,8 @@ def test_qmt_sector_missing_catalog_members_remains_explicit() -> None:
             ],
         },
         config=NativeTradingGatewayConfig(
-            request_bars_by_frequency=(("30m", 4), ("5m", 4), ("1m", 4)),
-            minimum_bars_by_frequency=(("30m", 2), ("5m", 2), ("1m", 2)),
+            request_bars_by_frequency=(("d", 4), ("30m", 4), ("5m", 4), ("1m", 4)),
+            minimum_bars_by_frequency=(("d", 2), ("30m", 2), ("5m", 2), ("1m", 2)),
             minimum_sector_members=3,
         ),
     )
@@ -1343,11 +1337,7 @@ def test_qmt_catalog_members_are_not_filtered_by_tick_derived_universe() -> None
 
     gateway = NativeTradingDataGateway(
         exchange_provider=lambda: stock_exchange,
-        sector_exchange_provider=lambda: stock_exchange,
         sector_frame_provider=sector_frame,
-        universe_provider=lambda _exchange: (_ for _ in ()).throw(
-            AssertionError("QMT current components are already the universe")
-        ),
         sector_provider=lambda: {
             "source": "qmt_gics3_components",
             "sectors": [
@@ -1365,9 +1355,9 @@ def test_qmt_catalog_members_are_not_filtered_by_tick_derived_universe() -> None
         },
         analyzer=RecordingAnalyzer(),
         config=NativeTradingGatewayConfig(
-            request_bars_by_frequency=(("30m", 4), ("5m", 4), ("1m", 4)),
+            request_bars_by_frequency=(("d", 4), ("30m", 4), ("5m", 4), ("1m", 4)),
             # Keep the fixture causal at 10:02; the 10:30 bucket is future.
-            minimum_bars_by_frequency=(("30m", 1), ("5m", 2), ("1m", 2)),
+            minimum_bars_by_frequency=(("d", 2), ("30m", 1), ("5m", 2), ("1m", 2)),
             minimum_sector_members=3,
         ),
     )
@@ -1387,46 +1377,9 @@ def test_qmt_catalog_members_are_not_filtered_by_tick_derived_universe() -> None
     assert stock_exchange.info_calls == ["SH.600001"]
 
 
-def test_native_sector_loader_forces_none_and_attaches_metadata_before_analysis() -> None:
-    analyzer = RecordingAnalyzer()
-    gateway, analyzer, exchange = _gateway(
-        sector_frame=_frame(with_metadata=False),
-        analyzer=analyzer,
-    )
-
-    batch = gateway.native_sector_assessments(as_of=NOW)
-
-    assert exchange.calls
-    assert {call[2]["fq"] for call in exchange.calls} == {"none"}
-    assert analyzer.frames[0].attrs["price_basis_provider"] == (
-        "tdx-industry-index"
-    )
-    assert analyzer.frames[0].attrs["price_basis_adjustment"] == "none"
-    assert analyzer.frames[0].attrs["structure_price_quantum"] == "0.01"
-    assert batch.completed_count == batch.discovered_count == 1
-
-
-def test_unknown_sector_code_fails_closed_before_strict_analysis() -> None:
-    gateway, analyzer, _exchange = _gateway(
-        sector_frame=_frame(with_metadata=False),
-        sector_code="SZ.880471",
-    )
-
-    batch = gateway.native_sector_assessments(as_of=NOW)
-
-    assert batch.discovered_count == 1
-    assert batch.completed_count == 0
-    assert batch.failure_counts == (
-        ("sector_price_basis_unavailable", 1),
-    )
-    assert analyzer.calls == []
-
-
 def test_native_gateway_maps_explicit_strict_error_to_structure_invalid() -> None:
     analyzer = FailingAnalyzer(
-        gateway_module.StrictStructureAnalysisError(
-            "unit directions must alternate"
-        )
+        gateway_module.StrictStructureAnalysisError("unit directions must alternate")
     )
     gateway, _analyzer, _exchange = _gateway(analyzer=analyzer)
 
@@ -1454,8 +1407,8 @@ def test_native_gateway_reuses_sector_analysis_when_closed_bar_is_unchanged() ->
 
     assert first == second
     assert analyzer.calls == [
-        ("tdx-industry:SH.880471", "30m"),
-        ("tdx-industry:SH.880471", "5m"),
+        ("qmt-gics3:bank", "30m"),
+        ("qmt-gics3:bank", "5m"),
     ]
 
 
@@ -1470,7 +1423,7 @@ def test_analysis_cache_invalidates_when_price_basis_revision_changes() -> None:
         frequency="5m",
         as_of=NOW,
     )
-    stock_exchange.frame.attrs["price_basis_revision"] = "test-raw-v2"
+    stock_exchange.frame.attrs["price_basis_revision"] = "test-adjusted"
     gateway._load_analysis(
         exchange=stock_exchange,
         code="SZ.000001",
@@ -1483,9 +1436,10 @@ def test_analysis_cache_invalidates_when_price_basis_revision_changes() -> None:
         ("SZ.000001", "5m"),
         ("SZ.000001", "5m"),
     ]
-    assert [
-        frame.attrs["price_basis_revision"] for frame in analyzer.frames
-    ] == ["test-raw-v1", "test-raw-v2"]
+    assert [frame.attrs["price_basis_revision"] for frame in analyzer.frames] == [
+        "test-raw",
+        "test-adjusted",
+    ]
 
 
 def test_analysis_cache_invalidates_when_sector_member_path_changes() -> None:
@@ -1494,11 +1448,9 @@ def test_analysis_cache_invalidates_when_sector_member_path_changes() -> None:
     first["member_mask"] = 1
     first.attrs.update(
         structure_price_quantum="0.000001",
-        price_basis_revision="qmt-gics3-composite-v1",
+        price_basis_revision="qmt-gics3-composite",
         price_basis_provider="qmt-gics3-composite",
-        price_basis_adjustment=(
-            gateway_module.QMT_GICS3_COMPOSITE_ADJUSTMENT
-        ),
+        price_basis_adjustment=(gateway_module.QMT_GICS3_COMPOSITE_ADJUSTMENT),
         sector_factor_adjustment_contract_id=(
             gateway_module.QMT_CAUSAL_FACTOR_ADJUSTMENT_CONTRACT_ID
         ),
@@ -1557,10 +1509,12 @@ def test_invalid_native_thirty_is_rebuilt_from_completed_same_source_five() -> N
     assert len(rebuilt) == 2
     assert bool((rebuilt["high"] >= rebuilt[["open", "close"]].max(axis=1)).all())
     assert bool((rebuilt["low"] <= rebuilt[["open", "close"]].min(axis=1)).all())
-    assert rebuilt.attrs["price_basis_revision"] == "qmt-front-test-v1"
+    assert rebuilt.attrs["price_basis_revision"] == "qmt-front-test"
 
 
-def test_invalid_native_thirty_fails_closed_when_five_minute_evidence_is_invalid() -> None:
+def test_invalid_native_thirty_fails_closed_when_five_minute_evidence_is_invalid() -> (
+    None
+):
     exchange = InvalidNativeThirtyExchange(invalid_five=True)
     gateway, _analyzer, _sector_exchange = _gateway()
 
@@ -1577,7 +1531,9 @@ def test_invalid_native_thirty_fails_closed_when_five_minute_evidence_is_invalid
         )
 
 
-def test_native_gateway_builds_four_physical_period_bundle_and_keeps_watch_scopes() -> None:
+def test_native_gateway_builds_four_physical_period_bundle_and_keeps_watch_scopes() -> (
+    None
+):
     gateway, _analyzer, _sector_exchange = _gateway()
     sector = gateway.native_sector_assessments(as_of=NOW).assessments[0]
 
@@ -1591,7 +1547,7 @@ def test_native_gateway_builds_four_physical_period_bundle_and_keeps_watch_scope
     assert bundle.five_points[0].status == "provisional"
     assert gateway.active_watchlist() == ("SZ.000001",)
     assert gateway.holdings() == ("SH.600000",)
-    assert gateway.symbol_name("SZ.000001") == "平安银行"
+    assert gateway.symbol_name("SZ.000001") == "测试名称"
     assert ("SZ.000001", "d") in _analyzer.calls
 
 
@@ -1634,9 +1590,76 @@ def test_native_gateway_one_minute_refresh_reuses_cached_higher_frames() -> None
         frequencies=("1m",),
     )
 
-    assert stock_exchange.calls == [
-        ("SZ.000001", "1m", {"req_counts": 4})
-    ]
+    assert stock_exchange.calls == [("SZ.000001", "1m", {"req_counts": 4})]
+
+
+def test_native_gateway_does_not_leak_cached_one_minute_points_into_5m_lane() -> None:
+    class TriggerAnalyzer(RecordingAnalyzer):
+        def __call__(self, *, code, frequency, frame, as_of):
+            base = super().__call__(
+                code=code,
+                frequency=frequency,
+                frame=frame,
+                as_of=as_of,
+            )
+            if frequency != "1m":
+                return base
+            return replace(
+                base,
+                confirmed_points=(confirmed_point("1buy", frequency="1m"),),
+            )
+
+    gateway, _analyzer, _sector_exchange = _gateway(analyzer=TriggerAnalyzer())
+    sector = gateway.native_sector_assessments(as_of=NOW).assessments[0]
+    first = gateway.structure_bundle("SZ.000001", as_of=NOW, sector=sector)
+    tactical = gateway.structure_bundle(
+        "SZ.000001",
+        as_of=NOW,
+        sector=sector,
+        frequencies=("5m",),
+    )
+
+    assert first.one_points
+    assert tactical.one_points == ()
+    assert tactical.entry_execution_boundaries == ()
+
+
+def test_native_gateway_reuses_resolved_higher_timeframe_cutoff_evidence() -> None:
+    calls: list[dict[str, object]] = []
+
+    def evidence(subject: str, observed_at: datetime) -> HigherTimeframeGateEvidence:
+        return HigherTimeframeGateEvidence(
+            subject=subject,
+            observed_at=observed_at,
+            monthly="NONE",
+            weekly="NONE",
+            daily="NONE",
+            gate="GREEN",
+            grade="RESEARCH_ONLY",
+            snapshot_id=f"snapshot:{subject}",
+            source_revision=f"source:{subject}",
+        )
+
+    def provider(**kwargs):
+        calls.append(kwargs)
+        return HigherTimeframeGateBundle(
+            market=evidence("MARKET", kwargs["as_of"]),
+            sector=evidence(kwargs["sector_id"], kwargs["as_of"]),
+            symbol=evidence(kwargs["symbol"], kwargs["as_of"]),
+        )
+
+    gateway, _analyzer, _sector_exchange = _gateway(higher_timeframe_provider=provider)
+    sector = gateway.native_sector_assessments(as_of=NOW).assessments[0]
+
+    gateway.structure_bundle("SZ.000001", as_of=NOW, sector=sector)
+    gateway.structure_bundle(
+        "SZ.000001",
+        as_of=NOW,
+        sector=sector,
+        frequencies=("5m", "1m"),
+    )
+
+    assert len(calls) == 1
 
 
 def test_native_gateway_skips_stock_one_minute_analysis_without_current_setup() -> None:

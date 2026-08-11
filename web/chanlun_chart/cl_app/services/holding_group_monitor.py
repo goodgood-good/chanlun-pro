@@ -32,10 +32,10 @@ from .job_names import JOB_DISPLAY_NAMES
 
 
 CN = ZoneInfo("Asia/Shanghai")
-SCHEMA = "chanlun-holding-group-monitor/v1"
+SCHEMA = "chanlun-holding-group-monitor"
 JOB_ID = "holding_group_realtime_monitor"
-DEDUPE_SCHEMA = "chanlun-holding-group-event-deduper/v1"
-RUNTIME_SCHEMA = "chanlun-holding-group-runtime-ledger/v1"
+DEDUPE_SCHEMA = "chanlun-holding-group-event-deduper"
+RUNTIME_SCHEMA = "chanlun-holding-group-runtime-ledger"
 _PENDING_NOTIFICATION_MAX_AGE = timedelta(minutes=2)
 _MARKET_LABELS = {
     "a": "A股",
@@ -65,9 +65,7 @@ _POINT_LABELS = {
 def fresh_monitor_events(events: Iterable[object], deduper: object) -> list[object]:
     """Return unseen events after stable in-batch identity de-duplication.
 
-    This tiny ownership-neutral operation used to be imported from the legacy
-    recursive monitor, which made the active app runtime depend on an inactive
-    signal authority.  The durable deduper remains the sole persistence gate.
+    The durable deduper remains the sole persistence gate.
     """
 
     unique: list[object] = []
@@ -105,9 +103,8 @@ _POINT_ADVICE = {
 class BoundedEventDeduper:
     """Durable event de-duplication with bounded retention.
 
-    The legacy recursive monitor keeps every identity forever.  A long-running
-    app-owned holding monitor must remain bounded, while still surviving app
-    restarts and retrying a notification that was not delivered.
+    A long-running app-owned holding monitor remains bounded while surviving
+    app restarts and retrying a notification that was not delivered.
     """
 
     def __init__(
@@ -131,16 +128,22 @@ class BoundedEventDeduper:
             payload = json.loads(self.path.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError):
             return
-        if not isinstance(payload, Mapping):
+        if (
+            not isinstance(payload, Mapping)
+            or set(payload) != {"schema", "records"}
+            or payload.get("schema") != DEDUPE_SCHEMA
+        ):
             return
-        raw = payload.get("records", payload)
-        if not isinstance(raw, Mapping):
-            return
-        self.records = {
-            str(identity): str(observed_at)
+        raw = payload["records"]
+        if not isinstance(raw, Mapping) or any(
+            not isinstance(identity, str)
+            or not identity
+            or not isinstance(observed_at, str)
+            or not observed_at
             for identity, observed_at in raw.items()
-            if identity and observed_at
-        }
+        ):
+            return
+        self.records = dict(raw)
         self._prune()
 
     def _now(self) -> datetime:
@@ -244,45 +247,75 @@ class HoldingMonitorRuntimeLedger:
             payload = json.loads(self.path.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError):
             return empty
-        if not isinstance(payload, Mapping) or payload.get("schema") != RUNTIME_SCHEMA:
-            return empty
-        state = dict(empty)
-        for key in (
-            "last_big_directions",
-            "active_outages",
-            "pending_notifications",
-            "delivered_event_count",
-            "success_count",
-            "simulated_success_count",
-            "failure_count",
-            "expired_event_count",
-            "consecutive_failure_count",
-            "last_success_at",
-            "last_simulated_at",
-            "last_failure_at",
-            "last_failure_reason",
-            "last_expired_at",
+        if (
+            not isinstance(payload, Mapping)
+            or payload.get("schema") != RUNTIME_SCHEMA
+            or set(payload) != set(empty)
         ):
-            if key in payload:
-                state[key] = payload[key]
-        if not isinstance(state["last_big_directions"], dict):
-            state["last_big_directions"] = {}
-        if not isinstance(state["active_outages"], dict):
-            state["active_outages"] = {}
-        if not isinstance(state["pending_notifications"], dict):
-            state["pending_notifications"] = {}
-        else:
-            valid_pending = {}
-            for market, raw in state["pending_notifications"].items():
-                if not isinstance(raw, Mapping):
-                    continue
-                try:
-                    queued_at = datetime.fromisoformat(str(raw["queued_at"]))
-                except (KeyError, TypeError, ValueError):
-                    continue
-                if queued_at.tzinfo is not None and queued_at.utcoffset() is not None:
-                    valid_pending[str(market)] = dict(raw)
-            state["pending_notifications"] = valid_pending
+            return empty
+        state = dict(payload)
+        if (
+            not isinstance(state["last_big_directions"], dict)
+            or any(
+                not isinstance(key, str)
+                or value not in {"up", "down", "neutral"}
+                for key, value in state["last_big_directions"].items()
+            )
+            or not isinstance(state["active_outages"], dict)
+            or any(
+                not isinstance(key, str) or value is not True
+                for key, value in state["active_outages"].items()
+            )
+            or not isinstance(state["pending_notifications"], dict)
+        ):
+            return empty
+        for market, raw in state["pending_notifications"].items():
+            if (
+                not isinstance(market, str)
+                or not isinstance(raw, Mapping)
+                or set(raw)
+                != {
+                    "title",
+                    "lines",
+                    "identities",
+                    "codes",
+                    "charts",
+                    "transition_codes",
+                    "queued_at",
+                }
+                or not isinstance(raw.get("title"), str)
+                or not raw.get("title")
+                or any(
+                    not isinstance(raw.get(key), list)
+                    for key in (
+                        "lines",
+                        "identities",
+                        "codes",
+                        "charts",
+                        "transition_codes",
+                    )
+                )
+                or any(
+                    not isinstance(value, str)
+                    for key in (
+                        "lines",
+                        "identities",
+                        "codes",
+                        "transition_codes",
+                    )
+                    for value in raw[key]
+                )
+                or any(
+                    not isinstance(value, Mapping) for value in raw["charts"]
+                )
+            ):
+                return empty
+            try:
+                queued_at = datetime.fromisoformat(str(raw["queued_at"]))
+            except (TypeError, ValueError):
+                return empty
+            if queued_at.tzinfo is None or queued_at.utcoffset() is None:
+                return empty
         for key in (
             "delivered_event_count",
             "success_count",
@@ -292,7 +325,18 @@ class HoldingMonitorRuntimeLedger:
             "consecutive_failure_count",
         ):
             value = state[key]
-            state[key] = max(0, int(value)) if not isinstance(value, bool) else 0
+            if type(value) is not int or value < 0:
+                return empty
+        for key in (
+            "last_success_at",
+            "last_simulated_at",
+            "last_failure_at",
+            "last_failure_reason",
+            "last_expired_at",
+        ):
+            value = state[key]
+            if value is not None and (not isinstance(value, str) or not value):
+                return empty
         return state
 
     def _now(self) -> datetime:
@@ -435,9 +479,9 @@ class HoldingMonitorRuntimeLedger:
             lines = raw.get("lines")
             identities = raw.get("identities")
             codes = raw.get("codes")
-            charts = raw.get("charts", [])
+            charts = raw.get("charts")
             queued_at = raw.get("queued_at")
-            transition_codes = raw.get("transition_codes", [])
+            transition_codes = raw.get("transition_codes")
             if not (
                 isinstance(title, str)
                 and title
@@ -471,6 +515,31 @@ class HoldingMonitorRuntimeLedger:
         market: str,
         payload: Mapping[str, object],
     ) -> None:
+        required = {
+            "title",
+            "lines",
+            "identities",
+            "codes",
+            "charts",
+            "transition_codes",
+            "queued_at",
+            "event_count",
+        }
+        if set(payload) != required:
+            raise ValueError("pending holding notification fields changed")
+        if not all(
+            isinstance(payload[key], list)
+            for key in (
+                "lines",
+                "identities",
+                "codes",
+                "charts",
+                "transition_codes",
+            )
+        ) or any(
+            not isinstance(value, Mapping) for value in payload["charts"]
+        ):
+            raise ValueError("pending holding notification is malformed")
         with self._lock:
             self._state["pending_notifications"][market] = {
                 "title": str(payload["title"]),
@@ -480,12 +549,10 @@ class HoldingMonitorRuntimeLedger:
                 ],
                 "codes": [str(value) for value in payload["codes"]],
                 "charts": [
-                    dict(value)
-                    for value in payload.get("charts", [])
-                    if isinstance(value, Mapping)
+                    dict(value) for value in payload["charts"]
                 ],
                 "transition_codes": [
-                    str(value) for value in payload.get("transition_codes", [])
+                    str(value) for value in payload["transition_codes"]
                 ],
                 "queued_at": str(payload["queued_at"]),
             }
@@ -941,23 +1008,22 @@ class HoldingGroupMonitorService:
         pending: Mapping[str, object],
         additional: Mapping[str, object],
     ) -> dict[str, object]:
-        identities = [str(value) for value in pending.get("identities", [])]
-        lines = [str(value) for value in pending.get("lines", [])]
-        codes = [str(value) for value in pending.get("codes", [])]
+        identities = [str(value) for value in pending["identities"]]
+        lines = [str(value) for value in pending["lines"]]
+        codes = [str(value) for value in pending["codes"]]
         transitions = [
-            str(value) for value in pending.get("transition_codes", [])
+            str(value) for value in pending["transition_codes"]
         ]
         charts = [
             dict(value)
-            for value in pending.get("charts", [])
-            if isinstance(value, Mapping)
+            for value in pending["charts"]
         ]
         seen = set(identities)
-        extra_identities = list(additional.get("identities", []))
-        extra_lines = list(additional.get("lines", []))
-        extra_codes = list(additional.get("codes", []))
-        extra_charts = list(additional.get("charts", []))
-        extra_transitions = set(additional.get("transition_codes", []))
+        extra_identities = list(additional["identities"])
+        extra_lines = list(additional["lines"])
+        extra_codes = list(additional["codes"])
+        extra_charts = list(additional["charts"])
+        extra_transitions = set(additional["transition_codes"])
         for index, (identity, line, code) in enumerate(
             zip(extra_identities, extra_lines, extra_codes)
         ):
@@ -973,15 +1039,13 @@ class HoldingGroupMonitorService:
             if index < len(extra_charts) and isinstance(extra_charts[index], Mapping):
                 charts.append(dict(extra_charts[index]))
         return {
-            "title": str(pending.get("title") or additional["title"]),
+            "title": str(pending["title"]),
             "lines": lines,
             "identities": identities,
             "codes": codes,
             "charts": charts,
             "transition_codes": list(dict.fromkeys(transitions)),
-            "queued_at": str(
-                pending.get("queued_at") or additional["queued_at"]
-            ),
+            "queued_at": str(pending["queued_at"]),
             "event_count": len(identities),
         }
 
@@ -1228,16 +1292,6 @@ class HoldingGroupMonitorService:
                 states,
                 names=names,
                 holdings=holding_codes,
-                # This is an alert scope, not a portfolio allocator.  Zero
-                # disables the free-slot cap; notification copy deliberately
-                # omits position ratios because this service has no holdings.
-                max_pos=0,
-                sell_scope="all",
-                regime_mode="off",
-                mid_gate="soft",
-                require_nest=False,
-                nest_mode="soft",
-                trend_3boost=False,
             )
             for event in events:
                 setattr(

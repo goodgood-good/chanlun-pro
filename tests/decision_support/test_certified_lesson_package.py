@@ -107,7 +107,7 @@ def test_rendered_package_links_original_chart_to_caption_and_occurrence(tmp_pat
         page_rotation=0,
         source_role=SourceRole.LESSON_CHART,
         reason_codes=("verified_black_caption_below",),
-        classifier_version="lesson-image/1",
+        classifier_id="lesson-image",
         caption_page_number=7,
         caption_source_sequence_index=0,
     )
@@ -124,7 +124,7 @@ def test_rendered_package_links_original_chart_to_caption_and_occurrence(tmp_pat
         page_rotation=0,
         source_role=SourceRole.LESSON_CHART,
         reason_codes=("verified_black_caption_below",),
-        classifier_version="lesson-image/1",
+        classifier_id="lesson-image",
         caption_page_number=8,
         caption_source_sequence_index=0,
     )
@@ -201,7 +201,7 @@ def test_rendered_package_links_original_chart_to_caption_and_occurrence(tmp_pat
         boundaries=boundaries,
         text_blocks=blocks,
         image_inventory=inventory,
-        extractor_versions={"text": "lesson-pdf/1", "image": "lesson-image/1", "package": "lesson-package/1"},
+        extractor_ids={"text": "lesson-pdf", "image": "lesson-image", "package": "lesson-package"},
         certification={
             "byte_identical_double_build": True,
             "determinism_builds": 2,

@@ -9,7 +9,6 @@ from chanlun.decision_support.corpus_retrieval import (
 )
 from chanlun.decision_support.corpus_types import (
     EvidenceUnit,
-    ImageEvidence,
     SourceTier,
 )
 
@@ -168,22 +167,6 @@ def test_build_rejects_duplicate_evidence_ids() -> None:
 
     with pytest.raises(ValueError, match="duplicate evidence_id"):
         CorpusIndex.build([first, second])
-
-
-def test_build_rejects_text_image_identity_collision() -> None:
-    unit = make_unit("shared-identity", SourceTier.LESSON_ORIGINAL, "第三类买点")
-    image = ImageEvidence(
-        image_id="shared-identity",
-        source_tier=SourceTier.LESSON_CHART,
-        source_path="chart.jpg",
-        sha256="sha256:" + "4" * 64,
-        media_type="image/jpeg",
-        width=10,
-        height=10,
-    )
-
-    with pytest.raises(ValueError, match="duplicate evidence identifier"):
-        CorpusIndex.build((unit,), images=(image,))
 
 
 def test_search_normalizes_nfkc_case_punctuation_and_whitespace() -> None:

@@ -51,15 +51,6 @@ class _FakeEx:
         return self._df
 
 
-class _CaptureFdb:
-    def __init__(self):
-        self.captured = None
-
-    def get_web_cl_data(self, market, code, frequency, cl_config, klines):
-        self.captured = klines
-        return object()
-
-
 def _make_om(df):
     om = OnlineMarketDatas.__new__(OnlineMarketDatas)
     om.market = "a"
@@ -69,19 +60,7 @@ def _make_om(df):
     om._round_seq = 0
     om.cache_klines = {}
     om.ex = _FakeEx(df)
-    om.fdb = _CaptureFdb()
     return om
-
-
-def test_get_cl_data_feeds_closed_bars_only():
-    """get_cl_data 喂给缠论的 K 线已丢进行中末根(实盘信号不吃未收盘 bar)。"""
-    df = _df(["2099-01-01 09:30:00", "2099-01-01 09:35:00", "2099-01-01 09:40:00"])
-    om = _make_om(df)
-    om.get_cl_data("X", "5m")
-    fed = om.fdb.captured
-    assert fed is not None
-    assert len(fed) == 2  # 3 根中末根(未来=进行中)被丢
-    assert pd.Timestamp(fed["date"].iloc[-1]) == pd.Timestamp("2099-01-01 09:35:00")
 
 
 def test_last_k_info_keeps_live_bar():

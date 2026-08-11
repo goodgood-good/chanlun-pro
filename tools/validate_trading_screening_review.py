@@ -26,7 +26,7 @@ for value in (PROJECT_ROOT / "src", PROJECT_ROOT / "web" / "chanlun_chart"):
     if rendered not in sys.path:
         sys.path.insert(0, rendered)
 
-from chanlun.decision_support.trading_system.v3_live_human_review import (
+from chanlun.decision_support.trading_system.live_human_review import (
     live_screening_snapshot_content_sha256,
     live_human_review_document,
     validate_live_review_snapshot,
@@ -44,7 +44,7 @@ from chanlun.decision_support.trading_system.live_review_materialization import 
     live_review_materialization_receipt,
     live_review_web_bundle_receipt,
 )
-from chanlun.decision_support.trading_system.v3_human_review_screening import (
+from chanlun.decision_support.trading_system.human_review_screening import (
     HumanReviewAlert,
     parse_human_review_alert,
     validate_human_review_screen_document,
@@ -146,8 +146,7 @@ def _write_detail_store(
                 locators[candidate_id] = {
                     "offset": offset,
                     "length": len(encoded),
-                    "line_sha256": "sha256:"
-                    + hashlib.sha256(encoded).hexdigest(),
+                    "line_sha256": "sha256:" + hashlib.sha256(encoded).hexdigest(),
                 }
             handle.flush()
             os.fsync(handle.fileno())
@@ -180,9 +179,7 @@ def _materialize_web_bundle(
         if alerts is None
         else tuple(alerts)
     )
-    alert_by_candidate_id = {
-        value.candidate_id: value for value in parsed_alerts
-    }
+    alert_by_candidate_id = {value.candidate_id: value for value in parsed_alerts}
     if len(alert_by_candidate_id) != len(raw_queue):
         raise ValueError("human review Web bundle candidate set changed")
     artifact_root = archive_root / ".web"
@@ -203,7 +200,8 @@ def _materialize_web_bundle(
         if alert is None:
             raise ValueError("human review Web bundle candidate is unavailable")
         compact = dict(raw)
-        compact.setdefault("signal_lifecycle_id", alert.signal_lifecycle_id)
+        if compact.get("signal_lifecycle_id") != alert.signal_lifecycle_id:
+            raise ValueError("human review lifecycle identity changed")
         sector_evidence = compact.pop("sector_higher_timeframe_evidence", None)
         market_symbol_evidence = compact.pop(
             "market_symbol_higher_timeframe_evidence",
@@ -218,11 +216,6 @@ def _materialize_web_bundle(
                     side.get("source_support"), Mapping
                 ):
                     market_symbol_support_count += 1
-        ranking_profile = (
-            ranking_evidence.get("source_profile")
-            if isinstance(ranking_evidence, Mapping)
-            else None
-        )
         compact.update(
             {
                 "evidence_detail_available": bool(
@@ -230,23 +223,11 @@ def _materialize_web_bundle(
                     or market_symbol_evidence is not None
                     or ranking_evidence is not None
                 ),
-                "sector_higher_timeframe_evidence_id": _evidence_id(
-                    sector_evidence
-                ),
+                "sector_higher_timeframe_evidence_id": _evidence_id(sector_evidence),
                 "market_symbol_higher_timeframe_evidence_id": _evidence_id(
                     market_symbol_evidence
                 ),
                 "sector_ranking_evidence_id": _evidence_id(ranking_evidence),
-                "sector_risk_gate_attestation": (
-                    "SELF_CONTAINED"
-                    if "sector_risk_gate" in raw
-                    else "LEGACY_OMITTED_FAIL_CLOSED"
-                ),
-                "market_symbol_higher_timeframe_attestation": (
-                    "SELF_CONTAINED"
-                    if market_symbol_evidence is not None
-                    else "LEGACY_SUMMARY_ONLY"
-                ),
                 "market_symbol_higher_timeframe_source_attestation": (
                     "SELF_CONTAINED"
                     if market_symbol_support_count == 2
@@ -256,18 +237,14 @@ def _materialize_web_bundle(
                         else (
                             "STRUCTURE_ONLY"
                             if market_symbol_evidence is not None
-                            else "LEGACY_SUMMARY_ONLY"
+                            else "SUMMARY_ONLY"
                         )
                     )
                 ),
                 "sector_ranking_attestation": (
-                    "FULL_STRUCTURAL_COMPONENTS"
-                    if ranking_profile == "LIVE_FULL_RANKING"
-                    else (
-                        "HISTORICAL_TRIGGER_SUMMARY_NO_COMPONENTS"
-                        if ranking_evidence is not None
-                        else "LEGACY_NOT_ATTACHED"
-                    )
+                    "NOT_ATTACHED"
+                    if ranking_evidence is None
+                    else "FULL_STRUCTURAL_COMPONENTS"
                 ),
                 "detail_locator": locators[candidate_id],
             }
@@ -292,9 +269,7 @@ def _materialize_web_bundle(
         "signal_counts": report.get("signal_counts") or {},
         "event_study_summary": event_study_summary,
         "data_caveats": list(report.get("data_caveats") or ()),
-        "division_of_responsibility": (
-            report.get("division_of_responsibility") or {}
-        ),
+        "division_of_responsibility": (report.get("division_of_responsibility") or {}),
         "review_queue": compact_queue,
         "review_queue_count": len(compact_queue),
         "highest_status": "REVIEW_REQUIRED",
@@ -421,9 +396,7 @@ def validate_document(
     if _SHA256.fullmatch(expected_sha256) is None:
         raise ValueError("expected-sha256 must be a canonical sha256 identity")
     if (archive_root is None) != (repository_root is None):
-        raise ValueError(
-            "archive-root and repository-root must be provided together"
-        )
+        raise ValueError("archive-root and repository-root must be provided together")
     source_stat = path.stat()
     payload = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(payload, Mapping):
@@ -431,7 +404,7 @@ def validate_document(
     declared = payload.get("snapshot_content_sha256")
     if declared != expected_sha256:
         return {
-            "schema": "chanlun-screening-review-validator/v1",
+            "schema": "chanlun-screening-review-validator",
             "snapshot_content_sha256": expected_sha256,
             "ready": False,
             "reason_code": "SNAPSHOT_IDENTITY_INVALID",
@@ -469,7 +442,7 @@ def validate_document(
                 reason_code = "HUMAN_REVIEW_MATERIALIZATION_FAILED"
                 error = f"{type(exc).__name__}: {str(exc)[:240]}"
     return {
-        "schema": "chanlun-screening-review-validator/v1",
+        "schema": "chanlun-screening-review-validator",
         "snapshot_content_sha256": expected_sha256,
         "ready": ready,
         "reason_code": reason_code,
@@ -491,9 +464,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             None if args.archive_root is None else args.archive_root.resolve()
         ),
         repository_root=(
-            None
-            if args.repository_root is None
-            else args.repository_root.resolve()
+            None if args.repository_root is None else args.repository_root.resolve()
         ),
     )
     print(

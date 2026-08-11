@@ -216,7 +216,7 @@ class ImageOccurrence:
     page_rotation: int
     source_role: SourceRole
     reason_codes: tuple[str, ...]
-    classifier_version: str
+    classifier_id: str
     caption_page_number: int | None = None
     caption_source_sequence_index: int | None = None
     cropbox_pdf: tuple[float, float, float, float] | None = None
@@ -315,11 +315,11 @@ class ImageOccurrence:
             raise ValueError("lesson chart requires a verified caption source position")
         cropbox_pdf = _optional_box(self.cropbox_pdf, "cropbox_pdf")
         mediabox_pdf = _optional_box(self.mediabox_pdf, "mediabox_pdf")
-        if not isinstance(self.classifier_version, str):
-            raise TypeError("classifier_version must be a string")
-        classifier_version = self.classifier_version.strip()
-        if not classifier_version or len(classifier_version) > 128:
-            raise ValueError("classifier_version must be present and bounded")
+        if not isinstance(self.classifier_id, str):
+            raise TypeError("classifier_id must be a string")
+        classifier_id = self.classifier_id.strip()
+        if not classifier_id or len(classifier_id) > 128:
+            raise ValueError("classifier_id must be present and bounded")
         if not isinstance(self.reason_codes, tuple) or any(
             not isinstance(code, str) or not code.strip() or len(code.strip()) > 128
             for code in self.reason_codes
@@ -360,7 +360,7 @@ class ImageOccurrence:
             "bbox_top_left": list(bbox_top_left),
             "caption_page_number": caption_values[0],
             "caption_source_sequence_index": caption_values[1],
-            "classifier_version": classifier_version,
+            "classifier_id": classifier_id,
             "lesson_number": self.lesson_number,
             "occurrence_id": occurrence_id,
             "reason_codes": list(reason_codes),
@@ -380,7 +380,7 @@ class ImageOccurrence:
         object.__setattr__(self, "page_size", (page_width, page_height))
         object.__setattr__(self, "source_role", role)
         object.__setattr__(self, "reason_codes", reason_codes)
-        object.__setattr__(self, "classifier_version", classifier_version)
+        object.__setattr__(self, "classifier_id", classifier_id)
         object.__setattr__(self, "cropbox_pdf", cropbox_pdf)
         object.__setattr__(self, "mediabox_pdf", mediabox_pdf)
         object.__setattr__(self, "bbox_pdf_bottom_left", bbox_pdf_bottom_left)

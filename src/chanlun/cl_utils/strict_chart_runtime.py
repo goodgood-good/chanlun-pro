@@ -6,11 +6,11 @@ from dataclasses import dataclass
 
 import pandas as pd
 
-from chanlun.cl_utils.data import web_batch_get_cl_datas
+from chanlun.core.cl import CL
 from chanlun.core.types import ICL
 from chanlun.decision_support.trading_system.runtime_config import (
     strict_snapshot_price_metadata,
-    v3_recursive_cl_config,
+    recursive_cl_config,
 )
 from chanlun.tools.log_util import LogUtil
 
@@ -78,25 +78,17 @@ def build_strict_chart_cd(
             exc=exc,
         )
     try:
-        # The production chart is part of the V3 decision surface.  Using the
+        # The production chart is part of the strict strategy decision surface.  Using the
         # general research profile here used NEW_PEN while screening, replay
         # and notifications used ORIGINAL_OLD_PEN, so a visible center and its
         # point could come from different segment chains.
-        config = v3_recursive_cl_config(
+        config = recursive_cl_config(
             structure_price_quantum=metadata.structure_price_quantum,
             price_basis_revision=metadata.price_basis_revision,
         )
-        values = web_batch_get_cl_datas(
-            market,
-            code,
-            {frequency: frame},
-            config,
-        )
-        if len(values) != 1:
-            raise ValueError(
-                "strict chart CL factory must return exactly one object"
-            )
-        return StrictChartRuntimeResult.success(values[0])
+        cd = CL(code, frequency, config, market=market)
+        cd.process_klines(frame)
+        return StrictChartRuntimeResult.success(cd)
     except Exception as exc:
         return _failure(
             market=market,

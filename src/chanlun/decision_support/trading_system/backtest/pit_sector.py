@@ -26,7 +26,7 @@ from chanlun.exchange.price_basis import (
 
 
 PIT_SW1_COMPOSITE_PROVIDER = "qmt-sw1-pit-composite"
-PIT_SW1_COMPOSITE_ADJUSTMENT = "causal-all-member-median-v1"
+PIT_SW1_COMPOSITE_ADJUSTMENT = "causal-all-member-median"
 _FIELDS = ("time", "open", "high", "low", "close", "volume")
 _PRICES = ("open", "high", "low", "close")
 _QUANTUM = Decimal("0.000001")

@@ -30,7 +30,7 @@ test('多级别[1d,30,5]: 5m 图选到自己(index2)而非首个日线', () => {
   assert.equal(pickPreferredWidgetIndex(intervals, 'd'), 0);   // 命名日线等价
 });
 
-test('单图: 只有一个 widget 时永远返回它(保留 V31 数字周期修正)', () => {
+test('单图: 只有一个 widget 时永远返回它(保留 current system 数字周期修正)', () => {
   // context 传来的数字周期怪癖("1" 实为日线)由单图 fallback + 后续修正处理
   assert.equal(pickPreferredWidgetIndex(['1D'], '1'), 0);
   assert.equal(pickPreferredWidgetIndex(['1D'], '1d'), 0);

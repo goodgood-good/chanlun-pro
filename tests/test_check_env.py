@@ -34,7 +34,7 @@ def _modules(*, db_connect=None, config_overrides=None):
             connect=db_connect or (lambda **_kwargs: _CloseableConnection())
         ),
         "redis": SimpleNamespace(Redis=lambda **_kwargs: _RedisClient()),
-        "chanlun.core.cl_interface": object(),
+        "chanlun.core.cl": object(),
         "chanlun.config": SimpleNamespace(**config_values),
     }
 

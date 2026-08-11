@@ -11,16 +11,6 @@ from cl_app import create_app
             {"status": "error", "message": "JSON body must be an object."},
             id="drawings",
         ),
-        pytest.param(
-            "/symbols/prewarm",
-            {"ok": False, "msg": "JSON body must be an object."},
-            id="prewarm",
-        ),
-        pytest.param(
-            "/symbols/prewarm/cancel",
-            {"ok": False, "msg": "JSON body must be an object."},
-            id="prewarm-cancel",
-        ),
     ],
 )
 def test_non_object_json_returns_structured_400(path, expected):

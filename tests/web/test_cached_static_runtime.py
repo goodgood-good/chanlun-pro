@@ -236,31 +236,31 @@ def test_generic_wsgi_full_chart_has_no_vendor_inline_csp_blocks(monkeypatch):
         app.extensions["shutdown_scheduler"]()
 
 
-def test_index_uses_runtime_version_for_unhashed_charting_entrypoint():
+def test_index_uses_runtime_asset_token_for_unhashed_charting_entrypoint():
     template = (ROOT / "web/chanlun_chart/cl_app/templates/index.html").read_text(
         encoding="utf-8"
     )
 
     assert (
-        "charting_library/charting_library.standalone.js') }}?v={{ static_version }}"
+        "charting_library/charting_library.standalone.js') }}?asset={{ static_asset_token }}"
         in template
     )
-    assert "charting_library.standalone.js') }}?version=1.0.0" not in template
+    assert "charting_library.standalone.js') }}?asset=1.0.0" not in template
 
 
-def test_static_version_changes_when_standalone_entrypoint_changes(monkeypatch):
+def test_static_asset_token_changes_when_standalone_entrypoint_changes(monkeypatch):
     app = _wsgi_app()
     processor = next(
         function
         for function in app.template_context_processors[None]
-        if function.__name__ == "inject_static_version"
+        if function.__name__ == "inject_static_asset_token"
     )
     original_getmtime = os.path.getmtime
     standalone_path = os.path.normcase(os.path.abspath(STANDALONE))
 
     try:
         with app.test_request_context("/"):
-            first = processor()["static_version"]
+            first = processor()["static_asset_token"]
             monkeypatch.setattr(
                 os.path,
                 "getmtime",
@@ -268,7 +268,7 @@ def test_static_version_changes_when_standalone_entrypoint_changes(monkeypatch):
                 if os.path.normcase(os.path.abspath(path)) == standalone_path
                 else original_getmtime(path),
             )
-            second = processor()["static_version"]
+            second = processor()["static_asset_token"]
     finally:
         app.extensions["shutdown_scheduler"]()
 

@@ -18,7 +18,7 @@ from chanlun.decision_support.trading_system.runtime_config import (
 )
 
 
-SCHEMA_VERSION = "chanlun-signal-notifications/v1"
+SCHEMA = "chanlun-signal-notifications"
 STRATEGY_ID = STRICT_STRATEGY_ID
 CN = ZoneInfo("Asia/Shanghai")
 _NOTIFIABLE_TRANSITIONS = {
@@ -107,7 +107,7 @@ def _stage_label(stage: str | None) -> str:
 def notification_event_id(signal_id: str, old_stage: str, new_stage: str) -> str:
     payload = json.dumps(
         {
-            "schema": SCHEMA_VERSION,
+            "schema": SCHEMA,
             "signal_id": signal_id,
             "old_stage": old_stage,
             "new_stage": new_stage,
@@ -120,13 +120,9 @@ def notification_event_id(signal_id: str, old_stage: str, new_stage: str) -> str
 
 
 def _defense_price_value(
-    signal: Mapping[str, object],
     setup: Mapping[str, object],
 ) -> object:
-    value = setup.get("invalidation_price")
-    if value is None or not str(value).strip():
-        value = signal.get("structural_stop")
-    return value
+    return setup.get("invalidation_price")
 
 
 def _trigger_occurrence_key(
@@ -147,14 +143,8 @@ def _trigger_occurrence_key(
         ),
         "",
     )
-    # ``point_id`` may change when a completed structure is rebuilt under a
-    # newer price-basis revision.  The visible causal occurrence does not: its
-    # point type and completed-bar time remain the same.  Use the ID only for
-    # legacy documents that lack every causal timestamp.
     trigger_identity = (
-        f"{trigger_type}@{trigger_time}"
-        if trigger_type and trigger_time
-        else str(trigger.get("point_id") or "")
+        f"{trigger_type}@{trigger_time}" if trigger_type and trigger_time else ""
     )
     if not trigger_identity:
         return None
@@ -170,7 +160,7 @@ def _trigger_occurrence_key(
 def _trigger_occurrence_event_id(key: tuple[str, ...]) -> str:
     payload = json.dumps(
         {
-            "schema": "chanlun-signal-notification-trigger-occurrence/v1",
+            "schema": "chanlun-signal-notification-trigger-occurrence",
             "strategy_id": STRATEGY_ID,
             "key": key,
         },
@@ -339,11 +329,9 @@ def _defense_price_text(
     """Render the operation-level structural defense without inventing a price.
 
     The 5-minute setup owns the structure that generated the alert, so its
-    invalidation price is authoritative for both buy and sell signals.  Older
-    buy documents exposed the same value only as ``structural_stop``; retain
-    that field as a compatibility fallback.  A sell defense is an *upper*
-    invalidation boundary, not a downside stop, hence the direction is stated
-    explicitly in the notification.
+    invalidation price is authoritative for both buy and sell signals.  A sell
+    defense is an *upper* invalidation boundary, not a downside stop, hence the
+    direction is stated explicitly in the notification.
     """
 
     raw_values = signal.get("notification_defense_prices")
@@ -358,16 +346,14 @@ def _defense_price_text(
         if isinstance(raw_values, (list, tuple, set, frozenset))
         else ()
     )
-    value = _defense_price_value(signal, setup)
-    rendered = (
-        "、".join(values)
-        if values
-        else _text(value, "待结构确认")
-    )
+    value = _defense_price_value(setup)
+    rendered = "、".join(values) if values else _text(value, "待结构确认")
     side = str(signal.get("side") or "").strip()
     if not side:
         point = str(setup.get("point_type") or signal.get("point_type") or "")
-        side = "buy" if point.endswith("buy") else "sell" if point.endswith("sell") else ""
+        side = (
+            "buy" if point.endswith("buy") else "sell" if point.endswith("sell") else ""
+        )
     if side == "buy":
         return f"{rendered}（跌破买入结构失效）"
     if side == "sell":
@@ -477,10 +463,7 @@ def format_notification(
     lines = [
         f"{name}｜{old_stage_label}→{new_stage_label}｜{confirmed_at}",
         f"结构：{context_text}｜5分钟{setup_point}｜1分钟{trigger_point}",
-        (
-            f"板块：{_text(sector.get('sector_name'))}｜"
-            f"防守价：{defense_price}"
-        ),
+        (f"板块：{_text(sector.get('sector_name'))}｜防守价：{defense_price}"),
         _action_advice(
             signal,
             point_type=effective_point_type,
@@ -543,72 +526,99 @@ class SignalNotificationDispatcher:
             return empty
         if (
             not isinstance(payload, Mapping)
-            or payload.get("schema_version") != SCHEMA_VERSION
+            or payload.get("schema") != SCHEMA
             or not isinstance(payload.get("delivered_event_ids"), list)
+            or set(payload)
+            != {
+                "schema",
+                "delivered_event_ids",
+                "success_count",
+                "failure_count",
+                "last_success_at",
+                "last_success_event_id",
+                "last_failure_at",
+                "last_failure_reason",
+                "suppressed_count",
+                "last_suppressed_at",
+                "last_suppressed_reason",
+                "event_audit",
+                "pending_trigger_events",
+            }
         ):
             return empty
         values = payload["delivered_event_ids"]
         if not all(
-            isinstance(value, str)
-            and value.startswith("sha256:")
-            and len(value) == 71
+            isinstance(value, str) and value.startswith("sha256:") and len(value) == 71
             for value in values
         ):
             return empty
-        delivered = tuple(sorted(set(values)))
-        raw_audit = payload.get("event_audit", [])
-        event_audit = (
-            tuple(dict(value) for value in raw_audit[-_AUDIT_RECORD_LIMIT:])
-            if isinstance(raw_audit, list)
-            and all(isinstance(value, Mapping) for value in raw_audit)
-            else ()
-        )
-        raw_pending = payload.get("pending_trigger_events", {})
-        pending_trigger_events = (
-            {
-                str(event_id): {
-                    "old_stage": str(value.get("old_stage") or ""),
-                    "new_stage": str(value.get("new_stage") or ""),
-                    "queued_at": str(value.get("queued_at") or ""),
-                }
-                for event_id, value in raw_pending.items()
-                if isinstance(event_id, str)
-                and event_id.startswith("sha256:")
-                and isinstance(value, Mapping)
-                and value.get("old_stage") in {"armed", "triggered"}
-                and value.get("new_stage") in {"triggered", "executable"}
-                and _parse_time(value.get("queued_at")) is not None
+        delivered = tuple(values)
+        if delivered != tuple(sorted(set(delivered))):
+            return empty
+        for key in ("success_count", "failure_count", "suppressed_count"):
+            if type(payload[key]) is not int or payload[key] < 0:
+                return empty
+        for key in (
+            "last_success_at",
+            "last_failure_at",
+            "last_suppressed_at",
+        ):
+            value = payload[key]
+            if value is not None and _parse_time(value) is None:
+                return empty
+        for key in (
+            "last_success_event_id",
+            "last_failure_reason",
+            "last_suppressed_reason",
+        ):
+            value = payload[key]
+            if value is not None and (not isinstance(value, str) or not value):
+                return empty
+        last_success_event_id = payload["last_success_event_id"]
+        if last_success_event_id is not None and (
+            not last_success_event_id.startswith("sha256:")
+            or len(last_success_event_id) != 71
+        ):
+            return empty
+        raw_audit = payload["event_audit"]
+        if not isinstance(raw_audit, list) or not all(
+            isinstance(value, Mapping) for value in raw_audit
+        ):
+            return empty
+        event_audit = tuple(dict(value) for value in raw_audit[-_AUDIT_RECORD_LIMIT:])
+        raw_pending = payload["pending_trigger_events"]
+        if not isinstance(raw_pending, Mapping):
+            return empty
+        pending_trigger_events: dict[str, dict[str, str]] = {}
+        for event_id, value in raw_pending.items():
+            if (
+                not isinstance(event_id, str)
+                or not event_id.startswith("sha256:")
+                or len(event_id) != 71
+                or not isinstance(value, Mapping)
+                or set(value) != {"old_stage", "new_stage", "queued_at"}
+                or value.get("old_stage") not in {"armed", "triggered"}
+                or value.get("new_stage") not in {"triggered", "executable"}
+                or _parse_time(value.get("queued_at")) is None
+            ):
+                return empty
+            pending_trigger_events[event_id] = {
+                "old_stage": str(value["old_stage"]),
+                "new_stage": str(value["new_stage"]),
+                "queued_at": str(value["queued_at"]),
             }
-            if isinstance(raw_pending, Mapping)
-            else {}
-        )
-
-        def optional_text(key: str) -> str | None:
-            value = payload.get(key)
-            return value if isinstance(value, str) and value else None
-
-        def nonnegative_int(key: str, fallback: int) -> int:
-            value = payload.get(key, fallback)
-            if isinstance(value, bool):
-                return fallback
-            try:
-                return max(0, int(value))
-            except (TypeError, ValueError):
-                return fallback
 
         return {
             "delivered_event_ids": delivered,
-            # Every legacy ID was persisted only after notifier.send returned
-            # True, so the ID count is an exact lower bound, not an inference.
-            "success_count": nonnegative_int("success_count", len(delivered)),
-            "failure_count": nonnegative_int("failure_count", 0),
-            "last_success_at": optional_text("last_success_at"),
-            "last_success_event_id": optional_text("last_success_event_id"),
-            "last_failure_at": optional_text("last_failure_at"),
-            "last_failure_reason": optional_text("last_failure_reason"),
-            "suppressed_count": nonnegative_int("suppressed_count", 0),
-            "last_suppressed_at": optional_text("last_suppressed_at"),
-            "last_suppressed_reason": optional_text("last_suppressed_reason"),
+            "success_count": payload["success_count"],
+            "failure_count": payload["failure_count"],
+            "last_success_at": payload["last_success_at"],
+            "last_success_event_id": last_success_event_id,
+            "last_failure_at": payload["last_failure_at"],
+            "last_failure_reason": payload["last_failure_reason"],
+            "suppressed_count": payload["suppressed_count"],
+            "last_suppressed_at": payload["last_suppressed_at"],
+            "last_suppressed_reason": payload["last_suppressed_reason"],
             "event_audit": event_audit,
             "pending_trigger_events": pending_trigger_events,
         }
@@ -629,7 +639,7 @@ class SignalNotificationDispatcher:
         temporary.write_text(
             json.dumps(
                 {
-                    "schema_version": SCHEMA_VERSION,
+                    "schema": SCHEMA,
                     "delivered_event_ids": sorted(self._delivered),
                     "success_count": self._success_count,
                     "failure_count": self._failure_count,
@@ -673,7 +683,7 @@ class SignalNotificationDispatcher:
                 status = "awaiting_first_delivery"
                 reason = "NO_NOTIFICATION_EVENT_DUE_OR_DELIVERED"
             return {
-                "schema": "chanlun-signal-notification-readiness/v1",
+                "schema": "chanlun-signal-notification-readiness",
                 "configured": True,
                 "operationally_verified": verified,
                 "status": status,
@@ -689,9 +699,7 @@ class SignalNotificationDispatcher:
                 "last_suppressed_at": self._last_suppressed_at,
                 "last_suppressed_reason": self._last_suppressed_reason,
                 "event_audit_record_count": len(self._event_audit),
-                "pending_trigger_event_count": len(
-                    self._pending_trigger_events
-                ),
+                "pending_trigger_event_count": len(self._pending_trigger_events),
                 "credentials_exposed": False,
                 "real_account_accessed": False,
                 "real_order_transport_enabled": False,
@@ -776,7 +784,7 @@ class SignalNotificationDispatcher:
             after = _signals_by_id(current)
             grouped: dict[
                 tuple[str, ...],
-                list[tuple[str, str, str, Mapping[str, object], str]],
+                list[tuple[str, str, str, Mapping[str, object]]],
             ] = {}
             dirty_state = False
             dispatch_now = self._now()
@@ -784,7 +792,8 @@ class SignalNotificationDispatcher:
                 queued_at = _parse_time(pending.get("queued_at"))
                 if (
                     queued_at is not None
-                    and timedelta(0) <= dispatch_now - queued_at
+                    and timedelta(0)
+                    <= dispatch_now - queued_at
                     <= _PENDING_TRIGGER_MAX_AGE
                 ):
                     continue
@@ -812,9 +821,7 @@ class SignalNotificationDispatcher:
                     str(actual_new_stage),
                 )
                 if current_occurrence is not None:
-                    pending_event_id = _trigger_occurrence_event_id(
-                        current_occurrence
-                    )
+                    pending_event_id = _trigger_occurrence_event_id(current_occurrence)
                     pending = self._pending_trigger_events.get(pending_event_id)
                 if transition in _NOTIFIABLE_TRANSITIONS:
                     old_stage = str(actual_old_stage)
@@ -824,7 +831,7 @@ class SignalNotificationDispatcher:
                     new_stage = str(pending["new_stage"])
                 else:
                     continue
-                legacy_event_id = notification_event_id(
+                signal_event_id = notification_event_id(
                     signal_id,
                     old_stage,
                     new_stage,
@@ -837,7 +844,11 @@ class SignalNotificationDispatcher:
                     if pending_event_id is not None:
                         self._pending_trigger_events.pop(pending_event_id, None)
                     self._record_suppressed(
-                        event_id=legacy_event_id,
+                        event_id=(
+                            pending_event_id
+                            if pending_event_id is not None
+                            else signal_event_id
+                        ),
                         old_stage=old_stage,
                         new_stage=new_stage,
                         document=document,
@@ -849,7 +860,7 @@ class SignalNotificationDispatcher:
                 group_key = (
                     ("trigger", *occurrence_key)
                     if occurrence_key is not None
-                    else ("signal", legacy_event_id)
+                    else ("signal", signal_event_id)
                 )
                 grouped.setdefault(group_key, []).append(
                     (
@@ -857,7 +868,6 @@ class SignalNotificationDispatcher:
                         old_stage,
                         new_stage,
                         document,
-                        legacy_event_id,
                     )
                 )
 
@@ -871,7 +881,9 @@ class SignalNotificationDispatcher:
                 if isinstance(authoritative_raw, (list, tuple, set, frozenset))
                 else set()
             )
-            current_semantic_keys = {_signal_semantic_key(value) for value in after.values()}
+            current_semantic_keys = {
+                _signal_semantic_key(value) for value in after.values()
+            }
             for signal_id, old_document in sorted(before.items()):
                 if (
                     signal_id in after
@@ -891,18 +903,17 @@ class SignalNotificationDispatcher:
                         )
                     )
                 )
-                legacy_event_id = notification_event_id(
+                signal_event_id = notification_event_id(
                     signal_id,
                     old_stage,
                     "invalidated",
                 )
-                grouped.setdefault(("signal", legacy_event_id), []).append(
+                grouped.setdefault(("signal", signal_event_id), []).append(
                     (
                         signal_id,
                         old_stage,
                         "invalidated",
                         document,
-                        legacy_event_id,
                     )
                 )
 
@@ -913,8 +924,7 @@ class SignalNotificationDispatcher:
                     if group_key[0] == "trigger"
                     else group_key[1]
                 )
-                legacy_event_ids = {value[4] for value in candidates}
-                if event_id in self._delivered or self._delivered & legacy_event_ids:
+                if event_id in self._delivered:
                     if self._pending_trigger_events.pop(event_id, None) is not None:
                         dirty_state = True
                     continue
@@ -931,7 +941,7 @@ class SignalNotificationDispatcher:
                         value[0],
                     )
                 )
-                _signal_id, old_stage, new_stage, document, _legacy_id = candidates[0]
+                _signal_id, old_stage, new_stage, document = candidates[0]
                 setup_point_types = tuple(
                     sorted(
                         {
@@ -951,10 +961,7 @@ class SignalNotificationDispatcher:
                     dict.fromkeys(
                         str(value).strip()
                         for value in (
-                            _defense_price_value(
-                                candidate[3],
-                                _mapping(candidate[3].get("setup_5m")),
-                            )
+                            _defense_price_value(_mapping(candidate[3].get("setup_5m")))
                             for candidate in candidates
                         )
                         if value is not None and str(value).strip()
@@ -1011,7 +1018,7 @@ class SignalNotificationDispatcher:
                                     "evidence_required": new_stage
                                     in {"triggered", "executable"},
                                 }
-                            ]
+                            ],
                         }
                         sent = bool(send_rich(title, lines, context))
                     else:
@@ -1081,7 +1088,7 @@ class SignalNotificationDispatcher:
 
 
 __all__ = [
-    "SCHEMA_VERSION",
+    "SCHEMA",
     "STRATEGY_ID",
     "SignalNotificationDispatcher",
     "format_notification",

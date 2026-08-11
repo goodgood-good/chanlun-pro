@@ -12,7 +12,7 @@ class _FakeEx:
         self._trading = trading
         self.calls = 0
 
-    def now_trading(self):
+    def now_trading(self, market: str):
         self.calls += 1
         return self._trading
 

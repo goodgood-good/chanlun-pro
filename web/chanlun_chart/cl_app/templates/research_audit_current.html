@@ -5,8 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="robots" content="noindex,nofollow" />
     <title>当前缠论研究回放 · 统一审计</title>
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/ui-system.css') }}?v={{ static_version|default('') }}" />
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/research_audit.css') }}?v={{ static_version|default('') }}" />
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/ui-system.css') }}?asset={{ static_asset_token|default('') }}" />
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/research_audit.css') }}?asset={{ static_asset_token|default('') }}" />
   </head>
   <body class="cp-ui cp-immersive">
     <a class="cp-skip-link" href="#main-content">跳到审计结果</a>
@@ -220,7 +220,7 @@
           {% if risk_effect.strict_green_risk_eligible_count == 0 and risk_effect.research_green_or_amber_risk_eligible_count > 0 %}
             <div class="ra-notice ra-notice-warning" role="alert">
               <strong>当前成交样本全部不是严格高级别门样本：</strong>
-              冻结 V3 规格规定 AMBER 禁止新仓；本回放仅为“先由程序粗筛、再交给人识别”的研究变体，允许 AMBER 进入人工复核。它不能证明严格整套体系有收益。
+              冻结统一策略 规格规定 AMBER 禁止新仓；本回放仅为“先由程序粗筛、再交给人识别”的研究变体，允许 AMBER 进入人工复核。它不能证明严格整套体系有收益。
             </div>
           {% endif %}
           <div class="ra-track-counts">
@@ -288,7 +288,7 @@
                       {% if convergence.qualified_prefix_count_range %}
                         <span class="ra-subtext">合格前缀 {{ convergence.qualified_prefix_count_range.minimum }}–{{ convergence.qualified_prefix_count_range.maximum }} 个；双窗口稳定但未获全部前缀稳定证明 {{ convergence.pairwise_stable_without_all_prefix_stability_count }} 个候选</span>
                       {% else %}
-                        <span class="ra-subtext">本批没有可计数的多前缀证据；旧归档不得解释为稳定</span>
+                        <span class="ra-subtext">本批缺少可计数的多前缀证据，当前审计不成立</span>
                       {% endif %}
                       {% if subject == 'sector' %}
                         <span class="ra-subtext">严格同源暖机</span>
@@ -364,7 +364,7 @@
                   </table>
                 </div>
               {% else %}
-                <p class="ra-subtext">本批未记录非单调语义差异；旧快照的 <code>NOT_RECORDED_LEGACY</code> 不能解释为稳定。</p>
+                <p class="ra-subtext">本批未记录非单调语义差异。</p>
               {% endif %}
             </details>
             {% set supply_points = row.warmup_mapping_supply_point_audit %}
@@ -395,7 +395,7 @@
                   </table>
                 </div>
               {% else %}
-                <p class="ra-subtext">本批没有保存逐点映射供给差异；<code>NOT_RECORDED_LEGACY</code> 仅表示旧产物缺少该旁路证据。</p>
+                <p class="ra-subtext">本批没有逐点映射供给差异。</p>
               {% endif %}
             </details>
             {% set lineage_points = row.warmup_structure_lineage_point_audit %}
@@ -436,7 +436,7 @@
                   </table>
                 </div>
               {% else %}
-                <p class="ra-subtext">本批没有保存结构谱系差异；<code>NOT_RECORDED_LEGACY</code> 只表示旧产物缺少该诊断，不能解释成结构稳定。</p>
+                <p class="ra-subtext">本批没有结构谱系差异。</p>
               {% endif %}
             </details>
           {% endfor %}
@@ -449,7 +449,7 @@
                   {% set supply = row.mapping_supply_totals %}
                   <tr>
                     <td><strong>{{ {'market': '市场', 'sector': '板块', 'symbol': '个股'}[subject] }}</strong></td>
-                    <td>{{ supply.active_top_period_count }} / {{ supply.retained_mapping_supply_period_count }}<span class="ra-subtext">活动但缺明细 {{ supply.missing_active_mapping_supply_period_count }}</span></td>
+                    <td>{{ supply.active_top_period_count }}<span class="ra-subtext">现行契约要求每个活动顶分型都携带完整供给身份</span></td>
                     <td>{% for code, count in row.mapping_supply_class_counts.items() %}<code>{{ code }}</code> × {{ count }}{% if not loop.last %}<br>{% endif %}{% else %}无可用明细{% endfor %}</td>
                     <td>一卖 {{ row.mapping_point_type_counts.get('1sell', 0) }} · 二卖 {{ row.mapping_point_type_counts.get('2sell', 0) }} · 三卖 {{ row.mapping_point_type_counts.get('3sell', 0) }} · 三买 {{ row.mapping_point_type_counts.get('3buy', 0) }}<span class="ra-subtext">全部低级别点 {{ supply.point_evidence_count }}</span></td>
                     <td>一买 {{ row.diagnostic_buy_point_type_counts.get('1buy', 0) }} · 二买 {{ row.diagnostic_buy_point_type_counts.get('2buy', 0) }}<span class="ra-subtext">{% for code, count in row.diagnostic_directional_class_counts.items() %}<code>{{ code }}</code> × {{ count }}{% if not loop.last %}<br>{% endif %}{% endfor %}</span><span class="ra-subtext">仅解释方向供给，不参与风险门、卖点映射或订单</span></td>
@@ -459,7 +459,7 @@
               </tbody>
             </table>
           </div>
-          <p class="ra-subtext">诊断性一/二买只说明低级别方向供给，不参与风险门、顶分型卖点映射、稳定卖点身份或订单决策；旧快照没有保存该旁路字段时标记为 <code>NOT_RECORDED_LEGACY</code>，不得解释成真实零。</p>
+          <p class="ra-subtext">诊断性一/二买只说明低级别方向供给，不参与风险门、顶分型卖点映射、稳定卖点身份或订单决策。</p>
           <div class="ra-table-wrap ra-table-spaced">
             <table>
               <caption>去重后的活动顶分型事件：按对象、周期和分型区间唯一化，取每个事件最后一次候选观察</caption>
@@ -471,7 +471,7 @@
                   <tr>
                     <td><strong>{{ {'market': '市场', 'sector': '板块', 'symbol': '个股'}[subject] }}</strong></td>
                     <td>{{ unique.candidate_period_exposure_count }} / {{ unique.distinct_active_top_event_count }} / {{ unique.repeated_candidate_exposure_count }}<span class="ra-subtext">单一事件最多被引用 {{ unique.max_candidate_references_to_one_event }} 次</span></td>
-                    <td>不同事件内供给快照 {{ unique.distinct_retained_supply_snapshot_count }}<span class="ra-subtext">供给发生演化的事件 {{ unique.events_with_evolving_supply_count }}；末态缺明细 {{ terminal.missing_terminal_supply_event_count }}</span></td>
+                    <td>不同事件内供给快照 {{ unique.distinct_retained_supply_snapshot_count }}<span class="ra-subtext">供给发生演化的事件 {{ unique.events_with_evolving_supply_count }}</span></td>
                     <td>{% for code, count in unique.terminal_mapping_supply_class_counts.items() %}<code>{{ code }}</code> × {{ count }}{% if not loop.last %}<br>{% endif %}{% else %}无可用末态{% endfor %}</td>
                     <td>一卖 {{ unique.terminal_mapping_point_type_counts.get('1sell', 0) }} · 二卖 {{ unique.terminal_mapping_point_type_counts.get('2sell', 0) }} · 三卖 {{ unique.terminal_mapping_point_type_counts.get('3sell', 0) }} · 三买 {{ unique.terminal_mapping_point_type_counts.get('3buy', 0) }}<span class="ra-subtext">这是事件末态出现次数；下表再按稳定点 ID 全局去重</span></td>
                     <td>一买 {{ unique.terminal_diagnostic_buy_point_type_counts.get('1buy', 0) }} · 二买 {{ unique.terminal_diagnostic_buy_point_type_counts.get('2buy', 0) }}<span class="ra-subtext">{% for code, count in unique.terminal_diagnostic_directional_class_counts.items() %}<code>{{ code }}</code> × {{ count }}{% if not loop.last %}<br>{% endif %}{% endfor %}</span></td>
@@ -491,10 +491,10 @@
                   {% set points = row.globally_deduplicated_point_audit %}
                   <tr>
                     <td><strong>{{ {'market': '市场', 'sector': '板块', 'symbol': '个股'}[subject] }}</strong></td>
-                    <td>{{ points.terminal_event_point_occurrence_count }} / {{ points.identified_terminal_point_occurrence_count }} / {{ points.distinct_point_id_count }} / {{ points.repeated_terminal_point_occurrence_count }}<span class="ra-subtext">无法识别 {{ points.unidentified_terminal_point_occurrence_count }}</span></td>
+                    <td>{{ points.terminal_event_point_occurrence_count }} / {{ points.identified_terminal_point_occurrence_count }} / {{ points.distinct_point_id_count }} / {{ points.repeated_terminal_point_occurrence_count }}</td>
                     <td>一卖 {{ points.distinct_point_type_counts.get('1sell', 0) }} · 二卖 {{ points.distinct_point_type_counts.get('2sell', 0) }} · 三卖 {{ points.distinct_point_type_counts.get('3sell', 0) }} · 三买 {{ points.distinct_point_type_counts.get('3buy', 0) }}</td>
                     <td>来源标的 {{ points.distinct_source_symbol_count }}<span class="ra-subtext">可因果定位 {{ points.chart_focus_supported_point_count }}；暂不可打开 {{ points.chart_focus_unavailable_point_count }}；原始审计内建支持 {{ points.artifact_chart_focus_supported_point_count }}</span></td>
-                    <td><code>{{ points.identity_coverage_status }}</code><span class="ra-subtext">{{ points.identity_contract_id }}</span></td>
+                    <td><code>REQUIRED</code><span class="ra-subtext">{{ points.identity_contract_id }}</span></td>
                   </tr>
                 {% endfor %}
               </tbody>
@@ -557,16 +557,16 @@
                   {% set points = row.globally_deduplicated_diagnostic_buy_point_audit %}
                   <tr>
                     <td><strong>{{ {'market': '市场', 'sector': '板块', 'symbol': '个股'}[subject] }}</strong></td>
-                    <td>{{ points.terminal_event_point_occurrence_count }} / {{ points.identified_terminal_point_occurrence_count }} / {{ points.distinct_point_id_count }} / {{ points.repeated_terminal_point_occurrence_count }}<span class="ra-subtext">无法识别 {{ points.unidentified_terminal_point_occurrence_count }}</span></td>
+                    <td>{{ points.terminal_event_point_occurrence_count }} / {{ points.identified_terminal_point_occurrence_count }} / {{ points.distinct_point_id_count }} / {{ points.repeated_terminal_point_occurrence_count }}</td>
                     <td>一买 {{ points.distinct_point_type_counts.get('1buy', 0) }} · 二买 {{ points.distinct_point_type_counts.get('2buy', 0) }}<span class="ra-subtext"><code>DIAGNOSTIC_ONLY</code> · <code>MAPPING_ELIGIBLE=false</code></span></td>
                     <td>来源标的 {{ points.distinct_source_symbol_count }}<span class="ra-subtext">可因果定位 {{ points.chart_focus_supported_point_count }}；暂不可打开 {{ points.chart_focus_unavailable_point_count }}；原始审计内建支持 {{ points.artifact_chart_focus_supported_point_count }}</span></td>
-                    <td><code>{{ points.identity_coverage_status }}</code><span class="ra-subtext">{{ points.identity_contract_id }}</span></td>
+                    <td><code>REQUIRED</code><span class="ra-subtext">{{ points.identity_contract_id }}</span></td>
                   </tr>
                 {% endfor %}
               </tbody>
             </table>
           </div>
-          <p class="ra-subtext">全对象诊断合计：有身份的事件末态出现 {{ global_diagnostic_points.identified_terminal_point_occurrence_count }} 次，稳定诊断买点 {{ global_diagnostic_points.distinct_point_id_count }} 个；无法识别 {{ global_diagnostic_points.unidentified_terminal_point_occurrence_count }} 次。诊断身份契约与冻结卖点映射身份完全分离，页面复核不能提升其交易资格。</p>
+          <p class="ra-subtext">全对象诊断合计：有身份的事件末态出现 {{ global_diagnostic_points.identified_terminal_point_occurrence_count }} 次，稳定诊断买点 {{ global_diagnostic_points.distinct_point_id_count }} 个。诊断身份契约与冻结卖点映射身份完全分离，页面复核不能提升其交易资格。</p>
           {% for subject, row in risk_effect.subjects.items() %}
             {% set point_audit = row.globally_deduplicated_diagnostic_buy_point_audit %}
             <details class="ra-point-details">
@@ -762,7 +762,7 @@
         <section class="ra-section ra-error" role="alert">
           <p class="ra-section-index">FAIL CLOSED · NO RESULT DISPLAYED</p>
           <h2>当前回放结果不能安全展示</h2>
-          <p>统一审计门检测到当前结果缺失、内容被改动，或其回放决策核心快照已落后于工作区。系统没有回退到旧报告，也没有展示可能过期的收益数字。</p>
+          <p>统一审计门检测到当前结果缺失、内容被改动，或其回放决策核心快照已落后于工作区，因此不展示收益数字。</p>
           <p>错误码：<code>{{ audit_error_code or 'current_research_artifact_invalid' }}</code></p>
         </section>
       {% endif %}

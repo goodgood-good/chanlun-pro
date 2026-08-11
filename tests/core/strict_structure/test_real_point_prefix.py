@@ -10,23 +10,26 @@ from chanlun.core.strict_structure.base_profile import strict_base_config
 
 
 FIXTURES = Path(__file__).resolve().parents[2] / "fixtures"
-GOLDEN = Path(__file__).resolve().parents[1] / "golden" / "strict_points_v10.json"
+GOLDEN = Path(__file__).resolve().parents[1] / "golden" / "strict_points.json"
 
 
 def strict_config():
     return {
         **strict_base_config(),
         "structure_price_quantum": "0.01",
-        "price_basis_revision": "test-raw-v1",
-        "skip_legacy_zslx": True,
-        "skip_legacy_mmd": True,
+        "price_basis_revision": "test-raw",
+        "strict_config_revision": "sha256:test-strict-runtime",
     }
 
 
 def load_frame(name, rows):
-    return pd.read_parquet(FIXTURES / name)[
-        ["date", "open", "high", "low", "close", "volume"]
-    ].head(rows).reset_index(drop=True)
+    return (
+        pd.read_parquet(FIXTURES / name)[
+            ["date", "open", "high", "low", "close", "volume"]
+        ]
+        .head(rows)
+        .reset_index(drop=True)
+    )
 
 
 def append_row(cd, row):
@@ -42,7 +45,7 @@ def append_row(cd, row):
 
 def assert_point_prefix(name, code, frequency, start, end, *, require_points):
     frame = load_frame(name, end)
-    incremental = CL(code, frequency, strict_config())
+    incremental = CL(code, frequency, strict_config(), market="a")
     incremental.process_klines(frame.head(start))
     frozen = {}
 
@@ -60,7 +63,7 @@ def assert_point_prefix(name, code, frequency, start, end, *, require_points):
                 assert point.available_at == evidence.source_closed_at
         frozen = current
 
-    batch = CL(code, frequency, strict_config())
+    batch = CL(code, frequency, strict_config(), market="a")
     batch.process_klines(frame)
     assert batch.get_strict_evidence().confirmed_points == tuple(
         sorted(
@@ -89,21 +92,19 @@ def _golden_point(point):
         "available_at": point.available_at.isoformat(),
         "variant": point.variant.value,
         "strength_source": (
-            None
-            if point.divergence is None
-            else point.divergence.strength_source
+            None if point.divergence is None else point.divergence.strength_source
         ),
     }
 
 
-def build_v10_golden_document():
+def build_golden_document():
     rows = 1100
     frame = load_frame("SZ.002299_1m.parquet", rows)
-    cd = CL("SZ.002299", "1m", strict_config())
+    cd = CL("SZ.002299", "1m", strict_config(), market="a")
     cd.process_klines(frame)
     evidence = cd.get_strict_evidence()
     points = [_golden_point(point) for point in evidence.confirmed_points]
-    assert points, "v10 golden fixture must remain non-vacuous"
+    assert points, "current golden fixture must remain non-vacuous"
     return {
         "code": "SZ.002299",
         "dataset": "tests/fixtures/SZ.002299_1m.parquet",
@@ -111,8 +112,9 @@ def build_v10_golden_document():
         "points": points,
         "price_basis_revision": evidence.price_basis_revision,
         "rows": rows,
-        "schema_version": "chanlun-strict-points-golden/v10",
+        "schema": "chanlun-strict-points-golden",
         "source_closed_at": evidence.source_closed_at.isoformat(),
+        "strict_config_revision": evidence.strict_config_revision,
         "structure_price_quantum": str(evidence.structure_price_quantum),
     }
 
@@ -139,16 +141,22 @@ def test_zhongji_real_point_ledger_is_prefix_stable_and_non_vacuous():
     )
 
 
-def test_zhongji_real_points_match_audited_v10_golden():
+def test_zhongji_real_points_match_audited_golden():
     expected = json.loads(GOLDEN.read_text(encoding="utf-8"))
     frame = load_frame("SZ.002299_1m.parquet", expected["rows"])
-    cd = CL(expected["code"], expected["frequency"], strict_config())
+    cd = CL(
+        expected["code"],
+        expected["frequency"],
+        strict_config(),
+        market="a",
+    )
     cd.process_klines(frame)
     evidence = cd.get_strict_evidence()
 
-    assert expected["schema_version"] == "chanlun-strict-points-golden/v10"
+    assert expected["schema"] == "chanlun-strict-points-golden"
     assert evidence.source_closed_at.isoformat() == expected["source_closed_at"]
     assert evidence.price_basis_revision == expected["price_basis_revision"]
+    assert evidence.strict_config_revision == expected["strict_config_revision"]
     assert str(evidence.structure_price_quantum) == expected["structure_price_quantum"]
     assert [_golden_point(point) for point in evidence.confirmed_points] == expected[
         "points"

@@ -4,6 +4,7 @@
 选对应 trading_session(Market.HK/US)+ 本地时区。"""
 
 import datetime
+import pytest
 
 from longbridge.openapi import Market
 
@@ -40,7 +41,7 @@ def test_now_trading_us_reads_us_session():
     assert cq.now_trading("hk") is False
 
 
-def test_now_trading_default_market_us_backcompat():
-    # 无参调用(向后兼容其余直调方)默认按 us
+def test_now_trading_rejects_unknown_market():
     cq = _mk_cq([_FakeSession(Market.US, _FULL_DAY), _FakeSession(Market.HK, [])])
-    assert cq.now_trading() is True
+    with pytest.raises(ValueError, match="unsupported Longbridge"):
+        cq.now_trading("fx")

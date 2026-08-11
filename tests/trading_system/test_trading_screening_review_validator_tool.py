@@ -24,7 +24,7 @@ def test_materializer_receipt_binds_nested_decision_source_identity(
     source_hash = "sha256:" + "1" * 64
     decision_source_id = "sha256:" + "2" * 64
     stable: dict[str, object] = {
-        "schema": "chanlun-v3-human-review-screen/v1",
+        "schema": "chanlun-human-review-screen",
         "data_grade": "HUMAN_REVIEW_SCREENING",
         "highest_status": "REVIEW_REQUIRED",
         "live_status": "LIVE_DISABLED",

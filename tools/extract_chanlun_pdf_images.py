@@ -29,7 +29,7 @@ TRUSTED_IDENTITY = PdfIdentity(
     page_count=2_533,
     sha256="867b1262af2d3430b98421df4c5372748eb75a4eb7600cd967ecdc374817429e",
 )
-EXTRACTOR_VERSION = "lesson-image/pdfplumber-0.11.10+pillow-12/2"
+EXTRACTOR_ID = "lesson-image/pdfplumber-0.11.10+pillow-12"
 EXPECTED_ASSET_COUNT = 2_783
 EXPECTED_OCCURRENCE_COUNT = 2_816
 EXPECTED_PRIMARY_RAW_BYTES = 1_343_589_074
@@ -84,7 +84,7 @@ def archive_pdf_pages_incrementally(
     identity: PdfIdentity,
     lesson_by_page,
     blocks_by_page,
-    extractor_version: str,
+    extractor_id: str,
     expected_asset_count: int | None = None,
     expected_occurrence_count: int | None = None,
     expected_primary_raw_bytes: int | None = None,
@@ -94,7 +94,7 @@ def archive_pdf_pages_incrementally(
     with IncrementalLessonImageCacheBuilder(
         target,
         identity=identity,
-        extractor_version=extractor_version,
+        extractor_id=extractor_id,
     ) as builder:
         for page_number, page in enumerate(pages, start=1):
             result = None
@@ -105,7 +105,7 @@ def archive_pdf_pages_incrementally(
                     lesson_number=lesson_by_page.get(page_number),
                     source_pdf_sha256=identity.sha256,
                     page_text_blocks=tuple(blocks_by_page.get(page_number, ())),
-                    classifier_version=extractor_version,
+                    classifier_id=extractor_id,
                 )
                 builder.add_batch(
                     assets=result.assets,
@@ -160,7 +160,7 @@ def _report(inventory, elapsed_seconds: float, cache_action: str, target: Path) 
         "cache_action": cache_action,
         "cache_path": str(target),
         "elapsed_seconds": round(elapsed_seconds, 3),
-        "extractor_version": EXTRACTOR_VERSION,
+        "extractor_id": EXTRACTOR_ID,
         "materialized_chart_asset_count": len(inventory.materialized_paths),
         "materialized_chart_bytes": sum(
             path.stat().st_size for path in inventory.materialized_paths.values()
@@ -210,7 +210,7 @@ def main() -> int:
                 identity=verified,
                 lesson_by_page=lesson_by_page,
                 blocks_by_page=blocks_by_page,
-                extractor_version=EXTRACTOR_VERSION,
+                extractor_id=EXTRACTOR_ID,
                 expected_asset_count=EXPECTED_ASSET_COUNT,
                 expected_occurrence_count=EXPECTED_OCCURRENCE_COUNT,
                 expected_primary_raw_bytes=EXPECTED_PRIMARY_RAW_BYTES,

@@ -1,10 +1,8 @@
-"""由应用进程托管 V3 人工复核前向模拟调度。
+"""由应用进程托管统一策略人工复核前向模拟调度。
 
-长期运行的 ``app.py`` 是业务调度的唯一所有者。Windows 任务计划程序只保留为
-QMT 与网页进程的启动、恢复机制；本控制器启用后，不再由它执行盘前快照采集或
-盘后评估。
+长期运行的 ``app.py`` 是业务调度的唯一所有者。
 
-每个阶段仍通过全新的 Python 进程运行 ``tools/run_v3_forward_paper.py``，以保留
+每个阶段仍通过全新的 Python 进程运行 ``tools/run_forward_paper.py``，以保留
 工具的实现来源证明，并保证页面、历史回放和前向样本共用同一冻结决策核心。
 本控制器不会打开账户，也不会启用订单通道。
 """
@@ -27,7 +25,7 @@ from chanlun.decision_support.trading_system.file_lock import (
     InterprocessLockTimeout,
     interprocess_file_lock,
 )
-from chanlun.decision_support.trading_system.v3_trading_session import (
+from chanlun.decision_support.trading_system.trading_session import (
     resolve_trading_session_requirement,
 )
 from .app_runtime_owner import pid_alive
@@ -36,21 +34,21 @@ from .job_names import JOB_DISPLAY_NAMES
 
 CN = ZoneInfo("Asia/Shanghai")
 APP_FORWARD_CONTRACT_ID = (
-    "chanlun-v3-forward-scheduler/app-runtime-contract/v1"
+    "chanlun-forward-scheduler/app-runtime-contract"
 )
-APP_FORWARD_STATE_SCHEMA = "chanlun-v3-app-forward-runtime-state/v1"
-APP_FORWARD_OWNER_SCHEMA = "chanlun-v3-forward-execution-owner/v1"
-FORWARD_READINESS_SCHEMA = "chanlun-v3-forward-scheduler-readiness/v1"
-QMT_RUNTIME_SCHEMA = "chanlun-qmt-runtime-readiness/v1"
+APP_FORWARD_STATE_SCHEMA = "chanlun-app-forward-runtime-state"
+APP_FORWARD_OWNER_SCHEMA = "chanlun-forward-execution-owner"
+FORWARD_READINESS_SCHEMA = "chanlun-forward-scheduler-readiness"
+QMT_RUNTIME_SCHEMA = "chanlun-qmt-runtime-readiness"
 
-CAPTURE_JOB_ID = "v3_forward_capture"
-EVALUATE_JOB_ID = "v3_forward_evaluate"
-RECONCILE_JOB_ID = "v3_forward_reconcile"
-STARTUP_JOB_ID = "v3_forward_startup_reconcile"
+CAPTURE_JOB_ID = "forward_capture"
+EVALUATE_JOB_ID = "forward_evaluate"
+RECONCILE_JOB_ID = "forward_reconcile"
+STARTUP_JOB_ID = "forward_startup_reconcile"
 
 _TASKS = {
-    "CAPTURE": "Chanlun-V3-Forward-Capture",
-    "EVALUATE": "Chanlun-V3-Forward-Evaluate",
+    "CAPTURE": "chanlun-app-forward-capture",
+    "EVALUATE": "chanlun-app-forward-evaluate",
 }
 _TERMINAL_PHASE_STATES = {"SUCCEEDED", "NO_SAMPLE"}
 _SAFETY = {
@@ -97,12 +95,7 @@ def _read_mapping(path: Path) -> dict[str, object] | None:
 def discover_qmt_local_data_dir(
     configured: str | os.PathLike[str] | None = None,
 ) -> Path | None:
-    """Resolve one read-only QMT ``datadir`` without starting QMT.
-
-    Explicit configuration wins.  The bounded ``D:/software/*`` discovery is
-    retained only for compatibility with the existing, already-audited
-    PowerShell runner.  Zero or multiple matches fail closed.
-    """
+    """Resolve the explicitly configured read-only QMT ``datadir``."""
 
     raw = configured or os.environ.get("CHANLUN_QMT_LOCAL_DATA_DIR")
     if raw is not None and str(raw).strip():
@@ -114,23 +107,7 @@ def discover_qmt_local_data_dir(
             )
         return candidate
 
-    software_root = Path("D:/software")
-    if not software_root.is_dir():
-        return None
-    matches = sorted(
-        candidate.resolve()
-        for child in software_root.iterdir()
-        if child.is_dir()
-        for candidate in (child / "userdata_mini" / "datadir",)
-        if (candidate / "Sector" / "Temple" / "GICS").is_dir()
-    )
-    if not matches:
-        return None
-    if len(matches) != 1:
-        raise RuntimeError(
-            f"expected exactly one local QMT data directory, found {len(matches)}"
-        )
-    return matches[0]
+    return None
 
 
 def evaluation_readiness_from_health(
@@ -249,7 +226,7 @@ class AppForwardSchedulerController:
             else (
                 self._root
                 / ".cache"
-                / "chanlun_v3_human_review_forward"
+                / "chanlun_human_review_forward"
             ).resolve()
         )
         self._qmt = (
@@ -263,7 +240,7 @@ class AppForwardSchedulerController:
         self._clock = clock or (lambda: datetime.now(CN))
         self._runner = runner
         self._python = Path(python_executable or sys.executable).resolve()
-        runtime_root = self._root / ".cache" / "chanlun_v3_scheduler"
+        runtime_root = self._root / ".cache" / "chanlun_scheduler"
         self._state_path = state_path or runtime_root / "app_forward_runtime.json"
         self._owner_path = owner_path or runtime_root / "forward_execution_owner.json"
         self._execution_lock_path = runtime_root / "app_forward_execution.lock"
@@ -296,7 +273,7 @@ class AppForwardSchedulerController:
             reasons.append("APP_FORWARD_JOBS_NOT_REGISTERED")
         if not self._python.is_file():
             reasons.append("PINNED_PYTHON_UNAVAILABLE")
-        if not (self._root / "tools" / "run_v3_forward_paper.py").is_file():
+        if not (self._root / "tools" / "run_forward_paper.py").is_file():
             reasons.append("FORWARD_TOOL_UNAVAILABLE")
         if self._qmt is None or not (
             self._qmt / "Sector" / "Temple" / "GICS"
@@ -343,7 +320,7 @@ class AppForwardSchedulerController:
                 and self._pid_alive(existing.get("pid"))
             ):
                 raise RuntimeError(
-                    "another live app process owns V3 forward scheduling"
+                    "another live app process owns strict strategy forward scheduling"
                 )
             _atomic_json(self._owner_path, self._owner_payload(observed_at))
 
@@ -418,8 +395,8 @@ class AppForwardSchedulerController:
         with self._state_lock:
             # ``scheduler.shutdown(wait=False)`` deliberately keeps web
             # shutdown bounded.  If a child phase is still running, retain the
-            # owner marker until process exit so a legacy Windows task cannot
-            # overlap that child during migration.
+            # Keep the owner marker until process exit so no second scheduler
+            # can overlap the active child.
             if self._attempt_lock.locked():
                 self._registered = False
                 return
@@ -552,7 +529,7 @@ class AppForwardSchedulerController:
     def _command(self, phase: str, session: date) -> list[str]:
         command = [
             str(self._python),
-            str(self._root / "tools" / "run_v3_forward_paper.py"),
+            str(self._root / "tools" / "run_forward_paper.py"),
             "--root",
             str(self._forward_root),
             "--qmt-local-data-dir",

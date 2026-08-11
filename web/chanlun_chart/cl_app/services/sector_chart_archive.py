@@ -22,8 +22,8 @@ import pandas as pd
 from chanlun.decision_support.fingerprints import sha256_json
 
 
-SECTOR_CHART_ARCHIVE_SCHEMA = "chanlun-v3-sector-chart-evidence-archive/v1"
-SECTOR_CHART_FRAME_SCHEMA = "chanlun-v3-sector-chart-frame/v1"
+SECTOR_CHART_ARCHIVE_SCHEMA = "chanlun-sector-chart-evidence-archive"
+SECTOR_CHART_FRAME_SCHEMA = "chanlun-sector-chart-frame"
 SECTOR_CHART_ARCHIVE_RELATIVE_PATH = Path(
     "audit/chanlun_trading_system_backtest/"
     "recent_year_current_sector_no3p_mwd_strength/"

@@ -323,7 +323,7 @@ def write_nav_and_ncx(
         )
         play_order += 1
 
-    identifier = "urn:uuid:" + str(uuid.uuid5(uuid.NAMESPACE_URL, f"chanlun-reading-volume-v2-{volume.index}"))
+    identifier = "urn:uuid:" + str(uuid.uuid5(uuid.NAMESPACE_URL, f"chanlun-reading-volume-{volume.index}"))
     (oebps / "toc.ncx").write_text(
         f"""<?xml version="1.0" encoding="UTF-8"?>
 <ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">
@@ -351,7 +351,7 @@ def write_opf(
     image_hrefs: list[str],
     image_page_hrefs: list[str],
 ) -> None:
-    identifier = "urn:uuid:" + str(uuid.uuid5(uuid.NAMESPACE_URL, f"chanlun-reading-volume-v2-{volume.index}"))
+    identifier = "urn:uuid:" + str(uuid.uuid5(uuid.NAMESPACE_URL, f"chanlun-reading-volume-{volume.index}"))
     manifest_items = [
         '<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>',
         '<item id="toc" href="toc.ncx" media-type="application/x-dtbncx+xml"/>',

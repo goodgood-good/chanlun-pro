@@ -290,56 +290,9 @@ def correct_toc_pages(entries: list[TocEntry], starts: dict[int, int]) -> list[s
     return notes
 
 
-def refresh_titles_from_start_pages(entries: list[TocEntry], pages: list[str]) -> list[str]:
-    notes: list[str] = []
-    for entry in entries:
-        if entry.num is None or entry.page < 1 or entry.page > len(pages):
-            continue
-        lines = [line.strip() for line in page_body_lines(pages[entry.page - 1], entry.page) if line.strip()]
-        candidates: list[str] = []
-        for idx, line in enumerate(lines[:6]):
-            if not is_heading_line(line, entry.num):
-                continue
-            candidate = line.split("在流程图", 1)[0].strip()
-            if idx + 1 < len(lines) and re.match(r"^\(\d{4}-\d{2}-\d{2}\s+\d{1,2}:\d{2}:\d{1,2}\)$", lines[idx + 1]):
-                candidate = f"{candidate}{lines[idx + 1]}"
-            candidates.append(candidate)
-        if not candidates:
-            continue
-        candidates.sort(key=lambda item: (("在流程图" in item), -len(item)))
-        title = clean_toc_title(candidates[0])
-        if title and title != entry.title:
-            notes.append(f"更新第 {entry.num} 课标题: {entry.title} -> {title}")
-            entry.title = title
-    return notes
-
-
 def is_heading_line(line: str, num: int) -> bool:
     compact = normalize_for_match(line)
     return f"教你炒股票{num}:" in compact
-
-
-def strip_leading_lesson_heading(lines: list[str], entry: TocEntry) -> list[str]:
-    if entry.num is None:
-        return lines
-    result = list(lines)
-    removed_heading = False
-    for _ in range(4):
-        if not result:
-            break
-        stripped = result[0].strip()
-        if not stripped:
-            result.pop(0)
-            continue
-        if not removed_heading and is_heading_line(stripped, entry.num):
-            result.pop(0)
-            removed_heading = True
-            continue
-        if removed_heading and is_parenthesized_datetime(stripped):
-            result.pop(0)
-            continue
-        break
-    return result
 
 
 def next_nonblank_index(lines: list[str], start: int) -> int | None:

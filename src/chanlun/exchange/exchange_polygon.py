@@ -34,8 +34,6 @@ class ExchangePolygon(Exchange):
 
         self.client = RESTClient(config.POLYGON_APIKEY)
 
-        self.trade_days = None
-
         self.tz = pytz.timezone("US/Eastern")
 
     def default_code(self):
@@ -131,9 +129,7 @@ class ExchangePolygon(Exchange):
                 # 回看时长从统一表读取，修改请改 _lookback.py
                 from chanlun.exchange._lookback import get_lookback_timedelta
 
-                start_date = end_date - get_lookback_timedelta(
-                    frequency, default=dt.timedelta(days=30)
-                )
+                start_date = end_date - get_lookback_timedelta(frequency)
             else:
                 if len(start_date) == 10:  # B2(Round8): 修 typo(此处 end_date 已转 datetime), 应判 start_date
                     start_date = fun.str_to_datetime(start_date, "%Y-%m-%d")
@@ -191,7 +187,7 @@ class ExchangePolygon(Exchange):
     def ticks(self, codes: List[str]) -> Dict[str, Tick]:
         raise Exception("交易所不支持")
 
-    def now_trading(self):
+    def now_trading(self, market: str):
         """
         返回当前是否是交易时间
         """
@@ -214,25 +210,3 @@ class ExchangePolygon(Exchange):
 
     def order(self, code: str, o_type: str, amount: float, args=None):
         raise Exception("交易所不支持")
-
-
-if __name__ == "__main__":
-    ex = ExchangePolygon()
-
-    tickers = ex.client.list_tickers(
-        type="CS", market="stocks", active=True, limit=1000
-    )
-    stocks = []
-    for t in tickers:
-        stocks.append(
-            {
-                "ticker": t.ticker,
-                "exchange": t.primary_exchange,
-                "name": t.name,
-                "currency": t.currency_name,
-                "last_updated": t.last_updated_utc,
-            }
-        )
-
-    print(stocks)
-    print(len(stocks))

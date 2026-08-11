@@ -63,7 +63,7 @@ class ExchangeBinanceSpot(Exchange):
             "1m": "1m",
         }
 
-    def now_trading(self):
+    def now_trading(self, market: str):
         """
         返回交易时间，数字货币 24 小时可交易
         """
@@ -387,9 +387,6 @@ class ExchangeBinanceSpot(Exchange):
     def positions(self, code: str = ""):
         raise RuntimeWarning("交易接口未实现")
 
-    def cancel_all_order(self, code):
-        raise RuntimeWarning("交易接口未实现")
-
     def order(self, code: str, o_type: str, amount: float, args=None):
         raise RuntimeWarning("交易接口未实现")
 
@@ -398,14 +395,3 @@ class ExchangeBinanceSpot(Exchange):
 
     def plate_stocks(self, code: str):
         raise Exception("交易所不支持")
-
-
-if __name__ == "__main__":
-    ex = ExchangeBinanceSpot()
-
-    stocks = ex.all_stocks()
-    print(len(stocks))
-    stocks = sorted(stocks, key=lambda x: x["precision"], reverse=True)
-    for _s in stocks[0:10]:
-        print(_s)
-

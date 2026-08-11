@@ -76,7 +76,7 @@ class ExchangeIB(Exchange):
         self.cache[f"search_stock_{search}"] = res
         return res
 
-    def now_trading(self):
+    def now_trading(self, market: str):
         """
         TODO 暂时还没有找到接口，直接硬编码
         周一致周五，美国东部时间，9:30 - 16:00
@@ -239,29 +239,13 @@ class ExchangeIB(Exchange):
         args = {"key": self.uid()}
         rd.Robj().lpush(CmdEnum.BALANCE.value, json.dumps(args))
 
-        # Demo
-        # {
-        # 'AccruedCash': 792.27, 'AvailableFunds': 1000694.26, 'BuyingPower': 4002777.02,
-        # 'EquityWithLoanValue': 1000784.36, 'ExcessLiquidity': 1000702.45,
-        # 'FullAvailableFunds': 1000694.26, 'FullExcessLiquidity': 1000702.45,
-        # 'FullInitMarginReq': 90.1, 'FullMaintMarginReq': 81.91, 'GrossPositionValue': 267.7,
-        # 'InitMarginReq': 90.1, 'LookAheadAvailableFunds': 1000694.26,
-        # 'LookAheadExcessLiquidity': 1000702.45, 'LookAheadInitMarginReq': 90.1,
-        # 'LookAheadMaintMarginReq': 81.91, 'MaintMarginReq': 81.91, 'NetLiquidation': 1000784.36,
-        # 'SMA': 1000650.51, 'TotalCashValue': 999724.39
-        # }
         balance = rd.Robj().brpop(args["key"], timeout=30)
         if balance is None:
             return None
         return json.loads(balance[1])
 
     def positions(self, code: str = ""):
-        """
-        获取当前持仓
-
-        DEMO:
-        [{'code': 'NVDA', 'account': 'DU6941075', 'avgCost': 273.93, 'position': 1.0}]
-        """
+        """获取当前持仓。"""
         args = {"key": self.uid(), "code": code}
         rd.Robj().lpush(CmdEnum.POSITIONS.value, json.dumps(args))
 
@@ -281,10 +265,3 @@ class ExchangeIB(Exchange):
         if res is None:
             return False
         return json.loads(res[1])
-
-
-if __name__ == "__main__":
-    ex = ExchangeIB()
-
-    stock_info = ex.stock_info('META')
-    print(stock_info)

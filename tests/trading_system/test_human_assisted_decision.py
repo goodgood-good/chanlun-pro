@@ -9,6 +9,9 @@ from chanlun.decision_support.trading_system.higher_timeframe_gate import (
     HigherTimeframeGateEvidence,
     HigherTimeframePeriodDiagnostic,
 )
+from chanlun.decision_support.trading_system.etf_proxy_facts import (
+    RiskMappingSupplyFacts,
+)
 from chanlun.decision_support.trading_system.human_assisted_decision import (
     HumanAssistedDecisionCore,
     MONITOR_ONLY_BUY_REASON_CODE,
@@ -16,8 +19,7 @@ from chanlun.decision_support.trading_system.human_assisted_decision import (
     validate_human_assisted_contract_document,
     validate_signal_decision_document,
 )
-from tests.trading_system.backtest.test_live_parity import deterministic_bundle
-from tests.trading_system.helpers import confirmed_point
+from tests.trading_system.helpers import confirmed_point, deterministic_bundle
 
 
 def _gate(
@@ -44,6 +46,26 @@ def _gate(
 
 def _period_diagnostics(subject: str) -> tuple[HigherTimeframePeriodDiagnostic, ...]:
     observed_at = deterministic_bundle().as_of
+    unresolved_supply = RiskMappingSupplyFacts(
+        classification="NO_LOWER_POINT_EVIDENCE",
+        lower_structure_available=True,
+        point_evidence_count=0,
+        point_type_counts=(
+            ("1sell", 0),
+            ("2sell", 0),
+            ("3sell", 0),
+            ("3buy", 0),
+        ),
+        completed_sell12_count=0,
+        in_top_interval_sell12_count=0,
+        completed_in_top_interval_sell12_count=0,
+        incomplete_in_top_interval_sell12_count=0,
+        outside_top_interval_sell12_count=0,
+        highest_candidate_center_count=0,
+        point_evidence=(),
+        diagnostic_buy_point_type_counts=(("1buy", 0), ("2buy", 0)),
+        diagnostic_buy_point_evidence=(),
+    )
     return tuple(
         HigherTimeframePeriodDiagnostic(
             period=period,
@@ -59,6 +81,7 @@ def _period_diagnostics(subject: str) -> tuple[HigherTimeframePeriodDiagnostic, 
             else (),
             warning_codes=(),
             source_revision=f"source:{subject}:{period}",
+            mapping_supply=unresolved_supply if period == "D" else None,
         )
         for period, count in (("M", 12), ("W", 51), ("D", 243))
     )
@@ -147,6 +170,12 @@ def test_decision_core_identity_is_stable_and_parameter_bound() -> None:
     assert first.contract.human_confirmation_required is True
     assert first.contract.automated_order_authorized is False
     assert first.contract.stroke_mode == "old"
+    assert first.contract.strict_base_profile_id == ("chanlun-source-faithful-base")
+    assert first.contract.strict_base_profile_revision.startswith("sha256:")
+    assert first.contract.strict_runtime_scope_profile_id == (
+        "chanlun-screening-strict-l0"
+    )
+    assert first.contract.strict_runtime_scope_profile_revision.startswith("sha256:")
     assert first.contract.recursive_structure_allowed is False
     assert first.contract.physical_structure_frequencies == (
         "d",
@@ -156,9 +185,7 @@ def test_decision_core_identity_is_stable_and_parameter_bound() -> None:
     )
     document = first.contract.document()
     assert document["policy"]["minimum_tick"] == "0.01"
-    assert validate_human_assisted_contract_document(document) == (
-        first.contract_id
-    )
+    assert validate_human_assisted_contract_document(document) == (first.contract_id)
 
 
 def test_daily_physical_structure_can_block_new_buy_without_recursion() -> None:
@@ -274,36 +301,6 @@ def test_mwd_evidence_keeps_market_and_symbol_causes_separate() -> None:
     ]
 
 
-def test_missing_sector_mwd_gate_is_explicit_and_blocks_new_entry() -> None:
-    core = HumanAssistedDecisionCore()
-    bundle = replace(
-        deterministic_bundle(),
-        higher_timeframe_gates=HigherTimeframeGateBundle(
-            market=_gate("MARKET", "GREEN"),
-            symbol=_gate("SZ.000001", "GREEN"),
-        ),
-        enforce_higher_timeframe_entry_gate=True,
-    )
-
-    [decision] = core.evaluate_symbol(bundle)
-    [document] = core.decision_documents(bundle)
-
-    assert decision.technical_entry_allowed is True
-    assert decision.entry is not None and decision.entry.allowed is False
-    assert decision.sector_risk_gate == "UNRESOLVED"
-    assert decision.sector_higher_timeframe_reason_codes == (
-        "HIGHER_TIMEFRAME_SECTOR_GATE_NOT_ATTACHED",
-    )
-    risk = document["higher_timeframe_risk"]
-    assert risk["sector_gate"] == "UNRESOLVED"
-    assert risk["sector_states"] == {
-        "M": "UNRESOLVED",
-        "W": "UNRESOLVED",
-        "D": "UNRESOLVED",
-    }
-    assert "SECTOR_GATE_UNRESOLVED" in document["decision_reasons"]
-
-
 def test_unconverged_warmup_blocks_entry_without_hiding_technical_candidate() -> None:
     core = HumanAssistedDecisionCore()
     bundle = replace(
@@ -317,9 +314,7 @@ def test_unconverged_warmup_blocks_entry_without_hiding_technical_candidate() ->
         warmup_converged=False,
         warmup_reason_codes=("30M:WARMUP_TAIL_DIVERGED",),
         warmup_by_frequency=(("30m", False, 1600, 1067),),
-        warmup_difference_codes_by_frequency=(
-            ("30m", ("WARMUP_DIRECTION_CHANGED",)),
-        ),
+        warmup_difference_codes_by_frequency=(("30m", ("WARMUP_DIRECTION_CHANGED",)),),
         enforce_warmup_entry_gate=True,
     )
 

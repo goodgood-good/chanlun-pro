@@ -1,9 +1,8 @@
 """Round11 N5: Binance order() 规范化返回 {price:成交均价, amount:成交量}。
 
 ccxt 市价单 create_order 典型返回 price=None(成交均价在 average)、amount=请求量(成交量在
-filled), 原样返回致 trader_currency 记 None 价污染账本(msg/db.order_save)+ 平仓分支
-res['price']*res['amount'] None 算术 TypeError。ccxt 未装, 注入 stub 后 object.__new__ 绕
-__init__ 测 order() 纯规范化逻辑。★真 Binance 需灰度验证 create_order 返回口径与 mock 一致。
+filled)。适配器必须返回真实成交均价与成交量。ccxt 未装时注入 stub，并通过 object.__new__
+绕过 __init__ 测试纯规范化逻辑。
 """
 
 import sys

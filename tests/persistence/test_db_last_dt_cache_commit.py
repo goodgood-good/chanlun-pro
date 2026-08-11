@@ -42,18 +42,30 @@ def _bar(date="2024-01-01 15:00:00"):
     )
 
 
+def _force_last_dt_cache(db_obj, market, code, frequency, value):
+    with db_obj._last_dt_cache_lock:
+        key = (market, code, frequency)
+        db_obj._last_dt_cache_generation.setdefault(key, 0)
+        db_obj._last_dt_cache[key] = value
+
+
+def _last_dt_cache_value(db_obj, market, code, frequency):
+    with db_obj._last_dt_cache_lock:
+        return db_obj._last_dt_cache.get((market, code, frequency))
+
+
 def test_insert_invalidates_last_datetime_cache_after_commit(monkeypatch):
     db_obj = _isolated_db(monkeypatch)
     code = "SH.910001"
-    db_obj._set_last_dt_cache("a", code, "d", "old")
+    _force_last_dt_cache(db_obj, "a", code, "d", "old")
 
     def repopulate_stale_cache(_session):
-        db_obj._set_last_dt_cache("a", code, "d", "stale-during-commit")
+        _force_last_dt_cache(db_obj, "a", code, "d", "stale-during-commit")
 
     event.listen(db_obj.Session.class_, "after_commit", repopulate_stale_cache)
     db_obj.klines_insert("a", code, "d", _bar())
 
-    assert db_obj._get_last_dt_cache("a", code, "d") is None
+    assert _last_dt_cache_value(db_obj, "a", code, "d") is None
 
 
 def test_delete_all_frequencies_invalidates_each_cache_key_after_commit(monkeypatch):
@@ -62,8 +74,8 @@ def test_delete_all_frequencies_invalidates_each_cache_key_after_commit(monkeypa
     db_obj._last_dt_cache_generation = {}
     db_obj._last_dt_cache_lock = threading.Lock()
     code = "SH.920002"
-    db_obj._set_last_dt_cache("a", code, "d", "old-d")
-    db_obj._set_last_dt_cache("a", code, "5m", "old-5m")
+    _force_last_dt_cache(db_obj, "a", code, "d", "old-d")
+    _force_last_dt_cache(db_obj, "a", code, "5m", "old-5m")
 
     class DeleteQuery:
         def filter(self, *_args):
@@ -83,7 +95,7 @@ def test_delete_all_frequencies_invalidates_each_cache_key_after_commit(monkeypa
             return DeleteQuery()
 
         def commit(self):
-            db_obj._set_last_dt_cache("a", code, "d", "stale-during-commit")
+            _force_last_dt_cache(db_obj, "a", code, "d", "stale-during-commit")
 
         def rollback(self):
             pass
@@ -97,8 +109,8 @@ def test_delete_all_frequencies_invalidates_each_cache_key_after_commit(monkeypa
     db_obj.klines_tables = lambda _market, _code: table
     db_obj.klines_delete("a", code)
 
-    assert db_obj._get_last_dt_cache("a", code, "d") is None
-    assert db_obj._get_last_dt_cache("a", code, "5m") is None
+    assert _last_dt_cache_value(db_obj, "a", code, "d") is None
+    assert _last_dt_cache_value(db_obj, "a", code, "5m") is None
 
 
 class _Field:
@@ -174,5 +186,5 @@ def test_reader_cannot_repopulate_stale_last_datetime_after_commit_invalidation(
 
     assert not reader.is_alive()
     assert result == ["2024-01-02"]
-    assert db_obj._get_last_dt_cache("a", "SH.910003", "d") == "2024-01-02"
+    assert _last_dt_cache_value(db_obj, "a", "SH.910003", "d") == "2024-01-02"
     assert query.calls == 2

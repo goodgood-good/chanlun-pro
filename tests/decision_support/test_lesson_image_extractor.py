@@ -93,7 +93,7 @@ def test_extract_page_image_evidence_deduplicates_assets_but_keeps_draws() -> No
         lesson_number=16,
         source_pdf_sha256="a" * 64,
         page_text_blocks=(caption,),
-        classifier_version="lesson-image/1",
+        classifier_id="lesson-image",
     )
 
     digest = hashlib.sha256(_VALID_JPEG).hexdigest()
@@ -105,7 +105,7 @@ def test_extract_page_image_evidence_deduplicates_assets_but_keeps_draws() -> No
     assert result.occurrences[0].source_role is SourceRole.LESSON_CHART
     assert result.occurrences[1].source_role is SourceRole.UNKNOWN_IMAGE
     assert result.occurrences[0].occurrence_id != result.occurrences[1].occurrence_id
-    assert result.materialized_raw_by_sha256 == {digest: _VALID_JPEG}
+    assert result.primary_raw_by_sha256 == {digest: _VALID_JPEG}
 
 
 def test_front_matter_bleed_records_raw_draw_box_and_clipped_visible_box() -> None:
@@ -126,7 +126,7 @@ def test_front_matter_bleed_records_raw_draw_box_and_clipped_visible_box() -> No
         lesson_number=None,
         source_pdf_sha256="a" * 64,
         page_text_blocks=(),
-        classifier_version="lesson-image/1",
+        classifier_id="lesson-image",
     )
 
     occurrence = result.occurrences[0]
@@ -137,4 +137,3 @@ def test_front_matter_bleed_records_raw_draw_box_and_clipped_visible_box() -> No
     assert occurrence.source_role is SourceRole.UNKNOWN_IMAGE
     assert result.primary_raw_by_sha256 == {primary_sha256: _VALID_JPEG}
     assert result.smask_raw_by_sha256 == {smask_sha256: b"alpha-mask"}
-    assert result.materialized_raw_by_sha256 == result.primary_raw_by_sha256

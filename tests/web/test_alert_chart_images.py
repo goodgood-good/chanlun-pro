@@ -70,7 +70,6 @@ def test_public_route_requires_signature_and_returns_png(tmp_path: Path) -> None
             "ALERT_CHART_PUBLIC_BASE_URL": "http://47.96.40.233:8890",
             "ALERT_CHART_ROOT": tmp_path,
             "TRADING_SCREENING_DINGTALK_WEBHOOK": "",
-            "EARLY_SCREENING_DINGTALK_WEBHOOK": "",
         }
     )
     store = app.extensions["alert_chart_image_store"]

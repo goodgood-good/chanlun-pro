@@ -42,7 +42,7 @@ def empty_structure(*, with_level=False):
         )
         center_result = CenterLevelResult(
             structural_level=0,
-            price_basis_revision="test-raw-v1",
+            price_basis_revision="test-raw",
             centers=(),
             previews=(),
             events=(),
@@ -59,8 +59,8 @@ def empty_structure(*, with_level=False):
             ),
         )
     return StrictStructureResult(
-        schema_version="chanlun-structure/v3",
-        price_basis_revision="test-raw-v1",
+        schema="chanlun-structure",
+        price_basis_revision="test-raw",
         levels=levels,
     )
 
@@ -68,7 +68,7 @@ def empty_structure(*, with_level=False):
 def observation_result(*, replay_from=0):
     return CenterLevelResult(
         structural_level=0,
-        price_basis_revision="test-raw-v1",
+        price_basis_revision="test-raw",
         centers=(),
         previews=(),
         events=(),
@@ -127,8 +127,8 @@ def evidence_bundle(
     revision = build_strict_evidence_revision(
         symbol="SZ.000001",
         source_frequency="1m",
-        price_basis_revision="test-raw-v1",
-        strict_config_revision="strict-config-v1",
+        price_basis_revision="test-raw",
+        strict_config_revision="strict-config",
         structure=formal,
         confirmed_points=confirmed_points,
         divergences=divergences,
@@ -137,9 +137,9 @@ def evidence_bundle(
         symbol="SZ.000001",
         source_frequency="1m",
         source_closed_at=NOW + timedelta(hours=1),
-        price_basis_revision="test-raw-v1",
+        price_basis_revision="test-raw",
         structure_price_quantum=Decimal("0.01"),
-        strict_config_revision="strict-config-v1",
+        strict_config_revision="strict-config",
         structure_revision=revision,
         structure=formal,
         stroke_center_observations=stroke_observations or observation_result(),
@@ -236,15 +236,15 @@ def test_atomic_bundle_rejects_future_structure_without_any_points():
         available_at=NOW + timedelta(hours=2, minutes=10),
     )
     structure = StrictStructureResult(
-        schema_version="chanlun-structure/v3",
-        price_basis_revision="test-raw-v1",
+        schema="chanlun-structure",
+        price_basis_revision="test-raw",
         levels=(
             StrictLevelResult(
                 structural_level=0,
                 units=(future_unit,),
                 center_result=CenterLevelResult(
                     structural_level=0,
-                    price_basis_revision="test-raw-v1",
+                    price_basis_revision="test-raw",
                     centers=(),
                     previews=(),
                     events=(),
@@ -277,7 +277,7 @@ def test_atomic_bundle_rejects_missing_recursive_unit_lineage():
             units=units,
             center_result=CenterLevelResult(
                 structural_level=number,
-                price_basis_revision="test-raw-v1",
+                price_basis_revision="test-raw",
                 centers=(),
                 previews=(),
                 events=(),
@@ -289,8 +289,8 @@ def test_atomic_bundle_rejects_missing_recursive_unit_lineage():
         )
 
     structure = StrictStructureResult(
-        schema_version="chanlun-structure/v3",
-        price_basis_revision="test-raw-v1",
+        schema="chanlun-structure",
+        price_basis_revision="test-raw",
         levels=(level(0, (lower,)), level(1, (higher,))),
     )
 

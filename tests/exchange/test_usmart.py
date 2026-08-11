@@ -378,8 +378,8 @@ def test_market_state_maps_open_closed_and_failure_to_three_states():
         "hk", client=_QuoteClient(lambda *_: {"status": 7})
     )
 
-    assert open_exchange.now_trading() is True
-    assert closed_exchange.now_trading() is False
+    assert open_exchange.now_trading("us") is True
+    assert closed_exchange.now_trading("us") is False
 
 
 def test_factory_builds_independent_usmart_adapter_for_each_market(monkeypatch):

@@ -27,14 +27,13 @@ def strict_config():
     return {
         **strict_base_config(),
         "structure_price_quantum": "0.01",
-        "price_basis_revision": "test-raw-v1",
-        "skip_legacy_zslx": True,
-        "skip_legacy_mmd": True,
+        "price_basis_revision": "test-raw",
+        "strict_config_revision": "sha256:test-strict-runtime",
     }
 
 
 def make_cd(frame, rows=800):
-    cd = CL("SH.600519", "5m", strict_config())
+    cd = CL("SH.600519", "5m", strict_config(), market="a")
     cd.process_klines(frame.head(rows))
     return cd
 
@@ -53,14 +52,8 @@ def test_cl_strict_points_can_expose_each_of_six_point_types(
         def __init__(self, **_kwargs):
             pass
 
-        def first_class_points(self):
-            return (points["1buy"], points["1sell"])
-
-        def second_class_points(self, _first):
-            return (points["2buy"], points["2sell"])
-
-        def third_class_points(self):
-            return (points["3buy"], points["3sell"])
+        def confirmed_points(self):
+            return tuple(points.values())
 
     monkeypatch.setattr(
         "chanlun.core.strict_structure.signals.StrictSignalEngine",
@@ -125,7 +118,7 @@ def test_atomic_strict_evidence_uses_one_cl_generation(sample_frame):
 def test_atomic_strict_evidence_uses_bound_runtime_config_revision(sample_frame):
     config = strict_config()
     config["strict_config_revision"] = "sha256:runtime-bound-test"
-    cd = CL("SH.600519", "5m", config)
+    cd = CL("SH.600519", "5m", config, market="a")
     cd.process_klines(sample_frame.head(800))
 
     assert cd.get_strict_evidence().strict_config_revision == config[

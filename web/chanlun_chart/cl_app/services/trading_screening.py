@@ -34,12 +34,9 @@ from chanlun.decision_support.trading_system.decision_source_provenance import (
 )
 from chanlun.decision_support.trading_system.human_assisted_decision import (
     HumanAssistedDecisionCore,
-    MONITOR_ONLY_BUY_REASON_CODE,
-    SIGNAL_DECISION_DOCUMENT_SCHEMA,
     apply_sector_selection_scope as _apply_selection_scope,
     sector_decision_document,
     serialize_evaluated_signal,
-    signal_decision_document_id,
 )
 from chanlun.decision_support.trading_system.higher_timeframe_gate import (
     HIGHER_TIMEFRAME_SESSION_EVIDENCE_CONTRACT_ID,
@@ -85,32 +82,31 @@ from chanlun.decision_support.trading_system.sector_strength import (
     build_sector_member_history_diagnostics,
     sector_strength_batch_from_evidence_document,
 )
-from chanlun.decision_support.trading_system.v3_live_human_review import (
+from chanlun.decision_support.trading_system.live_human_review import (
     COVERAGE_EXCLUSION_REASON_CODES,
+    COVERAGE_MANIFEST_FIELDS,
     COVERAGE_MANIFEST_SCHEMA,
     COVERAGE_STATE_CONTRACT_ID,
     MONITOR_INSTRUMENT_EXCLUSION_CONTRACT_ID,
     SECTOR_COVERAGE_CONTRACT_ID,
     SIGNAL_DOCUMENT_CONTRACT_ID,
     live_screening_snapshot_content_sha256,
-    live_screening_semantic_snapshot_document,
-    live_review_risk_evidence_replay_codes,
     monitor_instrument_exclusions_are_consistent,
     screening_coverage_epoch_id,
     validate_live_review_snapshot,
 )
-from chanlun.decision_support.trading_system.v3_qmt_same_base_stream import (
+from chanlun.decision_support.trading_system.qmt_same_base_stream import (
     QMT_COMPLETED_ONE_MINUTE_GRID_REVISION,
 )
-from chanlun.decision_support.trading_system.v3_qmt_higher_timeframe import (
+from chanlun.decision_support.trading_system.qmt_higher_timeframe import (
     QMT_HIGHER_TIMEFRAME_WARMUP_EVIDENCE_CONTRACT_ID,
     QMT_HIGHER_TIMEFRAME_WARMUP_REQUIRED_DAILY_BARS,
 )
-from chanlun.decision_support.trading_system.v3_qmt_native_daily_bridge import (
+from chanlun.decision_support.trading_system.qmt_native_daily_bridge import (
     QMT_NATIVE_DAILY_CALENDAR_COVERAGE_EVIDENCE_CONTRACT_ID,
     QMT_NATIVE_DAILY_RECONCILIATION_CONTRACT_ID,
 )
-from chanlun.decision_support.trading_system.v3_trading_session import (
+from chanlun.decision_support.trading_system.trading_session import (
     official_trading_session_evidence,
 )
 from chanlun.decision_support.trading_system.warmup_convergence import (
@@ -142,25 +138,6 @@ from cl_app.services.trading_screening_gateway import (
 )
 
 
-_LEGACY_SIGNAL_DOCUMENT_CONTRACT_IDS = frozenset(
-    {
-        None,
-        "chanlun-human-assisted-signal-document/v2",
-        "chanlun-human-assisted-signal-document/v3",
-        "chanlun-human-assisted-signal-document/v4",
-        "chanlun-human-assisted-signal-document/v5",
-        "chanlun-human-assisted-signal-document/v6",
-        "chanlun-human-assisted-signal-document/v7",
-        # V8 already carries every decision fact required by the deterministic
-        # V9 identity migration below.  Omitting it here made that migration
-        # unreachable and silently discarded a resumable full-market queue on
-        # app restart.
-        "chanlun-human-assisted-signal-document/v8",
-        # V9 predates the explicit ``formed`` lifecycle.  Its evidence is
-        # sufficient for a deterministic stage migration without replaying QMT.
-        "chanlun-human-assisted-signal-document/v9",
-    }
-)
 _KNOWN_MONITOR_INSTRUMENT_TYPES = frozenset(
     {
         "stock_cn",
@@ -174,9 +151,8 @@ _KNOWN_MONITOR_INSTRUMENT_TYPES = frozenset(
 _TRADABLE_MONITOR_INSTRUMENT_TYPES = frozenset({"stock_cn", "etf_cn"})
 
 
-SCHEMA_VERSION = "chanlun-trading-screening/v3"
+SCHEMA = "chanlun-trading-screening"
 POINT_TYPES = ("1buy", "2buy", "3buy", "1sell", "2sell", "3sell")
-HEALTH_REPLAY_CODE_SAMPLE_LIMIT = 64
 CN = ZoneInfo("Asia/Shanghai")
 # 次日候选池的重计算属于收盘后任务。15:05 为 QMT 写入 15:00 已完成分钟线
 # 预留一个很小的落盘缓冲；全市场覆盖一旦开始，即使超过窗口也会由 pending
@@ -192,7 +168,18 @@ PRIORITY_MONITOR_MORNING_START = datetime_time(9, 31)
 PRIORITY_MONITOR_MORNING_END = datetime_time(11, 31)
 PRIORITY_MONITOR_AFTERNOON_START = datetime_time(13, 1)
 PRIORITY_MONITOR_AFTERNOON_END = datetime_time(15, 1)
-PRIORITY_MONITOR_SCHEMA = "chanlun-priority-signal-monitor/v1"
+PRIORITY_MONITOR_SCHEMA = "chanlun-priority-signal-monitor"
+CANDIDATE_MONITOR_CONTRACT_ID = "bar-cadence-live-candidate-monitor"
+CANDIDATE_MONITOR_LANE_1M = "CURRENT_1M"
+CANDIDATE_MONITOR_LANE_5M = "CURRENT_5M"
+CANDIDATE_MONITOR_LANE_30M = "CURRENT_30M"
+_CANDIDATE_MONITOR_LANES = frozenset(
+    {
+        CANDIDATE_MONITOR_LANE_1M,
+        CANDIDATE_MONITOR_LANE_5M,
+        CANDIDATE_MONITOR_LANE_30M,
+    }
+)
 MARKET_CLOSE_CUTOFF = datetime_time(15)
 COMPLETE_CLOSE_IDLE_REASON = "COMPLETE_CLOSE_SNAPSHOT_OUTSIDE_ACTIVE_WINDOW"
 FULL_COVERAGE_PAUSE_REASON = "OUTSIDE_FULL_COVERAGE_REFRESH_WINDOW"
@@ -470,7 +457,7 @@ def _coverage_sector_probe_required(
     Outside the two deliberate daily boundaries, a restart is not a new
     decision time.  Recomputing the same sector structures merely because the
     Python process changed can alter structural point identities and mix two
-    evidence versions in one coverage epoch.  The post-close and pre-open
+    evidence identities in one coverage epoch. The post-close and pre-open
     windows remain the only places where a complete epoch is probed for a new
     market/catalog revision.
     """
@@ -635,10 +622,13 @@ _PRIORITY_BUY_STAGE_RANK = {
     "active": 6,
 }
 
+_CURRENT_MINUTE_BUY_STAGES = frozenset({"armed", "triggered", "executable", "active"})
+
 
 def _priority_buy_candidate_codes(
     *signal_groups: tuple[Mapping[str, object], ...],
     excluded_codes: frozenset[str] = frozenset(),
+    allowed_stages: frozenset[str] | None = None,
 ) -> tuple[str, ...]:
     """Return non-owned buy candidates in operational urgency order.
 
@@ -665,6 +655,7 @@ def _priority_buy_candidate_codes(
                 or not point_type.endswith("buy")
                 or not isinstance(stage, str)
                 or stage in {"closed", "invalidated"}
+                or (allowed_stages is not None and stage not in allowed_stages)
             ):
                 continue
             rank = (_PRIORITY_BUY_STAGE_RANK.get(stage, 10**6), code)
@@ -672,6 +663,105 @@ def _priority_buy_candidate_codes(
             if previous is None or rank < previous:
                 best_rank[code] = rank
     return tuple(sorted(best_rank, key=best_rank.__getitem__))
+
+
+def _take_due_candidate_batch(
+    universe: tuple[str, ...],
+    *,
+    last_success_at: Mapping[str, datetime],
+    observed_at: datetime,
+    target_seconds: int,
+    monitor_interval_seconds: int,
+    max_symbols: int,
+    excluded_codes: frozenset[str] = frozenset(),
+    previous_monitor_at: datetime | None = None,
+) -> tuple[str, ...]:
+    """Take the oldest due bar-cadence candidates within honest capacity.
+
+    The target is a maximum observation age, not a promise that every symbol
+    is recomputed on every one-minute scheduler tick.  A 5m setup cannot
+    change between completed 5m bars, so the scheduler spreads that universe
+    across the five minute ticks.  If a slow prior pass consumed multiple
+    ticks, the requested share grows proportionally and the hard cap makes any
+    capacity shortfall visible through health instead of blocking the 1m lane
+    indefinitely.
+    """
+
+    if target_seconds <= 0 or monitor_interval_seconds <= 0 or max_symbols <= 0:
+        raise ValueError("candidate cadence limits must be positive")
+    observed = normalize_datetime(observed_at, "observed_at")
+    values = tuple(
+        code for code in dict.fromkeys(universe) if code not in excluded_codes
+    )
+    if not values:
+        return ()
+    elapsed_seconds = monitor_interval_seconds
+    if previous_monitor_at is not None:
+        previous = normalize_datetime(
+            previous_monitor_at,
+            "previous candidate monitor at",
+        )
+        if observed >= previous:
+            elapsed_seconds = max(
+                monitor_interval_seconds,
+                int((observed - previous).total_seconds()),
+            )
+    planned = max(
+        1,
+        (len(values) * min(elapsed_seconds, target_seconds) + target_seconds - 1)
+        // target_seconds,
+    )
+    due: list[tuple[bool, datetime, str]] = []
+    minimum = datetime.min.replace(tzinfo=observed.tzinfo)
+    for code in values:
+        last_at = last_success_at.get(code)
+        if last_at is None:
+            due.append((False, minimum, code))
+            continue
+        last = normalize_datetime(last_at, f"{code} candidate last_success_at")
+        if observed < last or (observed - last).total_seconds() >= target_seconds:
+            due.append((True, last, code))
+    due.sort()
+    return tuple(value[2] for value in due[: min(max_symbols, planned)])
+
+
+def _candidate_lane_coverage(
+    universe: tuple[str, ...],
+    *,
+    last_success_at: Mapping[str, datetime],
+    observed_at: datetime,
+    target_seconds: int,
+) -> dict[str, object]:
+    """Describe actual cadence coverage without treating unseen as current."""
+
+    observed = normalize_datetime(observed_at, "observed_at")
+    unique = tuple(dict.fromkeys(universe))
+    missing = 0
+    overdue = 0
+    oldest_age: float | None = None
+    for code in unique:
+        last_at = last_success_at.get(code)
+        if last_at is None:
+            missing += 1
+            continue
+        last = normalize_datetime(last_at, f"{code} candidate last_success_at")
+        age = max(0.0, (observed - last).total_seconds())
+        oldest_age = age if oldest_age is None else max(oldest_age, age)
+        if observed < last or age > target_seconds:
+            overdue += 1
+    current = max(0, len(unique) - missing - overdue)
+    return {
+        "universe_count": len(unique),
+        "current_count": current,
+        "missing_count": missing,
+        "overdue_count": overdue,
+        "coverage_ratio": (
+            "1" if not unique else str(Decimal(current) / Decimal(len(unique)))
+        ),
+        "oldest_observation_age_seconds": oldest_age,
+        "target_seconds": target_seconds,
+        "ready": missing == 0 and overdue == 0,
+    }
 
 
 def _main_notification_context(
@@ -711,7 +801,7 @@ def _main_notification_context(
         realtime_eligible = False
         reason_code = "FROZEN_COVERAGE_CUTOFF_STALE"
     return {
-        "schema": "chanlun-realtime-notification-context/v1",
+        "schema": "chanlun-realtime-notification-context",
         "realtime_eligible": realtime_eligible,
         "reason_code": reason_code,
         "source": (
@@ -768,7 +858,7 @@ def _screening_policy_document() -> dict[str, object]:
         ),
         "sector_higher_timeframe_frequencies": ["M", "W", "D"],
         "sector_higher_timeframe_membership_provenance": (
-            "exact_members_sample_coverage_price_grid_and_path_v6"
+            "exact_members_sample_coverage_price_grid_and_path"
         ),
         "stock_structure_frequencies": ["d", "30m", "5m", "1m"],
         "stroke_mode": "old",
@@ -780,7 +870,7 @@ def _screening_policy_document() -> dict[str, object]:
         "qmt_one_minute_grid_revision": (QMT_COMPLETED_ONE_MINUTE_GRID_REVISION),
         "tick_data_used": False,
         "selection_universe_source": "qmt_gics3_current_components",
-        "monitor_instrument_eligibility": ("qmt_native_stock_or_etf_fail_closed_v1"),
+        "monitor_instrument_eligibility": ("qmt_native_stock_or_etf_fail_closed"),
         "sector_strength_qmt_dividend_type": (QMT_SECTOR_STRENGTH_QMT_DIVIDEND_TYPE),
         "sector_strength_adjustment": QMT_SECTOR_STRENGTH_ADJUSTMENT,
         "sector_strength_price_basis_contract": (
@@ -797,7 +887,7 @@ def _screening_policy_document() -> dict[str, object]:
             QMT_HIGHER_TIMEFRAME_WARMUP_REQUIRED_DAILY_BARS * 8
         ),
         "higher_timeframe_warmup_convergence_contract": (
-            "drop_oldest_third_compare_mwd_state_mapping_and_ma5_v1"
+            "drop_oldest_third_compare_mwd_state_mapping_and_ma5"
         ),
         "higher_timeframe_warmup_entry_policy": (
             "fail_closed_on_insufficient_or_diverged"
@@ -944,14 +1034,18 @@ class TradingScreeningConfig:
     max_monitor_symbols_per_refresh: int = 64
     max_total_symbols_per_refresh: int = 32
     priority_monitoring_enabled: bool = False
-    max_priority_monitor_symbols_per_refresh: int = 64
+    full_coverage_refresh_enabled: bool = True
     priority_monitor_interval_seconds: int = 60
+    max_five_minute_candidate_symbols_per_refresh: int = 256
+    max_thirty_minute_candidate_symbols_per_refresh: int = 96
+    five_minute_candidate_target_seconds: int = 300
+    thirty_minute_candidate_target_seconds: int = 1800
     stock_worker_count: int = 1
     min_scan_completion_ratio: Decimal = Decimal("0.80")
     max_structure_age_seconds: int = 3600
-    algorithm_version: str = STRICT_STRATEGY_ID
-    structure_version: str = "physical-timeframe-l0-v1"
-    parameter_version: str = "old-pen-v1"
+    algorithm_id: str = STRICT_STRATEGY_ID
+    structure_contract_id: str = "physical-timeframe-l0"
+    parameter_set_id: str = "old-pen"
 
     def __post_init__(self) -> None:
         if self.refresh_interval_seconds <= 0:
@@ -961,26 +1055,34 @@ class TradingScreeningConfig:
             or self.max_symbols_per_refresh <= 0
             or self.max_monitor_symbols_per_refresh <= 0
             or self.max_total_symbols_per_refresh <= 0
-            or self.max_priority_monitor_symbols_per_refresh <= 0
+            or self.max_five_minute_candidate_symbols_per_refresh <= 0
+            or self.max_thirty_minute_candidate_symbols_per_refresh <= 0
             or self.stock_worker_count <= 0
         ):
             raise ValueError("screening limits must be positive")
         if self.priority_monitor_interval_seconds <= 0:
             raise ValueError("priority monitor interval must be positive")
+        if (
+            self.five_minute_candidate_target_seconds
+            < self.priority_monitor_interval_seconds
+            or self.thirty_minute_candidate_target_seconds
+            < self.five_minute_candidate_target_seconds
+        ):
+            raise ValueError("candidate cadence targets are inconsistent")
         if not Decimal("0") < self.min_scan_completion_ratio <= Decimal("1"):
             raise ValueError("min_scan_completion_ratio must be in (0, 1]")
         if self.max_structure_age_seconds <= 0:
             raise ValueError("max_structure_age_seconds must be positive")
-        if not self.algorithm_version:
-            raise ValueError("algorithm_version cannot be empty")
+        if not self.algorithm_id:
+            raise ValueError("algorithm_id cannot be empty")
 
 
 def _initial_snapshot(config: TradingScreeningConfig) -> dict[str, object]:
     return {
-        "schema_version": SCHEMA_VERSION,
-        "algorithm_version": config.algorithm_version,
-        "structure_version": config.structure_version,
-        "parameter_version": config.parameter_version,
+        "schema": SCHEMA,
+        "algorithm_id": config.algorithm_id,
+        "structure_contract_id": config.structure_contract_id,
+        "parameter_set_id": config.parameter_set_id,
         "available": False,
         "scan_state": "not_started",
         "last_batch_state": "not_started",
@@ -1070,6 +1172,8 @@ def _initial_snapshot(config: TradingScreeningConfig) -> dict[str, object]:
             "universe_revision": None,
             "sector_catalog_revision": None,
             "sector_strength_evidence_revision": None,
+            "superseded_coverage_epoch_id": None,
+            "superseded_market_data_as_of": None,
             "discovered_codes": [],
             "completed_codes": [],
             "excluded_codes": [],
@@ -1357,7 +1461,7 @@ def _coverage_sector_state_from_snapshot(
     multi-batch scan must therefore reuse the same assessment documents after a
     process restart; re-running the sector analyzer at the same bar cutoff can
     produce a different structural point identity and silently mix two evidence
-    versions in one otherwise unchanged epoch.
+    identities in one otherwise unchanged epoch.
     """
 
     raw_sectors = snapshot.get("sectors")
@@ -1477,70 +1581,6 @@ def _coverage_sector_state_from_snapshot(
     return batch, members
 
 
-def _sector_evidence_replay_codes(
-    snapshot: Mapping[str, object],
-    *,
-    sector_members: Mapping[str, tuple[str, ...]] | None,
-) -> tuple[str, ...]:
-    """Return only stock rows whose embedded sector decision no longer matches."""
-
-    raw_sectors = snapshot.get("sectors")
-    raw_signals = snapshot.get("signals")
-    if not isinstance(raw_sectors, list) or not isinstance(raw_signals, list):
-        return ()
-    sectors = {
-        str(value.get("sector_id")): value
-        for value in raw_sectors
-        if isinstance(value, Mapping) and isinstance(value.get("sector_id"), str)
-    }
-    replay: set[str] = set()
-    for signal in raw_signals:
-        if not isinstance(signal, Mapping) or not isinstance(signal.get("code"), str):
-            continue
-        code = str(signal["code"])
-        raw_sector = signal.get("sector")
-        sources = signal.get("selection_sources")
-        if not isinstance(raw_sector, Mapping) or not isinstance(sources, list):
-            replay.add(code)
-            continue
-        sector_id = raw_sector.get("sector_id")
-        expected = sectors.get(str(sector_id))
-        if expected is None:
-            if sector_id != "unclassified" or "QMT_SECTOR_TRIGGER" in sources:
-                replay.add(code)
-            continue
-        expected_signal_sector = dict(expected)
-        expected_signal_sector["rank"] = None
-        member_codes = (
-            None
-            if sector_members is None
-            else set(sector_members.get(str(sector_id), ()))
-        )
-        triggered = "QMT_SECTOR_TRIGGER" in sources
-        eligible_scope = "QMT_SECTOR_ELIGIBLE_SCOPE" in sources
-        if (
-            dict(raw_sector) != expected_signal_sector
-            or triggered
-            and (
-                expected.get("eligible") is not True
-                or expected.get("regime") != "supportive"
-                or type(expected.get("rank")) is not int
-                or member_codes is not None
-                and code not in member_codes
-            )
-            or eligible_scope
-            and (
-                expected.get("eligible") is not True
-                or expected.get("regime") == "supportive"
-                or type(expected.get("rank")) is not int
-                or member_codes is not None
-                and code not in member_codes
-            )
-        ):
-            replay.add(code)
-    return tuple(sorted(replay))
-
-
 def _chart_urls(code: str) -> dict[str, str]:
     intervals = {"d": "D", "30m": "30", "5m": "5", "1m": "1"}
     return {
@@ -1568,10 +1608,7 @@ def _signal_document(
     document["chart_urls"] = _chart_urls(str(document["code"]))
     if higher_timeframe_gates is not None and (
         higher_timeframe_gates.market.session_evidence is not None
-        or (
-            higher_timeframe_gates.sector is not None
-            and higher_timeframe_gates.sector.session_evidence is not None
-        )
+        or (higher_timeframe_gates.sector.session_evidence is not None)
         or higher_timeframe_gates.symbol.session_evidence is not None
     ):
         risk = document.get("higher_timeframe_risk")
@@ -1586,13 +1623,11 @@ def _signal_document(
             or HigherTimeframeSessionEvidence.unavailable()
         )
         sector_evidence = (
-            None
-            if higher_timeframe_gates.sector is None
-            else higher_timeframe_gates.sector.session_evidence
+            higher_timeframe_gates.sector.session_evidence
         ) or HigherTimeframeSessionEvidence.unavailable()
         # Presentation-only extension: these facts explain an already
         # fail-closed M/W/D result and never participate in decision identity.
-        # The extension carries its own contract so v7 coverage can continue
+        # The extension carries its own contract so coverage can continue
         # without replaying already-completed symbols merely to add prose.
         risk["session_evidence_contract_id"] = (
             HIGHER_TIMEFRAME_SESSION_EVIDENCE_CONTRACT_ID
@@ -1602,10 +1637,7 @@ def _signal_document(
         risk["symbol_session_evidence"] = symbol_evidence.document()
     if higher_timeframe_gates is not None and (
         higher_timeframe_gates.market.warmup_evidence is not None
-        or (
-            higher_timeframe_gates.sector is not None
-            and higher_timeframe_gates.sector.warmup_evidence is not None
-        )
+        or (higher_timeframe_gates.sector.warmup_evidence is not None)
         or higher_timeframe_gates.symbol.warmup_evidence is not None
     ):
         risk = document.get("higher_timeframe_risk")
@@ -1621,8 +1653,7 @@ def _signal_document(
         )
         risk["sector_warmup_evidence"] = (
             None
-            if higher_timeframe_gates.sector is None
-            or higher_timeframe_gates.sector.warmup_evidence is None
+            if higher_timeframe_gates.sector.warmup_evidence is None
             else higher_timeframe_gates.sector.warmup_evidence.document()
         )
         risk["symbol_warmup_evidence"] = (
@@ -1648,10 +1679,7 @@ def _signal_document(
             )
     if higher_timeframe_gates is not None and (
         higher_timeframe_gates.market.warmup_convergence_evidence is not None
-        or (
-            higher_timeframe_gates.sector is not None
-            and higher_timeframe_gates.sector.warmup_convergence_evidence is not None
-        )
+        or (higher_timeframe_gates.sector.warmup_convergence_evidence is not None)
         or higher_timeframe_gates.symbol.warmup_convergence_evidence is not None
     ):
         risk = document.get("higher_timeframe_risk")
@@ -1674,8 +1702,7 @@ def _signal_document(
         )
         risk["sector_warmup_convergence_evidence"] = (
             None
-            if higher_timeframe_gates.sector is None
-            or higher_timeframe_gates.sector.warmup_convergence_evidence is None
+            if higher_timeframe_gates.sector.warmup_convergence_evidence is None
             else higher_timeframe_gates.sector.warmup_convergence_evidence.document()
         )
         risk["symbol_warmup_convergence_evidence"] = (
@@ -1789,6 +1816,107 @@ def _signal_document(
             is None
             else higher_timeframe_gates.symbol.native_daily_calendar_coverage_evidence.document()
         )
+    if higher_timeframe_gates is not None:
+        risk = document.get("higher_timeframe_risk")
+        if not isinstance(risk, dict):
+            raise TypeError("serialized higher-timeframe risk document is invalid")
+        risk.setdefault(
+            "session_evidence_contract_id",
+            HIGHER_TIMEFRAME_SESSION_EVIDENCE_CONTRACT_ID,
+        )
+        for subject in ("market", "sector", "symbol"):
+            risk.setdefault(
+                f"{subject}_session_evidence",
+                HigherTimeframeSessionEvidence.unavailable().document(),
+            )
+        risk.setdefault(
+            "warmup_evidence_contract_id",
+            QMT_HIGHER_TIMEFRAME_WARMUP_EVIDENCE_CONTRACT_ID,
+        )
+        risk.setdefault(
+            "warmup_convergence_contract_id",
+            WARMUP_CONVERGENCE_ENVELOPE_CONTRACT_ID,
+        )
+        risk.setdefault(
+            "warmup_convergence_diagnostic_contract_id",
+            WARMUP_CONVERGENCE_DIAGNOSTIC_CONTRACT_ID,
+        )
+        risk.setdefault(
+            "warmup_mapping_supply_diagnostic_contract_id",
+            WARMUP_MAPPING_SUPPLY_DIAGNOSTIC_CONTRACT_ID,
+        )
+        risk.setdefault(
+            "warmup_structure_lineage_diagnostic_contract_id",
+            WARMUP_STRUCTURE_LINEAGE_DIAGNOSTIC_CONTRACT_ID,
+        )
+        risk.setdefault(
+            "native_daily_reconciliation_contract_id",
+            QMT_NATIVE_DAILY_RECONCILIATION_CONTRACT_ID,
+        )
+        risk.setdefault(
+            "native_daily_calendar_coverage_contract_id",
+            QMT_NATIVE_DAILY_CALENDAR_COVERAGE_EVIDENCE_CONTRACT_ID,
+        )
+        for subject in ("market", "sector", "symbol"):
+            for suffix in (
+                "warmup_evidence",
+                "warmup_convergence_evidence",
+                "warmup_convergence_diagnostic_evidence",
+                "warmup_mapping_supply_diagnostic_evidence",
+                "warmup_structure_lineage_diagnostic_evidence",
+                "native_daily_reconciliation_evidence",
+                "native_daily_calendar_coverage_evidence",
+            ):
+                risk.setdefault(f"{subject}_{suffix}", None)
+        sector_gate = higher_timeframe_gates.sector
+        if sector_gate.sector_source_mode is not None:
+            risk.setdefault(
+                "sector_higher_timeframe_source_mode",
+                sector_gate.sector_source_mode,
+            )
+            risk.setdefault(
+                "sector_strict_same_5m_warmup_evidence",
+                None
+                if sector_gate.sector_strict_same_base_warmup_evidence is None
+                else sector_gate.sector_strict_same_base_warmup_evidence.document(),
+            )
+            risk.setdefault(
+                "sector_strict_same_5m_source_coverage_evidence",
+                None
+                if sector_gate.sector_strict_same_base_source_coverage_evidence is None
+                else sector_gate.sector_strict_same_base_source_coverage_evidence.document(),
+            )
+            risk.setdefault(
+                "sector_research_bridge_parameter_set_id",
+                sector_gate.sector_research_bridge_parameter_set_id,
+            )
+            strict_convergence = (
+                sector_gate.sector_strict_same_base_warmup_convergence_evidence
+            )
+            risk.setdefault(
+                "sector_strict_same_5m_warmup_convergence_evidence",
+                None if strict_convergence is None else strict_convergence.document(),
+            )
+            risk.setdefault(
+                "sector_strict_same_5m_warmup_convergence_diagnostic_evidence",
+                None
+                if strict_convergence is None or strict_convergence.diagnostic is None
+                else strict_convergence.diagnostic.document(),
+            )
+            risk.setdefault(
+                "sector_strict_same_5m_warmup_mapping_supply_diagnostic_evidence",
+                None
+                if strict_convergence is None
+                or strict_convergence.mapping_supply_diagnostic is None
+                else strict_convergence.mapping_supply_diagnostic.document(),
+            )
+            risk.setdefault(
+                "sector_strict_same_5m_warmup_structure_lineage_diagnostic_evidence",
+                None
+                if strict_convergence is None
+                or strict_convergence.structure_lineage_diagnostic is None
+                else strict_convergence.structure_lineage_diagnostic.document(),
+            )
     return document
 
 
@@ -1814,7 +1942,7 @@ _PRESENTATION_SIGNAL_FIELDS = (
     "lifecycle_stage",
     "observed_at",
     "observation_lane",
-    "priority_observed_at",
+    "monitor_observed_at",
     "realtime_observation",
     "structural_stop",
     "risk_multiplier",
@@ -1912,25 +2040,6 @@ _PRESENTATION_SOURCE_COVERAGE_FIELDS = (
     "missing_leading_calendar_session_count",
     "boundary_status",
 )
-_PRESENTATION_MAPPING_SUPPLY_FIELDS = (
-    "classification",
-    "point_evidence_count",
-    "point_type_counts",
-    "in_top_interval_sell12_count",
-    "completed_in_top_interval_sell12_count",
-)
-_PRESENTATION_PERIOD_FIELDS = (
-    "period",
-    "state",
-    "completed_bar_count",
-    "evidence_bar_end",
-    "active_top_interval",
-    "mapped_center_id",
-    "mapping_unique",
-    "mapping_candidate_ids",
-    "blocker_codes",
-    "warning_codes",
-)
 
 
 def _presentation_fields(
@@ -1953,28 +2062,6 @@ def _presentation_rows(
         row = _presentation_fields(raw, fields)
         if row is not None:
             rows.append(row)
-    return rows
-
-
-def _presentation_period_diagnostics(value: object) -> list[dict[str, object]]:
-    if not isinstance(value, (list, tuple)):
-        return []
-    rows: list[dict[str, object]] = []
-    for raw in value:
-        row = _presentation_fields(raw, _PRESENTATION_PERIOD_FIELDS)
-        if row is None:
-            continue
-        supply = (
-            None
-            if not isinstance(raw, Mapping)
-            else _presentation_fields(
-                raw.get("mapping_supply"),
-                _PRESENTATION_MAPPING_SUPPLY_FIELDS,
-            )
-        )
-        if supply is not None:
-            row["mapping_supply"] = supply
-        rows.append(row)
     return rows
 
 
@@ -2002,12 +2089,10 @@ def _presentation_signal_document(
     )
     for key in ("context_d", "context_30m"):
         document[key] = (
-            _presentation_fields(signal.get(key), _PRESENTATION_CONTEXT_FIELDS)
-            or {}
+            _presentation_fields(signal.get(key), _PRESENTATION_CONTEXT_FIELDS) or {}
         )
     document["setup_5m"] = (
-        _presentation_fields(signal.get("setup_5m"), _PRESENTATION_SETUP_FIELDS)
-        or {}
+        _presentation_fields(signal.get("setup_5m"), _PRESENTATION_SETUP_FIELDS) or {}
     )
     effective_stage = lifecycle_stage_from_signal(signal)
     if effective_stage is not None:
@@ -2019,10 +2104,7 @@ def _presentation_signal_document(
         else _presentation_fields(raw_trigger, _PRESENTATION_TRIGGER_FIELDS) or {}
     )
     raw_warmup = signal.get("warmup")
-    warmup = (
-        _presentation_fields(raw_warmup, _PRESENTATION_SIGNAL_WARMUP_FIELDS)
-        or {}
-    )
+    warmup = _presentation_fields(raw_warmup, _PRESENTATION_SIGNAL_WARMUP_FIELDS) or {}
     if isinstance(raw_warmup, Mapping):
         warmup["by_frequency"] = _presentation_rows(
             raw_warmup.get("by_frequency"),
@@ -2156,62 +2238,6 @@ def _stock_analysis_exclusion_document(
         "deterministic_for_coverage_epoch": True,
         "remote_error_type": str(error["remote_error_type"]),
         "reason": str(error["reason"]),
-    }
-
-
-_SECTOR_EXCLUSION_DETAIL_CODES = frozenset(
-    {
-        "sector_catalog_members_missing",
-        "sector_constituent_count_below_minimum",
-        "sector_universe_member_coverage_insufficient",
-    }
-)
-_SECTOR_MEMBER_REASON = re.compile(
-    r"catalog_members=(\d+); universe_members=(\d+); required=(\d+)"
-)
-
-
-def _legacy_sector_exclusion_document(
-    error: Mapping[str, object],
-) -> dict[str, object] | None:
-    """Migrate the former failure document without changing its facts."""
-
-    if (
-        error.get("error_type") != "sector_member_coverage_insufficient"
-        or error.get("detail_code") not in _SECTOR_EXCLUSION_DETAIL_CODES
-        or not isinstance(error.get("sector_id"), str)
-        or not error.get("sector_id")
-        or not isinstance(error.get("code"), str)
-        or not error.get("code")
-        or not isinstance(error.get("reason"), str)
-    ):
-        return None
-    match = _SECTOR_MEMBER_REASON.fullmatch(str(error["reason"]))
-    if match is None:
-        return None
-    catalog_count, universe_count, required_count = (
-        int(value) for value in match.groups()
-    )
-    if (
-        error.get("catalog_member_count") != catalog_count
-        or error.get("universe_member_count") != universe_count
-        or required_count <= 0
-        or universe_count >= required_count
-    ):
-        return None
-    return {
-        "sector_id": str(error["sector_id"]),
-        "code": str(error["code"]),
-        "exclusion_type": "sector_analysis_exclusion",
-        "eligibility": "MINIMUM_SECTOR_MEMBERS_NOT_MET",
-        "reason_code": "sector_member_coverage_insufficient",
-        "reason": str(error["reason"]),
-        "detail_code": str(error["detail_code"]),
-        "catalog_member_count": catalog_count,
-        "universe_member_count": universe_count,
-        "required_member_count": required_count,
-        "deterministic_for_catalog_revision": True,
-        "retry_policy": "NEXT_SECTOR_CATALOG_REVISION",
     }
 
 
@@ -2386,287 +2412,12 @@ def _sector_coverage_contract_is_valid(
         return False
 
 
-def _migrate_sector_coverage_snapshot(
-    snapshot: Mapping[str, object],
-) -> dict[str, object] | None:
-    """Upgrade the display contract while preserving the stock coverage epoch.
-
-    Small-sector hard blocks already affected ranking and stock selection in the
-    old snapshot, so reclassifying their evidence does not change any decision
-    fact.  It must therefore preserve the stock manifest/queues and only rewrite
-    the sector disposition ledger and semantic hash.
-    """
-
-    if snapshot.get("sector_coverage_contract_id") == SECTOR_COVERAGE_CONTRACT_ID:
-        if not _sector_coverage_contract_is_valid(snapshot):
-            return None
-        return _migrate_member_history_diagnostics(snapshot)
-
-    value = copy.deepcopy(dict(snapshot))
-    audit = value.get("scan_audit")
-    errors = value.get("errors")
-    if not isinstance(audit, dict) or not isinstance(errors, list):
-        return None
-    exclusions: list[dict[str, object]] = []
-    retained_errors: list[object] = []
-    for error in errors:
-        if not isinstance(error, Mapping):
-            return None
-        exclusion = _legacy_sector_exclusion_document(error)
-        if exclusion is None:
-            retained_errors.append(copy.deepcopy(error))
-        else:
-            exclusions.append(exclusion)
-    exclusions.sort(key=lambda item: str(item["sector_id"]))
-    if len({str(item["sector_id"]) for item in exclusions}) != len(exclusions):
-        return None
-    try:
-        discovered = int(audit.get("sector_discovered_count"))
-        completed = int(audit.get("sector_completed_count"))
-    except (TypeError, ValueError):
-        return None
-    sector_errors = [
-        error
-        for error in retained_errors
-        if isinstance(error, Mapping) and "sector_id" in error
-    ]
-    if (
-        discovered < 0
-        or completed < 0
-        or completed + len(exclusions) + len(sector_errors) != discovered
-    ):
-        return None
-    failure_counts: dict[str, int] = {}
-    for error in sector_errors:
-        error_type = error.get("error_type")
-        if not isinstance(error_type, str) or not error_type:
-            return None
-        failure_counts[error_type] = failure_counts.get(error_type, 0) + 1
-    exclusion_counts: dict[str, int] = {}
-    for exclusion in exclusions:
-        reason_code = str(exclusion["reason_code"])
-        exclusion_counts[reason_code] = exclusion_counts.get(reason_code, 0) + 1
-    resolved = completed + len(exclusions)
-    audit.update(
-        {
-            "sector_excluded_count": len(exclusions),
-            "sector_failed_count": len(sector_errors),
-            "sector_resolved_count": resolved,
-            "sector_resolution_ratio": str(
-                Decimal("0")
-                if discovered == 0
-                else Decimal(resolved) / Decimal(discovered)
-            ),
-            "sector_failure_counts": dict(sorted(failure_counts.items())),
-            "sector_exclusion_counts": dict(sorted(exclusion_counts.items())),
-        }
-    )
-    value["sector_coverage_contract_id"] = SECTOR_COVERAGE_CONTRACT_ID
-    value["sector_exclusions"] = exclusions
-    value["errors"] = retained_errors
-    quality = value.get("data_quality")
-    if isinstance(quality, dict):
-        raw_codes = quality.get("failure_codes")
-        failure_codes = (
-            [str(code) for code in raw_codes if isinstance(code, str)]
-            if isinstance(raw_codes, list)
-            else []
-        )
-        if not sector_errors:
-            failure_codes = [
-                code for code in failure_codes if code != "sector_scan_partial"
-            ]
-        quality["failure_codes"] = failure_codes
-        if quality.get("stale") is False:
-            quality["complete"] = bool(
-                audit.get("coverage_cycle_complete") is True and not retained_errors
-            )
-    value["snapshot_content_sha256"] = live_screening_snapshot_content_sha256(value)
-    if not _sector_coverage_contract_is_valid(value):
-        return None
-    return _migrate_member_history_diagnostics(value)
-
-
-def _migrate_member_history_diagnostics(
-    snapshot: Mapping[str, object],
-) -> dict[str, object]:
-    """Add a purely derived UI/health summary without replaying stock scope.
-
-    The authenticated `/v3` strength evidence already contains every member
-    history state.  Recomputing its operator summary cannot change candidates,
-    the decision core or the coverage epoch.  Older evidence schemas remain
-    untouched and will follow the existing causal full-replay migration.
-    """
-
-    raw_evidence = snapshot.get("sector_strength_evidence")
-    evidence_revision = snapshot.get("sector_strength_evidence_revision")
-    if raw_evidence is None:
-        if evidence_revision is not None:
-            return snapshot if isinstance(snapshot, dict) else dict(snapshot)
-        expected: dict[str, object] | None = None
-    elif isinstance(raw_evidence, Mapping):
-        try:
-            batch = sector_strength_batch_from_evidence_document(raw_evidence)
-            if evidence_revision != batch.evidence_revision:
-                return snapshot if isinstance(snapshot, dict) else dict(snapshot)
-            expected = build_sector_member_history_diagnostics(batch)
-        except (TypeError, ValueError):
-            return snapshot if isinstance(snapshot, dict) else dict(snapshot)
-    else:
-        return snapshot if isinstance(snapshot, dict) else dict(snapshot)
-    if snapshot.get("sector_member_history_diagnostics") == expected and (
-        "sector_member_history_diagnostics" in snapshot
-    ):
-        return snapshot if isinstance(snapshot, dict) else dict(snapshot)
-    value = copy.deepcopy(dict(snapshot))
-    value["sector_member_history_diagnostics"] = expected
-    value["snapshot_content_sha256"] = live_screening_snapshot_content_sha256(value)
-    return value
-
-
-def _migrate_signal_document_v8(
-    snapshot: Mapping[str, object],
-) -> dict[str, object]:
-    """Upgrade authenticated v7-v9 rows to the current decision contract.
-
-    V7 used ``QMT_SECTOR_TRIGGER`` for every member of every eligible sector.
-    V8 reserves that source for a supportive sector and labels a neutral sector
-    as early, monitor-only scope.  The already authenticated nested sector
-    document contains the exact ``eligible``/``regime`` facts needed for this
-    deterministic rewrite.  V9 additionally binds the final selection scope and
-    entry result to the shared page/replay decision identity.  Every required
-    decision field is already present in v8, so it can be hashed without a QMT
-    replay.  V10 also separates a geometrically completed provisional
-    third-class point from a genuinely incomplete ``approaching`` point.  Any
-    malformed or contradictory row stays on its old contract and follows the
-    existing fail-closed full-universe replay path.
-    """
-
-    original = snapshot if isinstance(snapshot, dict) else dict(snapshot)
-    if snapshot.get("signal_document_contract_id") == SIGNAL_DOCUMENT_CONTRACT_ID:
-        return original
-    legacy_contract_id = snapshot.get("signal_document_contract_id")
-    if legacy_contract_id not in {
-        "chanlun-human-assisted-signal-document/v7",
-        "chanlun-human-assisted-signal-document/v8",
-        "chanlun-human-assisted-signal-document/v9",
-    }:
-        return original
-    value = copy.deepcopy(original)
-    signals = value.get("signals")
-    manifest = value.get("coverage_manifest")
-    if not isinstance(signals, list) or not isinstance(manifest, dict):
-        return value
-    try:
-        market_data_as_of = normalize_datetime(
-            datetime.fromisoformat(str(manifest["market_data_as_of"])),
-            "legacy coverage market_data_as_of",
-        )
-        epoch_arguments = {
-            "market_data_as_of": market_data_as_of,
-            "universe_revision": manifest["universe_revision"],
-            "sector_catalog_revision": manifest["sector_catalog_revision"],
-            "sector_strength_evidence_revision": manifest.get(
-                "sector_strength_evidence_revision"
-            ),
-            "decision_core_id": value["decision_core_id"],
-            "screening_policy_id": manifest["screening_policy_id"],
-            "structure_version": value["structure_version"],
-            "parameter_version": value["parameter_version"],
-        }
-        legacy_epoch_id = screening_coverage_epoch_id(
-            **epoch_arguments,
-            signal_document_contract_id=legacy_contract_id,
-        )
-        current_epoch_id = screening_coverage_epoch_id(**epoch_arguments)
-    except (KeyError, TypeError, ValueError):
-        return original
-    if (
-        value.get("coverage_epoch_id") != legacy_epoch_id
-        or manifest.get("coverage_epoch_id") != legacy_epoch_id
-    ):
-        return original
-    for signal in signals:
-        if not isinstance(signal, dict):
-            return original
-        sources = signal.get("selection_sources")
-        sector = signal.get("sector")
-        warmup = signal.get("warmup")
-        if (
-            not isinstance(sources, list)
-            or not sources
-            or any(not isinstance(source, str) for source in sources)
-            or len(sources) != len(set(sources))
-            or not isinstance(sector, Mapping)
-            or not isinstance(warmup, dict)
-        ):
-            return original
-        if "QMT_SECTOR_TRIGGER" in sources:
-            if sector.get("eligible") is not True:
-                return original
-            regime = sector.get("regime")
-            if regime == "neutral":
-                sources = [
-                    (
-                        "QMT_SECTOR_ELIGIBLE_SCOPE"
-                        if source == "QMT_SECTOR_TRIGGER"
-                        else source
-                    )
-                    for source in sources
-                ]
-                signal["selection_sources"] = sources
-                if signal.get("side") == "buy":
-                    reasons = signal.get("decision_reasons")
-                    if not isinstance(reasons, list) or any(
-                        not isinstance(reason, str) for reason in reasons
-                    ):
-                        return original
-                    signal["entry_allowed"] = False
-                    signal["risk_multiplier"] = "0"
-                    signal["decision_reasons"] = list(
-                        dict.fromkeys((*reasons, MONITOR_ONLY_BUY_REASON_CODE))
-                    )
-            elif regime != "supportive":
-                return original
-        sector_triggered = "QMT_SECTOR_TRIGGER" in sources
-        signal["sector_triggered"] = sector_triggered
-        signal["monitor_only"] = not sector_triggered
-        warmup.setdefault("difference_codes_by_frequency", [])
-        signal["decision_document_schema"] = SIGNAL_DECISION_DOCUMENT_SCHEMA
-        effective_stage = lifecycle_stage_from_signal(signal)
-        if effective_stage is None:
-            return original
-        signal["lifecycle_stage"] = effective_stage
-        try:
-            signal["decision_document_id"] = signal_decision_document_id(signal)
-        except (TypeError, ValueError):
-            return original
-    counts_by_stage: dict[str, int] = {}
-    for signal in signals:
-        stage = str(signal["lifecycle_stage"])
-        counts_by_stage[stage] = counts_by_stage.get(stage, 0) + 1
-    value["counts_by_stage"] = dict(sorted(counts_by_stage.items()))
-    value["signal_document_contract_id"] = SIGNAL_DOCUMENT_CONTRACT_ID
-    manifest["signal_document_contract_id"] = SIGNAL_DOCUMENT_CONTRACT_ID
-    value["coverage_epoch_id"] = current_epoch_id
-    manifest["coverage_epoch_id"] = current_epoch_id
-    value["snapshot_content_sha256"] = live_screening_snapshot_content_sha256(value)
-    return value
-
-
-def _semantic_snapshot_document(
-    payload: Mapping[str, object],
-) -> dict[str, object]:
-    return live_screening_semantic_snapshot_document(payload)
-
-
 def _sector_source_evidence_complete(snapshot: Mapping[str, object]) -> bool:
     """Return whether every cached sector document has explicit source evidence.
 
-    ``strength_source_revision`` is intentionally present even when its value is
-    ``None``: absence means the row predates the auditable sector-ranking
-    contract, while ``None`` means the current contract explicitly recorded that
-    no independently versioned horizontal-strength source was available.
+    The current contract always includes ``strength_source_revision``.  A
+    ``None`` value explicitly records that no independently attested
+    horizontal-strength source was available.
     """
 
     sectors = snapshot.get("sectors")
@@ -2716,20 +2467,16 @@ def _cache_is_valid(
 ) -> bool:
     return bool(
         isinstance(value, Mapping)
-        and value.get("schema_version") == SCHEMA_VERSION
-        and value.get("algorithm_version") == config.algorithm_version
-        and value.get("structure_version") == config.structure_version
-        and value.get("parameter_version") == config.parameter_version
+        and value.get("schema") == SCHEMA
+        and value.get("algorithm_id") == config.algorithm_id
+        and value.get("structure_contract_id") == config.structure_contract_id
+        and value.get("parameter_set_id") == config.parameter_set_id
         and value.get("read_only") is True
         and value.get("no_order_execution") is True
         and value.get("decision_core_id") == decision_core_id
         and value.get("screening_policy") == _screening_policy_document()
         and value.get("screening_policy_id") == _screening_policy_id()
-        # Supported legacy values are loaded only so a new process can preserve
-        # the last complete page while scheduling a causal full-universe
-        # document migration. They are never emitted by the current service.
-        and value.get("signal_document_contract_id")
-        in _LEGACY_SIGNAL_DOCUMENT_CONTRACT_IDS | {SIGNAL_DOCUMENT_CONTRACT_ID}
+        and value.get("signal_document_contract_id") == SIGNAL_DOCUMENT_CONTRACT_ID
         and isinstance(value.get("snapshot_content_sha256"), str)
         and value.get("snapshot_content_sha256")
         == live_screening_snapshot_content_sha256(value)
@@ -2741,10 +2488,9 @@ def _cache_is_valid(
         and isinstance(value.get("sectors"), list)
         and isinstance(value.get("signals"), list)
         and isinstance(value.get("data_quality"), Mapping)
-        and (
-            value.get("sector_coverage_contract_id") is None
-            or _sector_coverage_contract_is_valid(value)
-        )
+        and value.get("sector_coverage_contract_id") == SECTOR_COVERAGE_CONTRACT_ID
+        and _sector_coverage_contract_is_valid(value)
+        and _sector_source_evidence_complete(value)
     )
 
 
@@ -2819,7 +2565,7 @@ class TradingScreeningService:
             if isinstance(raw_core_id, str) and raw_core_id.startswith("sha256:")
             else sha256_json(
                 {
-                    "schema": "chanlun-screening-engine-adapter/v1",
+                    "schema": "chanlun-screening-engine-adapter",
                     "engine_type": f"{type(engine).__module__}.{type(engine).__qualname__}",
                 }
             )
@@ -2830,7 +2576,7 @@ class TradingScreeningService:
             contract_document()
             if callable(contract_document)
             else {
-                "schema": "chanlun-screening-engine-adapter/v1",
+                "schema": "chanlun-screening-engine-adapter",
                 "contract_id": self._decision_core_id,
                 "live_status": "LIVE_DISABLED",
             }
@@ -2896,16 +2642,22 @@ class TradingScreeningService:
         self._priority_monitor_state_path = self._cache_path.with_name(
             "trading_priority_monitor_state.json"
         )
-        self._priority_monitor_critical_offset = 0
-        self._priority_monitor_sector_offset = 0
-        self._priority_monitor_single_slot_sector_turn = False
         self._priority_monitor_signal_stages: dict[str, str] = {}
         self._priority_monitor_signal_codes: dict[str, str] = {}
         self._priority_monitor_latest_documents: dict[str, dict[str, object]] = {}
+        self._priority_monitor_code_observations: dict[str, tuple[datetime, str]] = {}
         self._priority_monitor_presentation_revision: str | None = None
         self._priority_monitor_last_at: datetime | None = None
         self._priority_monitor_last_codes: tuple[str, ...] = ()
         self._priority_monitor_last_errors: tuple[dict[str, object], ...] = ()
+        self._candidate_monitor_last_errors: tuple[dict[str, object], ...] = ()
+        self._candidate_monitor_started_at: datetime | None = None
+        self._candidate_monitor_five_universe: tuple[str, ...] = ()
+        self._candidate_monitor_thirty_universe: tuple[str, ...] = ()
+        self._candidate_monitor_five_last_success_at: dict[str, datetime] = {}
+        self._candidate_monitor_thirty_last_success_at: dict[str, datetime] = {}
+        self._candidate_monitor_last_five_codes: tuple[str, ...] = ()
+        self._candidate_monitor_last_thirty_codes: tuple[str, ...] = ()
         self._priority_monitor_sector_source_mode: str | None = None
         self._priority_monitor_sector_as_of: datetime | None = None
         self._priority_monitor_sector_coverage_epoch_id: str | None = None
@@ -2924,11 +2676,6 @@ class TradingScreeningService:
         self._coverage_cycle_exclusions: dict[str, dict[str, object]] = {}
         self._coverage_cycle_discarded_retry_codes: set[str] = set()
         self._coverage_cycle_errors: dict[str, dict[str, object]] = {}
-        # Output-evidence migrations are narrower than parameter/structure
-        # migrations.  Symbols listed here keep the same frozen coverage epoch
-        # but must be replayed before final human-review validation.
-        self._risk_evidence_replay_codes: set[str] = set()
-        self._sector_evidence_replay_codes: set[str] = set()
         self._coverage_sector_restore_error: str | None = None
         self._coverage_cycle_full_market_history_scan = False
         self._coverage_cycle_background_refresh_required = False
@@ -2943,23 +2690,10 @@ class TradingScreeningService:
         self._coverage_sector_catalog_revision: str | None = None
         self._coverage_sector_strength_evidence_revision: str | None = None
         self._coverage_market_data_as_of: datetime | None = None
+        self._quarantined_cache_decision_core_id: str | None = None
+        self._quarantined_cache_reason: str | None = None
         loaded_snapshot = self._load_valid_cache()
-        sector_migrated_snapshot = (
-            None
-            if loaded_snapshot is None
-            else _migrate_sector_coverage_snapshot(loaded_snapshot)
-        )
-        migrated_snapshot = (
-            None
-            if sector_migrated_snapshot is None
-            else _migrate_signal_document_v8(sector_migrated_snapshot)
-        )
-        sector_cache_migration_applied = bool(
-            loaded_snapshot is not None
-            and migrated_snapshot is not None
-            and migrated_snapshot is not loaded_snapshot
-        )
-        self._snapshot = migrated_snapshot or _initial_snapshot(config)
+        self._snapshot = loaded_snapshot or _initial_snapshot(config)
         # Loaded snapshots have already passed the full semantic/content hash
         # gate.  Health reads can attest this immutable publication by identity
         # instead of re-hashing a 100+ MiB signal tree on every HTTP request.
@@ -2980,28 +2714,13 @@ class TradingScreeningService:
         self._review_readiness_validation_lock = Lock()
         self._review_readiness_validation_sha256: str | None = None
         self._review_readiness_validation_thread: Thread | None = None
-        self._sector_cache_migration_applied = sector_cache_migration_applied
-        self._sector_cache_migration_persist_error: str | None = None
-        if sector_cache_migration_applied:
-            try:
-                self._persist_atomic(self._snapshot)
-            except OSError as exc:
-                self._sector_cache_migration_persist_error = (
-                    f"{type(exc).__name__}: {str(exc)[:160]}"
-                )
-        # Output evidence is versioned independently from trading parameters.
-        # A legacy cache remains readable so the page never drops its last
-        # complete result during migration, but every symbol must be replayed
-        # before the new contract is declared complete. Resetting only the
-        # scan cursor makes ``changed_bars(None)`` schedule the full current
-        # sector universe; it does not alter decision or policy identities.
         cached_manifest = self._snapshot.get("coverage_manifest")
         cached_sector_catalog_revision = (
             cached_manifest.get("sector_catalog_revision")
             if isinstance(cached_manifest, Mapping)
             else None
         )
-        self._signal_document_migration_required = (
+        self._snapshot_rebuild_required = (
             self._snapshot.get("signal_document_contract_id")
             != SIGNAL_DOCUMENT_CONTRACT_ID
             or not isinstance(cached_sector_catalog_revision, str)
@@ -3012,85 +2731,27 @@ class TradingScreeningService:
         self._snapshot["decision_core"] = copy.deepcopy(self._decision_core_document)
         coverage_state_restored = (
             False
-            if self._signal_document_migration_required
+            if self._snapshot_rebuild_required
             else self._restore_coverage_state(self._snapshot)
         )
         if coverage_state_restored:
-            restored_manifest = self._snapshot.get("coverage_manifest")
-            persisted_risk_replays = set(self._risk_evidence_replay_codes)
-            persisted_sector_replays = set(self._sector_evidence_replay_codes)
             try:
                 restored_sector_batch, restored_sector_members = (
                     _coverage_sector_state_from_snapshot(self._snapshot)
                 )
             except (TypeError, ValueError) as exc:
-                # A parseable outer cache may still predate the exact
-                # resumable-sector contract.  Recompute every completed symbol
-                # under one newly frozen batch instead of mixing evidence.
+                # Never mix a partially restorable sector state with the
+                # authenticated current coverage epoch.
                 self._coverage_sector_restore_error = (
                     f"{type(exc).__name__}: {str(exc)[:160]}"
                 )
-                requested_sector_replays = set(self._coverage_cycle_completed_codes)
+                self._snapshot_rebuild_required = True
+                coverage_state_restored = False
             else:
                 self._coverage_cycle_sector_batch = restored_sector_batch
                 self._coverage_cycle_sector_members = restored_sector_members
                 self._coverage_cycle_sector_restored = True
-                requested_sector_replays = set(
-                    _sector_evidence_replay_codes(
-                        self._snapshot,
-                        sector_members=restored_sector_members,
-                    )
-                )
-            requested_sector_replays.update(persisted_sector_replays)
-            # Early builds did not persist targeted replay identity.  If they
-            # restarted before native atomic hydration existed, attempted rows
-            # were removed from the signal list and survived only in the
-            # authenticated error/backoff ledger.  Recover that exact legacy
-            # state once; current manifests carry the explicit lists below.
-            if (
-                isinstance(restored_manifest, Mapping)
-                and "sector_evidence_replay_codes" not in restored_manifest
-            ):
-                raw_errors = self._snapshot.get("errors")
-                if isinstance(raw_errors, list):
-                    requested_sector_replays.update(
-                        str(error["code"])
-                        for error in raw_errors
-                        if isinstance(error, Mapping)
-                        and isinstance(error.get("code"), str)
-                        and error.get("reason_code") == "NATIVE_WORKER_UNAVAILABLE"
-                        and error.get("reason")
-                        == "atomic sector snapshot has not been captured"
-                    )
-            requested_risk_replays = set(
-                live_review_risk_evidence_replay_codes(self._snapshot)
-            )
-            requested_risk_replays.update(persisted_risk_replays)
-            risk_replayable = (
-                requested_risk_replays
-                & self._coverage_cycle_discovered_codes
-                - self._coverage_cycle_excluded_codes
-            )
-            sector_replayable = (
-                requested_sector_replays
-                & self._coverage_cycle_discovered_codes
-                - self._coverage_cycle_excluded_codes
-            )
-            self._risk_evidence_replay_codes = risk_replayable
-            self._sector_evidence_replay_codes = sector_replayable
-            replayable = risk_replayable | sector_replayable
-            for code in replayable:
-                self._coverage_cycle_completed_codes.discard(code)
-                self._coverage_cycle_failed_codes.discard(code)
-                self._coverage_cycle_errors.pop(
-                    f"stock_analysis_error:{code}",
-                    None,
-                )
-                self._backoff_frequencies.pop(code, None)
-                self._deferred_frequencies.pop(code, None)
-                self._pending_frequencies.setdefault(code, set()).update(
-                    SCREENING_STRUCTURE_FREQUENCIES
-                )
+        if coverage_state_restored:
             runtime_pending = (
                 set(self._pending_frequencies) | set(self._backoff_frequencies)
             ).intersection(self._coverage_cycle_discovered_codes)
@@ -3100,13 +2761,13 @@ class TradingScreeningService:
             )
         self._last_as_of = (
             None
-            if self._signal_document_migration_required or not coverage_state_restored
+            if self._snapshot_rebuild_required or not coverage_state_restored
             else self._cached_as_of(self._snapshot)
         )
         self._cursor = (
             ScanCursor.current(
-                structure_version=config.structure_version,
-                parameter_version=config.parameter_version,
+                structure_contract_id=config.structure_contract_id,
+                parameter_set_id=config.parameter_set_id,
             )
             if self._last_as_of is not None
             else ScanCursor.empty()
@@ -3162,6 +2823,8 @@ class TradingScreeningService:
         if (
             not isinstance(payload, Mapping)
             or payload.get("schema") != PRIORITY_MONITOR_SCHEMA
+            or payload.get("candidate_monitor_contract_id")
+            != CANDIDATE_MONITOR_CONTRACT_ID
             or payload.get("decision_core_id") != self._decision_core_id
             or payload.get("signal_document_contract_id") != SIGNAL_DOCUMENT_CONTRACT_ID
             or payload.get("live_status") != "LIVE_DISABLED"
@@ -3216,22 +2879,88 @@ class TradingScreeningService:
             return
         raw_last_codes = payload.get("last_codes", [])
         raw_last_errors = payload.get("last_errors", [])
-        if not isinstance(raw_last_codes, list) or any(
-            not isinstance(value, str) or not value for value in raw_last_codes
+        raw_candidate_errors = payload.get("candidate_last_errors", [])
+        raw_five_universe = payload.get("five_minute_universe", [])
+        raw_thirty_universe = payload.get("thirty_minute_universe", [])
+        raw_last_five_codes = payload.get("last_five_minute_codes", [])
+        raw_last_thirty_codes = payload.get("last_thirty_minute_codes", [])
+        string_lists = (
+            raw_last_codes,
+            raw_five_universe,
+            raw_thirty_universe,
+            raw_last_five_codes,
+            raw_last_thirty_codes,
+        )
+        if any(
+            not isinstance(values, list)
+            or len(values) != len(set(values))
+            or any(not isinstance(value, str) or not value for value in values)
+            for values in string_lists
         ):
             return
-        if not isinstance(raw_last_errors, list) or any(
-            not isinstance(value, Mapping) for value in raw_last_errors
+        if any(
+            not isinstance(values, list)
+            or any(not isinstance(value, Mapping) for value in values)
+            for values in (raw_last_errors, raw_candidate_errors)
         ):
             return
+
+        def parse_datetime_map(
+            raw: object,
+            *,
+            label: str,
+        ) -> dict[str, datetime]:
+            if not isinstance(raw, Mapping):
+                raise TypeError(f"{label} must be a mapping")
+            result: dict[str, datetime] = {}
+            for key, value in raw.items():
+                if not isinstance(key, str) or not key or not isinstance(value, str):
+                    raise TypeError(f"{label} contains an invalid row")
+                result[key] = normalize_datetime(
+                    datetime.fromisoformat(value),
+                    f"{label} {key}",
+                )
+            return result
+
         try:
-            critical_offset = max(0, int(payload.get("critical_offset", 0)))
-            sector_offset = max(0, int(payload.get("sector_offset", 0)))
-            single_slot_sector_turn = bool(
-                payload.get("single_slot_sector_turn", False)
-            )
             last_at = datetime.fromisoformat(str(payload["last_at"]))
             last_at = normalize_datetime(last_at, "priority monitor last_at")
+            raw_started_at = payload.get("candidate_monitor_started_at")
+            candidate_started_at = (
+                None
+                if raw_started_at is None
+                else normalize_datetime(
+                    datetime.fromisoformat(str(raw_started_at)),
+                    "candidate monitor started_at",
+                )
+            )
+            five_last_success_at = parse_datetime_map(
+                payload.get("five_minute_last_success_at"),
+                label="five minute candidate last_success_at",
+            )
+            thirty_last_success_at = parse_datetime_map(
+                payload.get("thirty_minute_last_success_at"),
+                label="thirty minute candidate last_success_at",
+            )
+            raw_code_observations = payload.get("code_observations")
+            if not isinstance(raw_code_observations, Mapping):
+                return
+            code_observations: dict[str, tuple[datetime, str]] = {}
+            for code, raw_observation in raw_code_observations.items():
+                if (
+                    not isinstance(code, str)
+                    or not code
+                    or not isinstance(raw_observation, Mapping)
+                    or raw_observation.get("lane") not in _CANDIDATE_MONITOR_LANES
+                ):
+                    return
+                code_observations[code] = (
+                    normalize_datetime(
+                        datetime.fromisoformat(str(raw_observation["observed_at"])),
+                        f"{code} monitor observation",
+                    ),
+                    str(raw_observation["lane"]),
+                )
             raw_sector_source_mode = payload.get("sector_source_mode")
             if raw_sector_source_mode not in {
                 None,
@@ -3255,9 +2984,10 @@ class TradingScreeningService:
                 return
         except (KeyError, TypeError, ValueError):
             return
-        self._priority_monitor_critical_offset = critical_offset
-        self._priority_monitor_sector_offset = sector_offset
-        self._priority_monitor_single_slot_sector_turn = single_slot_sector_turn
+        if not set(five_last_success_at).issubset(set(raw_five_universe)) or not set(
+            thirty_last_success_at
+        ).issubset(set(raw_thirty_universe)):
+            return
         effective_stages: dict[str, str] = {}
         for key, value in raw_stages.items():
             signal_id = str(key)
@@ -3275,12 +3005,23 @@ class TradingScreeningService:
             str(key): str(value) for key, value in raw_codes.items()
         }
         self._priority_monitor_latest_documents = latest_documents
+        self._priority_monitor_code_observations = code_observations
         self._priority_monitor_presentation_revision = str(payload["content_sha256"])
         self._priority_monitor_last_at = last_at
         self._priority_monitor_last_codes = tuple(raw_last_codes)
         self._priority_monitor_last_errors = tuple(
             copy.deepcopy(dict(value)) for value in raw_last_errors
         )
+        self._candidate_monitor_last_errors = tuple(
+            copy.deepcopy(dict(value)) for value in raw_candidate_errors
+        )
+        self._candidate_monitor_started_at = candidate_started_at
+        self._candidate_monitor_five_universe = tuple(raw_five_universe)
+        self._candidate_monitor_thirty_universe = tuple(raw_thirty_universe)
+        self._candidate_monitor_five_last_success_at = five_last_success_at
+        self._candidate_monitor_thirty_last_success_at = thirty_last_success_at
+        self._candidate_monitor_last_five_codes = tuple(raw_last_five_codes)
+        self._candidate_monitor_last_thirty_codes = tuple(raw_last_thirty_codes)
         self._priority_monitor_sector_source_mode = raw_sector_source_mode
         self._priority_monitor_sector_as_of = sector_as_of
         self._priority_monitor_sector_coverage_epoch_id = raw_sector_epoch_id
@@ -3300,22 +3041,57 @@ class TradingScreeningService:
             last_errors = tuple(
                 copy.deepcopy(value) for value in self._priority_monitor_last_errors
             )
+            candidate_last_errors = tuple(
+                copy.deepcopy(value) for value in self._candidate_monitor_last_errors
+            )
+            code_observations = dict(self._priority_monitor_code_observations)
+            candidate_started_at = self._candidate_monitor_started_at
+            five_universe = tuple(self._candidate_monitor_five_universe)
+            thirty_universe = tuple(self._candidate_monitor_thirty_universe)
+            five_last_success_at = dict(self._candidate_monitor_five_last_success_at)
+            thirty_last_success_at = dict(
+                self._candidate_monitor_thirty_last_success_at
+            )
+            last_five_codes = tuple(self._candidate_monitor_last_five_codes)
+            last_thirty_codes = tuple(self._candidate_monitor_last_thirty_codes)
             sector_source_mode = self._priority_monitor_sector_source_mode
             sector_as_of = self._priority_monitor_sector_as_of
             sector_coverage_epoch_id = self._priority_monitor_sector_coverage_epoch_id
         payload: dict[str, object] = {
             "schema": PRIORITY_MONITOR_SCHEMA,
+            "candidate_monitor_contract_id": CANDIDATE_MONITOR_CONTRACT_ID,
             "decision_core_id": self._decision_core_id,
             "signal_document_contract_id": SIGNAL_DOCUMENT_CONTRACT_ID,
             "last_at": (None if last_at is None else last_at.isoformat()),
-            "critical_offset": self._priority_monitor_critical_offset,
-            "sector_offset": self._priority_monitor_sector_offset,
-            "single_slot_sector_turn": (self._priority_monitor_single_slot_sector_turn),
             "signal_stages": dict(sorted(signal_stages.items())),
             "signal_codes": dict(sorted(signal_codes.items())),
             "latest_documents": list(latest_documents),
+            "code_observations": {
+                code: {"observed_at": value[0].isoformat(), "lane": value[1]}
+                for code, value in sorted(code_observations.items())
+            },
             "last_codes": list(last_codes),
             "last_errors": [copy.deepcopy(value) for value in last_errors],
+            "candidate_last_errors": [
+                copy.deepcopy(value) for value in candidate_last_errors
+            ],
+            "candidate_monitor_started_at": (
+                None
+                if candidate_started_at is None
+                else candidate_started_at.isoformat()
+            ),
+            "five_minute_universe": list(five_universe),
+            "thirty_minute_universe": list(thirty_universe),
+            "five_minute_last_success_at": {
+                code: value.isoformat()
+                for code, value in sorted(five_last_success_at.items())
+            },
+            "thirty_minute_last_success_at": {
+                code: value.isoformat()
+                for code, value in sorted(thirty_last_success_at.items())
+            },
+            "last_five_minute_codes": list(last_five_codes),
+            "last_thirty_minute_codes": list(last_thirty_codes),
             "sector_source_mode": sector_source_mode,
             "sector_as_of": (
                 None if sector_as_of is None else sector_as_of.isoformat()
@@ -3369,35 +3145,44 @@ class TradingScreeningService:
         codes: tuple[str, ...],
         errors: tuple[dict[str, object], ...],
         documents: tuple[Mapping[str, object], ...] | None = None,
+        successful_codes: tuple[str, ...] = (),
+        lanes_by_code: Mapping[str, str] | None = None,
+        candidate_errors: tuple[dict[str, object], ...] = (),
+        five_universe: tuple[str, ...] | None = None,
+        thirty_universe: tuple[str, ...] | None = None,
+        five_codes: tuple[str, ...] = (),
+        thirty_codes: tuple[str, ...] = (),
+        successful_five_codes: tuple[str, ...] = (),
+        successful_thirty_codes: tuple[str, ...] = (),
     ) -> None:
         """Publish compact monitor state without touching coverage state."""
 
+        lane_map = dict(lanes_by_code or {})
+        if any(value not in _CANDIDATE_MONITOR_LANES for value in lane_map.values()):
+            raise ValueError("candidate monitor lane is invalid")
+        presentation_lane = {
+            CANDIDATE_MONITOR_LANE_1M: "PRIORITY_CURRENT_1M",
+            CANDIDATE_MONITOR_LANE_5M: "CANDIDATE_CURRENT_5M",
+            CANDIDATE_MONITOR_LANE_30M: "CANDIDATE_CURRENT_30M",
+        }
         compact_documents = None
         if documents is not None:
             compact_documents = tuple(
                 {
                     **_presentation_signal_document(document),
-                    "observation_lane": "PRIORITY_CURRENT_1M",
-                    "priority_observed_at": observed_at.isoformat(),
-                    "realtime_observation": True,
+                    "observation_lane": presentation_lane[
+                        lane_map[str(document["code"])]
+                    ],
+                    "monitor_observed_at": observed_at.isoformat(),
+                    "realtime_observation": (
+                        lane_map[str(document["code"])] == CANDIDATE_MONITOR_LANE_1M
+                    ),
                 }
                 for document in documents
             )
         with self._background_lock:
-            for document in documents or ():
-                signal_id = str(document["signal_id"])
-                self._priority_monitor_signal_stages[signal_id] = str(
-                    lifecycle_stage_from_signal(document)
-                    or document["lifecycle_stage"]
-                )
-                self._priority_monitor_signal_codes[signal_id] = str(document["code"])
             if compact_documents is not None:
-                failed_codes = {
-                    str(error["code"])
-                    for error in errors
-                    if isinstance(error.get("code"), str)
-                }
-                completed_codes = set(codes).difference(failed_codes)
+                completed_codes = set(successful_codes)
                 for signal_id, document in tuple(
                     self._priority_monitor_latest_documents.items()
                 ):
@@ -3406,10 +3191,57 @@ class TradingScreeningService:
                             signal_id,
                             None,
                         )
+                        self._priority_monitor_signal_stages.pop(signal_id, None)
+                        self._priority_monitor_signal_codes.pop(signal_id, None)
                 for document in compact_documents:
-                    self._priority_monitor_latest_documents[
-                        str(document["signal_id"])
-                    ] = copy.deepcopy(document)
+                    signal_id = str(document["signal_id"])
+                    self._priority_monitor_latest_documents[signal_id] = copy.deepcopy(
+                        document
+                    )
+                    self._priority_monitor_signal_stages[signal_id] = str(
+                        lifecycle_stage_from_signal(document)
+                        or document["lifecycle_stage"]
+                    )
+                    self._priority_monitor_signal_codes[signal_id] = str(
+                        document["code"]
+                    )
+                for code in successful_codes:
+                    self._priority_monitor_code_observations[code] = (
+                        observed_at,
+                        lane_map[code],
+                    )
+            if five_universe is not None and thirty_universe is not None:
+                if self._candidate_monitor_started_at is None:
+                    self._candidate_monitor_started_at = observed_at
+                self._candidate_monitor_five_universe = tuple(
+                    dict.fromkeys(five_universe)
+                )
+                self._candidate_monitor_thirty_universe = tuple(
+                    dict.fromkeys(thirty_universe)
+                )
+                five_scope = set(self._candidate_monitor_five_universe)
+                thirty_scope = set(self._candidate_monitor_thirty_universe)
+                self._candidate_monitor_five_last_success_at = {
+                    code: value
+                    for code, value in self._candidate_monitor_five_last_success_at.items()
+                    if code in five_scope
+                }
+                self._candidate_monitor_thirty_last_success_at = {
+                    code: value
+                    for code, value in self._candidate_monitor_thirty_last_success_at.items()
+                    if code in thirty_scope
+                }
+                self._candidate_monitor_five_last_success_at.update(
+                    {code: observed_at for code in successful_five_codes}
+                )
+                self._candidate_monitor_thirty_last_success_at.update(
+                    {code: observed_at for code in successful_thirty_codes}
+                )
+                self._candidate_monitor_last_five_codes = tuple(five_codes)
+                self._candidate_monitor_last_thirty_codes = tuple(thirty_codes)
+                self._candidate_monitor_last_errors = tuple(
+                    copy.deepcopy(value) for value in candidate_errors
+                )
             self._priority_monitor_last_at = observed_at
             self._priority_monitor_last_codes = tuple(codes)
             self._priority_monitor_last_errors = tuple(
@@ -3422,6 +3254,12 @@ class TradingScreeningService:
                     "documents": tuple(
                         self._priority_monitor_latest_documents[key]
                         for key in sorted(self._priority_monitor_latest_documents)
+                    ),
+                    "code_observations": tuple(
+                        (code, value[0], value[1])
+                        for code, value in sorted(
+                            self._priority_monitor_code_observations.items()
+                        )
                     ),
                 }
             )
@@ -3449,115 +3287,19 @@ class TradingScreeningService:
                 and str(document["point_type"]).endswith("sell")
             )
             for signal_id in removable:
+                code = self._priority_monitor_signal_codes.get(signal_id)
                 self._priority_monitor_latest_documents.pop(signal_id, None)
                 self._priority_monitor_signal_stages.pop(signal_id, None)
                 self._priority_monitor_signal_codes.pop(signal_id, None)
-
-    @staticmethod
-    def _rotated_monitor_slice(
-        values: tuple[str, ...],
-        *,
-        offset: int,
-        limit: int,
-    ) -> tuple[tuple[str, ...], int]:
-        if not values or limit <= 0:
-            return (), 0 if not values else offset % len(values)
-        start = offset % len(values)
-        rotated = values[start:] + values[:start]
-        selected = rotated[:limit]
-        return selected, (start + len(selected)) % len(values)
-
-    def _take_priority_monitor_codes(
-        self,
-        *,
-        critical_codes: tuple[str, ...],
-        sector_trigger_codes: tuple[str, ...],
-        always_codes: tuple[str, ...] = (),
-        holding_codes: tuple[str, ...] = (),
-    ) -> tuple[str, ...]:
-        """Reserve every holding before watchlists and discovery candidates.
-
-        A configured batch limit may rotate an oversized watchlist, but it may
-        never rotate away a user-declared holding.  When holdings alone exceed
-        the ordinary limit they temporarily expand this lane; observability of
-        an owned symbol is more important than candidate throughput.
-        """
-
-        holdings = tuple(dict.fromkeys(holding_codes))
-        holding_set = set(holdings)
-        mandatory = holdings + tuple(
-            code for code in dict.fromkeys(always_codes) if code not in holding_set
-        )
-        mandatory_set = set(mandatory)
-        critical = tuple(
-            code for code in dict.fromkeys(critical_codes) if code not in mandatory_set
-        )
-        critical_set = set(critical)
-        sector = tuple(
-            code
-            for code in dict.fromkeys(sector_trigger_codes)
-            if code not in mandatory_set and code not in critical_set
-        )
-        limit = self._config.max_priority_monitor_symbols_per_refresh
-        if len(holdings) >= limit:
-            return holdings
-        if len(mandatory) >= limit:
-            watchlist_slots = limit - len(holdings)
-            selected, self._priority_monitor_critical_offset = (
-                self._rotated_monitor_slice(
-                    mandatory[len(holdings) :],
-                    offset=self._priority_monitor_critical_offset,
-                    limit=watchlist_slots,
-                )
-            )
-            return holdings + selected
-
-        # When the explicit risk/review scope fits, every holding and watchlist
-        # symbol is observed on every minute pass.  Rotation applies only to an
-        # oversized mandatory scope or to the remaining candidate lanes.
-        selected_mandatory = mandatory
-        remaining_limit = limit - len(selected_mandatory)
-        if remaining_limit == 1 and critical and sector:
-            use_sector = self._priority_monitor_single_slot_sector_turn
-            self._priority_monitor_single_slot_sector_turn = not use_sector
-            if use_sector:
-                selected, self._priority_monitor_sector_offset = (
-                    self._rotated_monitor_slice(
-                        sector,
-                        offset=self._priority_monitor_sector_offset,
-                        limit=1,
+                if (
+                    isinstance(code, str)
+                    and code not in mandatory_codes
+                    and all(
+                        document.get("code") != code
+                        for document in self._priority_monitor_latest_documents.values()
                     )
-                )
-            else:
-                selected, self._priority_monitor_critical_offset = (
-                    self._rotated_monitor_slice(
-                        critical,
-                        offset=self._priority_monitor_critical_offset,
-                        limit=1,
-                    )
-                )
-            return selected_mandatory + selected
-        sector_reserve = min(
-            len(sector),
-            max(1, remaining_limit // 4) if sector else 0,
-        )
-        critical_limit = min(len(critical), remaining_limit - sector_reserve)
-        critical_batch, self._priority_monitor_critical_offset = (
-            self._rotated_monitor_slice(
-                critical,
-                offset=self._priority_monitor_critical_offset,
-                limit=critical_limit,
-            )
-        )
-        sector_limit = remaining_limit - len(critical_batch)
-        sector_batch, self._priority_monitor_sector_offset = (
-            self._rotated_monitor_slice(
-                sector,
-                offset=self._priority_monitor_sector_offset,
-                limit=sector_limit,
-            )
-        )
-        return selected_mandatory + critical_batch + sector_batch
+                ):
+                    self._priority_monitor_code_observations.pop(code, None)
 
     def _run_priority_monitor(
         self,
@@ -3646,10 +3388,9 @@ class TradingScreeningService:
             self._market_data.holdings_scope(),
             "holdings_scope",
         )
+        mandatory_scope = tuple(dict.fromkeys((*holdings, *watchlist)))
         mandatory_codes = tuple(
-            code
-            for code in dict.fromkeys((*holdings, *watchlist))
-            if code not in excluded_codes
+            code for code in mandatory_scope if code not in excluded_codes
         )
         self._prune_unowned_sell_priority_state(
             mandatory_codes=frozenset(mandatory_codes),
@@ -3662,30 +3403,122 @@ class TradingScreeningService:
                 copy.deepcopy(row)
                 for row in self._priority_monitor_latest_documents.values()
             )
-        critical_codes = _priority_buy_candidate_codes(
+            monitor_code_observations = dict(self._priority_monitor_code_observations)
+        observation_max_age_seconds = {
+            CANDIDATE_MONITOR_LANE_1M: max(
+                180,
+                self._config.priority_monitor_interval_seconds * 3,
+            ),
+            CANDIDATE_MONITOR_LANE_5M: (
+                self._config.five_minute_candidate_target_seconds
+                + self._config.priority_monitor_interval_seconds
+            ),
+            CANDIDATE_MONITOR_LANE_30M: (
+                self._config.thirty_minute_candidate_target_seconds
+                + self._config.priority_monitor_interval_seconds
+            ),
+        }
+        fresh_monitor_codes = {
+            code
+            for code, (last_at, lane) in monitor_code_observations.items()
+            if observed_at >= last_at
+            and (observed_at - last_at).total_seconds()
+            <= observation_max_age_seconds[lane]
+        }
+        current_monitor_signal_documents = tuple(
+            row
+            for row in monitor_signal_documents
+            if row.get("code") in fresh_monitor_codes
+        )
+        # A successful current observation is authoritative even when it emits
+        # no row.  Without this code-level tombstone, an armed row in the daily
+        # archive would re-enter the 1m lane forever after its setup vanished;
+        # a newer formed row could likewise lose to the archive's older rank.
+        current_signal_documents = (
+            tuple(
+                row
+                for row in main_signal_documents
+                if row.get("code") not in fresh_monitor_codes
+            )
+            + current_monitor_signal_documents
+        )
+        buy_candidate_codes = _priority_buy_candidate_codes(
             main_signal_documents,
-            monitor_signal_documents,
-            excluded_codes=frozenset((*excluded_codes, *mandatory_codes)),
+            current_monitor_signal_documents,
+            excluded_codes=excluded_codes,
         )
-        codes = self._take_priority_monitor_codes(
-            critical_codes=critical_codes,
-            sector_trigger_codes=tuple(
-                code
-                for code in dict.fromkeys(supportive_codes)
-                if code not in excluded_codes
-            ),
-            always_codes=tuple(
-                code for code in watchlist if code not in excluded_codes
-            ),
-            holding_codes=tuple(
-                code for code in holdings if code not in excluded_codes
-            ),
+        urgent_buy_codes = _priority_buy_candidate_codes(
+            current_signal_documents,
+            excluded_codes=frozenset((*excluded_codes, *mandatory_scope)),
+            allowed_stages=_CURRENT_MINUTE_BUY_STAGES,
         )
+        minute_codes = tuple(dict.fromkeys((*mandatory_codes, *urgent_buy_codes)))
+        # Existing buy candidates are observed on the cadence of the 5m setup
+        # that can change their decision.  The much broader frozen supportive
+        # sector scope is a discovery lane: it receives a current 5m+30m
+        # evaluation over each 30-minute window.  Treating all sector members
+        # as five-minute candidates would overclaim capacity and delay the
+        # genuinely armed 1m lane on the measured production host.
+        five_universe = tuple(dict.fromkeys((*mandatory_scope, *buy_candidate_codes)))
+        thirty_universe = tuple(dict.fromkeys((*five_universe, *supportive_codes)))
+        with self._background_lock:
+            previous_monitor_at = self._priority_monitor_last_at
+            five_last_success_at = dict(self._candidate_monitor_five_last_success_at)
+            thirty_last_success_at = dict(
+                self._candidate_monitor_thirty_last_success_at
+            )
+        five_codes = _take_due_candidate_batch(
+            five_universe,
+            last_success_at=five_last_success_at,
+            observed_at=observed_at,
+            target_seconds=self._config.five_minute_candidate_target_seconds,
+            monitor_interval_seconds=self._config.priority_monitor_interval_seconds,
+            max_symbols=(self._config.max_five_minute_candidate_symbols_per_refresh),
+            excluded_codes=excluded_codes,
+            previous_monitor_at=previous_monitor_at,
+        )
+        thirty_codes = _take_due_candidate_batch(
+            thirty_universe,
+            last_success_at=thirty_last_success_at,
+            observed_at=observed_at,
+            target_seconds=self._config.thirty_minute_candidate_target_seconds,
+            monitor_interval_seconds=self._config.priority_monitor_interval_seconds,
+            max_symbols=(self._config.max_thirty_minute_candidate_symbols_per_refresh),
+            excluded_codes=excluded_codes,
+            previous_monitor_at=previous_monitor_at,
+        )
+        frequencies_by_code: dict[str, set[str]] = {}
+        for code in minute_codes:
+            # A current 1m trigger is only meaningful against the latest
+            # completed 5m setup; refreshing both prevents a stale cached 5m
+            # structure from surviving a five-minute boundary.
+            frequencies_by_code.setdefault(code, set()).update(("5m", "1m"))
+        for code in five_codes:
+            frequencies_by_code.setdefault(code, set()).add("5m")
+        for code in thirty_codes:
+            frequencies_by_code.setdefault(code, set()).update(("5m", "30m"))
+        codes = tuple(dict.fromkeys((*minute_codes, *five_codes, *thirty_codes)))
+        minute_code_set = set(minute_codes)
+        five_code_set = set(five_codes)
+        five_universe_set = set(five_universe)
+        thirty_universe_set = set(thirty_universe)
+        lanes_by_code = {
+            code: (
+                CANDIDATE_MONITOR_LANE_1M
+                if code in minute_code_set
+                else CANDIDATE_MONITOR_LANE_5M
+                if code in five_code_set
+                else CANDIDATE_MONITOR_LANE_30M
+            )
+            for code in codes
+        }
         if not codes:
             self._record_priority_monitor_result(
                 observed_at=observed_at,
                 codes=(),
                 errors=(),
+                five_universe=five_universe,
+                thirty_universe=thirty_universe,
             )
             self._persist_priority_monitor_state()
             return
@@ -3702,8 +3535,8 @@ class TradingScreeningService:
             and isinstance(row.get("signal_id"), str)
             and isinstance(row.get("lifecycle_stage"), str)
         }
-        monitor_previous_stages = dict(self._priority_monitor_signal_stages)
-        for row in monitor_signal_documents:
+        monitor_previous_stages: dict[str, str] = {}
+        for row in current_monitor_signal_documents:
             signal_id = row.get("signal_id")
             stage = lifecycle_stage_from_signal(row)
             if isinstance(signal_id, str) and stage is not None:
@@ -3714,7 +3547,7 @@ class TradingScreeningService:
         }
         previous_documents_by_id = {
             str(row["signal_id"]): copy.deepcopy(dict(row))
-            for row in (*main_signal_documents, *monitor_signal_documents)
+            for row in (*main_signal_documents, *current_monitor_signal_documents)
             if isinstance(row.get("signal_id"), str)
             and isinstance(row.get("code"), str)
         }
@@ -3729,7 +3562,7 @@ class TradingScreeningService:
                 sources.append("ACTIVE_WATCHLIST_MONITOR")
             if code in holding_codes:
                 sources.append("HOLDING_MONITOR")
-            if code in critical_codes and not sources:
+            if code in buy_candidate_codes and not sources:
                 sources.append("PREVIOUS_SIGNAL_MONITOR")
             return tuple(sources or ("INCREMENTAL_SCAN_SCOPE",))
 
@@ -3751,7 +3584,11 @@ class TradingScreeningService:
                     code,
                     as_of=observed_at,
                     sector=sector,
-                    frequencies=SCREENING_STRUCTURE_FREQUENCIES,
+                    frequencies=tuple(
+                        frequency
+                        for frequency in SCREENING_STRUCTURE_FREQUENCIES
+                        if frequency in frequencies_by_code[code]
+                    ),
                     risk_evidence_cutoff=sector_as_of,
                 )
                 bundle = replace(
@@ -3803,11 +3640,16 @@ class TradingScreeningService:
 
         documents: list[dict[str, object]] = []
         errors: list[dict[str, object]] = []
+        candidate_errors: list[dict[str, object]] = []
         for code, rows, exc in results:
             if exc is None:
                 documents.extend(rows)
                 continue
-            errors.append(_stock_analysis_error_document(code, exc))
+            error = _stock_analysis_error_document(code, exc)
+            if code in minute_code_set:
+                errors.append(error)
+            else:
+                candidate_errors.append(error)
         documents.sort(
             key=lambda row: (
                 str(row.get("code")),
@@ -3817,27 +3659,53 @@ class TradingScreeningService:
         authoritative_codes = tuple(
             sorted(code for code, _rows, exc in results if exc is None)
         )
-        authoritative_code_set = set(authoritative_codes)
+        notification_authoritative_codes = tuple(
+            code for code in authoritative_codes if code in minute_code_set
+        )
+        notification_authoritative_code_set = set(notification_authoritative_codes)
         previous_notification = {
             "signals": [
                 document
                 for signal_id, document in sorted(previous_documents_by_id.items())
                 if signal_id in prior_stages
-                and document.get("code") in authoritative_code_set
+                and document.get("code") in notification_authoritative_code_set
             ]
         }
         current_notification = {
-            "signals": documents,
+            "signals": [
+                document
+                for document in documents
+                if document.get("code") in notification_authoritative_code_set
+            ],
             # A missing signal is meaningful only for symbols successfully
             # recomputed in this partial lane.  The dispatcher uses this scope
             # to emit a retraction without invalidating rotated-out symbols.
-            "notification_authoritative_codes": list(authoritative_codes),
+            "notification_authoritative_codes": list(notification_authoritative_codes),
         }
+        successful_five_codes = tuple(
+            code
+            for code in authoritative_codes
+            if code in five_universe_set and "5m" in frequencies_by_code[code]
+        )
+        successful_thirty_codes = tuple(
+            code
+            for code in authoritative_codes
+            if code in thirty_universe_set and "30m" in frequencies_by_code[code]
+        )
         self._record_priority_monitor_result(
             observed_at=observed_at,
-            codes=codes,
+            codes=minute_codes,
             errors=tuple(errors),
             documents=tuple(documents),
+            successful_codes=authoritative_codes,
+            lanes_by_code=lanes_by_code,
+            candidate_errors=tuple(candidate_errors),
+            five_universe=five_universe,
+            thirty_universe=thirty_universe,
+            five_codes=five_codes,
+            thirty_codes=thirty_codes,
+            successful_five_codes=successful_five_codes,
+            successful_thirty_codes=successful_thirty_codes,
         )
         self._persist_priority_monitor_state()
         if self._notifier is not None:
@@ -3855,7 +3723,7 @@ class TradingScreeningService:
                 errors.append(notification_error)
                 self._record_priority_monitor_result(
                     observed_at=observed_at,
-                    codes=codes,
+                    codes=minute_codes,
                     errors=tuple(errors),
                 )
                 self._persist_priority_monitor_state()
@@ -3932,7 +3800,7 @@ class TradingScreeningService:
         self,
         snapshot: Mapping[str, object],
     ) -> bool:
-        """Independently recompute the shared v3 coverage-epoch identity."""
+        """Independently recompute the shared strict strategy coverage-epoch identity."""
 
         manifest = snapshot.get("coverage_manifest")
         if not isinstance(manifest, Mapping):
@@ -3978,8 +3846,8 @@ class TradingScreeningService:
                 sector_strength_evidence_revision=strength_revision,
                 decision_core_id=self._decision_core_id,
                 screening_policy_id=screening_policy_id,
-                structure_version=self._config.structure_version,
-                parameter_version=self._config.parameter_version,
+                structure_contract_id=self._config.structure_contract_id,
+                parameter_set_id=self._config.parameter_set_id,
             )
         except (TypeError, ValueError):
             return False
@@ -3991,7 +3859,8 @@ class TradingScreeningService:
             return False
         epoch_id = manifest.get("coverage_epoch_id")
         if (
-            manifest.get("schema") != COVERAGE_MANIFEST_SCHEMA
+            set(manifest) != COVERAGE_MANIFEST_FIELDS
+            or manifest.get("schema") != COVERAGE_MANIFEST_SCHEMA
             or manifest.get("coverage_state_contract_id") != COVERAGE_STATE_CONTRACT_ID
             or manifest.get("signal_document_contract_id")
             != SIGNAL_DOCUMENT_CONTRACT_ID
@@ -4005,6 +3874,7 @@ class TradingScreeningService:
             "completed_codes",
             "excluded_codes",
             "failed_codes",
+            "discarded_out_of_scope_retry_codes",
         ):
             raw = manifest.get(field)
             if (
@@ -4014,19 +3884,22 @@ class TradingScreeningService:
             ):
                 return False
             canonical_lists[field] = raw
-        replay_lists: dict[str, list[str]] = {}
-        for field in (
-            "risk_evidence_replay_codes",
-            "sector_evidence_replay_codes",
+        if (
+            type(manifest.get("complete")) is not bool
+            or type(manifest.get("batch_count")) is not int
+            or manifest.get("batch_count", -1) < 0
         ):
-            raw = manifest.get(field, [])
-            if (
-                not isinstance(raw, list)
-                or any(not isinstance(value, str) or not value for value in raw)
-                or raw != sorted(set(raw))
-            ):
+            return False
+        parsed_frequency_maps: dict[str, dict[str, set[str]]] = {}
+        for field in (
+            "pending_frequencies",
+            "backoff_frequencies",
+            "deferred_frequencies",
+        ):
+            parsed = self._frequency_map(manifest.get(field))
+            if self._frequency_document(parsed) != manifest.get(field):
                 return False
-            replay_lists[field] = raw
+            parsed_frequency_maps[field] = parsed
         exclusion_keys = {
             "code",
             "exclusion_type",
@@ -4116,8 +3989,8 @@ class TradingScreeningService:
                 sector_strength_evidence_revision=(sector_strength_evidence_revision),
                 decision_core_id=self._decision_core_id,
                 screening_policy_id=_screening_policy_id(),
-                structure_version=self._config.structure_version,
-                parameter_version=self._config.parameter_version,
+                structure_contract_id=self._config.structure_contract_id,
+                parameter_set_id=self._config.parameter_set_id,
             )
         except ValueError:
             return False
@@ -4132,42 +4005,34 @@ class TradingScreeningService:
         self._coverage_cycle_started_at = started
         self._coverage_market_data_as_of = market_time
         superseded_epoch_id = manifest.get("superseded_coverage_epoch_id")
-        self._coverage_cycle_superseded_epoch_id = (
-            superseded_epoch_id
-            if isinstance(superseded_epoch_id, str) and superseded_epoch_id
-            else None
-        )
         superseded_cutoff = manifest.get("superseded_market_data_as_of")
-        if isinstance(superseded_cutoff, str) and superseded_cutoff:
+        if (superseded_epoch_id is None) != (superseded_cutoff is None):
+            return False
+        if superseded_epoch_id is None:
+            self._coverage_cycle_superseded_epoch_id = None
+            self._coverage_cycle_superseded_market_data_as_of = None
+        elif (
+            not isinstance(superseded_epoch_id, str)
+            or not superseded_epoch_id.startswith("sha256:")
+            or not isinstance(superseded_cutoff, str)
+            or not superseded_cutoff
+        ):
+            return False
+        else:
             try:
                 self._coverage_cycle_superseded_market_data_as_of = normalize_datetime(
                     datetime.fromisoformat(superseded_cutoff),
                     "superseded coverage market data as_of",
                 )
             except ValueError:
-                self._coverage_cycle_superseded_market_data_as_of = None
+                return False
+            self._coverage_cycle_superseded_epoch_id = superseded_epoch_id
         self._coverage_cycle_started_perf = time.perf_counter()
         self._coverage_cycle_batch_count = int(manifest.get("batch_count") or 0)
-        self._coverage_cycle_discovered_codes = set(
-            value
-            for value in manifest.get("discovered_codes", ())
-            if isinstance(value, str)
-        )
-        self._coverage_cycle_completed_codes = set(
-            value
-            for value in manifest.get("completed_codes", ())
-            if isinstance(value, str)
-        )
-        self._coverage_cycle_excluded_codes = set(
-            value
-            for value in manifest.get("excluded_codes", ())
-            if isinstance(value, str)
-        )
-        self._coverage_cycle_failed_codes = set(
-            value
-            for value in manifest.get("failed_codes", ())
-            if isinstance(value, str)
-        )
+        self._coverage_cycle_discovered_codes = set(canonical_lists["discovered_codes"])
+        self._coverage_cycle_completed_codes = set(canonical_lists["completed_codes"])
+        self._coverage_cycle_excluded_codes = set(canonical_lists["excluded_codes"])
+        self._coverage_cycle_failed_codes = set(canonical_lists["failed_codes"])
         raw_exclusions = manifest.get("exclusions")
         self._coverage_cycle_exclusions = {}
         if isinstance(raw_exclusions, list):
@@ -4177,25 +4042,11 @@ class TradingScreeningService:
                 if isinstance(value, Mapping) and isinstance(value.get("code"), str)
             }
         self._coverage_cycle_discarded_retry_codes = set(
-            value
-            for value in manifest.get("discarded_out_of_scope_retry_codes", ())
-            if isinstance(value, str)
+            canonical_lists["discarded_out_of_scope_retry_codes"]
         )
-        self._pending_frequencies = self._frequency_map(
-            manifest.get("pending_frequencies")
-        )
-        self._backoff_frequencies = self._frequency_map(
-            manifest.get("backoff_frequencies")
-        )
-        self._deferred_frequencies = self._frequency_map(
-            manifest.get("deferred_frequencies")
-        )
-        self._risk_evidence_replay_codes = set(
-            replay_lists["risk_evidence_replay_codes"]
-        )
-        self._sector_evidence_replay_codes = set(
-            replay_lists["sector_evidence_replay_codes"]
-        )
+        self._pending_frequencies = parsed_frequency_maps["pending_frequencies"]
+        self._backoff_frequencies = parsed_frequency_maps["backoff_frequencies"]
+        self._deferred_frequencies = parsed_frequency_maps["deferred_frequencies"]
         audit = snapshot.get("scan_audit")
         if isinstance(audit, Mapping):
             self._coverage_cycle_full_market_history_scan = bool(
@@ -4264,6 +4115,20 @@ class TradingScreeningService:
                 current_value, self._config, self._decision_core_id
             ):
                 return current_value
+            if isinstance(current_value, Mapping):
+                cached_core_id = current_value.get("decision_core_id")
+                if (
+                    isinstance(cached_core_id, str)
+                    and cached_core_id
+                    and cached_core_id != self._decision_core_id
+                ):
+                    self._quarantined_cache_decision_core_id = cached_core_id
+                    self._quarantined_cache_reason = "DECISION_CORE_IDENTITY_MISMATCH"
+                else:
+                    self._quarantined_cache_decision_core_id = (
+                        cached_core_id if isinstance(cached_core_id, str) else None
+                    )
+                    self._quarantined_cache_reason = "CURRENT_CACHE_CONTRACT_INVALID"
             # A parseable primary that fails semantic, policy or content-hash
             # validation is evidence of tampering/staleness, not an interrupted
             # write.  Fail closed instead of hiding it behind an older backup.
@@ -4298,6 +4163,8 @@ class TradingScreeningService:
                 copy.deepcopy(value)
                 for _, value in sorted(self._priority_monitor_latest_documents.items())
             )
+            code_observations = dict(self._priority_monitor_code_observations)
+            candidate_errors = tuple(self._candidate_monitor_last_errors)
             priority_revision = self._priority_monitor_presentation_revision
         priority_max_age_seconds = max(
             180,
@@ -4315,11 +4182,49 @@ class TradingScreeningService:
             and priority_age_seconds is not None
             and priority_age_seconds <= priority_max_age_seconds
         )
+        overlay_active = bool(
+            self._config.priority_monitoring_enabled
+            and _priority_monitor_session_open(observed_at)
+        )
+        lane_max_age_seconds = {
+            CANDIDATE_MONITOR_LANE_1M: priority_max_age_seconds,
+            CANDIDATE_MONITOR_LANE_5M: (
+                self._config.five_minute_candidate_target_seconds
+                + self._config.priority_monitor_interval_seconds
+            ),
+            CANDIDATE_MONITOR_LANE_30M: (
+                self._config.thirty_minute_candidate_target_seconds
+                + self._config.priority_monitor_interval_seconds
+            ),
+        }
+        fresh_code_observations = {
+            code: (value[0], value[1])
+            for code, value in code_observations.items()
+            if overlay_active
+            and observed_at >= value[0]
+            and (observed_at - value[0]).total_seconds()
+            <= lane_max_age_seconds[value[1]]
+        }
+        fresh_codes = set(fresh_code_observations)
+        priority_documents = tuple(
+            value for value in priority_documents if value.get("code") in fresh_codes
+        )
+        minute_documents = tuple(
+            value
+            for value in priority_documents
+            if value.get("realtime_observation") is True
+        )
+        candidate_documents = tuple(
+            value
+            for value in priority_documents
+            if value.get("realtime_observation") is not True
+        )
         with self._state_lock:
             snapshot = self._snapshot
             source_sha256 = snapshot.get("snapshot_content_sha256")
             presentation_revision = (
                 f"{source_sha256}|{priority_revision}|live={priority_live}"
+                f"|fresh={sha256_json(tuple(sorted(fresh_code_observations)))}"
             )
             if (
                 isinstance(source_sha256, str)
@@ -4342,7 +4247,12 @@ class TradingScreeningService:
             if isinstance(raw_signals, (list, tuple))
             else []
         )
-        if priority_live:
+        if overlay_active and fresh_codes:
+            projected_signals = [
+                value
+                for value in projected_signals
+                if value.get("code") not in fresh_codes
+            ]
             signals_by_id = {
                 str(value["signal_id"]): value
                 for value in projected_signals
@@ -4370,11 +4280,11 @@ class TradingScreeningService:
             point_type = str(value.get("point_type") or "")
             if point_type in document["counts_by_point_type"]:
                 document["counts_by_point_type"][point_type] += 1
-        document["presentation_schema"] = "chanlun-trading-screening-presentation/v1"
+        document["presentation_schema"] = "chanlun-trading-screening-presentation"
         document["source_snapshot_content_sha256"] = source_sha256
         document["full_audit_evidence_embedded"] = False
         document["priority_live_overlay"] = {
-            "schema": "chanlun-priority-live-page-overlay/v1",
+            "schema": "chanlun-priority-live-page-overlay",
             "enabled": self._config.priority_monitoring_enabled,
             "live": priority_live,
             "observed_at": (
@@ -4382,10 +4292,21 @@ class TradingScreeningService:
             ),
             "age_seconds": priority_age_seconds,
             "max_age_seconds": priority_max_age_seconds,
-            "signal_count": (len(priority_documents) if priority_live else 0),
+            "signal_count": (len(minute_documents) if priority_live else 0),
             "error_count": len(priority_errors),
             "notification_dispatcher_configured": self._notifier is not None,
             "archival_snapshot_unchanged": True,
+        }
+        document["candidate_live_overlay"] = {
+            "schema": "chanlun-candidate-live-page-overlay",
+            "contract_id": CANDIDATE_MONITOR_CONTRACT_ID,
+            "enabled": self._config.priority_monitoring_enabled,
+            "live": bool(overlay_active and fresh_code_observations),
+            "fresh_code_count": len(fresh_code_observations),
+            "signal_count": len(candidate_documents),
+            "error_count": len(candidate_errors),
+            "archival_snapshot_unchanged": True,
+            "realtime_notification_authorized": False,
         }
         with self._state_lock:
             if self._snapshot is snapshot and isinstance(source_sha256, str):
@@ -4493,8 +4414,7 @@ class TradingScreeningService:
                 if self._review_readiness_validation_sha256 != snapshot_sha256:
                     self._review_readiness_validation_sha256 = snapshot_sha256
                     file_backed = bool(
-                        hasattr(self, "_cache_path")
-                        and self._cache_path.is_file()
+                        hasattr(self, "_cache_path") and self._cache_path.is_file()
                     )
                     worker = Thread(
                         target=(
@@ -4602,9 +4522,7 @@ class TradingScreeningService:
                 ]
             )
         creationflags = (
-            getattr(subprocess, "CREATE_NO_WINDOW", 0)
-            if os.name == "nt"
-            else 0
+            getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
         )
         try:
             completed = subprocess.run(
@@ -4681,6 +4599,28 @@ class TradingScreeningService:
                 self._priority_monitor_sector_coverage_epoch_id
             )
             priority_monitor_runtime_verified = self._priority_monitor_runtime_verified
+            candidate_monitor_started_at = self._candidate_monitor_started_at
+            candidate_monitor_last_errors = tuple(
+                copy.deepcopy(self._candidate_monitor_last_errors)
+            )
+            candidate_monitor_five_universe = tuple(
+                self._candidate_monitor_five_universe
+            )
+            candidate_monitor_thirty_universe = tuple(
+                self._candidate_monitor_thirty_universe
+            )
+            candidate_monitor_five_last_success_at = dict(
+                self._candidate_monitor_five_last_success_at
+            )
+            candidate_monitor_thirty_last_success_at = dict(
+                self._candidate_monitor_thirty_last_success_at
+            )
+            candidate_monitor_last_five_codes = tuple(
+                self._candidate_monitor_last_five_codes
+            )
+            candidate_monitor_last_thirty_codes = tuple(
+                self._candidate_monitor_last_thirty_codes
+            )
 
         # Do not deep-copy the full-universe signal/evidence tree merely to
         # read health counters.  Identity is still recomputed against the
@@ -4773,9 +4713,10 @@ class TradingScreeningService:
             heartbeat_age_seconds > heartbeat_max_age_seconds
         ):
             reasons.append("screening_heartbeat_stale")
-        if not snapshot_available:
+        current_snapshot_required = self._config.full_coverage_refresh_enabled
+        if not snapshot_available and current_snapshot_required:
             reasons.append("screening_snapshot_unavailable")
-        elif not identity_valid:
+        elif snapshot_available and not identity_valid:
             reasons.append("screening_snapshot_identity_missing")
         if scan_state == "refresh_failed":
             reasons.append("screening_refresh_failed")
@@ -4786,9 +4727,6 @@ class TradingScreeningService:
             reasons.append("screening_snapshot_not_publishable")
         if last_error is not None and scan_state != "refresh_failed":
             reasons.append("screening_background_error")
-        if self._sector_cache_migration_persist_error is not None:
-            reasons.append("screening_cache_migration_persist_failed")
-
         scan_audit = snapshot.get("scan_audit")
         coverage_complete = None
         if not isinstance(scan_audit, Mapping):
@@ -4869,8 +4807,10 @@ class TradingScreeningService:
                 phase_refresh_at=last_result_at,
             )
         )
-        full_coverage_refresh_window_open = _full_coverage_refresh_window_open(
-            observed_at
+        full_coverage_refresh_enabled = self._config.full_coverage_refresh_enabled
+        full_coverage_refresh_window_open = bool(
+            full_coverage_refresh_enabled
+            and _full_coverage_refresh_window_open(observed_at)
         )
         monitoring_failure_codes = sorted(
             {
@@ -4939,6 +4879,91 @@ class TradingScreeningService:
             priority_monitor_failure_reason_counts[reason] = (
                 priority_monitor_failure_reason_counts.get(reason, 0) + 1
             )
+        five_candidate_coverage = _candidate_lane_coverage(
+            candidate_monitor_five_universe,
+            last_success_at=candidate_monitor_five_last_success_at,
+            observed_at=observed_at,
+            target_seconds=self._config.five_minute_candidate_target_seconds,
+        )
+        thirty_candidate_coverage = _candidate_lane_coverage(
+            candidate_monitor_thirty_universe,
+            last_success_at=candidate_monitor_thirty_last_success_at,
+            observed_at=observed_at,
+            target_seconds=self._config.thirty_minute_candidate_target_seconds,
+        )
+        five_required_per_refresh = (
+            len(candidate_monitor_five_universe)
+            * self._config.priority_monitor_interval_seconds
+            + self._config.five_minute_candidate_target_seconds
+            - 1
+        ) // self._config.five_minute_candidate_target_seconds
+        thirty_required_per_refresh = (
+            len(candidate_monitor_thirty_universe)
+            * self._config.priority_monitor_interval_seconds
+            + self._config.thirty_minute_candidate_target_seconds
+            - 1
+        ) // self._config.thirty_minute_candidate_target_seconds
+        candidate_capacity_sufficient = bool(
+            five_required_per_refresh
+            <= self._config.max_five_minute_candidate_symbols_per_refresh
+            and thirty_required_per_refresh
+            <= self._config.max_thirty_minute_candidate_symbols_per_refresh
+        )
+        candidate_monitor_failure_reason_counts: dict[str, int] = {}
+        for error in candidate_monitor_last_errors:
+            reason = str(error.get("reason_code") or "CANDIDATE_MONITOR_UNCLASSIFIED")
+            candidate_monitor_failure_reason_counts[reason] = (
+                candidate_monitor_failure_reason_counts.get(reason, 0) + 1
+            )
+        candidate_warmup_age_seconds = (
+            None
+            if candidate_monitor_started_at is None
+            else max(
+                0.0,
+                (observed_at - candidate_monitor_started_at).total_seconds(),
+            )
+        )
+        candidate_monitor_reason_codes: list[str] = []
+        if not priority_monitor_enabled:
+            candidate_monitor_status = "disabled"
+            candidate_monitor_ready = True
+        elif not priority_monitor_session_open:
+            candidate_monitor_status = "not_due"
+            candidate_monitor_ready = True
+        elif not priority_monitor_runtime_verified:
+            candidate_monitor_status = "awaiting_runtime_verification"
+            candidate_monitor_ready = False
+            candidate_monitor_reason_codes.append(
+                "CANDIDATE_MONITOR_RUNTIME_UNVERIFIED"
+            )
+        elif candidate_monitor_last_errors:
+            candidate_monitor_status = "degraded"
+            candidate_monitor_ready = False
+            candidate_monitor_reason_codes.append("CANDIDATE_MONITOR_ERRORS")
+        elif not candidate_capacity_sufficient:
+            candidate_monitor_status = "capacity_insufficient"
+            candidate_monitor_ready = False
+            candidate_monitor_reason_codes.append(
+                "CANDIDATE_MONITOR_CONFIGURED_CAPACITY_INSUFFICIENT"
+            )
+        elif (
+            five_candidate_coverage["ready"] is True
+            and thirty_candidate_coverage["ready"] is True
+        ):
+            candidate_monitor_status = "verified"
+            candidate_monitor_ready = True
+        elif (
+            candidate_warmup_age_seconds is not None
+            and candidate_warmup_age_seconds
+            <= self._config.thirty_minute_candidate_target_seconds
+        ):
+            candidate_monitor_status = "warming"
+            candidate_monitor_ready = False
+            candidate_monitor_reason_codes.append("CANDIDATE_MONITOR_WARMING")
+        else:
+            candidate_monitor_status = "cadence_overdue"
+            candidate_monitor_ready = False
+            candidate_monitor_reason_codes.append("CANDIDATE_MONITOR_CADENCE_OVERDUE")
         notification_dispatcher_configured = self._notifier is not None
         notification_delivery: dict[str, object] | None = None
         if notification_dispatcher_configured:
@@ -4950,7 +4975,7 @@ class TradingScreeningService:
                         notification_delivery = dict(raw_notification_delivery)
                 except Exception as exc:
                     notification_delivery = {
-                        "schema": "chanlun-signal-notification-readiness/v1",
+                        "schema": "chanlun-signal-notification-readiness",
                         "configured": True,
                         "operationally_verified": False,
                         "status": "unavailable",
@@ -4998,8 +5023,6 @@ class TradingScreeningService:
         if not isinstance(member_history_diagnostics, Mapping):
             member_history_diagnostics = None
 
-        risk_replay_codes = sorted(self._risk_evidence_replay_codes)
-        sector_replay_codes = sorted(self._sector_evidence_replay_codes)
         ready = not reasons
         return {
             "ready": ready,
@@ -5030,33 +5053,14 @@ class TradingScreeningService:
             ),
             "refresh_attempt_count": iteration_count,
             "last_error": last_error,
-            "sector_cache_migration_applied": (self._sector_cache_migration_applied),
-            "sector_cache_migration_persist_error": (
-                self._sector_cache_migration_persist_error
-            ),
             "cache_recovered_from_generation": (self._cache_recovered_from_generation),
             "cache_generation_count": self._cache_generation_count,
             "cache_generation_error": self._cache_generation_error,
-            "risk_evidence_replay_symbol_count": len(risk_replay_codes),
-            "risk_evidence_replay_codes": risk_replay_codes[
-                :HEALTH_REPLAY_CODE_SAMPLE_LIMIT
-            ],
-            "risk_evidence_replay_codes_truncated": (
-                len(risk_replay_codes) > HEALTH_REPLAY_CODE_SAMPLE_LIMIT
+            "quarantined_cache_decision_core_id": (
+                self._quarantined_cache_decision_core_id
             ),
-            "risk_evidence_replay_codes_sha256": sha256_json(
-                {"codes": risk_replay_codes}
-            ),
-            "sector_evidence_replay_symbol_count": len(sector_replay_codes),
-            "sector_evidence_replay_codes": sector_replay_codes[
-                :HEALTH_REPLAY_CODE_SAMPLE_LIMIT
-            ],
-            "sector_evidence_replay_codes_truncated": (
-                len(sector_replay_codes) > HEALTH_REPLAY_CODE_SAMPLE_LIMIT
-            ),
-            "sector_evidence_replay_codes_sha256": sha256_json(
-                {"codes": sector_replay_codes}
-            ),
+            "quarantined_cache_reason": self._quarantined_cache_reason,
+            "current_logic_snapshot_required": current_snapshot_required,
             "coverage_sector_restore_error": (self._coverage_sector_restore_error),
             "last_monitoring_at": (
                 None if last_monitoring_at is None else last_monitoring_at.isoformat()
@@ -5100,6 +5104,42 @@ class TradingScreeningService:
             "priority_monitor_last_failure_reason_counts": dict(
                 sorted(priority_monitor_failure_reason_counts.items())
             ),
+            "candidate_monitor_contract_id": CANDIDATE_MONITOR_CONTRACT_ID,
+            "candidate_monitor_ready": candidate_monitor_ready,
+            "candidate_monitor_status": candidate_monitor_status,
+            "candidate_monitor_reason_codes": candidate_monitor_reason_codes,
+            "candidate_monitor_started_at": (
+                None
+                if candidate_monitor_started_at is None
+                else candidate_monitor_started_at.isoformat()
+            ),
+            "candidate_monitor_capacity_sufficient": (candidate_capacity_sufficient),
+            "candidate_monitor_last_error_count": len(candidate_monitor_last_errors),
+            "candidate_monitor_last_failure_reason_counts": dict(
+                sorted(candidate_monitor_failure_reason_counts.items())
+            ),
+            "candidate_monitor_five_minute": {
+                **five_candidate_coverage,
+                "scope": "OWNED_WATCHED_AND_EXISTING_BUY_CANDIDATES",
+                "required_symbols_per_refresh": five_required_per_refresh,
+                "max_symbols_per_refresh": (
+                    self._config.max_five_minute_candidate_symbols_per_refresh
+                ),
+                "last_batch_count": len(candidate_monitor_last_five_codes),
+                "last_batch_codes": list(candidate_monitor_last_five_codes),
+                "requested_frequencies": ["5m"],
+            },
+            "candidate_monitor_thirty_minute": {
+                **thirty_candidate_coverage,
+                "scope": "SUPPORTIVE_SECTOR_DISCOVERY_AND_EXISTING_CANDIDATES",
+                "required_symbols_per_refresh": thirty_required_per_refresh,
+                "max_symbols_per_refresh": (
+                    self._config.max_thirty_minute_candidate_symbols_per_refresh
+                ),
+                "last_batch_count": len(candidate_monitor_last_thirty_codes),
+                "last_batch_codes": list(candidate_monitor_last_thirty_codes),
+                "requested_frequencies": ["5m", "30m"],
+            },
             "notification_dispatcher_configured": (notification_dispatcher_configured),
             "notification_delivery": copy.deepcopy(notification_delivery),
             "notification_operationally_verified": bool(
@@ -5133,16 +5173,24 @@ class TradingScreeningService:
             "refresh_suppression_reason": (
                 COMPLETE_CLOSE_IDLE_REASON if refresh_suppressed else None
             ),
+            "full_coverage_refresh_enabled": full_coverage_refresh_enabled,
             "full_coverage_refresh_window_open": (full_coverage_refresh_window_open),
             "full_coverage_refresh_paused": (not full_coverage_refresh_window_open),
             "full_coverage_refresh_pause_reason": (
                 None
                 if full_coverage_refresh_window_open
-                else FULL_COVERAGE_PAUSE_REASON
+                else (
+                    FULL_COVERAGE_PAUSE_REASON
+                    if full_coverage_refresh_enabled
+                    else "FULL_COVERAGE_REFRESH_DISABLED"
+                )
             ),
             "full_coverage_next_active_at": (
                 None
-                if full_coverage_refresh_window_open
+                if (
+                    full_coverage_refresh_window_open
+                    or not full_coverage_refresh_enabled
+                )
                 else _next_full_coverage_active_start(observed_at).isoformat()
             ),
             "next_background_active_at": (
@@ -5150,14 +5198,6 @@ class TradingScreeningService:
                 if refresh_suppressed
                 else None
             ),
-            # Backward-compatible primary-window field: this is now the main
-            # next-session stock-selection window, not the morning check.
-            "background_active_window": {
-                "timezone": "Asia/Shanghai",
-                "weekdays": [0, 1, 2, 3, 4],
-                "start": POST_CLOSE_PRESELECTION_START.isoformat(),
-                "end": POST_CLOSE_PRESELECTION_END.isoformat(),
-            },
             "background_active_windows": [
                 {
                     "phase": "POST_CLOSE_PRESELECTION",
@@ -5233,11 +5273,6 @@ class TradingScreeningService:
             ),
             "daily_preselection_reconcile_schedule": ("MON-FRI 08:45 Asia/Shanghai"),
             "daily_preselection_capture_schedule": ("MON-FRI 09:10 Asia/Shanghai"),
-            # Backward-compatible aliases.  They attest only the immutable
-            # screening/review boundary; /readyz exposes the distinct complete
-            # forward_archive gate that also requires same-session QMT Capture.
-            "forward_review_ready": screening_review_ready,
-            "forward_review_reason_code": screening_review_reason_code,
             "pending_symbol_count": self._pending_symbol_count(snapshot),
             "immediate_pending_symbol_count": scan_audit.get(
                 "immediate_pending_symbol_count",
@@ -5396,7 +5431,10 @@ class TradingScreeningService:
                 has_pending = self._immediate_pending_symbol_count(snapshot) > 0
                 has_backoff_retry = self._backoff_retry_symbol_count(snapshot) > 0
                 observed_at = normalize_datetime(self._clock(), "clock")
-                coverage_window_open = _full_coverage_refresh_window_open(observed_at)
+                coverage_window_open = bool(
+                    self._config.full_coverage_refresh_enabled
+                    and _full_coverage_refresh_window_open(observed_at)
+                )
                 priority_monitor_due = self._priority_monitor_due(observed_at)
                 if (
                     has_pending
@@ -5563,14 +5601,7 @@ class TradingScreeningService:
         *,
         cache_valid: bool | None = None,
     ) -> None:
-        """Reject an unexplained loss of completed symbols in one epoch.
-
-        Targeted evidence migrations explicitly place their affected symbols in
-        the risk/sector replay sets.  They are the only permitted same-epoch
-        transition from completed back to pending.  A new universe, market-data
-        cutoff or policy produces a different epoch identity and is evaluated
-        independently.
-        """
+        """Reject any loss of completed symbols in one coverage epoch."""
 
         previous = self._snapshot_reference()
         if cache_valid is None:
@@ -5620,14 +5651,11 @@ class TradingScreeningService:
             for value in new_manifest.get("excluded_codes", ())
             if isinstance(value, str)
         }
-        explicit_replays = (
-            self._risk_evidence_replay_codes | self._sector_evidence_replay_codes
-        )
-        unexplained = (old_completed - new_completed - new_excluded) - explicit_replays
+        unexplained = old_completed - new_completed - new_excluded
         if unexplained:
             raise ValueError(
-                "same coverage epoch lost completed symbols without an explicit "
-                f"evidence replay: {','.join(sorted(unexplained)[:8])}"
+                "same coverage epoch lost completed symbols: "
+                f"{','.join(sorted(unexplained)[:8])}"
             )
 
     def _persist_atomic(
@@ -5769,8 +5797,6 @@ class TradingScreeningService:
             "discarded_out_of_scope_retry_codes": sorted(
                 self._coverage_cycle_discarded_retry_codes
             ),
-            "risk_evidence_replay_codes": sorted(self._risk_evidence_replay_codes),
-            "sector_evidence_replay_codes": sorted(self._sector_evidence_replay_codes),
             "pending_frequencies": self._frequency_document(self._pending_frequencies),
             "backoff_frequencies": self._frequency_document(self._backoff_frequencies),
             "deferred_frequencies": self._frequency_document(
@@ -5779,10 +5805,6 @@ class TradingScreeningService:
             "complete": complete,
             "batch_count": self._coverage_cycle_batch_count,
         }
-
-    @staticmethod
-    def _semantic_snapshot(payload: Mapping[str, object]) -> dict[str, object]:
-        return _semantic_snapshot_document(payload)
 
     def _finalize_snapshot_identity(
         self,
@@ -5824,10 +5846,8 @@ class TradingScreeningService:
         ``market_data_as_of`` is the atomic sector/coverage cutoff.  A current
         1m bar may close after that cutoff but before the scan wall clock; the
         low-level signal keeps that precision while M/W/D evidence must equal
-        ``min(bundle.as_of, market_data_as_of)``.  Production process proxies
-        expose the explicit cutoff-aware method.  Legacy read-only adapters
-        retain their public interface, but any attached evidence that violates
-        the cutoff is rejected rather than persisted for an endless replay.
+        ``min(bundle.as_of, market_data_as_of)``.  Every provider must expose
+        the explicit cutoff-aware method.
         """
 
         observed = normalize_datetime(as_of, "as_of")
@@ -5837,26 +5857,13 @@ class TradingScreeningService:
         )
         if cutoff > observed:
             raise ValueError("risk evidence cutoff cannot be after scan as_of")
-        cutoff_loader = getattr(
-            self._market_data,
-            "structure_bundle_with_risk_cutoff",
-            None,
+        bundle = self._market_data.structure_bundle_with_risk_cutoff(
+            code,
+            as_of=observed,
+            sector=sector,
+            frequencies=frequencies,
+            risk_evidence_cutoff=cutoff,
         )
-        if callable(cutoff_loader):
-            bundle = cutoff_loader(
-                code,
-                as_of=observed,
-                sector=sector,
-                frequencies=frequencies,
-                risk_evidence_cutoff=cutoff,
-            )
-        else:
-            bundle = self._market_data.structure_bundle(
-                code,
-                as_of=observed,
-                sector=sector,
-                frequencies=frequencies,
-            )
         if not isinstance(bundle, SymbolStructureBundle):
             raise TypeError("structure bundle provider returned an invalid result")
         gates = bundle.higher_timeframe_gates
@@ -5864,8 +5871,8 @@ class TradingScreeningService:
             expected = min(bundle.as_of, cutoff)
             evidence = (
                 gates.market,
+                gates.sector,
                 gates.symbol,
-                *((gates.sector,) if gates.sector is not None else ()),
             )
             if any(item.observed_at != expected for item in evidence):
                 raise ValueError("higher_timeframe_evidence_cutoff_mismatch")
@@ -5972,16 +5979,6 @@ class TradingScreeningService:
         self._monitor_offset = (start + len(symbols)) % len(ordered)
         return symbols, {code: plan.frequencies_for(code) for code in symbols}
 
-    def _requeue_symbols(
-        self,
-        symbols: tuple[str, ...],
-        frequencies: Mapping[str, tuple[str, ...]],
-    ) -> None:
-        for code in symbols:
-            self._pending_frequencies.setdefault(code, set()).update(
-                frequencies.get(code, ())
-            )
-
     def _defer_symbols_to_next_cycle(
         self,
         symbols: tuple[str, ...],
@@ -6033,8 +6030,8 @@ class TradingScreeningService:
             sector_strength_evidence_revision=(sector_strength_evidence_revision),
             decision_core_id=self._decision_core_id,
             screening_policy_id=_screening_policy_id(),
-            structure_version=self._config.structure_version,
-            parameter_version=self._config.parameter_version,
+            structure_contract_id=self._config.structure_contract_id,
+            parameter_set_id=self._config.parameter_set_id,
         )
         self._coverage_cycle_started_perf = started_perf
         self._coverage_runtime_baseline_finalized_count = 0
@@ -6046,8 +6043,6 @@ class TradingScreeningService:
         self._coverage_cycle_exclusions.clear()
         self._coverage_cycle_discarded_retry_codes.clear()
         self._coverage_cycle_errors.clear()
-        self._risk_evidence_replay_codes.clear()
-        self._sector_evidence_replay_codes.clear()
         self._coverage_cycle_full_market_history_scan = False
         self._coverage_cycle_background_refresh_required = False
         with self._background_lock:
@@ -6322,9 +6317,9 @@ class TradingScreeningService:
             # restart restoration made the live process recompute sectors on
             # every idle refresh after coverage completed. That could change
             # structural point identities while retaining the already-built
-            # symbol documents, mixing two evidence versions in one snapshot.
+            # symbol documents, mixing two evidence states in one snapshot.
             # The deliberate pre-open/post-close probes above are the only
-            # times a complete epoch may query a new sector version.
+            # times a complete epoch may query a new sector catalog revision.
             #
             # The native process proxy keeps member routing in memory. After
             # an app restart the authenticated screening snapshot can prime
@@ -6662,7 +6657,7 @@ class TradingScreeningService:
             )
         universe_revision = sha256_json(
             {
-                "schema": "chanlun-screening-universe/v1",
+                "schema": "chanlun-screening-universe",
                 "sector_members": {
                     sector_id: tuple(members)
                     for sector_id, members in sorted(sector_members.items())
@@ -6674,7 +6669,7 @@ class TradingScreeningService:
         )
         sector_catalog_revision = sector_batch.catalog_revision or sha256_json(
             {
-                "schema": "chanlun-live-sector-membership/v1",
+                "schema": "chanlun-live-sector-membership",
                 "members": {
                     sector_id: tuple(members)
                     for sector_id, members in sorted(all_members.items())
@@ -6693,8 +6688,8 @@ class TradingScreeningService:
             sector_strength_evidence_revision=(sector_strength_evidence_revision),
             decision_core_id=self._decision_core_id,
             screening_policy_id=_screening_policy_id(),
-            structure_version=self._config.structure_version,
-            parameter_version=self._config.parameter_version,
+            structure_contract_id=self._config.structure_contract_id,
+            parameter_set_id=self._config.parameter_set_id,
         )
         same_coverage_epoch = (
             self._coverage_epoch_id == expected_epoch_id
@@ -6754,26 +6749,6 @@ class TradingScreeningService:
                 "replacement_required": True,
             }
             return invalidated
-        if not cycle_started and same_coverage_epoch:
-            # Resume-time invariant: a persisted in-progress ledger may have
-            # been produced by an older service that reset the coverage epoch
-            # but planned only changed bars.  The authenticated universe hash
-            # already binds the complete eligible-sector membership, so safely
-            # repair the same frozen epoch by adding only members absent from
-            # its discovered set.  Existing completed/excluded/failed facts are
-            # preserved and never replayed merely for this migration.
-            required_scope = selected_member_codes.union(
-                watchlist_codes,
-                holding_codes,
-            )
-            missing_coverage_codes = required_scope.difference(
-                self._coverage_cycle_discovered_codes
-            )
-            for code in missing_coverage_codes:
-                self._pending_frequencies.setdefault(code, set()).update(
-                    SCREENING_STRUCTURE_FREQUENCIES
-                )
-            self._coverage_cycle_discovered_codes.update(missing_coverage_codes)
         if same_coverage_epoch and self._coverage_cycle_sector_batch is None:
             self._coverage_cycle_sector_batch = sector_batch
             self._coverage_cycle_sector_members = dict(all_members)
@@ -6813,8 +6788,8 @@ class TradingScreeningService:
                 active_watchlist=priority_codes,
                 holdings=holdings,
                 previous=planner_cursor,
-                structure_version=self._config.structure_version,
-                parameter_version=self._config.parameter_version,
+                structure_contract_id=self._config.structure_contract_id,
+                parameter_set_id=self._config.parameter_set_id,
             )
             if replacing_coverage_epoch:
                 # A coverage identity change clears the completed ledger.  An
@@ -6911,7 +6886,8 @@ class TradingScreeningService:
                     self._coverage_cycle_background_refresh_required
                 ),
             )
-        self._record_cycle_errors(sector_errors)
+        if not monitoring_only_refresh:
+            self._record_cycle_errors(sector_errors)
         if monitoring_only_refresh:
             symbols, batch_frequencies = self._take_monitoring_batch(
                 plan,
@@ -7115,12 +7091,6 @@ class TradingScreeningService:
                     None,
                 )
             self._record_cycle_exclusions(exclusions)
-            self._risk_evidence_replay_codes.difference_update(
-                completed_codes | excluded_codes
-            )
-            self._sector_evidence_replay_codes.difference_update(
-                completed_codes | excluded_codes
-            )
         stock_batch_errors = errors[len(sector_errors) :]
         if monitoring_only_refresh:
             # The full-universe coverage ledger is already complete.  A failed
@@ -7130,7 +7100,16 @@ class TradingScreeningService:
             # later successful monitor could recover the epoch.
             with self._background_lock:
                 self._last_monitoring_at = as_of
-                self._last_monitoring_errors = tuple(copy.deepcopy(stock_batch_errors))
+                self._last_monitoring_errors = tuple(copy.deepcopy(errors))
+            # A completed coverage publication is immutable.  The sector probe
+            # above may legitimately produce a different structural point
+            # identity for the same frozen market cutoff, while this bounded
+            # monitor only re-evaluates a subset of symbols.  Rebuilding the
+            # page here would therefore combine retained old signals with new
+            # sector documents.  The priority monitor already persists and
+            # notifies its current results through its independent state lane;
+            # keep the daily preselection snapshot byte-for-byte unchanged.
+            return dict(previous)
         else:
             self._record_cycle_errors(stock_batch_errors)
         cycle_errors = list(self._coverage_cycle_errors.values())
@@ -7396,14 +7375,6 @@ class TradingScreeningService:
             if (
                 code in completed_codes
                 or code in excluded_codes
-                or (
-                    code in failed_codes
-                    and code
-                    in (
-                        self._risk_evidence_replay_codes
-                        | self._sector_evidence_replay_codes
-                    )
-                )
                 or code not in retained_scope
             ):
                 continue
@@ -7452,10 +7423,10 @@ class TradingScreeningService:
             else build_sector_member_history_diagnostics(sector_batch.strength_evidence)
         )
         payload = {
-            "schema_version": SCHEMA_VERSION,
-            "algorithm_version": self._config.algorithm_version,
-            "structure_version": self._config.structure_version,
-            "parameter_version": self._config.parameter_version,
+            "schema": SCHEMA,
+            "algorithm_id": self._config.algorithm_id,
+            "structure_contract_id": self._config.structure_contract_id,
+            "parameter_set_id": self._config.parameter_set_id,
             "decision_core_id": self._decision_core_id,
             "decision_core": copy.deepcopy(self._decision_core_document),
             "signal_document_contract_id": SIGNAL_DOCUMENT_CONTRACT_ID,
@@ -7614,8 +7585,8 @@ class TradingScreeningService:
         if coverage_cycle_complete:
             self._last_as_of = self._coverage_market_data_as_of or market_data_as_of
             self._cursor = ScanCursor.current(
-                structure_version=self._config.structure_version,
-                parameter_version=self._config.parameter_version,
+                structure_contract_id=self._config.structure_contract_id,
+                parameter_set_id=self._config.parameter_set_id,
             )
         return payload
 
@@ -7624,7 +7595,7 @@ __all__ = [
     "MarketDataGateway",
     "NotificationDispatcher",
     "POINT_TYPES",
-    "SCHEMA_VERSION",
+    "SCHEMA",
     "SIGNAL_DOCUMENT_CONTRACT_ID",
     "SectorCatalogGateway",
     "TradingScreeningConfig",

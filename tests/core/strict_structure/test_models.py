@@ -32,7 +32,7 @@ def test_constituent_unit_rejects_inverted_range():
             unit_id="bad",
             structural_level=0,
             source_kind="segment",
-            price_basis_revision="test-raw-v1",
+            price_basis_revision="test-raw",
             direction="up",
             start_tick=100,
             end_tick=110,
@@ -101,14 +101,12 @@ def test_constituent_unit_normalizes_enum_and_child_ids_to_immutable_values():
 
 def test_stable_structure_id_is_deterministic_and_namespaced():
     first = stable_structure_id(
-        "unit", SourceKind.SEGMENT, BASE, ("a", 1), "test-raw-v1"
+        "unit", SourceKind.SEGMENT, BASE, ("a", 1), "test-raw"
     )
-    second = stable_structure_id(
-        "unit", "segment", BASE, ("a", 1), "test-raw-v1"
-    )
+    second = stable_structure_id("unit", "segment", BASE, ("a", 1), "test-raw")
     assert first == second
     assert first != stable_structure_id(
-        "center", SourceKind.SEGMENT, BASE, ("a", 1), "test-raw-v1"
+        "center", SourceKind.SEGMENT, BASE, ("a", 1), "test-raw"
     )
     assert len(first) == 64
 
@@ -187,7 +185,9 @@ def test_completed_center_requires_atomic_locked_leave_return_and_timestamp():
 
 def test_completion_return_is_confirmation_evidence_not_center_body():
     value = completed_up_center()
-    with pytest.raises(ValueError, match="completion return must not enter center body"):
+    with pytest.raises(
+        ValueError, match="completion return must not enter center body"
+    ):
         replace(value, completion_return_unit=value.body_units[0])
 
 
@@ -206,7 +206,7 @@ def test_center_rejects_mixed_price_basis():
     value = ongoing_center()
     bad_last = replace(
         value.initial_units[-1],
-        price_basis_revision="post-action-v2",
+        price_basis_revision="post-action",
     )
     initial = value.initial_units[:-1] + (bad_last,)
     with pytest.raises(ValueError, match="center body price basis mismatch"):
@@ -260,14 +260,8 @@ def test_center_core_body_time_uses_first_component_and_excludes_departure():
     ongoing = ongoing_center()
     completed = completed_up_center()
 
-    assert (
-        ongoing.core_body_start_market_time
-        == ongoing.core_units[0].market_start
-    )
-    assert (
-        ongoing.core_body_end_market_time
-        == ongoing.pending_leave_unit.market_start
-    )
+    assert ongoing.core_body_start_market_time == ongoing.core_units[0].market_start
+    assert ongoing.core_body_end_market_time == ongoing.pending_leave_unit.market_start
     assert (
         completed.core_body_end_market_time
         == completed.completion_leave_unit.market_start
@@ -278,13 +272,9 @@ def test_center_display_range_excludes_entry_and_departure_legs():
     ongoing = ongoing_center()
     completed = completed_up_center()
 
+    assert ongoing.display_range_start_market_time == ongoing.core_units[0].market_start
     assert (
-        ongoing.display_range_start_market_time
-        == ongoing.core_units[0].market_start
-    )
-    assert (
-        ongoing.display_range_end_market_time
-        == ongoing.pending_leave_unit.market_start
+        ongoing.display_range_end_market_time == ongoing.pending_leave_unit.market_start
     )
     assert (
         completed.display_range_end_market_time
@@ -320,7 +310,7 @@ def test_center_core_body_end_advances_only_after_an_accepted_reentry():
 def test_center_evidence_preserves_external_roles_and_excludes_return():
     value = completed_up_center()
     evidence = CenterEvidence.from_center(value)
-    assert evidence.schema_version == "chanlun-center/v11"
+    assert evidence.schema == "chanlun-center"
     assert evidence.price_basis_revision == TEST_PRICE_BASIS
     assert evidence.initial_unit_ids == tuple(
         item.unit_id for item in value.initial_units

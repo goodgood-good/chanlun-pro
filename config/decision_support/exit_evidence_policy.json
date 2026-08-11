@@ -1,7 +1,6 @@
 {
-  "schema_version": 1,
+  "schema": "current",
   "policy_id": "chanlun.original_exit_evidence",
-  "version": 1,
   "corpus_manifest_sha256": "b90e5d757209c0f9ed14226d405d59559ac557eecd127df38f83623be3d29a0a",
   "source_pdf_sha256": "867b1262af2d3430b98421df4c5372748eb75a4eb7600cd967ecdc374817429e",
   "bindings": [

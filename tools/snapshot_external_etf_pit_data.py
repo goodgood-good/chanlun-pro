@@ -22,7 +22,7 @@ from zoneinfo import ZoneInfo
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 CN = ZoneInfo("Asia/Shanghai")
 DEFAULT_DATABASE = Path(
-    ".cache/chanlun_v3_external_pit/etf_proxy_pit.sqlite3"
+    ".cache/chanlun_external_pit/etf_proxy_pit.sqlite3"
 )
 DEFAULT_MANIFEST = Path(
     "audit/chanlun_live_integration/external_etf_pit_manifest.json"
@@ -575,7 +575,7 @@ def capture(
         bs.logout()
 
     payload: dict[str, object] = {
-        "schema": "chanlun-v3-external-etf-pit-snapshot/v1",
+        "schema": "chanlun-external-etf-pit-snapshot",
         "captured_at": queried_at.isoformat(),
         "selection_path": "ETF_PROXY",
         "etf_symbol": "SH.510300",

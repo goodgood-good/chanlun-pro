@@ -15,7 +15,7 @@ from chanlun.decision_support.trading_system.recursive_1m_research import (
     RESEARCH_STATUS,
     Recursive1mResearchParameters,
 )
-from chanlun.decision_support.trading_system.v3_parameters import LIVE_STATUS
+from chanlun.decision_support.trading_system.parameters import LIVE_STATUS
 
 
 @dataclass(frozen=True, slots=True)
@@ -361,7 +361,7 @@ def evaluate_recursive_1m_exit(
 ) -> Recursive1mExitDecision:
     """Promote only a completed L0=1m third sell to a persistent exit.
 
-    The other frozen V3 strategic exits require entry-relative L1 cycle or
+    The other frozen strict strategy strategic exits require entry-relative L1 cycle or
     divergence facts that the research hierarchy does not yet produce.  They
     remain explicit unresolved components instead of being approximated from
     prices.  Replay and future paper adapters call this same pure function.

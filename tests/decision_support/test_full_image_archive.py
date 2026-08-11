@@ -111,7 +111,7 @@ def _render_full_image_fixture(
         "source_pdf_sha256": identity.sha256,
         "page_size": (595.3, 841.9),
         "page_rotation": 0,
-        "classifier_version": "lesson-image/2",
+        "classifier_id": "lesson-image-changed",
     }
     chart_occurrence = ImageOccurrence.create(
         **common,
@@ -256,10 +256,10 @@ def _render_full_image_fixture(
         boundaries=boundaries,
         text_blocks=blocks,
         image_inventory=inventory,
-        extractor_versions={
-            "text": "lesson-pdf/2",
-            "image": "lesson-image/2",
-            "package": "lesson-package/2",
+        extractor_ids={
+            "text": "lesson-pdf-changed",
+            "image": "lesson-image-changed",
+            "package": "lesson-package-changed",
         },
         certification={
             "byte_identical_double_build": True,

@@ -84,7 +84,7 @@ def test_hk_ticks_rate_zero_guard_on_pre_close(monkeypatch):
     monkeypatch.setattr(hk_mod, "TdxExHq_API", _FakeExHqApi)
     _FakeExHqApi.quote = _quote_dict(price=110.0, pre_close=0.0)
     t = _hk_ex().ticks(["KP.00700"])["KP.00700"]
-    assert t.rate == 0  # 旧实现算出 100.0
+    assert t.rate == 0
 
 def test_ny_ticks_rate_uses_pre_close_denominator(monkeypatch):
     monkeypatch.setattr(ny_mod, "TdxExHq_API", _FakeExHqApi)
@@ -104,7 +104,7 @@ def test_ny_all_ticks_rate_zero_guard_on_zuojie(monkeypatch):
     monkeypatch.setattr(ny_mod, "TdxExHq_API", _FakeExHqApi)
     _FakeExHqApi.quotes_list = [_ny_list_quote(mai_chu=110.0, zuo_jie=0.0)]
     t = _ny_ex().all_ticks()["NYF.CL2508"]
-    assert t.rate == 0  # 旧实现算出 100.0
+    assert t.rate == 0
 
 
 # --- R18: A股 exchange_tdx.py 漏网(全家族唯一护卫字段≠除数字段→真 ZeroDivisionError) ---

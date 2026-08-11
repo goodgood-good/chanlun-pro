@@ -16,11 +16,6 @@ class PageImageEvidence:
     primary_raw_by_sha256: dict[str, bytes]
     smask_raw_by_sha256: dict[str, bytes]
 
-    @property
-    def materialized_raw_by_sha256(self) -> dict[str, bytes]:
-        """Compatibility alias for callers written before full-asset archival."""
-        return self.primary_raw_by_sha256
-
 
 def _finite(value: object) -> bool:
     return (
@@ -80,7 +75,7 @@ def extract_page_image_evidence(
     lesson_number: int | None,
     source_pdf_sha256: str,
     page_text_blocks: tuple[LessonTextBlock, ...] | list[LessonTextBlock],
-    classifier_version: str,
+    classifier_id: str,
 ) -> PageImageEvidence:
     if isinstance(page_number, bool) or not isinstance(page_number, int) or page_number <= 0:
         raise ValueError("page_number must be a positive integer")
@@ -190,7 +185,7 @@ def extract_page_image_evidence(
             page_rotation=rotation,
             source_role=role,
             reason_codes=reason_codes,
-            classifier_version=classifier_version,
+            classifier_id=classifier_id,
             caption_page_number=(caption_source_position[0] if caption_source_position else None),
             caption_source_sequence_index=(
                 caption_source_position[1] if caption_source_position else None

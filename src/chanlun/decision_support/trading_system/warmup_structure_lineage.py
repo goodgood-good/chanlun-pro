@@ -1,10 +1,8 @@
-"""Read-only structure lineage for warmup mapping-supply changes.
+"""Strict structure lineage for warmup mapping-supply changes.
 
-The active M/W/D gate intentionally stays unchanged.  This sibling diagnostic
-explains *why* a lower-timeframe mapping point can disappear when more left
-history is supplied: stable old-pen geometry can be repartitioned into a
-different greedy center phase, changing a trigger line from an after-center
-sell into a constituent of the longer-prefix center.
+The diagnostic explains why a lower-timeframe mapping point can disappear when
+more left history is supplied. Lines, centers and trigger links are projected
+from the same immutable strict evidence used by charting, screening and replay.
 
 All cross-prefix conclusions are derived canonically from recorded lines,
 centers and point-to-trigger links.  A caller cannot edit a conclusion and
@@ -17,13 +15,11 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
-import hashlib
-import json
 import re
 from typing import TYPE_CHECKING, Literal
 
 from chanlun.decision_support.fingerprints import normalize_datetime, sha256_json
-from chanlun.decision_support.trading_system.v3_etf_proxy_facts import (
+from chanlun.decision_support.trading_system.etf_proxy_facts import (
     RiskMappingPointEvidenceFacts,
     RiskMappingSupplyFacts,
 )
@@ -35,7 +31,7 @@ if TYPE_CHECKING:
 
 
 WARMUP_STRUCTURE_LINEAGE_DIAGNOSTIC_SCHEMA = (
-    "chanlun-warmup-structure-lineage-diagnostic/v1"
+    "chanlun-warmup-structure-lineage-diagnostic"
 )
 WARMUP_STRUCTURE_LINEAGE_DIAGNOSTIC_CONTRACT_ID = sha256_json(
     {
@@ -44,7 +40,7 @@ WARMUP_STRUCTURE_LINEAGE_DIAGNOSTIC_CONTRACT_ID = sha256_json(
             "warmup-envelope-semantic-and-mapping-supply-content-sha256"
         ),
         "comparison": "changed-prefix-period-vs-longest-left-history-prefix",
-        "structure_source": "read-only-original-old-pen-bi-xd-center-mmd",
+        "structure_source": "strict-recursive-evidence",
         "derived_facts": (
             "common-line-suffix",
             "center-partition-delta",
@@ -56,15 +52,21 @@ WARMUP_STRUCTURE_LINEAGE_DIAGNOSTIC_CONTRACT_ID = sha256_json(
     }
 )
 
-StructureLineKind = Literal["BI", "XD"]
-_LINE_KINDS: tuple[StructureLineKind, ...] = ("BI", "XD")
+StructureLineKind = Literal["SEGMENT", "TREND_TYPE"]
+_LINE_KINDS: tuple[StructureLineKind, ...] = ("SEGMENT", "TREND_TYPE")
 _PERIODS = ("M", "W", "D")
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
+_STRICT_STRUCTURE_ID = re.compile(r"^[0-9a-f]{64}$")
 
 
 def _require_sha256(value: str, field_name: str) -> None:
     if not isinstance(value, str) or _SHA256.fullmatch(value) is None:
         raise ValueError(f"{field_name} must be a sha256 identity")
+
+
+def _require_strict_structure_id(value: str, field_name: str) -> None:
+    if not isinstance(value, str) or _STRICT_STRUCTURE_ID.fullmatch(value) is None:
+        raise ValueError(f"{field_name} must be a strict structure identity")
 
 
 def _decimal(value: object, field_name: str) -> Decimal:
@@ -82,38 +84,6 @@ def _decimal_text(value: Decimal) -> str:
     if normalized == 0:
         return "0"
     return format(normalized, "f")
-
-
-def _legacy_center_identity(
-    *,
-    frequency: str,
-    level_rank: int,
-    index: int,
-    start_at: datetime,
-    end_at: datetime,
-    core_low: Decimal,
-    core_high: Decimal,
-    direction: str | None,
-) -> str:
-    """Reproduce the established risk-mapping center identity exactly."""
-
-    payload = json.dumps(
-        {
-            "frequency": frequency,
-            "level_rank": level_rank,
-            "index": index,
-            "start": start_at,
-            "end": end_at,
-            "zd": float(core_low),
-            "zg": float(core_high),
-            "type": direction,
-        },
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        default=str,
-    ).encode("utf-8")
-    return "sha256:" + hashlib.sha256(payload).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,7 +115,7 @@ class WarmupStructureLineFacts:
     ) -> str:
         return sha256_json(
             {
-                "schema": "chanlun-warmup-stable-structure-line-identity/v1",
+                "schema": "chanlun-warmup-strict-structure-unit-identity",
                 "source_symbol": source_symbol,
                 "source_frequency": source_frequency,
                 "source_kind": source_kind,
@@ -265,36 +235,12 @@ class WarmupStructureCenterFacts:
     entry_line_id: str | None
     constituent_line_ids: tuple[str, ...]
 
-    @staticmethod
-    def identity(
-        *,
-        source_frequency: str,
-        level_rank: int,
-        center_index: int,
-        start_at: datetime,
-        end_at: datetime,
-        core_low: Decimal,
-        core_high: Decimal,
-        direction: str | None,
-    ) -> str:
-        return _legacy_center_identity(
-            frequency=source_frequency,
-            level_rank=level_rank,
-            index=center_index,
-            start_at=start_at,
-            end_at=end_at,
-            core_low=core_low,
-            core_high=core_high,
-            direction=direction,
-        )
-
     def __post_init__(self) -> None:
-        _require_sha256(self.center_id, "center_id")
+        _require_strict_structure_id(self.center_id, "center_id")
         if self.source_kind not in _LINE_KINDS:
             raise ValueError("center source kind is invalid")
-        expected_rank = 1 if self.source_kind == "BI" else 2
-        if self.level_rank != expected_rank:
-            raise ValueError("center level rank contradicts its line kind")
+        if type(self.level_rank) is not int or self.level_rank < 0:
+            raise ValueError("center level rank is invalid")
         if type(self.center_index) is not int or self.center_index < 0:
             raise ValueError("center index is invalid")
         if self.direction not in {None, "up", "down", "zd"}:
@@ -323,20 +269,6 @@ class WarmupStructureCenterFacts:
         for value in values:
             _require_sha256(value, "constituent_line_id")
         object.__setattr__(self, "constituent_line_ids", values)
-
-    def validate_identity(self, *, source_frequency: str) -> None:
-        expected = self.identity(
-            source_frequency=source_frequency,
-            level_rank=self.level_rank,
-            center_index=self.center_index,
-            start_at=self.start_at,
-            end_at=self.end_at,
-            core_low=self.core_low,
-            core_high=self.core_high,
-            direction=self.direction,
-        )
-        if self.center_id != expected:
-            raise ValueError("center identity changed")
 
     def document(self) -> dict[str, object]:
         return {
@@ -503,7 +435,6 @@ class WarmupStructureLineageSnapshot:
         if len(center_ids) != len(centers):
             raise ValueError("structure lineage center identities are duplicated")
         for row in centers:
-            row.validate_identity(source_frequency=self.source_frequency)
             referenced = set(row.constituent_line_ids)
             if row.entry_line_id is not None:
                 referenced.add(row.entry_line_id)
@@ -1054,29 +985,30 @@ class WarmupStructureLineageDiagnosticEnvelope:
         return result
 
 
-def _raw_line_facts(
-    line: object,
+def _strict_line_facts(
+    unit: object,
     *,
     source_symbol: str,
     source_frequency: str,
     source_kind: StructureLineKind,
     ordinal: int,
+    price_quantum: Decimal,
 ) -> WarmupStructureLineFacts:
-    start_at = normalize_datetime(line.start.k.date, "line_start_at")
-    end_at = normalize_datetime(line.end.k.date, "line_end_at")
+    start_at = normalize_datetime(unit.market_start, "line_start_at")
+    end_at = normalize_datetime(unit.market_end, "line_end_at")
     locked = (
         None
-        if line.locked_at is None
-        else normalize_datetime(line.locked_at, "line_locked_at")
+        if unit.confirmed_at is None
+        else normalize_datetime(unit.confirmed_at, "line_locked_at")
     )
-    start_value = _decimal(line.start.val, "start_value")
-    end_value = _decimal(line.end.val, "end_value")
-    completed = bool(line.is_done())
+    start_value = price_quantum * unit.start_tick
+    end_value = price_quantum * unit.end_tick
+    completed = bool(unit.locked)
     identity = WarmupStructureLineFacts.identity(
         source_symbol=source_symbol,
         source_frequency=source_frequency,
         source_kind=source_kind,
-        direction=str(line.type),
+        direction=str(unit.direction),
         start_at=start_at,
         end_at=end_at,
         start_value=start_value,
@@ -1088,7 +1020,7 @@ def _raw_line_facts(
         line_id=identity,
         source_kind=source_kind,
         ordinal=ordinal,
-        direction=str(line.type),
+        direction=str(unit.direction),
         start_at=start_at,
         end_at=end_at,
         start_value=start_value,
@@ -1107,148 +1039,146 @@ def capture_warmup_structure_lineage_snapshot(
     state: object,
     mapping_supply: RiskMappingSupplyFacts,
 ) -> WarmupStructureLineageSnapshot:
-    """Capture immutable lineage from the already-computed read-only state."""
+    """Project lineage exclusively from the immutable strict evidence authority."""
 
-    visible = tuple(value for value in source_bars if bool(value.completed))
+    getter = getattr(state, "get_strict_evidence", None)
+    if not callable(getter):
+        raise ValueError("structure lineage state has no strict evidence authority")
+    evidence = getter()
+    evidence_closed_at = normalize_datetime(
+        evidence.source_closed_at, "strict_source_closed_at"
+    )
+    if (
+        evidence.symbol != source_symbol
+        or evidence.source_frequency != source_frequency
+    ):
+        raise ValueError("structure lineage strict source identity is inconsistent")
+    visible = tuple(
+        value
+        for value in source_bars
+        if bool(value.completed)
+        and normalize_datetime(value.end_at, "source_bar_end")
+        <= evidence_closed_at
+    )
     if not visible:
         raise ValueError("structure lineage source bars are empty")
-    raw_by_kind = {
-        "BI": tuple(state.get_bis()),
-        "XD": tuple(state.get_xds()),
+    if normalize_datetime(visible[-1].end_at, "source_end_at") != evidence_closed_at:
+        raise ValueError("structure lineage bars do not close the strict evidence")
+
+    from chanlun.core.strict_structure.center_relation import (
+        classify_center_relation,
+    )
+    from chanlun.core.strict_structure.models import (
+        CenterRelation,
+        CenterState,
+        SourceKind,
+    )
+
+    quantum = evidence.structure_price_quantum
+    strict_kind = {
+        SourceKind.SEGMENT: "SEGMENT",
+        SourceKind.TREND_TYPE: "TREND_TYPE",
     }
     lines: list[WarmupStructureLineFacts] = []
-    line_by_object: dict[int, WarmupStructureLineFacts] = {}
+    line_by_unit_id: dict[str, WarmupStructureLineFacts] = {}
+    units_by_kind = {
+        kind: tuple(
+            unit
+            for level in evidence.structure.levels
+            for unit in level.units
+            if strict_kind.get(unit.source_kind) == kind
+        )
+        for kind in _LINE_KINDS
+    }
     for kind in _LINE_KINDS:
-        for ordinal, line in enumerate(raw_by_kind[kind]):
-            if line.start is None or line.end is None:
-                continue
-            fact = _raw_line_facts(
-                line,
+        for ordinal, unit in enumerate(units_by_kind[kind]):
+            fact = _strict_line_facts(
+                unit,
                 source_symbol=source_symbol,
                 source_frequency=source_frequency,
                 source_kind=kind,
                 ordinal=ordinal,
+                price_quantum=quantum,
             )
             lines.append(fact)
-            line_by_object[id(line)] = fact
+            if unit.unit_id in line_by_unit_id:
+                raise ValueError("strict structure unit identities are duplicated")
+            line_by_unit_id[unit.unit_id] = fact
 
     centers: list[WarmupStructureCenterFacts] = []
-    center_by_object: dict[int, WarmupStructureCenterFacts] = {}
-    center_by_signature: dict[tuple[object, ...], WarmupStructureCenterFacts] = {}
-    for kind, rank, raw_centers in (
-        ("BI", 1, tuple(state.get_bi_zss())),
-        ("XD", 2, tuple(state.get_xd_zss())),
-    ):
-        for center in raw_centers:
-            if (
-                center.start is None
-                or center.end is None
-                or center.start.start is None
-                or center.end.end is None
-                or center.zd is None
-                or center.zg is None
-                or center.dd is None
-                or center.gg is None
-            ):
-                continue
+    centers_by_id: dict[str, object] = {}
+    expanded_center_ids: set[str] = set()
+    for level in evidence.structure.levels:
+        level_centers = tuple(level.center_result.centers)
+        for previous, current in zip(level_centers, level_centers[1:]):
+            if classify_center_relation(previous, current) is CenterRelation.UPGRADE:
+                expanded_center_ids.update((previous.center_id, current.center_id))
+        for center_index, center in enumerate(level_centers):
+            kind = strict_kind.get(center.source_kind)
+            if kind is None:
+                raise ValueError("tradable strict center has an unsupported source")
             constituents = tuple(
-                line_by_object[id(value)].line_id
-                for value in center.lines
-                if id(value) in line_by_object
+                line_by_unit_id[value.unit_id].line_id for value in center.body_units
             )
-            if len(constituents) != len(center.lines):
-                raise ValueError("center constituent line was not captured")
-            entry = line_by_object.get(id(center.start))
-            start_at = normalize_datetime(center.start.start.k.date, "center_start")
-            end_at = normalize_datetime(center.end.end.k.date, "center_end")
-            core_low = _decimal(center.zd, "center_core_low")
-            core_high = _decimal(center.zg, "center_core_high")
+            entry = line_by_unit_id.get(center.entry_unit.unit_id)
+            if entry is None:
+                raise ValueError("strict center entry unit was not captured")
             fact = WarmupStructureCenterFacts(
-                center_id=WarmupStructureCenterFacts.identity(
-                    source_frequency=source_frequency,
-                    level_rank=rank,
-                    center_index=int(center.index),
-                    start_at=start_at,
-                    end_at=end_at,
-                    core_low=core_low,
-                    core_high=core_high,
-                    direction=(None if center.type is None else str(center.type)),
-                ),
+                center_id=center.center_id,
                 source_kind=kind,
-                level_rank=rank,
-                center_index=int(center.index),
-                direction=(None if center.type is None else str(center.type)),
-                start_at=start_at,
-                end_at=end_at,
-                core_low=core_low,
-                core_high=core_high,
-                range_low=_decimal(center.dd, "center_range_low"),
-                range_high=_decimal(center.gg, "center_range_high"),
-                completed=bool(center.done),
-                real=bool(center.real),
-                expanded=bool(getattr(center, "expanded_with", ())),
-                entry_line_id=None if entry is None else entry.line_id,
+                level_rank=center.structural_level,
+                center_index=center_index,
+                direction=center.completion_direction,
+                start_at=normalize_datetime(
+                    center.entry_unit.market_start, "center_start"
+                ),
+                end_at=normalize_datetime(
+                    max(
+                        center.established_market_time,
+                        center.last_touch_market_time,
+                    ),
+                    "center_end",
+                ),
+                core_low=quantum * center.zd_tick,
+                core_high=quantum * center.zg_tick,
+                range_low=quantum * center.dd_tick,
+                range_high=quantum * center.gg_tick,
+                completed=center.state
+                in {CenterState.COMPLETED, CenterState.DIVERGENCE_CLOSED},
+                real=bool(center.tradable),
+                expanded=center.center_id in expanded_center_ids,
+                entry_line_id=entry.line_id,
                 constituent_line_ids=constituents,
             )
             centers.append(fact)
-            center_by_object[id(center)] = fact
-            center_by_signature[
-                (
-                    center.index,
-                    center.zd,
-                    center.zg,
-                    start_at,
-                    end_at,
-                )
-            ] = fact
+            if center.center_id in centers_by_id:
+                raise ValueError("strict center identities are duplicated")
+            centers_by_id[center.center_id] = center
 
-    supply_points = {
-        value.point_id: value for value in (mapping_supply.point_evidence or ())
-    }
+    if mapping_supply.point_evidence is None:
+        raise ValueError("structure lineage requires current mapping point evidence")
+    supply_points = {value.point_id: value for value in mapping_supply.point_evidence}
     trigger_by_point: dict[str, str] = {}
-    for kind in _LINE_KINDS:
-        for line in raw_by_kind[kind]:
-            line_fact = line_by_object.get(id(line))
-            if (
-                line_fact is None
-                or not line_fact.completed
-                or line_fact.locked_at is None
-            ):
-                continue
-            for point in line.get_mmds():
-                center = center_by_object.get(id(point.zs))
-                if center is None and (
-                    point.zs.start is not None
-                    and point.zs.end is not None
-                    and point.zs.start.start is not None
-                    and point.zs.end.end is not None
-                ):
-                    center = center_by_signature.get(
-                        (
-                            point.zs.index,
-                            point.zs.zd,
-                            point.zs.zg,
-                            normalize_datetime(
-                                point.zs.start.start.k.date, "point_center_start"
-                            ),
-                            normalize_datetime(
-                                point.zs.end.end.k.date, "point_center_end"
-                            ),
-                        )
-                    )
-                if center is None:
-                    continue
-                point_id = RiskMappingPointEvidenceFacts.identity(
-                    source_symbol=source_symbol,
-                    source_frequency=source_frequency,
-                    center_id=center.center_id,
-                    center_level_rank=center.level_rank,
-                    point_type=str(point.name),
-                    point_anchor_at=line_fact.end_at,
-                    point_available_at=line_fact.locked_at,
-                )
-                if point_id in supply_points:
-                    trigger_by_point[point_id] = line_fact.line_id
+    for point in evidence.confirmed_points:
+        if point.center_id is None:
+            continue
+        point_id = RiskMappingPointEvidenceFacts.identity(
+            source_symbol=source_symbol,
+            source_frequency=source_frequency,
+            center_id=point.center_id,
+            center_level_rank=point.structural_level,
+            point_type=point.point_type,
+            point_anchor_at=point.anchor_at,
+            point_available_at=point.available_at,
+        )
+        if point_id not in supply_points:
+            continue
+        line_fact = line_by_unit_id.get(point.anchor_unit_id)
+        if line_fact is None or not line_fact.completed or line_fact.locked_at is None:
+            raise ValueError("mapping point trigger is not a locked strict unit")
+        trigger_by_point[point_id] = line_fact.line_id
+    if set(trigger_by_point) != set(supply_points):
+        raise ValueError("mapping supply is not closed over strict point evidence")
 
     points = tuple(
         WarmupStructurePointLineageFacts(
@@ -1257,9 +1187,7 @@ def capture_warmup_structure_lineage_snapshot(
         )
         for point_id, point in sorted(supply_points.items())
     )
-    unique_centers = {
-        value.center_id: value for value in centers
-    }
+    unique_centers = {value.center_id: value for value in centers}
     ordered_centers = tuple(
         sorted(
             unique_centers.values(),
@@ -1279,7 +1207,7 @@ def capture_warmup_structure_lineage_snapshot(
         source_end_at=visible[-1].end_at,
         source_content_sha256=sha256_json(
             {
-                "schema": "chanlun-warmup-structure-source-bars/v1",
+                "schema": "chanlun-warmup-structure-source-bars",
                 "source_symbol": source_symbol,
                 "source_frequency": source_frequency,
                 "bars": [

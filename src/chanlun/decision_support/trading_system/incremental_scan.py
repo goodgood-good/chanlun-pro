@@ -36,8 +36,8 @@ class BarKey:
 @dataclass(frozen=True, slots=True)
 class ScanCursor:
     initialized: bool
-    structure_version: str | None
-    parameter_version: str | None
+    structure_contract_id: str | None
+    parameter_set_id: str | None
 
     @classmethod
     def empty(cls) -> "ScanCursor":
@@ -47,10 +47,10 @@ class ScanCursor:
     def current(
         cls,
         *,
-        structure_version: str = "v1",
-        parameter_version: str = "v1",
+        structure_contract_id: str = "strict-structure",
+        parameter_set_id: str = "frozen-parameters",
     ) -> "ScanCursor":
-        return cls(True, structure_version, parameter_version)
+        return cls(True, structure_contract_id, parameter_set_id)
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,8 +73,8 @@ def build_scan_plan(
     active_watchlist: tuple[str, ...],
     previous: ScanCursor,
     holdings: tuple[str, ...] = (),
-    structure_version: str = "v1",
-    parameter_version: str = "v1",
+    structure_contract_id: str = "strict-structure",
+    parameter_set_id: str = "frozen-parameters",
 ) -> ScanPlan:
     sectors: set[str] = set()
     scheduled: dict[str, set[str]] = {}
@@ -109,8 +109,8 @@ def build_scan_plan(
     )
     background_refresh = (
         not previous.initialized
-        or previous.structure_version != structure_version
-        or previous.parameter_version != parameter_version
+        or previous.structure_contract_id != structure_contract_id
+        or previous.parameter_set_id != parameter_set_id
     )
     return ScanPlan(
         sectors=tuple(sorted(sectors)),

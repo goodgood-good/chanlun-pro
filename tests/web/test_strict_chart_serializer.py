@@ -55,7 +55,7 @@ from tests.trading_system.strict_helpers import strict_point
 
 CN = ZoneInfo("Asia/Shanghai")
 BASE = datetime(2026, 7, 20, 9, 30, tzinfo=CN)
-PRICE_BASIS = "test-raw-v1"
+PRICE_BASIS = "test-raw"
 QUANTUM = Decimal("0.01")
 
 
@@ -115,9 +115,7 @@ def _center(
 
 def _trend(center: TrendCenter) -> TrendType:
     units = center.body_units
-    direction = (
-        "up" if units[-1].end_tick > units[0].start_tick else "down"
-    )
+    direction = "up" if units[-1].end_tick > units[0].start_tick else "down"
     return TrendType(
         trend_id=build_trend_id(
             price_basis_revision=PRICE_BASIS,
@@ -224,9 +222,7 @@ def _evidence(
         units=selected_units,
         center_result=center_result,
         trend_types=(
-            (_trend(formal_center),)
-            if selected_centers == (formal_center,)
-            else ()
+            (_trend(formal_center),) if selected_centers == (formal_center,) else ()
         ),
         completed_trends=(),
     )
@@ -251,7 +247,7 @@ def _evidence(
             )
         )
     structure = StrictStructureResult(
-        schema_version="chanlun-structure/v3",
+        schema="chanlun-structure",
         price_basis_revision=PRICE_BASIS,
         levels=tuple(levels),
     )
@@ -268,7 +264,7 @@ def _evidence(
         symbol="SH.600519",
         source_frequency=source_frequency,
         price_basis_revision=PRICE_BASIS,
-        strict_config_revision="strict-config-v1",
+        strict_config_revision="strict-config",
         structure=structure,
         confirmed_points=confirmed_points,
         divergences=divergences,
@@ -279,7 +275,7 @@ def _evidence(
         source_closed_at=BASE + timedelta(hours=6),
         price_basis_revision=PRICE_BASIS,
         structure_price_quantum=QUANTUM,
-        strict_config_revision="strict-config-v1",
+        strict_config_revision="strict-config",
         structure_revision=revision,
         structure=structure,
         stroke_center_observations=observation_result,
@@ -296,26 +292,22 @@ def test_formal_center_rectangle_uses_core_not_envelope() -> None:
     assert payload["envelope"] == {"dd_tick": 100, "gg_tick": 130}
 
 
-def test_v11_center_payload_exposes_five_segment_and_middle_core_roles() -> None:
+def test_center_payload_exposes_five_segment_and_middle_core_roles() -> None:
     center = completed_up_center()
     payload = strict_center_to_chart_dict(center)
 
-    assert payload["schema"] == "chanlun-chart-center/v12"
+    assert payload["schema"] == "chanlun-chart-center"
     assert payload["state"] == "completed"
+    assert payload["completion_phase"] == "FORMAL_THIRD_CLASS_POINT"
+    assert payload["completion_point_type"] == "3buy"
+    assert payload["expected_completion_point_type"] == "3buy"
+    assert payload["completion_point_status"] == "confirmed"
     assert payload["entry_unit_id"] == center.entry_unit.unit_id
-    assert payload["core_unit_ids"] == [
-        item.unit_id for item in center.core_units
-    ]
+    assert payload["core_unit_ids"] == [item.unit_id for item in center.core_units]
     assert payload["establishment_unit_id"] == center.establishment_unit.unit_id
     assert payload["initial_exit_unit_id"] == center.initial_exit_unit.unit_id
-    assert (
-        payload["completion_leave_unit_id"]
-        == center.completion_leave_unit.unit_id
-    )
-    assert (
-        payload["completion_return_unit_id"]
-        == center.completion_return_unit.unit_id
-    )
+    assert payload["completion_leave_unit_id"] == center.completion_leave_unit.unit_id
+    assert payload["completion_return_unit_id"] == center.completion_return_unit.unit_id
     assert payload["entering_segment"]["unit_id"] == center.entry_unit.unit_id
     assert payload["entry_role"] == "external_entry"
     assert payload["overlap_component_count"] == 5
@@ -326,16 +318,25 @@ def test_v11_center_payload_exposes_five_segment_and_middle_core_roles() -> None
         center.completion_leave_unit.unit_id
     )
     assert payload["leaving_segment"]["direction"] == "up"
+    assert payload["completion_return_segment"]["unit_id"] == (
+        center.completion_return_unit.unit_id
+    )
     assert payload["establishment_segment_ids"] == [
         item.unit_id for item in center.establishment_units
     ]
-    assert payload["points"][0]["time"] == payload["first_three_components"][0]["start_time"]
-    assert payload["points"][1]["time"] == payload["first_three_components"][-1]["end_time"]
+    assert (
+        payload["points"][0]["time"]
+        == payload["first_three_components"][0]["start_time"]
+    )
+    assert (
+        payload["points"][1]["time"]
+        == payload["first_three_components"][-1]["end_time"]
+    )
     assert payload["display_range"]["includes_entry"] is False
     assert payload["display_range"]["includes_leave"] is False
 
 
-def test_v11_center_payload_exposes_fifth_maturity_extension_without_leave() -> None:
+def test_center_payload_exposes_fifth_maturity_extension_without_leave() -> None:
     values = (
         _unit(0, "up", 90, 120),
         _unit(1, "down", 120, 100),
@@ -352,9 +353,7 @@ def test_v11_center_payload_exposes_fifth_maturity_extension_without_leave() -> 
     assert payload["initial_exit_unit_id"] is None
     assert payload["pending_leave_unit_id"] is None
     assert payload["leaving_segment"] is None
-    assert payload["establishment_segment_ids"] == [
-        item.unit_id for item in values
-    ]
+    assert payload["establishment_segment_ids"] == [item.unit_id for item in values]
     assert payload["extension_unit_ids"] == [values[4].unit_id]
     assert payload["body_unit_ids"] == [item.unit_id for item in values[1:]]
     assert payload["points"][1]["time"] == int(values[4].market_end.timestamp())
@@ -402,37 +401,9 @@ def test_stroke_observation_is_explicitly_non_tradable() -> None:
     )
 
 
-def test_display_segment_centers_do_not_replace_strict_stroke_evidence() -> None:
-    stroke = _center(source_kind=SourceKind.STROKE_OBSERVATION)
-    display = strict_center_to_chart_dict(_center())
-    display.update(
-        render_kind="center_observation",
-        tradable=False,
-        origin="display_cl_segment_zhongshu",
-    )
-
-    snapshot = build_strict_structure_snapshot(
-        _evidence(observation=stroke),
-        interval="5m",
-        display_center_observation_payloads=(display,),
-    )
-
-    assert snapshot["stroke_center_observations"][0]["source_kind"] == (
-        "stroke_observation"
-    )
-    assert snapshot["display_center_observations"][0]["source_kind"] == (
-        "segment"
-    )
-    assert snapshot["display_center_observations"][0]["origin"] == (
-        "display_cl_segment_zhongshu"
-    )
-
-
 def test_formal_serializer_rejects_stroke_observation() -> None:
     with pytest.raises(ValueError, match="formal serializer rejects"):
-        strict_center_to_chart_dict(
-            _center(source_kind=SourceKind.STROKE_OBSERVATION)
-        )
+        strict_center_to_chart_dict(_center(source_kind=SourceKind.STROKE_OBSERVATION))
 
 
 def test_chart_times_are_utc_epoch_seconds_and_reject_naive_datetime() -> None:
@@ -471,15 +442,11 @@ def test_active_projection_keeps_entry_and_leave_outside_the_box() -> None:
     assert projection["establishment_segment_ids"] == [
         item.unit_id for item in center.establishment_units
     ]
-    assert projection["establishment_unit_id"] == (
-        center.establishment_unit.unit_id
-    )
-    assert projection["pending_leave_unit_id"] == (
-        center.pending_leave_unit.unit_id
-    )
-    assert projection["body_unit_ids"] == [
-        item.unit_id for item in center.body_units
-    ]
+    assert projection["establishment_unit_id"] == (center.establishment_unit.unit_id)
+    assert projection["pending_leave_unit_id"] == (center.pending_leave_unit.unit_id)
+    assert projection["completion_phase"] == "AWAITING_SAME_LEVEL_RETURN"
+    assert projection["expected_completion_point_type"] == "3buy"
+    assert projection["body_unit_ids"] == [item.unit_id for item in center.body_units]
     assert projection["points"][0]["time"] == int(
         center.core_units[0].market_start.timestamp()
     )
@@ -552,11 +519,13 @@ def test_snapshot_serializes_unlocked_tail_as_non_tradable_center_preview() -> N
     assert snapshot["levels"][0]["current_trends"] == []
     assert snapshot["levels"][0]["confirmed_points"] == []
     assert snapshot["levels"][0]["divergences"] == []
-    assert snapshot["schema"] == "chanlun-chart-structure/v12"
-    assert payload["schema"] == "chanlun-chart-center/v12"
+    assert snapshot["schema"] == "chanlun-chart-structure"
+    assert payload["schema"] == "chanlun-chart-center"
     assert payload["render_kind"] == "center_preview"
     assert payload["state"] == "forming"
     assert payload["tradable"] is False
+    assert payload["completion_phase"] == "AWAITING_SAME_LEVEL_RETURN"
+    assert payload["expected_completion_point_type"] == "3buy"
     assert payload["core"] == {
         "zd_tick": 105,
         "zg_tick": 115,
@@ -580,9 +549,7 @@ def test_snapshot_draws_partial_four_line_center_as_non_tradable_preview() -> No
         _unit(2, "up", 100, 115),
         _unit(3, "down", 115, 105, locked=False),
     )
-    preview = forming_preview(
-        units[1:], 0, SourceKind.SEGMENT, entry_unit=units[0]
-    )
+    preview = forming_preview(units[1:], 0, SourceKind.SEGMENT, entry_unit=units[0])
     assert preview is not None
 
     snapshot = build_strict_structure_snapshot(
@@ -599,9 +566,7 @@ def test_snapshot_draws_partial_four_line_center_as_non_tradable_preview() -> No
     assert payload["tradable"] is False
     assert payload["entry_unit_id"] == units[0].unit_id
     assert payload["core_unit_ids"] == [item.unit_id for item in units[1:4]]
-    assert payload["establishment_segment_ids"] == [
-        item.unit_id for item in units
-    ]
+    assert payload["establishment_segment_ids"] == [item.unit_id for item in units]
     assert payload["establishment_component_count"] == 4
     assert payload["establishment_unit_id"] is None
     assert payload["lifecycle_role_count"] == 4
@@ -702,6 +667,10 @@ def test_snapshot_serializes_provisional_third_sell_completion() -> None:
     payload = snapshot["levels"][0]["center_previews"][0]
     assert payload["state"] == "completed"
     assert payload["tradable"] is False
+    assert payload["completion_phase"] == "GEOMETRIC_THIRD_CLASS_POINT"
+    assert payload["completion_point_type"] == "3sell"
+    assert payload["expected_completion_point_type"] == "3sell"
+    assert payload["completion_point_status"] == "provisional"
     assert payload["completion_direction"] == "down"
     assert payload["completion_leave_unit_id"] == units[4].unit_id
     assert payload["completion_return_unit_id"] == units[5].unit_id
@@ -788,20 +757,20 @@ def test_snapshot_revision_is_deterministic_and_window_independent() -> None:
     assert first == second
     assert first["structure_revision"] == evidence.structure_revision
     assert first["source_frequency"] == first["display_frequency"] == "5m"
-    assert first["schema"] == "chanlun-chart-structure/v12"
+    assert first["schema"] == "chanlun-chart-structure"
 
 
-def test_v8_snapshot_groups_independent_divergences_by_level() -> None:
+def test_snapshot_groups_independent_divergences_by_level() -> None:
     item = DivergenceEvidence(
         divergence_id=stable_structure_id(
-            "chanlun-strict-divergence/v3",
+            "chanlun-strict-divergence",
             PRICE_BASIS,
             1,
             SourceKind.TREND_TYPE.value,
             "trend",
             "up",
-            "L1-earlier",
-            "L1-later",
+            ("L1-earlier",),
+            ("L1-later",),
         ),
         structural_level=1,
         source_kind=SourceKind.TREND_TYPE,
@@ -818,7 +787,7 @@ def test_v8_snapshot_groups_independent_divergences_by_level() -> None:
         histogram_area_decayed=True,
         histogram_peak_decayed=True,
         dif_extreme_decayed=True,
-        strength_source="macd_native",
+        strength_source="macd_htf",
     )
     snapshot = build_strict_structure_snapshot(
         _evidence(
@@ -829,15 +798,23 @@ def test_v8_snapshot_groups_independent_divergences_by_level() -> None:
         interval="1m",
     )
 
-    assert snapshot["schema"] == "chanlun-chart-structure/v12"
+    assert snapshot["schema"] == "chanlun-chart-structure"
     assert [level["label"] for level in snapshot["levels"]] == ["1m", "5m"]
     assert {level["origin"] for level in snapshot["levels"]} == {
         "current_chart_recursive"
     }
-    assert snapshot["levels"][1]["divergences"][0]["kind"] == "trend"
+    payload = snapshot["levels"][1]["divergences"][0]
+    assert payload["kind"] == "trend"
+    assert payload["schema"] == "chanlun-chart-divergence"
+    assert payload["comparison_width"] == 1
+    assert payload["compare_leg_unit_ids"] == ["L1-earlier"]
+    assert payload["signal_leg_unit_ids"] == ["L1-later"]
+    assert payload["metrics"]["strength_decay_count"] == 3
 
 
-def test_observation_or_approaching_change_updates_render_not_decision_revision() -> None:
+def test_observation_or_approaching_change_updates_render_not_decision_revision() -> (
+    None
+):
     observation = _center(source_kind=SourceKind.STROKE_OBSERVATION)
     formal_center = _center(extension=True)
     anchor = formal_center.body_units[-1]

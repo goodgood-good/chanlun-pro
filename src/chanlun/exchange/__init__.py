@@ -1,4 +1,3 @@
-import inspect
 import threading
 
 from chanlun import config
@@ -12,23 +11,10 @@ _get_exchange_lock = threading.Lock()
 
 
 def market_now_trading(ex: Exchange, market) -> bool | None:
-    """按市场调用交易时段判断，同时兼容既有无参适配器。
+    """Call the single market-aware trading-session contract."""
 
-    ``ExchangeChangQiao`` 同一实例承载 HK/US，必须显式传入 market；其余适配器
-    仍沿用无参 ``now_trading()``。通过签名分派，避免用 ``except TypeError`` 把
-    方法内部的真实类型错误误判为“不支持 market 参数”后再次调用。
-    """
-    method = ex.now_trading
-    try:
-        accepts_market = "market" in inspect.signature(method).parameters
-    except (TypeError, ValueError):
-        accepts_market = False
-    if accepts_market:
-        market_value = market.value if isinstance(market, Market) else str(market)
-        return method(market_value)
-    # ExchangeDB 用 None 表示“未知”；保留三态，让原先使用 ``is False`` 的
-    # 调度器继续执行，而不是把未知状态误判成明确休市。
-    return method()
+    market_value = market.value if isinstance(market, Market) else str(market)
+    return ex.now_trading(market_value)
 
 
 def get_exchange(market: Market) -> Exchange:
@@ -145,8 +131,6 @@ def _build_exchange(market: Market) -> None:
             from chanlun.exchange.exchange_db import ExchangeDB
 
             g_exchange_obj[market.value] = ExchangeDB(Market.FX.value)
-        elif config.EXCHANGE_FX == "cq":
-            g_exchange_obj[market.value] = _changqiao_market_view(market)
         else:
             raise Exception(f"不支持的外汇交易所 {config.EXCHANGE_FX}")
 

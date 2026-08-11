@@ -76,9 +76,7 @@ def _filter_alpaca_rth_bars(bar_list, frequency):
 
 @fun.singleton
 class ExchangeAlpaca(Exchange):
-    """
-    TODO 年久失修，使用前请自行修改测试
-    """
+    """Alpaca-backed US historical market-data adapter."""
 
     def __init__(self):
         super().__init__()
@@ -157,7 +155,7 @@ class ExchangeAlpaca(Exchange):
                 return v
             if isinstance(v, dt.date):
                 return dt.datetime.combine(v, dt.time())
-            # str 兜底
+            # 字符串是 Exchange 公共接口的标准日期输入。
             if len(v) == 10:
                 return fun.str_to_datetime(v, "%Y-%m-%d")
             return fun.str_to_datetime(v)
@@ -181,10 +179,7 @@ class ExchangeAlpaca(Exchange):
                 # 回看时长从统一表读取，修改请改 _lookback.py
                 from chanlun.exchange._lookback import get_lookback_timedelta
 
-                # 未知 frequency 走 30 天兜底, 与历史行为保持一致 (避免请求空 start_date)
-                start_date = end_date - get_lookback_timedelta(
-                    frequency, default=dt.timedelta(days=30)
-                )
+                start_date = end_date - get_lookback_timedelta(frequency)
             else:
                 start_date = _to_datetime(start_date)
 
@@ -271,7 +266,7 @@ class ExchangeAlpaca(Exchange):
             )
         return code_ticks
 
-    def now_trading(self):
+    def now_trading(self, market: str):
         """
         返回当前是否是交易时间
         """
@@ -305,10 +300,3 @@ class ExchangeAlpaca(Exchange):
 
     def order(self, code: str, o_type: str, amount: float, args=None):
         raise Exception("交易所不支持")
-
-
-if __name__ == "__main__":
-    ex = ExchangeAlpaca()
-
-    ticks = ex.ticks([ex.default_code()])
-    print(ticks)

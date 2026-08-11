@@ -5,7 +5,7 @@ import json
 from cl_app.services import stock_list
 
 
-def test_disk_cache_preserves_stock_type_and_invalidates_v1(tmp_path, monkeypatch):
+def test_disk_cache_preserves_stock_type_under_current_schema(tmp_path, monkeypatch):
     cache_file = tmp_path / "a_stocks.json"
     monkeypatch.setattr(stock_list, "_stocks_cache_file", lambda _market: str(cache_file))
 
@@ -18,5 +18,5 @@ def test_disk_cache_preserves_stock_type_and_invalidates_v1(tmp_path, monkeypatc
     )
 
     payload = json.loads(cache_file.read_text(encoding="utf-8"))
-    assert payload["version"] == 2
+    assert payload["schema"] == "chanlun-stock-list-cache"
     assert [stock["type"] for stock in payload["stocks"]] == ["etf_cn", "stock_cn"]

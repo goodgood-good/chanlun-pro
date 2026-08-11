@@ -23,7 +23,7 @@ function chartContext(chartInstanceId, interval = '5m') {
     chartInstanceId,
     symbol: 'SH.600519',
     interval,
-    price_basis_revision: 'raw-v1',
+    price_basis_revision: 'raw-test',
   };
 }
 

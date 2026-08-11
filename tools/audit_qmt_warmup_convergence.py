@@ -46,7 +46,7 @@ from cl_app.services.trading_screening_gateway import (  # noqa: E402
     _market_datetime,
     audit_native_frame_warmup_envelope,
 )
-from tools.chanlun_v3_research_data import atomic_json  # noqa: E402
+from tools.research_data import atomic_json  # noqa: E402
 
 
 DEFAULT_SNAPSHOT = Path(
@@ -96,22 +96,6 @@ def _frequencies(value: str) -> tuple[str, ...]:
     if any(item not in DEFAULT_FREQUENCIES for item in result):
         raise argparse.ArgumentTypeError("unsupported diagnostic frequency")
     return result
-
-
-def _snapshot_codes(
-    snapshot: Mapping[str, object],
-    *,
-    explicit: tuple[str, ...] | None,
-    limit: int,
-) -> tuple[str, ...]:
-    return tuple(
-        str(value["code"])
-        for value in select_candidate_warmup_rows(
-            snapshot,
-            limit=limit,
-            explicit_codes=explicit,
-        )
-    )
 
 
 def qmt_local_frame_provider(exchange: object) -> FrameProvider:

@@ -705,16 +705,3 @@ tdx_codes_by_error = [
     "BJ.834682",
     "BJ.839167",
 ]
-
-
-if __name__ == "__main__":
-    from chanlun.exchange.exchange_qmt import ExchangeQMT
-
-    bj_codes = {}
-    ex = ExchangeQMT()
-    stocks = ex.all_stocks()
-    for stock in stocks:
-        if stock["code"].startswith("BJ."):
-            bj_codes[stock["code"]] = stock["name"]
-
-    print(bj_codes)

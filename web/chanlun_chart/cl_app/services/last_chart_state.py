@@ -4,7 +4,7 @@
 chart_cache_disk entry 提前回填 RAM 热层。
 
 存储：${DATA_PATH}/cache/last_chart_state.json
-格式：{ "version": 1, "updated_at": <ts>, "market", "code", "frequency" }
+格式：{ "schema": "current", "updated_at": <ts>, "market", "code", "frequency" }
 
 防抖：tv_history 在 firstDataRequest=true 时调，但 TV widget 切周期/标的可能
 触发连续多次 first=true，5s 内同三元组不重复写盘。
@@ -18,7 +18,7 @@ import time
 from chanlun import config
 from chanlun.tools.log_util import LogUtil
 
-_VERSION = 1
+_SCHEMA = "current"
 _LOCK = threading.Lock()
 _last_record = None  # ((market, code, frequency), wall_time)
 _DEBOUNCE_SECONDS = 5.0
@@ -46,7 +46,7 @@ def record_user_request(market: str, code: str, frequency: str) -> None:
         _last_record = (key, now)
 
     payload = {
-        "version": _VERSION,
+        "schema": _SCHEMA,
         "updated_at": int(now),
         "market": market,
         "code": code,
@@ -81,7 +81,7 @@ def load_last_state():
             data = json.load(f)
         if not isinstance(data, dict):
             return None
-        if data.get("version") != _VERSION:
+        if data.get("schema") != _SCHEMA:
             return None
         if not all(data.get(k) for k in ("market", "code", "frequency")):
             return None

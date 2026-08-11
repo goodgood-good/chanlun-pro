@@ -40,7 +40,7 @@ MAX_FIVE_MINUTE_SETUP_AGE_SECONDS = 4 * 24 * 60 * 60
 
 ENTRY_EXECUTION_BOUNDARY_POLICY_ID = sha256_json(
     {
-        "schema": "chanlun-human-entry-execution-boundary/v1",
+        "schema": "chanlun-human-entry-execution-boundary",
         "locator_frequency": "1m",
         "price_cap": "UNADJUSTED_CONFIRMATION_BAR_HIGH",
         "validity": (
@@ -72,7 +72,7 @@ def build_point_id(
         raise ValueError("invalid structure identity")
     return sha256_json(
         {
-            "schema": "chanlun-structural-point/v2",
+            "schema": "chanlun-structural-point",
             "code": code,
             "price_basis_revision": price_basis_revision,
             "point_type": point_type,

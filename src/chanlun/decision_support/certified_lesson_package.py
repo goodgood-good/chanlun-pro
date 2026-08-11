@@ -38,8 +38,8 @@ TRUSTED_IDENTITY = PdfIdentity(
     page_count=2_533,
     sha256="867b1262af2d3430b98421df4c5372748eb75a4eb7600cd967ecdc374817429e",
 )
-PACKAGE_VERSION = "lesson-package/3"
-SEMANTIC_AUDIT_VERSION = "chanlun-semantic-audit/1"
+PACKAGE_ID = "lesson-package"
+SEMANTIC_AUDIT_CONTRACT_ID = "chanlun-semantic-audit"
 EXPECTED_IMAGE_ASSETS = 2_783
 EXPECTED_IMAGE_OCCURRENCES = 2_816
 EXPECTED_IMAGE_PRIMARY_RAW_BYTES = 1_343_589_074
@@ -509,7 +509,7 @@ def build_semantic_certification(
         "lesson_boundary_count": len(boundary_values),
         "lesson_boundary_sha256": lesson_boundary_sha256(boundary_values),
         "role_audit": role_audit,
-        "semantic_audit_version": SEMANTIC_AUDIT_VERSION,
+        "semantic_audit_contract_id": SEMANTIC_AUDIT_CONTRACT_ID,
         "semantic_gate_passed": not blocker_values,
         "semantic_warnings": list(warnings),
         "text_cache_sha256": text_cache_sha256,
@@ -613,7 +613,7 @@ def _render_lesson_package_tree(
     boundaries: tuple[LessonBoundary, ...] | list[LessonBoundary],
     text_blocks: tuple[LessonTextBlock, ...] | list[LessonTextBlock],
     image_inventory: LessonImageInventory,
-    extractor_versions: dict[str, str],
+    extractor_ids: dict[str, str],
     certification: dict[str, object],
     inventory_files: dict[str, bytes],
     expected_first_page: int = 7,
@@ -630,10 +630,10 @@ def _render_lesson_package_tree(
         raise ValueError("lesson coverage must end at the verified PDF page count")
     if not isinstance(image_inventory, LessonImageInventory):
         raise TypeError("image_inventory must be LessonImageInventory")
-    if set(extractor_versions) != {"text", "image", "package"} or any(
-        not isinstance(value, str) or not value.strip() for value in extractor_versions.values()
+    if set(extractor_ids) != {"text", "image", "package"} or any(
+        not isinstance(value, str) or not value.strip() for value in extractor_ids.values()
     ):
-        raise ValueError("extractor_versions must identify text, image, and package")
+        raise ValueError("extractor_ids must identify text, image, and package")
     ordered_blocks = order_lesson_text_blocks(text_blocks)
     boundary_by_lesson = {item.lesson_number: item for item in validated_boundaries}
     for block in ordered_blocks:
@@ -681,7 +681,7 @@ def _render_lesson_package_tree(
                     output_path=lesson_filenames[block.lesson_number],
                     source_sequence_index=block.source_sequence_index,
                     block_index=block_index,
-                    extractor_version=extractor_versions["text"],
+                    extractor_id=extractor_ids["text"],
                     cropbox_pdf=block.cropbox_pdf,
                     mediabox_pdf=block.mediabox_pdf,
                 )
@@ -783,7 +783,7 @@ def _render_lesson_package_tree(
                 output_path=output_path,
                 source_sequence_index=occurrence.draw_index,
                 block_index=block_index,
-                extractor_version=extractor_versions["image"],
+                extractor_id=extractor_ids["image"],
                 cropbox_pdf=occurrence.cropbox_pdf,
                 mediabox_pdf=occurrence.mediabox_pdf,
                 caption_record_id=(
@@ -823,8 +823,8 @@ def _render_lesson_package_tree(
                 f"- Lesson: {boundary.lesson_number}",
                 f"- Pages: {boundary.page_start}-{boundary.page_end}",
                 f"- Source-PDF-SHA256: {identity.sha256}",
-                f"- Text-Extractor-Version: {extractor_versions['text']}",
-                f"- Image-Extractor-Version: {extractor_versions['image']}",
+                f"- Text-Extractor-ID: {extractor_ids['text']}",
+                f"- Image-Extractor-ID: {extractor_ids['image']}",
                 "",
             ]
             for block, record in text_rows_by_lesson[boundary.lesson_number]:
@@ -977,7 +977,7 @@ def _render_lesson_package_tree(
                 "last_page": expected_last_page,
                 "lesson_count": len(validated_boundaries),
             },
-            "extractor_versions": dict(sorted(extractor_versions.items())),
+            "extractor_ids": dict(sorted(extractor_ids.items())),
             "files": [_stream_file_entry(path, root_path) for path in package_files],
             "inventory": {
                 "image_asset_count": len(image_inventory.assets),
@@ -1004,7 +1004,7 @@ def _render_lesson_package_tree(
             "role_counts": dict(
                 sorted(Counter(record.source_role.value for record in records).items())
             ),
-            "schema_version": 3,
+            "schema": "current",
             "source_pdf": {
                 "filename": identity.filename,
                 "page_count": identity.page_count,
@@ -1128,10 +1128,10 @@ def certify_lesson_package(
         "inventory/text_cache_manifest.json": text_manifest_bytes,
         "inventory/text_spans.jsonl": (Path(text_cache_root) / "text_spans.jsonl").read_bytes(),
     }
-    extractor_versions = {
-        "image": image_manifest["extractor_version"],
-        "package": PACKAGE_VERSION,
-        "text": text_manifest["extractor_version"],
+    extractor_ids = {
+        "image": image_manifest["extractor_id"],
+        "package": PACKAGE_ID,
+        "text": text_manifest["extractor_id"],
     }
     certification = {
         "byte_identical_double_build": True,
@@ -1156,7 +1156,7 @@ def certify_lesson_package(
             boundaries=boundaries,
             text_blocks=blocks,
             image_inventory=image_inventory,
-            extractor_versions=extractor_versions,
+            extractor_ids=extractor_ids,
             certification=certification,
             inventory_files=inventory_files,
         )
@@ -1166,7 +1166,7 @@ def certify_lesson_package(
             boundaries=boundaries,
             text_blocks=tuple(reversed(blocks)),
             image_inventory=image_inventory,
-            extractor_versions=extractor_versions,
+            extractor_ids=extractor_ids,
             certification=certification,
             inventory_files=dict(reversed(tuple(inventory_files.items()))),
         )

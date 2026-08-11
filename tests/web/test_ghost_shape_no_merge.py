@@ -1,17 +1,4 @@
-"""锁定"过期快照 + 全新重算"不得用 _merge_chart_data 的起点身份并集语义合并。
-
-背景(2026-07 深度审查发现): compute_and_cache_chart_data(被 chart_revalidate 后台
-重验证、symbols.py 批量预热复用)以及 tv.py 的 MISS 兜底分支(含新引入的 too_stale/
-cache_stale_snapshot)此前都会把"全新全量计算结果"与 existing_entry(可能是几分钟
-到几天前的陈旧快照)做 _merge_chart_data 合并。该合并对笔/线段/中枢/买卖点等形态
-用"起点身份并集"语义 —— 若陈旧快照里某个未完成形态的起点在新计算里已不存在(因为
-正在形成的笔被新行情证伪、从别处重新起笔),旧版本会被原样保留,与新版本一起返回,
-造成前端出现幽灵/重复形态。修复:两处写回都应整体替换(is_full_snapshot=True 的全量
-计算结果本身就是权威数据),不再与 existing_entry 合并。
-
-本文件只锁定"陈旧形态不会被保留"这一行为契约,不复刻 compute_and_cache_chart_data/
-fetch_klines_and_compute_cl_data 内部实现细节。
-"""
+"""全量重算必须整体替换快照，不得保留已被行情证伪的形态。"""
 import pathlib
 import sys
 
@@ -81,10 +68,6 @@ def _fake_klines():
     })
 
 
-class _FakeCL:
-    pass
-
-
 class _FakeEx:
     def klines(self, code, freq, **kwargs):
         return _fake_klines()
@@ -97,16 +80,15 @@ def test_compute_and_cache_chart_data_does_not_resurrect_ghost_shape(
     monkeypatch.setattr(chart_compute, "_build_cache_key", lambda *a, **k: cache_key)
     monkeypatch.setattr(chart_compute, "get_exchange", lambda m: _FakeEx())
     monkeypatch.setattr(
-        chart_compute, "web_batch_get_cl_datas",
-        lambda market, code, freq_klines, cl_config: [_FakeCL()],
+        chart_compute,
+        "build_strict_chart_cd",
+        lambda **_kwargs: object(),
     )
     fresh = _fresh_chart_data()
     monkeypatch.setattr(
         chart_compute, "cl_data_to_tv_chart",
-        lambda cd, cl_config, *, strict_runtime=None: dict(fresh),
+        lambda _frame, _config, **_kwargs: dict(fresh),
     )
-    monkeypatch.setattr(chart_compute, "apply_higher_macd_to_chart_data", lambda *a, **k: False)
-
     ok = chart_compute.compute_and_cache_chart_data(MARKET, CODE, FREQ, cfg)
     assert ok is True
 
@@ -116,7 +98,7 @@ def test_compute_and_cache_chart_data_does_not_resurrect_ghost_shape(
         for b in entry["data"]["bis"]
     }
     assert _GHOST_START not in starts, (
-        "陈旧快照里已被新行情证伪的未完成笔不应被 merge 保留(幽灵形态)"
+        "陈旧快照里已被新行情证伪的未完成笔不应被保留(幽灵形态)"
     )
     assert starts == {_FRESH_START}, "应整体替换为全新计算结果,而非与旧数据并集"
 
@@ -137,9 +119,12 @@ TOO_STALE_MARKET, TOO_STALE_CODE, TOO_STALE_FREQ = "a", "SH.GHOSTSTALE", "5m"
 
 @_pytest.fixture
 def client():
-    app = create_app()
-    app.config["LOGIN_DISABLED"] = True
-    app.config["TESTING"] = True
+    app = create_app(test_config={
+        "TESTING": True,
+        "LOGIN_DISABLED": True,
+        "VALIDATE_WEB_SECURITY": False,
+        "SCHEDULER_ENABLED": False,
+    })
     return app.test_client()
 
 
@@ -172,15 +157,14 @@ def test_tv_history_too_stale_path_does_not_resurrect_ghost_shape(monkeypatch, c
     fresh = _fresh_chart_data()
     monkeypatch.setattr(chart_compute, "get_exchange", lambda m: _FakeEx())
     monkeypatch.setattr(
-        chart_compute, "web_batch_get_cl_datas",
-        lambda market, code, freq_klines, cl_config: [_FakeCL()],
+        chart_compute,
+        "build_strict_chart_cd",
+        lambda **_kwargs: object(),
     )
     monkeypatch.setattr(
         chart_compute, "cl_data_to_tv_chart",
-        lambda cd, cl_config, *, strict_runtime=None: dict(fresh),
+        lambda _frame, _config, **_kwargs: dict(fresh),
     )
-    monkeypatch.setattr(chart_compute, "apply_higher_macd_to_chart_data", lambda *a, **k: False)
-
     try:
         to = int(_time.time()) + 86400
         url = (
@@ -195,7 +179,7 @@ def test_tv_history_too_stale_path_does_not_resurrect_ghost_shape(monkeypatch, c
             for b in body.get("bis", [])
         }
         assert _GHOST_START not in starts, (
-            "too_stale 兜底本应防止陈旧未完成笔泄漏给用户,不应被 merge 保留"
+            "too_stale 兜底本应防止陈旧未完成笔泄漏给用户"
         )
         assert starts == {_FRESH_START}
     finally:

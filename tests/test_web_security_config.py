@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
+import json
 import threading
 import time
 
@@ -38,9 +39,96 @@ def test_external_bind_rejects_hash_without_https(monkeypatch):
         )
 
 
-def test_loopback_allows_passwordless_development(monkeypatch):
+def test_loopback_rejects_passwordless_startup(monkeypatch):
     monkeypatch.setenv("CHANLUN_HTTPS", "0")
-    security.validate_web_security_config("127.0.0.1", "")
+    with pytest.raises(ValueError, match="LOGIN_PWD"):
+        security.validate_web_security_config("127.0.0.1", "")
+
+
+def test_loopback_requires_a_password_hash(monkeypatch):
+    monkeypatch.setenv("CHANLUN_HTTPS", "0")
+    with pytest.raises(ValueError, match="hash"):
+        security.validate_web_security_config("127.0.0.1", "plain-text")
+    security.validate_web_security_config(
+        "127.0.0.1", "scrypt:32768:8:1$stub$stub"
+    )
+
+
+def test_login_verifier_rejects_plaintext_contracts():
+    from werkzeug.security import generate_password_hash
+
+    hashed = generate_password_hash("current-password")
+    assert security.verify_login_password("current-password", hashed) is True
+    assert security.verify_login_password("wrong-password", hashed) is False
+    assert security.verify_login_password("plain-text", "plain-text") is False
+
+
+def test_secret_decryption_rejects_plaintext():
+    assert security.decrypt_str("old-plaintext-secret") == ""
+
+
+def test_dingtalk_webhook_prefers_valid_environment(monkeypatch, tmp_path):
+    webhook = "https://oapi.dingtalk.com/robot/send?access_token=environment"
+    monkeypatch.setenv("CHANLUN_DINGTALK_WEBHOOK", webhook)
+
+    assert security.get_dingtalk_webhook(tmp_path / "missing.json") == webhook
+
+
+def test_dingtalk_webhook_loads_only_current_repository_document(
+    monkeypatch, tmp_path
+):
+    webhook = "https://oapi.dingtalk.com/robot/send?access_token=configured"
+    path = tmp_path / "runtime_credentials.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema": "chanlun-runtime-credentials",
+                "dingtalk_webhook": webhook,
+                "dingtalk_keyword": "current keyword",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("CHANLUN_DINGTALK_WEBHOOK", raising=False)
+
+    assert security.get_dingtalk_webhook(path) == webhook
+    assert security.get_dingtalk_keyword(path) == "current keyword"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"schema": "chanlun-runtime-credentials"},
+        {
+            "schema": "chanlun-runtime-credentials",
+            "dingtalk_webhook": "http://oapi.dingtalk.com/robot/send",
+        },
+        {
+            "schema": "another-contract",
+            "dingtalk_webhook": (
+                "https://oapi.dingtalk.com/robot/send?access_token=foreign"
+            ),
+        },
+    ],
+)
+def test_dingtalk_webhook_rejects_missing_plaintext_or_foreign_credentials(
+    monkeypatch, tmp_path, payload
+):
+    path = tmp_path / "runtime_credentials.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    monkeypatch.delenv("CHANLUN_DINGTALK_WEBHOOK", raising=False)
+
+    assert security.get_dingtalk_webhook(path) == ""
+
+
+def test_repository_runtime_credentials_contain_current_webhook_contract():
+    path = security._RUNTIME_CREDENTIALS_PATH
+    raw = path.read_text(encoding="utf-8")
+    payload = json.loads(raw)
+
+    assert payload["schema"] == "chanlun-runtime-credentials"
+    assert security._is_valid_dingtalk_webhook(payload["dingtalk_webhook"])
+    assert payload["dingtalk_keyword"] == "买卖通知"
 
 
 def test_external_bind_accepts_password_hash_with_https(monkeypatch):

@@ -1,79 +1,21 @@
-"""Read-only cached observation of the Windows forward-paper task contract."""
+"""Validation for the app-owned forward-paper scheduler contract."""
 
 from __future__ import annotations
 
 from copy import deepcopy
 from datetime import datetime
-import json
 from pathlib import Path
-import shutil
-import subprocess
-import threading
-import time
-from typing import Callable
 
 
-SCHEMA = "chanlun-v3-forward-scheduler-readiness/v1"
-CONTRACT_ID = "chanlun-v3-forward-scheduler/windows-task-contract/v1"
+SCHEMA = "chanlun-forward-scheduler-readiness"
 APP_RUNTIME_CONTRACT_ID = (
-    "chanlun-v3-forward-scheduler/app-runtime-contract/v1"
+    "chanlun-forward-scheduler/app-runtime-contract"
 )
-_CONTRACT_IDS = {CONTRACT_ID, APP_RUNTIME_CONTRACT_ID}
-_QMT_SCHEMAS = {
-    "chanlun-qmt-restart-scheduler-readiness/v1",
-    "chanlun-qmt-runtime-readiness/v1",
-}
+_QMT_SCHEMA = "chanlun-qmt-runtime-readiness"
 _TASKS = {
-    "Chanlun-V3-Forward-Capture": "CAPTURE",
-    "Chanlun-V3-Forward-Evaluate": "EVALUATE",
+    "chanlun-app-forward-capture": "CAPTURE",
+    "chanlun-app-forward-evaluate": "EVALUATE",
 }
-
-
-def _unavailable(reason: str) -> dict[str, object]:
-    return {
-        "schema": SCHEMA,
-        "contract_id": CONTRACT_ID,
-        "observed_at": None,
-        "ready": False,
-        "status": "unresolved",
-        "reason_code": "SCHEDULED_TASK_OBSERVATION_UNAVAILABLE",
-        "reason_codes": ["SCHEDULED_TASK_OBSERVATION_UNAVAILABLE"],
-        "configuration_ready": False,
-        "operationally_verified": False,
-        "operational_status": "not_verified",
-        "operational_reason_codes": [
-            "SCHEDULED_TASK_OBSERVATION_UNAVAILABLE"
-        ],
-        "first_success_after_registration": False,
-        "registered_at": None,
-        "pinned_python_executable": None,
-        "upstream_qmt": {
-            "schema": "chanlun-qmt-restart-scheduler-readiness/v1",
-            "ready": False,
-            "status": "unresolved",
-            "reason_code": "QMT_SCHEDULER_OBSERVATION_UNAVAILABLE",
-            "reason_codes": ["QMT_SCHEDULER_OBSERVATION_UNAVAILABLE"],
-            "configuration_ready": False,
-            "operationally_verified": False,
-            "operational_status": "not_verified",
-            "operational_reason_codes": [
-                "QMT_SCHEDULER_OBSERVATION_UNAVAILABLE"
-            ],
-            "upstream_ready_now": False,
-            "upstream_reason_code": "QMT_SCHEDULER_OBSERVATION_UNAVAILABLE",
-            "real_account_accessed": False,
-            "real_order_transport_enabled": False,
-            "automated_order_authorized": False,
-            "live_status": "LIVE_DISABLED",
-        },
-        "tasks": [],
-        "task_count": 0,
-        "error": reason[:200],
-        "real_account_accessed": False,
-        "real_order_transport_enabled": False,
-        "automated_order_authorized": False,
-        "live_status": "LIVE_DISABLED",
-    }
 
 
 def validate_forward_scheduler_snapshot(payload: object) -> dict[str, object]:
@@ -81,13 +23,10 @@ def validate_forward_scheduler_snapshot(payload: object) -> dict[str, object]:
         raise ValueError("forward scheduler observation must be an object")
     if (
         payload.get("schema") != SCHEMA
-        or payload.get("contract_id") not in _CONTRACT_IDS
+        or payload.get("contract_id") != APP_RUNTIME_CONTRACT_ID
     ):
         raise ValueError("forward scheduler observation identity is invalid")
-    if (
-        payload.get("contract_id") == APP_RUNTIME_CONTRACT_ID
-        and payload.get("execution_owner") != "APP_RUNTIME"
-    ):
+    if payload.get("execution_owner") != "APP_RUNTIME":
         raise ValueError("app forward scheduler execution owner is invalid")
     observed_at = payload.get("observed_at")
     if not isinstance(observed_at, str):
@@ -215,7 +154,7 @@ def validate_forward_scheduler_snapshot(payload: object) -> dict[str, object]:
     upstream = payload.get("upstream_qmt")
     if (
         not isinstance(upstream, dict)
-        or upstream.get("schema") not in _QMT_SCHEMAS
+        or upstream.get("schema") != _QMT_SCHEMA
     ):
         raise ValueError("forward scheduler QMT dependency is invalid")
     for key, expected in (
@@ -245,82 +184,8 @@ def validate_forward_scheduler_snapshot(payload: object) -> dict[str, object]:
     return deepcopy(payload)
 
 
-class ForwardSchedulerProbe:
-    """Execute the read-only PowerShell audit with a short in-process TTL."""
-
-    def __init__(
-        self,
-        *,
-        audit_script: Path,
-        ttl_seconds: float = 30.0,
-        runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
-        monotonic: Callable[[], float] = time.monotonic,
-    ) -> None:
-        if ttl_seconds < 0:
-            raise ValueError("ttl_seconds must be non-negative")
-        self._audit_script = Path(audit_script).resolve()
-        self._ttl_seconds = float(ttl_seconds)
-        self._runner = runner
-        self._monotonic = monotonic
-        self._lock = threading.Lock()
-        self._cached_at: float | None = None
-        self._cached: dict[str, object] | None = None
-
-    def snapshot(self, *, force_refresh: bool = False) -> dict[str, object]:
-        if not isinstance(force_refresh, bool):
-            raise TypeError("force_refresh must be boolean")
-        now = self._monotonic()
-        with self._lock:
-            if (
-                not force_refresh
-                and self._cached is not None
-                and self._cached_at is not None
-                and now - self._cached_at < self._ttl_seconds
-            ):
-                return deepcopy(self._cached)
-            result = self._observe()
-            self._cached = result
-            self._cached_at = now
-            return deepcopy(result)
-
-    def _observe(self) -> dict[str, object]:
-        executable = shutil.which("powershell.exe") or shutil.which("powershell")
-        if executable is None:
-            return _unavailable("PowerShell executable is unavailable")
-        if not self._audit_script.is_file():
-            return _unavailable("forward scheduler audit script is unavailable")
-        try:
-            completed = self._runner(
-                [
-                    executable,
-                    "-NoProfile",
-                    "-NonInteractive",
-                    "-ExecutionPolicy",
-                    "Bypass",
-                    "-File",
-                    str(self._audit_script),
-                ],
-                check=False,
-                capture_output=True,
-                text=True,
-                encoding="utf-8-sig",
-                timeout=15,
-            )
-            if completed.returncode not in {0, 3}:
-                raise RuntimeError(
-                    f"audit process exited with {completed.returncode}"
-                )
-            return validate_forward_scheduler_snapshot(
-                json.loads(completed.stdout)
-            )
-        except (OSError, subprocess.SubprocessError, TypeError, ValueError) as exc:
-            return _unavailable(f"{type(exc).__name__}: {str(exc)}")
-
-
 __all__ = [
     "APP_RUNTIME_CONTRACT_ID",
-    "CONTRACT_ID",
-    "ForwardSchedulerProbe",
     "SCHEMA",
     "validate_forward_scheduler_snapshot",
 ]

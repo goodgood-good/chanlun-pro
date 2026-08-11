@@ -1,11 +1,11 @@
 {
-  "schema": "chanlun-v3-human-review-forward-parameters/v1",
+  "schema": "chanlun-human-review-forward-parameters",
   "parameter_set_id": "sha256:7c7f7f0fe638110ad891b5f98f87f6f4b784bfd15980239261c964f80d06cf0b",
   "technical_mode": "HUMAN_REVIEW_SCREENING",
   "technical_approximation_parameter_set_id": "sha256:84f3e7f2146d4aefbd26f33028cb16b0c0eb86e10d523c55d7d1a83a743f81e0",
   "technical_alignment_parameter_set_id": "sha256:303673b8517de296ec57b7c98691c80f866bc45932b0dbcc1bf25607ec12e7df",
   "human_review_screening_parameter_set_id": "sha256:00f1c5b19ce6cc71893e41be0fc83661f4fb8faaa02c86bbdcb24821efbc2e86",
-  "technical_alignment_contract_id": "V3_APPROXIMATE_30M_5M_1M_CONFIRMED_POINTS_V1",
+  "technical_alignment_contract_id": "APPROXIMATE_30M_5M_1M_CONFIRMED_POINTS",
   "warmup_start": "2025-05-01",
   "requested_start": "2025-07-25",
   "effective_start": "2025-08-01",
@@ -43,7 +43,7 @@
   "stock_strategy_parameter_set_id": "sha256:63810cea2432d4ac58ec9bf232799b0e6f78176b89ec1d22025cf8d06bb4984d",
   "initial_cash": "1000000",
   "fee_schedule": {
-    "schedule_id": "A_SHARE_RESEARCH_2025_V1",
+    "schedule_id": "A_SHARE_RESEARCH_2025",
     "commission_rate": "0.0003",
     "minimum_commission": "5",
     "stock_sell_stamp_rate": "0.0005",

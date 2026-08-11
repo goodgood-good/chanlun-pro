@@ -88,7 +88,7 @@ def test_calendar_poll_window_includes_the_active_period() -> None:
 
 def test_final_response_close_must_match_atomic_strict_snapshot() -> None:
     strict = {
-        "schema": "chanlun-chart-structure/v12",
+        "schema": "chanlun-chart-structure",
         "source_closed_at": _ts(2026, 7, 31, 7),
     }
     chart_data = {
@@ -116,9 +116,12 @@ def test_final_response_close_must_match_atomic_strict_snapshot() -> None:
 
 @pytest.fixture
 def client():
-    app = create_app()
-    app.config["LOGIN_DISABLED"] = True
-    app.config["TESTING"] = True
+    app = create_app(test_config={
+        "TESTING": True,
+        "LOGIN_DISABLED": True,
+        "VALIDATE_WEB_SECURITY": False,
+        "SCHEDULER_ENABLED": False,
+    })
     return app.test_client()
 
 
@@ -134,7 +137,7 @@ def test_monthly_history_response_keeps_active_bar_and_matching_strict_snapshot(
     chart_data.update({
         "strict_structure_mode": "replace",
         "strict_structure": {
-            "schema": "chanlun-chart-structure/v12",
+            "schema": "chanlun-chart-structure",
             "source_closed_at": july_close,
         },
     })
@@ -155,12 +158,6 @@ def test_monthly_history_response_keeps_active_bar_and_matching_strict_snapshot(
         "cached_snapshot",
         lambda _markets: {market: ["m"]},
     )
-    monkeypatch.setattr(
-        tv_mod,
-        "_lazy_writeback_htf",
-        lambda _key, data, *_args, **_kwargs: data,
-    )
-
     response = client.get(
         "/tv/history"
         f"?symbol={market}:{code}"

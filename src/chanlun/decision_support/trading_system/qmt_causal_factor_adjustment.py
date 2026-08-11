@@ -26,7 +26,7 @@ from chanlun.exchange.price_basis import (
 
 
 QMT_CAUSAL_FACTOR_ADJUSTMENT_CONTRACT_ID = (
-    "QMT_RAW_PRICE_DIVISOR_CAUSAL_EX_DATE_V1"
+    "QMT_RAW_PRICE_DIVISOR_CAUSAL_EX_DATE"
 )
 _NORMALIZED_A_SHARE_CODE = re.compile(r"^(SH|SZ|BJ)\.([0-9]{6})$")
 _FACTOR_FIELDS = (
@@ -232,7 +232,7 @@ def qmt_causal_factor_revision(
             prior = event.effective_on
     return sha256_json(
         {
-            "schema": "chanlun-qmt-causal-sector-factor-ledger/v1",
+            "schema": "chanlun-qmt-causal-sector-factor-ledger",
             "contract_id": QMT_CAUSAL_FACTOR_ADJUSTMENT_CONTRACT_ID,
             "known_through": known_through.isoformat(),
             "members": normalized,

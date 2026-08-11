@@ -13,7 +13,7 @@ import sys
 from typing import Iterable, Sequence
 
 
-KLINE_URL = "/api/v1/quote/kline-batch"
+KLINE_URL = "/api/quote/kline-batch"
 EXPECTED_FIELDS = (
     "symbol",
     "period",
@@ -326,7 +326,7 @@ def acquire(
     finally:
         connection.close()
     return {
-        "schema": "chanlun-financial-data-query-cache/v1",
+        "schema": "chanlun-financial-data-query-cache",
         "database": str(database.resolve()),
         "database_sha256": _sha256_file(database),
         "queried_windows_this_run": queried,

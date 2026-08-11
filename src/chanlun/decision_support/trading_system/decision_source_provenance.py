@@ -21,13 +21,15 @@ from typing import Mapping
 from chanlun.decision_support.fingerprints import sha256_json
 
 
-DECISION_SOURCE_SNAPSHOT_SCHEMA = "chanlun-v3-decision-source-snapshot/v2"
-REPLAY_DECISION_SOURCE_SNAPSHOT_SCHEMA = (
-    "chanlun-v3-replay-decision-source-snapshot/v1"
-)
+DECISION_SOURCE_SNAPSHOT_SCHEMA = "chanlun-decision-source-snapshot"
+REPLAY_DECISION_SOURCE_SNAPSHOT_SCHEMA = "chanlun-replay-decision-source-snapshot"
 _SHA256_ID = re.compile(r"^sha256:[0-9a-f]{64}$")
 _CONTENT_ADDRESSED_APPLICATION_REVISION = re.compile(
     r"^[0-9a-f]{40}\.tree\.[0-9a-f]{24}$"
+)
+_DEPLOYMENT_APPLICATION_REVISION = re.compile(
+    r"^(?P<source>[0-9a-f]{40}\.tree\.[0-9a-f]{24})"
+    r"\.run\.[0-9a-f]{32}$"
 )
 _SOURCE_DIRECTORIES = (
     "src/chanlun/core",
@@ -38,11 +40,7 @@ _SOURCE_FILES = (
     "src/chanlun/exchange/price_basis.py",
     "src/chanlun/exchange/qmt_screening_sector_source.py",
     "tools/audit_qmt_warmup_convergence.py",
-    "tools/backtest_v3_sector_first_full_market.py",
-    "tools/build_v3_recent_year_current_sector_triggers.py",
-    "tools/extract_v3_sector_first_direct_facts.py",
-    "tools/prescreen_v3_sector_first_research_candidates.py",
-    "tools/run_v3_forward_paper.py",
+    "tools/run_forward_paper.py",
     "tools/snapshot_qmt_gics3_sector_ledger.py",
     "tools/validate_trading_screening_review.py",
     "web/chanlun_chart/cl_app/services/human_review_screening.py",
@@ -53,17 +51,11 @@ _SOURCE_FILES = (
 )
 FORWARD_PIPELINE_TOOL_PATHS = (
     "tools/audit_qmt_warmup_convergence.py",
-    "tools/backtest_v3_sector_first_full_market.py",
-    "tools/build_v3_recent_year_current_sector_triggers.py",
-    "tools/extract_v3_sector_first_direct_facts.py",
-    "tools/prescreen_v3_sector_first_research_candidates.py",
-    "tools/run_v3_forward_paper.py",
+    "tools/run_forward_paper.py",
     "tools/snapshot_qmt_gics3_sector_ledger.py",
     "tools/snapshot_qmt_pit_metadata.py",
 )
-FORWARD_IMPLEMENTATION_PROVENANCE_SCHEMA = (
-    "chanlun-v3-forward-implementation-provenance/v1"
-)
+FORWARD_IMPLEMENTATION_PROVENANCE_SCHEMA = "chanlun-forward-implementation-provenance"
 # A historical replay must be invalidated by every implementation file that
 # can alter its structures, selection, orders, fills or accounting.  It must
 # not, however, be invalidated by downstream forward-review persistence and
@@ -73,9 +65,7 @@ _REPLAY_SOURCE_DIRECTORIES = (
     "src/chanlun/core",
     "src/chanlun/decision_support/trading_system/backtest",
 )
-_REPLAY_TRADING_SYSTEM_DIRECTORY = (
-    "src/chanlun/decision_support/trading_system"
-)
+_REPLAY_TRADING_SYSTEM_DIRECTORY = "src/chanlun/decision_support/trading_system"
 _REPLAY_EXCLUDED_TRADING_SYSTEM_FILES = frozenset(
     {
         "candidate_warmup_diagnostics.py",
@@ -83,9 +73,9 @@ _REPLAY_EXCLUDED_TRADING_SYSTEM_FILES = frozenset(
         "human_paper_accounting.py",
         "human_paper_ledger.py",
         "human_paper_valuation.py",
-        "v3_forward_paper.py",
-        "v3_forward_review_markout.py",
-        "v3_live_human_review.py",
+        "forward_paper.py",
+        "forward_review_markout.py",
+        "live_human_review.py",
     }
 )
 _REPLAY_SOURCE_FILES = (
@@ -103,10 +93,10 @@ _REPLAY_SOURCE_FILES = (
     "src/chanlun/market.py",
     "src/chanlun/tools/__init__.py",
     "src/chanlun/tools/log_util.py",
-    "tools/backtest_v3_sector_first_full_market.py",
-    "tools/build_v3_recent_year_current_sector_triggers.py",
-    "tools/extract_v3_sector_first_direct_facts.py",
-    "tools/prescreen_v3_sector_first_research_candidates.py",
+    "tools/backtest_sector_first_full_market.py",
+    "tools/build_recent_year_current_sector_triggers.py",
+    "tools/extract_sector_first_direct_facts.py",
+    "tools/prescreen_sector_first_research_candidates.py",
     "tools/snapshot_qmt_gics3_sector_ledger.py",
 )
 
@@ -194,6 +184,26 @@ def is_content_addressed_application_source_revision(value: object) -> bool:
     )
 
 
+def content_addressed_source_revision_from_build(
+    value: object,
+) -> str | None:
+    """Resolve the exact source identity from a current build identity.
+
+    A direct launch uses the source identity itself.  The deployment wrapper
+    appends a 32-hex run nonce so readiness can distinguish consecutive
+    processes built from the same bytes.  No other historical or informal
+    build-revision shape is accepted.
+    """
+
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    if _CONTENT_ADDRESSED_APPLICATION_REVISION.fullmatch(normalized):
+        return normalized
+    match = _DEPLOYMENT_APPLICATION_REVISION.fullmatch(normalized)
+    return None if match is None else match.group("source")
+
+
 def forward_implementation_provenance_document(
     *,
     application_source_revision: str,
@@ -205,11 +215,16 @@ def forward_implementation_provenance_document(
     stable: dict[str, object] = {
         "schema": FORWARD_IMPLEMENTATION_PROVENANCE_SCHEMA,
         "application_source_revision": application_source_revision,
-        "forward_runner_script_sha256": _sha256_file(
-            root / "ops" / "run_v3_forward_paper_daily.ps1"
+        "forward_scheduler_module_sha256": _sha256_file(
+            root
+            / "web"
+            / "chanlun_chart"
+            / "cl_app"
+            / "services"
+            / "app_forward_scheduler.py"
         ),
         "forward_python_tool_sha256": _sha256_file(
-            root / "tools" / "run_v3_forward_paper.py"
+            root / "tools" / "run_forward_paper.py"
         ),
         "sector_capture_tool_sha256": _sha256_file(
             root / "tools" / "snapshot_qmt_gics3_sector_ledger.py"
@@ -264,7 +279,9 @@ def current_decision_source_snapshot(
         directory = root / relative
         if not directory.is_dir():
             raise FileNotFoundError(f"decision source directory is missing: {relative}")
-        paths.update(path.resolve() for path in directory.rglob("*.py") if path.is_file())
+        paths.update(
+            path.resolve() for path in directory.rglob("*.py") if path.is_file()
+        )
     for relative in _SOURCE_FILES:
         path = (root / relative).resolve()
         if not path.is_file():
@@ -294,18 +311,18 @@ def current_replay_decision_source_snapshot(
         directory = root / relative
         if not directory.is_dir():
             raise FileNotFoundError(f"replay source directory is missing: {relative}")
-        paths.update(path.resolve() for path in directory.rglob("*.py") if path.is_file())
+        paths.update(
+            path.resolve() for path in directory.rglob("*.py") if path.is_file()
+        )
     trading_system = root / _REPLAY_TRADING_SYSTEM_DIRECTORY
     if not trading_system.is_dir():
         raise FileNotFoundError(
-            "replay source directory is missing: "
-            + _REPLAY_TRADING_SYSTEM_DIRECTORY
+            "replay source directory is missing: " + _REPLAY_TRADING_SYSTEM_DIRECTORY
         )
     paths.update(
         path.resolve()
         for path in trading_system.glob("*.py")
-        if path.is_file()
-        and path.name not in _REPLAY_EXCLUDED_TRADING_SYSTEM_FILES
+        if path.is_file() and path.name not in _REPLAY_EXCLUDED_TRADING_SYSTEM_FILES
     )
     for relative in _REPLAY_SOURCE_FILES:
         path = (root / relative).resolve()
@@ -424,6 +441,7 @@ __all__ = (
     "FORWARD_PIPELINE_TOOL_PATHS",
     "REPLAY_DECISION_SOURCE_SNAPSHOT_SCHEMA",
     "calculate_forward_application_source_revision",
+    "content_addressed_source_revision_from_build",
     "current_forward_implementation_provenance",
     "current_decision_source_snapshot",
     "current_replay_decision_source_snapshot",

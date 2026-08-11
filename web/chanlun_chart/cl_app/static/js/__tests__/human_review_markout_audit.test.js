@@ -36,16 +36,12 @@ test("hash identity exposes only exact lowercase sha256 evidence", () => {
   assert.equal(audit.hashIdentity(null).short, "未认证");
 });
 
-test("cohort label distinguishes unavailable legacy mixed and single source", () => {
+test("cohort label distinguishes invalid unavailable incomplete mixed and single source", () => {
   assert.equal(audit.cohortLabel({ status: "INVALID" }), "证据无效");
-  assert.equal(
-    audit.cohortLabel({ status: "UNQUALIFIED" }),
-    "历史样本 · 会话资格未认证",
-  );
   assert.equal(audit.cohortLabel({ status: "NOT_AVAILABLE" }), "尚无观察样本");
   assert.equal(
-    audit.cohortLabel(markout({ source_provenance_status: "LEGACY_UNATTESTED" })),
-    "旧版样本 · 源码未认证",
+    audit.cohortLabel(markout({ source_provenance_status: "INCOMPLETE" })),
+    "价格来源未完整",
   );
   assert.equal(
     audit.cohortLabel(markout({ sample: { source_identity_status: "NOT_APPLICABLE" } })),
@@ -54,8 +50,8 @@ test("cohort label distinguishes unavailable legacy mixed and single source", ()
   assert.equal(
     audit.cohortLabel(markout({
       sample: {
-        source_identity_status: "LEGACY_UNATTESTED",
-        source_cohort_ids: ["legacy"],
+        source_identity_status: "UNAVAILABLE",
+        source_cohort_ids: ["unattested"],
       },
     })),
     "1 批 · 源码未认证",
@@ -76,10 +72,6 @@ test("cohort label distinguishes unavailable legacy mixed and single source", ()
 test("horizon label keeps the 100 observation equality boundary honest", () => {
   assert.equal(audit.horizonLabel({ status: "INVALID" }, 5), "证据无效");
   assert.equal(
-    audit.horizonLabel({ status: "UNQUALIFIED" }, 5),
-    "不合格会话样本已排除",
-  );
-  assert.equal(
     audit.horizonLabel({ status: "NOT_AVAILABLE" }, 5),
     "尚未积累 · 不可评价",
   );
@@ -88,7 +80,7 @@ test("horizon label keeps the 100 observation equality boundary honest", () => {
     /价格来源未完整$/,
   );
   assert.match(
-    audit.horizonLabel(markout({ source_provenance_status: "LEGACY_UNATTESTED" }), 5),
+    audit.horizonLabel(markout({ source_provenance_status: "UNAVAILABLE" }), 5),
     /源码未认证$/,
   );
   assert.match(

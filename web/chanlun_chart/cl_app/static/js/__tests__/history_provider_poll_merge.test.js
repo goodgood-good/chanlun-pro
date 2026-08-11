@@ -1,30 +1,27 @@
 'use strict';
-// history-provider 轮询合并回归测试(2026-07-01 前端实时显示审查发现)：TV 30s 轮询响应
-// (update=true 且无 full_snapshot)对被后端证伪的"已完成"笔/线段/中枢等形态只增不删
-// (updateLineSegments 按起点 key 做 upsert)。SSE 推送带 full_snapshot 会整体替换、不受
-// 影响；但纯轮询/SSE 关闭的降级路径下，已作废的形态会永久"幽灵"驻留，直到手动刷新。
-// 用 vm 加载真实 dist/bundle.js(UMD, browser-global 分支)，经 applyChanlunUpdate
-// (SSE 复用入口，跳过网络请求，但与 getBars 共享同一份 _processHistoryResponse 合并逻辑)
-// 直接喂两次 response，断言 bars_result 里的形态数组是否符合预期。
+
 const { test } = require('node:test');
 const assert = require('node:assert');
-const fs = require('fs');
-const path = require('path');
-const vm = require('vm');
+const fs = require('node:fs');
+const path = require('node:path');
+const vm = require('node:vm');
 
 function loadDatafeeds() {
-  const sb = {
+  const sandbox = {
     console, Math, JSON, Array, Object, String, Number, Boolean, Promise, Error, Map, Set,
     fetch: () => Promise.reject(new Error('no network in test')),
-    setTimeout: () => 0, clearTimeout: () => {},
-    setInterval: () => 0, clearInterval: () => {},
+    setTimeout: () => 0,
+    clearTimeout: () => {},
+    setInterval: () => 0,
+    clearInterval: () => {},
   };
-  sb.globalThis = sb; sb.self = sb; sb.window = sb;
-  vm.createContext(sb);
+  sandbox.globalThis = sandbox;
+  sandbox.self = sandbox;
+  sandbox.window = sandbox;
+  vm.createContext(sandbox);
   const bundlePath = path.join(__dirname, '..', '..', 'datafeeds', 'udf', 'dist', 'bundle.js');
-  const src = fs.readFileSync(bundlePath, 'utf8');
-  vm.runInContext(src, sb, { filename: 'bundle.js' });
-  return sb.Datafeeds;
+  vm.runInContext(fs.readFileSync(bundlePath, 'utf8'), sandbox, { filename: 'bundle.js' });
+  return sandbox.Datafeeds;
 }
 
 function makeDatafeed() {
@@ -32,7 +29,7 @@ function makeDatafeed() {
   return new UDFCompatibleDatafeed('http://test-datafeed');
 }
 
-function seg(headTime, headPrice, tailTime, tailPrice, linestyle) {
+function segment(headTime, headPrice, tailTime, tailPrice, linestyle) {
   return {
     linestyle: String(linestyle),
     points: [
@@ -42,335 +39,95 @@ function seg(headTime, headPrice, tailTime, tailPrice, linestyle) {
   };
 }
 
-function mmd(time, price, text) {
-  return { points: { time, price }, text: text || 'buy' };
-}
-
-function fullResponse(times, prices, bis, mmds) {
+function response({ times, prices, bis = [], update = false }) {
   return {
-    s: 'ok', update: false,
-    t: times, c: prices, o: prices, h: prices, l: prices, v: prices.map(() => 0),
-    fxs: [], bis: bis, xds: [], bi_zss: [], xd_zss: [], bcs: [], mmds: mmds || [],
+    s: 'ok',
+    update,
+    t: times,
+    c: prices,
+    o: prices,
+    h: prices,
+    l: prices,
+    v: prices.map(() => 0),
+    fxs: [],
+    bis,
+    xds: [],
   };
 }
 
-function pollResponse(times, prices, bis, mmds) {
-  return {
-    s: 'ok', update: true,
-    t: times, c: prices, o: prices, h: prices, l: prices, v: prices.map(() => 0),
-    fxs: [], bis: bis, xds: [], bi_zss: [], xd_zss: [], bcs: [], mmds: mmds || [],
-  };
-}
+const SYMBOL = 'a:sh.513100';
+const RESOLUTION = '5';
+const BASE_PARAMS = { symbol: SYMBOL, resolution: RESOLUTION };
+const RESULT_KEY = SYMBOL.toLowerCase() + RESOLUTION.toLowerCase();
 
-test('30s 轮询窗口内被证伪的已完成笔应被移除(幽灵形态复现回归)', () => {
-  const df = makeDatafeed();
-  const hp = df._historyProvider;
-  const symbol = 'a:sh.513100';
-  const resolution = '5';
-  const base = { symbol, resolution };
+test('authoritative current window removes a disproved completed stroke', () => {
+  const history = makeDatafeed()._historyProvider;
+  const removed = segment(1000, 10, 1500, 12, 0);
+  const current = segment(1800, 11, 2500, 14, 1);
 
-  // 初始全量加载：K线到 t=2000s，含一根已完成笔 X(起点 t=1000)
-  const ghostSeg = seg(1000, 10, 1500, 12, 0);
-  hp.applyChanlunUpdate(
-    fullResponse([1000, 1500, 2000], [10, 12, 13], [ghostSeg]),
-    Object.assign({}, base, { from: 0, to: 2000, firstDataRequest: 'true' })
+  history.applyChanlunUpdate(
+    response({ times: [1000, 1500, 2000], prices: [10, 12, 13], bis: [removed] }),
+    { ...BASE_PARAMS, from: 0, to: 2000, firstDataRequest: 'true' },
+  );
+  history.applyChanlunUpdate(
+    response({ times: [2000, 2500], prices: [13, 14], bis: [current], update: true }),
+    { ...BASE_PARAMS, from: 500, to: 2500, firstDataRequest: 'false' },
   );
 
-  // 30s 轮询(右侧最新窗口, to=2500 >= 已知最新K线时间 2000)：后端重算后 X 已不在
-  // 响应里(起点被新行情证伪)，换成另一根笔 Y(起点 t=1800)。
-  const freshSeg = seg(1800, 11, 2500, 14, 1);
-  hp.applyChanlunUpdate(
-    pollResponse([2000, 2500], [13, 14], [freshSeg]),
-    Object.assign({}, base, { from: 500, to: 2500, firstDataRequest: 'false' })
-  );
-
-  const resKey = symbol.toLowerCase() + resolution.toLowerCase();
-  const bis = hp.bars_result.get(resKey).bis;
-  const heads = bis.map((s) => s.points[0].time);
-  assert.ok(!heads.includes(1000), `幽灵笔起点 1000 不应残留，实际 heads=${JSON.stringify(heads)}`);
-  assert.ok(heads.includes(1800), '新笔起点 1800 应存在');
+  const heads = history.bars_result.get(RESULT_KEY).bis.map((item) => item.points[0].time);
+  assert.deepStrictEqual(heads, [1800]);
 });
 
-test('向左滚动的历史响应不应误删右侧现有形态', () => {
-  const df = makeDatafeed();
-  const hp = df._historyProvider;
-  const symbol = 'a:sh.513100';
-  const resolution = '5';
-  const base = { symbol, resolution };
+test('backward history merge preserves recent strokes and adds older strokes', () => {
+  const history = makeDatafeed()._historyProvider;
+  const recent = segment(5000, 20, 5500, 22, 0);
+  const older = segment(500, 9, 900, 10, 0);
 
-  // 初始全量加载：最新笔 X 起点在 t=5000(较新/靠右)
-  const recentSeg = seg(5000, 20, 5500, 22, 0);
-  hp.applyChanlunUpdate(
-    fullResponse([4000, 5000, 5500], [18, 20, 22], [recentSeg]),
-    Object.assign({}, base, { from: 0, to: 5500, firstDataRequest: 'true' })
+  history.applyChanlunUpdate(
+    response({ times: [4000, 5000, 5500], prices: [18, 20, 22], bis: [recent] }),
+    { ...BASE_PARAMS, from: 0, to: 5500, firstDataRequest: 'true' },
+  );
+  history.applyChanlunUpdate(
+    response({ times: [500, 900, 1000], prices: [9, 10, 10], bis: [older], update: true }),
+    { ...BASE_PARAMS, from: 0, to: 3000, firstDataRequest: 'false' },
   );
 
-  // 向左滚动(backward)：请求更早历史 to=3000 < 已知最新K线时间(5500)，
-  // 响应只含更早的一根笔 Z(起点 t=500)，不含 X(本就不在这段更早窗口内)。
-  const olderSeg = seg(500, 9, 900, 10, 0);
-  hp.applyChanlunUpdate(
-    pollResponse([500, 900, 1000], [9, 10, 10], [olderSeg]),
-    Object.assign({}, base, { from: 0, to: 3000, firstDataRequest: 'false' })
-  );
-
-  const resKey = symbol.toLowerCase() + resolution.toLowerCase();
-  const bis = hp.bars_result.get(resKey).bis;
-  const heads = bis.map((s) => s.points[0].time);
-  assert.ok(heads.includes(5000), `向左滚动不应误删右侧现有笔 5000，实际 heads=${JSON.stringify(heads)}`);
-  assert.ok(heads.includes(500), '更早的新笔 500 应被加入');
+  const heads = history.bars_result.get(RESULT_KEY).bis.map((item) => item.points[0].time);
+  assert.deepStrictEqual(heads.sort((a, b) => a - b), [500, 5000]);
 });
 
-test('缺少已知K线时间(退化态)不应被当作权威窗口而误删已有形态', () => {
-  // 复核发现(独立代码审查): existingMaxBarMs===undefined(obj_res 存在但 bars 为空,
-  // 理论上不应正常出现的退化态)不应默认判定为"权威窗口"——没有K线证据时,更保守的
-  // 默认是不做窗口删除,而不是假定这次响应权威。
-  const df = makeDatafeed();
-  const hp = df._historyProvider;
-  const symbol = 'a:sh.513100';
-  const resolution = '5';
-  const base = { symbol, resolution };
+test('an update without window bounds cannot remove existing strokes', () => {
+  const history = makeDatafeed()._historyProvider;
+  const existing = segment(1000, 10, 1500, 12, 0);
 
-  // 人为构造退化态：K线为空但笔数组非空(真实后端不会产生,此处用于钉死防御性默认值)。
-  const staleSeg = seg(1000, 10, 1500, 12, 0);
-  hp.applyChanlunUpdate(
-    fullResponse([], [], [staleSeg]),
-    Object.assign({}, base, { from: 0, to: 2000, firstDataRequest: 'true' })
+  history.applyChanlunUpdate(
+    response({ times: [1000, 1500, 2000], prices: [10, 12, 13], bis: [existing] }),
+    { ...BASE_PARAMS, from: 0, to: 2000, firstDataRequest: 'true' },
   );
-
-  // 轮询响应不再提及该笔, 且不带 full_snapshot。
-  hp.applyChanlunUpdate(
-    pollResponse([2000, 2500], [13, 14], []),
-    Object.assign({}, base, { from: 500, to: 2500, firstDataRequest: 'false' })
-  );
-
-  const resKey = symbol.toLowerCase() + resolution.toLowerCase();
-  const bis = hp.bars_result.get(resKey).bis;
-  const heads = bis.map((s) => s.points[0].time);
-  assert.ok(heads.includes(1000), `无K线证据时不应误删已有形态,实际 heads=${JSON.stringify(heads)}`);
-});
-
-test('真实SSE生产调用签名(仅 {symbol,resolution},无 from/to)不应崩溃也不应误删', () => {
-  // 复核发现(独立代码审查,3路收敛): 生产唯一的 applyChanlunUpdate 调用点
-  // (charts.js:2519 hp.applyChanlunUpdate(data, { symbol, resolution }))不传 from/to。
-  // 当前生产该路径恒带 full_snapshot 整体替换、这条窗口删除逻辑对它是 inert 的——
-  // 但仍需确认"inert"是安全的静默跳过,而不是崩溃或误删(为将来可能出现的
-  // 非 full_snapshot 场景兜底)。
-  const df = makeDatafeed();
-  const hp = df._historyProvider;
-  const symbol = 'a:sh.513100';
-  const resolution = '5';
-  const base = { symbol, resolution };
-
-  const existingSeg = seg(1000, 10, 1500, 12, 0);
-  hp.applyChanlunUpdate(
-    fullResponse([1000, 1500, 2000], [10, 12, 13], [existingSeg]),
-    Object.assign({}, base, { from: 0, to: 2000, firstDataRequest: 'true' })
-  );
-
-  // 真实生产签名：无 from/to，且这次响应不再提及 existingSeg、也不带 full_snapshot。
   assert.doesNotThrow(() => {
-    hp.applyChanlunUpdate(pollResponse([2000, 2500], [13, 14], []), { symbol, resolution });
-  }, '缺 from/to 时不应抛异常');
+    history.applyChanlunUpdate(
+      response({ times: [2000, 2500], prices: [13, 14], update: true }),
+      BASE_PARAMS,
+    );
+  });
 
-  const resKey = symbol.toLowerCase() + resolution.toLowerCase();
-  const bis = hp.bars_result.get(resKey).bis;
-  const heads = bis.map((s) => s.points[0].time);
-  assert.ok(
-    heads.includes(1000),
-    `缺 from/to 时无法判断是否权威窗口,应保守不删,实际 heads=${JSON.stringify(heads)}`
-  );
+  const heads = history.bars_result.get(RESULT_KEY).bis.map((item) => item.points[0].time);
+  assert.deepStrictEqual(heads, [1000]);
 });
 
-test('30s 轮询窗口内被证伪的买卖点(单点形态)应被移除(幽灵买卖点回归)', () => {
-  // 复核发现(独立代码审查): updateTextPoints(fxs/bcs/mmds 等单点形态)只对
-  // "新响应非空"的情形做了按时间分区的隐式删除, 新响应为空时直接原样保留旧点位——
-  // 与 updateLineSegments 刚补上的"权威窗口内缺失即删"不对称, 买卖点/背驰这类单点
-  // 幽灵形态在此路径下仍会残留。
-  const df = makeDatafeed();
-  const hp = df._historyProvider;
-  const symbol = 'a:sh.513100';
-  const resolution = '5';
-  const base = { symbol, resolution };
+test('backward history merge preserves recent bars while adding older bars', () => {
+  const history = makeDatafeed()._historyProvider;
 
-  const ghostMmd = mmd(1000, 10, 'buy');
-  hp.applyChanlunUpdate(
-    fullResponse([1000, 1500, 2000], [10, 12, 13], [], [ghostMmd]),
-    Object.assign({}, base, { from: 0, to: 2000, firstDataRequest: 'true' })
+  history.applyChanlunUpdate(
+    response({ times: [4000, 5000, 5500], prices: [18, 20, 22] }),
+    { ...BASE_PARAMS, from: 0, to: 5500, firstDataRequest: 'true' },
+  );
+  history.applyChanlunUpdate(
+    response({ times: [500, 900, 1000], prices: [9, 10, 10], update: true }),
+    { ...BASE_PARAMS, from: 0, to: 3000, firstDataRequest: 'false' },
   );
 
-  // 30s 轮询(右侧最新窗口, to=2500 >= 已知最新K线时间 2000): 后端重算后该买点已被
-  // 证伪撤销, 新响应 mmds 为空。
-  hp.applyChanlunUpdate(
-    pollResponse([2000, 2500], [13, 14], [], []),
-    Object.assign({}, base, { from: 500, to: 2500, firstDataRequest: 'false' })
-  );
-
-  const resKey = symbol.toLowerCase() + resolution.toLowerCase();
-  const mmds = hp.bars_result.get(resKey).mmds;
-  assert.strictEqual(mmds.length, 0, `幽灵买卖点不应残留,实际 mmds=${JSON.stringify(mmds)}`);
-});
-
-test('向左滚动时新响应为空不应误删右侧现有买卖点', () => {
-  const df = makeDatafeed();
-  const hp = df._historyProvider;
-  const symbol = 'a:sh.513100';
-  const resolution = '5';
-  const base = { symbol, resolution };
-
-  const recentMmd = mmd(5000, 20, 'sell');
-  hp.applyChanlunUpdate(
-    fullResponse([4000, 5000, 5500], [18, 20, 22], [], [recentMmd]),
-    Object.assign({}, base, { from: 0, to: 5500, firstDataRequest: 'true' })
-  );
-
-  // 向左滚动: to=3000 < 已知最新K线时间(5500), 这段更早窗口本就没有买卖点(mmds=[])。
-  hp.applyChanlunUpdate(
-    pollResponse([500, 900, 1000], [9, 10, 10], [], []),
-    Object.assign({}, base, { from: 0, to: 3000, firstDataRequest: 'false' })
-  );
-
-  const resKey = symbol.toLowerCase() + resolution.toLowerCase();
-  const mmds = hp.bars_result.get(resKey).mmds;
-  assert.strictEqual(mmds.length, 1, `向左滚动不应误删右侧现有买卖点,实际 mmds=${JSON.stringify(mmds)}`);
-  assert.strictEqual(mmds[0].points.time, 5000);
-});
-
-test('向左滚动的历史响应不应 clobber 掉右侧现有 K线 bars(Round11 BUG1 回归)', () => {
-  const df = makeDatafeed();
-  const hp = df._historyProvider;
-  const symbol = 'a:sh.513100';
-  const resolution = '5';
-  const base = { symbol, resolution };
-
-  hp.applyChanlunUpdate(
-    fullResponse([4000, 5000, 5500], [18, 20, 22], []),
-    Object.assign({}, base, { from: 0, to: 5500, firstDataRequest: 'true' })
-  );
-  // 向左滚动: to=3000 < 最新K线时间 5500, 响应是更旧窗口 [500,900,1000]
-  hp.applyChanlunUpdate(
-    pollResponse([500, 900, 1000], [9, 10, 10], []),
-    Object.assign({}, base, { from: 0, to: 3000, firstDataRequest: 'false' })
-  );
-
-  const resKey = symbol.toLowerCase() + resolution.toLowerCase();
-  const bars = hp.bars_result.get(resKey).bars;
-  const times = bars.map((b) => b.time);
-  // BUG1: keptBars=filter(time<500)=空 → bars 被截成 [500,900,1000], 最近 5500 丢失 → 误判gap弹回
-  assert.ok(times.includes(5500 * 1000), `最近K线 5500 不应被向左滚动 clobber, times=${JSON.stringify(times)}`);
-  assert.ok(times.includes(500 * 1000), '更旧K线 500 应被并入');
-});
-
-test('当前周期中枢始终与合并后的 xd_zss 同源，不接受 higher_zs 重复副本的旧边界', () => {
-  const df = makeDatafeed();
-  const hp = df._historyProvider;
-  const symbol = 'a:sh.513100';
-  const resolution = '5';
-  const current = seg(1000, 12, 2000, 10, 0);
-  const poisoned = seg(1000, 99, 2000, 1, 0);
-  const response = fullResponse([1000, 1500, 2000], [10, 11, 12], []);
-  response.xd_zss = [current];
-  response.higher_zs = [
-    { period: '5m', level_name: '5m 中枢', zss: [poisoned] },
-    { period: '30m', level_name: '30m 中枢', zss: [seg(500, 20, 2000, 18, 0)] },
-  ];
-
-  hp.applyChanlunUpdate(
-    response,
-    { symbol, resolution, from: 0, to: 2000, firstDataRequest: 'true' },
-  );
-
-  const stored = hp.bars_result.get(symbol.toLowerCase() + resolution);
-  const currentGroup = stored.higher_zs.find((group) => group.period === '5m');
-  assert.deepStrictEqual(currentGroup.zss, stored.xd_zss);
-  assert.equal(currentGroup.zss[0].points[0].price, 12);
-});
-
-test('向左翻历史不得用旧窗口 higher_zs 覆盖右侧四周期中枢快照', () => {
-  const df = makeDatafeed();
-  const hp = df._historyProvider;
-  const symbol = 'a:sh.513100';
-  const resolution = '5';
-  const base = { symbol, resolution };
-  const latestThirty = seg(4000, 30, 5500, 28, 0);
-  const initial = fullResponse([4000, 5000, 5500], [18, 20, 22], []);
-  initial.xd_zss = [seg(4000, 22, 5500, 20, 0)];
-  initial.higher_zs = [
-    { period: '5m', zss: initial.xd_zss },
-    { period: '30m', zss: [latestThirty] },
-  ];
-  hp.applyChanlunUpdate(
-    initial,
-    Object.assign({}, base, { from: 0, to: 5500, firstDataRequest: 'true' }),
-  );
-
-  const backward = pollResponse([500, 900, 1000], [9, 10, 10], []);
-  backward.xd_zss = [seg(500, 11, 1000, 9, 0)];
-  backward.higher_zs = [
-    { period: '5m', zss: backward.xd_zss },
-    { period: '30m', zss: [seg(500, 3, 1000, 2, 0)] },
-  ];
-  hp.applyChanlunUpdate(
-    backward,
-    Object.assign({}, base, { from: 0, to: 3000, firstDataRequest: 'false' }),
-  );
-
-  const stored = hp.bars_result.get(symbol.toLowerCase() + resolution);
-  const thirty = stored.higher_zs.find((group) => group.period === '30m');
-  assert.equal(thirty.zss[0].points[0].price, 30);
-  const current = stored.higher_zs.find((group) => group.period === '5m');
-  assert.deepStrictEqual(current.zss, stored.xd_zss);
-});
-
-test('较旧的 SSE full_snapshot 不得回退已缓存的中枢范围', () => {
-  const df = makeDatafeed();
-  const hp = df._historyProvider;
-  const symbol = 'a:sh.513100';
-  const resolution = '5';
-  const latestCenter = seg(2000, 22, 2500, 20, 0);
-  const latest = fullResponse([2000, 2500], [20, 22], []);
-  latest.xd_zss = [latestCenter];
-  latest.higher_zs = [{ period: '5m', zss: [latestCenter] }];
-  hp.applyChanlunUpdate(
-    latest,
-    { symbol, resolution, from: 0, to: 2500, firstDataRequest: 'true' },
-  );
-
-  const staleCenter = seg(1000, 99, 1500, 1, 0);
-  const stale = pollResponse([1000, 1500], [8, 9], []);
-  stale.full_snapshot = true;
-  stale.xd_zss = [staleCenter];
-  stale.higher_zs = [{ period: '5m', zss: [staleCenter] }];
-  hp.applyChanlunUpdate(stale, { symbol, resolution });
-
-  const stored = hp.bars_result.get(symbol.toLowerCase() + resolution);
-  assert.equal(stored.xd_zss[0].points[0].price, 22);
-  assert.equal(stored.higher_zs[0].zss[0].points[0].price, 22);
-  assert.deepStrictEqual(Array.from(stored.times), [2000 * 1000, 2500 * 1000]);
-});
-
-test('向左滚动且旧窗口自带非空买卖点时不应丢弃右侧最近买卖点(Round11 BUG2 回归)', () => {
-  const df = makeDatafeed();
-  const hp = df._historyProvider;
-  const symbol = 'a:sh.513100';
-  const resolution = '5';
-  const base = { symbol, resolution };
-
-  const recentMmd = mmd(5000, 20, 'sell');
-  hp.applyChanlunUpdate(
-    fullResponse([4000, 5000, 5500], [18, 20, 22], [], [recentMmd]),
-    Object.assign({}, base, { from: 0, to: 5500, firstDataRequest: 'true' })
-  );
-  // 向左滚动: to=3000 < 最新 5500, 旧窗口本身带一个买点 mmd(800)(非空, 不同于既有"新响应为空"用例)
-  const olderMmd = mmd(800, 9, 'buy');
-  hp.applyChanlunUpdate(
-    pollResponse([500, 900, 1000], [9, 10, 10], [], [olderMmd]),
-    Object.assign({}, base, { from: 0, to: 3000, firstDataRequest: 'false' })
-  );
-
-  const resKey = symbol.toLowerCase() + resolution.toLowerCase();
-  const mmds = hp.bars_result.get(resKey).mmds;
-  const times = mmds.map((m) => m.points.time);
-  // BUG2: minResponseTime=800 → 最近 5000 不 < 800 → 被丢弃(非对称于已硬化的线段路径)
-  assert.ok(times.includes(5000), `向左滚动不应丢弃最近买卖点 5000, times=${JSON.stringify(times)}`);
-  assert.ok(times.includes(800), '更旧买卖点 800 应被并入');
+  const times = history.bars_result.get(RESULT_KEY).bars.map((bar) => bar.time);
+  assert.ok(times.includes(500 * 1000));
+  assert.ok(times.includes(5500 * 1000));
 });

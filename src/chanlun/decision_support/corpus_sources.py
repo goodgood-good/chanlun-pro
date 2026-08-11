@@ -416,7 +416,7 @@ def write_trusted_manifest(
         else "missing_original"
     )
     payload = {
-        "schema_version": 1,
+        "schema": "current",
         "corpus_status": {
             "integrity": integrity_status,
             "original_evidence": original_status,

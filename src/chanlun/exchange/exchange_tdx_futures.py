@@ -206,7 +206,6 @@ class ExchangeTDXFutures(Exchange):
         # 通达信不支持按时间区间查询；收到 start_date/end_date 时忽略它们，
         # 仍按“分页拉最新 + 文件缓存合并”返回（tv_history 后续会按窗口切片）。
 
-        # _time_s = time.time()
         try:
             client = TdxExHq_API(raise_exception=True, auto_retry=True)
             with client.connect(self.connect_info["ip"], self.connect_info["port"]):
@@ -280,7 +279,7 @@ class ExchangeTDXFutures(Exchange):
             # 多页数据合并后去重，保留最新一条
             klines = klines.drop_duplicates(["date"], keep="last").sort_values("date")
             self.fdb.save_tdx_klines(
-                Market.FUTURES.value, code, frequency, klines  # C3:写key与读一致(去v1_前缀)
+                Market.FUTURES.value, code, frequency, klines  # 写入键与读取键保持一致
             )
 
             klines.loc[:, "code"] = code
@@ -434,7 +433,7 @@ class ExchangeTDXFutures(Exchange):
                     )
         return ticks
 
-    def now_trading(self):
+    def now_trading(self, market: str):
         """返回当前是否处于期货交易时段（简化判断，未区分品种夜盘差异）。"""
         hour = int(time.strftime("%H"))
         minute = int(time.strftime("%M"))
@@ -466,10 +465,3 @@ class ExchangeTDXFutures(Exchange):
 
     def plate_stocks(self, code: str):
         raise Exception("交易所不支持")
-
-
-if __name__ == "__main__":
-    ex = ExchangeTDXFutures()
-
-    klines = ex.klines("PR.HHIL8", "5m")
-    print(klines)

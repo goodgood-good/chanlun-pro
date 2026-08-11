@@ -53,7 +53,7 @@ def test_span_cache_is_deterministic_and_round_trips_raw_evidence(tmp_path: Path
         tmp_path / "first",
         identity=_identity(),
         spans=_spans(),
-        extractor_version="lesson-pdf/1",
+        extractor_id="lesson-pdf",
         first_page=7,
         last_page=8,
     )
@@ -61,7 +61,7 @@ def test_span_cache_is_deterministic_and_round_trips_raw_evidence(tmp_path: Path
         tmp_path / "second",
         identity=_identity(),
         spans=tuple(reversed(_spans())),
-        extractor_version="lesson-pdf/1",
+        extractor_id="lesson-pdf",
         first_page=7,
         last_page=8,
     )
@@ -84,7 +84,7 @@ def test_span_cache_rejects_tampering_before_deserializing(tmp_path: Path) -> No
         tmp_path / "cache",
         identity=_identity(),
         spans=_spans(),
-        extractor_version="lesson-pdf/1",
+        extractor_id="lesson-pdf",
         first_page=7,
         last_page=8,
     )

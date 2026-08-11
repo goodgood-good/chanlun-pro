@@ -23,7 +23,7 @@ from chanlun.decision_support.fingerprints import sha256_json
 
 
 HIGHER_TIMEFRAME_EXECUTION_ATTRIBUTION_SCHEMA = (
-    "chanlun-v3-higher-timeframe-execution-attribution/v1"
+    "chanlun-higher-timeframe-execution-attribution"
 )
 _SHA256_ID = re.compile(r"^sha256:[0-9a-f]{64}$")
 _ZERO = Decimal("0")
@@ -355,7 +355,7 @@ def higher_timeframe_execution_attribution(
             entry_execution_id = _text(
                 first_fill.get("execution_id"), "entry execution_id"
             )
-            cycle_id = f"v3-cycle:{key[0]}:{entry_execution_id}"
+            cycle_id = f"cycle:{key[0]}:{entry_execution_id}"
             if cycle_id in attributed_cycle_ids:
                 raise ValueError("entry cycle identity is duplicated")
             attributed_cycle_ids.add(cycle_id)

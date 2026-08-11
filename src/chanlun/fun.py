@@ -74,11 +74,6 @@ def timeint_to_datetime(_t, _format="%Y-%m-%d %H:%M:%S", tz=__tz):
     return str_to_datetime(time.strftime(_format, time_arr), _format, tz=tz)
 
 
-def str_to_timeint(_t, _format="%Y-%m-%d %H:%M:%S"):
-    """格式化字符串转 Unix 时间戳（int）。"""
-    return int(time.mktime(time.strptime(_t, _format)))
-
-
 def str_to_datetime(_s, _format="%Y-%m-%d %H:%M:%S", tz=__tz):
     """格式化字符串转 datetime 对象（带时区）。"""
     return datetime.datetime.strptime(_s, _format).astimezone(tz)
@@ -92,16 +87,6 @@ def datetime_to_str(_dt: datetime.datetime, _format="%Y-%m-%d %H:%M:%S"):
 def datetime_to_int(_dt: datetime.datetime):
     """datetime 对象转 Unix 时间戳（int）。"""
     return int(_dt.timestamp())
-
-
-def str_add_seconds_to_str(_s, _seconds, _format="%Y-%m-%d %H:%M:%S"):
-    """
-    字符串日期时间，加上秒数，在返回新的字符串日期
-    """
-    _time = int(time.mktime(time.strptime(_s, _format)))
-    _time += _seconds
-    _time = time.localtime(int(_time))
-    return time.strftime(_format, _time)
 
 
 def now_dt():
@@ -122,9 +107,3 @@ def reverse_decimal_to_power_of_ten(decimal_number):
         # 科学计数法（如 1e-8）直接读指数位
         num_zeros = int(decimal_str[decimal_str.index("e-") + 2 :])
     return 10**num_zeros
-
-
-if __name__ == "__main__":
-    for i in range(1, 10):
-        dn = 1 / (10**i)
-        print(dn, reverse_decimal_to_power_of_ten(dn))

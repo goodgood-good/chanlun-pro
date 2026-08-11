@@ -321,10 +321,6 @@ def _is_reader_header_at(
     return True
 
 
-def _looks_like_reader_header(record: tuple[tuple[int, PageSpan], ...]) -> bool:
-    return bool(record) and _is_reader_header_at(record, 0)
-
-
 def _terminal_date_shape(
     record: tuple[tuple[int, PageSpan], ...],
 ) -> tuple[int, str] | None:

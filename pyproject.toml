@@ -42,7 +42,7 @@ dependencies = [
 ]
 
 # 可选依赖：按需求场景分组安装（默认不装）
-#   poetry install --extras us / hk / usmart / cn-extra / futures / ai / notify / backtest / monitor
+#   poetry install --extras us / hk / usmart / cn-extra / futures / notify / charts / monitor / corpus
 #   poetry install --all-extras       # 一次装齐
 [project.optional-dependencies]
 us = [
@@ -56,21 +56,9 @@ usmart = ["pycryptodome>=3.23.0"]
 cn-extra = ["baostock>=0.8.9"]
 futures = [
     "tqsdk>=3.8.2",
-    "openctp-ctp>=6.7.11.0",
 ]
-ai = ["openai>=1.84.0"]
 notify = ["lark-oapi>=1.4.17"]
-# F2 (2026-05-15): pyecharts 与 matplotlib 移到 [charts] extras
-# matplotlib 在 src/ 中没有任何 import (顶层依赖纯死代码), pyecharts 只在
-# kcharts.py 和 backtesting/backtest.py 用 (图表渲染 / 回测可视化)。
-# web 服务运行不需要这两个包, 顶层依赖让 docker 部署多装 ~100MB 无意义。
 charts = [
-    "pyecharts==2.1.0",
-    "matplotlib>=3.10.3",
-]
-backtest = [
-    "pyfolio-reloaded>=0.9.9",
-    "pyecharts==2.1.0",
     "matplotlib>=3.10.3",
 ]
 monitor = ["playwright>=1.53.0"]
@@ -84,10 +72,6 @@ corpus = [
 # xtquant 是 vendored 的第三方 SDK（迅投 QMT），不纳入 lint
 extend-exclude = [
     "src/xtquant",
-    # 第三方交易框架/券商 SDK 适配入口，依赖按场景安装，不纳入默认 lint
-    "src/cl_myquant",
-    "src/cl_vnpy",
-    "src/cl_wtpy",
 ]
 
 [tool.ruff.lint]
@@ -97,22 +81,16 @@ extend-exclude = [
 ignore = ["F403", "F405", "E402", "E731", "E741"]
 
 [tool.ruff.lint.per-file-ignores]
-# 这些模块保留兼容性 re-export / 延迟导入入口，不能被 F401 自动删除。
+# 这些模块保留包级 re-export / 延迟导入入口，不能被 F401 自动删除。
 "src/chanlun/exchange/__init__.py" = ["F401"]
-"src/chanlun/persistence/file_db.py" = ["F401"]
-"src/chanlun/core/cl_interface.py" = ["F401", "F403"]
 "src/chanlun/cl_utils/__init__.py" = ["F401", "F403"]
-"src/chanlun/core/types/__init__.py" = ["F401", "F403"]
-"web/chanlun_chart/cl_app/__init__.py" = ["F401"]
-"web/chanlun_chart/cl_app/blueprints/tv.py" = ["F401"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 addopts = ["--import-mode=importlib"]
-# 让 `poetry run pytest`(console script 不把 cwd 加入 sys.path)也能 import tests.* 包,
-# 否则 tests/trader/test_ctp_*.py 的 `from tests.trader.conftest import ...` 在 poetry 口径下
-# 报 ModuleNotFoundError: No module named 'tests'(4 个 CTP 资金安全测试静默不收集)。审计 D4-MED-2。
+# 让 `poetry run pytest`（console script 不把 cwd 加入 sys.path）也能导入
+# 项目内的 tests 与 tools 模块。
 pythonpath = [".", "src", "web/chanlun_chart"]
 
 [tool.poetry]

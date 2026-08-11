@@ -2,7 +2,7 @@
 
 C2: ticks/all_ticks 的 rate 分母原用现价(price)/卖出价(MaiChu), 应为昨收(pre_close)/
     昨结(ZuoJie)。与 tdx_fx/tdx_us/tdx_hk/ny_futures 审查 L2 修复口径一致。
-C3: klines() 读缓存用 code、写缓存曾用 v1_ 前缀, 读写不对称→缓存永不命中、每次重拉全量。
+C3: klines() 读写缓存必须使用同一个 code 键，否则缓存永不命中、每次重拉全量。
     修复后读写 key 一致(均 code, 与其它 tdx 交易所约定一致)。
 """
 
@@ -142,5 +142,5 @@ def test_futures_klines_cache_key_read_write_symmetric(monkeypatch):
     ex.fix_yp_date = lambda code, dt: dt
     ex.klines("MA.MA2509", "5m", args={"pages": 1})
     assert spy.read_key == "MA.MA2509"
-    assert spy.save_key == "MA.MA2509"  # 旧代码写 v1_MA.MA2509 → 不对称
+    assert spy.save_key == "MA.MA2509"
     assert spy.read_key == spy.save_key

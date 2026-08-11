@@ -54,9 +54,9 @@ def _point(*, level: int, price_basis_revision: str) -> StructuralPoint:
 
 
 def test_point_identity_distinguishes_price_basis_and_recursive_level() -> None:
-    raw_l0 = _point(level=0, price_basis_revision="raw-v1")
-    raw_l1 = _point(level=1, price_basis_revision="raw-v1")
-    adjusted_l0 = _point(level=0, price_basis_revision="forward-v1")
+    raw_l0 = _point(level=0, price_basis_revision="raw")
+    raw_l1 = _point(level=1, price_basis_revision="raw")
+    adjusted_l0 = _point(level=0, price_basis_revision="forward")
 
     assert len({raw_l0.point_id, raw_l1.point_id, adjusted_l0.point_id}) == 3
     assert raw_l0.structure_key == ("formal", 0, "center-a")
@@ -64,7 +64,7 @@ def test_point_identity_distinguishes_price_basis_and_recursive_level() -> None:
 
 
 def test_confirmed_point_requires_basis_and_causal_availability() -> None:
-    point = _point(level=0, price_basis_revision="raw-v1")
+    point = _point(level=0, price_basis_revision="raw")
 
     with pytest.raises(ValueError, match="price_basis_revision is required"):
         replace(point, price_basis_revision="")

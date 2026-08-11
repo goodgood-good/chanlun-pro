@@ -15,7 +15,6 @@ import unicodedata
 
 from .corpus_chunking import build_semantic_units
 from .corpus_types import EvidenceUnit, ImageEvidence, SourceTier
-from .llm_provider import ProviderImage
 from .lesson_image_cache import (
     _absolute_without_resolving,
     _safe_directory,
@@ -38,7 +37,7 @@ _QUARANTINED_TEXT_ROLES = frozenset(
     {"editor_note", "reader_comment", "unknown_text"}
 )
 _MAX_CERTIFIED_IMAGE_BYTES = 20 * 1024 * 1024
-_SEMANTIC_AUDIT_VERSION = "chanlun-semantic-audit/1"
+_SEMANTIC_AUDIT_CONTRACT_ID = "chanlun-semantic-audit"
 _SEMANTIC_THRESHOLDS = {
     "anonymous_chan_reply_count_max": 0,
     "image_provenance_incomplete_count_max": 0,
@@ -75,6 +74,26 @@ _SEMANTIC_ZERO_FIELDS = frozenset(
         "unknown_image_authoritative_leak_count",
     }
 )
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderImage:
+    """Validated image payload produced by the certified corpus loader."""
+
+    image_id: str
+    media_type: str
+    data_url: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.image_id, str) or not self.image_id.strip():
+            raise ValueError("image_id must be non-empty")
+        if not isinstance(self.media_type, str) or not self.media_type.startswith(
+            "image/"
+        ):
+            raise ValueError("media_type must be an image type")
+        prefix = f"data:{self.media_type};base64,"
+        if not isinstance(self.data_url, str) or not self.data_url.startswith(prefix):
+            raise ValueError("data_url must match media_type")
 
 
 @dataclass(frozen=True)
@@ -160,7 +179,7 @@ def _semantic_certification(certification: object) -> dict[str, object]:
         "lesson_boundary_count",
         "lesson_boundary_sha256",
         "role_audit",
-        "semantic_audit_version",
+        "semantic_audit_contract_id",
         "semantic_gate_passed",
         "semantic_warnings",
         "text_cache_sha256",
@@ -170,7 +189,7 @@ def _semantic_certification(certification: object) -> dict[str, object]:
     if not isinstance(semantic, dict) or set(semantic) != expected_fields:
         raise ValueError("certified corpus semantic certification is missing or invalid")
     if (
-        semantic.get("semantic_audit_version") != _SEMANTIC_AUDIT_VERSION
+        semantic.get("semantic_audit_contract_id") != _SEMANTIC_AUDIT_CONTRACT_ID
         or semantic.get("semantic_gate_passed") is not True
         or semantic.get("thresholds") != _SEMANTIC_THRESHOLDS
     ):
@@ -447,7 +466,7 @@ def load_certified_lesson_corpus(
     manifest, manifest_bytes = _read_manifest(root_path)
     if hashlib.sha256(manifest_bytes).hexdigest() != policy.manifest_sha256:
         raise ValueError("certified corpus manifest fingerprint mismatch")
-    if manifest.get("package_kind") != "chanlun_lesson_corpus" or manifest.get("schema_version") != 3:
+    if manifest.get("package_kind") != "chanlun_lesson_corpus" or manifest.get("schema") != "current":
         raise ValueError("certified corpus kind or schema is invalid")
     if manifest.get("status") != {
         "blockers": [],

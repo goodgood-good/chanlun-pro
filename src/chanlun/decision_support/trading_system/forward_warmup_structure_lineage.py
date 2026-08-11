@@ -22,10 +22,10 @@ from chanlun.decision_support.trading_system.warmup_structure_lineage import (
 
 
 FORWARD_WARMUP_STRUCTURE_LINEAGE_ROLLUP_SCHEMA = (
-    "chanlun-forward-warmup-structure-lineage-rollup/v1"
+    "chanlun-forward-warmup-structure-lineage-rollup"
 )
 FORWARD_WARMUP_STRUCTURE_LINEAGE_EVENT_SCHEMA = (
-    "chanlun-forward-warmup-structure-lineage-event/v1"
+    "chanlun-forward-warmup-structure-lineage-event"
 )
 _HASH = re.compile(r"sha256:[0-9a-f]{64}")
 _SUBJECT_FIELDS = (
@@ -36,6 +36,47 @@ _SUBJECT_FIELDS = (
 _STRICT_SUBJECT_FIELD = (
     "sector_strict_same_5m",
     "sector_strict_same_5m_warmup_structure_lineage_diagnostic_evidence",
+)
+_ROLLUP_FIELDS = frozenset(
+    {
+        "schema",
+        "through_session",
+        "source_session_qualification_sha256",
+        "status",
+        "qualified_session_count",
+        "recorded_session_count",
+        "session_recording_status_counts",
+        "source_signal_count",
+        "lineage_extension_signal_count",
+        "unavailable_subject_evidence_count",
+        "unique_lineage_diagnostic_count",
+        "subjects",
+        "structure_event_count",
+        "structure_events",
+        "sessions",
+        "cross_session_convergence_adjudication",
+        "diagnostic_only",
+        "active_gate_unchanged",
+        "parameters_changed",
+        "automated_order_authorized",
+        "orders_created",
+        "fills_created",
+        "live_status",
+        "content_sha256",
+    }
+)
+_SESSION_FIELDS = frozenset(
+    {
+        "session",
+        "live_object_file_sha256",
+        "live_object_content_sha256",
+        "snapshot_content_sha256",
+        "signal_count",
+        "lineage_extension_signal_count",
+        "unavailable_subject_evidence_count",
+        "unique_lineage_diagnostic_count",
+        "recording_status",
+    }
 )
 
 
@@ -65,26 +106,22 @@ class ForwardWarmupLineageSessionSnapshot:
 
 def _lineage_extension(
     risk: Mapping[str, object],
-) -> tuple[bool, tuple[tuple[str, object], ...]]:
+) -> tuple[tuple[str, object], ...]:
     contract_field = "warmup_structure_lineage_diagnostic_contract_id"
     main_fields = tuple(field for _subject, field in _SUBJECT_FIELDS)
     strict_field = _STRICT_SUBJECT_FIELD[1]
-    present = tuple(field in risk for field in (contract_field, *main_fields))
-    strict_present = strict_field in risk
-    if not any(present):
-        if strict_present:
-            raise ValueError("strict forward lineage evidence has no main contract")
-        return False, ()
     if (
-        not all(present)
+        any(
+            field not in risk
+            for field in (contract_field, *main_fields, strict_field)
+        )
         or risk.get(contract_field)
         != WARMUP_STRUCTURE_LINEAGE_DIAGNOSTIC_CONTRACT_ID
     ):
-        raise ValueError("forward lineage extension is partial or foreign")
+        raise ValueError("forward lineage evidence is incomplete or foreign")
     values = [(subject, risk.get(field)) for subject, field in _SUBJECT_FIELDS]
-    if strict_present:
-        values.append((_STRICT_SUBJECT_FIELD[0], risk.get(strict_field)))
-    return True, tuple(values)
+    values.append((_STRICT_SUBJECT_FIELD[0], risk.get(strict_field)))
+    return tuple(values)
 
 
 def _event_identity(
@@ -139,8 +176,6 @@ def build_forward_warmup_structure_lineage_rollup(
 
     source_signal_count = 0
     signals_with_lineage_extension = 0
-    legacy_signal_count = 0
-    signals_without_risk_count = 0
     unavailable_subject_evidence_count = 0
     session_rows: list[dict[str, object]] = []
     # A market diagnostic can be repeated on many symbol rows in one screen.
@@ -151,22 +186,14 @@ def build_forward_warmup_structure_lineage_rollup(
 
     for source in ordered:
         session_extension_count = 0
-        session_legacy_count = 0
-        session_risk_missing_count = 0
         session_unavailable_count = 0
         session_diagnostic_keys: set[tuple[date, str, str]] = set()
         for signal in source.signals:
             source_signal_count += 1
             risk = signal.get("higher_timeframe_risk")
             if not isinstance(risk, Mapping):
-                signals_without_risk_count += 1
-                session_risk_missing_count += 1
-                continue
-            extension_present, values = _lineage_extension(risk)
-            if not extension_present:
-                legacy_signal_count += 1
-                session_legacy_count += 1
-                continue
+                raise ValueError("forward signal has no higher-timeframe risk evidence")
+            values = _lineage_extension(risk)
             signals_with_lineage_extension += 1
             session_extension_count += 1
             for subject, raw in values:
@@ -184,17 +211,6 @@ def build_forward_warmup_structure_lineage_rollup(
                 key = (source.session, subject, diagnostic.content_sha256)
                 diagnostics[key] = diagnostic
                 session_diagnostic_keys.add(key)
-        session_unrecorded_count = (
-            session_legacy_count + session_risk_missing_count
-        )
-        if session_extension_count and session_unrecorded_count:
-            recording_status = "MIXED_RECORDED_AND_LEGACY_SIGNALS"
-        elif session_extension_count:
-            recording_status = "RECORDED"
-        elif source.signals:
-            recording_status = "NOT_RECORDED_LEGACY"
-        else:
-            recording_status = "EMPTY_SCREEN"
         session_rows.append(
             {
                 "session": source.session.isoformat(),
@@ -203,12 +219,9 @@ def build_forward_warmup_structure_lineage_rollup(
                 "snapshot_content_sha256": source.snapshot_content_sha256,
                 "signal_count": len(source.signals),
                 "lineage_extension_signal_count": session_extension_count,
-                "legacy_signal_count": session_legacy_count,
-                "risk_missing_signal_count": session_risk_missing_count,
-                "unrecorded_signal_count": session_unrecorded_count,
                 "unavailable_subject_evidence_count": session_unavailable_count,
                 "unique_lineage_diagnostic_count": len(session_diagnostic_keys),
-                "recording_status": recording_status,
+                "recording_status": "RECORDED",
             }
         )
 
@@ -322,22 +335,9 @@ def build_forward_warmup_structure_lineage_rollup(
     recording_counts = Counter(
         str(value["recording_status"]) for value in session_rows
     )
-    recorded_session_count = sum(
-        value["recording_status"]
-        in {"RECORDED", "MIXED_RECORDED_AND_LEGACY_SIGNALS"}
-        for value in session_rows
-    )
-    legacy_session_count = sum(
-        value["recording_status"]
-        in {"NOT_RECORDED_LEGACY", "MIXED_RECORDED_AND_LEGACY_SIGNALS"}
-        for value in session_rows
-    )
+    recorded_session_count = len(session_rows)
     if not session_rows:
         status = "NO_QUALIFIED_SESSIONS"
-    elif not recorded_session_count:
-        status = "NOT_RECORDED_LEGACY"
-    elif legacy_session_count:
-        status = "RECORDED_WITH_LEGACY_SESSIONS"
     else:
         status = "RECORDED"
 
@@ -350,15 +350,9 @@ def build_forward_warmup_structure_lineage_rollup(
         "status": status,
         "qualified_session_count": len(session_rows),
         "recorded_session_count": recorded_session_count,
-        "legacy_session_count": legacy_session_count,
         "session_recording_status_counts": _sorted_counts(recording_counts),
         "source_signal_count": source_signal_count,
         "lineage_extension_signal_count": signals_with_lineage_extension,
-        "legacy_signal_count": legacy_signal_count,
-        "risk_missing_signal_count": signals_without_risk_count,
-        "unrecorded_signal_count": (
-            legacy_signal_count + signals_without_risk_count
-        ),
         "unavailable_subject_evidence_count": (
             unavailable_subject_evidence_count
         ),
@@ -410,6 +404,8 @@ def validate_forward_warmup_structure_lineage_rollup_document(
     """
 
     value = dict(document)
+    if set(value) != _ROLLUP_FIELDS:
+        raise ValueError("forward lineage rollup fields changed")
     stable = {key: raw for key, raw in value.items() if key != "content_sha256"}
     if (
         value.get("schema")
@@ -435,10 +431,10 @@ def validate_forward_warmup_structure_lineage_rollup_document(
     session_dates: list[date] = []
     recording_counts: Counter[str] = Counter()
     totals: Counter[str] = Counter()
-    recorded_count = 0
-    legacy_count = 0
     for index, raw_row in enumerate(sessions):
         row = dict(raw_row)
+        if set(row) != _SESSION_FIELDS:
+            raise ValueError("forward lineage session fields changed")
         try:
             session = date.fromisoformat(str(row["session"]))
         except (KeyError, ValueError) as exc:
@@ -458,41 +454,16 @@ def validate_forward_warmup_structure_lineage_rollup_document(
             for field in (
                 "signal_count",
                 "lineage_extension_signal_count",
-                "legacy_signal_count",
-                "risk_missing_signal_count",
-                "unrecorded_signal_count",
                 "unavailable_subject_evidence_count",
                 "unique_lineage_diagnostic_count",
             )
         }
-        if counts["unrecorded_signal_count"] != (
-            counts["legacy_signal_count"] + counts["risk_missing_signal_count"]
-        ) or counts["signal_count"] != (
-            counts["lineage_extension_signal_count"]
-            + counts["unrecorded_signal_count"]
-        ):
+        if counts["signal_count"] != counts["lineage_extension_signal_count"]:
             raise ValueError("forward lineage session signal counts disagree")
-        if counts["lineage_extension_signal_count"] and counts[
-            "unrecorded_signal_count"
-        ]:
-            expected_status = "MIXED_RECORDED_AND_LEGACY_SIGNALS"
-        elif counts["lineage_extension_signal_count"]:
-            expected_status = "RECORDED"
-        elif counts["signal_count"]:
-            expected_status = "NOT_RECORDED_LEGACY"
-        else:
-            expected_status = "EMPTY_SCREEN"
+        expected_status = "RECORDED"
         if row.get("recording_status") != expected_status:
             raise ValueError("forward lineage session recording status changed")
         recording_counts[expected_status] += 1
-        recorded_count += expected_status in {
-            "RECORDED",
-            "MIXED_RECORDED_AND_LEGACY_SIGNALS",
-        }
-        legacy_count += expected_status in {
-            "NOT_RECORDED_LEGACY",
-            "MIXED_RECORDED_AND_LEGACY_SIGNALS",
-        }
         totals.update(counts)
     if session_dates != sorted(session_dates) or len(session_dates) != len(
         set(session_dates)
@@ -502,9 +473,7 @@ def validate_forward_warmup_structure_lineage_rollup_document(
     if _count(value.get("qualified_session_count"), "qualified_session_count") != len(
         sessions
     ) or _count(value.get("recorded_session_count"), "recorded_session_count") != (
-        recorded_count
-    ) or _count(value.get("legacy_session_count"), "legacy_session_count") != (
-        legacy_count
+        len(sessions)
     ):
         raise ValueError("forward lineage session totals changed")
     if _count_map(
@@ -515,9 +484,6 @@ def validate_forward_warmup_structure_lineage_rollup_document(
     for top_field, session_field in (
         ("source_signal_count", "signal_count"),
         ("lineage_extension_signal_count", "lineage_extension_signal_count"),
-        ("legacy_signal_count", "legacy_signal_count"),
-        ("risk_missing_signal_count", "risk_missing_signal_count"),
-        ("unrecorded_signal_count", "unrecorded_signal_count"),
         (
             "unavailable_subject_evidence_count",
             "unavailable_subject_evidence_count",
@@ -529,15 +495,7 @@ def validate_forward_warmup_structure_lineage_rollup_document(
     expected_status = (
         "NO_QUALIFIED_SESSIONS"
         if not sessions
-        else (
-            "NOT_RECORDED_LEGACY"
-            if not recorded_count
-            else (
-                "RECORDED_WITH_LEGACY_SESSIONS"
-                if legacy_count
-                else "RECORDED"
-            )
-        )
+        else "RECORDED"
     )
     if value.get("status") != expected_status:
         raise ValueError("forward lineage rollup status changed")

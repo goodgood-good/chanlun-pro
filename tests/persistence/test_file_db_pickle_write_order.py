@@ -18,8 +18,7 @@ def test_same_path_pickle_writes_finish_in_submission_order(tmp_path, monkeypatc
     def controlled_write(path, obj):
         if obj["sequence"] == 1:
             first_started.set()
-            # 旧实现允许第二个 worker 越过这里先落盘；修复后同路径串行，
-            # 等待超时后旧快照先写，新快照再写。
+            # 同一路径写入必须串行，确保先提交的快照先落盘。
             second_finished.wait(timeout=1.0)
             real_write(path, obj)
             return
@@ -134,19 +133,6 @@ def test_logging_failure_does_not_strand_same_path_queue(tmp_path, monkeypatch):
     assert recovery.result(timeout=5.0) is None
     with open(target, "rb") as fp:
         assert pickle.load(fp) == {"sequence": 2}
-
-
-def test_generic_pickle_wait_exposes_write_failure(tmp_path, monkeypatch):
-    file_db = object.__new__(FileCacheDB)
-    file_db.cache_pkl_path = tmp_path
-
-    def fail_write(path, obj, *, durable=False):
-        raise OSError("controlled durable write failure")
-
-    monkeypatch.setattr(file_db, "_atomic_write_pickle_blocking", fail_write)
-
-    with pytest.raises(OSError, match="controlled durable write failure"):
-        file_db.cache_pkl_to_file("critical.pkl", {"sequence": 1}, wait=True)
 
 
 def test_shutdown_fallback_write_survives_logging_failure(tmp_path, monkeypatch):

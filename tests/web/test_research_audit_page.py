@@ -25,21 +25,25 @@ from chanlun.decision_support.trading_system.backtest.report import (
     build_report,
 )
 from chanlun.decision_support.trading_system.higher_timeframe_gate import (
+    HigherTimeframePeriodDiagnostic,
     QmtSectorSameBaseCoverageEvidence,
     higher_timeframe_effectiveness_audit,
 )
 from chanlun.decision_support.trading_system.higher_timeframe_execution_attribution import (
     higher_timeframe_execution_attribution,
 )
-from chanlun.decision_support.trading_system.v3_etf_proxy_facts import (
+from chanlun.decision_support.trading_system.etf_proxy_facts import (
     RiskDiagnosticBuyPointEvidenceFacts,
     RiskMappingPointEvidenceFacts,
     RiskMappingSupplyFacts,
 )
-from chanlun.decision_support.trading_system.v3_qmt_higher_timeframe import (
+from chanlun.decision_support.trading_system.qmt_higher_timeframe import (
     QMT_HIGHER_TIMEFRAME_WARMUP_CONVERGENCE_PARAMETER_SET_ID,
 )
-from chanlun.research_release.v3_sector_release_manifest import (
+from chanlun.decision_support.trading_system.qmt_native_daily_bridge import (
+    QmtNativeDailyCalendarCoverageEvidence,
+)
+from chanlun.research_release.sector_release_manifest import (
     SectorReleaseManifestError,
 )
 from chanlun.decision_support.trading_system.warmup_convergence import (
@@ -50,6 +54,10 @@ from chanlun.decision_support.trading_system.warmup_convergence import (
     bind_warmup_convergence_diagnostic,
     bind_warmup_mapping_supply_diagnostic,
     classify_warmup_convergence_envelope,
+)
+from chanlun.decision_support.trading_system.warmup_structure_lineage import (
+    WarmupStructureLineageSnapshotSet,
+    bind_warmup_structure_lineage_diagnostic,
 )
 from cl_app.blueprints.decision_support import decision_support_bp
 from cl_app.services.research_audit import (
@@ -185,7 +193,7 @@ def _write_passed_gate(root: Path, report: dict[str, object]) -> None:
     path.write_text(
         json.dumps(
             {
-                "schema": "chanlun-backtest-causality-gate/v2",
+                "schema": "chanlun-backtest-causality-gate",
                 "checked_at": "2026-07-25T12:00:00+08:00",
                 "status": "passed",
                 "pnl_generated": True,
@@ -205,28 +213,48 @@ def _write_passed_gate(root: Path, report: dict[str, object]) -> None:
     )
 
 
+def _empty_active_mapping_supply() -> RiskMappingSupplyFacts:
+    return RiskMappingSupplyFacts(
+        classification="NO_LOWER_POINT_EVIDENCE",
+        lower_structure_available=True,
+        point_evidence_count=0,
+        point_type_counts=(
+            ("1sell", 0),
+            ("2sell", 0),
+            ("3sell", 0),
+            ("3buy", 0),
+        ),
+        completed_sell12_count=0,
+        in_top_interval_sell12_count=0,
+        completed_in_top_interval_sell12_count=0,
+        incomplete_in_top_interval_sell12_count=0,
+        outside_top_interval_sell12_count=0,
+        highest_candidate_center_count=0,
+        point_evidence=(),
+        diagnostic_buy_point_type_counts=(("1buy", 0), ("2buy", 0)),
+        diagnostic_buy_point_evidence=(),
+    )
+
+
 def _risk_evidence(
     subject: str,
     *,
     observed_at: datetime,
 ) -> dict[str, object]:
     blocker = "NO_COMPLETED_LOWER_1SELL_2SELL_CENTER_IN_TOP_FRACTAL"
-    def semantic_snapshot(
-        *,
-        weekly_state: str = "FORMED_UNRESOLVED",
-        daily_ma5: str = "10",
-    ) -> WarmupSemanticSnapshot:
+    active_interval = (
+        observed_at - timedelta(days=30),
+        observed_at - timedelta(days=5),
+    )
+
+    def semantic_snapshot(*, daily_ma5: str = "10") -> WarmupSemanticSnapshot:
         return WarmupSemanticSnapshot(
             periods=tuple(
                 WarmupPeriodSemanticFacts(
                     period=period,
-                    state=(
-                        weekly_state
-                        if period == "W"
-                        else "FORMED_UNRESOLVED"
-                    ),
+                    state="FORMED_UNRESOLVED",
                     evidence_bar_end=observed_at - timedelta(days=index + 1),
-                    active_top_interval=None,
+                    active_top_interval=active_interval,
                     mapping_unique=False,
                     mapped_center_id=None,
                     mapping_candidate_ids=(),
@@ -243,7 +271,7 @@ def _risk_evidence(
         )
 
     baseline = semantic_snapshot()
-    intermediate = semantic_snapshot(weekly_state="NONE", daily_ma5="11")
+    intermediate = semantic_snapshot(daily_ma5="11")
     snapshots = (baseline, intermediate, baseline, baseline)
     convergence = classify_warmup_convergence_envelope(
         frequency="d",
@@ -264,7 +292,24 @@ def _risk_evidence(
         convergence,
         snapshots=snapshots,
     )
+    supplies = tuple(_empty_active_mapping_supply() for _period in ("M", "W", "D"))
+    supply_snapshot = WarmupMappingSupplySnapshot(
+        periods=tuple(zip(("M", "W", "D"), supplies))
+    )
+    convergence = bind_warmup_mapping_supply_diagnostic(
+        convergence,
+        snapshots=(supply_snapshot,) * len(snapshots),
+    )
+    empty_lineage = WarmupStructureLineageSnapshotSet(
+        periods=(("M", None), ("W", None), ("D", None))
+    )
+    convergence = bind_warmup_structure_lineage_diagnostic(
+        convergence,
+        snapshots=(empty_lineage,) * len(snapshots),
+    )
     assert convergence.diagnostic is not None
+    assert convergence.mapping_supply_diagnostic is not None
+    assert convergence.structure_lineage_diagnostic is not None
     evidence: dict[str, object] = {
         "source_revision": "sha256:" + "7" * 64,
         "monthly": "FORMED_UNRESOLVED",
@@ -272,12 +317,28 @@ def _risk_evidence(
         "daily": "FORMED_UNRESOLVED",
         "grade": "RESEARCH_ONLY",
         "period_diagnostics": [
-            {
-                "period": period,
-                "state": "FORMED_UNRESOLVED",
-                "blocker_codes": [blocker],
-            }
-            for period in ("M", "W", "D")
+            HigherTimeframePeriodDiagnostic(
+                period=period,
+                state="FORMED_UNRESOLVED",
+                completed_bar_count=480,
+                evidence_bar_end=observed_at - timedelta(days=index + 1),
+                active_top_interval=active_interval,
+                mapping_unique=False,
+                mapped_center_id=None,
+                mapping_candidate_ids=(),
+                blocker_codes=(blocker,),
+                warning_codes=(),
+                source_revision=sha256_json(
+                    {
+                        "schema": "test-higher-timeframe-period",
+                        "subject": subject,
+                        "period": period,
+                        "observed_at": observed_at,
+                    }
+                ),
+                mapping_supply=supplies[index],
+            ).document()
+            for index, period in enumerate(("M", "W", "D"))
         ],
         "session_evidence": {"issues": []},
         "warmup": {
@@ -285,6 +346,12 @@ def _risk_evidence(
         },
         "warmup_convergence": convergence.document(),
         "warmup_convergence_diagnostic": convergence.diagnostic.document(),
+        "warmup_mapping_supply_diagnostic": (
+            convergence.mapping_supply_diagnostic.document()
+        ),
+        "warmup_structure_lineage_diagnostic": (
+            convergence.structure_lineage_diagnostic.document()
+        ),
         "source_mode": (
             "NATIVE_DAILY_MWD_PLUS_5M_30M_UNRECONCILED_RESEARCH"
             if subject == "sector"
@@ -357,12 +424,28 @@ def _risk_evidence(
             strict_convergence,
             snapshots=(),
         )
+        strict_convergence = bind_warmup_mapping_supply_diagnostic(
+            strict_convergence,
+            snapshots=(),
+        )
+        strict_convergence = bind_warmup_structure_lineage_diagnostic(
+            strict_convergence,
+            snapshots=(),
+        )
         assert strict_convergence.diagnostic is not None
+        assert strict_convergence.mapping_supply_diagnostic is not None
+        assert strict_convergence.structure_lineage_diagnostic is not None
         evidence["strict_same_5m_warmup_convergence"] = (
             strict_convergence.document()
         )
         evidence["strict_same_5m_warmup_convergence_diagnostic"] = (
             strict_convergence.diagnostic.document()
+        )
+        evidence["strict_same_5m_warmup_mapping_supply_diagnostic"] = (
+            strict_convergence.mapping_supply_diagnostic.document()
+        )
+        evidence["strict_same_5m_warmup_structure_lineage_diagnostic"] = (
+            strict_convergence.structure_lineage_diagnostic.document()
         )
     return evidence
 
@@ -555,6 +638,16 @@ def _current_candidate_audit() -> list[dict[str, object]]:
         observed_at = datetime.fromisoformat(
             f"2026-07-{index + 1:02d}T10:00:00+08:00"
         )
+        symbol_evidence = _risk_evidence(
+            "symbol",
+            observed_at=observed_at,
+        )
+        if not symbol_resolved:
+            symbol_evidence.update(
+                monthly="UNRESOLVED",
+                weekly="UNRESOLVED",
+                daily="UNRESOLVED",
+            )
         candidates.append(
             {
                 "symbol": f"SZ.{index:06d}",
@@ -589,14 +682,44 @@ def _current_candidate_audit() -> list[dict[str, object]]:
                     "sector",
                     observed_at=observed_at,
                 ),
-                "symbol_risk_warmup_evidence": (
-                    _risk_evidence("symbol", observed_at=observed_at)
-                    if symbol_resolved
-                    else None
+                "symbol_risk_warmup_evidence": symbol_evidence,
+                "market_risk_native_daily_calendar_coverage_evidence": (
+                    _native_daily_calendar_coverage(
+                        symbol="SH.000300",
+                        observed_at=observed_at,
+                    )
+                ),
+                "symbol_risk_native_daily_calendar_coverage_evidence": (
+                    _native_daily_calendar_coverage(
+                        symbol=f"SZ.{index:06d}",
+                        observed_at=observed_at,
+                    )
                 ),
             }
         )
     return candidates
+
+
+def _native_daily_calendar_coverage(
+    *,
+    symbol: str,
+    observed_at: datetime,
+) -> dict[str, object]:
+    last_session = observed_at.date() - timedelta(days=1)
+    return QmtNativeDailyCalendarCoverageEvidence(
+        symbol=symbol,
+        observed_at=observed_at,
+        native_first_session=date(2025, 7, 1),
+        native_last_session=last_session,
+        calendar_first_session=date(2025, 7, 1),
+        calendar_last_session=last_session,
+        native_daily_bar_count=240,
+        expected_calendar_session_count=240,
+        native_only_sessions=(),
+        unexplained_calendar_only_sessions=(),
+        trading_calendar_revision="sha256:" + "5" * 64,
+        status="EXACT",
+    ).document()
 
 
 def _current_report() -> dict[str, object]:
@@ -639,16 +762,15 @@ def _current_report() -> dict[str, object]:
         "tactical_sample_insufficient": True,
         "total_fees": "5",
         "turnover": "0.10",
-        "valid": True,
         "warnings": ["INSUFFICIENT_CALENDAR_SPAN_FOR_ANNUALIZATION"],
         "win_rate": "0",
     }
     def entry_execution_id(index: int) -> str:
-        return f"v3-replay-order:{index:064x}:bar:{index + 1}"
+        return f"replay-order:{index:064x}:bar:{index + 1}"
 
     def entry_cycle_id(index: int) -> str:
         return (
-            f"v3-cycle:{candidates[index]['symbol']}:"
+            f"cycle:{candidates[index]['symbol']}:"
             f"{entry_execution_id(index)}"
         )
 
@@ -765,7 +887,7 @@ def _current_report() -> dict[str, object]:
         removed_events: int,
     ) -> dict[str, object]:
         return {
-            "schema": "chanlun-v3-session-checkpoint-scheduler-audit/v1",
+            "schema": "chanlun-session-checkpoint-scheduler-audit",
             "mode": "HISTORICAL_SESSION_CHECKPOINT_FIXED_POINT",
             "converged": True,
             "build_pass_count": 2,
@@ -794,7 +916,7 @@ def _current_report() -> dict[str, object]:
             "live_status": "LIVE_DISABLED",
         }
     terminal_accounting = {
-        "schema": "chanlun-v3-terminal-accounting-attribution/v1",
+        "schema": "chanlun-terminal-accounting-attribution",
         "status": "EVALUATED",
         "reason_codes": [],
         "sector_membership_mode": (
@@ -909,9 +1031,8 @@ def _current_report() -> dict[str, object]:
         ],
     }
     report: dict[str, object] = {
-        "schema": "chanlun-v3-sector-first-full-market-research-backtest/v2",
+        "schema": "chanlun-sector-first-full-market-research-backtest",
         "result_label": "RECENT_YEAR_APPROXIMATE_CHANLUN_POINT_RESEARCH_BACKTEST",
-        "forward_paper_session": None,
         "strict_full_system_result": {
             "status": "NOT_EVALUABLE",
             "reason": "TECHNICAL_POINTS_ARE_EXPLICIT_RESEARCH_APPROXIMATIONS",
@@ -981,7 +1102,7 @@ def _current_report() -> dict[str, object]:
         "structural_rejections": [],
         "signal_counts": {},
         "scheduler_causality_audit": {
-            "schema": "chanlun-v3-session-checkpoint-scheduler-audit/v1",
+            "schema": "chanlun-session-checkpoint-scheduler-audit",
             "mode": "HISTORICAL_SESSION_CHECKPOINT_FIXED_POINT",
             "converged": True,
             "build_pass_count": 3,
@@ -1009,7 +1130,7 @@ def _current_report() -> dict[str, object]:
             "live_status": "LIVE_DISABLED",
         },
         "tactical_execution_audit": {
-            "schema": "chanlun-v3-tactical-execution-audit/v1",
+            "schema": "chanlun-tactical-execution-audit",
             "adjudication": "NO_LEGAL_TACTICAL_LOT",
             "generated_signal_count": 1,
             "dispatched_source_signal_count": 1,
@@ -1071,7 +1192,7 @@ def _current_report() -> dict[str, object]:
         "higher_timeframe_data_provenance": {},
         "input_hashes": {"trigger_ledger": "sha256:" + "1" * 64},
         "decision_source_snapshot": {
-            "schema": "chanlun-v3-decision-source-snapshot/v2",
+            "schema": "chanlun-decision-source-snapshot",
             "files": [],
             "aggregate_sha256": "sha256:" + "2" * 64,
         },
@@ -1225,24 +1346,26 @@ def _write_current_report_with_identified_risk_point(root: Path) -> tuple[Path, 
             ],
             "mapping_unique": False,
             "mapping_candidate_ids": [],
-            "mapping_supply": {
-                "classification": "ONLY_THIRD_CLASS_POINTS",
-                "lower_structure_available": True,
-                "point_evidence_count": 1,
-                "point_type_counts": {
-                    "1sell": 0,
-                    "2sell": 0,
-                    "3sell": 1,
-                    "3buy": 0,
-                },
-                "completed_sell12_count": 0,
-                "in_top_interval_sell12_count": 0,
-                "completed_in_top_interval_sell12_count": 0,
-                "incomplete_in_top_interval_sell12_count": 0,
-                "outside_top_interval_sell12_count": 0,
-                "highest_candidate_center_count": 0,
-                "point_evidence": [point.document()],
-            },
+            "mapping_supply": RiskMappingSupplyFacts(
+                classification="ONLY_THIRD_CLASS_POINTS",
+                lower_structure_available=True,
+                point_evidence_count=1,
+                point_type_counts=(
+                    ("1sell", 0),
+                    ("2sell", 0),
+                    ("3sell", 1),
+                    ("3buy", 0),
+                ),
+                completed_sell12_count=0,
+                in_top_interval_sell12_count=0,
+                completed_in_top_interval_sell12_count=0,
+                incomplete_in_top_interval_sell12_count=0,
+                outside_top_interval_sell12_count=0,
+                highest_candidate_center_count=0,
+                point_evidence=(point,),
+                diagnostic_buy_point_type_counts=(("1buy", 0), ("2buy", 0)),
+                diagnostic_buy_point_evidence=(),
+            ).document(),
         }
     )
     report["higher_timeframe_effectiveness_audit"] = (
@@ -1304,32 +1427,26 @@ def _write_current_report_with_identified_diagnostic_buy_point(
             ],
             "mapping_unique": False,
             "mapping_candidate_ids": [],
-            "mapping_supply": {
-                "classification": "NO_LOWER_POINT_EVIDENCE",
-                "lower_structure_available": True,
-                "point_evidence_count": 0,
-                "point_type_counts": {
-                    "1sell": 0,
-                    "2sell": 0,
-                    "3sell": 0,
-                    "3buy": 0,
-                },
-                "completed_sell12_count": 0,
-                "in_top_interval_sell12_count": 0,
-                "completed_in_top_interval_sell12_count": 0,
-                "incomplete_in_top_interval_sell12_count": 0,
-                "outside_top_interval_sell12_count": 0,
-                "highest_candidate_center_count": 0,
-                "point_evidence": [],
-                "diagnostic_buy_point_type_counts": {
-                    "1buy": 1,
-                    "2buy": 0,
-                },
-                "diagnostic_directional_classification": (
-                    "BUY12_PRESENT_SELL12_ABSENT"
+            "mapping_supply": RiskMappingSupplyFacts(
+                classification="NO_LOWER_POINT_EVIDENCE",
+                lower_structure_available=True,
+                point_evidence_count=0,
+                point_type_counts=(
+                    ("1sell", 0),
+                    ("2sell", 0),
+                    ("3sell", 0),
+                    ("3buy", 0),
                 ),
-                "diagnostic_buy_point_evidence": [point.document()],
-            },
+                completed_sell12_count=0,
+                in_top_interval_sell12_count=0,
+                completed_in_top_interval_sell12_count=0,
+                incomplete_in_top_interval_sell12_count=0,
+                outside_top_interval_sell12_count=0,
+                highest_candidate_center_count=0,
+                point_evidence=(),
+                diagnostic_buy_point_type_counts=(("1buy", 1), ("2buy", 0)),
+                diagnostic_buy_point_evidence=(point,),
+            ).document(),
         }
     )
     report["higher_timeframe_effectiveness_audit"] = (
@@ -1402,8 +1519,8 @@ def app(audit_root: Path) -> Flask:
 def test_snapshot_exposes_only_new_read_only_strategy(audit_root: Path) -> None:
     snapshot = build_research_audit_snapshot(audit_root)
 
-    assert snapshot["schema_version"] == "research-audit-page-v12"
-    assert snapshot["strategy_id"] == "chanlun_source_faithful_v2"
+    assert snapshot["schema"] == "research-audit-page"
+    assert snapshot["strategy_id"] == "chanlun_source_faithful"
     assert snapshot["active_strategy_count"] == 1
     assert snapshot["read_only"] is True
     assert snapshot["historical"] is True
@@ -1430,9 +1547,9 @@ def test_current_result_is_preferred_and_exposes_lifecycle(
 
     snapshot = build_research_audit_snapshot(audit_root)
 
-    assert snapshot["schema_version"] == "research-audit-page-v14"
+    assert snapshot["schema"] == "research-audit-page"
     assert snapshot["source_kind"] == "current_research_variant"
-    assert snapshot["strategy_id"] == "chanlun_v3_current_sector_human_assisted"
+    assert snapshot["strategy_id"] == "chanlun_current_sector_human_assisted"
     assert snapshot["verdict"]["live_ready"] is False
     assert snapshot["data_evidence"]["grade"] == "research_only"
     current = snapshot["current_research"]
@@ -1555,13 +1672,12 @@ def test_current_result_is_preferred_and_exposes_lifecycle(
     }
     assert market_convergence["non_monotonic_changed_path_counts"] == {
         "D.ma5": 17,
-        "W.state": 17,
     }
     market_warmup_points = risk["subjects"]["market"][
         "warmup_non_monotonic_point_audit"
     ]
-    assert market_warmup_points["point_count"] == 34
-    assert market_warmup_points["chart_focus_supported_point_count"] == 34
+    assert market_warmup_points["point_count"] == 17
+    assert market_warmup_points["chart_focus_supported_point_count"] == 17
     assert market_warmup_points["points"][0]["diagnostic_only"] is True
     sector_convergence = risk["subjects"]["sector"]["warmup_convergence"]
     assert sector_convergence["strict_same_base_status_counts"] == {
@@ -1572,7 +1688,7 @@ def test_current_result_is_preferred_and_exposes_lifecycle(
     ] == {"INSUFFICIENT_PREFIXES": 17}
     assert risk["subjects"]["symbol"]["warmup_convergence"][
         "status_counts"
-    ] == {"NON_MONOTONIC": 12, "NOT_RECORDED_LEGACY": 5}
+    ] == {"NON_MONOTONIC": 17}
     assert snapshot["artifact"]["decision_source_matches_current"] is True
 
 
@@ -1659,7 +1775,7 @@ def test_current_result_fails_closed_when_decision_source_is_stale(
     assert raised.value.code == "current_research_decision_source_stale"
 
 
-def test_v21_current_result_requires_verified_release_input_binding(
+def test_current_result_requires_verified_release_input_binding(
     audit_root: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1686,7 +1802,7 @@ def test_v21_current_result_requires_verified_release_input_binding(
     ] == 28
 
 
-def test_v21_current_result_fails_closed_on_unbound_release_inputs(
+def test_current_result_fails_closed_on_unbound_release_inputs(
     audit_root: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1813,7 +1929,7 @@ def test_causality_gate_blocks_an_older_research_report(
     gate.write_text(
         json.dumps(
             {
-                "schema": "chanlun-backtest-causality-gate/v2",
+                "schema": "chanlun-backtest-causality-gate",
                 "checked_at": "2026-07-25T12:00:00+08:00",
                 "status": "blocked",
                 "pnl_generated": False,
@@ -1852,7 +1968,7 @@ def test_page_explains_that_blocked_gate_generated_no_pnl(
     gate.write_text(
         json.dumps(
             {
-                "schema": "chanlun-backtest-causality-gate/v2",
+                "schema": "chanlun-backtest-causality-gate",
                 "checked_at": "2026-07-25T12:00:00+08:00",
                 "status": "blocked",
                 "pnl_generated": False,
@@ -1878,18 +1994,18 @@ def test_page_explains_that_blocked_gate_generated_no_pnl(
     assert "未生成正式回测收益" in html
     assert "系统已在计算收益前停止" in html
     assert "historical_sector_membership_unverified" in html
-    assert "chanlun_source_faithful_v2" not in html
+    assert "chanlun_source_faithful" not in html
 
 
 def test_snapshot_reads_only_the_canonical_current_report(
     audit_root: Path,
 ) -> None:
     directory = audit_root / "audit/chanlun_trading_system_backtest"
-    legacy = directory / "newer_legacy_strategy.json"
-    legacy.write_text(
+    unrelated = directory / "newer_unrelated_strategy.json"
+    unrelated.write_text(
         json.dumps(
             {
-                "strategy_id": "obsolete_strategy_v1",
+                "strategy_id": "unrelated_strategy",
                 "generated_at": "2099-01-01T00:00:00+08:00",
             },
             ensure_ascii=False,
@@ -1899,7 +2015,7 @@ def test_snapshot_reads_only_the_canonical_current_report(
 
     snapshot = build_research_audit_snapshot(audit_root)
 
-    assert snapshot["strategy_id"] == "chanlun_source_faithful_v2"
+    assert snapshot["strategy_id"] == "chanlun_source_faithful"
     assert snapshot["artifact"]["relative_path"].endswith(
         "/certified_report.json"
     )
@@ -1938,7 +2054,7 @@ def test_page_and_data_endpoint_are_login_protected_and_read_only(app: Flask) ->
     assert data.status_code == 200
     assert data.get_json()["data"]["active_strategy_count"] == 1
     assert "历史研究 / 审计成果" in html
-    assert "chanlun_source_faithful_v2" in html
+    assert "chanlun_source_faithful" in html
     assert "旧策略报告不会加载" in html
     assert "未达到实盘标准" in html
     assert "30m 大级别结构" in html
@@ -1999,9 +2115,8 @@ def test_current_page_and_api_share_the_lifecycle_result(
     assert "双窗口稳定但未获全部前缀稳定证明 17 个候选" in html
     assert "严格5m同源多前缀诊断" in html
     assert "M/W/D 语义差异证据" in html
-    assert "暖机非单调差异（34）" in html
+    assert "暖机非单调差异（17）" in html
     assert "D.ma5" in html
-    assert "W.state" in html
     assert "MA5 11" in html
     assert "交易门不变" in html
     assert "INSUFFICIENT_PREFIXES" in html
@@ -2018,7 +2133,6 @@ def test_current_page_and_api_share_the_lifecycle_result(
     assert "仅解释方向供给，不参与风险门、卖点映射或订单" in html
     assert "稳定诊断买点身份" in html
     assert "MAPPING_ELIGIBLE=false" in html
-    assert "NOT_RECORDED_LEGACY" in html
     assert (
         "PHYSICAL_QMT_CACHE_LEFT_BOUNDARY_AFTER_REQUESTED_WARMUP" in html
     )
@@ -2219,8 +2333,7 @@ def test_warmup_mapping_supply_delta_is_visible_and_causally_chart_locked(
     risk = snapshot["current_research"]["higher_timeframe_effectiveness_audit"]
     convergence = risk["subjects"]["market"]["warmup_convergence"]
     assert convergence["mapping_supply_diagnostic_status_counts"] == {
-        "NON_MONOTONIC": 1,
-        "NOT_RECORDED_LEGACY": 16,
+        "NON_MONOTONIC": 17,
     }
     for code in (
         "SUPPLY_CLASSIFICATION_CHANGED",
@@ -2233,8 +2346,7 @@ def test_warmup_mapping_supply_delta_is_visible_and_causally_chart_locked(
     ):
         assert convergence["mapping_supply_transition_code_counts"][code] == 1
     assert convergence["structure_lineage_diagnostic_status_counts"] == {
-        "NON_MONOTONIC": 1,
-        "NOT_RECORDED_LEGACY": 16,
+        "NON_MONOTONIC": 17,
     }
     for code in (
         "LOWER_LINE_COMMON_SUFFIX_IDENTICAL",
@@ -2437,7 +2549,7 @@ def test_page_fails_closed_when_new_artifact_is_missing(
     directory = audit_root / "audit/chanlun_trading_system_backtest"
     path = directory / "certified_report.json"
     path.unlink()
-    (directory / "legacy_report.json").write_text(
+    (directory / "unsupported_report.json").write_text(
         json.dumps(_report(), ensure_ascii=False, sort_keys=True),
         encoding="utf-8",
     )

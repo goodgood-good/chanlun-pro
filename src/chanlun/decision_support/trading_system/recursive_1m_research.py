@@ -3,18 +3,18 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from decimal import Decimal
 
-from chanlun.decision_support.trading_system.v3_parameters import (
+from chanlun.decision_support.trading_system.parameters import (
     LIVE_STATUS,
-    STRATEGY_V3_ID,
+    STRATEGY_ID,
     SelectionPath,
-    StrategyV3Parameters,
+    StrategyParameters,
     snapshot_sha256,
 )
 
 
-RECURSIVE_1M_RESEARCH_ID = "CL-HIER-1M5M30M-RESEARCH-v1"
+RECURSIVE_1M_RESEARCH_ID = "CL-HIER-1M5M30M-RESEARCH"
 RECURSIVE_1M_DIAGNOSTIC_EXECUTION_ID = (
-    "CL-HIER-1M5M30M-DIAGNOSTIC-EXECUTION-v1"
+    "CL-HIER-1M5M30M-DIAGNOSTIC-EXECUTION"
 )
 RESEARCH_STATUS = "RESEARCH_ONLY"
 
@@ -23,21 +23,21 @@ RESEARCH_STATUS = "RESEARCH_ONLY"
 class Recursive1mResearchParameters:
     """Frozen user-authorized research override for the recursive hierarchy.
 
-    The immutable V3 specification remains ``30m/5m/1m``.  This snapshot is a
+    The immutable strict strategy specification remains ``30m/5m/1m``.  This snapshot is a
     separate research contract for the user's later instruction
-    ``L0=1m, L1=5m, L2=30m`` and can never be represented as the frozen V3
+    ``L0=1m, L1=5m, L2=30m`` and can never be represented as the frozen strict strategy
     parameter set or enabled for live trading.
     """
 
     selection_path: SelectionPath
     research_id: str = RECURSIVE_1M_RESEARCH_ID
-    source_strategy_spec_id: str = STRATEGY_V3_ID
+    source_strategy_spec_id: str = STRATEGY_ID
     source_frequency: str = "1m"
     l0_frequency: str = "1m"
     l1_frequency: str = "5m-derived"
     l2_frequency: str = "30m-derived"
     strategic_entry_rule: str = "L0_FIRST_COMPLETED_CENTER_THIRD_BUY"
-    strategic_exit_rule: str = "L0_THIRD_SELL_ONLY_OTHER_V3_EXITS_UNRESOLVED"
+    strategic_exit_rule: str = "L0_THIRD_SELL_ONLY_OTHER_EXITS_UNRESOLVED"
     higher_context_rule: str = "L1_AND_L2_VISIBLE_BEFORE_L0_DECISION"
     expansion_rule: str = "ACTIVE_EXPANSION_RECLASSIFYING_BLOCKS_ENTRY"
     nine_segment_rule: str = "NINE_CENTER_TOUCH_UNITS_DERIVE_HIGHER_CONTEXT"
@@ -60,14 +60,14 @@ class Recursive1mResearchParameters:
             raise ValueError("unsupported recursive 1m selection path")
         expected = {
             "research_id": RECURSIVE_1M_RESEARCH_ID,
-            "source_strategy_spec_id": STRATEGY_V3_ID,
+            "source_strategy_spec_id": STRATEGY_ID,
             "source_frequency": "1m",
             "l0_frequency": "1m",
             "l1_frequency": "5m-derived",
             "l2_frequency": "30m-derived",
             "strategic_entry_rule": "L0_FIRST_COMPLETED_CENTER_THIRD_BUY",
             "strategic_exit_rule": (
-                "L0_THIRD_SELL_ONLY_OTHER_V3_EXITS_UNRESOLVED"
+                "L0_THIRD_SELL_ONLY_OTHER_EXITS_UNRESOLVED"
             ),
             "higher_context_rule": "L1_AND_L2_VISIBLE_BEFORE_L0_DECISION",
             "expansion_rule": "ACTIVE_EXPANSION_RECLASSIFYING_BLOCKS_ENTRY",
@@ -98,20 +98,20 @@ class Recursive1mResearchParameters:
             raise ValueError("recursive 1m slot fractions must sum to one")
 
     @property
-    def inherited_v3_parameters(self) -> StrategyV3Parameters:
-        return StrategyV3Parameters(self.selection_path)
+    def inherited_parameters(self) -> StrategyParameters:
+        return StrategyParameters(self.selection_path)
 
     @property
     def strategic_slot_fraction(self) -> Decimal:
         return (
-            self.inherited_v3_parameters.slot_fraction
+            self.inherited_parameters.slot_fraction
             * self.strategic_fraction_of_slot
         )
 
     def document(self) -> dict[str, object]:
-        inherited = self.inherited_v3_parameters
+        inherited = self.inherited_parameters
         return {
-            "schema": "chanlun-recursive-1m-research-parameters/v1",
+            "schema": "chanlun-recursive-1m-research-parameters",
             "research_id": self.research_id,
             "source_strategy_spec_id": self.source_strategy_spec_id,
             "selection_path": self.selection_path,
@@ -139,8 +139,8 @@ class Recursive1mResearchParameters:
                 format(self.tactical_cash_reserve_fraction_of_slot, "f")
             ),
             "strategic_slot_fraction": format(self.strategic_slot_fraction, "f"),
-            "inherited_v3_parameter_set_id": inherited.parameter_set_id,
-            "inherited_v3_parameters": inherited.document(),
+            "inherited_parameter_set_id": inherited.parameter_set_id,
+            "inherited_parameters": inherited.document(),
             "full_system_eligible": self.full_system_eligible,
             "highest_status": self.highest_status,
             "live_status": self.live_status,
@@ -225,7 +225,7 @@ class Recursive1mDiagnosticExecutionParameters:
             "transfer_rate",
         ):
             value[name] = format(getattr(self, name), "f")
-        value["schema"] = "chanlun-recursive-1m-diagnostic-execution/v1"
+        value["schema"] = "chanlun-recursive-1m-diagnostic-execution"
         return value
 
     @property
@@ -253,9 +253,9 @@ def recursive_1m_parameter_manifest() -> dict[str, object]:
     if len({value.parameter_set_id for value in snapshots.values()}) != 2:
         raise RuntimeError("recursive 1m selection paths must remain distinct")
     payload: dict[str, object] = {
-        "schema": "chanlun-recursive-1m-research-manifest/v1",
+        "schema": "chanlun-recursive-1m-research-manifest",
         "research_id": RECURSIVE_1M_RESEARCH_ID,
-        "source_strategy_spec_id": STRATEGY_V3_ID,
+        "source_strategy_spec_id": STRATEGY_ID,
         "highest_status": RESEARCH_STATUS,
         "live_status": LIVE_STATUS,
         "snapshots": {

@@ -90,12 +90,6 @@ def test_history_fetch_and_structure_snapshot_are_cut_off_before_future_bars(
         lambda *_args, **_kwargs: {"a": ["5m"]},
     )
     monkeypatch.setattr(tv_module, "_get_chart_cache_entry", lambda key: observed.setdefault("cache_key", key) and None)
-    monkeypatch.setattr(tv_module, "apply_higher_macd_to_chart_data", lambda *_args: False)
-    monkeypatch.setattr(
-        tv_module,
-        "prewarm_common_intervals",
-        lambda *_args: pytest.fail("historical review must not prewarm live data"),
-    )
     monkeypatch.setattr(
         tv_module,
         "submit_revalidation",
@@ -117,6 +111,8 @@ def test_history_fetch_and_structure_snapshot_are_cut_off_before_future_bars(
                 "v": [100.0, 100.0, 100.0],
             },
             "cd": None,
+            "is_full_snapshot": True,
+            "cache_already_written": False,
         }
 
     monkeypatch.setattr(tv_module, "fetch_klines_and_compute_cl_data", fetch)

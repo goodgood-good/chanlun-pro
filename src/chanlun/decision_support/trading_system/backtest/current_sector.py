@@ -45,24 +45,24 @@ from chanlun.exchange.price_basis import (
 
 
 # The historical current-membership proxy deliberately keeps its biased
-# membership mode below, but its *bar construction* must be the same V5
+# membership mode below, but its *bar construction* must be the same canonical
 # contract consumed by the page/forward higher-timeframe gate.  Keeping a
 # second provider/adjustment/method identity here previously made two
 # numerically identical 5m median-return chains look like different decision
 # facts and prevented the replay from using the live sector M/W/D core.
 CURRENT_GICS3_COMPOSITE_PROVIDER = "qmt-gics3-composite"
 CURRENT_GICS3_COMPOSITE_ADJUSTMENT = (
-    "causal-factor-stable-24-member-median-v5"
+    "causal-factor-stable-24-member-median"
 )
 CURRENT_GICS3_COMPOSITE_MEMBER_LIMIT = 24
 CURRENT_GICS3_COMPOSITE_MEMBER_MASK_CONTRACT = (
-    "BIT_I_IS_SECTOR_COMPOSITE_MEMBERS_I_V1"
+    "BIT_I_IS_SECTOR_COMPOSITE_MEMBERS_I"
 )
 CURRENT_GICS3_COMPOSITE_METHOD = (
-    "DETERMINISTIC_HASH_SAMPLE_CAUSAL_FACTOR_MEDIAN_RETURN_CHAIN_V5"
+    "DETERMINISTIC_HASH_SAMPLE_CAUSAL_FACTOR_MEDIAN_RETURN_CHAIN"
 )
 CURRENT_GICS3_PHYSICAL_5M_COVERAGE_SCHEMA = (
-    "chanlun-qmt-current-sector-physical-5m-coverage/v1"
+    "chanlun-qmt-current-sector-physical-5m-coverage"
 )
 _FIELDS = ("time", "open", "high", "low", "close", "volume")
 _PRICES = ("open", "high", "low", "close")
@@ -84,7 +84,7 @@ def deterministic_current_sector_composite_members(
         normalized,
         key=lambda code: sha256_json(
             {
-                "schema": "chanlun-qmt-gics3-sample/v1",
+                "schema": "chanlun-qmt-gics3-sample",
                 "sector_id": sector_id,
                 "code": code,
             }
@@ -100,7 +100,7 @@ def _member_path_revision(frame: pd.DataFrame) -> str | None:
         return None
     return sha256_json(
         {
-            "schema": "chanlun-qmt-sector-composite-member-path/v1",
+            "schema": "chanlun-qmt-sector-composite-member-path",
             "rows": tuple(
                 {
                     "date": normalize_datetime(
@@ -182,7 +182,7 @@ def _empty(
     )
     membership_revision = sha256_json(
         {
-            "schema": "chanlun-qmt-gics3-members/v2",
+            "schema": "chanlun-qmt-gics3-members",
             "sector_id": sector_id,
             "members": sector_members,
             "composite_members": composite_members,
@@ -414,7 +414,7 @@ def current_composite_from_member_frames(
         )
     membership_revision = sha256_json(
         {
-            "schema": "chanlun-qmt-gics3-members/v2",
+            "schema": "chanlun-qmt-gics3-members",
             "sector_id": sector_id,
             "members": full_members,
             "composite_members": representatives,
@@ -606,7 +606,7 @@ class CurrentQmtGics3CompositeReplaySource:
             )
         inventory_revision = sha256_json(
             {
-                "schema": "chanlun-qmt-current-sector-5m-source-inventory/v1",
+                "schema": "chanlun-qmt-current-sector-5m-source-inventory",
                 "sector_id": sector_id,
                 "representatives": representatives,
                 "sources": tuple(source_rows),
@@ -762,7 +762,7 @@ class CurrentQmtGics3CompositeReplaySource:
         )
         base_revision = sha256_json(
             {
-                "schema": "chanlun-qmt-current-sector-native-daily-base/v1",
+                "schema": "chanlun-qmt-current-sector-native-daily-base",
                 "sector_id": sector_id,
                 "observed_at": observed,
                 "price_basis_revision": result.attrs.get(

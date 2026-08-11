@@ -22,14 +22,14 @@ from chanlun.decision_support.fingerprints import sha256_json
 
 
 LIVE_REVIEW_MATERIALIZATION_RECEIPT_SCHEMA = (
-    "chanlun-live-human-review-materialization-receipt/v2"
+    "chanlun-live-human-review-materialization-receipt"
 )
 LIVE_REVIEW_WEB_BUNDLE_RECEIPT_SCHEMA = (
-    "chanlun-live-human-review-web-bundle-receipt/v1"
+    "chanlun-live-human-review-web-bundle-receipt"
 )
-LIVE_REVIEW_WEB_INDEX_SCHEMA = "chanlun-live-human-review-web-index/v1"
+LIVE_REVIEW_WEB_INDEX_SCHEMA = "chanlun-live-human-review-web-index"
 LIVE_REVIEW_CANDIDATE_DETAIL_SCHEMA = (
-    "chanlun-live-human-review-candidate-detail/v1"
+    "chanlun-live-human-review-candidate-detail"
 )
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 _STABLE_FIELDS = frozenset(
@@ -134,7 +134,7 @@ def live_review_materialization_receipt(
     decision_source_snapshot_id: str,
     archive_root: Path,
 ) -> dict[str, object]:
-    """Build the exact v2 receipt after child-process validation succeeds."""
+    """Build the exact receipt after child-process validation succeeds."""
 
     for label, value in (
         ("source snapshot", source_snapshot_content_sha256),

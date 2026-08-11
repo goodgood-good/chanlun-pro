@@ -34,7 +34,7 @@ def test_concurrent_duplicate_returns_false_not_raise(monkeypatch):
 
 def test_existing_name_returns_false_no_db(monkeypatch):
     z = _mk_zixuan(["已存在组"])
-    # 存在性检查即返 False, 不应触达 db.zx_add_group
+    # 存在性检查即返 False, 不应触达全局分组写入。
     called = {"n": 0}
     monkeypatch.setattr(
         zx_mod.db,

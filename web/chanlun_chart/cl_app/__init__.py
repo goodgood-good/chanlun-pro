@@ -2,7 +2,6 @@ import atexit
 import datetime
 import hashlib
 import hmac
-import json
 import os
 import threading
 import pathlib
@@ -10,7 +9,6 @@ import pytz
 import secrets
 import subprocess
 from collections.abc import Mapping
-from contextlib import closing
 from types import MappingProxyType
 from apscheduler.events import (
     EVENT_ALL,
@@ -32,7 +30,6 @@ from flask import (
     Flask,
     abort,
     g,
-    has_request_context,
     redirect,
     render_template,
     request,
@@ -43,6 +40,8 @@ from flask_login import LoginManager, UserMixin, login_required, login_user, log
 from flask_wtf.csrf import CSRFError, generate_csrf
 from chanlun import config, fun
 from chanlun.security import (
+    get_dingtalk_keyword,
+    get_dingtalk_webhook,
     get_flask_secret_key,
     get_login_password,
     get_web_host,
@@ -50,15 +49,16 @@ from chanlun.security import (
     validate_web_security_config,
     verify_login_password,
 )
-from chanlun.decision_support.trading_system.v3_trading_session import (
+from chanlun.decision_support.trading_system.trading_session import (
     DEFAULT_OFFICIAL_TRADING_CALENDAR_PATH,
     authoritative_trading_session_evidence,
 )
 from chanlun.decision_support.trading_system.decision_source_provenance import (
     calculate_forward_application_source_revision,
-    is_content_addressed_application_source_revision,
+    content_addressed_source_revision_from_build,
 )
 from .services.job_names import job_display_name
+
 __all__ = ["create_app"]
 
 
@@ -68,26 +68,16 @@ _SHARED_RUNTIME_OWNER_LOCK = threading.RLock()
 _SHARED_RUNTIME_OWNER: object | None = None
 
 
-def _human_review_historical_paths() -> tuple[pathlib.Path, pathlib.Path]:
-    """Return the current release sidecar and the explicit legacy fallback."""
-
+def _human_review_historical_report() -> pathlib.Path:
+    """Return the sole current-release historical review sidecar."""
     repository_root = pathlib.Path(__file__).resolve().parents[3]
-    backtests = repository_root / "audit" / "chanlun_trading_system_backtest"
     return (
-        backtests
+        repository_root
+        / "audit"
+        / "chanlun_trading_system_backtest"
         / "recent_year_current_sector_no3p_mwd_strength"
-        / "human_review_screen.json",
-        backtests
-        / "recent_year_current_sector_no3p"
-        / "human_review_screen.json",
+        / "human_review_screen.json"
     )
-
-
-def _default_human_review_historical_report() -> pathlib.Path:
-    """Prefer the page sidecar produced beside the current formal release."""
-
-    current, legacy = _human_review_historical_paths()
-    return current if current.is_file() else legacy
 
 
 def _trim_task_history(task_map, limit: int = _TASK_HISTORY_LIMIT) -> None:
@@ -123,9 +113,9 @@ def create_app(test_config=None, start_scheduler=False):
     # desktop entrypoint opts in explicitly; tests and generic WSGI imports do not.
     app = Flask(__name__, instance_relative_config=True)
     https_enabled = is_https_enabled()
-    secure_cookie_setting = os.environ.get(
-        "CHANLUN_SESSION_COOKIE_SECURE", ""
-    ).strip().lower()
+    secure_cookie_setting = (
+        os.environ.get("CHANLUN_SESSION_COOKIE_SECURE", "").strip().lower()
+    )
     secure_cookie_enabled = https_enabled or secure_cookie_setting in {
         "1",
         "true",
@@ -153,32 +143,34 @@ def create_app(test_config=None, start_scheduler=False):
         MAX_FORM_PARTS=500,
         WTF_CSRF_TIME_LIMIT=12 * 60 * 60,
         READINESS_MARKETS=os.environ.get("CHANLUN_READINESS_MARKETS", "a"),
-        # The historical alert surfaces use MACD divergence and legacy
-        # bi/segment MMD rules.  They are not the strict first/second/third
-        # class point authority used by the chart, screening, holdings monitor
-        # and replay.  Keep them available only as an explicit compatibility
-        # opt-in so one running app cannot publish two conflicting meanings of
-        # "buy/sell signal".
-        LEGACY_ALERT_TASKS_ENABLED=(
-            os.environ.get("CHANLUN_LEGACY_ALERT_TASKS_ENABLED", "0")
-            .strip()
-            .lower()
-            in {"1", "true", "yes", "on"}
-        ),
-        LEGACY_SIGNAL_MONITOR_ENABLED=(
-            os.environ.get("CHANLUN_LEGACY_SIGNAL_MONITOR_ENABLED", "0")
-            .strip()
-            .lower()
-            in {"1", "true", "yes", "on"}
-        ),
         TRADING_SCREENING_BACKGROUND_ENABLED=True,
         TRADING_SCREENING_PRIORITY_MONITOR_ENABLED=True,
-        TRADING_SCREENING_PRIORITY_MONITOR_MAX_SYMBOLS=int(
+        # Full-market coverage is intentionally opt-in.  The always-on
+        # priority/holding monitors must never turn a web restart into an
+        # implicit multi-hour rebuild.
+        TRADING_SCREENING_FULL_COVERAGE_ENABLED=(
             os.environ.get(
-                "CHANLUN_TRADING_SCREENING_PRIORITY_MONITOR_MAX_SYMBOLS",
-                "16",
+                "CHANLUN_TRADING_SCREENING_FULL_COVERAGE_ENABLED",
+                "0",
+            )
+            .strip()
+            .lower()
+            in {"1", "true", "yes", "on"}
+        ),
+        TRADING_SCREENING_CANDIDATE_5M_MAX_SYMBOLS=int(
+            os.environ.get(
+                "CHANLUN_TRADING_SCREENING_CANDIDATE_5M_MAX_SYMBOLS",
+                "256",
             )
         ),
+        TRADING_SCREENING_CANDIDATE_30M_MAX_SYMBOLS=int(
+            os.environ.get(
+                "CHANLUN_TRADING_SCREENING_CANDIDATE_30M_MAX_SYMBOLS",
+                "96",
+            )
+        ),
+        TRADING_SCREENING_CANDIDATE_5M_TARGET_SECONDS=300,
+        TRADING_SCREENING_CANDIDATE_30M_TARGET_SECONDS=1800,
         TRADING_SCREENING_PRIORITY_MONITOR_INTERVAL_SECONDS=60,
         # A system-local, market-independent watchlist group declares manual
         # holdings.  It is only a monitoring fact: no broker/account access or
@@ -204,7 +196,9 @@ def create_app(test_config=None, start_scheduler=False):
             os.environ.get("CHANLUN_ALERT_CHART_PUBLIC_BASE_URL")
             or getattr(config, "ALERT_CHART_PUBLIC_BASE_URL", "")
             or ""
-        ).strip().rstrip("/"),
+        )
+        .strip()
+        .rstrip("/"),
         ALERT_CHART_TTL_SECONDS=int(
             os.environ.get("CHANLUN_ALERT_CHART_TTL_SECONDS", str(30 * 24 * 60 * 60))
         ),
@@ -213,10 +207,10 @@ def create_app(test_config=None, start_scheduler=False):
                 "CHANLUN_ALERT_CHART_CAPTURE_BASE_URL",
                 "http://127.0.0.1:9900",
             )
-        ).strip().rstrip("/"),
-        ALERT_CHART_ROOT=(
-            config.get_data_path() / "monitor" / "dingtalk_chart_images"
-        ),
+        )
+        .strip()
+        .rstrip("/"),
+        ALERT_CHART_ROOT=(config.get_data_path() / "monitor" / "dingtalk_chart_images"),
         TRADING_SCREENING_TOTAL_SYMBOLS_PER_REFRESH=int(
             os.environ.get(
                 "CHANLUN_TRADING_SCREENING_TOTAL_SYMBOLS_PER_REFRESH",
@@ -258,52 +252,39 @@ def create_app(test_config=None, start_scheduler=False):
         ),
         FORWARD_SCHEDULER_MONITOR_ENABLED=True,
         FORWARD_SCHEDULER_MONITOR_TTL_SECONDS=30.0,
-        # app.py is the long-running owner of forward business scheduling.
-        # Windows Task Scheduler is retained only for QMT/app bootstrap and
-        # recovery.  Set WINDOWS only during a bounded migration rollback.
-        FORWARD_SCHEDULER_MODE=os.environ.get(
-            "CHANLUN_FORWARD_SCHEDULER_MODE", "APP"
-        ).strip().upper(),
+        # app.py is the sole owner of forward business scheduling.
+        FORWARD_SCHEDULER_MODE=os.environ.get("CHANLUN_FORWARD_SCHEDULER_MODE", "APP")
+        .strip()
+        .upper(),
         FORWARD_QMT_LOCAL_DATA_DIR=os.environ.get(
             "CHANLUN_QMT_LOCAL_DATA_DIR", ""
         ).strip(),
-        # app.py is also the sole owner of the interactive QMT runtime.  The
-        # legacy Windows QMT task is supported only as a bounded migration
-        # rollback and must be removed after the app-owned health gate passes.
-        QMT_RUNTIME_MODE=os.environ.get(
-            "CHANLUN_QMT_RUNTIME_MODE", "APP"
-        ).strip().upper(),
-        QMT_RUNTIME_HELPER=os.environ.get(
-            "CHANLUN_QMT_RUNTIME_HELPER", ""
-        ).strip(),
+        # app.py is also the sole owner of the interactive QMT runtime.
+        QMT_RUNTIME_MODE=os.environ.get("CHANLUN_QMT_RUNTIME_MODE", "APP")
+        .strip()
+        .upper(),
+        QMT_RUNTIME_HELPER=os.environ.get("CHANLUN_QMT_RUNTIME_HELPER", "").strip(),
         QMT_RUNTIME_STARTUP_TIMEOUT_SECONDS=120,
         QMT_RUNTIME_WARMUP_SECONDS=90,
         QMT_RUNTIME_RECOVERY_COOLDOWN_SECONDS=300,
         QMT_RUNTIME_OBSERVATION_MAX_AGE_SECONDS=180,
-        TRADING_SESSION_OFFICIAL_CALENDAR_PATH=(
-            DEFAULT_OFFICIAL_TRADING_CALENDAR_PATH
-        ),
-        HUMAN_REVIEW_HISTORICAL_REPORT=(
-            _default_human_review_historical_report()
-        ),
-        HUMAN_REVIEW_CURRENT_HISTORICAL_REPORT=(
-            _human_review_historical_paths()[0]
-        ),
+        TRADING_SESSION_OFFICIAL_CALENDAR_PATH=(DEFAULT_OFFICIAL_TRADING_CALENDAR_PATH),
+        HUMAN_REVIEW_HISTORICAL_REPORT=(_human_review_historical_report()),
         HUMAN_REVIEW_FORWARD_ROOT=(
             pathlib.Path(__file__).resolve().parents[3]
             / ".cache"
-            / "chanlun_v3_human_review_forward"
+            / "chanlun_human_review_forward"
         ),
         HUMAN_REVIEW_FEEDBACK_LEDGER=(
             pathlib.Path(__file__).resolve().parents[3]
             / ".cache"
-            / "chanlun_v3_human_review"
+            / "chanlun_human_review"
             / "feedback_ledger.json"
         ),
         HUMAN_REVIEW_PAPER_LEDGER=(
             pathlib.Path(__file__).resolve().parents[3]
             / ".cache"
-            / "chanlun_v3_human_review"
+            / "chanlun_human_review"
             / "paper_ledger.json"
         ),
         HUMAN_REVIEW_PARAMETER_SNAPSHOT=(
@@ -316,33 +297,32 @@ def create_app(test_config=None, start_scheduler=False):
         HUMAN_REVIEW_LIVE_ARCHIVE_ROOT=(
             pathlib.Path(__file__).resolve().parents[3]
             / ".cache"
-            / "chanlun_v3_human_review"
+            / "chanlun_human_review"
             / "live_screens"
         ),
         HUMAN_REVIEW_FORWARD_MARKOUT=(
             pathlib.Path(__file__).resolve().parents[3]
             / ".cache"
-            / "chanlun_v3_human_review_forward"
+            / "chanlun_human_review_forward"
             / "forward_review_markout.json"
         ),
         HUMAN_REVIEW_FORWARD_WARMUP_LINEAGE=(
             pathlib.Path(__file__).resolve().parents[3]
             / ".cache"
-            / "chanlun_v3_human_review_forward"
+            / "chanlun_human_review_forward"
             / "forward_warmup_structure_lineage_rollup.json"
         ),
         QMT_SECTOR_CAPTURE_LEDGER=(
             pathlib.Path(__file__).resolve().parents[3]
             / ".cache"
-            / "chanlun_v3_qmt_sector_ledger"
+            / "chanlun_qmt_sector_ledger"
             / "qmt_gics3_catalog_ledger.json"
         ),
     )
     if test_config:
         app.config.update(test_config)
     if app.testing and (
-        not test_config
-        or "TRADING_SCREENING_BACKGROUND_ENABLED" not in test_config
+        not test_config or "TRADING_SCREENING_BACKGROUND_ENABLED" not in test_config
     ):
         # Runtime tests opt in explicitly. This keeps the default app factory
         # side-effect free and prevents real market scans in unrelated tests.
@@ -353,25 +333,19 @@ def create_app(test_config=None, start_scheduler=False):
     ):
         app.config["TRADING_SCREENING_NATIVE_PROCESS_ISOLATION"] = False
     if app.testing and (
-        not test_config
-        or "FORWARD_SCHEDULER_MONITOR_ENABLED" not in test_config
+        not test_config or "FORWARD_SCHEDULER_MONITOR_ENABLED" not in test_config
     ):
         # Reading Windows Task Scheduler is an explicit integration-test opt-in.
         # Generic app-factory tests remain host-independent and side-effect free.
         app.config["FORWARD_SCHEDULER_MONITOR_ENABLED"] = False
-    if app.testing and (
-        not test_config or "FORWARD_SCHEDULER_MODE" not in test_config
-    ):
+    if app.testing and (not test_config or "FORWARD_SCHEDULER_MODE" not in test_config):
         # Unit tests must opt into the process-owning scheduler explicitly.
         app.config["FORWARD_SCHEDULER_MODE"] = "DISABLED"
-    if app.testing and (
-        not test_config or "QMT_RUNTIME_MODE" not in test_config
-    ):
+    if app.testing and (not test_config or "QMT_RUNTIME_MODE" not in test_config):
         # Host-process control is always an explicit integration-test opt-in.
         app.config["QMT_RUNTIME_MODE"] = "DISABLED"
     if app.testing and (
-        not test_config
-        or "TRADING_SESSION_OFFICIAL_CALENDAR_PATH" not in test_config
+        not test_config or "TRADING_SESSION_OFFICIAL_CALENDAR_PATH" not in test_config
     ):
         # Unit tests opt into the immutable annual artifact explicitly.  This
         # preserves injected calendar-provider tests and prevents a real
@@ -383,9 +357,7 @@ def create_app(test_config=None, start_scheduler=False):
     if app.config.get("VALIDATE_WEB_SECURITY", True):
         validate_web_security_config(app.config["WEB_HOST"], get_login_password())
     scheduler_enabled = bool(app.config.get("SCHEDULER_ENABLED", False))
-    app.logger.addFilter(
-        lambda record: "/static/" not in record.getMessage().lower()
-    )
+    app.logger.addFilter(lambda record: "/static/" not in record.getMessage().lower())
 
     # 任务对象
     from .services.scheduler_executor import RestartableDaemonPoolExecutor
@@ -408,21 +380,15 @@ def create_app(test_config=None, start_scheduler=False):
     app.extensions["research_required_job_executors"] = MappingProxyType({})
 
     def research_scheduler_attestation():
-        required_job_executors = app.extensions[
-            "research_required_job_executors"
-        ]
+        required_job_executors = app.extensions["research_required_job_executors"]
         if type(required_job_executors) is not MappingProxyType:
-            raise RuntimeError(
-                "research required-job mapping must be immutable"
-            )
+            raise RuntimeError("research required-job mapping must be immutable")
         return build_scheduler_attestation(
             scheduler,
             required_job_executors,
         )
 
-    app.extensions[
-        "research_scheduler_attestation"
-    ] = research_scheduler_attestation
+    app.extensions["research_scheduler_attestation"] = research_scheduler_attestation
 
     def run_tasks_listener(event):
         state_map = {
@@ -461,16 +427,13 @@ def create_app(test_config=None, start_scheduler=False):
                 task["state"] = state_map[event.code]
                 _trim_task_history(scheduler.my_task_list)
         return
+
     scheduler.add_listener(run_tasks_listener, EVENT_ALL)
 
     # 统一从 services.constants 引用常量，降低耦合
     from .services.constants import (
-        frequency_maps,
-        resolution_maps,
         market_frequencys,
         market_default_codes,
-        market_session,
-        market_timezone,
         market_types,
     )
     from .services import constants as constants_service
@@ -492,22 +455,15 @@ def create_app(test_config=None, start_scheduler=False):
     readiness_registry = readiness_service.ReadinessRegistry()
     metadata_warmup_thread = None
 
-    from .alert_tasks import AlertTasks
     from .xuangu_tasks import XuanguTasks
-    _alert_tasks = AlertTasks(
-        scheduler,
-        enabled=bool(app.config.get("LEGACY_ALERT_TASKS_ENABLED", False)),
-    )
-    _xuangu_tasks = XuanguTasks(scheduler)
-    _recursive_monitors = []
-    holding_group_monitor = None
 
-    # _other_tasks = OtherTasks(scheduler)
+    _xuangu_tasks = XuanguTasks(scheduler)
+    holding_group_monitor = None
 
     __log = fun.get_logger()
 
     # 强制 Jinja2 每次请求都从磁盘 re-render template,避免 web 长跑后
-    # ``index.html`` 内 ``{{ static_version }}`` 等动态变量被内存缓存。
+    # ``index.html`` 内 ``{{ static_asset_token }}`` 等动态变量被内存缓存。
     # 性能代价微小(主页面 template,只在 / 请求时 render)。
     app.config["TEMPLATES_AUTO_RELOAD"] = True
     app.jinja_env.auto_reload = True
@@ -518,13 +474,14 @@ def create_app(test_config=None, start_scheduler=False):
 
     # CSRF token 与当前浏览器会话使用同一 12 小时边界；记住登录 Cookie 独立续期。
     from .csrf import csrf
+
     csrf.init_app(app)
 
     # 静态资源 cache-bust:Tornado static handler 给所有 /static/* 加
     # ``Cache-Control: max-age=31536000, immutable``,导致 charts.js / bundle.js
     # 等核心前端文件被浏览器**永久缓存**——后端修了字段但前端永远拉不到新版本。
-    # 修法:在 Jinja2 模板里给 ``<script src>`` 加 ``?v={{ static_version }}``,
-    # static_version = 关键文件 mtime 的 short hash,文件变即 bust。
+    # 修法:在 Jinja2 模板里给 ``<script src>`` 加 ``?asset={{ static_asset_token }}``,
+    # static_asset_token = 关键文件 mtime 的 short hash,文件变即 bust。
     @app.before_request
     def _set_csp_nonce():
         g.csp_nonce = secrets.token_urlsafe(24)
@@ -542,11 +499,12 @@ def create_app(test_config=None, start_scheduler=False):
         return None
 
     @app.context_processor
-    def inject_static_version():
+    def inject_static_asset_token():
         import hashlib
+
         h = hashlib.md5()
         # 聚合前端 js/css、datafeed bundle 与固定 Charting Library 入口的 mtime+size：
-        # 改动都会让 static_version 变化，模板里带 ?v={{ static_version }} 的资源
+        # 改动都会让 static_asset_token 变化，模板里带 ?asset={{ static_asset_token }} 的资源
         # 随之 cache-bust，用户改前端后普通刷新即可生效，无需手动硬刷新。
         targets = [
             os.path.join(app.static_folder, "favicon.ico"),
@@ -557,9 +515,7 @@ def create_app(test_config=None, start_scheduler=False):
                 "charting_library",
                 "charting_library.standalone.js",
             ),
-            os.path.join(
-                app.static_folder, "charting_library", "sameorigin.html"
-            ),
+            os.path.join(app.static_folder, "charting_library", "sameorigin.html"),
         ]
         for sub in ("js", "css"):
             sub_dir = os.path.join(app.static_folder, sub)
@@ -575,7 +531,7 @@ def create_app(test_config=None, start_scheduler=False):
             except OSError:
                 pass
         return {
-            "static_version": h.hexdigest()[:10],
+            "static_asset_token": h.hexdigest()[:10],
             "csp_nonce": getattr(g, "csp_nonce", ""),
         }
 
@@ -584,8 +540,7 @@ def create_app(test_config=None, start_scheduler=False):
         static_filename = str((request.view_args or {}).get("filename", ""))
         is_charting_vendor_shell = (
             request.endpoint == "static"
-            and static_filename.replace("\\", "/")
-            == "charting_library/sameorigin.html"
+            and static_filename.replace("\\", "/") == "charting_library/sameorigin.html"
         )
         if not is_charting_vendor_shell:
             nonce = getattr(g, "csp_nonce", "")
@@ -630,12 +585,9 @@ def create_app(test_config=None, start_scheduler=False):
             "/ticks",
             "/tv/",
             "/symbols/",
-            "/ai/",
             "/decision-support/",
             "/get_zixuan_",
             "/get_stock_zixuan/",
-            "/alert_list/",
-            "/alert_records/",
             "/xuangu/task_list/",
             "/a/bkgn_",
             "/get_cl_config/",
@@ -693,23 +645,16 @@ def create_app(test_config=None, start_scheduler=False):
 
     @app.route("/login", methods=["GET", "POST"])
     def login_opt():
-        configured_password = get_login_password() or ""
+        configured_password = get_login_password()
         remember_duration = app.config["REMEMBER_COOKIE_DURATION"]
-
-        if configured_password == "":
-            session.clear()
-            login_user(
-                LoginUser(),
-                remember=True,
-                duration=remember_duration,
-            )
-            return redirect("/")
 
         emsg = ""
         if request.method == "POST":
             client_key = request.remote_addr or "unknown"
             if login_rate_limiter.is_blocked(client_key):
-                return render_template("login.html", emsg="尝试次数过多，请稍后再试"), 429
+                return render_template(
+                    "login.html", emsg="尝试次数过多，请稍后再试"
+                ), 429
 
             password = request.form.get("password") or ""
             if verify_login_password(password, configured_password):
@@ -845,9 +790,7 @@ def create_app(test_config=None, start_scheduler=False):
         if scheduler_required:
             runtime_probe = app.extensions.get("runtime_status")
             runtime_component = (
-                runtime_probe()
-                if callable(runtime_probe)
-                else runtime_status()
+                runtime_probe() if callable(runtime_probe) else runtime_status()
             )
             runtime_component["required"] = True
         else:
@@ -861,8 +804,7 @@ def create_app(test_config=None, start_scheduler=False):
         qmt_runtime_required = bool(
             scheduler_required
             and market == "a"
-            and str(app.config.get("QMT_RUNTIME_MODE", "APP")).upper()
-            == "APP"
+            and str(app.config.get("QMT_RUNTIME_MODE", "APP")).upper() == "APP"
         )
         if qmt_runtime_required:
             qmt_runtime_probe = app.extensions.get("app_qmt_runtime")
@@ -876,18 +818,14 @@ def create_app(test_config=None, start_scheduler=False):
             except Exception as exc:
                 app.logger.exception("readiness QMT runtime snapshot failed")
                 qmt_runtime_component = {
-                    "schema": "chanlun-qmt-runtime-readiness/v1",
-                    "contract_id": (
-                        "chanlun-qmt-runtime/app-runtime-contract/v1"
-                    ),
+                    "schema": "chanlun-qmt-runtime-readiness",
+                    "contract_id": ("chanlun-qmt-runtime/app-runtime-contract"),
                     "execution_owner": "APP_RUNTIME",
                     "required": True,
                     "ready": False,
                     "status": "not_ready",
                     "reason_code": "QMT_RUNTIME_OBSERVATION_UNAVAILABLE",
-                    "reason_codes": [
-                        "QMT_RUNTIME_OBSERVATION_UNAVAILABLE"
-                    ],
+                    "reason_codes": ["QMT_RUNTIME_OBSERVATION_UNAVAILABLE"],
                     "error": f"{type(exc).__name__}: {str(exc)[:160]}",
                     "real_account_accessed": False,
                     "real_order_transport_enabled": False,
@@ -896,8 +834,8 @@ def create_app(test_config=None, start_scheduler=False):
                 }
         else:
             qmt_runtime_component = {
-                "schema": "chanlun-qmt-runtime-readiness/v1",
-                "contract_id": "chanlun-qmt-runtime/app-runtime-contract/v1",
+                "schema": "chanlun-qmt-runtime-readiness",
+                "contract_id": "chanlun-qmt-runtime/app-runtime-contract",
                 "execution_owner": None,
                 "required": False,
                 "ready": True,
@@ -917,25 +855,17 @@ def create_app(test_config=None, start_scheduler=False):
             and app.config.get("TRADING_SCREENING_BACKGROUND_ENABLED", True)
         )
         if screening_required:
-            screening_service = app.extensions.get(
-                "decision_support_trading_screening"
-            )
+            screening_service = app.extensions.get("decision_support_trading_screening")
             try:
                 if screening_service is None or not hasattr(
                     screening_service, "health_snapshot"
                 ):
                     raise RuntimeError("trading screening service unavailable")
-                screening_component = dict(
-                    screening_service.health_snapshot()
-                )
+                screening_component = dict(screening_service.health_snapshot())
                 screening_component["required"] = True
-                screening_component["ready"] = bool(
-                    screening_component.get("ready")
-                )
+                screening_component["ready"] = bool(screening_component.get("ready"))
                 screening_component["status"] = (
-                    "ready"
-                    if screening_component["ready"]
-                    else "not_ready"
+                    "ready" if screening_component["ready"] else "not_ready"
                 )
             except Exception as exc:
                 app.logger.exception("readiness trading screening snapshot failed")
@@ -966,14 +896,12 @@ def create_app(test_config=None, start_scheduler=False):
                     getattr(monitor_service, "health_snapshot", None)
                 ):
                     raise RuntimeError("holding group monitor unavailable")
-                holding_monitor_component = dict(
-                    monitor_service.health_snapshot()
-                )
+                holding_monitor_component = dict(monitor_service.health_snapshot())
                 holding_monitor_component["required"] = True
             except Exception as exc:
                 app.logger.exception("holding monitor readiness snapshot failed")
                 holding_monitor_component = {
-                    "schema": "chanlun-holding-group-monitor/v1",
+                    "schema": "chanlun-holding-group-monitor",
                     "required": True,
                     "ready": False,
                     "status": "not_ready",
@@ -986,7 +914,7 @@ def create_app(test_config=None, start_scheduler=False):
                 }
         else:
             holding_monitor_component = {
-                "schema": "chanlun-holding-group-monitor/v1",
+                "schema": "chanlun-holding-group-monitor",
                 "required": False,
                 "ready": True,
                 "status": "disabled",
@@ -1000,44 +928,28 @@ def create_app(test_config=None, start_scheduler=False):
         forward_scheduler_required = bool(
             screening_required
             and app.config.get("FORWARD_SCHEDULER_MONITOR_ENABLED", True)
+            and str(app.config.get("FORWARD_SCHEDULER_MODE", "APP")).upper() == "APP"
         )
-        forward_scheduler_contract_id = (
-            "chanlun-v3-forward-scheduler/app-runtime-contract/v1"
-            if str(app.config.get("FORWARD_SCHEDULER_MODE", "APP")).upper()
-            == "APP"
-            else "chanlun-v3-forward-scheduler/windows-task-contract/v1"
-        )
+        forward_scheduler_contract_id = "chanlun-forward-scheduler/app-runtime-contract"
         if forward_scheduler_required:
-            forward_scheduler_probe = app.extensions.get(
-                "forward_scheduler_probe"
-            )
+            forward_scheduler_probe = app.extensions.get("forward_scheduler_probe")
             try:
                 if forward_scheduler_probe is None or not hasattr(
                     forward_scheduler_probe, "snapshot"
                 ):
                     raise RuntimeError("forward scheduler probe unavailable")
-                forward_scheduler_component = dict(
-                    forward_scheduler_probe.snapshot()
-                )
+                forward_scheduler_component = dict(forward_scheduler_probe.snapshot())
                 forward_scheduler_component["required"] = True
             except Exception as exc:
                 app.logger.exception("forward scheduler observation failed")
                 forward_scheduler_component = {
-                    "schema": (
-                        "chanlun-v3-forward-scheduler-readiness/v1"
-                    ),
-                    "contract_id": (
-                        forward_scheduler_contract_id
-                    ),
+                    "schema": ("chanlun-forward-scheduler-readiness"),
+                    "contract_id": (forward_scheduler_contract_id),
                     "required": True,
                     "ready": False,
                     "status": "unresolved",
-                    "reason_code": (
-                        "SCHEDULED_TASK_OBSERVATION_UNAVAILABLE"
-                    ),
-                    "reason_codes": [
-                        "SCHEDULED_TASK_OBSERVATION_UNAVAILABLE"
-                    ],
+                    "reason_code": ("SCHEDULED_TASK_OBSERVATION_UNAVAILABLE"),
+                    "reason_codes": ["SCHEDULED_TASK_OBSERVATION_UNAVAILABLE"],
                     "tasks": [],
                     "task_count": 0,
                     "error": f"{type(exc).__name__}: {str(exc)[:160]}",
@@ -1048,10 +960,8 @@ def create_app(test_config=None, start_scheduler=False):
                 }
         else:
             forward_scheduler_component = {
-                "schema": "chanlun-v3-forward-scheduler-readiness/v1",
-                "contract_id": (
-                    forward_scheduler_contract_id
-                ),
+                "schema": "chanlun-forward-scheduler-readiness",
+                "contract_id": (forward_scheduler_contract_id),
                 "required": False,
                 "ready": True,
                 "status": "disabled",
@@ -1069,29 +979,25 @@ def create_app(test_config=None, start_scheduler=False):
             screening_review_ready = bool(
                 screening_component.get(
                     "screening_review_ready",
-                    screening_component.get("forward_review_ready", False),
+                    screening_component.get("screening_review_ready", False),
                 )
             )
             screening_review_reason = str(
                 screening_component.get(
                     "screening_review_reason_code",
                     screening_component.get(
-                        "forward_review_reason_code",
+                        "screening_review_reason_code",
                         "SCREENING_REVIEW_READINESS_UNAVAILABLE",
                     ),
                 )
             )
-            human_review_service = app.extensions.get(
-                "decision_support_human_review"
-            )
+            human_review_service = app.extensions.get("decision_support_human_review")
             try:
                 capture_probe = getattr(
                     human_review_service,
                     "forward_archive_capture_readiness",
                 )
-                capture_component = dict(
-                    capture_probe(session=forward_session)
-                )
+                capture_component = dict(capture_probe(session=forward_session))
             except Exception as exc:
                 app.logger.exception("forward archive capture readiness failed")
                 capture_component = {
@@ -1105,9 +1011,7 @@ def create_app(test_config=None, start_scheduler=False):
                     "status": "not_ready",
                     "reason_code": "SECTOR_CAPTURE_READINESS_UNAVAILABLE",
                     "session": (
-                        None
-                        if forward_session is None
-                        else forward_session.isoformat()
+                        None if forward_session is None else forward_session.isoformat()
                     ),
                     "receipt_proven": False,
                     "error": f"{type(exc).__name__}: {str(exc)[:160]}",
@@ -1120,9 +1024,7 @@ def create_app(test_config=None, start_scheduler=False):
                 capture_component.get("reason_code")
                 or "SECTOR_CAPTURE_READINESS_UNAVAILABLE"
             )
-            forward_archive_ready = (
-                screening_review_ready and sector_capture_ready
-            )
+            forward_archive_ready = screening_review_ready and sector_capture_ready
             forward_archive_reason = (
                 screening_review_reason
                 if not screening_review_ready
@@ -1172,9 +1074,7 @@ def create_app(test_config=None, start_scheduler=False):
                     "status": "not_ready",
                     "reason_code": "FORWARD_DELIVERY_READINESS_UNAVAILABLE",
                     "session": (
-                        None
-                        if forward_session is None
-                        else forward_session.isoformat()
+                        None if forward_session is None else forward_session.isoformat()
                     ),
                     "capture_ready": False,
                     "evaluation_ready": False,
@@ -1191,9 +1091,7 @@ def create_app(test_config=None, start_scheduler=False):
                 "status": "disabled",
                 "reason_code": "SCREENING_DISABLED",
                 "session": (
-                    None
-                    if forward_session is None
-                    else forward_session.isoformat()
+                    None if forward_session is None else forward_session.isoformat()
                 ),
                 "screening_review_ready": False,
                 "screening_review_reason_code": "SCREENING_DISABLED",
@@ -1210,9 +1108,7 @@ def create_app(test_config=None, start_scheduler=False):
                 "status": "disabled",
                 "reason_code": "SCREENING_DISABLED",
                 "session": (
-                    None
-                    if forward_session is None
-                    else forward_session.isoformat()
+                    None if forward_session is None else forward_session.isoformat()
                 ),
                 "capture_ready": False,
                 "evaluation_ready": False,
@@ -1376,9 +1272,8 @@ def create_app(test_config=None, start_scheduler=False):
                     )
                     abort(404)
             requested_code = str(request.args.get("code") or "")
-            if (
-                initial_market != "a"
-                or requested_code != review_chart_lock.get("symbol")
+            if initial_market != "a" or requested_code != review_chart_lock.get(
+                "symbol"
             ):
                 abort(404)
             if review_chart_lock.get("lock_kind") == "RISK_POINT_AUDIT":
@@ -1394,12 +1289,8 @@ def create_app(test_config=None, start_scheduler=False):
 
         selected_default_codes = market_default_codes.cached_snapshot()
         selected_frequencies = market_frequencys.cached_snapshot()
-        selected_default_codes.update(
-            market_default_codes.snapshot((initial_market,))
-        )
-        selected_frequencies.update(
-            market_frequencys.snapshot((initial_market,))
-        )
+        selected_default_codes.update(market_default_codes.snapshot((initial_market,)))
+        selected_frequencies.update(market_frequencys.snapshot((initial_market,)))
 
         return render_template(
             "index.html",
@@ -1412,10 +1303,9 @@ def create_app(test_config=None, start_scheduler=False):
 
     from .blueprints.tv import tv_bp
     from .blueprints.zixuan import zixuan_bp
-    from .blueprints.alert import alert_bp
+    from .blueprints.jobs import jobs_bp
     from .blueprints.xuangu import xuangu_bp
     from .blueprints.setting import setting_bp
-    from .blueprints.ai import ai_bp
     from .blueprints.bkgn import bkgn_bp
     from .blueprints.other import other_bp
     from .blueprints.options import options_bp
@@ -1425,10 +1315,9 @@ def create_app(test_config=None, start_scheduler=False):
     for blueprint in (
         tv_bp,
         zixuan_bp,
-        alert_bp,
+        jobs_bp,
         xuangu_bp,
         setting_bp,
-        ai_bp,
         bkgn_bp,
         other_bp,
         options_bp,
@@ -1587,36 +1476,8 @@ def create_app(test_config=None, start_scheduler=False):
                 _ensure_start_is_current()
 
             if enable_scheduler:
-                if app.config.get("LEGACY_ALERT_TASKS_ENABLED", False):
-                    _alert_tasks.run()
-
-                if app.config.get("LEGACY_SIGNAL_MONITOR_ENABLED", False):
-                    from chanlun.signal_monitor.scheduler import (
-                        register_signal_jobs,
-                    )
-
-                    register_signal_jobs(scheduler)
-
                 if holding_group_monitor is not None:
                     holding_group_monitor.register_job(scheduler)
-
-                recursive_root = getattr(config, "RECURSIVE_MONITOR_CONFIG", {})
-                if (
-                    type(recursive_root) is dict
-                    and recursive_root.get("enabled") is True
-                ):
-                    from chanlun.recursive_bt.monitor.app_monitor import (
-                        register_recursive_monitor_jobs,
-                    )
-
-                    monitors = register_recursive_monitor_jobs(scheduler)
-                else:
-                    monitors = {}
-                _recursive_monitors.clear()
-                if isinstance(monitors, dict):
-                    _recursive_monitors.extend(monitors.values())
-                elif monitors:
-                    _recursive_monitors.extend(monitors)
                 if app_qmt_runtime is not None:
                     app_qmt_runtime.register_jobs()
                 if app_forward_scheduler is not None:
@@ -1804,9 +1665,7 @@ def create_app(test_config=None, start_scheduler=False):
         shutdown_runtime_services()
 
     def _trading_screening_clock():
-        configured = app.config.get("TRADING_SCREENING_CLOCK") or app.config.get(
-            "EARLY_SCREENING_CLOCK"
-        )
+        configured = app.config.get("TRADING_SCREENING_CLOCK")
         if callable(configured):
             return configured()
         return datetime.datetime.now(pytz.timezone("Asia/Shanghai"))
@@ -1842,11 +1701,6 @@ def create_app(test_config=None, start_scheduler=False):
         from chanlun.exchange import Market, get_exchange
 
         return get_exchange(Market.A)
-
-    def _trading_screening_universe(_exchange):
-        # QMT GICS3 current components are authoritative for sector-first
-        # selection; never fall back to ExchangeQMT.all_stocks/get_full_tick.
-        return ()
 
     def _trading_screening_watchlist():
         from chanlun.persistence.db import db
@@ -1911,7 +1765,7 @@ def create_app(test_config=None, start_scheduler=False):
         )
         covered_count = a_share_priority_count + auxiliary_count
         return {
-            "schema": "chanlun-local-manual-holdings/v1",
+            "schema": "chanlun-local-manual-holdings",
             "source": "LOCAL_GLOBAL_WATCHLIST_GROUP",
             "group_name": holding_group,
             "group_scope": "GLOBAL_ACROSS_MARKETS",
@@ -1935,9 +1789,9 @@ def create_app(test_config=None, start_scheduler=False):
     if not callable(
         app.config.get("TRADING_SCREENING_MANUAL_HOLDINGS_SNAPSHOT_PROVIDER")
     ):
-        app.config[
-            "TRADING_SCREENING_MANUAL_HOLDINGS_SNAPSHOT_PROVIDER"
-        ] = _trading_screening_manual_holdings_snapshot
+        app.config["TRADING_SCREENING_MANUAL_HOLDINGS_SNAPSHOT_PROVIDER"] = (
+            _trading_screening_manual_holdings_snapshot
+        )
 
     def _trading_screening_holdings():
         configured = app.config.get("TRADING_SCREENING_HOLDINGS_PROVIDER")
@@ -1945,9 +1799,7 @@ def create_app(test_config=None, start_scheduler=False):
             return configured()
         manual_snapshot = _trading_screening_manual_holdings_snapshot()
         manually_declared = tuple(
-            row["code"]
-            for row in manual_snapshot["positions"]
-            if row["market"] == "a"
+            row["code"] for row in manual_snapshot["positions"] if row["market"] == "a"
         )
         service = decision_support_human_review
         virtual = () if service is None else service.virtual_holding_codes()
@@ -1985,25 +1837,14 @@ def create_app(test_config=None, start_scheduler=False):
             expanded_watchlist_markets=frozenset({"us"}),
         )
 
-    recursive_monitor_config = getattr(config, "RECURSIVE_MONITOR_CONFIG", {})
-    recursive_common = (
-        recursive_monitor_config.get("common", {})
-        if isinstance(recursive_monitor_config, Mapping)
-        else {}
-    )
-    if not isinstance(recursive_common, Mapping):
-        recursive_common = {}
     trading_screening_dingtalk_webhook = str(
         app.config.get("TRADING_SCREENING_DINGTALK_WEBHOOK")
-        or app.config.get("EARLY_SCREENING_DINGTALK_WEBHOOK")
-        or os.environ.get("CHANLUN_DINGTALK_WEBHOOK")
-        or recursive_common.get("dingtalk_webhook")
+        or ("" if app.config.get("TESTING") else get_dingtalk_webhook())
         or ""
     ).strip()
     trading_screening_dingtalk_keyword = str(
         app.config.get("TRADING_SCREENING_DINGTALK_KEYWORD")
-        or app.config.get("EARLY_SCREENING_DINGTALK_KEYWORD")
-        or os.environ.get("CHANLUN_DINGTALK_KEYWORD")
+        or ("" if app.config.get("TESTING") else get_dingtalk_keyword())
         or "买卖通知"
     ).strip()
     dry_run_value = app.config.get(
@@ -2032,7 +1873,7 @@ def create_app(test_config=None, start_scheduler=False):
             app.secret_key
             if isinstance(app.secret_key, bytes)
             else str(app.secret_key).encode("utf-8"),
-            b"chanlun-alert-chart-public-route/v1",
+            b"chanlun-alert-chart-public-route",
             hashlib.sha256,
         ).digest()
         alert_chart_store = SignedAlertChartStore(
@@ -2093,9 +1934,7 @@ def create_app(test_config=None, start_scheduler=False):
             # and the auxiliary cross-market monitor.  It persists only
             # message hashes, never webhook credentials or message bodies.
             dedupe_state_path=(
-                config.get_data_path()
-                / "monitor"
-                / "dingtalk_outbound_dedupe.json"
+                config.get_data_path() / "monitor" / "dingtalk_outbound_dedupe.json"
             ),
             rich_content_provider=alert_chart_image_service,
         )
@@ -2138,7 +1977,7 @@ def create_app(test_config=None, start_scheduler=False):
     trading_gateway = app.config.get("TRADING_SCREENING_GATEWAY")
     if trading_gateway is None:
         if app.config.get("TRADING_SCREENING_NATIVE_PROCESS_ISOLATION", True):
-            # Manual/unversioned launches stay cache-disabled.  Official
+            # Manual or unofficial launches stay cache-disabled. Official
             # launches bind the persistent sector snapshot to its complete but
             # UI-independent native producer: trading/structure/QMT changes
             # invalidate it, while a template or JavaScript-only deploy does
@@ -2156,19 +1995,13 @@ def create_app(test_config=None, start_scheduler=False):
                 ),
                 process_config=NativeWorkerProcessConfig(
                     startup_timeout_seconds=float(
-                        app.config[
-                            "TRADING_SCREENING_NATIVE_STARTUP_TIMEOUT_SECONDS"
-                        ]
+                        app.config["TRADING_SCREENING_NATIVE_STARTUP_TIMEOUT_SECONDS"]
                     ),
                     native_idle_timeout_seconds=float(
-                        app.config[
-                            "TRADING_SCREENING_NATIVE_IDLE_TIMEOUT_SECONDS"
-                        ]
+                        app.config["TRADING_SCREENING_NATIVE_IDLE_TIMEOUT_SECONDS"]
                     ),
                     restart_backoff_seconds=float(
-                        app.config[
-                            "TRADING_SCREENING_NATIVE_RESTART_BACKOFF_SECONDS"
-                        ]
+                        app.config["TRADING_SCREENING_NATIVE_RESTART_BACKOFF_SECONDS"]
                     ),
                 ),
                 sector_cache_path=(
@@ -2205,8 +2038,6 @@ def create_app(test_config=None, start_scheduler=False):
             )
             trading_gateway = NativeTradingDataGateway(
                 exchange_provider=_trading_screening_exchange,
-                sector_exchange_provider=_trading_screening_exchange,
-                universe_provider=_trading_screening_universe,
                 sector_provider=build_qmt_gics3_sector_catalog,
                 sector_frame_provider=sector_frames.frame,
                 sector_strength_provider=sector_strength.strengths,
@@ -2215,9 +2046,7 @@ def create_app(test_config=None, start_scheduler=False):
                 watchlist_provider=_trading_screening_watchlist,
                 holdings_provider=_trading_screening_holdings,
             )
-    official_calendar_path = app.config.get(
-        "TRADING_SESSION_OFFICIAL_CALENDAR_PATH"
-    )
+    official_calendar_path = app.config.get("TRADING_SESSION_OFFICIAL_CALENDAR_PATH")
     qmt_calendar_provider = getattr(
         trading_gateway,
         "trading_session_evidence",
@@ -2228,6 +2057,7 @@ def create_app(test_config=None, start_scheduler=False):
     if official_calendar_path is None:
         trading_session_provider = qmt_calendar_provider
     else:
+
         def trading_session_provider(*, session, observed_at):
             return authoritative_trading_session_evidence(
                 session=session,
@@ -2239,10 +2069,7 @@ def create_app(test_config=None, start_scheduler=False):
     if (
         app.config.get("TRADING_SCREENING_NATIVE_PROCESS_ISOLATION", True)
         and not app.config.get("TESTING", False)
-        and (
-            ".run." in build_revision
-            or is_content_addressed_application_source_revision(build_revision)
-        )
+        and content_addressed_source_revision_from_build(build_revision) is not None
     ):
         # Prime recent immutable official/QMT calendar verdicts before the background
         # universe scan can occupy the serialized native worker.  This keeps
@@ -2264,9 +2091,8 @@ def create_app(test_config=None, start_scheduler=False):
                     datetime.timezone(datetime.timedelta(hours=8))
                 )
                 for days_ago in range(1, 11):
-                    calendar_session = (
-                        calendar_observed_at.date()
-                        - datetime.timedelta(days=days_ago)
+                    calendar_session = calendar_observed_at.date() - datetime.timedelta(
+                        days=days_ago
                     )
                     evidence = calendar_provider(
                         session=calendar_session,
@@ -2323,10 +2149,22 @@ def create_app(test_config=None, start_scheduler=False):
                     True,
                 )
             ),
-            max_priority_monitor_symbols_per_refresh=int(
+            full_coverage_refresh_enabled=bool(
                 app.config.get(
-                    "TRADING_SCREENING_PRIORITY_MONITOR_MAX_SYMBOLS",
-                    16,
+                    "TRADING_SCREENING_FULL_COVERAGE_ENABLED",
+                    False,
+                )
+            ),
+            max_five_minute_candidate_symbols_per_refresh=int(
+                app.config.get(
+                    "TRADING_SCREENING_CANDIDATE_5M_MAX_SYMBOLS",
+                    256,
+                )
+            ),
+            max_thirty_minute_candidate_symbols_per_refresh=int(
+                app.config.get(
+                    "TRADING_SCREENING_CANDIDATE_30M_MAX_SYMBOLS",
+                    96,
                 )
             ),
             max_symbols_per_refresh=int(
@@ -2347,6 +2185,18 @@ def create_app(test_config=None, start_scheduler=False):
                     60,
                 )
             ),
+            five_minute_candidate_target_seconds=int(
+                app.config.get(
+                    "TRADING_SCREENING_CANDIDATE_5M_TARGET_SECONDS",
+                    300,
+                )
+            ),
+            thirty_minute_candidate_target_seconds=int(
+                app.config.get(
+                    "TRADING_SCREENING_CANDIDATE_30M_TARGET_SECONDS",
+                    1800,
+                )
+            ),
             max_structure_age_seconds=int(
                 app.config.get("TRADING_SCREENING_MAX_STRUCTURE_AGE_SECONDS", 864000)
             ),
@@ -2359,9 +2209,7 @@ def create_app(test_config=None, start_scheduler=False):
         backtest_verdict=backtest_verdict,
     )
     trading_screening_snapshot_path = (
-        config.get_data_path()
-        / "decision_support"
-        / "trading_screening_snapshot.json"
+        config.get_data_path() / "decision_support" / "trading_screening_snapshot.json"
     )
     repository_root = pathlib.Path(__file__).resolve().parents[3]
     from .services.app_qmt_runtime import AppQmtRuntimeController
@@ -2370,14 +2218,12 @@ def create_app(test_config=None, start_scheduler=False):
         discover_qmt_local_data_dir,
         evaluation_readiness_from_health,
     )
-    from .services.forward_scheduler import ForwardSchedulerProbe
 
-    qmt_runtime_mode = str(
-        app.config.get("QMT_RUNTIME_MODE", "APP")
-    ).strip().upper()
-    if qmt_runtime_mode not in {"APP", "WINDOWS", "DISABLED"}:
-        raise ValueError("QMT_RUNTIME_MODE must be APP, WINDOWS or DISABLED")
+    qmt_runtime_mode = str(app.config.get("QMT_RUNTIME_MODE", "APP")).strip().upper()
+    if qmt_runtime_mode not in {"APP", "DISABLED"}:
+        raise ValueError("QMT_RUNTIME_MODE must be APP or DISABLED")
     if qmt_runtime_mode == "APP":
+
         def _prepare_qmt_runtime_change(action):
             native_gateway_close = getattr(trading_gateway, "close", None)
             if not callable(native_gateway_close):
@@ -2399,26 +2245,20 @@ def create_app(test_config=None, start_scheduler=False):
                     action,
                 )
 
-        configured_helper = str(
-            app.config.get("QMT_RUNTIME_HELPER") or ""
-        ).strip()
+        configured_helper = str(app.config.get("QMT_RUNTIME_HELPER") or "").strip()
         app_qmt_runtime = AppQmtRuntimeController(
             scheduler=scheduler,
             repository_root=repository_root,
             clock=_trading_screening_clock,
             helper_script=(
-                pathlib.Path(configured_helper)
-                if configured_helper
-                else None
+                pathlib.Path(configured_helper) if configured_helper else None
             ),
             before_change=_prepare_qmt_runtime_change,
             after_change=_resume_after_qmt_runtime_change,
             startup_timeout_seconds=int(
                 app.config.get("QMT_RUNTIME_STARTUP_TIMEOUT_SECONDS", 120)
             ),
-            warmup_seconds=int(
-                app.config.get("QMT_RUNTIME_WARMUP_SECONDS", 90)
-            ),
+            warmup_seconds=int(app.config.get("QMT_RUNTIME_WARMUP_SECONDS", 90)),
             recovery_cooldown_seconds=int(
                 app.config.get("QMT_RUNTIME_RECOVERY_COOLDOWN_SECONDS", 300)
             ),
@@ -2427,31 +2267,21 @@ def create_app(test_config=None, start_scheduler=False):
             ),
         )
 
-    forward_windows_scheduler_probe = ForwardSchedulerProbe(
-        audit_script=repository_root
-        / "ops"
-        / "audit_v3_forward_paper_tasks.ps1",
-        ttl_seconds=float(
-            app.config.get("FORWARD_SCHEDULER_MONITOR_TTL_SECONDS", 30.0)
-        ),
+    forward_scheduler_mode = (
+        str(app.config.get("FORWARD_SCHEDULER_MODE", "APP")).strip().upper()
     )
-    forward_scheduler_mode = str(
-        app.config.get("FORWARD_SCHEDULER_MODE", "APP")
-    ).strip().upper()
-    if forward_scheduler_mode not in {"APP", "WINDOWS", "DISABLED"}:
-        raise ValueError(
-            "FORWARD_SCHEDULER_MODE must be APP, WINDOWS or DISABLED"
-        )
+    if forward_scheduler_mode not in {"APP", "DISABLED"}:
+        raise ValueError("FORWARD_SCHEDULER_MODE must be APP or DISABLED")
+    forward_scheduler_probe = None
     if forward_scheduler_mode == "APP":
+
         def _app_forward_capture_readiness(*, session, observed_at):
             payload, _status = health_snapshot(
                 "readyz",
                 market="a",
                 forward_session=session,
             )
-            delivery = payload.get("components", {}).get(
-                "forward_delivery", {}
-            )
+            delivery = payload.get("components", {}).get("forward_delivery", {})
             return {
                 # A sector receipt is merely an input.  Adoption/success must
                 # prove that the forward ledger itself contains CAPTURE.
@@ -2493,46 +2323,25 @@ def create_app(test_config=None, start_scheduler=False):
         app_forward_scheduler = AppForwardSchedulerController(
             scheduler=scheduler,
             repository_root=repository_root,
-            forward_root=pathlib.Path(
-                app.config["HUMAN_REVIEW_FORWARD_ROOT"]
-            ),
+            forward_root=pathlib.Path(app.config["HUMAN_REVIEW_FORWARD_ROOT"]),
             qmt_local_data_dir=forward_qmt_data_dir,
             trading_session_provider=trading_session_provider,
             capture_readiness_provider=_app_forward_capture_readiness,
-            evaluation_readiness_provider=(
-                _app_forward_evaluation_readiness
-            ),
+            evaluation_readiness_provider=(_app_forward_evaluation_readiness),
             clock=_trading_screening_clock,
         )
         forward_scheduler_probe = app_forward_scheduler
-    else:
-        # WINDOWS is a rollback mode.  DISABLED is reserved for isolated tests;
-        # its monitor is disabled by default, so no host process is spawned.
-        forward_scheduler_probe = forward_windows_scheduler_probe
     decision_support_human_review = HumanReviewScreeningService(
         repository_root=repository_root,
-        historical_report=pathlib.Path(
-            app.config["HUMAN_REVIEW_HISTORICAL_REPORT"]
-        ),
-        preferred_historical_report=pathlib.Path(
-            app.config["HUMAN_REVIEW_CURRENT_HISTORICAL_REPORT"]
-        ),
+        historical_report=pathlib.Path(app.config["HUMAN_REVIEW_HISTORICAL_REPORT"]),
         forward_root=pathlib.Path(app.config["HUMAN_REVIEW_FORWARD_ROOT"]),
-        feedback_ledger=pathlib.Path(
-            app.config["HUMAN_REVIEW_FEEDBACK_LEDGER"]
-        ),
+        feedback_ledger=pathlib.Path(app.config["HUMAN_REVIEW_FEEDBACK_LEDGER"]),
         sector_ledger=pathlib.Path(app.config["QMT_SECTOR_CAPTURE_LEDGER"]),
         paper_ledger=pathlib.Path(app.config["HUMAN_REVIEW_PAPER_LEDGER"]),
-        parameter_snapshot=pathlib.Path(
-            app.config["HUMAN_REVIEW_PARAMETER_SNAPSHOT"]
-        ),
+        parameter_snapshot=pathlib.Path(app.config["HUMAN_REVIEW_PARAMETER_SNAPSHOT"]),
         live_screening_snapshot=trading_screening_snapshot_path,
-        live_archive_root=pathlib.Path(
-            app.config["HUMAN_REVIEW_LIVE_ARCHIVE_ROOT"]
-        ),
-        forward_markout_report=pathlib.Path(
-            app.config["HUMAN_REVIEW_FORWARD_MARKOUT"]
-        ),
+        live_archive_root=pathlib.Path(app.config["HUMAN_REVIEW_LIVE_ARCHIVE_ROOT"]),
+        forward_markout_report=pathlib.Path(app.config["HUMAN_REVIEW_FORWARD_MARKOUT"]),
         forward_warmup_lineage_report=pathlib.Path(
             app.config["HUMAN_REVIEW_FORWARD_WARMUP_LINEAGE"]
         ),
@@ -2541,6 +2350,7 @@ def create_app(test_config=None, start_scheduler=False):
         forward_scheduler_provider=(
             forward_scheduler_probe.snapshot
             if app.config.get("FORWARD_SCHEDULER_MONITOR_ENABLED", True)
+            and forward_scheduler_probe is not None
             # Disabling the readiness/UI observation must never turn into a
             # semantic bypass for new virtual intents.  Generic tests keep the
             # host-independent monitor disabled, so inject a deterministic
@@ -2553,9 +2363,7 @@ def create_app(test_config=None, start_scheduler=False):
     app.extensions.update(
         {
             "scheduler": scheduler,
-            "alert_tasks": _alert_tasks,
             "xuangu_tasks": _xuangu_tasks,
-            "recursive_monitors": _recursive_monitors,
             "holding_group_monitor": holding_group_monitor,
             "readiness": readiness_registry,
             "metadata_warmup_thread": metadata_warmup_thread,
@@ -2565,15 +2373,10 @@ def create_app(test_config=None, start_scheduler=False):
             "start_runtime_services": start_runtime_services,
             "shutdown_runtime_services": shutdown_runtime_services,
             "shutdown_scheduler": shutdown_scheduler,
-            "decision_support_trading_screening": (
-                decision_support_trading_screening
-            ),
+            "decision_support_trading_screening": (decision_support_trading_screening),
             "decision_support_trading_screening_gateway": trading_gateway,
             "decision_support_human_review": decision_support_human_review,
             "forward_scheduler_probe": forward_scheduler_probe,
-            "forward_windows_scheduler_probe": (
-                forward_windows_scheduler_probe
-            ),
             "app_forward_scheduler": app_forward_scheduler,
             "app_qmt_runtime": app_qmt_runtime,
         }

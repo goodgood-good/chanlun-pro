@@ -10,12 +10,11 @@ from chanlun.core.strict_structure.base_profile import (
     strict_base_config,
     strict_base_config_revision,
 )
-from chanlun.core.types.config import Config
 
 
-STRICT_STRATEGY_ID = "chanlun_source_faithful_v2"
-SCREENING_STRUCTURE_PROFILE_ID = "chanlun-screening-old-pen-l0-v1"
-V3_RECURSIVE_STRUCTURE_PROFILE_ID = "chanlun-v3-old-pen-recursive-v1"
+STRICT_STRATEGY_ID = "chanlun_source_faithful"
+SCREENING_STRUCTURE_PROFILE_ID = "chanlun-screening-strict-l0"
+RECURSIVE_STRUCTURE_PROFILE_ID = "chanlun-strict-recursive"
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,20 +65,16 @@ def strict_runtime_config_revision(
 def _screening_base_config() -> dict[str, object]:
     """Return the fixed early-screening structure profile.
 
-    The general recursive research profile intentionally remains unchanged.
-    Early screening and its historical physical-timeframe replay have a
-    separate, explicit contract: old strokes feed segments, and every physical
-    K-line frequency consumes only its own segment-sourced level zero.
-    Recursive trend-type levels are not part of this profile.
+    Every runtime shares the strict base algorithm.  This profile changes only
+    the evidence scope: every physical K-line frequency consumes its own
+    segment-sourced level zero and recursive trend-type levels are contextual,
+    not tradable, evidence.
     """
 
     result: dict[str, object] = dict(strict_base_config())
     result.update(
         {
-            "strict_base_profile_id": SCREENING_STRUCTURE_PROFILE_ID,
-            "bi_type": Config.BI_TYPE_OLD.value,
-            "bi_mode": "strict",
-            "bi_rule": "old-stroke-cl-k-distance-v1",
+            "strict_runtime_scope_profile_id": SCREENING_STRUCTURE_PROFILE_ID,
             "screening_structure_scope": "physical-timeframe-level-zero",
             "screening_center_source": "segment",
             "screening_recursive_structure": False,
@@ -89,24 +84,19 @@ def _screening_base_config() -> dict[str, object]:
     return result
 
 
-def _v3_recursive_base_config() -> dict[str, object]:
-    """Return the sole recursive profile admissible to the V3 strategy.
+def _recursive_base_config() -> dict[str, object]:
+    """Return the sole recursive profile admissible to the strict strategy.
 
-    The general strict research profile follows the later new-stroke rule.
-    V3's frozen specification explicitly forbids that definition and requires
-    ORIGINAL_OLD_PEN at every recursive level.  Keep the profiles separate so
-    changing V3 does not silently rewrite unrelated research/chart consumers.
+    strict strategy changes only the visibility scope.  Its stroke, segment, center,
+    divergence and point definitions are inherited unchanged from the same
+    base profile used by physical-timeframe screening.
     """
 
     result: dict[str, object] = dict(strict_base_config())
     result.update(
         {
-            "strict_base_profile_id": V3_RECURSIVE_STRUCTURE_PROFILE_ID,
-            "bi_type": Config.BI_TYPE_OLD.value,
-            "bi_mode": "strict",
-            "bi_rule": "old-stroke-cl-k-distance-v1",
+            "strict_runtime_scope_profile_id": RECURSIVE_STRUCTURE_PROFILE_ID,
             "strategy_id": STRICT_STRATEGY_ID,
-            "pen_definition": "ORIGINAL_OLD_PEN",
             "recursive_structure_scope": "same-source-direct-recursion",
         }
     )
@@ -123,9 +113,9 @@ def screening_base_config_revision() -> str:
     return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
-def v3_recursive_base_config_revision() -> str:
+def recursive_base_config_revision() -> str:
     encoded = json.dumps(
-        _v3_recursive_base_config(),
+        _recursive_base_config(),
         ensure_ascii=True,
         sort_keys=True,
         separators=(",", ":"),
@@ -154,7 +144,7 @@ def screening_runtime_config_revision(
     return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
-def v3_recursive_runtime_config_revision(
+def recursive_runtime_config_revision(
     *,
     structure_price_quantum: Decimal,
     price_basis_revision: str,
@@ -162,7 +152,7 @@ def v3_recursive_runtime_config_revision(
     quantum = _validated_quantum(structure_price_quantum)
     basis = _validated_basis(price_basis_revision)
     payload = {
-        "base_revision": v3_recursive_base_config_revision(),
+        "base_revision": recursive_base_config_revision(),
         "structure_price_quantum": _canonical_decimal(quantum),
         "price_basis_revision": basis,
     }
@@ -205,7 +195,10 @@ def screening_cl_config(
     result = _screening_base_config()
     result["structure_price_quantum"] = _canonical_decimal(quantum)
     result["price_basis_revision"] = basis
-    result["strict_base_profile_revision"] = screening_base_config_revision()
+    result["strict_base_profile_revision"] = strict_base_config_revision()
+    result["strict_runtime_scope_profile_revision"] = (
+        screening_base_config_revision()
+    )
     result["strict_config_revision"] = screening_runtime_config_revision(
         structure_price_quantum=quantum,
         price_basis_revision=basis,
@@ -213,22 +206,23 @@ def screening_cl_config(
     return result
 
 
-def v3_recursive_cl_config(
+def recursive_cl_config(
     *,
     structure_price_quantum: Decimal,
     price_basis_revision: str,
 ) -> dict[str, object]:
-    """Build V3's immutable old-pen direct-recursion configuration."""
+    """Build strict strategy's immutable old-pen direct-recursion configuration."""
 
     quantum = _validated_quantum(structure_price_quantum)
     basis = _validated_basis(price_basis_revision)
-    result = _v3_recursive_base_config()
+    result = _recursive_base_config()
     result["structure_price_quantum"] = _canonical_decimal(quantum)
     result["price_basis_revision"] = basis
-    result["strict_base_profile_revision"] = (
-        v3_recursive_base_config_revision()
+    result["strict_base_profile_revision"] = strict_base_config_revision()
+    result["strict_runtime_scope_profile_revision"] = (
+        recursive_base_config_revision()
     )
-    result["strict_config_revision"] = v3_recursive_runtime_config_revision(
+    result["strict_config_revision"] = recursive_runtime_config_revision(
         structure_price_quantum=quantum,
         price_basis_revision=basis,
     )
@@ -269,7 +263,7 @@ def strict_snapshot_price_metadata(snapshot: object) -> StrictSnapshotPriceMetad
 __all__ = (
     "SCREENING_STRUCTURE_PROFILE_ID",
     "STRICT_STRATEGY_ID",
-    "V3_RECURSIVE_STRUCTURE_PROFILE_ID",
+    "RECURSIVE_STRUCTURE_PROFILE_ID",
     "StrictSnapshotPriceMetadata",
     "screening_base_config_revision",
     "screening_cl_config",
@@ -277,7 +271,7 @@ __all__ = (
     "strict_cl_config",
     "strict_runtime_config_revision",
     "strict_snapshot_price_metadata",
-    "v3_recursive_base_config_revision",
-    "v3_recursive_cl_config",
-    "v3_recursive_runtime_config_revision",
+    "recursive_base_config_revision",
+    "recursive_cl_config",
+    "recursive_runtime_config_revision",
 )

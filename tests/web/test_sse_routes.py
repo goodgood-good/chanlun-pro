@@ -8,7 +8,11 @@ from cl_app.handlers.sse_stream import SseStreamHandler, build_routes
 def test_routes_integrate_into_application(monkeypatch):
     from chanlun import config
     monkeypatch.setattr(config, "ENABLE_SSE_PUSH", True, raising=False)
-    app = create_app()
+    app = create_app(test_config={
+        "TESTING": True,
+        "VALIDATE_WEB_SECURITY": False,
+        "SCHEDULER_ENABLED": False,
+    })
     routes = [
         (r"/static/(.*)", tornado.web.StaticFileHandler, {"path": "."}),
         *build_routes(app, pool=None),
@@ -24,5 +28,9 @@ def test_routes_integrate_into_application(monkeypatch):
 def test_routes_empty_when_flag_off(monkeypatch):
     from chanlun import config
     monkeypatch.setattr(config, "ENABLE_SSE_PUSH", False, raising=False)
-    app = create_app()
+    app = create_app(test_config={
+        "TESTING": True,
+        "VALIDATE_WEB_SECURITY": False,
+        "SCHEDULER_ENABLED": False,
+    })
     assert build_routes(app, pool=None) == []

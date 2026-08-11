@@ -189,7 +189,7 @@ function Get-QmtSnapshot([string]$Executable, [string]$Directory) {
         'QMT_MAIN_PROCESS_MISSING'
     }
     return [ordered]@{
-        schema = 'chanlun-qmt-app-runtime-observation/v1'
+        schema = 'chanlun-qmt-app-runtime-observation'
         observed_at = (Get-Date).ToString(
             'yyyy-MM-ddTHH:mm:ss.ffffffK',
             [Globalization.CultureInfo]::InvariantCulture
@@ -339,7 +339,7 @@ try {
         Get-QmtSnapshot -Executable $resolvedExe -Directory $qmtDir
     } else {
         [ordered]@{
-            schema = 'chanlun-qmt-app-runtime-observation/v1'
+            schema = 'chanlun-qmt-app-runtime-observation'
             observed_at = (Get-Date).ToString('yyyy-MM-ddTHH:mm:ss.ffffffK')
             action = $Action.ToUpperInvariant()
             ready = $false

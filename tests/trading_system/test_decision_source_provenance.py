@@ -68,10 +68,10 @@ def test_replay_snapshot_is_dependency_scoped_not_forward_adapter_scoped() -> No
     paths = {row["path"] for row in replay["files"]}
 
     assert replay["schema"] == REPLAY_DECISION_SOURCE_SNAPSHOT_SCHEMA
-    assert "tools/backtest_v3_sector_first_full_market.py" in paths
+    assert "tools/backtest_sector_first_full_market.py" in paths
     assert "src/chanlun/core/cl.py" in paths
     assert (
-        "src/chanlun/decision_support/trading_system/v3_human_review_screening.py"
+        "src/chanlun/decision_support/trading_system/human_review_screening.py"
         in paths
     )
     assert (
@@ -79,7 +79,7 @@ def test_replay_snapshot_is_dependency_scoped_not_forward_adapter_scoped() -> No
         not in paths
     )
     assert (
-        "src/chanlun/decision_support/trading_system/v3_forward_paper.py"
+        "src/chanlun/decision_support/trading_system/forward_paper.py"
         not in paths
     )
     assert (
@@ -87,7 +87,7 @@ def test_replay_snapshot_is_dependency_scoped_not_forward_adapter_scoped() -> No
         "forward_warmup_structure_lineage.py"
         not in paths
     )
-    assert "tools/run_v3_forward_paper.py" not in paths
+    assert "tools/run_forward_paper.py" not in paths
     assert (
         "web/chanlun_chart/cl_app/services/human_review_screening.py" not in paths
     )
@@ -100,7 +100,7 @@ def test_full_integration_snapshot_still_binds_forward_adapters() -> None:
         row["path"] for row in current_decision_source_snapshot()["files"]
     }
 
-    assert "tools/run_v3_forward_paper.py" in paths
+    assert "tools/run_forward_paper.py" in paths
     assert (
         "src/chanlun/decision_support/trading_system/human_paper_ledger.py"
         in paths

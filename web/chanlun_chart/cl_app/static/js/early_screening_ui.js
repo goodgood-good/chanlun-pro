@@ -5,12 +5,12 @@
   if (typeof module === "object" && module.exports) module.exports = api;
   if (root) root.TradingScreeningUi = api;
 })(typeof globalThis === "object" ? globalThis : this, function createTradingScreeningUi() {
-  const SCHEMA_VERSION = "chanlun-trading-screening/v3";
+  const SCHEMA = "chanlun-trading-screening";
   const SECTOR_SAME_BASE_SOURCE_MODE = "PAGE_PARITY_SAME_5M_BASE";
   const SECTOR_NATIVE_DAILY_RESEARCH_SOURCE_MODE =
     "NATIVE_DAILY_MWD_PLUS_5M_30M_UNRECONCILED_RESEARCH";
   const SECTOR_SAME_BASE_COVERAGE_CONTRACT_ID =
-    "chanlun-qmt-sector-same-5m-source-coverage/v3";
+    "chanlun-qmt-sector-same-5m-source-coverage";
   const POINT_TYPES = ["1buy", "2buy", "3buy", "1sell", "2sell", "3sell"];
   const REVIEW_STAGE_ORDER = {
     executable: 0,
@@ -25,7 +25,6 @@
   };
   const FREQUENCIES = new Set(["d", "30m", "5m", "1m"]);
   const LAYOUTS = new Set(["focus", "dual", "triple"]);
-  const LEGACY_LAYOUTS = { single: "focus", split: "dual", quad: "triple" };
   const POINT_LABELS = {
     "1buy": "一买",
     "2buy": "二买",
@@ -53,24 +52,7 @@
 
   function lifecycleStageForSignal(signal) {
     const safeSignal = isRecord(signal) ? signal : {};
-    const stage = text(safeSignal.lifecycle_stage, "");
-    const setup = isRecord(safeSignal.setup_5m) ? safeSignal.setup_5m : {};
-    const pointType = text(setup.point_type || safeSignal.point_type, "");
-    const evidence = Array.isArray(setup.evidence_codes)
-      ? setup.evidence_codes.map((value) => text(value, ""))
-      : [];
-    // Snapshots produced before the dedicated `formed` lifecycle used
-    // `approaching` for both a genuinely pending point and a completed
-    // leave/first-return geometry.  Normalize only the latter so persisted
-    // snapshots immediately display the same semantics as fresh evaluations.
-    if (
-      stage === "approaching"
-      && setup.status === "provisional"
-      && ["3buy", "3sell"].includes(pointType)
-      && evidence.includes("provisional_center_completion")
-      && evidence.includes("core_boundary_held")
-    ) return "formed";
-    return stage;
+    return text(safeSignal.lifecycle_stage, "");
   }
   const DIRECTION_LABELS = { up: "向上", down: "向下", neutral: "震荡" };
   const DISPOSITION_LABELS = { supportive: "支撑", neutral: "中性", hostile: "风险" };
@@ -164,11 +146,6 @@
     "unfinished_core_mmd",
     "unfinished_trend_divergence",
   ]);
-  const SESSION_ISSUE_REASON_CODES = new Set([
-    "QMT_ONE_MINUTE_EXPECTED_SESSION_MISSING",
-    "QMT_ONE_MINUTE_SESSION_GRID_INVALID",
-  ]);
-
   function isRecord(value) {
     return value !== null && typeof value === "object" && !Array.isArray(value);
   }
@@ -243,14 +220,14 @@
       monitorExclusion
       && monitorExclusion.reason_code === "QMT_NATIVE_INSTRUMENT_TYPE_UNRESOLVED"
     ) {
-      return `${code} 来自自选、虚拟持仓或旧信号监控，但QMT本轮未能解析其原生品种类型；系统已失败关闭，不会把未知品种加入交易结构线索队列。`;
+      return `${code} 来自自选、虚拟持仓或持续信号监控，但QMT本轮未能解析其原生品种类型；系统已失败关闭，不会把未知品种加入交易结构线索队列。`;
     }
     if (
       monitorExclusion
       && monitorExclusion.reason_code === "QMT_NATIVE_STOCK_OR_ETF_REQUIRED"
     ) {
       const instrumentType = text(monitorExclusion.qmt_instrument_type, "非股票/ETF");
-      return `${code} 来自自选、虚拟持仓或旧信号监控，但QMT原生品种类型为 ${instrumentType}，不是可交易A股股票或场内ETF；它不会进入交易结构线索队列。`;
+      return `${code} 来自自选、虚拟持仓或持续信号监控，但QMT原生品种类型为 ${instrumentType}，不是可交易A股股票或场内ETF；它不会进入交易结构线索队列。`;
     }
     const includes = (field) => (
       Array.isArray(manifest[field]) && manifest[field].includes(code)
@@ -343,7 +320,7 @@
     const diagnostics = isRecord(safeSnapshot.sector_member_history_diagnostics)
       ? safeSnapshot.sector_member_history_diagnostics
       : {};
-    if (diagnostics.schema !== "chanlun-sector-member-history-diagnostics/v1") {
+    if (diagnostics.schema !== "chanlun-sector-member-history-diagnostics") {
       return "尚无认证成员状态";
     }
     const counts = isRecord(diagnostics.unique_symbol_status_counts)
@@ -536,10 +513,6 @@
       0,
       Number(health.daily_preselection_buy_candidate_count) || 0,
     );
-    const replay = Math.max(
-      0,
-      Number(health.sector_evidence_replay_symbol_count) || 0,
-    );
     const parts = [
       `内部状态 ${status}`,
       `原因 ${reason}`,
@@ -551,7 +524,6 @@
     if (health.daily_preselection_market_data_as_of) {
       parts.push(`数据截止 ${timeText(health.daily_preselection_market_data_as_of)}`);
     }
-    if (replay) parts.push(`待重放板块证据 ${replay} 只`);
     return parts.join(" · ");
   }
 
@@ -702,7 +674,7 @@
       sources.includes("HOLDING_MONITOR")
       || sources.includes("VIRTUAL_HOLDING_MONITOR")
     ) labels.push("持仓监控");
-    if (sources.includes("PREVIOUS_SIGNAL_MONITOR")) labels.push("旧信号跟踪");
+    if (sources.includes("PREVIOUS_SIGNAL_MONITOR")) labels.push("持续信号监控");
     if (sources.includes("INCREMENTAL_SCAN_SCOPE")) labels.push("增量监控");
     return labels.length ? labels.join(" + ") : "来源待确认";
   }
@@ -872,21 +844,13 @@
     const bridgeId = typeof safeRisk.sector_research_bridge_parameter_set_id === "string"
       ? safeRisk.sector_research_bridge_parameter_set_id
       : "";
-    const extensionFieldsPresent = [
-      "sector_higher_timeframe_source_mode",
-      "sector_strict_same_5m_warmup_evidence",
-      "sector_strict_same_5m_source_coverage_evidence",
-      "sector_research_bridge_parameter_set_id",
-    ].some((field) => Object.prototype.hasOwnProperty.call(safeRisk, field));
     if (!mode) {
-      return extensionFieldsPresent
-        ? {
-          cardLabel: "来源证据不完整",
-          risk: [],
-          blocking: ["板块高级别来源字段不完整，不能据此解除风险门"],
-          raw: [],
-        }
-        : { cardLabel: "", risk: [], blocking: [], raw: [] };
+      return {
+        cardLabel: "来源证据不完整",
+        risk: [],
+        blocking: ["板块高级别来源字段不完整，不能据此解除风险门"],
+        raw: [],
+      };
     }
 
     const strictLine = strictWarmup
@@ -1088,11 +1052,15 @@
         : {};
       const supplyText = supply
         ? `映射供给 ${MAPPING_SUPPLY_LABELS[supply.classification] || text(supply.classification, "未分类")} · 低级别点 ${numberText(supply.point_evidence_count)}（一卖 ${numberText(pointCounts["1sell"])} / 二卖 ${numberText(pointCounts["2sell"])} / 三卖 ${numberText(pointCounts["3sell"])} / 三买 ${numberText(pointCounts["3buy"])}）· 分型内一二卖 ${numberText(supply.in_top_interval_sell12_count)} / 已完成中枢 ${numberText(supply.completed_in_top_interval_sell12_count)}`
-        : "映射供给：旧证据未保存明细";
+        : row.state === "NONE"
+          ? "映射供给：当前周期无活动顶分型，不适用"
+          : "映射供给：当前契约字段缺失，失败关闭";
       return `${subject}${text(row.period, "?")}：${text(row.state, "UNRESOLVED")} · 完成K线 ${numberText(row.completed_bar_count)} · ${interval} · ${evidenceEnd} · ${mapping} · ${supplyText}${suffix.length ? ` · ${suffix.join("；")}` : ""}`;
     });
     const sessionEvidenceLines = (subject, evidence) => {
-      if (!isRecord(evidence)) return [];
+      if (!isRecord(evidence)) {
+        return [`${subject}1分钟会话证据：当前契约字段缺失 · 失败关闭`];
+      }
       if (evidence.status === "UNAVAILABLE") {
         return [`${subject}1分钟会话证据：不可用 · 继续失败关闭`];
       }
@@ -1109,11 +1077,6 @@
         return `${subject}1分钟会话异常 ${text(issue.session, "未知")}：${reasonLabel(issue.code)} · 失败关闭`;
       });
     };
-    const legacySessionEvidenceLines = (subject, reasons, evidence) => (
-      evidence === null && reasons.some((code) => SESSION_ISSUE_REASON_CODES.has(code))
-        ? [`${subject}1分钟会话证据：旧信号缺少精确日期 · 不可用于最终复核 · 失败关闭`]
-        : []
-    );
     const mwdWarmupLines = (subject, evidence) => {
       if (!isRecord(evidence)) return [];
       const verdict = evidence.converged === true ? "一致" : "失败关闭";
@@ -1250,21 +1213,6 @@
         ...sessionEvidenceLines("市场", marketSessionEvidence),
         ...sessionEvidenceLines("板块", sectorSessionEvidence),
         ...sessionEvidenceLines("个股", symbolSessionEvidence),
-        ...legacySessionEvidenceLines(
-          "市场",
-          marketRiskReasons,
-          marketSessionEvidence,
-        ),
-        ...legacySessionEvidenceLines(
-          "板块",
-          sectorRiskReasons,
-          sectorSessionEvidence,
-        ),
-        ...legacySessionEvidenceLines(
-          "个股",
-          symbolRiskReasons,
-          symbolSessionEvidence,
-        ),
         ...mwdWarmupLines("市场", marketMwdWarmup),
         ...mwdWarmupLines("板块", sectorMwdWarmup),
         ...mwdWarmupLines("个股", symbolMwdWarmup),
@@ -1316,7 +1264,7 @@
   }
 
   function normalizeSnapshot(value) {
-    if (!isRecord(value) || value.schema_version !== SCHEMA_VERSION) {
+    if (!isRecord(value) || value.schema !== SCHEMA) {
       throw new Error("snapshot_schema_invalid");
     }
     if (
@@ -1332,7 +1280,22 @@
     }
     const normalizeSignal = (row) => {
       const signal = { ...row };
-      signal.lifecycle_stage = lifecycleStageForSignal(signal);
+      const lifecycleStage = lifecycleStageForSignal(signal);
+      if (!Object.prototype.hasOwnProperty.call(REVIEW_STAGE_ORDER, lifecycleStage)) {
+        throw new Error("snapshot_lifecycle_stage_invalid");
+      }
+      signal.lifecycle_stage = lifecycleStage;
+      const chartUrls = isRecord(signal.chart_urls) ? signal.chart_urls : null;
+      if (
+        chartUrls === null
+        || [...FREQUENCIES].some((frequency) => (
+          typeof chartUrls[frequency] !== "string"
+          || !chartUrls[frequency].trim()
+          || /[?&]frequency=/.test(chartUrls[frequency])
+        ))
+      ) {
+        throw new Error("snapshot_chart_urls_invalid");
+      }
       return signal;
     };
     const signals = value.signals.filter(isRecord).map(normalizeSignal);
@@ -1457,8 +1420,6 @@
   function chartUrlsForSignal(signal) {
     const safeSignal = isRecord(signal) ? signal : {};
     const supplied = isRecord(safeSignal.chart_urls) ? safeSignal.chart_urls : {};
-    const code = encodeURIComponent(text(safeSignal.code, ""));
-    const fallback = (interval) => `/?market=a&code=${code}&layout=single&intervals=${interval}`;
     const appendQueryValue = (url, key, value) => {
       const hashIndex = url.indexOf("#");
       const base = hashIndex >= 0 ? url.slice(0, hashIndex) : url;
@@ -1474,22 +1435,20 @@
       if (/[?&]default_study=MACD_HTF(?:&|#|$)/.test(url)) return url;
       return appendQueryValue(url, "default_study", "MACD_HTF");
     };
-    const normalized = (frequency, interval) => {
-      const value = text(supplied[frequency], "");
-      const url = value && !/[?&]frequency=/.test(value) ? value : fallback(interval);
+    const normalized = (frequency) => {
+      const url = supplied[frequency];
       return withDefaultMacdStudy(withInitialSidebarState(url));
     };
     return {
-      "d": normalized("d", "D"),
-      "30m": normalized("30m", "30"),
-      "5m": normalized("5m", "5"),
-      "1m": normalized("1m", "1"),
+      "d": normalized("d"),
+      "30m": normalized("30m"),
+      "5m": normalized("5m"),
+      "1m": normalized("1m"),
     };
   }
 
   function setChartLayout(rootElement, requested) {
-    const migrated = LEGACY_LAYOUTS[requested] || requested;
-    const layout = LAYOUTS.has(migrated) ? migrated : "focus";
+    const layout = LAYOUTS.has(requested) ? requested : "focus";
     if (rootElement && rootElement.dataset) {
       rootElement.dataset.layout = layout;
       rootElement.dataset.currentLayout = layout;
@@ -1887,7 +1846,7 @@
     LIFECYCLE_LABELS,
     POINT_LABELS,
     POINT_TYPES,
-    SCHEMA_VERSION,
+    SCHEMA,
     chartUrlsForSignal,
     completedWithoutSignalCount,
     dailyPreselectionDiagnosticsText,

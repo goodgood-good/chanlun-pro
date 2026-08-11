@@ -23,10 +23,13 @@ from chanlun.exchange.exchange import Tick  # noqa: E402
 
 @pytest.fixture
 def client():
-    app = create_app()
-    app.config["LOGIN_DISABLED"] = True
-    app.config["TESTING"] = True
-    app.config["WTF_CSRF_ENABLED"] = False  # POST 测试免 CSRF token
+    app = create_app(test_config={
+        "TESTING": True,
+        "LOGIN_DISABLED": True,
+        "VALIDATE_WEB_SECURITY": False,
+        "SCHEDULER_ENABLED": False,
+        "WTF_CSRF_ENABLED": False,
+    })
     return app.test_client()
 
 
@@ -44,7 +47,7 @@ class _FakeEx:
     def ticks(self, codes):
         return {c: self._ticks[c] for c in codes if c in self._ticks}
 
-    def now_trading(self):
+    def now_trading(self, _market=None):
         return True
 
 

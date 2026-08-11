@@ -97,7 +97,7 @@ function makeReconcileManager(ChartManager) {
   const cm = Object.create(ChartManager.prototype);
   const calls = { create: 0, remove: 0, setProperties: [] };
   let nextId = 1;
-  cm.obj_charts = { S: { bi_zss: [] } };
+  cm.obj_charts = { S: { test_shapes: [] } };
   cm._reconcileGuard = {};
   cm._reconcileOwnedIds = new Set();
   cm._reconcileRetry = { count: 0, timer: null };
@@ -135,12 +135,12 @@ function makeDataReadyManager(ChartManager) {
   let resolution = '5';
   const calls = { draw: 0, debounced: 0, widen: 0 };
   cm.instanceId = 'chart-manager-1';
-  cm._dataContextVersion = 0;
-  cm._tvDataReadyVersion = -1;
+  cm._dataContextGeneration = 0;
+  cm._tvDataReadyGeneration = -1;
   cm._tvDataReadyIdentity = null;
-  cm._pendingChanlunDrawVersion = null;
+  cm._pendingChanlunDrawGeneration = null;
   cm._pendingChanlunDrawIdentity = null;
-  cm._dataReadyProbeVersion = null;
+  cm._dataReadyProbeGeneration = null;
   cm._dataReadyProbeIdentity = null;
   cm._initialLoadDone = false;
   cm.chart = {
@@ -176,178 +176,6 @@ function barsReadyEvent() {
     },
   };
 }
-
-test('drawChartElements 独立绘制笔中枢和四个真实周期中枢且不读取递归级别', () => {
-  const { ChartManager } = loadChartManager();
-  const cm = Object.create(ChartManager.prototype);
-  const calls = [];
-  const center = (id, index) => ({ ...zone(index), id });
-  const penCenter = center('pen-center', 0);
-  const centers = {
-    '1m': [center('center-1m', 1)],
-    '5m': [{
-      ...center('center-5m', 2),
-      linestyle: '1',
-      done: false,
-      state: 'forming',
-      render_kind: 'center_preview',
-      provisional: true,
-      contains_unfinished_segment: true,
-    }],
-    '30m': [center('center-30m', 3)],
-    d: [center('center-d', 4)],
-  };
-  cm.obj_charts = {};
-  cm.chart = {};
-  cm.cl_show_config = {
-    fx: false,
-    bi: false,
-    xd: false,
-    pen_center: true,
-    center_control_all: true,
-    center_1m: true,
-    center_5m: true,
-    center_30m: false,
-    center_d: true,
-  };
-  cm.reconcile = (type, source) => { calls.push({ type, source }); };
-  cm._drawStrictStructure = () => {};
-  cm.updateDrawPalette = () => {};
-  cm._sweepOrphanTimer = null;
-  cm._disposed = false;
-
-  cm.drawChartElements({
-    symbolKey: 'a:SH.600000_5',
-    from: 0,
-    visibleRange: { from: 0, to: 2_000_000_000 },
-    barsResult: {
-      bars: Array.from({ length: 80 }, (_, index) => ({
-        time: (1_700_000_000 + index * 500) * 1000,
-      })),
-      fxs: [], bis: [], xds: [], bi_zss: [penCenter], xd_zss: centers['5m'],
-      higher_zs: [
-        { period: 'd', zss: centers.d },
-        { period: '1m', zss: centers['1m'] },
-        { period: '30m', zss: centers['30m'] },
-        { period: '5m', zss: centers['5m'] },
-      ],
-      recursive_levels: [{ level: 0, zss: [{ id: 'must-not-render-as-center' }] }],
-    },
-  }, '5');
-
-  const byType = new Map(calls.map((entry) => [entry.type, entry.source]));
-  assert.equal(byType.get('bi_zss')[0].id, penCenter.id);
-  assert.equal(byType.get('frequency_center_1m')[0].id, centers['1m'][0].id);
-  assert.equal(byType.get('frequency_center_5m')[0].id, centers['5m'][0].id);
-  assert.equal(byType.get('frequency_center_5m')[0].linestyle, '1');
-  assert.equal(byType.get('frequency_center_5m')[0].provisional, true);
-  assert.equal(byType.get('frequency_center_5m')[0].contains_unfinished_segment, true);
-  assert.equal(byType.get('frequency_center_30m').length, 0);
-  assert.equal(byType.get('frequency_center_d')[0].id, centers.d[0].id);
-  assert.equal(calls.some((entry) => entry.type.includes('center_L')), false);
-});
-
-test('周期中枢总开关关闭时只清空四周期中枢并保留笔中枢与子项偏好', () => {
-  const { ChartManager } = loadChartManager();
-  const cm = Object.create(ChartManager.prototype);
-  const calls = [];
-  cm.obj_charts = {};
-  cm.chart = {};
-  cm.cl_show_config = {
-    fx: false,
-    bi: false,
-    xd: false,
-    pen_center: true,
-    center_control_all: false,
-    center_1m: true,
-    center_5m: false,
-    center_30m: true,
-    center_d: true,
-  };
-  cm.reconcile = (type, source) => { calls.push({ type, source }); };
-  cm._drawStrictStructure = () => {};
-  cm.updateDrawPalette = () => {};
-  cm._sweepOrphanTimer = null;
-  cm._disposed = false;
-  const penCenter = { ...zone(0), id: 'pen-center' };
-  const periodCenter = { ...zone(1), id: 'period-center' };
-
-  cm.drawChartElements({
-    symbolKey: 'a:SH.600000_5',
-    from: 0,
-    visibleRange: { from: 0, to: 2_000_000_000 },
-    barsResult: {
-      bars: Array.from({ length: 20 }, (_, index) => ({
-        time: (1_700_000_000 + index * 500) * 1000,
-      })),
-      fxs: [], bis: [], xds: [], bi_zss: [penCenter], xd_zss: [periodCenter],
-      higher_zs: [
-        { period: '1m', zss: [periodCenter] },
-        { period: '5m', zss: [periodCenter] },
-        { period: '30m', zss: [periodCenter] },
-        { period: 'd', zss: [periodCenter] },
-      ],
-    },
-  }, '5');
-
-  const byType = new Map(calls.map((entry) => [entry.type, entry.source]));
-  assert.equal(byType.get('bi_zss').length, 1);
-  for (const period of ['1m', '5m', '30m', 'd']) {
-    assert.equal(byType.get(`frequency_center_${period}`).length, 0);
-  }
-  assert.deepEqual(
-    [cm.cl_show_config.center_1m, cm.cl_show_config.center_5m,
-      cm.cl_show_config.center_30m, cm.cl_show_config.center_d],
-    [true, false, true, true],
-  );
-});
-
-test('中枢绘制范围按已加载真实K线裁剪，加载范围扩大后自动恢复实际端点', () => {
-  const { ChartManager } = loadChartManager();
-  const cm = Object.create(ChartManager.prototype);
-  const base = 1_700_000_000;
-  const center = {
-    points: [
-      { time: base + 100, price: 12 },
-      { time: base + 600, price: 10 },
-    ],
-    linestyle: '0',
-  };
-  const visibleRange = { from: base, to: base + 700 };
-  const partialBars = [200, 300, 400, 500].map((offset) => ({
-    time: (base + offset) * 1000,
-  }));
-  const fullBars = [100, 200, 300, 400, 500, 600].map((offset) => ({
-    time: (base + offset) * 1000,
-  }));
-
-  const partial = cm._centerRenderList([center], partialBars, visibleRange, '5');
-  const full = cm._centerRenderList([center], fullBars, visibleRange, '5');
-
-  assert.deepEqual(partial[0].points.map((point) => point.time), [base + 200, base + 500]);
-  assert.deepEqual(full[0].points.map((point) => point.time), [base + 100, base + 600]);
-  assert.deepEqual(center.points.map((point) => point.time), [base + 100, base + 600], '不得修改原始中枢');
-});
-
-test('日线中枢原始收盘时刻会转换到日K的TradingView日期坐标', () => {
-  const { ChartManager } = loadChartManager();
-  const cm = Object.create(ChartManager.prototype);
-  const firstRaw = Date.UTC(2026, 6, 22, 7) / 1000;
-  const secondRaw = Date.UTC(2026, 6, 23, 7) / 1000;
-  const firstChart = Date.UTC(2026, 6, 22) / 1000;
-  const secondChart = Date.UTC(2026, 6, 23) / 1000;
-  const rendered = cm._centerRenderList([{
-    points: [
-      { time: firstRaw, price: 12 },
-      { time: secondRaw, price: 10 },
-    ],
-  }], [
-    { time: firstChart * 1000 },
-    { time: secondChart * 1000 },
-  ], { from: firstChart, to: secondChart }, '1D');
-
-  assert.deepEqual(rendered[0].points.map((point) => point.time), [firstChart, secondChart]);
-});
 
 test('分型只使用已加载真实K线坐标，日线收盘时刻会规整到对应日K', () => {
   const { ChartManager } = loadChartManager();
@@ -412,7 +240,7 @@ test('drawChartElements 为分型接入真实K线规整与创建后锚点校验'
           { time: rawClose, price: 12 },
         ],
       }],
-      bis: [], xds: [], bi_zss: [], xd_zss: [], higher_zs: [],
+      bis: [], xds: [],
     },
   }, '1D');
 
@@ -422,30 +250,30 @@ test('drawChartElements 为分型接入真实K线规整与创建后锚点校验'
   assert.equal(typeof fractalCall[7], 'function', '必须校验TV创建后的实际锚点');
 });
 
-test('reconcile: 列表尾部中枢边界变化且数量/from 不变时仍替换 shape', () => {
+test('reconcile: 列表尾部边界变化且数量/from 不变时仍替换 shape', () => {
   const { ChartManager } = loadChartManager();
   const { cm, calls, create } = makeReconcileManager(ChartManager);
   const initial = Array.from({ length: 8 }, (_, index) => zone(index));
-  cm.reconcile('bi_zss', initial, 1600000000, 'S', create, false, true);
+  cm.reconcile('test_shapes', initial, 1600000000, 'S', create, false, true);
   assert.equal(calls.create, 8);
 
   const corrected = Array.from(
     { length: 8 },
     (_, index) => zone(index, index === 7 ? 0.5 : 0),
   );
-  cm.reconcile('bi_zss', corrected, 1600000000, 'S', create, false, true);
+  cm.reconcile('test_shapes', corrected, 1600000000, 'S', create, false, true);
 
   assert.equal(calls.remove, 1, '旧的最后一个中枢必须删除');
   assert.equal(calls.create, 9, '修正后的最后一个中枢必须重建');
 });
 
-test('reconcile: 完全相同的中枢状态重复进入时保持零操作', () => {
+test('reconcile: 完全相同的图形状态重复进入时保持零操作', () => {
   const { ChartManager } = loadChartManager();
   const { cm, calls, create } = makeReconcileManager(ChartManager);
   const zones = Array.from({ length: 8 }, (_, index) => zone(index));
-  cm.reconcile('bi_zss', zones, 1600000000, 'S', create, false, true);
+  cm.reconcile('test_shapes', zones, 1600000000, 'S', create, false, true);
   const before = { ...calls };
-  cm.reconcile('bi_zss', zones, 1600000000, 'S', create, false, true);
+  cm.reconcile('test_shapes', zones, 1600000000, 'S', create, false, true);
   assert.equal(calls.create, before.create);
   assert.equal(calls.remove, before.remove);
 });
@@ -458,80 +286,14 @@ test('reconcile: 旧异步创建晚到时不得把旧范围重新写回当前容
   const oldZone = zone(0);
   const currentZone = zone(1);
 
-  cm.reconcile('bi_zss', [oldZone], 1_600_000_000, 'S', () => oldPromise, false, true);
-  cm.reconcile('bi_zss', [currentZone], 1_600_000_000, 'S', () => 200, false, true);
+  cm.reconcile('test_shapes', [oldZone], 1_600_000_000, 'S', () => oldPromise, false, true);
+  cm.reconcile('test_shapes', [currentZone], 1_600_000_000, 'S', () => 200, false, true);
   resolveOld(100);
   await Promise.resolve();
   await Promise.resolve();
 
-  assert.deepEqual(cm.obj_charts.S.bi_zss.map((entry) => entry.id), [200]);
+  assert.deepEqual(cm.obj_charts.S.test_shapes.map((entry) => entry.id), [200]);
   assert.equal(calls.remove, 1, '晚到的旧实体应立即删除');
-});
-
-test('reconcile: TradingView 后续移动已存在中枢时即使数据 key 未变也会自愈重建', () => {
-  const { ChartManager } = loadChartManager();
-  const cm = Object.create(ChartManager.prototype);
-  const calls = { create: [], remove: [] };
-  const created = new Map();
-  let nextId = 1;
-  cm.obj_charts = { S: { bi_zss: [] } };
-  cm._reconcileGuard = {};
-  cm._reconcileEpochs = new Map();
-  cm._reconcileOwnedIds = new Set();
-  cm._pendingRemovalIds = new Set();
-  cm._reconcileRetry = { count: 0, timer: null };
-  cm._disposed = false;
-  cm.chart = {
-    removeEntity(id) { calls.remove.push(id); created.delete(id); },
-    getShapeById(id) {
-      const item = created.get(id);
-      if (!item) return null;
-      return {
-        getPoints() {
-          const points = item.points.map((point) => ({ ...point }));
-          if (id === 1) points[0].price += 1;
-          return points;
-        },
-      };
-    },
-  };
-  const center = {
-    points: [
-      { time: 1_700_000_000, price: 12 },
-      { time: 1_700_000_900, price: 10 },
-    ],
-    linestyle: '0',
-  };
-  const create = (item) => {
-    const id = nextId++;
-    created.set(id, item);
-    calls.create.push(id);
-    return id;
-  };
-
-  // 首次创建时让 1 号实体先通过校验，随后模拟 TV 在历史加载中移动它。
-  cm.chart.getShapeById = (id) => {
-    const item = created.get(id);
-    if (!item) return null;
-    return { getPoints: () => item.points.map((point) => ({ ...point })) };
-  };
-  cm.reconcile('bi_zss', [center], 1_600_000_000, 'S', create, false, true, true);
-  cm.chart.getShapeById = (id) => {
-    const item = created.get(id);
-    if (!item) return null;
-    return {
-      getPoints() {
-        const points = item.points.map((point) => ({ ...point }));
-        if (id === 1) points[0].price += 1;
-        return points;
-      },
-    };
-  };
-  cm.reconcile('bi_zss', [center], 1_600_000_000, 'S', create, false, true, true);
-
-  assert.deepEqual(calls.create, [1, 2]);
-  assert.deepEqual(calls.remove, [1]);
-  assert.deepEqual(cm.obj_charts.S.bi_zss.map((entry) => entry.id), [2]);
 });
 
 test('reconcile: TradingView 后续把分型吸附到错误K线时自动删除并重建', () => {
@@ -594,12 +356,12 @@ test('reconcile: 截断范围后的未完成状态变化必须刷新样式', () 
   const { ChartManager } = loadChartManager();
   const { cm, calls, create } = makeReconcileManager(ChartManager);
   const pending = Array.from({ length: 8 }, (_, index) => zone(index, 0, '1'));
-  cm.reconcile('bi_zss', pending, 1600000000, 'S', create, false, true);
+  cm.reconcile('test_shapes', pending, 1600000000, 'S', create, false, true);
   const corrected = Array.from(
     { length: 8 },
     (_, index) => zone(index, 0, index === 7 ? '0' : '1'),
   );
-  cm.reconcile('bi_zss', corrected, 1600000000, 'S', create, false, true);
+  cm.reconcile('test_shapes', corrected, 1600000000, 'S', create, false, true);
   assert.equal(calls.setProperties.at(-1)?.linestyle, 0);
 });
 
@@ -616,7 +378,7 @@ test('draw_chanlun 旁路调用在 dataReady 前只登记待绘制，不读取�
   const { ChartManager, sb } = loadChartManager();
   const fx = makeDataReadyManager(ChartManager);
   sb.setTimeout = (callback) => { callback(); return 0; };
-  fx.cm._intervalVersion = 0;
+  fx.cm._intervalGeneration = 0;
   fx.cm._intervalSwitchSeq = 0;
   fx.cm.getChartData = () => {
     throw new Error('未就绪时不应读取图表数据');
@@ -625,7 +387,7 @@ test('draw_chanlun 旁路调用在 dataReady 前只登记待绘制，不读取�
 
   await fx.cm.draw_chanlun();
 
-  assert.equal(fx.cm._pendingChanlunDrawVersion, 0);
+  assert.equal(fx.cm._pendingChanlunDrawGeneration, 0);
   assert.equal(fx.cm._initialLoadDone, false);
 });
 
@@ -645,10 +407,10 @@ test('周期切换后旧 dataReady 回调不得绘制到新代际', () => {
   const { ChartManager } = loadChartManager();
   const fx = makeDataReadyManager(ChartManager);
   fx.cm.handleBarsReadyEvent(barsReadyEvent());
-  const oldVersion = fx.cm._dataContextVersion;
+  const oldGeneration = fx.cm._dataContextGeneration;
   fx.cm._resetDataReadyContext();
   fx.setReady(true);
-  fx.cm.handleDataReady(oldVersion);
+  fx.cm.handleDataReady(oldGeneration);
   assert.equal(fx.calls.draw, 0);
   assert.equal(fx.calls.debounced, 0);
 });
@@ -657,10 +419,10 @@ test('同代际旧标的 dataReady 回调不得通过身份校验', () => {
   const { ChartManager } = loadChartManager();
   const fx = makeDataReadyManager(ChartManager);
   fx.cm.handleBarsReadyEvent(barsReadyEvent());
-  const version = fx.cm._dataContextVersion;
+  const generation = fx.cm._dataContextGeneration;
   fx.setIdentity('A:SH.600001', '5');
   fx.setReady(true);
-  fx.cm.handleDataReady(version, 'a:sh.600000|5');
+  fx.cm.handleDataReady(generation, 'a:sh.600000|5');
   assert.equal(fx.calls.draw, 0);
   assert.equal(fx.calls.debounced, 0);
 });
@@ -1127,15 +889,15 @@ test('_doReset: 画布前进(上次生效) → 退避归零', () => {
   assert.equal(cm._resetState['k'].backoffLevel, 0, '画布前进 → 退避归零');
 });
 
-test('_doReset: widget 无 resetCache → 降级裸 resetData(容错)', () => {
+test('_doReset: widget 缺少现行 resetCache 契约时拒绝 reset', () => {
   const { ChartManager, sb } = loadChartManager();
   let resetDataCalls = 0;
-  const widget = { activeChart: () => ({ resetData: () => { resetDataCalls++; } }) }; // 无 resetCache
+  const widget = { activeChart: () => ({ resetData: () => { resetDataCalls++; } }) };
   const cm = makeManager(ChartManager, widget);
   sb._setNowSec(10000);
   const did = cm._doReset('k', 'reconnect', 5000);
-  assert.equal(did, true);
-  assert.equal(resetDataCalls, 1, '无 resetCache 仍执行 resetData');
+  assert.equal(did, false);
+  assert.equal(resetDataCalls, 0, '契约不完整时不得执行 resetData');
 });
 
 test('_doReset: 无 activeChart → 不 reset 且不污染记账', () => {
@@ -1229,39 +991,6 @@ test('onmessage: 断档帧(SSE 领先多根) → gap-detect reset', () => {
   fire({ s: 'ok', t, c: t.map(() => 1) });
   assert.equal(calls.resetData, 1, 'gap 断档 → reset');
   assert.equal(applyCalls.length, 0, 'gap 帧 return');
-});
-
-// ── 买卖点偏移方向(前端H1: 买点系统性画错边) ──
-// 设计意图(charts.js:306 注释): 买点放 K 线下方(price-off)、卖点放上方(price+off)。
-// 默认 branch_core 路径买卖点文本是小写 bs_type(1buy/3buy/类1buy), 偏移判定必须与
-// 颜色/箭头(toLowerCase().includes("b"))同口径, 否则买点被画到上方与卖点同侧。
-test('mmdOffsetPoint: 买点(默认小写)下移 price<锚点, 卖点上移 price>锚点', () => {
-  const { ChartUtils } = loadChartManager();
-  assert.ok(ChartUtils && typeof ChartUtils.mmdOffsetPoint === 'function', 'ChartUtils 应可加载');
-  const mk = (text) => ({ text, points: { price: 100, time: 1000 } });
-  // off = |100| * 0.01 = 1 (offsetBase=0 → 走 priceRatioFallback)
-  const buy = ChartUtils.mmdOffsetPoint(mk('1buy'), 0.8, 0.01);
-  assert.ok(buy.price < 100, `买点应下移(<100), 实际 ${buy.price}`);
-  const sell = ChartUtils.mmdOffsetPoint(mk('1sell'), 0.8, 0.01);
-  assert.ok(sell.price > 100, `卖点应上移(>100), 实际 ${sell.price}`);
-});
-
-test('mmdOffsetPoint: 买点全变体(1buy/2buy/3buy/类1buy/大写1B/3B)都下移', () => {
-  const { ChartUtils } = loadChartManager();
-  const mk = (text) => ({ text, points: { price: 100, time: 1000 } });
-  for (const t of ['1buy', '2buy', '3buy', '类1buy', '1B', '3B']) {
-    const pt = ChartUtils.mmdOffsetPoint(mk(t), 0.8, 0.01);
-    assert.ok(pt.price < 100, `买点 ${t} 应下移(<100), 实际 ${pt.price}`);
-  }
-});
-
-test('mmdOffsetPoint: 卖点全变体(1sell/2sell/3sell/类1sell/大写1S/3S)都上移', () => {
-  const { ChartUtils } = loadChartManager();
-  const mk = (text) => ({ text, points: { price: 100, time: 1000 } });
-  for (const t of ['1sell', '2sell', '3sell', '类1sell', '1S', '3S']) {
-    const pt = ChartUtils.mmdOffsetPoint(mk(t), 0.8, 0.01);
-    assert.ok(pt.price > 100, `卖点 ${t} 应上移(>100), 实际 ${pt.price}`);
-  }
 });
 
 // ── H1 force_refresh(阶段E): _doReset 置一次性标志,datafeed 下次 firstDataRequest 绕过缓存重算 ──

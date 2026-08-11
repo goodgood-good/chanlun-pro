@@ -204,14 +204,14 @@ web/chanlun_chart/cl_app/static/charting_library/bundles/*.gz
 # 整体不入库——防误 git add -A 把未被 *.epub 覆盖的大文件(~1GB azw3 等)计划提交。
 /output/
 
-# V4: 真实标的 K 线 fixture 与本地 baseline (机器本地数据, 隐私 + 体积考量)
-# 用 script/dev/export_real_kline_fixtures.py 在本地生成
+# 真实标的 K 线 fixture 与本地 baseline（机器本地数据，包含隐私且体积较大）
 tests/fixtures/klines/
 tests/core/baselines.local.json
 *.gz
 *.md
 # Keep the unique trading specification and formal audit reports visible.
 # The large lesson corpus stays protected by its tree-hash manifest.
+/audit/chanlun_lesson_corpus/
 !audit/chanlun_live_strategy/*.md
 !audit/chanlun_live_integration/*.md
 !audit/chanlun_trading_system_forward_paper/*.md

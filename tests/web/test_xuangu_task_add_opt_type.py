@@ -1,7 +1,4 @@
-"""R6-#6: /xuangu/task_add 未校验 opt_type → 非法值(空串/拼写错)经 get_opt_types 的
-direction_types[x] KeyError 被逐码吞 → xg_results 空 → 无条件 clear_zx_stocks 清空目标自选组
-(静默数据丢失)。修复=task_add 早校验 opt_type∈{long,short}, 非法直接 ok:False 不进 run_xuangu。
-"""
+"""选股任务只接受明确支持的 long/short 方向。"""
 import pathlib
 import sys
 
@@ -38,10 +35,13 @@ class _FakeXuanguTasks:
 
 @pytest.fixture
 def app_fake(monkeypatch):
-    app = create_app()
-    app.config["LOGIN_DISABLED"] = True
-    app.config["TESTING"] = True
-    app.config["WTF_CSRF_ENABLED"] = False
+    app = create_app(test_config={
+        "TESTING": True,
+        "LOGIN_DISABLED": True,
+        "VALIDATE_WEB_SECURITY": False,
+        "SCHEDULER_ENABLED": False,
+        "WTF_CSRF_ENABLED": False,
+    })
     fake = _FakeXuanguTasks()
     app.extensions["xuangu_tasks"] = fake
     monkeypatch.setattr(xuangu_blueprint, "get_exchange", lambda _market: _FakeExchange())

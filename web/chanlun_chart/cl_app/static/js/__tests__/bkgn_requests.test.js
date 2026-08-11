@@ -16,15 +16,15 @@ function loadBkgn() {
   const messages = [];
   let nextLoadId = 0;
 
-  function requestChain(options, legacyCallback) {
+  function requestChain(options, completionCallback) {
     const request = {
       options,
-      legacyCallback,
+      completionCallback,
       doneHandler: null,
       failHandler: null,
       alwaysHandler: null,
       resolve(payload) {
-        if (this.legacyCallback) this.legacyCallback(payload);
+        if (this.completionCallback) this.completionCallback(payload);
         if (this.doneHandler) this.doneHandler(payload);
         if (this.alwaysHandler) this.alwaysHandler();
       },

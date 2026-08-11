@@ -1,8 +1,7 @@
 """Sparse causal facts for a fixed-policy, one-year QMT replay.
 
-The legacy research runner evaluates every symbol on every minute and keeps the
-entire market in memory.  This module reduces the same fixed production policy
-to the times at which an entry or exit can actually change:
+The replay evaluates the fixed production policy only at times when an entry
+or exit can actually change:
 
 * a confirmed five-minute setup becomes available;
 * its first matching confirmed one-minute trigger becomes available; or
@@ -76,17 +75,17 @@ from chanlun.decision_support.trading_system.models import (
     TimeframeContext,
 )
 from chanlun.decision_support.trading_system.runtime_config import (
-    v3_recursive_cl_config,
+    recursive_cl_config,
 )
 from chanlun.decision_support.trading_system.structure_adapter import (
     extract_confirmed_points,
     structural_point_id_map,
 )
-from chanlun.decision_support.trading_system.v3_direct_recursive_structure import (
+from chanlun.decision_support.trading_system.direct_recursive_structure import (
     DirectRecursiveEntryChain,
 )
 from chanlun.decision_support.trading_system.sector_policy import assess_sector
-from chanlun.decision_support.trading_system.v3_selection import (
+from chanlun.decision_support.trading_system.selection import (
     TechnicalEntrySnapshot,
 )
 from chanlun.exchange.kline_precision import (
@@ -116,8 +115,8 @@ FRAME_COLUMNS = (
     "raw_close",
 )
 BASE_FRAME_COLUMNS = FRAME_COLUMNS[:7]
-FACT_SCHEMA = "chanlun-fixed-year-symbol-facts/v4"
-SECTOR_FACT_SCHEMA = "chanlun-fixed-year-sector-facts/v4"
+FACT_SCHEMA = "chanlun-fixed-year-symbol-facts"
+SECTOR_FACT_SCHEMA = "chanlun-fixed-year-sector-facts"
 
 
 @dataclass(frozen=True, slots=True)
@@ -283,9 +282,7 @@ def load_qmt_frame(
 ) -> pd.DataFrame:
     """Read raw QMT rows and build an ex-date-only causal analysis basis."""
 
-    if frequency not in FREQUENCIES and not (
-        _allow_native_daily and frequency == "1d"
-    ):
+    if frequency not in FREQUENCIES and not (_allow_native_daily and frequency == "1d"):
         raise ValueError("frequency must be 30m, 5m or 1m")
     start = normalize_datetime(start_at, "start_at")
     end = normalize_datetime(end_at, "end_at")
@@ -298,9 +295,7 @@ def load_qmt_frame(
     local_directory = resolve_qmt_local_data_dir()
     if local_directory is not None:
         reader = (
-            read_qmt_local_derived_30m
-            if frequency == "30m"
-            else read_qmt_local_kline
+            read_qmt_local_derived_30m if frequency == "30m" else read_qmt_local_kline
         )
         reader_arguments: dict[str, object] = {
             "data_dir": local_directory,
@@ -424,7 +419,7 @@ def load_qmt_frame(
         provider="qmt",
         market="a",
         code=code,
-        adjustment="causal-forward-ex-date-v1",
+        adjustment="causal-forward-ex-date",
         structure_price_quantum=quantum,
     )
     normalized = normalized.loc[:, list(FRAME_COLUMNS)]
@@ -457,19 +452,13 @@ def strict_state(code: str, frequency: str, frame: pd.DataFrame) -> CL:
         raise ValueError(f"{frequency} frame is empty")
     quantum = Decimal(str(frame.attrs["structure_price_quantum"]))
     revision = cast(str, frame.attrs["price_basis_revision"])
-    config = v3_recursive_cl_config(
+    config = recursive_cl_config(
         structure_price_quantum=quantum,
         price_basis_revision=revision,
     )
-    # These switches suppress legacy display/MMD products only.  The strict
-    # evidence path used by the sole active strategy remains unchanged.
-    config["skip_legacy_mmd"] = True
-    config["skip_legacy_zslx"] = True
-    # ``compute_higher_macd`` linearly interpolates between adjacent higher-
-    # timeframe bucket-end anchors.  The right anchor is not known on earlier
-    # source bars, so that display-oriented series is not admissible in a
-    # certified replay.  Native MACD is an ordinary causal EMA recurrence.
-    config["macd_ld_use_htf"] = False
+    # Strict divergence uses causal-partial HTF MACD.  Each source-bar sample
+    # is frozen at that bar's close, so certified replay and live calculation
+    # share the same prefix-stable strength evidence.
     return CL(code, frequency, config, market="a")
 
 
@@ -497,13 +486,16 @@ def _symbol_source_revision(
                 frame.reset_index(drop=True),
                 index=False,
                 categorize=False,
-            ).to_numpy(dtype="uint64", copy=False).tobytes()
+            )
+            .to_numpy(dtype="uint64", copy=False)
+            .tobytes()
         )
         if name != "factors":
             metadata = {
                 key: frame.attrs.get(key)
                 for key in sorted(frame.attrs)
-                if key in {
+                if key
+                in {
                     "adjustment",
                     "price_basis_revision",
                     "qmt_local_cache_audit_id",
@@ -597,7 +589,7 @@ class CausalCenterCompletionFact:
         if self.zd_tick > self.zg_tick:
             raise ValueError("causal center core must be a non-empty interval")
         if self.leave_direction != "up" or self.return_direction != "down":
-            # V3.1 consumes only upward third-buy completion geometry.  Keeping
+            # strict strategy consumes only upward third-buy completion geometry.  Keeping
             # the generic ledger fail-closed prevents a sell-side center from
             # being mistaken for entry evidence.
             raise ValueError("causal entry center requires up-leave/down-return")
@@ -610,7 +602,10 @@ class CausalCenterCompletionFact:
             <= self.available_at
         ):
             raise ValueError("causal center completion times are inconsistent")
-        if self.leave_available_at > self.available_at or self.return_available_at > self.available_at:
+        if (
+            self.leave_available_at > self.available_at
+            or self.return_available_at > self.available_at
+        ):
             raise ValueError("center units cannot become visible after the center fact")
 
 
@@ -690,52 +685,66 @@ class CausalStructureEventLedger:
             "point_anchor_unit_ids",
             tuple(self.point_anchor_unit_ids),
         )
-        if tuple(
-            sorted(self.points, key=lambda item: (item.available_at, item.point_id))
-        ) != self.points:
+        if (
+            tuple(
+                sorted(self.points, key=lambda item: (item.available_at, item.point_id))
+            )
+            != self.points
+        ):
             raise ValueError("causal points must be deterministically ordered")
-        if tuple(
-            sorted(
-                self.completed_trends,
-                key=lambda item: (item.available_at, item.trend_id),
+        if (
+            tuple(
+                sorted(
+                    self.completed_trends,
+                    key=lambda item: (item.available_at, item.trend_id),
+                )
             )
-        ) != self.completed_trends:
+            != self.completed_trends
+        ):
             raise ValueError("causal trends must be deterministically ordered")
-        if tuple(
-            sorted(
-                self.completed_units,
-                key=lambda item: (item.available_at, item.unit_id),
+        if (
+            tuple(
+                sorted(
+                    self.completed_units,
+                    key=lambda item: (item.available_at, item.unit_id),
+                )
             )
-        ) != self.completed_units:
+            != self.completed_units
+        ):
             raise ValueError("causal completed units must be deterministically ordered")
         unit_keys = tuple(
             (item.unit_id, item.structural_level) for item in self.completed_units
         )
         if len(unit_keys) != len(set(unit_keys)):
             raise ValueError("causal completed units must be unique")
-        if tuple(
-            sorted(
-                self.center_completions,
-                key=lambda item: (item.available_at, item.center_id),
+        if (
+            tuple(
+                sorted(
+                    self.center_completions,
+                    key=lambda item: (item.available_at, item.center_id),
+                )
             )
-        ) != self.center_completions:
-            raise ValueError("causal center completions must be deterministically ordered")
+            != self.center_completions
+        ):
+            raise ValueError(
+                "causal center completions must be deterministically ordered"
+            )
         center_keys = tuple(
-            (item.center_id, item.structural_level)
-            for item in self.center_completions
+            (item.center_id, item.structural_level) for item in self.center_completions
         )
         if len(center_keys) != len(set(center_keys)):
             raise ValueError("causal center completions must be unique")
-        if tuple(
-            sorted(
-                self.direct_recursive_decisions,
-                key=lambda item: (item.first_seen_at, item.l0_point_id),
+        if (
+            tuple(
+                sorted(
+                    self.direct_recursive_decisions,
+                    key=lambda item: (item.first_seen_at, item.l0_point_id),
+                )
             )
-        ) != self.direct_recursive_decisions:
+            != self.direct_recursive_decisions
+        ):
             raise ValueError("causal direct decisions must be chronological")
-        direct_ids = tuple(
-            item.l0_point_id for item in self.direct_recursive_decisions
-        )
+        direct_ids = tuple(item.l0_point_id for item in self.direct_recursive_decisions)
         if len(direct_ids) != len(set(direct_ids)):
             raise ValueError("causal direct decisions must be unique")
         anchors = tuple(self.point_anchor_unit_ids)
@@ -832,9 +841,7 @@ def _causal_confirmed_structure_events(
 
     state = strict_state(code, frequency, frame)
     state.process_klines(frame)
-    locked_bis = tuple(
-        item for item in state.get_bis() if item.locked_at is not None
-    )
+    locked_bis = tuple(item for item in state.get_bis() if item.locked_at is not None)
     if len(locked_bis) < 3:
         return CausalStructureEventLedger(points=(), completed_trends=())
 
@@ -854,7 +861,7 @@ def _causal_confirmed_structure_events(
     prefix_size = 3
 
     while prefix_size <= len(locked_bis):
-        calculator = XdCalculator(state.config)
+        calculator = XdCalculator()
         prefix = list(locked_bis[:prefix_size])
         if next_segment_start is None:
             calculator.calculate(prefix)
@@ -880,10 +887,7 @@ def _causal_confirmed_structure_events(
         frozen_segments.append(segment)
 
         following_start = int(segment.end_line.index) + 1
-        if (
-            next_segment_start is not None
-            and following_start <= next_segment_start
-        ):
+        if next_segment_start is not None and following_start <= next_segment_start:
             raise RuntimeError("causal segment replay did not advance")
         next_segment_start = following_start
 
@@ -959,9 +963,7 @@ def _causal_confirmed_structure_events(
                     return_low_tick=ret.low_tick,
                     return_high_tick=ret.high_tick,
                 )
-                center_ledger.setdefault(
-                    (fact.center_id, fact.structural_level), fact
-                )
+                center_ledger.setdefault((fact.center_id, fact.structural_level), fact)
         for level in structure.levels:
             for trend in level.completed_trends:
                 first_seen_trend = replace(
@@ -977,12 +979,7 @@ def _causal_confirmed_structure_events(
             strength=strength,
             price_quantum=price_quantum,
         )
-        first = engine.first_class_points()
-        raw_points = (
-            *first,
-            *engine.second_class_points(first),
-            *engine.third_class_points(),
-        )
+        raw_points = engine.confirmed_points()
         strict_config_revision = cast(
             str,
             state.get_config()["strict_config_revision"],
@@ -1029,8 +1026,7 @@ def _causal_confirmed_structure_events(
             source_frequency=frequency,
         )
         raw_anchor_by_point_id = {
-            converted_point_ids[raw.point_id]: raw.anchor_unit_id
-            for raw in raw_points
+            converted_point_ids[raw.point_id]: raw.anchor_unit_id for raw in raw_points
         }
         for point in extract_confirmed_points(
             snapshot,
@@ -1063,20 +1059,17 @@ def _causal_confirmed_structure_events(
         # is not admissible here: its live tail may contain evidence that was
         # unavailable at the historical decision time.
         if frequency == "1m" and len(structure.levels) >= 3:
-            from chanlun.decision_support.trading_system.v3_direct_recursive_structure import (
-                build_v3_direct_recursive_structure_path,
+            from chanlun.decision_support.trading_system.direct_recursive_structure import (
+                build_direct_recursive_structure_path,
             )
 
-            direct = build_v3_direct_recursive_structure_path(
+            direct = build_direct_recursive_structure_path(
                 evidence=snapshot,
                 code=code,
             )
-            entries = {
-                entry.l0_point_id: entry for entry in direct.technical_entries
-            }
+            entries = {entry.l0_point_id: entry for entry in direct.technical_entries}
             strategic_available = {
-                point.point_id: point.available_at
-                for point in direct.strategic_points
+                point.point_id: point.available_at for point in direct.strategic_points
             }
             for decision in direct.decisions:
                 strategic_at = strategic_available[decision.l0_point_id]
@@ -1088,9 +1081,7 @@ def _causal_confirmed_structure_events(
                     continue
                 entry = entries.get(decision.l0_point_id)
                 causal_entry = (
-                    None
-                    if entry is None
-                    else replace(entry, observed_at=checkpoint)
+                    None if entry is None else replace(entry, observed_at=checkpoint)
                 )
                 direct_decision_ledger[decision.l0_point_id] = (
                     CausalDirectRecursiveDecisionFact(
@@ -1474,15 +1465,23 @@ def build_symbol_bundle(
     selection_sources: tuple[str, ...] = (),
 ) -> SymbolStructureBundle:
     observed_at = evaluation.observed_at
-    thirty = tuple(
-        point for point in facts.thirty_points if point.available_at <= observed_at
-    )
-    five = tuple(
-        point for point in facts.five_points if point.available_at <= observed_at
-    )
-    one = tuple(
-        point for point in facts.one_points if point.available_at <= observed_at
-    )
+
+    def tradable(points, frequency):
+        return tuple(
+            point
+            for point in points
+            if point.available_at <= observed_at
+            and point.source_frequency == frequency
+            and point.recursive_level == 0
+        )
+
+    # Recursive levels remain in the immutable research facts for chart and
+    # audit context.  The decision bundle deliberately mirrors the live
+    # gateway: only each physical frequency's own segment-sourced L0 can open,
+    # trigger, block or close a trade.
+    thirty = tradable(facts.thirty_points, "30m")
+    five = tradable(facts.five_points, "5m")
+    one = tradable(facts.one_points, "1m")
     return SymbolStructureBundle(
         code=facts.code,
         as_of=observed_at,
@@ -1496,6 +1495,7 @@ def build_symbol_bundle(
         opposite_points=(*thirty, *five, *one),
         held_tower=held_tower,
         held_level=held_level,
+        physical_timeframe_level_zero=True,
         selection_sources=selection_sources,
     )
 
@@ -1511,9 +1511,7 @@ def _event_bars(
     session_close = {
         session: Decimal(
             str(
-                group.iloc[-1][
-                    "raw_close" if "raw_close" in group.columns else "close"
-                ]
+                group.iloc[-1]["raw_close" if "raw_close" in group.columns else "close"]
             )
         )
         for session, group in frame.groupby(
@@ -1563,13 +1561,21 @@ def _event_bars(
     return output
 
 
+def _board_limit(code: str, session: date) -> Decimal:
+    digits = code.split(".", 1)[1]
+    if code.startswith("BJ."):
+        return Decimal("0.30")
+    if digits.startswith(("688", "689")):
+        return Decimal("0.20")
+    if digits.startswith(("300", "301")) and session >= date(2020, 8, 24):
+        return Decimal("0.20")
+    return Decimal("0.10")
+
+
 def _status_for_bar(
     bar: MinuteBar,
     master: SecurityMasterRecord | None = None,
 ):
-    from chanlun.decision_support.trading_system.backtest.data_source import (
-        _board_limit,
-    )
     from chanlun.decision_support.trading_system.backtest.models import SecurityStatus
 
     session = bar.opened_at.date()
@@ -1582,11 +1588,7 @@ def _status_for_bar(
         # Certified execution observes the completed next-minute price range
         # directly.  A deliberately broad bound avoids inventing historical
         # ST percentages while raw OHLC still caps every possible fill.
-        limit_pct=(
-            _board_limit(bar.code, session)
-            if master is None
-            else Decimal("1")
-        ),
+        limit_pct=(_board_limit(bar.code, session) if master is None else Decimal("1")),
         lot_size=100,
         t_plus_days=1,
     )
@@ -1662,9 +1664,7 @@ def _active_minute_source(
     session_closes = {
         session: Decimal(
             str(
-                group.iloc[-1][
-                    "raw_close" if "raw_close" in group.columns else "close"
-                ]
+                group.iloc[-1]["raw_close" if "raw_close" in group.columns else "close"]
             )
         )
         for session, group in frame.groupby(
@@ -1697,9 +1697,7 @@ def _market_minute_timeline(
     )
     if frame.empty:
         raise RuntimeError("QMT market-minute timeline is unavailable")
-    return tuple(
-        pd.Timestamp(value).to_pydatetime() for value in frame["date"]
-    )
+    return tuple(pd.Timestamp(value).to_pydatetime() for value in frame["date"])
 
 
 def _densify_equity_curve(
@@ -1968,16 +1966,13 @@ def run_sparse_portfolio(
         terminal_at = datetime.combine(requested_end, time(15, 0), tzinfo=CN)
         for code in sorted(tuple(state.positions_by_code)):
             master = facts_by_code[code].security_master
-            if (
-                master is not None
-                and (
-                    (
-                        master.listed_through is not None
-                        and master.listed_through < requested_end
-                    )
-                    or "\u9000\u5e02" in master.name
-                    or master.name.endswith("\u9000")
+            if master is not None and (
+                (
+                    master.listed_through is not None
+                    and master.listed_through < requested_end
                 )
+                or "\u9000\u5e02" in master.name
+                or master.name.endswith("\u9000")
             ):
                 state.write_off_position(
                     code=code,
@@ -2067,8 +2062,7 @@ def build_symbol_facts(
         frames["5m"],
         visibility_windows=(
             (
-                effective_at
-                - timedelta(seconds=MAX_FIVE_MINUTE_SETUP_AGE_SECONDS),
+                effective_at - timedelta(seconds=MAX_FIVE_MINUTE_SETUP_AGE_SECONDS),
                 end_at,
             ),
         ),
@@ -2131,9 +2125,7 @@ def build_symbol_facts(
         code,
         "30m",
         frames["30m"],
-        visibility_windows=(
-            (context_start, max(evaluation_times)),
-        )
+        visibility_windows=((context_start, max(evaluation_times)),)
         if evaluation_times
         else (),
     )
@@ -2150,9 +2142,7 @@ def build_symbol_facts(
             observed_at.date()
         ):
             return None
-        available = tuple(
-            row for row in membership_rows if row.known_at <= observed_at
-        )
+        available = tuple(row for row in membership_rows if row.known_at <= observed_at)
         return None if not available else available[-1].sector_id
 
     evaluations = tuple(

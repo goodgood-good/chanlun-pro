@@ -62,24 +62,26 @@ test('only explicit valid user drawings are persisted', () => {
     groups: new Map([['polluted-group', { lineTools: ['manual-1', 'auto-1'] }]]),
   });
 
-  assert.equal(saved.schema, 'chanlun-user-drawings/v2');
+  assert.equal(saved.schema, 'chanlun-user-drawings');
   assert.deepEqual(Object.keys(saved.sources), ['manual-1']);
   assert.deepEqual(Object.keys(saved.groups), []);
 });
 
-test('legacy and malformed drawing states are quarantined on load', () => {
+test('unsupported drawing states are rejected and current sources are normalized', () => {
   const ChartManager = loadChartManager();
   const manager = Object.create(ChartManager.prototype);
   manager._userDrawingIds = new Set(['stale']);
 
-  const legacy = manager.deserializeUserDrawingsState({
-    sources: { GiRd26: { type: 'LineToolTrendLine' } },
-  });
-  assert.equal(legacy.sources.size, 0);
+  assert.throws(
+    () => manager.deserializeUserDrawingsState({
+      sources: { GiRd26: { type: 'LineToolTrendLine' } },
+    }),
+    /drawing_state_schema_invalid/,
+  );
   assert.equal(manager._userDrawingIds.size, 0);
 
   const current = manager.deserializeUserDrawingsState({
-    schema: 'chanlun-user-drawings/v2',
+    schema: 'chanlun-user-drawings',
     sources: {
       manual: { type: 'LineToolRectangle', state: {} },
       invalid: null,
@@ -104,7 +106,7 @@ test('settled automatic ownership revokes a racing user classification', () => {
   assert.equal(manager._coloredDrawings.has('GiRd26'), false);
 });
 
-test('manual reload clears overlays through v2 before resetting K line data', async () => {
+test('manual reload clears overlays through the storage boundary before resetting K line data', async () => {
   const ChartManager = loadChartManager();
   const manager = Object.create(ChartManager.prototype);
   const calls = [];

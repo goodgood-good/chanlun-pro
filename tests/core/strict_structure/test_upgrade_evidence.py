@@ -194,7 +194,7 @@ def test_nine_segment_evidence_links_existing_standard_target_center() -> None:
         completed_trends=(),
     )
     structure = StrictStructureResult(
-        schema_version="chanlun-structure/v3",
+        schema="chanlun-structure",
         price_basis_revision=source.price_basis_revision,
         levels=(level_zero, level_one),
     )
@@ -239,14 +239,14 @@ def test_future_standard_target_does_not_rewrite_nine_segment_evidence() -> None
         completed_trends=(),
     )
     structure = StrictStructureResult(
-        schema_version="chanlun-structure/v3",
+        schema="chanlun-structure",
         price_basis_revision=source.price_basis_revision,
         levels=(level_zero, level_one),
     )
 
     without_future_target = collect_recursive_upgrade_evidence(
         StrictStructureResult(
-            schema_version="chanlun-structure/v3",
+            schema="chanlun-structure",
             price_basis_revision=source.price_basis_revision,
             levels=(level_zero,),
         )

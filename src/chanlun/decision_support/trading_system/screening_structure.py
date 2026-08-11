@@ -93,7 +93,7 @@ def build_screening_evidence(
         decomposition_boundaries=assembly.decomposition_boundaries,
     )
     structure = StrictStructureResult(
-        schema_version="chanlun-structure/v3",
+        schema="chanlun-structure",
         price_basis_revision=price_basis_revision,
         levels=(level_zero,),
     )
@@ -117,25 +117,7 @@ def build_screening_evidence(
         strength=strength,
         price_quantum=structure_price_quantum,
     )
-    first = signal_engine.first_class_points()
-    second = signal_engine.second_class_points(first)
-    third = signal_engine.third_class_points()
-    confirmed_by_id = {}
-    for point in (*first, *second, *third):
-        previous = confirmed_by_id.setdefault(point.point_id, point)
-        if previous != point:
-            raise ValueError("screening point id maps to conflicting evidence")
-    confirmed = tuple(
-        sorted(
-            confirmed_by_id.values(),
-            key=lambda point: (
-                point.available_at,
-                point.structural_level,
-                point.point_type,
-                point.point_id,
-            ),
-        )
-    )
+    confirmed = signal_engine.confirmed_points()
     approaching = signal_engine.approaching_points(source_closed_at)
     divergences = merge_formal_divergence_ledger(
         structure,
@@ -232,7 +214,7 @@ def unfinished_segment_candidates(
         else:
             continue
         candidate_id = stable_structure_id(
-            "chanlun-screening-unfinished-segment-candidate/v1",
+            "chanlun-screening-unfinished-segment-candidate",
             evidence.price_basis_revision,
             source_frequency,
             point_type,

@@ -1,9 +1,4 @@
-"""TV chart_data 磁盘缓存 Mixin。
-
-含 ``_ChartCacheSafeUnpickler``（pickle RCE 防御反序列化器，仅允许原生数据类型）与
-``_ChartDataCacheMixin``。``_ChartCacheSafeUnpickler`` 通过 file_db.py
-re-export 保持外部 ``from chanlun.file_db import _ChartCacheSafeUnpickler`` 兼容。
-"""
+"""TV chart-data disk cache and its restricted unpickler."""
 
 from __future__ import annotations
 

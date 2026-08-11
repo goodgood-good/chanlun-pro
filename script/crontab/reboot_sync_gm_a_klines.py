@@ -8,8 +8,6 @@
 import datetime
 import time
 import traceback
-from concurrent.futures import ProcessPoolExecutor
-
 import pandas as pd
 from gm.api import ADJUST_NONE, get_symbols, history, set_serv_addr, set_token
 from tqdm.auto import tqdm
@@ -193,16 +191,7 @@ if __name__ == "__main__":
     for _code in tqdm(run_codes, desc="同步进度"):
         sync_code(_code)
 
-    # 慢慢来进行转换
-    if True:
-        for code in tqdm(run_codes):
-            convert_code(code)
-
-    # 多进程转换k线（需要时将 False 改为 True）
-    if False:
-        bar = tqdm(total=len(run_codes), desc="转换进度")
-        with ProcessPoolExecutor(max_workers=6) as ex:
-            for r in ex.map(convert_code, run_codes):
-                bar.update(1)
+    for code in tqdm(run_codes):
+        convert_code(code)
 
     print("Done")

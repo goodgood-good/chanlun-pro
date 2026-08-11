@@ -37,9 +37,8 @@ stock_cache: LRUCache = LRUCache(maxsize=100)
 # chart 缓存的磁盘读会阻塞 symbol 列表读写；此处独立成锁，两个无关缓存互不干扰。
 _stock_cache_lock = threading.Lock()
 
-# 落盘缓存格式版本：未来若 schema 变更（如新增字段、改 raw 为 processed），递增此值，
-# 旧文件会被忽略并被新版本覆盖，避免反序列化时 KeyError。
-_STOCKS_CACHE_VERSION = 2
+# 落盘缓存只接受这一份当前契约；不维护历史格式或版本分支。
+_STOCKS_CACHE_SCHEMA = "chanlun-stock-list-cache"
 
 # 全部支持的市场（用于校验配置项）
 _ALL_PRELOAD_EXCHANGES = [
@@ -196,10 +195,10 @@ def _load_stocks_from_disk(exchange: str):
             data = json.load(f)
         if not isinstance(data, dict):
             return None
-        if data.get("version") != _STOCKS_CACHE_VERSION:
+        if data.get("schema") != _STOCKS_CACHE_SCHEMA:
             LogUtil.info(
-                f"[stocks_cache] {path} version={data.get('version')!r} "
-                f"与当前 {_STOCKS_CACHE_VERSION} 不符，忽略"
+                f"[stocks_cache] {path} schema={data.get('schema')!r} "
+                f"与当前契约不符，忽略"
             )
             return None
         if data.get("market") != exchange:
@@ -228,7 +227,7 @@ def _save_stocks_to_disk(exchange: str, raw_stocks) -> None:
         return
     path = _stocks_cache_file(exchange)
     payload = {
-        "version": _STOCKS_CACHE_VERSION,
+        "schema": _STOCKS_CACHE_SCHEMA,
         "market": exchange,
         "updated_at": int(time.time()),
         "count": len(raw_stocks),
@@ -299,20 +298,10 @@ def _warm_cache_from_disk() -> None:
             LogUtil.warning(f"[stocks_cache] 恢复 {exchange} 失败: {e}")
 
 
-def _safe_all_stocks(ex, exchange: str):
-    """统一的 all_stocks 调用入口。
+def _safe_all_stocks(ex):
+    """调用所有市场适配器共享的无参股票列表契约。"""
 
-    历史 bug：``ExchangeChangQiao`` 是 ``@fun.singleton``，A/HK/US 三个市场共享同一实例。
-    如果只靠实例字段 ``default_market`` 区分市场，后注册的市场会覆盖前面的字段，结果
-    所有市场拿到的都是最后一个市场的数据（实测复现）。所以这里强制把 ``exchange`` 作为
-    参数传下去——cq 实现的 ``all_stocks`` 接受可选 ``market`` 参数；其它 exchange 的
-    签名是无参的，用 try/except 优雅降级即可。
-    """
-    try:
-        return ex.all_stocks(exchange)
-    except TypeError:
-        # 大多数非 cq 的 exchange 是无参签名，退回原行为。
-        return ex.all_stocks()
+    return ex.all_stocks()
 
 
 def _process_stock_list(all_stocks):
@@ -358,7 +347,7 @@ def _preload_single_exchange(exchange: str, skip_if_disk_warm: bool = False) -> 
             _mark_symbol_degraded(exchange, "exchange init failed")
             LogUtil.warning(f"市场 {exchange} 交易所初始化失败，跳过本次预加载")
             return
-        all_stocks = _safe_all_stocks(ex, exchange)
+        all_stocks = _safe_all_stocks(ex)
         if not all_stocks:
             _mark_symbol_degraded(exchange, "empty symbol list")
             LogUtil.warning(f"市场 {exchange} symbols 刷新返回空列表，保留现有缓存")

@@ -1,9 +1,7 @@
 """Render page-aligned Chanlun evidence into notification-safe PNG images.
 
 The notification renderer consumes the same strict structure snapshot as the
-TradingView page.  It deliberately does *not* call the legacy ``kcharts``
-renderer, because doing so would recalculate historical compatibility centers
-and could make an alert image disagree with the current page.
+TradingView page so alert images and the current page share one structure.
 """
 
 from __future__ import annotations
@@ -293,7 +291,7 @@ def _aligned_htf_macd(
 ) -> tuple[tuple[float, ...], tuple[float, ...], tuple[float, ...]] | None:
     """Return canonical MACD_HTF arrays aligned to every source K-line."""
 
-    result = getattr(cl_data, "_htf_macd", None)
+    result = getattr(cl_data, "_strict_htf_macd_by_level", {}).get(0)
 
     def valid(value: object) -> bool:
         if not isinstance(value, Mapping):
@@ -304,16 +302,6 @@ def _aligned_htf_macd(
             for name in ("dif", "dea", "hist")
         )
 
-    if not valid(result):
-        # Reuse the canonical core helper only when an older ICL implementation
-        # does not expose its cached result.  This is not a second formula.
-        from chanlun.core.macd_htf import compute_higher_macd
-
-        result = compute_higher_macd(
-            list(all_bars),
-            cl_data.get_frequency(),
-            getattr(cl_data, "market", None),
-        )
     if not valid(result):
         return None
     return tuple(
@@ -446,14 +434,12 @@ def _draw_chart(
 def render_multi_timeframe_png(
     charts: Iterable[tuple[str, ICL]],
     *,
-    chart_config: dict[str, object] | None = None,
     width: int = 1200,
     height_per_chart: int = 580,
     kline_count: int = 1200,
 ) -> bytes:
     """Return one vertically aligned PNG for physical 30m/5m/1m charts."""
 
-    del chart_config  # Compatibility only; structure settings are not overridden.
     values = tuple(charts)
     if not values:
         raise ValueError("at least one chart is required")
