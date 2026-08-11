@@ -63,19 +63,17 @@ class StrengthSnapshot:
 
 
 class MacdStrengthUnavailable(ValueError):
-    """The requested structural unit has no aligned directional MACD slice."""
+    """请求的结构单元没有与其对齐的方向性 MACD 切片。"""
 
 
 @dataclass(frozen=True, slots=True)
 class ComparisonMeasurement:
-    """Transient market interval for a three-unit divergence leg.
+    """三段背驰比较腿使用的临时市场区间。
 
-    The leg direction is owned by its first and terminal source units.  A
-    same-direction ``enter/reverse/re-enter`` sequence need not have the same
-    *net* displacement from the first start price to the terminal end price,
-    so it cannot be represented honestly by ``ConstituentUnit``.  This view
-    keeps the real endpoints and full price envelope while supplying the
-    interval and direction needed by the strength provider.
+    比较腿方向由第一段和末段来源单元决定。同向的“进入—反向—再进入”序列，
+    从首段起价到末段终价的净位移未必保持该方向，因此不能如实用
+    ``ConstituentUnit`` 表达。此视图保留真实端点和完整价格包络，同时提供力度
+    数据源所需的区间与方向。
     """
 
     unit_id: str
@@ -133,11 +131,10 @@ class ComparisonMeasurement:
 
 @dataclass(frozen=True, slots=True)
 class ComparisonLeg:
-    """One- or three-unit same-level movement used by a divergence comparison.
+    """背驰比较使用的一段或三段同级别走势。
 
-    ``measurement_unit`` is an immutable view over the complete market-time
-    interval.  ``units`` retains the exact source proof so an aggregate
-    three-unit leg can never be mistaken for one recursive source unit.
+    ``measurement_unit`` 是完整市场时间区间上的不可变视图；``units`` 保留
+    精确来源证明，使聚合三段腿永远不会被误认为一个递归来源单元。
     """
 
     units: tuple[ConstituentUnit, ...]
@@ -175,11 +172,10 @@ class ComparisonLeg:
 
 
 class MacdStrengthProvider:
-    """Read source-aligned MACD for one unified structural-level policy.
+    """按唯一结构级别策略读取与来源对齐的 MACD。
 
-    Physical level 0 uses the native MACD of the source K-line frequency.
-    Recursive level N uses the Nth causal partial higher-frequency series, so
-    structural recursion never changes the meaning of level 0 evidence.
+    物理第 0 层使用来源 K 线周期的原生 MACD；递归第 N 层使用第 N 级因果局部
+    高周期序列，因此结构递归永远不会改变第 0 层证据的含义。
     """
 
     def __init__(self, cd) -> None:
@@ -266,10 +262,9 @@ class MacdStrengthProvider:
 
         selected_indexes = tuple(range(left, right))
         if bucket_keys is not None:
-            # ``causal-partial-htf`` emits one provisional value per source
-            # bar so a live endpoint is available immediately.  MACD area is
-            # nevertheless an HTF-bar area: count each covered target bucket
-            # once, using the last value visible at this unit's endpoint.
+            # ``causal-partial-htf`` 为每根来源 K 线输出一个临时值，使实时端点
+            # 立即可用；但 MACD 面积仍按高周期 K 线计算，每个覆盖目标桶只统计
+            # 一次，并使用该结构单元端点当时可见的最后一个值。
             last_by_bucket: dict[object, int] = {}
             for index in selected_indexes:
                 last_by_bucket[bucket_keys[index]] = index
@@ -369,7 +364,7 @@ def _is_contiguous_three_leg(values: tuple[ConstituentUnit, ...]) -> bool:
 
 
 def comparison_leg_from_units(units) -> ComparisonLeg:
-    """Build an exact one- or three-unit divergence leg from source proof."""
+    """从来源证据构建精确的一段或三段背驰比较腿。"""
 
     values = tuple(units)
     if len(values) not in (1, 3):
@@ -387,12 +382,11 @@ def center_entry_comparison_leg(
     *,
     not_before_unit_id: str | None = None,
 ) -> ComparisonLeg | None:
-    """Return the center's formal one- or three-unit incoming movement.
+    """返回中枢正式的一段或三段进入走势。
 
-    A three-unit entry is the same-level ``enter/reverse/re-enter`` sequence
-    ending at ``center.entry_unit``.  Its first unit must be strictly outside
-    the frozen center interval on the incoming side.  Merely touching ``ZD``
-    or ``ZG`` counts as overlap and therefore leaves the entry one unit wide.
+    三段进入是以 ``center.entry_unit`` 结束的同级别“进入—反向—再进入”序列。
+    第一段必须严格位于冻结中枢区间的进入侧之外；仅触碰 ``ZD`` 或 ``ZG`` 也
+    视为重叠，此时进入段保持一段宽度。
     """
 
     if center.source_kind.value == "stroke_observation":
@@ -425,7 +419,7 @@ def center_departure_comparison_leg(
     *,
     width: int,
 ) -> ComparisonLeg | None:
-    """Return a departure with the exact width selected by the entry leg."""
+    """返回与进入腿所选宽度完全一致的离开腿。"""
 
     if width not in (1, 3):
         raise ValueError("departure comparison width must be one or three")
@@ -471,7 +465,7 @@ def compare_terminal_trend_divergence(
     *,
     trend_start_unit_id: str,
 ) -> tuple[DivergenceEvidence, ConstituentUnit] | None:
-    """Compare A/C with the width selected by the terminal center entry."""
+    """使用末端中枢进入腿确定的宽度比较 A/C 段。"""
 
     values = tuple(centers)
     if len(values) < 2 or provider is None:

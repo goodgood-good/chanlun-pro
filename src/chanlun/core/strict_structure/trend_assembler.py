@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 from chanlun.core.strict_structure.center_machine import (
     close_center_at_divergence,
     validate_unit_sequence,
 )
 from chanlun.core.strict_structure.center_relation import classify_center_relation
+from chanlun.core.strict_structure.divergence import (
+    compare_center_consolidation_divergence,
+)
 from chanlun.core.strict_structure.identity import build_trend_id, stable_structure_id
 from chanlun.core.strict_structure.models import (
     CenterRelation,
@@ -136,7 +141,7 @@ def _group_is_divergence_complete(group, constituent_units, divergence):
     if len(signal_ids) > len(unit_ids):
         return False
     return (
-        len(group) >= 2
+        len(group) >= 1
         and all(center.state is CenterState.COMPLETED for center in group[:-1])
         and terminal_center.state is CenterState.DIVERGENCE_CLOSED
         and terminal_center.boundary_divergence_id == divergence.divergence_id
@@ -224,18 +229,38 @@ def _confirmed_divergence_boundary(
     structural_level,
     strength,
 ):
-    """Return a confirmed width-matched divergence boundary."""
+    """返回趋势或盘整走势中已经确认的同宽背驰边界。"""
 
-    if strength is None or len(group) < 2:
+    if strength is None or not group:
         return None
     try:
-        compared = compare_terminal_trend_divergence(
-            group,
-            source_units,
-            strength,
-            trend_start_unit_id=source_units[group_start].unit_id,
-        )
-    except MacdStrengthUnavailable:
+        if len(group) >= 2:
+            compared = compare_terminal_trend_divergence(
+                group,
+                source_units,
+                strength,
+                trend_start_unit_id=source_units[group_start].unit_id,
+            )
+        else:
+            divergence = compare_center_consolidation_divergence(
+                group[-1],
+                source_units,
+                strength,
+                movement_start_unit_id=source_units[group_start].unit_id,
+            )
+            if divergence is None:
+                compared = None
+            else:
+                units_by_id = {item.unit_id: item for item in source_units}
+                signal = units_by_id.get(divergence.signal_unit_id)
+                if signal is None:
+                    raise ValueError(
+                        "盘整背驰的离开段末端不在同级别单元序列中"
+                    )
+                compared = (divergence, signal)
+    except (MacdStrengthUnavailable, KeyError):
+        # 稀疏回放或测试强度表可能只保存目标趋势的 MACD 切片；缺失的单中枢
+        # 切片与正式提供者抛出的 MacdStrengthUnavailable 语义相同。
         return None
     if compared is None:
         return None
@@ -293,12 +318,13 @@ def _confirmed_divergence_boundary(
         available_at,
         terminal_divergence=divergence,
     )
+    boundary_kind = f"{divergence.kind}_divergence"
     boundary = DecompositionBoundaryEvidence(
         boundary_id=stable_structure_id(
             "chanlun-decomposition-boundary",
             divergence.price_basis_revision,
             "same_level",
-            "trend_divergence",
+            boundary_kind,
             divergence.structural_level,
             divergence.source_kind.value,
             locked.trend_id,
@@ -306,7 +332,7 @@ def _confirmed_divergence_boundary(
             divergence.divergence_id,
         ),
         decomposition_mode="same_level",
-        boundary_kind="trend_divergence",
+        boundary_kind=boundary_kind,
         structural_level=divergence.structural_level,
         source_kind=divergence.source_kind,
         price_basis_revision=divergence.price_basis_revision,
@@ -347,7 +373,7 @@ def assemble_trend_types(
     boundaries = {}
     group = [values[0]]
     group_start = (
-        index[values[0].entry_unit.unit_id]
+        0
         if group_start_unit_id is None
         else index.get(group_start_unit_id, -1)
     )
@@ -355,6 +381,21 @@ def assemble_trend_types(
         raise ValueError("trend group start must precede its first center")
     group_relation = None
     active_divergence_end = None
+
+    def lock_completed_output(confirmed_at, available_at) -> None:
+        """后续背驰边界成立时，锁定此前仅完成但尚未冻结的走势。"""
+
+        for offset, trend in enumerate(output):
+            if trend.state is not TrendState.COMPLETE:
+                continue
+            if trend.confirmed_at is None:
+                raise ValueError("已完成走势缺少确认时间")
+            output[offset] = replace(
+                trend,
+                state=TrendState.LOCKED,
+                confirmed_at=max(trend.confirmed_at, confirmed_at),
+                available_at=max(trend.available_at, available_at),
+            )
 
     def record_complete(candidate_group, candidate_start):
         constituent_units = _constituent_units(
@@ -403,6 +444,10 @@ def assemble_trend_types(
                 previous = completed.setdefault(complete.trend_id, complete)
                 if previous != complete:
                     raise ValueError("completed divergence trend identity collision")
+                lock_completed_output(
+                    boundary.confirmed_at,
+                    boundary.available_at,
+                )
                 output.append(locked)
                 previous_boundary = boundaries.setdefault(
                     boundary.boundary_id, boundary
@@ -420,10 +465,8 @@ def assemble_trend_types(
                 active_divergence_end is not None
                 and first_body_index <= active_divergence_end
             ):
-                # This raw center window straddles a boundary that was already
-                # confirmed on an earlier prefix.  It cannot revoke or cross
-                # that immutable same-level split; wait for the first center
-                # whose body starts wholly to its right.
+                # 该原始中枢窗口跨越了此前前缀已确认的边界。它不能撤销或跨越
+                # 这个不可变同级别切分，应等待本体完全从边界右侧开始的首个中枢。
                 continue
             group = [current]
             group_relation = None
@@ -456,9 +499,8 @@ def assemble_trend_types(
         )
         record_complete(group, group_start)
         if current.state is not CenterState.COMPLETED:
-            # A live center can still be replaced by a later five-unit window.
-            # It may start a forming boundary, but it cannot irreversibly lock
-            # the preceding trend until its own center identity is completed.
+            # 实时中枢仍可能被后续五段窗口替换。它可以开启形成中边界，但在自身
+            # 中枢身份完成之前，不能不可逆地锁定前一段走势。
             output.append(
                 _build(
                     group,
@@ -472,9 +514,8 @@ def assemble_trend_types(
             terminal_return = group[-1].completion_return_unit
             if terminal_return is None:
                 raise ValueError("complete trend requires terminal return")
-            # The previous completion return is the earliest source unit of
-            # the next five-component center and keeps recursive trend units
-            # adjacent without reusing the prior departure.
+            # 前一中枢的完成回返是下一个五段中枢最早的来源单元；这样既保持递归
+            # 走势单元相邻，也不会重复使用上一离开段。
             group_start = index[terminal_return.unit_id]
             group = [current]
             group_relation = None
@@ -528,6 +569,10 @@ def assemble_trend_types(
         previous = completed.setdefault(complete.trend_id, complete)
         if previous != complete:
             raise ValueError("completed divergence trend identity collision")
+        lock_completed_output(
+            boundary.confirmed_at,
+            boundary.available_at,
+        )
         output.append(locked)
         previous_boundary = boundaries.setdefault(boundary.boundary_id, boundary)
         if previous_boundary != boundary:

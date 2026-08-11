@@ -16,8 +16,6 @@ from chanlun.core.strict_structure.models import (
 )
 from tests.core.strict_structure.helpers import (
     TEST_PRICE_BASIS,
-    completed_up_center,
-    ongoing_center,
     unit,
 )
 from tests.core.strict_structure.signal_helpers import confirmed_point
@@ -263,15 +261,6 @@ def promote_structure_to_level_one(structure):
 
 def test_lower_level_first_point_independently_emits_higher_level_second_buy():
     lower_anchor = unit(6, "down", 110, 90)
-    reverse_center = completed_up_center(7)
-    reverse_return = reverse_center.completion_return_unit
-    assert reverse_return is not None
-    reverse_children = (
-        reverse_center.entry_unit.unit_id,
-        *(item.unit_id for item in reverse_center.body_units),
-        reverse_center.completion_leave_unit.unit_id,
-        reverse_return.unit_id,
-    )
     signal = replace(
         unit(
             6,
@@ -294,10 +283,6 @@ def test_lower_level_first_point_independently_emits_higher_level_second_buy():
             structural_level=1,
         ),
         unit_id="l1-rebound",
-        market_end=reverse_return.market_end,
-        confirmed_at=reverse_return.confirmed_at,
-        available_at=reverse_return.available_at,
-        child_ids=reverse_children,
     )
     pullback = replace(
         unit(
@@ -347,7 +332,7 @@ def test_lower_level_first_point_independently_emits_higher_level_second_buy():
             replay_from=0,
         )
 
-    missing_reverse_third = StrictStructureResult(
+    structure = StrictStructureResult(
         schema="chanlun-structure",
         price_basis_revision=TEST_PRICE_BASIS,
         levels=(
@@ -367,50 +352,6 @@ def test_lower_level_first_point_independently_emits_higher_level_second_buy():
             ),
         ),
     )
-    assert engine_for(missing_reverse_third, None).second_class_points((lower,)) == ()
-
-    lower_units = (
-        lower_anchor,
-        reverse_center.entry_unit,
-        *reverse_center.body_units,
-        reverse_center.completion_leave_unit,
-        reverse_return,
-    )
-    lower_centers = CenterLevelResult(
-        structural_level=0,
-        price_basis_revision=TEST_PRICE_BASIS,
-        centers=(reverse_center,),
-        previews=(),
-        events=(),
-        locked_unit_count=len(lower_units),
-        replay_from=0,
-    )
-    structure = replace(
-        missing_reverse_third,
-        levels=(
-            StrictLevelResult(0, lower_units, lower_centers, (), ()),
-            missing_reverse_third.levels[1],
-        ),
-    )
-    unrelated_rebound = replace(rebound, child_ids=())
-    unrelated = replace(
-        structure,
-        levels=(
-            structure.levels[0],
-            StrictLevelResult(
-                1,
-                (signal, unrelated_rebound, pullback),
-                empty_centers(1, 3),
-                (),
-                (),
-            ),
-        ),
-    )
-    assert not tuple(
-        point
-        for point in engine_for(unrelated, None).second_class_points((lower,))
-        if point.structural_level == 1
-    )
 
     points = engine_for(structure, None).second_class_points((lower,))
     promoted = tuple(point for point in points if point.structural_level == 1)
@@ -419,77 +360,10 @@ def test_lower_level_first_point_independently_emits_higher_level_second_buy():
     assert point.point_type == "2buy"
     assert point.parent_point_id == lower.point_id
     assert "small_to_large_reversal" in point.evidence_codes
-    assert "last_lower_level_center_reverse_third_class" in point.evidence_codes
-    assert len(point.related_point_ids) == 2
-
-    later_center = ongoing_center(13, zd_tick=135, zg_tick=145)
-    later_leave = later_center.pending_leave_unit
-    assert later_leave is not None
-    later_children = (
-        later_center.entry_unit.unit_id,
-        *(item.unit_id for item in later_center.body_units),
-        later_leave.unit_id,
-    )
-    extended_rebound = replace(
-        rebound,
-        market_end=later_leave.market_end,
-        confirmed_at=later_leave.confirmed_at,
-        available_at=later_leave.available_at,
-        child_ids=reverse_children + later_children,
-    )
-    extended_pullback = replace(
-        unit(
-            18,
-            "down",
-            120,
-            105,
-            source_kind=SourceKind.TREND_TYPE,
-            structural_level=1,
-        ),
-        unit_id="l1-extended-pullback",
-    )
-    extended_lower_units = (
-        *lower_units,
-        later_center.entry_unit,
-        *later_center.body_units,
-        later_leave,
-    )
-    dynamic_last = StrictStructureResult(
-        schema="chanlun-structure",
-        price_basis_revision=TEST_PRICE_BASIS,
-        levels=(
-            StrictLevelResult(
-                0,
-                extended_lower_units,
-                CenterLevelResult(
-                    structural_level=0,
-                    price_basis_revision=TEST_PRICE_BASIS,
-                    centers=(reverse_center, later_center),
-                    previews=(),
-                    events=(),
-                    locked_unit_count=len(extended_lower_units),
-                    replay_from=0,
-                ),
-                (),
-                (),
-            ),
-            StrictLevelResult(
-                1,
-                (signal, extended_rebound, extended_pullback),
-                empty_centers(1, 3),
-                (),
-                (),
-            ),
-        ),
-    )
-    assert not tuple(
-        point
-        for point in engine_for(dynamic_last, None).second_class_points((lower,))
-        if point.structural_level == 1
-    )
+    assert point.related_point_ids == (lower.point_id,)
 
 
-def test_small_first_point_can_promote_across_multiple_levels_with_direct_sublevel_third():
+def test_small_first_point_can_promote_across_multiple_levels():
     lower_anchor = unit(6, "down", 110, 90)
     bridge = replace(
         unit(
@@ -678,7 +552,7 @@ def test_small_first_point_can_promote_across_multiple_levels_with_direct_sublev
     promoted = tuple(point for point in points if point.structural_level == 2)
     assert len(promoted) == 1
     assert promoted[0].parent_point_id == parent.point_id
-    assert len(promoted[0].related_point_ids) == 2
+    assert promoted[0].related_point_ids == (parent.point_id,)
 
     false_extreme = replace(signal, low_tick=80)
     rejected = replace(

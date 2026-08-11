@@ -22,7 +22,7 @@ def structural_point_id_map(
     code: str,
     source_frequency: str,
 ) -> dict[str, str]:
-    """Translate strict ids to trading ids without breaking evidence links."""
+    """在不破坏证据关系的前提下把严格结构身份转换为交易身份。"""
 
     values = tuple(raw_points)
     raw_by_id = {point.point_id: point for point in values}
@@ -135,9 +135,6 @@ def extract_confirmed_points(
                 small_to_large_carrier_unit_ids=(
                     raw.small_to_large_carrier_unit_ids
                 ),
-                small_to_large_last_center_id=(
-                    raw.small_to_large_last_center_id
-                ),
             )
         )
     return tuple(sorted(output, key=lambda point: (point.available_at, point.point_id)))
@@ -162,7 +159,6 @@ def point_signature(
             point.parent_point_id,
             point.related_point_ids,
             point.small_to_large_carrier_unit_ids,
-            point.small_to_large_last_center_id,
         )
         for point in points
     )

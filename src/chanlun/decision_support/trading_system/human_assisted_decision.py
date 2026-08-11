@@ -1,9 +1,8 @@
-"""One decision core for the human-assisted live screen and causal replay.
+"""人机协同实时选股与因果回放共用的唯一决策核心。
 
-This module deliberately owns both evaluation and decision serialization.  A
-web page may add presentation-only fields (for example chart URLs), but it may
-not reinterpret a signal.  Historical replay receives the very same
-``SymbolStructureBundle`` and calls the very same core.
+本模块同时负责评估与决策序列化。网页可以增加仅用于展示的字段（例如图表
+链接），但不能重新解释信号。历史回放接收完全相同的
+``SymbolStructureBundle``，并调用同一个核心。
 """
 
 from __future__ import annotations
@@ -22,6 +21,9 @@ from chanlun.decision_support.trading_system.engine import (
     EvaluatedSignal,
     SymbolStructureBundle,
     TradingEngine,
+)
+from chanlun.decision_support.trading_system.direct_recursive_structure import (
+    direct_recursive_alignment_contract,
 )
 from chanlun.decision_support.trading_system.models import (
     SectorAssessment,
@@ -97,7 +99,7 @@ _HIGHER_TIMEFRAME_DECISION_FIELDS = (
 
 
 def _trading_policy_document(policy: TradingPolicy) -> dict[str, object]:
-    """Serialize every decision-affecting policy field without losing decimals."""
+    """无精度损失地序列化所有影响决策的策略字段。"""
 
     return {
         "require_confirmed_five_minute": policy.require_confirmed_five_minute,
@@ -123,7 +125,7 @@ def _trading_policy_document(policy: TradingPolicy) -> dict[str, object]:
 
 @dataclass(frozen=True, slots=True)
 class HumanAssistedDecisionContract:
-    """Frozen identity of the decision logic shared by screen and replay."""
+    """选股、盘中监听与回放共同使用的冻结决策逻辑身份。"""
 
     policy: TradingPolicy
     schema: str = DECISION_CORE_SCHEMA
@@ -135,6 +137,9 @@ class HumanAssistedDecisionContract:
     stroke_mode: str = STRICT_STROKE_MODE
     strict_base_profile_id: str = STRICT_BASE_PROFILE_ID
     strict_base_profile_revision: str = strict_base_config_revision()
+    direct_recursive_alignment_parameter_set_id: str = (
+        direct_recursive_alignment_contract().parameter_set_id
+    )
     structure_scope: str = SCREENING_STRUCTURE_SCOPE
     recursive_structure_allowed: bool = True
     unfinished_segment_candidates: bool = True
@@ -157,6 +162,8 @@ class HumanAssistedDecisionContract:
             or self.stroke_mode != STRICT_STROKE_MODE
             or self.strict_base_profile_id != STRICT_BASE_PROFILE_ID
             or self.strict_base_profile_revision != strict_base_config_revision()
+            or self.direct_recursive_alignment_parameter_set_id
+            != direct_recursive_alignment_contract().parameter_set_id
             or self.structure_scope != SCREENING_STRUCTURE_SCOPE
             or not self.recursive_structure_allowed
             or not self.unfinished_segment_candidates
@@ -177,9 +184,8 @@ class HumanAssistedDecisionContract:
         return {
             "schema": self.schema,
             "contract_id": self.contract_id,
-            # The contract id has always bound ``policy``.  It must also be
-            # present in the portable document so an archive can independently
-            # reconstruct that id instead of trusting an opaque self-assertion.
+            # 合同身份始终绑定 ``policy``；可移植文档也必须保存它，使归档能够
+            # 独立重建身份，而不是信任不透明的自我声明。
             "policy": _trading_policy_document(self.policy),
             "higher_context_frequency": self.higher_context_frequency,
             "strategic_frequency": self.strategic_frequency,
@@ -191,6 +197,9 @@ class HumanAssistedDecisionContract:
             "stroke_mode": self.stroke_mode,
             "strict_base_profile_id": self.strict_base_profile_id,
             "strict_base_profile_revision": self.strict_base_profile_revision,
+            "direct_recursive_alignment_parameter_set_id": (
+                self.direct_recursive_alignment_parameter_set_id
+            ),
             "structure_scope": self.structure_scope,
             "recursive_structure_allowed": self.recursive_structure_allowed,
             "unfinished_segment_candidates": self.unfinished_segment_candidates,
@@ -203,12 +212,10 @@ class HumanAssistedDecisionContract:
 def validate_human_assisted_contract_document(
     document: Mapping[str, object],
 ) -> str:
-    """Reconstruct and verify a portable decision-core contract document.
+    """重建并验证可移植的决策核心合同文档。
 
-    The outer screening snapshot hash proves that a document was not changed
-    accidentally.  This verifier additionally proves that its declared
-    ``contract_id`` is the canonical hash of *all* decision parameters,
-    including the embedded ``TradingPolicy``.
+    外层选股快照哈希证明文档未被意外修改；本验证器进一步证明其声明的
+    ``contract_id`` 是全部决策参数（包括内嵌 ``TradingPolicy``）的标准哈希。
     """
 
     expected_contract_fields = {
@@ -268,6 +275,7 @@ def validate_human_assisted_contract_document(
         "stroke_mode",
         "strict_base_profile_id",
         "strict_base_profile_revision",
+        "direct_recursive_alignment_parameter_set_id",
         "structure_scope",
         "live_status",
     )
@@ -298,6 +306,9 @@ def validate_human_assisted_contract_document(
         stroke_mode=str(document["stroke_mode"]),
         strict_base_profile_id=str(document["strict_base_profile_id"]),
         strict_base_profile_revision=str(document["strict_base_profile_revision"]),
+        direct_recursive_alignment_parameter_set_id=str(
+            document["direct_recursive_alignment_parameter_set_id"]
+        ),
         structure_scope=str(document["structure_scope"]),
         recursive_structure_allowed=bool(document["recursive_structure_allowed"]),
         unfinished_segment_candidates=bool(document["unfinished_segment_candidates"]),
@@ -330,7 +341,7 @@ def sector_decision_document(
     *,
     ordinal: int | None,
 ) -> dict[str, object]:
-    """Serialize all evidence used to order a sector without changing eligibility."""
+    """序列化板块排序使用的全部证据，但不改变其入选资格。"""
 
     strength = getattr(assessment, "horizontal_strength", None)
     anchor = getattr(assessment, "strength_anchor_session", None)
@@ -430,12 +441,11 @@ def apply_sector_selection_scope(
     document: dict[str, object],
     selection_sources: Sequence[str],
 ) -> None:
-    """Apply the sector-first entry rule inside the shared decision contract.
+    """在共享决策合同内应用板块优先入场规则。
 
-    The web screen used to perform this mutation after the common evaluator had
-    returned.  Historical replay could therefore report an entry as allowed
-    while the page correctly kept the same buy monitor-only.  Keeping the rule
-    here makes selection provenance part of the portable decision identity.
+    过去网页选股会在公共评估器返回后再修改结果，导致历史回放可能允许入场，
+    而页面却正确地把同一买点保留为仅监控。将规则放在这里，使选股来源成为
+    可移植决策身份的一部分。
     """
 
     sources = tuple(dict.fromkeys(selection_sources))
@@ -463,12 +473,10 @@ def apply_sector_selection_scope(
 def signal_decision_projection(
     document: Mapping[str, object],
 ) -> dict[str, object]:
-    """Return the exact decision-only projection shared by page and replay.
+    """返回页面与回放共用的精确纯决策投影。
 
-    Page-only chart links and large explanatory QMT evidence may be appended to
-    the flat transport document.  They are deliberately excluded here because
-    they explain a decision but may not alter it.  The compact projection stays
-    independently recomputable from either transport.
+    扁平传输文档可以附加页面专用图表链接和大体积 QMT 解释证据。它们只能解释
+    决策而不能改变决策，因此在此明确排除；紧凑投影仍可从任一传输文档独立重算。
     """
 
     if document.get("decision_document_schema") != SIGNAL_DECISION_DOCUMENT_SCHEMA:
@@ -500,7 +508,7 @@ def signal_decision_document_id(document: Mapping[str, object]) -> str:
 
 
 def validate_signal_decision_document(document: Mapping[str, object]) -> str:
-    """Verify the portable page/replay decision identity and return it."""
+    """验证可移植的页面/回放决策身份并返回该身份。"""
 
     expected = signal_decision_document_id(document)
     if document.get("decision_document_id") != expected:
@@ -516,7 +524,7 @@ def serialize_evaluated_signal(
     decision_core_id: str,
     selection_sources: Sequence[str] = (),
 ) -> dict[str, object]:
-    """Canonical decision fields used identically by live screen and replay."""
+    """返回实时选股与回放完全一致使用的标准决策字段。"""
 
     point = item.setup.point
     trigger = item.trigger
@@ -659,7 +667,7 @@ def serialize_evaluated_signal(
 
 
 class HumanAssistedDecisionCore:
-    """Sole evaluator for page screening and historical bundle replay."""
+    """页面选股与历史结构包回放的唯一评估器。"""
 
     def __init__(self, policy: TradingPolicy = TradingPolicy()) -> None:
         self.contract = HumanAssistedDecisionContract(policy=policy)
@@ -732,7 +740,7 @@ def replay_human_assisted_bundles(
     core: HumanAssistedDecisionCore,
     selection_sources_by_code: Mapping[str, Sequence[str]] | None = None,
 ) -> tuple[tuple[str, tuple[dict[str, object], ...]], ...]:
-    """Causal replay adapter; callers must only pass point-in-time bundles."""
+    """因果回放适配器；调用方只能传入当时可见的时点结构包。"""
 
     ordered = tuple(sorted(bundles, key=lambda value: (value.as_of, value.code)))
     sources = selection_sources_by_code or {}

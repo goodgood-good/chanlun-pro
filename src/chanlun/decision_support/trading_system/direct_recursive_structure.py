@@ -1,17 +1,14 @@
-"""Original-Chanlun 30m strategy from one causal one-minute structure graph.
+"""从唯一因果一分钟结构图生成忠于缠论原义的 30 分钟策略。
 
-Logical strategy levels are mapped without mutating raw structure semantics:
+逻辑策略级别在不改变原始结构语义的前提下映射：
 
-* L0 / 30m strategy = recursive structural level 2;
-* L1 / 5m tactical return = recursive structural level 1 represented by the
-  level-2 center's completed leave and first-return units;
-* L2 / 1m locator = recursive structural level 0 and must be a descendant of
-  that exact first-return unit.
+* L0 / 30 分钟策略 = 递归结构第 2 层；
+* L1 / 5 分钟战术回返 = 递归结构第 1 层，由第 2 层中枢的已完成离开段和
+  首次回返段表达；
+* L2 / 1 分钟定位 = 递归结构第 0 层，且必须是该精确首次回返单元的后代。
 
-Nine-segment derivation is corroborating/reclassification evidence.  A
-naturally-recursed standard center is the only signal authority; unresolved
-nine-segment ambiguity or relevant center expansion blocks the chain instead
-of creating a second signal channel.
+九段推导只作为佐证或重新分类证据。自然递归得到的标准中枢是唯一信号权威；
+未解决的九段歧义或相关中枢扩展会阻断该链，而不会建立第二条信号通道。
 """
 
 from __future__ import annotations
@@ -292,7 +289,7 @@ def build_direct_recursive_structure_path(
     evidence: StrictEvidenceResult,
     code: str,
 ) -> DirectRecursiveStructurePath:
-    """Build every causal 30m strategic chain visible in one final snapshot."""
+    """构建一个最终快照中所有可见的因果 30 分钟策略链。"""
 
     if evidence.symbol != code or evidence.source_frequency != "1m":
         raise ValueError("direct recursive structure requires matching 1m evidence")

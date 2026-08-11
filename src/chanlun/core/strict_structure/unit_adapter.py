@@ -8,7 +8,7 @@ from chanlun.core.strict_structure.models import ConstituentUnit, SourceKind, Tr
 
 
 class UnitLockRegistry:
-    """Records the first causal confirmation attached to each stable unit."""
+    """记录每个稳定单元首次获得的因果确认时间。"""
 
     def __init__(self, price_basis_revision: str) -> None:
         if (

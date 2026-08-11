@@ -12,6 +12,9 @@ from chanlun.decision_support.trading_system.higher_timeframe_gate import (
 from chanlun.decision_support.trading_system.etf_proxy_facts import (
     RiskMappingSupplyFacts,
 )
+from chanlun.decision_support.trading_system.direct_recursive_structure import (
+    direct_recursive_alignment_contract,
+)
 from chanlun.decision_support.trading_system.human_assisted_decision import (
     HumanAssistedDecisionCore,
     MONITOR_ONLY_BUY_REASON_CODE,
@@ -172,6 +175,9 @@ def test_decision_core_identity_is_stable_and_parameter_bound() -> None:
     assert first.contract.stroke_mode == "strict-cl-k-distance"
     assert first.contract.strict_base_profile_id == ("chanlun-source-faithful-base")
     assert first.contract.strict_base_profile_revision.startswith("sha256:")
+    assert first.contract.direct_recursive_alignment_parameter_set_id == (
+        direct_recursive_alignment_contract().parameter_set_id
+    )
     assert first.contract.structure_scope == "physical-timeframe-recursive"
     assert first.contract.recursive_structure_allowed is True
     assert first.contract.physical_structure_frequencies == (
@@ -183,6 +189,10 @@ def test_decision_core_identity_is_stable_and_parameter_bound() -> None:
     document = first.contract.document()
     assert document["policy"]["minimum_tick"] == "0.01"
     assert validate_human_assisted_contract_document(document) == (first.contract_id)
+
+    document["direct_recursive_alignment_parameter_set_id"] = "sha256:" + "0" * 64
+    with pytest.raises(ValueError, match="physical structure contract changed"):
+        validate_human_assisted_contract_document(document)
 
 
 def test_daily_physical_structure_can_block_new_buy_with_recursive_graph() -> None:

@@ -371,8 +371,8 @@ def test_entry_first_leg_touching_center_falls_back_to_one_unit_comparison():
     assert len(centers) == 2
     center = centers[-1]
 
-    # Candidate E1/E2/E3 is u-4/u-5/u-6.  E1.high == ZD, so E1 touches
-    # the center interval and is not an external incoming leg.
+    # 候选 E1/E2/E3 为 u-4/u-5/u-6。E1.high == ZD，说明 E1 接触
+    # 中枢闭区间，不能作为中枢外部的进入第一段。
     assert values[4].high_tick == center.zd_tick
     entry = center_entry_comparison_leg(center, values)
     assert entry is not None
@@ -531,44 +531,55 @@ def test_boundary_replay_keeps_centers_and_locked_trends_on_one_side():
     level = latest.levels[0]
     assert tuple(item.anchor_unit_id for item in level.decomposition_boundaries) == (
         "u-17",
+        "u-23",
     )
-    boundary = level.decomposition_boundaries[0]
-    terminal_centers = tuple(
-        center
-        for center in level.center_result.centers
-        if center.center_id == boundary.terminal_center_id
-    )
-    assert len(terminal_centers) == 1
-    terminal_center = terminal_centers[0]
-    assert terminal_center.state is CenterState.DIVERGENCE_CLOSED
-    assert terminal_center.pending_leave_unit is None
-    assert terminal_center.completion_leave_unit is not None
-    assert terminal_center.completion_leave_unit.unit_id == (
-        boundary.divergence.signal_leg_unit_ids[0]
-    )
-    assert terminal_center.boundary_anchor_unit_id == boundary.anchor_unit_id
-    assert terminal_center.boundary_divergence_id == (boundary.divergence.divergence_id)
     locked = tuple(trend for trend in level.trend_types if trend.locked)
-    boundary_trend = next(
-        trend for trend in locked if trend.trend_id == boundary.left_trend_id
-    )
-    assert boundary_trend.centers[-1] == terminal_center
-    assert boundary_trend.terminal_unit.unit_id == boundary.anchor_unit_id
-    assert boundary_trend.terminal_divergence == boundary.divergence
     assert all(
         previous.end_tick == current.start_tick
         for previous, current in zip(locked, locked[1:])
     )
     index = {item.unit_id: offset for offset, item in enumerate(level.units)}
-    boundary_index = index[boundary.anchor_unit_id]
-    for center in level.center_result.centers:
-        evidence = [center.entry_unit, *center.body_units]
-        if center.completion_leave_unit is not None:
-            evidence.append(center.completion_leave_unit)
-        if center.completion_return_unit is not None:
-            evidence.append(center.completion_return_unit)
-        offsets = tuple(index[item.unit_id] for item in evidence)
-        assert not min(offsets) <= boundary_index < max(offsets)
+    for boundary in level.decomposition_boundaries:
+        terminal_centers = tuple(
+            center
+            for center in level.center_result.centers
+            if center.center_id == boundary.terminal_center_id
+        )
+        assert len(terminal_centers) == 1
+        terminal_center = terminal_centers[0]
+        assert terminal_center.state is CenterState.DIVERGENCE_CLOSED
+        if boundary.divergence.comparison_width == 1:
+            assert terminal_center.pending_leave_unit is not None
+            assert terminal_center.pending_leave_unit.unit_id == (
+                boundary.divergence.signal_unit_id
+            )
+            assert terminal_center.completion_leave_unit is None
+        else:
+            assert terminal_center.pending_leave_unit is None
+            assert terminal_center.completion_leave_unit is not None
+            assert terminal_center.completion_leave_unit.unit_id == (
+                boundary.divergence.signal_leg_unit_ids[0]
+            )
+        assert terminal_center.boundary_anchor_unit_id == boundary.anchor_unit_id
+        assert terminal_center.boundary_divergence_id == (
+            boundary.divergence.divergence_id
+        )
+        boundary_trend = next(
+            trend for trend in locked if trend.trend_id == boundary.left_trend_id
+        )
+        assert boundary_trend.centers[-1] == terminal_center
+        assert boundary_trend.terminal_unit.unit_id == boundary.anchor_unit_id
+        assert boundary_trend.terminal_divergence == boundary.divergence
+
+        boundary_index = index[boundary.anchor_unit_id]
+        for center in level.center_result.centers:
+            evidence = [center.entry_unit, *center.body_units]
+            if center.completion_leave_unit is not None:
+                evidence.append(center.completion_leave_unit)
+            if center.completion_return_unit is not None:
+                evidence.append(center.completion_return_unit)
+            offsets = tuple(index[item.unit_id] for item in evidence)
+            assert not min(offsets) <= boundary_index < max(offsets)
 
 
 def test_raw_departure_without_whole_trend_new_extreme_is_not_trend_boundary():
@@ -608,9 +619,17 @@ def test_raw_departure_without_whole_trend_new_extreme_is_not_trend_boundary():
     assert later is values[14]
     assert later.high_tick > earlier.high_tick
     assert later.high_tick < values[0].high_tick
-    assert result.levels[0].decomposition_boundaries == ()
+    # 编号 u-10 相对从 u-5 开始的新盘整走势创出新高，因此可形成盘整背驰
+    # 边界；编号 u-14 虽高于前一中枢离开段，却没有突破趋势起点 u-0 的高点，
+    # 不能据此生成趋势背驰边界。
+    assert tuple(
+        (boundary.boundary_kind, boundary.anchor_unit_id)
+        for boundary in result.levels[0].decomposition_boundaries
+    ) == (("consolidation_divergence", "u-10"),)
     assert all(
-        trend.terminal_divergence is None for trend in result.levels[0].completed_trends
+        trend.terminal_divergence is None
+        or trend.terminal_divergence.kind != "trend"
+        for trend in result.levels[0].completed_trends
     )
 
 

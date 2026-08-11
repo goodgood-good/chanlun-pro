@@ -56,7 +56,7 @@ class SignalAdapterDiagnostic:
 
 @dataclass(frozen=True, slots=True)
 class FrozenCompletedTrendFact:
-    """Read-only copy of one completed physical or recursive trend."""
+    """一段已完成物理或递归走势的只读副本。"""
 
     trend_id: str
     source_frequency: Literal["30m", "5m", "1m"]
@@ -104,7 +104,7 @@ def frozen_completed_trend_fact(
     *,
     source_frequency: Literal["30m", "5m", "1m"],
 ) -> FrozenCompletedTrendFact:
-    """Copy immutable facts without changing or wrapping the frozen core object."""
+    """复制不可变事实，不改变或包装冻结的核心对象。"""
 
     if not trend.complete:
         raise ValueError("only completed trends apply")
@@ -134,7 +134,7 @@ def frozen_completed_trend_fact(
 
 @dataclass(frozen=True, slots=True)
 class FrozenCenterPhaseFact:
-    """Point-in-time L1 phase copied from one frozen causal center snapshot."""
+    """从冻结因果中枢快照复制的时点第 1 层阶段。"""
 
     center_id: str
     source_frequency: str
@@ -180,11 +180,10 @@ Qualification = Literal["PASS", "FAIL", "UNRESOLVED"]
 
 @dataclass(frozen=True, slots=True)
 class FrozenSignalExecutionFact:
-    """Explicit non-structural facts needed to promote one structural signal.
+    """把一个结构信号提升为可执行信号所需的明确非结构事实。
 
-    The adapter never derives these values from prices or later account state.
-    A missing envelope leaves the structural observation in the audit ledger but
-    makes it ineligible for a replay order event.
+    适配器绝不从价格或后续账户状态推导这些值。缺少执行边界时，结构观察仍保留
+    在审计账本中，但不能生成回放订单事件。
     """
 
     signal_point_id: str
@@ -363,22 +362,6 @@ def _point_proof(
         if not required_codes.issubset(set(point.evidence_codes)):
             reasons.append("UNRESOLVED_SECOND_POINT_COMPLETION_EVIDENCE")
         proof_ids: list[str] = [] if parent is None else [parent.point_id]
-        if "small_to_large_reversal" in point.evidence_codes:
-            reverse_type = "3buy" if point.side == "buy" else "3sell"
-            reverse = tuple(
-                points_by_id.get(point_id)
-                for point_id in point.related_point_ids
-                if points_by_id.get(point_id) is not None
-                and points_by_id[point_id].point_type == reverse_type
-                and points_by_id[point_id].side == point.side
-                and points_by_id[point_id].recursive_level
-                == point.recursive_level - 1
-                and points_by_id[point_id].available_at <= point.available_at
-            )
-            if len(reverse) != 1:
-                reasons.append("UNRESOLVED_SMALL_TO_LARGE_REVERSE_THIRD_LINK")
-            else:
-                proof_ids.append(reverse[0].point_id)
         return (
             tuple(proof_ids),
             tuple(reasons),
@@ -423,7 +406,7 @@ def build_structure_signal_ledger(
         "USER_OVERRIDE_INDEPENDENT_TIMEFRAMES",
     ] = "USER_OVERRIDE_INDEPENDENT_TIMEFRAMES",
 ) -> StructureSignalLedger:
-    """Map frozen facts to strict strategy signals without deriving a second signal system."""
+    """把冻结事实映射为严格策略信号，不派生第二套信号系统。"""
 
     start = normalize_datetime(coverage_start, "coverage_start")
     end = normalize_datetime(coverage_end, "coverage_end")

@@ -9,7 +9,7 @@ from chanlun.core.strict_structure.models import ConstituentUnit, SourceKind
 
 @dataclass(frozen=True, slots=True)
 class SameLevelCombination:
-    """Audit evidence for one associative same-direction combination."""
+    """一次同向结合律合并的审计证据。"""
 
     combined_unit_id: str
     child_unit_ids: tuple[str, ...]
@@ -19,7 +19,7 @@ class SameLevelCombination:
 
 @dataclass(frozen=True, slots=True)
 class SameLevelDecompositionResult:
-    """A deterministic same-level decomposition ready for recursion."""
+    """可直接递归的确定性同级别分解结果。"""
 
     units: tuple[ConstituentUnit, ...]
     oscillatory_ids: frozenset[str]
@@ -30,10 +30,9 @@ def _validate_source_chain(
     values: tuple[ConstituentUnit, ...],
     oscillatory_ids: frozenset[str],
 ) -> None:
-    """Validate every invariant except direction alternation.
+    """验证除方向交替外的所有不变量。
 
-    Direction cannot be checked until adjacent same-direction trends have been
-    combined.  All other causal and identity constraints remain fail-closed.
+    相邻同向走势完成合并前不能检查方向；其余因果和身份约束仍采用封闭失败。
     """
 
     if not values:
@@ -131,21 +130,15 @@ def combine_same_level_trends(
     oscillatory_ids: frozenset[str],
     protected_after_ids: frozenset[str] = frozenset(),
 ) -> SameLevelDecompositionResult:
-    """Apply the same-level combination law before recursive center building.
+    """在递归构建中枢前应用同级别结合律。
 
-    Consecutive directional trend types with the same direction are one trend
-    under the associative combination law.  Consolidations are directionless
-    connectors for this purpose and are deliberately never merged, so
-    ``trend + consolidation + trend`` and ``consolidation + consolidation``
-    remain observable decompositions.  Confirmed divergence edges belong to
-    the fixed same-level ledger.  If the higher-level associative carrier must
-    combine adjacent same-direction trends, ``SameLevelCombination`` retains
-    every protected child edge instead of erasing its provenance.
+    按结合律，连续同向的有向走势类型属于同一走势。盘整在此作为无方向连接件，
+    故意不参与合并，使 ``趋势 + 盘整 + 趋势`` 和 ``盘整 + 盘整`` 仍保持可观察
+    分解。已确认背驰边界属于固定同级别账本；若高一级结合载体必须合并相邻
+    同向走势，``SameLevelCombination`` 会保留每条受保护子边界而不抹去来源。
 
-    The output is deterministic and prefix-causal: a run is combined only from
-    already locked source trend types, and the composite becomes available no
-    earlier than its latest child.  Its ``child_ids`` retain the complete
-    one-level provenance used by replay and audit code.
+    输出具有确定性和前缀因果性：只合并已锁定的来源走势类型，组合结果不会早于
+    最晚子单元可用；其 ``child_ids`` 保留回放与审计所需的完整单层来源。
     """
 
     values = tuple(units)

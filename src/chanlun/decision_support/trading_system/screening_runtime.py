@@ -1,4 +1,4 @@
-"""Canonical frame-to-evidence runtime for strict physical-timeframe signals."""
+"""把已收盘行情帧转换成严格物理周期证据的唯一生产入口。"""
 
 from __future__ import annotations
 
@@ -27,11 +27,10 @@ def screening_evidence_from_frame(
     as_of: datetime,
     market: str = "a",
 ) -> StrictEvidenceResult:
-    """Build canonical recursive strict evidence from a closed-bar frame.
+    """根据已收盘行情帧构建唯一的递归严格结构证据。
 
-    Chart adapters, live screening, historical replay and stock selection must
-    enter the structure engine here.  Every consumer receives the same
-    physical-frequency recursive structure graph.
+    图表适配、实时筛选、历史回放和选股都必须从这里进入结构引擎，确保每个
+    消费方取得同一份物理周期递归结构图。
     """
 
     if not isinstance(code, str) or not code:

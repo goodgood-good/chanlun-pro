@@ -165,10 +165,13 @@ def test_strict_base_profile_contains_only_current_production_rules():
         "entry-width-matched-one-or-three-price-extreme-any-macd-decay"
     )
     assert config["decomposition_rule"] == (
-        "matched-leg-terminal-prefix-partition"
+        "trend-or-consolidation-divergence-terminal-prefix-partition"
+    )
+    assert config["first_class_rule"] == (
+        "trend-or-consolidation-divergence-reversal"
     )
     assert config["second_class_rule"] == (
-        "parent-first-return-or-cross-level-small-large-direct-subcenter-third-retest"
+        "same-or-lower-first-adjacent-rebound-first-pullback"
     )
     assert not any(
         key.startswith(("zs_", "chart_", "recursive_")) or "mmd" in key

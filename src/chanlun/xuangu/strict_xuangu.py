@@ -1,4 +1,4 @@
-"""Stock-selection predicates backed by canonical recursive strict evidence."""
+"""由唯一递归严格结构证据驱动的选股条件。"""
 
 from __future__ import annotations
 
@@ -53,7 +53,7 @@ def _evidence(code: str, mk_datas, frequency: str) -> StrictEvidenceResult:
 def _terminal_locked_unit_ids(
     evidence: StrictEvidenceResult,
 ) -> dict[int, str]:
-    """Return the current locked unit independently for every recursive level."""
+    """分别返回每个递归级别当前最后一个已锁定单元。"""
 
     terminal_by_level: dict[int, str] = {}
     for level in evidence.structure.levels:
@@ -234,7 +234,7 @@ def select_strict_point_divergence_confluence(
     mk_datas,
     opt_type: list | None = None,
 ):
-    """Require a current strict point and same-side strict divergence."""
+    """要求当前严格买卖点与严格背驰方向一致。"""
 
     sides = _allowed_sides(opt_type)
     evidence = _evidence(code, mk_datas, mk_datas.frequencys[0])
@@ -307,7 +307,7 @@ def select_strict_lower_class12_confluence(
 
 
 def select_closed_ma250(code: str, mk_datas, opt_type: list | None = None):
-    """Non-structural control task; use the same closed-bar boundary."""
+    """非结构类对照任务，同样使用统一的收盘边界。"""
 
     sides = _allowed_sides(opt_type)
     frequency = mk_datas.frequencys[0]

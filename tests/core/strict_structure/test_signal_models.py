@@ -61,7 +61,7 @@ def test_weak_divergence_variant_requires_second_class_consolidation_divergence(
 
 
 def test_point_class_requires_compatible_variant_parent_and_divergence():
-    with pytest.raises(ValueError, match="first class requires standard trend divergence"):
+    with pytest.raises(ValueError, match="一类买卖点必须来自正式趋势背驰或盘整背驰"):
         replace(
             confirmed_point(point_type="1buy"),
             variant=StrictPointVariant.STRICT,

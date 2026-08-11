@@ -23,7 +23,7 @@ def close_center_at_divergence(
     center: TrendCenter,
     divergence: DivergenceEvidence,
 ) -> TrendCenter:
-    """Freeze a center at its width-matched divergence boundary."""
+    """在同宽背驰边界处冻结中枢。"""
 
     signal = center.lifecycle_leave_unit
     if signal is None:
@@ -98,7 +98,7 @@ def _conflicting_pair(
     current: ConstituentUnit,
     oscillatory_ids: frozenset[str],
 ) -> bool:
-    """Return whether two adjacent units may not follow one another.
+    """返回两个相邻单元是否不能前后连接。
 
     线段永远有方向，相邻线段必然一上一下，所以线段层保持严格交替。
 
@@ -127,7 +127,7 @@ def _alternates(
 
 
 def _touches_core(item: ConstituentUnit, zd_tick: int, zg_tick: int) -> bool:
-    """Return whether a closed component interval intersects the closed core."""
+    """返回单元闭区间是否与中枢核心闭区间相交。"""
 
     return max(item.low_tick, zd_tick) <= min(item.high_tick, zg_tick)
 
@@ -137,7 +137,7 @@ def _positive_overlap(
     zd_tick: int,
     zg_tick: int,
 ) -> bool:
-    """Return whether a unit and core share a positive-width interval."""
+    """返回单元与中枢核心是否存在正宽度交集。"""
 
     return max(item.low_tick, zd_tick) < min(item.high_tick, zg_tick)
 
@@ -148,11 +148,10 @@ def _overlaps_core(
     zg_tick: int,
     source_kind: SourceKind,
 ) -> bool:
-    """Apply the source-specific overlap contract.
+    """应用与来源类型对应的重叠规则。
 
-    Line/stroke centers require a positive-width overlap.  Recursive inputs are
-    already-completed lower-level trend types and retain the original closed
-    interval rule, where equality at one tick is a valid center boundary.
+    线段/笔中枢要求正宽度重叠。递归输入是已完成的低级别走势类型，保留原始
+    闭区间规则；一个价格跳动点上的相等也构成有效中枢边界。
     """
 
     if SourceKind(source_kind) is SourceKind.TREND_TYPE:
@@ -166,10 +165,10 @@ def _return_reenters_core(
     zd_tick: int,
     zg_tick: int,
 ) -> bool:
-    """A first return re-enters only after crossing the relevant boundary.
+    """首次回返只有越过相应边界才算重新进入中枢。
 
-    Equality stays outside by the strict strategy contract: ``low >= ZG`` is a third buy
-    and ``high <= ZD`` is a third sell.
+    严格策略规则下，等于边界仍算在外：``low >= ZG`` 为三买，
+    ``high <= ZD`` 为三卖。
     """
 
     return (
@@ -200,18 +199,17 @@ def _is_leave_candidate(
     center: TrendCenter,
     item: ConstituentUnit,
 ) -> bool:
-    """Whether an overlapping unit finishes outside either core boundary."""
+    """返回一个重叠单元是否最终收在任一核心边界之外。"""
 
     return _outside_in_direction(item, center.zd_tick, center.zg_tick)
 
 
 def _seed_size(source_kind: SourceKind) -> int:
-    """Return the candidate width consumed by ``establish_center``.
+    """返回 ``establish_center`` 消耗的候选窗口宽度。
 
-    Physical line/stroke centers require one immutable five-segment window:
-    entry + middle-three core + maturity.  The maturity segment may either be
-    an external departure or the first extension. Recursive centers are still
-    built from three completed lower-level trend types.
+    物理线段/笔中枢要求一个不可变五段窗口：进入段 + 中间三段核心 + 成熟段。
+    成熟段可以是外部离开段，也可以是首次延伸；递归中枢仍由三段已完成的
+    低级别走势类型构成。
     """
 
     return (
@@ -428,7 +426,7 @@ def establish_center_preview(
     *,
     entry_unit: ConstituentUnit | None = None,
 ) -> CenterPreview | None:
-    """Build provisional evidence with entry/body/leave roles kept separate."""
+    """构建进入、本体和离开角色相互分离的临时证据。"""
 
     values = tuple(initial_units)
     source_kind = SourceKind(source_kind)
@@ -523,11 +521,10 @@ def _advance_center_preview_lifecycle(
     following_units,
     oscillatory_ids: frozenset[str] = frozenset(),
 ) -> CenterPreview | None:
-    """Advance provisional center geometry without promoting it to formal evidence.
+    """推进临时中枢几何，但不把它提升为正式证据。
 
-    Unlocked segments may establish, extend and geometrically complete a center for
-    display.  The result deliberately remains a non-tradable ``CenterPreview``;
-    formal centers and confirmed third-class points still require locked units.
+    未锁定线段可以为显示而建立、延伸并在几何上完成中枢，但结果仍故意保持为
+    不可交易的 ``CenterPreview``；正式中枢与已确认三类点仍要求单元锁定。
     """
 
     known = tuple(initial_units)
@@ -604,10 +601,8 @@ def _advance_center_preview_lifecycle(
                 preview.zg_tick,
                 preview.source_kind,
             ):
-                # The old departure failed as soon as the return crossed back
-                # into the core. If that same return finishes beyond the
-                # opposite boundary, it simultaneously becomes the next
-                # external departure instead of being swallowed by the body.
+                # 回返越回核心时，旧离开立即失败。若同一回返最终越过另一侧边界，
+                # 它同时成为下一段外部离开，而不是被并入中枢本体。
                 body.append(pending)
                 if _outside_in_direction(
                     item,
@@ -648,7 +643,7 @@ def _project_ongoing_center_preview(
     following_units,
     oscillatory_ids: frozenset[str] = frozenset(),
 ) -> CenterPreview | None:
-    """Project an already-formal ongoing center through provisional units."""
+    """使用临时单元投影一个已正式成立但仍在进行的中枢。"""
 
     if center.state is not CenterState.ONGOING:
         return None
@@ -698,7 +693,7 @@ def _preview_matches_center_seed(
     preview: CenterPreview,
     center: TrendCenter,
 ) -> bool:
-    """Return whether provisional evidence projects this formal owner."""
+    """返回临时证据是否是该正式归属中枢的投影。"""
 
     seed_width = center_seed_size(center.source_kind)
     active_seed = (
@@ -813,7 +808,7 @@ def _fold_failed_departure(
     center: TrendCenter,
     ret: ConstituentUnit,
 ) -> tuple[TrendCenter, CenterEvent]:
-    """Fold a failed leave and preserve a same-unit opposite departure."""
+    """折叠失败离开，并保留同一单元形成的反向离开。"""
 
     leave = center.pending_leave_unit
     if leave is None:
@@ -1004,9 +999,8 @@ def forming_preview(
         if zd_tick == zg_tick and source_kind is not SourceKind.TREND_TYPE:
             state = CenterPreviewState.TOUCH_ONLY
         if state is CenterPreviewState.TOUCH_ONLY:
-            # Zero-width intersections are diagnostic observations only.  A
-            # component must at least contain the shared boundary; this never
-            # promotes to a formal center and the chart gate will not draw it.
+            # 零宽度交集只作为诊断观察。单元至少必须包含共享边界；这种情况永远
+            # 不会提升为正式中枢，图表门槛也不会绘制它。
             if any(
                 item.low_tick > zd_tick or item.high_tick < zg_tick for item in body
             ):
@@ -1104,21 +1098,18 @@ def _scanner_entry(
     start: int,
     source_kind: SourceKind,
 ) -> ConstituentUnit | None:
-    """Return the external entry owned by a scanner seed.
+    """返回扫描器种子所拥有的外部进入段。
 
-    Recursive seeds begin with core unit A. Their immediately preceding
-    same-level unit is the external entry, so the first stream element cannot
-    seed a fully auditable recursive center. Physical five-role seeds already
-    contain their entry as the first of the five units and therefore return
-    ``None`` here.
+    递归种子从核心 A 段开始，其紧邻的前一同级别单元才是外部进入段，因此流中
+    第一个单元不能建立可完整审计的递归中枢。物理五角色种子的第一段已是进入段，
+    所以这里返回 ``None``。
     """
 
     source_kind = SourceKind(source_kind)
     if source_kind is not SourceKind.TREND_TYPE:
         return None
-    # ``calculate_centers`` also calls this helper while probing an empty or
-    # not-yet-warmed tail.  Such a tail has no auditable external entry and
-    # must yield no preview, not index an absent stream element.
+    # ``calculate_centers`` 探测空尾部或尚未预热的尾部时也会调用本函数。此类
+    # 尾部没有可审计外部进入段，应当不产生预览，而不是索引不存在的流单元。
     return values[start - 1] if 0 < start <= len(values) else None
 
 
@@ -1126,12 +1117,11 @@ def _next_scan_start_after_completion(
     completion_return_offset: int,
     source_kind: SourceKind,
 ) -> int:
-    """Resume with the completed center's leave as the next entry.
+    """把已完成中枢的离开段作为下一进入段继续扫描。
 
-    A physical five-role seed contains its entry, so it starts one unit before
-    the completion return.  A recursive seed starts with core A and obtains the
-    preceding leave through ``_scanner_entry``; it therefore starts exactly at
-    the completion return.
+    物理五角色种子包含自身进入段，因此从完成回返之前一个单元开始。递归种子
+    从核心 A 段开始，并通过 ``_scanner_entry`` 获取前一离开段，所以正好从
+    完成回返处开始。
     """
 
     if completion_return_offset <= 0:
@@ -1150,14 +1140,12 @@ def _first_successor_preview(
     source_kind: SourceKind,
     oscillatory_ids: frozenset[str],
 ) -> CenterPreview | None:
-    """Return the first causal live center after a preview completion.
+    """返回预览完成后首个因果实时中枢。
 
-    A physical center becomes *visible* as soon as its external entry and
-    middle-three core are present.  Its fifth component is deliberately not
-    required here: that component promotes the preview to a formal center,
-    but an unfinished fourth segment may already close a positive core.  Full
-    establishment windows still pass through ``establish_center_preview`` so
-    an already-observed invalid fifth component cannot be ignored.
+    物理中枢在外部进入段和中间三段核心出现后即变得“可见”。这里故意不要求
+    第五段：第五段用于把预览提升为正式中枢，而尚未完成的第四段已经可能闭合
+    一个正宽度核心。完整成立窗口仍必须经过 ``establish_center_preview``，
+    因而不能忽略已经观察到的无效第五段。
     """
 
     width = _seed_size(source_kind)
@@ -1211,12 +1199,10 @@ def _successor_previews_after_completion(
     source_kind: SourceKind,
     oscillatory_ids: frozenset[str],
 ) -> tuple[CenterPreview, ...]:
-    """Chain previews after a provisional third-class completion.
+    """在临时三类点完成后串联后续中枢预览。
 
-    The completed center's leave is shared as the next physical center's
-    entry.  Repeating this step is important at the live edge: one provisional
-    center may already be complete while a second one is only four components
-    old and therefore has no fifth maturity component yet.
+    已完成中枢的离开段会共享为下一物理中枢的进入段。实时边缘必须重复此步骤：
+    一个临时中枢可能已经完成，而第二个中枢只有四个单元，尚无第五成熟段。
     """
 
     offsets = {item.unit_id: index for index, item in enumerate(values)}
@@ -1254,14 +1240,11 @@ def _find_later_completed_candidate(
     oscillatory_ids: frozenset[str] = frozenset(),
     last_completion_offset: int | None = None,
 ) -> tuple[int, int, TrendCenter, list[CenterEvent]] | None:
-    """Find the first later seed that is already complete in this prefix.
+    """查找当前前缀中首个已经完成的后续种子。
 
-    A broad early seed can remain geometrically ongoing while a narrower
-    three-unit core inside its tail has already produced a same-side
-    leave and an outside first return.  Waiting for a still later unit to
-    invalidate the broad seed makes that completed center appear
-    retroactively.  Completion is stronger evidence than an overlapping
-    ongoing seed, so select the first later completed candidate immediately.
+    较宽的早期种子可能在几何上仍进行中，但其尾部较窄的三段核心已产生同侧离开
+    和外部首次回返。若等待更晚单元使宽种子失效，会让已完成中枢看似事后出现。
+    完成证据强于重叠的进行中种子，因此应立即选择首个后续已完成候选。
     """
 
     last_offset = (
@@ -1273,9 +1256,8 @@ def _find_later_completed_candidate(
     earliest_key = None
     width = _seed_size(source_kind)
     for start in range(current_start + 1, last_offset - width + 1):
-        # A three-unit seed needs later lifecycle evidence to complete. Once a
-        # later start cannot beat the earliest completion already found, no
-        # subsequent start can beat it either.
+        # 三段种子需要后续生命周期证据才能完成。一旦更晚起点不可能早于当前
+        # 已发现的最早完成点，其后的起点也都不可能更早。
         if earliest_key is not None and start + width >= earliest_key[0]:
             break
         candidate = establish_center(
@@ -1518,11 +1500,9 @@ def calculate_centers(
             j += 1
         previous_leave = None if not centers else centers[-1].completion_leave_unit
         owns_post_completion_tail = previous_leave is not None
-        # After a third-class completion the scanner resumes at the completed
-        # leave and slides forward. The first five-unit seed that matures in
-        # that suffix is the causal owner, whether its entry is the leave, the
-        # completion return, or a later unit. A narrower internal seed cannot
-        # replace it merely because it happens to complete sooner.
+        # 三类点完成后，扫描器从已完成离开段恢复并向前滑动。该后缀中首个成熟的
+        # 五段种子是因果归属者，无论其进入段是离开段、完成回返还是更晚单元。
+        # 较窄内部种子不能仅因更早完成就替换它。
         completed_later = (
             None
             if owns_post_completion_tail
@@ -1545,14 +1525,12 @@ def calculate_centers(
             i, j, center, candidate_events = completed_later
             geometry_stopped = False
         if geometry_stopped:
-            # This seed cannot consume the next same-level component as an
-            # extension or a valid departure/return lifecycle. Slide one unit
-            # and allow a later consolidation window to become the center.
+            # 该种子不能把下一同级别单元作为延伸或有效离开/回返生命周期使用。
+            # 向后滑动一个单元，让后续盘整窗口有机会成为中枢。
             i += 1
             continue
-        # Physical centers can only be created by the immutable five-segment
-        # establishment window.  Recursive trend-type centers keep their
-        # three-completed-trend seed.
+        # 物理中枢只能由不可变五段成立窗口创建；递归走势类型中枢保留三段已完成
+        # 走势种子。
         if not center.has_minimum_physical_roles:
             replay_from = i
             break
@@ -1560,9 +1538,8 @@ def calculate_centers(
         events.extend(candidate_events)
         replay_from = i
         if center.state is CenterState.COMPLETED:
-            # The external leave may simultaneously serve as the next center's
-            # entry.  Resume far enough back to test that shared-boundary seed;
-            # a failed seed will slide forward normally on the next iteration.
+            # 外部离开段可同时作为下一中枢进入段。扫描应回退到足以验证该共享边界
+            # 种子的位置；若种子失败，下一轮会正常向前滑动。
             i = max(
                 i + 1,
                 _next_scan_start_after_completion(j, source_kind),
@@ -1586,10 +1563,9 @@ def calculate_centers(
                 completion_return_offset,
                 source_kind,
             )
-        # A valid core can end before the final provisional unit. Scan every
-        # window intersecting the unlocked suffix, but never scan back into a
-        # completed center. After a third-class point the first viable preview
-        # owns the suffix under the same causal rule as the formal scanner.
+        # 有效核心可以在最后一个临时单元之前结束。扫描所有与未锁定后缀相交的
+        # 窗口，但绝不能回扫进已完成中枢。三类点之后，首个可行预览按与正式
+        # 扫描器相同的因果规则拥有该后缀。
         first_live_start = max(
             1 if source_kind is SourceKind.TREND_TYPE else 0,
             locked_count - (width - 1),
@@ -1618,10 +1594,8 @@ def calculate_centers(
                 if post_completion_resume is not None:
                     latest_live_preview = preview
                     break
-                # A geometrically completed candidate is stronger lifecycle
-                # evidence than a later overlapping forming seed.  This avoids
-                # replacing a visible third-class completion with a shorter
-                # live-edge window.
+                # 几何已完成候选比更晚的重叠形成中种子具有更强生命周期证据，
+                # 避免用更短的实时边缘窗口替换可见三类点完成状态。
                 if (
                     latest_live_preview is None
                     or preview.state is CenterPreviewState.COMPLETED
@@ -1634,21 +1608,15 @@ def calculate_centers(
                 values[locked_count:],
                 oscillatory_ids,
             )
-            # A formal ongoing center owns the entire provisional suffix.
-            # Any shifted source-specific seed inside that suffix is merely an
-            # alternative decomposition until the source units lock; showing
-            # it beside the owner created the duplicate unfinished centers
-            # reported on TSLA/SH.513100 and could also manufacture a second
-            # provisional third-class point.  Fail closed: expose only the
-            # projection rooted at the immutable formal center_id.  If that
-            # projection is geometrically invalid, expose no replacement until
-            # the locked-prefix calculation can resolve the boundary.
+            # 正式进行中中枢拥有整个临时后缀。来源特定的偏移种子在单元锁定前只是
+            # 另一种划分；与归属中枢并列展示会造成 TSLA/SH.513100 曾出现的重复
+            # 未完成中枢，也可能制造第二个临时三类点。采用封闭失败：只暴露以
+            # 不可变正式 center_id 为根的投影；若其几何无效，在锁定前缀计算解决
+            # 边界之前不暴露替代项。
             if projected is None:
-                # A shifted ordinary forming window cannot displace the formal
-                # owner.  A shifted COMPLETED preview is different: its locked
-                # leave plus outside first return is stronger lifecycle
-                # evidence and must survive so a visible 3-buy/3-sell is not
-                # regressed to an old ongoing box.
+                # 偏移的普通形成中窗口不能替换正式归属者；但偏移的已完成预览不同，
+                # 其锁定离开段加外部首次回返是更强生命周期证据，必须保留，避免可见
+                # 三买/三卖退化成旧的进行中中枢框。
                 if (
                     latest_live_preview is None
                     or latest_live_preview.state is not CenterPreviewState.COMPLETED

@@ -24,12 +24,10 @@ class UpgradeEvidenceStatus(str, Enum):
 
 @dataclass(frozen=True, slots=True)
 class RecursiveUpgradeEvidence:
-    """Causal evidence that a source level is upgrading one level higher.
+    """来源级别正在升级到高一级的因果证据。
 
-    This object is deliberately separate from :class:`TrendCenter`.  A
-    nine-segment derivation is a higher-level center context, while an
-    expansion pair is only a reclassification warning.  Neither may silently
-    enter the ordinary strict-point signal channel.
+    本对象故意与 :class:`TrendCenter` 分离。九段推导是高一级中枢上下文，中枢
+    扩展对只是一项重新分类警告；二者都不能静默进入普通严格买卖点信号通道。
     """
 
     evidence_id: str
@@ -111,12 +109,10 @@ class RecursiveUpgradeEvidence:
 
 
 def _center_touch_units(center: TrendCenter):
-    """Return only the lower-level movements that actually touch the core.
+    """只返回真正接触中枢核心的低级别走势。
 
-    All source kinds use three components as the frozen center core.  Failed
-    departures and their re-entry legs are folded into ``body_units``;
-    successful pending/completion leaves remain external and therefore need
-    no positional exclusion here.
+    所有来源类型都以三段作为冻结中枢核心。失败离开及其重新进入段会折叠进
+    ``body_units``；成功的待确认/已完成离开段保留在外部，因此无需在此按位置排除。
     """
 
     return center.body_units
@@ -126,7 +122,7 @@ def _resolved_standard_center(
     source: TrendCenter,
     target_centers: tuple[TrendCenter, ...],
 ) -> str | None:
-    """Link, but never duplicate, a naturally-recursed higher center."""
+    """链接自然递归得到的高一级中枢，但绝不重复创建。"""
 
     touch_units = _center_touch_units(source)
     if len(touch_units) < 9:
@@ -149,8 +145,8 @@ def _nine_segment_evidence(
 ) -> RecursiveUpgradeEvidence | None:
     if center.state is not CenterState.COMPLETED:
         return None
-    # ``body_units`` already contains only center-touching movements.  Entry,
-    # successful leave and first return are external lifecycle evidence.
+    # ``body_units`` 已只包含接触中枢的走势；进入段、成功离开段与首次回返段
+    # 都属于外部生命周期证据。
     touch_units = _center_touch_units(center)
     if len(touch_units) < 9:
         return None
@@ -162,8 +158,8 @@ def _nine_segment_evidence(
     zd_tick = max(group_lows)
     zg_tick = min(group_highs)
     if zd_tick > zg_tick:
-        # Fail closed if the alleged three derived consolidations do not have
-        # a common overlap.  A long body alone must never manufacture a center.
+        # 若所称三段派生盘整不存在公共交集，则采用封闭失败；仅凭较长本体绝不能
+        # 制造中枢。
         return None
     source_ids = tuple(item.unit_id for item in establishing)
     extension_ids = tuple(item.unit_id for item in extension)
@@ -171,11 +167,9 @@ def _nine_segment_evidence(
         center.available_at,
         *(item.available_at for item in establishing),
     )
-    # A confirmed nine-segment derivation is append-only evidence.  A standard
-    # higher-level center discovered later may describe the same geometry, but
-    # must not retroactively mutate this historical evidence object.  Record a
-    # resolution link only when that target was already observable when the
-    # derivation itself first became available.
+    # 已确认九段推导是只追加证据。之后发现的标准高一级中枢可能描述相同几何，
+    # 但不能事后修改该历史证据对象；只有当目标在推导首次可用时已经可观察，
+    # 才记录解决链接。
     resolved = _resolved_standard_center(
         center,
         tuple(
@@ -209,8 +203,7 @@ def _nine_segment_evidence(
         gg_tick=max(item.high_tick for item in touch_units),
         market_start=establishing[0].market_start,
         market_end=establishing[-1].market_end,
-        # A completed source center is the conservative immutable boundary for
-        # a derived context.  This never back-dates the upgrade to its ninth leg.
+        # 已完成来源中枢是派生上下文的保守不可变边界，绝不把升级时间倒推到第九段。
         available_at=available_at,
         resolved_by_standard_center_id=resolved,
         signal_eligible=False,
@@ -279,12 +272,11 @@ def collect_recursive_upgrade_evidence(
     *,
     as_of: datetime | None = None,
 ) -> tuple[RecursiveUpgradeEvidence, ...]:
-    """Collect the upgrade context visible at one causal snapshot.
+    """收集一个因果快照当时可见的升级上下文。
 
-    ``as_of=None`` means the final structure snapshot.  Supplying ``as_of``
-    filters immutable completed centers by their own availability before both
-    nine-segment derivation and the tail-only expansion state are evaluated.
-    No future center is allowed to resolve or create historical context.
+    ``as_of=None`` 表示最终结构快照。传入 ``as_of`` 时，先按各中枢自身可用时间
+    过滤不可变已完成中枢，再评估九段推导和仅尾部扩展状态。任何未来中枢都不得
+    解决或创建历史上下文。
     """
 
     if as_of is not None and (as_of.tzinfo is None or as_of.utcoffset() is None):
@@ -316,10 +308,9 @@ def collect_recursive_upgrade_evidence(
             )
             if evidence is not None:
                 output.append(evidence)
-        # Expansion is a present-tense reclassification state.  On a full
-        # snapshot only the final adjacent pair can still be forming; older
-        # pairs were states of historical prefixes and must be recovered by
-        # causal replay, not left permanently active at the final timestamp.
+        # 扩展是当前时点的重新分类状态。完整快照中只有最后一对相邻中枢仍可能
+        # 处于形成中；更早的中枢对属于历史前缀状态，必须通过因果回放恢复，不能
+        # 永久保留为最终时点的活动状态。
         for previous, current in (
             ((completed[-2], completed[-1]),) if len(completed) >= 2 else ()
         ):

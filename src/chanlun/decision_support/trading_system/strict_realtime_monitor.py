@@ -1,9 +1,8 @@
-"""Strict physical-timeframe facts for read-only realtime monitoring.
+"""供只读实时监听使用的严格物理周期事实。
 
-The chart screening gateway, historical replay and this monitor all consume
-the same ``strict_cl_config`` + ``build_screening_evidence`` decision
-core. Missing price-basis metadata or an invalid structure snapshot is an
-observable refresh failure, never an alternative buy/sell signal.
+图表筛选入口、历史回放和本监听器共同使用 ``strict_cl_config`` 与
+``build_screening_evidence`` 组成的同一决策核心。价格基准元数据缺失或结构
+快照无效时必须形成可观察的刷新失败，绝不能回退为另一套买卖信号。
 """
 
 from __future__ import annotations
@@ -39,7 +38,7 @@ CN = ZoneInfo("Asia/Shanghai")
 
 
 class _WarmupIncomplete(RuntimeError):
-    """A required timeframe is valid but does not yet have enough history."""
+    """所需周期有效，但历史数据量尚未达到预热要求。"""
 
 
 def _market_name(exchange: object, code: str) -> str:
@@ -77,7 +76,7 @@ def _strict_direction(evidence: StrictEvidenceResult | None) -> str:
 
 @dataclass
 class StrictRealtimeMonitorEvent:
-    """Notification-shaped fact with a strict evidence identity."""
+    """带有严格证据身份的通知事实。"""
 
     code: str
     name: str
@@ -96,9 +95,8 @@ class StrictRealtimeMonitorEvent:
 
     @property
     def identity(self) -> str:
-        # Point IDs contain full structure lineage and may legitimately change
-        # when the same completed source bars are rebuilt.  Notification
-        # identity is the causal market occurrence, not an implementation ID.
+        # 买卖点编号包含完整结构谱系，同一批已收盘源 K 线重建时可能合理变化。
+        # 通知身份表示因果行情事件，而不是具体实现编号。
         return "|".join(
             (self.kind, self.code, self.bs_type or "-", self.signal_time or "-")
         )
@@ -114,7 +112,7 @@ class _FrequencyRuntime:
 
 
 class StrictPhysicalMonitorState:
-    """Incremental 1m/5m/30m monitor using the screening decision core."""
+    """使用统一筛选决策核心的 1m/5m/30m 增量监听状态。"""
 
     WARMUP_DAYS_BY_FREQ = {
         "1m": 30,
@@ -217,9 +215,8 @@ class StrictPhysicalMonitorState:
         )
         if not np.isfinite(numeric.to_numpy(dtype=float)).all():
             raise ValueError(f"{frequency} kline values must be finite numbers")
-        # Geometry comparisons must use the values that were actually
-        # validated.  Providers are allowed to return numeric strings, while
-        # object-dtype comparisons can otherwise be lexical or fail midway.
+        # 几何比较必须使用已经实际校验的数值。数据源允许返回数字字符串；若
+        # 直接比较 object 类型，可能变成字典序比较或在中途失败。
         frame.loc[:, numeric_columns] = numeric
         if (
             (frame["high"] < frame[["open", "close", "low"]].max(axis=1)).any()
@@ -227,8 +224,7 @@ class StrictPhysicalMonitorState:
             or (frame["volume"] < 0).any()
         ):
             raise ValueError(f"{frequency} kline geometry is invalid")
-        # Keep the validated metadata variable live so a future refactor cannot
-        # accidentally turn this into a best-effort metadata check.
+        # 保留已校验元数据的显式引用，防止后续重构误把强制校验弱化为尽力检查。
         if not metadata.price_basis_revision:
             raise AssertionError("validated price basis unexpectedly empty")
         return frame
@@ -256,7 +252,7 @@ class StrictPhysicalMonitorState:
         existing: pd.DataFrame,
         tail: pd.DataFrame,
     ) -> pd.DataFrame:
-        """Replace the fetched overlap and retain only the untouched prefix."""
+        """用新拉取数据替换重叠尾部，只保留未触及的历史前缀。"""
 
         first_tail_at = pd.Timestamp(tail["date"].iloc[0])
         prefix = existing.loc[pd.to_datetime(existing["date"]) < first_tail_at]
@@ -289,9 +285,8 @@ class StrictPhysicalMonitorState:
         metadata = strict_snapshot_price_metadata(frame)
         runtime = self._runtime_by_frequency.get(frequency)
         if runtime is not None and runtime.metadata != metadata:
-            # A corporate action or provider epoch changed the structure price
-            # basis.  Replaying only the five-day incremental tail would mix
-            # incomparable prices, so reacquire the complete warmup window.
+            # 除权除息或数据源批次改变了结构价格基准。只回放五日增量尾部会混入
+            # 不可比较的价格，因此必须重新取得完整预热窗口。
             frame = self._closed_frame(self._fetch_klines(frequency, None), frequency)
             metadata = strict_snapshot_price_metadata(frame)
             runtime = None
@@ -325,10 +320,8 @@ class StrictPhysicalMonitorState:
         if unchanged and runtime.evidence is not None:
             return runtime.evidence
 
-        # Rebuild atomically from the complete retained source frame.  Strict
-        # structures can revise historical IDs and centers when a pending tail
-        # locks; feeding only the new rows creates a different state from the
-        # full chart recomputation used as notification evidence.
+        # 从完整保留的源行情帧原子重建。待定尾部锁定时，严格结构可能修订历史
+        # 编号与中枢；若只输入新增行，所得状态会不同于通知证据使用的全图重算。
         candidate = self._new_runtime(frequency, metadata, source_frame)
         candidate.cd.process_klines(source_frame)
         candidate.evidence = build_screening_evidence(
@@ -384,7 +377,7 @@ class StrictPhysicalMonitorState:
             if pd.Timedelta(0) <= lag <= self.signal_freshness:
                 output.append(point)
         self._op_baseline_initialized = True
-        # Keep explicit references for diagnostic callers and direction gates.
+        # 为诊断调用方和方向门保留显式引用。
         if mid is not None and _strict_direction(mid) not in {"up", "down", "neutral"}:
             raise AssertionError("invalid strict middle direction")
         if _strict_direction(big) not in {"up", "down", "neutral"}:
@@ -392,13 +385,11 @@ class StrictPhysicalMonitorState:
         return output
 
     def refresh_chart_levels(self) -> bool:
-        """Refresh only the completed 1m/5m/30m presentation timeframes.
+        """只刷新已完成的 1m/5m/30m 展示周期。
 
-        Notification images are review material, not a decision invocation.
-        They must visualize the same physical-timeframe core, but they must not
-        demand or bypass the separate daily risk gate.  In particular, an
-        unfinished QMT daily bar remains rejected by ``refresh()`` while chart
-        rendering can still use the three fully completed intraday frames.
+        通知图片属于复核材料，不是一次决策调用。图片必须展示同一物理周期核心，
+        但不能要求或绕过独立的日线风险门。尤其是，未完成的 QMT 日线仍会被
+        ``refresh()`` 拒绝，而图表渲染仍可使用三个已经完整收盘的盘中周期。
         """
 
         self.warmup_ready = False
@@ -420,11 +411,10 @@ class StrictPhysicalMonitorState:
         return None if runtime is None else runtime.evidence
 
     def chart_data(self, frequency: str) -> CL | None:
-        """Return the exact computed timeframe consumed by this monitor.
+        """返回本监听器实际消费的对应周期计算对象。
 
-        The object is exposed read-only by convention for presentation code.
-        Notification rendering must not rebuild a second signal path or mutate
-        this state; it merely visualizes the already refreshed structure.
+        按约定仅向展示代码只读暴露该对象。通知渲染不能重建第二条信号路径，
+        也不能修改此状态；它只负责展示已经刷新的结构。
         """
 
         runtime = self._runtime_by_frequency.get(str(frequency))
@@ -437,7 +427,7 @@ class StrictPhysicalMonitorState:
         *,
         frequency: str = "1m",
     ) -> StructuralPoint | None:
-        """Resolve an alert marker from this exact computed chart snapshot."""
+        """从当前精确计算的图表快照中解析通知标记。"""
 
         evidence = self.evidence(frequency)
         if evidence is None or not point_type or not signal_time:
@@ -484,7 +474,7 @@ def collect_strict_monitor_events(
     names: Mapping[str, str] | None = None,
     holdings: set[str] | None = None,
 ) -> list[StrictRealtimeMonitorEvent]:
-    """Refresh states and map only strict confirmed points into alerts."""
+    """刷新各状态，并且只把严格确认的买卖点映射为通知。"""
 
     names = names or {}
     holdings = holdings or set()

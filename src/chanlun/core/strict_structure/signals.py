@@ -5,6 +5,9 @@ from datetime import datetime
 from decimal import Decimal
 
 from chanlun.core.strict_structure.center_relation import classify_center_relation
+from chanlun.core.strict_structure.divergence import (
+    compare_center_consolidation_divergence,
+)
 from chanlun.core.strict_structure.models import (
     CenterRelation,
     CenterState,
@@ -77,7 +80,7 @@ def center_ordinals(
     centers: tuple[TrendCenter, ...],
     decomposition_boundaries=(),
 ) -> dict[tuple[str, str], int]:
-    """Number centers inside strict trend runs split by divergence boundaries."""
+    """在背驰边界切分的严格走势序列内为中枢编号。"""
 
     values = tuple(centers)
     if len({center.center_id for center in values}) != len(values):
@@ -134,12 +137,10 @@ class StrictSignalEngine:
         self.strength = strength
 
     def confirmed_points(self) -> tuple[StrictPointEvidence, ...]:
-        """Return every confirmed 1/2/3 point through one canonical pipeline.
+        """通过唯一标准流水线返回全部已确认的一、二、三类买卖点。
 
-        Callers must not independently combine the three point classes.  In
-        particular, second-class recognition receives the exact first-class
-        ledger produced in this invocation, so charting, replay and screening
-        cannot drift through subtly different ordering or de-duplication.
+        调用方不得自行拼接三类买卖点。二类点识别必须接收本次调用生成的精确
+        一类点账本，使图表、回放和选股不会因排序或去重细节不同而发生漂移。
         """
 
         first = self.first_class_points()
@@ -344,10 +345,16 @@ class StrictSignalEngine:
             return None
         for trend in reversed(level.trend_types):
             if (
-                trend.kind is not TrendKind.TREND
-                or len(trend.centers) < 2
-                or trend.terminal_divergence is not None
+                trend.terminal_divergence is not None
                 or tail.source_kind is SourceKind.STROKE_OBSERVATION
+            ):
+                continue
+            if (
+                trend.kind is TrendKind.TREND
+                and len(trend.centers) < 2
+            ) or (
+                trend.kind is TrendKind.CONSOLIDATION
+                and len(trend.centers) != 1
             ):
                 continue
             last_center = trend.centers[-1]
@@ -387,12 +394,29 @@ class StrictSignalEngine:
             projected_units = list(level.units)
             projected_units[tail_index] = projected_tail
             try:
-                compared = compare_terminal_trend_divergence(
-                    (*trend.centers[:-1], projected_center),
-                    tuple(projected_units),
-                    self.strength,
-                    trend_start_unit_id=trend.constituent_units[0].unit_id,
-                )
+                if trend.kind is TrendKind.TREND:
+                    compared = compare_terminal_trend_divergence(
+                        (*trend.centers[:-1], projected_center),
+                        tuple(projected_units),
+                        self.strength,
+                        trend_start_unit_id=trend.constituent_units[0].unit_id,
+                    )
+                else:
+                    divergence = (
+                        compare_center_consolidation_divergence(
+                            projected_center,
+                            tuple(projected_units),
+                            self.strength,
+                            movement_start_unit_id=(
+                                trend.constituent_units[0].unit_id
+                            ),
+                        )
+                    )
+                    compared = (
+                        None
+                        if divergence is None
+                        else (divergence, projected_tail)
+                    )
             except MacdStrengthUnavailable:
                 continue
             if compared is None:
@@ -445,11 +469,19 @@ class StrictSignalEngine:
                 divergence=divergence,
                 parent_point_id=None,
                 evidence_codes=(
-                    "formal_trend_prefix",
-                    "two_separated_centers",
+                    (
+                        "formal_trend_prefix"
+                        if trend.kind is TrendKind.TREND
+                        else "formal_consolidation_prefix"
+                    ),
+                    (
+                        "two_separated_centers"
+                        if trend.kind is TrendKind.TREND
+                        else "single_center_consolidation"
+                    ),
                     "live_width_matched_departure_leg",
                     *_divergence_evidence_codes(divergence),
-                    "temporary_trend_divergence",
+                    f"temporary_{divergence.kind}_divergence",
                 ),
                 missing_conditions=("terminal_unit_locked",),
             )
@@ -575,13 +607,13 @@ class StrictSignalEngine:
         return tuple(output)
 
     def first_class_points(self) -> tuple[StrictPointEvidence, ...]:
+        """返回所有由正式趋势背驰或盘整背驰确认的一类买卖点。"""
+
         output: dict[tuple[int, str, str], StrictPointEvidence] = {}
         for level in self.structure.levels:
             for trend in level.completed_trends:
                 if (
                     trend.state is not TrendState.COMPLETE
-                    or trend.kind is not TrendKind.TREND
-                    or len(trend.centers) < 2
                 ):
                     continue
                 divergence = trend.terminal_divergence
@@ -743,15 +775,13 @@ class StrictSignalEngine:
                 point,
             )
 
-        # L053's small-level-to-large-level reversal has no same-level first
-        # point.  A confirmed lower-level first point closes its containing
-        # higher-level unit; the immediate complete rebound and first pullback
-        # then form the higher-level second point.  Ordinary same-level-parent
-        # evidence wins if both paths identify the same anchor.
+        # 小转大没有同级一类点。下一级一类点确认其所在的高一级离开单元后，
+        # 紧邻的完整反弹与第一次回抽就按普通二类点的同一套规则确认高一级
+        # 二类点；不再额外要求下一级先出现三类点。若两条路径落在同一锚点，
+        # 优先保留拥有同级一类点父证据的普通二类点。
         for point in self._small_to_large_second_points(
             all_first,
             levels,
-            self.third_class_points(),
         ):
             output.setdefault(
                 (point.structural_level, point.point_type, point.anchor_unit_id),
@@ -844,31 +874,9 @@ class StrictSignalEngine:
             related_point_ids=related_point_ids,
         )
 
-    @staticmethod
-    def _lower_descendant_ids(unit, lower_level) -> frozenset[str]:
-        descendants = set(unit.child_ids)
-        changed = True
-        while changed:
-            changed = False
-            for trend in lower_level.trend_types:
-                if trend.trend_id not in descendants:
-                    continue
-                before = len(descendants)
-                for child in trend.constituent_units:
-                    descendants.add(child.unit_id)
-                    descendants.update(child.child_ids)
-                changed = changed or len(descendants) != before
-        return frozenset(descendants)
-
     @classmethod
     def _recursive_descendant_ids(cls, unit, levels) -> frozenset[str]:
-        """Expand one recursive carrier to every auditable lower-level leaf.
-
-        A higher-level unit may directly contain lower-level units, a locked
-        trend id, or an associative same-level combination.  The graph is
-        therefore expanded by stable identity instead of assuming that the
-        small reversal belongs to the immediately adjacent level.
-        """
+        """把递归载体展开为所有可审计的低级别叶子单元。"""
 
         children_by_id: dict[str, tuple[str, ...]] = {}
 
@@ -901,82 +909,10 @@ class StrictSignalEngine:
     def _contains_lower_anchor(cls, unit, levels, anchor_unit_id: str) -> bool:
         return anchor_unit_id in cls._recursive_descendant_ids(unit, levels)
 
-    @classmethod
-    def _last_lower_reverse_third(
-        cls,
-        parent,
-        lower_level,
-        signal,
-        rebound,
-        pullback,
-        lower_third_points,
-    ):
-        signal_children = cls._lower_descendant_ids(signal, lower_level)
-        rebound_children = cls._lower_descendant_ids(rebound, lower_level)
-        pullback_children = cls._lower_descendant_ids(pullback, lower_level)
-        movement_children = signal_children | rebound_children
-        reversal_children = rebound_children | pullback_children
-        if not rebound_children or not movement_children:
-            return None
-
-        candidates = tuple(
-            center
-            for center in lower_level.center_result.centers
-            if signal.market_start
-            <= center.body_start_market_time
-            <= center.established_market_time
-            <= rebound.market_end
-            and center.entry_unit.unit_id in movement_children
-            and all(
-                item.unit_id in movement_children
-                for item in (
-                    *center.establishment_units,
-                    *center.body_units,
-                    *center.extension_units,
-                )
-            )
-        )
-        if not candidates:
-            return None
-        last_center = max(
-            candidates,
-            key=lambda center: (
-                center.body_start_market_time,
-                center.established_market_time,
-                center.center_id,
-            ),
-        )
-        if (
-            not last_center.physically_completed
-            or last_center.completion_leave_unit is None
-            or last_center.completion_return_unit is None
-            or last_center.available_at > pullback.available_at
-            or last_center.completion_leave_unit.unit_id not in rebound_children
-            or last_center.completion_return_unit.unit_id not in reversal_children
-            or last_center.completion_return_unit.market_end > pullback.market_end
-        ):
-            return None
-        expected_type = "3buy" if parent.side == "buy" else "3sell"
-        matches = tuple(
-            point
-            for point in lower_third_points
-            if point.structural_level == lower_level.structural_level
-            and point.center_id == last_center.center_id
-            and point.point_type == expected_type
-            and point.status is StrictPointStatus.CONFIRMED
-            and point.anchor_unit_id == last_center.completion_return_unit.unit_id
-            and rebound.market_start <= point.anchor_at <= pullback.market_end
-            and point.available_at <= pullback.available_at
-        )
-        if len(matches) > 1:
-            raise ValueError("last lower-level center has duplicate third points")
-        return None if not matches else matches[0]
-
     def _small_to_large_second_points(
         self,
         lower_first_points,
         levels,
-        lower_third_points,
     ):
         output = []
         for parent in lower_first_points:
@@ -986,9 +922,6 @@ class StrictSignalEngine:
                 if level_number > parent.structural_level
             ):
                 target = levels[target_level_number]
-                lower_level = levels.get(target_level_number - 1)
-                if lower_level is None:
-                    continue
                 matches = [
                     index
                     for index, unit in enumerate(target.units)
@@ -1037,19 +970,6 @@ class StrictSignalEngine:
                     or pullback.price_basis_revision != parent.price_basis_revision
                 ):
                     raise ValueError("small-to-large second-class evidence mismatch")
-                reverse_third = self._last_lower_reverse_third(
-                    parent,
-                    lower_level,
-                    signal,
-                    rebound,
-                    pullback,
-                    lower_third_points,
-                )
-                if reverse_third is None:
-                    # L044: every promoted target uses the dynamic last center
-                    # of its own direct sub-level.  A still smaller first point
-                    # is only a possible turn, never sufficient proof alone.
-                    continue
                 held = (
                     pullback.low_tick >= parent.anchor_tick
                     if parent.side == "buy"
@@ -1085,7 +1005,6 @@ class StrictSignalEngine:
                         pullback,
                         variant=variant,
                         divergence=divergence,
-                        reverse_third=reverse_third,
                     )
                 )
         return tuple(output)
@@ -1100,12 +1019,9 @@ class StrictSignalEngine:
         *,
         variant: StrictPointVariant,
         divergence,
-        reverse_third: StrictPointEvidence,
     ) -> StrictPointEvidence:
         if pullback.confirmed_at is None:
             raise ValueError("small-to-large pullback requires confirmation")
-        if reverse_third.center_id is None:
-            raise ValueError("small-to-large reverse third requires its center")
         point_type = "2buy" if parent.side == "buy" else "2sell"
         anchor_tick = pullback.low_tick if parent.side == "buy" else pullback.high_tick
         invalidation_tick = (
@@ -1113,13 +1029,11 @@ class StrictSignalEngine:
         )
         confirmed_at = max(
             parent.confirmed_at,
-            reverse_third.confirmed_at,
             pullback.confirmed_at,
             pullback.confirmed_at if divergence is None else divergence.confirmed_at,
         )
         available_at = max(
             parent.available_at,
-            reverse_third.available_at,
             pullback.available_at,
             pullback.available_at if divergence is None else divergence.available_at,
         )
@@ -1156,7 +1070,6 @@ class StrictSignalEngine:
             evidence_codes=(
                 "confirmed_lower_level_first_class_parent",
                 "small_to_large_reversal",
-                "last_lower_level_center_reverse_third_class",
                 "complete_adjacent_rebound",
                 "complete_first_pullback",
                 (
@@ -1165,13 +1078,12 @@ class StrictSignalEngine:
                     else "consolidation_divergence"
                 ),
             ),
-            related_point_ids=(parent.point_id, reverse_third.point_id),
+            related_point_ids=(parent.point_id,),
             small_to_large_carrier_unit_ids=(
                 signal.unit_id,
                 rebound.unit_id,
                 pullback.unit_id,
             ),
-            small_to_large_last_center_id=reverse_third.center_id,
         )
 
     def _first_class_point(
@@ -1232,12 +1144,20 @@ class StrictSignalEngine:
             divergence=divergence,
             parent_point_id=None,
             evidence_codes=(
-                "formal_trend",
-                "two_separated_centers",
+                (
+                    "formal_trend"
+                    if trend.kind is TrendKind.TREND
+                    else "formal_consolidation_movement"
+                ),
+                (
+                    "two_separated_centers"
+                    if trend.kind is TrendKind.TREND
+                    else "single_center_consolidation"
+                ),
                 "width_matched_entry_departure_legs",
                 "confirmed_same_level_boundary",
                 *_divergence_evidence_codes(divergence),
-                "trend_divergence",
+                f"{divergence.kind}_divergence",
             ),
         )
 

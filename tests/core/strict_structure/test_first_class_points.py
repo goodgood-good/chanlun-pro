@@ -18,7 +18,11 @@ from chanlun.core.strict_structure.strength import (
     center_departure_comparison_leg,
     center_entry_comparison_leg,
 )
-from tests.core.strict_structure.helpers import TEST_PRICE_BASIS, unit
+from tests.core.strict_structure.helpers import (
+    TEST_PRICE_BASIS,
+    unit,
+    valid_five_up_exit,
+)
 
 
 UP_VALUES = (
@@ -140,6 +144,16 @@ def divergent_strength(direction, *, extended=False):
     return StrengthTable(values)
 
 
+def consolidation_divergent_strength(direction):
+    sign = 1 if direction == "up" else -1
+    return StrengthTable(
+        {
+            "u-0": (100, sign * 5, sign * 2),
+            "u-6": (80, sign * 3, sign * 1),
+        }
+    )
+
+
 def engine_for(structure, strength):
     return StrictSignalEngine(
         structure=structure,
@@ -232,9 +246,149 @@ def test_approaching_first_waits_for_unlocked_third_departure_segment():
     assert "macd_histogram_area_decay" in point.evidence_codes
 
 
-def test_single_center_consolidation_does_not_emit_first_class():
+def test_approaching_consolidation_first_class_is_symmetric():
+    for direction, expected_type in (("up", "1sell"), ("down", "1buy")):
+        strength = consolidation_divergent_strength(direction)
+        units = list(make_units(UP_VALUES[:7], direction))
+        units[-1] = replace(units[-1], locked=False, confirmed_at=None)
+        center_result, assembly = calculate_level_with_divergence_boundaries(
+            tuple(units),
+            0,
+            SourceKind.SEGMENT,
+            strength=strength,
+        )
+        structure = StrictStructureResult(
+            schema="chanlun-structure",
+            price_basis_revision=TEST_PRICE_BASIS,
+            levels=(
+                StrictLevelResult(
+                    structural_level=0,
+                    units=tuple(units),
+                    center_result=center_result,
+                    trend_types=assembly.current_trends,
+                    completed_trends=assembly.completed_trends,
+                    decomposition_boundaries=assembly.decomposition_boundaries,
+                ),
+            ),
+        )
+
+        point = only_point(
+            engine_for(structure, strength).approaching_points(
+                units[-1].available_at
+            )
+        )
+        assert point.point_type == expected_type
+        assert point.anchor_unit_id == "u-6"
+        assert point.divergence.kind == "consolidation"
+        assert "formal_consolidation_prefix" in point.evidence_codes
+        assert point.missing_conditions == ("terminal_unit_locked",)
+
+
+def test_uncompleted_single_center_does_not_emit_first_class():
     structure, _assembly = structure_from_values(values=UP_VALUES[:5])
     assert engine_for(structure, StrengthTable({})).first_class_points() == ()
+
+
+def test_single_center_consolidation_divergence_emits_symmetric_first_class():
+    for direction, expected_type in (("up", "1sell"), ("down", "1buy")):
+        strength = consolidation_divergent_strength(direction)
+        structure, assembly = structure_from_values(
+            values=UP_VALUES[:7],
+            direction=direction,
+            strength=strength,
+        )
+
+        point = only_point(engine_for(structure, strength).first_class_points())
+        boundary = assembly.decomposition_boundaries[0]
+        trend = assembly.completed_trends[0]
+        assert point.point_type == expected_type
+        assert point.divergence.kind == "consolidation"
+        assert point.anchor_unit_id == "u-6"
+        assert point.available_at == structure.levels[0].units[-1].available_at
+        assert boundary.boundary_kind == "consolidation_divergence"
+        assert boundary.anchor_unit_id == point.anchor_unit_id
+        assert trend.kind is TrendKind.CONSOLIDATION
+        assert trend.terminal_divergence == point.divergence
+
+
+def test_three_unit_entry_compares_three_unit_departure_for_first_class():
+    up_units = (
+        unit(0, "up", 80, 100),
+        unit(1, "down", 100, 90),
+        *valid_five_up_exit(2),
+        unit(7, "down", 130, 120),
+        unit(8, "up", 120, 140),
+    )
+    for direction, expected_type in (("up", "1sell"), ("down", "1buy")):
+        units = (
+            up_units
+            if direction == "up"
+            else tuple(
+                unit(
+                    index,
+                    "up" if item.direction == "down" else "down",
+                    300 - item.start_tick,
+                    300 - item.end_tick,
+                )
+                for index, item in enumerate(up_units)
+            )
+        )
+        sign = 1 if direction == "up" else -1
+        strength = StrengthTable(
+            {
+                ("u-0", "u-1", "u-2"): (100, sign * 5, sign * 2),
+                ("u-6", "u-7", "u-8"): (80, sign * 3, sign * 1),
+            }
+        )
+        center_result, assembly = calculate_level_with_divergence_boundaries(
+            units,
+            0,
+            SourceKind.SEGMENT,
+            strength=strength,
+        )
+        structure = StrictStructureResult(
+            schema="chanlun-structure",
+            price_basis_revision=TEST_PRICE_BASIS,
+            levels=(
+                StrictLevelResult(
+                    structural_level=0,
+                    units=units,
+                    center_result=center_result,
+                    trend_types=assembly.current_trends,
+                    completed_trends=assembly.completed_trends,
+                    decomposition_boundaries=assembly.decomposition_boundaries,
+                ),
+            ),
+        )
+
+        point = only_point(engine_for(structure, strength).first_class_points())
+        assert point.point_type == expected_type
+        assert point.divergence.comparison_width == 3
+        assert point.divergence.compare_leg_unit_ids == ("u-0", "u-1", "u-2")
+        assert point.divergence.signal_leg_unit_ids == ("u-6", "u-7", "u-8")
+
+
+def test_consolidation_first_class_is_followed_by_symmetric_second_class():
+    values = (*UP_VALUES[:8], ("up", 120, 129))
+    for direction, first_type, second_type in (
+        ("up", "1sell", "2sell"),
+        ("down", "1buy", "2buy"),
+    ):
+        strength = consolidation_divergent_strength(direction)
+        structure, _assembly = structure_from_values(
+            values=values,
+            direction=direction,
+            strength=strength,
+        )
+        engine = engine_for(structure, strength)
+        first = only_point(engine.first_class_points())
+        second = only_point(engine.second_class_points((first,)))
+
+        assert first.point_type == first_type
+        assert second.point_type == second_type
+        assert second.parent_point_id == first.point_id
+        assert second.anchor_unit_id == "u-8"
+        assert second.variant.value == "strict"
 
 
 def test_departure_without_whole_trend_new_extreme_is_not_formal_divergence():

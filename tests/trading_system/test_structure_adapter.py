@@ -83,9 +83,6 @@ SMALL_TO_LARGE_SPECS = (
     ("up", 198, 210),
     ("down", 210, 193),
     ("up", 193, 219),
-    # The rebound ends on u-41. Its dynamic last lower-level center leaves
-    # upward on u-41 and completes a genuine 3buy on u-42, the first segment
-    # of the immediately following higher-level pullback.
     ("down", 219, 205),
     ("up", 205, 215),
     ("down", 215, 207),
@@ -115,8 +112,8 @@ SMALL_TO_LARGE_SPECS = (
 
 class SmallToLargeFixtureStrength:
     def snapshot(self, value):
-        # Only the opening downward trend is divergent. Equal upward strength
-        # keeps the rebound intact until its genuine relation boundary.
+        # 只有开头的下行走势发生背驰；上行力度保持不衰减，使反弹延续到真实
+        # 的中枢关系边界。
         magnitude = (
             100_000_000.0
             if value.direction == "up"
@@ -161,7 +158,7 @@ def _anchor_unit(point) -> ConstituentUnit:
 
 
 def _with_point_anchors(structure, points) -> StrictStructureResult:
-    """Attach only the exact formal anchor facts needed by adapter fixtures."""
+    """只附加适配器测试夹具所需的精确正式锚点事实。"""
 
     values = tuple(points)
     max_level = max(
@@ -372,7 +369,7 @@ def test_adapter_rejects_mismatched_or_future_snapshot_context() -> None:
         )
 
 
-def test_small_to_large_parent_and_reverse_third_links_survive_id_conversion() -> None:
+def test_small_to_large_parent_link_survives_id_conversion() -> None:
     strength = SmallToLargeFixtureStrength()
     units = tuple(
         unit(index, direction, start_tick + 1_000, end_tick + 1_000)
@@ -397,14 +394,7 @@ def test_small_to_large_parent_and_reverse_third_links_survive_id_conversion() -
         and point.point_type == "2buy"
         and "small_to_large_reversal" in point.evidence_codes
     )
-    parent = next(
-        point for point in first_points if point.point_id == second.parent_point_id
-    )
-    reverse_third = next(
-        point
-        for point in reverse_points
-        if point.point_id in second.related_point_ids and point.point_type == "3buy"
-    )
+    assert second.related_point_ids == (second.parent_point_id,)
     all_points_by_id = {}
     for point in (*first_points, *second_points, *reverse_points):
         previous = all_points_by_id.setdefault(point.point_id, point)
@@ -436,44 +426,12 @@ def test_small_to_large_parent_and_reverse_third_links_survive_id_conversion() -
         for point in converted
         if point.point_id == converted_second.parent_point_id
     )
-    converted_reverse = next(
-        point
-        for point in converted
-        if point.point_id in converted_second.related_point_ids
-        and point.point_type == "3buy"
-    )
     assert converted_second.parent_point_id == converted_parent.point_id
-    assert set(converted_second.related_point_ids) == {
-        converted_parent.point_id,
-        converted_reverse.point_id,
-    }
+    assert converted_second.related_point_ids == (converted_parent.point_id,)
     proof_ids, reasons = _point_proof(
         converted_second,
         points_by_id={point.point_id: point for point in converted},
         trends=(),
     )
-    assert set(proof_ids) == {
-        converted_parent.point_id,
-        converted_reverse.point_id,
-    }
+    assert proof_ids == (converted_parent.point_id,)
     assert reasons == ()
-
-    earlier_third = next(
-        point
-        for point in reverse_points
-        if point.structural_level == 0
-        and point.point_type == "3buy"
-        and point.point_id != reverse_third.point_id
-        and point.available_at <= second.available_at
-    )
-    forged_earlier_center = replace(
-        second,
-        related_point_ids=(parent.point_id, earlier_third.point_id),
-        small_to_large_last_center_id=earlier_third.center_id,
-    )
-    forged_points = tuple(
-        forged_earlier_center if point.point_id == second.point_id else point
-        for point in all_points
-    )
-    with pytest.raises(ValueError, match="dynamic last center"):
-        _evidence(forged_points, structure=structure)

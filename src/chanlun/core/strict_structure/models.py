@@ -25,12 +25,11 @@ class SourceKind(str, Enum):
 
 
 def center_seed_size(source_kind: SourceKind) -> int:
-    """Return the three-unit price-core width.
+    """返回中枢三段价格核心的宽度。
 
-    ``initial_units`` always stores the three units whose intersection freezes
-    ``ZD/ZG``.  Physical line/stroke centers have a separate five-segment
-    establishment gate (entry + these three units + maturity); recursive
-    trend-type centers keep the original three completed lower-level trends.
+    ``initial_units`` 始终保存用于冻结 ``ZD/ZG`` 交集的三段。物理线段/笔中枢
+    另有五段成立门槛（进入段 + 这三段 + 成熟段）；递归走势类型中枢则保留
+    原始的三段已完成低级别走势。
     """
 
     SourceKind(source_kind)
@@ -560,25 +559,25 @@ class TrendCenter:
 
     @property
     def display_range_start_market_time(self) -> datetime:
-        """Start of the visible center rectangle (middle-three core only)."""
+        """返回可见中枢矩形的起点，仅包含中间三段核心。"""
 
         return self.core_body_start_market_time
 
     @property
     def display_range_end_market_time(self) -> datetime:
-        """End of the visible center body, before the external leaving leg."""
+        """返回可见中枢本体的终点，不包含外部离开段。"""
 
         return self.core_body_end_market_time
 
     @property
     def initial_exit_unit(self) -> ConstituentUnit | None:
-        """The fifth segment when it was already an external departure."""
+        """若第五段已是外部离开段，则返回该段。"""
 
         return self.establishment_leave_unit
 
     @property
     def maturity_unit(self) -> ConstituentUnit:
-        """Return the immutable unit whose lock made the center public."""
+        """返回锁定后使中枢正式成立的不可变单元。"""
 
         if self.source_kind is SourceKind.TREND_TYPE:
             return self.initial_units[-1]
@@ -588,7 +587,7 @@ class TrendCenter:
 
     @property
     def establishment_units(self) -> tuple[ConstituentUnit, ...]:
-        """Return the exact source window used to establish this center."""
+        """返回用于建立该中枢的精确来源窗口。"""
 
         if self.source_kind is SourceKind.TREND_TYPE:
             return self.initial_units
@@ -599,18 +598,16 @@ class TrendCenter:
 
     @property
     def lifecycle_leave_unit(self) -> ConstituentUnit | None:
-        """Return the external leave currently owned by this center."""
+        """返回当前归属于该中枢的外部离开段。"""
 
         return self.completion_leave_unit or self.pending_leave_unit
 
     @property
     def lifecycle_role_count(self) -> int:
-        """Count entry, true body components and one external leave.
+        """统计进入段、真实本体段和一段外部离开段。
 
-        The completion return confirms a third-class point and is deliberately
-        not part of the five-role center.  A failed leave and its return are
-        folded into ``body_units`` first, so they are counted as extensions
-        only after their failed-departure status is known.
+        完成回返用于确认三类点，故意不计入中枢五角色。失败离开及其回返会先
+        折叠进 ``body_units``，只有确认离开失败后才作为延伸段计数。
         """
 
         return (
@@ -621,7 +618,7 @@ class TrendCenter:
 
     @property
     def has_minimum_physical_roles(self) -> bool:
-        """Whether this object may leave the internal physical state machine."""
+        """返回该对象是否已具备离开内部物理状态机的最低角色数。"""
 
         if self.source_kind is SourceKind.TREND_TYPE:
             return True
@@ -639,7 +636,7 @@ class TrendCenter:
 
     @property
     def physically_completed(self) -> bool:
-        """Whether leave plus outside first return have both been confirmed."""
+        """返回离开段及外部首次回返是否均已确认。"""
 
         return (
             self.completion_leave_unit is not None
@@ -951,9 +948,8 @@ class TrendType:
     market_end: datetime
     confirmed_at: datetime | None
     available_at: datetime
-    # A confirmed same-level divergence may finish the trend before a later
-    # center-relation change appears.  The field is deliberately optional so
-    # ordinary geometric COMPLETE snapshots remain representable.
+    # 已确认的同级别趋势背驰或盘整背驰，都可以在后续中枢关系变化出现前结束
+    # 当前走势。该字段保持可选，以便表达仅由几何关系完成的走势快照。
     terminal_divergence: DivergenceEvidence | None = None
 
     def __post_init__(self) -> None:
@@ -1081,17 +1077,21 @@ class TrendType:
                 raise ValueError("terminal unit must be the final leave unit")
         else:
             divergence = self.terminal_divergence
+            expected_divergence_kind = (
+                "trend"
+                if self.kind is TrendKind.TREND
+                else "consolidation"
+            )
             if (
-                self.kind is not TrendKind.TREND
-                or self.state not in (TrendState.COMPLETE, TrendState.LOCKED)
-                or divergence.kind != "trend"
+                self.state not in (TrendState.COMPLETE, TrendState.LOCKED)
+                or divergence.kind != expected_divergence_kind
                 or not divergence.is_divergent
                 or divergence.structural_level != self.structural_level
                 or divergence.source_kind not in source_kinds
                 or divergence.price_basis_revision != self.price_basis_revision
                 or divergence.direction != self.direction
             ):
-                raise ValueError("terminal divergence must finish this formal trend")
+                raise ValueError("末端背驰必须与当前正式走势类型一致")
             terminal_center = self.centers[-1]
             leave = terminal_center.lifecycle_leave_unit
             terminal = self.constituent_units[-1]
@@ -1759,18 +1759,10 @@ class StrictEvidenceResult:
                 raise ValueError("second-class parent evidence is unresolved")
             is_small_to_large = "small_to_large_reversal" in point.evidence_codes
             if is_small_to_large:
-                reverse_type = "3buy" if point.side == "buy" else "3sell"
-                reverse = tuple(
-                    item
-                    for item in related
-                    if item.point_type == reverse_type
-                    and item.side == point.side
-                    and item.structural_level == point.structural_level - 1
-                )
                 if (
                     parent.structural_level >= point.structural_level
                     or parent.point_id not in point.related_point_ids
-                    or len(reverse) != 1
+                    or tuple(point.related_point_ids) != (parent.point_id,)
                 ):
                     raise ValueError(
                         "small-to-large second-class evidence graph is incomplete"
@@ -1778,7 +1770,6 @@ class StrictEvidenceResult:
                 self._validate_small_to_large_second(
                     point,
                     parent,
-                    reverse[0],
                     levels_by_number,
                 )
             elif parent.structural_level != point.structural_level:
@@ -1884,15 +1875,11 @@ class StrictEvidenceResult:
         self,
         point,
         parent,
-        reverse_third,
         levels_by_number,
     ) -> None:
-        """Rebuild L044's dynamic-last-center proof from the frozen graph."""
+        """从冻结的递归图中重建小转大二类点的同一套三段证明。"""
 
         target = levels_by_number[point.structural_level]
-        lower = levels_by_number.get(point.structural_level - 1)
-        if lower is None:
-            raise ValueError("small-to-large direct sublevel is unavailable")
         carrier_ids = point.small_to_large_carrier_unit_ids
         positions = {unit.unit_id: index for index, unit in enumerate(target.units)}
         if any(unit_id not in positions for unit_id in carrier_ids):
@@ -1954,66 +1941,13 @@ class StrictEvidenceResult:
             return frozenset(output)
 
         signal_descendants = descendants(signal)
-        rebound_descendants = descendants(rebound)
-        pullback_descendants = descendants(pullback)
         if parent.anchor_unit_id not in signal_descendants:
             raise ValueError("small-to-large parent is outside its signal carrier")
-        lower_ids = {unit.unit_id for unit in lower.units}
-        signal_children = signal_descendants & lower_ids
-        rebound_children = rebound_descendants & lower_ids
-        pullback_children = pullback_descendants & lower_ids
-        movement_children = signal_children | rebound_children
-        reversal_children = rebound_children | pullback_children
-        candidates = tuple(
-            center
-            for center in lower.center_result.centers
-            if signal.market_start
-            <= center.body_start_market_time
-            <= center.established_market_time
-            <= rebound.market_end
-            and center.entry_unit.unit_id in movement_children
-            and all(
-                unit.unit_id in movement_children
-                for unit in (
-                    *center.establishment_units,
-                    *center.body_units,
-                    *center.extension_units,
-                )
-            )
-        )
-        if not candidates:
-            raise ValueError("small-to-large direct sublevel center is missing")
-        last_center = max(
-            candidates,
-            key=lambda center: (
-                center.body_start_market_time,
-                center.established_market_time,
-                center.center_id,
-            ),
-        )
-        leave = last_center.completion_leave_unit
-        return_unit = last_center.completion_return_unit
-        if (
-            last_center.center_id != point.small_to_large_last_center_id
-            or not last_center.physically_completed
-            or leave is None
-            or return_unit is None
-            or last_center.available_at > pullback.available_at
-            or leave.unit_id not in rebound_children
-            or return_unit.unit_id not in reversal_children
-            or return_unit.market_end > pullback.market_end
-            or reverse_third.center_id != last_center.center_id
-            or reverse_third.anchor_unit_id != return_unit.unit_id
-            or reverse_third.available_at > pullback.available_at
-        ):
-            raise ValueError(
-                "small-to-large point does not preserve the dynamic last center"
-            )
 
     def _validate_recursive_unit_lineage(self) -> None:
-        """Replay the exact production recursion between adjacent levels."""
+        """重放相邻级别之间的精确生产递归关系。"""
 
-        # Lazy imports avoid a models -> adapter/decomposition -> models cycle.
+        # 延迟导入用于避免 models -> adapter/decomposition -> models 循环依赖。
         from chanlun.core.strict_structure.same_level_decomposition import (
             combine_same_level_trends,
         )
@@ -2068,7 +2002,7 @@ def build_strict_point_id(
     center_id: str | None,
     parent_point_id: str | None,
 ) -> str:
-    """Build the stable identity of a confirmed strict structural point."""
+    """构建已确认严格结构买卖点的稳定身份。"""
 
     if not price_basis_revision or not price_basis_revision.strip():
         raise ValueError("price_basis_revision is required")
@@ -2180,9 +2114,8 @@ class DivergenceEvidence:
 
     @property
     def is_divergent(self) -> bool:
-        # Area, directional histogram peak, and DIF extreme are independent
-        # momentum evidence.  Any one may confirm weakening; the number of
-        # agreeing indicators affects confidence, never the formal boolean.
+        # 面积、方向柱峰值和 DIF 极值是相互独立的力度证据，任意一项衰减即可
+        # 确认力度转弱；同时成立的指标数量只影响置信度，不改变正式布尔结论。
         return self.price_extreme_confirmed and self.strength_decay_count > 0
 
     @property
@@ -2206,7 +2139,7 @@ class DivergenceEvidence:
 
 @dataclass(frozen=True, slots=True)
 class DecompositionBoundaryEvidence:
-    """A causal, confirmed boundary used by fixed same-level decomposition."""
+    """固定同级别划分所使用的因果已确认边界。"""
 
     boundary_id: str
     decomposition_mode: Literal["same_level"]
@@ -2291,7 +2224,6 @@ class StrictPointEvidence:
     missing_conditions: tuple[str, ...] = ()
     related_point_ids: tuple[str, ...] = ()
     small_to_large_carrier_unit_ids: tuple[str, ...] = ()
-    small_to_large_last_center_id: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "status", StrictPointStatus(self.status))
@@ -2390,10 +2322,12 @@ class StrictPointEvidence:
         if self.point_type in {"1buy", "1sell"} and (
             self.variant is not StrictPointVariant.STANDARD
             or self.divergence is None
-            or self.divergence.kind != "trend"
+            or self.divergence.kind not in {"trend", "consolidation"}
             or not self.divergence.is_divergent
         ):
-            raise ValueError("first class requires standard trend divergence")
+            raise ValueError(
+                "一类买卖点必须来自正式趋势背驰或盘整背驰"
+            )
         if self.point_type in {"2buy", "2sell"}:
             if self.variant not in {
                 StrictPointVariant.STRICT,
@@ -2467,16 +2401,11 @@ class StrictPointEvidence:
                     for unit_id in self.small_to_large_carrier_unit_ids
                 )
                 or self.anchor_unit_id != self.small_to_large_carrier_unit_ids[-1]
-                or not isinstance(self.small_to_large_last_center_id, str)
-                or not self.small_to_large_last_center_id
             ):
                 raise ValueError(
-                    "small-to-large point requires its exact carrier and last center"
+                    "小转大二类点必须保留完整的离开、反向、再离开三段载体"
                 )
-        elif (
-            self.small_to_large_carrier_unit_ids
-            or self.small_to_large_last_center_id is not None
-        ):
+        elif self.small_to_large_carrier_unit_ids:
             raise ValueError(
                 "ordinary point cannot carry small-to-large structural evidence"
             )

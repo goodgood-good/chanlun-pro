@@ -1,8 +1,8 @@
-"""Explicit exception boundary for strict Chan-structure contract failures."""
+"""严格缠论结构合同失败的明确异常边界。"""
 
 
 class StrictStructureContractError(RuntimeError):
-    """Raised only inside strict evidence construction for invalid evidence."""
+    """仅在严格证据构建内部遇到无效证据时抛出。"""
 
 
 __all__ = ("StrictStructureContractError",)

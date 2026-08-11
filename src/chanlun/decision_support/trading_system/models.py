@@ -112,7 +112,6 @@ class StructuralPoint:
     evidence_codes: tuple[str, ...]
     related_point_ids: tuple[str, ...] = ()
     small_to_large_carrier_unit_ids: tuple[str, ...] = ()
-    small_to_large_last_center_id: str | None = None
 
     def __post_init__(self) -> None:
         expected_side = "buy" if self.point_type.endswith("buy") else "sell"
@@ -163,16 +162,11 @@ class StructuralPoint:
                     not isinstance(unit_id, str) or not unit_id
                     for unit_id in self.small_to_large_carrier_unit_ids
                 )
-                or not isinstance(self.small_to_large_last_center_id, str)
-                or not self.small_to_large_last_center_id
             ):
                 raise ValueError(
-                    "small-to-large point requires its carrier and last center"
+                    "小转大二类点必须保留完整的离开、反向、再离开三段载体"
                 )
-        elif (
-            self.small_to_large_carrier_unit_ids
-            or self.small_to_large_last_center_id is not None
-        ):
+        elif self.small_to_large_carrier_unit_ids:
             raise ValueError(
                 "ordinary point cannot carry small-to-large structural evidence"
             )
@@ -207,11 +201,10 @@ class StructuralPoint:
 
 @dataclass(frozen=True, slots=True)
 class EntryExecutionBoundary:
-    """Unadjusted confirmation-bar facts that bound one optional entry.
+    """用于约束一次可选入场的未复权确认 K 线事实。
 
-    This is execution evidence, not a structural price.  In particular, a
-    first-buy structural anchor is normally the low of the divergence leg and
-    must never be reused as the confirmation bar's executable upper bound.
+    这是执行证据，不是结构价格。尤其是一买结构锚点通常是背驰段低点，绝不能
+    复用为确认 K 线的可执行价格上界。
     """
 
     symbol: str
@@ -304,7 +297,7 @@ class EntryExecutionBoundary:
 def parse_entry_execution_boundary_document(
     raw: object,
 ) -> EntryExecutionBoundary:
-    """Parse and independently re-attest one portable boundary document."""
+    """解析并独立复核一个可移植的执行边界文档。"""
 
     field_names = tuple(field.name for field in fields(EntryExecutionBoundary))
     if not isinstance(raw, Mapping) or set(raw) != set(field_names) | {
@@ -368,9 +361,8 @@ class SectorAssessment:
     thirty_context: TimeframeContext | None = None
     five_context: TimeframeContext | None = None
     one_context: TimeframeContext | None = None
-    # Horizontal strength is an ordering fact only.  It never turns a hostile
-    # sector into an eligible one and it is kept separate from structural
-    # context so missing QMT history cannot silently become a neutral score.
+    # 横向强度只用于排序，不能把不利板块变成可入选板块；它与结构上下文保持
+    # 分离，避免 QMT 历史缺失被静默解释成中性得分。
     horizontal_strength: Decimal | None = None
     horizontal_rank: int | None = None
     strength_anchor_session: date | None = None

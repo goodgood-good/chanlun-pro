@@ -25,7 +25,7 @@ def _json_value(value: Any) -> Any:
 
 
 def stable_structure_id(namespace: str, *parts: Any) -> str:
-    """Return a process-independent SHA-256 identity for structural facts."""
+    """返回与进程无关的结构事实 SHA-256 身份。"""
 
     if not namespace:
         raise ValueError("namespace is required")
@@ -49,7 +49,7 @@ def build_center_id(
     zd_tick: int,
     zg_tick: int,
 ) -> str:
-    """Return the immutable identity of a formal center seed."""
+    """返回正式中枢种子的不可变身份。"""
 
     return stable_structure_id(
         "chanlun-center",
@@ -73,7 +73,7 @@ def build_trend_id(
     direction: str,
     terminal_divergence_id: str | None = None,
 ) -> str:
-    """Return the immutable identity shared by a trend's state snapshots."""
+    """返回同一走势不同状态快照共享的不可变身份。"""
 
     return stable_structure_id(
         "chanlun-trend",
@@ -187,7 +187,7 @@ def build_strict_evidence_revision(
     confirmed_points,
     divergences=(),
 ) -> str:
-    """Hash only formal, executable evidence; projections stay outside."""
+    """只哈希正式可执行证据，临时投影不纳入身份。"""
 
     for value, label in (
         (symbol, "symbol"),

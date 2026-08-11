@@ -29,7 +29,7 @@ def calculate_level_with_divergence_boundaries(
     *,
     strength=None,
 ):
-    """Calculate one fixed same-level ledger to its causal boundary fixed point."""
+    """把唯一同级别账本计算到因果边界不再变化。"""
 
     values = tuple(units)
     unit_index = {item.unit_id: index for index, item in enumerate(values)}
@@ -68,9 +68,8 @@ def calculate_level_with_divergence_boundaries(
 
     for _pass in range(len(values) + 1):
         discovered = None
-        # A departure can later be folded back into its center body.  Replay
-        # locked prefixes so the first confirmed divergence remains an
-        # immutable boundary in batch, incremental, and restart calculations.
+        # 离开段之后可能折叠回中枢本体。通过重放锁定前缀，使首个已确认背驰在
+        # 批量、增量和重启计算中始终保持为不可变边界。
         for prefix_end in range(last_boundary_index + 1, locked_count):
             prefix = values[: prefix_end + 1]
             prefix_centers = calculate_centers(
@@ -267,9 +266,8 @@ class StrictRecursiveEngine:
         for level in range(self.max_levels):
             source_kind = SourceKind.SEGMENT if level == 0 else SourceKind.TREND_TYPE
             validate_unit_sequence(units, level, source_kind, oscillatory_ids)
-            # L0 consumes one immutable five-segment window: entry + middle
-            # three + leave. Higher levels retain three completed lower-level
-            # trends plus their auditable preceding trend entry.
+            # 第 0 层消耗不可变五段窗口：进入段 + 中间三段 + 离开段。更高级别保留
+            # 三段已完成低级别走势及其可审计的前一走势进入段。
             minimum_units = (
                 center_seed_size(source_kind) + 1
                 if source_kind is SourceKind.TREND_TYPE
@@ -278,11 +276,9 @@ class StrictRecursiveEngine:
             if len(units) < minimum_units:
                 break
 
-            # A confirmed divergence closes the current same-level movement.
-            # Center geometry must then be replayed in partitions so no later
-            # center can borrow units from both sides of that immutable edge.
-            # Repeating to a fixed point also allows a newly exposed suffix to
-            # reveal another confirmed boundary without future backfilling.
+            # 已确认背驰结束当前同级别走势。随后必须按分区重放中枢几何，避免后续
+            # 中枢借用不可变边界两侧的单元。重复计算到稳定点，也允许新暴露后缀
+            # 发现另一个已确认边界，而无需未来数据回填。
             center_result, assembly = calculate_level_with_divergence_boundaries(
                 units,
                 level,
