@@ -96,6 +96,7 @@ function Exit-DeploymentMutex {
 function Import-ProjectDotEnv {
     param([Parameter(Mandatory = $true)][string]$Path)
 
+    $script:ProjectDotEnvReplacedLegacyLogin = $false
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return }
     try {
         $bytes = [IO.File]::ReadAllBytes($Path)
@@ -120,7 +121,13 @@ function Import-ProjectDotEnv {
         $parts = @($trimmed.Substring(0, $separatorIndex), $trimmed.Substring($separatorIndex + 1))
         $key = $parts[0].Trim()
         if ($key -notmatch '^[A-Za-z_][A-Za-z0-9_]*$') { continue }
-        if ($null -ne [Environment]::GetEnvironmentVariable($key, 'Process')) { continue }
+        $currentValue = [Environment]::GetEnvironmentVariable($key, 'Process')
+        $replaceLegacyLogin = (
+            $key -eq 'CHANLUN_LOGIN_PWD' -and
+            $null -ne $currentValue -and
+            $currentValue.Trim() -notmatch '^(?:pbkdf2:|scrypt:)'
+        )
+        if ($null -ne $currentValue -and -not $replaceLegacyLogin) { continue }
         $value = $parts[1].Trim()
         if (
             $value.Length -ge 2 -and
@@ -129,7 +136,20 @@ function Import-ProjectDotEnv {
         ) {
             $value = $value.Substring(1, $value.Length - 2)
         }
+        # A legacy user/machine environment variable can otherwise shadow the
+        # repository's migrated Werkzeug hash forever.  Only repair that one
+        # invalid override, and only when .env supplies a valid replacement;
+        # valid explicit process overrides retain normal environment priority.
+        if (
+            $replaceLegacyLogin -and
+            $value.Trim() -notmatch '^(?:pbkdf2:|scrypt:)'
+        ) {
+            continue
+        }
         [Environment]::SetEnvironmentVariable($key, $value, 'Process')
+        if ($replaceLegacyLogin) {
+            $script:ProjectDotEnvReplacedLegacyLogin = $true
+        }
     }
 }
 
@@ -329,6 +349,9 @@ if ($null -eq (Get-Command Get-NetTCPConnection -ErrorAction SilentlyContinue)) 
 
 try {
     Import-ProjectDotEnv -Path (Join-Path $ProjectRoot '.env')
+    if ($script:ProjectDotEnvReplacedLegacyLogin) {
+        Log 'replaced an invalid inherited CHANLUN_LOGIN_PWD with the hashed project .env value'
+    }
     $PythonExe = Resolve-ProjectPython
 } catch {
     Log ('ERROR: Python/environment preflight failed: {0}' -f $_.Exception.Message)

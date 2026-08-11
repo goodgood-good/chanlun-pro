@@ -61,6 +61,46 @@ def test_restart_dotenv_loader_preserves_equals_and_quotes(tmp_path):
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+@pytest.mark.skipif(os.name != "nt", reason="restart script targets Windows")
+def test_restart_dotenv_loader_repairs_only_legacy_plaintext_login(tmp_path):
+    script = Path(__file__).resolve().parents[1] / "ops" / "restart_web.ps1"
+    env_file = tmp_path / ".env"
+    project_hash = "scrypt:32768:8:1$project$hash"
+    env_file.write_text(
+        f"CHANLUN_LOGIN_PWD={project_hash}\n",
+        encoding="utf-8",
+    )
+    script_arg = str(script).replace("'", "''")
+    env_arg = str(env_file).replace("'", "''")
+    command = (
+        f"$tokens=$null; $errors=$null; "
+        f"$ast=[Management.Automation.Language.Parser]::ParseFile('{script_arg}',"
+        "[ref]$tokens,[ref]$errors); "
+        "$definition=$ast.Find({param($node) "
+        "$node -is [Management.Automation.Language.FunctionDefinitionAst] -and "
+        "$node.Name -eq 'Import-ProjectDotEnv'}, $true); "
+        ". ([scriptblock]::Create($definition.Extent.Text)); "
+        "$env:CHANLUN_LOGIN_PWD='legacy-plaintext'; "
+        f"Import-ProjectDotEnv -Path '{env_arg}'; "
+        f"if ($env:CHANLUN_LOGIN_PWD -ne '{project_hash}' -or "
+        "-not $script:ProjectDotEnvReplacedLegacyLogin) { exit 1 }; "
+        "$env:CHANLUN_LOGIN_PWD='scrypt:32768:8:1$explicit$hash'; "
+        f"Import-ProjectDotEnv -Path '{env_arg}'; "
+        "if ($env:CHANLUN_LOGIN_PWD -ne "
+        "'scrypt:32768:8:1$explicit$hash' -or "
+        "$script:ProjectDotEnvReplacedLegacyLogin) { exit 2 }"
+    )
+
+    result = subprocess.run(
+        ["powershell", "-NoProfile", "-Command", command],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 def test_restart_owns_only_the_configured_port_process_and_confirms_shutdown():
     source = (
         Path(__file__).resolve().parents[1] / "ops" / "restart_web.ps1"
