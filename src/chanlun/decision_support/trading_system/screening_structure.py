@@ -162,7 +162,7 @@ def unfinished_segment_candidates(
             ),
             evidence_codes=(
                 "physical_timeframe_recursive_base_level",
-                "old_pen_segment_chain",
+                "strict_stroke_segment_chain",
                 "unfinished_segment_participates",
                 "provisional_center_completion",
                 "core_boundary_held",

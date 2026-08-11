@@ -246,7 +246,7 @@ def test_fast_basket_category_matches_frozen_selection_rule() -> None:
     assert actual == expected
 
 
-def test_bottom_fractal_anchor_uses_third_completed_bar_and_old_pen() -> None:
+def test_bottom_fractal_anchor_uses_third_completed_bar_and_strict_stroke() -> None:
     values = (
         10,
         11,
@@ -288,7 +288,7 @@ def test_bottom_fractal_anchor_uses_third_completed_bar_and_old_pen() -> None:
         symbol="CSI.000300",
     )
     assert result.resolved
-    assert result.pen_definition_mode == "ORIGINAL_OLD_PEN"
+    assert result.stroke_mode == "strict-cl-k-distance"
     assert result.fractal_middle_session == date(2020, 1, 22)
     assert result.anchor_session == date(2020, 1, 23)
     # Supplying future rows while keeping the same decision prefix cannot
@@ -674,7 +674,7 @@ def test_diagnostic_buys_do_not_change_unique_sell_mapping() -> None:
     assert supply.diagnostic_directional_classification == "SELL12_PRESENT"
 
 
-def test_old_pen_risk_adapter_emits_formed_unresolved_without_lower_mapping() -> None:
+def test_strict_risk_adapter_emits_formed_unresolved_without_lower_mapping() -> None:
     values = (10, 11, 12, 11, 10, 9, 10, 11, 12, 13, 12)
     start = date(2020, 1, 1)
     bars = tuple(
@@ -703,7 +703,7 @@ def test_old_pen_risk_adapter_emits_formed_unresolved_without_lower_mapping() ->
     assert result.blockers[0].code == (
         "NO_COMPLETED_LOWER_1SELL_2SELL_CENTER_IN_TOP_FRACTAL"
     )
-    assert result.fact.pen_definition_mode == "ORIGINAL_OLD_PEN"
+    assert result.fact.stroke_mode == "strict-cl-k-distance"
     assert result.mapping_supply is not None
     assert result.mapping_supply.classification == "LOWER_STRUCTURE_UNAVAILABLE"
     assert result.mapping_supply.point_evidence_count == 0
@@ -801,7 +801,7 @@ def test_qmt_adjustment_applies_on_equal_effective_boundary_never_before(
     assert len(adjusted.applied_event_ids) == 1
 
 
-def test_high_timeframe_risk_uses_completed_ma5_and_old_pen_states() -> None:
+def test_high_timeframe_risk_uses_completed_ma5_and_strict_states() -> None:
     sessions = tuple(date(2018, 1, 1) + timedelta(days=index) for index in range(1100))
     rows = tuple(market_bar(session, 100 + (index % 11)) for index, session in enumerate(sessions))
     decision = close_time(sessions[-1])
@@ -813,7 +813,7 @@ def test_high_timeframe_risk_uses_completed_ma5_and_old_pen_states() -> None:
             evidence_bar_end=None,
             mapping_unique=True,
             mapped_center_id=None,
-            pen_definition_mode="ORIGINAL_OLD_PEN",
+            stroke_mode="strict-cl-k-distance",
             source_revision=f"source:{period}",
         )
         for period in ("M", "W", "D")
@@ -929,7 +929,7 @@ def test_benchmark_daily_risk_consumes_equal_boundary_completed_30m_prefix(
             close_time(date(2020, 1, 11)),
         )
     )
-    original_structure = etf_facts._old_pen_structure_state
+    original_structure = etf_facts._strict_structure_state
     lower_state = object()
 
     def structure_state(
@@ -969,7 +969,7 @@ def test_benchmark_daily_risk_consumes_equal_boundary_completed_30m_prefix(
             ),
         )
 
-    monkeypatch.setattr(etf_facts, "_old_pen_structure_state", structure_state)
+    monkeypatch.setattr(etf_facts, "_strict_structure_state", structure_state)
     monkeypatch.setattr(etf_facts, "_lower_risk_evidence", lower_evidence)
     result = build_benchmark_structure_risk_facts(
         rows,
@@ -1100,7 +1100,7 @@ def test_candidate_interface_uses_exact_pit_session_and_same_decision_core(
         structure_snapshot_id="technical:510300:test",
         observed_at=decision,
         price_basis_revision="pit:test",
-        pen_definition_mode="ORIGINAL_OLD_PEN",
+        stroke_mode="strict-cl-k-distance",
         l0_source_frequency="30m",
         l1_source_frequency="5m",
         l2_source_frequency="1m",

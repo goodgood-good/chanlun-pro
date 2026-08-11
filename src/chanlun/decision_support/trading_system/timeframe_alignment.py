@@ -13,9 +13,6 @@ from chanlun.decision_support.trading_system.backtest.fixed_year import (
     CausalCenterCompletionFact,
 )
 from chanlun.decision_support.trading_system.models import StructuralPoint
-from chanlun.decision_support.trading_system.structure_adapter import (
-    has_explicit_small_to_large_second_proof,
-)
 from chanlun.decision_support.trading_system.parameters import snapshot_sha256
 
 
@@ -329,7 +326,6 @@ def align_independent_entry_chains(
     l2_points: Iterable[StructuralPoint],
     confirmation_bars: Mapping[str, ConfirmationBarFact],
     l0_price_quantum: Decimal,
-    allowed_l2_second_buy_ids: Iterable[str] = (),
 ) -> tuple[AlignmentDecision, ...]:
     quantum = Decimal(l0_price_quantum)
     if quantum <= 0:
@@ -341,16 +337,6 @@ def align_independent_entry_chains(
     }
     trends = tuple(l1_trends)
     locators = tuple(l2_points)
-    allowed_second = frozenset(allowed_l2_second_buy_ids)
-    locator_by_id = {point.point_id: point for point in locators}
-    proven_second = frozenset(
-        point.point_id
-        for point in locators
-        if has_explicit_small_to_large_second_proof(
-            point,
-            points_by_id=locator_by_id,
-        )
-    )
     decisions: list[AlignmentDecision] = []
 
     for l0 in sorted(l0_points, key=lambda item: (item.available_at, item.point_id)):
@@ -485,13 +471,6 @@ def align_independent_entry_chains(
                 if point.price_basis_revision == l0.price_basis_revision
                 and point.side == "buy"
                 and point.point_type in {"1buy", "2buy"}
-                and (
-                    point.point_type == "1buy"
-                    or (
-                        point.point_id in allowed_second
-                        and point.point_id in proven_second
-                    )
-                )
                 and first_return.terminal_start <= point.anchor_at <= first_return.terminal_end
                 and point.available_at <= l0.available_at
             ),

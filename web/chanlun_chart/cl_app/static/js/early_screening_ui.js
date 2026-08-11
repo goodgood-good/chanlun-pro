@@ -812,7 +812,7 @@
         state: setupState,
         tone: setupTone,
         summary: setupKnown
-          ? `${POINT_LABELS[setup.point_type || safeSignal.point_type] || text(setup.point_type || safeSignal.point_type)} · 老笔→线段中枢 · 本周期0级（非递归） · ${center}${unfinished}`
+          ? `${POINT_LABELS[setup.point_type || safeSignal.point_type] || text(setup.point_type || safeSignal.point_type)} · 严格笔→递归中枢 · 第 ${text(setup.recursive_level, "0")} 层 · ${center}${unfinished}`
           : "操作级别设置未提供",
         boundary: setup.invalidation_price === null || setup.invalidation_price === undefined || setup.invalidation_price === ""
           ? "失效价未提供"
@@ -1768,7 +1768,7 @@
       "[data-selected-stage]",
       lifecycleLabel(lifecycleStageForSignal(signal)),
     );
-    setNodeText(rootElement, "[data-selected-tower]", "老笔 → 线段中枢 / 本周期0级（非递归）");
+    setNodeText(rootElement, "[data-selected-tower]", "严格笔 → 线段 → 递归中枢 / 全层级");
     const selectedSetup = isRecord(signal.setup_5m) ? signal.setup_5m : {};
     setNodeText(
       rootElement,

@@ -16,6 +16,7 @@ import re
 from typing import Mapping
 from zoneinfo import ZoneInfo
 
+from chanlun.core.strict_structure.base_profile import STRICT_STROKE_MODE
 from chanlun.decision_support.fingerprints import normalize_datetime, sha256_json
 from chanlun.decision_support.trading_system.decision_source_provenance import (
     decision_source_snapshot_id,
@@ -3164,7 +3165,7 @@ def validate_live_review_snapshot(
             or raw.get("live_status") != "LIVE_DISABLED"
             or raw.get("structure_scope") != "physical-timeframe-recursive"
             or raw.get("structure_frequencies") != ["d", "30m", "5m", "1m"]
-            or raw.get("stroke_mode") != "strict-cl-k-distance"
+            or raw.get("stroke_mode") != STRICT_STROKE_MODE
             or raw.get("recursive_structure_used") is not True
             or raw.get("physical_timeframe_recursive") is not True
             or not signal_identity_consistent

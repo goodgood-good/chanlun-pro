@@ -32,9 +32,6 @@ from chanlun.core.strict_structure.same_level_decomposition import (
 )
 from chanlun.core.strict_structure.signals import StrictSignalEngine
 from chanlun.core.strict_structure.unit_adapter import trend_type_to_unit
-from chanlun.decision_support.trading_system.structure_adapter import (
-    extract_confirmed_points,
-)
 from chanlun.decision_support.trading_system.direct_recursive_structure import (
     build_direct_recursive_structure_path,
 )
@@ -478,47 +475,15 @@ def test_locator_outside_exact_first_return_is_rejected() -> None:
     )
 
 
-def test_signed_ordinary_second_buy_cannot_impersonate_small_to_large() -> None:
+def test_canonical_ordinary_second_buy_is_a_direct_locator() -> None:
     evidence = _evidence(locator_type="2buy")
-    rejected = build_direct_recursive_structure_path(
+    path = build_direct_recursive_structure_path(
         evidence=evidence,
         code=CODE,
     )
-    assert rejected.decisions[0].reason_codes == (
-        "L2_1M_SECOND_BUY_REQUIRES_SMALL_TO_LARGE_EVIDENCE",
-    )
-
-    points = extract_confirmed_points(
-        evidence,
-        code=CODE,
-        source_frequency="1m",
-        as_of=evidence.source_closed_at,
-    )
-    second_id = next(point.point_id for point in points if point.point_type == "2buy")
-    still_rejected = build_direct_recursive_structure_path(
-        evidence=evidence,
-        code=CODE,
-        allowed_l2_second_buy_ids=(second_id,),
-    )
-    assert still_rejected.aligned_entry_count == 0
-    assert still_rejected.decisions[0].reason_codes == (
-        "L2_1M_SECOND_BUY_REQUIRES_SMALL_TO_LARGE_EVIDENCE",
-    )
-
-
-def test_unknown_signed_second_buy_is_rejected_at_contract_boundary() -> None:
-    evidence = _evidence(locator_type="2buy")
-
-    try:
-        build_direct_recursive_structure_path(
-            evidence=evidence,
-            code=CODE,
-            allowed_l2_second_buy_ids=("sha256:unknown",),
-        )
-    except ValueError as exc:
-        assert str(exc) == "allowed direct-recursive second buy is unknown"
-    else:  # pragma: no cover - explicit contract guard
-        raise AssertionError("unknown signed identity must be rejected")
+    assert path.aligned_entry_count == 1
+    assert path.decisions[0].status == "PASS"
+    assert path.technical_entries[0].l2_locator == "L2_SECOND_BUY"
 
 
 def test_less_than_three_recursive_levels_fails_closed() -> None:

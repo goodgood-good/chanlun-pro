@@ -125,7 +125,7 @@ ETF_REQUIRED_CANDIDATE_GATES = frozenset(
         "symbol_risk",
         "sector_strength",
         "structure_visibility",
-        "pen_definition",
+        "stroke_mode",
         "observation_windows",
         "level_relation",
         "completed_structure",

@@ -46,7 +46,7 @@
           <h1 id="es-title">缠论提前选股 · 实时盯盘与个股分析</h1>
           <p class="es-hero__intro">
             收盘后生成候选，盘中跟踪结构变化；程序只提供线索，由人最终判断，不会自动下单。
-            <span class="es-sr-only">提前选股固定使用老笔和各周期自身的线段中枢，不使用走势类型递归。</span>
+            <span class="es-sr-only">提前选股固定使用唯一严格笔和各物理周期的完整递归中枢证据。</span>
           </p>
         </div>
         <aside class="es-boundary-card" aria-label="系统边界">
@@ -74,7 +74,7 @@
           <span id="es-status-dot" class="es-status-dot is-loading" aria-hidden="true"></span>
           <div>
             <strong id="es-status">正在读取最新快照</strong>
-            <small id="es-status-detail">等待日线 / 30m / 5m / 1m 独立结构数据</small>
+            <small id="es-status-detail">等待日线 / 30m / 5m / 1m 统一递归结构数据</small>
           </div>
         </div>
         <dl class="es-status-facts es-status-facts--primary">
@@ -103,13 +103,13 @@
       <details class="es-operation-guide">
         <summary>查看日线 → 30m → 5m → 1m 筛选流程</summary>
         <section class="es-pipeline" aria-label="四周期筛选链">
-          <article><span>01 · 高级别环境</span><strong>日线结构筛选</strong><p>使用日线老笔与本周期线段中枢，只作真实周期环境判断。</p></article>
+          <article><span>01 · 高级别环境</span><strong>日线结构筛选</strong><p>使用日线严格笔与完整递归中枢，只作真实周期环境判断。</p></article>
           <i aria-hidden="true">→</i>
-          <article><span>02 · 大级别</span><strong>30m 大级别筛选</strong><p>按30分钟自身线段划分中枢，不把递归走势类型当成高级别。</p></article>
+          <article><span>02 · 大级别</span><strong>30m 大级别筛选</strong><p>按30分钟严格结构递归划分中枢，并保留各层级买卖点。</p></article>
           <i aria-hidden="true">→</i>
           <article><span>03 · 可操作级别</span><strong>5m 可操作级别筛选</strong><p>定位买卖点与失效边界；最后未完成线段可进入待确认观察。</p></article>
           <i aria-hidden="true">→</i>
-          <article><span>04 · 最精细操作</span><strong>1m 精确操作确认</strong><p>使用1分钟自身的老笔与线段结构核对同向触发，不消费递归层级。</p></article>
+          <article><span>04 · 最精细操作</span><strong>1m 精确操作确认</strong><p>使用1分钟严格笔、线段和递归结构核对同向触发。</p></article>
         </section>
       </details>
 
@@ -559,9 +559,9 @@
           <article><strong>板块先行</strong><p>板块和个股都按缠论结构计算；涨跌幅、上涨家数不参与方向判断。</p></article>
           <article><strong>六类点独立</strong><p>一买看背驰反转，二买看首次回试确认，三买看离开中枢后的延续；卖点按对称规则独立处理。</p></article>
           <article><strong>第一中枢约束</strong><p>三买只取第一中枢；序号未知或后续中枢一律关闭。</p></article>
-          <article><strong>结构口径</strong><p>日线、30m、5m、1m 都固定使用老笔→线段→本周期线段中枢；不使用走势类型递归。</p></article>
+          <article><strong>结构口径</strong><p>日线、30m、5m、1m 都固定使用严格笔→线段→递归走势与中枢，买卖点来自同一证据图。</p></article>
           <article><strong>因果边界</strong><p>最后未完成线段参与中枢与候选识别；离开与首次回抽几何成立后显示“已形成”，线段锁定后才进入正式确认。</p></article>
-          <article><strong>当前性窗口</strong><p>5m 设置只保留最近 4 个自然日内、各买卖点的最新本周期0级事件；临近点必须来自当前结构。</p></article>
+          <article><strong>当前性窗口</strong><p>5m 设置只保留最近 4 个自然日内、各买卖点在全部递归层级中的最新事件；临近点必须来自当前结构。</p></article>
         </div>
       </details>
     </main>

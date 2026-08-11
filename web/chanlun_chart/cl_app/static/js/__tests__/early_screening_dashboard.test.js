@@ -1718,7 +1718,7 @@ test("period path and evidence groups separate established missing blocking and 
         frequency: "5m",
         state: "形成中",
         tone: "waiting",
-        summary: "二买 · 老笔→线段中枢 · 本周期0级（非递归） · 第 1 中枢",
+        summary: "二买 · 严格笔→递归中枢 · 第 0 层 · 第 1 中枢",
         boundary: "失效价未提供",
       },
       {

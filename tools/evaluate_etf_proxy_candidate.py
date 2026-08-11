@@ -231,8 +231,8 @@ def _technical(value: Mapping[str, object]) -> TechnicalEntrySnapshot:
         price_basis_revision=_string(
             value.get("price_basis_revision"), "technical.price_basis_revision"
         ),
-        pen_definition_mode=_string(
-            value.get("pen_definition_mode"), "technical.pen_definition_mode"
+        stroke_mode=_string(
+            value.get("stroke_mode"), "technical.stroke_mode"
         ),
         l0_source_frequency=_string(
             value.get("l0_source_frequency"), "technical.l0_source_frequency"

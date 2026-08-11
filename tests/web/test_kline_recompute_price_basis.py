@@ -144,7 +144,7 @@ def test_delete_chart_cache_entry_clears_ram_and_disk(monkeypatch) -> None:
 
 def test_recompute_serializes_exact_frame_through_strict_bridge(monkeypatch) -> None:
     frame = _klines()
-    config = {"bi_type": "old"}
+    config = {"unrelated_caller_option": "ignored"}
     captured = {}
 
     class FakeCL:

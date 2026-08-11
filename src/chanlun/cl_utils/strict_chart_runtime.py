@@ -78,10 +78,9 @@ def build_strict_chart_cd(
             exc=exc,
         )
     try:
-        # The production chart is part of the strict strategy decision surface.  Using the
-        # general research profile here used NEW_PEN while screening, replay
-        # and notifications used ORIGINAL_OLD_PEN, so a visible center and its
-        # point could come from different segment chains.
+        # The production chart is part of the strict strategy decision surface,
+        # so it consumes the same canonical profile as screening, replay and
+        # notifications. A visible center and point therefore share one chain.
         config = strict_cl_config(
             structure_price_quantum=metadata.structure_price_quantum,
             price_basis_revision=metadata.price_basis_revision,

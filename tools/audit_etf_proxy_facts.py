@@ -312,7 +312,7 @@ def audit(
                     "confirmation_time": anchor.confirmation_time,
                     "middle_session": anchor.fractal_middle_session,
                     "value": anchor.fractal_value,
-                    "pen_definition_mode": anchor.pen_definition_mode,
+                    "stroke_mode": anchor.stroke_mode,
                     "source_revision": anchor.source_revision,
                     "blockers": _blocker_payload(anchor.blockers),
                     "warnings": _blocker_payload(anchor.warnings),
@@ -387,7 +387,7 @@ def audit(
         "membership_scope": "EXACT_STORED_SESSION_ONLY_NO_FORWARD_FILL",
         "resolved_basket_strength_snapshots": resolved_strength,
         "high_timeframe_structure_state_status": (
-            "FROZEN_OLD_PEN_PREFIX_ADAPTER_EXECUTED_WITH_D_TO_30M_GATE"
+            "CANONICAL_STRICT_PREFIX_ADAPTER_EXECUTED_WITH_D_TO_30M_GATE"
         ),
         "data_grade": "RESEARCH_ONLY",
         "full_system_candidate_gate_certified": False,

@@ -6,6 +6,8 @@ import hashlib
 import json
 from typing import Literal
 
+from chanlun.core.strict_structure.base_profile import STRICT_STROKE_MODE
+
 
 STRATEGY_ID = "CL-HIER-30M5M1M"
 LIVE_STATUS = "LIVE_DISABLED"
@@ -40,7 +42,7 @@ def snapshot_sha256(value: object) -> str:
 class StrategyParameters:
     selection_path: SelectionPath
     strategy_id: str = STRATEGY_ID
-    pen_definition_mode: str = "ORIGINAL_OLD_PEN"
+    stroke_mode: str = STRICT_STROKE_MODE
     account_exposure_cap: Decimal = Decimal("0.90")
     slot_count: int = 5
     slot_fraction: Decimal = Decimal("0.18")
@@ -69,8 +71,8 @@ class StrategyParameters:
             raise ValueError("unsupported strict strategy selection path")
         if self.strategy_id != STRATEGY_ID:
             raise ValueError("strategy_id is frozen")
-        if self.pen_definition_mode != "ORIGINAL_OLD_PEN":
-            raise ValueError("strict strategy only permits ORIGINAL_OLD_PEN")
+        if self.stroke_mode != STRICT_STROKE_MODE:
+            raise ValueError("strict strategy only permits the canonical stroke mode")
         frozen_values = {
             "account_exposure_cap": (self.account_exposure_cap, Decimal("0.90")),
             "slot_count": (self.slot_count, 5),
@@ -172,6 +174,7 @@ def parameter_snapshot_manifest() -> dict[str, object]:
 
 __all__ = [
     "LIVE_STATUS",
+    "STRICT_STROKE_MODE",
     "STRATEGY_ID",
     "SelectionPath",
     "StrategyParameters",

@@ -22,6 +22,7 @@ import sqlite3
 from typing import Literal, Mapping, Sequence
 from zoneinfo import ZoneInfo
 
+from chanlun.core.strict_structure.base_profile import STRICT_STROKE_MODE
 from chanlun.decision_support.fingerprints import normalize_datetime
 from chanlun.decision_support.trading_system.parameters import (
     StrategyParameters,
@@ -212,7 +213,7 @@ class RiskStructureStateFact:
     evidence_bar_end: datetime | None
     mapping_unique: bool
     mapped_center_id: str | None
-    pen_definition_mode: str
+    stroke_mode: str
     source_revision: str
 
     def __post_init__(self) -> None:
@@ -295,7 +296,7 @@ class BottomFractalAnchorFacts:
     fractal_middle_session: date | None
     fractal_value: Decimal | None
     up_pen_start_present: bool
-    pen_definition_mode: str
+    stroke_mode: str
     source_revision: str
     blockers: tuple[FactBlocker, ...]
     warnings: tuple[FactBlocker, ...] = ()
@@ -1371,7 +1372,7 @@ def select_unique_top_center_mapping(
     return (ids[0] if len(ids) == 1 else None), ids
 
 
-def _old_pen_structure_state(
+def _strict_structure_state(
     bars: Sequence[FrozenStructureBar],
     *,
     symbol: str,
@@ -1440,11 +1441,9 @@ def _lower_risk_evidence(
 ) -> tuple[RiskCenterPointEvidence, ...]:
     """Map the unified strict structure snapshot into high-risk evidence.
 
-    The completed high-timeframe fractal still comes from ORIGINAL_OLD_PEN.
-    Its lower-timeframe center and point mapping, however, must use the same
-    strict recursive center/point authority as the chart, screening and replay.
-    A separate lower-timeframe structure reader would create a materially
-    different trading authority and is therefore forbidden.
+    The completed high-timeframe fractal and its lower-timeframe center/point
+    mapping use the same canonical strict stroke and recursive structure
+    authority as charting, screening and replay.
     """
 
     from chanlun.core.strict_structure.center_relation import (
@@ -1674,12 +1673,11 @@ def build_risk_structure_state_fact(
 ) -> RiskStructureStateFacts:
     """Build one strict strategy high-timeframe risk state from one structure authority.
 
-    High-period fractals retain the frozen ORIGINAL_OLD_PEN definition.  Lower
-    centers and points come from the strict strategy strict recursive evidence endpoint used
-    by charting, screening and replay.  The adapter only performs the strict strategy
-    mapping: the highest unique completed lower center carrying a first/second
-    sell inside the inclusive high-fractal interval.  Ambiguity becomes
-    ``FORMED_UNRESOLVED``.
+    High-period fractals, lower centers and points all come from the canonical
+    strict recursive evidence endpoint used by charting, screening and replay.
+    The adapter only performs the strict strategy mapping: the highest unique
+    completed lower center carrying a first/second sell inside the inclusive
+    high-fractal interval. Ambiguity becomes ``FORMED_UNRESOLVED``.
     """
 
     decision = normalize_datetime(decision_time, "decision_time")
@@ -1694,7 +1692,7 @@ def build_risk_structure_state_fact(
             "schema": "chanlun-risk-frozen-price-basis",
             "symbol": symbol,
             "mode": "CALLER_FROZEN_POINT_IN_TIME_PRICES",
-            "pen_definition": "ORIGINAL_OLD_PEN",
+            "stroke_mode": STRICT_STROKE_MODE,
         }
     )
     if (
@@ -1709,7 +1707,7 @@ def build_risk_structure_state_fact(
             "high_frequency": high_frequency,
             "lower_frequency": lower_frequency,
             "decision": decision,
-            "pen_definition_mode": "ORIGINAL_OLD_PEN",
+            "stroke_mode": STRICT_STROKE_MODE,
             "center_point_authority": "STRICT_RECURSIVE_EVIDENCE",
             "structure_price_quantum": str(structure_price_quantum),
             "price_basis_revision": resolved_price_basis,
@@ -1725,7 +1723,7 @@ def build_risk_structure_state_fact(
             ],
         }
     )
-    high_state = _old_pen_structure_state(
+    high_state = _strict_structure_state(
         high_bars,
         symbol=symbol,
         frequency=high_frequency,
@@ -1749,7 +1747,7 @@ def build_risk_structure_state_fact(
             evidence_bar_end=None,
             mapping_unique=True,
             mapped_center_id=None,
-            pen_definition_mode="ORIGINAL_OLD_PEN",
+            stroke_mode=STRICT_STROKE_MODE,
             source_revision=source_revision,
         )
         return RiskStructureStateFacts(fact, None, None, (), ())
@@ -1778,12 +1776,12 @@ def build_risk_structure_state_fact(
             evidence_bar_end=down_pen_end,
             mapping_unique=True,
             mapped_center_id=None,
-            pen_definition_mode="ORIGINAL_OLD_PEN",
+            stroke_mode=STRICT_STROKE_MODE,
             source_revision=source_revision,
         )
         return RiskStructureStateFacts(fact, None, None, (), ())
 
-    lower_state = _old_pen_structure_state(
+    lower_state = _strict_structure_state(
         lower_bars,
         symbol=symbol,
         frequency=lower_frequency,
@@ -1854,7 +1852,7 @@ def build_risk_structure_state_fact(
             evidence_bar_end=top_confirmation,
             mapping_unique=False,
             mapped_center_id=None,
-            pen_definition_mode="ORIGINAL_OLD_PEN",
+            stroke_mode=STRICT_STROKE_MODE,
             source_revision=source_revision,
         )
         return RiskStructureStateFacts(
@@ -1906,7 +1904,7 @@ def build_risk_structure_state_fact(
         evidence_bar_end=evidence_end,
         mapping_unique=True,
         mapped_center_id=mapped,
-        pen_definition_mode="ORIGINAL_OLD_PEN",
+        stroke_mode=STRICT_STROKE_MODE,
         source_revision=source_revision,
     )
     return RiskStructureStateFacts(
@@ -2037,8 +2035,8 @@ def latest_completed_bottom_fractal_anchor(
 ) -> BottomFractalAnchorFacts:
     """Read the latest completed daily bottom fractal from the frozen core.
 
-    The adapter explicitly selects the original/strict stroke distance mode;
-    it neither changes nor reimplements inclusion, fractal or stroke logic.
+    The adapter consumes the canonical strict stroke distance mode; it neither
+    changes nor reimplements inclusion, fractal or stroke logic.
     The third included K-line's final raw bar is the causal confirmation time.
     """
 
@@ -2057,7 +2055,7 @@ def latest_completed_bottom_fractal_anchor(
         {
             "symbol": symbol,
             "decision_time": decision,
-            "pen_definition_mode": "ORIGINAL_OLD_PEN",
+            "stroke_mode": STRICT_STROKE_MODE,
             "bars": [
                 (
                     row.session,
@@ -2079,7 +2077,7 @@ def latest_completed_bottom_fractal_anchor(
             None,
             None,
             False,
-            "ORIGINAL_OLD_PEN",
+            STRICT_STROKE_MODE,
             source_revision,
             (
                 FactBlocker(
@@ -2136,7 +2134,7 @@ def latest_completed_bottom_fractal_anchor(
             None,
             None,
             False,
-            "ORIGINAL_OLD_PEN",
+            STRICT_STROKE_MODE,
             source_revision,
             (
                 FactBlocker(
@@ -2156,7 +2154,7 @@ def latest_completed_bottom_fractal_anchor(
             None,
             None,
             False,
-            "ORIGINAL_OLD_PEN",
+            STRICT_STROKE_MODE,
             source_revision,
             (
                 FactBlocker(
@@ -2192,7 +2190,7 @@ def latest_completed_bottom_fractal_anchor(
         fractal_middle_session=middle_time.date(),
         fractal_value=Decimal(str(fractal.val)),
         up_pen_start_present=up_pen_start,
-        pen_definition_mode="ORIGINAL_OLD_PEN",
+        stroke_mode=STRICT_STROKE_MODE,
         source_revision=source_revision,
         blockers=(),
         warnings=warnings,
@@ -2254,12 +2252,12 @@ def build_higher_timeframe_risk_facts(
                     detail=state.observed_at.isoformat(),
                 )
             )
-        if state.pen_definition_mode != "ORIGINAL_OLD_PEN":
+        if state.stroke_mode != STRICT_STROKE_MODE:
             blockers.append(
                 FactBlocker(
-                    field=f"{period}_pen_definition_mode",
-                    code=f"{period}_NON_OLD_PEN_RISK_FACT",
-                    detail=state.pen_definition_mode,
+                    field=f"{period}_stroke_mode",
+                    code=f"{period}_NON_STRICT_STROKE_RISK_FACT",
+                    detail=state.stroke_mode,
                 )
             )
         if not state.mapping_unique:
@@ -2277,9 +2275,9 @@ def build_higher_timeframe_risk_facts(
         snapshot = None
     else:
         states = tuple(by_period[period] for period in ("M", "W", "D"))
-        visible_and_old = all(
+        visible_and_strict = all(
             state.observed_at <= decision
-            and state.pen_definition_mode == "ORIGINAL_OLD_PEN"
+            and state.stroke_mode == STRICT_STROKE_MODE
             for state in states
         )
         snapshot = (
@@ -2292,10 +2290,10 @@ def build_higher_timeframe_risk_facts(
                 monthly_ma5=average_map["M"],
                 weekly_ma5=average_map["W"],
                 daily_ma5=average_map["D"],
-                mapping_unique=visible_and_old
+                mapping_unique=visible_and_strict
                 and all(state.mapping_unique for state in states),
             )
-            if visible_and_old
+            if visible_and_strict
             else None
         )
     return HigherTimeframeRiskFacts(

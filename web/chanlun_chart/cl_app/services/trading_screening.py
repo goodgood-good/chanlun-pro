@@ -23,7 +23,10 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from chanlun.decision_support.fingerprints import normalize_datetime, sha256_json
-from chanlun.core.strict_structure.base_profile import strict_base_config_revision
+from chanlun.core.strict_structure.base_profile import (
+    STRICT_STROKE_MODE,
+    strict_base_config_revision,
+)
 from chanlun.decision_support.trading_system.engine import (
     EvaluatedSignal,
     SymbolStructureBundle,
@@ -863,7 +866,7 @@ def _screening_policy_document() -> dict[str, object]:
             "exact_members_sample_coverage_price_grid_and_path"
         ),
         "stock_structure_frequencies": ["d", "30m", "5m", "1m"],
-        "stroke_mode": "strict-cl-k-distance",
+        "stroke_mode": STRICT_STROKE_MODE,
         "center_source": "physical_timeframe_recursive_segments",
         "recursive_structure_used": True,
         "stock_structure_request_bars": dict(

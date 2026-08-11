@@ -14,6 +14,7 @@ from typing import Mapping, Sequence
 
 from chanlun.core.strict_structure.base_profile import (
     STRICT_BASE_PROFILE_ID,
+    STRICT_STROKE_MODE,
     strict_base_config_revision,
 )
 from chanlun.decision_support.fingerprints import sha256_json
@@ -131,7 +132,7 @@ class HumanAssistedDecisionContract:
     tactical_frequency: str = "5m"
     locator_frequency: str = "1m"
     physical_structure_frequencies: tuple[str, ...] = ("d", "30m", "5m", "1m")
-    stroke_mode: str = "strict-cl-k-distance"
+    stroke_mode: str = STRICT_STROKE_MODE
     strict_base_profile_id: str = STRICT_BASE_PROFILE_ID
     strict_base_profile_revision: str = strict_base_config_revision()
     structure_scope: str = SCREENING_STRUCTURE_SCOPE
@@ -153,7 +154,7 @@ class HumanAssistedDecisionContract:
             raise ValueError("human-assisted timeframe contract changed")
         if (
             self.physical_structure_frequencies != ("d", "30m", "5m", "1m")
-            or self.stroke_mode != "strict-cl-k-distance"
+            or self.stroke_mode != STRICT_STROKE_MODE
             or self.strict_base_profile_id != STRICT_BASE_PROFILE_ID
             or self.strict_base_profile_revision != strict_base_config_revision()
             or self.structure_scope != SCREENING_STRUCTURE_SCOPE
@@ -560,7 +561,7 @@ def serialize_evaluated_signal(
         "observed_at": item.lifecycle.observed_at.isoformat(),
         "structure_scope": SCREENING_STRUCTURE_SCOPE,
         "structure_frequencies": ["d", "30m", "5m", "1m"],
-        "stroke_mode": "strict-cl-k-distance",
+        "stroke_mode": STRICT_STROKE_MODE,
         "recursive_structure_used": item.physical_timeframe_recursive,
         "physical_timeframe_recursive": item.physical_timeframe_recursive,
         "context_d": _context_document(item.daily_context),

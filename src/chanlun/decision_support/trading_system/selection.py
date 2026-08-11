@@ -7,6 +7,7 @@ from typing import Literal
 
 from chanlun.decision_support.fingerprints import normalize_datetime
 from chanlun.decision_support.trading_system.parameters import (
+    STRICT_STROKE_MODE,
     SelectionPath,
     StrategyParameters,
 )
@@ -51,7 +52,7 @@ HIGHER_TIMEFRAME_RISK_STATES = frozenset(
 )
 LocatorType = Literal[
     "L2_FIRST_BUY",
-    "L2_SECOND_BUY_AFTER_SMALL_TO_LARGE_REVERSAL",
+    "L2_SECOND_BUY",
     "NONE",
 ]
 ContinuityStatus = Literal["ACTIVE", "TERMINATION_CONFIRMED", "UNRESOLVED"]
@@ -350,7 +351,7 @@ class TechnicalEntrySnapshot:
     structure_snapshot_id: str
     observed_at: datetime
     price_basis_revision: str
-    pen_definition_mode: str
+    stroke_mode: str
     l0_source_frequency: str
     l1_source_frequency: str
     l2_source_frequency: str
@@ -684,7 +685,7 @@ def evaluate_candidate(
     checks.extend(
         (
             _check("structure_visibility", technical_visible, "PASS_STRUCTURE_POINT_IN_TIME", "REJECT_STRUCTURE_FUTURE_OR_UNCONFIRMED", technical.structure_snapshot_id),
-            _check("pen_definition", technical.pen_definition_mode == "ORIGINAL_OLD_PEN", "PASS_ORIGINAL_OLD_PEN", "REJECT_NON_OLD_PEN", technical.pen_definition_mode),
+            _check("stroke_mode", technical.stroke_mode == STRICT_STROKE_MODE, "PASS_STRICT_STROKE_MODE", "REJECT_NON_STRICT_STROKE_MODE", technical.stroke_mode),
             _check("observation_windows", (technical.l0_source_frequency, technical.l1_source_frequency, technical.l2_source_frequency) == ("30m", "5m", "1m"), "PASS_30M_5M_1M_WINDOWS", "REJECT_OBSERVATION_WINDOWS", f"{technical.l0_source_frequency}/{technical.l1_source_frequency}/{technical.l2_source_frequency}"),
             _check(
                 "level_relation",
@@ -705,7 +706,7 @@ def evaluate_candidate(
             _check("l0_three_buy", technical.l0_point_type == "3buy" and bool(technical.l0_point_id), "PASS_L0_THREE_BUY", "REJECT_L0_THREE_BUY_MISSING", str(technical.l0_point_type)),
             _check("l1_departure_return", technical.l1_departure_completed and technical.l1_first_return_completed, "PASS_L1_DEPARTURE_FIRST_RETURN", "REJECT_L1_DEPARTURE_OR_RETURN_INCOMPLETE", f"departure={technical.l1_departure_completed}; return={technical.l1_first_return_completed}"),
             _check("third_buy_boundary", technical.first_return_low is not None and technical.l0_zg is not None and technical.first_return_low >= technical.l0_zg, "PASS_THIRD_BUY_ABOVE_OR_EQUAL_ZG", "REJECT_THIRD_BUY_RETURNED_INSIDE", f"low={technical.first_return_low}; ZG={technical.l0_zg}"),
-            _check("l2_locator", technical.l2_locator in {"L2_FIRST_BUY", "L2_SECOND_BUY_AFTER_SMALL_TO_LARGE_REVERSAL"} and bool(technical.l2_point_id) and technical.l2_confirmation_bar_high is not None, "PASS_L2_LOCATOR", "REJECT_L2_LOCATOR", technical.l2_locator),
+            _check("l2_locator", technical.l2_locator in {"L2_FIRST_BUY", "L2_SECOND_BUY"} and bool(technical.l2_point_id) and technical.l2_confirmation_bar_high is not None, "PASS_L2_LOCATOR", "REJECT_L2_LOCATOR", technical.l2_locator),
         )
     )
     account = candidate.account

@@ -191,6 +191,20 @@ def bar() -> ConfirmationBarFact:
     )
 
 
+def l2_second_buy() -> StructuralPoint:
+    return replace(
+        l2_point(),
+        point_id="l2:2buy",
+        point_type="2buy",
+        parent_point_id="l2:1buy:parent",
+        evidence_codes=(
+            "confirmed_first_class_parent",
+            "complete_adjacent_rebound",
+            "complete_first_pullback",
+        ),
+    )
+
+
 def align(**changes):
     values = {
         "l0_points": (l0_point(),),
@@ -216,6 +230,20 @@ def test_alignment_uses_center_leave_and_return_not_point_anchor_window() -> Non
 
 def test_equal_l1_return_low_at_zg_is_valid() -> None:
     assert align().status == "PASS"
+
+
+def test_canonical_second_buy_uses_the_same_locator_path_as_first_buy() -> None:
+    second = l2_second_buy()
+    second_bar = replace(bar(), point_id=second.point_id)
+
+    decision = align(
+        l2_points=(second,),
+        confirmation_bars={second.point_id: second_bar},
+    )
+
+    assert decision.status == "PASS"
+    assert decision.chain is not None
+    assert decision.chain.l2_locator_point_id == second.point_id
 
 
 def test_trends_after_l0_return_are_not_misread_as_formation_evidence() -> None:

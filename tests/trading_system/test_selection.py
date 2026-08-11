@@ -135,7 +135,7 @@ def valid_candidate(*, symbol: str = "SH.600000") -> CandidateSnapshot:
         structure_snapshot_id="strict:snapshot:test",
         observed_at=NOW,
         price_basis_revision="pit-adjustment:test",
-        pen_definition_mode="ORIGINAL_OLD_PEN",
+        stroke_mode="strict-cl-k-distance",
         l0_source_frequency="30m",
         l1_source_frequency="5m",
         l2_source_frequency="1m",
@@ -288,7 +288,7 @@ def test_drawdown_equal_to_halt_boundary_is_rejected_with_all_reasons() -> None:
     decision = evaluate_candidate(candidate, individual_parameter_snapshot())
     assert decision.accepted is False
     assert "REJECT_DRAWDOWN_10PCT_OR_MORE" in decision.rejected_reason_codes
-    assert "PASS_ORIGINAL_OLD_PEN" in decision.passed_reason_codes
+    assert "PASS_STRICT_STROKE_MODE" in decision.passed_reason_codes
 
 
 def test_unresolved_research_and_missing_quote_fail_closed() -> None:

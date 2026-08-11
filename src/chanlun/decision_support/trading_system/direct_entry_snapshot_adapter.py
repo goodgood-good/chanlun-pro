@@ -5,6 +5,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING
 
 from chanlun.decision_support.fingerprints import normalize_datetime
+from chanlun.core.strict_structure.base_profile import STRICT_STROKE_MODE
 from chanlun.decision_support.trading_system.models import StructuralPoint
 from chanlun.decision_support.trading_system.selection import TechnicalEntrySnapshot
 
@@ -49,10 +50,6 @@ def build_direct_recursive_technical_entry_snapshot(
         or l2_locator.point_type not in {"1buy", "2buy"}
     ):
         raise ValueError("direct recursion requires a level-0 first/second buy")
-    if l2_locator.point_type == "2buy":
-        raise ValueError(
-            "direct-recursive second-buy locator requires a closed small-to-large proof graph"
-        )
     if (
         chain.l0_point_id != l0_three_buy.point_id
         or chain.l0_center_id != l0_three_buy.center_id
@@ -75,7 +72,7 @@ def build_direct_recursive_technical_entry_snapshot(
         structure_snapshot_id=structure_snapshot_id,
         observed_at=observed,
         price_basis_revision=l0_three_buy.price_basis_revision,
-        pen_definition_mode="ORIGINAL_OLD_PEN",
+        stroke_mode=STRICT_STROKE_MODE,
         l0_source_frequency="30m",
         l1_source_frequency="5m",
         l2_source_frequency="1m",
@@ -94,7 +91,7 @@ def build_direct_recursive_technical_entry_snapshot(
         l2_locator=(
             "L2_FIRST_BUY"
             if l2_locator.point_type == "1buy"
-            else "L2_SECOND_BUY_AFTER_SMALL_TO_LARGE_REVERSAL"
+            else "L2_SECOND_BUY"
         ),
         l2_point_id=chain.l2_locator_point_id,
         l2_confirmation_bar_high=chain.l2_confirmation_bar_high,

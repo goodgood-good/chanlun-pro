@@ -37,7 +37,6 @@ from chanlun.decision_support.trading_system.models import (
 )
 from chanlun.decision_support.trading_system.structure_adapter import (
     extract_confirmed_points,
-    has_explicit_small_to_large_second_proof,
     structural_point_id_map,
 )
 from chanlun.decision_support.trading_system.direct_entry_snapshot_adapter import (
@@ -65,7 +64,7 @@ class DirectRecursiveAlignmentContract:
     l1_logical_frequency: str = "5m"
     l2_logical_frequency: str = "1m"
     locator_scope: str = "EXACT_DIRECT_FIRST_RETURN_DESCENDANTS"
-    second_buy_policy: str = "STRUCTURAL_SMALL_TO_LARGE_PROOF_AND_SIGNED_POINT_ID"
+    second_buy_policy: str = "CANONICAL_CONFIRMED_FIRST_OR_SECOND_POINT"
     live_status: str = "LIVE_DISABLED"
 
     def __post_init__(self) -> None:
@@ -92,7 +91,7 @@ class DirectRecursiveAlignmentContract:
             "5m",
             "1m",
             "EXACT_DIRECT_FIRST_RETURN_DESCENDANTS",
-            "STRUCTURAL_SMALL_TO_LARGE_PROOF_AND_SIGNED_POINT_ID",
+            "CANONICAL_CONFIRMED_FIRST_OR_SECOND_POINT",
             "LIVE_DISABLED",
         ):
             raise ValueError("direct recursive alignment contract changed")
@@ -292,7 +291,6 @@ def build_direct_recursive_structure_path(
     *,
     evidence: StrictEvidenceResult,
     code: str,
-    allowed_l2_second_buy_ids: tuple[str, ...] = (),
 ) -> DirectRecursiveStructurePath:
     """Build every causal 30m strategic chain visible in one final snapshot."""
 
@@ -334,22 +332,6 @@ def build_direct_recursive_structure_path(
         if fact.point.recursive_level == 0
         and fact.point.point_type in {"1buy", "2buy"}
     )
-    known_locator_ids = {fact.point.point_id for fact in locator_facts}
-    allowed_seconds = frozenset(allowed_l2_second_buy_ids)
-    if not allowed_seconds.issubset(known_locator_ids):
-        raise ValueError("allowed direct-recursive second buy is unknown")
-    locator_points_by_id = {
-        fact.point.point_id: fact.point for fact in facts
-    }
-    proven_small_seconds = frozenset(
-        fact.point.point_id
-        for fact in locator_facts
-        if has_explicit_small_to_large_second_proof(
-            fact.point,
-            points_by_id=locator_points_by_id,
-        )
-    )
-
     level_two = evidence.structure.levels[2]
     centers = {value.center_id: value for value in level_two.center_result.centers}
     graph = _provenance_graph(evidence.structure)
@@ -435,49 +417,13 @@ def build_direct_recursive_structure_path(
                     <= item.point.anchor_at
                     <= first_return.market_end
                     and item.point.available_at <= point.available_at
-                    and (
-                        item.point.point_type == "1buy"
-                        or (
-                            item.point.point_id in allowed_seconds
-                            and item.point.point_id in proven_small_seconds
-                        )
-                    )
                 ),
                 key=lambda item: (item.point.available_at, item.point.point_id),
             )
         )
         locator = eligible_locators[0] if eligible_locators else None
         if locator is None:
-            candidate_seconds = tuple(
-                item
-                for item in locator_facts
-                if item.anchor_unit_id in return_trace.level_zero_leaf_ids
-                and first_return.market_start
-                <= item.point.anchor_at
-                <= first_return.market_end
-                and item.point.available_at <= point.available_at
-                and item.point.point_type == "2buy"
-            )
-            has_unproven_second = any(
-                item.point.point_id not in proven_small_seconds
-                for item in candidate_seconds
-            )
-            has_unsigned_second = any(
-                item.anchor_unit_id in return_trace.level_zero_leaf_ids
-                and item.point.point_type == "2buy"
-                and item.point.point_id in proven_small_seconds
-                and item.point.point_id not in allowed_seconds
-                for item in locator_facts
-            )
-            reasons.append(
-                "L2_1M_SECOND_BUY_REQUIRES_SMALL_TO_LARGE_EVIDENCE"
-                if has_unproven_second
-                else (
-                    "L2_1M_SECOND_BUY_REQUIRES_SIGNED_EVIDENCE"
-                    if has_unsigned_second
-                    else "NO_L2_1M_LOCATOR_IN_DIRECT_FIRST_RETURN"
-                )
-            )
+            reasons.append("NO_L2_1M_LOCATOR_IN_DIRECT_FIRST_RETURN")
 
         if reasons:
             decisions.append(

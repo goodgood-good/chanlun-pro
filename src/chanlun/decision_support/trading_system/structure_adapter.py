@@ -16,68 +16,6 @@ from chanlun.decision_support.trading_system.models import (
 )
 
 
-_SMALL_TO_LARGE_SECOND_CODES = frozenset(
-    {
-        "confirmed_lower_level_first_class_parent",
-        "small_to_large_reversal",
-        "last_lower_level_center_reverse_third_class",
-        "complete_adjacent_rebound",
-        "complete_first_pullback",
-    }
-)
-
-
-def has_explicit_small_to_large_second_proof(
-    point: StructuralPoint,
-    *,
-    points_by_id: dict[str, StructuralPoint],
-) -> bool:
-    """Verify the closed point graph behind a small-to-large second point."""
-
-    if point.point_type not in {"2buy", "2sell"}:
-        return False
-    if not _SMALL_TO_LARGE_SECOND_CODES.issubset(point.evidence_codes):
-        return False
-    if point.recursive_level <= 0 or point.parent_point_id is None:
-        return False
-    if point.parent_point_id not in point.related_point_ids:
-        return False
-    if (
-        len(point.small_to_large_carrier_unit_ids) != 3
-        or not point.small_to_large_last_center_id
-    ):
-        return False
-    parent = points_by_id.get(point.parent_point_id)
-    expected_parent = "1buy" if point.side == "buy" else "1sell"
-    if (
-        parent is None
-        or parent.point_type != expected_parent
-        or parent.side != point.side
-        or parent.recursive_level >= point.recursive_level
-        or parent.code != point.code
-        or parent.source_frequency != point.source_frequency
-        or parent.price_basis_revision != point.price_basis_revision
-        or parent.available_at > point.available_at
-    ):
-        return False
-    reverse_type = "3buy" if point.side == "buy" else "3sell"
-    reverse = tuple(
-        candidate
-        for related_id in point.related_point_ids
-        if related_id != point.parent_point_id
-        and (candidate := points_by_id.get(related_id)) is not None
-        and candidate.point_type == reverse_type
-        and candidate.side == point.side
-        and candidate.recursive_level == point.recursive_level - 1
-        and candidate.code == point.code
-        and candidate.source_frequency == point.source_frequency
-        and candidate.price_basis_revision == point.price_basis_revision
-        and candidate.available_at <= point.available_at
-        and candidate.center_id == point.small_to_large_last_center_id
-    )
-    return len(reverse) == 1
-
-
 def structural_point_id_map(
     raw_points,
     *,

@@ -13,6 +13,7 @@ import json
 from typing import Dict, Union
 
 STRICT_BASE_PROFILE_ID = "chanlun-source-faithful-base"
+STRICT_STROKE_MODE = "strict-cl-k-distance"
 
 
 _STRICT_BASE_CONFIG: Dict[str, Union[str, int, bool]] = {
@@ -20,7 +21,7 @@ _STRICT_BASE_CONFIG: Dict[str, Union[str, int, bool]] = {
     # L062/L065: directional, chronological inclusion before three-K fractals.
     "kline_inclusion_rule": "directional-sequential",
     "fractal_rule": "three-cl-k-both-extremes",
-    "stroke_rule": "strict-cl-k-distance",
+    "stroke_rule": STRICT_STROKE_MODE,
     # L067/L071: feature-sequence segmentation with explicit gap handling.
     "segment_rule": "feature-sequence",
     "segment_gap_rule": "second-feature-sequence-fractal",
