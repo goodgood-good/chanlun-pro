@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import datetime as dt
 import json
+import os
 import threading
 import time
 from typing import Any, Dict, List, Mapping, Union
@@ -473,6 +474,7 @@ class ExchangeUSmart(Exchange):
         # Lazily created so uSMART can still provide symbols/ticks without
         # opening a second quote connection during application startup.
         self._us_history_exchange = history_exchange
+        self._longbridge_fallback_reported = False
         self._all_stocks: List[Dict[str, Any]] | None = None
         self._stock_by_code: Dict[str, Dict[str, Any]] = {}
         self._all_stocks_lock = threading.Lock()
@@ -510,6 +512,27 @@ class ExchangeUSmart(Exchange):
             return None
         if self._us_history_exchange is None:
             if self._us_history_source == "longbridge":
+                credentials = tuple(
+                    os.getenv(name)
+                    for name in (
+                        "LONGBRIDGE_APP_KEY",
+                        "LONGBRIDGE_APP_SECRET",
+                        "LONGBRIDGE_ACCESS_TOKEN",
+                    )
+                )
+                if not all(credentials):
+                    # A console access token is not sufficient for the API-key
+                    # SDK flow.  Keep the market-data service available by
+                    # taking the already configured uSMART path for this whole
+                    # request; its price-basis metadata lets callers detect a
+                    # later provider change and rebuild atomically.
+                    if not self._longbridge_fallback_reported:
+                        LogUtil.warning(
+                            "Longbridge history credentials are incomplete; "
+                            "using uSMART history for this US adapter"
+                        )
+                        self._longbridge_fallback_reported = True
+                    return None
                 from chanlun.exchange.exchange_cq import ExchangeChangQiao
 
                 self._us_history_exchange = ExchangeChangQiao()
@@ -700,9 +723,7 @@ class ExchangeUSmart(Exchange):
         else:
             from chanlun.exchange._lookback import get_lookback_timedelta
 
-            start_bound = end_bound - get_lookback_timedelta(
-                frequency, default=dt.timedelta(days=30)
-            )
+            start_bound = end_bound - get_lookback_timedelta(frequency)
         if start_bound > end_bound:
             raise ValueError("start_date must not be later than end_date")
 

@@ -17,59 +17,59 @@ log = fun.get_logger()
 
 # 选股运行配置
 xuangu_task_configs: Dict[str, Dict[str, object]] = {
-    "strict_l0_class1_point": {
+    "strict_class1_point": {
         "name": "严格结构一类买卖点",
-        "task_fun": strict_xuangu.select_strict_l0_class1_point,
-        "task_memo": "物理周期L0当前确认段上的严格一类买卖点",
+        "task_fun": strict_xuangu.select_strict_class1_point,
+        "task_memo": "物理周期完整递归结构当前确认的一类买卖点",
         "frequency_num": 1,
         "frequency_memo": "单周期",
     },
-    "strict_l0_class2_point": {
+    "strict_class2_point": {
         "name": "严格结构二类买卖点",
-        "task_fun": strict_xuangu.select_strict_l0_class2_point,
-        "task_memo": "物理周期L0当前确认段上的严格二类买卖点",
+        "task_fun": strict_xuangu.select_strict_class2_point,
+        "task_memo": "物理周期完整递归结构当前确认的二类买卖点",
         "frequency_num": 1,
         "frequency_memo": "单周期",
     },
-    "strict_l0_class3_point": {
+    "strict_class3_point": {
         "name": "严格结构三类买卖点",
-        "task_fun": strict_xuangu.select_strict_l0_class3_point,
-        "task_memo": "物理周期L0当前确认段上的严格三类买卖点",
+        "task_fun": strict_xuangu.select_strict_class3_point,
+        "task_memo": "物理周期完整递归结构当前确认的三类买卖点",
         "frequency_num": 1,
         "frequency_memo": "单周期",
     },
-    "strict_l0_class3_after_class1": {
+    "strict_class3_after_class1": {
         "name": "一类买卖点后的三类买卖点",
-        "task_fun": strict_xuangu.select_strict_l0_class3_after_class1,
-        "task_memo": "当前严格三类点，且此前已确认同向严格一类点",
+        "task_fun": strict_xuangu.select_strict_class3_after_class1,
+        "task_memo": "当前严格三类点，且此前已确认同级同向严格一类点",
         "frequency_num": 1,
         "frequency_memo": "单周期",
     },
-    "strict_l0_class3_after_trend_divergence": {
+    "strict_class3_after_trend_divergence": {
         "name": "趋势下跌后的三类买卖点",
-        "task_fun": strict_xuangu.select_strict_l0_class3_after_trend_divergence,
-        "task_memo": "当前严格三类点，且此前同向严格趋势背驰已确认",
+        "task_fun": strict_xuangu.select_strict_class3_after_trend_divergence,
+        "task_memo": "当前严格三类点，且此前同级同向严格趋势背驰已确认",
         "frequency_num": 1,
         "frequency_memo": "单周期",
     },
-    "strict_l0_point_divergence_confluence": {
+    "strict_point_divergence_confluence": {
         "name": "严格买卖点与背驰共振",
-        "task_fun": strict_xuangu.select_strict_l0_point_divergence_confluence,
-        "task_memo": "物理周期L0当前确认段同时存在严格买卖点与同向严格背驰",
+        "task_fun": strict_xuangu.select_strict_point_divergence_confluence,
+        "task_memo": "物理周期完整递归结构同时存在当前买卖点与同向严格背驰",
         "frequency_num": 1,
         "frequency_memo": "单周期",
     },
-    "strict_l0_two_frequency_confluence": {
+    "strict_two_frequency_confluence": {
         "name": "双周期严格买卖点或背驰共振",
-        "task_fun": strict_xuangu.select_strict_l0_two_frequency_confluence,
-        "task_memo": "两个物理周期的L0严格买卖点或背驰方向一致",
+        "task_fun": strict_xuangu.select_strict_two_frequency_confluence,
+        "task_memo": "两个物理周期的完整递归结构买卖点或背驰方向一致",
         "frequency_num": 2,
         "frequency_memo": "两个周期",
     },
-    "strict_l0_lower_class12_confluence": {
+    "strict_lower_class12_confluence": {
         "name": "高周期严格事件与低周期一二类点共振",
-        "task_fun": strict_xuangu.select_strict_l0_lower_class12_confluence,
-        "task_memo": "高周期L0严格事件与任一低周期当前严格一/二类点方向一致",
+        "task_fun": strict_xuangu.select_strict_lower_class12_confluence,
+        "task_memo": "高周期严格递归事件与任一低周期当前严格一/二类点方向一致",
         "frequency_num": 3,
         "frequency_memo": "三个周期",
     },

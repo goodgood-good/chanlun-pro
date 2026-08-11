@@ -6,7 +6,7 @@ import pandas as pd
 
 from chanlun.cl_utils import strict_chart_runtime
 from chanlun.decision_support.trading_system.runtime_config import (
-    recursive_cl_config,
+    strict_cl_config,
 )
 
 
@@ -55,7 +55,7 @@ def test_strict_chart_runtime_uses_only_fixed_recursive_config(monkeypatch) -> N
     assert isinstance(result.cd, FakeCL)
     assert result.error_code is None
     assert captured["frame"] is frame
-    assert captured["config"] == recursive_cl_config(
+    assert captured["config"] == strict_cl_config(
         structure_price_quantum=Decimal("0.01"),
         price_basis_revision="sha256:test-basis",
     )

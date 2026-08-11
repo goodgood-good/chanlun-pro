@@ -49,9 +49,11 @@ def test_point_and_completed_trend_ledgers_are_prefix_invariant() -> None:
     )
 
 
-def test_causal_structure_uses_original_old_pen_recursive_profile() -> None:
+def test_causal_structure_uses_the_single_strict_profile() -> None:
     state = strict_state("SZ.002299", "1m", frame(900))
     config = state.get_config()
 
     assert config["stroke_rule"] == "strict-cl-k-distance"
-    assert config["recursive_structure_scope"] == "same-source-direct-recursion"
+    assert config["strict_macd_source"] == "native_l0_causal_recursive"
+    assert "recursive_structure_scope" not in config
+    assert "screening_structure_scope" not in config

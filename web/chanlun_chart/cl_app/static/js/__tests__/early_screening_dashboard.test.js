@@ -130,7 +130,7 @@ function currentHigherTimeframeRisk() {
 
 const snapshot = {
   schema: "chanlun-trading-screening",
-  structure_contract_id: "physical-timeframe-l0",
+  structure_contract_id: "physical-timeframe-recursive",
   available: true,
   scan_state: "complete",
   generated_at: "2026-07-20T15:00:00+08:00",
@@ -1484,7 +1484,7 @@ test("the current lifecycle field is authoritative", () => {
       point_type: "3buy",
       status: "provisional",
       evidence_codes: [
-        "physical_timeframe_level_zero",
+        "physical_timeframe_recursive_base_level",
         "provisional_center_completion",
         "core_boundary_held",
       ],

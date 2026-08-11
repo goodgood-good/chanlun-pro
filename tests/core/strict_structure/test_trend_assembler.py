@@ -279,7 +279,7 @@ class BoundaryStrength:
             histogram_area=area,
             histogram_peak=peak,
             dif_extreme=dif,
-            source="macd_htf",
+            source="macd",
             available_at=value.available_at,
         )
 
@@ -429,7 +429,7 @@ class PeakDifOnlyDecayStrength:
             histogram_area=area,
             histogram_peak=peak,
             dif_extreme=dif,
-            source="macd_htf",
+            source="macd",
             available_at=value.available_at,
         )
 
@@ -463,7 +463,7 @@ class CausalDecayStrength:
             histogram_area=magnitude,
             histogram_peak=signed,
             dif_extreme=signed,
-            source="macd_htf",
+            source="macd",
             available_at=value.available_at,
         )
 

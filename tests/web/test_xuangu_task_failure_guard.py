@@ -38,7 +38,7 @@ def _patch_task_dependencies(monkeypatch, fake_zx):
 
 def _run(src_group="src"):
     return xuangu_tasks.process_xuangu_task(
-        "a", "strict_l0_class1_point", ["5m"], ["long"], src_group, "dst"
+        "a", "strict_class1_point", ["5m"], ["long"], src_group, "dst"
     )
 
 
@@ -131,7 +131,7 @@ def test_per_code_exception_has_distinct_failure_result(monkeypatch):
     )
 
     result = xuangu_tasks.process_xuangu_by_code(
-        ("SH.600000", "a", ["5m"], "strict_l0_class1_point", ["long"])
+        ("SH.600000", "a", ["5m"], "strict_class1_point", ["long"])
     )
     assert result is failed
 

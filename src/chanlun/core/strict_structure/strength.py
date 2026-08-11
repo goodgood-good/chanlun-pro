@@ -22,10 +22,10 @@ from chanlun.core.strict_structure.models import (
 class StrengthSnapshot:
     unit_id: str
     direction: Direction
-    histogram_area: float
-    histogram_peak: float
+    histogram_area: float | None
+    histogram_peak: float | None
     dif_extreme: float
-    source: Literal["macd_htf"]
+    source: Literal["macd"]
     available_at: datetime
 
     def __post_init__(self) -> None:
@@ -33,16 +33,32 @@ class StrengthSnapshot:
             raise ValueError("unit_id is required")
         if self.direction not in ("up", "down"):
             raise ValueError("direction must be up or down")
-        values = (self.histogram_area, self.histogram_peak, self.dif_extreme)
+        values = tuple(
+            value
+            for value in (
+                self.histogram_area,
+                self.histogram_peak,
+                self.dif_extreme,
+            )
+            if value is not None
+        )
         if any(not isfinite(float(value)) for value in values):
             raise ValueError("strength values must be finite")
-        if self.histogram_area <= 0:
+        if self.histogram_area is not None and self.histogram_area <= 0:
             raise ValueError("histogram_area must be positive")
-        if self.direction == "up" and self.histogram_peak <= 0:
+        if (
+            self.histogram_peak is not None
+            and self.direction == "up"
+            and self.histogram_peak <= 0
+        ):
             raise ValueError("up strength peak must be positive")
-        if self.direction == "down" and self.histogram_peak >= 0:
+        if (
+            self.histogram_peak is not None
+            and self.direction == "down"
+            and self.histogram_peak >= 0
+        ):
             raise ValueError("down strength peak must be negative")
-        if self.source != "macd_htf":
+        if self.source != "macd":
             raise ValueError("unsupported MACD strength source")
 
 
@@ -159,7 +175,12 @@ class ComparisonLeg:
 
 
 class MacdStrengthProvider:
-    """Read prefix-stable, source-bar-aligned causal HTF MACD evidence."""
+    """Read source-aligned MACD for one unified structural-level policy.
+
+    Physical level 0 uses the native MACD of the source K-line frequency.
+    Recursive level N uses the Nth causal partial higher-frequency series, so
+    structural recursion never changes the meaning of level 0 evidence.
+    """
 
     def __init__(self, cd) -> None:
         self._dates = tuple(kline.date for kline in cd.get_src_klines())
@@ -172,6 +193,20 @@ class MacdStrengthProvider:
             raise ValueError("source K-line dates must be strictly increasing")
 
         self._series_by_level = {}
+        index_values = cd.get_idx()
+        if not isinstance(index_values, dict):
+            raise ValueError("native MACD index result is invalid")
+        native = index_values.get("macd")
+        if not isinstance(native, dict):
+            raise ValueError("native MACD index result is unavailable")
+        self._validate_series(native, "native MACD")
+        self._series_by_level[0] = (
+            np.asarray(native["hist"], dtype=float).copy(),
+            np.asarray(native["dif"], dtype=float).copy(),
+            self._dates,
+            None,
+        )
+
         level_series = getattr(cd, "_strict_htf_macd_by_level", None)
         if level_series is None:
             return
@@ -193,7 +228,7 @@ class MacdStrengthProvider:
             ):
                 raise ValueError("causal HTF MACD context is invalid")
             self._validate_series(candidate, "causal level HTF MACD")
-            self._series_by_level[level] = (
+            self._series_by_level[level + 1] = (
                 np.asarray(candidate["hist"], dtype=float).copy(),
                 np.asarray(candidate["dif"], dtype=float).copy(),
                 tuple(candidate["known_at"]),
@@ -214,7 +249,7 @@ class MacdStrengthProvider:
         selected = self._series_by_level.get(unit.structural_level)
         if selected is None:
             raise MacdStrengthUnavailable(
-                "causal HTF MACD is unavailable for structural level"
+                "MACD is unavailable for structural level"
             )
         hist_series, dif_series, known_at, bucket_keys = selected
         left = bisect_left(self._dates, unit.market_start)
@@ -245,17 +280,13 @@ class MacdStrengthProvider:
             raise ValueError("MACD slice must be finite")
         if unit.direction == "up":
             directional = hist[hist > 0]
-            if directional.size == 0:
-                raise MacdStrengthUnavailable("unit has no directional MACD bars")
-            area = float(directional.sum())
-            peak = float(directional.max())
+            area = None if directional.size == 0 else float(directional.sum())
+            peak = None if directional.size == 0 else float(directional.max())
             dif_extreme = float(dif.max())
         else:
             directional = hist[hist < 0]
-            if directional.size == 0:
-                raise MacdStrengthUnavailable("unit has no directional MACD bars")
-            area = float(abs(directional.sum()))
-            peak = float(directional.min())
+            area = None if directional.size == 0 else float(abs(directional.sum()))
+            peak = None if directional.size == 0 else float(directional.min())
             dif_extreme = float(dif.min())
         return StrengthSnapshot(
             unit_id=unit.unit_id,
@@ -263,7 +294,7 @@ class MacdStrengthProvider:
             histogram_area=area,
             histogram_peak=peak,
             dif_extreme=dif_extreme,
-            source="macd_htf",
+            source="macd",
             available_at=max(
                 unit.available_at,
                 *(known_at[index] for index in selected_indexes),
@@ -335,6 +366,19 @@ def _is_contiguous_three_leg(values: tuple[ConstituentUnit, ...]) -> bool:
             for previous, current in zip(values, values[1:])
         )
     )
+
+
+def comparison_leg_from_units(units) -> ComparisonLeg:
+    """Build an exact one- or three-unit divergence leg from source proof."""
+
+    values = tuple(units)
+    if len(values) not in (1, 3):
+        raise ValueError("comparison leg width must be one or three")
+    if len(values) == 3 and not _is_contiguous_three_leg(values):
+        raise ValueError(
+            "three-unit comparison leg must be contiguous enter/reverse/re-enter"
+        )
+    return _comparison_leg(values)
 
 
 def center_entry_comparison_leg(
@@ -529,12 +573,26 @@ def compare_comparison_legs(
 
     if later.direction == "up":
         new_extreme = later.high_tick > earlier.high_tick
-        peak_decayed = later_strength.histogram_peak < earlier_strength.histogram_peak
+        peak_decayed = (
+            earlier_strength.histogram_peak is not None
+            and later_strength.histogram_peak is not None
+            and later_strength.histogram_peak < earlier_strength.histogram_peak
+        )
         dif_decayed = later_strength.dif_extreme < earlier_strength.dif_extreme
     else:
         new_extreme = later.low_tick < earlier.low_tick
-        peak_decayed = later_strength.histogram_peak > earlier_strength.histogram_peak
+        peak_decayed = (
+            earlier_strength.histogram_peak is not None
+            and later_strength.histogram_peak is not None
+            and later_strength.histogram_peak > earlier_strength.histogram_peak
+        )
         dif_decayed = later_strength.dif_extreme > earlier_strength.dif_extreme
+
+    area_decayed = (
+        earlier_strength.histogram_area is not None
+        and later_strength.histogram_area is not None
+        and later_strength.histogram_area < earlier_strength.histogram_area
+    )
 
     return DivergenceEvidence(
         divergence_id=stable_structure_id(
@@ -566,9 +624,7 @@ def compare_comparison_legs(
             later_strength.available_at,
         ),
         price_extreme_confirmed=new_extreme,
-        histogram_area_decayed=(
-            later_strength.histogram_area < earlier_strength.histogram_area
-        ),
+        histogram_area_decayed=area_decayed,
         histogram_peak_decayed=peak_decayed,
         dif_extreme_decayed=dif_decayed,
         strength_source=later_strength.source,

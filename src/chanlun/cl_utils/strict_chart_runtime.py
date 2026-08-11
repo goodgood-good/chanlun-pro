@@ -10,7 +10,7 @@ from chanlun.core.cl import CL
 from chanlun.core.types import ICL
 from chanlun.decision_support.trading_system.runtime_config import (
     strict_snapshot_price_metadata,
-    recursive_cl_config,
+    strict_cl_config,
 )
 from chanlun.tools.log_util import LogUtil
 
@@ -82,7 +82,7 @@ def build_strict_chart_cd(
         # general research profile here used NEW_PEN while screening, replay
         # and notifications used ORIGINAL_OLD_PEN, so a visible center and its
         # point could come from different segment chains.
-        config = recursive_cl_config(
+        config = strict_cl_config(
             structure_price_quantum=metadata.structure_price_quantum,
             price_basis_revision=metadata.price_basis_revision,
         )

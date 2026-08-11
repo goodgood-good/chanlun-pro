@@ -63,7 +63,7 @@ class SymbolStructureBundle:
         tuple[str, tuple[str, ...]], ...
     ] = ()
     enforce_warmup_entry_gate: bool = False
-    physical_timeframe_level_zero: bool = False
+    physical_timeframe_recursive: bool = False
     entry_execution_boundaries: tuple[EntryExecutionBoundary, ...] = ()
     selection_sources: tuple[str, ...] = ()
 
@@ -108,7 +108,7 @@ class SymbolStructureBundle:
             for value in self.entry_execution_boundaries
         ):
             raise ValueError("entry execution boundary symbol is inconsistent")
-        if self.physical_timeframe_level_zero:
+        if self.physical_timeframe_recursive:
             frequency_points = (
                 ("d", self.daily_points),
                 ("30m", self.thirty_points),
@@ -116,12 +116,12 @@ class SymbolStructureBundle:
                 ("1m", self.one_points),
             )
             if any(
-                point.source_frequency != frequency or point.recursive_level != 0
+                point.source_frequency != frequency
                 for frequency, points in frequency_points
                 for point in points
             ):
                 raise ValueError(
-                    "physical timeframe bundle accepts only its own level-zero points"
+                    "physical timeframe bundle accepts only points from its own frequency"
                 )
 
 
@@ -160,7 +160,7 @@ class EvaluatedSignal:
         tuple[str, tuple[str, ...]], ...
     ] = ()
     daily_context: TimeframeContext | None = None
-    physical_timeframe_level_zero: bool = False
+    physical_timeframe_recursive: bool = False
     entry_execution_boundary: EntryExecutionBoundary | None = None
 
 
@@ -389,8 +389,8 @@ class TradingEngine:
                             bundle.warmup_difference_codes_by_frequency
                         ),
                         daily_context=daily_context,
-                        physical_timeframe_level_zero=(
-                            bundle.physical_timeframe_level_zero
+                        physical_timeframe_recursive=(
+                            bundle.physical_timeframe_recursive
                         ),
                         entry_execution_boundary=(
                             None
@@ -403,7 +403,7 @@ class TradingEngine:
             conflict = resolve_conflict(
                 setup,
                 bundle.opposite_points,
-                physical_timeframes=bundle.physical_timeframe_level_zero,
+                physical_timeframes=bundle.physical_timeframe_recursive,
             )
             entry = evaluate_entry_policy(
                 lifecycle,
@@ -493,8 +493,8 @@ class TradingEngine:
                         bundle.warmup_difference_codes_by_frequency
                     ),
                     daily_context=daily_context,
-                    physical_timeframe_level_zero=(
-                        bundle.physical_timeframe_level_zero
+                    physical_timeframe_recursive=(
+                        bundle.physical_timeframe_recursive
                     ),
                     entry_execution_boundary=(
                         None

@@ -1,10 +1,9 @@
-"""Physical-timeframe structure evidence for early stock screening.
+"""Screening helpers over the canonical recursive strict evidence graph.
 
-This module is deliberately separate from ``CL.get_strict_evidence``.  The
-global strict endpoint recursively promotes completed trend types.  Early
-screening instead consumes four real market-data frequencies independently;
-within each frequency, old strokes build segments and only segment-sourced
-level zero is tradable evidence.
+Every physical market-data frequency is still analyzed independently, but it
+uses ``CL.get_strict_evidence()`` exactly like charts, replay and monitoring.
+This module owns only screening-specific provisional presentation; it does not
+implement another center, divergence or buy/sell-point calculator.
 """
 
 from __future__ import annotations
@@ -12,32 +11,16 @@ from __future__ import annotations
 from datetime import datetime
 from decimal import Decimal
 
-from chanlun.core.strict_structure.center_machine import calculate_centers
-from chanlun.core.strict_structure.divergence import (
-    collect_strict_divergences,
-    merge_formal_divergence_ledger,
-)
-from chanlun.core.strict_structure.identity import (
-    build_strict_evidence_revision,
-    stable_structure_id,
-)
+from chanlun.core.strict_structure.identity import stable_structure_id
 from chanlun.core.strict_structure.models import (
     CenterPreviewState,
     SourceKind,
     StrictEvidenceResult,
-    StrictLevelResult,
-    StrictStructureResult,
 )
-from chanlun.core.strict_structure.recursive_engine import (
-    calculate_level_with_divergence_boundaries,
-)
-from chanlun.core.strict_structure.signals import StrictSignalEngine
-from chanlun.core.strict_structure.strength import MacdStrengthProvider
-from chanlun.core.strict_structure.unit_adapter import UnitLockRegistry, adapt_lines
 from chanlun.decision_support.trading_system.provisional import ProvisionalCandidate
 
 
-SCREENING_STRUCTURE_SCOPE = "physical-timeframe-level-zero"
+SCREENING_STRUCTURE_SCOPE = "physical-timeframe-recursive"
 SCREENING_STRUCTURE_FREQUENCIES = ("d", "30m", "5m", "1m")
 
 
@@ -49,13 +32,7 @@ def build_screening_evidence(
     price_basis_revision: str,
     strict_config_revision: str,
 ) -> StrictEvidenceResult:
-    """Build one non-recursive, segment-sourced evidence snapshot.
-
-    ``cd.get_xds()`` intentionally includes the active unfinished terminal
-    segment.  ``calculate_centers`` keeps locked units formal and carries every
-    unlocked suffix unit into ``CenterPreview`` evidence, so an unfinished
-    segment participates without being promoted to a confirmed point.
-    """
+    """Return the sole recursive evidence snapshot already owned by ``CL``."""
 
     if not isinstance(source_closed_at, datetime):
         raise TypeError("source_closed_at must be a datetime")
@@ -67,86 +44,22 @@ def build_screening_evidence(
         raise ValueError("structure_price_quantum must be a positive Decimal")
     if not price_basis_revision or not strict_config_revision:
         raise ValueError("screening structure identity is required")
-
-    registry = UnitLockRegistry(price_basis_revision)
-    segment_units = adapt_lines(
-        cd.get_xds(),
-        0,
-        SourceKind.SEGMENT,
-        structure_price_quantum,
-        source_closed_at,
-        registry,
-    )
-    strength = MacdStrengthProvider(cd)
-    center_result, assembly = calculate_level_with_divergence_boundaries(
-        segment_units,
-        0,
-        SourceKind.SEGMENT,
-        strength=strength,
-    )
-    level_zero = StrictLevelResult(
-        structural_level=0,
-        units=segment_units,
-        center_result=center_result,
-        trend_types=assembly.current_trends,
-        completed_trends=assembly.completed_trends,
-        decomposition_boundaries=assembly.decomposition_boundaries,
-    )
-    structure = StrictStructureResult(
-        schema="chanlun-structure",
-        price_basis_revision=price_basis_revision,
-        levels=(level_zero,),
-    )
-
-    stroke_units = adapt_lines(
-        cd.get_bis(),
-        0,
-        SourceKind.STROKE_OBSERVATION,
-        structure_price_quantum,
-        source_closed_at,
-        registry,
-    )
-    stroke_observations = calculate_centers(
-        stroke_units,
-        0,
-        SourceKind.STROKE_OBSERVATION,
-    )
-
-    signal_engine = StrictSignalEngine(
-        structure=structure,
-        strength=strength,
-        price_quantum=structure_price_quantum,
-    )
-    confirmed = signal_engine.confirmed_points()
-    approaching = signal_engine.approaching_points(source_closed_at)
-    divergences = merge_formal_divergence_ledger(
-        structure,
-        confirmed,
-        collect_strict_divergences(structure, strength),
-    )
-    structure_revision = build_strict_evidence_revision(
-        symbol=cd.get_code(),
-        source_frequency=cd.get_frequency(),
-        price_basis_revision=price_basis_revision,
-        strict_config_revision=strict_config_revision,
-        structure=structure,
-        confirmed_points=confirmed,
-        divergences=divergences,
-    )
-    return StrictEvidenceResult(
-        symbol=cd.get_code(),
-        source_frequency=cd.get_frequency(),
-        source_closed_at=source_closed_at,
-        price_basis_revision=price_basis_revision,
-        structure_price_quantum=structure_price_quantum,
-        strict_config_revision=strict_config_revision,
-        structure_revision=structure_revision,
-        structure=structure,
-        stroke_center_observations=stroke_observations,
-        confirmed_points=confirmed,
-        approaching_points=approaching,
-        divergences=divergences,
-    )
+    getter = getattr(cd, "get_strict_evidence", None)
+    if not callable(getter):
+        raise TypeError("screening state must expose canonical strict evidence")
+    evidence = getter()
+    if not isinstance(evidence, StrictEvidenceResult):
+        raise TypeError("canonical strict endpoint returned invalid evidence")
+    if (
+        evidence.symbol != cd.get_code()
+        or evidence.source_frequency != cd.get_frequency()
+        or evidence.price_basis_revision != price_basis_revision
+        or evidence.structure_price_quantum != structure_price_quantum
+        or evidence.strict_config_revision != strict_config_revision
+        or evidence.source_closed_at > source_closed_at
+    ):
+        raise ValueError("canonical strict evidence context mismatch")
+    return evidence
 
 
 def unfinished_segment_candidates(
@@ -166,9 +79,14 @@ def unfinished_segment_candidates(
 
     if evidence.symbol != code or evidence.source_frequency != source_frequency:
         raise ValueError("screening evidence context mismatch")
-    if len(evidence.structure.levels) != 1:
-        raise ValueError("early screening accepts exactly physical level zero")
+    if not evidence.structure.levels:
+        # The canonical recursive endpoint omits level 0 until at least one
+        # physical segment exists.  Sparse sector composites can legitimately
+        # be in that state; they simply have no unfinished preview to expose.
+        return ()
     level = evidence.structure.levels[0]
+    if level.structural_level != 0:
+        raise ValueError("screening evidence base level is invalid")
     units = {unit.unit_id: unit for unit in level.units}
     output: dict[str, ProvisionalCandidate] = {}
     for preview in level.center_result.previews:
@@ -243,7 +161,7 @@ def unfinished_segment_candidates(
                 "formal_center_confirmation",
             ),
             evidence_codes=(
-                "physical_timeframe_level_zero",
+                "physical_timeframe_recursive_base_level",
                 "old_pen_segment_chain",
                 "unfinished_segment_participates",
                 "provisional_center_completion",

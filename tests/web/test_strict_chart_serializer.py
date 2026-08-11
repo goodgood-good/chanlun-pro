@@ -787,7 +787,7 @@ def test_snapshot_groups_independent_divergences_by_level() -> None:
         histogram_area_decayed=True,
         histogram_peak_decayed=True,
         dif_extreme_decayed=True,
-        strength_source="macd_htf",
+        strength_source="macd",
     )
     snapshot = build_strict_structure_snapshot(
         _evidence(

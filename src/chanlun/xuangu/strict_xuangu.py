@@ -1,4 +1,4 @@
-"""Stock-selection predicates backed exclusively by strict L0 evidence."""
+"""Stock-selection predicates backed by canonical recursive strict evidence."""
 
 from __future__ import annotations
 
@@ -50,11 +50,17 @@ def _evidence(code: str, mk_datas, frequency: str) -> StrictEvidenceResult:
     )
 
 
-def _terminal_locked_unit_id(evidence: StrictEvidenceResult) -> str | None:
-    if len(evidence.structure.levels) != 1:
-        raise ValueError("stock selection accepts exactly physical level zero")
-    locked = tuple(unit for unit in evidence.structure.levels[0].units if unit.locked)
-    return None if not locked else locked[-1].unit_id
+def _terminal_locked_unit_ids(
+    evidence: StrictEvidenceResult,
+) -> dict[int, str]:
+    """Return the current locked unit independently for every recursive level."""
+
+    terminal_by_level: dict[int, str] = {}
+    for level in evidence.structure.levels:
+        locked = tuple(unit for unit in level.units if unit.locked)
+        if locked:
+            terminal_by_level[level.structural_level] = locked[-1].unit_id
+    return terminal_by_level
 
 
 def _current_points(
@@ -63,16 +69,16 @@ def _current_points(
     sides: frozenset[str],
     classes: frozenset[str] = frozenset({"1", "2", "3"}),
 ):
-    terminal_id = _terminal_locked_unit_id(evidence)
-    if terminal_id is None:
+    terminal_by_level = _terminal_locked_unit_ids(evidence)
+    if not terminal_by_level:
         return ()
     return tuple(
         sorted(
             (
                 point
                 for point in evidence.confirmed_points
-                if point.structural_level == 0
-                and point.anchor_unit_id == terminal_id
+                if terminal_by_level.get(point.structural_level)
+                == point.anchor_unit_id
                 and point.side in sides
                 and point.point_type[0] in classes
             ),
@@ -90,16 +96,16 @@ def _current_divergences(
     *,
     sides: frozenset[str],
 ):
-    terminal_id = _terminal_locked_unit_id(evidence)
-    if terminal_id is None:
+    terminal_by_level = _terminal_locked_unit_ids(evidence)
+    if not terminal_by_level:
         return ()
     return tuple(
         sorted(
             (
                 divergence
                 for divergence in evidence.divergences
-                if divergence.structural_level == 0
-                and divergence.signal_unit_id == terminal_id
+                if terminal_by_level.get(divergence.structural_level)
+                == divergence.signal_unit_id
                 and ("buy" if divergence.direction == "down" else "sell") in sides
             ),
             key=lambda item: (item.available_at, item.kind, item.divergence_id),
@@ -122,9 +128,10 @@ def _event_sides(
 
 def _point_message(evidence: StrictEvidenceResult, points) -> str:
     labels = ",".join(
-        f"{point.point_type}/{point.variant.value}" for point in points
+        f"L{point.structural_level}:{point.point_type}/{point.variant.value}"
+        for point in points
     )
-    return f"{evidence.source_frequency} 严格结构L0确认买卖点【{labels}】"
+    return f"{evidence.source_frequency} 严格递归结构确认买卖点【{labels}】"
 
 
 def _single_class_point(code, mk_datas, opt_types, point_class: str):
@@ -140,25 +147,25 @@ def _single_class_point(code, mk_datas, opt_types, point_class: str):
     return {"code": code, "msg": _point_message(evidence, points)}
 
 
-def select_strict_l0_class1_point(
+def select_strict_class1_point(
     code: str, mk_datas, opt_type: list | None = None
 ):
     return _single_class_point(code, mk_datas, opt_type, "1")
 
 
-def select_strict_l0_class2_point(
+def select_strict_class2_point(
     code: str, mk_datas, opt_type: list | None = None
 ):
     return _single_class_point(code, mk_datas, opt_type, "2")
 
 
-def select_strict_l0_class3_point(
+def select_strict_class3_point(
     code: str, mk_datas, opt_type: list | None = None
 ):
     return _single_class_point(code, mk_datas, opt_type, "3")
 
 
-def select_strict_l0_class3_after_class1(
+def select_strict_class3_after_class1(
     code: str,
     mk_datas,
     opt_type: list | None = None,
@@ -175,7 +182,7 @@ def select_strict_l0_class3_after_class1(
         expected = "1buy" if third.side == "buy" else "1sell"
         if any(
             point.point_type == expected
-            and point.structural_level == 0
+            and point.structural_level == third.structural_level
             and point.available_at <= third.available_at
             and point.anchor_at < third.anchor_at
             for point in evidence.confirmed_points
@@ -185,11 +192,11 @@ def select_strict_l0_class3_after_class1(
         return None
     return {
         "code": code,
-        "msg": _point_message(evidence, matches) + "，且此前已有同向严格一类点",
+        "msg": _point_message(evidence, matches) + "，且此前已有同级同向严格一类点",
     }
 
 
-def select_strict_l0_class3_after_trend_divergence(
+def select_strict_class3_after_trend_divergence(
     code: str,
     mk_datas,
     opt_type: list | None = None,
@@ -206,7 +213,7 @@ def select_strict_l0_class3_after_trend_divergence(
         expected = "1buy" if third.side == "buy" else "1sell"
         if any(
             point.point_type == expected
-            and point.structural_level == 0
+            and point.structural_level == third.structural_level
             and point.divergence is not None
             and point.divergence.kind == "trend"
             and point.available_at <= third.available_at
@@ -218,11 +225,11 @@ def select_strict_l0_class3_after_trend_divergence(
         return None
     return {
         "code": code,
-        "msg": _point_message(evidence, matches) + "，且此前严格趋势背驰已确认转折",
+        "msg": _point_message(evidence, matches) + "，且此前同级严格趋势背驰已确认",
     }
 
 
-def select_strict_l0_point_divergence_confluence(
+def select_strict_point_divergence_confluence(
     code: str,
     mk_datas,
     opt_type: list | None = None,
@@ -241,11 +248,11 @@ def select_strict_l0_point_divergence_confluence(
         return None
     return {
         "code": code,
-        "msg": _point_message(evidence, matches) + "，且同锚点严格背驰成立",
+        "msg": _point_message(evidence, matches) + "，且同时存在同向严格背驰",
     }
 
 
-def select_strict_l0_two_frequency_confluence(
+def select_strict_two_frequency_confluence(
     code: str,
     mk_datas,
     opt_type: list | None = None,
@@ -260,12 +267,12 @@ def select_strict_l0_two_frequency_confluence(
         "code": code,
         "msg": (
             f"{high.source_frequency} 与 {low.source_frequency} "
-            f"严格结构L0同向买卖点/背驰【{','.join(sorted(matched))}】"
+            f"严格递归结构同向买卖点/背驰【{','.join(sorted(matched))}】"
         ),
     }
 
 
-def select_strict_l0_lower_class12_confluence(
+def select_strict_lower_class12_confluence(
     code: str,
     mk_datas,
     opt_type: list | None = None,
@@ -293,7 +300,7 @@ def select_strict_l0_lower_class12_confluence(
     return {
         "code": code,
         "msg": (
-            f"{high.source_frequency} 严格结构L0事件，且低周期 "
+            f"{high.source_frequency} 严格递归结构事件，且低周期 "
             f"{','.join(matched_frequencies)} 出现同向严格一/二类点"
         ),
     }
@@ -319,12 +326,12 @@ def select_closed_ma250(code: str, mk_datas, opt_type: list | None = None):
 
 __all__ = (
     "select_closed_ma250",
-    "select_strict_l0_class1_point",
-    "select_strict_l0_class2_point",
-    "select_strict_l0_class3_after_class1",
-    "select_strict_l0_class3_after_trend_divergence",
-    "select_strict_l0_class3_point",
-    "select_strict_l0_lower_class12_confluence",
-    "select_strict_l0_point_divergence_confluence",
-    "select_strict_l0_two_frequency_confluence",
+    "select_strict_class1_point",
+    "select_strict_class2_point",
+    "select_strict_class3_after_class1",
+    "select_strict_class3_after_trend_divergence",
+    "select_strict_class3_point",
+    "select_strict_lower_class12_confluence",
+    "select_strict_point_divergence_confluence",
+    "select_strict_two_frequency_confluence",
 )

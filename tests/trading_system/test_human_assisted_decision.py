@@ -169,14 +169,11 @@ def test_decision_core_identity_is_stable_and_parameter_bound() -> None:
     assert first.contract_id.startswith("sha256:")
     assert first.contract.human_confirmation_required is True
     assert first.contract.automated_order_authorized is False
-    assert first.contract.stroke_mode == "old"
+    assert first.contract.stroke_mode == "strict-cl-k-distance"
     assert first.contract.strict_base_profile_id == ("chanlun-source-faithful-base")
     assert first.contract.strict_base_profile_revision.startswith("sha256:")
-    assert first.contract.strict_runtime_scope_profile_id == (
-        "chanlun-screening-strict-l0"
-    )
-    assert first.contract.strict_runtime_scope_profile_revision.startswith("sha256:")
-    assert first.contract.recursive_structure_allowed is False
+    assert first.contract.structure_scope == "physical-timeframe-recursive"
+    assert first.contract.recursive_structure_allowed is True
     assert first.contract.physical_structure_frequencies == (
         "d",
         "30m",
@@ -188,13 +185,13 @@ def test_decision_core_identity_is_stable_and_parameter_bound() -> None:
     assert validate_human_assisted_contract_document(document) == (first.contract_id)
 
 
-def test_daily_physical_structure_can_block_new_buy_without_recursion() -> None:
+def test_daily_physical_structure_can_block_new_buy_with_recursive_graph() -> None:
     core = HumanAssistedDecisionCore()
     bundle = replace(
         deterministic_bundle(),
         daily_direction="down",
         daily_points=(confirmed_point("1sell", frequency="d"),),
-        physical_timeframe_level_zero=True,
+        physical_timeframe_recursive=True,
     )
 
     [decision] = core.evaluate_symbol(bundle)
@@ -205,9 +202,9 @@ def test_daily_physical_structure_can_block_new_buy_without_recursion() -> None:
     assert "daily_structure_hostile" in decision.entry.reason_codes
     assert document["context_d"]["frequency"] == "d"
     assert document["context_d"]["hard_block"] is True
-    assert document["stroke_mode"] == "old"
-    assert document["recursive_structure_used"] is False
-    assert document["physical_timeframe_level_zero"] is True
+    assert document["stroke_mode"] == "strict-cl-k-distance"
+    assert document["recursive_structure_used"] is True
+    assert document["physical_timeframe_recursive"] is True
 
 
 def test_mwd_gate_keeps_candidate_visible_but_blocks_non_green_entry() -> None:

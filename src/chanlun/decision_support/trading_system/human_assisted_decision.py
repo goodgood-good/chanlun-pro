@@ -29,9 +29,8 @@ from chanlun.decision_support.trading_system.models import (
     TradingPolicy,
 )
 from chanlun.decision_support.trading_system.provisional import ProvisionalCandidate
-from chanlun.decision_support.trading_system.runtime_config import (
-    SCREENING_STRUCTURE_PROFILE_ID,
-    screening_base_config_revision,
+from chanlun.decision_support.trading_system.screening_structure import (
+    SCREENING_STRUCTURE_SCOPE,
 )
 
 
@@ -55,7 +54,7 @@ _SIGNAL_DECISION_FIELDS = (
     "structure_frequencies",
     "stroke_mode",
     "recursive_structure_used",
-    "physical_timeframe_level_zero",
+    "physical_timeframe_recursive",
     "context_d",
     "context_30m",
     "setup_5m",
@@ -132,12 +131,11 @@ class HumanAssistedDecisionContract:
     tactical_frequency: str = "5m"
     locator_frequency: str = "1m"
     physical_structure_frequencies: tuple[str, ...] = ("d", "30m", "5m", "1m")
-    stroke_mode: str = "old"
+    stroke_mode: str = "strict-cl-k-distance"
     strict_base_profile_id: str = STRICT_BASE_PROFILE_ID
     strict_base_profile_revision: str = strict_base_config_revision()
-    strict_runtime_scope_profile_id: str = SCREENING_STRUCTURE_PROFILE_ID
-    strict_runtime_scope_profile_revision: str = screening_base_config_revision()
-    recursive_structure_allowed: bool = False
+    structure_scope: str = SCREENING_STRUCTURE_SCOPE
+    recursive_structure_allowed: bool = True
     unfinished_segment_candidates: bool = True
     human_confirmation_required: bool = True
     automated_order_authorized: bool = False
@@ -155,14 +153,11 @@ class HumanAssistedDecisionContract:
             raise ValueError("human-assisted timeframe contract changed")
         if (
             self.physical_structure_frequencies != ("d", "30m", "5m", "1m")
-            or self.stroke_mode != "old"
+            or self.stroke_mode != "strict-cl-k-distance"
             or self.strict_base_profile_id != STRICT_BASE_PROFILE_ID
             or self.strict_base_profile_revision != strict_base_config_revision()
-            or self.strict_runtime_scope_profile_id
-            != SCREENING_STRUCTURE_PROFILE_ID
-            or self.strict_runtime_scope_profile_revision
-            != screening_base_config_revision()
-            or self.recursive_structure_allowed
+            or self.structure_scope != SCREENING_STRUCTURE_SCOPE
+            or not self.recursive_structure_allowed
             or not self.unfinished_segment_candidates
         ):
             raise ValueError("human-assisted physical structure contract changed")
@@ -195,12 +190,7 @@ class HumanAssistedDecisionContract:
             "stroke_mode": self.stroke_mode,
             "strict_base_profile_id": self.strict_base_profile_id,
             "strict_base_profile_revision": self.strict_base_profile_revision,
-            "strict_runtime_scope_profile_id": (
-                self.strict_runtime_scope_profile_id
-            ),
-            "strict_runtime_scope_profile_revision": (
-                self.strict_runtime_scope_profile_revision
-            ),
+            "structure_scope": self.structure_scope,
             "recursive_structure_allowed": self.recursive_structure_allowed,
             "unfinished_segment_candidates": self.unfinished_segment_candidates,
             "human_confirmation_required": self.human_confirmation_required,
@@ -277,8 +267,7 @@ def validate_human_assisted_contract_document(
         "stroke_mode",
         "strict_base_profile_id",
         "strict_base_profile_revision",
-        "strict_runtime_scope_profile_id",
-        "strict_runtime_scope_profile_revision",
+        "structure_scope",
         "live_status",
     )
     if any(not isinstance(document.get(name), str) for name in string_fields):
@@ -308,12 +297,7 @@ def validate_human_assisted_contract_document(
         stroke_mode=str(document["stroke_mode"]),
         strict_base_profile_id=str(document["strict_base_profile_id"]),
         strict_base_profile_revision=str(document["strict_base_profile_revision"]),
-        strict_runtime_scope_profile_id=str(
-            document["strict_runtime_scope_profile_id"]
-        ),
-        strict_runtime_scope_profile_revision=str(
-            document["strict_runtime_scope_profile_revision"]
-        ),
+        structure_scope=str(document["structure_scope"]),
         recursive_structure_allowed=bool(document["recursive_structure_allowed"]),
         unfinished_segment_candidates=bool(document["unfinished_segment_candidates"]),
         human_confirmation_required=bool(document["human_confirmation_required"]),
@@ -574,11 +558,11 @@ def serialize_evaluated_signal(
         "recursive_level": point.recursive_level,
         "lifecycle_stage": lifecycle_stage,
         "observed_at": item.lifecycle.observed_at.isoformat(),
-        "structure_scope": "physical_timeframe_level_zero",
+        "structure_scope": SCREENING_STRUCTURE_SCOPE,
         "structure_frequencies": ["d", "30m", "5m", "1m"],
-        "stroke_mode": "old",
-        "recursive_structure_used": False,
-        "physical_timeframe_level_zero": item.physical_timeframe_level_zero,
+        "stroke_mode": "strict-cl-k-distance",
+        "recursive_structure_used": item.physical_timeframe_recursive,
+        "physical_timeframe_recursive": item.physical_timeframe_recursive,
         "context_d": _context_document(item.daily_context),
         "context_30m": {
             "direction": item.setup.context.direction,

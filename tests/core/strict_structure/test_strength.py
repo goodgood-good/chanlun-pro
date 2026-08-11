@@ -51,12 +51,16 @@ def source_klines(closes) -> tuple[Kline, ...]:
 
 
 class FakeCD:
-    def __init__(self, dates, *, htf_by_level):
+    def __init__(self, dates, *, native, htf_by_level):
         self._dates = tuple(dates)
+        self._native = dict(native)
         self._strict_htf_macd_by_level = dict(htf_by_level)
 
     def get_src_klines(self):
         return tuple(SimpleNamespace(date=value) for value in self._dates)
+
+    def get_idx(self):
+        return {"macd": dict(self._native)}
 
 def fake_strength_provider(
     *,
@@ -69,28 +73,33 @@ def fake_strength_provider(
     htf_bucket_keys=None,
     htf_algorithm=None,
 ):
-    selected_hist = tuple(htf_hist if htf_hist is not None else native_hist)
-    selected_dif = tuple(
-        htf_dif
-        if htf_dif is not None
-        else native_dif
-        if native_dif is not None
-        else selected_hist
-    )
-    htf = {
-        "hist": selected_hist,
-        "dif": selected_dif,
-        "dates": tuple(htf_dates or source_dates(len(selected_hist))),
-        "known_at": tuple(htf_known_at or source_dates(len(selected_hist))),
-        "bucket_keys": tuple(
-            htf_bucket_keys
-            if htf_bucket_keys is not None
-            else range(len(selected_hist))
-        ),
-        "algorithm": htf_algorithm or "causal-partial-htf",
+    native_hist = tuple(native_hist)
+    native = {
+        "hist": native_hist,
+        "dif": tuple(native_dif if native_dif is not None else native_hist),
     }
+    htf_by_level = {}
+    if htf_hist is not None:
+        selected_hist = tuple(htf_hist)
+        selected_dif = tuple(htf_dif if htf_dif is not None else selected_hist)
+        htf_by_level[0] = {
+            "hist": selected_hist,
+            "dif": selected_dif,
+            "dates": tuple(htf_dates or source_dates(len(selected_hist))),
+            "known_at": tuple(htf_known_at or source_dates(len(selected_hist))),
+            "bucket_keys": tuple(
+                htf_bucket_keys
+                if htf_bucket_keys is not None
+                else range(len(selected_hist))
+            ),
+            "algorithm": htf_algorithm or "causal-partial-htf",
+        }
     return MacdStrengthProvider(
-        FakeCD(source_dates(len(selected_hist)), htf_by_level={0: htf})
+        FakeCD(
+            source_dates(len(native_hist)),
+            native=native,
+            htf_by_level=htf_by_level,
+        )
     )
 
 
@@ -103,6 +112,7 @@ def unit_covering_indexes(
     locked: bool = True,
     start_tick: int | None = None,
     end_tick: int | None = None,
+    structural_level: int = 0,
 ) -> ConstituentUnit:
     dates = source_dates(right + 1)
     if start_tick is None:
@@ -112,7 +122,7 @@ def unit_covering_indexes(
     available_at = dates[right] + timedelta(minutes=1)
     return ConstituentUnit(
         unit_id=unit_id,
-        structural_level=0,
+        structural_level=structural_level,
         source_kind=SourceKind.SEGMENT,
         price_basis_revision="test-raw",
         direction=direction,
@@ -144,26 +154,41 @@ def test_noncausal_htf_macd_is_rejected():
         )
 
 
-def test_formal_strength_uses_causal_partial_htf_algorithm():
+def test_physical_strength_uses_native_same_period_macd():
     provider = fake_strength_provider(
-        native_hist=(99, 99, 99),
+        native_hist=(2, 3, 4),
         htf_hist=(5, -40, 3),
         htf_algorithm="causal-partial-htf",
     )
 
     snapshot = provider.snapshot(unit_covering_indexes(0, 2, direction="up"))
 
-    assert snapshot.source == "macd_htf"
+    assert snapshot.source == "macd"
+    assert snapshot.histogram_area == 9
+
+
+def test_recursive_strength_uses_first_causal_partial_higher_period():
+    provider = fake_strength_provider(
+        native_hist=(99, 99, 99),
+        htf_hist=(5, -40, 3),
+        htf_algorithm="causal-partial-htf",
+    )
+
+    snapshot = provider.snapshot(
+        unit_covering_indexes(0, 2, direction="up", structural_level=1)
+    )
+
+    assert snapshot.source == "macd"
     assert snapshot.histogram_area == 8
 
 
 def test_formal_strength_fails_closed_when_causal_htf_is_unavailable():
-    provider = MacdStrengthProvider(
-        FakeCD(source_dates(3), htf_by_level={})
-    )
+    provider = fake_strength_provider(native_hist=(1, 2, 3))
 
-    with pytest.raises(MacdStrengthUnavailable, match="causal HTF"):
-        provider.snapshot(unit_covering_indexes(0, 2, direction="up"))
+    with pytest.raises(MacdStrengthUnavailable, match="structural level"):
+        provider.snapshot(
+            unit_covering_indexes(0, 2, direction="up", structural_level=1)
+        )
 
 
 def test_formal_causal_htf_snapshot_is_prefix_stable_after_new_source_bar():
@@ -171,15 +196,19 @@ def test_formal_causal_htf_snapshot_is_prefix_stable_after_new_source_bar():
         native_hist=(1, 2, 1),
         htf_hist=(4, -1, 2),
         htf_algorithm="causal-partial-htf",
-    ).snapshot(unit_covering_indexes(0, 2, direction="up"))
+    ).snapshot(
+        unit_covering_indexes(0, 2, direction="up", structural_level=1)
+    )
     after = fake_strength_provider(
         native_hist=(1, 2, 1, 9),
         htf_hist=(4, -1, 2, -999),
         htf_algorithm="causal-partial-htf",
-    ).snapshot(unit_covering_indexes(0, 2, direction="up"))
+    ).snapshot(
+        unit_covering_indexes(0, 2, direction="up", structural_level=1)
+    )
 
     assert before == after
-    assert before.source == "macd_htf"
+    assert before.source == "macd"
 
 
 def test_causal_partial_htf_calculator_never_rewrites_a_frozen_prefix():
@@ -208,9 +237,7 @@ def test_causal_partial_htf_calculator_never_rewrites_a_frozen_prefix():
 
 def test_strength_area_uses_only_histogram_bars_in_leg_direction():
     provider = fake_strength_provider(
-        native_hist=(99, 99, 99, 99),
-        htf_hist=(-9, 2, 3, -4),
-        htf_algorithm="causal-partial-htf",
+        native_hist=(-9, 2, 3, -4),
     )
 
     up = provider.snapshot(unit_covering_indexes(0, 3, direction="up"))
@@ -230,7 +257,9 @@ def test_causal_htf_area_counts_each_target_bucket_once():
         htf_bucket_keys=(0, 0, 0, 0, 0, 1, 1, 1, 1, 1),
     )
 
-    snapshot = provider.snapshot(unit_covering_indexes(0, 9, direction="up"))
+    snapshot = provider.snapshot(
+        unit_covering_indexes(0, 9, direction="up", structural_level=1)
+    )
 
     assert snapshot.histogram_area == pytest.approx(2.1)
     assert snapshot.histogram_peak == pytest.approx(1.1)
@@ -242,13 +271,17 @@ def test_causal_htf_open_bucket_uses_only_the_unit_endpoint_sample():
         htf_hist=(0.2, 0.4, 0.6, 0.8, 1.0, 1.5, 1.4),
         htf_algorithm="causal-partial-htf",
         htf_bucket_keys=(0, 0, 0, 0, 0, 1, 1),
-    ).snapshot(unit_covering_indexes(0, 6, direction="up"))
+    ).snapshot(
+        unit_covering_indexes(0, 6, direction="up", structural_level=1)
+    )
     extended = fake_strength_provider(
         native_hist=(99,) * 10,
         htf_hist=(0.2, 0.4, 0.6, 0.8, 1.0, 1.5, 1.4, -999, -999, -999),
         htf_algorithm="causal-partial-htf",
         htf_bucket_keys=(0, 0, 0, 0, 0, 1, 1, 1, 1, 1),
-    ).snapshot(unit_covering_indexes(0, 6, direction="up"))
+    ).snapshot(
+        unit_covering_indexes(0, 6, direction="up", structural_level=1)
+    )
 
     assert base == extended
     assert base.histogram_area == pytest.approx(2.4)
@@ -275,7 +308,7 @@ class TableProvider:
             histogram_area=area,
             histogram_peak=peak,
             dif_extreme=dif,
-            source="macd_htf",
+            source="macd",
             available_at=unit.available_at,
         )
 
@@ -355,7 +388,7 @@ def test_area_decay_alone_is_sufficient_macd_decay_for_formal_divergence():
     assert evidence.histogram_peak_decayed is False
     assert evidence.dif_extreme_decayed is False
     assert evidence.is_strong_divergent is False
-    assert evidence.strength_source == "macd_htf"
+    assert evidence.strength_source == "macd"
     assert evidence.structural_level == 0
     assert evidence.divergence_id
     assert evidence.anchor_at == later.market_end
@@ -410,18 +443,45 @@ def test_each_macd_indicator_can_independently_confirm_divergence(
     assert evidence.is_strong_divergent is False
 
 
-def test_strength_rejects_non_finite_or_missing_directional_macd_bars():
+def test_strength_rejects_non_finite_macd_bars():
     with pytest.raises(ValueError, match="finite"):
         fake_strength_provider(native_hist=(1, np.nan, 2)).snapshot(
             unit_covering_indexes(0, 2, direction="up")
         )
-    with pytest.raises(MacdStrengthUnavailable, match="no directional MACD bars"):
-        fake_strength_provider(native_hist=(-1, -2, -1)).snapshot(
-            unit_covering_indexes(0, 2, direction="up")
-        )
 
 
-def test_strict_strength_matches_directional_htf_formula_for_locked_xd_pair():
+def test_missing_directional_histogram_keeps_dif_available():
+    snapshot = fake_strength_provider(
+        native_hist=(-1, -2, -1),
+        native_dif=(1, 2, 3),
+    ).snapshot(unit_covering_indexes(0, 2, direction="up"))
+
+    assert snapshot.histogram_area is None
+    assert snapshot.histogram_peak is None
+    assert snapshot.dif_extreme == 3
+
+
+def test_dif_alone_confirms_when_directional_histogram_is_unavailable():
+    earlier, later = same_direction_units_with_new_low()
+    evidence = compare_divergence(
+        earlier,
+        later,
+        TableProvider(
+            {
+                "earlier": (None, None, -2),
+                "later": (None, None, -1),
+            }
+        ),
+        kind="trend",
+    )
+
+    assert evidence.histogram_area_decayed is False
+    assert evidence.histogram_peak_decayed is False
+    assert evidence.dif_extreme_decayed is True
+    assert evidence.is_divergent is True
+
+
+def test_strict_strength_matches_directional_native_formula_for_locked_xd_pair():
     frame = (
         pd.read_parquet("tests/fixtures/SH.600519_5m.parquet")[
             ["date", "open", "high", "low", "close", "volume"]
@@ -446,23 +506,27 @@ def test_strict_strength_matches_directional_htf_formula_for_locked_xd_pair():
         UnitLockRegistry("test-raw"),
     )
     provider = MacdStrengthProvider(cd)
-    causal = cd._strict_htf_macd_by_level[0]
-    causal_dates = tuple(causal["dates"])
+    native = cd.get_idx()["macd"]
+    native_dates = tuple(kline.date for kline in cd.get_src_klines())
 
     def expected_strength(value):
-        left = causal_dates.index(value.market_start)
-        right = causal_dates.index(value.market_end) + 1
-        last_by_bucket = {}
-        for index in range(left, right):
-            last_by_bucket[causal["bucket_keys"][index]] = index
-        indexes = tuple(sorted(last_by_bucket.values()))
-        hist = np.asarray([causal["hist"][index] for index in indexes])
-        dif = np.asarray([causal["dif"][index] for index in indexes])
+        left = native_dates.index(value.market_start)
+        right = native_dates.index(value.market_end) + 1
+        hist = np.asarray(native["hist"][left:right])
+        dif = np.asarray(native["dif"][left:right])
         if value.direction == "up":
             directional = hist[hist > 0]
-            return directional.sum(), directional.max(), dif.max()
+            return (
+                None if directional.size == 0 else directional.sum(),
+                None if directional.size == 0 else directional.max(),
+                dif.max(),
+            )
         directional = hist[hist < 0]
-        return abs(directional.sum()), directional.min(), dif.min()
+        return (
+            None if directional.size == 0 else abs(directional.sum()),
+            None if directional.size == 0 else directional.min(),
+            dif.min(),
+        )
 
     compared = False
     for later_index, (later_line, later_unit) in enumerate(zip(raw_lines, units)):
@@ -490,11 +554,19 @@ def test_strict_strength_matches_directional_htf_formula_for_locked_xd_pair():
             direction = later_unit.direction
             earlier_area, earlier_peak, earlier_dif = expected_strength(earlier_unit)
             later_area, later_peak, later_dif = expected_strength(later_unit)
-            assert earlier_snapshot.source == later_snapshot.source == "macd_htf"
-            assert earlier_snapshot.histogram_area == pytest.approx(earlier_area)
-            assert later_snapshot.histogram_area == pytest.approx(later_area)
-            assert earlier_snapshot.histogram_peak == pytest.approx(earlier_peak)
-            assert later_snapshot.histogram_peak == pytest.approx(later_peak)
+            assert earlier_snapshot.source == later_snapshot.source == "macd"
+            assert earlier_snapshot.histogram_area == (
+                None if earlier_area is None else pytest.approx(earlier_area)
+            )
+            assert later_snapshot.histogram_area == (
+                None if later_area is None else pytest.approx(later_area)
+            )
+            assert earlier_snapshot.histogram_peak == (
+                None if earlier_peak is None else pytest.approx(earlier_peak)
+            )
+            assert later_snapshot.histogram_peak == (
+                None if later_peak is None else pytest.approx(later_peak)
+            )
             assert earlier_snapshot.dif_extreme == pytest.approx(earlier_dif)
             assert later_snapshot.dif_extreme == pytest.approx(later_dif)
             assert evidence.price_extreme_confirmed == (
@@ -502,11 +574,19 @@ def test_strict_strength_matches_directional_htf_formula_for_locked_xd_pair():
                 if direction == "up"
                 else later_unit.low_tick < earlier_unit.low_tick
             )
-            assert evidence.histogram_area_decayed == (later_area < earlier_area)
+            assert evidence.histogram_area_decayed == (
+                earlier_area is not None
+                and later_area is not None
+                and later_area < earlier_area
+            )
             assert evidence.histogram_peak_decayed == (
-                later_peak < earlier_peak
-                if direction == "up"
-                else later_peak > earlier_peak
+                earlier_peak is not None
+                and later_peak is not None
+                and (
+                    later_peak < earlier_peak
+                    if direction == "up"
+                    else later_peak > earlier_peak
+                )
             )
             assert evidence.dif_extreme_decayed == (
                 later_dif < earlier_dif

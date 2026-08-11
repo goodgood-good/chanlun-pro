@@ -23,7 +23,7 @@ def signal_document(stage: str = "triggered") -> dict[str, object]:
         "tower": "xd",
         "recursive_level": 1,
         "lifecycle_stage": stage,
-        "physical_timeframe_level_zero": True,
+        "physical_timeframe_recursive": True,
         "observed_at": "2026-07-20T10:01:30+08:00",
         "context_30m": {"direction": "up", "disposition": "supportive"},
         "setup_5m": {
@@ -284,7 +284,7 @@ def test_newly_discovered_triggered_signal_only_seeds_the_baseline(
         ),
         ({"sector_triggered": False}, "CURRENT_SECTOR_TRIGGER_REQUIRED"),
         (
-            {"physical_timeframe_level_zero": False},
+            {"physical_timeframe_recursive": False},
             "PHYSICAL_TIMEFRAME_AUTHORITY_MISSING",
         ),
     ),

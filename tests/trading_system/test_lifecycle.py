@@ -66,7 +66,7 @@ def test_geometrically_completed_third_class_candidate_is_formed() -> None:
     point = replace(
         provisional_point("3buy"),
         evidence_codes=(
-            "physical_timeframe_level_zero",
+            "physical_timeframe_recursive_base_level",
             "provisional_center_completion",
             "core_boundary_held",
         ),

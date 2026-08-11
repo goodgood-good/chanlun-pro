@@ -147,8 +147,11 @@ def test_strict_base_profile_contains_only_current_production_rules():
     assert config["stroke_rule"] == "strict-cl-k-distance"
     assert config["segment_rule"] == "feature-sequence"
     assert config["segment_gap_rule"] == "second-feature-sequence-fractal"
-    assert config["strict_macd_source"] == "causal_htf"
-    assert config["strict_macd_htf_policy"] == "level_plus_one"
+    assert config["strict_macd_source"] == "native_l0_causal_recursive"
+    assert (
+        config["strict_macd_level_policy"]
+        == "native_l0_level_plus_one_recursive"
+    )
     assert config["strict_macd_area"] == "same_sign_magnitude"
     assert config["strict_macd_decay_rule"] == "area-or-peak-or-dif"
     assert config["center_seed_rule"] == ("shared-leave-entry-three-core-five-role")
@@ -165,7 +168,7 @@ def test_strict_base_profile_contains_only_current_production_rules():
         "matched-leg-terminal-prefix-partition"
     )
     assert config["second_class_rule"] == (
-        "parent-or-cross-level-small-large-direct-subcenter-third-retest"
+        "parent-first-return-or-cross-level-small-large-direct-subcenter-third-retest"
     )
     assert not any(
         key.startswith(("zs_", "chart_", "recursive_")) or "mmd" in key

@@ -8,7 +8,7 @@ import pandas as pd
 import pytest
 
 from chanlun.core.strict_structure.models import StrictPointStatus
-from chanlun.decision_support.trading_system.runtime_config import screening_cl_config
+from chanlun.decision_support.trading_system.runtime_config import strict_cl_config
 import chanlun.decision_support.trading_system.screening_runtime as screening_runtime_module
 from chanlun.decision_support.trading_system.higher_timeframe_gate import (
     HigherTimeframeDataUnavailable,
@@ -118,7 +118,18 @@ def test_entry_ttl_rejects_second_level_confirmation() -> None:
         )
 
 
-def test_analyzer_uses_dedicated_non_recursive_screening_builder(monkeypatch) -> None:
+def test_default_gateway_requests_complete_recursive_cold_start_context() -> None:
+    config = NativeTradingGatewayConfig()
+
+    assert dict(config.request_bars_by_frequency) == {
+        "d": 1600,
+        "30m": 4000,
+        "5m": 12000,
+        "1m": 12000,
+    }
+
+
+def test_analyzer_uses_canonical_recursive_screening_builder(monkeypatch) -> None:
     closed_at = datetime.fromisoformat("2026-07-20T10:01:00+08:00")
     confirmed = strict_point("1buy", available_at=closed_at)
     approaching = strict_point(
@@ -204,7 +215,7 @@ def test_analyzer_builds_strict_cl_from_snapshot_metadata(monkeypatch) -> None:
     assert captured == {
         "code": "SZ.000001",
         "frequency": "5m",
-        "config": screening_cl_config(
+        "config": strict_cl_config(
             structure_price_quantum=Decimal("0.01"),
             price_basis_revision="test-raw",
         ),
@@ -1542,7 +1553,7 @@ def test_native_gateway_builds_four_physical_period_bundle_and_keeps_watch_scope
     assert bundle.as_of == datetime.fromisoformat("2026-07-20T10:01:00+08:00")
     assert bundle.thirty_direction == "neutral"
     assert bundle.daily_direction == "neutral"
-    assert bundle.physical_timeframe_level_zero is True
+    assert bundle.physical_timeframe_recursive is True
     assert len(bundle.five_points) == 1
     assert bundle.five_points[0].status == "provisional"
     assert gateway.active_watchlist() == ("SZ.000001",)

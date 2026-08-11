@@ -1384,7 +1384,7 @@ def _old_pen_structure_state(
 
     from chanlun.core.cl import CL
     from chanlun.decision_support.trading_system.runtime_config import (
-        recursive_cl_config,
+        strict_cl_config,
     )
 
     decision = normalize_datetime(decision_time, "decision_time")
@@ -1394,7 +1394,7 @@ def _old_pen_structure_state(
     ends = tuple(bar.end_at for bar in visible)
     if ends != tuple(sorted(set(ends))):
         raise ValueError("frozen structure bars must be unique and chronological")
-    config = recursive_cl_config(
+    config = strict_cl_config(
         structure_price_quantum=structure_price_quantum,
         price_basis_revision=price_basis_revision,
     )

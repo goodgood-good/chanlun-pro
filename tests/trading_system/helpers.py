@@ -206,6 +206,7 @@ def deterministic_bundle() -> SymbolStructureBundle:
             confirmed_point("1buy", frequency="1m", minutes_after=1),
         ),
         opposite_points=(),
+        physical_timeframe_recursive=True,
         selection_sources=("QMT_SECTOR_TRIGGER",),
     )
 

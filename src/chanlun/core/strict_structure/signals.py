@@ -75,27 +75,42 @@ def _divergence_evidence_codes(divergence) -> tuple[str, ...]:
 
 def center_ordinals(
     centers: tuple[TrendCenter, ...],
+    decomposition_boundaries=(),
 ) -> dict[tuple[str, str], int]:
-    """Number each center inside its strict same-direction trend run."""
+    """Number centers inside strict trend runs split by divergence boundaries."""
 
     values = tuple(centers)
     if len({center.center_id for center in values}) != len(values):
         raise ValueError("center ids must be unique within a structural level")
+    boundary_center_ids = tuple(
+        boundary.terminal_center_id for boundary in decomposition_boundaries
+    )
+    if len(set(boundary_center_ids)) != len(boundary_center_ids):
+        raise ValueError("decomposition boundary terminal centers must be unique")
+    unknown_boundary_centers = set(boundary_center_ids) - {
+        center.center_id for center in values
+    }
+    if unknown_boundary_centers:
+        raise ValueError("decomposition boundary references an unknown center")
+    boundary_center_ids = set(boundary_center_ids)
     output: dict[tuple[str, str], int] = {}
     up_run = 1
     down_run = 1
     previous = None
     for center in values:
         if previous is not None:
-            relation = classify_center_relation(previous, center)
-            if relation is CenterRelation.UP_TREND:
-                up_run += 1
-                down_run = 1
-            elif relation is CenterRelation.DOWN_TREND:
-                down_run += 1
-                up_run = 1
-            else:
+            if previous.center_id in boundary_center_ids:
                 up_run = down_run = 1
+            else:
+                relation = classify_center_relation(previous, center)
+                if relation is CenterRelation.UP_TREND:
+                    up_run += 1
+                    down_run = 1
+                elif relation is CenterRelation.DOWN_TREND:
+                    down_run += 1
+                    up_run = 1
+                else:
+                    up_run = down_run = 1
         output[(center.center_id, "up")] = up_run
         output[(center.center_id, "down")] = down_run
         previous = center
@@ -154,7 +169,10 @@ class StrictSignalEngine:
         output = []
         for level in self.structure.levels:
             centers = tuple(level.center_result.centers)
-            ordinals = center_ordinals(centers)
+            ordinals = center_ordinals(
+                centers,
+                level.decomposition_boundaries,
+            )
             for center in centers:
                 if center.source_kind is SourceKind.STROKE_OBSERVATION:
                     continue
@@ -238,7 +256,10 @@ class StrictSignalEngine:
         tail: ConstituentUnit,
     ) -> StrictPointEvidence | None:
         centers = tuple(level.center_result.centers)
-        ordinals = center_ordinals(centers)
+        ordinals = center_ordinals(
+            centers,
+            level.decomposition_boundaries,
+        )
         for center in reversed(centers):
             if center.source_kind is SourceKind.STROKE_OBSERVATION:
                 continue
@@ -487,17 +508,8 @@ class StrictSignalEngine:
                         self.strength,
                         kind="consolidation",
                     )
-                except ValueError as exc:
-                    if any(
-                        marker in str(exc)
-                        for marker in (
-                            "MACD",
-                            "directional MACD bars",
-                            "market interval",
-                        )
-                    ):
-                        continue
-                    raise
+                except MacdStrengthUnavailable:
+                    continue
                 if not divergence.is_divergent:
                     continue
                 variant = StrictPointVariant.WEAK_DIVERGENCE
@@ -702,15 +714,8 @@ class StrictSignalEngine:
                         self.strength,
                         kind="consolidation",
                     )
-                except ValueError as exc:
-                    unavailable_markers = (
-                        "MACD",
-                        "directional MACD bars",
-                        "market interval must align",
-                    )
-                    if any(marker in str(exc) for marker in unavailable_markers):
-                        continue
-                    raise
+                except MacdStrengthUnavailable:
+                    continue
                 if not divergence.is_divergent:
                     continue
                 variant = StrictPointVariant.WEAK_DIVERGENCE
@@ -1066,17 +1071,8 @@ class StrictSignalEngine:
                             self.strength,
                             kind="consolidation",
                         )
-                    except ValueError as exc:
-                        if any(
-                            marker in str(exc)
-                            for marker in (
-                                "MACD",
-                                "directional MACD bars",
-                                "market interval must align",
-                            )
-                        ):
-                            continue
-                        raise
+                    except MacdStrengthUnavailable:
+                        continue
                     if not divergence.is_divergent:
                         continue
                     variant = StrictPointVariant.WEAK_DIVERGENCE

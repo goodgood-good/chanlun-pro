@@ -6,7 +6,7 @@ import pandas as pd
 
 from chanlun.cl_utils import build_strict_chart_cd, cl_data_to_tv_chart
 from chanlun.decision_support.trading_system.runtime_config import (
-    recursive_cl_config,
+    strict_cl_config,
 )
 from chanlun.exchange.price_basis import (
     attach_price_basis_metadata,
@@ -34,7 +34,7 @@ def test_qmt_frame_reaches_the_single_strict_chart_pipeline() -> None:
 
     assert runtime.error_code is None
     assert runtime.cd is not None
-    expected_config = recursive_cl_config(
+    expected_config = strict_cl_config(
         structure_price_quantum=Decimal("0.01"),
         price_basis_revision=metadata.price_basis_revision,
     )

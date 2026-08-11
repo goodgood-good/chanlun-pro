@@ -75,7 +75,7 @@ from chanlun.decision_support.trading_system.models import (
     TimeframeContext,
 )
 from chanlun.decision_support.trading_system.runtime_config import (
-    recursive_cl_config,
+    strict_cl_config,
 )
 from chanlun.decision_support.trading_system.structure_adapter import (
     extract_confirmed_points,
@@ -452,7 +452,7 @@ def strict_state(code: str, frequency: str, frame: pd.DataFrame) -> CL:
         raise ValueError(f"{frequency} frame is empty")
     quantum = Decimal(str(frame.attrs["structure_price_quantum"]))
     revision = cast(str, frame.attrs["price_basis_revision"])
-    config = recursive_cl_config(
+    config = strict_cl_config(
         structure_price_quantum=quantum,
         price_basis_revision=revision,
     )
@@ -1472,13 +1472,11 @@ def build_symbol_bundle(
             for point in points
             if point.available_at <= observed_at
             and point.source_frequency == frequency
-            and point.recursive_level == 0
         )
 
-    # Recursive levels remain in the immutable research facts for chart and
-    # audit context.  The decision bundle deliberately mirrors the live
-    # gateway: only each physical frequency's own segment-sourced L0 can open,
-    # trigger, block or close a trade.
+    # Replay and live screening consume the same complete recursive graph for
+    # each physical frequency.  In particular, small-to-large first/second
+    # points must remain tradable instead of being discarded at this boundary.
     thirty = tradable(facts.thirty_points, "30m")
     five = tradable(facts.five_points, "5m")
     one = tradable(facts.one_points, "1m")
@@ -1495,7 +1493,7 @@ def build_symbol_bundle(
         opposite_points=(*thirty, *five, *one),
         held_tower=held_tower,
         held_level=held_level,
-        physical_timeframe_level_zero=True,
+        physical_timeframe_recursive=True,
         selection_sources=selection_sources,
     )
 

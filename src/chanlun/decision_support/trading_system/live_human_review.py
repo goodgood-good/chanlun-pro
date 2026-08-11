@@ -3162,11 +3162,11 @@ def validate_live_review_snapshot(
             or raw.get("human_confirmation_required") is not True
             or raw.get("automated_order_authorized") is not False
             or raw.get("live_status") != "LIVE_DISABLED"
-            or raw.get("structure_scope") != "physical_timeframe_level_zero"
+            or raw.get("structure_scope") != "physical-timeframe-recursive"
             or raw.get("structure_frequencies") != ["d", "30m", "5m", "1m"]
-            or raw.get("stroke_mode") != "old"
-            or raw.get("recursive_structure_used") is not False
-            or raw.get("physical_timeframe_level_zero") is not True
+            or raw.get("stroke_mode") != "strict-cl-k-distance"
+            or raw.get("recursive_structure_used") is not True
+            or raw.get("physical_timeframe_recursive") is not True
             or not signal_identity_consistent
             or not isinstance(context, Mapping)
             or not isinstance(setup, Mapping)
@@ -3322,14 +3322,10 @@ def validate_live_review_snapshot(
 
 def _alert_type(signal: Mapping[str, object]) -> str:
     side = signal.get("side")
-    # The live human-assisted path intentionally consumes independent physical
-    # d/30m/5m/1m level-zero structures.  Its 5m clue therefore cannot prove
-    # whether a human-held 30m cycle is ending or only offers a 5m short-diff
-    # opportunity.  Do not manufacture that role from a recursive tower
-    # comparison: every physical point is ``formal / level 0``.  Preserve
-    # the side clue and delegate the strategic/tactical classification to the
-    # reviewer, exactly as the screen contract promises.
-    if side == "sell" and signal.get("physical_timeframe_level_zero") is True:
+    # The live path consumes the canonical recursive graph independently at
+    # d/30m/5m/1m.  Preserve the physical 5m side clue and let the review
+    # contract decide how it affects the held strategic cycle.
+    if side == "sell" and signal.get("physical_timeframe_recursive") is True:
         return "POSSIBLE_SELL_REVIEW"
     if side == "sell" and signal.get("exit_action") == "reduce_tactical":
         return "POSSIBLE_5M_TACTICAL_SELL"

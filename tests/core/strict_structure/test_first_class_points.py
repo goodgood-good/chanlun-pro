@@ -121,7 +121,7 @@ class StrengthTable:
             histogram_area=area,
             histogram_peak=peak,
             dif_extreme=dif,
-            source="macd_htf",
+            source="macd",
             available_at=value.available_at,
         )
 

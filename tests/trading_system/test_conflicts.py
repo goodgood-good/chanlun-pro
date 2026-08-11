@@ -29,3 +29,31 @@ def test_unrelated_center_without_parent_binding_is_not_global_veto() -> None:
 
     assert decision.hard_block is False
     assert decision.risk_only_point_ids == (sell.point_id,)
+
+
+def test_physical_frequency_higher_recursive_sell_blocks_lower_setup() -> None:
+    buy = confirmed_point("2buy", frequency="5m", level=0)
+    sell = confirmed_point("1sell", frequency="5m", level=1)
+
+    decision = resolve_conflict(
+        setup_for(buy),
+        (sell,),
+        physical_timeframes=True,
+    )
+
+    assert decision.hard_block is True
+    assert decision.blocking_point_ids == (sell.point_id,)
+
+
+def test_physical_frequency_lower_recursive_sell_is_risk_only() -> None:
+    buy = confirmed_point("2buy", frequency="5m", level=1)
+    sell = confirmed_point("1sell", frequency="5m", level=0)
+
+    decision = resolve_conflict(
+        setup_for(buy),
+        (sell,),
+        physical_timeframes=True,
+    )
+
+    assert decision.hard_block is False
+    assert decision.risk_only_point_ids == (sell.point_id,)

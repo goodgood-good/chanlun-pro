@@ -346,7 +346,7 @@ def test_first_successful_refresh_only_builds_a_semantic_baseline(monkeypatch) -
     assert state.refresh() == []
 
 
-def test_monitor_runtime_uses_the_same_screening_profile_as_page_and_replay() -> None:
+def test_monitor_runtime_uses_the_same_strict_profile_as_page_and_replay() -> None:
     frame = _frame(metadata=True)
     state = StrictPhysicalMonitorState(
         "TSLA.US",
@@ -361,8 +361,8 @@ def test_monitor_runtime_uses_the_same_screening_profile_as_page_and_replay() ->
     )
 
     config = runtime.cd.get_config()
-    assert config["screening_structure_scope"] == "physical-timeframe-level-zero"
-    assert config["screening_center_source"] == "segment"
-    assert config["screening_recursive_structure"] is False
+    assert config["strict_macd_source"] == "native_l0_causal_recursive"
+    assert "screening_structure_scope" not in config
+    assert "recursive_structure_scope" not in config
     assert config["stroke_rule"] == "strict-cl-k-distance"
     assert runtime.strict_config_revision == config["strict_config_revision"]

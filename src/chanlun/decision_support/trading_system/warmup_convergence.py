@@ -1142,7 +1142,7 @@ class WarmupConvergenceEnvelope:
         compare=False,
         repr=False,
     )
-    # A third, independently hashed sibling records old-pen/center/trigger-line
+    # A third, independently hashed sibling records strict-stroke/center/trigger-line
     # lineage.  It is deliberately absent from the convergence document and
     # equality so adding human-review evidence cannot mutate the active gate.
     structure_lineage_diagnostic: (

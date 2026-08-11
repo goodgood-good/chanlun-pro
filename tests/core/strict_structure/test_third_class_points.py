@@ -1,4 +1,5 @@
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 
@@ -8,6 +9,7 @@ from chanlun.core.strict_structure.models import (
     StrictPointStatus,
     StrictPointVariant,
 )
+from chanlun.core.strict_structure.signals import center_ordinals
 from tests.core.strict_structure.helpers import (
     completed_down_center,
     completed_up_center,
@@ -58,6 +60,21 @@ def test_third_class_pass_does_not_emit_first_or_second_class():
     ).third_class_points()
     assert {point.point_type for point in points} == {"3buy", "3sell"}
     assert len(points) == 2
+
+
+def test_center_ordinal_restarts_after_divergence_decomposition_boundary():
+    first = completed_up_center(0, zd_tick=105, zg_tick=115)
+    terminal = completed_up_center(10, zd_tick=160, zg_tick=170)
+    post_boundary = completed_up_center(20, zd_tick=215, zg_tick=225)
+
+    ordinals = center_ordinals(
+        (first, terminal, post_boundary),
+        (SimpleNamespace(terminal_center_id=terminal.center_id),),
+    )
+
+    assert ordinals[(first.center_id, "up")] == 1
+    assert ordinals[(terminal.center_id, "up")] == 2
+    assert ordinals[(post_boundary.center_id, "up")] == 1
 
 
 def test_stroke_observation_center_is_never_formal_third_class_point():

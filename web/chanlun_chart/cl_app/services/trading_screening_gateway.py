@@ -94,6 +94,12 @@ from chanlun.tools.log_util import LogUtil
 
 
 _FREQUENCIES = SCREENING_STRUCTURE_FREQUENCIES
+CANONICAL_REQUEST_BARS_BY_FREQUENCY = (
+    ("d", 1600),
+    ("30m", 4000),
+    ("5m", 12000),
+    ("1m", 12000),
+)
 _SECTOR_FREQUENCIES = ("30m", "5m")
 _A_STOCK_CODE = re.compile(r"^(?:SH|SZ|BJ)\.\d{6}$")
 _FRAME_UNSET = object()
@@ -404,11 +410,15 @@ class StructureAnalyzer(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class NativeTradingGatewayConfig:
+    # Cold starts consume the complete QMT lookback made available for each
+    # physical frequency.  The former 3,200/4,800-bar tails were long enough
+    # to manufacture segments but not to stabilize first/second points: the
+    # exact same symbol could expose only a third point until its older centers
+    # were restored.  Symbols are deterministically sharded, unchanged frames
+    # are cached, and the live scheduler analyzes only its bounded changed-code
+    # batch; the longer cost is paid on a cold contract rebuild.
     request_bars_by_frequency: tuple[tuple[str, int], ...] = (
-        ("d", 1600),
-        ("30m", 1600),
-        ("5m", 3200),
-        ("1m", 4800),
+        CANONICAL_REQUEST_BARS_BY_FREQUENCY
     )
     minimum_bars_by_frequency: tuple[tuple[str, int], ...] = (
         ("d", 240),
@@ -2238,7 +2248,7 @@ class NativeTradingDataGateway:
                 warmup_difference_codes_by_frequency
             ),
             enforce_warmup_entry_gate=True,
-            physical_timeframe_level_zero=True,
+            physical_timeframe_recursive=True,
             entry_execution_boundaries=(
                 ()
                 if "1m" not in analyses
@@ -2248,6 +2258,7 @@ class NativeTradingDataGateway:
 
 
 __all__ = (
+    "CANONICAL_REQUEST_BARS_BY_FREQUENCY",
     "FrameStructureAnalysis",
     "NativeTradingDataGateway",
     "NativeTradingGatewayConfig",

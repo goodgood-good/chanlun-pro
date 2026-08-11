@@ -8,18 +8,10 @@ from chanlun.core.strict_structure.base_profile import (
     strict_base_config_revision,
 )
 from chanlun.decision_support.trading_system.runtime_config import (
-    SCREENING_STRUCTURE_PROFILE_ID,
     STRICT_STRATEGY_ID,
-    RECURSIVE_STRUCTURE_PROFILE_ID,
-    screening_base_config_revision,
-    screening_cl_config,
-    screening_runtime_config_revision,
     strict_cl_config,
     strict_runtime_config_revision,
     strict_snapshot_price_metadata,
-    recursive_base_config_revision,
-    recursive_cl_config,
-    recursive_runtime_config_revision,
 )
 
 
@@ -62,59 +54,20 @@ def test_strict_cl_config_contains_only_fixed_base_and_runtime_identity() -> Non
     assert not any(key.startswith(forbidden_prefixes) for key in config)
 
 
-def test_screening_config_is_old_pen_and_non_recursive_level_zero() -> None:
-    config = screening_cl_config(
+def test_one_runtime_config_drives_base_and_recursive_structure() -> None:
+    config = strict_cl_config(
         structure_price_quantum=Decimal("0.01"),
         price_basis_revision="raw",
     )
 
     assert config["strict_base_profile_id"] == STRICT_BASE_PROFILE_ID
-    assert (
-        config["strict_runtime_scope_profile_id"]
-        == SCREENING_STRUCTURE_PROFILE_ID
-    )
     assert config["stroke_rule"] == "strict-cl-k-distance"
-    assert config["screening_structure_scope"] == "physical-timeframe-level-zero"
-    assert config["screening_center_source"] == "segment"
-    assert config["screening_recursive_structure"] is False
-    assert config["screening_unfinished_segment_participates"] is True
     assert config["strict_base_profile_revision"] == strict_base_config_revision()
-    assert config["strict_runtime_scope_profile_revision"] == (
-        screening_base_config_revision()
-    )
-    assert config["strict_config_revision"] == screening_runtime_config_revision(
+    assert config["strict_config_revision"] == strict_runtime_config_revision(
         structure_price_quantum=Decimal("0.01"),
         price_basis_revision="raw",
     )
-
-
-def test_recursive_config_uses_original_old_pen_at_every_level() -> None:
-    config = recursive_cl_config(
-        structure_price_quantum=Decimal("0.01"),
-        price_basis_revision="raw",
-    )
-
-    assert config["strict_base_profile_id"] == STRICT_BASE_PROFILE_ID
-    assert (
-        config["strict_runtime_scope_profile_id"]
-        == RECURSIVE_STRUCTURE_PROFILE_ID
-    )
-    assert config["stroke_rule"] == "strict-cl-k-distance"
-    assert config["recursive_structure_scope"] == "same-source-direct-recursion"
-    assert config["strict_base_profile_revision"] == strict_base_config_revision()
-    assert config["strict_runtime_scope_profile_revision"] == (
-        recursive_base_config_revision()
-    )
-    assert config["strict_config_revision"] == (
-        recursive_runtime_config_revision(
-            structure_price_quantum=Decimal("0.01"),
-            price_basis_revision="raw",
-        )
-    )
-    assert config["strict_config_revision"] != screening_cl_config(
-        structure_price_quantum=Decimal("0.01"),
-        price_basis_revision="raw",
-    )["strict_config_revision"]
+    assert not any("screening" in key or "recursive" in key for key in config)
 
 
 def test_snapshot_metadata_is_required_and_never_guessed() -> None:

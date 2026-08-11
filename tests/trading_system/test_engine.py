@@ -127,7 +127,7 @@ def test_engine_exposes_completed_preview_as_formed_not_approaching() -> None:
     point = replace(
         provisional_point("3buy"),
         evidence_codes=(
-            "physical_timeframe_level_zero",
+            "physical_timeframe_recursive_base_level",
             "provisional_center_completion",
             "core_boundary_held",
         ),

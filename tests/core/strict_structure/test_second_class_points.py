@@ -94,14 +94,15 @@ def test_first_complete_rebound_and_pullback_not_breaking_low_emits_strict_two_b
 
 def test_new_low_pullback_requires_weak_divergence():
     rejected = strict_engine(direction="down", values=WEAK_VALUES, invalid=True)
-    first = only_point(rejected.first_class_points())
-    assert rejected.second_class_points((first,)) == ()
+    rejected_parent = only_point(rejected.first_class_points())
+    assert rejected.second_class_points((rejected_parent,)) == ()
 
     accepted = strict_engine(direction="down", values=WEAK_VALUES, weak=True)
-    first = only_point(accepted.first_class_points())
-    point = only_point(accepted.second_class_points((first,)))
+    parent = only_point(accepted.first_class_points())
+    point = only_point(accepted.second_class_points((parent,)))
     pullback = accepted.structure.levels[0].units[20]
     assert point.variant is StrictPointVariant.WEAK_DIVERGENCE
+    assert point.divergence.comparison_width == 1
     assert point.invalidation_tick == pullback.low_tick
     assert point.available_at == max(
         pullback.available_at,

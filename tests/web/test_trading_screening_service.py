@@ -601,7 +601,7 @@ def test_service_uses_incremental_scan_plan_and_new_engine(tmp_path: Path) -> No
     payload = service.refresh_now()
 
     assert payload["schema"] == "chanlun-trading-screening"
-    assert payload["structure_contract_id"] == "physical-timeframe-l0"
+    assert payload["structure_contract_id"] == "physical-timeframe-recursive"
     assert payload["sector_first"] is True
     assert payload["read_only"] is True
     assert payload["no_order_execution"] is True
@@ -643,9 +643,15 @@ def test_service_uses_incremental_scan_plan_and_new_engine(tmp_path: Path) -> No
             "exact_members_sample_coverage_price_grid_and_path"
         ),
         "stock_structure_frequencies": ["d", "30m", "5m", "1m"],
-        "stroke_mode": "old",
-        "center_source": "physical_timeframe_level_zero_segments",
-        "recursive_structure_used": False,
+        "stroke_mode": "strict-cl-k-distance",
+        "center_source": "physical_timeframe_recursive_segments",
+        "recursive_structure_used": True,
+        "stock_structure_request_bars": {
+            "d": 1600,
+            "30m": 4000,
+            "5m": 12000,
+            "1m": 12000,
+        },
         "unfinished_segment_candidates": True,
         "stock_trigger_frequency": "1m",
         "minimum_market_data_frequency": "1m",
@@ -698,7 +704,7 @@ def test_virtual_holding_is_attached_to_physical_decision_bundle(
         def structure_bundle(self, code: str, **kwargs) -> SymbolStructureBundle:
             return replace(
                 super().structure_bundle(code, **kwargs),
-                physical_timeframe_level_zero=True,
+                physical_timeframe_recursive=True,
             )
 
     engine = RecordingEngine()
@@ -1264,7 +1270,7 @@ def test_cache_with_another_schema_is_rejected(tmp_path: Path) -> None:
 
     snapshot = service.snapshot()
     assert snapshot["schema"] == "chanlun-trading-screening"
-    assert snapshot["structure_contract_id"] == "physical-timeframe-l0"
+    assert snapshot["structure_contract_id"] == "physical-timeframe-recursive"
     assert snapshot["scan_state"] == "not_started"
     assert snapshot["signals"] == []
 
@@ -4254,7 +4260,7 @@ def test_priority_monitor_notification_is_early_and_idempotent(
                     five_points=(),
                     one_points=(),
                     opposite_points=(),
-                    physical_timeframe_level_zero=True,
+                    physical_timeframe_recursive=True,
                 )
             setup = confirmed_point("2buy", minutes_after=295)
             trigger = confirmed_point(
@@ -4315,7 +4321,7 @@ def test_priority_monitor_notification_is_early_and_idempotent(
                 enforce_higher_timeframe_entry_gate=True,
                 warmup_converged=True,
                 enforce_warmup_entry_gate=True,
-                physical_timeframe_level_zero=True,
+                physical_timeframe_recursive=True,
                 entry_execution_boundaries=(boundary,),
             )
 

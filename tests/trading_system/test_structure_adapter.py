@@ -132,7 +132,7 @@ class SmallToLargeFixtureStrength:
             histogram_area=magnitude,
             histogram_peak=signed,
             dif_extreme=signed,
-            source="macd_htf",
+            source="macd",
             available_at=value.available_at,
         )
 

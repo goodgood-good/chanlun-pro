@@ -1,7 +1,7 @@
 """Strict physical-timeframe facts for read-only realtime monitoring.
 
 The chart screening gateway, historical replay and this monitor all consume
-the same ``screening_cl_config`` + ``build_screening_evidence`` decision
+the same ``strict_cl_config`` + ``build_screening_evidence`` decision
 core. Missing price-basis metadata or an invalid structure snapshot is an
 observable refresh failure, never an alternative buy/sell signal.
 """
@@ -22,7 +22,7 @@ from chanlun.core.strict_structure.models import StrictEvidenceResult
 from chanlun.decision_support.trading_system.models import StructuralPoint
 from chanlun.decision_support.trading_system.runtime_config import (
     StrictSnapshotPriceMetadata,
-    screening_cl_config,
+    strict_cl_config,
     strict_snapshot_price_metadata,
 )
 from chanlun.decision_support.trading_system.screening_structure import (
@@ -239,7 +239,7 @@ class StrictPhysicalMonitorState:
         metadata: StrictSnapshotPriceMetadata,
         source_frame: pd.DataFrame,
     ) -> _FrequencyRuntime:
-        config = screening_cl_config(
+        config = strict_cl_config(
             structure_price_quantum=metadata.structure_price_quantum,
             price_basis_revision=metadata.price_basis_revision,
         )

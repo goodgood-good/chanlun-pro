@@ -34,8 +34,11 @@ def resolve_conflict(
             return candidate_rank > point_rank or (
                 candidate_rank == point_rank
                 and candidate.tower == point.tower
-                and candidate.recursive_level == point.recursive_level == 0
-                and candidate.center_id == point.center_id
+                and candidate.recursive_level >= point.recursive_level
+                and (
+                    candidate.center_id == point.center_id
+                    or candidate.recursive_level > point.recursive_level
+                )
             )
         return (
             candidate.tower == point.tower

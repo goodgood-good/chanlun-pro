@@ -34,7 +34,7 @@ class _TradingScreeningService:
         return {
             "schema": "chanlun-trading-screening",
             "algorithm_id": "chanlun_source_faithful",
-            "structure_contract_id": "physical-timeframe-l0",
+            "structure_contract_id": "physical-timeframe-recursive",
             "available": True,
             "scan_state": "complete",
             "generated_at": "2026-07-20T15:00:00+08:00",
@@ -115,7 +115,7 @@ def test_early_signals_requires_new_schema(app: Flask, logged_in_client) -> None
     assert response.headers["Cache-Control"] == "private, no-store"
     assert payload["ok"] is True
     assert payload["data"]["schema"] == "chanlun-trading-screening"
-    assert payload["data"]["structure_contract_id"] == "physical-timeframe-l0"
+    assert payload["data"]["structure_contract_id"] == "physical-timeframe-recursive"
     assert payload["data"]["presentation_scope"] == "all-qualified"
     assert payload["data"]["presentation_signal_count"] == 0
     assert payload["data"]["total_qualified_signal_count"] == 0

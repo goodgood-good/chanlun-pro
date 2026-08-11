@@ -22,9 +22,10 @@ def _point(
     anchor: str = "terminal",
     at: datetime = NOW,
     divergence=None,
+    level: int = 0,
 ):
     return SimpleNamespace(
-        structural_level=0,
+        structural_level=level,
         anchor_unit_id=anchor,
         side="buy" if point_type.endswith("buy") else "sell",
         point_type=point_type,
@@ -41,9 +42,10 @@ def _divergence(
     *,
     signal: str = "terminal",
     at: datetime = NOW,
+    level: int = 0,
 ):
     return SimpleNamespace(
-        structural_level=0,
+        structural_level=level,
         signal_unit_id=signal,
         direction=direction,
         available_at=at,
@@ -52,14 +54,23 @@ def _divergence(
     )
 
 
-def _evidence(frequency: str, *, points=(), divergences=()):
-    units = (
-        SimpleNamespace(unit_id="old", locked=True),
-        SimpleNamespace(unit_id="terminal", locked=True),
+def _evidence(frequency: str, *, points=(), divergences=(), levels=1):
+    structure_levels = tuple(
+        SimpleNamespace(
+            structural_level=level,
+            units=(
+                SimpleNamespace(unit_id=f"old-l{level}", locked=True),
+                SimpleNamespace(
+                    unit_id="terminal" if level == 0 else f"terminal-l{level}",
+                    locked=True,
+                ),
+            ),
+        )
+        for level in range(levels)
     )
     return SimpleNamespace(
         source_frequency=frequency,
-        structure=SimpleNamespace(levels=(SimpleNamespace(units=units),)),
+        structure=SimpleNamespace(levels=structure_levels),
         confirmed_points=tuple(points),
         divergences=tuple(divergences),
     )
@@ -92,12 +103,12 @@ def test_single_class_selection_requires_current_terminal_point(monkeypatch) -> 
     data = _market_datas("5m")
 
     assert (
-        strict_xuangu.select_strict_l0_class1_point(
+        strict_xuangu.select_strict_class1_point(
             "SH.600000", data, ["long"]
         )
         is None
     )
-    result = strict_xuangu.select_strict_l0_class1_point(
+    result = strict_xuangu.select_strict_class1_point(
         "SH.600000", data, ["short"]
     )
     assert result is not None
@@ -110,7 +121,7 @@ def test_third_after_first_uses_same_strict_point_ledger(monkeypatch) -> None:
     evidence = _evidence("5m", points=(first, third))
     monkeypatch.setattr(strict_xuangu, "_evidence", lambda *_args: evidence)
 
-    result = strict_xuangu.select_strict_l0_class3_after_class1(
+    result = strict_xuangu.select_strict_class3_after_class1(
         "SH.600000",
         _market_datas("5m"),
         ["long"],
@@ -131,7 +142,7 @@ def test_multi_frequency_selection_matches_point_or_divergence_side(monkeypatch)
         lambda _code, _data, frequency: evidence_by_frequency[frequency],
     )
 
-    result = strict_xuangu.select_strict_l0_two_frequency_confluence(
+    result = strict_xuangu.select_strict_two_frequency_confluence(
         "SH.600000",
         _market_datas("30m", "5m"),
         ["long"],
@@ -139,6 +150,26 @@ def test_multi_frequency_selection_matches_point_or_divergence_side(monkeypatch)
 
     assert result is not None
     assert "buy" in result["msg"]
+
+
+def test_recursive_small_to_large_second_point_is_current_and_selectable(
+    monkeypatch,
+) -> None:
+    evidence = _evidence(
+        "5m",
+        points=(_point("2buy", anchor="terminal-l1", level=1),),
+        levels=2,
+    )
+    monkeypatch.setattr(strict_xuangu, "_evidence", lambda *_args: evidence)
+
+    result = strict_xuangu.select_strict_class2_point(
+        "SH.600000",
+        _market_datas("5m"),
+        ["long"],
+    )
+
+    assert result is not None
+    assert "L1:2buy" in result["msg"]
 
 
 def test_stock_selection_uses_the_same_real_frame_evidence_runtime() -> None:

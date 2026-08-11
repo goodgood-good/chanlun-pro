@@ -11,7 +11,7 @@ from chanlun.core.cl import CL
 from chanlun.core.strict_structure.models import StrictEvidenceResult
 from chanlun.decision_support.fingerprints import normalize_datetime
 from chanlun.decision_support.trading_system.runtime_config import (
-    screening_cl_config,
+    strict_cl_config,
     strict_snapshot_price_metadata,
 )
 from chanlun.decision_support.trading_system.screening_structure import (
@@ -27,11 +27,11 @@ def screening_evidence_from_frame(
     as_of: datetime,
     market: str = "a",
 ) -> StrictEvidenceResult:
-    """Build the sole tradable strict evidence view from a closed-bar frame.
+    """Build canonical recursive strict evidence from a closed-bar frame.
 
     Chart adapters, live screening, historical replay and stock selection must
-    enter the structure engine here. The runtime exposes only the physical
-    frequency's segment-sourced level zero to screening.
+    enter the structure engine here.  Every consumer receives the same
+    physical-frequency recursive structure graph.
     """
 
     if not isinstance(code, str) or not code:
@@ -51,7 +51,7 @@ def screening_evidence_from_frame(
         raise ValueError("screening frame contains bars after as_of")
 
     metadata = strict_snapshot_price_metadata(frame)
-    config = screening_cl_config(
+    config = strict_cl_config(
         structure_price_quantum=metadata.structure_price_quantum,
         price_basis_revision=metadata.price_basis_revision,
     )

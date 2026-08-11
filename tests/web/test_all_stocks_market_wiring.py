@@ -34,7 +34,7 @@ def test_process_xuangu_task_uses_bound_market_stock_list(monkeypatch):
     )
     monkeypatch.setattr(xuangu_tasks, "process_xuangu_by_code", lambda args: None)
     xuangu_tasks.process_xuangu_task(
-        "hk", "strict_l0_class1_point", ["5m"], ["long"], "all", "xg-target"
+        "hk", "strict_class1_point", ["5m"], ["long"], "all", "xg-target"
     )
     assert fake_ex.called is True
 

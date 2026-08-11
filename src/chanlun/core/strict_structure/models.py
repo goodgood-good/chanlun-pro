@@ -2107,7 +2107,7 @@ class DivergenceEvidence:
     histogram_area_decayed: bool
     histogram_peak_decayed: bool
     dif_extreme_decayed: bool
-    strength_source: Literal["macd_htf"]
+    strength_source: Literal["macd"]
     compare_leg_unit_ids: tuple[str, ...] = ()
     signal_leg_unit_ids: tuple[str, ...] = ()
 
@@ -2163,7 +2163,7 @@ class DivergenceEvidence:
         )
         if any(type(flag) is not bool for flag in flags):
             raise TypeError("divergence conditions must be booleans")
-        if self.strength_source != "macd_htf":
+        if self.strength_source != "macd":
             raise ValueError("unsupported divergence strength source")
         expected_id = stable_structure_id(
             "chanlun-strict-divergence",

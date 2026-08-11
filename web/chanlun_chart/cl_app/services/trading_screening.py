@@ -23,6 +23,7 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from chanlun.decision_support.fingerprints import normalize_datetime, sha256_json
+from chanlun.core.strict_structure.base_profile import strict_base_config_revision
 from chanlun.decision_support.trading_system.engine import (
     EvaluatedSignal,
     SymbolStructureBundle,
@@ -130,6 +131,7 @@ from chanlun.exchange.qmt_screening_sector_source import (
     QMT_SECTOR_STRENGTH_QMT_DIVIDEND_TYPE,
 )
 from cl_app.services.trading_screening_gateway import (
+    CANONICAL_REQUEST_BARS_BY_FREQUENCY,
     SectorAnalysisExclusion,
     SectorAnalysisFailure,
     SectorAssessmentBatch,
@@ -861,9 +863,12 @@ def _screening_policy_document() -> dict[str, object]:
             "exact_members_sample_coverage_price_grid_and_path"
         ),
         "stock_structure_frequencies": ["d", "30m", "5m", "1m"],
-        "stroke_mode": "old",
-        "center_source": "physical_timeframe_level_zero_segments",
-        "recursive_structure_used": False,
+        "stroke_mode": "strict-cl-k-distance",
+        "center_source": "physical_timeframe_recursive_segments",
+        "recursive_structure_used": True,
+        "stock_structure_request_bars": dict(
+            CANONICAL_REQUEST_BARS_BY_FREQUENCY
+        ),
         "unfinished_segment_candidates": True,
         "stock_trigger_frequency": "1m",
         "minimum_market_data_frequency": "1m",
@@ -1044,8 +1049,8 @@ class TradingScreeningConfig:
     min_scan_completion_ratio: Decimal = Decimal("0.80")
     max_structure_age_seconds: int = 3600
     algorithm_id: str = STRICT_STRATEGY_ID
-    structure_contract_id: str = "physical-timeframe-l0"
-    parameter_set_id: str = "old-pen"
+    structure_contract_id: str = "physical-timeframe-recursive"
+    parameter_set_id: str = strict_base_config_revision()
 
     def __post_init__(self) -> None:
         if self.refresh_interval_seconds <= 0:
@@ -3595,7 +3600,7 @@ class TradingScreeningService:
                     bundle,
                     selection_sources=selection_sources_for(code),
                 )
-                if code in holding_codes and bundle.physical_timeframe_level_zero:
+                if code in holding_codes and bundle.physical_timeframe_recursive:
                     bundle = replace(bundle, held_tower="formal", held_level=0)
                 age = observed_at - bundle.as_of
                 if age < timedelta(0) or age > timedelta(
@@ -6983,14 +6988,11 @@ class TradingScreeningService:
                     bundle,
                     selection_sources=selection_sources,
                 )
-                if code in holding_codes and bundle.physical_timeframe_level_zero:
-                    # The active human-paper path uses independent physical
-                    # timeframe level-zero structures.  ``formal / 0`` is the
-                    # only legal identity in that contract, so attaching it
-                    # proves position existence without guessing whether the
-                    # current 5m sell clue is a strategic 30m exit or a
-                    # tactical short-diff.  That role remains an explicit
-                    # human judgement in the review adapter.
+                if code in holding_codes and bundle.physical_timeframe_recursive:
+                    # External holdings do not carry the originating strict
+                    # point lineage.  Attach the most conservative base-level
+                    # position identity so any same-frequency recursive sell
+                    # remains visible for full-exit review.
                     bundle = replace(
                         bundle,
                         held_tower="formal",

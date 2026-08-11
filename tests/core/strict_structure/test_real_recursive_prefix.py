@@ -92,7 +92,7 @@ def _assert_recursive_prefix(
         assert last
         assert batch.get_strict_structure_levels().levels[0].units
     else:
-        # The canonical old-pen profile can legitimately leave the short QQQ
+        # The canonical strict-stroke profile can legitimately leave the short QQQ
         # fixture without a locked segment.  Empty recursive evidence is still
         # a deterministic, prefix-stable result and must not fall back to the
         # former new-pen definition merely to manufacture a level.

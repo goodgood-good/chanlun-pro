@@ -26,13 +26,13 @@ from tests.trading_system.backtest.helpers import minute_bar
 from tests.trading_system.helpers import CN, confirmed_point, eligible_sector
 
 
-def test_symbol_bundle_keeps_recursive_points_as_research_only() -> None:
+def test_symbol_bundle_keeps_recursive_small_to_large_points_tradable() -> None:
     observed_at = datetime(2026, 7, 20, 10, 0, tzinfo=CN)
     sector = eligible_sector()
     thirty_l0 = confirmed_point("1buy", frequency="30m", level=0)
     thirty_l1 = confirmed_point("1buy", frequency="30m", level=1)
     five_l0 = confirmed_point("3buy", frequency="5m", level=0)
-    five_l1 = confirmed_point("3buy", frequency="5m", level=1)
+    five_l1 = confirmed_point("2buy", frequency="5m", level=1)
     one_l0 = confirmed_point("1buy", frequency="1m", level=0)
     one_l1 = confirmed_point("1buy", frequency="1m", level=1)
     evaluation = SparseEvaluationFact(
@@ -60,11 +60,18 @@ def test_symbol_bundle_keeps_recursive_points_as_research_only() -> None:
 
     bundle = build_symbol_bundle(facts, evaluation, sector)
 
-    assert bundle.physical_timeframe_level_zero is True
-    assert bundle.thirty_points == (thirty_l0,)
-    assert bundle.five_points == (five_l0,)
-    assert bundle.one_points == (one_l0,)
-    assert bundle.opposite_points == (thirty_l0, five_l0, one_l0)
+    assert bundle.physical_timeframe_recursive is True
+    assert bundle.thirty_points == (thirty_l0, thirty_l1)
+    assert bundle.five_points == (five_l0, five_l1)
+    assert bundle.one_points == (one_l0, one_l1)
+    assert bundle.opposite_points == (
+        thirty_l0,
+        thirty_l1,
+        five_l0,
+        five_l1,
+        one_l0,
+        one_l1,
+    )
 
 
 def test_newer_same_lane_supersedes_setup_before_four_day_expiry() -> None:

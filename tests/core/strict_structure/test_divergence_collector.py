@@ -132,7 +132,7 @@ class FixedStrength:
             histogram_area=area,
             histogram_peak=peak,
             dif_extreme=dif,
-            source="macd_htf",
+            source="macd",
             available_at=item.available_at,
         )
 

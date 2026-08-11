@@ -44,19 +44,21 @@ _STRICT_BASE_CONFIG: Dict[str, Union[str, int, bool]] = {
     # Every target must still be confirmed by the reverse third point of its
     # own direct sub-level's dynamic last center.
     "second_class_rule": (
-        "parent-or-cross-level-small-large-direct-subcenter-third-retest"
+        "parent-first-return-or-cross-level-small-large-direct-subcenter-third-retest"
     ),
     # The strength measure is fixed too; it is evidence, never a definition
     # switch for K/fractal/stroke/segment structure.
     "idx_macd_fast": 12,
     "idx_macd_slow": 26,
     "idx_macd_signal": 9,
-    # Formal evidence uses a prefix-stable partial higher-timeframe MACD.  For
+    # Physical L0 uses the native MACD of its source period.  Recursive L1+
+    # uses the corresponding prefix-stable causal higher-period series.  For
     # upward legs only positive bars enter area; for downward legs only the
-    # magnitude of negative bars enters area.  HTF unavailability fails closed
-    # rather than switching the meaning of the rule to native MACD.
-    "strict_macd_source": "causal_htf",
-    "strict_macd_htf_policy": "level_plus_one",
+    # magnitude of negative bars enters area.  Area, peak and DIF remain
+    # independent evidence; an unavailable directional histogram does not
+    # suppress an otherwise valid DIF comparison.
+    "strict_macd_source": "native_l0_causal_recursive",
+    "strict_macd_level_policy": "native_l0_level_plus_one_recursive",
     "strict_macd_area": "same_sign_magnitude",
     "strict_macd_decay_rule": "area-or-peak-or-dif",
 }

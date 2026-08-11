@@ -318,6 +318,43 @@ def test_us_kline_uses_configured_long_history_backend_without_mixing_sources(
     assert quote_client.calls == []
 
 
+def test_us_kline_falls_back_to_usmart_when_longbridge_credentials_are_partial(
+    monkeypatch,
+):
+    monkeypatch.setattr(config, "US_HISTORY_KLINE_SOURCE", "longbridge")
+    monkeypatch.delenv("LONGBRIDGE_APP_KEY", raising=False)
+    monkeypatch.delenv("LONGBRIDGE_APP_SECRET", raising=False)
+    monkeypatch.setenv("LONGBRIDGE_ACCESS_TOKEN", "access-token-only")
+
+    def handler(endpoint, payload):
+        assert endpoint == "kline"
+        return {
+            "list": [
+                {
+                    "latestTime": 20260810160000000,
+                    "open": 320.0,
+                    "high": 321.0,
+                    "low": 319.0,
+                    "close": 320.5,
+                    "volume": 100,
+                }
+            ]
+        }
+
+    quote_client = _QuoteClient(handler)
+    exchange = ExchangeUSmart("us", client=quote_client)
+
+    frame = exchange.klines(
+        "TSLA.US",
+        "1m",
+        args={"right": "qfq", "count": 1000},
+    )
+
+    assert frame.attrs["price_basis_provider"] == "usmart"
+    assert list(frame["code"]) == ["TSLA.US"]
+    assert quote_client.calls[0][0] == "kline"
+
+
 def test_realtime_ticks_preserve_callers_codes_and_calculate_rate():
     def handler(endpoint, payload):
         assert endpoint == "realtime"

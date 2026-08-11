@@ -49,7 +49,7 @@ def _trend_divergence(
         histogram_area_decayed=True,
         histogram_peak_decayed=True,
         dif_extreme_decayed=True,
-        strength_source="macd_htf",
+        strength_source="macd",
     )
 
 

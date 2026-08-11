@@ -226,7 +226,7 @@ def _notification_eligibility_reason(
     else:
         return "SIGNAL_SIDE_INVALID"
 
-    if signal.get("physical_timeframe_level_zero") is not True:
+    if signal.get("physical_timeframe_recursive") is not True:
         return "PHYSICAL_TIMEFRAME_AUTHORITY_MISSING"
     warmup = _mapping(signal.get("warmup"))
     if warmup.get("converged") is not True:

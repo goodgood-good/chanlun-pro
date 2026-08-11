@@ -389,7 +389,7 @@ def live_snapshot() -> dict[str, object]:
         # with the QMT-scoped sector above. Re-identify the setup/lifecycle just
         # as production does when it evaluates directly inside that sector;
         # otherwise the fixture itself would carry a decorative stale ID.
-        signal["physical_timeframe_level_zero"] = True
+        signal["physical_timeframe_recursive"] = True
         signal["higher_timeframe_risk"].update(
             {
                 "market_states": {period: "UNRESOLVED" for period in ("M", "W", "D")},

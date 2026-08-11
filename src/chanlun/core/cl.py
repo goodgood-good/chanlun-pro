@@ -64,14 +64,6 @@ _RUNTIME_METADATA_KEYS = frozenset(
         "price_basis_revision",
         "strict_base_profile_revision",
         "strict_config_revision",
-        "strict_runtime_scope_profile_id",
-        "strict_runtime_scope_profile_revision",
-        "screening_structure_scope",
-        "screening_center_source",
-        "screening_recursive_structure",
-        "screening_unfinished_segment_participates",
-        "strategy_id",
-        "recursive_structure_scope",
     }
 )
 

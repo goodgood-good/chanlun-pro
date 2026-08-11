@@ -18,7 +18,7 @@ from chanlun.core.strict_structure.models import (
     StrictLevelResult,
     StrictStructureResult,
 )
-from chanlun.decision_support.trading_system.runtime_config import screening_cl_config
+from chanlun.decision_support.trading_system.runtime_config import strict_cl_config
 from chanlun.decision_support.trading_system.screening_structure import (
     build_screening_evidence,
     unfinished_segment_candidates,
@@ -107,7 +107,7 @@ def test_completed_preview_from_unfinished_segment_is_non_actionable() -> None:
         symbol="SZ.000001",
         source_frequency="5m",
         price_basis_revision=BASIS,
-        strict_config_revision="screening-old-pen",
+        strict_config_revision="strict-test-config",
         structure=structure,
         confirmed_points=(),
     )
@@ -117,7 +117,7 @@ def test_completed_preview_from_unfinished_segment_is_non_actionable() -> None:
         source_closed_at=NOW,
         price_basis_revision=BASIS,
         structure_price_quantum=QUANTUM,
-        strict_config_revision="screening-old-pen",
+        strict_config_revision="strict-test-config",
         structure_revision=revision,
         structure=structure,
         stroke_center_observations=CenterLevelResult(
@@ -147,7 +147,50 @@ def test_completed_preview_from_unfinished_segment_is_non_actionable() -> None:
     assert "unfinished_segment_participates" in candidate.evidence_codes
 
 
-def test_builder_always_returns_one_physical_segment_level() -> None:
+def test_empty_canonical_structure_has_no_unfinished_candidate() -> None:
+    structure = StrictStructureResult(
+        schema="chanlun-structure",
+        price_basis_revision=BASIS,
+        levels=(),
+    )
+    revision = build_strict_evidence_revision(
+        symbol="qmt-gics3:test",
+        source_frequency="30m",
+        price_basis_revision=BASIS,
+        strict_config_revision="strict-test-config",
+        structure=structure,
+        confirmed_points=(),
+    )
+    evidence = StrictEvidenceResult(
+        symbol="qmt-gics3:test",
+        source_frequency="30m",
+        source_closed_at=NOW,
+        price_basis_revision=BASIS,
+        structure_price_quantum=QUANTUM,
+        strict_config_revision="strict-test-config",
+        structure_revision=revision,
+        structure=structure,
+        stroke_center_observations=CenterLevelResult(
+            structural_level=0,
+            price_basis_revision=None,
+            centers=(),
+            previews=(),
+            events=(),
+            locked_unit_count=0,
+            replay_from=0,
+        ),
+        confirmed_points=(),
+        approaching_points=(),
+    )
+
+    assert unfinished_segment_candidates(
+        evidence,
+        code="qmt-gics3:test",
+        source_frequency="30m",
+    ) == ()
+
+
+def test_builder_returns_the_canonical_recursive_evidence_graph() -> None:
     frame = pd.DataFrame(
         {
             "date": pd.date_range(
@@ -162,7 +205,7 @@ def test_builder_always_returns_one_physical_segment_level() -> None:
             "volume": (1000.0, 1200.0),
         }
     )
-    config = screening_cl_config(
+    config = strict_cl_config(
         structure_price_quantum=Decimal("0.01"),
         price_basis_revision=BASIS,
     )
@@ -178,8 +221,12 @@ def test_builder_always_returns_one_physical_segment_level() -> None:
     )
 
     assert cd.config["stroke_rule"] == "strict-cl-k-distance"
-    assert tuple(level.structural_level for level in evidence.structure.levels) == (0,)
+    assert evidence == cd.get_strict_evidence()
+    assert tuple(level.structural_level for level in evidence.structure.levels) == tuple(
+        range(len(evidence.structure.levels))
+    )
     assert all(
         unit.source_kind is SourceKind.SEGMENT
-        for unit in evidence.structure.levels[0].units
+        for level in evidence.structure.levels[:1]
+        for unit in level.units
     )
