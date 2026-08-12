@@ -21,6 +21,14 @@ import threading
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from chanlun.decision_support.fingerprints import sha256_json
+from chanlun.decision_support.trading_system.forward_paper import (
+    FORWARD_PAPER_CONTRACT_SCHEMA,
+    FORWARD_PAPER_LEDGER_SCHEMA,
+    load_forward_contract,
+    load_forward_paper_ledger,
+    validate_forward_paper_ledger,
+)
 from chanlun.decision_support.trading_system.file_lock import (
     InterprocessLockTimeout,
     interprocess_file_lock,
@@ -40,6 +48,7 @@ APP_FORWARD_STATE_SCHEMA = "chanlun-app-forward-runtime-state"
 APP_FORWARD_OWNER_SCHEMA = "chanlun-forward-execution-owner"
 FORWARD_READINESS_SCHEMA = "chanlun-forward-scheduler-readiness"
 QMT_RUNTIME_SCHEMA = "chanlun-qmt-runtime-readiness"
+FORWARD_LEDGER_ROTATION_SCHEMA = "chanlun-forward-paper-ledger-contract-rotation"
 
 CAPTURE_JOB_ID = "forward_capture"
 EVALUATE_JOB_ID = "forward_evaluate"
@@ -57,6 +66,201 @@ _SAFETY = {
     "automated_order_authorized": False,
     "live_status": "LIVE_DISABLED",
 }
+
+
+def _is_sha256(value: object) -> bool:
+    text = value if isinstance(value, str) else ""
+    if not text.startswith("sha256:") or len(text) != 71:
+        return False
+    try:
+        int(text[7:], 16)
+    except ValueError:
+        return False
+    return True
+
+
+def _sha256_bytes(payload: bytes) -> str:
+    return "sha256:" + hashlib.sha256(payload).hexdigest()
+
+
+def _atomic_bytes(path: Path, payload: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(
+        f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+    )
+    try:
+        with temporary.open("wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+class _StoredForwardContract:
+    """只为校验历史哈希链提供其原始、不可变的契约文档。"""
+
+    def __init__(self, document: Mapping[str, object]) -> None:
+        self._document = dict(document)
+        self.contract_id = str(document["contract_id"])
+        self.strategy_parameter_set_id = str(
+            document["strategy_parameter_set_id"]
+        )
+
+    @property
+    def operational_status(self) -> str:
+        return "REVIEW_REQUIRED"
+
+    def document(self) -> dict[str, object]:
+        return dict(self._document)
+
+
+def _stored_forward_contract(
+    document: Mapping[str, object],
+) -> _StoredForwardContract:
+    """认证历史契约自身，不把它重新解释成当前策略。"""
+
+    stable = {key: value for key, value in document.items() if key != "contract_id"}
+    contract_id = document.get("contract_id")
+    parameter_set_id = document.get("strategy_parameter_set_id")
+    if (
+        document.get("schema") != FORWARD_PAPER_CONTRACT_SCHEMA
+        or not _is_sha256(contract_id)
+        or contract_id != sha256_json(stable)
+        or not _is_sha256(parameter_set_id)
+        or document.get("real_account_access") is not False
+        or document.get("real_order_transport") is not False
+        or document.get("tick_data_used") is not False
+        or document.get("signal_bar_fill_allowed") is not False
+        or document.get("highest_status") != "REVIEW_REQUIRED"
+        or document.get("live_status") != "LIVE_DISABLED"
+    ):
+        raise ValueError("superseded forward paper contract is invalid")
+    return _StoredForwardContract(document)
+
+
+def _validate_superseded_forward_ledger(
+    payload: Mapping[str, object],
+) -> dict[str, object]:
+    """复用正式账本校验器认证旧链；这里只替换契约读取视角。"""
+
+    raw_contract = payload.get("contract")
+    if not isinstance(raw_contract, Mapping):
+        raise ValueError("superseded forward paper contract is unavailable")
+    return validate_forward_paper_ledger(
+        payload,
+        contract=_stored_forward_contract(raw_contract),
+    )
+
+
+def _empty_forward_ledger(contract: object) -> dict[str, object]:
+    stable: dict[str, object] = {
+        "schema": FORWARD_PAPER_LEDGER_SCHEMA,
+        "contract": contract.document(),
+        "events": [],
+        "paper_status": contract.operational_status,
+        "live_status": "LIVE_DISABLED",
+    }
+    return {**stable, "content_sha256": sha256_json(stable)}
+
+
+def prepare_forward_paper_ledger_contract(
+    *,
+    forward_root: Path,
+    parameter_snapshot: Path,
+) -> dict[str, object]:
+    """让活动账本只属于当前契约，并完整保留已认证的旧哈希链。
+
+    契约不同时不能把旧事件接到新链上。函数先使用正式校验器验证旧链，再把原始
+    字节写入内容寻址归档，最后原子发布当前契约的空账本。损坏账本绝不轮换。
+    """
+
+    root = Path(forward_root).resolve()
+    ledger_path = root / "forward_paper_ledger.json"
+    contract = load_forward_contract(Path(parameter_snapshot).resolve())
+    result: dict[str, object] = {
+        "ready": True,
+        "status": "CURRENT",
+        "reason_code": "CURRENT_FORWARD_CONTRACT",
+        "current_contract_id": contract.contract_id,
+        "rotation": None,
+        **_SAFETY,
+    }
+    lock_path = ledger_path.with_suffix(ledger_path.suffix + ".lock")
+    with interprocess_file_lock(lock_path):
+        if not ledger_path.is_file():
+            return result
+        try:
+            raw = ledger_path.read_bytes()
+            payload = json.loads(raw.decode("utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise ValueError("forward paper ledger cannot be read") from exc
+        if not isinstance(payload, Mapping):
+            raise ValueError("forward paper ledger document is invalid")
+        if payload.get("contract") == contract.document():
+            load_forward_paper_ledger(ledger_path, contract=contract)
+            return result
+
+        validated = _validate_superseded_forward_ledger(payload)
+        archived_content_sha256 = str(validated["content_sha256"])
+        archived_contract = validated["contract"]
+        assert isinstance(archived_contract, Mapping)
+        archive_root = root / "ledger_archives"
+        archive_path = archive_root / f"{archived_content_sha256[7:]}.json"
+        if archive_path.is_file():
+            if archive_path.read_bytes() != raw:
+                raise RuntimeError("immutable forward ledger archive changed")
+        else:
+            _atomic_bytes(archive_path, raw)
+        archived_payload = json.loads(archive_path.read_text(encoding="utf-8"))
+        if not isinstance(archived_payload, Mapping):
+            raise RuntimeError("immutable forward ledger archive is invalid")
+        archived_validated = _validate_superseded_forward_ledger(archived_payload)
+        if archived_validated["content_sha256"] != archived_content_sha256:
+            raise RuntimeError("immutable forward ledger archive identity changed")
+
+        receipt_stable: dict[str, object] = {
+            "schema": FORWARD_LEDGER_ROTATION_SCHEMA,
+            "archived_ledger": archive_path.relative_to(root).as_posix(),
+            "archived_ledger_file_sha256": _sha256_bytes(raw),
+            "archived_ledger_content_sha256": archived_content_sha256,
+            "archived_contract_id": archived_contract["contract_id"],
+            "archived_event_count": len(validated["events"]),
+            "current_contract_id": contract.contract_id,
+            "old_events_carried_forward": False,
+            **_SAFETY,
+        }
+        receipt = {
+            **receipt_stable,
+            "content_sha256": sha256_json(receipt_stable),
+        }
+        receipt_path = archive_root / (
+            f"rotation-{str(receipt['content_sha256'])[7:]}.json"
+        )
+        if receipt_path.is_file():
+            existing_receipt = _read_mapping(receipt_path)
+            if existing_receipt != receipt:
+                raise RuntimeError("immutable forward ledger rotation receipt changed")
+        else:
+            _atomic_json(receipt_path, receipt)
+
+        current = _empty_forward_ledger(contract)
+        validate_forward_paper_ledger(current, contract=contract)
+        _atomic_json(ledger_path, current)
+        load_forward_paper_ledger(ledger_path, contract=contract)
+        return {
+            **result,
+            "status": "ROTATED",
+            "reason_code": "SUPERSEDED_FORWARD_CONTRACT_ARCHIVED",
+            "rotation": {
+                **receipt,
+                "receipt": receipt_path.relative_to(root).as_posix(),
+            },
+        }
 
 
 def _canonical_at(value: datetime) -> str:
@@ -213,6 +417,7 @@ class AppForwardSchedulerController:
         clock: Callable[[], datetime] | None = None,
         runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
         python_executable: str | os.PathLike[str] | None = None,
+        parameter_snapshot: Path | None = None,
         state_path: Path | None = None,
         owner_path: Path | None = None,
         capture_timeout_seconds: int = 1800,
@@ -240,6 +445,19 @@ class AppForwardSchedulerController:
         self._clock = clock or (lambda: datetime.now(CN))
         self._runner = runner
         self._python = Path(python_executable or sys.executable).resolve()
+        self._parameter_snapshot = (
+            Path(parameter_snapshot).resolve()
+            if parameter_snapshot is not None
+            else (
+                self._root
+                / "config"
+                / "decision_support"
+                / "human_review_parameters.json"
+            ).resolve()
+        )
+        self._forward_contract_id: str | None = None
+        self._ledger_contract_preparation: dict[str, object] | None = None
+        self._ledger_contract_error: str | None = None
         runtime_root = self._root / ".cache" / "chanlun_scheduler"
         self._state_path = state_path or runtime_root / "app_forward_runtime.json"
         self._owner_path = owner_path or runtime_root / "forward_execution_owner.json"
@@ -281,6 +499,8 @@ class AppForwardSchedulerController:
             reasons.append("QMT_LOCAL_DATA_DIRECTORY_UNAVAILABLE")
         if self._registered and not bool(getattr(self._scheduler, "running", False)):
             reasons.append("APP_SCHEDULER_NOT_RUNNING")
+        if self._ledger_contract_error is not None:
+            reasons.append("FORWARD_LEDGER_CONTRACT_UNRESOLVED")
         return reasons
 
     def _owner_payload(self, observed_at: datetime) -> dict[str, object]:
@@ -335,6 +555,20 @@ class AppForwardSchedulerController:
             if self._registered:
                 return
             observed_at = self._now()
+            try:
+                preparation = prepare_forward_paper_ledger_contract(
+                    forward_root=self._forward_root,
+                    parameter_snapshot=self._parameter_snapshot,
+                )
+                self._ledger_contract_preparation = preparation
+                self._forward_contract_id = str(preparation["current_contract_id"])
+                self._ledger_contract_error = None
+            except (OSError, RuntimeError, TypeError, ValueError) as exc:
+                self._ledger_contract_preparation = None
+                self._forward_contract_id = None
+                self._ledger_contract_error = (
+                    f"{type(exc).__name__}: {str(exc)[:240]}"
+                )
             self._registered_at = observed_at
             self._claim_owner(observed_at)
             common = {
@@ -418,6 +652,7 @@ class AppForwardSchedulerController:
             value is None
             or value.get("schema") != APP_FORWARD_STATE_SCHEMA
             or value.get("execution_owner") != "APP_RUNTIME"
+            or value.get("forward_contract_id") != self._forward_contract_id
             or any(value.get(key) != expected for key, expected in _SAFETY.items())
             or not isinstance(value.get("phases"), Mapping)
         ):
@@ -425,6 +660,7 @@ class AppForwardSchedulerController:
                 "schema": APP_FORWARD_STATE_SCHEMA,
                 "execution_owner": "APP_RUNTIME",
                 "updated_at": None,
+                "forward_contract_id": self._forward_contract_id,
                 "phases": {},
                 **_SAFETY,
             }
@@ -432,6 +668,7 @@ class AppForwardSchedulerController:
 
     def _write_state(self, value: dict[str, object], observed_at: datetime) -> None:
         value["updated_at"] = _canonical_at(observed_at)
+        value["forward_contract_id"] = self._forward_contract_id
         _atomic_json(self._state_path, value)
 
     def _phase_record(
@@ -971,6 +1208,23 @@ class AppForwardSchedulerController:
             "registered_at": (
                 _canonical_at(registered_at) if registered_at is not None else None
             ),
+            "forward_contract_id": self._forward_contract_id,
+            "forward_ledger_contract": (
+                {
+                    **dict(self._ledger_contract_preparation or {}),
+                    "error": None,
+                }
+                if self._ledger_contract_error is None
+                else {
+                    "ready": False,
+                    "status": "not_ready",
+                    "reason_code": "FORWARD_LEDGER_CONTRACT_UNRESOLVED",
+                    "current_contract_id": self._forward_contract_id,
+                    "rotation": None,
+                    "error": self._ledger_contract_error,
+                    **_SAFETY,
+                }
+            ),
             "pinned_python_executable": str(self._python),
             "upstream_qmt": upstream,
             "tasks": tasks,
@@ -983,6 +1237,7 @@ __all__ = (
     "APP_FORWARD_CONTRACT_ID",
     "APP_FORWARD_OWNER_SCHEMA",
     "APP_FORWARD_STATE_SCHEMA",
+    "FORWARD_LEDGER_ROTATION_SCHEMA",
     "AppForwardSchedulerController",
     "CAPTURE_JOB_ID",
     "EVALUATE_JOB_ID",
@@ -990,4 +1245,5 @@ __all__ = (
     "STARTUP_JOB_ID",
     "discover_qmt_local_data_dir",
     "evaluation_readiness_from_health",
+    "prepare_forward_paper_ledger_contract",
 )

@@ -8,6 +8,16 @@ import subprocess
 import sys
 from zoneinfo import ZoneInfo
 
+import pytest
+
+from chanlun.decision_support.fingerprints import sha256_json
+from chanlun.decision_support.trading_system.forward_paper import (
+    FORWARD_PAPER_CONTRACT_SCHEMA,
+    FORWARD_PAPER_EVENT_SCHEMA,
+    FORWARD_PAPER_LEDGER_SCHEMA,
+    load_forward_contract,
+    load_forward_paper_ledger,
+)
 from chanlun.decision_support.trading_system.trading_session import (
     build_trading_session_evidence,
 )
@@ -19,6 +29,7 @@ from cl_app.services.app_forward_scheduler import (
     RECONCILE_JOB_ID,
     STARTUP_JOB_ID,
     evaluation_readiness_from_health,
+    prepare_forward_paper_ledger_contract,
 )
 from cl_app.services.forward_scheduler import (
     validate_forward_scheduler_snapshot,
@@ -27,6 +38,68 @@ from cl_app.services.forward_scheduler import (
 
 CN = ZoneInfo("Asia/Shanghai")
 ROOT = Path(__file__).resolve().parents[2]
+PARAMETER_SNAPSHOT = (
+    ROOT / "config" / "decision_support" / "human_review_parameters.json"
+)
+
+
+def _superseded_forward_ledger() -> dict[str, object]:
+    """构造一个安全但不再属于当前统一策略的历史账本。"""
+
+    contract_stable: dict[str, object] = {
+        "strategy_parameter_set_id": "sha256:" + "1" * 64,
+        "strategy_parameter_snapshot_sha256": "sha256:" + "2" * 64,
+        "selection_path": "SUPERSEDED_SECTOR_ONLY_PATH",
+        "strategic_frequency": "30m",
+        "tactical_frequency": "5m",
+        "locator_frequency": "1m",
+        "initial_cash": "1000000",
+        "slot_count": 5,
+        "slot_fraction": "0.18",
+        "account_exposure_cap": "0.90",
+        "tactical_ratio": "0.25",
+        "technical_mode": "HUMAN_REVIEW_SCREENING",
+        "tick_data_used": False,
+        "signal_bar_fill_allowed": False,
+        "real_account_access": False,
+        "real_order_transport": False,
+        "highest_status": "REVIEW_REQUIRED",
+        "live_status": "LIVE_DISABLED",
+        "schema": FORWARD_PAPER_CONTRACT_SCHEMA,
+    }
+    contract = {
+        **contract_stable,
+        "contract_id": sha256_json(contract_stable),
+    }
+    evidence = {"reason": "SUPERSEDED_BUT_AUTHENTICATED"}
+    event_stable: dict[str, object] = {
+        "schema": FORWARD_PAPER_EVENT_SCHEMA,
+        "session": "2026-08-03",
+        "recorded_at": "2026-08-03T08:00:00+08:00",
+        "phase": "CONTROL",
+        "status": "PAPER_STARTED",
+        "contract_id": contract["contract_id"],
+        "strategy_parameter_set_id": contract["strategy_parameter_set_id"],
+        "previous_event_sha256": None,
+        "evidence": evidence,
+        "evidence_sha256": sha256_json(evidence),
+        "real_account_accessed": False,
+        "real_order_transport_enabled": False,
+        "paper_status": "REVIEW_REQUIRED",
+        "live_status": "LIVE_DISABLED",
+    }
+    event = {**event_stable, "event_sha256": sha256_json(event_stable)}
+    ledger_stable: dict[str, object] = {
+        "schema": FORWARD_PAPER_LEDGER_SCHEMA,
+        "contract": contract,
+        "events": [event],
+        "paper_status": "REVIEW_REQUIRED",
+        "live_status": "LIVE_DISABLED",
+    }
+    return {
+        **ledger_stable,
+        "content_sha256": sha256_json(ledger_stable),
+    }
 
 
 class FakeScheduler:
@@ -90,6 +163,106 @@ def _controller(
         owner_path=tmp_path / "owner.json",
     )
     return controller, scheduler
+
+
+def test_superseded_forward_ledger_is_verified_archived_and_rotated_once(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "forward"
+    root.mkdir()
+    ledger_path = root / "forward_paper_ledger.json"
+    previous = _superseded_forward_ledger()
+    previous_bytes = (
+        json.dumps(previous, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
+    ).encode("utf-8")
+    ledger_path.write_bytes(previous_bytes)
+
+    rotated = prepare_forward_paper_ledger_contract(
+        forward_root=root,
+        parameter_snapshot=PARAMETER_SNAPSHOT,
+    )
+
+    assert rotated["status"] == "ROTATED"
+    assert rotated["reason_code"] == "SUPERSEDED_FORWARD_CONTRACT_ARCHIVED"
+    receipt = rotated["rotation"]
+    assert receipt["archived_event_count"] == 1
+    assert receipt["old_events_carried_forward"] is False
+    archive_path = root / receipt["archived_ledger"]
+    assert archive_path.read_bytes() == previous_bytes
+    current_contract = load_forward_contract(PARAMETER_SNAPSHOT)
+    current = load_forward_paper_ledger(ledger_path, contract=current_contract)
+    assert current["events"] == ()
+    assert current["contract"]["contract_id"] == current_contract.contract_id
+
+    unchanged = prepare_forward_paper_ledger_contract(
+        forward_root=root,
+        parameter_snapshot=PARAMETER_SNAPSHOT,
+    )
+    assert unchanged["status"] == "CURRENT"
+    assert unchanged["rotation"] is None
+    assert archive_path.read_bytes() == previous_bytes
+
+
+def test_tampered_superseded_forward_ledger_is_never_rotated(tmp_path: Path) -> None:
+    root = tmp_path / "forward"
+    root.mkdir()
+    ledger_path = root / "forward_paper_ledger.json"
+    payload = _superseded_forward_ledger()
+    payload["events"][0]["evidence"]["reason"] = "FORGED"
+    original = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    ledger_path.write_bytes(original)
+
+    with pytest.raises(ValueError, match="event hash changed"):
+        prepare_forward_paper_ledger_contract(
+            forward_root=root,
+            parameter_snapshot=PARAMETER_SNAPSHOT,
+        )
+
+    assert ledger_path.read_bytes() == original
+    assert not (root / "ledger_archives").exists()
+
+
+def test_scheduler_contract_rotation_invalidates_prior_phase_state(
+    tmp_path: Path,
+) -> None:
+    clock = MutableClock(datetime(2026, 8, 3, 8, 0, tzinfo=CN))
+    controller, _scheduler = _controller(
+        tmp_path,
+        clock=clock,
+        runner=lambda *_args, **_kwargs: None,
+    )
+    state_path = tmp_path / "state.json"
+    state_path.write_text(
+        json.dumps(
+            {
+                "schema": "chanlun-app-forward-runtime-state",
+                "execution_owner": "APP_RUNTIME",
+                "updated_at": "2026-08-03T07:00:00+08:00",
+                "forward_contract_id": "sha256:" + "0" * 64,
+                "phases": {
+                    "CAPTURE": {
+                        "phase": "CAPTURE",
+                        "session": "2026-08-03",
+                        "status": "SUCCEEDED",
+                    }
+                },
+                "real_account_accessed": False,
+                "real_order_transport_enabled": False,
+                "automated_order_authorized": False,
+                "live_status": "LIVE_DISABLED",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    controller.register_jobs()
+
+    snapshot = controller.snapshot()
+    assert snapshot["forward_contract_id"] == load_forward_contract(
+        PARAMETER_SNAPSHOT
+    ).contract_id
+    assert snapshot["forward_ledger_contract"]["ready"] is True
+    assert {task["phase_status"] for task in snapshot["tasks"]} == {"PENDING"}
 
 
 def test_registers_exact_due_jobs_and_app_readiness_contract(

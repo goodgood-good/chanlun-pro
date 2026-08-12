@@ -2294,6 +2294,9 @@ def create_app(test_config=None, start_scheduler=False):
             trading_session_provider=trading_session_provider,
             capture_readiness_provider=_app_forward_capture_readiness,
             evaluation_readiness_provider=(_app_forward_evaluation_readiness),
+            parameter_snapshot=pathlib.Path(
+                app.config["HUMAN_REVIEW_PARAMETER_SNAPSHOT"]
+            ),
             clock=_trading_screening_clock,
         )
         forward_scheduler_probe = app_forward_scheduler
