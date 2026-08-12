@@ -1,11 +1,10 @@
-"""
-WSGI entrypoint for the TradingView web application.
+"""TradingView Web 应用的单进程启动入口。
 
-Adds project `src` and web server path to `sys.path`, supports a WPF
-launcher mode that wraps stdio into GBK to avoid encoding issues, and
-bootstraps the Flask/Tornado server.
+入口会把项目 ``src`` 与 Web 目录加入 ``sys.path``，兼容 WPF 启动器所需的
+GBK 标准流，并在同一进程中启动 Flask/Tornado 服务。
 """
 
+import asyncio
 import json
 import os
 import pathlib
@@ -24,6 +23,7 @@ for bootstrap_path in (web_server_path, src_path):
     sys.path.insert(0, value)
 
 from chanlun.tools.log_util import LogUtil
+
 
 def _wrap_stdio_gbk() -> None:
     """
@@ -68,27 +68,110 @@ from cl_app import create_app
 
 
 class NativeHealthHandler(RequestHandler):
-    """Serve local health snapshots without entering the business WSGI pool."""
+    """绕过业务 WSGI 线程池提供本机健康检查。"""
 
-    def initialize(self, flask_app):
+    def initialize(
+        self,
+        flask_app,
+        readiness_runner=None,
+        readiness_timeout_seconds=3.0,
+    ):
         self._flask_app = flask_app
-
-    def get(self):
-        kind = self.request.path.strip("/")
-        market = self.get_query_argument("market", "a")
-        forward_session = self.get_query_argument("forward_session", None)
-        payload, status_code = self._flask_app.extensions["health_snapshot"](
-            kind, market, forward_session
+        self._readiness_runner = readiness_runner
+        self._readiness_timeout_seconds = max(
+            0.1,
+            min(float(readiness_timeout_seconds), 30.0),
         )
+
+    def _finish_json(self, payload, status_code):
         self.set_status(status_code)
         self.set_header("Content-Type", "application/json; charset=UTF-8")
         self.set_header("Cache-Control", "no-store")
         self.set_header("X-Content-Type-Options", "nosniff")
+        if status_code == 503:
+            self.set_header("Retry-After", "1")
         self.finish(json.dumps(payload, ensure_ascii=False))
+
+    def _unavailable_payload(self, market, reason):
+        # 存活身份本身是常数时间快照。即使深度就绪检查仍在后台运行，也能返回
+        # 当前版本与进程号，供运维区分“进程已死”和“依赖暂时繁忙”。
+        identity, _status = self._flask_app.extensions["health_snapshot"](
+            "healthz", market, None
+        )
+        return {
+            "status": "not_ready",
+            "revision": identity.get("revision"),
+            "pid": os.getpid(),
+            "market": market,
+            "components": {},
+            "reasons": [reason],
+        }
+
+    async def get(self):
+        kind = self.request.path.strip("/")
+        market = self.get_query_argument("market", "a")
+        forward_session = self.get_query_argument("forward_session", None)
+        snapshot = self._flask_app.extensions["health_snapshot"]
+        if kind != "readyz" or self._readiness_runner is None:
+            payload, status_code = snapshot(kind, market, forward_session)
+            self._finish_json(payload, status_code)
+            return
+
+        future = self._readiness_runner.submit(market, forward_session)
+        if future is None:
+            self._finish_json(
+                self._unavailable_payload(market, "health_snapshot_busy"),
+                503,
+            )
+            return
+        try:
+            wrapped = asyncio.wrap_future(future)
+            payload, status_code = await asyncio.wait_for(
+                asyncio.shield(wrapped),
+                timeout=self._readiness_timeout_seconds,
+            )
+        except asyncio.TimeoutError:
+            self._finish_json(
+                self._unavailable_payload(market, "health_snapshot_timeout"),
+                503,
+            )
+            return
+        except Exception:
+            LogUtil.exception("深度就绪检查执行失败")
+            self._finish_json(
+                self._unavailable_payload(market, "health_snapshot_failed"),
+                503,
+            )
+            return
+        self._finish_json(payload, status_code)
+
+
+class NativeReadinessRunner:
+    """在独立执行器中单飞运行深度就绪检查。"""
+
+    def __init__(self, flask_app, executor):
+        self._snapshot = flask_app.extensions["health_snapshot"]
+        self._executor = executor
+        self._lock = threading.Lock()
+        self._in_flight = None
+
+    def submit(self, market, forward_session):
+        """提交一次检查；已有检查未完成时快速报告繁忙。"""
+
+        with self._lock:
+            if self._in_flight is not None and not self._in_flight.done():
+                return None
+            self._in_flight = self._executor.submit(
+                self._snapshot,
+                "readyz",
+                market,
+                forward_session,
+            )
+            return self._in_flight
 
 
 class BoundedWSGIContainer(WSGIContainer):
-    """Bound in-flight WSGI requests and reject overload without queuing forever."""
+    """限制并发 WSGI 请求，过载时直接拒绝而不是无限排队。"""
 
     def __init__(self, wsgi_application, executor, max_requests):
         super().__init__(wsgi_application, executor=executor)
@@ -145,12 +228,11 @@ class BoundedWSGIContainer(WSGIContainer):
         connection = request.connection
         if connection is None:
             return
-        start_line = httputil.ResponseStartLine(
-            "HTTP/1.1", 503, "Service Unavailable"
-        )
+        start_line = httputil.ResponseStartLine("HTTP/1.1", 503, "Service Unavailable")
         connection.write_headers(start_line, headers, chunk=body)
         connection.finish()
         self._log(503, request)
+
 
 def _warm_chart_cache_from_disk() -> None:
     """启动期 chart_data 预热。把上次访问的 entry 从 fdb 回填 RAM。
@@ -160,6 +242,7 @@ def _warm_chart_cache_from_disk() -> None:
     的 key 构造方式完全一致，命中率最高。
     """
     from cl_app.services.last_chart_state import load_last_state
+
     state = load_last_state()
     if not state:
         return
@@ -182,22 +265,16 @@ def _warm_chart_cache_from_disk() -> None:
     try:
         disk_entry = fdb.get_chart_cache(cache_key)
     except Exception as e:
-        LogUtil.warning(
-            f"[chart_warm] 读磁盘 entry 失败 key={cache_key} err={e}"
-        )
+        LogUtil.warning(f"[chart_warm] 读磁盘 entry 失败 key={cache_key} err={e}")
         return
     if disk_entry is None:
-        LogUtil.info(
-            f"[chart_warm] 磁盘冷层无 {market}:{code}:{frequency} entry，跳过"
-        )
+        LogUtil.info(f"[chart_warm] 磁盘冷层无 {market}:{code}:{frequency} entry，跳过")
         return
     normalized = _normalize_cache_entry(disk_entry)
     if normalized is None:
         return
     chart_data_cache[cache_key] = normalized
-    LogUtil.info(
-        f"[chart_warm] 已预热 {market}:{code}:{frequency} 到 RAM"
-    )
+    LogUtil.info(f"[chart_warm] 已预热 {market}:{code}:{frequency} 到 RAM")
 
 
 def _get_web_port() -> int:
@@ -205,10 +282,25 @@ def _get_web_port() -> int:
     try:
         port = int(raw_port)
     except (TypeError, ValueError) as exc:
-        raise ValueError("CHANLUN_WEB_PORT must be an integer between 1 and 65535") from exc
+        raise ValueError(
+            "CHANLUN_WEB_PORT must be an integer between 1 and 65535"
+        ) from exc
     if not 1 <= port <= 65535:
         raise ValueError("CHANLUN_WEB_PORT must be an integer between 1 and 65535")
     return port
+
+
+def _get_readiness_timeout_seconds() -> float:
+    raw_timeout = os.environ.get("CHANLUN_READINESS_TIMEOUT_SECONDS", "3").strip()
+    try:
+        timeout = float(raw_timeout)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "CHANLUN_READINESS_TIMEOUT_SECONDS must be between 0.1 and 30"
+        ) from exc
+    if not 0.1 <= timeout <= 30:
+        raise ValueError("CHANLUN_READINESS_TIMEOUT_SECONDS must be between 0.1 and 30")
+    return timeout
 
 
 def _start_runtime_with_retry(
@@ -236,19 +328,21 @@ def _start_runtime_with_retry(
 
 
 def main() -> int:
-    """Start the Tornado HTTP server hosting the Flask app."""
+    """启动承载 Flask 应用的 Tornado HTTP 服务。"""
     is_wpf_launcher = "wpf_launcher" in sys.argv
     if is_wpf_launcher:
         _wrap_stdio_gbk()
 
     # 安装 stdout 噪音过滤：吞掉 pytdx 等第三方库漏删的纯数字调试 print，避免刷屏。
     from chanlun.utils import install_stdout_noise_filter
+
     install_stdout_noise_filter()
 
     app = None
     server = None
     wsgi_container = None
     http_executor = None
+    health_executor = None
     sse_pool = None
     runtime_executor = None
     runtime_cancel_event = threading.Event()
@@ -266,7 +360,7 @@ def main() -> int:
         # 多 tab + 多周期并发时 IO（QMT/CQ 拉数据）是瓶颈而非 CPU，扩大 worker 数
         # 不会显著抢占 GIL；用环境变量 CHANLUN_HTTP_WORKERS 覆盖。
         try:
-            http_workers = int(os.environ.get('CHANLUN_HTTP_WORKERS', '32'))
+            http_workers = int(os.environ.get("CHANLUN_HTTP_WORKERS", "32"))
             if http_workers < 1:
                 http_workers = 32
         except (TypeError, ValueError):
@@ -280,15 +374,15 @@ def main() -> int:
             http_queue = 128
         http_queue = min(http_queue, 1024)
         max_http_requests = http_workers + http_queue
-        LogUtil.info(
-            f"HTTP 线程池容量: {http_workers}，等待队列上限: {http_queue}"
-        )
+        LogUtil.info(f"HTTP 线程池容量: {http_workers}，等待队列上限: {http_queue}")
         # 监听建立后再异步预压缩 charting_library / datafeeds 下的资源。
         # CachedStaticFileHandler 在生成期间会安全回退到 identity 表示。
         from cl_app.services.static_precompress import precompress_static_assets
+
         static_root = os.path.join(
             os.path.dirname(os.path.abspath(__file__)),
-            "cl_app", "static",
+            "cl_app",
+            "static",
         )
 
         # Tornado Application 路由——charting_library / datafeeds 走自定义
@@ -304,9 +398,17 @@ def main() -> int:
         wsgi_container = BoundedWSGIContainer(
             app, executor=http_executor, max_requests=max_http_requests
         )
+        health_executor = DaemonExecutor(
+            max_workers=1,
+            thread_name_prefix="ReadinessProbe",
+            max_pending=1,
+        )
+        readiness_runner = NativeReadinessRunner(app, health_executor)
+        readiness_timeout_seconds = _get_readiness_timeout_seconds()
         # SSE 实时推送路由（flag 关时返回空）。重算用独立线程池, 与 WSGI 请求池
         # 隔离, 避免后台持续重算抢占用户 HTTP 请求的 worker。
         from cl_app.handlers.sse_stream import build_routes as sse_build_routes
+
         sse_pool = DaemonExecutor(
             max_workers=8,
             thread_name_prefix="SseRefresh",
@@ -314,7 +416,15 @@ def main() -> int:
         )
         tornado_app = Application(
             [
-                (r"/(?:livez|healthz|readyz)", NativeHealthHandler, {"flask_app": app}),
+                (
+                    r"/(?:livez|healthz|readyz)",
+                    NativeHealthHandler,
+                    {
+                        "flask_app": app,
+                        "readiness_runner": readiness_runner,
+                        "readiness_timeout_seconds": readiness_timeout_seconds,
+                    },
+                ),
                 (
                     r"/static/charting_library/(.*)",
                     CachedStaticFileHandler,
@@ -375,6 +485,7 @@ def main() -> int:
             if not runtime_cancel_event.is_set():
                 runtime_executor.submit(_bootstrap_runtime)
                 runtime_executor.submit(lambda: precompress_static_assets(static_root))
+
         # ⚠️ 严禁改为 s.start(0) 或 s.start(N)（多进程模式）！
         # 当前架构所有缓存（tv.py 的 chart_data_cache / stock_cache / chart_calc_locks /
         # _history_req_locks，以及 file_db、QMT/CQ 的 singleton 实例字段）都是
@@ -386,6 +497,7 @@ def main() -> int:
         no_auto_open = os.environ.get("CHANLUN_NO_AUTO_OPEN", "0").strip() == "1"
         nobrowser_flag = len(sys.argv) >= 2 and sys.argv[1] == "nobrowser"
         if not (no_auto_open or nobrowser_flag):
+
             def _open_browser():
                 threading.Thread(
                     target=webbrowser.open,
@@ -398,8 +510,11 @@ def main() -> int:
         else:
             LogUtil.info("")
             LogUtil.info(f">>> Web 已启动，请在浏览器访问：{url}")
-            LogUtil.info('>>> 当前已禁用自动开浏览器（CHANLUN_NO_AUTO_OPEN=1 或 nobrowser）')
+            LogUtil.info(
+                ">>> 当前已禁用自动开浏览器（CHANLUN_NO_AUTO_OPEN=1 或 nobrowser）"
+            )
             LogUtil.info("")
+
         def _request_stop(_signum=None, _frame=None):
             io_loop.add_callback(io_loop.stop)
 
@@ -429,14 +544,10 @@ def main() -> int:
                 LogUtil.exception("停止 HTTP 服务失败")
         if wsgi_container is not None and hasattr(wsgi_container, "wait_for_idle"):
             try:
-                drain_seconds = float(
-                    os.environ.get("CHANLUN_HTTP_DRAIN_SECONDS", "2")
-                )
+                drain_seconds = float(os.environ.get("CHANLUN_HTTP_DRAIN_SECONDS", "2"))
             except (TypeError, ValueError):
                 drain_seconds = 2.0
-            drained = wsgi_container.wait_for_idle(
-                max(0.0, min(drain_seconds, 30.0))
-            )
+            drained = wsgi_container.wait_for_idle(max(0.0, min(drain_seconds, 30.0)))
             if not drained:
                 LogUtil.warning("HTTP 请求未在关闭窗口内排空，将停止等待")
         if http_executor is not None:
@@ -447,7 +558,7 @@ def main() -> int:
                 app.extensions["shutdown_runtime_services"]()
             except Exception:
                 LogUtil.exception("停止应用后台服务失败")
-        for executor in (runtime_executor, sse_pool):
+        for executor in (health_executor, runtime_executor, sse_pool):
             if executor is not None:
                 executor.shutdown(wait=False, cancel_futures=True)
 

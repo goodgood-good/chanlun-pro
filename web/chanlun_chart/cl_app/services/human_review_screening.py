@@ -137,6 +137,7 @@ _REVIEW_LANE_ORDER = {
 }
 _FORWARD_SCHEDULER_MAX_AGE = timedelta(seconds=90)
 _FORWARD_SCHEDULER_FUTURE_TOLERANCE = timedelta(seconds=5)
+_FORWARD_CAPTURE_READINESS_CACHE_SECONDS = 300.0
 _FORWARD_DELIVERY_READINESS_CACHE_SECONDS = 300.0
 _MAX_SYNCHRONOUS_LIVE_SNAPSHOT_BYTES = 8 * 1024 * 1024
 _PAPER_RECONCILIABLE_OPERATIONAL_REASONS = frozenset(
@@ -771,6 +772,8 @@ class HumanReviewScreeningService:
         clock: Callable[[], datetime] | None = None,
         sector_capture_due: datetime_time | None = None,
         trading_session_provider: Callable[..., Mapping[str, object]] | None = None,
+        readiness_trading_session_provider: Callable[..., Mapping[str, object]]
+        | None = None,
         forward_scheduler_provider: Callable[..., Mapping[str, object]] | None = None,
         forward_implementation_provenance_provider: Callable[[], Mapping[str, object]]
         | None = None,
@@ -787,6 +790,11 @@ class HumanReviewScreeningService:
         ):
             raise TypeError("trading_session_provider must be callable")
         self._trading_session_provider = trading_session_provider
+        if readiness_trading_session_provider is not None and not callable(
+            readiness_trading_session_provider
+        ):
+            raise TypeError("readiness_trading_session_provider must be callable")
+        self._readiness_trading_session_provider = readiness_trading_session_provider
         if forward_scheduler_provider is not None and not callable(
             forward_scheduler_provider
         ):
@@ -847,6 +855,14 @@ class HumanReviewScreeningService:
             tuple[str, int, int, str, int, int],
             _LoadedWebBundle,
         ] = {}
+        # 前向采集严格审计可能经官方日历兜底访问 QMT。直接业务调用仍执行同步审计，
+        # 就绪接口则只读取精确缓存或启动一个后台校验，不能占住 HTTP 请求线程。
+        self._forward_capture_readiness_lock = threading.Lock()
+        self._forward_capture_readiness_cache_key: tuple[object, ...] | None = None
+        self._forward_capture_readiness_cache: dict[str, object] | None = None
+        self._forward_capture_readiness_cache_at: float | None = None
+        self._forward_capture_readiness_inflight_key: tuple[object, ...] | None = None
+        self._forward_capture_readiness_thread: threading.Thread | None = None
         # ``forward_delivery_readiness`` 认证完整前向账本、不可变工件和当前实现来源。
         # 直接调用者仍执行同步严格审计，但不能让 ``/readyz`` 变成数分钟请求；下方应用
         # 方法只运行一个后台校验，并仅按精确输入身份缓存判定。
@@ -1891,9 +1907,38 @@ class HumanReviewScreeningService:
         session: date,
         observed_at: datetime,
     ) -> tuple[dict[str, object], str | None]:
+        return self._trading_session_requirement_from_provider(
+            self._trading_session_provider,
+            session=session,
+            observed_at=observed_at,
+        )
+
+    def _readiness_trading_session_requirement(
+        self,
+        *,
+        session: date,
+        observed_at: datetime,
+    ) -> tuple[dict[str, object], str | None]:
+        provider = (
+            self._readiness_trading_session_provider
+            if self._readiness_trading_session_provider is not None
+            else self._trading_session_provider
+        )
+        return self._trading_session_requirement_from_provider(
+            provider,
+            session=session,
+            observed_at=observed_at,
+        )
+
+    @staticmethod
+    def _trading_session_requirement_from_provider(
+        provider: Callable[..., Mapping[str, object]] | None,
+        *,
+        session: date,
+        observed_at: datetime,
+    ) -> tuple[dict[str, object], str | None]:
         evidence: Mapping[str, object] | None = None
         error: str | None = None
-        provider = self._trading_session_provider
         if provider is None:
             error = "TRADING_SESSION_PROVIDER_UNAVAILABLE"
         else:
@@ -1945,7 +1990,7 @@ class HumanReviewScreeningService:
         session: date | None,
         _calendar_requirement: tuple[dict[str, object], str | None] | None = None,
     ) -> dict[str, object]:
-        """Return a side-effect-free proof for the daily forward archive gate."""
+        """同步认证每日前向归档的采集闸门。"""
 
         observed_at = self._clock()
         if observed_at.tzinfo is None:
@@ -2056,6 +2101,154 @@ class HumanReviewScreeningService:
             | {
                 "trading_session_provider_error": provider_error,
             }
+        )
+
+    def _forward_capture_readiness_key(
+        self,
+        *,
+        session: date | None,
+        observed_at: datetime,
+    ) -> tuple[object, ...]:
+        local = observed_at.astimezone(ZoneInfo("Asia/Shanghai"))
+        required_session = local.date() if session is None else session
+        if isinstance(required_session, datetime) or not isinstance(
+            required_session, date
+        ):
+            raise TypeError("session must be a date")
+        if required_session != local.date():
+            capture_phase = "OTHER_SESSION"
+        elif self._sector_capture_due is None:
+            capture_phase = "CAPTURE_NOT_SCHEDULED"
+        elif local.time() < self._sector_capture_due:
+            capture_phase = "BEFORE_CAPTURE"
+        else:
+            capture_phase = "CAPTURE_DUE"
+        return (
+            required_session.isoformat(),
+            local.date().isoformat(),
+            capture_phase,
+            self._readiness_file_identity(self.sector_ledger),
+        )
+
+    @staticmethod
+    def _pending_forward_capture_readiness(
+        *,
+        session: date,
+        observed_at: datetime,
+    ) -> dict[str, object]:
+        return {
+            "schema": QMT_FORWARD_CAPTURE_READINESS_SCHEMA,
+            "required": None,
+            "requirement_resolved": False,
+            "trading_session_status": "UNRESOLVED",
+            "trading_session_reason_code": "FORWARD_CAPTURE_VALIDATION_PENDING",
+            "trading_session_evidence_proven": False,
+            "trading_session_evidence": None,
+            "ready": False,
+            "status": "validating",
+            "reason_code": "FORWARD_CAPTURE_VALIDATION_PENDING",
+            "session": session.isoformat(),
+            "observed_at": observed_at.isoformat(),
+            "receipt_proven": False,
+            "background_validation": True,
+            "real_account_accessed": False,
+            "real_order_transport_enabled": False,
+            "live_status": "LIVE_DISABLED",
+        }
+
+    def _validate_forward_capture_readiness_in_background(
+        self,
+        *,
+        session: date,
+        cache_key: tuple[object, ...],
+    ) -> None:
+        try:
+            observed_at = self._clock()
+            if observed_at.tzinfo is None:
+                raise ValueError("human review clock must be timezone-aware")
+            local = observed_at.astimezone(ZoneInfo("Asia/Shanghai"))
+            result = self.forward_archive_capture_readiness(
+                session=session,
+                _calendar_requirement=self._readiness_trading_session_requirement(
+                    session=session,
+                    observed_at=local,
+                ),
+            )
+        except Exception as exc:
+            observed_at = self._clock()
+            if observed_at.tzinfo is None:
+                observed_at = observed_at.replace(tzinfo=ZoneInfo("Asia/Shanghai"))
+            result = self._pending_forward_capture_readiness(
+                session=session,
+                observed_at=observed_at.astimezone(ZoneInfo("Asia/Shanghai")),
+            )
+            result.update(
+                status="not_ready",
+                reason_code="FORWARD_CAPTURE_VALIDATION_FAILED",
+                error=f"{type(exc).__name__}: {str(exc)[:160]}",
+            )
+        completed_at = time.monotonic()
+        with self._forward_capture_readiness_lock:
+            if self._forward_capture_readiness_inflight_key == cache_key:
+                self._forward_capture_readiness_cache_key = cache_key
+                self._forward_capture_readiness_cache = dict(result)
+                self._forward_capture_readiness_cache_at = completed_at
+                self._forward_capture_readiness_inflight_key = None
+                self._forward_capture_readiness_thread = None
+
+    def forward_archive_capture_readiness_nonblocking(
+        self,
+        *,
+        session: date | None,
+    ) -> dict[str, object]:
+        """返回精确缓存的采集证明，必要时只启动一个后台严格校验。"""
+
+        observed_at = self._clock()
+        if observed_at.tzinfo is None:
+            raise ValueError("human review clock must be timezone-aware")
+        local = observed_at.astimezone(ZoneInfo("Asia/Shanghai"))
+        if session is None and (
+            self._sector_capture_due is None or local.time() < self._sector_capture_due
+        ):
+            return self.forward_archive_capture_readiness(session=None)
+        required_session = local.date() if session is None else session
+        if isinstance(required_session, datetime) or not isinstance(
+            required_session, date
+        ):
+            raise TypeError("session must be a date")
+        cache_key = self._forward_capture_readiness_key(
+            session=required_session,
+            observed_at=local,
+        )
+        now = time.monotonic()
+        with self._forward_capture_readiness_lock:
+            cache_fresh = bool(
+                self._forward_capture_readiness_cache_key == cache_key
+                and self._forward_capture_readiness_cache is not None
+                and self._forward_capture_readiness_cache_at is not None
+                and now - self._forward_capture_readiness_cache_at
+                <= _FORWARD_CAPTURE_READINESS_CACHE_SECONDS
+            )
+            if cache_fresh:
+                return copy.deepcopy(self._forward_capture_readiness_cache)
+
+            worker = self._forward_capture_readiness_thread
+            if worker is None or not worker.is_alive():
+                self._forward_capture_readiness_inflight_key = cache_key
+                worker = threading.Thread(
+                    target=self._validate_forward_capture_readiness_in_background,
+                    kwargs={
+                        "session": required_session,
+                        "cache_key": cache_key,
+                    },
+                    name="forward-capture-readiness-validator",
+                    daemon=True,
+                )
+                self._forward_capture_readiness_thread = worker
+                worker.start()
+        return self._pending_forward_capture_readiness(
+            session=required_session,
+            observed_at=local,
         )
 
     def _feedback_entries(self) -> tuple[dict[str, object], ...]:
@@ -3020,6 +3213,7 @@ class HumanReviewScreeningService:
         self,
         *,
         session: date | None,
+        _calendar_requirement: tuple[dict[str, object], str | None] | None = None,
     ) -> dict[str, object]:
         """Prove actual daily Capture/Evaluate delivery from the ledger.
 
@@ -3038,9 +3232,13 @@ class HumanReviewScreeningService:
             required_session, date
         ):
             raise TypeError("session must be a date")
-        requirement, trading_session_provider_error = self._trading_session_requirement(
-            session=required_session,
-            observed_at=local,
+        requirement, trading_session_provider_error = (
+            self._trading_session_requirement(
+                session=required_session,
+                observed_at=local,
+            )
+            if _calendar_requirement is None
+            else _calendar_requirement
         )
         trading_session_evidence = requirement["trading_session_evidence"]
         ledger_path = self.forward_root / "forward_paper_ledger.json"
@@ -3232,7 +3430,17 @@ class HumanReviewScreeningService:
         cache_key: tuple[object, ...],
     ) -> None:
         try:
-            result = self.forward_delivery_readiness(session=session)
+            observed_at = self._clock()
+            if observed_at.tzinfo is None:
+                raise ValueError("human review clock must be timezone-aware")
+            local = observed_at.astimezone(ZoneInfo("Asia/Shanghai"))
+            result = self.forward_delivery_readiness(
+                session=session,
+                _calendar_requirement=self._readiness_trading_session_requirement(
+                    session=session,
+                    observed_at=local,
+                ),
+            )
         except Exception as exc:  # 就绪状态必须始终可观测，绝不能挂起。
             observed_at = self._clock()
             if observed_at.tzinfo is None:

@@ -80,6 +80,8 @@ def fresh_monitor_events(events: Iterable[object], deduper: object) -> list[obje
     if not callable(unseen):
         raise TypeError("monitor event deduper must provide unseen(events)")
     return list(unseen(unique))
+
+
 _DIRECTION_LABELS = {
     "up": "向上",
     "down": "向下",
@@ -257,8 +259,7 @@ class HoldingMonitorRuntimeLedger:
         if (
             not isinstance(state["last_big_directions"], dict)
             or any(
-                not isinstance(key, str)
-                or value not in {"up", "down", "neutral"}
+                not isinstance(key, str) or value not in {"up", "down", "neutral"}
                 for key, value in state["last_big_directions"].items()
             )
             or not isinstance(state["active_outages"], dict)
@@ -305,9 +306,7 @@ class HoldingMonitorRuntimeLedger:
                     )
                     for value in raw[key]
                 )
-                or any(
-                    not isinstance(value, Mapping) for value in raw["charts"]
-                )
+                or any(not isinstance(value, Mapping) for value in raw["charts"])
             ):
                 return empty
             try:
@@ -351,9 +350,7 @@ class HoldingMonitorRuntimeLedger:
 
     def previous_direction(self, market: str, code: str) -> str | None:
         with self._lock:
-            value = self._state["last_big_directions"].get(
-                self.identity(market, code)
-            )
+            value = self._state["last_big_directions"].get(self.identity(market, code))
             return value if value in {"up", "down", "neutral"} else None
 
     def update_directions(self, market: str, values: Mapping[str, str]) -> None:
@@ -371,9 +368,7 @@ class HoldingMonitorRuntimeLedger:
 
     def outage_active(self, market: str, code: str) -> bool:
         with self._lock:
-            return bool(
-                self._state["active_outages"].get(self.identity(market, code))
-            )
+            return bool(self._state["active_outages"].get(self.identity(market, code)))
 
     def set_outage(self, market: str, code: str, active: bool) -> None:
         with self._lock:
@@ -421,14 +416,10 @@ class HoldingMonitorRuntimeLedger:
     def snapshot(self) -> dict[str, object]:
         with self._lock:
             success_count = int(self._state["success_count"])
-            simulated_success_count = int(
-                self._state["simulated_success_count"]
-            )
+            simulated_success_count = int(self._state["simulated_success_count"])
             failure_count = int(self._state["failure_count"])
             expired_event_count = int(self._state["expired_event_count"])
-            consecutive_failures = int(
-                self._state["consecutive_failure_count"]
-            )
+            consecutive_failures = int(self._state["consecutive_failure_count"])
             pending_count = sum(
                 len(value.get("identities", []))
                 for value in self._state["pending_notifications"].values()
@@ -454,9 +445,7 @@ class HoldingMonitorRuntimeLedger:
                 "operationally_verified": bool(success_count),
                 "status": status,
                 "reason_code": reason,
-                "delivered_event_count": int(
-                    self._state["delivered_event_count"]
-                ),
+                "delivered_event_count": int(self._state["delivered_event_count"]),
                 "success_count": success_count,
                 "simulated_success_count": simulated_success_count,
                 "failure_count": failure_count,
@@ -536,21 +525,15 @@ class HoldingMonitorRuntimeLedger:
                 "charts",
                 "transition_codes",
             )
-        ) or any(
-            not isinstance(value, Mapping) for value in payload["charts"]
-        ):
+        ) or any(not isinstance(value, Mapping) for value in payload["charts"]):
             raise ValueError("pending holding notification is malformed")
         with self._lock:
             self._state["pending_notifications"][market] = {
                 "title": str(payload["title"]),
                 "lines": [str(value) for value in payload["lines"]],
-                "identities": [
-                    str(value) for value in payload["identities"]
-                ],
+                "identities": [str(value) for value in payload["identities"]],
                 "codes": [str(value) for value in payload["codes"]],
-                "charts": [
-                    dict(value) for value in payload["charts"]
-                ],
+                "charts": [dict(value) for value in payload["charts"]],
                 "transition_codes": [
                     str(value) for value in payload["transition_codes"]
                 ],
@@ -611,9 +594,7 @@ class HoldingMonitorRuntimeLedger:
                     pending_notifications[market] = {
                         "title": str(raw.get("title") or "持仓结构雷达"),
                         "lines": [str(lines[index]) for index in keep],
-                        "identities": [
-                            str(identities[index]) for index in keep
-                        ],
+                        "identities": [str(identities[index]) for index in keep],
                         "codes": retained_codes,
                         "charts": [
                             dict(charts[index])
@@ -622,9 +603,7 @@ class HoldingMonitorRuntimeLedger:
                             and isinstance(charts[index], Mapping)
                         ],
                         "transition_codes": [
-                            code
-                            for code in retained_codes
-                            if code in transition_codes
+                            code for code in retained_codes if code in transition_codes
                         ],
                         "queued_at": str(raw.get("queued_at") or ""),
                     }
@@ -772,10 +751,7 @@ def _notification_line(event: object) -> str:
         if not is_holding:
             advice = advice.replace("增持", "买入")
             if side == "sell":
-                advice = (
-                    "建议：不新开仓；已有仓位时"
-                    + advice.removeprefix("建议：")
-                )
+                advice = "建议：不新开仓；已有仓位时" + advice.removeprefix("建议：")
     elif side == "buy":
         action = "增持" if is_holding else "买入"
         advice = f"建议：人工确认后再考虑{action}"
@@ -939,8 +915,7 @@ class HoldingGroupMonitorService:
                     {
                         "charts": list(charts),
                         "require_evidence_match": any(
-                            value.get("evidence_required") is True
-                            for value in charts
+                            value.get("evidence_required") is True for value in charts
                         ),
                     },
                 )
@@ -976,8 +951,7 @@ class HoldingGroupMonitorService:
                     "market": market,
                     "code": str(getattr(event, "code", "")),
                     "name": str(
-                        getattr(event, "name", "")
-                        or getattr(event, "code", "")
+                        getattr(event, "name", "") or getattr(event, "code", "")
                     ),
                     "artifact_key": str(getattr(event, "identity")),
                     "observed_at": str(getattr(event, "signal_time", "")),
@@ -1008,13 +982,8 @@ class HoldingGroupMonitorService:
         identities = [str(value) for value in pending["identities"]]
         lines = [str(value) for value in pending["lines"]]
         codes = [str(value) for value in pending["codes"]]
-        transitions = [
-            str(value) for value in pending["transition_codes"]
-        ]
-        charts = [
-            dict(value)
-            for value in pending["charts"]
-        ]
+        transitions = [str(value) for value in pending["transition_codes"]]
+        charts = [dict(value) for value in pending["charts"]]
         seen = set(identities)
         extra_identities = list(additional["identities"])
         extra_lines = list(additional["lines"])
@@ -1154,14 +1123,10 @@ class HoldingGroupMonitorService:
                     "name": name,
                     "groups": sorted(groups),
                     "is_holding": is_holding,
-                    "monitoring_scope": (
-                        "HOLDING" if is_holding else "WATCHLIST"
-                    ),
+                    "monitoring_scope": ("HOLDING" if is_holding else "WATCHLIST"),
                 }
                 continue
-            existing["groups"] = sorted(
-                set(existing.get("groups", ())) | groups
-            )
+            existing["groups"] = sorted(set(existing.get("groups", ())) | groups)
             combined_holding = bool(existing.get("is_holding") or is_holding)
             existing["is_holding"] = combined_holding
             existing["monitoring_scope"] = (
@@ -1243,9 +1208,7 @@ class HoldingGroupMonitorService:
                 "sent_count": 0,
             }
         try:
-            is_open = bool(
-                self._market_open_provider(exchange, market, observed_at)
-            )
+            is_open = bool(self._market_open_provider(exchange, market, observed_at))
         except Exception as exc:
             return {
                 "market": market,
@@ -1280,9 +1243,7 @@ class HoldingGroupMonitorService:
         states = self._sync_market_states(market, rows, exchange)
         names = {str(row["code"]): str(row["name"]) for row in rows}
         holding_codes = {
-            str(row["code"])
-            for row in rows
-            if row.get("is_holding", True) is True
+            str(row["code"]) for row in rows if row.get("is_holding", True) is True
         }
         try:
             events = self._event_collector(
@@ -1313,9 +1274,7 @@ class HoldingGroupMonitorService:
             for code, state in states.items()
         }
         warmup_incomplete = {
-            code: int(
-                getattr(state, "consecutive_warmup_incomplete", 0) or 0
-            )
+            code: int(getattr(state, "consecutive_warmup_incomplete", 0) or 0)
             for code, state in states.items()
         }
         refresh_failed_codes = {
@@ -1328,9 +1287,7 @@ class HoldingGroupMonitorService:
             and getattr(state, "warmup_ready", True) is not True
         }
         stalled_warmup_codes = {
-            code
-            for code in warming_codes
-            if warmup_incomplete.get(code, 0) >= 3
+            code for code in warming_codes if warmup_incomplete.get(code, 0) >= 3
         }
         failed_codes = refresh_failed_codes | stalled_warmup_codes
         # 绝不发布由过期状态或不完整多周期预热计算的线索。刷新失败后收集器仍可能返回
@@ -1338,8 +1295,7 @@ class HoldingGroupMonitorService:
         events = [
             event
             for event in events
-            if str(getattr(event, "code", ""))
-            not in failed_codes | warming_codes
+            if str(getattr(event, "code", "")) not in failed_codes | warming_codes
         ]
         current_directions: dict[str, str] = {}
         for code, state in states.items():
@@ -1583,7 +1539,9 @@ class HoldingGroupMonitorService:
             positions.sort(key=lambda row: (str(row["market"]), str(row["code"])))
             failed_count = sum(row.get("status") == "error" for row in positions)
             active_count = sum(row.get("status") == "monitoring" for row in positions)
-            closed_count = sum(row.get("status") == "market_closed" for row in positions)
+            closed_count = sum(
+                row.get("status") == "market_closed" for row in positions
+            )
             awaiting_count = sum(
                 row.get("status") in {"awaiting_first_run", "warming_up"}
                 for row in positions
@@ -1624,8 +1582,7 @@ class HoldingGroupMonitorService:
                     int(row.get("sent_count", 0)) for row in market_results
                 ),
                 "health_alert_count": sum(
-                    int(row.get("health_alert_count", 0))
-                    for row in market_results
+                    int(row.get("health_alert_count", 0)) for row in market_results
                 ),
                 "positions": positions,
                 "markets": market_results,
@@ -1645,11 +1602,10 @@ class HoldingGroupMonitorService:
                 return JOB_ID
             scheduler.add_job(
                 self.run_once,
-                trigger=IntervalTrigger(
-                    seconds=max(30, self._config.interval_seconds)
-                ),
+                trigger=IntervalTrigger(seconds=max(30, self._config.interval_seconds)),
                 id=JOB_ID,
                 name=JOB_DISPLAY_NAMES[JOB_ID],
+                executor="realtime_monitor",
                 max_instances=1,
                 coalesce=True,
                 replace_existing=True,
@@ -1751,7 +1707,9 @@ class HoldingGroupMonitorService:
                 "stale": stale,
                 "stale_after_seconds": stale_after_seconds,
                 "declared_count": 0 if last is None else last.get("declared_count", 0),
-                "monitored_count": 0 if last is None else last.get("monitored_count", 0),
+                "monitored_count": 0
+                if last is None
+                else last.get("monitored_count", 0),
                 "covered_count": 0 if last is None else last.get("covered_count", 0),
                 "active_count": 0 if last is None else last.get("active_count", 0),
                 "closed_count": 0 if last is None else last.get("closed_count", 0),

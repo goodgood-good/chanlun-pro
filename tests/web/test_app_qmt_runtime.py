@@ -60,9 +60,9 @@ def _observation(
         "log_retention_days": 30,
         "log_max_total_bytes": 104857600,
         "main_process_count": 1 if ready else 0,
-        "process_count": (
-            1 if ready else 0
-        ) if process_count is None else process_count,
+        "process_count": (1 if ready else 0)
+        if process_count is None
+        else process_count,
         "main_started_at": started_at,
         "processes": [],
         "error": None,
@@ -172,9 +172,9 @@ def test_startup_ensures_missing_qmt_then_registers_owned_jobs(
         "QMT 工作日启动维护（应用托管）"
     )
     assert scheduler.jobs[QMT_MONITOR_JOB_ID]["minutes"] == 1
-    assert scheduler.jobs[QMT_MONITOR_JOB_ID]["name"] == (
-        "QMT 运行状态与故障恢复监控"
-    )
+    assert scheduler.jobs[QMT_MONITOR_JOB_ID]["name"] == ("QMT 运行状态与故障恢复监控")
+    assert scheduler.jobs[QMT_DAILY_JOB_ID]["executor"] == "qmt_runtime"
+    assert scheduler.jobs[QMT_MONITOR_JOB_ID]["executor"] == "qmt_runtime"
     snapshot = controller.snapshot()
     assert snapshot["contract_id"] == APP_QMT_CONTRACT_ID
     assert snapshot["execution_owner"] == "APP_RUNTIME"

@@ -258,9 +258,10 @@ def test_scheduler_contract_rotation_invalidates_prior_phase_state(
     controller.register_jobs()
 
     snapshot = controller.snapshot()
-    assert snapshot["forward_contract_id"] == load_forward_contract(
-        PARAMETER_SNAPSHOT
-    ).contract_id
+    assert (
+        snapshot["forward_contract_id"]
+        == load_forward_contract(PARAMETER_SNAPSHOT).contract_id
+    )
     assert snapshot["forward_ledger_contract"]["ready"] is True
     assert {task["phase_status"] for task in snapshot["tasks"]} == {"PENDING"}
 
@@ -295,12 +296,11 @@ def test_registers_exact_due_jobs_and_app_readiness_contract(
     )
     assert scheduler.jobs[EVALUATE_JOB_ID]["misfire_grace_time"] == 8 * 60 * 60
     assert scheduler.jobs[RECONCILE_JOB_ID]["minutes"] == 5
-    assert scheduler.jobs[RECONCILE_JOB_ID]["name"] == (
-        "统一策略前向模拟失败恢复协调"
-    )
-    assert scheduler.jobs[STARTUP_JOB_ID]["name"] == (
-        "统一策略前向模拟启动一致性检查"
-    )
+    assert scheduler.jobs[RECONCILE_JOB_ID]["name"] == ("统一策略前向模拟失败恢复协调")
+    assert scheduler.jobs[STARTUP_JOB_ID]["name"] == ("统一策略前向模拟启动一致性检查")
+    assert {scheduler.jobs[job_id]["executor"] for job_id in scheduler.jobs} == {
+        "forward_research"
+    }
 
     _start, evaluate_end = controller._window("EVALUATE", date(2026, 8, 3))
     assert evaluate_end == datetime(2026, 8, 3, 23, 0, tzinfo=CN)
@@ -346,17 +346,13 @@ def test_capture_runs_fresh_cli_once_and_persists_idempotent_success(
     command, kwargs = calls[0]
     assert command[0] == str(Path(sys.executable).resolve())
     assert command[-3:] == ["capture", "--source", "auto"]
-    assert command[command.index("--root") + 1] == str(
-        (tmp_path / "forward").resolve()
-    )
+    assert command[command.index("--root") + 1] == str((tmp_path / "forward").resolve())
     assert command[command.index("--session") + 1] == "2026-08-03"
     assert kwargs["cwd"] == str(ROOT)
     assert kwargs["check"] is False
 
     snapshot = validate_forward_scheduler_snapshot(controller.snapshot())
-    capture = next(
-        task for task in snapshot["tasks"] if task["phase"] == "CAPTURE"
-    )
+    capture = next(task for task in snapshot["tasks"] if task["phase"] == "CAPTURE")
     assert capture["phase_status"] == "SUCCEEDED"
     assert capture["attempt_count"] == 1
     assert capture["operationally_verified"] is True
@@ -386,9 +382,7 @@ def test_zero_exit_is_not_success_until_capture_event_is_observable(
 
     assert controller.capture_due() is False
     failed = next(
-        task
-        for task in controller.snapshot()["tasks"]
-        if task["phase"] == "CAPTURE"
+        task for task in controller.snapshot()["tasks"] if task["phase"] == "CAPTURE"
     )
     assert failed["phase_status"] == "RETRY_PENDING"
     assert failed["last_run_reason_code"] == (
@@ -400,9 +394,7 @@ def test_zero_exit_is_not_success_until_capture_event_is_observable(
     assert controller.capture_due() is True
     assert len(calls) == 2
     succeeded = next(
-        task
-        for task in controller.snapshot()["tasks"]
-        if task["phase"] == "CAPTURE"
+        task for task in controller.snapshot()["tasks"] if task["phase"] == "CAPTURE"
     )
     assert succeeded["phase_status"] == "SUCCEEDED"
     assert succeeded["attempt_count"] == 2
@@ -433,9 +425,7 @@ def test_restart_adopts_existing_same_session_capture_after_window(
 
     assert calls == []
     capture = next(
-        task
-        for task in controller.snapshot()["tasks"]
-        if task["phase"] == "CAPTURE"
+        task for task in controller.snapshot()["tasks"] if task["phase"] == "CAPTURE"
     )
     assert capture["phase_status"] == "SUCCEEDED"
     assert capture["last_run_reason_code"] == "CAPTURE_ALREADY_DELIVERED"
@@ -471,9 +461,7 @@ def test_evaluate_retries_inside_frozen_window_then_succeeds(
     assert len(calls) == 2
     assert calls[0][-1] == "evaluate"
     snapshot = controller.snapshot()
-    evaluate = next(
-        task for task in snapshot["tasks"] if task["phase"] == "EVALUATE"
-    )
+    evaluate = next(task for task in snapshot["tasks"] if task["phase"] == "EVALUATE")
     assert evaluate["phase_status"] == "SUCCEEDED"
     assert evaluate["attempt_count"] == 2
 
@@ -506,9 +494,7 @@ def test_evaluate_waits_for_shared_readiness_without_polluting_cli_ledger(
     assert controller.evaluate_due() is False
     assert calls == []
     waiting = next(
-        task
-        for task in controller.snapshot()["tasks"]
-        if task["phase"] == "EVALUATE"
+        task for task in controller.snapshot()["tasks"] if task["phase"] == "EVALUATE"
     )
     assert waiting["phase_status"] == "WAITING"
     assert waiting["attempt_count"] == 0
@@ -520,9 +506,7 @@ def test_evaluate_waits_for_shared_readiness_without_polluting_cli_ledger(
 
     assert len(calls) == 1
     completed = next(
-        task
-        for task in controller.snapshot()["tasks"]
-        if task["phase"] == "EVALUATE"
+        task for task in controller.snapshot()["tasks"] if task["phase"] == "EVALUATE"
     )
     assert completed["phase_status"] == "SUCCEEDED"
 
@@ -548,9 +532,7 @@ def test_existing_evaluation_delivery_is_adopted_without_cli_replay(
     assert controller.evaluate_due() is True
     assert calls == []
     completed = next(
-        task
-        for task in controller.snapshot()["tasks"]
-        if task["phase"] == "EVALUATE"
+        task for task in controller.snapshot()["tasks"] if task["phase"] == "EVALUATE"
     )
     assert completed["phase_status"] == "SUCCEEDED"
 
@@ -631,9 +613,7 @@ def test_non_trading_session_records_no_sample_without_running_tool(
 
     assert calls == []
     snapshot = controller.snapshot()
-    assert {task["phase_status"] for task in snapshot["tasks"]} == {
-        "NO_SAMPLE"
-    }
+    assert {task["phase_status"] for task in snapshot["tasks"]} == {"NO_SAMPLE"}
     assert snapshot["operationally_verified"] is False
     assert snapshot["live_status"] == "LIVE_DISABLED"
 

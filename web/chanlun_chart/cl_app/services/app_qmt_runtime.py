@@ -201,9 +201,7 @@ class AppQmtRuntimeController:
                 and existing.get("pid") != os.getpid()
                 and pid_alive(existing.get("pid"))
             ):
-                raise RuntimeError(
-                    "another live app process owns the QMT runtime"
-                )
+                raise RuntimeError("another live app process owns the QMT runtime")
             _atomic_json(
                 self._owner_path,
                 {
@@ -213,9 +211,7 @@ class AppQmtRuntimeController:
                     "pid": os.getpid(),
                     "project_root": str(self._root),
                     "helper_script": str(self._helper),
-                    "registered_at": _canonical_at(
-                        self._registered_at or observed_at
-                    ),
+                    "registered_at": _canonical_at(self._registered_at or observed_at),
                     "heartbeat_at": _canonical_at(observed_at),
                     **_SAFETY,
                 },
@@ -368,8 +364,7 @@ class AppQmtRuntimeController:
         self._claim_owner(observed_at)
         status = self._operate("Status", notify_change=False)
         in_catchup = bool(
-            observed_at.weekday() < 5
-            and time(8, 30) <= observed_at.time() <= time(10)
+            observed_at.weekday() < 5 and time(8, 30) <= observed_at.time() <= time(10)
         )
         if in_catchup and not self._fresh_for_session(status, observed_at):
             status = self._operate("Restart", notify_change=False)
@@ -384,9 +379,7 @@ class AppQmtRuntimeController:
             )
         elif status.get("ready") is not True:
             recovery_action = (
-                "Restart"
-                if int(status.get("process_count", 0) or 0) > 0
-                else "Ensure"
+                "Restart" if int(status.get("process_count", 0) or 0) > 0 else "Ensure"
             )
             status = self._operate(
                 recovery_action,
@@ -414,6 +407,7 @@ class AppQmtRuntimeController:
                 "replace_existing": True,
                 "coalesce": True,
                 "max_instances": 1,
+                "executor": "qmt_runtime",
             }
             self._scheduler.add_job(
                 self.daily_restart,
@@ -455,9 +449,7 @@ class AppQmtRuntimeController:
             observed_at=self._now(),
             status="SUCCEEDED" if success else "FAILED",
             reason_code=(
-                "QMT_DAILY_RESTART_SUCCEEDED"
-                if success
-                else "QMT_DAILY_RESTART_FAILED"
+                "QMT_DAILY_RESTART_SUCCEEDED" if success else "QMT_DAILY_RESTART_FAILED"
             ),
         )
         return success
@@ -476,9 +468,7 @@ class AppQmtRuntimeController:
         ):
             return False
         recovery_action = (
-            "Restart"
-            if int(status.get("process_count", 0) or 0) > 0
-            else "Ensure"
+            "Restart" if int(status.get("process_count", 0) or 0) > 0 else "Ensure"
         )
         result = self._operate(
             recovery_action,
@@ -494,9 +484,7 @@ class AppQmtRuntimeController:
             state = self._load_state()
         raw_observation = state.get("observation")
         observation = (
-            dict(raw_observation)
-            if isinstance(raw_observation, Mapping)
-            else {}
+            dict(raw_observation) if isinstance(raw_observation, Mapping) else {}
         )
         configured = not reasons
         process_ready = observation.get("ready") is True
@@ -513,14 +501,10 @@ class AppQmtRuntimeController:
         elif not observation_fresh:
             reason = "QMT_RUNTIME_OBSERVATION_STALE"
         elif not process_ready:
-            reason = str(
-                observation.get("reason_code") or "QMT_RUNTIME_NOT_OBSERVED"
-            )
+            reason = str(observation.get("reason_code") or "QMT_RUNTIME_NOT_OBSERVED")
         else:
             reason = "READY"
-        ready = bool(
-            configured and registered and observation_fresh and process_ready
-        )
+        ready = bool(configured and registered and observation_fresh and process_ready)
         registered_at = self._registered_at
         last_success = _parse_datetime(state.get("last_success_at"))
         operational = bool(
@@ -542,15 +526,15 @@ class AppQmtRuntimeController:
             "configuration_ready": configured,
             "operationally_verified": operational,
             "operational_status": (
-                "verified" if operational else "awaiting_first_success"
+                "verified"
+                if operational
+                else "awaiting_first_success"
                 if configured
                 else "not_verified"
             ),
-            "operational_reason_codes": [] if operational else [
-                "AWAITING_APP_QMT_SUCCESS"
-                if configured
-                else reason
-            ],
+            "operational_reason_codes": []
+            if operational
+            else ["AWAITING_APP_QMT_SUCCESS" if configured else reason],
             "registered_at": (
                 None if registered_at is None else _canonical_at(registered_at)
             ),
@@ -564,9 +548,7 @@ class AppQmtRuntimeController:
             "qmt_directory": observation.get("qmt_directory"),
             "log_retention_days": observation.get("log_retention_days"),
             "log_max_total_bytes": observation.get("log_max_total_bytes"),
-            "main_process_count": int(
-                observation.get("main_process_count", 0) or 0
-            ),
+            "main_process_count": int(observation.get("main_process_count", 0) or 0),
             "main_started_at": observation.get("main_started_at"),
             "processes": observation.get("processes", []),
             "error": state.get("error"),

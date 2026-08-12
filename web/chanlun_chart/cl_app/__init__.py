@@ -53,6 +53,7 @@ from chanlun.security import (
 from chanlun.decision_support.trading_system.trading_session import (
     DEFAULT_OFFICIAL_TRADING_CALENDAR_PATH,
     authoritative_trading_session_evidence,
+    official_trading_session_evidence,
 )
 from chanlun.decision_support.trading_system.decision_source_provenance import (
     calculate_forward_application_source_revision,
@@ -76,10 +77,7 @@ def _human_review_historical_report() -> pathlib.Path:
     """返回当前系统唯一的历史人工复核快照路径。"""
     repository_root = pathlib.Path(__file__).resolve().parents[3]
     return (
-        repository_root
-        / ".cache"
-        / "chanlun_human_review"
-        / "human_review_screen.json"
+        repository_root / ".cache" / "chanlun_human_review" / "human_review_screen.json"
     )
 
 
@@ -144,6 +142,7 @@ def create_app(test_config=None, start_scheduler=False):
         MAX_FORM_PARTS=500,
         WTF_CSRF_TIME_LIMIT=12 * 60 * 60,
         READINESS_MARKETS=os.environ.get("CHANLUN_READINESS_MARKETS", "a"),
+        TRADING_SCREENING_SNAPSHOT_PATH=None,
         TRADING_SCREENING_BACKGROUND_ENABLED=True,
         TRADING_SCREENING_PRIORITY_MONITOR_ENABLED=True,
         # 全市场覆盖有意设为显式启用；常驻优先级/持仓监听绝不能把网页重启变成隐式的
@@ -227,22 +226,36 @@ def create_app(test_config=None, start_scheduler=False):
         ),
         TRADING_SCREENING_NATIVE_PROCESS_ISOLATION=True,
         TRADING_SCREENING_NATIVE_STARTUP_TIMEOUT_SECONDS=45.0,
-        TRADING_SCREENING_NATIVE_IDLE_TIMEOUT_SECONDS=210.0,
-        TRADING_SCREENING_NATIVE_RESTART_BACKOFF_SECONDS=30.0,
-        # 一个已认证工作进程只能占满一个 CPU 核；个股结构任务使用约一半逻辑 CPU，
-        # 最多八个，为 QMT、Flask、图表和操作系统留出容量。
-        TRADING_SCREENING_STOCK_WORKERS=int(
+        # 单次原生 QMT 调用超过一分钟没有任何进度时终止并重建隔离进程，避免一个
+        # 150 秒级 RPC 卡住整个扫描批次。该上限必须大于客户端自身 45 秒超时。
+        TRADING_SCREENING_NATIVE_IDLE_TIMEOUT_SECONDS=float(
             os.environ.get(
-                "CHANLUN_TRADING_SCREENING_STOCK_WORKERS",
-                # 使用约八分之五的逻辑 CPU，最多十个。当前 10 核 16 线程主机上相当于
-                # 每个物理核心一个工作进程，并保留六个逻辑 CPU 给 QMT、Flask、图表
-                # 渲染和通知投递。
-                str(
-                    min(
-                        10,
-                        max(1, (((os.cpu_count() or 4) * 5) + 7) // 8),
-                    )
+                "CHANLUN_TRADING_SCREENING_NATIVE_IDLE_TIMEOUT_SECONDS",
+                "60",
+            )
+        ),
+        TRADING_SCREENING_NATIVE_RESTART_BACKOFF_SECONDS=30.0,
+        # QMT 本地 RPC 是共享瓶颈，不应按逻辑 CPU 数线性扩张。最多四个隔离结构
+        # 进程，盘中完整覆盖暂停后，这四路全部可供分钟监听使用；盘后仍为图表、
+        # QMT 维护与通知保留容量。
+        TRADING_SCREENING_STOCK_WORKERS=int(
+            min(
+                4,
+                max(
+                    1,
+                    int(
+                        os.environ.get(
+                            "CHANLUN_TRADING_SCREENING_STOCK_WORKERS",
+                            str(min(4, max(1, (os.cpu_count() or 4) // 4))),
+                        )
+                    ),
                 ),
+            )
+        ),
+        TRADING_SCREENING_FULL_COVERAGE_WORKERS=int(
+            os.environ.get(
+                "CHANLUN_TRADING_SCREENING_FULL_COVERAGE_WORKERS",
+                "3",
             )
         ),
         FORWARD_SCHEDULER_MONITOR_ENABLED=True,
@@ -358,9 +371,23 @@ def create_app(test_config=None, start_scheduler=False):
         timezone=pytz.timezone("Asia/Shanghai"),
         executors={
             "default": RestartableDaemonPoolExecutor(
-                max_workers=10,
-                max_pending=100,
-            )
+                max_workers=8,
+                max_pending=64,
+            ),
+            # 三条运行通道互不借用线程：慢速前向复核或 QMT 维护不能挤掉
+            # 每分钟持仓/关注监听。
+            "realtime_monitor": RestartableDaemonPoolExecutor(
+                max_workers=2,
+                max_pending=4,
+            ),
+            "qmt_runtime": RestartableDaemonPoolExecutor(
+                max_workers=2,
+                max_pending=4,
+            ),
+            "forward_research": RestartableDaemonPoolExecutor(
+                max_workers=2,
+                max_pending=8,
+            ),
         },
     )
     scheduler.my_task_list = {}
@@ -986,8 +1013,14 @@ def create_app(test_config=None, start_scheduler=False):
             try:
                 capture_probe = getattr(
                     human_review_service,
-                    "forward_archive_capture_readiness",
+                    "forward_archive_capture_readiness_nonblocking",
+                    None,
                 )
+                if not callable(capture_probe):
+                    capture_probe = getattr(
+                        human_review_service,
+                        "forward_archive_capture_readiness",
+                    )
                 capture_component = dict(capture_probe(session=forward_session))
             except Exception as exc:
                 app.logger.exception("forward archive capture readiness failed")
@@ -2007,6 +2040,10 @@ def create_app(test_config=None, start_scheduler=False):
         raise TypeError("trading screening calendar provider is unavailable")
     if official_calendar_path is None:
         trading_session_provider = qmt_calendar_provider
+
+        def readiness_trading_session_provider(*, session, observed_at):
+            raise RuntimeError("official trading calendar unavailable")
+
     else:
 
         def trading_session_provider(*, session, observed_at):
@@ -2016,6 +2053,16 @@ def create_app(test_config=None, start_scheduler=False):
                 calendar_path=pathlib.Path(official_calendar_path),
                 fallback_provider=qmt_calendar_provider,
             )
+
+        def readiness_trading_session_provider(*, session, observed_at):
+            evidence = official_trading_session_evidence(
+                session=session,
+                observed_at=observed_at,
+                calendar_path=pathlib.Path(official_calendar_path),
+            )
+            if evidence is None:
+                raise RuntimeError("session is outside official calendar coverage")
+            return evidence
 
     if (
         app.config.get("TRADING_SCREENING_NATIVE_PROCESS_ISOLATION", True)
@@ -2074,8 +2121,8 @@ def create_app(test_config=None, start_scheduler=False):
             "status": "evidence_unavailable",
             "evidence_grade": "invalid",
         }
-    selection_research_path = config.get_data_path() / "decision_support" / (
-        "selection_research.json"
+    selection_research_path = (
+        config.get_data_path() / "decision_support" / ("selection_research.json")
     )
     try:
         selection_research = (
@@ -2092,15 +2139,23 @@ def create_app(test_config=None, start_scheduler=False):
             str(exc)[:160],
         )
         selection_research = ()
+    configured_screening_snapshot_path = app.config.get(
+        "TRADING_SCREENING_SNAPSHOT_PATH"
+    )
+    trading_screening_snapshot_path = (
+        pathlib.Path(configured_screening_snapshot_path)
+        if configured_screening_snapshot_path
+        else (
+            config.get_data_path()
+            / "decision_support"
+            / "trading_screening_snapshot.json"
+        )
+    )
     decision_support_trading_screening = TradingScreeningService(
         market_data=trading_gateway,
         sector_catalog=trading_gateway,
         engine=HumanAssistedDecisionCore(),
-        cache_path=(
-            config.get_data_path()
-            / "decision_support"
-            / "trading_screening_snapshot.json"
-        ),
+        cache_path=trading_screening_snapshot_path,
         human_review_archive_root=pathlib.Path(
             app.config["HUMAN_REVIEW_LIVE_ARCHIVE_ROOT"]
         ),
@@ -2173,11 +2228,13 @@ def create_app(test_config=None, start_scheduler=False):
                 if app.config.get("TRADING_SCREENING_NATIVE_PROCESS_ISOLATION", True)
                 else 1
             ),
+            full_coverage_worker_count=(
+                int(app.config["TRADING_SCREENING_FULL_COVERAGE_WORKERS"])
+                if app.config.get("TRADING_SCREENING_NATIVE_PROCESS_ISOLATION", True)
+                else 1
+            ),
         ),
         backtest_verdict=backtest_verdict,
-    )
-    trading_screening_snapshot_path = (
-        config.get_data_path() / "decision_support" / "trading_screening_snapshot.json"
     )
     repository_root = pathlib.Path(__file__).resolve().parents[3]
     from .services.app_qmt_runtime import AppQmtRuntimeController
@@ -2316,6 +2373,7 @@ def create_app(test_config=None, start_scheduler=False):
         ),
         sector_capture_due=datetime.time(9, 10),
         trading_session_provider=trading_session_provider,
+        readiness_trading_session_provider=readiness_trading_session_provider,
         forward_scheduler_provider=(
             forward_scheduler_probe.snapshot
             if app.config.get("FORWARD_SCHEDULER_MONITOR_ENABLED", True)

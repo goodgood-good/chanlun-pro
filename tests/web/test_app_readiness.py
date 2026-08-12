@@ -23,14 +23,11 @@ def _raise_external_call(*_args, **_kwargs):
 
 class _FakeExchange:
     def ticks(self, codes):
-        return {
-            code: SimpleNamespace(last=2.5, rate=1.25)
-            for code in codes
-        }
+        return {code: SimpleNamespace(last=2.5, rate=1.25) for code in codes}
 
 
 @pytest.fixture
-def app(monkeypatch):
+def app(monkeypatch, tmp_path):
     monkeypatch.setenv("CHANLUN_BUILD_REVISION", "test-revision")
     flask_app = create_app(
         test_config={
@@ -38,6 +35,9 @@ def app(monkeypatch):
             "LOGIN_DISABLED": True,
             "VALIDATE_WEB_SECURITY": False,
             "SCHEDULER_ENABLED": False,
+            "TRADING_SCREENING_SNAPSHOT_PATH": (
+                tmp_path / "trading_screening_snapshot.json"
+            ),
             "WTF_CSRF_ENABLED": False,
         }
     )
@@ -140,6 +140,7 @@ def test_index_loads_only_requested_market_metadata(app, monkeypatch):
     assert 'var initial_market = "hk";' in body
     assert 'location.replace("/?market="' in body
     assert 'location.assign("/?market="' in body
+
 
 def test_readyz_uses_only_local_snapshots(app, monkeypatch):
     monkeypatch.setattr(stock_list_service, "get_exchange", _raise_external_call)
@@ -274,9 +275,7 @@ def test_readyz_rejects_supported_but_unmonitored_market(app):
     assert response.get_json()["reasons"] == ["market_not_monitored"]
 
 
-def test_metadata_warmup_is_background_and_eventually_makes_ready(
-    app, monkeypatch
-):
+def test_metadata_warmup_is_background_and_eventually_makes_ready(app, monkeypatch):
     started = Event()
     release = Event()
     loaded = set()
@@ -394,6 +393,7 @@ def test_ticks_dependency_error_remains_not_ready_after_details_expire():
         "error": None,
     }
 
+
 def test_readyz_requires_scheduler_only_when_enabled(app):
     app.config["SCHEDULER_ENABLED"] = True
     app.extensions["readiness"].record_ticks_success("a")
@@ -507,6 +507,22 @@ def test_readyz_requires_screening_attestation_when_runtime_is_running(app):
                 "reasons": [],
             }
         )
+        app.extensions["decision_support_human_review"] = SimpleNamespace(
+            forward_archive_capture_readiness_nonblocking=lambda *, session: {
+                "required": False,
+                "ready": False,
+                "status": "not_due",
+                "reason_code": "FORWARD_SESSION_NOT_DUE",
+                "session": session,
+            },
+            forward_delivery_readiness_nonblocking=lambda *, session: {
+                "required": False,
+                "ready": False,
+                "status": "not_due",
+                "reason_code": "FORWARD_SESSION_NOT_DUE",
+                "session": session,
+            },
+        )
         recovered = app.test_client().get("/readyz?market=a")
         assert recovered.status_code == 200
         assert recovered.get_json()["reasons"] == []
@@ -558,18 +574,15 @@ def test_readyz_does_not_call_a_complete_screen_a_complete_forward_archive(app):
             "live_status": "LIVE_DISABLED",
         }
         app.extensions["decision_support_human_review"] = SimpleNamespace(
-            forward_archive_capture_readiness=lambda *, session: dict(capture),
-            forward_delivery_readiness=lambda *, session: (
-                _raise_external_call()
+            forward_archive_capture_readiness=lambda *, session: _raise_external_call(),
+            forward_archive_capture_readiness_nonblocking=lambda *, session: dict(
+                capture
             ),
-            forward_delivery_readiness_nonblocking=lambda *, session: dict(
-                delivery
-            ),
+            forward_delivery_readiness=lambda *, session: _raise_external_call(),
+            forward_delivery_readiness_nonblocking=lambda *, session: dict(delivery),
         )
 
-        blocked = app.test_client().get(
-            "/readyz?market=a&forward_session=2026-07-29"
-        )
+        blocked = app.test_client().get("/readyz?market=a&forward_session=2026-07-29")
 
         # Forward evidence is a research pipeline component. Its absence must
         # not falsely make the Web process itself unavailable.
@@ -582,9 +595,7 @@ def test_readyz_does_not_call_a_complete_screen_a_complete_forward_archive(app):
         assert archive["reason_code"] == "REQUIRED_CAPTURE_MISSING"
         assert archive["screening_review_ready"] is True
         assert archive["sector_capture_ready"] is False
-        assert archive["sector_capture_reason_code"] == (
-            "REQUIRED_CAPTURE_MISSING"
-        )
+        assert archive["sector_capture_reason_code"] == ("REQUIRED_CAPTURE_MISSING")
         delivery_component = payload["components"]["forward_delivery"]
         assert delivery_component["ready"] is False
         assert delivery_component["reason_code"] == (
@@ -603,9 +614,11 @@ def test_readyz_does_not_call_a_complete_screen_a_complete_forward_archive(app):
             trading_session_status="UNRESOLVED",
             reason_code="TRADING_SESSION_EVIDENCE_UNAVAILABLE",
         )
-        unresolved = app.test_client().get(
-            "/readyz?market=a&forward_session=2026-07-29"
-        ).get_json()["components"]
+        unresolved = (
+            app.test_client()
+            .get("/readyz?market=a&forward_session=2026-07-29")
+            .get_json()["components"]
+        )
         assert unresolved["forward_archive"]["required"] is None
         assert unresolved["forward_archive"]["requirement_resolved"] is False
         assert unresolved["forward_delivery"]["required"] is None
@@ -618,9 +631,7 @@ def test_readyz_does_not_call_a_complete_screen_a_complete_forward_archive(app):
             reason_code="READY",
             receipt_proven=True,
         )
-        ready = app.test_client().get(
-            "/readyz?market=a&forward_session=2026-07-29"
-        )
+        ready = app.test_client().get("/readyz?market=a&forward_session=2026-07-29")
         archive = ready.get_json()["components"]["forward_archive"]
         assert archive["ready"] is True
         assert archive["status"] == "ready"
@@ -638,9 +649,11 @@ def test_readyz_does_not_call_a_complete_screen_a_complete_forward_archive(app):
             reason_code="READY",
             evaluation_ready=True,
         )
-        completed = app.test_client().get(
-            "/readyz?market=a&forward_session=2026-07-29"
-        ).get_json()
+        completed = (
+            app.test_client()
+            .get("/readyz?market=a&forward_session=2026-07-29")
+            .get_json()
+        )
         assert completed["components"]["forward_archive"]["ready"] is True
         assert completed["components"]["forward_delivery"]["ready"] is True
     finally:
@@ -676,9 +689,7 @@ def test_readyz_exposes_forward_scheduler_contract_without_masking_web_health(
         app.extensions["forward_scheduler_probe"] = SimpleNamespace(
             snapshot=lambda: {
                 "schema": "chanlun-forward-scheduler-readiness",
-                "contract_id": (
-                    "chanlun-forward-scheduler/app-runtime-contract"
-                ),
+                "contract_id": ("chanlun-forward-scheduler/app-runtime-contract"),
                 "execution_owner": "APP_RUNTIME",
                 "ready": False,
                 "status": "not_ready",
@@ -713,9 +724,7 @@ def test_readyz_exposes_forward_scheduler_contract_without_masking_web_health(
         component = payload["components"]["forward_scheduler"]
         assert component["required"] is True
         assert component["ready"] is False
-        assert component["reason_code"] == (
-            "SCHEDULED_TASK_PRINCIPAL_MISMATCH"
-        )
+        assert component["reason_code"] == ("SCHEDULED_TASK_PRINCIPAL_MISMATCH")
         # Research delivery remains a distinct red component; it must not make
         # the chart/Web process itself unavailable.
         assert payload["status"] == "ready"
@@ -725,9 +734,7 @@ def test_readyz_exposes_forward_scheduler_contract_without_masking_web_health(
 
 
 def test_readyz_rejects_an_invalid_forward_session(app):
-    response = app.test_client().get(
-        "/readyz?market=a&forward_session=not-a-session"
-    )
+    response = app.test_client().get("/readyz?market=a&forward_session=not-a-session")
 
     assert response.status_code == 400
     assert response.get_json()["reasons"] == ["invalid_forward_session"]
@@ -735,6 +742,7 @@ def test_readyz_rejects_an_invalid_forward_session(app):
 
 def test_production_calendar_provider_resolves_before_any_qmt_fallback(
     monkeypatch,
+    tmp_path,
 ):
     monkeypatch.setenv("CHANLUN_BUILD_REVISION", "test-official-calendar")
     flask_app = create_app(
@@ -743,6 +751,9 @@ def test_production_calendar_provider_resolves_before_any_qmt_fallback(
             "LOGIN_DISABLED": True,
             "VALIDATE_WEB_SECURITY": False,
             "SCHEDULER_ENABLED": False,
+            "TRADING_SCREENING_SNAPSHOT_PATH": (
+                tmp_path / "trading_screening_snapshot.json"
+            ),
             "WTF_CSRF_ENABLED": False,
             "TRADING_SESSION_OFFICIAL_CALENDAR_PATH": (
                 DEFAULT_OFFICIAL_TRADING_CALENDAR_PATH

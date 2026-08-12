@@ -41,9 +41,7 @@ from .job_names import JOB_DISPLAY_NAMES
 
 
 CN = ZoneInfo("Asia/Shanghai")
-APP_FORWARD_CONTRACT_ID = (
-    "chanlun-forward-scheduler/app-runtime-contract"
-)
+APP_FORWARD_CONTRACT_ID = "chanlun-forward-scheduler/app-runtime-contract"
 APP_FORWARD_STATE_SCHEMA = "chanlun-app-forward-runtime-state"
 APP_FORWARD_OWNER_SCHEMA = "chanlun-forward-execution-owner"
 FORWARD_READINESS_SCHEMA = "chanlun-forward-scheduler-readiness"
@@ -107,9 +105,7 @@ class _StoredForwardContract:
     def __init__(self, document: Mapping[str, object]) -> None:
         self._document = dict(document)
         self.contract_id = str(document["contract_id"])
-        self.strategy_parameter_set_id = str(
-            document["strategy_parameter_set_id"]
-        )
+        self.strategy_parameter_set_id = str(document["strategy_parameter_set_id"])
 
     @property
     def operational_status(self) -> str:
@@ -338,8 +334,7 @@ def evaluation_readiness_from_health(
             "reason_code": "EVALUATION_ALREADY_DELIVERED",
         }
     delivery_reason = str(
-        delivery.get("reason_code")
-        or "FORWARD_DELIVERY_READINESS_UNAVAILABLE"
+        delivery.get("reason_code") or "FORWARD_DELIVERY_READINESS_UNAVAILABLE"
     )
     if delivery_reason in {
         "CAPTURE_IMPLEMENTATION_PROVENANCE_UNATTESTED",
@@ -353,9 +348,7 @@ def evaluation_readiness_from_health(
             "reason_code": delivery_reason,
         }
     try:
-        market_cutoff = datetime.fromisoformat(
-            str(screening.get("market_data_as_of"))
-        )
+        market_cutoff = datetime.fromisoformat(str(screening.get("market_data_as_of")))
         if market_cutoff.tzinfo is None or market_cutoff.utcoffset() is None:
             raise ValueError("market cutoff must be timezone-aware")
         market_cutoff = market_cutoff.astimezone(CN)
@@ -368,8 +361,7 @@ def evaluation_readiness_from_health(
     except (TypeError, ValueError):
         pending_symbol_count = -1
     coverage_ready = bool(
-        screening.get("coverage_cycle_complete") is True
-        and pending_symbol_count == 0
+        screening.get("coverage_cycle_complete") is True and pending_symbol_count == 0
     )
     ready = bool(
         payload.get("status") == "ready"
@@ -408,9 +400,7 @@ class AppForwardSchedulerController:
         forward_root: Path | None = None,
         qmt_local_data_dir: Path | None,
         trading_session_provider: Callable[..., Mapping[str, object] | None],
-        capture_readiness_provider: (
-            Callable[..., Mapping[str, object]] | None
-        ) = None,
+        capture_readiness_provider: (Callable[..., Mapping[str, object]] | None) = None,
         evaluation_readiness_provider: (
             Callable[..., Mapping[str, object]] | None
         ) = None,
@@ -428,16 +418,10 @@ class AppForwardSchedulerController:
         self._forward_root = (
             Path(forward_root).resolve()
             if forward_root is not None
-            else (
-                self._root
-                / ".cache"
-                / "chanlun_human_review_forward"
-            ).resolve()
+            else (self._root / ".cache" / "chanlun_human_review_forward").resolve()
         )
         self._qmt = (
-            None
-            if qmt_local_data_dir is None
-            else Path(qmt_local_data_dir).resolve()
+            None if qmt_local_data_dir is None else Path(qmt_local_data_dir).resolve()
         )
         self._calendar = trading_session_provider
         self._capture_readiness = capture_readiness_provider
@@ -493,9 +477,7 @@ class AppForwardSchedulerController:
             reasons.append("PINNED_PYTHON_UNAVAILABLE")
         if not (self._root / "tools" / "run_forward_paper.py").is_file():
             reasons.append("FORWARD_TOOL_UNAVAILABLE")
-        if self._qmt is None or not (
-            self._qmt / "Sector" / "Temple" / "GICS"
-        ).is_dir():
+        if self._qmt is None or not (self._qmt / "Sector" / "Temple" / "GICS").is_dir():
             reasons.append("QMT_LOCAL_DATA_DIRECTORY_UNAVAILABLE")
         if self._registered and not bool(getattr(self._scheduler, "running", False)):
             reasons.append("APP_SCHEDULER_NOT_RUNNING")
@@ -566,15 +548,14 @@ class AppForwardSchedulerController:
             except (OSError, RuntimeError, TypeError, ValueError) as exc:
                 self._ledger_contract_preparation = None
                 self._forward_contract_id = None
-                self._ledger_contract_error = (
-                    f"{type(exc).__name__}: {str(exc)[:240]}"
-                )
+                self._ledger_contract_error = f"{type(exc).__name__}: {str(exc)[:240]}"
             self._registered_at = observed_at
             self._claim_owner(observed_at)
             common = {
                 "replace_existing": True,
                 "coalesce": True,
                 "max_instances": 1,
+                "executor": "forward_research",
             }
             self._scheduler.add_job(
                 self.capture_due,
@@ -627,9 +608,9 @@ class AppForwardSchedulerController:
         """Release only this process's execution-owner receipt."""
 
         with self._state_lock:
-        # ``scheduler.shutdown(wait=False)`` 用于限制 Web 停机等待时间。
-        # 若子阶段仍在运行，则保留所有者标记直到进程退出，避免第二个调度器
-        # 与仍活跃的子任务重叠执行。
+            # ``scheduler.shutdown(wait=False)`` 用于限制 Web 停机等待时间。
+            # 若子阶段仍在运行，则保留所有者标记直到进程退出，避免第二个调度器
+            # 与仍活跃的子任务重叠执行。
             if self._attempt_lock.locked():
                 self._registered = False
                 return
@@ -696,9 +677,7 @@ class AppForwardSchedulerController:
             observed_at=observed_at,
         )
 
-    def _adopt_existing_capture(
-        self, *, session: date, observed_at: datetime
-    ) -> bool:
+    def _adopt_existing_capture(self, *, session: date, observed_at: datetime) -> bool:
         if self._capture_readiness is None:
             return False
         try:
@@ -732,7 +711,10 @@ class AppForwardSchedulerController:
             state = self._load_state()
             session = observed_at.date()
             existing = self._phase_record(state, phase, session)
-            if existing is not None and existing.get("status") in _TERMINAL_PHASE_STATES:
+            if (
+                existing is not None
+                and existing.get("status") in _TERMINAL_PHASE_STATES
+            ):
                 return
             phases = dict(state.get("phases", {}))
             phases[phase] = {
@@ -805,14 +787,9 @@ class AppForwardSchedulerController:
             # 生产环境始终具备该提供方。
             return True, None
         try:
-            readiness = dict(
-                provider(session=session, observed_at=observed_at)
-            )
+            readiness = dict(provider(session=session, observed_at=observed_at))
         except Exception as exc:
-            return False, (
-                "DELIVERY_POSTCONDITION_UNAVAILABLE:"
-                f"{type(exc).__name__}"
-            )
+            return False, (f"DELIVERY_POSTCONDITION_UNAVAILABLE:{type(exc).__name__}")
         if phase == "CAPTURE":
             delivered = readiness.get("ready") is True
         else:
@@ -879,13 +856,10 @@ class AppForwardSchedulerController:
                     return False
                 with self._state_lock:
                     current_state = self._load_state()
-                    current_record = self._phase_record(
-                        current_state, phase, session
-                    )
+                    current_record = self._phase_record(current_state, phase, session)
                     if (
                         current_record is not None
-                        and current_record.get("status")
-                        in _TERMINAL_PHASE_STATES
+                        and current_record.get("status") in _TERMINAL_PHASE_STATES
                     ):
                         return True
                 if phase == "CAPTURE" and self._adopt_existing_capture(
@@ -906,8 +880,7 @@ class AppForwardSchedulerController:
                             "ready": False,
                             "terminal": False,
                             "reason_code": (
-                                "EVALUATION_READINESS_UNAVAILABLE:"
-                                f"{type(exc).__name__}"
+                                f"EVALUATION_READINESS_UNAVAILABLE:{type(exc).__name__}"
                             ),
                         }
                     if readiness.get("already_complete") is True:
@@ -920,9 +893,7 @@ class AppForwardSchedulerController:
                         return True
                     if readiness.get("ready") is not True:
                         next_retry = now + timedelta(minutes=5)
-                        terminal = bool(readiness.get("terminal")) or (
-                            next_retry > end
-                        )
+                        terminal = bool(readiness.get("terminal")) or (next_retry > end)
                         self._set_terminal_without_run(
                             phase,
                             observed_at=now,
@@ -936,8 +907,8 @@ class AppForwardSchedulerController:
                 with self._state_lock:
                     state = self._load_state()
                     existing = self._phase_record(state, phase, session)
-            # 跨进程锁已经排除了仍存活的执行。持久化的 RUNNING 记录只能是
-            # 崩溃残留，必须重试，不能让当天任务永久卡死。
+                    # 跨进程锁已经排除了仍存活的执行。持久化的 RUNNING 记录只能是
+                    # 崩溃残留，必须重试，不能让当天任务永久卡死。
                     if existing is not None and existing.get("status") in (
                         _TERMINAL_PHASE_STATES
                     ):
@@ -1002,8 +973,10 @@ class AppForwardSchedulerController:
                 success = result_code == 0 and postcondition_ready
                 next_retry = completed_at + timedelta(minutes=5)
                 retryable = not success and next_retry <= end
-                status = "SUCCEEDED" if success else (
-                    "RETRY_PENDING" if retryable else "BLOCKED"
+                status = (
+                    "SUCCEEDED"
+                    if success
+                    else ("RETRY_PENDING" if retryable else "BLOCKED")
                 )
                 if success:
                     reason = "FORWARD_PHASE_SUCCEEDED"
@@ -1047,9 +1020,7 @@ class AppForwardSchedulerController:
                         "delivery_postcondition_ready": (
                             postcondition_ready if result_code == 0 else False
                         ),
-                        "delivery_postcondition_reason_code": (
-                            postcondition_reason
-                        ),
+                        "delivery_postcondition_reason_code": (postcondition_reason),
                     }
                     state["phases"] = phases
                     self._write_state(state, completed_at)
@@ -1122,19 +1093,17 @@ class AppForwardSchedulerController:
                 try:
                     parsed = datetime.fromisoformat(completed_at)
                     completed_after_registration = (
-                        parsed.tzinfo is not None
-                        and parsed >= registered_at
+                        parsed.tzinfo is not None and parsed >= registered_at
                     )
                 except ValueError:
                     pass
             operational = bool(
-                record.get("status") == "SUCCEEDED"
-                and completed_after_registration
+                record.get("status") == "SUCCEEDED" and completed_after_registration
             )
             task_reasons = list(resource_reasons)
-            operational_reasons = [] if operational else [
-                "AWAITING_FIRST_SUCCESS_AFTER_REGISTRATION"
-            ]
+            operational_reasons = (
+                [] if operational else ["AWAITING_FIRST_SUCCESS_AFTER_REGISTRATION"]
+            )
             tasks.append(
                 {
                     "name": name,
@@ -1173,19 +1142,31 @@ class AppForwardSchedulerController:
             "configuration_ready": qmt_ready,
             "operationally_verified": qmt_ready,
             "operational_status": "verified" if qmt_ready else "not_verified",
-            "operational_reason_codes": [] if qmt_ready else [
-                "QMT_LOCAL_DATA_UNAVAILABLE"
-            ],
+            "operational_reason_codes": []
+            if qmt_ready
+            else ["QMT_LOCAL_DATA_UNAVAILABLE"],
             "upstream_ready_now": qmt_ready,
-            "upstream_reason_code": "READY" if qmt_ready else "QMT_LOCAL_DATA_UNAVAILABLE",
+            "upstream_reason_code": "READY"
+            if qmt_ready
+            else "QMT_LOCAL_DATA_UNAVAILABLE",
             "data_directory": str(self._qmt) if self._qmt is not None else None,
             **_SAFETY,
         }
         operational = bool(configuration_ready and first_success and qmt_ready)
-        operational_reasons = [] if operational else (
-            ["AWAITING_FIRST_SUCCESS_AFTER_REGISTRATION"]
-            if configuration_ready and qmt_ready
-            else list(dict.fromkeys([*resource_reasons, "UPSTREAM_QMT_RUNTIME_UNAVAILABLE"] if not qmt_ready else resource_reasons))
+        operational_reasons = (
+            []
+            if operational
+            else (
+                ["AWAITING_FIRST_SUCCESS_AFTER_REGISTRATION"]
+                if configuration_ready and qmt_ready
+                else list(
+                    dict.fromkeys(
+                        [*resource_reasons, "UPSTREAM_QMT_RUNTIME_UNAVAILABLE"]
+                        if not qmt_ready
+                        else resource_reasons
+                    )
+                )
+            )
         )
         return {
             "schema": FORWARD_READINESS_SCHEMA,
@@ -1198,7 +1179,9 @@ class AppForwardSchedulerController:
             "reason_codes": resource_reasons,
             "configuration_ready": configuration_ready,
             "operationally_verified": operational,
-            "operational_status": "verified" if operational else (
+            "operational_status": "verified"
+            if operational
+            else (
                 "awaiting_first_success"
                 if configuration_ready and qmt_ready
                 else "not_verified"

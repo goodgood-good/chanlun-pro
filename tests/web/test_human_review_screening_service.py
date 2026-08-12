@@ -1975,6 +1975,62 @@ def test_forward_archive_readiness_requires_the_capture_receipt(
     assert result["catalog_entry_sha256"].startswith("sha256:")
 
 
+def test_forward_capture_readiness_health_adapter_is_single_flight(
+    service: HumanReviewScreeningService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """严格采集审计可以较慢，但 HTTP 就绪检查不得等待它。"""
+
+    session = date(2026, 7, 30)
+    started = Event()
+    release = Event()
+    calls: list[date | None] = []
+
+    def slow_audit(
+        *,
+        session: date | None,
+        _calendar_requirement=None,
+    ) -> dict[str, object]:
+        calls.append(session)
+        started.set()
+        assert release.wait(timeout=2)
+        return {
+            "schema": "chanlun-qmt-forward-capture-readiness",
+            "required": True,
+            "requirement_resolved": True,
+            "ready": True,
+            "status": "ready",
+            "reason_code": "READY",
+            "session": session.isoformat() if session is not None else None,
+            "receipt_proven": True,
+            "real_account_accessed": False,
+            "real_order_transport_enabled": False,
+            "live_status": "LIVE_DISABLED",
+        }
+
+    monkeypatch.setattr(service, "forward_archive_capture_readiness", slow_audit)
+
+    first = service.forward_archive_capture_readiness_nonblocking(session=session)
+    assert first["reason_code"] == "FORWARD_CAPTURE_VALIDATION_PENDING"
+    assert first["ready"] is False
+    assert started.wait(timeout=1)
+
+    second = service.forward_archive_capture_readiness_nonblocking(session=session)
+    assert second["reason_code"] == "FORWARD_CAPTURE_VALIDATION_PENDING"
+    assert calls == [session]
+
+    release.set()
+    deadline = time_module.monotonic() + 2
+    cached = second
+    while time_module.monotonic() < deadline:
+        cached = service.forward_archive_capture_readiness_nonblocking(session=session)
+        if cached["reason_code"] == "READY":
+            break
+        time_module.sleep(0.01)
+    assert cached["ready"] is True
+    assert calls == [session]
+
+
 def test_forward_delivery_readiness_rejects_self_reported_evaluated_event(
     service: HumanReviewScreeningService,
 ) -> None:
@@ -2044,7 +2100,11 @@ def test_forward_delivery_readiness_health_adapter_is_single_flight(
     release = Event()
     calls: list[date | None] = []
 
-    def slow_audit(*, session: date | None) -> dict[str, object]:
+    def slow_audit(
+        *,
+        session: date | None,
+        _calendar_requirement=None,
+    ) -> dict[str, object]:
         calls.append(session)
         started.set()
         assert release.wait(timeout=2)

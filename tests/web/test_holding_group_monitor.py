@@ -77,10 +77,7 @@ def _small_sell(code: str, name: str, signal_time: str) -> MonitorEvent:
 
 def _event_collector(states, *, names, holdings, **_kwargs):
     assert holdings == set(states)
-    return [
-        _small_sell(code, names[code], states[code].signal_time)
-        for code in states
-    ]
+    return [_small_sell(code, names[code], states[code].signal_time) for code in states]
 
 
 def _big_down_collector(states, *, names, holdings, **_kwargs):
@@ -437,9 +434,7 @@ def test_warmup_that_does_not_converge_becomes_an_observable_outage(tmp_path):
     result = service.run_once()
 
     assert result["failed_count"] == 1
-    assert result["positions"][0]["reason_code"] == (
-        "MULTI_TIMEFRAME_WARMUP_STALLED"
-    )
+    assert result["positions"][0]["reason_code"] == ("MULTI_TIMEFRAME_WARMUP_STALLED")
     assert result["health_alert_count"] == 0
     assert notifier.messages == []
     assert service._runtime_ledger.outage_active("us", "TSLA.US") is True
@@ -496,16 +491,22 @@ def test_us_auxiliary_lane_does_not_treat_premarket_stale_bars_as_live(
     monkeypatch.setattr(monitor_module, "market_now_trading", lambda *_args: True)
     exchange = object()
 
-    assert monitor_module._default_market_open(
-        exchange,
-        "us",
-        datetime(2026, 8, 4, 19, 0, tzinfo=CN),
-    ) is False
-    assert monitor_module._default_market_open(
-        exchange,
-        "us",
-        datetime(2026, 8, 4, 22, 0, tzinfo=CN),
-    ) is True
+    assert (
+        monitor_module._default_market_open(
+            exchange,
+            "us",
+            datetime(2026, 8, 4, 19, 0, tzinfo=CN),
+        )
+        is False
+    )
+    assert (
+        monitor_module._default_market_open(
+            exchange,
+            "us",
+            datetime(2026, 8, 4, 22, 0, tzinfo=CN),
+        )
+        is True
+    )
 
 
 def test_unknown_market_is_reported_instead_of_silently_dropped(tmp_path):
@@ -543,9 +544,8 @@ def test_scheduler_registration_is_idempotent(tmp_path):
     assert first == "holding_group_realtime_monitor"
     assert second == first
     assert list(scheduler.jobs) == [first]
-    assert scheduler.jobs[first][1]["name"] == (
-        "持仓与关注分组跨市场实时监听"
-    )
+    assert scheduler.jobs[first][1]["name"] == ("持仓与关注分组跨市场实时监听")
+    assert scheduler.jobs[first][1]["executor"] == "realtime_monitor"
     assert service.health_snapshot()["job_registered"] is True
 
 
@@ -612,9 +612,7 @@ def test_watched_us_signal_is_not_worded_as_a_holding(tmp_path):
             )
         ]
 
-    service, notifier, _ = _service(
-        tmp_path, positions, event_collector=collector
-    )
+    service, notifier, _ = _service(tmp_path, positions, event_collector=collector)
     result = service.run_once()
 
     assert result["positions"][0]["monitoring_scope"] == "WATCHLIST"

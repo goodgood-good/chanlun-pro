@@ -451,6 +451,33 @@ def test_stock_structure_requests_use_configured_parallel_workers(
     assert payload["scan_audit"]["stock_worker_count"] == 3
 
 
+def test_full_coverage_reserves_one_qmt_worker_for_realtime_services(
+    tmp_path: Path,
+) -> None:
+    symbols = tuple(f"SZ.{index:06d}" for index in range(1, 9))
+    market = ConcurrentRecordingMarketData()
+    service = TradingScreeningService(
+        market_data=market,
+        sector_catalog=MultiMemberSectorCatalog(symbols),
+        engine=HumanAssistedDecisionCore(),
+        scan_planner=SequencedPlanner((symbols,)),
+        cache_path=tmp_path / "snapshot.json",
+        clock=lambda: AS_OF,
+        notifier=None,
+        config=TradingScreeningConfig(
+            max_symbols_per_refresh=len(symbols),
+            stock_worker_count=4,
+            full_coverage_worker_count=3,
+        ),
+    )
+
+    payload = service.refresh_now()
+
+    assert market.max_active == 3
+    assert payload["scan_audit"]["stock_worker_count"] == 3
+    assert payload["scan_audit"]["full_coverage_worker_limit"] == 3
+
+
 def test_scan_batch_honors_hard_total_limit_without_starving_discovery(
     tmp_path: Path,
 ) -> None:
@@ -616,9 +643,10 @@ def test_research_revision_change_invalidates_snapshot_and_priority_state(
     snapshot = restarted.snapshot()
     assert snapshot["scan_state"] == "not_started"
     assert snapshot["snapshot_content_sha256"] is None
-    assert snapshot["selection_research_revision"] != published[
-        "selection_research_revision"
-    ]
+    assert (
+        snapshot["selection_research_revision"]
+        != published["selection_research_revision"]
+    )
     assert restarted._priority_monitor_last_at is None
     assert persisted_priority["selection_research_revision"] != (
         restarted._selection_research_revision
@@ -650,6 +678,7 @@ def test_same_epoch_completed_progress_cannot_silently_reset(tmp_path: Path) -> 
 
     with pytest.raises(ValueError, match="lost completed symbols"):
         service._persist_atomic(regressed)
+
 
 def test_service_uses_incremental_scan_plan_and_new_engine(tmp_path: Path) -> None:
     market = RecordingMarketData()
@@ -1073,7 +1102,9 @@ def test_member_history_diagnostics_are_required_by_current_cache_contract(
 
     noncurrent = json.loads(json.dumps(payload))
     noncurrent.pop("sector_member_history_diagnostics")
-    noncurrent["snapshot_content_sha256"] = live_screening_snapshot_content_sha256(noncurrent)
+    noncurrent["snapshot_content_sha256"] = live_screening_snapshot_content_sha256(
+        noncurrent
+    )
     cache_path.write_text(
         json.dumps(noncurrent, ensure_ascii=False, sort_keys=True),
         encoding="utf-8",
@@ -1187,7 +1218,9 @@ def test_old_sector_failure_contract_is_rejected_without_migration(
         "stale": False,
         "failure_codes": ["sector_scan_partial"],
     }
-    noncurrent["snapshot_content_sha256"] = live_screening_snapshot_content_sha256(noncurrent)
+    noncurrent["snapshot_content_sha256"] = live_screening_snapshot_content_sha256(
+        noncurrent
+    )
     cache_path.write_text(
         json.dumps(noncurrent, ensure_ascii=False, sort_keys=True),
         encoding="utf-8",
@@ -1408,12 +1441,10 @@ def test_cache_from_previous_decision_core_is_quarantined(
 
     assert restarted.snapshot()["scan_state"] == "not_started"
     health = restarted.health_snapshot()
-    assert health["quarantined_cache_decision_core_id"] == (
-        previous["decision_core_id"]
+    assert (
+        health["quarantined_cache_decision_core_id"] == (previous["decision_core_id"])
     )
-    assert health["quarantined_cache_reason"] == (
-        "DECISION_CORE_IDENTITY_MISMATCH"
-    )
+    assert health["quarantined_cache_reason"] == ("DECISION_CORE_IDENTITY_MISMATCH")
     assert "screening_snapshot_unavailable" not in health["reasons"]
 
 
@@ -1934,9 +1965,7 @@ def test_incomplete_noncurrent_queue_is_not_resumed_by_current_runtime(
     assert restarted_market.bundle_codes == []
 
     rebuilt = restarted.refresh_now()
-    assert set(rebuilt["coverage_manifest"]["pending_frequencies"]) == set(
-        symbols[1:]
-    )
+    assert set(rebuilt["coverage_manifest"]["pending_frequencies"]) == set(symbols[1:])
     assert restarted_market.bundle_codes == ["SZ.000001"]
 
 
@@ -2983,9 +3012,7 @@ class SectorNativeDailyResearchMarketData(ActionableMarketData):
             gate="AMBER",
             grade="RESEARCH_ONLY",
             snapshot_id=sha256_json({"schema": "test-sector-native-daily-gate"}),
-            source_revision=sha256_json(
-                {"schema": "test-sector-native-daily-source"}
-            ),
+            source_revision=sha256_json({"schema": "test-sector-native-daily-source"}),
             reason_codes=(blocker,),
             period_diagnostics=diagnostics,
             session_evidence=HigherTimeframeSessionEvidence.exact(),
@@ -3331,6 +3358,8 @@ def test_snapshot_binds_mwd_warmup_evidence(
     )
     assert risk["sector_warmup_convergence_evidence"]["active_gate_unchanged"] is True
     assert risk["symbol_warmup_convergence_evidence"]["diagnostic_only"] is True
+
+
 def test_newer_one_minute_signal_uses_frozen_mwd_cutoff_and_is_self_consistent(
     tmp_path: Path,
 ) -> None:
@@ -3385,6 +3414,8 @@ def test_newer_one_minute_signal_uses_frozen_mwd_cutoff_and_is_self_consistent(
             risk[f"{subject}_warmup_convergence_evidence"]["as_of"]
             == risk_cutoff.isoformat()
         )
+
+
 def test_presentation_snapshot_compacts_audit_only_evidence(
     tmp_path: Path,
 ) -> None:
@@ -3421,16 +3452,9 @@ def test_presentation_snapshot_compacts_audit_only_evidence(
     assert "market_warmup_convergence_evidence" not in visible_risk
     assert "market_warmup_evidence" not in visible_risk
     assert visible_risk["market_gate"] == full_risk["market_gate"]
-    assert (
-        visible_risk["market_reason_codes"]
-        == full_risk["market_reason_codes"]
-    )
-    assert visible_signal["setup_5m"]["status"] == (
-        full_signal["setup_5m"]["status"]
-    )
-    assert visible_signal["warmup"]["converged"] == (
-        full_signal["warmup"]["converged"]
-    )
+    assert visible_risk["market_reason_codes"] == full_risk["market_reason_codes"]
+    assert visible_signal["setup_5m"]["status"] == (full_signal["setup_5m"]["status"])
+    assert visible_signal["warmup"]["converged"] == (full_signal["warmup"]["converged"])
     assert "decision_core_id" not in visible_signal
     full_size = len(json.dumps(full, ensure_ascii=False))
     visible_size = len(json.dumps(presentation, ensure_ascii=False))
@@ -3482,6 +3506,8 @@ def test_snapshot_binds_native_daily_reconciliation(
         risk["symbol_native_daily_calendar_coverage_evidence"]["entry_disposition"]
         == "NO_CALENDAR_BLOCKER"
     )
+
+
 def test_native_daily_ahead_snapshot_fails_closed(
     tmp_path: Path,
 ) -> None:
@@ -3543,6 +3569,7 @@ def test_snapshot_binds_unexplained_native_daily_gap_without_claiming_suspension
         "UNEXPLAINED_CALENDAR_SESSION_MISSING"
     )
 
+
 def test_snapshot_authenticates_sector_native_daily_research_cap(
     tmp_path: Path,
 ) -> None:
@@ -3577,6 +3604,8 @@ def test_snapshot_authenticates_sector_native_daily_research_cap(
         risk["sector_research_bridge_parameter_set_id"]
         == (sector_native_daily_research_bridge_contract()["parameter_set_id"])
     )
+
+
 def test_signal_identity_survives_service_restart(tmp_path: Path) -> None:
     cache_path = tmp_path / "snapshot.json"
     first_service = TradingScreeningService(
@@ -4093,9 +4122,7 @@ def test_candidate_health_reports_insufficient_configured_cadence_capacity(
     assert health["candidate_monitor_reason_codes"] == [
         "CANDIDATE_MONITOR_CONFIGURED_CAPACITY_INSUFFICIENT"
     ]
-    assert health["candidate_monitor_five_minute"][
-        "required_symbols_per_refresh"
-    ] == 4
+    assert health["candidate_monitor_five_minute"]["required_symbols_per_refresh"] == 4
     assert health["candidate_monitor_five_minute"]["last_batch_count"] == 3
 
 
@@ -4161,12 +4188,8 @@ def test_priority_monitor_uses_bar_cadence_lanes_and_merges_frequency_work(
     assert health["candidate_monitor_status"] == "warming"
     assert health["candidate_monitor_five_minute"]["current_count"] == 2
     assert health["candidate_monitor_five_minute"]["missing_count"] == 0
-    assert health["candidate_monitor_five_minute"]["last_batch_codes"] == [
-        symbols[1]
-    ]
-    assert health["candidate_monitor_thirty_minute"]["last_batch_codes"] == [
-        symbols[1]
-    ]
+    assert health["candidate_monitor_five_minute"]["last_batch_codes"] == [symbols[1]]
+    assert health["candidate_monitor_thirty_minute"]["last_batch_codes"] == [symbols[1]]
     restarted = TradingScreeningService(
         market_data=RecordingMarketData(),
         sector_catalog=catalog,
@@ -4177,48 +4200,44 @@ def test_priority_monitor_uses_bar_cadence_lanes_and_merges_frequency_work(
         notifier=None,
         config=service._config,
     )
-    assert set(restarted._candidate_monitor_five_last_success_at) == set(
-        symbols[:2]
-    )
-    assert set(restarted._candidate_monitor_thirty_last_success_at) == set(
-        symbols[:2]
-    )
+    assert set(restarted._candidate_monitor_five_last_success_at) == set(symbols[:2])
+    assert set(restarted._candidate_monitor_thirty_last_success_at) == set(symbols[:2])
     assert restarted._priority_monitor_runtime_verified is False
 
 
 def test_priority_buy_candidates_exclude_unowned_sell_only_signals() -> None:
     rows = (
-            {
-                "code": "SELL_ONLY",
-                "point_type": "3sell",
-                "lifecycle_stage": "triggered",
-            },
-            {
-                "code": "BUY_APPROACHING",
-                "point_type": "3buy",
-                "lifecycle_stage": "approaching",
-            },
-            {
-                "code": "BUY_ARMED",
-                "point_type": "1buy",
-                "lifecycle_stage": "armed",
-            },
-            {
-                "code": "BUY_EXECUTABLE",
-                "point_type": "2buy",
-                "lifecycle_stage": "executable",
-            },
-            {
-                "code": "BUY_APPROACHING_B",
-                "point_type": "3buy",
-                "lifecycle_stage": "approaching",
-            },
-            {
-                "code": "WATCHED_BUY",
-                "point_type": "2buy",
-                "lifecycle_stage": "triggered",
-            },
-        )
+        {
+            "code": "SELL_ONLY",
+            "point_type": "3sell",
+            "lifecycle_stage": "triggered",
+        },
+        {
+            "code": "BUY_APPROACHING",
+            "point_type": "3buy",
+            "lifecycle_stage": "approaching",
+        },
+        {
+            "code": "BUY_ARMED",
+            "point_type": "1buy",
+            "lifecycle_stage": "armed",
+        },
+        {
+            "code": "BUY_EXECUTABLE",
+            "point_type": "2buy",
+            "lifecycle_stage": "executable",
+        },
+        {
+            "code": "BUY_APPROACHING_B",
+            "point_type": "3buy",
+            "lifecycle_stage": "approaching",
+        },
+        {
+            "code": "WATCHED_BUY",
+            "point_type": "2buy",
+            "lifecycle_stage": "triggered",
+        },
+    )
     candidates = _priority_buy_candidate_codes(
         rows,
         excluded_codes=frozenset({"WATCHED_BUY"}),
@@ -4233,9 +4252,7 @@ def test_priority_buy_candidates_exclude_unowned_sell_only_signals() -> None:
     urgent = _priority_buy_candidate_codes(
         rows,
         excluded_codes=frozenset({"WATCHED_BUY"}),
-        allowed_stages=frozenset(
-            {"armed", "triggered", "executable", "active"}
-        ),
+        allowed_stages=frozenset({"armed", "triggered", "executable", "active"}),
     )
     assert urgent == ("BUY_EXECUTABLE", "BUY_ARMED")
 
@@ -5809,7 +5826,9 @@ def test_background_health_rechecks_an_untrusted_snapshot_publication(
 
     assert noncurrent_but_self_hashed["ready"] is False
     assert noncurrent_but_self_hashed["snapshot_content_sha256"] is None
-    assert "screening_snapshot_identity_missing" in (noncurrent_but_self_hashed["reasons"])
+    assert (
+        "screening_snapshot_identity_missing" in (noncurrent_but_self_hashed["reasons"])
+    )
 
     with service._state_lock:
         service._snapshot["signal_document_contract_id"] = SIGNAL_DOCUMENT_CONTRACT_ID

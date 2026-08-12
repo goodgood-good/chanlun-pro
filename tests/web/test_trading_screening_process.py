@@ -1324,6 +1324,10 @@ def test_app_default_screening_parallelism_is_bounded_and_tunable(
 ) -> None:
     monkeypatch.delenv("CHANLUN_TRADING_SCREENING_STOCK_WORKERS", raising=False)
     monkeypatch.delenv(
+        "CHANLUN_TRADING_SCREENING_FULL_COVERAGE_WORKERS",
+        raising=False,
+    )
+    monkeypatch.delenv(
         "CHANLUN_TRADING_SCREENING_CANDIDATE_5M_MAX_SYMBOLS",
         raising=False,
     )
@@ -1346,11 +1350,9 @@ def test_app_default_screening_parallelism_is_bounded_and_tunable(
         },
     )
 
-    expected_workers = min(
-        10,
-        max(1, (((os.cpu_count() or 4) * 5) + 7) // 8),
-    )
+    expected_workers = min(4, max(1, (os.cpu_count() or 4) // 4))
     assert app.config["TRADING_SCREENING_STOCK_WORKERS"] == expected_workers
+    assert app.config["TRADING_SCREENING_FULL_COVERAGE_WORKERS"] == 3
     assert app.config["TRADING_SCREENING_CANDIDATE_5M_MAX_SYMBOLS"] == 256
     assert app.config["TRADING_SCREENING_CANDIDATE_30M_MAX_SYMBOLS"] == 96
     assert app.config["TRADING_SCREENING_TOTAL_SYMBOLS_PER_REFRESH"] == 64

@@ -851,9 +851,7 @@ def _screening_policy_document() -> dict[str, object]:
         "stroke_mode": STRICT_STROKE_MODE,
         "center_source": "physical_timeframe_recursive_segments",
         "recursive_structure_used": True,
-        "stock_structure_request_bars": dict(
-            CANONICAL_REQUEST_BARS_BY_FREQUENCY
-        ),
+        "stock_structure_request_bars": dict(CANONICAL_REQUEST_BARS_BY_FREQUENCY),
         "stock_structure_qmt_dividend_type": QMT_STRUCTURE_DIVIDEND_TYPE,
         "provisional_point_source": "strict_approaching_ledger",
         "stock_trigger_frequency": "1m",
@@ -1032,6 +1030,7 @@ class TradingScreeningConfig:
     five_minute_candidate_target_seconds: int = 300
     thirty_minute_candidate_target_seconds: int = 1800
     stock_worker_count: int = 1
+    full_coverage_worker_count: int | None = None
     min_scan_completion_ratio: Decimal = Decimal("0.80")
     max_structure_age_seconds: int = 3600
     algorithm_id: str = STRICT_STRATEGY_ID
@@ -1049,6 +1048,10 @@ class TradingScreeningConfig:
             or self.max_five_minute_candidate_symbols_per_refresh <= 0
             or self.max_thirty_minute_candidate_symbols_per_refresh <= 0
             or self.stock_worker_count <= 0
+            or (
+                self.full_coverage_worker_count is not None
+                and self.full_coverage_worker_count <= 0
+            )
         ):
             raise ValueError("screening limits must be positive")
         if self.priority_monitor_interval_seconds <= 0:
@@ -1066,6 +1069,16 @@ class TradingScreeningConfig:
             raise ValueError("max_structure_age_seconds must be positive")
         if not self.algorithm_id:
             raise ValueError("algorithm_id cannot be empty")
+
+    @property
+    def effective_full_coverage_worker_count(self) -> int:
+        """返回盘后覆盖可占用的最大结构工作进程数。"""
+
+        configured = self.full_coverage_worker_count
+        return min(
+            self.stock_worker_count,
+            self.stock_worker_count if configured is None else configured,
+        )
 
 
 def _initial_snapshot(
@@ -1127,6 +1140,7 @@ def _initial_snapshot(
             "sector_scan_duration_ms": 0,
             "stock_scan_duration_ms": 0,
             "stock_worker_count": config.stock_worker_count,
+            "full_coverage_worker_limit": (config.effective_full_coverage_worker_count),
             "coverage_cycle_elapsed_ms": 0,
             "coverage_cycle_batch_count": 0,
             "coverage_cycle_started_at": None,
@@ -2443,12 +2457,14 @@ def _sector_source_evidence_complete(snapshot: Mapping[str, object]) -> bool:
     )
 
 
-def _cache_is_valid(
+def _cache_contract_is_valid(
     value: object,
     config: TradingScreeningConfig,
     decision_core_id: str,
     selection_research_revision: str,
 ) -> bool:
+    """校验快照语义契约，不重复计算已由本进程生成的内容哈希。"""
+
     return bool(
         isinstance(value, Mapping)
         and value.get("schema") == SCHEMA
@@ -2458,14 +2474,11 @@ def _cache_is_valid(
         and value.get("read_only") is True
         and value.get("no_order_execution") is True
         and value.get("decision_core_id") == decision_core_id
-        and value.get("selection_research_revision")
-        == selection_research_revision
+        and value.get("selection_research_revision") == selection_research_revision
         and value.get("screening_policy") == _screening_policy_document()
         and value.get("screening_policy_id") == _screening_policy_id()
         and value.get("signal_document_contract_id") == SIGNAL_DOCUMENT_CONTRACT_ID
         and isinstance(value.get("snapshot_content_sha256"), str)
-        and value.get("snapshot_content_sha256")
-        == live_screening_snapshot_content_sha256(value)
         and monitor_instrument_exclusions_are_consistent(value)
         and isinstance(value.get("coverage_manifest"), Mapping)
         and value["coverage_manifest"].get("schema") == COVERAGE_MANIFEST_SCHEMA
@@ -2477,6 +2490,27 @@ def _cache_is_valid(
         and value.get("sector_coverage_contract_id") == SECTOR_COVERAGE_CONTRACT_ID
         and _sector_coverage_contract_is_valid(value)
         and _sector_source_evidence_complete(value)
+    )
+
+
+def _cache_is_valid(
+    value: object,
+    config: TradingScreeningConfig,
+    decision_core_id: str,
+    selection_research_revision: str,
+) -> bool:
+    """校验外部或持久化快照的语义契约与内容身份。"""
+
+    return bool(
+        _cache_contract_is_valid(
+            value,
+            config,
+            decision_core_id,
+            selection_research_revision,
+        )
+        and isinstance(value, Mapping)
+        and value.get("snapshot_content_sha256")
+        == live_screening_snapshot_content_sha256(value)
     )
 
 
@@ -6118,7 +6152,9 @@ class TradingScreeningService:
                     # 将诊断返回后台循环以记录故障，但不替换独立有效的页面数据
                     # 及其磁盘原子缓存。
                     return result(payload)
-                payload_valid = _cache_is_valid(
+                # 身份刚由本进程对该私有对象树计算完成；此处只需校验语义契约。
+                # 外部缓存加载与未知发布仍使用 ``_cache_is_valid`` 完整重算哈希。
+                payload_valid = _cache_contract_is_valid(
                     payload,
                     self._config,
                     self._decision_core_id,
@@ -6144,7 +6180,7 @@ class TradingScreeningService:
                 "snapshot_content_sha256"
             ):
                 return result(dict(previous))
-            payload_valid = _cache_is_valid(
+            payload_valid = _cache_contract_is_valid(
                 payload,
                 self._config,
                 self._decision_core_id,
@@ -6381,7 +6417,12 @@ class TradingScreeningService:
                     ),
                     "sector_scan_duration_ms": sector_scan_duration_ms,
                     "stock_scan_duration_ms": 0,
-                    "stock_worker_count": self._config.stock_worker_count,
+                    "stock_worker_count": (
+                        self._config.effective_full_coverage_worker_count
+                    ),
+                    "full_coverage_worker_limit": (
+                        self._config.effective_full_coverage_worker_count
+                    ),
                 }
             )
             failed["scan_audit"] = scan_audit
@@ -6980,7 +7021,12 @@ class TradingScreeningService:
                     errors.append(error)
             self._record_background_heartbeat()
 
-        worker_count = min(self._config.stock_worker_count, max(1, len(symbols)))
+        worker_limit = (
+            self._config.stock_worker_count
+            if monitoring_only_refresh
+            else self._config.effective_full_coverage_worker_count
+        )
+        worker_count = min(worker_limit, max(1, len(symbols)))
         if worker_count == 1:
             for code in symbols:
                 self._record_background_heartbeat()
@@ -7249,6 +7295,9 @@ class TradingScreeningService:
                     "sector_scan_duration_ms": sector_scan_duration_ms,
                     "stock_scan_duration_ms": stock_scan_duration_ms,
                     "stock_worker_count": worker_count,
+                    "full_coverage_worker_limit": (
+                        self._config.effective_full_coverage_worker_count
+                    ),
                     "coverage_cycle_batch_count": (self._coverage_cycle_batch_count),
                     "coverage_cycle_started_at": (
                         None
@@ -7467,6 +7516,9 @@ class TradingScreeningService:
                 "sector_scan_duration_ms": sector_scan_duration_ms,
                 "stock_scan_duration_ms": stock_scan_duration_ms,
                 "stock_worker_count": worker_count,
+                "full_coverage_worker_limit": (
+                    self._config.effective_full_coverage_worker_count
+                ),
                 "coverage_cycle_elapsed_ms": coverage_cycle_elapsed_ms,
                 "coverage_cycle_batch_count": self._coverage_cycle_batch_count,
                 "coverage_cycle_started_at": (
