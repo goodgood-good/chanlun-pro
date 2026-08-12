@@ -1701,6 +1701,13 @@ def create_app(test_config=None, start_scheduler=False):
 
         return get_exchange(Market.A)
 
+    def _trading_screening_instrument_types(
+        codes: tuple[str, ...],
+    ) -> dict[str, str]:
+        """只读启动期恢复的唯一 A 股证券目录，不触发原生或磁盘调用。"""
+
+        return stock_list_service.get_cached_a_instrument_types(codes)
+
     def _trading_screening_watchlist():
         from chanlun.persistence.db import db
 
@@ -1983,6 +1990,7 @@ def create_app(test_config=None, start_scheduler=False):
             trading_gateway = NativeTradingDataGatewayProcessProxy(
                 watchlist_provider=_trading_screening_watchlist,
                 holdings_provider=_trading_screening_holdings,
+                instrument_type_provider=_trading_screening_instrument_types,
                 log_path=(
                     config.get_data_path()
                     / "decision_support"
@@ -2038,6 +2046,7 @@ def create_app(test_config=None, start_scheduler=False):
                 sector_strength_provider=sector_strength.strengths,
                 higher_timeframe_provider=higher_timeframe.gates,
                 trading_session_provider=qmt_trading_session_evidence,
+                instrument_type_provider=_trading_screening_instrument_types,
                 watchlist_provider=_trading_screening_watchlist,
                 holdings_provider=_trading_screening_holdings,
             )

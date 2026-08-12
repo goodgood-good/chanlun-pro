@@ -1037,6 +1037,8 @@ class NativeTradingDataGateway:
         higher_timeframe_provider: Callable[..., HigherTimeframeGateBundle]
         | None = None,
         trading_session_provider: Callable[..., Mapping[str, object]] | None = None,
+        instrument_type_provider: Callable[[tuple[str, ...]], Mapping[str, str]]
+        | None = None,
         watchlist_provider: Callable[[], object] = lambda: (),
         holdings_provider: Callable[[], object] = lambda: (),
         analyzer: StructureAnalyzer = analyze_native_frame_with_warmup,
@@ -1067,12 +1069,17 @@ class NativeTradingDataGateway:
             trading_session_provider
         ):
             raise TypeError("trading_session_provider must be callable")
+        if instrument_type_provider is not None and not callable(
+            instrument_type_provider
+        ):
+            raise TypeError("instrument_type_provider must be callable")
         self._exchange_provider = exchange_provider
         self._sector_provider = sector_provider
         self._sector_frame_provider = sector_frame_provider
         self._sector_strength_provider = sector_strength_provider
         self._higher_timeframe_provider = higher_timeframe_provider
         self._trading_session_provider = trading_session_provider
+        self._instrument_type_provider = instrument_type_provider
         self._watchlist_provider = watchlist_provider
         self._holdings_provider = holdings_provider
         self._analyzer = analyzer
@@ -1834,7 +1841,7 @@ class NativeTradingDataGateway:
         self,
         codes: tuple[str, ...],
     ) -> Mapping[str, str]:
-        """逐个读取并缓存精确原生类型，让每次 QMT 调用都有真实进度边界。"""
+        """从统一证券目录读取并缓存精确原生类型。"""
 
         normalized = _stock_codes(codes)
         if not normalized:
@@ -1848,24 +1855,20 @@ class NativeTradingDataGateway:
         missing = tuple(code for code in normalized if code not in result)
         if not missing:
             return {code: result[code] for code in normalized}
-        exchange = self._exchange_provider()
-        provider = getattr(exchange, "screening_instrument_types", None)
-        if not callable(provider):
-            raise RuntimeError("QMT native instrument type provider is unavailable")
-
-        resolved: dict[str, str] = {}
-        for code in missing:
-            # 心跳严格位于一次原生调用前后；若单个调用超过隔离空闲上限，父进程仍会
-            # 判定它真正卡死，而长列表中的正常连续调用不会被误杀。
-            self._report_progress()
-            raw = provider((code,))
-            self._report_progress()
-            if not isinstance(raw, Mapping) or set(raw) != {code}:
-                raise RuntimeError("QMT native instrument type result is incomplete")
-            kind = raw.get(code)
-            if kind not in _KNOWN_SCREENING_INSTRUMENT_TYPES:
-                raise RuntimeError("QMT native instrument type result is invalid")
-            resolved[code] = str(kind)
+        provider = self._instrument_type_provider
+        if provider is None:
+            raise RuntimeError("instrument type catalog is unavailable")
+        raw = provider(missing)
+        if not isinstance(raw, Mapping) or set(raw) != set(missing):
+            raise RuntimeError("instrument type catalog result is incomplete")
+        if any(
+            type(code) is not str
+            or type(kind) is not str
+            or kind not in _KNOWN_SCREENING_INSTRUMENT_TYPES
+            for code, kind in raw.items()
+        ):
+            raise RuntimeError("instrument type catalog result is invalid")
+        resolved = {code: str(raw[code]) for code in missing}
 
         stable = {
             code: kind for code, kind in resolved.items() if kind != "unresolved_cn"

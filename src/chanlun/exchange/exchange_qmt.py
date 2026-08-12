@@ -32,22 +32,6 @@ from xtquant import xtdata
 _XTDATA_NATIVE_LOCK = threading.RLock()
 
 
-def _validated_screening_codes(codes: object) -> tuple[str, ...]:
-    if type(codes) is not tuple:
-        raise TypeError("codes must be an exact tuple")
-    if any(
-        type(code) is not str
-        or len(code) != 9
-        or code[:3] not in {"SH.", "SZ.", "BJ."}
-        or not code[3:].isdigit()
-        for code in codes
-    ):
-        raise ValueError("codes must contain exact normalized A-share codes")
-    if len(set(codes)) != len(codes):
-        raise ValueError("codes must not contain duplicates")
-    return codes
-
-
 class ExchangeQMT(Exchange):
     """QMT（xtquant）沪深 A 股行情适配器。"""
 
@@ -597,37 +581,6 @@ class ExchangeQMT(Exchange):
             "name": stock_detail["InstrumentName"],
             "precision": fun.reverse_decimal_to_power_of_ten(stock_detail["PriceTick"]),
         }
-
-    def screening_instrument_types(
-        self,
-        codes: tuple[str, ...],
-    ) -> Mapping[str, str]:
-        """返回只读选股范围使用的 QMT 原生证券类型。
-
-        代码形状无法区分指数 ``SH.000001`` 与 A 股，名称也不是稳定的决策事实。因此
-        自选、虚拟持仓和历史信号补充范围统一以 QMT 类型服务为唯一权威。未知或不支持
-        的响应保持显式状态，并由下游按失败关闭处理。
-        """
-
-        normalized = _validated_screening_codes(codes)
-        result: dict[str, str] = {}
-        with _XTDATA_NATIVE_LOCK:
-            for code in normalized:
-                raw = xtdata.get_instrument_type(self.code_to_qmt(code))
-                if not isinstance(raw, Mapping) or not raw:
-                    kind = "unresolved_cn"
-                elif raw.get("stock") is True:
-                    kind = "stock_cn"
-                elif raw.get("etf") is True:
-                    kind = "etf_cn"
-                elif raw.get("index") is True:
-                    kind = "index_cn"
-                elif raw.get("fund") is True:
-                    kind = "fund_cn"
-                else:
-                    kind = "unsupported_cn"
-                result[code] = kind
-        return result
 
     def ticks(self, codes: List[str]) -> Dict[str, Tick]:
         """

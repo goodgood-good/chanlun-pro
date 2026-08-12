@@ -236,3 +236,66 @@ def test_disabled_preload_is_ready_without_symbol_cache(monkeypatch):
         "count": 0,
         "last_error": None,
     }
+
+
+def test_cached_a_instrument_types_use_only_restored_memory_catalog(monkeypatch):
+    with stock_list._stock_cache_lock:
+        stock_list.stock_cache["a"] = [
+            {"code": "SH.000001", "name": "上证指数", "type": "index_cn"},
+            {"code": "SH.510300", "name": "沪深300ETF", "type": "etf_cn"},
+            {"code": "SH.600000", "name": "浦发银行", "type": "stock_cn"},
+        ]
+
+    monkeypatch.setattr(
+        stock_list,
+        "get_exchange",
+        lambda _market: (_ for _ in ()).throw(
+            AssertionError("证券类型读取不得访问交易所")
+        ),
+    )
+    monkeypatch.setattr(
+        stock_list,
+        "_load_stocks_from_disk",
+        lambda _market: (_ for _ in ()).throw(
+            AssertionError("证券类型读取不得访问磁盘")
+        ),
+    )
+
+    assert stock_list.get_cached_a_instrument_types(
+        ("SH.000001", "SH.510300", "SH.600000", "SZ.000001")
+    ) == {
+        "SH.000001": "index_cn",
+        "SH.510300": "etf_cn",
+        "SH.600000": "stock_cn",
+        "SZ.000001": "unresolved_cn",
+    }
+
+
+def test_cached_a_instrument_types_fail_closed_on_conflict_or_unknown_type():
+    with stock_list._stock_cache_lock:
+        stock_list.stock_cache["a"] = [
+            {"code": "SH.600000", "name": "浦发银行", "type": "stock_cn"},
+            {"code": "SH.600000", "name": "冲突记录", "type": "index_cn"},
+            {"code": "SZ.000001", "name": "平安银行", "type": "legacy_stock"},
+        ]
+
+    assert stock_list.get_cached_a_instrument_types(
+        ("SH.600000", "SZ.000001")
+    ) == {
+        "SH.600000": "unresolved_cn",
+        "SZ.000001": "unresolved_cn",
+    }
+
+
+@pytest.mark.parametrize(
+    ("codes", "error"),
+    [
+        (["SH.600000"], TypeError),
+        (("600000",), TypeError),
+        (("SH.600000", "SH.600000"), ValueError),
+        (("SZ.000001", "SH.600000"), ValueError),
+    ],
+)
+def test_cached_a_instrument_types_require_exact_sorted_identity(codes, error):
+    with pytest.raises(error):
+        stock_list.get_cached_a_instrument_types(codes)

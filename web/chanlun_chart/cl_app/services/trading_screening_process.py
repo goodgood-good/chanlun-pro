@@ -69,9 +69,6 @@ _SECTOR_SNAPSHOT_WEB_PRODUCERS = (
     "web/chanlun_chart/cl_app/services/trading_screening_native_worker.py",
     "web/chanlun_chart/cl_app/services/trading_screening_process.py",
 )
-_INSTRUMENT_TYPE_BATCH_SIZE = 64
-
-
 def _sector_cache_decision_epoch(value: datetime) -> tuple[date, str, int]:
     """把墙上时钟请求映射到因果 A 股 5m 数据周期。
 
@@ -1141,6 +1138,8 @@ class NativeTradingDataGatewayProcessProxy:
         *,
         watchlist_provider: Callable[[], object] = lambda: (),
         holdings_provider: Callable[[], object] = lambda: (),
+        instrument_type_provider: Callable[[tuple[str, ...]], Mapping[str, str]]
+        | None = None,
         transport: NativeWorkerProcessTransport | None = None,
         log_path: Path | None = None,
         process_config: NativeWorkerProcessConfig = NativeWorkerProcessConfig(),
@@ -1152,6 +1151,10 @@ class NativeTradingDataGatewayProcessProxy:
     ) -> None:
         if not callable(watchlist_provider) or not callable(holdings_provider):
             raise TypeError("watchlist and holdings providers must be callable")
+        if instrument_type_provider is not None and not callable(
+            instrument_type_provider
+        ):
+            raise TypeError("instrument_type_provider must be callable")
         if transport is None and log_path is None:
             raise ValueError("log_path is required when no transport is supplied")
         if (sector_cache_path is None) != (sector_cache_revision is None):
@@ -1179,6 +1182,7 @@ class NativeTradingDataGatewayProcessProxy:
             )
         self._watchlist_provider = watchlist_provider
         self._holdings_provider = holdings_provider
+        self._instrument_type_provider = instrument_type_provider
         self._transport = transport or NativeWorkerProcessTransport(
             log_path=log_path,  # type: ignore[arg-type]
             config=process_config,
@@ -1723,7 +1727,7 @@ class NativeTradingDataGatewayProcessProxy:
         self,
         codes: tuple[str, ...],
     ) -> Mapping[str, str]:
-        """分批经结构进程读取精确类型，不占用实时逐笔控制进程。"""
+        """从 Web 进程已恢复的统一证券目录读取精确类型。"""
 
         normalized = _stock_codes(codes)
         if not normalized:
@@ -1735,36 +1739,33 @@ class NativeTradingDataGatewayProcessProxy:
                 if code in self._instrument_types
             }
         missing = tuple(code for code in normalized if code not in result)
-        classification_transport = self._structure_transports[0]
-        for offset in range(0, len(missing), _INSTRUMENT_TYPE_BATCH_SIZE):
-            batch = missing[offset : offset + _INSTRUMENT_TYPE_BATCH_SIZE]
-            value = classification_transport.request(
-                "screening_instrument_types",
-                codes=batch,
+        if not missing:
+            return {code: result[code] for code in normalized}
+        provider = self._instrument_type_provider
+        if provider is None:
+            raise RuntimeError("instrument type catalog is unavailable")
+        value = provider(missing)
+        if (
+            not isinstance(value, Mapping)
+            or set(value) != set(missing)
+            or any(
+                type(code) is not str
+                or type(kind) is not str
+                or kind not in _KNOWN_SCREENING_INSTRUMENT_TYPES
+                for code, kind in value.items()
             )
-            if (
-                not isinstance(value, Mapping)
-                or set(value) != set(batch)
-                or any(
-                    type(code) is not str
-                    or type(kind) is not str
-                    or kind not in _KNOWN_SCREENING_INSTRUMENT_TYPES
-                    for code, kind in value.items()
-                )
-            ):
-                raise NativeScreeningWorkerProtocolError(
-                    "invalid instrument type disposition result"
-                )
-            validated = {code: str(value[code]) for code in batch}
-            result.update(validated)
-            stable = {
-                code: kind
-                for code, kind in validated.items()
-                if kind != "unresolved_cn"
-            }
-            if stable:
-                with self._cache_lock:
-                    self._instrument_types.update(stable)
+        ):
+            raise RuntimeError("instrument type catalog result is invalid")
+        validated = {code: str(value[code]) for code in missing}
+        result.update(validated)
+        stable = {
+            code: kind
+            for code, kind in validated.items()
+            if kind != "unresolved_cn"
+        }
+        if stable:
+            with self._cache_lock:
+                self._instrument_types.update(stable)
         return {code: result[code] for code in normalized}
 
     def tick_probe(self, code: str) -> Mapping[str, object]:

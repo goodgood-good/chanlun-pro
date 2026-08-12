@@ -348,11 +348,6 @@ class _FakeGateway:
     def members(self):
         return {"sector": ("SH.600000",)}
 
-    def screening_instrument_types(self, codes):
-        return {
-            code: "index_cn" if code == "SH.000001" else "stock_cn" for code in codes
-        }
-
     def tick_probe(self, code):
         return {"code": code, "usable": True}
 
@@ -364,15 +359,11 @@ def test_worker_dispatch_is_a_strict_read_only_allowlist() -> None:
     }
     assert dispatch_gateway_request(
         gateway,
-        method="screening_instrument_types",
-        kwargs={"codes": ("SH.000001", "SH.600000")},
-    ) == {"SH.000001": "index_cn", "SH.600000": "stock_cn"}
-    assert dispatch_gateway_request(
-        gateway,
         method="tick_probe",
         kwargs={"code": "SH.600000"},
     ) == {"code": "SH.600000", "usable": True}
     for forbidden in (
+        "screening_instrument_types",
         "tradable_instrument_codes",
         "order",
         "cancel_order",
@@ -392,18 +383,31 @@ class _InstrumentScopeTransport:
 
     def request(self, method: str, **kwargs: object) -> object:
         self.calls.append((method, kwargs))
-        codes = kwargs["codes"]
-        assert isinstance(codes, tuple)
-        assert method == "screening_instrument_types"
-        return {
-            code: "index_cn" if code == "SH.000001" else "stock_cn" for code in codes
-        }
+        raise AssertionError("证券类型目录不得通过原生工作进程读取")
 
     def health_snapshot(self):
         return {"ready": True}
 
     def shutdown(self) -> None:
         return None
+
+
+class _InstrumentTypeCatalog:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, ...]] = []
+
+    def __call__(self, codes: tuple[str, ...]) -> dict[str, str]:
+        self.calls.append(codes)
+        return {
+            code: (
+                "index_cn"
+                if code == "SH.000001"
+                else "etf_cn"
+                if code == "SH.510300"
+                else "stock_cn"
+            )
+            for code in codes
+        }
 
 
 class _TickProbeTransport:
@@ -523,10 +527,12 @@ def test_process_proxy_forwards_frozen_higher_timeframe_cutoff() -> None:
     ]
 
 
-def test_process_proxy_filters_watchlist_and_holdings_through_native_qmt_type() -> None:
+def test_process_proxy_filters_watchlist_and_holdings_through_shared_catalog() -> None:
     transport = _InstrumentScopeTransport()
+    catalog = _InstrumentTypeCatalog()
     proxy = NativeTradingDataGatewayProcessProxy(
         transport=transport,  # type: ignore[arg-type]
+        instrument_type_provider=catalog,
         watchlist_provider=lambda: (
             {"code": "SH.000001"},
             {"code": "SH.510300"},
@@ -542,30 +548,54 @@ def test_process_proxy_filters_watchlist_and_holdings_through_native_qmt_type() 
     )
     assert proxy.screening_instrument_types(("SH.000001", "SH.510300")) == {
         "SH.000001": "index_cn",
-        "SH.510300": "stock_cn",
+        "SH.510300": "etf_cn",
     }
-    assert transport.calls == [
-        (
-            "screening_instrument_types",
-            {"codes": ("SH.000001", "SH.510300")},
-        ),
-        ("screening_instrument_types", {"codes": ("SH.600000",)}),
+    assert catalog.calls == [
+        ("SH.000001", "SH.510300"),
+        ("SH.600000",),
     ]
+    assert transport.calls == []
 
 
-def test_process_proxy_batches_and_caches_native_instrument_types() -> None:
+def test_process_proxy_reads_and_caches_shared_instrument_types_without_ipc() -> None:
     transport = _InstrumentScopeTransport()
-    proxy = NativeTradingDataGatewayProcessProxy(transport=transport)  # type: ignore[arg-type]
+    catalog = _InstrumentTypeCatalog()
+    proxy = NativeTradingDataGatewayProcessProxy(  # type: ignore[arg-type]
+        transport=transport,
+        instrument_type_provider=catalog,
+    )
     codes = tuple(f"SH.{value:06d}" for value in range(600000, 600065))
 
     first = proxy.screening_instrument_types(codes)
     second = proxy.screening_instrument_types(codes)
 
     assert first == second == {code: "stock_cn" for code in codes}
-    assert transport.calls == [
-        ("screening_instrument_types", {"codes": codes[:64]}),
-        ("screening_instrument_types", {"codes": codes[64:]}),
-    ]
+    assert catalog.calls == [codes]
+    assert transport.calls == []
+
+
+def test_process_proxy_retries_unresolved_shared_instrument_type() -> None:
+    transport = _InstrumentScopeTransport()
+    responses = iter(("unresolved_cn", "stock_cn"))
+    calls: list[tuple[str, ...]] = []
+
+    def catalog(codes: tuple[str, ...]) -> dict[str, str]:
+        calls.append(codes)
+        return {codes[0]: next(responses)}
+
+    proxy = NativeTradingDataGatewayProcessProxy(  # type: ignore[arg-type]
+        transport=transport,
+        instrument_type_provider=catalog,
+    )
+
+    assert proxy.screening_instrument_types(("SH.600000",)) == {
+        "SH.600000": "unresolved_cn"
+    }
+    assert proxy.screening_instrument_types(("SH.600000",)) == {
+        "SH.600000": "stock_cn"
+    }
+    assert calls == [("SH.600000",), ("SH.600000",)]
+    assert transport.calls == []
 
 
 class _AtomicGateway:

@@ -18,6 +18,7 @@ API：
 """
 import json
 import os
+import re
 import tempfile
 import threading
 import time
@@ -39,6 +40,10 @@ _stock_cache_lock = threading.Lock()
 
 # 落盘缓存只接受这一份当前契约；不维护历史格式或版本分支。
 _STOCKS_CACHE_SCHEMA = "chanlun-stock-list-cache"
+_A_STOCK_CODE = re.compile(r"^(?:SH|SZ|BJ)\.\d{6}$")
+_KNOWN_A_INSTRUMENT_TYPES = frozenset(
+    {"stock_cn", "etf_cn", "index_cn", "fund_cn", "unsupported_cn"}
+)
 
 # 全部支持的市场（用于校验配置项）
 _ALL_PRELOAD_EXCHANGES = [
@@ -112,16 +117,13 @@ def _cached_symbols_or_empty(exchange: str):
 
 
 def get_cached_processed_stock(exchange: str, code: str):
-    """Return one cached symbol without triggering refreshes or external I/O.
+    """无外部 I/O 地返回一个缓存标的。
 
-    ``/tv/symbols`` is on the chart's critical startup path.  In particular,
-    QMT's full-market refresh holds its native lock for the duration of the
-    scan, so falling through to ``exchange.stock_info`` while that refresh is
-    running can outlive the datafeed's 15 second timeout.  A disk-warmed cache
-    already contains enough metadata to resolve the chart immediately.
+    ``/tv/symbols`` 位于图表启动关键路径。QMT 全市场刷新会长时间持有原生锁，此时
+    回退到 ``exchange.stock_info`` 可能超过数据源十五秒上限；磁盘恢复缓存已经包含
+    立即解析图表所需的元数据。
 
-    Return a copy so callers cannot mutate the process-wide last-known-good
-    cache while normalising optional fields such as ``precision``.
+    返回副本，避免调用方在规范化 ``precision`` 等可选字段时修改进程级最后有效值。
     """
     normalized_code = str(code or "").strip()
     if not normalized_code:
@@ -132,6 +134,47 @@ def get_cached_processed_stock(exchange: str, code: str):
             if stock.get("code") == normalized_code:
                 return stock.copy()
     return None
+
+
+def get_cached_a_instrument_types(codes: tuple[str, ...]) -> dict[str, str]:
+    """从已恢复的唯一 A 股证券目录读取精确类型，不触发 QMT 或磁盘 I/O。
+
+    目录由 ``ExchangeQMT.all_stocks`` 的原生类型事实生成并原子持久化。缺失、冲突或
+    非现行类型一律返回 ``unresolved_cn``，让选股范围按失败关闭处理。
+    """
+
+    if type(codes) is not tuple or any(
+        type(code) is not str or _A_STOCK_CODE.fullmatch(code) is None
+        for code in codes
+    ):
+        raise TypeError("codes must be an exact normalized A-share tuple")
+    if len(codes) != len(set(codes)) or tuple(sorted(codes)) != codes:
+        raise ValueError("codes must be unique and sorted")
+    requested = set(codes)
+    resolved: dict[str, str] = {}
+    conflicts: set[str] = set()
+    with _stock_cache_lock:
+        cached = tuple(stock_cache.get("a") or ())
+    for row in cached:
+        if not isinstance(row, dict):
+            continue
+        code = row.get("code")
+        kind = row.get("type")
+        if code not in requested or kind not in _KNOWN_A_INSTRUMENT_TYPES:
+            continue
+        previous = resolved.get(code)
+        if previous is not None and previous != kind:
+            conflicts.add(code)
+            continue
+        resolved[code] = kind
+    return {
+        code: (
+            "unresolved_cn"
+            if code in conflicts or code not in resolved
+            else resolved[code]
+        )
+        for code in codes
+    }
 
 
 def get_symbol_readiness(exchange: str):

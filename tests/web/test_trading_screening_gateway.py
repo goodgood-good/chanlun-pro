@@ -571,22 +571,6 @@ class RecordingExchange:
         self.info_calls.append(code)
         return {"code": code, "name": "测试名称", "precision": 2}
 
-    def screening_instrument_types(
-        self,
-        codes: tuple[str, ...],
-    ) -> dict[str, str]:
-        self.type_calls.append(codes)
-        return {
-            code: (
-                "index_cn"
-                if code == "SH.000001"
-                else "etf_cn"
-                if code in {"SH.510300", "SZ.159915"}
-                else "stock_cn"
-            )
-            for code in codes
-        }
-
     def now_trading(self, market: str) -> bool:
         assert market == "a"
         return False
@@ -842,6 +826,19 @@ def _gateway(
     stock_exchange = RecordingExchange()
     analyzer = analyzer if analyzer is not None else RecordingAnalyzer()
 
+    def instrument_type_provider(codes: tuple[str, ...]) -> dict[str, str]:
+        stock_exchange.type_calls.append(codes)
+        return {
+            code: (
+                "index_cn"
+                if code == "SH.000001"
+                else "etf_cn"
+                if code in {"SH.510300", "SZ.159915"}
+                else "stock_cn"
+            )
+            for code in codes
+        }
+
     def sector_frame_provider(**kwargs):
         return _qmt_sector_five_frame(
             request_bars=kwargs["request_bars"],
@@ -865,6 +862,7 @@ def _gateway(
         sector_frame_provider=sector_frame_provider,
         sector_strength_provider=sector_strength_provider,
         higher_timeframe_provider=higher_timeframe_provider,
+        instrument_type_provider=instrument_type_provider,
         watchlist_provider=lambda: ({"code": "SZ.000001"},),
         holdings_provider=lambda: ("SH.600000",),
         analyzer=analyzer,
@@ -1622,11 +1620,9 @@ def test_native_gateway_monitor_scope_keeps_only_qmt_stock_and_etf() -> None:
     )
     assert gateway.active_watchlist() == ("SH.510300", "SH.600000")
     assert stock_exchange.type_calls == [
-        ("SH.000001",),
-        ("SH.510300",),
-        ("SH.600000",),
+        ("SH.000001", "SH.510300", "SH.600000"),
     ]
-    assert progress == ["progress"] * 6
+    assert progress == []
 
 
 def test_native_gateway_retries_unresolved_instrument_type() -> None:
@@ -1637,7 +1633,7 @@ def test_native_gateway_retries_unresolved_instrument_type() -> None:
         stock_exchange.type_calls.append(codes)
         return {codes[0]: next(responses)}
 
-    stock_exchange.screening_instrument_types = instrument_types  # type: ignore[method-assign]
+    gateway._instrument_type_provider = instrument_types
 
     assert gateway.screening_instrument_types(("SH.600000",)) == {
         "SH.600000": "unresolved_cn"

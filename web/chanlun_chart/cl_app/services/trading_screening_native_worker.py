@@ -1,4 +1,4 @@
-"""Read-only native QMT worker for the live screening process boundary."""
+"""实时选股进程边界内的只读 QMT 原生工作进程。"""
 
 from __future__ import annotations
 
@@ -32,8 +32,6 @@ class _Gateway(Protocol):
     def changed_bars(self, since: object) -> object: ...
 
     def symbol_name(self, code: str) -> object: ...
-
-    def screening_instrument_types(self, codes: tuple[str, ...]) -> object: ...
 
     def tick_probe(self, code: str) -> object: ...
 
@@ -157,15 +155,6 @@ def dispatch_gateway_request(
         if not isinstance(code, str):
             raise ValueError("symbol_name requires code")
         return gateway.symbol_name(code)
-    if method == "screening_instrument_types":
-        if set(kwargs) != {"codes"}:
-            raise ValueError("screening_instrument_types requires exactly codes")
-        codes = kwargs.get("codes")
-        if type(codes) is not tuple or any(type(code) is not str for code in codes):
-            raise ValueError(
-                "screening_instrument_types requires an exact string tuple"
-            )
-        return gateway.screening_instrument_types(codes)
     if method == "tick_probe":
         if set(kwargs) != {"code"}:
             raise ValueError("tick_probe requires exactly code")
