@@ -23,7 +23,6 @@ from chanlun.tools.log_util import LogUtil
 from xtquant import xtdata
 
 
-
 # xtquant 的 native 客户端不是线程安全的：多线程并发调用 download_history_data /
 # get_market_data / get_full_tick / get_instrument_detail 等接口时，其内部 BSON
 # 序列化层可能触发 `Assertion failed: u < 1000000, file ...\bson\src\bsonobj.cpp`
@@ -31,6 +30,7 @@ from xtquant import xtdata
 # Python 层无法 try/except 捕获。这里用进程级全局可重入锁把所有对 xtdata 的调用
 # 串行化，作为防御性兜底，避免多线程并发触发崩溃。
 _XTDATA_NATIVE_LOCK = threading.RLock()
+
 
 def _validated_screening_codes(codes: object) -> tuple[str, ...]:
     if type(codes) is not tuple:
@@ -108,8 +108,8 @@ class ExchangeQMT(Exchange):
         # 权衡：天数越大 → 1m/递归层级越多，但 K 线越多→计算/BSON payload 越重、首屏越慢;
         #       且 QMT 实际能回看多少由数据源返回为准(指数/主板通常比个股长,部分个股可能不足 60 天)。
         QMT_LOOKBACK_OVERRIDE_DAYS = {
-            "1m": 60,     # A股 1m 拉长(本地源快;US 不动以保切标的速度)
-            "5m": 365,    # 5min 图的 30m 同级别需更长 5m 历史
+            "1m": 60,  # A股 1m 拉长(本地源快;US 不动以保切标的速度)
+            "5m": 365,  # 5min 图的 30m 同级别需更长 5m 历史
         }
         for _freq, _days in QMT_LOOKBACK_OVERRIDE_DAYS.items():
             self.DEFAULT_LOOKBACK[_freq] = timedelta(days=_days)
@@ -146,10 +146,23 @@ class ExchangeQMT(Exchange):
 
             # 黑名单用 set 避免 5500+ 次 list 线性查找
             black_codes = {
-                "SZ.399290", "SZ.399289", "SZ.399302", "SZ.399298", "SZ.399481",
-                "SZ.399299", "SZ.399301", "SH.000013", "SH.000022", "SH.000116",
-                "SH.000061", "SH.000101", "SH.000012", "SZ.988201", "SZ.980068",
-                "SZ.980001", "SZ.980023",
+                "SZ.399290",
+                "SZ.399289",
+                "SZ.399302",
+                "SZ.399298",
+                "SZ.399481",
+                "SZ.399299",
+                "SZ.399301",
+                "SH.000013",
+                "SH.000022",
+                "SH.000116",
+                "SH.000061",
+                "SH.000101",
+                "SH.000012",
+                "SZ.988201",
+                "SZ.980068",
+                "SZ.980001",
+                "SZ.980023",
             }
 
             # 全市场扫描放在一把大锁内：避免多线程穿插调用触发 BSON 断言，
@@ -161,7 +174,11 @@ class ExchangeQMT(Exchange):
                 all_stocks = []
                 for _c in tick_codes:
                     _stock_type: dict = xtdata.get_instrument_type(_c)
-                    if not (_stock_type.get("stock") or _stock_type.get("etf") or _stock_type.get("index")):
+                    if not (
+                        _stock_type.get("stock")
+                        or _stock_type.get("etf")
+                        or _stock_type.get("index")
+                    ):
                         continue
 
                     tdx_code = self.code_to_tdx(_c)
@@ -184,17 +201,23 @@ class ExchangeQMT(Exchange):
                         sym_type = "etf_cn"
                     else:
                         sym_type = "index_cn"
-                    all_stocks.append({
-                        "code": tdx_code,
-                        "name": stock_detail["InstrumentName"],
-                        "type": sym_type,
-                        "precision": fun.reverse_decimal_to_power_of_ten(stock_detail["PriceTick"]),
-                    })
+                    all_stocks.append(
+                        {
+                            "code": tdx_code,
+                            "name": stock_detail["InstrumentName"],
+                            "type": sym_type,
+                            "precision": fun.reverse_decimal_to_power_of_ten(
+                                stock_detail["PriceTick"]
+                            ),
+                        }
+                    )
 
             self.g_all_stocks = all_stocks
             return self.g_all_stocks
 
-    def get_start_date_by_frequency(self, frequency: str, req_counts: int = None) -> str:
+    def get_start_date_by_frequency(
+        self, frequency: str, req_counts: int = None
+    ) -> str:
         """
         根据周期获取默认起始日期。
         如果上层指定了 req_counts（用户实际只要这么多根 K 线），会按周期估算
@@ -221,9 +244,7 @@ class ExchangeQMT(Exchange):
             if frequency in intraday_minutes_per_bar:
                 # A 股每天仅有约 240 个交易分钟。按 24 小时连续市场折算会把
                 # 1,200 根 1m 的窗口压缩成约 3 天，周末后实际不足 600 根。
-                required_minutes = (
-                    intraday_minutes_per_bar[frequency] * req_counts * 3
-                )
+                required_minutes = intraday_minutes_per_bar[frequency] * req_counts * 3
                 trading_days = (required_minutes + 239) // 240
                 calendar_days = (trading_days * 7 + 4) // 5
                 est_delta = timedelta(days=calendar_days)
@@ -243,9 +264,14 @@ class ExchangeQMT(Exchange):
         return start_date.strftime("%Y%m%d")
 
     def prewarm_batch_download(
-            self, codes, frequencies, cancel_check=None,
-            progress_callback=None, chunk_size: int = 100,
-            req_counts_by_frequency=None):
+        self,
+        codes,
+        frequencies,
+        cancel_check=None,
+        progress_callback=None,
+        chunk_size: int = 100,
+        req_counts_by_frequency=None,
+    ):
         """批量预下载多只标的的基础周期数据到本地 QMT 库,供预热逐只计算时跳过 download。
 
         加速原理:把"逐只 N 周期"的成千上万次 download_history_data 往返,合并成
@@ -267,9 +293,7 @@ class ExchangeQMT(Exchange):
             raise TypeError("QMT frequencies must be exact strings")
         unsupported = set(frequencies) - set(self.download_frequency_map)
         if unsupported:
-            raise ValueError(
-                f"unsupported QMT frequencies: {sorted(unsupported)}"
-            )
+            raise ValueError(f"unsupported QMT frequencies: {sorted(unsupported)}")
         if req_counts_by_frequency is None:
             req_counts_by_frequency = {}
         if not isinstance(req_counts_by_frequency, Mapping):
@@ -303,13 +327,19 @@ class ExchangeQMT(Exchange):
             done = 0
             for i in range(0, total, chunk_size):
                 if cancel_check and cancel_check():
-                    LogUtil.info(f"[ExchangeQMT.batch_download] 取消 base={base} {done}/{total}")
+                    LogUtil.info(
+                        f"[ExchangeQMT.batch_download] 取消 base={base} {done}/{total}"
+                    )
                     return
-                chunk = qmt_codes[i:i + chunk_size]
+                chunk = qmt_codes[i : i + chunk_size]
                 with _XTDATA_NATIVE_LOCK:
                     try:
                         xtdata.download_history_data2(
-                            chunk, base, start_time=start, end_time="", incrementally=True,
+                            chunk,
+                            base,
+                            start_time=start,
+                            end_time="",
+                            incrementally=True,
                         )
                     except Exception as e:
                         LogUtil.warning(
@@ -325,19 +355,18 @@ class ExchangeQMT(Exchange):
                 f"[ExchangeQMT.batch_download] base={base} 完成 {done}/{total} start={start}"
             )
 
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_random(min=0.1, max=1)
-    )
+    @retry(stop=stop_after_attempt(3), wait=wait_random(min=0.1, max=1))
     def klines(
-            self,
-            code: str,
-            frequency: str,
-            start_date: str = None,
-            end_date: str = None,
-            args=None,
+        self,
+        code: str,
+        frequency: str,
+        start_date: str = None,
+        end_date: str = None,
+        args=None,
     ) -> pd.DataFrame:
-        empty_df = pd.DataFrame(columns=['code', 'date', 'open', 'high', 'low', 'close', 'volume'])
+        empty_df = pd.DataFrame(
+            columns=["code", "date", "open", "high", "low", "close", "volume"]
+        )
 
         if args is not None:
             if type(args) is not dict:
@@ -349,12 +378,9 @@ class ExchangeQMT(Exchange):
                 "skip_download",
             }
             if unknown_args:
-                raise ValueError(
-                    f"unsupported QMT K-line args: {sorted(unknown_args)}"
-                )
+                raise ValueError(f"unsupported QMT K-line args: {sorted(unknown_args)}")
             if "req_counts" in args and (
-                type(args["req_counts"]) is not int
-                or args["req_counts"] <= 0
+                type(args["req_counts"]) is not int or args["req_counts"] <= 0
             ):
                 raise ValueError("req_counts must be a positive exact int")
             if "skip_download" in args and type(args["skip_download"]) is not bool:
@@ -366,13 +392,13 @@ class ExchangeQMT(Exchange):
         # 在入口如实拒绝，不降级也不重试。
         QMT_SUPPORTED_FREQS = frozenset(self.download_frequency_map)
         if frequency not in QMT_SUPPORTED_FREQS:
-            LogUtil.warning(f"[ExchangeQMT.klines] 不支持的周期 {frequency} code={code}, 返回空(不降级)")
+            LogUtil.warning(
+                f"[ExchangeQMT.klines] 不支持的周期 {frequency} code={code}, 返回空(不降级)"
+            )
             return empty_df
 
         qmt_read_period = (
-            self.frequency_map[frequency]
-            if frequency in self.frequency_map
-            else "1m"
+            self.frequency_map[frequency] if frequency in self.frequency_map else "1m"
         )
         qmt_code = self.code_to_qmt(code)
 
@@ -383,16 +409,16 @@ class ExchangeQMT(Exchange):
         if start_date:
             query_start = start_date.replace("-", "").replace(" ", "").replace(":", "")
         else:
-            query_start = self.get_start_date_by_frequency(frequency, req_counts=req_counts)
+            query_start = self.get_start_date_by_frequency(
+                frequency, req_counts=req_counts
+            )
         if (
             args is not None
             and "research_exact_end" in args
             and type(args["research_exact_end"]) is not bool
         ):
             raise ValueError("research_exact_end must be an exact bool")
-        research_exact_end = (
-            args is not None and args.get("research_exact_end") is True
-        )
+        research_exact_end = args is not None and args.get("research_exact_end") is True
         if research_exact_end and not end_date:
             raise ValueError("research_exact_end requires end_date")
         query_end = (
@@ -468,8 +494,7 @@ class ExchangeQMT(Exchange):
         if not raw_data:
             return empty_df
         if set(raw_data) != set(field_list) or any(
-            not isinstance(raw_data[field], pd.DataFrame)
-            for field in field_list
+            not isinstance(raw_data[field], pd.DataFrame) for field in field_list
         ):
             raise TypeError("QMT K-line response field contract is invalid")
         time_col = raw_data["time"]
@@ -499,7 +524,9 @@ class ExchangeQMT(Exchange):
             if frequency in ["d", "w", "m"]:
                 # 年线已经删除：frequency_map 不含 y，入口白名单也拒绝 y，
                 # 原 ["d","w","m","y"] 的 y 分支是到不了的死代码(审查 L1)。
-                klines_df["date"] = klines_df["date"].dt.normalize() + pd.Timedelta(hours=15)
+                klines_df["date"] = klines_df["date"].dt.normalize() + pd.Timedelta(
+                    hours=15
+                )
         except Exception as e:
             LogUtil.warning(
                 f"[exchange_qmt] tz convert failed code={code} freq={frequency}: {e}"
@@ -508,7 +535,9 @@ class ExchangeQMT(Exchange):
 
         klines_df["code"] = code
 
-        klines_df = klines_df[["code", "date", "open", "high", "low", "close", "volume"]]
+        klines_df = klines_df[
+            ["code", "date", "open", "high", "low", "close", "volume"]
+        ]
         cols_to_float = ["open", "high", "low", "close", "volume"]
         klines_df[cols_to_float] = klines_df[cols_to_float].astype(float)
 
@@ -534,7 +563,9 @@ class ExchangeQMT(Exchange):
                 ):
                     klines_df = klines_df[klines_df["date"] <= _end_dt]
             except Exception as _e:
-                LogUtil.warning(f"[exchange_qmt] end_date 裁剪跳过 code={code} end={end_date}: {_e}")
+                LogUtil.warning(
+                    f"[exchange_qmt] end_date 裁剪跳过 code={code} end={end_date}: {_e}"
+                )
 
         # 按调用方声明的 req_counts 截断，避免返回超过需要的数据
         if args and "req_counts" in args:
@@ -571,13 +602,11 @@ class ExchangeQMT(Exchange):
         self,
         codes: tuple[str, ...],
     ) -> Mapping[str, str]:
-        """Return native QMT security kinds for the read-only screening scope.
+        """返回只读选股范围使用的 QMT 原生证券类型。
 
-        Code shape alone cannot distinguish ``SH.000001`` (an index) from an
-        A-share stock, and names are not a stable decision fact.  The native
-        QMT type service is therefore the sole authority for watchlist,
-        virtual-holding, and previous-signal monitor supplements.  Unknown or
-        unsupported responses remain explicit and fail closed downstream.
+        代码形状无法区分指数 ``SH.000001`` 与 A 股，名称也不是稳定的决策事实。因此
+        自选、虚拟持仓和历史信号补充范围统一以 QMT 类型服务为唯一权威。未知或不支持
+        的响应保持显式状态，并由下游按失败关闭处理。
         """
 
         normalized = _validated_screening_codes(codes)

@@ -348,9 +348,6 @@ class _FakeGateway:
     def members(self):
         return {"sector": ("SH.600000",)}
 
-    def tradable_instrument_codes(self, codes):
-        return tuple(code for code in codes if code != "SH.000001")
-
     def screening_instrument_types(self, codes):
         return {
             code: "index_cn" if code == "SH.000001" else "stock_cn" for code in codes
@@ -367,11 +364,6 @@ def test_worker_dispatch_is_a_strict_read_only_allowlist() -> None:
     }
     assert dispatch_gateway_request(
         gateway,
-        method="tradable_instrument_codes",
-        kwargs={"codes": ("SH.000001", "SH.600000")},
-    ) == ("SH.600000",)
-    assert dispatch_gateway_request(
-        gateway,
         method="screening_instrument_types",
         kwargs={"codes": ("SH.000001", "SH.600000")},
     ) == {"SH.000001": "index_cn", "SH.600000": "stock_cn"}
@@ -380,7 +372,13 @@ def test_worker_dispatch_is_a_strict_read_only_allowlist() -> None:
         method="tick_probe",
         kwargs={"code": "SH.600000"},
     ) == {"code": "SH.600000", "usable": True}
-    for forbidden in ("order", "cancel_order", "account", "trader"):
+    for forbidden in (
+        "tradable_instrument_codes",
+        "order",
+        "cancel_order",
+        "account",
+        "trader",
+    ):
         with pytest.raises(ValueError, match="not allowed"):
             dispatch_gateway_request(gateway, method=forbidden, kwargs={})
 
@@ -396,13 +394,10 @@ class _InstrumentScopeTransport:
         self.calls.append((method, kwargs))
         codes = kwargs["codes"]
         assert isinstance(codes, tuple)
-        if method == "screening_instrument_types":
-            return {
-                code: "index_cn" if code == "SH.000001" else "stock_cn"
-                for code in codes
-            }
-        assert method == "tradable_instrument_codes"
-        return tuple(code for code in codes if code != "SH.000001")
+        assert method == "screening_instrument_types"
+        return {
+            code: "index_cn" if code == "SH.000001" else "stock_cn" for code in codes
+        }
 
     def health_snapshot(self):
         return {"ready": True}
@@ -551,18 +546,25 @@ def test_process_proxy_filters_watchlist_and_holdings_through_native_qmt_type() 
     }
     assert transport.calls == [
         (
-            "tradable_instrument_codes",
-            {"codes": ("SH.000001", "SH.510300")},
-        ),
-        ("tradable_instrument_codes", {"codes": ("SH.600000",)}),
-        (
-            "tradable_instrument_codes",
-            {"codes": ("SH.000001", "SH.510300")},
-        ),
-        (
             "screening_instrument_types",
             {"codes": ("SH.000001", "SH.510300")},
         ),
+        ("screening_instrument_types", {"codes": ("SH.600000",)}),
+    ]
+
+
+def test_process_proxy_batches_and_caches_native_instrument_types() -> None:
+    transport = _InstrumentScopeTransport()
+    proxy = NativeTradingDataGatewayProcessProxy(transport=transport)  # type: ignore[arg-type]
+    codes = tuple(f"SH.{value:06d}" for value in range(600000, 600065))
+
+    first = proxy.screening_instrument_types(codes)
+    second = proxy.screening_instrument_types(codes)
+
+    assert first == second == {code: "stock_cn" for code in codes}
+    assert transport.calls == [
+        ("screening_instrument_types", {"codes": codes[:64]}),
+        ("screening_instrument_types", {"codes": codes[64:]}),
     ]
 
 

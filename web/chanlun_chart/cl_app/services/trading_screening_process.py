@@ -51,6 +51,7 @@ from cl_app.services.trading_screening_gateway import (
     SectorAnalysisFailure,
     SectorAssessmentBatch,
     _KNOWN_SCREENING_INSTRUMENT_TYPES,
+    _TRADABLE_SCREENING_INSTRUMENT_TYPES,
     _stock_codes,
 )
 
@@ -68,6 +69,7 @@ _SECTOR_SNAPSHOT_WEB_PRODUCERS = (
     "web/chanlun_chart/cl_app/services/trading_screening_native_worker.py",
     "web/chanlun_chart/cl_app/services/trading_screening_process.py",
 )
+_INSTRUMENT_TYPE_BATCH_SIZE = 64
 
 
 def _sector_cache_decision_epoch(value: datetime) -> tuple[date, str, int]:
@@ -1215,6 +1217,7 @@ class NativeTradingDataGatewayProcessProxy:
         self._changed_bars: tuple[BarKey, ...] = ()
         self._emitted_bar_ids: set[tuple[str, str, datetime]] = set()
         self._symbol_names: dict[str, str] = {}
+        self._instrument_types: dict[str, str] = {}
         self._trading_session_cache: dict[date, dict[str, object]] = {}
 
     def set_progress_callback(self, callback: Callable[[], None]) -> None:
@@ -1704,54 +1707,65 @@ class NativeTradingDataGatewayProcessProxy:
         self,
         codes: tuple[str, ...],
     ) -> tuple[str, ...]:
-        """在隔离 QMT 工作进程内分类监听补充标的。"""
+        """以唯一的精确类型契约筛选可监听股票和 ETF。"""
 
         normalized = _stock_codes(codes)
         if not normalized:
             return ()
-        value = self._transport.request(
-            "tradable_instrument_codes",
-            codes=normalized,
+        dispositions = self.screening_instrument_types(normalized)
+        return tuple(
+            code
+            for code in normalized
+            if dispositions[code] in _TRADABLE_SCREENING_INSTRUMENT_TYPES
         )
-        if (
-            type(value) is not tuple
-            or any(type(code) is not str for code in value)
-            or len(value) != len(set(value))
-            or tuple(sorted(value)) != value
-            or any(code not in normalized for code in value)
-        ):
-            raise NativeScreeningWorkerProtocolError(
-                "invalid tradable instrument scope result"
-            )
-        return value
 
     def screening_instrument_types(
         self,
         codes: tuple[str, ...],
     ) -> Mapping[str, str]:
-        """返回精确原生类型，不折叠尚未解析的结果。"""
+        """分批经结构进程读取精确类型，不占用实时逐笔控制进程。"""
 
         normalized = _stock_codes(codes)
         if not normalized:
             return {}
-        value = self._transport.request(
-            "screening_instrument_types",
-            codes=normalized,
-        )
-        if (
-            not isinstance(value, Mapping)
-            or set(value) != set(normalized)
-            or any(
-                type(code) is not str
-                or type(kind) is not str
-                or kind not in _KNOWN_SCREENING_INSTRUMENT_TYPES
-                for code, kind in value.items()
+        with self._cache_lock:
+            result = {
+                code: self._instrument_types[code]
+                for code in normalized
+                if code in self._instrument_types
+            }
+        missing = tuple(code for code in normalized if code not in result)
+        classification_transport = self._structure_transports[0]
+        for offset in range(0, len(missing), _INSTRUMENT_TYPE_BATCH_SIZE):
+            batch = missing[offset : offset + _INSTRUMENT_TYPE_BATCH_SIZE]
+            value = classification_transport.request(
+                "screening_instrument_types",
+                codes=batch,
             )
-        ):
-            raise NativeScreeningWorkerProtocolError(
-                "invalid instrument type disposition result"
-            )
-        return {code: str(value[code]) for code in normalized}
+            if (
+                not isinstance(value, Mapping)
+                or set(value) != set(batch)
+                or any(
+                    type(code) is not str
+                    or type(kind) is not str
+                    or kind not in _KNOWN_SCREENING_INSTRUMENT_TYPES
+                    for code, kind in value.items()
+                )
+            ):
+                raise NativeScreeningWorkerProtocolError(
+                    "invalid instrument type disposition result"
+                )
+            validated = {code: str(value[code]) for code in batch}
+            result.update(validated)
+            stable = {
+                code: kind
+                for code, kind in validated.items()
+                if kind != "unresolved_cn"
+            }
+            if stable:
+                with self._cache_lock:
+                    self._instrument_types.update(stable)
+        return {code: result[code] for code in normalized}
 
     def tick_probe(self, code: str) -> Mapping[str, object]:
         """通过认证子进程探测实时行情，避免 ``xtdata`` 阻塞 Web 主进程。"""

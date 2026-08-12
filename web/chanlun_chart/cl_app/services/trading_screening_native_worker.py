@@ -33,8 +33,6 @@ class _Gateway(Protocol):
 
     def symbol_name(self, code: str) -> object: ...
 
-    def tradable_instrument_codes(self, codes: tuple[str, ...]) -> object: ...
-
     def screening_instrument_types(self, codes: tuple[str, ...]) -> object: ...
 
     def tick_probe(self, code: str) -> object: ...
@@ -159,13 +157,6 @@ def dispatch_gateway_request(
         if not isinstance(code, str):
             raise ValueError("symbol_name requires code")
         return gateway.symbol_name(code)
-    if method == "tradable_instrument_codes":
-        if set(kwargs) != {"codes"}:
-            raise ValueError("tradable_instrument_codes requires exactly codes")
-        codes = kwargs.get("codes")
-        if type(codes) is not tuple or any(type(code) is not str for code in codes):
-            raise ValueError("tradable_instrument_codes requires an exact string tuple")
-        return gateway.tradable_instrument_codes(codes)
     if method == "screening_instrument_types":
         if set(kwargs) != {"codes"}:
             raise ValueError("screening_instrument_types requires exactly codes")

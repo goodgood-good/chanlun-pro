@@ -1081,6 +1081,9 @@ class NativeTradingDataGateway:
         self._lock = RLock()
         self._members: dict[str, tuple[str, ...]] = {}
         self._symbol_names: dict[str, str] = {}
+        # 原生证券类型在同一工作进程和源码版本内稳定；只缓存已明确解析的类型。
+        # ``unresolved_cn`` 可能来自瞬时 QMT 故障，必须保留后续重试机会。
+        self._instrument_types: dict[str, str] = {}
         self._latest_sector_bars: dict[tuple[str, str], datetime] = {}
         self._emitted_sector_bars: dict[tuple[str, str], datetime] = {}
         self._analysis_cache: dict[
@@ -1831,24 +1834,47 @@ class NativeTradingDataGateway:
         self,
         codes: tuple[str, ...],
     ) -> Mapping[str, str]:
-        """为监听诊断返回精确的原生类型处置结果。"""
+        """逐个读取并缓存精确原生类型，让每次 QMT 调用都有真实进度边界。"""
 
         normalized = _stock_codes(codes)
         if not normalized:
             return {}
+        with self._lock:
+            result = {
+                code: self._instrument_types[code]
+                for code in normalized
+                if code in self._instrument_types
+            }
+        missing = tuple(code for code in normalized if code not in result)
+        if not missing:
+            return {code: result[code] for code in normalized}
         exchange = self._exchange_provider()
         provider = getattr(exchange, "screening_instrument_types", None)
         if not callable(provider):
             raise RuntimeError("QMT native instrument type provider is unavailable")
-        self._report_progress()
-        raw = provider(normalized)
-        self._report_progress()
-        if not isinstance(raw, Mapping) or set(raw) != set(normalized):
-            raise RuntimeError("QMT native instrument type result is incomplete")
-        for code, kind in raw.items():
-            if code not in normalized or kind not in _KNOWN_SCREENING_INSTRUMENT_TYPES:
+
+        resolved: dict[str, str] = {}
+        for code in missing:
+            # 心跳严格位于一次原生调用前后；若单个调用超过隔离空闲上限，父进程仍会
+            # 判定它真正卡死，而长列表中的正常连续调用不会被误杀。
+            self._report_progress()
+            raw = provider((code,))
+            self._report_progress()
+            if not isinstance(raw, Mapping) or set(raw) != {code}:
+                raise RuntimeError("QMT native instrument type result is incomplete")
+            kind = raw.get(code)
+            if kind not in _KNOWN_SCREENING_INSTRUMENT_TYPES:
                 raise RuntimeError("QMT native instrument type result is invalid")
-        return {code: str(raw[code]) for code in normalized}
+            resolved[code] = str(kind)
+
+        stable = {
+            code: kind for code, kind in resolved.items() if kind != "unresolved_cn"
+        }
+        if stable:
+            with self._lock:
+                self._instrument_types.update(stable)
+        result.update(resolved)
+        return {code: result[code] for code in normalized}
 
     def tick_probe(self, code: str) -> Mapping[str, object]:
         """在原生进程内探测一个 A 股实时报价，不泄露原生行情对象。"""

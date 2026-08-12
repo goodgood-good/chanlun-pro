@@ -560,6 +560,7 @@ class RecordingExchange:
         self.frame = _frame() if frame is None else frame
         self.calls: list[tuple[str, str, dict[str, object]]] = []
         self.info_calls: list[str] = []
+        self.type_calls: list[tuple[str, ...]] = []
 
     def klines(self, code: str, frequency: str, *, args: dict[str, object]):
         assert args["req_counts"] == 4
@@ -574,6 +575,7 @@ class RecordingExchange:
         self,
         codes: tuple[str, ...],
     ) -> dict[str, str]:
+        self.type_calls.append(codes)
         return {
             code: (
                 "index_cn"
@@ -1595,7 +1597,9 @@ def test_native_gateway_builds_four_physical_period_bundle_and_keeps_watch_scope
 
 
 def test_native_gateway_monitor_scope_keeps_only_qmt_stock_and_etf() -> None:
-    gateway, _analyzer, _sector_exchange = _gateway()
+    gateway, _analyzer, stock_exchange = _gateway()
+    progress: list[str] = []
+    gateway.set_progress_callback(lambda: progress.append("progress"))
     gateway._watchlist_provider = lambda: (
         {"code": "SH.000001", "name": "上证指数"},
         {"code": "SH.600000", "name": "浦发银行"},
@@ -1617,6 +1621,31 @@ def test_native_gateway_monitor_scope_keeps_only_qmt_stock_and_etf() -> None:
         ("SH.000001",),
     )
     assert gateway.active_watchlist() == ("SH.510300", "SH.600000")
+    assert stock_exchange.type_calls == [
+        ("SH.000001",),
+        ("SH.510300",),
+        ("SH.600000",),
+    ]
+    assert progress == ["progress"] * 6
+
+
+def test_native_gateway_retries_unresolved_instrument_type() -> None:
+    gateway, _analyzer, stock_exchange = _gateway()
+    responses = iter(("unresolved_cn", "stock_cn"))
+
+    def instrument_types(codes: tuple[str, ...]) -> dict[str, str]:
+        stock_exchange.type_calls.append(codes)
+        return {codes[0]: next(responses)}
+
+    stock_exchange.screening_instrument_types = instrument_types  # type: ignore[method-assign]
+
+    assert gateway.screening_instrument_types(("SH.600000",)) == {
+        "SH.600000": "unresolved_cn"
+    }
+    assert gateway.screening_instrument_types(("SH.600000",)) == {
+        "SH.600000": "stock_cn"
+    }
+    assert stock_exchange.type_calls == [("SH.600000",), ("SH.600000",)]
 
 
 def test_native_gateway_tick_probe_skips_qmt_when_market_is_closed() -> None:
