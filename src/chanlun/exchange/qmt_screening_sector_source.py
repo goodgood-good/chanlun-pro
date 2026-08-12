@@ -908,6 +908,31 @@ def _tail_composite_frame(
     return result
 
 
+def _latest_contiguous_calendar_suffix_length(
+    actual_closes: tuple[datetime, ...],
+    expected_closes: tuple[datetime, ...],
+) -> int:
+    """返回截至最新预期收盘时刻的连续交易日历后缀长度。"""
+
+    if (
+        not actual_closes
+        or not expected_closes
+        or len(actual_closes) > len(expected_closes)
+        or actual_closes[-1] != expected_closes[-1]
+    ):
+        return 0
+    actual_index = len(actual_closes) - 1
+    expected_index = len(expected_closes) - 1
+    while (
+        actual_index >= 0
+        and expected_index >= 0
+        and actual_closes[actual_index] == expected_closes[expected_index]
+    ):
+        actual_index -= 1
+        expected_index -= 1
+    return len(actual_closes) - actual_index - 1
+
+
 def _member_ratios(
     raw: Mapping[str, object],
     native_code: str,
@@ -1815,56 +1840,59 @@ class QmtSectorCompositeSource:
                         close_ratio=("close_ratio", "median"),
                     )
                     grouped = grouped[grouped["member_count"] >= required_count]
-                    rows: list[dict[str, object]] = []
-                    previous_close = 1000.0
-                    for date, item in grouped.iterrows():
-                        open_value = previous_close * float(item["open_ratio"])
-                        close_value = previous_close * float(item["close_ratio"])
-                        high_value = max(
-                            previous_close * float(item["high_ratio"]),
-                            open_value,
-                            close_value,
-                        )
-                        low_value = min(
-                            previous_close * float(item["low_ratio"]),
-                            open_value,
-                            close_value,
-                        )
-                        rows.append(
-                            {
-                                "code": sector_id,
-                                "date": date,
-                                "open": open_value,
-                                "high": high_value,
-                                "low": low_value,
-                                "close": close_value,
-                                "volume": float(item["member_count"]),
-                                "member_mask": int(item["member_mask"]),
-                            }
-                        )
-                        previous_close = close_value
-                    result = (
-                        empty
-                        if not rows
-                        else pd.DataFrame(rows)
-                        .tail(request_bars)
-                        .reset_index(drop=True)
-                    )
-                    actual_closes = tuple(
+                    grouped_closes = tuple(
                         normalize_datetime(
                             pd.Timestamp(value).to_pydatetime(),
-                            "sector bar close",
+                            "sector grouped close",
                         )
-                        for value in result.get("date", ())
+                        for value in grouped.index
                     )
-                    if (
-                        not actual_closes
-                        or len(actual_closes) > len(expected_closes)
-                        or actual_closes
-                        != expected_closes[-len(actual_closes) :]
-                    ):
+                    suffix_length = _latest_contiguous_calendar_suffix_length(
+                        grouped_closes,
+                        expected_closes,
+                    )
+                    minimum_suffix_length = min(request_bars, 2)
+                    if suffix_length < minimum_suffix_length:
                         result = empty
                     else:
+                        # 只保留以最新已完成柱结尾、与交易日历逐根一致的连续后缀。
+                        # 早期覆盖不足不能使整个当前序列失效；近期缺口仍会因后缀过短
+                        # 失败关闭。裁剪后从统一基准重新连乘，避免跨缺口收益污染后缀。
+                        grouped = grouped.iloc[-suffix_length:]
+                        rows: list[dict[str, object]] = []
+                        previous_close = 1000.0
+                        for date, item in grouped.iterrows():
+                            open_value = previous_close * float(item["open_ratio"])
+                            close_value = previous_close * float(item["close_ratio"])
+                            high_value = max(
+                                previous_close * float(item["high_ratio"]),
+                                open_value,
+                                close_value,
+                            )
+                            low_value = min(
+                                previous_close * float(item["low_ratio"]),
+                                open_value,
+                                close_value,
+                            )
+                            rows.append(
+                                {
+                                    "code": sector_id,
+                                    "date": date,
+                                    "open": open_value,
+                                    "high": high_value,
+                                    "low": low_value,
+                                    "close": close_value,
+                                    "volume": float(item["member_count"]),
+                                    "member_mask": int(item["member_mask"]),
+                                }
+                            )
+                            previous_close = close_value
+                        result = (
+                            pd.DataFrame(rows)
+                            .tail(request_bars)
+                            .reset_index(drop=True)
+                        )
+                    if not result.empty:
                         metadata = build_causal_sector_price_basis_metadata(
                             provider=QMT_GICS3_COMPOSITE_PROVIDER,
                             market="a",

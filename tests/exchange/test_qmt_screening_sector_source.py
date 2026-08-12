@@ -790,6 +790,47 @@ def test_qmt_component_source_rejects_interior_five_minute_grid_gap(
     assert frame.attrs["sector_composite_members"] == members
 
 
+def test_qmt_component_source_trims_prefix_before_an_old_grid_gap(
+    monkeypatch,
+) -> None:
+    """旧缺口前缀可裁掉，但最新连续后缀仍须逐根匹配交易日历。"""
+
+    class OldGapXtdata(FakeXtdata):
+        def get_market_data(self, **kwargs):
+            result = super().get_market_data(**kwargs)
+            if kwargs["field_list"] == ["time"]:
+                return result
+            return {
+                field: values.drop(columns=values.columns[3])
+                for field, values in result.items()
+            }
+
+    fake = OldGapXtdata(latest_probe_end=AS_OF - timedelta(days=1))
+    monkeypatch.setattr(subject, "xtdata", fake)
+    monkeypatch.setattr(subject, "_XTDATA_NATIVE_LOCK", RLock())
+    members = tuple(f"SH.6000{index:02d}" for index in range(8))
+
+    frame = QmtSectorCompositeSource(minimum_member_count=8).frame(
+        sector_id="qmt-gics3:old-prefix-gap",
+        sector_name="旧前缀缺口行业",
+        members=members,
+        frequency="5m",
+        as_of=AS_OF,
+        request_bars=16,
+    )
+
+    assert len(frame) == 7
+    assert frame["date"].iloc[0].to_pydatetime() == AS_OF - timedelta(minutes=30)
+    assert frame["date"].iloc[-1].to_pydatetime() == AS_OF
+    expected_suffix = tuple(
+        AS_OF - timedelta(minutes=5 * offset)
+        for offset in range(6, -1, -1)
+    )
+    assert tuple(value.to_pydatetime() for value in frame["date"]) == (
+        expected_suffix
+    )
+
+
 def test_qmt_component_fact_cache_survives_a_new_source_instance(
     monkeypatch,
     tmp_path: Path,
